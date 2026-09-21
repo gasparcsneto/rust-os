@@ -25,8 +25,8 @@ construção:**
   O agente *descobre* o que pode fazer em vez de adivinhar.
 
 - **Logging estruturado.** Todo evento é um registro tipado (nível, subsistema,
-  número de sequência) num ring buffer consultável. O texto legível na COM1 é
-  apenas uma renderização — não a fonte da verdade.
+  número de sequência) num ring buffer consultável. O texto legível no console
+  é apenas uma renderização — não a fonte da verdade.
 
 - **Introspecção de primeira classe.** Mapa de memória, informações de CPU e
   vídeo, histórico de log: tudo acessível de forma estruturada, em tempo de
