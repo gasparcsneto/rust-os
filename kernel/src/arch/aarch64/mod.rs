@@ -16,6 +16,7 @@
 
 pub mod fdt;
 pub mod gic;
+pub mod mmu;
 pub mod uart;
 pub mod vetores;
 
@@ -177,6 +178,19 @@ pub fn init_seriais() -> (Option<Uart>, Option<Uart>) {
         (None, porta)
     }
 }
+
+/// Monta o mapa de identidade e liga a MMU.
+///
+/// Antes desta chamada todo endereço é físico. Depois dela, a tradução está
+/// ativa — mas como o mapa é de identidade, nada muda de lugar, que é
+/// precisamente o que torna a transição sobrevivível.
+pub fn init_paginacao() {
+    // SAFETY: chamada uma única vez no boot, com as interrupções ainda
+    // mascaradas neste ponto do fluxo.
+    unsafe { mmu::init() };
+}
+
+pub use mmu::{acesso_fisico, desmapear, mapear, traduzir};
 
 /// Informa faixas de memória física que o alocador de frames não pode
 /// entregar.

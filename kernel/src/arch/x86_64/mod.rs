@@ -8,8 +8,11 @@
 
 pub mod gdt;
 pub mod idt;
+pub mod paginacao;
 pub mod pic;
 pub mod uart;
+
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use bootloader_api::BootInfo;
 use bootloader_api::info::{MemoryRegionKind, PixelFormat};
@@ -23,13 +26,31 @@ pub const fn nome() -> &'static str {
     "x86_64"
 }
 
+/// Onde o bootloader mapeou a memória física completa.
+///
+/// A sentinela `u64::MAX` distingue "não fornecido" de um deslocamento zero.
+static DESLOCAMENTO_FISICO: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// Configuração pedida ao bootloader.
+///
+/// O pedido que importa é `physical_memory`: sem ele, o bootloader não mapeia
+/// a RAM física no espaço virtual, e ficaríamos sem qualquer forma de
+/// *alcançar* as tabelas de página — cujos descritores contêm endereços
+/// físicos, enquanto todo acesso nosso é virtual. É o que torna a paginação
+/// editável.
+const CONFIG: bootloader_api::BootloaderConfig = {
+    let mut config = bootloader_api::BootloaderConfig::new_default();
+    config.mappings.physical_memory = Some(bootloader_api::config::Mapping::Dynamic);
+    config
+};
+
 // Declara `inicio` como o ponto de entrada do kernel.
 //
 // A macro gera um símbolo `_start` com a ABI que o bootloader espera e, o
 // mais importante, faz uma verificação de tipo da assinatura em tempo de
 // compilação. Sem isso, uma divergência entre o que o bootloader passa e o
 // que o kernel espera viraria corrupção de memória silenciosa no boot.
-bootloader_api::entry_point!(inicio);
+bootloader_api::entry_point!(inicio, config = &CONFIG);
 
 /// Primeira função Rust a executar depois do bootloader.
 ///
@@ -54,6 +75,10 @@ fn inicio(boot_info: &'static mut BootInfo) -> ! {
                 _ => TipoRegiao::Reservada,
             },
         });
+    }
+
+    if let Some(deslocamento) = boot_info.physical_memory_offset.into_option() {
+        DESLOCAMENTO_FISICO.store(deslocamento, Ordering::Relaxed);
     }
 
     if let Some(fb) = boot_info.framebuffer.as_ref() {
@@ -93,6 +118,24 @@ pub fn init_seriais() -> (Option<Uart>, Option<Uart>) {
     let agente = unsafe { Uart::abrir(uart::COM2_BASE) };
     (console, agente)
 }
+
+/// Assume o controle das tabelas de página que o bootloader deixou ativas.
+pub fn init_paginacao() {
+    let deslocamento = DESLOCAMENTO_FISICO.load(Ordering::Relaxed);
+    if deslocamento == u64::MAX {
+        // Sem o mapeamento da memória física não há como editar tabelas. É
+        // fatal para a paginação, mas não para o kernel: reportamos e seguimos
+        // com o que o bootloader montou, que já basta para executar.
+        crate::log_error!("mmu", "bootloader nao mapeou a memoria fisica");
+        return;
+    }
+
+    // SAFETY: o deslocamento veio do próprio bootloader, que o estabeleceu ao
+    // montar as tabelas.
+    unsafe { paginacao::init(deslocamento) };
+}
+
+pub use paginacao::{acesso_fisico, desmapear, mapear, traduzir};
 
 /// Informa faixas de memória física que o alocador de frames não pode
 /// entregar.

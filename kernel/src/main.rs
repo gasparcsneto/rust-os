@@ -106,6 +106,11 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     // faixas que cada arquitetura sabe estarem ocupadas.
     frames::init();
 
+    // Com frames disponíveis, a paginação pode criar tabelas. No x86 isto
+    // assume o controle do que o bootloader montou; no ARM, liga a MMU pela
+    // primeira vez.
+    arch::init_paginacao();
+
     match machine::video() {
         Some(v) => log_info!(
             "video",

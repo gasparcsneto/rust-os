@@ -26,6 +26,8 @@
 //! - `init_excecoes()`: instala o mecanismo de tratamento de exceções.
 //! - `init_interrupcoes()`: liga o controlador de interrupções e o timer.
 //! - `reservar_faixas()`: faixas físicas que o alocador de frames deve evitar.
+//! - `init_paginacao()`, `mapear()`, `desmapear()`, `traduzir()`: a MMU.
+//! - `acesso_fisico()`: endereço virtual por onde se enxerga um físico.
 //! - `esperar_interrupcao()`: dorme até a próxima interrupção.
 //! - `disparar_breakpoint()`: gera uma exceção recuperável, para autoteste.
 //! - `encerrar_emulador()`: termina o QEMU comunicando sucesso ou falha.
@@ -43,11 +45,40 @@ pub mod aarch64;
 #[cfg(target_arch = "aarch64")]
 pub use aarch64 as atual;
 
+// A paginação ainda só tem consumidor nos testes: quem vai mapear páginas de
+// verdade é o heap, próximo da fila. Anotar mantém o build limpo sem esconder
+// código morto de verdade.
+#[cfg_attr(not(feature = "modo-teste"), allow(unused_imports))]
 pub use atual::{
-    Uart, disparar_breakpoint, encerrar_emulador, esperar_interrupcao, halt_forever,
-    identificar_cpu, init_excecoes, init_interrupcoes, init_seriais, nome, reservar_faixas,
-    sem_interrupcoes,
+    Uart, acesso_fisico, desmapear, disparar_breakpoint, encerrar_emulador, esperar_interrupcao,
+    halt_forever, identificar_cpu, init_excecoes, init_interrupcoes, init_paginacao, init_seriais,
+    mapear, nome, reservar_faixas, sem_interrupcoes, traduzir,
 };
+
+/// Como uma página pode ser acessada.
+///
+/// Os dois hardwares codificam isto de formas completamente diferentes — bits
+/// de flag no x86, índices para uma tabela de atributos no ARM —, mas as
+/// perguntas que o kernel precisa responder são as mesmas.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Permissoes {
+    pub escrita: bool,
+    pub executavel: bool,
+    /// Memória de dispositivo: sem cache, sem junção de escritas, sem
+    /// reordenação. Registradores de hardware exigem isto; RAM, não.
+    pub dispositivo: bool,
+}
+
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+impl Permissoes {
+    /// Dados do kernel: leitura e escrita, jamais executáveis.
+    pub const DADOS: Self = Self {
+        escrita: true,
+        executavel: false,
+        dispositivo: false,
+    };
+}
 
 /// Identificação do processador, num buffer de tamanho fixo.
 ///

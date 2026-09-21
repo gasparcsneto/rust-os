@@ -70,6 +70,17 @@ pub static COMANDOS: &[Command] = &[
         handler: memory_frames,
     },
     Command {
+        nome: "paging.translate",
+        resumo: "Resolve um endereco virtual para fisico usando as tabelas de pagina ativas.",
+        params: &[ParamSpec {
+            nome: "address",
+            tipo: TipoParam::Inteiro,
+            obrigatorio: true,
+            descricao: "Endereco virtual a traduzir, em decimal.",
+        }],
+        handler: paging_translate,
+    },
+    Command {
         nome: "system.uptime",
         resumo: "Tempo desde o boot, em ticks do timer e em milissegundos.",
         params: &[],
@@ -223,6 +234,36 @@ fn memory_frames(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.field_u64("free", livres as u64)?;
     w.field_u64("used", (rastreados - livres) as u64)?;
     w.field_u64("free_bytes", livres as u64 * crate::frames::TAMANHO_FRAME)?;
+    w.end_object()
+}
+
+// ---------------------------------------------------------------------------
+// paging.*
+// ---------------------------------------------------------------------------
+
+fn paging_translate(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    // O registro já garantiu que é inteiro; o `unwrap_or` cobre o impossível.
+    let virtual_ = params
+        .member("address")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    w.begin_object()?;
+    w.field_u64("virtual", virtual_)?;
+    match crate::arch::traduzir(virtual_) {
+        Some(fisico) => {
+            w.field_bool("mapped", true)?;
+            w.field_u64("physical", fisico)?;
+        }
+        None => {
+            // Um endereço sem tradução não é erro: é informação, e uma das
+            // mais úteis que o agente pode pedir ao investigar uma falha de
+            // pagina.
+            w.field_bool("mapped", false)?;
+            w.key("physical")?;
+            w.null_value()?;
+        }
+    }
     w.end_object()
 }
 

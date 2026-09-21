@@ -101,6 +101,8 @@ Os dois podem rodar ao mesmo tempo: cada arquitetura tem seu próprio socket.
 | `system.uptime` | Ticks do timer e milissegundos desde o boot |
 | `memory.stats` | Totais agregados de memória física |
 | `memory.regions` | Regiões do mapa de memória (`limit`, `usable_only`) |
+| `memory.frames` | Estado do alocador de frames físicos |
+| `paging.translate` | Traduz um endereço virtual para físico (`address`) |
 | `irq.stats` | Contadores de interrupções de hardware por linha |
 | `traps.stats` | Contadores de exceções e detalhes da última falha |
 | `debug.trigger` | Dispara uma exceção de propósito, para autoteste (`kind`) |
@@ -117,6 +119,7 @@ kernel/src/
 ├── machine.rs       descrição da máquina, neutra de arquitetura
 ├── serial.rs        papéis de console e canal do agente
 ├── log.rs           logging estruturado em ring buffer
+├── frames.rs        alocador de frames de memória física (bitmap)
 ├── testes.rs        suíte de testes que roda dentro do emulador
 ├── traps.rs         contabilidade de exceções e modo post-mortem
 ├── irq.rs           contadores de interrupções de hardware
@@ -135,11 +138,13 @@ kernel/src/
     │   ├── gdt.rs    GDT, TSS e pilha dedicada ao double fault
     │   ├── idt.rs    IDT e handlers de exceção e interrupção
     │   ├── pic.rs    controlador 8259 e timer PIT
+    │   ├── paginacao.rs  assume as tabelas de página do bootloader
     │   └── uart.rs   UART 16550 por port-mapped I/O
     └── aarch64/
         ├── mod.rs     boot em assembly, cabeçalho de imagem arm64, MIDR_EL1
         ├── vetores.rs tabela de vetores de exceção (VBAR_EL1)
         ├── gic.rs     GIC v2 e timer genérico do ARM
+        ├── mmu.rs     tabelas de tradução e ativação da MMU
         ├── uart.rs    PL011 por memory-mapped I/O
         ├── fdt.rs     leitor de device tree escrito à mão
         └── linker.ld  layout de memória e símbolos de boot
@@ -163,6 +168,8 @@ O contraste no caminho de boot é grande:
 | Seriais | duas UARTs 16550 (port I/O) | uma PL011 (MMIO) |
 | Exceções | IDT de ponteiros, contexto salvo pela CPU | vetores de código, contexto salvo à mão |
 | Interrupções | PIC 8259 + timer PIT | GIC v2 + timer genérico |
+| MMU | já ligada pelo bootloader | desligada; nós a acendemos |
+| Acesso à memória física | mapeada num deslocamento | identidade |
 | Encerrar emulador | `isa-debug-exit` | semihosting |
 
 Dois workspaces separados: o kernel compila bare-metal e o `xtask` para o
@@ -212,7 +219,10 @@ padronizado.
       arquiteturas, modo post-mortem.
 - [x] **Fase 0 — Testes e CI.** 27 casos rodando em bare-metal nas duas
       arquiteturas, em debug e release, com formatação e lints no CI.
-- [ ] **Fase 0 (cont.)** — paginação, alocador de frames e heap.
+- [x] **Fase 0 — Memória física e paginação.** Alocador de frames por bitmap,
+      MMU ligada do zero no ARM com mapa de identidade, controle das tabelas
+      do bootloader no x86, e uma API de mapeamento comum às duas.
+- [ ] **Fase 0 (cont.)** — heap, que destrava `alloc` no kernel.
 - [ ] **Fase 1 — Kernel de verdade.** Scheduler preemptivo, context switch,
       ring 3 com TSS, `syscall`/`sysret`, ELF loader, processos com espaços de
       endereçamento isolados.

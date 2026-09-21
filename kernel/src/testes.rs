@@ -694,6 +694,139 @@ fn frames_estatisticas_coerentes() -> Resultado {
 }
 
 // ===========================================================================
+// Paginação
+// ===========================================================================
+
+/// Procura um endereço virtual sem tradução, para os testes de mapeamento.
+///
+/// Sondar em vez de fixar um endereço é o que mantém o teste válido nas duas
+/// arquiteturas: no x86 o bootloader mapeia a memória física num deslocamento
+/// que ele escolhe, e um endereço fixo poderia cair em cima dele.
+fn endereco_virtual_livre() -> Option<u64> {
+    // Abaixo de 512 GiB para caber nos 39 bits de endereço virtual que
+    // configuramos no ARM, e alto o bastante para não colidir com o kernel.
+    const BASE: u64 = 128 * 1024 * 1024 * 1024;
+
+    (0..64).find_map(|i| {
+        let candidato = BASE + i * crate::frames::TAMANHO_FRAME;
+        crate::arch::traduzir(candidato)
+            .is_none()
+            .then_some(candidato)
+    })
+}
+
+/// O código do kernel precisa estar mapeado — estamos executando nele.
+fn paginacao_traduz_endereco_do_kernel() -> Resultado {
+    let endereco = CASOS.as_ptr() as u64;
+    match crate::arch::traduzir(endereco) {
+        Some(_) => Ok(()),
+        None => {
+            crate::log_error!("teste", "endereco {:#x} sem traducao", endereco);
+            Err("dados do kernel aparecem como nao mapeados")
+        }
+    }
+}
+
+/// O teste central da paginação: prova que o mapeamento roteia de verdade.
+///
+/// Escrevemos pelo endereço virtual recém-mapeado e lemos pelo caminho físico,
+/// que é independente. Se os dois concordarem, a tradução levou a escrita
+/// exatamente ao frame pretendido — não a um lugar qualquer que por acaso
+/// aceitou a escrita.
+fn paginacao_escreve_e_le_pelo_caminho_fisico() -> Resultado {
+    const PADRAO: u64 = 0x5EED_1234_ABCD_9876;
+
+    let frame = crate::frames::alocar().ok_or("sem frames")?;
+    let Some(virtual_) = endereco_virtual_livre() else {
+        crate::frames::liberar(frame);
+        return Err("nenhum endereco virtual livre encontrado");
+    };
+
+    if let Err(motivo) = crate::arch::mapear(virtual_, frame, crate::arch::Permissoes::DADOS) {
+        crate::frames::liberar(frame);
+        crate::log_error!("teste", "mapear falhou: {}", motivo);
+        return Err("mapeamento recusado");
+    }
+
+    // SAFETY: acabamos de mapear esta página com permissão de escrita, e ela
+    // não é usada por mais ninguém.
+    unsafe { core::ptr::write_volatile(virtual_ as *mut u64, PADRAO) };
+
+    // SAFETY: o frame está alocado a nós, e `acesso_fisico` devolve o endereço
+    // virtual por onde o kernel enxerga memória física.
+    let lido = unsafe { core::ptr::read_volatile(crate::arch::acesso_fisico(frame) as *const u64) };
+
+    let desmapeou = crate::arch::desmapear(virtual_).is_ok();
+    crate::frames::liberar(frame);
+
+    if !desmapeou {
+        return Err("desmapear falhou");
+    }
+    if lido != PADRAO {
+        crate::log_error!("teste", "esperado {:#x}, lido {:#x}", PADRAO, lido);
+        return Err("escrita pela pagina nao chegou ao frame");
+    }
+    Ok(())
+}
+
+fn paginacao_desmapear_remove_traducao() -> Resultado {
+    let frame = crate::frames::alocar().ok_or("sem frames")?;
+    let Some(virtual_) = endereco_virtual_livre() else {
+        crate::frames::liberar(frame);
+        return Err("nenhum endereco virtual livre encontrado");
+    };
+
+    let mapeou = crate::arch::mapear(virtual_, frame, crate::arch::Permissoes::DADOS).is_ok();
+    let traduziu = crate::arch::traduzir(virtual_) == Some(frame);
+    let desmapeou = mapeou && crate::arch::desmapear(virtual_).is_ok();
+    let sumiu = crate::arch::traduzir(virtual_).is_none();
+
+    crate::frames::liberar(frame);
+
+    if !mapeou {
+        return Err("mapeamento recusado");
+    }
+    if !traduziu {
+        return Err("traducao nao aponta para o frame mapeado");
+    }
+    if !desmapeou {
+        return Err("desmapear falhou");
+    }
+    if !sumiu {
+        // Se a tradução sobrevive ao desmapeamento, a TLB não foi invalidada —
+        // e memória liberada continuaria acessível, que é uma falha de
+        // isolamento, não só um bug de contabilidade.
+        return Err("traducao sobreviveu ao desmapeamento");
+    }
+    Ok(())
+}
+
+/// Mapear por cima de algo já mapeado precisa ser recusado, não silenciosamente
+/// aceito: sobrescrever um descritor em uso deixa o frame anterior órfão e dá
+/// ao novo dono acesso à memória do antigo.
+fn paginacao_recusa_mapeamento_duplicado() -> Resultado {
+    let frame = crate::frames::alocar().ok_or("sem frames")?;
+    let Some(virtual_) = endereco_virtual_livre() else {
+        crate::frames::liberar(frame);
+        return Err("nenhum endereco virtual livre encontrado");
+    };
+
+    let primeiro = crate::arch::mapear(virtual_, frame, crate::arch::Permissoes::DADOS);
+    let segundo = crate::arch::mapear(virtual_, frame, crate::arch::Permissoes::DADOS);
+
+    let _ = crate::arch::desmapear(virtual_);
+    crate::frames::liberar(frame);
+
+    if primeiro.is_err() {
+        return Err("primeiro mapeamento recusado");
+    }
+    if segundo.is_ok() {
+        return Err("mapeamento duplicado foi aceito");
+    }
+    Ok(())
+}
+
+// ===========================================================================
 // Registro e execução
 // ===========================================================================
 
@@ -825,6 +958,22 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "frames: estatisticas coerentes",
         f: frames_estatisticas_coerentes,
+    },
+    Caso {
+        nome: "paginacao: kernel esta mapeado",
+        f: paginacao_traduz_endereco_do_kernel,
+    },
+    Caso {
+        nome: "paginacao: escrita chega ao frame",
+        f: paginacao_escreve_e_le_pelo_caminho_fisico,
+    },
+    Caso {
+        nome: "paginacao: desmapear remove traducao",
+        f: paginacao_desmapear_remove_traducao,
+    },
+    Caso {
+        nome: "paginacao: recusa duplicado",
+        f: paginacao_recusa_mapeamento_duplicado,
     },
 ];
 
