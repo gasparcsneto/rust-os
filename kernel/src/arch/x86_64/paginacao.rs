@@ -37,7 +37,26 @@ use x86_64::structures::paging::{
 };
 use x86_64::{PhysAddr, VirtAddr};
 
-use super::super::Permissoes;
+use super::super::{Permissoes, TAMANHO_PAGINA, validar_alinhamento};
+
+/// Um endereço virtual do x86_64 precisa ser *canônico*: os bits 48 a 63 têm
+/// de repetir o bit 47.
+///
+/// Isto não é detalhe acadêmico. `VirtAddr::new` do crate `x86_64` entra em
+/// **pânico** diante de um endereço não-canônico, e um pânico no kernel é
+/// terminal. Como o comando `paging.translate` aceita um inteiro arbitrário
+/// vindo do canal do agente, sem esta verificação uma única requisição JSON
+/// derruba o sistema — o que foi verificado na prática antes de escrever isto.
+fn canonico(endereco: u64) -> bool {
+    let alto = endereco >> 47;
+    alto == 0 || alto == 0x1_FFFF
+}
+
+/// O x86_64 limita endereços físicos a 52 bits, e `PhysAddr::new` também entra
+/// em pânico acima disso.
+fn fisico_valido(endereco: u64) -> bool {
+    endereco < (1 << 52)
+}
 
 /// Deslocamento onde a memória física inteira está mapeada.
 ///
@@ -130,69 +149,132 @@ fn flags_de(permissoes: Permissoes) -> PageTableFlags {
     flags
 }
 
-/// Mapeia uma página de 4 KiB.
-pub fn mapear(virtual_: u64, fisico: u64, permissoes: Permissoes) -> Result<(), &'static str> {
-    let _guarda = TRAVA.lock();
-
-    // SAFETY: seguramos a trava por toda a vida do mapeador.
-    let mut mapeador = unsafe { mapeador()? };
-
-    let pagina = Page::<Size4KiB>::containing_address(VirtAddr::new(virtual_));
-    let frame = PhysFrame::containing_address(PhysAddr::new(fisico));
-
-    // SAFETY: criar um mapeamento novo num endereço virtual até então livre
-    // não invalida nenhuma referência existente. O caso perigoso — remapear
-    // algo em uso — é rejeitado pelo próprio `map_to`, que devolve
-    // `PageAlreadyMapped`.
-    let resultado =
-        unsafe { mapeador.map_to(pagina, frame, flags_de(permissoes), &mut AlocadorDeFrames) };
-
-    match resultado {
-        Ok(flush) => {
-            // Sem isto a TLB continuaria servindo a ausência de tradução.
-            flush.flush();
-            Ok(())
-        }
-        Err(MapToError::PageAlreadyMapped(_)) => Err("endereco virtual ja mapeado"),
-        Err(MapToError::FrameAllocationFailed) => Err("sem frames para tabela de pagina"),
-        Err(MapToError::ParentEntryHugePage) => Err("bloco grande no caminho do mapeamento"),
+/// Mapeia uma página de 4 KiB para um frame específico.
+///
+/// # Safety
+///
+/// O chamador precisa garantir que `fisico` **não esteja em uso** por nenhum
+/// outro mapeamento — é o mesmo contrato que `map_to` exige, e pela mesma
+/// razão: duas páginas apontando para o mesmo frame são dois caminhos de
+/// escrita para a mesma memória física.
+///
+/// Para memória comum, prefira [`crate::paginacao::mapear_novo`], que
+/// satisfaz esta condição por construção.
+pub unsafe fn mapear_frame(
+    virtual_: u64,
+    fisico: u64,
+    permissoes: Permissoes,
+) -> Result<(), &'static str> {
+    validar_alinhamento(virtual_, fisico)?;
+    if !canonico(virtual_) {
+        return Err("endereco virtual nao canonico");
     }
+    if !fisico_valido(fisico) {
+        return Err("endereco fisico fora da faixa de 52 bits");
+    }
+
+    // Mascarar interrupções não é zelo excessivo: `TRAVA` é um spinlock, e
+    // spinlocks não são reentrantes. Se o timer disparasse no meio de um
+    // mapeamento e o handler chegasse aqui, ele giraria para sempre esperando
+    // um lock que só nós podemos soltar — e só voltamos a rodar quando ele
+    // retornar.
+    crate::arch::sem_interrupcoes(|| {
+        let _guarda = TRAVA.lock();
+
+        // SAFETY: seguramos a trava por toda a vida do mapeador.
+        let mut mapeador = unsafe { mapeador()? };
+
+        // Os endereços já foram validados como alinhados e dentro das faixas
+        // que os construtores exigem, então nem `new` entra em pânico nem
+        // `containing_address` tem o que arredondar em silêncio.
+        let pagina = Page::<Size4KiB>::containing_address(VirtAddr::new(virtual_));
+        let frame = PhysFrame::containing_address(PhysAddr::new(fisico));
+
+        // SAFETY: criar um mapeamento novo num endereço virtual até então
+        // livre não invalida nenhuma referência existente, e o contrato desta
+        // função transfere ao chamador a garantia de que o frame não está em
+        // uso. O caso de remapear algo em uso é rejeitado pelo próprio
+        // `map_to`, que devolve `PageAlreadyMapped`.
+        let resultado =
+            unsafe { mapeador.map_to(pagina, frame, flags_de(permissoes), &mut AlocadorDeFrames) };
+
+        match resultado {
+            Ok(flush) => {
+                // Sem isto a TLB continuaria servindo a ausência de tradução.
+                flush.flush();
+                Ok(())
+            }
+            Err(MapToError::PageAlreadyMapped(_)) => Err("endereco virtual ja mapeado"),
+            Err(MapToError::FrameAllocationFailed) => Err("sem frames para tabela de pagina"),
+            Err(MapToError::ParentEntryHugePage) => Err("bloco grande no caminho do mapeamento"),
+        }
+    })
 }
 
-/// Remove o mapeamento de uma página de 4 KiB.
-pub fn desmapear(virtual_: u64) -> Result<(), &'static str> {
-    let _guarda = TRAVA.lock();
-
-    // SAFETY: seguramos a trava por toda a vida do mapeador.
-    let mut mapeador = unsafe { mapeador()? };
-    let pagina = Page::<Size4KiB>::containing_address(VirtAddr::new(virtual_));
-
-    match mapeador.unmap(pagina) {
-        Ok((_frame, flush)) => {
-            flush.flush();
-            Ok(())
-        }
-        Err(UnmapError::PageNotMapped) => Err("endereco nao estava mapeado"),
-        Err(UnmapError::ParentEntryHugePage) => {
-            Err("endereco nao mapeado em granularidade de pagina")
-        }
-        Err(UnmapError::InvalidFrameAddress(_)) => Err("descritor com endereco invalido"),
+/// Remove o mapeamento de uma página de 4 KiB e devolve o frame que estava
+/// ali.
+///
+/// Nota conhecida: as tabelas intermediárias que ficam vazias **não** são
+/// recuperadas, aqui nem no ARM. É um vazamento limitado — um frame por
+/// região de 2 MiB que já foi usada — e recuperá-las exige contar entradas
+/// vivas por tabela, com invalidação de TLB mais ampla. Fica registrado em
+/// vez de meio resolvido.
+pub fn desmapear(virtual_: u64) -> Result<u64, &'static str> {
+    if !virtual_.is_multiple_of(TAMANHO_PAGINA) {
+        return Err("endereco virtual desalinhado");
     }
+    if !canonico(virtual_) {
+        return Err("endereco virtual nao canonico");
+    }
+
+    crate::arch::sem_interrupcoes(|| {
+        let _guarda = TRAVA.lock();
+
+        // SAFETY: seguramos a trava por toda a vida do mapeador.
+        let mut mapeador = unsafe { mapeador()? };
+        let pagina = Page::<Size4KiB>::containing_address(VirtAddr::new(virtual_));
+
+        match mapeador.unmap(pagina) {
+            Ok((frame, flush)) => {
+                flush.flush();
+                // Devolver o frame permite ao chamador liberá-lo. Sem isto,
+                // quem desmapeia não tem como saber qual memória física ficou
+                // órfã.
+                Ok(frame.start_address().as_u64())
+            }
+            Err(UnmapError::PageNotMapped) => Err("endereco nao estava mapeado"),
+            Err(UnmapError::ParentEntryHugePage) => {
+                Err("endereco nao mapeado em granularidade de pagina")
+            }
+            Err(UnmapError::InvalidFrameAddress(_)) => Err("descritor com endereco invalido"),
+        }
+    })
 }
 
 /// Resolve um endereço virtual para físico, se houver tradução.
+///
+/// Um endereço inválido devolve `None` em vez de falhar: para quem pergunta,
+/// "não tem tradução" é a resposta correta, e é exatamente o que um endereço
+/// impossível merece. Nunca entra em pânico — esta função é alcançável a
+/// partir do canal do agente com um inteiro arbitrário.
 pub fn traduzir(virtual_: u64) -> Option<u64> {
-    let _guarda = TRAVA.lock();
-
-    // SAFETY: seguramos a trava por toda a vida do mapeador.
-    let mapeador = unsafe { mapeador().ok()? };
-
-    match mapeador.translate(VirtAddr::new(virtual_)) {
-        TranslateResult::Mapped { frame, offset, .. } => {
-            Some(frame.start_address().as_u64() + offset)
-        }
-        _ => None,
+    if !canonico(virtual_) {
+        return None;
     }
+
+    crate::arch::sem_interrupcoes(|| {
+        let _guarda = TRAVA.lock();
+
+        // SAFETY: seguramos a trava por toda a vida do mapeador.
+        let mapeador = unsafe { mapeador().ok()? };
+
+        match mapeador.translate(VirtAddr::new(virtual_)) {
+            TranslateResult::Mapped { frame, offset, .. } => {
+                Some(frame.start_address().as_u64() + offset)
+            }
+            _ => None,
+        }
+    })
 }
 
 /// Endereço virtual por onde o kernel enxerga uma página física.

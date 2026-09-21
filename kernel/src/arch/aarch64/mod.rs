@@ -190,7 +190,7 @@ pub fn init_paginacao() {
     unsafe { mmu::init() };
 }
 
-pub use mmu::{acesso_fisico, desmapear, mapear, traduzir};
+pub use mmu::{acesso_fisico, desmapear, mapear_frame, traduzir};
 
 /// Informa faixas de memória física que o alocador de frames não pode
 /// entregar.

@@ -736,17 +736,15 @@ fn paginacao_traduz_endereco_do_kernel() -> Resultado {
 fn paginacao_escreve_e_le_pelo_caminho_fisico() -> Resultado {
     const PADRAO: u64 = 0x5EED_1234_ABCD_9876;
 
-    let frame = crate::frames::alocar().ok_or("sem frames")?;
-    let Some(virtual_) = endereco_virtual_livre() else {
-        crate::frames::liberar(frame);
-        return Err("nenhum endereco virtual livre encontrado");
-    };
+    let virtual_ = endereco_virtual_livre().ok_or("nenhum endereco virtual livre")?;
 
-    if let Err(motivo) = crate::arch::mapear(virtual_, frame, crate::arch::Permissoes::DADOS) {
-        crate::frames::liberar(frame);
-        crate::log_error!("teste", "mapear falhou: {}", motivo);
-        return Err("mapeamento recusado");
-    }
+    let frame = match crate::paginacao::mapear_novo(virtual_, crate::arch::Permissoes::DADOS) {
+        Ok(frame) => frame,
+        Err(motivo) => {
+            crate::log_error!("teste", "mapear falhou: {}", motivo);
+            return Err("mapeamento recusado");
+        }
+    };
 
     // SAFETY: acabamos de mapear esta página com permissão de escrita, e ela
     // não é usada por mais ninguém.
@@ -756,8 +754,7 @@ fn paginacao_escreve_e_le_pelo_caminho_fisico() -> Resultado {
     // virtual por onde o kernel enxerga memória física.
     let lido = unsafe { core::ptr::read_volatile(crate::arch::acesso_fisico(frame) as *const u64) };
 
-    let desmapeou = crate::arch::desmapear(virtual_).is_ok();
-    crate::frames::liberar(frame);
+    let desmapeou = crate::paginacao::desmapear_e_liberar(virtual_).is_ok();
 
     if !desmapeou {
         return Err("desmapear falhou");
@@ -770,18 +767,13 @@ fn paginacao_escreve_e_le_pelo_caminho_fisico() -> Resultado {
 }
 
 fn paginacao_desmapear_remove_traducao() -> Resultado {
-    let frame = crate::frames::alocar().ok_or("sem frames")?;
-    let Some(virtual_) = endereco_virtual_livre() else {
-        crate::frames::liberar(frame);
-        return Err("nenhum endereco virtual livre encontrado");
-    };
+    let virtual_ = endereco_virtual_livre().ok_or("nenhum endereco virtual livre")?;
 
-    let mapeou = crate::arch::mapear(virtual_, frame, crate::arch::Permissoes::DADOS).is_ok();
-    let traduziu = crate::arch::traduzir(virtual_) == Some(frame);
-    let desmapeou = mapeou && crate::arch::desmapear(virtual_).is_ok();
+    let mapeado = crate::paginacao::mapear_novo(virtual_, crate::arch::Permissoes::DADOS);
+    let mapeou = mapeado.is_ok();
+    let traduziu = mapeado.map(|frame| crate::arch::traduzir(virtual_) == Some(frame)) == Ok(true);
+    let desmapeou = mapeou && crate::paginacao::desmapear_e_liberar(virtual_).is_ok();
     let sumiu = crate::arch::traduzir(virtual_).is_none();
-
-    crate::frames::liberar(frame);
 
     if !mapeou {
         return Err("mapeamento recusado");
@@ -805,23 +797,79 @@ fn paginacao_desmapear_remove_traducao() -> Resultado {
 /// aceito: sobrescrever um descritor em uso deixa o frame anterior órfão e dá
 /// ao novo dono acesso à memória do antigo.
 fn paginacao_recusa_mapeamento_duplicado() -> Resultado {
-    let frame = crate::frames::alocar().ok_or("sem frames")?;
-    let Some(virtual_) = endereco_virtual_livre() else {
-        crate::frames::liberar(frame);
-        return Err("nenhum endereco virtual livre encontrado");
-    };
+    let virtual_ = endereco_virtual_livre().ok_or("nenhum endereco virtual livre")?;
 
-    let primeiro = crate::arch::mapear(virtual_, frame, crate::arch::Permissoes::DADOS);
-    let segundo = crate::arch::mapear(virtual_, frame, crate::arch::Permissoes::DADOS);
+    let primeiro = crate::paginacao::mapear_novo(virtual_, crate::arch::Permissoes::DADOS);
+    let segundo = crate::paginacao::mapear_novo(virtual_, crate::arch::Permissoes::DADOS);
 
-    let _ = crate::arch::desmapear(virtual_);
-    crate::frames::liberar(frame);
+    let _ = crate::paginacao::desmapear_e_liberar(virtual_);
 
     if primeiro.is_err() {
         return Err("primeiro mapeamento recusado");
     }
     if segundo.is_ok() {
         return Err("mapeamento duplicado foi aceito");
+    }
+    Ok(())
+}
+
+/// Regressão do bug que derrubava o kernel pelo canal do agente.
+///
+/// O comando `paging.translate` aceita um inteiro arbitrário vindo de fora.
+/// No x86, `VirtAddr::new` entra em pânico diante de um endereço não-canônico
+/// — e um pânico no kernel é terminal. No ARM o sintoma era outro e mais
+/// traiçoeiro: o cálculo de índices mascarava os bits altos, e um endereço
+/// impossível "dobrava" para dentro do espaço válido, devolvendo uma tradução
+/// falsa.
+///
+/// Chegar ao fim desta função já é metade do teste: antes da correção, a
+/// primeira linha matava o sistema.
+fn paginacao_endereco_impossivel_nao_derruba() -> Resultado {
+    // Bit 63 ligado com os bits 62..48 zerados: não é extensão de sinal, logo
+    // não é canônico no x86; e está muito além dos 39 bits do ARM.
+    const IMPOSSIVEIS: [u64; 3] = [1 << 63, 0x0000_8000_0000_0000, 0xFFFF_FFFF_FFFF_F000];
+
+    for endereco in IMPOSSIVEIS {
+        if crate::arch::traduzir(endereco).is_some() {
+            crate::log_error!("teste", "{:#x} reportado como mapeado", endereco);
+            return Err("endereco impossivel reportado como mapeado");
+        }
+    }
+    Ok(())
+}
+
+/// Endereços desalinhados precisam ser recusados, não arredondados.
+///
+/// As duas APIs de hardware arredondam para baixo em silêncio. Quem pedisse
+/// para mapear `frame + 8` receberia um mapeamento para `frame` e passaria a
+/// escrever oito bytes antes do pretendido — corrupção que só aparece muito
+/// depois da causa.
+fn paginacao_recusa_desalinhado() -> Resultado {
+    let virtual_ = endereco_virtual_livre().ok_or("nenhum endereco virtual livre")?;
+    let frame = crate::frames::alocar().ok_or("sem frames")?;
+
+    // SAFETY: as três chamadas são rejeitadas pela validação antes de tocar em
+    // qualquer tabela, então o contrato de "frame nao em uso" nunca chega a
+    // ser exercido. Se alguma passasse, o teste falha e nós a desfazemos.
+    let resultados = unsafe {
+        [
+            crate::arch::mapear_frame(virtual_ + 8, frame, crate::arch::Permissoes::DADOS),
+            crate::arch::mapear_frame(virtual_, frame + 8, crate::arch::Permissoes::DADOS),
+            crate::arch::mapear_frame(1 << 63, frame, crate::arch::Permissoes::DADOS),
+        ]
+    };
+
+    let algum_passou = resultados.iter().any(|r| r.is_ok());
+    if algum_passou {
+        // Limpeza defensiva: se a validação falhou, não deixamos mapeamento
+        // pendurado para confundir os testes seguintes.
+        let _ = crate::arch::desmapear(virtual_ + 8);
+        let _ = crate::arch::desmapear(virtual_);
+    }
+    crate::frames::liberar(frame);
+
+    if algum_passou {
+        return Err("endereco invalido foi aceito");
     }
     Ok(())
 }
@@ -974,6 +1022,14 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "paginacao: recusa duplicado",
         f: paginacao_recusa_mapeamento_duplicado,
+    },
+    Caso {
+        nome: "paginacao: endereco impossivel e seguro",
+        f: paginacao_endereco_impossivel_nao_derruba,
+    },
+    Caso {
+        nome: "paginacao: recusa desalinhado",
+        f: paginacao_recusa_desalinhado,
     },
 ];
 

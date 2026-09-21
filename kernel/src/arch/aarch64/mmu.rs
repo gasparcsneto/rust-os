@@ -41,8 +41,35 @@
 
 use core::arch::asm;
 use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicBool, Ordering};
 
-use super::super::Permissoes;
+use spin::Mutex;
+
+use super::super::{Permissoes, TAMANHO_PAGINA, validar_alinhamento};
+
+/// Serializa as alterações e leituras de tabela.
+///
+/// Sem isto, `mapear` poderia estar no meio de instalar um descritor enquanto
+/// `traduzir` o lê pela metade — ou pior, duas chamadas de `mapear` poderiam
+/// criar tabelas concorrentes para o mesmo endereço e uma vazaria.
+static TRAVA: Mutex<()> = Mutex::new(());
+
+/// A MMU já foi ligada?
+///
+/// Mapear antes disso escreveria em tabelas que ninguém consulta, e a falha
+/// apareceria muito longe da causa.
+static ATIVA: AtomicBool = AtomicBool::new(false);
+
+/// Limite do espaço virtual configurado.
+///
+/// `T0SZ = 25` dá 39 bits de endereço virtual, e como desligamos as buscas por
+/// TTBR1 não existe a metade alta. Qualquer endereço acima disto é inválido —
+/// e checar aqui é o que impede que o cálculo de índices o trunque em silêncio
+/// para algo dentro da faixa.
+const LIMITE_VIRTUAL: u64 = 1 << 39;
+
+/// Os descritores carregam 36 bits de endereço físico (bits 47:12).
+const LIMITE_FISICO: u64 = 1 << 48;
 
 /// Entradas por tabela: 4 KiB divididos em descritores de 8 bytes.
 const ENTRADAS: usize = 512;
@@ -158,6 +185,8 @@ pub unsafe fn init() {
     // os periféricos, então a instrução seguinte ao `isb` continua válida.
     unsafe { ligar(raiz) };
 
+    ATIVA.store(true, Ordering::Release);
+
     crate::log_info!(
         "mmu",
         "identidade ativa: 1 bloco de dispositivo, {} de RAM",
@@ -220,6 +249,15 @@ unsafe fn ligar(raiz: u64) {
             raiz = in(reg) raiz,
             options(nostack),
         );
+
+        // Vamos ligar o cache de instruções junto com a MMU, e ele pode conter
+        // linhas trazidas enquanto a tradução estava desligada. Essas linhas
+        // foram buscadas sob outro regime de atributos de memória; deixá-las
+        // vivas é arriscar executar instruções obsoletas logo após a
+        // transição, que é uma falha sem sintoma legível.
+        //
+        // `nsh` (non-shareable) basta: a invalidação é do cache deste núcleo.
+        asm!("ic iallu", "dsb nsh", "isb", options(nostack));
 
         // O momento crítico: entre escrever SCTLR_EL1 e o `isb`, a MMU passa a
         // valer. O mapa de identidade é o que garante que a busca da próxima
@@ -300,70 +338,141 @@ fn bits_de(permissoes: Permissoes) -> u64 {
     bits | AF
 }
 
-/// Mapeia uma página de 4 KiB.
-pub fn mapear(virtual_: u64, fisico: u64, permissoes: Permissoes) -> Result<(), &'static str> {
-    let (i1, i2, i3) = indices(virtual_);
+/// Mapeia uma página de 4 KiB para um frame específico.
+///
+/// # Safety
+///
+/// O chamador precisa garantir que `fisico` **não esteja em uso** por nenhum
+/// outro mapeamento. Apontar duas páginas para o mesmo frame cria dois
+/// caminhos de escrita para a mesma memória física — o equivalente a duas
+/// referências `&mut` para o mesmo lugar, que é comportamento indefinido em
+/// Rust antes mesmo de ser um problema de kernel.
+///
+/// Para memória comum, prefira [`crate::paginacao::mapear_novo`], que tira o
+/// frame do alocador e por isso satisfaz esta condição por construção. Esta
+/// função existe para os casos em que o frame é escolhido e não alocado —
+/// registradores mapeados em memória, por exemplo.
+pub unsafe fn mapear_frame(
+    virtual_: u64,
+    fisico: u64,
+    permissoes: Permissoes,
+) -> Result<(), &'static str> {
+    validar_endereco(virtual_, fisico)?;
 
-    // SAFETY: núcleo único e chamadas serializadas pelo chamador.
-    let l1 = unsafe { &mut *L1.0.get() };
+    // Mascarar interrupções não é zelo excessivo: `TRAVA` é um spinlock, e
+    // spinlocks não são reentrantes. Se o timer disparasse no meio de um
+    // mapeamento e o handler chegasse aqui, ele giraria para sempre esperando
+    // um lock que só nós podemos soltar — e só voltamos a rodar quando ele
+    // retornar.
+    crate::arch::sem_interrupcoes(|| {
+        let _guarda = TRAVA.lock();
+        let (i1, i2, i3) = indices(virtual_);
 
-    // SAFETY: descemos por descritores válidos, criando tabelas conforme
-    // necessário.
-    let l3 = unsafe {
-        let l2 = descer(&raw mut l1.entradas[i1])?;
-        descer(l2.add(i2))?
-    };
+        // SAFETY: a trava garante acesso exclusivo à tabela.
+        let l1 = unsafe { &mut *L1.0.get() };
 
-    // SAFETY: `l3` é uma tabela de 512 entradas e `i3` está dentro dela.
-    unsafe {
-        let alvo = l3.add(i3);
-        if *alvo & VALIDO != 0 {
-            return Err("endereco virtual ja mapeado");
+        // SAFETY: descemos por descritores válidos, criando tabelas conforme
+        // necessário.
+        let l3 = unsafe {
+            let l2 = descer(&raw mut l1.entradas[i1])?;
+            descer(l2.add(i2))?
+        };
+
+        // SAFETY: `l3` é uma tabela de 512 entradas e `i3` está dentro dela.
+        unsafe {
+            let alvo = l3.add(i3);
+            if *alvo & VALIDO != 0 {
+                return Err("endereco virtual ja mapeado");
+            }
+            // No nível 3, uma página usa VÁLIDO *com* o bit de tabela.
+            *alvo = (fisico & MASCARA_ENDERECO) | VALIDO | TABELA | bits_de(permissoes);
         }
-        // No nível 3, uma página usa VÁLIDO *com* o bit de tabela.
-        *alvo = (fisico & MASCARA_ENDERECO) | VALIDO | TABELA | bits_de(permissoes);
-    }
 
-    // SAFETY: a entrada foi escrita; resta publicá-la.
-    unsafe { invalidar(virtual_) };
+        // SAFETY: a entrada foi escrita; resta publicá-la.
+        unsafe { invalidar(virtual_) };
+        Ok(())
+    })
+}
+
+/// Recusa endereços que não podem ser mapeados nesta configuração.
+///
+/// A checagem de faixa é o que impede o cálculo de índices de truncar um
+/// endereço alto em silêncio para algo dentro do espaço configurado — quem
+/// pedisse para mapear `2^40` acabaria mapeando `0`, sem aviso.
+fn validar_endereco(virtual_: u64, fisico: u64) -> Result<(), &'static str> {
+    if !ATIVA.load(Ordering::Acquire) {
+        return Err("mmu ainda nao inicializada");
+    }
+    validar_alinhamento(virtual_, fisico)?;
+    if virtual_ >= LIMITE_VIRTUAL {
+        return Err("endereco virtual fora do espaco configurado");
+    }
+    if fisico >= LIMITE_FISICO {
+        return Err("endereco fisico fora da faixa de 48 bits");
+    }
     Ok(())
 }
 
 /// Remove o mapeamento de uma página de 4 KiB.
-pub fn desmapear(virtual_: u64) -> Result<(), &'static str> {
-    let (i1, i2, i3) = indices(virtual_);
-
-    // SAFETY: núcleo único e chamadas serializadas pelo chamador.
-    let l1 = unsafe { &mut *L1.0.get() };
-
-    // SAFETY: percorremos sem criar nada; paramos ao primeiro nível ausente.
-    unsafe {
-        let e1 = l1.entradas[i1];
-        if e1 & VALIDO == 0 || e1 & TABELA == 0 {
-            return Err("endereco nao mapeado em granularidade de pagina");
-        }
-        let l2 = (e1 & MASCARA_ENDERECO) as *mut u64;
-
-        let e2 = *l2.add(i2);
-        if e2 & VALIDO == 0 || e2 & TABELA == 0 {
-            return Err("endereco nao mapeado em granularidade de pagina");
-        }
-        let l3 = (e2 & MASCARA_ENDERECO) as *mut u64;
-
-        let alvo = l3.add(i3);
-        if *alvo & VALIDO == 0 {
-            return Err("endereco nao estava mapeado");
-        }
-        *alvo = 0;
-
-        invalidar(virtual_);
+pub fn desmapear(virtual_: u64) -> Result<u64, &'static str> {
+    if !ATIVA.load(Ordering::Acquire) {
+        return Err("mmu ainda nao inicializada");
+    }
+    if !virtual_.is_multiple_of(TAMANHO_PAGINA) {
+        return Err("endereco virtual desalinhado");
+    }
+    if virtual_ >= LIMITE_VIRTUAL {
+        return Err("endereco virtual fora do espaco configurado");
     }
 
-    Ok(())
+    crate::arch::sem_interrupcoes(|| {
+        let _guarda = TRAVA.lock();
+        let (i1, i2, i3) = indices(virtual_);
+
+        // SAFETY: a trava garante acesso exclusivo à tabela.
+        let l1 = unsafe { &mut *L1.0.get() };
+
+        // SAFETY: percorremos sem criar nada; paramos ao primeiro nível
+        // ausente.
+        unsafe {
+            let e1 = l1.entradas[i1];
+            if e1 & VALIDO == 0 || e1 & TABELA == 0 {
+                return Err("endereco nao mapeado em granularidade de pagina");
+            }
+            let l2 = (e1 & MASCARA_ENDERECO) as *mut u64;
+
+            let e2 = *l2.add(i2);
+            if e2 & VALIDO == 0 || e2 & TABELA == 0 {
+                return Err("endereco nao mapeado em granularidade de pagina");
+            }
+            let l3 = (e2 & MASCARA_ENDERECO) as *mut u64;
+
+            let alvo = l3.add(i3);
+            let descritor = *alvo;
+            if descritor & VALIDO == 0 {
+                return Err("endereco nao estava mapeado");
+            }
+            *alvo = 0;
+
+            invalidar(virtual_);
+
+            // Devolver o frame permite ao chamador liberá-lo. Sem isto, quem
+            // desmapeia não tem como saber qual memória física ficou órfã.
+            Ok(descritor & MASCARA_ENDERECO)
+        }
+    })
 }
 
 /// Resolve um endereço virtual para físico, se houver tradução.
 pub fn traduzir(virtual_: u64) -> Option<u64> {
+    // Sem esta checagem, o cálculo de índices mascara os bits altos e um
+    // endereço fora do espaço configurado "dobra" para dentro dele — a função
+    // devolveria uma tradução plausível para um endereço que não existe. Falso
+    // positivo é pior que nenhuma resposta.
+    if virtual_ >= LIMITE_VIRTUAL {
+        return None;
+    }
+
     let (i1, i2, i3) = indices(virtual_);
 
     // SAFETY: leitura das tabelas, sem modificá-las.

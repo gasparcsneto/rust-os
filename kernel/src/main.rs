@@ -47,6 +47,7 @@ mod frames;
 mod irq;
 mod log;
 mod machine;
+mod paginacao;
 mod qemu;
 mod serial;
 mod tempo;

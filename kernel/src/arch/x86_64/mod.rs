@@ -135,7 +135,7 @@ pub fn init_paginacao() {
     unsafe { paginacao::init(deslocamento) };
 }
 
-pub use paginacao::{acesso_fisico, desmapear, mapear, traduzir};
+pub use paginacao::{acesso_fisico, desmapear, mapear_frame, traduzir};
 
 /// Informa faixas de memória física que o alocador de frames não pode
 /// entregar.
