@@ -1,0 +1,10 @@
+# Workspace do *host*. Contém apenas as ferramentas que rodam na sua máquina.
+#
+# O `kernel` é deliberadamente excluído: ele compila para `x86_64-unknown-none`
+# (bare-metal, sem sistema operacional por baixo), enquanto o `xtask` compila
+# para o host. Um único workspace não consegue ter dois targets padrão, então
+# separamos os dois — o `xtask` invoca o build do kernel explicitamente.
+[workspace]
+resolver = "3"
+members = ["xtask"]
+exclude = ["kernel"]

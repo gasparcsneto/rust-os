@@ -1,0 +1,7 @@
+# Atalho para o nosso build system: `cargo xtask <comando>`.
+#
+# O padrão `xtask` substitui Makefiles e scripts shell por um binário Rust
+# comum. Vantagem: o build system é multiplataforma, tem tipos, e é compilado
+# pelo mesmo toolchain do resto do projeto.
+[alias]
+xtask = "run --quiet --package xtask --"

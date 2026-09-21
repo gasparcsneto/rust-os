@@ -1,0 +1,12 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Build system do projeto: compila o kernel, gera as imagens de disco e roda o QEMU"
+
+[dependencies]
+# Monta as imagens bootáveis. Este crate contém o bootloader em si (estágios
+# BIOS e a aplicação UEFI) e sabe empacotar o ELF do kernel junto com eles
+# num disco FAT inicializável.
+bootloader = "0.11.17"

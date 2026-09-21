@@ -1,0 +1,39 @@
+[package]
+name = "kernel"
+version = "0.1.0"
+edition = "2024"
+description = "Kernel agent-native em Rust para x86_64"
+license = "MIT OR Apache-2.0"
+
+# O kernel é seu próprio workspace (ver comentário no Cargo.toml da raiz):
+# ele compila para bare-metal, o `xtask` compila para o host.
+[workspace]
+
+[dependencies]
+# Define o contrato com o bootloader: a assinatura do entry point e a struct
+# `BootInfo` (mapa de memória, framebuffer, offset da memória física).
+bootloader_api = "0.11.17"
+
+# Abstrações seguras sobre instruções e estruturas do x86_64: tabelas de
+# páginas, GDT, IDT, portas de I/O. Evita escrever assembly inline à mão.
+x86_64 = "0.15.5"
+
+# Driver da UART 16550 — nossa porta serial. É o primeiro dispositivo de saída
+# que temos: funciona antes de qualquer inicialização gráfica e o QEMU a
+# redireciona para stdout. Também é o transporte do canal de agente.
+uart_16550 = "0.8.1"
+
+# Primitivas de sincronização baseadas em spinlock. Num kernel não existe
+# scheduler para bloquear uma thread, então `std::sync::Mutex` não se aplica.
+spin = "0.12.3"
+
+[profile.dev]
+# Overflow checks custam caro em paths de interrupção, mas em debug queremos
+# capturar bugs de aritmética cedo.
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+# Símbolos preservados: sem eles não conseguimos resolver stack traces do
+# kernel, e um kernel sem stack trace é um kernel impossível de depurar.
+debug = true

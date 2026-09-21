@@ -1,0 +1,13 @@
+# O kernel depende de recursos que só existem no Rust nightly, principalmente:
+#   - `abi_x86_interrupt`: a ABI de chamada que o processador usa ao invocar
+#     um handler de interrupção (difere da ABI normal: o retorno é `iretq`).
+#   - `custom_test_frameworks`: nossa suíte de testes roda *dentro* do kernel,
+#     no QEMU, então não podemos usar o `libtest` padrão (que depende de `std`).
+#
+# `targets` garante que o alvo bare-metal seja instalado automaticamente por
+# quem clonar o repositório — sem passo manual de `rustup target add`.
+[toolchain]
+channel = "nightly"
+components = ["rust-src", "llvm-tools", "rustfmt", "clippy"]
+targets = ["x86_64-unknown-none"]
+profile = "minimal"
