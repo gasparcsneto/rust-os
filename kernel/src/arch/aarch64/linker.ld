@@ -37,24 +37,35 @@ SECTIONS
         /* A pilha mora dentro do .bss de propósito: assim ela é contabilizada
          * no layout, zerada junto com o resto e não corre o risco de colidir
          * com dados do kernel. */
-        . = ALIGN(16);
-        /* Canário: uma palavra logo abaixo da pilha, com valor conhecido.
+        /* Guard page: uma página deixada DESMAPEADA logo abaixo da pilha.
          *
-         * No x86 o bootloader instala uma guard page de verdade — uma página
-         * desmapeada que faz o estouro virar falha na hora. Aqui a pilha mora
-         * dentro de um bloco de identidade de 1 GiB, e desmapear 4 KiB de
-         * dentro dele exigiria fatiar o bloco, o que o mapeador recusa de
-         * propósito.
+         * É o mesmo mecanismo que o bootloader instala no x86. Um estouro de
+         * pilha atinge esta página, o acesso falha na tradução e vira uma
+         * exceção no exato instante em que acontece — em vez de sobrescrever
+         * em silêncio os `static` do kernel (o anel de log, o estado do
+         * alocador).
          *
-         * O canário não detecta o estouro no instante em que acontece, mas
-         * detecta que aconteceu — e sem ele um estouro corromperia os `static`
-         * do kernel (o anel de log, o estado do alocador) em silêncio
-         * absoluto. */
-        __stack_canary = .;
-        . += 16;
+         * Precisa de alinhamento de página porque a granularidade mínima da
+         * tradução é 4 KiB. */
+        . = ALIGN(4096);
+        __guard_page = .;
+        . += 0x1000;
+
         __stack_bottom = .;
         . += 0x20000;          /* 128 KiB */
         __stack_top = .;
+
+        /* Pilha de exceção, separada da pilha do kernel.
+         *
+         * Sem ela, o estouro seria detectado e imediatamente inútil: o handler
+         * tentaria empilhar o contexto na mesma pilha estourada e faltaria de
+         * novo, em laço. É o análogo da Interrupt Stack Table do x86, e no ARM
+         * o hardware faz a troca sozinho — ver o comentário sobre SPSel no
+         * código de boot. */
+        . = ALIGN(4096);
+        __exc_stack_bottom = .;
+        . += 0x8000;           /* 32 KiB */
+        __exc_stack_top = .;
 
         . = ALIGN(16);
         __bss_end = .;

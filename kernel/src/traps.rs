@@ -68,6 +68,22 @@ static ESTADO: Mutex<Estado> = Mutex::new(Estado {
     total: 0,
 });
 
+/// Uma falha que o código em execução espera provocar de propósito.
+///
+/// Existe para um único caso, e um caso que não teria outra forma de ser
+/// testado: verificar que um estouro de pilha realmente é detectado. Não há
+/// como retornar de um double fault nem de um abort na guard page — a pilha
+/// que permitiria voltar é justamente a que estourou. Então, em vez de
+/// retomar, o handler reconhece que esta era a falha esperada e encerra o
+/// emulador com sucesso.
+static ESPERADA: Mutex<Option<&'static str>> = Mutex::new(None);
+
+/// Declara que a próxima falha fatal com este nome é esperada.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub fn esperar(nome: &'static str) {
+    *ESPERADA.lock() = Some(nome);
+}
+
 /// Contabiliza uma falha e devolve seu número de sequência.
 pub fn registrar(nome: &'static str, pc: u64, endereco: Option<u64>, codigo: u64) -> u64 {
     let mut estado = ESTADO.lock();
@@ -142,8 +158,18 @@ pub fn fatal(nome: &'static str, pc: u64, endereco: Option<u64>, codigo: u64) ->
     // SAFETY: não há outro núcleo rodando, e a alternativa é o deadlock.
     unsafe {
         ESTADO.force_unlock();
+        ESPERADA.force_unlock();
         crate::log::destravar();
         crate::serial::destravar();
+    }
+
+    // Se esta falha era a esperada, ela é o resultado de um teste e não um
+    // acidente. Conferimos antes de qualquer registro para que a saída
+    // complete a linha que o executor deixou pela metade.
+    #[cfg(feature = "modo-teste")]
+    if *ESPERADA.lock() == Some(nome) {
+        crate::serial_println!("ok");
+        crate::qemu::encerrar(crate::qemu::Resultado::Sucesso)
     }
 
     let seq = registrar(nome, pc, endereco, codigo);

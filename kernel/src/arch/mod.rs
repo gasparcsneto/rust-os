@@ -53,8 +53,8 @@ pub use aarch64 as atual;
 #[allow(unused_imports)]
 pub use atual::{
     Uart, acesso_fisico, desmapear, disparar_breakpoint, encerrar_emulador, esperar_interrupcao,
-    halt_forever, identificar_cpu, init_excecoes, init_interrupcoes, init_paginacao, init_seriais,
-    mapear_frame, nome, pilha_intacta, reservar_faixas, sem_interrupcoes, traduzir,
+    falha_de_estouro_de_pilha, halt_forever, identificar_cpu, init_excecoes, init_interrupcoes,
+    init_paginacao, init_seriais, mapear_frame, nome, reservar_faixas, sem_interrupcoes, traduzir,
 };
 
 /// Tamanho de uma página nas duas arquiteturas.

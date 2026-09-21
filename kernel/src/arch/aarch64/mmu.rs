@@ -155,6 +155,7 @@ pub unsafe fn init() {
     // mapa em vez de fixar 0x4000_0000 no código: o endereço da RAM é uma
     // característica da placa, não do ARM.
     let mut blocos_de_ram = 0;
+    let mut guard_page: Option<u64> = None;
     crate::machine::com_regioes(|regiao| {
         if regiao.tipo != crate::machine::TipoRegiao::Utilizavel {
             return;
@@ -179,6 +180,25 @@ pub unsafe fn init() {
         }
     });
 
+    // A guard page exige granularidade de 4 KiB numa região que os blocos de
+    // 1 GiB cobrem inteira. Refinamos a árvore aqui, **antes** de ligar a MMU.
+    //
+    // O momento não é detalhe. A arquitetura exige *break-before-make* ao
+    // trocar o tamanho de um mapeamento: é preciso invalidar a tradução,
+    // limpar a TLB e só então escrever a nova, porque duas entradas de TLB
+    // traduzindo o mesmo endereço têm comportamento imprevisível. Fazer isso
+    // com a MMU ligada, na região de onde estamos executando, significaria
+    // ficar sem tradução no meio do caminho — suicídio.
+    //
+    // Com a MMU desligada não há nada na TLB, e o `tlbi` que já fazemos antes
+    // de ligar cobre o resto. O problema desaparece por construção.
+    // SAFETY: a MMU ainda está desligada neste ponto, que é exatamente a
+    // pré-condição da função.
+    match unsafe { instalar_guard_page(l1) } {
+        Ok(endereco) => guard_page = Some(endereco),
+        Err(motivo) => crate::log_warn!("mmu", "sem guard page: {}", motivo),
+    }
+
     let raiz = core::ptr::addr_of!(l1.entradas) as u64;
 
     // SAFETY: a tabela está montada e cobre identicamente o código, a pilha e
@@ -192,6 +212,99 @@ pub unsafe fn init() {
         "identidade ativa: 1 bloco de dispositivo, {} de RAM",
         blocos_de_ram
     );
+    match guard_page {
+        Some(endereco) => crate::log_info!("mmu", "guard page da pilha em {:#x}", endereco),
+        None => crate::log_warn!("mmu", "pilha do kernel sem guard page"),
+    }
+}
+
+/// Deixa desmapeada a página logo abaixo da pilha do kernel.
+///
+/// Devolve o endereço protegido.
+///
+/// # Safety
+///
+/// Só pode ser chamada com a MMU desligada, antes de qualquer tradução ser
+/// cacheada — ver o comentário sobre break-before-make em [`init`].
+unsafe fn instalar_guard_page(l1: &mut Tabela) -> Result<u64, &'static str> {
+    // SAFETY: símbolo do linker script; só tomamos seu endereço.
+    unsafe extern "C" {
+        static __guard_page: u8;
+    }
+    let endereco = &raw const __guard_page as u64;
+
+    let i1 = ((endereco >> 30) & 0x1FF) as usize;
+    let i2 = ((endereco >> 21) & 0x1FF) as usize;
+    let i3 = ((endereco >> 12) & 0x1FF) as usize;
+
+    // SAFETY: refinamos descritores válidos que nós mesmos acabamos de montar.
+    unsafe {
+        // 1 GiB -> 512 blocos de 2 MiB.
+        let l2 = refinar(&raw mut l1.entradas[i1], (i1 as u64) << 30, 21, false)?;
+        // 2 MiB -> 512 páginas de 4 KiB.
+        let base_l2 = ((i1 as u64) << 30) | ((i2 as u64) << 21);
+        let l3 = refinar(l2.add(i2), base_l2, 12, true)?;
+
+        // E então o buraco: a única entrada que fica inválida.
+        *l3.add(i3) = 0;
+    }
+
+    Ok(endereco)
+}
+
+/// Troca um bloco por uma tabela de entradas menores cobrindo exatamente o
+/// mesmo intervalo, com os mesmos atributos.
+///
+/// `bits` é quantos bits de endereço cada entrada nova cobre (21 para blocos
+/// de 2 MiB, 12 para páginas de 4 KiB) e `folha` distingue o nível 3, onde uma
+/// página usa VÁLIDO *com* o bit de tabela.
+///
+/// # Safety
+///
+/// `entrada` precisa apontar para um descritor de bloco válido, e a MMU
+/// precisa estar desligada.
+unsafe fn refinar(
+    entrada: *mut u64,
+    base: u64,
+    bits: u32,
+    folha: bool,
+) -> Result<*mut u64, &'static str> {
+    // SAFETY: o chamador garantiu que aponta para um descritor.
+    let descritor = unsafe { *entrada };
+
+    if descritor & VALIDO == 0 {
+        return Err("descritor ausente onde se esperava um bloco");
+    }
+    if descritor & TABELA != 0 {
+        return Err("descritor ja e uma tabela");
+    }
+
+    // Preservar os atributos é o que mantém o refinamento invisível: o mesmo
+    // intervalo continua com o mesmo tipo de memória, as mesmas permissões e
+    // a mesma flag de acesso.
+    let atributos = descritor & !(MASCARA_ENDERECO | VALIDO | TABELA);
+
+    let nova = crate::frames::alocar().ok_or("sem frames para refinar o mapeamento")?;
+    // SAFETY: frame recém-alocado, nosso, e com a MMU desligada seu endereço
+    // físico é o próprio endereço de acesso.
+    unsafe { core::ptr::write_bytes(nova as *mut u8, 0, 4096) };
+    let nova = nova as *mut u64;
+
+    let passo = 1u64 << bits;
+    for indice in 0..ENTRADAS {
+        let alvo = base + indice as u64 * passo;
+        let mut novo = (alvo & MASCARA_ENDERECO) | VALIDO | atributos;
+        if folha {
+            novo |= TABELA;
+        }
+        // SAFETY: `nova` é uma tabela de 512 entradas e `indice` cabe nela.
+        unsafe { *nova.add(indice) = novo };
+    }
+
+    // SAFETY: instalamos o descritor de tabela no lugar do bloco.
+    unsafe { *entrada = (nova as u64 & MASCARA_ENDERECO) | VALIDO | TABELA };
+
+    Ok(nova)
 }
 
 /// Monta um descritor de bloco de 1 GiB no nível 1.
@@ -456,6 +569,29 @@ pub fn desmapear(virtual_: u64) -> Result<u64, &'static str> {
 
             invalidar(virtual_);
 
+            // Recupera as tabelas que esta remoção esvaziou. Sem isso, cada
+            // região de 2 MiB já usada custaria um frame permanente.
+            //
+            // As tabelas do mapa de identidade nunca são atingidas: a L3 que
+            // contém a guard page tem 511 entradas válidas, então jamais
+            // aparece vazia.
+            if tabela_vazia(l3) {
+                *l2.add(i2) = 0;
+                crate::frames::liberar(l3 as u64);
+
+                if tabela_vazia(l2) {
+                    l1.entradas[i1] = 0;
+                    crate::frames::liberar(l2 as u64);
+                }
+
+                // Invalidação ampla, e não do endereço: o percorredor de
+                // tabelas mantém caches dos *níveis intermediários*, e um
+                // `tlbi` por endereço não os alcança. Liberar um frame cuja
+                // tradução ainda esteja em cache é corrupção garantida assim
+                // que ele for reaproveitado.
+                invalidar_tudo();
+            }
+
             // Devolver o frame permite ao chamador liberá-lo. Sem isto, quem
             // desmapeia não tem como saber qual memória física ficou órfã.
             Ok(descritor & MASCARA_ENDERECO)
@@ -504,6 +640,32 @@ pub fn traduzir(virtual_: u64) -> Option<u64> {
             return None;
         }
         Some((e3 & MASCARA_ENDERECO) | (virtual_ & 0xFFF))
+    }
+}
+
+/// Todas as 512 entradas desta tabela estão inválidas?
+///
+/// # Safety
+/// `tabela` precisa apontar para uma tabela de tradução de 512 entradas.
+unsafe fn tabela_vazia(tabela: *const u64) -> bool {
+    // SAFETY: percorremos exatamente as 512 entradas que a tabela tem.
+    (0..ENTRADAS).all(|indice| unsafe { *tabela.add(indice) } == 0)
+}
+
+/// Invalida a TLB inteira, incluindo os caches de níveis intermediários.
+///
+/// # Safety
+/// Deve ser chamada logo após descartar uma tabela de tradução.
+unsafe fn invalidar_tudo() {
+    // SAFETY: manutenção de TLB, sempre válida a partir de EL1.
+    unsafe {
+        asm!(
+            "dsb ishst",
+            "tlbi vmalle1is",
+            "dsb ish",
+            "isb",
+            options(nostack),
+        );
     }
 }
 

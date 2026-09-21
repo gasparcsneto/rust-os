@@ -1041,22 +1041,74 @@ fn heap_estatisticas_coerentes() -> Resultado {
     Ok(())
 }
 
-/// A pilha do kernel não pode ter transbordado.
+/// Mapear e desmapear não pode custar memória permanente.
 ///
-/// No x86 quem garante isso é o hardware: o bootloader instala uma guard page
-/// abaixo da pilha, e um estouro vira falha de página no ato — com a pilha de
-/// emergência da IST transformando o que seria um triple fault num relatório.
-///
-/// No ARM a pilha mora dentro de um bloco de identidade de 1 GiB e não há
-/// guard page, então a detecção é por canário e *a posteriori*. Menos bom, mas
-/// infinitamente melhor que corromper o anel de log e o estado do alocador em
-/// silêncio.
-fn pilha_nao_transbordou() -> Resultado {
-    if crate::arch::pilha_intacta() {
-        Ok(())
-    } else {
-        Err("canario da pilha foi sobrescrito: houve estouro")
+/// Criar um mapeamento novo numa região virgem cria também as tabelas
+/// intermediárias que levam até ele. Se elas não forem devolvidas quando
+/// ficam vazias, cada região já visitada custa frames para sempre — um
+/// vazamento que cresce com o uso e só aparece muito depois.
+fn paginacao_nao_vaza_tabelas() -> Resultado {
+    let virtual_ = endereco_virtual_livre().ok_or("nenhum endereco virtual livre")?;
+
+    let (antes, _) = crate::frames::estatisticas();
+
+    crate::paginacao::mapear_novo(virtual_, crate::arch::Permissoes::DADOS)
+        .map_err(|_| "mapeamento recusado")?;
+    crate::paginacao::desmapear_e_liberar(virtual_).map_err(|_| "desmapeamento falhou")?;
+
+    let (depois, _) = crate::frames::estatisticas();
+
+    if depois != antes {
+        crate::log_error!(
+            "teste",
+            "frames livres {} -> {} ({} nao voltaram)",
+            antes,
+            depois,
+            antes - depois
+        );
+        return Err("tabelas intermediarias nao foram recuperadas");
     }
+    Ok(())
+}
+
+// ===========================================================================
+// Estouro de pilha
+// ===========================================================================
+
+/// Recursão que consome pilha até estourá-la.
+///
+/// Os dois cuidados aqui existem para impedir o compilador de nos sabotar. A
+/// leitura volátil força a variável local a ocupar um lugar na pilha em vez de
+/// viver num registrador, e o uso do valor *depois* da chamada impede que a
+/// recursão de cauda vire um laço — que rodaria para sempre sem consumir pilha
+/// nenhuma, e o teste esperaria pela eternidade por um estouro que nunca viria.
+#[allow(unconditional_recursion)]
+fn consumir_pilha(profundidade: u64) -> u64 {
+    let marca = profundidade;
+    // SAFETY: leitura de uma variável local viva, apenas para forçá-la à pilha.
+    let eco = unsafe { core::ptr::read_volatile(&marca) };
+    consumir_pilha(eco + 1) + eco
+}
+
+/// O caso final: prova que um estouro de pilha é detectado.
+///
+/// Precisa ser o último, e por um motivo estrutural: não há como voltar dele.
+/// A pilha que permitiria retornar é justamente a que estourou. O desfecho de
+/// sucesso acontece *dentro* do handler de falha, que reconhece a falha
+/// esperada e encerra o emulador — ver [`crate::traps::esperar`].
+///
+/// É também o único caso que testa as três peças de uma vez: a guard page
+/// existe, a falha é entregue, e o handler tem uma pilha intacta para rodar.
+/// Sem a terceira, o próprio handler faltaria ao empilhar o contexto.
+fn estouro_de_pilha_e_detectado() -> ! {
+    crate::serial_print!("  {:<42} ", "pilha: estouro e detectado");
+
+    crate::traps::esperar(crate::arch::falha_de_estouro_de_pilha());
+    let _ = consumir_pilha(0);
+
+    // Inalcançável se a guard page funcionar.
+    crate::serial_println!("FALHOU -- a recursao terminou sem estourar a pilha");
+    crate::qemu::encerrar(crate::qemu::Resultado::Falha)
 }
 
 // ===========================================================================
@@ -1217,6 +1269,10 @@ static CASOS: &[Caso] = &[
         f: paginacao_recusa_desalinhado,
     },
     Caso {
+        nome: "paginacao: nao vaza tabelas",
+        f: paginacao_nao_vaza_tabelas,
+    },
+    Caso {
         nome: "heap: box aloca e libera",
         f: heap_box_aloca_e_libera,
     },
@@ -1247,10 +1303,6 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "heap: estatisticas coerentes",
         f: heap_estatisticas_coerentes,
-    },
-    Caso {
-        nome: "pilha: sem estouro",
-        f: pilha_nao_transbordou,
     },
 ];
 
@@ -1284,12 +1336,14 @@ pub fn executar_todos() -> ! {
 
     crate::serial_println!("-----------------------------------------------------");
     crate::serial_println!("  {} de {} passaram", CASOS.len() - falhas, CASOS.len());
-    crate::serial_println!("=====================================================");
-    crate::serial_println!();
 
-    crate::qemu::encerrar(if falhas == 0 {
-        crate::qemu::Resultado::Sucesso
-    } else {
-        crate::qemu::Resultado::Falha
-    })
+    if falhas > 0 {
+        crate::serial_println!("=====================================================");
+        crate::serial_println!();
+        crate::qemu::encerrar(crate::qemu::Resultado::Falha);
+    }
+
+    // O caso final fica fora da tabela porque não devolve o controle: ele
+    // encerra o emulador de dentro do handler de falha.
+    estouro_de_pilha_e_detectado()
 }

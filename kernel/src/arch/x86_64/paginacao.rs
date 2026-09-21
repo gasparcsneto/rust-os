@@ -30,10 +30,11 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use spin::Mutex;
+use x86_64::structures::paging::mapper::CleanUp;
 use x86_64::structures::paging::mapper::{MapToError, TranslateResult, UnmapError};
 use x86_64::structures::paging::{
-    FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB,
-    Translate,
+    FrameAllocator, FrameDeallocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags,
+    PhysFrame, Size4KiB, Translate,
 };
 use x86_64::{PhysAddr, VirtAddr};
 
@@ -132,6 +133,14 @@ unsafe impl FrameAllocator<Size4KiB> for AlocadorDeFrames {
     }
 }
 
+// SAFETY: devolvemos ao alocador apenas frames que saíram dele e cujo último
+// dono era a tabela de página que acabou de ser descartada.
+impl FrameDeallocator<Size4KiB> for AlocadorDeFrames {
+    unsafe fn deallocate_frame(&mut self, frame: PhysFrame<Size4KiB>) {
+        crate::frames::liberar(frame.start_address().as_u64());
+    }
+}
+
 fn flags_de(permissoes: Permissoes) -> PageTableFlags {
     let mut flags = PageTableFlags::PRESENT;
     if permissoes.escrita {
@@ -214,11 +223,8 @@ pub unsafe fn mapear_frame(
 /// Remove o mapeamento de uma página de 4 KiB e devolve o frame que estava
 /// ali.
 ///
-/// Nota conhecida: as tabelas intermediárias que ficam vazias **não** são
-/// recuperadas, aqui nem no ARM. É um vazamento limitado — um frame por
-/// região de 2 MiB que já foi usada — e recuperá-las exige contar entradas
-/// vivas por tabela, com invalidação de TLB mais ampla. Fica registrado em
-/// vez de meio resolvido.
+/// As tabelas intermediárias que ficarem vazias são devolvidas ao alocador.
+/// Sem isso, cada região de 2 MiB já usada custaria um frame permanente.
 pub fn desmapear(virtual_: u64) -> Result<u64, &'static str> {
     if !virtual_.is_multiple_of(TAMANHO_PAGINA) {
         return Err("endereco virtual desalinhado");
@@ -237,6 +243,25 @@ pub fn desmapear(virtual_: u64) -> Result<u64, &'static str> {
         match mapeador.unmap(pagina) {
             Ok((frame, flush)) => {
                 flush.flush();
+
+                // Recupera as tabelas que esta remoção possa ter esvaziado.
+                //
+                // A faixa é limitada à página que acabou de sair: o percurso
+                // sobe conferindo cada nível e só descarta o que ficou
+                // realmente vazio, então restringir mantém o custo baixo sem
+                // deixar nada para trás.
+                //
+                // SAFETY: as tabelas desta hierarquia foram todas criadas por
+                // `map_to` com o nosso alocador, nunca são compartilhadas
+                // entre faixas e não têm contagem de referência — que é
+                // exatamente o que o contrato de `clean_up_addr_range` exige.
+                unsafe {
+                    mapeador.clean_up_addr_range(
+                        Page::range_inclusive(pagina, pagina),
+                        &mut AlocadorDeFrames,
+                    );
+                }
+
                 // Devolver o frame permite ao chamador liberá-lo. Sem isto,
                 // quem desmapeia não tem como saber qual memória física ficou
                 // órfã.

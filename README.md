@@ -97,7 +97,7 @@ Os dois podem rodar ao mesmo tempo: cada arquitetura tem seu próprio socket.
 |---|---|
 | `agent.ping` | Verifica se o canal está vivo |
 | `agent.describe` | Lista todos os comandos e parâmetros |
-| `system.info` | Kernel, CPU, vídeo, uptime e integridade da pilha |
+| `system.info` | Kernel, CPU, vídeo, uptime e mecanismo de guarda da pilha |
 | `system.uptime` | Ticks do timer e milissegundos desde o boot |
 | `memory.stats` | Totais agregados de memória física |
 | `memory.regions` | Regiões do mapa de memória (`limit`, `usable_only`) |
@@ -170,6 +170,8 @@ O contraste no caminho de boot é grande:
 | Mapa de memória | struct `BootInfo` pronta | device tree, parseado por nós |
 | Seriais | duas UARTs 16550 (port I/O) | uma PL011 (MMIO) |
 | Exceções | IDT de ponteiros, contexto salvo pela CPU | vetores de código, contexto salvo à mão |
+| Pilha de exceção | IST, índice no TSS | `SP_EL1`, trocado por hardware |
+| Guard page da pilha | instalada pelo bootloader | construída antes de ligar a MMU |
 | Interrupções | PIC 8259 + timer PIT | GIC v2 + timer genérico |
 | MMU | já ligada pelo bootloader | desligada; nós a acendemos |
 | Acesso à memória física | mapeada num deslocamento | identidade |
