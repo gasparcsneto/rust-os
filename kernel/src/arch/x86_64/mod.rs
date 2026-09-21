@@ -195,6 +195,34 @@ pub fn init_interrupcoes() {
     crate::log_info!("irq", "PIC remapeado, timer a {} Hz", efetiva);
 }
 
+/// Faz a serial do agente interromper quando chegar um byte.
+///
+/// Fica separada de [`init_interrupcoes`] porque a ordem importa: só faz
+/// sentido liberar a linha depois que existe quem consuma os bytes. Entre
+/// ligar a interrupção e a tarefa começar a rodar, os bytes já vão para a
+/// fila — que é justamente o que queremos.
+pub fn init_interrupcao_serial() {
+    crate::arch::sem_interrupcoes(|| {
+        let mut guarda = crate::serial::AGENT_LINK.lock();
+        let Some(porta) = guarda.as_mut() else {
+            return;
+        };
+        porta.habilitar_interrupcao_recepcao();
+    });
+
+    crate::irq::nomear(pic::IRQ_SERIAL_AGENTE as usize, "serial-agente");
+
+    // SAFETY: o handler do vetor correspondente foi instalado por
+    // `init_excecoes`, e a porta acabou de ser configurada.
+    unsafe { pic::desmascarar(pic::IRQ_SERIAL_AGENTE) };
+
+    crate::log_info!(
+        "irq",
+        "COM2 interrompendo na IRQ {}",
+        pic::IRQ_SERIAL_AGENTE
+    );
+}
+
 /// Espera pela próxima interrupção, em baixo consumo.
 ///
 /// Devolve o controle imediatamente se as interrupções estiverem
@@ -204,6 +232,46 @@ pub fn esperar_interrupcao() {
     if x86_64::instructions::interrupts::are_enabled() {
         x86_64::instructions::hlt();
     } else {
+        core::hint::spin_loop();
+    }
+}
+
+/// Dorme até a próxima interrupção, mas só se `ocioso` confirmar que não há
+/// trabalho — e sem deixar fresta entre as duas coisas.
+///
+/// # A corrida que esta função existe para fechar
+///
+/// O ingênuo seria `if ocioso() { hlt() }`. Uma interrupção caindo *entre* a
+/// checagem e o `hlt` deixaria trabalho enfileirado e a CPU dormindo: o
+/// sistema só acordaria no próximo evento, que pode demorar — ou não vir.
+///
+/// A saída é desligar as interrupções antes de checar e reabilitá-las
+/// *junto* com o `hlt`. O x86 garante que uma interrupção pendente após um
+/// `sti` só é entregue depois da instrução seguinte, e é exatamente por isso
+/// que o par `sti; hlt` nessa ordem é atômico para este fim. Qualquer
+/// interrupção que tenha chegado durante a checagem fica retida e é entregue
+/// já com a CPU dormindo, que a acorda na hora.
+pub fn dormir_se_ocioso(ocioso: impl FnOnce() -> bool) {
+    use x86_64::instructions::interrupts;
+
+    // Um chamador pode nos invocar de dentro de uma seção crítica. Restaurar
+    // o estado anterior, em vez de ligar incondicionalmente, é o que impede
+    // que a seção dele termine mais cedo do que ele pediu.
+    let estavam_ligadas = interrupts::are_enabled();
+    interrupts::disable();
+
+    if !ocioso() {
+        if estavam_ligadas {
+            interrupts::enable();
+        }
+        return;
+    }
+
+    if estavam_ligadas {
+        interrupts::enable_and_hlt();
+    } else {
+        // Dormir com as interrupções mascaradas pararia o núcleo para sempre:
+        // nada poderia acordá-lo. Girar é desperdício, mas é recuperável.
         core::hint::spin_loop();
     }
 }

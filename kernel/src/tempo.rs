@@ -39,6 +39,11 @@ pub fn registrar_frequencia(hz: u32) {
 /// garantia nenhuma que importe.
 pub fn tick() {
     TICKS.fetch_add(1, Ordering::Relaxed);
+
+    // Acorda quem pediu para ser avisado quando o tempo passasse. Fica aqui,
+    // e não nos handlers de cada arquitetura, porque a contagem do tempo já é
+    // o ponto neutro por onde as duas passam.
+    crate::tarefas::relogio::tique();
 }
 
 /// Quantas interrupções de timer ocorreram desde o boot.

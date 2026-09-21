@@ -34,6 +34,13 @@ pub const OFFSET_ESCRAVO: u8 = OFFSET_MESTRE + 8;
 pub const VETOR_TIMER: u8 = OFFSET_MESTRE;
 /// Vetor da interrupção do teclado (IRQ 1).
 pub const VETOR_TECLADO: u8 = OFFSET_MESTRE + 1;
+/// Vetor da interrupção da COM2 (IRQ 3), onde vive o canal do agente.
+///
+/// No barramento ISA, COM1 e COM3 compartilham a IRQ 4 e COM2 e COM4
+/// compartilham a IRQ 3. Como só usamos COM1 e COM2, cada uma fica com a sua.
+pub const VETOR_SERIAL_AGENTE: u8 = OFFSET_MESTRE + 3;
+/// Número da linha da COM2 no PIC mestre.
+pub const IRQ_SERIAL_AGENTE: u8 = 3;
 
 const CMD_MESTRE: u16 = 0x20;
 const DADOS_MESTRE: u16 = 0x21;
@@ -109,9 +116,35 @@ pub unsafe fn init() {
         // passar apenas IRQ 0 (timer) e IRQ 1 (teclado); tudo que ainda não
         // sabemos tratar fica bloqueado, porque uma interrupção sem handler
         // adequado é pior que interrupção nenhuma.
+        //
+        // A IRQ 3 (COM2) continua bloqueada aqui de propósito: ela só é
+        // liberada por `desmascarar` quando o canal do agente estiver
+        // realmente pronto para consumir bytes.
         dados_mestre.write(0b1111_1100);
         espera_io();
         dados_escravo.write(0b1111_1111);
+    }
+}
+
+/// Libera uma linha do PIC mestre.
+///
+/// Desmascarar é uma operação de leitura-modificação-escrita sobre a máscara
+/// inteira: ler o valor atual antes de mexer é o que impede que habilitar uma
+/// linha reabilite silenciosamente todas as outras.
+///
+/// # Safety
+///
+/// Só pode ser chamada quando já existe um handler instalado para o vetor
+/// correspondente.
+pub unsafe fn desmascarar(linha: u8) {
+    debug_assert!(linha < 8, "apenas o PIC mestre é tratado aqui");
+
+    // SAFETY: porta de dados do PIC mestre; o chamador garantiu que há
+    // handler para a linha.
+    unsafe {
+        let mut dados_mestre = Port::<u8>::new(DADOS_MESTRE);
+        let atual: u8 = dados_mestre.read();
+        dados_mestre.write(atual & !(1 << linha));
     }
 }
 

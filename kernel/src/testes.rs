@@ -1136,6 +1136,313 @@ fn estouro_de_pilha_e_detectado() -> ! {
 // Registro e execução
 // ===========================================================================
 
+// ===========================================================================
+// Tarefas — fila, executor e wakers
+// ===========================================================================
+
+fn fila_preserva_ordem() -> Resultado {
+    let fila: crate::tarefas::fila::Fila<u8, 4> = crate::tarefas::fila::Fila::nova();
+
+    for b in [1u8, 2, 3] {
+        fila.enfileirar(b)
+            .map_err(|_| "fila recusou item com espaco")?;
+    }
+
+    for esperado in [1u8, 2, 3] {
+        match fila.desenfileirar() {
+            Some(b) if b == esperado => {}
+            Some(b) => {
+                crate::log_error!("teste", "esperado {}, veio {}", esperado, b);
+                return Err("fila entregou fora de ordem");
+            }
+            None => return Err("fila esvaziou cedo demais"),
+        }
+    }
+
+    if fila.desenfileirar().is_some() {
+        return Err("fila entregou item que nao foi enfileirado");
+    }
+    if !fila.vazia() {
+        return Err("fila diz estar cheia depois de esvaziada");
+    }
+    Ok(())
+}
+
+/// O caso que garante que o excesso vira contador, e não corrupção.
+///
+/// Uma fila que sobrescreve em silêncio quando enche é pior que uma que
+/// descarta: o cliente recebe bytes fora de ordem e a falha aparece longe da
+/// causa.
+fn fila_cheia_descarta_e_conta() -> Resultado {
+    let fila: crate::tarefas::fila::Fila<u8, 2> = crate::tarefas::fila::Fila::nova();
+
+    fila.enfileirar(10).map_err(|_| "recusou o primeiro")?;
+    fila.enfileirar(20).map_err(|_| "recusou o segundo")?;
+
+    if fila.enfileirar(30).is_ok() {
+        return Err("fila aceitou item alem da capacidade");
+    }
+    if fila.descartados() != 1 {
+        return Err("descarte nao foi contabilizado");
+    }
+
+    // O conteúdo precisa ter sobrevivido intacto ao descarte.
+    if fila.desenfileirar() != Some(10) || fila.desenfileirar() != Some(20) {
+        return Err("descarte corrompeu o conteudo da fila");
+    }
+    Ok(())
+}
+
+/// A fila é circular: depois de dar a volta, os índices precisam continuar
+/// corretos. É onde um erro de aritmética modular se esconderia.
+fn fila_da_a_volta() -> Resultado {
+    let fila: crate::tarefas::fila::Fila<u8, 3> = crate::tarefas::fila::Fila::nova();
+
+    for ciclo in 0..4u8 {
+        for i in 0..3u8 {
+            fila.enfileirar(ciclo * 10 + i)
+                .map_err(|_| "fila recusou item com espaco")?;
+        }
+        for i in 0..3u8 {
+            if fila.desenfileirar() != Some(ciclo * 10 + i) {
+                return Err("fila perdeu a ordem ao dar a volta");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn tarefa_roda_ate_o_fim() -> Resultado {
+    static CONCLUIU: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+    async fn corpo() {
+        CONCLUIU.store(true, core::sync::atomic::Ordering::SeqCst);
+    }
+
+    CONCLUIU.store(false, core::sync::atomic::Ordering::SeqCst);
+
+    let mut executor = crate::tarefas::executor::Executor::novo();
+    executor.lancar(crate::tarefas::Tarefa::nova("teste-simples", corpo()));
+    executor.rodar_ate_esvaziar(8)?;
+
+    if !CONCLUIU.load(core::sync::atomic::Ordering::SeqCst) {
+        return Err("a tarefa nao chegou a rodar");
+    }
+    if executor.vivas() != 0 {
+        return Err("tarefa concluida nao foi removida do executor");
+    }
+    Ok(())
+}
+
+/// Duas tarefas cedendo mutuamente precisam se intercalar.
+///
+/// É a evidência direta de que há concorrência de verdade: se o executor
+/// rodasse cada tarefa até o fim antes de olhar para a outra, a sequência
+/// gravada seria `aabb` em vez de `abab`.
+fn tarefas_se_intercalam() -> Resultado {
+    static SEQUENCIA: spin::Mutex<[u8; 8]> = spin::Mutex::new([0; 8]);
+    static ESCRITOS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+    fn anotar(marca: u8) {
+        let i = ESCRITOS.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        if i < 8 {
+            SEQUENCIA.lock()[i] = marca;
+        }
+    }
+
+    async fn corpo(marca: u8) {
+        for _ in 0..2 {
+            anotar(marca);
+            crate::tarefas::ceder().await;
+        }
+    }
+
+    ESCRITOS.store(0, core::sync::atomic::Ordering::SeqCst);
+    *SEQUENCIA.lock() = [0; 8];
+
+    let mut executor = crate::tarefas::executor::Executor::novo();
+    executor.lancar(crate::tarefas::Tarefa::nova("teste-a", corpo(b'a')));
+    executor.lancar(crate::tarefas::Tarefa::nova("teste-b", corpo(b'b')));
+    executor.rodar_ate_esvaziar(16)?;
+
+    let sequencia = *SEQUENCIA.lock();
+    if &sequencia[..4] != b"abab" {
+        crate::log_error!(
+            "teste",
+            "sequencia obtida: {}",
+            core::str::from_utf8(&sequencia[..4]).unwrap_or("?")
+        );
+        return Err("tarefas nao se intercalaram nos pontos de cessao");
+    }
+    Ok(())
+}
+
+/// O caso central do artigo: uma tarefa dorme esperando um evento externo, e
+/// só volta a rodar quando **alguém a acorda**.
+///
+/// A prova está em duas partes. Primeiro rodamos o executor com a fila de
+/// entrada vazia e exigimos que ele *não* consiga terminar — se conseguisse, a
+/// tarefa não estaria realmente esperando. Depois injetamos o byte e exigimos
+/// que ela termine — o que só acontece se o waker registrado tiver funcionado.
+fn waker_acorda_tarefa_bloqueada() -> Resultado {
+    static RECEBIDO: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+    async fn corpo() {
+        let byte = crate::tarefas::entrada::proximo_byte().await;
+        RECEBIDO.store(byte as u64 + 1, core::sync::atomic::Ordering::SeqCst);
+    }
+
+    // A fila é compartilhada com o hardware: qualquer resíduo faria a tarefa
+    // completar sem nunca ter esperado, e o teste passaria sem testar nada.
+    while crate::tarefas::entrada::retirar().is_some() {}
+    RECEBIDO.store(0, core::sync::atomic::Ordering::SeqCst);
+
+    let mut executor = crate::tarefas::executor::Executor::novo();
+    executor.lancar(crate::tarefas::Tarefa::nova("teste-espera", corpo()));
+
+    if executor.rodar_ate_esvaziar(2).is_ok() {
+        return Err("a tarefa terminou sem que nenhum byte tivesse chegado");
+    }
+    if executor.vivas() != 1 {
+        return Err("a tarefa sumiu sem concluir");
+    }
+
+    crate::tarefas::entrada::injetar(b'Z').map_err(|_| "fila de entrada cheia")?;
+    executor.rodar_ate_esvaziar(8)?;
+
+    if RECEBIDO.load(core::sync::atomic::Ordering::SeqCst) != b'Z' as u64 + 1 {
+        return Err("a tarefa nao recebeu o byte injetado");
+    }
+    Ok(())
+}
+
+/// O mesmo mecanismo, agora acordado pelo hardware de verdade.
+///
+/// O waker é registrado pela tarefa e acionado de dentro do handler do timer.
+/// Nada no caminho é simulado: é a interrupção física que traz a tarefa de
+/// volta.
+fn relogio_acorda_tarefa() -> Resultado {
+    const ESPERA: u64 = 3;
+    static ACORDOU_EM: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+    async fn corpo() {
+        crate::tarefas::relogio::por_ticks(ESPERA).await;
+        ACORDOU_EM.store(crate::tempo::ticks(), core::sync::atomic::Ordering::SeqCst);
+    }
+
+    ACORDOU_EM.store(0, core::sync::atomic::Ordering::SeqCst);
+    let inicio = crate::tempo::ticks();
+
+    let mut executor = crate::tarefas::executor::Executor::novo();
+    executor.lancar(crate::tarefas::Tarefa::nova("teste-sono", corpo()));
+    executor.rodar_ate_esvaziar(64)?;
+
+    let acordou = ACORDOU_EM.load(core::sync::atomic::Ordering::SeqCst);
+    if acordou < inicio + ESPERA {
+        crate::log_error!(
+            "teste",
+            "acordou em {} tiques, esperado ao menos {}",
+            acordou,
+            inicio + ESPERA
+        );
+        return Err("a tarefa acordou antes do prazo");
+    }
+    Ok(())
+}
+
+/// Dormir precisa custar quase nada em repolagens.
+///
+/// Este é o caso que distingue um executor com wakers de um que só finge ter:
+/// os dois passariam em todos os testes acima, mas o ingênuo repollaria a
+/// tarefa adormecida milhares de vezes por segundo. Contamos os avanços e
+/// exigimos que sejam poucos.
+fn tarefa_adormecida_nao_e_repollada() -> Resultado {
+    const ESPERA: u64 = 5;
+    // Uma repolagem para registrar o sono, uma para confirmar que venceu, e
+    // folga para um despertar espúrio no limiar do tique.
+    const TETO_DE_AVANCOS: u64 = 4;
+
+    async fn corpo() {
+        crate::tarefas::relogio::por_ticks(ESPERA).await;
+    }
+
+    let antes = crate::tarefas::executor::estatisticas().2;
+
+    let mut executor = crate::tarefas::executor::Executor::novo();
+    executor.lancar(crate::tarefas::Tarefa::nova("teste-ocioso", corpo()));
+    executor.rodar_ate_esvaziar(64)?;
+
+    let avancos = crate::tarefas::executor::estatisticas().2 - antes;
+    if avancos > TETO_DE_AVANCOS {
+        crate::log_error!("teste", "{} avancos para dormir {} tiques", avancos, ESPERA);
+        return Err("tarefa adormecida foi repollada demais");
+    }
+    Ok(())
+}
+
+/// Uma espera em milissegundos precisa ser convertida para tiques sem
+/// arredondar *para baixo*.
+///
+/// Arredondar para baixo faria `por_ms` dormir menos que o pedido, e um pedido
+/// menor que um tique inteiro viraria "não dorme nada" — transformando uma
+/// espera curta num laço de espera ativa.
+fn dormir_em_ms_arredonda_para_cima() -> Resultado {
+    const PEDIDO_MS: u64 = 25;
+    static ACORDOU_EM: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+    async fn corpo() {
+        crate::tarefas::relogio::por_ms(PEDIDO_MS).await;
+        ACORDOU_EM.store(crate::tempo::ticks(), core::sync::atomic::Ordering::SeqCst);
+    }
+
+    let hz = crate::tempo::frequencia_hz() as u64;
+    if hz == 0 {
+        return Err("sem timer configurado");
+    }
+    // A mesma conta que `por_ms` faz, derivada da frequência real do timer e
+    // não de um 100 Hz presumido.
+    let esperado = (PEDIDO_MS * hz).div_ceil(1000).max(1);
+
+    ACORDOU_EM.store(0, core::sync::atomic::Ordering::SeqCst);
+    let inicio = crate::tempo::ticks();
+
+    let mut executor = crate::tarefas::executor::Executor::novo();
+    executor.lancar(crate::tarefas::Tarefa::nova("teste-ms", corpo()));
+    executor.rodar_ate_esvaziar(64)?;
+
+    let decorridos = ACORDOU_EM.load(core::sync::atomic::Ordering::SeqCst) - inicio;
+    if decorridos < esperado {
+        crate::log_error!(
+            "teste",
+            "dormiu {} tiques, esperado ao menos {}",
+            decorridos,
+            esperado
+        );
+        return Err("por_ms dormiu menos que o pedido");
+    }
+    Ok(())
+}
+
+/// Uma tarefa encerrada precisa devolver sua vaga na tabela de dormentes.
+///
+/// Sem isso, a tabela se esgotaria depois de algumas dezenas de esperas e
+/// todas as seguintes cairiam em espera ativa — uma degradação silenciosa,
+/// que só apareceria como "o sistema fica lento com o tempo".
+fn dormentes_devolvem_a_vaga() -> Resultado {
+    async fn corpo() {
+        crate::tarefas::relogio::por_ticks(1).await;
+    }
+
+    // Bem mais que o tamanho da tabela: se as vagas não fossem devolvidas,
+    // as últimas rodadas não teriam onde registrar.
+    for _ in 0..24 {
+        let mut executor = crate::tarefas::executor::Executor::novo();
+        executor.lancar(crate::tarefas::Tarefa::nova("teste-vaga", corpo()));
+        executor.rodar_ate_esvaziar(32)?;
+    }
+    Ok(())
+}
+
 static CASOS: &[Caso] = &[
     Caso {
         nome: "json: objeto simples",
@@ -1324,6 +1631,46 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "heap: estatisticas coerentes",
         f: heap_estatisticas_coerentes,
+    },
+    Caso {
+        nome: "fila: preserva ordem",
+        f: fila_preserva_ordem,
+    },
+    Caso {
+        nome: "fila: cheia descarta e conta",
+        f: fila_cheia_descarta_e_conta,
+    },
+    Caso {
+        nome: "fila: indices dao a volta",
+        f: fila_da_a_volta,
+    },
+    Caso {
+        nome: "tarefa: roda ate o fim",
+        f: tarefa_roda_ate_o_fim,
+    },
+    Caso {
+        nome: "tarefa: duas se intercalam",
+        f: tarefas_se_intercalam,
+    },
+    Caso {
+        nome: "tarefa: waker acorda bloqueada",
+        f: waker_acorda_tarefa_bloqueada,
+    },
+    Caso {
+        nome: "tarefa: relogio acorda tarefa",
+        f: relogio_acorda_tarefa,
+    },
+    Caso {
+        nome: "tarefa: adormecida nao gira",
+        f: tarefa_adormecida_nao_e_repollada,
+    },
+    Caso {
+        nome: "tarefa: dormir em ms arredonda",
+        f: dormir_em_ms_arredonda_para_cima,
+    },
+    Caso {
+        nome: "tarefa: dormentes devolvem vaga",
+        f: dormentes_devolvem_a_vaga,
     },
 ];
 

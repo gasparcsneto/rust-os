@@ -36,6 +36,12 @@ const CR: usize = 0x30; // Control Register
 const IMSC: usize = 0x38; // Interrupt Mask Set/Clear
 const ICR: usize = 0x44; // Interrupt Clear Register
 
+const IMSC_RXIM: u32 = 1 << 4; // interrupção de recepção
+const IMSC_RTIM: u32 = 1 << 6; // interrupção de recepção parada (timeout)
+
+const ICR_RXIC: u32 = 1 << 4;
+const ICR_RTIC: u32 = 1 << 6;
+
 const FR_RXFE: u32 = 1 << 4; // FIFO de recepção vazia
 const FR_TXFF: u32 = 1 << 5; // FIFO de transmissão cheia
 
@@ -88,9 +94,10 @@ impl Uart {
             // 8 bits, sem paridade, 1 stop bit, FIFOs ligadas.
             uart.escrever(LCRH, LCRH_WLEN_8 | LCRH_FEN);
 
-            // Nenhuma interrupção por enquanto: o canal do agente opera por
-            // polling nesta fase, porque o kernel ainda não tem tabela de
-            // vetores de exceção instalada.
+            // Nenhuma interrupção por enquanto: quando esta porta é aberta,
+            // o kernel ainda não tem tabela de vetores nem GIC, e uma
+            // interrupção entregue aqui não teria para onde ir. Elas são
+            // ligadas depois, por `habilitar_interrupcao_recepcao`.
             uart.escrever(IMSC, 0);
 
             uart.escrever(CR, CR_UARTEN | CR_TXE | CR_RXE);
@@ -111,6 +118,40 @@ impl Uart {
     /// O deslocamento precisa ser de um registrador válido da PL011.
     unsafe fn ler(&self, offset: usize) -> u32 {
         unsafe { core::ptr::read_volatile(self.base.add(offset) as *const u32) }
+    }
+
+    /// Passa a interromper o processador quando chegar um byte.
+    ///
+    /// Só pode ser chamada depois que a tabela de vetores e o GIC estiverem
+    /// de pé.
+    ///
+    /// Habilitamos **duas** causas, e as duas são necessárias. `RXIM` dispara
+    /// quando a FIFO de recepção atinge o nível de gatilho — que por padrão é
+    /// a metade dela. Sozinha, ela deixaria uma requisição curta do agente
+    /// parada na FIFO indefinidamente, esperando bytes que não vêm. `RTIM` é
+    /// o complemento: dispara quando há dados parados na FIFO e a linha fica
+    /// ociosa, garantindo que a cauda de qualquer mensagem seja entregue.
+    ///
+    /// (No modelo de dispositivo do QEMU o nível de gatilho é sempre um
+    /// caractere, então `RXIM` já bastaria. Mas o driver é escrito para o
+    /// hardware descrito no manual, não para o emulador.)
+    pub fn habilitar_interrupcao_recepcao(&mut self) {
+        // SAFETY: registradores válidos de uma PL011 já inicializada.
+        unsafe {
+            self.escrever(ICR, ICR_RXIC | ICR_RTIC);
+            self.escrever(IMSC, IMSC_RXIM | IMSC_RTIM);
+        }
+    }
+
+    /// Reconhece a interrupção de recepção no próprio dispositivo.
+    ///
+    /// Chamado depois de drenar a FIFO. A de recepção some sozinha quando a
+    /// FIFO esvazia, mas a de *timeout* fica pendente até ser limpa
+    /// explicitamente — sem esta escrita, o GIC reentregaria a mesma
+    /// interrupção para sempre.
+    pub fn fim_de_recepcao(&mut self) {
+        // SAFETY: registrador válido de uma PL011 já inicializada.
+        unsafe { self.escrever(ICR, ICR_RXIC | ICR_RTIC) }
     }
 
     /// Descarta o que já estiver na FIFO de recepção.

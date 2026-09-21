@@ -22,6 +22,19 @@
 //! O transporte é um detalhe trocável: o conjunto de comandos em
 //! [`commands::COMANDOS`] não sabe nada sobre serial. Na fase 3, expor o mesmo
 //! conjunto sobre TCP é trocar este módulo, não os comandos.
+//!
+//! # Os dois modos de atendimento
+//!
+//! - [`atender`] é o normal: uma tarefa assíncrona que espera bytes chegarem
+//!   por interrupção e cede a CPU enquanto não há nada. É o que roda em
+//!   operação.
+//! - [`servir`] é o de emergência: um laço síncrono que não depende do heap
+//!   nem do escalonador, usado no modo post-mortem depois de uma exceção
+//!   fatal. Nessa hora, o heap e o escalonador podem ser exatamente o que
+//!   quebrou, e o canal precisa responder mesmo assim.
+//!
+//! Os dois consomem a mesma fila de bytes e compartilham todo o resto:
+//! enquadramento, decodificação e despacho.
 
 pub mod commands;
 pub mod json;
@@ -41,71 +54,148 @@ use protocol::{Requisicao, RpcError};
 /// não fez.
 const LINHA_MAX: usize = 2048;
 
-/// Entra no laço de atendimento. Nunca retorna.
-pub fn servir() -> ! {
+/// Monta linhas a partir de um fluxo de bytes.
+///
+/// Fica separado dos dois laços de atendimento porque o enquadramento é a
+/// única parte com estado, e duplicá-lo seria duplicar exatamente a lógica
+/// mais fácil de errar: o que fazer com uma linha longa demais.
+struct Montador {
+    buffer: [u8; LINHA_MAX],
+    tam: usize,
+    /// Ligado quando a linha atual estourou o buffer: descartamos tudo até o
+    /// próximo `\n` para voltar a um ponto de sincronia conhecido do stream.
+    estourou: bool,
+}
+
+impl Montador {
+    const fn novo() -> Self {
+        Self {
+            buffer: [0; LINHA_MAX],
+            tam: 0,
+            estourou: false,
+        }
+    }
+
+    /// Consome um byte, processando a requisição quando a linha fecha.
+    ///
+    /// Devolve `true` quando este byte fechou uma linha — o chamador usa isso
+    /// para saber que acabou de gastar um tempo indeterminado executando um
+    /// comando, e que é uma boa hora de dar a vez a outra tarefa.
+    fn alimentar(&mut self, byte: u8) -> bool {
+        match byte {
+            b'\n' => {
+                if self.estourou {
+                    responder_erro(None, RpcError::LINHA_MUITO_LONGA, None);
+                    self.estourou = false;
+                } else if self.tam > 0 {
+                    processar(&self.buffer[..self.tam]);
+                }
+                self.tam = 0;
+                true
+            }
+            // Clientes que mandam CRLF não deveriam quebrar o parser.
+            b'\r' => false,
+            _ => {
+                if self.estourou {
+                    return false;
+                }
+                if self.tam < LINHA_MAX {
+                    self.buffer[self.tam] = byte;
+                    self.tam += 1;
+                } else {
+                    self.estourou = true;
+                    self.tam = 0;
+                }
+                false
+            }
+        }
+    }
+}
+
+/// A tarefa que atende o canal do agente. Nunca termina.
+///
+/// # O que o `.await` faz aqui
+///
+/// Cada `.await` é um ponto em que esta tarefa devolve o controle ao
+/// executor. Enquanto não há byte na fila, ela não roda: seu waker fica
+/// guardado, o handler da interrupção da serial o aciona quando um byte
+/// chega, e só então o executor a traz de volta exatamente deste ponto.
+///
+/// Comparado ao laço antigo, a diferença prática é grande. Antes, o kernel
+/// ou dormia até o próximo tique do timer (10 ms de latência por byte) ou
+/// girava em espera ativa para evitá-la. Agora não faz nenhum dos dois: a
+/// latência é a da interrupção, e o núcleo fica parado no resto do tempo.
+///
+/// O `async fn` não retorna `!` porque uma tarefa precisa produzir `()`. O
+/// laço infinito por dentro dá no mesmo, com a vantagem de o executor poder
+/// continuar rodando outras tarefas.
+///
+/// Em modo de teste esta função não tem chamador: a suíte roda no lugar do
+/// atendimento, e uma tarefa que nunca termina não teria como devolver o
+/// controle ao relatório.
+#[cfg_attr(feature = "modo-teste", allow(dead_code))]
+pub async fn atender() {
     crate::log_info!(
         "agent",
-        "canal pronto, {} comandos registrados",
+        "canal assincrono pronto, {} comandos registrados",
         commands::COMANDOS.len()
     );
 
-    let mut buffer = [0u8; LINHA_MAX];
-    let mut tam = 0usize;
-    // Ligado quando a linha atual estourou o buffer: descartamos tudo até o
-    // próximo `\n` para voltar a um ponto de sincronia conhecido do stream.
-    let mut estourou = false;
+    let mut montador = Montador::novo();
+    loop {
+        let byte = crate::tarefas::entrada::proximo_byte().await;
+        if montador.alimentar(byte) {
+            // Acabamos de executar um comando, o que pode ter custado um
+            // tempo arbitrário. Um cliente que envie várias requisições
+            // emendadas manteria esta tarefa rodando sem parar, porque o
+            // `.await` de cima encontraria a fila sempre cheia e nunca
+            // cederia. Ceder aqui dá a vez às outras tarefas entre uma
+            // requisição e a seguinte.
+            crate::tarefas::ceder().await;
+        }
+    }
+}
+
+/// Atende o canal sem tarefas, sem heap e sem escalonador. Nunca retorna.
+///
+/// Este é o laço do modo post-mortem. Ele existe porque, depois de uma
+/// exceção fatal, não dá para confiar em nada que o kernel construiu por
+/// cima do básico — e o canal do agente é justamente o que precisa
+/// sobreviver, para poder contar o que aconteceu.
+///
+/// Por isso ele bombeia a coleta da UART à mão em vez de esperar pela
+/// interrupção: se a falha deixou as interrupções mascaradas, ou se o
+/// controlador ficou num estado estranho, um laço que dependesse delas não
+/// responderia nunca.
+pub fn servir() -> ! {
+    crate::log_info!(
+        "agent",
+        "canal em modo direto, {} comandos registrados",
+        commands::COMANDOS.len()
+    );
+
+    let mut montador = Montador::novo();
 
     loop {
-        let byte = {
-            let mut porta = crate::serial::AGENT_LINK.lock();
-            porta.as_mut().and_then(|s| s.read_byte())
-        };
+        // A coleta é idempotente e barata quando não há nada: se as
+        // interrupções ainda funcionarem, ela vai quase sempre encontrar a
+        // fila já preenchida pelo handler, e não há conflito entre os dois —
+        // ambos passam pela mesma fila.
+        crate::tarefas::entrada::coletar();
 
-        let Some(byte) = byte else {
-            if tam == 0 {
-                // Ocioso entre requisições: dormimos até a próxima
-                // interrupção em vez de queimar o núcleo em busy-wait. Com o
-                // timer a 100 Hz, acordamos a cada 10 ms no pior caso.
-                //
-                // `esperar_interrupcao` é seguro mesmo antes de as
-                // interrupções existirem: cada arquitetura verifica se estão
-                // habilitadas e cai em espera ativa se não estiverem. Dormir
-                // com as interrupções mascaradas pararia o núcleo para
-                // sempre.
-                crate::arch::esperar_interrupcao();
-            } else {
-                // No meio de uma requisição, dormir custaria até 10 ms por
-                // byte que ainda não chegou — uma requisição de 100 bytes
-                // levaria um segundo. Aqui a espera ativa é a escolha certa.
-                core::hint::spin_loop();
-            }
-            continue;
-        };
+        let mut atendeu = false;
+        while let Some(byte) = crate::tarefas::entrada::retirar() {
+            let _ = montador.alimentar(byte);
+            atendeu = true;
+        }
 
-        match byte {
-            b'\n' => {
-                if estourou {
-                    responder_erro(None, RpcError::LINHA_MUITO_LONGA, None);
-                    estourou = false;
-                } else if tam > 0 {
-                    processar(&buffer[..tam]);
-                }
-                tam = 0;
-            }
-            // Clientes que mandam CRLF não deveriam quebrar o parser.
-            b'\r' => {}
-            _ => {
-                if estourou {
-                    continue;
-                }
-                if tam < LINHA_MAX {
-                    buffer[tam] = byte;
-                    tam += 1;
-                } else {
-                    estourou = true;
-                    tam = 0;
-                }
-            }
+        if !atendeu {
+            // Ocioso: dormimos até a próxima interrupção em vez de queimar o
+            // núcleo. `esperar_interrupcao` é seguro mesmo com elas
+            // mascaradas — cada arquitetura verifica e cai em espera ativa
+            // nesse caso, porque dormir de verdade pararia o núcleo para
+            // sempre.
+            crate::arch::esperar_interrupcao();
         }
     }
 }

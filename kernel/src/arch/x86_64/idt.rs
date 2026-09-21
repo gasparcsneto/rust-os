@@ -35,6 +35,7 @@ pub fn init() {
         // faixa das exceções.
         idt[super::pic::VETOR_TIMER].set_handler_fn(timer);
         idt[super::pic::VETOR_TECLADO].set_handler_fn(teclado);
+        idt[super::pic::VETOR_SERIAL_AGENTE].set_handler_fn(serial_agente);
 
         // SAFETY: `IST_DOUBLE_FAULT` é um índice válido da IST, e a pilha
         // correspondente foi preparada em `gdt::init`, que roda antes desta
@@ -63,6 +64,21 @@ extern "x86-interrupt" fn timer(_quadro: InterruptStackFrame) {
     // o PIC considerar a interrupção eternamente em atendimento e nunca mais
     // entregar outra — o timer dispararia uma única vez.
     unsafe { super::pic::fim_de_interrupcao(super::pic::VETOR_TIMER) };
+}
+
+/// Interrupção de recepção da COM2 (IRQ 3): chegou byte para o agente.
+///
+/// O handler faz o mínimo: move os bytes do FIFO do hardware para a fila do
+/// kernel e acorda a tarefa que os espera. Decodificar o JSON, executar o
+/// comando e serializar a resposta acontece fora daqui — um handler roda com
+/// interrupções mascaradas e suspende qualquer coisa que estivesse rodando,
+/// então tudo que puder sair dele, sai.
+extern "x86-interrupt" fn serial_agente(_quadro: InterruptStackFrame) {
+    crate::tarefas::entrada::coletar();
+
+    crate::irq::contabilizar(3);
+    // SAFETY: estamos no fim do handler da própria interrupção.
+    unsafe { super::pic::fim_de_interrupcao(super::pic::VETOR_SERIAL_AGENTE) };
 }
 
 /// Interrupção do teclado PS/2 (IRQ 1).

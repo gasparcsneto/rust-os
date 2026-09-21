@@ -27,6 +27,8 @@ const GICC_BASE: usize = 0x0801_0000;
 
 const GICD_CTLR: usize = 0x000;
 const GICD_ISENABLER: usize = 0x100;
+/// Um byte por INTID, dizendo a quais núcleos a linha é entregue.
+const GICD_ITARGETSR: usize = 0x800;
 
 const GICC_CTLR: usize = 0x000;
 const GICC_PMR: usize = 0x004;
@@ -38,6 +40,13 @@ const GICC_EOIR: usize = 0x010;
 /// As interrupções privadas de cada núcleo (PPIs) ocupam os INTIDs 16 a 31; o
 /// timer físico não-seguro de EL1 é o PPI 14, ou seja, INTID 30.
 pub const INTID_TIMER: u32 = 30;
+
+/// INTID da PL011 na máquina `virt`.
+///
+/// As interrupções de periférico (SPIs) começam no INTID 32, e o device tree
+/// do QEMU declara a UART como SPI 1 — daí 33. Confirmado no mesmo dump de
+/// device tree que deu o endereço da porta.
+pub const INTID_UART: u32 = 33;
 
 /// INTID devolvido pelo GIC quando não há interrupção pendente de verdade.
 ///
@@ -90,6 +99,33 @@ pub unsafe fn init() {
         // 32 linhas, uma por bit.
         let registrador = GICD_BASE + GICD_ISENABLER + (INTID_TIMER as usize / 32) * 4;
         escrever(registrador, 1 << (INTID_TIMER % 32));
+    }
+}
+
+/// Habilita a linha da UART e a roteia para este núcleo.
+///
+/// # Por que uma SPI dá mais trabalho que o timer
+///
+/// O timer é uma PPI: uma interrupção *privada*, que existe separadamente em
+/// cada núcleo e por construção só pode ser entregue ao seu. Uma SPI é
+/// compartilhada por todo o sistema, então o distribuidor precisa ser
+/// informado de para quem entregá-la — e o valor de reset desse registrador é
+/// zero, ou seja, "para ninguém". Sem esta escrita a interrupção é habilitada
+/// e simplesmente nunca chega.
+///
+/// # Safety
+///
+/// Exige tabela de vetores instalada e [`init`] já executado.
+pub unsafe fn habilitar_uart() {
+    // SAFETY: endereços do GIC da máquina `virt`, com acesso exclusivo.
+    unsafe {
+        // Entrega ao núcleo 0. O registrador tem um byte por INTID, e cada
+        // bit desse byte é um núcleo.
+        let alvo = GICD_BASE + GICD_ITARGETSR + INTID_UART as usize;
+        core::ptr::write_volatile(alvo as *mut u8, 0b0000_0001);
+
+        let registrador = GICD_BASE + GICD_ISENABLER + (INTID_UART as usize / 32) * 4;
+        escrever(registrador, 1 << (INTID_UART % 32));
     }
 }
 
@@ -167,6 +203,12 @@ pub fn tratar() {
         // interrupção que receberíamos.
         // SAFETY: estamos dentro do handler da própria interrupção do timer.
         unsafe { armar(INTERVALO.load(Ordering::Relaxed)) };
+    }
+
+    if intid == INTID_UART {
+        // Mínimo indispensável: tirar os bytes do hardware e acordar quem os
+        // espera. O trabalho de verdade acontece na tarefa, fora do handler.
+        crate::tarefas::entrada::coletar();
     }
 
     crate::irq::contabilizar(intid as usize);

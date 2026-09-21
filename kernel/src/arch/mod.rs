@@ -25,10 +25,13 @@
 //! - `identificar_cpu()`: string de identificação do processador.
 //! - `init_excecoes()`: instala o mecanismo de tratamento de exceções.
 //! - `init_interrupcoes()`: liga o controlador de interrupções e o timer.
+//! - `init_interrupcao_serial()`: faz a serial do agente avisar por
+//!   interrupção em vez de ser consultada em laço.
 //! - `reservar_faixas()`: faixas físicas que o alocador de frames deve evitar.
 //! - `init_paginacao()`, `mapear_frame()`, `desmapear()`, `traduzir()`: a MMU.
 //! - `acesso_fisico()`: endereço virtual por onde se enxerga um físico.
 //! - `esperar_interrupcao()`: dorme até a próxima interrupção.
+//! - `dormir_se_ocioso()`: dorme só se não houver trabalho, sem corrida.
 //! - `disparar_breakpoint()`: gera uma exceção recuperável, para autoteste.
 //! - `encerrar_emulador()`: termina o QEMU comunicando sucesso ou falha.
 //! - `nome()`: o nome da arquitetura, para o protocolo do agente.
@@ -52,9 +55,10 @@ pub use aarch64 as atual;
 // pelos backends, que esconderia código morto de verdade dentro deles.
 #[allow(unused_imports)]
 pub use atual::{
-    Uart, acesso_fisico, desmapear, disparar_breakpoint, encerrar_emulador, esperar_interrupcao,
-    falha_de_estouro_de_pilha, halt_forever, identificar_cpu, init_excecoes, init_interrupcoes,
-    init_paginacao, init_seriais, mapear_frame, nome, reservar_faixas, sem_interrupcoes, traduzir,
+    Uart, acesso_fisico, desmapear, disparar_breakpoint, dormir_se_ocioso, encerrar_emulador,
+    esperar_interrupcao, falha_de_estouro_de_pilha, halt_forever, identificar_cpu, init_excecoes,
+    init_interrupcao_serial, init_interrupcoes, init_paginacao, init_seriais, mapear_frame, nome,
+    reservar_faixas, sem_interrupcoes, traduzir,
 };
 
 /// Tamanho de uma página nas duas arquiteturas.

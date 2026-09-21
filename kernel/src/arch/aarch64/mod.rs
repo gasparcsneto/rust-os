@@ -301,6 +301,63 @@ pub fn esperar_interrupcao() {
     }
 }
 
+/// Faz a serial do agente interromper quando chegar um byte.
+///
+/// Fica separada de [`init_interrupcoes`] porque a ordem importa: só faz
+/// sentido liberar a linha depois que existe quem consuma os bytes.
+pub fn init_interrupcao_serial() {
+    sem_interrupcoes(|| {
+        let mut guarda = crate::serial::AGENT_LINK.lock();
+        let Some(porta) = guarda.as_mut() else {
+            return;
+        };
+        porta.habilitar_interrupcao_recepcao();
+
+        // SAFETY: os vetores e o GIC já estão instalados, e estamos com as
+        // interrupções mascaradas.
+        unsafe { gic::habilitar_uart() };
+    });
+
+    crate::irq::nomear(gic::INTID_UART as usize, "pl011-agente");
+    crate::log_info!("irq", "PL011 interrompendo no INTID {}", gic::INTID_UART);
+}
+
+/// Dorme até a próxima interrupção, mas só se `ocioso` confirmar que não há
+/// trabalho — e sem deixar fresta entre as duas coisas.
+///
+/// # Por que no ARM isto é mais simples que no x86
+///
+/// O x86 precisa de um par `sti; hlt` cuidadosamente ordenado para não perder
+/// uma interrupção que chegue entre a checagem e o adormecer. No ARM a
+/// corrida simplesmente não existe: o manual (Arm ARM, *Wait For Interrupt*)
+/// define que uma IRQ pendente é um evento de despertar do `wfi`
+/// **independentemente de PSTATE.I** — ou seja, mesmo mascarada, ela acorda o
+/// núcleo.
+///
+/// Isso nos dá a atomicidade de graça. Mascaramos as IRQs, checamos, e
+/// dormimos: qualquer interrupção que tenha chegado nesse meio-tempo já está
+/// pendente e o `wfi` retorna de imediato. Só depois desmascaramos, e aí ela é
+/// entregue.
+pub fn dormir_se_ocioso(ocioso: impl FnOnce() -> bool) {
+    let daif: u64;
+    // SAFETY: ler DAIF e mascarar IRQs não tem pré-condição.
+    unsafe {
+        asm!("mrs {}, daif", out(reg) daif, options(nomem, nostack));
+        asm!("msr daifset, #2", options(nomem, nostack));
+    }
+
+    if ocioso() {
+        // SAFETY: `wfi` é uma dica de energia, sempre válida em EL1.
+        unsafe { asm!("wfi", options(nomem, nostack)) };
+    }
+
+    // Só restauramos se o chamador não as tinha mascarado por conta própria.
+    if daif & (1 << 7) == 0 {
+        // SAFETY: mesma justificativa do bloco acima.
+        unsafe { asm!("msr daifclr, #2", options(nomem, nostack)) };
+    }
+}
+
 /// As IRQs estão desmascaradas?
 fn interrupcoes_habilitadas() -> bool {
     let daif: u64;

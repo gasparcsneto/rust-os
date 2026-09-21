@@ -8,6 +8,7 @@
 
 use core::fmt;
 
+use uart_16550::spec::registers::{FifoTriggerLevel, IER};
 use uart_16550::{Config, Uart16550, backend::PioBackend};
 
 /// Endereço base da COM1. Fixo no barramento ISA desde o IBM PC original.
@@ -43,6 +44,37 @@ impl Uart {
         porta.drenar_recepcao();
         Some(porta)
     }
+
+    /// Passa a interromper o processador quando chegar um byte.
+    ///
+    /// Só pode ser chamada depois que a IDT e o PIC estiverem de pé: uma
+    /// interrupção entregue antes disso seria um triplo fault.
+    ///
+    /// Reduzimos o gatilho do FIFO para um único caractere. O padrão do 16550
+    /// é interromper a cada catorze, o que é ótimo para throughput e péssimo
+    /// para latência — uma requisição do agente com menos de catorze bytes
+    /// ficaria parada no FIFO até o temporizador de caractere do hardware
+    /// desistir. O canal do agente é de baixa vazão e sensível a latência;
+    /// uma interrupção por byte é exatamente o negócio certo aqui.
+    pub fn habilitar_interrupcao_recepcao(&mut self) {
+        let config = Config {
+            interrupts: IER::DATA_READY,
+            fifo_trigger_level: Some(FifoTriggerLevel::One),
+            ..Config::DEFAULT
+        };
+        // Reaplicar a configuração inteira é o caminho que o driver oferece
+        // para mexer no IER. É seguro: a sequência é a mesma da abertura, e a
+        // porta está ociosa neste ponto do boot.
+        let _ = self.0.init(config);
+    }
+
+    /// Reconhece a interrupção de recepção no próprio dispositivo.
+    ///
+    /// No 16550 não há nada a fazer: a condição de interrupção desaparece
+    /// sozinha quando o FIFO de recepção é esvaziado. Existe para que
+    /// [`crate::tarefas::entrada`] possa ser neutra de arquitetura — na
+    /// PL011 do ARM a mesma chamada escreve num registrador de verdade.
+    pub fn fim_de_recepcao(&mut self) {}
 
     /// Descarta o que já estiver na FIFO de recepção.
     ///

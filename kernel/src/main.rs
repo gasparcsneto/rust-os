@@ -57,6 +57,7 @@ mod machine;
 mod paginacao;
 mod qemu;
 mod serial;
+mod tarefas;
 mod tempo;
 #[cfg(feature = "modo-teste")]
 mod testes;
@@ -137,23 +138,52 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
         None => log_info!("video", "nenhum framebuffer nesta plataforma"),
     }
 
+    // Com heap e interrupções no ar, a serial do agente pode deixar de ser
+    // consultada em laço e passar a avisar quando chega um byte. É o que
+    // transforma o canal numa tarefa que dorme de verdade.
+    if canal_agente {
+        arch::init_interrupcao_serial();
+    }
+
     // Em modo de teste o kernel não atende ninguém: roda a suíte, imprime o
     // relatório e encerra o emulador com um código que o CI interpreta.
     #[cfg(feature = "modo-teste")]
-    {
-        let _ = canal_agente;
-        testes::executar_todos()
-    }
+    testes::executar_todos();
 
     #[cfg(not(feature = "modo-teste"))]
     if canal_agente {
         log_info!("agent", "canal do agente disponivel");
-        // A partir daqui o kernel é dirigido pelo agente. Esta chamada nunca
-        // retorna: ela é o laço principal do sistema nesta fase.
-        agent::servir()
+        // A partir daqui o kernel é dirigido pelo escalonador cooperativo, e
+        // o canal do agente é apenas uma das tarefas que ele roda. Esta
+        // chamada nunca retorna: é o laço principal do sistema.
+        let mut executor = tarefas::executor::Executor::novo();
+        executor.lancar(tarefas::Tarefa::nova("agent", agent::atender()));
+        executor.lancar(tarefas::Tarefa::nova("pulso", pulso()));
+        executor.rodar()
     } else {
         log_error!("agent", "nenhuma porta serial para o canal do agente");
         arch::halt_forever()
+    }
+}
+
+/// Batimento periódico: registra que o sistema está vivo.
+///
+/// Existe por duas razões. A prática: um agente lendo `log.tail` consegue
+/// distinguir "o kernel travou" de "o kernel está ocioso" sem precisar fazer
+/// uma pergunta. E a didática: é a segunda tarefa do executor, o que torna a
+/// concorrência visível — enquanto ela dorme um minuto inteiro, o canal do
+/// agente segue atendendo normalmente, no mesmo núcleo e na mesma pilha.
+///
+/// O intervalo é longo de propósito. O ring buffer de log tem tamanho fixo, e
+/// um batimento frequente empurraria para fora dele justamente os registros
+/// do boot, que são os mais úteis.
+#[cfg(not(feature = "modo-teste"))]
+async fn pulso() {
+    const INTERVALO_MS: u64 = 60_000;
+
+    loop {
+        tarefas::relogio::por_ms(INTERVALO_MS).await;
+        log_debug!("pulso", "vivo ha {} ms", tempo::uptime_ms());
     }
 }
 

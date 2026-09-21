@@ -40,6 +40,11 @@ O canal existe desde o primeiro milissegundo do boot, antes de haver
 paginação, heap ou interrupções. Essa precocidade é intencional: ele serve
 para ajudar a construir e depurar as camadas que vêm depois dele.
 
+Hoje ele é uma **tarefa assíncrona**: a UART interrompe quando chega um byte,
+o handler só move os bytes para uma fila e aciona o waker, e todo o trabalho
+de verdade acontece fora dele. Entre uma requisição e outra o núcleo fica
+parado — não em espera ativa, nem acordando a cada 10 ms para conferir.
+
 No ARM isso deixa de ser conveniência e vira necessidade. A máquina `virt` do
 emulador tem **uma única** porta serial, então o canal do agente é literalmente
 a única interface de depuração do sistema — não há console de texto. Os
@@ -104,6 +109,8 @@ Os dois podem rodar ao mesmo tempo: cada arquitetura tem seu próprio socket.
 | `memory.frames` | Estado do alocador de frames físicos |
 | `paging.translate` | Traduz um endereço virtual para físico (`address`) |
 | `heap.stats` | Estado do heap, incluindo fragmentação |
+| `tasks.stats` | Escalonador cooperativo e fila de entrada do canal |
+| `tasks.list` | Tarefas lançadas, com id, nome e se estão vivas |
 | `irq.stats` | Contadores de interrupções de hardware por linha |
 | `traps.stats` | Contadores de exceções e detalhes da última falha |
 | `debug.trigger` | Dispara uma exceção de propósito, para autoteste (`kind`) |
@@ -124,6 +131,12 @@ kernel/src/
 ├── paginacao.rs     fachada segura de mapeamento
 ├── heap.rs          alocador do kernel: lista livre ordenada com fusão
 ├── testes.rs        suíte de testes que roda dentro do emulador
+├── tarefas/
+│   ├── mod.rs       tarefa, identidade e o `yield` explícito
+│   ├── executor.rs  escalonador cooperativo com suporte a wakers
+│   ├── fila.rs      fila de capacidade fixa, escrita de dentro de handlers
+│   ├── relogio.rs   o futuro que espera o tempo passar
+│   └── entrada.rs   bytes do canal do agente, entregues por interrupção
 ├── traps.rs         contabilidade de exceções e modo post-mortem
 ├── irq.rs           contadores de interrupções de hardware
 ├── tempo.rs         contagem de tempo desde o boot
@@ -173,12 +186,43 @@ O contraste no caminho de boot é grande:
 | Pilha de exceção | IST, índice no TSS | `SP_EL1`, trocado por hardware |
 | Guard page da pilha | instalada pelo bootloader | construída antes de ligar a MMU |
 | Interrupções | PIC 8259 + timer PIT | GIC v2 + timer genérico |
+| Serial do agente | UART 16550 na IRQ 3 | PL011 no INTID 33 (SPI 1) |
+| Dormir sem corrida | `sti; hlt`, par atômico | `wfi` acorda com IRQ mascarada |
 | MMU | já ligada pelo bootloader | desligada; nós a acendemos |
 | Acesso à memória física | mapeada num deslocamento | identidade |
 | Encerrar emulador | `isa-debug-exit` | semihosting |
 
 Dois workspaces separados: o kernel compila bare-metal e o `xtask` para o
 host. Um único workspace não suporta dois targets padrão.
+
+## Multitarefa cooperativa
+
+O kernel roda suas tarefas com `async`/`await` e um executor próprio. Não é
+uma conveniência de sintaxe: `async`/`await` **é** multitarefa cooperativa,
+com outro vocabulário.
+
+| multitarefa cooperativa | `async`/`await` |
+|---|---|
+| tarefa | `Future` |
+| ceder a CPU | devolver `Poll::Pending` |
+| estado salvo à mão | campos da máquina de estados gerada pelo compilador |
+| escalonador | executor |
+
+É por isso que uma tarefa aqui não tem pilha própria: o que sobreviveria na
+pilha entre dois `.await` o compilador guarda na struct que ele gera. Dá para
+ter muitas tarefas sem pagar uma pilha por cada uma — o oposto do modelo
+preemptivo com threads, que vem na fase 1.
+
+O executor usa *wakers* de verdade. Uma tarefa que devolve `Pending` não é
+consultada de novo até alguém avisar: o handler da serial avisa quando chega
+um byte, o do timer avisa quando um prazo vence. Entre os dois, o núcleo
+dorme. O comando `tasks.stats` mostra a conta — `polls` fica na casa das
+dezenas depois de minutos no ar, não dos milhões.
+
+A versão ingênua desse executor (fila circular, repolla todo mundo) passaria
+em quase todos os testes da suíte. O caso `tarefa: adormecida nao gira` existe
+exatamente para reprovar essa versão: ele conta os avanços de uma tarefa que
+dorme cinco tiques e exige que sejam poucos.
 
 ## Testes
 
@@ -198,11 +242,12 @@ interrupção de hardware de verdade.
 
 ```
 $ cargo xtask test --arch aarch64
-  suite de testes :: aarch64 :: 27 casos
+  suite de testes :: aarch64 :: 57 casos
   ...
   excecao: breakpoint retomado               ok
   timer: relogio avanca                      ok
-  27 de 27 passaram
+  tarefa: waker acorda bloqueada             ok
+  57 de 57 passaram
 ```
 
 O CI roda formatação, clippy nas cinco configurações, e a suíte nas duas
@@ -222,7 +267,7 @@ padronizado.
 - [x] **Fase 0 — Exceções e interrupções.** GDT/TSS/IDT e vetores EL1,
       double fault com pilha dedicada, PIC e GIC, timer a 100 Hz nas duas
       arquiteturas, modo post-mortem.
-- [x] **Fase 0 — Testes e CI.** 27 casos rodando em bare-metal nas duas
+- [x] **Fase 0 — Testes e CI.** A suíte roda em bare-metal nas duas
       arquiteturas, em debug e release, com formatação e lints no CI.
 - [x] **Fase 0 — Memória física e paginação.** Alocador de frames por bitmap,
       MMU ligada do zero no ARM com mapa de identidade, controle das tabelas
@@ -230,10 +275,12 @@ padronizado.
 - [x] **Fase 0 — Heap.** Alocador próprio com lista livre ordenada e fusão de
       blocos adjacentes. `Box`, `Vec` e `String` disponíveis no kernel.
       **Fase 0 completa.**
-- [ ] **Fase 1 — Kernel de verdade.** Multitarefa, ring 3, processos.
-- [ ] **Fase 1 — Kernel de verdade.** Multitarefa cooperativa com
-      `async`/`await`, depois scheduler preemptivo, context switch, ring 3 com
-      TSS, `syscall`/`sysret`, ELF loader e processos isolados.
+- [x] **Fase 1 — Multitarefa cooperativa.** Executor com `async`/`await` e
+      suporte real a wakers, serial do agente dirigida por interrupção nas
+      duas arquiteturas, e um núcleo que dorme de verdade quando não há
+      trabalho.
+- [ ] **Fase 1 — Kernel de verdade.** Scheduler preemptivo, context switch,
+      ring 3 com TSS, `syscall`/`sysret`, ELF loader e processos isolados.
 - [ ] **Fase 2 — Drivers.** Enumeração PCI, virtio-blk, virtio-net, timer
       APIC/HPET, framebuffer gráfico.
 

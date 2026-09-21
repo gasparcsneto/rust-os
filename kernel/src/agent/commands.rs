@@ -93,6 +93,18 @@ pub static COMANDOS: &[Command] = &[
         handler: system_uptime,
     },
     Command {
+        nome: "tasks.stats",
+        resumo: "Estado do escalonador cooperativo e da fila de entrada.",
+        params: &[],
+        handler: tasks_stats,
+    },
+    Command {
+        nome: "tasks.list",
+        resumo: "Tarefas ja lancadas, com id, nome e se ainda estao vivas.",
+        params: &[],
+        handler: tasks_list,
+    },
+    Command {
         nome: "irq.stats",
         resumo: "Contadores de interrupcoes de hardware por linha.",
         params: &[],
@@ -331,6 +343,67 @@ fn irq_stats(_params: Json, w: &mut JsonWriter) -> fmt::Result {
             erro = Some(e);
         }
     });
+    w.end_array()?;
+    w.end_object()?;
+
+    match erro {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// tasks.*
+// ---------------------------------------------------------------------------
+
+fn tasks_stats(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let (lancadas, concluidas, avancos, despertares) = crate::tarefas::executor::estatisticas();
+    let (ocupacao, capacidade, descartados) = crate::tarefas::entrada::estatisticas();
+
+    w.begin_object()?;
+    w.field_u64("spawned", lancadas)?;
+    w.field_u64("completed", concluidas)?;
+    w.field_u64("alive", lancadas.saturating_sub(concluidas))?;
+    // Quantas vezes uma tarefa foi efetivamente avancada. A razao entre isto
+    // e `wakes` diz se o executor esta trabalhando ou girando: com wakers
+    // funcionando, os dois numeros andam juntos.
+    w.field_u64("polls", avancos)?;
+    w.field_u64("wakes", despertares)?;
+
+    w.key("input")?;
+    w.begin_object()?;
+    w.field_u64("queued", ocupacao as u64)?;
+    w.field_u64("capacity", capacidade as u64)?;
+    // Byte descartado e requisicao corrompida. Um valor diferente de zero
+    // aqui explica um erro de JSON que de outra forma pareceria inexplicavel.
+    w.field_u64("dropped", descartados)?;
+    w.end_object()?;
+
+    w.end_object()
+}
+
+fn tasks_list(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    w.key("tasks")?;
+    w.begin_array()?;
+
+    let mut erro: Option<fmt::Error> = None;
+    crate::tarefas::executor::com_inventario(|inscricao| {
+        if erro.is_some() {
+            return;
+        }
+        let resultado = (|| -> fmt::Result {
+            w.begin_object()?;
+            w.field_u64("id", inscricao.id)?;
+            w.field_str("name", inscricao.nome)?;
+            w.field_bool("alive", inscricao.viva)?;
+            w.end_object()
+        })();
+        if let Err(e) = resultado {
+            erro = Some(e);
+        }
+    });
+
     w.end_array()?;
     w.end_object()?;
 

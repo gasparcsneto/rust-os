@@ -161,6 +161,7 @@ pub fn fatal(nome: &'static str, pc: u64, endereco: Option<u64>, codigo: u64) ->
         ESPERADA.force_unlock();
         crate::log::destravar();
         crate::serial::destravar();
+        crate::tarefas::entrada::destravar();
     }
 
     // Se esta falha era a esperada, ela é o resultado de um teste e não um
