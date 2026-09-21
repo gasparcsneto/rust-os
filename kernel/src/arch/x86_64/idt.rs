@@ -94,7 +94,12 @@ extern "x86-interrupt" fn ponto_de_parada(quadro: InterruptStackFrame) {
 
 /// Instrução inválida: o fluxo de execução saiu dos trilhos.
 extern "x86-interrupt" fn opcode_invalido(quadro: InterruptStackFrame) {
-    crate::traps::fatal("invalid_opcode", quadro.instruction_pointer.as_u64(), None, 0)
+    crate::traps::fatal(
+        "invalid_opcode",
+        quadro.instruction_pointer.as_u64(),
+        None,
+        0,
+    )
 }
 
 /// Violação de proteção: acesso a um segmento ou registrador não permitido.

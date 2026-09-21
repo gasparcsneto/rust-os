@@ -9,6 +9,13 @@ license = "MIT OR Apache-2.0"
 # ele compila para bare-metal, o `xtask` compila para o host.
 [workspace]
 
+[features]
+# Troca o laço do agente por um executor de testes que roda dentro do
+# emulador e o encerra com um código de saída. É assim que a suíte roda em
+# CI: o kernel é seu próprio test harness, porque `cargo test` depende da
+# `std` e de um sistema operacional por baixo — coisas que não temos.
+modo-teste = []
+
 [dependencies]
 # Primitivas de sincronização baseadas em spinlock. Num kernel não existe
 # scheduler para bloquear uma thread, então `std::sync::Mutex` não se aplica.

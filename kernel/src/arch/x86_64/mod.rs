@@ -193,6 +193,7 @@ pub fn identificar_cpu() -> super::IdCpu {
 /// com o código de saída `(valor << 1) | 1`. Os valores evitam 0 e 1 de
 /// propósito: assim um código nosso nunca colide com uma saída "natural" do
 /// emulador, como um crash do próprio QEMU.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub fn encerrar_emulador(resultado: crate::qemu::Resultado) -> ! {
     use crate::qemu::Resultado;
 

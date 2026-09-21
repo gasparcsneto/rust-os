@@ -113,7 +113,7 @@ fn main() -> ExitCode {
     let comando = posicionais.first().copied().unwrap_or("help");
 
     let resultado = match comando {
-        "build" => build(arch, release).map(|_| ExitCode::SUCCESS),
+        "build" => build(arch, release, false).map(|_| ExitCode::SUCCESS),
         "run" => run(arch, release),
         "test" => test(arch, release),
         "agent" => {
@@ -216,7 +216,10 @@ enum Artefato {
 }
 
 /// Compila o kernel e prepara o que o QEMU vai carregar.
-fn build(arch: Arquitetura, release: bool) -> Result<Artefato, String> {
+///
+/// Com `modo_teste`, o kernel é compilado com a feature que troca o laço do
+/// agente pelo executor da suíte de testes.
+fn build(arch: Arquitetura, release: bool, modo_teste: bool) -> Result<Artefato, String> {
     let raiz = raiz_do_projeto();
     let dir_kernel = raiz.join("kernel");
 
@@ -229,6 +232,9 @@ fn build(arch: Arquitetura, release: bool) -> Result<Artefato, String> {
         .args(["build", "--target", arch.alvo()]);
     if release {
         cargo.arg("--release");
+    }
+    if modo_teste {
+        cargo.args(["--features", "modo-teste"]);
     }
 
     // O cargo exporta variáveis que descrevem o build *do xtask*. Se elas
@@ -285,7 +291,6 @@ fn build(arch: Arquitetura, release: bool) -> Result<Artefato, String> {
         }
 
         Arquitetura::X86_64 => {
-
             // Geramos as duas variantes porque elas bootam por caminhos
             // diferentes: a imagem BIOS usa o boot legado por MBR (o QEMU roda
             // sem firmware extra) e a UEFI é o que máquinas modernas usam.
@@ -424,7 +429,7 @@ fn anexar_socket(qemu: &mut Command, socket: &Path) {
 }
 
 fn run(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
-    let artefato = build(arch, release)?;
+    let artefato = build(arch, release, false)?;
     let socket = caminho_socket(arch);
 
     println!("[xtask] canal do agente em {}", socket.display());
@@ -448,8 +453,11 @@ fn run(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
 }
 
 fn test(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
-    let artefato = build(arch, release)?;
-    println!("[xtask] executando a suíte de testes no QEMU ({})\n", arch.nome());
+    let artefato = build(arch, release, true)?;
+    println!(
+        "[xtask] executando a suíte de testes no QEMU ({})\n",
+        arch.nome()
+    );
 
     let status = comando_qemu(arch, &artefato, None)?
         .status()

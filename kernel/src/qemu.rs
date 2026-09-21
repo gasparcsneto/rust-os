@@ -9,6 +9,11 @@
 //! este módulo é só o vocabulário comum.
 
 /// Como a execução terminou.
+//
+// Só tem consumidor quando a feature `modo-teste` está ligada; num build
+// normal o kernel nunca termina de propósito. Marcamos em vez de apagar
+// porque o mecanismo é parte do contrato com o CI.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Resultado {
     Sucesso,
@@ -19,6 +24,7 @@ pub enum Resultado {
 ///
 /// Em hardware real não há emulador para encerrar; nesse caso a implementação
 /// de cada arquitetura simplesmente para a CPU.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub fn encerrar(resultado: Resultado) -> ! {
     crate::arch::encerrar_emulador(resultado)
 }

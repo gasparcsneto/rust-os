@@ -28,6 +28,13 @@ use spin::Mutex;
 const MAX_REGIOES: usize = 64;
 
 /// Para que serve uma faixa de memória física.
+//
+// `Bootloader` e `Reservada` só são construídas pelo backend x86, porque é o
+// único que hoje recebe um mapa com essa distinção — no ARM o device tree
+// descreve a RAM instalada sem dizer o que já está ocupado. As variantes
+// pertencem à abstração, não a uma arquitetura, então ficam aqui; a anotação
+// evita que o build de ARM as acuse de mortas.
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TipoRegiao {
     /// Livre para o kernel alocar.
@@ -114,6 +121,10 @@ pub fn adicionar_regiao(regiao: Regiao) {
 }
 
 /// Registra o framebuffer, se a plataforma tiver um.
+///
+/// Sem chamador no ARM: a máquina `virt` não expõe framebuffer, então lá a
+/// função existe mas nunca é usada.
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub fn definir_video(video: Video) {
     MAQUINA.lock().video = Some(video);
 }

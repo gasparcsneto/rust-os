@@ -62,10 +62,7 @@ struct Estado {
 }
 
 static ESTADO: Mutex<Estado> = Mutex::new(Estado {
-    contadores: [Contador {
-        nome: "",
-        total: 0,
-    }; MAX_TIPOS],
+    contadores: [Contador { nome: "", total: 0 }; MAX_TIPOS],
     n: 0,
     ultima: None,
     total: 0,
@@ -83,9 +80,10 @@ pub fn registrar(nome: &'static str, pc: u64, endereco: Option<u64>, codigo: u64
     // caminho roda dentro de um handler de exceção, onde simplicidade vale
     // mais que velocidade.
     let mut achou = false;
-    for i in 0..estado.n {
-        if estado.contadores[i].nome == nome {
-            estado.contadores[i].total += 1;
+    let n = estado.n;
+    for contador in estado.contadores[..n].iter_mut() {
+        if contador.nome == nome {
+            contador.total += 1;
             achou = true;
             break;
         }
@@ -110,8 +108,8 @@ pub fn registrar(nome: &'static str, pc: u64, endereco: Option<u64>, codigo: u64
 /// Percorre os contadores por tipo.
 pub fn com_contadores<F: FnMut(&'static str, u64)>(mut f: F) {
     let estado = ESTADO.lock();
-    for i in 0..estado.n {
-        f(estado.contadores[i].nome, estado.contadores[i].total);
+    for contador in &estado.contadores[..estado.n] {
+        f(contador.nome, contador.total);
     }
 }
 

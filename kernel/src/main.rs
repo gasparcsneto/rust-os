@@ -43,12 +43,14 @@
 
 mod agent;
 mod arch;
+mod irq;
 mod log;
 mod machine;
-mod irq;
 mod qemu;
 mod serial;
 mod tempo;
+#[cfg(feature = "modo-teste")]
+mod testes;
 mod traps;
 
 use core::panic::PanicInfo;
@@ -111,6 +113,15 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
         None => log_info!("video", "nenhum framebuffer nesta plataforma"),
     }
 
+    // Em modo de teste o kernel não atende ninguém: roda a suíte, imprime o
+    // relatório e encerra o emulador com um código que o CI interpreta.
+    #[cfg(feature = "modo-teste")]
+    {
+        let _ = canal_agente;
+        testes::executar_todos()
+    }
+
+    #[cfg(not(feature = "modo-teste"))]
     if canal_agente {
         log_info!("agent", "canal do agente disponivel");
         // A partir daqui o kernel é dirigido pelo agente. Esta chamada nunca

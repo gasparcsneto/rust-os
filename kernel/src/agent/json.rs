@@ -144,17 +144,6 @@ impl<'w> JsonWriter<'w> {
         self.sink.write_str(bruto)
     }
 
-    /// Escreve um valor formatado como string JSON.
-    pub fn fmt_value(&mut self, args: fmt::Arguments) -> fmt::Result {
-        self.sep()?;
-        self.sink.write_str("\"")?;
-        // O sink recebe o texto já formatado. Não escapamos aqui porque os
-        // usos internos (versões, nomes de formato de pixel) não contêm
-        // caracteres especiais. Para dados vindos de fora, use `str_value`.
-        self.sink.write_fmt(args)?;
-        self.sink.write_str("\"")
-    }
-
     // -- atalhos ------------------------------------------------------------
 
     pub fn field_str(&mut self, chave: &str, valor: &str) -> fmt::Result {
@@ -206,11 +195,6 @@ impl<'w> JsonWriter<'w> {
 pub struct Json<'a>(pub &'a [u8]);
 
 impl<'a> Json<'a> {
-    /// Os bytes crus deste valor.
-    pub fn raw(&self) -> &'a [u8] {
-        self.0
-    }
-
     /// Os bytes crus como `&str`, se forem UTF-8 válido.
     pub fn raw_str(&self) -> Option<&'a str> {
         core::str::from_utf8(self.0).ok()
@@ -327,8 +311,7 @@ fn pular_valor(b: &[u8], i: usize) -> Option<usize> {
         _ => {
             // Número, `true`, `false` ou `null`: vai até o próximo delimitador.
             let mut j = i;
-            while j < b.len()
-                && !matches!(b[j], b',' | b'}' | b']' | b' ' | b'\t' | b'\n' | b'\r')
+            while j < b.len() && !matches!(b[j], b',' | b'}' | b']' | b' ' | b'\t' | b'\n' | b'\r')
             {
                 j += 1;
             }

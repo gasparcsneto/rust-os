@@ -153,8 +153,15 @@ extern "C" fn inicio_aarch64(dtb: u64) -> ! {
 pub fn init_seriais() -> (Option<Uart>, Option<Uart>) {
     // SAFETY: rodamos antes de qualquer outro código tocar na PL011, em
     // núcleo único, então o acesso é de fato exclusivo.
-    let agente = unsafe { Uart::abrir(uart::PL011_BASE) };
-    (None, agente)
+    let porta = unsafe { Uart::abrir(uart::PL011_BASE) };
+
+    if cfg!(feature = "modo-teste") {
+        // Na suíte de testes não há agente: o que precisamos é ver o relatório
+        // em texto. Com uma porta só, ela vira o console.
+        (porta, None)
+    } else {
+        (None, porta)
+    }
 }
 
 /// Instala a tabela de vetores de exceção em `VBAR_EL1`.
@@ -163,7 +170,11 @@ pub fn init_seriais() -> (Option<Uart>, Option<Uart>) {
 /// deixado o VBAR apontando — na prática, comportamento indefinido.
 pub fn init_excecoes() {
     vetores::init();
-    crate::log_info!("traps", "vetores instalados, rodando em EL{}", vetores::nivel_de_excecao());
+    crate::log_info!(
+        "traps",
+        "vetores instalados, rodando em EL{}",
+        vetores::nivel_de_excecao()
+    );
 }
 
 /// Inicializa o GIC e o timer genérico, e desmascara as IRQs.
@@ -309,6 +320,7 @@ pub fn identificar_cpu() -> super::IdCpu {
 ///
 /// Requer que o QEMU seja iniciado com `-semihosting-config enable=on`; sem
 /// isso a instrução vira uma exceção comum. O xtask cuida disso.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub fn encerrar_emulador(resultado: crate::qemu::Resultado) -> ! {
     use crate::qemu::Resultado;
 

@@ -62,6 +62,10 @@ cargo xtask run
 # aarch64: compila e gera a imagem arm64 crua
 cargo xtask build --arch aarch64
 cargo xtask run   --arch aarch64
+
+# Suíte de testes, dentro do emulador
+cargo xtask test
+cargo xtask test --arch aarch64
 ```
 
 Com o kernel rodando, converse com ele de outro terminal:
@@ -113,6 +117,7 @@ kernel/src/
 ├── machine.rs       descrição da máquina, neutra de arquitetura
 ├── serial.rs        papéis de console e canal do agente
 ├── log.rs           logging estruturado em ring buffer
+├── testes.rs        suíte de testes que roda dentro do emulador
 ├── traps.rs         contabilidade de exceções e modo post-mortem
 ├── irq.rs           contadores de interrupções de hardware
 ├── tempo.rs         contagem de tempo desde o boot
@@ -163,6 +168,36 @@ O contraste no caminho de boot é grande:
 Dois workspaces separados: o kernel compila bare-metal e o `xtask` para o
 host. Um único workspace não suporta dois targets padrão.
 
+## Testes
+
+Os testes do kernel **não** rodam com `cargo test`: o harness padrão do Rust
+depende da `std` e de um sistema operacional que colete os resultados, e aqui
+nós somos o sistema operacional.
+
+Em vez disso o kernel é seu próprio harness. Compilado com a feature
+`modo-teste`, ele troca o laço do agente por um executor que roda a suíte,
+imprime o relatório e encerra o emulador com um código de saída — por
+`isa-debug-exit` no x86, por semihosting no ARM.
+
+A vantagem é que os testes rodam no mesmo ambiente que o kernel de verdade,
+em bare-metal, nas duas arquiteturas. Não há simulação nem mocks: quando o
+teste do relógio verifica que o tempo avança, ele está esperando uma
+interrupção de hardware de verdade.
+
+```
+$ cargo xtask test --arch aarch64
+  suite de testes :: aarch64 :: 27 casos
+  ...
+  excecao: breakpoint retomado               ok
+  timer: relogio avanca                      ok
+  27 de 27 passaram
+```
+
+O CI roda formatação, clippy nas cinco configurações, e a suíte nas duas
+arquiteturas em debug e release.
+
+## Idioma
+
 O código e os comentários estão em português — o projeto é também um material
 de estudo, e cada decisão não óbvia é explicada no ponto onde aparece. As
 chaves do protocolo JSON-RPC ficam em inglês por serem um contrato externo
@@ -175,8 +210,9 @@ padronizado.
 - [x] **Fase 0 — Exceções e interrupções.** GDT/TSS/IDT e vetores EL1,
       double fault com pilha dedicada, PIC e GIC, timer a 100 Hz nas duas
       arquiteturas, modo post-mortem.
-- [ ] **Fase 0 (cont.)** — paginação, alocador de frames, heap, suíte de
-      testes automatizada e CI.
+- [x] **Fase 0 — Testes e CI.** 27 casos rodando em bare-metal nas duas
+      arquiteturas, em debug e release, com formatação e lints no CI.
+- [ ] **Fase 0 (cont.)** — paginação, alocador de frames e heap.
 - [ ] **Fase 1 — Kernel de verdade.** Scheduler preemptivo, context switch,
       ring 3 com TSS, `syscall`/`sysret`, ELF loader, processos com espaços de
       endereçamento isolados.

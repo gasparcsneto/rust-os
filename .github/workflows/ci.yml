@@ -1,0 +1,98 @@
+# Integração contínua do kernel.
+#
+# O ponto não óbvio deste arquivo: os testes do kernel não rodam com
+# `cargo test`. O harness padrão do Rust depende da `std` e de um sistema
+# operacional que colete resultados, e aqui nós *somos* o sistema operacional.
+#
+# Em vez disso, o kernel é compilado com a feature `modo-teste`, que troca o
+# laço do agente por um executor de testes. Ele roda a suíte dentro do
+# emulador e o encerra com um código de saída — por `isa-debug-exit` no x86 e
+# por semihosting no ARM. O `cargo xtask test` traduz esse código no sucesso
+# ou falha do job.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  qualidade:
+    name: Formatação e lints
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # O `rust-toolchain.toml` cuida de instalar o nightly com os
+      # componentes e alvos certos; basta invocar o cargo.
+      - name: Cache do cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            kernel/target
+          key: lints-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: lints-
+
+      # Dois workspaces separados exigem duas invocações: o da raiz não
+      # alcança o kernel, que é deliberadamente excluído dele.
+      - name: Formatação
+        run: |
+          cargo fmt --all -- --check
+          cd kernel && cargo fmt --all -- --check
+
+      - name: Lints
+        run: |
+          cargo clippy -p xtask --all-targets -- -D warnings
+          cd kernel
+          for alvo in x86_64-unknown-none aarch64-unknown-none-softfloat; do
+            cargo clippy --target "$alvo" -- -D warnings
+            cargo clippy --target "$alvo" --features modo-teste -- -D warnings
+          done
+
+  testes:
+    name: Testes (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      # Sem fail-fast: quando uma arquitetura quebra, queremos saber na mesma
+      # rodada se a outra também quebrou. Saber se o bug é específico de uma
+      # plataforma costuma ser metade do diagnóstico.
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache do cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            kernel/target
+          key: testes-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: testes-${{ matrix.arch }}-
+
+      - name: Instalar o emulador
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 qemu-system-arm
+
+      - name: Suíte de testes
+        run: cargo xtask test --arch ${{ matrix.arch }}
+
+      # O perfil de release exercita caminhos que o de debug não: as
+      # otimizações podem expor comportamento indefinido que passa despercebido
+      # sem elas, e num kernel isso costuma virar corrupção silenciosa.
+      - name: Suíte de testes (release)
+        run: cargo xtask test --arch ${{ matrix.arch }} --release

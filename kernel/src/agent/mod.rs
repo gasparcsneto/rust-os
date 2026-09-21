@@ -121,7 +121,7 @@ pub fn servir() -> ! {
 /// JSON, então nunca descartamos conteúdo significativo. E é preferível a
 /// confiar só na drenagem — um único byte espúrio no momento errado não deve
 /// custar ao agente uma requisição inteira.
-fn limpar_quadro(linha: &[u8]) -> &[u8] {
+pub(crate) fn limpar_quadro(linha: &[u8]) -> &[u8] {
     let inicio = linha.iter().position(|&b| b > 0x20);
     let Some(inicio) = inicio else {
         return &[];

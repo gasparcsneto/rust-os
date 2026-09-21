@@ -189,6 +189,7 @@ fn system_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
         None => w.null_value()?,
     }
 
+    w.field_u64("uptime_ms", crate::tempo::uptime_ms())?;
     w.field_u64("log_records", crate::log::total_emitidos())?;
     w.end_object()
 }
@@ -254,7 +255,10 @@ fn memory_stats(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.field_u64("region_count", regioes as u64)?;
     // Se o mapa não coube na tabela, dizemos — um agente não tem como
     // desconfiar sozinho de um número que parece plausível.
-    w.field_u64("dropped_regions", crate::machine::regioes_descartadas() as u64)?;
+    w.field_u64(
+        "dropped_regions",
+        crate::machine::regioes_descartadas() as u64,
+    )?;
     w.end_object()
 }
 
