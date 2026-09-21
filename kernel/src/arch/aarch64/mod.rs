@@ -15,10 +15,13 @@
 //! É por isso que este módulo tem assembly e o do x86 não.
 
 pub mod fdt;
+pub mod gic;
 pub mod uart;
 pub mod vetores;
 
 pub use uart::Uart;
+
+use core::arch::asm;
 
 use crate::machine::{Regiao, TipoRegiao};
 
@@ -161,6 +164,55 @@ pub fn init_seriais() -> (Option<Uart>, Option<Uart>) {
 pub fn init_excecoes() {
     vetores::init();
     crate::log_info!("traps", "vetores instalados, rodando em EL{}", vetores::nivel_de_excecao());
+}
+
+/// Inicializa o GIC e o timer genérico, e desmascara as IRQs.
+///
+/// Exige que [`init_excecoes`] já tenha rodado: habilitar interrupções sem
+/// tabela de vetores instalada é pedir um salto para lugar nenhum.
+pub fn init_interrupcoes() {
+    /// 100 Hz dá resolução de 10 ms — suficiente para medir uptime e para o
+    /// scheduler da fase 1, sem custo perceptível de handler.
+    const HZ: u32 = 100;
+
+    // SAFETY: as IRQs ainda estão mascaradas neste ponto (só as
+    // desmascaramos no fim), e a tabela de vetores já está instalada.
+    let efetiva = unsafe {
+        gic::init();
+        gic::init_timer(HZ)
+    };
+
+    crate::tempo::registrar_frequencia(efetiva);
+    crate::irq::nomear(gic::INTID_TIMER as usize, "timer-generico");
+
+    // Desmascara IRQs (bit I do DAIF). A partir daqui o timer preempta o
+    // kernel periodicamente.
+    // SAFETY: há tabela de vetores instalada e um handler para toda classe.
+    unsafe { asm!("msr daifclr, #2", options(nomem, nostack)) };
+
+    crate::log_info!("irq", "GIC ativo, timer a {} Hz", efetiva);
+}
+
+/// Espera pela próxima interrupção, em baixo consumo.
+///
+/// Devolve o controle imediatamente se as IRQs estiverem mascaradas: `wfi`
+/// com interrupções desabilitadas pararia o núcleo para sempre.
+pub fn esperar_interrupcao() {
+    if interrupcoes_habilitadas() {
+        // SAFETY: `wfi` é uma dica de energia, sempre válida.
+        unsafe { asm!("wfi", options(nomem, nostack)) };
+    } else {
+        core::hint::spin_loop();
+    }
+}
+
+/// As IRQs estão desmascaradas?
+fn interrupcoes_habilitadas() -> bool {
+    let daif: u64;
+    // SAFETY: `DAIF` é legível a partir de EL1.
+    unsafe { asm!("mrs {}, daif", out(reg) daif, options(nomem, nostack)) };
+    // Bit 7 ligado significa IRQ *mascarada*.
+    daif & (1 << 7) == 0
 }
 
 /// Dispara um breakpoint (`brk`), que é tratado e retorna normalmente.

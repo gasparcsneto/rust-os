@@ -64,6 +64,18 @@ pub static COMANDOS: &[Command] = &[
         handler: memory_regions,
     },
     Command {
+        nome: "system.uptime",
+        resumo: "Tempo desde o boot, em ticks do timer e em milissegundos.",
+        params: &[],
+        handler: system_uptime,
+    },
+    Command {
+        nome: "irq.stats",
+        resumo: "Contadores de interrupcoes de hardware por linha.",
+        params: &[],
+        handler: irq_stats,
+    },
+    Command {
         nome: "traps.stats",
         resumo: "Contadores de excecoes por tipo e detalhes da ultima falha.",
         params: &[],
@@ -179,6 +191,54 @@ fn system_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
 
     w.field_u64("log_records", crate::log::total_emitidos())?;
     w.end_object()
+}
+
+fn system_uptime(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let hz = crate::tempo::frequencia_hz();
+
+    w.begin_object()?;
+    w.field_u64("ticks", crate::tempo::ticks())?;
+    w.field_u64("uptime_ms", crate::tempo::uptime_ms())?;
+    w.field_u64("timer_hz", hz as u64)?;
+    // Sem timer, `uptime_ms` é zero e seria indistinguível de "acabou de
+    // bootar". Este campo remove a ambiguidade.
+    w.field_bool("timer_active", hz > 0)?;
+    w.end_object()
+}
+
+// ---------------------------------------------------------------------------
+// irq.*
+// ---------------------------------------------------------------------------
+
+fn irq_stats(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    w.field_u64("total", crate::irq::total())?;
+
+    w.key("lines")?;
+    w.begin_array()?;
+    let mut erro: Option<fmt::Error> = None;
+    crate::irq::com_contadores(|linha, nome, total| {
+        if erro.is_some() {
+            return;
+        }
+        let resultado = (|| -> fmt::Result {
+            w.begin_object()?;
+            w.field_u64("line", linha as u64)?;
+            w.field_str("name", nome)?;
+            w.field_u64("count", total)?;
+            w.end_object()
+        })();
+        if let Err(e) = resultado {
+            erro = Some(e);
+        }
+    });
+    w.end_array()?;
+    w.end_object()?;
+
+    match erro {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -367,6 +427,7 @@ fn log_tail(params: Json, w: &mut JsonWriter) -> fmt::Result {
         let resultado = (|| -> fmt::Result {
             w.begin_object()?;
             w.field_u64("seq", registro.seq)?;
+            w.field_u64("uptime_ms", registro.uptime_ms)?;
             w.field_str("level", registro.level.nome())?;
             w.field_str("subsystem", registro.subsistema)?;
             w.field_str("message", registro.mensagem())?;

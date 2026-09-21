@@ -31,6 +31,11 @@ pub fn init() {
         idt.general_protection_fault.set_handler_fn(protecao_geral);
         idt.page_fault.set_handler_fn(falha_de_pagina);
 
+        // Interrupções de hardware, já remapeadas pelo PIC para fora da
+        // faixa das exceções.
+        idt[super::pic::VETOR_TIMER].set_handler_fn(timer);
+        idt[super::pic::VETOR_TECLADO].set_handler_fn(teclado);
+
         // SAFETY: `IST_DOUBLE_FAULT` é um índice válido da IST, e a pilha
         // correspondente foi preparada em `gdt::init`, que roda antes desta
         // função. Ver a explicação do triple fault em `gdt`.
@@ -44,6 +49,36 @@ pub fn init() {
     });
 
     idt.load();
+}
+
+/// Interrupção periódica do timer (IRQ 0).
+///
+/// É o coração do kernel: dá noção de tempo hoje e, na fase 1, será o ponto
+/// em que o scheduler preemptivo decide trocar de tarefa.
+extern "x86-interrupt" fn timer(_quadro: InterruptStackFrame) {
+    crate::tempo::tick();
+    crate::irq::contabilizar(0);
+
+    // SAFETY: estamos no handler desta exata interrupção. Omitir o EOI faria
+    // o PIC considerar a interrupção eternamente em atendimento e nunca mais
+    // entregar outra — o timer dispararia uma única vez.
+    unsafe { super::pic::fim_de_interrupcao(super::pic::VETOR_TIMER) };
+}
+
+/// Interrupção do teclado PS/2 (IRQ 1).
+extern "x86-interrupt" fn teclado(_quadro: InterruptStackFrame) {
+    // Ler o scancode não é opcional: o controlador de teclado só arma a
+    // próxima interrupção depois que o byte anterior for consumido. Sem esta
+    // leitura, a primeira tecla travaria o teclado para sempre.
+    //
+    // SAFETY: 0x60 é a porta de dados do controlador 8042, e a leitura é o
+    // protocolo documentado de consumo do scancode.
+    let _scancode: u8 = unsafe { x86_64::instructions::port::Port::new(0x60).read() };
+
+    crate::irq::contabilizar(1);
+
+    // SAFETY: estamos no handler desta exata interrupção.
+    unsafe { super::pic::fim_de_interrupcao(super::pic::VETOR_TECLADO) };
 }
 
 /// `int3` — o ponto de parada dos depuradores.

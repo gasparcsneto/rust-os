@@ -45,8 +45,10 @@ mod agent;
 mod arch;
 mod log;
 mod machine;
+mod irq;
 mod qemu;
 mod serial;
+mod tempo;
 mod traps;
 
 use core::panic::PanicInfo;
@@ -71,6 +73,11 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     // relatório em vez de num reboot silencioso. Tudo que vem depois desta
     // linha é depurável.
     arch::init_excecoes();
+
+    // Com exceções instaladas, é seguro ligar as interrupções de hardware.
+    // A partir daqui o kernel tem noção de tempo, e os registros de log
+    // passam a carregar um carimbo de uptime de verdade.
+    arch::init_interrupcoes();
 
     let (utilizavel, total, regioes) = machine::estatisticas();
     log_info!(

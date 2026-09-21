@@ -62,16 +62,23 @@ pub fn servir() -> ! {
         };
 
         let Some(byte) = byte else {
-            // ATENÇÃO: nada de `hlt` aqui. Nesta fase o kernel ainda não
-            // habilitou nenhuma interrupção, e `hlt` sem interrupções pendentes
-            // para a CPU *para sempre* — o sistema morreria silenciosamente no
-            // primeiro instante ocioso. `spin_loop` é a primitiva correta para
-            // espera ativa: ela emite a instrução `pause`, que avisa a CPU
-            // sobre o laço de espera sem desligá-la.
-            //
-            // Quando as interrupções existirem, este laço vira orientado a
-            // interrupção de recepção da UART e o `hlt` volta a ser correto.
-            core::hint::spin_loop();
+            if tam == 0 {
+                // Ocioso entre requisições: dormimos até a próxima
+                // interrupção em vez de queimar o núcleo em busy-wait. Com o
+                // timer a 100 Hz, acordamos a cada 10 ms no pior caso.
+                //
+                // `esperar_interrupcao` é seguro mesmo antes de as
+                // interrupções existirem: cada arquitetura verifica se estão
+                // habilitadas e cai em espera ativa se não estiverem. Dormir
+                // com as interrupções mascaradas pararia o núcleo para
+                // sempre.
+                crate::arch::esperar_interrupcao();
+            } else {
+                // No meio de uma requisição, dormir custaria até 10 ms por
+                // byte que ainda não chegou — uma requisição de 100 bytes
+                // levaria um segundo. Aqui a espera ativa é a escolha certa.
+                core::hint::spin_loop();
+            }
             continue;
         };
 

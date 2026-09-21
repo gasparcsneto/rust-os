@@ -25,8 +25,12 @@ construção:**
   O agente *descobre* o que pode fazer em vez de adivinhar.
 
 - **Logging estruturado.** Todo evento é um registro tipado (nível, subsistema,
-  número de sequência) num ring buffer consultável. O texto legível no console
-  é apenas uma renderização — não a fonte da verdade.
+  número de sequência, carimbo de uptime) num ring buffer consultável. O texto
+  legível no console é apenas uma renderização — não a fonte da verdade.
+
+- **Falhas sobrevividas.** Uma exceção fatal não mata o canal: o kernel entra
+  em modo post-mortem e segue respondendo qual exceção ocorreu, onde e com que
+  código. Um cadáver que responde à autópsia.
 
 - **Introspecção de primeira classe.** Mapa de memória, informações de CPU e
   vídeo, histórico de log: tudo acessível de forma estruturada, em tempo de
@@ -89,9 +93,13 @@ Os dois podem rodar ao mesmo tempo: cada arquitetura tem seu próprio socket.
 |---|---|
 | `agent.ping` | Verifica se o canal está vivo |
 | `agent.describe` | Lista todos os comandos e parâmetros |
-| `system.info` | Kernel, CPU e vídeo |
+| `system.info` | Kernel, CPU, vídeo e uptime |
+| `system.uptime` | Ticks do timer e milissegundos desde o boot |
 | `memory.stats` | Totais agregados de memória física |
 | `memory.regions` | Regiões do mapa de memória (`limit`, `usable_only`) |
+| `irq.stats` | Contadores de interrupções de hardware por linha |
+| `traps.stats` | Contadores de exceções e detalhes da última falha |
+| `debug.trigger` | Dispara uma exceção de propósito, para autoteste (`kind`) |
 | `log.tail` | Registros de log estruturados (`count`, `min_level`) |
 
 Esta tabela é gerada a partir do mesmo registro que o kernel usa para validar
@@ -105,6 +113,9 @@ kernel/src/
 ├── machine.rs       descrição da máquina, neutra de arquitetura
 ├── serial.rs        papéis de console e canal do agente
 ├── log.rs           logging estruturado em ring buffer
+├── traps.rs         contabilidade de exceções e modo post-mortem
+├── irq.rs           contadores de interrupções de hardware
+├── tempo.rs         contagem de tempo desde o boot
 ├── qemu.rs          encerramento do emulador para testes
 ├── agent/
 │   ├── mod.rs       laço de atendimento e despacho
@@ -116,12 +127,17 @@ kernel/src/
     ├── mod.rs        seleção da arquitetura em tempo de compilação
     ├── x86_64/
     │   ├── mod.rs    entrada via crate `bootloader`, CPUID, portas de I/O
+    │   ├── gdt.rs    GDT, TSS e pilha dedicada ao double fault
+    │   ├── idt.rs    IDT e handlers de exceção e interrupção
+    │   ├── pic.rs    controlador 8259 e timer PIT
     │   └── uart.rs   UART 16550 por port-mapped I/O
     └── aarch64/
-        ├── mod.rs    boot em assembly, cabeçalho de imagem arm64, MIDR_EL1
-        ├── uart.rs   PL011 por memory-mapped I/O
-        ├── fdt.rs    leitor de device tree escrito à mão
-        └── linker.ld layout de memória e símbolos de boot
+        ├── mod.rs     boot em assembly, cabeçalho de imagem arm64, MIDR_EL1
+        ├── vetores.rs tabela de vetores de exceção (VBAR_EL1)
+        ├── gic.rs     GIC v2 e timer genérico do ARM
+        ├── uart.rs    PL011 por memory-mapped I/O
+        ├── fdt.rs     leitor de device tree escrito à mão
+        └── linker.ld  layout de memória e símbolos de boot
 
 xtask/src/main.rs    build system: compila, gera imagens, roda o emulador
 ```
@@ -140,6 +156,8 @@ O contraste no caminho de boot é grande:
 | Chegamos em | long mode, com pilha e paginação | MMU desligada, sem pilha |
 | Mapa de memória | struct `BootInfo` pronta | device tree, parseado por nós |
 | Seriais | duas UARTs 16550 (port I/O) | uma PL011 (MMIO) |
+| Exceções | IDT de ponteiros, contexto salvo pela CPU | vetores de código, contexto salvo à mão |
+| Interrupções | PIC 8259 + timer PIT | GIC v2 + timer genérico |
 | Encerrar emulador | `isa-debug-exit` | semihosting |
 
 Dois workspaces separados: o kernel compila bare-metal e o `xtask` para o
@@ -154,8 +172,11 @@ padronizado.
 
 - [x] **Fase 0 — Base.** Boot bare-metal em x86_64 e aarch64, serial,
       logging estruturado, canal do agente, abstração de arquitetura.
-- [ ] **Fase 0 (cont.)** — GDT, IDT, exceções, double fault com IST,
-      interrupções de hardware, teclado, paginação, heap, testes no QEMU.
+- [x] **Fase 0 — Exceções e interrupções.** GDT/TSS/IDT e vetores EL1,
+      double fault com pilha dedicada, PIC e GIC, timer a 100 Hz nas duas
+      arquiteturas, modo post-mortem.
+- [ ] **Fase 0 (cont.)** — paginação, alocador de frames, heap, suíte de
+      testes automatizada e CI.
 - [ ] **Fase 1 — Kernel de verdade.** Scheduler preemptivo, context switch,
       ring 3 com TSS, `syscall`/`sysret`, ELF loader, processos com espaços de
       endereçamento isolados.

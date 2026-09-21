@@ -8,6 +8,7 @@
 
 pub mod gdt;
 pub mod idt;
+pub mod pic;
 pub mod uart;
 
 use bootloader_api::BootInfo;
@@ -103,6 +104,44 @@ pub fn init_excecoes() {
     // apontado pela GDT.
     gdt::init();
     idt::init();
+}
+
+/// Remapeia o PIC, programa o timer e habilita as interrupções.
+///
+/// Exige que [`init_excecoes`] já tenha rodado: habilitar interrupções sem
+/// IDT instalada entrega o controle a um vetor indefinido.
+pub fn init_interrupcoes() {
+    /// 100 Hz dá resolução de 10 ms — suficiente para medir uptime e para o
+    /// scheduler da fase 1, sem custo perceptível de handler.
+    const HZ: u32 = 100;
+
+    // SAFETY: as interrupções ainda estão desabilitadas neste ponto (só as
+    // habilitamos no fim) e a IDT já está instalada.
+    let efetiva = unsafe {
+        pic::init();
+        pic::programar_timer(HZ)
+    };
+
+    crate::tempo::registrar_frequencia(efetiva);
+    crate::irq::nomear(0, "timer-pit");
+    crate::irq::nomear(1, "teclado-ps2");
+
+    x86_64::instructions::interrupts::enable();
+
+    crate::log_info!("irq", "PIC remapeado, timer a {} Hz", efetiva);
+}
+
+/// Espera pela próxima interrupção, em baixo consumo.
+///
+/// Devolve o controle imediatamente se as interrupções estiverem
+/// desabilitadas: `hlt` sem interrupções pendentes pararia o núcleo para
+/// sempre — o sistema morreria no primeiro instante ocioso.
+pub fn esperar_interrupcao() {
+    if x86_64::instructions::interrupts::are_enabled() {
+        x86_64::instructions::hlt();
+    } else {
+        core::hint::spin_loop();
+    }
 }
 
 /// Dispara um breakpoint (`int3`), que é tratado e retorna normalmente.

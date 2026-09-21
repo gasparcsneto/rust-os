@@ -253,13 +253,13 @@ extern "C" fn tratar_sync(quadro: &mut Quadro) {
 
 /// Handler de IRQ: interrupção de hardware.
 ///
-/// Nesta fase nenhuma fonte de interrupção está habilitada, então chegar aqui
-/// significa que algo inesperado disparou. Contabilizamos e retomamos — uma
-/// IRQ espúria não é motivo para derrubar o sistema.
+/// Delega ao GIC, que identifica a fonte, atende e finaliza. O quadro salvo
+/// não é consultado hoje, mas existe e está correto — é dele que o scheduler
+/// preemptivo vai precisar na fase 1, quando uma interrupção de timer puder
+/// resultar em troca de contexto.
 #[unsafe(no_mangle)]
-extern "C" fn tratar_irq(quadro: &mut Quadro) {
-    let seq = crate::traps::registrar("irq", quadro.elr, None, 0);
-    crate::log_warn!("traps", "IRQ inesperada #{} em pc={:#x}", seq, quadro.elr);
+extern "C" fn tratar_irq(_quadro: &mut Quadro) {
+    super::gic::tratar();
 }
 
 /// Handler de FIQ: interrupção rápida, de prioridade mais alta.

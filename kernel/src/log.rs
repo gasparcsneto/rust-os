@@ -79,6 +79,12 @@ pub struct Record {
     /// Serve para o agente detectar registros perdidos: se as sequências
     /// pularem entre duas chamadas de `log.tail`, houve sobrescrita no anel.
     pub seq: u64,
+    /// Milissegundos desde o boot, ou zero enquanto não houver timer.
+    ///
+    /// O número de sequência diz *ordem*; este campo diz *quando*. Para quem
+    /// tenta descobrir se o sistema travou ou apenas está lento, é a
+    /// diferença entre diagnosticar e adivinhar.
+    pub uptime_ms: u64,
     pub level: Level,
     /// Subsistema de origem (`"boot"`, `"agent"`, `"mem"`, ...).
     pub subsistema: &'static str,
@@ -89,6 +95,7 @@ pub struct Record {
 impl Record {
     const VAZIO: Self = Self {
         seq: 0,
+        uptime_ms: 0,
         level: Level::Info,
         subsistema: "",
         tam: 0,
@@ -153,6 +160,7 @@ pub fn registrar(nivel: Level, subsistema: &'static str, args: fmt::Arguments) {
 
         let registro = &mut anel.registros[idx];
         registro.seq = seq;
+        registro.uptime_ms = crate::tempo::uptime_ms();
         registro.level = nivel;
         registro.subsistema = subsistema;
 
@@ -180,8 +188,9 @@ pub fn registrar(nivel: Level, subsistema: &'static str, args: fmt::Arguments) {
     // `serial_println!`, e o `format_args!` se recusa a capturar variáveis do
     // escopo quando o literal veio de uma expansão de macro.
     crate::serial_println!(
-        "[{:>5}] {:<5} {:<8} {}",
+        "[{:>5}] {:>8}ms {:<5} {:<8} {}",
         seq,
+        crate::tempo::uptime_ms(),
         nivel.nome(),
         subsistema,
         args
