@@ -23,6 +23,8 @@
 //! - `halt_forever()`: para a CPU definitivamente.
 //! - `sem_interrupcoes()`: executa uma closure com interrupções mascaradas.
 //! - `identificar_cpu()`: string de identificação do processador.
+//! - `init_excecoes()`: instala o mecanismo de tratamento de exceções.
+//! - `disparar_breakpoint()`: gera uma exceção recuperável, para autoteste.
 //! - `encerrar_emulador()`: termina o QEMU comunicando sucesso ou falha.
 //! - `nome()`: o nome da arquitetura, para o protocolo do agente.
 //! - O ponto de entrada de boot, que preenche [`crate::machine`] e chama
@@ -39,8 +41,8 @@ pub mod aarch64;
 pub use aarch64 as atual;
 
 pub use atual::{
-    Uart, encerrar_emulador, halt_forever, identificar_cpu, init_seriais, nome,
-    sem_interrupcoes,
+    Uart, disparar_breakpoint, encerrar_emulador, halt_forever, identificar_cpu, init_excecoes,
+    init_seriais, nome, sem_interrupcoes,
 };
 
 /// Identificação do processador, num buffer de tamanho fixo.

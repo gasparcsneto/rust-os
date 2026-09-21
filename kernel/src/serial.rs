@@ -58,6 +58,19 @@ pub fn init() -> bool {
     disponivel
 }
 
+/// Destrava as portas à força, para uso exclusivo do caminho de pânico.
+///
+/// # Safety
+///
+/// Só pode ser chamada quando o kernel já está em falha irrecuperável e não
+/// há outro núcleo em execução. Ver [`crate::traps::fatal`].
+pub unsafe fn destravar() {
+    unsafe {
+        CONSOLE.force_unlock();
+        AGENT_LINK.force_unlock();
+    }
+}
+
 /// Implementação por trás de [`serial_print!`]. Não chame diretamente.
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {

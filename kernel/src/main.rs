@@ -14,6 +14,8 @@
 //!   modo que o agente descubra a superfície do sistema em vez de adivinhá-la.
 //! - [Logging estruturado](log): todo evento é um registro tipado num ring
 //!   buffer consultável, não texto solto para parsear com regex.
+//! - [Falhas contabilizadas](traps) e um **modo post-mortem**: uma exceção
+//!   fatal não mata o canal do agente, que segue respondendo o que aconteceu.
 //!
 //! No ARM essa premissa deixa de ser conveniência e vira necessidade: a
 //! máquina `virt` do QEMU tem uma única porta serial, então o canal do agente
@@ -33,6 +35,11 @@
 
 #![no_std]
 #![no_main]
+// Handlers de interrupção do x86 precisam de uma convenção de chamada própria
+// (o retorno é `iretq`, não `ret`, e todos os registradores são preservados).
+// O `cfg_attr` mantém o atributo fora do build de ARM, onde a ABI não existe
+// e declará-la geraria aviso.
+#![cfg_attr(target_arch = "x86_64", feature(abi_x86_interrupt))]
 
 mod agent;
 mod arch;
@@ -40,6 +47,7 @@ mod log;
 mod machine;
 mod qemu;
 mod serial;
+mod traps;
 
 use core::panic::PanicInfo;
 
@@ -58,6 +66,11 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
 
     let cpu = arch::identificar_cpu();
     log_info!("cpu", "fabricante: {}", cpu.como_str());
+
+    // Instalar exceções cedo é o que transforma qualquer falha posterior num
+    // relatório em vez de num reboot silencioso. Tudo que vem depois desta
+    // linha é depurável.
+    arch::init_excecoes();
 
     let (utilizavel, total, regioes) = machine::estatisticas();
     log_info!(

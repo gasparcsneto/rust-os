@@ -6,6 +6,8 @@
 //! pronto. Este módulo basicamente traduz esse `BootInfo` para as estruturas
 //! neutras de [`crate::machine`] e segue para o fluxo comum.
 
+pub mod gdt;
+pub mod idt;
 pub mod uart;
 
 use bootloader_api::BootInfo;
@@ -89,6 +91,27 @@ pub fn init_seriais() -> (Option<Uart>, Option<Uart>) {
     let console = unsafe { Uart::abrir(uart::COM1_BASE) };
     let agente = unsafe { Uart::abrir(uart::COM2_BASE) };
     (console, agente)
+}
+
+/// Instala GDT, TSS e IDT.
+///
+/// Depois desta chamada o processador tem para onde ir quando uma exceção
+/// acontece. Antes dela, qualquer falha vira triple fault — reboot sem
+/// diagnóstico.
+pub fn init_excecoes() {
+    // A ordem importa: a IDT referencia a IST, que vive no TSS, que é
+    // apontado pela GDT.
+    gdt::init();
+    idt::init();
+}
+
+/// Dispara um breakpoint (`int3`), que é tratado e retorna normalmente.
+///
+/// Existe para que o agente possa verificar, em tempo de execução, que o
+/// caminho de exceções está de fato funcionando — ver o comando
+/// `debug.trigger`.
+pub fn disparar_breakpoint() {
+    x86_64::instructions::interrupts::int3();
 }
 
 /// Executa `f` com as interrupções mascaradas, restaurando o estado ao sair.

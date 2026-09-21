@@ -16,6 +16,7 @@
 
 pub mod fdt;
 pub mod uart;
+pub mod vetores;
 
 pub use uart::Uart;
 
@@ -151,6 +152,26 @@ pub fn init_seriais() -> (Option<Uart>, Option<Uart>) {
     // núcleo único, então o acesso é de fato exclusivo.
     let agente = unsafe { Uart::abrir(uart::PL011_BASE) };
     (None, agente)
+}
+
+/// Instala a tabela de vetores de exceção em `VBAR_EL1`.
+///
+/// Antes desta chamada, uma exceção salta para onde quer que o firmware tenha
+/// deixado o VBAR apontando — na prática, comportamento indefinido.
+pub fn init_excecoes() {
+    vetores::init();
+    crate::log_info!("traps", "vetores instalados, rodando em EL{}", vetores::nivel_de_excecao());
+}
+
+/// Dispara um breakpoint (`brk`), que é tratado e retorna normalmente.
+///
+/// Existe para que o agente possa verificar, em tempo de execução, que o
+/// caminho de exceções está de fato funcionando — ver o comando
+/// `debug.trigger`.
+pub fn disparar_breakpoint() {
+    // SAFETY: `brk` gera uma exceção síncrona que o handler em `vetores`
+    // reconhece e da qual retoma, avançando o ELR por cima desta instrução.
+    unsafe { core::arch::asm!("brk #0", options(nomem, nostack)) };
 }
 
 /// Executa `f` com as interrupções mascaradas, restaurando o estado ao sair.

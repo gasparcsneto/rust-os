@@ -64,6 +64,25 @@ pub static COMANDOS: &[Command] = &[
         handler: memory_regions,
     },
     Command {
+        nome: "traps.stats",
+        resumo: "Contadores de excecoes por tipo e detalhes da ultima falha.",
+        params: &[],
+        handler: traps_stats,
+    },
+    Command {
+        nome: "debug.trigger",
+        resumo: "Dispara deliberadamente uma excecao recuperavel, para verificar \
+                 que o caminho de tratamento de excecoes esta funcionando.",
+        params: &[ParamSpec {
+            nome: "kind",
+            tipo: TipoParam::Texto,
+            obrigatorio: true,
+            descricao: "Tipo de excecao. Hoje apenas `breakpoint`, que e \
+                        recuperavel nas duas arquiteturas.",
+        }],
+        handler: debug_trigger,
+    },
+    Command {
         nome: "log.tail",
         resumo: "Retorna os registros de log mais recentes, de forma estruturada.",
         params: &[
@@ -230,6 +249,93 @@ fn memory_regions(params: Json, w: &mut JsonWriter) -> fmt::Result {
         Some(e) => Err(e),
         None => Ok(()),
     }
+}
+
+// ---------------------------------------------------------------------------
+// traps.* e debug.*
+// ---------------------------------------------------------------------------
+
+fn traps_stats(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    w.field_u64("total", crate::traps::total())?;
+
+    w.key("by_type")?;
+    w.begin_array()?;
+    let mut erro: Option<fmt::Error> = None;
+    crate::traps::com_contadores(|nome, total| {
+        if erro.is_some() {
+            return;
+        }
+        let resultado = (|| -> fmt::Result {
+            w.begin_object()?;
+            w.field_str("name", nome)?;
+            w.field_u64("count", total)?;
+            w.end_object()
+        })();
+        if let Err(e) = resultado {
+            erro = Some(e);
+        }
+    });
+    w.end_array()?;
+
+    w.key("last")?;
+    match crate::traps::ultima() {
+        Some(falha) => {
+            w.begin_object()?;
+            w.field_u64("seq", falha.seq)?;
+            w.field_str("name", falha.nome)?;
+            w.field_u64("pc", falha.pc)?;
+            w.key("address")?;
+            match falha.endereco {
+                Some(endereco) => w.u64_value(endereco)?,
+                None => w.null_value()?,
+            }
+            // O código de erro vai cru: qualquer decodificação nossa perderia
+            // bits que podem importar, e o agente tem o manual da arquitetura.
+            w.field_u64("raw_code", falha.codigo)?;
+            w.end_object()?;
+        }
+        None => w.null_value()?,
+    }
+
+    w.end_object()?;
+
+    match erro {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+fn debug_trigger(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    // `kind` é obrigatório e já foi validado como texto pelo registro, mas o
+    // *valor* ainda pode ser qualquer coisa — validação de domínio é do
+    // handler.
+    let tipo = params.member("kind").and_then(|v| v.as_str()).unwrap_or("");
+
+    w.begin_object()?;
+    match tipo {
+        "breakpoint" => {
+            let antes = crate::traps::total();
+
+            // Se o tratamento de exceções estiver quebrado, o kernel morre
+            // nesta linha e o agente recebe um timeout em vez de resposta —
+            // que também é um resultado informativo.
+            crate::arch::disparar_breakpoint();
+
+            w.field_str("triggered", "breakpoint")?;
+            // Chegar aqui é a prova: o handler rodou e devolveu o controle.
+            w.field_bool("survived", true)?;
+            w.field_u64("traps_before", antes)?;
+            w.field_u64("traps_after", crate::traps::total())?;
+        }
+        outro => {
+            w.field_bool("survived", true)?;
+            w.field_str("error", "tipo de excecao nao suportado")?;
+            w.field_str("requested", outro)?;
+            w.field_str("supported", "breakpoint")?;
+        }
+    }
+    w.end_object()
 }
 
 // ---------------------------------------------------------------------------

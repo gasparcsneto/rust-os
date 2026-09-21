@@ -207,6 +207,18 @@ pub fn ultimos<F: FnMut(&Record)>(max: usize, nivel_minimo: Level, mut f: F) {
     }
 }
 
+/// Destrava o ring buffer à força, para uso exclusivo do caminho de pânico.
+///
+/// # Safety
+///
+/// Só pode ser chamada quando o kernel já está em falha irrecuperável e não
+/// há outro núcleo em execução. Destravar um mutex que alguém ainda usa
+/// permite corrida de dados — aqui isso é aceito porque a alternativa é um
+/// deadlock que engoliria o relatório da falha.
+pub unsafe fn destravar() {
+    unsafe { ANEL.force_unlock() }
+}
+
 /// Total de registros emitidos desde o boot.
 pub fn total_emitidos() -> u64 {
     ANEL.lock().total
