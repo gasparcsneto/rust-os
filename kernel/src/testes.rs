@@ -575,6 +575,125 @@ fn regioes_de_memoria_sao_coerentes() -> Resultado {
 }
 
 // ===========================================================================
+// Alocador de frames
+// ===========================================================================
+
+fn frames_alocacao_alinhada_e_distinta() -> Resultado {
+    const QUANTOS: usize = 8;
+    let mut obtidos = [0u64; QUANTOS];
+
+    for slot in obtidos.iter_mut() {
+        match crate::frames::alocar() {
+            Some(endereco) => *slot = endereco,
+            None => return Err("alocador ficou sem frames"),
+        }
+    }
+
+    let mut problema = None;
+    for (i, &endereco) in obtidos.iter().enumerate() {
+        if !endereco.is_multiple_of(crate::frames::TAMANHO_FRAME) {
+            problema = Some("frame devolvido sem alinhamento");
+        }
+        // Entregar o mesmo frame duas vezes é a falha mais grave possível
+        // neste módulo: dois donos escrevendo na mesma memória física.
+        for &outro in obtidos.iter().skip(i + 1) {
+            if endereco == outro {
+                problema = Some("mesmo frame entregue duas vezes");
+            }
+        }
+    }
+
+    // Devolvemos tudo mesmo em caso de falha: um teste não deve vazar recursos
+    // e distorcer os que vêm depois dele.
+    for &endereco in &obtidos {
+        crate::frames::liberar(endereco);
+    }
+
+    match problema {
+        Some(motivo) => Err(motivo),
+        None => Ok(()),
+    }
+}
+
+fn frames_liberar_devolve_ao_contador() -> Resultado {
+    let (antes, _) = crate::frames::estatisticas();
+
+    let endereco = crate::frames::alocar().ok_or("alocador sem frames")?;
+    let (durante, _) = crate::frames::estatisticas();
+    if durante != antes - 1 {
+        crate::frames::liberar(endereco);
+        return Err("contador de livres nao caiu ao alocar");
+    }
+    if crate::frames::esta_livre(endereco) {
+        crate::frames::liberar(endereco);
+        return Err("frame alocado ainda consta como livre");
+    }
+
+    crate::frames::liberar(endereco);
+    let (depois, _) = crate::frames::estatisticas();
+    if depois != antes {
+        return Err("contador de livres nao voltou ao liberar");
+    }
+    if !crate::frames::esta_livre(endereco) {
+        return Err("frame liberado nao voltou a constar como livre");
+    }
+    Ok(())
+}
+
+/// Desreferenciar um ponteiro nulo precisa continuar falhando de forma
+/// diagnosticável. Se o frame zero entrasse em circulação, uma escrita em
+/// `null` corromperia dados legítimos em silêncio.
+fn frames_frame_nulo_nunca_entregue() -> Resultado {
+    if crate::frames::esta_livre(0) {
+        return Err("frame do endereco zero esta em circulacao");
+    }
+    Ok(())
+}
+
+/// As faixas que cada arquitetura declara ocupadas — no ARM, a imagem do
+/// kernel e o device tree — não podem estar livres.
+///
+/// No x86 não há faixas declaradas, porque o bootloader já as exclui do mapa;
+/// lá este caso passa sem verificar nada, e isso é honesto: não há o que
+/// verificar.
+fn frames_faixas_reservadas_fora_de_circulacao() -> Resultado {
+    let mut vazou = false;
+
+    crate::arch::reservar_faixas(|inicio, fim| {
+        let mut endereco = inicio & !(crate::frames::TAMANHO_FRAME - 1);
+        while endereco < fim {
+            if crate::frames::esta_livre(endereco) {
+                vazou = true;
+            }
+            endereco += crate::frames::TAMANHO_FRAME;
+        }
+    });
+
+    if vazou {
+        Err("faixa reservada aparece como livre")
+    } else {
+        Ok(())
+    }
+}
+
+fn frames_estatisticas_coerentes() -> Resultado {
+    let (livres, rastreados) = crate::frames::estatisticas();
+    if rastreados == 0 {
+        return Err("nenhum frame rastreado");
+    }
+    if livres > rastreados {
+        return Err("mais frames livres que rastreados");
+    }
+    if livres == 0 {
+        return Err("nenhum frame livre apos o boot");
+    }
+    if !crate::frames::base().is_multiple_of(crate::frames::TAMANHO_FRAME) {
+        return Err("base do alocador desalinhada");
+    }
+    Ok(())
+}
+
+// ===========================================================================
 // Registro e execução
 // ===========================================================================
 
@@ -686,6 +805,26 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "memoria: regioes coerentes",
         f: regioes_de_memoria_sao_coerentes,
+    },
+    Caso {
+        nome: "frames: alinhados e distintos",
+        f: frames_alocacao_alinhada_e_distinta,
+    },
+    Caso {
+        nome: "frames: liberar devolve ao pool",
+        f: frames_liberar_devolve_ao_contador,
+    },
+    Caso {
+        nome: "frames: frame nulo reservado",
+        f: frames_frame_nulo_nunca_entregue,
+    },
+    Caso {
+        nome: "frames: faixas reservadas fora",
+        f: frames_faixas_reservadas_fora_de_circulacao,
+    },
+    Caso {
+        nome: "frames: estatisticas coerentes",
+        f: frames_estatisticas_coerentes,
     },
 ];
 

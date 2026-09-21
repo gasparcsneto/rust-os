@@ -94,6 +94,16 @@ pub fn init_seriais() -> (Option<Uart>, Option<Uart>) {
     (console, agente)
 }
 
+/// Informa faixas de memória física que o alocador de frames não pode
+/// entregar.
+///
+/// No x86 não há nenhuma: o crate `bootloader` já marca no mapa de memória
+/// tudo que ocupou — a imagem do kernel, as tabelas de página iniciais, o
+/// próprio `BootInfo` — com o tipo `Bootloader`, e nunca como utilizável. A
+/// tradução em [`inicio`] preserva essa distinção, então o alocador já nasce
+/// sabendo o que evitar.
+pub fn reservar_faixas(_f: impl FnMut(u64, u64)) {}
+
 /// Instala GDT, TSS e IDT.
 ///
 /// Depois desta chamada o processador tem para onde ir quando uma exceção

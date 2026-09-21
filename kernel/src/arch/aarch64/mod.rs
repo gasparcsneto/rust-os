@@ -22,8 +22,16 @@ pub mod vetores;
 pub use uart::Uart;
 
 use core::arch::asm;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::machine::{Regiao, TipoRegiao};
+
+/// Onde o firmware depositou o device tree, e quanto ele ocupa.
+///
+/// Guardado no boot porque o alocador de frames precisa saber disso muito
+/// depois, e o ponteiro só chega uma vez, em `x0`.
+static DTB_INICIO: AtomicU64 = AtomicU64::new(0);
+static DTB_TAMANHO: AtomicU64 = AtomicU64::new(0);
 
 /// Nome da arquitetura, exposto no protocolo do agente.
 pub const fn nome() -> &'static str {
@@ -136,6 +144,12 @@ extern "C" fn inicio_aarch64(dtb: u64) -> ! {
         crate::log_error!("fdt", "device tree ilegivel: {}", erro);
     }
 
+    // SAFETY: mesmo ponteiro já validado pelo percurso acima.
+    if let Some(tamanho) = unsafe { fdt::tamanho_total(dtb as *const u8) } {
+        DTB_INICIO.store(dtb, Ordering::Relaxed);
+        DTB_TAMANHO.store(tamanho, Ordering::Relaxed);
+    }
+
     crate::inicio_comum(canal)
 }
 
@@ -161,6 +175,39 @@ pub fn init_seriais() -> (Option<Uart>, Option<Uart>) {
         (porta, None)
     } else {
         (None, porta)
+    }
+}
+
+/// Informa faixas de memória física que o alocador de frames não pode
+/// entregar.
+///
+/// No ARM isto não é opcional, e o motivo é uma diferença de fundo em relação
+/// ao x86: o device tree descreve a **RAM instalada**, não a RAM *livre*. Ele
+/// não tem como saber o que o firmware já colocou ali.
+///
+/// Duas coisas estão dentro dessa RAM "utilizável" e não podem ser entregues:
+///
+/// 1. A imagem do kernel, delimitada pelos símbolos do linker script. Inclui
+///    o `.bss` e, portanto, a pilha em que estamos rodando agora.
+/// 2. O próprio device tree, que o firmware depositou na RAM.
+///
+/// Sem isto, a primeira alocação de frame devolveria alegremente o pedaço de
+/// memória onde o kernel está executando.
+pub fn reservar_faixas(mut f: impl FnMut(u64, u64)) {
+    // SAFETY: símbolos definidos pelo linker script; só tomamos seus
+    // endereços, nunca lemos através deles.
+    unsafe extern "C" {
+        static __image_start: u8;
+        static __image_end: u8;
+    }
+    let inicio = &raw const __image_start as u64;
+    let fim = &raw const __image_end as u64;
+    f(inicio, fim);
+
+    let dtb = DTB_INICIO.load(Ordering::Relaxed);
+    let tamanho = DTB_TAMANHO.load(Ordering::Relaxed);
+    if tamanho > 0 {
+        f(dtb, dtb + tamanho);
     }
 }
 

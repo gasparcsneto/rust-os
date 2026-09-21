@@ -64,6 +64,12 @@ pub static COMANDOS: &[Command] = &[
         handler: memory_regions,
     },
     Command {
+        nome: "memory.frames",
+        resumo: "Estado do alocador de frames de memoria fisica.",
+        params: &[],
+        handler: memory_frames,
+    },
+    Command {
         nome: "system.uptime",
         resumo: "Tempo desde o boot, em ticks do timer e em milissegundos.",
         params: &[],
@@ -204,6 +210,19 @@ fn system_uptime(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     // Sem timer, `uptime_ms` é zero e seria indistinguível de "acabou de
     // bootar". Este campo remove a ambiguidade.
     w.field_bool("timer_active", hz > 0)?;
+    w.end_object()
+}
+
+fn memory_frames(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let (livres, rastreados) = crate::frames::estatisticas();
+
+    w.begin_object()?;
+    w.field_u64("frame_size", crate::frames::TAMANHO_FRAME)?;
+    w.field_u64("base", crate::frames::base())?;
+    w.field_u64("tracked", rastreados as u64)?;
+    w.field_u64("free", livres as u64)?;
+    w.field_u64("used", (rastreados - livres) as u64)?;
+    w.field_u64("free_bytes", livres as u64 * crate::frames::TAMANHO_FRAME)?;
     w.end_object()
 }
 

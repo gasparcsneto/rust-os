@@ -25,6 +25,7 @@
 //! - `identificar_cpu()`: string de identificação do processador.
 //! - `init_excecoes()`: instala o mecanismo de tratamento de exceções.
 //! - `init_interrupcoes()`: liga o controlador de interrupções e o timer.
+//! - `reservar_faixas()`: faixas físicas que o alocador de frames deve evitar.
 //! - `esperar_interrupcao()`: dorme até a próxima interrupção.
 //! - `disparar_breakpoint()`: gera uma exceção recuperável, para autoteste.
 //! - `encerrar_emulador()`: termina o QEMU comunicando sucesso ou falha.
@@ -44,7 +45,8 @@ pub use aarch64 as atual;
 
 pub use atual::{
     Uart, disparar_breakpoint, encerrar_emulador, esperar_interrupcao, halt_forever,
-    identificar_cpu, init_excecoes, init_interrupcoes, init_seriais, nome, sem_interrupcoes,
+    identificar_cpu, init_excecoes, init_interrupcoes, init_seriais, nome, reservar_faixas,
+    sem_interrupcoes,
 };
 
 /// Identificação do processador, num buffer de tamanho fixo.

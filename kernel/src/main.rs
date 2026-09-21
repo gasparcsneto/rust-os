@@ -43,6 +43,7 @@
 
 mod agent;
 mod arch;
+mod frames;
 mod irq;
 mod log;
 mod machine;
@@ -100,6 +101,10 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
             descartadas
         );
     }
+
+    // O alocador de frames precisa do mapa de memória já traduzido, e das
+    // faixas que cada arquitetura sabe estarem ocupadas.
+    frames::init();
 
     match machine::video() {
         Some(v) => log_info!(

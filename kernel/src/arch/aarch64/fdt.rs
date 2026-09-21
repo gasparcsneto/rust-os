@@ -85,6 +85,29 @@ unsafe fn ler_celulas(base: *const u8, offset: usize, cells: u32) -> u64 {
     valor
 }
 
+/// Tamanho total do blob, lido do cabeçalho.
+///
+/// Serve para reservar a região onde o firmware o depositou: ela fica dentro
+/// da RAM que o próprio device tree declara utilizável, então sem isto o
+/// alocador a entregaria alegremente.
+///
+/// # Safety
+///
+/// `dtb` precisa apontar para um device tree válido, ou ser nulo.
+pub unsafe fn tamanho_total(dtb: *const u8) -> Option<u64> {
+    if dtb.is_null() {
+        return None;
+    }
+    // SAFETY: o chamador garantiu validade; conferimos a assinatura antes de
+    // confiar em qualquer outro campo.
+    unsafe {
+        if be32(dtb, 0) != MAGIC {
+            return None;
+        }
+        Some(be32(dtb, 4) as u64)
+    }
+}
+
 /// Percorre o device tree e chama `f(inicio, tamanho)` para cada faixa de RAM.
 ///
 /// # Safety
