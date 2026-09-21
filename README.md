@@ -97,7 +97,7 @@ Os dois podem rodar ao mesmo tempo: cada arquitetura tem seu próprio socket.
 |---|---|
 | `agent.ping` | Verifica se o canal está vivo |
 | `agent.describe` | Lista todos os comandos e parâmetros |
-| `system.info` | Kernel, CPU, vídeo e uptime |
+| `system.info` | Kernel, CPU, vídeo, uptime e integridade da pilha |
 | `system.uptime` | Ticks do timer e milissegundos desde o boot |
 | `memory.stats` | Totais agregados de memória física |
 | `memory.regions` | Regiões do mapa de memória (`limit`, `usable_only`) |

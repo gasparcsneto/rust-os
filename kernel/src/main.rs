@@ -185,5 +185,14 @@ fn panic(info: &PanicInfo) -> ! {
     serial_println!("!!! PANICO NO KERNEL !!!");
     serial_println!("{}", info);
 
+    // Na suíte de testes, parar a CPU seria o pior desfecho possível: o
+    // emulador ficaria rodando para sempre e o CI penduraria até estourar o
+    // tempo do job, sem dizer o que houve. Encerramos com código de falha, que
+    // é o que transforma um pânico em "teste falhou" em vez de "trabalho
+    // travado".
+    #[cfg(feature = "modo-teste")]
+    qemu::encerrar(qemu::Resultado::Falha);
+
+    #[cfg(not(feature = "modo-teste"))]
     arch::halt_forever()
 }

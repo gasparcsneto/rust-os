@@ -137,6 +137,19 @@ pub fn init_paginacao() {
 
 pub use paginacao::{acesso_fisico, desmapear, mapear_frame, traduzir};
 
+/// A pilha do kernel transbordou?
+///
+/// No x86 o bootloader instala uma **guard page** logo abaixo da pilha: uma
+/// página desmapeada que transforma o estouro numa falha de página no exato
+/// instante em que acontece — e, com a pilha de emergência da IST, num
+/// relatório de double fault em vez de um reboot.
+///
+/// Ou seja, aqui a detecção é do hardware e é imediata. Se a pilha tivesse
+/// transbordado, não estaríamos executando esta função.
+pub fn pilha_intacta() -> bool {
+    true
+}
+
 /// Informa faixas de memória física que o alocador de frames não pode
 /// entregar.
 ///

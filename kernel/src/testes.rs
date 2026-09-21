@@ -1041,6 +1041,24 @@ fn heap_estatisticas_coerentes() -> Resultado {
     Ok(())
 }
 
+/// A pilha do kernel não pode ter transbordado.
+///
+/// No x86 quem garante isso é o hardware: o bootloader instala uma guard page
+/// abaixo da pilha, e um estouro vira falha de página no ato — com a pilha de
+/// emergência da IST transformando o que seria um triple fault num relatório.
+///
+/// No ARM a pilha mora dentro de um bloco de identidade de 1 GiB e não há
+/// guard page, então a detecção é por canário e *a posteriori*. Menos bom, mas
+/// infinitamente melhor que corromper o anel de log e o estado do alocador em
+/// silêncio.
+fn pilha_nao_transbordou() -> Resultado {
+    if crate::arch::pilha_intacta() {
+        Ok(())
+    } else {
+        Err("canario da pilha foi sobrescrito: houve estouro")
+    }
+}
+
 // ===========================================================================
 // Registro e execução
 // ===========================================================================
@@ -1229,6 +1247,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "heap: estatisticas coerentes",
         f: heap_estatisticas_coerentes,
+    },
+    Caso {
+        nome: "pilha: sem estouro",
+        f: pilha_nao_transbordou,
     },
 ];
 

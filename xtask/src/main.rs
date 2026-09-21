@@ -17,9 +17,19 @@ use std::{
     io::{BufRead, BufReader, Write},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
-    process::{Command, ExitCode},
-    time::Duration,
+    process::{Child, Command, ExitCode},
+    time::{Duration, Instant},
 };
+
+/// Teto de tempo para a suíte de testes.
+///
+/// Um kernel tem formas demais de travar para que esperar indefinidamente seja
+/// aceitável: o bootloader pode falhar e reiniciar em laço, uma exceção não
+/// tratada pode causar triple fault e reboot, um teste pode entrar num laço
+/// sem saída. Sem teto, qualquer um desses casos vira um job de CI pendurado
+/// que não diz nada — o pior modo de falhar. Dois minutos é muito acima dos
+/// poucos segundos que a suíte leva.
+const TETO_DOS_TESTES: Duration = Duration::from_secs(120);
 
 /// As arquiteturas que o kernel suporta.
 ///
@@ -459,20 +469,64 @@ fn test(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
         arch.nome()
     );
 
-    let status = comando_qemu(arch, &artefato, None)?
-        .status()
+    let filho = comando_qemu(arch, &artefato, None)?
+        .spawn()
         .map_err(|e| format!("não foi possível iniciar o {}: {e}", arch.qemu()))?;
 
-    match status.code() {
-        Some(code) if code == arch.codigo_de_sucesso() => {
+    match aguardar_com_teto(filho, TETO_DOS_TESTES)? {
+        Desfecho::Codigo(code) if code == arch.codigo_de_sucesso() => {
             println!("\n[xtask] todos os testes passaram");
             Ok(ExitCode::SUCCESS)
         }
-        Some(code) => {
-            eprintln!("\n[xtask] os testes falharam (qemu saiu com {code})");
+        Desfecho::Codigo(code) => {
+            eprintln!("\n[xtask] os testes falharam (emulador saiu com {code})");
             Ok(ExitCode::FAILURE)
         }
-        None => Err("o QEMU foi terminado por um sinal".into()),
+        Desfecho::Sinal => Err("o emulador foi terminado por um sinal".into()),
+        Desfecho::Estourou => Err(format!(
+            "os testes nao terminaram em {}s e o emulador foi encerrado\n\
+             causas tipicas: laco sem saida num teste, triple fault reiniciando \
+             a maquina, ou o dispositivo de saida do emulador sem funcionar",
+            TETO_DOS_TESTES.as_secs()
+        )),
+    }
+}
+
+/// Como um processo do emulador terminou.
+enum Desfecho {
+    Codigo(i32),
+    Sinal,
+    Estourou,
+}
+
+/// Aguarda o processo, matando-o se passar do teto.
+fn aguardar_com_teto(mut filho: Child, teto: Duration) -> Result<Desfecho, String> {
+    let inicio = Instant::now();
+
+    loop {
+        match filho
+            .try_wait()
+            .map_err(|e| format!("falha ao aguardar o emulador: {e}"))?
+        {
+            Some(status) => {
+                return Ok(match status.code() {
+                    Some(code) => Desfecho::Codigo(code),
+                    None => Desfecho::Sinal,
+                });
+            }
+            None => {
+                if inicio.elapsed() >= teto {
+                    // Melhor um processo morto e um diagnóstico claro que um
+                    // job de CI pendurado sem explicação.
+                    let _ = filho.kill();
+                    let _ = filho.wait();
+                    return Ok(Desfecho::Estourou);
+                }
+                // 50 ms mantém a espera barata sem atrasar perceptivelmente o
+                // fim de uma suíte que leva segundos.
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
     }
 }
 

@@ -45,14 +45,16 @@ pub mod aarch64;
 #[cfg(target_arch = "aarch64")]
 pub use aarch64 as atual;
 
-// A paginação ainda só tem consumidor nos testes: quem vai mapear páginas de
-// verdade é o heap, próximo da fila. Anotar mantém o build limpo sem esconder
-// código morto de verdade.
-#[cfg_attr(not(feature = "modo-teste"), allow(unused_imports))]
+// A fachada reexporta a superfície completa que os backends oferecem. Quais
+// itens têm consumidor depende da configuração de build — `halt_forever` não
+// é usado em modo de teste, onde o pânico encerra o emulador; e há itens que
+// só os testes exercitam. Anotar aqui é mais honesto que espalhar `allow`
+// pelos backends, que esconderia código morto de verdade dentro deles.
+#[allow(unused_imports)]
 pub use atual::{
     Uart, acesso_fisico, desmapear, disparar_breakpoint, encerrar_emulador, esperar_interrupcao,
     halt_forever, identificar_cpu, init_excecoes, init_interrupcoes, init_paginacao, init_seriais,
-    mapear_frame, nome, reservar_faixas, sem_interrupcoes, traduzir,
+    mapear_frame, nome, pilha_intacta, reservar_faixas, sem_interrupcoes, traduzir,
 };
 
 /// Tamanho de uma página nas duas arquiteturas.

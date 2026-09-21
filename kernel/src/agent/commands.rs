@@ -214,6 +214,13 @@ fn system_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
 
     w.field_u64("uptime_ms", crate::tempo::uptime_ms())?;
     w.field_u64("log_records", crate::log::total_emitidos())?;
+
+    // Integridade da pilha do kernel. No x86 é o hardware que garante, com a
+    // guard page que o bootloader instala; no ARM é um canário verificado a
+    // posteriori. Em ambos, `false` significa que a pilha invadiu memória que
+    // não era dela — e nesse caso qualquer outro dado desta resposta pode
+    // estar corrompido.
+    w.field_bool("stack_intact", crate::arch::pilha_intacta())?;
     w.end_object()
 }
 

@@ -105,6 +105,14 @@ _start:
     b       .Llimpar_bss
 
 .Lem_rust:
+    // Planta o canário logo abaixo da pilha. O .bss acabou de ser zerado,
+    // então este valor só pode sumir se alguém escrever ali — e o único
+    // candidato é a pilha crescendo além do seu limite.
+    adrp    x1, __stack_canary
+    add     x1, x1, :lo12:__stack_canary
+    ldr     x2, ={canario}
+    str     x2, [x1]
+
     bl      {entrada}
 
     // `entrada` é divergente, então nunca voltamos. Se voltarmos, algo está
@@ -114,7 +122,14 @@ _start:
     b       .Lestacionar
 "#,
     entrada = sym inicio_aarch64,
+    canario = const CANARIO_DA_PILHA,
 );
+
+/// Valor plantado logo abaixo da pilha para detectar estouro.
+///
+/// Escolhido para não ser confundível com lixo plausível: nem zero, nem um
+/// endereço, nem um valor que apareça naturalmente em dados do kernel.
+const CANARIO_DA_PILHA: u64 = 0xDEAD_BEEF_CAFE_F00D;
 
 /// Primeira função Rust a executar no ARM.
 ///
@@ -191,6 +206,26 @@ pub fn init_paginacao() {
 }
 
 pub use mmu::{acesso_fisico, desmapear, mapear_frame, traduzir};
+
+/// A pilha do kernel transbordou?
+///
+/// Compara o canário plantado no boot. `false` significa que a pilha cresceu
+/// além do seu limite e sobrescreveu o que havia abaixo — provavelmente os
+/// `static` do kernel.
+///
+/// Isto é uma detecção *a posteriori*, não uma guarda: diferente da guard page
+/// do x86, o estouro já aconteceu quando descobrimos. É o que dá para fazer
+/// enquanto a pilha vive dentro de um bloco de identidade de 1 GiB.
+pub fn pilha_intacta() -> bool {
+    // SAFETY: símbolo do linker script; lemos uma palavra alinhada dentro do
+    // .bss, que existe durante todo o tempo de vida do kernel.
+    unsafe extern "C" {
+        static __stack_canary: u64;
+    }
+    // SAFETY: leitura volátil de um endereço válido e alinhado.
+    let valor = unsafe { core::ptr::read_volatile(&raw const __stack_canary) };
+    valor == CANARIO_DA_PILHA
+}
 
 /// Informa faixas de memória física que o alocador de frames não pode
 /// entregar.

@@ -38,6 +38,20 @@ SECTIONS
          * no layout, zerada junto com o resto e não corre o risco de colidir
          * com dados do kernel. */
         . = ALIGN(16);
+        /* Canário: uma palavra logo abaixo da pilha, com valor conhecido.
+         *
+         * No x86 o bootloader instala uma guard page de verdade — uma página
+         * desmapeada que faz o estouro virar falha na hora. Aqui a pilha mora
+         * dentro de um bloco de identidade de 1 GiB, e desmapear 4 KiB de
+         * dentro dele exigiria fatiar o bloco, o que o mapeador recusa de
+         * propósito.
+         *
+         * O canário não detecta o estouro no instante em que acontece, mas
+         * detecta que aconteceu — e sem ele um estouro corromperia os `static`
+         * do kernel (o anel de log, o estado do alocador) em silêncio
+         * absoluto. */
+        __stack_canary = .;
+        . += 16;
         __stack_bottom = .;
         . += 0x20000;          /* 128 KiB */
         __stack_top = .;
