@@ -41,8 +41,41 @@ static DESLOCAMENTO_FISICO: AtomicU64 = AtomicU64::new(u64::MAX);
 const CONFIG: bootloader_api::BootloaderConfig = {
     let mut config = bootloader_api::BootloaderConfig::new_default();
     config.mappings.physical_memory = Some(bootloader_api::config::Mapping::Dynamic);
+    config.mappings.kernel_base = bootloader_api::config::Mapping::FixedAddress(BASE_DO_KERNEL);
     config
 };
+
+/// Endereço virtual onde o kernel é carregado.
+///
+/// # Por que fixo, e não dinâmico
+///
+/// Por padrão o bootloader escolhe o endereço na hora. O endereço é estável
+/// entre execuções (o ASLR vem desligado), mas **não é conhecido em tempo de
+/// compilação** — e isso custa caro na hora de depurar.
+///
+/// O binário do kernel é um executável independente de posição, ligado a
+/// partir do zero. Com base dinâmica, todo endereço que o kernel reporta em
+/// tempo de execução — o `pc` de uma exceção em `traps.stats`, um quadro de
+/// pilha no depurador — está deslocado por uma constante desconhecida em
+/// relação ao binário. Traduzir endereço para arquivo e linha exige descobrir
+/// esse deslocamento antes, e um depurador conectado *antes* do boot não tem
+/// como perguntá-lo a ninguém.
+///
+/// Fixando a base, o deslocamento passa a ser esta constante. `cargo xtask
+/// simbolo` e `cargo xtask debug` a usam diretamente.
+///
+/// # Por que este endereço
+///
+/// `0xFFFF_8000_0000_0000` é o primeiro endereço canônico da metade alta do
+/// espaço virtual de 48 bits. É a convenção de quase todo kernel de 64 bits, e
+/// a razão é a fase 1: quando houver processos, a metade baixa inteira fica
+/// para o userspace e a alta para o kernel, sem que o mapa de um precise
+/// negociar espaço com o do outro.
+///
+/// Também aproxima as duas arquiteturas: no ARM a imagem já tem endereço fixo
+/// (`0x4008_0000`, imposto pelo protocolo de boot do arm64 e escrito no script
+/// do linker).
+pub const BASE_DO_KERNEL: u64 = 0xFFFF_8000_0000_0000;
 
 // Declara `inicio` como o ponto de entrada do kernel.
 //
@@ -283,6 +316,34 @@ pub fn dormir_se_ocioso(ocioso: impl FnOnce() -> bool) {
 /// `debug.trigger`.
 pub fn disparar_breakpoint() {
     x86_64::instructions::interrupts::int3();
+}
+
+/// Endereço garantidamente não mapeado, para provocar uma falha de propósito.
+///
+/// É canônico (bit 47 zerado, metade baixa) e está muito abaixo de tudo que o
+/// bootloader mapeia: o kernel vive em [`BASE_DO_KERNEL`], a memória física
+/// num deslocamento alto, e o heap em 64 GiB. Nada do kernel encosta aqui.
+const ENDERECO_INVALIDO: u64 = 0xDEAD_0000;
+
+/// Provoca uma falha irrecuperável de propósito. Nunca retorna.
+///
+/// Serve ao comando `debug.trigger` com `kind: "fatal"`, que existe para
+/// exercitar o modo post-mortem sem precisar plantar um defeito no código e
+/// recompilar.
+pub fn disparar_falha_fatal() -> ! {
+    // SAFETY: nenhuma. É deliberadamente inválida — escrever aqui é o ponto.
+    // O handler de page fault reconhece a falha, registra o endereço e entra
+    // em modo post-mortem.
+    unsafe { core::ptr::write_volatile(ENDERECO_INVALIDO as *mut u64, 0) };
+
+    // Inalcançável se a paginação estiver funcionando. Se chegarmos aqui, o
+    // fato de *não* ter falhado é em si o diagnóstico.
+    crate::log_error!(
+        "debug",
+        "escrita em {:#x} nao falhou; a paginacao nao esta protegendo nada",
+        ENDERECO_INVALIDO
+    );
+    halt_forever()
 }
 
 /// Executa `f` com as interrupções mascaradas, restaurando o estado ao sair.
