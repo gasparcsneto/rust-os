@@ -1077,17 +1077,38 @@ fn paginacao_nao_vaza_tabelas() -> Resultado {
 
 /// Recursão que consome pilha até estourá-la.
 ///
-/// Os dois cuidados aqui existem para impedir o compilador de nos sabotar. A
-/// leitura volátil força a variável local a ocupar um lugar na pilha em vez de
-/// viver num registrador, e o uso do valor *depois* da chamada impede que a
-/// recursão de cauda vire um laço — que rodaria para sempre sem consumir pilha
-/// nenhuma, e o teste esperaria pela eternidade por um estouro que nunca viria.
+/// # Contra as otimizações do compilador
+///
+/// O inimigo deste teste é o próprio otimizador: se ele conseguir eliminar a
+/// recursão, a função vira um laço que roda para sempre sem consumir pilha
+/// nenhuma, e o teste espera pela eternidade por um estouro que nunca vem.
+///
+/// A primeira versão deste código tentava evitar isso usando o resultado
+/// *depois* da chamada, com `consumir_pilha(n + 1) + n`. Não bastou, e a razão
+/// é instrutiva: o LLVM reconhece esse formato exato — recursão cujo retorno
+/// entra numa operação associativa — e o converte num laço com acumulador. Em
+/// debug o teste passava; em release, pendurava.
+///
+/// A versão atual fecha as duas portas de uma vez. Cada quadro reserva um
+/// bloco de pilha de verdade, e esse bloco é **escrito de forma volátil depois
+/// da chamada recursiva**. Escrita volátil não pode ser eliminada nem
+/// reordenada, e o bloco precisa continuar vivo do outro lado da chamada —
+/// então o quadro tem de existir, e a chamada não está em posição de cauda
+/// nem em forma de acumulador.
+#[inline(never)]
 #[allow(unconditional_recursion)]
 fn consumir_pilha(profundidade: u64) -> u64 {
-    let marca = profundidade;
-    // SAFETY: leitura de uma variável local viva, apenas para forçá-la à pilha.
-    let eco = unsafe { core::ptr::read_volatile(&marca) };
-    consumir_pilha(eco + 1) + eco
+    // 128 bytes por quadro: acelera o estouro sem arriscar pular por cima da
+    // guard page, que tem 4 KiB.
+    let mut bloco = [0u64; 16];
+
+    // SAFETY: escrita e leitura de uma variável local viva, deste quadro.
+    unsafe {
+        core::ptr::write_volatile(&mut bloco[0], profundidade);
+        let eco = consumir_pilha(core::ptr::read_volatile(&bloco[0]) + 1);
+        core::ptr::write_volatile(&mut bloco[15], eco);
+        core::ptr::read_volatile(&bloco[15])
+    }
 }
 
 /// O caso final: prova que um estouro de pilha é detectado.
