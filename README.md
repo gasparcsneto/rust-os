@@ -1,7 +1,7 @@
 # rust-os
 
-Um kernel x86_64 escrito do zero em Rust, projetado desde a primeira linha
-para ser operado tanto por humanos quanto por um agente.
+Um kernel escrito do zero em Rust para **x86_64 e aarch64**, projetado desde
+a primeira linha para ser operado tanto por humanos quanto por um agente.
 
 O ponto de partida é o material de [os.phil-opp.com](https://os.phil-opp.com),
 mas o objetivo vai além do tutorial: chegar a um sistema com userspace real —
@@ -17,8 +17,8 @@ Aqui a abordagem é invertida. **O estado do sistema é legível por máquina po
 construção:**
 
 - **Canal de agente estruturado.** Um servidor JSON-RPC 2.0 roda dentro do
-  kernel, falando pela COM2 — separada do console humano na COM1. Toda linha
-  que sai desse canal é um objeto JSON válido. Sem ruído, sem heurística.
+  kernel, falando por uma porta serial dedicada. Toda linha que sai desse
+  canal é um objeto JSON válido. Sem ruído, sem heurística.
 
 - **Auto-descrição.** O kernel descreve a própria superfície via
   `agent.describe`, do mesmo jeito que um servidor MCP lista suas ferramentas.
@@ -36,17 +36,28 @@ O canal existe desde o primeiro milissegundo do boot, antes de haver
 paginação, heap ou interrupções. Essa precocidade é intencional: ele serve
 para ajudar a construir e depurar as camadas que vêm depois dele.
 
+No ARM isso deixa de ser conveniência e vira necessidade. A máquina `virt` do
+emulador tem **uma única** porta serial, então o canal do agente é literalmente
+a única interface de depuração do sistema — não há console de texto. Os
+registros de log vivem no ring buffer e saem por `log.tail`.
+
+O port para ARM foi o teste mais duro dessa premissa, e ela passou: o primeiro
+bug do boot ARM (`x0` chegando nulo, sem device tree) foi diagnosticado pelo
+próprio canal, lendo `log.tail`.
+
 ## Começando
 
 Requisitos: Rust nightly (instalado automaticamente pelo `rust-toolchain.toml`)
-e `qemu-system-x86`.
+e os pacotes do emulador para as arquiteturas desejadas.
 
 ```bash
-# Compila o kernel e gera as imagens BIOS e UEFI
+# x86_64 (padrão): compila e gera as imagens BIOS e UEFI
 cargo xtask build
-
-# Sobe o kernel no QEMU (logs da COM1 no terminal)
 cargo xtask run
+
+# aarch64: compila e gera a imagem arm64 crua
+cargo xtask build --arch aarch64
+cargo xtask run   --arch aarch64
 ```
 
 Com o kernel rodando, converse com ele de outro terminal:
@@ -63,7 +74,14 @@ $ cargo xtask agent memory.regions '{"limit":2,"usable_only":true}'
 
 # Descobre todos os comandos disponíveis e seus parâmetros
 $ cargo xtask agent agent.describe
+
+# O mesmo protocolo, no kernel ARM
+$ cargo xtask agent --arch aarch64 system.info
+{"jsonrpc":"2.0","id":1,"result":{"arch":"aarch64","cpu_vendor":"ARM Limited",
+ "framebuffer":null,"log_records":6}}
 ```
+
+Os dois podem rodar ao mesmo tempo: cada arquitetura tem seu próprio socket.
 
 ## Comandos disponíveis
 
@@ -83,24 +101,49 @@ chamadas — `agent.describe` sempre reflete a verdade.
 
 ```
 kernel/src/
-├── main.rs          ponto de entrada; sequência de boot
-├── serial.rs        driver UART 16550 (COM1 humano, COM2 agente)
+├── main.rs          fluxo de boot comum às duas arquiteturas
+├── machine.rs       descrição da máquina, neutra de arquitetura
+├── serial.rs        papéis de console e canal do agente
 ├── log.rs           logging estruturado em ring buffer
-├── boot.rs          acesso global ao BootInfo
-├── qemu.rs          encerramento do QEMU para testes automatizados
-└── agent/
-    ├── mod.rs       laço de atendimento e despacho
-    ├── json.rs      JSON sem alocação (streaming + varredura)
-    ├── protocol.rs  envelope JSON-RPC 2.0
-    ├── registry.rs  registro de comandos auto-descritivo
-    └── commands.rs  implementações dos comandos
+├── qemu.rs          encerramento do emulador para testes
+├── agent/
+│   ├── mod.rs       laço de atendimento e despacho
+│   ├── json.rs      JSON sem alocação (streaming + varredura)
+│   ├── protocol.rs  envelope JSON-RPC 2.0
+│   ├── registry.rs  registro de comandos auto-descritivo
+│   └── commands.rs  implementações dos comandos
+└── arch/
+    ├── mod.rs        seleção da arquitetura em tempo de compilação
+    ├── x86_64/
+    │   ├── mod.rs    entrada via crate `bootloader`, CPUID, portas de I/O
+    │   └── uart.rs   UART 16550 por port-mapped I/O
+    └── aarch64/
+        ├── mod.rs    boot em assembly, cabeçalho de imagem arm64, MIDR_EL1
+        ├── uart.rs   PL011 por memory-mapped I/O
+        ├── fdt.rs    leitor de device tree escrito à mão
+        └── linker.ld layout de memória e símbolos de boot
 
-xtask/src/main.rs    build system: compila, gera imagens, roda QEMU, cliente
+xtask/src/main.rs    build system: compila, gera imagens, roda o emulador
 ```
 
-Dois workspaces separados: o kernel compila para `x86_64-unknown-none`
-(bare-metal) e o `xtask` para o host. Um único workspace não suporta dois
-targets padrão.
+**Como as duas arquiteturas convivem.** Cada backend em `arch/` traduz o que
+recebeu do firmware para as estruturas neutras de `machine.rs` durante o boot.
+Daí para baixo, nenhuma linha do kernel sabe em que processador está rodando —
+é por isso que a mesma resposta JSON sai dos dois.
+
+O contraste no caminho de boot é grande:
+
+| | x86_64 | aarch64 |
+|---|---|---|
+| Carga | crate `bootloader` (BIOS + UEFI) | protocolo de boot do arm64 |
+| Artefato | imagem de disco | binário cru, cabeçalho de 64 bytes |
+| Chegamos em | long mode, com pilha e paginação | MMU desligada, sem pilha |
+| Mapa de memória | struct `BootInfo` pronta | device tree, parseado por nós |
+| Seriais | duas UARTs 16550 (port I/O) | uma PL011 (MMIO) |
+| Encerrar emulador | `isa-debug-exit` | semihosting |
+
+Dois workspaces separados: o kernel compila bare-metal e o `xtask` para o
+host. Um único workspace não suporta dois targets padrão.
 
 O código e os comentários estão em português — o projeto é também um material
 de estudo, e cada decisão não óbvia é explicada no ponto onde aparece. As
@@ -109,8 +152,8 @@ padronizado.
 
 ## Roteiro
 
-- [x] **Fase 0 — Base.** Boot bare-metal, serial, logging estruturado, canal
-      do agente.
+- [x] **Fase 0 — Base.** Boot bare-metal em x86_64 e aarch64, serial,
+      logging estruturado, canal do agente, abstração de arquitetura.
 - [ ] **Fase 0 (cont.)** — GDT, IDT, exceções, double fault com IST,
       interrupções de hardware, teclado, paginação, heap, testes no QEMU.
 - [ ] **Fase 1 — Kernel de verdade.** Scheduler preemptivo, context switch,

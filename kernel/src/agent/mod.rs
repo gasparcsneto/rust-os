@@ -103,8 +103,36 @@ pub fn servir() -> ! {
     }
 }
 
+/// Remove ruído das bordas de um quadro.
+///
+/// Descarta bytes de controle e espaços no começo e no fim da linha. Isso
+/// torna o canal tolerante a três coisas reais: terminadores CRLF, bytes
+/// nulos que uma UART produz em transições de linha, e qualquer resíduo que
+/// tenha escapado da drenagem feita na inicialização da porta.
+///
+/// É seguro: nenhum byte abaixo de 0x21 pode iniciar ou encerrar um valor
+/// JSON, então nunca descartamos conteúdo significativo. E é preferível a
+/// confiar só na drenagem — um único byte espúrio no momento errado não deve
+/// custar ao agente uma requisição inteira.
+fn limpar_quadro(linha: &[u8]) -> &[u8] {
+    let inicio = linha.iter().position(|&b| b > 0x20);
+    let Some(inicio) = inicio else {
+        return &[];
+    };
+    let fim = linha
+        .iter()
+        .rposition(|&b| b > 0x20)
+        .expect("se há um byte significativo no início, há um no fim");
+    &linha[inicio..=fim]
+}
+
 /// Decodifica uma linha, despacha o comando e responde.
 fn processar(linha: &[u8]) {
+    let linha = limpar_quadro(linha);
+    if linha.is_empty() {
+        return;
+    }
+
     let requisicao = match Requisicao::parse(linha) {
         Ok(r) => r,
         Err((id, erro)) => return responder_erro(id, erro, None),
@@ -134,9 +162,7 @@ fn responder_erro(id: Option<json::Json>, erro: RpcError, detalhe: Option<&str>)
 
 /// Emite uma resposta completa na COM2, seguida do delimitador de quadro.
 fn com_saida(f: impl FnOnce(&mut JsonWriter) -> fmt::Result) {
-    use x86_64::instructions::interrupts;
-
-    interrupts::without_interrupts(|| {
+    crate::arch::sem_interrupcoes(|| {
         let mut guarda = crate::serial::AGENT_LINK.lock();
         let Some(porta) = guarda.as_mut() else {
             return;

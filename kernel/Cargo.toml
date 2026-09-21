@@ -2,7 +2,7 @@
 name = "kernel"
 version = "0.1.0"
 edition = "2024"
-description = "Kernel agent-native em Rust para x86_64"
+description = "Kernel agent-native em Rust para x86_64 e aarch64"
 license = "MIT OR Apache-2.0"
 
 # O kernel é seu próprio workspace (ver comentário no Cargo.toml da raiz):
@@ -10,26 +10,37 @@ license = "MIT OR Apache-2.0"
 [workspace]
 
 [dependencies]
-# Define o contrato com o bootloader: a assinatura do entry point e a struct
-# `BootInfo` (mapa de memória, framebuffer, offset da memória física).
-bootloader_api = "0.11.17"
-
-# Abstrações seguras sobre instruções e estruturas do x86_64: tabelas de
-# páginas, GDT, IDT, portas de I/O. Evita escrever assembly inline à mão.
-x86_64 = "0.15.5"
-
-# Driver da UART 16550 — nossa porta serial. É o primeiro dispositivo de saída
-# que temos: funciona antes de qualquer inicialização gráfica e o QEMU a
-# redireciona para stdout. Também é o transporte do canal de agente.
-uart_16550 = "0.8.1"
-
 # Primitivas de sincronização baseadas em spinlock. Num kernel não existe
 # scheduler para bloquear uma thread, então `std::sync::Mutex` não se aplica.
+# É a única dependência comum às duas arquiteturas.
 spin = "0.12.3"
 
+# --- x86_64 -----------------------------------------------------------------
+#
+# No x86 nos apoiamos em crates maduros porque a plataforma tem décadas de
+# peculiaridades acumuladas (GDT, IDT, portas de I/O legadas) que não vale a
+# pena reimplementar.
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+# Define o contrato com o bootloader: a assinatura do entry point e a struct
+# `BootInfo` (mapa de memória, framebuffer, offset da memória física).
+# Atenção: este crate é x86_64-only — daí o port ARM ter boot próprio.
+bootloader_api = "0.11.17"
+
+# Abstrações seguras sobre instruções e estruturas do x86_64.
+x86_64 = "0.15.5"
+
+# Driver da UART 16550, acessada por portas de I/O (PIO).
+uart_16550 = "0.8.1"
+
+# --- aarch64 ----------------------------------------------------------------
+#
+# No ARM não há dependências externas: escrevemos o boot, o driver PL011 e o
+# leitor de device tree à mão. Não é masoquismo — é que não existe equivalente
+# ao `bootloader` para aarch64, e o hardware da máquina `virt` é simples o
+# bastante para que a implementação direta seja mais clara que uma abstração
+# de terceiros.
+
 [profile.dev]
-# Overflow checks custam caro em paths de interrupção, mas em debug queremos
-# capturar bugs de aritmética cedo.
 panic = "abort"
 
 [profile.release]

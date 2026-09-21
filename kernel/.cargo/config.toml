@@ -1,7 +1,20 @@
-# Alvo bare-metal: x86_64 sem sistema operacional, sem libc, sem std.
+# Alvo padrão quando se roda `cargo build` de dentro de `kernel/`.
 #
 # Usamos o target oficial `x86_64-unknown-none` (tier 2) em vez de um arquivo
 # de target JSON customizado: ele já vem com `core` e `alloc` pré-compilados,
 # o que dispensa `-Z build-std` e deixa o build muito mais rápido e estável.
+#
+# Para ARM, use `cargo xtask build --arch aarch64` (ou passe `--target`).
 [build]
 target = "x86_64-unknown-none"
+
+[target.aarch64-unknown-none-softfloat]
+# O ARM não tem bootloader que nos posicione na memória, então o layout é
+# responsabilidade nossa: o script define onde o kernel é carregado, onde o
+# BSS começa e termina, e onde fica a pilha inicial.
+#
+# Escolhemos o alvo `-softfloat` de propósito: ele proíbe o compilador de usar
+# registradores de ponto flutuante e NEON. Num kernel isso é desejável, porque
+# usar FP/SIMD em EL1 sem antes habilitar o acesso (CPACR_EL1) gera uma
+# exceção — um bug sutil e difícil de rastrear.
+rustflags = ["-C", "link-arg=-Tsrc/arch/aarch64/linker.ld"]

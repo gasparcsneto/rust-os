@@ -143,9 +143,7 @@ impl fmt::Write for Cursor<'_> {
 /// Grava um registro. Use as macros [`log_info!`] e companhia.
 #[doc(hidden)]
 pub fn registrar(nivel: Level, subsistema: &'static str, args: fmt::Arguments) {
-    use x86_64::instructions::interrupts;
-
-    let seq = interrupts::without_interrupts(|| {
+    let seq = crate::arch::sem_interrupcoes(|| {
         let mut anel = ANEL.lock();
 
         let seq = anel.total;
