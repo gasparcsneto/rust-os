@@ -4,19 +4,21 @@
 //! shell, as tarefas de build são um binário Rust comum. Isso dá tipos,
 //! portabilidade e o mesmo toolchain do resto do projeto.
 //!
-//! Comandos disponíveis:
-//!
 //! ```text
-//! cargo xtask build          # compila o kernel e gera as imagens de disco
-//! cargo xtask run            # build + sobe no QEMU (saída na serial)
-//! cargo xtask test           # roda a suíte de testes do kernel dentro do QEMU
+//! cargo xtask build                       # compila o kernel e gera as imagens
+//! cargo xtask run                         # sobe no QEMU (serial no terminal)
+//! cargo xtask test                        # roda a suíte de testes no QEMU
+//! cargo xtask agent <metodo> [params]     # fala JSON-RPC com o kernel
 //! ```
 //!
 //! Aceita `--release` em qualquer um deles.
 
 use std::{
+    io::{BufRead, BufReader, Write},
+    os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process::{Command, ExitCode},
+    time::Duration,
 };
 
 /// Porta de I/O do `isa-debug-exit`. Precisa casar com `kernel/src/qemu.rs`.
@@ -30,17 +32,24 @@ const QEMU_SUCCESS: i32 = 33;
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let release = args.iter().any(|a| a == "--release");
-    let comando = args
+    let posicionais: Vec<&str> = args
         .iter()
-        .find(|a| !a.starts_with("--"))
+        .filter(|a| !a.starts_with("--"))
         .map(String::as_str)
-        .unwrap_or("help");
+        .collect();
+
+    let comando = posicionais.first().copied().unwrap_or("help");
 
     let resultado = match comando {
         "build" => build(release).map(|_| ExitCode::SUCCESS),
         "run" => run(release),
         "test" => test(release),
-        "help" | "-h" | "--help" => {
+        "agent" => {
+            let metodo = posicionais.get(1).copied().unwrap_or("agent.describe");
+            let params = posicionais.get(2).copied().unwrap_or("{}");
+            agente(metodo, params)
+        }
+        "help" | "-h" => {
             ajuda();
             Ok(ExitCode::SUCCESS)
         }
@@ -67,10 +76,16 @@ USO:
     cargo xtask <comando> [--release]
 
 COMANDOS:
-    build    compila o kernel e gera as imagens BIOS e UEFI
-    run      compila e executa no QEMU, com a serial ligada ao terminal
-    test     executa a suíte de testes do kernel dentro do QEMU
-    help     mostra esta mensagem"
+    build                     compila o kernel e gera as imagens BIOS e UEFI
+    run                       compila e executa no QEMU, com a serial no terminal
+    test                      executa a suíte de testes do kernel dentro do QEMU
+    agent <metodo> [params]   envia uma chamada JSON-RPC ao kernel em execução
+    help                      mostra esta mensagem
+
+EXEMPLOS:
+    cargo xtask agent agent.describe
+    cargo xtask agent system.info
+    cargo xtask agent log.tail '{{\"count\":5,\"min_level\":\"info\"}}'"
     );
 }
 
@@ -83,6 +98,11 @@ fn raiz_do_projeto() -> PathBuf {
         .parent()
         .expect("xtask/ sempre tem um diretório pai")
         .to_path_buf()
+}
+
+/// Onde o canal do agente (COM2) é exposto no host.
+fn caminho_socket() -> PathBuf {
+    raiz_do_projeto().join("target").join("agent.sock")
 }
 
 /// Imagens geradas por [`build`].
@@ -156,8 +176,12 @@ fn build(release: bool) -> Result<Imagens, String> {
     Ok(Imagens { bios, uefi })
 }
 
-/// Argumentos base do QEMU, compartilhados por `run` e `test`.
-fn qemu_base(imagem: &Path) -> Command {
+/// Monta a linha de comando do QEMU.
+///
+/// A ordem das opções `-serial` é significativa: a primeira vira a COM1 e a
+/// segunda a COM2. O kernel conta com exatamente esse mapeamento — COM1 para
+/// o console humano, COM2 para o canal do agente.
+fn qemu_base(imagem: &Path, socket_agente: Option<&Path>) -> Result<Command, String> {
     let mut qemu = Command::new("qemu-system-x86_64");
     qemu.args([
         "-drive",
@@ -165,42 +189,64 @@ fn qemu_base(imagem: &Path) -> Command {
         // 128 MiB é folgado para a fase 0 e mantém o boot rápido.
         "-m",
         "128M",
-        // Liga a serial do kernel ao stdout do host: é assim que vemos a
-        // saída do kernel e, mais adiante, como o agente conversa com ele.
+        // COM1 -> stdout do host.
         "-serial",
         "stdio",
+    ]);
+
+    if let Some(socket) = socket_agente {
+        // Um socket obsoleto de uma execução anterior faria o QEMU falhar ao
+        // tentar criar o novo.
+        let _ = std::fs::remove_file(socket);
+
+        qemu.args([
+            "-chardev",
+            // `server=on` faz o QEMU escutar; `wait=off` o impede de travar o
+            // boot esperando um cliente conectar. O kernel precisa subir mesmo
+            // quando ninguém está falando com ele.
+            &format!(
+                "socket,id=canal-agente,path={},server=on,wait=off",
+                socket.display()
+            ),
+            // COM2 -> o socket acima.
+            "-serial",
+            "chardev:canal-agente",
+        ]);
+    }
+
+    qemu.args([
         // Sem janela gráfica: este ambiente é headless, e toda a informação
-        // que nos importa já sai pela serial.
+        // que nos importa já sai pelas seriais.
         "-display",
         "none",
         // O dispositivo que permite ao kernel encerrar o QEMU (ver qemu.rs).
         "-device",
         &format!("isa-debug-exit,iobase={EXIT_IOBASE},iosize=0x04"),
     ]);
-    qemu
+
+    Ok(qemu)
 }
 
 fn run(release: bool) -> Result<ExitCode, String> {
     let imagens = build(release)?;
-    println!("[xtask] iniciando o QEMU (ctrl-a x para sair)\n");
+    let socket = caminho_socket();
 
-    let status = qemu_base(&imagens.bios)
+    println!("[xtask] canal do agente em {}", socket.display());
+    println!("[xtask] fale com o kernel de outro terminal:");
+    println!("[xtask]     cargo xtask agent agent.describe\n");
+
+    qemu_base(&imagens.bios, Some(&socket))?
         .status()
         .map_err(|e| format!("não foi possível iniciar o qemu-system-x86_64: {e}"))?;
 
-    // `hlt_loop` nunca retorna, então a saída normal aqui é o usuário matar o
-    // QEMU. Qualquer código é aceitável; só repassamos.
-    Ok(match status.code() {
-        Some(QEMU_SUCCESS) | Some(0) | None => ExitCode::SUCCESS,
-        Some(_) => ExitCode::SUCCESS,
-    })
+    Ok(ExitCode::SUCCESS)
 }
 
 fn test(release: bool) -> Result<ExitCode, String> {
     let imagens = build(release)?;
     println!("[xtask] executando a suíte de testes no QEMU\n");
 
-    let status = qemu_base(&imagens.bios)
+    let status = qemu_base(&imagens.bios, None)?
         .status()
         .map_err(|e| format!("não foi possível iniciar o qemu-system-x86_64: {e}"))?;
 
@@ -215,4 +261,48 @@ fn test(release: bool) -> Result<ExitCode, String> {
         }
         None => Err("o QEMU foi terminado por um sinal".into()),
     }
+}
+
+/// Cliente do canal do agente.
+///
+/// Conecta no socket Unix onde a COM2 do kernel está exposta, envia uma
+/// requisição JSON-RPC e imprime a resposta. É o comando que torna o kernel
+/// operável de fora com uma única linha de shell.
+fn agente(metodo: &str, params: &str) -> Result<ExitCode, String> {
+    let socket = caminho_socket();
+
+    let mut fluxo = UnixStream::connect(&socket).map_err(|e| {
+        format!(
+            "não foi possível conectar em {}: {e}\n\
+             dica: o kernel precisa estar rodando — inicie `cargo xtask run` em outro terminal",
+            socket.display()
+        )
+    })?;
+
+    // Sem timeout, um kernel travado deixaria o cliente pendurado para sempre.
+    // Falhar em cinco segundos é muito mais útil do que não falhar nunca.
+    fluxo
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|e| format!("não foi possível configurar o timeout: {e}"))?;
+
+    let requisicao =
+        format!("{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"{metodo}\",\"params\":{params}}}\n");
+
+    fluxo
+        .write_all(requisicao.as_bytes())
+        .and_then(|()| fluxo.flush())
+        .map_err(|e| format!("falha ao enviar a requisição: {e}"))?;
+
+    let mut leitor = BufReader::new(fluxo);
+    let mut resposta = String::new();
+    let lidos = leitor
+        .read_line(&mut resposta)
+        .map_err(|e| format!("falha ao ler a resposta: {e}"))?;
+
+    if lidos == 0 {
+        return Err("o kernel fechou o canal sem responder".into());
+    }
+
+    print!("{resposta}");
+    Ok(ExitCode::SUCCESS)
 }
