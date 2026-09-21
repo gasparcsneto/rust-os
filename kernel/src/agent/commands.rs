@@ -70,6 +70,12 @@ pub static COMANDOS: &[Command] = &[
         handler: memory_frames,
     },
     Command {
+        nome: "heap.stats",
+        resumo: "Estado do heap do kernel, incluindo fragmentacao.",
+        params: &[],
+        handler: heap_stats,
+    },
+    Command {
         nome: "paging.translate",
         resumo: "Resolve um endereco virtual para fisico usando as tabelas de pagina ativas.",
         params: &[ParamSpec {
@@ -234,6 +240,28 @@ fn memory_frames(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.field_u64("free", livres as u64)?;
     w.field_u64("used", (rastreados - livres) as u64)?;
     w.field_u64("free_bytes", livres as u64 * crate::frames::TAMANHO_FRAME)?;
+    w.end_object()
+}
+
+// ---------------------------------------------------------------------------
+// heap.*
+// ---------------------------------------------------------------------------
+
+fn heap_stats(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let e = crate::heap::estatisticas();
+
+    w.begin_object()?;
+    w.field_u64("total_bytes", e.total as u64)?;
+    w.field_u64("allocated_bytes", e.alocado as u64)?;
+    w.field_u64("free_bytes", e.livre as u64)?;
+    w.field_u64("free_blocks", e.blocos_livres as u64)?;
+    // A medida honesta de fragmentacao: quando o maior bloco fica muito menor
+    // que o total livre, ha memoria de sobra mas nenhuma peca grande o
+    // bastante para um pedido maior.
+    w.field_u64("largest_free_block", e.maior_bloco as u64)?;
+    w.field_u64("allocations", e.alocacoes)?;
+    w.field_u64("deallocations", e.liberacoes)?;
+    w.field_u64("failures", e.falhas)?;
     w.end_object()
 }
 

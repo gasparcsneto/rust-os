@@ -875,6 +875,173 @@ fn paginacao_recusa_desalinhado() -> Resultado {
 }
 
 // ===========================================================================
+// Heap
+// ===========================================================================
+
+fn heap_box_aloca_e_libera() -> Resultado {
+    let antes = crate::heap::estatisticas();
+
+    {
+        let valor = alloc::boxed::Box::new(0xC0FFEEu64);
+        if *valor != 0xC0FFEE {
+            return Err("valor lido do heap esta corrompido");
+        }
+    }
+
+    let depois = crate::heap::estatisticas();
+    if depois.livre != antes.livre {
+        crate::log_error!("teste", "livre {} -> {}", antes.livre, depois.livre);
+        return Err("memoria nao voltou apos o drop");
+    }
+    Ok(())
+}
+
+fn heap_vec_cresce() -> Resultado {
+    let mut numeros = alloc::vec::Vec::new();
+    for i in 0..500u64 {
+        numeros.push(i);
+    }
+
+    // Um `Vec` que cresce realoca várias vezes, então este caso exercita o
+    // ciclo de alocar-copiar-liberar, e não só alocações isoladas.
+    let soma: u64 = numeros.iter().sum();
+    let esperado: u64 = (0..500u64).sum();
+    if soma != esperado {
+        return Err("conteudo do vetor nao sobreviveu as realocacoes");
+    }
+    Ok(())
+}
+
+fn heap_string_formata() -> Resultado {
+    let texto = alloc::format!("arch={} paginas={}", crate::arch::nome(), 4);
+    if !texto.starts_with("arch=") || !texto.contains("paginas=4") {
+        crate::log_error!("teste", "obtido: {}", texto);
+        return Err("formatacao com alocacao produziu texto errado");
+    }
+    Ok(())
+}
+
+/// O caso que separa um alocador de verdade de um *bump allocator*.
+///
+/// Um alocador que só avança um ponteiro consegue atender mil alocações
+/// seguidas se cada uma for liberada antes da próxima — mas falha aqui,
+/// porque o bloco de vida longa impede que o ponteiro volte. Só reaproveitando
+/// memória liberada é possível passar.
+fn heap_reaproveita_memoria_liberada() -> Resultado {
+    let longevo = alloc::boxed::Box::new(0xABCDu64);
+
+    for i in 0..1000u64 {
+        let efemero = alloc::boxed::Box::new(i);
+        if *efemero != i {
+            return Err("valor corrompido durante o ciclo");
+        }
+    }
+
+    if *longevo != 0xABCD {
+        return Err("bloco de vida longa foi corrompido pelo ciclo");
+    }
+    Ok(())
+}
+
+/// Sem fusão de blocos adjacentes, o heap se estilhaça: sobra memória livre
+/// mas nenhuma peça contígua grande o bastante. Este caso verifica que três
+/// blocos vizinhos voltam a ser um só.
+fn heap_funde_blocos_adjacentes() -> Resultado {
+    let antes = crate::heap::estatisticas();
+
+    {
+        let a = alloc::boxed::Box::new([1u8; 512]);
+        let b = alloc::boxed::Box::new([2u8; 512]);
+        let c = alloc::boxed::Box::new([3u8; 512]);
+        // Impede que o compilador descarte as alocações por não serem usadas.
+        core::hint::black_box((&a, &b, &c));
+    }
+
+    let depois = crate::heap::estatisticas();
+
+    if depois.livre != antes.livre {
+        return Err("memoria nao voltou por completo");
+    }
+    if depois.maior_bloco != antes.maior_bloco {
+        crate::log_error!(
+            "teste",
+            "maior bloco {} -> {} (livre {})",
+            antes.maior_bloco,
+            depois.maior_bloco,
+            depois.livre
+        );
+        return Err("blocos adjacentes nao foram fundidos");
+    }
+    Ok(())
+}
+
+fn heap_respeita_alinhamento() -> Resultado {
+    for expoente in 3..=9u32 {
+        let alinhamento = 1usize << expoente;
+        let layout =
+            core::alloc::Layout::from_size_align(64, alinhamento).map_err(|_| "layout invalido")?;
+
+        // Chamamos o alocador direto: por `alloc::alloc` o LLVM poderia
+        // eliminar o par alocar/liberar e nos deixar testando o otimizador.
+        let ponteiro = crate::heap::tentar_alocar(layout);
+        if ponteiro.is_null() {
+            return Err("alocacao alinhada falhou");
+        }
+
+        let alinhado = (ponteiro as usize).is_multiple_of(alinhamento);
+
+        // SAFETY: devolvemos o mesmo ponteiro com o mesmo layout.
+        unsafe { crate::heap::devolver(ponteiro, layout) };
+
+        if !alinhado {
+            crate::log_error!("teste", "alinhamento {} nao respeitado", alinhamento);
+            return Err("ponteiro nao respeita o alinhamento pedido");
+        }
+    }
+    Ok(())
+}
+
+/// O contrato do `GlobalAlloc` manda sinalizar falha com ponteiro nulo, nunca
+/// com pânico — quem chama essas funções é o compilador, e um pânico ali seria
+/// terminal.
+///
+/// Este caso precisa falar com o alocador diretamente. Por `alloc::alloc`, o
+/// LLVM elimina um par alocar/liberar cujo resultado só é comparado com nulo e
+/// assume que a alocação teve sucesso, o que fazia o teste passar em debug e
+/// falhar em release — medindo o otimizador, não o alocador.
+fn heap_falha_devolve_nulo() -> Resultado {
+    let layout = core::alloc::Layout::from_size_align(crate::heap::HEAP_TAMANHO * 2, 8)
+        .map_err(|_| "layout invalido")?;
+
+    let ponteiro = crate::heap::tentar_alocar(layout);
+
+    if ponteiro.is_null() {
+        Ok(())
+    } else {
+        // SAFETY: mesmo ponteiro, mesmo layout.
+        unsafe { crate::heap::devolver(ponteiro, layout) };
+        Err("pedido maior que o heap foi atendido")
+    }
+}
+
+fn heap_estatisticas_coerentes() -> Resultado {
+    let e = crate::heap::estatisticas();
+    if e.total == 0 {
+        return Err("heap sem tamanho; init falhou?");
+    }
+    if e.livre > e.total {
+        return Err("livre maior que o total");
+    }
+    if e.maior_bloco > e.livre {
+        return Err("maior bloco maior que o total livre");
+    }
+    if e.liberacoes > e.alocacoes {
+        return Err("mais liberacoes que alocacoes");
+    }
+    Ok(())
+}
+
+// ===========================================================================
 // Registro e execução
 // ===========================================================================
 
@@ -1030,6 +1197,38 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "paginacao: recusa desalinhado",
         f: paginacao_recusa_desalinhado,
+    },
+    Caso {
+        nome: "heap: box aloca e libera",
+        f: heap_box_aloca_e_libera,
+    },
+    Caso {
+        nome: "heap: vec cresce e realoca",
+        f: heap_vec_cresce,
+    },
+    Caso {
+        nome: "heap: formatacao com alocacao",
+        f: heap_string_formata,
+    },
+    Caso {
+        nome: "heap: reaproveita memoria liberada",
+        f: heap_reaproveita_memoria_liberada,
+    },
+    Caso {
+        nome: "heap: funde blocos adjacentes",
+        f: heap_funde_blocos_adjacentes,
+    },
+    Caso {
+        nome: "heap: respeita alinhamento",
+        f: heap_respeita_alinhamento,
+    },
+    Caso {
+        nome: "heap: falha devolve nulo",
+        f: heap_falha_devolve_nulo,
+    },
+    Caso {
+        nome: "heap: estatisticas coerentes",
+        f: heap_estatisticas_coerentes,
     },
 ];
 

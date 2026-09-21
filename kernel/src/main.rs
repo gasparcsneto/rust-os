@@ -41,9 +41,16 @@
 // e declará-la geraria aviso.
 #![cfg_attr(target_arch = "x86_64", feature(abi_x86_interrupt))]
 
+// A `alloc` é a parte da biblioteca padrão que depende apenas de um alocador,
+// e não de um sistema operacional. Com o heap no ar, ela nos dá `Box`, `Vec`,
+// `String` e companhia — o vocabulário normal do Rust, que até aqui estava
+// fora de alcance.
+extern crate alloc;
+
 mod agent;
 mod arch;
 mod frames;
+mod heap;
 mod irq;
 mod log;
 mod machine;
@@ -111,6 +118,12 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     // assume o controle do que o bootloader montou; no ARM, liga a MMU pela
     // primeira vez.
     arch::init_paginacao();
+
+    // Com a paginação no ar, o heap pode mapear sua faixa. A partir daqui o
+    // kernel pode alocar memória dinâmica.
+    if let Err(motivo) = heap::init() {
+        log_error!("heap", "nao foi possivel inicializar: {}", motivo);
+    }
 
     match machine::video() {
         Some(v) => log_info!(

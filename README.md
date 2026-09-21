@@ -103,6 +103,7 @@ Os dois podem rodar ao mesmo tempo: cada arquitetura tem seu próprio socket.
 | `memory.regions` | Regiões do mapa de memória (`limit`, `usable_only`) |
 | `memory.frames` | Estado do alocador de frames físicos |
 | `paging.translate` | Traduz um endereço virtual para físico (`address`) |
+| `heap.stats` | Estado do heap, incluindo fragmentação |
 | `irq.stats` | Contadores de interrupções de hardware por linha |
 | `traps.stats` | Contadores de exceções e detalhes da última falha |
 | `debug.trigger` | Dispara uma exceção de propósito, para autoteste (`kind`) |
@@ -120,6 +121,8 @@ kernel/src/
 ├── serial.rs        papéis de console e canal do agente
 ├── log.rs           logging estruturado em ring buffer
 ├── frames.rs        alocador de frames de memória física (bitmap)
+├── paginacao.rs     fachada segura de mapeamento
+├── heap.rs          alocador do kernel: lista livre ordenada com fusão
 ├── testes.rs        suíte de testes que roda dentro do emulador
 ├── traps.rs         contabilidade de exceções e modo post-mortem
 ├── irq.rs           contadores de interrupções de hardware
@@ -222,10 +225,13 @@ padronizado.
 - [x] **Fase 0 — Memória física e paginação.** Alocador de frames por bitmap,
       MMU ligada do zero no ARM com mapa de identidade, controle das tabelas
       do bootloader no x86, e uma API de mapeamento comum às duas.
-- [ ] **Fase 0 (cont.)** — heap, que destrava `alloc` no kernel.
-- [ ] **Fase 1 — Kernel de verdade.** Scheduler preemptivo, context switch,
-      ring 3 com TSS, `syscall`/`sysret`, ELF loader, processos com espaços de
-      endereçamento isolados.
+- [x] **Fase 0 — Heap.** Alocador próprio com lista livre ordenada e fusão de
+      blocos adjacentes. `Box`, `Vec` e `String` disponíveis no kernel.
+      **Fase 0 completa.**
+- [ ] **Fase 1 — Kernel de verdade.** Multitarefa, ring 3, processos.
+- [ ] **Fase 1 — Kernel de verdade.** Multitarefa cooperativa com
+      `async`/`await`, depois scheduler preemptivo, context switch, ring 3 com
+      TSS, `syscall`/`sysret`, ELF loader e processos isolados.
 - [ ] **Fase 2 — Drivers.** Enumeração PCI, virtio-blk, virtio-net, timer
       APIC/HPET, framebuffer gráfico.
 

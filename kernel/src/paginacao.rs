@@ -23,10 +23,6 @@
 //! por exemplo — continua usando a função `unsafe` e assume a
 //! responsabilidade explicitamente.
 
-// Quem vai consumir esta fachada de verdade é o heap, próximo da fila. Até
-// lá só os testes a exercitam.
-#![cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
-
 use crate::arch::{self, Permissoes, TAMANHO_PAGINA};
 
 /// Mapeia um endereço virtual sobre memória recém-alocada.
@@ -67,6 +63,7 @@ pub fn mapear_novo(virtual_: u64, permissoes: Permissoes) -> Result<u64, &'stati
 /// Só use quando o frame tiver vindo de [`mapear_novo`]: liberar um frame que
 /// pertence a outro dono o coloca de volta em circulação enquanto ainda está
 /// em uso.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub fn desmapear_e_liberar(virtual_: u64) -> Result<(), &'static str> {
     let frame = arch::desmapear(virtual_)?;
     crate::frames::liberar(frame);
