@@ -378,6 +378,34 @@ pub fn disparar_breakpoint() {
     unsafe { core::arch::asm!("brk #0", options(nomem, nostack)) };
 }
 
+/// Endereço garantidamente não mapeado, para provocar uma falha de propósito.
+///
+/// O mapa de identidade cobre o bloco de dispositivos (o primeiro GiB) e os
+/// blocos de 1 GiB que contêm RAM — na máquina `virt`, a partir de
+/// `0x4000_0000`. Este endereço cai no quarto bloco, que nunca é mapeado.
+const ENDERECO_INVALIDO: u64 = 0xDEAD_0000;
+
+/// Provoca uma falha irrecuperável de propósito. Nunca retorna.
+///
+/// Serve ao comando `debug.trigger` com `kind: "fatal"`, que existe para
+/// exercitar o modo post-mortem sem precisar plantar um defeito no código e
+/// recompilar.
+pub fn disparar_falha_fatal() -> ! {
+    // SAFETY: nenhuma. É deliberadamente inválida — escrever aqui é o ponto.
+    // O resultado é um data abort, que os vetores reconhecem e encaminham ao
+    // modo post-mortem.
+    unsafe { core::ptr::write_volatile(ENDERECO_INVALIDO as *mut u64, 0) };
+
+    // Inalcançável se a MMU estiver funcionando. Se chegarmos aqui, o fato de
+    // *não* ter falhado é em si o diagnóstico.
+    crate::log_error!(
+        "debug",
+        "escrita em {:#x} nao falhou; a MMU nao esta protegendo nada",
+        ENDERECO_INVALIDO
+    );
+    halt_forever()
+}
+
 /// Executa `f` com as interrupções mascaradas, restaurando o estado ao sair.
 ///
 /// No ARM as máscaras vivem no registrador `DAIF`, um por classe de exceção:

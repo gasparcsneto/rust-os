@@ -42,9 +42,22 @@ pub mod protocol;
 pub mod registry;
 
 use core::fmt;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use json::JsonWriter;
 use protocol::{Requisicao, RpcError};
+
+/// Um comando pediu que o kernel falhasse de propósito.
+///
+/// A falha não pode acontecer dentro do handler: a serialização é em
+/// streaming, e naquele ponto a resposta ainda está aberta no fio. Quem
+/// dispara é [`processar`], depois que o quadro fechou.
+static FALHA_AGENDADA: AtomicBool = AtomicBool::new(false);
+
+/// Marca que a próxima resposta deve ser seguida de uma falha fatal.
+pub(crate) fn agendar_falha_fatal() {
+    FALHA_AGENDADA.store(true, Ordering::SeqCst);
+}
 
 /// Tamanho máximo de uma requisição.
 ///
@@ -251,6 +264,13 @@ fn processar(linha: &[u8]) {
             (comando.handler)(requisicao.params, w)
         })
     });
+
+    // Com a resposta inteira no fio, é seguro morrer. Daqui não se volta: o
+    // handler da exceção entra em modo post-mortem, que reentra neste mesmo
+    // módulo por [`servir`].
+    if FALHA_AGENDADA.swap(false, Ordering::SeqCst) {
+        crate::arch::disparar_falha_fatal();
+    }
 }
 
 fn responder_erro(id: Option<json::Json>, erro: RpcError, detalhe: Option<&str>) {

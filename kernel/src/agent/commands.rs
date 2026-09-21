@@ -118,14 +118,17 @@ pub static COMANDOS: &[Command] = &[
     },
     Command {
         nome: "debug.trigger",
-        resumo: "Dispara deliberadamente uma excecao recuperavel, para verificar \
-                 que o caminho de tratamento de excecoes esta funcionando.",
+        resumo: "Dispara uma excecao de proposito, para autoteste. \
+                 `kind`: \"breakpoint\" e recuperavel; \"fatal\" mata o kernel \
+                 e o deixa em modo post-mortem.",
         params: &[ParamSpec {
             nome: "kind",
             tipo: TipoParam::Texto,
             obrigatorio: true,
-            descricao: "Tipo de excecao. Hoje apenas `breakpoint`, que e \
-                        recuperavel nas duas arquiteturas.",
+            descricao: "`breakpoint`: recuperavel, o kernel segue vivo. \
+                        `fatal`: provoca uma falha irrecuperavel de proposito; \
+                        o kernel entra em modo post-mortem e passa a responder \
+                        apenas o relatorio da falha.",
         }],
         handler: debug_trigger,
     },
@@ -563,11 +566,34 @@ fn debug_trigger(params: Json, w: &mut JsonWriter) -> fmt::Result {
             w.field_u64("traps_before", antes)?;
             w.field_u64("traps_after", crate::traps::total())?;
         }
+        "fatal" => {
+            // Uma falha *de verdade*, da qual nao se volta.
+            //
+            // Existe porque o modo post-mortem era a unica parte do kernel sem
+            // forma de ser exercitada de fora: ate aqui, provoca-lo exigia
+            // recompilar com um defeito plantado a mao. E e o caminho que
+            // fecha o ciclo com `cargo xtask simbolo`, traduzindo em arquivo e
+            // linha o `pc` que `traps.stats` passa a reportar.
+            //
+            // Agendamos em vez de falhar aqui. A serializacao e em streaming:
+            // neste ponto o envelope JSON-RPC esta aberto e o `\n` que fecha o
+            // quadro ainda nao saiu. Falhar agora deixaria o cliente esperando
+            // para sempre por uma linha que nunca se completa. O laco dispara
+            // a falha depois de a resposta estar inteira no fio.
+            super::agendar_falha_fatal();
+
+            w.field_str("scheduled", "fatal")?;
+            w.field_bool("survived", false)?;
+            w.field_str(
+                "warning",
+                "o kernel falha logo apos esta resposta e entra em modo post-mortem",
+            )?;
+        }
         outro => {
             w.field_bool("survived", true)?;
             w.field_str("error", "tipo de excecao nao suportado")?;
             w.field_str("requested", outro)?;
-            w.field_str("supported", "breakpoint")?;
+            w.field_str("supported", "breakpoint, fatal")?;
         }
     }
     w.end_object()

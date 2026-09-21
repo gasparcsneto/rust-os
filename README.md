@@ -71,6 +71,11 @@ cargo xtask run   --arch aarch64
 # Suíte de testes, dentro do emulador
 cargo xtask test
 cargo xtask test --arch aarch64
+
+# Depuração
+cargo xtask debug                    # sobe congelado, esperando gdb/lldb
+cargo xtask simbolo 0xffff8000...    # endereço -> arquivo, linha e função
+cargo xtask asm consumir_pilha       # o que o otimizador realmente gerou
 ```
 
 Com o kernel rodando, converse com ele de outro terminal:
@@ -113,7 +118,7 @@ Os dois podem rodar ao mesmo tempo: cada arquitetura tem seu próprio socket.
 | `tasks.list` | Tarefas lançadas, com id, nome e se estão vivas |
 | `irq.stats` | Contadores de interrupções de hardware por linha |
 | `traps.stats` | Contadores de exceções e detalhes da última falha |
-| `debug.trigger` | Dispara uma exceção de propósito, para autoteste (`kind`) |
+| `debug.trigger` | Dispara uma exceção de propósito (`kind`: `breakpoint` ou `fatal`) |
 | `log.tail` | Registros de log estruturados (`count`, `min_level`) |
 
 Esta tabela é gerada a partir do mesmo registro que o kernel usa para validar
@@ -165,7 +170,10 @@ kernel/src/
         ├── fdt.rs     leitor de device tree escrito à mão
         └── linker.ld  layout de memória e símbolos de boot
 
-xtask/src/main.rs    build system: compila, gera imagens, roda o emulador
+xtask/src/main.rs    build system: compila, gera imagens, roda o emulador,
+                     conecta depurador e traduz endereços em símbolos
+
+docs/DEPURACAO.md    o ferramental de depuração, e o que não se aplica aqui
 ```
 
 **Como as duas arquiteturas convivem.** Cada backend em `arch/` traduz o que
@@ -252,6 +260,38 @@ $ cargo xtask test --arch aarch64
 
 O CI roda formatação, clippy nas cinco configurações, e a suíte nas duas
 arquiteturas em debug e release.
+
+## Depuração
+
+Um kernel não pode ser depurado como um programa comum: não há processo para
+anexar, e sanitizers, Miri e profilers dependem justamente do sistema
+operacional que nós somos. O projeto resolve isso em duas frentes.
+
+**De dentro**, o kernel se descreve — é o que o canal do agente existe para
+fazer. `log.tail` diz o que aconteceu e em que ordem; `traps.stats` diz onde
+ele morreu; e o modo post-mortem mantém o canal vivo depois de uma exceção
+fatal. `debug.trigger` com `kind: "fatal"` provoca uma falha de propósito,
+para exercitar esse caminho sem plantar um defeito no código.
+
+**De fora**, pelo emulador. O QEMU implementa o protocolo de depuração remota
+do GDB, o que dá breakpoint, passo a passo, pilha de chamadas e variáveis
+locais em bare-metal, desde a primeira instrução — inclusive no trecho de boot
+anterior à existência do canal.
+
+```bash
+$ cargo xtask agent traps.stats
+{"result":{"last":{"name":"page_fault","pc":18446603336221253026,…}}}
+
+$ cargo xtask simbolo 18446603336221253026
+0xffff80000000dda2
+  core::ptr::write_volatile::<u64>
+      …/core/src/ptr/mod.rs:2269:9
+  inlinado em kernel::arch::x86_64::disparar_falha_fatal
+      kernel/src/arch/x86_64/mod.rs:337:14
+```
+
+Detalhes, e a lista honesta do que **não** funciona num kernel (Miri, ASan,
+TSan, Tokio, `perf`) com o motivo de cada um, em [`docs/DEPURACAO.md`](docs/DEPURACAO.md).
 
 ## Idioma
 

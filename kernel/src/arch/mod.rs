@@ -33,6 +33,7 @@
 //! - `esperar_interrupcao()`: dorme até a próxima interrupção.
 //! - `dormir_se_ocioso()`: dorme só se não houver trabalho, sem corrida.
 //! - `disparar_breakpoint()`: gera uma exceção recuperável, para autoteste.
+//! - `disparar_falha_fatal()`: gera uma exceção irrecuperável, de propósito.
 //! - `encerrar_emulador()`: termina o QEMU comunicando sucesso ou falha.
 //! - `nome()`: o nome da arquitetura, para o protocolo do agente.
 //! - O ponto de entrada de boot, que preenche [`crate::machine`] e chama
@@ -55,10 +56,10 @@ pub use aarch64 as atual;
 // pelos backends, que esconderia código morto de verdade dentro deles.
 #[allow(unused_imports)]
 pub use atual::{
-    Uart, acesso_fisico, desmapear, disparar_breakpoint, dormir_se_ocioso, encerrar_emulador,
-    esperar_interrupcao, falha_de_estouro_de_pilha, halt_forever, identificar_cpu, init_excecoes,
-    init_interrupcao_serial, init_interrupcoes, init_paginacao, init_seriais, mapear_frame, nome,
-    reservar_faixas, sem_interrupcoes, traduzir,
+    Uart, acesso_fisico, desmapear, disparar_breakpoint, disparar_falha_fatal, dormir_se_ocioso,
+    encerrar_emulador, esperar_interrupcao, falha_de_estouro_de_pilha, halt_forever,
+    identificar_cpu, init_excecoes, init_interrupcao_serial, init_interrupcoes, init_paginacao,
+    init_seriais, mapear_frame, nome, reservar_faixas, sem_interrupcoes, traduzir,
 };
 
 /// Tamanho de uma página nas duas arquiteturas.

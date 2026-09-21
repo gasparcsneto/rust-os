@@ -73,6 +73,36 @@ impl Arquitetura {
         }
     }
 
+    /// Endereço virtual onde a imagem do kernel é carregada.
+    ///
+    /// É o deslocamento entre um endereço em tempo de execução e o endereço
+    /// correspondente dentro do binário — o número que transforma o `pc` de
+    /// uma exceção em arquivo e linha.
+    ///
+    /// No x86 o kernel é um executável independente de posição, ligado a
+    /// partir do zero, e o bootloader o deposita na metade alta do espaço
+    /// virtual (ver `BASE_DO_KERNEL` em `arch::x86_64`). No ARM o script do
+    /// linker já fixa os endereços finais, então não há deslocamento nenhum.
+    fn base_do_kernel(self) -> u64 {
+        match self {
+            Self::X86_64 => 0xFFFF_8000_0000_0000,
+            Self::Aarch64 => 0,
+        }
+    }
+
+    /// O depurador que consegue falar com esta arquitetura nesta máquina.
+    ///
+    /// O `gdb` das distribuições costuma ser compilado para um alvo só, então
+    /// o do host não depura ARM (isso é o `gdb-multiarch`). O `lldb` é
+    /// construído sobre o LLVM e carrega todos os alvos no mesmo binário, o
+    /// que o torna a escolha portátil para a arquitetura cruzada.
+    fn depurador(self) -> &'static str {
+        match self {
+            Self::X86_64 => "gdb",
+            Self::Aarch64 => "lldb",
+        }
+    }
+
     fn qemu(self) -> &'static str {
         match self {
             Self::X86_64 => "qemu-system-x86_64",
@@ -131,6 +161,12 @@ fn main() -> ExitCode {
             let params = posicionais.get(2).copied().unwrap_or("{}");
             agente(arch, metodo, params)
         }
+        "debug" => depurar(arch, release),
+        "simbolo" => simbolizar(arch, release, &posicionais[1..]),
+        "asm" => match posicionais.get(1) {
+            Some(simbolo) => desmontar(arch, release, simbolo),
+            None => Err("uso: cargo xtask asm <simbolo>".into()),
+        },
         "help" | "-h" => {
             ajuda();
             Ok(ExitCode::SUCCESS)
@@ -179,6 +215,9 @@ COMANDOS:
     run                       executa no QEMU com o canal do agente ativo
     test                      executa a suíte de testes dentro do QEMU
     agent <metodo> [params]   envia uma chamada JSON-RPC ao kernel em execução
+    debug                     sobe o kernel parado, esperando um depurador
+    simbolo <endereco>...     traduz endereços de execução em arquivo e linha
+    asm <simbolo>             desmonta uma função do binário compilado
     help                      mostra esta mensagem
 
 EXEMPLOS:
@@ -186,7 +225,11 @@ EXEMPLOS:
     cargo xtask run --arch aarch64
     cargo xtask agent system.info
     cargo xtask agent --arch aarch64 agent.describe
-    cargo xtask agent log.tail '{{\"count\":5,\"min_level\":\"info\"}}'"
+    cargo xtask agent log.tail '{{\"count\":5,\"min_level\":\"info\"}}'
+
+    cargo xtask debug --arch aarch64
+    cargo xtask simbolo 0xffff80000000b697
+    cargo xtask asm --release kernel::testes::consumir_pilha"
     );
 }
 
@@ -328,6 +371,17 @@ fn build(arch: Arquitetura, release: bool, modo_teste: bool) -> Result<Artefato,
 /// do LLVM lida com todos os alvos que o próprio rustc sabe gerar — ele vem
 /// no componente `llvm-tools`, declarado no `rust-toolchain.toml`.
 fn localizar_objcopy() -> Result<PathBuf, String> {
+    ferramenta_llvm("llvm-objcopy")
+}
+
+/// Localiza uma ferramenta do LLVM distribuída junto com a toolchain.
+///
+/// Preferimos a do `rustup` à do sistema por um motivo prático: ela é a mesma
+/// versão do LLVM que compilou o binário, então entende o DWARF que ele
+/// contém. Uma `llvm-symbolizer` mais velha que o compilador pode silenciar
+/// informação de linha em vez de falhar, que é o pior desfecho possível numa
+/// ferramenta de diagnóstico.
+fn ferramenta_llvm(nome: &str) -> Result<PathBuf, String> {
     let saida = Command::new("rustc")
         .args(["--print", "sysroot"])
         .output()
@@ -339,17 +393,311 @@ fn localizar_objcopy() -> Result<PathBuf, String> {
         .map_err(|e| format!("não foi possível ler {}: {e}", rustlib.display()))?;
 
     for entrada in entradas.flatten() {
-        let candidato = entrada.path().join("bin").join("llvm-objcopy");
+        let candidato = entrada.path().join("bin").join(nome);
         if candidato.is_file() {
             return Ok(candidato);
         }
     }
 
+    // Fora do rustup, a do sistema serve — com a ressalva de versão acima.
+    if Command::new(nome).arg("--version").output().is_ok() {
+        return Ok(PathBuf::from(nome));
+    }
+
     Err(format!(
-        "llvm-objcopy não encontrado em {}\n\
+        "{nome} não encontrado em {}\n\
          instale o componente com: rustup component add llvm-tools",
         rustlib.display()
     ))
+}
+
+/// Caminho do ELF compilado, que é onde vivem os símbolos e o DWARF.
+///
+/// O que o QEMU carrega é outra coisa: no x86 uma imagem de disco, no ARM um
+/// binário cru sem metadado nenhum. Depurar exige os dois lados — o emulador
+/// executa a imagem, o depurador lê o ELF.
+fn caminho_elf(arch: Arquitetura, release: bool) -> PathBuf {
+    raiz_do_projeto()
+        .join("kernel")
+        .join("target")
+        .join(arch.alvo())
+        .join(if release { "release" } else { "debug" })
+        .join("kernel")
+}
+
+/// Porta TCP onde o QEMU expõe o protocolo de depuração remota.
+const PORTA_GDB: u16 = 1234;
+
+/// Sobe o kernel parado na primeira instrução, esperando um depurador.
+///
+/// # O que isto resolve
+///
+/// Até agora a depuração deste kernel se apoiava no canal do agente: o
+/// próprio sistema conta o que aconteceu. É uma ferramenta excelente, mas tem
+/// dois limites intransponíveis. Ela não funciona *antes* de o canal existir —
+/// o trecho de boot mais escuro é justamente o anterior a ele —, e não
+/// funciona quando o kernel morre de um jeito que o modo post-mortem não
+/// alcança, como um triple fault que reinicia a máquina.
+///
+/// O QEMU resolve os dois de uma vez: ele implementa o protocolo de depuração
+/// remota do GDB, o que dá breakpoint, execução passo a passo, pilha de
+/// chamadas, variáveis locais e registradores num kernel bare-metal, desde a
+/// primeira instrução. Isto aqui é só a plumbagem: sobe o emulador congelado e
+/// imprime a linha exata para conectar.
+fn depurar(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
+    let artefato = build(arch, release, false)?;
+    let elf = caminho_elf(arch, release);
+    let socket = caminho_socket(arch);
+
+    let mut qemu = comando_qemu(arch, &artefato, Some(&socket))?;
+    // `-S` congela a CPU antes da primeira instrução; `-gdb` abre o servidor.
+    // Sem o `-S`, o kernel bootaria inteiro antes de dar tempo de conectar, e
+    // qualquer breakpoint de boot seria perdido.
+    qemu.arg("-S").args(["-gdb", &format!("tcp::{PORTA_GDB}")]);
+
+    println!("[xtask] kernel congelado antes da primeira instrucao");
+    println!("[xtask] servidor de depuracao em localhost:{PORTA_GDB}\n");
+    println!("[xtask] conecte de outro terminal com:\n");
+    for linha in receita_do_depurador(arch, &elf) {
+        println!("    {linha}");
+    }
+    println!("\n[xtask] ja conectado, um primeiro passo util:\n");
+    for linha in primeiros_passos(arch) {
+        println!("    {linha}");
+    }
+    println!(
+        "\n[xtask] o canal do agente continua em {}\n",
+        socket.display()
+    );
+
+    qemu.status()
+        .map_err(|e| format!("não foi possível iniciar o {}: {e}", arch.qemu()))?;
+
+    Ok(ExitCode::SUCCESS)
+}
+
+/// A linha de comando que conecta o depurador certo ao kernel certo.
+///
+/// O x86 precisa do `add-symbol-file` com deslocamento porque o binário é
+/// independente de posição e o bootloader o carrega na metade alta; sem isso o
+/// GDB conecta, funciona, e mostra endereços sem nome nenhum — a pior forma de
+/// falhar, porque parece estar funcionando.
+fn receita_do_depurador(arch: Arquitetura, elf: &Path) -> Vec<String> {
+    let dep = arch.depurador();
+    match arch {
+        Arquitetura::X86_64 => vec![format!(
+            "{dep} -ex 'target remote localhost:{PORTA_GDB}' \\\n         \
+             -ex 'add-symbol-file {} -o {:#x}'",
+            elf.display(),
+            arch.base_do_kernel()
+        )],
+        Arquitetura::Aarch64 => vec![format!(
+            "{dep} -o 'settings set target.default-arch aarch64' \\\n         \
+             -o 'target create {}' \\\n         \
+             -o 'gdb-remote localhost:{PORTA_GDB}'",
+            elf.display()
+        )],
+    }
+}
+
+/// O primeiro comando útil depois de conectar, na sintaxe de cada depurador.
+///
+/// Os dois falam o mesmo protocolo com o QEMU, mas não a mesma língua: o GDB
+/// resolve um caminho de módulo Rust inteiro em `break`, enquanto o LLDB casa
+/// por nome de função em `breakpoint set --name` e não aceita o caminho
+/// completo — um detalhe que custa uns minutos de confusão na primeira vez.
+fn primeiros_passos(arch: Arquitetura) -> Vec<&'static str> {
+    match arch {
+        Arquitetura::X86_64 => vec![
+            "break kernel::inicio_comum",
+            "continue",
+            "bt",
+            "info locals",
+        ],
+        Arquitetura::Aarch64 => vec![
+            "breakpoint set --name inicio_comum",
+            "continue",
+            "bt",
+            "frame variable",
+        ],
+    }
+}
+
+/// Traduz endereços de execução em arquivo, linha e função.
+///
+/// # Por que este comando existe
+///
+/// O canal do agente reporta o `pc` de uma exceção como um número cru — é a
+/// decisão certa para o protocolo, porque o kernel não tem como carregar sua
+/// própria tabela de símbolos. Mas do lado de fora esse número é inútil até
+/// ser cruzado com o DWARF do binário, e fazer isso à mão toda vez é
+/// exatamente o tipo de trabalho que some quando vira um comando.
+///
+/// Fecha o ciclo com `traps.stats`:
+///
+/// ```text
+/// cargo xtask agent traps.stats        -> "pc": 18446603336221365869
+/// cargo xtask simbolo 18446603336221365869
+/// ```
+fn simbolizar(arch: Arquitetura, release: bool, enderecos: &[&str]) -> Result<ExitCode, String> {
+    if enderecos.is_empty() {
+        return Err("uso: cargo xtask simbolo <endereco>... (decimal ou 0x...)".into());
+    }
+
+    let elf = caminho_elf(arch, release);
+    if !elf.exists() {
+        return Err(format!(
+            "binário não encontrado em {}\ncompile antes com: cargo xtask build --arch {}{}",
+            elf.display(),
+            arch.nome(),
+            if release { " --release" } else { "" }
+        ));
+    }
+
+    let symbolizer = ferramenta_llvm("llvm-symbolizer")?;
+    let base = arch.base_do_kernel();
+
+    for bruto in enderecos {
+        let endereco = interpretar_endereco(bruto)?;
+
+        if endereco < base {
+            println!("{bruto}: abaixo da base do kernel ({base:#x}); nao pertence a imagem");
+            continue;
+        }
+
+        // O endereço que o DWARF conhece é o do binário, não o da execução.
+        // `--adjust-vma` faz o `llvm-symbolizer` somar a base aos endereços do
+        // binário antes de comparar, em vez de nós subtrairmos e perdermos a
+        // referência original na saída.
+        let saida = Command::new(&symbolizer)
+            .arg(format!("--obj={}", elf.display()))
+            .arg(format!("--adjust-vma={base:#x}"))
+            .arg("--demangle")
+            .arg("--functions=linkage")
+            // Num kernel quase tudo é inlinado, e o quadro mais interno
+            // costuma ser uma função da `core` que não diz nada — `pc` caindo
+            // em `ptr::write_volatile` só vira informação quando se vê quem a
+            // chamou. Esta opção traz a cadeia inteira.
+            .arg("--inlining=true")
+            .arg(format!("{endereco:#x}"))
+            .output()
+            .map_err(|e| format!("não foi possível invocar o llvm-symbolizer: {e}"))?;
+
+        let texto = String::from_utf8_lossy(&saida.stdout);
+        // A saída vem em pares: uma linha de função, uma de arquivo:linha. O
+        // primeiro par é o quadro mais interno; os seguintes são quem o
+        // inlinou, do mais próximo para o mais distante.
+        let linhas: Vec<&str> = texto.lines().filter(|l| !l.trim().is_empty()).collect();
+
+        println!("{endereco:#x}");
+        if linhas.is_empty() || linhas[0] == "??" {
+            // `??` é como o symbolizer diz "não sei", e repassar isso cru
+            // deixaria o usuário achando que a ferramenta quebrou.
+            println!("  sem informacao de simbolo neste endereco");
+            println!("  (o binario corresponde ao que esta rodando? tente --release)");
+            continue;
+        }
+
+        for (nivel, par) in linhas.chunks(2).enumerate() {
+            let funcao = par[0];
+            let local = par.get(1).map(|l| l.trim()).unwrap_or("");
+            let marca = if nivel == 0 { "  " } else { "  inlinado em " };
+            println!("{marca}{funcao}");
+            if !local.is_empty() {
+                println!("      {local}");
+            }
+        }
+    }
+
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Aceita um endereço em decimal ou em hexadecimal com `0x`.
+///
+/// Os dois formatos aparecem de verdade: o canal do agente emite números JSON,
+/// que são decimais, e um depurador imprime hexadecimal.
+fn interpretar_endereco(bruto: &str) -> Result<u64, String> {
+    let limpo = bruto.trim().replace('_', "");
+    let resultado = match limpo
+        .strip_prefix("0x")
+        .or_else(|| limpo.strip_prefix("0X"))
+    {
+        Some(hex) => u64::from_str_radix(hex, 16),
+        None => limpo.parse(),
+    };
+    resultado.map_err(|_| format!("`{bruto}` não é um endereço válido (decimal ou 0x...)"))
+}
+
+/// Desmonta uma função do binário compilado.
+///
+/// # Por que isto ganhou um comando
+///
+/// Porque um bug real deste projeto teria sido encontrado em segundos por
+/// aqui. O teste de estouro de pilha passava em debug e pendurava em release:
+/// o otimizador reconhecia a recursão e a convertia num laço, que roda para
+/// sempre sem consumir pilha. A evidência era direta — a versão release da
+/// função não tinha instrução de chamada nenhuma —, mas só se alguém olhasse.
+///
+/// O filtro é por subcadeia porque nomes de símbolo em Rust carregam sufixo de
+/// hash, e ninguém os digita por inteiro.
+fn desmontar(arch: Arquitetura, release: bool, simbolo: &str) -> Result<ExitCode, String> {
+    let elf = caminho_elf(arch, release);
+    if !elf.exists() {
+        return Err(format!(
+            "binário não encontrado em {}\ncompile antes com: cargo xtask build --arch {}{}",
+            elf.display(),
+            arch.nome(),
+            if release { " --release" } else { "" }
+        ));
+    }
+
+    let objdump = ferramenta_llvm("llvm-objdump")?;
+    let saida = Command::new(&objdump)
+        .arg("--disassemble")
+        .arg("--demangle")
+        // Sem isto a saída é só instrução; com isto, cada trecho vem anotado
+        // com a linha de Rust que o gerou, que é o que torna a comparação
+        // entre debug e release legível.
+        .arg("--source")
+        .arg("--no-show-raw-insn")
+        .arg(&elf)
+        .output()
+        .map_err(|e| format!("não foi possível invocar o llvm-objdump: {e}"))?;
+
+    if !saida.status.success() {
+        return Err(format!(
+            "llvm-objdump falhou: {}",
+            String::from_utf8_lossy(&saida.stderr).trim()
+        ));
+    }
+
+    let texto = String::from_utf8_lossy(&saida.stdout);
+    let mut dentro = false;
+    let mut achou = false;
+
+    for linha in texto.lines() {
+        // Um cabeçalho de função tem a forma `<endereco> <nome>:`.
+        if linha.ends_with(">:") {
+            dentro = linha.contains(simbolo);
+            if dentro {
+                achou = true;
+                println!();
+            }
+        }
+        if dentro {
+            println!("{linha}");
+        }
+    }
+
+    if !achou {
+        return Err(format!(
+            "nenhum símbolo contendo `{simbolo}` no binário {}\n\
+             dica: funções pequenas somem por inlining em release",
+            elf.display()
+        ));
+    }
+
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Monta a linha de comando do QEMU para a arquitetura em questão.
@@ -575,4 +923,64 @@ fn agente(arch: Arquitetura, metodo: &str, params: &str) -> Result<ExitCode, Str
 
     print!("{resposta}");
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(test)]
+mod testes {
+    use super::*;
+
+    /// O comando `simbolo` recebe endereços de duas origens com formatos
+    /// diferentes: o canal do agente emite números JSON, que são decimais, e
+    /// um depurador imprime hexadecimal. Aceitar os dois sem exigir conversão
+    /// manual é o ponto, e é também onde um erro silencioso doeria mais — um
+    /// decimal lido como hexadecimal aponta para o símbolo errado sem reclamar
+    /// de nada.
+    #[test]
+    fn enderecos_em_decimal_e_hexadecimal() {
+        assert_eq!(interpretar_endereco("4096"), Ok(4096));
+        assert_eq!(interpretar_endereco("0x1000"), Ok(0x1000));
+        assert_eq!(interpretar_endereco("0X1000"), Ok(0x1000));
+        // O `pc` de uma falha real, como o `traps.stats` o reporta.
+        assert_eq!(
+            interpretar_endereco("18446603336221253026"),
+            Ok(0xffff_8000_0000_dda2)
+        );
+        // Sublinhados aparecem quando alguém copia de um literal Rust.
+        assert_eq!(
+            interpretar_endereco("0xFFFF_8000_0000_0000"),
+            Ok(0xFFFF_8000_0000_0000)
+        );
+        // Espaço em volta é comum ao colar de um terminal.
+        assert_eq!(interpretar_endereco("  0x40 "), Ok(0x40));
+    }
+
+    #[test]
+    fn enderecos_invalidos_sao_recusados() {
+        assert!(interpretar_endereco("").is_err());
+        assert!(interpretar_endereco("0x").is_err());
+        assert!(interpretar_endereco("xyz").is_err());
+        // Dígitos hexadecimais sem o prefixo são ambíguos, e adivinhar seria
+        // pior que recusar: `dead` em decimal não existe, mas `10` existe nas
+        // duas bases com valores diferentes.
+        assert!(interpretar_endereco("dead").is_err());
+    }
+
+    /// A base do x86 é o que transforma endereço de execução em endereço de
+    /// binário; se ela divergir de `arch::x86_64::BASE_DO_KERNEL`, a
+    /// simbolização aponta para o lugar errado em silêncio. Os dois arquivos
+    /// não compartilham código — um é bare-metal, o outro é do host —, então
+    /// esta é a única amarra possível.
+    #[test]
+    fn base_do_kernel_confere_com_a_do_kernel() {
+        let fonte =
+            std::fs::read_to_string(raiz_do_projeto().join("kernel/src/arch/x86_64/mod.rs"))
+                .expect("o backend x86_64 do kernel precisa existir");
+
+        assert!(
+            fonte.contains("pub const BASE_DO_KERNEL: u64 = 0xFFFF_8000_0000_0000;"),
+            "a base do kernel mudou em arch::x86_64; atualize Arquitetura::base_do_kernel"
+        );
+        assert_eq!(Arquitetura::X86_64.base_do_kernel(), 0xFFFF_8000_0000_0000);
+        assert_eq!(Arquitetura::Aarch64.base_do_kernel(), 0);
+    }
 }

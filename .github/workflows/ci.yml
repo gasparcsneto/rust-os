@@ -48,6 +48,12 @@ jobs:
           cargo fmt --all -- --check
           cd kernel && cargo fmt --all -- --check
 
+      # O xtask roda no host, então tem testes de unidade comuns. São poucos,
+      # mas cobrem a parte dele que erra em silêncio: interpretar um endereço
+      # no formato errado aponta para o símbolo errado sem reclamar de nada.
+      - name: Testes do xtask
+        run: cargo test -p xtask
+
       - name: Lints
         run: |
           cargo clippy -p xtask --all-targets -- -D warnings
