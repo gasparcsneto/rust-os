@@ -43,7 +43,10 @@ use core::arch::asm;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use aarch64_cpu::asm::barrier;
+use aarch64_cpu::registers::{ID_AA64MMFR0_EL1, MAIR_EL1, SCTLR_EL1, TCR_EL1, TTBR0_EL1};
 use spin::Mutex;
+use tock_registers::interfaces::{ReadWriteable, Readable, Writeable};
 
 use super::super::{Permissoes, TAMANHO_PAGINA, validar_alinhamento};
 
@@ -102,13 +105,29 @@ const PXN: u64 = 1 << 53;
 /// Nunca executável em EL0.
 const UXN: u64 = 1 << 54;
 
-/// `MAIR_EL1`: a tabela de atributos de memória.
+/// Programa `MAIR_EL1`, a tabela de atributos de memória.
 ///
-/// - Atributo 0 = `0x00`: dispositivo nGnRnE. Sem cache, sem junção de
-///   escritas, sem reordenação. É o que registradores de hardware exigem.
-/// - Atributo 1 = `0xFF`: memória normal, write-back, com alocação em
-///   leitura e escrita, interna e externa.
-const MAIR: u64 = 0xFF00;
+/// Os descritores de página não carregam os atributos de cache: carregam um
+/// *índice* de três bits para esta tabela. É aqui que cada índice ganha
+/// significado.
+///
+/// - Atributo 0: dispositivo nGnRnE — sem junção de escritas, sem
+///   reordenação, sem confirmação antecipada. É o regime que registradores de
+///   hardware exigem: cada acesso precisa chegar ao dispositivo exatamente
+///   como foi escrito, na ordem em que foi escrito.
+/// - Atributo 1: memória normal, write-back, com alocação em leitura e
+///   escrita, interna e externa. É o regime da RAM.
+///
+/// O valor final é `0xFF00`, mas escrevê-lo assim exigiria confiar que quem
+/// lê saiba decompor dois bytes de codificação do manual. Os nomes abaixo
+/// dizem a mesma coisa de forma conferível.
+fn programar_atributos_de_memoria() {
+    MAIR_EL1.write(
+        MAIR_EL1::Attr0_Device::nonGathering_nonReordering_noEarlyWriteAck
+            + MAIR_EL1::Attr1_Normal_Inner::WriteBack_NonTransient_ReadWriteAlloc
+            + MAIR_EL1::Attr1_Normal_Outer::WriteBack_NonTransient_ReadWriteAlloc,
+    );
+}
 
 /// Uma tabela de tradução.
 #[repr(C, align(4096))]
@@ -320,48 +339,22 @@ const fn bloco(endereco_fisico: u64, atributo: u64, extras: u64) -> u64 {
 /// `raiz` precisa apontar para uma tabela de nível 1 válida que mapeie, no
 /// mínimo, o código em execução e a pilha atual.
 unsafe fn ligar(raiz: u64) {
-    // A largura de endereço físico suportada varia por implementação. Ler em
-    // vez de fixar evita configurar mais bits do que o processador tem.
-    let mmfr0: u64;
-    // SAFETY: registrador de identificação, somente leitura.
-    unsafe { asm!("mrs {}, id_aa64mmfr0_el1", out(reg) mmfr0, options(nomem, nostack)) };
-    let ips = (mmfr0 & 0b1111).min(0b101);
+    programar_atributos_de_memoria();
+    programar_controle_de_traducao();
 
-    // T0SZ = 25 dá 39 bits de endereço virtual, o que faz o nível 1 ser o
-    // nível inicial e cada uma de suas entradas cobrir 1 GiB.
-    // Os termos que valem zero ficam escritos para documentar o layout dos
-    // campos; sem eles a constante viraria um número sem explicação.
-    #[allow(clippy::identity_op)]
-    let tcr: u64 = 25
-        | (0b01 << 8)   // IRGN0: cache interno write-back
-        | (0b01 << 10)  // ORGN0: cache externo write-back
-        | (0b11 << 12)  // SH0: compartilhável internamente
-        | (0b00 << 14)  // TG0: granularidade de 4 KiB
-        | (1 << 23)     // EPD1: desliga as buscas por TTBR1, que não usamos
-        | (0b10 << 30)  // TG1: 4 KiB (evita um valor reservado)
-        | (ips << 32);
+    TTBR0_EL1.set_baddr(raiz);
 
-    // SAFETY: valores calculados acima; a sequência de barreiras é a exigida
-    // pelo manual de arquitetura.
+    // Garante que a escrita da tabela na memória esteja visível para o
+    // percorredor de tabelas antes de ligá-lo.
+    barrier::dsb(barrier::ISH);
+    barrier::isb(barrier::SY);
+
+    // SAFETY: manutenção de TLB e de cache, sem pré-condição além de estarmos
+    // em EL1. Nenhuma das duas tem equivalente tipado: são instruções, não
+    // escritas em registrador.
     unsafe {
-        asm!(
-            // Garante que a escrita da tabela na memória esteja visível para o
-            // percorredor de tabelas antes de apontá-lo para ela.
-            "dsb ish",
-            "isb",
-            "msr mair_el1, {mair}",
-            "msr tcr_el1,  {tcr}",
-            "msr ttbr0_el1,{raiz}",
-            "isb",
-            // A TLB pode conter traduções obsoletas do que rodou antes de nós.
-            "tlbi vmalle1",
-            "dsb ish",
-            "isb",
-            mair = in(reg) MAIR,
-            tcr = in(reg) tcr,
-            raiz = in(reg) raiz,
-            options(nostack),
-        );
+        // A TLB pode conter traduções obsoletas do que rodou antes de nós.
+        asm!("tlbi vmalle1", "dsb ish", "isb", options(nostack));
 
         // Vamos ligar o cache de instruções junto com a MMU, e ele pode conter
         // linhas trazidas enquanto a tradução estava desligada. Essas linhas
@@ -371,22 +364,56 @@ unsafe fn ligar(raiz: u64) {
         //
         // `nsh` (non-shareable) basta: a invalidação é do cache deste núcleo.
         asm!("ic iallu", "dsb nsh", "isb", options(nostack));
-
-        // O momento crítico: entre escrever SCTLR_EL1 e o `isb`, a MMU passa a
-        // valer. O mapa de identidade é o que garante que a busca da próxima
-        // instrução ainda encontre o mesmo código.
-        let mut sctlr: u64;
-        asm!("mrs {}, sctlr_el1", out(reg) sctlr, options(nomem, nostack));
-        sctlr |= 1 << 0; // M: liga a tradução
-        sctlr |= 1 << 2; // C: cache de dados
-        sctlr |= 1 << 12; // I: cache de instruções
-        asm!(
-            "msr sctlr_el1, {}",
-            "isb",
-            in(reg) sctlr,
-            options(nostack),
-        );
     }
+
+    // O momento crítico. Entre esta escrita e o `isb` seguinte, a MMU passa a
+    // valer: é o mapa de identidade que garante que a busca da próxima
+    // instrução ainda encontre o mesmo código.
+    SCTLR_EL1.modify(
+        SCTLR_EL1::M::Enable      // liga a tradução
+            + SCTLR_EL1::C::Cacheable // cache de dados
+            + SCTLR_EL1::I::Cacheable, // cache de instruções
+    );
+    barrier::isb(barrier::SY);
+}
+
+/// Programa `TCR_EL1`, que descreve o formato das tabelas de tradução.
+///
+/// Antes esta função montava um `u64` a partir de deslocamentos copiados do
+/// manual. Funcionava, mas um bit trocado ali não gera erro de compilação nem
+/// mensagem — gera uma máquina que traduz endereços de um jeito sutilmente
+/// errado. Com campos nomeados, cada linha é conferível contra o manual sem
+/// contar posições.
+fn programar_controle_de_traducao() {
+    // A largura de endereço físico suportada varia por implementação. Ler do
+    // processador, em vez de fixar, evita configurar mais bits do que ele tem.
+    //
+    // O teto em 48 bits não é arbitrário: a codificação seguinte (52 bits)
+    // depende da extensão FEAT_LPA, que muda o formato dos descritores e do
+    // próprio TTBR0. Anunciar 52 bits sem implementar esse formato produziria
+    // traduções silenciosamente erradas, então preferimos endereçar menos.
+    let ips = ID_AA64MMFR0_EL1
+        .read(ID_AA64MMFR0_EL1::PARange)
+        .min(ID_AA64MMFR0_EL1::PARange::Bits_48.into());
+
+    TCR_EL1.write(
+        // T0SZ = 25 dá 39 bits de endereço virtual, o que faz o nível 1 ser o
+        // nível inicial e cada uma de suas entradas cobrir 1 GiB.
+        TCR_EL1::T0SZ.val(25)
+            + TCR_EL1::TG0::KiB_4
+            + TCR_EL1::SH0::Inner
+            + TCR_EL1::IRGN0::WriteBack_ReadAlloc_WriteAlloc_Cacheable
+            + TCR_EL1::ORGN0::WriteBack_ReadAlloc_WriteAlloc_Cacheable
+            // Não usamos a metade alta do espaço virtual, então desligamos as
+            // buscas por TTBR1 em vez de deixá-las apontando para lixo.
+            + TCR_EL1::EPD1::DisableTTBR1Walks
+            // TG1 tem codificação própria, *diferente* da de TG0 — um dos
+            // detalhes que justificam não escrever estes campos à mão. Mesmo
+            // sem usar TTBR1, deixá-lo num valor reservado é comportamento
+            // indefinido.
+            + TCR_EL1::TG1::KiB_4
+            + TCR_EL1::IPS.val(ips),
+    );
 }
 
 /// Índices de tabela para um endereço virtual, com granularidade de 4 KiB.

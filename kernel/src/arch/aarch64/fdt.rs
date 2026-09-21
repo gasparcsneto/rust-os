@@ -8,13 +8,18 @@
 //! o endereço dela no registrador `x0`. Descobrir quanta memória a máquina
 //! tem significa interpretar essa árvore.
 //!
-//! # Por que escrito à mão
+//! # Por que continua escrito à mão
 //!
-//! Existem crates de FDT prontos, mas o formato é pequeno e bem especificado,
-//! e precisamos de exatamente uma coisa dele: os nós `/memory`. Escrever o
-//! parser mantém o kernel sem dependências no ARM e deixa visível um formato
-//! que vai voltar a importar quando formos descobrir controlador de
-//! interrupções, timer e dispositivos virtio.
+//! Existem crates de FDT prontos, e o kernel já usa crates no ARM para o que
+//! vale: registradores de sistema e blocos de MMIO, onde montar bits à mão é
+//! arriscado e invisível quando erra.
+//!
+//! Aqui o critério dá o resultado oposto. O formato é pequeno e bem
+//! especificado, não há aritmética de bits contra um manual de arquitetura, e
+//! precisamos de exatamente uma coisa dele: os nós `/memory`. O parser é
+//! autocontido, tem teste, e deixa visível um formato que vai voltar a
+//! importar quando formos descobrir dispositivos virtio. Trocá-lo por uma
+//! dependência não tornaria nada mais seguro — só esconderia o formato.
 //!
 //! # O formato, em resumo
 //!

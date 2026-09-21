@@ -19,6 +19,10 @@
 
 use core::fmt;
 
+use tock_registers::interfaces::{Readable, Writeable};
+use tock_registers::registers::{ReadOnly, ReadWrite, WriteOnly};
+use tock_registers::{register_bitfields, register_structs};
+
 /// Endereço da PL011 na máquina `virt` do QEMU.
 ///
 /// Confirmado lendo o device tree que o próprio QEMU gera
@@ -26,35 +30,89 @@ use core::fmt;
 /// `pl011@9000000`.
 pub const PL011_BASE: usize = 0x0900_0000;
 
-// Deslocamentos dos registradores, conforme o manual do ARM PrimeCell PL011.
-const DR: usize = 0x00; // Data Register
-const FR: usize = 0x18; // Flag Register
-const IBRD: usize = 0x24; // Integer Baud Rate Divisor
-const FBRD: usize = 0x28; // Fractional Baud Rate Divisor
-const LCRH: usize = 0x2C; // Line Control Register
-const CR: usize = 0x30; // Control Register
-const IMSC: usize = 0x38; // Interrupt Mask Set/Clear
-const ICR: usize = 0x44; // Interrupt Clear Register
+register_bitfields! {u32,
+    /// Flag Register: o estado das FIFOs e das linhas de controle.
+    FR [
+        /// FIFO de recepção vazia.
+        RXFE OFFSET(4) NUMBITS(1) [],
+        /// FIFO de transmissão cheia.
+        TXFF OFFSET(5) NUMBITS(1) [],
+    ],
 
-const IMSC_RXIM: u32 = 1 << 4; // interrupção de recepção
-const IMSC_RTIM: u32 = 1 << 6; // interrupção de recepção parada (timeout)
+    /// Line Control Register: formato do quadro serial.
+    LCRH [
+        /// Habilita as FIFOs de 16 bytes. Com elas desligadas, cada registro
+        /// guarda um byte só.
+        FEN  OFFSET(4) NUMBITS(1) [],
+        /// Bits por palavra.
+        WLEN OFFSET(5) NUMBITS(2) [
+            Bits5 = 0b00,
+            Bits6 = 0b01,
+            Bits7 = 0b10,
+            Bits8 = 0b11,
+        ],
+    ],
 
-const ICR_RXIC: u32 = 1 << 4;
-const ICR_RTIC: u32 = 1 << 6;
+    /// Control Register.
+    CR [
+        /// Liga a UART.
+        UARTEN OFFSET(0) NUMBITS(1) [],
+        /// Habilita a transmissão.
+        TXE    OFFSET(8) NUMBITS(1) [],
+        /// Habilita a recepção.
+        RXE    OFFSET(9) NUMBITS(1) [],
+    ],
 
-const FR_RXFE: u32 = 1 << 4; // FIFO de recepção vazia
-const FR_TXFF: u32 = 1 << 5; // FIFO de transmissão cheia
+    /// Interrupt Mask Set/Clear: quais causas chegam a interromper.
+    IMSC [
+        /// Recepção: dispara quando a FIFO atinge o nível de gatilho.
+        RXIM OFFSET(4) NUMBITS(1) [],
+        /// Recepção parada: dispara quando há dados na FIFO e a linha fica
+        /// ociosa. É o que entrega a cauda de uma mensagem curta.
+        RTIM OFFSET(6) NUMBITS(1) [],
+    ],
 
-const CR_UARTEN: u32 = 1 << 0;
-const CR_TXE: u32 = 1 << 8;
-const CR_RXE: u32 = 1 << 9;
+    /// Interrupt Clear Register: escrever 1 reconhece a causa.
+    ICR [
+        RXIC OFFSET(4) NUMBITS(1) [],
+        RTIC OFFSET(6) NUMBITS(1) [],
+        /// Todas as onze causas de uma vez.
+        TODAS OFFSET(0) NUMBITS(11) [],
+    ],
+}
 
-const LCRH_FEN: u32 = 1 << 4; // habilita FIFOs
-const LCRH_WLEN_8: u32 = 0b11 << 5; // palavra de 8 bits
+register_structs! {
+    /// O bloco de registradores da PL011, conforme o manual do ARM PrimeCell.
+    ///
+    /// Antes isto era uma lista de constantes de deslocamento e um par de
+    /// funções `ler`/`escrever` que recebiam `usize`. Funcionava, mas nada
+    /// impedia passar o deslocamento de um registrador e a máscara de outro —
+    /// e o compilador não tinha como perceber. A macro confere o layout
+    /// inteiro em tempo de compilação: os intervalos precisam fechar, e cada
+    /// campo só aceita as máscaras do seu próprio registrador.
+    Registradores {
+        /// Data Register: ler consome um byte da FIFO, escrever enfileira um.
+        (0x00 => dr: ReadWrite<u32>),
+        (0x04 => _reservado0),
+        (0x18 => fr: ReadOnly<u32, FR::Register>),
+        (0x1C => _reservado1),
+        /// Divisor de baud rate, parte inteira.
+        (0x24 => ibrd: WriteOnly<u32>),
+        /// Divisor de baud rate, parte fracionária.
+        (0x28 => fbrd: WriteOnly<u32>),
+        (0x2C => lcrh: WriteOnly<u32, LCRH::Register>),
+        (0x30 => cr: WriteOnly<u32, CR::Register>),
+        (0x34 => _reservado2),
+        (0x38 => imsc: WriteOnly<u32, IMSC::Register>),
+        (0x3C => _reservado3),
+        (0x44 => icr: WriteOnly<u32, ICR::Register>),
+        (0x48 => @END),
+    }
+}
 
 /// Uma PL011 inicializada.
 pub struct Uart {
-    base: *mut u8,
+    registradores: *const Registradores,
 }
 
 // SAFETY: a struct é só um endereço de MMIO. O acesso concorrente é impedido
@@ -71,53 +129,49 @@ impl Uart {
     /// e o chamador precisa garantir acesso exclusivo a ela.
     pub unsafe fn abrir(base: usize) -> Option<Self> {
         let uart = Self {
-            base: base as *mut u8,
+            registradores: base as *const Registradores,
         };
+        let r = uart.regs();
 
-        // SAFETY: o chamador garantiu que `base` é uma PL011 válida.
-        unsafe {
-            // Desligar antes de reconfigurar. Mexer em LCRH com a UART ativa
-            // tem comportamento indefinido pelo manual.
-            uart.escrever(CR, 0);
+        // Desligar antes de reconfigurar. Mexer em LCRH com a UART ativa tem
+        // comportamento indefinido pelo manual.
+        r.cr.set(0);
 
-            // Limpa todas as interrupções pendentes (11 bits de causas).
-            uart.escrever(ICR, 0x7FF);
+        // Limpa todas as causas de interrupção pendentes.
+        r.icr.write(ICR::TODAS.val(0x7FF));
 
-            // 115200 baud com o clock de 24 MHz que o QEMU usa:
-            //   divisor = 24e6 / (16 * 115200) = 13.0208…
-            //   parte inteira = 13; fracionária = 0.0208 * 64 ≈ 1
-            // O QEMU ignora o baud rate, mas hardware real não — e o objetivo
-            // é que este driver funcione numa placa de verdade.
-            uart.escrever(IBRD, 13);
-            uart.escrever(FBRD, 1);
+        // 115200 baud com o clock de 24 MHz que o QEMU usa:
+        //   divisor = 24e6 / (16 * 115200) = 13.0208…
+        //   parte inteira = 13; fracionária = 0.0208 * 64 ≈ 1
+        // O QEMU ignora o baud rate, mas hardware real não — e o objetivo é
+        // que este driver funcione numa placa de verdade.
+        r.ibrd.set(13);
+        r.fbrd.set(1);
 
-            // 8 bits, sem paridade, 1 stop bit, FIFOs ligadas.
-            uart.escrever(LCRH, LCRH_WLEN_8 | LCRH_FEN);
+        // 8 bits, sem paridade, 1 stop bit, FIFOs ligadas.
+        r.lcrh.write(LCRH::WLEN::Bits8 + LCRH::FEN::SET);
 
-            // Nenhuma interrupção por enquanto: quando esta porta é aberta,
-            // o kernel ainda não tem tabela de vetores nem GIC, e uma
-            // interrupção entregue aqui não teria para onde ir. Elas são
-            // ligadas depois, por `habilitar_interrupcao_recepcao`.
-            uart.escrever(IMSC, 0);
+        // Nenhuma interrupção por enquanto: quando esta porta é aberta, o
+        // kernel ainda não tem tabela de vetores nem GIC, e uma interrupção
+        // entregue aqui não teria para onde ir. Elas são ligadas depois, por
+        // `habilitar_interrupcao_recepcao`.
+        r.imsc.set(0);
 
-            uart.escrever(CR, CR_UARTEN | CR_TXE | CR_RXE);
-        }
+        r.cr.write(CR::UARTEN::SET + CR::TXE::SET + CR::RXE::SET);
 
         let mut porta = uart;
         porta.drenar_recepcao();
         Some(porta)
     }
 
-    /// # Safety
-    /// O deslocamento precisa ser de um registrador válido da PL011.
-    unsafe fn escrever(&self, offset: usize, valor: u32) {
-        unsafe { core::ptr::write_volatile(self.base.add(offset) as *mut u32, valor) }
-    }
-
-    /// # Safety
-    /// O deslocamento precisa ser de um registrador válido da PL011.
-    unsafe fn ler(&self, offset: usize) -> u32 {
-        unsafe { core::ptr::read_volatile(self.base.add(offset) as *const u32) }
+    /// O bloco de registradores desta porta.
+    ///
+    /// Seguro porque o ponteiro veio de [`Self::abrir`], cujo contrato exige
+    /// que `base` aponte para uma PL011 de verdade, e o bloco de dispositivos
+    /// vive enquanto a máquina viver.
+    fn regs(&self) -> &Registradores {
+        // SAFETY: garantido pelo contrato de `abrir`.
+        unsafe { &*self.registradores }
     }
 
     /// Passa a interromper o processador quando chegar um byte.
@@ -136,11 +190,9 @@ impl Uart {
     /// caractere, então `RXIM` já bastaria. Mas o driver é escrito para o
     /// hardware descrito no manual, não para o emulador.)
     pub fn habilitar_interrupcao_recepcao(&mut self) {
-        // SAFETY: registradores válidos de uma PL011 já inicializada.
-        unsafe {
-            self.escrever(ICR, ICR_RXIC | ICR_RTIC);
-            self.escrever(IMSC, IMSC_RXIM | IMSC_RTIM);
-        }
+        let r = self.regs();
+        r.icr.write(ICR::RXIC::SET + ICR::RTIC::SET);
+        r.imsc.write(IMSC::RXIM::SET + IMSC::RTIM::SET);
     }
 
     /// Reconhece a interrupção de recepção no próprio dispositivo.
@@ -150,8 +202,7 @@ impl Uart {
     /// explicitamente — sem esta escrita, o GIC reentregaria a mesma
     /// interrupção para sempre.
     pub fn fim_de_recepcao(&mut self) {
-        // SAFETY: registrador válido de uma PL011 já inicializada.
-        unsafe { self.escrever(ICR, ICR_RXIC | ICR_RTIC) }
+        self.regs().icr.write(ICR::RXIC::SET + ICR::RTIC::SET);
     }
 
     /// Descarta o que já estiver na FIFO de recepção.
@@ -169,30 +220,26 @@ impl Uart {
 
     /// Envia todos os bytes, aguardando espaço na FIFO conforme necessário.
     pub fn write_bytes(&mut self, bytes: &[u8]) {
+        let r = self.regs();
         for &byte in bytes {
-            // SAFETY: registradores válidos de uma PL011 inicializada.
-            unsafe {
-                // Espera ativa enquanto a FIFO de transmissão estiver cheia.
-                // Sem esta checagem, bytes seriam descartados silenciosamente
-                // sob carga — e "o log some de vez em quando" é uma das
-                // falhas mais caras de diagnosticar num kernel.
-                while self.ler(FR) & FR_TXFF != 0 {
-                    core::hint::spin_loop();
-                }
-                self.escrever(DR, byte as u32);
+            // Espera ativa enquanto a FIFO de transmissão estiver cheia. Sem
+            // esta checagem, bytes seriam descartados silenciosamente sob
+            // carga — e "o log some de vez em quando" é uma das falhas mais
+            // caras de diagnosticar num kernel.
+            while r.fr.is_set(FR::TXFF) {
+                core::hint::spin_loop();
             }
+            r.dr.set(byte as u32);
         }
     }
 
     /// Lê um byte se houver algum disponível, sem bloquear.
     pub fn read_byte(&mut self) -> Option<u8> {
-        // SAFETY: registradores válidos de uma PL011 inicializada.
-        unsafe {
-            if self.ler(FR) & FR_RXFE != 0 {
-                None
-            } else {
-                Some(self.ler(DR) as u8)
-            }
+        let r = self.regs();
+        if r.fr.is_set(FR::RXFE) {
+            None
+        } else {
+            Some(r.dr.get() as u8)
         }
     }
 }

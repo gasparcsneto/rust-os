@@ -203,6 +203,16 @@ O contraste no caminho de boot é grande:
 Dois workspaces separados: o kernel compila bare-metal e o `xtask` para o
 host. Um único workspace não suporta dois targets padrão.
 
+**O que vem de crate e o que é escrito à mão.** O critério é um só: montar
+palavras de configuração a partir de deslocamentos lidos de um manual é onde
+um erro não gera mensagem nenhuma — gera uma máquina sutilmente errada. Isso
+vai para biblioteca. Protocolo e estrutura ficam explícitos.
+
+| | de crate | escrito à mão |
+|---|---|---|
+| x86_64 | GDT, TSS, IDT, tabelas de página, portas de I/O (`x86_64`); boot (`bootloader`); UART (`uart_16550`) | PIC 8259 e timer PIT |
+| aarch64 | registradores de sistema (`aarch64-cpu`); blocos de MMIO (`tock-registers`) | boot, tabela de vetores, descritores de página, leitor de device tree |
+
 ## Multitarefa cooperativa
 
 O kernel roda suas tarefas com `async`/`await` e um executor próprio. Não é

@@ -41,11 +41,27 @@ uart_16550 = "0.8.1"
 
 # --- aarch64 ----------------------------------------------------------------
 #
-# No ARM não há dependências externas: escrevemos o boot, o driver PL011 e o
-# leitor de device tree à mão. Não é masoquismo — é que não existe equivalente
-# ao `bootloader` para aarch64, e o hardware da máquina `virt` é simples o
-# bastante para que a implementação direta seja mais clara que uma abstração
-# de terceiros.
+# Não há equivalente ao `bootloader` para aarch64, então o boot, o leitor de
+# device tree e a tabela de vetores continuam escritos à mão — são protocolo e
+# estrutura, não aritmética de bits, e a implementação direta é mais clara que
+# uma abstração de terceiros.
+#
+# O que *não* vale escrever à mão é montar palavras de configuração a partir
+# de deslocamentos lidos do manual da arquitetura. Um bit errado em `TCR_EL1`
+# ou `SCTLR_EL1` não dá erro de compilação nem mensagem: dá uma máquina que
+# se comporta de um jeito sutilmente errado. Estes dois crates trocam essa
+# aritmética por campos com nome, verificáveis pela leitura.
+
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+# Registradores de sistema do ARMv8-A com campos tipados: `TCR_EL1::TG0::KiB_4`
+# em vez de `0b00 << 14`, `ESR_EL1::EC` em vez de `(esr >> 26) & 0x3F`.
+aarch64-cpu = "11.2.0"
+
+# Blocos de registradores mapeados em memória, com layout conferido em tempo
+# de compilação. `register_structs!` exige que todo intervalo entre dois
+# registradores seja declarado, o que transforma um deslocamento errado — hoje
+# uma constante solta — em erro de compilação.
+tock-registers = "0.10.1"
 
 [profile.dev]
 panic = "abort"

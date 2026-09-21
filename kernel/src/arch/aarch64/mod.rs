@@ -22,8 +22,11 @@ pub mod vetores;
 
 pub use uart::Uart;
 
+use aarch64_cpu::asm::{wfe, wfi};
+use aarch64_cpu::registers::{DAIF, MIDR_EL1};
 use core::arch::asm;
 use core::sync::atomic::{AtomicU64, Ordering};
+use tock_registers::interfaces::Readable;
 
 use crate::machine::{Regiao, TipoRegiao};
 
@@ -294,8 +297,7 @@ pub fn init_interrupcoes() {
 /// com interrupções desabilitadas pararia o núcleo para sempre.
 pub fn esperar_interrupcao() {
     if interrupcoes_habilitadas() {
-        // SAFETY: `wfi` é uma dica de energia, sempre válida.
-        unsafe { asm!("wfi", options(nomem, nostack)) };
+        wfi();
     } else {
         core::hint::spin_loop();
     }
@@ -339,32 +341,51 @@ pub fn init_interrupcao_serial() {
 /// pendente e o `wfi` retorna de imediato. Só depois desmascaramos, e aí ela é
 /// entregue.
 pub fn dormir_se_ocioso(ocioso: impl FnOnce() -> bool) {
-    let daif: u64;
-    // SAFETY: ler DAIF e mascarar IRQs não tem pré-condição.
-    unsafe {
-        asm!("mrs {}, daif", out(reg) daif, options(nomem, nostack));
-        asm!("msr daifset, #2", options(nomem, nostack));
-    }
+    let estavam_habilitadas = mascarar_irqs();
 
     if ocioso() {
-        // SAFETY: `wfi` é uma dica de energia, sempre válida em EL1.
-        unsafe { asm!("wfi", options(nomem, nostack)) };
+        wfi();
     }
 
-    // Só restauramos se o chamador não as tinha mascarado por conta própria.
-    if daif & (1 << 7) == 0 {
-        // SAFETY: mesma justificativa do bloco acima.
-        unsafe { asm!("msr daifclr, #2", options(nomem, nostack)) };
-    }
+    restaurar_irqs(estavam_habilitadas);
 }
 
 /// As IRQs estão desmascaradas?
 fn interrupcoes_habilitadas() -> bool {
-    let daif: u64;
-    // SAFETY: `DAIF` é legível a partir de EL1.
-    unsafe { asm!("mrs {}, daif", out(reg) daif, options(nomem, nostack)) };
-    // Bit 7 ligado significa IRQ *mascarada*.
-    daif & (1 << 7) == 0
+    DAIF.matches_all(DAIF::I::Unmasked)
+}
+
+/// Mascara as IRQs e devolve se elas *estavam* habilitadas.
+///
+/// # Por que `daifset` à mão, e não o registrador tipado
+///
+/// Este é o caso em que a versão escrita à mão é melhor, e vale registrar por
+/// quê. Escrever `DAIF` pelo caminho tipado emite `msr daif, x`, que grava os
+/// quatro bits de uma vez — mexeríamos em D, A e F sem querer. A alternativa
+/// tipada que preserva os outros (`modify`) é leitura-modificação-escrita:
+/// três instruções onde a arquitetura oferece uma.
+///
+/// `daifset #2` liga *apenas* o bit I, numa instrução só. Não há aritmética
+/// de bits para errar aqui — o `#2` é o seletor de campo que o assembler
+/// entende —, então o crate não teria o que melhorar.
+fn mascarar_irqs() -> bool {
+    let estavam_habilitadas = interrupcoes_habilitadas();
+    // SAFETY: mascarar IRQs não tem pré-condição; `nomem`/`nostack` informam
+    // ao compilador que não tocamos memória nem pilha.
+    unsafe { asm!("msr daifset, #2", options(nomem, nostack)) };
+    estavam_habilitadas
+}
+
+/// Desmascara as IRQs, mas só se `estavam_habilitadas`.
+///
+/// Reabilitar incondicionalmente quebraria o aninhamento: um chamador externo
+/// que as mascarou de propósito as veria ligadas de volta ao fim da *nossa*
+/// seção crítica, e não da dele.
+fn restaurar_irqs(estavam_habilitadas: bool) {
+    if estavam_habilitadas {
+        // SAFETY: mesma justificativa de `mascarar_irqs`.
+        unsafe { asm!("msr daifclr, #2", options(nomem, nostack)) };
+    }
 }
 
 /// Dispara um breakpoint (`brk`), que é tratado e retorna normalmente.
@@ -375,7 +396,7 @@ fn interrupcoes_habilitadas() -> bool {
 pub fn disparar_breakpoint() {
     // SAFETY: `brk` gera uma exceção síncrona que o handler em `vetores`
     // reconhece e da qual retoma, avançando o ELR por cima desta instrução.
-    unsafe { core::arch::asm!("brk #0", options(nomem, nostack)) };
+    unsafe { asm!("brk #0", options(nomem, nostack)) };
 }
 
 /// Endereço garantidamente não mapeado, para provocar uma falha de propósito.
@@ -412,27 +433,9 @@ pub fn disparar_falha_fatal() -> ! {
 /// **D**ebug, **A**bort (SError), **I**RQ e **F**IQ. Mexemos apenas no bit I,
 /// que é o equivalente do `cli`/`sti` do x86.
 pub fn sem_interrupcoes<R>(f: impl FnOnce() -> R) -> R {
-    let daif: u64;
-    // SAFETY: ler DAIF e mascarar IRQs não tem pré-condição; `nomem` e
-    // `nostack` informam ao compilador que não tocamos memória nem pilha.
-    unsafe {
-        core::arch::asm!("mrs {}, daif", out(reg) daif, options(nomem, nostack));
-        core::arch::asm!("msr daifset, #2", options(nomem, nostack));
-    }
-
+    let estavam_habilitadas = mascarar_irqs();
     let resultado = f();
-
-    // Restauramos apenas se as interrupções estavam habilitadas na entrada.
-    // Reabilitar incondicionalmente quebraria o aninhamento: um chamador
-    // externo que as mascarou de propósito as veria ligadas de volta ao fim
-    // da nossa seção crítica, e não da dele.
-    //
-    // O bit I é o 7 do DAIF; ligado significa "IRQ mascarada".
-    if daif & (1 << 7) == 0 {
-        // SAFETY: mesma justificativa do bloco acima.
-        unsafe { core::arch::asm!("msr daifclr, #2", options(nomem, nostack)) };
-    }
-
+    restaurar_irqs(estavam_habilitadas);
     resultado
 }
 
@@ -442,9 +445,7 @@ pub fn sem_interrupcoes<R>(f: impl FnOnce() -> R) -> R {
 /// baixo consumo em vez de queimar ciclos num laço vazio.
 pub fn halt_forever() -> ! {
     loop {
-        // SAFETY: `wfe` é uma dica de energia, sempre válida em qualquer nível
-        // de exceção.
-        unsafe { core::arch::asm!("wfe", options(nomem, nostack)) };
+        wfe();
     }
 }
 
@@ -454,11 +455,7 @@ pub fn halt_forever() -> ! {
 /// O que existe é um byte de código de fabricante nos bits 31:24, atribuído
 /// pela ARM Ltd. e documentado no manual de arquitetura.
 pub fn identificar_cpu() -> super::IdCpu {
-    let midr: u64;
-    // SAFETY: `MIDR_EL1` é somente leitura e legível a partir de EL1.
-    unsafe { core::arch::asm!("mrs {}, midr_el1", out(reg) midr, options(nomem, nostack)) };
-
-    let fabricante: &[u8] = match (midr >> 24) & 0xFF {
+    let fabricante: &[u8] = match MIDR_EL1.read(MIDR_EL1::Implementer) {
         0x41 => b"ARM Limited",
         0x42 => b"Broadcom",
         0x43 => b"Cavium",
@@ -513,7 +510,7 @@ pub fn encerrar_emulador(resultado: crate::qemu::Resultado) -> ! {
     // encerra o processo. Com ele desabilitado vira uma exceção, que também
     // interrompe a execução — em nenhum caso corrompemos estado.
     unsafe {
-        core::arch::asm!(
+        asm!(
             "hlt #0xF000",
             in("x0") SYS_EXIT_EXTENDED,
             in("x1") bloco.as_ptr(),

@@ -17,23 +17,79 @@
 //!   frequência em `CNTFRQ_EL0`, então não precisamos de nenhuma constante
 //!   mágica de hardware.
 
-use core::arch::asm;
 use core::sync::atomic::{AtomicU32, Ordering};
+
+use aarch64_cpu::registers::{CNTFRQ_EL0, CNTP_CTL_EL0, CNTP_TVAL_EL0};
+use tock_registers::interfaces::{Readable, Writeable};
+use tock_registers::register_structs;
+use tock_registers::registers::{ReadOnly, ReadWrite, WriteOnly};
 
 /// Distribuidor do GIC na máquina `virt`.
 const GICD_BASE: usize = 0x0800_0000;
 /// Interface de CPU do GIC na máquina `virt`.
 const GICC_BASE: usize = 0x0801_0000;
 
-const GICD_CTLR: usize = 0x000;
-const GICD_ISENABLER: usize = 0x100;
-/// Um byte por INTID, dizendo a quais núcleos a linha é entregue.
-const GICD_ITARGETSR: usize = 0x800;
+register_structs! {
+    /// O *distribuidor*: decide quais interrupções existem e para onde vão.
+    ///
+    /// Declarar o bloco em vez de somar deslocamentos soltos tem duas
+    /// vantagens concretas aqui. A macro exige que **todo** intervalo entre
+    /// dois registradores seja declarado e confere o total em tempo de
+    /// compilação, então um deslocamento errado vira erro de build. E os
+    /// registradores que são vetores — um bit por INTID em `ISENABLER`, um
+    /// byte por INTID em `ITARGETSR` — viram arrays indexáveis, no lugar da
+    /// aritmética `base + offset + (intid / 32) * 4` feita à mão.
+    Distribuidor {
+        (0x000 => ctlr: ReadWrite<u32>),
+        (0x004 => _reservado0),
+        /// Um bit por INTID: escrever 1 habilita aquela linha.
+        (0x100 => isenabler: [ReadWrite<u32>; 32]),
+        (0x180 => _reservado1),
+        /// Um byte por INTID, e cada bit desse byte é um núcleo destino.
+        ///
+        /// Só vale para interrupções compartilhadas (SPIs, INTID >= 32): as
+        /// privadas de cada núcleo são entregues ao seu por construção.
+        (0x800 => itargetsr: [ReadWrite<u8>; 1020]),
+        (0xBFC => _reservado2),
+        (0x1000 => @END),
+    }
+}
 
-const GICC_CTLR: usize = 0x000;
-const GICC_PMR: usize = 0x004;
-const GICC_IAR: usize = 0x00C;
-const GICC_EOIR: usize = 0x010;
+register_structs! {
+    /// A *interface de CPU*: por onde este núcleo reconhece e finaliza as
+    /// interrupções que recebe.
+    InterfaceDeCpu {
+        (0x000 => ctlr: ReadWrite<u32>),
+        /// Máscara de prioridade: o GIC só entrega interrupções de prioridade
+        /// numericamente *menor* que este valor.
+        (0x004 => pmr: ReadWrite<u32>),
+        (0x008 => _reservado0),
+        /// Reconhecimento. A leitura tem efeito colateral: marca a
+        /// interrupção como em atendimento.
+        (0x00C => iar: ReadOnly<u32>),
+        /// Fim de interrupção.
+        (0x010 => eoir: WriteOnly<u32>),
+        (0x014 => _reservado1),
+        (0x1000 => @END),
+    }
+}
+
+/// Os registradores do distribuidor.
+///
+/// É seguro: o endereço é fixo e o bloco está sempre acessível. Antes de a
+/// MMU ligar porque não há tradução, e depois dela porque o mapa é de
+/// identidade — nos dois casos, o mesmo endereço.
+fn distribuidor() -> &'static Distribuidor {
+    // SAFETY: endereço fixo do GIC da máquina `virt`, confirmado no device
+    // tree. O bloco é de dispositivo e existe durante toda a vida do kernel.
+    unsafe { &*(GICD_BASE as *const Distribuidor) }
+}
+
+/// Os registradores da interface de CPU deste núcleo.
+fn interface_de_cpu() -> &'static InterfaceDeCpu {
+    // SAFETY: mesma justificativa de `distribuidor`.
+    unsafe { &*(GICC_BASE as *const InterfaceDeCpu) }
+}
 
 /// INTID do timer físico de EL1.
 ///
@@ -62,18 +118,6 @@ const INTID_ESPURIO: u32 = 1023;
 /// precisa ser rearmado com a mesma contagem, de dentro do handler.
 static INTERVALO: AtomicU32 = AtomicU32::new(0);
 
-/// # Safety
-/// O endereço precisa ser de um registrador válido do GIC.
-unsafe fn escrever(endereco: usize, valor: u32) {
-    unsafe { core::ptr::write_volatile(endereco as *mut u32, valor) }
-}
-
-/// # Safety
-/// O endereço precisa ser de um registrador válido do GIC.
-unsafe fn ler(endereco: usize) -> u32 {
-    unsafe { core::ptr::read_volatile(endereco as *const u32) }
-}
-
 /// Inicializa o GIC e habilita a linha do timer.
 ///
 /// # Safety
@@ -81,25 +125,29 @@ unsafe fn ler(endereco: usize) -> u32 {
 /// Precisa ser chamada com as interrupções mascaradas e a tabela de vetores
 /// já instalada.
 pub unsafe fn init() {
-    // SAFETY: endereços do GIC da máquina `virt`, com acesso exclusivo.
-    unsafe {
-        // Distribuidor: liga o encaminhamento de interrupções.
-        escrever(GICD_BASE + GICD_CTLR, 1);
+    let gicd = distribuidor();
+    let gicc = interface_de_cpu();
 
-        // Máscara de prioridade da interface de CPU. Um valor alto deixa
-        // passar tudo: o GIC só entrega interrupções de prioridade
-        // *numericamente menor* que a máscara, e 0xFF é o maior valor
-        // possível.
-        escrever(GICC_BASE + GICC_PMR, 0xFF);
+    // Distribuidor: liga o encaminhamento de interrupções.
+    gicd.ctlr.set(1);
 
-        // Liga a interface de CPU.
-        escrever(GICC_BASE + GICC_CTLR, 1);
+    // Máscara de prioridade da interface de CPU. Um valor alto deixa passar
+    // tudo: o GIC só entrega interrupções de prioridade *numericamente menor*
+    // que a máscara, e 0xFF é o maior valor possível.
+    gicc.pmr.set(0xFF);
 
-        // Habilita o INTID do timer no distribuidor. Cada registrador cobre
-        // 32 linhas, uma por bit.
-        let registrador = GICD_BASE + GICD_ISENABLER + (INTID_TIMER as usize / 32) * 4;
-        escrever(registrador, 1 << (INTID_TIMER % 32));
-    }
+    // Liga a interface de CPU.
+    gicc.ctlr.set(1);
+
+    habilitar_linha(INTID_TIMER);
+}
+
+/// Habilita uma linha de interrupção no distribuidor.
+///
+/// Cada registrador de `ISENABLER` cobre 32 linhas, uma por bit.
+fn habilitar_linha(intid: u32) {
+    let indice = (intid / 32) as usize;
+    distribuidor().isenabler[indice].set(1 << (intid % 32));
 }
 
 /// Habilita a linha da UART e a roteia para este núcleo.
@@ -117,24 +165,16 @@ pub unsafe fn init() {
 ///
 /// Exige tabela de vetores instalada e [`init`] já executado.
 pub unsafe fn habilitar_uart() {
-    // SAFETY: endereços do GIC da máquina `virt`, com acesso exclusivo.
-    unsafe {
-        // Entrega ao núcleo 0. O registrador tem um byte por INTID, e cada
-        // bit desse byte é um núcleo.
-        let alvo = GICD_BASE + GICD_ITARGETSR + INTID_UART as usize;
-        core::ptr::write_volatile(alvo as *mut u8, 0b0000_0001);
-
-        let registrador = GICD_BASE + GICD_ISENABLER + (INTID_UART as usize / 32) * 4;
-        escrever(registrador, 1 << (INTID_UART % 32));
-    }
+    // Entrega ao núcleo 0. Um byte por INTID, um bit por núcleo dentro dele.
+    distribuidor().itargetsr[INTID_UART as usize].set(0b0000_0001);
+    habilitar_linha(INTID_UART);
 }
 
 /// Reconhece a interrupção pendente e devolve seu INTID.
 fn reconhecer() -> u32 {
-    // SAFETY: leitura do registrador de reconhecimento da interface de CPU.
-    // A leitura tem efeito colateral (marca a interrupção como em
-    // atendimento), e é exatamente por isso que precisa ser volátil.
-    unsafe { ler(GICC_BASE + GICC_IAR) & 0x3FF }
+    // A leitura tem efeito colateral — marca a interrupção como em
+    // atendimento —, e `ReadOnly` garante que seja volátil.
+    interface_de_cpu().iar.get() & 0x3FF
 }
 
 /// Sinaliza o fim do atendimento.
@@ -142,25 +182,20 @@ fn reconhecer() -> u32 {
 /// Sem isto o GIC considera a interrupção ainda ativa e não entrega outra da
 /// mesma linha. O sintoma é o timer disparar uma única vez.
 fn finalizar(intid: u32) {
-    // SAFETY: escrita no registrador de fim de interrupção.
-    unsafe { escrever(GICC_BASE + GICC_EOIR, intid) }
+    interface_de_cpu().eoir.set(intid);
 }
 
 /// Frequência do timer genérico, em Hz, informada pelo próprio processador.
 fn frequencia_do_contador() -> u32 {
-    let valor: u64;
-    // SAFETY: `CNTFRQ_EL0` é somente leitura.
-    unsafe { asm!("mrs {}, cntfrq_el0", out(reg) valor, options(nomem, nostack)) };
-    valor as u32
+    CNTFRQ_EL0.get() as u32
 }
 
 /// Arma o timer para disparar daqui a `ciclos`.
 ///
 /// # Safety
 /// Altera o estado do timer do processador.
-unsafe fn armar(ciclos: u32) {
-    // SAFETY: `CNTP_TVAL_EL0` é gravável a partir de EL1.
-    unsafe { asm!("msr cntp_tval_el0, {:x}", in(reg) ciclos as u64, options(nomem, nostack)) };
+fn armar(ciclos: u32) {
+    CNTP_TVAL_EL0.set(ciclos as u64);
 }
 
 /// Configura o timer para disparar periodicamente na frequência pedida.
@@ -177,12 +212,8 @@ pub unsafe fn init_timer(hz_desejado: u32) -> u32 {
     let intervalo = (frequencia / hz_desejado).max(1);
     INTERVALO.store(intervalo, Ordering::Relaxed);
 
-    // SAFETY: registradores do timer, com interrupções mascaradas.
-    unsafe {
-        armar(intervalo);
-        // Bit 0: habilita o timer. Bit 1 mascararia a saída, então fica zero.
-        asm!("msr cntp_ctl_el0, {:x}", in(reg) 1u64, options(nomem, nostack));
-    }
+    armar(intervalo);
+    CNTP_CTL_EL0.write(CNTP_CTL_EL0::ENABLE::SET + CNTP_CTL_EL0::IMASK::CLEAR);
 
     frequencia / intervalo
 }
@@ -201,8 +232,7 @@ pub fn tratar() {
 
         // O timer genérico é one-shot: sem rearmar aqui, esta seria a última
         // interrupção que receberíamos.
-        // SAFETY: estamos dentro do handler da própria interrupção do timer.
-        unsafe { armar(INTERVALO.load(Ordering::Relaxed)) };
+        armar(INTERVALO.load(Ordering::Relaxed));
     }
 
     if intid == INTID_UART {

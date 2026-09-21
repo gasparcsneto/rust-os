@@ -27,7 +27,9 @@
 //! o segundo. O quarto grupo (vindo de EL mais baixo) é o que passará a
 //! importar na fase 1, quando houver userspace em EL0 fazendo syscalls.
 
-use core::arch::asm;
+use aarch64_cpu::asm::barrier;
+use aarch64_cpu::registers::{CurrentEL, ESR_EL1, FAR_EL1, VBAR_EL1};
+use tock_registers::interfaces::{Readable, Writeable};
 
 /// O contexto salvo por [`SALVAR`] quando uma exceção acontece.
 ///
@@ -182,15 +184,23 @@ tabela_vetores_el1:
     serror = sym tratar_serror,
 );
 
-/// Lê o registrador de síndrome da exceção (`ESR_EL1`).
+/// O registrador de síndrome da exceção (`ESR_EL1`), cru.
 ///
-/// É onde o processador descreve *o que* aconteceu. O campo EC, nos bits
-/// 31:26, é a classe da exceção.
+/// É onde o processador descreve *o que* aconteceu. Guardamos o valor inteiro
+/// em [`crate::traps`] sem interpretar: qualquer decodificação que fizéssemos
+/// perderia bits do campo ISS que podem importar, e o agente tem como
+/// consultar o manual.
 fn ler_esr() -> u64 {
-    let valor: u64;
-    // SAFETY: `ESR_EL1` é somente leitura e acessível a partir de EL1.
-    unsafe { asm!("mrs {}, esr_el1", out(reg) valor, options(nomem, nostack)) };
-    valor
+    ESR_EL1.get()
+}
+
+/// A classe da exceção — o campo `EC` do `ESR_EL1`.
+///
+/// Antes isto era `(esr >> 26) & 0x3F` espalhado pelos handlers. O
+/// deslocamento e a máscara estavam corretos, mas eram duas oportunidades de
+/// errar em silêncio a cada uso.
+fn classe_da_excecao() -> u64 {
+    ESR_EL1.read(ESR_EL1::EC)
 }
 
 /// Lê o registrador de endereço da falha (`FAR_EL1`).
@@ -198,10 +208,7 @@ fn ler_esr() -> u64 {
 /// Contém o endereço acusado numa falha de acesso a memória — o equivalente
 /// ao CR2 do x86. Só é significativo para abortos de dado ou de instrução.
 fn ler_far() -> u64 {
-    let valor: u64;
-    // SAFETY: `FAR_EL1` é somente leitura e acessível a partir de EL1.
-    unsafe { asm!("mrs {}, far_el1", out(reg) valor, options(nomem, nostack)) };
-    valor
+    FAR_EL1.get()
 }
 
 /// Traduz a classe de exceção (campo EC do ESR) para um nome estável.
@@ -229,7 +236,7 @@ const fn nome_da_classe(ec: u64) -> &'static str {
 #[unsafe(no_mangle)]
 extern "C" fn tratar_sync(quadro: &mut Quadro) {
     let esr = ler_esr();
-    let ec = (esr >> 26) & 0x3F;
+    let ec = classe_da_excecao();
     let nome = nome_da_classe(ec);
 
     // `BRK` é a única classe que sabemos retomar hoje.
@@ -288,16 +295,12 @@ pub fn init() {
         static tabela_vetores_el1: u8;
     }
 
-    let endereco = &raw const tabela_vetores_el1 as u64;
+    VBAR_EL1.set(&raw const tabela_vetores_el1 as u64);
 
-    // SAFETY: `endereco` aponta para uma tabela de vetores válida e alinhada.
-    // O `isb` é obrigatório: sem ele o processador pode continuar usando o
-    // VBAR antigo por algumas instruções, e uma exceção nesse intervalo
-    // saltaria para o lugar errado.
-    unsafe {
-        asm!("msr vbar_el1, {}", in(reg) endereco, options(nomem, nostack));
-        asm!("isb", options(nomem, nostack));
-    }
+    // Obrigatório: sem ele o processador pode continuar usando o VBAR antigo
+    // por algumas instruções, e uma exceção nesse intervalo saltaria para o
+    // lugar errado.
+    barrier::isb(barrier::SY);
 }
 
 /// O nível de exceção em que o kernel está rodando.
@@ -306,8 +309,5 @@ pub fn init() {
 /// se tivéssemos bootado em EL2 a tabela não teria efeito — e isso explicaria
 /// um silêncio difícil de entender.
 pub fn nivel_de_excecao() -> u8 {
-    let valor: u64;
-    // SAFETY: `CurrentEL` é somente leitura e acessível em qualquer nível.
-    unsafe { asm!("mrs {}, CurrentEL", out(reg) valor, options(nomem, nostack)) };
-    ((valor >> 2) & 0b11) as u8
+    CurrentEL.read(CurrentEL::EL) as u8
 }
