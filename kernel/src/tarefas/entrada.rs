@@ -57,6 +57,52 @@ static DESPERTADOR: Mutex<Option<Waker>> = Mutex::new(None);
 ///
 /// Chamado pelo handler da interrupção de recepção. Não deve alocar, não deve
 /// bloquear, e não deve fazer nada que possa falhar de forma interessante.
+/// Joga fora o que já estiver no FIFO da UART, antes de a recepção entrar no
+/// ar. Devolve quantos bytes foram descartados.
+///
+/// # O defeito que isto conserta
+///
+/// O socket do canal existe desde antes de o kernel começar a bootar: o QEMU o
+/// cria junto com a máquina. Um cliente ansioso conecta e manda a requisição
+/// dele enquanto ainda estamos montando GDT, paginação e escalonador.
+///
+/// Esses bytes vão parar no FIFO da UART, que tem dezesseis posições. Uma
+/// requisição típica tem quase sessenta bytes, então a maior parte dela se
+/// perde ali mesmo — e o que sobra é um **pedaço de linha**. Quando a recepção
+/// finalmente liga, o primeiro byte novo dispara a interrupção, o handler
+/// drena o FIFO, e o pedaço velho entra na fila grudado na requisição
+/// seguinte. O resultado é o que se via na prática: a primeira chamada depois
+/// do boot ficava sem resposta, **e a segunda voltava com `JSON malformado`**
+/// sem que o cliente tivesse feito nada de errado.
+///
+/// Perder a requisição de quem chegou cedo demais é inevitável — ela já estava
+/// truncada pelo hardware. Contaminar a próxima não é. Descartar o resto aqui
+/// separa as duas coisas.
+///
+/// O número de bytes descartados vai para o log de propósito: um agente que
+/// veja isso sabe que uma requisição dele sumiu, em vez de concluir que o
+/// kernel responde errado.
+pub fn descartar_pendentes() -> usize {
+    crate::arch::sem_interrupcoes(|| {
+        let mut guarda = crate::serial::AGENT_LINK.lock();
+        let Some(porta) = guarda.as_mut() else {
+            return 0;
+        };
+
+        let mut descartados = 0;
+        // O mesmo teto de `coletar`, pelo mesmo motivo: uma UART que reporte
+        // dados para sempre não pode prender o boot num laço.
+        for _ in 0..CAPACIDADE {
+            if porta.read_byte().is_none() {
+                break;
+            }
+            descartados += 1;
+        }
+        porta.fim_de_recepcao();
+        descartados
+    })
+}
+
 pub fn coletar() {
     let mut chegou = false;
 

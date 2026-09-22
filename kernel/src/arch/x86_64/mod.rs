@@ -303,6 +303,19 @@ pub fn init_interrupcoes() {
 /// ligar a interrupção e a tarefa começar a rodar, os bytes já vão para a
 /// fila — que é justamente o que queremos.
 pub fn init_interrupcao_serial() {
+    // Antes de ligar a recepção: o FIFO pode ter um pedaço de requisição de
+    // quem conectou enquanto o kernel ainda bootava. Ver
+    // `tarefas::entrada::descartar_pendentes` — deixá-lo ali contamina a
+    // requisição seguinte.
+    let descartados = crate::tarefas::entrada::descartar_pendentes();
+    if descartados > 0 {
+        crate::log_warn!(
+            "agent",
+            "{} bytes descartados: chegaram antes do canal subir",
+            descartados
+        );
+    }
+
     crate::arch::sem_interrupcoes(|| {
         let mut guarda = crate::serial::AGENT_LINK.lock();
         let Some(porta) = guarda.as_mut() else {

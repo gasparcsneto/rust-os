@@ -1028,23 +1028,62 @@ fn aguardar_com_teto(mut filho: Child, teto: Duration) -> Result<Desfecho, Strin
 /// operável de fora com uma única linha de shell — e é idêntico nas duas
 /// arquiteturas, porque o protocolo é o mesmo.
 fn agente(arch: Arquitetura, metodo: &str, params: &str) -> Result<ExitCode, String> {
+    let limite = std::time::Instant::now() + ESPERA_PELO_CANAL;
+    let mut avisou = false;
+
+    loop {
+        match tentar_agente(arch, metodo, params) {
+            Ok(code) => return Ok(code),
+            // O kernel ainda não subiu o canal: insistir é o comportamento
+            // certo, e desistir cedo transformaria uma espera em erro.
+            Err(Espera::AindaNaoRespondeu) if std::time::Instant::now() < limite => {
+                if !avisou {
+                    eprintln!("[xtask] o canal ainda não respondeu; aguardando o boot...");
+                    avisou = true;
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            Err(Espera::AindaNaoRespondeu) => {
+                return Err(format!(
+                    "o kernel não respondeu em {}s\n\
+                     dica: ele sobe o canal depois do firmware e do bootloader; \
+                     confira se `cargo xtask run --arch {}` está de pé",
+                    ESPERA_PELO_CANAL.as_secs(),
+                    arch.nome()
+                ));
+            }
+            Err(Espera::Fatal(motivo)) => return Err(motivo),
+        }
+    }
+}
+
+/// O que separa "ainda não" de "não vai dar".
+enum Espera {
+    /// O canal existe mas ninguém respondeu ainda. Vale tentar de novo.
+    AindaNaoRespondeu,
+    /// Erro que não melhora com o tempo.
+    Fatal(String),
+}
+
+fn tentar_agente(arch: Arquitetura, metodo: &str, params: &str) -> Result<ExitCode, Espera> {
     let socket = caminho_socket(arch);
 
     let mut fluxo = UnixStream::connect(&socket).map_err(|e| {
-        format!(
+        Espera::Fatal(format!(
             "não foi possível conectar em {}: {e}\n\
              dica: o kernel precisa estar rodando — inicie \
              `cargo xtask run --arch {}` em outro terminal",
             socket.display(),
             arch.nome()
-        )
+        ))
     })?;
 
     // Sem timeout, um kernel travado deixaria o cliente pendurado para sempre.
-    // Falhar em cinco segundos é muito mais útil do que não falhar nunca.
+    // Falhar em cinco segundos é muito mais útil do que não falhar nunca — e
+    // quem decide se vale insistir é `agente`, não esta função.
     fluxo
         .set_read_timeout(Some(Duration::from_secs(5)))
-        .map_err(|e| format!("não foi possível configurar o timeout: {e}"))?;
+        .map_err(|e| Espera::Fatal(format!("não foi possível configurar o timeout: {e}")))?;
 
     let requisicao =
         format!("{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"{metodo}\",\"params\":{params}}}\n");
@@ -1052,21 +1091,41 @@ fn agente(arch: Arquitetura, metodo: &str, params: &str) -> Result<ExitCode, Str
     fluxo
         .write_all(requisicao.as_bytes())
         .and_then(|()| fluxo.flush())
-        .map_err(|e| format!("falha ao enviar a requisição: {e}"))?;
+        .map_err(|e| Espera::Fatal(format!("falha ao enviar a requisição: {e}")))?;
 
     let mut leitor = BufReader::new(fluxo);
     let mut resposta = String::new();
-    let lidos = leitor
-        .read_line(&mut resposta)
-        .map_err(|e| format!("falha ao ler a resposta: {e}"))?;
-
-    if lidos == 0 {
-        return Err("o kernel fechou o canal sem responder".into());
+    match leitor.read_line(&mut resposta) {
+        // Silêncio dentro do prazo: o canal pode não ter subido ainda.
+        Ok(0) => Err(Espera::AindaNaoRespondeu),
+        Ok(_) => {
+            print!("{resposta}");
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) =>
+        {
+            Err(Espera::AindaNaoRespondeu)
+        }
+        Err(e) => Err(Espera::Fatal(format!("falha ao ler a resposta: {e}"))),
     }
-
-    print!("{resposta}");
-    Ok(ExitCode::SUCCESS)
 }
+
+/// Quanto tempo insistir antes de desistir do canal.
+///
+/// O socket existe desde que o QEMU sobe, mas o kernel só chega ao canal do
+/// agente depois do firmware e do bootloader — vários segundos, em emulação.
+/// Quem manda a requisição nessa janela fala com um socket que ainda não tem
+/// ninguém do outro lado, e o kernel **descarta** o que chegou antes de o
+/// canal subir, de propósito, para não contaminar a requisição seguinte.
+///
+/// Sem esperar, o `run` convida a falar com o kernel e a primeira tentativa
+/// falha. Insistir aqui é o que faz a instrução impressa pelo `run` valer
+/// desde o instante em que ela aparece.
+const ESPERA_PELO_CANAL: Duration = Duration::from_secs(30);
 
 #[cfg(test)]
 mod testes {
