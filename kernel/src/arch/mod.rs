@@ -83,6 +83,25 @@ pub const fn entrada_de_topo(endereco: u64) -> u64 {
     endereco / COBERTURA_DA_ENTRADA_DE_TOPO
 }
 
+/// A entrada de topo que cada espaço de endereços tem só para si.
+///
+/// Todas as outras são **cópias** das do kernel: os espaços compartilham as
+/// tabelas de nível inferior por referência, e é isso que faz um mapeamento do
+/// kernel valer em todos ao mesmo tempo.
+pub const ENTRADA_PRIVADA: u64 = entrada_de_topo(crate::usuario::BASE);
+
+/// Este endereço mora na parte do espaço que pertence só a ele?
+///
+/// A pergunta decide quem pode **liberar uma tabela**. Numa entrada privada,
+/// esvaziar uma tabela e devolvê-la ao alocador é correto: ninguém mais a
+/// alcança. Numa entrada compartilhada, é uma referência pendurada — quem
+/// desmapeia enxerga só a raiz ativa, e zerar a entrada de topo ali não
+/// alcança as cópias que os outros espaços guardam. Elas continuariam
+/// apontando para um frame que já voltou ao alocador.
+pub const fn e_privado(endereco: u64) -> bool {
+    entrada_de_topo(endereco) == ENTRADA_PRIVADA
+}
+
 /// Recusa endereços que não servem para um mapeamento de página.
 ///
 /// O ponto aqui não é ser pedante: as duas APIs de hardware **arredondam para

@@ -640,13 +640,22 @@ pub fn desmapear(virtual_: u64) -> Result<u64, &'static str> {
 
             invalidar(virtual_);
 
-            // Recupera as tabelas que esta remoção esvaziou. Sem isso, cada
-            // região de 2 MiB já usada custaria um frame permanente.
+            // Recupera as tabelas que esta remoção esvaziou — mas **só** na
+            // entrada de topo privada deste espaço. Sem a recuperação, cada
+            // região de 2 MiB já usada custaria um frame permanente; sem a
+            // restrição, liberaríamos tabelas que os outros espaços alcançam.
             //
-            // As tabelas do mapa de identidade nunca são atingidas: a L3 que
-            // contém a guard page tem 511 entradas válidas, então jamais
-            // aparece vazia.
-            if tabela_vazia(l3) {
+            // As demais entradas de topo são cópias das do kernel, e os
+            // espaços compartilham as tabelas abaixo delas por referência.
+            // Zerar `*l1.add(i1)` aqui alcança só a raiz ativa: as cópias
+            // guardadas pelos outros espaços seguiriam apontando para um frame
+            // devolvido ao alocador, e o estrago apareceria quando ele fosse
+            // reaproveitado — longe daqui, e sem sintoma que leve de volta.
+            //
+            // As tabelas do mapa de identidade nunca são atingidas por outro
+            // motivo, que continua valendo: a L3 que contém a guard page tem
+            // 511 entradas válidas, então jamais aparece vazia.
+            if crate::arch::e_privado(virtual_) && tabela_vazia(l3) {
                 *l2.add(i2) = 0;
                 crate::frames::liberar(l3 as u64);
 

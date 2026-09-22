@@ -2075,6 +2075,109 @@ fn memoria_espacos_isolam_o_mesmo_endereco() -> Resultado {
     })
 }
 
+/// Desmapear uma página do kernel não pode soltar uma tabela que outros
+/// espaços referenciam.
+///
+/// # O defeito que este caso persegue
+///
+/// Os espaços de processo recebem uma **cópia das entradas de topo** do
+/// kernel. Cópia da entrada, não da árvore abaixo dela: todos os espaços
+/// apontam para as mesmas tabelas de nível inferior, e é isso que faz um
+/// mapeamento do kernel valer em todos de uma vez.
+///
+/// A consequência é que liberar uma dessas tabelas é diferente de liberar uma
+/// tabela do usuário. Quem desmapeia enxerga só a raiz **ativa**: zerar a
+/// entrada de topo ali não alcança as cópias que os outros espaços guardam, e
+/// elas ficam apontando para um frame que voltou ao alocador. O sintoma
+/// aparece muito depois, quando esse frame for reaproveitado — memória do
+/// kernel corrompida através de uma referência de tabela que já não valia.
+///
+/// # Como o caso detecta isso sem corromper nada
+///
+/// Só desmapear não basta, e a primeira versão deste teste passava por isso:
+/// a limpeza zera cada nível **antes** de liberá-lo, então uma travessia pela
+/// referência pendurada encontra tabelas vazias e responde "não mapeado" — a
+/// mesma resposta de um kernel correto. O defeito fica escondido até o frame
+/// liberado ser reaproveitado.
+///
+/// O que o denuncia de forma determinística é mapear de novo. Aí a raiz do
+/// kernel passa a apontar para uma árvore **nova**, enquanto a cópia guardada
+/// pelo espaço do processo segue apontando para a antiga. Um mapeamento do
+/// kernel tem de valer identicamente em todo espaço; basta então comparar as
+/// duas traduções, e não confiar em nenhuma delas isoladamente.
+///
+/// O endereço de sonda fica na entrada de topo seguinte à do heap, que nenhuma
+/// região usa. Ela precisa ficar **vazia** depois da remoção: é o caso em que
+/// a limpeza sobe até o topo, e o único em que o defeito se manifesta.
+fn memoria_desmapear_do_kernel_vale_em_todo_espaco() -> Resultado {
+    use crate::arch::{self, Permissoes};
+
+    let sonda = arch::BASE_DO_HEAP + arch::COBERTURA_DA_ENTRADA_DE_TOPO;
+    let privada = arch::entrada_de_topo(crate::usuario::BASE) as usize;
+    let kernel = arch::espaco_do_kernel();
+
+    if arch::entrada_de_topo(sonda) == arch::entrada_de_topo(arch::BASE_DO_HEAP) {
+        return Err("a sonda caiu na mesma entrada de topo do heap");
+    }
+
+    arch::sem_interrupcoes(|| {
+        // A página existe **antes** do espaço nascer, para que a entrada de
+        // topo que ele copia já aponte para a árvore que vai ser removida.
+        crate::paginacao::mapear_novo(sonda, Permissoes::DADOS)?;
+
+        let espaco = crate::paginacao::Espaco::novo(privada)?;
+        let raiz = espaco.raiz();
+
+        crate::paginacao::desmapear_e_liberar(sonda)?;
+
+        if arch::traduzir(sonda).is_some() {
+            return Err("a sonda continuou mapeada no espaco do kernel");
+        }
+
+        // Os chamarizes existem para desfazer uma coincidência. O alocador é
+        // um bitmap: sem eles, remontar a árvore recebe de volta exatamente os
+        // mesmos frames na mesma ordem, a cópia presa pelo processo volta a
+        // apontar para a tabela certa por acidente, e o teste passa sem provar
+        // nada. Foi o que aconteceu na primeira versão deste caso.
+        let chamarizes = [
+            crate::frames::alocar().ok_or("memoria fisica esgotada")?,
+            crate::frames::alocar().ok_or("memoria fisica esgotada")?,
+        ];
+
+        // O passo que denuncia: a raiz do kernel ganha uma árvore nova para
+        // este endereço. Se a entrada de topo tiver sido zerada, a cópia do
+        // processo ficou presa à árvore antiga.
+        crate::paginacao::mapear_novo(sonda, Permissoes::DADOS)?;
+        let no_kernel = arch::traduzir(sonda);
+
+        // SAFETY: a raiz saiu de `Espaco::novo` e carrega as entradas de topo
+        // do kernel, então o código e a pilha deste fio seguem mapeados.
+        // Voltamos ao espaço do kernel antes de largar o espaço.
+        let no_processo = unsafe {
+            arch::trocar_espaco(raiz);
+            let visto = arch::traduzir(sonda);
+            arch::trocar_espaco(kernel);
+            visto
+        };
+        drop(espaco);
+        crate::paginacao::desmapear_e_liberar(sonda)?;
+        for frame in chamarizes {
+            crate::frames::liberar(frame);
+        }
+
+        if no_processo != no_kernel {
+            crate::log_error!(
+                "teste",
+                "kernel traduz {:?}, processo traduz {:?}",
+                no_kernel,
+                no_processo
+            );
+            return Err("os dois espacos discordam sobre um mapeamento do kernel");
+        }
+        Ok(())
+    })
+}
+
 /// Destruir um espaço devolve **tudo**: tabelas, páginas e a própria raiz.
 ///
 /// # Por que isto merece um caso próprio
@@ -2598,6 +2701,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "usuario: descritor e conferido",
         f: usuario_descritor_e_conferido,
+    },
+    Caso {
+        nome: "memoria: desmapear do kernel vale em todo espaco",
+        f: memoria_desmapear_do_kernel_vale_em_todo_espaco,
     },
     Caso {
         nome: "memoria: espaco destruido devolve tudo",

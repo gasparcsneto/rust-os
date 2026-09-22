@@ -44,7 +44,7 @@ const GUARD_DA_PILHA: u64 = BASE_DA_PILHA - TAMANHO_PAGINA;
 /// Todo o espaço do usuário cabe nesta única entrada, e é ela que fica vazia
 /// na tabela de cada processo — conferido em tempo de compilação junto de
 /// [`BASE`] e [`TETO`].
-const ENTRADA_PRIVADA: usize = crate::arch::entrada_de_topo(BASE) as usize;
+const ENTRADA_PRIVADA: usize = crate::arch::ENTRADA_PRIVADA as usize;
 
 /// Um programa mapeado, pronto para executar.
 pub struct Programa {

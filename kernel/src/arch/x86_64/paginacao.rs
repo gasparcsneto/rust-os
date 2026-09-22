@@ -273,22 +273,38 @@ pub fn desmapear(virtual_: u64) -> Result<u64, &'static str> {
             Ok((frame, flush)) => {
                 flush.flush();
 
-                // Recupera as tabelas que esta remoção possa ter esvaziado.
+                // Recupera as tabelas que esta remoção possa ter esvaziado —
+                // mas **só** na entrada de topo privada deste espaço.
+                //
+                // A restrição não é zelo: as demais entradas são cópias das do
+                // kernel, e os espaços compartilham as tabelas abaixo delas por
+                // referência. Ao esvaziar uma, a limpeza sobe até zerar a
+                // entrada de topo e devolver o frame ao alocador — na raiz
+                // ativa, que é a única que ela enxerga. As cópias guardadas
+                // pelos outros espaços seguiriam apontando para esse frame, e o
+                // estrago só apareceria quando ele fosse reaproveitado.
+                //
+                // O preço de não limpar é uma tabela vazia por região do
+                // kernel, para sempre. São poucos frames, e regiões do kernel
+                // não vão e voltam.
                 //
                 // A faixa é limitada à página que acabou de sair: o percurso
                 // sobe conferindo cada nível e só descarta o que ficou
                 // realmente vazio, então restringir mantém o custo baixo sem
                 // deixar nada para trás.
                 //
-                // SAFETY: as tabelas desta hierarquia foram todas criadas por
-                // `map_to` com o nosso alocador, nunca são compartilhadas
-                // entre faixas e não têm contagem de referência — que é
-                // exatamente o que o contrato de `clean_up_addr_range` exige.
-                unsafe {
-                    mapeador.clean_up_addr_range(
-                        Page::range_inclusive(pagina, pagina),
-                        &mut AlocadorDeFrames,
-                    );
+                // SAFETY: dentro da entrada privada, as tabelas desta
+                // hierarquia foram todas criadas por `map_to` com o nosso
+                // alocador, não são alcançadas por nenhum outro espaço e não
+                // têm contagem de referência — que é exatamente o que o
+                // contrato de `clean_up_addr_range` exige.
+                if crate::arch::e_privado(virtual_) {
+                    unsafe {
+                        mapeador.clean_up_addr_range(
+                            Page::range_inclusive(pagina, pagina),
+                            &mut AlocadorDeFrames,
+                        );
+                    }
                 }
 
                 // Devolver o frame permite ao chamador liberá-lo. Sem isto,
