@@ -61,16 +61,25 @@ pub use aarch64 as atual;
 // pelos backends, que esconderia código morto de verdade dentro deles.
 #[allow(unused_imports)]
 pub use atual::{
-    Contexto, Uart, acesso_fisico, ceder_cpu, definir_pilha_de_kernel, desmapear,
-    disparar_breakpoint, disparar_falha_fatal, dormir_se_ocioso, encerrar_emulador,
-    entrar_em_usuario, esperar_interrupcao, falha_de_estouro_de_pilha, halt_forever,
-    identificar_cpu, init_excecoes, init_interrupcao_serial, init_interrupcoes, init_paginacao,
-    init_seriais, init_usuario, mapear_frame, nome, preparar_contexto, reservar_faixas,
-    sem_interrupcoes, traduzir,
+    BASE_DAS_PILHAS, BASE_DO_HEAP, COBERTURA_DA_ENTRADA_DE_TOPO, Contexto, Uart, acesso_fisico,
+    ceder_cpu, definir_pilha_de_kernel, desmapear, disparar_breakpoint, disparar_falha_fatal,
+    dormir_se_ocioso, encerrar_emulador, entrar_em_usuario, esperar_interrupcao,
+    falha_de_estouro_de_pilha, halt_forever, identificar_cpu, init_excecoes,
+    init_interrupcao_serial, init_interrupcoes, init_paginacao, init_seriais, init_usuario,
+    mapear_frame, nome, preparar_contexto, reservar_faixas, sem_interrupcoes, traduzir,
 };
 
 /// Tamanho de uma página nas duas arquiteturas.
 pub const TAMANHO_PAGINA: u64 = 4096;
+
+/// Qual entrada da tabela de topo cobre este endereço.
+///
+/// É a pergunta que decide se duas regiões podem ser separadas por uma tabela
+/// de tradução por processo: entradas diferentes, sim; a mesma entrada, não —
+/// copiar a do kernel levaria junto a do usuário.
+pub const fn entrada_de_topo(endereco: u64) -> u64 {
+    endereco / COBERTURA_DA_ENTRADA_DE_TOPO
+}
 
 /// Recusa endereços que não servem para um mapeamento de página.
 ///

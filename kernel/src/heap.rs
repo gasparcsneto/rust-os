@@ -47,10 +47,12 @@ use crate::arch::{Permissoes, TAMANHO_PAGINA};
 
 /// Onde o heap vive no espaço virtual.
 ///
-/// 64 GiB: bem acima do kernel e das tabelas, e abaixo dos 512 GiB que o ARM
-/// consegue endereçar na configuração atual. Precisa valer nas duas
-/// arquiteturas, o que descarta os endereços altos que o x86 aceitaria.
-pub const HEAP_INICIO: usize = 0x0000_0010_0000_0000;
+/// O endereço vem da arquitetura porque as duas resolvem o mesmo problema de
+/// jeitos diferentes: no x86 o heap precisa estar na metade alta, para não
+/// dividir uma entrada de topo de 512 GiB com o espaço do usuário; no ARM as
+/// entradas de topo cobrem 1 GiB cada, e 64 GiB já é uma entrada só dele. Ver
+/// o mapa em `arch::x86_64` e `arch::aarch64`.
+pub const HEAP_INICIO: usize = crate::arch::BASE_DO_HEAP as usize;
 
 /// Tamanho do heap. 1 MiB é folgado para o que o kernel faz hoje e barato
 /// diante dos 128 MiB da máquina.

@@ -44,11 +44,65 @@ static DESLOCAMENTO_FISICO: AtomicU64 = AtomicU64::new(u64::MAX);
 /// físicos, enquanto todo acesso nosso é virtual. É o que torna a paginação
 /// editável.
 const CONFIG: bootloader_api::BootloaderConfig = {
+    use bootloader_api::config::Mapping;
+
     let mut config = bootloader_api::BootloaderConfig::new_default();
-    config.mappings.physical_memory = Some(bootloader_api::config::Mapping::Dynamic);
-    config.mappings.kernel_base = bootloader_api::config::Mapping::FixedAddress(BASE_DO_KERNEL);
+    config.mappings.physical_memory = Some(Mapping::FixedAddress(BASE_DA_MEMORIA_FISICA));
+    config.mappings.kernel_base = Mapping::FixedAddress(BASE_DO_KERNEL);
+
+    // Tudo o que o bootloader ainda escolhe sozinho — a pilha inicial, a
+    // `BootInfo`, o framebuffer — precisa cair na metade alta. Sem este piso
+    // ele procura um buraco livre a partir do zero, e foi o que aconteceu: o
+    // mapa da memória física apareceu em 2 TiB, dentro da metade que agora
+    // pertence ao usuário.
+    config.mappings.dynamic_range_start = Some(BASE_DO_RESTO);
     config
 };
+
+// ---------------------------------------------------------------------------
+// O mapa do espaço virtual
+// ---------------------------------------------------------------------------
+//
+// A regra é uma só: **a metade baixa é do usuário, a alta é do kernel**.
+//
+// Não é estética. Uma tabela de tradução por processo se monta copiando as
+// entradas de topo do kernel para a tabela nova; as que sobram são do
+// processo. Isso só funciona se nenhuma entrada de topo for compartilhada
+// entre os dois — e uma entrada de topo no x86 cobre 512 GiB.
+//
+// Antes disto o heap (64 GiB) e as pilhas de fio (128 GiB) moravam na mesma
+// entrada de topo que o espaço do usuário (4 GiB). Copiar "as entradas do
+// kernel" teria levado junto o mapa do processo anterior, ou deixado o kernel
+// sem heap — conforme o lado que se escolhesse.
+//
+// Cada região ganha uma entrada de topo só dela, com folga de sobra entre
+// elas. Desperdiçar espaço virtual num endereçamento de 48 bits não custa
+// nada: o que custa é descobrir tarde que duas regiões se encostaram.
+
+/// Onde o mapa da memória física inteira começa.
+///
+/// Fixo pelo mesmo motivo de [`BASE_DO_KERNEL`]: o bootloader escolheria um
+/// endereço estável entre execuções mas desconhecido em tempo de compilação, e
+/// este é o deslocamento por onde o kernel enxerga *qualquer* byte de RAM —
+/// inclusive as tabelas de página. Saber o valor de cor vale numa sessão de
+/// depuração.
+pub const BASE_DA_MEMORIA_FISICA: u64 = 0xFFFF_8800_0000_0000;
+
+/// Onde o heap do kernel começa.
+pub const BASE_DO_HEAP: u64 = 0xFFFF_9000_0000_0000;
+
+/// Onde a área das pilhas de fio começa.
+pub const BASE_DAS_PILHAS: u64 = 0xFFFF_9800_0000_0000;
+
+/// Piso para o que o bootloader ainda posiciona por conta própria.
+const BASE_DO_RESTO: u64 = 0xFFFF_A000_0000_0000;
+
+/// Quanto espaço virtual uma entrada da tabela de topo cobre.
+///
+/// A raiz do x86_64 é a PML4, e cada uma das 512 entradas dela cobre 512 GiB.
+/// É a granularidade com que uma tabela por processo pode separar kernel de
+/// usuário — daí as regiões do kernel precisarem estar longe umas das outras.
+pub const COBERTURA_DA_ENTRADA_DE_TOPO: u64 = 512 * 1024 * 1024 * 1024;
 
 /// Endereço virtual onde o kernel é carregado.
 ///

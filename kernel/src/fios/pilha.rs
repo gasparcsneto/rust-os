@@ -32,10 +32,11 @@ use crate::arch::{Permissoes, TAMANHO_PAGINA};
 
 /// Onde começa a área reservada às pilhas de fio.
 ///
-/// 128 GiB: bem acima do heap (64 GiB) e bem abaixo de qualquer coisa que as
-/// duas arquiteturas usem. No ARM precisa caber no espaço de 39 bits que o
-/// `TCR_EL1.T0SZ` configura, e cabe com folga.
-const BASE: u64 = 0x0000_0020_0000_0000;
+/// Vem da arquitetura pelo mesmo motivo de [`crate::heap::HEAP_INICIO`]: cada
+/// região do kernel precisa de uma entrada de topo só dela, para que montar
+/// uma tabela de tradução por processo seja copiar entradas de topo. Ver o
+/// mapa em `arch::x86_64` e `arch::aarch64`.
+pub(crate) const BASE: u64 = crate::arch::BASE_DAS_PILHAS;
 
 /// Espaço virtual reservado por fio, guard page incluída.
 const TAMANHO_DA_VAGA: u64 = 64 * 1024;

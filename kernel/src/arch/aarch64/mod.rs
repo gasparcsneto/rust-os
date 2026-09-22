@@ -42,6 +42,43 @@ use crate::machine::{Regiao, TipoRegiao};
 static DTB_INICIO: AtomicU64 = AtomicU64::new(0);
 static DTB_TAMANHO: AtomicU64 = AtomicU64::new(0);
 
+// ---------------------------------------------------------------------------
+// O mapa do espaço virtual
+// ---------------------------------------------------------------------------
+//
+// O ARM chega ao mesmo objetivo do x86 por outro caminho. Lá a regra é "metade
+// baixa para o usuário, alta para o kernel", porque uma entrada de topo cobre
+// 512 GiB e não dá para fatiar mais fino. Aqui não existe metade alta — o
+// `TCR_EL1` deste kernel configura 39 bits de endereço virtual e desliga as
+// buscas por TTBR1 —, mas também não é preciso: a raiz é uma tabela de nível 1
+// e **cada entrada dela cobre 1 GiB**.
+//
+// Com essa granularidade as regiões já ocupam entradas de topo distintas, sem
+// precisar de endereços altos:
+//
+//   L1[0]    periféricos da máquina `virt` (UART, GIC)
+//   L1[1]    imagem do kernel, em 0x4008_0000
+//   L1[4]    espaço do usuário
+//   L1[64]   heap do kernel
+//   L1[128]  pilhas de fio
+//
+// É o que permite montar uma tabela por processo do mesmo jeito nas duas
+// arquiteturas: copiam-se as entradas de topo do kernel, e as do usuário ficam
+// de fora.
+
+/// Onde o heap do kernel começa. 64 GiB.
+pub const BASE_DO_HEAP: u64 = 0x0000_0010_0000_0000;
+
+/// Onde a área das pilhas de fio começa. 128 GiB.
+pub const BASE_DAS_PILHAS: u64 = 0x0000_0020_0000_0000;
+
+/// Quanto espaço virtual uma entrada da tabela de topo cobre.
+///
+/// A raiz aqui é uma tabela de nível 1, e cada entrada cobre 1 GiB — 512 vezes
+/// mais fino que a PML4 do x86. É por isso que este lado não precisa de
+/// endereços altos para separar kernel de usuário.
+pub const COBERTURA_DA_ENTRADA_DE_TOPO: u64 = 1024 * 1024 * 1024;
+
 /// Nome da arquitetura, exposto no protocolo do agente.
 pub const fn nome() -> &'static str {
     "aarch64"

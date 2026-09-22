@@ -141,6 +141,35 @@ pub const BASE: u64 = 0x0000_0001_0000_0000;
 /// Fim exclusivo da faixa do usuário.
 pub const TETO: u64 = BASE + 0x1000_0000;
 
+// O espaço do usuário inteiro tem de caber numa única entrada da tabela de
+// topo, e nenhuma região do kernel pode dividir essa entrada com ele.
+//
+// É a condição que torna possível dar uma tabela de tradução a cada processo:
+// a tabela nova recebe uma cópia das entradas de topo do kernel, e as que
+// sobram são do processo. Se uma entrada servisse aos dois, copiá-la levaria
+// junto o mapa do processo anterior — ou, escolhendo o outro lado, deixaria o
+// kernel sem heap no instante em que o processo assumisse.
+//
+// Conferido aqui, em tempo de compilação, porque o erro é de *aritmética de
+// endereço*: mover uma constante 512 GiB para o lado não quebra nada visível
+// até um processo carregar e o kernel sumir de baixo dele.
+const _: () = {
+    use crate::arch::entrada_de_topo;
+
+    assert!(
+        entrada_de_topo(BASE) == entrada_de_topo(TETO - 1),
+        "o espaco do usuario atravessa duas entradas da tabela de topo"
+    );
+    assert!(
+        entrada_de_topo(BASE) != entrada_de_topo(crate::heap::HEAP_INICIO as u64),
+        "o heap do kernel divide a entrada de topo com o espaco do usuario"
+    );
+    assert!(
+        entrada_de_topo(BASE) != entrada_de_topo(crate::fios::pilha::BASE),
+        "as pilhas de fio dividem a entrada de topo com o espaco do usuario"
+    );
+};
+
 /// Maior escrita que uma chamada aceita de uma vez.
 ///
 /// Um teto explícito é obrigatório: sem ele, um processo pediria uma escrita

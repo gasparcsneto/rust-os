@@ -234,6 +234,37 @@ vai para biblioteca. Protocolo e estrutura ficam explícitos.
 | x86_64 | GDT, TSS, IDT, tabelas de página, portas de I/O (`x86_64`); boot (`bootloader`); UART (`uart_16550`) | PIC 8259 e timer PIT |
 | aarch64 | registradores de sistema (`aarch64-cpu`); blocos de MMIO (`tock-registers`) | boot, tabela de vetores, descritores de página, leitor de device tree |
 
+**O mapa do espaço virtual.** Cada região do kernel tem uma entrada da tabela
+de topo só dela, separada da do usuário. Não é organização por gosto: dar uma
+tabela de tradução a cada processo é copiar as entradas de topo do kernel para
+a tabela nova e deixar as do usuário de fora — o que só funciona se nenhuma
+entrada servir aos dois lados.
+
+As duas arquiteturas chegam lá por caminhos diferentes, porque a granularidade
+de uma entrada de topo difere em 512 vezes:
+
+| | x86_64 (512 GiB por entrada) | aarch64 (1 GiB por entrada) |
+|---|---|---|
+| Imagem do kernel | `0xFFFF_8000_0000_0000` | `0x4008_0000` |
+| Memória física mapeada | `0xFFFF_8800_0000_0000` | identidade |
+| Heap | `0xFFFF_9000_0000_0000` | 64 GiB |
+| Pilhas de fio | `0xFFFF_9800_0000_0000` | 128 GiB |
+| Espaço do usuário | 4 GiB | 4 GiB |
+
+No x86 a regra é a clássica — metade alta para o kernel, metade baixa para o
+usuário —, e o endereço da memória física deixou de ser escolhido pelo
+bootloader: ele caía em 2 TiB, dentro da metade que agora é do usuário. Fixá-lo
+tem o mesmo benefício que fixar a base do kernel teve para a simbolização.
+
+No ARM não existe metade alta (o `TCR_EL1` deste kernel configura 39 bits e
+desliga as buscas por TTBR1), mas também não é preciso: com entradas de 1 GiB,
+as regiões já caem em entradas distintas sem sair dos endereços baixos.
+
+A separação é conferida em tempo de compilação. Mover uma constante para uma
+entrada já ocupada não quebra nada visível até um processo carregar e o kernel
+sumir de baixo dele — então o erro aparece no build, com o nome da região que
+colidiu.
+
 **Onde o `unsafe` pode morar.** Um kernel não tem como eliminá-lo: falar com
 hardware, assembly e registradores de sistema exigem sair das garantias do
 compilador. O que dá para fazer é mantê-lo concentrado, e hoje cerca de três
