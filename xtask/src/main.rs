@@ -853,40 +853,56 @@ const TAMANHO_DO_DISCO: u64 = 1024 * 1024;
 /// diferença entre "a leitura retornou" e "a leitura funcionou".
 const ASSINATURA_DO_DISCO: &[u8] = b"DUKE-DISCO-v1";
 
-/// Cria o disco de testes se ele ainda não existir.
+/// O byte com que o setor `numero` é preenchido.
 ///
-/// O conteúdo é gerado, e não versionado: um arquivo binário de 1 MiB no
-/// repositório seria peso morto que ninguém revisa. A regra de preenchimento
-/// está aqui e no teste do kernel, que é o par que precisa concordar.
+/// Esta regra e a assinatura acima são metade de um contrato cujo outro lado
+/// está no `testes.rs` do kernel. Duplicá-las é o preço de o disco ser gerado
+/// por um programa que roda no hospedeiro e lido por outro que roda no
+/// hóspede — não há lugar comum onde as duas metades caibam.
+fn marca_do_setor(numero: usize) -> u8 {
+    (numero as u8).wrapping_mul(7).wrapping_add(1)
+}
+
+/// Monta o conteúdo do disco de testes.
+fn conteudo_do_disco() -> Vec<u8> {
+    let mut conteudo = vec![0u8; TAMANHO_DO_DISCO as usize];
+    for (numero, setor) in conteudo.chunks_mut(512).enumerate() {
+        setor.fill(marca_do_setor(numero));
+    }
+    // A assinatura vai por último, por cima do padrão do primeiro setor.
+    conteudo[..ASSINATURA_DO_DISCO.len()].copy_from_slice(ASSINATURA_DO_DISCO);
+    conteudo
+}
+
+/// Cria o disco de testes, ou o recria se o que está lá não confere.
+///
+/// # Por que conferir, e não só existir
+///
+/// Porque o arquivo sobrevive ao que o gerou. Ele mora em `target/`, que o CI
+/// mantém em cache entre execuções e que ninguém limpa entre dois `git
+/// checkout` — então um disco gerado por uma versão anterior desta função
+/// continuaria sendo usado por esta.
+///
+/// Isso desmontaria a garantia que justifica a duplicação da regra: o teste do
+/// kernel só denuncia a divergência entre os dois lados se o disco for
+/// realmente regerado quando este lado muda. Conferir o conteúdo é o que
+/// transforma "existe um arquivo" em "existe o arquivo certo".
 fn disco_de_testes() -> Result<PathBuf, String> {
     let caminho = raiz_do_projeto().join("target").join("disco.img");
-    if caminho.exists() {
+    let esperado = conteudo_do_disco();
+
+    // A comparação é do arquivo inteiro. Um megabyte lido uma vez por
+    // invocação do QEMU não é custo que se perceba, e conferir por amostragem
+    // deixaria de fora exatamente o setor que divergiu.
+    if std::fs::read(&caminho).is_ok_and(|atual| atual == esperado) {
         return Ok(caminho);
     }
 
     std::fs::create_dir_all(caminho.parent().unwrap())
         .map_err(|e| format!("não foi possível criar o diretório do disco: {e}"))?;
-
-    let mut conteudo = vec![0u8; TAMANHO_DO_DISCO as usize];
-    conteudo[..ASSINATURA_DO_DISCO.len()].copy_from_slice(ASSINATURA_DO_DISCO);
-
-    // Cada setor é preenchido com um byte que deriva do próprio número. Ler o
-    // setor errado devolve um padrão que não confere, o que torna um erro de
-    // deslocamento visível — diferente de zeros, que parecem plausíveis em
-    // qualquer lugar.
-    for (numero, setor) in conteudo.chunks_mut(512).enumerate() {
-        let marca = (numero as u8).wrapping_mul(7).wrapping_add(1);
-        for (i, byte) in setor.iter_mut().enumerate() {
-            if numero == 0 && i < ASSINATURA_DO_DISCO.len() {
-                continue;
-            }
-            *byte = marca;
-        }
-    }
-
-    std::fs::write(&caminho, &conteudo)
+    std::fs::write(&caminho, &esperado)
         .map_err(|e| format!("não foi possível escrever o disco de testes: {e}"))?;
-    println!("[xtask] disco de testes criado em {}", caminho.display());
+    println!("[xtask] disco de testes gerado em {}", caminho.display());
     Ok(caminho)
 }
 
