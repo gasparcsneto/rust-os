@@ -3204,10 +3204,205 @@ static CASOS: &[Caso] = &[
         f: usuario_executa_bifurca_e_troca_de_imagem,
     },
     Caso {
+        nome: "pci: regioes atribuidas nao se sobrepoem",
+        f: pci_regioes_atribuidas_nao_se_sobrepoem,
+    },
+    Caso {
+        nome: "disco: le a assinatura do setor zero",
+        f: disco_le_a_assinatura_do_setor_zero,
+    },
+    Caso {
+        nome: "disco: cada setor devolve o seu padrao",
+        f: disco_cada_setor_devolve_o_seu_padrao,
+    },
+    Caso {
+        nome: "disco: recusa setor fora da capacidade",
+        f: disco_recusa_setor_fora_da_capacidade,
+    },
+    Caso {
         nome: "usuario: nao alcanca o kernel",
         f: usuario_nao_alcanca_o_kernel,
     },
 ];
+
+// ---------------------------------------------------------------------------
+// O disco
+// ---------------------------------------------------------------------------
+
+/// A assinatura que o `xtask` grava no começo do disco de testes.
+///
+/// Ela e a regra de preenchimento abaixo são metade de um contrato cujo outro
+/// lado está em `xtask/src/main.rs`. Duplicá-las é o preço de o disco ser
+/// gerado por um programa que roda no hospedeiro e lido por outro que roda no
+/// hóspede — não há lugar comum onde as duas metades caibam. O que impede a
+/// divergência é este teste: se o `xtask` mudar a regra e não mudar esta, o
+/// caso falha.
+const ASSINATURA_DO_DISCO: &[u8] = b"DUKE-DISCO-v1";
+
+/// O byte com que o setor `numero` é preenchido.
+///
+/// Deriva do número do setor de propósito. Zeros pareceriam plausíveis em
+/// qualquer lugar, e um erro de deslocamento — ler o setor 3 quando se pediu o
+/// 4 — passaria despercebido. Com um padrão que muda a cada setor, ler o setor
+/// errado é indistinguível de não ler nada.
+fn marca_do_setor(numero: u64) -> u8 {
+    (numero as u8).wrapping_mul(7).wrapping_add(1)
+}
+
+/// Nenhum dispositivo recebeu uma faixa de memória que invada a de outro.
+///
+/// É a invariante do distribuidor de BARs, e a única que uma inspeção do
+/// `pci.list` não pegaria: dois dispositivos com endereços diferentes ainda
+/// podem se sobrepor se o tamanho de um alcançar o começo do outro. Foi
+/// exatamente o que o alinhamento ao tamanho do BAR existe para impedir.
+fn pci_regioes_atribuidas_nao_se_sobrepoem() -> Resultado {
+    // Cada dispositivo pode ter até seis regiões, e o inventário tem teto.
+    let mut faixas = [(0u64, 0u64); crate::pci::MAX_DISPOSITIVOS * crate::pci::BARS];
+    let mut quantas = 0usize;
+    let mut falha: Option<&'static str> = None;
+
+    crate::pci::com_dispositivos(|d| {
+        for regiao in d.regioes.iter().flatten() {
+            if regiao.tamanho == 0 {
+                falha = Some("uma regiao foi registrada com tamanho zero");
+                continue;
+            }
+            // O alinhamento não é cosmético: os bits baixos de um BAR são
+            // fixos em zero, então um endereço desalinhado não é o endereço
+            // que o dispositivo passou a decodificar.
+            if !regiao.tamanho.is_power_of_two() || regiao.base % regiao.tamanho != 0 {
+                falha = Some("uma regiao nao esta alinhada ao proprio tamanho");
+            }
+            if quantas < faixas.len() {
+                faixas[quantas] = (regiao.base, regiao.tamanho);
+                quantas += 1;
+            }
+        }
+    });
+
+    if let Some(motivo) = falha {
+        return Err(motivo);
+    }
+    if quantas == 0 {
+        return Err("nenhum dispositivo tem regiao de memoria");
+    }
+
+    for i in 0..quantas {
+        let (base_a, tamanho_a) = faixas[i];
+        for &(base_b, tamanho_b) in faixas.iter().take(quantas).skip(i + 1) {
+            if base_a < base_b + tamanho_b && base_b < base_a + tamanho_a {
+                crate::log_error!(
+                    "teste",
+                    "regioes sobrepostas: {:#x}+{:#x} e {:#x}+{:#x}",
+                    base_a,
+                    tamanho_a,
+                    base_b,
+                    tamanho_b
+                );
+                return Err("duas regioes de memoria se sobrepoem");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// O primeiro setor traz a assinatura que o `xtask` gravou.
+///
+/// É o teste que separa "a leitura retornou" de "a leitura funcionou". Um
+/// caminho de DMA quebrado devolve um buffer intacto — e um buffer intacto é
+/// de zeros, que passariam por qualquer verificação frouxa.
+fn disco_le_a_assinatura_do_setor_zero() -> Resultado {
+    let mut setor = [0u8; crate::virtio::blk::TAMANHO_DO_SETOR];
+    let Some(resultado) = crate::virtio::blk::com_o_disco(|d| d.ler_setor(0, &mut setor)) else {
+        return Err("nao ha disco nesta maquina");
+    };
+    resultado?;
+
+    if &setor[..ASSINATURA_DO_DISCO.len()] != ASSINATURA_DO_DISCO {
+        crate::log_error!(
+            "teste",
+            "o setor zero comeca com {:#04x} {:#04x} {:#04x} {:#04x}",
+            setor[0],
+            setor[1],
+            setor[2],
+            setor[3]
+        );
+        return Err("o setor zero nao traz a assinatura do disco");
+    }
+
+    // O resto do setor zero segue a mesma regra dos outros. Conferi-lo aqui é
+    // o que prova que a leitura trouxe o setor **inteiro**, e não só os
+    // primeiros bytes.
+    let marca = marca_do_setor(0);
+    if setor[ASSINATURA_DO_DISCO.len()..]
+        .iter()
+        .any(|&b| b != marca)
+    {
+        return Err("o resto do setor zero nao segue o padrao");
+    }
+
+    Ok(())
+}
+
+/// Setores diferentes devolvem conteúdos diferentes, e o certo para cada um.
+///
+/// Ler o setor zero corretamente ainda seria compatível com um driver que
+/// ignora o número do setor e devolve sempre o primeiro. Esta é a verificação
+/// que fecha essa porta.
+fn disco_cada_setor_devolve_o_seu_padrao() -> Resultado {
+    // Os escolhidos não são consecutivos de propósito: um erro de um setor
+    // para cima ou para baixo é o mais provável, e saltos o tornam visível.
+    const ALVOS: [u64; 5] = [1, 2, 7, 64, 255];
+
+    let mut setor = [0u8; crate::virtio::blk::TAMANHO_DO_SETOR];
+
+    for numero in ALVOS {
+        let Some(resultado) = crate::virtio::blk::com_o_disco(|d| d.ler_setor(numero, &mut setor))
+        else {
+            return Err("nao ha disco nesta maquina");
+        };
+        resultado?;
+
+        let esperado = marca_do_setor(numero);
+        if let Some(posicao) = setor.iter().position(|&b| b != esperado) {
+            crate::log_error!(
+                "teste",
+                "setor {}: byte {} e {:#04x}, esperava {:#04x}",
+                numero,
+                posicao,
+                setor[posicao],
+                esperado
+            );
+            return Err("um setor veio com o conteudo de outro");
+        }
+    }
+
+    Ok(())
+}
+
+/// Pedir um setor além do fim do disco é erro, e não uma leitura de lixo.
+///
+/// O limite é conferido do nosso lado antes de o pedido chegar ao
+/// dispositivo. Poderia não ser — o dispositivo também recusaria —, mas então
+/// o erro voltaria como "o dispositivo recusou", que não diz por quê.
+fn disco_recusa_setor_fora_da_capacidade() -> Resultado {
+    let Some(capacidade) = crate::virtio::blk::com_o_disco(|d| d.capacidade()) else {
+        return Err("nao ha disco nesta maquina");
+    };
+    if capacidade == 0 {
+        return Err("o disco diz ter zero setores");
+    }
+
+    let mut setor = [0u8; crate::virtio::blk::TAMANHO_DO_SETOR];
+    let resultado = crate::virtio::blk::com_o_disco(|d| d.ler_setor(capacidade, &mut setor));
+
+    match resultado {
+        Some(Err(_)) => Ok(()),
+        Some(Ok(())) => Err("o disco aceitou ler um setor que nao existe"),
+        None => Err("nao ha disco nesta maquina"),
+    }
+}
 
 /// Roda todos os casos e encerra o emulador com o veredito.
 pub fn executar_todos() -> ! {
