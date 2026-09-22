@@ -12,8 +12,10 @@ pub mod idt;
 pub mod paginacao;
 pub mod pic;
 pub mod uart;
+pub mod usuario;
 
 pub use contexto::{Contexto, ceder_cpu, preparar_contexto};
+pub use usuario::{definir_pilha_de_kernel, entrar as entrar_em_usuario, init as init_usuario};
 
 use core::sync::atomic::{AtomicU64, Ordering};
 

@@ -1817,6 +1817,175 @@ fn fios_criacao_concorrente_nao_colide() -> Resultado {
     Ok(())
 }
 
+// ===========================================================================
+// Userspace — anel sem privilégio e chamadas de sistema
+// ===========================================================================
+
+/// A travessia completa: kernel -> anel sem privilégio -> chamada de sistema
+/// -> kernel.
+///
+/// O programa de exemplo escreve uma mensagem e encerra com um código
+/// improvável. Encontrar esse código do outro lado prova que **toda** a cadeia
+/// funcionou: as páginas foram mapeadas com permissão de usuário, o
+/// processador desceu de privilégio, a instrução de chamada de sistema levou o
+/// controle de volta ao kernel com a pilha certa, o despacho aconteceu, e o
+/// fio foi encerrado em vez de voltar a um processo que já não existe.
+///
+/// Se qualquer elo falhar, o desfecho é uma falha de proteção — e o teste
+/// nunca vê o código de saída.
+fn usuario_executa_e_encerra() -> Resultado {
+    static COMECOU: AtomicBool = AtomicBool::new(false);
+
+    extern "C" fn hospedar(_argumento: u64) -> ! {
+        COMECOU.store(true, SeqCst);
+        match crate::usuario::programa::executar(crate::usuario::exemplo::bytes()) {
+            Ok(_) => unreachable!("executar nao retorna em caso de sucesso"),
+            Err(motivo) => {
+                crate::log_error!("teste", "nao foi possivel entrar em userspace: {}", motivo);
+                crate::fios::terminar()
+            }
+        }
+    }
+
+    crate::usuario::limpar_ultima_saida();
+    COMECOU.store(false, SeqCst);
+    let chamadas_antes = crate::usuario::estatisticas().0;
+
+    crate::fios::criar("teste-usuario", hospedar, 0)?;
+
+    esperar_ate(|| crate::usuario::ultima_saida().is_some(), 300)?;
+
+    if !COMECOU.load(SeqCst) {
+        return Err("o fio hospedeiro nunca rodou");
+    }
+
+    match crate::usuario::ultima_saida() {
+        Some(codigo) if codigo == crate::usuario::exemplo::CODIGO_DE_SAIDA => {}
+        Some(outro) => {
+            crate::log_error!("teste", "codigo de saida inesperado: {}", outro);
+            return Err("o processo saiu com um codigo que nao e o dele");
+        }
+        None => return Err("o processo nao chegou a sair"),
+    }
+
+    // Duas chamadas: uma escrita e uma saída. Menos que isso significa que a
+    // primeira falhou e o programa foi direto para a segunda.
+    let chamadas = crate::usuario::estatisticas().0 - chamadas_antes;
+    if chamadas < 2 {
+        crate::log_error!("teste", "apenas {} chamadas de sistema", chamadas);
+        return Err("o processo nao fez todas as chamadas esperadas");
+    }
+    Ok(())
+}
+
+/// Um ponteiro que o usuário inventa não pode ser desreferenciado.
+///
+/// Este é o caso que separa um sistema operacional de uma biblioteca com
+/// etapas extras. Todo argumento de chamada de sistema vem de código sem
+/// privilégio; aceitar um ponteiro pelo valor de face daria ao processo um
+/// jeito de fazer o kernel ler qualquer endereço em nome dele.
+///
+/// Testamos direto o validador, sem passar por userspace, porque é ele que
+/// carrega a regra — e porque um processo mal-intencionado é exatamente o que
+/// não queremos precisar escrever para descobrir que a regra falhou.
+fn usuario_recusa_ponteiro_de_fora() -> Resultado {
+    use crate::usuario::{BASE, TETO, erro, validar_faixa};
+
+    // Dentro do kernel: o alvo óbvio de quem quer ler o que não deve.
+    let no_kernel = &raw const CASOS as *const _ as u64;
+    if validar_faixa(no_kernel, 8) != Err(erro::ENDERECO_INVALIDO) {
+        return Err("aceitou um ponteiro para dentro do kernel");
+    }
+
+    // Logo abaixo e logo acima da faixa: os erros de um caractere.
+    if validar_faixa(BASE - 8, 8) != Err(erro::ENDERECO_INVALIDO) {
+        return Err("aceitou uma faixa que comeca antes do espaco do usuario");
+    }
+    if validar_faixa(TETO - 4, 8) != Err(erro::ENDERECO_INVALIDO) {
+        return Err("aceitou uma faixa que termina depois do espaco do usuario");
+    }
+
+    // Transbordo: `inicio + tamanho` dá a volta e produziria uma faixa que
+    // *parece* pequena e válida.
+    if validar_faixa(u64::MAX - 4, 16) == Ok(()) {
+        return Err("aceitou uma faixa cuja soma transborda");
+    }
+
+    // Tamanho absurdo: sem teto, uma chamada gastaria tempo ilimitado.
+    if validar_faixa(BASE, u64::MAX) != Err(erro::TAMANHO_INVALIDO) {
+        return Err("aceitou um tamanho sem teto");
+    }
+
+    // Dentro da faixa mas **não mapeado**: estar no intervalo certo não basta.
+    let meio_nao_mapeado = BASE + 0x0080_0000;
+    if validar_faixa(meio_nao_mapeado, 8) != Err(erro::ENDERECO_INVALIDO) {
+        return Err("aceitou um endereco da faixa do usuario que nao esta mapeado");
+    }
+
+    // Tamanho zero é legítimo e não desreferencia nada.
+    if validar_faixa(no_kernel, 0) != Ok(()) {
+        return Err("recusou uma faixa vazia");
+    }
+    Ok(())
+}
+
+/// Um processo não alcança a memória do kernel, e tentar mata só o processo.
+///
+/// É o teste que dá sentido a todos os outros deste grupo. Entrar em ring 3
+/// sem que ele proteja nada seria uma troca de contexto cara e mais nada; o
+/// que precisa ser demonstrado são duas coisas ao mesmo tempo:
+///
+/// 1. o processo **não consegue** ler o que não é dele — se conseguisse,
+///    seguiria em frente e sairia com o código do invasor;
+/// 2. a tentativa mata **só o processo** — o kernel continua vivo, e a prova
+///    disso é que este próprio teste chega ao fim e reporta.
+fn usuario_nao_alcanca_o_kernel() -> Resultado {
+    static COMECOU: AtomicBool = AtomicBool::new(false);
+
+    extern "C" fn hospedar(_argumento: u64) -> ! {
+        COMECOU.store(true, SeqCst);
+        match crate::usuario::programa::executar(crate::usuario::exemplo::bytes_invasores()) {
+            Ok(_) => unreachable!("executar nao retorna em caso de sucesso"),
+            Err(motivo) => {
+                crate::log_error!("teste", "nao foi possivel entrar em userspace: {}", motivo);
+                crate::fios::terminar()
+            }
+        }
+    }
+
+    crate::usuario::limpar_ultima_saida();
+    COMECOU.store(false, SeqCst);
+    let falhas_antes = crate::traps::total();
+    let vivos_antes = crate::fios::estatisticas().0;
+
+    crate::fios::criar("teste-invasor", hospedar, 0)?;
+
+    // Esperamos a falha aparecer na contabilidade de exceções.
+    esperar_ate(|| crate::traps::total() > falhas_antes, 300)?;
+
+    if !COMECOU.load(SeqCst) {
+        return Err("o fio hospedeiro nunca rodou");
+    }
+
+    // Se o invasor tivesse conseguido ler, teria saído com o código dele.
+    if crate::usuario::ultima_saida() == Some(crate::usuario::exemplo::CODIGO_DO_INVASOR) {
+        return Err("o processo leu memoria do kernel e sobreviveu");
+    }
+
+    // O fio do invasor precisa ter sumido — e o kernel, não.
+    esperar_ate(|| crate::fios::estatisticas().0 <= vivos_antes, 200)?;
+
+    // Chegar aqui já é metade da prova: o kernel seguiu executando. A outra
+    // metade é que ele ainda funciona, então exercitamos um caminho que toca
+    // heap, paginação e log.
+    let (livres, _) = crate::frames::estatisticas();
+    if livres == 0 {
+        return Err("o alocador de frames nao sobreviveu");
+    }
+    crate::log_info!("teste", "kernel vivo depois de matar o invasor");
+    Ok(())
+}
+
 /// Espera `quantos` tiques do timer passarem.
 fn esperar_ticks(quantos: u64) {
     let ate = crate::tempo::ticks().saturating_add(quantos);
@@ -2097,6 +2266,18 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "fios: criacao concorrente",
         f: fios_criacao_concorrente_nao_colide,
+    },
+    Caso {
+        nome: "usuario: recusa ponteiro de fora",
+        f: usuario_recusa_ponteiro_de_fora,
+    },
+    Caso {
+        nome: "usuario: executa e encerra",
+        f: usuario_executa_e_encerra,
+    },
+    Caso {
+        nome: "usuario: nao alcanca o kernel",
+        f: usuario_nao_alcanca_o_kernel,
     },
 ];
 

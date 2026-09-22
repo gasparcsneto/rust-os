@@ -117,6 +117,19 @@ pub static COMANDOS: &[Command] = &[
         handler: threads_list,
     },
     Command {
+        nome: "user.run",
+        resumo: "Lanca o programa de exemplo no anel sem privilegio, num fio proprio. \
+                 Nao espera o fim: consulte `user.stats` depois.",
+        params: &[],
+        handler: user_run,
+    },
+    Command {
+        nome: "user.stats",
+        resumo: "Chamadas de sistema atendidas, recusadas e o ultimo codigo de saida.",
+        params: &[],
+        handler: user_stats,
+    },
+    Command {
         nome: "irq.stats",
         resumo: "Contadores de interrupcoes de hardware por linha.",
         params: &[],
@@ -426,6 +439,54 @@ fn tasks_list(_params: Json, w: &mut JsonWriter) -> fmt::Result {
         Some(e) => Err(e),
         None => Ok(()),
     }
+}
+
+// ---------------------------------------------------------------------------
+// user.*
+// ---------------------------------------------------------------------------
+
+fn user_run(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    match crate::usuario::lancar_exemplo() {
+        Ok(id) => {
+            w.field_bool("launched", true)?;
+            w.field_u64("thread_id", id)?;
+        }
+        Err(motivo) => {
+            w.field_bool("launched", false)?;
+            w.field_str("error", motivo)?;
+        }
+    }
+    w.end_object()
+}
+
+fn user_stats(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let (chamadas, recusadas, bytes) = crate::usuario::estatisticas();
+
+    w.begin_object()?;
+    w.field_u64("syscalls", chamadas)?;
+    // Recusadas sao pedidos que o kernel se negou a atender: numero de chamada
+    // desconhecido, ou um ponteiro que nao pertence ao processo. Um valor que
+    // sobe sozinho denuncia um processo tentando alcancar o que nao e dele.
+    w.field_u64("rejected", recusadas)?;
+    w.field_u64("bytes_written", bytes)?;
+
+    w.key("last_exit")?;
+    match crate::usuario::ultima_saida() {
+        Some(codigo) => w.i64_value(codigo)?,
+        None => w.null_value()?,
+    }
+
+    w.field_u64("user_base", crate::usuario::BASE)?;
+    w.field_u64("user_top", crate::usuario::TETO)?;
+    // O codigo que o programa de exemplo devolve. Publicado para que quem
+    // chama `user.run` possa conferir que o `last_exit` veio dele, e nao de
+    // um processo anterior ou de uma falha.
+    w.field_u64(
+        "example_exit_code",
+        crate::usuario::exemplo::CODIGO_DE_SAIDA as u64,
+    )?;
+    w.end_object()
 }
 
 // ---------------------------------------------------------------------------

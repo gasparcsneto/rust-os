@@ -94,6 +94,8 @@ const ATTR_NORMAL: u64 = 1 << 2;
 
 /// AP[2]: somente leitura. Ausente significa leitura e escrita.
 const AP_SOMENTE_LEITURA: u64 = 1 << 7;
+/// `AP[1]`: a página é alcançável a partir de EL0.
+const AP_USUARIO: u64 = 1 << 6;
 /// Compartilhável internamente, exigido para memória normal em SMP.
 const SH_INTERNO: u64 = 0b11 << 8;
 /// Flag de acesso. Com ela em zero, **todo** acesso gera falha — é um
@@ -468,12 +470,27 @@ fn bits_de(permissoes: Permissoes) -> u64 {
     if !permissoes.escrita {
         bits |= AP_SOMENTE_LEITURA;
     }
-    if !permissoes.executavel {
+
+    if permissoes.usuario {
+        bits |= AP_USUARIO;
+
+        // Uma página de usuário **nunca** é executável pelo kernel, mesmo
+        // sendo executável pelo usuário. Sem isto, um desvio acidental para
+        // um endereço de userspace faria o kernel executar código do
+        // processo com privilégio total. É a mesma proteção que o x86 chama
+        // de SMEP, e aqui ela é um bit por página.
         bits |= PXN;
+        if !permissoes.executavel {
+            bits |= UXN;
+        }
+    } else {
+        // Páginas do kernel: nunca executáveis por EL0, e executáveis por EL1
+        // só quando pedido.
+        bits |= UXN;
+        if !permissoes.executavel {
+            bits |= PXN;
+        }
     }
-    // Nada mapeado por aqui é executável por userspace ainda; a fase 1 vai
-    // precisar afrouxar isto.
-    bits |= UXN;
 
     bits | AF
 }

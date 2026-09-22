@@ -117,6 +117,8 @@ Os dois podem rodar ao mesmo tempo: cada arquitetura tem seu próprio socket.
 | `tasks.stats` | Escalonador cooperativo e fila de entrada do canal |
 | `threads.stats` | Escalonador preemptivo: trocas de contexto e quanta |
 | `threads.list` | Fios de execução do kernel, com estado e vezes escalonado |
+| `user.run` | Lança o programa de exemplo no anel sem privilégio |
+| `user.stats` | Chamadas de sistema atendidas, recusadas e último código de saída |
 | `tasks.list` | Tarefas lançadas, com id, nome e se estão vivas |
 | `irq.stats` | Contadores de interrupções de hardware por linha |
 | `traps.stats` | Contadores de exceções e detalhes da última falha |
@@ -141,6 +143,10 @@ kernel/src/
 ├── fios/
 │   ├── mod.rs       escalonador preemptivo: fios, rodízio e quantum
 │   └── pilha.rs     pilhas de fio, cada uma com sua guard page
+├── usuario/
+│   ├── mod.rs       ABI das chamadas de sistema e validação de ponteiros
+│   ├── programa.rs  mapeia o processo e desce de privilégio
+│   └── exemplo.rs   dois programas mínimos, em assembly
 ├── tarefas/
 │   ├── mod.rs       tarefa, identidade e o `yield` explícito
 │   ├── executor.rs  escalonador cooperativo com suporte a wakers
@@ -203,6 +209,9 @@ O contraste no caminho de boot é grande:
 | Dormir sem corrida | `sti; hlt`, par atômico | `wfi` acorda com IRQ mascarada |
 | Troca de contexto | troca de pilha (`rsp`) | troca do quadro de exceção |
 | Ceder a vez | chamada de função comum | `svc`, pelo mesmo caminho da preempção |
+| Sem privilégio | ring 3 | EL0 |
+| Chamada de sistema | `syscall`/`sysret` | `svc`, na tabela de vetores |
+| Pilha na entrada | trocada à mão (`syscall` não troca) | `SP_EL1`, trocada pelo hardware |
 | MMU | já ligada pelo bootloader | desligada; nós a acendemos |
 | Acesso à memória física | mapeada num deslocamento | identidade |
 | Encerrar emulador | `isa-debug-exit` | semihosting |
@@ -287,6 +296,44 @@ preemptado segurando uma trava faz o próximo girar para sempre. Por isso todo
 acesso a estado compartilhado neste kernel passa por `sem_interrupcoes`, que
 desliga a preempção junto — `frames`, `machine`, `heap` e o próprio
 escalonador.
+
+## Userspace
+
+Até a multitarefa preemptiva, todo código do kernel era igualmente poderoso:
+qualquer função podia escrever em qualquer endereço. Ring 3 (x86) e EL0 (ARM)
+mudam isso no hardware — o processo executa num modo em que instruções
+privilegiadas não funcionam e só alcança as páginas marcadas como dele.
+
+```
+$ cargo xtask agent user.run
+{"launched":true,"thread_id":7}
+
+$ cargo xtask agent log.tail '{"count":2}'
+... "usuario" "ola do anel 3"
+... "usuario" "processo encerrou com codigo 42"
+```
+
+O programa é um punhado de bytes de instrução copiados para uma página — não
+um ELF. Um carregador de ELF é outra coisa difícil, e depurar duas de uma vez
+é o jeito mais confiável de não entender nenhuma. Assim a travessia de
+privilégio fica sozinha em cena: se algo falhar, foi ela.
+
+**A proteção é testada, não presumida.** Existe um segundo programa que tenta
+ler a memória do kernel. O caso `usuario: nao alcanca o kernel` exige duas
+coisas ao mesmo tempo: que ele **não consiga** — se conseguisse, seguiria e
+sairia com o código dele — e que a tentativa mate **só o processo**. A prova
+da segunda é que o teste chega ao fim e reporta.
+
+**Todo argumento de chamada de sistema é hostil até prova em contrário.** Um
+ponteiro vindo do usuário pode apontar para dentro do kernel; um comprimento
+pode transbordar na soma. O kernel não desreferencia nada antes de conferir
+que a faixa inteira está no espaço do usuário **e** mapeada — faixa por faixa,
+página por página, com aritmética saturante.
+
+O que ainda não existe é isolamento *entre* processos: eles compartilham o
+espaço de endereços do kernel, e por isso só cabe um por vez. O que já existe
+é a separação de **privilégio**. Uma tabela de tradução por processo é o passo
+seguinte.
 
 ## Testes
 
@@ -378,8 +425,11 @@ padronizado.
 - [x] **Fase 1 — Scheduler preemptivo.** Fios de execução com pilha própria e
       guard page, troca de contexto nas duas arquiteturas, rodízio por quantum
       e preempção pelo timer.
-- [ ] **Fase 1 — Userspace.** Ring 3 com TSS e EL0, `syscall`/`sysret` e `svc`,
-      ELF loader, processos com espaço de endereços isolado.
+- [x] **Fase 1 — Ring 3 e chamadas de sistema.** Processos em ring 3 e EL0,
+      `syscall`/`sysret` e `svc`, páginas de usuário, validação de ponteiros e
+      falha de processo que não derruba o kernel.
+- [ ] **Fase 1 — Processos isolados.** Uma tabela de tradução por processo,
+      carregador de ELF, `fork`/`exec`.
 - [ ] **Fase 2 — Drivers.** Enumeração PCI, virtio-blk, virtio-net, timer
       APIC/HPET, framebuffer gráfico.
 

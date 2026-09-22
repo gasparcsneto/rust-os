@@ -66,13 +66,35 @@ unsafe impl Sync for PilhaEmergencia {}
 
 static PILHA_DOUBLE_FAULT: PilhaEmergencia = PilhaEmergencia(UnsafeCell::new([0; TAM_PILHA]));
 
-static TSS: Once<TaskStateSegment> = Once::new();
-static GDT: Once<(
-    GlobalDescriptorTable,
-    SegmentSelector,
-    SegmentSelector,
-    SegmentSelector,
-)> = Once::new();
+/// O TSS, num `UnsafeCell` porque `privilege_stack_table[0]` precisa mudar.
+///
+/// Esse campo é o `RSP0`: a pilha que o processador adota automaticamente
+/// quando uma interrupção chega enquanto o código do usuário está rodando.
+/// Como cada fio de execução tem sua própria pilha de kernel, o valor precisa
+/// acompanhar a troca de contexto — daí a mutabilidade.
+struct TssMutavel(UnsafeCell<TaskStateSegment>);
+
+// SAFETY: o único campo que muda é `RSP0`, escrito com as interrupções
+// mascaradas durante a troca de contexto. Fora isso, o processador apenas lê.
+unsafe impl Sync for TssMutavel {}
+
+static TSS: Once<TssMutavel> = Once::new();
+
+/// Os seletores que a GDT publica.
+pub struct Seletores {
+    pub codigo_kernel: SegmentSelector,
+    pub dados_kernel: SegmentSelector,
+    pub codigo_usuario: SegmentSelector,
+    pub dados_usuario: SegmentSelector,
+    tss: SegmentSelector,
+}
+
+static GDT: Once<(GlobalDescriptorTable, Seletores)> = Once::new();
+
+/// Os seletores da GDT. Só é válido depois de [`init`].
+pub fn seletores() -> &'static Seletores {
+    &GDT.get().expect("a GDT precisa estar carregada").1
+}
 
 /// Monta e carrega a GDT e o TSS. Chame uma vez, antes da IDT.
 pub fn init() {
@@ -84,18 +106,54 @@ pub fn init() {
             // entregamos é o **topo** da região, não o início.
             base + TAM_PILHA as u64
         };
-        tss
+        TssMutavel(UnsafeCell::new(tss))
     });
 
-    let (gdt, seletor_codigo, seletor_dados, seletor_tss) = GDT.call_once(|| {
+    // SAFETY: ainda estamos na inicialização, com um único fio e sem
+    // interrupções; ninguém mais olha para o TSS neste instante.
+    let tss_ref: &'static TaskStateSegment = unsafe { &*tss.0.get() };
+
+    let (gdt, seletores) = GDT.call_once(|| {
         let mut gdt = GlobalDescriptorTable::new();
-        let seletor_codigo = gdt.append(Descriptor::kernel_code_segment());
-        let seletor_dados = gdt.append(Descriptor::kernel_data_segment());
-        let seletor_tss = gdt.append(Descriptor::tss_segment(tss));
-        (gdt, seletor_codigo, seletor_dados, seletor_tss)
+        let codigo_kernel = gdt.append(Descriptor::kernel_code_segment());
+        let dados_kernel = gdt.append(Descriptor::kernel_data_segment());
+
+        // A ordem dos três próximos descritores **não é escolha nossa**: é o
+        // que a instrução `sysret` impõe. Ao retornar para 64 bits ela carrega
+        // `SS = STAR[63:48] + 8` e `CS = STAR[63:48] + 16`, sem consultar mais
+        // nada. Então precisa existir, nessa sequência exata:
+        //
+        //   base + 0   um descritor qualquer (o `sysret` de 32 bits usaria)
+        //   base + 8   dados de usuário
+        //   base + 16  código de usuário
+        //
+        // Inverter dois deles produz um `#GP` no retorno da primeira chamada
+        // de sistema — depois de ela ter funcionado.
+        // Este é o `STAR[63:48]` de que o `sysret` parte; nunca é carregado.
+        let _base_do_sysret = gdt.append(Descriptor::user_data_segment());
+        let dados_usuario = gdt.append(Descriptor::user_data_segment());
+        let codigo_usuario = gdt.append(Descriptor::user_code_segment());
+
+        let tss = gdt.append(Descriptor::tss_segment(tss_ref));
+
+        (
+            gdt,
+            Seletores {
+                codigo_kernel,
+                dados_kernel,
+                codigo_usuario,
+                dados_usuario,
+                tss,
+            },
+        )
     });
 
     gdt.load();
+    let (seletor_codigo, seletor_dados, seletor_tss) = (
+        &seletores.codigo_kernel,
+        &seletores.dados_kernel,
+        &seletores.tss,
+    );
 
     // SAFETY: os seletores vêm da GDT que acabamos de carregar, então apontam
     // para descritores válidos.
@@ -124,5 +182,30 @@ pub fn init() {
         ES::set_reg(*seletor_dados);
 
         load_tss(*seletor_tss);
+    }
+}
+
+/// Aponta o `RSP0` do TSS para o topo da pilha de kernel do fio atual.
+///
+/// É o endereço que o processador adota sozinho quando uma interrupção chega
+/// com o código do usuário rodando. Precisa acompanhar a troca de contexto:
+/// apontar para a pilha de outro fio faria dois fios empilharem quadros de
+/// exceção no mesmo lugar.
+///
+/// Um valor zero é ignorado, e é o caso do fio inicial — a pilha dele veio do
+/// boot e ele não executa código de usuário.
+pub fn definir_pilha_de_kernel(topo: u64) {
+    if topo == 0 {
+        return;
+    }
+    let Some(tss) = TSS.get() else {
+        return;
+    };
+
+    // SAFETY: escrevemos um único campo, com as interrupções mascaradas pelo
+    // chamador (a troca de contexto). O processador só lê este campo ao
+    // entregar uma interrupção, o que não pode acontecer aqui dentro.
+    unsafe {
+        (*tss.0.get()).privilege_stack_table[0] = VirtAddr::new(topo);
     }
 }

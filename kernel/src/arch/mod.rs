@@ -34,6 +34,8 @@
 //! - `dormir_se_ocioso()`: dorme só se não houver trabalho, sem corrida.
 //! - `disparar_breakpoint()`: gera uma exceção recuperável, para autoteste.
 //! - `disparar_falha_fatal()`: gera uma exceção irrecuperável, de propósito.
+//! - `init_usuario()`, `entrar_em_usuario()`, `definir_pilha_de_kernel()`: a
+//!   travessia para o anel sem privilégio — ver [`crate::usuario`].
 //! - `Contexto`, `preparar_contexto()`, `ceder_cpu()`: a troca de contexto
 //!   entre fios de execução. O mecanismo difere entre as duas arquiteturas —
 //!   ver [`crate::fios`].
@@ -59,10 +61,11 @@ pub use aarch64 as atual;
 // pelos backends, que esconderia código morto de verdade dentro deles.
 #[allow(unused_imports)]
 pub use atual::{
-    Contexto, Uart, acesso_fisico, ceder_cpu, desmapear, disparar_breakpoint, disparar_falha_fatal,
-    dormir_se_ocioso, encerrar_emulador, esperar_interrupcao, falha_de_estouro_de_pilha,
-    halt_forever, identificar_cpu, init_excecoes, init_interrupcao_serial, init_interrupcoes,
-    init_paginacao, init_seriais, mapear_frame, nome, preparar_contexto, reservar_faixas,
+    Contexto, Uart, acesso_fisico, ceder_cpu, definir_pilha_de_kernel, desmapear,
+    disparar_breakpoint, disparar_falha_fatal, dormir_se_ocioso, encerrar_emulador,
+    entrar_em_usuario, esperar_interrupcao, falha_de_estouro_de_pilha, halt_forever,
+    identificar_cpu, init_excecoes, init_interrupcao_serial, init_interrupcoes, init_paginacao,
+    init_seriais, init_usuario, mapear_frame, nome, preparar_contexto, reservar_faixas,
     sem_interrupcoes, traduzir,
 };
 
@@ -101,6 +104,13 @@ pub struct Permissoes {
     /// Memória de dispositivo: sem cache, sem junção de escritas, sem
     /// reordenação. Registradores de hardware exigem isto; RAM, não.
     pub dispositivo: bool,
+    /// Alcançável a partir do anel sem privilégio.
+    ///
+    /// É o bit que separa o kernel do userspace, e o padrão é `false` de
+    /// propósito: uma página que deveria ser do usuário e não é gera uma falha
+    /// alta e imediata; uma página do kernel que vaza para o usuário não gera
+    /// falha nenhuma — gera uma brecha.
+    pub usuario: bool,
 }
 
 #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
@@ -110,6 +120,27 @@ impl Permissoes {
         escrita: true,
         executavel: false,
         dispositivo: false,
+        usuario: false,
+    };
+
+    /// Dados de userspace: leitura e escrita pelo anel sem privilégio.
+    pub const DADOS_USUARIO: Self = Self {
+        escrita: true,
+        executavel: false,
+        dispositivo: false,
+        usuario: true,
+    };
+
+    /// Código de userspace: executável e somente leitura.
+    ///
+    /// Somente leitura não é zelo: código gravável permitiria a um processo
+    /// reescrever a si mesmo, e é a metade `W` do `W^X` que todo sistema
+    /// moderno mantém separada.
+    pub const CODIGO_USUARIO: Self = Self {
+        escrita: false,
+        executavel: true,
+        dispositivo: false,
+        usuario: true,
     };
 }
 

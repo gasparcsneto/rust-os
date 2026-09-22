@@ -33,11 +33,28 @@ use core::arch::global_asm;
 #[repr(C)]
 pub struct Contexto {
     pub sp: u64,
+    /// O topo da pilha de kernel deste fio.
+    ///
+    /// Diferente de `sp`, que acompanha a execução, este valor é fixo. Ele
+    /// existe porque o processador precisa saber para onde empilhar quando uma
+    /// interrupção chega com o **usuário** rodando: nesse momento `sp` aponta
+    /// para a pilha do processo, e o kernel precisa de uma sua.
+    ///
+    /// Zero no fio inicial: a pilha dele veio do boot e ele não roda código de
+    /// usuário.
+    pub pilha_de_kernel: u64,
 }
 
 impl Contexto {
     pub const fn vazio() -> Self {
-        Self { sp: 0 }
+        Self {
+            sp: 0,
+            pilha_de_kernel: 0,
+        }
+    }
+
+    pub fn pilha_de_kernel(&self) -> u64 {
+        self.pilha_de_kernel
     }
 }
 
@@ -163,6 +180,7 @@ pub unsafe fn preparar_contexto(
     }
 
     contexto.sp = sp;
+    contexto.pilha_de_kernel = topo & !0xF;
 }
 
 /// Ponte para [`crate::fios::terminar`] com nome estável para o assembly.
@@ -188,6 +206,11 @@ pub fn ceder_cpu() {
     // do escalonador, que só é modificada com elas mascaradas.
     unsafe {
         if let Some(troca) = crate::fios::selecionar() {
+            // O processador precisa saber onde empilhar se uma interrupção
+            // chegar com o usuário rodando, e esse lugar muda com o fio.
+            // Informar **antes** da troca é obrigatório: depois dela já
+            // estamos executando o outro fio.
+            super::usuario::definir_pilha_de_kernel((*troca.para).pilha_de_kernel);
             trocar_contexto(troca.de, troca.para);
         }
     }

@@ -40,9 +40,18 @@ use super::vetores::Quadro;
 pub struct Contexto {
     /// A pilha do fio. Vive em `SP_EL0`, que o hardware troca sozinho na
     /// entrada e na saída da exceção.
+    ///
+    /// Enquanto o fio executa em EL0, este campo guarda a pilha do **processo**
+    /// — é a mesma `SP_EL0`, agora apontando para o espaço do usuário.
     pub sp: u64,
     /// O quadro de exceção completo: registradores, `PC` e `PSTATE`.
     pub quadro: Quadro,
+    /// O topo da pilha de kernel deste fio.
+    ///
+    /// No ARM o kernel não precisa dele para atender exceções — elas têm
+    /// `SP_EL1` só delas. Existe para manter o contrato igual ao do x86 e para
+    /// o dia em que cada fio tiver sua própria pilha de exceção.
+    pub pilha_de_kernel: u64,
 }
 
 impl Contexto {
@@ -54,7 +63,12 @@ impl Contexto {
                 elr: 0,
                 spsr: 0,
             },
+            pilha_de_kernel: 0,
         }
+    }
+
+    pub fn pilha_de_kernel(&self) -> u64 {
+        self.pilha_de_kernel
     }
 }
 
@@ -81,6 +95,7 @@ pub unsafe fn preparar_contexto(
     argumento: u64,
 ) {
     contexto.sp = topo & !0xF;
+    contexto.pilha_de_kernel = topo & !0xF;
     contexto.quadro = Quadro {
         x: [0; 31],
         // O `eret` salta para cá com os argumentos já nos registradores.

@@ -63,6 +63,7 @@ mod tempo;
 #[cfg(feature = "modo-teste")]
 mod testes;
 mod traps;
+mod usuario;
 
 use core::panic::PanicInfo;
 
@@ -138,6 +139,14 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
         ),
         None => log_info!("video", "nenhum framebuffer nesta plataforma"),
     }
+
+    // Com a GDT carregada, o mecanismo de chamadas de sistema pode ser
+    // ligado. Precisa vir antes de qualquer processo existir, e depois das
+    // exceções: uma chamada atendida com metade da configuração no lugar
+    // saltaria para um endereço indefinido.
+    //
+    // SAFETY: `init_excecoes` já carregou a GDT de onde saem os seletores.
+    unsafe { arch::init_usuario() };
 
     // Com heap e paginação no ar, o escalonador pode adotar o contexto atual
     // como primeiro fio de execução. A partir daqui o kernel é preemptável: o

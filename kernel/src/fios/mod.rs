@@ -402,6 +402,53 @@ pub fn ceder() {
     crate::arch::ceder_cpu();
 }
 
+/// O identificador do fio que está executando.
+pub fn id_atual() -> u64 {
+    com_escalonador(|e| e.fios[e.atual].as_ref().map(|f| f.id.numero()).unwrap_or(0))
+}
+
+/// A pilha de kernel do fio que está executando.
+///
+/// Usada ao entrar em userspace: é o endereço que o processador precisa
+/// adotar quando uma interrupção chegar com o código do usuário rodando.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub fn pilha_de_kernel_atual() -> u64 {
+    com_escalonador(|e| {
+        e.fios[e.atual]
+            .as_ref()
+            .map(|f| f.contexto.pilha_de_kernel())
+            .unwrap_or(0)
+    })
+}
+
+/// Marca o fio atual como encerrado, sem trocar de contexto.
+///
+/// Separado de [`terminar`] por causa do ARM. Lá, encerrar de dentro de um
+/// handler de exceção — que é onde uma chamada de sistema roda — não pode
+/// passar por `ceder`: `ceder` emite um `svc`, e um `svc` de dentro de um
+/// handler aninha uma exceção sobre a outra. O quadro aninhado fica numa
+/// profundidade da pilha de exceção que não sobrevive a uma troca de fio.
+///
+/// Então quem roda num handler marca aqui e deixa o próprio handler fazer a
+/// troca, sobre o quadro que ele já tem em mãos.
+pub fn marcar_terminado() {
+    com_escalonador(|e| {
+        let atual = e.atual;
+        if let Some(fio) = e.fios[atual].as_mut() {
+            fio.estado = Estado::Terminado;
+        }
+    });
+}
+
+/// O fio atual já se encerrou?
+pub fn atual_terminou() -> bool {
+    com_escalonador(|e| {
+        e.fios[e.atual]
+            .as_ref()
+            .is_some_and(|f| f.estado == Estado::Terminado)
+    })
+}
+
 /// Encerra o fio atual. Nunca retorna.
 ///
 /// A pilha do fio **não** é liberada aqui, e não poderia ser: estamos
@@ -414,13 +461,15 @@ pub fn ceder() {
 /// que existe é o do próprio kernel, e ele não termina.
 #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub fn terminar() -> ! {
-    com_escalonador(|e| {
-        let atual = e.atual;
-        if let Some(fio) = e.fios[atual].as_mut() {
-            fio.estado = Estado::Terminado;
-        }
-    });
+    marcar_terminado();
+    descansar()
+}
 
+/// Cede a CPU para sempre. Nunca retorna.
+///
+/// É a cauda de [`terminar`], separada porque o caminho da chamada de sistema
+/// `sair` precisa dela sem a marcação — o handler já marcou.
+pub fn descansar() -> ! {
     loop {
         crate::arch::ceder_cpu();
         // Se voltarmos aqui é porque não havia outro fio pronto. Dormir em vez

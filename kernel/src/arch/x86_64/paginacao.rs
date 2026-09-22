@@ -155,6 +155,9 @@ fn flags_de(permissoes: Permissoes) -> PageTableFlags {
         // ser juntadas ou adiadas.
         flags |= PageTableFlags::NO_CACHE | PageTableFlags::WRITE_THROUGH;
     }
+    if permissoes.usuario {
+        flags |= PageTableFlags::USER_ACCESSIBLE;
+    }
     flags
 }
 
@@ -204,8 +207,29 @@ pub unsafe fn mapear_frame(
         // função transfere ao chamador a garantia de que o frame não está em
         // uso. O caso de remapear algo em uso é rejeitado pelo próprio
         // `map_to`, que devolve `PageAlreadyMapped`.
-        let resultado =
-            unsafe { mapeador.map_to(pagina, frame, flags_de(permissoes), &mut AlocadorDeFrames) };
+        // `map_to_with_table_flags`, e não `map_to`, por um motivo que falha
+        // em silêncio se for esquecido: o processador exige `USER_ACCESSIBLE`
+        // em **todos** os níveis da hierarquia, não só na folha. O `map_to`
+        // comum cria as tabelas intermediárias com `PRESENT | WRITABLE`, e uma
+        // página de usuário pendurada nelas seria mapeada com sucesso e
+        // inacessível ao usuário — falha de página no primeiro acesso, longe
+        // da causa.
+        //
+        // Restringir de verdade quem alcança o quê é trabalho da folha: as
+        // tabelas intermediárias são permissivas e cada entrada final decide.
+        let flags = flags_de(permissoes);
+        let flags_de_tabela =
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+
+        let resultado = unsafe {
+            mapeador.map_to_with_table_flags(
+                pagina,
+                frame,
+                flags,
+                flags_de_tabela,
+                &mut AlocadorDeFrames,
+            )
+        };
 
         match resultado {
             Ok(flush) => {

@@ -134,12 +134,24 @@ extern "x86-interrupt" fn opcode_invalido(quadro: InterruptStackFrame) {
 
 /// Violação de proteção: acesso a um segmento ou registrador não permitido.
 extern "x86-interrupt" fn protecao_geral(quadro: InterruptStackFrame, codigo: u64) {
-    crate::traps::fatal(
-        "general_protection_fault",
-        quadro.instruction_pointer.as_u64(),
-        None,
-        codigo,
-    )
+    let pc = quadro.instruction_pointer.as_u64();
+
+    // Mesma regra da falha de página: instrução privilegiada tentada pelo
+    // processo mata o processo, não o kernel. O `CS` salvo diz de onde veio —
+    // os dois bits baixos são o nível de privilégio.
+    if quadro.code_segment.rpl() as u8 == x86_64::PrivilegeLevel::Ring3 as u8 {
+        let seq = crate::traps::registrar("general_protection_fault", pc, None, codigo);
+        crate::log_error!(
+            "usuario",
+            "processo morto por falha de protecao #{} em pc={:#x}",
+            seq,
+            pc
+        );
+        crate::fios::marcar_terminado();
+        crate::fios::descansar();
+    }
+
+    crate::traps::fatal("general_protection_fault", pc, None, codigo)
 }
 
 /// Falha de página: o endereço acessado não está mapeado, ou o acesso é
@@ -151,13 +163,35 @@ extern "x86-interrupt" fn falha_de_pagina(quadro: InterruptStackFrame, codigo: P
     let endereco = x86_64::registers::control::Cr2::read()
         .ok()
         .map(|addr| addr.as_u64());
+    let pc = quadro.instruction_pointer.as_u64();
 
-    crate::traps::fatal(
-        "page_fault",
-        quadro.instruction_pointer.as_u64(),
-        endereco,
-        codigo.bits(),
-    )
+    // Uma falha vinda do anel sem privilégio é culpa do processo, não do
+    // kernel. Matar o sistema por causa dela entregaria a todo processo um
+    // jeito trivial de derrubar a máquina — e desperdiçaria exatamente a
+    // proteção que o ring 3 existe para dar.
+    //
+    // O bit que o processador usa para dizer isso é `USER_MODE` no código de
+    // erro: ele descreve o privilégio de **quem causou** a falha, não o do
+    // handler.
+    if codigo.contains(PageFaultErrorCode::USER_MODE) {
+        let seq = crate::traps::registrar("page_fault", pc, endereco, codigo.bits());
+        crate::log_error!(
+            "usuario",
+            "processo morto por falha de pagina #{} em pc={:#x}, endereco {:#x}",
+            seq,
+            pc,
+            endereco.unwrap_or(0)
+        );
+        crate::fios::marcar_terminado();
+
+        // Cedemos de vez, em vez de retornar. O `iretq` do fim deste handler
+        // devolveria o controle a um processo que já não existe — e o
+        // abandono deste quadro de interrupção é inofensivo: a pilha de
+        // kernel dele volta quando a vaga do fio for reaproveitada.
+        crate::fios::descansar();
+    }
+
+    crate::traps::fatal("page_fault", pc, endereco, codigo.bits())
 }
 
 /// Double fault: uma exceção ocorreu *enquanto* o processador tratava outra.

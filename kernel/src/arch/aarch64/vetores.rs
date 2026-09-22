@@ -249,6 +249,22 @@ extern "C" fn tratar_sync(quadro: &mut Quadro) {
     // ajustar nada: diferente do `brk`, o processador já deixa `ELR_EL1`
     // apontando para depois dela.
     if ec == 0x15 {
+        if super::usuario::veio_de_usuario(quadro) {
+            // Chamada de sistema de um processo.
+            super::usuario::atender_chamada(quadro);
+
+            // `sair` apenas marca o fio como encerrado; quem troca de contexto
+            // é este handler, sobre o quadro que ele já tem. Ver
+            // `fios::marcar_terminado` para o porquê de não ser a própria
+            // chamada a ceder.
+            if crate::fios::atual_terminou() {
+                encerrar_fio_atual(quadro);
+            }
+            return;
+        }
+
+        // `svc` de EL1: um fio do kernel cedendo a vez.
+        //
         // SAFETY: estamos dentro de um handler de exceção, com as interrupções
         // mascaradas pela própria entrada da exceção.
         unsafe { super::contexto::trocar_no_quadro(quadro) };
@@ -271,7 +287,47 @@ extern "C" fn tratar_sync(quadro: &mut Quadro) {
     // demais classes o FAR contém lixo de uma falha anterior.
     let endereco = matches!(ec, 0x20 | 0x21 | 0x24 | 0x25).then(ler_far);
 
+    // Uma falha vinda de EL0 é culpa do processo, não do kernel. Matar o
+    // sistema por causa dela seria entregar a todo processo um jeito trivial
+    // de derrubar a máquina — e desperdiçaria exatamente a proteção que ring 3
+    // existe para dar.
+    if super::usuario::veio_de_usuario(quadro) {
+        let seq = crate::traps::registrar(nome, quadro.elr, endereco, esr);
+        crate::log_error!(
+            "usuario",
+            "processo morto por {} #{} em pc={:#x}",
+            nome,
+            seq,
+            quadro.elr
+        );
+        crate::fios::marcar_terminado();
+        encerrar_fio_atual(quadro);
+        return;
+    }
+
     crate::traps::fatal(nome, quadro.elr, endereco, esr)
+}
+
+/// Tira o fio encerrado de circulação, sobre o quadro da exceção corrente.
+///
+/// Se não houver outro fio pronto, esperamos aqui dentro em vez de retornar:
+/// um `eret` neste ponto devolveria o controle a um processo que já não
+/// existe.
+fn encerrar_fio_atual(quadro: &mut Quadro) {
+    loop {
+        // SAFETY: estamos dentro de um handler de exceção, com as interrupções
+        // mascaradas pela própria entrada da exceção.
+        unsafe { super::contexto::trocar_no_quadro(quadro) };
+
+        if !crate::fios::atual_terminou() {
+            return;
+        }
+
+        // `wfi` acorda com uma IRQ pendente mesmo mascarada, então a próxima
+        // interrupção do timer nos traz de volta — possivelmente com alguém
+        // pronto para rodar.
+        crate::arch::esperar_interrupcao();
+    }
 }
 
 /// Handler de IRQ: interrupção de hardware.
