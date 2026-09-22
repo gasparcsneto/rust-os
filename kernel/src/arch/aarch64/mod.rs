@@ -252,6 +252,10 @@ pub fn init_paginacao() {
     unsafe { mmu::init() };
 }
 
+/// Só para a suíte: o par de conversões de permissão deste backend.
+#[cfg(feature = "modo-teste")]
+pub use mmu::permissoes_ida_e_volta;
+
 pub use mmu::{
     acesso_fisico, criar_espaco, desmapear, destruir_espaco, espaco_atual, espaco_do_kernel,
     mapear_frame, percorrer_paginas_do_usuario, traduzir, trocar_espaco,

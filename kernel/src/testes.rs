@@ -2349,6 +2349,47 @@ fn memoria_desmapear_do_kernel_vale_em_todo_espaco() -> Resultado {
     })
 }
 
+/// Traduzir permissões para bits de descritor e de volta devolve o original.
+///
+/// # Por que um caso só para isto
+///
+/// Porque `fork` transformou um caminho de mão única em ida e volta. Até ele,
+/// permissões só eram **escritas** em descritores; duplicar um espaço obriga a
+/// lê-las de volta, para que o `W^X` do pai chegue intacto ao filho.
+///
+/// Um par de inversas é a espécie de coisa que deixa de ser sem que nada
+/// quebre: quem mexe numa delas raramente reabre a outra, e o erro só aparece
+/// muito depois, como uma página com permissão errada. As dezesseis
+/// combinações são poucas o bastante para conferir todas.
+///
+/// Este caso encontrou um erro assim. A primeira versão do lado ARM lia `UXN`
+/// para saber se a página era executável, o que vale para página de usuário —
+/// o único caminho que existia — mas não para página do kernel, onde a
+/// resposta mora em `PXN`.
+fn memoria_permissoes_sobrevivem_a_ida_e_volta() -> Resultado {
+    use crate::arch::{self, Permissoes};
+
+    for combinacao in 0..16u8 {
+        let original = Permissoes {
+            escrita: combinacao & 1 != 0,
+            executavel: combinacao & 2 != 0,
+            // Memória de dispositivo não convive com permissão de usuário em
+            // nenhum lugar deste kernel, mas a combinação é conferida mesmo
+            // assim: o par de conversões não sabe disso, e não deveria mentir
+            // sobre uma entrada que aceita.
+            dispositivo: combinacao & 4 != 0,
+            usuario: combinacao & 8 != 0,
+        };
+
+        let voltou = arch::permissoes_ida_e_volta(original);
+        if voltou != original {
+            crate::log_error!("teste", "{:?} voltou como {:?}", original, voltou);
+            return Err("permissoes nao sobreviveram a conversao de ida e volta");
+        }
+    }
+    Ok(())
+}
+
 /// Clonar um espaço copia o conteúdo, e não a página.
 ///
 /// # O que separa uma cópia de um compartilhamento
@@ -2968,6 +3009,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "memoria: desmapear do kernel vale em todo espaco",
         f: memoria_desmapear_do_kernel_vale_em_todo_espaco,
+    },
+    Caso {
+        nome: "memoria: permissoes sobrevivem a ida e volta",
+        f: memoria_permissoes_sobrevivem_a_ida_e_volta,
     },
     Caso {
         nome: "memoria: clonar copia o conteudo",

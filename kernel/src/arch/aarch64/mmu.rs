@@ -926,12 +926,41 @@ unsafe fn liberar_subarvore(descritor: u64, nivel: u8) {
 /// isto, o filho receberia tudo gravável — e o `W^X` do pai não sobreviveria
 /// a ter filhos.
 fn permissoes_de(descritor: u64) -> Permissoes {
+    let usuario = descritor & AP_USUARIO != 0;
+
     Permissoes {
         escrita: descritor & AP_SOMENTE_LEITURA == 0,
-        executavel: descritor & UXN == 0,
+
+        // Qual bit responde "executável" depende de **quem** executa, e é por
+        // isso que este `if` existe. Numa página de usuário o kernel nunca
+        // executa — `PXN` é sempre 1 —, então quem carrega a resposta é `UXN`;
+        // numa página do kernel é exatamente o contrário.
+        //
+        // Ler `UXN` nos dois casos foi a primeira versão disto, e estava
+        // errada de um jeito silencioso: toda página do kernel seria relatada
+        // como não executável, porque `UXN` é sempre 1 nelas. Não havia bug
+        // ativo — o único chamador percorre páginas de usuário —, mas uma
+        // função que mente fora do caminho testado é uma armadilha esperando o
+        // próximo chamador.
+        executavel: if usuario {
+            descritor & UXN == 0
+        } else {
+            descritor & PXN == 0
+        },
+
         dispositivo: descritor & ATTR_NORMAL == 0,
-        usuario: descritor & AP_USUARIO != 0,
+        usuario,
     }
+}
+
+/// Converte permissões em bits de descritor e de volta, para a suíte.
+///
+/// Existe porque [`bits_de`] e [`permissoes_de`] são um par de inversas, e um
+/// par de inversas é a espécie de coisa que passa a não ser sem que nada
+/// quebre: quem escreve uma delas raramente reabre a outra.
+#[cfg(feature = "modo-teste")]
+pub fn permissoes_ida_e_volta(permissoes: Permissoes) -> Permissoes {
+    permissoes_de(bits_de(permissoes))
 }
 
 /// Visita cada página de usuário de um espaço.

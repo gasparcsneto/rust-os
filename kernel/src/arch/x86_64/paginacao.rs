@@ -32,6 +32,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 use x86_64::structures::paging::mapper::CleanUp;
 use x86_64::structures::paging::mapper::{MapToError, TranslateResult, UnmapError};
+use x86_64::structures::paging::page_table::{FrameError, PageTableEntry};
 use x86_64::structures::paging::{
     FrameAllocator, FrameDeallocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags,
     PhysFrame, Size4KiB, Translate,
@@ -376,13 +377,11 @@ pub fn acesso_fisico(fisico: u64) -> *mut u8 {
 // razão do mapa em `super::BASE_DO_HEAP` e vizinhos, e está conferido em
 // tempo de compilação em `crate::usuario`.
 
-/// Bits de endereço físico num descritor (12 a 51).
-const MASCARA_ENDERECO: u64 = 0x000F_FFFF_FFFF_F000;
-/// O descritor está presente.
-const PRESENTE: u64 = 1 << 0;
-/// O descritor mapeia uma página grande, e não uma tabela abaixo.
-const GRANDE: u64 = 1 << 7;
 /// Descritores por tabela.
+///
+/// O crate `x86_64` também sabe disto — [`PageTable`] é indexável e iterável —,
+/// mas o número aparece aqui para conferir o índice que vem de fora antes de
+/// usá-lo.
 const ENTRADAS: usize = 512;
 
 /// A raiz do espaço do kernel, capturada no boot.
@@ -420,8 +419,8 @@ pub fn criar_espaco(entrada_privada: usize) -> Result<u64, &'static str> {
     crate::arch::sem_interrupcoes(|| {
         let _guarda = TRAVA.lock();
 
-        let destino = acesso_fisico(nova) as *mut u64;
-        let origem = acesso_fisico(raiz_do_kernel) as *const u64;
+        let destino = acesso_fisico(nova) as *mut PageTable;
+        let origem = acesso_fisico(raiz_do_kernel) as *const PageTable;
         if destino.is_null() || origem.is_null() {
             crate::frames::liberar(nova);
             return Err("memoria fisica nao esta acessivel");
@@ -430,12 +429,12 @@ pub fn criar_espaco(entrada_privada: usize) -> Result<u64, &'static str> {
         // SAFETY: as duas raízes são frames de 4 KiB alcançáveis pelo mapa da
         // memória física, e a trava garante que ninguém mais as escreve.
         unsafe {
-            for i in 0..ENTRADAS {
-                *destino.add(i) = if i == entrada_privada {
-                    0
-                } else {
-                    *origem.add(i)
-                };
+            let destino = &mut *destino;
+            destino.zero();
+            for (i, entrada) in (*origem).iter().enumerate() {
+                if i != entrada_privada {
+                    destino[i] = entrada.clone();
+                }
             }
         }
         Ok(nova)
@@ -477,15 +476,16 @@ pub unsafe fn destruir_espaco(raiz: u64, entrada_privada: usize) {
     crate::arch::sem_interrupcoes(|| {
         let _guarda = TRAVA.lock();
 
-        let topo = acesso_fisico(raiz) as *mut u64;
+        let topo = acesso_fisico(raiz) as *mut PageTable;
         if !topo.is_null() {
             // SAFETY: `raiz` é um frame de 4 KiB alcançável pelo mapa físico, e
             // a trava garante acesso exclusivo. Só descemos pela entrada do
             // usuário: as demais são do kernel e continuam em uso.
             unsafe {
+                let topo = &mut *topo;
                 // Quatro níveis: PML4 -> PDPT -> PD -> PT -> página.
-                liberar_subarvore(*topo.add(entrada_privada), 3);
-                *topo.add(entrada_privada) = 0;
+                liberar_subarvore(&topo[entrada_privada], 3);
+                topo[entrada_privada].set_unused();
             }
         }
         crate::frames::liberar(raiz);
@@ -501,28 +501,39 @@ pub unsafe fn destruir_espaco(raiz: u64, entrada_privada: usize) {
 ///
 /// `descritor` precisa ser uma entrada de tabela válida do nível indicado, e
 /// tudo abaixo dela precisa ter vindo do alocador de frames.
-unsafe fn liberar_subarvore(descritor: u64, nivel: u8) {
-    if descritor & PRESENTE == 0 {
-        return;
-    }
-    let endereco = descritor & MASCARA_ENDERECO;
+unsafe fn liberar_subarvore(entrada: &PageTableEntry, nivel: u8) {
+    // `frame()` recusa as duas coisas que não podem ser tratadas como tabela:
+    // um descritor ausente e uma página grande. Deixar o crate responder isso
+    // vale mais que a máscara e os dois bits escritos à mão que estavam aqui —
+    // o endereço físico de um descritor tem doze bits baixos e doze altos que
+    // não são endereço, e errar a máscara devolveria um frame errado ao
+    // alocador sem nenhum sintoma imediato.
+    let frame = match entrada.frame() {
+        Ok(frame) => frame.start_address().as_u64(),
+        Err(FrameError::FrameNotPresent) => return,
+        Err(FrameError::HugeFrame) => {
+            // O espaço do usuário não cria páginas grandes. Se uma aparecer,
+            // devolvê-la a um alocador de frames de 4 KiB entregaria o
+            // primeiro pedaço e perderia o resto — pior que não devolver nada.
+            crate::log_error!("mmu", "pagina grande no espaco do usuario, nao devolvida");
+            return;
+        }
+    };
 
-    // Uma página grande não tem tabela abaixo. O espaço do usuário não cria
-    // nenhuma, mas conferir é mais barato que confiar: interpretar um bloco
-    // como tabela liberaria 512 frames que pertencem a outra pessoa.
-    if nivel > 0 && descritor & GRANDE == 0 {
-        let tabela = acesso_fisico(endereco) as *const u64;
+    if nivel > 0 {
+        let tabela = acesso_fisico(frame) as *const PageTable;
         if tabela.is_null() {
             return;
         }
-        for i in 0..ENTRADAS {
-            // SAFETY: `tabela` é uma tabela de 512 descritores do nível
-            // abaixo, alcançável pelo mapa da memória física.
-            unsafe { liberar_subarvore(*tabela.add(i), nivel - 1) };
+        // SAFETY: `tabela` é uma tabela de 512 descritores do nível abaixo,
+        // alcançável pelo mapa da memória física.
+        for abaixo in unsafe { (*tabela).iter() } {
+            // SAFETY: cada entrada pertence à tabela acima, do nível seguinte.
+            unsafe { liberar_subarvore(abaixo, nivel - 1) };
         }
     }
 
-    crate::frames::liberar(endereco);
+    crate::frames::liberar(frame);
 }
 
 /// As permissões que um descritor de página de usuário carrega.
@@ -539,6 +550,15 @@ fn permissoes_de(descritor: u64) -> Permissoes {
         dispositivo: flags.contains(PageTableFlags::NO_CACHE),
         usuario: flags.contains(PageTableFlags::USER_ACCESSIBLE),
     }
+}
+
+/// Converte permissões em bits de descritor e de volta, para a suíte.
+///
+/// Ver o equivalente no backend ARM: o par de inversas é a espécie de coisa
+/// que passa a não ser sem que nada quebre.
+#[cfg(feature = "modo-teste")]
+pub fn permissoes_ida_e_volta(permissoes: Permissoes) -> Permissoes {
+    permissoes_de(flags_de(permissoes).bits())
 }
 
 /// Visita cada página de usuário de um espaço.
@@ -559,55 +579,50 @@ pub unsafe fn percorrer_paginas_do_usuario(
         return;
     }
 
-    /// Lê uma tabela pelo mapa da memória física, ou `None` se ele não existe.
+    /// A tabela que um descritor alcança, ou `None` se ele não alcança uma.
+    ///
+    /// `frame()` recusa sozinho o descritor ausente e a página grande, que são
+    /// justamente os dois casos em que descer seria interpretar dados como
+    /// tabela.
     ///
     /// # Safety
-    /// `fisico` precisa ser o endereço de uma tabela de 512 descritores.
-    unsafe fn tabela(fisico: u64) -> Option<*const u64> {
-        let ponteiro = acesso_fisico(fisico) as *const u64;
-        (!ponteiro.is_null()).then_some(ponteiro)
+    /// `entrada` precisa ser um descritor de PML4, PDPT ou PD.
+    unsafe fn descer(entrada: &PageTableEntry) -> Option<&'static PageTable> {
+        let frame = entrada.frame().ok()?;
+        let ponteiro = acesso_fisico(frame.start_address().as_u64()) as *const PageTable;
+        // SAFETY: o ponteiro deriva de um descritor válido somado ao mapa da
+        // memória física, então aponta para uma tabela de 512 descritores.
+        (!ponteiro.is_null()).then(|| unsafe { &*ponteiro })
     }
 
-    // SAFETY: delegada ao chamador; cada descida confere presença e recusa
-    // páginas grandes, que o espaço do usuário não cria.
+    // SAFETY: delegada ao chamador.
     unsafe {
-        let Some(p4) = tabela(raiz) else { return };
-        let e4 = *p4.add(entrada_privada);
-        if e4 & PRESENTE == 0 {
+        let ponteiro = acesso_fisico(raiz) as *const PageTable;
+        if ponteiro.is_null() {
             return;
         }
-        let Some(p3) = tabela(e4 & MASCARA_ENDERECO) else {
+        let raiz: &PageTable = &*ponteiro;
+        let Some(p3) = descer(&raiz[entrada_privada]) else {
             return;
         };
         let base4 = (entrada_privada as u64) << 39;
 
-        for i3 in 0..ENTRADAS {
-            let e3 = *p3.add(i3);
-            if e3 & PRESENTE == 0 || e3 & GRANDE != 0 {
-                continue;
-            }
-            let Some(p2) = tabela(e3 & MASCARA_ENDERECO) else {
-                continue;
-            };
+        for (i3, e3) in p3.iter().enumerate() {
+            let Some(p2) = descer(e3) else { continue };
             let base3 = base4 | ((i3 as u64) << 30);
 
-            for i2 in 0..ENTRADAS {
-                let e2 = *p2.add(i2);
-                if e2 & PRESENTE == 0 || e2 & GRANDE != 0 {
-                    continue;
-                }
-                let Some(p1) = tabela(e2 & MASCARA_ENDERECO) else {
-                    continue;
-                };
+            for (i2, e2) in p2.iter().enumerate() {
+                let Some(p1) = descer(e2) else { continue };
                 let base2 = base3 | ((i2 as u64) << 21);
 
-                for i1 in 0..ENTRADAS {
-                    let e1 = *p1.add(i1);
-                    if e1 & PRESENTE == 0 {
-                        continue;
-                    }
+                for (i1, e1) in p1.iter().enumerate() {
+                    let Ok(frame) = e1.frame() else { continue };
                     let virtual_ = base2 | ((i1 as u64) << 12);
-                    f(virtual_, e1 & MASCARA_ENDERECO, permissoes_de(e1));
+                    f(
+                        virtual_,
+                        frame.start_address().as_u64(),
+                        permissoes_de(e1.flags().bits()),
+                    );
                 }
             }
         }

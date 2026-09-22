@@ -71,6 +71,10 @@ pub use atual::{
     redirecionar_para, reservar_faixas, sem_interrupcoes, traduzir, trocar_espaco,
 };
 
+/// Só para a suíte: o par de conversões de permissão de cada backend.
+#[cfg(feature = "modo-teste")]
+pub use atual::permissoes_ida_e_volta;
+
 /// Tamanho de uma página nas duas arquiteturas.
 pub const TAMANHO_PAGINA: u64 = 4096;
 
