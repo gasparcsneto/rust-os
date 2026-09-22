@@ -44,7 +44,50 @@ const GUARD_DA_PILHA: u64 = BASE_DA_PILHA - TAMANHO_PAGINA;
 /// Todo o espaço do usuário cabe nesta única entrada, e é ela que fica vazia
 /// na tabela de cada processo — conferido em tempo de compilação junto de
 /// [`BASE`] e [`TETO`].
-const ENTRADA_PRIVADA: usize = crate::arch::ENTRADA_PRIVADA as usize;
+pub const ENTRADA_PRIVADA: usize = crate::arch::ENTRADA_PRIVADA as usize;
+
+/// Os programas que o kernel carrega consigo, procuráveis por nome.
+///
+/// # Por que uma tabela, e não um caminho de arquivo
+///
+/// Porque não há sistema de arquivos ainda. `exec` precisa de *alguma* forma
+/// de dizer qual programa carregar, e um número de índice seria uma ABI que
+/// envelhece mal — acrescentar um programa no meio renumeraria os outros.
+///
+/// Um nome é o que um `execve` de verdade recebe. No dia em que houver disco,
+/// o que muda é onde a busca acontece; a chamada de sistema continua a mesma.
+/// Um programa embutido: o nome pelo qual `executar` o encontra e como obter
+/// os bytes dele.
+///
+/// A imagem vem por função em vez de fatia porque os limites de cada programa
+/// são símbolos que o linker resolve — não há como escrevê-los numa constante.
+struct Embutido {
+    nome: &'static str,
+    imagem: fn() -> &'static [u8],
+}
+
+static EMBUTIDOS: &[Embutido] = &[
+    Embutido {
+        nome: "exemplo",
+        imagem: super::exemplo::bytes,
+    },
+    Embutido {
+        nome: "filho",
+        imagem: super::exemplo::bytes_do_filho,
+    },
+    Embutido {
+        nome: "invasor",
+        imagem: super::exemplo::bytes_invasores,
+    },
+];
+
+/// Procura um programa embutido pelo nome.
+pub fn embutido(nome: &str) -> Option<&'static [u8]> {
+    EMBUTIDOS
+        .iter()
+        .find(|e| e.nome == nome)
+        .map(|e| (e.imagem)())
+}
 
 /// Um programa mapeado, pronto para executar.
 pub struct Programa {

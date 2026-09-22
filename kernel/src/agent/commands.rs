@@ -125,7 +125,8 @@ pub static COMANDOS: &[Command] = &[
     },
     Command {
         nome: "user.stats",
-        resumo: "Chamadas de sistema atendidas, recusadas e o ultimo codigo de saida.",
+        resumo: "Chamadas de sistema atendidas e recusadas, bifurcacoes, trocas de \
+                 imagem, saidas e o ultimo codigo de saida.",
         params: &[],
         handler: user_stats,
     },
@@ -462,9 +463,13 @@ fn user_run(_params: Json, w: &mut JsonWriter) -> fmt::Result {
 
 fn user_stats(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     let (chamadas, recusadas, bytes) = crate::usuario::estatisticas();
+    let (bifurcacoes, trocas, saidas) = crate::usuario::estatisticas_de_processo();
 
     w.begin_object()?;
     w.field_u64("syscalls", chamadas)?;
+    w.field_u64("forks", bifurcacoes)?;
+    w.field_u64("execs", trocas)?;
+    w.field_u64("exits", saidas)?;
     // Recusadas sao pedidos que o kernel se negou a atender: numero de chamada
     // desconhecido, ou um ponteiro que nao pertence ao processo. Um valor que
     // sobe sozinho denuncia um processo tentando alcancar o que nao e dele.

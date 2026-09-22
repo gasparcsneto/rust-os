@@ -188,3 +188,67 @@ pub fn ceder_cpu() {
     // reconhece o imediato 0 como pedido de cessão e retorna normalmente.
     unsafe { asm!("svc #0", options(nomem, nostack)) };
 }
+
+/// Monta o contexto de um filho de `fork`.
+///
+/// O filho acorda como se tivesse acabado de fazer a mesma chamada de sistema
+/// que o pai, e recebe `0` em `x0` onde o pai recebe o identificador dele.
+///
+/// # Por que aqui é mais simples que no x86
+///
+/// Porque a entrada da exceção já materializa o estado completo do usuário num
+/// [`Quadro`], e o [`Contexto`] de um fio **é** um quadro mais o `SP_EL0`.
+/// Duplicar um fio de usuário é, literalmente, copiar a struct e trocar um
+/// campo. No x86 o estado mora espalhado pela pilha de kernel, e o contexto do
+/// filho precisa ser remontado palavra por palavra.
+///
+/// # Safety
+///
+/// `quadro` precisa apontar para o [`Quadro`] da exceção em curso, e `topo`
+/// para o topo de uma pilha de kernel recém-criada.
+pub unsafe fn preparar_contexto_de_fork(
+    contexto: &mut Contexto,
+    topo: u64,
+    quadro: *const core::ffi::c_void,
+) {
+    let quadro = quadro as *const Quadro;
+
+    // SAFETY: delegada ao chamador.
+    unsafe {
+        contexto.quadro = *quadro;
+    }
+    // O valor que `fork` devolve ao filho.
+    contexto.quadro.x[0] = 0;
+
+    // A pilha do usuário é a mesma do pai — no espaço de endereços **dele**,
+    // que é uma cópia. Os dois veem o mesmo endereço com conteúdos que vão
+    // divergir a partir da primeira escrita.
+    contexto.sp = ler_sp_el0();
+    contexto.pilha_de_kernel = topo & !0xF;
+}
+
+/// Reescreve o quadro para que o retorno da chamada caia noutro programa.
+///
+/// É o que `exec` precisa: o processo não volta para onde chamou, volta para o
+/// começo da imagem nova. Os registradores são zerados — o programa que entra
+/// não tem direito ao estado do que saiu — e o `SPSR` é preservado porque
+/// descreve o modo de execução, não dados.
+///
+/// # Safety
+///
+/// `quadro` precisa apontar para o [`Quadro`] da exceção em curso, e `pilha`
+/// precisa estar mapeada com permissão de usuário e alinhada em 16 bytes.
+pub unsafe fn redirecionar_para(quadro: *mut core::ffi::c_void, entrada: u64, pilha: u64) {
+    let quadro = quadro as *mut Quadro;
+
+    // SAFETY: delegada ao chamador. `SP_EL0` é escrito diretamente porque não
+    // faz parte do quadro: o hardware o troca sozinho no `eret`.
+    unsafe {
+        let q = &mut *quadro;
+        let spsr = q.spsr;
+        q.x = [0; 31];
+        q.elr = entrada;
+        q.spsr = spsr;
+        escrever_sp_el0(pilha);
+    }
+}

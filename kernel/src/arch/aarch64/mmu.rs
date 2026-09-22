@@ -918,3 +918,69 @@ unsafe fn liberar_subarvore(descritor: u64, nivel: u8) {
 
     crate::frames::liberar(endereco);
 }
+
+/// As permissões que um descritor de página de usuário carrega.
+///
+/// É a leitura inversa de [`bits_de`], e existe para o `fork`: duplicar um
+/// espaço exige recriar cada página **com as permissões que ela tinha**. Sem
+/// isto, o filho receberia tudo gravável — e o `W^X` do pai não sobreviveria
+/// a ter filhos.
+fn permissoes_de(descritor: u64) -> Permissoes {
+    Permissoes {
+        escrita: descritor & AP_SOMENTE_LEITURA == 0,
+        executavel: descritor & UXN == 0,
+        dispositivo: descritor & ATTR_NORMAL == 0,
+        usuario: descritor & AP_USUARIO != 0,
+    }
+}
+
+/// Visita cada página de usuário de um espaço.
+///
+/// Chama `f(virtual, fisico, permissoes)` para cada página mapeada dentro da
+/// entrada de topo privada. A ordem é a das tabelas, que é a dos endereços.
+///
+/// # Safety
+///
+/// `raiz` precisa ser uma raiz de tradução válida, e as tabelas abaixo dela não
+/// podem estar sendo modificadas — chame com as interrupções mascaradas.
+pub unsafe fn percorrer_paginas_do_usuario(
+    raiz: u64,
+    entrada_privada: usize,
+    f: &mut dyn FnMut(u64, u64, Permissoes),
+) {
+    if entrada_privada >= ENTRADAS {
+        return;
+    }
+
+    // SAFETY: delegada ao chamador. O mapa é de identidade, então cada
+    // endereço físico de tabela serve direto como ponteiro.
+    unsafe {
+        let l1 = (raiz as *const u64).add(entrada_privada);
+        let e1 = *l1;
+        if e1 & VALIDO == 0 || e1 & TABELA == 0 {
+            return;
+        }
+        let base1 = (entrada_privada as u64) << 30;
+
+        let l2 = (e1 & MASCARA_ENDERECO) as *const u64;
+        for i2 in 0..ENTRADAS {
+            let e2 = *l2.add(i2);
+            if e2 & VALIDO == 0 || e2 & TABELA == 0 {
+                continue;
+            }
+            let base2 = base1 | ((i2 as u64) << 21);
+
+            let l3 = (e2 & MASCARA_ENDERECO) as *const u64;
+            for i3 in 0..ENTRADAS {
+                let e3 = *l3.add(i3);
+                // Em L3 uma página válida traz `VALIDO` **com** o bit de
+                // tabela; só `VALIDO` ali seria um descritor reservado.
+                if e3 & VALIDO == 0 || e3 & TABELA == 0 {
+                    continue;
+                }
+                let virtual_ = base2 | ((i3 as u64) << 12);
+                f(virtual_, e3 & MASCARA_ENDERECO, permissoes_de(e3));
+            }
+        }
+    }
+}

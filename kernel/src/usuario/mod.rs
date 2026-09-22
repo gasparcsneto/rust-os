@@ -52,6 +52,12 @@ pub mod numero {
     pub const ID: u64 = 2;
     /// `ceder()`: devolve a CPU voluntariamente.
     pub const CEDER: u64 = 3;
+    /// `bifurcar()`: duplica o processo. Devolve 0 ao filho e o identificador
+    /// do filho ao pai.
+    pub const BIFURCAR: u64 = 4;
+    /// `executar(ptr, tamanho)`: troca a imagem do processo pela que o nome
+    /// indicar. Não retorna em caso de sucesso — retorna noutro programa.
+    pub const EXECUTAR: u64 = 5;
 }
 
 /// Erros devolvidos ao usuário, sempre negativos.
@@ -64,6 +70,9 @@ pub mod erro {
     pub const ENDERECO_INVALIDO: i64 = -2;
     pub const TAMANHO_INVALIDO: i64 = -3;
     pub const DESCRITOR_INVALIDO: i64 = -4;
+    pub const SEM_MEMORIA: i64 = -5;
+    pub const SEM_VAGA_DE_FIO: i64 = -6;
+    pub const PROGRAMA_DESCONHECIDO: i64 = -7;
 }
 
 /// Os descritores que todo processo recebe abertos.
@@ -178,7 +187,16 @@ const _: () = {
 /// chamada — negação de serviço por um número grande.
 const MAX_ESCRITA: u64 = 4096;
 
+/// Maior nome de programa que `executar` aceita.
+///
+/// Um teto explícito porque o tamanho vem do usuário, e porque o nome é
+/// copiado para a pilha do kernel **antes** de a imagem ser trocada — ver
+/// [`executar`] para o porquê.
+const MAX_NOME: usize = 32;
+
 static CHAMADAS: AtomicU64 = AtomicU64::new(0);
+static BIFURCACOES: AtomicU64 = AtomicU64::new(0);
+static TROCAS_DE_IMAGEM: AtomicU64 = AtomicU64::new(0);
 static RECUSADAS: AtomicU64 = AtomicU64::new(0);
 static BYTES_ESCRITOS: AtomicU64 = AtomicU64::new(0);
 
@@ -187,6 +205,14 @@ static BYTES_ESCRITOS: AtomicU64 = AtomicU64::new(0);
 /// `i64::MIN` marca "nenhum": um processo pode sair com qualquer valor, e
 /// usar zero como sentinela confundiria "saiu com sucesso" com "não rodou".
 static ULTIMA_SAIDA: AtomicI64 = AtomicI64::new(i64::MIN);
+
+/// Quantos processos já encerraram.
+///
+/// Passou a ser necessário quando `bifurcar` apareceu: com um processo só,
+/// "houve saída" e "a saída foi esta" eram a mesma pergunta. Com dois, quem
+/// espera precisa saber **quantas** já aconteceram antes de olhar qualquer
+/// coisa.
+static SAIDAS: AtomicU64 = AtomicU64::new(0);
 
 /// Confere que `[inicio, inicio + tamanho)` está inteiramente na faixa do
 /// usuário.
@@ -223,7 +249,17 @@ pub fn validar_faixa(inicio: u64, tamanho: u64) -> Result<(), i64> {
 }
 
 /// Atende uma chamada de sistema. Chamado pelo backend de arquitetura.
-pub fn despachar(numero: u64, a0: u64, a1: u64, a2: u64) -> i64 {
+/// # Safety
+///
+/// `quadro` precisa apontar para o quadro de usuário desta chamada, montado
+/// pelo backend de arquitetura. `bifurcar` e `executar` o leem e o reescrevem.
+pub unsafe fn despachar(
+    numero: u64,
+    a0: u64,
+    a1: u64,
+    a2: u64,
+    quadro: *mut core::ffi::c_void,
+) -> i64 {
     CHAMADAS.fetch_add(1, Ordering::Relaxed);
 
     match numero {
@@ -234,6 +270,9 @@ pub fn despachar(numero: u64, a0: u64, a1: u64, a2: u64) -> i64 {
             crate::fios::ceder();
             0
         }
+        // SAFETY: o quadro é o desta chamada, garantido por quem nos chamou.
+        numero::BIFURCAR => unsafe { bifurcar(quadro) },
+        numero::EXECUTAR => unsafe { executar(quadro, a0, a1) },
         _ => {
             RECUSADAS.fetch_add(1, Ordering::Relaxed);
             erro::NUMERO_INVALIDO
@@ -251,6 +290,7 @@ pub fn despachar(numero: u64, a0: u64, a1: u64, a2: u64) -> i64 {
 /// exceção sobre a outra.
 fn sair(codigo: i64) -> i64 {
     ULTIMA_SAIDA.store(codigo, Ordering::SeqCst);
+    SAIDAS.fetch_add(1, Ordering::SeqCst);
     crate::log_info!("usuario", "processo encerrou com codigo {}", codigo);
     crate::fios::marcar_terminado();
     codigo
@@ -299,6 +339,105 @@ fn escrever(descritor: u64, ponteiro: u64, tamanho: u64) -> i64 {
     tamanho as i64
 }
 
+/// `bifurcar()`: duplica o processo.
+///
+/// O filho recebe uma cópia do espaço de endereços e acorda retornando `0`
+/// desta mesma chamada; o pai recebe o identificador do fio do filho.
+///
+/// # Safety
+///
+/// `quadro` precisa ser o quadro de usuário desta chamada.
+unsafe fn bifurcar(quadro: *mut core::ffi::c_void) -> i64 {
+    let espaco = match crate::paginacao::Espaco::clonar_o_ativo(programa::ENTRADA_PRIVADA) {
+        Ok(espaco) => espaco,
+        Err(motivo) => {
+            crate::log_warn!("usuario", "bifurcar falhou: {}", motivo);
+            RECUSADAS.fetch_add(1, Ordering::Relaxed);
+            return erro::SEM_MEMORIA;
+        }
+    };
+
+    // SAFETY: o quadro é o desta chamada e o espaço é cópia do ativo, que é o
+    // do fio que chamou — exatamente o que `bifurcar` exige.
+    match unsafe { crate::fios::bifurcar("usuario", quadro as *const _, espaco) } {
+        Ok(id) => {
+            BIFURCACOES.fetch_add(1, Ordering::Relaxed);
+            id.numero() as i64
+        }
+        Err(motivo) => {
+            crate::log_warn!("usuario", "bifurcar falhou: {}", motivo);
+            RECUSADAS.fetch_add(1, Ordering::Relaxed);
+            erro::SEM_VAGA_DE_FIO
+        }
+    }
+}
+
+/// `executar(ptr, tamanho)`: troca a imagem deste processo por outra.
+///
+/// Em caso de sucesso não retorna para quem chamou — retorna para o primeiro
+/// endereço do programa novo, porque o quadro da chamada foi reescrito.
+///
+/// # O detalhe que não pode ser invertido
+///
+/// O nome é copiado para a pilha do kernel **antes** de a imagem ser trocada.
+/// `programa::carregar` instala um espaço de endereços novo, e no instante em
+/// que isso acontece o ponteiro do usuário deixa de significar qualquer coisa:
+/// ele apontava para memória que já não está mapeada. Ler depois seria ler o
+/// programa novo achando que é o nome.
+///
+/// # Safety
+///
+/// `quadro` precisa ser o quadro de usuário desta chamada.
+unsafe fn executar(quadro: *mut core::ffi::c_void, ponteiro: u64, tamanho: u64) -> i64 {
+    if tamanho == 0 || tamanho as usize > MAX_NOME {
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return erro::TAMANHO_INVALIDO;
+    }
+    if let Err(e) = validar_faixa(ponteiro, tamanho) {
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return e;
+    }
+
+    let mut buffer = [0u8; MAX_NOME];
+    let tamanho = tamanho as usize;
+    // SAFETY: `validar_faixa` confirmou que a faixa está no espaço do usuário
+    // e mapeada, e ainda estamos no espaço de endereços em que ela vale.
+    unsafe {
+        core::ptr::copy_nonoverlapping(ponteiro as *const u8, buffer.as_mut_ptr(), tamanho);
+    }
+
+    let Ok(nome) = core::str::from_utf8(&buffer[..tamanho]) else {
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return erro::PROGRAMA_DESCONHECIDO;
+    };
+    let Some(imagem) = programa::embutido(nome) else {
+        crate::log_warn!("usuario", "executar: nao ha programa `{}`", nome);
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return erro::PROGRAMA_DESCONHECIDO;
+    };
+
+    // A partir daqui o espaço de endereços antigo deixa de existir.
+    let novo = match programa::carregar(imagem) {
+        Ok(programa) => programa,
+        Err(motivo) => {
+            // Sem imagem e sem a anterior: não há para onde voltar. Encerrar é
+            // o único desfecho honesto, e é o que um `execve` que falha depois
+            // do ponto de não retorno faz em qualquer sistema.
+            crate::log_error!("usuario", "executar falhou depois de trocar: {}", motivo);
+            RECUSADAS.fetch_add(1, Ordering::Relaxed);
+            return sair(erro::SEM_MEMORIA);
+        }
+    };
+
+    crate::log_info!("usuario", "processo trocou de imagem para `{}`", nome);
+    TROCAS_DE_IMAGEM.fetch_add(1, Ordering::Relaxed);
+
+    // SAFETY: o quadro é o desta chamada, e entrada e pilha acabaram de ser
+    // mapeadas com permissão de usuário no espaço que agora está ativo.
+    unsafe { crate::arch::redirecionar_para(quadro, novo.entrada(), novo.topo_da_pilha()) };
+    0
+}
+
 /// Lança o programa de exemplo num fio próprio.
 ///
 /// Devolve o identificador do fio. Não espera o processo terminar: quem chama
@@ -329,6 +468,15 @@ pub fn estatisticas() -> (u64, u64, u64) {
         CHAMADAS.load(Ordering::Relaxed),
         RECUSADAS.load(Ordering::Relaxed),
         BYTES_ESCRITOS.load(Ordering::Relaxed),
+    )
+}
+
+/// `(bifurcacoes, trocas de imagem, saidas)`.
+pub fn estatisticas_de_processo() -> (u64, u64, u64) {
+    (
+        BIFURCACOES.load(Ordering::Relaxed),
+        TROCAS_DE_IMAGEM.load(Ordering::Relaxed),
+        SAIDAS.load(Ordering::SeqCst),
     )
 }
 

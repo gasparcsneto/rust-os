@@ -365,7 +365,8 @@ $ cargo xtask agent log.tail '{"count":3}'
 ... info  "usuario" "processo encerrou com codigo 42"
 ```
 
-As chamadas de sistema são quatro: `sair`, `escrever`, `id` e `ceder`.
+As chamadas de sistema são seis: `sair`, `escrever`, `id`, `ceder`, `bifurcar`
+e `executar`.
 
 **O programa é um ELF64.** O cabeçalho diz onde a execução começa; cada
 segmento diz onde quer morar, quanto traz do arquivo, quanto ocupa na memória
@@ -415,7 +416,44 @@ pode transbordar na soma. O kernel não desreferencia nada antes de conferir
 que a faixa inteira está no espaço do usuário **e** mapeada — faixa por faixa,
 página por página, com aritmética saturante.
 
-O que ainda não existe é `fork`/`exec`: um processo não cria outro.
+**Um processo cria outro.** `bifurcar` duplica o processo: o filho recebe uma
+cópia do espaço de endereços — cópia integral, não copy-on-write — e acorda
+retornando `0` de uma chamada que nunca fez, enquanto o pai recebe o
+identificador dele. `executar` troca a imagem do processo pela que o nome
+indicar, e não retorna para quem chamou: retorna para o primeiro endereço do
+programa novo.
+
+```
+$ cargo xtask agent user.run && cargo xtask agent user.stats
+{"syscalls":7,"forks":1,"execs":1,"exits":2,...}
+
+$ cargo xtask agent log.tail '{"count":6}'
+... info  "usuario" "ola do anel 3"
+... error "usuario" "diagnostico de userspace"
+... info  "usuario" "processo encerrou com codigo 42"      <- o pai
+... info  "usuario" "processo trocou de imagem para `filho`"
+... info  "usuario" "filho por exec"
+... info  "usuario" "processo encerrou com codigo 24"      <- o filho
+```
+
+A cópia é integral por escolha, não por descuido: copy-on-write exige contagem
+de referências por frame, marcar as páginas do pai como somente leitura e um
+caminho de falha de página que distinga "escrita proibida" de "escrita a
+resolver" — três peças com modos próprios de falhar em silêncio. O custo é uma
+página por página mapeada, pago uma vez.
+
+As permissões atravessam a cópia. Recriar tudo gravável seria mais simples e
+faria o `W^X` do processo desaparecer no instante em que ele tivesse um filho.
+
+Como `exec` não tem sistema de arquivos para consultar, o nome é procurado
+numa tabela de programas embutidos. No dia em que houver disco, o que muda é
+onde a busca acontece — a chamada de sistema continua a mesma.
+
+**O que o espaço de um processo morto custa.** Ele sobrevive até a vaga de fio
+ser reaproveitada, pela mesma razão que a pilha sempre sobreviveu: não há fio
+coletor. O consumo é limitado e estável — medindo ao vivo, para de crescer
+depois da primeira volta pelas dezesseis vagas —, mas agora o que fica retido
+é um espaço de endereços inteiro, e não só uma pilha.
 
 **Cada processo tem o seu espaço de endereços.** Uma tabela de tradução por
 processo, montada copiando as entradas de topo do kernel — o que mantém o
@@ -528,8 +566,10 @@ padronizado.
 - [x] **Fase 1 — Ring 3 e chamadas de sistema.** Processos em ring 3 e EL0,
       `syscall`/`sysret` e `svc`, páginas de usuário, validação de ponteiros e
       falha de processo que não derruba o kernel.
-- [ ] **Fase 1 — Processos isolados.** Uma tabela de tradução por processo
-      (**feito**), carregador de ELF (**feito**), `fork`/`exec`.
+- [x] **Fase 1 — Processos isolados.** Uma tabela de tradução por processo,
+      carregador de ELF64 com validação de tudo que vem do arquivo, e
+      `fork`/`exec` com cópia integral do espaço de endereços.
+      **Fase 1 completa.**
 - [ ] **Fase 2 — Drivers.** Enumeração PCI, virtio-blk, virtio-net, timer
       APIC/HPET, framebuffer gráfico.
 

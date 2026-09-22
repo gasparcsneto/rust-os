@@ -117,6 +117,24 @@ struct Fio {
     /// para todos. Guardar o espaço **aqui** é o que faz ele morrer junto com
     /// o fio — quando a vaga é reaproveitada, o `Fio` antigo é largado e o
     /// `Drop` do espaço devolve as tabelas e as páginas do processo.
+    ///
+    /// # O adiamento, e o que ele custa agora
+    ///
+    /// "Quando a vaga é reaproveitada" é literal: um fio morto segura o espaço
+    /// dele até outra criação escolher aquela vaga. É a mesma regra da
+    /// [`pilha::Pilha`], e pelo mesmo motivo — não há fio coletor para
+    /// desmontar o que é dos outros.
+    ///
+    /// O preço, porém, cresceu. Antes a vaga segurava uma pilha; agora segura
+    /// um espaço de endereços inteiro: raiz, tabelas e todas as páginas do
+    /// processo. O consumo é **limitado e estável** — no pior caso um espaço
+    /// por vaga, e medindo ao vivo ele para de crescer depois da primeira
+    /// volta pelas dezesseis —, mas é maior do que parece à primeira vista.
+    ///
+    /// Recuperar mais cedo exigiria largar o espaço no instante em que o
+    /// escalonador troca para fora de um fio encerrado, e isso é trabalho de
+    /// paginação com a trava do escalonador na mão — que é exatamente o que
+    /// este módulo se recusa a fazer.
     espaco: Option<crate::paginacao::Espaco>,
     /// Quantas vezes este fio já foi escalonado.
     escalonamentos: u64,
@@ -237,6 +255,43 @@ pub fn criar(
     entrada: extern "C" fn(u64) -> !,
     argumento: u64,
 ) -> Result<IdFio, &'static str> {
+    nascer(nome, Nascimento::Funcao { entrada, argumento })
+}
+
+/// Como um fio novo recebe o primeiro contexto.
+///
+/// As duas formas diferem só no que é escrito na pilha nova; todo o resto —
+/// escolher a vaga, mapear a pilha, instalar — é idêntico, e é por isso que
+/// elas compartilham [`nascer`] em vez de duplicá-lo.
+enum Nascimento {
+    /// Um fio do kernel, que começa entrando numa função Rust.
+    Funcao {
+        entrada: extern "C" fn(u64) -> !,
+        argumento: u64,
+    },
+    /// Um filho de `fork`, que começa **retornando** da chamada de sistema que
+    /// o pai fez, com o espaço de endereços que o pai lhe deu.
+    Bifurcacao {
+        quadro: *const core::ffi::c_void,
+        espaco: crate::paginacao::Espaco,
+    },
+}
+
+/// Cria um fio a partir de um quadro de usuário: o filho de um `fork`.
+///
+/// # Safety
+///
+/// `quadro` precisa apontar para o quadro de usuário da chamada de sistema em
+/// curso, e `espaco` precisa ser uma cópia do espaço do fio que chamou.
+pub unsafe fn bifurcar(
+    nome: &'static str,
+    quadro: *const core::ffi::c_void,
+    espaco: crate::paginacao::Espaco,
+) -> Result<IdFio, &'static str> {
+    nascer(nome, Nascimento::Bifurcacao { quadro, espaco })
+}
+
+fn nascer(nome: &'static str, nascimento: Nascimento) -> Result<IdFio, &'static str> {
     // Duas coisas acontecem **fora** da trava do escalonador, e as duas por
     // motivo de ordem de travas.
     //
@@ -293,9 +348,23 @@ pub fn criar(
     };
 
     let mut contexto = Contexto::vazio();
-    // SAFETY: a pilha foi mapeada agora e pertence exclusivamente a este fio;
-    // `topo` é o endereço logo acima dela, alinhado em página.
-    unsafe { crate::arch::preparar_contexto(&mut contexto, pilha.topo(), entrada, argumento) };
+    let espaco = match nascimento {
+        Nascimento::Funcao { entrada, argumento } => {
+            // SAFETY: a pilha foi mapeada agora e pertence exclusivamente a
+            // este fio; `topo` é o endereço logo acima dela, alinhado em
+            // página.
+            unsafe {
+                crate::arch::preparar_contexto(&mut contexto, pilha.topo(), entrada, argumento)
+            };
+            None
+        }
+        Nascimento::Bifurcacao { quadro, espaco } => {
+            // SAFETY: o quadro é o da chamada em curso, garantido por quem
+            // chamou `bifurcar`; a pilha é nova e exclusiva deste fio.
+            unsafe { crate::arch::preparar_contexto_de_fork(&mut contexto, pilha.topo(), quadro) };
+            Some(espaco)
+        }
+    };
 
     com_escalonador(|e| {
         e.fios[vaga] = Some(Fio {
@@ -304,7 +373,7 @@ pub fn criar(
             estado: Estado::Pronto,
             contexto,
             _pilha: Some(pilha),
-            espaco: None,
+            espaco,
             escalonamentos: 0,
         });
     });

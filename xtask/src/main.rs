@@ -451,7 +451,7 @@ fn conferir_elfs(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
         .map_err(|e| format!("não foi possível criar {saida:?}: {e}"))?;
 
     let mut falhou = false;
-    for nome in ["exemplo", "invasor"] {
+    for nome in ["exemplo", "filho", "invasor"] {
         let inicio = buscar(&simbolos, &format!("programa_{nome}_inicio"))?;
         let fim = buscar(&simbolos, &format!("programa_{nome}_fim"))?;
 
@@ -478,9 +478,9 @@ fn conferir_elfs(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
     }
 
     if falhou {
-        return Err("uma das imagens não passou pelo llvm-readelf".into());
+        return Err("uma das imagens nao passou pelo llvm-readelf".into());
     }
-    println!("\n[xtask] as duas imagens são ELF64 válidos para ferramenta de fora");
+    println!("\n[xtask] as imagens sao ELF64 validos para ferramenta de fora");
     Ok(ExitCode::SUCCESS)
 }
 

@@ -58,7 +58,17 @@ pub fn atender_chamada(quadro: &mut Quadro) {
     let numero = quadro.x[8];
     let (a0, a1, a2) = (quadro.x[0], quadro.x[1], quadro.x[2]);
 
-    let resultado = crate::usuario::despachar(numero, a0, a1, a2);
+    // SAFETY: o quadro é o desta exceção; `bifurcar` e `executar` o leem e o
+    // reescrevem, e é por isso que ele desce até o despacho.
+    let resultado = unsafe {
+        crate::usuario::despachar(
+            numero,
+            a0,
+            a1,
+            a2,
+            quadro as *mut Quadro as *mut core::ffi::c_void,
+        )
+    };
     quadro.x[0] = resultado as u64;
 }
 

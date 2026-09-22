@@ -232,3 +232,113 @@ pub fn ceder_cpu() {
         x86_64::instructions::interrupts::enable();
     }
 }
+
+unsafe extern "C" {
+    /// O ponto do caminho de chamada de sistema que restaura o usuário.
+    ///
+    /// Um filho de `fork` entra por aqui: o contexto dele é montado para que a
+    /// primeira troca de fio salte direto para este rótulo, com o quadro de
+    /// usuário pronto logo acima do ponteiro de pilha.
+    fn retorno_ao_usuario();
+}
+
+/// Monta o contexto de um filho de `fork`.
+///
+/// O filho acorda como se tivesse acabado de fazer a mesma chamada de sistema
+/// que o pai, e recebe `0` onde o pai recebe o identificador dele.
+///
+/// # Como a pilha do filho é montada
+///
+/// De cima para baixo: uma cópia do quadro do pai, depois o quadro de troca de
+/// contexto que [`trocar_contexto`] espera. O endereço de retorno desse quadro
+/// aponta para o caminho que restaura o usuário — então a primeira vez que o
+/// escalonador escolher este fio, ele cai direto na sequência de `pop` seguida
+/// de `sysretq`, com o quadro do pai logo acima do `rsp`.
+///
+/// É o mesmo mecanismo do fio comum, com outro destino: lá o `ret` salta para
+/// o trampolim que chama uma função Rust; aqui salta para o retorno ao anel
+/// sem privilégio.
+///
+/// # Safety
+///
+/// `quadro` precisa apontar para o [`super::usuario::QuadroDeUsuario`] da
+/// chamada de sistema em curso, e `topo` para o topo de uma pilha de kernel
+/// recém-criada e ainda não usada.
+pub unsafe fn preparar_contexto_de_fork(
+    contexto: &mut Contexto,
+    topo: u64,
+    quadro: *const core::ffi::c_void,
+) {
+    let quadro = quadro as *const super::usuario::QuadroDeUsuario;
+    let mut sp = topo & !0xF;
+
+    // SAFETY: `quadro` é o quadro da chamada em curso, e a pilha é nova e tem
+    // espaço de sobra para as vinte e três palavras que empilhamos.
+    unsafe {
+        let mut empilhar = |valor: u64| {
+            sp -= 8;
+            (sp as *mut u64).write(valor);
+        };
+
+        let q = *quadro;
+
+        // A ordem é a dos `push` do ponto de entrada, para que os `pop` do
+        // retorno encontrem cada campo onde esperam.
+        empilhar(q.rsp);
+        empilhar(0); // rax: o que `fork` devolve ao filho
+        empilhar(q.rcx);
+        empilhar(q.r11);
+        empilhar(q.rdi);
+        empilhar(q.rsi);
+        empilhar(q.rdx);
+        empilhar(q.r8);
+        empilhar(q.r9);
+        empilhar(q.r10);
+        empilhar(q.rbx);
+        empilhar(q.rbp);
+        empilhar(q.r12);
+        empilhar(q.r13);
+        empilhar(q.r14);
+        empilhar(q.r15);
+
+        // E o quadro que `trocar_contexto` desempilha, com o retorno apontando
+        // para a restauração do usuário.
+        let retorno: unsafe extern "C" fn() = retorno_ao_usuario;
+        empilhar(retorno as *const () as u64);
+        empilhar(0); // rbp
+        empilhar(0); // rbx
+        empilhar(0); // r12
+        empilhar(0); // r13
+        empilhar(0); // r14
+        empilhar(0); // r15
+    }
+
+    contexto.sp = sp;
+    contexto.pilha_de_kernel = topo & !0xF;
+}
+
+/// Reescreve o quadro para que o retorno da chamada caia noutro programa.
+///
+/// É o que `exec` precisa: o processo não volta para onde chamou, volta para o
+/// começo da imagem nova. Os demais registradores são zerados — o programa que
+/// entra não tem direito ao estado do que saiu.
+///
+/// # Safety
+///
+/// `quadro` precisa apontar para o [`super::usuario::QuadroDeUsuario`] da
+/// chamada de sistema em curso.
+pub unsafe fn redirecionar_para(quadro: *mut core::ffi::c_void, entrada: u64, pilha: u64) {
+    let quadro = quadro as *mut super::usuario::QuadroDeUsuario;
+
+    // SAFETY: delegada ao chamador.
+    unsafe {
+        let q = &mut *quadro;
+        let flags = q.r11;
+        *q = super::usuario::QuadroDeUsuario::default();
+        q.rcx = entrada; // `sysretq` retoma a execucao aqui
+        q.rsp = pilha;
+        // As flags do processo que saiu: elas descrevem o modo de execucao
+        // (interrupcoes ligadas, direcao normal), nao dados dele.
+        q.r11 = flags;
+    }
+}

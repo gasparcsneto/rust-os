@@ -524,3 +524,92 @@ unsafe fn liberar_subarvore(descritor: u64, nivel: u8) {
 
     crate::frames::liberar(endereco);
 }
+
+/// As permissões que um descritor de página de usuário carrega.
+///
+/// É a leitura inversa de [`flags_de`], e existe para o `fork`: duplicar um
+/// espaço exige recriar cada página **com as permissões que ela tinha**. Sem
+/// isto, o filho receberia tudo gravável — e o `W^X` do pai não sobreviveria
+/// a ter filhos.
+fn permissoes_de(descritor: u64) -> Permissoes {
+    let flags = PageTableFlags::from_bits_truncate(descritor);
+    Permissoes {
+        escrita: flags.contains(PageTableFlags::WRITABLE),
+        executavel: !flags.contains(PageTableFlags::NO_EXECUTE),
+        dispositivo: flags.contains(PageTableFlags::NO_CACHE),
+        usuario: flags.contains(PageTableFlags::USER_ACCESSIBLE),
+    }
+}
+
+/// Visita cada página de usuário de um espaço.
+///
+/// Chama `f(virtual, fisico, permissoes)` para cada página mapeada dentro da
+/// entrada de topo privada. A ordem é a das tabelas, que é a dos endereços.
+///
+/// # Safety
+///
+/// `raiz` precisa ser uma raiz de tradução válida, e as tabelas abaixo dela não
+/// podem estar sendo modificadas — chame com as interrupções mascaradas.
+pub unsafe fn percorrer_paginas_do_usuario(
+    raiz: u64,
+    entrada_privada: usize,
+    f: &mut dyn FnMut(u64, u64, Permissoes),
+) {
+    if entrada_privada >= ENTRADAS {
+        return;
+    }
+
+    /// Lê uma tabela pelo mapa da memória física, ou `None` se ele não existe.
+    ///
+    /// # Safety
+    /// `fisico` precisa ser o endereço de uma tabela de 512 descritores.
+    unsafe fn tabela(fisico: u64) -> Option<*const u64> {
+        let ponteiro = acesso_fisico(fisico) as *const u64;
+        (!ponteiro.is_null()).then_some(ponteiro)
+    }
+
+    // SAFETY: delegada ao chamador; cada descida confere presença e recusa
+    // páginas grandes, que o espaço do usuário não cria.
+    unsafe {
+        let Some(p4) = tabela(raiz) else { return };
+        let e4 = *p4.add(entrada_privada);
+        if e4 & PRESENTE == 0 {
+            return;
+        }
+        let Some(p3) = tabela(e4 & MASCARA_ENDERECO) else {
+            return;
+        };
+        let base4 = (entrada_privada as u64) << 39;
+
+        for i3 in 0..ENTRADAS {
+            let e3 = *p3.add(i3);
+            if e3 & PRESENTE == 0 || e3 & GRANDE != 0 {
+                continue;
+            }
+            let Some(p2) = tabela(e3 & MASCARA_ENDERECO) else {
+                continue;
+            };
+            let base3 = base4 | ((i3 as u64) << 30);
+
+            for i2 in 0..ENTRADAS {
+                let e2 = *p2.add(i2);
+                if e2 & PRESENTE == 0 || e2 & GRANDE != 0 {
+                    continue;
+                }
+                let Some(p1) = tabela(e2 & MASCARA_ENDERECO) else {
+                    continue;
+                };
+                let base2 = base3 | ((i2 as u64) << 21);
+
+                for i1 in 0..ENTRADAS {
+                    let e1 = *p1.add(i1);
+                    if e1 & PRESENTE == 0 {
+                        continue;
+                    }
+                    let virtual_ = base2 | ((i1 as u64) << 12);
+                    f(virtual_, e1 & MASCARA_ENDERECO, permissoes_de(e1));
+                }
+            }
+        }
+    }
+}

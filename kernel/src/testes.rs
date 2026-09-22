@@ -1821,19 +1821,31 @@ fn fios_criacao_concorrente_nao_colide() -> Resultado {
 // Userspace — anel sem privilégio e chamadas de sistema
 // ===========================================================================
 
-/// A travessia completa: kernel -> anel sem privilégio -> chamada de sistema
-/// -> kernel.
+/// A travessia completa, do kernel ao anel sem privilégio e de volta — agora
+/// com o processo se duplicando e trocando de imagem no meio do caminho.
 ///
-/// O programa de exemplo escreve uma mensagem e encerra com um código
-/// improvável. Encontrar esse código do outro lado prova que **toda** a cadeia
-/// funcionou: as páginas foram mapeadas com permissão de usuário, o
-/// processador desceu de privilégio, a instrução de chamada de sistema levou o
-/// controle de volta ao kernel com a pilha certa, o despacho aconteceu, e o
-/// fio foi encerrado em vez de voltar a um processo que já não existe.
+/// # O que cada elo prova
 ///
-/// Se qualquer elo falhar, o desfecho é uma falha de proteção — e o teste
-/// nunca vê o código de saída.
-fn usuario_executa_e_encerra() -> Resultado {
+/// O programa de exemplo escreve nos dois descritores, confere a própria
+/// `.bss`, chama `bifurcar` e aí os dois lados seguem caminhos diferentes: o
+/// pai sai com um código improvável, e o filho chama `executar` para virar
+/// outro programa, que escreve a própria linha e sai com outro código.
+///
+/// Encontrar os **dois** códigos do outro lado prova a cadeia inteira: as
+/// páginas foram mapeadas a partir do ELF com permissão de usuário, o
+/// processador desceu de privilégio, a chamada de sistema levou o controle de
+/// volta com a pilha certa, o espaço do pai foi copiado para o filho, o filho
+/// acordou retornando `0` de uma chamada que nunca fez, e a troca de imagem
+/// pôs outro programa no lugar sem derrubar nada.
+///
+/// # Por que o log, e não só o código de saída
+///
+/// Porque agora há dois processos e um só campo de "última saída". Os códigos
+/// são lidos do log, que guarda todos — e de quebra a leitura confere que cada
+/// escrita saiu no nível certo, o que o código de saída não diria.
+fn usuario_executa_bifurca_e_troca_de_imagem() -> Resultado {
+    use alloc::format;
+
     static COMECOU: AtomicBool = AtomicBool::new(false);
 
     extern "C" fn hospedar(_argumento: u64) -> ! {
@@ -1849,49 +1861,88 @@ fn usuario_executa_e_encerra() -> Resultado {
 
     crate::usuario::limpar_ultima_saida();
     COMECOU.store(false, SeqCst);
+    let (bifurcacoes_antes, trocas_antes, saidas_antes) =
+        crate::usuario::estatisticas_de_processo();
     let chamadas_antes = crate::usuario::estatisticas().0;
 
     crate::fios::criar("teste-usuario", hospedar, 0)?;
 
-    esperar_ate(|| crate::usuario::ultima_saida().is_some(), 300)?;
+    // Duas saídas: a do pai e a do filho já trocado de imagem.
+    esperar_ate(
+        || crate::usuario::estatisticas_de_processo().2 >= saidas_antes + 2,
+        600,
+    )?;
 
     if !COMECOU.load(SeqCst) {
         return Err("o fio hospedeiro nunca rodou");
     }
 
-    match crate::usuario::ultima_saida() {
-        Some(codigo) if codigo == crate::usuario::exemplo::CODIGO_DE_SAIDA => {}
-        // O programa confere a própria `.bss` antes de sair: se ele encontrou
-        // lixo onde o segmento pediu memória zerada, sai por este caminho.
-        Some(codigo) if codigo == crate::usuario::exemplo::CODIGO_DE_BSS_SUJA => {
-            return Err("a .bss do processo chegou com lixo");
-        }
-        Some(outro) => {
-            crate::log_error!("teste", "codigo de saida inesperado: {}", outro);
-            return Err("o processo saiu com um codigo que nao e o dele");
-        }
-        None => return Err("o processo nao chegou a sair"),
+    let (bifurcacoes, trocas, _) = crate::usuario::estatisticas_de_processo();
+    if bifurcacoes != bifurcacoes_antes + 1 {
+        return Err("o processo nao se bifurcou exatamente uma vez");
+    }
+    if trocas != trocas_antes + 1 {
+        return Err("nao houve exatamente uma troca de imagem");
     }
 
-    // Três chamadas: duas escritas (uma em cada descritor) e uma saída. Menos
-    // que isso significa que alguma falhou e o programa pulou para a seguinte.
+    // Cinco chamadas do pai (duas escritas, bifurcar, sair... e a do filho),
+    // conferidas de forma frouxa de propósito: o que importa aqui é que
+    // nenhuma delas tenha sumido, e o número exato já é conferido acima pelos
+    // contadores de bifurcação e troca.
     let chamadas = crate::usuario::estatisticas().0 - chamadas_antes;
-    if chamadas < 3 {
+    if chamadas < 6 {
         crate::log_error!("teste", "apenas {} chamadas de sistema", chamadas);
         return Err("o processo nao fez todas as chamadas esperadas");
     }
 
-    // A escrita no descritor 2 precisa ter virado um registro de nível
-    // `error`. Sem esta conferência, o descritor poderia ser ignorado pelo
-    // kernel e o teste ainda passaria — a tabela seria decoração.
-    let mut achou = false;
-    crate::log::ultimos(64, crate::log::Level::Error, |r| {
-        if r.subsistema == "usuario" && r.mensagem() == crate::usuario::exemplo::DIAGNOSTICO {
-            achou = true;
+    let saida_do_pai = format!(
+        "processo encerrou com codigo {}",
+        crate::usuario::exemplo::CODIGO_DE_SAIDA
+    );
+    let saida_do_filho = format!(
+        "processo encerrou com codigo {}",
+        crate::usuario::exemplo::CODIGO_DO_FILHO
+    );
+    let sujo = format!(
+        "processo encerrou com codigo {}",
+        crate::usuario::exemplo::CODIGO_DE_BSS_SUJA
+    );
+
+    let (mut viu_pai, mut viu_filho, mut viu_sujo) = (false, false, false);
+    let (mut viu_mensagem, mut viu_diagnostico, mut viu_filho_escrevendo) = (false, false, false);
+    crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+        if r.subsistema != "usuario" {
+            return;
         }
+        let m = r.mensagem();
+        viu_pai |= m == saida_do_pai;
+        viu_filho |= m == saida_do_filho;
+        viu_sujo |= m == sujo;
+        viu_filho_escrevendo |= m == crate::usuario::exemplo::MENSAGEM_DO_FILHO;
+        viu_mensagem |= r.level == crate::log::Level::Info && m.starts_with("ola do ");
+        viu_diagnostico |=
+            r.level == crate::log::Level::Error && m == crate::usuario::exemplo::DIAGNOSTICO;
     });
-    if !achou {
+
+    // O programa sai com este código quando a `.bss` chegou suja **ou** quando
+    // `executar` voltou. As duas são falhas do kernel, não do programa.
+    if viu_sujo {
+        return Err("o processo relatou .bss suja ou executar que voltou");
+    }
+    if !viu_mensagem {
+        return Err("a escrita no descritor de saida nao saiu em nivel info");
+    }
+    if !viu_diagnostico {
         return Err("a escrita no descritor de erro nao saiu em nivel error");
+    }
+    if !viu_pai {
+        return Err("o pai nao saiu com o codigo dele");
+    }
+    if !viu_filho_escrevendo {
+        return Err("o programa carregado por executar nao chegou a escrever");
+    }
+    if !viu_filho {
+        return Err("o filho nao saiu com o codigo do programa novo");
     }
     Ok(())
 }
@@ -1912,7 +1963,10 @@ fn usuario_descritor_e_conferido() -> Resultado {
 
     // Um endereço do kernel: reprovado em qualquer caso que chegue a olhá-lo.
     let no_kernel = &raw const CASOS as *const _ as u64;
-    let escrever = |fd: u64| despachar(numero::ESCREVER, fd, no_kernel, 8);
+    // SAFETY: nenhuma das chamadas abaixo é `bifurcar` ou `executar`, que são
+    // as únicas que tocam o quadro. `escrever` nem o olha.
+    let escrever =
+        |fd: u64| unsafe { despachar(numero::ESCREVER, fd, no_kernel, 8, core::ptr::null_mut()) };
 
     // Fechados para escrita: param no descritor, sem olhar o ponteiro.
     if escrever(descritor::ENTRADA) != erro::DESCRITOR_INVALIDO {
@@ -2290,6 +2344,90 @@ fn memoria_desmapear_do_kernel_vale_em_todo_espaco() -> Resultado {
                 no_processo
             );
             return Err("os dois espacos discordam sobre um mapeamento do kernel");
+        }
+        Ok(())
+    })
+}
+
+/// Clonar um espaço copia o conteúdo, e não a página.
+///
+/// # O que separa uma cópia de um compartilhamento
+///
+/// Depois de um `fork`, pai e filho enxergam o mesmo endereço com o mesmo
+/// conteúdo — e é fácil obter isso do jeito errado, apontando as duas tabelas
+/// para o **mesmo** frame. Nos primeiros instantes os dois comportamentos são
+/// indistinguíveis: o conteúdo confere dos dois lados.
+///
+/// A diferença aparece na primeira escrita. Este caso a provoca: escreve uma
+/// marca no original, clona, escreve outra no clone e volta a olhar o
+/// original. Se as duas tabelas apontarem para o mesmo frame, a segunda
+/// escrita apaga a primeira.
+///
+/// Também confere o que um `fork` ingênuo perderia: as permissões. Uma página
+/// somente leitura no original não pode chegar gravável no clone — seria o
+/// `W^X` do processo desaparecendo no instante em que ele tem um filho.
+fn memoria_clonar_copia_o_conteudo() -> Resultado {
+    use crate::arch::{self, Permissoes};
+
+    const ALVO: u64 = crate::usuario::BASE;
+    const SO_LEITURA: u64 = crate::usuario::BASE + crate::arch::TAMANHO_PAGINA;
+    const MARCA_ORIGINAL: u64 = 0x0819_0819_0819_0819;
+    const MARCA_DO_CLONE: u64 = 0xC10E_C10E_C10E_C10E;
+
+    let privada = arch::ENTRADA_PRIVADA as usize;
+    let kernel = arch::espaco_do_kernel();
+
+    arch::sem_interrupcoes(|| {
+        let original = crate::paginacao::Espaco::novo(privada)?;
+
+        // SAFETY: as raízes vêm de `Espaco::novo` e carregam as entradas de
+        // topo do kernel; voltamos ao espaço do kernel antes de largar
+        // qualquer uma delas.
+        let (lido_no_original, lido_no_clone, gravavel_no_clone) = unsafe {
+            arch::trocar_espaco(original.raiz());
+            crate::paginacao::mapear_novo(ALVO, Permissoes::DADOS_USUARIO)?;
+            core::ptr::write_volatile(ALVO as *mut u64, MARCA_ORIGINAL);
+
+            // Uma página somente leitura, para conferir que a permissão
+            // atravessa o clone.
+            let frame = crate::paginacao::mapear_novo(SO_LEITURA, Permissoes::DADOS_USUARIO)?;
+            arch::desmapear(SO_LEITURA)?;
+            arch::mapear_frame(
+                SO_LEITURA,
+                frame,
+                Permissoes {
+                    escrita: false,
+                    executavel: false,
+                    dispositivo: false,
+                    usuario: true,
+                },
+            )?;
+
+            let clone = crate::paginacao::Espaco::clonar_o_ativo(privada)?;
+
+            arch::trocar_espaco(clone.raiz());
+            let lido_no_clone = core::ptr::read_volatile(ALVO as *const u64);
+            core::ptr::write_volatile(ALVO as *mut u64, MARCA_DO_CLONE);
+            let gravavel = crate::paginacao::mapear_novo(SO_LEITURA, Permissoes::DADOS).is_ok();
+
+            arch::trocar_espaco(original.raiz());
+            let lido_no_original = core::ptr::read_volatile(ALVO as *const u64);
+
+            arch::trocar_espaco(kernel);
+            drop(clone);
+            (lido_no_original, lido_no_clone, gravavel)
+        };
+        drop(original);
+
+        if lido_no_clone != MARCA_ORIGINAL {
+            return Err("o clone nao recebeu o conteudo do original");
+        }
+        if lido_no_original != MARCA_ORIGINAL {
+            crate::log_error!("teste", "o original passou a ler {:#x}", lido_no_original);
+            return Err("escrever no clone alterou o original: os dois dividem o frame");
+        }
+        if gravavel_no_clone {
+            return Err("a pagina somente leitura do original ficou livre no clone");
         }
         Ok(())
     })
@@ -2832,6 +2970,10 @@ static CASOS: &[Caso] = &[
         f: memoria_desmapear_do_kernel_vale_em_todo_espaco,
     },
     Caso {
+        nome: "memoria: clonar copia o conteudo",
+        f: memoria_clonar_copia_o_conteudo,
+    },
+    Caso {
         nome: "memoria: espaco destruido devolve tudo",
         f: memoria_espaco_destruido_devolve_tudo,
     },
@@ -2840,8 +2982,8 @@ static CASOS: &[Caso] = &[
         f: usuario_dois_processos_coexistem,
     },
     Caso {
-        nome: "usuario: executa e encerra",
-        f: usuario_executa_e_encerra,
+        nome: "usuario: executa, bifurca e troca de imagem",
+        f: usuario_executa_bifurca_e_troca_de_imagem,
     },
     Caso {
         nome: "usuario: nao alcanca o kernel",

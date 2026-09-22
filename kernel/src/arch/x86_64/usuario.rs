@@ -113,6 +113,52 @@ unsafe extern "C" {
     fn ponto_de_entrada();
 }
 
+/// O estado do usuário no instante da chamada de sistema.
+///
+/// # Por que o quadro existe agora, e não antes
+///
+/// Antes do `fork`, o caminho de chamada de sistema só precisava preservar o
+/// que o usuário esperava de volta — e os registradores que a convenção de
+/// chamada já preserva ficavam por conta do compilador, nos próprios
+/// registradores. `fork` muda isso: para dar ao filho o estado do pai é
+/// preciso **ler** esse estado, e o que mora só num registrador não tem
+/// endereço.
+///
+/// Empilhar tudo também aproxima as duas arquiteturas. No ARM a entrada de
+/// exceção já materializa um quadro completo; aqui ele passa a existir pelo
+/// mesmo motivo e com o mesmo papel.
+///
+/// # A ordem dos campos não é estética
+///
+/// Ela espelha, do endereço mais baixo para o mais alto, a ordem inversa dos
+/// `push` em [`ponto_de_entrada`]. Trocar um campo de lugar sem trocar o
+/// `push` correspondente faria o usuário voltar com registradores embaralhados
+/// — e nada nisso falha de imediato.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct QuadroDeUsuario {
+    pub r15: u64,
+    pub r14: u64,
+    pub r13: u64,
+    pub r12: u64,
+    pub rbp: u64,
+    pub rbx: u64,
+    pub r10: u64,
+    pub r9: u64,
+    pub r8: u64,
+    pub rdx: u64,
+    pub rsi: u64,
+    pub rdi: u64,
+    /// `RFLAGS` no instante do `syscall`: a instrução as deposita aqui.
+    pub r11: u64,
+    /// Endereço de retorno ao usuário: a instrução `syscall` o deposita aqui.
+    pub rcx: u64,
+    /// Número da chamada na entrada, valor de retorno na saída.
+    pub rax: u64,
+    /// O `RSP` do usuário, guardado antes da troca para a pilha de kernel.
+    pub rsp: u64,
+}
+
 global_asm!(
     r#"
 .section .text
@@ -123,6 +169,12 @@ ponto_de_entrada:
     mov [rip + PILHA_DE_USUARIO_SALVA], rsp
     mov rsp, [rip + PILHA_DE_KERNEL_ATUAL]
 
+    // A partir daqui montamos o `QuadroDeUsuario` na pilha de kernel. A ordem
+    // é o contrato: cada `push` corresponde a um campo da struct, do endereço
+    // mais alto para o mais baixo.
+    push qword ptr [rip + PILHA_DE_USUARIO_SALVA]
+    push rax
+
     // RCX e R11 não são escolha nossa: a instrução `syscall` os sobrescreve
     // com o endereço de retorno e as flags. Guardá-los é o que permite ao
     // `sysretq` devolver o usuário exatamente onde ele estava.
@@ -130,8 +182,7 @@ ponto_de_entrada:
     push r11
 
     // Os registradores que a convenção de chamada não preserva e que o usuário
-    // espera de volta intactos. Os preservados (rbx, rbp, r12-r15) o código
-    // Rust abaixo já cuida sozinho.
+    // espera de volta intactos.
     push rdi
     push rsi
     push rdx
@@ -139,14 +190,36 @@ ponto_de_entrada:
     push r9
     push r10
 
-    // A ABI: rax traz o número da chamada, rdi/rsi/rdx os argumentos.
-    // Reordenamos para a convenção de chamada do C.
-    mov rcx, rdx        // arg2
-    mov rdx, rsi        // arg1
-    mov rsi, rdi        // arg0
-    mov rdi, rax        // numero
+    // E os que ela preserva. Antes do `fork` bastava deixá-los com o
+    // compilador; agora o filho precisa recebê-los, e para isso eles precisam
+    // de um endereço.
+    push rbx
+    push rbp
+    push r12
+    push r13
+    push r14
+    push r15
+
+    // Dezesseis `push` a partir de um topo alinhado em 16 deixam o RSP
+    // alinhado, que é o que a convenção de chamada exige no ponto do `call`.
+    mov rdi, rsp
     call {despachar}
-    // O retorno já está em rax, que é onde o usuário vai procurá-lo.
+
+    // O retorno vai para o campo `rax` do quadro, e não para o registrador:
+    // ele ainda vai ser restaurado pelos `pop` abaixo.
+    mov [rsp + 14*8], rax
+
+// Onde um filho de `fork` entra em cena. Ele nunca passou pela metade de cima
+// desta funcao: o contexto dele foi montado para que a primeira troca de fio
+// caia exatamente aqui, com um `QuadroDeUsuario` pronto logo acima do RSP.
+.global retorno_ao_usuario
+retorno_ao_usuario:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbp
+    pop rbx
 
     pop r10
     pop r9
@@ -157,8 +230,11 @@ ponto_de_entrada:
 
     pop r11
     pop rcx
+    pop rax
 
-    mov rsp, [rip + PILHA_DE_USUARIO_SALVA]
+    // `pop rsp` devolve a pilha do usuário direto do quadro — inclusive quando
+    // o quadro é o de um filho de `fork`, que nunca passou por aqui na ida.
+    pop rsp
 
     // `sysretq`, com q: sem o sufixo o retorno seria para modo compatível de
     // 32 bits, e o processo voltaria a executar seu próprio código
@@ -169,8 +245,21 @@ ponto_de_entrada:
 );
 
 /// Ponte do assembly para o despacho neutro de arquitetura.
-extern "C" fn despachar_chamada(numero: u64, a0: u64, a1: u64, a2: u64) -> i64 {
-    let resultado = crate::usuario::despachar(numero, a0, a1, a2);
+///
+/// # Safety
+///
+/// `quadro` precisa apontar para o [`QuadroDeUsuario`] que o
+/// [`ponto_de_entrada`] acabou de montar na pilha de kernel deste fio.
+extern "C" fn despachar_chamada(quadro: *mut QuadroDeUsuario) -> i64 {
+    // SAFETY: o ponteiro vem do assembly logo acima, e aponta para o quadro
+    // recém-montado na nossa própria pilha de kernel.
+    let q = unsafe { &mut *quadro };
+    let (numero, a0, a1, a2) = (q.rax, q.rdi, q.rsi, q.rdx);
+
+    // SAFETY: o quadro é o desta chamada; `bifurcar` e `executar` o leem e o
+    // reescrevem, e é por isso que ele desce até o despacho.
+    let resultado =
+        unsafe { crate::usuario::despachar(numero, a0, a1, a2, quadro as *mut core::ffi::c_void) };
 
     // `sair` apenas marca; quem troca de contexto é quem tem como não voltar.
     // Aqui estamos numa cadeia de chamadas comum sobre a pilha de kernel do

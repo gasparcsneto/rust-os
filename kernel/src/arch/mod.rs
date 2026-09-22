@@ -67,8 +67,8 @@ pub use atual::{
     entrar_em_usuario, espaco_atual, espaco_do_kernel, esperar_interrupcao,
     falha_de_estouro_de_pilha, halt_forever, identificar_cpu, init_excecoes,
     init_interrupcao_serial, init_interrupcoes, init_paginacao, init_seriais, init_usuario,
-    mapear_frame, nome, preparar_contexto, reservar_faixas, sem_interrupcoes, traduzir,
-    trocar_espaco,
+    mapear_frame, nome, percorrer_paginas_do_usuario, preparar_contexto, preparar_contexto_de_fork,
+    redirecionar_para, reservar_faixas, sem_interrupcoes, traduzir, trocar_espaco,
 };
 
 /// Tamanho de uma página nas duas arquiteturas.

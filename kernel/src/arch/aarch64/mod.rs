@@ -22,7 +22,9 @@ pub mod uart;
 pub mod usuario;
 pub mod vetores;
 
-pub use contexto::{Contexto, ceder_cpu, preparar_contexto};
+pub use contexto::{
+    Contexto, ceder_cpu, preparar_contexto, preparar_contexto_de_fork, redirecionar_para,
+};
 pub use usuario::{definir_pilha_de_kernel, entrar as entrar_em_usuario, init as init_usuario};
 
 pub use uart::Uart;
@@ -252,7 +254,7 @@ pub fn init_paginacao() {
 
 pub use mmu::{
     acesso_fisico, criar_espaco, desmapear, destruir_espaco, espaco_atual, espaco_do_kernel,
-    mapear_frame, traduzir, trocar_espaco,
+    mapear_frame, percorrer_paginas_do_usuario, traduzir, trocar_espaco,
 };
 
 /// O nome da falha que um estouro de pilha produz nesta arquitetura.

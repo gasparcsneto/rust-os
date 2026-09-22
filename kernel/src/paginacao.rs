@@ -100,6 +100,115 @@ impl Espaco {
     pub fn raiz(&self) -> u64 {
         self.raiz
     }
+
+    /// Um espaço novo com uma **cópia** das páginas de usuário do ativo.
+    ///
+    /// É o que `fork` precisa: o filho enxerga os mesmos endereços com o mesmo
+    /// conteúdo, mas escrever num deles não alcança o outro.
+    ///
+    /// # Por que cópia integral, e não copy-on-write
+    ///
+    /// Porque copy-on-write é uma otimização, e otimizar antes de funcionar é
+    /// a forma mais confiável de não conseguir nenhum dos dois. Ele exige
+    /// contagem de referências por frame, marcar as páginas do **pai** como
+    /// somente leitura e um caminho de falha de página que distinga "escrita
+    /// proibida" de "escrita a resolver". Cada uma dessas peças tem um modo
+    /// próprio de falhar em silêncio.
+    ///
+    /// O custo de copiar tudo é uma página por página mapeada, pago uma vez
+    /// no `fork`. Para processos do tamanho dos que este kernel roda, é
+    /// irrelevante — e o dia em que deixar de ser, o teste que compara o
+    /// conteúdo dos dois lados continua valendo palavra por palavra.
+    ///
+    /// # Por que as permissões são lidas de volta das tabelas
+    ///
+    /// Porque recriar tudo gravável seria mais simples e destruiria o `W^X`
+    /// do processo no instante em que ele tivesse um filho. O segmento de
+    /// código do pai é somente leitura e executável; o do filho tem de ser a
+    /// mesma coisa.
+    pub fn clonar_o_ativo(privada: usize) -> Result<Self, &'static str> {
+        // A origem é o espaço **ativo**, e não um `&self`, porque é assim que
+        // `fork` o encontra: quem chama está executando dentro do espaço que
+        // quer duplicar. Ler o registrador de tradução evita ter de alcançar o
+        // espaço através do escalonador, que traria a trava dele junto.
+        let origem = arch::espaco_atual();
+        let novo = Self::novo(privada)?;
+
+        // A lista é montada antes de qualquer troca de espaço: percorrer as
+        // tabelas da origem e escrever no destino ao mesmo tempo exigiria que
+        // os dois estivessem ativos, e só um pode estar.
+        let mut paginas = alloc::vec::Vec::new();
+        arch::sem_interrupcoes(|| {
+            // SAFETY: a raiz é nossa e é válida; as interrupções mascaradas
+            // garantem que ninguém altera as tabelas durante o percurso.
+            unsafe {
+                arch::percorrer_paginas_do_usuario(
+                    origem,
+                    privada,
+                    &mut |virtual_, fisico, permissoes| {
+                        paginas.push((virtual_, fisico, permissoes));
+                    },
+                );
+            }
+        });
+
+        let anterior = arch::espaco_atual();
+
+        // SAFETY: as duas raízes carregam as entradas de topo do kernel, então
+        // o código e a pilha deste fio seguem mapeados dos dois lados. A troca
+        // de volta acontece em qualquer desfecho, inclusive no de erro.
+        let resultado = unsafe {
+            arch::trocar_espaco(novo.raiz);
+            let r = copiar_para_o_espaco_ativo(&paginas);
+            arch::trocar_espaco(anterior);
+            r
+        };
+        resultado?;
+        Ok(novo)
+    }
+}
+
+/// Recria no espaço ativo as páginas descritas, com o conteúdo do original.
+///
+/// # Safety
+///
+/// O espaço ativo precisa ser o destino, e cada `fisico` precisa ser um frame
+/// vivo — o percurso que os produziu não pode ter sido invalidado no meio.
+unsafe fn copiar_para_o_espaco_ativo(
+    paginas: &[(u64, u64, arch::Permissoes)],
+) -> Result<(), &'static str> {
+    for (virtual_, fisico, permissoes) in paginas {
+        // Gravável primeiro, sempre: é a única forma de escrever o conteúdo, e
+        // depois a página recebe o que o original tinha. Em nenhum instante
+        // ela é gravável **e** executável.
+        let temporarias = arch::Permissoes {
+            escrita: true,
+            executavel: false,
+            dispositivo: false,
+            usuario: permissoes.usuario,
+        };
+        let destino = mapear_novo(*virtual_, temporarias)?;
+
+        // SAFETY: a página de destino acabou de ser mapeada com escrita neste
+        // espaço, e o mapa da memória física alcança o frame de origem — que
+        // pertence ao outro espaço e por isso não tem endereço virtual aqui.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                arch::acesso_fisico(*fisico),
+                *virtual_ as *mut u8,
+                TAMANHO_PAGINA as usize,
+            );
+        }
+
+        if *permissoes != temporarias {
+            let frame = arch::desmapear(*virtual_)?;
+            debug_assert_eq!(frame, destino);
+            // SAFETY: o frame acabou de sair deste mesmo endereço virtual,
+            // então não está em uso por nenhum outro mapeamento.
+            unsafe { arch::mapear_frame(*virtual_, frame, *permissoes)? };
+        }
+    }
+    Ok(())
 }
 
 impl Drop for Espaco {
