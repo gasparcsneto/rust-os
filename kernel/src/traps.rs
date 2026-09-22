@@ -220,6 +220,14 @@ pub fn fatal(nome: &'static str, pc: u64, endereco: Option<u64>, codigo: u64) ->
         crate::tarefas::entrada::destravar();
     }
 
+    // Para o escalonador antes de qualquer outra coisa. Com multitarefa
+    // preemptiva, o timer continuaria trocando de fio enquanto montamos o
+    // relatório: os outros fios rodariam por cima de um estado que já se sabe
+    // corrompido, e disputariam o canal do agente com a própria autópsia.
+    //
+    // A partir daqui o fio que falhou é o único que roda.
+    crate::fios::congelar();
+
     // Se esta falha era a esperada, ela é o resultado de um teste e não um
     // acidente. Conferimos antes de qualquer registro para que a saída
     // complete a linha que o executor deixou pela metade.

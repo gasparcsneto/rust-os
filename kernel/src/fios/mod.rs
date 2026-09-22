@@ -73,6 +73,14 @@ pub const QUANTUM_EM_TIQUES: u32 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Estado {
+    /// A vaga foi tomada, mas o fio ainda não tem pilha nem contexto.
+    ///
+    /// Existe por causa de uma corrida real: [`criar`] precisa escolher a vaga
+    /// sob a trava do escalonador e mapear a pilha **fora** dela, porque
+    /// mapear toma as travas da paginação e dos frames. Sem marcar a vaga
+    /// nesse intervalo, duas criações concorrentes escolheriam a mesma — a
+    /// segunda falharia ao tentar mapear por cima da primeira.
+    Reservado,
     /// Pronto para rodar, esperando a vez.
     Pronto,
     /// É o fio que está executando agora.
@@ -124,6 +132,33 @@ static ESCALONADOR: Mutex<Escalonador> = Mutex::new(Escalonador {
 });
 
 static PROXIMO_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Congela o escalonamento. Uma via só: quem congela não descongela.
+///
+/// Serve ao modo post-mortem. Depois de uma falha fatal o sistema está morto
+/// para qualquer trabalho útil, mas o timer continua disparando — e sem isto
+/// ele continuaria trocando de fio, deixando os outros rodarem por cima de um
+/// estado que já se sabe corrompido, e disputando com o próprio relatório da
+/// falha o canal do agente.
+///
+/// É um atômico, e não um campo do escalonador, justamente porque precisa
+/// funcionar quando a trava do escalonador é o que está quebrado.
+static CONGELADO: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Para o escalonamento de vez. Chamado pelo caminho de falha fatal.
+pub fn congelar() {
+    CONGELADO.store(true, Ordering::SeqCst);
+}
+
+/// Faz [`criar`] ceder a vez logo depois de escolher a vaga.
+///
+/// Existe só para a suíte de testes, e testa algo que de outra forma não teria
+/// como ser testado de forma determinística: a corrida entre duas criações
+/// concorrentes pela mesma vaga. A janela real dura algumas centenas de
+/// instruções, e o timer praticamente nunca a acerta.
+#[cfg(feature = "modo-teste")]
+pub static CEDER_AO_ESCOLHER_VAGA: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 static TROCAS: AtomicU64 = AtomicU64::new(0);
 
 /// Quantas vezes o quantum de um fio se esgotou.
@@ -193,20 +228,52 @@ pub fn criar(
     // A segunda é mapear a pilha nova, pelo mesmo motivo. Aninhar travas é o
     // começo de todo deadlock; manter a ordem trivial é mais barato que provar
     // que a ordem é segura.
+    let id = IdFio(PROXIMO_ID.fetch_add(1, Ordering::Relaxed));
+
+    // Escolhemos a vaga e a **marcamos** na mesma seção crítica. Marcar é o
+    // que impede que outra criação concorrente escolha a mesma vaga no
+    // intervalo em que estamos mapeando a pilha lá fora.
     let (vaga, ocupante_morto) = com_escalonador(|e| {
         let vaga = e.vaga_livre()?;
-        Ok::<_, &'static str>((vaga, e.fios[vaga].take()))
+        let anterior = e.fios[vaga].take();
+        e.fios[vaga] = Some(Fio {
+            id,
+            nome,
+            estado: Estado::Reservado,
+            contexto: Contexto::vazio(),
+            _pilha: None,
+            escalonamentos: 0,
+        });
+        Ok::<_, &'static str>((vaga, anterior))
     })?;
+
+    // O fio morto que ocupava a vaga morre aqui fora: o `Drop` da pilha dele
+    // desmapeia páginas, ou seja, toma as travas da paginação e dos frames.
     drop(ocupante_morto);
 
-    let pilha = pilha::reservar(vaga)?;
+    // Ponto de cessão só para testes: é exatamente aqui que a janela entre
+    // escolher a vaga e mapear a pilha fica aberta. Sem forçar a troca, a
+    // janela dura algumas centenas de instruções e o timer praticamente nunca
+    // a acerta — a corrida existiria, mas nenhum teste a provocaria.
+    #[cfg(feature = "modo-teste")]
+    if CEDER_AO_ESCOLHER_VAGA.load(Ordering::Relaxed) {
+        ceder();
+    }
+
+    let pilha = match pilha::reservar(vaga) {
+        Ok(pilha) => pilha,
+        Err(motivo) => {
+            // Devolver a vaga é obrigatório: deixá-la reservada a perderia
+            // para sempre, e um erro de mapeamento não deve custar uma vaga.
+            com_escalonador(|e| e.fios[vaga] = None);
+            return Err(motivo);
+        }
+    };
 
     let mut contexto = Contexto::vazio();
     // SAFETY: a pilha foi mapeada agora e pertence exclusivamente a este fio;
     // `topo` é o endereço logo acima dela, alinhado em página.
     unsafe { crate::arch::preparar_contexto(&mut contexto, pilha.topo(), entrada, argumento) };
-
-    let id = IdFio(PROXIMO_ID.fetch_add(1, Ordering::Relaxed));
 
     com_escalonador(|e| {
         e.fios[vaga] = Some(Fio {
@@ -278,6 +345,12 @@ pub struct Troca {
 /// devolvidos só valem enquanto elas continuarem mascaradas: eles apontam para
 /// dentro da tabela do escalonador.
 pub unsafe fn selecionar() -> Option<Troca> {
+    // Conferido antes de tocar na trava: depois de uma falha fatal, ela pode
+    // ser justamente o que está na mão de código que nunca mais vai rodar.
+    if CONGELADO.load(Ordering::SeqCst) {
+        return None;
+    }
+
     let mut escalonador = ESCALONADOR.lock();
     let e = &mut *escalonador;
 
@@ -331,6 +404,12 @@ pub fn ceder() {
 
 /// Encerra o fio atual. Nunca retorna.
 ///
+/// A pilha do fio **não** é liberada aqui, e não poderia ser: estamos
+/// executando em cima dela. Ela sobrevive até a vaga ser reaproveitada por
+/// outra criação, que é quando o `Drop` finalmente roda. O desperdício é
+/// limitado — no pior caso uma pilha por vaga —, e a alternativa seria um fio
+/// coletor só para desmapear pilhas alheias.
+///
 /// Sem consumidor de produção hoje pelo mesmo motivo de [`criar`]: o único fio
 /// que existe é o do próprio kernel, e ele não termina.
 #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
@@ -354,6 +433,10 @@ pub fn terminar() -> ! {
 ///
 /// Chamada de dentro do handler do timer, antes de ele retornar.
 pub fn tique() -> bool {
+    if CONGELADO.load(Ordering::SeqCst) {
+        return false;
+    }
+
     let venceu = crate::arch::sem_interrupcoes(|| {
         let Some(mut e) = ESCALONADOR.try_lock() else {
             // A trava está com código que foi interrompido. Não insistimos:
@@ -405,6 +488,7 @@ pub fn com_inscricoes<F: FnMut(Inscricao)>(mut f: F) {
                 id: fio.id.numero(),
                 nome: fio.nome,
                 estado: match fio.estado {
+                    Estado::Reservado => "spawning",
                     Estado::Pronto => "ready",
                     Estado::Rodando => "running",
                     Estado::Terminado => "done",

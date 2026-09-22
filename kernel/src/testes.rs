@@ -1741,6 +1741,82 @@ fn fios_cedem_voluntariamente() -> Resultado {
     Ok(())
 }
 
+/// Duas criações concorrentes não podem escolher a mesma vaga.
+///
+/// `criar` escolhe a vaga sob a trava do escalonador e mapeia a pilha **fora**
+/// dela — mapear toma as travas da paginação e dos frames, e aninhá-las seria
+/// começo de deadlock. O intervalo entre as duas coisas é uma janela real: sem
+/// marcar a vaga, duas criações simultâneas escolhem a mesma, e a segunda
+/// falha ao tentar mapear por cima da primeira.
+///
+/// Aqui dois fios criam em rodízio, cedendo a vez entre uma criação e outra
+/// para maximizar o entrelaçamento. Distinguimos os dois motivos de falha:
+/// ficar sem vaga é legítimo, falhar no mapeamento é a colisão.
+fn fios_criacao_concorrente_nao_colide() -> Resultado {
+    const CADA: u64 = 3;
+    static COLISOES: AtomicU64 = AtomicU64::new(0);
+    static SEM_VAGA: AtomicU64 = AtomicU64::new(0);
+    static CRIADOS: AtomicU64 = AtomicU64::new(0);
+    static PRONTOS: AtomicU64 = AtomicU64::new(0);
+
+    extern "C" fn efemero(_argumento: u64) -> ! {
+        crate::fios::terminar()
+    }
+
+    extern "C" fn criador(_argumento: u64) -> ! {
+        for _ in 0..CADA {
+            match crate::fios::criar("teste-efemero", efemero, 0) {
+                Ok(_) => {
+                    CRIADOS.fetch_add(1, SeqCst);
+                }
+                Err(motivo) if motivo.contains("vaga") => {
+                    SEM_VAGA.fetch_add(1, SeqCst);
+                }
+                Err(_) => {
+                    COLISOES.fetch_add(1, SeqCst);
+                }
+            }
+            crate::fios::ceder();
+        }
+        PRONTOS.fetch_add(1, SeqCst);
+        crate::fios::terminar()
+    }
+
+    COLISOES.store(0, SeqCst);
+    SEM_VAGA.store(0, SeqCst);
+    CRIADOS.store(0, SeqCst);
+    PRONTOS.store(0, SeqCst);
+
+    // Abre a janela de propósito: cada criação cede a vez logo depois de
+    // escolher a vaga, que é o ponto exato em que a corrida existe.
+    crate::fios::CEDER_AO_ESCOLHER_VAGA.store(true, SeqCst);
+
+    crate::fios::criar("teste-criador-a", criador, 0)?;
+    crate::fios::criar("teste-criador-b", criador, 1)?;
+
+    let desfecho = esperar_ate(|| PRONTOS.load(SeqCst) == 2, 200);
+    crate::fios::CEDER_AO_ESCOLHER_VAGA.store(false, SeqCst);
+    desfecho?;
+
+    let colisoes = COLISOES.load(SeqCst);
+    let criados = CRIADOS.load(SeqCst);
+    crate::log_info!(
+        "teste",
+        "criacao concorrente: {} criados, {} sem vaga, {} colisoes",
+        criados,
+        SEM_VAGA.load(SeqCst),
+        colisoes
+    );
+
+    if colisoes > 0 {
+        return Err("duas criacoes concorrentes escolheram a mesma vaga");
+    }
+    if criados == 0 {
+        return Err("nenhum fio foi criado; o teste nao exercitou nada");
+    }
+    Ok(())
+}
+
 /// Espera `quantos` tiques do timer passarem.
 fn esperar_ticks(quantos: u64) {
     let ate = crate::tempo::ticks().saturating_add(quantos);
@@ -2017,6 +2093,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "fios: preservam contexto",
         f: fios_preservam_contexto,
+    },
+    Caso {
+        nome: "fios: criacao concorrente",
+        f: fios_criacao_concorrente_nao_colide,
     },
 ];
 

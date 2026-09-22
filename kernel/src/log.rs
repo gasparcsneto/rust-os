@@ -201,19 +201,33 @@ pub fn registrar(nivel: Level, subsistema: &'static str, args: fmt::Arguments) {
 ///
 /// `max` limita quantos registros são *examinados*; o filtro de nível é
 /// aplicado depois, então o callback pode ser chamado menos vezes que `max`.
+///
+/// # Por que a *leitura* também mascara interrupções
+///
+/// Porque a escrita acontece de dentro de handlers. Um handler que precise
+/// registrar algo — o de breakpoint faz isso — encontraria a trava na mão de
+/// quem ele interrompeu, e giraria para sempre esperando alguém que só volta a
+/// rodar quando ele retornar.
+///
+/// Sem preempção esse cenário era estreito: um fio só, e o único jeito de
+/// chegar nele era provocar uma exceção durante a própria leitura. Com o
+/// escalonador preemptivo deixou de ser: qualquer fio pode estar aqui dentro
+/// quando outro provocar a exceção.
 pub fn ultimos<F: FnMut(&Record)>(max: usize, nivel_minimo: Level, mut f: F) {
-    let anel = ANEL.lock();
+    crate::arch::sem_interrupcoes(|| {
+        let anel = ANEL.lock();
 
-    let guardados = (anel.total as usize).min(CAPACIDADE);
-    let quantos = max.min(guardados);
+        let guardados = (anel.total as usize).min(CAPACIDADE);
+        let quantos = max.min(guardados);
 
-    for k in (0..quantos).rev() {
-        let idx = (anel.proximo + CAPACIDADE - 1 - k) % CAPACIDADE;
-        let registro = &anel.registros[idx];
-        if registro.level <= nivel_minimo {
-            f(registro);
+        for k in (0..quantos).rev() {
+            let idx = (anel.proximo + CAPACIDADE - 1 - k) % CAPACIDADE;
+            let registro = &anel.registros[idx];
+            if registro.level <= nivel_minimo {
+                f(registro);
+            }
         }
-    }
+    });
 }
 
 /// Destrava o ring buffer à força, para uso exclusivo do caminho de pânico.
@@ -230,7 +244,7 @@ pub unsafe fn destravar() {
 
 /// Total de registros emitidos desde o boot.
 pub fn total_emitidos() -> u64 {
-    ANEL.lock().total
+    crate::arch::sem_interrupcoes(|| ANEL.lock().total)
 }
 
 // As cinco macros são escritas por extenso em vez de geradas por uma

@@ -11,6 +11,12 @@
 //! Como [`crate::tempo`], usamos atômicos e não `Mutex`: este código roda
 //! dentro de handlers de interrupção, onde tomar um spinlock que o código
 //! preemptado já segurasse seria deadlock.
+//!
+//! A tabela de nomes é a exceção, e por isso é a única coisa aqui protegida
+//! por `Mutex`: ela é escrita uma vez na inicialização e lida pelo canal do
+//! agente, nunca de dentro de um handler. Ainda assim, os dois acessos
+//! mascaram interrupções — com o escalonador preemptivo, dois fios podem
+//! disputá-la, e um fio preemptado segurando um spinlock trava o seguinte.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -37,7 +43,7 @@ static NOMES: Mutex<[&'static str; MAX_LINHAS]> = Mutex::new([""; MAX_LINHAS]);
 /// interrupções.
 pub fn nomear(linha: usize, nome: &'static str) {
     if linha < MAX_LINHAS {
-        NOMES.lock()[linha] = nome;
+        crate::arch::sem_interrupcoes(|| NOMES.lock()[linha] = nome);
     }
 }
 
@@ -54,13 +60,15 @@ pub fn contabilizar(linha: usize) {
 /// Omitir linhas zeradas mantém a resposta do agente enxuta: 64 entradas em
 /// que 62 são zero não informam nada.
 pub fn com_contadores<F: FnMut(usize, &'static str, u64)>(mut f: F) {
-    let nomes = NOMES.lock();
-    for linha in 0..MAX_LINHAS {
-        let total = CONTADORES[linha].load(Ordering::Relaxed);
-        if total > 0 {
-            f(linha, nomes[linha], total);
+    crate::arch::sem_interrupcoes(|| {
+        let nomes = NOMES.lock();
+        for linha in 0..MAX_LINHAS {
+            let total = CONTADORES[linha].load(Ordering::Relaxed);
+            if total > 0 {
+                f(linha, nomes[linha], total);
+            }
         }
-    }
+    });
 }
 
 /// Total de interrupções de hardware desde o boot.
