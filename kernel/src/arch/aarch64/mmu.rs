@@ -418,6 +418,27 @@ fn programar_controle_de_traducao() {
     );
 }
 
+/// A tabela de nível 1 que a MMU está consultando **agora**.
+///
+/// Lê `TTBR0_EL1` em vez de devolver [`L1`] direto pelo mesmo motivo que o x86
+/// lê `CR3`: a raiz ativa é a fonte da verdade sobre o que está mapeado, e não
+/// sobre o que nós achamos que mapeamos. Enquanto houver uma tabela só, os
+/// dois coincidem; com uma tabela por processo, deixam de coincidir — e este é
+/// o ponto onde a diferença entra sem que os caminhos de mapeamento saibam
+/// dela.
+///
+/// O registrador guarda um endereço **físico**, e aqui físico e virtual
+/// coincidem (o mapa é de identidade), então ele serve direto como ponteiro.
+///
+/// # Safety
+///
+/// Só pode ser usada com a MMU ligada e [`TRAVA`] na mão: o resultado é um
+/// ponteiro mutável para a raiz, e duas escritas concorrentes nela são
+/// corrida de dados.
+unsafe fn raiz_ativa() -> *mut u64 {
+    TTBR0_EL1.get_baddr() as *mut u64
+}
+
 /// Índices de tabela para um endereço virtual, com granularidade de 4 KiB.
 const fn indices(virtual_: u64) -> (usize, usize, usize) {
     (
@@ -525,13 +546,14 @@ pub unsafe fn mapear_frame(
         let _guarda = TRAVA.lock();
         let (i1, i2, i3) = indices(virtual_);
 
-        // SAFETY: a trava garante acesso exclusivo à tabela.
-        let l1 = unsafe { &mut *L1.0.get() };
+        // SAFETY: a trava garante acesso exclusivo à tabela, e a MMU está
+        // ligada — `validar_endereco` já recusou o caso contrário.
+        let l1 = unsafe { raiz_ativa() };
 
         // SAFETY: descemos por descritores válidos, criando tabelas conforme
         // necessário.
         let l3 = unsafe {
-            let l2 = descer(&raw mut l1.entradas[i1])?;
+            let l2 = descer(l1.add(i1))?;
             descer(l2.add(i2))?
         };
 
@@ -586,13 +608,14 @@ pub fn desmapear(virtual_: u64) -> Result<u64, &'static str> {
         let _guarda = TRAVA.lock();
         let (i1, i2, i3) = indices(virtual_);
 
-        // SAFETY: a trava garante acesso exclusivo à tabela.
-        let l1 = unsafe { &mut *L1.0.get() };
+        // SAFETY: a trava garante acesso exclusivo à tabela, e a MMU está
+        // ligada — conferido no início da função.
+        let l1 = unsafe { raiz_ativa() };
 
         // SAFETY: percorremos sem criar nada; paramos ao primeiro nível
         // ausente.
         unsafe {
-            let e1 = l1.entradas[i1];
+            let e1 = *l1.add(i1);
             if e1 & VALIDO == 0 || e1 & TABELA == 0 {
                 return Err("endereco nao mapeado em granularidade de pagina");
             }
@@ -624,7 +647,7 @@ pub fn desmapear(virtual_: u64) -> Result<u64, &'static str> {
                 crate::frames::liberar(l3 as u64);
 
                 if tabela_vazia(l2) {
-                    l1.entradas[i1] = 0;
+                    *l1.add(i1) = 0;
                     crate::frames::liberar(l2 as u64);
                 }
 
@@ -657,9 +680,9 @@ pub fn traduzir(virtual_: u64) -> Option<u64> {
 
     // SAFETY: leitura das tabelas, sem modificá-las.
     unsafe {
-        let l1 = &*L1.0.get();
+        let l1 = raiz_ativa();
 
-        let e1 = l1.entradas[i1];
+        let e1 = *l1.add(i1);
         if e1 & VALIDO == 0 {
             return None;
         }
