@@ -206,6 +206,19 @@ pub fn ceder_cpu() {
     // do escalonador, que só é modificada com elas mascaradas.
     unsafe {
         if let Some(troca) = crate::fios::selecionar() {
+            // O espaço de endereços do fio que entra, antes de qualquer outra
+            // coisa. Trocar aqui é seguro em qualquer ordem porque as duas
+            // raízes carregam as mesmas entradas de topo do kernel: a pilha
+            // que estamos usando agora e a que vamos usar depois seguem
+            // mapeadas dos dois lados.
+            //
+            // Comparar antes de escrever não é microotimização: escrever CR3
+            // descarta a TLB inteira, e fazer isso a cada troca entre fios do
+            // kernel — que compartilham o espaço — custaria caro à toa.
+            if troca.espaco != super::paginacao::espaco_atual() {
+                super::paginacao::trocar_espaco(troca.espaco);
+            }
+
             // O processador precisa saber onde empilhar se uma interrupção
             // chegar com o usuário rodando, e esse lugar muda com o fio.
             // Informar **antes** da troca é obrigatório: depois dela já

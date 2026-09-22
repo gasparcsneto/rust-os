@@ -69,3 +69,53 @@ pub fn desmapear_e_liberar(virtual_: u64) -> Result<(), &'static str> {
     crate::frames::liberar(frame);
     Ok(())
 }
+
+/// Um espaço de endereços, dono das tabelas que o descrevem.
+///
+/// # Por que RAII, e não um par criar/destruir
+///
+/// Porque o dono de um espaço é um fio, e um fio pode morrer de várias
+/// maneiras: saindo, tomando uma falha de proteção, ou sendo arrancado quando
+/// a vaga dele é reaproveitada. Um `destruir` explícito teria de ser chamado
+/// em todos esses caminhos, e o que se esquece de fazer em um deles vaza
+/// tabelas até a memória física acabar.
+///
+/// Com o `Drop`, quem esquece é o compilador — e ele não esquece. É o mesmo
+/// arranjo que [`crate::fios::pilha::Pilha`] usa pelo mesmo motivo.
+pub struct Espaco {
+    raiz: u64,
+    privada: usize,
+}
+
+impl Espaco {
+    /// Cria um espaço com o kernel mapeado e a entrada `privada` vazia.
+    pub fn novo(privada: usize) -> Result<Self, &'static str> {
+        Ok(Self {
+            raiz: arch::criar_espaco(privada)?,
+            privada,
+        })
+    }
+
+    /// A raiz, para instalar no registrador de tradução.
+    pub fn raiz(&self) -> u64 {
+        self.raiz
+    }
+}
+
+impl Drop for Espaco {
+    fn drop(&mut self) {
+        // Destruir o espaço em que se executa seria ficar sem tradução no meio
+        // do caminho. Não pode acontecer — o escalonador troca para o espaço
+        // do fio que entra antes que este seja largado —, mas o custo de
+        // conferir é uma comparação e o custo de não conferir é a máquina.
+        if arch::espaco_atual() == self.raiz {
+            crate::log_error!("mmu", "espaco {:#x} largado enquanto ativo", self.raiz);
+            return;
+        }
+
+        // SAFETY: a raiz veio de `criar_espaco`, não está ativa (conferido
+        // acima) e ninguém mais a referencia — somos o dono, e estamos sendo
+        // largados.
+        unsafe { arch::destruir_espaco(self.raiz, self.privada) };
+    }
+}

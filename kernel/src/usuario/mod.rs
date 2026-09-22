@@ -318,13 +318,6 @@ pub fn lancar_exemplo() -> Result<u64, &'static str> {
         }
     }
 
-    // Recusar aqui, e não deixar o fio hospedeiro descobrir sozinho lá dentro.
-    // O `carregar` também recusaria, mas o agente já teria recebido um
-    // `launched: true` e ficaria esperando um processo que nunca rodou.
-    if programa::ocupado() {
-        return Err("ja existe um processo em execucao");
-    }
-
     limpar_ultima_saida();
     crate::fios::criar("usuario", hospedar, 0).map(|id| id.numero())
 }

@@ -162,6 +162,18 @@ pub unsafe fn trocar_no_quadro(quadro: &mut Quadro) {
 
         *quadro = (*troca.para).quadro;
         escrever_sp_el0((*troca.para).sp);
+
+        // O espaço de endereços do fio que entra. Trocar de dentro do handler
+        // é seguro porque as duas raízes carregam as mesmas entradas de topo
+        // do kernel — o código que executa esta linha e a pilha de exceção
+        // seguem mapeados dos dois lados.
+        //
+        // Comparar antes de escrever importa mais aqui que no x86: sem ASID,
+        // cada troca de TTBR0 obriga a descartar a TLB inteira, e fios do
+        // kernel compartilham o espaço.
+        if troca.espaco != super::mmu::espaco_atual() {
+            super::mmu::trocar_espaco(troca.espaco);
+        }
     }
 }
 

@@ -2075,82 +2075,176 @@ fn memoria_espacos_isolam_o_mesmo_endereco() -> Resultado {
     })
 }
 
-/// Enquanto um processo vive, outro fio não toma o espaço dele.
+/// Destruir um espaço devolve **tudo**: tabelas, páginas e a própria raiz.
 ///
-/// # Por que isto é uma falha de kernel, e não só um processo confuso
+/// # Por que isto merece um caso próprio
 ///
-/// `carregar` começa desmapeando o que estiver no espaço do usuário. Sem dono,
-/// um segundo `user.run` arrancaria o código e a pilha do primeiro **enquanto
-/// ele roda**. O pior desfecho não é o processo morrer: é o primeiro fio estar
-/// dentro de uma chamada de sistema, já tendo passado pela validação da faixa,
-/// e ler a memória do usuário depois de ela sumir — falha de página com o
-/// kernel no comando, que é fatal.
+/// Um vazamento aqui não produz sintoma nenhum — nem falha, nem log, nem
+/// resposta errada. Ele só aparece muito depois, como memória física que
+/// acabou sem ninguém ter pedido nada de grande. E a contagem não é óbvia:
+/// além das páginas do processo há as tabelas intermediárias, que nascem sob
+/// demanda no meio de um mapeamento e não têm dono visível.
 ///
-/// Os dois lados são fios criados aqui, e nenhum deles é o fio do próprio
-/// teste. É proposital: o espaço pertence a quem o toma até esse fio morrer, e
-/// o fio do teste não morre — se ele tomasse o espaço, os casos seguintes
-/// encontrariam tudo ocupado.
-fn usuario_um_processo_por_vez() -> Resultado {
-    /// O que aconteceu com quem tentou carregar por cima.
-    static DESFECHO: AtomicU64 = AtomicU64::new(0);
-    const NAO_RODOU: u64 = 0;
-    const ACEITOU: u64 = 1;
-    const RECUSOU: u64 = 2;
+/// Comparar o alocador antes e depois é a única forma honesta de conferir, e
+/// dez voltas em vez de uma transformam um vazamento de um frame por processo
+/// — o tamanho típico de um esquecimento — em dez, bem acima de qualquer
+/// ruído.
+fn memoria_espaco_destruido_devolve_tudo() -> Resultado {
+    use crate::arch::{self, Permissoes};
 
-    static OCUPOU: AtomicBool = AtomicBool::new(false);
-    static PODE_SAIR: AtomicBool = AtomicBool::new(false);
+    const ALVO: u64 = crate::usuario::BASE;
+    const VOLTAS: usize = 10;
 
-    extern "C" fn ocupante(_argumento: u64) -> ! {
-        if crate::usuario::programa::carregar(crate::usuario::exemplo::bytes()).is_ok() {
-            OCUPOU.store(true, SeqCst);
+    let privada = arch::entrada_de_topo(ALVO) as usize;
+    let kernel = arch::espaco_do_kernel();
+
+    arch::sem_interrupcoes(|| {
+        let (livres_antes, _) = crate::frames::estatisticas();
+
+        for _ in 0..VOLTAS {
+            let espaco = crate::paginacao::Espaco::novo(privada)?;
+            let raiz = espaco.raiz();
+
+            // SAFETY: a raiz saiu de `Espaco::novo` e carrega as entradas de
+            // topo do kernel, então o código e a pilha deste fio seguem
+            // mapeados. Voltamos ao espaço do kernel antes de largar o espaço.
+            unsafe {
+                arch::trocar_espaco(raiz);
+
+                // Duas páginas distantes uma da outra de propósito: forçam a
+                // criação de tabelas intermediárias diferentes, que são
+                // exatamente as que um `destruir` incompleto esqueceria.
+                crate::paginacao::mapear_novo(ALVO, Permissoes::DADOS)?;
+                crate::paginacao::mapear_novo(ALVO + 0x20_0000, Permissoes::DADOS)?;
+
+                arch::trocar_espaco(kernel);
+            }
+
+            drop(espaco);
         }
-        // Fica vivo, segurando o espaço, até o teste mandar sair. Não entra em
-        // userspace: o que está em teste é a posse, não a travessia.
-        while !PODE_SAIR.load(SeqCst) {
+
+        let (livres_depois, _) = crate::frames::estatisticas();
+        if livres_depois != livres_antes {
+            crate::log_error!(
+                "teste",
+                "{} frames livres antes, {} depois de {} espacos",
+                livres_antes,
+                livres_depois,
+                VOLTAS
+            );
+            return Err("destruir um espaco nao devolveu tudo que ele ocupava");
+        }
+        Ok(())
+    })
+}
+
+/// Dois processos coexistem, cada um no seu espaço, nos mesmos endereços.
+///
+/// # Por que este caso substituiu "um processo por vez"
+///
+/// Enquanto havia uma tabela de tradução só, carregar um programa começava
+/// desmapeando o que estivesse no espaço do usuário — e por isso dois
+/// hospedeiros concorrentes arrancavam o chão um do outro. O caso anterior
+/// existia para impor a serialização que faltava.
+///
+/// Com um espaço por processo, a serialização deixou de ser necessária: o que
+/// precisa ser demonstrado agora é o contrário dela.
+///
+/// # A coreografia, e por que ela não depende do relógio
+///
+/// Os dois fios se alternam por sinalizações explícitas, não por sorte de
+/// escalonamento. O fio A carrega, escreve a marca dele e **espera**; só então
+/// B carrega no mesmo endereço e escreve a marca dele. Se os dois
+/// compartilhassem memória, a escrita de B apagaria a de A — e A, ao acordar,
+/// leria a marca errada.
+///
+/// A leitura de volta acontece depois que ambos escreveram, que é o instante
+/// em que um espaço compartilhado se denunciaria.
+fn usuario_dois_processos_coexistem() -> Resultado {
+    const MARCA_A: u64 = 0xA1A1_A1A1_A1A1_A1A1;
+    const MARCA_B: u64 = 0xB2B2_B2B2_B2B2_B2B2;
+
+    static CARREGOU_A: AtomicBool = AtomicBool::new(false);
+    static ESCREVEU_B: AtomicBool = AtomicBool::new(false);
+    static LIDO_A: AtomicU64 = AtomicU64::new(0);
+    static LIDO_B: AtomicU64 = AtomicU64::new(0);
+    static FALHA: AtomicBool = AtomicBool::new(false);
+
+    /// Carrega, escreve `marca` no topo da própria pilha e devolve o que ler
+    /// de volta depois que o outro fio também escreveu.
+    ///
+    /// # Safety
+    /// Só pode rodar num fio criado por `fios::criar`, porque `carregar`
+    /// instala um espaço de endereços no fio corrente.
+    unsafe fn marcar(marca: u64) -> Result<(), &'static str> {
+        let programa = crate::usuario::programa::carregar(crate::usuario::exemplo::bytes())?;
+
+        // O topo da pilha do processo: mapeado por `carregar`, e no mesmo
+        // endereço virtual para os dois — que é o ponto do teste.
+        let alvo = (programa.topo_da_pilha() - 16) as *mut u64;
+
+        // SAFETY: `alvo` está dentro da página de pilha que `carregar` acabou
+        // de mapear no espaço deste fio, com permissão de escrita.
+        unsafe { core::ptr::write_volatile(alvo, marca) };
+        Ok(())
+    }
+
+    extern "C" fn fio_a(_argumento: u64) -> ! {
+        // SAFETY: estamos num fio criado por `fios::criar`.
+        if unsafe { marcar(MARCA_A) }.is_err() {
+            FALHA.store(true, SeqCst);
+            crate::fios::terminar()
+        }
+        let alvo = (crate::usuario::TETO - 16) as *const u64;
+        CARREGOU_A.store(true, SeqCst);
+
+        // Espera B escrever no mesmo endereço, no espaço dele.
+        while !ESCREVEU_B.load(SeqCst) {
             crate::fios::ceder();
         }
+
+        // SAFETY: a página segue mapeada no espaço deste fio, que o
+        // escalonador reinstalou ao devolver a CPU.
+        LIDO_A.store(unsafe { core::ptr::read_volatile(alvo) }, SeqCst);
         crate::fios::terminar()
     }
 
-    extern "C" fn desafiante(_argumento: u64) -> ! {
-        let desfecho = match crate::usuario::programa::carregar(crate::usuario::exemplo::bytes()) {
-            Ok(_) => ACEITOU,
-            Err(_) => RECUSOU,
-        };
-        DESFECHO.store(desfecho, SeqCst);
+    extern "C" fn fio_b(_argumento: u64) -> ! {
+        while !CARREGOU_A.load(SeqCst) {
+            crate::fios::ceder();
+        }
+        // SAFETY: estamos num fio criado por `fios::criar`.
+        if unsafe { marcar(MARCA_B) }.is_err() {
+            FALHA.store(true, SeqCst);
+            ESCREVEU_B.store(true, SeqCst);
+            crate::fios::terminar()
+        }
+        let alvo = (crate::usuario::TETO - 16) as *const u64;
+
+        // SAFETY: mesma justificativa do fio A.
+        LIDO_B.store(unsafe { core::ptr::read_volatile(alvo) }, SeqCst);
+        ESCREVEU_B.store(true, SeqCst);
         crate::fios::terminar()
     }
 
-    OCUPOU.store(false, SeqCst);
-    PODE_SAIR.store(false, SeqCst);
-    DESFECHO.store(NAO_RODOU, SeqCst);
+    CARREGOU_A.store(false, SeqCst);
+    ESCREVEU_B.store(false, SeqCst);
+    LIDO_A.store(0, SeqCst);
+    LIDO_B.store(0, SeqCst);
+    FALHA.store(false, SeqCst);
 
-    let dono = crate::fios::criar("teste-ocupante", ocupante, 0)?.numero();
-    esperar_ate(|| OCUPOU.load(SeqCst), 300)?;
+    crate::fios::criar("teste-proc-a", fio_a, 0)?;
+    crate::fios::criar("teste-proc-b", fio_b, 0)?;
 
-    // Com o dono vivo, a segunda carga precisa ser recusada.
-    crate::fios::criar("teste-desafiante", desafiante, 0)?;
-    let esperou = esperar_ate(|| DESFECHO.load(SeqCst) != NAO_RODOU, 300);
+    esperar_ate(|| LIDO_A.load(SeqCst) != 0 && LIDO_B.load(SeqCst) != 0, 600)?;
 
-    // Soltar o ocupante antes de qualquer `return`: deixá-lo girando para
-    // sempre custaria uma vaga de fio a todos os casos seguintes.
-    PODE_SAIR.store(true, SeqCst);
-    esperou?;
-
-    if DESFECHO.load(SeqCst) != RECUSOU {
-        return Err("um segundo processo tomou o espaco de um que estava vivo");
+    if FALHA.load(SeqCst) {
+        return Err("um dos fios nao conseguiu carregar o programa");
     }
-
-    // Morto o dono, o espaço volta a ser de quem chegar. Sem esta metade, um
-    // `reivindicar` que recusasse *sempre* passaria no teste — e `user.run`
-    // funcionaria uma única vez por boot.
-    esperar_ate(|| !crate::fios::esta_vivo(dono), 300)?;
-    DESFECHO.store(NAO_RODOU, SeqCst);
-    crate::fios::criar("teste-desafiante", desafiante, 0)?;
-    esperar_ate(|| DESFECHO.load(SeqCst) != NAO_RODOU, 300)?;
-
-    if DESFECHO.load(SeqCst) != ACEITOU {
-        return Err("o espaco continuou preso depois que o dono morreu");
+    let (a, b) = (LIDO_A.load(SeqCst), LIDO_B.load(SeqCst));
+    if a != MARCA_A || b != MARCA_B {
+        crate::log_error!("teste", "fio A leu {:#x}, fio B leu {:#x}", a, b);
+        return Err("os dois processos compartilharam a mesma memoria");
     }
     Ok(())
 }
@@ -2506,8 +2600,12 @@ static CASOS: &[Caso] = &[
         f: usuario_descritor_e_conferido,
     },
     Caso {
-        nome: "usuario: um processo por vez",
-        f: usuario_um_processo_por_vez,
+        nome: "memoria: espaco destruido devolve tudo",
+        f: memoria_espaco_destruido_devolve_tudo,
+    },
+    Caso {
+        nome: "usuario: dois processos coexistem",
+        f: usuario_dois_processos_coexistem,
     },
     Caso {
         nome: "usuario: executa e encerra",

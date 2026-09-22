@@ -111,8 +111,28 @@ struct Fio {
     /// escalonador ligou — não tem: a pilha dele veio do boot e não é nossa
     /// para liberar.
     _pilha: Option<Pilha>,
+    /// O espaço de endereços próprio, quando o fio hospeda um processo.
+    ///
+    /// Fios do kernel não têm: eles rodam no espaço do kernel, que é o mesmo
+    /// para todos. Guardar o espaço **aqui** é o que faz ele morrer junto com
+    /// o fio — quando a vaga é reaproveitada, o `Fio` antigo é largado e o
+    /// `Drop` do espaço devolve as tabelas e as páginas do processo.
+    espaco: Option<crate::paginacao::Espaco>,
     /// Quantas vezes este fio já foi escalonado.
     escalonamentos: u64,
+}
+
+impl Fio {
+    /// A raiz de tradução em que este fio precisa rodar.
+    ///
+    /// Sem espaço próprio, o do kernel: é o caso de todo fio que não hospeda
+    /// processo, e também o caminho de volta quando um processo sai de cena.
+    fn raiz(&self) -> u64 {
+        match &self.espaco {
+            Some(espaco) => espaco.raiz(),
+            None => crate::arch::espaco_do_kernel(),
+        }
+    }
 }
 
 struct Escalonador {
@@ -188,6 +208,7 @@ pub fn init() {
             estado: Estado::Rodando,
             contexto: Contexto::vazio(),
             _pilha: None,
+            espaco: None,
             escalonamentos: 1,
         });
         e.atual = 0;
@@ -242,6 +263,7 @@ pub fn criar(
             estado: Estado::Reservado,
             contexto: Contexto::vazio(),
             _pilha: None,
+            espaco: None,
             escalonamentos: 0,
         });
         Ok::<_, &'static str>((vaga, anterior))
@@ -282,6 +304,7 @@ pub fn criar(
             estado: Estado::Pronto,
             contexto,
             _pilha: Some(pilha),
+            espaco: None,
             escalonamentos: 0,
         });
     });
@@ -330,6 +353,12 @@ pub struct Troca {
     pub de: *mut Contexto,
     /// De onde ler o contexto do fio que está entrando.
     pub para: *const Contexto,
+    /// A raiz de tradução em que o fio que entra precisa rodar.
+    ///
+    /// Vem resolvida daqui, e não do backend, porque a resposta depende da
+    /// tabela do escalonador — que só pode ser lida com a trava na mão. O
+    /// backend recebe um número e o instala se for diferente do atual.
+    pub espaco: u64,
 }
 
 /// Escolhe o próximo fio e prepara a troca, ou devolve `None` se não há para
@@ -376,11 +405,11 @@ pub unsafe fn selecionar() -> Option<Troca> {
     }
     let de: *mut Contexto = &mut fio_atual.contexto;
 
-    let para: *const Contexto = {
+    let (para, espaco): (*const Contexto, u64) = {
         let fio = e.fios[proximo].as_mut().expect("vaga conferida acima");
         fio.estado = Estado::Rodando;
         fio.escalonamentos += 1;
-        &fio.contexto
+        (&fio.contexto, fio.raiz())
     };
 
     e.atual = proximo;
@@ -390,7 +419,21 @@ pub unsafe fn selecionar() -> Option<Troca> {
     e.quantum = QUANTUM_EM_TIQUES;
     TROCAS.fetch_add(1, Ordering::Relaxed);
 
-    Some(Troca { de, para })
+    Some(Troca { de, para, espaco })
+}
+
+/// Entrega ao fio atual o espaço de endereços em que ele vai rodar.
+///
+/// Devolve o espaço que estava no lugar, se havia — largá-lo aqui dentro faria
+/// o `Drop` dele desmapear páginas com a trava do escalonador na mão, e o
+/// módulo inteiro evita aninhar travas por princípio. Quem chama larga o
+/// resultado quando quiser.
+#[must_use = "o espaco anterior precisa ser largado fora da trava"]
+pub fn adotar_espaco(espaco: crate::paginacao::Espaco) -> Option<crate::paginacao::Espaco> {
+    com_escalonador(|e| {
+        let atual = e.atual;
+        e.fios[atual].as_mut()?.espaco.replace(espaco)
+    })
 }
 
 /// Cede a CPU voluntariamente.
@@ -438,21 +481,6 @@ pub fn marcar_terminado() {
             fio.estado = Estado::Terminado;
         }
     });
-}
-
-/// O fio `id` ainda ocupa uma vaga e não terminou?
-///
-/// Serve a quem guarda o identificador de um fio e precisa saber, depois, se
-/// ele ainda existe. Comparar o identificador, e não a vaga, é o que torna a
-/// resposta confiável: vagas são reaproveitadas, identificadores não.
-#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
-pub fn esta_vivo(id: u64) -> bool {
-    com_escalonador(|e| {
-        e.fios
-            .iter()
-            .flatten()
-            .any(|f| f.id.numero() == id && f.estado != Estado::Terminado)
-    })
 }
 
 /// O fio atual já se encerrou?

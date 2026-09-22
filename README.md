@@ -394,18 +394,26 @@ pode transbordar na soma. O kernel não desreferencia nada antes de conferir
 que a faixa inteira está no espaço do usuário **e** mapeada — faixa por faixa,
 página por página, com aritmética saturante.
 
-O que ainda não existe é isolamento *entre* processos: eles compartilham o
-espaço de endereços do kernel, e por isso só cabe um por vez. O que já existe
-é a separação de **privilégio**. Uma tabela de tradução por processo é o passo
-seguinte.
+O que ainda não existe é um carregador de ELF — o programa é um punhado de
+bytes de instrução, não um executável — nem `fork`/`exec`.
 
-**"Um por vez" é imposto, não combinado.** Carregar um programa começa
-desmapeando o que estiver no espaço do usuário, então dois hospedeiros
-concorrentes arrancariam o chão um do outro — e o desfecho ruim não é o
-processo morrer, é o primeiro estar dentro de uma chamada de sistema e ler a
-memória do usuário depois de ela sumir, o que é uma falha de página com o
-kernel no comando. O espaço pertence a um fio até esse fio morrer, e um
-segundo `user.run` recebe a recusa na própria resposta.
+**Cada processo tem o seu espaço de endereços.** Uma tabela de tradução por
+processo, montada copiando as entradas de topo do kernel — o que mantém o
+kernel mapeado em todo espaço, sem o qual a instrução seguinte a uma troca não
+teria tradução. A entrada do usuário nasce vazia, e é a única que difere entre
+os espaços.
+
+O efeito é que dois processos usam `0x1_0000_0000` ao mesmo tempo apontando
+para memórias físicas diferentes. O escalonador instala o espaço do fio que
+entra a cada troca de contexto, e compara antes de escrever: fios do kernel
+compartilham o espaço, e trocar à toa custa a TLB inteira.
+
+O espaço morre com o fio que o hospeda. É um `Drop`, e não um par
+criar/destruir, porque um fio morre de várias maneiras — saindo, tomando uma
+falha, ou sendo arrancado quando a vaga dele é reaproveitada — e o caminho
+que se esquece de chamar `destruir` vaza tabelas até a memória acabar. Há um
+caso de teste que dá dez voltas de criar-mapear-destruir e exige que o
+alocador de frames volte ao número exato de antes.
 
 ## Testes
 
@@ -500,8 +508,8 @@ padronizado.
 - [x] **Fase 1 — Ring 3 e chamadas de sistema.** Processos em ring 3 e EL0,
       `syscall`/`sysret` e `svc`, páginas de usuário, validação de ponteiros e
       falha de processo que não derruba o kernel.
-- [ ] **Fase 1 — Processos isolados.** Uma tabela de tradução por processo,
-      carregador de ELF, `fork`/`exec`.
+- [ ] **Fase 1 — Processos isolados.** Uma tabela de tradução por processo
+      (**feito**), carregador de ELF, `fork`/`exec`.
 - [ ] **Fase 2 — Drivers.** Enumeração PCI, virtio-blk, virtio-net, timer
       APIC/HPET, framebuffer gráfico.
 
