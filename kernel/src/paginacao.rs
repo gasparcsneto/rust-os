@@ -84,6 +84,14 @@ pub fn mapear_novo(virtual_: u64, permissoes: Permissoes) -> Result<u64, &'stati
 /// Ela roda com as páginas **graváveis**, e é a única janela em que elas
 /// estão: depois que esta função retorna, o que foi pedido somente leitura já
 /// é somente leitura.
+///
+/// # O que acontece quando falha no meio
+///
+/// As páginas já mapeadas ficam onde estão. Isso é deliberado e não é um
+/// vazamento **porque todo chamador de hoje mapeia dentro de um
+/// [`Espaco`] que ele possui**: o `Drop` dele devolve tudo, mapeado pela
+/// metade ou não. Quem chamar isto fora dessa condição precisa desfazer o que
+/// ficou — a função não tem como saber a quem as páginas pertencem.
 pub fn mapear_faixa_preenchendo(
     inicio: u64,
     paginas: u64,

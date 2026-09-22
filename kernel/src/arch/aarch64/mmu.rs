@@ -903,17 +903,38 @@ unsafe fn liberar_subarvore(descritor: u64, nivel: u8) {
     }
     let endereco = descritor & MASCARA_ENDERECO;
 
-    // Em L1 e L2, `TABELA` desligado marca um **bloco** — 1 GiB ou 2 MiB de
-    // uma vez, sem tabela abaixo. O espaço do usuário não cria nenhum, mas
-    // conferir é mais barato que confiar: tratar um bloco como tabela
-    // liberaria 512 frames de outra pessoa.
-    if nivel > 0 && descritor & TABELA != 0 {
+    // O bit `TABELA` quer dizer coisas diferentes conforme o nível, e as duas
+    // leituras importam aqui.
+    let aponta_para_tabela = descritor & TABELA != 0;
+
+    if nivel > 0 {
+        // Em L1 e L2, `TABELA` desligado marca um **bloco**: 1 GiB ou 2 MiB de
+        // uma vez, sem tabela abaixo. Duas coisas não podem ser feitas com ele,
+        // e por muito tempo este código fazia a segunda.
+        //
+        // A primeira é descer: tratar um bloco como tabela leria dados como
+        // descritores e liberaria 512 frames de outra pessoa.
+        //
+        // A segunda é **devolvê-lo ao alocador**, que é o que acontecia. Ele
+        // rastreia frames de 4 KiB; entregar a base de um bloco de 2 MiB
+        // devolveria o primeiro pedaço e perderia o resto — pior que não
+        // devolver nada. O lado x86 já recusava isso; aqui não, e a diferença
+        // passou despercebida porque o espaço do usuário não cria blocos.
+        if !aponta_para_tabela {
+            crate::log_error!("mmu", "bloco grande no espaco do usuario, nao devolvido");
+            return;
+        }
+
         let tabela = endereco as *const u64;
         for i in 0..ENTRADAS {
             // SAFETY: `tabela` é uma tabela de 512 descritores do nível
             // abaixo, em memória identicamente mapeada.
             unsafe { liberar_subarvore(*tabela.add(i), nivel - 1) };
         }
+    } else if !aponta_para_tabela {
+        // Em L3 o mesmo bit marca uma **página**. Sem ele o descritor é
+        // reservado pela arquitetura e não aponta para frame nosso.
+        return;
     }
 
     crate::frames::liberar(endereco);
