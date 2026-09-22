@@ -81,13 +81,14 @@ cargo xtask test --arch aarch64
 cargo xtask debug                    # sobe congelado, esperando gdb/lldb
 cargo xtask simbolo 0xffff8000...    # endereço -> arquivo, linha e função
 cargo xtask asm consumir_pilha       # o que o otimizador realmente gerou
+cargo xtask elf                      # confere os ELFs de usuário por fora
 ```
 
 Com o kernel rodando, converse com ele de outro terminal:
 
 ```bash
 $ cargo xtask agent system.info
-{"jsonrpc":"2.0","id":1,"result":{"arch":"x86_64","kernel":"kernel",
+{"jsonrpc":"2.0","id":1,"result":{"arch":"x86_64","kernel":"duke",
  "version":"0.1.0","phase":"0","cpu_vendor":"AuthenticAMD",
  "framebuffer":{"width":1280,"height":720,"stride":1280,
  "bytes_per_pixel":3,"pixel_format":"bgr"},"log_records":5}}
@@ -366,10 +367,30 @@ $ cargo xtask agent log.tail '{"count":3}'
 
 As chamadas de sistema são quatro: `sair`, `escrever`, `id` e `ceder`.
 
-O programa é um punhado de bytes de instrução copiados para uma página — não
-um ELF. Um carregador de ELF é outra coisa difícil, e depurar duas de uma vez
-é o jeito mais confiável de não entender nenhuma. Assim a travessia de
-privilégio fica sozinha em cena: se algo falhar, foi ela.
+**O programa é um ELF64.** O cabeçalho diz onde a execução começa; cada
+segmento diz onde quer morar, quanto traz do arquivo, quanto ocupa na memória
+e com que permissões. Nada disso é confiado: cada campo é conferido antes de
+virar decisão, cada soma é testada contra transbordo, e um arquivo malformado
+devolve erro — nunca pânico, que num kernel é terminal.
+
+O carregador mapeia todo segmento como gravável, copia o conteúdo, zera o que
+sobra (a `.bss`) e **só então** aplica as permissões pedidas. Em nenhum
+instante existe uma página que o usuário possa escrever *e* executar.
+Segmentos que dividiriam uma página são recusados: permissão é propriedade da
+página, e a única negociação possível seria conceder a união — que é
+exatamente como se perde o `W^X`.
+
+O ELF de exemplo é montado no mesmo bloco de assembly que contém o programa,
+sem um segundo alvo de build. O arranjo tem uma fraqueza óbvia — quem escreve
+o cabeçalho e quem o lê são a mesma pessoa —, e por isso `cargo xtask elf`
+extrai as imagens do binário e as entrega ao `llvm-readelf`, que não tem nada
+a ver com este projeto.
+
+O programa usa endereços **absolutos** para alcançar a mensagem, e lê a
+própria `.bss` antes de sair. As duas coisas são propositais: só funcionam se
+o carregador tiver honrado `e_entry`, `p_vaddr` e a diferença entre `p_filesz`
+e `p_memsz`. Se a `.bss` chegar com lixo, o processo sai com outro código e o
+teste acusa.
 
 **A proteção é testada, não presumida.** Existe um segundo programa que tenta
 ler a memória do kernel. O caso `usuario: nao alcanca o kernel` exige duas
@@ -394,8 +415,7 @@ pode transbordar na soma. O kernel não desreferencia nada antes de conferir
 que a faixa inteira está no espaço do usuário **e** mapeada — faixa por faixa,
 página por página, com aritmética saturante.
 
-O que ainda não existe é um carregador de ELF — o programa é um punhado de
-bytes de instrução, não um executável — nem `fork`/`exec`.
+O que ainda não existe é `fork`/`exec`: um processo não cria outro.
 
 **Cada processo tem o seu espaço de endereços.** Uma tabela de tradução por
 processo, montada copiando as entradas de topo do kernel — o que mantém o
@@ -509,7 +529,7 @@ padronizado.
       `syscall`/`sysret` e `svc`, páginas de usuário, validação de ponteiros e
       falha de processo que não derruba o kernel.
 - [ ] **Fase 1 — Processos isolados.** Uma tabela de tradução por processo
-      (**feito**), carregador de ELF, `fork`/`exec`.
+      (**feito**), carregador de ELF (**feito**), `fork`/`exec`.
 - [ ] **Fase 2 — Drivers.** Enumeração PCI, virtio-blk, virtio-net, timer
       APIC/HPET, framebuffer gráfico.
 

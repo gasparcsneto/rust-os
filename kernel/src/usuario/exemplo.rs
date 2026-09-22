@@ -1,22 +1,42 @@
-//! Um programa de usuário mínimo, em assembly.
+//! Programas de usuário de exemplo, em ELF64 montado à mão.
 //!
-//! # Por que em assembly, e dentro do próprio binário
+//! # Por que o ELF é escrito em assembly, e não compilado à parte
 //!
-//! Porque o que se quer provar aqui é a travessia de privilégio, e nada mais.
-//! Um programa compilado à parte exigiria um segundo alvo de build, um
-//! carregador de ELF e uma biblioteca mínima — três coisas que podem falhar e
-//! que não têm relação com ring 3.
+//! Compilar um programa separado exigiria um segundo alvo de build, um script
+//! de linker próprio e a ordenação entre os dois builds. Nada disso é difícil,
+//! mas é infraestrutura — e o que está em teste aqui é o **carregador**.
 //!
-//! Estes poucos bytes fazem exatamente três coisas: uma chamada de sistema que
-//! escreve no descritor de saída, uma que encerra, e um laço de segurança caso
-//! alguma delas volte quando não deveria.
+//! Emitir o ELF no mesmo assembly do programa mantém o alvo único e dá uma
+//! vantagem real: cada byte do cabeçalho é escolhido e conferível, então uma
+//! falha do carregador não pode ser confundida com uma peculiaridade do
+//! linker. O assembler calcula os deslocamentos e tamanhos sozinho, de modo
+//! que editar o programa não desalinha o cabeçalho.
 //!
-//! # A restrição que o código precisa respeitar
+//! **A fraqueza do arranjo, dita em voz alta:** quem escreve o cabeçalho e
+//! quem o lê são a mesma pessoa, então um mal-entendido sobre o formato
+//! apareceria dos dois lados e se cancelaria. Por isso a imagem é conferida
+//! por ferramenta independente — `cargo xtask elf` roda o `llvm-readelf` sobre
+//! os bytes embutidos. Um programa compilado à parte continua sendo o passo
+//! natural seguinte.
 //!
-//! Ele é **copiado** para o endereço do processo, então todo acesso precisa ser
-//! relativo ao ponteiro de instrução. Um endereço absoluto apontaria de volta
-//! para dentro do kernel — onde o processo não tem permissão de tocar, e onde
-//! não deveria mesmo.
+//! # O que estes programas exercitam
+//!
+//! O exemplo usa endereços **absolutos** para alcançar a mensagem, e não mais
+//! deslocamentos relativos ao ponteiro de instrução. É de propósito: só
+//! funciona se o carregador tiver honrado `e_entry` e o `p_vaddr` de cada
+//! segmento. Ele também lê a `.bss` — os bytes que o segmento pede na memória
+//! além do que traz do arquivo — e sai com um código diferente se encontrar
+//! lixo ali.
+//!
+//! # O mapa que os dois segmentos desenham
+//!
+//! ```text
+//!   BASE          ┌──────────────┐
+//!                 │    código    │  R+X
+//!   BASE + 4 KiB  ├──────────────┤
+//!                 │    dados     │  R+W, com 8 bytes de .bss no fim
+//!                 └──────────────┘
+//! ```
 
 /// Código de saída que o invasor usaria se a proteção falhasse.
 ///
@@ -26,22 +46,27 @@
 #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub const CODIGO_DO_INVASOR: i64 = 99;
 
-/// Texto que o exemplo manda para o descritor de erro.
-///
-/// Está numa constante porque o teste procura exatamente este texto no log,
-/// em nível `error`. É o que prova que o descritor **escolhe o destino**: a
-/// mesma chamada, com outro número, produz um registro de outro nível.
-///
-/// O texto é igual nas duas arquiteturas de propósito — o que se quer
-/// comparar aqui é o roteamento, não a plataforma.
-#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
-pub const DIAGNOSTICO: &str = "diagnostico de userspace";
-
-/// Código de saída que o programa de exemplo devolve.
+/// Código de saída que o programa de exemplo devolve quando tudo deu certo.
 ///
 /// Um valor arbitrário e improvável: se ele aparecer do outro lado, veio daqui
 /// e de nenhum outro lugar.
 pub const CODIGO_DE_SAIDA: i64 = 42;
+
+/// Código de saída quando a `.bss` chegou com lixo.
+///
+/// Distinto do de sucesso de propósito. Sem ele, um carregador que esquecesse
+/// de zerar a memória além do que o arquivo traz passaria despercebido: o
+/// programa terminaria normalmente e ninguém saberia que uma variável global
+/// começou com o que o dono anterior do frame deixou lá.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub const CODIGO_DE_BSS_SUJA: i64 = 7;
+
+/// Texto que o exemplo manda para o descritor de erro.
+///
+/// Está numa constante porque o teste procura exatamente este texto no log,
+/// em nível `error`. É o que prova que o descritor **escolhe o destino**.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub const DIAGNOSTICO: &str = "diagnostico de userspace";
 
 unsafe extern "C" {
     #[link_name = "programa_exemplo_inicio"]
@@ -54,13 +79,13 @@ unsafe extern "C" {
     static INVASOR_FIM: u8;
 }
 
-/// Os bytes do programa bem-comportado.
+/// A imagem ELF do programa bem-comportado.
 pub fn bytes() -> &'static [u8] {
     // SAFETY: ver `entre`.
     unsafe { entre(&raw const INICIO, &raw const FIM) }
 }
 
-/// Os bytes de um programa que tenta ler a memória do kernel.
+/// A imagem ELF de um programa que tenta ler a memória do kernel.
 ///
 /// Existe para provar que a proteção é real. Um ring 3 que se entra mas não
 /// protege nada é só uma troca de contexto cara — o que precisa ser
@@ -73,8 +98,8 @@ pub fn bytes_invasores() -> &'static [u8] {
 }
 
 /// # Safety
-/// Os dois símbolos precisam delimitar uma região contígua da seção de código,
-/// na ordem em que o bloco de assembly os emite.
+/// Os dois símbolos precisam delimitar uma região contígua da seção, na ordem
+/// em que o bloco de assembly os emite.
 unsafe fn entre(inicio: *const u8, fim: *const u8) -> &'static [u8] {
     // SAFETY: delegada ao chamador; o linker preserva a ordem dos rótulos.
     unsafe {
@@ -86,30 +111,93 @@ unsafe fn entre(inicio: *const u8, fim: *const u8) -> &'static [u8] {
 #[cfg(target_arch = "x86_64")]
 core::arch::global_asm!(
     r#"
-.section .text.programa_exemplo
+.section .rodata.programa_exemplo
+.balign 8
+
+// O mapa que os dois segmentos desenham, em enderecos absolutos. O programa
+// os usa diretamente: so funciona se o carregador tiver honrado `p_vaddr`.
+.set BASE_USUARIO,     0x100000000
+.set VADDR_CODIGO,     BASE_USUARIO
+.set VADDR_DADOS,      BASE_USUARIO + 0x1000
+
+.set OFF_DIAG,         32
+.set TAM_DIAG,         24
+.set DADOS_NO_ARQUIVO, 64
+.set DADOS_NA_MEMORIA, DADOS_NO_ARQUIVO + 8
+
+.set VADDR_MENSAGEM,   VADDR_DADOS
+.set VADDR_DIAG,       VADDR_DADOS + OFF_DIAG
+.set VADDR_BSS,        VADDR_DADOS + DADOS_NO_ARQUIVO
+.set TAM_MENSAGEM, 13
+
 .global programa_exemplo_inicio
 programa_exemplo_inicio:
+
+// --- cabecalho ELF64 -------------------------------------------------------
+// Os deslocamentos e tamanhos sao diferencas entre rotulos: o assembler os
+// calcula, entao editar o programa nao desalinha o cabecalho.
+.Lelf_ex:
+    .byte   0x7F, 0x45, 0x4C, 0x46   // \x7fELF
+    .byte   2, 1, 1, 0               // 64 bits, little-endian, versao 1
+    .byte   0, 0, 0, 0, 0, 0, 0, 0   // resto do e_ident
+    .short  2                        // e_type: ET_EXEC
+    .short  0x3E                // e_machine
+    .long   1                        // e_version
+    .quad   VADDR_CODIGO             // e_entry
+    .quad   64                       // e_phoff: a tabela vem logo apos
+    .quad   0                        // e_shoff: sem secoes
+    .long   0                        // e_flags
+    .short  64                       // e_ehsize
+    .short  56                       // e_phentsize
+    .short  2                 // e_phnum
+    .short  0                        // e_shentsize
+    .short  0                        // e_shnum
+    .short  0                        // e_shstrndx
+
+    // segmento de codigo: leitura e execucao, nunca escrita
+    .long   1                                    // PT_LOAD
+    .long   5                                    // PF_R | PF_X
+    .quad   .Lcodigo_ex - .Lelf_ex // p_offset
+    .quad   VADDR_CODIGO                         // p_vaddr
+    .quad   VADDR_CODIGO                         // p_paddr
+    .quad   .Lfim_codigo_ex - .Lcodigo_ex  // p_filesz
+    .quad   .Lfim_codigo_ex - .Lcodigo_ex  // p_memsz
+    .quad   4096                                 // p_align
+
+    // segmento de dados: leitura e escrita. `p_memsz` maior que `p_filesz`
+    // pede 8 bytes a mais do que o arquivo traz — a `.bss`, que o carregador
+    // tem de entregar zerada.
+    .long   1                                  // PT_LOAD
+    .long   6                                  // PF_R | PF_W
+    .quad   .Ldados_ex - .Lelf_ex  // p_offset
+    .quad   VADDR_DADOS                        // p_vaddr
+    .quad   VADDR_DADOS                        // p_paddr
+    .quad   DADOS_NO_ARQUIVO                   // p_filesz
+    .quad   DADOS_NA_MEMORIA                   // p_memsz
+    .quad   4096                               // p_align
+
+.Lcodigo_ex:
     // escrever(SAIDA, mensagem, tamanho)
+    //
+    // O endereco da mensagem e absoluto, e nao relativo ao ponteiro de
+    // instrucao como era antes do ELF. E de proposito: so acerta se o
+    // carregador tiver posto o segmento de dados onde o cabecalho pediu.
     mov     edi, 1
-    // `lea` com deslocamento relativo ao RIP: o endereço da mensagem é
-    // calculado a partir de onde o código *está executando*, que é o espaço do
-    // usuário — e não de onde ele foi montado, que é dentro do kernel.
-    lea     rsi, [rip + .Lmensagem]
-    // `offset` é obrigatório: na sintaxe Intel, um símbolo sem ele é um
-    // *endereço de memória*, e `mov edx, TAMANHO` carregaria de 13 em vez de
-    // carregar 13. Foi exatamente esse o primeiro erro deste programa — falha
-    // de página no endereço 0xd, que é o tamanho da mensagem.
-    mov     edx, offset TAMANHO_DA_MENSAGEM
+    movabs  rsi, offset VADDR_MENSAGEM
+    mov     edx, offset TAM_MENSAGEM
     mov     eax, 1
     syscall
 
+    // A `.bss` precisa ter chegado zerada.
+    movabs  rax, offset VADDR_BSS
+    mov     rax, [rax]
+    test    rax, rax
+    jne     .Lbss_suja_ex
+
     // escrever(ERRO, diagnostico, tamanho)
-    //
-    // Mesma chamada, outro descritor. Esta sai no log em nivel `error`, e e
-    // isso que prova que a tabela de descritores escolhe o destino.
     mov     edi, 2
-    lea     rsi, [rip + .Ldiagnostico]
-    mov     edx, offset TAMANHO_DO_DIAGNOSTICO
+    movabs  rsi, offset VADDR_DIAG
+    mov     edx, offset TAM_DIAG
     mov     eax, 1
     syscall
 
@@ -118,40 +206,78 @@ programa_exemplo_inicio:
     mov     edi, 42
     syscall
 
-    // Inalcançável: `sair` não volta. Se voltar, girar aqui é melhor que
-    // executar o que houver na memória seguinte.
-.Lprender:
-    jmp     .Lprender
+    // Inalcancavel: `sair` nao volta. Se voltar, girar aqui e melhor que
+    // executar o que houver na memoria seguinte.
+.Lprender_ex:
+    jmp     .Lprender_ex
 
-.Lmensagem:
+.Lbss_suja_ex:
+    mov     eax, 0
+    mov     edi, 7
+    syscall
+    jmp     .Lbss_suja_ex
+.Lfim_codigo_ex:
+
+.Ldados_ex:
     .ascii  "ola do anel 3"
-.Lfim_da_mensagem:
-.set TAMANHO_DA_MENSAGEM, .Lfim_da_mensagem - .Lmensagem
-
-.Ldiagnostico:
+    .space  OFF_DIAG - 13
     .ascii  "diagnostico de userspace"
-.Lfim_do_diagnostico:
-.set TAMANHO_DO_DIAGNOSTICO, .Lfim_do_diagnostico - .Ldiagnostico
+    .space  DADOS_NO_ARQUIVO - OFF_DIAG - TAM_DIAG
+.Lfim_dados_ex:
 
 .global programa_exemplo_fim
 programa_exemplo_fim:
 
 // --- o invasor -------------------------------------------------------------
+.balign 8
 .global programa_invasor_inicio
 programa_invasor_inicio:
-    // Lê o primeiro endereço do kernel, que vive na metade alta. Um endereço
-    // de 64 bits não cabe num imediato comum, daí o `movabs`.
+
+// --- cabecalho ELF64 -------------------------------------------------------
+// Os deslocamentos e tamanhos sao diferencas entre rotulos: o assembler os
+// calcula, entao editar o programa nao desalinha o cabecalho.
+.Lelf_inv:
+    .byte   0x7F, 0x45, 0x4C, 0x46   // \x7fELF
+    .byte   2, 1, 1, 0               // 64 bits, little-endian, versao 1
+    .byte   0, 0, 0, 0, 0, 0, 0, 0   // resto do e_ident
+    .short  2                        // e_type: ET_EXEC
+    .short  0x3E                // e_machine
+    .long   1                        // e_version
+    .quad   VADDR_CODIGO             // e_entry
+    .quad   64                       // e_phoff: a tabela vem logo apos
+    .quad   0                        // e_shoff: sem secoes
+    .long   0                        // e_flags
+    .short  64                       // e_ehsize
+    .short  56                       // e_phentsize
+    .short  1                 // e_phnum
+    .short  0                        // e_shentsize
+    .short  0                        // e_shnum
+    .short  0                        // e_shstrndx
+
+    // segmento de codigo: leitura e execucao, nunca escrita
+    .long   1                                    // PT_LOAD
+    .long   5                                    // PF_R | PF_X
+    .quad   .Lcodigo_inv - .Lelf_inv // p_offset
+    .quad   VADDR_CODIGO                         // p_vaddr
+    .quad   VADDR_CODIGO                         // p_paddr
+    .quad   .Lfim_codigo_inv - .Lcodigo_inv  // p_filesz
+    .quad   .Lfim_codigo_inv - .Lcodigo_inv  // p_memsz
+    .quad   4096                                 // p_align
+
+.Lcodigo_inv:
+    // Le o primeiro endereco do kernel, que vive na metade alta.
     movabs  rax, 0xffff800000000000
     mov     rax, [rax]
 
-    // Inalcançável: a leitura acima é uma falha de proteção. Se chegarmos
-    // aqui, o processo saiu com um código que o teste reconhece como
+    // Inalcancavel: a leitura acima e uma falha de protecao. Se chegarmos
+    // aqui, o processo saiu com um codigo que o teste reconhece como
     // "a protecao nao funcionou".
     mov     eax, 0
     mov     edi, 99
     syscall
-.Lprender_invasor:
-    jmp     .Lprender_invasor
+.Lprender_inv:
+    jmp     .Lprender_inv
+.Lfim_codigo_inv:
 
 .global programa_invasor_fim
 programa_invasor_fim:
@@ -161,25 +287,98 @@ programa_invasor_fim:
 #[cfg(target_arch = "aarch64")]
 core::arch::global_asm!(
     r#"
-.section .text.programa_exemplo
+.section .rodata.programa_exemplo
+.balign 8
+
+// O mapa que os dois segmentos desenham, em enderecos absolutos. O programa
+// os usa diretamente: so funciona se o carregador tiver honrado `p_vaddr`.
+.set BASE_USUARIO,     0x100000000
+.set VADDR_CODIGO,     BASE_USUARIO
+.set VADDR_DADOS,      BASE_USUARIO + 0x1000
+
+.set OFF_DIAG,         32
+.set TAM_DIAG,         24
+.set DADOS_NO_ARQUIVO, 64
+.set DADOS_NA_MEMORIA, DADOS_NO_ARQUIVO + 8
+
+.set VADDR_MENSAGEM,   VADDR_DADOS
+.set VADDR_DIAG,       VADDR_DADOS + OFF_DIAG
+.set VADDR_BSS,        VADDR_DADOS + DADOS_NO_ARQUIVO
+.set TAM_MENSAGEM, 10
+
 .global programa_exemplo_inicio
 programa_exemplo_inicio:
+
+// --- cabecalho ELF64 -------------------------------------------------------
+// Os deslocamentos e tamanhos sao diferencas entre rotulos: o assembler os
+// calcula, entao editar o programa nao desalinha o cabecalho.
+.Lelf_ex:
+    .byte   0x7F, 0x45, 0x4C, 0x46   // \x7fELF
+    .byte   2, 1, 1, 0               // 64 bits, little-endian, versao 1
+    .byte   0, 0, 0, 0, 0, 0, 0, 0   // resto do e_ident
+    .short  2                        // e_type: ET_EXEC
+    .short  0xB7                // e_machine
+    .long   1                        // e_version
+    .quad   VADDR_CODIGO             // e_entry
+    .quad   64                       // e_phoff: a tabela vem logo apos
+    .quad   0                        // e_shoff: sem secoes
+    .long   0                        // e_flags
+    .short  64                       // e_ehsize
+    .short  56                       // e_phentsize
+    .short  2                 // e_phnum
+    .short  0                        // e_shentsize
+    .short  0                        // e_shnum
+    .short  0                        // e_shstrndx
+
+    // segmento de codigo: leitura e execucao, nunca escrita
+    .long   1                                    // PT_LOAD
+    .long   5                                    // PF_R | PF_X
+    .quad   .Lcodigo_ex - .Lelf_ex // p_offset
+    .quad   VADDR_CODIGO                         // p_vaddr
+    .quad   VADDR_CODIGO                         // p_paddr
+    .quad   .Lfim_codigo_ex - .Lcodigo_ex  // p_filesz
+    .quad   .Lfim_codigo_ex - .Lcodigo_ex  // p_memsz
+    .quad   4096                                 // p_align
+
+    // segmento de dados: leitura e escrita. `p_memsz` maior que `p_filesz`
+    // pede 8 bytes a mais do que o arquivo traz — a `.bss`, que o carregador
+    // tem de entregar zerada.
+    .long   1                                  // PT_LOAD
+    .long   6                                  // PF_R | PF_W
+    .quad   .Ldados_ex - .Lelf_ex  // p_offset
+    .quad   VADDR_DADOS                        // p_vaddr
+    .quad   VADDR_DADOS                        // p_paddr
+    .quad   DADOS_NO_ARQUIVO                   // p_filesz
+    .quad   DADOS_NA_MEMORIA                   // p_memsz
+    .quad   4096                               // p_align
+
+.Lcodigo_ex:
     // escrever(SAIDA, mensagem, tamanho)
+    //
+    // O endereco vem montado em tres pedacos de 16 bits porque o AArch64 nao
+    // tem imediato de 64 bits. E absoluto, e nao relativo ao PC como era antes
+    // do ELF: so acerta se o carregador tiver honrado `p_vaddr`.
     mov     x0, #1
-    // `adr` calcula o endereço relativo ao PC, pelo mesmo motivo do `lea`
-    // relativo ao RIP no x86: o código executa noutro endereço do que foi
-    // montado.
-    adr     x1, .Lmensagem
-    mov     x2, #TAMANHO_DA_MENSAGEM
+    movz    x1, #(VADDR_MENSAGEM & 0xFFFF)
+    movk    x1, #((VADDR_MENSAGEM >> 16) & 0xFFFF), lsl #16
+    movk    x1, #((VADDR_MENSAGEM >> 32) & 0xFFFF), lsl #32
+    mov     x2, #TAM_MENSAGEM
     mov     x8, #1
     svc     #0
 
+    // A `.bss` precisa ter chegado zerada.
+    movz    x9, #(VADDR_BSS & 0xFFFF)
+    movk    x9, #((VADDR_BSS >> 16) & 0xFFFF), lsl #16
+    movk    x9, #((VADDR_BSS >> 32) & 0xFFFF), lsl #32
+    ldr     x9, [x9]
+    cbnz    x9, .Lbss_suja_ex
+
     // escrever(ERRO, diagnostico, tamanho)
-    //
-    // Mesma chamada, outro descritor. Esta sai no log em nivel `error`.
     mov     x0, #2
-    adr     x1, .Ldiagnostico
-    mov     x2, #TAMANHO_DO_DIAGNOSTICO
+    movz    x1, #(VADDR_DIAG & 0xFFFF)
+    movk    x1, #((VADDR_DIAG >> 16) & 0xFFFF), lsl #16
+    movk    x1, #((VADDR_DIAG >> 32) & 0xFFFF), lsl #32
+    mov     x2, #TAM_DIAG
     mov     x8, #1
     svc     #0
 
@@ -188,38 +387,75 @@ programa_exemplo_inicio:
     mov     x0, #42
     svc     #0
 
-    // Inalcançável: `sair` não volta.
-.Lprender:
-    b       .Lprender
+    // Inalcancavel: `sair` nao volta.
+.Lprender_ex:
+    b       .Lprender_ex
 
-.Lmensagem:
+.Lbss_suja_ex:
+    mov     x8, #0
+    mov     x0, #7
+    svc     #0
+    b       .Lbss_suja_ex
+.Lfim_codigo_ex:
+
+.Ldados_ex:
     .ascii  "ola do EL0"
-.Lfim_da_mensagem:
-.set TAMANHO_DA_MENSAGEM, .Lfim_da_mensagem - .Lmensagem
-
-.Ldiagnostico:
+    .space  OFF_DIAG - 10
     .ascii  "diagnostico de userspace"
-.Lfim_do_diagnostico:
-.set TAMANHO_DO_DIAGNOSTICO, .Lfim_do_diagnostico - .Ldiagnostico
-    .balign 4
+    .space  DADOS_NO_ARQUIVO - OFF_DIAG - TAM_DIAG
+.Lfim_dados_ex:
 
 .global programa_exemplo_fim
 programa_exemplo_fim:
 
 // --- o invasor -------------------------------------------------------------
+.balign 8
 .global programa_invasor_inicio
 programa_invasor_inicio:
-    // Lê o começo da imagem do kernel, em 0x4008_0000. `movz` com
-    // deslocamento monta a metade alta do endereço num registrador.
+
+// --- cabecalho ELF64 -------------------------------------------------------
+// Os deslocamentos e tamanhos sao diferencas entre rotulos: o assembler os
+// calcula, entao editar o programa nao desalinha o cabecalho.
+.Lelf_inv:
+    .byte   0x7F, 0x45, 0x4C, 0x46   // \x7fELF
+    .byte   2, 1, 1, 0               // 64 bits, little-endian, versao 1
+    .byte   0, 0, 0, 0, 0, 0, 0, 0   // resto do e_ident
+    .short  2                        // e_type: ET_EXEC
+    .short  0xB7                // e_machine
+    .long   1                        // e_version
+    .quad   VADDR_CODIGO             // e_entry
+    .quad   64                       // e_phoff: a tabela vem logo apos
+    .quad   0                        // e_shoff: sem secoes
+    .long   0                        // e_flags
+    .short  64                       // e_ehsize
+    .short  56                       // e_phentsize
+    .short  1                 // e_phnum
+    .short  0                        // e_shentsize
+    .short  0                        // e_shnum
+    .short  0                        // e_shstrndx
+
+    // segmento de codigo: leitura e execucao, nunca escrita
+    .long   1                                    // PT_LOAD
+    .long   5                                    // PF_R | PF_X
+    .quad   .Lcodigo_inv - .Lelf_inv // p_offset
+    .quad   VADDR_CODIGO                         // p_vaddr
+    .quad   VADDR_CODIGO                         // p_paddr
+    .quad   .Lfim_codigo_inv - .Lcodigo_inv  // p_filesz
+    .quad   .Lfim_codigo_inv - .Lcodigo_inv  // p_memsz
+    .quad   4096                                 // p_align
+
+.Lcodigo_inv:
+    // Le o comeco da imagem do kernel, em 0x4008_0000.
     movz    x0, #0x4008, lsl #16
     ldr     x0, [x0]
 
-    // Inalcançável: a leitura acima é uma falha de proteção.
+    // Inalcancavel: a leitura acima e uma falha de protecao.
     mov     x8, #0
     mov     x0, #99
     svc     #0
-.Lprender_invasor:
-    b       .Lprender_invasor
+.Lprender_inv:
+    b       .Lprender_inv
+.Lfim_codigo_inv:
 
 .global programa_invasor_fim
 programa_invasor_fim:

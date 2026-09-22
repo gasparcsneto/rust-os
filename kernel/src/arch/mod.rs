@@ -161,17 +161,11 @@ impl Permissoes {
         usuario: true,
     };
 
-    /// Código de userspace: executável e somente leitura.
-    ///
-    /// Somente leitura não é zelo: código gravável permitiria a um processo
-    /// reescrever a si mesmo, e é a metade `W` do `W^X` que todo sistema
-    /// moderno mantém separada.
-    pub const CODIGO_USUARIO: Self = Self {
-        escrita: false,
-        executavel: true,
-        dispositivo: false,
-        usuario: true,
-    };
+    // Não existe uma constante para código de userspace: as permissões de cada
+    // segmento vêm do ELF que pediu por elas, montadas em
+    // `usuario::programa::carregar`. Uma constante aqui seria um segundo lugar
+    // com a mesma resposta, e o dia em que os dois discordassem o carregador
+    // silenciosamente ignoraria o que o programa pediu.
 }
 
 /// Identificação do processador, num buffer de tamanho fixo.

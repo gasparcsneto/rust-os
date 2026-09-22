@@ -1861,6 +1861,11 @@ fn usuario_executa_e_encerra() -> Resultado {
 
     match crate::usuario::ultima_saida() {
         Some(codigo) if codigo == crate::usuario::exemplo::CODIGO_DE_SAIDA => {}
+        // O programa confere a própria `.bss` antes de sair: se ele encontrou
+        // lixo onde o segmento pediu memória zerada, sai por este caminho.
+        Some(codigo) if codigo == crate::usuario::exemplo::CODIGO_DE_BSS_SUJA => {
+            return Err("a .bss do processo chegou com lixo");
+        }
         Some(outro) => {
             crate::log_error!("teste", "codigo de saida inesperado: {}", outro);
             return Err("o processo saiu com um codigo que nao e o dele");
@@ -2073,6 +2078,118 @@ fn memoria_espacos_isolam_o_mesmo_endereco() -> Resultado {
         }
         Ok(())
     })
+}
+
+/// O leitor de ELF aceita a imagem de exemplo e descreve o que ela pede.
+fn elf_aceita_a_imagem_de_exemplo() -> Resultado {
+    let imagem = crate::usuario::exemplo::bytes();
+    let elf = crate::usuario::elf::validar(imagem)?;
+
+    if elf.entrada() != crate::usuario::BASE {
+        return Err("o ponto de entrada nao e o inicio do espaco do usuario");
+    }
+
+    let segmentos = elf.segmentos();
+    if segmentos.len() != 2 {
+        return Err("a imagem de exemplo deveria ter dois segmentos carregaveis");
+    }
+
+    let codigo = &segmentos[0];
+    if !codigo.executavel || codigo.escrita {
+        return Err("o segmento de codigo nao e executavel-e-somente-leitura");
+    }
+
+    let dados = &segmentos[1];
+    if !dados.escrita || dados.executavel {
+        return Err("o segmento de dados nao e gravavel-e-nao-executavel");
+    }
+
+    // O que prova que a `.bss` existe como conceito nesta imagem: o segmento
+    // pede mais memória do que traz do arquivo.
+    if dados.bytes_na_memoria <= dados.bytes_no_arquivo {
+        return Err("o segmento de dados nao pede nenhuma .bss");
+    }
+    Ok(())
+}
+
+/// Um ELF malformado vira erro, nunca pânico.
+///
+/// # Por que a lista é longa
+///
+/// Cada caso corresponde a um campo que o arquivo controla e que o kernel usa
+/// para decidir onde escrever ou quanto copiar. Um `e_phnum` grande demais faz
+/// o kernel percorrer uma tabela que não existe; um `p_vaddr` fora da faixa
+/// faz ele escrever onde não deve; uma soma que transborda transforma um
+/// segmento enorme num que *parece* pequeno.
+///
+/// Hoje a imagem vem de dentro do próprio kernel e nenhum desses casos
+/// aconteceria por acaso. Mas o ponto de um carregador é aceitar programas de
+/// fora, e a hora de acertar isso é antes de existir quem os mande.
+fn elf_recusa_imagens_invalidas() -> Resultado {
+    use alloc::vec::Vec;
+
+    let valida = crate::usuario::exemplo::bytes();
+    if crate::usuario::elf::validar(valida).is_err() {
+        return Err("a imagem de exemplo deveria ser valida");
+    }
+
+    /// Uma avaria a aplicar sobre uma cópia da imagem válida, e o motivo pelo
+    /// qual o leitor precisa recusá-la.
+    type Avaria<'a> = (&'a dyn Fn(&mut Vec<u8>), &'a str);
+
+    let casos: &[Avaria] = &[
+        (&|v: &mut Vec<u8>| v.truncate(8), "cabecalho truncado"),
+        (&|v: &mut Vec<u8>| v[1] = b'X', "assinatura errada"),
+        (&|v: &mut Vec<u8>| v[4] = 1, "classe 32 bits"),
+        (&|v: &mut Vec<u8>| v[16] = 3, "ET_DYN em vez de ET_EXEC"),
+        (&|v: &mut Vec<u8>| v[18] ^= 0xFF, "outra arquitetura"),
+        (
+            &|v: &mut Vec<u8>| v[24..32].copy_from_slice(&0u64.to_le_bytes()),
+            "entrada fora do espaco do usuario",
+        ),
+        (
+            &|v: &mut Vec<u8>| v[54..56].copy_from_slice(&32u16.to_le_bytes()),
+            "p_entsize inesperado",
+        ),
+        (
+            &|v: &mut Vec<u8>| v[56..58].copy_from_slice(&4096u16.to_le_bytes()),
+            "e_phnum maior que a imagem",
+        ),
+        (
+            &|v: &mut Vec<u8>| v[56..58].copy_from_slice(&0u16.to_le_bytes()),
+            "nenhum segmento carregavel",
+        ),
+        (
+            &|v: &mut Vec<u8>| v[68..72].copy_from_slice(&7u32.to_le_bytes()),
+            "segmento pedindo escrita e execucao",
+        ),
+        (
+            &|v: &mut Vec<u8>| v[80..88].copy_from_slice(&0u64.to_le_bytes()),
+            "p_vaddr fora do espaco do usuario",
+        ),
+        (
+            &|v: &mut Vec<u8>| v[96..104].copy_from_slice(&u64::MAX.to_le_bytes()),
+            "p_filesz que transborda",
+        ),
+        (
+            &|v: &mut Vec<u8>| v[104..112].copy_from_slice(&0u64.to_le_bytes()),
+            "p_memsz menor que p_filesz",
+        ),
+        (
+            &|v: &mut Vec<u8>| v[72..80].copy_from_slice(&(1u64 << 40).to_le_bytes()),
+            "p_offset alem do fim da imagem",
+        ),
+    ];
+
+    for (estragar, motivo) in casos {
+        let mut copia: Vec<u8> = valida.to_vec();
+        estragar(&mut copia);
+        if crate::usuario::elf::validar(&copia).is_ok() {
+            crate::log_error!("teste", "aceitou um ELF com {}", motivo);
+            return Err("o leitor de ELF aceitou uma imagem invalida");
+        }
+    }
+    Ok(())
 }
 
 /// Desmapear uma página do kernel não pode soltar uma tabela que outros
@@ -2701,6 +2818,14 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "usuario: descritor e conferido",
         f: usuario_descritor_e_conferido,
+    },
+    Caso {
+        nome: "elf: aceita a imagem de exemplo",
+        f: elf_aceita_a_imagem_de_exemplo,
+    },
+    Caso {
+        nome: "elf: recusa imagens invalidas",
+        f: elf_recusa_imagens_invalidas,
     },
     Caso {
         nome: "memoria: desmapear do kernel vale em todo espaco",

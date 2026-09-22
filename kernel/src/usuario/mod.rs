@@ -32,6 +32,7 @@
 //! existe é a separação de *privilégio*: o processo não alcança as páginas do
 //! kernel, porque elas não têm o bit de usuário.
 
+pub mod elf;
 pub mod exemplo;
 pub mod programa;
 

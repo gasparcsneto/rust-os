@@ -167,6 +167,7 @@ fn main() -> ExitCode {
             Some(simbolo) => desmontar(arch, release, simbolo),
             None => Err("uso: cargo xtask asm <simbolo>".into()),
         },
+        "elf" => conferir_elfs(arch, release),
         "help" | "-h" => {
             ajuda();
             Ok(ExitCode::SUCCESS)
@@ -218,6 +219,7 @@ COMANDOS:
     debug                     sobe o kernel parado, esperando um depurador
     simbolo <endereco>...     traduz endereços de execução em arquivo e linha
     asm <simbolo>             desmonta uma função do binário compilado
+    elf                       confere os programas de usuário embutidos
     help                      mostra esta mensagem
 
 EXEMPLOS:
@@ -417,6 +419,143 @@ fn ferramenta_llvm(nome: &str) -> Result<PathBuf, String> {
         "{nome} não encontrado em {}\n\
          instale o componente com: rustup component add llvm-tools",
         rustlib.display()
+    ))
+}
+
+/// Confere as imagens ELF dos programas de usuário com ferramenta de fora.
+///
+/// # Por que este comando existe
+///
+/// Os ELFs dos programas de exemplo são montados à mão, no mesmo bloco de
+/// assembly que contém o código. O arranjo tem uma vantagem — cada byte do
+/// cabeçalho é escolhido e conferível — e uma fraqueza óbvia: quem escreve o
+/// cabeçalho e quem o lê são a mesma pessoa. Um mal-entendido sobre o formato
+/// apareceria nos dois lados e se cancelaria, e o carregador "funcionaria"
+/// sobre um ELF que nenhuma outra ferramenta aceitaria.
+///
+/// Este comando extrai as imagens de dentro do binário do kernel e as entrega
+/// ao `llvm-readelf`, que não tem nada a ver com este projeto. Se ele lê os
+/// cabeçalhos e os segmentos, o formato está certo por um caminho
+/// independente.
+fn conferir_elfs(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
+    build(arch, release, false)?;
+    let kernel = caminho_elf(arch, release);
+    let readelf = ferramenta_llvm("llvm-readelf")?;
+
+    let bytes = std::fs::read(&kernel)
+        .map_err(|e| format!("não foi possível ler {}: {e}", kernel.display()))?;
+    let simbolos = simbolos_do_kernel(&kernel)?;
+
+    let saida = raiz_do_projeto().join("target").join("elfs");
+    std::fs::create_dir_all(&saida)
+        .map_err(|e| format!("não foi possível criar {saida:?}: {e}"))?;
+
+    let mut falhou = false;
+    for nome in ["exemplo", "invasor"] {
+        let inicio = buscar(&simbolos, &format!("programa_{nome}_inicio"))?;
+        let fim = buscar(&simbolos, &format!("programa_{nome}_fim"))?;
+
+        let a = deslocamento_no_arquivo(&bytes, inicio)?;
+        let b = deslocamento_no_arquivo(&bytes, fim)?;
+        if b <= a {
+            return Err(format!("os rótulos de `{nome}` estão fora de ordem"));
+        }
+
+        let caminho = saida.join(format!("{nome}.elf"));
+        std::fs::write(&caminho, &bytes[a..b])
+            .map_err(|e| format!("não foi possível escrever {caminho:?}: {e}"))?;
+
+        println!("\n[xtask] {nome}: {} bytes -> {}", b - a, caminho.display());
+        let status = Command::new(&readelf)
+            .args(["--file-header", "--program-headers"])
+            .arg(&caminho)
+            .status()
+            .map_err(|e| format!("não foi possível invocar o llvm-readelf: {e}"))?;
+        if !status.success() {
+            eprintln!("[xtask] o llvm-readelf recusou a imagem de `{nome}`");
+            falhou = true;
+        }
+    }
+
+    if falhou {
+        return Err("uma das imagens não passou pelo llvm-readelf".into());
+    }
+    println!("\n[xtask] as duas imagens são ELF64 válidos para ferramenta de fora");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Tabela `nome -> endereço` dos símbolos do kernel, via `llvm-nm`.
+fn simbolos_do_kernel(kernel: &Path) -> Result<Vec<(String, u64)>, String> {
+    let nm = ferramenta_llvm("llvm-nm")?;
+    let saida = Command::new(&nm)
+        .arg(kernel)
+        .output()
+        .map_err(|e| format!("não foi possível invocar o llvm-nm: {e}"))?;
+    if !saida.status.success() {
+        return Err("o llvm-nm falhou ao ler o binário do kernel".into());
+    }
+
+    let texto = String::from_utf8_lossy(&saida.stdout);
+    let mut tabela = Vec::new();
+    for linha in texto.lines() {
+        // `<endereço> <tipo> <nome>`; símbolos indefinidos vêm sem endereço.
+        let campos: Vec<&str> = linha.split_whitespace().collect();
+        if campos.len() == 3
+            && let Ok(endereco) = u64::from_str_radix(campos[0], 16)
+        {
+            tabela.push((campos[2].to_string(), endereco));
+        }
+    }
+    Ok(tabela)
+}
+
+fn buscar(tabela: &[(String, u64)], nome: &str) -> Result<u64, String> {
+    tabela
+        .iter()
+        .find(|(s, _)| s == nome)
+        .map(|(_, e)| *e)
+        .ok_or_else(|| format!("símbolo `{nome}` não encontrado no binário do kernel"))
+}
+
+/// Onde, dentro do arquivo, mora um endereço virtual do kernel.
+///
+/// Percorre os segmentos `PT_LOAD` do próprio binário. É um parser de ELF de
+/// dez linhas porque é tudo que precisamos — e porque a alternativa seria
+/// interpretar a saída de texto de outra ferramenta, que muda de formato entre
+/// versões sem avisar.
+fn deslocamento_no_arquivo(elf: &[u8], virtual_: u64) -> Result<usize, String> {
+    let ler_u64 = |p: usize| -> u64 {
+        let mut o = [0u8; 8];
+        o.copy_from_slice(&elf[p..p + 8]);
+        u64::from_le_bytes(o)
+    };
+    let ler_u16 = |p: usize| -> u16 { u16::from_le_bytes([elf[p], elf[p + 1]]) };
+
+    if elf.len() < 64 || &elf[..4] != b"\x7fELF" {
+        return Err("o binário do kernel não é um ELF".into());
+    }
+    let tabela = ler_u64(32) as usize;
+    let tamanho = ler_u16(54) as usize;
+    let quantos = ler_u16(56) as usize;
+
+    for i in 0..quantos {
+        let base = tabela + i * tamanho;
+        if base + 56 > elf.len() {
+            break;
+        }
+        // 1 = PT_LOAD.
+        if u32::from_le_bytes([elf[base], elf[base + 1], elf[base + 2], elf[base + 3]]) != 1 {
+            continue;
+        }
+        let deslocamento = ler_u64(base + 8);
+        let vaddr = ler_u64(base + 16);
+        let no_arquivo = ler_u64(base + 32);
+        if virtual_ >= vaddr && virtual_ < vaddr + no_arquivo {
+            return Ok((deslocamento + (virtual_ - vaddr)) as usize);
+        }
+    }
+    Err(format!(
+        "o endereço {virtual_:#x} não está em nenhum segmento carregável"
     ))
 }
 

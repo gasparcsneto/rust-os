@@ -30,7 +30,7 @@
 
 use crate::arch::{Permissoes, TAMANHO_PAGINA};
 
-use super::{BASE, TETO};
+use super::TETO;
 
 /// Onde a pilha do processo termina (o endereço mais alto, exclusivo).
 const TOPO_DA_PILHA: u64 = TETO;
@@ -63,19 +63,44 @@ impl Programa {
     }
 }
 
-/// Mapeia o código e a pilha de um processo.
+/// Mapeia os segmentos de um ELF e a pilha de um processo.
 ///
-/// O código é copiado enquanto a página ainda é gravável e só então passa a
-/// executável e somente leitura. É a ordem que mantém `W^X`: em nenhum
-/// instante existe uma página que o usuário possa escrever **e** executar.
-pub fn carregar(codigo: &[u8]) -> Result<Programa, &'static str> {
-    if codigo.is_empty() {
-        return Err("programa vazio");
-    }
+/// # A ordem, e por que ela mantém `W^X`
+///
+/// Todo segmento é mapeado primeiro como **gravável e não executável**, para
+/// que o conteúdo possa ser copiado e o resto zerado. Só depois cada um recebe
+/// as permissões que pediu. Em nenhum instante existe uma página que o usuário
+/// possa escrever *e* executar — e é por isso que a segunda passada existe em
+/// vez de mapear já com a permissão final.
+///
+/// # Por que segmentos que dividem página são recusados
+///
+/// Permissão é propriedade da página, não do segmento. Dois segmentos na mesma
+/// página teriam de negociar, e a única negociação segura seria conceder a
+/// união das permissões — que é exatamente como se perde o `W^X`. Um linker
+/// alinha segmentos a página justamente por isso, então recusar não rejeita
+/// nada legítimo.
+pub fn carregar(imagem: &[u8]) -> Result<Programa, &'static str> {
+    let elf = super::elf::validar(imagem)?;
 
-    let paginas_de_codigo = (codigo.len() as u64).div_ceil(TAMANHO_PAGINA);
-    if BASE + paginas_de_codigo * TAMANHO_PAGINA > GUARD_DA_PILHA {
-        return Err("programa nao cabe no espaco do usuario");
+    // As faixas de página de cada segmento, conferidas antes de qualquer
+    // mapeamento: descobrir a sobreposição no meio da carga deixaria o espaço
+    // meio montado.
+    let mut faixas = [(0u64, 0u64); super::elf::MAX_SEGMENTOS];
+    let segmentos = elf.segmentos();
+    for (i, segmento) in segmentos.iter().enumerate() {
+        faixas[i] = faixa_de_paginas(segmento.destino, segmento.bytes_na_memoria as u64)?;
+    }
+    for i in 0..segmentos.len() {
+        for j in (i + 1)..segmentos.len() {
+            if faixas[i].0 < faixas[j].1 && faixas[j].0 < faixas[i].1 {
+                return Err("dois segmentos dividem a mesma pagina");
+            }
+        }
+        // A pilha é do kernel para dar, não do programa para pedir.
+        if faixas[i].0 < TOPO_DA_PILHA && GUARD_DA_PILHA < faixas[i].1 {
+            return Err("um segmento invade a pilha do processo");
+        }
     }
 
     // O espaço próprio vem antes de qualquer mapeamento, porque é *nele* que
@@ -94,36 +119,81 @@ pub fn carregar(codigo: &[u8]) -> Result<Programa, &'static str> {
     // Só agora: o espaço anterior deste fio, se havia, deixou de estar ativo.
     drop(anterior);
 
-    // Fase 1: gravável, para podermos copiar.
-    for i in 0..paginas_de_codigo {
-        crate::paginacao::mapear_novo(BASE + i * TAMANHO_PAGINA, Permissoes::DADOS_USUARIO)?;
+    // Primeira passada: graváveis, para copiar.
+    for (i, segmento) in segmentos.iter().enumerate() {
+        let (inicio, fim) = faixas[i];
+        let mut endereco = inicio;
+        while endereco < fim {
+            crate::paginacao::mapear_novo(endereco, Permissoes::DADOS_USUARIO)?;
+            endereco += TAMANHO_PAGINA;
+        }
+
+        let conteudo = elf.conteudo(segmento);
+
+        // SAFETY: as páginas que cobrem `[destino, destino + bytes_na_memoria)`
+        // acabaram de ser mapeadas com escrita no espaço deste processo, e o
+        // validador garantiu que a faixa inteira está no espaço do usuário.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                conteudo.as_ptr(),
+                segmento.destino as *mut u8,
+                conteudo.len(),
+            );
+
+            // O que o segmento pede além do que o arquivo traz é a `.bss`, e
+            // ela **precisa** chegar zerada. `mapear_novo` já entrega páginas
+            // limpas, mas depender disso seria depender de um detalhe de outro
+            // módulo para uma garantia que é deste.
+            let resto = segmento.bytes_na_memoria - conteudo.len();
+            core::ptr::write_bytes(
+                (segmento.destino + conteudo.len() as u64) as *mut u8,
+                0,
+                resto,
+            );
+        }
     }
 
-    // SAFETY: as páginas acabaram de ser mapeadas no espaço deste processo e
-    // são exclusivas dele; `paginas_de_codigo` foi calculado para caber
-    // `codigo` inteiro.
-    unsafe {
-        core::ptr::copy_nonoverlapping(codigo.as_ptr(), BASE as *mut u8, codigo.len());
-    }
+    // Segunda passada: cada segmento recebe o que pediu.
+    for (i, segmento) in segmentos.iter().enumerate() {
+        let permissoes = Permissoes {
+            escrita: segmento.escrita,
+            executavel: segmento.executavel,
+            dispositivo: false,
+            usuario: true,
+        };
 
-    // Fase 2: executável e somente leitura. Desmapear e remapear o mesmo frame
-    // é o caminho que a API de paginação já oferece; o intervalo entre as duas
-    // operações não é observável porque ninguém mais alcança este endereço.
-    for i in 0..paginas_de_codigo {
-        let endereco = BASE + i * TAMANHO_PAGINA;
-        let frame = crate::arch::desmapear(endereco)?;
-        // SAFETY: o frame acabou de sair deste mesmo endereço virtual, então
-        // não está em uso por nenhum outro mapeamento.
-        unsafe { crate::arch::mapear_frame(endereco, frame, Permissoes::CODIGO_USUARIO)? };
+        let (inicio, fim) = faixas[i];
+        let mut endereco = inicio;
+        while endereco < fim {
+            let frame = crate::arch::desmapear(endereco)?;
+            // SAFETY: o frame acabou de sair deste mesmo endereço virtual,
+            // então não está em uso por nenhum outro mapeamento.
+            unsafe { crate::arch::mapear_frame(endereco, frame, permissoes)? };
+            endereco += TAMANHO_PAGINA;
+        }
     }
 
     crate::paginacao::mapear_novo(BASE_DA_PILHA, Permissoes::DADOS_USUARIO)?;
 
     Ok(Programa {
-        entrada: BASE,
+        entrada: elf.entrada(),
         // As duas ABIs exigem alinhamento de 16 no ponteiro de pilha.
         topo_da_pilha: TOPO_DA_PILHA & !0xF,
     })
+}
+
+/// As páginas que cobrem `[inicio, inicio + tamanho)`.
+///
+/// Devolve `[primeira, fim_exclusivo)`, os dois alinhados a página. O
+/// arredondamento para cima usa `div_ceil` em vez de somar `TAMANHO_PAGINA - 1`
+/// porque os dois números vêm do arquivo, e a soma transbordaria em silêncio.
+fn faixa_de_paginas(inicio: u64, tamanho: u64) -> Result<(u64, u64), &'static str> {
+    let primeira = inicio & !(TAMANHO_PAGINA - 1);
+    let fim = inicio
+        .checked_add(tamanho)
+        .ok_or("segmento com tamanho que transborda")?;
+    let ultima = fim.div_ceil(TAMANHO_PAGINA) * TAMANHO_PAGINA;
+    Ok((primeira, ultima.max(primeira + TAMANHO_PAGINA)))
 }
 
 /// Carrega `codigo` e desce para o anel sem privilégio. Nunca retorna.
@@ -135,8 +205,8 @@ pub fn carregar(codigo: &[u8]) -> Result<Programa, &'static str> {
 /// O mapeamento **sobrevive** a esta função: o processo continua executando
 /// depois dela, e desmontá-lo aqui puxaria o chão de baixo dele. Quem o desfaz
 /// é a morte deste fio, que larga o espaço de endereços inteiro de uma vez.
-pub fn executar(codigo: &[u8]) -> Result<core::convert::Infallible, &'static str> {
-    let programa = carregar(codigo)?;
+pub fn executar(imagem: &[u8]) -> Result<core::convert::Infallible, &'static str> {
+    let programa = carregar(imagem)?;
 
     let pilha_de_kernel = crate::fios::pilha_de_kernel_atual();
     if pilha_de_kernel == 0 {
