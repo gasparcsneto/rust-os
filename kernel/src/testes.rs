@@ -1443,6 +1443,140 @@ fn dormentes_devolvem_a_vaga() -> Resultado {
     Ok(())
 }
 
+// ===========================================================================
+// Robustez descoberta em revisão
+// ===========================================================================
+
+/// Uma região degenerada não pode entrar no mapa da máquina.
+///
+/// O caso existe porque uma região com `fim <= inicio` envenena tudo a
+/// jusante: o alocador de frames calcula uma janela sem sentido, e a montagem
+/// do mapa de identidade no ARM faz `fim - 1`, que numa região com `fim == 0`
+/// entra em underflow — pânico em debug, e em release um índice gigante que
+/// mapearia meio espaço de endereços como RAM.
+fn machine_recusa_regiao_degenerada() -> Resultado {
+    use crate::machine::{Regiao, TipoRegiao};
+
+    let (_, _, antes) = crate::machine::estatisticas();
+    let descartadas_antes = crate::machine::regioes_descartadas();
+
+    // Tamanho zero.
+    crate::machine::adicionar_regiao(Regiao {
+        inicio: 0x1_0000,
+        fim: 0x1_0000,
+        tipo: TipoRegiao::Utilizavel,
+    });
+    // Invertida, como sairia de uma soma que transbordou na origem.
+    crate::machine::adicionar_regiao(Regiao {
+        inicio: 0x2_0000,
+        fim: 0,
+        tipo: TipoRegiao::Utilizavel,
+    });
+
+    let (_, _, depois) = crate::machine::estatisticas();
+    if depois != antes {
+        crate::log_error!("teste", "{} regioes -> {}", antes, depois);
+        return Err("regiao degenerada entrou no mapa");
+    }
+    if crate::machine::regioes_descartadas() != descartadas_antes + 2 {
+        return Err("descarte de regiao degenerada nao foi contabilizado");
+    }
+    Ok(())
+}
+
+/// Contabilizar uma falha não pode depender de conseguir a trava.
+///
+/// É o caminho que roda dentro de handlers de exceção. Uma exceção acontece em
+/// qualquer instrução — inclusive numa que já segure a trava de `traps` —, e
+/// mascarar interrupções não impede exceções síncronas. Se `registrar`
+/// bloqueasse, o kernel travaria em silêncio exatamente quando deveria relatar
+/// a falha.
+///
+/// Aqui seguramos a trava e chamamos `registrar` de dentro: se ela bloquear, o
+/// teste pendura e o teto do xtask o mata — que é o sintoma que queremos
+/// impedir de voltar.
+fn traps_registrar_nao_bloqueia() -> Resultado {
+    let total_antes = crate::traps::total();
+    let perdidos_antes = crate::traps::detalhes_perdidos();
+
+    // Simula a exceção acontecendo com a trava na mão de código interrompido.
+    let seq = crate::traps::com_trava_ocupada(|| {
+        crate::traps::registrar("teste_sintetico", 0xC0FFEE, Some(0x1234), 0)
+    });
+
+    if crate::traps::total() != total_antes + 1 {
+        return Err("o total de falhas nao avancou");
+    }
+    if seq != total_antes {
+        return Err("o numero de sequencia nao corresponde ao total anterior");
+    }
+    // O detalhamento tinha de ser pulado, e a perda contabilizada.
+    if crate::traps::detalhes_perdidos() != perdidos_antes + 1 {
+        return Err("a perda de detalhamento nao foi contabilizada");
+    }
+    Ok(())
+}
+
+/// Com a trava livre, o detalhamento precisa de fato ser gravado.
+///
+/// Sem este par, o caso acima passaria com uma `registrar` que nunca grava
+/// nada.
+fn traps_registrar_grava_detalhe() -> Resultado {
+    let perdidos_antes = crate::traps::detalhes_perdidos();
+    let seq = crate::traps::registrar("teste_detalhado", 0xBEEF, Some(0x99), 7);
+
+    if crate::traps::detalhes_perdidos() != perdidos_antes {
+        return Err("perdeu detalhamento com a trava livre");
+    }
+    match crate::traps::ultima() {
+        Some(f) if f.nome == "teste_detalhado" && f.pc == 0xBEEF && f.seq == seq => Ok(()),
+        Some(f) => {
+            crate::log_error!(
+                "teste",
+                "ultima falha veio como `{}` pc={:#x}",
+                f.nome,
+                f.pc
+            );
+            Err("a ultima falha registrada nao confere")
+        }
+        None => Err("nenhuma falha registrada"),
+    }
+}
+
+/// Dormir sem timer não pode ser dormir para sempre.
+///
+/// Sem relógio ninguém chama `tique`, então uma tarefa que peça um tique de
+/// espera nunca mais seria acordada. O contrato é devolver um prazo já
+/// vencido: a tarefa cede uma vez e segue.
+fn relogio_sem_timer_nao_trava() -> Resultado {
+    static CONCLUIU: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+    async fn corpo() {
+        // Zero tiques é o mesmo prazo já vencido que `por_ms` produz quando
+        // não há timer; exercita o caminho sem precisar desligar o relógio.
+        crate::tarefas::relogio::por_ticks(0).await;
+        CONCLUIU.store(true, core::sync::atomic::Ordering::SeqCst);
+    }
+
+    CONCLUIU.store(false, core::sync::atomic::Ordering::SeqCst);
+
+    let mut executor = crate::tarefas::executor::Executor::novo();
+    executor.lancar(crate::tarefas::Tarefa::nova("teste-sem-timer", corpo()));
+
+    // Teto de **uma** rodada, e o número importa. Um prazo já vencido resolve
+    // na primeira polagem, sem depender de interrupção nenhuma. Um prazo de um
+    // tique também terminaria — mas só depois de dormir até o timer disparar,
+    // o que exige uma segunda rodada. Com teto 2 este caso passaria mesmo com
+    // o bug de volta, porque o relógio *deste* teste funciona; é o teto 1 que
+    // distingue "resolveu sozinho" de "precisou do timer".
+    executor.rodar_ate_esvaziar(1)?;
+
+    if !CONCLUIU.load(core::sync::atomic::Ordering::SeqCst) {
+        return Err("a tarefa nao terminou com prazo ja vencido");
+    }
+    Ok(())
+}
+
 static CASOS: &[Caso] = &[
     Caso {
         nome: "json: objeto simples",
@@ -1671,6 +1805,22 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "tarefa: dormentes devolvem vaga",
         f: dormentes_devolvem_a_vaga,
+    },
+    Caso {
+        nome: "tarefa: sem timer nao trava",
+        f: relogio_sem_timer_nao_trava,
+    },
+    Caso {
+        nome: "machine: recusa regiao degenerada",
+        f: machine_recusa_regiao_degenerada,
+    },
+    Caso {
+        nome: "traps: registrar nao bloqueia",
+        f: traps_registrar_nao_bloqueia,
+    },
+    Caso {
+        nome: "traps: registrar grava detalhe",
+        f: traps_registrar_grava_detalhe,
     },
 ];
 

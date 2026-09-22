@@ -62,6 +62,12 @@ struct Anel<T: Copy, const N: usize> {
 
 impl<T: Copy, const N: usize> Fila<T, N> {
     pub const fn nova() -> Self {
+        // Capacidade zero tornaria os `% N` das duas operações uma divisão por
+        // zero. Como `N` é sempre uma constante escolhida por nós, dá para
+        // recusar em tempo de compilação em vez de descobrir com um pânico
+        // dentro de um handler de interrupção.
+        const { assert!(N > 0, "uma fila precisa de capacidade maior que zero") };
+
         Self {
             interior: Mutex::new(Anel {
                 itens: [const { None }; N],

@@ -23,6 +23,8 @@
 //! É exatamente o tipo de coisa que só vale a pena construir num OS projetado
 //! para ser operado por um agente, e é barata porque o canal já existe.
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use spin::Mutex;
 
 /// Quantos tipos distintos de falha conseguimos contabilizar.
@@ -58,15 +60,26 @@ struct Estado {
     contadores: [Contador; MAX_TIPOS],
     n: usize,
     ultima: Option<Falha>,
-    total: u64,
 }
 
 static ESTADO: Mutex<Estado> = Mutex::new(Estado {
     contadores: [Contador { nome: "", total: 0 }; MAX_TIPOS],
     n: 0,
     ultima: None,
-    total: 0,
 });
+
+/// Total de falhas desde o boot.
+///
+/// Vive fora do `Mutex` de propósito. É o único número que **precisa** estar
+/// certo mesmo quando o detalhamento não pôde ser gravado — ver [`registrar`].
+static TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// Falhas cujo detalhamento se perdeu porque a trava estava ocupada.
+///
+/// Um valor diferente de zero aqui significa que uma exceção aconteceu dentro
+/// de uma seção crítica deste módulo. É raro, e é exatamente o tipo de coisa
+/// que precisa aparecer em vez de sumir.
+static DETALHES_PERDIDOS: AtomicU64 = AtomicU64::new(0);
 
 /// Uma falha que o código em execução espera provocar de propósito.
 ///
@@ -81,41 +94,64 @@ static ESPERADA: Mutex<Option<&'static str>> = Mutex::new(None);
 /// Declara que a próxima falha fatal com este nome é esperada.
 #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub fn esperar(nome: &'static str) {
-    *ESPERADA.lock() = Some(nome);
+    crate::arch::sem_interrupcoes(|| *ESPERADA.lock() = Some(nome));
 }
 
 /// Contabiliza uma falha e devolve seu número de sequência.
+///
+/// # Por que esta função não pode bloquear
+///
+/// Ela roda dentro de handlers de exceção, e uma exceção acontece em
+/// *qualquer* instrução — inclusive numa que já segure esta trava. Mascarar
+/// interrupções, que é a disciplina do resto do kernel, não ajuda aqui:
+/// mascarar impede que um *handler de interrupção* preempte o dono da trava,
+/// mas não impede uma exceção síncrona. Um `lock()` normal giraria para
+/// sempre esperando uma trava que só o código interrompido pode soltar.
+///
+/// E o desfecho seria o pior possível: o kernel travaria em silêncio
+/// exatamente no instante em que deveria relatar a falha.
+///
+/// A saída tem duas partes. O contador total é atômico, então nunca depende
+/// da trava. O detalhamento — contagem por tipo e a última falha — é tentado
+/// com `try_lock`, e quando não dá, contabilizamos a perda em vez de esperar.
 pub fn registrar(nome: &'static str, pc: u64, endereco: Option<u64>, codigo: u64) -> u64 {
-    let mut estado = ESTADO.lock();
+    let seq = TOTAL.fetch_add(1, Ordering::Relaxed);
 
-    let seq = estado.total;
-    estado.total += 1;
+    // A máscara evita o caso comum de disputa (um handler de interrupção
+    // preemptando uma leitura de `traps.stats`); o `try_lock` cobre o caso
+    // que a máscara não alcança, que é a exceção síncrona.
+    crate::arch::sem_interrupcoes(|| {
+        let Some(mut estado) = ESTADO.try_lock() else {
+            DETALHES_PERDIDOS.fetch_add(1, Ordering::Relaxed);
+            return;
+        };
 
-    // Busca linear: com no máximo algumas dezenas de tipos, uma tabela hash
-    // custaria mais em complexidade do que economizaria em ciclos — e este
-    // caminho roda dentro de um handler de exceção, onde simplicidade vale
-    // mais que velocidade.
-    let mut achou = false;
-    let n = estado.n;
-    for contador in estado.contadores[..n].iter_mut() {
-        if contador.nome == nome {
-            contador.total += 1;
-            achou = true;
-            break;
-        }
-    }
-    if !achou && estado.n < MAX_TIPOS {
+        // Busca linear: com no máximo algumas dezenas de tipos, uma tabela
+        // hash custaria mais em complexidade do que economizaria em ciclos — e
+        // este caminho roda dentro de um handler de exceção, onde simplicidade
+        // vale mais que velocidade.
+        let mut achou = false;
         let n = estado.n;
-        estado.contadores[n] = Contador { nome, total: 1 };
-        estado.n = n + 1;
-    }
+        for contador in estado.contadores[..n].iter_mut() {
+            if contador.nome == nome {
+                contador.total += 1;
+                achou = true;
+                break;
+            }
+        }
+        if !achou && estado.n < MAX_TIPOS {
+            let n = estado.n;
+            estado.contadores[n] = Contador { nome, total: 1 };
+            estado.n = n + 1;
+        }
 
-    estado.ultima = Some(Falha {
-        nome,
-        pc,
-        endereco,
-        codigo,
-        seq,
+        estado.ultima = Some(Falha {
+            nome,
+            pc,
+            endereco,
+            codigo,
+            seq,
+        });
     });
 
     seq
@@ -123,20 +159,40 @@ pub fn registrar(nome: &'static str, pc: u64, endereco: Option<u64>, codigo: u64
 
 /// Percorre os contadores por tipo.
 pub fn com_contadores<F: FnMut(&'static str, u64)>(mut f: F) {
-    let estado = ESTADO.lock();
-    for contador in &estado.contadores[..estado.n] {
-        f(contador.nome, contador.total);
-    }
+    crate::arch::sem_interrupcoes(|| {
+        let estado = ESTADO.lock();
+        for contador in &estado.contadores[..estado.n] {
+            f(contador.nome, contador.total);
+        }
+    });
 }
 
 /// A falha mais recente, se houve alguma.
 pub fn ultima() -> Option<Falha> {
-    ESTADO.lock().ultima
+    crate::arch::sem_interrupcoes(|| ESTADO.lock().ultima)
 }
 
 /// Total de falhas desde o boot.
 pub fn total() -> u64 {
-    ESTADO.lock().total
+    TOTAL.load(Ordering::Relaxed)
+}
+
+/// Quantas falhas ficaram sem detalhamento por disputa da trava.
+pub fn detalhes_perdidos() -> u64 {
+    DETALHES_PERDIDOS.load(Ordering::Relaxed)
+}
+
+/// Executa `f` com a trava de detalhamento na mão.
+///
+/// Existe só para a suíte de testes, e testa algo que de outra forma não teria
+/// como ser testado: que [`registrar`] não bloqueia quando a trava está
+/// ocupada. Esse é o cenário da exceção que acontece dentro de uma seção
+/// crítica deste módulo — raro, impossível de provocar de fora, e exatamente
+/// o que travaria o kernel no pior momento possível.
+#[cfg(feature = "modo-teste")]
+pub fn com_trava_ocupada<R>(f: impl FnOnce() -> R) -> R {
+    let _guarda = ESTADO.lock();
+    f()
 }
 
 /// Trata uma falha não recuperável: registra, reporta e entra em post-mortem.

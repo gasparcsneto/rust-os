@@ -496,6 +496,10 @@ fn memory_regions(params: Json, w: &mut JsonWriter) -> fmt::Result {
 fn traps_stats(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.begin_object()?;
     w.field_u64("total", crate::traps::total())?;
+    // Diferente de zero significa que uma excecao aconteceu dentro de uma
+    // secao critica de `traps`: o total esta certo, mas `by_type` e `last`
+    // perderam essa falha. Aparece aqui para nao sumir em silencio.
+    w.field_u64("details_lost", crate::traps::detalhes_perdidos())?;
 
     w.key("by_type")?;
     w.begin_array()?;

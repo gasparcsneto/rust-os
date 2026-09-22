@@ -64,14 +64,22 @@ pub fn por_ticks(ticks: u64) -> Dormir {
 /// devolver `Ready` na hora, então garantimos ao menos um.
 pub fn por_ms(ms: u64) -> Dormir {
     let hz = crate::tempo::frequencia_hz() as u64;
-    let ticks = if hz == 0 {
-        // Sem timer não há como medir tempo. Um tique nominal faz a tarefa
-        // ceder uma vez em vez de girar, que é o comportamento menos ruim.
-        1
-    } else {
-        ms.saturating_mul(hz).div_ceil(1000).max(1)
+    let Some(hz) = (hz > 0).then_some(hz) else {
+        // Sem timer não há relógio, e ninguém chamará `tique` para acordar
+        // quem dormir. Pedir um tique aqui não seria "esperar um pouco": seria
+        // esperar para sempre, porque o contador nunca avança.
+        //
+        // Devolvemos um prazo já vencido, que o primeiro `poll` reconhece e
+        // resolve na hora. A tarefa cede uma vez e segue — degradar para um
+        // laço apertado é ruim, mas é recuperável; travar não é.
+        crate::log_warn!(
+            "tarefa",
+            "sem timer configurado; espera de {} ms ignorada",
+            ms
+        );
+        return por_ticks(0);
     };
-    por_ticks(ticks)
+    por_ticks(ms.saturating_mul(hz).div_ceil(1000).max(1))
 }
 
 impl Dormir {

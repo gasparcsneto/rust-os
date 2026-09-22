@@ -106,7 +106,24 @@ static MAQUINA: Mutex<Maquina> = Mutex::new(Maquina {
 });
 
 /// Registra uma região. Chamado pelo backend de arquitetura durante o boot.
+///
+/// Regiões degeneradas — as de tamanho zero, e as em que a soma
+/// `inicio + tamanho` transbordou na origem — são descartadas aqui, e não
+/// mais adiante. O motivo é que elas envenenam todo consumidor a jusante:
+/// o alocador de frames calcularia uma janela sem sentido, e a montagem do
+/// mapa de identidade no ARM faz `fim - 1` para achar o último bloco, o que
+/// numa região com `fim == 0` entra em *underflow* — pânico em debug e, em
+/// release, um índice gigante que mapearia meio espaço de endereços como RAM.
+///
+/// Filtrar na entrada é o único ponto em que a checagem vale por todos: é por
+/// aqui que passam as regiões das duas arquiteturas.
 pub fn adicionar_regiao(regiao: Regiao) {
+    if regiao.fim <= regiao.inicio {
+        let mut m = MAQUINA.lock();
+        m.descartadas += 1;
+        return;
+    }
+
     let mut m = MAQUINA.lock();
     if m.n < MAX_REGIOES {
         let n = m.n;
