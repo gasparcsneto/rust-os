@@ -355,10 +355,6 @@ pub fn esperar_interrupcao() {
     }
 }
 
-/// Faz a serial do agente interromper quando chegar um byte.
-///
-/// Fica separada de [`init_interrupcoes`] porque a ordem importa: só faz
-/// sentido liberar a linha depois que existe quem consuma os bytes.
 /// Quanto do ECAM vale mapear: um barramento inteiro.
 ///
 /// Cada função tem 4 KiB de configuração, e um barramento tem 256 funções —
@@ -425,6 +421,10 @@ pub fn init_pci() {
     pci::registrar(base, janela);
 }
 
+/// Faz a serial do agente interromper quando chegar um byte.
+///
+/// Fica separada de [`init_interrupcoes`] porque a ordem importa: só faz
+/// sentido liberar a linha depois que existe quem consuma os bytes.
 pub fn init_interrupcao_serial() {
     // Antes de ligar a recepção: o FIFO pode ter um pedaço de requisição de
     // quem conectou enquanto o kernel ainda bootava. Ver
