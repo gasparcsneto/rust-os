@@ -124,6 +124,21 @@ impl Distribuidor {
     }
 }
 
+/// Quantos BARs um dispositivo comum tem.
+pub const BARS: usize = 6;
+
+/// Uma região de memória que um dispositivo decodifica.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Regiao {
+    /// Onde a região está, **do ponto de vista da CPU** — que é o que um
+    /// driver desreferencia. O BAR guarda o endereço do lado do barramento, e
+    /// os dois só coincidem quando a ponte não traduz nada; ver
+    /// [`JanelaMmio::na_cpu`].
+    pub base: u64,
+    /// Quanto ela ocupa.
+    pub tamanho: u64,
+}
+
 /// Um dispositivo encontrado no barramento.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Dispositivo {
@@ -138,21 +153,43 @@ pub struct Dispositivo {
     pub subclasse: u8,
     pub interface: u8,
     pub revisao: u8,
-    /// Onde a primeira região de memória do dispositivo está, **do ponto de
-    /// vista da CPU**, e quanto ela ocupa.
+    /// As regiões de memória do dispositivo, uma por BAR.
     ///
-    /// Do ponto de vista da CPU porque é isso que um driver desreferencia. O
-    /// BAR guarda o endereço do lado do barramento, e os dois só coincidem
-    /// quando a ponte não traduz nada — ver [`JanelaMmio::na_cpu`].
+    /// # Por que indexadas, e não compactadas
     ///
-    /// `None` quando o dispositivo não tem região nenhuma, ou quando ninguém
-    /// lhe atribuiu endereço. O segundo caso não é defeito do dispositivo:
-    /// alguém precisa **distribuir** as janelas do barramento, e esse alguém é
-    /// o firmware ou o kernel.
-    pub memoria: Option<(u64, u64)>,
+    /// Porque o número do BAR é informação. Uma capability virtio diz "minha
+    /// configuração está no BAR 4, deslocamento tal"; compactar a lista
+    /// tornaria esse 4 inútil e obrigaria quem pergunta a adivinhar.
+    ///
+    /// Um BAR de 64 bits ocupa dois slots, e o segundo fica `None` — ele é a
+    /// metade alta do endereço do primeiro, não uma região própria.
+    ///
+    /// # Por que guardadas, e não relidas
+    ///
+    /// Porque reler é destrutivo. Descobrir o tamanho de um BAR exige escrever
+    /// todos os uns nele e ler a máscara de volta, e fazer isso num
+    /// dispositivo que já está decodificando o faria responder, por um
+    /// instante, por uma faixa enorme. A varredura do boot é o único momento
+    /// em que a medição é segura, então é lá que ela acontece — uma vez.
+    ///
+    /// `None` em todos os slots quer dizer que o dispositivo não tem região
+    /// nenhuma, ou que ninguém lhe atribuiu endereço. O segundo caso não é
+    /// defeito do dispositivo: alguém precisa **distribuir** as janelas do
+    /// barramento, e esse alguém é o firmware ou o kernel.
+    pub regioes: [Option<Regiao>; BARS],
 }
 
 impl Dispositivo {
+    /// A região de memória de um BAR específico.
+    pub fn regiao(&self, bar: u8) -> Option<Regiao> {
+        self.regioes.get(bar as usize).copied().flatten()
+    }
+
+    /// A primeira região de memória que o dispositivo tem, se tiver alguma.
+    pub fn primeira_regiao(&self) -> Option<Regiao> {
+        self.regioes.iter().flatten().copied().next()
+    }
+
     /// Uma descrição legível da classe, para o relatório do agente.
     ///
     /// Só os casos que este kernel vai encontrar ou usar. O resto vira
@@ -211,7 +248,7 @@ fn ler(acesso: &impl ConfigRegionAccess, endereco: PciAddress) -> Option<Disposi
         subclasse,
         interface,
         revisao,
-        memoria: None,
+        regioes: [None; BARS],
     })
 }
 
@@ -226,7 +263,7 @@ fn ler(acesso: &impl ConfigRegionAccess, endereco: PciAddress) -> Option<Disposi
 /// nenhum, não há quem tenha feito — e é por isso que `distribuidor` é
 /// opcional em vez de obrigatório.
 ///
-/// Preencher `memoria` é a última coisa, e de propósito: o valor só é
+/// Preencher `regioes` é a última coisa, e de propósito: o valor só é
 /// verdadeiro depois da atribuição.
 fn preparar(
     acesso: &impl ConfigRegionAccess,
@@ -245,16 +282,16 @@ fn preparar(
         atribuir_bars(acesso, &mut ponta, distribuidor);
     }
 
-    // Onde a primeira região de memória ficou. Lida depois da atribuição, e
-    // percorrendo os seis slots porque um BAR de 64 bits ocupa dois: parar no
-    // primeiro slot vazio daria `None` num dispositivo que tem região.
-    let mut slot = 0u8;
-    while slot < 6 {
-        let regiao = match ponta.bar(slot, acesso) {
+    // Onde cada região ficou. Lido depois da atribuição, e percorrendo os seis
+    // slots porque um BAR de 64 bits ocupa dois: o segundo não é uma região,
+    // é a metade alta do endereço do primeiro.
+    let mut slot = 0usize;
+    while slot < BARS {
+        let (no_barramento, tamanho, largura_em_slots) = match ponta.bar(slot as u8, acesso) {
             Some(Bar::Memory32 { address, size, .. }) if address != 0 => {
-                Some((address as u64, size as u64))
+                (address as u64, size as u64, 1)
             }
-            Some(Bar::Memory64 { address, size, .. }) if address != 0 => Some((address, size)),
+            Some(Bar::Memory64 { address, size, .. }) if address != 0 => (address, size, 2),
             Some(Bar::Memory64 { .. }) => {
                 slot += 2;
                 continue;
@@ -265,37 +302,36 @@ fn preparar(
             }
         };
 
-        if let Some((no_barramento, tamanho)) = regiao {
-            // Onde houve firmware não há janela declarada, e não há tradução a
-            // aplicar: num PC o endereço do barramento é o da CPU. Onde há
-            // janela, é ela que sabe a diferença.
-            let na_cpu = match distribuidor.as_ref() {
-                Some(d) => d.janela.na_cpu(no_barramento),
-                None => Some(no_barramento),
-            };
+        // Onde houve firmware não há janela declarada, e não há tradução a
+        // aplicar: num PC o endereço do barramento é o da CPU. Onde há janela,
+        // é ela que sabe a diferença.
+        let na_cpu = match distribuidor.as_ref() {
+            Some(d) => d.janela.na_cpu(no_barramento),
+            None => Some(no_barramento),
+        };
 
-            match na_cpu {
-                Some(na_cpu) => achado.memoria = Some((na_cpu, tamanho)),
-                None => crate::log_warn!(
-                    "pci",
-                    "BAR {} em {:#x} fica fora da janela conhecida",
-                    slot,
-                    no_barramento
-                ),
-            }
-            break;
+        match na_cpu {
+            Some(base) => achado.regioes[slot] = Some(Regiao { base, tamanho }),
+            None => crate::log_warn!(
+                "pci",
+                "BAR {} em {:#x} fica fora da janela conhecida",
+                slot,
+                no_barramento
+            ),
         }
+
+        slot += largura_em_slots;
     }
 
     // Com endereço atribuído, o decodificador pode ser ligado. Fazemos isso
     // mesmo no x86, onde o BIOS já ligou: é uma escrita idempotente, e em
-    // troca a invariante fica igual nas duas arquiteturas — se `memoria` é
-    // `Some`, aquela faixa responde.
+    // troca a invariante fica igual nas duas arquiteturas — se há região,
+    // ela responde.
     //
     // `BUS_MASTER` fica de fora. Ele autoriza o dispositivo a escrever na
     // memória por conta própria, e isso é poder que só faz sentido dar a quem
     // o kernel decidiu usar — ver [`habilitar_mestre`].
-    if achado.memoria.is_some() {
+    if achado.primeira_regiao().is_some() {
         ponta.update_command(acesso, |atual| atual | CommandRegister::MEMORY_ENABLE);
     }
 }
@@ -433,6 +469,29 @@ pub fn init() {
             crate::arch::pci::MECANISMO
         );
     }
+}
+
+/// Autoriza um dispositivo a ler e escrever na memória por conta própria.
+///
+/// # Por que não na varredura
+///
+/// Porque mestria de barramento é poder, não configuração. Um dispositivo com
+/// esse bit aceso segue ponteiros que estiverem nas estruturas dele e escreve
+/// onde eles apontarem — e a varredura vê dispositivos que o kernel não dirige
+/// e cujos registradores nunca preencheu. Dar a autorização a todos seria dar
+/// a quem não tem nada para fazer com ela.
+///
+/// Quem liga é o driver, depois de montar as filas, que é quando os ponteiros
+/// passam a ser os que ele escreveu.
+pub fn habilitar_mestre(d: &Dispositivo) {
+    let Some(acesso) = crate::arch::pci::acesso() else {
+        return;
+    };
+    let endereco = PciAddress::new(0, d.barramento, d.dispositivo, d.funcao);
+    let Some(mut ponta) = EndpointHeader::from_header(PciHeader::new(endereco), acesso) else {
+        return;
+    };
+    ponta.update_command(acesso, |atual| atual | CommandRegister::BUS_MASTER_ENABLE);
 }
 
 /// Quantos dispositivos a varredura encontrou.

@@ -40,7 +40,7 @@ pub static COMANDOS: &[Command] = &[
     },
     Command {
         nome: "memory.stats",
-        resumo: "Totais agregados de memoria fisica.",
+        resumo: "Totais agregados de memoria fisica e de MMIO mapeado.",
         params: &[],
         handler: memory_stats,
     },
@@ -136,6 +136,31 @@ pub static COMANDOS: &[Command] = &[
                  modelo e o que cada um faz.",
         params: &[],
         handler: pci_list,
+    },
+    Command {
+        nome: "disk.info",
+        resumo: "Capacidade e estado do disco virtio, se houver um.",
+        params: &[],
+        handler: disk_info,
+    },
+    Command {
+        nome: "disk.read",
+        resumo: "Le um setor de 512 bytes do disco e o devolve em hexadecimal.",
+        params: &[
+            ParamSpec {
+                nome: "sector",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "Numero do setor a ler (padrao: 0).",
+            },
+            ParamSpec {
+                nome: "length",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "Quantos bytes do setor mostrar (padrao: 64, maximo: 512).",
+            },
+        ],
+        handler: disk_read,
     },
     Command {
         nome: "irq.stats",
@@ -386,10 +411,10 @@ fn pci_list(_params: Json, w: &mut JsonWriter) -> fmt::Result {
             w.field_u64("interface", d.interface as u64)?;
             w.field_u64("revision", d.revisao as u64)?;
             w.field_str("role", d.o_que_faz())?;
-            match d.memoria {
-                Some((endereco, tamanho)) => {
-                    w.field_u64("mmio_base", endereco)?;
-                    w.field_u64("mmio_size", tamanho)?;
+            match d.primeira_regiao() {
+                Some(regiao) => {
+                    w.field_u64("mmio_base", regiao.base)?;
+                    w.field_u64("mmio_size", regiao.tamanho)?;
                 }
                 None => {
                     w.key("mmio_base")?;
@@ -402,6 +427,110 @@ fn pci_list(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     erro?;
     w.end_array()?;
     w.end_object()
+}
+
+// ---------------------------------------------------------------------------
+// disk.*
+// ---------------------------------------------------------------------------
+
+/// Quantos bytes de um setor o `disk.read` mostra quando ninguém pede um
+/// número.
+///
+/// Sessenta e quatro porque é o que cabe numa tela de terminal sem rolar e o
+/// suficiente para reconhecer uma assinatura, que é o uso real: confirmar que
+/// o setor lido é o setor esperado. Quem quiser o resto pede.
+const BYTES_MOSTRADOS_POR_PADRAO: u64 = 64;
+
+fn disk_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    match crate::virtio::blk::com_o_disco(|disco| disco.capacidade()) {
+        Some(setores) => {
+            w.field_bool("present", true)?;
+            w.field_u64("sectors", setores)?;
+            w.field_u64("sector_size", crate::virtio::blk::TAMANHO_DO_SETOR as u64)?;
+            w.field_u64(
+                "bytes",
+                setores * crate::virtio::blk::TAMANHO_DO_SETOR as u64,
+            )?;
+        }
+        // Ausência não é erro. A máquina pode legitimamente não ter disco, e
+        // dizer isso é mais útil ao agente que um código de falha que ele
+        // teria de distinguir de um disco quebrado.
+        None => w.field_bool("present", false)?,
+    }
+    w.end_object()
+}
+
+fn disk_read(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let setor = params
+        .member("sector")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let mostrados = params
+        .member("length")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(BYTES_MOSTRADOS_POR_PADRAO)
+        .min(crate::virtio::blk::TAMANHO_DO_SETOR as u64) as usize;
+
+    let mut buffer = [0u8; crate::virtio::blk::TAMANHO_DO_SETOR];
+    let resultado = crate::virtio::blk::com_o_disco(|disco| disco.ler_setor(setor, &mut buffer));
+
+    w.begin_object()?;
+    w.field_u64("sector", setor)?;
+
+    match resultado {
+        None => {
+            w.field_bool("ok", false)?;
+            w.field_str("error", "nao ha disco nesta maquina")?;
+        }
+        Some(Err(motivo)) => {
+            w.field_bool("ok", false)?;
+            w.field_str("error", motivo)?;
+        }
+        Some(Ok(())) => {
+            w.field_bool("ok", true)?;
+            w.field_u64("length", mostrados as u64)?;
+
+            // Hexadecimal e ASCII lado a lado, que é o formato em que um
+            // despejo de setor se lê. O ASCII é o que deixa uma assinatura
+            // saltar aos olhos; o hexadecimal é o que permite conferir os
+            // bytes que não são texto.
+            w.key("hex")?;
+            escrever_hex(w, &buffer[..mostrados])?;
+            w.key("ascii")?;
+            escrever_ascii(w, &buffer[..mostrados])?;
+        }
+    }
+
+    w.end_object()
+}
+
+/// Escreve os bytes como uma string hexadecimal, sem separadores.
+///
+/// Byte a byte, e não montando uma `String` antes, porque o escritor JSON já
+/// é um fluxo: acumular 1 KiB de texto num `Vec` para escrevê-lo em seguida
+/// seria alocar para nada.
+fn escrever_hex(w: &mut JsonWriter, bytes: &[u8]) -> fmt::Result {
+    const DIGITOS: &[u8; 16] = b"0123456789abcdef";
+    w.begin_str()?;
+    for &byte in bytes {
+        w.push_char(DIGITOS[(byte >> 4) as usize] as char)?;
+        w.push_char(DIGITOS[(byte & 0xF) as usize] as char)?;
+    }
+    w.end_str()
+}
+
+/// Escreve os bytes como texto, trocando o que não for imprimível por ponto.
+fn escrever_ascii(w: &mut JsonWriter, bytes: &[u8]) -> fmt::Result {
+    w.begin_str()?;
+    for &byte in bytes {
+        // O intervalo é o dos caracteres ASCII imprimíveis. Tudo fora dele
+        // vira ponto — inclusive as aspas e a barra invertida, que exigiriam
+        // escape no JSON e que ninguém procura num despejo de setor.
+        let visivel = (0x20..0x7F).contains(&byte) && byte != b'"' && byte != b'\\';
+        w.push_char(if visivel { byte as char } else { '.' })?;
+    }
+    w.end_str()
 }
 
 fn irq_stats(_params: Json, w: &mut JsonWriter) -> fmt::Result {
@@ -617,6 +746,10 @@ fn memory_stats(_params: Json, w: &mut JsonWriter) -> fmt::Result {
         "dropped_regions",
         crate::machine::regioes_descartadas() as u64,
     )?;
+    // Quanto espaco virtual ja foi entregue a registradores de dispositivo.
+    // Nao sai da RAM utilizavel — e uma faixa propria —, mas e o unico numero
+    // que revela um driver mapeando mais do que devia.
+    w.field_u64("device_mapped_bytes", crate::mmio::reservado())?;
     w.end_object()
 }
 
