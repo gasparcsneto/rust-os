@@ -4,10 +4,19 @@
 #   - `custom_test_frameworks`: nossa suíte de testes roda *dentro* do kernel,
 #     no QEMU, então não podemos usar o `libtest` padrão (que depende de `std`).
 #
-# `targets` garante que o alvo bare-metal seja instalado automaticamente por
-# quem clonar o repositório — sem passo manual de `rustup target add`.
+# `targets` garante que os alvos bare-metal sejam instalados automaticamente
+# por quem clonar o repositório — sem passo manual de `rustup target add`.
+#
+# **Os dois precisam estar aqui.** Faltava o do ARM, e a consequência não
+# aparecia em nenhuma máquina de desenvolvimento: quem já tinha o alvo
+# instalado por outro motivo compilava normalmente, e o CI, que parte de uma
+# imagem limpa, falhava em *todo* job de aarch64 antes de compilar uma linha do
+# kernel — com um erro que fala de `core`, e não do alvo que falta.
+#
+# É a espécie de defeito que sobrevive justamente por não incomodar quem
+# poderia corrigi-lo.
 [toolchain]
 channel = "nightly"
 components = ["rust-src", "llvm-tools", "rustfmt", "clippy"]
-targets = ["x86_64-unknown-none"]
+targets = ["x86_64-unknown-none", "aarch64-unknown-none-softfloat"]
 profile = "minimal"
