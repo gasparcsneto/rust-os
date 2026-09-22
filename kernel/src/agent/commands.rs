@@ -386,6 +386,16 @@ fn pci_list(_params: Json, w: &mut JsonWriter) -> fmt::Result {
             w.field_u64("interface", d.interface as u64)?;
             w.field_u64("revision", d.revisao as u64)?;
             w.field_str("role", d.o_que_faz())?;
+            match d.memoria {
+                Some((endereco, tamanho)) => {
+                    w.field_u64("mmio_base", endereco)?;
+                    w.field_u64("mmio_size", tamanho)?;
+                }
+                None => {
+                    w.key("mmio_base")?;
+                    w.null_value()?;
+                }
+            }
             w.end_object()
         })();
     });

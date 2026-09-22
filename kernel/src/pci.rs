@@ -34,7 +34,7 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use pci_types::{ConfigRegionAccess, PciAddress, PciHeader};
+use pci_types::{Bar, ConfigRegionAccess, EndpointHeader, PciAddress, PciHeader};
 use spin::Mutex;
 
 /// Quantos dispositivos cabem no inventário.
@@ -66,6 +66,15 @@ pub struct Dispositivo {
     pub subclasse: u8,
     pub interface: u8,
     pub revisao: u8,
+    /// Onde a primeira região de memória do dispositivo foi mapeada, e quanto
+    /// ela ocupa. `None` quando o dispositivo não tem nenhuma, ou quando
+    /// ninguém lhe atribuiu endereço.
+    ///
+    /// Um BAR sem endereço não é defeito do dispositivo: alguém precisa
+    /// **distribuir** as janelas do barramento, e esse alguém é o firmware ou
+    /// o kernel. No x86 o BIOS já fez; no ARM, onde carregamos sem firmware
+    /// nenhum, não há quem tenha feito.
+    pub memoria: Option<(u64, u64)>,
 }
 
 impl Dispositivo {
@@ -113,6 +122,19 @@ fn ler(acesso: &impl ConfigRegionAccess, endereco: PciAddress) -> Option<Disposi
     }
 
     let (revisao, classe, subclasse, interface) = cabecalho.revision_and_class(acesso);
+
+    // Só dispositivos comuns têm BARs no lugar que nos interessa; pontes usam
+    // o mesmo espaço para descrever a faixa de barramentos que encaminham.
+    let memoria = EndpointHeader::from_header(cabecalho, acesso).and_then(|ponta| {
+        (0..6).find_map(|slot| match ponta.bar(slot, acesso) {
+            Some(Bar::Memory32 { address, size, .. }) if address != 0 => {
+                Some((address as u64, size as u64))
+            }
+            Some(Bar::Memory64 { address, size, .. }) if address != 0 => Some((address, size)),
+            _ => None,
+        })
+    });
+
     Some(Dispositivo {
         barramento: endereco.bus(),
         dispositivo: endereco.device(),
@@ -123,6 +145,7 @@ fn ler(acesso: &impl ConfigRegionAccess, endereco: PciAddress) -> Option<Disposi
         subclasse,
         interface,
         revisao,
+        memoria,
     })
 }
 
