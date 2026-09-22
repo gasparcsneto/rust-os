@@ -440,6 +440,21 @@ pub fn marcar_terminado() {
     });
 }
 
+/// O fio `id` ainda ocupa uma vaga e não terminou?
+///
+/// Serve a quem guarda o identificador de um fio e precisa saber, depois, se
+/// ele ainda existe. Comparar o identificador, e não a vaga, é o que torna a
+/// resposta confiável: vagas são reaproveitadas, identificadores não.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub fn esta_vivo(id: u64) -> bool {
+    com_escalonador(|e| {
+        e.fios
+            .iter()
+            .flatten()
+            .any(|f| f.id.numero() == id && f.estado != Estado::Terminado)
+    })
+}
+
 /// O fio atual já se encerrou?
 pub fn atual_terminou() -> bool {
     com_escalonador(|e| {

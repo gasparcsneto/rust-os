@@ -1984,6 +1984,86 @@ fn usuario_recusa_ponteiro_de_fora() -> Resultado {
     Ok(())
 }
 
+/// Enquanto um processo vive, outro fio não toma o espaço dele.
+///
+/// # Por que isto é uma falha de kernel, e não só um processo confuso
+///
+/// `carregar` começa desmapeando o que estiver no espaço do usuário. Sem dono,
+/// um segundo `user.run` arrancaria o código e a pilha do primeiro **enquanto
+/// ele roda**. O pior desfecho não é o processo morrer: é o primeiro fio estar
+/// dentro de uma chamada de sistema, já tendo passado pela validação da faixa,
+/// e ler a memória do usuário depois de ela sumir — falha de página com o
+/// kernel no comando, que é fatal.
+///
+/// Os dois lados são fios criados aqui, e nenhum deles é o fio do próprio
+/// teste. É proposital: o espaço pertence a quem o toma até esse fio morrer, e
+/// o fio do teste não morre — se ele tomasse o espaço, os casos seguintes
+/// encontrariam tudo ocupado.
+fn usuario_um_processo_por_vez() -> Resultado {
+    /// O que aconteceu com quem tentou carregar por cima.
+    static DESFECHO: AtomicU64 = AtomicU64::new(0);
+    const NAO_RODOU: u64 = 0;
+    const ACEITOU: u64 = 1;
+    const RECUSOU: u64 = 2;
+
+    static OCUPOU: AtomicBool = AtomicBool::new(false);
+    static PODE_SAIR: AtomicBool = AtomicBool::new(false);
+
+    extern "C" fn ocupante(_argumento: u64) -> ! {
+        if crate::usuario::programa::carregar(crate::usuario::exemplo::bytes()).is_ok() {
+            OCUPOU.store(true, SeqCst);
+        }
+        // Fica vivo, segurando o espaço, até o teste mandar sair. Não entra em
+        // userspace: o que está em teste é a posse, não a travessia.
+        while !PODE_SAIR.load(SeqCst) {
+            crate::fios::ceder();
+        }
+        crate::fios::terminar()
+    }
+
+    extern "C" fn desafiante(_argumento: u64) -> ! {
+        let desfecho = match crate::usuario::programa::carregar(crate::usuario::exemplo::bytes()) {
+            Ok(_) => ACEITOU,
+            Err(_) => RECUSOU,
+        };
+        DESFECHO.store(desfecho, SeqCst);
+        crate::fios::terminar()
+    }
+
+    OCUPOU.store(false, SeqCst);
+    PODE_SAIR.store(false, SeqCst);
+    DESFECHO.store(NAO_RODOU, SeqCst);
+
+    let dono = crate::fios::criar("teste-ocupante", ocupante, 0)?.numero();
+    esperar_ate(|| OCUPOU.load(SeqCst), 300)?;
+
+    // Com o dono vivo, a segunda carga precisa ser recusada.
+    crate::fios::criar("teste-desafiante", desafiante, 0)?;
+    let esperou = esperar_ate(|| DESFECHO.load(SeqCst) != NAO_RODOU, 300);
+
+    // Soltar o ocupante antes de qualquer `return`: deixá-lo girando para
+    // sempre custaria uma vaga de fio a todos os casos seguintes.
+    PODE_SAIR.store(true, SeqCst);
+    esperou?;
+
+    if DESFECHO.load(SeqCst) != RECUSOU {
+        return Err("um segundo processo tomou o espaco de um que estava vivo");
+    }
+
+    // Morto o dono, o espaço volta a ser de quem chegar. Sem esta metade, um
+    // `reivindicar` que recusasse *sempre* passaria no teste — e `user.run`
+    // funcionaria uma única vez por boot.
+    esperar_ate(|| !crate::fios::esta_vivo(dono), 300)?;
+    DESFECHO.store(NAO_RODOU, SeqCst);
+    crate::fios::criar("teste-desafiante", desafiante, 0)?;
+    esperar_ate(|| DESFECHO.load(SeqCst) != NAO_RODOU, 300)?;
+
+    if DESFECHO.load(SeqCst) != ACEITOU {
+        return Err("o espaco continuou preso depois que o dono morreu");
+    }
+    Ok(())
+}
+
 /// Um processo não alcança a memória do kernel, e tentar mata só o processo.
 ///
 /// É o teste que dá sentido a todos os outros deste grupo. Entrar em ring 3
@@ -2329,6 +2409,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "usuario: descritor e conferido",
         f: usuario_descritor_e_conferido,
+    },
+    Caso {
+        nome: "usuario: um processo por vez",
+        f: usuario_um_processo_por_vez,
     },
     Caso {
         nome: "usuario: executa e encerra",

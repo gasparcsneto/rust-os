@@ -28,6 +28,8 @@
 //! existe abaixo das pilhas do kernel: um estouro precisa virar falha no ponto
 //! em que acontece, não corrupção do que estiver ao lado.
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use crate::arch::{Permissoes, TAMANHO_PAGINA};
 
 use super::{BASE, TETO};
@@ -52,6 +54,81 @@ const GUARD_DA_PILHA: u64 = BASE_DA_PILHA - TAMANHO_PAGINA;
 /// o passo seguinte. Aí cada um vê o mesmo `BASE` apontando para páginas
 /// diferentes, e este contador vira um campo do processo.
 static PAGINAS_MAPEADAS: spin::Mutex<Option<u64>> = spin::Mutex::new(None);
+
+/// O fio que ocupa o espaço do usuário agora, ou zero se ele está livre.
+///
+/// # O que isto impede
+///
+/// [`descarregar`] é destrutivo, e [`carregar`] o chama antes de qualquer
+/// coisa. Sem um dono, dois fios hospedeiros concorrentes produziriam isto: o
+/// segundo desmapearia o código e a pilha do primeiro **enquanto ele roda**.
+///
+/// O desfecho pior não é o processo morrer — é o primeiro fio estar dentro de
+/// uma chamada de sistema, já tendo passado por [`super::validar_faixa`], e ler
+/// a memória do usuário depois de ela sumir. Aí a falha de página acontece com
+/// o kernel no comando, e uma falha de página do kernel é fatal. Uma chamada
+/// de `user.run` a mais derrubaria a máquina.
+///
+/// # Por que um atômico, e não uma trava
+///
+/// Porque a resposta que interessa — "o dono ainda está vivo?" — mora no
+/// escalonador, e perguntar a ele exige a trava dele. Com um atômico aqui,
+/// nenhuma trava deste módulo está na mão quando isso acontece. O módulo
+/// [`crate::fios`] já registra o critério: aninhar travas é o começo de todo
+/// deadlock, e manter a ordem trivial é mais barato que provar que ela é
+/// segura.
+static FIO_DONO: AtomicU64 = AtomicU64::new(0);
+
+/// Toma o espaço do usuário para o fio atual, ou recusa.
+///
+/// Um dono que já terminou não bloqueia ninguém: o espaço é dele até morrer, e
+/// depois disso é de quem chegar. É por isso que não existe nenhuma função
+/// para "devolver" o espaço — devolver é algo que se esquece de fazer, e o
+/// esquecimento só apareceria muito depois, na forma de um `user.run` que
+/// recusa para sempre. A morte do fio é um fato que não se esquece de
+/// acontecer.
+fn reivindicar() -> Result<(), &'static str> {
+    let eu = crate::fios::id_atual();
+    if eu == 0 {
+        return Err("este fio nao tem identificador proprio");
+    }
+
+    loop {
+        let dono = FIO_DONO.load(Ordering::Acquire);
+
+        // Já é nosso: um fio pode trocar o próprio programa.
+        if dono == eu {
+            return Ok(());
+        }
+        if dono != 0 && crate::fios::esta_vivo(dono) {
+            return Err("o espaco do usuario ja tem um processo");
+        }
+
+        // Livre ou abandonado por um fio morto. Trocar em um passo só é o que
+        // impede que dois fios concluam ao mesmo tempo que estava livre.
+        if FIO_DONO
+            .compare_exchange(dono, eu, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return Ok(());
+        }
+
+        // Alguém chegou antes entre a leitura e a troca. A volta seguinte
+        // encontra esse alguém vivo e recusa — o laço não gira mais que isso.
+    }
+}
+
+/// Há um processo vivo ocupando o espaço do usuário?
+///
+/// Consulta sem tomar nada, para quem precisa **reportar** o estado — o canal
+/// do agente — e não para quem vai carregar. Entre esta resposta e uma carga o
+/// estado pode mudar; quem carrega usa [`carregar`], que decide e toma o
+/// espaço num passo só. Serve para o agente receber a recusa na resposta da
+/// chamada, em vez de um `launched: true` seguido de nada acontecer.
+pub fn ocupado() -> bool {
+    let dono = FIO_DONO.load(Ordering::Acquire);
+    dono != 0 && crate::fios::esta_vivo(dono)
+}
 
 /// Um programa mapeado, pronto para executar.
 pub struct Programa {
@@ -79,6 +156,9 @@ pub fn carregar(codigo: &[u8]) -> Result<Programa, &'static str> {
     if codigo.is_empty() {
         return Err("programa vazio");
     }
+
+    // Antes de destruir o que estiver mapeado, garantir que não é de ninguém.
+    reivindicar()?;
 
     // O processo anterior pode ter terminado deixando as páginas dele no
     // lugar. Limpar **aqui**, e não no caminho que o encerra, é deliberado:

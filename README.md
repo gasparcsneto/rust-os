@@ -368,6 +368,14 @@ espaço de endereços do kernel, e por isso só cabe um por vez. O que já exist
 é a separação de **privilégio**. Uma tabela de tradução por processo é o passo
 seguinte.
 
+**"Um por vez" é imposto, não combinado.** Carregar um programa começa
+desmapeando o que estiver no espaço do usuário, então dois hospedeiros
+concorrentes arrancariam o chão um do outro — e o desfecho ruim não é o
+processo morrer, é o primeiro estar dentro de uma chamada de sistema e ler a
+memória do usuário depois de ela sumir, o que é uma falha de página com o
+kernel no comando. O espaço pertence a um fio até esse fio morrer, e um
+segundo `user.run` recebe a recusa na própria resposta.
+
 ## Testes
 
 Os testes do kernel **não** rodam com `cargo test`: o harness padrão do Rust
