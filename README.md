@@ -473,6 +473,48 @@ que se esquece de chamar `destruir` vaza tabelas até a memória acabar. Há um
 caso de teste que dá dez voltas de criar-mapear-destruir e exige que o
 alocador de frames volte ao número exato de antes.
 
+## Barramento PCI
+
+Até a fase 1, todo dispositivo que o kernel tocava tinha endereço conhecido de
+antemão: UART, timer, controlador de interrupções. São peças da placa, e a
+placa é sempre a mesma. Disco e rede não funcionam assim — é o primeiro momento
+em que o kernel **pergunta ao hardware o que existe** em vez de já saber.
+
+```
+$ cargo xtask agent pci.list
+mecanismo=port-io-cf8  count=6
+  00:00.0  8086:1237  classe 06/00  ponte-hospedeira
+  00:01.1  8086:7010  classe 01/01  disco-ide
+  00:02.0  1234:1111  classe 03/00  video
+  00:03.0  8086:100e  classe 02/00  rede
+
+$ cargo xtask agent --arch aarch64 pci.list
+mecanismo=ecam  count=2
+  00:00.0  1b36:0008  classe 06/00  ponte-hospedeira
+  00:01.0  1af4:1000  classe 02/00  rede        <- virtio
+```
+
+O mecanismo difere, a enumeração não. No x86 a configuração é alcançada por um
+par de portas de I/O que existe desde 1993 — não precisa ser descoberto, ao
+contrário do ECAM, que exigiria ler a tabela `MCFG` da ACPI. No ARM não há
+portas: a configuração é memória mapeada, e **onde** ela está é escolha da
+placa. O endereço vem do device tree, pelo mesmo motivo que o mapa de memória
+sempre veio.
+
+Duas coisas custaram uma descoberta cada. O ECAM da máquina `virt` fica em
+`0x40_1000_0000`, muito acima do primeiro GiB que o boot mapeia, e precisa ser
+mapeado como memória de dispositivo — uma leitura de configuração servida pelo
+cache devolveria um valor velho, e o barramento não avisa. E o `reg` desse nó
+vem **antes** do `compatible` no blob do QEMU: a especificação não ordena as
+propriedades dentro de um nó, e um leitor de passada única que espere o
+`compatible` primeiro não acha nada.
+
+Os deslocamentos do cabeçalho PCI vêm do crate `pci_types`, pelo critério que
+o projeto já usava: montar palavras de configuração a partir de deslocamentos
+lidos de um manual vai para biblioteca, porque errar um não gera erro — gera um
+dispositivo descrito errado. O que fica aqui é decisão nossa: como varrer, o
+que guardar e como reportar.
+
 ## Testes
 
 Os testes do kernel **não** rodam com `cargo test`: o harness padrão do Rust
@@ -570,8 +612,8 @@ padronizado.
       carregador de ELF64 com validação de tudo que vem do arquivo, e
       `fork`/`exec` com cópia integral do espaço de endereços.
       **Fase 1 completa.**
-- [ ] **Fase 2 — Drivers.** Enumeração PCI, virtio-blk, virtio-net, timer
-      APIC/HPET, framebuffer gráfico.
+- [ ] **Fase 2 — Drivers.** Enumeração PCI (**feito**), virtio-blk,
+      virtio-net, timer APIC/HPET, framebuffer gráfico.
 
 ## Licença
 

@@ -21,6 +21,7 @@ license = "MIT OR Apache-2.0"
 modo-teste = []
 
 [dependencies]
+pci_types = "0.10.1"
 # Primitivas de sincronização baseadas em spinlock. Num kernel não existe
 # scheduler para bloquear uma thread, então `std::sync::Mutex` não se aplica.
 # É a única dependência comum às duas arquiteturas.

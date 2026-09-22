@@ -131,6 +131,13 @@ pub static COMANDOS: &[Command] = &[
         handler: user_stats,
     },
     Command {
+        nome: "pci.list",
+        resumo: "Dispositivos encontrados no barramento PCI, com fabricante, \
+                 modelo e o que cada um faz.",
+        params: &[],
+        handler: pci_list,
+    },
+    Command {
         nome: "irq.stats",
         resumo: "Contadores de interrupcoes de hardware por linha.",
         params: &[],
@@ -349,6 +356,43 @@ fn paging_translate(params: Json, w: &mut JsonWriter) -> fmt::Result {
 // ---------------------------------------------------------------------------
 // irq.*
 // ---------------------------------------------------------------------------
+
+fn pci_list(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    w.field_str("mechanism", crate::arch::pci::MECANISMO)?;
+    w.field_u64("count", crate::pci::total() as u64)?;
+
+    // O teto do inventário vai na resposta porque `count` pode ser maior que o
+    // que a lista traz: um agente precisa distinguir "só há isto" de "isto é o
+    // que coube".
+    w.field_u64("capacity", crate::pci::MAX_DISPOSITIVOS as u64)?;
+
+    w.key("devices")?;
+    w.begin_array()?;
+    let mut erro = Ok(());
+    crate::pci::com_dispositivos(|d| {
+        if erro.is_err() {
+            return;
+        }
+        erro = (|| {
+            w.begin_object()?;
+            w.field_u64("bus", d.barramento as u64)?;
+            w.field_u64("device", d.dispositivo as u64)?;
+            w.field_u64("function", d.funcao as u64)?;
+            w.field_u64("vendor", d.fabricante as u64)?;
+            w.field_u64("model", d.modelo as u64)?;
+            w.field_u64("class", d.classe as u64)?;
+            w.field_u64("subclass", d.subclasse as u64)?;
+            w.field_u64("interface", d.interface as u64)?;
+            w.field_u64("revision", d.revisao as u64)?;
+            w.field_str("role", d.o_que_faz())?;
+            w.end_object()
+        })();
+    });
+    erro?;
+    w.end_array()?;
+    w.end_object()
+}
 
 fn irq_stats(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.begin_object()?;

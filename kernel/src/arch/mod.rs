@@ -66,15 +66,19 @@ pub use atual::{
     disparar_breakpoint, disparar_falha_fatal, dormir_se_ocioso, encerrar_emulador,
     entrar_em_usuario, espaco_atual, espaco_do_kernel, esperar_interrupcao,
     falha_de_estouro_de_pilha, halt_forever, identificar_cpu, init_excecoes,
-    init_interrupcao_serial, init_interrupcoes, init_paginacao, init_seriais, init_usuario,
-    interrupcoes_habilitadas, mapear_frame, nome, percorrer_paginas_do_usuario, preparar_contexto,
-    preparar_contexto_de_fork, redirecionar_para, reservar_faixas, sem_interrupcoes, traduzir,
-    trocar_espaco,
+    init_interrupcao_serial, init_interrupcoes, init_paginacao, init_pci, init_seriais,
+    init_usuario, interrupcoes_habilitadas, mapear_frame, nome, percorrer_paginas_do_usuario,
+    preparar_contexto, preparar_contexto_de_fork, redirecionar_para, reservar_faixas,
+    sem_interrupcoes, traduzir, trocar_espaco,
 };
 
 /// Só para a suíte: o par de conversões de permissão de cada backend.
 #[cfg(feature = "modo-teste")]
 pub use atual::permissoes_ida_e_volta;
+
+/// Acesso ao barramento PCI, que difere em mecanismo entre as duas
+/// arquiteturas: portas de I/O no x86, ECAM no ARM.
+pub use atual::pci;
 
 /// Tamanho de uma página nas duas arquiteturas.
 pub const TAMANHO_PAGINA: u64 = 4096;

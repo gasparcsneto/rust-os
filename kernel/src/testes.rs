@@ -2349,6 +2349,84 @@ fn memoria_desmapear_do_kernel_vale_em_todo_espaco() -> Resultado {
     })
 }
 
+/// A varredura do barramento encontra dispositivos coerentes.
+///
+/// # O que dá para afirmar sem saber que máquina é esta
+///
+/// Pouco, e é por isso que o caso é escrito como é. O conjunto de dispositivos
+/// depende da placa, da versão do QEMU e dos argumentos de linha de comando —
+/// fixar "deve haver uma placa de rede" seria testar o emulador, não o kernel.
+///
+/// O que vale nas duas arquiteturas e em qualquer configuração:
+///
+/// 1. **A varredura roda e acha alguma coisa.** As duas máquinas têm ao menos
+///    uma ponte hospedeira, que é o dispositivo que *é* o barramento. Zero
+///    significa que o acesso à configuração não funcionou.
+/// 2. **Ninguém é `0xFFFF`.** Esse é o valor que o barramento devolve quando
+///    não há ninguém no endereço; um dispositivo guardado com ele seria a
+///    varredura confundindo ausência com presença.
+/// 3. **A função zero existe para todo dispositivo listado.** As funções de 1
+///    a 7 só são procuradas quando a zero diz que existem; encontrar uma
+///    função alta sem a zero significaria ter lido o bit errado.
+/// 4. **Não há endereços repetidos.** Dois registros para o mesmo
+///    `(barramento, dispositivo, função)` seriam a varredura contando duas
+///    vezes.
+fn pci_varredura_coerente() -> Resultado {
+    let total = crate::pci::total();
+    if total == 0 {
+        return Err("a varredura nao encontrou nenhum dispositivo");
+    }
+
+    let mut vistos = [(0u8, 0u8, 0u8); crate::pci::MAX_DISPOSITIVOS];
+    let mut quantos = 0usize;
+    let mut com_funcao_zero = [(0u8, 0u8); crate::pci::MAX_DISPOSITIVOS];
+    let mut zeros = 0usize;
+    let mut falha: Option<&'static str> = None;
+
+    crate::pci::com_dispositivos(|d| {
+        if d.fabricante == 0xFFFF {
+            falha = Some("um dispositivo foi guardado com fabricante 0xFFFF");
+        }
+        if d.funcao >= 8 {
+            falha = Some("numero de funcao fora da faixa");
+        }
+
+        let chave = (d.barramento, d.dispositivo, d.funcao);
+        if vistos[..quantos].contains(&chave) {
+            falha = Some("o mesmo endereco apareceu duas vezes");
+        }
+        if quantos < vistos.len() {
+            vistos[quantos] = chave;
+            quantos += 1;
+        }
+
+        if d.funcao == 0 && zeros < com_funcao_zero.len() {
+            com_funcao_zero[zeros] = (d.barramento, d.dispositivo);
+            zeros += 1;
+        }
+    });
+
+    if let Some(motivo) = falha {
+        return Err(motivo);
+    }
+
+    for (barramento, dispositivo, funcao) in &vistos[..quantos] {
+        if *funcao != 0 && !com_funcao_zero[..zeros].contains(&(*barramento, *dispositivo)) {
+            crate::log_error!(
+                "teste",
+                "funcao {} de {:02x}:{:02x} sem a funcao zero",
+                funcao,
+                barramento,
+                dispositivo
+            );
+            return Err("uma funcao alta apareceu sem a funcao zero do mesmo dispositivo");
+        }
+    }
+
+    crate::log_info!("teste", "{} dispositivos PCI coerentes", total);
+    Ok(())
+}
+
 /// Traduzir permissões para bits de descritor e de volta devolve o original.
 ///
 /// # Por que um caso só para isto
@@ -3096,6 +3174,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "memoria: desmapear do kernel vale em todo espaco",
         f: memoria_desmapear_do_kernel_vale_em_todo_espaco,
+    },
+    Caso {
+        nome: "pci: varredura coerente",
+        f: pci_varredura_coerente,
     },
     Caso {
         nome: "memoria: permissoes sobrevivem a ida e volta",

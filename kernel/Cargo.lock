@@ -41,6 +41,7 @@ version = "0.1.0"
 dependencies = [
  "aarch64-cpu",
  "bootloader_api",
+ "pci_types",
  "spin",
  "tock-registers",
  "uart_16550",
@@ -54,6 +55,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "224399e74b87b5f3557511d98dff8b14089b3dadafcab6bb93eab67d3aace965"
 dependencies = [
  "scopeguard",
+]
+
+[[package]]
+name = "pci_types"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0c2a105c657261a938ff68ee231c199a3d80eef33976004829de761ef5b1a9b"
+dependencies = [
+ "bit_field",
+ "bitflags",
 ]
 
 [[package]]

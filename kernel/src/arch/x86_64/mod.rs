@@ -10,6 +10,7 @@ pub mod contexto;
 pub mod gdt;
 pub mod idt;
 pub mod paginacao;
+pub mod pci;
 pub mod pic;
 pub mod uart;
 pub mod usuario;
@@ -302,6 +303,12 @@ pub fn init_interrupcoes() {
 /// sentido liberar a linha depois que existe quem consuma os bytes. Entre
 /// ligar a interrupção e a tarefa começar a rodar, os bytes já vão para a
 /// fila — que é justamente o que queremos.
+/// Não há nada a descobrir: as portas de configuração são da arquitetura.
+///
+/// Existe para que o caminho de boot seja o mesmo nas duas plataformas — no
+/// ARM esta função lê o device tree para achar o ECAM.
+pub fn init_pci() {}
+
 pub fn init_interrupcao_serial() {
     // Antes de ligar a recepção: o FIFO pode ter um pedaço de requisição de
     // quem conectou enquanto o kernel ainda bootava. Ver

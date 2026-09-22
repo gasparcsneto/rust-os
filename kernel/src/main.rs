@@ -56,6 +56,7 @@ mod irq;
 mod log;
 mod machine;
 mod paginacao;
+mod pci;
 mod qemu;
 mod serial;
 mod tarefas;
@@ -152,6 +153,11 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     // como primeiro fio de execução. A partir daqui o kernel é preemptável: o
     // timer pode tirar a CPU de quem estiver rodando.
     fios::init();
+
+    // Com paginação e heap no ar, o barramento pode ser varrido: é a primeira
+    // vez que o kernel pergunta ao hardware o que existe em vez de já saber.
+    arch::init_pci();
+    pci::init();
 
     // Com heap e interrupções no ar, a serial do agente pode deixar de ser
     // consultada em laço e passar a avisar quando chega um byte. É o que

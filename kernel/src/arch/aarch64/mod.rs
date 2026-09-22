@@ -18,6 +18,7 @@ pub mod contexto;
 mod fdt;
 pub mod gic;
 pub mod mmu;
+pub mod pci;
 pub mod uart;
 pub mod usuario;
 pub mod vetores;
@@ -358,6 +359,72 @@ pub fn esperar_interrupcao() {
 ///
 /// Fica separada de [`init_interrupcoes`] porque a ordem importa: só faz
 /// sentido liberar a linha depois que existe quem consuma os bytes.
+/// Quanto do ECAM vale mapear: um barramento inteiro.
+///
+/// Cada função tem 4 KiB de configuração, e um barramento tem 256 funções —
+/// 1 MiB. A janela completa que a placa declara cobre os 256 barramentos
+/// possíveis (256 MiB), e mapear tudo custaria 65 mil páginas para varrer um.
+const TAMANHO_DE_UM_BARRAMENTO: u64 = 1024 * 1024;
+
+/// Descobre onde a configuração PCI está mapeada, lendo o device tree.
+///
+/// Chamada antes da enumeração. Se a máquina não descrever um barramento — ou
+/// se o device tree não chegou —, a enumeração simplesmente não acontece e o
+/// kernel diz isso no log, em vez de ler um endereço inventado.
+pub fn init_pci() {
+    let dtb = DTB_INICIO.load(Ordering::Relaxed) as *const u8;
+
+    // SAFETY: o ponteiro veio do firmware em `x0` e foi guardado no boot;
+    // `encontrar_ecam` confere a assinatura antes de olhar qualquer campo, e
+    // trata o ponteiro nulo.
+    let Some((base, tamanho)) = (unsafe { fdt::encontrar_ecam(dtb) }) else {
+        crate::log_warn!("pci", "device tree nao descreve barramento PCI");
+        return;
+    };
+
+    // O ECAM fica **fora** do mapa de identidade: a máquina `virt` o coloca em
+    // 0x40_1000_0000, muito acima do primeiro GiB que o boot mapeia. Precisa
+    // ser mapeado, e como memória de dispositivo — uma leitura de configuração
+    // servida pelo cache devolveria um valor velho, e o barramento não avisa.
+    //
+    // Mapeamos identicamente (virtual igual a físico) para que o cálculo de
+    // deslocamento do ECAM continue sendo só aritmética, sem deslocamento de
+    // janela para acertar.
+    let janela = tamanho.min(TAMANHO_DE_UM_BARRAMENTO);
+    let mut mapeado = 0u64;
+    while mapeado < janela {
+        let endereco = base + mapeado;
+        // SAFETY: o endereço veio do device tree, que descreve memória de
+        // dispositivo real da placa; nenhum outro mapeamento aponta para ela.
+        let r = unsafe {
+            crate::arch::mapear_frame(
+                endereco,
+                endereco,
+                crate::arch::Permissoes {
+                    escrita: true,
+                    executavel: false,
+                    dispositivo: true,
+                    usuario: false,
+                },
+            )
+        };
+        if let Err(motivo) = r {
+            crate::log_warn!("pci", "ECAM nao pode ser mapeado: {}", motivo);
+            return;
+        }
+        mapeado += crate::arch::TAMANHO_PAGINA;
+    }
+
+    crate::log_info!(
+        "pci",
+        "ECAM em {:#x}, {} KiB mapeados de {} KiB",
+        base,
+        janela / 1024,
+        tamanho / 1024
+    );
+    pci::registrar(base, janela);
+}
+
 pub fn init_interrupcao_serial() {
     // Antes de ligar a recepção: o FIFO pode ter um pedaço de requisição de
     // quem conectou enquanto o kernel ainda bootava. Ver

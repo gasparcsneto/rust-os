@@ -113,16 +113,47 @@ pub unsafe fn tamanho_total(dtb: *const u8) -> Option<u64> {
     }
 }
 
-/// Percorre o device tree e chama `f(inicio, tamanho)` para cada faixa de RAM.
+/// Uma propriedade encontrada durante o percurso.
+pub struct Propriedade<'a> {
+    /// Profundidade do nó dono: 1 para filhos da raiz, 2 para netos.
+    pub profundidade: usize,
+    /// Nome do nó dono, sem o `@endereço`.
+    pub no: &'a [u8],
+    /// Numeração do nó dono na ordem do percurso.
+    ///
+    /// Existe porque o nome é emprestado do blob e não sobrevive à closure,
+    /// e quem procura um nó específico precisa de algo comparável que sim.
+    /// Dois nós nunca compartilham este número.
+    pub no_seq: u32,
+    /// Nome da propriedade.
+    pub nome: &'a [u8],
+    /// Deslocamento dos dados dentro do blob.
+    pub dados: usize,
+    /// Tamanho dos dados, em bytes.
+    pub tamanho: usize,
+    /// Quantas células a raiz usa para endereço, e quantas para tamanho.
+    ///
+    /// Vêm da raiz porque é ela que as declara para os filhos. Um nó não
+    /// descreve as próprias larguras — descreve as dos filhos dele.
+    pub address_cells: u32,
+    pub size_cells: u32,
+}
+
+/// Percorre o device tree, chamando `f` para cada propriedade encontrada.
+///
+/// # Por que um percurso só
+///
+/// Porque o formato é uma sequência de tokens sem índice: descobrir qualquer
+/// coisa custa percorrer tudo desde o começo. Escrever um percurso por
+/// pergunta duplicaria a máquina de estados — profundidade, larguras de
+/// célula, alinhamento de quatro bytes — e o segundo divergiria do primeiro na
+/// primeira correção que só um deles recebesse.
 ///
 /// # Safety
 ///
 /// `dtb` precisa apontar para um device tree válido, ou ser nulo (caso em que
 /// a função retorna erro sem desreferenciar nada).
-pub unsafe fn percorrer_memoria(
-    dtb: *const u8,
-    mut f: impl FnMut(u64, u64),
-) -> Result<(), &'static str> {
+unsafe fn percorrer(dtb: *const u8, mut f: impl FnMut(&Propriedade)) -> Result<(), &'static str> {
     if dtb.is_null() {
         return Err("ponteiro de device tree nulo");
     }
@@ -142,8 +173,10 @@ pub unsafe fn percorrer_memoria(
     let mut address_cells = 2u32;
     let mut size_cells = 2u32;
 
-    // Estamos dentro de um nó `/memory...`?
-    let mut em_memoria = false;
+    // O nó cujas propriedades estamos lendo. As propriedades de um nó vêm
+    // antes dos filhos dele, então guardar o último nome aberto basta.
+    let mut no: &[u8] = b"";
+    let mut no_seq = 0u32;
 
     loop {
         let token = unsafe { be32(dtb, pos) };
@@ -154,19 +187,20 @@ pub unsafe fn percorrer_memoria(
                 let nome = unsafe { cstr(dtb, pos) };
                 pos += alinhar4(nome.len() + 1);
                 profundidade += 1;
+                no_seq = no_seq.wrapping_add(1);
 
-                // Os nós de memória são filhos diretos da raiz e se chamam
-                // `memory@<endereço>`.
-                if profundidade == 2 {
-                    em_memoria = nome.starts_with(b"memory");
-                }
+                // O nome vem como `tipo@endereço`; o endereço é o mesmo que a
+                // propriedade `reg` já diz, e compará-lo daria falso negativo
+                // em qualquer máquina com outro mapa.
+                no = match nome.iter().position(|&b| b == b'@') {
+                    Some(corte) => &nome[..corte],
+                    None => nome,
+                };
             }
 
             FDT_END_NODE => {
-                if profundidade == 2 {
-                    em_memoria = false;
-                }
                 profundidade = profundidade.saturating_sub(1);
+                no = b"";
             }
 
             FDT_PROP => {
@@ -178,33 +212,26 @@ pub unsafe fn percorrer_memoria(
                 let nome = unsafe { cstr(dtb, off_strings + nome_off) };
                 let dados = pos;
 
+                // As larguras da raiz precisam ser lidas antes de qualquer
+                // filho usá-las, e são: a raiz é o primeiro nó do blob.
                 if profundidade == 1 {
-                    // Propriedades da raiz: as larguras de célula.
                     if nome == b"#address-cells" {
                         address_cells = unsafe { be32(dtb, dados) };
                     } else if nome == b"#size-cells" {
                         size_cells = unsafe { be32(dtb, dados) };
                     }
-                } else if em_memoria && nome == b"reg" {
-                    // `reg` é uma lista de pares (endereço, tamanho).
-                    let largura_par = (address_cells + size_cells) as usize * 4;
-                    if largura_par > 0 {
-                        let mut deslocamento = 0usize;
-                        while deslocamento + largura_par <= tamanho {
-                            let inicio =
-                                unsafe { ler_celulas(dtb, dados + deslocamento, address_cells) };
-                            let tam = unsafe {
-                                ler_celulas(
-                                    dtb,
-                                    dados + deslocamento + address_cells as usize * 4,
-                                    size_cells,
-                                )
-                            };
-                            f(inicio, tam);
-                            deslocamento += largura_par;
-                        }
-                    }
                 }
+
+                f(&Propriedade {
+                    profundidade,
+                    no,
+                    no_seq,
+                    nome,
+                    dados,
+                    tamanho,
+                    address_cells,
+                    size_cells,
+                });
 
                 pos += alinhar4(tamanho);
             }
@@ -218,4 +245,124 @@ pub unsafe fn percorrer_memoria(
             _ => return Err("token desconhecido no device tree"),
         }
     }
+}
+
+/// Lê uma lista `reg` de pares (endereço, tamanho), chamando `f` para cada.
+///
+/// # Safety
+/// `prop` precisa ter vindo de um percurso do blob `dtb`.
+unsafe fn ler_reg(dtb: *const u8, prop: &Propriedade, mut f: impl FnMut(u64, u64)) {
+    let largura_par = (prop.address_cells + prop.size_cells) as usize * 4;
+    if largura_par == 0 {
+        return;
+    }
+    let mut deslocamento = 0usize;
+    while deslocamento + largura_par <= prop.tamanho {
+        // SAFETY: delegada ao chamador; o laço confere que o par inteiro cabe.
+        unsafe {
+            let inicio = ler_celulas(dtb, prop.dados + deslocamento, prop.address_cells);
+            let tam = ler_celulas(
+                dtb,
+                prop.dados + deslocamento + prop.address_cells as usize * 4,
+                prop.size_cells,
+            );
+            f(inicio, tam);
+        }
+        deslocamento += largura_par;
+    }
+}
+
+/// Percorre o device tree e chama `f(inicio, tamanho)` para cada faixa de RAM.
+///
+/// # Safety
+///
+/// `dtb` precisa apontar para um device tree válido, ou ser nulo (caso em que
+/// a função retorna erro sem desreferenciar nada).
+pub unsafe fn percorrer_memoria(
+    dtb: *const u8,
+    mut f: impl FnMut(u64, u64),
+) -> Result<(), &'static str> {
+    // SAFETY: delegada ao chamador.
+    unsafe {
+        percorrer(dtb, |prop| {
+            // Os nós de memória são filhos diretos da raiz e se chamam
+            // `memory@<endereço>`.
+            if prop.profundidade == 2 && prop.no == b"memory" && prop.nome == b"reg" {
+                ler_reg(dtb, prop, &mut f);
+            }
+        })
+    }
+}
+
+/// Onde o espaço de configuração PCI está mapeado, e quanto ele ocupa.
+///
+/// # Por que perguntar em vez de fixar
+///
+/// O endereço do ECAM é escolha da placa, não da arquitetura. A máquina
+/// `virt` do QEMU o coloca num lugar, uma placa real o coloca noutro, e uma
+/// versão futura do QEMU pode mudá-lo — foi para não depender disso que este
+/// kernel lê o device tree desde o começo.
+///
+/// Procuramos pelo `compatible`, e não pelo nome do nó, porque o nome carrega
+/// o endereço (`pcie@10000000`) e compará-lo seria fixar o endereço por outro
+/// caminho.
+///
+/// # Safety
+///
+/// `dtb` precisa apontar para um device tree válido, ou ser nulo.
+pub unsafe fn encontrar_ecam(dtb: *const u8) -> Option<(u64, u64)> {
+    // Duas coisas, ambas guardadas pelo **número do nó**, e não por um
+    // booleano: o que o último `reg` visto disse, e qual nó se declarou
+    // compatível.
+    //
+    // Guardar o `reg` antes de saber se serve é o que torna a busca correta
+    // numa passada só. A especificação não ordena as propriedades dentro de um
+    // nó, e o QEMU de fato emite `reg` **antes** de `compatible` neste nó —
+    // uma versão anterior disto só olhava o `reg` depois de ver o
+    // `compatible`, e por isso não achava nada.
+    let mut ultimo_reg: Option<(u32, u64, u64)> = None;
+    let mut achado: Option<(u64, u64)> = None;
+
+    let mut visitar = |prop: &Propriedade| {
+        if prop.profundidade != 2 || achado.is_some() {
+            return;
+        }
+
+        if prop.nome == b"reg" {
+            // SAFETY: o percurso garantiu que `dados` e `tamanho` estão dentro
+            // do blob.
+            unsafe {
+                ler_reg(dtb, prop, |inicio, tamanho| {
+                    if ultimo_reg.map(|(seq, ..)| seq) != Some(prop.no_seq) {
+                        ultimo_reg = Some((prop.no_seq, inicio, tamanho));
+                    }
+                });
+            }
+            return;
+        }
+
+        // `compatible` é uma lista de strings terminadas em zero, da mais
+        // específica para a mais genérica.
+        if prop.nome == b"compatible" {
+            // SAFETY: mesma justificativa.
+            let lista = unsafe { core::slice::from_raw_parts(dtb.add(prop.dados), prop.tamanho) };
+            if !lista
+                .split(|&b| b == 0)
+                .any(|s| s == b"pci-host-ecam-generic")
+            {
+                return;
+            }
+
+            if let Some((seq, inicio, tamanho)) = ultimo_reg
+                && seq == prop.no_seq
+            {
+                achado = Some((inicio, tamanho));
+            }
+        }
+    };
+
+    // SAFETY: delegada ao chamador.
+    let _ = unsafe { percorrer(dtb, &mut visitar) };
+
+    achado
 }
