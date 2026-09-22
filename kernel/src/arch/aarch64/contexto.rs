@@ -32,6 +32,9 @@
 
 use core::arch::asm;
 
+use aarch64_cpu::registers::SP_EL0;
+use tock_registers::interfaces::{Readable, Writeable};
+
 use super::vetores::Quadro;
 
 /// O estado salvo de um fio que não está executando.
@@ -122,19 +125,31 @@ extern "C" fn trampolim_de_fio(entrada: u64, argumento: u64) -> ! {
     entrada(argumento)
 }
 
+/// A pilha do fio que está executando, ou a do processo quando ele está em
+/// EL0.
+///
+/// Passa pelo `aarch64-cpu` em vez de `asm!` pelo mesmo critério que o resto
+/// dos registradores de sistema deste backend: quando o crate já nomeia o
+/// registrador, escrever a instrução à mão é uma oportunidade de errar o nome
+/// sem que nada reclame.
 fn ler_sp_el0() -> u64 {
-    let valor: u64;
-    // SAFETY: `SP_EL0` é acessível a partir de EL1.
-    unsafe { asm!("mrs {}, sp_el0", out(reg) valor, options(nomem, nostack)) };
-    valor
+    SP_EL0.get()
 }
 
 /// # Safety
+///
 /// O valor precisa apontar para uma pilha válida e alinhada em 16 bytes; o
 /// processador gera exceção de alinhamento ao usar um `SP` torto.
+///
+/// E o código que chama **não pode estar usando `SP_EL0`**: escrever o
+/// registrador de pilha que se está usando é comportamento indefinido no
+/// AArch64. Aqui isso é dado, porque toda chamada acontece de dentro de um
+/// handler de exceção, que roda em `SP_EL1`.
+///
+/// A escrita em si é segura para o crate — quem a torna perigosa é o que ela
+/// significa, não como ela é feita.
 unsafe fn escrever_sp_el0(valor: u64) {
-    // SAFETY: delegada ao chamador pelo contrato acima.
-    unsafe { asm!("msr sp_el0, {}", in(reg) valor, options(nomem, nostack)) };
+    SP_EL0.set(valor);
 }
 
 /// Executa a troca de fio sobre o quadro de exceção corrente.

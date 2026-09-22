@@ -58,6 +58,69 @@ pub fn mapear_novo(virtual_: u64, permissoes: Permissoes) -> Result<u64, &'stati
     }
 }
 
+/// Mapeia uma faixa de páginas, deixa `preencher` escrever nelas, e **só
+/// então** aplica as permissões pedidas.
+///
+/// # O que esta função existe para garantir
+///
+/// `W^X`: em nenhum instante existe uma página que o usuário possa escrever
+/// *e* executar. Conseguir isso exige uma sequência de três passos numa ordem
+/// específica — mapear gravável, preencher, repermissionar — e a sequência
+/// estava escrita duas vezes, no carregador de ELF e na cópia de espaço do
+/// `fork`.
+///
+/// Duas cópias de um invariante sutil é uma a mais do que se pode manter: o
+/// dia em que uma delas ganhasse um caso novo, a outra continuaria certa por
+/// conta própria até deixar de ser. Aqui a garantia mora num lugar só, e quem
+/// mapeia memória de usuário passa por ele.
+///
+/// # Por que `preencher` não recebe ponteiro nenhum
+///
+/// Porque a faixa pode ter várias páginas e o conteúdo atravessá-las — é o
+/// caso de um segmento de ELF. Dar um ponteiro por página obrigaria quem
+/// chama a repartir o conteúdo; a closure escreve direto nos endereços
+/// virtuais, que é onde eles estão.
+///
+/// Ela roda com as páginas **graváveis**, e é a única janela em que elas
+/// estão: depois que esta função retorna, o que foi pedido somente leitura já
+/// é somente leitura.
+pub fn mapear_faixa_preenchendo(
+    inicio: u64,
+    paginas: u64,
+    permissoes: Permissoes,
+    preencher: impl FnOnce(),
+) -> Result<(), &'static str> {
+    // Gravável e nunca executável, aconteça o que acontecer com o resto: é
+    // justamente essa combinação que torna a janela segura.
+    let temporarias = Permissoes {
+        escrita: true,
+        executavel: false,
+        ..permissoes
+    };
+
+    for i in 0..paginas {
+        mapear_novo(inicio + i * TAMANHO_PAGINA, temporarias)?;
+    }
+
+    preencher();
+
+    if permissoes == temporarias {
+        return Ok(());
+    }
+
+    // Desmapear e remapear o mesmo frame é o caminho que a API de paginação
+    // oferece para trocar permissões. O intervalo entre as duas operações não
+    // é observável: ninguém mais alcança estes endereços.
+    for i in 0..paginas {
+        let endereco = inicio + i * TAMANHO_PAGINA;
+        let frame = arch::desmapear(endereco)?;
+        // SAFETY: o frame acabou de sair deste mesmo endereço virtual, então
+        // não está em uso por nenhum outro mapeamento.
+        unsafe { arch::mapear_frame(endereco, frame, permissoes)? };
+    }
+    Ok(())
+}
+
 /// Desfaz o mapeamento e devolve o frame ao alocador.
 ///
 /// Só use quando o frame tiver vindo de [`mapear_novo`]: liberar um frame que
@@ -178,35 +241,20 @@ unsafe fn copiar_para_o_espaco_ativo(
     paginas: &[(u64, u64, arch::Permissoes)],
 ) -> Result<(), &'static str> {
     for (virtual_, fisico, permissoes) in paginas {
-        // Gravável primeiro, sempre: é a única forma de escrever o conteúdo, e
-        // depois a página recebe o que o original tinha. Em nenhum instante
-        // ela é gravável **e** executável.
-        let temporarias = arch::Permissoes {
-            escrita: true,
-            executavel: false,
-            dispositivo: false,
-            usuario: permissoes.usuario,
-        };
-        let destino = mapear_novo(*virtual_, temporarias)?;
-
-        // SAFETY: a página de destino acabou de ser mapeada com escrita neste
-        // espaço, e o mapa da memória física alcança o frame de origem — que
-        // pertence ao outro espaço e por isso não tem endereço virtual aqui.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                arch::acesso_fisico(*fisico),
-                *virtual_ as *mut u8,
-                TAMANHO_PAGINA as usize,
-            );
-        }
-
-        if *permissoes != temporarias {
-            let frame = arch::desmapear(*virtual_)?;
-            debug_assert_eq!(frame, destino);
-            // SAFETY: o frame acabou de sair deste mesmo endereço virtual,
-            // então não está em uso por nenhum outro mapeamento.
-            unsafe { arch::mapear_frame(*virtual_, frame, *permissoes)? };
-        }
+        mapear_faixa_preenchendo(*virtual_, 1, *permissoes, || {
+            // SAFETY: a página de destino está mapeada com escrita neste
+            // espaço — é o que `mapear_faixa_preenchendo` garante enquanto
+            // esta closure roda —, e o mapa da memória física alcança o frame
+            // de origem, que pertence ao outro espaço e por isso não tem
+            // endereço virtual aqui.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    arch::acesso_fisico(*fisico),
+                    *virtual_ as *mut u8,
+                    TAMANHO_PAGINA as usize,
+                );
+            }
+        })?;
     }
     Ok(())
 }

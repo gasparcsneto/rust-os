@@ -2537,6 +2537,93 @@ fn memoria_espaco_destruido_devolve_tudo() -> Resultado {
     })
 }
 
+/// Nenhuma página de um processo carregado é gravável **e** executável.
+///
+/// # Por que afirmar isto, e não presumir
+///
+/// O `W^X` é mantido por uma sequência de três passos numa ordem específica —
+/// mapear gravável, preencher, repermissionar. Até aqui nada o conferia: os
+/// testes provavam que o programa *roda*, e um programa roda igualmente bem
+/// num espaço onde tudo ficou gravável. A falha seria invisível exatamente
+/// onde mais importa.
+///
+/// O percorredor de páginas que o `fork` trouxe tornou a afirmação possível:
+/// dá para olhar cada descritor do espaço do processo e perguntar.
+///
+/// O caso também conta quantas páginas executáveis encontrou. Sem isso, um
+/// percurso que não achasse nada passaria — e passaria em silêncio, que é o
+/// modo de falhar mais caro que um teste tem.
+fn usuario_nenhuma_pagina_gravavel_e_executavel() -> Resultado {
+    static PRONTO: AtomicBool = AtomicBool::new(false);
+    static EXECUTAVEIS: AtomicU64 = AtomicU64::new(0);
+    static GRAVAVEIS: AtomicU64 = AtomicU64::new(0);
+    static AMBOS: AtomicU64 = AtomicU64::new(0);
+
+    extern "C" fn inspetor(_argumento: u64) -> ! {
+        if crate::usuario::programa::carregar(crate::usuario::exemplo::bytes()).is_err() {
+            crate::fios::terminar()
+        }
+
+        crate::arch::sem_interrupcoes(|| {
+            // SAFETY: o espaço ativo é o deste fio, acabado de montar, e as
+            // interrupções mascaradas garantem que ninguém o altera durante o
+            // percurso.
+            unsafe {
+                crate::arch::percorrer_paginas_do_usuario(
+                    crate::arch::espaco_atual(),
+                    crate::usuario::programa::ENTRADA_PRIVADA,
+                    &mut |_virtual, _fisico, permissoes| {
+                        if permissoes.executavel {
+                            EXECUTAVEIS.fetch_add(1, SeqCst);
+                        }
+                        if permissoes.escrita {
+                            GRAVAVEIS.fetch_add(1, SeqCst);
+                        }
+                        if permissoes.escrita && permissoes.executavel {
+                            AMBOS.fetch_add(1, SeqCst);
+                        }
+                    },
+                );
+            }
+        });
+
+        PRONTO.store(true, SeqCst);
+        crate::fios::terminar()
+    }
+
+    PRONTO.store(false, SeqCst);
+    EXECUTAVEIS.store(0, SeqCst);
+    GRAVAVEIS.store(0, SeqCst);
+    AMBOS.store(0, SeqCst);
+
+    // Num fio próprio: `carregar` instala um espaço no fio corrente, e o fio
+    // do teste não morre — se ele adotasse um, os casos seguintes o herdariam.
+    crate::fios::criar("teste-wx", inspetor, 0)?;
+    esperar_ate(|| PRONTO.load(SeqCst), 300)?;
+
+    let (executaveis, gravaveis, ambos) = (
+        EXECUTAVEIS.load(SeqCst),
+        GRAVAVEIS.load(SeqCst),
+        AMBOS.load(SeqCst),
+    );
+
+    if executaveis == 0 {
+        return Err("o percurso nao encontrou nenhuma pagina executavel");
+    }
+    if gravaveis == 0 {
+        return Err("o percurso nao encontrou nenhuma pagina gravavel");
+    }
+    if ambos != 0 {
+        crate::log_error!(
+            "teste",
+            "{} paginas gravaveis e executaveis ao mesmo tempo",
+            ambos
+        );
+        return Err("o processo tem pagina gravavel e executavel: W^X quebrado");
+    }
+    Ok(())
+}
+
 /// Dois processos coexistem, cada um no seu espaço, nos mesmos endereços.
 ///
 /// # Por que este caso substituiu "um processo por vez"
@@ -3021,6 +3108,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "memoria: espaco destruido devolve tudo",
         f: memoria_espaco_destruido_devolve_tudo,
+    },
+    Caso {
+        nome: "usuario: nenhuma pagina gravavel e executavel",
+        f: usuario_nenhuma_pagina_gravavel_e_executavel,
     },
     Caso {
         nome: "usuario: dois processos coexistem",

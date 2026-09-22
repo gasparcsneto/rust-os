@@ -162,41 +162,6 @@ pub fn carregar(imagem: &[u8]) -> Result<Programa, &'static str> {
     // Só agora: o espaço anterior deste fio, se havia, deixou de estar ativo.
     drop(anterior);
 
-    // Primeira passada: graváveis, para copiar.
-    for (i, segmento) in segmentos.iter().enumerate() {
-        let (inicio, fim) = faixas[i];
-        let mut endereco = inicio;
-        while endereco < fim {
-            crate::paginacao::mapear_novo(endereco, Permissoes::DADOS_USUARIO)?;
-            endereco += TAMANHO_PAGINA;
-        }
-
-        let conteudo = elf.conteudo(segmento);
-
-        // SAFETY: as páginas que cobrem `[destino, destino + bytes_na_memoria)`
-        // acabaram de ser mapeadas com escrita no espaço deste processo, e o
-        // validador garantiu que a faixa inteira está no espaço do usuário.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                conteudo.as_ptr(),
-                segmento.destino as *mut u8,
-                conteudo.len(),
-            );
-
-            // O que o segmento pede além do que o arquivo traz é a `.bss`, e
-            // ela **precisa** chegar zerada. `mapear_novo` já entrega páginas
-            // limpas, mas depender disso seria depender de um detalhe de outro
-            // módulo para uma garantia que é deste.
-            let resto = segmento.bytes_na_memoria - conteudo.len();
-            core::ptr::write_bytes(
-                (segmento.destino + conteudo.len() as u64) as *mut u8,
-                0,
-                resto,
-            );
-        }
-    }
-
-    // Segunda passada: cada segmento recebe o que pediu.
     for (i, segmento) in segmentos.iter().enumerate() {
         let permissoes = Permissoes {
             escrita: segmento.escrita,
@@ -206,14 +171,39 @@ pub fn carregar(imagem: &[u8]) -> Result<Programa, &'static str> {
         };
 
         let (inicio, fim) = faixas[i];
-        let mut endereco = inicio;
-        while endereco < fim {
-            let frame = crate::arch::desmapear(endereco)?;
-            // SAFETY: o frame acabou de sair deste mesmo endereço virtual,
-            // então não está em uso por nenhum outro mapeamento.
-            unsafe { crate::arch::mapear_frame(endereco, frame, permissoes)? };
-            endereco += TAMANHO_PAGINA;
-        }
+        let conteudo = elf.conteudo(segmento);
+
+        crate::paginacao::mapear_faixa_preenchendo(
+            inicio,
+            (fim - inicio) / TAMANHO_PAGINA,
+            permissoes,
+            || {
+                // SAFETY: as páginas que cobrem
+                // `[destino, destino + bytes_na_memoria)` estão mapeadas com
+                // escrita no espaço deste processo enquanto esta closure roda,
+                // e o validador garantiu que a faixa inteira está no espaço do
+                // usuário.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        conteudo.as_ptr(),
+                        segmento.destino as *mut u8,
+                        conteudo.len(),
+                    );
+
+                    // O que o segmento pede além do que o arquivo traz é a
+                    // `.bss`, e ela **precisa** chegar zerada. `mapear_novo` já
+                    // entrega páginas limpas, mas depender disso seria depender
+                    // de um detalhe de outro módulo para uma garantia que é
+                    // deste.
+                    let resto = segmento.bytes_na_memoria - conteudo.len();
+                    core::ptr::write_bytes(
+                        (segmento.destino + conteudo.len() as u64) as *mut u8,
+                        0,
+                        resto,
+                    );
+                }
+            },
+        )?;
     }
 
     crate::paginacao::mapear_novo(BASE_DA_PILHA, Permissoes::DADOS_USUARIO)?;
