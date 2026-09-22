@@ -98,6 +98,15 @@ struct Maquina {
     video: Option<Video>,
 }
 
+/// Executa `f` com acesso exclusivo à descrição da máquina.
+///
+/// Como em [`crate::frames`], a trava é tomada com a preempção desligada. Com
+/// o escalonador preemptivo, um fio de execução interrompido segurando este
+/// `Mutex` faria o próximo que consultasse o mapa girar para sempre.
+fn com_maquina<R>(f: impl FnOnce(&mut Maquina) -> R) -> R {
+    crate::arch::sem_interrupcoes(|| f(&mut MAQUINA.lock()))
+}
+
 static MAQUINA: Mutex<Maquina> = Mutex::new(Maquina {
     regioes: [Regiao::VAZIA; MAX_REGIOES],
     n: 0,
@@ -118,23 +127,18 @@ static MAQUINA: Mutex<Maquina> = Mutex::new(Maquina {
 /// Filtrar na entrada é o único ponto em que a checagem vale por todos: é por
 /// aqui que passam as regiões das duas arquiteturas.
 pub fn adicionar_regiao(regiao: Regiao) {
-    if regiao.fim <= regiao.inicio {
-        let mut m = MAQUINA.lock();
-        m.descartadas += 1;
-        return;
-    }
-
-    let mut m = MAQUINA.lock();
-    if m.n < MAX_REGIOES {
+    com_maquina(|m| {
+        if regiao.fim <= regiao.inicio || m.n >= MAX_REGIOES {
+            // Contamos em vez de ignorar em silêncio: um mapa truncado faria
+            // `memory.stats` mentir, e um agente não tem como desconfiar de um
+            // número que parece plausível.
+            m.descartadas += 1;
+            return;
+        }
         let n = m.n;
         m.regioes[n] = regiao;
         m.n = n + 1;
-    } else {
-        // Contamos em vez de ignorar em silêncio: um mapa truncado faria
-        // `memory.stats` mentir, e um agente não tem como desconfiar de um
-        // número que parece plausível.
-        m.descartadas += 1;
-    }
+    });
 }
 
 /// Registra o framebuffer, se a plataforma tiver um.
@@ -143,36 +147,38 @@ pub fn adicionar_regiao(regiao: Regiao) {
 /// função existe mas nunca é usada.
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub fn definir_video(video: Video) {
-    MAQUINA.lock().video = Some(video);
+    com_maquina(|m| m.video = Some(video));
 }
 
 /// Executa `f` para cada região registrada.
 pub fn com_regioes<F: FnMut(&Regiao)>(mut f: F) {
-    let m = MAQUINA.lock();
-    for regiao in &m.regioes[..m.n] {
-        f(regiao);
-    }
+    com_maquina(|m| {
+        for regiao in &m.regioes[..m.n] {
+            f(regiao);
+        }
+    });
 }
 
 /// Totais agregados: (bytes utilizáveis, bytes totais, número de regiões).
 pub fn estatisticas() -> (u64, u64, usize) {
-    let m = MAQUINA.lock();
-    let mut utilizavel = 0;
-    let mut total = 0;
-    for regiao in &m.regioes[..m.n] {
-        total += regiao.tamanho();
-        if regiao.tipo == TipoRegiao::Utilizavel {
-            utilizavel += regiao.tamanho();
+    com_maquina(|m| {
+        let mut utilizavel = 0;
+        let mut total = 0;
+        for regiao in &m.regioes[..m.n] {
+            total += regiao.tamanho();
+            if regiao.tipo == TipoRegiao::Utilizavel {
+                utilizavel += regiao.tamanho();
+            }
         }
-    }
-    (utilizavel, total, m.n)
+        (utilizavel, total, m.n)
+    })
 }
 
 /// Quantas regiões foram descartadas por falta de espaço.
 pub fn regioes_descartadas() -> usize {
-    MAQUINA.lock().descartadas
+    com_maquina(|m| m.descartadas)
 }
 
 pub fn video() -> Option<Video> {
-    MAQUINA.lock().video
+    com_maquina(|m| m.video)
 }

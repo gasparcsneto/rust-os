@@ -105,6 +105,18 @@ pub static COMANDOS: &[Command] = &[
         handler: tasks_list,
     },
     Command {
+        nome: "threads.stats",
+        resumo: "Estado do escalonador preemptivo: fios vivos, trocas de contexto e preempcoes.",
+        params: &[],
+        handler: threads_stats,
+    },
+    Command {
+        nome: "threads.list",
+        resumo: "Fios de execucao do kernel, com id, nome, estado e quantas vezes rodaram.",
+        params: &[],
+        handler: threads_list,
+    },
+    Command {
         nome: "irq.stats",
         resumo: "Contadores de interrupcoes de hardware por linha.",
         params: &[],
@@ -400,6 +412,58 @@ fn tasks_list(_params: Json, w: &mut JsonWriter) -> fmt::Result {
             w.field_u64("id", inscricao.id)?;
             w.field_str("name", inscricao.nome)?;
             w.field_bool("alive", inscricao.viva)?;
+            w.end_object()
+        })();
+        if let Err(e) = resultado {
+            erro = Some(e);
+        }
+    });
+
+    w.end_array()?;
+    w.end_object()?;
+
+    match erro {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// threads.*
+// ---------------------------------------------------------------------------
+
+fn threads_stats(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let (vivos, trocas, quanta_vencidos) = crate::fios::estatisticas();
+
+    w.begin_object()?;
+    w.field_u64("alive", vivos as u64)?;
+    w.field_u64("context_switches", trocas)?;
+    // Um quantum vence sem gerar troca quando nao ha outro fio pronto, entao
+    // comparar os dois numeros diz se o sistema tem concorrencia de verdade ou
+    // um fio so. Muitas trocas e poucos vencimentos significa que os fios
+    // cedem sozinhos; o contrario, que alguem segura a CPU ate o timer tira-la.
+    w.field_u64("quantum_expirations", quanta_vencidos)?;
+    w.field_u64("quantum_ticks", crate::fios::QUANTUM_EM_TIQUES as u64)?;
+    w.field_u64("max_threads", crate::fios::MAX_FIOS as u64)?;
+    w.end_object()
+}
+
+fn threads_list(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    w.key("threads")?;
+    w.begin_array()?;
+
+    let mut erro: Option<fmt::Error> = None;
+    crate::fios::com_inscricoes(|inscricao| {
+        if erro.is_some() {
+            return;
+        }
+        let resultado = (|| -> fmt::Result {
+            w.begin_object()?;
+            w.field_u64("id", inscricao.id)?;
+            w.field_str("name", inscricao.nome)?;
+            w.field_str("state", inscricao.estado)?;
+            w.field_u64("scheduled", inscricao.escalonamentos)?;
             w.end_object()
         })();
         if let Err(e) = resultado {

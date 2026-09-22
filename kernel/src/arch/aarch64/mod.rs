@@ -14,11 +14,14 @@
 //!
 //! É por isso que este módulo tem assembly e o do x86 não.
 
-pub mod fdt;
+pub mod contexto;
+mod fdt;
 pub mod gic;
 pub mod mmu;
 pub mod uart;
 pub mod vetores;
+
+pub use contexto::{Contexto, ceder_cpu, preparar_contexto};
 
 pub use uart::Uart;
 

@@ -36,6 +36,14 @@
 
 use spin::Mutex;
 
+// Toda tomada de `ALOCADOR` abaixo passa por `sem_interrupcoes`, e a partir da
+// fase 1 isso deixou de ser zelo e virou requisito. Com o escalonador
+// preemptivo, o timer pode trocar de fio de execução em qualquer instrução: um
+// fio preemptado segurando esta trava faria o próximo que pedisse um frame
+// girar para sempre, porque um spinlock não é reentrante e só o dono o solta.
+// Mascarar interrupções desliga a preempção junto, que é o que torna a seção
+// crítica de fato crítica.
+
 /// Tamanho de um frame. 4 KiB é o granulado nativo das duas arquiteturas.
 pub const TAMANHO_FRAME: u64 = 4096;
 
@@ -72,6 +80,16 @@ static ALOCADOR: Mutex<Alocador> = Mutex::new(Alocador {
     dica: 0,
     inicializado: false,
 });
+
+/// Executa `f` com acesso exclusivo ao alocador.
+///
+/// Concentrar a tomada da trava num lugar só é o que torna a invariante
+/// estrutural em vez de uma regra que cada chamador precisa lembrar: não há
+/// como acessar o alocador sem passar por aqui, e aqui a preempção está
+/// desligada.
+fn com_alocador<R>(f: impl FnOnce(&mut Alocador) -> R) -> R {
+    crate::arch::sem_interrupcoes(|| f(&mut ALOCADOR.lock()))
+}
 
 impl Alocador {
     /// Marca um frame como livre, se estiver dentro da janela rastreada.
@@ -133,8 +151,7 @@ pub fn init() {
     let necessarios = ((maior - base) / TAMANHO_FRAME) as usize;
     let rastreados = necessarios.min(MAX_FRAMES);
 
-    {
-        let mut a = ALOCADOR.lock();
+    com_alocador(|a| {
         a.base = base;
         a.rastreados = rastreados;
         a.livres = 0;
@@ -145,7 +162,7 @@ pub fn init() {
         // reservar corrompe o sistema.
         a.bitmap = [0; PALAVRAS];
         a.inicializado = true;
-    }
+    });
 
     crate::machine::com_regioes(|regiao| {
         if regiao.tipo != crate::machine::TipoRegiao::Utilizavel {
@@ -157,13 +174,14 @@ pub fn init() {
         let primeiro = regiao.inicio.div_ceil(TAMANHO_FRAME);
         let ultimo = regiao.fim / TAMANHO_FRAME;
 
-        let mut a = ALOCADOR.lock();
-        for frame in primeiro..ultimo {
-            let endereco = frame * TAMANHO_FRAME;
-            if let Some(indice) = a.indice_de(endereco) {
-                a.liberar_indice(indice);
+        com_alocador(|a| {
+            for frame in primeiro..ultimo {
+                let endereco = frame * TAMANHO_FRAME;
+                if let Some(indice) = a.indice_de(endereco) {
+                    a.liberar_indice(indice);
+                }
             }
-        }
+        });
     });
 
     // Cada arquitetura sabe de coisas diferentes que não podem ser entregues.
@@ -205,13 +223,14 @@ pub fn reservar(inicio: u64, fim: u64) {
     let primeiro = inicio / TAMANHO_FRAME;
     let ultimo = fim.div_ceil(TAMANHO_FRAME);
 
-    let mut a = ALOCADOR.lock();
-    for frame in primeiro..ultimo {
-        let endereco = frame * TAMANHO_FRAME;
-        if let Some(indice) = a.indice_de(endereco) {
-            a.ocupar_indice(indice);
+    com_alocador(|a| {
+        for frame in primeiro..ultimo {
+            let endereco = frame * TAMANHO_FRAME;
+            if let Some(indice) = a.indice_de(endereco) {
+                a.ocupar_indice(indice);
+            }
         }
-    }
+    });
 }
 
 /// Entrega um frame livre, ou `None` se a memória acabou.
@@ -225,40 +244,41 @@ pub fn reservar(inicio: u64, fim: u64) {
 // de verdade — quando a paginação chegar, ela some.
 #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub fn alocar() -> Option<u64> {
-    let mut a = ALOCADOR.lock();
-    if !a.inicializado || a.livres == 0 {
-        return None;
-    }
-
-    let palavras = a.rastreados.div_ceil(64);
-
-    // Duas passadas: da dica até o fim, depois do início até a dica. Assim a
-    // busca é amortizada mesmo quando a memória livre está fragmentada no
-    // começo do bitmap.
-    for tentativa in 0..2 {
-        let (de, ate) = if tentativa == 0 {
-            (a.dica, palavras)
-        } else {
-            (0, a.dica.min(palavras))
-        };
-
-        for palavra in de..ate {
-            if a.bitmap[palavra] == 0 {
-                continue;
-            }
-            let bit = a.bitmap[palavra].trailing_zeros() as usize;
-            let indice = palavra * 64 + bit;
-            if indice >= a.rastreados {
-                continue;
-            }
-
-            a.ocupar_indice(indice);
-            a.dica = palavra;
-            return Some(a.base + indice as u64 * TAMANHO_FRAME);
+    com_alocador(|a| {
+        if !a.inicializado || a.livres == 0 {
+            return None;
         }
-    }
 
-    None
+        let palavras = a.rastreados.div_ceil(64);
+
+        // Duas passadas: da dica até o fim, depois do início até a dica. Assim a
+        // busca é amortizada mesmo quando a memória livre está fragmentada no
+        // começo do bitmap.
+        for tentativa in 0..2 {
+            let (de, ate) = if tentativa == 0 {
+                (a.dica, palavras)
+            } else {
+                (0, a.dica.min(palavras))
+            };
+
+            for palavra in de..ate {
+                if a.bitmap[palavra] == 0 {
+                    continue;
+                }
+                let bit = a.bitmap[palavra].trailing_zeros() as usize;
+                let indice = palavra * 64 + bit;
+                if indice >= a.rastreados {
+                    continue;
+                }
+
+                a.ocupar_indice(indice);
+                a.dica = palavra;
+                return Some(a.base + indice as u64 * TAMANHO_FRAME);
+            }
+        }
+
+        None
+    })
 }
 
 /// Devolve um frame ao alocador.
@@ -272,24 +292,24 @@ pub fn alocar() -> Option<u64> {
 // de verdade — quando a paginação chegar, ela some.
 #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub fn liberar(endereco: u64) {
-    let mut a = ALOCADOR.lock();
-    if let Some(indice) = a.indice_de(endereco) {
-        a.liberar_indice(indice);
-        // Buscar a partir daqui aproveita a localidade: quem libera costuma
-        // voltar a alocar logo em seguida.
-        a.dica = indice / 64;
-    }
+    com_alocador(|a| {
+        if let Some(indice) = a.indice_de(endereco) {
+            a.liberar_indice(indice);
+            // Buscar a partir daqui aproveita a localidade: quem libera
+            // costuma voltar a alocar logo em seguida.
+            a.dica = indice / 64;
+        }
+    });
 }
 
 /// `(frames livres, frames rastreados)`.
 pub fn estatisticas() -> (usize, usize) {
-    let a = ALOCADOR.lock();
-    (a.livres, a.rastreados)
+    com_alocador(|a| (a.livres, a.rastreados))
 }
 
 /// Endereço físico coberto pelo primeiro frame rastreado.
 pub fn base() -> u64 {
-    ALOCADOR.lock().base
+    com_alocador(|a| a.base)
 }
 
 /// O frame que contém este endereço está livre?
@@ -302,9 +322,8 @@ pub fn base() -> u64 {
 // de verdade — quando a paginação chegar, ela some.
 #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub fn esta_livre(endereco: u64) -> bool {
-    let a = ALOCADOR.lock();
-    match a.indice_de(endereco) {
+    com_alocador(|a| match a.indice_de(endereco) {
         Some(indice) => a.bitmap[indice / 64] & (1u64 << (indice % 64)) != 0,
         None => false,
-    }
+    })
 }

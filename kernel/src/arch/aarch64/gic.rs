@@ -219,16 +219,23 @@ pub unsafe fn init_timer(hz_desejado: u32) -> u32 {
 }
 
 /// Atende a interrupção de hardware pendente. Chamado pelo handler de IRQ.
-pub fn tratar() {
+///
+/// Devolve `true` quando o escalonador pediu uma troca de fio. Quem troca é o
+/// handler, e não esta função, porque a troca precisa acontecer depois do fim
+/// de interrupção e com o quadro de exceção em mãos.
+pub fn tratar() -> bool {
     let intid = reconhecer();
 
     // Espúria: nada a atender e, principalmente, nada a finalizar.
     if intid == INTID_ESPURIO {
-        return;
+        return false;
     }
+
+    let mut preemptar = false;
 
     if intid == INTID_TIMER {
         crate::tempo::tick();
+        preemptar = crate::fios::tique();
 
         // O timer genérico é one-shot: sem rearmar aqui, esta seria a última
         // interrupção que receberíamos.
@@ -243,4 +250,6 @@ pub fn tratar() {
 
     crate::irq::contabilizar(intid as usize);
     finalizar(intid);
+
+    preemptar
 }

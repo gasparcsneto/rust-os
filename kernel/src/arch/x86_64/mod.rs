@@ -6,11 +6,14 @@
 //! pronto. Este módulo basicamente traduz esse `BootInfo` para as estruturas
 //! neutras de [`crate::machine`] e segue para o fluxo comum.
 
+pub mod contexto;
 pub mod gdt;
 pub mod idt;
 pub mod paginacao;
 pub mod pic;
 pub mod uart;
+
+pub use contexto::{Contexto, ceder_cpu, preparar_contexto};
 
 use core::sync::atomic::{AtomicU64, Ordering};
 

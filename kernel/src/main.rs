@@ -49,6 +49,7 @@ extern crate alloc;
 
 mod agent;
 mod arch;
+mod fios;
 mod frames;
 mod heap;
 mod irq;
@@ -137,6 +138,11 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
         ),
         None => log_info!("video", "nenhum framebuffer nesta plataforma"),
     }
+
+    // Com heap e paginação no ar, o escalonador pode adotar o contexto atual
+    // como primeiro fio de execução. A partir daqui o kernel é preemptável: o
+    // timer pode tirar a CPU de quem estiver rodando.
+    fios::init();
 
     // Com heap e interrupções no ar, a serial do agente pode deixar de ser
     // consultada em laço e passar a avisar quando chega um byte. É o que

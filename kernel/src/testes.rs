@@ -1577,6 +1577,190 @@ fn relogio_sem_timer_nao_trava() -> Resultado {
     Ok(())
 }
 
+// ===========================================================================
+// Fios de execução — multitarefa preemptiva
+// ===========================================================================
+
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed, Ordering::SeqCst};
+
+/// O caso que distingue preempção de cooperação.
+///
+/// Os dois fios rodam um laço apertado e **nunca cedem a vez**: não há
+/// `.await`, não há `ceder`, não há chamada de sistema. Num escalonador
+/// cooperativo — o que este kernel tinha até a fase anterior — o primeiro a
+/// entrar rodaria para sempre e o segundo nunca sairia do lugar.
+///
+/// Exigir que os dois contadores avancem é, portanto, exigir que alguém os
+/// tenha interrompido à força. É o timer, e é exatamente isso que "preemptivo"
+/// significa.
+fn fios_preemptam_sem_cooperacao() -> Resultado {
+    static CONTADOR: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+    static PARAR: AtomicBool = AtomicBool::new(false);
+    static SAIRAM: AtomicU64 = AtomicU64::new(0);
+
+    extern "C" fn girar(qual: u64) -> ! {
+        let meu = &CONTADOR[qual as usize];
+        while !PARAR.load(SeqCst) {
+            meu.fetch_add(1, Relaxed);
+            core::hint::spin_loop();
+        }
+        SAIRAM.fetch_add(1, SeqCst);
+        crate::fios::terminar()
+    }
+
+    CONTADOR[0].store(0, SeqCst);
+    CONTADOR[1].store(0, SeqCst);
+    PARAR.store(false, SeqCst);
+    SAIRAM.store(0, SeqCst);
+
+    let trocas_antes = crate::fios::estatisticas().1;
+
+    crate::fios::criar("teste-gira-a", girar, 0)?;
+    crate::fios::criar("teste-gira-b", girar, 1)?;
+
+    // Espera ativa de propósito: este fio também não cede: se ele avançar, foi
+    // porque o timer o devolveu à CPU. Trinta tiques são seis quanta.
+    esperar_ticks(30);
+    PARAR.store(true, SeqCst);
+
+    // Dá tempo de os dois notarem a parada e se encerrarem, para não deixarem
+    // fios vivos disputando a CPU com os casos seguintes.
+    esperar_ate(|| SAIRAM.load(SeqCst) == 2, 60)?;
+
+    let a = CONTADOR[0].load(SeqCst);
+    let b = CONTADOR[1].load(SeqCst);
+    let trocas = crate::fios::estatisticas().1 - trocas_antes;
+
+    crate::log_info!("teste", "fios avancaram {} e {} em {} trocas", a, b, trocas);
+
+    if a == 0 || b == 0 {
+        return Err("um dos fios nunca rodou; nao houve preempcao");
+    }
+    if trocas < 4 {
+        return Err("houve poucas trocas de contexto para o tempo decorrido");
+    }
+    Ok(())
+}
+
+/// Um fio precisa retomar exatamente onde parou, com os registradores
+/// intactos.
+///
+/// Preempção que perde estado é pior que preempção nenhuma: o fio continua,
+/// mas com valores trocados, e a corrupção aparece longe da troca. Aqui cada
+/// fio mantém uma soma numa variável local — que o compilador guarda em
+/// registrador justamente por ser usada num laço — e confere o resultado no
+/// fim. Se uma troca embaralhar registradores, a conta não fecha.
+fn fios_preservam_contexto() -> Resultado {
+    const VOLTAS: u64 = 200_000;
+    static SOMA: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+    static PRONTOS: AtomicU64 = AtomicU64::new(0);
+
+    extern "C" fn somar(qual: u64) -> ! {
+        let mut acumulado = 0u64;
+        let mut i = 0u64;
+        while i < VOLTAS {
+            acumulado = acumulado.wrapping_add(i ^ qual);
+            i += 1;
+        }
+        SOMA[qual as usize].store(acumulado, SeqCst);
+        PRONTOS.fetch_add(1, SeqCst);
+        crate::fios::terminar()
+    }
+
+    /// A mesma conta, feita sem ninguém interromper.
+    fn esperado(qual: u64) -> u64 {
+        let mut acumulado = 0u64;
+        let mut i = 0u64;
+        while i < VOLTAS {
+            acumulado = acumulado.wrapping_add(i ^ qual);
+            i += 1;
+        }
+        acumulado
+    }
+
+    PRONTOS.store(0, SeqCst);
+    crate::fios::criar("teste-soma-a", somar, 0)?;
+    crate::fios::criar("teste-soma-b", somar, 1)?;
+
+    esperar_ate(|| PRONTOS.load(SeqCst) == 2, 400)?;
+
+    for qual in 0..2u64 {
+        let obtido = SOMA[qual as usize].load(SeqCst);
+        let alvo = esperado(qual);
+        if obtido != alvo {
+            crate::log_error!("teste", "fio {}: {} != {}", qual, obtido, alvo);
+            return Err("um fio perdeu estado numa troca de contexto");
+        }
+    }
+    Ok(())
+}
+
+/// Ceder a vez de propósito precisa funcionar sem depender do timer.
+fn fios_cedem_voluntariamente() -> Resultado {
+    static ORDEM: spin::Mutex<[u8; 6]> = spin::Mutex::new([0; 6]);
+    static ESCRITOS: AtomicU64 = AtomicU64::new(0);
+    static PRONTOS: AtomicU64 = AtomicU64::new(0);
+
+    fn anotar(marca: u8) {
+        let i = ESCRITOS.fetch_add(1, SeqCst) as usize;
+        crate::arch::sem_interrupcoes(|| {
+            if i < 6 {
+                ORDEM.lock()[i] = marca;
+            }
+        });
+    }
+
+    extern "C" fn alternar(marca: u64) -> ! {
+        for _ in 0..3 {
+            anotar(marca as u8);
+            crate::fios::ceder();
+        }
+        PRONTOS.fetch_add(1, SeqCst);
+        crate::fios::terminar()
+    }
+
+    ESCRITOS.store(0, SeqCst);
+    PRONTOS.store(0, SeqCst);
+    crate::arch::sem_interrupcoes(|| *ORDEM.lock() = [0; 6]);
+
+    crate::fios::criar("teste-cede-a", alternar, b'a' as u64)?;
+    crate::fios::criar("teste-cede-b", alternar, b'b' as u64)?;
+
+    esperar_ate(|| PRONTOS.load(SeqCst) == 2, 200)?;
+
+    let ordem = crate::arch::sem_interrupcoes(|| *ORDEM.lock());
+    // Não exigimos uma sequência exata: o timer também troca, e amarrar o
+    // teste ao rodízio exato o tornaria frágil sem testar nada a mais. O que
+    // precisa valer é que os dois escreveram três vezes cada.
+    let a = ordem.iter().filter(|&&c| c == b'a').count();
+    let b = ordem.iter().filter(|&&c| c == b'b').count();
+    if a != 3 || b != 3 {
+        crate::log_error!("teste", "a={} b={}", a, b);
+        return Err("cessao voluntaria nao alternou entre os fios");
+    }
+    Ok(())
+}
+
+/// Espera `quantos` tiques do timer passarem.
+fn esperar_ticks(quantos: u64) {
+    let ate = crate::tempo::ticks().saturating_add(quantos);
+    while crate::tempo::ticks() < ate {
+        core::hint::spin_loop();
+    }
+}
+
+/// Espera uma condição, com teto em tiques para não pendurar o CI.
+fn esperar_ate(mut condicao: impl FnMut() -> bool, teto_em_ticks: u64) -> Resultado {
+    let limite = crate::tempo::ticks().saturating_add(teto_em_ticks);
+    while crate::tempo::ticks() < limite {
+        if condicao() {
+            return Ok(());
+        }
+        core::hint::spin_loop();
+    }
+    Err("a condicao nao se cumpriu dentro do teto de tempo")
+}
+
 static CASOS: &[Caso] = &[
     Caso {
         nome: "json: objeto simples",
@@ -1821,6 +2005,18 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "traps: registrar grava detalhe",
         f: traps_registrar_grava_detalhe,
+    },
+    Caso {
+        nome: "fios: cedem voluntariamente",
+        f: fios_cedem_voluntariamente,
+    },
+    Caso {
+        nome: "fios: preemptam sem cooperar",
+        f: fios_preemptam_sem_cooperacao,
+    },
+    Caso {
+        nome: "fios: preservam contexto",
+        f: fios_preservam_contexto,
     },
 ];
 

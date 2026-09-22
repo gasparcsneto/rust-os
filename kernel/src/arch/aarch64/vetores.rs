@@ -37,6 +37,7 @@ use tock_registers::interfaces::{Readable, Writeable};
 /// assembly abaixo: `x0..x30` contíguos a partir do início, depois `elr` e
 /// `spsr`. Qualquer divergência aqui vira corrupção silenciosa de registrador,
 /// que é das coisas mais difíceis de depurar num kernel.
+#[derive(Clone, Copy)]
 #[repr(C)]
 pub struct Quadro {
     /// Registradores de uso geral `x0` a `x30`.
@@ -239,7 +240,22 @@ extern "C" fn tratar_sync(quadro: &mut Quadro) {
     let ec = classe_da_excecao();
     let nome = nome_da_classe(ec);
 
-    // `BRK` é a única classe que sabemos retomar hoje.
+    // `SVC` é a chamada de sistema. Hoje tem um único uso: um fio de execução
+    // pedindo para ceder a vez. Passa por aqui de propósito — assim a cessão
+    // voluntária e a preempção usam exatamente o mesmo caminho de troca, sobre
+    // o mesmo quadro montado do mesmo jeito.
+    //
+    // O `eret` volta para a instrução *seguinte* ao `svc` sem que precisemos
+    // ajustar nada: diferente do `brk`, o processador já deixa `ELR_EL1`
+    // apontando para depois dela.
+    if ec == 0x15 {
+        // SAFETY: estamos dentro de um handler de exceção, com as interrupções
+        // mascaradas pela própria entrada da exceção.
+        unsafe { super::contexto::trocar_no_quadro(quadro) };
+        return;
+    }
+
+    // `BRK` é a única outra classe que sabemos retomar hoje.
     if ec == 0x3C {
         let seq = crate::traps::registrar(nome, quadro.elr, None, esr);
         crate::log_info!("traps", "breakpoint #{} em pc={:#x}", seq, quadro.elr);
@@ -265,8 +281,19 @@ extern "C" fn tratar_sync(quadro: &mut Quadro) {
 /// preemptivo vai precisar na fase 1, quando uma interrupção de timer puder
 /// resultar em troca de contexto.
 #[unsafe(no_mangle)]
-extern "C" fn tratar_irq(_quadro: &mut Quadro) {
-    super::gic::tratar();
+extern "C" fn tratar_irq(quadro: &mut Quadro) {
+    let preemptar = super::gic::tratar();
+
+    if preemptar {
+        // A troca acontece **depois** de o GIC ter sido avisado do fim do
+        // atendimento, lá dentro de `tratar`. Se trocássemos antes, a linha do
+        // timer ficaria eternamente em atendimento e o próximo tique nunca
+        // chegaria — o sistema trocaria de fio uma única vez.
+        //
+        // SAFETY: estamos dentro de um handler de exceção, com as interrupções
+        // mascaradas pela própria entrada da exceção.
+        unsafe { super::contexto::trocar_no_quadro(quadro) };
+    }
 }
 
 /// Handler de FIQ: interrupção rápida, de prioridade mais alta.

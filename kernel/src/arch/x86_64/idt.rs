@@ -54,16 +54,30 @@ pub fn init() {
 
 /// Interrupção periódica do timer (IRQ 0).
 ///
-/// É o coração do kernel: dá noção de tempo hoje e, na fase 1, será o ponto
-/// em que o scheduler preemptivo decide trocar de tarefa.
+/// É o coração do kernel: dá a noção de tempo e é o ponto em que o
+/// escalonador preemptivo decide trocar de fio de execução.
 extern "x86-interrupt" fn timer(_quadro: InterruptStackFrame) {
     crate::tempo::tick();
     crate::irq::contabilizar(0);
 
-    // SAFETY: estamos no handler desta exata interrupção. Omitir o EOI faria
-    // o PIC considerar a interrupção eternamente em atendimento e nunca mais
-    // entregar outra — o timer dispararia uma única vez.
+    let preemptar = crate::fios::tique();
+
+    // O EOI vem **antes** da troca, e a ordem importa. Se trocássemos de fio
+    // primeiro, este handler só voltaria a executar quando o fio atual fosse
+    // escalonado de novo — e até lá o PIC consideraria a interrupção em
+    // atendimento e não entregaria outra. O timer pararia, e com ele o
+    // escalonador: um sistema que troca de fio exatamente uma vez.
+    //
+    // SAFETY: estamos no handler desta exata interrupção.
     unsafe { super::pic::fim_de_interrupcao(super::pic::VETOR_TIMER) };
+
+    if preemptar {
+        // Trocar aqui dentro é seguro porque no x86 o quadro de interrupção
+        // foi empilhado na pilha do fio interrompido: a troca de pilha leva o
+        // quadro junto, e o `iretq` do fim deste handler acontece na pilha do
+        // outro fio, retomando o ponto em que *ele* parou.
+        super::contexto::ceder_cpu();
+    }
 }
 
 /// Interrupção de recepção da COM2 (IRQ 3): chegou byte para o agente.

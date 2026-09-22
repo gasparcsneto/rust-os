@@ -115,6 +115,8 @@ Os dois podem rodar ao mesmo tempo: cada arquitetura tem seu próprio socket.
 | `paging.translate` | Traduz um endereço virtual para físico (`address`) |
 | `heap.stats` | Estado do heap, incluindo fragmentação |
 | `tasks.stats` | Escalonador cooperativo e fila de entrada do canal |
+| `threads.stats` | Escalonador preemptivo: trocas de contexto e quanta |
+| `threads.list` | Fios de execução do kernel, com estado e vezes escalonado |
 | `tasks.list` | Tarefas lançadas, com id, nome e se estão vivas |
 | `irq.stats` | Contadores de interrupções de hardware por linha |
 | `traps.stats` | Contadores de exceções e detalhes da última falha |
@@ -136,6 +138,9 @@ kernel/src/
 ├── paginacao.rs     fachada segura de mapeamento
 ├── heap.rs          alocador do kernel: lista livre ordenada com fusão
 ├── testes.rs        suíte de testes que roda dentro do emulador
+├── fios/
+│   ├── mod.rs       escalonador preemptivo: fios, rodízio e quantum
+│   └── pilha.rs     pilhas de fio, cada uma com sua guard page
 ├── tarefas/
 │   ├── mod.rs       tarefa, identidade e o `yield` explícito
 │   ├── executor.rs  escalonador cooperativo com suporte a wakers
@@ -196,6 +201,8 @@ O contraste no caminho de boot é grande:
 | Interrupções | PIC 8259 + timer PIT | GIC v2 + timer genérico |
 | Serial do agente | UART 16550 na IRQ 3 | PL011 no INTID 33 (SPI 1) |
 | Dormir sem corrida | `sti; hlt`, par atômico | `wfi` acorda com IRQ mascarada |
+| Troca de contexto | troca de pilha (`rsp`) | troca do quadro de exceção |
+| Ceder a vez | chamada de função comum | `svc`, pelo mesmo caminho da preempção |
 | MMU | já ligada pelo bootloader | desligada; nós a acendemos |
 | Acesso à memória física | mapeada num deslocamento | identidade |
 | Encerrar emulador | `isa-debug-exit` | semihosting |
@@ -241,6 +248,45 @@ A versão ingênua desse executor (fila circular, repolla todo mundo) passaria
 em quase todos os testes da suíte. O caso `tarefa: adormecida nao gira` existe
 exatamente para reprovar essa versão: ele conta os avanços de uma tarefa que
 dorme cinco tiques e exige que sejam poucos.
+
+## Multitarefa preemptiva
+
+O executor cooperativo resolve concorrência de I/O, mas depende de todo mundo
+cooperar: uma tarefa que entre num laço longo sem `.await` trava as outras.
+Para o que não se pode confiar que ceda, existe o escalonador preemptivo —
+**fios de execução**, cada um com sua pilha, trocados à força pelo timer.
+
+As duas convivem, com a divisão usual: o executor cooperativo roda dentro de
+**um** fio.
+
+O caso `fios: preemptam sem cooperar` é o que separa uma coisa da outra. Dois
+fios rodam um laço apertado sem `.await`, sem `ceder`, sem chamada de sistema
+nenhuma. Num escalonador cooperativo, o primeiro rodaria para sempre:
+
+```
+[   15]  1020ms info  teste  fios avancaram 294315 e 296655 em 9 trocas
+```
+
+Cada fio tem pilha própria, mapeada em páginas com uma **guard page** logo
+abaixo. Um `Box<[u8]>` seria uma linha de código e a decisão errada: estourar
+uma pilha de heap não produz falha, produz uma escrita silenciosa no bloco
+vizinho. Com a guard page, o estouro vira falha de página no instante em que
+acontece, com o endereço no relatório.
+
+O mecanismo de troca difere entre as arquiteturas, e a diferença é deliberada.
+No x86 o quadro de interrupção é empilhado na pilha do próprio fio, então
+trocar de fio é trocar de pilha. No ARM as exceções rodam numa pilha separada
+(`SP_EL1`) — é o que dá a detecção de estouro de graça — e trocar essa pilha
+destruiria a propriedade; lá o contexto completo já está no quadro de exceção,
+e trocar de fio é trocar o quadro. Ceder de propósito passa por `svc`
+justamente para cair nesse mesmo caminho, e é a instrução que as chamadas de
+sistema vão usar na etapa seguinte.
+
+**Preempção muda a regra das travas.** Um spinlock não é reentrante: um fio
+preemptado segurando uma trava faz o próximo girar para sempre. Por isso todo
+acesso a estado compartilhado neste kernel passa por `sem_interrupcoes`, que
+desliga a preempção junto — `frames`, `machine`, `heap` e o próprio
+escalonador.
 
 ## Testes
 
@@ -329,8 +375,11 @@ padronizado.
       suporte real a wakers, serial do agente dirigida por interrupção nas
       duas arquiteturas, e um núcleo que dorme de verdade quando não há
       trabalho.
-- [ ] **Fase 1 — Kernel de verdade.** Scheduler preemptivo, context switch,
-      ring 3 com TSS, `syscall`/`sysret`, ELF loader e processos isolados.
+- [x] **Fase 1 — Scheduler preemptivo.** Fios de execução com pilha própria e
+      guard page, troca de contexto nas duas arquiteturas, rodízio por quantum
+      e preempção pelo timer.
+- [ ] **Fase 1 — Userspace.** Ring 3 com TSS e EL0, `syscall`/`sysret` e `svc`,
+      ELF loader, processos com espaço de endereços isolado.
 - [ ] **Fase 2 — Drivers.** Enumeração PCI, virtio-blk, virtio-net, timer
       APIC/HPET, framebuffer gráfico.
 
