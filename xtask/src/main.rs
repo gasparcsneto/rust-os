@@ -843,6 +843,53 @@ fn desmontar(arch: Arquitetura, release: bool, simbolo: &str) -> Result<ExitCode
     Ok(ExitCode::SUCCESS)
 }
 
+/// Tamanho do disco de testes.
+const TAMANHO_DO_DISCO: u64 = 1024 * 1024;
+
+/// Bytes reconhecíveis no começo do primeiro setor.
+///
+/// O driver de disco precisa de algo que prove que leu o **setor certo** e não
+/// um buffer zerado que por acaso parecia plausível. Um padrão conhecido é a
+/// diferença entre "a leitura retornou" e "a leitura funcionou".
+const ASSINATURA_DO_DISCO: &[u8] = b"DUKE-DISCO-v1";
+
+/// Cria o disco de testes se ele ainda não existir.
+///
+/// O conteúdo é gerado, e não versionado: um arquivo binário de 1 MiB no
+/// repositório seria peso morto que ninguém revisa. A regra de preenchimento
+/// está aqui e no teste do kernel, que é o par que precisa concordar.
+fn disco_de_testes() -> Result<PathBuf, String> {
+    let caminho = raiz_do_projeto().join("target").join("disco.img");
+    if caminho.exists() {
+        return Ok(caminho);
+    }
+
+    std::fs::create_dir_all(caminho.parent().unwrap())
+        .map_err(|e| format!("não foi possível criar o diretório do disco: {e}"))?;
+
+    let mut conteudo = vec![0u8; TAMANHO_DO_DISCO as usize];
+    conteudo[..ASSINATURA_DO_DISCO.len()].copy_from_slice(ASSINATURA_DO_DISCO);
+
+    // Cada setor é preenchido com um byte que deriva do próprio número. Ler o
+    // setor errado devolve um padrão que não confere, o que torna um erro de
+    // deslocamento visível — diferente de zeros, que parecem plausíveis em
+    // qualquer lugar.
+    for (numero, setor) in conteudo.chunks_mut(512).enumerate() {
+        let marca = (numero as u8).wrapping_mul(7).wrapping_add(1);
+        for (i, byte) in setor.iter_mut().enumerate() {
+            if numero == 0 && i < ASSINATURA_DO_DISCO.len() {
+                continue;
+            }
+            *byte = marca;
+        }
+    }
+
+    std::fs::write(&caminho, &conteudo)
+        .map_err(|e| format!("não foi possível escrever o disco de testes: {e}"))?;
+    println!("[xtask] disco de testes criado em {}", caminho.display());
+    Ok(caminho)
+}
+
 /// Monta a linha de comando do QEMU para a arquitetura em questão.
 fn comando_qemu(
     arch: Arquitetura,
@@ -880,6 +927,16 @@ fn comando_qemu(
         }
         _ => return Err("artefato incompatível com a arquitetura".into()),
     }
+
+    // Um disco virtio, nas duas arquiteturas. `if=none` mais `-device` em vez
+    // de `if=virtio` porque só assim o dispositivo aparece no barramento PCI
+    // no ARM, onde não há o atalho que o x86 aceita.
+    let disco = disco_de_testes()?;
+    qemu.args([
+        "-drive",
+        &format!("format=raw,file={},if=none,id=disco0", disco.display()),
+    ]);
+    qemu.args(["-device", "virtio-blk-pci,drive=disco0"]);
 
     qemu.args(["-m", "128M"]);
 
