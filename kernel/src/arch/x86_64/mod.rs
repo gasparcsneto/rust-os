@@ -91,6 +91,14 @@ const CONFIG: bootloader_api::BootloaderConfig = {
 /// depuração.
 pub const BASE_DA_MEMORIA_FISICA: u64 = 0xFFFF_8800_0000_0000;
 
+/// Onde a faixa de memória de dispositivo começa.
+///
+/// Fica **abaixo** do mapa da memória física de propósito, entre ele e a
+/// imagem do kernel: são entradas de topo que ninguém mais usa, e pô-la
+/// acima significaria disputar espaço com o que o bootloader ainda posiciona
+/// sozinho a partir de [`BASE_DO_RESTO`].
+pub const BASE_DE_MMIO: u64 = 0xFFFF_8400_0000_0000;
+
 /// Onde o heap do kernel começa.
 pub const BASE_DO_HEAP: u64 = 0xFFFF_9000_0000_0000;
 

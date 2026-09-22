@@ -64,10 +64,20 @@ static DTB_TAMANHO: AtomicU64 = AtomicU64::new(0);
 //   L1[4]    espaço do usuário
 //   L1[64]   heap do kernel
 //   L1[128]  pilhas de fio
+//   L1[192]  memória de dispositivo mapeada sob demanda
 //
 // É o que permite montar uma tabela por processo do mesmo jeito nas duas
 // arquiteturas: copiam-se as entradas de topo do kernel, e as do usuário ficam
 // de fora.
+
+/// Onde a faixa de memória de dispositivo começa. 192 GiB.
+///
+/// Mapear um BAR aqui, e não confiar no mapa de identidade que já cobre o
+/// primeiro GiB como dispositivo, é o que faz o driver ser o mesmo nas duas
+/// arquiteturas. O endereço físico continua alcançável pela identidade
+/// também; duas traduções para a mesma página, ambas de dispositivo, é algo
+/// que a arquitetura permite.
+pub const BASE_DE_MMIO: u64 = 0x0000_0030_0000_0000;
 
 /// Onde o heap do kernel começa. 64 GiB.
 pub const BASE_DO_HEAP: u64 = 0x0000_0010_0000_0000;
@@ -384,33 +394,17 @@ pub fn init_pci() {
     // ser mapeado, e como memória de dispositivo — uma leitura de configuração
     // servida pelo cache devolveria um valor velho, e o barramento não avisa.
     //
-    // Mapeamos identicamente (virtual igual a físico) para que o cálculo de
-    // deslocamento do ECAM continue sendo só aritmética, sem deslocamento de
-    // janela para acertar.
+    // Mapeamos só um barramento, e não a janela inteira que a placa declara:
+    // ela cobre os 256 barramentos possíveis, e mapeá-la custaria 65 mil
+    // páginas para varrer um.
     let janela = tamanho.min(TAMANHO_DE_UM_BARRAMENTO);
-    let mut mapeado = 0u64;
-    while mapeado < janela {
-        let endereco = base + mapeado;
-        // SAFETY: o endereço veio do device tree, que descreve memória de
-        // dispositivo real da placa; nenhum outro mapeamento aponta para ela.
-        let r = unsafe {
-            crate::arch::mapear_frame(
-                endereco,
-                endereco,
-                crate::arch::Permissoes {
-                    escrita: true,
-                    executavel: false,
-                    dispositivo: true,
-                    usuario: false,
-                },
-            )
-        };
-        if let Err(motivo) = r {
+    let onde = match crate::mmio::mapear(base, janela) {
+        Ok(onde) => onde,
+        Err(motivo) => {
             crate::log_warn!("pci", "ECAM nao pode ser mapeado: {}", motivo);
             return;
         }
-        mapeado += crate::arch::TAMANHO_PAGINA;
-    }
+    };
 
     crate::log_info!(
         "pci",
@@ -419,32 +413,16 @@ pub fn init_pci() {
         janela / 1024,
         tamanho / 1024
     );
-    pci::registrar(base, janela);
+    pci::registrar(onde, janela);
 
-    // A janela de MMIO é onde o kernel vai pôr os BARs. Ela precisa estar
-    // mapeada antes de alguém desreferenciar um deles, e aqui isso sai de
-    // graça — mas só enquanto couber no bloco de dispositivo que o boot monta.
-    //
-    // Conferimos em vez de supor porque supor sairia caro do jeito errado: um
-    // BAR fora do mapa não dá erro de compilação nem de atribuição, dá uma
-    // falha de tradução na primeira leitura do driver, muito longe daqui.
-    // Mapear a janela inteira não é alternativa: são quase 750 MiB, 190 mil
-    // páginas, para usar alguns KiB.
+    // A janela de MMIO é onde o kernel vai pôr os BARs. Ela não é mapeada
+    // aqui: quem precisa de um BAR é o driver daquele dispositivo, e mapear
+    // 751 MiB para usar alguns KiB seria 190 mil páginas de desperdício. Ver
+    // [`crate::mmio`].
     let Some((no_barramento, na_cpu, tamanho)) = barramento.mmio32 else {
         crate::log_warn!("pci", "device tree nao declara janela de MMIO de 32 bits");
         return;
     };
-
-    let fim = na_cpu.saturating_add(tamanho);
-    if fim > COBERTURA_DA_ENTRADA_DE_TOPO {
-        crate::log_warn!(
-            "pci",
-            "janela de MMIO em {:#x}+{:#x} fica fora do bloco de dispositivo",
-            na_cpu,
-            tamanho
-        );
-        return;
-    }
 
     crate::log_info!(
         "pci",

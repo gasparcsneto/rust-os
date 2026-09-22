@@ -55,6 +55,7 @@ mod heap;
 mod irq;
 mod log;
 mod machine;
+mod mmio;
 mod paginacao;
 mod pci;
 mod qemu;
@@ -65,6 +66,7 @@ mod tempo;
 mod testes;
 mod traps;
 mod usuario;
+mod virtio;
 
 use core::panic::PanicInfo;
 
@@ -158,6 +160,11 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     // vez que o kernel pergunta ao hardware o que existe em vez de já saber.
     arch::init_pci();
     pci::init();
+
+    // E com o barramento varrido, os dispositivos que ele revelou podem ser
+    // ligados. A ordem não é escolha: um driver virtio precisa dos BARs já
+    // atribuídos e do decodificador já ligado, que é o que a varredura faz.
+    virtio::blk::init();
 
     // Com heap e interrupções no ar, a serial do agente pode deixar de ser
     // consultada em laço e passar a avisar quando chega um byte. É o que

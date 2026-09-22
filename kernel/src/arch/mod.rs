@@ -61,8 +61,8 @@ pub use aarch64 as atual;
 // pelos backends, que esconderia código morto de verdade dentro deles.
 #[allow(unused_imports)]
 pub use atual::{
-    BASE_DAS_PILHAS, BASE_DO_HEAP, COBERTURA_DA_ENTRADA_DE_TOPO, Contexto, Uart, acesso_fisico,
-    ceder_cpu, criar_espaco, definir_pilha_de_kernel, desmapear, destruir_espaco,
+    BASE_DAS_PILHAS, BASE_DE_MMIO, BASE_DO_HEAP, COBERTURA_DA_ENTRADA_DE_TOPO, Contexto, Uart,
+    acesso_fisico, ceder_cpu, criar_espaco, definir_pilha_de_kernel, desmapear, destruir_espaco,
     disparar_breakpoint, disparar_falha_fatal, dormir_se_ocioso, encerrar_emulador,
     entrar_em_usuario, espaco_atual, espaco_do_kernel, esperar_interrupcao,
     falha_de_estouro_de_pilha, halt_forever, identificar_cpu, init_excecoes,
