@@ -77,10 +77,19 @@ pub struct Acesso {
 /// qualquer implementação de ECAM — é isso que o "generic" do `compatible`
 /// quer dizer.
 fn deslocamento_no_ecam(endereco: PciAddress, deslocamento: u16) -> u64 {
+    // Os dois bits baixos do deslocamento são descartados, como no x86: o
+    // acesso é sempre de 32 bits e sempre devolve a palavra alinhada, e quem
+    // quer um campo menor recorta depois.
+    //
+    // Aqui isso não é só simetria com o outro backend. A configuração no ARM é
+    // memória de dispositivo, e um acesso desalinhado a memória de dispositivo
+    // gera exceção — não um acesso lento. Sem esta máscara, um deslocamento
+    // ímpar vindo de uma lista de capabilities malformada derrubaria o kernel
+    // em vez de devolver um valor errado.
     ((endereco.bus() as u64) << 20)
         | ((endereco.device() as u64) << 15)
         | ((endereco.function() as u64) << 12)
-        | (deslocamento as u64 & 0xFFF)
+        | (deslocamento as u64 & 0xFFC)
 }
 
 impl ConfigRegionAccess for Acesso {
