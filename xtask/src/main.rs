@@ -205,7 +205,7 @@ fn extrair_arch(args: &[String]) -> Result<Arquitetura, String> {
 fn ajuda() {
     println!(
         "\
-build system do kernel
+build system do Duke
 
 USO:
     cargo xtask <comando> [--arch x86_64|aarch64] [--release]
@@ -229,7 +229,7 @@ EXEMPLOS:
 
     cargo xtask debug --arch aarch64
     cargo xtask simbolo 0xffff80000000b697
-    cargo xtask asm --release kernel::testes::consumir_pilha"
+    cargo xtask asm --release duke::testes::consumir_pilha"
     );
 }
 
@@ -267,6 +267,15 @@ enum Artefato {
     /// é o que o QEMU *não* faz quando lhe entregamos um ELF.
     Binario(PathBuf),
 }
+
+/// Nome do executável que o cargo produz para o kernel.
+///
+/// É o `name` do pacote em `kernel/Cargo.toml` — ou seja, o nome do sistema.
+/// Fica numa constante porque o xtask precisa dele em dois caminhos
+/// diferentes (a imagem que o QEMU carrega e o ELF que o depurador lê), e
+/// descobrir só na hora de rodar que um dos dois ficou para trás é o tipo de
+/// erro que custa uma sessão de depuração inteira.
+const NOME_DO_BINARIO: &str = "duke";
 
 /// Compila o kernel e prepara o que o QEMU vai carregar.
 ///
@@ -308,7 +317,7 @@ fn build(arch: Arquitetura, release: bool, modo_teste: bool) -> Result<Artefato,
         .join("target")
         .join(arch.alvo())
         .join(perfil)
-        .join("kernel");
+        .join(NOME_DO_BINARIO);
     if !elf.exists() {
         return Err(format!(
             "o cargo reportou sucesso mas o binário não apareceu em {}",
@@ -422,7 +431,7 @@ fn caminho_elf(arch: Arquitetura, release: bool) -> PathBuf {
         .join("target")
         .join(arch.alvo())
         .join(if release { "release" } else { "debug" })
-        .join("kernel")
+        .join(NOME_DO_BINARIO)
 }
 
 /// Porta TCP onde o QEMU expõe o protocolo de depuração remota.
@@ -508,12 +517,7 @@ fn receita_do_depurador(arch: Arquitetura, elf: &Path) -> Vec<String> {
 /// completo — um detalhe que custa uns minutos de confusão na primeira vez.
 fn primeiros_passos(arch: Arquitetura) -> Vec<&'static str> {
     match arch {
-        Arquitetura::X86_64 => vec![
-            "break kernel::inicio_comum",
-            "continue",
-            "bt",
-            "info locals",
-        ],
+        Arquitetura::X86_64 => vec!["break duke::inicio_comum", "continue", "bt", "info locals"],
         Arquitetura::Aarch64 => vec![
             "breakpoint set --name inicio_comum",
             "continue",
@@ -982,5 +986,21 @@ mod testes {
         );
         assert_eq!(Arquitetura::X86_64.base_do_kernel(), 0xFFFF_8000_0000_0000);
         assert_eq!(Arquitetura::Aarch64.base_do_kernel(), 0);
+    }
+
+    /// Mesmo raciocínio da amarra anterior: o nome do executável vem do
+    /// `Cargo.toml` do kernel, e o xtask precisa adivinhá-lo para achar o ELF.
+    /// Se o pacote for renomeado sem atualizar a constante, o build "passa" e
+    /// só o `cargo xtask debug` quebra — longe da causa.
+    #[test]
+    fn nome_do_binario_confere_com_o_pacote_do_kernel() {
+        let manifesto = std::fs::read_to_string(raiz_do_projeto().join("kernel/Cargo.toml"))
+            .expect("o manifesto do kernel precisa existir");
+
+        assert!(
+            manifesto.contains(&format!("name = \"{NOME_DO_BINARIO}\"")),
+            "o pacote do kernel não se chama mais {NOME_DO_BINARIO}; \
+             atualize NOME_DO_BINARIO"
+        );
     }
 }

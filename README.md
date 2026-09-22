@@ -1,4 +1,4 @@
-# rust-os
+# Duke
 
 Um kernel escrito do zero em Rust para **x86_64 e aarch64**, projetado desde
 a primeira linha para ser operado tanto por humanos quanto por um agente.
@@ -7,7 +7,12 @@ O ponto de partida é o material de [os.phil-opp.com](https://os.phil-opp.com),
 mas o objetivo vai além do tutorial: chegar a um sistema com userspace real —
 processos isolados em ring 3, syscalls, drivers e sistema de arquivos.
 
-## O que torna este OS diferente
+O nome aparece onde importa para quem depura: é o prefixo de todo símbolo do
+binário (`duke::fios::selecionar`), o nome do ELF que o depurador carrega e o
+campo `kernel` que o canal do agente reporta em `agent.describe` e
+`system.info`.
+
+## O que torna o Duke diferente
 
 A maioria dos kernels expõe seu estado como texto: você lê um log e tenta
 deduzir o que aconteceu. Isso obriga qualquer ferramenta automatizada a

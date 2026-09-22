@@ -1,4 +1,4 @@
-//! # Kernel agent-native em Rust
+//! # Duke — kernel agent-native em Rust
 //!
 //! Um kernel escrito do zero para **x86_64 e aarch64**, projetado desde o
 //! início para ser operado por um agente além de por humanos.
@@ -78,7 +78,7 @@ use core::panic::PanicInfo;
 pub fn inicio_comum(canal_agente: bool) -> ! {
     banner();
 
-    log_info!("boot", "kernel iniciado em {}, fase 0", arch::nome());
+    log_info!("boot", "Duke iniciado em {}, fase 0", arch::nome());
 
     let cpu = arch::identificar_cpu();
     log_info!("cpu", "fabricante: {}", cpu.como_str());
@@ -210,7 +210,7 @@ async fn pulso() {
 fn banner() {
     serial_println!();
     serial_println!("=============================================");
-    serial_println!("  kernel agent-native :: {} :: fase 0", arch::nome());
+    serial_println!("  Duke :: agent-native :: {} :: fase 0", arch::nome());
     serial_println!("=============================================");
 }
 

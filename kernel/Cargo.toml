@@ -1,8 +1,12 @@
 [package]
-name = "kernel"
+# O nome do pacote é o nome do sistema. Não é só estética: ele vira o prefixo
+# de todo símbolo do binário (`duke::tarefas::Tarefa`), o nome do ELF que o
+# depurador carrega e o valor do campo `kernel` que `agent.describe` e
+# `system.info` reportam pelo canal do agente. Um único lugar define os três.
+name = "duke"
 version = "0.1.0"
 edition = "2024"
-description = "Kernel agent-native em Rust para x86_64 e aarch64"
+description = "Duke: kernel agent-native em Rust para x86_64 e aarch64"
 license = "MIT OR Apache-2.0"
 
 # O kernel é seu próprio workspace (ver comentário no Cargo.toml da raiz):

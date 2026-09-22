@@ -5,7 +5,7 @@ programas que rodam **sobre** um sistema operacional, e aqui nós somos o
 sistema operacional. Boa parte do que funciona lá não funciona aqui — e a
 parte que funciona muitas vezes precisa de uma volta a mais.
 
-## O que este kernel tem
+## O que o Duke tem
 
 Quatro ferramentas, cada uma respondendo a uma pergunta diferente.
 
@@ -41,11 +41,11 @@ O que se consegue com isso, na prática:
 (lldb) continue
 (lldb) bt
 * frame #0: <Executor>::lancar(self=…, tarefa=…) at executor.rs:85:25
-  frame #1: kernel::inicio_comum(canal_agente=true) at main.rs:160:18
+  frame #1: duke::inicio_comum(canal_agente=true) at main.rs:160:18
   frame #2: inicio_aarch64(dtb=1140850688) at mod.rs:169:5
   frame #3: _start + 140
 (lldb) frame variable
-(kernel::tarefas::Tarefa) tarefa = {
+(duke::tarefas::Tarefa) tarefa = {
   id = (__0 = 1)
   nome = (data_ptr = "agent…", length = 5)
   futuro = { pointer = { pointer = 0x1000000830, vtable = 0x400b0f68 } }
@@ -99,7 +99,7 @@ $ cargo xtask simbolo 18446603336221253026
 0xffff80000000dda2
   core::ptr::write_volatile::<u64>
       …/core/src/ptr/mod.rs:2269:9
-  inlinado em kernel::arch::x86_64::disparar_falha_fatal
+  inlinado em duke::arch::x86_64::disparar_falha_fatal
       kernel/src/arch/x86_64/mod.rs:337:14
 ```
 
@@ -131,7 +131,7 @@ A evidência estava a um comando de distância: a versão release da função n�
 tinha instrução de chamada nenhuma. Depois da correção:
 
 ```
-00000000000073f0 <kernel::testes::consumir_pilha>:
+00000000000073f0 <duke::testes::consumir_pilha>:
 ; fn consumir_pilha(profundidade: u64) -> u64 {
     73f0:  subq  $0x18, %rsp          <- quadro de pilha de verdade
 ;         let eco = consumir_pilha(core::ptr::read_volatile(&bloco[0]) + 1);

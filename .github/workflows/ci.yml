@@ -1,4 +1,4 @@
-# Integração contínua do kernel.
+# Integração contínua do Duke.
 #
 # O ponto não óbvio deste arquivo: os testes do kernel não rodam com
 # `cargo test`. O harness padrão do Rust depende da `std` e de um sistema
