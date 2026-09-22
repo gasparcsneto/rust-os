@@ -164,6 +164,12 @@ impl<'w> JsonWriter<'w> {
     /// Serializa uma string com o escape exigido pelo JSON.
     fn escrever_string(&mut self, s: &str) -> fmt::Result {
         self.sink.write_str("\"")?;
+        self.escrever_corpo(s)?;
+        self.sink.write_str("\"")
+    }
+
+    /// O interior de uma string, escapado, sem as aspas.
+    fn escrever_corpo(&mut self, s: &str) -> fmt::Result {
         for c in s.chars() {
             match c {
                 '"' => self.sink.write_str("\\\"")?,
@@ -177,6 +183,31 @@ impl<'w> JsonWriter<'w> {
                 c => self.sink.write_char(c)?,
             }
         }
+        Ok(())
+    }
+
+    // -- strings escritas aos pedaços ---------------------------------------
+    //
+    // Existem para valores longos que são **gerados**, e não copiados de
+    // lugar nenhum: o despejo hexadecimal de um setor, por exemplo. A
+    // alternativa seria montar mil e tantos caracteres num buffer para
+    // escrevê-los em seguida, o que é alocar (ou ocupar pilha) para nada num
+    // escritor que já é um fluxo.
+
+    /// Abre uma string cujo conteúdo virá em pedaços.
+    pub fn begin_str(&mut self) -> fmt::Result {
+        self.sep()?;
+        self.sink.write_str("\"")
+    }
+
+    /// Acrescenta um caractere à string aberta.
+    pub fn push_char(&mut self, c: char) -> fmt::Result {
+        let mut buffer = [0u8; 4];
+        self.escrever_corpo(c.encode_utf8(&mut buffer))
+    }
+
+    /// Fecha a string aberta.
+    pub fn end_str(&mut self) -> fmt::Result {
         self.sink.write_str("\"")
     }
 }
