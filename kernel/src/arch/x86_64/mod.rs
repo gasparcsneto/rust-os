@@ -329,6 +329,14 @@ pub fn init_interrupcao_serial() {
 /// Devolve o controle imediatamente se as interrupções estiverem
 /// desabilitadas: `hlt` sem interrupções pendentes pararia o núcleo para
 /// sempre — o sistema morreria no primeiro instante ocioso.
+/// As interrupções estão habilitadas?
+///
+/// Existe para que código portátil possa **conferir** que está numa seção
+/// crítica, em vez de confiar que quem o chamou lembrou de criar uma.
+pub fn interrupcoes_habilitadas() -> bool {
+    x86_64::instructions::interrupts::are_enabled()
+}
+
 pub fn esperar_interrupcao() {
     if x86_64::instructions::interrupts::are_enabled() {
         x86_64::instructions::hlt();

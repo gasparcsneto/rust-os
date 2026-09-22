@@ -402,7 +402,7 @@ pub fn dormir_se_ocioso(ocioso: impl FnOnce() -> bool) {
 }
 
 /// As IRQs estão desmascaradas?
-fn interrupcoes_habilitadas() -> bool {
+pub fn interrupcoes_habilitadas() -> bool {
     DAIF.matches_all(DAIF::I::Unmasked)
 }
 

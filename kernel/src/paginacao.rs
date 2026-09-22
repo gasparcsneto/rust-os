@@ -225,15 +225,46 @@ impl Espaco {
 
         let anterior = arch::espaco_atual();
 
-        // SAFETY: as duas raízes carregam as entradas de topo do kernel, então
-        // o código e a pilha deste fio seguem mapeados dos dois lados. A troca
-        // de volta acontece em qualquer desfecho, inclusive no de erro.
-        let resultado = unsafe {
-            arch::trocar_espaco(novo.raiz);
-            let r = copiar_para_o_espaco_ativo(&paginas);
-            arch::trocar_espaco(anterior);
-            r
-        };
+        // # Por que a troca **inteira** vive numa seção crítica
+        //
+        // Porque durante ela o espaço ativo não pertence a ninguém. Todo outro
+        // lugar do kernel que instala um espaço o faz depois de entregá-lo ao
+        // fio — e é isso que torna a preempção inofensiva ali: ao voltar, o
+        // escalonador reinstala o espaço registrado, que é o certo.
+        //
+        // Aqui não há a quem entregar: o espaço novo ainda vai ser do filho,
+        // que não existe. Uma preempção no meio da cópia faria o escalonador
+        // reinstalar o espaço **do pai** ao devolver a CPU, e o resto da cópia
+        // iria para lá.
+        //
+        // Isso não chega a acontecer hoje, e vale ser exato sobre o porquê:
+        // o único chamador é `fork`, que roda dentro de uma chamada de
+        // sistema, e chamadas de sistema já entram com as interrupções
+        // mascaradas — por `SFMASK` no x86 e pela própria entrada de exceção
+        // no ARM. A correção vinha do chamador, não daqui.
+        //
+        // Depender disso é que era frágil: a condição não estava escrita em
+        // lugar nenhum, e o primeiro chamador vindo de contexto de fio — um
+        // `spawn` iniciado pelo kernel, por exemplo — a quebraria sem aviso.
+        // Mascarar aqui torna a função correta sozinha, e o custo é zero
+        // quando já se está mascarado.
+        //
+        // O preço real é uma janela sem interrupções proporcional ao tamanho
+        // do processo. É aceitável enquanto processos forem pequenos; quando
+        // deixarem de ser, a saída não é encurtar a seção crítica e sim mapear
+        // direto na tabela do destino, sem nunca torná-la ativa.
+        let resultado = arch::sem_interrupcoes(|| {
+            // SAFETY: as duas raízes carregam as entradas de topo do kernel,
+            // então o código e a pilha deste fio seguem mapeados dos dois
+            // lados. A troca de volta acontece em qualquer desfecho, inclusive
+            // no de erro.
+            unsafe {
+                arch::trocar_espaco(novo.raiz);
+                let r = copiar_para_o_espaco_ativo(&paginas);
+                arch::trocar_espaco(anterior);
+                r
+            }
+        });
         resultado?;
         Ok(novo)
     }
@@ -248,6 +279,18 @@ impl Espaco {
 unsafe fn copiar_para_o_espaco_ativo(
     paginas: &[(u64, u64, arch::Permissoes)],
 ) -> Result<(), &'static str> {
+    // A precondição mais importante desta função é a que não aparece nos
+    // argumentos: o espaço ativo não é o de nenhum fio, e uma troca de
+    // contexto no meio disto instalaria o espaço errado por baixo dela.
+    //
+    // Conferir custa a leitura de um registrador por `fork` e transforma o
+    // "quem chama precisa lembrar" num erro que aparece na hora. Sem isto, a
+    // única evidência seria uma bifurcação que falha de vez em quando — e
+    // seria preciso descobrir sozinho que a condição existia.
+    if arch::interrupcoes_habilitadas() {
+        return Err("copia de espaco com interrupcoes ligadas");
+    }
+
     for (virtual_, fisico, permissoes) in paginas {
         mapear_faixa_preenchendo(*virtual_, 1, *permissoes, || {
             // SAFETY: a página de destino está mapeada com escrita neste

@@ -342,7 +342,15 @@ fn nascer(nome: &'static str, nascimento: Nascimento) -> Result<IdFio, &'static 
         Err(motivo) => {
             // Devolver a vaga é obrigatório: deixá-la reservada a perderia
             // para sempre, e um erro de mapeamento não deve custar uma vaga.
-            com_escalonador(|e| e.fios[vaga] = None);
+            //
+            // `take` e não `= None` pelo mesmo motivo que o resto do módulo
+            // evita: atribuir larga o valor antigo ali mesmo, com a trava na
+            // mão. O marcador que está na vaga não tem recursos hoje, então
+            // dá na mesma — mas isso é um invariante que ninguém enuncia, e
+            // no dia em que o `Fio` ganhar mais um campo com `Drop` a
+            // diferença entre as duas formas vira um deadlock.
+            let marcador = com_escalonador(|e| e.fios[vaga].take());
+            drop(marcador);
             return Err(motivo);
         }
     };
@@ -366,8 +374,10 @@ fn nascer(nome: &'static str, nascimento: Nascimento) -> Result<IdFio, &'static 
         }
     };
 
-    com_escalonador(|e| {
-        e.fios[vaga] = Some(Fio {
+    // Mesma regra da devolução acima: o marcador sai sob a trava e é largado
+    // fora dela.
+    let marcador = com_escalonador(|e| {
+        e.fios[vaga].replace(Fio {
             id,
             nome,
             estado: Estado::Pronto,
@@ -375,8 +385,9 @@ fn nascer(nome: &'static str, nascimento: Nascimento) -> Result<IdFio, &'static 
             _pilha: Some(pilha),
             espaco,
             escalonamentos: 0,
-        });
+        })
     });
+    drop(marcador);
 
     Ok(id)
 }
