@@ -8,21 +8,59 @@
 //! deslocamento — mas a **base** é escolha da placa.
 //!
 //! Fixá-la no código seria contradizer a razão de este kernel ler o device
-//! tree desde o boot. Ver [`super::fdt::encontrar_ecam`].
+//! tree desde o boot. Ver [`super::fdt::encontrar_barramento_pci`].
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use pci_types::{ConfigRegionAccess, PciAddress};
+
+use crate::pci::JanelaMmio;
 
 /// Base do ECAM, ou zero enquanto não foi descoberta.
 static BASE: AtomicU64 = AtomicU64::new(0);
 /// Quanto o ECAM ocupa, para conferir que um acesso cabe nele.
 static TAMANHO: AtomicU64 = AtomicU64::new(0);
 
+/// A janela de MMIO que o barramento encaminha, como o barramento a vê, como
+/// a CPU a vê, e quanto ela ocupa. Tamanho zero enquanto não foi descoberta.
+static JANELA_NO_BARRAMENTO: AtomicU64 = AtomicU64::new(0);
+static JANELA_NA_CPU: AtomicU64 = AtomicU64::new(0);
+static JANELA_TAMANHO: AtomicU64 = AtomicU64::new(0);
+
 /// Guarda onde o device tree disse que a configuração PCI está.
 pub fn registrar(base: u64, tamanho: u64) {
     BASE.store(base, Ordering::Release);
     TAMANHO.store(tamanho, Ordering::Release);
+}
+
+/// Guarda a janela de MMIO que o kernel pode distribuir entre os BARs.
+///
+/// Separada de [`registrar`] porque as duas coisas podem faltar
+/// independentemente: uma placa pode descrever o ECAM e não encaminhar
+/// memória de 32 bits, e nesse caso a enumeração ainda funciona — só não há
+/// onde pôr os BARs.
+pub fn registrar_janela(no_barramento: u64, na_cpu: u64, tamanho: u64) {
+    JANELA_NO_BARRAMENTO.store(no_barramento, Ordering::Release);
+    JANELA_NA_CPU.store(na_cpu, Ordering::Release);
+    JANELA_TAMANHO.store(tamanho, Ordering::Release);
+}
+
+/// A janela de MMIO desta placa, se houver uma.
+///
+/// # Por que o ARM precisa disto e o x86 não
+///
+/// No x86 o BIOS roda antes do kernel e já distribuiu os BARs. Aqui o QEMU
+/// carrega o ELF e salta para ele: não houve firmware nenhum, e todo
+/// dispositivo do barramento está com os BARs zerados. Distribuí-los é
+/// trabalho do kernel, e a janela é a faixa de endereços em que ele pode
+/// fazê-lo sem colidir com a RAM ou com os periféricos da placa.
+pub fn janela_mmio() -> Option<JanelaMmio> {
+    let tamanho = JANELA_TAMANHO.load(Ordering::Acquire);
+    (tamanho > 0).then(|| JanelaMmio {
+        barramento: JANELA_NO_BARRAMENTO.load(Ordering::Acquire),
+        cpu: JANELA_NA_CPU.load(Ordering::Acquire),
+        tamanho,
+    })
 }
 
 /// O ECAM desta máquina.

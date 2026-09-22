@@ -373,10 +373,11 @@ pub fn init_pci() {
     // SAFETY: o ponteiro veio do firmware em `x0` e foi guardado no boot;
     // `encontrar_ecam` confere a assinatura antes de olhar qualquer campo, e
     // trata o ponteiro nulo.
-    let Some((base, tamanho)) = (unsafe { fdt::encontrar_ecam(dtb) }) else {
+    let Some(barramento) = (unsafe { fdt::encontrar_barramento_pci(dtb) }) else {
         crate::log_warn!("pci", "device tree nao descreve barramento PCI");
         return;
     };
+    let (base, tamanho) = barramento.ecam;
 
     // O ECAM fica **fora** do mapa de identidade: a máquina `virt` o coloca em
     // 0x40_1000_0000, muito acima do primeiro GiB que o boot mapeia. Precisa
@@ -419,6 +420,40 @@ pub fn init_pci() {
         tamanho / 1024
     );
     pci::registrar(base, janela);
+
+    // A janela de MMIO é onde o kernel vai pôr os BARs. Ela precisa estar
+    // mapeada antes de alguém desreferenciar um deles, e aqui isso sai de
+    // graça — mas só enquanto couber no bloco de dispositivo que o boot monta.
+    //
+    // Conferimos em vez de supor porque supor sairia caro do jeito errado: um
+    // BAR fora do mapa não dá erro de compilação nem de atribuição, dá uma
+    // falha de tradução na primeira leitura do driver, muito longe daqui.
+    // Mapear a janela inteira não é alternativa: são quase 750 MiB, 190 mil
+    // páginas, para usar alguns KiB.
+    let Some((no_barramento, na_cpu, tamanho)) = barramento.mmio32 else {
+        crate::log_warn!("pci", "device tree nao declara janela de MMIO de 32 bits");
+        return;
+    };
+
+    let fim = na_cpu.saturating_add(tamanho);
+    if fim > COBERTURA_DA_ENTRADA_DE_TOPO {
+        crate::log_warn!(
+            "pci",
+            "janela de MMIO em {:#x}+{:#x} fica fora do bloco de dispositivo",
+            na_cpu,
+            tamanho
+        );
+        return;
+    }
+
+    crate::log_info!(
+        "pci",
+        "janela de MMIO em {:#x} (barramento {:#x}), {} MiB",
+        na_cpu,
+        no_barramento,
+        tamanho / (1024 * 1024)
+    );
+    pci::registrar_janela(no_barramento, na_cpu, tamanho);
 }
 
 /// Faz a serial do agente interromper quando chegar um byte.

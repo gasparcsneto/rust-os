@@ -75,5 +75,19 @@ pub fn acesso() -> Option<Acesso> {
     Some(Acesso)
 }
 
+/// A janela de MMIO que o kernel pode distribuir entre os BARs: nenhuma.
+///
+/// Não porque a máquina não tenha uma, mas porque o BIOS já distribuiu os
+/// BARs antes de o kernel existir. Repetir o trabalho exigiria descobrir
+/// quais faixas continuam livres — informação que está na ACPI, que este
+/// kernel ainda não lê — e o ganho seria zero: o resultado seria outro
+/// endereço para o mesmo dispositivo.
+///
+/// A assimetria com o ARM não é um buraco; é a diferença entre uma plataforma
+/// com firmware e uma sem.
+pub fn janela_mmio() -> Option<crate::pci::JanelaMmio> {
+    None
+}
+
 /// Como o barramento é alcançado, para o relatório do agente.
 pub const MECANISMO: &str = "port-io-cf8";

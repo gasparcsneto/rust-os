@@ -15,11 +15,12 @@
 //! arriscado e invisível quando erra.
 //!
 //! Aqui o critério dá o resultado oposto. O formato é pequeno e bem
-//! especificado, não há aritmética de bits contra um manual de arquitetura, e
-//! precisamos de exatamente uma coisa dele: os nós `/memory`. O parser é
-//! autocontido, tem teste, e deixa visível um formato que vai voltar a
-//! importar quando formos descobrir dispositivos virtio. Trocá-lo por uma
-//! dependência não tornaria nada mais seguro — só esconderia o formato.
+//! especificado, e não há aritmética de bits contra um manual de arquitetura.
+//! Precisamos de três coisas dele: os nós `/memory`, o endereço do espaço de
+//! configuração PCI e as janelas que o barramento encaminha. O parser é
+//! autocontido, tem teste, e deixa visível um formato que o kernel consulta
+//! toda vez que precisa descobrir onde algo está. Trocá-lo por uma dependência
+//! não tornaria nada mais seguro — só esconderia o formato.
 //!
 //! # O formato, em resumo
 //!
@@ -294,75 +295,175 @@ pub unsafe fn percorrer_memoria(
     }
 }
 
-/// Onde o espaço de configuração PCI está mapeado, e quanto ele ocupa.
+/// O binding PCI fixa três células de endereço para os filhos de um host
+/// bridge, e duas de tamanho.
+///
+/// São os únicos números deste arquivo que não vêm lidos do blob, e vale
+/// dizer por quê: a especificação do device tree não os deixa à escolha da
+/// placa — um nó que se declara `pci-host-ecam-generic` e usasse outras
+/// larguras não seria um host bridge PCI, seria um nó malformado. Ler a
+/// declaração do próprio nó daria a ilusão de flexibilidade sobre algo que a
+/// própria propriedade `ranges` não sabe expressar de outro jeito.
+const CELULAS_DE_ENDERECO_PCI: usize = 3;
+const CELULAS_DE_TAMANHO_PCI: usize = 2;
+
+/// Código do espaço de memória de 32 bits, nos bits 25-24 da palavra alta.
+///
+/// A palavra alta de um endereço PCI no device tree não é endereço: é uma
+/// descrição de *onde* o endereço vive. `0b00` é configuração, `0b01` é I/O,
+/// `0b10` é memória de 32 bits e `0b11` é memória de 64 bits.
+const ESPACO_DE_MEMORIA_32: u32 = 0b10;
+
+/// O que o device tree diz sobre o barramento PCI desta placa.
+pub struct BarramentoPci {
+    /// Onde o espaço de configuração (ECAM) começa, e quanto ele ocupa.
+    pub ecam: (u64, u64),
+    /// A janela de memória de 32 bits, se a placa declarou uma: endereço do
+    /// lado do barramento, endereço do lado da CPU, e tamanho.
+    ///
+    /// Os dois endereços existem porque não são a mesma coisa. O que se
+    /// escreve num BAR é o endereço **do barramento**; o que a CPU
+    /// desreferencia é o endereço do lado dela. A máquina `virt` os faz
+    /// coincidir, mas depender disso seria depender de uma coincidência que a
+    /// `ranges` existe justamente para descrever.
+    pub mmio32: Option<(u64, u64, u64)>,
+}
+
+/// Lê a `ranges` de um host bridge e devolve a primeira janela de memória de
+/// 32 bits que ela declarar.
+///
+/// Por que a de 32 bits: é a única em que um BAR de 32 bits — que é o que os
+/// dispositivos virtio do QEMU pedem — consegue ser endereçado. A janela de
+/// 64 bits da máquina `virt` começa em 0x80_0000_0000, muito além do que cabe
+/// num BAR de 32 bits.
+///
+/// # Safety
+/// `prop` precisa ter vindo de um percurso do blob `dtb`.
+unsafe fn ler_ranges(dtb: *const u8, prop: &Propriedade) -> Option<(u64, u64, u64)> {
+    // Uma entrada é endereço-filho, endereço-pai e tamanho concatenados. As
+    // larguras do filho o binding fixa; a do pai é a que a raiz declarou, e é
+    // por isso que `Propriedade` carrega `address_cells`.
+    let celulas_do_pai = prop.address_cells as usize;
+    let largura = (CELULAS_DE_ENDERECO_PCI + celulas_do_pai + CELULAS_DE_TAMANHO_PCI) * 4;
+
+    let mut deslocamento = 0usize;
+    while deslocamento + largura <= prop.tamanho {
+        let entrada = prop.dados + deslocamento;
+
+        // SAFETY: delegada ao chamador; o laço confere que a entrada inteira
+        // cabe no tamanho que o percurso reportou.
+        let janela = unsafe {
+            let alto = be32(dtb, entrada);
+            if (alto >> 24) & 0b11 != ESPACO_DE_MEMORIA_32 {
+                None
+            } else {
+                // As duas células baixas do endereço do filho formam o
+                // endereço do lado do barramento; a alta só descreve o espaço.
+                let no_barramento = ler_celulas(dtb, entrada + 4, 2);
+                let na_cpu = ler_celulas(
+                    dtb,
+                    entrada + CELULAS_DE_ENDERECO_PCI * 4,
+                    celulas_do_pai as u32,
+                );
+                let tamanho = ler_celulas(
+                    dtb,
+                    entrada + (CELULAS_DE_ENDERECO_PCI + celulas_do_pai) * 4,
+                    CELULAS_DE_TAMANHO_PCI as u32,
+                );
+                Some((no_barramento, na_cpu, tamanho))
+            }
+        };
+
+        if janela.is_some() {
+            return janela;
+        }
+        deslocamento += largura;
+    }
+
+    None
+}
+
+/// Descreve o barramento PCI desta placa, lendo o device tree.
 ///
 /// # Por que perguntar em vez de fixar
 ///
-/// O endereço do ECAM é escolha da placa, não da arquitetura. A máquina
-/// `virt` do QEMU o coloca num lugar, uma placa real o coloca noutro, e uma
-/// versão futura do QEMU pode mudá-lo — foi para não depender disso que este
-/// kernel lê o device tree desde o começo.
+/// O endereço do ECAM e o das janelas são escolha da placa, não da
+/// arquitetura. A máquina `virt` do QEMU os coloca num lugar, uma placa real
+/// noutro, e uma versão futura do QEMU pode mudá-los — foi para não depender
+/// disso que este kernel lê o device tree desde o começo.
 ///
 /// Procuramos pelo `compatible`, e não pelo nome do nó, porque o nome carrega
 /// o endereço (`pcie@10000000`) e compará-lo seria fixar o endereço por outro
 /// caminho.
 ///
+/// # Por que duas passadas
+///
+/// Porque a especificação não ordena as propriedades dentro de um nó, e o
+/// QEMU de fato emite `reg` e `ranges` **antes** de `compatible`. Uma versão
+/// anterior disto tentava resolver isso lembrando o último `reg` visto; com
+/// duas propriedades para recolher, essa contabilidade vira o tipo de código
+/// em que um erro não aparece — ele só devolve a janela do nó errado.
+///
+/// A primeira passada descobre **qual** nó é o host bridge; a segunda lê as
+/// propriedades dele. Percorrer o blob duas vezes custa alguns microssegundos
+/// uma vez no boot, e a busca deixa de depender da ordem.
+///
 /// # Safety
 ///
 /// `dtb` precisa apontar para um device tree válido, ou ser nulo.
-pub unsafe fn encontrar_ecam(dtb: *const u8) -> Option<(u64, u64)> {
-    // Duas coisas, ambas guardadas pelo **número do nó**, e não por um
-    // booleano: o que o último `reg` visto disse, e qual nó se declarou
-    // compatível.
-    //
-    // Guardar o `reg` antes de saber se serve é o que torna a busca correta
-    // numa passada só. A especificação não ordena as propriedades dentro de um
-    // nó, e o QEMU de fato emite `reg` **antes** de `compatible` neste nó —
-    // uma versão anterior disto só olhava o `reg` depois de ver o
-    // `compatible`, e por isso não achava nada.
-    let mut ultimo_reg: Option<(u32, u64, u64)> = None;
-    let mut achado: Option<(u64, u64)> = None;
-
-    let mut visitar = |prop: &Propriedade| {
-        if prop.profundidade != 2 || achado.is_some() {
+pub unsafe fn encontrar_barramento_pci(dtb: *const u8) -> Option<BarramentoPci> {
+    // As closures ficam fora da chamada de propósito. Aninhá-las dentro de um
+    // bloco `unsafe` faria o corpo delas herdar esse bloco, e cada
+    // desreferência lá dentro deixaria de ser marcada — o `unsafe` viraria
+    // ruído em vez de sinalização.
+    let mut alvo: Option<u32> = None;
+    let mut procurar_o_no = |prop: &Propriedade| {
+        if alvo.is_some() || prop.nome != b"compatible" {
             return;
         }
-
-        if prop.nome == b"reg" {
-            // SAFETY: o percurso garantiu que `dados` e `tamanho` estão dentro
-            // do blob.
-            unsafe {
-                ler_reg(dtb, prop, |inicio, tamanho| {
-                    if ultimo_reg.map(|(seq, ..)| seq) != Some(prop.no_seq) {
-                        ultimo_reg = Some((prop.no_seq, inicio, tamanho));
-                    }
-                });
-            }
-            return;
-        }
-
         // `compatible` é uma lista de strings terminadas em zero, da mais
         // específica para a mais genérica.
-        if prop.nome == b"compatible" {
-            // SAFETY: mesma justificativa.
-            let lista = unsafe { core::slice::from_raw_parts(dtb.add(prop.dados), prop.tamanho) };
-            if !lista
-                .split(|&b| b == 0)
-                .any(|s| s == b"pci-host-ecam-generic")
-            {
-                return;
-            }
-
-            if let Some((seq, inicio, tamanho)) = ultimo_reg
-                && seq == prop.no_seq
-            {
-                achado = Some((inicio, tamanho));
-            }
+        // SAFETY: o percurso garantiu que a faixa está dentro do blob.
+        let lista = unsafe { core::slice::from_raw_parts(dtb.add(prop.dados), prop.tamanho) };
+        if lista
+            .split(|&b| b == 0)
+            .any(|s| s == b"pci-host-ecam-generic")
+        {
+            alvo = Some(prop.no_seq);
         }
     };
 
     // SAFETY: delegada ao chamador.
-    let _ = unsafe { percorrer(dtb, &mut visitar) };
+    let _ = unsafe { percorrer(dtb, &mut procurar_o_no) };
 
-    achado
+    let alvo = alvo?;
+    let mut ecam: Option<(u64, u64)> = None;
+    let mut mmio32: Option<(u64, u64, u64)> = None;
+
+    let mut ler_o_no = |prop: &Propriedade| {
+        if prop.no_seq != alvo {
+            return;
+        }
+        match prop.nome {
+            // O `reg` de um host bridge ECAM é a janela de configuração. Só a
+            // primeira entrada interessa.
+            // SAFETY: `prop` veio do percurso deste mesmo blob.
+            b"reg" => unsafe {
+                ler_reg(dtb, prop, |inicio, tamanho| {
+                    ecam.get_or_insert((inicio, tamanho));
+                });
+            },
+            // SAFETY: mesma justificativa.
+            b"ranges" => mmio32 = unsafe { ler_ranges(dtb, prop) },
+            _ => {}
+        }
+    };
+
+    // SAFETY: delegada ao chamador.
+    let _ = unsafe { percorrer(dtb, &mut ler_o_no) };
+
+    Some(BarramentoPci {
+        ecam: ecam?,
+        mmio32,
+    })
 }
