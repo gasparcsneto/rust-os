@@ -72,13 +72,24 @@ impl Mmio {
     /// dispositivo precisa ser lido na largura certa de qualquer jeito — ler
     /// dois registradores de 16 bits como um de 32 pode disparar efeitos
     /// colaterais que o manual atribui a um deles só.
+    ///
+    /// A conferência é do endereço **final**, e não do deslocamento dentro da
+    /// janela. A diferença importa porque a janela nem sempre começa alinhada:
+    /// a base dela vem do `offset` de uma capability, que é o dispositivo quem
+    /// escreve. Conferir só o deslocamento deixaria o campo em `0x20` de uma
+    /// janela que começa em `+2` passar como alinhado, que é exatamente o caso
+    /// contra o qual esta função existe.
     fn registrador<T>(&self, deslocamento: u64) -> Option<*mut T> {
         let largura = core::mem::size_of::<T>() as u64;
         let fim = deslocamento.checked_add(largura)?;
-        if fim > self.tamanho || !deslocamento.is_multiple_of(largura) {
+        if fim > self.tamanho {
             return None;
         }
-        Some((self.base + deslocamento) as *mut T)
+        let endereco = self.base.checked_add(deslocamento)?;
+        if !endereco.is_multiple_of(largura) {
+            return None;
+        }
+        Some(endereco as *mut T)
     }
 }
 
