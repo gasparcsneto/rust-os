@@ -227,7 +227,10 @@ pub fn init_paginacao() {
     unsafe { paginacao::init(deslocamento) };
 }
 
-pub use paginacao::{acesso_fisico, desmapear, mapear_frame, traduzir};
+pub use paginacao::{
+    acesso_fisico, criar_espaco, desmapear, destruir_espaco, espaco_atual, espaco_do_kernel,
+    mapear_frame, traduzir, trocar_espaco,
+};
 
 /// O nome da falha que um estouro de pilha produz nesta arquitetura.
 ///

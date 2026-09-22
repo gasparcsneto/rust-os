@@ -62,11 +62,13 @@ pub use aarch64 as atual;
 #[allow(unused_imports)]
 pub use atual::{
     BASE_DAS_PILHAS, BASE_DO_HEAP, COBERTURA_DA_ENTRADA_DE_TOPO, Contexto, Uart, acesso_fisico,
-    ceder_cpu, definir_pilha_de_kernel, desmapear, disparar_breakpoint, disparar_falha_fatal,
-    dormir_se_ocioso, encerrar_emulador, entrar_em_usuario, esperar_interrupcao,
+    ceder_cpu, criar_espaco, definir_pilha_de_kernel, desmapear, destruir_espaco,
+    disparar_breakpoint, disparar_falha_fatal, dormir_se_ocioso, encerrar_emulador,
+    entrar_em_usuario, espaco_atual, espaco_do_kernel, esperar_interrupcao,
     falha_de_estouro_de_pilha, halt_forever, identificar_cpu, init_excecoes,
     init_interrupcao_serial, init_interrupcoes, init_paginacao, init_seriais, init_usuario,
     mapear_frame, nome, preparar_contexto, reservar_faixas, sem_interrupcoes, traduzir,
+    trocar_espaco,
 };
 
 /// Tamanho de uma página nas duas arquiteturas.

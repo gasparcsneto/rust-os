@@ -41,7 +41,7 @@
 
 use core::arch::asm;
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use aarch64_cpu::asm::barrier;
 use aarch64_cpu::registers::{ID_AA64MMFR0_EL1, MAIR_EL1, SCTLR_EL1, TCR_EL1, TTBR0_EL1};
@@ -221,6 +221,10 @@ pub unsafe fn init() {
     }
 
     let raiz = core::ptr::addr_of!(l1.entradas) as u64;
+
+    // A raiz do kernel, guardada para que `criar_espaco` copie dela e não da
+    // raiz ativa — que, com um processo rodando, seria a do processo.
+    RAIZ_DO_KERNEL.store(raiz, Ordering::Release);
 
     // SAFETY: a tabela está montada e cobre identicamente o código, a pilha e
     // os periféricos, então a instrução seguinte ao `isb` continua válida.
@@ -764,4 +768,144 @@ unsafe fn invalidar(virtual_: u64) {
 /// resposta é outra, e é por isso que esta função existe.
 pub fn acesso_fisico(fisico: u64) -> *mut u8 {
     fisico as *mut u8
+}
+
+// ===========================================================================
+// Espaços de endereços
+// ===========================================================================
+//
+// Ver o comentário equivalente em `arch::x86_64::paginacao`: a construção é a
+// mesma nas duas arquiteturas — a tabela nova recebe uma cópia de todas as
+// entradas de topo menos a do usuário, e é isso que mantém o kernel mapeado
+// em todo espaço.
+//
+// A diferença está na granularidade. Aqui a raiz é uma L1 de 512 entradas de
+// 1 GiB; lá é uma PML4 de 512 entradas de 512 GiB. Como o código só fala em
+// "entrada de topo", ele não precisa saber qual dos dois está rodando.
+
+/// A raiz do espaço do kernel, capturada quando a MMU liga.
+static RAIZ_DO_KERNEL: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// A raiz do espaço de endereços ativo agora.
+pub fn espaco_atual() -> u64 {
+    TTBR0_EL1.get_baddr()
+}
+
+/// A raiz do espaço do kernel.
+pub fn espaco_do_kernel() -> u64 {
+    RAIZ_DO_KERNEL.load(Ordering::Acquire)
+}
+
+/// Cria um espaço de endereços com o kernel mapeado e `entrada_privada` vazia.
+pub fn criar_espaco(entrada_privada: usize) -> Result<u64, &'static str> {
+    if entrada_privada >= ENTRADAS {
+        return Err("entrada de topo fora da tabela");
+    }
+    if !ATIVA.load(Ordering::Acquire) {
+        return Err("mmu ainda nao inicializada");
+    }
+    let raiz_do_kernel = espaco_do_kernel();
+    if raiz_do_kernel == u64::MAX {
+        return Err("mmu ainda nao inicializada");
+    }
+
+    let nova = crate::frames::alocar().ok_or("memoria fisica esgotada")?;
+
+    crate::arch::sem_interrupcoes(|| {
+        let _guarda = TRAVA.lock();
+
+        // O mapa é de identidade: o endereço físico serve direto de ponteiro.
+        let destino = nova as *mut u64;
+        let origem = raiz_do_kernel as *const u64;
+
+        // SAFETY: as duas raízes são tabelas de 512 descritores em memória
+        // identicamente mapeada, e a trava garante acesso exclusivo.
+        unsafe {
+            for i in 0..ENTRADAS {
+                *destino.add(i) = if i == entrada_privada {
+                    0
+                } else {
+                    *origem.add(i)
+                };
+            }
+        }
+        Ok(nova)
+    })
+}
+
+/// Passa a traduzir por `raiz`.
+///
+/// # Safety
+///
+/// `raiz` precisa vir de [`criar_espaco`] e ainda não ter sido destruída.
+pub unsafe fn trocar_espaco(raiz: u64) {
+    // SAFETY: delegada ao chamador. Diferente do x86, trocar a raiz aqui
+    // **não** descarta a TLB sozinho: sem ASID, traduções do espaço anterior
+    // continuariam valendo para os mesmos endereços virtuais — que é
+    // exatamente o que dois processos no mesmo endereço produzem.
+    unsafe {
+        TTBR0_EL1.set_baddr(raiz);
+        asm!("dsb ish", "isb", options(nostack));
+        invalidar_tudo();
+    }
+}
+
+/// Devolve ao alocador tudo que pertence a `raiz`: as tabelas do usuário, as
+/// páginas que elas mapeiam e a própria raiz.
+///
+/// # Safety
+///
+/// `raiz` não pode estar ativa — destruir o espaço em que se executa é ficar
+/// sem tradução no meio do caminho.
+pub unsafe fn destruir_espaco(raiz: u64, entrada_privada: usize) {
+    if entrada_privada >= ENTRADAS {
+        return;
+    }
+
+    crate::arch::sem_interrupcoes(|| {
+        let _guarda = TRAVA.lock();
+        let topo = raiz as *mut u64;
+
+        // SAFETY: `raiz` é uma tabela de 512 descritores em memória
+        // identicamente mapeada. Só descemos pela entrada do usuário: as
+        // demais são do kernel e continuam em uso.
+        unsafe {
+            // Dois níveis de tabela abaixo da raiz: L1 -> L2 -> L3 -> página.
+            liberar_subarvore(*topo.add(entrada_privada), 2);
+            *topo.add(entrada_privada) = 0;
+            invalidar_tudo();
+        }
+        crate::frames::liberar(raiz);
+    })
+}
+
+/// Libera recursivamente o que um descritor alcança.
+///
+/// `nivel` conta quantos níveis de tabela ainda há abaixo: 2 num descritor de
+/// L1, 0 num de L3 (que aponta para a página em si).
+///
+/// # Safety
+///
+/// `descritor` precisa ser uma entrada válida do nível indicado, e tudo abaixo
+/// dela precisa ter vindo do alocador de frames.
+unsafe fn liberar_subarvore(descritor: u64, nivel: u8) {
+    if descritor & VALIDO == 0 {
+        return;
+    }
+    let endereco = descritor & MASCARA_ENDERECO;
+
+    // Em L1 e L2, `TABELA` desligado marca um **bloco** — 1 GiB ou 2 MiB de
+    // uma vez, sem tabela abaixo. O espaço do usuário não cria nenhum, mas
+    // conferir é mais barato que confiar: tratar um bloco como tabela
+    // liberaria 512 frames de outra pessoa.
+    if nivel > 0 && descritor & TABELA != 0 {
+        let tabela = endereco as *const u64;
+        for i in 0..ENTRADAS {
+            // SAFETY: `tabela` é uma tabela de 512 descritores do nível
+            // abaixo, em memória identicamente mapeada.
+            unsafe { liberar_subarvore(*tabela.add(i), nivel - 1) };
+        }
+    }
+
+    crate::frames::liberar(endereco);
 }

@@ -1984,6 +1984,97 @@ fn usuario_recusa_ponteiro_de_fora() -> Resultado {
     Ok(())
 }
 
+/// Dois espaços de endereços traduzem o **mesmo** endereço virtual para
+/// memórias físicas diferentes.
+///
+/// # O que isto prova, e por que é o teste que importa
+///
+/// É a definição prática de isolamento entre processos. Até aqui havia uma
+/// tabela de tradução só, e por isso dois processos teriam de ocupar faixas
+/// diferentes do mesmo mapa — o que não é isolamento, é combinado. Com uma
+/// tabela por espaço, `0x1_0000_0000` pode ser de um processo num instante e
+/// de outro no seguinte, sem que nenhum dos dois saiba.
+///
+/// A sequência confere as três coisas que podem dar errado em separado:
+///
+/// 1. um endereço mapeado num espaço **não existe** no outro;
+/// 2. o mesmo endereço, mapeado nos dois, guarda conteúdos distintos;
+/// 3. voltar ao espaço do kernel devolve o mapa de antes, intacto.
+///
+/// Tudo com interrupções mascaradas: uma troca de fio no meio deixaria outro
+/// fio rodando num espaço de endereços que não é o esperado, e embora isso
+/// seja inofensivo (o kernel está mapeado em todos), tornaria o teste
+/// dependente do instante em que o timer dispara.
+fn memoria_espacos_isolam_o_mesmo_endereco() -> Resultado {
+    use crate::arch::{self, Permissoes};
+
+    const ALVO: u64 = crate::usuario::BASE;
+    const MARCA_A: u64 = 0xAAAA_AAAA_AAAA_AAAA;
+    const MARCA_B: u64 = 0xBBBB_BBBB_BBBB_BBBB;
+
+    let privada = arch::entrada_de_topo(ALVO) as usize;
+    let kernel = arch::espaco_do_kernel();
+    if kernel == u64::MAX {
+        return Err("a raiz do espaco do kernel nao foi registrada no boot");
+    }
+    if arch::espaco_atual() != kernel {
+        return Err("o teste nao comecou no espaco do kernel");
+    }
+
+    arch::sem_interrupcoes(|| {
+        let a = arch::criar_espaco(privada)?;
+        let b = arch::criar_espaco(privada)?;
+
+        // SAFETY: `a` e `b` vieram de `criar_espaco` e carregam as entradas de
+        // topo do kernel, então o código e a pilha deste fio seguem mapeados
+        // em qualquer um dos dois. Nenhum dos dois é destruído enquanto ativo.
+        let resultado = unsafe {
+            arch::trocar_espaco(a);
+            crate::paginacao::mapear_novo(ALVO, Permissoes::DADOS)?;
+            core::ptr::write_volatile(ALVO as *mut u64, MARCA_A);
+
+            arch::trocar_espaco(b);
+            if arch::traduzir(ALVO).is_some() {
+                arch::trocar_espaco(kernel);
+                return Err("o endereco do espaco A apareceu no espaco B");
+            }
+            crate::paginacao::mapear_novo(ALVO, Permissoes::DADOS)?;
+            core::ptr::write_volatile(ALVO as *mut u64, MARCA_B);
+
+            // O mesmo endereço, os dois espaços, conteúdos diferentes.
+            let lido_em_b = core::ptr::read_volatile(ALVO as *const u64);
+            arch::trocar_espaco(a);
+            let lido_em_a = core::ptr::read_volatile(ALVO as *const u64);
+
+            arch::trocar_espaco(kernel);
+            (lido_em_a, lido_em_b)
+        };
+
+        // SAFETY: nenhum dos dois está ativo — voltamos ao espaço do kernel
+        // acima —, e tudo abaixo deles saiu do alocador de frames.
+        unsafe {
+            arch::destruir_espaco(a, privada);
+            arch::destruir_espaco(b, privada);
+        }
+
+        if resultado.0 != MARCA_A || resultado.1 != MARCA_B {
+            crate::log_error!(
+                "teste",
+                "espaco A leu {:#x}, espaco B leu {:#x}",
+                resultado.0,
+                resultado.1
+            );
+            return Err("os dois espacos compartilharam a mesma memoria fisica");
+        }
+
+        // O espaço do kernel nunca teve este endereço, e continua sem ele.
+        if arch::traduzir(ALVO).is_some() {
+            return Err("o mapeamento do processo vazou para o espaco do kernel");
+        }
+        Ok(())
+    })
+}
+
 /// Enquanto um processo vive, outro fio não toma o espaço dele.
 ///
 /// # Por que isto é uma falha de kernel, e não só um processo confuso
@@ -2401,6 +2492,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "fios: criacao concorrente",
         f: fios_criacao_concorrente_nao_colide,
+    },
+    Caso {
+        nome: "memoria: espacos isolam o mesmo endereco",
+        f: memoria_espacos_isolam_o_mesmo_endereco,
     },
     Caso {
         nome: "usuario: recusa ponteiro de fora",

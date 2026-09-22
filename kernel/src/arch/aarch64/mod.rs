@@ -250,7 +250,10 @@ pub fn init_paginacao() {
     unsafe { mmu::init() };
 }
 
-pub use mmu::{acesso_fisico, desmapear, mapear_frame, traduzir};
+pub use mmu::{
+    acesso_fisico, criar_espaco, desmapear, destruir_espaco, espaco_atual, espaco_do_kernel,
+    mapear_frame, traduzir, trocar_espaco,
+};
 
 /// O nome da falha que um estouro de pilha produz nesta arquitetura.
 ///

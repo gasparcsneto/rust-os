@@ -82,6 +82,11 @@ static TRAVA: Mutex<()> = Mutex::new(());
 pub unsafe fn init(deslocamento: u64) {
     DESLOCAMENTO.store(deslocamento, Ordering::Relaxed);
 
+    // A raiz ativa no boot é a do kernel. Guardá-la agora é o que permite
+    // criar espaços de processo depois, quando `CR3` já puder estar apontando
+    // para a tabela de um processo.
+    RAIZ_DO_KERNEL.store(espaco_atual(), Ordering::Release);
+
     // Sem `NXE` no EFER, o bit de não-execução dos descritores é *reservado* —
     // e escrever 1 num bit reservado de uma entrada de tabela faz o acesso
     // gerar falha de página. Ou seja, marcar uma página como não executável
@@ -336,4 +341,170 @@ pub fn acesso_fisico(fisico: u64) -> *mut u8 {
         return core::ptr::null_mut();
     }
     (deslocamento + fisico) as *mut u8
+}
+
+// ===========================================================================
+// Espaços de endereços
+// ===========================================================================
+//
+// Um espaço de endereços é uma tabela raiz. Dar um a cada processo é o que faz
+// dois processos poderem usar o *mesmo* endereço virtual apontando para
+// memórias físicas diferentes — a definição prática de isolamento.
+//
+// A construção é a mesma nas duas arquiteturas: a tabela nova recebe uma cópia
+// de todas as entradas de topo, menos a do usuário, que fica vazia. Copiar as
+// do kernel é o que mantém o kernel mapeado em todo espaço, e sem isso a
+// primeira interrupção depois de uma troca não teria para onde ir.
+//
+// Que as duas coisas caibam em entradas de topo distintas não é acidente: é a
+// razão do mapa em `super::BASE_DO_HEAP` e vizinhos, e está conferido em
+// tempo de compilação em `crate::usuario`.
+
+/// Bits de endereço físico num descritor (12 a 51).
+const MASCARA_ENDERECO: u64 = 0x000F_FFFF_FFFF_F000;
+/// O descritor está presente.
+const PRESENTE: u64 = 1 << 0;
+/// O descritor mapeia uma página grande, e não uma tabela abaixo.
+const GRANDE: u64 = 1 << 7;
+/// Descritores por tabela.
+const ENTRADAS: usize = 512;
+
+/// A raiz do espaço do kernel, capturada no boot.
+///
+/// Guardada em vez de lida de `CR3` na hora porque `criar_espaco` pode ser
+/// chamada com um processo ativo — e aí `CR3` seria a raiz *dele*, e o espaço
+/// novo nasceria com o mapa do processo anterior em vez do mapa do kernel.
+static RAIZ_DO_KERNEL: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// A raiz do espaço de endereços ativo agora.
+pub fn espaco_atual() -> u64 {
+    x86_64::registers::control::Cr3::read()
+        .0
+        .start_address()
+        .as_u64()
+}
+
+/// A raiz do espaço do kernel.
+pub fn espaco_do_kernel() -> u64 {
+    RAIZ_DO_KERNEL.load(Ordering::Acquire)
+}
+
+/// Cria um espaço de endereços com o kernel mapeado e `entrada_privada` vazia.
+pub fn criar_espaco(entrada_privada: usize) -> Result<u64, &'static str> {
+    if entrada_privada >= ENTRADAS {
+        return Err("entrada de topo fora da tabela");
+    }
+    let raiz_do_kernel = espaco_do_kernel();
+    if raiz_do_kernel == u64::MAX {
+        return Err("paginacao ainda nao inicializada");
+    }
+
+    let nova = crate::frames::alocar().ok_or("memoria fisica esgotada")?;
+
+    crate::arch::sem_interrupcoes(|| {
+        let _guarda = TRAVA.lock();
+
+        let destino = acesso_fisico(nova) as *mut u64;
+        let origem = acesso_fisico(raiz_do_kernel) as *const u64;
+        if destino.is_null() || origem.is_null() {
+            crate::frames::liberar(nova);
+            return Err("memoria fisica nao esta acessivel");
+        }
+
+        // SAFETY: as duas raízes são frames de 4 KiB alcançáveis pelo mapa da
+        // memória física, e a trava garante que ninguém mais as escreve.
+        unsafe {
+            for i in 0..ENTRADAS {
+                *destino.add(i) = if i == entrada_privada {
+                    0
+                } else {
+                    *origem.add(i)
+                };
+            }
+        }
+        Ok(nova)
+    })
+}
+
+/// Passa a traduzir por `raiz`.
+///
+/// # Safety
+///
+/// `raiz` precisa vir de [`criar_espaco`] e ainda não ter sido destruída. O
+/// kernel continua mapeado porque a raiz carrega as entradas de topo dele —
+/// sem isso, a instrução seguinte a esta função não teria tradução.
+pub unsafe fn trocar_espaco(raiz: u64) {
+    let frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(raiz));
+
+    // Preservar os flags em vez de zerá-los: eles descrevem o regime de cache
+    // da própria tabela, e inventar outro aqui mudaria em silêncio o modo como
+    // o processador percorre todas as tabelas.
+    let (_, flags) = x86_64::registers::control::Cr3::read();
+
+    // SAFETY: delegada ao chamador. Escrever CR3 já descarta as traduções não
+    // globais da TLB, então não há invalidação a fazer depois.
+    unsafe { x86_64::registers::control::Cr3::write(frame, flags) };
+}
+
+/// Devolve ao alocador tudo que pertence a `raiz`: as tabelas do usuário, as
+/// páginas que elas mapeiam e a própria raiz.
+///
+/// # Safety
+///
+/// `raiz` não pode estar ativa — destruir o espaço em que se executa é ficar
+/// sem tradução no meio do caminho.
+pub unsafe fn destruir_espaco(raiz: u64, entrada_privada: usize) {
+    if entrada_privada >= ENTRADAS {
+        return;
+    }
+
+    crate::arch::sem_interrupcoes(|| {
+        let _guarda = TRAVA.lock();
+
+        let topo = acesso_fisico(raiz) as *mut u64;
+        if !topo.is_null() {
+            // SAFETY: `raiz` é um frame de 4 KiB alcançável pelo mapa físico, e
+            // a trava garante acesso exclusivo. Só descemos pela entrada do
+            // usuário: as demais são do kernel e continuam em uso.
+            unsafe {
+                // Quatro níveis: PML4 -> PDPT -> PD -> PT -> página.
+                liberar_subarvore(*topo.add(entrada_privada), 3);
+                *topo.add(entrada_privada) = 0;
+            }
+        }
+        crate::frames::liberar(raiz);
+    })
+}
+
+/// Libera recursivamente o que um descritor alcança.
+///
+/// `nivel` conta quantos níveis de tabela ainda há abaixo: 3 num descritor de
+/// PML4, 0 num de PT (que aponta para a página em si).
+///
+/// # Safety
+///
+/// `descritor` precisa ser uma entrada de tabela válida do nível indicado, e
+/// tudo abaixo dela precisa ter vindo do alocador de frames.
+unsafe fn liberar_subarvore(descritor: u64, nivel: u8) {
+    if descritor & PRESENTE == 0 {
+        return;
+    }
+    let endereco = descritor & MASCARA_ENDERECO;
+
+    // Uma página grande não tem tabela abaixo. O espaço do usuário não cria
+    // nenhuma, mas conferir é mais barato que confiar: interpretar um bloco
+    // como tabela liberaria 512 frames que pertencem a outra pessoa.
+    if nivel > 0 && descritor & GRANDE == 0 {
+        let tabela = acesso_fisico(endereco) as *const u64;
+        if tabela.is_null() {
+            return;
+        }
+        for i in 0..ENTRADAS {
+            // SAFETY: `tabela` é uma tabela de 512 descritores do nível
+            // abaixo, alcançável pelo mapa da memória física.
+            unsafe { liberar_subarvore(*tabela.add(i), nivel - 1) };
+        }
+    }
+
+    crate::frames::liberar(endereco);
 }
