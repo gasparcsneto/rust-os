@@ -44,7 +44,8 @@ use core::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 pub mod numero {
     /// `sair(codigo)`: encerra o processo. Não retorna.
     pub const SAIR: u64 = 0;
-    /// `escrever(ptr, tamanho)`: manda bytes para o log do kernel.
+    /// `escrever(descritor, ptr, tamanho)`: manda bytes para onde o
+    /// descritor apontar.
     pub const ESCREVER: u64 = 1;
     /// `id()`: devolve o identificador do fio que executa o processo.
     pub const ID: u64 = 2;
@@ -61,6 +62,72 @@ pub mod erro {
     pub const NUMERO_INVALIDO: i64 = -1;
     pub const ENDERECO_INVALIDO: i64 = -2;
     pub const TAMANHO_INVALIDO: i64 = -3;
+    pub const DESCRITOR_INVALIDO: i64 = -4;
+}
+
+/// Os descritores que todo processo recebe abertos.
+///
+/// Os números são os do Unix, e isso é deliberado: não porque o Duke pretenda
+/// ser POSIX, mas porque qualquer pessoa que já escreveu um programa sabe de
+/// cor o que 1 e 2 significam. Inventar uma numeração própria cobraria esse
+/// conhecimento de volta sem devolver nada.
+pub mod descritor {
+    /// Leitura. Reservado: ainda não há de onde ler, e **escrever nele é
+    /// erro** — é o caso que prova que a tabela é consultada de verdade.
+    pub const ENTRADA: u64 = 0;
+    /// Saída comum. Vai para o log do kernel em nível `info`.
+    pub const SAIDA: u64 = 1;
+    /// Saída de erro. Vai para o mesmo log em nível `error`.
+    pub const ERRO: u64 = 2;
+}
+
+/// Para onde um descritor aponta.
+///
+/// Hoje só há dois destinos, os dois no log do kernel. O tipo existe mesmo
+/// assim porque é ele que torna a indireção real: sem ele, `escrever` voltaria
+/// a ter um único destino embutido e o descritor seria decoração.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Alvo {
+    /// Log do kernel, nível `info`.
+    Registro,
+    /// Log do kernel, nível `error`.
+    Diagnostico,
+}
+
+/// A tabela de descritores.
+///
+/// # Por que ela é `static` e imutável
+///
+/// Porque nada pode alterá-la ainda: não existe `abrir`, nem `fechar`, nem
+/// herança por `fork`. Uma tabela imutável não precisa de lock, e um lock que
+/// não existe não pode ser esquecido dentro de um handler.
+///
+/// Quando houver mais de um processo, ela vira campo do processo — e é
+/// exatamente por isso que a indireção entra agora. Acrescentar o argumento
+/// depois que houver programas de usuário significaria quebrar todos eles.
+static TABELA: [Option<Alvo>; 3] = [None, Some(Alvo::Registro), Some(Alvo::Diagnostico)];
+
+// A tabela é posicional, mas os nomes acima é que formam a ABI. Se alguém
+// reordenar uma sem renumerar os outros, os dois deixam de concordar em
+// silêncio e todo programa de usuário passa a escrever no lugar errado.
+//
+// Esta amarra é conferida em tempo de compilação, então o erro aparece no
+// build e não num log estranho meses depois.
+const _: () = {
+    assert!(TABELA[descritor::ENTRADA as usize].is_none());
+    assert!(TABELA[descritor::SAIDA as usize].is_some());
+    assert!(TABELA[descritor::ERRO as usize].is_some());
+};
+
+/// Resolve um descritor no seu destino, se ele permitir escrita.
+fn alvo_de_escrita(descritor: u64) -> Option<Alvo> {
+    // `get` em vez de indexar: o número veio do usuário e pode ser qualquer
+    // coisa. Indexar entraria em pânico, e um processo não deve conseguir
+    // derrubar o kernel com um inteiro grande.
+    TABELA
+        .get(usize::try_from(descritor).ok()?)
+        .copied()
+        .flatten()
 }
 
 /// Onde o espaço do usuário começa e termina.
@@ -126,12 +193,12 @@ pub fn validar_faixa(inicio: u64, tamanho: u64) -> Result<(), i64> {
 }
 
 /// Atende uma chamada de sistema. Chamado pelo backend de arquitetura.
-pub fn despachar(numero: u64, a0: u64, a1: u64, _a2: u64) -> i64 {
+pub fn despachar(numero: u64, a0: u64, a1: u64, a2: u64) -> i64 {
     CHAMADAS.fetch_add(1, Ordering::Relaxed);
 
     match numero {
         numero::SAIR => sair(a0 as i64),
-        numero::ESCREVER => escrever(a0, a1),
+        numero::ESCREVER => escrever(a0, a1, a2),
         numero::ID => crate::fios::id_atual() as i64,
         numero::CEDER => {
             crate::fios::ceder();
@@ -159,8 +226,24 @@ fn sair(codigo: i64) -> i64 {
     codigo
 }
 
-/// `escrever(ptr, tamanho)`: bytes do usuário para o log do kernel.
-fn escrever(ponteiro: u64, tamanho: u64) -> i64 {
+/// `escrever(descritor, ptr, tamanho)`: bytes do usuário para onde o
+/// descritor apontar.
+///
+/// # Por que existe um descritor se só há um destino possível
+///
+/// Porque o argumento faz parte da ABI, e a ABI é a única coisa aqui que não
+/// se corrige depois: mudá-la quebra todo programa de usuário já escrito. O
+/// destino é o que pode crescer sem quebrar ninguém — um arquivo, um socket,
+/// outro processo —, e é justamente isso que a indireção protege.
+fn escrever(descritor: u64, ponteiro: u64, tamanho: u64) -> i64 {
+    // O descritor primeiro, antes de olhar o ponteiro. A ordem importa: um
+    // processo que varra endereços com um descritor inválido não deve
+    // conseguir distinguir "não mapeado" de "mapeado" pela resposta.
+    let Some(alvo) = alvo_de_escrita(descritor) else {
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return erro::DESCRITOR_INVALIDO;
+    };
+
     if let Err(e) = validar_faixa(ponteiro, tamanho) {
         RECUSADAS.fetch_add(1, Ordering::Relaxed);
         return e;
@@ -177,7 +260,10 @@ fn escrever(ponteiro: u64, tamanho: u64) -> i64 {
     // Texto do usuário não é confiável nem como UTF-8. Substituir em vez de
     // recusar mantém a chamada útil para quem escreve bytes crus.
     let texto = core::str::from_utf8(bytes).unwrap_or("<bytes nao-utf8>");
-    crate::log_info!("usuario", "{}", texto);
+    match alvo {
+        Alvo::Registro => crate::log_info!("usuario", "{}", texto),
+        Alvo::Diagnostico => crate::log_error!("usuario", "{}", texto),
+    }
 
     BYTES_ESCRITOS.fetch_add(tamanho, Ordering::Relaxed);
     tamanho as i64

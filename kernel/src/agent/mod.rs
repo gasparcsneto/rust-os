@@ -36,6 +36,21 @@
 //! Os dois consomem a mesma fila de bytes e compartilham todo o resto:
 //! enquadramento, decodificação e despacho.
 
+// O canal do agente inteiro — enquadramento, parser, escritor e os dezenove
+// comandos — é Rust seguro, e esta linha transforma esse fato num invariante
+// verificado pelo compilador em vez de uma coincidência que o próximo commit
+// desfaz sem ninguém notar.
+//
+// A escolha de módulo não é arbitrária. Este é o código que processa entrada
+// vinda de fora da máquina: se algum dia houver um estouro de buffer no Duke,
+// é aqui que ele teria mais valor para quem o explorasse. Também é o único
+// subsistema grande que não fala com hardware — não há motivo legítimo para
+// `unsafe` aqui, e portanto nada de legítimo é bloqueado.
+//
+// Se um dia for preciso mexer nisto, o caminho certo é isolar o `unsafe` num
+// módulo de arquitetura e chamá-lo daqui, não relaxar a regra.
+#![deny(unsafe_code)]
+
 pub mod commands;
 pub mod json;
 pub mod protocol;

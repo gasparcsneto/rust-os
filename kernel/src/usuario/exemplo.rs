@@ -8,8 +8,8 @@
 //! que não têm relação com ring 3.
 //!
 //! Estes poucos bytes fazem exatamente três coisas: uma chamada de sistema que
-//! escreve, uma que encerra, e um laço de segurança caso alguma delas volte
-//! quando não deveria.
+//! escreve no descritor de saída, uma que encerra, e um laço de segurança caso
+//! alguma delas volte quando não deveria.
 //!
 //! # A restrição que o código precisa respeitar
 //!
@@ -25,6 +25,17 @@
 /// existe para impedir.
 #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub const CODIGO_DO_INVASOR: i64 = 99;
+
+/// Texto que o exemplo manda para o descritor de erro.
+///
+/// Está numa constante porque o teste procura exatamente este texto no log,
+/// em nível `error`. É o que prova que o descritor **escolhe o destino**: a
+/// mesma chamada, com outro número, produz um registro de outro nível.
+///
+/// O texto é igual nas duas arquiteturas de propósito — o que se quer
+/// comparar aqui é o roteamento, não a plataforma.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub const DIAGNOSTICO: &str = "diagnostico de userspace";
 
 /// Código de saída que o programa de exemplo devolve.
 ///
@@ -78,17 +89,27 @@ core::arch::global_asm!(
 .section .text.programa_exemplo
 .global programa_exemplo_inicio
 programa_exemplo_inicio:
-    // escrever(mensagem, tamanho)
-    //
+    // escrever(SAIDA, mensagem, tamanho)
+    mov     edi, 1
     // `lea` com deslocamento relativo ao RIP: o endereço da mensagem é
     // calculado a partir de onde o código *está executando*, que é o espaço do
     // usuário — e não de onde ele foi montado, que é dentro do kernel.
-    lea     rdi, [rip + .Lmensagem]
+    lea     rsi, [rip + .Lmensagem]
     // `offset` é obrigatório: na sintaxe Intel, um símbolo sem ele é um
-    // *endereço de memória*, e `mov esi, TAMANHO` carregaria de 13 em vez de
+    // *endereço de memória*, e `mov edx, TAMANHO` carregaria de 13 em vez de
     // carregar 13. Foi exatamente esse o primeiro erro deste programa — falha
     // de página no endereço 0xd, que é o tamanho da mensagem.
-    mov     esi, offset TAMANHO_DA_MENSAGEM
+    mov     edx, offset TAMANHO_DA_MENSAGEM
+    mov     eax, 1
+    syscall
+
+    // escrever(ERRO, diagnostico, tamanho)
+    //
+    // Mesma chamada, outro descritor. Esta sai no log em nivel `error`, e e
+    // isso que prova que a tabela de descritores escolhe o destino.
+    mov     edi, 2
+    lea     rsi, [rip + .Ldiagnostico]
+    mov     edx, offset TAMANHO_DO_DIAGNOSTICO
     mov     eax, 1
     syscall
 
@@ -106,6 +127,11 @@ programa_exemplo_inicio:
     .ascii  "ola do anel 3"
 .Lfim_da_mensagem:
 .set TAMANHO_DA_MENSAGEM, .Lfim_da_mensagem - .Lmensagem
+
+.Ldiagnostico:
+    .ascii  "diagnostico de userspace"
+.Lfim_do_diagnostico:
+.set TAMANHO_DO_DIAGNOSTICO, .Lfim_do_diagnostico - .Ldiagnostico
 
 .global programa_exemplo_fim
 programa_exemplo_fim:
@@ -138,13 +164,22 @@ core::arch::global_asm!(
 .section .text.programa_exemplo
 .global programa_exemplo_inicio
 programa_exemplo_inicio:
-    // escrever(mensagem, tamanho)
-    //
+    // escrever(SAIDA, mensagem, tamanho)
+    mov     x0, #1
     // `adr` calcula o endereço relativo ao PC, pelo mesmo motivo do `lea`
     // relativo ao RIP no x86: o código executa noutro endereço do que foi
     // montado.
-    adr     x0, .Lmensagem
-    mov     x1, #TAMANHO_DA_MENSAGEM
+    adr     x1, .Lmensagem
+    mov     x2, #TAMANHO_DA_MENSAGEM
+    mov     x8, #1
+    svc     #0
+
+    // escrever(ERRO, diagnostico, tamanho)
+    //
+    // Mesma chamada, outro descritor. Esta sai no log em nivel `error`.
+    mov     x0, #2
+    adr     x1, .Ldiagnostico
+    mov     x2, #TAMANHO_DO_DIAGNOSTICO
     mov     x8, #1
     svc     #0
 
@@ -161,6 +196,11 @@ programa_exemplo_inicio:
     .ascii  "ola do EL0"
 .Lfim_da_mensagem:
 .set TAMANHO_DA_MENSAGEM, .Lfim_da_mensagem - .Lmensagem
+
+.Ldiagnostico:
+    .ascii  "diagnostico de userspace"
+.Lfim_do_diagnostico:
+.set TAMANHO_DO_DIAGNOSTICO, .Lfim_do_diagnostico - .Ldiagnostico
     .balign 4
 
 .global programa_exemplo_fim

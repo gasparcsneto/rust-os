@@ -1868,12 +1868,67 @@ fn usuario_executa_e_encerra() -> Resultado {
         None => return Err("o processo nao chegou a sair"),
     }
 
-    // Duas chamadas: uma escrita e uma saída. Menos que isso significa que a
-    // primeira falhou e o programa foi direto para a segunda.
+    // Três chamadas: duas escritas (uma em cada descritor) e uma saída. Menos
+    // que isso significa que alguma falhou e o programa pulou para a seguinte.
     let chamadas = crate::usuario::estatisticas().0 - chamadas_antes;
-    if chamadas < 2 {
+    if chamadas < 3 {
         crate::log_error!("teste", "apenas {} chamadas de sistema", chamadas);
         return Err("o processo nao fez todas as chamadas esperadas");
+    }
+
+    // A escrita no descritor 2 precisa ter virado um registro de nível
+    // `error`. Sem esta conferência, o descritor poderia ser ignorado pelo
+    // kernel e o teste ainda passaria — a tabela seria decoração.
+    let mut achou = false;
+    crate::log::ultimos(64, crate::log::Level::Error, |r| {
+        if r.subsistema == "usuario" && r.mensagem() == crate::usuario::exemplo::DIAGNOSTICO {
+            achou = true;
+        }
+    });
+    if !achou {
+        return Err("a escrita no descritor de erro nao saiu em nivel error");
+    }
+    Ok(())
+}
+
+/// A tabela de descritores é consultada de verdade, e um número inventado não
+/// derruba nada.
+///
+/// # O que cada caso separa
+///
+/// O descritor é conferido **antes** do ponteiro, e isso é proposital: se a
+/// ordem fosse a inversa, um processo poderia varrer endereços com um
+/// descritor inválido e distinguir "mapeado" de "não mapeado" pela resposta
+/// que recebesse. Os casos abaixo fixam essa ordem — todos usam um ponteiro
+/// que o kernel jamais aceitaria, e mesmo assim os descritores abertos chegam
+/// a reclamar *do ponteiro*, enquanto os fechados param antes.
+fn usuario_descritor_e_conferido() -> Resultado {
+    use crate::usuario::{descritor, despachar, erro, numero};
+
+    // Um endereço do kernel: reprovado em qualquer caso que chegue a olhá-lo.
+    let no_kernel = &raw const CASOS as *const _ as u64;
+    let escrever = |fd: u64| despachar(numero::ESCREVER, fd, no_kernel, 8);
+
+    // Fechados para escrita: param no descritor, sem olhar o ponteiro.
+    if escrever(descritor::ENTRADA) != erro::DESCRITOR_INVALIDO {
+        return Err("aceitou escrita no descritor de entrada");
+    }
+    if escrever(3) != erro::DESCRITOR_INVALIDO {
+        return Err("aceitou um descritor fora da tabela");
+    }
+    // Um número absurdo não pode indexar a tabela nem entrar em pânico: um
+    // processo não deve conseguir matar o kernel com um inteiro grande.
+    if escrever(u64::MAX) != erro::DESCRITOR_INVALIDO {
+        return Err("um descritor absurdo nao foi recusado");
+    }
+
+    // Abertos: passam do descritor e reprovam no ponteiro. É o que prova que
+    // a recusa acima veio da tabela, e não de um `escrever` que recusa tudo.
+    if escrever(descritor::SAIDA) != erro::ENDERECO_INVALIDO {
+        return Err("o descritor de saida nao chegou a validar o ponteiro");
+    }
+    if escrever(descritor::ERRO) != erro::ENDERECO_INVALIDO {
+        return Err("o descritor de erro nao chegou a validar o ponteiro");
     }
     Ok(())
 }
@@ -2270,6 +2325,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "usuario: recusa ponteiro de fora",
         f: usuario_recusa_ponteiro_de_fora,
+    },
+    Caso {
+        nome: "usuario: descritor e conferido",
+        f: usuario_descritor_e_conferido,
     },
     Caso {
         nome: "usuario: executa e encerra",

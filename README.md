@@ -234,6 +234,20 @@ vai para biblioteca. Protocolo e estrutura ficam explícitos.
 | x86_64 | GDT, TSS, IDT, tabelas de página, portas de I/O (`x86_64`); boot (`bootloader`); UART (`uart_16550`) | PIC 8259 e timer PIT |
 | aarch64 | registradores de sistema (`aarch64-cpu`); blocos de MMIO (`tock-registers`) | boot, tabela de vetores, descritores de página, leitor de device tree |
 
+**Onde o `unsafe` pode morar.** Um kernel não tem como eliminá-lo: falar com
+hardware, assembly e registradores de sistema exigem sair das garantias do
+compilador. O que dá para fazer é mantê-lo concentrado, e hoje cerca de três
+quartos dele vive em `arch/`; quase todo o resto está no alocador e na
+paginação. A lógica portátil — escalonador, executor, log, despacho de
+chamadas — é praticamente toda Rust seguro.
+
+O canal do agente é o caso em que isso deixou de ser hábito e virou regra:
+`agent/` inteiro carrega `#![deny(unsafe_code)]`. É o código que processa
+entrada vinda de fora da máquina e o único subsistema grande que não fala com
+hardware — não há motivo legítimo para `unsafe` ali, então nada de legítimo é
+bloqueado, e o compilador impede que a próxima mudança desfaça isso em
+silêncio.
+
 ## Multitarefa cooperativa
 
 O kernel roda suas tarefas com `async`/`await` e um executor próprio. Não é
@@ -313,10 +327,13 @@ privilegiadas não funcionam e só alcança as páginas marcadas como dele.
 $ cargo xtask agent user.run
 {"launched":true,"thread_id":7}
 
-$ cargo xtask agent log.tail '{"count":2}'
-... "usuario" "ola do anel 3"
-... "usuario" "processo encerrou com codigo 42"
+$ cargo xtask agent log.tail '{"count":3}'
+... info  "usuario" "ola do anel 3"
+... error "usuario" "diagnostico de userspace"
+... info  "usuario" "processo encerrou com codigo 42"
 ```
+
+As chamadas de sistema são quatro: `sair`, `escrever`, `id` e `ceder`.
 
 O programa é um punhado de bytes de instrução copiados para uma página — não
 um ELF. Um carregador de ELF é outra coisa difícil, e depurar duas de uma vez
@@ -328,6 +345,17 @@ ler a memória do kernel. O caso `usuario: nao alcanca o kernel` exige duas
 coisas ao mesmo tempo: que ele **não consiga** — se conseguisse, seguiria e
 sairia com o código dele — e que a tentativa mate **só o processo**. A prova
 da segunda é que o teste chega ao fim e reporta.
+
+**`escrever` recebe um descritor, e não um destino fixo.** A assinatura é
+`escrever(descritor, ptr, tamanho)`: 1 é a saída comum, 2 a de erro, e 0 fica
+reservado para leitura — escrever nele é erro. Hoje os dois destinos abertos
+vão para o log do kernel, em níveis diferentes, e é essa diferença que as duas
+linhas acima mostram.
+
+A indireção existe agora justamente porque ainda não é necessária. O destino
+pode crescer depois sem quebrar ninguém — um arquivo, um socket, outro
+processo. A *assinatura* não: acrescentar o argumento quando já houvesse
+programas de usuário significaria quebrar todos eles.
 
 **Todo argumento de chamada de sistema é hostil até prova em contrário.** Um
 ponteiro vindo do usuário pode apontar para dentro do kernel; um comprimento
