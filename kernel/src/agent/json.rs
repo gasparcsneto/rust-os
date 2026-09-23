@@ -200,6 +200,11 @@ impl<'w> JsonWriter<'w> {
         self.sink.write_str("\"")
     }
 
+    /// Acrescenta texto à string aberta, escapando o que o JSON exige.
+    pub fn push_str(&mut self, pedaco: &str) -> fmt::Result {
+        self.escrever_corpo(pedaco)
+    }
+
     /// Acrescenta um caractere à string aberta.
     pub fn push_char(&mut self, c: char) -> fmt::Result {
         let mut buffer = [0u8; 4];

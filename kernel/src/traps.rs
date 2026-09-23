@@ -255,6 +255,14 @@ pub fn fatal(nome: &'static str, pc: u64, endereco: Option<u64>, codigo: u64) ->
         "entrando em modo post-mortem; o canal do agente segue respondendo"
     );
 
+    // E a tela, se houver uma. Ela é o único canal que sobra quando a serial
+    // não chegou a subir, ou quando o que matou o kernel a levou junto — e é
+    // a única coisa aqui que um humano na frente da máquina consegue ver.
+    //
+    // Depois dos logs, e não antes: desenhar nunca deve atrasar o que o canal
+    // do agente vai ler.
+    crate::tela::falha();
+
     // O sistema não pode mais fazer trabalho útil, mas pode explicar-se.
     crate::agent::servir()
 }

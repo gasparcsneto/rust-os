@@ -188,6 +188,25 @@ pub static COMANDOS: &[Command] = &[
         handler: net_arp,
     },
     Command {
+        nome: "video.sample",
+        resumo: "Amostra a tela numa grade de cores, para o agente conferir o que foi desenhado.",
+        params: &[
+            ParamSpec {
+                nome: "columns",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "Colunas da grade (padrao: 16, maximo: 64).",
+            },
+            ParamSpec {
+                nome: "rows",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "Linhas da grade (padrao: 8, maximo: 64).",
+            },
+        ],
+        handler: video_sample,
+    },
+    Command {
         nome: "irq.stats",
         resumo: "Contadores de interrupcoes de hardware por linha.",
         params: &[],
@@ -297,14 +316,14 @@ fn system_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.field_str("cpu_vendor", cpu.como_str())?;
 
     w.key("framebuffer")?;
-    match crate::machine::video() {
-        Some(v) => {
+    match crate::tela::tela() {
+        Some(t) => {
             w.begin_object()?;
-            w.field_u64("width", v.largura)?;
-            w.field_u64("height", v.altura)?;
-            w.field_u64("stride", v.stride)?;
-            w.field_u64("bytes_per_pixel", v.bytes_por_pixel)?;
-            w.field_str("pixel_format", v.formato)?;
+            w.field_u64("width", t.largura as u64)?;
+            w.field_u64("height", t.altura as u64)?;
+            w.field_u64("stride", t.stride as u64)?;
+            w.field_u64("bytes_per_pixel", t.bytes_por_pixel as u64)?;
+            w.field_str("pixel_format", t.formato.como_str())?;
             w.end_object()?;
         }
         None => w.null_value()?,
@@ -553,6 +572,87 @@ fn escrever_mac(w: &mut JsonWriter, mac: &[u8]) -> fmt::Result {
         escrever_byte_hex(w, *byte)?;
     }
     w.end_str()
+}
+
+// ---------------------------------------------------------------------------
+// video.*
+// ---------------------------------------------------------------------------
+
+/// Tamanho padrao da grade de amostragem.
+///
+/// Dezesseis por oito cabe numa tela de terminal e ja distingue as regioes
+/// grandes de uma tela — um banner no topo, um fundo, uma faixa de cor. Quem
+/// precisar de detalhe pede mais.
+const COLUNAS_PADRAO: u64 = 16;
+const LINHAS_PADRAO: u64 = 8;
+/// Teto da grade. Sessenta e quatro por sessenta e quatro sao quatro mil
+/// cores, ja perto do que vale mandar por um canal serial.
+const MAX_GRADE: u64 = 64;
+
+/// Amostra a tela numa grade de cores.
+///
+/// # Por que uma grade, e nao os pixels
+///
+/// Porque um agente nao tem olhos, e porque a tela inteira sao milhoes de
+/// pixels que nao cabem numa resposta. O que ele precisa responder e "foi
+/// desenhado o que eu mandei desenhar?", e para isso uma amostra grosseira
+/// basta: ela distingue um fundo de uma faixa, e um retangulo de nada.
+///
+/// A amostra e por ponto, e nao por media da regiao. A media suavizaria
+/// justamente a borda entre duas cores, que e o que se quer enxergar.
+fn video_sample(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let colunas = params
+        .member("columns")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(COLUNAS_PADRAO)
+        .clamp(1, MAX_GRADE) as u32;
+    let linhas = params
+        .member("rows")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(LINHAS_PADRAO)
+        .clamp(1, MAX_GRADE) as u32;
+
+    w.begin_object()?;
+
+    let Some(tela) = crate::tela::tela() else {
+        w.field_bool("present", false)?;
+        return w.end_object();
+    };
+
+    w.field_bool("present", true)?;
+    w.field_u64("width", tela.largura as u64)?;
+    w.field_u64("height", tela.altura as u64)?;
+    w.field_u64("columns", colunas as u64)?;
+    w.field_u64("rows", linhas as u64)?;
+
+    w.key("grid")?;
+    w.begin_array()?;
+    for linha in 0..linhas {
+        // O centro de cada celula, e nao o canto: um ponto no canto de uma
+        // grade grosseira cai exatamente na borda entre duas regioes, e
+        // reportaria ora uma ora outra conforme o arredondamento.
+        let y = (linha * 2 + 1) * tela.altura / (linhas * 2);
+
+        w.begin_str()?;
+        for coluna in 0..colunas {
+            let x = (coluna * 2 + 1) * tela.largura / (colunas * 2);
+            if coluna > 0 {
+                w.push_char(' ')?;
+            }
+            match tela.ler_pixel(x, y) {
+                Some(cor) => {
+                    escrever_byte_hex(w, cor.r)?;
+                    escrever_byte_hex(w, cor.g)?;
+                    escrever_byte_hex(w, cor.b)?;
+                }
+                None => w.push_str("......")?,
+            }
+        }
+        w.end_str()?;
+    }
+    w.end_array()?;
+
+    w.end_object()
 }
 
 // ---------------------------------------------------------------------------
