@@ -131,7 +131,13 @@ impl Alocador {
 /// Descobre a memória disponível e monta o bitmap.
 ///
 /// Chame uma vez, depois que [`crate::machine`] estiver preenchido.
-pub fn init() {
+/// Prepara o alocador a partir do mapa de memória da máquina.
+///
+/// Devolve erro quando não há nenhuma região utilizável. Não é um aviso: sem
+/// frames, a paginação não tem de onde tirar tabelas, e ligar a MMU com uma
+/// tabela que não mapeia nada tranca o núcleo num laço de exceções do qual
+/// não se sai nem se relata. Quem chama precisa poder parar aqui.
+pub fn init() -> Result<(), &'static str> {
     let mut menor = u64::MAX;
     let mut maior = 0u64;
 
@@ -143,8 +149,7 @@ pub fn init() {
     });
 
     if menor == u64::MAX {
-        crate::log_error!("frames", "nenhuma regiao utilizavel; alocador inerte");
-        return;
+        return Err("nenhuma regiao utilizavel no mapa de memoria");
     }
 
     let base = menor & !(TAMANHO_FRAME - 1);
@@ -209,6 +214,15 @@ pub fn init() {
             MAX_FRAMES as u64 * TAMANHO_FRAME / 1024 / 1024
         );
     }
+
+    // A condição que importa é esta, e não "o mapa declarou alguma região":
+    // um mapa com regiões que as reservas consumiram inteiras chega aqui com
+    // zero frames e é tão inviável quanto um mapa vazio.
+    if livres == 0 {
+        return Err("nenhum frame livre depois das reservas");
+    }
+
+    Ok(())
 }
 
 /// Retira da circulação todos os frames que tocam a faixa `[inicio, fim)`.

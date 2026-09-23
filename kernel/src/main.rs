@@ -72,6 +72,63 @@ mod virtio;
 
 use core::panic::PanicInfo;
 
+/// Para o boot quando falta uma base sobre a qual tudo o que vem depois se
+/// apoia, e continua respondendo pelo caminho que não depende dela.
+///
+/// # Por que parar, e não seguir tolerando
+///
+/// Porque seguir não é tolerância: é adiar a morte e piorar o relato. Os dois
+/// chamadores mediram isso.
+///
+/// Sem **heap**, o kernel atravessava mais vinte linhas de log e morria com
+///
+///     panicked at library/alloc/src/alloc.rs:673:9:
+///     memory allocation of 8 bytes failed
+///
+/// — uma mensagem que aponta para o primeiro que tentou alocar, e não para a
+/// causa, que passou muito antes e ficou para trás no log.
+///
+/// Sem **frames** é pior, porque a linha seguinte liga a MMU: a tabela de
+/// tradução nasce sem mapear nada, a busca da próxima instrução aborta, e o
+/// vetor que atenderia esse abort está igualmente desmapeado. Medido, com um
+/// device tree ilegível: 21,3 milhões de prefetch aborts em vinte segundos,
+/// sem um byte de saída e sem post-mortem.
+///
+/// # Por que o canal ainda funciona aqui
+///
+/// Porque [`agent::servir`] é o mesmo caminho direto do modo post-mortem: não
+/// aloca, não depende do escalonador, e a serial já está aberta desde o
+/// primeiro milissegundo do boot. Parar e continuar respondendo sobre o que
+/// aconteceu é incomparavelmente mais útil que morrer adiante.
+///
+/// Está numa função só porque os dois desfechos precisam ser o mesmo. Duas
+/// cópias divergiriam na primeira correção que só uma recebesse — e foi
+/// exatamente assim que o caminho de frames ficou para trás do de heap.
+//
+// `canal_agente` só é consultado fora do modo de teste, onde o desfecho é o
+// código de saída e não um canal aberto.
+#[cfg_attr(feature = "modo-teste", allow(unused_variables))]
+fn parar_sem_base(subsistema: &'static str, motivo: &str, canal_agente: bool) -> ! {
+    log_error!(subsistema, "nao foi possivel inicializar: {}", motivo);
+    log_error!(
+        subsistema,
+        "tudo daqui para baixo depende disto; o kernel para nesta linha"
+    );
+
+    // A suíte precisa das duas bases para existir, então em modo de teste o
+    // desfecho é o código de falha que o CI entende — e não um canal aberto
+    // que ninguém vai consultar.
+    #[cfg(feature = "modo-teste")]
+    qemu::encerrar(qemu::Resultado::Falha);
+
+    #[cfg(not(feature = "modo-teste"))]
+    if canal_agente {
+        agent::servir()
+    } else {
+        arch::halt_forever()
+    }
+}
+
 /// O fluxo de boot comum às duas arquiteturas.
 ///
 /// Quando chegamos aqui, o backend de arquitetura já fez o trabalho sujo: as
@@ -121,7 +178,18 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
 
     // O alocador de frames precisa do mapa de memória já traduzido, e das
     // faixas que cada arquitetura sabe estarem ocupadas.
-    frames::init();
+    //
+    // Sem frames o boot não continua, e a razão é mais dura que a do heap: a
+    // linha seguinte liga a MMU, e uma tabela de tradução que não mapeia nada
+    // faz a busca da próxima instrução abortar — e o vetor que atenderia esse
+    // abort também está desmapeado. Medido, com um device tree ilegível a
+    // ponto de não sobrar região nenhuma: 21,3 milhões de prefetch aborts em
+    // vinte segundos, sem um byte de saída e sem post-mortem. Um kernel que
+    // para aqui, pelo caminho direto que não depende de MMU nem de heap,
+    // ainda consegue dizer o que houve.
+    if let Err(motivo) = frames::init() {
+        parar_sem_base("frames", motivo, canal_agente);
+    }
 
     // Com frames disponíveis, a paginação pode criar tabelas. No x86 isto
     // assume o controle do que o bootloader montou; no ARM, liga a MMU pela
@@ -131,41 +199,7 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     // Com a paginação no ar, o heap pode mapear sua faixa. A partir daqui o
     // kernel pode alocar memória dinâmica.
     if let Err(motivo) = heap::init() {
-        log_error!("heap", "nao foi possivel inicializar: {}", motivo);
-
-        // E o boot para aqui, porque tudo daqui para baixo aloca: o
-        // escalonador, cada tarefa, o executor, os drivers de virtio.
-        //
-        // Seguir em frente não era tolerância, era adiar a morte e piorar o
-        // relato. Medido, desligando o heap de propósito: o kernel atravessava
-        // mais vinte linhas de log e morria com
-        //
-        //     panicked at library/alloc/src/alloc.rs:673:9:
-        //     memory allocation of 8 bytes failed
-        //
-        // — uma mensagem que aponta para o primeiro que tentou alocar, e não
-        // para a causa, que passou muito antes e ficou para trás no log.
-        //
-        // O canal do agente não aloca: é o mesmo caminho direto que o modo
-        // post-mortem usa. Dá para parar aqui e continuar respondendo sobre o
-        // que aconteceu, que é infinitamente mais útil que morrer adiante.
-        log_error!(
-            "heap",
-            "tudo daqui para baixo aloca; o kernel para nesta linha"
-        );
-
-        #[cfg(feature = "modo-teste")]
-        qemu::encerrar(qemu::Resultado::Falha);
-
-        // A suíte precisa de heap para existir, então em modo de teste o
-        // desfecho é o código de falha que o CI entende — e não um canal
-        // aberto que ninguém vai consultar.
-        #[cfg(not(feature = "modo-teste"))]
-        if canal_agente {
-            agent::servir()
-        } else {
-            arch::halt_forever()
-        }
+        parar_sem_base("heap", motivo, canal_agente);
     }
 
     match tela::tela() {
