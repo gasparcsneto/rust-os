@@ -612,9 +612,11 @@ padronizado.
       carregador de ELF64 com validação de tudo que vem do arquivo, e
       `fork`/`exec` com cópia integral do espaço de endereços.
       **Fase 1 completa.**
-- [ ] **Fase 2 — Drivers.** Enumeração PCI (**feito**), virtio-blk
-      (**feito**), virtio-net (**feito**), roteamento de interrupção de PCI
-      (**feito**), timer do APIC local (**feito**), framebuffer gráfico.
+- [x] **Fase 2 — Drivers.** Enumeração PCI, virtio-blk, virtio-net,
+      roteamento de interrupção de PCI, timer do APIC local e framebuffer
+      gráfico. O framebuffer existe só no x86: a máquina `virt` do ARM não
+      expõe nenhum, e fechar essa lacuna é um driver de virtio-gpu.
+      **Fase 2 completa.**
 
 ## Licença
 
