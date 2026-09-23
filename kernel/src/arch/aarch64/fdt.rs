@@ -295,6 +295,24 @@ pub unsafe fn percorrer_memoria(
     }
 }
 
+/// Profundidade das propriedades de um nó que é filho direto da raiz.
+///
+/// # Por que a busca exige isso
+///
+/// Porque `Propriedade::address_cells` carrega as larguras declaradas **pela
+/// raiz**, e é com elas que o endereço do lado do pai é lido, tanto no `reg`
+/// quanto no `ranges`. Isso só está certo se o pai do nó *for* a raiz.
+///
+/// Numa placa que pendure o host bridge sob um `/soc`, quem declara as
+/// larguras é o `/soc`, não a raiz. Sem esta conferência o nó seria
+/// encontrado e lido com as larguras erradas — e o resultado não seria um
+/// erro, seria um endereço plausível e falso, que o kernel mapearia.
+///
+/// Recusar o nó é a resposta certa para um caso que este leitor não sabe
+/// tratar: a enumeração não acontece, o log diz que não há barramento, e
+/// ninguém desreferencia um endereço inventado.
+const FILHO_DA_RAIZ: usize = 2;
+
 /// O binding PCI fixa três células de endereço para os filhos de um host
 /// bridge, e duas de tamanho.
 ///
@@ -418,7 +436,7 @@ pub unsafe fn encontrar_barramento_pci(dtb: *const u8) -> Option<BarramentoPci> 
     // ruído em vez de sinalização.
     let mut alvo: Option<u32> = None;
     let mut procurar_o_no = |prop: &Propriedade| {
-        if alvo.is_some() || prop.nome != b"compatible" {
+        if alvo.is_some() || prop.profundidade != FILHO_DA_RAIZ || prop.nome != b"compatible" {
             return;
         }
         // `compatible` é uma lista de strings terminadas em zero, da mais
