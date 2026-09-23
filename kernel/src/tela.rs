@@ -225,10 +225,7 @@ fn geometria_coerente(
     bytes_por_pixel: u32,
     formato: Formato,
 ) -> bool {
-    largura > 0
-        && altura > 0
-        && stride >= largura
-        && bytes_por_pixel >= formato.bytes_tocados()
+    largura > 0 && altura > 0 && stride >= largura && bytes_por_pixel >= formato.bytes_tocados()
 }
 
 /// A tela desta máquina, se houver uma.
