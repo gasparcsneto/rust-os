@@ -145,18 +145,59 @@ pub fn com_regioes<F: FnMut(&Regiao)>(mut f: F) {
     });
 }
 
-/// Totais agregados: (bytes utilizáveis, bytes totais, número de regiões).
-pub fn estatisticas() -> (u64, u64, usize) {
+/// Os totais do mapa, cada um com um significado que se consegue enunciar.
+///
+/// # Por que não existe um campo chamado "total"
+///
+/// Porque existia, e ele mentia. Era a soma de todas as regiões, e o mapa que
+/// um firmware entrega não descreve só memória: descreve **espaço de
+/// endereçamento**. Numa máquina de 128 MiB o mapa traz uma região reservada
+/// de doze gibibytes perto de um tebibyte — um buraco de MMIO, zero bytes de
+/// RAM —, e ela sozinha dominava a soma.
+///
+/// O resultado era o log de boot anunciando "117 MiB utilizaveis de 12415 MiB
+/// mapeados" e `memory.stats` devolvendo `total_bytes` de treze bilhões. Dois
+/// números plausíveis, errados por duas ordens de grandeza, e nenhum agente
+/// tem como desconfiar sozinho.
+///
+/// Distinguir "reservado que é RAM" de "reservado que é buraco" não dá: o
+/// mapa não diz. O que dá é parar de somar as duas coisas sob um nome que
+/// promete memória, e dar a cada número o nome do que ele é.
+pub struct Totais {
+    /// RAM que o alocador pode entregar.
+    pub utilizavel: u64,
+    /// RAM que o bootloader retém para as estruturas dele.
+    ///
+    /// É memória de verdade, e um dia recuperável — daí valer um campo
+    /// próprio em vez de sumir dentro de um agregado.
+    pub bootloader: u64,
+    /// A soma de todas as regiões, buracos de endereçamento inclusive.
+    ///
+    /// Não é quanta memória a máquina tem. É quanto espaço o firmware
+    /// descreveu, e o nome diz isso.
+    pub descrito: u64,
+    /// Quantas regiões o mapa trouxe.
+    pub regioes: usize,
+}
+
+/// Os totais agregados do mapa de memória.
+pub fn estatisticas() -> Totais {
     com_maquina(|m| {
-        let mut utilizavel = 0;
-        let mut total = 0;
+        let mut totais = Totais {
+            utilizavel: 0,
+            bootloader: 0,
+            descrito: 0,
+            regioes: m.n,
+        };
         for regiao in &m.regioes[..m.n] {
-            total += regiao.tamanho();
-            if regiao.tipo == TipoRegiao::Utilizavel {
-                utilizavel += regiao.tamanho();
+            totais.descrito += regiao.tamanho();
+            match regiao.tipo {
+                TipoRegiao::Utilizavel => totais.utilizavel += regiao.tamanho(),
+                TipoRegiao::Bootloader => totais.bootloader += regiao.tamanho(),
+                _ => {}
             }
         }
-        (utilizavel, total, m.n)
+        totais
     })
 }
 

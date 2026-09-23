@@ -1110,15 +1110,18 @@ fn regioes_de_memoria_sao_coerentes() -> Resultado {
         return Err("regiao com fim menor ou igual ao inicio");
     }
 
-    let (utilizavel, total, quantas) = crate::machine::estatisticas();
-    if quantas == 0 {
+    let mem = crate::machine::estatisticas();
+    if mem.regioes == 0 {
         return Err("nenhuma regiao de memoria descoberta");
     }
-    if utilizavel > total {
-        return Err("memoria utilizavel maior que o total");
-    }
-    if utilizavel == 0 {
+    if mem.utilizavel == 0 {
         return Err("nenhuma memoria utilizavel");
+    }
+    // As duas partes que sabemos serem RAM cabem no que o firmware descreveu.
+    // Não vale o contrário — o descrito inclui buracos de endereçamento que
+    // não são memória nenhuma, e é por isso que ele não se chama "total".
+    if mem.utilizavel + mem.bootloader > mem.descrito {
+        return Err("a RAM conhecida excede o espaco descrito");
     }
     Ok(())
 }
@@ -2006,7 +2009,7 @@ fn dormentes_devolvem_a_vaga() -> Resultado {
 fn machine_recusa_regiao_degenerada() -> Resultado {
     use crate::machine::{Regiao, TipoRegiao};
 
-    let (_, _, antes) = crate::machine::estatisticas();
+    let antes = crate::machine::estatisticas().regioes;
     let descartadas_antes = crate::machine::regioes_descartadas();
 
     // Tamanho zero.
@@ -2022,7 +2025,7 @@ fn machine_recusa_regiao_degenerada() -> Resultado {
         tipo: TipoRegiao::Utilizavel,
     });
 
-    let (_, _, depois) = crate::machine::estatisticas();
+    let depois = crate::machine::estatisticas().regioes;
     if depois != antes {
         crate::log_error!("teste", "{} regioes -> {}", antes, depois);
         return Err("regiao degenerada entrou no mapa");

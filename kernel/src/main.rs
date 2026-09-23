@@ -98,13 +98,14 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     // passam a carregar um carimbo de uptime de verdade.
     arch::init_interrupcoes();
 
-    let (utilizavel, total, regioes) = machine::estatisticas();
+    let mem = machine::estatisticas();
     log_info!(
         "mem",
-        "{} regioes, {} MiB utilizaveis de {} MiB mapeados",
-        regioes,
-        utilizavel / 1024 / 1024,
-        total / 1024 / 1024
+        "{} regioes: {} MiB utilizaveis, {} MiB retidos pelo bootloader, {} MiB de espaco descrito",
+        mem.regioes,
+        mem.utilizavel / 1024 / 1024,
+        mem.bootloader / 1024 / 1024,
+        mem.descrito / 1024 / 1024
     );
 
     let descartadas = machine::regioes_descartadas();

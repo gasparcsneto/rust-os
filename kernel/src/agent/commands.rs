@@ -1042,12 +1042,19 @@ fn threads_list(_params: Json, w: &mut JsonWriter) -> fmt::Result {
 // ---------------------------------------------------------------------------
 
 fn memory_stats(_params: Json, w: &mut JsonWriter) -> fmt::Result {
-    let (utilizavel, total, regioes) = crate::machine::estatisticas();
+    let mem = crate::machine::estatisticas();
 
     w.begin_object()?;
-    w.field_u64("usable_bytes", utilizavel)?;
-    w.field_u64("total_bytes", total)?;
-    w.field_u64("region_count", regioes as u64)?;
+    w.field_u64("usable_bytes", mem.utilizavel)?;
+    // RAM de verdade, que o bootloader retem e que um dia se recupera.
+    w.field_u64("bootloader_bytes", mem.bootloader)?;
+    // A soma do mapa inteiro, e nao quanta memoria a maquina tem: o mapa
+    // descreve espaco de enderecamento, e o buraco de MMIO de uma maquina de
+    // 128 MiB chega a doze gibibytes. O campo se chamava `total_bytes` e era
+    // lido como memoria instalada — plausivel, e errado por duas ordens de
+    // grandeza.
+    w.field_u64("described_bytes", mem.descrito)?;
+    w.field_u64("region_count", mem.regioes as u64)?;
     // Se o mapa não coube na tabela, dizemos — um agente não tem como
     // desconfiar sozinho de um número que parece plausível.
     w.field_u64(
