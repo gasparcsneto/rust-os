@@ -590,14 +590,33 @@ fn timer_exatamente_um_relogio_avanca() -> Resultado {
 
     // Esperar pelo relógio, e não por um número de voltas: o que interessa é
     // que tempo tenha passado, e o relógio é justamente o que está sob
-    // exame. Se ele não andar, o teste falha por não achar nenhuma linha
-    // avançando — que é a resposta certa.
+    // exame. O teto de voltas existe só para que um relógio parado vire falha
+    // em vez de travamento — e ele precisa ser folgado o bastante para que
+    // esgotá-lo signifique mesmo isso. Ver [`VOLTAS_ESPERANDO_O_RELOGIO`].
+    const TIQUES_NECESSARIOS: u64 = 3;
+
     let comeco = crate::tempo::ticks();
-    for _ in 0..VOLTAS_ESPERANDO_INTERRUPCAO {
-        if crate::tempo::ticks() - comeco >= 3 {
+    let mut esgotou = true;
+    for _ in 0..VOLTAS_ESPERANDO_O_RELOGIO {
+        if crate::tempo::ticks() - comeco >= TIQUES_NECESSARIOS {
+            esgotou = false;
             break;
         }
         core::hint::spin_loop();
+    }
+
+    // Distinguir as duas causas, porque confundi-las foi o que custou uma CI
+    // vermelha: o relógio parado é defeito do kernel, o teto curto demais é
+    // defeito deste caso, e a mensagem anterior chamava os dois de "o relogio
+    // parou".
+    if esgotou {
+        crate::log_error!(
+            "teste",
+            "{} voltas sem completar {} tiques",
+            VOLTAS_ESPERANDO_O_RELOGIO,
+            TIQUES_NECESSARIOS
+        );
+        return Err("o teto de voltas acabou antes dos tiques: relogio parado ou teto curto");
     }
 
     let mut depois = [("", 0u64); MAX_TIMERS];
@@ -4367,6 +4386,33 @@ fn rede_um_descritor_por_buffer() -> Resultado {
 /// depois que a tranca do driver é solta. O laço aqui existe justamente para
 /// dar essa janela.
 const VOLTAS_ESPERANDO_INTERRUPCAO: u32 = 2_000_000;
+
+/// Quantas voltas esperar o **relógio** andar os tiques de que um caso precisa.
+///
+/// # Por que não serve o teto acima
+///
+/// Porque os dois medem coisas diferentes. Lá a interrupção já está pendente
+/// no controlador e chega em microssegundos assim que a tranca é solta; aqui é
+/// preciso esperar **tempo de parede** — três tiques a 100 Hz são trinta
+/// milissegundos.
+///
+/// Um teto de voltas é um substituto ruim para uma duração, e o erro de
+/// calibração não aparece onde se testa. Medido, contando as voltas até o
+/// terceiro tique no ARM:
+///
+///   debug:    104 372 voltas
+///   release:  2 000 000 voltas — o teto inteiro, sem nunca completar os três
+///
+/// Ou seja: em release o caso já rodava exatamente no limite nesta máquina, e
+/// passava porque um tique ainda cabia. Num runner da CI, mais rápido, nem
+/// esse coube, e o caso acusou "o relogio parou" num kernel cujo relógio
+/// estava perfeito.
+///
+/// Dois bilhões cobrem os trinta milissegundos com duas ordens de grandeza de
+/// folga mesmo a um nanossegundo por volta. O preço é que um relógio de fato
+/// parado leva alguns segundos para ser declarado morto — a troca certa, já
+/// que o outro lado custa uma CI vermelha sem defeito nenhum.
+const VOLTAS_ESPERANDO_O_RELOGIO: u64 = 2_000_000_000;
 
 /// O dispositivo interrompe, e a interrupção chega.
 ///
