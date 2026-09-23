@@ -33,9 +33,19 @@ pub fn init() {
 
         // Interrupções de hardware, já remapeadas pelo PIC para fora da
         // faixa das exceções.
-        idt[super::pic::VETOR_TIMER].set_handler_fn(timer);
-        idt[super::pic::VETOR_TECLADO].set_handler_fn(teclado);
-        idt[super::pic::VETOR_SERIAL_AGENTE].set_handler_fn(serial_agente);
+        //
+        // Todas as dezesseis, e não só as que hoje têm uso. O vetor precisa
+        // existir na IDT **antes** de a linha ser desmascarada, e quem
+        // desmascara é o driver do dispositivo, muito depois daqui. Instalar
+        // sob demanda exigiria mexer na IDT com o sistema rodando; instalar
+        // todas de uma vez custa dezesseis entradas numa tabela de 256.
+        //
+        // Uma linha sem dono não é perigosa: o handler contabiliza, pergunta
+        // aos drivers e sinaliza o fim. O que seria perigoso é o contrário —
+        // uma linha desmascarada sem vetor derruba o processador.
+        for (linha, tratador) in TRATADORES.iter().enumerate() {
+            idt[super::pic::OFFSET_MESTRE + linha as u8].set_handler_fn(*tratador);
+        }
 
         // SAFETY: `IST_DOUBLE_FAULT` é um índice válido da IST, e a pilha
         // correspondente foi preparada em `gdt::init`, que roda antes desta
@@ -52,63 +62,97 @@ pub fn init() {
     idt.load();
 }
 
-/// Interrupção periódica do timer (IRQ 0).
+/// Gera um handler por linha do PIC.
 ///
-/// É o coração do kernel: dá a noção de tempo e é o ponto em que o
-/// escalonador preemptivo decide trocar de fio de execução.
-extern "x86-interrupt" fn timer(_quadro: InterruptStackFrame) {
-    crate::tempo::tick();
-    crate::irq::contabilizar(0);
+/// # Por que uma macro
+///
+/// Porque a ABI `x86-interrupt` não passa o número do vetor ao handler: o
+/// processador salta para o endereço que a IDT guarda e pronto. Saber qual
+/// linha disparou só é possível tendo uma função **por linha**, e a única
+/// diferença entre as dezesseis é o número que elas repassam.
+///
+/// Escrevê-las à mão seria dezesseis corpos idênticos, e a primeira correção
+/// que só quinze recebessem viraria um bug que aparece numa linha só.
+macro_rules! tratadores {
+    ($($nome:ident = $linha:expr),* $(,)?) => {
+        $(
+            extern "x86-interrupt" fn $nome(_quadro: InterruptStackFrame) {
+                if atender($linha) {
+                    // Trocar de fio aqui dentro é seguro porque no x86 o
+                    // quadro de interrupção foi empilhado na pilha do fio
+                    // interrompido: a troca leva o quadro junto, e o `iretq`
+                    // do fim deste handler acontece na pilha do outro fio,
+                    // retomando o ponto em que *ele* parou.
+                    super::contexto::ceder_cpu();
+                }
+            }
+        )*
 
-    let preemptar = crate::fios::tique();
+        /// Os handlers, indexados pela linha do PIC.
+        static TRATADORES: [extern "x86-interrupt" fn(InterruptStackFrame); 16] =
+            [$($nome),*];
+    };
+}
 
-    // O EOI vem **antes** da troca, e a ordem importa. Se trocássemos de fio
+tratadores! {
+    linha0 = 0, linha1 = 1, linha2 = 2, linha3 = 3,
+    linha4 = 4, linha5 = 5, linha6 = 6, linha7 = 7,
+    linha8 = 8, linha9 = 9, linha10 = 10, linha11 = 11,
+    linha12 = 12, linha13 = 13, linha14 = 14, linha15 = 15,
+}
+
+/// Atende a interrupção da linha indicada. Devolve se o escalonador pediu
+/// troca de fio.
+///
+/// É o gêmeo de [`super::super::aarch64::gic::tratar`] no outro backend, e a
+/// simetria é deliberada: as duas arquiteturas fazem a mesma sequência — o
+/// mínimo indispensável, contabilizar, sinalizar o fim — e quem lê uma
+/// reconhece a outra.
+fn atender(linha: u8) -> bool {
+    let mut preemptar = false;
+
+    match linha {
+        // O coração do kernel: dá a noção de tempo e é o ponto em que o
+        // escalonador preemptivo decide trocar de fio.
+        0 => {
+            crate::tempo::tick();
+            preemptar = crate::fios::tique();
+        }
+
+        // Ler o scancode não é opcional: o controlador de teclado só arma a
+        // próxima interrupção depois que o byte anterior for consumido. Sem
+        // esta leitura, a primeira tecla travaria o teclado para sempre.
+        //
+        // SAFETY: 0x60 é a porta de dados do controlador 8042, e a leitura é
+        // o protocolo documentado de consumo do scancode.
+        1 => {
+            let _scancode: u8 = unsafe { x86_64::instructions::port::Port::new(0x60).read() };
+        }
+
+        // Chegou byte para o agente. O handler faz o mínimo: move os bytes do
+        // FIFO do hardware para a fila do kernel e acorda a tarefa que os
+        // espera. Decodificar o JSON, executar o comando e serializar a
+        // resposta acontece fora daqui.
+        3 => crate::tarefas::entrada::coletar(),
+
+        // As demais são dos dispositivos que o kernel dirige. Perguntar a
+        // eles é o que evita uma tabela de handlers — e, com dois
+        // dispositivos, uma tabela seria generalidade sem cliente.
+        _ => crate::virtio::atender_interrupcao(linha as u32),
+    }
+
+    crate::irq::contabilizar(linha as usize);
+
+    // O EOI vem **antes** da troca de fio, e a ordem importa. Se trocássemos
     // primeiro, este handler só voltaria a executar quando o fio atual fosse
     // escalonado de novo — e até lá o PIC consideraria a interrupção em
     // atendimento e não entregaria outra. O timer pararia, e com ele o
     // escalonador: um sistema que troca de fio exatamente uma vez.
     //
     // SAFETY: estamos no handler desta exata interrupção.
-    unsafe { super::pic::fim_de_interrupcao(super::pic::VETOR_TIMER) };
+    unsafe { super::pic::fim_de_interrupcao(super::pic::OFFSET_MESTRE + linha) };
 
-    if preemptar {
-        // Trocar aqui dentro é seguro porque no x86 o quadro de interrupção
-        // foi empilhado na pilha do fio interrompido: a troca de pilha leva o
-        // quadro junto, e o `iretq` do fim deste handler acontece na pilha do
-        // outro fio, retomando o ponto em que *ele* parou.
-        super::contexto::ceder_cpu();
-    }
-}
-
-/// Interrupção de recepção da COM2 (IRQ 3): chegou byte para o agente.
-///
-/// O handler faz o mínimo: move os bytes do FIFO do hardware para a fila do
-/// kernel e acorda a tarefa que os espera. Decodificar o JSON, executar o
-/// comando e serializar a resposta acontece fora daqui — um handler roda com
-/// interrupções mascaradas e suspende qualquer coisa que estivesse rodando,
-/// então tudo que puder sair dele, sai.
-extern "x86-interrupt" fn serial_agente(_quadro: InterruptStackFrame) {
-    crate::tarefas::entrada::coletar();
-
-    crate::irq::contabilizar(3);
-    // SAFETY: estamos no fim do handler da própria interrupção.
-    unsafe { super::pic::fim_de_interrupcao(super::pic::VETOR_SERIAL_AGENTE) };
-}
-
-/// Interrupção do teclado PS/2 (IRQ 1).
-extern "x86-interrupt" fn teclado(_quadro: InterruptStackFrame) {
-    // Ler o scancode não é opcional: o controlador de teclado só arma a
-    // próxima interrupção depois que o byte anterior for consumido. Sem esta
-    // leitura, a primeira tecla travaria o teclado para sempre.
-    //
-    // SAFETY: 0x60 é a porta de dados do controlador 8042, e a leitura é o
-    // protocolo documentado de consumo do scancode.
-    let _scancode: u8 = unsafe { x86_64::instructions::port::Port::new(0x60).read() };
-
-    crate::irq::contabilizar(1);
-
-    // SAFETY: estamos no handler desta exata interrupção.
-    unsafe { super::pic::fim_de_interrupcao(super::pic::VETOR_TECLADO) };
+    preemptar
 }
 
 /// `int3` — o ponto de parada dos depuradores.
