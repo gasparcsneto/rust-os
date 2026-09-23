@@ -205,3 +205,13 @@ pub fn estatisticas() -> Totais {
 pub fn regioes_descartadas() -> usize {
     com_maquina(|m| m.descartadas)
 }
+
+/// Destrava a descrição da máquina à força, para uso exclusivo do caminho de falha fatal.
+///
+/// # Safety
+///
+/// Só pode ser chamada quando o kernel já está em falha irrecuperável e não
+/// há outro núcleo em execução. Ver [`crate::traps::fatal`].
+pub unsafe fn destravar() {
+    unsafe { MAQUINA.force_unlock() };
+}

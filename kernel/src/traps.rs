@@ -231,6 +231,17 @@ pub fn fatal(nome: &'static str, pc: u64, endereco: Option<u64>, codigo: u64) ->
     // aceitável: o sistema já está morto, e um relatório possivelmente
     // inconsistente vale infinitamente mais que nenhum.
     //
+    // A lista precisa cobrir **tudo** que o canal do agente toca, e não só o
+    // que este módulo usa para escrever o relatório. Ela cobria cinco travas,
+    // e o post-mortem oferece vinte e cinco comandos que tocam o dobro disso.
+    //
+    // Medido, provocando uma falha de página com a tranca do disco na mão: o
+    // cadáver respondia `traps.stats` e `system.info` perfeitamente, e
+    // `disk.info` pendurava — a tranca continuava na mão do fio morto, e
+    // `com_o_disco` girava nela para sempre. E o travamento acontece *dentro*
+    // de `agent::servir`, então aquele comando não derrubava só a si mesmo:
+    // derrubava o canal inteiro, e com ele o resto da autópsia.
+    //
     // SAFETY: não há outro núcleo rodando, e a alternativa é o deadlock.
     unsafe {
         ESTADO.force_unlock();
@@ -238,6 +249,18 @@ pub fn fatal(nome: &'static str, pc: u64, endereco: Option<u64>, codigo: u64) ->
         crate::log::destravar();
         crate::serial::destravar();
         crate::tarefas::entrada::destravar();
+
+        crate::arch::destravar_paginacao();
+        crate::frames::destravar();
+        crate::heap::destravar();
+        crate::machine::destravar();
+        crate::irq::destravar();
+        crate::pci::destravar();
+        crate::fios::destravar();
+        crate::tarefas::relogio::destravar();
+        crate::tarefas::executor::destravar();
+        crate::virtio::blk::destravar();
+        crate::virtio::net::destravar();
     }
 
     // Para o escalonador antes de qualquer outra coisa. Com multitarefa

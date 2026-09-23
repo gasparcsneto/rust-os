@@ -409,3 +409,13 @@ pub const fn capacidade_do_inventario() -> usize {
 pub const fn capacidade_da_fila_de_prontas() -> usize {
     CAPACIDADE_PRONTAS
 }
+
+/// Destrava o inventário de tarefas à força, para uso exclusivo do caminho de falha fatal.
+///
+/// # Safety
+///
+/// Só pode ser chamada quando o kernel já está em falha irrecuperável e não
+/// há outro núcleo em execução. Ver [`crate::traps::fatal`].
+pub unsafe fn destravar() {
+    unsafe { INVENTARIO.force_unlock() };
+}

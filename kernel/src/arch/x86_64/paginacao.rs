@@ -628,3 +628,13 @@ pub unsafe fn percorrer_paginas_do_usuario(
         }
     }
 }
+
+/// Destrava a tabela de páginas à força, para o caminho de falha fatal.
+///
+/// # Safety
+///
+/// Só pode ser chamada quando o kernel já está em falha irrecuperável e não
+/// há outro núcleo em execução. Ver [`crate::traps::fatal`].
+pub unsafe fn destravar_paginacao() {
+    unsafe { TRAVA.force_unlock() };
+}

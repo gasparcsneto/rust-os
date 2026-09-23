@@ -327,3 +327,13 @@ pub fn esta_livre(endereco: u64) -> bool {
         None => false,
     })
 }
+
+/// Destrava o alocador de frames à força, para uso exclusivo do caminho de falha fatal.
+///
+/// # Safety
+///
+/// Só pode ser chamada quando o kernel já está em falha irrecuperável e não
+/// há outro núcleo em execução. Ver [`crate::traps::fatal`].
+pub unsafe fn destravar() {
+    unsafe { ALOCADOR.force_unlock() };
+}

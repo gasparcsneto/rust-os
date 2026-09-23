@@ -690,3 +690,13 @@ pub fn estatisticas() -> (usize, u64, u64) {
         QUANTUNS_VENCIDOS.load(Ordering::Relaxed),
     )
 }
+
+/// Destrava o escalonador à força, para uso exclusivo do caminho de falha fatal.
+///
+/// # Safety
+///
+/// Só pode ser chamada quando o kernel já está em falha irrecuperável e não
+/// há outro núcleo em execução. Ver [`crate::traps::fatal`].
+pub unsafe fn destravar() {
+    unsafe { ESCALONADOR.force_unlock() };
+}

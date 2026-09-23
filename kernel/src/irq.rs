@@ -138,3 +138,13 @@ pub fn total() -> u64 {
 pub fn fora_do_teto() -> u64 {
     FORA_DO_TETO.load(Ordering::Relaxed)
 }
+
+/// Destrava a tabela de nomes de linha à força, para uso exclusivo do caminho de falha fatal.
+///
+/// # Safety
+///
+/// Só pode ser chamada quando o kernel já está em falha irrecuperável e não
+/// há outro núcleo em execução. Ver [`crate::traps::fatal`].
+pub unsafe fn destravar() {
+    unsafe { NOMES.force_unlock() };
+}

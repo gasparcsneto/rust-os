@@ -644,3 +644,13 @@ pub fn init() {
 pub fn com_a_placa<R>(f: impl FnOnce(&mut Placa) -> R) -> Option<R> {
     crate::arch::sem_interrupcoes(|| PLACA.lock().as_mut().map(f))
 }
+
+/// Destrava a tranca da placa de rede à força, para uso exclusivo do caminho de falha fatal.
+///
+/// # Safety
+///
+/// Só pode ser chamada quando o kernel já está em falha irrecuperável e não
+/// há outro núcleo em execução. Ver [`crate::traps::fatal`].
+pub unsafe fn destravar() {
+    unsafe { PLACA.force_unlock() };
+}

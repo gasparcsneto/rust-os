@@ -62,10 +62,10 @@ pub use aarch64 as atual;
 #[allow(unused_imports)]
 pub use atual::{
     BASE_DAS_PILHAS, BASE_DE_MMIO, BASE_DO_HEAP, COBERTURA_DA_ENTRADA_DE_TOPO, Contexto, Uart,
-    acesso_fisico, ceder_cpu, criar_espaco, definir_pilha_de_kernel, desmapear, destruir_espaco,
-    disparar_breakpoint, disparar_falha_fatal, dormir_se_ocioso, encerrar_emulador,
-    entrar_em_usuario, espaco_atual, espaco_do_kernel, esperar_interrupcao,
-    falha_de_estouro_de_pilha, halt_forever, identificar_cpu, init_excecoes,
+    acesso_fisico, ceder_cpu, criar_espaco, definir_pilha_de_kernel, desmapear,
+    destravar_paginacao, destruir_espaco, disparar_breakpoint, disparar_falha_fatal,
+    dormir_se_ocioso, encerrar_emulador, entrar_em_usuario, espaco_atual, espaco_do_kernel,
+    esperar_interrupcao, falha_de_estouro_de_pilha, halt_forever, identificar_cpu, init_excecoes,
     init_interrupcao_serial, init_interrupcoes, init_paginacao, init_pci, init_seriais,
     init_timer_definitivo, init_usuario, interrupcoes_habilitadas, mapear_frame, nome,
     percorrer_paginas_do_usuario, preparar_contexto, preparar_contexto_de_fork, redirecionar_para,

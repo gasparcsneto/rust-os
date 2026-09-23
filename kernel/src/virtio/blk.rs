@@ -417,3 +417,13 @@ pub fn init() {
 pub fn com_o_disco<R>(f: impl FnOnce(&mut Disco) -> R) -> Option<R> {
     crate::arch::sem_interrupcoes(|| DISCO.lock().as_mut().map(f))
 }
+
+/// Destrava a tranca do disco à força, para uso exclusivo do caminho de falha fatal.
+///
+/// # Safety
+///
+/// Só pode ser chamada quando o kernel já está em falha irrecuperável e não
+/// há outro núcleo em execução. Ver [`crate::traps::fatal`].
+pub unsafe fn destravar() {
+    unsafe { DISCO.force_unlock() };
+}
