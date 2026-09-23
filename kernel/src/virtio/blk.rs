@@ -184,6 +184,23 @@ impl Disco {
             }
         };
 
+        // A capacidade vem em setores e é usada em bytes — no log logo abaixo,
+        // em `disk.info`, e em qualquer conta que venha depois. A conversão é
+        // uma multiplicação por 512, e ela transborda para qualquer capacidade
+        // a partir de 2^55 setores.
+        //
+        // Recusamos aqui, e não em cada lugar que multiplica, porque o que
+        // transborda não é a conta: é o número. Um disco de 2^55 setores são
+        // dezesseis exabytes, que nenhum disco tem e nenhum emulador oferece —
+        // é o dispositivo dizendo algo impossível. Deixar o valor entrar
+        // obrigaria todo caminho que o usa a se defender dele, e bastaria um
+        // esquecer para o kernel entrar em pânico ao **responder uma
+        // pergunta** sobre o disco, ou para relatar um tamanho que deu a volta.
+        if capacidade > u64::MAX / TAMANHO_DO_SETOR as u64 {
+            transporte.abortar();
+            return Err("capacidade que nao cabe em bytes");
+        }
+
         let fila = match Fila::nova(&transporte, FILA_DE_PEDIDOS) {
             Ok(fila) => fila,
             Err(motivo) => {
@@ -235,6 +252,10 @@ impl Disco {
     }
 
     /// Quantos setores o disco tem.
+    ///
+    /// Cabe em bytes: [`Disco::ligar`] recusa um dispositivo cuja capacidade
+    /// não caiba, então multiplicar por [`TAMANHO_DO_SETOR`] é seguro em
+    /// qualquer chamador.
     pub fn capacidade(&self) -> u64 {
         self.capacidade
     }
