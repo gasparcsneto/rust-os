@@ -546,6 +546,84 @@ fn irq_do_timer_contabilizada() -> Resultado {
     }
 }
 
+/// Quantas linhas de timer o kernel pode ter, contando as que ele abandonou.
+const MAX_TIMERS: usize = 4;
+
+/// Exatamente uma linha de timer está avançando.
+///
+/// # A propriedade, e por que ela é a certa
+///
+/// No x86 o PIT sobe cedo e o APIC local o substitui assim que a paginação
+/// permite. Entre programar o APIC e mascarar o PIT existe uma janela em que
+/// **os dois** disparam, e os dois chamam `tempo::tick` — o relógio anda ao
+/// dobro da velocidade. Fora dessa janela, exatamente um deve estar contando.
+///
+/// Os dois erros possíveis são simétricos e este caso pega os dois:
+///
+/// - mascarar o PIT sem que o APIC esteja contando para o relógio, e o
+///   sistema para de preemptar sem nenhuma mensagem de erro;
+/// - programar o APIC e esquecer de mascarar o PIT, e o uptime passa a andar
+///   ao dobro — um erro que nenhum teste de "o relógio avança" pegaria,
+///   porque ele avança mesmo, só que errado.
+///
+/// No ARM só existe um timer e o caso passa trivialmente. Ele vale mesmo
+/// assim: a propriedade é do kernel, não da plataforma, e é o ARM que mostra
+/// qual é o comportamento normal.
+fn timer_exatamente_um_relogio_avanca() -> Resultado {
+    /// Lê os contadores de todas as linhas cujo nome começa com "timer".
+    fn amostrar(destino: &mut [(&'static str, u64); MAX_TIMERS]) -> usize {
+        let mut quantos = 0;
+        crate::irq::com_contadores(|_linha, nome, total| {
+            if nome.starts_with("timer") && quantos < MAX_TIMERS {
+                destino[quantos] = (nome, total);
+                quantos += 1;
+            }
+        });
+        quantos
+    }
+
+    let mut antes = [("", 0u64); MAX_TIMERS];
+    let quantos = amostrar(&mut antes);
+    if quantos == 0 {
+        return Err("nenhuma linha de timer contabilizada");
+    }
+
+    // Esperar pelo relógio, e não por um número de voltas: o que interessa é
+    // que tempo tenha passado, e o relógio é justamente o que está sob
+    // exame. Se ele não andar, o teste falha por não achar nenhuma linha
+    // avançando — que é a resposta certa.
+    let comeco = crate::tempo::ticks();
+    for _ in 0..VOLTAS_ESPERANDO_INTERRUPCAO {
+        if crate::tempo::ticks() - comeco >= 3 {
+            break;
+        }
+        core::hint::spin_loop();
+    }
+
+    let mut depois = [("", 0u64); MAX_TIMERS];
+    let agora = amostrar(&mut depois);
+
+    let mut avancaram = 0;
+    for (nome, valor) in depois.iter().take(agora) {
+        let anterior = antes
+            .iter()
+            .take(quantos)
+            .find(|(n, _)| n == nome)
+            .map(|(_, v)| *v)
+            .unwrap_or(0);
+        if *valor > anterior {
+            avancaram += 1;
+            crate::log_info!("teste", "{} avancou {} tiques", nome, valor - anterior);
+        }
+    }
+
+    match avancaram {
+        1 => Ok(()),
+        0 => Err("nenhum timer avancou: o relogio parou"),
+        _ => Err("mais de um timer avancando: o relogio anda rapido demais"),
+    }
+}
+
 // ===========================================================================
 // Descrição da máquina
 // ===========================================================================
@@ -2994,6 +3072,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "irq: timer contabilizado",
         f: irq_do_timer_contabilizada,
+    },
+    Caso {
+        nome: "timer: exatamente um relogio avanca",
+        f: timer_exatamente_um_relogio_avanca,
     },
     Caso {
         nome: "memoria: regioes coerentes",
