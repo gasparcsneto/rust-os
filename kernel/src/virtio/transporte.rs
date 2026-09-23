@@ -42,6 +42,8 @@ pub const FABRICANTE: u16 = 0x1AF4;
 #[derive(Clone, Copy, Debug)]
 pub struct Mmio {
     base: u64,
+    /// Quantos bytes a janela cobre. Legível porque quem a recebe pode precisar
+    /// exigir um tamanho mínimo — ver [`TAMANHO_MINIMO_DA_CONFIG_COMUM`].
     tamanho: u64,
 }
 
@@ -211,6 +213,28 @@ pub struct Transporte {
     do_dispositivo: Option<Mmio>,
 }
 
+/// Quanto a configuração comum precisa ter para conter tudo o que lemos dela.
+///
+/// # Por que conferir uma vez, e não a cada acesso
+///
+/// Porque os acessadores devolvem `Option`, e todo chamador aqui dentro acaba
+/// dando um `unwrap_or` nela. Isso conflata duas coisas: `estado()` devolvendo
+/// zero pode significar "o dispositivo está reiniciado" ou "não consegui ler o
+/// registrador" — e [`Transporte::reiniciar`], que espera pelo zero, trataria
+/// a segunda como sucesso.
+///
+/// Conferir o tamanho na construção torna essa confusão impossível em vez de
+/// improvável: ou a região comporta todos os campos, e nenhum acesso a ela
+/// pode falhar por limite, ou o dispositivo é recusado com uma mensagem que
+/// diz o que houve.
+///
+/// O valor é o fim do último campo que este driver toca: `queue_device`, em
+/// `0x30`, com oito bytes.
+const TAMANHO_MINIMO_DA_CONFIG_COMUM: u64 = comum::USADOS + 8;
+
+/// E quanto a região de notificação precisa ter para caber uma escrita.
+const TAMANHO_MINIMO_DA_NOTIFICACAO: u64 = 2;
+
 // Campos da configuração comum, em bytes a partir do começo dela.
 mod comum {
     pub const SELETOR_DE_RECURSOS_DO_DISPOSITIVO: u64 = 0x00;
@@ -376,9 +400,19 @@ impl Transporte {
             }
         });
 
+        let comum = comum.ok_or("dispositivo sem configuracao comum")?;
+        if comum.tamanho < TAMANHO_MINIMO_DA_CONFIG_COMUM {
+            return Err("configuracao comum menor que os campos do protocolo");
+        }
+
+        let notificacao = notificacao.ok_or("dispositivo sem regiao de notificacao")?;
+        if notificacao.tamanho < TAMANHO_MINIMO_DA_NOTIFICACAO {
+            return Err("regiao de notificacao pequena demais para uma escrita");
+        }
+
         Ok(Transporte {
-            comum: comum.ok_or("dispositivo sem configuracao comum")?,
-            notificacao: notificacao.ok_or("dispositivo sem regiao de notificacao")?,
+            comum,
+            notificacao,
             multiplicador_de_notificacao: multiplicador,
             do_dispositivo,
         })
@@ -394,6 +428,12 @@ impl Transporte {
         self.comum.ler_u16(comum::NUMERO_DE_FILAS).unwrap_or(0)
     }
 
+    /// O registrador de estado.
+    ///
+    /// O `unwrap_or` não esconde nada: [`Transporte::descobrir`] recusa uma
+    /// configuração comum que não comporte todos os campos, então uma leitura
+    /// aqui não tem como falhar por limite. Sem aquela conferência, este zero
+    /// seria indistinguível do zero que significa "dispositivo reiniciado".
     fn estado(&self) -> u8 {
         self.comum.ler_u8(comum::ESTADO).unwrap_or(0)
     }

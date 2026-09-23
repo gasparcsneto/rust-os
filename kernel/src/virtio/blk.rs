@@ -90,6 +90,19 @@ const _: () = assert!(core::mem::size_of::<Cabecalho>() as u64 == DADOS_EM - CAB
 /// confiável em todo caminho que chama o disco. A ordem de grandeza é
 /// deliberadamente folgada — um dispositivo emulado responde em algumas
 /// dezenas de voltas, e o teto só precisa distinguir "lento" de "morto".
+///
+/// # O que esperar custa
+///
+/// O acesso ao disco passa por [`com_o_disco`], que mascara interrupções — é a
+/// disciplina que este kernel aplica a toda tranca compartilhada. Enquanto a
+/// espera roda, então, o timer não conta e o escalonador não troca de fio.
+///
+/// No caminho normal isso é irrelevante: a resposta vem em microssegundos. No
+/// caminho ruim seriam dezenas de milissegundos de kernel parado — e o que
+/// torna isso aceitável não é o número, é o campo `vivo`. Um tempo esgotado
+/// desliga o disco, então a espera longa acontece **no máximo uma vez** na
+/// vida do kernel. Sem aquele campo, cada leitura seguinte pagaria o mesmo
+/// preço, para sempre.
 const VOLTAS_DE_ESPERA: u32 = 5_000_000;
 
 /// Um disco virtio pronto para uso.
@@ -156,10 +169,20 @@ impl Disco {
             return Err("dispositivo de bloco sem filas");
         }
 
-        let capacidade = transporte
+        // O `?` aqui seria o unico caminho de erro desta funcao a sair sem
+        // abortar, e deixaria o dispositivo parado em `DRIVER` — que e
+        // exatamente o estado que `abortar` existe para distinguir de um
+        // driver que travou no meio.
+        let capacidade = match transporte
             .configuracao()
             .and_then(|config: Mmio| config.ler_u64(CONFIG_CAPACIDADE))
-            .ok_or("dispositivo nao publica capacidade")?;
+        {
+            Some(capacidade) => capacidade,
+            None => {
+                transporte.abortar();
+                return Err("dispositivo nao publica capacidade");
+            }
+        };
 
         let fila = match Fila::nova(&transporte, FILA_DE_PEDIDOS) {
             Ok(fila) => fila,
@@ -175,16 +198,20 @@ impl Disco {
         };
         let base = crate::arch::acesso_fisico(trabalho);
 
-        // Só agora: o dispositivo pode começar a trabalhar a partir desta
-        // escrita, e antes dela a fila não existia para ele.
-        transporte.liberar();
-
-        // Ligar a mestria de barramento é o último passo, e é o que de fato
-        // autoriza o dispositivo a ler e escrever na nossa memória. Tudo até
-        // aqui foi conversa por registradores; daqui para frente ele segue
-        // ponteiros. Ver `pci::habilitar_mestre` para por que isso não é feito
-        // na varredura.
+        // A mestria de barramento vem **antes** de liberar o dispositivo, e a
+        // ordem não é indiferente. Ela é o que de fato o autoriza a ler e
+        // escrever na nossa memória: tudo até aqui foi conversa por
+        // registradores, daqui para frente ele segue ponteiros. Liberar
+        // primeiro seria dizer "pode trabalhar" a quem ainda não pode tocar na
+        // fila que acabamos de lhe entregar.
+        //
+        // Ver `pci::habilitar_mestre` para por que isso não é feito na
+        // varredura do barramento.
         crate::pci::habilitar_mestre(d);
+
+        // E só agora o dispositivo pode começar a trabalhar. Antes desta
+        // escrita a fila não existia para ele.
+        transporte.liberar();
 
         Ok(Disco {
             transporte,
