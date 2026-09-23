@@ -132,6 +132,40 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     // kernel pode alocar memória dinâmica.
     if let Err(motivo) = heap::init() {
         log_error!("heap", "nao foi possivel inicializar: {}", motivo);
+
+        // E o boot para aqui, porque tudo daqui para baixo aloca: o
+        // escalonador, cada tarefa, o executor, os drivers de virtio.
+        //
+        // Seguir em frente não era tolerância, era adiar a morte e piorar o
+        // relato. Medido, desligando o heap de propósito: o kernel atravessava
+        // mais vinte linhas de log e morria com
+        //
+        //     panicked at library/alloc/src/alloc.rs:673:9:
+        //     memory allocation of 8 bytes failed
+        //
+        // — uma mensagem que aponta para o primeiro que tentou alocar, e não
+        // para a causa, que passou muito antes e ficou para trás no log.
+        //
+        // O canal do agente não aloca: é o mesmo caminho direto que o modo
+        // post-mortem usa. Dá para parar aqui e continuar respondendo sobre o
+        // que aconteceu, que é infinitamente mais útil que morrer adiante.
+        log_error!(
+            "heap",
+            "tudo daqui para baixo aloca; o kernel para nesta linha"
+        );
+
+        #[cfg(feature = "modo-teste")]
+        qemu::encerrar(qemu::Resultado::Falha);
+
+        // A suíte precisa de heap para existir, então em modo de teste o
+        // desfecho é o código de falha que o CI entende — e não um canal
+        // aberto que ninguém vai consultar.
+        #[cfg(not(feature = "modo-teste"))]
+        if canal_agente {
+            agent::servir()
+        } else {
+            arch::halt_forever()
+        }
     }
 
     match tela::tela() {
