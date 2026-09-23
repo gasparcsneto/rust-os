@@ -245,3 +245,53 @@ significar algo. Um `grep -c` que devolveu zero interrompeu um encadeamento
 `&&`, a mutação nunca chegou ao arquivo, e a suíte passou por não haver nada
 para pegar. Uma conclusão negativa a partir de um experimento que não rodou é
 pior que nenhuma conclusão.
+
+### Injetar pela fronteira, e não pelo código
+
+As mutações acima quebram o kernel por dentro. Há uma segunda família, mais
+fiel, para tudo que o kernel **recebe de fora**: deixar o código intacto e
+corromper a entrada.
+
+Os dois canais por onde entra dado alheio aceitam isso sem recompilar nada:
+
+- **O canal do agente.** Um `socket.connect` no `target/agent-<arch>.sock` e
+  qualquer byte que se queira. Foi assim que apareceu o `id` que saía cru
+  dentro da resposta: nove pedidos malformados, e as respostas conferidas com
+  `json.loads` — o que separa "o kernel respondeu" de "o kernel respondeu
+  algo legível".
+
+- **O device tree, no ARM.** `qemu-system-aarch64 -machine virt,dumpdtb=x.dtb`
+  entrega o blob que a máquina usaria; envenenar um campo de trinta e dois
+  bits e devolvê-lo com `-dtb x.dtb` exercita o leitor com exatamente o que
+  ele veria de um firmware corrompido. Um `nameoff` alterado bastou para o
+  kernel pendurar no boot sem emitir um byte.
+
+A vantagem sobre a mutação de código é que o experimento continua válido
+depois da correção: o mesmo blob, o mesmo pedido, e o que muda é a resposta.
+
+### O arnês também é código
+
+Ver `cargo xtask test` dizer "todos os testes passaram" não é evidência de que
+algo rodou. Antes de confiar numa rodada verde, vale conferir que o arnês
+distingue as duas coisas — encerrando o kernel com sucesso **antes** da suíte,
+ou desligando a máquina por um caminho que não seja o canal de resultado
+(`hvc #0` com `SYSTEM_OFF` no ARM, a porta ACPI `0x604` no x86). Foi assim que
+apareceu o sucesso do ARM valendo `0`, o mesmo código de qualquer saída limpa
+do QEMU.
+
+### Quando a lente não acha nada
+
+Acontece, e o resultado é legítimo — desde que a varredura fique registrada,
+ou a rodada seguinte a refaz do zero. Duas que voltaram limpas:
+
+- **Ordenação de memória.** Cruzar, por variável atômica, as escritas `Release`
+  com as leituras que as consomem: um `Release` lido com `Relaxed` não é par
+  nenhum, e falha só no ARM — metade da CI passa por construção. Atenção ao
+  falso positivo: em `virtio::registrar`, `isr` e `nome` são escritos
+  `Relaxed` de propósito e publicados pelo `Release` de `linha`. O par existe,
+  só não está na mesma variável.
+
+- **Disciplina de travas.** Varrer todo `.lock()` que não tenha
+  `sem_interrupcoes` acima. As sete ocorrências são legítimas: inicialização
+  antes de a interrupção existir, contrato `unsafe` documentado, ou dentro de
+  handler com as interrupções já mascaradas pela entrada de exceção.
