@@ -331,6 +331,14 @@ fn system_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
 
     w.field_u64("uptime_ms", crate::tempo::uptime_ms())?;
     w.field_u64("log_records", crate::log::total_emitidos())?;
+    // Bytes que a porta serial nao conseguiu enviar. Diferente de zero aqui
+    // quer dizer que o que se le do log esta incompleto, e e a unica forma de
+    // saber disso: a espera por espaco na FIFO tem teto — sem ele o kernel
+    // travaria — e o que nao coube dentro do teto e descartado.
+    w.field_u64(
+        "log_bytes_dropped",
+        crate::serial::bytes_de_saida_perdidos(),
+    )?;
 
     // Como um estouro de pilha se manifesta nesta máquina. Serve para
     // correlação: um agente que veja este nome aparecer em `traps.stats`

@@ -218,18 +218,36 @@ impl Uart {
         }
     }
 
-    /// Envia todos os bytes, aguardando espaço na FIFO conforme necessário.
+    /// Envia os bytes, aguardando espaço na FIFO dentro de um orçamento.
+    ///
+    /// Espera ativa enquanto a FIFO de transmissão estiver cheia: sem isso,
+    /// bytes seriam descartados sob carga, e "o log some de vez em quando" é
+    /// uma das falhas mais caras de diagnosticar num kernel.
+    ///
+    /// Mas a espera tem teto, e é preciso que tenha. Sem ele, um cliente que
+    /// conecta no socket e para de ler enche o buffer do hospedeiro, a FIFO
+    /// deixa de drenar, e o kernel gira aqui para sempre — com as interrupções
+    /// mascaradas, porque `serial::_print` as mascara. O que restava do log
+    /// nunca sairia, e nada diria por quê.
+    ///
+    /// Esgotado o orçamento, o resto é descartado e **contado**. Ver
+    /// [`crate::serial::perder_saida`]: um log incompleto que se declara
+    /// incompleto é outra coisa que um log que some.
     pub fn write_bytes(&mut self, bytes: &[u8]) {
         let r = self.regs();
-        for &byte in bytes {
-            // Espera ativa enquanto a FIFO de transmissão estiver cheia. Sem
-            // esta checagem, bytes seriam descartados silenciosamente sob
-            // carga — e "o log some de vez em quando" é uma das falhas mais
-            // caras de diagnosticar num kernel.
+        let mut orcamento = crate::serial::orcamento_de_saida();
+
+        for (enviados, &byte) in bytes.iter().enumerate() {
             while r.fr.is_set(FR::TXFF) {
+                if orcamento == 0 {
+                    crate::serial::perder_saida((bytes.len() - enviados) as u64);
+                    return;
+                }
+                orcamento -= 1;
                 core::hint::spin_loop();
             }
             r.dr.set(byte as u32);
+            crate::serial::saida_fluiu();
         }
     }
 

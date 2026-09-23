@@ -95,9 +95,36 @@ impl Uart {
         }
     }
 
-    /// Envia todos os bytes, aguardando espaço no FIFO conforme necessário.
+    /// Envia os bytes, aguardando espaço no FIFO dentro de um orçamento.
+    ///
+    /// `send_bytes_exact` faria isto em uma linha, e é o que estava aqui — mas
+    /// ele espera sem teto, e um teto é o que separa "o log atrasa" de "o
+    /// kernel trava". Basta um cliente conectar no socket e parar de ler: o
+    /// buffer do hospedeiro enche, o FIFO deixa de drenar, e a espera não
+    /// termina. `send_bytes` devolve quantos couberam, que é o que permite
+    /// desistir.
+    ///
+    /// O que não coube é contado, não sumido — ver
+    /// [`crate::serial::perder_saida`]. A mesma correção do PL011, porque o
+    /// defeito era o mesmo nas duas arquiteturas.
     pub fn write_bytes(&mut self, bytes: &[u8]) {
-        self.0.send_bytes_exact(bytes);
+        let mut restante = bytes;
+        let mut orcamento = crate::serial::orcamento_de_saida();
+
+        while !restante.is_empty() {
+            let enviados = self.0.send_bytes(restante);
+            if enviados > 0 {
+                restante = &restante[enviados..];
+                crate::serial::saida_fluiu();
+                continue;
+            }
+            if orcamento == 0 {
+                crate::serial::perder_saida(restante.len() as u64);
+                return;
+            }
+            orcamento -= 1;
+            core::hint::spin_loop();
+        }
     }
 
     /// Lê um byte se houver algum disponível, sem bloquear.

@@ -26,6 +26,7 @@
 //! é ruído — exatamente o tipo de parsing frágil que este projeto evita.
 
 use core::fmt;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use spin::Mutex;
 
@@ -45,6 +46,84 @@ pub static CONSOLE: Mutex<Option<Uart>> = Mutex::new(None);
 
 /// Canal estruturado do agente (JSON-RPC).
 pub static AGENT_LINK: Mutex<Option<Uart>> = Mutex::new(None);
+
+/// Bytes de saída que não couberam na FIFO dentro do tempo tolerado.
+///
+/// # Por que existe
+///
+/// Porque a alternativa era o kernel travar. A espera por espaço na FIFO era
+/// um laço sem saída: enquanto o outro lado não drenasse, o kernel girava ali
+/// dentro para sempre — com as interrupções mascaradas, porque `_print` as
+/// mascara. Basta um cliente conectar no socket do canal e parar de ler.
+///
+/// O mesmo arquivo do x86 já enunciava a regra, para o laço de leitura: "uma
+/// UART com defeito pode reportar dados disponíveis indefinidamente, e um
+/// laço sem saída aqui travaria o boot". Valia igual para a escrita, e a
+/// escrita não a aplicava — em nenhuma das duas arquiteturas.
+///
+/// Descartar byte de log é ruim; o comentário do PL011 dizia, com razão, que
+/// "o log some de vez em quando" é caro de diagnosticar. O que ele descrevia
+/// era o sumiço **silencioso**, e é isso que este contador desfaz: o log fica
+/// incompleto e diz que ficou, em `system.info`.
+static BYTES_DE_SAIDA_PERDIDOS: AtomicU64 = AtomicU64::new(0);
+
+/// A porta parou de drenar na última tentativa?
+///
+/// # Por que um estado, e não só o teto
+///
+/// Porque o teto sozinho troca um travamento por um rastejo. Medido, com uma
+/// FIFO simulada como permanentemente cheia: o kernel sobrevive, e cada linha
+/// de log passa a custar o orçamento inteiro — dez milhões de voltas, com as
+/// interrupções mascaradas, uma vez por escrita. O kernel não morre e também
+/// não serve para nada.
+///
+/// Com este estado, o orçamento é pago **uma vez**. Depois dele, enquanto a
+/// porta continuar parada, cada escrita desiste na primeira conferência.
+///
+/// A recuperação é automática e não precisa de código: a conferência da FIFO
+/// é a condição do laço, então no instante em que ela abrir espaço o byte sai
+/// e o estado se limpa. Não há retentativa a agendar nem temporizador a
+/// manter.
+static SAIDA_TRAVADA: AtomicBool = AtomicBool::new(false);
+
+/// O orçamento de espera para a próxima escrita.
+///
+/// Zero enquanto a porta estiver dada como parada — ver [`SAIDA_TRAVADA`].
+pub fn orcamento_de_saida() -> u32 {
+    if SAIDA_TRAVADA.load(Ordering::Relaxed) {
+        0
+    } else {
+        VOLTAS_ESPERANDO_A_FIFO
+    }
+}
+
+/// Registra que um byte saiu: a porta está drenando.
+pub fn saida_fluiu() {
+    if SAIDA_TRAVADA.load(Ordering::Relaxed) {
+        SAIDA_TRAVADA.store(false, Ordering::Relaxed);
+    }
+}
+
+/// Contabiliza bytes que a porta não conseguiu enviar.
+pub fn perder_saida(quantos: u64) {
+    SAIDA_TRAVADA.store(true, Ordering::Relaxed);
+    BYTES_DE_SAIDA_PERDIDOS.fetch_add(quantos, Ordering::Relaxed);
+}
+
+/// Quantos bytes de saída se perderam desde o boot.
+pub fn bytes_de_saida_perdidos() -> u64 {
+    BYTES_DE_SAIDA_PERDIDOS.load(Ordering::Relaxed)
+}
+
+/// Quantas voltas esperar por espaço na FIFO antes de desistir do resto.
+///
+/// Orçamento para a chamada inteira, e não por byte: no caminho ruim, um teto
+/// por byte multiplicaria a espera pelo tamanho da mensagem.
+///
+/// Dez milhões é folgado por ordens de grandeza sobre o que uma FIFO leva
+/// para abrir espaço — a 115200 baud, um byte sai em cerca de 87 µs — e é
+/// pequeno o bastante para que um canal parado não pendure o kernel.
+pub const VOLTAS_ESPERANDO_A_FIFO: u32 = 10_000_000;
 
 /// Inicializa as portas. Chame uma vez, o mais cedo possível no boot.
 ///
