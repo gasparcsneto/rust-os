@@ -305,18 +305,18 @@ pub fn init_interrupcoes() {
     crate::log_info!("irq", "PIC remapeado, timer a {} Hz", efetiva);
 }
 
-/// Faz a serial do agente interromper quando chegar um byte.
-///
-/// Fica separada de [`init_interrupcoes`] porque a ordem importa: só faz
-/// sentido liberar a linha depois que existe quem consuma os bytes. Entre
-/// ligar a interrupção e a tarefa começar a rodar, os bytes já vão para a
-/// fila — que é justamente o que queremos.
 /// Não há nada a descobrir: as portas de configuração são da arquitetura.
 ///
 /// Existe para que o caminho de boot seja o mesmo nas duas plataformas — no
 /// ARM esta função lê o device tree para achar o ECAM.
 pub fn init_pci() {}
 
+/// Faz a serial do agente interromper quando chegar um byte.
+///
+/// Fica separada de [`init_interrupcoes`] porque a ordem importa: só faz
+/// sentido liberar a linha depois que existe quem consuma os bytes. Entre
+/// ligar a interrupção e a tarefa começar a rodar, os bytes já vão para a
+/// fila — que é justamente o que queremos.
 pub fn init_interrupcao_serial() {
     // Antes de ligar a recepção: o FIFO pode ter um pedaço de requisição de
     // quem conectou enquanto o kernel ainda bootava. Ver
