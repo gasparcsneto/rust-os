@@ -69,18 +69,51 @@ unsafe fn be32(base: *const u8, offset: usize) -> u32 {
     u32::from_be(valor)
 }
 
-/// Devolve a string terminada em nulo no deslocamento indicado.
+/// Tamanho do cabeçalho do FDT, em bytes.
+///
+/// Os dez campos de 32 bits da versão 17 do formato. Nada abaixo disso é um
+/// device tree, e é o mínimo que precisa existir para que se possa ler o
+/// `totalsize` que limita todo o resto.
+const TAMANHO_DO_CABECALHO: usize = 40;
+
+/// Lê um `u32` big-endian, ou nada se ele não couber inteiro no blob.
 ///
 /// # Safety
-/// `base + offset` precisa apontar para uma string válida dentro do blob.
-unsafe fn cstr<'a>(base: *const u8, offset: usize) -> &'a [u8] {
+/// `base` precisa apontar para um blob de ao menos `fim` bytes.
+unsafe fn be32_ate(base: *const u8, offset: usize, fim: usize) -> Option<u32> {
+    if offset.checked_add(4)? > fim {
+        return None;
+    }
+    // SAFETY: a soma acima confere que os quatro bytes estão no blob.
+    Some(unsafe { be32(base, offset) })
+}
+
+/// Devolve a string terminada em nulo em `offset`, sem passar de `fim`.
+///
+/// A versão sem teto que existia aqui varria a memória até encontrar um zero.
+/// Com um `nameoff` vindo do blob — que é o caso de toda propriedade — isso
+/// era uma leitura de comprimento arbitrário a partir de um endereço
+/// arbitrário: um device tree com esse campo corrompido pendurava o kernel no
+/// boot, antes de haver canal do agente para contar o motivo.
+///
+/// # Safety
+/// `base` precisa apontar para um blob de ao menos `fim` bytes.
+unsafe fn cstr_ate<'a>(base: *const u8, offset: usize, fim: usize) -> Option<&'a [u8]> {
+    if offset >= fim {
+        return None;
+    }
     let inicio = unsafe { base.add(offset) };
     let mut n = 0;
-    // SAFETY: o formato garante terminação em nulo dentro do blob.
-    while unsafe { *inicio.add(n) } != 0 {
+    while offset + n < fim {
+        // SAFETY: a condição do laço mantém `offset + n` dentro do blob.
+        if unsafe { *inicio.add(n) } == 0 {
+            // SAFETY: os `n` bytes lidos estão todos dentro do blob.
+            return Some(unsafe { core::slice::from_raw_parts(inicio, n) });
+        }
         n += 1;
     }
-    unsafe { core::slice::from_raw_parts(inicio, n) }
+    // Uma string que chega ao fim do blob sem terminador não é uma string.
+    None
 }
 
 /// Se uma propriedade tem ao menos uma célula de conteúdo.
@@ -154,6 +187,14 @@ pub struct Propriedade<'a> {
     /// Nome da propriedade.
     pub nome: &'a [u8],
     /// Deslocamento dos dados dentro do blob.
+    ///
+    /// # A garantia de que os consumidores dependem
+    ///
+    /// O percurso só emite uma `Propriedade` depois de conferir que a faixa
+    /// `dados..dados + tamanho` cabe inteira no `totalsize` declarado no
+    /// cabeçalho. É o que permite a quem lê aqui dentro tratar `tamanho` como
+    /// o único limite a respeitar — e é por isso que cada consumidor confere
+    /// só isso antes de ler.
     pub dados: usize,
     /// Tamanho dos dados, em bytes.
     pub tamanho: usize,
@@ -189,8 +230,26 @@ unsafe fn percorrer(dtb: *const u8, mut f: impl FnMut(&Propriedade)) -> Result<(
         return Err("assinatura de device tree invalida");
     }
 
+    // O `totalsize` do cabeçalho é o único limite que existe para este blob, e
+    // até aqui ninguém o lia. Sem ele, todos os deslocamentos abaixo — que vêm
+    // de dentro do próprio blob — eram obedecidos sem conferência: um
+    // `nameoff` corrompido mandava a leitura do nome para qualquer lugar da
+    // memória, e um `len` corrompido fazia o percurso pular para fora do blob.
+    //
+    // Vale reparar que este arquivo já dizia depender desta garantia: quatro
+    // comentários `SAFETY` mais abaixo afirmam que "o percurso garantiu que a
+    // faixa está dentro do blob". Os consumidores estavam certos em confiar; o
+    // percurso é que não cumpria. É esta leitura que passa a cumprir.
+    let fim = unsafe { be32(dtb, 4) } as usize;
+    if fim < TAMANHO_DO_CABECALHO {
+        return Err("device tree menor que o proprio cabecalho");
+    }
+
     let off_struct = unsafe { be32(dtb, 8) } as usize;
     let off_strings = unsafe { be32(dtb, 12) } as usize;
+    if off_struct >= fim || off_strings >= fim {
+        return Err("bloco declarado fora do device tree");
+    }
 
     let mut pos = off_struct;
     let mut profundidade = 0usize;
@@ -205,12 +264,15 @@ unsafe fn percorrer(dtb: *const u8, mut f: impl FnMut(&Propriedade)) -> Result<(
     let mut no_seq = 0u32;
 
     loop {
-        let token = unsafe { be32(dtb, pos) };
+        // Todo ramo do `match` avança `pos` em ao menos quatro bytes, e `pos`
+        // não pode passar de `fim`: é o que faz este laço terminar mesmo com
+        // um blob que não traga `FDT_END`.
+        let token = unsafe { be32_ate(dtb, pos, fim) }.ok_or("percurso passou do fim do blob")?;
         pos += 4;
 
         match token {
             FDT_BEGIN_NODE => {
-                let nome = unsafe { cstr(dtb, pos) };
+                let nome = unsafe { cstr_ate(dtb, pos, fim) }.ok_or("nome de no sem terminador")?;
                 pos += alinhar4(nome.len() + 1);
                 profundidade += 1;
                 no_seq = no_seq.wrapping_add(1);
@@ -230,13 +292,31 @@ unsafe fn percorrer(dtb: *const u8, mut f: impl FnMut(&Propriedade)) -> Result<(
             }
 
             FDT_PROP => {
-                let tamanho = unsafe { be32(dtb, pos) } as usize;
+                let tamanho =
+                    unsafe { be32_ate(dtb, pos, fim) }.ok_or("propriedade sem tamanho")? as usize;
                 pos += 4;
-                let nome_off = unsafe { be32(dtb, pos) } as usize;
+                let nome_off =
+                    unsafe { be32_ate(dtb, pos, fim) }.ok_or("propriedade sem nome")? as usize;
                 pos += 4;
 
-                let nome = unsafe { cstr(dtb, off_strings + nome_off) };
+                // Soma conferida: os dois lados vêm do blob e podem ser
+                // qualquer coisa até `u32::MAX`.
+                let nome_em = off_strings
+                    .checked_add(nome_off)
+                    .ok_or("deslocamento de nome transborda")?;
+                let nome = unsafe { cstr_ate(dtb, nome_em, fim) }
+                    .ok_or("nome de propriedade fora do blob")?;
+
                 let dados = pos;
+                // Esta é a conferência de que todos os consumidores dependem:
+                // quem receber esta `Propriedade` pode ler `dados` até
+                // `dados + tamanho` sem sair do device tree.
+                let fim_dos_dados = dados
+                    .checked_add(tamanho)
+                    .ok_or("tamanho de propriedade transborda")?;
+                if fim_dos_dados > fim {
+                    return Err("propriedade passa do fim do device tree");
+                }
 
                 // As larguras da raiz precisam ser lidas antes de qualquer
                 // filho usá-las, e são: a raiz é o primeiro nó do blob.

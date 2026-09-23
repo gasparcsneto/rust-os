@@ -808,6 +808,102 @@ fn montar_dtb(destino: &mut [u8; 256], address_cells: u32, size_cells: u32) -> u
     total
 }
 
+/// Todo deslocamento do blob é conferido contra o tamanho que ele declara.
+///
+/// # O que estava solto
+///
+/// O percurso nunca lia o `totalsize` do cabeçalho — o único limite que um
+/// device tree tem. Os deslocamentos que ele obedecia (`off_struct`,
+/// `off_strings`, o `nameoff` de cada propriedade, o `len` de cada uma) vêm
+/// todos de dentro do próprio blob, e eram seguidos sem conferência nenhuma.
+///
+/// Um `nameoff` corrompido mandava a busca do nome para um endereço arbitrário
+/// e varria a memória de lá até encontrar um zero. Com um device tree assim, o
+/// kernel pendurava no boot sem emitir um byte — antes de existir canal do
+/// agente para contar o motivo.
+///
+/// Cada caso abaixo envenena **um** campo de trinta e dois bits de um blob que
+/// de resto é válido, e exige duas coisas: que o leitor recuse, e que não
+/// entregue região nenhuma ao alocador.
+fn fdt_confere_deslocamentos_contra_o_tamanho_declarado() -> Resultado {
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        crate::log_info!("teste", "o leitor de device tree so existe no aarch64");
+        Ok(())
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        use crate::arch::aarch64::fdt;
+
+        // Deslocamentos do blob que `montar_dtb` produz: o cabeçalho é fixo
+        // pelo formato, e a primeira propriedade é a primeira coisa que o
+        // construtor escreve depois da raiz sem nome.
+        const TOTALSIZE: usize = 4;
+        const OFF_STRUCT: usize = 8;
+        const OFF_STRINGS: usize = 12;
+        const TAMANHO_DA_1A_PROP: usize = 76;
+        const NAMEOFF_DA_1A_PROP: usize = 80;
+        // O `reg` do nó `memory`: a única propriedade deste blob que um
+        // consumidor de fato lê. É por ela que a conferência de faixa se
+        // demonstra — as outras o percurso recusa sozinho ao seguir adiante,
+        // mas quem lê `reg` nunca volta ao percurso para ser salvo por ele.
+        const TAMANHO_DO_REG: usize = 124;
+
+        const LONGE: u32 = 0xFFF0_0000;
+
+        let envenenados: &[(&str, usize, u32)] = &[
+            ("len do reg consumido alem do fim", TAMANHO_DO_REG, LONGE),
+            ("nameoff apontando para fora", NAMEOFF_DA_1A_PROP, LONGE),
+            ("len de propriedade alem do fim", TAMANHO_DA_1A_PROP, LONGE),
+            ("bloco de estrutura fora do blob", OFF_STRUCT, LONGE),
+            ("bloco de strings fora do blob", OFF_STRINGS, LONGE),
+            ("totalsize menor que o cabecalho", TOTALSIZE, 8),
+        ];
+
+        for (o_que, onde, valor) in envenenados {
+            let mut blob = [0u8; 256];
+            montar_dtb(&mut blob, 2, 1);
+            blob[*onde..*onde + 4].copy_from_slice(&valor.to_be_bytes());
+
+            let mut entregues = 0;
+            // SAFETY: o blob está neste quadro de pilha e traz a assinatura;
+            // o que se afirma é justamente que o leitor não confia no resto.
+            let r = unsafe { fdt::percorrer_memoria(blob.as_ptr(), |_, _| entregues += 1) };
+
+            if r.is_ok() {
+                crate::log_error!("teste", "aceitou: {}", o_que);
+                return Err("o leitor aceitou um deslocamento fora do blob");
+            }
+            if entregues != 0 {
+                crate::log_error!("teste", "inventou regiao com: {}", o_que);
+                return Err("o leitor entregou regiao a partir de um blob corrompido");
+            }
+        }
+
+        // E um blob sem `FDT_END`: trocando o token final por um `NOP`, o
+        // percurso não tem mais onde parar por conta própria. O que o faz
+        // parar é o teto — sem ele, a varredura seguia pela memória adiante.
+        let mut sem_fim = [0u8; 256];
+        montar_dtb(&mut sem_fim, 2, 1);
+        let off_strings = u32::from_be_bytes([
+            sem_fim[OFF_STRINGS],
+            sem_fim[OFF_STRINGS + 1],
+            sem_fim[OFF_STRINGS + 2],
+            sem_fim[OFF_STRINGS + 3],
+        ]) as usize;
+        sem_fim[off_strings - 4..off_strings].copy_from_slice(&4u32.to_be_bytes());
+
+        // SAFETY: mesma justificativa.
+        let r = unsafe { fdt::percorrer_memoria(sem_fim.as_ptr(), |_, _| {}) };
+        if r.is_ok() {
+            return Err("o leitor chegou ao fim de um blob sem FDT_END sem reclamar");
+        }
+
+        Ok(())
+    }
+}
+
 /// O leitor entende um blob bem formado e não morre com um malformado.
 ///
 /// # O que o caso hostil exercita
@@ -3796,6 +3892,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "fdt: le o blob normal e resiste ao hostil",
         f: fdt_le_o_normal_e_resiste_ao_hostil,
+    },
+    Caso {
+        nome: "fdt: confere deslocamentos contra o tamanho declarado",
+        f: fdt_confere_deslocamentos_contra_o_tamanho_declarado,
     },
     Caso {
         nome: "tela: cada formato volta como foi escrito",
