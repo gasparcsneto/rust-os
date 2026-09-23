@@ -426,6 +426,24 @@ impl Transporte {
     }
 
     /// A configuração específica do tipo de dispositivo, se houver.
+    ///
+    /// # O que falta aqui, e por que não custa nada hoje
+    ///
+    /// A especificação manda ler `config_generation` — o byte em `0x15` da
+    /// configuração comum — antes e depois de ler um campo de vários bytes, e
+    /// repetir a leitura se os dois valores diferirem. É o que protege contra
+    /// o dispositivo mudar a configuração no meio da leitura e o driver montar
+    /// um valor que nunca existiu, metade velha e metade nova.
+    ///
+    /// Este kernel não faz isso. Os dois campos que ele lê são a capacidade do
+    /// disco e o endereço da placa, ambos uma vez só na construção, e nenhum
+    /// dos dois muda num dispositivo do QEMU — a capacidade mudaria num disco
+    /// redimensionado a quente, que é justamente o caso que não existe aqui.
+    ///
+    /// Fica registrado porque é o tipo de coisa que está certa por acidente do
+    /// ambiente, e não por construção: no dia em que houver redimensionamento
+    /// a quente, a leitura da capacidade passa a precisar do laço, e quem for
+    /// escrevê-lo não vai adivinhar sozinho que ele faltava.
     pub fn configuracao(&self) -> Option<Mmio> {
         self.do_dispositivo
     }
