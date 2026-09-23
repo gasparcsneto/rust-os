@@ -226,11 +226,18 @@ com nome — a do alocador mata o kernel antes da suíte rodar, e o que se vê �
 o modo post-mortem respondendo.
 
 A quinta não foi. Removendo as três barreiras de memória de
-`virtio::fila`, os noventa e oito casos passam. A reordenação contra a qual
+`virtio::fila`, os casos todos passam. A reordenação contra a qual
 elas defendem não acontece num emulador coerente de um núcleo só, e nenhum
 caso possível a produziria. A resposta não foi inventar um teste: foi
 escrever a lacuna no comentário da própria linha, onde quem for apagá-la vai
 ler.
+
+O mesmo vale para a ordem de publicação do registro de interrupção de
+`virtio`: invertendo os dois passos de volta, a suíte passa inteira, porque a
+janela dura duas instruções e nenhum caso consegue cair dentro dela. As duas
+lacunas estão escritas no comentário da linha que as contém — é a única
+defesa que sobra quando a suíte não é uma, e vale escrevê-la **na correção**,
+enquanto a medição ainda está fresca.
 
 E uma armadilha de método, porque ela quase produziu um achado falso: a
 mutação precisa ser **confirmada aplicada** antes de a ausência de falhas

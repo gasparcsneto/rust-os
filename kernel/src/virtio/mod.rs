@@ -236,6 +236,21 @@ fn registrar(linha: u32, isr: Option<u64>, nome: u32) -> bool {
         // As duas escritas abaixo podem ser `Relaxed`: quem as ordena é a
         // publicação da linha, que é `Release`, e o handler lê a linha com
         // `Acquire`. É o par que torna a ordem observável do outro lado.
+        //
+        // # Nenhum teste protege esta ordem, e isso foi medido
+        //
+        // Invertendo os dois passos de volta — publicar a linha na própria
+        // troca e escrever o ISR depois —, a suíte inteira passa. Não é falha
+        // dos casos: a janela dura duas instruções, e para atravessá-la seria
+        // preciso uma interrupção caindo exatamente entre elas, o que nenhum
+        // caso consegue provocar. O que se conseguiu foi uma sonda dentro da
+        // janela, que mostrou o estado publicado — `linha = 11, isr = 0` — e
+        // essa sonda não é um teste, é uma medição que se faz uma vez.
+        //
+        // É a segunda garantia deste diretório nessa condição; a outra é a
+        // barreira de memória de `fila.rs`, e pelo mesmo tipo de razão. As
+        // duas estão escritas onde quem for mexer vai ler, porque é a única
+        // defesa que sobra quando a suíte não é uma.
         registro.isr.store(isr.unwrap_or(0), Ordering::Relaxed);
         registro.nome.store(nome, Ordering::Relaxed);
         registro.linha.store(linha, Ordering::Release);
