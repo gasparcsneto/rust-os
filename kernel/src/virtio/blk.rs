@@ -295,7 +295,16 @@ impl Disco {
         }
 
         let cabeca = self.fila.submeter(&[
-            (self.trabalho + CABECALHO_EM, DADOS_EM as u32, false),
+            // O comprimento do cabeçalho é o tamanho dele, e não o
+            // deslocamento do que vem depois. Os dois números são iguais
+            // enquanto o cabeçalho começar em zero — a asserção de compilação
+            // lá em cima diz exatamente isso —, e escrever o deslocamento
+            // aqui seria depender dessa coincidência sem dizer que depende.
+            (
+                self.trabalho + CABECALHO_EM,
+                core::mem::size_of::<Cabecalho>() as u32,
+                false,
+            ),
             (self.trabalho + DADOS_EM, TAMANHO_DO_SETOR as u32, true),
             (self.trabalho + ESTADO_EM, 1, true),
         ])?;
