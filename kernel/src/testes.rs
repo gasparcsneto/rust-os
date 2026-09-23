@@ -625,6 +625,162 @@ fn timer_exatamente_um_relogio_avanca() -> Resultado {
 }
 
 // ===========================================================================
+// O leitor de device tree
+// ===========================================================================
+
+/// Monta um device tree mínimo, com as larguras de célula que se pedir.
+///
+/// # Por que um blob sintético
+///
+/// Porque o leitor de device tree interpreta o dado mais externo que este
+/// kernel recebe — um blob que o firmware depositou na RAM — e até aqui ele
+/// só tinha sido exercitado contra o blob que o QEMU produz. Um parser
+/// testado só com entrada bem formada é um parser testado pela metade.
+///
+/// Montar o blob aqui é o que permite escrever a entrada **errada** de
+/// propósito, que é a metade que faltava.
+#[cfg(target_arch = "aarch64")]
+fn montar_dtb(destino: &mut [u8; 256], address_cells: u32, size_cells: u32) -> usize {
+    /// Os nomes das propriedades, num bloco só, referenciados por
+    /// deslocamento — é assim que o formato os guarda.
+    const STRINGS: &[u8] = b"#address-cells\0#size-cells\0reg\0";
+    const OFF_ADDRESS_CELLS: u32 = 0;
+    const OFF_SIZE_CELLS: u32 = 15;
+    const OFF_REG: u32 = 27;
+
+    const OFF_STRUCT: usize = 64;
+
+    let mut n = OFF_STRUCT;
+    let palavra = |destino: &mut [u8; 256], n: &mut usize, valor: u32| {
+        destino[*n..*n + 4].copy_from_slice(&valor.to_be_bytes());
+        *n += 4;
+    };
+
+    // A raiz, sem nome: um byte nulo preenchido até a fronteira de quatro.
+    palavra(destino, &mut n, 1); // BEGIN_NODE
+    palavra(destino, &mut n, 0); // nome vazio, já alinhado
+
+    palavra(destino, &mut n, 3); // PROP
+    palavra(destino, &mut n, 4); // tamanho
+    palavra(destino, &mut n, OFF_ADDRESS_CELLS);
+    palavra(destino, &mut n, address_cells);
+
+    palavra(destino, &mut n, 3);
+    palavra(destino, &mut n, 4);
+    palavra(destino, &mut n, OFF_SIZE_CELLS);
+    palavra(destino, &mut n, size_cells);
+
+    // `memory@0`, filho direto da raiz.
+    palavra(destino, &mut n, 1); // BEGIN_NODE
+    destino[n..n + 12].copy_from_slice(b"memory@0\0\0\0\0");
+    n += 12;
+
+    // `reg` com doze bytes: dois de endereço e um de tamanho, que é o que um
+    // blob com `#address-cells = 2` e `#size-cells = 1` declara.
+    palavra(destino, &mut n, 3); // PROP
+    palavra(destino, &mut n, 12);
+    palavra(destino, &mut n, OFF_REG);
+    palavra(destino, &mut n, 0x0000_0000); // endereço, palavra alta
+    palavra(destino, &mut n, 0x4000_0000); // endereço, palavra baixa
+    palavra(destino, &mut n, 0x0800_0000); // tamanho
+
+    palavra(destino, &mut n, 2); // END_NODE de memory
+    palavra(destino, &mut n, 2); // END_NODE da raiz
+    palavra(destino, &mut n, 9); // END
+
+    let tamanho_struct = n - OFF_STRUCT;
+    let off_strings = n;
+    destino[off_strings..off_strings + STRINGS.len()].copy_from_slice(STRINGS);
+    let total = off_strings + STRINGS.len();
+
+    // O cabeçalho, agora que os tamanhos são conhecidos.
+    let mut cabecalho = 0usize;
+    for valor in [
+        0xd00d_feed,           // magic
+        total as u32,          // tamanho total
+        OFF_STRUCT as u32,     // onde o bloco de estrutura começa
+        off_strings as u32,    // onde o bloco de strings começa
+        0,                     // mapa de reservas: vazio
+        17,                    // versão
+        16,                    // última versão compatível
+        0,                     // cpu de boot
+        STRINGS.len() as u32,  // tamanho do bloco de strings
+        tamanho_struct as u32, // tamanho do bloco de estrutura
+    ] {
+        destino[cabecalho..cabecalho + 4].copy_from_slice(&valor.to_be_bytes());
+        cabecalho += 4;
+    }
+
+    total
+}
+
+/// O leitor entende um blob bem formado e não morre com um malformado.
+///
+/// # O que o caso hostil exercita
+///
+/// As larguras de célula vêm **do blob**, e alimentam a aritmética que decide
+/// quantos bytes cada entrada ocupa. Antes do teto em `MAX_CELULAS`, um blob
+/// que declarasse `0xFFFF_FFFF` fazia `address_cells + size_cells`
+/// transbordar a soma de 32 bits: pânico num build de depuração, e uma
+/// largura pequena e falsa num de release — que levaria o leitor a
+/// interpretar lixo como endereços de RAM e a entregá-los ao alocador.
+fn fdt_le_o_normal_e_resiste_ao_hostil() -> Resultado {
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        crate::log_info!("teste", "o leitor de device tree so existe no aarch64");
+        Ok(())
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        use crate::arch::aarch64::fdt;
+
+        // O blob bem formado: uma região de 128 MiB em 0x4000_0000.
+        let mut blob = [0u8; 256];
+        montar_dtb(&mut blob, 2, 1);
+
+        let mut achadas = 0;
+        let mut regiao = (0u64, 0u64);
+        // SAFETY: o blob acabou de ser montado neste quadro de pilha, com a
+        // assinatura e os deslocamentos que o formato exige.
+        let r = unsafe {
+            fdt::percorrer_memoria(blob.as_ptr(), |inicio, tamanho| {
+                achadas += 1;
+                regiao = (inicio, tamanho);
+            })
+        };
+        if r.is_err() {
+            return Err("o leitor recusou um blob bem formado");
+        }
+        if achadas != 1 {
+            return Err("o leitor nao achou a regiao de memoria do blob");
+        }
+        if regiao != (0x4000_0000, 0x0800_0000) {
+            crate::log_error!("teste", "veio {:#x}+{:#x}", regiao.0, regiao.1);
+            return Err("a regiao lida nao e a que o blob declara");
+        }
+
+        // E o hostil: larguras absurdas nas duas declarações. O que se afirma
+        // é que o leitor volta — sem pânico e sem inventar região.
+        let mut hostil = [0u8; 256];
+        montar_dtb(&mut hostil, u32::MAX, u32::MAX);
+
+        let mut inventadas = 0;
+        // SAFETY: mesma justificativa.
+        let _ = unsafe {
+            fdt::percorrer_memoria(hostil.as_ptr(), |_, _| {
+                inventadas += 1;
+            })
+        };
+        if inventadas != 0 {
+            return Err("o leitor inventou regiao a partir de larguras absurdas");
+        }
+
+        Ok(())
+    }
+}
+
+// ===========================================================================
 // A tela
 // ===========================================================================
 
@@ -3324,6 +3480,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "timer: exatamente um relogio avanca",
         f: timer_exatamente_um_relogio_avanca,
+    },
+    Caso {
+        nome: "fdt: le o blob normal e resiste ao hostil",
+        f: fdt_le_o_normal_e_resiste_ao_hostil,
     },
     Caso {
         nome: "tela: cada formato volta como foi escrito",
