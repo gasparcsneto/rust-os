@@ -249,10 +249,29 @@ fn banner() {
 /// ser a única evidência disponível de por que a máquina morreu.
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
+    // Destravar antes de escrever, exatamente como [`traps::fatal`] faz — e
+    // pela mesma razão, que este handler documentava e não aplicava por
+    // inteiro.
+    //
+    // Evitar o `log` cobria uma das duas travas do caminho de saída. A outra
+    // é a da própria serial, e um pânico que tenha acontecido com ela na mão
+    // — formatando um argumento, por exemplo, que é trabalho feito *dentro*
+    // do bloqueio — giraria para sempre em `serial_println!`. O sintoma seria
+    // o pior possível: um kernel travado sem uma linha de explicação, que é o
+    // oposto do que um handler de pânico existe para dar.
+    //
+    // SAFETY: o kernel já está em falha irrecuperável, não há outro núcleo
+    // rodando, e a alternativa é o deadlock.
+    unsafe { serial::destravar() };
+
+    // E para o escalonador, também como no caminho de falha fatal: sem isto o
+    // timer continuaria trocando de fio enquanto a mensagem é impressa, e os
+    // outros fios rodariam por cima de um estado que já se sabe ruim.
+    fios::congelar();
+
     // Escrevemos direto na serial, sem passar pelo `log`: o caminho de log
     // pega o lock do ring buffer, e se o pânico veio de dentro de uma seção
     // que já o segurava, tentaríamos um lock não reentrante e travaríamos.
-    // Perder a mensagem de pânico num deadlock é o pior desfecho possível.
     serial_println!();
     serial_println!("!!! PANICO NO KERNEL !!!");
     serial_println!("{}", info);
