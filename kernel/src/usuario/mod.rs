@@ -419,13 +419,28 @@ unsafe fn executar(quadro: *mut core::ffi::c_void, ponteiro: u64, tamanho: u64) 
         return erro::PROGRAMA_DESCONHECIDO;
     };
 
-    // A partir daqui o espaço de endereços antigo deixa de existir.
     let novo = match programa::carregar(imagem) {
         Ok(programa) => programa,
-        Err(motivo) => {
-            // Sem imagem e sem a anterior: não há para onde voltar. Encerrar é
-            // o único desfecho honesto, e é o que um `execve` que falha depois
-            // do ponto de não retorno faz em qualquer sistema.
+
+        // Falhou antes do ponto de não retorno: o processo que chamou está
+        // inteiro — a imagem dele mapeada, a pilha no lugar — e devolver um
+        // erro é o que um `execve` faz quando recusa o arquivo.
+        //
+        // Esta distinção não existia, e o tratamento era o do pior caso para
+        // os dois: qualquer falha matava o processo. Uma imagem malformada ou
+        // uma falta momentânea de memória em `Espaco::novo`, as duas
+        // recuperáveis, custavam o processo inteiro por uma premissa — "sem a
+        // anterior" — que só vale do outro lado da troca.
+        Err(programa::Falha::ProcessoIntacto(motivo)) => {
+            crate::log_warn!("usuario", "executar recusado: {}", motivo);
+            RECUSADAS.fetch_add(1, Ordering::Relaxed);
+            return erro::SEM_MEMORIA;
+        }
+
+        // Aqui sim: sem imagem e sem a anterior, não há para onde voltar.
+        // Encerrar é o único desfecho honesto, e é o que um `execve` que falha
+        // depois do ponto de não retorno faz em qualquer sistema.
+        Err(programa::Falha::SemVolta(motivo)) => {
             crate::log_error!("usuario", "executar falhou depois de trocar: {}", motivo);
             RECUSADAS.fetch_add(1, Ordering::Relaxed);
             return sair(erro::SEM_MEMORIA);
@@ -450,11 +465,11 @@ pub fn lancar_exemplo() -> Result<u64, &'static str> {
     extern "C" fn hospedar(_argumento: u64) -> ! {
         match programa::executar(exemplo::bytes()) {
             Ok(_) => unreachable!("executar nao retorna em caso de sucesso"),
-            Err(motivo) => {
+            Err(falha) => {
                 crate::log_error!(
                     "usuario",
                     "nao foi possivel entrar em userspace: {}",
-                    motivo
+                    falha.motivo()
                 );
                 crate::fios::terminar()
             }

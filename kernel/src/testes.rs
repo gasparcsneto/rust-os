@@ -1004,6 +1004,47 @@ fn sem_framebuffer() -> Resultado {
     Ok(())
 }
 
+/// Uma imagem que o validador recusa não custa o espaço de quem chamou.
+///
+/// # O que este caso protege
+///
+/// `carregar` tem um ponto de não retorno — a troca do espaço de endereços —
+/// e falha dos dois lados dele. Depois da troca não há para onde voltar, e
+/// encerrar o processo é o desfecho certo. Antes, o processo que chamou está
+/// inteiro: imagem mapeada, pilha no lugar.
+///
+/// Os dois casos eram tratados como um, com o tratamento do pior deles:
+/// qualquer falha matava o processo. Uma imagem malformada e uma falta
+/// momentânea de memória em `Espaco::novo`, as duas antes da troca e as duas
+/// recuperáveis, custavam o processo inteiro.
+///
+/// A conferência do espaço é o que torna este caso mais que um teste de
+/// classificação: se `carregar` tivesse trocado, a raiz teria mudado.
+fn usuario_imagem_recusada_nao_custa_o_espaco() -> Resultado {
+    use crate::usuario::programa::Falha;
+
+    let antes = crate::arch::espaco_atual();
+
+    // Oito bytes não são um cabeçalho ELF, e é a primeira conferência do
+    // validador que os recusa — bem antes de qualquer mapeamento.
+    let resultado = crate::usuario::programa::carregar(&[0u8; 8]);
+
+    let depois = crate::arch::espaco_atual();
+    if depois != antes {
+        crate::log_error!("teste", "raiz {:#x} virou {:#x}", antes, depois);
+        return Err("a carga recusada trocou o espaco de enderecos");
+    }
+
+    match resultado {
+        Ok(_) => Err("oito bytes foram aceitos como um ELF"),
+        Err(Falha::SemVolta(motivo)) => {
+            crate::log_error!("teste", "classificada como sem volta: {}", motivo);
+            Err("uma falha antes da troca foi classificada como sem volta")
+        }
+        Err(Falha::ProcessoIntacto(_)) => Ok(()),
+    }
+}
+
 /// O banner do boot está desenhado no framebuffer da máquina.
 ///
 /// # O que este caso acrescenta aos anteriores
@@ -2360,8 +2401,12 @@ fn usuario_executa_bifurca_e_troca_de_imagem() -> Resultado {
         COMECOU.store(true, SeqCst);
         match crate::usuario::programa::executar(crate::usuario::exemplo::bytes()) {
             Ok(_) => unreachable!("executar nao retorna em caso de sucesso"),
-            Err(motivo) => {
-                crate::log_error!("teste", "nao foi possivel entrar em userspace: {}", motivo);
+            Err(falha) => {
+                crate::log_error!(
+                    "teste",
+                    "nao foi possivel entrar em userspace: {}",
+                    falha.motivo()
+                );
                 crate::fios::terminar()
             }
         }
@@ -3249,7 +3294,8 @@ fn usuario_dois_processos_coexistem() -> Resultado {
     /// Só pode rodar num fio criado por `fios::criar`, porque `carregar`
     /// instala um espaço de endereços no fio corrente.
     unsafe fn marcar(marca: u64) -> Result<(), &'static str> {
-        let programa = crate::usuario::programa::carregar(crate::usuario::exemplo::bytes())?;
+        let programa = crate::usuario::programa::carregar(crate::usuario::exemplo::bytes())
+            .map_err(|falha| falha.motivo())?;
 
         // O topo da pilha do processo: mapeado por `carregar`, e no mesmo
         // endereço virtual para os dois — que é o ponto do teste.
@@ -3338,8 +3384,12 @@ fn usuario_nao_alcanca_o_kernel() -> Resultado {
         COMECOU.store(true, SeqCst);
         match crate::usuario::programa::executar(crate::usuario::exemplo::bytes_invasores()) {
             Ok(_) => unreachable!("executar nao retorna em caso de sucesso"),
-            Err(motivo) => {
-                crate::log_error!("teste", "nao foi possivel entrar em userspace: {}", motivo);
+            Err(falha) => {
+                crate::log_error!(
+                    "teste",
+                    "nao foi possivel entrar em userspace: {}",
+                    falha.motivo()
+                );
                 crate::fios::terminar()
             }
         }
@@ -3782,6 +3832,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "usuario: nao alcanca o kernel",
         f: usuario_nao_alcanca_o_kernel,
+    },
+    Caso {
+        nome: "usuario: imagem recusada nao custa o espaco",
+        f: usuario_imagem_recusada_nao_custa_o_espaco,
     },
 ];
 
