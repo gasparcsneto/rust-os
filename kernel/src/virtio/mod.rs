@@ -82,6 +82,11 @@ struct Registro {
     /// dispositivo, ou zero se ele não publicou um.
     isr: AtomicU64,
     /// Quantas vezes este dispositivo interrompeu.
+    ///
+    /// **Este**, e não "a linha dele". A distinção nasceu de olhar o
+    /// relatório: no x86 o disco e a rede caem os dois na IRQ 11, e uma versão
+    /// anterior contava uma entrega para os dois, sempre. O número existia,
+    /// era plausível, e não respondia a pergunta que o nome dele fazia.
     avisos: AtomicU64,
     /// Um nome para o relatório do agente.
     nome: AtomicU32,
@@ -143,7 +148,12 @@ fn ligar_interrupcao(d: &crate::pci::Dispositivo, transporte: &transporte::Trans
         return;
     }
 
-    crate::irq::nomear(linha as usize, nome_de(nome));
+    // A linha recebe um nome genérico, e não o do dispositivo. Dois
+    // dispositivos na mesma linha se sobrescreveriam, e o relatório mostraria
+    // a IRQ 11 chamada de "rede" só porque a rede foi registrada por último.
+    // Qual dos dois interrompeu está nos contadores por dispositivo, que é
+    // onde a pergunta tem resposta.
+    crate::irq::nomear(linha as usize, "virtio-pci");
 
     // SAFETY: o registro acima garante que há quem reconheça a interrupção no
     // dispositivo, que é a pré-condição de liberar a linha.
@@ -207,14 +217,24 @@ pub fn atender_interrupcao(linha: u32) {
         }
 
         let isr = registro.isr.load(Ordering::Acquire);
-        if isr != 0 {
-            // SAFETY: o endereço foi registrado por um driver a partir de uma
-            // região que `mmio::mapear` mapeou como memória de dispositivo, e
-            // continua mapeada porque nada neste kernel desmapeia MMIO.
-            let _ = unsafe { core::ptr::read_volatile(isr as *const u8) };
+        if isr == 0 {
+            // Sem registrador de estado não há como saber se foi ele, nem como
+            // fazê-lo soltar a linha. Contar seria inventar.
+            continue;
         }
 
-        registro.avisos.fetch_add(1, Ordering::Relaxed);
+        // SAFETY: o endereço foi registrado por um driver a partir de uma
+        // região que `mmio::mapear` mapeou como memória de dispositivo, e
+        // continua mapeada porque nada neste kernel desmapeia MMIO.
+        let estado = unsafe { core::ptr::read_volatile(isr as *const u8) };
+
+        // A leitura precisa acontecer para **todos** os registros da linha,
+        // seja qual for o resultado: é ela que faz cada dispositivo soltar o
+        // sinal. Só a contagem depende do que veio — zero quer dizer "não fui
+        // eu", e é a resposta esperada do outro dispositivo da linha.
+        if estado != 0 {
+            registro.avisos.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -230,6 +250,18 @@ pub fn total_de_avisos() -> u64 {
         .iter()
         .map(|registro| registro.avisos.load(Ordering::Relaxed))
         .sum()
+}
+
+/// Quantas interrupções um dispositivo recebeu, pelo nome.
+#[cfg(feature = "modo-teste")]
+pub fn avisos_de(nome: &str) -> Option<u64> {
+    REGISTROS
+        .iter()
+        .find(|registro| {
+            registro.linha.load(Ordering::Acquire) != SEM_LINHA
+                && nome_de(registro.nome.load(Ordering::Acquire)) == nome
+        })
+        .map(|registro| registro.avisos.load(Ordering::Relaxed))
 }
 
 /// Percorre os dispositivos registrados: nome, linha e quantos avisos.

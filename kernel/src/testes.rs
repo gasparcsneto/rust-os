@@ -3236,6 +3236,10 @@ static CASOS: &[Caso] = &[
         f: irq_o_virtio_interrompe_de_verdade,
     },
     Caso {
+        nome: "irq: a linha compartilhada nao confunde os donos",
+        f: irq_linha_compartilhada_nao_confunde,
+    },
+    Caso {
         nome: "usuario: nao alcanca o kernel",
         f: usuario_nao_alcanca_o_kernel,
     },
@@ -3557,6 +3561,65 @@ fn irq_o_virtio_interrompe_de_verdade() -> Resultado {
     }
 
     Err("o dispositivo trabalhou mas nenhuma interrupcao chegou")
+}
+
+/// Numa linha compartilhada, quem trabalhou é quem conta.
+///
+/// # O caso que este teste existe para pegar
+///
+/// No x86 o disco e a rede caem os dois na IRQ 11. Uma entrega dessa linha
+/// não diz qual dos dois a levantou, e a primeira versão deste kernel contava
+/// uma para cada — um número plausível, que não respondia a pergunta que o
+/// nome dele fazia.
+///
+/// A resposta está no registrador de estado de cada dispositivo: quem não
+/// interrompeu lê zero. O teste força tráfego de **um** deles e confere que o
+/// outro não foi creditado.
+///
+/// No ARM as linhas são separadas e o caso passa trivialmente. Ele vale
+/// mesmo assim: a atribuição é do código comum, e um dia o ARM também terá
+/// dois dispositivos no mesmo pino.
+fn irq_linha_compartilhada_nao_confunde() -> Resultado {
+    let Some(rede_antes) = crate::virtio::avisos_de("rede") else {
+        return Err("a rede nao registrou interrupcao");
+    };
+    let Some(disco_antes) = crate::virtio::avisos_de("disco") else {
+        return Err("o disco nao registrou interrupcao");
+    };
+
+    let mut setor = [0u8; crate::virtio::blk::TAMANHO_DO_SETOR];
+    let Some(resultado) = crate::virtio::blk::com_o_disco(|d| d.ler_setor(2, &mut setor)) else {
+        return Err("nao ha disco nesta maquina");
+    };
+    resultado?;
+
+    let mut subiu = false;
+    for _ in 0..VOLTAS_ESPERANDO_INTERRUPCAO {
+        if crate::virtio::avisos_de("disco").unwrap_or(0) > disco_antes {
+            subiu = true;
+            break;
+        }
+        core::hint::spin_loop();
+    }
+
+    if !subiu {
+        return Err("o disco trabalhou mas nao foi creditado");
+    }
+
+    // A rede não transmitiu nada nesse intervalo. Se o contador dela subiu, o
+    // crédito foi dado pela linha e não pelo dispositivo.
+    let rede_depois = crate::virtio::avisos_de("rede").unwrap_or(0);
+    if rede_depois != rede_antes {
+        crate::log_error!(
+            "teste",
+            "a rede foi de {} para {} sem transmitir nada",
+            rede_antes,
+            rede_depois
+        );
+        return Err("a interrupcao do disco foi creditada tambem a rede");
+    }
+
+    Ok(())
 }
 
 /// Roda todos os casos e encerra o emulador com o veredito.
