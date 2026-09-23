@@ -166,6 +166,54 @@ fn endereco() -> Option<u64> {
     (valor & MSR_HABILITADO != 0).then_some(valor & MSR_ENDERECO)
 }
 
+/// Espera a linha do PIT avançar `quantos` disparos a partir de `de`.
+///
+/// Devolve quantos disparos aconteceram, ou `None` se o teto de voltas se
+/// esgotou antes.
+///
+/// # Por que um teto, e não um laço até acontecer
+///
+/// Porque a versão sem teto era um travamento em silêncio esperando um
+/// firmware ruim. Toda espera por dispositivo neste kernel tem teto — o disco
+/// e a rede contam voltas por escrito —, e a espera pelo PIT não tinha,
+/// embora dependa de um dispositivo tanto quanto as outras: se a IRQ 0 não
+/// chega, porque o PIT está morto ou porque a linha foi roteada para outro
+/// lugar, o contador nunca muda e o laço gira para sempre.
+///
+/// E gira no pior lugar possível: durante o boot, antes de o canal do agente
+/// ter respondido a primeira pergunta. A máquina não travaria com um
+/// diagnóstico ruim; travaria sem diagnóstico nenhum.
+///
+/// O teto é folgado de propósito. Ele não mede tempo, só distingue "o PIT
+/// está lento" de "o PIT não está disparando" — e errar para o lado folgado
+/// custa um boot demorado, enquanto errar para o lado apertado custa um APIC
+/// recusado numa máquina em que ele funcionava.
+fn esperar_disparos(linha: usize, de: u64, quantos: u64) -> Option<u64> {
+    /// Voltas de espera toleradas por disparo do PIT.
+    ///
+    /// A dez milissegundos por disparo, cem milhões de voltas são ordens de
+    /// grandeza mais do que qualquer máquina precisa — inclusive um emulador
+    /// interpretando instrução por instrução.
+    const VOLTAS_POR_DISPARO: u64 = 100_000_000;
+
+    for _ in 0..VOLTAS_POR_DISPARO.saturating_mul(quantos) {
+        let agora = crate::irq::contagem_da_linha(linha).wrapping_sub(de);
+        if agora >= quantos {
+            return Some(agora);
+        }
+        core::hint::spin_loop();
+    }
+
+    crate::log_error!(
+        "irq",
+        "o PIT nao disparou {} vezes; a linha {} esta parada em {}",
+        quantos,
+        linha,
+        crate::irq::contagem_da_linha(linha)
+    );
+    None
+}
+
 /// Mede a frequência do contador do timer contra o PIT.
 ///
 /// Devolve quantas vezes por segundo o contador decrementa — que é a unidade
@@ -209,16 +257,18 @@ fn calibrar(lapic: &Lapic) -> Option<u32> {
     let linha = super::pic::IRQ_TIMER as usize;
 
     let borda = crate::irq::contagem_da_linha(linha);
-    while crate::irq::contagem_da_linha(linha) == borda {
-        core::hint::spin_loop();
-    }
+    esperar_disparos(linha, borda, 1)?;
 
     let comeco = crate::irq::contagem_da_linha(linha);
     lapic.contagem_inicial.set(u32::MAX);
 
-    while crate::irq::contagem_da_linha(linha) - comeco < TIQUES_DO_PIT {
-        core::hint::spin_loop();
-    }
+    let Some(tiques) = esperar_disparos(linha, comeco, TIQUES_DO_PIT) else {
+        // Desarma o contador antes de desistir. Ele foi carregado logo acima e
+        // continuaria correndo; deixá-lo assim entregaria ao próximo leitor um
+        // APIC em meio estado, que é pior que um APIC recusado.
+        lapic.contagem_inicial.set(0);
+        return None;
+    };
 
     let restante = lapic.contagem_atual.get();
     lapic.contagem_inicial.set(0);
@@ -230,10 +280,15 @@ fn calibrar(lapic: &Lapic) -> Option<u32> {
         return None;
     }
 
-    // `andou` decrementos em `TIQUES_DO_PIT / hz_do_pit` segundos. O divisor
+    // `andou` decrementos em `tiques / hz_do_pit` segundos. O divisor
     // **não** entra nesta conta: ele já está embutido no que medimos, porque
     // o que contamos foram decrementos do contador, não ciclos do barramento.
-    let por_segundo = andou.checked_mul(hz_do_pit)?.checked_div(TIQUES_DO_PIT)?;
+    //
+    // O divisor da regra de três são os tiques **observados**, e não os
+    // pedidos: a espera pode devolver mais de um disparo por volta se o PIT
+    // vier atrasado, e dividir pelo número pedido atribuiria a um intervalo
+    // curto um contador que andou um intervalo longo.
+    let por_segundo = andou.checked_mul(hz_do_pit)?.checked_div(tiques)?;
 
     u32::try_from(por_segundo).ok()
 }
@@ -293,11 +348,9 @@ fn conferir_contra_o_pit(hz_pedido: u32) -> bool {
     let pit_antes = crate::irq::contagem_da_linha(linha_do_pit);
     let apic_antes = crate::irq::contagem_da_linha(linha_do_apic);
 
-    while crate::irq::contagem_da_linha(linha_do_pit) - pit_antes < DISPAROS_DO_PIT {
-        core::hint::spin_loop();
-    }
-
-    let do_pit = crate::irq::contagem_da_linha(linha_do_pit) - pit_antes;
+    let Some(do_pit) = esperar_disparos(linha_do_pit, pit_antes, DISPAROS_DO_PIT) else {
+        return false;
+    };
     let do_apic = crate::irq::contagem_da_linha(linha_do_apic) - apic_antes;
 
     // Quantos disparos do APIC caberiam nos do PIT que acabamos de observar,
