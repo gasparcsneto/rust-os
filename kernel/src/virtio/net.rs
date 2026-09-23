@@ -377,7 +377,7 @@ impl Placa {
         // virtio diz isso. É sobre o buffer: ele é um só, e reescrevê-lo
         // enquanto o dispositivo ainda o lê seria a mesma corrida de DMA que o
         // disco tem documentada.
-        match self.esperar(true) {
+        match self.esperar_transmissao() {
             Some(respondido) if respondido == cabeca => {
                 self.transmitidos += 1;
                 Ok(())
@@ -540,15 +540,23 @@ impl Placa {
         super::fila::DESCRITORES as usize - self.recepcao.disponiveis()
     }
 
-    /// Espera uma das filas devolver alguma coisa.
-    fn esperar(&mut self, transmissao: bool) -> Option<u16> {
+    /// Espera a fila de transmissão confirmar uma cadeia.
+    ///
+    /// # Por que só a de transmissão
+    ///
+    /// Porque esta função escolhia a fila por um parâmetro, e o ramo da
+    /// recepção nunca foi chamado — nem podia ser, sem estragar alguma coisa.
+    /// Colher da fila de recepção aqui devolveria só o índice da cadeia e
+    /// jogaria fora o resto: o pacote que chegou, porque ninguém o copia, e a
+    /// contabilidade do buffer, porque é [`Placa::receber`] quem identifica de
+    /// qual buffer a cadeia veio e quem manda pendurá-lo de volta.
+    ///
+    /// Um ramo que existe, compila, e está errado para qualquer chamador é
+    /// pior que ausência de código: ele parece uma opção disponível. A espera
+    /// pela recepção, se um dia fizer sentido, é `receber` em laço — não esta.
+    fn esperar_transmissao(&mut self) -> Option<u16> {
         for _ in 0..VOLTAS_DE_ESPERA {
-            let colhido = if transmissao {
-                self.transmissao.colher()
-            } else {
-                self.recepcao.colher()
-            };
-            if let Some((cabeca, _)) = colhido {
+            if let Some((cabeca, _)) = self.transmissao.colher() {
                 return Some(cabeca);
             }
             core::hint::spin_loop();
