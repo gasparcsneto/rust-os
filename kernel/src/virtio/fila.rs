@@ -259,9 +259,21 @@ impl Fila {
         ) {
             Ok(notificacao) => notificacao,
             Err(motivo) => {
-                // O dispositivo não ficou com o endereço — a falha aconteceu
-                // antes da habilitação —, então o frame pode voltar ao
-                // alocador com segurança.
+                // O frame pode voltar ao alocador, mas **não** porque o
+                // dispositivo não tenha o endereço: ele pode muito bem ter —
+                // `configurar_fila` escreve os três endereços antes do passo
+                // que pode falhar por último, a habilitação.
+                //
+                // O que torna a devolução segura é a habilitação não ter
+                // acontecido. Uma fila com `queue_enable` em zero é uma fila
+                // que o dispositivo está proibido de tocar, tenha ele o
+                // endereço ou não.
+                //
+                // A distinção importa porque as duas levam à mesma linha de
+                // código e a raciocínios opostos sobre o próximo caso: quem
+                // acreditasse na primeira versão concluiria que basta não
+                // escrever o endereço, e liberaria um frame de uma fila já
+                // habilitada.
                 crate::frames::liberar(frame);
                 return Err(motivo);
             }

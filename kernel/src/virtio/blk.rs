@@ -193,6 +193,15 @@ impl Disco {
         };
 
         let Some(trabalho) = crate::frames::alocar() else {
+            // A fila montada acima fica com o frame dela, e de proposito: ela
+            // ja foi habilitada no dispositivo, que portanto pode le-la. Sair
+            // daqui devolvendo aquele frame ao alocador seria entregar a outro
+            // dono uma pagina que o dispositivo tem o direito de varrer.
+            //
+            // `abortar` marca o dispositivo como falho, o que o obriga a
+            // parar — mas o frame nao volta mesmo assim. Vazar um frame num
+            // caminho de boot que so roda uma vez e o preco de nao depender
+            // de o dispositivo respeitar o estado.
             transporte.abortar();
             return Err("sem frame para os buffers de pedido");
         };
