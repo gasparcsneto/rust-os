@@ -3738,6 +3738,10 @@ static CASOS: &[Caso] = &[
         f: rede_contadores_acompanham_o_trafego,
     },
     Caso {
+        nome: "rede: cadeia desconhecida desliga a placa",
+        f: rede_cadeia_desconhecida_desliga_a_placa,
+    },
+    Caso {
         nome: "irq: o virtio interrompe de verdade",
         f: irq_o_virtio_interrompe_de_verdade,
     },
@@ -4017,6 +4021,69 @@ fn rede_contadores_acompanham_o_trafego() -> Resultado {
     if recebidos == 0 {
         return Err("a placa diz nao ter recebido nada");
     }
+
+    Ok(())
+}
+
+/// Uma cadeia colhida que não é de nenhum buffer desliga a placa.
+///
+/// # O que este caso protege
+///
+/// A colheita devolve o índice do descritor que encabeça a cadeia, e o driver
+/// descobre por ele de qual buffer o pacote veio. Quando esse índice não
+/// corresponde a buffer nenhum, o anel deixou de descrever a realidade.
+///
+/// A primeira versão deste driver respondia a isso caindo no buffer zero.
+/// Duas coisas ruins saíam dali: um quadro que nunca chegou era entregue e
+/// contado como recebido — um valor plausível e errado —, e a leitura caía
+/// num buffer que continuava pendurado, isto é, que o dispositivo podia estar
+/// escrevendo naquele instante. É a mesma corrida de DMA que o disco e a
+/// transmissão já tratavam como fatal; só a recepção não tratava.
+///
+/// # Por que a falha é injetada
+///
+/// Porque o dispositivo do QEMU não comete esse erro, e um defeito que só
+/// aparece com hardware quebrado ficaria sem teste para sempre. A injeção
+/// atinge exatamente a comparação que decide o índice, trocando os endereços
+/// que o driver guarda — o dispositivo segue com os buffers de verdade.
+fn rede_cadeia_desconhecida_desliga_a_placa() -> Resultado {
+    let Some(vivo) = crate::virtio::net::com_a_placa(|placa| placa.vivo()) else {
+        return Err("nao ha placa de rede nesta maquina");
+    };
+    if !vivo {
+        return Err("a placa ja estava desligada antes do caso");
+    }
+
+    let Some(verdadeiros) = crate::virtio::net::com_a_placa(|placa| placa.desfigurar_buffers())
+    else {
+        return Err("nao ha placa de rede nesta maquina");
+    };
+
+    // Um ARP para provocar a resposta que será colhida. O resultado dele não
+    // interessa: o que interessa é o que a colheita fez com a placa.
+    let resposta = crate::rede::resolver(&IP_DO_ROTEADOR, &NOSSO_IP);
+
+    let Some(vivo) = crate::virtio::net::com_a_placa(|placa| placa.vivo()) else {
+        return Err("nao ha placa de rede nesta maquina");
+    };
+
+    crate::virtio::net::com_a_placa(|placa| placa.restaurar_buffers(verdadeiros));
+
+    if vivo {
+        return Err("a placa continuou no ar depois de colher uma cadeia que nao reconhece");
+    }
+    if resposta.is_ok() {
+        return Err("o ARP foi respondido por uma placa que nao reconhecia os buffers");
+    }
+
+    // A reparação precisa valer: uma placa que não voltasse daqui deixaria os
+    // casos seguintes falhando por culpa deste.
+    crate::rede::resolver(&IP_DO_ROTEADOR, &NOSSO_IP)?;
+
+    crate::log_info!(
+        "teste",
+        "placa desligada por cadeia desconhecida e recolocada no ar"
+    );
 
     Ok(())
 }

@@ -357,8 +357,21 @@ impl Placa {
         let bytes_do_quadro = (escritos as usize).saturating_sub(CABECALHO);
         let copiados = bytes_do_quadro.min(destino.len()).min(MAIOR_QUADRO);
 
+        // De qual buffer veio, antes de copiar coisa alguma. Uma cadeia que
+        // não corresponde a buffer nenhum é o anel dizendo algo impossível, e
+        // a placa para aqui — pelo mesmo motivo que o disco e a transmissão
+        // param quando o anel responde uma cadeia que não pediram.
+        let Some(indice) = self.indice_do_buffer(cabeca) else {
+            self.vivo = false;
+            crate::log_error!(
+                "virtio",
+                "a placa devolveu a cadeia {}, que nao e de nenhum buffer de recepcao; desligada",
+                cabeca
+            );
+            return None;
+        };
+
         if copiados > 0 {
-            let indice = self.indice_do_buffer(cabeca);
             // SAFETY: `indice` é menor que `BUFFERS_DE_RECEPCAO`, e
             // `copiados` é no máximo o tamanho útil de um buffer — as duas
             // coisas confinam a leitura ao frame daquele buffer.
@@ -381,20 +394,79 @@ impl Placa {
         Some(copiados)
     }
 
-    /// De qual buffer veio a cadeia que começa em `cabeca`.
+    /// De qual buffer veio a cadeia que começa em `cabeca`, se de algum.
     ///
     /// A resposta sai do endereço que o descritor guarda, e não de uma tabela
     /// paralela: o descritor já sabe onde o buffer está, e manter a mesma
     /// informação em dois lugares é convidar os dois a divergirem.
-    fn indice_do_buffer(&self, cabeca: u16) -> usize {
-        self.recepcao
-            .endereco_do_descritor(cabeca)
-            .and_then(|endereco| {
-                self.frames_de_recepcao
-                    .iter()
-                    .position(|frame| *frame == endereco)
-            })
-            .unwrap_or(0)
+    ///
+    /// # Por que `None` em vez de um palpite
+    ///
+    /// Porque a versão anterior desta função caía no buffer zero quando não
+    /// reconhecia a cadeia, e as duas consequências disso eram piores do que
+    /// a falha que ela escondia.
+    ///
+    /// A primeira é que o quadro devolvido não veio de lugar nenhum: é o
+    /// conteúdo de outro buffer, entregue como pacote recebido e contado como
+    /// tal. Um valor plausível e errado é pior que um erro.
+    ///
+    /// A segunda é pior ainda: o buffer zero, quando não foi ele que o
+    /// dispositivo devolveu, é um buffer que **continua pendurado** — ou
+    /// seja, que o dispositivo pode estar escrevendo neste instante. Lê-lo é
+    /// a mesma corrida de DMA que `vivo` existe para impedir no disco e na
+    /// transmissão.
+    fn indice_do_buffer(&self, cabeca: u16) -> Option<usize> {
+        let endereco = self.recepcao.endereco_do_descritor(cabeca)?;
+        self.frames_de_recepcao
+            .iter()
+            .position(|frame| *frame == endereco)
+    }
+
+    /// Faz a placa deixar de reconhecer os próprios buffers de recepção.
+    ///
+    /// Existe para um teste só, e um que não teria outra forma de existir:
+    /// provar que uma cadeia colhida que não corresponde a buffer nenhum
+    /// desliga a placa, em vez de devolver o conteúdo de outro buffer como se
+    /// fosse um pacote. O dispositivo do QEMU nunca devolve uma cadeia
+    /// dessas — é o defeito que a checagem existe para pegar, não um caso que
+    /// se provoque de fora.
+    ///
+    /// Trocar os endereços registrados é a injeção mais fiel que há: ela
+    /// atinge exatamente a comparação de [`Placa::indice_do_buffer`], e nada
+    /// mais. O dispositivo continua com os buffers de verdade e continua
+    /// escrevendo neles; quem deixa de reconhecê-los é o driver.
+    ///
+    /// Devolve os endereços verdadeiros, para [`Placa::restaurar_buffers`].
+    #[cfg(feature = "modo-teste")]
+    pub fn desfigurar_buffers(&mut self) -> [u64; BUFFERS_DE_RECEPCAO] {
+        let verdadeiros = self.frames_de_recepcao;
+        for frame in self.frames_de_recepcao.iter_mut() {
+            // Um endereço que nenhum frame pode ter: o alocador só entrega
+            // frames alinhados, e todos os uns não é alinhado a nada.
+            *frame = u64::MAX;
+        }
+        verdadeiros
+    }
+
+    /// Desfaz [`Placa::desfigurar_buffers`] e devolve a placa ao ar.
+    ///
+    /// Repor os endereços não basta: a colheita que falhou liberou os
+    /// descritores daquele buffer e voltou sem pendurá-lo de novo, porque o
+    /// caminho que o penduraria é o que a falha interrompeu. Sem esta parte,
+    /// a placa ficaria viva e surda — que é o estado que
+    /// [`Placa::pendurar_buffers`] existe para evitar.
+    #[cfg(feature = "modo-teste")]
+    pub fn restaurar_buffers(&mut self, verdadeiros: [u64; BUFFERS_DE_RECEPCAO]) {
+        self.frames_de_recepcao = verdadeiros;
+        self.vivo = true;
+        self.pendurar_buffers();
+        self.recepcao.notificar(&self.transporte);
+    }
+
+    /// A placa ainda está no ar?
+    #[cfg(feature = "modo-teste")]
+    pub fn vivo(&self) -> bool {
+        self.vivo
     }
 
     /// Espera uma das filas devolver alguma coisa.
