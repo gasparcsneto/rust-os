@@ -203,6 +203,26 @@ impl Placa {
             for frame in &frames_de_recepcao[..quantos] {
                 crate::frames::liberar(*frame);
             }
+            // O de transmissão também, quando veio. Hoje ele não vem sem os
+            // outros virem — o alocador só falha quando esgota, e nada devolve
+            // frames entre os dois pedidos —, mas o comentário acima promete
+            // que a falha no meio devolve o que já veio, e uma promessa que
+            // depende do comportamento de outro módulo é uma promessa que
+            // alguém vai quebrar sem perceber.
+            if let Some(frame) = frame_de_transmissao {
+                crate::frames::liberar(frame);
+            }
+
+            // As duas filas ficam com os frames delas, e de propósito — a
+            // mesma razão que o disco documenta. Elas já foram habilitadas no
+            // dispositivo, que portanto tem o direito de varrê-las; devolvê-las
+            // ao alocador seria entregar a outro dono uma página que o
+            // dispositivo pode ler a qualquer momento.
+            //
+            // `abortar` o marca como falho, o que o obriga a parar, mas os
+            // frames não voltam mesmo assim: não dependemos de o dispositivo
+            // respeitar o estado. Dois frames vazados num caminho de boot que
+            // roda uma vez é o preço.
             transporte.abortar();
             return Err("sem frames para os buffers de rede");
         };
