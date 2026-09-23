@@ -86,7 +86,25 @@ impl<'a> Requisicao<'a> {
             return Err((None, RpcError::PARSE));
         }
 
+        // O `id` é ecoado **cru** na resposta, byte a byte, porque o
+        // JSON-RPC exige que ele volte idêntico — com o mesmo tipo e a mesma
+        // grafia. Isso faz da conferência aqui a única coisa entre o que o
+        // cliente escreveu e o que sai pela porta: sem ela, um `id` que a
+        // varredura aceitou mas que não é JSON (`abc`, `1e`, um byte de
+        // controle dentro das aspas) ia inteiro para dentro de uma resposta
+        // nossa, e a resposta deixava de ser legível.
+        //
+        // O estrago era pior do que parece. O comando **executava**: o
+        // trabalho era feito e a resposta entregue num formato que o cliente
+        // não consegue ler nem atribuir ao pedido que a causou. Recusar o
+        // pedido inteiro é o que a especificação manda (§4: o `id` só pode
+        // ser String, Number ou Null) e é também o que informa o agente.
         let id = raiz.member("id").filter(|j| !j.is_null());
+        // Sem id utilizável não há o que ecoar: a resposta de erro leva
+        // `null`, como a especificação manda para um pedido inválido.
+        if id.is_some_and(|id| !id.e_string_ecoavel() && !id.e_numero()) {
+            return Err((None, RpcError::REQUISICAO_INVALIDA));
+        }
 
         let Some(metodo) = raiz.member("method").and_then(|m| m.as_str()) else {
             return Err((id, RpcError::REQUISICAO_INVALIDA));

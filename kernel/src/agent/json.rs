@@ -310,6 +310,81 @@ impl<'a> Json<'a> {
     pub fn is_null(&self) -> bool {
         self.0 == b"null"
     }
+
+    /// Este valor é uma string JSON que pode ser devolvida crua?
+    ///
+    /// Mais estrito que [`Self::as_str`], e de propósito. `as_str` só olha as
+    /// aspas das pontas, o que basta para *ler* um valor que a varredura já
+    /// delimitou. Aqui a pergunta é outra: se estes bytes forem copiados sem
+    /// alteração para dentro de uma resposta nossa, a resposta continua sendo
+    /// JSON? Para isso a string tem de fechar no último byte, ser UTF-8, e
+    /// não trazer byte de controle cru — que o JSON proíbe dentro de string e
+    /// que o nosso escritor nunca emitiria.
+    pub fn e_string_ecoavel(&self) -> bool {
+        if pular_string(self.0, 0) != Some(self.0.len()) {
+            return false;
+        }
+        if self.0.iter().any(|&b| b < 0x20) {
+            return false;
+        }
+        core::str::from_utf8(self.0).is_ok()
+    }
+
+    /// Este valor é um número JSON bem formado?
+    ///
+    /// Vale a pergunta porque a varredura não sabe responder: para qualquer
+    /// coisa que não comece com `"`, `{` ou `[`, [`pular_valor`] só anda até
+    /// o próximo delimitador e devolve o que houver antes. `abc`, `@#$` e
+    /// `1e` chegam de lá com a mesma cara de um número.
+    ///
+    /// A gramática é a do JSON, e as duas recusas que não são óbvias são
+    /// dela: zero à esquerda (`01`) e expoente ou fração sem dígito (`1e`,
+    /// `1.`).
+    pub fn e_numero(&self) -> bool {
+        let b = self.0;
+        let mut i = 0;
+
+        if b.first() == Some(&b'-') {
+            i += 1;
+        }
+
+        match b.get(i) {
+            Some(b'0') => i += 1,
+            Some(c) if c.is_ascii_digit() => {
+                while b.get(i).is_some_and(u8::is_ascii_digit) {
+                    i += 1;
+                }
+            }
+            _ => return false,
+        }
+
+        if b.get(i) == Some(&b'.') {
+            i += 1;
+            let antes = i;
+            while b.get(i).is_some_and(u8::is_ascii_digit) {
+                i += 1;
+            }
+            if i == antes {
+                return false;
+            }
+        }
+
+        if matches!(b.get(i), Some(b'e' | b'E')) {
+            i += 1;
+            if matches!(b.get(i), Some(b'+' | b'-')) {
+                i += 1;
+            }
+            let antes = i;
+            while b.get(i).is_some_and(u8::is_ascii_digit) {
+                i += 1;
+            }
+            if i == antes {
+                return false;
+            }
+        }
+
+        i == b.len()
+    }
 }
 
 fn pular_espacos(b: &[u8], mut i: usize) -> usize {

@@ -247,6 +247,81 @@ fn protocolo_decompoe_requisicao() -> Resultado {
     Ok(())
 }
 
+/// Um `id` que a varredura aceita mas que não é JSON tem de derrubar o
+/// pedido — não ser ecoado cru numa resposta.
+///
+/// A varredura de `member` para no primeiro delimitador e devolve o que
+/// houver antes, então `abc` e `1e` chegam com a mesma cara de um número. Como
+/// o `id` é ecoado byte a byte na resposta, aceitá-los fazia o kernel emitir
+/// JSON que nenhum cliente lê — e emitir *depois* de ter executado o comando.
+fn protocolo_recusa_id_que_nao_e_json() -> Resultado {
+    // Cada um destes foi visto saindo cru pela porta antes da correção.
+    let recusaveis: &[&[u8]] = &[
+        br#"{"jsonrpc":"2.0","id":abc,"method":"agent.ping"}"#,
+        br#"{"jsonrpc":"2.0","id":@#$,"method":"agent.ping"}"#,
+        br#"{"jsonrpc":"2.0","id":1e,"method":"agent.ping"}"#,
+        br#"{"jsonrpc":"2.0","id":01,"method":"agent.ping"}"#,
+        br#"{"jsonrpc":"2.0","id":1.,"method":"agent.ping"}"#,
+        // Estruturados são JSON válido, mas a especificação (§4) só admite
+        // String, Number ou Null como `id`.
+        br#"{"jsonrpc":"2.0","id":[1,2],"method":"agent.ping"}"#,
+        br#"{"jsonrpc":"2.0","id":{"a":1},"method":"agent.ping"}"#,
+        br#"{"jsonrpc":"2.0","id":true,"method":"agent.ping"}"#,
+        // Byte de controle cru dentro das aspas: o JSON proíbe, e ecoá-lo
+        // quebrava a resposta do mesmo jeito.
+        b"{\"jsonrpc\":\"2.0\",\"id\":\"a\x01b\",\"method\":\"agent.ping\"}",
+    ];
+
+    for linha in recusaveis {
+        if Requisicao::parse(linha).is_ok() {
+            return Err("um id que nao e JSON-RPC valido foi aceito");
+        }
+    }
+    Ok(())
+}
+
+/// E a recusa não pode ter levado junto os `id` legítimos.
+///
+/// A metade que importa do caso acima: uma conferência estrita demais
+/// silenciaria clientes corretos, e esse defeito seria mais caro que o que
+/// ela conserta.
+fn protocolo_aceita_id_legitimo() -> Resultado {
+    let aceitaveis: &[(&[u8], &str)] = &[
+        (br#"{"jsonrpc":"2.0","id":7,"method":"agent.ping"}"#, "7"),
+        (br#"{"jsonrpc":"2.0","id":-3,"method":"agent.ping"}"#, "-3"),
+        (br#"{"jsonrpc":"2.0","id":0,"method":"agent.ping"}"#, "0"),
+        (
+            br#"{"jsonrpc":"2.0","id":1.5e-3,"method":"agent.ping"}"#,
+            "1.5e-3",
+        ),
+        (
+            br#"{"jsonrpc":"2.0","id":"pedido-1","method":"agent.ping"}"#,
+            "\"pedido-1\"",
+        ),
+        // Com escape: a aspa escapada não encerra a string, e o valor volta
+        // com a grafia exata que chegou.
+        (
+            br#"{"jsonrpc":"2.0","id":"a\"b","method":"agent.ping"}"#,
+            r#""a\"b""#,
+        ),
+    ];
+
+    for (linha, esperado) in aceitaveis {
+        let req = Requisicao::parse(linha).map_err(|_| "um id legitimo foi recusado")?;
+        if req.id.and_then(|j| j.raw_str()) != Some(esperado) {
+            return Err("o id legitimo nao voltou com a grafia que chegou");
+        }
+    }
+
+    // `null` é legítimo e significa "sem id": some, e a resposta leva null.
+    let req = Requisicao::parse(br#"{"jsonrpc":"2.0","id":null,"method":"agent.ping"}"#)
+        .map_err(|_| "id null foi recusado")?;
+    if req.id.is_some() {
+        return Err("id null deveria virar ausencia de id");
+    }
+    Ok(())
+}
+
 /// Sem `params`, o padrão precisa ser um objeto vazio — é o que mantém os
 /// handlers uniformes, sem cada um tratar o caso ausente.
 fn protocolo_params_ausente_vira_objeto_vazio() -> Resultado {
@@ -3641,6 +3716,14 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "rpc: decompoe requisicao",
         f: protocolo_decompoe_requisicao,
+    },
+    Caso {
+        nome: "rpc: recusa id que nao e JSON",
+        f: protocolo_recusa_id_que_nao_e_json,
+    },
+    Caso {
+        nome: "rpc: aceita id legitimo",
+        f: protocolo_aceita_id_legitimo,
     },
     Caso {
         nome: "rpc: params ausente vira {}",
