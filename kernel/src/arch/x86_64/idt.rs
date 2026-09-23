@@ -47,6 +47,13 @@ pub fn init() {
             idt[super::pic::OFFSET_MESTRE + linha as u8].set_handler_fn(*tratador);
         }
 
+        // O timer do APIC local não passa pelo PIC: ele nasce dentro do
+        // núcleo e é entregue direto num vetor próprio. Os dois ficam
+        // instalados ao mesmo tempo de propósito — a calibração do APIC
+        // depende do PIT estar rodando.
+        idt[super::apic::VETOR_TIMER].set_handler_fn(timer_do_apic);
+        idt[super::apic::VETOR_ESPURIO].set_handler_fn(espuria);
+
         // SAFETY: `IST_DOUBLE_FAULT` é um índice válido da IST, e a pilha
         // correspondente foi preparada em `gdt::init`, que roda antes desta
         // função. Ver a explicação do triple fault em `gdt`.
@@ -99,6 +106,38 @@ tratadores! {
     linha4 = 4, linha5 = 5, linha6 = 6, linha7 = 7,
     linha8 = 8, linha9 = 9, linha10 = 10, linha11 = 11,
     linha12 = 12, linha13 = 13, linha14 = 14, linha15 = 15,
+}
+
+/// Interrupção periódica do timer do APIC local.
+///
+/// É a gêmea de `atender(0)`, e faz o mesmo trabalho: marcar o tempo e
+/// perguntar ao escalonador. O que muda é quem precisa ser avisado no fim —
+/// o APIC, não o PIC.
+extern "x86-interrupt" fn timer_do_apic(_quadro: InterruptStackFrame) {
+    crate::tempo::tick();
+    let preemptar = crate::fios::tique();
+
+    crate::irq::contabilizar(super::apic::VETOR_TIMER as usize);
+
+    // Antes da troca de fio, pela mesma razão do PIC: se trocássemos
+    // primeiro, este handler só voltaria a executar quando o fio atual fosse
+    // escalonado de novo, e até lá o APIC não entregaria outra.
+    super::apic::fim_de_interrupcao();
+
+    if preemptar {
+        super::contexto::ceder_cpu();
+    }
+}
+
+/// Interrupção espúria do APIC.
+///
+/// Acontece numa corrida legítima: uma linha que baixa entre o processador
+/// aceitar a interrupção e o APIC decidir de quem ela é. A especificação é
+/// explícita em que **não** se deve sinalizar fim de interrupção aqui — o
+/// APIC não considera esta entrega em atendimento, e finalizá-la encerraria a
+/// interrupção anterior, que ainda está.
+extern "x86-interrupt" fn espuria(_quadro: InterruptStackFrame) {
+    crate::irq::contabilizar(super::apic::VETOR_ESPURIO as usize);
 }
 
 /// Atende a interrupção da linha indicada. Devolve se o escalonador pediu

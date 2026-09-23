@@ -71,6 +71,26 @@ pub fn com_contadores<F: FnMut(usize, &'static str, u64)>(mut f: F) {
     });
 }
 
+/// Quantas interrupções uma linha específica gerou.
+///
+/// Existe para quem precisa da resposta **de dentro do kernel**, e não do
+/// relatório: a conferência do timer do APIC contra o PIT, que compara duas
+/// linhas enquanto as duas ainda disparam. [`com_contadores`] não serviria —
+/// ela mascara interrupções para percorrer a tabela de nomes, e mascará-las é
+/// exatamente o que impediria a medida de acontecer.
+///
+/// O `allow` é condicionado à arquitetura de propósito: no ARM esta função
+/// não tem chamador, porque o timer de lá não precisa ser calibrado contra
+/// nada. Um `allow` incondicional esconderia o dia em que ela ficasse sem
+/// chamador **no x86** também.
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub fn contagem_da_linha(linha: usize) -> u64 {
+    if linha >= MAX_LINHAS {
+        return 0;
+    }
+    CONTADORES[linha].load(Ordering::Relaxed)
+}
+
 /// Total de interrupções de hardware desde o boot.
 pub fn total() -> u64 {
     TOTAL.load(Ordering::Relaxed)

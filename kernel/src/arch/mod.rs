@@ -67,9 +67,9 @@ pub use atual::{
     entrar_em_usuario, espaco_atual, espaco_do_kernel, esperar_interrupcao,
     falha_de_estouro_de_pilha, halt_forever, identificar_cpu, init_excecoes,
     init_interrupcao_serial, init_interrupcoes, init_paginacao, init_pci, init_seriais,
-    init_usuario, interrupcoes_habilitadas, mapear_frame, nome, percorrer_paginas_do_usuario,
-    preparar_contexto, preparar_contexto_de_fork, redirecionar_para, reservar_faixas,
-    sem_interrupcoes, traduzir, trocar_espaco,
+    init_timer_definitivo, init_usuario, interrupcoes_habilitadas, mapear_frame, nome,
+    percorrer_paginas_do_usuario, preparar_contexto, preparar_contexto_de_fork, redirecionar_para,
+    reservar_faixas, sem_interrupcoes, traduzir, trocar_espaco,
 };
 
 /// Só para a suíte: o par de conversões de permissão de cada backend.

@@ -6,6 +6,7 @@
 //! pronto. Este módulo basicamente traduz esse `BootInfo` para as estruturas
 //! neutras de [`crate::machine`] e segue para o fluxo comum.
 
+pub mod apic;
 pub mod contexto;
 pub mod gdt;
 pub mod idt;
@@ -303,6 +304,58 @@ pub fn init_interrupcoes() {
     x86_64::instructions::interrupts::enable();
 
     crate::log_info!("irq", "PIC remapeado, timer a {} Hz", efetiva);
+}
+
+/// Troca o PIT pelo timer do APIC local, se esta máquina tiver um.
+///
+/// # Por que não em [`init_interrupcoes`]
+///
+/// Porque o APIC é memória mapeada e precisa da paginação no ar — e a
+/// paginação, por sua vez, precisa do alocador de frames, que precisa do mapa
+/// de memória. O timer vem antes de tudo isso no boot por um bom motivo: sem
+/// ele os registros de log não têm carimbo de tempo, e é entre o boot e a
+/// paginação que as coisas mais difíceis de depurar acontecem.
+///
+/// A saída é a que os kernels costumam tomar: o PIT sobe cedo e serve de
+/// relógio provisório, e o APIC o substitui assim que pode. Não é dívida —
+/// o PIT é o que torna a calibração do APIC possível.
+///
+/// Se não houver APIC, ou se a calibração não der um número utilizável, o PIT
+/// continua. Um timer pior é melhor que nenhum.
+pub fn init_timer_definitivo() {
+    /// A mesma frequência do PIT: 100 Hz dão resolução de 10 ms, que é o que
+    /// o escalonador desta fase precisa. O ganho do APIC aqui não é
+    /// resolução, é ter um timer por núcleo.
+    const HZ: u32 = 100;
+
+    // SAFETY: a paginação está no ar, o PIT está rodando desde
+    // `init_interrupcoes` e as interrupções estão habilitadas — as três
+    // pré-condições da calibração.
+    let Some(efetiva) = (unsafe { apic::init(HZ) }) else {
+        crate::log_info!("irq", "sem APIC local utilizavel; o PIT continua");
+        return;
+    };
+
+    // Só agora o PIT pode ser desligado. Entre a programação do APIC e esta
+    // linha os dois disparam, e os dois chamam `tempo::tick` — o relógio anda
+    // rápido demais por alguns milissegundos, o que é infinitamente melhor
+    // que a alternativa: desligar o PIT primeiro e descobrir que o APIC não
+    // estava contando.
+    //
+    // SAFETY: o timer do APIC já está entregando no lugar dele.
+    unsafe { pic::mascarar(0) };
+
+    crate::tempo::registrar_frequencia(efetiva);
+    crate::irq::nomear(apic::VETOR_TIMER as usize, "timer-apic");
+    crate::irq::nomear(apic::VETOR_ESPURIO as usize, "apic-espuria");
+
+    crate::log_info!(
+        "irq",
+        "timer do APIC a {} Hz no nucleo {} (barramento medido em {} kHz), PIT desligado",
+        efetiva,
+        apic::id_do_nucleo().unwrap_or(0),
+        apic::frequencia_do_barramento() / 1000
+    );
 }
 
 /// Não há nada a descobrir: as portas de configuração são da arquitetura.

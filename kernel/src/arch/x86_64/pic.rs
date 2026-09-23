@@ -30,6 +30,13 @@ pub const OFFSET_MESTRE: u8 = 32;
 /// Vetor onde a primeira IRQ do PIC escravo passa a chegar.
 pub const OFFSET_ESCRAVO: u8 = OFFSET_MESTRE + 8;
 
+/// Número da linha do PIT.
+///
+/// Exposto porque a conferência do timer do APIC precisa contar os disparos
+/// **do PIT em si**, e não os tiques do relógio do kernel — que a essa altura
+/// já estão sendo alimentados pelos dois.
+pub const IRQ_TIMER: u8 = 0;
+
 /// Número da linha da COM2, onde vive o canal do agente.
 ///
 /// No barramento ISA, COM1 e COM3 compartilham a IRQ 4 e COM2 e COM4
@@ -164,6 +171,29 @@ pub unsafe fn desmascarar(linha: u8) {
         let mut dados_mestre = Port::<u8>::new(DADOS_MESTRE);
         let atual: u8 = dados_mestre.read();
         dados_mestre.write(atual & !(1 << IRQ_CASCATA));
+    }
+}
+
+/// Bloqueia uma linha do PIC.
+///
+/// O inverso de [`desmascarar`], e pela mesma razão uma leitura-modificação-
+/// escrita: mexer numa linha sem preservar as outras as reabilitaria em
+/// silêncio.
+///
+/// # Safety
+///
+/// Bloquear uma linha que alguém ainda espera deixa o sistema sem aquele
+/// evento, sem aviso nenhum.
+pub unsafe fn mascarar(linha: u8) {
+    if linha >= 8 {
+        return;
+    }
+    // SAFETY: porta de dados do PIC mestre; a consequência de bloquear a
+    // linha é do chamador.
+    unsafe {
+        let mut dados_mestre = Port::<u8>::new(DADOS_MESTRE);
+        let atual: u8 = dados_mestre.read();
+        dados_mestre.write(atual | (1 << linha));
     }
 }
 

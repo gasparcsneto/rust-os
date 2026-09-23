@@ -152,6 +152,11 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     // SAFETY: `init_excecoes` já carregou a GDT de onde saem os seletores.
     unsafe { arch::init_usuario() };
 
+    // Com a paginação no ar, o timer provisório do boot pode dar lugar ao
+    // definitivo. Antes do escalonador de propósito: é o timer que o
+    // preempta, e trocá-lo com fios já rodando seria trocar o chão sob eles.
+    arch::init_timer_definitivo();
+
     // Com heap e paginação no ar, o escalonador pode adotar o contexto atual
     // como primeiro fio de execução. A partir daqui o kernel é preemptável: o
     // timer pode tirar a CPU de quem estiver rodando.

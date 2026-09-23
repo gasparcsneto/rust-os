@@ -374,6 +374,17 @@ pub fn dtb() -> *const u8 {
     DTB_INICIO.load(Ordering::Relaxed) as *const u8
 }
 
+/// Não há timer a promover: o do ARM já é o definitivo.
+///
+/// O timer genérico faz parte do próprio processador — cada núcleo tem o seu,
+/// acessado por registradores de sistema, e ele informa a própria frequência
+/// em `CNTFRQ_EL0`. É exatamente o que o x86 só alcança trocando o PIT pelo
+/// APIC local, e ainda assim precisando medir a frequência contra outro
+/// relógio.
+///
+/// Existe para que o caminho de boot seja o mesmo nas duas plataformas.
+pub fn init_timer_definitivo() {}
+
 /// Quanto do ECAM vale mapear: um barramento inteiro.
 ///
 /// Cada função tem 4 KiB de configuração, e um barramento tem 256 funções —
