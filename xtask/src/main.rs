@@ -954,6 +954,17 @@ fn comando_qemu(
     ]);
     qemu.args(["-device", "virtio-blk-pci,drive=disco0"]);
 
+    // E uma placa de rede virtio, tambem nas duas.
+    //
+    // `user` e a rede em modo usuario do QEMU: uma pilha TCP/IP inteira
+    // implementada no hospedeiro, que responde como se fosse um roteador em
+    // 10.0.2.2. Ela nao precisa de privilegio nenhum — uma `tap` precisaria —
+    // e responde a ARP, que e o menor teste de ponta a ponta que existe: o
+    // kernel transmite um quadro e recebe uma resposta que so pode ter vindo
+    // de fora dele.
+    qemu.args(["-netdev", "user,id=rede0"]);
+    qemu.args(["-device", "virtio-net-pci,netdev=rede0"]);
+
     qemu.args(["-m", "128M"]);
 
     // A ordem das opções `-serial` é significativa: a primeira vira a COM1 do

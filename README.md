@@ -612,8 +612,8 @@ padronizado.
       carregador de ELF64 com validação de tudo que vem do arquivo, e
       `fork`/`exec` com cópia integral do espaço de endereços.
       **Fase 1 completa.**
-- [ ] **Fase 2 — Drivers.** Enumeração PCI (**feito**), virtio-blk,
-      virtio-net, timer APIC/HPET, framebuffer gráfico.
+- [ ] **Fase 2 — Drivers.** Enumeração PCI (**feito**), virtio-blk
+      (**feito**), virtio-net, timer APIC/HPET, framebuffer gráfico.
 
 ## Licença
 
