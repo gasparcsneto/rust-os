@@ -719,6 +719,28 @@ fn irq_stats(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.begin_object()?;
     w.field_u64("total", crate::irq::total())?;
 
+    // Os dispositivos virtio aparecem em separado porque uma linha de PCI e
+    // compartilhada: no x86 o disco e a rede caem os dois na IRQ 11, e o
+    // contador daquela linha nao diz qual dos dois interrompeu. Este e o
+    // unico lugar onde a resposta existe.
+    w.key("virtio")?;
+    w.begin_array()?;
+    let mut erro = Ok(());
+    crate::virtio::com_interrupcoes(|nome, linha, avisos| {
+        if erro.is_err() {
+            return;
+        }
+        erro = (|| {
+            w.begin_object()?;
+            w.field_str("device", nome)?;
+            w.field_u64("line", linha as u64)?;
+            w.field_u64("count", avisos)?;
+            w.end_object()
+        })();
+    });
+    erro?;
+    w.end_array()?;
+
     w.key("lines")?;
     w.begin_array()?;
     let mut erro: Option<fmt::Error> = None;

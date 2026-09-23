@@ -3232,6 +3232,10 @@ static CASOS: &[Caso] = &[
         f: rede_contadores_acompanham_o_trafego,
     },
     Caso {
+        nome: "irq: o virtio interrompe de verdade",
+        f: irq_o_virtio_interrompe_de_verdade,
+    },
+    Caso {
         nome: "usuario: nao alcanca o kernel",
         f: usuario_nao_alcanca_o_kernel,
     },
@@ -3505,6 +3509,54 @@ fn rede_contadores_acompanham_o_trafego() -> Resultado {
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Roteamento de interrupção
+// ---------------------------------------------------------------------------
+
+/// Quantas voltas esperar a interrupção chegar depois de gerar o trabalho.
+///
+/// A entrega não é instantânea: o acesso ao disco roda com interrupções
+/// mascaradas, então o sinal fica pendente no controlador e só é entregue
+/// depois que a tranca do driver é solta. O laço aqui existe justamente para
+/// dar essa janela.
+const VOLTAS_ESPERANDO_INTERRUPCAO: u32 = 2_000_000;
+
+/// O dispositivo interrompe, e a interrupção chega.
+///
+/// # Por que este caso não é redundante com os outros
+///
+/// Porque disco e rede funcionam **sem** interrupção nenhuma. Os dois esperam
+/// em laço lendo o anel de usados, que o dispositivo preenche por DMA — todos
+/// os outros casos passariam com o roteamento completamente quebrado.
+///
+/// Descobrir a linha também não prova nada: um número lido do device tree ou
+/// de um registrador de configuração é só um número. O que prova é o
+/// contador subir, e ele só sobe se a linha certa foi encontrada, se ela foi
+/// liberada nos dois controladores certos, se o vetor existia na tabela, e se
+/// o dispositivo não foi instruído a ficar calado.
+///
+/// São cinco coisas, e este é o único caso que falha se qualquer uma delas
+/// estiver errada.
+fn irq_o_virtio_interrompe_de_verdade() -> Resultado {
+    let antes = crate::virtio::total_de_avisos();
+
+    // Gerar trabalho: uma leitura de disco basta, e é a mais barata.
+    let mut setor = [0u8; crate::virtio::blk::TAMANHO_DO_SETOR];
+    let Some(resultado) = crate::virtio::blk::com_o_disco(|d| d.ler_setor(1, &mut setor)) else {
+        return Err("nao ha disco nesta maquina");
+    };
+    resultado?;
+
+    for _ in 0..VOLTAS_ESPERANDO_INTERRUPCAO {
+        if crate::virtio::total_de_avisos() > antes {
+            return Ok(());
+        }
+        core::hint::spin_loop();
+    }
+
+    Err("o dispositivo trabalhou mas nenhuma interrupcao chegou")
 }
 
 /// Roda todos os casos e encerra o emulador com o veredito.
