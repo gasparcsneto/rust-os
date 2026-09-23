@@ -639,6 +639,20 @@ impl Transporte {
         // O valor escrito é o número da fila. Quando cada fila tem endereço
         // próprio o dispositivo já sabe qual é e o ignora; quando todas
         // compartilham um endereço, é ele que distingue.
-        let _ = self.notificacao.escrever_u16(onde, indice_da_fila);
+        //
+        // O deslocamento é calculado a partir de dois números do dispositivo,
+        // e a região de notificação tem o tamanho que ele declarou: os três
+        // podem não combinar. Quando não combinam, a escrita não acontece —
+        // e é preciso dizê-lo. Um aviso que não sai é um pedido que o
+        // dispositivo nunca vê, e o sintoma seria o driver acusando um tempo
+        // esgotado: o diagnóstico certo para a causa errada.
+        if !self.notificacao.escrever_u16(onde, indice_da_fila) {
+            crate::log_error!(
+                "virtio",
+                "a fila {} notifica em {:#x}, fora da regiao de notificacao",
+                indice_da_fila,
+                onde
+            );
+        }
     }
 }
