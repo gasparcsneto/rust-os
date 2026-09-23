@@ -119,6 +119,15 @@ const fn alinhar(valor: u64, a: u64) -> u64 {
     (valor + a - 1) & !(a - 1)
 }
 
+/// O bitmap de descritores livres quando a fila está vazia.
+///
+/// Um bit por descritor, e é por isso que [`DESCRITORES`] não pode passar de
+/// oito sem trocar o tipo. A asserção abaixo transforma esse acoplamento num
+/// erro de compilação em vez de num bug.
+const TODOS_LIVRES: u8 = u8::MAX;
+
+const _: () = assert!(DESCRITORES as u32 <= u8::BITS);
+
 // Que tudo caiba num frame é premissa do arquivo inteiro, não sorte. Se um dia
 // `DESCRITORES` crescer além do que cabe, a compilação para aqui em vez de o
 // kernel corromper o frame seguinte em tempo de execução.
@@ -152,6 +161,24 @@ pub struct Fila {
     /// com um ponteiro e não é — que é exatamente a confusão mais fácil de
     /// cometer neste arquivo.
     base: *mut u8,
+    /// Quais descritores estão livres, um bit por posição.
+    ///
+    /// # Por que agora há um alocador
+    ///
+    /// A primeira versão desta fila não tinha: o driver de bloco submete um
+    /// pedido e espera por ele, então a cadeia sempre começava em zero. Está
+    /// escrito no commit que a introduziu que um alocador sem dois clientes
+    /// seria um alocador sem teste.
+    ///
+    /// A placa de rede é o segundo cliente, e ela muda a forma do problema. A
+    /// fila de recepção precisa de vários buffers postados **antes** de
+    /// chegar qualquer pacote — o dispositivo escreve neles quando quiser, e
+    /// um buffer só não recebe nada enquanto o anterior não for colhido.
+    ///
+    /// Um bitmap, e não uma lista encadeada pelo campo `proximo` dos
+    /// descritores livres, que é a técnica clássica: a lista mora na memória
+    /// que o dispositivo também enxerga, e um `u8` aqui do lado do kernel não.
+    livres: u8,
     /// Quantos descritores da cadeia já foram publicados.
     ///
     /// Cresce para sempre e transborda de propósito: o formato define a
@@ -226,6 +253,7 @@ impl Fila {
             indice,
             notificacao,
             base,
+            livres: TODOS_LIVRES,
             proximo_disponivel: 0,
             ultimo_usado: 0,
         })
@@ -261,6 +289,29 @@ impl Fila {
         }
     }
 
+    /// Lê um descritor de volta da tabela.
+    ///
+    /// Usado só para percorrer uma cadeia que terminou, em
+    /// [`Fila::liberar_cadeia`]. Os campos vêm em little-endian, como foram
+    /// escritos.
+    fn ler_descritor(&self, posicao: u16) -> Descritor {
+        // SAFETY: o chamador confere que `posicao` é menor que `DESCRITORES`
+        // antes de chamar, e a asserção de compilação garante que a tabela
+        // inteira cabe no frame.
+        let bruto = unsafe {
+            core::ptr::read_volatile(
+                self.base.add((DESC_EM + 16 * posicao as u64) as usize) as *const Descritor
+            )
+        };
+
+        Descritor {
+            endereco: u64::from_le(bruto.endereco),
+            tamanho: u32::from_le(bruto.tamanho),
+            flags: u16::from_le(bruto.flags),
+            proximo: u16::from_le(bruto.proximo),
+        }
+    }
+
     /// Lê um `u16` de um deslocamento dentro do frame da fila.
     fn ler_u16(&self, deslocamento: u64) -> u16 {
         // SAFETY: todos os chamadores usam deslocamentos derivados das
@@ -280,6 +331,80 @@ impl Fila {
         };
     }
 
+    /// Reserva `quantos` descritores, ou `None` se não há tantos livres.
+    ///
+    /// Devolve as posições em ordem crescente do bitmap, o que não é nada
+    /// além de determinismo: uma fila que entrega sempre as mesmas posições
+    /// para a mesma sequência de pedidos é uma fila cujo despejo se lê.
+    fn reservar(&mut self, quantos: usize, posicoes: &mut [u16]) -> Option<()> {
+        if quantos > posicoes.len() || (self.livres.count_ones() as usize) < quantos {
+            return None;
+        }
+
+        let mut achados = 0;
+        for posicao in 0..DESCRITORES {
+            if achados == quantos {
+                break;
+            }
+            if self.livres & (1 << posicao) != 0 {
+                posicoes[achados] = posicao;
+                achados += 1;
+            }
+        }
+
+        // Só marcamos como ocupados depois de saber que todos couberam, para
+        // que uma reserva que falha não deixe descritores perdidos.
+        for &posicao in &posicoes[..quantos] {
+            self.livres &= !(1 << posicao);
+        }
+        Some(())
+    }
+
+    /// Devolve ao bitmap a cadeia que começa em `cabeca`.
+    ///
+    /// A cadeia é percorrida pelos próprios descritores, seguindo `proximo`
+    /// enquanto `SEGUE` estiver aceso. É a mesma travessia que o dispositivo
+    /// fez, o que significa que não precisamos guardar o comprimento de cada
+    /// cadeia em lugar nenhum — a resposta já está escrita na tabela.
+    ///
+    /// O teto de voltas existe porque a tabela é memória que o dispositivo
+    /// também enxerga. Um `proximo` corrompido — por defeito ou por malícia —
+    /// faria um ciclo, e um laço infinito dentro de uma seção com
+    /// interrupções mascaradas é um kernel travado sem diagnóstico.
+    fn liberar_cadeia(&mut self, cabeca: u16) {
+        let mut posicao = cabeca;
+        for _ in 0..DESCRITORES {
+            if posicao >= DESCRITORES {
+                crate::log_warn!("virtio", "cadeia aponta para o descritor {}", posicao);
+                return;
+            }
+
+            let descritor = self.ler_descritor(posicao);
+            self.livres |= 1 << posicao;
+
+            if descritor.flags & SEGUE == 0 {
+                return;
+            }
+            posicao = descritor.proximo;
+        }
+        crate::log_warn!("virtio", "cadeia sem fim a partir do descritor {}", cabeca);
+    }
+
+    /// O endereço físico que o descritor `posicao` guarda.
+    ///
+    /// Serve a quem precisa saber **de qual buffer** veio uma cadeia colhida.
+    /// A alternativa seria uma tabela paralela do índice da cadeia para o
+    /// buffer, mantida pelo driver — e duas cópias da mesma informação são
+    /// duas coisas que podem divergir.
+    pub fn endereco_do_descritor(&self, posicao: u16) -> Option<u64> {
+        (posicao < DESCRITORES).then(|| self.ler_descritor(posicao).endereco)
+    }
+
+    /// Quantos descritores estão livres agora.
+    pub fn disponiveis(&self) -> usize {
+        self.livres.count_ones() as usize
+    }
+
     /// Publica uma cadeia de buffers e avisa o dispositivo.
     ///
     /// Cada entrada de `cadeia` é `(endereço físico, tamanho, o dispositivo
@@ -288,23 +413,25 @@ impl Fila {
     /// estado.
     ///
     /// Devolve o índice do primeiro descritor — é por ele que o dispositivo
-    /// vai identificar a cadeia quando terminar.
+    /// vai identificar a cadeia quando terminar, e é ele que [`Fila::colher`]
+    /// devolve para que os descritores voltem ao bitmap.
     pub fn submeter(&mut self, cadeia: &[(u64, u32, bool)]) -> Result<u16, &'static str> {
         if cadeia.is_empty() {
             return Err("cadeia vazia");
         }
-        if cadeia.len() > DESCRITORES as usize {
+
+        let mut posicoes = [0u16; DESCRITORES as usize];
+        if cadeia.len() > posicoes.len() {
             return Err("cadeia maior que a fila");
         }
+        if self.reservar(cadeia.len(), &mut posicoes).is_none() {
+            return Err("sem descritores livres na fila");
+        }
 
-        // Este driver tem um pedido em voo por vez, então a cadeia sempre
-        // começa em zero. Não há alocador de descritores porque não há
-        // concorrência a arbitrar — e um alocador que nunca vê dois clientes é
-        // um alocador sem teste.
-        let cabeca = 0u16;
+        let cabeca = posicoes[0];
 
-        for (posicao, &(endereco, tamanho, escrita)) in cadeia.iter().enumerate() {
-            let ultimo = posicao + 1 == cadeia.len();
+        for (indice, &(endereco, tamanho, escrita)) in cadeia.iter().enumerate() {
+            let ultimo = indice + 1 == cadeia.len();
             let mut flags = 0;
             if !ultimo {
                 flags |= SEGUE;
@@ -315,17 +442,11 @@ impl Fila {
 
             // `proximo` só tem significado quando `SEGUE` está aceso; no
             // último descritor ele vai zerado em vez de apontar para uma
-            // posição que não existe. O dispositivo ignoraria o valor de
-            // qualquer forma — mas um índice fora da tabela escrito na
-            // tabela é o tipo de coisa que engana quem lê um despejo dela.
-            let proximo = if ultimo {
-                0
-            } else {
-                cabeca + posicao as u16 + 1
-            };
+            // posição que a cadeia não usa.
+            let proximo = if ultimo { 0 } else { posicoes[indice + 1] };
 
             self.escrever_descritor(
-                cabeca + posicao as u16,
+                posicoes[indice],
                 Descritor {
                     endereco,
                     tamanho,
@@ -393,6 +514,15 @@ impl Fila {
         };
 
         self.ultimo_usado = self.ultimo_usado.wrapping_add(1);
-        Some((u32::from_le(usado.id) as u16, u32::from_le(usado.tamanho)))
+
+        let cabeca = u32::from_le(usado.id) as u16;
+
+        // Os descritores voltam ao bitmap aqui, e não em quem chamou. Deixar
+        // isso para o chamador seria a mesma decisão que obriga a lembrar de
+        // um `free` — e a fila de recepção submete muito mais vezes do que o
+        // disco, então esquecer uma vez a esgotaria em silêncio.
+        self.liberar_cadeia(cabeca);
+
+        Some((cabeca, u32::from_le(usado.tamanho)))
     }
 }
