@@ -193,3 +193,22 @@ são outras. O resto é idêntico — e a parte que este projeto leva a sério �
 espúrio no enquadramento do canal, com o endereço não canônico em
 `paging.translate`, com o vazamento de tabelas intermediárias e com o estouro
 de pilha que o otimizador apagava.
+
+### Quando o comportamento está certo e o defeito não
+
+Nem todo defeito tem sintoma observável, e os que não têm são os que a suíte
+não pega — porque uma suíte pergunta pelo resultado.
+
+O driver de rede entregava o mesmo buffer ao dispositivo mais de uma vez, o
+que perde um pacote e duplica outro. O ARP continuava indo e voltando, os
+contadores continuavam batendo, e as noventa e cinco perguntas da suíte
+continuavam respondidas — todas sobre o resultado, nenhuma sobre o meio.
+
+O que expôs o defeito foi uma sonda sobre um invariante interno: quantos
+descritores estão em uso. Quatro buffers deveriam gastar quatro; gastavam
+oito. A contagem não é o comportamento, é a estrutura por baixo dele, e é aí
+que um defeito assim aparece primeiro.
+
+A regra que ficou: **quando o comportamento observável está certo e a
+desconfiança persiste, instrumente a invariante, não a saída** — e, quando a
+invariante se confirma errada, é ela que vira o caso na suíte.

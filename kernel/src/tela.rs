@@ -266,7 +266,10 @@ impl Tela {
     /// # Safety
     ///
     /// `base` precisa apontar para pelo menos
-    /// `stride * altura * bytes_por_pixel` bytes graváveis.
+    /// `stride * altura * bytes_por_pixel` bytes graváveis, e a geometria
+    /// precisa satisfazer [`geometria_coerente`] — este construtor não passa
+    /// por [`registrar`], então é o chamador quem garante as duas relações de
+    /// que a aritmética de pixel depende.
     #[cfg(feature = "modo-teste")]
     pub const unsafe fn sobre(
         base: u64,

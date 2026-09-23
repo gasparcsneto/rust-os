@@ -217,12 +217,15 @@ static SAIDAS: AtomicU64 = AtomicU64::new(0);
 /// Confere que `[inicio, inicio + tamanho)` está inteiramente na faixa do
 /// usuário.
 ///
-/// # Por que a aritmética é toda saturante
+/// # Por que a soma é conferida
 ///
 /// Porque os dois números vêm do usuário. `inicio + tamanho` com valores
 /// grandes transborda, e um transbordo silencioso produziria uma faixa que
-/// *parece* pequena e válida enquanto aponta para qualquer lugar. Saturar
-/// transforma o ataque num erro comum.
+/// *parece* pequena e válida enquanto aponta para qualquer lugar.
+///
+/// `checked_add` transforma o ataque num erro comum — e num erro, e não num
+/// número. Saturar também impediria o transbordo, mas devolveria uma faixa
+/// que continua parecendo legítima; recusar diz o que aconteceu.
 pub fn validar_faixa(inicio: u64, tamanho: u64) -> Result<(), i64> {
     if tamanho == 0 {
         return Ok(());
