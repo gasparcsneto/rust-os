@@ -232,13 +232,32 @@ impl Fila {
     }
 
     /// Escreve um descritor na posição indicada.
+    ///
+    /// A conversão para little-endian acontece aqui, e não em quem monta o
+    /// descritor, para que o resto do arquivo manipule números e não
+    /// representações. É o mesmo contrato dos acessadores de MMIO: o formato
+    /// é little-endian por especificação, em qualquer arquitetura, e nos dois
+    /// alvos deste kernel a conversão não gera instrução nenhuma.
+    ///
+    /// Ela estava faltando: a leitura do anel de usados já era explícita, a
+    /// escrita do descritor não. Num arquivo cujo assunto inteiro é um
+    /// contrato de representação com software que não é nosso, meia
+    /// explicitação é pior que nenhuma — ela sugere que o outro lado foi
+    /// considerado.
     fn escrever_descritor(&self, posicao: u16, descritor: Descritor) {
+        let bruto = Descritor {
+            endereco: descritor.endereco.to_le(),
+            tamanho: descritor.tamanho.to_le(),
+            flags: descritor.flags.to_le(),
+            proximo: descritor.proximo.to_le(),
+        };
+
         // SAFETY: `posicao` é sempre menor que `DESCRITORES`, e a asserção de
         // compilação no topo garante que a tabela inteira cabe no frame.
         unsafe {
             let ponteiro =
                 self.base.add((DESC_EM + 16 * posicao as u64) as usize) as *mut Descritor;
-            core::ptr::write_volatile(ponteiro, descritor);
+            core::ptr::write_volatile(ponteiro, bruto);
         }
     }
 
@@ -294,13 +313,24 @@ impl Fila {
                 flags |= ESCRITA_DO_DISPOSITIVO;
             }
 
+            // `proximo` só tem significado quando `SEGUE` está aceso; no
+            // último descritor ele vai zerado em vez de apontar para uma
+            // posição que não existe. O dispositivo ignoraria o valor de
+            // qualquer forma — mas um índice fora da tabela escrito na
+            // tabela é o tipo de coisa que engana quem lê um despejo dela.
+            let proximo = if ultimo {
+                0
+            } else {
+                cabeca + posicao as u16 + 1
+            };
+
             self.escrever_descritor(
                 cabeca + posicao as u16,
                 Descritor {
                     endereco,
                     tamanho,
                     flags,
-                    proximo: cabeca + posicao as u16 + 1,
+                    proximo,
                 },
             );
         }
