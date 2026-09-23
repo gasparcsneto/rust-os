@@ -36,7 +36,9 @@
 //!   aperto de mão que o liga.
 //! - [`fila`]: a virtqueue, que é o canal por onde os pedidos passam.
 //! - [`blk`]: o disco.
+//! - [`net`]: a placa de rede.
 
 pub mod blk;
 pub mod fila;
+pub mod net;
 pub mod transporte;

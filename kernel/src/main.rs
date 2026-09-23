@@ -59,6 +59,7 @@ mod mmio;
 mod paginacao;
 mod pci;
 mod qemu;
+mod rede;
 mod serial;
 mod tarefas;
 mod tempo;
@@ -165,6 +166,7 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     // ligados. A ordem não é escolha: um driver virtio precisa dos BARs já
     // atribuídos e do decodificador já ligado, que é o que a varredura faz.
     virtio::blk::init();
+    virtio::net::init();
 
     // Com heap e interrupções no ar, a serial do agente pode deixar de ser
     // consultada em laço e passar a avisar quando chega um byte. É o que
