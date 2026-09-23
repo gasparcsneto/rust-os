@@ -401,6 +401,42 @@ unsafe fn ler_ranges(dtb: *const u8, prop: &Propriedade) -> Option<(u64, u64, u6
     None
 }
 
+/// Acha o nó do host bridge PCI e devolve a numeração dele no percurso.
+///
+/// Procuramos pelo `compatible`, e não pelo nome do nó, porque o nome carrega
+/// o endereço (`pcie@10000000`) e compará-lo seria fixar o endereço por outro
+/// caminho.
+///
+/// A closure fica fora da chamada de propósito. Aninhá-la dentro de um bloco
+/// `unsafe` faria o corpo dela herdar esse bloco, e cada desreferência lá
+/// dentro deixaria de ser marcada — o `unsafe` viraria ruído em vez de
+/// sinalização.
+///
+/// # Safety
+/// `dtb` precisa apontar para um device tree válido, ou ser nulo.
+unsafe fn no_do_host_bridge(dtb: *const u8) -> Option<u32> {
+    let mut alvo: Option<u32> = None;
+    let mut procurar = |prop: &Propriedade| {
+        if alvo.is_some() || prop.profundidade != FILHO_DA_RAIZ || prop.nome != b"compatible" {
+            return;
+        }
+        // `compatible` é uma lista de strings terminadas em zero, da mais
+        // específica para a mais genérica.
+        // SAFETY: o percurso garantiu que a faixa está dentro do blob.
+        let lista = unsafe { core::slice::from_raw_parts(dtb.add(prop.dados), prop.tamanho) };
+        if lista
+            .split(|&b| b == 0)
+            .any(|s| s == b"pci-host-ecam-generic")
+        {
+            alvo = Some(prop.no_seq);
+        }
+    };
+
+    // SAFETY: delegada ao chamador.
+    let _ = unsafe { percorrer(dtb, &mut procurar) };
+    alvo
+}
+
 /// Descreve o barramento PCI desta placa, lendo o device tree.
 ///
 /// # Por que perguntar em vez de fixar
@@ -430,31 +466,8 @@ unsafe fn ler_ranges(dtb: *const u8, prop: &Propriedade) -> Option<(u64, u64, u6
 ///
 /// `dtb` precisa apontar para um device tree válido, ou ser nulo.
 pub unsafe fn encontrar_barramento_pci(dtb: *const u8) -> Option<BarramentoPci> {
-    // As closures ficam fora da chamada de propósito. Aninhá-las dentro de um
-    // bloco `unsafe` faria o corpo delas herdar esse bloco, e cada
-    // desreferência lá dentro deixaria de ser marcada — o `unsafe` viraria
-    // ruído em vez de sinalização.
-    let mut alvo: Option<u32> = None;
-    let mut procurar_o_no = |prop: &Propriedade| {
-        if alvo.is_some() || prop.profundidade != FILHO_DA_RAIZ || prop.nome != b"compatible" {
-            return;
-        }
-        // `compatible` é uma lista de strings terminadas em zero, da mais
-        // específica para a mais genérica.
-        // SAFETY: o percurso garantiu que a faixa está dentro do blob.
-        let lista = unsafe { core::slice::from_raw_parts(dtb.add(prop.dados), prop.tamanho) };
-        if lista
-            .split(|&b| b == 0)
-            .any(|s| s == b"pci-host-ecam-generic")
-        {
-            alvo = Some(prop.no_seq);
-        }
-    };
-
     // SAFETY: delegada ao chamador.
-    let _ = unsafe { percorrer(dtb, &mut procurar_o_no) };
-
-    let alvo = alvo?;
+    let alvo = unsafe { no_do_host_bridge(dtb)? };
     let mut ecam: Option<(u64, u64)> = None;
     let mut mmio32: Option<(u64, u64, u64)> = None;
 
@@ -484,4 +497,206 @@ pub unsafe fn encontrar_barramento_pci(dtb: *const u8) -> Option<BarramentoPci> 
         ecam: ecam?,
         mmio32,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Roteamento de interrupção
+// ---------------------------------------------------------------------------
+
+/// Uma interrupção, como o controlador que a atende a descreve.
+///
+/// Os três campos são o especificador de um GIC: que classe de linha é, qual
+/// o número dentro dela, e como o sinal se comporta. Quem os traduz em INTID
+/// é [`super::gic`] — este arquivo lê o device tree e não sabe o que os
+/// números significam.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Interrupcao {
+    pub tipo: u32,
+    pub numero: u32,
+    pub flags: u32,
+}
+
+/// Quantas células um nó declara para os filhos dele.
+#[derive(Clone, Copy)]
+struct Larguras {
+    endereco: u32,
+    interrupcao: u32,
+}
+
+/// Quantas células um `phandle` declara, para endereço e para interrupção.
+///
+/// # Por que resolver em vez de fixar
+///
+/// Porque é o que determina o **tamanho de cada entrada** da `interrupt-map`,
+/// e errar o tamanho não produz erro: produz uma leitura deslocada, que
+/// devolve um número de linha plausível e errado. O kernel habilitaria a
+/// interrupção de outro dispositivo e esperaria para sempre pela sua.
+///
+/// Na máquina `virt` o controlador declara duas células de endereço e três de
+/// interrupção — dez células por entrada, contando as quatro do lado do
+/// filho. Nada disso é fixo pela arquitetura.
+///
+/// # Safety
+/// `dtb` precisa apontar para um device tree válido, ou ser nulo.
+unsafe fn larguras_do_phandle(dtb: *const u8, phandle: u32) -> Option<Larguras> {
+    // Primeira passada: qual nó tem este `phandle`.
+    let mut alvo: Option<u32> = None;
+    let mut procurar = |prop: &Propriedade| {
+        if alvo.is_some() || prop.nome != b"phandle" || prop.tamanho < 4 {
+            return;
+        }
+        // SAFETY: o percurso garantiu que `dados` está dentro do blob e que
+        // há ao menos quatro bytes.
+        if unsafe { be32(dtb, prop.dados) } == phandle {
+            alvo = Some(prop.no_seq);
+        }
+    };
+    // SAFETY: delegada ao chamador.
+    let _ = unsafe { percorrer(dtb, &mut procurar) };
+    let alvo = alvo?;
+
+    // Segunda passada: as larguras que ele declara.
+    //
+    // Um controlador que não declare `#address-cells` não tem endereço do
+    // lado dele nas entradas, e zero é a resposta certa — diferente do padrão
+    // de dois que a especificação manda usar na raiz. Já `#interrupt-cells`
+    // é obrigatório num controlador de interrupção, e a ausência dele é um
+    // blob malformado, não um caso a adivinhar.
+    let mut endereco = 0u32;
+    let mut interrupcao: Option<u32> = None;
+    let mut ler = |prop: &Propriedade| {
+        if prop.no_seq != alvo || prop.tamanho < 4 {
+            return;
+        }
+        // SAFETY: mesma justificativa.
+        let valor = unsafe { be32(dtb, prop.dados) };
+        if prop.nome == b"#address-cells" {
+            endereco = valor;
+        } else if prop.nome == b"#interrupt-cells" {
+            interrupcao = Some(valor);
+        }
+    };
+    // SAFETY: delegada ao chamador.
+    let _ = unsafe { percorrer(dtb, &mut ler) };
+
+    Some(Larguras {
+        endereco,
+        interrupcao: interrupcao?,
+    })
+}
+
+/// Descobre em que linha do controlador um dispositivo PCI interrompe.
+///
+/// # Como a `interrupt-map` funciona
+///
+/// É uma tabela de tradução, e não uma fórmula. Cada entrada diz "um
+/// dispositivo *assim*, no pino *tal*, chega no controlador *aquele*, na
+/// linha *tal*". O "assim" é comparado depois de passar por uma máscara que a
+/// própria placa declara — na `virt`, ela deixa passar só dois bits do número
+/// do slot e três do pino.
+///
+/// A máquina `virt` embaralha as linhas entre os slots: o slot 0 no pino 1
+/// cai na SPI 3, o slot 1 no mesmo pino cai na 4, e assim por diante. É um
+/// arranjo deliberado, para que quatro placas de expansão não disputem todas
+/// a mesma linha. Reproduzir esse embaralhamento em código seria copiar uma
+/// decisão de layout de placa para dentro do kernel; ler a tabela é o que
+/// funciona também na placa seguinte.
+///
+/// `endereco_alto` é a primeira célula do endereço PCI do dispositivo — a que
+/// carrega barramento, slot e função.
+///
+/// # Safety
+/// `dtb` precisa apontar para um device tree válido, ou ser nulo.
+pub unsafe fn interrupcao_pci(dtb: *const u8, endereco_alto: u32, pino: u8) -> Option<Interrupcao> {
+    let alvo = unsafe { no_do_host_bridge(dtb)? };
+
+    // Recolhemos as duas propriedades numa passada; qual vem primeiro no blob
+    // não está especificado, e já houve um bug aqui por supor uma ordem.
+    let mut mascara: Option<(usize, usize)> = None;
+    let mut mapa: Option<(usize, usize)> = None;
+    let mut ler = |prop: &Propriedade| {
+        if prop.no_seq != alvo {
+            return;
+        }
+        if prop.nome == b"interrupt-map-mask" {
+            mascara = Some((prop.dados, prop.tamanho));
+        } else if prop.nome == b"interrupt-map" {
+            mapa = Some((prop.dados, prop.tamanho));
+        }
+    };
+    // SAFETY: delegada ao chamador.
+    let _ = unsafe { percorrer(dtb, &mut ler) };
+
+    let (mascara_em, mascara_bytes) = mascara?;
+    let (mapa_em, mapa_bytes) = mapa?;
+
+    // A máscara cobre o endereço do filho e o pino: as mesmas larguras que o
+    // binding PCI fixa, mais uma célula de interrupção.
+    const CELULAS_DE_INTERRUPCAO_PCI: usize = 1;
+    let celulas_do_filho = CELULAS_DE_ENDERECO_PCI + CELULAS_DE_INTERRUPCAO_PCI;
+    if mascara_bytes < celulas_do_filho * 4 {
+        return None;
+    }
+
+    // SAFETY: o percurso garantiu que a faixa está no blob, e o tamanho foi
+    // conferido acima.
+    let (mascara_alto, mascara_do_pino) = unsafe {
+        (
+            be32(dtb, mascara_em),
+            be32(dtb, mascara_em + CELULAS_DE_ENDERECO_PCI * 4),
+        )
+    };
+
+    // O phandle do controlador está na entrada, logo depois do pino. Ele é o
+    // mesmo em todas — o que varia é a linha —, então lemos o da primeira
+    // para descobrir o tamanho das demais.
+    if mapa_bytes < (celulas_do_filho + 1) * 4 {
+        return None;
+    }
+    // SAFETY: mesma justificativa.
+    let phandle = unsafe { be32(dtb, mapa_em + celulas_do_filho * 4) };
+    // SAFETY: delegada ao chamador.
+    let larguras = unsafe { larguras_do_phandle(dtb, phandle)? };
+
+    let por_entrada =
+        celulas_do_filho + 1 + larguras.endereco as usize + larguras.interrupcao as usize;
+    if larguras.interrupcao < 3 {
+        // Um especificador com menos de três células não é o de um GIC, e
+        // interpretá-lo como se fosse leria campos que não existem.
+        return None;
+    }
+
+    let procurado_alto = endereco_alto & mascara_alto;
+    let procurado_pino = pino as u32 & mascara_do_pino;
+
+    let mut deslocamento = 0usize;
+    while deslocamento + por_entrada * 4 <= mapa_bytes {
+        let entrada = mapa_em + deslocamento;
+
+        // SAFETY: o laço confere que a entrada inteira cabe no tamanho que o
+        // percurso reportou.
+        let combina = unsafe {
+            be32(dtb, entrada) & mascara_alto == procurado_alto
+                && be32(dtb, entrada + CELULAS_DE_ENDERECO_PCI * 4) & mascara_do_pino
+                    == procurado_pino
+        };
+
+        if combina {
+            // O especificador do pai vem depois do phandle e do endereço do
+            // lado dele. As três primeiras células são as do GIC.
+            let em = entrada + (celulas_do_filho + 1 + larguras.endereco as usize) * 4;
+            // SAFETY: mesma justificativa do laço.
+            return Some(unsafe {
+                Interrupcao {
+                    tipo: be32(dtb, em),
+                    numero: be32(dtb, em + 4),
+                    flags: be32(dtb, em + 8),
+                }
+            });
+        }
+
+        deslocamento += por_entrada * 4;
+    }
+
+    None
 }
