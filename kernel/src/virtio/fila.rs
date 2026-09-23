@@ -103,13 +103,27 @@ const DISP_FLAGS: u64 = 0;
 const DISP_IDX: u64 = 2;
 const DISP_ANEL: u64 = 4;
 
-/// Pede ao dispositivo que não interrompa ao consumir um buffer.
+/// Pedir ao dispositivo que **não** interrompa ao consumir um buffer.
 ///
-/// Este driver espera pelo resultado em laço, e nenhuma linha de interrupção
-/// do virtio está ligada a handler nenhum. Sem este bit o dispositivo
-/// sinalizaria a cada pedido, numa linha que ninguém atende — barulho no
-/// melhor caso, e no pior uma interrupção que o kernel não sabe reconhecer.
+/// Era o que esta fila fazia enquanto nenhuma linha de interrupção do virtio
+/// estava ligada a handler nenhum: sem o bit, o dispositivo sinalizaria a cada
+/// pedido numa linha que ninguém atende.
+///
+/// A premissa deixou de valer. Com o roteamento no ar, o bit passa a ser
+/// exatamente o que impede a interrupção de chegar — e um driver que registra
+/// um handler e depois pede para não ser chamado é a contradição mais difícil
+/// de enxergar num despejo de registradores, porque os dois lados parecem
+/// certos isoladamente.
+///
+/// Fica nomeado, e apagado: o valor escrito é zero. Quando houver motivo para
+/// suprimir interrupções numa fila específica — a de transmissão é a
+/// candidata óbvia, já que a conclusão dela não interessa a ninguém —, o bit
+/// está aqui e a decisão será por fila, não por falta de handler.
+#[allow(dead_code)]
 const SEM_INTERROMPER: u16 = 1;
+
+/// O que de fato vai no campo de flags do anel de disponíveis.
+const AVISAR_SEMPRE: u16 = 0;
 
 /// Deslocamentos dentro do anel de usados.
 const USADOS_IDX: u64 = 2;
@@ -221,14 +235,18 @@ impl Fila {
         unsafe { core::ptr::write_bytes(base, 0, TAMANHO_PAGINA as usize) };
 
         // Antes de entregar a fila ao dispositivo, e não depois: a partir da
-        // habilitação ele pode ler o anel, e o pedido de não interromper
-        // precisa já estar lá.
+        // habilitação ele pode ler o anel, e o que temos a dizer sobre
+        // interrupções precisa já estar lá.
+        //
+        // Escrever zero é redundante com a limpeza do frame acima, e está
+        // aqui de propósito: o valor deste campo é uma decisão, e uma decisão
+        // que depende de o frame ter sido zerado é uma decisão invisível.
         // SAFETY: o frame é desta fila, e o deslocamento é o do campo de flags
         // do anel de disponíveis.
         unsafe {
             core::ptr::write_volatile(
                 base.add((DISP_EM + DISP_FLAGS) as usize) as *mut u16,
-                SEM_INTERROMPER.to_le(),
+                AVISAR_SEMPRE.to_le(),
             )
         };
 

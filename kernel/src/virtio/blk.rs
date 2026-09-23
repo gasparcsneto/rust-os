@@ -213,6 +213,8 @@ impl Disco {
         // escrita a fila não existia para ele.
         transporte.liberar();
 
+        super::ligar_interrupcao(d, &transporte, super::NOME_DISCO);
+
         Ok(Disco {
             transporte,
             fila,

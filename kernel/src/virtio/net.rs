@@ -235,6 +235,8 @@ impl Placa {
         placa.transporte.liberar();
         placa.recepcao.notificar(&placa.transporte);
 
+        super::ligar_interrupcao(d, &placa.transporte, super::NOME_REDE);
+
         Ok(placa)
     }
 

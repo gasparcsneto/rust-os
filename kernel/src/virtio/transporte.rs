@@ -155,11 +155,6 @@ acessadores! {
 const CFG_COMUM: u8 = 1;
 const CFG_NOTIFICACAO: u8 = 2;
 /// A região que diz **por que** uma interrupção chegou.
-///
-/// Listada, e não usada: este driver espera em laço, e a única coisa que ela
-/// responde é uma pergunta que ninguém faz ainda. Nomeá-la evita que o 3 volte
-/// a parecer um número livre para outra coisa.
-#[allow(dead_code)]
 const CFG_ISR: u8 = 3;
 const CFG_DO_DISPOSITIVO: u8 = 4;
 
@@ -211,6 +206,12 @@ pub struct Transporte {
     /// disco, o endereço MAC da placa de rede. Opcional: nem todo dispositivo
     /// tem.
     do_dispositivo: Option<Mmio>,
+    /// O registrador que diz **por que** uma interrupção chegou.
+    ///
+    /// Passou a importar quando as interrupções passaram a ser entregues: uma
+    /// linha de PCI é de nível, e é a leitura deste registrador que faz o
+    /// dispositivo soltá-la. Ver [`crate::virtio::atender_interrupcao`].
+    isr: Option<Mmio>,
 }
 
 /// Quanto a configuração comum precisa ter para conter tudo o que lemos dela.
@@ -292,6 +293,7 @@ impl Transporte {
         let mut notificacao = None;
         let mut multiplicador = 0u32;
         let mut do_dispositivo = None;
+        let mut isr = None;
 
         // Um BAR é mapeado no máximo uma vez, e é por isso que há um cache em
         // vez de uma chamada direta: as três regiões que interessam moram, no
@@ -332,7 +334,10 @@ impl Transporte {
                 // para o BAR de I/O legado — o que este kernel deliberadamente
                 // não atribui. Resolvê-la para depois descartá-la só produzia
                 // um aviso sobre algo que está certo.
-                if !matches!(tipo, CFG_COMUM | CFG_NOTIFICACAO | CFG_DO_DISPOSITIVO) {
+                if !matches!(
+                    tipo,
+                    CFG_COMUM | CFG_NOTIFICACAO | CFG_DO_DISPOSITIVO | CFG_ISR
+                ) {
                     continue;
                 }
 
@@ -394,6 +399,7 @@ impl Transporte {
                         notificacao = Some(fatia);
                     }
                     CFG_DO_DISPOSITIVO => do_dispositivo = Some(fatia),
+                    CFG_ISR => isr = Some(fatia),
                     // O filtro acima já garantiu que não chegamos aqui.
                     _ => {}
                 }
@@ -415,12 +421,23 @@ impl Transporte {
             notificacao,
             multiplicador_de_notificacao: multiplicador,
             do_dispositivo,
+            isr,
         })
     }
 
     /// A configuração específica do tipo de dispositivo, se houver.
     pub fn configuracao(&self) -> Option<Mmio> {
         self.do_dispositivo
+    }
+
+    /// Endereço do registrador de estado de interrupção, para o handler.
+    ///
+    /// Entregue como número, e não como [`Mmio`], porque quem o usa é um
+    /// handler de interrupção que precisa guardá-lo num atômico. Um tipo com
+    /// invariantes não caberia lá, e afrouxar as invariantes para caber seria
+    /// pior que entregar o número cru.
+    pub fn endereco_do_isr(&self) -> Option<u64> {
+        self.isr.map(|regiao| regiao.base)
     }
 
     /// Quantas filas o dispositivo oferece.

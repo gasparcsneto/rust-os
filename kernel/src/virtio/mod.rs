@@ -42,3 +42,207 @@ pub mod blk;
 pub mod fila;
 pub mod net;
 pub mod transporte;
+
+// ---------------------------------------------------------------------------
+// Interrupções
+// ---------------------------------------------------------------------------
+
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+/// Quantos dispositivos virtio podem pedir para ser avisados.
+///
+/// Dois hoje — disco e rede —, e o teto existe para que a tabela seja um
+/// `static` de tamanho fixo em vez de depender do heap. Um handler de
+/// interrupção não é lugar de alocar.
+const MAX_REGISTROS: usize = 4;
+
+/// Nenhuma linha. `u32::MAX` porque zero é uma linha válida no PIC.
+const SEM_LINHA: u32 = u32::MAX;
+
+/// O que o handler precisa saber sobre um dispositivo.
+///
+/// # Por que isto fica fora da tranca do driver
+///
+/// Porque um handler de interrupção não pode esperar por um spinlock. Ele
+/// roda no meio do que estiver executando, e se esse código já segurasse a
+/// tranca do driver, o handler giraria para sempre esperando por alguém que
+/// só continua quando ele terminar — o deadlock clássico.
+///
+/// Hoje o kernel tem um núcleo só e o acesso ao driver mascara interrupções,
+/// então a situação não ocorre. Depender disso seria depender de duas coisas
+/// que mudam: o número de núcleos e a disciplina de quem escrever o próximo
+/// driver.
+///
+/// O que o handler faz com atômicos é tudo o que ele precisa: reconhecer a
+/// interrupção no dispositivo e contá-la.
+struct Registro {
+    /// Em que linha do controlador este dispositivo interrompe.
+    linha: AtomicU32,
+    /// Endereço virtual do registrador de estado de interrupção do
+    /// dispositivo, ou zero se ele não publicou um.
+    isr: AtomicU64,
+    /// Quantas vezes este dispositivo interrompeu.
+    avisos: AtomicU64,
+    /// Um nome para o relatório do agente.
+    nome: AtomicU32,
+}
+
+/// Os nomes possíveis, como números, porque um `&'static str` não cabe num
+/// atômico. São dois, e a tabela é a tradução.
+const NOME_NENHUM: u32 = 0;
+const NOME_DISCO: u32 = 1;
+const NOME_REDE: u32 = 2;
+
+fn nome_de(codigo: u32) -> &'static str {
+    match codigo {
+        NOME_DISCO => "disco",
+        NOME_REDE => "rede",
+        _ => "?",
+    }
+}
+
+#[allow(clippy::declare_interior_mutable_const)]
+const REGISTRO_VAZIO: Registro = Registro {
+    linha: AtomicU32::new(SEM_LINHA),
+    isr: AtomicU64::new(0),
+    avisos: AtomicU64::new(0),
+    nome: AtomicU32::new(NOME_NENHUM),
+};
+
+static REGISTROS: [Registro; MAX_REGISTROS] = [REGISTRO_VAZIO; MAX_REGISTROS];
+
+/// Liga a interrupção de um dispositivo: registra o dono e libera a linha.
+///
+/// Os dois drivers fazem exatamente isto, e a ordem importa — registrar
+/// **antes** de liberar. Uma linha liberada sem dono registrado entrega uma
+/// interrupção que ninguém reconhece no dispositivo, e uma linha de nível que
+/// ninguém reconhece dispara de novo imediatamente, para sempre.
+///
+/// Nada disto é obrigatório para o driver funcionar: os dois esperam em laço
+/// e leem o anel de usados, que não depende de interrupção nenhuma. Falhar
+/// aqui custa a visibilidade, não o disco nem a rede — e é por isso que o
+/// retorno é um log, e não um erro que aborta a construção.
+fn ligar_interrupcao(d: &crate::pci::Dispositivo, transporte: &transporte::Transporte, nome: u32) {
+    let Some(linha) = d.interrupcao else {
+        crate::log_info!(
+            "virtio",
+            "{} em {:02x}.{} nao tem linha de interrupcao; segue por consulta",
+            nome_de(nome),
+            d.dispositivo,
+            d.funcao
+        );
+        return;
+    };
+
+    if !registrar(linha, transporte.endereco_do_isr(), nome) {
+        crate::log_warn!(
+            "virtio",
+            "tabela de interrupcoes cheia; {} fica de fora",
+            nome_de(nome)
+        );
+        return;
+    }
+
+    crate::irq::nomear(linha as usize, nome_de(nome));
+
+    // SAFETY: o registro acima garante que há quem reconheça a interrupção no
+    // dispositivo, que é a pré-condição de liberar a linha.
+    unsafe { crate::arch::pci::habilitar_interrupcao(linha) };
+
+    crate::log_info!(
+        "virtio",
+        "{} interrompe na linha {} (pino {})",
+        nome_de(nome),
+        linha,
+        d.pino
+    );
+}
+
+/// Pede para ser avisado quando `linha` disparar.
+///
+/// `isr` é o endereço virtual do registrador de estado de interrupção do
+/// dispositivo. Ele importa mais do que parece: ver [`atender_interrupcao`].
+///
+/// Devolve `false` se a tabela estiver cheia — caso em que o driver continua
+/// funcionando, só que sem ser avisado.
+fn registrar(linha: u32, isr: Option<u64>, nome: u32) -> bool {
+    for registro in &REGISTROS {
+        if registro
+            .linha
+            .compare_exchange(SEM_LINHA, linha, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            registro.isr.store(isr.unwrap_or(0), Ordering::Release);
+            registro.nome.store(nome, Ordering::Release);
+            return true;
+        }
+    }
+    false
+}
+
+/// Atende uma interrupção que não é de nenhum periférico da placa.
+///
+/// # Por que ler o registrador de estado é obrigatório
+///
+/// Uma interrupção de PCI por linha é **de nível**: o dispositivo mantém o
+/// sinal ativo até ser atendido, e não manda um pulso. Reconhecê-la no
+/// controlador não basta — enquanto o dispositivo mantiver a linha baixa, o
+/// controlador entrega outra, e outra, para sempre. O sistema não trava com
+/// uma mensagem de erro; ele para de progredir porque nunca sai do handler.
+///
+/// A leitura do registrador de estado é o que faz o dispositivo soltar a
+/// linha, e ela **limpa o registrador ao ser lida** — é o mecanismo, não um
+/// efeito colateral.
+///
+/// # Por que todos os registros, e não o primeiro que combinar
+///
+/// Porque uma linha de PCI é compartilhada por construção: quatro pinos para
+/// quantos dispositivos a placa tiver. Dois dispositivos na mesma linha que
+/// interrompam juntos produzem uma única entrega, e atender só um deixaria o
+/// outro segurando o sinal.
+pub fn atender_interrupcao(linha: u32) {
+    for registro in &REGISTROS {
+        if registro.linha.load(Ordering::Acquire) != linha {
+            continue;
+        }
+
+        let isr = registro.isr.load(Ordering::Acquire);
+        if isr != 0 {
+            // SAFETY: o endereço foi registrado por um driver a partir de uma
+            // região que `mmio::mapear` mapeou como memória de dispositivo, e
+            // continua mapeada porque nada neste kernel desmapeia MMIO.
+            let _ = unsafe { core::ptr::read_volatile(isr as *const u8) };
+        }
+
+        registro.avisos.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Quantas interrupções os dispositivos virtio já receberam, ao todo.
+///
+/// Só a suíte pergunta isto. O canal do agente lê os contadores por
+/// dispositivo, via [`com_interrupcoes`], que é a resposta útil quando dois
+/// deles dividem a mesma linha; o total só serve para o teste detectar que
+/// *alguma* chegou.
+#[cfg(feature = "modo-teste")]
+pub fn total_de_avisos() -> u64 {
+    REGISTROS
+        .iter()
+        .map(|registro| registro.avisos.load(Ordering::Relaxed))
+        .sum()
+}
+
+/// Percorre os dispositivos registrados: nome, linha e quantos avisos.
+pub fn com_interrupcoes<F: FnMut(&'static str, u32, u64)>(mut f: F) {
+    for registro in &REGISTROS {
+        let linha = registro.linha.load(Ordering::Acquire);
+        if linha == SEM_LINHA {
+            continue;
+        }
+        f(
+            nome_de(registro.nome.load(Ordering::Acquire)),
+            linha,
+            registro.avisos.load(Ordering::Relaxed),
+        );
+    }
+}
