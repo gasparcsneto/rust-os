@@ -877,18 +877,23 @@ fn irq_stats(_params: Json, w: &mut JsonWriter) -> fmt::Result {
 // ---------------------------------------------------------------------------
 
 fn tasks_stats(_params: Json, w: &mut JsonWriter) -> fmt::Result {
-    let (lancadas, concluidas, avancos, despertares) = crate::tarefas::executor::estatisticas();
+    let e = crate::tarefas::executor::estatisticas();
     let (ocupacao, capacidade, descartados) = crate::tarefas::entrada::estatisticas();
 
     w.begin_object()?;
-    w.field_u64("spawned", lancadas)?;
-    w.field_u64("completed", concluidas)?;
-    w.field_u64("alive", lancadas.saturating_sub(concluidas))?;
+    w.field_u64("spawned", e.lancadas)?;
+    w.field_u64("completed", e.concluidas)?;
+    w.field_u64("alive", e.lancadas.saturating_sub(e.concluidas))?;
     // Quantas vezes uma tarefa foi efetivamente avancada. A razao entre isto
     // e `wakes` diz se o executor esta trabalhando ou girando: com wakers
     // funcionando, os dois numeros andam juntos.
-    w.field_u64("polls", avancos)?;
-    w.field_u64("wakes", despertares)?;
+    w.field_u64("polls", e.avancos)?;
+    w.field_u64("wakes", e.despertares)?;
+    // Tarefas que existem e nao rodam, porque a entrada delas nao coube na
+    // fila de prontas — no lancamento ou num despertar. Diferente de zero aqui
+    // explica uma tarefa parada que de outra forma pareceria apenas ociosa, e
+    // sobrevive a volta do anel de log, que e onde a evidencia ficava antes.
+    w.field_u64("never_scheduled", e.nunca_agendadas)?;
 
     w.key("input")?;
     w.begin_object()?;
@@ -904,6 +909,17 @@ fn tasks_stats(_params: Json, w: &mut JsonWriter) -> fmt::Result {
 
 fn tasks_list(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.begin_object()?;
+    // O teto do inventario e quantas tarefas ficaram de fora dele, pela mesma
+    // razao de `pci.list`: a lista pode ser mais curta que a verdade, e quem
+    // le precisa distinguir "so ha isto" de "isto e o que coube".
+    w.field_u64(
+        "capacity",
+        crate::tarefas::executor::capacidade_do_inventario() as u64,
+    )?;
+    w.field_u64(
+        "omitted",
+        crate::tarefas::executor::estatisticas().fora_do_inventario,
+    )?;
     w.key("tasks")?;
     w.begin_array()?;
 
@@ -1132,6 +1148,10 @@ fn traps_stats(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     // secao critica de `traps`: o total esta certo, mas `by_type` e `last`
     // perderam essa falha. Aparece aqui para nao sumir em silencio.
     w.field_u64("details_lost", crate::traps::detalhes_perdidos())?;
+    // E a outra forma de `by_type` deixar de somar `total`: a tabela de tipos
+    // encheu. A trava foi obtida, a vaga e que faltou — causa diferente, efeito
+    // igual para quem le, numero proprio.
+    w.field_u64("types_lost", crate::traps::tipos_perdidos())?;
 
     w.key("by_type")?;
     w.begin_array()?;

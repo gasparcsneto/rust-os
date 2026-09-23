@@ -81,6 +81,17 @@ static TOTAL: AtomicU64 = AtomicU64::new(0);
 /// que precisa aparecer em vez de sumir.
 static DETALHES_PERDIDOS: AtomicU64 = AtomicU64::new(0);
 
+/// Falhas de um tipo que não coube na tabela de contadores.
+///
+/// Diferente de [`DETALHES_PERDIDOS`], que conta a disputa da trava: aqui a
+/// trava foi obtida e o que faltou foi vaga. O efeito para quem lê é o mesmo —
+/// a soma de `by_type` deixa de bater com `total` — e a causa é outra, então
+/// o número é outro.
+///
+/// Sem ele, a discrepância existiria e nada a explicaria. O módulo já tinha a
+/// regra escrita para o outro caso e não a aplicava a este.
+static TIPOS_PERDIDOS: AtomicU64 = AtomicU64::new(0);
+
 /// Uma falha que o código em execução espera provocar de propósito.
 ///
 /// Existe para um único caso, e um caso que não teria outra forma de ser
@@ -139,10 +150,14 @@ pub fn registrar(nome: &'static str, pc: u64, endereco: Option<u64>, codigo: u64
                 break;
             }
         }
-        if !achou && estado.n < MAX_TIPOS {
-            let n = estado.n;
-            estado.contadores[n] = Contador { nome, total: 1 };
-            estado.n = n + 1;
+        if !achou {
+            if estado.n < MAX_TIPOS {
+                let n = estado.n;
+                estado.contadores[n] = Contador { nome, total: 1 };
+                estado.n = n + 1;
+            } else {
+                TIPOS_PERDIDOS.fetch_add(1, Ordering::Relaxed);
+            }
         }
 
         estado.ultima = Some(Falha {
@@ -180,6 +195,11 @@ pub fn total() -> u64 {
 /// Quantas falhas ficaram sem detalhamento por disputa da trava.
 pub fn detalhes_perdidos() -> u64 {
     DETALHES_PERDIDOS.load(Ordering::Relaxed)
+}
+
+/// Quantas falhas ficaram sem contador por a tabela de tipos estar cheia.
+pub fn tipos_perdidos() -> u64 {
+    TIPOS_PERDIDOS.load(Ordering::Relaxed)
 }
 
 /// Executa `f` com a trava de detalhamento na mão.

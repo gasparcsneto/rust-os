@@ -1958,6 +1958,87 @@ fn relogio_acorda_tarefa() -> Resultado {
 /// os dois passariam em todos os testes acima, mas o ingênuo repollaria a
 /// tarefa adormecida milhares de vezes por segundo. Contamos os avanços e
 /// exigimos que sejam poucos.
+/// Encher a fila de prontas e o inventário aparece no relatório.
+///
+/// # O que este caso protege
+///
+/// Os dois tetos falhavam em silêncio durável. A fila de prontas cheia
+/// descarta a entrada da tarefa, e a tarefa nunca roda — no lançamento ela não
+/// roda nenhuma vez, num despertar ela para de rodar. A única prova era uma
+/// linha de log, num anel de cento e vinte e oito registros que dá a volta: um
+/// minuto depois não havia mais nada dizendo por que aquela tarefa estava
+/// parada.
+///
+/// O inventário cheio é mais brando e igualmente mudo: a tarefa roda, mas a
+/// linha dela não sai em `tasks.list`, e a lista fica mais curta que a verdade
+/// sem dizer que ficou.
+///
+/// A fila de bytes do agente já tinha o contador dela exposto como
+/// `input.dropped`, com um comentário explicando por que um valor diferente de
+/// zero ali importa. Estes dois tinham a mesma necessidade e nenhum número.
+///
+/// # Por que os números exatos
+///
+/// Porque um caso que enchesse "com muitas tarefas" testaria o chute. Os dois
+/// tetos vêm do módulo, e as contas saem deles: lançar `prontas + 1` tarefas
+/// derruba exatamente uma na fila, e deixa `prontas + 1 - inventario` fora do
+/// inventário, já que nenhuma delas terminou ainda.
+fn tarefa_tetos_cheios_aparecem() -> Resultado {
+    use crate::tarefas::executor;
+
+    async fn nada() {}
+
+    let prontas = executor::capacidade_da_fila_de_prontas();
+    let inventario = executor::capacidade_do_inventario();
+    let antes = executor::estatisticas();
+
+    let mut e = executor::Executor::novo();
+    for _ in 0..prontas + 1 {
+        e.lancar(crate::tarefas::Tarefa::nova("teste-teto", nada()));
+    }
+
+    let depois = executor::estatisticas();
+
+    let na_fila = depois.nunca_agendadas - antes.nunca_agendadas;
+    if na_fila != 1 {
+        crate::log_error!(
+            "teste",
+            "{} tarefas ficaram sem agendar, esperava 1",
+            na_fila
+        );
+        return Err("a fila de prontas cheia nao foi contabilizada");
+    }
+
+    let fora = depois.fora_do_inventario - antes.fora_do_inventario;
+    let esperado = (prontas + 1 - inventario) as u64;
+    if fora != esperado {
+        crate::log_error!(
+            "teste",
+            "{} tarefas fora do inventario, esperava {}",
+            fora,
+            esperado
+        );
+        return Err("o inventario cheio nao foi contabilizado");
+    }
+
+    // Drenar o que coube, para devolver as vagas do inventário aos casos
+    // seguintes. O veredito é ignorado de propósito: o executor **não** tem
+    // como esvaziar, e é isso que vem a seguir.
+    let _ = e.rodar_ate_esvaziar(prontas * 2);
+
+    // A prova do que a perda significa. A tarefa que não entrou na fila
+    // continua registrada e viva, e não existe caminho que a faça rodar — não
+    // há quem a enfileire, porque enfileirá-la era o passo que falhou. Uma
+    // tarefa sobrando aqui é exatamente o que `never_scheduled` conta, vista
+    // do outro lado.
+    if e.vivas() != 1 {
+        crate::log_error!("teste", "{} tarefas vivas, esperava 1", e.vivas());
+        return Err("a tarefa que ficou fora da fila deveria continuar viva e parada");
+    }
+
+    Ok(())
+}
+
 fn tarefa_adormecida_nao_e_repollada() -> Resultado {
     const ESPERA: u64 = 5;
     // Uma repolagem para registrar o sono, uma para confirmar que venceu, e
@@ -1968,13 +2049,13 @@ fn tarefa_adormecida_nao_e_repollada() -> Resultado {
         crate::tarefas::relogio::por_ticks(ESPERA).await;
     }
 
-    let antes = crate::tarefas::executor::estatisticas().2;
+    let antes = crate::tarefas::executor::estatisticas().avancos;
 
     let mut executor = crate::tarefas::executor::Executor::novo();
     executor.lancar(crate::tarefas::Tarefa::nova("teste-ocioso", corpo()));
     executor.rodar_ate_esvaziar(64)?;
 
-    let avancos = crate::tarefas::executor::estatisticas().2 - antes;
+    let avancos = crate::tarefas::executor::estatisticas().avancos - antes;
     if avancos > TETO_DE_AVANCOS {
         crate::log_error!("teste", "{} avancos para dormir {} tiques", avancos, ESPERA);
         return Err("tarefa adormecida foi repollada demais");
@@ -3745,6 +3826,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "tarefa: relogio acorda tarefa",
         f: relogio_acorda_tarefa,
+    },
+    Caso {
+        nome: "tarefa: os tetos cheios aparecem no relatorio",
+        f: tarefa_tetos_cheios_aparecem,
     },
     Caso {
         nome: "tarefa: adormecida nao gira",

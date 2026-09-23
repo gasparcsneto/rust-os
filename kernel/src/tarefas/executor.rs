@@ -96,6 +96,9 @@ impl Executor {
         ESTATISTICAS.lancadas.fetch_add(1, Ordering::Relaxed);
 
         if self.prontas.enfileirar(id).is_err() {
+            // Mesma perda do despertar, e o mesmo contador: esta tarefa foi
+            // registrada, contada como lançada, e não vai rodar nenhuma vez.
+            ESTATISTICAS.nunca_agendadas.fetch_add(1, Ordering::Relaxed);
             crate::log_error!("tarefa", "fila de prontas cheia ao lancar {}", nome);
         }
     }
@@ -233,6 +236,18 @@ impl Despertar {
     fn acordar(&self) {
         ESTATISTICAS.despertares.fetch_add(1, Ordering::Relaxed);
         if self.prontas.enfileirar(self.id).is_err() {
+            // Um aviso perdido não é um aviso atrasado: a tarefa devolveu
+            // `Pending` contando com este despertar, e sem ele **nunca mais**
+            // roda. É a falha mais grave que este módulo consegue ter, e até
+            // aqui a única prova dela era esta linha de log — num anel de cento
+            // e vinte e oito registros, que dá a volta.
+            //
+            // O contador é o que sobrevive à volta do anel. A fila de bytes do
+            // agente já tinha o dela, exposta em `tasks.stats` como
+            // `input.dropped`, com um comentário explicando por que um número
+            // diferente de zero ali importa. A fila de prontas tinha o mesmo
+            // contador e ninguém o lia — e o que se perde aqui é pior.
+            ESTATISTICAS.nunca_agendadas.fetch_add(1, Ordering::Relaxed);
             crate::log_error!(
                 "tarefa",
                 "fila de prontas cheia ao acordar {}",
@@ -268,6 +283,18 @@ struct Estatisticas {
     concluidas: AtomicU64,
     avancos: AtomicU64,
     despertares: AtomicU64,
+    /// Entradas que não couberam na fila de prontas.
+    ///
+    /// Conta os dois sítios que enfileiram — o lançamento e o despertar —
+    /// porque a consequência é a mesma nos dois: uma tarefa que existe e não
+    /// vai rodar. Separá-los daria dois números que o leitor teria de somar
+    /// para chegar à única pergunta que importa.
+    nunca_agendadas: AtomicU64,
+    /// Tarefas que não couberam no inventário.
+    ///
+    /// Cada uma existe e roda; o que falta é a linha dela em `tasks.list`. Sem
+    /// este número, a lista seria mais curta que a verdade sem dizer que é.
+    fora_do_inventario: AtomicU64,
 }
 
 static ESTATISTICAS: Estatisticas = Estatisticas {
@@ -275,6 +302,8 @@ static ESTATISTICAS: Estatisticas = Estatisticas {
     concluidas: AtomicU64::new(0),
     avancos: AtomicU64::new(0),
     despertares: AtomicU64::new(0),
+    nunca_agendadas: AtomicU64::new(0),
+    fora_do_inventario: AtomicU64::new(0),
 };
 
 /// Uma linha do inventário de tarefas.
@@ -305,12 +334,23 @@ fn inventario_registrar(id: IdTarefa, nome: &'static str) {
             .position(|e| e.is_none())
             .or_else(|| tabela.iter().position(|e| e.is_some_and(|i| !i.viva)));
 
-        if let Some(vaga) = vaga {
-            tabela[vaga] = Some(Inscricao {
-                id: id.numero(),
-                nome,
-                viva: true,
-            });
+        match vaga {
+            Some(vaga) => {
+                tabela[vaga] = Some(Inscricao {
+                    id: id.numero(),
+                    nome,
+                    viva: true,
+                });
+            }
+            // A tarefa foi lançada e vai rodar; o que não coube foi a linha
+            // dela no relatório. Contamos para que `tasks.list` possa dizer
+            // que é mais curta que a verdade — é o mesmo que `pci.list` faz
+            // com `count` e `capacity`.
+            None => {
+                ESTATISTICAS
+                    .fora_do_inventario
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
     });
 }
@@ -334,12 +374,38 @@ pub fn com_inventario<F: FnMut(Inscricao)>(mut f: F) {
     }
 }
 
-/// Os contadores do escalonador: lançadas, concluídas, avanços, despertares.
-pub fn estatisticas() -> (u64, u64, u64, u64) {
-    (
-        ESTATISTICAS.lancadas.load(Ordering::Relaxed),
-        ESTATISTICAS.concluidas.load(Ordering::Relaxed),
-        ESTATISTICAS.avancos.load(Ordering::Relaxed),
-        ESTATISTICAS.despertares.load(Ordering::Relaxed),
-    )
+/// Os contadores do escalonador.
+pub struct Contadores {
+    pub lancadas: u64,
+    pub concluidas: u64,
+    pub avancos: u64,
+    pub despertares: u64,
+    pub nunca_agendadas: u64,
+    pub fora_do_inventario: u64,
+}
+
+pub fn estatisticas() -> Contadores {
+    Contadores {
+        lancadas: ESTATISTICAS.lancadas.load(Ordering::Relaxed),
+        concluidas: ESTATISTICAS.concluidas.load(Ordering::Relaxed),
+        avancos: ESTATISTICAS.avancos.load(Ordering::Relaxed),
+        despertares: ESTATISTICAS.despertares.load(Ordering::Relaxed),
+        nunca_agendadas: ESTATISTICAS.nunca_agendadas.load(Ordering::Relaxed),
+        fora_do_inventario: ESTATISTICAS.fora_do_inventario.load(Ordering::Relaxed),
+    }
+}
+
+/// Quantas tarefas o inventário comporta.
+pub const fn capacidade_do_inventario() -> usize {
+    MAX_INVENTARIO
+}
+
+/// Quantas entradas a fila de prontas comporta.
+///
+/// Exposta para a suíte, que precisa do número exato para encher a fila de
+/// propósito — um caso que chutasse "muitas tarefas" passaria a testar o
+/// chute em vez do teto.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub const fn capacidade_da_fila_de_prontas() -> usize {
+    CAPACIDADE_PRONTAS
 }
