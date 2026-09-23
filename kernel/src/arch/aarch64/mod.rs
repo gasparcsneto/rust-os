@@ -661,8 +661,20 @@ pub fn encerrar_emulador(resultado: crate::qemu::Resultado) -> ! {
     /// `ADP_Stopped_ApplicationExit`: encerramento normal da aplicação.
     const ADP_STOPPED_APPLICATION_EXIT: u64 = 0x20026;
 
+    // Sucesso é 33, e não 0, porque o semihosting repassa este número
+    // literalmente para o código de saída do processo do QEMU — e 0 é o que o
+    // QEMU produz em toda saída limpa: um desligamento por PSCI, um `quit` no
+    // monitor, uma máquina que terminou sem nunca ter chegado à suíte. Com 0,
+    // qualquer um desses casos era lido pelo `xtask` como "todos os testes
+    // passaram", e um arnês que aprova sem nada ter rodado invalida todo
+    // resultado verde. 33 é o mesmo valor do x86 (lá, `(0x10 << 1) | 1` do
+    // `isa-debug-exit`): nada além de um encerramento deliberado o produz.
+    //
+    // Falha continua 1, que o QEMU também usa para os erros dele. A confusão
+    // aqui é inofensiva na direção que importa: um falso "falhou" para o CI
+    // vermelho, e alguém olha. Um falso "passou" não é olhado por ninguém.
     let codigo: u64 = match resultado {
-        Resultado::Sucesso => 0,
+        Resultado::Sucesso => 33,
         Resultado::Falha => 1,
     };
 

@@ -114,11 +114,21 @@ impl Arquitetura {
     ///
     /// No x86 o kernel escreve `0x10` no `isa-debug-exit` e o QEMU transforma
     /// em `(0x10 << 1) | 1` = 33. No ARM o encerramento é por semihosting, que
-    /// repassa o código literalmente — então sucesso é 0.
+    /// repassa o código literalmente, e o kernel repassa 33 de propósito.
+    ///
+    /// # Por que não 0 no ARM
+    ///
+    /// Porque 0 é o que o QEMU devolve em toda saída limpa, e a maioria delas
+    /// não é a suíte terminando: um desligamento por PSCI, um `quit` no
+    /// monitor, uma máquina que morreu antes do primeiro caso. Enquanto
+    /// sucesso foi 0, este `match` aprovava qualquer um deles — dava para
+    /// desligar a máquina antes de rodar um único teste e ler "todos os
+    /// testes passaram". Exigir um número que só um encerramento deliberado
+    /// produz é o que separa "a suíte passou" de "o processo terminou".
     fn codigo_de_sucesso(self) -> i32 {
         match self {
             Self::X86_64 => 33,
-            Self::Aarch64 => 0,
+            Self::Aarch64 => 33,
         }
     }
 }
