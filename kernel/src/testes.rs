@@ -3220,6 +3220,18 @@ static CASOS: &[Caso] = &[
         f: disco_recusa_setor_fora_da_capacidade,
     },
     Caso {
+        nome: "rede: publica um endereco valido",
+        f: rede_publica_um_endereco_valido,
+    },
+    Caso {
+        nome: "rede: ARP vai e volta",
+        f: rede_arp_vai_e_volta,
+    },
+    Caso {
+        nome: "rede: contadores acompanham o trafego",
+        f: rede_contadores_acompanham_o_trafego,
+    },
+    Caso {
         nome: "usuario: nao alcanca o kernel",
         f: usuario_nao_alcanca_o_kernel,
     },
@@ -3402,6 +3414,97 @@ fn disco_recusa_setor_fora_da_capacidade() -> Resultado {
         Some(Ok(())) => Err("o disco aceitou ler um setor que nao existe"),
         None => Err("nao ha disco nesta maquina"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// A rede
+// ---------------------------------------------------------------------------
+
+/// O endereço que a rede em modo usuário do QEMU dá ao hóspede.
+const NOSSO_IP: [u8; 4] = [10, 0, 2, 15];
+/// O roteador dessa rede, que é quem responde ao ARP.
+const IP_DO_ROTEADOR: [u8; 4] = [10, 0, 2, 2];
+
+/// A placa publica um endereço, e ele não é um dos inválidos.
+///
+/// Um endereço todo zeros é o que se lê de um registrador que não responde;
+/// um todo `0xFF` é o que o barramento devolve quando ninguém atende. Os dois
+/// pareceriam um MAC para quem só conferisse o tamanho.
+fn rede_publica_um_endereco_valido() -> Resultado {
+    let Some(mac) = crate::virtio::net::com_a_placa(|placa| placa.mac()) else {
+        return Err("nao ha placa de rede nesta maquina");
+    };
+    let Some(mac) = mac else {
+        return Err("a placa nao publicou endereco");
+    };
+
+    if mac.iter().all(|&b| b == 0) {
+        return Err("o endereco e todo zeros");
+    }
+    if mac.iter().all(|&b| b == 0xFF) {
+        return Err("o endereco e todo uns");
+    }
+    // O bit de multicast no primeiro byte não pode estar aceso num endereço
+    // de placa: seria um endereço de grupo, e nenhuma placa se chama assim.
+    if mac[0] & 1 != 0 {
+        return Err("o endereco tem o bit de grupo aceso");
+    }
+
+    Ok(())
+}
+
+/// Um pedido ARP sai e a resposta volta.
+///
+/// É o teste que exercita as duas filas de uma vez, e prova algo que nenhum
+/// exame interno provaria: que os bytes saíram do kernel, foram interpretados
+/// por outro software e voltaram. Um driver que transmitisse para o nada e
+/// recebesse lixo passaria por qualquer verificação que só olhasse para os
+/// contadores.
+///
+/// Toda a conferência da resposta está em [`crate::rede::resolver`], que é
+/// quem o canal do agente também chama — de propósito. Um teste que validasse
+/// por um caminho próprio deixaria o caminho de produção sem teste.
+fn rede_arp_vai_e_volta() -> Resultado {
+    let dono = crate::rede::resolver(&IP_DO_ROTEADOR, &NOSSO_IP)?;
+
+    crate::log_info!(
+        "teste",
+        "{}.{}.{}.{} responde de {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        IP_DO_ROTEADOR[0],
+        IP_DO_ROTEADOR[1],
+        IP_DO_ROTEADOR[2],
+        IP_DO_ROTEADOR[3],
+        dono[0],
+        dono[1],
+        dono[2],
+        dono[3],
+        dono[4],
+        dono[5]
+    );
+
+    Ok(())
+}
+
+/// Os contadores da placa acompanham o que passou por ela.
+///
+/// Um driver pode acertar o diálogo e mentir no relatório, e é o relatório
+/// que o agente lê. Este caso confere que os dois concordam: depois de um ARP
+/// que deu certo, ao menos um quadro saiu e ao menos um entrou.
+fn rede_contadores_acompanham_o_trafego() -> Resultado {
+    let Some((transmitidos, recebidos)) =
+        crate::virtio::net::com_a_placa(|placa| placa.contadores())
+    else {
+        return Err("nao ha placa de rede nesta maquina");
+    };
+
+    if transmitidos == 0 {
+        return Err("a placa diz nao ter transmitido nada");
+    }
+    if recebidos == 0 {
+        return Err("a placa diz nao ter recebido nada");
+    }
+
+    Ok(())
 }
 
 /// Roda todos os casos e encerra o emulador com o veredito.
