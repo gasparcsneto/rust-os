@@ -22,9 +22,20 @@ modo-teste = []
 
 [dependencies]
 pci_types = "0.10.1"
+
+# Blocos de registradores mapeados em memória, com layout conferido em tempo
+# de compilação. `register_structs!` exige que todo intervalo entre dois
+# registradores seja declarado, o que transforma um deslocamento errado — que
+# de outra forma seria uma constante solta — em erro de compilação.
+#
+# Comum às duas arquiteturas desde que o x86 ganhou o APIC local: ele é um
+# bloco mapeado em memória como o GIC, com a mesma armadilha de registradores
+# espaçados de dezesseis em dezesseis bytes. Usar o mesmo mecanismo nos dois
+# lados é o que faz um leitor do GIC reconhecer o APIC.
+tock-registers = "0.10.1"
+
 # Primitivas de sincronização baseadas em spinlock. Num kernel não existe
 # scheduler para bloquear uma thread, então `std::sync::Mutex` não se aplica.
-# É a única dependência comum às duas arquiteturas.
 spin = "0.12.3"
 
 # --- x86_64 -----------------------------------------------------------------
@@ -54,19 +65,14 @@ uart_16550 = "0.8.1"
 # O que *não* vale escrever à mão é montar palavras de configuração a partir
 # de deslocamentos lidos do manual da arquitetura. Um bit errado em `TCR_EL1`
 # ou `SCTLR_EL1` não dá erro de compilação nem mensagem: dá uma máquina que
-# se comporta de um jeito sutilmente errado. Estes dois crates trocam essa
-# aritmética por campos com nome, verificáveis pela leitura.
+# se comporta de um jeito sutilmente errado. O crate abaixo, junto com o
+# `tock-registers` comum às duas arquiteturas, troca essa aritmética por
+# campos com nome, verificáveis pela leitura.
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 # Registradores de sistema do ARMv8-A com campos tipados: `TCR_EL1::TG0::KiB_4`
 # em vez de `0b00 << 14`, `ESR_EL1::EC` em vez de `(esr >> 26) & 0x3F`.
 aarch64-cpu = "11.2.0"
-
-# Blocos de registradores mapeados em memória, com layout conferido em tempo
-# de compilação. `register_structs!` exige que todo intervalo entre dois
-# registradores seja declarado, o que transforma um deslocamento errado — hoje
-# uma constante solta — em erro de compilação.
-tock-registers = "0.10.1"
 
 [profile.dev]
 panic = "abort"
