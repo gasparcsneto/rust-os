@@ -509,6 +509,33 @@ impl Fila {
         // dispositivo pode ver o contador novo e descritores velhos — e a
         // janela é tão pequena que o bug só aparece sob carga, na máquina de
         // outra pessoa.
+        //
+        // # Nenhum teste protege esta linha, e isso foi medido
+        //
+        // Removendo as três barreiras deste arquivo, a suíte inteira passa —
+        // noventa e oito de noventa e oito. Não é descuido de quem escreveu os
+        // casos: é que a reordenação contra a qual elas defendem não acontece
+        // aqui. O dispositivo do QEMU é coerente, o hóspede tem um núcleo só,
+        // e nada neste ambiente produz a janela.
+        //
+        // Ou seja: apagar esta linha não custa nada hoje e custa tudo no dia em
+        // que o kernel rodar em hardware de verdade ou em mais de um núcleo. É
+        // a única garantia deste driver cuja ausência a suíte não denuncia, e
+        // por isso ela está escrita aqui, onde quem for apagá-la vai ler.
+        //
+        // O que se pode conferir é que a instrução sai mesmo. Em release,
+        // `cargo xtask asm --release submeter` mostra `dmb ish` no aarch64 e o
+        // prefixo `lock` no x86_64; em debug a barreira aparece como uma
+        // chamada a `core::sync::atomic::fence`, que não é inlinada.
+        //
+        // # Uma ressalva de domínio, para quando sair do emulador
+        //
+        // `fence(SeqCst)` compila para `dmb ish` — *inner shareable*. Um
+        // dispositivo que faça DMA de fora desse domínio exigiria `osh` ou um
+        // `dsb`. Não é o caso do virtio do QEMU, que é coerente com o hóspede,
+        // e por isso não há inline assembly aqui: seria trocar uma linha
+        // portátil por uma específica para resolver um problema que esta
+        // máquina não tem. Fica registrado porque a primeira placa real o terá.
         fence(Ordering::SeqCst);
 
         self.proximo_disponivel = self.proximo_disponivel.wrapping_add(1);

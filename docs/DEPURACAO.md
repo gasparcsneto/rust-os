@@ -212,3 +212,29 @@ que um defeito assim aparece primeiro.
 A regra que ficou: **quando o comportamento observável está certo e a
 desconfiança persiste, instrumente a invariante, não a saída** — e, quando a
 invariante se confirma errada, é ela que vira o caso na suíte.
+
+### Medir a suíte pela mutação
+
+Uma suíte verde diz que os casos passam, não que eles testam. A forma de
+descobrir a diferença é quebrar a garantia de propósito e ver quem reclama —
+e vale fazer isso com as garantias centrais, não só com a correção da vez.
+
+Feito aqui, com quatro delas: quebrar o `W^X` da carga de programas, desligar
+a conferência de limites das chamadas de sistema, entregar o mesmo frame duas
+vezes e vazar o frame ao desmapear. As quatro foram pegas, três por um caso
+com nome — a do alocador mata o kernel antes da suíte rodar, e o que se vê é
+o modo post-mortem respondendo.
+
+A quinta não foi. Removendo as três barreiras de memória de
+`virtio::fila`, os noventa e oito casos passam. A reordenação contra a qual
+elas defendem não acontece num emulador coerente de um núcleo só, e nenhum
+caso possível a produziria. A resposta não foi inventar um teste: foi
+escrever a lacuna no comentário da própria linha, onde quem for apagá-la vai
+ler.
+
+E uma armadilha de método, porque ela quase produziu um achado falso: a
+mutação precisa ser **confirmada aplicada** antes de a ausência de falhas
+significar algo. Um `grep -c` que devolveu zero interrompeu um encadeamento
+`&&`, a mutação nunca chegou ao arquivo, e a suíte passou por não haver nada
+para pegar. Uma conclusão negativa a partir de um experimento que não rodou é
+pior que nenhuma conclusão.
