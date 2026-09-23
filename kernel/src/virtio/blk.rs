@@ -102,6 +102,28 @@ pub struct Disco {
     base: *mut u8,
     /// Capacidade, em setores de 512 bytes.
     capacidade: u64,
+    /// Se o disco ainda pode ser usado.
+    ///
+    /// # Por que um tempo esgotado e definitivo
+    ///
+    /// Porque a requisicao que estourou o tempo **continua pendente no
+    /// dispositivo**. Ele nao desistiu — nos e que paramos de esperar. O frame
+    /// de trabalho continua sendo dele: ele pode escrever a resposta ali a
+    /// qualquer momento, e a conclusao dela ainda vai aparecer no anel de
+    /// usados.
+    ///
+    /// Sem este campo, a leitura seguinte faria duas coisas erradas de uma vez.
+    /// Sobrescreveria o cabecalho e o byte de estado enquanto o dispositivo
+    /// pode estar lendo um e escrevendo o outro — uma corrida de DMA, que e
+    /// indefinida por construcao. E colheria do anel a conclusao **atrasada**,
+    /// nao a da requisicao nova, porque o indice da cadeia e sempre zero neste
+    /// driver e as duas sao indistinguiveis.
+    ///
+    /// O que se observa depois disso depende de quem chegou primeiro: um
+    /// "dispositivo recusou a leitura" espurio, um setor trocado, ou um acerto
+    /// por acaso. Um defeito cujo sintoma muda a cada execucao e pior que um
+    /// erro, e e por isso que o primeiro tempo esgotado encerra o assunto.
+    vivo: bool,
 }
 
 // SAFETY: o ponteiro é para um frame de propriedade exclusiva deste disco,
@@ -170,6 +192,7 @@ impl Disco {
             trabalho,
             base,
             capacidade,
+            vivo: true,
         })
     }
 
@@ -184,6 +207,9 @@ impl Disco {
     /// de bloco não tem como devolver meio setor, e aceitar uma fatia menor só
     /// esconderia de quem chama que o resto foi lido e descartado.
     pub fn ler_setor(&mut self, setor: u64, destino: &mut [u8]) -> Result<(), &'static str> {
+        if !self.vivo {
+            return Err("o disco parou de responder e foi desligado");
+        }
         if destino.len() != TAMANHO_DO_SETOR {
             return Err("o destino precisa ter um setor");
         }
@@ -218,6 +244,10 @@ impl Disco {
 
         let (respondido, _) = self.esperar()?;
         if respondido != cabeca {
+            // O anel deixou de descrever a realidade. Nao ha como voltar disso
+            // sem reiniciar o dispositivo, e insistir leria buffers que nao
+            // sabemos de quem sao.
+            self.vivo = false;
             return Err("dispositivo respondeu uma cadeia que nao pedimos");
         }
 
@@ -243,6 +273,12 @@ impl Disco {
     }
 
     /// Espera a fila devolver alguma coisa.
+    ///
+    /// Desistir desliga o disco. O frame de trabalho **nao** e devolvido ao
+    /// alocador: o dispositivo ainda tem o endereco dele numa cadeia que nunca
+    /// completou, e entregar essa pagina a outro dono seria autorizar uma
+    /// escrita em memoria alheia, num momento que ninguem escolhe. Vazar um
+    /// frame e o preco de nao ter esse problema.
     fn esperar(&mut self) -> Result<(u16, u32), &'static str> {
         for _ in 0..VOLTAS_DE_ESPERA {
             if let Some(resposta) = self.fila.colher() {
@@ -250,6 +286,13 @@ impl Disco {
             }
             core::hint::spin_loop();
         }
+
+        self.vivo = false;
+        crate::log_error!(
+            "virtio",
+            "o disco nao respondeu em {} voltas; desligado",
+            VOLTAS_DE_ESPERA
+        );
         Err("o dispositivo nao respondeu")
     }
 }
