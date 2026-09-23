@@ -613,7 +613,8 @@ padronizado.
       `fork`/`exec` com cópia integral do espaço de endereços.
       **Fase 1 completa.**
 - [ ] **Fase 2 — Drivers.** Enumeração PCI (**feito**), virtio-blk
-      (**feito**), virtio-net, timer APIC/HPET, framebuffer gráfico.
+      (**feito**), virtio-net (**feito**), roteamento de interrupção de PCI
+      (**feito**), timer APIC/HPET, framebuffer gráfico.
 
 ## Licença
 
