@@ -381,7 +381,15 @@ pub fn init() {
     });
 
     let Some(alvo) = alvo else {
-        crate::log_info!("virtio", "nenhum disco no barramento");
+        // "virtio", e não "disco": a máquina pode muito bem ter um, e o
+        // relatório do agente mostra que às vezes tem. Sem o disco virtio o
+        // `pci.list` de uma máquina x86 comum ainda traz um controlador IDE
+        // com `role: "disco-ide"`, e as duas linhas se contradiziam — uma
+        // dizendo que não há disco, a outra mostrando um.
+        //
+        // O que falta é um dispositivo que **este driver** saiba dirigir, e a
+        // mensagem passa a dizer isso.
+        crate::log_info!("virtio", "nenhum disco virtio no barramento");
         return;
     };
 

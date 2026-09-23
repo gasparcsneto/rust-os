@@ -592,7 +592,11 @@ pub fn init() {
     });
 
     let Some(alvo) = alvo else {
-        crate::log_info!("virtio", "nenhuma placa de rede no barramento");
+        // Mesma correção do disco, e o mesmo motivo: sem a placa virtio, uma
+        // máquina x86 comum ainda traz a placa emulada padrão do QEMU, que
+        // aparece em `pci.list` com `role: "rede"`. Dizer que não há placa
+        // nenhuma contradiz o outro relatório.
+        crate::log_info!("virtio", "nenhuma placa de rede virtio no barramento");
         return;
     };
 

@@ -105,7 +105,7 @@ pub fn resolver(
     nosso_ip: &[u8; TAMANHO_DO_IP],
 ) -> Result<[u8; TAMANHO_DO_MAC], &'static str> {
     let Some(nosso_mac) = crate::virtio::net::com_a_placa(|placa| placa.mac()) else {
-        return Err("nao ha placa de rede nesta maquina");
+        return Err("nao ha placa de rede virtio nesta maquina");
     };
     let Some(nosso_mac) = nosso_mac else {
         return Err("a placa nao publicou endereco");
@@ -115,7 +115,7 @@ pub fn resolver(
     match crate::virtio::net::com_a_placa(|placa| placa.transmitir(&pedido)) {
         Some(Ok(())) => {}
         Some(Err(motivo)) => return Err(motivo),
-        None => return Err("nao ha placa de rede nesta maquina"),
+        None => return Err("nao ha placa de rede virtio nesta maquina"),
     }
 
     let mut quadro = [0u8; crate::virtio::net::MAIOR_QUADRO];
@@ -123,7 +123,7 @@ pub fn resolver(
     for _ in 0..VOLTAS_PROCURANDO {
         let Some(recebido) = crate::virtio::net::com_a_placa(|placa| placa.receber(&mut quadro))
         else {
-            return Err("nao ha placa de rede nesta maquina");
+            return Err("nao ha placa de rede virtio nesta maquina");
         };
 
         let Some(tamanho) = recebido else {

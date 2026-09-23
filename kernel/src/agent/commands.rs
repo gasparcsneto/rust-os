@@ -758,7 +758,7 @@ fn disk_read(params: Json, w: &mut JsonWriter) -> fmt::Result {
     match resultado {
         None => {
             w.field_bool("ok", false)?;
-            w.field_str("error", "nao ha disco nesta maquina")?;
+            w.field_str("error", "nao ha disco virtio nesta maquina")?;
         }
         Some(Err(motivo)) => {
             w.field_bool("ok", false)?;
