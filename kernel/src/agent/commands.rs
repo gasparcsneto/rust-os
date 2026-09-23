@@ -163,6 +163,31 @@ pub static COMANDOS: &[Command] = &[
         handler: disk_read,
     },
     Command {
+        nome: "net.info",
+        resumo: "Endereco e contadores da placa de rede, se houver uma.",
+        params: &[],
+        handler: net_info,
+    },
+    Command {
+        nome: "net.arp",
+        resumo: "Pergunta quem atende por um endereco IPv4 e espera a resposta.",
+        params: &[
+            ParamSpec {
+                nome: "ip",
+                tipo: TipoParam::Texto,
+                obrigatorio: false,
+                descricao: "IPv4 procurado, em decimal com pontos (padrao: 10.0.2.2).",
+            },
+            ParamSpec {
+                nome: "from",
+                tipo: TipoParam::Texto,
+                obrigatorio: false,
+                descricao: "IPv4 anunciado como origem (padrao: 10.0.2.15).",
+            },
+        ],
+        handler: net_arp,
+    },
+    Command {
         nome: "irq.stats",
         resumo: "Contadores de interrupcoes de hardware por linha.",
         params: &[],
@@ -379,6 +404,158 @@ fn paging_translate(params: Json, w: &mut JsonWriter) -> fmt::Result {
 }
 
 // ---------------------------------------------------------------------------
+// net.*
+// ---------------------------------------------------------------------------
+
+fn net_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+
+    let dados = crate::virtio::net::com_a_placa(|placa| (placa.mac(), placa.contadores()));
+
+    match dados {
+        Some((mac, (transmitidos, recebidos))) => {
+            w.field_bool("present", true)?;
+
+            // O endereco vai como texto no formato em que se le um MAC, e nao
+            // como seis numeros. Um agente que precise compara-lo compara uma
+            // string; um humano que o leia reconhece o que esta vendo.
+            w.key("mac")?;
+            match mac {
+                Some(mac) => escrever_mac(w, &mac)?,
+                None => w.null_value()?,
+            }
+
+            w.field_u64("frames_sent", transmitidos)?;
+            w.field_u64("frames_received", recebidos)?;
+            w.field_u64("max_frame", crate::virtio::net::MAIOR_QUADRO as u64)?;
+        }
+        None => w.field_bool("present", false)?,
+    }
+
+    w.end_object()
+}
+
+/// O roteador da rede em modo usuario do QEMU, e o endereco que ela da ao
+/// hospede.
+///
+/// Padroes, e nao constantes do protocolo: sao o que ha do outro lado na
+/// maquina de testes, e e util que `net.arp` sem parametro nenhum ja faca uma
+/// pergunta com resposta. Quem estiver noutra rede passa os dois.
+const ROTEADOR_PADRAO: [u8; 4] = [10, 0, 2, 2];
+const ORIGEM_PADRAO: [u8; 4] = [10, 0, 2, 15];
+
+/// Interpreta um IPv4 em decimal com pontos.
+///
+/// Escrito a mao porque sao quatro numeros e tres pontos, e porque o que
+/// importa e recusar o que nao e isso: um octeto acima de 255, um campo
+/// vazio, pontos a mais ou a menos. Um parser permissivo aqui produziria um
+/// endereco plausivel a partir de uma string errada.
+fn interpretar_ipv4(texto: &str) -> Option<[u8; 4]> {
+    let mut octetos = [0u8; 4];
+    let mut quantos = 0;
+
+    for parte in texto.split('.') {
+        if quantos == 4 || parte.is_empty() || parte.len() > 3 {
+            return None;
+        }
+        let mut valor = 0u16;
+        for byte in parte.bytes() {
+            if !byte.is_ascii_digit() {
+                return None;
+            }
+            valor = valor * 10 + (byte - b'0') as u16;
+        }
+        if valor > 255 {
+            return None;
+        }
+        octetos[quantos] = valor as u8;
+        quantos += 1;
+    }
+
+    (quantos == 4).then_some(octetos)
+}
+
+fn net_arp(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let procurado = params
+        .member("ip")
+        .and_then(|v| v.as_str())
+        .map(interpretar_ipv4);
+    let origem = params
+        .member("from")
+        .and_then(|v| v.as_str())
+        .map(interpretar_ipv4);
+
+    w.begin_object()?;
+
+    // Um endereco malformado e recusado antes de tocar a placa. Tratar o
+    // ilegivel como o padrao faria o comando responder sobre um endereco que
+    // ninguem pediu.
+    let (Some(procurado), Some(origem)) = (
+        procurado.unwrap_or(Some(ROTEADOR_PADRAO)),
+        origem.unwrap_or(Some(ORIGEM_PADRAO)),
+    ) else {
+        w.field_bool("ok", false)?;
+        w.field_str("error", "endereco IPv4 malformado")?;
+        return w.end_object();
+    };
+
+    w.key("ip")?;
+    escrever_ipv4(w, &procurado)?;
+
+    match crate::rede::resolver(&procurado, &origem) {
+        Ok(mac) => {
+            w.field_bool("ok", true)?;
+            w.key("mac")?;
+            escrever_mac(w, &mac)?;
+        }
+        Err(motivo) => {
+            w.field_bool("ok", false)?;
+            w.field_str("error", motivo)?;
+        }
+    }
+
+    w.end_object()
+}
+
+/// Escreve um IPv4 em decimal com pontos.
+fn escrever_ipv4(w: &mut JsonWriter, ip: &[u8; 4]) -> fmt::Result {
+    w.begin_str()?;
+    for (indice, octeto) in ip.iter().enumerate() {
+        if indice > 0 {
+            w.push_char('.')?;
+        }
+        // Tres digitos bastam para um octeto, e o zero a esquerda e omitido.
+        let mut restante = *octeto;
+        let mut digitos = [0u8; 3];
+        let mut quantos = 0;
+        loop {
+            digitos[quantos] = restante % 10;
+            quantos += 1;
+            restante /= 10;
+            if restante == 0 {
+                break;
+            }
+        }
+        for digito in digitos[..quantos].iter().rev() {
+            w.push_char((b'0' + digito) as char)?;
+        }
+    }
+    w.end_str()
+}
+
+/// Escreve um endereco de placa no formato em que um MAC se le.
+fn escrever_mac(w: &mut JsonWriter, mac: &[u8]) -> fmt::Result {
+    w.begin_str()?;
+    for (indice, byte) in mac.iter().enumerate() {
+        if indice > 0 {
+            w.push_char(':')?;
+        }
+        escrever_byte_hex(w, *byte)?;
+    }
+    w.end_str()
+}
+
+// ---------------------------------------------------------------------------
 // irq.*
 // ---------------------------------------------------------------------------
 
@@ -511,13 +688,18 @@ fn disk_read(params: Json, w: &mut JsonWriter) -> fmt::Result {
 /// é um fluxo: acumular 1 KiB de texto num `Vec` para escrevê-lo em seguida
 /// seria alocar para nada.
 fn escrever_hex(w: &mut JsonWriter, bytes: &[u8]) -> fmt::Result {
-    const DIGITOS: &[u8; 16] = b"0123456789abcdef";
     w.begin_str()?;
     for &byte in bytes {
-        w.push_char(DIGITOS[(byte >> 4) as usize] as char)?;
-        w.push_char(DIGITOS[(byte & 0xF) as usize] as char)?;
+        escrever_byte_hex(w, byte)?;
     }
     w.end_str()
+}
+
+/// Escreve um byte como dois dígitos hexadecimais, dentro de uma string aberta.
+fn escrever_byte_hex(w: &mut JsonWriter, byte: u8) -> fmt::Result {
+    const DIGITOS: &[u8; 16] = b"0123456789abcdef";
+    w.push_char(DIGITOS[(byte >> 4) as usize] as char)?;
+    w.push_char(DIGITOS[(byte & 0xF) as usize] as char)
 }
 
 /// Escreve os bytes como texto, trocando o que não for imprimível por ponto.
