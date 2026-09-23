@@ -430,6 +430,16 @@ impl Fila {
         (posicao < DESCRITORES).then(|| self.ler_descritor(posicao).endereco)
     }
 
+    /// Este descritor está com o dispositivo agora?
+    ///
+    /// A pergunta importa a quem precise saber o que já entregou: o endereço
+    /// que [`Fila::endereco_do_descritor`] devolve continua lá depois de a
+    /// cadeia ser colhida, porque liberar um descritor só apaga o bit do
+    /// bitmap. Sem esta distinção, um endereço velho passa por entrega viva.
+    pub fn em_uso(&self, posicao: u16) -> bool {
+        posicao < DESCRITORES && self.livres & (1 << posicao) == 0
+    }
+
     /// Quantos descritores estão livres agora.
     pub fn disponiveis(&self) -> usize {
         self.livres.count_ones() as usize

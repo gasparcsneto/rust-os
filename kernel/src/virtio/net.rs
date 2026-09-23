@@ -97,7 +97,7 @@ const BUFFER: usize = CABECALHO + MAIOR_QUADRO;
 /// Um buffer por cadeia, e não cabeçalho e quadro em descritores separados: o
 /// dispositivo aceita os dois no mesmo, e uma cadeia de um descritor é uma a
 /// menos para alocar por pacote.
-const BUFFERS_DE_RECEPCAO: usize = 4;
+pub const BUFFERS_DE_RECEPCAO: usize = 4;
 
 /// Onde o endereço MAC está, na configuração específica do dispositivo.
 const CONFIG_MAC: u64 = 0;
@@ -240,12 +240,53 @@ impl Placa {
         Ok(placa)
     }
 
-    /// Entrega ao dispositivo todos os buffers de recepção que couberem.
+    /// Este buffer está agora com o dispositivo?
     ///
-    /// Chamada na construção e depois de cada colheita. É idempotente por
-    /// construção: ela pendura o que estiver livre, e não um número fixo.
+    /// A resposta sai da tabela de descritores: um descritor **em uso** que
+    /// aponta para o frame deste buffer é o dispositivo tendo-o em mãos. É a
+    /// mesma escolha de [`Placa::indice_do_buffer`], e pelo mesmo motivo —
+    /// duas cópias da mesma informação são duas coisas que podem divergir, e
+    /// aqui a cópia paralela teria de ser mantida certa em todo caminho de
+    /// erro, inclusive nos que desligam a placa.
+    fn ja_pendurado(&self, indice: usize) -> bool {
+        let frame = self.frames_de_recepcao[indice];
+        (0..super::fila::DESCRITORES).any(|posicao| {
+            self.recepcao.em_uso(posicao)
+                && self.recepcao.endereco_do_descritor(posicao) == Some(frame)
+        })
+    }
+
+    /// Entrega ao dispositivo os buffers de recepção que ainda não estão com
+    /// ele.
+    ///
+    /// Chamada na construção e depois de cada colheita.
+    ///
+    /// # O que `ja_pendurado` conserta
+    ///
+    /// Esta função se dizia idempotente e não era. Ela percorria os quatro
+    /// índices e pendurava cada um enquanto houvesse descritor livre, sem
+    /// nenhuma forma de saber quais já estavam com o dispositivo.
+    ///
+    /// O efeito era o mesmo buffer entregue duas vezes ao mesmo tempo. Duas
+    /// cadeias apontando para a mesma memória: o dispositivo escreve um pacote
+    /// em cada uma, o segundo por cima do primeiro, e as duas colheitas
+    /// devolvem o mesmo conteúdo. Um pacote perdido e um duplicado, os dois
+    /// em silêncio.
+    ///
+    /// E o desperdício era mensurável. Com quatro buffers e oito descritores,
+    /// os livres caíam de quatro para **um** na primeira colheita e para
+    /// **zero** na segunda; daí em diante cada descritor que uma colheita
+    /// liberava era gasto numa duplicata do buffer zero. A fila de recepção
+    /// de quatro pacotes que este driver anuncia deixava de existir a partir
+    /// do segundo pacote.
+    ///
+    /// O estado estável agora é o pretendido: quatro descritores em uso, um
+    /// por buffer, e quatro livres.
     fn pendurar_buffers(&mut self) {
         for indice in 0..BUFFERS_DE_RECEPCAO {
+            if self.ja_pendurado(indice) {
+                continue;
+            }
             if self.recepcao.disponiveis() == 0 {
                 break;
             }
@@ -467,6 +508,16 @@ impl Placa {
     #[cfg(feature = "modo-teste")]
     pub fn vivo(&self) -> bool {
         self.vivo
+    }
+
+    /// Quantos descritores da fila de recepção estão com o dispositivo.
+    ///
+    /// O número que a suíte confere: com um buffer por cadeia, ele tem de
+    /// ser igual ao de buffers pendurados, e qualquer excesso é o mesmo
+    /// buffer entregue mais de uma vez.
+    #[cfg(feature = "modo-teste")]
+    pub fn descritores_de_recepcao_em_uso(&self) -> usize {
+        super::fila::DESCRITORES as usize - self.recepcao.disponiveis()
     }
 
     /// Espera uma das filas devolver alguma coisa.

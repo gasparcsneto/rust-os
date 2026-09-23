@@ -3768,6 +3768,10 @@ static CASOS: &[Caso] = &[
         f: rede_cadeia_desconhecida_desliga_a_placa,
     },
     Caso {
+        nome: "rede: um descritor por buffer, e so um",
+        f: rede_um_descritor_por_buffer,
+    },
+    Caso {
         nome: "irq: o virtio interrompe de verdade",
         f: irq_o_virtio_interrompe_de_verdade,
     },
@@ -4110,6 +4114,48 @@ fn rede_cadeia_desconhecida_desliga_a_placa() -> Resultado {
         "teste",
         "placa desligada por cadeia desconhecida e recolocada no ar"
     );
+
+    Ok(())
+}
+
+/// Cada buffer de recepção está pendurado uma vez só.
+///
+/// # O defeito que este caso pega
+///
+/// `pendurar_buffers` percorria os quatro buffers e entregava cada um
+/// enquanto houvesse descritor livre, sem ter como saber quais já estavam com
+/// o dispositivo. Depois de cada colheita ela entregava de novo os três que
+/// nunca tinham voltado.
+///
+/// O mesmo buffer entregue duas vezes é o dispositivo escrevendo dois pacotes
+/// na mesma memória: um sobrescreve o outro, e as duas colheitas devolvem o
+/// mesmo conteúdo. Um pacote perdido e um duplicado, sem uma linha de log.
+///
+/// Nada disso aparece num teste que só confira se o ARP volta — e não
+/// aparecia: a suíte inteira passava. O que aparece é a contagem de
+/// descritores, que é o mesmo defeito visto pelo outro lado. Ela caía de
+/// quatro livres para um depois do primeiro pacote e para zero depois do
+/// segundo.
+///
+/// Este caso roda depois de todo o tráfego dos anteriores, inclusive da placa
+/// que foi desligada e recolocada no ar — então ele também confere que aquela
+/// reparação devolveu o estado certo, e não um aproximado.
+fn rede_um_descritor_por_buffer() -> Resultado {
+    let Some(em_uso) =
+        crate::virtio::net::com_a_placa(|placa| placa.descritores_de_recepcao_em_uso())
+    else {
+        return Err("nao ha placa de rede nesta maquina");
+    };
+
+    if em_uso != crate::virtio::net::BUFFERS_DE_RECEPCAO {
+        crate::log_error!(
+            "teste",
+            "{} descritores em uso para {} buffers",
+            em_uso,
+            crate::virtio::net::BUFFERS_DE_RECEPCAO
+        );
+        return Err("a fila de recepcao nao tem um descritor por buffer");
+    }
 
     Ok(())
 }
