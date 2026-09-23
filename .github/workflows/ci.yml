@@ -102,3 +102,15 @@ jobs:
       # sem elas, e num kernel isso costuma virar corrupção silenciosa.
       - name: Suíte de testes (release)
         run: cargo xtask test --arch ${{ matrix.arch }} --release
+
+      # A suíte roda com a feature `modo-teste`, que **troca** o laço do agente
+      # pelo executor de testes. Isso deixa fora de toda rodada verde,
+      # por construção, justamente o laço que o kernel entregue roda: o
+      # `Executor`, a tarefa `agent::atender`, a espera por byte via
+      # interrupção e a escrita da resposta na porta.
+      #
+      # As peças têm caso; a composição não tinha nenhum. Este passo sobe o
+      # kernel compilado como se entrega e conversa com ele pelo socket, que é
+      # o que um agente de verdade faz.
+      - name: Fumaça (canal do agente, kernel de produção)
+        run: cargo xtask fumaca --arch ${{ matrix.arch }}

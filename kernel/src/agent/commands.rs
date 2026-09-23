@@ -910,6 +910,13 @@ fn tasks_stats(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     // Byte descartado e requisicao corrompida. Um valor diferente de zero
     // aqui explica um erro de JSON que de outra forma pareceria inexplicavel.
     w.field_u64("dropped", descartados)?;
+    // Perda de outra natureza: bytes que chegaram antes de o canal existir, e
+    // que a subida da porta jogou fora. Publicado aqui porque no ARM o aviso
+    // equivalente no log nao tem onde ser lido -- a unica serial e este canal.
+    w.field_u64(
+        "dropped_before_ready",
+        crate::tarefas::entrada::descartados_no_boot(),
+    )?;
     w.end_object()?;
 
     w.end_object()

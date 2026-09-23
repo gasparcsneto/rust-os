@@ -32,6 +32,7 @@
 
 use core::future::Future;
 use core::pin::Pin;
+use core::sync::atomic::{AtomicU64, Ordering};
 use core::task::{Context, Poll, Waker};
 
 use spin::Mutex;
@@ -82,6 +83,24 @@ static DESPERTADOR: Mutex<Option<Waker>> = Mutex::new(None);
 /// O número de bytes descartados vai para o log de propósito: um agente que
 /// veja isso sabe que uma requisição dele sumiu, em vez de concluir que o
 /// kernel responde errado.
+/// Bytes jogados fora na subida do canal, acumulados desde o boot.
+///
+/// Separado do contador de fila cheia de propósito: as duas perdas têm causas
+/// diferentes e remédios diferentes — uma é um cliente que falou cedo demais,
+/// a outra é um cliente que fala rápido demais. Somá-las tornaria as duas
+/// inúteis.
+static DESCARTADOS_NO_BOOT: AtomicU64 = AtomicU64::new(0);
+
+/// Quantos bytes foram descartados por chegarem antes de o canal subir.
+///
+/// Publicado em `tasks.stats` porque o aviso no log não basta: no ARM a única
+/// serial **é** o canal do agente, então não há console onde esse aviso possa
+/// ser lido. Sem este número, um agente cujo primeiro pedido sumiu não tem
+/// como distinguir "falei cedo demais" de "o kernel ignorou o que pedi".
+pub fn descartados_no_boot() -> u64 {
+    DESCARTADOS_NO_BOOT.load(Ordering::Relaxed)
+}
+
 pub fn descartar_pendentes() -> usize {
     crate::arch::sem_interrupcoes(|| {
         let mut guarda = crate::serial::AGENT_LINK.lock();
@@ -99,6 +118,7 @@ pub fn descartar_pendentes() -> usize {
             descartados += 1;
         }
         porta.fim_de_recepcao();
+        DESCARTADOS_NO_BOOT.fetch_add(descartados as u64, Ordering::Relaxed);
         descartados
     })
 }

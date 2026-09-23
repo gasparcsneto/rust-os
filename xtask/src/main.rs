@@ -166,6 +166,7 @@ fn main() -> ExitCode {
         "build" => build(arch, release, false).map(|_| ExitCode::SUCCESS),
         "run" => run(arch, release),
         "test" => test(arch, release),
+        "fumaca" => fumaca(arch, release),
         "agent" => {
             let metodo = posicionais.get(1).copied().unwrap_or("agent.describe");
             let params = posicionais.get(2).copied().unwrap_or("{}");
@@ -225,6 +226,7 @@ COMANDOS:
     build                     compila o kernel (e gera as imagens, no x86)
     run                       executa no QEMU com o canal do agente ativo
     test                      executa a suíte de testes dentro do QEMU
+    fumaca                    sobe o kernel de produção e conversa pelo canal
     agent <metodo> [params]   envia uma chamada JSON-RPC ao kernel em execução
     debug                     sobe o kernel parado, esperando um depurador
     simbolo <endereco>...     traduz endereços de execução em arquivo e linha
@@ -1045,6 +1047,269 @@ fn run(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
         .map_err(|e| format!("não foi possível iniciar o {}: {e}", arch.qemu()))?;
 
     Ok(ExitCode::SUCCESS)
+}
+
+/// Quanto esperar o canal do agente responder ao primeiro pedido.
+const ESPERA_PELA_FUMACA: Duration = Duration::from_secs(90);
+
+/// Um pedido do teste de fumaça e o que a resposta precisa provar.
+struct Sonda {
+    /// A linha crua enviada. Crua de propósito: parte do que se testa é o que
+    /// o kernel faz com um quadro que nenhum cliente bem-comportado montaria.
+    pedido: &'static str,
+    /// Trechos que precisam aparecer na resposta.
+    exige: &'static [&'static str],
+}
+
+/// O que o laço de produção precisa provar que faz.
+///
+/// Todos numa conexão só, na ordem: um canal que atende o primeiro pedido e
+/// morre no segundo é um canal quebrado, e uma sonda por conexão não veria
+/// isso.
+const SONDAS: &[Sonda] = &[
+    Sonda {
+        pedido: r#"{"jsonrpc":"2.0","id":1,"method":"agent.ping"}"#,
+        exige: &[r#""id":1"#, r#""pong":true"#],
+    },
+    // O `id` volta com o tipo que chegou. Ecoá-lo como número quebraria a
+    // correlação de qualquer cliente que use string.
+    Sonda {
+        pedido: r#"{"jsonrpc":"2.0","id":"p2","method":"system.info"}"#,
+        exige: &[r#""id":"p2""#, r#""kernel":"duke""#],
+    },
+    Sonda {
+        pedido: r#"{"jsonrpc":"2.0","id":3,"method":"agent.describe"}"#,
+        exige: &[r#""id":3"#, r#""commands""#, "agent.ping"],
+    },
+    // Um método inexistente é erro de protocolo, não silêncio.
+    Sonda {
+        pedido: r#"{"jsonrpc":"2.0","id":4,"method":"nao.existe"}"#,
+        exige: &[r#""id":4"#, "-32601"],
+    },
+    // JSON que nem chega a ser objeto.
+    Sonda {
+        pedido: "isto nao e json",
+        exige: &[r#""id":null"#, "-32700"],
+    },
+    // Um `id` que a varredura aceita mas que não é JSON. Ecoá-lo cru fazia o
+    // kernel emitir uma resposta que nenhum cliente lê — e depois de já ter
+    // executado o comando.
+    Sonda {
+        pedido: r#"{"jsonrpc":"2.0","id":abc,"method":"agent.ping"}"#,
+        exige: &[r#""id":null"#, "-32600"],
+    },
+    // E o canal continua vivo depois de todas as recusas: é esta última que
+    // separa "recusou" de "recusou e caiu".
+    Sonda {
+        pedido: r#"{"jsonrpc":"2.0","id":7,"method":"log.tail","params":{"count":3}}"#,
+        exige: &[r#""id":7"#, r#""records""#],
+    },
+];
+
+/// Sobe o kernel em modo de produção e conversa com ele pelo canal do agente.
+///
+/// # Por que isto existe
+///
+/// Porque a suíte não alcança o laço que o kernel entregue roda. Tudo que
+/// `cargo xtask test` exercita está sob `modo-teste`, e `modo-teste` **troca**
+/// o laço do agente pelo executor de testes: o `Executor`, a tarefa
+/// `agent::atender`, a espera por byte via interrupção e a serialização na
+/// porta ficam fora de toda rodada verde, por construção.
+///
+/// As peças têm caso: o enquadrador, o parser, os comandos. A composição não
+/// tinha nenhum — e é a composição que o agente usa.
+///
+/// # O que ele prova, e o que não prova
+///
+/// Prova que o kernel compilado como se entrega sobe, publica o canal,
+/// responde a uma sequência de pedidos numa conexão só e continua respondendo
+/// depois de recusar os malformados.
+///
+/// Não substitui a suíte: não confere nenhum invariante interno. É a outra
+/// metade — a suíte olha o kernel por dentro, isto olha pelo buraco da
+/// fechadura por onde o agente olha.
+fn fumaca(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
+    let artefato = build(arch, release, false)?;
+    let socket = caminho_socket(arch);
+
+    println!(
+        "[xtask] fumaça: subindo o kernel de produção no QEMU ({})",
+        arch.nome()
+    );
+
+    let mut filho = comando_qemu(arch, &artefato, Some(&socket))?
+        .spawn()
+        .map_err(|e| format!("não foi possível iniciar o {}: {e}", arch.qemu()))?;
+
+    let resultado = conversar(&socket, filho.id());
+
+    // O emulador morre aconteça o que acontecer: um QEMU órfão segura a
+    // imagem de disco e faz a *próxima* execução falhar por um motivo que
+    // nada tem a ver com ela.
+    let _ = filho.kill();
+    let _ = filho.wait();
+    let _ = std::fs::remove_file(&socket);
+
+    match resultado {
+        Ok(()) => {
+            println!("\n[xtask] fumaça: o canal do agente respondeu a tudo");
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(motivo) => {
+            eprintln!("\n[xtask] fumaça: {motivo}");
+            Ok(ExitCode::FAILURE)
+        }
+    }
+}
+
+/// Espera o canal subir e roda as sondas numa conexão só.
+fn conversar(socket: &Path, qemu: u32) -> Result<(), String> {
+    let limite = std::time::Instant::now() + ESPERA_PELA_FUMACA;
+
+    // Conectar não é o mesmo que ser atendido. O QEMU aceita a conexão assim
+    // que cria o chardev — muito antes de o kernel bootar —, e os bytes
+    // enviados nessa janela são **descartados** de propósito na subida da
+    // porta, junto com o lixo que uma UART produz ao ser configurada.
+    //
+    // Medido na primeira execução deste comando, que mandava o primeiro pedido
+    // na primeira conexão que abrisse:
+    //
+    //     [16] 880ms warn agent  39 bytes descartados: chegaram antes do canal
+    //                            subir
+    //     [xtask] fumaça: sonda 1: sem resposta
+    //
+    // O aperto de mão é reconectar e repetir um `agent.ping` barato até vir
+    // resposta. Só então a conversa de verdade começa, e daí em diante um
+    // silêncio é defeito e não impaciência. É a mesma disciplina de
+    // [`agente`], pela mesma razão.
+    let fluxo = loop {
+        if std::time::Instant::now() >= limite {
+            return Err(format!(
+                "o canal não respondeu em {}s (qemu pid {qemu})",
+                ESPERA_PELA_FUMACA.as_secs()
+            ));
+        }
+
+        let Ok(tentativa) = UnixStream::connect(socket) else {
+            std::thread::sleep(Duration::from_millis(200));
+            continue;
+        };
+        if tentativa
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .is_err()
+        {
+            return Err("não foi possível configurar o timeout".into());
+        }
+
+        let mut escrita = match tentativa.try_clone() {
+            Ok(f) => f,
+            Err(e) => return Err(format!("não foi possível duplicar o fluxo: {e}")),
+        };
+        let vivo = escrita
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"agent.ping\"}\n")
+            .and_then(|()| escrita.flush())
+            .is_ok()
+            && {
+                let mut eco = String::new();
+                BufReader::new(&tentativa).read_line(&mut eco).is_ok() && eco.contains("\"pong\"")
+            };
+
+        if vivo {
+            break tentativa;
+        }
+        drop(tentativa);
+        std::thread::sleep(Duration::from_millis(500));
+    };
+
+    println!(
+        "[xtask] fumaça: canal de pé; rodando {} sondas",
+        SONDAS.len()
+    );
+
+    // A partir daqui um silêncio é defeito, não paciência.
+    fluxo
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .map_err(|e| format!("não foi possível configurar o timeout: {e}"))?;
+
+    let mut escrita = fluxo
+        .try_clone()
+        .map_err(|e| format!("não foi possível duplicar o fluxo: {e}"))?;
+    let mut leitor = BufReader::new(fluxo);
+
+    for (n, sonda) in SONDAS.iter().enumerate() {
+        escrita
+            .write_all(format!("{}\n", sonda.pedido).as_bytes())
+            .and_then(|()| escrita.flush())
+            .map_err(|e| format!("sonda {}: falha ao enviar: {e}", n + 1))?;
+
+        let mut resposta = String::new();
+        match leitor.read_line(&mut resposta) {
+            Ok(0) => return Err(format!("sonda {}: o canal fechou sem responder", n + 1)),
+            Ok(_) => {}
+            Err(e) => return Err(format!("sonda {}: sem resposta: {e}", n + 1)),
+        }
+
+        let resposta = resposta.trim();
+        for exigido in sonda.exige {
+            if !resposta.contains(exigido) {
+                return Err(format!(
+                    "sonda {}: a resposta não traz {exigido}\n  pedido:   {}\n  resposta: {resposta}",
+                    n + 1,
+                    sonda.pedido
+                ));
+            }
+        }
+
+        // Uma resposta que não fecha as chaves não é um quadro: o cliente
+        // seguinte leria o resto dela como se fosse a resposta dele.
+        if !quadro_fechado(resposta) {
+            return Err(format!(
+                "sonda {}: a resposta não é um objeto JSON fechado\n  resposta: {resposta}",
+                n + 1
+            ));
+        }
+
+        println!("  [{}/{}] ok  {}", n + 1, SONDAS.len(), sonda.pedido);
+    }
+
+    Ok(())
+}
+
+/// Se a linha é um objeto JSON com todas as chaves fechadas.
+///
+/// Não é um parser: é a conferência que o `contains` acima não faz. Um quadro
+/// truncado traria os trechos exigidos e ainda assim quebraria o cliente, que
+/// é exatamente o defeito difícil de enxergar num teste por substring.
+///
+/// Strings são puladas inteiras, e dentro delas a barra invertida consome o
+/// byte seguinte — sem isso, um `}` dentro de aspas contaria como fechamento.
+fn quadro_fechado(linha: &str) -> bool {
+    let b = linha.as_bytes();
+    if b.first() != Some(&b'{') {
+        return false;
+    }
+
+    let mut nivel = 0usize;
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'"' => {
+                i += 1;
+                while i < b.len() && b[i] != b'"' {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+            }
+            b'{' | b'[' => nivel += 1,
+            b'}' | b']' => match nivel.checked_sub(1) {
+                Some(n) => nivel = n,
+                None => return false,
+            },
+            _ => {}
+        }
+        i += 1;
+    }
+
+    nivel == 0
 }
 
 fn test(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
