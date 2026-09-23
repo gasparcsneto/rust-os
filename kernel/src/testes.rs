@@ -1430,6 +1430,56 @@ fn paginacao_recusa_desalinhado() -> Resultado {
 // Heap
 // ===========================================================================
 
+/// O que `heap.stats` relata fecha com o que o alocador tem.
+///
+/// # Por que um invariante, e não um número esperado
+///
+/// Porque o número certo depende de tudo o que o kernel alocou até aqui, e um
+/// teste que o fixasse quebraria a cada linha de código nova. O que não muda
+/// é a soma: cada byte do heap ou está entregue a alguém ou está na lista
+/// livre, e `alocado + livre` tem de dar exatamente `total`.
+///
+/// # O que ele pega
+///
+/// Contabilidade que escorrega. `dealloc` desconta com `saturating_sub`, que
+/// é o certo a fazer num caminho onde não há a quem reclamar — e é também o
+/// que **esconde** o descompasso, grudando em zero em vez de aparecer. Um
+/// tamanho ajustado diferente entre alocar e liberar, um caminho de erro que
+/// esquece de descontar, uma sobra que se perde numa divisão de bloco: todos
+/// aparecem aqui, e em nenhum outro lugar.
+///
+/// A conferência acontece com uma alocação viva de propósito, para que o caso
+/// não passe por trivialidade num heap intocado.
+fn heap_relatorio_fecha() -> Resultado {
+    fn conferir(quando: &str) -> Resultado {
+        let e = crate::heap::estatisticas();
+        if e.alocado + e.livre != e.total {
+            crate::log_error!(
+                "teste",
+                "{}: alocado {} + livre {} != total {}",
+                quando,
+                e.alocado,
+                e.livre,
+                e.total
+            );
+            return Err("o relatorio do heap nao fecha com a lista livre");
+        }
+        if e.maior_bloco > e.livre {
+            return Err("o maior bloco livre e maior que todo o espaco livre");
+        }
+        Ok(())
+    }
+
+    conferir("em repouso")?;
+
+    {
+        let _ocupa = alloc::vec![0u8; 4096];
+        conferir("com uma alocacao viva")?;
+    }
+
+    conferir("depois de liberar")
+}
+
 fn heap_box_aloca_e_libera() -> Resultado {
     let antes = crate::heap::estatisticas();
 
@@ -3647,6 +3697,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "heap: reaproveita memoria liberada",
         f: heap_reaproveita_memoria_liberada,
+    },
+    Caso {
+        nome: "heap: o relatorio fecha com a lista livre",
+        f: heap_relatorio_fecha,
     },
     Caso {
         nome: "heap: funde blocos adjacentes",
