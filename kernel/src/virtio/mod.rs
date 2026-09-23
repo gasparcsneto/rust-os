@@ -59,6 +59,17 @@ const MAX_REGISTROS: usize = 4;
 /// Nenhuma linha. `u32::MAX` porque zero é uma linha válida no PIC.
 const SEM_LINHA: u32 = u32::MAX;
 
+/// Vaga tomada, mas ainda sem os dados dela.
+///
+/// Existe porque `linha` faz dois papéis — é a ficha que reserva a vaga e é a
+/// chave pela qual o handler reconhece o dono — e os dois querem coisas
+/// opostas: a ficha precisa ser escrita **antes** do resto, a chave precisa
+/// ser escrita **depois**. Um valor intermediário separa os dois momentos.
+///
+/// Nenhuma linha real vale isto, então o handler o descarta pela mesma
+/// comparação que já fazia, sem uma condição a mais.
+const RESERVADO: u32 = u32::MAX - 1;
+
 /// O que o handler precisa saber sobre um dispositivo.
 ///
 /// # Por que isto fica fora da tranca do driver
@@ -103,6 +114,23 @@ fn nome_de(codigo: u32) -> &'static str {
         NOME_DISCO => "disco",
         NOME_REDE => "rede",
         _ => "?",
+    }
+}
+
+impl Registro {
+    /// A linha deste registro, se ele já está publicado.
+    ///
+    /// Há dois jeitos de não haver o que ler numa vaga — livre
+    /// ([`SEM_LINHA`]) ou tomada com o conteúdo ainda por escrever
+    /// ([`RESERVADO`]) —, e quem lê não deveria precisar saber que são dois.
+    /// Sem isto, cada leitor repetiria a distinção e algum a esqueceria: o
+    /// relatório do agente esqueceu, e mostraria a vaga em transição como um
+    /// dispositivo sem nome numa linha de quatro bilhões.
+    fn linha_publicada(&self) -> Option<u32> {
+        match self.linha.load(Ordering::Acquire) {
+            SEM_LINHA | RESERVADO => None,
+            linha => Some(linha),
+        }
     }
 }
 
@@ -179,13 +207,39 @@ fn registrar(linha: u32, isr: Option<u64>, nome: u32) -> bool {
     for registro in &REGISTROS {
         if registro
             .linha
-            .compare_exchange(SEM_LINHA, linha, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
+            .compare_exchange(SEM_LINHA, RESERVADO, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
         {
-            registro.isr.store(isr.unwrap_or(0), Ordering::Release);
-            registro.nome.store(nome, Ordering::Release);
-            return true;
+            continue;
         }
+
+        // O conteúdo primeiro, a chave por último.
+        //
+        // A versão anterior escrevia a linha na própria troca e só depois o
+        // endereço do ISR. Entre uma coisa e outra o registro anunciava ser o
+        // dono da linha carregando um ISR zerado — e [`atender_interrupcao`]
+        // descarta um registro assim, porque zero quer dizer "este
+        // dispositivo não publicou registrador de estado".
+        //
+        // A janela é de duas instruções, e seria inofensiva se a linha ainda
+        // estivesse mascarada. Não está, e é o caso que este arquivo mais
+        // documenta que a abre: numa linha **compartilhada**, quem registra
+        // por último chega quando o primeiro já liberou a linha no
+        // controlador. No x86 é exatamente isso — disco e rede caem os dois
+        // na IRQ 11, e a rede se registra depois.
+        //
+        // Uma interrupção nessa janela é entregue, o handler não encontra
+        // quem a reconheça, e a linha é de **nível**: o dispositivo segue
+        // segurando o sinal e o controlador entrega de novo, imediatamente.
+        // O kernel para de progredir sem uma linha de log.
+        //
+        // As duas escritas abaixo podem ser `Relaxed`: quem as ordena é a
+        // publicação da linha, que é `Release`, e o handler lê a linha com
+        // `Acquire`. É o par que torna a ordem observável do outro lado.
+        registro.isr.store(isr.unwrap_or(0), Ordering::Relaxed);
+        registro.nome.store(nome, Ordering::Relaxed);
+        registro.linha.store(linha, Ordering::Release);
+        return true;
     }
     false
 }
@@ -212,7 +266,7 @@ fn registrar(linha: u32, isr: Option<u64>, nome: u32) -> bool {
 /// outro segurando o sinal.
 pub fn atender_interrupcao(linha: u32) {
     for registro in &REGISTROS {
-        if registro.linha.load(Ordering::Acquire) != linha {
+        if registro.linha_publicada() != Some(linha) {
             continue;
         }
 
@@ -258,7 +312,7 @@ pub fn avisos_de(nome: &str) -> Option<u64> {
     REGISTROS
         .iter()
         .find(|registro| {
-            registro.linha.load(Ordering::Acquire) != SEM_LINHA
+            registro.linha_publicada().is_some()
                 && nome_de(registro.nome.load(Ordering::Acquire)) == nome
         })
         .map(|registro| registro.avisos.load(Ordering::Relaxed))
@@ -267,10 +321,9 @@ pub fn avisos_de(nome: &str) -> Option<u64> {
 /// Percorre os dispositivos registrados: nome, linha e quantos avisos.
 pub fn com_interrupcoes<F: FnMut(&'static str, u32, u64)>(mut f: F) {
     for registro in &REGISTROS {
-        let linha = registro.linha.load(Ordering::Acquire);
-        if linha == SEM_LINHA {
+        let Some(linha) = registro.linha_publicada() else {
             continue;
-        }
+        };
         f(
             nome_de(registro.nome.load(Ordering::Acquire)),
             linha,
