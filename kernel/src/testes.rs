@@ -625,6 +625,254 @@ fn timer_exatamente_um_relogio_avanca() -> Resultado {
 }
 
 // ===========================================================================
+// A tela
+// ===========================================================================
+
+use crate::tela::{Cor, Formato, Tela};
+
+/// Monta uma tela minúscula sobre `buffer` e chama `f` com ela.
+///
+/// A tela da suíte é de mentira de propósito: a aritmética de pixel não tem
+/// nada de específico de arquitetura, e testá-la só onde há framebuffer de
+/// verdade seria testá-la só no x86.
+fn com_tela_falsa<R>(
+    buffer: &mut [u8],
+    largura: u32,
+    altura: u32,
+    stride: u32,
+    bytes_por_pixel: u32,
+    formato: Formato,
+    f: impl FnOnce(&Tela) -> R,
+) -> R {
+    // SAFETY: o buffer é da pilha de quem chamou, vive durante toda a
+    // chamada, e os casos abaixo o dimensionam para a geometria que passam.
+    let tela = unsafe {
+        Tela::sobre(
+            buffer.as_mut_ptr() as u64,
+            largura,
+            altura,
+            stride,
+            bytes_por_pixel,
+            formato,
+        )
+    };
+    f(&tela)
+}
+
+/// O que é escrito volta igual, nos três formatos.
+///
+/// # O que este caso pega
+///
+/// A ordem dos bytes. `rgb` e `bgr` guardam as mesmas três componentes em
+/// ordens opostas, e trocá-las não dá erro nenhum: dá uma tela em que o
+/// vermelho aparece azul. Num kernel que desenha uma tela de falha vermelha,
+/// o sintoma seria uma tela azul — e ninguém desconfia da ordem dos bytes ao
+/// ver isso, desconfia da constante da cor.
+fn tela_cada_formato_volta_como_foi_escrito() -> Resultado {
+    const CORES: [Cor; 4] = [
+        Cor::PRETO,
+        Cor::BRANCO,
+        Cor::nova(0xFF, 0x00, 0x00),
+        Cor::nova(0x10, 0x18, 0x28),
+    ];
+
+    for (formato, bytes_por_pixel) in [
+        (Formato::Rgb, 3),
+        (Formato::Rgb, 4),
+        (Formato::Bgr, 3),
+        (Formato::Bgr, 4),
+    ] {
+        let mut buffer = [0u8; 4 * 4 * 4];
+        let erro = com_tela_falsa(&mut buffer, 4, 4, 4, bytes_por_pixel, formato, |tela| {
+            for (indice, cor) in CORES.iter().enumerate() {
+                let x = indice as u32 % 4;
+                let y = indice as u32 / 4;
+                tela.retangulo(x, y, 1, 1, *cor);
+                if tela.ler_pixel(x, y) != Some(*cor) {
+                    return Some("uma cor nao voltou como foi escrita");
+                }
+            }
+            None
+        });
+        if let Some(motivo) = erro {
+            crate::log_error!(
+                "teste",
+                "formato {} com {} bytes por pixel",
+                formato.como_str(),
+                bytes_por_pixel
+            );
+            return Err(motivo);
+        }
+    }
+
+    // Em tons de cinza a volta não é exata de propósito: a cor foi reduzida a
+    // luminância na escrita. O que se afirma é que ela volta *cinza*, e que o
+    // valor não é zero para uma cor que não é preta.
+    let mut buffer = [0u8; 4 * 4];
+    let erro = com_tela_falsa(&mut buffer, 4, 4, 4, 1, Formato::Cinza, |tela| {
+        tela.retangulo(0, 0, 1, 1, Cor::BRANCO);
+        if tela.ler_pixel(0, 0) != Some(Cor::BRANCO) {
+            return Some("branco nao voltou branco em tons de cinza");
+        }
+
+        tela.retangulo(1, 0, 1, 1, Cor::nova(0x00, 0xFF, 0x00));
+        match tela.ler_pixel(1, 0) {
+            Some(Cor { r, g, b }) if r == g && g == b && r > 0 => None,
+            _ => Some("o verde nao virou um cinza diferente de preto"),
+        }
+    });
+    if let Some(motivo) = erro {
+        return Err(motivo);
+    }
+
+    Ok(())
+}
+
+/// Uma linha começa a `stride` pixels da anterior, não a `largura`.
+///
+/// # Por que isto merece um caso próprio
+///
+/// Porque é o erro clássico deste tipo de código, e porque o sintoma dele é
+/// uma imagem **inclinada** — cada linha deslocada um pouco mais que a
+/// anterior. Num teste que só escrevesse e lesse o mesmo pixel, o erro
+/// passaria: ele é consistente consigo mesmo.
+///
+/// O caso força a diferença: uma tela de 2 pixels de largura sobre um buffer
+/// de 5 pixels por linha. Se a conta usasse a largura, o pixel de baixo cairia
+/// dois pixels adiante em vez de cinco — e a posição exata é conferida byte a
+/// byte.
+fn tela_stride_nao_e_largura() -> Resultado {
+    const LARGURA: u32 = 2;
+    const STRIDE: u32 = 5;
+    const BYTES: u32 = 3;
+
+    let mut buffer = [0u8; (STRIDE * 2 * BYTES) as usize];
+
+    com_tela_falsa(
+        &mut buffer,
+        LARGURA,
+        2,
+        STRIDE,
+        BYTES,
+        Formato::Rgb,
+        |tela| {
+            tela.retangulo(0, 1, 1, 1, Cor::nova(0xAB, 0xCD, 0xEF));
+        },
+    );
+
+    // O pixel (0,1) tem de estar em `stride * bytes`, e não em
+    // `largura * bytes`.
+    let esperado = (STRIDE * BYTES) as usize;
+    let errado = (LARGURA * BYTES) as usize;
+
+    if buffer[esperado] != 0xAB || buffer[esperado + 1] != 0xCD || buffer[esperado + 2] != 0xEF {
+        return Err("a segunda linha nao comecou em stride");
+    }
+    if buffer[errado] != 0 {
+        return Err("a segunda linha comecou em largura, nao em stride");
+    }
+
+    Ok(())
+}
+
+/// Desenhar fora da tela não escreve fora do buffer.
+///
+/// Um retângulo maior que a tela é o caso normal, não o excepcional: é o que
+/// acontece em toda borda. O que não pode acontecer é ele escrever no que vem
+/// depois do framebuffer — e num kernel, o que vem depois é memória de outra
+/// pessoa.
+fn tela_recorta_na_borda() -> Resultado {
+    const LARGURA: u32 = 3;
+    const ALTURA: u32 = 3;
+    const BYTES: u32 = 4;
+    const UTEIS: usize = (LARGURA * ALTURA * BYTES) as usize;
+    /// Bytes de sentinela depois da tela, que precisam continuar intactos.
+    const SENTINELA: usize = 16;
+
+    let mut buffer = [0u8; UTEIS + SENTINELA];
+
+    com_tela_falsa(
+        &mut buffer[..UTEIS],
+        LARGURA,
+        ALTURA,
+        LARGURA,
+        BYTES,
+        Formato::Bgr,
+        |tela| {
+            // Bem maior que a tela, começando dentro dela.
+            tela.retangulo(1, 1, 1000, 1000, Cor::BRANCO);
+            // E um pixel solto muito além da borda.
+            tela.retangulo(9999, 9999, 1, 1, Cor::BRANCO);
+        },
+    );
+
+    if buffer[UTEIS..].iter().any(|&b| b != 0) {
+        return Err("o desenho passou do fim da tela");
+    }
+
+    // E o que estava dentro foi pintado: um recorte que não pinta nada
+    // passaria pela conferência acima sem fazer nada de útil.
+    if buffer[..UTEIS].iter().all(|&b| b == 0) {
+        return Err("o recorte descartou tambem o que estava dentro");
+    }
+
+    Ok(())
+}
+
+/// O banner do boot está desenhado no framebuffer da máquina.
+///
+/// # O que este caso acrescenta aos anteriores
+///
+/// Os três acima exercitam a aritmética de pixel sobre um buffer da pilha.
+/// Eles passariam num kernel que nunca tocasse no framebuffer de verdade —
+/// e o que pode dar errado ali é tudo que está entre a lógica e a tela: o
+/// endereço que o bootloader entregou, a geometria que ele declarou, e a
+/// escrita chegar mesmo à memória que o controlador de vídeo varre.
+///
+/// Numa máquina sem tela o caso não tem o que afirmar. Ele registra isso em
+/// vez de passar em silêncio: hoje é o ARM, onde a `virt` não expõe
+/// framebuffer nenhum, e essa lacuna deve ficar visível no relatório da
+/// suíte até um driver de virtio-gpu fechá-la.
+fn tela_banner_esta_na_tela_de_verdade() -> Resultado {
+    let Some(tela) = crate::tela::tela() else {
+        crate::log_info!("teste", "esta maquina nao tem framebuffer; nada a conferir");
+        return Ok(());
+    };
+
+    // A faixa de acento ocupa as primeiras linhas; o fundo, o resto.
+    let Some(topo) = tela.ler_pixel(0, 0) else {
+        return Err("o canto da tela nao pode ser lido");
+    };
+    if topo != Cor::ACENTO {
+        crate::log_error!(
+            "teste",
+            "o topo e {:02x}{:02x}{:02x}",
+            topo.r,
+            topo.g,
+            topo.b
+        );
+        return Err("o topo da tela nao tem a faixa de acento");
+    }
+
+    // Bem abaixo da faixa, e no meio da tela, para não cair numa borda.
+    let Some(fundo) = tela.ler_pixel(tela.largura / 2, tela.altura / 2) else {
+        return Err("o centro da tela nao pode ser lido");
+    };
+    if fundo != Cor::FUNDO {
+        crate::log_error!(
+            "teste",
+            "o centro e {:02x}{:02x}{:02x}",
+            fundo.r,
+            fundo.g,
+            fundo.b
+        );
+        return Err("o centro da tela nao foi limpo");
+    }
+
+    Ok(())
+}
+
+// ===========================================================================
 // Descrição da máquina
 // ===========================================================================
 
@@ -3076,6 +3324,22 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "timer: exatamente um relogio avanca",
         f: timer_exatamente_um_relogio_avanca,
+    },
+    Caso {
+        nome: "tela: cada formato volta como foi escrito",
+        f: tela_cada_formato_volta_como_foi_escrito,
+    },
+    Caso {
+        nome: "tela: stride nao e largura",
+        f: tela_stride_nao_e_largura,
+    },
+    Caso {
+        nome: "tela: recorta na borda",
+        f: tela_recorta_na_borda,
+    },
+    Caso {
+        nome: "tela: o banner esta na tela de verdade",
+        f: tela_banner_esta_na_tela_de_verdade,
     },
     Caso {
         nome: "memoria: regioes coerentes",
