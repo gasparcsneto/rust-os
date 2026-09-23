@@ -818,6 +818,10 @@ fn escrever_ascii(w: &mut JsonWriter, bytes: &[u8]) -> fmt::Result {
 fn irq_stats(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.begin_object()?;
     w.field_u64("total", crate::irq::total())?;
+    // O total conta toda interrupcao; as linhas so contam as que cabem no
+    // teto. Sem este campo a diferenca entre os dois seria um numero que nao
+    // fecha e nao se explica.
+    w.field_u64("beyond_line_limit", crate::irq::fora_do_teto())?;
 
     // Os dispositivos virtio aparecem em separado porque uma linha de PCI e
     // compartilhada: no x86 o disco e a rede caem os dois na IRQ 11, e o

@@ -24,13 +24,33 @@ use spin::Mutex;
 
 /// Quantas linhas de interrupção conseguimos contabilizar.
 ///
-/// O PIC do x86 tem 16; o GIC do ARM começa em 32 para periféricos, mas as
-/// linhas que usamos hoje (timer) são PPIs de numeração baixa. 64 cobre
-/// ambos com folga.
-pub const MAX_LINHAS: usize = 64;
+/// # Por que 256, e por que 64 deixou de bastar
+///
+/// O que se contabiliza não é uma "linha" no mesmo sentido nos dois lados. No
+/// ARM é o INTID do GIC, e os que este kernel usa cabem folgadamente abaixo de
+/// 64. No x86, desde que o APIC local entrou, é o **vetor** — e o vetor de
+/// interrupções espúrias que o APIC exige é o 255.
+///
+/// O teto anterior era 64, com um comentário dizendo que cobria ambos com
+/// folga. Ele deixou de cobrir no commit que acrescentou o APIC, e nada
+/// reclamou: `nomear` e `contabilizar` descartam em silêncio o que passa do
+/// teto. O efeito seria um `irq.stats` com um total que não fecha com a soma
+/// das linhas, sem nada explicando a diferença — que é o tipo de número que
+/// faz um agente concluir a coisa errada.
+///
+/// 256 é o espaço de vetores inteiro do x86, então não há como faltar de novo.
+/// Custa seis KiB de `.bss` numa máquina com centenas de MiB.
+pub const MAX_LINHAS: usize = 256;
 
 static CONTADORES: [AtomicU64; MAX_LINHAS] = [const { AtomicU64::new(0) }; MAX_LINHAS];
 static TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// Interrupções que chegaram numa linha acima do teto e não puderam ser
+/// atribuídas a ela.
+///
+/// Existe para que a diferença entre o total e a soma das linhas tenha nome.
+/// Um número que não fecha e não se explica é pior que um número ausente.
+static FORA_DO_TETO: AtomicU64 = AtomicU64::new(0);
 
 /// Nomes legíveis por linha, registrados pelo backend de arquitetura.
 ///
@@ -41,16 +61,34 @@ static NOMES: Mutex<[&'static str; MAX_LINHAS]> = Mutex::new([""; MAX_LINHAS]);
 
 /// Dá nome a uma linha. Chame na inicialização, antes de habilitar
 /// interrupções.
+///
+/// Uma linha acima do teto é reportada em vez de descartada calada: foi
+/// exatamente esse silêncio que deixou o vetor espúrio do APIC sem nome por
+/// um commit inteiro. Ver [`MAX_LINHAS`].
 pub fn nomear(linha: usize, nome: &'static str) {
-    if linha < MAX_LINHAS {
-        crate::arch::sem_interrupcoes(|| NOMES.lock()[linha] = nome);
+    if linha >= MAX_LINHAS {
+        crate::log_warn!(
+            "irq",
+            "linha {} acima do teto de {}; ficara sem nome",
+            linha,
+            MAX_LINHAS
+        );
+        return;
     }
+    crate::arch::sem_interrupcoes(|| NOMES.lock()[linha] = nome);
 }
 
 /// Contabiliza uma interrupção. Chamado de dentro dos handlers.
+///
+/// Não reporta uma linha acima do teto, ao contrário de [`nomear`]: aqui
+/// estamos dentro de um handler, e registrar dali seria tomar a trava do log
+/// no pior lugar possível. O que denuncia o caso é [`FORA_DO_TETO`], que o
+/// relatório do agente expõe.
 pub fn contabilizar(linha: usize) {
     if linha < MAX_LINHAS {
         CONTADORES[linha].fetch_add(1, Ordering::Relaxed);
+    } else {
+        FORA_DO_TETO.fetch_add(1, Ordering::Relaxed);
     }
     TOTAL.fetch_add(1, Ordering::Relaxed);
 }
@@ -94,4 +132,9 @@ pub fn contagem_da_linha(linha: usize) -> u64 {
 /// Total de interrupções de hardware desde o boot.
 pub fn total() -> u64 {
     TOTAL.load(Ordering::Relaxed)
+}
+
+/// Quantas chegaram numa linha que o teto não cobre.
+pub fn fora_do_teto() -> u64 {
+    FORA_DO_TETO.load(Ordering::Relaxed)
 }
