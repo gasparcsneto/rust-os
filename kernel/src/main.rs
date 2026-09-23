@@ -62,6 +62,7 @@ mod qemu;
 mod rede;
 mod serial;
 mod tarefas;
+mod tela;
 mod tempo;
 #[cfg(feature = "modo-teste")]
 mod testes;
@@ -132,15 +133,21 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
         log_error!("heap", "nao foi possivel inicializar: {}", motivo);
     }
 
-    match machine::video() {
-        Some(v) => log_info!(
-            "video",
-            "framebuffer {}x{} {} ({} bytes/pixel)",
-            v.largura,
-            v.altura,
-            v.formato,
-            v.bytes_por_pixel
-        ),
+    match tela::tela() {
+        Some(t) => {
+            log_info!(
+                "video",
+                "framebuffer {}x{} {} ({} bytes/pixel)",
+                t.largura,
+                t.altura,
+                t.formato.como_str(),
+                t.bytes_por_pixel
+            );
+            // O indicador de que há um kernel vivo desenhando. Vem logo
+            // depois do log, e não antes, para que uma falha ao desenhar
+            // apareça depois de já sabermos que a tela existe.
+            tela::banner();
+        }
         None => log_info!("video", "nenhum framebuffer nesta plataforma"),
     }
 

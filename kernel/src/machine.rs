@@ -18,6 +18,14 @@
 //! No ARM os dados saem de um parser e não sobrevivem por si. Copiar para um
 //! array estático unifica os dois casos e, de quebra, torna o mapa imune a
 //! qualquer reaproveitamento futuro da memória onde o bootloader o colocou.
+//!
+//! # O que **não** está aqui
+//!
+//! O framebuffer. Ele foi descrito neste módulo por um tempo, e mudou para
+//! [`crate::tela`] por uma razão concreta: a descrição da máquina vive atrás
+//! de um `Mutex`, e a tela precisa ser alcançável de dentro de um handler de
+//! exceção fatal — que é justamente onde alguém pode estar segurando aquela
+//! trava. A geometria acompanhou os pixels para não haver duas cópias dela.
 
 use spin::Mutex;
 
@@ -79,23 +87,11 @@ impl Regiao {
     }
 }
 
-/// Um framebuffer linear já configurado pelo firmware.
-#[derive(Clone, Copy, Debug)]
-pub struct Video {
-    pub largura: u64,
-    pub altura: u64,
-    /// Pixels por linha, que pode exceder a largura visível por alinhamento.
-    pub stride: u64,
-    pub bytes_por_pixel: u64,
-    pub formato: &'static str,
-}
-
 struct Maquina {
     regioes: [Regiao; MAX_REGIOES],
     n: usize,
     /// Regiões que não couberam em [`MAX_REGIOES`].
     descartadas: usize,
-    video: Option<Video>,
 }
 
 /// Executa `f` com acesso exclusivo à descrição da máquina.
@@ -111,7 +107,6 @@ static MAQUINA: Mutex<Maquina> = Mutex::new(Maquina {
     regioes: [Regiao::VAZIA; MAX_REGIOES],
     n: 0,
     descartadas: 0,
-    video: None,
 });
 
 /// Registra uma região. Chamado pelo backend de arquitetura durante o boot.
@@ -141,15 +136,6 @@ pub fn adicionar_regiao(regiao: Regiao) {
     });
 }
 
-/// Registra o framebuffer, se a plataforma tiver um.
-///
-/// Sem chamador no ARM: a máquina `virt` não expõe framebuffer, então lá a
-/// função existe mas nunca é usada.
-#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
-pub fn definir_video(video: Video) {
-    com_maquina(|m| m.video = Some(video));
-}
-
 /// Executa `f` para cada região registrada.
 pub fn com_regioes<F: FnMut(&Regiao)>(mut f: F) {
     com_maquina(|m| {
@@ -177,8 +163,4 @@ pub fn estatisticas() -> (u64, u64, usize) {
 /// Quantas regiões foram descartadas por falta de espaço.
 pub fn regioes_descartadas() -> usize {
     com_maquina(|m| m.descartadas)
-}
-
-pub fn video() -> Option<Video> {
-    com_maquina(|m| m.video)
 }

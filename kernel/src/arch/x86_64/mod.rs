@@ -26,7 +26,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use bootloader_api::BootInfo;
 use bootloader_api::info::{MemoryRegionKind, PixelFormat};
 
-use crate::machine::{Regiao, TipoRegiao, Video};
+use crate::machine::{Regiao, TipoRegiao};
 
 pub use uart::Uart;
 
@@ -187,26 +187,41 @@ fn inicio(boot_info: &'static mut BootInfo) -> ! {
 
     if let Some(fb) = boot_info.framebuffer.as_ref() {
         let info = fb.info();
-        crate::machine::definir_video(Video {
-            largura: info.width as u64,
-            altura: info.height as u64,
-            stride: info.stride as u64,
-            bytes_por_pixel: info.bytes_per_pixel as u64,
-            formato: nome_formato_pixel(info.pixel_format),
-        });
+
+        // O endereço vem do próprio buffer que o bootloader entregou, já
+        // mapeado e gravável — é o que torna a tela utilizável desde o
+        // primeiro instante, antes mesmo de a paginação ser nossa. Num kernel
+        // que quer poder desenhar uma tela de falha, esse "desde o primeiro
+        // instante" é a propriedade que importa.
+        //
+        // SAFETY: a fatia é do bootloader, tem exatamente o tamanho que a
+        // geometria descreve, e a posse dela passou para o kernel.
+        unsafe {
+            crate::tela::registrar(
+                fb.buffer().as_ptr() as u64,
+                info.width as u32,
+                info.height as u32,
+                info.stride as u32,
+                info.bytes_per_pixel as u32,
+                formato_de_pixel(info.pixel_format),
+            );
+        }
     }
 
     crate::inicio_comum(canal)
 }
 
-fn nome_formato_pixel(formato: PixelFormat) -> &'static str {
+/// Traduz o formato do bootloader para o do kernel.
+///
+/// Os formatos que o `bootloader` conhece e este kernel não sabe desenhar
+/// viram cinza. É uma escolha visível — a tela fica em tons de cinza — e
+/// melhor que a alternativa de escrever bytes na ordem errada, que produziria
+/// cores trocadas sem ninguém saber por quê.
+fn formato_de_pixel(formato: PixelFormat) -> crate::tela::Formato {
     match formato {
-        PixelFormat::Rgb => "rgb",
-        PixelFormat::Bgr => "bgr",
-        PixelFormat::U8 => "grayscale8",
-        // `PixelFormat` é `non_exhaustive`: versões futuras do bootloader
-        // podem adicionar variantes, e o kernel precisa continuar compilando.
-        _ => "desconhecido",
+        PixelFormat::Rgb => crate::tela::Formato::Rgb,
+        PixelFormat::Bgr => crate::tela::Formato::Bgr,
+        _ => crate::tela::Formato::Cinza,
     }
 }
 
