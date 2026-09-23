@@ -278,6 +278,23 @@ fn preparar(
         return;
     };
 
+    // O decodificador é desligado **antes de qualquer leitura de BAR**, e não
+    // só antes da atribuição.
+    //
+    // Ler um BAR é destrutivo: para descobrir o tamanho é preciso escrever
+    // todos os uns nele e ler de volta a máscara de bits fixos. Entre a
+    // escrita e a restauração o BAR contém lixo, e um dispositivo que
+    // estivesse decodificando responderia, por um instante, por uma faixa
+    // enorme — possivelmente por cima de outro.
+    //
+    // Isso valia para a atribuição, que só acontece no ARM, e o código já
+    // cuidava disso lá. Mas a releitura logo abaixo mede os BARs igual, e no
+    // x86 ela rodava com o decodificador que o BIOS deixou ligado. A regra é
+    // da medição, não da arquitetura.
+    ponta.update_command(acesso, |atual| {
+        atual & !(CommandRegister::MEMORY_ENABLE | CommandRegister::IO_ENABLE)
+    });
+
     if let Some(distribuidor) = distribuidor.as_mut() {
         atribuir_bars(acesso, &mut ponta, distribuidor);
     }
@@ -337,21 +354,14 @@ fn preparar(
 }
 
 /// Percorre os BARs vazios e dá um endereço a cada um.
+///
+/// Pressupõe que o decodificador do dispositivo já está desligado — ver
+/// [`preparar`], que o desliga para a medição e o religa no fim.
 fn atribuir_bars(
     acesso: &impl ConfigRegionAccess,
     ponta: &mut EndpointHeader,
     distribuidor: &mut Distribuidor,
 ) {
-    // Medir um BAR é destrutivo: escreve-se todos os uns nele e lê-se de volta
-    // a máscara de bits fixos, que diz o tamanho. Entre a escrita e a
-    // restauração o BAR contém lixo, e um dispositivo que estivesse
-    // decodificando responderia, por um instante, por uma faixa enorme —
-    // possivelmente por cima de outro. Desligar o decodificador antes é o que
-    // torna a medição segura, e religá-lo é trabalho de quem chamou.
-    ponta.update_command(acesso, |atual| {
-        atual & !(CommandRegister::MEMORY_ENABLE | CommandRegister::IO_ENABLE)
-    });
-
     let mut slot = 0u8;
     while slot < 6 {
         let (tamanho, largura_em_slots) = match ponta.bar(slot, acesso) {
