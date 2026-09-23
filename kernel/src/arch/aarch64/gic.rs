@@ -253,6 +253,32 @@ fn armar(ciclos: u32) {
 /// Precisa ser chamada com as interrupções mascaradas.
 pub unsafe fn init_timer(hz_desejado: u32) -> u32 {
     let frequencia = frequencia_do_contador();
+
+    // `CNTFRQ_EL0` não é medido: é um registrador que o firmware preenche
+    // para dizer ao software a que taxa o contador anda. Um firmware que não
+    // o preenche deixa zero ali — e o contador continua andando do mesmo
+    // jeito, porque este registrador só descreve, não controla.
+    //
+    // É por isso que o zero é perigoso e não inofensivo. `0 / hz` é zero, e o
+    // `.max(1)` logo abaixo — que existe justamente para impedir um intervalo
+    // de zero ciclos — o transformaria num intervalo de **um** ciclo do
+    // contador real. A tempestade de interrupções que aquele mínimo evita
+    // chegaria pela outra ponta: dezenas de milhões de disparos por segundo,
+    // cada um rearmando o próximo, e nenhum ciclo sobrando para o resto.
+    //
+    // Sem frequência declarada não há como programar o timer, e é melhor
+    // ficar sem relógio do que travar a máquina com um. O resto do kernel já
+    // sabe viver assim: `tempo` reporta uptime zero em vez de inventar um
+    // número, e `tarefas::relogio::por_ms` degrada para polling com aviso.
+    if frequencia == 0 || hz_desejado == 0 {
+        crate::log_error!(
+            "irq",
+            "CNTFRQ_EL0 diz {} Hz; sem timer, o kernel segue sem relogio",
+            frequencia
+        );
+        return 0;
+    }
+
     // Mínimo de 1 para não armar um timer de zero ciclos, que dispararia
     // continuamente e travaria o sistema numa tempestade de interrupções.
     let intervalo = (frequencia / hz_desejado).max(1);
