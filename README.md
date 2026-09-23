@@ -614,7 +614,7 @@ padronizado.
       **Fase 1 completa.**
 - [ ] **Fase 2 — Drivers.** Enumeração PCI (**feito**), virtio-blk
       (**feito**), virtio-net (**feito**), roteamento de interrupção de PCI
-      (**feito**), timer APIC/HPET, framebuffer gráfico.
+      (**feito**), timer do APIC local (**feito**), framebuffer gráfico.
 
 ## Licença
 
