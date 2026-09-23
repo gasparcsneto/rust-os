@@ -33,6 +33,23 @@
 /// Assinatura no início de todo device tree válido.
 const MAGIC: u32 = 0xd00d_feed;
 
+/// Maior largura de célula que este leitor aceita.
+///
+/// # Por que um teto
+///
+/// Porque `#address-cells` e `#size-cells` vêm **do blob**, e o blob vem do
+/// firmware. Um valor absurdo ali não é hipótese remota: é o que se lê de um
+/// device tree corrompido, e a aritmética que o consome não estava preparada.
+///
+/// `(address_cells + size_cells) * 4` com os dois em `0xFFFF_FFFF` transborda
+/// a soma de 32 bits — pânico num build de depuração, e uma largura pequena e
+/// falsa num de release, que faria o leitor interpretar lixo como endereços.
+///
+/// Quatro é o que a especificação admite: 128 bits de endereço. Recusar acima
+/// disso transforma um blob malformado numa leitura que simplesmente não
+/// encontra nada, em vez de num kernel que morre ou inventa endereços.
+const MAX_CELULAS: u32 = 4;
+
 // Tokens do struct block.
 const FDT_BEGIN_NODE: u32 = 0x1;
 const FDT_END_NODE: u32 = 0x2;
@@ -64,6 +81,14 @@ unsafe fn cstr<'a>(base: *const u8, offset: usize) -> &'a [u8] {
         n += 1;
     }
     unsafe { core::slice::from_raw_parts(inicio, n) }
+}
+
+/// Se uma propriedade tem ao menos uma célula de conteúdo.
+///
+/// `be32` lê quatro bytes; uma propriedade menor que isso faria a leitura
+/// passar do fim dos dados dela e entrar na próxima.
+const fn prop_cabe(tamanho: usize) -> bool {
+    tamanho >= 4
 }
 
 /// Arredonda para cima até o próximo múltiplo de 4.
@@ -215,11 +240,21 @@ unsafe fn percorrer(dtb: *const u8, mut f: impl FnMut(&Propriedade)) -> Result<(
 
                 // As larguras da raiz precisam ser lidas antes de qualquer
                 // filho usá-las, e são: a raiz é o primeiro nó do blob.
-                if profundidade == 1 {
+                if profundidade == 1 && prop_cabe(tamanho) {
+                    // Uma declaração fora da faixa é descartada, e o padrão da
+                    // especificação continua valendo. Conferir aqui vale por
+                    // todos os consumidores: é o único ponto por onde estas
+                    // larguras entram no kernel.
                     if nome == b"#address-cells" {
-                        address_cells = unsafe { be32(dtb, dados) };
+                        let valor = unsafe { be32(dtb, dados) };
+                        if valor <= MAX_CELULAS {
+                            address_cells = valor;
+                        }
                     } else if nome == b"#size-cells" {
-                        size_cells = unsafe { be32(dtb, dados) };
+                        let valor = unsafe { be32(dtb, dados) };
+                        if valor <= MAX_CELULAS {
+                            size_cells = valor;
+                        }
                     }
                 }
 
@@ -253,7 +288,11 @@ unsafe fn percorrer(dtb: *const u8, mut f: impl FnMut(&Propriedade)) -> Result<(
 /// # Safety
 /// `prop` precisa ter vindo de um percurso do blob `dtb`.
 unsafe fn ler_reg(dtb: *const u8, prop: &Propriedade, mut f: impl FnMut(u64, u64)) {
-    let largura_par = (prop.address_cells + prop.size_cells) as usize * 4;
+    // Soma em `usize`, e não em `u32`: as duas larguras vêm do blob, e somá-las
+    // na largura em que foram lidas transbordaria. O percurso já as limita a
+    // [`MAX_CELULAS`], e esta é a segunda barreira — a que continua valendo se
+    // um dia elas entrarem por outro caminho.
+    let largura_par = (prop.address_cells as usize + prop.size_cells as usize) * 4;
     if largura_par == 0 {
         return;
     }
@@ -361,6 +400,8 @@ unsafe fn ler_ranges(dtb: *const u8, prop: &Propriedade) -> Option<(u64, u64, u6
     // Uma entrada é endereço-filho, endereço-pai e tamanho concatenados. As
     // larguras do filho o binding fixa; a do pai é a que a raiz declarou, e é
     // por isso que `Propriedade` carrega `address_cells`.
+    // Mesma razão de `ler_reg`: a largura do pai vem do blob, e a conta é
+    // feita em `usize` para não transbordar.
     let celulas_do_pai = prop.address_cells as usize;
     let largura = (CELULAS_DE_ENDERECO_PCI + celulas_do_pai + CELULAS_DE_TAMANHO_PCI) * 4;
 
@@ -570,6 +611,14 @@ unsafe fn larguras_do_phandle(dtb: *const u8, phandle: u32) -> Option<Larguras> 
         }
         // SAFETY: mesma justificativa.
         let valor = unsafe { be32(dtb, prop.dados) };
+        if valor > MAX_CELULAS {
+            // Um controlador que declare larguras absurdas não é um
+            // controlador que este leitor saiba ler. Recusar aqui faz a busca
+            // devolver `None`, e o kernel segue sem interrupção de PCI — em
+            // vez de calcular um tamanho de entrada que percorreria a tabela
+            // errada.
+            return;
+        }
         if prop.nome == b"#address-cells" {
             endereco = valor;
         } else if prop.nome == b"#interrupt-cells" {

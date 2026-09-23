@@ -358,6 +358,16 @@ fn pular_valor(b: &[u8], i: usize) -> Option<usize> {
 
 /// Pula um objeto ou array inteiro, respeitando aninhamento e strings.
 fn pular_container(b: &[u8], mut i: usize, abre: u8, fecha: u8) -> Option<usize> {
+    // O primeiro byte tem de ser a abertura. Hoje todo chamador garante isso
+    // ao despachar pelo próprio byte, e é justamente por isso que a
+    // conferência é barata: ela torna local uma pré-condição que hoje mora em
+    // quem chama. Sem ela, um `fecha` na primeira posição faria `nivel`
+    // baixar de zero — pânico num build de depuração, e um laço sobre o resto
+    // do buffer num de release.
+    if *b.get(i)? != abre {
+        return None;
+    }
+
     let mut nivel = 0usize;
     while i < b.len() {
         let c = b[i];
