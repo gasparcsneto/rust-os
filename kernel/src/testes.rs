@@ -975,6 +975,35 @@ fn tela_recorta_na_borda() -> Resultado {
     Ok(())
 }
 
+/// O que a ausência de framebuffer significa, que depende da arquitetura.
+///
+/// # Por que não é sempre tolerável
+///
+/// Porque a tolerância boa demais transformou este caso num que passava
+/// justamente quando deveria falhar.
+///
+/// No ARM a `virt` do QEMU não expõe framebuffer nenhum, e a ausência é o
+/// estado correto da máquina — uma lacuna que deve aparecer no relatório da
+/// suíte até um driver de virtio-gpu fechá-la. No x86 é o contrário: o
+/// bootloader entrega um framebuffer sempre, então "não há tela" não descreve
+/// máquina nenhuma. Descreve um defeito — a geometria recusada, o registro
+/// que não aconteceu, o endereço que não chegou.
+///
+/// Os dois casos eram tratados como um. Injetando um stride menor que a
+/// largura, a tela foi corretamente recusada no boot e este caso continuou
+/// dizendo `ok`: o único que olha para o framebuffer de verdade parou de
+/// olhar, em silêncio, no exato cenário em que ele importa.
+#[cfg(target_arch = "x86_64")]
+fn sem_framebuffer() -> Resultado {
+    Err("esta maquina deveria ter framebuffer e nao tem")
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn sem_framebuffer() -> Resultado {
+    crate::log_info!("teste", "esta maquina nao tem framebuffer; nada a conferir");
+    Ok(())
+}
+
 /// O banner do boot está desenhado no framebuffer da máquina.
 ///
 /// # O que este caso acrescenta aos anteriores
@@ -985,14 +1014,11 @@ fn tela_recorta_na_borda() -> Resultado {
 /// endereço que o bootloader entregou, a geometria que ele declarou, e a
 /// escrita chegar mesmo à memória que o controlador de vídeo varre.
 ///
-/// Numa máquina sem tela o caso não tem o que afirmar. Ele registra isso em
-/// vez de passar em silêncio: hoje é o ARM, onde a `virt` não expõe
-/// framebuffer nenhum, e essa lacuna deve ficar visível no relatório da
-/// suíte até um driver de virtio-gpu fechá-la.
+/// Numa máquina sem tela o caso não tem o que afirmar, e é [`sem_framebuffer`]
+/// quem decide se essa ausência é legítima.
 fn tela_banner_esta_na_tela_de_verdade() -> Resultado {
     let Some(tela) = crate::tela::tela() else {
-        crate::log_info!("teste", "esta maquina nao tem framebuffer; nada a conferir");
-        return Ok(());
+        return sem_framebuffer();
     };
 
     // A faixa de acento ocupa as primeiras linhas; o fundo, o resto.

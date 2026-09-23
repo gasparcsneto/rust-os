@@ -66,6 +66,20 @@ impl Formato {
         }
     }
 
+    /// Quantos bytes de cada pixel este formato lê e escreve.
+    ///
+    /// Não é o mesmo que `bytes_por_pixel`: uma tela de 32 bits guarda quatro
+    /// bytes por pixel e este formato só toca três, deixando o quarto —
+    /// tipicamente o alfa — como estava. O que **não** pode acontecer é o
+    /// contrário: um formato que toque mais bytes do que o pixel tem faz a
+    /// leitura do último pixel da tela cair para fora dela.
+    const fn bytes_tocados(self) -> u32 {
+        match self {
+            Formato::Rgb | Formato::Bgr => 3,
+            Formato::Cinza => 1,
+        }
+    }
+
     /// O nome que o relatório do agente usa.
     pub fn como_str(self) -> &'static str {
         match self {
@@ -141,6 +155,9 @@ pub struct Tela {
 
 /// Registra o framebuffer que esta máquina oferece.
 ///
+/// Uma geometria que não se sustenta é recusada: a tela não é publicada, o
+/// kernel segue sem ela, e o motivo vai para o log. Ver [`geometria_coerente`].
+///
 /// # Safety
 ///
 /// `base` precisa ser um endereço virtual válido, já mapeado e gravável, de
@@ -154,6 +171,19 @@ pub unsafe fn registrar(
     bytes_por_pixel: u32,
     formato: Formato,
 ) {
+    if !geometria_coerente(largura, altura, stride, bytes_por_pixel, formato) {
+        crate::log_error!(
+            "tela",
+            "geometria recusada: {}x{}, stride {}, {} bytes por pixel, formato {}",
+            largura,
+            altura,
+            stride,
+            bytes_por_pixel,
+            formato.como_str()
+        );
+        return;
+    }
+
     LARGURA.store(largura, Ordering::Relaxed);
     ALTURA.store(altura, Ordering::Relaxed);
     STRIDE.store(stride, Ordering::Relaxed);
@@ -164,6 +194,41 @@ pub unsafe fn registrar(
     // decidir que há um framebuffer, então publicá-la antes da geometria
     // abriria uma janela em que alguém desenharia com largura zero.
     BASE.store(base, Ordering::Release);
+}
+
+/// A geometria descreve uma tela em que a aritmética de pixel se sustenta?
+///
+/// # O que cada condição protege
+///
+/// A segurança de [`Tela::endereco`] não vem só do tamanho da região: ela vem
+/// de o endereço de todo pixel **dentro da tela** cair dentro dela. Duas
+/// relações sustentam isso, e nenhuma das duas estava escrita em lugar nenhum.
+///
+/// A primeira é `stride >= largura`. O limite que a função confere é a
+/// largura, mas o endereço que ela calcula usa o stride: com um stride menor,
+/// o pixel mais à direita da última linha cai depois do fim da região — e a
+/// condição de segurança de [`registrar`], que fala em
+/// `stride * altura * bytes_por_pixel` bytes, não o impede.
+///
+/// A segunda é `bytes_por_pixel >= bytes_tocados`. O leitor de um pixel RGB
+/// lê três bytes a partir do começo dele; num framebuffer que declarasse um
+/// byte por pixel, os dois últimos viriam de fora da tela na última posição.
+///
+/// Nenhuma das duas acontece com um bootloader que funciona. As duas são
+/// baratas de conferir uma vez no boot, e o que elas evitam — uma escrita
+/// fora da região — não tem sintoma local: aparece como memória alheia
+/// corrompida, longe daqui.
+fn geometria_coerente(
+    largura: u32,
+    altura: u32,
+    stride: u32,
+    bytes_por_pixel: u32,
+    formato: Formato,
+) -> bool {
+    largura > 0
+        && altura > 0
+        && stride >= largura
+        && bytes_por_pixel >= formato.bytes_tocados()
 }
 
 /// A tela desta máquina, se houver uma.
