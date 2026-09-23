@@ -13,7 +13,7 @@
 //! nos interessa. Quando a ACPI entrar no kernel por outro motivo, trocar isto
 //! por ECAM é uma implementação nova do mesmo trait.
 
-use pci_types::{ConfigRegionAccess, PciAddress};
+use pci_types::{ConfigRegionAccess, EndpointHeader, PciAddress, PciHeader};
 use x86_64::instructions::port::Port;
 
 /// Onde se escreve qual registrador se quer.
@@ -73,6 +73,42 @@ impl ConfigRegionAccess for Acesso {
 /// Nunca falha no x86: as portas são parte da arquitetura.
 pub fn acesso() -> Option<Acesso> {
     Some(Acesso)
+}
+
+/// Em que linha do controlador um dispositivo interrompe.
+///
+/// # Por que aqui a resposta já está pronta
+///
+/// Porque o BIOS a escreveu. O registrador de linha de interrupção, no
+/// deslocamento `0x3C` do cabeçalho, não é lido pelo hardware — é um bilhete
+/// que o firmware deixa para o sistema operacional dizendo em qual entrada do
+/// controlador ele ligou aquele pino. Num PC essa decisão já foi tomada antes
+/// de o kernel existir.
+///
+/// No ARM não há bilhete porque não houve firmware, e a mesma pergunta se
+/// responde lendo a tabela de tradução do device tree. É a mesma assimetria
+/// dos BARs.
+///
+/// `0xFF` é o valor que significa "não conectada", e `0` a `15` são as linhas
+/// do PIC. Qualquer outra coisa é um bilhete que não sabemos ler.
+pub fn linha_de_interrupcao(endereco: PciAddress, _pino: u8) -> Option<u32> {
+    let ponta = EndpointHeader::from_header(PciHeader::new(endereco), Acesso)?;
+    let (_, linha) = ponta.interrupt(Acesso);
+    (linha < 16).then_some(linha as u32)
+}
+
+/// Libera a linha no controlador para que ela chegue ao processador.
+///
+/// # Safety
+///
+/// Só pode ser chamada quando já existe quem trate a linha.
+pub unsafe fn habilitar_interrupcao(linha: u32) {
+    if linha >= 16 {
+        return;
+    }
+    // SAFETY: delegada ao chamador; a IDT já tem vetor para todas as
+    // dezesseis linhas desde `idt::init`.
+    unsafe { super::pic::desmascarar(linha as u8) };
 }
 
 /// A janela de MMIO que o kernel pode distribuir entre os BARs: nenhuma.

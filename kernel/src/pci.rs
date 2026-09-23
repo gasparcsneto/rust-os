@@ -177,6 +177,20 @@ pub struct Dispositivo {
     /// defeito do dispositivo: alguém precisa **distribuir** as janelas do
     /// barramento, e esse alguém é o firmware ou o kernel.
     pub regioes: [Option<Regiao>; BARS],
+    /// Qual dos quatro pinos de interrupção do barramento este dispositivo
+    /// usa, ou zero se ele não interrompe.
+    ///
+    /// O pino é escolha do **dispositivo**; em que linha do controlador ele
+    /// acaba é escolha da placa. Os dois números juntos são o que permite
+    /// achar a linha — ver [`Dispositivo::interrupcao`].
+    pub pino: u8,
+    /// Em que linha do controlador ele interrompe, se em alguma.
+    ///
+    /// O número é o da arquitetura: uma IRQ do PIC no x86, um INTID do GIC no
+    /// ARM. O kernel não precisa dos dois vocabulários — precisa de um número
+    /// que sirva para habilitar e para reconhecer, e cada backend devolve o
+    /// seu.
+    pub interrupcao: Option<u32>,
 }
 
 impl Dispositivo {
@@ -249,6 +263,8 @@ fn ler(acesso: &impl ConfigRegionAccess, endereco: PciAddress) -> Option<Disposi
         interface,
         revisao,
         regioes: [None; BARS],
+        pino: 0,
+        interrupcao: None,
     })
 }
 
@@ -350,6 +366,15 @@ fn preparar(
     // o kernel decidiu usar — ver [`habilitar_mestre`].
     if achado.primeira_regiao().is_some() {
         ponta.update_command(acesso, |atual| atual | CommandRegister::MEMORY_ENABLE);
+    }
+
+    // Onde ele interrompe. O pino sai do próprio dispositivo; a linha, de
+    // quem sabe como a placa ligou esse pino — o firmware no x86, o device
+    // tree no ARM.
+    let (pino, _) = ponta.interrupt(acesso);
+    achado.pino = pino;
+    if pino != 0 {
+        achado.interrupcao = crate::arch::pci::linha_de_interrupcao(endereco, pino);
     }
 }
 

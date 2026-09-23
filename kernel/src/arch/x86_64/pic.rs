@@ -30,17 +30,18 @@ pub const OFFSET_MESTRE: u8 = 32;
 /// Vetor onde a primeira IRQ do PIC escravo passa a chegar.
 pub const OFFSET_ESCRAVO: u8 = OFFSET_MESTRE + 8;
 
-/// Vetor da interrupção do timer (IRQ 0).
-pub const VETOR_TIMER: u8 = OFFSET_MESTRE;
-/// Vetor da interrupção do teclado (IRQ 1).
-pub const VETOR_TECLADO: u8 = OFFSET_MESTRE + 1;
-/// Vetor da interrupção da COM2 (IRQ 3), onde vive o canal do agente.
+/// Número da linha da COM2, onde vive o canal do agente.
 ///
 /// No barramento ISA, COM1 e COM3 compartilham a IRQ 4 e COM2 e COM4
 /// compartilham a IRQ 3. Como só usamos COM1 e COM2, cada uma fica com a sua.
-pub const VETOR_SERIAL_AGENTE: u8 = OFFSET_MESTRE + 3;
-/// Número da linha da COM2 no PIC mestre.
 pub const IRQ_SERIAL_AGENTE: u8 = 3;
+
+/// A linha do PIC mestre onde o escravo está pendurado.
+///
+/// Uma interrupção do escravo chega ao processador **através** dela. Se ela
+/// ficar mascarada, nenhuma das oito linhas do escravo chega — e é para lá
+/// que o BIOS costuma rotear os dispositivos PCI.
+const IRQ_CASCATA: u8 = 2;
 
 const CMD_MESTRE: u16 = 0x20;
 const DADOS_MESTRE: u16 = 0x21;
@@ -137,14 +138,32 @@ pub unsafe fn init() {
 /// Só pode ser chamada quando já existe um handler instalado para o vetor
 /// correspondente.
 pub unsafe fn desmascarar(linha: u8) {
-    debug_assert!(linha < 8, "apenas o PIC mestre é tratado aqui");
+    if linha >= 16 {
+        return;
+    }
 
-    // SAFETY: porta de dados do PIC mestre; o chamador garantiu que há
+    // SAFETY: portas de dados dos dois PICs; o chamador garantiu que há
     // handler para a linha.
     unsafe {
+        if linha < 8 {
+            let mut dados_mestre = Port::<u8>::new(DADOS_MESTRE);
+            let atual: u8 = dados_mestre.read();
+            dados_mestre.write(atual & !(1 << linha));
+            return;
+        }
+
+        // Uma linha do escravo exige duas liberações. A do escravo é óbvia; a
+        // da cascata não, e esquecê-la produz o sintoma mais confuso possível
+        // — a linha está habilitada nos dois lugares que se costuma olhar, e
+        // a interrupção nunca chega, porque o caminho dela até o processador
+        // passa por uma terceira que continua fechada.
+        let mut dados_escravo = Port::<u8>::new(DADOS_ESCRAVO);
+        let atual: u8 = dados_escravo.read();
+        dados_escravo.write(atual & !(1 << (linha - 8)));
+
         let mut dados_mestre = Port::<u8>::new(DADOS_MESTRE);
         let atual: u8 = dados_mestre.read();
-        dados_mestre.write(atual & !(1 << linha));
+        dados_mestre.write(atual & !(1 << IRQ_CASCATA));
     }
 }
 

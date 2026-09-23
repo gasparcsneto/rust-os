@@ -365,6 +365,15 @@ pub fn esperar_interrupcao() {
     }
 }
 
+/// Onde o firmware depositou o device tree.
+///
+/// Guardado em vez de repassado porque quem precisa dele não está no caminho
+/// do boot: a descoberta de interrupção de um dispositivo PCI acontece muito
+/// depois, e o ponteiro só chega uma vez, em `x0`.
+pub fn dtb() -> *const u8 {
+    DTB_INICIO.load(Ordering::Relaxed) as *const u8
+}
+
 /// Quanto do ECAM vale mapear: um barramento inteiro.
 ///
 /// Cada função tem 4 KiB de configuração, e um barramento tem 256 funções —
@@ -378,7 +387,7 @@ const TAMANHO_DE_UM_BARRAMENTO: u64 = 1024 * 1024;
 /// se o device tree não chegou —, a enumeração simplesmente não acontece e o
 /// kernel diz isso no log, em vez de ler um endereço inventado.
 pub fn init_pci() {
-    let dtb = DTB_INICIO.load(Ordering::Relaxed) as *const u8;
+    let dtb = dtb();
 
     // SAFETY: o ponteiro veio do firmware em `x0` e foi guardado no boot;
     // `encontrar_ecam` confere a assinatura antes de olhar qualquer campo, e

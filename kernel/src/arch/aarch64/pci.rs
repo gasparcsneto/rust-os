@@ -63,6 +63,48 @@ pub fn janela_mmio() -> Option<JanelaMmio> {
     })
 }
 
+/// Em que linha do GIC um dispositivo interrompe.
+///
+/// A resposta vem da tabela `interrupt-map` do device tree, e não de um
+/// registrador: aqui não houve firmware para preencher o bilhete que o BIOS
+/// deixa no x86. Ver [`super::fdt::interrupcao_pci`].
+///
+/// O que a tabela devolve é um especificador de GIC — classe, número e
+/// comportamento do sinal. Traduzi-lo em INTID é trabalho de [`super::gic`],
+/// que é quem sabe que uma SPI começa em 32.
+pub fn linha_de_interrupcao(endereco: PciAddress, pino: u8) -> Option<u32> {
+    if pino == 0 {
+        // Pino zero quer dizer "este dispositivo não interrompe". Procurar por
+        // ele na tabela acharia a entrada errada ou nenhuma.
+        return None;
+    }
+
+    // A primeira célula do endereço PCI, como o device tree a codifica: o
+    // barramento nos bits 16-23, o slot nos 11-15 e a função nos 8-10.
+    let alto = ((endereco.bus() as u32) << 16)
+        | ((endereco.device() as u32) << 11)
+        | ((endereco.function() as u32) << 8);
+
+    let dtb = super::dtb();
+    // SAFETY: o ponteiro veio do firmware em `x0` e foi guardado no boot; a
+    // função confere a assinatura antes de olhar qualquer campo e trata o
+    // ponteiro nulo.
+    let achado = unsafe { super::fdt::interrupcao_pci(dtb, alto, pino) }?;
+
+    super::gic::intid_de(achado.tipo, achado.numero)
+}
+
+/// Libera a linha no GIC para que ela chegue ao processador.
+///
+/// # Safety
+///
+/// Só pode ser chamada quando já existe quem trate a linha.
+pub unsafe fn habilitar_interrupcao(linha: u32) {
+    // SAFETY: delegada ao chamador; `gic::tratar` encaminha toda linha que
+    // não é do timer nem da UART aos drivers.
+    unsafe { super::gic::habilitar_spi(linha) };
+}
+
 /// O ECAM desta máquina.
 #[derive(Clone, Copy)]
 pub struct Acesso {

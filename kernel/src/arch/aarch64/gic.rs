@@ -170,6 +170,52 @@ pub unsafe fn habilitar_uart() {
     habilitar_linha(INTID_UART);
 }
 
+/// Traduz um especificador do device tree em INTID.
+///
+/// O device tree não nomeia interrupções por INTID: ele diz a classe e o
+/// número **dentro** da classe. As PPIs, privadas de cada núcleo, ocupam os
+/// INTIDs 16 a 31; as SPIs, compartilhadas, começam em 32. Somar o
+/// deslocamento certo é a tradução inteira.
+///
+/// Devolve `None` para uma classe que este kernel não trata — as interrupções
+/// de software (SGIs) são geradas por núcleos, não por dispositivos, e não há
+/// o que um driver de PCI faça com uma.
+pub fn intid_de(tipo: u32, numero: u32) -> Option<u32> {
+    const TIPO_SPI: u32 = 0;
+    const TIPO_PPI: u32 = 1;
+    const PRIMEIRA_PPI: u32 = 16;
+    const PRIMEIRA_SPI: u32 = 32;
+
+    let intid = match tipo {
+        TIPO_SPI => PRIMEIRA_SPI.checked_add(numero)?,
+        TIPO_PPI => PRIMEIRA_PPI.checked_add(numero)?,
+        _ => return None,
+    };
+
+    // O teto do GIC é 1020; acima disso os números são reservados, e 1023 é o
+    // "nenhuma interrupção" que a leitura de reconhecimento devolve.
+    (intid < 1020).then_some(intid)
+}
+
+/// Habilita uma linha compartilhada e a roteia para este núcleo.
+///
+/// Mesma armadilha que [`habilitar_uart`] documenta: o valor de reset do
+/// registrador de destino é zero, ou seja, "para ninguém". Sem a escrita a
+/// linha fica habilitada e a interrupção simplesmente nunca chega.
+///
+/// # Safety
+///
+/// Exige tabela de vetores instalada, [`init`] já executado, e que exista
+/// quem trate a linha.
+pub unsafe fn habilitar_spi(intid: u32) {
+    let indice = intid as usize;
+    if indice >= 1020 {
+        return;
+    }
+    distribuidor().itargetsr[indice].set(0b0000_0001);
+    habilitar_linha(intid);
+}
+
 /// Reconhece a interrupção pendente e devolve seu INTID.
 fn reconhecer() -> u32 {
     // A leitura tem efeito colateral — marca a interrupção como em
@@ -246,6 +292,13 @@ pub fn tratar() -> bool {
         // Mínimo indispensável: tirar os bytes do hardware e acordar quem os
         // espera. O trabalho de verdade acontece na tarefa, fora do handler.
         crate::tarefas::entrada::coletar();
+    }
+
+    // As linhas que não são deste backend são dos dispositivos que o kernel
+    // dirige. Perguntar a eles é o que evita uma tabela de handlers aqui —
+    // e, com dois dispositivos, uma tabela seria generalidade sem cliente.
+    if intid != INTID_TIMER && intid != INTID_UART {
+        crate::virtio::atender_interrupcao(intid);
     }
 
     crate::irq::contabilizar(intid as usize);
