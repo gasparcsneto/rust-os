@@ -74,6 +74,22 @@ pub(crate) fn agendar_falha_fatal() {
     FALHA_AGENDADA.store(true, Ordering::SeqCst);
 }
 
+/// Quanto um quadro pode ficar parado antes de ser dado por abandonado.
+///
+/// Dois segundos a 100 Hz. É folgadíssimo para o que este canal é — um socket
+/// no hospedeiro, onde uma requisição inteira atravessa em microssegundos — e
+/// continua folgado para uma serial de verdade: os 2048 bytes de uma
+/// requisição máxima levam 180 ms a 115200 bauds.
+///
+/// A conta é sobre **ociosidade**, e não sobre a idade do quadro, para que um
+/// cliente lento porém constante nunca seja penalizado: o relógio reinicia a
+/// cada byte.
+///
+/// Errar para baixo custa pouco: um quadro legítimo partido ao meio vira um
+/// erro de JSON explícito, que o cliente vê. Errar para cima custa a janela em
+/// que o lixo de um cliente morto ainda pode colar no pedido de outro.
+const TETO_DO_QUADRO_EM_TIQUES: u64 = 200;
+
 /// Tamanho máximo de uma requisição.
 ///
 /// Fixo porque não há heap. Requisições maiores são rejeitadas com um erro
@@ -103,6 +119,24 @@ struct Montador {
     /// e o erro que voltava era atribuído a ele. Em nenhum dos dois havia como
     /// o agente saber que o que chegou não era o que ele mandou.
     perdas_ao_abrir: u64,
+    /// Quando chegou o último byte deste quadro, em tiques.
+    ///
+    /// Um quadro parado tempo demais não é um cliente lento: é um cliente que
+    /// morreu no meio de uma requisição. O kernel não enxerga a desconexão —
+    /// não há linha de modem entre ele e o socket —, mas enxerga o relógio.
+    ///
+    /// Sem isto, o fragmento do cliente morto ficava pendurado e colava na
+    /// primeira requisição de quem conectasse depois. Medido: um cliente
+    /// enviou `{"jsonrpc":"2.0","id":2,"method":"agent.pi` e caiu; o cliente
+    /// seguinte pediu um `agent.ping` com `id` 99 e recebeu
+    ///
+    ///     {"id":2,"error":{"code":-32601,"message":"metodo nao encontrado"}}
+    ///
+    /// — o pedido dele engolido, e uma resposta com o `id` de outra pessoa
+    /// para um método que ele não chamou. Com um fragmento mais infeliz, o
+    /// quadro colado vira uma requisição válida que ninguém fez, e o kernel a
+    /// executa.
+    ultimo_byte_em: u64,
     /// Este quadro já foi dado por perdido, e o cliente já foi avisado.
     ///
     /// Separado de `estourou` porque a causa é outra e o desfecho também: ali
@@ -121,6 +155,7 @@ impl Montador {
             buffer: [0; LINHA_MAX],
             tam: 0,
             perdas_ao_abrir: 0,
+            ultimo_byte_em: 0,
             danificado: false,
             estourou: false,
         }
@@ -132,6 +167,22 @@ impl Montador {
     /// para saber que acabou de gastar um tempo indeterminado executando um
     /// comando, e que é uma boa hora de dar a vez a outra tarefa.
     fn alimentar(&mut self, byte: u8) -> bool {
+        // Ociosidade primeiro: um quadro parado tempo demais é abandonado em
+        // silêncio, e este byte passa a ser o primeiro de um quadro novo.
+        //
+        // Em silêncio de propósito. Quem deixou o fragmento não está mais
+        // ouvindo, e mandar um erro só confundiria quem acabou de chegar — que
+        // não fez nada de errado e cuja requisição precisa ser atendida
+        // normalmente.
+        let agora = crate::tempo::ticks();
+        if self.tam > 0 && agora.saturating_sub(self.ultimo_byte_em) > TETO_DO_QUADRO_EM_TIQUES {
+            self.tam = 0;
+            self.estourou = false;
+            self.danificado = false;
+            self.abrir_quadro();
+        }
+        self.ultimo_byte_em = agora;
+
         // A perda é conferida a cada byte, e não ao fechar o quadro, para que
         // o cliente saiba enquanto ainda está mandando. O quadro fecha de
         // qualquer forma — o handler repõe o delimitador que não coube, ver

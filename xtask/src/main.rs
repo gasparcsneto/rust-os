@@ -1338,7 +1338,59 @@ fn conversar(socket: &Path, qemu: u32) -> Result<(), String> {
     }
 
     sob_carga(&mut escrita, &mut leitor)?;
-    sob_despejo(&mut escrita, &mut leitor)
+    sob_despejo(&mut escrita, &mut leitor)?;
+    sob_fragmento(&mut escrita, &mut leitor)
+}
+
+/// Um pedaço de requisição abandonado não pode colar no pedido seguinte.
+///
+/// # O cenário
+///
+/// Um agente cai no meio de uma requisição e reconecta. O kernel não enxerga a
+/// desconexão — não há linha de modem entre ele e o socket —, então o
+/// fragmento fica pendurado no enquadrador.
+///
+/// Medido antes do teto: o fragmento `{"jsonrpc":"2.0","id":2,"method":"agent.pi`
+/// colou no `agent.ping` do cliente seguinte, que teve o pedido engolido e
+/// recebeu `{"id":2,"error":{"code":-32601,...}}` — o `id` de outra pessoa,
+/// para um método que ele não chamou. Com um fragmento mais infeliz, o quadro
+/// colado vira uma requisição válida que ninguém fez.
+///
+/// A sonda não precisa desconectar: o enquadrador só vê bytes, e o que decide
+/// é o relógio parado entre eles.
+fn sob_fragmento(
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+) -> Result<(), String> {
+    println!("[xtask] fumaça: fragmento abandonado");
+
+    escrita
+        .write_all(br#"{"jsonrpc":"2.0","id":2,"method":"agent.pi"#)
+        .and_then(|()| escrita.flush())
+        .map_err(|e| format!("fragmento: falha ao enviar o pedaço: {e}"))?;
+
+    // Acima do teto do kernel (dois segundos), com folga para o relógio dele.
+    std::thread::sleep(Duration::from_millis(3_500));
+
+    escrita
+        .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":7777,\"method\":\"agent.ping\"}\n")
+        .and_then(|()| escrita.flush())
+        .map_err(|e| format!("fragmento: falha ao enviar o pedido: {e}"))?;
+
+    let mut resposta = String::new();
+    leitor
+        .read_line(&mut resposta)
+        .map_err(|e| format!("fragmento: o pedido depois do fragmento ficou sem resposta: {e}"))?;
+
+    if !resposta.starts_with(r#"{"jsonrpc":"2.0","id":7777,"#) {
+        return Err(format!(
+            "fragmento: o pedido colou no pedaço abandonado\n  {}",
+            resposta.trim()
+        ));
+    }
+
+    println!("  [fragmento] ok  pedaço abandonado, pedido seguinte intacto");
+    Ok(())
 }
 
 /// Quantos bytes despejar de uma vez, sem ler nada no meio.
