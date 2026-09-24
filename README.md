@@ -51,9 +51,15 @@ de verdade acontece fora dele. Entre uma requisição e outra o núcleo fica
 parado — não em espera ativa, nem acordando a cada 10 ms para conferir.
 
 No ARM isso deixa de ser conveniência e vira necessidade. A máquina `virt` do
-emulador tem **uma única** porta serial, então o canal do agente é literalmente
-a única interface de depuração do sistema — não há console de texto. Os
-registros de log vivem no ring buffer e saem por `log.tail`.
+emulador tem **uma única** porta serial, e ela é do canal do agente: não sobra
+uma segunda para ecoar log em texto, como o x86 tem. Por um bom tempo o canal
+foi literalmente a única interface do sistema ali, e os registros só saíam por
+`log.tail`.
+
+Hoje sai também na tela. O kernel programa o adaptador de vídeo por conta
+própria e desenha nele o mesmo texto que manda ao console humano — o que dá a
+uma pessoa sentada na frente da máquina a mesma leitura nas duas
+arquiteturas, sem depender de um terminal no hospedeiro.
 
 O port para ARM foi o teste mais duro dessa premissa, e ela passou: o primeiro
 bug do boot ARM (`x0` chegando nulo, sem device tree) foi diagnosticado pelo
@@ -235,6 +241,13 @@ vai para biblioteca. Protocolo e estrutura ficam explícitos.
 |---|---|---|
 | x86_64 | GDT, TSS, IDT, tabelas de página, portas de I/O (`x86_64`); boot (`bootloader`); UART (`uart_16550`) | PIC 8259 e timer PIT |
 | aarch64 | registradores de sistema (`aarch64-cpu`); blocos de MMIO (`tock-registers`) | boot, tabela de vetores, descritores de página, leitor de device tree |
+| comuns | enumeração PCI (`pci_types`); glifos já rasterizados (`noto-sans-mono-bitmap`) | adaptador de vídeo, console de texto, drivers virtio |
+
+A fonte é a única entrada da coluna esquerda que não entra pelo critério
+acima — um glifo errado aparece na tela, não fica calado. Ela vem de crate por
+outra razão: é massa de dados, e rasterizar uma fonte vetorial em tempo de
+execução exigiria ponto flutuante, que o alvo `aarch64-unknown-none-softfloat`
+não tem.
 
 **O mapa do espaço virtual.** Cada região do kernel tem uma entrada da tabela
 de topo só dela, separada da do usuário. Não é organização por gosto: dar uma
@@ -629,9 +642,10 @@ padronizado.
       alguém sentado na frente dele, nas duas arquiteturas, e não só por um
       agente pelo canal serial. Feito: framebuffer no ARM, por um driver do
       adaptador que as duas máquinas do QEMU expõem com os mesmos
-      identificadores (`1234:1111`). Falta: fonte e console de texto sobre o
-      framebuffer, teclado no x86 (PS/2) e no ARM (virtio-input), e o
-      interpretador que transforma isso em operação.
+      identificadores (`1234:1111`), e console de texto sobre ele: o mesmo
+      texto que vai para o console humano é desenhado na tela, pelo mesmo
+      funil, nas duas arquiteturas. Falta: teclado no x86 (PS/2) e no ARM
+      (virtio-input), e o interpretador que transforma isso em operação.
 
 ## Licença
 

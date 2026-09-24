@@ -1282,6 +1282,150 @@ fn tela_recorta_na_borda() -> Resultado {
     Ok(())
 }
 
+/// O texto que uma pessoa lê precisa estar mesmo no framebuffer.
+///
+/// # O que este caso protege
+///
+/// Tudo que está entre a fonte e a tela: o endereço para onde o glifo foi, a
+/// ordem dos bytes de cada pixel, o stride que separa uma linha da seguinte e
+/// a mistura da cobertura parcial com o fundo. Nenhuma dessas quatro coisas
+/// falha de forma visível para o kernel — falham produzindo uma tela que só
+/// uma pessoa olhando saberia dizer que está errada, e no ARM não havia
+/// pessoa nenhuma olhando até agora.
+///
+/// A conferência é pixel a pixel contra a própria fonte, e mora em
+/// [`crate::tela::console::conferir_glifo`] para não haver duas cópias da
+/// resposta — uma no desenho e outra no teste, livres para errarem juntas.
+fn console_texto_chega_ao_framebuffer() -> Resultado {
+    if crate::tela::tela().is_none() {
+        return sem_framebuffer();
+    }
+
+    // O banner limpa a tela e devolve o cursor ao começo. Sem isso o glifo
+    // sairia sobre o que as linhas de log já escreveram, e o que se conferiria
+    // seria a soma dos dois.
+    crate::tela::banner();
+    let (x, y) = crate::tela::console::cursor();
+
+    if !crate::tela::console::escrever("A") {
+        return Err("o console recusou escrever com a tela de pe");
+    }
+    crate::tela::console::conferir_glifo('A', x, y)?;
+
+    // E o cursor andou exatamente a largura de um glifo. Uma fonte
+    // monoespaçada é o que torna isso uma igualdade em vez de um intervalo.
+    let (largura, _) = crate::tela::console::tamanho_do_glifo();
+    let (depois, _) = crate::tela::console::cursor();
+    if depois != x + largura {
+        crate::log_error!("teste", "o cursor foi de {} para {}", x, depois);
+        return Err("o cursor nao andou uma largura de glifo");
+    }
+
+    Ok(())
+}
+
+/// O texto que o kernel manda ao console humano aparece na tela.
+///
+/// # Por que não basta o caso anterior
+///
+/// Porque ele chama [`crate::tela::console::escrever`] diretamente, e isso
+/// prova que o desenho funciona — não que alguém o use. Entre o log e a tela
+/// há uma ligação, uma linha em [`crate::serial::_print`], e removê-la
+/// deixaria a tela em branco com a suíte inteira verde: os dois casos de
+/// console continuariam desenhando por conta própria.
+///
+/// Este caso passa pelo funil de verdade. É o mesmo `serial_print!` que toda
+/// linha de log atravessa.
+fn console_log_humano_chega_a_tela() -> Resultado {
+    if crate::tela::tela().is_none() {
+        return sem_framebuffer();
+    }
+
+    crate::tela::banner();
+    let (x, y) = crate::tela::console::cursor();
+
+    crate::serial_print!("X");
+
+    crate::tela::console::conferir_glifo('X', x, y)
+}
+
+/// A linha quebra na borda direita, e a tela recomeça quando enche.
+///
+/// # Por que os dois no mesmo caso
+///
+/// Porque são a mesma decisão vista de dois lados: o que fazer quando não
+/// cabe mais. Errar o primeiro corta letras na borda; errar o segundo escreve
+/// fora da tela — e é [`crate::tela::Tela::retangulo`] que recorta, o que
+/// significa que o erro não apareceria como falha, e sim como texto que some.
+///
+/// O caso é escrito com espaços de propósito. Um espaço tem glifo, ocupa
+/// largura e move o cursor como qualquer outro, mas sua cobertura é toda
+/// zero — e o desenho pula pixel de cobertura zero. Encher a tela com letras
+/// de verdade custaria centenas de milhares de escritas em memória de
+/// dispositivo; com espaços, custa a mesma lógica e quase nenhum pixel.
+fn console_quebra_na_borda_e_recomeca() -> Resultado {
+    let Some(tela) = crate::tela::tela() else {
+        return sem_framebuffer();
+    };
+
+    crate::tela::banner();
+    let (largura_do_glifo, altura_do_glifo) = crate::tela::console::tamanho_do_glifo();
+    let (x_inicial, y_inicial) = crate::tela::console::cursor();
+
+    // Espaços suficientes para passar da borda direita com folga.
+    let cabem = tela.largura / largura_do_glifo;
+    for _ in 0..=cabem {
+        crate::tela::console::escrever(" ");
+    }
+
+    let (x, y) = crate::tela::console::cursor();
+    if x >= x_inicial + cabem * largura_do_glifo {
+        return Err("a linha nao quebrou na borda direita");
+    }
+    if y != y_inicial + altura_do_glifo {
+        crate::log_error!("teste", "a linha foi de {} para {}", y_inicial, y);
+        return Err("a quebra nao desceu exatamente uma linha");
+    }
+
+    // E agora o pé da tela. Uma quebra de linha por vez, que não desenha
+    // nada, e parando na primeira vez que o cursor **sobe** — que é o
+    // recomeço acontecendo.
+    //
+    // Parar no primeiro recomeço, e não contar quantas linhas cabem e
+    // conferir no fim, porque a segunda forma exige acertar o número exato:
+    // errando por um, o laço passa do recomeço e o cursor está de volta no
+    // meio da tela, indistinguível de nunca ter recomeçado. Foi assim que
+    // este caso reprovou na primeira escrita.
+    let linhas = tela.altura / altura_do_glifo;
+    let mut recomecou = false;
+    for _ in 0..=linhas {
+        let (_, antes) = crate::tela::console::cursor();
+        crate::tela::console::escrever("\n");
+        let (_, agora) = crate::tela::console::cursor();
+        if agora < antes {
+            if agora != y_inicial {
+                crate::log_error!("teste", "recomecou em {}, e nao em {}", agora, y_inicial);
+                return Err("o recomeco nao voltou ao topo da regiao do console");
+            }
+            recomecou = true;
+            break;
+        }
+    }
+
+    if !recomecou {
+        return Err("a tela nunca recomecou, mesmo passando do pe");
+    }
+
+    // E a faixa de acento sobreviveu ao recomeço: a região do console começa
+    // abaixo dela, e limpar a tela inteira apagaria o indicador de que há um
+    // kernel vivo.
+    match tela.ler_pixel(0, 0) {
+        Some(topo) if topo == Cor::ACENTO => Ok(()),
+        Some(_) => Err("o recomeco do console apagou a faixa do banner"),
+        None => Err("o canto da tela nao pode ser lido"),
+    }
+}
+
 /// A ausência de framebuffer é sempre defeito, nas duas arquiteturas.
 ///
 /// # Por que isto já foi condicional, e por que não é mais
@@ -4430,6 +4574,18 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "tela: o banner esta na tela de verdade",
         f: tela_banner_esta_na_tela_de_verdade,
+    },
+    Caso {
+        nome: "console: o texto chega ao framebuffer",
+        f: console_texto_chega_ao_framebuffer,
+    },
+    Caso {
+        nome: "console: quebra na borda e recomeca no pe",
+        f: console_quebra_na_borda_e_recomeca,
+    },
+    Caso {
+        nome: "console: o log humano chega a tela",
+        f: console_log_humano_chega_a_tela,
     },
     Caso {
         nome: "memoria: regioes coerentes",

@@ -34,6 +34,19 @@ pci_types = "0.10.1"
 # lados é o que faz um leitor do GIC reconhecer o APIC.
 tock-registers = "0.10.1"
 
+# A fonte do console de texto: glifos já rasterizados, um byte de cobertura
+# por pixel.
+#
+# Vem de biblioteca por uma razão diferente das outras daqui. As outras estão
+# aqui porque errar um deslocamento de registrador não gera mensagem nenhuma;
+# um glifo errado, ao contrário, aparece na tela. O motivo é outro: uma fonte
+# é massa de dados, e rasterizar uma vetorial em tempo de execução exigiria
+# ponto flutuante — que o alvo `aarch64-unknown-none-softfloat` não tem.
+#
+# As features padrão são exatamente o necessário: peso regular, altura 16,
+# e o bloco básico do latim. Nada de unicode que este kernel não imprime.
+noto-sans-mono-bitmap = "0.3.2"
+
 # Primitivas de sincronização baseadas em spinlock. Num kernel não existe
 # scheduler para bloquear uma thread, então `std::sync::Mutex` não se aplica.
 spin = "0.12.3"

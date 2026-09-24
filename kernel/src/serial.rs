@@ -168,9 +168,16 @@ pub fn _print(args: fmt::Arguments) {
             // de pânico.
             let _ = porta.write_fmt(args);
         }
-        // Sem console (caso do ARM), isto é um no-op silencioso. Os registros
-        // continuam indo para o ring buffer de `crate::log`, então nada se
-        // perde: só não há para onde ecoar em texto.
+
+        // E na tela, que é o console de quem está na frente da máquina em vez
+        // de na frente do terminal do hospedeiro.
+        //
+        // Os dois destinos recebem o **mesmo** texto, e é de propósito: um
+        // console que mostrasse outra coisa seria uma segunda verdade para
+        // manter. Quem não tem nenhum dos dois não perde nada — os registros
+        // vão para o anel de `crate::log` de qualquer forma, e `log.tail` os
+        // devolve.
+        let _ = crate::tela::console::Saida.write_fmt(args);
     });
 }
 

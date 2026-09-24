@@ -29,6 +29,16 @@
 //! lá. Duas cópias da mesma geometria seriam duas coisas que podem divergir.
 
 pub mod bochs;
+pub mod console;
+
+/// Altura do traço de acento que o banner desenha sob o topo da tela.
+///
+/// Mora aqui, e não dentro de [`banner`], porque o console de texto precisa
+/// saber onde ele acaba: a faixa é do banner, e limpar a tela inteira para
+/// recomeçar uma página de texto apagaria o indicador de que há um kernel
+/// vivo. Foi o que aconteceu — o caso `tela: o banner esta na tela de
+/// verdade` reprovou assim que o console passou a escrever.
+pub(crate) const ALTURA_DO_ACENTO: u32 = 3;
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -424,11 +434,11 @@ pub fn banner() {
         return;
     };
 
-    /// Altura do traço de acento sob o topo.
-    const ACENTO: u32 = 3;
-
     tela.preencher(Cor::FUNDO);
-    tela.retangulo(0, 0, tela.largura, ACENTO, Cor::ACENTO);
+    tela.retangulo(0, 0, tela.largura, ALTURA_DO_ACENTO, Cor::ACENTO);
+    // A tela ficou em branco; o cursor do console precisa saber disso, ou a
+    // primeira linha de texto sai onde ele parou da última vez.
+    console::recomecar();
 }
 
 /// Pinta a tela de falha.
