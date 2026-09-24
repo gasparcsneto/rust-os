@@ -1560,12 +1560,16 @@ fn sob_reconexao(socket: &Path) -> Result<(), String> {
     // `on_connect.expect` manda o cliente fazer.
     let meu = format!(r#""id":{ID_DA_RECONEXAO},"#);
     let mut alheios: Vec<String> = Vec::new();
-    for _ in 0..4 {
+    // Como a espera terminou, que não é a mesma coisa que por que ela falhou.
+    let fim = loop {
+        if alheios.len() >= 4 {
+            break "quatro quadros seguidos e nenhum era a resposta";
+        }
         let mut linha = String::new();
         match leitor.read_line(&mut linha) {
-            Ok(0) => break,
+            Ok(0) => break "o canal fechou",
             Ok(_) => {}
-            Err(_) => break,
+            Err(_) => break "o prazo estourou",
         }
         if linha.contains(&meu) {
             println!(
@@ -1577,16 +1581,23 @@ fn sob_reconexao(socket: &Path) -> Result<(), String> {
             return Ok(());
         }
         alheios.push(linha.trim().to_string());
-    }
+    };
 
+    // Separar o desfecho da acusação. Quadro alheio na frente é o
+    // envenenamento que esta sonda existe para pegar; silêncio pode ser ele
+    // ou pode ser o canal ter morrido antes, e dizer uma coisa pela outra é
+    // mandar quem for investigar para o lugar errado.
+    if alheios.is_empty() {
+        return Err(format!(
+            "reconexão: {fim} e o pedido do cliente novo ficou sem resposta \
+             nenhuma — isto não é o envenenamento que a sonda procura, o canal \
+             emudeceu"
+        ));
+    }
     Err(format!(
-        "reconexão: o pedido do cliente novo herdou o quadro do cliente que caiu\n  \
-         quadros recebidos: {}",
-        if alheios.is_empty() {
-            "nenhum".to_string()
-        } else {
-            alheios.join("\n                     ")
-        }
+        "reconexão: {fim}; o pedido do cliente novo herdou o quadro do cliente \
+         que caiu\n  quadros recebidos: {}",
+        alheios.join("\n                     ")
     ))
 }
 
