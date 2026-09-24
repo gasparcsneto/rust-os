@@ -16,6 +16,9 @@
 //! `llvm-readelf` sobre os ELFs de usuário e do `sgdisk` sobre a GPT.
 
 pub mod crc32c;
+pub mod pedacos;
+
+extern crate alloc;
 
 /// Onde o superbloco mora, contado do começo da partição.
 ///
@@ -62,6 +65,9 @@ mod campo {
     pub const NIVEL_DA_RAIZ: usize = 198;
     pub const NIVEL_DA_RAIZ_DOS_PEDACOS: usize = 199;
     pub const ROTULO: usize = 299;
+    /// Onde começa o vetor de pedaços do sistema, logo depois do rótulo e do
+    /// que vem com ele.
+    pub const VETOR_DE_PEDACOS: usize = 811;
     pub const TAMANHO_DO_ROTULO: usize = 256;
 }
 
@@ -177,4 +183,117 @@ pub fn do_disco(primeiro: u64, bloco: &mut [u8]) -> Result<Superbloco, &'static 
     resultado?;
 
     ler_superbloco(bloco)
+}
+
+// ---------------------------------------------------------------------------
+// Ler um nó por endereço lógico
+// ---------------------------------------------------------------------------
+
+/// Deslocamentos dentro do cabeçalho de um nó da árvore.
+///
+/// Os primeiros trinta e dois bytes são a soma, como no superbloco, e pela
+/// mesma razão ela cobre o que vem **depois** deles.
+mod no {
+    pub const BYTENR: usize = 48;
+    pub const GERACAO: usize = 80;
+    pub const DONO: usize = 88;
+    pub const ITENS: usize = 96;
+    pub const NIVEL: usize = 100;
+    pub const TAMANHO: usize = 101;
+}
+
+/// O que o cabeçalho de um nó diz sobre ele.
+#[derive(Clone, Copy, Debug)]
+pub struct CabecalhoDeNo {
+    /// O endereço lógico que o próprio nó afirma ocupar.
+    pub endereco: u64,
+    pub geracao: u64,
+    /// Qual árvore o contém.
+    pub dono: u64,
+    pub itens: u32,
+    /// Zero é folha; acima disso, nó interno.
+    pub nivel: u8,
+}
+
+/// Um sistema de arquivos Btrfs aberto: onde ele está e como traduzir.
+pub struct Volume {
+    /// O primeiro setor da partição, no disco.
+    primeiro: u64,
+    pub superbloco: Superbloco,
+    pub mapa: pedacos::Mapa,
+}
+
+impl Volume {
+    /// Lê o superbloco de uma partição e monta o mapa inicial.
+    pub fn abrir(primeiro: u64) -> Result<Volume, &'static str> {
+        let mut bloco = alloc::vec![0u8; TAMANHO_DO_SUPERBLOCO];
+        let superbloco = do_disco(primeiro, &mut bloco)?;
+
+        // O vetor de pedaços do sistema, que é o que quebra a circularidade.
+        let tamanho = superbloco.tamanho_do_vetor_de_pedacos as usize;
+        let fim = campo::VETOR_DE_PEDACOS + tamanho;
+        if tamanho == 0 || fim > TAMANHO_DO_SUPERBLOCO {
+            return Err("o vetor de pedacos do sistema nao cabe no superbloco");
+        }
+        let mapa = pedacos::do_vetor_do_sistema(&bloco[campo::VETOR_DE_PEDACOS..fim])?;
+
+        Ok(Volume {
+            primeiro,
+            superbloco,
+            mapa,
+        })
+    }
+
+    /// Lê um nó da árvore pelo endereço lógico dele.
+    ///
+    /// Confere três coisas, e as três são o que separa "leu bytes" de "leu o
+    /// nó": a soma de verificação, o endereço que o nó afirma ocupar, e o
+    /// tamanho do destino. O segundo é o que pega uma tradução errada — um
+    /// nó lido do lugar errado tem soma válida, porque é um nó de verdade,
+    /// só que outro.
+    pub fn ler_no(&self, logico: u64, destino: &mut [u8]) -> Result<CabecalhoDeNo, &'static str> {
+        let tamanho = self.superbloco.tamanho_de_no as usize;
+        if destino.len() < tamanho {
+            return Err("o destino nao cabe um no");
+        }
+        if !(no::TAMANHO..=crate::virtio::blk::MAIOR_LEITURA).contains(&tamanho) {
+            return Err("o tamanho de no nao e um que este leitor saiba ler");
+        }
+
+        let fisico = self
+            .mapa
+            .traduzir(logico)
+            .ok_or("o endereco logico nao cai em pedaco conhecido")?;
+
+        let setor_da_particao = crate::virtio::blk::TAMANHO_DO_SETOR as u64;
+        if !fisico.is_multiple_of(setor_da_particao) {
+            return Err("o endereco traduzido nao cai em fronteira de setor");
+        }
+
+        let setor = self.primeiro + fisico / setor_da_particao;
+        let resultado = crate::virtio::blk::com_o_disco(|d| d.ler(setor, &mut destino[..tamanho]));
+        let Some(resultado) = resultado else {
+            return Err("nao ha disco nesta maquina");
+        };
+        resultado?;
+
+        let gravada = u32_em(destino, 0);
+        let calculada = crc32c::somar(&destino[TAMANHO_DA_SOMA..tamanho]);
+        if gravada != calculada {
+            return Err("a soma do no nao confere");
+        }
+
+        let endereco = u64_em(destino, no::BYTENR);
+        if endereco != logico {
+            return Err("o no lido afirma estar em outro endereco");
+        }
+
+        Ok(CabecalhoDeNo {
+            endereco,
+            geracao: u64_em(destino, no::GERACAO),
+            dono: u64_em(destino, no::DONO),
+            itens: u32_em(destino, no::ITENS),
+            nivel: destino[no::NIVEL],
+        })
+    }
 }

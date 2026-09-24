@@ -1956,6 +1956,210 @@ fn btrfs_recusa_superbloco_adulterado() -> Resultado {
     Ok(())
 }
 
+/// A tradução de endereço lógico para deslocamento no disco.
+///
+/// # Por que este caso não pode ser feito contra o disco
+///
+/// Porque na imagem que o `xtask` monta o deslocamento da primeira faixa de
+/// cada pedaço é **igual** ao endereço lógico dele — não é regra do formato,
+/// é como o `mkfs.btrfs` dispôs um disco recém-criado. Uma tradução que
+/// devolvesse o endereço sem traduzir funcionaria em tudo que o kernel lê
+/// hoje, e passaria em qualquer caso que só lesse o disco.
+///
+/// Então os pedaços daqui são montados à mão, em endereços que não
+/// coincidem, e com uma lacuna entre eles: é onde a busca precisa dizer que
+/// não sabe, em vez de casar com o vizinho.
+fn btrfs_traduz_endereco_logico() -> Resultado {
+    use crate::vfs::btrfs::pedacos::{Mapa, Pedaco};
+
+    let mut mapa = Mapa::vazio();
+    mapa.acrescentar(Pedaco {
+        logico: 0x1000_0000,
+        tamanho: 0x10_0000,
+        fisico: 0x400_0000,
+        tipo: 0,
+        faixas: 1,
+    })?;
+    // O segundo começa bem depois do fim do primeiro: entre os dois há uma
+    // faixa de endereços que não pertence a pedaço nenhum.
+    mapa.acrescentar(Pedaco {
+        logico: 0x3000_0000,
+        tamanho: 0x2_0000,
+        fisico: 0x100_0000,
+        tipo: 0,
+        faixas: 2,
+    })?;
+
+    // O primeiro byte, um do meio e o último de cada pedaço.
+    let esperados = [
+        (0x1000_0000u64, 0x400_0000u64),
+        (0x1000_0001, 0x400_0001),
+        (0x1008_0000, 0x408_0000),
+        (0x100F_FFFF, 0x40F_FFFF),
+        (0x3000_0000, 0x100_0000),
+        (0x3001_FFFF, 0x101_FFFF),
+    ];
+    for (logico, fisico) in esperados {
+        match mapa.traduzir(logico) {
+            Some(achado) if achado == fisico => {}
+            Some(achado) => {
+                crate::log_error!("teste", "{:#x} traduziu para {:#x}", logico, achado);
+                return Err("a traducao levou ao deslocamento errado");
+            }
+            None => return Err("um endereco dentro de um pedaco nao traduziu"),
+        }
+    }
+
+    // E o que está fora: antes do primeiro, na lacuna, e um byte depois do
+    // fim de cada um. O último é o que um `<=` no lugar de `<` deixaria
+    // passar, traduzindo para o byte seguinte ao pedaço.
+    for fora in [
+        0x0FFF_FFFFu64,
+        0x1010_0000,
+        0x2000_0000,
+        0x3002_0000,
+        u64::MAX,
+    ] {
+        if let Some(achado) = mapa.traduzir(fora) {
+            crate::log_error!("teste", "{:#x} traduziu para {:#x}", fora, achado);
+            return Err("um endereco fora de qualquer pedaco traduziu");
+        }
+    }
+
+    Ok(())
+}
+
+/// Um pedaço com perfil de paridade ou intercalado é recusado por nome.
+///
+/// # O que este caso protege
+///
+/// A honestidade do leitor sobre o que ele sabe fazer. Num `RAID0` ou num
+/// `RAID10` cada faixa guarda um **pedaço diferente** do dado, e montar o
+/// bloco exige intercalar; ler a primeira faixa como se fosse tudo devolve
+/// bytes reais, de lugares errados. A soma de verificação acusaria, e a
+/// mensagem seria "corrompido" para um disco íntegro que este leitor apenas
+/// não sabe ler.
+fn btrfs_recusa_perfil_desconhecido() -> Resultado {
+    // Um item de pedaço com uma faixa: 48 bytes de cabeçalho e 32 de faixa.
+    fn item(tipo: u64) -> [u8; 80] {
+        let mut bytes = [0u8; 80];
+        bytes[0..8].copy_from_slice(&0x10_0000u64.to_le_bytes()); // tamanho
+        bytes[24..32].copy_from_slice(&tipo.to_le_bytes());
+        bytes[44..46].copy_from_slice(&1u16.to_le_bytes()); // uma faixa
+        bytes[56..64].copy_from_slice(&0x20_0000u64.to_le_bytes()); // deslocamento
+        bytes
+    }
+
+    // `single` e `DUP` passam: as faixas são cópias inteiras.
+    for tipo in [0x1u64, 0x2 | 0x20, 0x4 | 0x10] {
+        if crate::vfs::btrfs::pedacos::ler_item(0x1000, &item(tipo)).is_err() {
+            crate::log_error!("teste", "o perfil {:#x} foi recusado", tipo);
+            return Err("um perfil de copia inteira foi recusado");
+        }
+    }
+
+    // RAID0, RAID10, RAID5 e RAID6 não.
+    for tipo in [0x1u64 | 0x8, 0x4 | 0x40, 0x1 | 0x80, 0x1 | 0x100] {
+        if crate::vfs::btrfs::pedacos::ler_item(0x1000, &item(tipo)).is_ok() {
+            crate::log_error!("teste", "o perfil {:#x} passou", tipo);
+            return Err("um perfil que o leitor nao sabe montar foi aceito");
+        }
+    }
+
+    // E um pedaço sem faixa nenhuma, que faria a leitura do deslocamento
+    // apontar para o nada.
+    let mut sem_faixa = item(0x1);
+    sem_faixa[44..46].copy_from_slice(&0u16.to_le_bytes());
+    if crate::vfs::btrfs::pedacos::ler_item(0x1000, &sem_faixa).is_ok() {
+        return Err("um pedaco sem faixas foi aceito");
+    }
+
+    Ok(())
+}
+
+/// A raiz da árvore de pedaços é alcançada pelo endereço lógico dela.
+///
+/// # O que este caso fecha
+///
+/// A circularidade do formato. O endereço da árvore que traduz endereços vem
+/// do superbloco em forma lógica; o que permite lê-lo é o vetor de pedaços
+/// que o próprio superbloco carrega. Um nó que volta com a soma certa **e**
+/// afirmando o endereço que pedimos é as duas coisas funcionando.
+///
+/// O endereço errado no fim é o que separa "a soma confere" de "é o nó
+/// certo": um nó lido de outro lugar tem soma válida, porque é um nó de
+/// verdade — só que outro.
+fn btrfs_le_a_raiz_dos_pedacos() -> Resultado {
+    let tabela = crate::particoes::varrer()?;
+    let particao = tabela
+        .primeira(crate::particoes::Tipo::Dados)
+        .ok_or("nao ha particao de dados")?;
+    let volume = crate::vfs::btrfs::Volume::abrir(particao.primeiro)?;
+
+    if volume.mapa.quantos() == 0 {
+        return Err("o vetor do superbloco nao deu pedaco nenhum");
+    }
+
+    let mut bloco = alloc::vec![0u8; volume.superbloco.tamanho_de_no as usize];
+    let cabecalho = volume.ler_no(volume.superbloco.raiz_dos_pedacos, &mut bloco)?;
+
+    if cabecalho.endereco != volume.superbloco.raiz_dos_pedacos {
+        return Err("o no lido nao e o endereco pedido");
+    }
+    // Dono 3 é a árvore de pedaços. Ler a árvore certa e não outra é o que
+    // este número diz.
+    if cabecalho.dono != 3 {
+        crate::log_error!("teste", "o no pertence a arvore {}", cabecalho.dono);
+        return Err("a raiz dos pedacos pertence a outra arvore");
+    }
+    if cabecalho.itens == 0 {
+        return Err("a raiz dos pedacos veio sem itens");
+    }
+
+    // Um endereço um nó adiante: traduzível, e não é um nó. A soma recusa.
+    let adiante = volume.superbloco.raiz_dos_pedacos + u64::from(volume.superbloco.tamanho_de_no);
+    if volume.ler_no(adiante, &mut bloco).is_ok() {
+        return Err("um endereco que nao e o do no foi aceito");
+    }
+
+    // E o caso que a soma **não** pega: um mapa que traduz um endereço
+    // lógico qualquer para o lugar onde um nó de verdade mora. O bloco que
+    // volta tem soma correta, porque é um nó; o que não bate é o endereço que
+    // ele afirma ocupar.
+    //
+    // Esta metade existe porque a primeira não estava exercitando nada:
+    // desligando a conferência de endereço, o caso continuava passando, já
+    // que o `adiante` era recusado pela soma de qualquer forma.
+    //
+    // É a diferença entre "li um nó" e "li o nó certo", e ela é o que pega
+    // uma tradução errada — que é justamente o defeito silencioso deste
+    // formato, onde todo endereço é indireto.
+    const LOGICO_INVENTADO: u64 = 0x9000_0000;
+    let mut enganoso = crate::vfs::btrfs::pedacos::Mapa::vazio();
+    enganoso.acrescentar(crate::vfs::btrfs::pedacos::Pedaco {
+        logico: LOGICO_INVENTADO,
+        tamanho: 0x10_0000,
+        fisico: volume.superbloco.raiz_dos_pedacos,
+        tipo: 0,
+        faixas: 1,
+    })?;
+
+    let mut volume = volume;
+    volume.mapa = enganoso;
+    match volume.ler_no(LOGICO_INVENTADO, &mut bloco) {
+        Ok(cabecalho) => {
+            crate::log_error!(
+                "teste",
+                "o no em {:#x} foi aceito como sendo de {:#x}",
+                cabecalho.endereco,
+                LOGICO_INVENTADO
+            );
+            Err("um no valido foi aceito para o endereco errado")
+        }
+        Err(_) => Ok(()),
+    }
+}
+
 /// A ausência de framebuffer é sempre defeito, nas duas arquiteturas.
 ///
 /// # Por que isto já foi condicional, e por que não é mais
@@ -5416,6 +5620,18 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "btrfs: recusa um superbloco adulterado",
         f: btrfs_recusa_superbloco_adulterado,
+    },
+    Caso {
+        nome: "btrfs: traduz endereco logico para o disco",
+        f: btrfs_traduz_endereco_logico,
+    },
+    Caso {
+        nome: "btrfs: recusa perfil de pedaco que nao sabe montar",
+        f: btrfs_recusa_perfil_desconhecido,
+    },
+    Caso {
+        nome: "btrfs: le a raiz da arvore de pedacos",
+        f: btrfs_le_a_raiz_dos_pedacos,
     },
     Caso {
         nome: "disco: recusa setor fora da capacidade",

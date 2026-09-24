@@ -138,6 +138,7 @@ Os dois podem rodar ao mesmo tempo: cada arquitetura tem seu próprio socket.
 | `debug.trigger` | Dispara uma exceção de propósito (`kind`: `breakpoint` ou `fatal`) |
 | `disk.partitions` | A tabela de partições do disco, lida da GPT |
 | `btrfs.info` | O superbloco do Btrfs da partição de dados |
+| `btrfs.chunks` | O mapa de pedaços e a raiz da árvore de pedaços |
 | `fs.mounts` | O que está montado na árvore de arquivos, e de que tipo |
 | `fs.list` | Lista um diretório da árvore (`path`) |
 | `keyboard.read` | O que foi digitado no teclado da máquina, e os contadores dele (`max`) |
@@ -745,8 +746,9 @@ padronizado.
       FAT32 e uma raiz em Btrfs montadas pelas ferramentas do hospedeiro; e o
       VFS, com os programas embutidos servidos em `/bin`; e a leitura do disco
       em blocos de 16 KiB numa ida só, que é o tamanho de um nó de Btrfs; a
-      tabela de partições; e o superbloco do Btrfs, com crc32c conferido.
-      Falta: o resto do Btrfs
+      tabela de partições; o superbloco do Btrfs, com crc32c conferido; e a
+      tradução de endereço lógico para o disco, que é o que permite ler
+      qualquer nó da árvore. Falta: o resto do Btrfs
       somente leitura, a tabela de descritores por processo, `executar` lendo
       do disco, e um bootloader UEFI próprio no lugar do crate `bootloader`.
 

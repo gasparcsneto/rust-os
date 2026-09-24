@@ -213,6 +213,12 @@ pub static COMANDOS: &[Command] = &[
         handler: disk_partitions,
     },
     Command {
+        nome: "btrfs.chunks",
+        resumo: "O mapa de pedacos do Btrfs e a raiz da arvore de pedacos, lida por endereco logico.",
+        params: &[],
+        handler: btrfs_chunks,
+    },
+    Command {
         nome: "btrfs.info",
         resumo: "O superbloco do sistema de arquivos da particao de dados.",
         params: &[],
@@ -674,6 +680,66 @@ const MAX_GRADE: u64 = 64;
 ///
 /// A amostra e por ponto, e nao por media da regiao. A media suavizaria
 /// justamente a borda entre duas cores, que e o que se quer enxergar.
+/// O mapa de pedaços, e o primeiro nó lido por endereço lógico.
+///
+/// Os dois juntos porque é o segundo que prova o primeiro: o endereço da raiz
+/// da árvore de pedaços vem do superbloco em forma lógica, e só dá para
+/// lê-lo depois de o mapa traduzir. Um nó que volta com a soma certa e o
+/// endereço que ele mesmo afirma é a tradução tendo funcionado.
+fn btrfs_chunks(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+
+    let tabela = match crate::particoes::varrer() {
+        Ok(t) => t,
+        Err(motivo) => {
+            w.field_str("error", motivo)?;
+            return w.end_object();
+        }
+    };
+    let Some(particao) = tabela.primeira(crate::particoes::Tipo::Dados) else {
+        w.field_str("error", "nao ha particao de dados no disco")?;
+        return w.end_object();
+    };
+
+    let volume = match crate::vfs::btrfs::Volume::abrir(particao.primeiro) {
+        Ok(v) => v,
+        Err(motivo) => {
+            w.field_str("error", motivo)?;
+            return w.end_object();
+        }
+    };
+
+    w.key("chunks")?;
+    w.begin_array()?;
+    for pedaco in volume.mapa.iter() {
+        w.begin_object()?;
+        w.field_u64("logical", pedaco.logico)?;
+        w.field_u64("length", pedaco.tamanho)?;
+        w.field_u64("physical", pedaco.fisico)?;
+        w.field_u64("type", pedaco.tipo)?;
+        w.field_u64("stripes", u64::from(pedaco.faixas))?;
+        w.end_object()?;
+    }
+    w.end_array()?;
+
+    let mut bloco = alloc::vec![0u8; volume.superbloco.tamanho_de_no as usize];
+    match volume.ler_no(volume.superbloco.raiz_dos_pedacos, &mut bloco) {
+        Ok(cabecalho) => {
+            w.key("chunk_root_node")?;
+            w.begin_object()?;
+            w.field_u64("logical", cabecalho.endereco)?;
+            w.field_u64("generation", cabecalho.geracao)?;
+            w.field_u64("owner", cabecalho.dono)?;
+            w.field_u64("items", u64::from(cabecalho.itens))?;
+            w.field_u64("level", u64::from(cabecalho.nivel))?;
+            w.end_object()?;
+        }
+        Err(motivo) => w.field_str("error", motivo)?,
+    }
+
+    w.end_object()
+}
+
 /// O superbloco do Btrfs da partição de dados.
 ///
 /// Todo campo aqui tem um valor conhecido do lado de fora: um
