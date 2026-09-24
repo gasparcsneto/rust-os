@@ -292,6 +292,22 @@ pub unsafe fn bifurcar(
 }
 
 fn nascer(nome: &'static str, nascimento: Nascimento) -> Result<IdFio, &'static str> {
+    // Depois de uma falha fatal o escalonador está congelado, e um fio criado
+    // aqui **nunca** roda: [`selecionar`] desiste antes de olhar a tabela.
+    //
+    // Recusar é o único desfecho honesto. Medido pelo canal do agente, com o
+    // kernel em post-mortem: `user.run` respondia `launched: true` a cada
+    // chamada, e os fios ficavam todos em `ready` com `scheduled: 0`,
+    // `syscalls: 0`, `context_switches: 0`. Um agente investigando um kernel
+    // morto pedia para rodar um programa, ouvia que sim, e esperava por uma
+    // saída que não podia existir.
+    //
+    // Cada chamada ainda custava uma das dezesseis vagas de fio e um espaço de
+    // endereços que ninguém iria liberar.
+    if CONGELADO.load(Ordering::SeqCst) {
+        return Err("o escalonador esta congelado apos uma falha fatal");
+    }
+
     // Duas coisas acontecem **fora** da trava do escalonador, e as duas por
     // motivo de ordem de travas.
     //
