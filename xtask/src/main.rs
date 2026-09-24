@@ -1418,6 +1418,16 @@ const DESPEJO: usize = 20_000;
 /// Exige o contrato: **uma** resposta, que seja erro, e o pedido seguinte
 /// respondido com o próprio `id`.
 fn sob_despejo(escrita: &mut UnixStream, leitor: &mut BufReader<UnixStream>) -> Result<(), String> {
+    // Três vezes seguidas, e não uma. O segundo despejo chega com a fila
+    // recém-esvaziada pelo primeiro, e é o que exercita o caminho em que um
+    // marcador de fim de quadro precisa entrar numa fila que já esteve cheia.
+    for rodada in 1..=3u32 {
+        um_despejo(escrita, leitor).map_err(|e| format!("despejo {rodada}: {e}"))?;
+    }
+    Ok(())
+}
+
+fn um_despejo(escrita: &mut UnixStream, leitor: &mut BufReader<UnixStream>) -> Result<(), String> {
     println!("[xtask] fumaça: despejo de {DESPEJO} bytes numa fila de 4096");
 
     let mut linha = String::with_capacity(DESPEJO + 80);

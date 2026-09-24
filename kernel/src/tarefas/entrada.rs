@@ -141,6 +141,34 @@ pub fn descartar_pendentes() -> usize {
     })
 }
 
+/// Joga fora os bytes enfileirados até o fim do quadro atual, de uma vez.
+///
+/// Devolve `true` se encontrou o delimitador — ou seja, se o próximo byte a
+/// sair da fila já é de um quadro novo.
+///
+/// # Por que em bloco, e não um a um
+///
+/// Porque quem chama já sabe que o quadro está perdido, e porque a diferença
+/// de custo é o defeito. Depois de um transbordo, a fila guarda quatro mil
+/// bytes de um quadro que o kernel **já** deu por danificado. Drená-los pelo
+/// caminho normal custa quatro mil idas e voltas ao executor, e durante todas
+/// elas a fila continua cheia — então a requisição seguinte, que é legítima,
+/// não cabe e é descartada também.
+///
+/// Foi o que a CI pegou e a máquina daqui não: a drenagem ganhava a corrida
+/// aqui e perdia no runner. Em bloco, sob a mesma trava, isso leva
+/// microssegundos e a janela deixa de existir.
+pub fn descartar_ate_nova_linha() -> bool {
+    crate::arch::sem_interrupcoes(|| {
+        while let Some(byte) = BYTES.desenfileirar() {
+            if byte == b'\n' {
+                return true;
+            }
+        }
+        false
+    })
+}
+
 pub fn coletar() {
     let mut chegou = false;
 
@@ -213,8 +241,13 @@ pub fn coletar() {
                     // O delimitador do quadro atropelado. Vai para a vaga
                     // reservada: é ele que diz ao enquadrador onde o estrago
                     // acabou, e onde a próxima requisição começa intacta.
-                    let _ = BYTES.enfileirar(byte);
-                    descartando = false;
+                    //
+                    // Só saímos do descarte se ele **entrou**. Descartar a
+                    // falha aqui era um defeito: sem um limite marcado na
+                    // fila, o quadro seguinte colava no atropelado, que é
+                    // exatamente o que o marcador existe para impedir. Se não
+                    // coube, seguimos descartando e tentamos no próximo.
+                    descartando = BYTES.enfileirar(byte).is_err();
                 }
                 continue;
             }

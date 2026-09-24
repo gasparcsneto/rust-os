@@ -190,8 +190,36 @@ impl Montador {
         // responder só depois de o cliente terminar de despejar.
         if !self.danificado && crate::tarefas::entrada::perdidos() != self.perdas_ao_abrir {
             responder_erro(None, RpcError::ENTRADA_PERDIDA, None);
-            self.danificado = true;
             self.tam = 0;
+            self.estourou = false;
+
+            if byte == b'\n' {
+                // Este byte **é** o fim do quadro danificado. Nada a descartar
+                // depois dele: o que vier já é do quadro seguinte.
+                //
+                // A ordem aqui não é detalhe. Este byte saiu da fila antes de
+                // tudo o que ainda está nela, então descartar a fila sem
+                // olhá-lo primeiro jogaria fora o quadro **seguinte** e
+                // deixaria o delimitador do danificado passar como se fosse
+                // dele.
+                self.abrir_quadro();
+                return true;
+            }
+
+            // O resto deste quadro já está na fila e já é lixo conhecido.
+            // Jogá-lo fora de uma vez, em vez de um byte por ida ao executor,
+            // é o que devolve a fila ao pedido seguinte antes que ele chegue.
+            // Sem isso, a requisição legítima que vem depois não cabe e se
+            // perde junto — foi o que a CI pegou e a máquina daqui não.
+            if crate::tarefas::entrada::descartar_ate_nova_linha() {
+                self.abrir_quadro();
+                return true;
+            }
+
+            // A fila esvaziou sem o delimitador aparecer: ele ainda vem, e até
+            // lá tudo que chegar é do quadro perdido.
+            self.danificado = true;
+            return false;
         }
 
         match byte {
