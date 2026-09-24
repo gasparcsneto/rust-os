@@ -201,7 +201,7 @@ impl Uart {
     /// FIFO esvazia, mas a de *timeout* fica pendente até ser limpa
     /// explicitamente — sem esta escrita, o GIC reentregaria a mesma
     /// interrupção para sempre.
-    pub fn fim_de_recepcao(&mut self) {
+    pub fn reconhecer_recepcao(&mut self) {
         self.regs().icr.write(ICR::RXIC::SET + ICR::RTIC::SET);
     }
 

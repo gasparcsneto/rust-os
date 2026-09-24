@@ -108,6 +108,9 @@ pub fn descartar_pendentes() -> usize {
             return 0;
         };
 
+        // Mesma ordem de `coletar`, e pela mesma razão.
+        porta.reconhecer_recepcao();
+
         let mut descartados = 0;
         // O mesmo teto de `coletar`, pelo mesmo motivo: uma UART que reporte
         // dados para sempre não pode prender o boot num laço.
@@ -117,7 +120,6 @@ pub fn descartar_pendentes() -> usize {
             }
             descartados += 1;
         }
-        porta.fim_de_recepcao();
         DESCARTADOS_NO_BOOT.fetch_add(descartados as u64, Ordering::Relaxed);
         descartados
     })
@@ -132,6 +134,33 @@ pub fn coletar() {
             return;
         };
 
+        // O reconhecimento vem **antes** da drenagem, e a ordem é o conserto
+        // de um impasse que travava o canal inteiro no ARM.
+        //
+        // Reconhecendo depois, um byte que chegasse entre a última leitura e a
+        // escrita no registrador de reconhecimento tinha a causa dele apagada
+        // junto. A causa de recepção da PL011 é travada por borda: ela só
+        // volta a disparar quando a FIFO **cruza** o nível de gatilho de novo.
+        // Com a FIFO já cheia daquele byte em diante, o dispositivo parava de
+        // aceitar mais dados do hospedeiro, e o kernel parava de receber
+        // interrupções. Os dois lados esperando o outro, para sempre.
+        //
+        // Medido, mandando uma requisição de ~2600 bytes pelo canal do agente
+        // no ARM: o canal deixava de responder e não voltava. Com `qemu -d int`
+        // e o contador de CPU do processo, o que se via era um kernel **ocioso**
+        // — zero tiques de CPU em seis segundos, IRQs de relógio entrando e
+        // voltando ao mesmo `wfi` — enquanto o dispositivo segurava os bytes.
+        // Não era laço sem saída nem falha: era um despertar perdido.
+        //
+        // O tamanho importava porque a janela é de duas instruções: era
+        // preciso um fluxo grande o bastante para cair dentro dela, e por isso
+        // a mesma requisição às vezes passava.
+        //
+        // Reconhecer antes não perde nada: um byte que chegue durante a
+        // drenagem torna a levantar a causa, e o preço é uma interrupção a
+        // mais que encontra a FIFO vazia. No 16550 a chamada é um no-op.
+        porta.reconhecer_recepcao();
+
         // Drenamos o FIFO inteiro, e não um byte só. A interrupção é por
         // nível: deixar bytes para trás faria o hardware reinterromper
         // imediatamente, e atenderíamos uma interrupção por byte sem
@@ -145,12 +174,6 @@ pub fn coletar() {
             let _ = BYTES.enfileirar(byte);
             chegou = true;
         }
-
-        // Reconhece a interrupção no dispositivo. No 16550 é um no-op; na
-        // PL011 é obrigatório, porque a causa de *timeout* fica pendente até
-        // alguém limpá-la e o controlador reentregaria a mesma interrupção
-        // para sempre.
-        porta.fim_de_recepcao();
     });
 
     if chegou {

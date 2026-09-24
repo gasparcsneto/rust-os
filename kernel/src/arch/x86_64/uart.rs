@@ -74,7 +74,7 @@ impl Uart {
     /// sozinha quando o FIFO de recepção é esvaziado. Existe para que
     /// [`crate::tarefas::entrada`] possa ser neutra de arquitetura — na
     /// PL011 do ARM a mesma chamada escreve num registrador de verdade.
-    pub fn fim_de_recepcao(&mut self) {}
+    pub fn reconhecer_recepcao(&mut self) {}
 
     /// Descarta o que já estiver na FIFO de recepção.
     ///
