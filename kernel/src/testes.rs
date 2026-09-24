@@ -825,6 +825,72 @@ fn montar_dtb(destino: &mut [u8; 256], address_cells: u32, size_cells: u32) -> u
 /// Cada caso abaixo envenena **um** campo de trinta e dois bits de um blob que
 /// de resto é válido, e exige duas coisas: que o leitor recuse, e que não
 /// entregue região nenhuma ao alocador.
+/// Uma propriedade menor que uma célula é ignorada, não lida pela metade.
+///
+/// `#address-cells` diz quantas palavras de 32 bits cada endereço ocupa, e é
+/// o número que decide como o resto do blob é interpretado. `be32` lê quatro
+/// bytes; numa propriedade de dois, os outros dois vêm do token seguinte —
+/// uma largura inventada a partir de bytes que não são dela.
+///
+/// O caso declara `#address-cells` com dois bytes e deixa, logo depois deles,
+/// bytes que fariam a leitura de quatro devolver `1`. Com a conferência, a
+/// declaração é descartada e vale o padrão da especificação, que é `2`; sem
+/// ela, o leitor passa a interpretar o `reg` do nó de memória com a largura
+/// errada e devolve uma região que o blob não declara.
+///
+/// Medido: sem a conferência, a suíte inteira passava.
+fn fdt_ignora_propriedade_menor_que_uma_celula() -> Resultado {
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        crate::log_info!("teste", "o leitor de device tree so existe no aarch64");
+        Ok(())
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        use crate::arch::aarch64::fdt;
+
+        // Deslocamentos do blob que `montar_dtb` produz.
+        const TAMANHO_DA_1A_PROP: usize = 76;
+        const VALOR_DA_1A_PROP: usize = 84;
+
+        let mut blob = [0u8; 256];
+        montar_dtb(&mut blob, 2, 1);
+
+        // A propriedade passa a ter dois bytes...
+        blob[TAMANHO_DA_1A_PROP..TAMANHO_DA_1A_PROP + 4].copy_from_slice(&2u32.to_be_bytes());
+        // ...e os quatro bytes naquele ponto passam a valer 1, que é uma
+        // largura plausível e diferente do padrão. Ler além do tamanho
+        // declarado deixa de ser inofensivo e vira uma largura errada.
+        blob[VALOR_DA_1A_PROP..VALOR_DA_1A_PROP + 4].copy_from_slice(&1u32.to_be_bytes());
+
+        let mut achadas = 0;
+        let mut regiao = (0u64, 0u64);
+        // SAFETY: o blob está neste quadro de pilha e traz a assinatura; o que
+        // se afirma é como o leitor trata uma propriedade curta demais.
+        let r = unsafe {
+            fdt::percorrer_memoria(blob.as_ptr(), |inicio, tamanho| {
+                achadas += 1;
+                regiao = (inicio, tamanho);
+            })
+        };
+        if r.is_err() {
+            return Err("o leitor recusou um blob cuja unica anomalia e uma propriedade curta");
+        }
+        if achadas != 1 || regiao != (0x4000_0000, 0x0800_0000) {
+            crate::log_error!(
+                "teste",
+                "{} regiao(oes), a primeira {:#x}+{:#x}",
+                achadas,
+                regiao.0,
+                regiao.1
+            );
+            return Err("uma propriedade curta demais mudou a largura de celula");
+        }
+        Ok(())
+    }
+}
+
 fn fdt_confere_deslocamentos_contra_o_tamanho_declarado() -> Resultado {
     #[cfg(not(target_arch = "aarch64"))]
     {
@@ -1551,6 +1617,65 @@ fn paginacao_frame_reciclado_vem_zerado() -> Resultado {
         return Err("frame reciclado vazou dados do dono anterior");
     }
 
+    Ok(())
+}
+
+/// O frame do endereço zero nunca volta à circulação.
+///
+/// `frames::init` o reserva de propósito, para que zero continue significando
+/// "nenhum frame" em todo lugar que o usa como sentinela — e para que uma
+/// desreferência de ponteiro nulo continue produzindo falha diagnosticável em
+/// vez de corromper dados de alguém.
+///
+/// Medido: desligando a reserva, a suíte inteira passava.
+fn frames_nunca_entrega_o_frame_zero() -> Resultado {
+    if crate::frames::esta_livre(0) {
+        return Err("o frame zero esta na lista de livres");
+    }
+
+    // Liberá-lo não pode recolocá-lo em circulação: a reserva vale contra
+    // quem o devolve por engano, não só contra a inicialização.
+    crate::frames::liberar(0);
+    if crate::frames::esta_livre(0) {
+        return Err("liberar o frame zero o devolveu a circulacao");
+    }
+    Ok(())
+}
+
+/// Uma geometria de tela incoerente é recusada, e a tela em uso sobrevive.
+///
+/// O `stride` é quantos pixels vão de uma linha à seguinte, e pode exceder a
+/// largura visível. O limite que o leitor de pixel confere é a **largura**,
+/// mas o endereço que ele calcula usa o **stride**: com um stride menor que a
+/// largura, um ponto dentro do limite cai fora da linha, e perto da última
+/// linha cai fora do framebuffer inteiro.
+///
+/// Medido: aceitando stride menor que a largura, a suíte inteira passava.
+fn tela_recusa_geometria_incoerente() -> Resultado {
+    let antes = crate::tela::tela().map(|t| (t.largura, t.altura, t.stride, t.bytes_por_pixel));
+
+    // Endereço qualquer: a geometria é conferida **antes** de qualquer
+    // registro, então nada aqui chega a ser desreferenciado.
+    //
+    // SAFETY: cada chamada abaixo traz uma geometria que `registrar` tem de
+    // recusar, e uma recusa não guarda o ponteiro nem lê por ele. É
+    // exatamente isso que o caso afirma.
+    unsafe {
+        // stride menor que a largura
+        crate::tela::registrar(0x1000u64, 64, 64, 32, 4, crate::tela::Formato::Bgr);
+        // largura zero
+        crate::tela::registrar(0x1000u64, 0, 64, 64, 4, crate::tela::Formato::Bgr);
+        // altura zero
+        crate::tela::registrar(0x1000u64, 64, 0, 64, 4, crate::tela::Formato::Bgr);
+        // menos bytes por pixel do que o formato toca
+        crate::tela::registrar(0x1000u64, 64, 64, 64, 1, crate::tela::Formato::Bgr);
+    }
+
+    let depois = crate::tela::tela().map(|t| (t.largura, t.altura, t.stride, t.bytes_por_pixel));
+    if depois != antes {
+        crate::log_error!("teste", "{:?} -> {:?}", antes, depois);
+        return Err("uma geometria incoerente substituiu a tela em uso");
+    }
     Ok(())
 }
 
@@ -4107,6 +4232,10 @@ static CASOS: &[Caso] = &[
         f: fdt_confere_deslocamentos_contra_o_tamanho_declarado,
     },
     Caso {
+        nome: "fdt: ignora propriedade menor que uma celula",
+        f: fdt_ignora_propriedade_menor_que_uma_celula,
+    },
+    Caso {
         nome: "tela: cada formato volta como foi escrito",
         f: tela_cada_formato_volta_como_foi_escrito,
     },
@@ -4149,6 +4278,14 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "paginacao: kernel esta mapeado",
         f: paginacao_traduz_endereco_do_kernel,
+    },
+    Caso {
+        nome: "frames: nunca entrega o frame zero",
+        f: frames_nunca_entrega_o_frame_zero,
+    },
+    Caso {
+        nome: "tela: recusa geometria incoerente",
+        f: tela_recusa_geometria_incoerente,
     },
     Caso {
         nome: "paginacao: frame reciclado vem zerado",
@@ -4569,14 +4706,46 @@ fn disco_recusa_setor_fora_da_capacidade() -> Resultado {
         return Err("o disco diz ter zero setores");
     }
 
-    let mut setor = [0u8; crate::virtio::blk::TAMANHO_DO_SETOR];
-    let resultado = crate::virtio::blk::com_o_disco(|d| d.ler_setor(capacidade, &mut setor));
+    // Aceitar qualquer erro não bastava, e a mutação mostrou por quê:
+    // removendo a conferência de capacidade do driver, o pedido chega ao
+    // dispositivo, o dispositivo recusa, e `ler_setor` devolve erro do mesmo
+    // jeito. O caso passava sem que a guarda existisse.
+    //
+    // O que distingue é **quem** recusou, e isso está na mensagem — que não é
+    // detalhe interno: é o campo `error` que o agente lê em `disk.read`.
+    const POR_CAPACIDADE: &str = "setor alem da capacidade do disco";
 
-    match resultado {
-        Some(Err(_)) => Ok(()),
-        Some(Ok(())) => Err("o disco aceitou ler um setor que nao existe"),
-        None => Err("nao ha disco nesta maquina"),
+    let mut setor = [0u8; crate::virtio::blk::TAMANHO_DO_SETOR];
+    let resultado = crate::virtio::blk::com_o_disco(|d| {
+        let alem = [
+            d.ler_setor(capacidade, &mut setor),
+            d.ler_setor(capacidade + 1, &mut setor),
+            d.ler_setor(u64::MAX, &mut setor),
+        ];
+        // E o último setor válido continua legível: uma conferência estrita
+        // demais custaria o disco inteiro, e seria pior que a que ela troca.
+        let ultimo = d.ler_setor(capacidade - 1, &mut setor);
+        (alem, ultimo)
+    });
+
+    let Some((alem, ultimo)) = resultado else {
+        return Err("nao ha disco nesta maquina");
+    };
+
+    for r in alem {
+        match r {
+            Err(motivo) if motivo == POR_CAPACIDADE => {}
+            Err(outro) => {
+                crate::log_error!("teste", "recusado por outra razao: {}", outro);
+                return Err("quem recusou o setor inexistente nao foi o driver");
+            }
+            Ok(()) => return Err("o disco aceitou ler um setor que nao existe"),
+        }
     }
+    if ultimo.is_err() {
+        return Err("o disco recusou o ultimo setor valido");
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

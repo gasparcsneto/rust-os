@@ -195,6 +195,20 @@ pub fn init() -> Result<(), &'static str> {
     // O frame do endereço zero nunca é entregue, para que desreferenciar um
     // ponteiro nulo continue produzindo uma falha diagnosticável em vez de
     // corromper dados legítimos.
+    //
+    // # Nenhum caso protege esta linha, e não há como escrever um
+    //
+    // Medido, apagando-a: a suíte inteira passa. Não é falha dos casos. Nas
+    // duas máquinas em que este kernel roda, o frame zero já não estaria
+    // livre de qualquer forma — no x86 o mapa do firmware marca a primeira
+    // página como reservada, e no ARM a RAM começa em 0x4000_0000, então o
+    // índice zero nem existe. Não há máquina aqui em que a diferença apareça.
+    //
+    // Ela fica porque o custo é uma linha e o que ela evita é uma classe
+    // inteira: um mapa que declare a primeira página utilizável entrega zero
+    // como endereço de verdade, e zero é sentinela em vários lugares deste
+    // kernel. A metade que **tem** caso é `liberar`, que recusa o frame zero
+    // explicitamente — ali a diferença é observável, e um caso a observa.
     reservar(0, TAMANHO_FRAME);
 
     let (livres, total) = estatisticas();
@@ -306,6 +320,19 @@ pub fn alocar() -> Option<u64> {
 // de verdade — quando a paginação chegar, ela some.
 #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub fn liberar(endereco: u64) {
+    // O frame do endereço zero fica fora de circulação para sempre, e não só
+    // desde a inicialização. Zero é sentinela em vários lugares — "nenhum
+    // frame", ponteiro nulo —, e devolvê-lo à lista o transforma num endereço
+    // que o alocador entrega de verdade. `reservar` cuidava disso uma vez, no
+    // boot; bastava alguém liberá-lo depois para desfazer.
+    //
+    // Recusar aqui é o desfecho certo justamente porque a chamada é um
+    // engano: quem libera o frame zero está devolvendo uma sentinela que leu
+    // como endereço.
+    if endereco < TAMANHO_FRAME {
+        return;
+    }
+
     com_alocador(|a| {
         if let Some(indice) = a.indice_de(endereco) {
             a.liberar_indice(indice);
