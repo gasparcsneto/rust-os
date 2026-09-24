@@ -1767,6 +1767,130 @@ fn heap_funde_blocos_adjacentes() -> Resultado {
     Ok(())
 }
 
+/// Depois de muitas rodadas fora de ordem, o heap volta ao que era.
+///
+/// # Por que este caso, se já há um de fusão
+///
+/// Porque o que existe cobre o caso fácil: três blocos do mesmo tamanho,
+/// liberados na ordem inversa da alocação. Um alocador com fusão quebrada
+/// ainda passa nele.
+///
+/// O que estilhaça uma lista livre é o outro cenário — tamanhos e
+/// alinhamentos variados, liberados fora de ordem, repetidas vezes. É aí que
+/// aparecem as duas falhas que não travam nada e só se veem no relatório:
+///
+/// - **Vazamento.** Uma sobra pequena demais para caber um descritor que
+///   fosse aceita e esquecida sumiria alguns bytes por alocação. Com o tempo,
+///   um heap que encolhe sem que ninguém esteja segurando nada.
+/// - **Estilhaço.** Uma fusão que não acontece deixa `livre` intacto e
+///   `maior_bloco` cada vez menor: memória de sobra, e nenhuma peça grande o
+///   bastante.
+///
+/// Por isso as quatro conferências, e não só `livre`. Cada uma pega uma coisa
+/// que as outras deixam passar.
+fn heap_volta_ao_zero_depois_de_estilhacar() -> Resultado {
+    use core::alloc::Layout;
+
+    const RESERVADOS: usize = 24;
+    let antes = crate::heap::estatisticas();
+
+    // Gerador determinístico: um caso que muda de comportamento a cada
+    // execução não é um caso, é uma loteria. A sequência é a mesma sempre, e
+    // um defeito que ela pegue é reproduzível.
+    let mut semente = 0x2545_F491_4F6C_DD1Du64;
+    let mut sortear = move |teto: usize| {
+        semente ^= semente << 13;
+        semente ^= semente >> 7;
+        semente ^= semente << 17;
+        (semente % teto as u64) as usize
+    };
+
+    let mut vivos: [Option<(*mut u8, Layout)>; RESERVADOS] = [None; RESERVADOS];
+
+    for rodada in 0..400 {
+        let vaga = sortear(RESERVADOS);
+
+        // Meio a meio entre encher e esvaziar: a alternância é o que mistura
+        // a lista, e liberar sempre na ordem inversa não misturaria nada.
+        if let Some((ponteiro, layout)) = vivos[vaga].take() {
+            // SAFETY: veio de `tentar_alocar` com este mesmo layout.
+            unsafe { crate::heap::devolver(ponteiro, layout) };
+            continue;
+        }
+
+        // Tamanhos que cruzam a fronteira do nó da lista (16 bytes) nos dois
+        // sentidos: é ali que mora a decisão de aceitar ou recusar a sobra.
+        let tamanho = 1 + sortear(600);
+        let alinhamento = 1usize << (3 + sortear(6));
+        let Ok(layout) = Layout::from_size_align(tamanho, alinhamento) else {
+            return Err("layout invalido no sorteio");
+        };
+
+        let ponteiro = crate::heap::tentar_alocar(layout);
+        if ponteiro.is_null() {
+            crate::log_error!(
+                "teste",
+                "rodada {}: {} bytes alinhados em {} falharam com {} livres (maior {})",
+                rodada,
+                tamanho,
+                alinhamento,
+                crate::heap::estatisticas().livre,
+                crate::heap::estatisticas().maior_bloco
+            );
+            return Err("o heap recusou uma alocacao que cabia");
+        }
+        if !(ponteiro as usize).is_multiple_of(alinhamento) {
+            return Err("o heap devolveu um ponteiro desalinhado");
+        }
+
+        // Escrever no bloco inteiro é o que transforma uma sobreposição em
+        // falha visível: dois blocos vivos no mesmo lugar se corrompem, e a
+        // conferência de fusão no fim acusa.
+        // SAFETY: a região acabou de ser entregue e é só nossa.
+        unsafe { core::ptr::write_bytes(ponteiro, (rodada & 0xFF) as u8, tamanho) };
+
+        vivos[vaga] = Some((ponteiro, layout));
+    }
+
+    for vaga in vivos.iter_mut() {
+        if let Some((ponteiro, layout)) = vaga.take() {
+            // SAFETY: mesma justificativa.
+            unsafe { crate::heap::devolver(ponteiro, layout) };
+        }
+    }
+
+    let depois = crate::heap::estatisticas();
+
+    if depois.alocado != antes.alocado {
+        crate::log_error!("teste", "alocado {} -> {}", antes.alocado, depois.alocado);
+        return Err("o contador de alocado nao voltou ao inicial");
+    }
+    if depois.livre != antes.livre {
+        crate::log_error!("teste", "livre {} -> {}", antes.livre, depois.livre);
+        return Err("bytes vazaram do heap");
+    }
+    if depois.blocos_livres != antes.blocos_livres {
+        crate::log_error!(
+            "teste",
+            "blocos livres {} -> {}",
+            antes.blocos_livres,
+            depois.blocos_livres
+        );
+        return Err("a lista livre nao voltou ao numero de blocos inicial");
+    }
+    if depois.maior_bloco != antes.maior_bloco {
+        crate::log_error!(
+            "teste",
+            "maior bloco {} -> {}",
+            antes.maior_bloco,
+            depois.maior_bloco
+        );
+        return Err("o heap ficou estilhacado depois do ciclo");
+    }
+
+    Ok(())
+}
+
 fn heap_respeita_alinhamento() -> Resultado {
     for expoente in 3..=9u32 {
         let alinhamento = 1usize << expoente;
@@ -3988,6 +4112,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "heap: funde blocos adjacentes",
         f: heap_funde_blocos_adjacentes,
+    },
+    Caso {
+        nome: "heap: volta ao zero depois de estilhacar",
+        f: heap_volta_ao_zero_depois_de_estilhacar,
     },
     Caso {
         nome: "heap: respeita alinhamento",

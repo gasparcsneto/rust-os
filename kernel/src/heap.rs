@@ -165,7 +165,28 @@ impl Estado {
             while !atual.is_null() {
                 let inicio = atual as usize;
                 let fim = inicio + (*atual).tamanho;
-                let inicio_alinhado = alinhar_acima(inicio, alinhamento);
+                let mut inicio_alinhado = alinhar_acima(inicio, alinhamento);
+
+                // A folga que o alinhamento abre na frente vira um bloco
+                // livre, e um bloco livre precisa comportar o próprio
+                // descritor. Quando ela não comporta, a resposta **não** é
+                // recusar a região: o espaço existe, só está no lugar errado.
+                // Empurrar o início até o primeiro ponto alinhado que deixe
+                // um nó inteiro de folga resolve, e não custa nada além dos
+                // bytes que já estavam sendo pulados.
+                //
+                // Recusar era o que acontecia, e o preço era desproporcional.
+                // Com a lista quase toda num bloco só, não havia outra região
+                // para tentar, e o pedido falhava com o heap vazio:
+                //
+                //     524 bytes alinhados em 32 falharam com 1042296 livres
+                //     (maior bloco 1041832)
+                //
+                // Bastava o bloco começar num endereço cujo resto para o
+                // alinhamento deixasse exatamente oito bytes de folga.
+                if inicio_alinhado - inicio != 0 && inicio_alinhado - inicio < TAMANHO_NO {
+                    inicio_alinhado = alinhar_acima(inicio + TAMANHO_NO, alinhamento);
+                }
 
                 // O alinhamento pode empurrar o início para além do fim da
                 // região; `checked_add` também cobre o estouro.
@@ -178,6 +199,17 @@ impl Estado {
                     // Uma sobra menor que um nó não caberia o próprio
                     // descritor e se perderia. Recusamos a região inteira em
                     // vez de vazar os bytes.
+                    //
+                    // A da frente o ajuste acima já garante: ou é zero, ou
+                    // tem ao menos um nó. A condição fica escrita mesmo assim
+                    // porque é ela que diz qual é o invariante — quem mexer no
+                    // ajuste precisa ver o que ele tem de entregar.
+                    //
+                    // A da cauda é outra história, e para ela recusar é
+                    // mesmo a resposta certa: aumentar a alocação para
+                    // engoli-la faria `dealloc` devolver menos bytes do que
+                    // foram tirados, porque o tamanho de lá é recalculado do
+                    // `Layout`. Seria trocar uma recusa por um vazamento.
                     let sobras_registraveis = (antes == 0 || antes >= TAMANHO_NO)
                         && (depois == 0 || depois >= TAMANHO_NO);
 
