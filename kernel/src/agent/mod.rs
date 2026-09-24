@@ -76,19 +76,60 @@ pub(crate) fn agendar_falha_fatal() {
 
 /// Quanto um quadro pode ficar parado antes de ser dado por abandonado.
 ///
-/// Dois segundos a 100 Hz. É folgadíssimo para o que este canal é — um socket
-/// no hospedeiro, onde uma requisição inteira atravessa em microssegundos — e
-/// continua folgado para uma serial de verdade: os 2048 bytes de uma
-/// requisição máxima levam 180 ms a 115200 bauds.
+/// Meio segundo a 100 Hz. Era de dois segundos, e a diferença tem uma medição
+/// por trás.
 ///
-/// A conta é sobre **ociosidade**, e não sobre a idade do quadro, para que um
-/// cliente lento porém constante nunca seja penalizado: o relógio reinicia a
+/// # O que este teto protege
+///
+/// Um pedaço de requisição que ficou pendurado quando um cliente sumiu. O
+/// kernel não enxerga a desconexão — não há linha de modem entre ele e o
+/// socket —, então o fragmento cola na primeira requisição de quem conectar
+/// depois. Medido, oito ciclos de oito: o cliente seguinte recebia `-32700`
+/// e perdia o pedido dele.
+///
+/// Com dois segundos, quem reconectasse em menos disso herdava o fragmento —
+/// e reconectar leva milissegundos. O teto cobria o caso tarde demais para
+/// ser útil.
+///
+/// # Por que meio segundo, e não menos
+///
+/// Porque o custo de errar para baixo é partir um quadro legítimo ao meio. A
+/// conta que limita: a maior requisição são 2048 bytes, que a 115200 bauds
+/// levam 180 ms para atravessar uma serial de verdade. Meio segundo é quase o
+/// triplo disso, e neste canal — um socket no hospedeiro — é cinco ordens de
+/// grandeza a mais do que uma requisição precisa.
+///
+/// A conta é sobre **ociosidade**, e não sobre a idade do quadro, então um
+/// cliente lento porém constante nunca é penalizado: o relógio reinicia a
 /// cada byte.
 ///
-/// Errar para baixo custa pouco: um quadro legítimo partido ao meio vira um
-/// erro de JSON explícito, que o cliente vê. Errar para cima custa a janela em
-/// que o lixo de um cliente morto ainda pode colar no pedido de outro.
-const TETO_DO_QUADRO_EM_TIQUES: u64 = 200;
+/// # O que ele não resolve
+///
+/// Quem reconectar dentro do meio segundo ainda herda o fragmento. Isso é
+/// intrínseco a um fluxo de bytes sem fronteira de conexão, e a saída não é
+/// um teto menor — é o cliente anunciar a fronteira que só ele conhece. Ver
+/// [`LIMPAR_AO_CONECTAR`].
+const TETO_DO_QUADRO_EM_TIQUES: u64 = 50;
+
+/// O que um cliente deve enviar ao conectar: uma linha vazia.
+///
+/// # Por que isto existe
+///
+/// Porque o kernel não tem como saber que a conexão é nova. O cliente tem, e
+/// é a única coisa que ele sabe e o kernel não — então é ele quem precisa
+/// dizer.
+///
+/// Um `\n` solto fecha qualquer quadro que tenha ficado pela metade. Se não
+/// havia nenhum, não custa nada: [`processar`] devolve sem responder a uma
+/// linha vazia. Se havia, o cliente recebe **um** quadro de erro a mais, que
+/// se refere ao lixo do cliente anterior e não ao pedido dele — e é por isso
+/// que um cliente deste canal deve casar resposta por `id` e ignorar o que não
+/// pediu, como o JSON-RPC já pressupõe.
+///
+/// A alternativa seria encurtar o teto de ociosidade até não sobrar janela, e
+/// aí o preço seria partir requisições legítimas de clientes lentos. Um byte
+/// enviado pelo cliente resolve sem cobrar nada de ninguém.
+pub const LIMPAR_AO_CONECTAR: &[u8] = b"\n";
 
 /// Tamanho máximo de uma requisição.
 ///

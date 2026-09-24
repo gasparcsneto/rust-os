@@ -278,6 +278,32 @@ fn describe(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.field_str("version", env!("CARGO_PKG_VERSION"))?;
     w.field_str("arch", crate::arch::nome())?;
 
+    // O que o cliente deve fazer ao conectar, e por que ninguém além dele pode
+    // fazer. O kernel não enxerga a conexão — não há linha de modem entre ele
+    // e a serial —, então um pedaço de requisição deixado por quem desconectou
+    // antes cola no primeiro pedido de quem chega. Uma linha vazia fecha esse
+    // pedaço; se não havia nenhum, não custa nada.
+    //
+    // Vai em `describe`, e não só num comentário, porque este canal existe
+    // para ser descoberto em tempo de execução: uma convenção que só está na
+    // documentação é uma convenção que o agente não tem como seguir.
+    w.key("on_connect")?;
+    w.begin_object()?;
+    w.field_str(
+        "send",
+        core::str::from_utf8(crate::agent::LIMPAR_AO_CONECTAR).unwrap_or("\\n"),
+    )?;
+    w.field_str(
+        "why",
+        "fecha um quadro que o cliente anterior possa ter deixado pela metade",
+    )?;
+    // E o que fazer com o que vier em resposta a isso.
+    w.field_str(
+        "expect",
+        "pode vir um quadro de erro referente ao lixo anterior; case respostas por id e ignore o que nao pediu",
+    )?;
+    w.end_object()?;
+
     w.key("commands")?;
     w.begin_array()?;
     for cmd in COMANDOS {

@@ -1120,6 +1120,22 @@ struct Sonda {
 /// Todos numa conexão só, na ordem: um canal que atende o primeiro pedido e
 /// morre no segundo é um canal quebrado, e uma sonda por conexão não veria
 /// isso.
+/// A linha vazia que um cliente manda ao conectar.
+///
+/// Cópia de `agent::LIMPAR_AO_CONECTAR`: o xtask é outro workspace e não
+/// enxerga o crate do kernel. O que impede as duas cópias de divergirem é a
+/// sonda de `agent.describe`, que exige o valor publicado em `on_connect`.
+const LIMPAR_AO_CONECTAR: &[u8] = b"\n";
+
+/// Quanto um quadro pode ficar parado antes de o kernel o dar por abandonado.
+///
+/// Cópia de `agent::TETO_DO_QUADRO_EM_TIQUES` (50 tiques a 100 Hz). Aqui ela
+/// não é contrato: é o que [`sob_reconexao`] usa para saber se conseguiu
+/// reconectar **dentro** da janela que pretende exercitar. Se o kernel
+/// encurtar o teto sem que esta cópia acompanhe, a sonda fica exigente demais
+/// e reprova — que é o lado certo para errar.
+const TETO_DE_OCIOSIDADE: Duration = Duration::from_millis(500);
+
 const SONDAS: &[Sonda] = &[
     Sonda {
         pedido: r#"{"jsonrpc":"2.0","id":1,"method":"agent.ping"}"#,
@@ -1131,9 +1147,18 @@ const SONDAS: &[Sonda] = &[
         pedido: r#"{"jsonrpc":"2.0","id":"p2","method":"system.info"}"#,
         exige: &[r#""id":"p2""#, r#""kernel":"duke""#],
     },
+    // `describe` também publica a convenção de conexão. Está exigido aqui
+    // porque as duas constantes abaixo são cópias do que o kernel define, e
+    // esta sonda é o que impede que uma ponta mude sem a outra.
     Sonda {
         pedido: r#"{"jsonrpc":"2.0","id":3,"method":"agent.describe"}"#,
-        exige: &[r#""id":3"#, r#""commands""#, "agent.ping"],
+        exige: &[
+            r#""id":3"#,
+            r#""commands""#,
+            "agent.ping",
+            r#""on_connect""#,
+            r#""send":"\n""#,
+        ],
     },
     // Um método inexistente é erro de protocolo, não silêncio.
     Sonda {
@@ -1206,7 +1231,10 @@ fn fumaca(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
         .spawn()
         .map_err(|e| format!("não foi possível iniciar o {}: {e}", arch.qemu()))?;
 
-    let resultado = conversar(&socket, filho.id());
+    // A sonda de reconexão vem depois de `conversar` e não dentro dela porque
+    // precisa da conexão principal **fechada**: o que ela exercita é o que um
+    // cliente novo herda de um cliente que sumiu.
+    let resultado = conversar(&socket, filho.id()).and_then(|()| sob_reconexao(&socket));
 
     // O emulador morre aconteça o que acontecer: um QEMU órfão segura a
     // imagem de disco e faz a *próxima* execução falhar por um motivo que
@@ -1285,8 +1313,12 @@ fn conversar(socket: &Path, qemu: u32) -> Result<(), String> {
         let id_do_aperto = 90_000 + rodada;
         let vivo = escrita
             .write_all(
+                // A linha vazia da frente é a convenção de `on_connect`: uma
+                // tentativa de aperto de mão que estourou o prazo pode ter
+                // deixado um quadro pela metade, e é esta conexão que herda.
                 format!(
-                    "{{\"jsonrpc\":\"2.0\",\"id\":{id_do_aperto},\"method\":\"agent.ping\"}}\n"
+                    "{}{{\"jsonrpc\":\"2.0\",\"id\":{id_do_aperto},\"method\":\"agent.ping\"}}\n",
+                    String::from_utf8_lossy(LIMPAR_AO_CONECTAR),
                 )
                 .as_bytes(),
             )
@@ -1405,8 +1437,10 @@ fn sob_fragmento(
         .and_then(|()| escrita.flush())
         .map_err(|e| format!("fragmento: falha ao enviar o pedaço: {e}"))?;
 
-    // Acima do teto do kernel (dois segundos), com folga para o relógio dele.
-    std::thread::sleep(Duration::from_millis(3_500));
+    // Acima do teto de ociosidade do enquadrador (meio segundo), com folga
+    // para o relógio dele. Três vezes o teto: a espera existe para que o teto
+    // dispare, não para medir onde ele está.
+    std::thread::sleep(Duration::from_millis(1_500));
 
     escrita
         .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":7777,\"method\":\"agent.ping\"}\n")
@@ -1427,6 +1461,133 @@ fn sob_fragmento(
 
     println!("  [fragmento] ok  pedaço abandonado, pedido seguinte intacto");
     Ok(())
+}
+
+/// O `id` do pedido que precisa ser respondido depois da reconexão.
+///
+/// Fora da faixa do aperto de mão (90_000+) e de qualquer sonda, para que
+/// casar por `id` aqui não dependa de mais nada.
+const ID_DA_RECONEXAO: u32 = 8888;
+
+/// Quem conecta depois de um cliente que sumiu no meio de um quadro não pode
+/// herdar o pedaço dele.
+///
+/// # O cenário, e por que [`sob_fragmento`] não o cobre
+///
+/// Ali o mesmo cliente deixa um pedaço e espera o teto de ociosidade passar —
+/// o que se exercita é o teto. Aqui o cliente **desconecta** e outro entra
+/// logo em seguida, dentro do teto, de propósito: o que se exercita é a linha
+/// vazia que `agent.describe` publica em `on_connect`.
+///
+/// Medido antes dela, seis ciclos de seis: o cliente novo pedia um
+/// `agent.ping` com `id` 8888 e recebia
+///
+///     {"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"JSON malformado"}}
+///
+/// — o erro do lixo alheio no lugar da resposta dele, e o pedido perdido. Com
+/// a linha vazia, zero de seis: vêm dois quadros, o erro referente ao lixo
+/// anterior e, atrás dele, a resposta com o `id` certo.
+///
+/// # O que a sonda exige
+///
+/// Não que o erro do lixo anterior venha ou deixe de vir — isso depende de
+/// onde o fragmento parou, e o contrato publicado em `on_connect.expect` já
+/// diz que ele pode vir. Exige o que o cliente precisa: **o pedido dele
+/// respondido, com o `id` dele**.
+fn sob_reconexao(socket: &Path) -> Result<(), String> {
+    println!("[xtask] fumaça: reconexão no meio de um quadro");
+
+    // Cliente 1: meio pedido e some. Sem `\n` — é justamente o quadro que
+    // ficou aberto que envenena o próximo.
+    {
+        let mut caido = UnixStream::connect(socket)
+            .map_err(|e| format!("reconexão: o cliente que cai não conectou: {e}"))?;
+        caido
+            .write_all(br#"{"jsonrpc":"2.0","id":4,"method":"agent.pi"#)
+            .and_then(|()| caido.flush())
+            .map_err(|e| format!("reconexão: falha ao enviar o pedaço: {e}"))?;
+    }
+    let caiu_em = std::time::Instant::now();
+
+    // Cliente 2, o mais rápido possível. O QEMU precisa de um instante para
+    // notar a desconexão e voltar a escutar, então a conexão é tentada em
+    // laço — mas com pressa, porque uma reconexão lenta deixaria o teto de
+    // ociosidade limpar o fragmento e a sonda passaria sem ter exercitado
+    // nada.
+    let fluxo = loop {
+        match UnixStream::connect(socket) {
+            Ok(f) => break f,
+            Err(e) => {
+                if caiu_em.elapsed() > Duration::from_secs(5) {
+                    return Err(format!("reconexão: o canal não aceitou a reconexão: {e}"));
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    };
+    fluxo
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .map_err(|e| format!("reconexão: não foi possível configurar o timeout: {e}"))?;
+    let mut escrita = fluxo
+        .try_clone()
+        .map_err(|e| format!("reconexão: não foi possível duplicar o fluxo: {e}"))?;
+    let mut leitor = BufReader::new(fluxo);
+
+    let pedido = format!(
+        "{}{{\"jsonrpc\":\"2.0\",\"id\":{ID_DA_RECONEXAO},\"method\":\"agent.ping\"}}\n",
+        // A linha vazia de `on_connect`, e a única coisa que separa esta sonda
+        // do defeito que ela reproduz.
+        String::from_utf8_lossy(LIMPAR_AO_CONECTAR),
+    );
+    escrita
+        .write_all(pedido.as_bytes())
+        .and_then(|()| escrita.flush())
+        .map_err(|e| format!("reconexão: falha ao enviar o pedido: {e}"))?;
+
+    let janela = caiu_em.elapsed();
+    if janela >= TETO_DE_OCIOSIDADE {
+        return Err(format!(
+            "reconexão: a reconexão levou {} ms, mais que o teto de ociosidade do \
+             enquadrador ({} ms) — o fragmento foi limpo pelo teto e a sonda não \
+             exercitou a linha vazia",
+            janela.as_millis(),
+            TETO_DE_OCIOSIDADE.as_millis(),
+        ));
+    }
+
+    // Pode vir o erro referente ao lixo do cliente anterior antes da resposta;
+    // o que não pode é a resposta não vir. Casar por `id` é o que o próprio
+    // `on_connect.expect` manda o cliente fazer.
+    let meu = format!(r#""id":{ID_DA_RECONEXAO},"#);
+    let mut alheios: Vec<String> = Vec::new();
+    for _ in 0..4 {
+        let mut linha = String::new();
+        match leitor.read_line(&mut linha) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+        if linha.contains(&meu) {
+            println!(
+                "  [reconexão] ok  pedido respondido {} ms depois da queda, \
+                 com {} quadro(s) de lixo alheio antes",
+                janela.as_millis(),
+                alheios.len()
+            );
+            return Ok(());
+        }
+        alheios.push(linha.trim().to_string());
+    }
+
+    Err(format!(
+        "reconexão: o pedido do cliente novo herdou o quadro do cliente que caiu\n  \
+         quadros recebidos: {}",
+        if alheios.is_empty() {
+            "nenhum".to_string()
+        } else {
+            alheios.join("\n                     ")
+        }
+    ))
 }
 
 /// Quantos bytes despejar de uma vez, sem ler nada no meio.
@@ -1739,9 +1900,6 @@ fn ler_resposta(leitor: &mut BufReader<UnixStream>) -> Result<String, String> {
             }
         }
 
-        // Um quadro do aperto de mão é o único que se pula em silêncio: ele é
-        // desta ferramenta, e não do kernel.
-        //
         // Os `id` do aperto de mão começam em 90_000, faixa que sonda nenhuma
         // usa. Pular por prefixo, e não por número exato, porque quem lê aqui
         // não sabe em qual tentativa o aperto de mão parou.
@@ -1927,8 +2085,13 @@ fn tentar_agente(arch: Arquitetura, metodo: &str, params: &str) -> Result<ExitCo
         .set_read_timeout(Some(Duration::from_secs(5)))
         .map_err(|e| Espera::Fatal(format!("não foi possível configurar o timeout: {e}")))?;
 
-    let requisicao =
-        format!("{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"{metodo}\",\"params\":{params}}}\n");
+    // A convenção que `agent.describe` publica em `on_connect`: uma linha vazia
+    // fecha o quadro que um cliente anterior possa ter deixado pela metade. O
+    // kernel não vê a desconexão; quem sabe que a conexão é nova é o cliente.
+    let requisicao = format!(
+        "{}{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"{metodo}\",\"params\":{params}}}\n",
+        String::from_utf8_lossy(LIMPAR_AO_CONECTAR),
+    );
 
     fluxo
         .write_all(requisicao.as_bytes())
