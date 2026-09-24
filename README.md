@@ -102,7 +102,8 @@ $ cargo xtask agent agent.describe
 # O mesmo protocolo, no kernel ARM
 $ cargo xtask agent --arch aarch64 system.info
 {"jsonrpc":"2.0","id":1,"result":{"arch":"aarch64","cpu_vendor":"ARM Limited",
- "framebuffer":null,"log_records":6}}
+ "framebuffer":{"width":1280,"height":720,"stride":1280,
+ "bytes_per_pixel":4,"pixel_format":"bgr"},"log_records":8}}
 ```
 
 Os dois podem rodar ao mesmo tempo: cada arquitetura tem seu próprio socket.
@@ -489,10 +490,18 @@ mecanismo=port-io-cf8  count=6
   00:03.0  8086:100e  classe 02/00  rede
 
 $ cargo xtask agent --arch aarch64 pci.list
-mecanismo=ecam  count=2
+mecanismo=ecam  count=4
   00:00.0  1b36:0008  classe 06/00  ponte-hospedeira
-  00:01.0  1af4:1000  classe 02/00  rede        <- virtio
+  00:01.0  1af4:1001  classe 01/00  disco-scsi  <- virtio
+  00:02.0  1234:1111  classe 03/80  video
+  00:03.0  1af4:1000  classe 02/00  rede        <- virtio
 ```
+
+O vídeo aparece nas duas listas com o **mesmo** fabricante e modelo. Não é
+coincidência: a VGA padrão da máquina `pc` e o `bochs-display` da `virt` são a
+mesma implementação do emulador, com a mesma interface de programação. É por
+isso que um driver só (`tela/bochs.rs`) acende a tela nas duas arquiteturas,
+em vez de virtio-gpu de um lado e outra coisa do outro.
 
 O mecanismo difere, a enumeração não. No x86 a configuração é alcançada por um
 par de portas de I/O que existe desde 1993 — não precisa ser descoberto, ao
@@ -614,9 +623,15 @@ padronizado.
       **Fase 1 completa.**
 - [x] **Fase 2 — Drivers.** Enumeração PCI, virtio-blk, virtio-net,
       roteamento de interrupção de PCI, timer do APIC local e framebuffer
-      gráfico. O framebuffer existe só no x86: a máquina `virt` do ARM não
-      expõe nenhum, e fechar essa lacuna é um driver de virtio-gpu.
+      gráfico.
       **Fase 2 completa.**
+- [ ] **Fase 3 — Operação por uma pessoa.** O Duke precisa ser operável por
+      alguém sentado na frente dele, nas duas arquiteturas, e não só por um
+      agente pelo canal serial. Feito: framebuffer no ARM, por um driver do
+      adaptador que as duas máquinas do QEMU expõem com os mesmos
+      identificadores (`1234:1111`). Falta: fonte e console de texto sobre o
+      framebuffer, teclado no x86 (PS/2) e no ARM (virtio-input), e o
+      interpretador que transforma isso em operação.
 
 ## Licença
 

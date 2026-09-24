@@ -28,6 +28,8 @@
 //! Por isso o estado aqui é atômico, e por isso a geometria mora aqui e não
 //! lá. Duas cópias da mesma geometria seriam duas coisas que podem divergir.
 
+pub mod bochs;
+
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// Como os bytes de um pixel são ordenados na memória.
@@ -43,12 +45,6 @@ pub enum Formato {
 
 impl Formato {
     /// O código com que o formato é guardado num atômico.
-    ///
-    /// Sem chamador no ARM, porque lá nada chama [`registrar`]: a máquina
-    /// `virt` não expõe framebuffer nenhum. É a lacuna que um driver de
-    /// virtio-gpu fecharia, e o `allow` condicionado à arquitetura é o que
-    /// mantém a lacuna visível em vez de escondida.
-    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     const fn codigo(self) -> u32 {
         match self {
             Formato::Rgb => 1,

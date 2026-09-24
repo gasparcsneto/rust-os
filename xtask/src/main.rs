@@ -975,6 +975,21 @@ fn comando_qemu(
     // e responde a ARP, que e o menor teste de ponta a ponta que existe: o
     // kernel transmite um quadro e recebe uma resposta que so pode ter vindo
     // de fora dele.
+    // E um adaptador de vídeo, também nas duas.
+    //
+    // No x86 já vem um por padrão — a VGA da máquina `pc` — e este `-device`
+    // seria um segundo. No ARM a máquina `virt` não traz nenhum: sem isto, o
+    // kernel não tem o que programar, e uma pessoa não tem o que olhar.
+    //
+    // `bochs-display` e não `virtio-gpu` porque é o **mesmo** dispositivo que
+    // o x86 já tem (`1234:1111`), com a mesma interface de programação. Um
+    // driver serve as duas arquiteturas; virtio-gpu seria um segundo caminho
+    // para a mesma coisa, e este kernel já pagou caro por regras que valem em
+    // uma arquitetura só.
+    if arch == Arquitetura::Aarch64 {
+        qemu.args(["-device", "bochs-display"]);
+    }
+
     qemu.args(["-netdev", "user,id=rede0"]);
     qemu.args(["-device", "virtio-net-pci,netdev=rede0"]);
 

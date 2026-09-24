@@ -1282,33 +1282,27 @@ fn tela_recorta_na_borda() -> Resultado {
     Ok(())
 }
 
-/// O que a ausência de framebuffer significa, que depende da arquitetura.
+/// A ausência de framebuffer é sempre defeito, nas duas arquiteturas.
 ///
-/// # Por que não é sempre tolerável
+/// # Por que isto já foi condicional, e por que não é mais
 ///
 /// Porque a tolerância boa demais transformou este caso num que passava
-/// justamente quando deveria falhar.
+/// justamente quando deveria falhar. Injetando um stride menor que a largura,
+/// a tela foi corretamente recusada no boot e o caso continuou dizendo `ok`:
+/// o único que olha para o framebuffer de verdade parou de olhar, em
+/// silêncio, no exato cenário em que ele importa.
 ///
-/// No ARM a `virt` do QEMU não expõe framebuffer nenhum, e a ausência é o
-/// estado correto da máquina — uma lacuna que deve aparecer no relatório da
-/// suíte até um driver de virtio-gpu fechá-la. No x86 é o contrário: o
-/// bootloader entrega um framebuffer sempre, então "não há tela" não descreve
-/// máquina nenhuma. Descreve um defeito — a geometria recusada, o registro
-/// que não aconteceu, o endereço que não chegou.
+/// A correção de então foi exigir tela no x86 e tolerar a falta no ARM, onde
+/// a `virt` do QEMU não expunha vídeo nenhum. Era verdade sobre a máquina, e
+/// virou mentira no momento em que a máquina passou a receber um adaptador e
+/// o kernel passou a saber programá-lo — ver [`crate::tela::bochs`].
 ///
-/// Os dois casos eram tratados como um. Injetando um stride menor que a
-/// largura, a tela foi corretamente recusada no boot e este caso continuou
-/// dizendo `ok`: o único que olha para o framebuffer de verdade parou de
-/// olhar, em silêncio, no exato cenário em que ele importa.
-#[cfg(target_arch = "x86_64")]
+/// Deixá-la condicional agora seria pior que antes: a tolerância cobriria
+/// exatamente a arquitetura onde o caminho é novo, e portanto a única em que
+/// há algo a provar. Uma pessoa precisa enxergar o Duke nas duas, então a
+/// ausência descreve defeito nas duas.
 fn sem_framebuffer() -> Resultado {
     Err("esta maquina deveria ter framebuffer e nao tem")
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-fn sem_framebuffer() -> Resultado {
-    crate::log_info!("teste", "esta maquina nao tem framebuffer; nada a conferir");
-    Ok(())
 }
 
 /// Uma imagem que o validador recusa não custa o espaço de quem chamou.

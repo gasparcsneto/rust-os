@@ -129,6 +129,31 @@ fn parar_sem_base(subsistema: &'static str, motivo: &str, canal_agente: bool) ->
     }
 }
 
+/// Registra no log a tela que existe, e desenha o indicador de vida.
+///
+/// Devolve se havia uma. Os dois chamadores precisam saber: o primeiro porque
+/// no ARM ninguém procurou ainda, e o segundo porque é ele quem reporta a
+/// ausência **depois** de ter procurado.
+fn anunciar_tela() -> bool {
+    let Some(t) = tela::tela() else {
+        return false;
+    };
+
+    log_info!(
+        "video",
+        "framebuffer {}x{} {} ({} bytes/pixel)",
+        t.largura,
+        t.altura,
+        t.formato.como_str(),
+        t.bytes_por_pixel
+    );
+    // O indicador de que há um kernel vivo desenhando. Vem logo depois do
+    // log, e não antes, para que uma falha ao desenhar apareça depois de já
+    // sabermos que a tela existe.
+    tela::banner();
+    true
+}
+
 /// O fluxo de boot comum às duas arquiteturas.
 ///
 /// Quando chegamos aqui, o backend de arquitetura já fez o trabalho sujo: as
@@ -202,23 +227,14 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
         parar_sem_base("heap", motivo, canal_agente);
     }
 
-    match tela::tela() {
-        Some(t) => {
-            log_info!(
-                "video",
-                "framebuffer {}x{} {} ({} bytes/pixel)",
-                t.largura,
-                t.altura,
-                t.formato.como_str(),
-                t.bytes_por_pixel
-            );
-            // O indicador de que há um kernel vivo desenhando. Vem logo
-            // depois do log, e não antes, para que uma falha ao desenhar
-            // apareça depois de já sabermos que a tela existe.
-            tela::banner();
-        }
-        None => log_info!("video", "nenhum framebuffer nesta plataforma"),
-    }
+    // A tela que o firmware entregou pronta, se entregou alguma. É o caso do
+    // x86, onde o `bootloader` configura o modo antes de o kernel existir.
+    //
+    // Não há `else` aqui de propósito: no ARM ninguém entrega nada, e dizer
+    // "nenhum framebuffer nesta plataforma" agora seria uma conclusão tirada
+    // antes de procurar. Quem procura é [`tela::bochs`], e ele precisa do
+    // barramento PCI enumerado — o que só acontece bem mais abaixo.
+    anunciar_tela();
 
     // Com a GDT carregada, o mecanismo de chamadas de sistema pode ser
     // ligado. Precisa vir antes de qualquer processo existir, e depois das
@@ -246,6 +262,16 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     // E com o barramento varrido, os dispositivos que ele revelou podem ser
     // ligados. A ordem não é escolha: um driver virtio precisa dos BARs já
     // atribuídos e do decodificador já ligado, que é o que a varredura faz.
+    // Com o barramento enumerado, o adaptador de vídeo pode ser procurado e
+    // programado. Só onde ninguém entregou uma tela pronta: no x86, trocar o
+    // framebuffer do `bootloader` por outro não consertaria nada.
+    if tela::tela().is_none() {
+        tela::bochs::init();
+        if !anunciar_tela() {
+            log_info!("video", "nenhum framebuffer nesta maquina");
+        }
+    }
+
     virtio::blk::init();
     virtio::net::init();
 
