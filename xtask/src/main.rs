@@ -13,6 +13,7 @@
 //!
 //! `A` é `x86_64` (padrão) ou `aarch64`. Aceita também `--release`.
 
+use std::collections::BTreeMap;
 use std::{
     io::{BufRead, BufReader, Write},
     os::unix::net::UnixStream,
@@ -1336,7 +1337,153 @@ fn conversar(socket: &Path, qemu: u32) -> Result<(), String> {
         println!("  [{}/{}] ok  {}", n + 1, SONDAS.len(), sonda.pedido);
     }
 
+    sob_carga(&mut escrita, &mut leitor)
+}
+
+/// Quantas requisições a rajada envia ao todo.
+const RAJADA: usize = 400;
+
+/// Quantas cabem no ar de uma vez.
+///
+/// A fila de bytes de entrada do kernel tem 4096 bytes, e a primeira versão
+/// desta sonda despejou as quatrocentas de uma vez — dezoito mil bytes. O
+/// kernel descartou o excesso e contabilizou, exatamente como manda o
+/// contrato, e a sonda leu isso como defeito do kernel. Era defeito da sonda.
+///
+/// Um lote de sessenta e quatro são pouco menos de três mil bytes: folga
+/// suficiente para não estourar, e rajada suficiente para encher a fila de
+/// prontas se o kernel voltar a duplicar despertares — o defeito que esta
+/// sonda existe para pegar aparecia com oitenta e uma requisições.
+const LOTE: usize = 64;
+
+/// Martela o canal e exige que nada tenha sido perdido em silêncio.
+///
+/// # O que isto pega, e o que uma sonda avulsa não pegaria
+///
+/// As sondas acima mandam uma requisição por vez e olham a resposta. Um
+/// kernel pode responder a todas e ainda assim estar perdendo trabalho por
+/// dentro — foi exatamente o que acontecia: cada byte da serial enfileirava a
+/// tarefa do agente outra vez, a fila de prontas enchia de duplicatas, e
+/// quatro mil despertares eram descartados. O canal respondia a tudo.
+///
+/// A prova não está nas respostas, está nos contadores que o próprio kernel
+/// publica. Cada um deles existe porque uma perda silenciosa já custou caro em
+/// algum lugar, e todos precisam continuar em zero depois da rajada.
+fn sob_carga(escrita: &mut UnixStream, leitor: &mut BufReader<UnixStream>) -> Result<(), String> {
+    println!("[xtask] fumaça: rajada de {RAJADA} requisições em lotes de {LOTE}");
+
+    // A medida é a **variação**, e não o valor absoluto. `dropped_before_ready`
+    // já vem diferente de zero por culpa desta própria ferramenta: o aperto de
+    // mão manda pings em conexões abertas antes de o canal subir, e o kernel
+    // descarta esses bytes de propósito. Exigir zero seria a sonda acusando o
+    // kernel do que ela mesma fez.
+    let antes = contadores_de_perda(escrita, leitor)?;
+
+    let mut enviadas = 0;
+    while enviadas < RAJADA {
+        let neste = LOTE.min(RAJADA - enviadas);
+
+        for i in 0..neste {
+            let id = enviadas + i;
+            escrita
+                .write_all(
+                    format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"agent.ping\"}}\n")
+                        .as_bytes(),
+                )
+                .map_err(|e| format!("rajada: falha ao enviar a {}a: {e}", id + 1))?;
+        }
+        escrita
+            .flush()
+            .map_err(|e| format!("rajada: falha ao despachar: {e}"))?;
+
+        for i in 0..neste {
+            let id = enviadas + i;
+            let mut resposta = String::new();
+            match leitor.read_line(&mut resposta) {
+                Ok(0) => return Err(format!("rajada: o canal fechou na {}a resposta", id + 1)),
+                Ok(_) => {}
+                Err(e) => return Err(format!("rajada: sem resposta na {}a: {e}", id + 1)),
+            }
+            // Prefixo exato, e não `contains`: procurar `"id":4` solto casaria
+            // com a resposta de 40 e faria a sonda aprovar uma troca de ordem.
+            let esperado = format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},");
+            if !resposta.starts_with(&esperado) {
+                return Err(format!(
+                    "rajada: a {}a resposta não é a do pedido correspondente\n  {}",
+                    id + 1,
+                    resposta.trim()
+                ));
+            }
+        }
+
+        enviadas += neste;
+    }
+
+    // Os contadores, depois da poeira baixar.
+    let depois = contadores_de_perda(escrita, leitor)?;
+
+    for (nome, o_que_significa) in CONTADORES_DE_PERDA {
+        let (a, d) = (antes[nome], depois[nome]);
+        if d > a {
+            return Err(format!(
+                "rajada: {o_que_significa}\n  {nome}: {a} -> {d} (+{})",
+                d - a
+            ));
+        }
+    }
+
+    println!("  [carga] ok  {RAJADA} requisições, nenhuma perda nos contadores");
     Ok(())
+}
+
+/// Os contadores de perda que a rajada não pode fazer crescer.
+///
+/// Cada um existe porque uma perda silenciosa já custou caro em algum lugar
+/// deste kernel, e o nome ao lado é o que dizer quando ele se mexer.
+const CONTADORES_DE_PERDA: &[(&str, &str)] = &[
+    (
+        "never_scheduled",
+        "despertares descartados por fila de prontas cheia",
+    ),
+    ("dropped", "bytes descartados por fila de entrada cheia"),
+    (
+        "dropped_before_ready",
+        "bytes descartados antes de o canal subir",
+    ),
+    ("without_slot", "adormecidos que caíram em espera ativa"),
+];
+
+/// Lê `tasks.stats` e extrai os contadores de perda.
+fn contadores_de_perda(
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+) -> Result<BTreeMap<&'static str, u64>, String> {
+    escrita
+        .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":999,\"method\":\"tasks.stats\"}\n")
+        .and_then(|()| escrita.flush())
+        .map_err(|e| format!("falha ao pedir as estatísticas: {e}"))?;
+
+    let mut stats = String::new();
+    leitor
+        .read_line(&mut stats)
+        .map_err(|e| format!("sem estatísticas: {e}"))?;
+
+    let mut lidos = BTreeMap::new();
+    for (nome, _) in CONTADORES_DE_PERDA {
+        let chave = format!("\"{nome}\":");
+        let valor = stats
+            .find(&chave)
+            .map(|i| &stats[i + chave.len()..])
+            .and_then(|resto| {
+                let fim = resto
+                    .find(|c: char| !c.is_ascii_digit())
+                    .unwrap_or(resto.len());
+                resto[..fim].parse::<u64>().ok()
+            })
+            .ok_or_else(|| format!("`tasks.stats` não traz `{nome}`\n  {}", stats.trim()))?;
+        lidos.insert(*nome, valor);
+    }
+    Ok(lidos)
 }
 
 /// Se a linha é um objeto JSON com todas as chaves fechadas.
