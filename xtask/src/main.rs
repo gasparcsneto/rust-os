@@ -146,6 +146,17 @@ fn main() -> ExitCode {
     };
     let release = args.iter().any(|a| a == "--release");
 
+    // Qual teclado a máquina da fumaça vai ter. Ver [`Teclado`] sobre por que
+    // é um e não os dois.
+    let teclado = match extrair_valor(&args, "--teclado") {
+        None | Some("nativo") => Teclado::Nativo,
+        Some("usb") => Teclado::Usb,
+        Some(outro) => {
+            eprintln!("erro: teclado desconhecido `{outro}`; use `nativo` ou `usb`");
+            return ExitCode::FAILURE;
+        }
+    };
+
     // Posicionais: tudo que não é flag nem valor de flag.
     let mut posicionais: Vec<&str> = Vec::new();
     let mut pular = false;
@@ -154,7 +165,7 @@ fn main() -> ExitCode {
             pular = false;
             continue;
         }
-        if a == "--arch" {
+        if a == "--arch" || a == "--teclado" {
             pular = true;
         } else if !a.starts_with("--") {
             posicionais.push(a);
@@ -167,7 +178,7 @@ fn main() -> ExitCode {
         "build" => build(arch, release, false).map(|_| ExitCode::SUCCESS),
         "run" => run(arch, release),
         "test" => test(arch, release),
-        "fumaca" => fumaca(arch, release),
+        "fumaca" => fumaca(arch, release, teclado),
         "agent" => {
             let metodo = posicionais.get(1).copied().unwrap_or("agent.describe");
             let params = posicionais.get(2).copied().unwrap_or("{}");
@@ -215,6 +226,33 @@ fn extrair_arch(args: &[String]) -> Result<Arquitetura, String> {
     Ok(Arquitetura::X86_64)
 }
 
+/// O valor de uma opção `--nome valor` ou `--nome=valor`, se houver.
+///
+/// Espelha [`extrair_arch`], que veio antes e é específica demais para
+/// reaproveitar: ela devolve uma arquitetura, não o texto.
+fn extrair_valor<'a>(args: &'a [String], nome: &str) -> Option<&'a str> {
+    let prefixo = alloc_prefixo(nome);
+    let mut i = 0;
+    while i < args.len() {
+        if let Some(valor) = args[i].strip_prefix(prefixo.as_str()) {
+            return Some(valor);
+        }
+        if args[i] == nome {
+            return args.get(i + 1).map(|v| v.as_str());
+        }
+        i += 1;
+    }
+    None
+}
+
+/// `--nome=`, montado uma vez.
+fn alloc_prefixo(nome: &str) -> String {
+    let mut p = String::with_capacity(nome.len() + 1);
+    p.push_str(nome);
+    p.push('=');
+    p
+}
+
 fn ajuda() {
     println!(
         "\
@@ -222,6 +260,7 @@ build system do Duke
 
 USO:
     cargo xtask <comando> [--arch x86_64|aarch64] [--release]
+                          [--teclado nativo|usb]   (só na fumaça)
 
 COMANDOS:
     build                     compila o kernel (e gera as imagens, no x86)
@@ -267,6 +306,27 @@ fn caminho_socket(arch: Arquitetura) -> PathBuf {
     raiz_do_projeto()
         .join("target")
         .join(format!("agent-{}.sock", arch.nome()))
+}
+
+/// Qual teclado a máquina vai ter.
+///
+/// # Por que isto é uma escolha, e não os dois de uma vez
+///
+/// Porque o QEMU entrega cada tecla a **um** dispositivo. Medido: com o
+/// teclado virtio e o USB na mesma máquina ARM, `sendkey` alimentou o virtio e
+/// o USB não viu nada (`device_events` 12, `usb_reports` 0); no x86, com o
+/// 8042 e o USB, foi o USB que recebeu e a IRQ 1 nunca disparou.
+///
+/// Com os dois presentes, portanto, um dos drivers fica sem exercício — e sem
+/// que nada acuse, porque a sonda passa pelo outro caminho. Uma máquina com um
+/// teclado só é o que torna a sonda uma afirmação sobre qual driver funciona.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Teclado {
+    /// O que a máquina tem de fábrica: o 8042 no x86, o virtio no ARM.
+    Nativo,
+    /// Um teclado USB, atrás do controlador xHCI. O mesmo dispositivo e o
+    /// mesmo driver nas duas arquiteturas.
+    Usb,
 }
 
 /// Onde fica o monitor do emulador desta arquitetura.
@@ -628,7 +688,7 @@ fn depurar(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
     let elf = caminho_elf(arch, release);
     let socket = caminho_socket(arch);
 
-    let mut qemu = comando_qemu(arch, &artefato, Some(&socket))?;
+    let mut qemu = comando_qemu(arch, &artefato, Some(&socket), Teclado::Nativo)?;
     // `-S` congela a CPU antes da primeira instrução; `-gdb` abre o servidor.
     // Sem o `-S`, o kernel bootaria inteiro antes de dar tempo de conectar, e
     // qualquer breakpoint de boot seria perdido.
@@ -942,6 +1002,7 @@ fn comando_qemu(
     arch: Arquitetura,
     artefato: &Artefato,
     socket_agente: Option<&Path>,
+    teclado: Teclado,
 ) -> Result<Command, String> {
     let mut qemu = Command::new(arch.qemu());
 
@@ -1008,14 +1069,23 @@ fn comando_qemu(
         qemu.args(["-device", "bochs-display"]);
     }
 
-    // E um teclado, também só no ARM.
+    // E um teclado. Qual, depende do que se quer exercitar — ver [`Teclado`].
     //
-    // O x86 já tem o dele: o controlador 8042 é uma peça da máquina `pc`,
-    // presente desde antes de haver barramento para conectar coisas. A
-    // máquina `virt` não tem nenhum equivalente — o teclado dela entra pelo
-    // PCI, como tudo o mais.
-    if arch == Arquitetura::Aarch64 {
-        qemu.args(["-device", "virtio-keyboard-pci"]);
+    // O nativo do x86 é o controlador 8042, peça da máquina `pc` desde antes
+    // de haver barramento para conectar coisas, e que não se pode remover. O
+    // da `virt` do ARM não existe: lá o teclado entra pelo PCI, como tudo o
+    // mais.
+    match (teclado, arch) {
+        (Teclado::Nativo, Arquitetura::Aarch64) => {
+            qemu.args(["-device", "virtio-keyboard-pci"]);
+        }
+        (Teclado::Nativo, Arquitetura::X86_64) => {}
+        (Teclado::Usb, _) => {
+            // O controlador antes do dispositivo: o `usb-kbd` precisa de um
+            // barramento USB para se pendurar, e é o `qemu-xhci` que o cria.
+            qemu.args(["-device", "qemu-xhci"]);
+            qemu.args(["-device", "usb-kbd"]);
+        }
     }
 
     qemu.args(["-netdev", "user,id=rede0"]);
@@ -1102,7 +1172,7 @@ fn run(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
         );
     }
 
-    comando_qemu(arch, &artefato, Some(&socket))?
+    comando_qemu(arch, &artefato, Some(&socket), Teclado::Nativo)?
         .status()
         .map_err(|e| format!("não foi possível iniciar o {}: {e}", arch.qemu()))?;
 
@@ -1277,7 +1347,7 @@ const SONDAS: &[Sonda] = &[
 /// Não substitui a suíte: não confere nenhum invariante interno. É a outra
 /// metade — a suíte olha o kernel por dentro, isto olha pelo buraco da
 /// fechadura por onde o agente olha.
-fn fumaca(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
+fn fumaca(arch: Arquitetura, release: bool, teclado: Teclado) -> Result<ExitCode, String> {
     let artefato = build(arch, release, false)?;
     let socket = caminho_socket(arch);
 
@@ -1286,14 +1356,14 @@ fn fumaca(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
         arch.nome()
     );
 
-    let mut filho = comando_qemu(arch, &artefato, Some(&socket))?
+    let mut filho = comando_qemu(arch, &artefato, Some(&socket), teclado)?
         .spawn()
         .map_err(|e| format!("não foi possível iniciar o {}: {e}", arch.qemu()))?;
 
     // A sonda de reconexão vem depois de `conversar` e não dentro dela porque
     // precisa da conexão principal **fechada**: o que ela exercita é o que um
     // cliente novo herda de um cliente que sumiu.
-    let resultado = conversar(&socket, &caminho_monitor(arch), filho.id())
+    let resultado = conversar(&socket, &caminho_monitor(arch), teclado, filho.id())
         .and_then(|()| sob_reconexao(&socket));
 
     // O emulador morre aconteça o que acontecer: um QEMU órfão segura a
@@ -1316,7 +1386,7 @@ fn fumaca(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
 }
 
 /// Espera o canal subir e roda as sondas numa conexão só.
-fn conversar(socket: &Path, monitor: &Path, qemu: u32) -> Result<(), String> {
+fn conversar(socket: &Path, monitor: &Path, teclado: Teclado, qemu: u32) -> Result<(), String> {
     let limite = std::time::Instant::now() + ESPERA_PELA_FUMACA;
 
     // Conectar não é o mesmo que ser atendido. O QEMU aceita a conexão assim
@@ -1467,8 +1537,27 @@ fn conversar(socket: &Path, monitor: &Path, qemu: u32) -> Result<(), String> {
 
     sob_carga(&mut escrita, &mut leitor)?;
     sob_despejo(&mut escrita, &mut leitor)?;
-    sob_teclado(monitor, &mut escrita, &mut leitor)?;
+    sob_teclado(monitor, teclado, &mut escrita, &mut leitor)?;
     sob_fragmento(&mut escrita, &mut leitor)
+}
+
+/// O que as três teclas da sonda devem produzir.
+const ESPERADO_DO_TECLADO: &str = "abC";
+
+/// O valor que vem logo depois de uma chave, sem interpretar o JSON inteiro.
+///
+/// Serve para os dois formatos que esta sonda lê — uma string entre aspas e um
+/// número — e devolve o texto cru nos dois casos. Não é um interpretador: é o
+/// mínimo para não escrever um, num lugar onde a resposta é conhecida e curta.
+fn valor_de(resposta: &str, chave: &str) -> Option<String> {
+    let resto = &resposta[resposta.find(chave)? + chave.len()..];
+    Some(match resto.strip_prefix('"') {
+        Some(texto) => texto[..texto.find('"')?].to_string(),
+        None => resto
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>(),
+    })
 }
 
 /// As teclas que uma pessoa digita chegam ao kernel.
@@ -1490,10 +1579,17 @@ fn conversar(socket: &Path, monitor: &Path, qemu: u32) -> Result<(), String> {
 /// que é a parte com memória — e portanto a que pode ficar presa.
 fn sob_teclado(
     monitor: &Path,
+    teclado: Teclado,
     escrita: &mut UnixStream,
     leitor: &mut BufReader<UnixStream>,
 ) -> Result<(), String> {
-    println!("[xtask] fumaça: teclas pelo monitor do emulador");
+    println!(
+        "[xtask] fumaça: teclas pelo monitor do emulador (teclado {})",
+        match teclado {
+            Teclado::Nativo => "nativo",
+            Teclado::Usb => "usb",
+        }
+    );
 
     let mut mon = UnixStream::connect(monitor)
         .map_err(|e| format!("teclado: o monitor nao aceitou conexao: {e}"))?;
@@ -1506,30 +1602,68 @@ fn sob_teclado(
             .map_err(|e| format!("teclado: falha ao mandar `{tecla}`: {e}"))?;
     }
 
-    // O ARM recolhe os eventos no pulso do relógio, a cada dez milissegundos.
-    // Esperar bem mais que isso é o que separa "não chegou" de "ainda não
-    // chegou" — e um teste que não sabe a diferença acusa o kernel por
-    // impaciência da ferramenta.
-    std::thread::sleep(Duration::from_millis(500));
+    // Perguntar em laço, e não uma vez depois de um sono fixo.
+    //
+    // O caminho tem etapas com relógio próprio: o dispositivo entrega quando
+    // quer, o kernel recolhe no pulso de dez milissegundos, e a leitura tira
+    // da fila o que houver **naquele** instante. Um sono fixo transforma
+    // qualquer uma delas em intermitência — e foi o que aconteceu medindo à
+    // mão: meio segundo bastou no ARM e não no x86, e a conclusão errada
+    // seria "o driver do x86 nao entrega".
+    let limite = std::time::Instant::now() + Duration::from_secs(5);
+    let mut digitado = String::new();
+    let mut ultima = String::new();
 
-    escrita
-        .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":5555,\"method\":\"keyboard.read\"}\n")
-        .and_then(|()| escrita.flush())
-        .map_err(|e| format!("teclado: falha ao pedir o que foi digitado: {e}"))?;
+    while std::time::Instant::now() < limite && digitado != ESPERADO_DO_TECLADO {
+        escrita
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":5555,\"method\":\"keyboard.read\"}\n")
+            .and_then(|()| escrita.flush())
+            .map_err(|e| format!("teclado: falha ao pedir o que foi digitado: {e}"))?;
 
-    let resposta = ler_resposta(leitor).map_err(|e| format!("teclado: {e}"))?;
-    let resposta = resposta.trim();
+        let resposta = ler_resposta(leitor).map_err(|e| format!("teclado: {e}"))?;
+        let resposta = resposta.trim().to_string();
+        if !resposta.contains(r#""id":5555"#) {
+            return Err(format!(
+                "teclado: veio a resposta de outro pedido\n  {resposta}"
+            ));
+        }
+        digitado.push_str(&valor_de(&resposta, r#""text":"#).unwrap_or_default());
+        ultima = resposta;
 
-    if !resposta.contains(r#""id":5555"#) {
+        if digitado != ESPERADO_DO_TECLADO {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    if digitado != ESPERADO_DO_TECLADO {
         return Err(format!(
-            "teclado: veio a resposta de outro pedido\n  {resposta}"
+            "teclado: o kernel recebeu `{digitado}`, e nao `{ESPERADO_DO_TECLADO}`\n  {ultima}"
         ));
     }
-    if !resposta.contains(r#""text":"abC""#) {
-        return Err(format!("teclado: o kernel nao recebeu `abC`\n  {resposta}"));
+
+    // E por **onde** chegou. Sem esta parte a sonda diria apenas que algum
+    // teclado funciona, e uma máquina com dois provaria só aquele que o
+    // emulador escolhesse — deixando o outro driver sem exercício e sem nada
+    // acusando.
+    let relatorios = valor_de(&ultima, r#""usb_reports":"#)
+        .unwrap_or_default()
+        .parse::<u64>()
+        .unwrap_or(0);
+    match teclado {
+        Teclado::Usb if relatorios == 0 => {
+            return Err(format!(
+                "teclado: as teclas chegaram sem passar pelo USB\n  {ultima}"
+            ));
+        }
+        Teclado::Nativo if relatorios > 0 => {
+            return Err(format!(
+                "teclado: as teclas passaram pelo USB numa maquina sem teclado USB\n  {ultima}"
+            ));
+        }
+        _ => {}
     }
 
-    println!("  [teclado] ok  `a`, `b` e `shift-c` chegaram como `abC`");
+    println!("  [teclado] ok  `a`, `b` e `shift-c` chegaram como `{ESPERADO_DO_TECLADO}`");
     Ok(())
 }
 
@@ -2094,7 +2228,7 @@ fn test(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
         arch.nome()
     );
 
-    let filho = comando_qemu(arch, &artefato, None)?
+    let filho = comando_qemu(arch, &artefato, None, Teclado::Nativo)?
         .spawn()
         .map_err(|e| format!("não foi possível iniciar o {}: {e}", arch.qemu()))?;
 

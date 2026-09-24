@@ -120,3 +120,14 @@ jobs:
       # de ponto cego que a fumaça existe para fechar.
       - name: Fumaça (release)
         run: cargo xtask fumaca --arch ${{ matrix.arch }} --release
+
+      # E uma terceira, com teclado USB no lugar do nativo.
+      #
+      # Não é redundância: o emulador entrega cada tecla a **um** dispositivo,
+      # medido — numa máquina com teclado virtio e USB, o virtio recebeu tudo
+      # e o USB nada. Com os dois presentes, portanto, um dos drivers ficaria
+      # sem exercício e nada acusaria, porque a sonda passaria pelo outro
+      # caminho. Uma máquina por teclado é o que torna cada rodada uma
+      # afirmação sobre qual driver funciona.
+      - name: Fumaça (teclado USB)
+        run: cargo xtask fumaca --arch ${{ matrix.arch }} --teclado usb

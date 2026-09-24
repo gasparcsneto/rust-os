@@ -68,6 +68,7 @@ mod tempo;
 #[cfg(feature = "modo-teste")]
 mod testes;
 mod traps;
+mod usb;
 mod usuario;
 mod virtio;
 
@@ -276,6 +277,7 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     virtio::blk::init();
     virtio::net::init();
     virtio::teclado::init();
+    usb::xhci::init();
 
     // Com heap e interrupções no ar, a serial do agente pode deixar de ser
     // consultada em laço e passar a avisar quando chega um byte. É o que

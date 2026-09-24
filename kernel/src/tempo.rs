@@ -84,6 +84,7 @@ pub fn tick() {
     // trava. O caminho de volta fica para quando houver um segundo
     // dispositivo que precise dele.
     crate::virtio::teclado::colher();
+    crate::usb::xhci::colher();
 }
 
 /// Quantas interrupções de timer ocorreram desde o boot.

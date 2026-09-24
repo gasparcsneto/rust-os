@@ -700,6 +700,7 @@ fn keyboard_read(params: Json, w: &mut JsonWriter) -> fmt::Result {
     if let Some(eventos) = crate::virtio::teclado::recebidos() {
         w.field_u64("device_events", eventos)?;
     }
+    w.field_u64("usb_reports", crate::usb::hid::relatorios())?;
 
     w.end_object()
 }

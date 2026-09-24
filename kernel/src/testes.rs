@@ -1538,6 +1538,59 @@ fn teclado_soltar_nao_digita() -> Resultado {
     Ok(())
 }
 
+/// O relatório de um teclado USB vira as teclas certas.
+///
+/// # O que este caso protege
+///
+/// Três coisas que falham em silêncio. A tabela do HID para o AT, que é
+/// escrita à mão e cuja numeração **não** coincide com a dos outros dois
+/// barramentos — no HID as letras estão em ordem alfabética, no AT na ordem
+/// do teclado. A dedução de eventos a partir do estado, que é o que impede
+/// uma tecla segurada de digitar a cada relatório. E a ordem entre o
+/// modificador e a letra dentro do mesmo relatório: o shift precisa valer
+/// antes de a letra ser traduzida, ou a maiúscula sai minúscula.
+///
+/// É o único pedaço do caminho USB que a suíte alcança. O controlador xHCI
+/// depende de hardware que ela não tem como acionar, e quem o exercita é a
+/// fumaça com `--teclado usb`.
+fn usb_relatorio_hid_vira_teclas() -> Resultado {
+    crate::teclado::esvaziar();
+    crate::usb::hid::esquecer();
+
+    // `a` é 0x04 no HID e 30 no AT — os dois números mais distantes que esta
+    // tabela precisa ligar.
+    // SAFETY: a suíte roda numa tarefa só, que é a condição de `processar`.
+    unsafe { crate::usb::hid::processar([0, 0, 0x04, 0, 0, 0, 0, 0]) };
+    if crate::teclado::ler() != Some('a') {
+        return Err("o relatorio com `a` nao produziu a letra");
+    }
+
+    // O mesmo relatório outra vez é a tecla **continuando** pressionada.
+    // SAFETY: como acima.
+    unsafe { crate::usb::hid::processar([0, 0, 0x04, 0, 0, 0, 0, 0]) };
+    if let Some(c) = crate::teclado::ler() {
+        crate::log_error!("teste", "segurar a tecla digitou {:?} de novo", c);
+        return Err("segurar a tecla repetiu a letra");
+    }
+
+    // Solta tudo, e então shift com `b` no mesmo relatório.
+    // SAFETY: como acima.
+    unsafe {
+        crate::usb::hid::processar([0, 0, 0, 0, 0, 0, 0, 0]);
+        crate::usb::hid::processar([0x02, 0, 0x05, 0, 0, 0, 0, 0]);
+    }
+    if crate::teclado::ler() != Some('B') {
+        return Err("shift e `b` no mesmo relatorio nao deram maiuscula");
+    }
+
+    // E um usage que não é texto não vira nada.
+    if crate::usb::hid::traduzir(0x32).is_some() {
+        return Err("um usage sem equivalente virou codigo");
+    }
+
+    Ok(())
+}
+
 /// A ausência de framebuffer é sempre defeito, nas duas arquiteturas.
 ///
 /// # Por que isto já foi condicional, e por que não é mais
@@ -4710,6 +4763,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "teclado: soltar nao digita de novo",
         f: teclado_soltar_nao_digita,
+    },
+    Caso {
+        nome: "usb: o relatorio hid vira teclas",
+        f: usb_relatorio_hid_vira_teclas,
     },
     Caso {
         nome: "memoria: regioes coerentes",
