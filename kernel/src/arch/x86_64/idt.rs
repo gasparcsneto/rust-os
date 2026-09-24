@@ -165,7 +165,8 @@ fn atender(linha: u8) -> bool {
         // SAFETY: 0x60 é a porta de dados do controlador 8042, e a leitura é
         // o protocolo documentado de consumo do scancode.
         1 => {
-            let _scancode: u8 = unsafe { x86_64::instructions::port::Port::new(0x60).read() };
+            let scancode: u8 = unsafe { x86_64::instructions::port::Port::new(0x60).read() };
+            teclado_ps2(scancode);
         }
 
         // Chegou byte para o agente. O handler faz o mínimo: move os bytes do
@@ -292,4 +293,57 @@ extern "x86-interrupt" fn falha_dupla(quadro: InterruptStackFrame, codigo: u64) 
         None,
         codigo,
     )
+}
+
+/// O byte que anuncia um scancode estendido.
+///
+/// As teclas que o teclado original do PC não tinha — setas, `ctrl` da
+/// direita, as de navegação — são anunciadas por um prefixo `0xE0` seguido do
+/// código. Nenhuma delas produz texto, e o que este kernel precisa fazer com
+/// elas é justamente **não** as confundir com as que produzem: sem o prefixo,
+/// o código que vem depois é o de outra tecla, e a seta para a esquerda
+/// digitaria um `k`.
+const PREFIXO_ESTENDIDO: u8 = 0xE0;
+
+/// O bit que distingue soltar de pressionar no conjunto 1 de scancodes.
+const SOLTOU: u8 = 0x80;
+
+/// O próximo byte é a segunda metade de um código estendido?
+static ESTENDIDO: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Traduz um scancode do 8042 e o entrega ao teclado.
+///
+/// # Por que o estado mora aqui e não em [`crate::teclado`]
+///
+/// Porque o prefixo é do PS/2, e só dele. O `virtio-input` do ARM entrega o
+/// par código-valor já separado, e o USB entrega outro formato ainda. Pôr o
+/// prefixo na camada comum obrigaria os outros a conhecerem uma peculiaridade
+/// que não os afeta.
+///
+/// # Uma guarda que este ambiente não falsifica
+///
+/// Desligar o tratamento do prefixo não muda nada observável hoje, e a razão
+/// é a tabela de [`crate::teclado`]: ela cobre 58 códigos, e quase todo código
+/// estendido cai acima disso — a seta para a esquerda é `0xE0 0x4B`, e 0x4B é
+/// 75. Os poucos que caem dentro aliam para a tecla de mesmo significado: o
+/// `enter` do teclado numérico é `0xE0 0x1C`, e 0x1C é o `enter` comum.
+///
+/// Então a mutação passa, e isso está escrito aqui em vez de ficar parecendo
+/// que a sonda cobre o caso. A guarda vale no dia em que a tabela crescer
+/// para as teclas de navegação — que é exatamente quando o alias deixa de ser
+/// inofensivo — e o custo dela até lá são quatro linhas.
+fn teclado_ps2(scancode: u8) {
+    use core::sync::atomic::Ordering;
+
+    if scancode == PREFIXO_ESTENDIDO {
+        ESTENDIDO.store(true, Ordering::Relaxed);
+        return;
+    }
+
+    // Uma tecla estendida consome o byte seguinte e não produz nada.
+    if ESTENDIDO.swap(false, Ordering::Relaxed) {
+        return;
+    }
+
+    crate::teclado::evento(scancode & !SOLTOU, scancode & SOLTOU == 0);
 }

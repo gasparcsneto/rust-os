@@ -136,6 +136,7 @@ Os dois podem rodar ao mesmo tempo: cada arquitetura tem seu próprio socket.
 | `irq.stats` | Contadores de interrupções de hardware por linha |
 | `traps.stats` | Contadores de exceções e detalhes da última falha |
 | `debug.trigger` | Dispara uma exceção de propósito (`kind`: `breakpoint` ou `fatal`) |
+| `keyboard.read` | O que foi digitado no teclado da máquina, e os contadores dele (`max`) |
 | `log.tail` | Registros de log estruturados (`count`, `min_level`) |
 
 Esta tabela é gerada a partir do mesmo registro que o kernel usa para validar
@@ -219,6 +220,8 @@ O contraste no caminho de boot é grande:
 | Guard page da pilha | instalada pelo bootloader | construída antes de ligar a MMU |
 | Interrupções | PIC 8259 + timer PIT | GIC v2 + timer genérico |
 | Serial do agente | UART 16550 na IRQ 3 | PL011 no INTID 33 (SPI 1) |
+| Vídeo | VGA da máquina `pc`, modo posto pelo bootloader | `bochs-display` no PCI, modo posto por nós |
+| Teclado | controlador 8042, scancode na IRQ 1 | `virtio-input` no PCI, evento na fila |
 | Dormir sem corrida | `sti; hlt`, par atômico | `wfi` acorda com IRQ mascarada |
 | Troca de contexto | troca de pilha (`rsp`) | troca do quadro de exceção |
 | Ceder a vez | chamada de função comum | `svc`, pelo mesmo caminho da preempção |
@@ -645,7 +648,10 @@ padronizado.
       identificadores (`1234:1111`), e console de texto sobre ele: o mesmo
       texto que vai para o console humano é desenhado na tela, pelo mesmo
       funil, nas duas arquiteturas. Falta: teclado no x86 (PS/2) e no ARM
-      (virtio-input), e o interpretador que transforma isso em operação.
+      (virtio-input): o mesmo `sendkey` do monitor do emulador produz `abC`
+      nas duas, por caminhos de hardware inteiramente diferentes. Falta:
+      teclado USB, e o interpretador que transforma tela mais teclado em
+      operação.
 
 ## Licença
 

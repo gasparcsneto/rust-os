@@ -41,6 +41,7 @@
 pub mod blk;
 pub mod fila;
 pub mod net;
+pub mod teclado;
 pub mod transporte;
 
 // ---------------------------------------------------------------------------
@@ -108,11 +109,13 @@ struct Registro {
 const NOME_NENHUM: u32 = 0;
 const NOME_DISCO: u32 = 1;
 const NOME_REDE: u32 = 2;
+const NOME_TECLADO: u32 = 3;
 
 fn nome_de(codigo: u32) -> &'static str {
     match codigo {
         NOME_DISCO => "disco",
         NOME_REDE => "rede",
+        NOME_TECLADO => "teclado",
         _ => "?",
     }
 }

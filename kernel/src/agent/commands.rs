@@ -207,6 +207,17 @@ pub static COMANDOS: &[Command] = &[
         handler: video_sample,
     },
     Command {
+        nome: "keyboard.read",
+        resumo: "O que foi digitado no teclado da maquina, e os contadores dele. Tira da fila o que devolve.",
+        params: &[ParamSpec {
+            nome: "max",
+            tipo: TipoParam::Inteiro,
+            obrigatorio: false,
+            descricao: "Quantos caracteres tirar da fila (padrao: 64, maximo: 64).",
+        }],
+        handler: keyboard_read,
+    },
+    Command {
         nome: "irq.stats",
         resumo: "Contadores de interrupcoes de hardware por linha.",
         params: &[],
@@ -634,6 +645,65 @@ const MAX_GRADE: u64 = 64;
 ///
 /// A amostra e por ponto, e nao por media da regiao. A media suavizaria
 /// justamente a borda entre duas cores, que e o que se quer enxergar.
+/// Quantos caracteres uma leitura de teclado devolve por padrão, e no máximo.
+///
+/// O teto é o tamanho da fila do teclado: pedir mais do que cabe nela não
+/// devolveria mais, e o número serve para quem lê saber que uma resposta
+/// cheia pode ter deixado algo para trás.
+const TECLAS_PADRAO: u64 = 64;
+const TECLAS_MAX: u64 = 64;
+
+/// O que foi digitado, e o suficiente para saber se falta alguma coisa.
+///
+/// # Por que tirar da fila em vez de espiar
+///
+/// Porque um teclado é um fluxo, e espiar sem consumir faria a próxima
+/// leitura devolver as mesmas teclas. O preço é que a resposta é a única
+/// cópia: um cliente que a perca perdeu o que foi digitado. É o mesmo
+/// contrato de um terminal, e é por isso que os contadores vêm junto —
+/// `dropped` diz se a fila transbordou antes de alguém ler, o que nenhuma
+/// releitura revelaria.
+fn keyboard_read(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let max = params
+        .member("max")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(TECLAS_PADRAO)
+        .clamp(1, TECLAS_MAX);
+
+    w.begin_object()?;
+    w.field_u64("pressed", crate::teclado::pressionadas())?;
+    w.field_u64("dropped", crate::teclado::descartados())?;
+
+    // O texto sai como string escrita aos pedaços: um caractere por vez, sem
+    // um buffer intermediário. Montar a string antes exigiria um array do
+    // tamanho do teto e, com ele, um truncamento que nada reportaria.
+    w.key("text")?;
+    w.begin_str()?;
+    let mut lidos = 0;
+    while lidos < max {
+        let Some(c) = crate::teclado::ler() else {
+            break;
+        };
+        w.push_char(c)?;
+        lidos += 1;
+    }
+    w.end_str()?;
+
+    w.field_u64("read", lidos)?;
+    // Depois da leitura, e não antes: é o que sobrou, que é a pergunta útil.
+    w.field_u64("waiting", crate::teclado::esperando() as u64)?;
+
+    // Quantos eventos o dispositivo entregou, onde há um que os conte.
+    // Separa "ninguem digitou" de "chegou e nao virou caractere" — um codigo
+    // que a tabela nao conhece, uma tecla estendida — e essa distincao e a
+    // primeira pergunta de quem esta depurando um teclado mudo.
+    if let Some(eventos) = crate::virtio::teclado::recebidos() {
+        w.field_u64("device_events", eventos)?;
+    }
+
+    w.end_object()
+}
+
 fn video_sample(params: Json, w: &mut JsonWriter) -> fmt::Result {
     let colunas = params
         .member("columns")

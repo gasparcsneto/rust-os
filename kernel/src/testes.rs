@@ -1426,6 +1426,118 @@ fn console_quebra_na_borda_e_recomeca() -> Resultado {
     }
 }
 
+/// Os códigos comuns ao PS/2 e ao virtio-input produzem o caractere certo.
+///
+/// # O que este caso protege
+///
+/// As duas tabelas de [`crate::teclado`], que são escritas contando
+/// caracteres à mão. Um trecho com um caractere a mais desloca tudo o que vem
+/// depois, e o sintoma é uma tecla digitando a letra da vizinha — nada que
+/// quebre, nada que apareça em teste que não digite.
+///
+/// As asserções de compilação já ancoram os índices que importam. Este caso
+/// cobre o resto do caminho: o evento, a fila e a leitura.
+///
+/// Ele é a única parte do teclado que a suíte alcança. Os dois drivers —
+/// o scancode do 8042 e o evento do virtio — dependem de hardware que a
+/// suíte não tem como acionar, e quem os exercita é a sonda de fumaça, que
+/// manda teclas pelo monitor do emulador.
+fn teclado_codigo_vira_caractere() -> Resultado {
+    crate::teclado::esvaziar();
+
+    // `a`, `z`, `1` e espaço: um de cada trecho da tabela, que é onde um
+    // desalinhamento apareceria.
+    for (codigo, esperado) in [(30u8, 'a'), (44, 'z'), (2, '1'), (57, ' ')] {
+        crate::teclado::evento(codigo, true);
+        match crate::teclado::ler() {
+            Some(c) if c == esperado => {}
+            Some(c) => {
+                crate::log_error!(
+                    "teste",
+                    "o codigo {} deu {:?}, esperado {:?}",
+                    codigo,
+                    c,
+                    esperado
+                );
+                return Err("o codigo produziu outro caractere");
+            }
+            None => return Err("o codigo nao produziu caractere nenhum"),
+        }
+    }
+
+    // E um código que não é texto não enfileira nada.
+    crate::teclado::evento(29, true); // control
+    if crate::teclado::ler().is_some() {
+        return Err("uma tecla sem caractere enfileirou alguma coisa");
+    }
+
+    Ok(())
+}
+
+/// O shift muda a letra, e soltá-lo a muda de volta.
+///
+/// # Por que a segunda metade é a que importa
+///
+/// Porque o pressionar é fácil de acertar e o soltar é fácil de esquecer —
+/// e esquecê-lo não produz erro nenhum: produz um teclado que digita em
+/// maiúsculas para sempre depois do primeiro shift. Um caso que só
+/// conferisse a letra maiúscula passaria nesse kernel.
+fn teclado_shift_muda_e_solta() -> Resultado {
+    crate::teclado::esvaziar();
+
+    crate::teclado::evento(42, true); // shift esquerdo
+    if crate::teclado::ler().is_some() {
+        return Err("o shift enfileirou um caractere");
+    }
+
+    crate::teclado::evento(30, true);
+    if crate::teclado::ler() != Some('A') {
+        return Err("com shift, a tecla nao deu maiuscula");
+    }
+
+    crate::teclado::evento(42, false); // e solta
+
+    crate::teclado::evento(30, true);
+    if crate::teclado::ler() != Some('a') {
+        return Err("o shift ficou preso depois de solto");
+    }
+
+    // E o shift da direita faz a mesma coisa. São dois códigos diferentes
+    // para a mesma tecla, e tratar só um é o tipo de metade que passa
+    // despercebida.
+    crate::teclado::evento(54, true);
+    crate::teclado::evento(30, true);
+    let com_o_direito = crate::teclado::ler();
+    crate::teclado::evento(54, false);
+    if com_o_direito != Some('A') {
+        return Err("o shift da direita nao muda a letra");
+    }
+
+    Ok(())
+}
+
+/// Soltar uma tecla não digita a letra outra vez.
+///
+/// Cada tecla chega duas vezes — pressionar e soltar —, e tratar as duas
+/// igual dobra tudo o que se digita. É o defeito mais provável deste módulo,
+/// e o mais fácil de não ver: o texto sai, só sai errado.
+fn teclado_soltar_nao_digita() -> Resultado {
+    crate::teclado::esvaziar();
+
+    crate::teclado::evento(30, true);
+    crate::teclado::evento(30, false);
+
+    if crate::teclado::ler() != Some('a') {
+        return Err("a tecla nao produziu a letra");
+    }
+    if let Some(c) = crate::teclado::ler() {
+        crate::log_error!("teste", "soltar tambem digitou {:?}", c);
+        return Err("soltar a tecla digitou de novo");
+    }
+
+    Ok(())
+}
+
 /// A ausência de framebuffer é sempre defeito, nas duas arquiteturas.
 ///
 /// # Por que isto já foi condicional, e por que não é mais
@@ -4586,6 +4698,18 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "console: o log humano chega a tela",
         f: console_log_humano_chega_a_tela,
+    },
+    Caso {
+        nome: "teclado: o codigo vira o caractere certo",
+        f: teclado_codigo_vira_caractere,
+    },
+    Caso {
+        nome: "teclado: shift muda a letra e depois solta",
+        f: teclado_shift_muda_e_solta,
+    },
+    Caso {
+        nome: "teclado: soltar nao digita de novo",
+        f: teclado_soltar_nao_digita,
     },
     Caso {
         nome: "memoria: regioes coerentes",

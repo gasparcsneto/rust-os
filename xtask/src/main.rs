@@ -269,6 +269,24 @@ fn caminho_socket(arch: Arquitetura) -> PathBuf {
         .join(format!("agent-{}.sock", arch.nome()))
 }
 
+/// Onde fica o monitor do emulador desta arquitetura.
+///
+/// # Para que o monitor serve aqui
+///
+/// Para injetar teclas. O teclado é o único subsistema deste kernel que não
+/// se consegue exercitar nem pela suíte nem pelo canal do agente: a suíte não
+/// tem como acionar o controlador 8042 nem o dispositivo virtio, e o canal só
+/// mostra o resultado. O monitor do QEMU tem `sendkey`, que entrega a tecla
+/// ao dispositivo pelo mesmo caminho que um teclado de verdade entregaria.
+///
+/// É a mesma ideia do `llvm-readelf` conferindo os ELFs de usuário: quem
+/// produz o estímulo não é quem o interpreta.
+fn caminho_monitor(arch: Arquitetura) -> PathBuf {
+    raiz_do_projeto()
+        .join("target")
+        .join(format!("monitor-{}.sock", arch.nome()))
+}
+
 /// O que o build produziu e o QEMU precisa carregar.
 enum Artefato {
     /// x86: uma imagem de disco bootável por BIOS (e outra por UEFI).
@@ -990,10 +1008,27 @@ fn comando_qemu(
         qemu.args(["-device", "bochs-display"]);
     }
 
+    // E um teclado, também só no ARM.
+    //
+    // O x86 já tem o dele: o controlador 8042 é uma peça da máquina `pc`,
+    // presente desde antes de haver barramento para conectar coisas. A
+    // máquina `virt` não tem nenhum equivalente — o teclado dela entra pelo
+    // PCI, como tudo o mais.
+    if arch == Arquitetura::Aarch64 {
+        qemu.args(["-device", "virtio-keyboard-pci"]);
+    }
+
     qemu.args(["-netdev", "user,id=rede0"]);
     qemu.args(["-device", "virtio-net-pci,netdev=rede0"]);
 
     qemu.args(["-m", "128M"]);
+
+    // O monitor acompanha o canal do agente: os dois existem quando alguém vai
+    // conversar com a máquina, e não quando ela sobe para rodar a suíte e
+    // morrer. Ver [`caminho_monitor`] sobre por que ele é necessário.
+    if socket_agente.is_some() {
+        anexar_monitor(&mut qemu, &caminho_monitor(arch));
+    }
 
     // A ordem das opções `-serial` é significativa: a primeira vira a COM1 do
     // x86, a segunda a COM2. No ARM só existe a PL011, que recebe a primeira.
@@ -1020,6 +1055,15 @@ fn comando_qemu(
     qemu.args(["-display", "none"]);
 
     Ok(qemu)
+}
+
+/// Anexa o monitor do emulador a um socket.
+fn anexar_monitor(qemu: &mut Command, monitor: &Path) {
+    let _ = std::fs::remove_file(monitor);
+    qemu.args([
+        "-monitor",
+        &format!("unix:{},server=on,wait=off", monitor.display()),
+    ]);
 }
 
 fn anexar_socket(qemu: &mut Command, socket: &Path) {
@@ -1249,7 +1293,8 @@ fn fumaca(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
     // A sonda de reconexão vem depois de `conversar` e não dentro dela porque
     // precisa da conexão principal **fechada**: o que ela exercita é o que um
     // cliente novo herda de um cliente que sumiu.
-    let resultado = conversar(&socket, filho.id()).and_then(|()| sob_reconexao(&socket));
+    let resultado = conversar(&socket, &caminho_monitor(arch), filho.id())
+        .and_then(|()| sob_reconexao(&socket));
 
     // O emulador morre aconteça o que acontecer: um QEMU órfão segura a
     // imagem de disco e faz a *próxima* execução falhar por um motivo que
@@ -1271,7 +1316,7 @@ fn fumaca(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
 }
 
 /// Espera o canal subir e roda as sondas numa conexão só.
-fn conversar(socket: &Path, qemu: u32) -> Result<(), String> {
+fn conversar(socket: &Path, monitor: &Path, qemu: u32) -> Result<(), String> {
     let limite = std::time::Instant::now() + ESPERA_PELA_FUMACA;
 
     // Conectar não é o mesmo que ser atendido. O QEMU aceita a conexão assim
@@ -1422,7 +1467,70 @@ fn conversar(socket: &Path, qemu: u32) -> Result<(), String> {
 
     sob_carga(&mut escrita, &mut leitor)?;
     sob_despejo(&mut escrita, &mut leitor)?;
+    sob_teclado(monitor, &mut escrita, &mut leitor)?;
     sob_fragmento(&mut escrita, &mut leitor)
+}
+
+/// As teclas que uma pessoa digita chegam ao kernel.
+///
+/// # Por que esta sonda é a única que exercita o teclado
+///
+/// Porque a suíte não alcança nenhum dos dois drivers. Ela roda dentro do
+/// kernel e não tem como fazer o controlador 8042 levantar uma interrupção
+/// nem o dispositivo virtio entregar um evento — o que ela testa é a tabela
+/// comum aos dois, que é o depois. O antes só se exercita de fora.
+///
+/// O `sendkey` do monitor do QEMU entrega a tecla ao dispositivo pelo mesmo
+/// caminho que um teclado de verdade entregaria: no x86 vira scancode no
+/// 8042, no ARM vira evento na fila do virtio. Os dois caminhos são
+/// diferentes, o resultado esperado é o mesmo, e é por isso que esta sonda
+/// roda nas duas arquiteturas.
+///
+/// `shift-c` está aqui de propósito: ele exercita o estado de modificador,
+/// que é a parte com memória — e portanto a que pode ficar presa.
+fn sob_teclado(
+    monitor: &Path,
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+) -> Result<(), String> {
+    println!("[xtask] fumaça: teclas pelo monitor do emulador");
+
+    let mut mon = UnixStream::connect(monitor)
+        .map_err(|e| format!("teclado: o monitor nao aceitou conexao: {e}"))?;
+    mon.set_read_timeout(Some(Duration::from_millis(500)))
+        .map_err(|e| format!("teclado: timeout do monitor: {e}"))?;
+
+    for tecla in ["a", "b", "shift-c"] {
+        mon.write_all(format!("sendkey {tecla}\n").as_bytes())
+            .and_then(|()| mon.flush())
+            .map_err(|e| format!("teclado: falha ao mandar `{tecla}`: {e}"))?;
+    }
+
+    // O ARM recolhe os eventos no pulso do relógio, a cada dez milissegundos.
+    // Esperar bem mais que isso é o que separa "não chegou" de "ainda não
+    // chegou" — e um teste que não sabe a diferença acusa o kernel por
+    // impaciência da ferramenta.
+    std::thread::sleep(Duration::from_millis(500));
+
+    escrita
+        .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":5555,\"method\":\"keyboard.read\"}\n")
+        .and_then(|()| escrita.flush())
+        .map_err(|e| format!("teclado: falha ao pedir o que foi digitado: {e}"))?;
+
+    let resposta = ler_resposta(leitor).map_err(|e| format!("teclado: {e}"))?;
+    let resposta = resposta.trim();
+
+    if !resposta.contains(r#""id":5555"#) {
+        return Err(format!(
+            "teclado: veio a resposta de outro pedido\n  {resposta}"
+        ));
+    }
+    if !resposta.contains(r#""text":"abC""#) {
+        return Err(format!("teclado: o kernel nao recebeu `abC`\n  {resposta}"));
+    }
+
+    println!("  [teclado] ok  `a`, `b` e `shift-c` chegaram como `abC`");
+    Ok(())
 }
 
 /// Um pedaço de requisição abandonado não pode colar no pedido seguinte.

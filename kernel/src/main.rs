@@ -62,6 +62,7 @@ mod qemu;
 mod rede;
 mod serial;
 mod tarefas;
+mod teclado;
 mod tela;
 mod tempo;
 #[cfg(feature = "modo-teste")]
@@ -274,6 +275,7 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
 
     virtio::blk::init();
     virtio::net::init();
+    virtio::teclado::init();
 
     // Com heap e interrupções no ar, a serial do agente pode deixar de ser
     // consultada em laço e passar a avisar quando chega um byte. É o que

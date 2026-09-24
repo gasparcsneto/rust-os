@@ -68,6 +68,22 @@ pub fn tick() {
     // custa dois testes de registrador a cem hertz e transforma "o canal
     // morreu" em "o canal teve dez milissegundos de latência".
     crate::tarefas::entrada::coletar();
+
+    // E o teclado, onde ele for virtio.
+    //
+    // Por que aqui, e não pela interrupção do dispositivo: o despacho de
+    // interrupção do virtio neste kernel reconhece o aviso e conta, mas não
+    // chama de volta o driver — os dois drivers que existiam antes deste
+    // esperam em laço e leem o anel de usados, e nenhum precisava de
+    // retorno. Um teclado precisa, e a escolha é entre dar um caminho de
+    // volta ao despacho ou recolher no pulso que já existe.
+    //
+    // O pulso custa dez milissegundos de latência no pior caso, que é
+    // metade do que uma pessoa percebe como instantâneo, e não acrescenta
+    // um caminho novo entre um handler de interrupção e um driver com
+    // trava. O caminho de volta fica para quando houver um segundo
+    // dispositivo que precise dele.
+    crate::virtio::teclado::colher();
 }
 
 /// Quantas interrupções de timer ocorreram desde o boot.
