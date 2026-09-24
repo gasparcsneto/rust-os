@@ -1622,6 +1622,128 @@ fn console_linha_vira_nome_e_parametros() -> Resultado {
     Ok(())
 }
 
+/// Um caminho absoluto chega ao conteúdo do arquivo.
+///
+/// # Por que conferir o conteúdo, e não só que resolveu
+///
+/// Porque resolver prova que a árvore foi percorrida, e não que o que voltou
+/// é o arquivo certo. O que sai de `/bin` é um ELF, e os quatro primeiros
+/// bytes de um ELF são conhecidos — é a diferença entre "leu alguma coisa" e
+/// "leu aquilo".
+fn vfs_caminho_chega_ao_conteudo() -> Resultado {
+    let imagem = crate::vfs::ler_tudo("/bin/exemplo").map_err(|e| e.motivo())?;
+
+    if imagem.len() < 4 || &imagem[..4] != b"\x7fELF" {
+        crate::log_error!(
+            "teste",
+            "vieram {} bytes, comecando diferente",
+            imagem.len()
+        );
+        return Err("o que veio de /bin/exemplo nao e um ELF");
+    }
+
+    // E o tamanho que a resolução anunciou bate com o que a leitura trouxe. As
+    // duas informações vêm do mesmo sistema de arquivos por caminhos
+    // diferentes, e divergirem é o sintoma de uma leitura que parou cedo.
+    let vnode = crate::vfs::resolver("/bin/exemplo").map_err(|e| e.motivo())?;
+    if vnode.no.tamanho as usize != imagem.len() {
+        crate::log_error!(
+            "teste",
+            "o no diz {} bytes e a leitura trouxe {}",
+            vnode.no.tamanho,
+            imagem.len()
+        );
+        return Err("o tamanho do no nao bate com o que foi lido");
+    }
+
+    Ok(())
+}
+
+/// Cada jeito de um caminho não dar certo devolve o motivo certo.
+///
+/// # O que este caso protege
+///
+/// A distinção entre os motivos. Um VFS que devolvesse "não encontrado" para
+/// tudo compilaria e passaria em qualquer teste que só olhasse `is_err` — e
+/// quem estivesse depurando não saberia se errou o caminho, se esqueceu de
+/// montar, ou se pediu para entrar dentro de um arquivo.
+fn vfs_recusa_o_que_nao_resolve() -> Resultado {
+    use crate::vfs::Erro;
+
+    // Relativo: não há diretório de trabalho neste kernel.
+    if crate::vfs::resolver("bin/exemplo").err() != Some(Erro::CaminhoInvalido) {
+        return Err("um caminho relativo nao foi recusado como invalido");
+    }
+
+    // Absoluto, mas fora de qualquer montagem.
+    if crate::vfs::resolver("/nada/aqui").err() != Some(Erro::SemMontagem) {
+        return Err("um caminho sem montagem devolveu outro motivo");
+    }
+
+    // Dentro da montagem, e o nome não existe.
+    if crate::vfs::resolver("/bin/nao-existe").err() != Some(Erro::NaoEncontrado) {
+        return Err("um nome ausente devolveu outro motivo");
+    }
+
+    // E entrar dentro de um arquivo.
+    if crate::vfs::resolver("/bin/exemplo/mais").err() != Some(Erro::NaoEhDiretorio) {
+        return Err("entrar dentro de um arquivo devolveu outro motivo");
+    }
+
+    Ok(())
+}
+
+/// Com duas montagens encaixadas, a mais específica é a dona.
+///
+/// # Por que esta regra precisa de teste
+///
+/// Porque a versão errada funciona até o dia em que houver duas montagens.
+/// Escolhendo a primeira que casa, `/bin/exemplo` passaria a ser procurado na
+/// raiz assim que a raiz existisse — e o que se veria é `executar` parando de
+/// achar os programas no dia em que o disco fosse montado, sem nada
+/// apontando para a causa.
+///
+/// É exatamente o dia que vem a seguir: o Btrfs entra em `/`.
+fn vfs_montagem_mais_longa_ganha() -> Resultado {
+    // A ordem de montagem é o ponto do caso, e a primeira versão dele errou
+    // justamente aqui: montando `/` **depois** de `/bin`, a regra errada — "a
+    // primeira da lista que casar" — acerta por acidente, porque `/bin` já
+    // era a primeira. A mutação passou, e o caso não estava testando nada.
+    //
+    // Então a raiz entra primeiro. A partir daí, para `/bin/exemplo`, a
+    // primeira que casa é a errada e a mais longa é a certa.
+    crate::vfs::desmontar(crate::vfs::DIRETORIO_DOS_PROGRAMAS).map_err(|e| e.motivo())?;
+    crate::vfs::montar(
+        "programas",
+        "/",
+        alloc::boxed::Box::new(crate::vfs::programas::Programas),
+    )
+    .map_err(|e| e.motivo())?;
+    crate::vfs::montar(
+        "programas",
+        crate::vfs::DIRETORIO_DOS_PROGRAMAS,
+        alloc::boxed::Box::new(crate::vfs::programas::Programas),
+    )
+    .map_err(|e| e.motivo())?;
+
+    let pelo_bin = crate::vfs::resolver("/bin/exemplo");
+    // E o que está na raiz continua alcançável por ela.
+    let pela_raiz = crate::vfs::resolver("/exemplo");
+
+    // Desmontar antes de julgar: um `?` no meio deixaria a raiz montada para
+    // todos os casos seguintes, e `/bin` é de onde `executar` lê.
+    crate::vfs::desmontar("/").map_err(|e| e.motivo())?;
+
+    if pelo_bin.is_err() {
+        return Err("/bin/exemplo foi procurado na raiz em vez da montagem dele");
+    }
+    if pela_raiz.is_err() {
+        return Err("/exemplo nao resolveu pela montagem da raiz");
+    }
+
+    Ok(())
+}
+
 /// A ausência de framebuffer é sempre defeito, nas duas arquiteturas.
 ///
 /// # Por que isto já foi condicional, e por que não é mais
@@ -4802,6 +4924,18 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "console: a linha vira nome e parametros",
         f: console_linha_vira_nome_e_parametros,
+    },
+    Caso {
+        nome: "vfs: o caminho chega ao conteudo do arquivo",
+        f: vfs_caminho_chega_ao_conteudo,
+    },
+    Caso {
+        nome: "vfs: recusa o que nao da para resolver",
+        f: vfs_recusa_o_que_nao_resolve,
+    },
+    Caso {
+        nome: "vfs: a montagem mais longa ganha",
+        f: vfs_montagem_mais_longa_ganha,
     },
     Caso {
         nome: "memoria: regioes coerentes",

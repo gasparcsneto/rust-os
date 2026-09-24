@@ -81,12 +81,32 @@ static EMBUTIDOS: &[Embutido] = &[
     },
 ];
 
-/// Procura um programa embutido pelo nome.
-pub fn embutido(nome: &str) -> Option<&'static [u8]> {
+/// Procura um programa embutido pelo nome, devolvendo a posição na tabela.
+///
+/// Continua sendo uma busca linear sobre a mesma tabela de sempre. O que
+/// mudou é quem chama: não é mais `executar`, e sim
+/// [`crate::vfs::programas`] — que apresenta esta tabela como um sistema de
+/// arquivos montado em `/bin`.
+///
+/// A posição é o que o sistema de arquivos usa como identificador do nó. Ela
+/// serve porque a tabela é `static`: não há como uma entrada mudar de lugar
+/// entre uma consulta e a leitura seguinte. A versão que devolvia só a imagem
+/// saiu junto — com o VFS no meio, ninguém mais a chamava.
+pub fn embutido_com_indice(nome: &str) -> Option<(usize, &'static [u8])> {
     EMBUTIDOS
         .iter()
-        .find(|e| e.nome == nome)
-        .map(|e| (e.imagem)())
+        .position(|e| e.nome == nome)
+        .map(|i| (i, (EMBUTIDOS[i].imagem)()))
+}
+
+/// A imagem do programa que está na posição `indice`.
+pub fn embutido_por_indice(indice: usize) -> Option<&'static [u8]> {
+    EMBUTIDOS.get(indice).map(|e| (e.imagem)())
+}
+
+/// O nome do programa que está na posição `indice`.
+pub fn nome_por_indice(indice: usize) -> Option<&'static str> {
+    EMBUTIDOS.get(indice).map(|e| e.nome)
 }
 
 /// O que sobrou do processo depois de uma carga que falhou.

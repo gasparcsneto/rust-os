@@ -136,6 +136,8 @@ Os dois podem rodar ao mesmo tempo: cada arquitetura tem seu próprio socket.
 | `irq.stats` | Contadores de interrupções de hardware por linha |
 | `traps.stats` | Contadores de exceções e detalhes da última falha |
 | `debug.trigger` | Dispara uma exceção de propósito (`kind`: `breakpoint` ou `fatal`) |
+| `fs.mounts` | O que está montado na árvore de arquivos, e de que tipo |
+| `fs.list` | Lista um diretório da árvore (`path`) |
 | `keyboard.read` | O que foi digitado no teclado da máquina, e os contadores dele (`max`) |
 | `log.tail` | Registros de log estruturados (`count`, `min_level`) |
 
@@ -586,6 +588,43 @@ separado — porque um segundo consumidor da mesma fila não observa o que foi
 digitado, rouba. Foi medido: com os dois lendo a mesma fila, a sonda recebeu
 uma das três teclas que mandou.
 
+## Sistema de arquivos
+
+A camada que o Unix chamou de VFS: um *vnode* (um objeto do sistema de
+arquivos visto de memória), uma *montagem* (um sistema pendurado num ponto da
+árvore) e a tabela de operações que cada sistema preenche. A tabela de
+ponteiros de função do `vnodeops` vira um `trait` — a mesma indireção, com o
+compilador conferindo as assinaturas.
+
+```
+$ cargo xtask agent fs.mounts
+{"mounts":[{"at":"/bin","type":"programas"}]}
+
+$ cargo xtask agent fs.list
+{"path":"/bin","entries":[{"name":"exemplo","type":"file"},
+                          {"name":"filho","type":"file"},
+                          {"name":"invasor","type":"file"}]}
+```
+
+**Ele existe antes de haver disco, e é isso que o torna útil.** O único sistema
+de arquivos montado hoje serve os programas embutidos no binário do kernel, e
+`executar` os alcança por caminho em vez de por uma busca numa tabela. Era o
+que o README já prometia sobre `exec` — *"o que muda é onde a busca acontece; a
+chamada de sistema continua a mesma"* — e agora a camada que cumpre a promessa
+existe. Quando o Btrfs entrar, ele entra por baixo desta mesma interface.
+
+**O que não está lá**: escrita, `abrir` e `fechar`. Entram quando houver quem
+os chame. Um método de trait que compila e não tem chamador é pior que
+ausência — ele parece uma opção disponível, e o primeiro a usá-lo descobre que
+nunca foi exercitado.
+
+**A regra da montagem mais longa.** Com `/` e `/bin` montados, `/bin/exemplo`
+pertence ao segundo. A versão errada — a primeira da lista que casar —
+funciona até o dia em que houver duas montagens, e aí `executar` para de achar
+os programas sem que nada aponte a causa. O caso de teste que cobre isso
+precisou ser reescrito: a primeira versão montava a raiz **depois** de `/bin`,
+e aí a regra errada acertava por acidente de ordem.
+
 ## Testes
 
 Os testes do kernel **não** rodam com `cargo test`: o harness padrão do Rust
@@ -699,6 +738,12 @@ padronizado.
       despacha o que se digita pelo **mesmo** registro de comandos que o canal
       do agente publica.
       **Fase 3 completa.**
+- [ ] **Fase 4 — Sistema de arquivos.** A promessa da abertura que falta
+      cumprir. Feito: o disco de testes é uma GPT de verdade, com uma ESP em
+      FAT32 e uma raiz em Btrfs montadas pelas ferramentas do hospedeiro; e o
+      VFS, com os programas embutidos servidos em `/bin`. Falta: o Btrfs
+      somente leitura, a tabela de descritores por processo, `executar` lendo
+      do disco, e um bootloader UEFI próprio no lugar do crate `bootloader`.
 
 ## Licença
 

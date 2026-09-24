@@ -207,6 +207,23 @@ pub static COMANDOS: &[Command] = &[
         handler: video_sample,
     },
     Command {
+        nome: "fs.mounts",
+        resumo: "O que esta montado na arvore de arquivos, e de que tipo.",
+        params: &[],
+        handler: fs_mounts,
+    },
+    Command {
+        nome: "fs.list",
+        resumo: "Lista um diretorio da arvore de arquivos.",
+        params: &[ParamSpec {
+            nome: "path",
+            tipo: TipoParam::Texto,
+            obrigatorio: false,
+            descricao: "Caminho absoluto do diretorio (padrao: /bin).",
+        }],
+        handler: fs_list,
+    },
+    Command {
         nome: "keyboard.read",
         resumo: "O que foi digitado no teclado da maquina, e os contadores dele. Tira da fila o que devolve.",
         params: &[ParamSpec {
@@ -645,6 +662,94 @@ const MAX_GRADE: u64 = 64;
 ///
 /// A amostra e por ponto, e nao por media da regiao. A media suavizaria
 /// justamente a borda entre duas cores, que e o que se quer enxergar.
+/// O que está montado.
+///
+/// A resposta mais curta do canal, e a que responde à primeira pergunta de
+/// quem vai investigar qualquer coisa de arquivo: existe alguém servindo este
+/// caminho?
+fn fs_mounts(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    w.key("mounts")?;
+    w.begin_array()?;
+    let mut erro = Ok(());
+    crate::vfs::com_montagens(|em, tipo| {
+        if erro.is_err() {
+            return;
+        }
+        erro = (|| {
+            w.begin_object()?;
+            w.field_str("at", em)?;
+            w.field_str("type", tipo)?;
+            w.end_object()
+        })();
+    });
+    erro?;
+    w.end_array()?;
+    w.end_object()
+}
+
+/// Lista um diretório.
+///
+/// # Por que o erro vem no corpo, e não como erro de protocolo
+///
+/// Porque um caminho que não existe é uma resposta legítima a uma pergunta
+/// bem formada, e não uma requisição inválida. Um agente explorando a árvore
+/// vai bater em caminhos que não existem o tempo todo; transformar isso em
+/// `-32602` faria ele ter de distinguir "perguntei errado" de "não tem".
+fn fs_list(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let caminho = params
+        .member("path")
+        .and_then(|v| v.as_str())
+        .unwrap_or(crate::vfs::DIRETORIO_DOS_PROGRAMAS);
+
+    w.begin_object()?;
+    w.field_str("path", caminho)?;
+
+    let mut escrita = Ok(());
+    let mut aberto = false;
+    let resultado = crate::vfs::listar(caminho, |entrada| {
+        if escrita.is_err() {
+            return;
+        }
+        escrita = (|| {
+            if !aberto {
+                w.key("entries")?;
+                w.begin_array()?;
+                aberto = true;
+            }
+            w.begin_object()?;
+            w.field_str("name", &entrada.nome)?;
+            w.field_str(
+                "type",
+                match entrada.tipo {
+                    crate::vfs::Tipo::Arquivo => "file",
+                    crate::vfs::Tipo::Diretorio => "dir",
+                },
+            )?;
+            w.end_object()
+        })();
+    });
+    escrita?;
+
+    match resultado {
+        Ok(()) => {
+            if !aberto {
+                w.key("entries")?;
+                w.begin_array()?;
+            }
+            w.end_array()?;
+        }
+        Err(motivo) => {
+            // O array não é aberto quando a listagem falha: uma lista vazia
+            // e uma listagem que não aconteceu são coisas diferentes, e
+            // devolver `[]` nas duas apagaria a diferença.
+            w.field_str("error", motivo.motivo())?;
+        }
+    }
+
+    w.end_object()
+}
+
 /// Quantos caracteres uma leitura de teclado devolve por padrão, e no máximo.
 ///
 /// O teto é o tamanho da fila do teclado: pedir mais do que cabe nela não

@@ -71,6 +71,7 @@ mod testes;
 mod traps;
 mod usb;
 mod usuario;
+mod vfs;
 mod virtio;
 
 use core::panic::PanicInfo;
@@ -279,6 +280,26 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     virtio::net::init();
     virtio::teclado::init();
     usb::xhci::init();
+
+    // E o sistema de arquivos virtual, com o único sistema que existe por
+    // enquanto: os programas embutidos no binário, servidos em `/bin`.
+    //
+    // Depois dos dispositivos de propósito. Hoje este sistema de arquivos não
+    // depende de nenhum deles, mas o próximo depende — e montar o disco antes
+    // de o disco existir é o tipo de ordem que funciona até deixar de
+    // funcionar.
+    match vfs::montar(
+        "programas",
+        vfs::DIRETORIO_DOS_PROGRAMAS,
+        alloc::boxed::Box::new(vfs::programas::Programas),
+    ) {
+        Ok(()) => log_info!(
+            "vfs",
+            "{} montado com os programas embutidos",
+            vfs::DIRETORIO_DOS_PROGRAMAS
+        ),
+        Err(motivo) => log_error!("vfs", "nao foi possivel montar: {}", motivo.motivo()),
+    }
 
     // Com heap e interrupções no ar, a serial do agente pode deixar de ser
     // consultada em laço e passar a avisar quando chega um byte. É o que

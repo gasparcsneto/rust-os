@@ -433,13 +433,36 @@ unsafe fn executar(quadro: *mut core::ffi::c_void, ponteiro: u64, tamanho: u64) 
         RECUSADAS.fetch_add(1, Ordering::Relaxed);
         return erro::PROGRAMA_DESCONHECIDO;
     };
-    let Some(imagem) = programa::embutido(nome) else {
-        crate::log_warn!("usuario", "executar: nao ha programa `{}`", nome);
-        RECUSADAS.fetch_add(1, Ordering::Relaxed);
-        return erro::PROGRAMA_DESCONHECIDO;
+    // O programa vem do sistema de arquivos, e não mais de uma busca numa
+    // tabela estática. A tabela continua existindo — ela é o que
+    // `/bin` serve —, mas quem a consulta agora é o VFS, e trocá-la pelo
+    // Btrfs não muda nenhuma linha daqui. É a promessa que o README fazia
+    // desde que `executar` existe.
+    //
+    // Um nome sem barra é procurado em `/bin`, que é o caminho de busca
+    // inteiro deste kernel. Um nome absoluto é usado como veio, o que já
+    // permite executar qualquer coisa que esteja montada.
+    let caminho = if nome.starts_with('/') {
+        alloc::string::String::from(nome)
+    } else {
+        alloc::format!("{}/{}", crate::vfs::DIRETORIO_DOS_PROGRAMAS, nome)
     };
 
-    let novo = match programa::carregar(imagem) {
+    let imagem = match crate::vfs::ler_tudo(&caminho) {
+        Ok(bytes) => bytes,
+        Err(motivo) => {
+            crate::log_warn!(
+                "usuario",
+                "executar: `{}` nao pode ser lido: {}",
+                caminho,
+                motivo.motivo()
+            );
+            RECUSADAS.fetch_add(1, Ordering::Relaxed);
+            return erro::PROGRAMA_DESCONHECIDO;
+        }
+    };
+
+    let novo = match programa::carregar(&imagem) {
         Ok(programa) => programa,
 
         // Falhou antes do ponto de não retorno: o processo que chamou está
