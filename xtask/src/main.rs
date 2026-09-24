@@ -1337,7 +1337,96 @@ fn conversar(socket: &Path, qemu: u32) -> Result<(), String> {
         println!("  [{}/{}] ok  {}", n + 1, SONDAS.len(), sonda.pedido);
     }
 
-    sob_carga(&mut escrita, &mut leitor)
+    sob_carga(&mut escrita, &mut leitor)?;
+    sob_despejo(&mut escrita, &mut leitor)
+}
+
+/// Quantos bytes despejar de uma vez, sem ler nada no meio.
+///
+/// Cinco vezes a fila de bytes de entrada do kernel (4096). O ponto é
+/// atropelá-la de propósito: aqui não se testa o caminho feliz.
+const DESPEJO: usize = 20_000;
+
+/// Um despejo maior do que o kernel consegue absorver não pode sumir calado.
+///
+/// # O que isto pega
+///
+/// Bytes descartados por fila cheia não deixam marca no que sobra. O quadro
+/// remontado é indistinguível de um íntegro, e se calhar de ser JSON válido o
+/// kernel o executa — uma requisição que ninguém enviou.
+///
+/// Medido antes da correção, com este mesmo despejo: no x86 vinha um erro de
+/// linha longa demais; no ARM, **nenhuma resposta** em dois de cada três
+/// despejos, porque o `\n` final era descartado junto com o excesso. O pedido
+/// seguinte era engolido pelo quadro quebrado, e o erro que voltava era
+/// atribuído a ele.
+///
+/// O que a sonda exige não é um código de erro específico — o certo depende do
+/// que de fato aconteceu, e as duas arquiteturas perdem em pontos diferentes.
+/// Exige o contrato: **uma** resposta, que seja erro, e o pedido seguinte
+/// respondido com o próprio `id`.
+fn sob_despejo(escrita: &mut UnixStream, leitor: &mut BufReader<UnixStream>) -> Result<(), String> {
+    println!("[xtask] fumaça: despejo de {DESPEJO} bytes numa fila de 4096");
+
+    let mut linha = String::with_capacity(DESPEJO + 80);
+    linha.push_str(r#"{"jsonrpc":"2.0","id":1,"method":"agent.ping","params":{"x":""#);
+    for _ in 0..DESPEJO {
+        linha.push('b');
+    }
+    linha.push_str("\"}}\n");
+
+    escrita
+        .write_all(linha.as_bytes())
+        .and_then(|()| escrita.flush())
+        .map_err(|e| format!("despejo: falha ao enviar: {e}"))?;
+
+    let mut resposta = String::new();
+    leitor
+        .read_line(&mut resposta)
+        .map_err(|e| format!("despejo: o kernel engoliu {DESPEJO} bytes sem dizer nada: {e}"))?;
+
+    if !resposta.contains(r#""error""#) {
+        return Err(format!(
+            "despejo: era para vir erro, e veio outra coisa\n  {}",
+            resposta.trim()
+        ));
+    }
+    if !quadro_fechado(resposta.trim()) {
+        return Err(format!(
+            "despejo: a resposta não é um objeto JSON fechado\n  {}",
+            resposta.trim()
+        ));
+    }
+
+    // A metade que importa: o estrago para na requisição que o causou.
+    //
+    // Sem retentativa e sem drenagem de propósito. O kernel vê todo byte que
+    // chega — só não consegue guardar todos —, então ele sabe onde a
+    // requisição atropelada terminou e repõe o `\n` que não coube. O quadro
+    // seguinte chega intacto e é respondido de primeira.
+    //
+    // Enquanto o delimitador podia se perder junto com o excesso, esta sonda
+    // falhava em dois de cada três despejos no ARM: o pedido seguinte era
+    // consumido na ressincronização.
+    escrita
+        .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":4242,\"method\":\"agent.ping\"}\n")
+        .and_then(|()| escrita.flush())
+        .map_err(|e| format!("despejo: falha ao enviar o pedido seguinte: {e}"))?;
+
+    let mut seguinte = String::new();
+    leitor
+        .read_line(&mut seguinte)
+        .map_err(|e| format!("despejo: o pedido seguinte ao despejo ficou sem resposta: {e}"))?;
+
+    if !seguinte.starts_with(r#"{"jsonrpc":"2.0","id":4242,"#) {
+        return Err(format!(
+            "despejo: o pedido seguinte foi engolido pela ressincronização\n  {}",
+            seguinte.trim()
+        ));
+    }
+
+    println!("  [despejo] ok  {DESPEJO} bytes recusados, canal alinhado");
+    Ok(())
 }
 
 /// Quantas requisições a rajada envia ao todo.

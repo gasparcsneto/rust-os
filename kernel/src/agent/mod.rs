@@ -90,6 +90,26 @@ const LINHA_MAX: usize = 2048;
 struct Montador {
     buffer: [u8; LINHA_MAX],
     tam: usize,
+    /// Quantos bytes o canal já tinha perdido quando este quadro começou.
+    ///
+    /// Bytes descartados por fila cheia não deixam marca no que sobra: o
+    /// quadro remontado é indistinguível de um quadro íntegro, e se calhar de
+    /// ser JSON válido o kernel o **executa** — uma requisição que ninguém
+    /// enviou. Comparar o contador nas duas pontas é a única forma de saber.
+    ///
+    /// Medido, despejando vinte mil bytes de uma vez numa fila de quatro mil:
+    /// no x86 o quadro vinha truncado e o erro saía; no ARM o `\n` final era
+    /// descartado junto, o pedido seguinte era engolido pelo quadro quebrado,
+    /// e o erro que voltava era atribuído a ele. Em nenhum dos dois havia como
+    /// o agente saber que o que chegou não era o que ele mandou.
+    perdas_ao_abrir: u64,
+    /// Este quadro já foi dado por perdido, e o cliente já foi avisado.
+    ///
+    /// Separado de `estourou` porque a causa é outra e o desfecho também: ali
+    /// o kernel viu a requisição inteira e ela não coube; aqui ele não viu a
+    /// requisição inteira. O que os dois compartilham é o que fazer a seguir —
+    /// descartar até o próximo `\n` e recomeçar de um ponto conhecido.
+    danificado: bool,
     /// Ligado quando a linha atual estourou o buffer: descartamos tudo até o
     /// próximo `\n` para voltar a um ponto de sincronia conhecido do stream.
     estourou: bool,
@@ -100,6 +120,8 @@ impl Montador {
         Self {
             buffer: [0; LINHA_MAX],
             tam: 0,
+            perdas_ao_abrir: 0,
+            danificado: false,
             estourou: false,
         }
     }
@@ -110,21 +132,39 @@ impl Montador {
     /// para saber que acabou de gastar um tempo indeterminado executando um
     /// comando, e que é uma boa hora de dar a vez a outra tarefa.
     fn alimentar(&mut self, byte: u8) -> bool {
+        // A perda é conferida a cada byte, e não ao fechar o quadro, para que
+        // o cliente saiba enquanto ainda está mandando. O quadro fecha de
+        // qualquer forma — o handler repõe o delimitador que não coube, ver
+        // [`crate::tarefas::entrada::coletar`] —, mas esperar por ele seria
+        // responder só depois de o cliente terminar de despejar.
+        if !self.danificado && crate::tarefas::entrada::perdidos() != self.perdas_ao_abrir {
+            responder_erro(None, RpcError::ENTRADA_PERDIDA, None);
+            self.danificado = true;
+            self.tam = 0;
+        }
+
         match byte {
             b'\n' => {
-                if self.estourou {
+                // O aviso de dano já saiu quando a perda foi detectada; aqui
+                // só se recomeça de um ponto conhecido do fluxo.
+                if self.danificado {
+                    // nada a responder
+                } else if self.estourou {
                     responder_erro(None, RpcError::LINHA_MUITO_LONGA, None);
-                    self.estourou = false;
                 } else if self.tam > 0 {
                     processar(&self.buffer[..self.tam]);
                 }
+
+                self.danificado = false;
+                self.estourou = false;
                 self.tam = 0;
+                self.abrir_quadro();
                 true
             }
             // Clientes que mandam CRLF não deveriam quebrar o parser.
             b'\r' => false,
             _ => {
-                if self.estourou {
+                if self.estourou || self.danificado {
                     return false;
                 }
                 if self.tam < LINHA_MAX {
@@ -137,6 +177,16 @@ impl Montador {
                 false
             }
         }
+    }
+
+    /// Marca o ponto de partida de um quadro novo.
+    ///
+    /// Chamado ao fechar o anterior, e não ao receber o primeiro byte: a perda
+    /// que interessa a este quadro é toda a que acontecer entre o fim do
+    /// quadro passado e o fim dele, inclusive a que acontecer antes de o
+    /// primeiro byte dele chegar — que é justamente onde some um `\n`.
+    fn abrir_quadro(&mut self) {
+        self.perdas_ao_abrir = crate::tarefas::entrada::perdidos();
     }
 }
 
@@ -170,6 +220,9 @@ pub async fn atender() {
     );
 
     let mut montador = Montador::novo();
+    // A linha de partida do primeiro quadro é aqui, e não no `const fn`: o
+    // contador de perdas não existe em tempo de compilação.
+    montador.abrir_quadro();
     loop {
         let byte = crate::tarefas::entrada::proximo_byte().await;
         if montador.alimentar(byte) {
@@ -203,6 +256,9 @@ pub fn servir() -> ! {
     );
 
     let mut montador = Montador::novo();
+    // A linha de partida do primeiro quadro é aqui, e não no `const fn`: o
+    // contador de perdas não existe em tempo de compilação.
+    montador.abrir_quadro();
 
     loop {
         // A coleta é idempotente e barata quando não há nada: se as

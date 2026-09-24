@@ -60,6 +60,31 @@ impl RpcError {
         codigo: -32000,
         mensagem: "requisicao excede o buffer de linha do kernel",
     };
+    /// Bytes desta requisição não couberam na fila de entrada.
+    ///
+    /// # O que o agente precisa fazer com isto
+    ///
+    /// Reenviar **esta** requisição, e só ela. As que vierem depois não são
+    /// afetadas.
+    ///
+    /// Essa garantia não é de graça, e por um tempo não existiu. A perda
+    /// acontece quando o handler lê a serial mais rápido do que a tarefa
+    /// consome, e o byte que sobra é descartado. O delimitador é o **último**
+    /// byte de cada requisição, ou seja, exatamente o que chega quando a fila
+    /// está mais cheia — então era ele que se perdia, o quadro danificado
+    /// colava no seguinte, e a requisição seguinte era consumida na
+    /// ressincronização. Medido no ARM: dois de cada três despejos.
+    ///
+    /// O conserto está em [`crate::tarefas::entrada::coletar`], e a chave é
+    /// que a perda acontece **dentro** do kernel: o handler enxerga todo byte
+    /// que chega, só não consegue guardar todos. Enxergando, ele sabe onde a
+    /// requisição atropelada terminou e repõe o `\n` numa vaga que os bytes
+    /// comuns nunca tomam.
+    ///
+    pub const ENTRADA_PERDIDA: Self = Self {
+        codigo: -32001,
+        mensagem: "bytes perdidos no caminho; a requisicao foi descartada",
+    };
 }
 
 /// Uma requisição já decomposta, com todos os campos emprestando da linha

@@ -93,6 +93,30 @@ impl<T: Copy, const N: usize> Fila<T, N> {
         })
     }
 
+    /// Enfileira deixando `reserva` vagas intocadas.
+    ///
+    /// Existe para que quem enche a fila não possa tomar a última vaga de quem
+    /// precisa dela para **fechar** o que encheu. No canal do agente é assim
+    /// que o delimitador de quadro sobrevive a um transbordo: os bytes comuns
+    /// param uma vaga antes do fim, e a vaga que sobra é sempre do `\n`.
+    ///
+    /// Sem isso, o byte perdido podia ser justamente o delimitador — que é o
+    /// último de cada requisição, ou seja, exatamente o que chega quando a
+    /// fila está mais cheia.
+    pub fn enfileirar_com_reserva(&self, item: T, reserva: usize) -> Result<(), T> {
+        crate::arch::sem_interrupcoes(|| {
+            let mut anel = self.interior.lock();
+            if anel.tam + reserva >= N {
+                self.descartados.fetch_add(1, Ordering::Relaxed);
+                return Err(item);
+            }
+            let posicao = (anel.inicio + anel.tam) % N;
+            anel.itens[posicao] = Some(item);
+            anel.tam += 1;
+            Ok(())
+        })
+    }
+
     /// Retira o item mais antigo, se houver.
     pub fn desenfileirar(&self) -> Option<T> {
         crate::arch::sem_interrupcoes(|| {

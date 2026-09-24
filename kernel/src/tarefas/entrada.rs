@@ -32,7 +32,7 @@
 
 use core::future::Future;
 use core::pin::Pin;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use core::task::{Context, Poll, Waker};
 
 use spin::Mutex;
@@ -90,6 +90,22 @@ static DESPERTADOR: Mutex<Option<Waker>> = Mutex::new(None);
 /// a outra é um cliente que fala rápido demais. Somá-las tornaria as duas
 /// inúteis.
 static DESCARTADOS_NO_BOOT: AtomicU64 = AtomicU64::new(0);
+
+/// O handler está descartando bytes até achar o fim do quadro atropelado.
+///
+/// Vive fora do handler porque uma coleta pode terminar no meio do descarte:
+/// a FIFO esvazia, o handler retorna, e a próxima interrupção precisa
+/// continuar de onde a anterior parou.
+static DESCARTANDO_ATE_O_FIM_DO_QUADRO: AtomicBool = AtomicBool::new(false);
+
+/// Quantos bytes o canal já perdeu por fila cheia, desde o boot.
+///
+/// O enquadrador compara este número no começo e no fim de cada quadro. É a
+/// única forma de ele saber que o que montou não é o que foi enviado: bytes
+/// perdidos no meio de um fluxo não deixam marca nenhuma no que sobra.
+pub fn perdidos() -> u64 {
+    BYTES.descartados()
+}
 
 /// Quantos bytes foram descartados por chegarem antes de o canal subir.
 ///
@@ -167,13 +183,48 @@ pub fn coletar() {
         // necessidade. O teto vale contra uma UART que reporte dados para
         // sempre — um laço sem saída aqui travaria o sistema inteiro, já que
         // estamos dentro de um handler.
+        // Quando a fila enche, o handler **não** para de olhar os bytes: ele
+        // continua lendo a FIFO e descartando até encontrar o `\n` que fecha o
+        // quadro atropelado — e então enfileira esse `\n`.
+        //
+        // É esse detalhe que separa "o kernel perdeu bytes" de "o kernel
+        // perdeu o fio da meada". A perda acontece **aqui dentro**, e não num
+        // fio: o handler enxerga todo byte que chega, só não consegue guardar
+        // todos. Enxergando, ele sabe exatamente onde a requisição acabou, e
+        // pode repor o delimitador que não coube.
+        //
+        // Sem isso, o delimitador perdido colava o quadro danificado no
+        // seguinte, e a requisição seguinte era consumida na ressincronização
+        // — medido no ARM, com um despejo de vinte mil bytes numa fila de
+        // quatro mil. Com isso, o estrago para na requisição que o causou.
+        //
+        // A vaga para o `\n` está sempre livre porque os bytes comuns param
+        // uma antes do fim. Ver [`Fila::enfileirar_com_reserva`].
+        let mut descartando = DESCARTANDO_ATE_O_FIM_DO_QUADRO.load(Ordering::Relaxed);
+
         for _ in 0..CAPACIDADE {
             let Some(byte) = porta.read_byte() else {
                 break;
             };
-            let _ = BYTES.enfileirar(byte);
             chegou = true;
+
+            if descartando {
+                if byte == b'\n' {
+                    // O delimitador do quadro atropelado. Vai para a vaga
+                    // reservada: é ele que diz ao enquadrador onde o estrago
+                    // acabou, e onde a próxima requisição começa intacta.
+                    let _ = BYTES.enfileirar(byte);
+                    descartando = false;
+                }
+                continue;
+            }
+
+            if BYTES.enfileirar_com_reserva(byte, 1).is_err() {
+                descartando = true;
+            }
         }
+
+        DESCARTANDO_ATE_O_FIM_DO_QUADRO.store(descartando, Ordering::Relaxed);
     });
 
     if chegou {
