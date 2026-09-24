@@ -901,6 +901,18 @@ fn tasks_stats(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     // trabalho que nao precisou ser feito, e sao a explicacao para a distancia
     // entre `wakes` e `polls`.
     w.field_u64("wakes_coalesced", e.despertares_juntados)?;
+
+    // A tabela de adormecidos. Quando ela lota, quem nao cabe nao dorme: pede
+    // para ser acordado na hora e volta a rodar em espera ativa. Nada se
+    // perde, mas o nucleo gira em vez de dormir -- e sem este numero a unica
+    // prova disso era um aviso num anel de log que da a volta.
+    let (dormindo, vagas) = crate::tarefas::relogio::ocupacao();
+    w.key("sleepers")?;
+    w.begin_object()?;
+    w.field_u64("waiting", dormindo as u64)?;
+    w.field_u64("capacity", vagas as u64)?;
+    w.field_u64("without_slot", crate::tarefas::relogio::sem_vaga())?;
+    w.end_object()?;
     // Tarefas que existem e nao rodam, porque a entrada delas nao coube na
     // fila de prontas — no lancamento ou num despertar. Diferente de zero aqui
     // explica uma tarefa parada que de outra forma pareceria apenas ociosa, e

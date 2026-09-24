@@ -21,6 +21,7 @@
 
 use core::future::Future;
 use core::pin::Pin;
+use core::sync::atomic::{AtomicU64, Ordering};
 use core::task::{Context, Poll, Waker};
 
 use spin::Mutex;
@@ -32,6 +33,32 @@ const MAX_DORMENTES: usize = 16;
 struct Espera {
     alvo: u64,
     waker: Waker,
+}
+
+/// Quantas vezes a tabela estava cheia e alguém caiu em espera ativa.
+///
+/// O aviso no log não basta, e o motivo é o mesmo que já valeu para a fila de
+/// bytes do agente e para a de prontas: o anel tem cento e vinte e oito
+/// registros e dá a volta, então a prova de que isto aconteceu desaparece
+/// justamente quando aconteceu muito.
+///
+/// O que este número significa para quem o lê: nenhuma tarefa foi perdida — a
+/// degradação é deliberada e mantém o progresso —, mas o núcleo está girando
+/// em vez de dormir, e a conta de energia e de latência é real. Um agente que
+/// veja `polls` subindo sem `wakes` correspondente encontra aqui a explicação.
+static SEM_VAGA: AtomicU64 = AtomicU64::new(0);
+
+/// Quantas vezes faltou vaga na tabela de adormecidos.
+pub fn sem_vaga() -> u64 {
+    SEM_VAGA.load(Ordering::Relaxed)
+}
+
+/// Quantas vagas da tabela estão ocupadas agora, e quantas existem.
+pub fn ocupacao() -> (usize, usize) {
+    crate::arch::sem_interrupcoes(|| {
+        let tabela = DORMENTES.lock();
+        (tabela.iter().flatten().count(), MAX_DORMENTES)
+    })
 }
 
 /// Tarefas que esperam o relógio.
@@ -143,6 +170,7 @@ impl Future for Dormir {
             // dormir para sempre — a tarefa nunca mais seria acordada. Pedir
             // para ser acordado imediatamente degrada para espera ativa, que é
             // desperdício mas mantém o progresso garantido.
+            SEM_VAGA.fetch_add(1, Ordering::Relaxed);
             crate::log_warn!("tarefa", "tabela de dormentes cheia; caindo em polling");
             contexto.waker().wake_by_ref();
             return Poll::Pending;
