@@ -1741,8 +1741,11 @@ fn ler_resposta(leitor: &mut BufReader<UnixStream>) -> Result<String, String> {
 
         // Um quadro do aperto de mão é o único que se pula em silêncio: ele é
         // desta ferramenta, e não do kernel.
-        if false {
-            // MUTACAO: pulo desligado
+        //
+        // Os `id` do aperto de mão começam em 90_000, faixa que sonda nenhuma
+        // usa. Pular por prefixo, e não por número exato, porque quem lê aqui
+        // não sabe em qual tentativa o aperto de mão parou.
+        if linha.starts_with(r#"{"jsonrpc":"2.0","id":9"#) {
             pulados.push(linha.trim().to_string());
             continue;
         }
