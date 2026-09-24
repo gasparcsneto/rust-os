@@ -114,3 +114,9 @@ jobs:
       # o que um agente de verdade faz.
       - name: Fumaça (canal do agente, kernel de produção)
         run: cargo xtask fumaca --arch ${{ matrix.arch }}
+
+      # E em release, que é a configuração que se entrega. A suíte já roda nas
+      # duas otimizações; o laço de produção só rodava numa — o mesmo formato
+      # de ponto cego que a fumaça existe para fechar.
+      - name: Fumaça (release)
+        run: cargo xtask fumaca --arch ${{ matrix.arch }} --release
