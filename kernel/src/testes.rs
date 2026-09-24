@@ -1469,6 +1469,91 @@ fn paginacao_traduz_endereco_do_kernel() -> Resultado {
     }
 }
 
+/// Um frame reciclado chega zerado ao próximo dono.
+///
+/// # O que estava sem proteção
+///
+/// [`crate::paginacao::mapear_novo`] zera todo frame que entrega, e o
+/// comentário daquela linha diz por quê: entregar um frame sujo vaza dados do
+/// dono anterior, e *"quando houver processos, seria uma falha de
+/// isolamento"*. Há processos — `user.run`, `bifurcar`, `executar` —, e o
+/// carregador monta o BSS de um programa contando exatamente com isso.
+///
+/// Medido: apagando a zeragem, a suíte inteira passava. Um vazamento entre
+/// donos não quebra nada — só entrega bytes a quem não deveria vê-los, e
+/// quanto mais interessante o byte, mais provável que o dono anterior fosse
+/// o kernel.
+///
+/// # Por que vários frames, e não um
+///
+/// Porque o alocador é determinístico sobre o mesmo bitmap: liberar um frame
+/// e pedir outro devolve sempre a mesma resposta, e não há como forçá-lo a
+/// devolver justamente aquele. Sujando vários de uma vez e pedindo-os de
+/// volta em bloco, o conjunto livre é o mesmo das duas vezes — então são os
+/// mesmos frames que voltam, e o caso confere que são.
+fn paginacao_frame_reciclado_vem_zerado() -> Resultado {
+    const QUANTOS: usize = 8;
+    const SUJEIRA: u8 = 0xA5;
+    let tamanho = crate::frames::TAMANHO_FRAME as usize;
+
+    let mut enderecos = [0u64; QUANTOS];
+    let mut sujos = [0u64; QUANTOS];
+
+    // Primeira passada: mapear, sujar a página inteira, devolver o frame.
+    for i in 0..QUANTOS {
+        let virtual_ = endereco_virtual_livre().ok_or("nenhum endereco virtual livre")?;
+        enderecos[i] = virtual_;
+        sujos[i] = crate::paginacao::mapear_novo(virtual_, crate::arch::Permissoes::DADOS)
+            .map_err(|_| "mapeamento recusado na primeira passada")?;
+
+        // SAFETY: a página acabou de ser mapeada para escrita e é só nossa.
+        unsafe { core::ptr::write_bytes(virtual_ as *mut u8, SUJEIRA, tamanho) };
+    }
+    for &virtual_ in &enderecos {
+        crate::paginacao::desmapear_e_liberar(virtual_).map_err(|_| "liberacao falhou")?;
+    }
+
+    // Segunda passada: os mesmos frames voltam, e precisam voltar limpos.
+    let mut reaproveitados = 0;
+    let mut sujo_encontrado = false;
+
+    for &virtual_ in &enderecos {
+        let frame = crate::paginacao::mapear_novo(virtual_, crate::arch::Permissoes::DADOS)
+            .map_err(|_| "mapeamento recusado na segunda passada")?;
+
+        if sujos.contains(&frame) {
+            reaproveitados += 1;
+        }
+
+        // SAFETY: a página é nossa e está mapeada.
+        let bytes = unsafe { core::slice::from_raw_parts(virtual_ as *const u8, tamanho) };
+        if bytes.iter().any(|&b| b != 0) {
+            sujo_encontrado = true;
+        }
+    }
+
+    for &virtual_ in &enderecos {
+        let _ = crate::paginacao::desmapear_e_liberar(virtual_);
+    }
+
+    // Nenhum frame reaproveitado significa que o experimento não aconteceu.
+    // Um caso que passa sem ter medido nada é pior que um caso que falha.
+    if reaproveitados == 0 {
+        return Err("nenhum frame voltou do lote sujado; o caso nao mediu nada");
+    }
+    if sujo_encontrado {
+        crate::log_error!(
+            "teste",
+            "{} de {} frames reaproveitados, e ao menos um trouxe bytes do dono anterior",
+            reaproveitados,
+            QUANTOS
+        );
+        return Err("frame reciclado vazou dados do dono anterior");
+    }
+
+    Ok(())
+}
+
 /// O teste central da paginação: prova que o mapeamento roteia de verdade.
 ///
 /// Escrevemos pelo endereço virtual recém-mapeado e lemos pelo caminho físico,
@@ -4064,6 +4149,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "paginacao: kernel esta mapeado",
         f: paginacao_traduz_endereco_do_kernel,
+    },
+    Caso {
+        nome: "paginacao: frame reciclado vem zerado",
+        f: paginacao_frame_reciclado_vem_zerado,
     },
     Caso {
         nome: "paginacao: escrita chega ao frame",
