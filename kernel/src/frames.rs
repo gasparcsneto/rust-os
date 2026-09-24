@@ -176,6 +176,19 @@ pub fn init() -> Result<(), &'static str> {
         // Arredondamos para dentro: um frame só é considerado livre se estiver
         // *inteiramente* dentro da região. Um frame parcialmente reservado
         // entregue como livre seria corrupção garantida.
+        //
+        // # Nenhum caso protege este arredondamento, e não há como escrever um
+        //
+        // Medido, trocando `div_ceil` por divisão comum: a suíte inteira
+        // passa. Não é falha dos casos — nas duas máquinas em que este kernel
+        // roda, toda região do mapa começa e termina em fronteira de página, e
+        // então as duas contas dão o mesmo número. Não há mapa aqui em que a
+        // diferença apareça.
+        //
+        // Fica porque o mapa vem do firmware e o formato não obriga
+        // alinhamento nenhum: um E820 com uma região começando em 0x9FC00 —
+        // que existe em hardware real, é o começo da área de dados da BIOS —
+        // entregaria ao alocador um frame cuja primeira metade não é dele.
         let primeiro = regiao.inicio.div_ceil(TAMANHO_FRAME);
         let ultimo = regiao.fim / TAMANHO_FRAME;
 

@@ -103,6 +103,19 @@ impl<T: Copy, const N: usize> Fila<T, N> {
     /// Sem isso, o byte perdido podia ser justamente o delimitador — que é o
     /// último de cada requisição, ou seja, exatamente o que chega quando a
     /// fila está mais cheia.
+    //
+    // # Nenhum caso protege esta reserva, e o motivo é que ela não é o que faz
+    //   funcionar — é o que faz deixar de depender do tempo
+    //
+    // Medido, desligando-a: a suíte passa (o enquadrador do agente só existe
+    // de pé no laço de produção, então ela nem o alcança) e a sonda de despejo
+    // do teste de fumaça também passa, três vezes seguidas no ARM.
+    //
+    // Passa porque, sem a reserva, o `\n` ainda costuma caber: entre o momento
+    // em que a fila enche e o delimitador chegar, a tarefa já drenou espaço.
+    // "Costuma" é a palavra. A reserva troca isso por uma garantia que não
+    // depende de quem correu mais rápido — e é justamente essa diferença que
+    // esta sessão passou sete rodadas removendo do resto do kernel.
     pub fn enfileirar_com_reserva(&self, item: T, reserva: usize) -> Result<(), T> {
         crate::arch::sem_interrupcoes(|| {
             let mut anel = self.interior.lock();
