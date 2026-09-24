@@ -74,15 +74,38 @@ struct Cabecalho {
     setor: u64,
 }
 
-// Deslocamentos dos três buffers dentro do frame de trabalho. Um frame só,
-// pelo mesmo motivo da fila: os buffers precisam ser fisicamente contíguos, e
-// um frame é a menor unidade que garante isso.
+// Deslocamentos do cabeçalho e do byte de estado dentro do frame de trabalho.
+// Os dados não moram aqui: eles têm frames próprios, ver [`PAGINAS_DE_DADOS`].
 const CABECALHO_EM: u64 = 0;
-const DADOS_EM: u64 = 16;
-const ESTADO_EM: u64 = DADOS_EM + TAMANHO_DO_SETOR as u64;
+const ESTADO_EM: u64 = 16;
 
 const _: () = assert!(ESTADO_EM < crate::arch::TAMANHO_PAGINA);
-const _: () = assert!(core::mem::size_of::<Cabecalho>() as u64 == DADOS_EM - CABECALHO_EM);
+const _: () = assert!(core::mem::size_of::<Cabecalho>() as u64 <= ESTADO_EM);
+
+/// Quantas páginas de dados uma leitura pode preencher de uma vez.
+///
+/// # Por que mais de uma, e por que quatro
+///
+/// Porque o custo de ler do disco é **por requisição**, e não por byte.
+/// Medido, lendo mil setores um a um: 100 ms no ARM e 110 no x86, com 234
+/// voltas de espera por leitura — cem microssegundos por ida ao dispositivo,
+/// seja ela de meio kilobyte ou de dezesseis.
+///
+/// O comentário que estava aqui dizia "a resposta vem em microssegundos", e
+/// isso era uma estimativa que ninguém tinha medido. São cem, o que não muda
+/// nada para quem lê um setor no boot e muda tudo para um sistema de
+/// arquivos: um nó de Btrfs tem 16 KiB, e lê-lo setor a setor eram trinta e
+/// duas idas de cem microssegundos cada.
+///
+/// Quatro páginas são exatamente esses 16 KiB. O teto não é o número de
+/// páginas, é o de descritores: a cadeia leva o cabeçalho, uma entrada por
+/// página e o byte de estado, e a fila tem oito.
+const PAGINAS_DE_DADOS: usize = 4;
+
+/// O maior pedido, em bytes.
+pub const MAIOR_LEITURA: usize = PAGINAS_DE_DADOS * crate::arch::TAMANHO_PAGINA as usize;
+
+const _: () = assert!(PAGINAS_DE_DADOS + 2 <= super::fila::DESCRITORES as usize);
 
 /// Quantas voltas esperar por uma resposta antes de desistir.
 ///
@@ -109,10 +132,18 @@ const VOLTAS_DE_ESPERA: u32 = 5_000_000;
 pub struct Disco {
     transporte: Transporte,
     fila: Fila,
-    /// Frame físico com o cabeçalho, os dados e o byte de estado.
+    /// Frame físico com o cabeçalho e o byte de estado.
     trabalho: u64,
     /// Endereço virtual do mesmo frame.
     base: *mut u8,
+    /// Os frames onde o dispositivo deposita o que foi lido.
+    ///
+    /// Separados do de trabalho, e um por página, porque um descritor descreve
+    /// uma faixa contígua e o alocador entrega uma página por vez. Juntá-los
+    /// exigiria um alocador de faixas contíguas — que não existe, e que só
+    /// valeria a pena se houvesse um segundo cliente para ele.
+    dados: [u64; PAGINAS_DE_DADOS],
+    bases_de_dados: [*mut u8; PAGINAS_DE_DADOS],
     /// Capacidade, em setores de 512 bytes.
     capacidade: u64,
     /// Se o disco ainda pode ser usado.
@@ -224,6 +255,32 @@ impl Disco {
         };
         let base = crate::arch::acesso_fisico(trabalho);
 
+        // E as páginas de dados. Uma falha no meio devolve as que já vieram:
+        // elas ainda não foram entregues a descritor nenhum, então o
+        // dispositivo não tem direito sobre elas — ao contrário do frame da
+        // fila, que fica onde está pela razão documentada acima.
+        let mut dados = [0u64; PAGINAS_DE_DADOS];
+        let mut quantas = 0;
+        while quantas < PAGINAS_DE_DADOS {
+            let Some(frame) = crate::frames::alocar() else {
+                break;
+            };
+            dados[quantas] = frame;
+            quantas += 1;
+        }
+        if quantas != PAGINAS_DE_DADOS {
+            for frame in &dados[..quantas] {
+                crate::frames::liberar(*frame);
+            }
+            crate::frames::liberar(trabalho);
+            transporte.abortar();
+            return Err("sem frames para os buffers de dados");
+        }
+        let mut bases_de_dados = [core::ptr::null_mut(); PAGINAS_DE_DADOS];
+        for (base, frame) in bases_de_dados.iter_mut().zip(&dados) {
+            *base = crate::arch::acesso_fisico(*frame);
+        }
+
         // A mestria de barramento vem **antes** de liberar o dispositivo, e a
         // ordem não é indiferente. Ela é o que de fato o autoriza a ler e
         // escrever na nossa memória: tudo até aqui foi conversa por
@@ -246,6 +303,8 @@ impl Disco {
             fila,
             trabalho,
             base,
+            dados,
+            bases_de_dados,
             capacidade,
             vivo: true,
         })
@@ -260,23 +319,52 @@ impl Disco {
         self.capacidade
     }
 
-    /// Lê um setor para `destino`.
+    /// Lê um setor.
     ///
-    /// `destino` precisa ter exatamente [`TAMANHO_DO_SETOR`] bytes: um pedido
-    /// de bloco não tem como devolver meio setor, e aceitar uma fatia menor só
-    /// esconderia de quem chama que o resto foi lido e descartado.
+    /// Continua existindo porque quem lê um setor só não deveria precisar
+    /// montar uma fatia: é o caso do relatório do agente e dos testes de
+    /// leitura. Por dentro é [`Disco::ler`] com um setor.
     pub fn ler_setor(&mut self, setor: u64, destino: &mut [u8]) -> Result<(), &'static str> {
-        if !self.vivo {
-            return Err("o disco parou de responder e foi desligado");
-        }
         if destino.len() != TAMANHO_DO_SETOR {
             return Err("o destino precisa ter um setor");
         }
-        if setor >= self.capacidade {
+        self.ler(setor, destino)
+    }
+
+    /// Lê setores consecutivos numa única ida ao dispositivo.
+    ///
+    /// # Por que numa ida só
+    ///
+    /// Porque o custo é por requisição. Medido antes disto, lendo mil setores
+    /// um a um: 100 ms no ARM e 110 no x86 — cem microssegundos por leitura,
+    /// dos quais 234 voltas de espera. Um pedido de dezesseis kilobytes custa
+    /// o mesmo que um de meio, e é a diferença entre um nó de Btrfs custar
+    /// cem microssegundos ou três milissegundos e meio.
+    ///
+    /// `destino` precisa ser um múltiplo de setor e caber em
+    /// [`MAIOR_LEITURA`]. Um pedido maior é recusado em vez de partido em
+    /// dois: partir aqui esconderia de quem chamou que houve mais de uma ida
+    /// ao disco, e quem monta um sistema de arquivos precisa saber disso para
+    /// decidir o tamanho dos próprios blocos.
+    pub fn ler(&mut self, setor: u64, destino: &mut [u8]) -> Result<(), &'static str> {
+        if !self.vivo {
+            return Err("o disco parou de responder e foi desligado");
+        }
+        if destino.is_empty() || !destino.len().is_multiple_of(TAMANHO_DO_SETOR) {
+            return Err("o destino precisa ser um multiplo de setor");
+        }
+        if destino.len() > MAIOR_LEITURA {
+            return Err("o pedido passa do maior que o driver monta");
+        }
+
+        let setores = (destino.len() / TAMANHO_DO_SETOR) as u64;
+        // A soma satura para que um setor absurdo não dê a volta e caia dentro
+        // da capacidade.
+        if setor.saturating_add(setores) > self.capacidade {
             return Err("setor alem da capacidade do disco");
         }
 
-        // SAFETY: o frame é deste disco, os três deslocamentos vêm das
+        // SAFETY: o frame é deste disco, os dois deslocamentos vêm das
         // constantes de layout, e a asserção de compilação garante que cabem.
         unsafe {
             core::ptr::write_volatile(
@@ -294,20 +382,36 @@ impl Disco {
             core::ptr::write_volatile(self.base.add(ESTADO_EM as usize), 0xFF);
         }
 
-        let cabeca = self.fila.submeter(&[
+        // A cadeia: o cabeçalho, uma entrada por página de dados que o pedido
+        // alcança, e o byte de estado. As do meio são escritas pelo
+        // dispositivo; as das pontas, não e sim, nessa ordem.
+        let mut cadeia = [(0u64, 0u32, false); PAGINAS_DE_DADOS + 2];
+        let mut partes = 1;
+        cadeia[0] = (
             // O comprimento do cabeçalho é o tamanho dele, e não o
-            // deslocamento do que vem depois. Os dois números são iguais
-            // enquanto o cabeçalho começar em zero — a asserção de compilação
-            // lá em cima diz exatamente isso —, e escrever o deslocamento
-            // aqui seria depender dessa coincidência sem dizer que depende.
-            (
-                self.trabalho + CABECALHO_EM,
-                core::mem::size_of::<Cabecalho>() as u32,
-                false,
-            ),
-            (self.trabalho + DADOS_EM, TAMANHO_DO_SETOR as u32, true),
-            (self.trabalho + ESTADO_EM, 1, true),
-        ])?;
+            // deslocamento do que vem depois: os dois são iguais hoje, e
+            // escrever um pelo outro seria depender disso sem dizer que
+            // depende.
+            self.trabalho + CABECALHO_EM,
+            core::mem::size_of::<Cabecalho>() as u32,
+            false,
+        );
+
+        let pagina = crate::arch::TAMANHO_PAGINA as usize;
+        let mut restante = destino.len();
+        let mut indice = 0;
+        while restante > 0 {
+            let quanto = restante.min(pagina);
+            cadeia[partes] = (self.dados[indice], quanto as u32, true);
+            partes += 1;
+            restante -= quanto;
+            indice += 1;
+        }
+
+        cadeia[partes] = (self.trabalho + ESTADO_EM, 1, true);
+        partes += 1;
+
+        let cabeca = self.fila.submeter(&cadeia[..partes])?;
         self.fila.notificar(&self.transporte);
 
         let (respondido, _) = self.esperar()?;
@@ -320,33 +424,33 @@ impl Disco {
         }
 
         // SAFETY: o dispositivo terminou (foi o que a colheita significou), e
-        // os dois acessos ficam dentro do frame pelas constantes de layout.
+        // o acesso fica dentro do frame pela constante de layout.
         let estado = unsafe { core::ptr::read_volatile(self.base.add(ESTADO_EM as usize)) };
         if estado != OK {
             return Err("o dispositivo recusou a leitura");
         }
 
-        // SAFETY: a origem é o frame de trabalho, o destino tem exatamente o
-        // tamanho conferido acima, e as duas regiões não se sobrepõem — o
-        // frame é do kernel e `destino` é de quem chamou.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                self.base.add(DADOS_EM as usize),
-                destino.as_mut_ptr(),
-                TAMANHO_DO_SETOR,
-            )
-        };
+        // E o conteúdo, página a página, para onde quem chamou pediu.
+        let mut copiados = 0;
+        for origem in &self.bases_de_dados {
+            if copiados == destino.len() {
+                break;
+            }
+            let quanto = (destino.len() - copiados).min(pagina);
+            // SAFETY: a origem é uma das páginas de dados, que o
+            // dispositivo acabou de preencher com pelo menos `quanto` bytes; o
+            // destino tem espaço porque `copiados + quanto` é no máximo o
+            // comprimento dele; e as duas regiões não se sobrepõem — as
+            // páginas são do kernel e `destino` é de quem chamou.
+            unsafe {
+                core::ptr::copy_nonoverlapping(*origem, destino.as_mut_ptr().add(copiados), quanto);
+            }
+            copiados += quanto;
+        }
 
         Ok(())
     }
 
-    /// Espera a fila devolver alguma coisa.
-    ///
-    /// Desistir desliga o disco. O frame de trabalho **nao** e devolvido ao
-    /// alocador: o dispositivo ainda tem o endereco dele numa cadeia que nunca
-    /// completou, e entregar essa pagina a outro dono seria autorizar uma
-    /// escrita em memoria alheia, num momento que ninguem escolhe. Vazar um
-    /// frame e o preco de nao ter esse problema.
     fn esperar(&mut self) -> Result<(u16, u32), &'static str> {
         for _ in 0..VOLTAS_DE_ESPERA {
             if let Some(resposta) = self.fila.colher() {

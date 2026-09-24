@@ -741,7 +741,9 @@ padronizado.
 - [ ] **Fase 4 — Sistema de arquivos.** A promessa da abertura que falta
       cumprir. Feito: o disco de testes é uma GPT de verdade, com uma ESP em
       FAT32 e uma raiz em Btrfs montadas pelas ferramentas do hospedeiro; e o
-      VFS, com os programas embutidos servidos em `/bin`. Falta: o Btrfs
+      VFS, com os programas embutidos servidos em `/bin`; e a leitura do disco
+      em blocos de 16 KiB numa ida só, que é o tamanho de um nó de Btrfs.
+      Falta: o Btrfs
       somente leitura, a tabela de descritores por processo, `executar` lendo
       do disco, e um bootloader UEFI próprio no lugar do crate `bootloader`.
 

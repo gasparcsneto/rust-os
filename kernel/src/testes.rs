@@ -1744,6 +1744,80 @@ fn vfs_montagem_mais_longa_ganha() -> Resultado {
     Ok(())
 }
 
+/// Uma leitura de vários setores devolve os mesmos bytes que várias de um.
+///
+/// # O que este caso protege
+///
+/// A montagem da cadeia de descritores. Um pedido de dezesseis kilobytes não
+/// cabe numa página, então ele vira uma entrada por página — e a ordem delas
+/// é o que decide onde cada setor aterrissa. Trocar duas páginas, ou copiar
+/// de volta na ordem errada, produz um buffer que tem todos os bytes certos
+/// nos lugares errados: nada falha, nada avisa, e quem lê um sistema de
+/// arquivos em cima disso vê estruturas embaralhadas.
+///
+/// A conferência é contra a leitura setor a setor, que é o caminho que já
+/// estava exercitado. As duas precisam concordar byte a byte.
+///
+/// O tamanho não-alinhado está aqui de propósito: doze setores são uma página
+/// e meia, e é onde um laço que assume páginas cheias se perde.
+fn disco_leitura_multipla_atravessa_paginas() -> Resultado {
+    const PRIMEIRO: u64 = PADRAO_DE;
+    let maximo = crate::virtio::blk::MAIOR_LEITURA / crate::virtio::blk::TAMANHO_DO_SETOR;
+
+    for quantos in [1usize, 12, maximo] {
+        let mut juntos = [0u8; crate::virtio::blk::MAIOR_LEITURA];
+        let bytes = quantos * crate::virtio::blk::TAMANHO_DO_SETOR;
+        let Some(resultado) =
+            crate::virtio::blk::com_o_disco(|d| d.ler(PRIMEIRO, &mut juntos[..bytes]))
+        else {
+            return Err("nao ha disco nesta maquina");
+        };
+        resultado?;
+
+        for i in 0..quantos {
+            let esperado = marca_do_setor(PRIMEIRO + i as u64);
+            let fatia = &juntos[i * crate::virtio::blk::TAMANHO_DO_SETOR..]
+                [..crate::virtio::blk::TAMANHO_DO_SETOR];
+            if let Some(posicao) = fatia.iter().position(|&b| b != esperado) {
+                crate::log_error!(
+                    "teste",
+                    "lendo {} setores: o setor {} traz {:#04x} no byte {}, esperava {:#04x}",
+                    quantos,
+                    PRIMEIRO + i as u64,
+                    fatia[posicao],
+                    posicao,
+                    esperado
+                );
+                return Err("a leitura multipla trouxe os setores fora de ordem");
+            }
+        }
+    }
+
+    // E os pedidos que o driver precisa recusar. Um destino que não é
+    // múltiplo de setor faria o dispositivo escrever menos do que a cadeia
+    // anuncia; um maior que a cadeia comporta não caberia nos descritores.
+    let mut qualquer = [0u8; crate::virtio::blk::MAIOR_LEITURA];
+    let recusas = crate::virtio::blk::com_o_disco(|d| {
+        [
+            d.ler(PRIMEIRO, &mut []).is_err(),
+            d.ler(PRIMEIRO, &mut qualquer[..100]).is_err(),
+            d.ler(
+                PRIMEIRO,
+                &mut qualquer[..crate::virtio::blk::TAMANHO_DO_SETOR + 1],
+            )
+            .is_err(),
+        ]
+    });
+    let Some(recusas) = recusas else {
+        return Err("nao ha disco nesta maquina");
+    };
+    if !recusas.iter().all(|r| *r) {
+        return Err("o driver aceitou um destino que nao e multiplo de setor");
+    }
+
+    Ok(())
+}
+
 /// A ausência de framebuffer é sempre defeito, nas duas arquiteturas.
 ///
 /// # Por que isto já foi condicional, e por que não é mais
@@ -5188,6 +5262,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "disco: cada setor devolve o seu padrao",
         f: disco_cada_setor_devolve_o_seu_padrao,
+    },
+    Caso {
+        nome: "disco: uma leitura so atravessa varias paginas",
+        f: disco_leitura_multipla_atravessa_paginas,
     },
     Caso {
         nome: "disco: recusa setor fora da capacidade",
