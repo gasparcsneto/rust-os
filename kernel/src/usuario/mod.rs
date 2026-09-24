@@ -333,13 +333,33 @@ fn escrever(descritor: u64, ponteiro: u64, tamanho: u64) -> i64 {
     // Texto do usuário não é confiável nem como UTF-8. Substituir em vez de
     // recusar mantém a chamada útil para quem escreve bytes crus.
     let texto = core::str::from_utf8(bytes).unwrap_or("<bytes nao-utf8>");
-    match alvo {
-        Alvo::Registro => crate::log_info!("usuario", "{}", texto),
-        Alvo::Diagnostico => crate::log_error!("usuario", "{}", texto),
-    }
+    let legivel = texto.len() == tamanho as usize;
 
-    BYTES_ESCRITOS.fetch_add(tamanho, Ordering::Relaxed);
-    tamanho as i64
+    // Chamada direta em vez de macro porque o número de volta importa: o
+    // registro cabe 160 bytes e esta chamada aceita até 4096. Devolver o
+    // tamanho pedido depois de guardar menos é dizer ao programa que escreveu
+    // o que não escreveu — e programa nenhum tem como desconfiar.
+    //
+    // Uma escrita curta é a resposta certa, e é o que todo `write` faz: quem
+    // chamou repete com o resto. Aqui isso produz um registro por pedaço, que
+    // é o desfecho útil — nada se perde e cada pedaço fica datado.
+    let nivel = match alvo {
+        Alvo::Registro => crate::log::Level::Info,
+        Alvo::Diagnostico => crate::log::Level::Error,
+    };
+    let guardados = crate::log::registrar(nivel, "usuario", format_args!("{}", texto));
+
+    // Quando o texto não era UTF-8 o que foi ao registro é um marcador, não o
+    // texto: aí o que se consumiu foi o buffer inteiro, e o tamanho pedido é a
+    // resposta honesta.
+    let aceitos = if legivel {
+        guardados.min(tamanho as usize) as u64
+    } else {
+        tamanho
+    };
+
+    BYTES_ESCRITOS.fetch_add(aceitos, Ordering::Relaxed);
+    aceitos as i64
 }
 
 /// `bifurcar()`: duplica o processo.

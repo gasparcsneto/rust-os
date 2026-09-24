@@ -90,6 +90,16 @@ pub struct Record {
     pub subsistema: &'static str,
     tam: u16,
     bytes: [u8; MSG_MAX],
+    /// Quantos bytes da mensagem não couberam.
+    ///
+    /// Uma mensagem cortada em [`MSG_MAX`] termina numa fronteira de caractere
+    /// e fica com cara de mensagem inteira. Medido: trezentos caracteres
+    /// entraram, cento e sessenta ficaram, e nada no registro dizia que havia
+    /// mais — um agente lendo `log.tail` via um fato que o kernel não afirmou.
+    ///
+    /// Com um número aqui, "a mensagem acabou" e "a mensagem foi cortada"
+    /// deixam de ser indistinguíveis.
+    perdidos: u16,
 }
 
 impl Record {
@@ -100,11 +110,17 @@ impl Record {
         subsistema: "",
         tam: 0,
         bytes: [0; MSG_MAX],
+        perdidos: 0,
     };
 
     /// A mensagem renderizada.
     pub fn mensagem(&self) -> &str {
         core::str::from_utf8(&self.bytes[..self.tam as usize]).unwrap_or("<utf-8 invalido>")
+    }
+
+    /// Quantos bytes da mensagem original não couberam neste registro.
+    pub fn perdidos(&self) -> u16 {
+        self.perdidos
     }
 }
 
@@ -126,6 +142,11 @@ static ANEL: Mutex<Anel> = Mutex::new(Anel {
 struct Cursor<'a> {
     buf: &'a mut [u8; MSG_MAX],
     tam: usize,
+    /// Bytes que chegaram depois de o buffer encher.
+    ///
+    /// Contar custa uma subtração e é o que separa um relato honesto de um
+    /// relato que parece completo.
+    perdidos: usize,
 }
 
 impl fmt::Write for Cursor<'_> {
@@ -143,14 +164,21 @@ impl fmt::Write for Cursor<'_> {
 
         self.buf[self.tam..self.tam + n].copy_from_slice(&s.as_bytes()[..n]);
         self.tam += n;
+        self.perdidos += s.len() - n;
         Ok(())
     }
 }
 
 /// Grava um registro. Use as macros [`log_info!`] e companhia.
 #[doc(hidden)]
-pub fn registrar(nivel: Level, subsistema: &'static str, args: fmt::Arguments) {
-    let seq = crate::arch::sem_interrupcoes(|| {
+/// Devolve quantos bytes da mensagem couberam no registro.
+///
+/// Quem só quer registrar ignora o número — as macros descartam. Quem precisa
+/// dele é [`crate::usuario::escrever`], que responde a um programa de usuário
+/// quantos bytes foram de fato aceitos: devolver o tamanho pedido depois de
+/// guardar menos é mentir para quem chamou.
+pub fn registrar(nivel: Level, subsistema: &'static str, args: fmt::Arguments) -> usize {
+    let (seq, guardados) = crate::arch::sem_interrupcoes(|| {
         let mut anel = ANEL.lock();
 
         let seq = anel.total;
@@ -166,17 +194,19 @@ pub fn registrar(nivel: Level, subsistema: &'static str, args: fmt::Arguments) {
 
         // Escopo para soltar o empréstimo mutável de `bytes` antes de mexer
         // em `tam`.
-        let tam = {
+        let (tam, perdidos) = {
             let mut cursor = Cursor {
                 buf: &mut registro.bytes,
                 tam: 0,
+                perdidos: 0,
             };
             let _ = cursor.write_fmt(args);
-            cursor.tam
+            (cursor.tam, cursor.perdidos)
         };
         registro.tam = tam as u16;
+        registro.perdidos = perdidos.min(u16::MAX as usize) as u16;
 
-        seq
+        (seq, tam)
     });
 
     // O eco humano acontece *fora* do lock do anel. Se fizéssemos isso com o
@@ -195,6 +225,8 @@ pub fn registrar(nivel: Level, subsistema: &'static str, args: fmt::Arguments) {
         subsistema,
         args
     );
+
+    guardados
 }
 
 /// Percorre os registros mais recentes, do mais antigo para o mais novo.
@@ -256,10 +288,10 @@ pub fn total_emitidos() -> u64 {
 #[macro_export]
 macro_rules! log_error {
     ($sub:expr, $fmt:expr) => {
-        $crate::log::registrar($crate::log::Level::Error, $sub, format_args!($fmt))
+        { let _ = $crate::log::registrar($crate::log::Level::Error, $sub, format_args!($fmt)); }
     };
     ($sub:expr, $fmt:expr, $($arg:tt)*) => {
-        $crate::log::registrar($crate::log::Level::Error, $sub, format_args!($fmt, $($arg)*))
+        { let _ = $crate::log::registrar($crate::log::Level::Error, $sub, format_args!($fmt, $($arg)*)); }
     };
 }
 
@@ -267,10 +299,10 @@ macro_rules! log_error {
 #[macro_export]
 macro_rules! log_warn {
     ($sub:expr, $fmt:expr) => {
-        $crate::log::registrar($crate::log::Level::Warn, $sub, format_args!($fmt))
+        { let _ = $crate::log::registrar($crate::log::Level::Warn, $sub, format_args!($fmt)); }
     };
     ($sub:expr, $fmt:expr, $($arg:tt)*) => {
-        $crate::log::registrar($crate::log::Level::Warn, $sub, format_args!($fmt, $($arg)*))
+        { let _ = $crate::log::registrar($crate::log::Level::Warn, $sub, format_args!($fmt, $($arg)*)); }
     };
 }
 
@@ -278,10 +310,10 @@ macro_rules! log_warn {
 #[macro_export]
 macro_rules! log_info {
     ($sub:expr, $fmt:expr) => {
-        $crate::log::registrar($crate::log::Level::Info, $sub, format_args!($fmt))
+        { let _ = $crate::log::registrar($crate::log::Level::Info, $sub, format_args!($fmt)); }
     };
     ($sub:expr, $fmt:expr, $($arg:tt)*) => {
-        $crate::log::registrar($crate::log::Level::Info, $sub, format_args!($fmt, $($arg)*))
+        { let _ = $crate::log::registrar($crate::log::Level::Info, $sub, format_args!($fmt, $($arg)*)); }
     };
 }
 
@@ -289,10 +321,10 @@ macro_rules! log_info {
 #[macro_export]
 macro_rules! log_debug {
     ($sub:expr, $fmt:expr) => {
-        $crate::log::registrar($crate::log::Level::Debug, $sub, format_args!($fmt))
+        { let _ = $crate::log::registrar($crate::log::Level::Debug, $sub, format_args!($fmt)); }
     };
     ($sub:expr, $fmt:expr, $($arg:tt)*) => {
-        $crate::log::registrar($crate::log::Level::Debug, $sub, format_args!($fmt, $($arg)*))
+        { let _ = $crate::log::registrar($crate::log::Level::Debug, $sub, format_args!($fmt, $($arg)*)); }
     };
 }
 
@@ -300,9 +332,9 @@ macro_rules! log_debug {
 #[macro_export]
 macro_rules! log_trace {
     ($sub:expr, $fmt:expr) => {
-        $crate::log::registrar($crate::log::Level::Trace, $sub, format_args!($fmt))
+        { let _ = $crate::log::registrar($crate::log::Level::Trace, $sub, format_args!($fmt)); }
     };
     ($sub:expr, $fmt:expr, $($arg:tt)*) => {
-        $crate::log::registrar($crate::log::Level::Trace, $sub, format_args!($fmt, $($arg)*))
+        { let _ = $crate::log::registrar($crate::log::Level::Trace, $sub, format_args!($fmt, $($arg)*)); }
     };
 }

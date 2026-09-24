@@ -1730,6 +1730,137 @@ fn tela_recusa_geometria_incoerente() -> Resultado {
     Ok(())
 }
 
+/// Uma mensagem que não cabe no registro diz quanto ficou de fora.
+///
+/// # Por que isso importa mais do que parece
+///
+/// O corte acontece numa fronteira de caractere, então a mensagem truncada
+/// tem cara de mensagem inteira. Medido, mandando trezentos caracteres ao
+/// log: cento e sessenta ficaram, o registro terminou num ponto de aparência
+/// perfeitamente legítima, e nenhum campo dizia que havia mais. Um agente
+/// lendo `log.tail` via um fato que o kernel não afirmou.
+fn log_conta_o_que_nao_coube() -> Resultado {
+    // Cento e oitenta caracteres: acima dos 160 que cabem, e o bastante para
+    // que a diferença seja um número redondo de conferir.
+    const LONGA: &str = concat!(
+        "0123456789012345678901234567890123456789",
+        "0123456789012345678901234567890123456789",
+        "0123456789012345678901234567890123456789",
+        "0123456789012345678901234567890123456789",
+        "01234567890123456789",
+    );
+
+    let guardados =
+        crate::log::registrar(crate::log::Level::Debug, "teste", format_args!("{}", LONGA));
+
+    if guardados >= LONGA.len() {
+        return Err("o registro afirmou ter guardado uma mensagem que nao cabe nele");
+    }
+
+    let mut achou = false;
+    let mut visto = (0usize, 0u16);
+    crate::log::ultimos(4, crate::log::Level::Trace, |registro| {
+        if registro
+            .mensagem()
+            .starts_with("012345678901234567890123456789")
+        {
+            achou = true;
+            visto = (registro.mensagem().len(), registro.perdidos());
+        }
+    });
+
+    if !achou {
+        return Err("o registro longo nao apareceu no anel");
+    }
+    let (guardada, perdidos) = visto;
+    if perdidos == 0 {
+        return Err("o registro nao diz que a mensagem foi cortada");
+    }
+    if guardada + perdidos as usize != LONGA.len() {
+        crate::log_error!(
+            "teste",
+            "{} guardados + {} perdidos != {} enviados",
+            guardada,
+            perdidos,
+            LONGA.len()
+        );
+        return Err("guardados mais perdidos nao somam a mensagem enviada");
+    }
+    if guardados != guardada {
+        return Err("o numero devolvido nao e o que foi guardado");
+    }
+
+    // E a metade que impede um conserto barulhento: uma mensagem que cabe não
+    // pode ser marcada como cortada.
+    let curta = crate::log::registrar(crate::log::Level::Debug, "teste", format_args!("cabe"));
+    if curta != 4 {
+        return Err("uma mensagem curta devolveu um tamanho que nao e o dela");
+    }
+    let mut marcada = false;
+    crate::log::ultimos(1, crate::log::Level::Trace, |registro| {
+        marcada = registro.perdidos() > 0;
+    });
+    if marcada {
+        return Err("uma mensagem que cabe foi marcada como cortada");
+    }
+    Ok(())
+}
+
+/// Uma linha acima do teto é contada à parte, e não indexa a tabela.
+///
+/// O número da linha vem do controlador de interrupção, não de nós. No GIC
+/// ele chega a 1020; a tabela aqui tem 256 entradas. Indexá-la com o número
+/// cru seria leitura fora dos limites — pânico num build de depuração, e
+/// memória alheia num de release.
+///
+/// O desvio existe e nunca foi exercitado: nas duas máquinas em que este
+/// kernel roda, nenhuma linha passa de 48. Medido, trocando o desvio por um
+/// `% MAX_LINHAS`: a suíte inteira passava, e o contador de fora do teto
+/// ficava parado enquanto interrupções eram contabilizadas na linha errada.
+///
+/// A chamada é pública, então não há por que esperar por hardware que a
+/// produza: basta chamá-la.
+fn irq_linha_acima_do_teto_vai_para_o_contador_separado() -> Resultado {
+    let fora_antes = crate::irq::fora_do_teto();
+    let total_antes = crate::irq::total();
+    let ultima_antes = crate::irq::contagem_da_linha(crate::irq::MAX_LINHAS - 1);
+
+    for linha in [
+        crate::irq::MAX_LINHAS,
+        crate::irq::MAX_LINHAS + 1,
+        1020,
+        usize::MAX,
+    ] {
+        crate::irq::contabilizar(linha);
+    }
+
+    if crate::irq::fora_do_teto() != fora_antes + 4 {
+        return Err("as linhas acima do teto nao foram para o contador separado");
+    }
+    // `>=` e não `==`: o total conta também as interrupções de verdade, e o
+    // timer dispara a cem por segundo entre uma leitura e a outra. Exigir
+    // igualdade aqui seria exigir que o relógio parasse.
+    if crate::irq::total() < total_antes + 4 {
+        return Err("o total nao contou as linhas acima do teto");
+    }
+    // A que um `% MAX_LINHAS` teria sujado: `usize::MAX % 256` cai em 255.
+    if crate::irq::contagem_da_linha(crate::irq::MAX_LINHAS - 1) != ultima_antes {
+        return Err("uma linha acima do teto foi contabilizada numa linha real");
+    }
+
+    // E a metade que impede um conserto estrito demais: uma linha válida
+    // continua sendo contada onde deve. Duzentos porque nada nas duas
+    // máquinas interrompe ali — uma linha real subiria sozinha entre as duas
+    // leituras.
+    let valida = 200;
+    let antes = crate::irq::contagem_da_linha(valida);
+    crate::irq::contabilizar(valida);
+    if crate::irq::contagem_da_linha(valida) != antes + 1 {
+        return Err("uma linha valida deixou de ser contada");
+    }
+    Ok(())
+}
+
 /// O teste central da paginação: prova que o mapeamento roteia de verdade.
 ///
 /// Escrevemos pelo endereço virtual recém-mapeado e lemos pelo caminho físico,
@@ -4333,6 +4464,14 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "paginacao: kernel esta mapeado",
         f: paginacao_traduz_endereco_do_kernel,
+    },
+    Caso {
+        nome: "irq: linha acima do teto vai a parte",
+        f: irq_linha_acima_do_teto_vai_para_o_contador_separado,
+    },
+    Caso {
+        nome: "log: conta o que nao coube",
+        f: log_conta_o_que_nao_coube,
     },
     Caso {
         nome: "frames: nunca entrega o frame zero",

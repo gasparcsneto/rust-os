@@ -1319,6 +1319,11 @@ fn log_tail(params: Json, w: &mut JsonWriter) -> fmt::Result {
             w.field_str("level", registro.level.nome())?;
             w.field_str("subsystem", registro.subsistema)?;
             w.field_str("message", registro.mensagem())?;
+            // Quantos bytes da mensagem nao couberam. Zero na esmagadora maioria;
+            // diferente de zero e a diferenca entre ler um fato e ler metade dele.
+            if registro.perdidos() > 0 {
+                w.field_u64("truncated_bytes", registro.perdidos() as u64)?;
+            }
             w.end_object()
         })();
         if let Err(e) = resultado {
