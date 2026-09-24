@@ -58,6 +58,7 @@ mod log;
 mod machine;
 mod mmio;
 mod paginacao;
+mod particoes;
 mod pci;
 mod qemu;
 mod rede;

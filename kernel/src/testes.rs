@@ -1818,6 +1818,144 @@ fn disco_leitura_multipla_atravessa_paginas() -> Resultado {
     Ok(())
 }
 
+/// A tabela de partições lida do disco descreve o disco que o `xtask` montou.
+///
+/// # O que este caso protege
+///
+/// A aritmética da GPT: o vetor de entradas fica num LBA que o cabeçalho
+/// indica, cada entrada tem um tamanho que o cabeçalho indica, e o último
+/// setor é **inclusive**. Errar o inclusive dá uma partição um setor menor;
+/// errar o tamanho da entrada dá partições que não existem, montadas a partir
+/// de bytes no meio de outra.
+///
+/// Os números vêm do `xtask`, que é quem manda montar o disco — e é o mesmo
+/// contrato duplicado que o padrão por setor já tem, pela mesma razão: os
+/// dois lados rodam em máquinas diferentes.
+fn particoes_tabela_do_disco() -> Resultado {
+    let tabela = crate::particoes::varrer()?;
+    let mut vistas = 0;
+
+    for particao in tabela.iter() {
+        vistas += 1;
+        let esperado = match particao.tipo {
+            crate::particoes::Tipo::Esp => (2048u64, 98304u64),
+            crate::particoes::Tipo::Dados => (100352, 262144),
+            crate::particoes::Tipo::Outro => {
+                return Err("apareceu uma particao de tipo inesperado");
+            }
+        };
+        if (particao.primeiro, particao.setores) != esperado {
+            crate::log_error!(
+                "teste",
+                "particao {}: comeca em {} com {} setores",
+                particao.tipo.como_str(),
+                particao.primeiro,
+                particao.setores
+            );
+            return Err("uma particao nao tem o lugar nem o tamanho que o disco declara");
+        }
+    }
+
+    if vistas != 2 {
+        crate::log_error!("teste", "a tabela trouxe {} particoes", vistas);
+        return Err("o disco tem duas particoes e a tabela disse outra coisa");
+    }
+
+    Ok(())
+}
+
+/// O superbloco lido do disco é o que o `mkfs.btrfs` escreveu.
+///
+/// # Por que estes campos
+///
+/// Porque cada um deles vem de um deslocamento diferente, e um erro de
+/// deslocamento produz números plausíveis — um endereço que existe, um
+/// tamanho que cabe. Conferir vários espalhados pelo bloco é o que
+/// transforma "leu alguma coisa" em "leu o campo certo".
+///
+/// O `nodesize` tem um papel a mais: ele é 16 KiB, que é exatamente o que
+/// [`crate::virtio::blk::MAIOR_LEITURA`] traz numa ida ao disco. Os dois
+/// números coincidirem não é sorte — o driver foi dimensionado para isto — e
+/// o caso falha se alguém mudar um sem o outro.
+fn btrfs_superbloco_confere() -> Resultado {
+    let tabela = crate::particoes::varrer()?;
+    let particao = tabela
+        .primeira(crate::particoes::Tipo::Dados)
+        .ok_or("nao ha particao de dados")?;
+
+    let mut bloco = alloc::vec![0u8; 4096];
+    let sb = crate::vfs::btrfs::do_disco(particao.primeiro, &mut bloco)?;
+
+    if crate::vfs::btrfs::rotulo(&bloco) != "duke-raiz" {
+        return Err("o rotulo do sistema de arquivos nao e o esperado");
+    }
+    if sb.tamanho_de_no as usize != crate::virtio::blk::MAIOR_LEITURA {
+        crate::log_error!(
+            "teste",
+            "o no tem {} bytes e a leitura traz {}",
+            sb.tamanho_de_no,
+            crate::virtio::blk::MAIOR_LEITURA
+        );
+        return Err("o tamanho de no nao e o que o disco le numa ida");
+    }
+    if sb.tamanho_de_setor != 4096 {
+        return Err("o tamanho de setor do sistema de arquivos mudou");
+    }
+    if sb.total != 128 * 1024 * 1024 {
+        return Err("o sistema de arquivos nao tem o tamanho da particao");
+    }
+    // Os dois endereços de raiz são lógicos, e o que se pode afirmar sem
+    // traduzi-los é que existem e não coincidem: são árvores diferentes.
+    if sb.raiz == 0 || sb.raiz_dos_pedacos == 0 || sb.raiz == sb.raiz_dos_pedacos {
+        return Err("as raizes do superbloco nao sao dois enderecos distintos");
+    }
+
+    Ok(())
+}
+
+/// Um superbloco com qualquer byte trocado é recusado.
+///
+/// # Por que este é o caso que importa
+///
+/// Porque calcular a soma e **conferi-la** são coisas diferentes, e a
+/// diferença não aparece em nenhum caminho feliz. Um leitor que calculasse e
+/// ignorasse o resultado passaria no caso anterior inteiro — e o primeiro
+/// disco com um bit trocado viraria um sistema de arquivos com estruturas
+/// inventadas, que é o pior desfecho possível para um erro de mídia.
+///
+/// Também confere que a magia é conferida antes: sem ela, um bloco de zeros
+/// seria lido como um sistema de arquivos com todos os campos zerados.
+fn btrfs_recusa_superbloco_adulterado() -> Resultado {
+    let tabela = crate::particoes::varrer()?;
+    let particao = tabela
+        .primeira(crate::particoes::Tipo::Dados)
+        .ok_or("nao ha particao de dados")?;
+
+    let mut bloco = alloc::vec![0u8; 4096];
+    crate::vfs::btrfs::do_disco(particao.primeiro, &mut bloco)?;
+
+    // Um bit trocado bem no fim do bloco, longe de qualquer campo que o
+    // leitor consulte: só a soma pode perceber.
+    let ultimo = bloco.len() - 1;
+    bloco[ultimo] ^= 1;
+    if crate::vfs::btrfs::ler_superbloco(&bloco).is_ok() {
+        return Err("um byte trocado no fim do bloco passou pela soma");
+    }
+    bloco[ultimo] ^= 1;
+
+    // E com o bloco de volta ao que era, ele volta a ser aceito. Sem esta
+    // metade, um leitor que recusasse tudo passaria na primeira.
+    crate::vfs::btrfs::ler_superbloco(&bloco)?;
+
+    // A magia vem antes da soma: um bloco de zeros não é um superbloco.
+    let zeros = alloc::vec![0u8; 4096];
+    if crate::vfs::btrfs::ler_superbloco(&zeros).is_ok() {
+        return Err("um bloco de zeros passou por superbloco");
+    }
+
+    Ok(())
+}
+
 /// A ausência de framebuffer é sempre defeito, nas duas arquiteturas.
 ///
 /// # Por que isto já foi condicional, e por que não é mais
@@ -5266,6 +5404,18 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "disco: uma leitura so atravessa varias paginas",
         f: disco_leitura_multipla_atravessa_paginas,
+    },
+    Caso {
+        nome: "particoes: a tabela do disco e a que o disco tem",
+        f: particoes_tabela_do_disco,
+    },
+    Caso {
+        nome: "btrfs: o superbloco do disco confere",
+        f: btrfs_superbloco_confere,
+    },
+    Caso {
+        nome: "btrfs: recusa um superbloco adulterado",
+        f: btrfs_recusa_superbloco_adulterado,
     },
     Caso {
         nome: "disco: recusa setor fora da capacidade",

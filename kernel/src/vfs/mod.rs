@@ -27,6 +27,7 @@
 //! uma opção disponível, e o primeiro a usá-lo descobre que nunca foi
 //! exercitado.
 
+pub mod btrfs;
 pub mod programas;
 
 extern crate alloc;

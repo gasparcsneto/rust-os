@@ -207,6 +207,18 @@ pub static COMANDOS: &[Command] = &[
         handler: video_sample,
     },
     Command {
+        nome: "disk.partitions",
+        resumo: "A tabela de particoes do disco, lida da GPT.",
+        params: &[],
+        handler: disk_partitions,
+    },
+    Command {
+        nome: "btrfs.info",
+        resumo: "O superbloco do sistema de arquivos da particao de dados.",
+        params: &[],
+        handler: btrfs_info,
+    },
+    Command {
         nome: "fs.mounts",
         resumo: "O que esta montado na arvore de arquivos, e de que tipo.",
         params: &[],
@@ -662,6 +674,85 @@ const MAX_GRADE: u64 = 64;
 ///
 /// A amostra e por ponto, e nao por media da regiao. A media suavizaria
 /// justamente a borda entre duas cores, que e o que se quer enxergar.
+/// O superbloco do Btrfs da partição de dados.
+///
+/// Todo campo aqui tem um valor conhecido do lado de fora: um
+/// `btrfs inspect-internal dump-super` sobre a mesma imagem imprime os
+/// mesmos números. É o que torna esta resposta uma conferência e não uma
+/// afirmação — se o leitor errar um deslocamento, os dois discordam.
+fn btrfs_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+
+    let tabela = match crate::particoes::varrer() {
+        Ok(t) => t,
+        Err(motivo) => {
+            w.field_str("error", motivo)?;
+            return w.end_object();
+        }
+    };
+    let Some(particao) = tabela.primeira(crate::particoes::Tipo::Dados) else {
+        w.field_str("error", "nao ha particao de dados no disco")?;
+        return w.end_object();
+    };
+
+    w.field_u64("partition_first_sector", particao.primeiro)?;
+
+    // O bloco vai no heap: quatro kilobytes na pilha de uma tarefa do
+    // executor seriam metade de uma pilha de fio.
+    let mut bloco = alloc::vec![0u8; 4096];
+    match crate::vfs::btrfs::do_disco(particao.primeiro, &mut bloco) {
+        Ok(sb) => {
+            w.field_str("label", crate::vfs::btrfs::rotulo(&bloco))?;
+            w.field_u64("generation", sb.geracao)?;
+            w.field_u64("root", sb.raiz)?;
+            w.field_u64("root_level", u64::from(sb.nivel_da_raiz))?;
+            w.field_u64("chunk_root", sb.raiz_dos_pedacos)?;
+            w.field_u64("chunk_root_level", u64::from(sb.nivel_da_raiz_dos_pedacos))?;
+            w.field_u64("total_bytes", sb.total)?;
+            w.field_u64("bytes_used", sb.usado)?;
+            w.field_u64("sectorsize", u64::from(sb.tamanho_de_setor))?;
+            w.field_u64("nodesize", u64::from(sb.tamanho_de_no))?;
+            w.field_u64(
+                "sys_chunk_array_size",
+                u64::from(sb.tamanho_do_vetor_de_pedacos),
+            )?;
+        }
+        Err(motivo) => w.field_str("error", motivo)?,
+    }
+
+    w.end_object()
+}
+
+/// A tabela de partições.
+///
+/// A primeira pergunta de quem vai montar qualquer coisa: o que existe neste
+/// disco, e onde. Os números saem do mesmo lugar que um `sgdisk -p` do lado
+/// de fora reporta, o que torna a resposta conferível sem confiar em nós.
+fn disk_partitions(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+
+    match crate::particoes::varrer() {
+        Ok(tabela) => {
+            w.key("partitions")?;
+            w.begin_array()?;
+            for (numero, particao) in tabela.iter().enumerate() {
+                w.begin_object()?;
+                // Numeradas a partir de um, como toda ferramenta de
+                // particionamento numera.
+                w.field_u64("number", numero as u64 + 1)?;
+                w.field_u64("first_sector", particao.primeiro)?;
+                w.field_u64("sectors", particao.setores)?;
+                w.field_str("type", particao.tipo.como_str())?;
+                w.end_object()?;
+            }
+            w.end_array()?;
+        }
+        Err(motivo) => w.field_str("error", motivo)?,
+    }
+
+    w.end_object()
+}
+
 /// O que está montado.
 ///
 /// A resposta mais curta do canal, e a que responde à primeira pergunta de
