@@ -44,6 +44,30 @@ pub fn tick() {
     // e não nos handlers de cada arquitetura, porque a contagem do tempo já é
     // o ponto neutro por onde as duas passam.
     crate::tarefas::relogio::tique();
+
+    // E puxa o que estiver parado na serial do agente, uma vez a cada tique.
+    //
+    // # Por que um kernel que tem interrupção de recepção precisa disto
+    //
+    // Porque a interrupção pode se perder, e no ARM ela se perde de um jeito
+    // que não volta sozinho. `coletar` drena no máximo um teto de bytes por
+    // interrupção; num despejo grande o hospedeiro realimenta a FIFO enquanto
+    // drenamos, o teto é atingido com ela ainda cheia, e a causa de recepção
+    // **já foi reconhecida** na entrada. A PL011 só a levanta de novo quando a
+    // FIFO cruza o nível de gatilho, o que exige esvaziá-la antes. Ninguém
+    // esvazia, e o canal morre em silêncio.
+    //
+    // Medido, despejando vinte mil bytes pelo canal do agente no ARM: depois
+    // de algumas rodadas o canal parava de responder e não voltava, com o
+    // kernel **ocioso** — zero tiques de CPU em cinco segundos, e as
+    // interrupções de relógio entrando e voltando ao mesmo `wfi`. O x86 não
+    // sofria: o 16550 do QEMU recalcula a causa por nível.
+    //
+    // Dá para apertar o teto do `coletar`, e vale; mas a raiz é depender de um
+    // único caminho para uma coisa que não pode falhar. Uma puxada por tique
+    // custa dois testes de registrador a cem hertz e transforma "o canal
+    // morreu" em "o canal teve dez milissegundos de latência".
+    crate::tarefas::entrada::coletar();
 }
 
 /// Quantas interrupções de timer ocorreram desde o boot.

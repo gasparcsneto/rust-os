@@ -1460,31 +1460,60 @@ fn um_despejo(escrita: &mut UnixStream, leitor: &mut BufReader<UnixStream>) -> R
         ));
     }
 
-    // A metade que importa: o estrago para na requisição que o causou.
+    // A metade que importa: o canal volta, e volta alinhado.
     //
-    // Sem retentativa e sem drenagem de propósito. O kernel vê todo byte que
-    // chega — só não consegue guardar todos —, então ele sabe onde a
-    // requisição atropelada terminou e repõe o `\n` que não coube. O quadro
-    // seguinte chega intacto e é respondido de primeira.
+    // # Por que com retentativa, depois de eu ter tirado a retentativa
     //
-    // Enquanto o delimitador podia se perder junto com o excesso, esta sonda
-    // falhava em dois de cada três despejos no ARM: o pedido seguinte era
-    // consumido na ressincronização.
-    escrita
-        .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":4242,\"method\":\"agent.ping\"}\n")
-        .and_then(|()| escrita.flush())
-        .map_err(|e| format!("despejo: falha ao enviar o pedido seguinte: {e}"))?;
+    // Porque a versão sem ela exigia do kernel uma garantia que ele não
+    // promete, e eu afirmei o contrário. O texto do commit dizia
+    // "determinístico por construção"; a CI seguinte reprovou na primeira
+    // execução, no ARM, com o pedido seguinte sem resposta.
+    //
+    // O que acontece é que o aviso de perda sai quando a perda é **detectada**
+    // — com a fila cheia nos primeiros quatro mil bytes de um despejo de vinte
+    // mil. O cliente é avisado enquanto o kernel ainda está descartando o
+    // resto, e o que ele mandar nessa janela é descartado junto. Nesta máquina
+    // o kernel absorve o despejo inteiro mais rápido que a ida e volta e a
+    // janela nunca é atingida; num runner mais lento, é.
+    //
+    // Tentei mover o aviso para o fim do quadro perdido, o que fecharia a
+    // janela. O resultado foi um travamento do canal no ARM que eu não
+    // consegui explicar — e código que eu não entendo não entra. Fica
+    // registrado como trabalho em aberto.
+    //
+    // Então a sonda passa a exigir o que o contrato de fato promete, e que
+    // está escrito em `RpcError::ENTRADA_PERDIDA`: o erro manda reenviar, e o
+    // canal volta alinhado. Três tentativas, cada uma conferida pelo próprio
+    // `id` — uma resposta com o `id` de outro pedido é falha, não recuperação.
+    let mut voltou = 0u32;
+    for tentativa in 0..3u32 {
+        let id = 4242 + tentativa;
+        escrita
+            .write_all(
+                format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"agent.ping\"}}\n")
+                    .as_bytes(),
+            )
+            .and_then(|()| escrita.flush())
+            .map_err(|e| format!("falha ao enviar o pedido seguinte: {e}"))?;
 
-    let mut seguinte = String::new();
-    leitor
-        .read_line(&mut seguinte)
-        .map_err(|e| format!("despejo: o pedido seguinte ao despejo ficou sem resposta: {e}"))?;
-
-    if !seguinte.starts_with(r#"{"jsonrpc":"2.0","id":4242,"#) {
-        return Err(format!(
-            "despejo: o pedido seguinte foi engolido pela ressincronização\n  {}",
-            seguinte.trim()
-        ));
+        let mut seguinte = String::new();
+        match leitor.read_line(&mut seguinte) {
+            Ok(0) => return Err("o canal fechou depois do despejo".into()),
+            Ok(_) => {}
+            // Silêncio é o sintoma de um pedido engolido pela janela de
+            // descarte: reenviar é exatamente o que o erro mandou fazer.
+            Err(_) => continue,
+        }
+        if seguinte.starts_with(&format!(r#"{{"jsonrpc":"2.0","id":{id},"#)) {
+            voltou = tentativa + 1;
+            break;
+        }
+    }
+    if voltou == 0 {
+        return Err("o canal não voltou em três tentativas".into());
+    }
+    if voltou > 1 {
+        println!("  [despejo] canal de volta na tentativa {voltou}");
     }
 
     println!("  [despejo] ok  {DESPEJO} bytes recusados, canal alinhado");
