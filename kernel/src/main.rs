@@ -52,6 +52,7 @@ mod arch;
 mod fios;
 mod frames;
 mod heap;
+mod interpretador;
 mod irq;
 mod log;
 mod machine;
@@ -300,6 +301,8 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
         let mut executor = tarefas::executor::Executor::novo();
         executor.lancar(tarefas::Tarefa::nova("agent", agent::atender()));
         executor.lancar(tarefas::Tarefa::nova("pulso", pulso()));
+        // E o interpretador, que atende quem estiver na frente da máquina.
+        executor.lancar(tarefas::Tarefa::nova("console", interpretador::atender()));
         executor.rodar()
     } else {
         log_error!("agent", "nenhuma porta serial para o canal do agente");

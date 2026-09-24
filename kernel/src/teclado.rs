@@ -37,6 +37,21 @@ const CAPACIDADE: usize = 64;
 
 static TECLADO: Fila<char, CAPACIDADE> = Fila::nova();
 
+/// O que foi digitado, para quem pergunta de fora.
+///
+/// # Por que uma segunda fila, e não uma leitura da primeira
+///
+/// Porque a fila do teclado tem **dono**: o interpretador, que atende quem
+/// está na frente da máquina. Um segundo consumidor tirando dela não observa
+/// o que foi digitado — ele rouba. Medido: com o canal do agente e o
+/// interpretador lendo a mesma fila, a sonda de fumaça recebeu `a` das três
+/// teclas que mandou, e as outras duas foram para o interpretador.
+///
+/// Esta aqui é escrita junto com a outra e lida só pelo canal. Quem a
+/// consome não tira nada de ninguém — e se ninguém a consumir, ela transborda
+/// e conta os descartes, que é o comportamento certo para um diagnóstico.
+static HISTORICO: Fila<char, CAPACIDADE> = Fila::nova();
+
 /// Alguma das duas teclas de shift está pressionada?
 ///
 /// Uma só para as duas: o hardware distingue a esquerda da direita, e nada
@@ -139,6 +154,13 @@ pub fn evento(codigo_da_tecla: u8, pressionada: bool) {
     // guarda quantos se perderam, e não há para quem reclamar aqui dentro —
     // isto roda num handler de interrupção.
     let _ = TECLADO.enfileirar(c);
+    let _ = HISTORICO.enfileirar(c);
+
+    // E avisar quem espera. Depois de enfileirar, nunca antes: um waker
+    // acordado para uma fila ainda vazia faz a tarefa consultar, não achar
+    // nada e voltar a dormir — e ninguém a acorda de novo.
+    #[cfg(not(feature = "modo-teste"))]
+    despertar();
 }
 
 /// O caractere que um código produz, com o shift que estiver valendo.
@@ -159,8 +181,16 @@ pub fn caractere(codigo_da_tecla: u8) -> Option<char> {
 }
 
 /// Tira o próximo caractere digitado, se houver algum.
+///
+/// É por aqui que o interpretador lê, e ele é o único que deveria: ver a nota
+/// de [`HISTORICO`] sobre por que um segundo leitor rouba em vez de observar.
 pub fn ler() -> Option<char> {
     TECLADO.desenfileirar()
+}
+
+/// Tira o próximo caractere do histórico de diagnóstico.
+pub fn observar() -> Option<char> {
+    HISTORICO.desenfileirar()
 }
 
 /// Quantas teclas viraram caractere desde o boot.
@@ -169,18 +199,94 @@ pub fn pressionadas() -> u64 {
 }
 
 /// Quantos caracteres se perderam por ninguém ler.
+///
+/// Soma as duas filas: perder no histórico é perder um diagnóstico, perder na
+/// do interpretador é perder o que alguém digitou. As duas contam, e quem
+/// investiga quer saber que houve perda antes de saber onde.
 pub fn descartados() -> u64 {
-    TECLADO.descartados()
+    TECLADO.descartados() + HISTORICO.descartados()
 }
 
-/// Quantos caracteres estão esperando leitura.
+/// Quantos caracteres estão esperando no histórico.
 pub fn esperando() -> usize {
-    TECLADO.ocupacao()
+    HISTORICO.ocupacao()
 }
 
 /// Devolve o teclado ao estado de quem não digitou nada. Para a suíte.
 #[cfg(feature = "modo-teste")]
 pub fn esvaziar() {
     while TECLADO.desenfileirar().is_some() {}
+    while HISTORICO.desenfileirar().is_some() {}
     SHIFT.store(false, Ordering::Relaxed);
+}
+
+// ---------------------------------------------------------------------------
+// Esperar por uma tecla sem girar
+// ---------------------------------------------------------------------------
+
+/// Quem acordar quando uma tecla chegar.
+///
+/// Mesma estrutura de [`crate::tarefas::entrada`], e pela mesma razão: uma
+/// tarefa que espera entrada não deve ser repolada até haver entrada. A
+/// diferença é o que acorda — lá um byte do agente, aqui uma tecla de uma
+/// pessoa — e as duas convivem no mesmo executor.
+#[cfg(not(feature = "modo-teste"))]
+static DESPERTADOR: spin::Mutex<Option<core::task::Waker>> = spin::Mutex::new(None);
+
+#[cfg(not(feature = "modo-teste"))]
+fn despertar() {
+    crate::arch::sem_interrupcoes(|| {
+        if let Some(waker) = DESPERTADOR.lock().as_ref() {
+            waker.wake_by_ref();
+        }
+    });
+}
+
+/// A próxima tecla digitada, quando houver uma.
+#[cfg(not(feature = "modo-teste"))]
+pub fn proxima_tecla() -> ProximaTecla {
+    ProximaTecla
+}
+
+/// O futuro devolvido por [`proxima_tecla`].
+///
+/// Sem estado: tudo de que precisa está nos `static` do módulo.
+#[cfg(not(feature = "modo-teste"))]
+pub struct ProximaTecla;
+
+#[cfg(not(feature = "modo-teste"))]
+impl core::future::Future for ProximaTecla {
+    type Output = char;
+
+    fn poll(
+        self: core::pin::Pin<&mut Self>,
+        contexto: &mut core::task::Context,
+    ) -> core::task::Poll<char> {
+        // Caminho rápido: com teclas na fila, nem tocamos no waker.
+        if let Some(c) = ler() {
+            return core::task::Poll::Ready(c);
+        }
+
+        crate::arch::sem_interrupcoes(|| {
+            let mut guarda = DESPERTADOR.lock();
+            // `will_wake` evita clonar um waker idêntico ao guardado, que é o
+            // caso em toda repolagem da mesma tarefa.
+            if guarda
+                .as_ref()
+                .is_some_and(|atual| atual.will_wake(contexto.waker()))
+            {
+                return;
+            }
+            *guarda = Some(contexto.waker().clone());
+        });
+
+        // Segunda consulta, agora com o waker no lugar. Sem ela, uma tecla que
+        // chegasse entre a primeira consulta e o registro acordaria um waker
+        // que ainda não existia, e o aviso se perderia — a tarefa dormiria
+        // para sempre com a tecla na fila.
+        match ler() {
+            Some(c) => core::task::Poll::Ready(c),
+            None => core::task::Poll::Pending,
+        }
+    }
 }

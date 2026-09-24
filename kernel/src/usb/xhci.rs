@@ -1184,7 +1184,8 @@ impl Xhci {
         self.teclado = Some(TecladoUsb {
             anel,
             dci,
-            proximo: 0,
+            submetidos: 0,
+            colhidos: 0,
         });
         self.pendurar_relatorios();
         Ok(())
@@ -1195,22 +1196,32 @@ impl Xhci {
         self.buffer + (RELATORIOS_EM + i * crate::usb::hid::TAMANHO_DO_RELATORIO) as u64
     }
 
-    /// Pendura no controlador as transferências que faltam.
+    /// Pendura no controlador as transferências que faltam — só as que faltam.
     fn pendurar_relatorios(&mut self) {
+        let buffer = self.buffer;
+        let slot = self.slot;
         let Some(teclado) = self.teclado.as_mut() else {
             return;
         };
         let dci = teclado.dci;
-        for i in 0..RELATORIOS {
+
+        let mut pendurou = false;
+        while teclado.submetidos - teclado.colhidos < RELATORIOS as u64 {
+            let i = (teclado.submetidos % RELATORIOS as u64) as usize;
             let endereco =
-                self.buffer + (RELATORIOS_EM + i * crate::usb::hid::TAMANHO_DO_RELATORIO) as u64;
+                buffer + (RELATORIOS_EM + i * crate::usb::hid::TAMANHO_DO_RELATORIO) as u64;
             teclado.anel.empurrar(
                 endereco,
                 crate::usb::hid::TAMANHO_DO_RELATORIO as u32,
                 (trb::NORMAL << 10) | AVISAR,
             );
+            teclado.submetidos += 1;
+            pendurou = true;
         }
-        self.campainha(self.slot, u32::from(dci));
+
+        if pendurou {
+            self.campainha(slot, u32::from(dci));
+        }
     }
 
     /// Lê os relatórios que chegaram e devolve as transferências.
@@ -1242,8 +1253,8 @@ impl Xhci {
             // e não do endereço do TRB, que exigiria procurar no anel.
             let indice = {
                 let teclado = self.teclado.as_mut().expect("conferido acima");
-                let indice = teclado.proximo;
-                teclado.proximo = (teclado.proximo + 1) % RELATORIOS;
+                let indice = (teclado.colhidos % RELATORIOS as u64) as usize;
+                teclado.colhidos += 1;
                 indice
             };
 
@@ -1277,8 +1288,26 @@ struct TecladoUsb {
     anel: Anel,
     /// O identificador do endpoint dentro do slot.
     dci: u8,
-    /// Qual buffer de relatório é o próximo a voltar.
-    proximo: usize,
+    /// Quantas transferências já foram entregues ao controlador.
+    submetidos: u64,
+    /// Quantas já voltaram.
+    ///
+    /// # Por que dois contadores, e não um índice
+    ///
+    /// Porque a diferença entre eles é quantas estão **com o dispositivo**, e
+    /// era isso que faltava. A primeira versão pendurava quatro
+    /// transferências a cada colheita, sem saber quantas tinham voltado: com
+    /// uma só de volta, o anel passava a ter sete pendentes apontando para
+    /// quatro buffers, dois a dois. O dispositivo escrevia dois relatórios no
+    /// mesmo lugar e a conta de qual buffer voltou saía errada dali em
+    /// diante.
+    ///
+    /// Com três teclas não aparecia — quatro buffers cobriam a rajada inteira
+    /// antes de qualquer recolocação. Apareceu na sonda do interpretador, que
+    /// digita doze: `agent.ping` chegava truncado, e o comando nunca
+    /// executava. É o mesmo defeito que a placa de rede documenta, pela mesma
+    /// razão: entregar o mesmo buffer duas vezes não deixa marca no que se lê.
+    colhidos: u64,
 }
 
 /// Recolhe o que o teclado USB tiver entregue.

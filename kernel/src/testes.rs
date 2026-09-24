@@ -1591,6 +1591,37 @@ fn usb_relatorio_hid_vira_teclas() -> Resultado {
     Ok(())
 }
 
+/// Uma linha digitada se separa em nome de comando e parâmetros.
+///
+/// # O que este caso protege
+///
+/// A única lógica do interpretador que não depende de hardware, e a que erra
+/// em silêncio: um nome com espaço sobrando não é encontrado no registro, e o
+/// que a pessoa vê é "comando desconhecido" para um comando que existe.
+///
+/// Os parâmetros ausentes viram `{}`, e não string vazia. A diferença importa
+/// porque é o que o registro recebe: um `Json` sobre bytes vazios não é um
+/// objeto, e todo handler que consulta um parâmetro opcional passaria a ver
+/// ausência onde deveria ver um objeto sem campos.
+fn console_linha_vira_nome_e_parametros() -> Resultado {
+    use crate::interpretador::separar;
+
+    if separar("agent.ping") != ("agent.ping", "{}") {
+        return Err("um comando sem parametros nao virou nome mais objeto vazio");
+    }
+
+    // Espaços dos dois lados, e mais de um no meio: é o que uma pessoa digita.
+    if separar("  log.tail   {\"count\":3}  ") != ("log.tail", "{\"count\":3}") {
+        return Err("os espacos em volta entraram no nome ou nos parametros");
+    }
+
+    if separar("") != ("", "{}") {
+        return Err("a linha vazia nao virou nome vazio");
+    }
+
+    Ok(())
+}
+
 /// A ausência de framebuffer é sempre defeito, nas duas arquiteturas.
 ///
 /// # Por que isto já foi condicional, e por que não é mais
@@ -4767,6 +4798,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "usb: o relatorio hid vira teclas",
         f: usb_relatorio_hid_vira_teclas,
+    },
+    Caso {
+        nome: "console: a linha vira nome e parametros",
+        f: console_linha_vira_nome_e_parametros,
     },
     Caso {
         nome: "memoria: regioes coerentes",

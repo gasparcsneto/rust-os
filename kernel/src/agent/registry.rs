@@ -76,6 +76,16 @@ pub struct Command {
 ///
 /// Busca linear: com uma dezena de comandos, uma tabela hash custaria mais em
 /// complexidade do que economizaria em ciclos.
+/// Todos os comandos, na ordem em que foram declarados.
+///
+/// Existe para quem precisa **listar**, e não procurar: `agent.describe`, que
+/// publica a superfície para um agente, e o interpretador, que a lista para
+/// uma pessoa. Os dois saem daqui pela mesma razão — uma segunda lista seria
+/// a que esquece de ser atualizada.
+pub fn todos() -> &'static [Command] {
+    super::commands::COMANDOS
+}
+
 pub fn encontrar(nome: &str) -> Option<&'static Command> {
     super::commands::COMANDOS.iter().find(|c| c.nome == nome)
 }

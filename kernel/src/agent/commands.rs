@@ -317,7 +317,7 @@ fn describe(_params: Json, w: &mut JsonWriter) -> fmt::Result {
 
     w.key("commands")?;
     w.begin_array()?;
-    for cmd in COMANDOS {
+    for cmd in crate::agent::registry::todos() {
         w.begin_object()?;
         w.field_str("name", cmd.nome)?;
         w.field_str("summary", cmd.resumo)?;
@@ -655,14 +655,18 @@ const TECLAS_MAX: u64 = 64;
 
 /// O que foi digitado, e o suficiente para saber se falta alguma coisa.
 ///
-/// # Por que tirar da fila em vez de espiar
+/// # O que este comando lê, e o que ele não lê
 ///
-/// Porque um teclado é um fluxo, e espiar sem consumir faria a próxima
-/// leitura devolver as mesmas teclas. O preço é que a resposta é a única
-/// cópia: um cliente que a perca perdeu o que foi digitado. É o mesmo
-/// contrato de um terminal, e é por isso que os contadores vêm junto —
-/// `dropped` diz se a fila transbordou antes de alguém ler, o que nenhuma
-/// releitura revelaria.
+/// Lê o **histórico**, e não a fila que o interpretador consome. As duas são
+/// escritas juntas, e a distinção existe porque o teclado tem dono: quem está
+/// na frente da máquina. Um comando que tirasse da fila do interpretador não
+/// observaria o que foi digitado — roubaria. Ver a nota em
+/// [`crate::teclado`].
+///
+/// Tira do histórico em vez de espiar porque um teclado é um fluxo, e espiar
+/// sem consumir faria a próxima leitura devolver as mesmas teclas. O preço é
+/// que a resposta é a única cópia; por isso os contadores vêm junto —
+/// `dropped` diz se houve perda, o que nenhuma releitura revelaria.
 fn keyboard_read(params: Json, w: &mut JsonWriter) -> fmt::Result {
     let max = params
         .member("max")
@@ -681,7 +685,7 @@ fn keyboard_read(params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.begin_str()?;
     let mut lidos = 0;
     while lidos < max {
-        let Some(c) = crate::teclado::ler() else {
+        let Some(c) = crate::teclado::observar() else {
             break;
         };
         w.push_char(c)?;

@@ -1538,6 +1538,7 @@ fn conversar(socket: &Path, monitor: &Path, teclado: Teclado, qemu: u32) -> Resu
     sob_carga(&mut escrita, &mut leitor)?;
     sob_despejo(&mut escrita, &mut leitor)?;
     sob_teclado(monitor, teclado, &mut escrita, &mut leitor)?;
+    sob_interpretador(monitor, &mut escrita, &mut leitor)?;
     sob_fragmento(&mut escrita, &mut leitor)
 }
 
@@ -1665,6 +1666,81 @@ fn sob_teclado(
 
     println!("  [teclado] ok  `a`, `b` e `shift-c` chegaram como `{ESPERADO_DO_TECLADO}`");
     Ok(())
+}
+
+/// O que uma pessoa digita vira um comando executado.
+///
+/// # O que esta sonda fecha
+///
+/// A composição. As peças já têm prova: as teclas chegam ao kernel (a sonda
+/// anterior), o texto chega ao framebuffer (a suíte), e o registro de
+/// comandos responde (as oito primeiras sondas). O que ninguém exercitava era
+/// o caminho inteiro — tecla, linha, despacho — que é o que uma pessoa
+/// **faz**.
+///
+/// A evidência sai pelo log, e não pela tela. O interpretador registra o que
+/// executou, então o canal do agente enxerga o que foi digitado na máquina
+/// sem precisar ler pixels. Uma sonda que conferisse a tela teria de
+/// reconhecer glifos, e passaria a testar o reconhecedor.
+///
+/// O `ret` da frente não é enfeite: a sonda anterior digitou `abC` e essa
+/// linha ainda está aberta no interpretador. Executá-la — e receber
+/// "comando desconhecido" — é o que devolve a linha vazia, e de quebra
+/// exercita o caminho de recusa.
+fn sob_interpretador(
+    monitor: &Path,
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+) -> Result<(), String> {
+    println!("[xtask] fumaça: um comando digitado no teclado da máquina");
+
+    let mut mon = UnixStream::connect(monitor)
+        .map_err(|e| format!("interpretador: o monitor nao aceitou conexao: {e}"))?;
+
+    let mut tecla = |nome: &str| -> Result<(), String> {
+        mon.write_all(format!("sendkey {nome}\n").as_bytes())
+            .and_then(|()| mon.flush())
+            .map_err(|e| format!("interpretador: falha ao mandar `{nome}`: {e}"))?;
+        // O emulador entrega uma tecla por vez, e mandá-las sem respiro faz
+        // algumas se perderem entre o monitor e o dispositivo.
+        std::thread::sleep(Duration::from_millis(20));
+        Ok(())
+    };
+
+    tecla("ret")?;
+    for nome in ["a", "g", "e", "n", "t", "dot", "p", "i", "n", "g", "ret"] {
+        tecla(nome)?;
+    }
+
+    // Em laço, pelo mesmo motivo da sonda anterior: entre a tecla e o log há
+    // o pulso do relógio, o executor e o despacho, cada um com o seu tempo.
+    let limite = std::time::Instant::now() + Duration::from_secs(5);
+    let mut ultima = String::new();
+    while std::time::Instant::now() < limite {
+        escrita
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":6666,\"method\":\"log.tail\",\"params\":{\"count\":12}}\n")
+            .and_then(|()| escrita.flush())
+            .map_err(|e| format!("interpretador: falha ao pedir o log: {e}"))?;
+
+        ultima = ler_resposta(leitor)
+            .map_err(|e| format!("interpretador: {e}"))?
+            .trim()
+            .to_string();
+        if !ultima.contains(r#""id":6666"#) {
+            return Err(format!(
+                "interpretador: veio a resposta de outro pedido\n  {ultima}"
+            ));
+        }
+        if ultima.contains("executado: agent.ping") {
+            println!("  [interpretador] ok  `agent.ping` digitado e executado");
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    Err(format!(
+        "interpretador: o comando digitado nao chegou a ser executado\n  {ultima}"
+    ))
 }
 
 /// Um pedaço de requisição abandonado não pode colar no pedido seguinte.

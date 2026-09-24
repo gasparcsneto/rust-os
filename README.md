@@ -541,6 +541,51 @@ lidos de um manual vai para biblioteca, porque errar um não gera erro — gera 
 dispositivo descrito errado. O que fica aqui é decisão nossa: como varrer, o
 que guardar e como reportar.
 
+## Operar por uma pessoa
+
+O canal do agente responde JSON por uma serial dedicada, e é ótimo para um
+agente. Para alguém sentado na frente da máquina ele é ilegível — e no ARM
+era a única coisa que existia. Hoje a mesma máquina atende os dois.
+
+```
+duke> system.info
+{
+  "kernel": "duke",
+  "arch": "aarch64",
+  "version": "0.1.0",
+  "phase": "0",
+  "cpu_vendor": "ARM Limited",
+  ...
+}
+
+duke> nao.existe
+comando desconhecido: nao.existe
+`ajuda` lista os 26 que existem
+```
+
+**O interpretador não tem comandos próprios.** O que se digita é despachado
+pelo mesmo registro que `agent.describe` publica, com os mesmos handlers. Um
+conjunto próprio seria uma segunda superfície, e as duas divergiriam na
+primeira que alguém esquecesse de atualizar — com uma pessoa e um agente vendo
+máquinas diferentes. O que muda é só a renderização: o agente lê uma linha de
+JSON compacto, a pessoa lê o mesmo JSON quebrado em linhas por um
+reformatador que não interpreta nada, só conta chaves e respeita strings.
+
+É a mesma ideia que o log estruturado defende desde o começo: o texto legível
+é uma renderização, e não a fonte da verdade.
+
+**Três caminhos de hardware, um teclado.** O `virtio-input` do ARM e o PS/2 do
+x86 compartilham a numeração de teclas — os códigos do Linux foram derivados
+do conjunto 1 do AT —, então uma tabela serve os dois. O USB tem numeração
+própria e uma tabela de tradução, e desemboca no mesmo lugar. O que cada
+driver faz é extrair o par `(código, pressionada)` do formato dele.
+
+**O teclado tem dono.** A fila de teclas é consumida pelo interpretador, e só
+por ele. `keyboard.read` lê um histórico paralelo, escrito junto e consumido
+separado — porque um segundo consumidor da mesma fila não observa o que foi
+digitado, rouba. Foi medido: com os dois lendo a mesma fila, a sonda recebeu
+uma das três teclas que mandou.
+
 ## Testes
 
 Os testes do kernel **não** rodam com `cargo test`: o harness padrão do Rust
@@ -650,8 +695,10 @@ padronizado.
       texto que vai para o console humano é desenhado na tela, pelo mesmo
       funil, nas duas arquiteturas. Falta: teclado no x86 (PS/2) e no ARM
       (virtio-input), e teclado USB por um driver xHCI próprio — três
-      caminhos de hardware, o mesmo `abC` no fim. Falta: o interpretador que
-      transforma tela mais teclado em operação.
+      caminhos de hardware, o mesmo `abC` no fim. E o interpretador, que
+      despacha o que se digita pelo **mesmo** registro de comandos que o canal
+      do agente publica.
+      **Fase 3 completa.**
 
 ## Licença
 
