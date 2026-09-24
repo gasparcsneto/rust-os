@@ -934,66 +934,291 @@ fn desmontar(arch: Arquitetura, release: bool, simbolo: &str) -> Result<ExitCode
     Ok(ExitCode::SUCCESS)
 }
 
-/// Tamanho do disco de testes.
-const TAMANHO_DO_DISCO: u64 = 1024 * 1024;
-
-/// Bytes reconhecíveis no começo do primeiro setor.
+/// O disco de testes, em setores de 512 bytes.
 ///
-/// O driver de disco precisa de algo que prove que leu o **setor certo** e não
-/// um buffer zerado que por acaso parecia plausível. Um padrão conhecido é a
-/// diferença entre "a leitura retornou" e "a leitura funcionou".
-const ASSINATURA_DO_DISCO: &[u8] = b"DUKE-DISCO-v1";
-
-/// O byte com que o setor `numero` é preenchido.
+/// # Por que um disco de verdade, e não um padrão sintético
 ///
-/// Esta regra e a assinatura acima são metade de um contrato cujo outro lado
-/// está no `testes.rs` do kernel. Duplicá-las é o preço de o disco ser gerado
-/// por um programa que roda no hospedeiro e lido por outro que roda no
-/// hóspede — não há lugar comum onde as duas metades caibam.
-fn marca_do_setor(numero: usize) -> u8 {
-    (numero as u8).wrapping_mul(7).wrapping_add(1)
-}
+/// Porque o que veio antes era um megabyte preenchido por este arquivo, com
+/// uma assinatura nossa no primeiro setor — e quem escrevia e quem lia eram
+/// as duas metades do mesmo projeto. Servia para provar que o driver lia o
+/// setor certo, e não servia para mais nada: não havia partição, tabela nem
+/// sistema de arquivos para um kernel encontrar.
+///
+/// Agora o disco é montado pelas ferramentas do hospedeiro — `sgdisk`,
+/// `mkfs.vfat`, `mkfs.btrfs` —, que não têm nada a ver com este projeto. O
+/// que o kernel lê é uma GPT de verdade, uma ESP de verdade e um Btrfs de
+/// verdade, e a conferência de fora existe: `mdir -i disco.img@@1M` lista a
+/// ESP e `btrfs inspect-internal dump-tree` lê a raiz, os dois sem montar
+/// nada e sem privilégio. É a mesma disciplina do `llvm-readelf` conferindo
+/// os ELFs de usuário.
+mod disco {
+    /// O disco inteiro.
+    pub const SETORES: u64 = 192 * 1024 * 1024 / 512;
 
-/// Monta o conteúdo do disco de testes.
-fn conteudo_do_disco() -> Vec<u8> {
-    let mut conteudo = vec![0u8; TAMANHO_DO_DISCO as usize];
-    for (numero, setor) in conteudo.chunks_mut(512).enumerate() {
-        setor.fill(marca_do_setor(numero));
+    /// Onde a ESP começa e quanto ocupa.
+    ///
+    /// 2048 é onde toda ferramenta de particionamento começa a primeira
+    /// partição: alinha a um mebibyte, que é o tamanho de bloco de apagamento
+    /// de qualquer mídia moderna.
+    pub const ESP_EM: u64 = 2048;
+    pub const ESP_SETORES: u64 = 48 * 1024 * 1024 / 512;
+
+    /// E a raiz, logo depois.
+    pub const RAIZ_EM: u64 = ESP_EM + ESP_SETORES;
+    pub const RAIZ_SETORES: u64 = 128 * 1024 * 1024 / 512;
+
+    /// A faixa que a GPT reserva e ninguém usa: do fim das entradas de
+    /// partição até o começo da primeira.
+    ///
+    /// É onde o padrão por setor continua morando. Ele não descreve mais o
+    /// disco inteiro, mas o que ele prova é o mesmo de antes — que o driver
+    /// leu o setor **certo**, e não um vizinho — e isso nenhum sistema de
+    /// arquivos prova enquanto não existir.
+    pub const PADRAO_DE: u64 = 34;
+    pub const PADRAO_ATE: u64 = ESP_EM - 1;
+
+    /// O byte com que o setor `numero` é preenchido.
+    ///
+    /// Esta regra é metade de um contrato cujo outro lado está no `testes.rs`
+    /// do kernel. Duplicá-la é o preço de o disco ser gerado por um programa
+    /// que roda no hospedeiro e lido por outro que roda no emulador — e é o
+    /// teste do kernel que denuncia se as duas metades divergirem.
+    pub fn marca_do_setor(numero: u64) -> u8 {
+        (numero as u8).wrapping_mul(7).wrapping_add(1)
     }
-    // A assinatura vai por último, por cima do padrão do primeiro setor.
-    conteudo[..ASSINATURA_DO_DISCO.len()].copy_from_slice(ASSINATURA_DO_DISCO);
-    conteudo
+
+    /// O que vai dentro da ESP e da raiz.
+    ///
+    /// Poucos arquivos, e com conteúdo reconhecível: o ponto não é exercitar
+    /// um sistema de arquivos cheio, é ter alvos que um teste possa exigir
+    /// pelo nome.
+    pub const NA_ESP: &[(&str, &str)] = &[("NOTA.TXT", "esta nota mora na ESP\n")];
+    pub const NA_RAIZ: &[(&str, &str)] = &[
+        ("saudacao.txt", "ola do btrfs, lido pelo duke\n"),
+        ("bin/exemplo", "um programa que ainda nao roda\n"),
+    ];
 }
 
-/// Cria o disco de testes, ou o recria se o que está lá não confere.
+/// As ferramentas que montam o disco, e o pacote de cada uma.
+const FERRAMENTAS_DO_DISCO: &[(&str, &str)] = &[
+    ("sgdisk", "gdisk"),
+    ("mkfs.vfat", "dosfstools"),
+    ("mcopy", "mtools"),
+    ("mkfs.btrfs", "btrfs-progs"),
+];
+
+/// A descrição de tudo que decide o conteúdo do disco.
 ///
-/// # Por que conferir, e não só existir
+/// # Por que um resumo, e não a comparação do arquivo inteiro
 ///
-/// Porque o arquivo sobrevive ao que o gerou. Ele mora em `target/`, que o CI
-/// mantém em cache entre execuções e que ninguém limpa entre dois `git
-/// checkout` — então um disco gerado por uma versão anterior desta função
-/// continuaria sendo usado por esta.
+/// Porque o disco passou de um megabyte para cento e noventa e dois, e ele é
+/// lido uma vez por invocação do QEMU. A versão anterior comparava byte a
+/// byte, o que era barato no tamanho antigo e não é mais.
 ///
-/// Isso desmontaria a garantia que justifica a duplicação da regra: o teste do
-/// kernel só denuncia a divergência entre os dois lados se o disco for
-/// realmente regerado quando este lado muda. Conferir o conteúdo é o que
-/// transforma "existe um arquivo" em "existe o arquivo certo".
+/// O que a comparação garantia continua garantido: o arquivo sobrevive ao que
+/// o gerou — mora em `target/`, que o CI mantém em cache — e um disco gerado
+/// por uma versão anterior desta função continuaria sendo usado por esta. O
+/// resumo cobre tudo que entra na receita, então mudar qualquer coisa aqui
+/// invalida o disco que está lá.
+fn receita_do_disco() -> String {
+    let mut receita = format!(
+        "v3 setores={} esp={}+{} raiz={}+{} padrao={}..{}\n",
+        disco::SETORES,
+        disco::ESP_EM,
+        disco::ESP_SETORES,
+        disco::RAIZ_EM,
+        disco::RAIZ_SETORES,
+        disco::PADRAO_DE,
+        disco::PADRAO_ATE
+    );
+    for (nome, conteudo) in disco::NA_ESP.iter().chain(disco::NA_RAIZ) {
+        receita.push_str(&format!("{nome} = {conteudo}"));
+    }
+    receita
+}
+
+/// Roda uma ferramenta do hospedeiro e devolve erro com o que ela disse.
+fn ferramenta(nome: &str, args: &[&str]) -> Result<(), String> {
+    let saida = Command::new(nome)
+        .args(args)
+        .output()
+        .map_err(|e| format!("não foi possível executar `{nome}`: {e}"))?;
+    if saida.status.success() {
+        return Ok(());
+    }
+    Err(format!(
+        "`{nome}` falhou: {}{}",
+        String::from_utf8_lossy(&saida.stderr).trim(),
+        String::from_utf8_lossy(&saida.stdout).trim()
+    ))
+}
+
+/// Monta o disco de testes com as ferramentas do hospedeiro.
+fn montar_disco(caminho: &Path) -> Result<(), String> {
+    let faltando: Vec<&str> = FERRAMENTAS_DO_DISCO
+        .iter()
+        .filter(|(binario, _)| which(binario).is_none())
+        .map(|(_, pacote)| *pacote)
+        .collect();
+    if !faltando.is_empty() {
+        return Err(format!(
+            "o disco de testes precisa de ferramentas que não estão instaladas.\n\
+             instale: apt-get install -y {}",
+            faltando.join(" ")
+        ));
+    }
+
+    let alvo = caminho.parent().ok_or("o disco não tem diretório")?;
+    std::fs::create_dir_all(alvo)
+        .map_err(|e| format!("não foi possível criar o diretório do disco: {e}"))?;
+
+    let imagem = caminho.display().to_string();
+    let esp = alvo.join("esp.img").display().to_string();
+    let raiz = alvo.join("raiz.img").display().to_string();
+    let arvore = alvo.join("raiz-do-disco");
+
+    // A imagem inteira, zerada, antes de qualquer coisa.
+    let vazio = vec![0u8; (disco::SETORES * 512) as usize];
+    std::fs::write(caminho, &vazio)
+        .map_err(|e| format!("não foi possível criar a imagem do disco: {e}"))?;
+
+    // A tabela de partições. `sgdisk` escreve também o MBR de proteção, que é
+    // o que impede uma ferramenta antiga de achar o disco vazio e o
+    // reparticionar.
+    ferramenta("sgdisk", &["-o", &imagem])?;
+    ferramenta(
+        "sgdisk",
+        &[
+            "-n",
+            // O `M` do sufixo não é decoração: sem ele o `sgdisk` lê o número
+            // como **setores**, e a partição sai mil vezes menor. Foi o que
+            // aconteceu, e quem acusou foi o `sgdisk -p` conferindo de fora —
+            // as duas partições tinham o conteúdo certo, depositado por
+            // deslocamento, e a tabela descrevia 24 KiB e 64 KiB.
+            &format!(
+                "1:{}:+{}M",
+                disco::ESP_EM,
+                disco::ESP_SETORES * 512 / 1024 / 1024
+            ),
+            "-t",
+            "1:ef00",
+            "-c",
+            "1:ESP",
+            &imagem,
+        ],
+    )?;
+    ferramenta(
+        "sgdisk",
+        &[
+            "-n",
+            &format!(
+                "2:{}:+{}M",
+                disco::RAIZ_EM,
+                disco::RAIZ_SETORES * 512 / 1024 / 1024
+            ),
+            "-t",
+            "2:8300",
+            "-c",
+            "2:raiz",
+            &imagem,
+        ],
+    )?;
+
+    // A ESP, com os arquivos dentro. Ela é montada num arquivo próprio e
+    // depositada na imagem depois: `mkfs.vfat` não sabe escrever a partir de
+    // um deslocamento.
+    std::fs::write(&esp, vec![0u8; (disco::ESP_SETORES * 512) as usize])
+        .map_err(|e| format!("não foi possível criar a imagem da ESP: {e}"))?;
+    ferramenta("mkfs.vfat", &["-F", "32", "-n", "DUKE-ESP", &esp])?;
+    for (nome, conteudo) in disco::NA_ESP {
+        let temporario = alvo.join(nome);
+        std::fs::write(&temporario, conteudo)
+            .map_err(|e| format!("não foi possível escrever {nome}: {e}"))?;
+        ferramenta(
+            "mcopy",
+            &[
+                "-i",
+                &esp,
+                &temporario.display().to_string(),
+                &format!("::/{nome}"),
+            ],
+        )?;
+        let _ = std::fs::remove_file(&temporario);
+    }
+
+    // E a raiz. `mkfs.btrfs --rootdir` monta o sistema de arquivos já com o
+    // conteúdo de um diretório, sem montar nada e sem privilégio — que é o
+    // que torna isto possível dentro de um contêiner.
+    let _ = std::fs::remove_dir_all(&arvore);
+    for (nome, conteudo) in disco::NA_RAIZ {
+        let destino = arvore.join(nome);
+        if let Some(pai) = destino.parent() {
+            std::fs::create_dir_all(pai)
+                .map_err(|e| format!("não foi possível criar {}: {e}", pai.display()))?;
+        }
+        std::fs::write(&destino, conteudo)
+            .map_err(|e| format!("não foi possível escrever {nome}: {e}"))?;
+    }
+    std::fs::write(&raiz, vec![0u8; (disco::RAIZ_SETORES * 512) as usize])
+        .map_err(|e| format!("não foi possível criar a imagem da raiz: {e}"))?;
+    ferramenta(
+        "mkfs.btrfs",
+        &[
+            "--rootdir",
+            &arvore.display().to_string(),
+            "-f",
+            "-L",
+            "duke-raiz",
+            &raiz,
+        ],
+    )?;
+
+    // As duas partições no lugar, e o padrão por setor na faixa reservada.
+    let mut conteudo =
+        std::fs::read(caminho).map_err(|e| format!("não foi possível reler a imagem: {e}"))?;
+    for (origem, em) in [(&esp, disco::ESP_EM), (&raiz, disco::RAIZ_EM)] {
+        let bytes =
+            std::fs::read(origem).map_err(|e| format!("não foi possível ler {origem}: {e}"))?;
+        let inicio = (em * 512) as usize;
+        conteudo[inicio..inicio + bytes.len()].copy_from_slice(&bytes);
+    }
+    for numero in disco::PADRAO_DE..=disco::PADRAO_ATE {
+        let inicio = (numero * 512) as usize;
+        conteudo[inicio..inicio + 512].fill(disco::marca_do_setor(numero));
+    }
+    std::fs::write(caminho, &conteudo)
+        .map_err(|e| format!("não foi possível gravar a imagem: {e}"))?;
+
+    let _ = std::fs::remove_file(&esp);
+    let _ = std::fs::remove_file(&raiz);
+    let _ = std::fs::remove_dir_all(&arvore);
+    Ok(())
+}
+
+/// Onde um executável está, se estiver no caminho.
+fn which(nome: &str) -> Option<PathBuf> {
+    std::env::var_os("PATH")?
+        .to_str()?
+        .split(':')
+        .map(|dir| Path::new(dir).join(nome))
+        .find(|caminho| caminho.is_file())
+}
+
+/// Cria o disco de testes, ou o recria se a receita mudou.
 fn disco_de_testes() -> Result<PathBuf, String> {
     let caminho = raiz_do_projeto().join("target").join("disco.img");
-    let esperado = conteudo_do_disco();
+    let receita = raiz_do_projeto().join("target").join("disco.receita");
+    let esperada = receita_do_disco();
 
-    // A comparação é do arquivo inteiro. Um megabyte lido uma vez por
-    // invocação do QEMU não é custo que se perceba, e conferir por amostragem
-    // deixaria de fora exatamente o setor que divergiu.
-    if std::fs::read(&caminho).is_ok_and(|atual| atual == esperado) {
+    if caminho.is_file() && std::fs::read_to_string(&receita).is_ok_and(|atual| atual == esperada) {
         return Ok(caminho);
     }
 
-    std::fs::create_dir_all(caminho.parent().unwrap())
-        .map_err(|e| format!("não foi possível criar o diretório do disco: {e}"))?;
-    std::fs::write(&caminho, &esperado)
-        .map_err(|e| format!("não foi possível escrever o disco de testes: {e}"))?;
-    println!("[xtask] disco de testes gerado em {}", caminho.display());
+    println!("[xtask] montando o disco de testes (GPT, ESP em FAT32, raiz em Btrfs)");
+    montar_disco(&caminho)?;
+    std::fs::write(&receita, &esperada)
+        .map_err(|e| format!("não foi possível gravar a receita do disco: {e}"))?;
+    println!("[xtask] disco de testes em {}", caminho.display());
     Ok(caminho)
 }
 

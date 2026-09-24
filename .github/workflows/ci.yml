@@ -88,11 +88,19 @@ jobs:
           key: testes-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: testes-${{ matrix.arch }}-
 
-      - name: Instalar o emulador
+      # O emulador e as ferramentas que montam o disco de testes.
+      #
+      # O disco deixou de ser um padrão que o `xtask` inventa e passou a ser
+      # uma GPT de verdade, com uma ESP em FAT32 e uma raiz em Btrfs, montadas
+      # por ferramentas que não têm nada a ver com este projeto. Nenhuma delas
+      # precisa de privilégio: `mkfs.btrfs --rootdir` monta o sistema de
+      # arquivos já com conteúdo, sem montar nada.
+      - name: Instalar o emulador e as ferramentas de disco
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            qemu-system-x86 qemu-system-arm
+            qemu-system-x86 qemu-system-arm \
+            gdisk dosfstools mtools btrfs-progs
 
       - name: Suíte de testes
         run: cargo xtask test --arch ${{ matrix.arch }}

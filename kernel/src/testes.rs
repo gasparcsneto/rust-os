@@ -5048,8 +5048,8 @@ static CASOS: &[Caso] = &[
         f: pci_regioes_atribuidas_nao_se_sobrepoem,
     },
     Caso {
-        nome: "disco: le a assinatura do setor zero",
-        f: disco_le_a_assinatura_do_setor_zero,
+        nome: "disco: le as assinaturas de particionamento",
+        f: disco_le_as_assinaturas_de_particionamento,
     },
     Caso {
         nome: "disco: cada setor devolve o seu padrao",
@@ -5101,22 +5101,43 @@ static CASOS: &[Caso] = &[
 // O disco
 // ---------------------------------------------------------------------------
 
-/// A assinatura que o `xtask` grava no começo do disco de testes.
+/// A assinatura de um MBR, nos dois últimos bytes do setor zero.
 ///
-/// Ela e a regra de preenchimento abaixo são metade de um contrato cujo outro
-/// lado está em `xtask/src/main.rs`. Duplicá-las é o preço de o disco ser
-/// gerado por um programa que roda no hospedeiro e lido por outro que roda no
-/// hóspede — não há lugar comum onde as duas metades caibam. O que impede a
-/// divergência é este teste: se o `xtask` mudar a regra e não mudar esta, o
-/// caso falha.
-const ASSINATURA_DO_DISCO: &[u8] = b"DUKE-DISCO-v1";
+/// # Por que ela e não uma assinatura nossa
+///
+/// Porque o disco de testes deixou de ser um padrão que este projeto inventa
+/// e passa a ser montado pelas ferramentas do hospedeiro: `sgdisk`,
+/// `mkfs.vfat`, `mkfs.btrfs`. Antes o kernel conferia bytes que o `xtask`
+/// tinha escrito — as duas metades do mesmo projeto concordando entre si.
+/// Agora ele confere marcas que ferramentas de terceiros produziram, e que
+/// existem em qualquer disco particionado do mundo.
+///
+/// O MBR de proteção existe para que uma ferramenta que não entenda GPT veja
+/// o disco como ocupado em vez de vazio. Estes dois bytes são o que ela olha.
+const ASSINATURA_DE_MBR: [u8; 2] = [0x55, 0xAA];
 
-/// O byte com que o setor `numero` é preenchido.
+/// O que o cabeçalho da GPT traz nos primeiros oito bytes do setor um.
+const ASSINATURA_DE_GPT: &[u8] = b"EFI PART";
+
+/// A faixa de setores que a GPT reserva e ninguém usa.
+///
+/// Do fim das entradas de partição até o começo da primeira. É onde o `xtask`
+/// grava o padrão por setor, e a razão de ele ainda existir está em
+/// [`marca_do_setor`].
+const PADRAO_DE: u64 = 34;
+const PADRAO_ATE: u64 = 2047;
+
+/// O byte com que o setor `numero` da faixa reservada é preenchido.
 ///
 /// Deriva do número do setor de propósito. Zeros pareceriam plausíveis em
 /// qualquer lugar, e um erro de deslocamento — ler o setor 3 quando se pediu o
 /// 4 — passaria despercebido. Com um padrão que muda a cada setor, ler o setor
 /// errado é indistinguível de não ler nada.
+///
+/// É metade de um contrato cujo outro lado está em `xtask/src/main.rs`.
+/// Duplicá-lo é o preço de o disco ser gerado por um programa que roda no
+/// hospedeiro e lido por outro que roda no hóspede — não há lugar comum onde
+/// as duas metades caibam. O que impede a divergência é este teste.
 fn marca_do_setor(numero: u64) -> u8 {
     (numero as u8).wrapping_mul(7).wrapping_add(1)
 }
@@ -5184,34 +5205,43 @@ fn pci_regioes_atribuidas_nao_se_sobrepoem() -> Resultado {
 /// É o teste que separa "a leitura retornou" de "a leitura funcionou". Um
 /// caminho de DMA quebrado devolve um buffer intacto — e um buffer intacto é
 /// de zeros, que passariam por qualquer verificação frouxa.
-fn disco_le_a_assinatura_do_setor_zero() -> Resultado {
+fn disco_le_as_assinaturas_de_particionamento() -> Resultado {
     let mut setor = [0u8; crate::virtio::blk::TAMANHO_DO_SETOR];
     let Some(resultado) = crate::virtio::blk::com_o_disco(|d| d.ler_setor(0, &mut setor)) else {
         return Err("nao ha disco nesta maquina");
     };
     resultado?;
 
-    if &setor[..ASSINATURA_DO_DISCO.len()] != ASSINATURA_DO_DISCO {
+    if setor[510..512] != ASSINATURA_DE_MBR {
         crate::log_error!(
             "teste",
-            "o setor zero comeca com {:#04x} {:#04x} {:#04x} {:#04x}",
+            "o setor zero termina com {:#04x} {:#04x}",
+            setor[510],
+            setor[511]
+        );
+        return Err("o setor zero nao traz a assinatura do disco");
+    }
+
+    // E o setor um, que é o cabeçalho da GPT. Ler o setor zero inteiro não
+    // prova que a leitura trouxe os 512 bytes: a assinatura mora nos dois
+    // últimos, então um driver que só trouxesse o fim do setor passaria. O
+    // cabeçalho seguinte é a marca que mora no **começo** de um setor, e os
+    // dois juntos cobrem as duas pontas.
+    let Some(resultado) = crate::virtio::blk::com_o_disco(|d| d.ler_setor(1, &mut setor)) else {
+        return Err("nao ha disco nesta maquina");
+    };
+    resultado?;
+
+    if &setor[..ASSINATURA_DE_GPT.len()] != ASSINATURA_DE_GPT {
+        crate::log_error!(
+            "teste",
+            "o setor um comeca com {:#04x} {:#04x} {:#04x} {:#04x}",
             setor[0],
             setor[1],
             setor[2],
             setor[3]
         );
-        return Err("o setor zero nao traz a assinatura do disco");
-    }
-
-    // O resto do setor zero segue a mesma regra dos outros. Conferi-lo aqui é
-    // o que prova que a leitura trouxe o setor **inteiro**, e não só os
-    // primeiros bytes.
-    let marca = marca_do_setor(0);
-    if setor[ASSINATURA_DO_DISCO.len()..]
-        .iter()
-        .any(|&b| b != marca)
-    {
-        return Err("o resto do setor zero nao segue o padrao");
+        return Err("o setor um nao traz o cabecalho da GPT");
     }
 
     Ok(())
@@ -5223,9 +5253,12 @@ fn disco_le_a_assinatura_do_setor_zero() -> Resultado {
 /// ignora o número do setor e devolve sempre o primeiro. Esta é a verificação
 /// que fecha essa porta.
 fn disco_cada_setor_devolve_o_seu_padrao() -> Resultado {
-    // Os escolhidos não são consecutivos de propósito: um erro de um setor
-    // para cima ou para baixo é o mais provável, e saltos o tornam visível.
-    const ALVOS: [u64; 5] = [1, 2, 7, 64, 255];
+    // Todos dentro da faixa reservada da GPT, que é onde o padrão mora — ver
+    // [`PADRAO_DE`]. Os escolhidos não são consecutivos de propósito: um erro
+    // de um setor para cima ou para baixo é o mais provável, e saltos o tornam
+    // visível. As duas pontas da faixa entram porque é nelas que um erro de
+    // limite aparece.
+    const ALVOS: [u64; 6] = [PADRAO_DE, PADRAO_DE + 1, 100, 999, 1500, PADRAO_ATE];
 
     let mut setor = [0u8; crate::virtio::blk::TAMANHO_DO_SETOR];
 
