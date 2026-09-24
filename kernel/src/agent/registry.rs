@@ -85,7 +85,28 @@ pub fn encontrar(nome: &str) -> Option<&'static Command> {
 /// Devolve o nome do parâmetro problemático em caso de erro, para que a
 /// resposta diga ao agente *exatamente* o que corrigir em vez de um genérico
 /// "parâmetros inválidos".
-pub fn validar(cmd: &Command, params: Json) -> Result<(), &'static str> {
+pub fn validar<'a>(cmd: &Command, params: Json<'a>) -> Result<(), &'a str> {
+    // Um campo que o comando não conhece é recusado, e não ignorado.
+    //
+    // Ignorar parecia tolerância e era o contrário. Medido contra um kernel de
+    // pé: `user.run {"name":"nao_existe"}` respondia `{"launched":true}` —
+    // `user.run` não declara parâmetro nenhum, o `name` foi jogado fora, e o
+    // agente recebeu sucesso por um pedido que o kernel não honrou.
+    //
+    // Num sistema em que o cliente **descobre** a interface em tempo de
+    // execução, e portanto às vezes chuta, recusar é a única resposta útil:
+    // `agent.describe` diz exatamente quais campos existem, e um erro manda o
+    // agente lê-lo em vez de acreditar num sucesso que não houve.
+    let mut desconhecido: Option<&'a str> = None;
+    params.para_cada_chave(|chave| {
+        if desconhecido.is_none() && !cmd.params.iter().any(|p| p.nome == chave) {
+            desconhecido = Some(chave);
+        }
+    });
+    if let Some(chave) = desconhecido {
+        return Err(chave);
+    }
+
     for spec in cmd.params {
         match params.member(spec.nome) {
             None => {

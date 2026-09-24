@@ -280,6 +280,55 @@ impl<'a> Json<'a> {
         }
     }
 
+    /// Chama `f` para cada chave do nível imediato deste objeto.
+    ///
+    /// É a mesma varredura de [`Self::member`], que já sabe pular strings e
+    /// contêineres aninhados — só que sem um nome procurado. Existe para que a
+    /// validação possa perguntar o inverso do que `member` responde: não "este
+    /// campo veio?", mas "veio algum campo que eu não conheço?".
+    ///
+    /// Um objeto malformado simplesmente não produz chaves: quem precisa de
+    /// erro para isso já o obteve ao procurar os campos que espera.
+    pub fn para_cada_chave(&self, mut f: impl FnMut(&'a str)) {
+        let b = self.0;
+        let mut i = pular_espacos(b, 0);
+        if b.get(i) != Some(&b'{') {
+            return;
+        }
+        i += 1;
+
+        loop {
+            i = pular_espacos(b, i);
+            match b.get(i) {
+                Some(b'}') | None => return,
+                Some(b',') => {
+                    i += 1;
+                    continue;
+                }
+                Some(b'"') => {}
+                Some(_) => return,
+            }
+
+            let inicio_chave = i;
+            let Some(fim_chave) = pular_string(b, i) else {
+                return;
+            };
+            i = pular_espacos(b, fim_chave);
+            if b.get(i) != Some(&b':') {
+                return;
+            }
+            i = pular_espacos(b, i + 1);
+
+            let Some(fim_valor) = pular_valor(b, i) else {
+                return;
+            };
+            if let Ok(chave) = core::str::from_utf8(&b[inicio_chave + 1..fim_chave - 1]) {
+                f(chave);
+            }
+            i = fim_valor;
+        }
+    }
+
     /// O conteúdo de uma string JSON, sem as aspas e sem desescapar.
     ///
     /// Não desescapamos porque os campos que lemos (nomes de método, níveis de

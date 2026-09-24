@@ -897,6 +897,10 @@ fn tasks_stats(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     // funcionando, os dois numeros andam juntos.
     w.field_u64("polls", e.avancos)?;
     w.field_u64("wakes", e.despertares)?;
+    // Despertares que encontraram a tarefa ja enfileirada. Nao sao perda: sao
+    // trabalho que nao precisou ser feito, e sao a explicacao para a distancia
+    // entre `wakes` e `polls`.
+    w.field_u64("wakes_coalesced", e.despertares_juntados)?;
     // Tarefas que existem e nao rodam, porque a entrada delas nao coube na
     // fila de prontas — no lancamento ou num despertar. Diferente de zero aqui
     // explica uma tarefa parada que de outra forma pareceria apenas ociosa, e

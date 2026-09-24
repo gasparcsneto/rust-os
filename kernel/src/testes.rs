@@ -322,6 +322,57 @@ fn protocolo_aceita_id_legitimo() -> Resultado {
     Ok(())
 }
 
+/// Um parâmetro que o comando não declara derruba a chamada.
+///
+/// # Por que recusar, e não ignorar
+///
+/// Porque ignorar produz a pior resposta possível: sucesso por um pedido que
+/// o kernel não honrou. Medido contra um kernel de pé, antes:
+///
+///     -> {"method":"user.run","params":{"name":"nao_existe"}}
+///     <- {"result":{"launched":true,"thread_id":2}}
+///
+/// `user.run` não declara parâmetro nenhum. O `name` foi jogado fora, o
+/// programa embutido de sempre rodou, e o agente recebeu `launched: true`.
+///
+/// Num sistema em que o cliente descobre a interface em tempo de execução, e
+/// portanto às vezes chuta, um erro que aponta o campo é o que o manda ler
+/// `agent.describe` em vez de acreditar num sucesso que não houve.
+fn protocolo_recusa_parametro_nao_declarado() -> Resultado {
+    let Some(cmd) = registry::encontrar("log.tail") else {
+        return Err("log.tail sumiu do registro");
+    };
+
+    // Um campo inventado, sozinho e acompanhado de um legítimo.
+    for bruto in [
+        br#"{"inventado":1}"#.as_slice(),
+        br#"{"count":3,"inventado":"x"}"#.as_slice(),
+        br#"{"Count":3}"#.as_slice(), // caixa diferente é outro nome
+    ] {
+        match registry::validar(cmd, Json(bruto)) {
+            Err(campo) if campo == "inventado" || campo == "Count" => {}
+            Err(outro) => {
+                crate::log_error!("teste", "recusou o campo errado: {}", outro);
+                return Err("a recusa apontou um campo que nao e o desconhecido");
+            }
+            Ok(()) => return Err("um parametro nao declarado foi aceito"),
+        }
+    }
+
+    // E a metade que impede um conserto estrito demais: o que é declarado
+    // continua passando, sozinho, junto e ausente.
+    for bruto in [
+        br#"{}"#.as_slice(),
+        br#"{"count":3}"#.as_slice(),
+        br#"{"count":3,"min_level":"info"}"#.as_slice(),
+    ] {
+        if registry::validar(cmd, Json(bruto)).is_err() {
+            return Err("um parametro legitimo foi recusado");
+        }
+    }
+    Ok(())
+}
+
 /// Sem `params`, o padrão precisa ser um objeto vazio — é o que mantém os
 /// handlers uniformes, sem cada um tratar o caso ausente.
 fn protocolo_params_ausente_vira_objeto_vazio() -> Resultado {
@@ -4154,6 +4205,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "rpc: aceita id legitimo",
         f: protocolo_aceita_id_legitimo,
+    },
+    Caso {
+        nome: "rpc: recusa parametro nao declarado",
+        f: protocolo_recusa_parametro_nao_declarado,
     },
     Caso {
         nome: "rpc: params ausente vira {}",

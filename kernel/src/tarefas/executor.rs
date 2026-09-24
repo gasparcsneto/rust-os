@@ -34,7 +34,7 @@
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::task::Wake;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use core::task::{Context, Poll, Waker};
 
 use super::fila::Fila;
@@ -61,14 +61,18 @@ pub struct Executor {
     /// manter a fila viva, e o executor não tem como saber quantos wakers
     /// seus ainda existem por aí.
     prontas: Arc<FilaProntas>,
-    /// Waker de cada tarefa, guardado depois de criado.
+    /// O despertador de cada tarefa, guardado depois de criado.
     ///
     /// Duas razões. A primeira é custo: criar um waker aloca, e não faz
     /// sentido pagar isso a cada `poll`. A segunda é mais sutil — um waker é
     /// contado por referência, e destruí-lo pode devolver memória ao heap.
     /// Guardando-os aqui, garantimos que nenhuma liberação de memória
     /// aconteça dentro de um handler de interrupção.
-    despertadores: BTreeMap<IdTarefa, Waker>,
+    ///
+    /// Guardamos o [`Despertar`] em vez do [`Waker`] pronto porque o executor
+    /// precisa alcançar a marca de "já está na fila" ao tirar a tarefa dela —
+    /// e um `Waker` é opaco por construção.
+    despertadores: BTreeMap<IdTarefa, Arc<Despertar>>,
 }
 
 impl Executor {
@@ -95,7 +99,18 @@ impl Executor {
         inventario_registrar(id, nome);
         ESTATISTICAS.lancadas.fetch_add(1, Ordering::Relaxed);
 
+        // O despertador nasce junto com a tarefa, e não no primeiro `poll`,
+        // para que a marca de "já está na fila" exista antes de a tarefa
+        // entrar nela. Criá-lo depois deixaria uma janela em que um despertar
+        // vindo de interrupção enfileiraria uma segunda vez.
+        let despertador = Arc::new(Despertar::novo(id, self.prontas.clone()));
+        despertador.enfileirada.store(true, Ordering::Release);
+        self.despertadores.insert(id, despertador);
+
         if self.prontas.enfileirar(id).is_err() {
+            if let Some(d) = self.despertadores.get(&id) {
+                d.enfileirada.store(false, Ordering::Release);
+            }
             // Mesma perda do despertar, e o mesmo contador: esta tarefa foi
             // registrada, contada como lançada, e não vai rodar nenhuma vez.
             ESTATISTICAS.nunca_agendadas.fetch_add(1, Ordering::Relaxed);
@@ -127,11 +142,19 @@ impl Executor {
                 continue;
             };
 
-            let waker = despertadores
+            let despertador = despertadores
                 .entry(id)
-                .or_insert_with(|| Despertar::waker(id, prontas.clone()));
+                .or_insert_with(|| Arc::new(Despertar::novo(id, prontas.clone())));
 
-            let mut contexto = Context::from_waker(waker);
+            // A marca cai **antes** de avançar, e a ordem não é escolha: um
+            // despertar que chegue durante o `poll` precisa encontrar a marca
+            // baixa e re-enfileirar a tarefa. Limpá-la depois engoliria esse
+            // aviso, e uma tarefa que devolveu `Pending` contando com ele não
+            // rodaria nunca mais.
+            despertador.enfileirada.store(false, Ordering::Release);
+
+            let waker = Waker::from(despertador.clone());
+            let mut contexto = Context::from_waker(&waker);
             rodadas += 1;
             ESTATISTICAS.avancos.fetch_add(1, Ordering::Relaxed);
 
@@ -219,6 +242,25 @@ impl Executor {
 struct Despertar {
     id: IdTarefa,
     prontas: Arc<FilaProntas>,
+    /// Esta tarefa já tem uma entrada na fila de prontas esperando por ela.
+    ///
+    /// Sem esta marca, cada byte que chegava pela serial enfileirava a tarefa
+    /// do agente outra vez. Com duas tarefas vivas e uma fila de cento e vinte
+    /// e oito vagas, uma rajada de requisições enchia a fila de duplicatas da
+    /// **mesma** tarefa, e todo despertar seguinte era descartado.
+    ///
+    /// Medido num kernel de pé, depois de oitenta e uma requisições:
+    ///
+    ///     tasks.stats: wakes 6588, polls 2231, never_scheduled 4322
+    ///     log: 4322 linhas "fila de prontas cheia ao acordar 1"
+    ///
+    /// O estrago tinha duas metades. A visível: o anel de log, de cento e
+    /// vinte e oito registros, foi inteiro ocupado por esse erro, e os
+    /// registros de boot — os mais úteis que existem — saíram por cima. A
+    /// invisível, e pior: aquele erro é descrito logo abaixo como a falha mais
+    /// grave deste módulo, e passou a acontecer o tempo todo de forma
+    /// inofensiva. Um alarme que dispara sem parar deixa de ser um alarme.
+    enfileirada: AtomicBool,
 }
 
 impl Despertar {
@@ -229,13 +271,31 @@ impl Despertar {
     /// [`Waker`] exige por baixo. Escrever essa tabela à mão é possível — e é
     /// `unsafe`, com um punhado de invariantes sobre ponteiros apagados que
     /// não há razão para assumir.
-    fn waker(id: IdTarefa, prontas: Arc<FilaProntas>) -> Waker {
-        Waker::from(Arc::new(Self { id, prontas }))
+    fn novo(id: IdTarefa, prontas: Arc<FilaProntas>) -> Self {
+        Self {
+            id,
+            prontas,
+            enfileirada: AtomicBool::new(false),
+        }
     }
 
     fn acordar(&self) {
         ESTATISTICAS.despertares.fetch_add(1, Ordering::Relaxed);
+
+        // Já há uma entrada esperando por esta tarefa. Enfileirar de novo não
+        // a faria rodar mais cedo — ela roda uma vez e vê tudo o que chegou —
+        // e consumiria uma vaga de que outra tarefa precisa.
+        if self.enfileirada.swap(true, Ordering::AcqRel) {
+            ESTATISTICAS
+                .despertares_juntados
+                .fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+
         if self.prontas.enfileirar(self.id).is_err() {
+            // A tarefa não entrou: a marca precisa cair, ou ela nunca mais
+            // seria enfileirada por despertar nenhum.
+            self.enfileirada.store(false, Ordering::Release);
             // Um aviso perdido não é um aviso atrasado: a tarefa devolveu
             // `Pending` contando com este despertar, e sem ele **nunca mais**
             // roda. É a falha mais grave que este módulo consegue ter, e até
@@ -283,6 +343,13 @@ struct Estatisticas {
     concluidas: AtomicU64,
     avancos: AtomicU64,
     despertares: AtomicU64,
+    /// Despertares que encontraram a tarefa já enfileirada.
+    ///
+    /// Não é perda: é trabalho que não precisou ser feito. O número existe
+    /// para que a diferença entre `despertares` e `avancos` tenha explicação —
+    /// sem ele, um agente que visse seis mil despertares e dois mil avanços
+    /// não teria como saber se o resto foi juntado ou descartado.
+    despertares_juntados: AtomicU64,
     /// Entradas que não couberam na fila de prontas.
     ///
     /// Conta os dois sítios que enfileiram — o lançamento e o despertar —
@@ -302,6 +369,7 @@ static ESTATISTICAS: Estatisticas = Estatisticas {
     concluidas: AtomicU64::new(0),
     avancos: AtomicU64::new(0),
     despertares: AtomicU64::new(0),
+    despertares_juntados: AtomicU64::new(0),
     nunca_agendadas: AtomicU64::new(0),
     fora_do_inventario: AtomicU64::new(0),
 };
@@ -380,6 +448,7 @@ pub struct Contadores {
     pub concluidas: u64,
     pub avancos: u64,
     pub despertares: u64,
+    pub despertares_juntados: u64,
     pub nunca_agendadas: u64,
     pub fora_do_inventario: u64,
 }
@@ -390,6 +459,7 @@ pub fn estatisticas() -> Contadores {
         concluidas: ESTATISTICAS.concluidas.load(Ordering::Relaxed),
         avancos: ESTATISTICAS.avancos.load(Ordering::Relaxed),
         despertares: ESTATISTICAS.despertares.load(Ordering::Relaxed),
+        despertares_juntados: ESTATISTICAS.despertares_juntados.load(Ordering::Relaxed),
         nunca_agendadas: ESTATISTICAS.nunca_agendadas.load(Ordering::Relaxed),
         fora_do_inventario: ESTATISTICAS.fora_do_inventario.load(Ordering::Relaxed),
     }
