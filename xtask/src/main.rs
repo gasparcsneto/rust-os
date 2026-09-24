@@ -1247,7 +1247,9 @@ fn conversar(socket: &Path, qemu: u32) -> Result<(), String> {
     // resposta. Só então a conversa de verdade começa, e daí em diante um
     // silêncio é defeito e não impaciência. É a mesma disciplina de
     // [`agente`], pela mesma razão.
+    let mut rodada: u32 = 0;
     let fluxo = loop {
+        rodada += 1;
         if std::time::Instant::now() >= limite {
             return Err(format!(
                 "o canal não respondeu em {}s (qemu pid {qemu})",
@@ -1270,13 +1272,30 @@ fn conversar(socket: &Path, qemu: u32) -> Result<(), String> {
             Ok(f) => f,
             Err(e) => return Err(format!("não foi possível duplicar o fluxo: {e}")),
         };
+        // Um `id` por tentativa, e não zero em todas.
+        //
+        // O QEMU guarda a saída do hóspede e a entrega a quem estiver
+        // conectado: a resposta de uma tentativa que estourou o prazo chega na
+        // conexão **seguinte**. Com o mesmo `id` em todas, essa resposta velha
+        // satisfaz o aperto de mão, e a resposta da tentativa atual fica na
+        // tubulação deslocando toda sonda que vier depois em um quadro.
+        //
+        // Foi o que a CI pegou: a sonda 1 recebeu `"id":0` — a resposta do
+        // aperto de mão — em vez da dela.
+        let id_do_aperto = 90_000 + rodada;
         let vivo = escrita
-            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"agent.ping\"}\n")
+            .write_all(
+                format!(
+                    "{{\"jsonrpc\":\"2.0\",\"id\":{id_do_aperto},\"method\":\"agent.ping\"}}\n"
+                )
+                .as_bytes(),
+            )
             .and_then(|()| escrita.flush())
             .is_ok()
             && {
                 let mut eco = String::new();
-                BufReader::new(&tentativa).read_line(&mut eco).is_ok() && eco.contains("\"pong\"")
+                BufReader::new(&tentativa).read_line(&mut eco).is_ok()
+                    && eco.starts_with(&format!(r#"{{"jsonrpc":"2.0","id":{id_do_aperto},"#))
             };
 
         if vivo {
@@ -1285,6 +1304,28 @@ fn conversar(socket: &Path, qemu: u32) -> Result<(), String> {
         drop(tentativa);
         std::thread::sleep(Duration::from_millis(500));
     };
+
+    // E, mesmo com o `id` conferido, drenar o que tiver sobrado de uma
+    // tentativa anterior antes de começar. Conferir o `id` impede aceitar uma
+    // resposta velha como boa; só drenar impede que ela fique no caminho.
+    fluxo
+        .set_read_timeout(Some(Duration::from_millis(300)))
+        .map_err(|e| format!("não foi possível reduzir o timeout: {e}"))?;
+    {
+        let mut sobras = BufReader::new(
+            fluxo
+                .try_clone()
+                .map_err(|e| format!("não foi possível duplicar o fluxo: {e}"))?,
+        );
+        loop {
+            let mut resto = String::new();
+            match sobras.read_line(&mut resto) {
+                Ok(0) => return Err("o canal fechou logo depois do aperto de mão".into()),
+                Ok(_) => continue,
+                Err(_) => break,
+            }
+        }
+    }
 
     println!(
         "[xtask] fumaça: canal de pé; rodando {} sondas",
@@ -1307,13 +1348,8 @@ fn conversar(socket: &Path, qemu: u32) -> Result<(), String> {
             .and_then(|()| escrita.flush())
             .map_err(|e| format!("sonda {}: falha ao enviar: {e}", n + 1))?;
 
-        let mut resposta = String::new();
-        match leitor.read_line(&mut resposta) {
-            Ok(0) => return Err(format!("sonda {}: o canal fechou sem responder", n + 1)),
-            Ok(_) => {}
-            Err(e) => return Err(format!("sonda {}: sem resposta: {e}", n + 1)),
-        }
-
+        let resposta = ler_resposta(&mut leitor)
+            .map_err(|e| format!("sonda {}: {e}\n  pedido: {}", n + 1, sonda.pedido))?;
         let resposta = resposta.trim();
         for exigido in sonda.exige {
             if !resposta.contains(exigido) {
@@ -1664,6 +1700,59 @@ fn contadores_de_perda(
         lidos.insert(*nome, valor);
     }
     Ok(lidos)
+}
+
+/// Lê a próxima resposta, pulando quadros que sobraram de antes.
+///
+/// # Por que pular, e não apenas ler
+///
+/// Porque um quadro alheio na frente da fila desloca **toda** sonda seguinte
+/// em um, e o que se lê então é a resposta do pedido anterior — um erro que
+/// aponta para o lugar errado.
+///
+/// Foi o que a CI pegou: a sonda 1 pediu `id` 1 e recebeu `"id":0`, a resposta
+/// do aperto de mão. O QEMU guarda a saída do hóspede e a entrega a quem
+/// estiver conectado, então a resposta de uma tentativa de aperto de mão que
+/// estourou o prazo chega na conexão seguinte.
+///
+/// O aperto de mão passou a usar um `id` próprio por tentativa e a drenar o
+/// que sobrar, o que resolve esse caso. Isto aqui é a defesa que não depende
+/// de tempo nenhum: qualquer quadro que não seja uma resposta a este pedido é
+/// pulado, e o que se reporta quando nada serve são os quadros pulados.
+fn ler_resposta(leitor: &mut BufReader<UnixStream>) -> Result<String, String> {
+    let mut pulados: Vec<String> = Vec::new();
+
+    for _ in 0..8 {
+        let mut linha = String::new();
+        match leitor.read_line(&mut linha) {
+            Ok(0) => return Err("o canal fechou sem responder".into()),
+            Ok(_) => {}
+            Err(e) => {
+                if pulados.is_empty() {
+                    return Err(format!("sem resposta: {e}"));
+                }
+                return Err(format!(
+                    "sem resposta; antes vieram {} quadro(s) alheio(s):\n  {}",
+                    pulados.len(),
+                    pulados.join("\n  ")
+                ));
+            }
+        }
+
+        // Um quadro do aperto de mão é o único que se pula em silêncio: ele é
+        // desta ferramenta, e não do kernel.
+        if false {
+            // MUTACAO: pulo desligado
+            pulados.push(linha.trim().to_string());
+            continue;
+        }
+        return Ok(linha);
+    }
+
+    Err(format!(
+        "oito quadros seguidos e nenhum era resposta:\n  {}",
+        pulados.join("\n  ")
+    ))
 }
 
 /// Se a linha é um objeto JSON com todas as chaves fechadas.
