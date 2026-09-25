@@ -2160,6 +2160,154 @@ fn btrfs_le_a_raiz_dos_pedacos() -> Resultado {
     }
 }
 
+/// Os itens de uma folha são lidos com a chave e os dados certos.
+///
+/// # O que este caso protege
+///
+/// A aritmética de deslocamento dentro do nó. Os dados de um item começam a
+/// partir do **fim do cabeçalho**, e não do começo do nó — somar errado dá um
+/// item que existe, do tamanho certo, com bytes de outro. Nada falha, e o que
+/// se lê depois é um pedaço, uma raiz ou um nome montado a partir de lixo.
+///
+/// A folha usada é a da árvore de pedaços, cujos quatro itens têm chave e
+/// tamanho conhecidos do lado de fora: o `dump-tree` imprime `itemoff` e
+/// `itemsize` de cada um.
+fn btrfs_percorre_itens_da_folha() -> Resultado {
+    let tabela = crate::particoes::varrer()?;
+    let particao = tabela
+        .primeira(crate::particoes::Tipo::Dados)
+        .ok_or("nao ha particao de dados")?;
+    let volume = crate::vfs::btrfs::Volume::abrir(particao.primeiro)?;
+
+    let mut bloco = alloc::vec![0u8; volume.superbloco.tamanho_de_no as usize];
+    volume.ler_no(volume.superbloco.raiz_dos_pedacos, &mut bloco)?;
+
+    let mut quantos = 0;
+    let mut pedacos = 0;
+    for item in crate::vfs::btrfs::folha::itens(&bloco)? {
+        let item = item?;
+        quantos += 1;
+
+        // Todo item precisa ter vindo de dentro do nó. A iteração já recusa o
+        // que aponta para fora; isto confere que ela não devolveu uma fatia
+        // vazia no lugar.
+        if item.dados.is_empty() {
+            return Err("um item veio sem dados");
+        }
+        if item.chave.tipo == crate::vfs::btrfs::folha::tipo::PEDACO {
+            pedacos += 1;
+            // O `offset` da chave de um pedaço é o endereço lógico dele, e
+            // todos os três precisam estar no mapa depois da abertura.
+            if volume.mapa.traduzir(item.chave.offset).is_none() {
+                crate::log_error!(
+                    "teste",
+                    "o pedaco em {:#x} nao esta no mapa",
+                    item.chave.offset
+                );
+                return Err("um pedaco da arvore nao entrou no mapa");
+            }
+        }
+    }
+
+    if quantos != 4 {
+        crate::log_error!("teste", "a folha deu {} itens", quantos);
+        return Err("a folha de pedacos nao tem os quatro itens que o disco traz");
+    }
+    if pedacos != 3 {
+        return Err("a folha de pedacos nao trouxe os tres pedacos");
+    }
+
+    // E um nó interno não é folha. Forjar o nível no bloco já lido é o
+    // caminho mais curto para o caso: os descritores de um nó interno têm
+    // outro tamanho, e lê-los como itens daria fatias montadas a partir de
+    // ponteiros.
+    bloco[100] = 1;
+    if crate::vfs::btrfs::folha::itens(&bloco).is_ok() {
+        return Err("um no interno foi percorrido como folha");
+    }
+    bloco[100] = 0;
+
+    // Um item que aponta para fora do nó precisa ser recusado na hora, e não
+    // devolver bytes de memória vizinha.
+    const PRIMEIRO_DESCRITOR: usize = 101;
+    bloco[PRIMEIRO_DESCRITOR + 17..PRIMEIRO_DESCRITOR + 21]
+        .copy_from_slice(&u32::MAX.to_le_bytes());
+    let recusou = crate::vfs::btrfs::folha::itens(&bloco)?.any(|i| i.is_err());
+    if !recusou {
+        return Err("um item apontando para fora do no foi aceito");
+    }
+
+    Ok(())
+}
+
+/// Depois de aberto, o volume traduz endereços de metadados.
+///
+/// # Por que isto vale mais que o caso anterior de tradução
+///
+/// Porque aqui a tradução **não** é identidade. No vetor que o superbloco
+/// carrega, o pedaço de sistema começa no mesmo endereço lógico e físico — e
+/// foi por isso que o caso da etapa anterior precisou de pedaços sintéticos
+/// para provar alguma coisa.
+///
+/// O pedaço de metadados, que só aparece depois de a árvore de pedaços ser
+/// lida, é lógico 30408704 e físico 38797312. Como as outras árvores moram
+/// nele, ler qualquer uma passa a exigir a aritmética de verdade — e uma
+/// tradução por identidade devolve um bloco que não é nó nenhum.
+fn btrfs_mapa_completo_alcanca_metadados() -> Resultado {
+    let tabela = crate::particoes::varrer()?;
+    let particao = tabela
+        .primeira(crate::particoes::Tipo::Dados)
+        .ok_or("nao ha particao de dados")?;
+    let volume = crate::vfs::btrfs::Volume::abrir(particao.primeiro)?;
+
+    if volume.mapa.quantos() != 3 {
+        crate::log_error!(
+            "teste",
+            "o mapa ficou com {} pedacos",
+            volume.mapa.quantos()
+        );
+        return Err("o mapa completo nao tem os tres pedacos do disco");
+    }
+
+    let mut bloco = alloc::vec![0u8; volume.superbloco.tamanho_de_no as usize];
+    let cabecalho = volume.ler_no(volume.superbloco.raiz, &mut bloco)?;
+
+    // Dono 1 é a árvore de raízes. É o número que distingue "li um nó" de
+    // "li a árvore que o superbloco apontou".
+    if cabecalho.dono != 1 {
+        crate::log_error!("teste", "o no pertence a arvore {}", cabecalho.dono);
+        return Err("a raiz do superbloco nao e a arvore de raizes");
+    }
+    if cabecalho.itens == 0 {
+        return Err("a arvore de raizes veio sem itens");
+    }
+
+    // E ela traz raízes de outras árvores, cada uma com um endereço que o
+    // mapa sabe traduzir.
+    let mut raizes = 0;
+    for item in crate::vfs::btrfs::folha::itens(&bloco)? {
+        let item = item?;
+        if item.chave.tipo != crate::vfs::btrfs::folha::tipo::RAIZ {
+            continue;
+        }
+        let endereco =
+            crate::vfs::btrfs::raiz_da_arvore(item.dados).ok_or("item de raiz truncado")?;
+        if endereco == 0 {
+            return Err("uma raiz aponta para o endereco zero");
+        }
+        if volume.mapa.traduzir(endereco).is_none() {
+            return Err("uma raiz aponta para fora de qualquer pedaco");
+        }
+        raizes += 1;
+    }
+
+    if raizes == 0 {
+        return Err("a arvore de raizes nao trouxe raiz nenhuma");
+    }
+
+    Ok(())
+}
+
 /// A ausência de framebuffer é sempre defeito, nas duas arquiteturas.
 ///
 /// # Por que isto já foi condicional, e por que não é mais
@@ -5632,6 +5780,14 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "btrfs: le a raiz da arvore de pedacos",
         f: btrfs_le_a_raiz_dos_pedacos,
+    },
+    Caso {
+        nome: "btrfs: percorre os itens de uma folha",
+        f: btrfs_percorre_itens_da_folha,
+    },
+    Caso {
+        nome: "btrfs: o mapa completo alcanca os metadados",
+        f: btrfs_mapa_completo_alcanca_metadados,
     },
     Caso {
         nome: "disco: recusa setor fora da capacidade",

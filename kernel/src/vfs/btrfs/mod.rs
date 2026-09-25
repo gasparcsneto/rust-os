@@ -16,6 +16,7 @@
 //! `llvm-readelf` sobre os ELFs de usuário e do `sgdisk` sobre a GPT.
 
 pub mod crc32c;
+pub mod folha;
 pub mod pedacos;
 
 extern crate alloc;
@@ -237,11 +238,59 @@ impl Volume {
         }
         let mapa = pedacos::do_vetor_do_sistema(&bloco[campo::VETOR_DE_PEDACOS..fim])?;
 
-        Ok(Volume {
+        let mut volume = Volume {
             primeiro,
             superbloco,
             mapa,
-        })
+        };
+
+        // O vetor do superbloco é só o bastante para alcançar a árvore de
+        // pedaços. O mapa de verdade está nela, e sem ele os endereços de
+        // metadados — onde moram as outras árvores — não traduzem.
+        volume.completar_mapa()?;
+        Ok(volume)
+    }
+
+    /// Acrescenta ao mapa os pedaços que a árvore de pedaços descreve.
+    ///
+    /// # O que muda depois disto
+    ///
+    /// A tradução deixa de ser identidade. No disco que o `xtask` monta, o
+    /// pedaço de sistema começa no mesmo endereço lógico e físico — e o de
+    /// **metadados** não: ele é lógico 30408704 e físico 38797312. Como as
+    /// outras árvores moram em metadados, ler qualquer uma delas passa a
+    /// exigir a aritmética de verdade.
+    fn completar_mapa(&mut self) -> Result<(), &'static str> {
+        let mut bloco = alloc::vec![0u8; self.superbloco.tamanho_de_no as usize];
+        let cabecalho = self.ler_no(self.superbloco.raiz_dos_pedacos, &mut bloco)?;
+
+        // Um nó interno significaria uma árvore de pedaços com mais de um
+        // nível, que este leitor ainda não percorre. Recusar é melhor que
+        // montar um mapa pela metade e descobrir na primeira tradução que
+        // falta um pedaço.
+        if cabecalho.nivel != 0 {
+            return Err("a arvore de pedacos tem mais de um nivel");
+        }
+
+        for item in folha::itens(&bloco)? {
+            let item = item?;
+            if item.chave.tipo != folha::tipo::PEDACO {
+                continue;
+            }
+            // O endereço lógico do pedaço é o `offset` da chave — o item em si
+            // não o traz.
+            let logico = item.chave.offset;
+            // O vetor do superbloco já trouxe o pedaço de sistema. Repetí-lo
+            // gastaria uma vaga do mapa e daria duas respostas iguais à mesma
+            // pergunta.
+            if self.mapa.traduzir(logico).is_some() {
+                continue;
+            }
+            let (pedaco, _) = pedacos::ler_item(logico, item.dados)?;
+            self.mapa.acrescentar(pedaco)?;
+        }
+
+        Ok(())
     }
 
     /// Lê um nó da árvore pelo endereço lógico dele.
@@ -296,4 +345,15 @@ impl Volume {
             nivel: destino[no::NIVEL],
         })
     }
+}
+
+/// O endereço lógico da raiz que um item de raiz descreve.
+///
+/// O item é um `btrfs_root_item`, uma struct grande de que só um campo
+/// interessa aqui: o endereço do nó de topo da árvore. Ele vem depois de um
+/// `btrfs_inode_item` embutido, que é o que põe o deslocamento em 176.
+pub fn raiz_da_arvore(item: &[u8]) -> Option<u64> {
+    const BYTENR: usize = 176;
+    let fatia = item.get(BYTENR..BYTENR + 8)?;
+    Some(u64::from_le_bytes(fatia.try_into().ok()?))
 }

@@ -747,8 +747,9 @@ padronizado.
       VFS, com os programas embutidos servidos em `/bin`; e a leitura do disco
       em blocos de 16 KiB numa ida só, que é o tamanho de um nó de Btrfs; a
       tabela de partições; o superbloco do Btrfs, com crc32c conferido; e a
-      tradução de endereço lógico para o disco, que é o que permite ler
-      qualquer nó da árvore. Falta: o resto do Btrfs
+      tradução de endereço lógico para o disco; e a leitura dos itens de uma
+      folha, que completa o mapa de pedaços e alcança a árvore de raízes.
+      Falta: percorrer a árvore de arquivos
       somente leitura, a tabela de descritores por processo, `executar` lendo
       do disco, e um bootloader UEFI próprio no lugar do crate `bootloader`.
 

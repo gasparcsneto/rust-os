@@ -723,16 +723,43 @@ fn btrfs_chunks(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.end_array()?;
 
     let mut bloco = alloc::vec![0u8; volume.superbloco.tamanho_de_no as usize];
-    match volume.ler_no(volume.superbloco.raiz_dos_pedacos, &mut bloco) {
+
+    // A raiz da árvore de raízes, e não mais a de pedaços: ela mora em
+    // metadados, cujo pedaço tem endereço lógico e físico diferentes. Lê-la é
+    // a tradução funcionando de verdade, e não por coincidência de disposição.
+    match volume.ler_no(volume.superbloco.raiz, &mut bloco) {
         Ok(cabecalho) => {
-            w.key("chunk_root_node")?;
+            w.key("root_tree_node")?;
             w.begin_object()?;
             w.field_u64("logical", cabecalho.endereco)?;
+            w.field_u64(
+                "physical",
+                volume.mapa.traduzir(cabecalho.endereco).unwrap_or(0),
+            )?;
             w.field_u64("generation", cabecalho.geracao)?;
             w.field_u64("owner", cabecalho.dono)?;
             w.field_u64("items", u64::from(cabecalho.itens))?;
             w.field_u64("level", u64::from(cabecalho.nivel))?;
             w.end_object()?;
+
+            // E as chaves que ela traz, que são as raízes das outras árvores.
+            w.key("roots")?;
+            w.begin_array()?;
+            if let Ok(itens) = crate::vfs::btrfs::folha::itens(&bloco) {
+                for item in itens.flatten() {
+                    if item.chave.tipo != crate::vfs::btrfs::folha::tipo::RAIZ {
+                        continue;
+                    }
+                    w.begin_object()?;
+                    w.field_u64("tree", item.chave.objeto)?;
+                    w.field_u64(
+                        "bytenr",
+                        crate::vfs::btrfs::raiz_da_arvore(item.dados).unwrap_or(0),
+                    )?;
+                    w.end_object()?;
+                }
+            }
+            w.end_array()?;
         }
         Err(motivo) => w.field_str("error", motivo)?,
     }
