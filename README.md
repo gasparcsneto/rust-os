@@ -130,8 +130,8 @@ Os dois podem rodar ao mesmo tempo: cada arquitetura tem seu próprio socket.
 | `tasks.stats` | Escalonador cooperativo e fila de entrada do canal |
 | `threads.stats` | Escalonador preemptivo: trocas de contexto e quanta |
 | `threads.list` | Fios de execução do kernel, com estado e vezes escalonado |
-| `user.run` | Lança o programa de exemplo no anel sem privilégio |
-| `user.stats` | Chamadas de sistema atendidas, recusadas e último código de saída |
+| `user.run` | Lança um programa no anel sem privilégio (`path`; padrão: o exemplo) |
+| `user.stats` | Chamadas atendidas e recusadas, arquivos abertos e lidos, último código de saída |
 | `tasks.list` | Tarefas lançadas, com id, nome e se estão vivas |
 | `irq.stats` | Contadores de interrupções de hardware por linha |
 | `traps.stats` | Contadores de exceções e detalhes da última falha |
@@ -389,8 +389,8 @@ $ cargo xtask agent log.tail '{"count":3}'
 ... info  "usuario" "processo encerrou com codigo 42"
 ```
 
-As chamadas de sistema são seis: `sair`, `escrever`, `id`, `ceder`, `bifurcar`
-e `executar`.
+As chamadas de sistema são nove: `sair`, `escrever`, `id`, `ceder`, `bifurcar`,
+`executar`, `abrir`, `ler` e `fechar`.
 
 **O programa é um ELF64.** O cabeçalho diz onde a execução começa; cada
 segmento diz onde quer morar, quanto traz do arquivo, quanto ocupa na memória
@@ -425,14 +425,66 @@ da segunda é que o teste chega ao fim e reporta.
 
 **`escrever` recebe um descritor, e não um destino fixo.** A assinatura é
 `escrever(descritor, ptr, tamanho)`: 1 é a saída comum, 2 a de erro, e 0 fica
-reservado para leitura — escrever nele é erro. Hoje os dois destinos abertos
-vão para o log do kernel, em níveis diferentes, e é essa diferença que as duas
-linhas acima mostram.
+reservado para leitura — escrever nele é erro.
 
-A indireção existe agora justamente porque ainda não é necessária. O destino
-pode crescer depois sem quebrar ninguém — um arquivo, um socket, outro
-processo. A *assinatura* não: acrescentar o argumento quando já houvesse
-programas de usuário significaria quebrar todos eles.
+A indireção entrou antes de ser necessária, e o que ela protegia era a
+*assinatura*: acrescentar o argumento depois de haver programas de usuário
+significaria quebrar todos eles. Agora ela tem para onde apontar.
+
+**A tabela de descritores é do processo.** `abrir(caminho)` resolve um nome
+pelo VFS, guarda o vnode na tabela **daquele processo** e devolve um número;
+`ler(descritor, ptr, tamanho)` traz os próximos bytes e avança a posição;
+`fechar(descritor)` devolve a vaga.
+
+O descritor é um número pequeno, e isso é de segurança antes de ser de
+conveniência: o processo não recebe ponteiro nenhum, não sabe em que sistema
+de arquivos o arquivo mora, e não tem como forjar um descritor para algo que
+não abriu. Uma tabela **global** faria o contrário — dois processos abrindo
+arquivos diferentes receberiam números diferentes, e o segundo leria o do
+primeiro se adivinhasse o número dele.
+
+A tabela mora dentro do `Fio`, e as duas propriedades que importam saem daí
+sem uma linha para mantê-las: ela morre junto com o processo, e `bifurcar` a
+herda porque duplica o fio. A alternativa — uma tabela à parte, indexada pelo
+identificador — precisaria de uma remoção no caminho de saída e de outra no
+caminho em que o processo morre por falha de página, que é justamente a que
+ninguém lembra de escrever.
+
+**O que ela não tem:** compartilhamento. Num Unix de verdade, pai e filho
+apontam para a **mesma** descrição de arquivo aberto, e ler num avança a
+posição do outro. Aqui cada um leva a própria cópia, que é o comportamento de
+quem abriu o arquivo duas vezes. A diferença é observável, e está escrita no
+código em vez de ser descoberta.
+
+**O programa que prova tudo isso é o `leitor`**, em `/bin`, escrito no mesmo
+assembly dos outros. Ele abre `/saudacao.txt` — um arquivo que só existe na
+imagem Btrfs do disco —, bifurca, e os dois lados leem pelo mesmo número. O
+pai escreve o que leu na saída, e é assim que o conteúdo do disco aparece no
+log, posto lá por um processo sem privilégio:
+
+```
+$ cargo xtask agent user.run '{"path":"/bin/leitor"}'
+{"program":"/bin/leitor","launched":true,"thread_id":2}
+
+$ cargo xtask agent log.tail '{"count":4}'
+... info  "usuario" "processo encerrou com codigo 34"      <- o filho
+... info  "usuario" "ola do btrfs, lido pelo duke"
+... info  "usuario" "processo encerrou com codigo 33"      <- o pai
+
+$ cargo xtask agent user.stats
+{"syscalls":12,"forks":1,"exits":2,"rejected":4,
+ "opens":1,"reads":2,"bytes_read":58,"last_exit":33,...}
+```
+
+Os quatro `rejected` são as quatro recusas que o programa **exigiu**; os 58
+bytes lidos são o arquivo inteiro duas vezes, uma por lado da bifurcação.
+
+E ele **confere o kernel de dentro**, saindo com um código de falha se alguma
+resposta não fizer sentido: se abrir um diretório não for recusado com o
+motivo certo, se escrever num descritor de arquivo for aceito, se ler num
+descritor de saída for aceito — ou se a leitura depois do `fechar` der certo,
+que é o que denunciaria um `fechar` que não fecha. Cada uma dessas linhas
+existe porque a mutação correspondente passava sem ela.
 
 **Todo argumento de chamada de sistema é hostil até prova em contrário.** Um
 ponteiro vindo do usuário pode apontar para dentro do kernel; um comprimento
@@ -469,9 +521,10 @@ página por página mapeada, pago uma vez.
 As permissões atravessam a cópia. Recriar tudo gravável seria mais simples e
 faria o `W^X` do processo desaparecer no instante em que ele tivesse um filho.
 
-Como `exec` não tem sistema de arquivos para consultar, o nome é procurado
-numa tabela de programas embutidos. No dia em que houver disco, o que muda é
-onde a busca acontece — a chamada de sistema continua a mesma.
+O nome que `exec` recebe é procurado no VFS: sem barra, em `/bin`; absoluto,
+como veio. É a promessa que este README fazia quando a busca ainda era numa
+tabela estática — *"o que muda é onde a busca acontece; a chamada de sistema
+continua a mesma"* —, e ela foi cumprida sem que `executar` mudasse de forma.
 
 **O que o espaço de um processo morto custa.** Ele sobrevive até a vaga de fio
 ser reaproveitada, pela mesma razão que a pilha sempre sobreviveu: não há fio
@@ -777,9 +830,10 @@ padronizado.
       tradução de endereço lógico para o disco; e a leitura dos itens de uma
       folha, que completa o mapa de pedaços e alcança a árvore de raízes; e a
       árvore de arquivos, com a raiz do disco montada em `/`, busca por nome,
-      listagem de diretório e leitura de arquivo embutido e com extensão.
-      Falta: a tabela de descritores por processo, `executar` lendo
-      do disco, e um bootloader UEFI próprio no lugar do crate `bootloader`.
+      listagem de diretório e leitura de arquivo embutido e com extensão; e a
+      tabela de descritores por processo, com `abrir`, `ler` e `fechar`
+      exercitados por um programa sem privilégio que lê um arquivo do disco.
+      Falta: um bootloader UEFI próprio no lugar do crate `bootloader`.
 
 ## Licença
 

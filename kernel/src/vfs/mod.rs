@@ -21,11 +21,17 @@
 //!
 //! # O que não está aqui
 //!
-//! Escrita, `abrir` e `fechar`. A sugestão que originou este trabalho os traz
-//! no `vnodeops`, e eles vão entrar — quando houver quem os chame. Um método
-//! de trait que compila e não tem chamador é pior que ausência: ele parece
-//! uma opção disponível, e o primeiro a usá-lo descobre que nunca foi
-//! exercitado.
+//! Escrita. `abrir` e `fechar` existem agora, mas **não** como métodos do
+//! trait: um sistema de arquivos somente leitura não tem nada a fazer quando
+//! um descritor abre ou fecha, e o estado que essas duas operações criam — a
+//! posição de leitura — é do processo, não do arquivo. Ele mora na tabela de
+//! descritores, em [`crate::usuario::descritores`], e o que esta camada
+//! precisou ganhar foi uma só função: [`ler_em`], que lê a partir de um
+//! deslocamento.
+//!
+//! O dia em que houver escrita, ou um sistema de arquivos que precise saber
+//! quantos descritores apontam para um nó, `abrir` e `fechar` descem para o
+//! trait. Antes disso seriam métodos que todo mundo implementa como `Ok(())`.
 
 pub mod btrfs;
 pub mod programas;
@@ -269,6 +275,45 @@ pub fn resolver(caminho: &str) -> Result<Vnode, Erro> {
             no: atual,
             montagem: indice,
         })
+    })
+}
+
+/// Lê a partir de um deslocamento, por um vnode já resolvido.
+///
+/// # Por que ela existe, se já há `ler_tudo`
+///
+/// Porque `ler_tudo` responde a "me dê este arquivo", e um descritor aberto
+/// responde a "me dê o próximo pedaço". São perguntas diferentes: a primeira
+/// aloca o arquivo inteiro e tem um teto de um mebibyte; a segunda entrega o
+/// que couber no buffer de quem chamou e não guarda nada.
+///
+/// É esta que um `read` de usuário precisa. Implementar `read` sobre
+/// `ler_tudo` significaria ler quarenta e oito kilobytes do disco para
+/// entregar sessenta e quatro bytes, e repetir isso a cada chamada.
+///
+/// # O vnode e a montagem que ele lembra
+///
+/// Um [`Vnode`] guarda o **índice** da montagem, e o índice é posicional: se
+/// algo for desmontado, os que vêm depois andam para trás e um vnode antigo
+/// passa a apontar para outro sistema de arquivos. Em produção isso não
+/// acontece — `desmontar` só existe em modo de teste —, e o `get` abaixo é o
+/// que impede a variante barata do problema: um índice além do fim.
+///
+/// A variante cara — o índice válido que passou a ser de outra montagem —
+/// pede uma geração por montagem, e entra junto com a desmontagem de
+/// verdade. Está escrito aqui para não ser descoberto depois.
+pub fn ler_em(vnode: &Vnode, deslocamento: u64, destino: &mut [u8]) -> Result<usize, Erro> {
+    if vnode.no.tipo != Tipo::Arquivo {
+        return Err(Erro::NaoEhArquivo);
+    }
+    if destino.is_empty() {
+        return Ok(0);
+    }
+
+    crate::arch::sem_interrupcoes(|| {
+        let montagens = MONTAGENS.lock();
+        let montagem = montagens.get(vnode.montagem).ok_or(Erro::SemMontagem)?;
+        montagem.sistema.ler(&vnode.no, deslocamento, destino)
     })
 }
 

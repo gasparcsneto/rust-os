@@ -2415,7 +2415,7 @@ fn btrfs_raiz_montada() -> Resultado {
     // E `/bin` continua sendo dos programas embutidos.
     let mut programas = 0;
     crate::vfs::listar("/bin", |_| programas += 1).map_err(|e| e.motivo())?;
-    if programas != 3 {
+    if programas != 4 {
         crate::log_error!("teste", "/bin listou {} entradas", programas);
         return Err("a raiz montada por cima roubou /bin dos programas embutidos");
     }
@@ -2565,6 +2565,306 @@ fn btrfs_classifica_cada_extensao() -> Resultado {
     // E um item que acaba antes do campo do tipo.
     if ler_extensao(&item(0, 1)[..18]).is_ok() {
         return Err("uma extensao truncada foi aceita");
+    }
+
+    Ok(())
+}
+
+/// A leitura por deslocamento continua de onde a anterior parou.
+///
+/// # Por que este caso existe separado do `ler_tudo`
+///
+/// Porque `ler_tudo` chama o sistema de arquivos com um deslocamento que ele
+/// mesmo calcula, e o [`crate::vfs::ler_em`] recebe o deslocamento de fora —
+/// de um descritor aberto, que é quem guarda a posição. Era falsificável em
+/// nenhum caso: apagar o deslocamento na passagem para o sistema de arquivos
+/// não reprovava nada, porque o único leitor por descritor lia do começo uma
+/// vez só.
+///
+/// Este caso lê o mesmo arquivo em pedaços e exige que eles se emendem.
+fn vfs_le_a_partir_de_um_deslocamento() -> Resultado {
+    let vnode = crate::vfs::resolver("/saudacao.txt").map_err(|e| e.motivo())?;
+    let esperado = NO_SAUDACAO.as_bytes();
+
+    // Em pedaços de oito, do começo ao fim, emendando.
+    const PEDACO: usize = 8;
+    let mut juntado = alloc::vec::Vec::new();
+    let mut de = 0u64;
+    loop {
+        let mut buffer = [0u8; PEDACO];
+        let veio = crate::vfs::ler_em(&vnode, de, &mut buffer).map_err(|e| e.motivo())?;
+        if veio == 0 {
+            break;
+        }
+        juntado.extend_from_slice(&buffer[..veio]);
+        de += veio as u64;
+        if juntado.len() > esperado.len() {
+            return Err("a leitura em pedacos trouxe mais que o arquivo tem");
+        }
+    }
+    if juntado != esperado {
+        crate::log_error!("teste", "vieram {} bytes emendados", juntado.len());
+        return Err("os pedacos nao remontam o arquivo: o deslocamento foi ignorado");
+    }
+
+    // Um deslocamento no meio traz o que está no meio, e não o começo.
+    let mut buffer = [0u8; PEDACO];
+    let veio = crate::vfs::ler_em(&vnode, 4, &mut buffer).map_err(|e| e.motivo())?;
+    if buffer[..veio] != esperado[4..4 + veio] {
+        return Err("a leitura no meio trouxe bytes de outro lugar");
+    }
+
+    // Além do fim não é erro: é zero bytes, que é o que uma leitura
+    // sequencial encontra ao chegar ao fim.
+    if crate::vfs::ler_em(&vnode, esperado.len() as u64, &mut buffer).map_err(|e| e.motivo())? != 0
+    {
+        return Err("uma leitura alem do fim trouxe bytes");
+    }
+
+    // E um diretório não se lê.
+    let dir = crate::vfs::resolver("/dados").map_err(|e| e.motivo())?;
+    if crate::vfs::ler_em(&dir, 0, &mut buffer).is_ok() {
+        return Err("um diretorio foi lido como arquivo");
+    }
+
+    Ok(())
+}
+
+/// A tabela de descritores faz o que uma tabela de descritores faz.
+///
+/// # Por que um caso de unidade, se há um programa que a usa
+///
+/// Porque o programa exercita **um** caminho: abrir uma vez, ler, fechar. Ele
+/// não tem como encher a tabela, nem como conferir que a vaga fechada volta
+/// para o mesmo número — são coisas que exigem contar até dezesseis e olhar o
+/// resultado, e um programa em assembly que fizesse isso testaria mais o
+/// assembly que o kernel.
+///
+/// Este caso confere as regras; o programa confere que elas valem do outro
+/// lado da chamada de sistema. Nenhum dos dois substitui o outro.
+fn descritores_a_tabela_do_processo() -> Resultado {
+    use crate::usuario::descritores::{Alvo, MAX, PRIMEIRO_LIVRE, Tabela, padrao};
+
+    let vnode = crate::vfs::resolver("/saudacao.txt").map_err(|e| e.motivo())?;
+    let mut tabela = Tabela::nova();
+
+    // Ela nasce com os três de sempre, e a entrada padrão vazia.
+    if tabela.alvo(padrao::ENTRADA).is_some() {
+        return Err("a entrada padrao nasceu apontando para algum lugar");
+    }
+    if !matches!(tabela.alvo(padrao::SAIDA), Some(Alvo::Registro)) {
+        return Err("a saida padrao nao nasceu apontando para o registro");
+    }
+    if !matches!(tabela.alvo(padrao::ERRO), Some(Alvo::Diagnostico)) {
+        return Err("a saida de erro nao nasceu apontando para o diagnostico");
+    }
+    if tabela.abertos() != 2 {
+        return Err("a tabela nova nao tem exatamente dois descritores abertos");
+    }
+
+    // O primeiro `abrir` não pode entregar a vaga zero, que está livre e é
+    // reservada. Entregá-la faria um `ler(0)` funcionar por acidente.
+    let primeiro = tabela
+        .abrir(vnode)
+        .ok_or("a tabela nova recusou a abertura")?;
+    if primeiro != PRIMEIRO_LIVRE as u64 {
+        crate::log_error!("teste", "o primeiro descritor foi {}", primeiro);
+        return Err("abrir entregou um numero que nao e o primeiro livre");
+    }
+    if !matches!(tabela.alvo(primeiro), Some(Alvo::Arquivo { .. })) {
+        return Err("o arquivo aberto nao ficou como destino de leitura");
+    }
+
+    // A posição é do descritor, e avançar um não mexe no outro.
+    let segundo = tabela
+        .abrir(vnode)
+        .ok_or("a segunda abertura foi recusada")?;
+    if segundo == primeiro {
+        return Err("duas aberturas devolveram o mesmo descritor");
+    }
+    tabela.avancar(primeiro, 10);
+    let em = |t: &Tabela, fd| match t.alvo(fd) {
+        Some(Alvo::Arquivo { posicao, .. }) => posicao,
+        _ => u64::MAX,
+    };
+    if em(&tabela, primeiro) != 10 || em(&tabela, segundo) != 0 {
+        crate::log_error!(
+            "teste",
+            "posicoes {} e {}",
+            em(&tabela, primeiro),
+            em(&tabela, segundo)
+        );
+        return Err("avancar um descritor mexeu na posicao do outro");
+    }
+
+    // Fechar devolve a vaga, e a próxima abertura a reaproveita — o menor
+    // número livre, como em qualquer Unix.
+    if !tabela.fechar(primeiro) {
+        return Err("fechar um descritor aberto falhou");
+    }
+    if tabela.alvo(primeiro).is_some() {
+        return Err("o descritor fechado continua apontando para o arquivo");
+    }
+    if tabela.fechar(primeiro) {
+        return Err("fechar duas vezes o mesmo descritor deu certo na segunda");
+    }
+    let terceiro = tabela
+        .abrir(vnode)
+        .ok_or("a terceira abertura foi recusada")?;
+    if terceiro != primeiro {
+        return Err("a vaga fechada nao foi reaproveitada");
+    }
+    // E a posição do reaproveitado começa do zero, e não de onde o anterior
+    // parou. Sem isto, o segundo dono do número leria do meio do arquivo.
+    if em(&tabela, terceiro) != 0 {
+        return Err("o descritor reaproveitado herdou a posicao do anterior");
+    }
+
+    // E a tabela tem fim. Um processo que abra sem fechar recebe uma recusa,
+    // e não uma vaga que não existe.
+    //
+    // Cheia são `MAX - 1`, e não `MAX`: a vaga da entrada padrão nunca é
+    // preenchida, porque `abrir` começa depois dela e nada mais escreve ali.
+    // A primeira versão deste caso esperava `MAX` e reprovou — o defeito
+    // estava no caso, e a conta certa é esta.
+    while tabela.abrir(vnode).is_some() {}
+    if tabela.abertos() != MAX - 1 {
+        crate::log_error!("teste", "{} abertos com a tabela cheia", tabela.abertos());
+        return Err("a tabela nao encheu ate a ultima vaga que ela entrega");
+    }
+    if tabela.alvo(padrao::ENTRADA).is_some() {
+        return Err("encher a tabela preencheu a vaga reservada");
+    }
+
+    // Um número que não cabe num `usize`, e um dentro do teto mas fora da
+    // tabela: os dois têm de sair como "não existe", e não em pânico.
+    if tabela.alvo(u64::MAX).is_some() || tabela.fechar(u64::MAX) {
+        return Err("um descritor absurdo foi aceito");
+    }
+    if tabela.alvo(MAX as u64).is_some() {
+        return Err("um descritor de fora da tabela foi aceito");
+    }
+
+    Ok(())
+}
+
+/// Um processo sem privilégio abre um arquivo do disco, lê e fecha.
+///
+/// # O que este caso prova que nenhum outro prova
+///
+/// A pilha inteira numa linha só: um programa em ring 3 chama `abrir`, o
+/// kernel resolve o caminho pelo VFS, acha o arquivo no Btrfs, guarda o vnode
+/// na tabela **daquele processo**, entrega um número; o programa chama `ler`
+/// com esse número, os bytes saem do disco e chegam à memória dele; ele os
+/// escreve de volta pelo descritor de saída, e o texto que aparece no log é o
+/// que o `mkfs.btrfs` pôs na imagem.
+///
+/// E o programa confere o kernel de dentro: ele sai com
+/// [`CODIGO_DE_FALHA_DO_LEITOR`](crate::usuario::exemplo::CODIGO_DE_FALHA_DO_LEITOR)
+/// se `abrir` devolver erro, se `ler` não trouxer nada, se abrir um diretório
+/// **não** for recusado com o motivo certo, se `fechar` recusar — ou se a
+/// leitura **depois** do `fechar` der certo, que é o que denunciaria um
+/// `fechar` que não fecha.
+///
+/// # A herança, provada pelo filho
+///
+/// O leitor bifurca com o arquivo já aberto, e o filho lê por aquele mesmo
+/// número. É a única prova possível de que a tabela é herdada: com uma tabela
+/// nova, o descritor do pai não existiria do lado do filho e a leitura dele
+/// sairia com "descritor invalido".
+///
+/// Os dois leem do começo, e isso também é afirmado aqui: cada um levou a
+/// própria cópia da posição. Não é o que o Unix faz — lá pai e filho
+/// compartilham a posição —, e a diferença está documentada na tabela em vez
+/// de ser descoberta.
+fn usuario_abre_le_e_fecha_um_arquivo() -> Resultado {
+    use alloc::format;
+
+    extern "C" fn hospedar(_argumento: u64) -> ! {
+        match crate::usuario::programa::executar(crate::usuario::exemplo::bytes_do_leitor()) {
+            Ok(_) => unreachable!("executar nao retorna em caso de sucesso"),
+            Err(falha) => {
+                crate::log_error!("teste", "o leitor nao entrou: {}", falha.motivo());
+                crate::fios::terminar()
+            }
+        }
+    }
+
+    let (aberturas_antes, leituras_antes, bytes_antes) = crate::usuario::estatisticas_de_arquivo();
+    let saidas_antes = crate::usuario::estatisticas_de_processo().2;
+
+    let bifurcacoes_antes = crate::usuario::estatisticas_de_processo().0;
+    crate::fios::criar("teste-leitor", hospedar, 0)?;
+
+    // Duas saídas: a do pai e a do filho que ele bifurcou.
+    esperar_ate(
+        || crate::usuario::estatisticas_de_processo().2 >= saidas_antes + 2,
+        600,
+    )?;
+
+    let sucesso = format!(
+        "processo encerrou com codigo {}",
+        crate::usuario::exemplo::CODIGO_DO_LEITOR
+    );
+    let do_filho = format!(
+        "processo encerrou com codigo {}",
+        crate::usuario::exemplo::CODIGO_DO_FILHO_DO_LEITOR
+    );
+    let falha = format!(
+        "processo encerrou com codigo {}",
+        crate::usuario::exemplo::CODIGO_DE_FALHA_DO_LEITOR
+    );
+
+    let (mut viu_sucesso, mut viu_filho, mut viu_falha, mut viu_conteudo) =
+        (false, false, false, false);
+    crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+        if r.subsistema != "usuario" {
+            return;
+        }
+        let m = r.mensagem();
+        viu_sucesso |= m == sucesso;
+        viu_filho |= m == do_filho;
+        viu_falha |= m == falha;
+        // O conteúdo vem com a quebra de linha que está no arquivo; o
+        // registro guarda o texto como veio.
+        viu_conteudo |=
+            r.level == crate::log::Level::Info && m.trim_end() == NO_SAUDACAO.trim_end();
+    });
+
+    if viu_falha {
+        return Err("o leitor reprovou alguma das chamadas que ele mesmo confere");
+    }
+    if !viu_conteudo {
+        return Err("o conteudo do arquivo nao apareceu escrito pelo processo");
+    }
+    if !viu_sucesso {
+        return Err("o leitor nao saiu com o codigo dele");
+    }
+    if !viu_filho {
+        return Err("o filho nao leu pelo descritor que o pai abriu");
+    }
+    if crate::usuario::estatisticas_de_processo().0 != bifurcacoes_antes + 1 {
+        return Err("o leitor nao se bifurcou exatamente uma vez");
+    }
+
+    // E os contadores acompanharam: **uma** abertura — a do diretório foi
+    // recusada e não conta —, e duas leituras que trouxeram bytes, uma de
+    // cada lado da bifurcação. A leitura no descritor fechado não conta, e é
+    // isso que distingue "recusou" de "leu zero bytes".
+    let (aberturas, leituras, bytes) = crate::usuario::estatisticas_de_arquivo();
+    if aberturas != aberturas_antes + 1 {
+        crate::log_error!("teste", "{} aberturas", aberturas - aberturas_antes);
+        return Err("a abertura do diretorio foi contada, ou a do arquivo nao");
+    }
+    if leituras != leituras_antes + 2 {
+        crate::log_error!("teste", "{} leituras", leituras - leituras_antes);
+        return Err("a leitura no descritor fechado foi contada como leitura");
+    }
+    // Os dois leram o arquivo inteiro, cada um do começo: é a soma que
+    // denuncia um filho que tivesse herdado a posição já avançada.
+    if bytes - bytes_antes != 2 * NO_SAUDACAO.len() as u64 {
+        crate::log_error!("teste", "{} bytes lidos", bytes - bytes_antes);
+        return Err("os dois lados nao leram o arquivo inteiro cada um");
     }
 
     Ok(())
@@ -4634,7 +4934,8 @@ fn usuario_executa_bifurca_e_troca_de_imagem() -> Resultado {
 /// que o kernel jamais aceitaria, e mesmo assim os descritores abertos chegam
 /// a reclamar *do ponteiro*, enquanto os fechados param antes.
 fn usuario_descritor_e_conferido() -> Resultado {
-    use crate::usuario::{descritor, despachar, erro, numero};
+    use crate::usuario::descritores::padrao as descritor;
+    use crate::usuario::{despachar, erro, numero};
 
     // Um endereço do kernel: reprovado em qualquer caso que chegue a olhá-lo.
     let no_kernel = &raw const CASOS as *const _ as u64;
@@ -6062,6 +6363,18 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "btrfs: classifica cada tipo de extensao",
         f: btrfs_classifica_cada_extensao,
+    },
+    Caso {
+        nome: "vfs: le a partir de um deslocamento",
+        f: vfs_le_a_partir_de_um_deslocamento,
+    },
+    Caso {
+        nome: "descritores: a tabela do processo",
+        f: descritores_a_tabela_do_processo,
+    },
+    Caso {
+        nome: "usuario: abre, le e fecha um arquivo do disco",
+        f: usuario_abre_le_e_fecha_um_arquivo,
     },
     Caso {
         nome: "disco: recusa setor fora da capacidade",

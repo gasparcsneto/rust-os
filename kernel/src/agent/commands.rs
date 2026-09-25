@@ -118,9 +118,16 @@ pub static COMANDOS: &[Command] = &[
     },
     Command {
         nome: "user.run",
-        resumo: "Lanca o programa de exemplo no anel sem privilegio, num fio proprio. \
+        resumo: "Lanca um programa no anel sem privilegio, num fio proprio. \
+                 Sem `path`, lanca o exemplo embutido. \
                  Nao espera o fim: consulte `user.stats` depois.",
-        params: &[],
+        params: &[ParamSpec {
+            nome: "path",
+            tipo: TipoParam::Texto,
+            obrigatorio: false,
+            descricao: "Caminho do programa na arvore de arquivos, por exemplo \
+                        `/bin/leitor` (padrao: o exemplo embutido).",
+        }],
         handler: user_run,
     },
     Command {
@@ -1464,9 +1471,15 @@ fn tasks_list(_params: Json, w: &mut JsonWriter) -> fmt::Result {
 // user.*
 // ---------------------------------------------------------------------------
 
-fn user_run(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+fn user_run(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let caminho = params.member("path").and_then(|v| v.as_str());
+
     w.begin_object()?;
-    match crate::usuario::lancar_exemplo() {
+    // O caminho e devolvido junto com a resposta: o lancamento nao espera o
+    // processo, entao quem perguntar depois precisa saber a qual programa o
+    // `last_exit` se refere.
+    w.field_str("program", caminho.unwrap_or("<exemplo embutido>"))?;
+    match crate::usuario::lancar(caminho) {
         Ok(id) => {
             w.field_bool("launched", true)?;
             w.field_u64("thread_id", id)?;
@@ -1482,6 +1495,7 @@ fn user_run(_params: Json, w: &mut JsonWriter) -> fmt::Result {
 fn user_stats(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     let (chamadas, recusadas, bytes) = crate::usuario::estatisticas();
     let (bifurcacoes, trocas, saidas) = crate::usuario::estatisticas_de_processo();
+    let (aberturas, leituras, bytes_lidos) = crate::usuario::estatisticas_de_arquivo();
 
     w.begin_object()?;
     w.field_u64("syscalls", chamadas)?;
@@ -1493,6 +1507,20 @@ fn user_stats(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     // sobe sozinho denuncia um processo tentando alcancar o que nao e dele.
     w.field_u64("rejected", recusadas)?;
     w.field_u64("bytes_written", bytes)?;
+    // Arquivos: quantos descritores foram abertos, quantas leituras
+    // aconteceram por eles e quantos bytes vieram. `opens` sem `reads` e um
+    // programa que abriu e desistiu; `reads` sem `bytes_read` e um arquivo
+    // que acabou.
+    w.field_u64("opens", aberturas)?;
+    w.field_u64("reads", leituras)?;
+    w.field_u64("bytes_read", bytes_lidos)?;
+    // Quantos descritores o fio que atende este comando tem abertos. E o do
+    // canal do agente, nao o de um processo -- ele mostra os tres padrao, que
+    // e o que todo fio recebe.
+    w.field_u64(
+        "descriptors_open",
+        crate::fios::com_descritores(|t| t.abertos()).unwrap_or(0) as u64,
+    )?;
 
     w.key("last_exit")?;
     match crate::usuario::ultima_saida() {

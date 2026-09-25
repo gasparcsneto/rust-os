@@ -73,6 +73,52 @@ pub const MENSAGEM_DO_FILHO: &str = "filho por exec";
 #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub const CODIGO_DE_BSS_SUJA: i64 = 7;
 
+/// Código de saída do programa que abre, lê e fecha um arquivo.
+///
+/// Distinto de todos os outros: se ele aparecer, quem saiu foi o leitor, e
+/// ele chegou ao fim — o que inclui a última conferência que ele faz, que é
+/// ler de novo no descritor fechado e exigir que falhe.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub const CODIGO_DO_LEITOR: i64 = 33;
+
+/// Código com que o leitor sai quando alguma das chamadas não fez o que devia.
+///
+/// Uma saída com este código é falha do **kernel**, não do programa: cada
+/// ponto que salta para cá é uma conferência que o leitor fez sobre o que
+/// `abrir`, `ler` ou `fechar` devolveram.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub const CODIGO_DE_FALHA_DO_LEITOR: i64 = 8;
+
+/// Código com que sai o filho que o leitor bifurca.
+///
+/// Ele existe para uma coisa só: o filho lê pelo descritor que o **pai**
+/// abriu. Se a tabela não fosse herdada, aquele número não existiria do lado
+/// dele e ele sairia pela falha.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub const CODIGO_DO_FILHO_DO_LEITOR: i64 = 34;
+
+/// O diretório que o leitor tenta abrir, e que tem de ser recusado.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub const DIRETORIO_DO_LEITOR: &str = "/dados";
+
+/// O motivo que o assembly compara, escrito como número nos dois blocos.
+const _: () = {
+    assert!(DIRETORIO_DO_LEITOR.len() == 6);
+    assert!(crate::usuario::erro::NAO_EH_ARQUIVO == -10);
+};
+
+/// O arquivo que o leitor abre.
+///
+/// Metade de um contrato cujo outro lado é o `.ascii` do assembly logo
+/// abaixo, nos dois blocos. A asserção de tamanho que vem a seguir é o que
+/// impede as duas metades de divergirem em silêncio: mudar o caminho aqui sem
+/// mudar lá quebraria o build, em vez de fazer o programa abrir outra coisa.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub const ARQUIVO_DO_LEITOR: &str = "/saudacao.txt";
+
+/// O tamanho que o assembly escreve em `TAM_CAMINHO_LE`.
+const _: () = assert!(ARQUIVO_DO_LEITOR.len() == 13);
+
 /// Texto que o exemplo manda para o descritor de erro.
 ///
 /// Está numa constante porque o teste procura exatamente este texto no log,
@@ -93,6 +139,10 @@ unsafe extern "C" {
     static FILHO_INICIO: u8;
     #[link_name = "programa_filho_fim"]
     static FILHO_FIM: u8;
+    #[link_name = "programa_leitor_inicio"]
+    static LEITOR_INICIO: u8;
+    #[link_name = "programa_leitor_fim"]
+    static LEITOR_FIM: u8;
 }
 
 /// A imagem ELF do programa bem-comportado.
@@ -122,6 +172,23 @@ pub fn bytes_invasores() -> &'static [u8] {
 pub fn bytes_do_filho() -> &'static [u8] {
     // SAFETY: ver `entre`.
     unsafe { entre(&raw const FILHO_INICIO, &raw const FILHO_FIM) }
+}
+
+/// A imagem ELF do programa que abre, lê e fecha um arquivo.
+///
+/// Existe porque a tabela de descritores só é real se alguém sem privilégio a
+/// usar. Um `abrir` que só o kernel chama é uma função; um `abrir` que um
+/// processo chama é uma chamada de sistema — e a diferença entre as duas é
+/// tudo que esta etapa acrescenta.
+///
+/// Ele confere o que recebe, e sai com [`CODIGO_DE_FALHA_DO_LEITOR`] se
+/// alguma resposta não fizer sentido. A última conferência é a que mais
+/// importa: depois de `fechar`, ele **lê de novo no mesmo número** e exige
+/// que a leitura falhe. Sem ela, um `fechar` que não fizesse nada passaria.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub fn bytes_do_leitor() -> &'static [u8] {
+    // SAFETY: ver `entre`.
+    unsafe { entre(&raw const LEITOR_INICIO, &raw const LEITOR_FIM) }
 }
 
 /// # Safety
@@ -332,6 +399,195 @@ programa_filho_inicio:
 
 .global programa_filho_fim
 programa_filho_fim:
+
+// O leitor: dois caminhos no comeco do segmento de dados e um buffer logo
+// depois, inteiro na `.bss` -- o carregador tem de entrega-lo zerado.
+.set TAM_CAMINHO_LE,      13
+.set OFF_DIRETORIO_LE,    16
+.set TAM_DIRETORIO_LE,    6
+.set DADOS_LE_NO_ARQUIVO, 24
+.set OFF_BUFFER_LE,       32
+.set TAM_BUFFER_LE,       64
+.set DADOS_LE_NA_MEMORIA, OFF_BUFFER_LE + TAM_BUFFER_LE
+.set VADDR_CAMINHO_LE,    VADDR_DADOS
+.set VADDR_DIRETORIO_LE,  VADDR_DADOS + OFF_DIRETORIO_LE
+.set VADDR_BUFFER_LE,     VADDR_DADOS + OFF_BUFFER_LE
+
+// --- o leitor: abre, bifurca, le dos dois lados, escreve e fecha -----------
+.balign 8
+.global programa_leitor_inicio
+programa_leitor_inicio:
+
+// --- cabecalho ELF64 -------------------------------------------------------
+.Lelf_le:
+    .byte   0x7F, 0x45, 0x4C, 0x46   // \x7fELF
+    .byte   2, 1, 1, 0               // 64 bits, little-endian, versao 1
+    .byte   0, 0, 0, 0, 0, 0, 0, 0   // resto do e_ident
+    .short  2                        // e_type: ET_EXEC
+    .short  0x3E                  // e_machine
+    .long   1                        // e_version
+    .quad   VADDR_CODIGO             // e_entry
+    .quad   64                       // e_phoff
+    .quad   0                        // e_shoff: sem secoes
+    .long   0                        // e_flags
+    .short  64                       // e_ehsize
+    .short  56                       // e_phentsize
+    .short  2                        // e_phnum
+    .short  0                        // e_shentsize
+    .short  0                        // e_shnum
+    .short  0                        // e_shstrndx
+
+    // segmento de codigo: leitura e execucao, nunca escrita
+    .long   1                                   // PT_LOAD
+    .long   5                                   // PF_R | PF_X
+    .quad   .Lcodigo_le - .Lelf_le              // p_offset
+    .quad   VADDR_CODIGO                        // p_vaddr
+    .quad   VADDR_CODIGO                        // p_paddr
+    .quad   .Lfim_codigo_le - .Lcodigo_le       // p_filesz
+    .quad   .Lfim_codigo_le - .Lcodigo_le       // p_memsz
+    .quad   4096                                // p_align
+
+    // segmento de dados: os caminhos vem do arquivo, o buffer nao. `p_memsz`
+    // maior que `p_filesz` e o que pede os 64 bytes de buffer zerados.
+    .long   1                                   // PT_LOAD
+    .long   6                                   // PF_R | PF_W
+    .quad   .Ldados_le - .Lelf_le               // p_offset
+    .quad   VADDR_DADOS                         // p_vaddr
+    .quad   VADDR_DADOS                         // p_paddr
+    .quad   DADOS_LE_NO_ARQUIVO                 // p_filesz
+    .quad   DADOS_LE_NA_MEMORIA                 // p_memsz
+    .quad   4096                                // p_align
+
+.Lcodigo_le:
+    // abrir(caminho, tamanho) -> descritor, ou negativo
+    movabs  rdi, offset VADDR_CAMINHO_LE
+    mov     esi, offset TAM_CAMINHO_LE
+    mov     eax, 6
+    syscall
+    test    rax, rax
+    js      .Lfalhou_le
+    // O descritor fica num registrador que a chamada de sistema preserva:
+    // o ponto de entrada empilha e desempilha tudo menos o retorno.
+    mov     r12, rax
+
+    // bifurcar() com um arquivo ja aberto. O filho herda a tabela de
+    // descritores -- e a leitura dele, logo abaixo, e o que prova isso: com
+    // uma tabela nova o numero em r12 nao existiria do lado dele.
+    mov     eax, 4
+    syscall
+    test    rax, rax
+    jnz     .Lpai_le
+
+    // ler(descritor herdado, buffer, tamanho)
+    mov     rdi, r12
+    movabs  rsi, offset VADDR_BUFFER_LE
+    mov     edx, offset TAM_BUFFER_LE
+    mov     eax, 7
+    syscall
+    test    rax, rax
+    jle     .Lfalhou_le
+
+    // sair(34): so o filho sai com este codigo.
+    mov     eax, 0
+    mov     edi, 34
+    syscall
+
+.Lpai_le:
+    // ler(descritor, buffer, tamanho) -> quantos vieram
+    //
+    // O pai le do comeco, mesmo que o filho ja tenha lido: cada um levou a
+    // propria copia da posicao. E o comportamento documentado na tabela, e
+    // nao o do Unix, que compartilha a posicao entre pai e filho.
+    mov     rdi, r12
+    movabs  rsi, offset VADDR_BUFFER_LE
+    mov     edx, offset TAM_BUFFER_LE
+    mov     eax, 7
+    syscall
+    test    rax, rax
+    jle     .Lfalhou_le
+    mov     r13, rax
+
+    // escrever(SAIDA, buffer, quantos) -- e assim o que veio do disco
+    // aparece do outro lado, escrito por um processo sem privilegio.
+    mov     edi, 1
+    movabs  rsi, offset VADDR_BUFFER_LE
+    mov     rdx, r13
+    mov     eax, 1
+    syscall
+
+    // Escrever num descritor de arquivo tem de ser recusado: este kernel nao
+    // tem escrita em arquivo, e aceitar mandaria o conteudo para o log como
+    // se fosse uma mensagem.
+    mov     rdi, r12
+    movabs  rsi, offset VADDR_BUFFER_LE
+    mov     edx, 8
+    mov     eax, 1
+    syscall
+    test    rax, rax
+    jns     .Lfalhou_le
+
+    // E ler num descritor de saida tambem: devolver zero fingiria um arquivo
+    // vazio, e quem lesse ate o fim entenderia "acabou" em vez de "este
+    // descritor nao le".
+    mov     edi, 1
+    movabs  rsi, offset VADDR_BUFFER_LE
+    mov     edx, offset TAM_BUFFER_LE
+    mov     eax, 7
+    syscall
+    test    rax, rax
+    jns     .Lfalhou_le
+
+    // Abrir um diretorio tem de ser recusado, e com o motivo certo: -10 e
+    // "nao e arquivo", que e diferente de "nao encontrado". Um kernel que
+    // devolvesse o segundo mandaria o programa procurar o erro no lugar
+    // errado.
+    movabs  rdi, offset VADDR_DIRETORIO_LE
+    mov     esi, offset TAM_DIRETORIO_LE
+    mov     eax, 6
+    syscall
+    cmp     rax, -10
+    jne     .Lfalhou_le
+
+    // fechar(descritor)
+    mov     rdi, r12
+    mov     eax, 8
+    syscall
+    test    rax, rax
+    jnz     .Lfalhou_le
+
+    // E ler de novo no mesmo numero. Tem de falhar: a vaga voltou para a
+    // tabela. Sem esta conferencia, um `fechar` que nao fizesse nada passaria
+    // -- e o programa nao teria como saber.
+    mov     rdi, r12
+    movabs  rsi, offset VADDR_BUFFER_LE
+    mov     edx, offset TAM_BUFFER_LE
+    mov     eax, 7
+    syscall
+    test    rax, rax
+    jns     .Lfalhou_le
+
+    // sair(33)
+    mov     eax, 0
+    mov     edi, 33
+    syscall
+
+.Lfalhou_le:
+    mov     eax, 0
+    mov     edi, 8
+    syscall
+.Lprender_le:
+    jmp     .Lprender_le
+.Lfim_codigo_le:
+
+.Ldados_le:
+    .ascii  "/saudacao.txt"
+    .space  OFF_DIRETORIO_LE - TAM_CAMINHO_LE
+    .ascii  "/dados"
+    .space  DADOS_LE_NO_ARQUIVO - OFF_DIRETORIO_LE - TAM_DIRETORIO_LE
+.Lfim_dados_le:
+
+.global programa_leitor_fim
+programa_leitor_fim:
 
 // --- o invasor -------------------------------------------------------------
 .balign 8
@@ -593,6 +849,205 @@ programa_filho_inicio:
 
 .global programa_filho_fim
 programa_filho_fim:
+
+// O leitor: dois caminhos no comeco do segmento de dados e um buffer logo
+// depois, inteiro na `.bss` -- o carregador tem de entrega-lo zerado.
+.set TAM_CAMINHO_LE,      13
+.set OFF_DIRETORIO_LE,    16
+.set TAM_DIRETORIO_LE,    6
+.set DADOS_LE_NO_ARQUIVO, 24
+.set OFF_BUFFER_LE,       32
+.set TAM_BUFFER_LE,       64
+.set DADOS_LE_NA_MEMORIA, OFF_BUFFER_LE + TAM_BUFFER_LE
+.set VADDR_CAMINHO_LE,    VADDR_DADOS
+.set VADDR_DIRETORIO_LE,  VADDR_DADOS + OFF_DIRETORIO_LE
+.set VADDR_BUFFER_LE,     VADDR_DADOS + OFF_BUFFER_LE
+
+// --- o leitor: abre, bifurca, le dos dois lados, escreve e fecha -----------
+.balign 8
+.global programa_leitor_inicio
+programa_leitor_inicio:
+
+// --- cabecalho ELF64 -------------------------------------------------------
+.Lelf_le:
+    .byte   0x7F, 0x45, 0x4C, 0x46   // \x7fELF
+    .byte   2, 1, 1, 0               // 64 bits, little-endian, versao 1
+    .byte   0, 0, 0, 0, 0, 0, 0, 0   // resto do e_ident
+    .short  2                        // e_type: ET_EXEC
+    .short  0xB7                  // e_machine
+    .long   1                        // e_version
+    .quad   VADDR_CODIGO             // e_entry
+    .quad   64                       // e_phoff
+    .quad   0                        // e_shoff: sem secoes
+    .long   0                        // e_flags
+    .short  64                       // e_ehsize
+    .short  56                       // e_phentsize
+    .short  2                        // e_phnum
+    .short  0                        // e_shentsize
+    .short  0                        // e_shnum
+    .short  0                        // e_shstrndx
+
+    // segmento de codigo: leitura e execucao, nunca escrita
+    .long   1                                   // PT_LOAD
+    .long   5                                   // PF_R | PF_X
+    .quad   .Lcodigo_le - .Lelf_le              // p_offset
+    .quad   VADDR_CODIGO                        // p_vaddr
+    .quad   VADDR_CODIGO                        // p_paddr
+    .quad   .Lfim_codigo_le - .Lcodigo_le       // p_filesz
+    .quad   .Lfim_codigo_le - .Lcodigo_le       // p_memsz
+    .quad   4096                                // p_align
+
+    // segmento de dados: os caminhos vem do arquivo, o buffer nao. `p_memsz`
+    // maior que `p_filesz` e o que pede os 64 bytes de buffer zerados.
+    .long   1                                   // PT_LOAD
+    .long   6                                   // PF_R | PF_W
+    .quad   .Ldados_le - .Lelf_le               // p_offset
+    .quad   VADDR_DADOS                         // p_vaddr
+    .quad   VADDR_DADOS                         // p_paddr
+    .quad   DADOS_LE_NO_ARQUIVO                 // p_filesz
+    .quad   DADOS_LE_NA_MEMORIA                 // p_memsz
+    .quad   4096                                // p_align
+
+.Lcodigo_le:
+    // abrir(caminho, tamanho) -> descritor, ou negativo
+    movz    x0, #(VADDR_CAMINHO_LE & 0xFFFF)
+    movk    x0, #((VADDR_CAMINHO_LE >> 16) & 0xFFFF), lsl #16
+    movk    x0, #((VADDR_CAMINHO_LE >> 32) & 0xFFFF), lsl #32
+    mov     x1, #TAM_CAMINHO_LE
+    mov     x8, #6
+    svc     #0
+    tbnz    x0, #63, .Lfalhou_le
+    // O descritor fica num registrador que a chamada de sistema preserva: o
+    // vetor de excecao salva e restaura x0..x30, menos o retorno.
+    mov     x19, x0
+
+    // bifurcar() com um arquivo ja aberto. O filho herda a tabela de
+    // descritores -- e a leitura dele, logo abaixo, e o que prova isso: com
+    // uma tabela nova o numero em x19 nao existiria do lado dele.
+    mov     x8, #4
+    svc     #0
+    cbnz    x0, .Lpai_le
+
+    // ler(descritor herdado, buffer, tamanho)
+    mov     x0, x19
+    movz    x1, #(VADDR_BUFFER_LE & 0xFFFF)
+    movk    x1, #((VADDR_BUFFER_LE >> 16) & 0xFFFF), lsl #16
+    movk    x1, #((VADDR_BUFFER_LE >> 32) & 0xFFFF), lsl #32
+    mov     x2, #TAM_BUFFER_LE
+    mov     x8, #7
+    svc     #0
+    cmp     x0, #0
+    ble     .Lfalhou_le
+
+    // sair(34): so o filho sai com este codigo.
+    mov     x8, #0
+    mov     x0, #34
+    svc     #0
+
+.Lpai_le:
+    // ler(descritor, buffer, tamanho) -> quantos vieram
+    //
+    // O pai le do comeco, mesmo que o filho ja tenha lido: cada um levou a
+    // propria copia da posicao. E o comportamento documentado na tabela, e
+    // nao o do Unix, que compartilha a posicao entre pai e filho.
+    mov     x0, x19
+    movz    x1, #(VADDR_BUFFER_LE & 0xFFFF)
+    movk    x1, #((VADDR_BUFFER_LE >> 16) & 0xFFFF), lsl #16
+    movk    x1, #((VADDR_BUFFER_LE >> 32) & 0xFFFF), lsl #32
+    mov     x2, #TAM_BUFFER_LE
+    mov     x8, #7
+    svc     #0
+    cmp     x0, #0
+    ble     .Lfalhou_le
+    mov     x20, x0
+
+    // escrever(SAIDA, buffer, quantos) -- e assim o que veio do disco
+    // aparece do outro lado, escrito por um processo sem privilegio.
+    mov     x2, x20
+    movz    x1, #(VADDR_BUFFER_LE & 0xFFFF)
+    movk    x1, #((VADDR_BUFFER_LE >> 16) & 0xFFFF), lsl #16
+    movk    x1, #((VADDR_BUFFER_LE >> 32) & 0xFFFF), lsl #32
+    mov     x0, #1
+    mov     x8, #1
+    svc     #0
+
+    // Escrever num descritor de arquivo tem de ser recusado: este kernel nao
+    // tem escrita em arquivo, e aceitar mandaria o conteudo para o log como
+    // se fosse uma mensagem.
+    mov     x0, x19
+    movz    x1, #(VADDR_BUFFER_LE & 0xFFFF)
+    movk    x1, #((VADDR_BUFFER_LE >> 16) & 0xFFFF), lsl #16
+    movk    x1, #((VADDR_BUFFER_LE >> 32) & 0xFFFF), lsl #32
+    mov     x2, #8
+    mov     x8, #1
+    svc     #0
+    tbz     x0, #63, .Lfalhou_le
+
+    // E ler num descritor de saida tambem: devolver zero fingiria um arquivo
+    // vazio, e quem lesse ate o fim entenderia "acabou" em vez de "este
+    // descritor nao le".
+    mov     x0, #1
+    movz    x1, #(VADDR_BUFFER_LE & 0xFFFF)
+    movk    x1, #((VADDR_BUFFER_LE >> 16) & 0xFFFF), lsl #16
+    movk    x1, #((VADDR_BUFFER_LE >> 32) & 0xFFFF), lsl #32
+    mov     x2, #TAM_BUFFER_LE
+    mov     x8, #7
+    svc     #0
+    tbz     x0, #63, .Lfalhou_le
+
+    // Abrir um diretorio tem de ser recusado, e com o motivo certo: -10 e
+    // "nao e arquivo", que e diferente de "nao encontrado". Um kernel que
+    // devolvesse o segundo mandaria o programa procurar o erro no lugar
+    // errado. `cmn` compara com o negativo: x0 + 10 == 0.
+    movz    x0, #(VADDR_DIRETORIO_LE & 0xFFFF)
+    movk    x0, #((VADDR_DIRETORIO_LE >> 16) & 0xFFFF), lsl #16
+    movk    x0, #((VADDR_DIRETORIO_LE >> 32) & 0xFFFF), lsl #32
+    mov     x1, #TAM_DIRETORIO_LE
+    mov     x8, #6
+    svc     #0
+    cmn     x0, #10
+    b.ne    .Lfalhou_le
+
+    // fechar(descritor)
+    mov     x0, x19
+    mov     x8, #8
+    svc     #0
+    cbnz    x0, .Lfalhou_le
+
+    // E ler de novo no mesmo numero. Tem de falhar: a vaga voltou para a
+    // tabela. Sem esta conferencia, um `fechar` que nao fizesse nada passaria
+    // -- e o programa nao teria como saber.
+    mov     x0, x19
+    movz    x1, #(VADDR_BUFFER_LE & 0xFFFF)
+    movk    x1, #((VADDR_BUFFER_LE >> 16) & 0xFFFF), lsl #16
+    movk    x1, #((VADDR_BUFFER_LE >> 32) & 0xFFFF), lsl #32
+    mov     x2, #TAM_BUFFER_LE
+    mov     x8, #7
+    svc     #0
+    tbz     x0, #63, .Lfalhou_le
+
+    // sair(33)
+    mov     x8, #0
+    mov     x0, #33
+    svc     #0
+
+.Lfalhou_le:
+    mov     x8, #0
+    mov     x0, #8
+    svc     #0
+.Lprender_le:
+    b       .Lprender_le
+.Lfim_codigo_le:
+
+.Ldados_le:
+    .ascii  "/saudacao.txt"
+    .space  OFF_DIRETORIO_LE - TAM_CAMINHO_LE
+    .ascii  "/dados"
+    .space  DADOS_LE_NO_ARQUIVO - OFF_DIRETORIO_LE - TAM_DIRETORIO_LE
+.Lfim_dados_le:
+
+.global programa_leitor_fim
+programa_leitor_fim:
 
 // --- o invasor -------------------------------------------------------------
 .balign 8

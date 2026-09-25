@@ -136,6 +136,25 @@ struct Fio {
     /// paginação com a trava do escalonador na mão — que é exatamente o que
     /// este módulo se recusa a fazer.
     espaco: Option<crate::paginacao::Espaco>,
+    /// Os descritores abertos do processo que este fio hospeda.
+    ///
+    /// # Por que ela mora aqui, e não numa tabela global indexada por id
+    ///
+    /// Porque assim as duas propriedades que ela precisa ter saem de graça,
+    /// sem uma linha para mantê-las: ela **morre junto com o processo**,
+    /// porque o `Fio` é largado quando a vaga é reaproveitada; e `bifurcar`
+    /// a **herda**, porque bifurcar copia o fio.
+    ///
+    /// Uma tabela à parte precisaria de uma remoção no caminho de saída — e
+    /// de outra no caminho em que o processo morre por falha de página, que
+    /// é justamente o que ninguém lembra de escrever.
+    ///
+    /// Fios do kernel também têm a sua. Eles não fazem chamada de sistema,
+    /// então ela fica intocada; o custo é o de três `Option` por vaga, e a
+    /// alternativa — um `Option<Tabela>` — trocaria isso por um desembrulho
+    /// em todo acesso e por uma pergunta ("este fio é processo?") que o
+    /// escalonador não tem por que responder.
+    descritores: crate::usuario::descritores::Tabela,
     /// Quantas vezes este fio já foi escalonado.
     escalonamentos: u64,
 }
@@ -227,6 +246,7 @@ pub fn init() {
             contexto: Contexto::vazio(),
             _pilha: None,
             espaco: None,
+            descritores: crate::usuario::descritores::Tabela::nova(),
             escalonamentos: 1,
         });
         e.atual = 0;
@@ -325,8 +345,22 @@ fn nascer(nome: &'static str, nascimento: Nascimento) -> Result<IdFio, &'static 
     // Escolhemos a vaga e a **marcamos** na mesma seção crítica. Marcar é o
     // que impede que outra criação concorrente escolha a mesma vaga no
     // intervalo em que estamos mapeando a pilha lá fora.
-    let (vaga, ocupante_morto) = com_escalonador(|e| {
+    // A tabela de descritores do filho é copiada do fio que está chamando, na
+    // mesma seção crítica que escolhe a vaga. Um `fork` que não herdasse os
+    // descritores abertos não seria um `fork`: o filho acordaria sem a saída
+    // padrão, e a primeira coisa que ele escrevesse sumiria.
+    //
+    // Um fio do kernel não herda de ninguém — ele começa com a tabela
+    // padrão, que é o que `criar` quer dizer.
+    let (vaga, ocupante_morto, herdada) = com_escalonador(|e| {
         let vaga = e.vaga_livre()?;
+        let herdada = match nascimento {
+            Nascimento::Bifurcacao { .. } => e.fios[e.atual]
+                .as_ref()
+                .map(|pai| pai.descritores.clone())
+                .unwrap_or_default(),
+            Nascimento::Funcao { .. } => crate::usuario::descritores::Tabela::nova(),
+        };
         let anterior = e.fios[vaga].take();
         e.fios[vaga] = Some(Fio {
             id,
@@ -335,9 +369,10 @@ fn nascer(nome: &'static str, nascimento: Nascimento) -> Result<IdFio, &'static 
             contexto: Contexto::vazio(),
             _pilha: None,
             espaco: None,
+            descritores: herdada.clone(),
             escalonamentos: 0,
         });
-        Ok::<_, &'static str>((vaga, anterior))
+        Ok::<_, &'static str>((vaga, anterior, herdada))
     })?;
 
     // O fio morto que ocupava a vaga morre aqui fora: o `Drop` da pilha dele
@@ -400,6 +435,7 @@ fn nascer(nome: &'static str, nascimento: Nascimento) -> Result<IdFio, &'static 
             contexto,
             _pilha: Some(pilha),
             espaco,
+            descritores: herdada,
             escalonamentos: 0,
         })
     });
@@ -544,6 +580,28 @@ pub fn ceder() {
 /// O identificador do fio que está executando.
 pub fn id_atual() -> u64 {
     com_escalonador(|e| e.fios[e.atual].as_ref().map(|f| f.id.numero()).unwrap_or(0))
+}
+
+/// Dá acesso à tabela de descritores do fio que está executando.
+///
+/// # A regra de quem chama, e por que ela não é opcional
+///
+/// `f` roda com a trava do escalonador na mão e as interrupções desligadas.
+/// **Nada que vá ao disco, ao heap ou a outra trava pode acontecer lá
+/// dentro** — uma leitura de arquivo dali travaria o sistema inteiro pelo
+/// tempo do disco, com o escalonador parado.
+///
+/// É por isso que uma leitura por descritor acontece em três tempos: pega o
+/// alvo aqui dentro, lê lá fora, e volta aqui para avançar a posição. O
+/// [`Alvo`](crate::usuario::descritores::Alvo) é `Copy` exatamente para que o
+/// primeiro tempo possa sair com uma cópia e largar a trava.
+///
+/// Devolve `None` se não houver fio atual, o que só acontece antes de
+/// [`init`].
+pub fn com_descritores<R>(
+    f: impl FnOnce(&mut crate::usuario::descritores::Tabela) -> R,
+) -> Option<R> {
+    com_escalonador(|e| e.fios[e.atual].as_mut().map(|fio| f(&mut fio.descritores)))
 }
 
 /// A pilha de kernel do fio que está executando.

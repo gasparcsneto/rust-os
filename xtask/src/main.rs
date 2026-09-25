@@ -542,7 +542,7 @@ fn conferir_elfs(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
         .map_err(|e| format!("não foi possível criar {saida:?}: {e}"))?;
 
     let mut falhou = false;
-    for nome in ["exemplo", "filho", "invasor"] {
+    for nome in ["exemplo", "filho", "invasor", "leitor"] {
         let inicio = buscar(&simbolos, &format!("programa_{nome}_inicio"))?;
         let fim = buscar(&simbolos, &format!("programa_{nome}_fim"))?;
 

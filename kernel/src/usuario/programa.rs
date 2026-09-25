@@ -79,6 +79,10 @@ static EMBUTIDOS: &[Embutido] = &[
         nome: "invasor",
         imagem: super::exemplo::bytes_invasores,
     },
+    Embutido {
+        nome: "leitor",
+        imagem: super::exemplo::bytes_do_leitor,
+    },
 ];
 
 /// Procura um programa embutido pelo nome, devolvendo a posição na tabela.

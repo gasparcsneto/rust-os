@@ -32,10 +32,12 @@
 //! existe é a separação de *privilégio*: o processo não alcança as páginas do
 //! kernel, porque elas não têm o bit de usuário.
 
+pub mod descritores;
 pub mod elf;
 pub mod exemplo;
 pub mod programa;
 
+use alloc::string::String;
 use core::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 /// Números das chamadas de sistema.
@@ -58,6 +60,13 @@ pub mod numero {
     /// `executar(ptr, tamanho)`: troca a imagem do processo pela que o nome
     /// indicar. Não retorna em caso de sucesso — retorna noutro programa.
     pub const EXECUTAR: u64 = 5;
+    /// `abrir(ptr, tamanho)`: abre o arquivo do caminho e devolve o descritor.
+    pub const ABRIR: u64 = 6;
+    /// `ler(descritor, ptr, tamanho)`: traz bytes de onde o descritor apontar
+    /// e avança a posição dele.
+    pub const LER: u64 = 7;
+    /// `fechar(descritor)`: devolve a vaga do descritor à tabela.
+    pub const FECHAR: u64 = 8;
 }
 
 /// Erros devolvidos ao usuário, sempre negativos.
@@ -73,71 +82,17 @@ pub mod erro {
     pub const SEM_MEMORIA: i64 = -5;
     pub const SEM_VAGA_DE_FIO: i64 = -6;
     pub const PROGRAMA_DESCONHECIDO: i64 = -7;
-}
-
-/// Os descritores que todo processo recebe abertos.
-///
-/// Os números são os do Unix, e isso é deliberado: não porque o Duke pretenda
-/// ser POSIX, mas porque qualquer pessoa que já escreveu um programa sabe de
-/// cor o que 1 e 2 significam. Inventar uma numeração própria cobraria esse
-/// conhecimento de volta sem devolver nada.
-pub mod descritor {
-    /// Leitura. Reservado: ainda não há de onde ler, e **escrever nele é
-    /// erro** — é o caso que prova que a tabela é consultada de verdade.
-    pub const ENTRADA: u64 = 0;
-    /// Saída comum. Vai para o log do kernel em nível `info`.
-    pub const SAIDA: u64 = 1;
-    /// Saída de erro. Vai para o mesmo log em nível `error`.
-    pub const ERRO: u64 = 2;
-}
-
-/// Para onde um descritor aponta.
-///
-/// Hoje só há dois destinos, os dois no log do kernel. O tipo existe mesmo
-/// assim porque é ele que torna a indireção real: sem ele, `escrever` voltaria
-/// a ter um único destino embutido e o descritor seria decoração.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Alvo {
-    /// Log do kernel, nível `info`.
-    Registro,
-    /// Log do kernel, nível `error`.
-    Diagnostico,
-}
-
-/// A tabela de descritores.
-///
-/// # Por que ela é `static` e imutável
-///
-/// Porque nada pode alterá-la ainda: não existe `abrir`, nem `fechar`, nem
-/// herança por `fork`. Uma tabela imutável não precisa de lock, e um lock que
-/// não existe não pode ser esquecido dentro de um handler.
-///
-/// Quando houver mais de um processo, ela vira campo do processo — e é
-/// exatamente por isso que a indireção entra agora. Acrescentar o argumento
-/// depois que houver programas de usuário significaria quebrar todos eles.
-static TABELA: [Option<Alvo>; 3] = [None, Some(Alvo::Registro), Some(Alvo::Diagnostico)];
-
-// A tabela é posicional, mas os nomes acima é que formam a ABI. Se alguém
-// reordenar uma sem renumerar os outros, os dois deixam de concordar em
-// silêncio e todo programa de usuário passa a escrever no lugar errado.
-//
-// Esta amarra é conferida em tempo de compilação, então o erro aparece no
-// build e não num log estranho meses depois.
-const _: () = {
-    assert!(TABELA[descritor::ENTRADA as usize].is_none());
-    assert!(TABELA[descritor::SAIDA as usize].is_some());
-    assert!(TABELA[descritor::ERRO as usize].is_some());
-};
-
-/// Resolve um descritor no seu destino, se ele permitir escrita.
-fn alvo_de_escrita(descritor: u64) -> Option<Alvo> {
-    // `get` em vez de indexar: o número veio do usuário e pode ser qualquer
-    // coisa. Indexar entraria em pânico, e um processo não deve conseguir
-    // derrubar o kernel com um inteiro grande.
-    TABELA
-        .get(usize::try_from(descritor).ok()?)
-        .copied()
-        .flatten()
+    /// A tabela de descritores do processo está cheia.
+    pub const SEM_DESCRITOR: i64 = -8;
+    /// O caminho não existe, ou não dá para resolvê-lo.
+    pub const NAO_ENCONTRADO: i64 = -9;
+    /// O caminho existe e não é um arquivo.
+    ///
+    /// Distinto de [`NAO_ENCONTRADO`] de propósito: um programa que tente
+    /// abrir um diretório merece saber que errou o tipo, e não que o caminho
+    /// não existe — a segunda resposta o manda procurar o erro no lugar
+    /// errado.
+    pub const NAO_EH_ARQUIVO: i64 = -10;
 }
 
 /// Onde o espaço do usuário começa e termina.
@@ -180,12 +135,16 @@ const _: () = {
     );
 };
 
-/// Maior escrita que uma chamada aceita de uma vez.
+/// Maior transferência que uma chamada aceita de uma vez, nos dois sentidos.
 ///
 /// Um teto explícito é obrigatório: sem ele, um processo pediria uma escrita
 /// de tamanho arbitrário e o kernel gastaria tempo ilimitado dentro de uma
 /// chamada — negação de serviço por um número grande.
-const MAX_ESCRITA: u64 = 4096;
+///
+/// Ele vale para `ler` também, e ali o teto faz uma segunda coisa: é o que
+/// limita o buffer que o kernel aloca por leitura. Sem ele, um processo
+/// escolheria quanto do heap do kernel quer consumir por chamada.
+const MAX_TRANSFERENCIA: u64 = 4096;
 
 /// Maior nome de programa que `executar` aceita.
 ///
@@ -230,7 +189,7 @@ pub fn validar_faixa(inicio: u64, tamanho: u64) -> Result<(), i64> {
     if tamanho == 0 {
         return Ok(());
     }
-    if tamanho > MAX_ESCRITA {
+    if tamanho > MAX_TRANSFERENCIA {
         return Err(erro::TAMANHO_INVALIDO);
     }
     let fim = inicio.checked_add(tamanho).ok_or(erro::ENDERECO_INVALIDO)?;
@@ -273,6 +232,9 @@ pub unsafe fn despachar(
             crate::fios::ceder();
             0
         }
+        numero::ABRIR => abrir(a0, a1),
+        numero::LER => ler(a0, a1, a2),
+        numero::FECHAR => fechar(a0),
         // SAFETY: o quadro é o desta chamada, garantido por quem nos chamou.
         numero::BIFURCAR => unsafe { bifurcar(quadro) },
         numero::EXECUTAR => unsafe { executar(quadro, a0, a1) },
@@ -312,9 +274,24 @@ fn escrever(descritor: u64, ponteiro: u64, tamanho: u64) -> i64 {
     // O descritor primeiro, antes de olhar o ponteiro. A ordem importa: um
     // processo que varra endereços com um descritor inválido não deve
     // conseguir distinguir "não mapeado" de "mapeado" pela resposta.
-    let Some(alvo) = alvo_de_escrita(descritor) else {
-        RECUSADAS.fetch_add(1, Ordering::Relaxed);
-        return erro::DESCRITOR_INVALIDO;
+    //
+    // # Por que a tabela é consultada, e não uma constante
+    //
+    // Porque a tabela é do processo e muda: um descritor aberto por `abrir`
+    // não existia quando o programa começou, e um fechado por `fechar` deixou
+    // de existir. Antes desta etapa havia um `static` de três posições, e ele
+    // dava a resposta certa por não haver nenhuma outra possível.
+    let nivel = match crate::fios::com_descritores(|t| t.alvo(descritor)).flatten() {
+        Some(descritores::Alvo::Registro) => crate::log::Level::Info,
+        Some(descritores::Alvo::Diagnostico) => crate::log::Level::Error,
+        // Um arquivo não recebe escrita neste kernel, e um número que não
+        // está na tabela não recebe nada. As duas respostas são a mesma de
+        // propósito: um processo que sondasse descritores alheios não deve
+        // aprender, pelo motivo, qual deles existe.
+        Some(descritores::Alvo::Arquivo { .. }) | None => {
+            RECUSADAS.fetch_add(1, Ordering::Relaxed);
+            return erro::DESCRITOR_INVALIDO;
+        }
     };
 
     if let Err(e) = validar_faixa(ponteiro, tamanho) {
@@ -343,10 +320,6 @@ fn escrever(descritor: u64, ponteiro: u64, tamanho: u64) -> i64 {
     // Uma escrita curta é a resposta certa, e é o que todo `write` faz: quem
     // chamou repete com o resto. Aqui isso produz um registro por pedaço, que
     // é o desfecho útil — nada se perde e cada pedaço fica datado.
-    let nivel = match alvo {
-        Alvo::Registro => crate::log::Level::Info,
-        Alvo::Diagnostico => crate::log::Level::Error,
-    };
     let guardados = crate::log::registrar(nivel, "usuario", format_args!("{}", texto));
 
     // Quando o texto não era UTF-8 o que foi ao registro é um marcador, não o
@@ -360,6 +333,169 @@ fn escrever(descritor: u64, ponteiro: u64, tamanho: u64) -> i64 {
 
     BYTES_ESCRITOS.fetch_add(aceitos, Ordering::Relaxed);
     aceitos as i64
+}
+
+/// Maior caminho que `abrir` aceita.
+///
+/// O nome é copiado para a pilha do kernel, e a pilha de um fio tem tamanho
+/// fixo. Um teto explícito é o que impede um processo de escolher quanto da
+/// pilha do kernel ele quer ocupar.
+const MAX_CAMINHO: usize = 128;
+
+static ABERTURAS: AtomicU64 = AtomicU64::new(0);
+static LEITURAS: AtomicU64 = AtomicU64::new(0);
+static BYTES_LIDOS: AtomicU64 = AtomicU64::new(0);
+
+/// Copia um caminho do espaço do usuário para a pilha do kernel.
+///
+/// Devolve o buffer e quantos bytes valem, porque devolver uma `&str` que
+/// aponta para dentro do buffer exigiria que o buffer sobrevivesse — e ele é
+/// local de quem chamou.
+fn copiar_caminho(ponteiro: u64, tamanho: u64) -> Result<([u8; MAX_CAMINHO], usize), i64> {
+    if tamanho == 0 || tamanho as usize > MAX_CAMINHO {
+        return Err(erro::TAMANHO_INVALIDO);
+    }
+    validar_faixa(ponteiro, tamanho)?;
+
+    let mut buffer = [0u8; MAX_CAMINHO];
+    let tamanho = tamanho as usize;
+    // SAFETY: `validar_faixa` confirmou que a faixa está no espaço do usuário
+    // e mapeada, e ainda estamos no espaço de endereços em que ela vale.
+    unsafe {
+        core::ptr::copy_nonoverlapping(ponteiro as *const u8, buffer.as_mut_ptr(), tamanho);
+    }
+    Ok((buffer, tamanho))
+}
+
+/// `abrir(ptr, tamanho)`: abre um arquivo e devolve o descritor dele.
+///
+/// # Por que o caminho é resolvido aqui e o vnode guardado
+///
+/// Porque é isso que um descritor **é**: o resultado de uma resolução de nome
+/// feita uma vez. Guardar o caminho e resolvê-lo a cada leitura daria outra
+/// coisa — um nome que pode passar a apontar para outro arquivo entre duas
+/// leituras —, e é justamente a diferença que o Unix tem desde sempre.
+fn abrir(ponteiro: u64, tamanho: u64) -> i64 {
+    let (buffer, tamanho) = match copiar_caminho(ponteiro, tamanho) {
+        Ok(par) => par,
+        Err(e) => {
+            RECUSADAS.fetch_add(1, Ordering::Relaxed);
+            return e;
+        }
+    };
+
+    let Ok(caminho) = core::str::from_utf8(&buffer[..tamanho]) else {
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return erro::NAO_ENCONTRADO;
+    };
+
+    let vnode = match crate::vfs::resolver(caminho) {
+        Ok(vnode) => vnode,
+        Err(_) => {
+            RECUSADAS.fetch_add(1, Ordering::Relaxed);
+            return erro::NAO_ENCONTRADO;
+        }
+    };
+    if vnode.no.tipo != crate::vfs::Tipo::Arquivo {
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return erro::NAO_EH_ARQUIVO;
+    }
+
+    match crate::fios::com_descritores(|t| t.abrir(vnode)) {
+        Some(Some(fd)) => {
+            ABERTURAS.fetch_add(1, Ordering::Relaxed);
+            fd as i64
+        }
+        // A tabela do processo está cheia, ou não há fio atual. A segunda não
+        // acontece numa chamada de sistema — ela exige um processo, e um
+        // processo exige um fio.
+        _ => {
+            RECUSADAS.fetch_add(1, Ordering::Relaxed);
+            erro::SEM_DESCRITOR
+        }
+    }
+}
+
+/// `ler(descritor, ptr, tamanho)`: bytes de onde o descritor apontar.
+///
+/// # Os três tempos, e por que eles não podem virar um
+///
+/// O alvo sai da tabela com a trava do escalonador na mão; a leitura acontece
+/// **fora** dela; a posição é avançada com a trava de novo. Ler lá dentro
+/// pararia o escalonador pelo tempo de uma ida ao disco — com as interrupções
+/// desligadas, e portanto sem nem o relógio andando.
+///
+/// O preço dos três tempos é uma janela: entre pegar o alvo e avançar a
+/// posição, outro fio poderia mexer no mesmo descritor. Não pode acontecer
+/// hoje — a tabela é do processo e um processo tem um fio só —, e no dia em
+/// que um processo tiver dois, é aqui que a corrida mora.
+fn ler(descritor: u64, ponteiro: u64, tamanho: u64) -> i64 {
+    // O descritor primeiro, antes de olhar o ponteiro — a mesma ordem de
+    // `escrever`, e pelo mesmo motivo: um processo que varra endereços com um
+    // descritor inválido não deve distinguir "mapeado" de "não mapeado" pela
+    // resposta.
+    let Some(Some(alvo)) = crate::fios::com_descritores(|t| t.alvo(descritor)) else {
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return erro::DESCRITOR_INVALIDO;
+    };
+    let descritores::Alvo::Arquivo { vnode, posicao } = alvo else {
+        // Os destinos de log não leem. Devolver zero fingiria um arquivo
+        // vazio, e um programa que leia até o fim entenderia isso como "o
+        // arquivo acabou" em vez de "este descritor não é de leitura".
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return erro::DESCRITOR_INVALIDO;
+    };
+
+    if let Err(e) = validar_faixa(ponteiro, tamanho) {
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return e;
+    }
+    if tamanho == 0 {
+        return 0;
+    }
+
+    // Os bytes passam por um buffer do kernel antes de chegar ao usuário.
+    //
+    // Escrever direto no ponteiro do usuário pareceria mais barato e seria
+    // errado: a leitura pode levar milissegundos no disco, e o relógio
+    // preempta o fio no meio dela. Quando ele voltar, o espaço de endereços
+    // ativo é outro — e a escrita teria ido para a memória de outro processo,
+    // no mesmo endereço.
+    let mut buffer = alloc::vec![0u8; tamanho as usize];
+    let lidos = match crate::vfs::ler_em(&vnode, posicao, &mut buffer) {
+        Ok(lidos) => lidos,
+        Err(motivo) => {
+            crate::log_warn!("usuario", "ler falhou: {}", motivo.motivo());
+            RECUSADAS.fetch_add(1, Ordering::Relaxed);
+            return erro::ENDERECO_INVALIDO;
+        }
+    };
+
+    if lidos > 0 {
+        // SAFETY: `validar_faixa` confirmou que a faixa inteira está no
+        // espaço do usuário e mapeada, e `lidos` não passa de `tamanho`.
+        // Estamos no espaço de endereços em que ela vale: a preempção durante
+        // a leitura acima devolve o fio ao mesmo espaço antes de continuar.
+        unsafe {
+            core::ptr::copy_nonoverlapping(buffer.as_ptr(), ponteiro as *mut u8, lidos);
+        }
+    }
+
+    crate::fios::com_descritores(|t| t.avancar(descritor, lidos as u64));
+    LEITURAS.fetch_add(1, Ordering::Relaxed);
+    BYTES_LIDOS.fetch_add(lidos as u64, Ordering::Relaxed);
+    lidos as i64
+}
+
+/// `fechar(descritor)`: devolve a vaga à tabela do processo.
+fn fechar(descritor: u64) -> i64 {
+    match crate::fios::com_descritores(|t| t.fechar(descritor)) {
+        Some(true) => 0,
+        _ => {
+            RECUSADAS.fetch_add(1, Ordering::Relaxed);
+            erro::DESCRITOR_INVALIDO
+        }
+    }
 }
 
 /// `bifurcar()`: duplica o processo.
@@ -499,14 +635,49 @@ unsafe fn executar(quadro: *mut core::ffi::c_void, ponteiro: u64, tamanho: u64) 
     0
 }
 
-/// Lança o programa de exemplo num fio próprio.
+/// Lança um programa no anel sem privilégio, num fio próprio.
+///
+/// Sem caminho, lança o exemplo embutido. Com caminho, lê a imagem do VFS —
+/// que é o que permite rodar um programa **do disco** pelo canal do agente ou
+/// pelo interpretador, sem que ele precise estar embutido no kernel.
 ///
 /// Devolve o identificador do fio. Não espera o processo terminar: quem chama
 /// é o canal do agente, e bloquear ali travaria o atendimento — o resultado
 /// aparece depois em `user.stats`.
-pub fn lancar_exemplo() -> Result<u64, &'static str> {
-    extern "C" fn hospedar(_argumento: u64) -> ! {
-        match programa::executar(exemplo::bytes()) {
+///
+/// # Como o caminho chega ao fio novo
+///
+/// Num ponteiro, e não numa variável global. [`crate::fios::criar`] carrega um
+/// `u64` até a função de entrada, e é nele que vai a `String` vazada de
+/// propósito — o fio a reconstrói e a larga. Zero significa "o exemplo".
+///
+/// Uma global exigiria decidir o que acontece quando dois lançamentos se
+/// cruzam: ou uma trava segurando o segundo, ou o segundo sobrescrevendo o
+/// caminho do primeiro antes de ele ler. O ponteiro não tem essa pergunta,
+/// porque cada fio recebe o dele.
+pub fn lancar(caminho: Option<&str>) -> Result<u64, &'static str> {
+    extern "C" fn hospedar(argumento: u64) -> ! {
+        let imagem = if argumento == 0 {
+            alloc::borrow::Cow::Borrowed(exemplo::bytes())
+        } else {
+            // SAFETY: o ponteiro veio do `Box::into_raw` logo abaixo, este fio
+            // é o único que o recebeu, e ele o reconstrói uma vez só.
+            let caminho = unsafe { alloc::boxed::Box::from_raw(argumento as *mut String) };
+            match crate::vfs::ler_tudo(&caminho) {
+                Ok(bytes) => alloc::borrow::Cow::Owned(bytes),
+                Err(motivo) => {
+                    crate::log_error!(
+                        "usuario",
+                        "nao foi possivel ler `{}`: {}",
+                        caminho,
+                        motivo.motivo()
+                    );
+                    crate::fios::terminar()
+                }
+            }
+        };
+
+        match programa::executar(&imagem) {
             Ok(_) => unreachable!("executar nao retorna em caso de sucesso"),
             Err(falha) => {
                 crate::log_error!(
@@ -520,7 +691,29 @@ pub fn lancar_exemplo() -> Result<u64, &'static str> {
     }
 
     limpar_ultima_saida();
-    crate::fios::criar("usuario", hospedar, 0).map(|id| id.numero())
+
+    let argumento = match caminho {
+        None => 0,
+        Some(caminho) => {
+            alloc::boxed::Box::into_raw(alloc::boxed::Box::new(String::from(caminho))) as u64
+        }
+    };
+
+    match crate::fios::criar("usuario", hospedar, argumento) {
+        Ok(id) => Ok(id.numero()),
+        Err(motivo) => {
+            // O fio não nasceu, então ninguém vai reconstruir a caixa. Largá-la
+            // aqui é obrigatório: sem isto, cada lançamento recusado — e eles
+            // acontecem, o escalonador tem dezesseis vagas — deixaria uma
+            // `String` no heap para sempre.
+            if argumento != 0 {
+                // SAFETY: o ponteiro veio do `into_raw` acima e não foi
+                // entregue a ninguém, porque `criar` falhou.
+                drop(unsafe { alloc::boxed::Box::from_raw(argumento as *mut String) });
+            }
+            Err(motivo)
+        }
+    }
 }
 
 /// `(chamadas, recusadas, bytes escritos)`.
@@ -529,6 +722,15 @@ pub fn estatisticas() -> (u64, u64, u64) {
         CHAMADAS.load(Ordering::Relaxed),
         RECUSADAS.load(Ordering::Relaxed),
         BYTES_ESCRITOS.load(Ordering::Relaxed),
+    )
+}
+
+/// `(aberturas, leituras, bytes lidos)`.
+pub fn estatisticas_de_arquivo() -> (u64, u64, u64) {
+    (
+        ABERTURAS.load(Ordering::Relaxed),
+        LEITURAS.load(Ordering::Relaxed),
+        BYTES_LIDOS.load(Ordering::Relaxed),
     )
 }
 
