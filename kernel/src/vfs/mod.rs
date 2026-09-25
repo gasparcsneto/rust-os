@@ -68,6 +68,8 @@ pub enum Erro {
     JaMontado,
     /// O arquivo não cabe no teto de leitura.
     GrandeDemais,
+    /// O dispositivo por baixo recusou, ou o que veio dele não faz sentido.
+    DoDispositivo,
 }
 
 impl Erro {
@@ -81,6 +83,7 @@ impl Erro {
             Erro::NaoEhArquivo => "nao e arquivo",
             Erro::JaMontado => "ja ha algo montado neste ponto",
             Erro::GrandeDemais => "o arquivo nao cabe no teto de leitura",
+            Erro::DoDispositivo => "o dispositivo recusou ou devolveu algo sem sentido",
         }
     }
 }
@@ -286,12 +289,14 @@ pub fn ler_tudo(caminho: &str) -> Result<Vec<u8>, Erro> {
     let mut conteudo = alloc::vec![0u8; vnode.no.tamanho as usize];
     let mut lidos = 0usize;
 
-    // O laço abaixo não é falsificável hoje, e isto está escrito aqui em vez
-    // de parecer coberto: o único sistema de arquivos montado enche o buffer
-    // inteiro numa chamada, então trocar o laço por uma leitura só não
-    // reprova caso nenhum. Ele existe porque um sistema de arquivos de disco
-    // **não** faz isso — um arquivo em extensões volta pedaço a pedaço —, e é
-    // o Btrfs que passa a exercitá-lo.
+    // O laço abaixo era, até o Btrfs entrar, uma promessa não falsificável:
+    // os programas embutidos enchiam o buffer inteiro numa chamada, e trocar
+    // o laço por uma leitura só não reprovava caso nenhum.
+    //
+    // Agora ele é exercitado. O `grande.txt` do disco tem quarenta e oito
+    // kilobytes e o driver monta dezesseis por ida, então o Btrfs devolve a
+    // leitura em três pedaços — e quem parasse no primeiro entregaria um
+    // terço do arquivo dizendo que é o arquivo.
 
     crate::arch::sem_interrupcoes(|| {
         let montagens = MONTAGENS.lock();

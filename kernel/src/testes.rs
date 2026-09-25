@@ -1675,10 +1675,15 @@ fn vfs_recusa_o_que_nao_resolve() -> Resultado {
         return Err("um caminho relativo nao foi recusado como invalido");
     }
 
-    // Absoluto, mas fora de qualquer montagem.
-    if crate::vfs::resolver("/nada/aqui").err() != Some(Erro::SemMontagem) {
-        return Err("um caminho sem montagem devolveu outro motivo");
-    }
+    // `SemMontagem` não é exercitado aqui, e a razão é o que mudou: com a raiz
+    // do disco montada em `/`, **todo** caminho absoluto tem dona. O motivo
+    // continua existindo para a janela entre o boot e a montagem da raiz, que
+    // é quando um caminho não tem quem responda por ele — e essa janela a
+    // suíte não alcança, porque ela roda com tudo já montado.
+    //
+    // Antes deste commit o caso conferia `/nada/aqui`, e ele passou a resolver
+    // pela raiz. Um caso que afirma algo que deixou de ser verdade é pior que
+    // um que não afirma nada.
 
     // Dentro da montagem, e o nome não existe.
     if crate::vfs::resolver("/bin/nao-existe").err() != Some(Erro::NaoEncontrado) {
@@ -1705,40 +1710,49 @@ fn vfs_recusa_o_que_nao_resolve() -> Resultado {
 ///
 /// É exatamente o dia que vem a seguir: o Btrfs entra em `/`.
 fn vfs_montagem_mais_longa_ganha() -> Resultado {
-    // A ordem de montagem é o ponto do caso, e a primeira versão dele errou
-    // justamente aqui: montando `/` **depois** de `/bin`, a regra errada — "a
-    // primeira da lista que casar" — acerta por acidente, porque `/bin` já
-    // era a primeira. A mutação passou, e o caso não estava testando nada.
+    // Pontos de montagem próprios, que não existem em produção.
     //
-    // Então a raiz entra primeiro. A partir daí, para `/bin/exemplo`, a
-    // primeira que casa é a errada e a mais longa é a certa.
-    crate::vfs::desmontar(crate::vfs::DIRETORIO_DOS_PROGRAMAS).map_err(|e| e.motivo())?;
+    // A primeira versão deste caso mexia em `/bin`: desmontava, remontava em
+    // outra ordem e devolvia. Funcionou até a raiz do disco ser montada — aí
+    // o `montar("/")` passou a falhar com "ja ha algo montado", e o `?` saiu
+    // da função **depois** de desmontar `/bin` e antes de o repor. Todos os
+    // casos seguintes rodaram sem `/bin`, e o de `executar` reprovou por um
+    // motivo que não tinha nada a ver com ele.
+    //
+    // Um caso que mexe no estado global de produção é um caso que pode
+    // derrubar os outros. Este mexe só no que ele mesmo criou.
+    const FUNDO: &str = "/teste-de-montagem";
+    const DENTRO: &str = "/teste-de-montagem/dentro";
+
+    // A ordem é o ponto: o mais curto entra primeiro, então a regra errada —
+    // "a primeira da lista que casar" — escolheria ele.
     crate::vfs::montar(
         "programas",
-        "/",
+        FUNDO,
         alloc::boxed::Box::new(crate::vfs::programas::Programas),
     )
     .map_err(|e| e.motivo())?;
-    crate::vfs::montar(
+
+    let segunda = crate::vfs::montar(
         "programas",
-        crate::vfs::DIRETORIO_DOS_PROGRAMAS,
+        DENTRO,
         alloc::boxed::Box::new(crate::vfs::programas::Programas),
-    )
-    .map_err(|e| e.motivo())?;
+    );
 
-    let pelo_bin = crate::vfs::resolver("/bin/exemplo");
-    // E o que está na raiz continua alcançável por ela.
-    let pela_raiz = crate::vfs::resolver("/exemplo");
+    // Daqui para baixo nada sai sem desmontar: as duas montagens são deste
+    // caso, e deixá-las penduradas estraga quem vier depois.
+    let pelo_dentro = crate::vfs::resolver("/teste-de-montagem/dentro/exemplo");
+    let pelo_fundo = crate::vfs::resolver("/teste-de-montagem/exemplo");
 
-    // Desmontar antes de julgar: um `?` no meio deixaria a raiz montada para
-    // todos os casos seguintes, e `/bin` é de onde `executar` lê.
-    crate::vfs::desmontar("/").map_err(|e| e.motivo())?;
+    let _ = crate::vfs::desmontar(DENTRO);
+    let _ = crate::vfs::desmontar(FUNDO);
 
-    if pelo_bin.is_err() {
-        return Err("/bin/exemplo foi procurado na raiz em vez da montagem dele");
+    segunda.map_err(|e| e.motivo())?;
+    if pelo_dentro.is_err() {
+        return Err("o caminho foi procurado na montagem curta em vez da longa");
     }
-    if pela_raiz.is_err() {
-        return Err("/exemplo nao resolveu pela montagem da raiz");
+    if pelo_fundo.is_err() {
+        return Err("o que esta na montagem curta deixou de ser alcancavel");
     }
 
     Ok(())
@@ -2303,6 +2317,254 @@ fn btrfs_mapa_completo_alcanca_metadados() -> Resultado {
 
     if raizes == 0 {
         return Err("a arvore de raizes nao trouxe raiz nenhuma");
+    }
+
+    Ok(())
+}
+
+/// O que o `xtask` escreveu nos arquivos do disco.
+///
+/// Metade de um contrato cujo outro lado está em `xtask/src/main.rs`, como o
+/// padrão por setor — e pela mesma razão: os dois lados rodam em máquinas
+/// diferentes e não há lugar comum onde caibam. O que impede a divergência
+/// são estes casos.
+const NO_SAUDACAO: &str = "ola do btrfs, lido pelo duke\n";
+const NO_SUBDIRETORIO: &str = "uma nota num subdiretorio\n";
+const TAMANHO_DO_GRANDE: usize = 48 * 1024;
+
+/// O byte que deve estar na posição `i` do arquivo grande.
+///
+/// A outra metade desta regra está no `xtask`, e o comentário de lá explica
+/// por que ela não é uma palavra repetida: com `duke` repetido, um pedaço
+/// lido do lugar errado vinha **idêntico** ao certo, e a conferência byte a
+/// byte aprovava uma leitura que tinha ido buscar em 0 o que estava em 16 Ki.
+fn marca_do_grande(i: usize) -> u8 {
+    ((i / 256) as u8).wrapping_add((i as u8).wrapping_mul(7))
+}
+
+/// A raiz do disco está montada, e listá-la traz o que o disco tem.
+///
+/// # O que este caso protege
+///
+/// A composição inteira, do setor ao nome: a GPT achou a partição, o
+/// superbloco passou na soma, o mapa traduziu, a folha foi percorrida, os
+/// itens de diretório foram lidos e o VFS montou. Qualquer uma dessas
+/// falhando dá a mesma lista vazia.
+///
+/// E a precedência das montagens, em produção: `/bin` continua vindo dos
+/// programas embutidos mesmo com a raiz montada por cima, porque a montagem
+/// mais longa ganha. É a regra que o caso sintético do VFS prova em
+/// isolamento, aqui exercitada no arranjo de verdade.
+fn btrfs_raiz_montada() -> Resultado {
+    use crate::vfs::Tipo;
+
+    /// Lista um diretório e devolve os nomes com os tipos, em ordem de
+    /// chegada.
+    fn conteudo(
+        caminho: &str,
+    ) -> Result<alloc::vec::Vec<(alloc::string::String, Tipo)>, &'static str> {
+        let mut visto = alloc::vec::Vec::new();
+        crate::vfs::listar(caminho, |entrada| {
+            visto.push((entrada.nome.clone(), entrada.tipo));
+        })
+        .map_err(|e| e.motivo())?;
+        visto.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(visto)
+    }
+
+    // A lista é conferida **inteira**, e não por presença. A primeira versão
+    // deste caso perguntava "veio `saudacao.txt`?" e três perguntas iguais,
+    // e passava com uma listagem que trouxesse também o que mora em outro
+    // diretório: apagar o filtro por diretório do `arvore::listar` fazia a
+    // raiz mostrar `nota.txt`, que está dentro de `dados`, e nenhuma das
+    // perguntas reclamava. Um diretório é o conjunto do que está nele.
+    let raiz = conteudo("/")?;
+    let esperado: &[(&str, Tipo)] = &[
+        ("dados", Tipo::Diretorio),
+        ("grande.txt", Tipo::Arquivo),
+        ("saudacao.txt", Tipo::Arquivo),
+    ];
+    if raiz.len() != esperado.len()
+        || raiz
+            .iter()
+            .zip(esperado)
+            .any(|(v, e)| v.0 != e.0 || v.1 != e.1)
+    {
+        crate::log_error!("teste", "a raiz listou {:?}", raiz);
+        return Err("a raiz montada nao lista exatamente o que o xtask pos nela");
+    }
+
+    // E o subdiretório tem o que é dele, e só.
+    let dados = conteudo("/dados")?;
+    if dados.len() != 1 || dados[0].0 != "nota.txt" || dados[0].1 != Tipo::Arquivo {
+        crate::log_error!("teste", "/dados listou {:?}", dados);
+        return Err("o subdiretorio nao lista exatamente o que esta dentro dele");
+    }
+
+    // A busca por nome também respeita o diretório: o que está na raiz não é
+    // alcançável de dentro de `dados`, nem o contrário. Sem isto, um leitor
+    // que procurasse o nome na folha inteira acertaria todos os caminhos
+    // certos e também os errados.
+    if crate::vfs::resolver("/dados/saudacao.txt").is_ok() {
+        return Err("um arquivo da raiz foi achado dentro do subdiretorio");
+    }
+    if crate::vfs::resolver("/nota.txt").is_ok() {
+        return Err("um arquivo do subdiretorio foi achado na raiz");
+    }
+
+    // E `/bin` continua sendo dos programas embutidos.
+    let mut programas = 0;
+    crate::vfs::listar("/bin", |_| programas += 1).map_err(|e| e.motivo())?;
+    if programas != 3 {
+        crate::log_error!("teste", "/bin listou {} entradas", programas);
+        return Err("a raiz montada por cima roubou /bin dos programas embutidos");
+    }
+
+    Ok(())
+}
+
+/// Os dois jeitos de um arquivo guardar conteúdo são lidos corretamente.
+///
+/// # Por que os dois no mesmo caso
+///
+/// Porque são caminhos de código inteiramente diferentes e é fácil ter só um.
+/// Um arquivo pequeno mora **dentro** do item de extensão, e lê-lo é copiar
+/// bytes que já vieram com a folha. Um grande mora num endereço lógico, e
+/// lê-lo exige traduzir esse endereço e ir ao disco outra vez.
+///
+/// A imagem tinha só arquivos pequenos quando esta etapa começou — todos
+/// embutidos. O `grande.txt` foi posto lá justamente para que o segundo
+/// caminho existisse para ser exercitado, em vez de ficar escrito e nunca
+/// percorrido.
+fn btrfs_le_os_dois_tipos_de_arquivo() -> Resultado {
+    // Embutido: vinte e nove bytes que vieram junto com a folha.
+    let embutido = crate::vfs::ler_tudo("/saudacao.txt").map_err(|e| e.motivo())?;
+    if embutido != NO_SAUDACAO.as_bytes() {
+        crate::log_error!(
+            "teste",
+            "vieram {} bytes do arquivo embutido",
+            embutido.len()
+        );
+        return Err("o arquivo embutido nao tem o conteudo que o xtask escreveu");
+    }
+
+    // Num subdiretório, que exige uma busca de nome dentro de outro
+    // diretório em vez de na raiz.
+    let no_subdiretorio = crate::vfs::ler_tudo("/dados/nota.txt").map_err(|e| e.motivo())?;
+    if no_subdiretorio != NO_SUBDIRETORIO.as_bytes() {
+        return Err("o arquivo do subdiretorio nao tem o conteudo esperado");
+    }
+
+    // Com extensão normal: quarenta e oito kilobytes, que exigem seguir um
+    // endereço lógico, traduzi-lo e ir ao disco — três vezes, porque o driver
+    // monta dezesseis kilobytes por ida e o `ler_tudo` chama em laço.
+    let grande = crate::vfs::ler_tudo("/grande.txt").map_err(|e| e.motivo())?;
+    if grande.len() != TAMANHO_DO_GRANDE {
+        crate::log_error!("teste", "o arquivo grande veio com {} bytes", grande.len());
+        return Err("o arquivo com extensao nao veio inteiro");
+    }
+    // O conteúdo é uma regra, e não uma tabela. Conferir todos os bytes é o
+    // que pega uma volta do laço que trouxe o pedaço certo do lugar errado.
+    if let Some(posicao) = (0..grande.len()).find(|i| grande[*i] != marca_do_grande(*i)) {
+        crate::log_error!(
+            "teste",
+            "o byte {} e {:#04x}, esperava {:#04x}",
+            posicao,
+            grande[posicao],
+            marca_do_grande(posicao)
+        );
+        return Err("o arquivo com extensao veio com bytes de outro lugar");
+    }
+
+    Ok(())
+}
+
+/// Cada forma de extensão é classificada pelo que ela é, e as duas que este
+/// leitor não sabe ler são recusadas.
+///
+/// # Por que sintético
+///
+/// Porque a imagem só tem o que o `mkfs.btrfs` produz, e ele produz dois dos
+/// cinco casos: embutida e normal. Esses dois o caso anterior já cobre lendo
+/// o disco de verdade. Os outros três — buraco, comprimida e pré-alocada —
+/// não aparecem em imagem nenhuma que este `xtask` saiba gerar, e o que está
+/// escrito no código para eles seria texto: dava para apagar os três braços
+/// e a suíte inteira continuava verde.
+///
+/// Um buraco é o mais perigoso dos três. O campo do endereço vem zero, e um
+/// leitor que não notasse iria traduzir o endereço lógico zero e entregar os
+/// bytes que morassem lá — o começo do próprio sistema de arquivos — como se
+/// fossem o conteúdo do arquivo. Não é um erro que apareça: é conteúdo
+/// plausível, de outro lugar.
+///
+/// Os deslocamentos abaixo são escritos à mão, e não vêm das constantes do
+/// módulo, de propósito. Um teste que peça ao código onde os campos estão
+/// concorda com qualquer resposta que o código der.
+fn btrfs_classifica_cada_extensao() -> Resultado {
+    use crate::vfs::btrfs::arvore::{Conteudo, ler_extensao};
+
+    /// Um `btrfs_file_extent_item`: 21 bytes de cabeçalho e, depois deles, ou
+    /// o conteúdo embutido ou os quatro campos de uma extensão normal.
+    fn item(compressao: u8, tipo: u8) -> [u8; 53] {
+        let mut bytes = [0u8; 53];
+        bytes[8..16].copy_from_slice(&0x2000u64.to_le_bytes()); // ram_bytes
+        bytes[16] = compressao;
+        bytes[20] = tipo;
+        bytes
+    }
+
+    // Embutida: o conteúdo começa logo depois do cabeçalho, e vai até o fim
+    // do item. Um item de 53 bytes tem 32 de conteúdo.
+    let embutida = item(0, 0);
+    match ler_extensao(&embutida) {
+        Ok(Conteudo::Embutido { em, quantos }) if em == 21 && quantos == 32 => {}
+        outro => {
+            crate::log_error!("teste", "a embutida saiu como {:?}", outro);
+            return Err("uma extensao embutida nao foi lida como embutida");
+        }
+    }
+
+    // Normal: o endereço do bloco mais o deslocamento dentro dele.
+    let mut normal = item(0, 1);
+    normal[21..29].copy_from_slice(&0x30_0000u64.to_le_bytes()); // disk_bytenr
+    normal[37..45].copy_from_slice(&0x1000u64.to_le_bytes()); // offset
+    normal[45..53].copy_from_slice(&0x2000u64.to_le_bytes()); // num_bytes
+    match ler_extensao(&normal) {
+        Ok(Conteudo::Normal { endereco, quantos })
+            if endereco == 0x30_0000 + 0x1000 && quantos == 0x2000 => {}
+        outro => {
+            crate::log_error!("teste", "a normal saiu como {:?}", outro);
+            return Err("uma extensao normal nao foi lida como normal");
+        }
+    }
+
+    // Buraco: o mesmo item, com o endereço zerado.
+    let mut buraco = normal;
+    buraco[21..29].copy_from_slice(&0u64.to_le_bytes());
+    match ler_extensao(&buraco) {
+        Ok(Conteudo::Buraco { quantos: 0x2000 }) => {}
+        outro => {
+            crate::log_error!("teste", "o buraco saiu como {:?}", outro);
+            return Err("um buraco foi lido como um endereco de verdade");
+        }
+    }
+
+    // Comprimida: entregar os bytes comprimidos seria pior que recusar.
+    for metodo in [1u8, 2, 3] {
+        if ler_extensao(&item(metodo, 1)).is_ok() {
+            crate::log_error!("teste", "a compressao {} passou", metodo);
+            return Err("uma extensao comprimida foi aceita");
+        }
+    }
+
+    // Pré-alocada: tem endereço e não tem conteúdo escrito ainda.
+    if ler_extensao(&item(0, 2)).is_ok() {
+        return Err("uma extensao pre-alocada foi aceita");
+    }
+
+    // E um item que acaba antes do campo do tipo.
+    if ler_extensao(&item(0, 1)[..18]).is_ok() {
+        return Err("uma extensao truncada foi aceita");
     }
 
     Ok(())
@@ -5788,6 +6050,18 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "btrfs: o mapa completo alcanca os metadados",
         f: btrfs_mapa_completo_alcanca_metadados,
+    },
+    Caso {
+        nome: "btrfs: a raiz do disco esta montada em /",
+        f: btrfs_raiz_montada,
+    },
+    Caso {
+        nome: "btrfs: le arquivo embutido e arquivo com extensao",
+        f: btrfs_le_os_dois_tipos_de_arquivo,
+    },
+    Caso {
+        nome: "btrfs: classifica cada tipo de extensao",
+        f: btrfs_classifica_cada_extensao,
     },
     Caso {
         nome: "disco: recusa setor fora da capacidade",

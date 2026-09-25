@@ -995,8 +995,61 @@ mod disco {
     pub const NA_ESP: &[(&str, &str)] = &[("NOTA.TXT", "esta nota mora na ESP\n")];
     pub const NA_RAIZ: &[(&str, &str)] = &[
         ("saudacao.txt", "ola do btrfs, lido pelo duke\n"),
-        ("bin/exemplo", "um programa que ainda nao roda\n"),
+        // Num subdiretório que **não** é `/bin`, de propósito: `/bin` é onde
+        // os programas embutidos estão montados, e a regra da montagem mais
+        // longa faria este arquivo ficar inalcançável. Um arquivo que o teste
+        // não consegue abrir não testa a descida em subdiretório.
+        ("dados/nota.txt", "uma nota num subdiretorio\n"),
     ];
+
+    /// Um arquivo grande demais para caber dentro do próprio item.
+    ///
+    /// # Por que ele existe
+    ///
+    /// Porque o Btrfs guarda arquivos pequenos **embutidos** no item de
+    /// extensão, e todos os outros desta imagem são pequenos. Um leitor que
+    /// só soubesse ler embutidos passaria em tudo, e o primeiro arquivo de
+    /// verdade — um programa, um texto — cairia no caminho que ninguém
+    /// exercitou.
+    ///
+    /// # Por que quarenta e oito kilobytes, e não oito
+    ///
+    /// Oito já passariam do teto de dois que o `mkfs.btrfs` usa para embutir,
+    /// e já dariam uma extensão normal. Mas o driver de disco monta no
+    /// máximo dezesseis kilobytes por ida, e o `ler_tudo` do VFS chama o
+    /// sistema de arquivos **em laço** justamente porque uma leitura pode
+    /// voltar pela metade. Com oito kilobytes o laço dava uma volta só, o
+    /// deslocamento era sempre zero, e a aritmética que soma o deslocamento
+    /// ao endereço lógico nunca era exercitada: dava para apagá-la e todo
+    /// caso passava.
+    ///
+    /// Quarenta e oito forçam três voltas, com deslocamento 0, 16 Ki e 32 Ki.
+    pub const GRANDE: (&str, usize) = ("grande.txt", 48 * 1024);
+
+    /// O byte que mora na posição `i` do arquivo grande.
+    ///
+    /// # Por que não é uma palavra repetida
+    ///
+    /// Porque era, e não testava o que parecia testar. Com `duke` repetido,
+    /// o pedaço que começa em 16 Ki é **idêntico** ao que começa em 0 — a
+    /// palavra tem quatro bytes e 16384 é múltiplo de quatro. Uma volta do
+    /// laço que fosse ao lugar errado traria bytes iguais aos certos, e a
+    /// conferência byte a byte aprovava. Foi medido: `w[0..16384] ==
+    /// w[16384..32768]`.
+    ///
+    /// Qualquer regra da forma "o byte `i` depende de `i % P`" tem o mesmo
+    /// problema quando `P` divide 16384 — e 4, 256 e 512 todos dividem.
+    ///
+    /// Esta soma duas coisas: o índice do bloco de 256 bytes, que muda a cada
+    /// bloco e só se repete depois de 64 Ki, e o próprio `i` vezes sete, que
+    /// muda a cada byte. Um deslocamento de 16 Ki muda a primeira parcela;
+    /// um de um byte muda a segunda. Nenhum dos dois passa despercebido.
+    ///
+    /// É metade de um contrato, como o `marca_do_setor`: a outra metade está
+    /// no `testes.rs` do kernel.
+    pub fn marca_do_grande(i: usize) -> u8 {
+        ((i / 256) as u8).wrapping_add((i as u8).wrapping_mul(7))
+    }
 }
 
 /// As ferramentas que montam o disco, e o pacote de cada uma.
@@ -1022,7 +1075,7 @@ const FERRAMENTAS_DO_DISCO: &[(&str, &str)] = &[
 /// invalida o disco que está lá.
 fn receita_do_disco() -> String {
     let mut receita = format!(
-        "v3 setores={} esp={}+{} raiz={}+{} padrao={}..{}\n",
+        "v5 setores={} esp={}+{} raiz={}+{} padrao={}..{}\n",
         disco::SETORES,
         disco::ESP_EM,
         disco::ESP_SETORES,
@@ -1034,7 +1087,23 @@ fn receita_do_disco() -> String {
     for (nome, conteudo) in disco::NA_ESP.iter().chain(disco::NA_RAIZ) {
         receita.push_str(&format!("{nome} = {conteudo}"));
     }
+    let (nome, tamanho) = disco::GRANDE;
+    receita.push_str(&format!(
+        "{nome} = {tamanho} bytes, marca({tamanho}/2)={}\n",
+        disco::marca_do_grande(tamanho / 2)
+    ));
     receita
+}
+
+/// Escreve um arquivo dentro da árvore que vai virar a raiz, criando os
+/// diretórios do caminho.
+fn escrever_na_arvore(arvore: &Path, nome: &str, conteudo: &[u8]) -> Result<(), String> {
+    let destino = arvore.join(nome);
+    if let Some(pai) = destino.parent() {
+        std::fs::create_dir_all(pai)
+            .map_err(|e| format!("não foi possível criar {}: {e}", pai.display()))?;
+    }
+    std::fs::write(&destino, conteudo).map_err(|e| format!("não foi possível escrever {nome}: {e}"))
 }
 
 /// Roda uma ferramenta do hospedeiro e devolve erro com o que ela disse.
@@ -1151,14 +1220,12 @@ fn montar_disco(caminho: &Path) -> Result<(), String> {
     // que torna isto possível dentro de um contêiner.
     let _ = std::fs::remove_dir_all(&arvore);
     for (nome, conteudo) in disco::NA_RAIZ {
-        let destino = arvore.join(nome);
-        if let Some(pai) = destino.parent() {
-            std::fs::create_dir_all(pai)
-                .map_err(|e| format!("não foi possível criar {}: {e}", pai.display()))?;
-        }
-        std::fs::write(&destino, conteudo)
-            .map_err(|e| format!("não foi possível escrever {nome}: {e}"))?;
+        escrever_na_arvore(&arvore, nome, conteudo.as_bytes())?;
     }
+
+    let (nome_grande, tamanho) = disco::GRANDE;
+    let grande: Vec<u8> = (0..tamanho).map(disco::marca_do_grande).collect();
+    escrever_na_arvore(&arvore, nome_grande, &grande)?;
     std::fs::write(&raiz, vec![0u8; (disco::RAIZ_SETORES * 512) as usize])
         .map_err(|e| format!("não foi possível criar a imagem da raiz: {e}"))?;
     ferramenta(

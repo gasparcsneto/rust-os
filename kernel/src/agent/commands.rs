@@ -231,6 +231,31 @@ pub static COMANDOS: &[Command] = &[
         handler: fs_mounts,
     },
     Command {
+        nome: "fs.read",
+        resumo: "Le um arquivo da arvore e devolve o conteudo como texto.",
+        params: &[
+            ParamSpec {
+                nome: "path",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "Caminho absoluto do arquivo.",
+            },
+            ParamSpec {
+                nome: "offset",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "De que byte comecar (padrao: 0).",
+            },
+            ParamSpec {
+                nome: "max",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "Quantos bytes devolver (padrao: 256, maximo: 4096).",
+            },
+        ],
+        handler: fs_read,
+    },
+    Command {
         nome: "fs.list",
         resumo: "Lista um diretorio da arvore de arquivos.",
         params: &[ParamSpec {
@@ -869,6 +894,71 @@ fn fs_mounts(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     });
     erro?;
     w.end_array()?;
+    w.end_object()
+}
+
+/// Quantos bytes uma leitura de arquivo devolve por padrão, e no máximo.
+///
+/// O teto existe porque a resposta é uma linha do canal: um arquivo de
+/// megabytes viraria um quadro que o enquadrador do outro lado recusa.
+///
+/// É o teto que obriga o `offset` a existir. Sem ele, um arquivo maior que
+/// quatro kilobytes seria inalcançável do quinto kilobyte em diante — e a
+/// resposta diria `size` sem que houvesse como chegar lá.
+const BYTES_PADRAO: u64 = 256;
+const BYTES_MAX: u64 = 4096;
+
+/// Lê um arquivo da árvore.
+///
+/// # Por que o conteúdo sai como texto
+///
+/// Porque quem pergunta é um agente ou uma pessoa, e os dois leem texto. O
+/// que não for UTF-8 válido é substituído em vez de recusado: um arquivo
+/// binário devolve algo legível sobre o que ele **não** é, em vez de um erro
+/// que não distingue "não existe" de "não é texto".
+fn fs_read(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let Some(caminho) = params.member("path").and_then(|v| v.as_str()) else {
+        w.begin_object()?;
+        w.field_str("error", "falta o parametro `path`")?;
+        return w.end_object();
+    };
+    let max = params
+        .member("max")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(BYTES_PADRAO)
+        .clamp(1, BYTES_MAX) as usize;
+    let de = params
+        .member("offset")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
+
+    w.begin_object()?;
+    w.field_str("path", caminho)?;
+
+    match crate::vfs::ler_tudo(caminho) {
+        Ok(conteudo) => {
+            w.field_u64("size", conteudo.len() as u64)?;
+            // Um `offset` além do fim devolve zero bytes, e não erro: é a
+            // resposta certa para quem está lendo em partes e chegou ao fim.
+            let de = de.min(conteudo.len());
+            let quanto = max.min(conteudo.len() - de);
+            w.field_u64("offset", de as u64)?;
+            w.field_u64("returned", quanto as u64)?;
+            w.key("content")?;
+            w.begin_str()?;
+            // Um arquivo pode não ser texto — os programas embutidos em
+            // `/bin` são ELF. Dizer isso é melhor que despejar bytes que o
+            // JSON não sabe carregar, e melhor que recusar a leitura: quem
+            // perguntou fica sabendo o tamanho e que o conteúdo é binário.
+            match core::str::from_utf8(&conteudo[de..de + quanto]) {
+                Ok(texto) => w.push_str(texto)?,
+                Err(_) => w.push_str("<bytes que nao sao utf-8>")?,
+            }
+            w.end_str()?;
+        }
+        Err(motivo) => w.field_str("error", motivo.motivo())?,
+    }
+
     w.end_object()
 }
 

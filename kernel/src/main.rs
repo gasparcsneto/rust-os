@@ -302,6 +302,26 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
         Err(motivo) => log_error!("vfs", "nao foi possivel montar: {}", motivo.motivo()),
     }
 
+    // E a raiz, do disco. Vem depois de `/bin` de propósito: a regra da
+    // montagem mais longa é o que faz `/bin/exemplo` continuar saindo dos
+    // programas embutidos com a raiz montada por cima, e montar nesta ordem é
+    // o que exercita essa regra em toda execução.
+    match particoes::varrer() {
+        Ok(tabela) => match tabela.primeira(particoes::Tipo::Dados) {
+            Some(particao) => match vfs::btrfs::Sistema::abrir(particao.primeiro) {
+                Ok(sistema) => match vfs::montar("btrfs", "/", alloc::boxed::Box::new(sistema)) {
+                    Ok(()) => log_info!("vfs", "/ montado do disco, em btrfs"),
+                    Err(motivo) => {
+                        log_error!("vfs", "a raiz nao montou: {}", motivo.motivo())
+                    }
+                },
+                Err(motivo) => log_warn!("vfs", "o btrfs do disco nao abriu: {}", motivo),
+            },
+            None => log_info!("vfs", "nao ha particao de dados para montar em /"),
+        },
+        Err(motivo) => log_warn!("vfs", "a tabela de particoes nao foi lida: {}", motivo),
+    }
+
     // Com heap e interrupções no ar, a serial do agente pode deixar de ser
     // consultada em laço e passar a avisar quando chega um byte. É o que
     // transforma o canal numa tarefa que dorme de verdade.

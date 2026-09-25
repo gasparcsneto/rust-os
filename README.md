@@ -141,6 +141,7 @@ Os dois podem rodar ao mesmo tempo: cada arquitetura tem seu próprio socket.
 | `btrfs.chunks` | O mapa de pedaços e a raiz da árvore de pedaços |
 | `fs.mounts` | O que está montado na árvore de arquivos, e de que tipo |
 | `fs.list` | Lista um diretório da árvore (`path`) |
+| `fs.read` | Lê um arquivo da árvore e devolve o conteúdo (`path`, `offset`, `max`) |
 | `keyboard.read` | O que foi digitado no teclado da máquina, e os contadores dele (`max`) |
 | `log.tail` | Registros de log estruturados (`count`, `min_level`) |
 
@@ -601,20 +602,43 @@ compilador conferindo as assinaturas.
 
 ```
 $ cargo xtask agent fs.mounts
-{"mounts":[{"at":"/bin","type":"programas"}]}
+{"mounts":[{"at":"/bin","type":"programas"},{"at":"/","type":"btrfs"}]}
 
 $ cargo xtask agent fs.list
-{"path":"/bin","entries":[{"name":"exemplo","type":"file"},
-                          {"name":"filho","type":"file"},
-                          {"name":"invasor","type":"file"}]}
+{"path":"/","entries":[{"name":"saudacao.txt","type":"file"},
+                       {"name":"dados","type":"dir"},
+                       {"name":"grande.txt","type":"file"}]}
+
+$ cargo xtask agent fs.read '{"path":"/dados/nota.txt"}'
+{"path":"/dados/nota.txt","size":26,"offset":0,"returned":26,
+ "content":"uma nota num subdiretorio\n"}
 ```
 
-**Ele existe antes de haver disco, e é isso que o torna útil.** O único sistema
-de arquivos montado hoje serve os programas embutidos no binário do kernel, e
-`executar` os alcança por caminho em vez de por uma busca numa tabela. Era o
-que o README já prometia sobre `exec` — *"o que muda é onde a busca acontece; a
-chamada de sistema continua a mesma"* — e agora a camada que cumpre a promessa
-existe. Quando o Btrfs entrar, ele entra por baixo desta mesma interface.
+**A raiz vem do disco.** Os três nomes acima não estão em lugar nenhum do
+binário: eles foram escritos numa imagem pelo `mkfs.btrfs` do hospedeiro, e o
+caminho até eles passa pela GPT, pelo superbloco com o crc32c conferido, pela
+tradução de endereço lógico e pelos itens de uma folha da árvore de arquivos.
+
+Um arquivo pequeno mora **dentro** do item de extensão — o Btrfs não gasta um
+bloco inteiro com vinte e nove bytes — e lê-lo é copiar bytes que já vieram
+com a folha. Um grande mora num endereço lógico, que precisa ser traduzido, e
+volta em pedaços do tamanho que o driver monta. São dois caminhos de código
+inteiramente diferentes, e a imagem de teste tem um arquivo de cada: o
+`grande.txt` tem quarenta e oito kilobytes justamente para que a leitura venha
+em três voltas em vez de uma.
+
+**O que este leitor não lê, declarado:** uma árvore com mais de um nível (ele
+recusa um nó interno em vez de lê-lo como folha, o que mostraria metade do
+conteúdo e pareceria funcionar), mais de uma extensão por arquivo (um arquivo
+escrito em pedaços sai truncado no primeiro), extensões comprimidas,
+extensões pré-alocadas, subvolumes e os perfis RAID0/10/5/6. Cada uma delas é
+uma recusa escrita no código, ou um limite anotado onde ele mora — não um
+caminho que dá errado calado.
+
+**Ele existiu antes de haver disco, e é isso que o tornou útil.** Quando o
+Btrfs entrou, ele entrou por baixo desta mesma interface, sem que `executar`
+mudasse: os programas embutidos continuam em `/bin` porque a montagem mais
+longa ganha.
 
 **O que não está lá**: escrita, `abrir` e `fechar`. Entram quando houver quem
 os chame. Um método de trait que compila e não tem chamador é pior que
@@ -625,8 +649,11 @@ nunca foi exercitado.
 pertence ao segundo. A versão errada — a primeira da lista que casar —
 funciona até o dia em que houver duas montagens, e aí `executar` para de achar
 os programas sem que nada aponte a causa. O caso de teste que cobre isso
-precisou ser reescrito: a primeira versão montava a raiz **depois** de `/bin`,
-e aí a regra errada acertava por acidente de ordem.
+precisou ser reescrito duas vezes: a primeira versão montava a raiz **depois**
+de `/bin`, e aí a regra errada acertava por acidente de ordem; a segunda
+mexia em `/bin` de verdade e, no dia em que a raiz do disco passou a estar
+montada, falhou **no meio** — deixando `/bin` desmontado e derrubando um caso
+que não tinha nada a ver. Hoje ele monta e desmonta pontos que são só dele.
 
 ## Testes
 
@@ -748,9 +775,10 @@ padronizado.
       em blocos de 16 KiB numa ida só, que é o tamanho de um nó de Btrfs; a
       tabela de partições; o superbloco do Btrfs, com crc32c conferido; e a
       tradução de endereço lógico para o disco; e a leitura dos itens de uma
-      folha, que completa o mapa de pedaços e alcança a árvore de raízes.
-      Falta: percorrer a árvore de arquivos
-      somente leitura, a tabela de descritores por processo, `executar` lendo
+      folha, que completa o mapa de pedaços e alcança a árvore de raízes; e a
+      árvore de arquivos, com a raiz do disco montada em `/`, busca por nome,
+      listagem de diretório e leitura de arquivo embutido e com extensão.
+      Falta: a tabela de descritores por processo, `executar` lendo
       do disco, e um bootloader UEFI próprio no lugar do crate `bootloader`.
 
 ## Licença

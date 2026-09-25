@@ -15,6 +15,7 @@
 //! Quem confere o leitor não é quem o escreveu — é a mesma disciplina do
 //! `llvm-readelf` sobre os ELFs de usuário e do `sgdisk` sobre a GPT.
 
+pub mod arvore;
 pub mod crc32c;
 pub mod folha;
 pub mod pedacos;
@@ -356,4 +357,291 @@ pub fn raiz_da_arvore(item: &[u8]) -> Option<u64> {
     const BYTENR: usize = 176;
     let fatia = item.get(BYTENR..BYTENR + 8)?;
     Some(u64::from_le_bytes(fatia.try_into().ok()?))
+}
+
+// ---------------------------------------------------------------------------
+// O Btrfs como sistema de arquivos do VFS
+// ---------------------------------------------------------------------------
+
+impl Volume {
+    /// Acha a árvore de arquivos entre as raízes que a árvore de raízes lista.
+    ///
+    /// Devolve o endereço lógico do nó de topo dela e o número do inode que é
+    /// o diretório raiz — os dois vêm do mesmo item, e separá-los seria ler a
+    /// árvore duas vezes.
+    pub fn raiz_dos_arquivos(&self) -> Result<(u64, u64), &'static str> {
+        let mut bloco = alloc::vec![0u8; self.superbloco.tamanho_de_no as usize];
+        let cabecalho = self.ler_no(self.superbloco.raiz, &mut bloco)?;
+        if cabecalho.nivel != 0 {
+            return Err("a arvore de raizes tem mais de um nivel");
+        }
+
+        for item in folha::itens(&bloco)? {
+            let item = item?;
+            if item.chave.tipo != folha::tipo::RAIZ
+                || item.chave.objeto != arvore::ARVORE_DE_ARQUIVOS
+            {
+                continue;
+            }
+            let endereco = raiz_da_arvore(item.dados).ok_or("item de raiz truncado")?;
+            let diretorio = diretorio_da_raiz(item.dados).ok_or("item de raiz truncado")?;
+            return Ok((endereco, diretorio));
+        }
+
+        Err("nao ha arvore de arquivos neste sistema de arquivos")
+    }
+
+    /// Lê a folha da árvore de arquivos para um buffer.
+    ///
+    /// # Por que a cada chamada, e não uma vez
+    ///
+    /// Porque guardar a folha exigiria decidir quando ela deixa de valer, e
+    /// não há escrita neste leitor para invalidá-la. Ler custa cem
+    /// microssegundos — uma ida ao disco, medida —, e um cache que ninguém
+    /// invalida é a forma mais silenciosa de servir conteúdo velho.
+    ///
+    /// Quando houver escrita, ou quando o custo aparecer numa medição, o
+    /// cache entra com a regra de invalidação junto.
+    fn folha_dos_arquivos(&self, raiz: u64, destino: &mut [u8]) -> Result<(), &'static str> {
+        let cabecalho = self.ler_no(raiz, destino)?;
+        // Também não falsificável por esta imagem: com meia dúzia de
+        // arquivos, a árvore cabe numa folha e nunca ganha um nível. A recusa
+        // está aqui porque a alternativa — ler um nó interno como se fosse
+        // folha — devolveria os itens que estão nele, que são ponteiros para
+        // outros nós, interpretados como inodes e diretórios. Nomes de lixo,
+        // ou uma árvore com um terço do conteúdo e nenhum erro.
+        if cabecalho.nivel != 0 {
+            return Err("a arvore de arquivos tem mais de um nivel");
+        }
+        Ok(())
+    }
+}
+
+/// O inode que é o diretório raiz de uma árvore, dentro do item de raiz.
+fn diretorio_da_raiz(item: &[u8]) -> Option<u64> {
+    const DIRETORIO: usize = 168;
+    let fatia = item.get(DIRETORIO..DIRETORIO + 8)?;
+    Some(u64::from_le_bytes(fatia.try_into().ok()?))
+}
+
+/// Um sistema de arquivos Btrfs pronto para o VFS.
+pub struct Sistema {
+    volume: Volume,
+    /// O endereço lógico da folha da árvore de arquivos.
+    raiz: u64,
+    /// O inode do diretório raiz.
+    diretorio: u64,
+}
+
+impl Sistema {
+    /// Abre a partição de dados do disco como sistema de arquivos.
+    pub fn abrir(primeiro: u64) -> Result<Sistema, &'static str> {
+        let volume = Volume::abrir(primeiro)?;
+        let (raiz, diretorio) = volume.raiz_dos_arquivos()?;
+        Ok(Sistema {
+            volume,
+            raiz,
+            diretorio,
+        })
+    }
+
+    fn folha(&self) -> Result<alloc::vec::Vec<u8>, crate::vfs::Erro> {
+        let mut bloco = alloc::vec![0u8; self.volume.superbloco.tamanho_de_no as usize];
+        self.volume
+            .folha_dos_arquivos(self.raiz, &mut bloco)
+            .map_err(|_| crate::vfs::Erro::DoDispositivo)?;
+        Ok(bloco)
+    }
+
+    /// O nó do VFS para um inode, lendo o item dele.
+    fn no_de(&self, folha: &[u8], numero: u64) -> Result<crate::vfs::No, crate::vfs::Erro> {
+        let dados = arvore::achar(folha, numero, arvore::tipo::INODE)
+            .map_err(|_| crate::vfs::Erro::DoDispositivo)?
+            .ok_or(crate::vfs::Erro::NaoEncontrado)?;
+        let inode = arvore::ler_inode(dados).ok_or(crate::vfs::Erro::DoDispositivo)?;
+
+        let tipo = match inode.especie {
+            arvore::Especie::Arquivo => crate::vfs::Tipo::Arquivo,
+            arvore::Especie::Diretorio => crate::vfs::Tipo::Diretorio,
+            // Um link simbólico ou um nó de dispositivo. O VFS não tem como
+            // descrevê-los, e inventar um tipo seria pior que dizer que não
+            // se sabe o que é.
+            arvore::Especie::Outro => return Err(crate::vfs::Erro::NaoEncontrado),
+        };
+
+        Ok(crate::vfs::No {
+            tipo,
+            id: numero,
+            tamanho: inode.tamanho,
+        })
+    }
+}
+
+impl crate::vfs::SistemaDeArquivos for Sistema {
+    fn raiz(&self) -> crate::vfs::No {
+        crate::vfs::No {
+            tipo: crate::vfs::Tipo::Diretorio,
+            id: self.diretorio,
+            tamanho: 0,
+        }
+    }
+
+    fn procurar(
+        &self,
+        dir: &crate::vfs::No,
+        nome: &str,
+    ) -> Result<crate::vfs::No, crate::vfs::Erro> {
+        let folha = self.folha()?;
+        let entrada = arvore::procurar(&folha, dir.id, nome)
+            .map_err(|_| crate::vfs::Erro::DoDispositivo)?
+            .ok_or(crate::vfs::Erro::NaoEncontrado)?;
+
+        // Uma entrada pode apontar para a raiz de outra árvore — é assim que
+        // um subvolume aparece dentro de um diretório. Seguir aquilo como se
+        // fosse inode leria o item errado, e este leitor não monta subvolume.
+        //
+        // Não é falsificável pela imagem de teste: o `xtask` não cria
+        // subvolume, e um `mkfs.btrfs --rootdir` também não. Fica escrito
+        // aqui em vez de parecer coberto. O dia em que a imagem tiver um
+        // subvolume, este é o caso que passa a existir.
+        if entrada.tipo_da_chave != arvore::tipo::INODE {
+            return Err(crate::vfs::Erro::NaoEncontrado);
+        }
+
+        self.no_de(&folha, entrada.objeto)
+    }
+
+    fn ler(
+        &self,
+        no: &crate::vfs::No,
+        deslocamento: u64,
+        destino: &mut [u8],
+    ) -> Result<usize, crate::vfs::Erro> {
+        let folha = self.folha()?;
+        let dados = arvore::achar(&folha, no.id, arvore::tipo::EXTENSAO)
+            .map_err(|_| crate::vfs::Erro::DoDispositivo)?
+            .ok_or(crate::vfs::Erro::NaoEncontrado)?;
+        let conteudo = arvore::ler_extensao(dados).map_err(|_| crate::vfs::Erro::DoDispositivo)?;
+
+        // O que ainda falta ler do arquivo, que é o teto de qualquer extensão.
+        let restante = no.tamanho.saturating_sub(deslocamento) as usize;
+        if restante == 0 {
+            return Ok(0);
+        }
+        let quanto = destino.len().min(restante);
+
+        match conteudo {
+            arvore::Conteudo::Embutido { em, quantos } => {
+                let inicio = em + deslocamento as usize;
+                let disponivel = quantos.saturating_sub(deslocamento as usize);
+                let quanto = quanto.min(disponivel);
+                let fatia = dados
+                    .get(inicio..inicio + quanto)
+                    .ok_or(crate::vfs::Erro::DoDispositivo)?;
+                destino[..quanto].copy_from_slice(fatia);
+                Ok(quanto)
+            }
+
+            arvore::Conteudo::Buraco { quantos } => {
+                // Um buraco lê como zeros. O destino já pode trazer qualquer
+                // coisa de quem chamou, então zerar é obrigatório.
+                //
+                // Este braço não é falsificável pela imagem de teste, e está
+                // escrito aqui em vez de parecer coberto: o `mkfs.btrfs
+                // --rootdir` materializa os buracos dos arquivos que copia —
+                // um arquivo esparso entra na imagem com os zeros gravados —,
+                // então nenhum arquivo daqui tem extensão com endereço zero.
+                //
+                // O que a suíte cobre é a **classificação**: o caso sintético
+                // exige que um endereço zero vire `Buraco` em vez de virar um
+                // endereço para traduzir. É a metade que decide se estes
+                // zeros são escritos ou se o arquivo recebe os bytes que
+                // morarem no endereço lógico zero.
+                // O buraco também tem um tamanho, e ele manda: zerar além do
+                // fim da extensão inventaria conteúdo para uma faixa do
+                // arquivo sobre a qual esta extensão não diz nada.
+                let disponivel = quantos.saturating_sub(deslocamento) as usize;
+                let quanto = quanto.min(disponivel);
+                destino[..quanto].fill(0);
+                Ok(quanto)
+            }
+
+            arvore::Conteudo::Normal { endereco, quantos } => {
+                let disponivel = quantos.saturating_sub(deslocamento) as usize;
+                let quanto = quanto.min(disponivel);
+                if quanto == 0 {
+                    return Ok(0);
+                }
+
+                // Uma ida ao disco por vez, do tamanho que o driver monta.
+                let por_vez = crate::virtio::blk::MAIOR_LEITURA;
+                let logico = endereco + deslocamento;
+                let setor_em_bytes = crate::virtio::blk::TAMANHO_DO_SETOR as u64;
+
+                // A leitura precisa começar numa fronteira de setor: o driver
+                // lê setores inteiros. O que sobra antes do ponto pedido é
+                // lido junto e descartado.
+                let alinhado = logico - (logico % setor_em_bytes);
+                let dentro = (logico - alinhado) as usize;
+                let bytes = (dentro + quanto).min(por_vez);
+
+                let fisico = self
+                    .volume
+                    .mapa
+                    .traduzir(alinhado)
+                    .ok_or(crate::vfs::Erro::DoDispositivo)?;
+
+                let mut bruto = alloc::vec![0u8; bytes.div_ceil(
+                    crate::virtio::blk::TAMANHO_DO_SETOR
+                ) * crate::virtio::blk::TAMANHO_DO_SETOR];
+                let setor = self.volume.primeiro + fisico / setor_em_bytes;
+                let resultado = crate::virtio::blk::com_o_disco(|d| d.ler(setor, &mut bruto));
+                resultado
+                    .ok_or(crate::vfs::Erro::DoDispositivo)?
+                    .map_err(|_| crate::vfs::Erro::DoDispositivo)?;
+
+                let veio = (bruto.len() - dentro).min(quanto);
+                destino[..veio].copy_from_slice(&bruto[dentro..dentro + veio]);
+                Ok(veio)
+            }
+        }
+    }
+
+    fn listar(
+        &self,
+        dir: &crate::vfs::No,
+        indice: usize,
+    ) -> Result<Option<crate::vfs::Entrada>, crate::vfs::Erro> {
+        let folha = self.folha()?;
+        let mut atual = 0usize;
+        let mut achada = None;
+
+        arvore::listar(&folha, dir.id, |entrada| {
+            if atual == indice && achada.is_none() {
+                achada = Some((
+                    alloc::string::String::from_utf8_lossy(entrada.nome).into_owned(),
+                    entrada.objeto,
+                    entrada.tipo_da_chave,
+                ));
+            }
+            atual += 1;
+        })
+        .map_err(|_| crate::vfs::Erro::DoDispositivo)?;
+
+        let Some((nome, objeto, tipo_da_chave)) = achada else {
+            return Ok(None);
+        };
+        if tipo_da_chave != arvore::tipo::INODE {
+            return Ok(Some(crate::vfs::Entrada {
+                nome,
+                tipo: crate::vfs::Tipo::Diretorio,
+            }));
+        }
+
+        let no = self.no_de(&folha, objeto)?;
+        Ok(Some(crate::vfs::Entrada {
+            nome,
+            tipo: no.tipo,
+        }))
+    }
 }
