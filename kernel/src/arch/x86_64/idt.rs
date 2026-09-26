@@ -249,6 +249,40 @@ extern "x86-interrupt" fn falha_de_pagina(quadro: InterruptStackFrame, codigo: P
         .map(|addr| addr.as_u64());
     let pc = quadro.instruction_pointer.as_u64();
 
+    // Antes de decidir de quem é a culpa, a pergunta que pode dissolver a
+    // falha: era uma escrita numa página de cópia na escrita?
+    //
+    // # Por que a checagem do anel não entra aqui
+    //
+    // Porque o kernel também escreve em memória do usuário — é o que `ler`
+    // faz ao entregar os bytes lidos ao buffer do processo. Essa escrita vem
+    // do anel zero e, numa página compartilhada por um `fork`, falharia
+    // exatamente como a do processo. Tratar só o caso do usuário deixaria o
+    // kernel morrer de uma falha que ele sabe resolver, e pior: a máquina
+    // inteira cairia por causa de um programa que apenas bifurcou e leu um
+    // arquivo.
+    //
+    // O que **não** se afrouxa é o resto. `copia_na_escrita_em` só reconhece
+    // uma página presente e marcada, e a marca só existe onde um `fork` a
+    // pôs. Uma escrita do kernel num endereço qualquer segue sendo fatal.
+    //
+    // Os dois bits são exigidos juntos de propósito: `PROTECTION_VIOLATION`
+    // separa "a página existe e o acesso é proibido" de "não há página", e
+    // `CAUSED_BY_WRITE` separa a escrita da leitura. Sem o primeiro,
+    // tentaríamos resolver uma falha de página ausente; sem o segundo, uma
+    // leitura numa página marcada seria "resolvida" tirando uma cópia que
+    // ninguém pediu.
+    let escrita_protegida = codigo
+        .contains(PageFaultErrorCode::CAUSED_BY_WRITE | PageFaultErrorCode::PROTECTION_VIOLATION);
+    if escrita_protegida
+        && let Some(endereco) = endereco
+        && crate::paginacao::resolver_copia_na_escrita(endereco)
+    {
+        // Retornar reexecuta a instrução que falhou, agora sobre uma página
+        // gravável. O processo não vê nada além do tempo que isto levou.
+        return;
+    }
+
     // Uma falha vinda do anel sem privilégio é culpa do processo, não do
     // kernel. Matar o sistema por causa dela entregaria a todo processo um
     // jeito trivial de derrubar a máquina — e desperdiçaria exatamente a

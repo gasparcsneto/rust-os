@@ -479,6 +479,25 @@ fn memory_frames(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.field_u64("free", livres as u64)?;
     w.field_u64("used", (rastreados - livres) as u64)?;
     w.field_u64("free_bytes", livres as u64 * crate::frames::TAMANHO_FRAME)?;
+
+    // A cópia na escrita quebra a equivalência entre "frame usado" e "uma
+    // página apontando para ele": depois de um `fork`, um frame serve dois
+    // espaços de endereços. Sem estes campos, um agente vendo `used` parado
+    // enquanto dois processos rodam não teria como saber se a memória está
+    // sendo compartilhada ou se a contabilidade está errada.
+    let (compartilhadas, resolvidas, copiadas) =
+        crate::paginacao::estatisticas_de_copia_na_escrita();
+    w.key("copy_on_write")?;
+    w.begin_object()?;
+    w.field_u64("shared_frames", crate::frames::compartilhados() as u64)?;
+    w.field_u64("pages_shared", compartilhadas)?;
+    w.field_u64("faults_resolved", resolvidas)?;
+    // A diferença entre `faults_resolved` e `copies` é o que a cópia na
+    // escrita economizou: uma resolução sem cópia é um frame de 4 KiB que
+    // não foi alocado nem preenchido.
+    w.field_u64("copies", copiadas)?;
+    w.end_object()?;
+
     w.end_object()
 }
 

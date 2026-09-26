@@ -277,6 +277,73 @@ pub fn init_paginacao() {
     unsafe { paginacao::init(deslocamento) };
 
     paginacao::largar_a_identidade();
+    exigir_protecao_de_escrita();
+}
+
+/// Faz o bit de escrita valer também para o anel zero.
+///
+/// # O bit que não vinha de lugar nenhum
+///
+/// Por padrão o `WRITE_PROTECT` do `CR0` está **desligado**, e com ele
+/// desligado o processador ignora o bit de escrita das páginas quando quem
+/// escreve é o kernel. Isso é herança do 386: o supervisor podia tudo, e o
+/// bit foi acrescentado depois justamente porque "podia tudo" impede
+/// implementar cópia na escrita.
+///
+/// Sem ele, a marca que o `fork` põe nas páginas protege o processo e não
+/// protege o kernel. A chamada `ler` entrega os bytes lidos escrevendo no
+/// buffer do usuário, do anel zero: numa página recém-bifurcada essa escrita
+/// atravessaria a proteção sem falha nenhuma e apareceria na memória do
+/// **outro** processo. Nenhum log, nenhum sintoma, e a corrupção a um `fork`
+/// de distância.
+///
+/// # Nenhum caso protege esta linha, e o que foi medido
+///
+/// Apagando-a: a suíte inteira passa, nas 143. O motivo está no próprio log
+/// que a função emite — **o firmware já a deixara ligada**. O EDK II liga o
+/// bit para as próprias proteções de página, e depois do `ExitBootServices`
+/// ninguém mais o toca: nem o iniciador, nem o kernel. A linha não muda nada
+/// nesta máquina.
+///
+/// O que **é** falsificável é o bit, e vale ter medido: trocando `insert`
+/// por `remove`, quatro casos caem de uma vez — `clonar copia o conteudo`,
+/// `clonar compartilha sem copiar`, `copia na escrita nao copia sem socio` e
+/// `fork do fork mantem a escrita`. Todos pelo mesmo motivo, e nenhum deles
+/// com uma mensagem que aponte para o `CR0`: eles relatam que escrever de um
+/// lado alterou o outro.
+///
+/// Ou seja: o que esta linha garante é indispensável e está provado; o que
+/// não dá para provar aqui é que **precisamos ligá-lo nós**. Ela fica porque
+/// herdar o bit é depender de um firmware específico, e a primeira máquina
+/// que arrancar de outro perderia a cópia na escrita sem um único sintoma
+/// que levasse até aqui.
+///
+/// O ARM não precisa do equivalente: lá `AP[2]` vale para EL1 do mesmo jeito
+/// que para EL0, e não existe bit que deixe o supervisor passar por cima.
+fn exigir_protecao_de_escrita() {
+    use x86_64::registers::control::{Cr0, Cr0Flags};
+
+    let ja_estava = Cr0::read().contains(Cr0Flags::WRITE_PROTECT);
+
+    // SAFETY: ligar `WRITE_PROTECT` só torna o processador **mais** estrito,
+    // e nenhuma escrita do kernel depende de atravessar uma página somente
+    // leitura — a suíte confirma, porque o caso que a violaria seria uma
+    // falha fatal e não um resultado errado.
+    unsafe { Cr0::update(|flags| flags.insert(Cr0Flags::WRITE_PROTECT)) };
+
+    // O log diz qual dos dois casos aconteceu de propósito: é a única
+    // evidência, em campo, de que a herança do firmware não é garantida. O
+    // dia em que esta linha aparecer com "nao a tinha" é o dia em que a
+    // função deixou de ser redundante.
+    crate::log_info!(
+        "mmu",
+        "protecao de escrita no anel zero ligada (o firmware {})",
+        if ja_estava {
+            "ja a deixara"
+        } else {
+            "nao a tinha"
+        }
+    );
 }
 
 /// Só para a suíte: o par de conversões de permissão deste backend.
@@ -284,8 +351,9 @@ pub fn init_paginacao() {
 pub use paginacao::permissoes_ida_e_volta;
 
 pub use paginacao::{
-    acesso_fisico, criar_espaco, desmapear, destravar_paginacao, destruir_espaco, espaco_atual,
-    espaco_do_kernel, mapear_frame, percorrer_paginas_do_usuario, traduzir, trocar_espaco,
+    acesso_fisico, copia_na_escrita_em, criar_espaco, desmapear, destravar_paginacao,
+    destruir_espaco, espaco_atual, espaco_do_kernel, mapear_frame, marcar_copia_na_escrita,
+    percorrer_paginas_do_usuario, traduzir, trocar_espaco,
 };
 
 /// O nome da falha que um estouro de pilha produz nesta arquitetura.

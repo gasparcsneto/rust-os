@@ -23,6 +23,8 @@
 //! por exemplo — continua usando a função `unsafe` e assume a
 //! responsabilidade explicitamente.
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use crate::arch::{self, Permissoes, TAMANHO_PAGINA};
 
 /// Mapeia um endereço virtual sobre memória recém-alocada.
@@ -172,31 +174,43 @@ impl Espaco {
         self.raiz
     }
 
-    /// Um espaço novo com uma **cópia** das páginas de usuário do ativo.
+    /// Um espaço novo que enxerga a mesma memória do ativo, **copiando cada
+    /// página só quando alguém escrever nela**.
     ///
-    /// É o que `fork` precisa: o filho enxerga os mesmos endereços com o mesmo
-    /// conteúdo, mas escrever num deles não alcança o outro.
+    /// É o que `fork` precisa: o filho enxerga os mesmos endereços com o
+    /// mesmo conteúdo, e escrever num deles não alcança o outro.
     ///
-    /// # Por que cópia integral, e não copy-on-write
+    /// # Como a separação acontece sem copiar nada
     ///
-    /// Porque copy-on-write é uma otimização, e otimizar antes de funcionar é
-    /// a forma mais confiável de não conseguir nenhum dos dois. Ele exige
-    /// contagem de referências por frame, marcar as páginas do **pai** como
-    /// somente leitura e um caminho de falha de página que distinga "escrita
-    /// proibida" de "escrita a resolver". Cada uma dessas peças tem um modo
-    /// próprio de falhar em silêncio.
+    /// Os dois espaços apontam para os mesmos frames. Toda página que o
+    /// processo enxerga como gravável sai de gravável nos **dois lados** e
+    /// ganha uma marca no descritor; o frame passa a ter dois donos.
     ///
-    /// O custo de copiar tudo é uma página por página mapeada, pago uma vez
-    /// no `fork`. Para processos do tamanho dos que este kernel roda, é
-    /// irrelevante — e o dia em que deixar de ser, o teste que compara o
-    /// conteúdo dos dois lados continua valendo palavra por palavra.
+    /// A primeira escrita, de qualquer um dos lados, vira falha de página.
+    /// [`resolver_copia_na_escrita`] reconhece a marca, tira uma cópia
+    /// particular do frame para quem escreveu, devolve a escrita e retoma a
+    /// instrução. O processo não percebe nada além de um atraso.
+    ///
+    /// # Por que as três coisas precisam acontecer juntas
+    ///
+    /// Compartilhar o frame, tirar a escrita do filho e tirar a escrita do
+    /// **pai** são uma operação só, e esquecer qualquer uma delas produz um
+    /// desfecho diferente e igualmente ruim:
+    ///
+    /// - sem contar o dono, o primeiro dos dois a morrer devolve ao alocador
+    ///   memória que o outro ainda usa;
+    /// - sem tirar a escrita do filho, ele escreve direto no frame do pai;
+    /// - sem tirar a escrita do **pai**, é o pai que escreve no frame do
+    ///   filho — e este é o lado que se esquece, porque o pai é quem está
+    ///   rodando e tudo parece funcionar até ele encostar na própria memória.
     ///
     /// # Por que as permissões são lidas de volta das tabelas
     ///
-    /// Porque recriar tudo gravável seria mais simples e destruiria o `W^X`
-    /// do processo no instante em que ele tivesse um filho. O segmento de
-    /// código do pai é somente leitura e executável; o do filho tem de ser a
-    /// mesma coisa.
+    /// Porque recriar tudo gravável destruiria o `W^X` do processo no
+    /// instante em que ele tivesse um filho. O segmento de código do pai é
+    /// somente leitura e executável; o do filho tem de ser a mesma coisa — e,
+    /// por ser somente leitura de verdade, ele é compartilhado **sem** marca:
+    /// uma escrita ali continua sendo o erro que sempre foi.
     pub fn clonar_o_ativo(privada: usize) -> Result<Self, &'static str> {
         // A origem é o espaço **ativo**, e não um `&self`, porque é assim que
         // `fork` o encontra: quem chama está executando dentro do espaço que
@@ -213,17 +227,11 @@ impl Espaco {
             // SAFETY: a raiz é nossa e é válida; as interrupções mascaradas
             // garantem que ninguém altera as tabelas durante o percurso.
             unsafe {
-                arch::percorrer_paginas_do_usuario(
-                    origem,
-                    privada,
-                    &mut |virtual_, fisico, permissoes| {
-                        paginas.push((virtual_, fisico, permissoes));
-                    },
-                );
+                arch::percorrer_paginas_do_usuario(origem, privada, &mut |pagina| {
+                    paginas.push(pagina);
+                });
             }
         });
-
-        let anterior = arch::espaco_atual();
 
         // # Por que a troca **inteira** vive numa seção crítica
         //
@@ -233,9 +241,9 @@ impl Espaco {
         // escalonador reinstala o espaço registrado, que é o certo.
         //
         // Aqui não há a quem entregar: o espaço novo ainda vai ser do filho,
-        // que não existe. Uma preempção no meio da cópia faria o escalonador
-        // reinstalar o espaço **do pai** ao devolver a CPU, e o resto da cópia
-        // iria para lá.
+        // que não existe. Uma preempção no meio faria o escalonador
+        // reinstalar o espaço **do pai** ao devolver a CPU, e o resto dos
+        // mapeamentos iria para lá.
         //
         // Isso não chega a acontecer hoje, e vale ser exato sobre o porquê:
         // o único chamador é `fork`, que roda dentro de uma chamada de
@@ -248,37 +256,70 @@ impl Espaco {
         // `spawn` iniciado pelo kernel, por exemplo — a quebraria sem aviso.
         // Mascarar aqui torna a função correta sozinha, e o custo é zero
         // quando já se está mascarado.
-        //
-        // O preço real é uma janela sem interrupções proporcional ao tamanho
-        // do processo. É aceitável enquanto processos forem pequenos; quando
-        // deixarem de ser, a saída não é encurtar a seção crítica e sim mapear
-        // direto na tabela do destino, sem nunca torná-la ativa.
-        let resultado = arch::sem_interrupcoes(|| {
+        arch::sem_interrupcoes(|| {
             // SAFETY: as duas raízes carregam as entradas de topo do kernel,
             // então o código e a pilha deste fio seguem mapeados dos dois
             // lados. A troca de volta acontece em qualquer desfecho, inclusive
             // no de erro.
             unsafe {
                 arch::trocar_espaco(novo.raiz);
-                let r = copiar_para_o_espaco_ativo(&paginas);
-                arch::trocar_espaco(anterior);
-                r
+                let r = adotar_no_espaco_ativo(&paginas);
+                arch::trocar_espaco(origem);
+                r?;
             }
-        });
-        resultado?;
+
+            // O lado do pai vem **depois** de o filho estar inteiro, e a
+            // ordem é deliberada: se a montagem do filho falhasse no meio, o
+            // pai já estaria com metade das páginas restritas sem ninguém com
+            // quem compartilhá-las. Não seria incorreto — a resolução devolve
+            // a escrita sem copiar quando há um dono só —, mas seria trabalho
+            // silencioso pago por um `fork` que nem aconteceu.
+            //
+            // Ele fica **dentro** da mesma seção crítica por um motivo mais
+            // simples que o da troca de espaços: `marcar_copia_na_escrita`
+            // opera sobre o espaço ativo, e manter as interrupções mascaradas
+            // até o fim é mais barato do que provar, a cada leitura deste
+            // código, que o escalonador reinstalaria o espaço certo ao
+            // devolver a CPU.
+            marcar_o_lado_do_pai(&paginas)
+        })?;
+
+        COMPARTILHADAS.fetch_add(paginas.len() as u64, Ordering::Relaxed);
         Ok(novo)
     }
 }
 
-/// Recria no espaço ativo as páginas descritas, com o conteúdo do original.
+/// Tira a escrita das páginas do pai, agora que o filho divide os frames.
+///
+/// Chegar a um erro aqui é ficar com o pai gravável sobre um frame que o
+/// filho também alcança: as escritas do pai apareceriam na memória do filho.
+/// Não há desfecho seguro que preserve os dois, e o filho é quem ainda não
+/// existe para ninguém — por isso o `fork` inteiro é desfeito.
+fn marcar_o_lado_do_pai(paginas: &[arch::PaginaDoUsuario]) -> Result<(), &'static str> {
+    for pagina in paginas {
+        if !pagina.gravavel_para_o_processo() {
+            continue;
+        }
+        if let Err(motivo) = arch::marcar_copia_na_escrita(pagina.virtual_) {
+            crate::log_error!(
+                "mmu",
+                "pai nao ficou protegido em {:#x}: {}",
+                pagina.virtual_,
+                motivo
+            );
+            return Err(motivo);
+        }
+    }
+    Ok(())
+}
+
+/// Aponta o espaço ativo para as páginas descritas, sem copiar nenhuma.
 ///
 /// # Safety
 ///
 /// O espaço ativo precisa ser o destino, e cada `fisico` precisa ser um frame
 /// vivo — o percurso que os produziu não pode ter sido invalidado no meio.
-unsafe fn copiar_para_o_espaco_ativo(
-    paginas: &[(u64, u64, arch::Permissoes)],
-) -> Result<(), &'static str> {
+unsafe fn adotar_no_espaco_ativo(paginas: &[arch::PaginaDoUsuario]) -> Result<(), &'static str> {
     // A precondição mais importante desta função é a que não aparece nos
     // argumentos: o espaço ativo não é o de nenhum fio, e uma troca de
     // contexto no meio disto instalaria o espaço errado por baixo dela.
@@ -291,23 +332,225 @@ unsafe fn copiar_para_o_espaco_ativo(
         return Err("copia de espaco com interrupcoes ligadas");
     }
 
-    for (virtual_, fisico, permissoes) in paginas {
-        mapear_faixa_preenchendo(*virtual_, 1, *permissoes, || {
-            // SAFETY: a página de destino está mapeada com escrita neste
-            // espaço — é o que `mapear_faixa_preenchendo` garante enquanto
-            // esta closure roda —, e o mapa da memória física alcança o frame
-            // de origem, que pertence ao outro espaço e por isso não tem
-            // endereço virtual aqui.
+    for pagina in paginas {
+        let gravavel = pagina.gravavel_para_o_processo();
+
+        // O filho nasce com as permissões que o **processo** enxerga, e não
+        // com as que o descritor do pai carrega. Nas páginas já marcadas de
+        // um `fork` anterior as duas diferem: o descritor diz somente
+        // leitura, e o processo escreve nelas o tempo todo.
+        //
+        // Mapear gravável e marcar em seguida — em vez de mapear somente
+        // leitura e marcar — não é um rodeio. É o que mantém **um único**
+        // ponto decidindo quem pode virar cópia na escrita: uma página que
+        // chegasse aqui somente leitura de verdade seria recusada pela marca,
+        // que é exatamente a proteção que queremos. Instalar a marca à mão,
+        // por fora, seria uma segunda resposta para a mesma pergunta — e a
+        // que não recusa nada.
+        //
+        // O intervalo em que a página do filho fica gravável não é
+        // observável: este espaço ainda não é de nenhum fio, e as
+        // interrupções estão mascaradas.
+        let permissoes = Permissoes {
+            escrita: gravavel,
+            ..pagina.permissoes
+        };
+
+        // O dono é anotado **antes** do mapeamento, e não depois, porque o
+        // caminho de erro de cada ordem é diferente: anotar antes e falhar
+        // deixa um dono a mais, que a linha seguinte desfaz; mapear antes e
+        // falhar ao anotar deixaria uma página mapeada sem dono registrado,
+        // que ninguém desfaz — e o frame voltaria ao alocador com dois
+        // espaços apontando para ele.
+        if !crate::frames::compartilhar(pagina.fisico) {
+            return Err("frame nao pode ser compartilhado");
+        }
+
+        // SAFETY: o frame pertence ao espaço de origem e acaba de ganhar um
+        // segundo dono registrado, então ele não volta ao alocador enquanto
+        // este mapeamento existir. Este é o caso que o contrato de
+        // `mapear_frame` deixa ao chamador, e a contagem de donos é o que o
+        // satisfaz.
+        if let Err(motivo) =
+            unsafe { arch::mapear_frame(pagina.virtual_, pagina.fisico, permissoes) }
+        {
+            crate::frames::soltar(pagina.fisico);
+            return Err(motivo);
+        }
+
+        if gravavel {
+            arch::marcar_copia_na_escrita(pagina.virtual_)?;
+        }
+    }
+    Ok(())
+}
+
+/// Resolve uma falha de escrita numa página de cópia na escrita.
+///
+/// Devolve `false` quando a página não estava marcada — e aí a falha é o que
+/// sempre foi, uma escrita proibida, que quem chamou trata como tal.
+///
+/// # Por que o caso de um dono só não copia
+///
+/// Porque não há de quem separar. É o que acontece com todo processo que
+/// bifurca e cujo filho morre: as páginas continuam marcadas, e a primeira
+/// escrita em cada uma delas só precisa desfazer a marca. Copiar ali seria
+/// alocar um frame, copiar 4 KiB e devolver o original — trabalho cujo
+/// resultado é bit a bit o estado inicial.
+///
+/// É também o que torna o `fork` barato de verdade no caso comum: bifurcar
+/// e sair custa uma passada de marcação, e não um espaço de endereços
+/// inteiro copiado duas vezes.
+pub fn resolver_copia_na_escrita(endereco: u64) -> bool {
+    // A marca só existe em memória de processo, e esta função é alcançada
+    // pelo tratador de falha de página com **o endereço que o hardware
+    // acusou** — qualquer um. Recusar fora da faixa do usuário é o que
+    // mantém o caminho de resolução estreito: o kernel pode resolver cópia
+    // na escrita porque ele escreve no buffer do processo, e não para que
+    // uma falha em qualquer página vire uma tentativa de torná-la gravável.
+    if !(crate::usuario::BASE..crate::usuario::TETO).contains(&endereco) {
+        return false;
+    }
+
+    let pagina = endereco & !(TAMANHO_PAGINA - 1);
+
+    // A seção crítica cobre da leitura do descritor ao remapeamento porque no
+    // meio dela a página fica **sem tradução nenhuma**: uma preempção ali
+    // devolveria a CPU a um processo cuja memória sumiu de baixo dele. E se o
+    // fio que entrasse fosse o outro dono deste frame, ele resolveria a
+    // própria falha sobre uma contagem de donos que estamos no meio de mudar.
+    arch::sem_interrupcoes(|| {
+        let Some((antigo, permissoes)) = arch::copia_na_escrita_em(pagina) else {
+            return false;
+        };
+
+        let restauradas = Permissoes {
+            escrita: true,
+            ..permissoes
+        };
+
+        let sozinho = crate::frames::donos(antigo) <= 1;
+        let destino = if sozinho {
+            antigo
+        } else {
+            let Some(novo) = crate::frames::alocar() else {
+                crate::log_error!(
+                    "mmu",
+                    "sem frame para separar a pagina {:#x} de {} donos",
+                    pagina,
+                    crate::frames::donos(antigo)
+                );
+                return false;
+            };
+            // SAFETY: os dois frames são alcançáveis pelo mapa da memória
+            // física, têm 4 KiB e são distintos — `novo` saiu do alocador, que
+            // só entrega frames livres, e `antigo` está mapeado.
             unsafe {
                 core::ptr::copy_nonoverlapping(
-                    arch::acesso_fisico(*fisico),
-                    *virtual_ as *mut u8,
+                    arch::acesso_fisico(antigo),
+                    arch::acesso_fisico(novo),
                     TAMANHO_PAGINA as usize,
                 );
             }
-        })?;
-    }
-    Ok(())
+            novo
+        };
+
+        // Os dois desfechos de erro abaixo precisam desfazer coisas
+        // diferentes, e tratá-los juntos vazaria um frame num deles.
+        //
+        // Falhar em **desmapear** deixa tudo como estava: a página segue
+        // apontando para `antigo`, que continua tendo os donos que tinha.
+        // Só a cópia recém-tirada sobra, e é só ela que volta ao alocador —
+        // devolver `antigo` aqui seria entregar memória que ainda está
+        // mapeada.
+        let saiu = match arch::desmapear(pagina) {
+            Ok(frame) => frame,
+            Err(motivo) => {
+                crate::log_error!("mmu", "copia na escrita em {:#x}: {}", pagina, motivo);
+                if !sozinho {
+                    crate::frames::liberar(destino);
+                }
+                return false;
+            }
+        };
+
+        // O frame que saiu tem de ser o mesmo que lemos do descritor. Entre
+        // as duas leituras não há janela — as interrupções estão mascaradas e
+        // há um núcleo só —, então divergir significa que a tabela mudou por
+        // baixo de nós, e que o conteúdo copiado acima não é o desta página.
+        //
+        // Seguir em frente aqui seria a pior variante do erro: escreveríamos
+        // uma cópia do frame errado no endereço certo, e o processo passaria
+        // a ler dados de outro lugar sem nenhuma falha. Desistir deixa a
+        // página desmapeada, o que o chamador trata como a falha que é.
+        if saiu != antigo {
+            crate::log_error!(
+                "mmu",
+                "copia na escrita em {:#x}: o descritor dizia {:#x} e saiu {:#x}",
+                pagina,
+                antigo,
+                saiu
+            );
+            if !sozinho {
+                crate::frames::liberar(destino);
+            }
+            return false;
+        }
+
+        // SAFETY: ou o frame acabou de sair do alocador, ou é o que acabou de
+        // sair deste mesmo endereço virtual e tem um dono só — as duas formas
+        // do invariante que `mapear_frame` exige.
+        if let Err(motivo) = unsafe { arch::mapear_frame(pagina, destino, restauradas) } {
+            crate::log_error!("mmu", "copia na escrita em {:#x}: {}", pagina, motivo);
+
+            // Falhar em **mapear** é o oposto: a página já saiu das tabelas,
+            // e agora os dois frames estão órfãos. `destino` não é alcançado
+            // por ninguém, e a participação deste espaço em `antigo` acabou
+            // junto com o mapeamento que a representava.
+            //
+            // Quando são o mesmo frame — o caso de um dono só — a primeira
+            // linha já o devolve, e a segunda não roda. Esquecê-la no caso
+            // compartilhado deixaria um dono anotado para sempre, e o frame
+            // nunca mais voltaria ao alocador.
+            crate::frames::liberar(destino);
+            if !sozinho {
+                crate::frames::soltar(antigo);
+            }
+            return false;
+        }
+
+        if !sozinho {
+            // Agora, e não antes: até o remapeamento acima, este espaço ainda
+            // apontava para `antigo`. Soltá-lo cedo o devolveria ao alocador
+            // no instante em que ele fosse o último dono, e a cópia acima
+            // teria lido de um frame já reciclado.
+            crate::frames::soltar(antigo);
+            COPIADAS.fetch_add(1, Ordering::Relaxed);
+        }
+
+        RESOLVIDAS.fetch_add(1, Ordering::Relaxed);
+        true
+    })
+}
+
+/// Páginas que um `fork` passou a compartilhar.
+static COMPARTILHADAS: AtomicU64 = AtomicU64::new(0);
+/// Falhas de escrita que a marca de cópia na escrita explicou.
+static RESOLVIDAS: AtomicU64 = AtomicU64::new(0);
+/// Quantas dessas exigiram de fato tirar uma cópia do frame.
+///
+/// A diferença entre esta e [`RESOLVIDAS`] é o que a cópia na escrita
+/// economizou: uma resolução sem cópia é um frame de 4 KiB que não foi
+/// alocado nem preenchido.
+static COPIADAS: AtomicU64 = AtomicU64::new(0);
+
+/// `(páginas compartilhadas, falhas resolvidas, cópias tiradas)`.
+pub fn estatisticas_de_copia_na_escrita() -> (u64, u64, u64) {
+    (
+        COMPARTILHADAS.load(Ordering::Relaxed),
+        RESOLVIDAS.load(Ordering::Relaxed),
+        COPIADAS.load(Ordering::Relaxed),
+    )
 }
 
 impl Drop for Espaco {

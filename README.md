@@ -507,12 +507,11 @@ pode transbordar na soma. O kernel não desreferencia nada antes de conferir
 que a faixa inteira está no espaço do usuário **e** mapeada — faixa por faixa,
 página por página, com aritmética saturante.
 
-**Um processo cria outro.** `bifurcar` duplica o processo: o filho recebe uma
-cópia do espaço de endereços — cópia integral, não copy-on-write — e acorda
-retornando `0` de uma chamada que nunca fez, enquanto o pai recebe o
-identificador dele. `executar` troca a imagem do processo pela que o nome
-indicar, e não retorna para quem chamou: retorna para o primeiro endereço do
-programa novo.
+**Um processo cria outro.** `bifurcar` duplica o processo: o filho enxerga o
+mesmo espaço de endereços e acorda retornando `0` de uma chamada que nunca
+fez, enquanto o pai recebe o identificador dele. `executar` troca a imagem do
+processo pela que o nome indicar, e não retorna para quem chamou: retorna
+para o primeiro endereço do programa novo.
 
 ```
 $ cargo xtask agent user.run && cargo xtask agent user.stats
@@ -527,14 +526,81 @@ $ cargo xtask agent log.tail '{"count":6}'
 ... info  "usuario" "processo encerrou com codigo 24"      <- o filho
 ```
 
-A cópia é integral por escolha, não por descuido: copy-on-write exige contagem
-de referências por frame, marcar as páginas do pai como somente leitura e um
-caminho de falha de página que distinga "escrita proibida" de "escrita a
-resolver" — três peças com modos próprios de falhar em silêncio. O custo é uma
-página por página mapeada, pago uma vez.
+### O `fork` não copia página nenhuma
 
-As permissões atravessam a cópia. Recriar tudo gravável seria mais simples e
-faria o `W^X` do processo desaparecer no instante em que ele tivesse um filho.
+Bifurcar não duplica a memória: os dois espaços passam a apontar para os
+mesmos frames. Toda página que o processo enxerga como gravável sai de
+gravável **nos dois lados** e ganha uma marca num bit que o processador
+ignora — o 9 do descritor no x86, o 55 no ARM, os dois reservados pela
+arquitetura para o sistema operacional. O frame passa a ter dois donos.
+
+A primeira escrita, de qualquer um dos lados, vira falha de página. O
+tratador reconhece a marca, tira uma cópia particular do frame para quem
+escreveu, devolve a escrita e **retoma a instrução**. O processo não percebe
+nada além do tempo que isso levou.
+
+São três peças, e esquecer qualquer uma produz um desfecho diferente e
+igualmente ruim:
+
+- sem contar os donos, o primeiro dos dois a morrer devolve ao alocador
+  memória que o outro ainda usa;
+- sem tirar a escrita do filho, ele escreve direto no frame do pai;
+- **sem tirar a escrita do pai**, é o pai que escreve no frame do filho — e
+  este é o lado que se esquece, porque o pai é quem está rodando e tudo
+  parece funcionar até ele encostar na própria memória.
+
+```
+$ cargo xtask agent memory.frames        # depois de quatro user.run
+{"frame_size":4096,"base":0,"tracked":26956,"free":24043,"used":2913,
+ "free_bytes":98480128,
+ "copy_on_write":{"shared_frames":0,"pages_shared":12,
+                  "faults_resolved":0,"copies":0}}
+```
+
+Quatro bifurcações, doze páginas compartilhadas, **nenhuma cópia**. E
+`faults_resolved` em zero não é o contador quebrado: o programa de exemplo
+bifurca e o filho troca de imagem em seguida, então ninguém chega a escrever
+numa página marcada. `shared_frames` volta a zero porque o `exec` larga o
+espaço herdado e o pai fica dono sozinho de tudo de novo.
+
+É o caminho comum de quase todo programa, e é exatamente onde a cópia
+integral era mais cara: ela copiava o espaço inteiro para jogá-lo fora um
+instante depois. A diferença entre `faults_resolved` e `copies` mede a outra
+metade da economia — quando o frame tem um dono só, resolver a marca é
+devolver a escrita e nada mais, sem alocar nem preencher frame nenhum.
+
+Quem exercita a separação de verdade é a suíte, que escreve dos dois lados e
+confere palavra por palavra — ver [Testes](#testes).
+
+**O bit que não vinha de lugar nenhum.** No x86 o `WRITE_PROTECT` do `CR0`
+manda o processador respeitar o bit de escrita das páginas **também no anel
+zero**. Com ele desligado — que é o padrão da arquitetura — a marca protege o
+processo e não protege o kernel: a chamada `ler` entrega os bytes escrevendo
+no buffer do usuário, do anel zero, e numa página recém-bifurcada essa
+escrita atravessaria a proteção sem falha nenhuma, aparecendo na memória do
+**outro** processo. O firmware desta máquina já o deixa ligado; o kernel o
+liga de novo, porque herdá-lo é depender de um firmware específico. No ARM
+não há equivalente: `AP[2]` vale para EL1 do mesmo jeito que para EL0.
+
+Pela mesma razão, o tratador de falha resolve a marca **sem perguntar de que
+anel veio a escrita**. Tratar só o caso do usuário deixaria a máquina inteira
+cair por causa de um programa que apenas bifurcou e leu um arquivo. Medido:
+acrescentando a condição do anel, quatro casos morrem e o kernel vai a falha
+fatal.
+
+As permissões atravessam a bifurcação. Recriar tudo gravável seria mais
+simples e faria o `W^X` do processo desaparecer no instante em que ele
+tivesse um filho — e uma página somente leitura de verdade é compartilhada
+**sem** marca, para que escrever nela continue sendo o erro que sempre foi.
+A função que põe a marca recusa uma página somente leitura por isso: a
+resolução devolve a escrita, e marcar código por engano abriria o buraco em
+vez de fechá-lo.
+
+O caso que só aparece na segunda geração é o neto. Depois do primeiro `fork`,
+as páginas do filho estão marcadas e sem o bit de escrita; bifurcá-lo de novo
+lendo só o descritor daria ao neto os dados como somente leitura, e ele
+morreria na primeira escrita — longe do `fork` que causou. Quem responde "o
+processo enxerga isto como gravável?" soma as duas coisas, o bit e a marca.
 
 O nome que `exec` recebe é procurado no VFS: sem barra, em `/bin`; absoluto,
 como veio. É a promessa que este README fazia quando a busca ainda era numa
@@ -976,12 +1042,12 @@ interrupção de hardware de verdade.
 
 ```
 $ cargo xtask test --arch aarch64
-  suite de testes :: aarch64 :: 57 casos
+  suite de testes :: aarch64 :: 143 casos
   ...
-  excecao: breakpoint retomado               ok
-  timer: relogio avanca                      ok
-  tarefa: waker acorda bloqueada             ok
-  57 de 57 passaram
+  memoria: clonar compartilha sem copiar     ok
+  memoria: filho morto nao leva as paginas do pai ok
+  memoria: fork do fork mantem a escrita     ok
+  143 de 143 passaram
 ```
 
 O CI roda formatação, clippy nas cinco configurações, e a suíte nas duas
@@ -1053,7 +1119,8 @@ padronizado.
       falha de processo que não derruba o kernel.
 - [x] **Fase 1 — Processos isolados.** Uma tabela de tradução por processo,
       carregador de ELF64 com validação de tudo que vem do arquivo, e
-      `fork`/`exec` com cópia integral do espaço de endereços.
+      `fork`/`exec` — hoje com cópia na escrita, contagem de donos por frame e
+      resolução da falha nos dois anéis.
       **Fase 1 completa.**
 - [x] **Fase 2 — Drivers.** Enumeração PCI, virtio-blk, virtio-net,
       roteamento de interrupção de PCI, timer do APIC local e framebuffer

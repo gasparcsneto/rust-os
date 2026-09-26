@@ -584,7 +584,175 @@ unsafe fn liberar_subarvore(entrada: &PageTableEntry, nivel: u8) {
         }
     }
 
-    crate::frames::liberar(frame);
+    // Aqui as tabelas e as páginas se separam, e a diferença é de dono.
+    //
+    // Uma tabela pertence a este espaço e a mais ninguém: ela foi criada por
+    // `map_to` com o nosso alocador quando este espaço precisou dela, e
+    // nenhum outro espaço a alcança — é por isso que só descemos pela entrada
+    // privada. Devolvê-la ao alocador é correto sem perguntar nada.
+    //
+    // Uma **página** pode ter vários donos desde que existe cópia na escrita:
+    // o `fork` aponta o filho para os mesmos frames do pai. Devolvê-la com
+    // `liberar` entregaria ao alocador memória que o outro processo ainda
+    // está lendo e escrevendo, e o estrago só apareceria quando o frame fosse
+    // reaproveitado — longe daqui, e sem sintoma que leve de volta.
+    if nivel > 0 {
+        crate::frames::liberar(frame);
+    } else {
+        crate::frames::soltar(frame);
+    }
+}
+
+/// O bit de descritor que marca uma página como cópia na escrita.
+///
+/// # Por que este bit, e por que ele é seguro de usar
+///
+/// Os bits 9, 10 e 11 de um descritor são **ignorados pelo processador** e
+/// reservados ao sistema operacional justamente para isto: pendurar um
+/// significado que o hardware não precisa conhecer. O percorredor de tabelas
+/// os carrega junto e não faz nada com eles.
+///
+/// A alternativa seria uma tabela paralela — "quais páginas de quais espaços
+/// são cópia na escrita" — que precisaria ser mantida em sincronia com as
+/// tabelas de verdade em todo mapeamento, desmapeamento e destruição de
+/// espaço. Aqui a marca viaja **dentro** do descritor: é impossível o
+/// descritor existir sem ela ou ela sobreviver ao descritor.
+const COPIA_NA_ESCRITA: PageTableFlags = PageTableFlags::BIT_9;
+
+/// Tira a escrita da página e a marca como cópia na escrita.
+///
+/// Opera sobre o espaço **ativo**, que é onde `fork` encontra o pai e onde
+/// ele instala o filho.
+///
+/// # Por que uma página somente leitura é recusada
+///
+/// Porque marcá-la abriria um buraco no `W^X`: a resolução da falha devolve
+/// a escrita à página, e uma página de código marcada por engano viraria
+/// gravável na primeira tentativa de escrever nela. O `fork` só marca o que
+/// já era gravável; recusar o resto transforma o engano num erro visível em
+/// vez de numa permissão concedida em silêncio.
+///
+/// Uma página já marcada é aceita sem mudança — é o caso do neto: o pai
+/// bifurcou uma vez, e a página dele já saiu de gravável na primeira vez.
+pub fn marcar_copia_na_escrita(virtual_: u64) -> Result<(), &'static str> {
+    com_descritor_da_folha(virtual_, |descritor| {
+        let flags = descritor.flags();
+        if flags.contains(COPIA_NA_ESCRITA) {
+            return Ok(((), false));
+        }
+        if !flags.contains(PageTableFlags::WRITABLE) {
+            return Err("pagina somente leitura nao vira copia na escrita");
+        }
+        descritor.set_flags((flags - PageTableFlags::WRITABLE) | COPIA_NA_ESCRITA);
+        Ok(((), true))
+    })
+}
+
+/// O frame e as permissões de uma página marcada como cópia na escrita.
+///
+/// `None` quando a página não está mapeada ou não carrega a marca — que é o
+/// que distingue uma falha de escrita a resolver de uma falha de escrita a
+/// punir.
+pub fn copia_na_escrita_em(virtual_: u64) -> Option<(u64, Permissoes)> {
+    com_descritor_da_folha(virtual_, |descritor| {
+        if !descritor.flags().contains(COPIA_NA_ESCRITA) {
+            return Err("pagina nao esta marcada para copia na escrita");
+        }
+        Ok((
+            (
+                descritor.addr().as_u64(),
+                permissoes_de(descritor.flags().bits()),
+            ),
+            false,
+        ))
+    })
+    .ok()
+}
+
+/// Entrega o descritor de folha de `virtual_` no espaço ativo a `f`.
+///
+/// Concentra aqui a descida pelos quatro níveis porque ela tem um detalhe que
+/// erra em silêncio: uma página grande no caminho não é uma folha de 4 KiB, e
+/// tratá-la como tal escreveria bits de permissão sobre 2 MiB de memória de
+/// outra pessoa. `frame()` recusa esse caso por nós, em todos os níveis.
+///
+/// `f` devolve o que interessa a quem chamou **e** se mexeu no descritor; é
+/// o segundo valor que pede a invalidação da TLB. Deixá-lo explícito, em vez
+/// de deduzi-lo do tipo do primeiro, mantém a decisão visível nos dois
+/// pontos de uso — e é o descasamento entre mudar o descritor e esquecer a
+/// invalidação que produz uma proteção existente na tabela e ausente no
+/// hardware.
+fn com_descritor_da_folha<R>(
+    virtual_: u64,
+    f: impl FnOnce(&mut PageTableEntry) -> Result<(R, bool), &'static str>,
+) -> Result<R, &'static str> {
+    if !virtual_.is_multiple_of(TAMANHO_PAGINA) {
+        return Err("endereco virtual desalinhado");
+    }
+    if !canonico(virtual_) {
+        return Err("endereco virtual nao canonico");
+    }
+
+    crate::arch::sem_interrupcoes(|| {
+        let _guarda = TRAVA.lock();
+
+        let raiz = acesso_fisico(espaco_atual()) as *mut PageTable;
+        if raiz.is_null() {
+            return Err("memoria fisica nao esta acessivel");
+        }
+
+        let indices = [
+            (virtual_ >> 39) & 0x1FF,
+            (virtual_ >> 30) & 0x1FF,
+            (virtual_ >> 21) & 0x1FF,
+        ];
+
+        // SAFETY: a raiz é a tabela ativa, alcançável pelo mapa da memória
+        // física, e a trava garante que ninguém mais a escreve.
+        let folha = unsafe {
+            let mut tabela = &mut *raiz;
+            for indice in indices {
+                let frame = match tabela[indice as usize].frame() {
+                    Ok(frame) => frame.start_address().as_u64(),
+                    Err(FrameError::FrameNotPresent) => return Err("endereco nao estava mapeado"),
+                    Err(FrameError::HugeFrame) => {
+                        return Err("bloco grande no caminho do mapeamento");
+                    }
+                };
+                let abaixo = acesso_fisico(frame) as *mut PageTable;
+                if abaixo.is_null() {
+                    return Err("memoria fisica nao esta acessivel");
+                }
+                tabela = &mut *abaixo;
+            }
+            &mut tabela[((virtual_ >> 12) & 0x1FF) as usize]
+        };
+
+        if !folha.flags().contains(PageTableFlags::PRESENT) {
+            return Err("endereco nao estava mapeado");
+        }
+
+        let (resultado, mudou) = f(folha)?;
+        if mudou {
+            // # A invalidação que nenhum caso derruba, e por quê
+            //
+            // Medido, apagando-a: a suíte inteira passa. Não é falha dos casos.
+            // O único chamador que modifica é o `fork`, e o passo imediatamente
+            // anterior ao lado do pai é uma troca de espaço — que recarrega o
+            // registrador de raiz e descarta a TLB por inteiro. Quando chegamos
+            // aqui não há entrada velha para descartar.
+            //
+            // Ela fica porque essa é uma propriedade **do chamador de hoje**, e
+            // não desta função. Quem marcar uma página sem trocar de espaço
+            // antes — um `mprotect`, uma proteção de guarda, qualquer coisa que
+            // ainda não existe — receberia do hardware a permissão anterior até
+            // a TLB expirar sozinha, e teria uma proteção que existe na tabela e
+            // não na máquina. É o modo de falhar mais caro que há: intermitente
+            // e dependente de quanto tempo passou.
+            x86_64::instructions::tlb::flush(VirtAddr::new(virtual_));
+        }
+        Ok(resultado)
+    })
 }
 
 /// As permissões que um descritor de página de usuário carrega.
@@ -614,8 +782,8 @@ pub fn permissoes_ida_e_volta(permissoes: Permissoes) -> Permissoes {
 
 /// Visita cada página de usuário de um espaço.
 ///
-/// Chama `f(virtual, fisico, permissoes)` para cada página mapeada dentro da
-/// entrada de topo privada. A ordem é a das tabelas, que é a dos endereços.
+/// Chama `f` uma vez por página mapeada dentro da entrada de topo privada. A
+/// ordem é a das tabelas, que é a dos endereços.
 ///
 /// # Safety
 ///
@@ -624,7 +792,7 @@ pub fn permissoes_ida_e_volta(permissoes: Permissoes) -> Permissoes {
 pub unsafe fn percorrer_paginas_do_usuario(
     raiz: u64,
     entrada_privada: usize,
-    f: &mut dyn FnMut(u64, u64, Permissoes),
+    f: &mut dyn FnMut(crate::arch::PaginaDoUsuario),
 ) {
     if entrada_privada >= ENTRADAS {
         return;
@@ -668,12 +836,12 @@ pub unsafe fn percorrer_paginas_do_usuario(
 
                 for (i1, e1) in p1.iter().enumerate() {
                     let Ok(frame) = e1.frame() else { continue };
-                    let virtual_ = base2 | ((i1 as u64) << 12);
-                    f(
-                        virtual_,
-                        frame.start_address().as_u64(),
-                        permissoes_de(e1.flags().bits()),
-                    );
+                    f(crate::arch::PaginaDoUsuario {
+                        virtual_: base2 | ((i1 as u64) << 12),
+                        fisico: frame.start_address().as_u64(),
+                        permissoes: permissoes_de(e1.flags().bits()),
+                        copia_na_escrita: e1.flags().contains(COPIA_NA_ESCRITA),
+                    });
                 }
             }
         }

@@ -287,6 +287,31 @@ extern "C" fn tratar_sync(quadro: &mut Quadro) {
     // demais classes o FAR contém lixo de uma falha anterior.
     let endereco = matches!(ec, 0x20 | 0x21 | 0x24 | 0x25).then(ler_far);
 
+    // Antes de decidir de quem é a culpa, a pergunta que pode dissolver a
+    // falha: era uma escrita numa página de cópia na escrita?
+    //
+    // # Por que a checagem do nível de exceção não entra aqui
+    //
+    // Porque o kernel também escreve em memória do usuário — é o que `ler`
+    // faz ao entregar os bytes lidos ao buffer do processo. Essa escrita vem
+    // de EL1 e, numa página compartilhada por um `fork`, falharia exatamente
+    // como a do processo. Por isso as duas classes de aborto de dado entram:
+    // `0x24`, vindo de EL0, e `0x25`, vindo daqui mesmo.
+    //
+    // O que **não** se afrouxa é o resto. `copia_na_escrita_em` só reconhece
+    // uma página presente e marcada, e a marca só existe onde um `fork` a
+    // pôs. Uma escrita do kernel num endereço qualquer segue sendo fatal.
+    if matches!(ec, 0x24 | 0x25)
+        && e_escrita_proibida(esr)
+        && let Some(endereco) = endereco
+        && crate::paginacao::resolver_copia_na_escrita(endereco)
+    {
+        // O `eret` reexecuta a instrução que falhou, agora sobre uma página
+        // gravável: diferente do `brk`, aqui o `ELR_EL1` aponta para a
+        // própria instrução, que é exatamente o que queremos.
+        return;
+    }
+
     // Uma falha vinda de EL0 é culpa do processo, não do kernel. Matar o
     // sistema por causa dela seria entregar a todo processo um jeito trivial
     // de derrubar a máquina — e desperdiçaria exatamente a proteção que ring 3
@@ -306,6 +331,35 @@ extern "C" fn tratar_sync(quadro: &mut Quadro) {
     }
 
     crate::traps::fatal(nome, quadro.elr, endereco, esr)
+}
+
+/// O aborto de dado descrito por `esr` foi uma **escrita** barrada pelas
+/// permissões da página?
+///
+/// São as duas perguntas que separam a falha que a cópia na escrita resolve
+/// de todas as outras, e as duas moram no campo ISS do `ESR_EL1`:
+///
+/// - `WnR`, o bit 6, diz se o acesso era escrita. Sem ele, uma **leitura**
+///   numa página marcada seria "resolvida" tirando uma cópia que ninguém
+///   pediu — e a leitura teria funcionado sozinha, porque a marca não tira a
+///   leitura.
+/// - `DFSC`, os seis bits baixos, diz *por que* o acesso falhou. A família
+///   `0b0011LL` é a falha de permissão, em qualquer um dos quatro níveis de
+///   tabela; as outras famílias são tradução ausente, erro de barramento,
+///   desalinhamento. Sem esta conferência, tentaríamos resolver como cópia na
+///   escrita um endereço que sequer tem página.
+///
+/// A comparação usa a família inteira, e não o nível 3 sozinho, porque o
+/// nível em que o hardware reporta a falha é o do descritor que a barrou —
+/// e um bloco grande a reportaria mais acima. Aceitar a família e deixar
+/// `copia_na_escrita_em` recusar o que não for folha de 4 KiB põe a decisão
+/// em quem sabe olhar a tabela.
+const fn e_escrita_proibida(esr: u64) -> bool {
+    const WNR: u64 = 1 << 6;
+    const FAMILIA_DFSC: u64 = 0b11_1100;
+    const FALHA_DE_PERMISSAO: u64 = 0b00_1100;
+
+    esr & WNR != 0 && esr & FAMILIA_DFSC == FALHA_DE_PERMISSAO
 }
 
 /// Tira o fio encerrado de circulação, sobre o quadro da exceção corrente.

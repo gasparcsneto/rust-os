@@ -69,6 +69,34 @@ struct Alocador {
     /// Sem esta dica, alocar N frames seria O(N²): cada busca recomeçaria do
     /// zero e percorreria tudo que já foi entregue.
     dica: usize,
+    /// Quantos donos **além do primeiro** cada frame tem.
+    ///
+    /// Zero é o caso comum e quer dizer "um dono", não "nenhum": um frame
+    /// alocado sempre pertence a alguém. A contagem começa a subir quando a
+    /// cópia na escrita faz dois espaços de endereços apontarem para o mesmo
+    /// frame.
+    ///
+    /// # Por que um byte por frame, e não uma estrutura só para os
+    /// compartilhados
+    ///
+    /// Um mapa esparso — hash, árvore — custaria uma alocação de heap no
+    /// meio do `fork` e uma busca em cada falha de página. Este array custa
+    /// 256 KiB de `.bss` e responde em uma indexação, sempre. É a mesma
+    /// escolha que o bitmap acima faz, pelo mesmo motivo: a camada mais baixa
+    /// da gerência de memória não pode depender das camadas de cima para
+    /// existir.
+    ///
+    /// Um byte comporta 256 donos; o kernel comporta dezesseis fios. O teto
+    /// é inalcançável e ainda assim [`compartilhar`] o confere, porque um
+    /// transbordo aqui produziria um frame liberado com donos vivos — a pior
+    /// falha possível nesta camada, e silenciosa.
+    compartilhamentos: [u8; MAX_FRAMES],
+    /// Quantos frames têm mais de um dono agora.
+    ///
+    /// Mantido incrementalmente porque a alternativa — varrer os 256 KiB a
+    /// cada pergunta — transformaria uma consulta de diagnóstico numa
+    /// varredura sob a trava do alocador.
+    compartilhados: usize,
     inicializado: bool,
 }
 
@@ -78,6 +106,8 @@ static ALOCADOR: Mutex<Alocador> = Mutex::new(Alocador {
     rastreados: 0,
     livres: 0,
     dica: 0,
+    compartilhamentos: [0; MAX_FRAMES],
+    compartilhados: 0,
     inicializado: false,
 });
 
@@ -102,6 +132,25 @@ impl Alocador {
         if self.bitmap[palavra] & bit == 0 {
             self.bitmap[palavra] |= bit;
             self.livres += 1;
+            // Um frame que volta à circulação não tem mais dono nenhum, e a
+            // contagem precisa acompanhar. Zerá-la **aqui** — no único ponto
+            // por onde um frame volta a ficar livre — é o que torna a
+            // invariante estrutural: nenhum caminho de liberação pode
+            // esquecer, porque todos passam por esta linha.
+            //
+            // Sem isto, um frame liberado com contagem residual voltaria ao
+            // alocador, seria entregue a outro dono e a primeira resolução de
+            // cópia na escrita dele acharia que há dois — não copiaria, e os
+            // dois processos passariam a escrever na mesma memória.
+            self.zerar_compartilhamento(indice);
+        }
+    }
+
+    /// Apaga a contagem de donos extras de um frame.
+    fn zerar_compartilhamento(&mut self, indice: usize) {
+        if self.compartilhamentos[indice] != 0 {
+            self.compartilhamentos[indice] = 0;
+            self.compartilhados -= 1;
         }
     }
 
@@ -116,6 +165,15 @@ impl Alocador {
             self.bitmap[palavra] &= !bit;
             self.livres -= 1;
         }
+    }
+
+    /// Este índice está livre?
+    ///
+    /// O bit e o deslocamento aparecem em quatro lugares diferentes, e a
+    /// conta é do tipo que se copia errado uma vez e ninguém percebe: um `/`
+    /// no lugar de um `%` responde sobre outro frame, sempre.
+    fn livre(&self, indice: usize) -> bool {
+        self.bitmap[indice / 64] & (1u64 << (indice % 64)) != 0
     }
 
     /// Converte um endereço físico no índice do frame que o contém.
@@ -166,6 +224,8 @@ pub fn init() -> Result<(), &'static str> {
         // política segura: esquecer de liberar desperdiça memória, esquecer de
         // reservar corrompe o sistema.
         a.bitmap = [0; PALAVRAS];
+        a.compartilhamentos = [0; MAX_FRAMES];
+        a.compartilhados = 0;
         a.inicializado = true;
     });
 
@@ -346,14 +406,137 @@ pub fn liberar(endereco: u64) {
         return;
     }
 
-    com_alocador(|a| {
-        if let Some(indice) = a.indice_de(endereco) {
-            a.liberar_indice(indice);
-            // Buscar a partir daqui aproveita a localidade: quem libera
-            // costuma voltar a alocar logo em seguida.
-            a.dica = indice / 64;
-        }
+    let extras = com_alocador(|a| {
+        let Some(indice) = a.indice_de(endereco) else {
+            return 0;
+        };
+        let extras = a.compartilhamentos[indice];
+        a.liberar_indice(indice);
+        // Buscar a partir daqui aproveita a localidade: quem libera
+        // costuma voltar a alocar logo em seguida.
+        a.dica = indice / 64;
+        extras
     });
+
+    // O relato sai **fora** da trava do alocador de propósito: escrever no
+    // log toma a trava da serial, e aninhar as duas na ordem errada é como
+    // nascem os travamentos que só aparecem sob carga.
+    //
+    // A contagem já foi zerada acima, então o sistema segue coerente — o que
+    // este aviso denuncia é que alguém devolveu ao alocador um frame que
+    // ainda tinha dono. Para páginas compartilhadas o caminho certo é
+    // [`soltar`]; chegar aqui com `extras > 0` é sempre erro de contabilidade
+    // de quem chamou.
+    if extras > 0 {
+        crate::log_error!(
+            "frames",
+            "frame {:#x} liberado com {} dono(s) alem do primeiro",
+            endereco,
+            extras as u64 + 1
+        );
+    }
+}
+
+/// Anota mais um dono para um frame que já está alocado.
+///
+/// Devolve `false` quando o frame não está sob gerência ou quando a contagem
+/// estouraria — e recusar é o desfecho certo nos dois casos, porque um dono
+/// que o alocador não registra é um dono que ele vai atropelar.
+///
+/// É a metade de ida de [`soltar`]: quem compartilha precisa soltar, e o
+/// frame só volta à circulação quando o último o soltar.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub fn compartilhar(endereco: u64) -> bool {
+    if endereco < TAMANHO_FRAME {
+        return false;
+    }
+
+    com_alocador(|a| {
+        let Some(indice) = a.indice_de(endereco) else {
+            return false;
+        };
+
+        // Compartilhar um frame **livre** é o pedido mais perigoso que esta
+        // função pode receber: o alocador o entregaria a outro dono logo em
+        // seguida, e a contagem faria os dois se acharem sócios de algo que
+        // um deles nem pediu. É engano de quem chama, sempre.
+        if a.livre(indice) {
+            return false;
+        }
+
+        let Some(agora) = a.compartilhamentos[indice].checked_add(1) else {
+            return false;
+        };
+        if a.compartilhamentos[indice] == 0 {
+            a.compartilhados += 1;
+        }
+        a.compartilhamentos[indice] = agora;
+        true
+    })
+}
+
+/// Retira um dono do frame, devolvendo-o ao alocador se era o último.
+///
+/// Devolve `true` quando o frame voltou de fato à circulação.
+///
+/// # Por que não é só `liberar`
+///
+/// Porque com cópia na escrita um frame pertence a vários espaços de
+/// endereços ao mesmo tempo, e quem desmonta um deles não sabe quantos
+/// outros ainda existem. `liberar` responde "o dono acabou"; esta responde
+/// "**um** dono acabou", que é a única pergunta que um espaço de endereços
+/// consegue responder sozinho.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub fn soltar(endereco: u64) -> bool {
+    if endereco < TAMANHO_FRAME {
+        return false;
+    }
+
+    let ultimo = com_alocador(|a| match a.indice_de(endereco) {
+        // Fora da janela rastreada não há contagem nem circulação, e
+        // `liberar` também trata este caso como no-op. Responder "voltou"
+        // seria inventar um retorno para uma operação que não aconteceu.
+        None => false,
+        // Já estava livre: soltar de novo é engano de contabilidade de quem
+        // chamou, e nada volta porque nada estava fora.
+        Some(indice) if a.livre(indice) => false,
+        Some(indice) if a.compartilhamentos[indice] > 0 => {
+            a.compartilhamentos[indice] -= 1;
+            if a.compartilhamentos[indice] == 0 {
+                a.compartilhados -= 1;
+            }
+            false
+        }
+        // Sem donos extras, soltar é liberar.
+        Some(_) => true,
+    });
+
+    if ultimo {
+        liberar(endereco);
+    }
+    ultimo
+}
+
+/// Quantos donos este frame tem.
+///
+/// Um frame alocado e não compartilhado responde `1`. Zero quando ele não
+/// está sob gerência **ou está livre** — as duas respostas honestas para
+/// "quem é dono disto?" quando ninguém é. Responder `1` para um frame livre
+/// seria pior que não responder: quem decide se pode escrever numa página
+/// pelo número de donos concluiria que tem exclusividade sobre memória que o
+/// alocador está prestes a entregar a outro.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub fn donos(endereco: u64) -> u32 {
+    com_alocador(|a| match a.indice_de(endereco) {
+        Some(indice) if !a.livre(indice) => a.compartilhamentos[indice] as u32 + 1,
+        _ => 0,
+    })
+}
+
+/// Quantos frames têm mais de um dono agora.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub fn compartilhados() -> usize {
+    com_alocador(|a| a.compartilhados)
 }
 
 /// `(frames livres, frames rastreados)`.
@@ -377,7 +560,7 @@ pub fn base() -> u64 {
 #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub fn esta_livre(endereco: u64) -> bool {
     com_alocador(|a| match a.indice_de(endereco) {
-        Some(indice) => a.bitmap[indice / 64] & (1u64 << (indice % 64)) != 0,
+        Some(indice) => a.livre(indice),
         None => false,
     })
 }

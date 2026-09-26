@@ -62,14 +62,15 @@ pub use aarch64 as atual;
 #[allow(unused_imports)]
 pub use atual::{
     BASE_DAS_PILHAS, BASE_DE_MMIO, BASE_DO_HEAP, COBERTURA_DA_ENTRADA_DE_TOPO, Contexto, Uart,
-    acesso_fisico, ceder_cpu, criar_espaco, definir_pilha_de_kernel, desmapear,
-    destravar_paginacao, destruir_espaco, disparar_breakpoint, disparar_falha_fatal,
+    acesso_fisico, ceder_cpu, copia_na_escrita_em, criar_espaco, definir_pilha_de_kernel,
+    desmapear, destravar_paginacao, destruir_espaco, disparar_breakpoint, disparar_falha_fatal,
     dormir_se_ocioso, encerrar_emulador, entrar_em_usuario, espaco_atual, espaco_do_kernel,
     esperar_interrupcao, falha_de_estouro_de_pilha, halt_forever, identificar_cpu, init_excecoes,
     init_interrupcao_serial, init_interrupcoes, init_paginacao, init_pci, init_seriais,
-    init_timer_definitivo, init_usuario, interrupcoes_habilitadas, mapear_frame, nome,
-    percorrer_paginas_do_usuario, preparar_contexto, preparar_contexto_de_fork, redirecionar_para,
-    reservar_faixas, sem_interrupcoes, traduzir, trocar_espaco,
+    init_timer_definitivo, init_usuario, interrupcoes_habilitadas, mapear_frame,
+    marcar_copia_na_escrita, nome, percorrer_paginas_do_usuario, preparar_contexto,
+    preparar_contexto_de_fork, redirecionar_para, reservar_faixas, sem_interrupcoes, traduzir,
+    trocar_espaco,
 };
 
 /// Só para a suíte: o par de conversões de permissão de cada backend.
@@ -175,6 +176,50 @@ impl Permissoes {
     // `usuario::programa::carregar`. Uma constante aqui seria um segundo lugar
     // com a mesma resposta, e o dia em que os dois discordassem o carregador
     // silenciosamente ignoraria o que o programa pediu.
+}
+
+/// Uma página de usuário, como o percurso das tabelas a encontra.
+///
+/// # Por que uma struct, e não uma tupla a mais
+///
+/// Porque ela nasceu como `(virtual, físico, permissões)` e ganhou um quarto
+/// campo quando a cópia na escrita chegou. Um `bool` solto na quarta posição
+/// de uma tupla é o tipo de coisa que se lê errado no dia em que a ordem
+/// mudar, e o percurso é justamente o lugar onde um campo esquecido não
+/// aparece como erro: aparece como uma página do filho que o pai deixou de
+/// proteger.
+#[derive(Clone, Copy, Debug)]
+pub struct PaginaDoUsuario {
+    pub virtual_: u64,
+    pub fisico: u64,
+    /// As permissões **como estão no descritor** agora.
+    ///
+    /// Numa página de cópia na escrita, `escrita` é `false` — foi
+    /// exatamente isso que a marca fez. A permissão que o processo acha que
+    /// tem está em `copia_na_escrita`, e quem duplica o espaço precisa
+    /// somar as duas coisas.
+    pub permissoes: Permissoes,
+    /// A página é compartilhada com outro espaço e volta a ser gravável na
+    /// primeira escrita.
+    pub copia_na_escrita: bool,
+}
+
+impl PaginaDoUsuario {
+    /// O processo enxerga esta página como gravável?
+    ///
+    /// É a pergunta que o `fork` faz, e ela tem duas fontes: o bit de escrita
+    /// do descritor **ou** a marca de cópia na escrita, que só existe em
+    /// páginas que eram graváveis antes de serem marcadas.
+    ///
+    /// Perguntar só pelo bit foi a primeira versão disto e estava errada num
+    /// caso que só aparece na segunda geração: o neto. O filho de um `fork`
+    /// tem as páginas marcadas e não graváveis; bifurcá-lo de novo copiaria
+    /// as permissões do descritor, e o neto nasceria com a memória de dados
+    /// somente leitura — morrendo na primeira escrita, longe do `fork` que
+    /// causou.
+    pub fn gravavel_para_o_processo(&self) -> bool {
+        self.permissoes.escrita || self.copia_na_escrita
+    }
 }
 
 /// Identificação do processador, num buffer de tamanho fixo.

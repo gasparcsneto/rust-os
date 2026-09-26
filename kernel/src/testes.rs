@@ -5578,6 +5578,551 @@ fn memoria_clonar_copia_o_conteudo() -> Resultado {
     })
 }
 
+/// Clonar não copia página nenhuma, e o pai fica tão protegido quanto o filho.
+///
+/// # O que este caso vê que o anterior não vê
+///
+/// [`memoria_clonar_copia_o_conteudo`] prova que os dois espaços ficam
+/// independentes. Ele passa igualmente bem com cópia integral e com cópia na
+/// escrita — e passava, antes de a segunda existir. O que ele não pergunta é
+/// **quanto custou**, e é aí que mora a diferença inteira.
+///
+/// Aqui a conta é explícita: um clone de `PAGINAS` páginas pode gastar
+/// tabelas de tradução, mas não pode gastar uma página de dados. Se gastar,
+/// o `fork` voltou a copiar tudo — e nada mais no sistema teria notado.
+///
+/// # A direção que se esquece
+///
+/// O caso escreve **no pai** depois de clonar, e confere que o filho não viu.
+/// É a metade que falta em quase toda primeira implementação de cópia na
+/// escrita: tirar a escrita do filho é óbvio, porque o filho é o novo; tirar
+/// a escrita do pai não é, porque o pai é quem está rodando e tudo continua
+/// funcionando até ele encostar na própria memória.
+fn memoria_clonar_compartilha_sem_copiar() -> Resultado {
+    use crate::arch::{self, Permissoes};
+
+    const ALVO: u64 = crate::usuario::BASE;
+    const PAGINAS: u64 = 8;
+    const MARCA_ORIGINAL: u64 = 0x5A5A_0000_0000_0000;
+    const MARCA_DO_PAI: u64 = 0xBEBE_0000_0000_0000;
+
+    let privada = arch::ENTRADA_PRIVADA as usize;
+    let kernel = arch::espaco_do_kernel();
+
+    arch::sem_interrupcoes(|| {
+        // O balanço do alocador cobre as duas metades da contagem de donos: o
+        // que o `fork` compartilhou, o que as escritas separaram em cópias
+        // novas, e o que as duas mortes precisam devolver. Um dono anotado e
+        // nunca solto não produz sintoma em lugar nenhum — produz um frame
+        // que o alocador nunca mais entrega, e só esta subtração o mostra.
+        let (livres_no_inicio, _) = crate::frames::estatisticas();
+        let original = crate::paginacao::Espaco::novo(privada)?;
+
+        // SAFETY: as raízes vêm de `Espaco::novo` e carregam as entradas de
+        // topo do kernel; voltamos ao espaço do kernel antes de largar
+        // qualquer uma delas.
+        unsafe {
+            arch::trocar_espaco(original.raiz());
+            for i in 0..PAGINAS {
+                let endereco = ALVO + i * arch::TAMANHO_PAGINA;
+                crate::paginacao::mapear_novo(endereco, Permissoes::DADOS_USUARIO)?;
+                core::ptr::write_volatile(endereco as *mut u64, MARCA_ORIGINAL | i);
+            }
+
+            // Medido **depois** de montar o original: o que interessa é o
+            // custo do clone, e não o do espaço que ele clona.
+            let (livres_antes, _) = crate::frames::estatisticas();
+            let clone = crate::paginacao::Espaco::clonar_o_ativo(privada)?;
+            let (livres_depois, _) = crate::frames::estatisticas();
+
+            // O pai escreve **antes** de o filho ser lido. Numa cópia na
+            // escrita correta, esta escrita tira uma cópia particular para o
+            // pai e deixa o frame original com o filho.
+            for i in 0..PAGINAS {
+                core::ptr::write_volatile(
+                    (ALVO + i * arch::TAMANHO_PAGINA) as *mut u64,
+                    MARCA_DO_PAI | i,
+                );
+            }
+
+            arch::trocar_espaco(clone.raiz());
+            let mut intrusas = 0;
+            for i in 0..PAGINAS {
+                let lido =
+                    core::ptr::read_volatile((ALVO + i * arch::TAMANHO_PAGINA) as *const u64);
+                if lido != (MARCA_ORIGINAL | i) {
+                    intrusas += 1;
+                }
+            }
+
+            arch::trocar_espaco(kernel);
+            drop(clone);
+            drop(original);
+
+            if intrusas > 0 {
+                crate::log_error!(
+                    "teste",
+                    "{} das {} paginas do filho mudaram quando o pai escreveu",
+                    intrusas,
+                    PAGINAS
+                );
+                return Err("escrever no pai alterou o filho: o pai ficou gravavel");
+            }
+
+            // As tabelas de tradução do clone são frames de verdade e saem da
+            // mesma conta, então o teto não é zero. Mas oito páginas de dados
+            // cabem numa tabela de folha só, e o caminho até ela tem um nível
+            // por tabela: bem abaixo de `PAGINAS`.
+            let gastos = livres_antes.saturating_sub(livres_depois);
+            if gastos as u64 >= PAGINAS {
+                crate::log_error!(
+                    "teste",
+                    "clonar {} paginas custou {} frames",
+                    PAGINAS,
+                    gastos
+                );
+                return Err("o clone copiou as paginas em vez de compartilha-las");
+            }
+
+            let (livres_no_fim, _) = crate::frames::estatisticas();
+            if livres_no_fim != livres_no_inicio {
+                crate::log_error!(
+                    "teste",
+                    "{} frames livres antes do fork, {} depois das duas mortes",
+                    livres_no_inicio,
+                    livres_no_fim
+                );
+                return Err("o fork deixou frames para tras");
+            }
+            Ok(())
+        }
+    })
+}
+
+/// Um frame compartilhado só volta ao alocador quando o último dono o solta.
+///
+/// # Por que a contagem merece um caso que não passa por espaço nenhum
+///
+/// Porque o erro que ela existe para impedir não tem sintoma perto de onde
+/// acontece. Um frame devolvido cedo demais continua legível e gravável por
+/// quem ainda o usa — até o alocador entregá-lo a outro dono, em outro
+/// momento, para outra coisa. O que aparece é corrupção num lugar que nunca
+/// tocou no `fork`.
+///
+/// Exercitar [`crate::frames::compartilhar`] e [`crate::frames::soltar`]
+/// direto, sem tabelas de página no meio, é o que separa "a contagem está
+/// certa" de "o `fork` funciona" — duas perguntas que um caso de ponta a
+/// ponta responde juntas e não sabe distinguir quando falha.
+fn memoria_frame_compartilhado_sobrevive_ao_primeiro_dono() -> Resultado {
+    let frame = crate::frames::alocar().ok_or("sem frame para o caso")?;
+
+    if crate::frames::donos(frame) != 1 {
+        crate::frames::liberar(frame);
+        return Err("um frame recem-alocado devia ter um dono");
+    }
+
+    if !crate::frames::compartilhar(frame) || !crate::frames::compartilhar(frame) {
+        crate::frames::liberar(frame);
+        return Err("compartilhar um frame alocado devia ser aceito");
+    }
+    if crate::frames::donos(frame) != 3 {
+        crate::frames::liberar(frame);
+        return Err("a contagem de donos nao acompanhou os compartilhamentos");
+    }
+
+    // Os dois primeiros soltam sem devolver: é a afirmação central. Cada um
+    // numa variável própria, e não num `||`: o curto-circuito faria a segunda
+    // chamada não acontecer no dia em que a primeira passasse a devolver
+    // `true` — e o caso denunciaria o erro deixando o frame com um dono a
+    // mais, que é o oposto do que ele existe para provar.
+    let primeiro = crate::frames::soltar(frame);
+    let segundo = crate::frames::soltar(frame);
+    if primeiro || segundo {
+        return Err("o frame voltou ao alocador antes do ultimo dono");
+    }
+    if crate::frames::esta_livre(frame) {
+        return Err("o frame voltou ao alocador antes do ultimo dono");
+    }
+    if crate::frames::donos(frame) != 1 {
+        return Err("sobrou dono demais depois de dois soltarem");
+    }
+
+    if !crate::frames::soltar(frame) {
+        return Err("o ultimo a soltar devia devolver o frame");
+    }
+    if !crate::frames::esta_livre(frame) {
+        return Err("o frame nao voltou ao alocador depois do ultimo dono");
+    }
+
+    // A segunda metade é o que acontece quando alguém devolve ao alocador um
+    // frame que **ainda tinha dono**. É engano — o caminho certo é `soltar` —
+    // e `liberar` o denuncia no log. O que não pode acontecer é a contagem
+    // sobreviver: o próximo dono do frame nasceria com um sócio que ele nunca
+    // teve, e a primeira escrita dele iria para uma cópia que ninguém lê.
+    let enganado = crate::frames::alocar().ok_or("sem frame para a segunda metade")?;
+    if !crate::frames::compartilhar(enganado) {
+        crate::frames::liberar(enganado);
+        return Err("compartilhar um frame alocado devia ser aceito");
+    }
+    crate::frames::liberar(enganado);
+
+    // O alocador não promete devolver o mesmo endereço na chamada seguinte:
+    // a busca recomeça na palavra do bitmap que acabou de mudar e entrega o
+    // primeiro bit livre dela, que pode ser outro. São 64 frames por palavra,
+    // então recolher até 64 basta para reencontrar aquele — e todos voltam
+    // logo abaixo.
+    let mut recolhidos = [0u64; 64];
+    let mut quantos = 0;
+    let mut reciclado = None;
+    while quantos < recolhidos.len() {
+        let Some(outro) = crate::frames::alocar() else {
+            break;
+        };
+        recolhidos[quantos] = outro;
+        quantos += 1;
+        if outro == enganado {
+            reciclado = Some(crate::frames::donos(outro));
+            break;
+        }
+    }
+    for outro in &recolhidos[..quantos] {
+        crate::frames::liberar(*outro);
+    }
+
+    match reciclado {
+        None => return Err("o frame devolvido nao voltou a circulacao"),
+        Some(1) => {}
+        Some(donos) => {
+            crate::log_error!("teste", "o frame reciclado nasceu com {} donos", donos);
+            return Err("a contagem de donos sobreviveu a volta ao alocador");
+        }
+    }
+
+    // Um frame livre não tem dono. Responder `1` aqui faria quem decide pela
+    // contagem concluir que tem exclusividade sobre memória que o alocador
+    // está prestes a entregar a outro.
+    if crate::frames::donos(frame) != 0 {
+        return Err("um frame livre nao devia ter dono");
+    }
+
+    // Compartilhar um frame **livre** é o pedido mais perigoso que a função
+    // recebe: aceitar faria o próximo dono nascer com um sócio que ele nunca
+    // teve, e a primeira escrita dele iria para uma cópia que ninguém lê.
+    if crate::frames::compartilhar(frame) {
+        return Err("compartilhar um frame livre foi aceito");
+    }
+    Ok(())
+}
+
+/// O filho morre sem levar as páginas do pai.
+///
+/// # A falha que não faz barulho
+///
+/// Quando o filho é desmontado, o percurso que devolve as tabelas dele chega
+/// nas folhas — e as folhas, desde a cópia na escrita, são frames que o
+/// **pai** também usa. Devolvê-las ao alocador não quebra nada na hora: o pai
+/// continua lendo e escrevendo normalmente, porque o frame ainda está lá.
+/// Quebra quando o alocador entrega aquele frame a outra coisa, em outro
+/// momento, e as duas passam a escrever uma por cima da outra.
+///
+/// Por isso o caso não se contenta com "o conteúdo do pai sobreviveu": ele
+/// pergunta ao alocador se os frames continuam ocupados. É a única pergunta
+/// que distingue "está certo" de "ainda não deu tempo de dar errado".
+fn memoria_filho_morto_nao_leva_as_paginas_do_pai() -> Resultado {
+    use crate::arch::{self, Permissoes};
+
+    const ALVO: u64 = crate::usuario::BASE;
+    const PAGINAS: u64 = 6;
+    const MARCA: u64 = 0xF110_0000_0000_0000;
+
+    let privada = arch::ENTRADA_PRIVADA as usize;
+    let kernel = arch::espaco_do_kernel();
+
+    arch::sem_interrupcoes(|| {
+        let original = crate::paginacao::Espaco::novo(privada)?;
+        let mut frames = [0u64; PAGINAS as usize];
+
+        // SAFETY: as raízes vêm de `Espaco::novo` e de `clonar_o_ativo`, e
+        // carregam as entradas de topo do kernel; voltamos ao espaço do
+        // kernel antes de largar qualquer uma delas.
+        unsafe {
+            arch::trocar_espaco(original.raiz());
+            for i in 0..PAGINAS {
+                let endereco = ALVO + i * arch::TAMANHO_PAGINA;
+                frames[i as usize] =
+                    crate::paginacao::mapear_novo(endereco, Permissoes::DADOS_USUARIO)?;
+                core::ptr::write_volatile(endereco as *mut u64, MARCA | i);
+            }
+
+            let clone = crate::paginacao::Espaco::clonar_o_ativo(privada)?;
+
+            arch::trocar_espaco(kernel);
+            drop(clone);
+            arch::trocar_espaco(original.raiz());
+
+            let mut soltos = 0;
+            for frame in frames {
+                if crate::frames::esta_livre(frame) {
+                    soltos += 1;
+                }
+            }
+
+            let mut perdidas = 0;
+            for i in 0..PAGINAS {
+                let lido =
+                    core::ptr::read_volatile((ALVO + i * arch::TAMANHO_PAGINA) as *const u64);
+                if lido != (MARCA | i) {
+                    perdidas += 1;
+                }
+            }
+
+            arch::trocar_espaco(kernel);
+            drop(original);
+
+            if soltos > 0 {
+                crate::log_error!(
+                    "teste",
+                    "{} dos {} frames do pai voltaram ao alocador com a morte do filho",
+                    soltos,
+                    PAGINAS
+                );
+                return Err("desmontar o filho devolveu frames que o pai ainda usa");
+            }
+            if perdidas > 0 {
+                return Err("o conteudo do pai nao sobreviveu a morte do filho");
+            }
+            Ok(())
+        }
+    })
+}
+
+/// Só uma página gravável pode virar cópia na escrita.
+///
+/// # Por que a recusa é a parte importante
+///
+/// A resolução da marca **devolve a escrita** à página. Uma página de código,
+/// somente leitura e executável, marcada por engano, viraria gravável na
+/// primeira tentativa de escrever nela — e o `W^X` do processo teria caído
+/// por um caminho que ninguém percorre de propósito.
+///
+/// O `fork` de hoje não comete esse engano: ele só marca o que o processo já
+/// enxergava como gravável. O caso existe para o próximo chamador, que ainda
+/// não foi escrito e não terá como saber sozinho que a marca carrega essa
+/// consequência.
+fn memoria_marca_recusa_pagina_somente_leitura() -> Resultado {
+    use crate::arch::{self, Permissoes};
+
+    const GRAVAVEL: u64 = crate::usuario::BASE;
+    const SO_LEITURA: u64 = crate::usuario::BASE + crate::arch::TAMANHO_PAGINA;
+
+    const APENAS_LEITURA: Permissoes = Permissoes {
+        escrita: false,
+        executavel: false,
+        dispositivo: false,
+        usuario: true,
+    };
+
+    let privada = arch::ENTRADA_PRIVADA as usize;
+    let kernel = arch::espaco_do_kernel();
+
+    arch::sem_interrupcoes(|| {
+        let espaco = crate::paginacao::Espaco::novo(privada)?;
+
+        // SAFETY: a raiz veio de `Espaco::novo` e carrega as entradas de topo
+        // do kernel; voltamos ao espaço do kernel antes de largá-la.
+        let desfecho = unsafe {
+            arch::trocar_espaco(espaco.raiz());
+
+            crate::paginacao::mapear_novo(GRAVAVEL, Permissoes::DADOS_USUARIO)?;
+
+            let frame = crate::paginacao::mapear_novo(SO_LEITURA, Permissoes::DADOS_USUARIO)?;
+            arch::desmapear(SO_LEITURA)?;
+            arch::mapear_frame(SO_LEITURA, frame, APENAS_LEITURA)?;
+
+            let marcou_gravavel = arch::marcar_copia_na_escrita(GRAVAVEL);
+            let virou_marcada = arch::copia_na_escrita_em(GRAVAVEL).is_some();
+            // Marcar de novo é o caso do neto, e precisa ser aceito sem
+            // mudar nada: a página já saiu de gravável na primeira vez.
+            let remarcou = arch::marcar_copia_na_escrita(GRAVAVEL);
+
+            let marcou_so_leitura = arch::marcar_copia_na_escrita(SO_LEITURA);
+            let so_leitura_ficou_marcada = arch::copia_na_escrita_em(SO_LEITURA).is_some();
+
+            arch::trocar_espaco(kernel);
+            (
+                marcou_gravavel,
+                virou_marcada,
+                remarcou,
+                marcou_so_leitura,
+                so_leitura_ficou_marcada,
+            )
+        };
+        drop(espaco);
+
+        let (marcou, virou, remarcou, recusou, vazou) = desfecho;
+        if marcou.is_err() {
+            return Err("marcar uma pagina gravavel foi recusado");
+        }
+        if !virou {
+            return Err("a pagina gravavel nao ficou marcada");
+        }
+        if remarcou.is_err() {
+            return Err("remarcar uma pagina ja marcada foi recusado");
+        }
+        if recusou.is_ok() || vazou {
+            return Err("uma pagina somente leitura virou copia na escrita");
+        }
+        Ok(())
+    })
+}
+
+/// Sem ninguém com quem dividir, resolver a marca não tira cópia nenhuma.
+///
+/// # O caso que paga o `fork` barato
+///
+/// Bifurcar e o filho sair logo em seguida é o que quase todo programa faz.
+/// Nesse caminho o pai fica com o espaço inteiro marcado e nenhum sócio, e a
+/// primeira escrita em cada página só precisa desfazer a marca. Tirar uma
+/// cópia ali seria alocar um frame, copiar 4 KiB e devolver o original —
+/// trabalho cujo resultado é bit a bit o estado inicial.
+///
+/// O caso mede pelos contadores porque é a única forma de ver a diferença: o
+/// conteúdo e as permissões ficam idênticos dos dois jeitos, e um `fork` que
+/// copiasse sempre passaria em todos os outros casos desta suíte.
+fn memoria_copia_na_escrita_nao_copia_sem_socio() -> Resultado {
+    use crate::arch::{self, Permissoes};
+
+    const ALVO: u64 = crate::usuario::BASE;
+    const PAGINAS: u64 = 4;
+
+    let privada = arch::ENTRADA_PRIVADA as usize;
+    let kernel = arch::espaco_do_kernel();
+
+    arch::sem_interrupcoes(|| {
+        let original = crate::paginacao::Espaco::novo(privada)?;
+
+        // SAFETY: a raiz veio de `Espaco::novo` e carrega as entradas de topo
+        // do kernel; voltamos ao espaço do kernel antes de largá-la.
+        unsafe {
+            arch::trocar_espaco(original.raiz());
+            for i in 0..PAGINAS {
+                crate::paginacao::mapear_novo(
+                    ALVO + i * arch::TAMANHO_PAGINA,
+                    Permissoes::DADOS_USUARIO,
+                )?;
+            }
+
+            let clone = crate::paginacao::Espaco::clonar_o_ativo(privada)?;
+
+            // O filho morre sem nunca ter rodado. Agora o pai é o único dono
+            // de tudo, e as marcas continuam lá.
+            arch::trocar_espaco(kernel);
+            drop(clone);
+            arch::trocar_espaco(original.raiz());
+
+            let (_, resolvidas_antes, copiadas_antes) =
+                crate::paginacao::estatisticas_de_copia_na_escrita();
+
+            for i in 0..PAGINAS {
+                core::ptr::write_volatile((ALVO + i * arch::TAMANHO_PAGINA) as *mut u64, i);
+            }
+
+            let (_, resolvidas, copiadas) = crate::paginacao::estatisticas_de_copia_na_escrita();
+            arch::trocar_espaco(kernel);
+            drop(original);
+
+            // Sem esta metade o caso passaria de graça: zero resoluções e
+            // zero cópias satisfariam a comparação seguinte, e é exatamente
+            // o que se veria se as páginas nunca tivessem sido marcadas.
+            if resolvidas - resolvidas_antes != PAGINAS {
+                crate::log_error!(
+                    "teste",
+                    "{} escritas produziram {} resolucoes",
+                    PAGINAS,
+                    resolvidas - resolvidas_antes
+                );
+                return Err("as paginas do pai nao ficaram marcadas depois do fork");
+            }
+            if copiadas != copiadas_antes {
+                crate::log_error!(
+                    "teste",
+                    "{} copias para um dono so",
+                    copiadas - copiadas_antes
+                );
+                return Err("resolver com um dono so tirou copia a toa");
+            }
+            Ok(())
+        }
+    })
+}
+
+/// O neto de um `fork` nasce com a memória de dados gravável.
+///
+/// # O caso que só aparece na segunda geração
+///
+/// Depois do primeiro `fork`, as páginas do filho estão marcadas e **sem** o
+/// bit de escrita. Bifurcá-lo de novo é o momento em que um clone que leia só
+/// o descritor erra: ele copia "somente leitura" para o neto, que nasce com
+/// os dados protegidos e morre na primeira escrita — longe do `fork` que
+/// causou, e com uma falha de página que parece um erro do programa.
+///
+/// A primeira geração não vê isso. O pai original tem o bit ligado, e ler o
+/// descritor dá a resposta certa por acidente.
+fn memoria_fork_do_fork_mantem_a_escrita() -> Resultado {
+    use crate::arch::{self, Permissoes};
+
+    const ALVO: u64 = crate::usuario::BASE;
+    const MARCA_DO_AVO: u64 = 0xA0A0_A0A0_A0A0_A0A0;
+    const MARCA_DO_NETO: u64 = 0x0E70_0E70_0E70_0E70;
+
+    let privada = arch::ENTRADA_PRIVADA as usize;
+    let kernel = arch::espaco_do_kernel();
+
+    arch::sem_interrupcoes(|| {
+        let avo = crate::paginacao::Espaco::novo(privada)?;
+
+        // SAFETY: as três raízes vêm de `Espaco::novo` ou de `clonar_o_ativo`
+        // e carregam as entradas de topo do kernel; voltamos ao espaço do
+        // kernel antes de largar qualquer uma delas.
+        unsafe {
+            arch::trocar_espaco(avo.raiz());
+            crate::paginacao::mapear_novo(ALVO, Permissoes::DADOS_USUARIO)?;
+            core::ptr::write_volatile(ALVO as *mut u64, MARCA_DO_AVO);
+
+            let filho = crate::paginacao::Espaco::clonar_o_ativo(privada)?;
+
+            // O neto é clonado **de dentro do filho**, que é onde as páginas
+            // já estão marcadas.
+            arch::trocar_espaco(filho.raiz());
+            let neto = crate::paginacao::Espaco::clonar_o_ativo(privada)?;
+
+            arch::trocar_espaco(neto.raiz());
+            let herdado = core::ptr::read_volatile(ALVO as *const u64);
+            core::ptr::write_volatile(ALVO as *mut u64, MARCA_DO_NETO);
+            let escrito = core::ptr::read_volatile(ALVO as *const u64);
+
+            arch::trocar_espaco(avo.raiz());
+            let no_avo = core::ptr::read_volatile(ALVO as *const u64);
+
+            arch::trocar_espaco(kernel);
+            drop(neto);
+            drop(filho);
+            drop(avo);
+
+            if herdado != MARCA_DO_AVO {
+                return Err("o neto nao herdou o conteudo do avo");
+            }
+            if escrito != MARCA_DO_NETO {
+                return Err("o neto nao conseguiu escrever na propria memoria");
+            }
+            if no_avo != MARCA_DO_AVO {
+                return Err("a escrita do neto alcancou o avo");
+            }
+            Ok(())
+        }
+    })
+}
+
 /// Destruir um espaço devolve **tudo**: tabelas, páginas e a própria raiz.
 ///
 /// # Por que isto merece um caso próprio
@@ -5676,14 +6221,23 @@ fn usuario_nenhuma_pagina_gravavel_e_executavel() -> Resultado {
                 crate::arch::percorrer_paginas_do_usuario(
                     crate::arch::espaco_atual(),
                     crate::usuario::programa::ENTRADA_PRIVADA,
-                    &mut |_virtual, _fisico, permissoes| {
-                        if permissoes.executavel {
+                    &mut |pagina| {
+                        // A pergunta é sobre o que o **processo** pode fazer,
+                        // e não sobre o bit de escrita do descritor. Depois
+                        // de um `fork` os dois deixam de ser a mesma coisa:
+                        // uma página de cópia na escrita tem a escrita
+                        // desligada na tabela e volta a ser gravável na
+                        // primeira tentativa. Contar pelo bit daria um `W^X`
+                        // que parece intacto justamente no caso em que ele
+                        // poderia ter sido perdido.
+                        let gravavel = pagina.gravavel_para_o_processo();
+                        if pagina.permissoes.executavel {
                             EXECUTAVEIS.fetch_add(1, SeqCst);
                         }
-                        if permissoes.escrita {
+                        if gravavel {
                             GRAVAVEIS.fetch_add(1, SeqCst);
                         }
-                        if permissoes.escrita && permissoes.executavel {
+                        if gravavel && pagina.permissoes.executavel {
                             AMBOS.fetch_add(1, SeqCst);
                         }
                     },
@@ -6337,6 +6891,30 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "memoria: clonar copia o conteudo",
         f: memoria_clonar_copia_o_conteudo,
+    },
+    Caso {
+        nome: "memoria: clonar compartilha sem copiar",
+        f: memoria_clonar_compartilha_sem_copiar,
+    },
+    Caso {
+        nome: "memoria: frame compartilhado sobrevive ao primeiro dono",
+        f: memoria_frame_compartilhado_sobrevive_ao_primeiro_dono,
+    },
+    Caso {
+        nome: "memoria: filho morto nao leva as paginas do pai",
+        f: memoria_filho_morto_nao_leva_as_paginas_do_pai,
+    },
+    Caso {
+        nome: "memoria: a marca recusa pagina somente leitura",
+        f: memoria_marca_recusa_pagina_somente_leitura,
+    },
+    Caso {
+        nome: "memoria: copia na escrita nao copia sem socio",
+        f: memoria_copia_na_escrita_nao_copia_sem_socio,
+    },
+    Caso {
+        nome: "memoria: fork do fork mantem a escrita",
+        f: memoria_fork_do_fork_mantem_a_escrita,
     },
     Caso {
         nome: "memoria: espaco destruido devolve tudo",

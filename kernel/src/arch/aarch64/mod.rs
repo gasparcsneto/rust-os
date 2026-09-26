@@ -268,8 +268,9 @@ pub fn init_paginacao() {
 pub use mmu::permissoes_ida_e_volta;
 
 pub use mmu::{
-    acesso_fisico, criar_espaco, desmapear, destravar_paginacao, destruir_espaco, espaco_atual,
-    espaco_do_kernel, mapear_frame, percorrer_paginas_do_usuario, traduzir, trocar_espaco,
+    acesso_fisico, copia_na_escrita_em, criar_espaco, desmapear, destravar_paginacao,
+    destruir_espaco, espaco_atual, espaco_do_kernel, mapear_frame, marcar_copia_na_escrita,
+    percorrer_paginas_do_usuario, traduzir, trocar_espaco,
 };
 
 /// O nome da falha que um estouro de pilha produz nesta arquitetura.
