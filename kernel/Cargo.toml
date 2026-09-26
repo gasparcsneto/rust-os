@@ -21,6 +21,16 @@ license = "MIT OR Apache-2.0"
 modo-teste = []
 
 [dependencies]
+# O contrato com o iniciador UEFI: o que ele entrega ao kernel e onde cada
+# coisa mora no espaço virtual. Declarado num pacote, e não nos dois lados,
+# porque duas declarações iguais são duas que podem divergir — e o preço de
+# divergirem aqui é uma máquina que reinicia no primeiro salto.
+#
+# Vale para as duas arquiteturas desde que o iniciador passou a subir no ARM
+# também. Lá ele convive com o protocolo de imagem crua do arm64: o kernel
+# distingue os dois pela magia que cada um põe em `x0`.
+protocolo = { path = "../protocolo" }
+
 pci_types = "0.10.1"
 
 # Blocos de registradores mapeados em memória, com layout conferido em tempo
@@ -56,16 +66,8 @@ spin = "0.12.3"
 # No x86 nos apoiamos em crates maduros porque a plataforma tem décadas de
 # peculiaridades acumuladas (GDT, IDT, portas de I/O legadas) que não vale a
 # pena reimplementar.
-[target.'cfg(target_arch = "x86_64")'.dependencies]
-# O contrato com o iniciador UEFI: o que ele entrega ao kernel e onde cada
-# coisa mora no espaço virtual. Declarado num pacote, e não nos dois lados,
-# porque duas declarações iguais são duas que podem divergir — e o preço de
-# divergirem aqui é uma máquina que reinicia no primeiro salto.
-#
-# Só do x86: no ARM o boot é o protocolo de imagem crua do arm64, que não
-# precisa de bootloader nenhum e não entrega estrutura nenhuma.
-protocolo = { path = "../protocolo" }
 
+[target.'cfg(target_arch = "x86_64")'.dependencies]
 # Abstrações seguras sobre instruções e estruturas do x86_64.
 x86_64 = "0.15.5"
 

@@ -66,7 +66,7 @@ pub type Handle = *mut c_void;
 /// `(0x9042a9de, 0x23dc, 0x4a38, [0x96, 0xfb, ...])` e não uma sequência de
 /// dezesseis bytes.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Guid {
     pub a: u32,
     pub b: u16,
@@ -109,8 +109,38 @@ pub struct Sistema {
     pub execucao: *mut ServicosDeExecucao,
     pub boot: *mut ServicosDeBoot,
     pub quantas_configuracoes: usize,
-    pub configuracoes: *const c_void,
+    pub configuracoes: *const Configuracao,
 }
+
+/// Uma entrada da tabela de configuração: um GUID e o que ele identifica.
+///
+/// É por onde o firmware publica o que não cabe na tabela do sistema — a
+/// ACPI, o SMBIOS, e no ARM o device tree. A tabela é um vetor simples, e
+/// achar alguma coisa nela é percorrê-lo comparando GUIDs.
+#[repr(C)]
+pub struct Configuracao {
+    pub guid: Guid,
+    pub em: *const c_void,
+}
+
+/// `EFI_DTB_TABLE_GUID`: o device tree que a placa descreve.
+///
+/// Só existe em máquinas que têm um — na `virt` do QEMU tem, num PC não. A
+/// ausência não é erro: é a resposta.
+pub const GUID_DO_DEVICE_TREE: Guid = Guid {
+    a: 0xb1b6_21d5,
+    b: 0xf19c,
+    c: 0x41a5,
+    d: [0x83, 0x0b, 0xd9, 0x15, 0x2c, 0x69, 0xaa, 0xe0],
+};
+
+/// A magia de um device tree achatado, nos quatro primeiros bytes.
+///
+/// Big-endian, como todo o formato: ele nasceu no PowerPC. Conferi-la é o
+/// que separa "o firmware publicou um device tree" de "o firmware publicou
+/// um ponteiro com o GUID certo" — e a diferença aparece como um kernel que
+/// não acha memória nenhuma.
+pub const MAGICA_DO_DEVICE_TREE: u32 = 0xd00d_feed;
 
 /// O console de texto do firmware.
 ///
@@ -416,6 +446,15 @@ pub const FIM_DO_ARQUIVO: u64 = u64::MAX;
 
 /// `AllocateAnyPages`: o firmware escolhe onde.
 pub const ALOCAR_QUALQUER: u32 = 0;
+
+/// `AllocateAddress`: o firmware dá **este** endereço ou recusa.
+///
+/// Nunca outro, e é o que torna o modo útil: quem pede um endereço fixo
+/// precisa dele exatamente, e receber "quase ali" seria pior que a recusa.
+/// É por ele que o kernel do ARM, que é ligado num endereço fixo, chega ao
+/// lugar onde os ponteiros constantes dele já apontam.
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
+pub const ALOCAR_NO_ENDERECO: u32 = 2;
 
 /// O que a tela **é**, depois de o protocolo de vídeo ser consultado.
 ///

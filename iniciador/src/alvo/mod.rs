@@ -26,4 +26,4 @@ pub mod aarch64;
 #[cfg(target_arch = "aarch64")]
 pub use aarch64 as atual;
 
-pub use atual::{MAQUINA, RELOCACAO_RELATIVA, Serial, dormir, init_serial, nome};
+pub use atual::{MAQUINA, Partida, RELOCACAO_RELATIVA, Serial, dormir, init_serial, nome, partir};

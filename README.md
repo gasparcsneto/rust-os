@@ -928,47 +928,104 @@ partir de um, então o `8` do x86 **existe** no ARM e quer dizer outra coisa
 (`R_AARCH64_ABS16`). Aplicar a tabela de uma no ELF da outra não daria erro:
 daria um punhado de escritas plausíveis nos lugares errados.
 
-**Onde o ARM para hoje, e por quê.** O iniciador do ARM sobe no AAVMF, faz
-tudo que está acima, confere a tabela de relocações do kernel entrada por
-entrada — e então **recusa saltar**, em voz alta:
+**E o ARM boota.** O mesmo comando, no outro firmware:
 
 ```
 $ cargo xtask iniciador --arch aarch64
   [iniciador] vivo em aarch64, carregado pelo firmware
   [iniciador] firmware `Ubuntu distribution of EDK II` revisao 0x10000
   [iniciador] as tres tabelas conferem, por assinatura e por crc
-  [iniciador] memoria: 33 descritores de 48 bytes, 192 MiB descritos, 122 MiB livres
-  [iniciador] video: 800x600 bgr, 800 pixels por linha, buffer em 0x43d00000
-  [iniciador] esp: duke.elf aberto e lido, 5830616 bytes, crc 0xe2fe991d
-  [iniciador] elf: 5830616 bytes, entrada em 0x40080000, endereco fixo
-  [iniciador] kernel: 3 segmentos, 0x40080000..0x401ab000, 717 KiB do arquivo
-  [iniciador] fim do relatorio
-  [iniciador] ERRO o salto no aarch64 ainda nao existe
+  [iniciador] memoria: 32 descritores de 48 bytes, 192 MiB descritos, 119 MiB livres
+  [iniciador] video: 800x600 bgr, buffer em 0x43d00000
+  [iniciador] device tree em 0x47ef6000, pela tabela de configuracao
+  [iniciador] esp: duke.elf aberto e lido, 7696200 bytes, crc 0x708a0c48
+  [iniciador] elf: entrada em 0x40080000, endereco fixo
+  [iniciador] carga: imagem em 0x40080000 fisico, 1516 KiB, 484368 bytes de bss
+  [iniciador] saindo dos servicos de boot: 34 regioes, chave 0x50d
+  [iniciador] a maquina e do Duke; saltando para 0x40080000
+  [iniciador] 34 regioes, device tree em 0x47ef6000        <- o kernel
 ```
 
-O que falta é justamente o que a UEFI não padroniza: montar as tabelas no
-formato VMSAv8, programar `MAIR_EL1` e `TCR_EL1`, trocar o `TTBR` com as
-barreiras que a arquitetura exige, e entregar ao kernel o device tree que
-hoje ele recebe em `x0` pelo protocolo de imagem crua do arm64. Esse último
-item é o que torna a etapa maior do que parece — ela não é só escrever o
-iniciador, é trocar o protocolo de boot do lado do kernel.
+### O fim do caminho é o oposto nas duas máquinas
 
-A linha `endereco fixo` do relatório é o registro disso: o kernel do ARM é
-ligado num endereço fixo e não tem relocação nenhuma, porque quem o carrega
-hoje não reloca nada. A próxima etapa vai ter de respeitar aquele endereço
-ou tornar o kernel relocável, e a sonda exige a linha para que a escolha não
-seja feita por acidente.
+No x86 o iniciador **constrói** o mapa em que o kernel vai rodar: o firmware
+entrega um mapa que não serve, e o kernel roda na metade alta do espaço.
 
-**A sonda do ARM não é a do x86 com menos linhas.** Ela exige o relatório até
-a validação do ELF, exige a recusa explícita do salto, e roda as **mesmas
-quatro recusas** com kernels estragados de propósito — que valem ali
-exatamente como valem no x86, porque o leitor de ELF é o mesmo código.
+No ARM ele **desconstrói**. A especificação da UEFI exige que uma máquina
+AArch64 entregue o programa de boot com a MMU ligada e mapeada por
+identidade, e esse estado sobrevive ao `ExitBootServices`. O kernel do ARM,
+por outro lado, foi escrito contra o protocolo de imagem crua do arm64 desde
+o primeiro dia: ele monta as próprias pilhas, zera o `.bss` e liga a MMU com
+tabelas suas. Então o trabalho do iniciador é desfazer o que o firmware
+deixou até chegar exatamente no estado que o kernel já sabia esperar.
 
-Uma delas só passou a valer depois de um conserto: o caso "um kernel de outra
-arquitetura" escrevia `0xB7` fixo no campo `e_machine`, o que no ARM é copiar
-o valor certo por cima dele mesmo. O iniciador aceitava o arquivo, com razão,
-e a rodada reprovava. O byte agora é o da **outra** arquitetura, seja qual
-for a de quem está rodando.
+Desfazer tem uma parte que não é opcional e não tem sintoma próprio:
+**limpar o cache de dados por conjunto e via**, antes de desligá-lo.
+Desligar o cache não o esvazia — as linhas sujas continuam lá, e uma delas
+pode ser expulsa muito depois, escrevendo um valor velho por cima de memória
+que o kernel já usou para outra coisa. Limpar por endereço cobriria só o que
+nós escrevemos; o que precisa sair são também as linhas do firmware, que
+rodou durante segundos antes de nós. A varredura percorre a geometria que o
+próprio processador declara — `CLIDR_EL1` diz quantos níveis, `CCSIDR_EL1`
+diz quantos conjuntos e vias em cada um — e é a única forma de alcançar
+todas.
+
+**O kernel vai para o endereço dele, e não para onde couber.** Ele é ligado
+num endereço fixo e não é independente de posição como o do x86: não há
+tabela de relocações para somar uma base, e os ponteiros constantes dele já
+dizem `0x4008_0000`. O iniciador pede aquele endereço ao firmware com
+`AllocateAddress`, que ou o dá exatamente ou recusa — e o AAVMF dá. Se um
+dia recusar, a saída é tornar o kernel relocável, e a recusa diz isso em vez
+de escolher sozinha. A linha `endereco fixo` do relatório é o registro do
+fato, e a sonda a exige.
+
+### Um registrador, dois protocolos
+
+`x0` carrega o device tree quando o QEMU carrega o kernel com `-kernel`, e
+uma [`Entrega`](protocolo/src/lib.rs) quando o iniciador o carrega. O kernel
+distingue os dois pela magia, que não colide: uma entrega começa com
+`DUKEBOOT`, um device tree com `0xd00dfeed` em big-endian.
+
+Os dois caminhos continuam existindo de propósito. O `-kernel` é como a
+suíte sobe hoje — em segundos, sem disco montado nem firmware instalado — e
+fingir que ele não existe custaria isso. O dia em que o boot por UEFI for o
+único, o `match` some.
+
+No ARM o device tree não vem em registrador nenhum: ele é uma entrada da
+**tabela de configuração** da UEFI, identificada por um GUID, e o iniciador
+o acha e o passa dentro da entrega. Passá-lo já achado não é conveniência:
+depois do `ExitBootServices` a tabela do sistema pode não estar mais
+mapeada, e o kernel não teria onde procurar.
+
+E ele só está lá com `acpi=off` na linha do QEMU. Com o padrão, o EDK II do
+ARM publica só a RSDP da ACPI — foi medido, e o iniciador lista os oito
+GUIDs da tabela quando não acha o que procura, justamente para que a
+diferença entre "não tem" e "tem com outro GUID" não precise ser adivinhada.
+
+### A sonda do ARM, e o boot que parecia ter falhado
+
+Ela roda as **mesmas quatro recusas** com kernels estragados de propósito —
+que valem ali exatamente como valem no x86, porque o leitor de ELF é o mesmo
+código.
+
+Uma delas só passou a valer depois de um conserto que a própria rodada do
+ARM revelou: o caso "um kernel de outra arquitetura" escrevia `0xB7` fixo no
+campo `e_machine`, o que no ARM é copiar o valor certo por cima dele mesmo.
+O iniciador aceitava o arquivo, com razão, e a rodada reprovava. O byte
+agora é o da **outra** arquitetura, seja qual for a de quem está rodando.
+
+E ela boota a compilação de **teste** do kernel, por um motivo que custou
+uma investigação. O primeiro boot por UEFI no ARM pareceu ter falhado: o
+iniciador dizia "a maquina e do Duke; saltando para 0x40080000" e depois
+silêncio. O `-d int` do QEMU mostrou o kernel **vivo** — tomando
+interrupções e tratando-as pelos vetores dele, com o `PC` dentro da imagem.
+
+Ele estava rodando e não tinha onde falar. A máquina `virt` expõe uma PL011
+só, e fora do modo de teste ela é o canal do agente: o ARM não tem console
+humano, e o log de boot vai só para o anel de registros. Um kernel que não
+escreve na serial é indistinguível, para uma sonda que lê a serial, de um
+kernel que não subiu. No modo de teste a porta vira console, e a primeira
+linha aparece.
 
 ```
 $ cargo xtask iniciador
@@ -1330,16 +1387,16 @@ padronizado.
       cópia na escrita, com contagem de donos por frame; e um fio coletor
       que recolhe o espaço de endereços do processo morto sem esperar a vaga
       dele ser reaproveitada. **Fase 4 completa.**
-- [ ] **Fase 5 — O iniciador nas duas máquinas.** O `iniciador/` já compila
-      para `aarch64-unknown-uefi` e sobe no AAVMF: ele confere as tabelas do
-      firmware, descreve a memória e a tela, abre o kernel na ESP e valida o
-      ELF inteiro — o mesmo código do x86, sem uma linha de `cfg`, porque a
-      UEFI é a mesma especificação nas duas. Falta o que ela não padroniza:
-      as tabelas no formato VMSAv8, o `MAIR_EL1` e o `TCR_EL1`, a troca do
-      `TTBR` com as barreiras da arquitetura, e a entrega ao kernel — que
-      exige trocar, do lado dele, o protocolo de imagem crua do arm64 pela
-      `Entrega`, com o device tree vindo da tabela de configuração da UEFI
-      em vez de `x0`.
+- [x] **Fase 5 — O iniciador nas duas máquinas.** O `iniciador/` compila
+      para `aarch64-unknown-uefi`, sobe no AAVMF e **boota o kernel**: ele
+      confere as tabelas do firmware, descreve a memória e a tela, acha o
+      device tree na tabela de configuração, abre o kernel na ESP, valida o
+      ELF, copia a imagem para o endereço em que ela é ligada, sai dos
+      serviços de boot, limpa o cache por conjunto e via, desliga a MMU e
+      salta. Tudo até a validação do ELF é o mesmo código do x86, sem uma
+      linha de `cfg`. O kernel distingue os dois protocolos de boot pela
+      magia em `x0`, e o `-kernel` continua funcionando.
+      **Fase 5 completa.**
 
 ## Licença
 

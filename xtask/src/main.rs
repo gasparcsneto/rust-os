@@ -756,7 +756,12 @@ const TETO_DO_INICIADOR: Duration = Duration::from_secs(90);
 /// É ela que prova o salto. Tudo que vem antes é o iniciador falando sobre o
 /// que pretende fazer; esta linha é outro programa, noutro espaço de
 /// endereços, dizendo que está de pé.
-const MARCA_DO_KERNEL: &str = "Duke iniciado em x86_64";
+const fn marca_do_kernel(arch: Arquitetura) -> &'static str {
+    match arch {
+        Arquitetura::X86_64 => "Duke iniciado em x86_64",
+        Arquitetura::Aarch64 => "Duke iniciado em aarch64",
+    }
+}
 
 /// O relatório que o iniciador do x86 precisa produzir, do começo ao salto.
 const ESPERADO_DO_INICIADOR: &[&str] = &[
@@ -771,29 +776,29 @@ const ESPERADO_DO_INICIADOR: &[&str] = &[
     "a maquina e do Duke",
 ];
 
-/// O que o iniciador do ARM precisa dizer hoje.
+/// O que o iniciador do ARM precisa dizer.
 ///
-/// É o **mesmo programa** até a validação do ELF, e a lista mostra isso: as
-/// quatro primeiras linhas são idênticas às do x86, porque o código que as
-/// escreve é o mesmo. O que falta depois é o que a UEFI não padroniza —
-/// tabelas de tradução, saída dos serviços de boot e salto —, e a última
-/// linha é o iniciador dizendo exatamente isso em voz alta, em vez de
-/// saltar para um mapa que ninguém montou.
+/// As quatro primeiras linhas são idênticas às do x86 porque o código que as
+/// escreve é o mesmo — a UEFI é a mesma especificação nas duas máquinas. O
+/// que difere é o meio: lá o iniciador monta um mapa de tradução, aqui ele
+/// desfaz o que o firmware deixou, porque a UEFI do ARM entrega a máquina
+/// com a MMU ligada e mapeada por identidade.
 const ESPERADO_DO_INICIADOR_ARM: &[&str] = &[
     "vivo em aarch64, carregado pelo firmware",
     "tabela do sistema confere",
     "as tres tabelas conferem",
     "esp: duke.elf aberto e lido",
     // O kernel do ARM é ligado num endereço fixo, e não independente de
-    // posição como o do x86 — ele é carregado pelo protocolo de imagem crua
-    // do arm64, que não reloca nada. Exigir a linha aqui registra o fato
-    // onde ele importa: é o que a próxima etapa vai ter de resolver, ou
-    // respeitando o endereço, ou tornando o kernel relocável.
+    // posição como o do x86. Exigir a linha registra o fato onde ele
+    // importa: é a razão de o iniciador pedir ao firmware **aquele**
+    // endereço em vez de qualquer um.
     "endereco fixo",
     "kernel conferido",
-    "relocacoes relativas",
+    "device tree em",
+    "carga: imagem em",
     "fim do relatorio",
-    "o salto no aarch64 ainda nao existe",
+    "saindo dos servicos de boot",
+    "a maquina e do Duke",
 ];
 
 const fn esperado_do_iniciador(arch: Arquitetura) -> &'static [&'static str] {
@@ -806,9 +811,26 @@ const fn esperado_do_iniciador(arch: Arquitetura) -> &'static [&'static str] {
 /// Sobe o iniciador no firmware de verdade e confere o que ele relatou.
 fn iniciador(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
     let efi = build_do_iniciador(arch, release)?;
+
     // O kernel também vai para a ESP: é o que o iniciador vai abrir. Compilar
     // é o mesmo `build` de sempre — o que muda é para onde o ELF vai.
-    build(arch, release, false)?;
+    //
+    // # Por que o ARM boota a compilação de teste
+    //
+    // Porque é a única que fala. A máquina `virt` expõe **uma** PL011, e
+    // fora do modo de teste ela é o canal do agente: o kernel do ARM não tem
+    // console humano, e o log de boot vai só para o anel de registros. Esta
+    // sonda lê a serial, então um kernel que não escreve nela é
+    // indistinguível de um kernel que não subiu — e foi exatamente assim que
+    // o primeiro boot por UEFI no ARM pareceu ter falhado, com o `-d int` do
+    // QEMU mostrando o kernel vivo, tratando interrupções pelos vetores
+    // dele.
+    //
+    // No modo de teste a porta vira console, e a primeira linha do kernel
+    // aparece. É o mesmo kernel, com a mesma imagem e o mesmo caminho de
+    // boot; o que muda é ter para onde falar.
+    let modo_teste = arch == Arquitetura::Aarch64;
+    build(arch, release, modo_teste)?;
     let kernel = caminho_elf(arch, release);
 
     let disco = disco_de_testes()?;
@@ -819,15 +841,11 @@ fn iniciador(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
     instalar_iniciador(arch, &disco, &efi, &kernel)?;
     println!("\n[xtask] iniciador: o kernel de verdade");
 
-    // No x86 o desfecho é o kernel falando; no ARM é o iniciador desligando
-    // a máquina depois de recusar o salto que ainda não sabe fazer. São
-    // desfechos diferentes porque as etapas são diferentes, e esperar o
-    // errado transformaria "ainda não existe" num travamento de noventa
-    // segundos.
-    let espera = match arch {
-        Arquitetura::X86_64 => Desenlace::Marca(MARCA_DO_KERNEL),
-        Arquitetura::Aarch64 => Desenlace::Desligamento,
-    };
+    // Nas duas o desfecho é o mesmo: o kernel falando do outro lado do
+    // salto. É a única linha que prova a entrega — tudo antes dela é o
+    // iniciador dizendo o que pretende fazer.
+    let marca = marca_do_kernel(arch);
+    let espera = Desenlace::Marca(marca);
     let (desfecho, relatorio) = subir_no_firmware(arch, &disco, &firmware, &espera)?;
     for linha in &relatorio {
         println!("  [iniciador] {linha}");
@@ -852,12 +870,6 @@ fn iniciador(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
         }
     }
     for linha in &como_str {
-        // A recusa do salto no ARM é uma linha de erro **esperada** — é o
-        // iniciador dizendo onde a etapa termina. Tratá-la como as outras
-        // faria a única coisa honesta do relatório reprovar a rodada.
-        if linha.contains("o salto no aarch64 ainda nao existe") {
-            continue;
-        }
         if linha.starts_with("ERRO") || linha.starts_with("PANICO") {
             eprintln!("[xtask] iniciador: {linha}");
             falhou = true;
@@ -871,14 +883,7 @@ fn iniciador(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
         eprintln!("[xtask] iniciador: {motivo}");
         falhou = true;
     }
-    match arch {
-        Arquitetura::X86_64 => {
-            println!("  [conferido] o kernel assumiu a maquina e disse `{MARCA_DO_KERNEL}`")
-        }
-        Arquitetura::Aarch64 => {
-            println!("  [conferido] o firmware carregou o iniciador e ele leu o kernel inteiro")
-        }
-    }
+    println!("  [conferido] o kernel assumiu a maquina e disse `{marca}`");
 
     // E as rodadas das recusas: kerneis estragados de propósito, que o
     // iniciador tem de rejeitar em vez de carregar.
@@ -1078,7 +1083,22 @@ fn subir_no_firmware(
         // precisa ser dito, porque o padrão dela é um Cortex-A15 de 32 bits
         // que sequer executaria uma aplicação EFI de 64.
         Arquitetura::Aarch64 => {
-            qemu.args(["-machine", "virt", "-cpu", "cortex-a72"]);
+            // `acpi=off` não é detalhe de configuração: é o que faz o
+            // firmware publicar o **device tree** na tabela de configuração.
+            // Com ACPI ligada — o padrão — o EDK II do ARM publica só a
+            // RSDP, e o kernel deste projeto não lê ACPI: ele descobre a
+            // RAM, o controlador de interrupções e o ECAM do PCI pelo device
+            // tree, como sempre fez.
+            //
+            // Foi medido: com o padrão, a tabela traz oito entradas e
+            // nenhuma delas é de device tree. O iniciador lista os GUIDs
+            // quando não acha, justamente para que a diferença entre "não
+            // tem" e "tem com outro GUID" não precise ser adivinhada.
+            //
+            // O processador também precisa ser dito: o padrão da `virt` é um
+            // Cortex-A15 de 32 bits, que sequer executaria uma aplicação EFI
+            // de 64.
+            qemu.args(["-machine", "virt,acpi=off", "-cpu", "cortex-a72"]);
         }
     }
 
@@ -1474,6 +1494,7 @@ fn conferir_elf_contra_readelf(
         Arquitetura::X86_64 => ("carga:", "relocacoes aplicadas"),
         Arquitetura::Aarch64 => ("kernel conferido:", "relocacoes relativas"),
     };
+    let _ = &prefixo;
     let carga = relatorio
         .iter()
         .find(|l| l.starts_with(prefixo))

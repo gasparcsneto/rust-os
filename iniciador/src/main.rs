@@ -42,7 +42,6 @@ mod efi;
 mod elf;
 #[cfg(target_arch = "x86_64")]
 mod paginas;
-#[cfg(target_arch = "x86_64")]
 mod salto;
 
 use core::fmt::Write;
@@ -134,7 +133,17 @@ fn relatorio(
 
     let fim_da_ram = descrever_memoria(boot)?;
     let video = descrever_video(boot)?;
-    carregar_o_kernel(imagem, boot, fim_da_ram, video)
+    // O device tree, se houver. Num PC não há, e zero é a resposta certa:
+    // o mapa de memória do firmware já diz o que o kernel precisa. Numa
+    // máquina ARM ele é a fonte de tudo que não está no processador, e sem
+    // ele o kernel não acha nem a RAM.
+    let dispositivos = achar_o_device_tree(sistema);
+    match dispositivos {
+        0 => relatar!("device tree: nenhum na tabela de configuracao"),
+        em => relatar!("device tree em {:#x}, pela tabela de configuracao", em),
+    }
+
+    carregar_o_kernel(imagem, boot, dispositivos, fim_da_ram, video)
 }
 
 /// Confere assinatura, tamanho e CRC-32 de um cabeçalho de tabela.
@@ -471,6 +480,7 @@ const MAIOR_KERNEL: u64 = 32 * 1024 * 1024;
 fn carregar_o_kernel(
     handle: efi::Handle,
     boot: &efi::ServicosDeBoot,
+    dispositivos: u64,
     fim_da_ram: u64,
     video: Option<efi::Tela>,
 ) -> Result<core::convert::Infallible, &'static str> {
@@ -557,7 +567,78 @@ fn carregar_o_kernel(
         na_memoria / 1024
     );
 
-    carregar_e_saltar(handle, boot, imagem, fim_da_ram, video)
+    carregar_e_saltar(handle, boot, dispositivos, imagem, fim_da_ram, video)
+}
+
+/// Procura o device tree na tabela de configuração do firmware.
+///
+/// Devolve zero quando não há — que é a resposta de qualquer PC, e não um
+/// erro. Quem decide se a ausência importa é o kernel da arquitetura.
+///
+/// # Por que a magia é conferida
+///
+/// Porque o GUID diz o que a entrada **afirma** ser, e a magia diz o que o
+/// conteúdo **é**. Um ponteiro publicado sob o GUID certo apontando para
+/// qualquer outra coisa não daria erro aqui: daria um kernel que percorre
+/// lixo procurando nós de device tree e conclui que a máquina não tem
+/// memória.
+fn achar_o_device_tree(sistema: &efi::Sistema) -> u64 {
+    if sistema.configuracoes.is_null() {
+        return 0;
+    }
+
+    for i in 0..sistema.quantas_configuracoes {
+        // SAFETY: o firmware declarou o vetor e quantas entradas ele tem, e
+        // a tabela do sistema já passou pelo CRC — então o par
+        // ponteiro/contagem é o que ele escreveu.
+        let entrada = unsafe { &*sistema.configuracoes.add(i) };
+        if entrada.guid != efi::GUID_DO_DEVICE_TREE || entrada.em.is_null() {
+            continue;
+        }
+
+        // SAFETY: a entrada existe e o ponteiro não é nulo; ler os quatro
+        // primeiros bytes de um device tree é o mínimo que qualquer blob
+        // tem, e a UEFI mapeia tudo por identidade neste ponto.
+        let magica = u32::from_be(unsafe { core::ptr::read_unaligned(entrada.em as *const u32) });
+        if magica != efi::MAGICA_DO_DEVICE_TREE {
+            relatar!(
+                "ERRO a entrada de device tree em {:#x} comeca com {:#010x}",
+                entrada.em as u64,
+                magica
+            );
+            return 0;
+        }
+        return entrada.em as u64;
+    }
+
+    // Não achar é uma resposta legítima num PC, e um problema no ARM. Em
+    // qualquer dos dois, listar o que **está** lá é a diferença entre "não
+    // tem" e "tem, com outro GUID" — e as duas coisas levam a lugares
+    // diferentes em quem for investigar.
+    relatar!(
+        "tabela de configuracao: {} entradas, nenhuma de device tree",
+        sistema.quantas_configuracoes
+    );
+    for i in 0..sistema.quantas_configuracoes {
+        // SAFETY: mesma justificativa do laço acima.
+        let entrada = unsafe { &*sistema.configuracoes.add(i) };
+        relatar!(
+            "  configuracao {}: {:08x}-{:04x}-{:04x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            i,
+            entrada.guid.a,
+            entrada.guid.b,
+            entrada.guid.c,
+            entrada.guid.d[0],
+            entrada.guid.d[1],
+            entrada.guid.d[2],
+            entrada.guid.d[3],
+            entrada.guid.d[4],
+            entrada.guid.d[5],
+            entrada.guid.d[6],
+            entrada.guid.d[7],
+        );
+    }
+    0
 }
 
 /// O fim do caminho: copiar, mapear, sair dos serviços de boot e saltar.
@@ -569,6 +650,11 @@ fn carregar_o_kernel(
 fn carregar_e_saltar(
     handle: efi::Handle,
     boot: &efi::ServicosDeBoot,
+    // Num PC é sempre zero, e o caminho do x86 não tem o que fazer com
+    // ele. O argumento fica para que as duas versões tenham a mesma
+    // assinatura — o que mantém o ponto de bifurcação sendo só o `cfg`, e
+    // não também a forma da chamada.
+    _dispositivos: u64,
     imagem: elf::Imagem,
     fim_da_ram: u64,
     video: Option<efi::Tela>,
@@ -594,46 +680,78 @@ fn carregar_e_saltar(
     conferir_o_mapa(&carga, &imagem)?;
     relatar!("fim do relatorio");
 
+    let destino = salto::Destino {
+        base_fisica: carga.base_fisica,
+        entrada: carga.entrada,
+        deslocamento: mapa::BASE_DA_MEMORIA_FISICA,
+        video: carga.entrega_de_video(),
+        // Não há device tree num PC: o mapa de memória do firmware já diz
+        // tudo que o kernel precisa, e é por isso que este campo é zero em
+        // vez de ausente. Ver `protocolo::Entrega::dispositivos`.
+        dispositivos: 0,
+    };
+
+    let raiz = carga.tabelas.raiz();
+    let pilha = carga.topo_da_pilha;
+
     // SAFETY: a imagem foi copiada, relocada e conferida contra o arquivo; o
     // mapa foi montado e percorrido; o `handle` é o que o firmware entregou
     // em `efi_main`. É tudo que o salto exige.
-    unsafe { salto::saltar(handle, boot, &carga) }
+    unsafe {
+        salto::saltar(handle, boot, &destino, |entrada, entrega| {
+            alvo::partir(alvo::Partida {
+                entrada,
+                entrega,
+                raiz,
+                pilha,
+            })
+        })
+    }
 }
 
-/// O mesmo fim de caminho, ainda por escrever no ARM.
+/// O fim do caminho no ARM: copiar o kernel para onde ele pede e saltar.
 ///
-/// # Por que ele para aqui, e o que falta
+/// # Por que aqui não há tabela de tradução a montar
 ///
-/// Tudo acima desta função já roda nas duas máquinas: conferir as tabelas do
-/// firmware, descrever a memória e o vídeo, abrir a ESP, ler o kernel e
-/// validar o ELF inteiro. É a parte que a UEFI padroniza, e ela não precisou
-/// de uma linha de `cfg` para atravessar.
+/// Porque a UEFI já montou uma. A especificação exige que uma máquina
+/// AArch64 entregue o programa de boot com a MMU ligada e **mapeada por
+/// identidade**, e esse estado sobrevive ao `ExitBootServices`. No x86 é o
+/// contrário: o firmware entrega um mapa que não serve ao kernel, e o
+/// iniciador constrói o que vai valer.
 ///
-/// O que falta é justamente o que a UEFI **não** padroniza, porque não é
-/// dela: montar as tabelas de tradução no formato VMSAv8, programar o
-/// `MAIR_EL1` e o `TCR_EL1`, trocar o `TTBR` com as barreiras que a
-/// arquitetura exige, e saltar entregando ao kernel o device tree que hoje
-/// ele recebe em `x0` pelo protocolo de imagem do arm64.
+/// O que o kernel do ARM espera é ainda mais simples que isso. Ele foi
+/// escrito contra o protocolo de imagem crua do arm64 desde o primeiro dia:
+/// monta as próprias pilhas, zera o `.bss` e liga a MMU com tabelas suas.
+/// Então o trabalho do iniciador é **desfazer** o que o firmware deixou até
+/// chegar no estado que o kernel já sabia esperar — ver
+/// [`alvo::partir`](crate::alvo::partir).
 ///
-/// Esse último item é o que torna a etapa maior do que parece: ela não é só
-/// escrever o iniciador, é trocar o protocolo de boot do lado do kernel. Até
-/// lá o ARM continua bootando pelo `-kernel` do QEMU, e este programa é um
-/// relatório que confere tudo que pode conferir antes de desistir em voz
-/// alta — que é melhor que saltar para um mapa que ninguém montou.
+/// # Por que o kernel vai para o endereço dele, e não para onde couber
+///
+/// Porque ele é ligado num endereço fixo, e não é independente de posição
+/// como o do x86. Não há tabela de relocações para somar uma base: os
+/// ponteiros constantes dele já dizem `0x4008_0000`, e pô-lo em outro lugar
+/// daria um kernel que salta para onde ele não está.
+///
+/// O firmware aceita reservar aquele endereço — foi medido antes de este
+/// código existir, e é a razão de ele ser tão curto. Se um dia recusar, a
+/// saída é tornar o kernel independente de posição, e a recusa aqui diz
+/// isso em vez de escolher sozinha.
 #[cfg(target_arch = "aarch64")]
 fn carregar_e_saltar(
-    _handle: efi::Handle,
-    _boot: &efi::ServicosDeBoot,
+    handle: efi::Handle,
+    boot: &efi::ServicosDeBoot,
+    dispositivos: u64,
     imagem: elf::Imagem,
+    // A RAM não precisa ser medida aqui: o kernel do ARM descobre a memória
+    // pelo device tree, como sempre fez, e as regiões da entrega dizem o
+    // resto.
     _fim_da_ram: u64,
-    _video: Option<efi::Tela>,
+    video: Option<efi::Tela>,
 ) -> Result<core::convert::Infallible, &'static str> {
-    // A tabela de relocações é lida e **conferida** aqui, embora nada vá ser
-    // aplicado: é o último pedaço do arquivo que ainda não tinha sido
-    // olhado, e ele é o que responde se este ELF é mesmo independente de
-    // posição e se todas as relocações dele são do tipo que o iniciador
-    // sabe somar. Descobrir isso agora, e não no dia do salto, é o que
-    // impede a próxima etapa de começar sobre uma suposição.
+    // A tabela de relocações é lida e conferida mesmo sem nada a aplicar: é
+    // o último pedaço do arquivo que ainda não tinha sido olhado, e ele é o
+    // que responde se este ELF é mesmo o que o iniciador sabe carregar.
     let (relativas, outras) = conferir_as_relocacoes(&imagem)?;
     relatar!(
         "kernel conferido: entrada {:#x}, maquina {:#x}, {} relocacoes relativas",
@@ -645,24 +763,182 @@ fn carregar_e_saltar(
         relatar!("ERRO {} relocacoes de outro tipo", outras);
         return Err("o kernel tem relocacao que este carregador nao sabe aplicar");
     }
+    if imagem.independente_de_posicao {
+        // Um kernel independente de posição precisaria de uma base escolhida
+        // por nós e das relocações aplicadas — que é o caminho do x86, e não
+        // o deste. Carregá-lo no endereço do arquivo deixaria os ponteiros
+        // constantes dele apontando para o lugar errado.
+        return Err("o kernel do ARM nao pode ser independente de posicao");
+    }
 
+    if dispositivos == 0 {
+        // Sem device tree o kernel do ARM não acha nem a RAM nem o
+        // controlador de interrupções. Parar aqui, com o firmware ainda
+        // vivo, é a diferença entre uma mensagem e um silêncio.
+        return Err("o firmware nao publicou um device tree");
+    }
+
+    let base = copiar_o_kernel(boot, &imagem)?;
     relatar!("fim do relatorio");
-    Err("o salto no aarch64 ainda nao existe")
+
+    let destino = salto::Destino {
+        base_fisica: base,
+        entrada: imagem.entrada,
+        // Zero: o mapa é de identidade, e somar um deslocamento apontaria
+        // para fora do espaço de 39 bits que o kernel configura.
+        deslocamento: 0,
+        video: entrega_de_video(video),
+        dispositivos,
+    };
+
+    // SAFETY: a imagem foi copiada para o endereço em que ela é ligada e
+    // conferida contra o arquivo; o `handle` é o que o firmware entregou em
+    // `efi_main`. É tudo que o salto exige — o mapa é o da UEFI, que
+    // sobrevive à saída dos serviços de boot.
+    unsafe {
+        salto::saltar(handle, boot, &destino, |entrada, entrega| {
+            alvo::partir(alvo::Partida { entrada, entrega })
+        })
+    }
+}
+
+/// Copia os segmentos do kernel para o endereço em que ele é ligado.
+///
+/// Devolve o endereço físico do começo da imagem.
+///
+/// # Por que o destino é envenenado antes de ser zerado
+///
+/// Porque a UEFI **não** promete páginas limpas, mas este firmware as
+/// entrega limpas — então apagar o zeramento não mudaria nada e a
+/// conferência passaria. É o mesmo remédio que o lado do x86 recebeu, pelo
+/// mesmo diagnóstico: preencher com `0xA5` antes faz o esquecimento
+/// aparecer. O que está em jogo são os globais do kernel.
+#[cfg(target_arch = "aarch64")]
+fn copiar_o_kernel(boot: &efi::ServicosDeBoot, imagem: &elf::Imagem) -> Result<u64, &'static str> {
+    let (menor, maior) = extensao_da_imagem(imagem)?;
+    if !menor.is_multiple_of(efi::PAGINA) {
+        return Err("o kernel nao comeca em fronteira de pagina");
+    }
+    let bytes = (maior - menor).next_multiple_of(efi::PAGINA);
+    let paginas = (bytes / efi::PAGINA) as usize;
+
+    let mut base = menor;
+    // SAFETY: os argumentos são os documentados e `base` é uma local. O modo
+    // é `AllocateAddress`, então o firmware ou dá exatamente este endereço
+    // ou recusa — ele nunca escolhe outro.
+    let status = unsafe {
+        (boot.alocar_paginas)(
+            efi::ALOCAR_NO_ENDERECO,
+            efi::memoria::CODIGO_DO_CARREGADOR,
+            paginas,
+            &mut base,
+        )
+    };
+    if efi::deu_errado(status) || base != menor {
+        relatar!(
+            "ERRO o firmware recusou as {} paginas em {:#x}: {:#x}",
+            paginas,
+            menor,
+            status
+        );
+        return Err("o endereco em que o kernel e ligado nao esta livre");
+    }
+
+    // SAFETY: as páginas acabaram de ser reservadas para nós, e a UEFI mapeia
+    // a memória por identidade — então o endereço físico serve de ponteiro.
+    let destino = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, bytes as usize) };
+    destino.fill(0xA5);
+    destino.fill(0);
+
+    let mut do_arquivo = 0u64;
+    let mut zerados = 0u64;
+    for segmento in imagem.segmentos() {
+        let s = segmento?;
+        let em = usize::try_from(s.endereco - menor).map_err(|_| "segmento longe demais")?;
+        let quantos = usize::try_from(s.tamanho_no_arquivo).map_err(|_| "segmento grande")?;
+        let conteudo = imagem.conteudo(&s)?;
+        destino
+            .get_mut(em..em + quantos)
+            .ok_or("um segmento nao cabe na imagem reservada")?
+            .copy_from_slice(conteudo);
+        do_arquivo += s.tamanho_no_arquivo;
+        zerados += s.zeros();
+    }
+
+    // O byte da entrada, relido da memória e confrontado com o arquivo. É a
+    // conferência mais barata que existe sobre "a cópia foi para o lugar
+    // certo", e a única que pega um deslocamento errado de um segmento só.
+    let na_memoria = destino
+        .get(usize::try_from(imagem.entrada - menor).map_err(|_| "entrada longe demais")?)
+        .copied()
+        .ok_or("a entrada caiu fora da imagem reservada")?;
+    let no_arquivo = imagem.byte(
+        imagem
+            .no_arquivo(imagem.entrada)?
+            .ok_or("a entrada nao esta no arquivo")?,
+    )?;
+    if na_memoria != no_arquivo {
+        relatar!(
+            "ERRO na entrada a memoria tem {:#04x} e o arquivo {:#04x}",
+            na_memoria,
+            no_arquivo
+        );
+        return Err("a copia do kernel nao confere com o arquivo");
+    }
+
+    relatar!(
+        "carga: imagem em {:#x} fisico, {} KiB, {} do arquivo, {} bytes de bss",
+        base,
+        bytes / 1024,
+        do_arquivo,
+        zerados
+    );
+    Ok(base)
+}
+
+/// Traduz a tela descoberta para o que a entrega carrega.
+///
+/// O vídeo **não** é mapeado aqui, ao contrário do x86: o mapa é de
+/// identidade, então o endereço que o firmware deu já é o que o kernel vai
+/// usar.
+#[cfg(target_arch = "aarch64")]
+fn entrega_de_video(tela: Option<efi::Tela>) -> protocolo::Video {
+    match tela {
+        Some(t) => protocolo::Video {
+            presente: 1,
+            formato: t.formato,
+            em: t.fisico,
+            bytes: t.bytes,
+            largura: t.largura,
+            altura: t.altura,
+            pixels_por_linha: t.pixels_por_linha,
+            bytes_por_pixel: t.bytes_por_pixel,
+        },
+        None => protocolo::Video {
+            presente: 0,
+            formato: 0,
+            em: 0,
+            bytes: 0,
+            largura: 0,
+            altura: 0,
+            pixels_por_linha: 0,
+            bytes_por_pixel: 0,
+        },
+    }
 }
 
 /// Conta as relocações do kernel, separando as que sabemos aplicar.
 ///
-/// Devolve `(relativas, de outro tipo)`. Ele **não** aplica nada: aplicar
-/// exige ter copiado a imagem para o endereço final, e no ARM isso ainda não
-/// acontece. O que se pode afirmar sem copiar é o tipo de cada uma, e é
-/// justamente o que distingue um kernel carregável de um que exigiria um
-/// ligador dinâmico.
+/// Devolve `(relativas, de outro tipo)`. Ela **não** aplica nada: aplicar
+/// exige somar uma base, e o kernel do ARM é ligado num endereço fixo. O que
+/// se pode afirmar sem aplicar é o tipo de cada uma, e é justamente o que
+/// distingue uma imagem que este iniciador sabe carregar de uma que exigiria
+/// um ligador dinâmico.
 #[cfg(target_arch = "aarch64")]
 fn conferir_as_relocacoes(imagem: &elf::Imagem) -> Result<(usize, usize), &'static str> {
     let Some(dinamica) = imagem.dinamica()? else {
         // Um kernel sem segmento dinâmico não é relocável, e isso não é erro
-        // por si: é um executável de endereço fixo. Quem decide se serve é o
-        // salto, que ainda não existe aqui.
+        // por si: é um executável de endereço fixo, que é o caso do ARM.
         return Ok((0, 0));
     };
 
@@ -697,7 +973,6 @@ fn conferir_as_relocacoes(imagem: &elf::Imagem) -> Result<(usize, usize), &'stat
             outras += 1;
         }
     }
-    let _ = menor;
     Ok((relativas, outras))
 }
 

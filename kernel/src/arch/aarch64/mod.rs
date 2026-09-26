@@ -191,40 +191,160 @@ _start:
 
 /// Primeira função Rust a executar no ARM.
 ///
-/// Recebe em `dtb` o endereço do device tree que o assembly preservou em `x0`.
+/// # Dois caminhos de boot, um registrador
+///
+/// `x0` carrega coisas diferentes conforme quem carregou o kernel:
+///
+/// - pelo **protocolo de imagem crua do arm64**, que é como o QEMU o carrega
+///   com `-kernel`, ele traz o endereço do device tree;
+/// - pelo **iniciador UEFI** deste projeto, ele traz uma
+///   [`protocolo::Entrega`], que carrega o mapa de memória que o firmware
+///   deu e, dentro dela, o device tree que a tabela de configuração
+///   publicou.
+///
+/// Distinguir os dois é barato e não depende de convenção nenhuma: cada um
+/// começa com uma magia própria, e elas não colidem. Uma entrega começa com
+/// `DUKEBOOT`; um device tree, com `0xd00dfeed` em big-endian.
+///
+/// # Por que os dois continuam existindo
+///
+/// Porque o iniciador ainda não é o único caminho no ARM, e fingir que é
+/// custaria o `-kernel` — que é como a suíte de testes sobe hoje, em
+/// segundos, sem precisar de um disco montado nem de firmware instalado. O
+/// dia em que o boot por UEFI for o único, este `match` some.
 #[unsafe(no_mangle)]
-extern "C" fn inicio_aarch64(dtb: u64) -> ! {
+extern "C" fn inicio_aarch64(x0: u64) -> ! {
     // A serial vem antes de qualquer outra coisa. Sem ela, qualquer falha a
     // partir daqui seria silêncio absoluto — no ARM nem tela preta existe.
     let canal = crate::serial::init();
 
-    // SAFETY: `dtb` veio do firmware em `x0`, que é exatamente o contrato do
-    // boot do arm64. O parser valida a assinatura antes de confiar no resto.
-    let resultado = unsafe {
-        fdt::percorrer_memoria(dtb as *const u8, |inicio, tamanho| {
-            crate::machine::adicionar_regiao(Regiao {
-                inicio,
-                fim: inicio + tamanho,
-                // O device tree descreve a RAM instalada; ele não marca o que
-                // já está ocupado. O próprio kernel está dentro de uma dessas
-                // faixas — reconciliar isso é tarefa do alocador de frames,
-                // que vai usar os símbolos do linker script para se excluir.
-                tipo: TipoRegiao::Utilizavel,
-            });
-        })
+    // SAFETY: `x0` veio do firmware ou do iniciador, e é o contrato dos dois
+    // protocolos de boot. `entrega_em` só devolve um ponteiro depois de
+    // conferir a magia, a versão e o tamanho.
+    let dtb = match unsafe { entrega_em(x0) } {
+        Some(entrega) => {
+            // SAFETY: a entrega passou pelas três conferências, então o
+            // ponteiro e a contagem são os que o iniciador escreveu. O mapa
+            // é de identidade no ARM, então o endereço serve direto.
+            unsafe { adotar_as_regioes(&entrega) };
+            crate::log_info!(
+                "boot",
+                "entrega do iniciador: {} regioes, device tree em {:#x}",
+                entrega.quantas_regioes,
+                entrega.dispositivos
+            );
+            entrega.dispositivos
+        }
+        None => {
+            // O caminho antigo: `x0` é o device tree, e a memória vem dele.
+            // Ele descreve a RAM instalada e não marca o que já está
+            // ocupado — o próprio kernel está dentro de uma dessas faixas, e
+            // reconciliar isso é tarefa do alocador de frames, que usa os
+            // símbolos do linker script para se excluir.
+            //
+            // SAFETY: o parser valida a assinatura antes de confiar no resto.
+            let resultado = unsafe {
+                fdt::percorrer_memoria(x0 as *const u8, |inicio, tamanho| {
+                    crate::machine::adicionar_regiao(Regiao {
+                        inicio,
+                        fim: inicio + tamanho,
+                        tipo: TipoRegiao::Utilizavel,
+                    });
+                })
+            };
+            if let Err(erro) = resultado {
+                crate::log_error!("fdt", "device tree ilegivel: {}", erro);
+            }
+            x0
+        }
     };
 
-    if let Err(erro) = resultado {
-        crate::log_error!("fdt", "device tree ilegivel: {}", erro);
-    }
-
-    // SAFETY: mesmo ponteiro já validado pelo percurso acima.
+    // SAFETY: o ponteiro é o de um device tree, e `tamanho_total` confere a
+    // assinatura antes de ler o resto.
     if let Some(tamanho) = unsafe { fdt::tamanho_total(dtb as *const u8) } {
         DTB_INICIO.store(dtb, Ordering::Relaxed);
         DTB_TAMANHO.store(tamanho, Ordering::Relaxed);
     }
 
     crate::inicio_comum(canal)
+}
+
+/// Lê uma entrega em `x0`, se for uma.
+///
+/// Devolve `None` quando o valor é outra coisa — o que no ARM quer dizer "é
+/// o device tree do protocolo de imagem crua", e não "é lixo".
+///
+/// # Safety
+///
+/// `x0` precisa ser o valor que o protocolo de boot pôs no registrador. A
+/// função lê a memória apontada, e é por isso que ela confere o alinhamento
+/// antes: uma leitura desalinhada de um `u64` é falha de alinhamento em EL1.
+unsafe fn entrega_em(x0: u64) -> Option<protocolo::Entrega> {
+    if x0 == 0 || !x0.is_multiple_of(align_of::<protocolo::Entrega>() as u64) {
+        return None;
+    }
+    let ponteiro = x0 as *const protocolo::Entrega;
+
+    // A magia é lida primeiro e sozinha: ela é o que autoriza ler o resto.
+    // Um device tree começa com `0xd00dfeed` em big-endian, que como `u64`
+    // little-endian não tem como coincidir com `DUKEBOOT`.
+    //
+    // SAFETY: o ponteiro está alinhado e, nos dois protocolos de boot, ele
+    // aponta para memória que existe — um blob de device tree tem pelo menos
+    // um cabeçalho, e uma entrega tem pelo menos a magia.
+    if unsafe { core::ptr::read(core::ptr::addr_of!((*ponteiro).magica)) } != protocolo::MAGICA {
+        return None;
+    }
+
+    // SAFETY: a magia confere, então a struct inteira está ali.
+    let entrega = unsafe { core::ptr::read(ponteiro) };
+
+    if entrega.versao != protocolo::VERSAO {
+        crate::log_error!(
+            "boot",
+            "a entrega e da versao {} e este kernel fala a {}",
+            entrega.versao,
+            protocolo::VERSAO
+        );
+        return None;
+    }
+    if (entrega.tamanho as usize) < size_of::<protocolo::Entrega>() {
+        crate::log_error!(
+            "boot",
+            "a entrega tem {} bytes e este kernel espera {}",
+            entrega.tamanho,
+            size_of::<protocolo::Entrega>()
+        );
+        return None;
+    }
+    Some(entrega)
+}
+
+/// Copia as regiões que o iniciador descreveu para o mapa da máquina.
+///
+/// # Safety
+///
+/// `entrega` precisa ter passado pelas conferências de [`entrega_em`], e o
+/// ponteiro de regiões dela precisa continuar válido — o que no ARM é o
+/// caso, porque o mapa é de identidade e a memória do iniciador está
+/// marcada como dele.
+unsafe fn adotar_as_regioes(entrega: &protocolo::Entrega) {
+    for i in 0..entrega.quantas_regioes {
+        // SAFETY: o ponteiro e a contagem vieram da entrega conferida.
+        let r = unsafe { *(entrega.regioes as *const protocolo::Regiao).add(i as usize) };
+        let tipo = match r.tipo {
+            protocolo::tipo::UTILIZAVEL => TipoRegiao::Utilizavel,
+            // O que é do iniciador **não** pode virar utilizável: a imagem
+            // do kernel está dentro disso, e entregá-la ao alocador de
+            // frames seria dar as páginas em que ele mesmo está rodando.
+            _ => TipoRegiao::Reservada,
+        };
+        crate::machine::adicionar_regiao(Regiao {
+            inicio: r.inicio,
+            fim: r.fim,
+            tipo,
+        });
+    }
 }
 
 /// Abre as portas seriais: (console humano, canal do agente).

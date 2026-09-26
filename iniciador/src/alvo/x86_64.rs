@@ -149,3 +149,48 @@ pub fn dormir() {
     // SAFETY: `hlt` não toca em memória e só suspende o núcleo.
     unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };
 }
+
+/// O que o último instante precisa saber, no x86.
+pub struct Partida {
+    /// Para onde saltar, já no espaço do kernel.
+    pub entrada: u64,
+    /// O endereço virtual da entrega, que vai no primeiro argumento.
+    pub entrega: u64,
+    /// A raiz do mapa que o iniciador montou.
+    pub raiz: u64,
+    /// O topo da pilha do kernel.
+    pub pilha: u64,
+}
+
+/// Instala o mapa novo e salta. Não retorna.
+///
+/// # Safety
+///
+/// O mapa precisa ter sido montado e conferido, e precisa cobrir **este**
+/// código por identidade: no instante seguinte ao `mov cr3` o processador
+/// busca a próxima instrução, e ela mora num endereço baixo. Sem essa
+/// cobertura a busca falha, e uma falha de página sem tabela de exceções é
+/// um triple fault — a máquina reiniciando sem nada na tela.
+pub unsafe fn partir(p: Partida) -> ! {
+    // SAFETY: delegada a quem chama. Nada entre o `cli` e o `jmp` toca
+    // memória que o mapa novo não descreva.
+    unsafe {
+        core::arch::asm!(
+            // Interrupções fora antes de qualquer coisa: a IDT que ainda está
+            // carregada é a do firmware, e o código dela some com o mapa.
+            "cli",
+            "mov cr3, {raiz}",
+            "mov rsp, {pilha}",
+            // O quadro de pilha acaba aqui. Zerar o ponteiro de base é o que
+            // faz um depurador parar de desenrolar em vez de seguir por
+            // valores que sobraram do firmware.
+            "xor rbp, rbp",
+            "jmp {entrada}",
+            raiz = in(reg) p.raiz,
+            pilha = in(reg) p.pilha,
+            entrada = in(reg) p.entrada,
+            in("rdi") p.entrega,
+            options(noreturn)
+        );
+    }
+}

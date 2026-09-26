@@ -28,10 +28,8 @@
 //! a pergunta e a saída — o próprio ato de imprimir alguma coisa pode
 //! mudá-lo. A especificação manda tentar de novo com um mapa fresco, uma vez.
 
-use crate::carga::Carga;
 use crate::efi;
 use crate::relatar;
-use protocolo::mapa;
 
 /// Quantas regiões a entrega cabe.
 ///
@@ -40,6 +38,34 @@ use protocolo::mapa;
 /// dispositivos. Estourar é um erro relatado enquanto ainda há como relatar,
 /// e não uma lista truncada que o kernel usaria como se fosse completa.
 const MAX_REGIOES: usize = 256;
+
+/// Para onde o kernel vai, e como ele enxerga a memória.
+///
+/// # Por que a sequência é parametrizada, e não duplicada
+///
+/// Porque a ordem dos quatro passos abaixo é o que há de mais delicado neste
+/// programa, e ela é **a mesma** nas duas arquiteturas: a especificação da
+/// UEFI é uma só. O que difere é o último instante — trocar o `CR3` e saltar
+/// de um lado, desligar a MMU e saltar do outro.
+///
+/// Duas cópias da dança da chave seriam duas chances de uma delas ganhar uma
+/// correção que a outra não recebe, num lugar onde o sintoma de estar errado
+/// é uma máquina que reinicia sem escrever nada.
+pub struct Destino {
+    /// Onde a imagem do kernel foi posta, em endereço físico.
+    pub base_fisica: u64,
+    /// Para onde saltar, já no espaço em que o kernel vai rodar.
+    pub entrada: u64,
+    /// Quanto somar a um endereço físico para chegar ao virtual do kernel.
+    ///
+    /// No x86 é a base do mapa da memória física, porque o kernel roda na
+    /// metade alta. No ARM é zero: o mapa é de identidade, e somar seria
+    /// apontar para fora do espaço de 39 bits que o kernel configura.
+    pub deslocamento: u64,
+    pub video: protocolo::Video,
+    /// O device tree, em endereço físico, ou zero quando não há.
+    pub dispositivos: u64,
+}
 
 /// Tudo que precisa estar pronto antes de o mapa de memória ser pedido.
 struct Reservado {
@@ -52,33 +78,41 @@ struct Reservado {
 
 /// Entrega a máquina ao kernel. Não retorna.
 ///
+/// `partir` é o último instante, e é a única coisa que difere entre as
+/// arquiteturas: ela recebe o endereço de entrada e o endereço **virtual**
+/// da entrega, e não volta.
+///
 /// # Safety
 ///
-/// `carga` precisa descrever uma imagem já copiada, relocada e com o mapa
-/// montado e conferido. `imagem` é o handle que o firmware passou em
-/// `efi_main` — é ele que autoriza a saída dos serviços de boot.
+/// `destino` precisa descrever uma imagem já copiada, relocada e — onde a
+/// arquitetura exigir — com o mapa montado e conferido. `imagem` é o handle
+/// que o firmware passou em `efi_main`, e é ele que autoriza a saída dos
+/// serviços de boot.
 pub unsafe fn saltar(
     imagem: efi::Handle,
     boot: &efi::ServicosDeBoot,
-    carga: &Carga,
+    destino: &Destino,
+    partir: impl FnOnce(u64, u64) -> !,
 ) -> Result<core::convert::Infallible, &'static str> {
     let reservado = reservar(boot)?;
 
     // Daqui para baixo, **nada** de alocar: qualquer alocação muda o mapa e
     // invalida a chave que o `ExitBootServices` exige.
-    let (chave, quantas) = ultimo_mapa(boot, &reservado, carga)?;
+    let (chave, quantas) = ultimo_mapa(boot, &reservado, destino)?;
 
     let entrega = protocolo::Entrega {
         magica: protocolo::MAGICA,
         versao: protocolo::VERSAO,
         tamanho: size_of::<protocolo::Entrega>() as u32,
-        deslocamento_fisico: mapa::BASE_DA_MEMORIA_FISICA,
-        // O ponteiro que o kernel recebe é **virtual**: ele só é válido
-        // depois da troca de `CR3`, e é por isso que ele é montado com o
-        // deslocamento somado em vez de ser o endereço em que escrevemos.
-        regioes: mapa::BASE_DA_MEMORIA_FISICA + reservado.regioes as u64,
+        deslocamento_fisico: destino.deslocamento,
+        // O ponteiro que o kernel recebe é **virtual**: no x86 ele só é
+        // válido depois da troca de `CR3`, e é por isso que ele é montado
+        // com o deslocamento somado em vez de ser o endereço em que
+        // escrevemos. No ARM o deslocamento é zero e os dois coincidem.
+        regioes: destino.deslocamento + reservado.regioes as u64,
         quantas_regioes: quantas as u64,
-        video: carga.entrega_de_video(),
+        video: destino.video,
+        dispositivos: destino.dispositivos,
     };
     // SAFETY: a página veio do firmware, está alinhada, e ninguém mais a tem.
     unsafe { reservado.entrega.write(entrega) };
@@ -97,7 +131,7 @@ pub unsafe fn saltar(
         // ter mudado entre a leitura e a saída. Se a segunda também falhar, o
         // firmware está dizendo que não vai sair, e insistir é laço.
         relatar!("a primeira saida devolveu {:#x}; relendo o mapa", status);
-        let (chave, _) = ultimo_mapa(boot, &reservado, carga)?;
+        let (chave, _) = ultimo_mapa(boot, &reservado, destino)?;
         // SAFETY: mesma justificativa, com a chave nova.
         let status = unsafe { (boot.sair_dos_servicos_de_boot)(imagem, chave) };
         if efi::deu_errado(status) {
@@ -107,34 +141,12 @@ pub unsafe fn saltar(
     }
 
     // A partir daqui o firmware não existe mais. Só a serial, que é nossa.
-    relatar!("a maquina e do Duke; saltando para {:#x}", carga.entrada);
+    relatar!("a maquina e do Duke; saltando para {:#x}", destino.entrada);
 
-    let virtual_da_entrega = mapa::BASE_DA_MEMORIA_FISICA + reservado.entrega as u64;
-
-    // SAFETY: o mapa foi conferido, inclusive a identidade que cobre este
-    // código; a pilha está mapeada e o topo dela é o endereço logo acima da
-    // última página; a entrada está mapeada e os bytes dela são os do
-    // arquivo. Nada entre o `cli` e o `jmp` toca memória que o mapa novo não
-    // descreva.
-    unsafe {
-        core::arch::asm!(
-            // Interrupções fora antes de qualquer coisa: a IDT que ainda está
-            // carregada é a do firmware, e o código dela some com o mapa.
-            "cli",
-            "mov cr3, {raiz}",
-            "mov rsp, {pilha}",
-            // O quadro de pilha acaba aqui. Zerar o ponteiro de base é o que
-            // faz um depurador parar de desenrolar em vez de seguir por
-            // valores que sobraram do firmware.
-            "xor rbp, rbp",
-            "jmp {entrada}",
-            raiz = in(reg) carga.tabelas.raiz(),
-            pilha = in(reg) carga.topo_da_pilha,
-            entrada = in(reg) carga.entrada,
-            in("rdi") virtual_da_entrega,
-            options(noreturn)
-        );
-    }
+    partir(
+        destino.entrada,
+        destino.deslocamento + reservado.entrega as u64,
+    )
 }
 
 /// Reserva, ainda com o firmware vivo, tudo que a entrega precisa.
@@ -190,7 +202,7 @@ fn reservar(boot: &efi::ServicosDeBoot) -> Result<Reservado, &'static str> {
 fn ultimo_mapa(
     boot: &efi::ServicosDeBoot,
     reservado: &Reservado,
-    carga: &Carga,
+    destino: &Destino,
 ) -> Result<(usize, usize), &'static str> {
     let mut tamanho = reservado.mapa_bytes;
     let mut chave = 0usize;
@@ -250,10 +262,10 @@ fn ultimo_mapa(
     // de uma região que **não** seja utilizável. Se ele aparecer como livre,
     // o alocador de frames do kernel vai entregar as páginas em que ele mesmo
     // está rodando — e o defeito aparece páginas depois, em outro lugar.
-    if !esta_protegido(reservado, escritas, carga.base_fisica) {
+    if !esta_protegido(reservado, escritas, destino.base_fisica) {
         relatar!(
             "ERRO a imagem em {:#x} consta como livre",
-            carga.base_fisica
+            destino.base_fisica
         );
         return Err("o kernel esta numa regiao que o mapa diz estar livre");
     }

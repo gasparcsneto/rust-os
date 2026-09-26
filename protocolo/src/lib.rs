@@ -68,6 +68,33 @@ pub struct Entrega {
     pub regioes: u64,
     pub quantas_regioes: u64,
     pub video: Video,
+    /// Onde o device tree está, em endereço **físico**, ou zero quando não há.
+    ///
+    /// # Por que ele vem aqui, e por que só no ARM
+    ///
+    /// Porque no ARM o device tree é a fonte de tudo que não está no
+    /// processador: onde a RAM começa, onde está o controlador de
+    /// interrupções, onde está o ECAM do PCI. O protocolo de imagem crua do
+    /// arm64 o entrega em `x0`, e o registrador passa a carregar a entrega —
+    /// então ele precisa de outro caminho.
+    ///
+    /// Na UEFI ele não vem em registrador nenhum: ele é uma entrada da
+    /// **tabela de configuração**, identificada por um GUID, que o iniciador
+    /// procura. Passá-lo já achado poupa ao kernel percorrer a tabela, e mais
+    /// que isso: depois do `ExitBootServices` a tabela do sistema pode não
+    /// estar mais mapeada, e o kernel não teria onde procurar.
+    ///
+    /// No x86 é zero, e é a resposta certa: não há device tree numa máquina
+    /// PC, e o mapa de memória vem do próprio firmware pelas regiões acima.
+    ///
+    /// # Por que é físico, ao contrário das regiões
+    ///
+    /// Porque quem o mapeia é o kernel, e ele já tem um caminho para isso —
+    /// no ARM o mapa é de identidade, então o endereço físico serve direto.
+    /// As regiões são virtuais porque o iniciador as escreve dentro do
+    /// espaço que montou para o kernel; o device tree não é dele, é da
+    /// placa.
+    pub dispositivos: u64,
 }
 
 /// O framebuffer, já mapeado pelo iniciador.
@@ -137,7 +164,7 @@ pub mod tipo {
 // impede a mudança — ela obriga quem a fizer a passar por aqui e subir a
 // versão se o significado mudou.
 const _: () = {
-    assert!(size_of::<Entrega>() == 80);
+    assert!(size_of::<Entrega>() == 88);
     assert!(size_of::<Video>() == 40);
     assert!(size_of::<Regiao>() == 24);
 };
