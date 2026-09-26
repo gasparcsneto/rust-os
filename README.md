@@ -898,6 +898,78 @@ firmware a carrega de `\EFI\BOOT\BOOTX64.EFI` na partição de sistema do
 mesmo disco que o kernel depois lê, ela põe o kernel de pé e lhe entrega a
 máquina. Não há mais bootloader de terceiros no caminho de boot do Duke.
 
+### O mesmo programa nos dois firmwares
+
+O iniciador compila para `x86_64-unknown-uefi` e para `aarch64-unknown-uefi`,
+e roda no EDK II de verdade dos dois lados — OVMF no x86, AAVMF no ARM, que
+são a mesma base de código compilada para processadores diferentes.
+
+E é literalmente o mesmo programa. Conferir as três tabelas do firmware por
+assinatura e CRC, descrever o mapa de memória, achar a tela pelo protocolo de
+vídeo, seguir a corrente de três elos até a partição de sistema, ler o kernel
+em pedaços de 64 KiB e validar o ELF inteiro — nada disso tem uma linha de
+`cfg`. A UEFI é a mesma especificação nas duas máquinas, com as mesmas
+tabelas, os mesmos GUIDs e a mesma convenção de chamada, que o compilador
+traduz sozinho.
+
+O que o módulo `alvo/` separa é o que a especificação não cobre porque não é
+dela:
+
+| | x86_64 | aarch64 |
+|---|---|---|
+| Serial | COM1 em `0x3F8`, por porta de I/O | PL011 em `0x0900_0000`, memória mapeada |
+| Arquivo na ESP | `BOOTX64.EFI` | `BOOTAA64.EFI` |
+| `e_machine` do ELF | `0x3E` | `0xB7` |
+| Relocação relativa | `R_X86_64_RELATIVE` = 8 | `R_AARCH64_RELATIVE` = 1027 |
+| Parar o núcleo | `hlt` | `wfi` |
+
+O número da relocação merece uma nota. Cada arquitetura numera as próprias a
+partir de um, então o `8` do x86 **existe** no ARM e quer dizer outra coisa
+(`R_AARCH64_ABS16`). Aplicar a tabela de uma no ELF da outra não daria erro:
+daria um punhado de escritas plausíveis nos lugares errados.
+
+**Onde o ARM para hoje, e por quê.** O iniciador do ARM sobe no AAVMF, faz
+tudo que está acima, confere a tabela de relocações do kernel entrada por
+entrada — e então **recusa saltar**, em voz alta:
+
+```
+$ cargo xtask iniciador --arch aarch64
+  [iniciador] vivo em aarch64, carregado pelo firmware
+  [iniciador] firmware `Ubuntu distribution of EDK II` revisao 0x10000
+  [iniciador] as tres tabelas conferem, por assinatura e por crc
+  [iniciador] memoria: 33 descritores de 48 bytes, 192 MiB descritos, 122 MiB livres
+  [iniciador] video: 800x600 bgr, 800 pixels por linha, buffer em 0x43d00000
+  [iniciador] esp: duke.elf aberto e lido, 5830616 bytes, crc 0xe2fe991d
+  [iniciador] elf: 5830616 bytes, entrada em 0x40080000, endereco fixo
+  [iniciador] kernel: 3 segmentos, 0x40080000..0x401ab000, 717 KiB do arquivo
+  [iniciador] fim do relatorio
+  [iniciador] ERRO o salto no aarch64 ainda nao existe
+```
+
+O que falta é justamente o que a UEFI não padroniza: montar as tabelas no
+formato VMSAv8, programar `MAIR_EL1` e `TCR_EL1`, trocar o `TTBR` com as
+barreiras que a arquitetura exige, e entregar ao kernel o device tree que
+hoje ele recebe em `x0` pelo protocolo de imagem crua do arm64. Esse último
+item é o que torna a etapa maior do que parece — ela não é só escrever o
+iniciador, é trocar o protocolo de boot do lado do kernel.
+
+A linha `endereco fixo` do relatório é o registro disso: o kernel do ARM é
+ligado num endereço fixo e não tem relocação nenhuma, porque quem o carrega
+hoje não reloca nada. A próxima etapa vai ter de respeitar aquele endereço
+ou tornar o kernel relocável, e a sonda exige a linha para que a escolha não
+seja feita por acidente.
+
+**A sonda do ARM não é a do x86 com menos linhas.** Ela exige o relatório até
+a validação do ELF, exige a recusa explícita do salto, e roda as **mesmas
+quatro recusas** com kernels estragados de propósito — que valem ali
+exatamente como valem no x86, porque o leitor de ELF é o mesmo código.
+
+Uma delas só passou a valer depois de um conserto: o caso "um kernel de outra
+arquitetura" escrevia `0xB7` fixo no campo `e_machine`, o que no ARM é copiar
+o valor certo por cima dele mesmo. O iniciador aceitava o arquivo, com razão,
+e a rodada reprovava. O byte agora é o da **outra** arquitetura, seja qual
+for a de quem está rodando.
+
 ```
 $ cargo xtask iniciador
   [iniciador] vivo, carregado pelo firmware
@@ -1252,7 +1324,22 @@ padronizado.
       máquina, abre o `duke.elf` na mesma partição com o CRC conferido de
       fora, copia os segmentos, aplica as relocações, monta o mapa de
       tradução e o confere, sai dos serviços de boot e salta. O crate
-      `bootloader` saiu. **Fase 4 completa.**
+      `bootloader` saiu. E a descida pela árvore do Btrfs, que tirou o
+      limite de "uma folha" e fez o leitor atravessar nós internos — com a
+      imagem de teste refeita para ter níveis de verdade. E o `fork` com
+      cópia na escrita, com contagem de donos por frame; e um fio coletor
+      que recolhe o espaço de endereços do processo morto sem esperar a vaga
+      dele ser reaproveitada. **Fase 4 completa.**
+- [ ] **Fase 5 — O iniciador nas duas máquinas.** O `iniciador/` já compila
+      para `aarch64-unknown-uefi` e sobe no AAVMF: ele confere as tabelas do
+      firmware, descreve a memória e a tela, abre o kernel na ESP e valida o
+      ELF inteiro — o mesmo código do x86, sem uma linha de `cfg`, porque a
+      UEFI é a mesma especificação nas duas. Falta o que ela não padroniza:
+      as tabelas no formato VMSAv8, o `MAIR_EL1` e o `TCR_EL1`, a troca do
+      `TTBR` com as barreiras da arquitetura, e a entrega ao kernel — que
+      exige trocar, do lado dele, o protocolo de imagem crua do arm64 pela
+      `Entrega`, com o device tree vindo da tabela de configuração da UEFI
+      em vez de `x0`.
 
 ## Licença
 

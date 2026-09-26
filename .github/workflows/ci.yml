@@ -58,7 +58,9 @@ jobs:
       - name: Lints
         run: |
           cargo clippy -p xtask --all-targets -- -D warnings
-          (cd iniciador && cargo clippy --target x86_64-unknown-uefi -- -D warnings)
+          for alvo in x86_64-unknown-uefi aarch64-unknown-uefi; do
+            (cd iniciador && cargo clippy --target "$alvo" -- -D warnings)
+          done
           cd kernel
           for alvo in x86_64-unknown-none aarch64-unknown-none-softfloat; do
             cargo clippy --target "$alvo" -- -D warnings
@@ -102,7 +104,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             qemu-system-x86 qemu-system-arm \
-            gdisk dosfstools mtools btrfs-progs ovmf
+            gdisk dosfstools mtools btrfs-progs ovmf qemu-efi-aarch64
 
       - name: Suíte de testes
         run: cargo xtask test --arch ${{ matrix.arch }}
@@ -138,9 +140,15 @@ jobs:
       # confere o relatório que ele emite. Não é um teste do kernel: é a
       # afirmação de que o firmware encontra o nosso programa e de que o que
       # ele lê da máquina bate com a máquina que pedimos ao emulador.
+      # O iniciador UEFI, nas duas arquiteturas e nos dois firmwares.
+      #
+      # Não é o mesmo passo duas vezes: no x86 a sonda exige que o kernel
+      # assuma a máquina e fale do outro lado do salto; no ARM ela exige o
+      # relatório até a validação do ELF e a recusa explícita do salto que
+      # ainda não existe. Os dois usam o EDK II de verdade — OVMF de um
+      # lado, AAVMF do outro.
       - name: Iniciador UEFI
-        if: matrix.arch == 'x86_64'
-        run: cargo xtask iniciador
+        run: cargo xtask iniciador --arch ${{ matrix.arch }}
 
       # E uma terceira, com teclado USB no lugar do nativo.
       #

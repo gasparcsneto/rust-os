@@ -21,8 +21,11 @@ components = ["rust-src", "llvm-tools", "rustfmt", "clippy"]
 targets = [
     "x86_64-unknown-none",
     "aarch64-unknown-none-softfloat",
-    # O alvo do iniciador UEFI. Não é um alvo bare-metal: uma aplicação EFI é
-    # um PE/COFF com ABI própria, carregado pelo firmware.
+    # Os alvos do iniciador UEFI, um por arquitetura. Não são alvos
+    # bare-metal: uma aplicação EFI é um PE/COFF com ABI própria, carregado
+    # pelo firmware — e é o **mesmo** programa nos dois, porque a UEFI é a
+    # mesma especificação nas duas máquinas.
     "x86_64-unknown-uefi",
+    "aarch64-unknown-uefi",
 ]
 profile = "minimal"

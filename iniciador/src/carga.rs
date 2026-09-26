@@ -21,7 +21,7 @@
 //! primeiro que não tem relatório: depois do `mov cr3`, ou a máquina segue ou
 //! ela reinicia calada.
 
-use crate::efi;
+use crate::efi::{self, Tela};
 use crate::elf;
 use crate::paginas::{self, PAGINA, Tabelas, bit};
 use crate::relatar;
@@ -44,7 +44,7 @@ pub struct Carga {
     /// O topo da pilha que o kernel vai usar, em endereço virtual.
     pub topo_da_pilha: u64,
     /// Onde o framebuffer ficou, em endereço virtual, se houver, e o que ele é.
-    pub video: Option<(u64, Video)>,
+    pub video: Option<(u64, Tela)>,
 }
 
 impl Carga {
@@ -78,24 +78,12 @@ impl Carga {
     }
 }
 
-/// O que o vídeo é, e o que dele precisa ser mapeado.
-#[derive(Clone, Copy)]
-pub struct Video {
-    pub fisico: u64,
-    pub bytes: u64,
-    pub formato: u32,
-    pub largura: u32,
-    pub altura: u32,
-    pub pixels_por_linha: u32,
-    pub bytes_por_pixel: u32,
-}
-
 /// Copia o kernel, reloca, e monta o mapa em que ele vai rodar.
 pub fn carregar(
     boot: &efi::ServicosDeBoot,
     imagem: &elf::Imagem,
     maior_ram: u64,
-    video: Option<Video>,
+    video: Option<Tela>,
 ) -> Result<Carga, &'static str> {
     let (menor, maior) = extensao(imagem)?;
     let bytes = (maior - menor).next_multiple_of(PAGINA);
@@ -314,7 +302,7 @@ fn relocar(imagem: &elf::Imagem, destino: &mut [u8], menor: u64) -> Result<usize
 
         // O tipo são os 32 bits de baixo; os de cima são o índice do símbolo,
         // que uma relocação relativa não usa.
-        if (info & 0xFFFF_FFFF) as u32 != elf::RELATIVA {
+        if (info & 0xFFFF_FFFF) as u32 != crate::alvo::RELOCACAO_RELATIVA {
             relatar!(
                 "ERRO relocacao de tipo {} na entrada {}",
                 info & 0xFFFF_FFFF,
@@ -519,7 +507,7 @@ fn mapear_a_pilha(tabelas: &mut Tabelas, boot: &efi::ServicosDeBoot) -> Result<u
 /// Ele não cai no mapa da memória física porque não é memória física: é um
 /// bloco de dispositivo, fora da RAM que o firmware descreveu. Mapeá-lo à
 /// parte é o que torna o endereço previsível para o kernel.
-fn mapear_o_video(tabelas: &mut Tabelas, video: Video) -> Result<u64, &'static str> {
+fn mapear_o_video(tabelas: &mut Tabelas, video: Tela) -> Result<u64, &'static str> {
     if !video.fisico.is_multiple_of(PAGINA) {
         return Err("o framebuffer nao comeca numa fronteira de pagina");
     }

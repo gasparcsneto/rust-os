@@ -1,4 +1,6 @@
-//! A porta serial, escrita direto no hardware.
+//! O que o Duke precisa saber sobre o x86_64 para ser iniciado.
+//!
+//! # A porta serial, escrita direto no hardware
 //!
 //! # Por que não o console do firmware
 //!
@@ -60,13 +62,29 @@ unsafe fn ler_porta(porta: u16) -> u8 {
     valor
 }
 
+/// O número que o ELF usa para esta arquitetura.
+pub const MAQUINA: u16 = 0x3E;
+
+/// O tipo de relocação que soma a base de carga a um valor.
+///
+/// `R_X86_64_RELATIVE`. É a única que uma imagem autocontida e independente
+/// de posição produz, e recusar qualquer outra é o que impede este
+/// iniciador de aplicar em silêncio uma relocação cujo significado ele não
+/// conhece.
+pub const RELOCACAO_RELATIVA: u32 = 8;
+
+/// O nome desta arquitetura, para o relatório.
+pub const fn nome() -> &'static str {
+    "x86_64"
+}
+
 /// Programa a COM1 para 38400 bauds, 8N1, sem interrupções.
 ///
 /// O firmware já a deixou utilizável, e este passo existe assim mesmo: a
 /// configuração que ele escolheu é dele, não nossa, e um iniciador que
 /// dependesse de herdar a velocidade certa funcionaria num firmware e
 /// emudeceria noutro.
-pub fn init() {
+pub fn init_serial() {
     // SAFETY: núcleo único, antes de qualquer outra coisa nossa tocar a porta.
     unsafe {
         escrever_porta(COM1 + HABILITAR_INTERRUPCOES, 0x00);
@@ -117,6 +135,17 @@ impl fmt::Write for Serial {
 macro_rules! relatar {
     ($($arg:tt)*) => {{
         use core::fmt::Write;
-        let _ = writeln!($crate::serial::Serial, "iniciador: {}", format_args!($($arg)*));
+        let _ = writeln!($crate::alvo::Serial, "iniciador: {}", format_args!($($arg)*));
     }};
+}
+
+/// Pára o núcleo até a próxima interrupção.
+///
+/// É o que o iniciador faz quando não há mais nada a fazer e nem como
+/// desligar. Um laço vazio manteria o núcleo em cem por cento girando à toa,
+/// o que num emulador é a diferença entre uma máquina parada e uma que
+/// parece travada.
+pub fn dormir() {
+    // SAFETY: `hlt` não toca em memória e só suspende o núcleo.
+    unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };
 }

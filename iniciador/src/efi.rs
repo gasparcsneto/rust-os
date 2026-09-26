@@ -416,3 +416,28 @@ pub const FIM_DO_ARQUIVO: u64 = u64::MAX;
 
 /// `AllocateAnyPages`: o firmware escolhe onde.
 pub const ALOCAR_QUALQUER: u32 = 0;
+
+/// O que a tela **é**, depois de o protocolo de vídeo ser consultado.
+///
+/// Mora aqui, e não junto de quem a mapeia, porque descobri-la é trabalho do
+/// firmware: o `Graphics Output Protocol` é da especificação e responde a
+/// mesma coisa nas duas arquiteturas. Quem a mapeia é que difere.
+///
+/// O nome é `Tela`, e não `Video`, porque [`Video`] já é o protocolo — a
+/// tabela de ponteiros que o firmware entrega. São coisas diferentes: uma é
+/// a pergunta, a outra é a resposta.
+///
+/// Os campos ficam todos declarados nas duas arquiteturas embora só o x86
+/// os leia hoje: quem os lê é o mapeamento do vídeo, que é a parte que o
+/// ARM ainda não tem.
+#[allow(dead_code)]
+#[derive(Clone, Copy)]
+pub struct Tela {
+    pub fisico: u64,
+    pub bytes: u64,
+    pub formato: u32,
+    pub largura: u32,
+    pub altura: u32,
+    pub pixels_por_linha: u32,
+    pub bytes_por_pixel: u32,
+}

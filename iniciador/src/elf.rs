@@ -28,9 +28,6 @@
 /// comparações, e erra menos.
 const IDENTIFICACAO: [u8; 8] = [0x7F, b'E', b'L', b'F', 2, 1, 1, 0];
 
-/// `EM_X86_64`.
-pub const MAQUINA_X86_64: u16 = 0x3E;
-
 /// Os tipos de arquivo que um carregador aceita.
 mod tipo {
     /// Executável de endereço fixo.
@@ -81,14 +78,6 @@ mod etiqueta {
     /// Quanto ocupa cada entrada dela.
     pub const RELA_ENTRADA: u64 = 9;
 }
-
-/// `R_X86_64_RELATIVE`: some a base de carga ao adendo, e escreva.
-///
-/// É a única relocação que um executável independente de posição sem
-/// símbolos externos produz — e este kernel é exatamente isso. Qualquer
-/// outra exigiria resolver um símbolo, que é trabalho de ligador dinâmico e
-/// não de carregador de kernel.
-pub const RELATIVA: u32 = 8;
 
 /// Quanto ocupa uma entrada `Elf64_Rela`.
 pub const TAMANHO_DA_RELOCACAO: usize = 24;
@@ -153,6 +142,11 @@ fn u64_em(bytes: &[u8], em: usize) -> Option<u64> {
     Some(u64::from_le_bytes(bytes.get(em..em + 8)?.try_into().ok()?))
 }
 
+// Quais métodos têm consumidor depende do alvo: o iniciador do x86 já copia
+// e reloca a imagem, e o do ARM ainda só a confere. Anotar aqui é mais
+// honesto que inventar um chamador só para o build ficar limpo — e some
+// sozinho quando o salto do ARM chegar.
+#[allow(dead_code)]
 impl<'a> Imagem<'a> {
     /// Confere o cabeçalho e prepara a leitura dos segmentos.
     pub fn abrir(bytes: &'a [u8]) -> Result<Imagem<'a>, &'static str> {
@@ -296,6 +290,32 @@ impl<'a> Imagem<'a> {
             .get(em)
             .copied()
             .ok_or("o deslocamento esta fora do arquivo")
+    }
+
+    /// Onde está a tabela de relocações desta imagem.
+    ///
+    /// Um atalho sobre [`relocacoes`] que evita ao chamador ter de alcançar
+    /// os bytes crus do arquivo — que são privados de propósito: quem os
+    /// tivesse na mão poderia recortar qualquer coisa deles sem passar pelas
+    /// conferências de faixa que esta struct faz.
+    pub fn relocacoes(&self, dinamica: &Segmento, menor: u64) -> Result<Relocacoes, &'static str> {
+        relocacoes(
+            self.bytes,
+            menor,
+            dinamica.endereco,
+            dinamica.tamanho_no_arquivo,
+        )
+    }
+
+    /// Um pedaço do arquivo, pelo deslocamento e pelo tamanho.
+    ///
+    /// Devolve `None` quando o pedaço sai do arquivo — que é a resposta
+    /// certa: tudo aqui vem de um arquivo lido de um disco, e recortar
+    /// memória vizinha porque um número veio grande demais é como um leitor
+    /// de formato entrega o conteúdo de outra coisa como se fosse o pedido.
+    pub fn fatia(&self, em: u64, quantos: usize) -> Option<&'a [u8]> {
+        let de = usize::try_from(em).ok()?;
+        self.bytes.get(de..de.checked_add(quantos)?)
     }
 
     /// Os bytes que um segmento traz do arquivo.

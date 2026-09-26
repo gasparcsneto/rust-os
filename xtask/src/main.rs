@@ -461,9 +461,9 @@ fn build(arch: Arquitetura, release: bool, modo_teste: bool) -> Result<Artefato,
             // incondicional porque `test`, `fumaca` e `run` compilam binários
             // diferentes, e bootar o errado dá um resultado que não é sobre o
             // que se pediu.
-            let efi = build_do_iniciador(release)?;
+            let efi = build_do_iniciador(arch, release)?;
             let disco = disco_de_testes()?;
-            instalar_iniciador(&disco, &efi, &elf)?;
+            instalar_iniciador(arch, &disco, &efi, &elf)?;
             Ok(Artefato::Disco(disco))
         }
     }
@@ -537,19 +537,33 @@ fn conferidor_de_elf() -> Result<(PathBuf, &'static str), String> {
     Ok((ferramenta_llvm("llvm-readobj")?, "--elf-output-style=GNU"))
 }
 
-/// O alvo em que o iniciador UEFI compila.
+/// O alvo em que o iniciador UEFI compila, por arquitetura.
 ///
 /// Não é o alvo do kernel: uma aplicação EFI é um **PE/COFF** com uma ABI de
 /// chamada própria, e não um ELF bare-metal. O firmware é quem a carrega, e
 /// ele só conhece um formato.
-const ALVO_DO_INICIADOR: &str = "x86_64-unknown-uefi";
+const fn alvo_do_iniciador(arch: Arquitetura) -> &'static str {
+    match arch {
+        Arquitetura::X86_64 => "x86_64-unknown-uefi",
+        Arquitetura::Aarch64 => "aarch64-unknown-uefi",
+    }
+}
 
 /// Onde o firmware procura o programa de boot num disco removível.
 ///
 /// O caminho é fixado pela especificação, e é a razão de a aplicação não
 /// precisar de nenhuma entrada no NVRAM da máquina: qualquer firmware UEFI,
 /// sem configuração nenhuma, procura este arquivo na partição de sistema.
-const CAMINHO_NA_ESP: &str = "::/EFI/BOOT/BOOTX64.EFI";
+///
+/// O nome carrega a arquitetura porque a ESP é uma só: um disco pode ser
+/// posto numa máquina x86 hoje e numa ARM amanhã, e os dois programas
+/// convivem sem que nenhum firmware precise escolher.
+const fn caminho_na_esp(arch: Arquitetura) -> &'static str {
+    match arch {
+        Arquitetura::X86_64 => "::/EFI/BOOT/BOOTX64.EFI",
+        Arquitetura::Aarch64 => "::/EFI/BOOT/BOOTAA64.EFI",
+    }
+}
 
 /// Onde o kernel fica na mesma partição, para o iniciador achá-lo.
 ///
@@ -565,7 +579,7 @@ const KERNEL_NA_ESP: &str = "::/duke.elf";
 /// separado do código; a outra é o arquivo único das versões antigas. Ambas
 /// existem em distribuições diferentes, e o `xtask` não escolhe por
 /// distribuição — escolhe pelo que está no disco.
-const FIRMWARES: &[(&str, &str)] = &[
+const FIRMWARES_X86: &[(&str, &str)] = &[
     (
         "/usr/share/OVMF/OVMF_CODE_4M.fd",
         "/usr/share/OVMF/OVMF_VARS_4M.fd",
@@ -580,17 +594,38 @@ const FIRMWARES: &[(&str, &str)] = &[
     ),
 ];
 
+/// O mesmo para o ARM: o EDK II compilado para aarch64, que as distribuições
+/// chamam de AAVMF. É a **mesma** base de código do OVMF, compilada para
+/// outro processador — o que é justamente o ponto do iniciador ser o mesmo
+/// programa.
+const FIRMWARES_ARM: &[(&str, &str)] = &[
+    (
+        "/usr/share/AAVMF/AAVMF_CODE.fd",
+        "/usr/share/AAVMF/AAVMF_VARS.fd",
+    ),
+    (
+        "/usr/share/edk2/aarch64/QEMU_EFI-silent-pflash.raw",
+        "/usr/share/edk2/aarch64/vars-template-pflash.raw",
+    ),
+];
+
+const fn firmwares(arch: Arquitetura) -> &'static [(&'static str, &'static str)] {
+    match arch {
+        Arquitetura::X86_64 => FIRMWARES_X86,
+        Arquitetura::Aarch64 => FIRMWARES_ARM,
+    }
+}
+
 /// Compila o iniciador e devolve o `.efi` produzido.
-fn build_do_iniciador(release: bool) -> Result<PathBuf, String> {
+fn build_do_iniciador(arch: Arquitetura, release: bool) -> Result<PathBuf, String> {
     let raiz = raiz_do_projeto();
     let dir = raiz.join("iniciador");
     let perfil = if release { "release" } else { "debug" };
-    println!("[xtask] compilando o iniciador UEFI ({perfil})...");
+    let alvo = alvo_do_iniciador(arch);
+    println!("[xtask] compilando o iniciador UEFI ({alvo}, {perfil})...");
 
     let mut cargo = Command::new(env!("CARGO"));
-    cargo
-        .current_dir(&dir)
-        .args(["build", "--target", ALVO_DO_INICIADOR]);
+    cargo.current_dir(&dir).args(["build", "--target", alvo]);
     if release {
         cargo.arg("--release");
     }
@@ -610,7 +645,7 @@ fn build_do_iniciador(release: bool) -> Result<PathBuf, String> {
 
     let efi = dir
         .join("target")
-        .join(ALVO_DO_INICIADOR)
+        .join(alvo)
         .join(perfil)
         .join("iniciador.efi");
     if !efi.exists() {
@@ -635,7 +670,12 @@ fn build_do_iniciador(release: bool) -> Result<PathBuf, String> {
 /// cacheado por uma receita que não menciona o iniciador, de propósito:
 /// recompilá-lo não deve custar a remontagem de 192 MiB, e sobrescrever um
 /// arquivo de 35 KiB é barato o bastante para ser incondicional.
-fn instalar_iniciador(disco: &Path, efi: &Path, kernel: &Path) -> Result<(), String> {
+fn instalar_iniciador(
+    arch: Arquitetura,
+    disco: &Path,
+    efi: &Path,
+    kernel: &Path,
+) -> Result<(), String> {
     let imagem = format!("{}@@1M", disco.display());
 
     // `mmd` reclama se o diretório já existe, e existir é o caso comum. O
@@ -645,7 +685,7 @@ fn instalar_iniciador(disco: &Path, efi: &Path, kernel: &Path) -> Result<(), Str
         let _ = Command::new("mmd").args(["-i", &imagem, dir]).output();
     }
 
-    for (origem, destino) in [(efi, CAMINHO_NA_ESP), (kernel, KERNEL_NA_ESP)] {
+    for (origem, destino) in [(efi, caminho_na_esp(arch)), (kernel, KERNEL_NA_ESP)] {
         ferramenta(
             "mcopy",
             &["-o", "-i", &imagem, &origem.display().to_string(), destino],
@@ -665,21 +705,29 @@ fn instalar_iniciador(disco: &Path, efi: &Path, kernel: &Path) -> Result<(), Str
 /// O arquivo de variáveis **precisa** ser gravável e nosso: o firmware
 /// escreve nele durante o boot, e apontar o QEMU para o do sistema ou falha
 /// por permissão ou suja a instalação da máquina.
-fn firmware_uefi() -> Result<(PathBuf, PathBuf), String> {
-    let (codigo, variaveis) = FIRMWARES
+fn firmware_uefi(arch: Arquitetura) -> Result<(PathBuf, PathBuf), String> {
+    let candidatos = firmwares(arch);
+    let (codigo, variaveis) = candidatos
         .iter()
         .map(|(c, v)| (PathBuf::from(c), PathBuf::from(v)))
         .find(|(c, v)| c.is_file() && v.is_file())
         .ok_or_else(|| {
-            let procurados: Vec<&str> = FIRMWARES.iter().map(|(c, _)| *c).collect();
+            let procurados: Vec<&str> = candidatos.iter().map(|(c, _)| *c).collect();
+            let pacote = match arch {
+                Arquitetura::X86_64 => "`ovmf` (Debian/Ubuntu) ou `edk2-ovmf` (Fedora)",
+                Arquitetura::Aarch64 => "`qemu-efi-aarch64` (Debian/Ubuntu) ou `edk2-aarch64`",
+            };
             format!(
-                "nenhum firmware UEFI encontrado. Procurei em: {}.\n\
-                 Instale o pacote `ovmf` (Debian/Ubuntu) ou `edk2-ovmf` (Fedora).",
+                "nenhum firmware UEFI de {} encontrado. Procurei em: {}.\n\
+                 Instale o pacote {pacote}.",
+                arch.nome(),
                 procurados.join(", ")
             )
         })?;
 
-    let nossas = raiz_do_projeto().join("target").join("ovmf-vars.fd");
+    let nossas = raiz_do_projeto()
+        .join("target")
+        .join(format!("uefi-vars-{}.fd", arch.nome()));
     std::fs::copy(&variaveis, &nossas).map_err(|e| {
         format!(
             "não foi possível copiar {} para {}: {e}",
@@ -710,8 +758,9 @@ const TETO_DO_INICIADOR: Duration = Duration::from_secs(90);
 /// endereços, dizendo que está de pé.
 const MARCA_DO_KERNEL: &str = "Duke iniciado em x86_64";
 
+/// O relatório que o iniciador do x86 precisa produzir, do começo ao salto.
 const ESPERADO_DO_INICIADOR: &[&str] = &[
-    "vivo, carregado pelo firmware",
+    "vivo em x86_64, carregado pelo firmware",
     "tabela do sistema confere",
     "as tres tabelas conferem",
     "esp: duke.elf aberto e lido",
@@ -722,30 +771,63 @@ const ESPERADO_DO_INICIADOR: &[&str] = &[
     "a maquina e do Duke",
 ];
 
+/// O que o iniciador do ARM precisa dizer hoje.
+///
+/// É o **mesmo programa** até a validação do ELF, e a lista mostra isso: as
+/// quatro primeiras linhas são idênticas às do x86, porque o código que as
+/// escreve é o mesmo. O que falta depois é o que a UEFI não padroniza —
+/// tabelas de tradução, saída dos serviços de boot e salto —, e a última
+/// linha é o iniciador dizendo exatamente isso em voz alta, em vez de
+/// saltar para um mapa que ninguém montou.
+const ESPERADO_DO_INICIADOR_ARM: &[&str] = &[
+    "vivo em aarch64, carregado pelo firmware",
+    "tabela do sistema confere",
+    "as tres tabelas conferem",
+    "esp: duke.elf aberto e lido",
+    // O kernel do ARM é ligado num endereço fixo, e não independente de
+    // posição como o do x86 — ele é carregado pelo protocolo de imagem crua
+    // do arm64, que não reloca nada. Exigir a linha aqui registra o fato
+    // onde ele importa: é o que a próxima etapa vai ter de resolver, ou
+    // respeitando o endereço, ou tornando o kernel relocável.
+    "endereco fixo",
+    "kernel conferido",
+    "relocacoes relativas",
+    "fim do relatorio",
+    "o salto no aarch64 ainda nao existe",
+];
+
+const fn esperado_do_iniciador(arch: Arquitetura) -> &'static [&'static str] {
+    match arch {
+        Arquitetura::X86_64 => ESPERADO_DO_INICIADOR,
+        Arquitetura::Aarch64 => ESPERADO_DO_INICIADOR_ARM,
+    }
+}
+
 /// Sobe o iniciador no firmware de verdade e confere o que ele relatou.
 fn iniciador(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
-    if arch != Arquitetura::X86_64 {
-        return Err(format!(
-            "o iniciador UEFI ainda é só do x86_64; o {} continua bootando pelo \
-             protocolo de imagem crua do arm64",
-            arch.nome()
-        ));
-    }
-
-    let efi = build_do_iniciador(release)?;
+    let efi = build_do_iniciador(arch, release)?;
     // O kernel também vai para a ESP: é o que o iniciador vai abrir. Compilar
     // é o mesmo `build` de sempre — o que muda é para onde o ELF vai.
     build(arch, release, false)?;
     let kernel = caminho_elf(arch, release);
 
     let disco = disco_de_testes()?;
-    let firmware = firmware_uefi()?;
+    let firmware = firmware_uefi(arch)?;
     let mut falhou = false;
 
     // A rodada que importa: o kernel de verdade, e o relatório inteiro.
-    instalar_iniciador(&disco, &efi, &kernel)?;
+    instalar_iniciador(arch, &disco, &efi, &kernel)?;
     println!("\n[xtask] iniciador: o kernel de verdade");
-    let espera = Desenlace::Marca(MARCA_DO_KERNEL);
+
+    // No x86 o desfecho é o kernel falando; no ARM é o iniciador desligando
+    // a máquina depois de recusar o salto que ainda não sabe fazer. São
+    // desfechos diferentes porque as etapas são diferentes, e esperar o
+    // errado transformaria "ainda não existe" num travamento de noventa
+    // segundos.
+    let espera = match arch {
+        Arquitetura::X86_64 => Desenlace::Marca(MARCA_DO_KERNEL),
+        Arquitetura::Aarch64 => Desenlace::Desligamento,
+    };
     let (desfecho, relatorio) = subir_no_firmware(arch, &disco, &firmware, &espera)?;
     for linha in &relatorio {
         println!("  [iniciador] {linha}");
@@ -763,13 +845,19 @@ fn iniciador(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
         falhou = true;
     }
     let como_str: Vec<&str> = relatorio.iter().map(|l| l.as_str()).collect();
-    for esperado in ESPERADO_DO_INICIADOR {
+    for esperado in esperado_do_iniciador(arch) {
         if !como_str.iter().any(|l| l.contains(esperado)) {
             eprintln!("[xtask] iniciador: faltou `{esperado}` no relatório");
             falhou = true;
         }
     }
     for linha in &como_str {
+        // A recusa do salto no ARM é uma linha de erro **esperada** — é o
+        // iniciador dizendo onde a etapa termina. Tratá-la como as outras
+        // faria a única coisa honesta do relatório reprovar a rodada.
+        if linha.contains("o salto no aarch64 ainda nao existe") {
+            continue;
+        }
         if linha.starts_with("ERRO") || linha.starts_with("PANICO") {
             eprintln!("[xtask] iniciador: {linha}");
             falhou = true;
@@ -779,19 +867,28 @@ fn iniciador(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
         eprintln!("[xtask] iniciador: {motivo}");
         falhou = true;
     }
-    if let Err(motivo) = conferir_elf_contra_readelf(&como_str, &kernel) {
+    if let Err(motivo) = conferir_elf_contra_readelf(arch, &como_str, &kernel) {
         eprintln!("[xtask] iniciador: {motivo}");
         falhou = true;
     }
-    println!("  [conferido] o kernel assumiu a maquina e disse `{MARCA_DO_KERNEL}`");
+    match arch {
+        Arquitetura::X86_64 => {
+            println!("  [conferido] o kernel assumiu a maquina e disse `{MARCA_DO_KERNEL}`")
+        }
+        Arquitetura::Aarch64 => {
+            println!("  [conferido] o firmware carregou o iniciador e ele leu o kernel inteiro")
+        }
+    }
 
     // E as rodadas das recusas: kerneis estragados de propósito, que o
     // iniciador tem de rejeitar em vez de carregar.
+    let de_outra = recusa_de_outra_arquitetura(arch);
+    let casos: Vec<&Recusa> = RECUSAS.iter().chain(core::iter::once(&de_outra)).collect();
     println!(
         "\n[xtask] iniciador: {} kerneis estragados de proposito, que tem de ser recusados",
-        RECUSAS.len()
+        casos.len()
     );
-    for caso in RECUSAS {
+    for caso in casos {
         match rodada_de_recusa(arch, &disco, &efi, &kernel, &firmware, caso) {
             Ok(()) => println!("  [recusa] ok  {} foi recusado", caso.nome),
             Err(motivo) => {
@@ -807,7 +904,7 @@ fn iniciador(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
     // O disco fica com o kernel bom, e não com o último adulterado: ele é
     // compartilhado com todo o resto do `xtask`, e deixá-lo quebrado faria a
     // próxima execução falhar por um motivo que nada tem a ver com ela.
-    instalar_iniciador(&disco, &efi, &kernel)?;
+    instalar_iniciador(arch, &disco, &efi, &kernel)?;
 
     if falhou {
         return Ok(ExitCode::FAILURE);
@@ -861,13 +958,6 @@ const RECUSAS: &[Recusa] = &[
         esperado: "os cabecalhos de programa sao menores que o formato",
     },
     Recusa {
-        nome: "um kernel compilado para outra arquitetura",
-        // `e_machine`, no deslocamento 18. 0xB7 é aarch64.
-        em: 18,
-        bytes: &[0xB7, 0x00],
-        esperado: "o kernel nao e desta arquitetura",
-    },
-    Recusa {
         nome: "um arquivo que nao e um ELF",
         // O primeiro byte da identificação.
         em: 0,
@@ -875,6 +965,31 @@ const RECUSAS: &[Recusa] = &[
         esperado: "nao e um ELF64 little-endian",
     },
 ];
+
+/// A recusa que depende de para onde se está compilando.
+///
+/// O caso é "um kernel de outra arquitetura", e o byte a escrever é o número
+/// da **outra**: num iniciador de x86, o do ARM; num de ARM, o do x86.
+///
+/// Escrever `0xB7` fixo funcionava enquanto só havia o x86, e virou um caso
+/// que passa sem testar nada no dia em que o ARM chegou: o kernel do ARM já
+/// é `0xB7`, então adulterá-lo para `0xB7` é copiar o valor por cima dele
+/// mesmo. O iniciador aceitava o arquivo, com razão, e a rodada reprovava —
+/// que foi como o defeito apareceu.
+const fn recusa_de_outra_arquitetura(arch: Arquitetura) -> Recusa {
+    Recusa {
+        nome: "um kernel compilado para outra arquitetura",
+        // `e_machine`, no deslocamento 18 do cabeçalho ELF64.
+        em: 18,
+        bytes: match arch {
+            // 0xB7 é `EM_AARCH64`.
+            Arquitetura::X86_64 => &[0xB7, 0x00],
+            // 0x3E é `EM_X86_64`.
+            Arquitetura::Aarch64 => &[0x3E, 0x00],
+        },
+        esperado: "o kernel nao e desta arquitetura",
+    }
+}
 
 /// Põe um kernel adulterado na ESP e exige que o iniciador o recuse.
 fn rodada_de_recusa(
@@ -896,7 +1011,7 @@ fn rodada_de_recusa(
     let estragado = raiz_do_projeto().join("target").join("duke-estragado.elf");
     std::fs::write(&estragado, &bytes)
         .map_err(|e| format!("não foi possível escrever {}: {e}", estragado.display()))?;
-    instalar_iniciador(disco, efi, &estragado)?;
+    instalar_iniciador(arch, disco, efi, &estragado)?;
 
     let espera = Desenlace::Desligamento;
     let (desfecho, relatorio) = subir_no_firmware(arch, disco, firmware, &espera)?;
@@ -952,25 +1067,72 @@ fn subir_no_firmware(
     let arquivo = std::fs::File::create(&registro)
         .map_err(|e| format!("não foi possível criar {}: {e}", registro.display()))?;
 
-    let filho = Command::new(arch.qemu())
-        .stdout(arquivo)
-        .args(["-machine", "q35"])
-        .args([
-            "-drive",
-            &format!("if=pflash,format=raw,readonly=on,file={}", codigo.display()),
-        ])
-        .args([
-            "-drive",
-            &format!("if=pflash,format=raw,file={}", variaveis.display()),
-        ])
-        .args(["-drive", &format!("format=raw,file={}", disco.display())])
-        // O relatório sai pela COM1, que é onde o kernel também fala. Ver o
-        // módulo `serial` do iniciador sobre por que não é o console do
-        // firmware.
+    let mut qemu = Command::new(arch.qemu());
+    qemu.stdout(arquivo);
+
+    match arch {
+        Arquitetura::X86_64 => {
+            qemu.args(["-machine", "q35"]);
+        }
+        // A máquina `virt` não tem chipset legado nenhum: o processador
+        // precisa ser dito, porque o padrão dela é um Cortex-A15 de 32 bits
+        // que sequer executaria uma aplicação EFI de 64.
+        Arquitetura::Aarch64 => {
+            qemu.args(["-machine", "virt", "-cpu", "cortex-a72"]);
+        }
+    }
+
+    qemu.args([
+        "-drive",
+        &format!("if=pflash,format=raw,readonly=on,file={}", codigo.display()),
+    ]);
+    qemu.args([
+        "-drive",
+        &format!("if=pflash,format=raw,file={}", variaveis.display()),
+    ]);
+
+    match arch {
+        // O `-drive` sem `if=` liga o disco ao controlador padrão da
+        // máquina, que no q35 é de onde o firmware procura uma ESP.
+        Arquitetura::X86_64 => {
+            qemu.args(["-drive", &format!("format=raw,file={}", disco.display())]);
+        }
+        // A `virt` não tem controlador padrão: o disco precisa de um
+        // dispositivo explícito, e o virtio-blk é o que o EDK II do ARM
+        // enxerga sem nenhuma configuração.
+        Arquitetura::Aarch64 => {
+            qemu.args([
+                "-drive",
+                &format!("format=raw,file={},if=none,id=disco0", disco.display()),
+            ]);
+            qemu.args(["-device", "virtio-blk-device,drive=disco0"]);
+            // E uma tela. A `q35` traz uma VGA de graça e a `virt` não traz
+            // nada: sem isto o firmware não publica o protocolo de vídeo, e
+            // o caminho que lê a geometria da tela nunca é exercitado no
+            // ARM.
+            //
+            // `ramfb`, e não o `bochs-display` que o kernel depois programa,
+            // porque o que importa aqui é **o firmware ter um GOP para
+            // publicar**, e o EDK II do ARM não tem driver de bochs: com ele
+            // a resposta é `EFI_NOT_FOUND`. O `virtio-gpu-pci` tem driver,
+            // mas publica um modo só de transferência, sem buffer linear —
+            // que o iniciador recusa, com razão, e aí o caminho da geometria
+            // também não roda. O `ramfb` é o único dos três que dá uma tela
+            // de verdade: 800x600 em BGR, com endereço.
+            qemu.args(["-device", "ramfb"]);
+        }
+    }
+
+    qemu
+        // O relatório sai pela serial em que o kernel também fala — a COM1 no
+        // x86, a PL011 no ARM. Ver o módulo `alvo` do iniciador sobre por que
+        // não é o console do firmware.
         .args(["-m", "128M", "-display", "none", "-serial", "stdio"])
         // Sem rede: nada aqui precisa dela, e o firmware tentaria PXE antes do
         // disco se ela existisse.
-        .args(["-net", "none"])
+        .args(["-net", "none"]);
+
+    let filho = qemu
         .spawn()
         .map_err(|e| format!("não foi possível iniciar o {}: {e}", arch.qemu()))?;
 
@@ -1207,7 +1369,11 @@ fn crc32_do_arquivo(caminho: &Path) -> Result<u32, String> {
 ///
 /// É a mesma disciplina do `cargo xtask elf` sobre os programas de usuário, e
 /// do `sgdisk`/`btrfs inspect-internal` sobre o disco.
-fn conferir_elf_contra_readelf(relatorio: &[&str], kernel: &Path) -> Result<(), String> {
+fn conferir_elf_contra_readelf(
+    arch: Arquitetura,
+    relatorio: &[&str],
+    kernel: &Path,
+) -> Result<(), String> {
     let (readelf, estilo) = conferidor_de_elf()?;
     let saida = Command::new(&readelf)
         .args([estilo, "--file-header", "--program-headers"])
@@ -1293,16 +1459,26 @@ fn conferir_elf_contra_readelf(relatorio: &[&str], kernel: &Path) -> Result<(), 
         ));
     }
 
-    // E as relocações. O iniciador aplica uma a uma; o `llvm-readobj` conta
-    // quantas o arquivo tem. Uma tabela percorrida com o passo errado, ou
-    // interrompida no meio, dá um número diferente — e um kernel que boota e
-    // falha no primeiro ponteiro constante que usar.
+    // E as relocações. O iniciador do x86 aplica uma a uma; o do ARM ainda só
+    // as classifica. Nos dois casos o número tem de bater com o que o
+    // `llvm-readobj` conta no arquivo: uma tabela percorrida com o passo
+    // errado, ou interrompida no meio, dá um número diferente — e no x86 isso
+    // é um kernel que boota e falha no primeiro ponteiro constante que usar.
+    //
+    // Conferir o mesmo número nos dois lados é o que faz esta etapa do ARM
+    // valer alguma coisa: ela afirma que o iniciador leu a tabela inteira e
+    // reconheceu **todas** as entradas, que é a pergunta que o salto vai
+    // depender de ter sido respondida.
     let relocacoes_de_fora = contar_relocacoes(&readelf, estilo, kernel)?;
+    let (prefixo, sufixo) = match arch {
+        Arquitetura::X86_64 => ("carga:", "relocacoes aplicadas"),
+        Arquitetura::Aarch64 => ("kernel conferido:", "relocacoes relativas"),
+    };
     let carga = relatorio
         .iter()
-        .find(|l| l.starts_with("carga:"))
-        .ok_or("o iniciador não relatou a carga")?;
-    let relocacoes_do_iniciador: u64 = extrair_numero_antes(carga, "relocacoes aplicadas")
+        .find(|l| l.starts_with(prefixo))
+        .ok_or("o iniciador não relatou as relocações")?;
+    let relocacoes_do_iniciador: u64 = extrair_numero_antes(carga, sufixo)
         .ok_or_else(|| format!("não consegui contar as relocações de `{carga}`"))?;
     if relocacoes_do_iniciador != relocacoes_de_fora {
         return Err(format!(
@@ -2241,7 +2417,7 @@ fn comando_qemu(
             // O firmware, em duas partes: o código, que é somente leitura, e
             // as variáveis, que ele escreve durante o boot e por isso são uma
             // cópia nossa.
-            let (codigo, variaveis) = firmware_uefi()?;
+            let (codigo, variaveis) = firmware_uefi(arch)?;
             qemu.args([
                 "-drive",
                 &format!("if=pflash,format=raw,readonly=on,file={}", codigo.display()),

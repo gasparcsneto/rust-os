@@ -31,15 +31,19 @@
 #![no_std]
 #![no_main]
 
+#[cfg(target_arch = "x86_64")]
+use protocolo::mapa;
+
+mod alvo;
+#[cfg(target_arch = "x86_64")]
 mod carga;
 mod crc32;
 mod efi;
 mod elf;
+#[cfg(target_arch = "x86_64")]
 mod paginas;
+#[cfg(target_arch = "x86_64")]
 mod salto;
-mod serial;
-
-use protocolo::mapa;
 
 use core::fmt::Write;
 use core::panic::PanicInfo;
@@ -55,8 +59,8 @@ const MAIOR_TABELA: u32 = 4096;
 
 #[unsafe(no_mangle)]
 pub extern "efiapi" fn efi_main(imagem: efi::Handle, sistema: *mut efi::Sistema) -> efi::Status {
-    serial::init();
-    relatar!("vivo, carregado pelo firmware");
+    alvo::init_serial();
+    relatar!("vivo em {}, carregado pelo firmware", alvo::nome());
 
     // Em caso de sucesso `relatorio` não volta: ela termina saltando para o
     // kernel. O desligamento abaixo é o caminho de quem falhou — e ele existe
@@ -352,7 +356,7 @@ fn e_memoria(tipo: u32) -> bool {
 ///
 /// Sem vídeo o relatório segue: uma máquina headless é uma máquina, e o Duke
 /// já sabe funcionar sem tela. O que não pode é a ausência passar calada.
-fn descrever_video(boot: &efi::ServicosDeBoot) -> Result<Option<carga::Video>, &'static str> {
+fn descrever_video(boot: &efi::ServicosDeBoot) -> Result<Option<efi::Tela>, &'static str> {
     let mut video: *mut core::ffi::c_void = core::ptr::null_mut();
     // SAFETY: o GUID é uma constante nossa, o registro nulo é a forma
     // documentada de pedir a primeira instância, e o destino é uma local.
@@ -405,7 +409,7 @@ fn descrever_video(boot: &efi::ServicosDeBoot) -> Result<Option<carga::Video>, &
     // este kernel desenha como quatro bytes, com o último ignorado.
     const BYTES_POR_PIXEL: u32 = 4;
 
-    Ok(Some(carga::Video {
+    Ok(Some(efi::Tela {
         fisico: modo.buffer,
         bytes: modo.tamanho_do_buffer as u64,
         formato: if info.formato == efi::formato::RGB {
@@ -468,12 +472,12 @@ fn carregar_o_kernel(
     handle: efi::Handle,
     boot: &efi::ServicosDeBoot,
     fim_da_ram: u64,
-    video: Option<carga::Video>,
+    video: Option<efi::Tela>,
 ) -> Result<core::convert::Infallible, &'static str> {
     let bytes = ler_o_kernel(handle, boot)?;
     let imagem = elf::Imagem::abrir(bytes)?;
 
-    if imagem.maquina != elf::MAQUINA_X86_64 {
+    if imagem.maquina != alvo::MAQUINA {
         relatar!("ERRO o kernel e para a maquina {:#x}", imagem.maquina);
         return Err("o kernel nao e desta arquitetura");
     }
@@ -553,6 +557,22 @@ fn carregar_o_kernel(
         na_memoria / 1024
     );
 
+    carregar_e_saltar(handle, boot, imagem, fim_da_ram, video)
+}
+
+/// O fim do caminho: copiar, mapear, sair dos serviços de boot e saltar.
+///
+/// Só existe no x86 por enquanto. A separação está aqui, e não espalhada em
+/// `cfg` pelo meio do relatório, porque tudo acima dela é **o mesmo
+/// programa** nas duas máquinas — e é isso que a divisão precisa mostrar.
+#[cfg(target_arch = "x86_64")]
+fn carregar_e_saltar(
+    handle: efi::Handle,
+    boot: &efi::ServicosDeBoot,
+    imagem: elf::Imagem,
+    fim_da_ram: u64,
+    video: Option<efi::Tela>,
+) -> Result<core::convert::Infallible, &'static str> {
     // O bit que torna o 63 das entradas significativo, antes de qualquer
     // tabela ser escrita com ele.
     paginas::ligar_nx();
@@ -580,6 +600,122 @@ fn carregar_o_kernel(
     unsafe { salto::saltar(handle, boot, &carga) }
 }
 
+/// O mesmo fim de caminho, ainda por escrever no ARM.
+///
+/// # Por que ele para aqui, e o que falta
+///
+/// Tudo acima desta função já roda nas duas máquinas: conferir as tabelas do
+/// firmware, descrever a memória e o vídeo, abrir a ESP, ler o kernel e
+/// validar o ELF inteiro. É a parte que a UEFI padroniza, e ela não precisou
+/// de uma linha de `cfg` para atravessar.
+///
+/// O que falta é justamente o que a UEFI **não** padroniza, porque não é
+/// dela: montar as tabelas de tradução no formato VMSAv8, programar o
+/// `MAIR_EL1` e o `TCR_EL1`, trocar o `TTBR` com as barreiras que a
+/// arquitetura exige, e saltar entregando ao kernel o device tree que hoje
+/// ele recebe em `x0` pelo protocolo de imagem do arm64.
+///
+/// Esse último item é o que torna a etapa maior do que parece: ela não é só
+/// escrever o iniciador, é trocar o protocolo de boot do lado do kernel. Até
+/// lá o ARM continua bootando pelo `-kernel` do QEMU, e este programa é um
+/// relatório que confere tudo que pode conferir antes de desistir em voz
+/// alta — que é melhor que saltar para um mapa que ninguém montou.
+#[cfg(target_arch = "aarch64")]
+fn carregar_e_saltar(
+    _handle: efi::Handle,
+    _boot: &efi::ServicosDeBoot,
+    imagem: elf::Imagem,
+    _fim_da_ram: u64,
+    _video: Option<efi::Tela>,
+) -> Result<core::convert::Infallible, &'static str> {
+    // A tabela de relocações é lida e **conferida** aqui, embora nada vá ser
+    // aplicado: é o último pedaço do arquivo que ainda não tinha sido
+    // olhado, e ele é o que responde se este ELF é mesmo independente de
+    // posição e se todas as relocações dele são do tipo que o iniciador
+    // sabe somar. Descobrir isso agora, e não no dia do salto, é o que
+    // impede a próxima etapa de começar sobre uma suposição.
+    let (relativas, outras) = conferir_as_relocacoes(&imagem)?;
+    relatar!(
+        "kernel conferido: entrada {:#x}, maquina {:#x}, {} relocacoes relativas",
+        imagem.entrada,
+        imagem.maquina,
+        relativas
+    );
+    if outras > 0 {
+        relatar!("ERRO {} relocacoes de outro tipo", outras);
+        return Err("o kernel tem relocacao que este carregador nao sabe aplicar");
+    }
+
+    relatar!("fim do relatorio");
+    Err("o salto no aarch64 ainda nao existe")
+}
+
+/// Conta as relocações do kernel, separando as que sabemos aplicar.
+///
+/// Devolve `(relativas, de outro tipo)`. Ele **não** aplica nada: aplicar
+/// exige ter copiado a imagem para o endereço final, e no ARM isso ainda não
+/// acontece. O que se pode afirmar sem copiar é o tipo de cada uma, e é
+/// justamente o que distingue um kernel carregável de um que exigiria um
+/// ligador dinâmico.
+#[cfg(target_arch = "aarch64")]
+fn conferir_as_relocacoes(imagem: &elf::Imagem) -> Result<(usize, usize), &'static str> {
+    let Some(dinamica) = imagem.dinamica()? else {
+        // Um kernel sem segmento dinâmico não é relocável, e isso não é erro
+        // por si: é um executável de endereço fixo. Quem decide se serve é o
+        // salto, que ainda não existe aqui.
+        return Ok((0, 0));
+    };
+
+    let (menor, _) = extensao_da_imagem(imagem)?;
+    let tabela = imagem.relocacoes(&dinamica, menor)?;
+
+    let mut relativas = 0usize;
+    let mut outras = 0usize;
+    for i in 0..tabela.quantas {
+        let virtual_ = tabela
+            .em
+            .checked_add((i * elf::TAMANHO_DA_RELOCACAO) as u64)
+            .ok_or("a tabela de relocacoes transborda")?;
+
+        // O endereço da tabela é virtual, e o arquivo é lido por
+        // deslocamento: a tradução é a mesma que o carregador faz ao copiar
+        // os segmentos, e pedi-la ao ELF em vez de subtrair a base à mão é o
+        // que impede as duas contas de divergirem.
+        let em = imagem
+            .no_arquivo(virtual_)?
+            .ok_or("a tabela de relocacoes nao esta no arquivo")?;
+        let entrada = imagem
+            .fatia(em, elf::TAMANHO_DA_RELOCACAO)
+            .ok_or("a tabela de relocacoes sai do arquivo")?;
+
+        // O tipo são os 32 bits de baixo do campo `info`; os de cima são o
+        // índice do símbolo, que uma relocação relativa não usa.
+        let info = u64::from_le_bytes(entrada[8..16].try_into().unwrap());
+        if (info & 0xFFFF_FFFF) as u32 == alvo::RELOCACAO_RELATIVA {
+            relativas += 1;
+        } else {
+            outras += 1;
+        }
+    }
+    let _ = menor;
+    Ok((relativas, outras))
+}
+
+/// O menor e o maior endereço virtual que os segmentos do kernel cobrem.
+#[cfg(target_arch = "aarch64")]
+fn extensao_da_imagem(imagem: &elf::Imagem) -> Result<(u64, u64), &'static str> {
+    let (mut menor, mut maior) = (u64::MAX, 0u64);
+    for segmento in imagem.segmentos() {
+        let s = segmento?;
+        menor = menor.min(s.endereco);
+        maior = maior.max(s.endereco.saturating_add(s.tamanho_na_memoria));
+    }
+    if menor == u64::MAX {
+        return Err("o kernel nao tem segmento nenhum");
+    }
+    Ok((menor, maior))
+}
+
 /// Percorre o mapa recém-montado e confere onde cada região caiu.
 ///
 /// # Por que conferir, se acabamos de montar
@@ -592,6 +728,7 @@ fn carregar_o_kernel(
 /// [`traduzir`](paginas::Tabelas::traduzir) desce pelos índices do endereço,
 /// como o processador faria, em vez de consultar uma lista do que foi
 /// mapeado — uma lista concordaria com quem a preencheu.
+#[cfg(target_arch = "x86_64")]
 fn conferir_o_mapa(carga: &carga::Carga, imagem: &elf::Imagem) -> Result<(), &'static str> {
     let tabelas = &carga.tabelas;
 
@@ -891,8 +1028,7 @@ fn desligar(sistema: *mut efi::Sistema) -> ! {
 
 fn parar() -> ! {
     loop {
-        // SAFETY: `hlt` só pára o núcleo até a próxima interrupção.
-        unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };
+        alvo::dormir();
     }
 }
 
