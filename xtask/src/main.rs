@@ -707,6 +707,8 @@ const ESPERADO_DO_INICIADOR: &[&str] = &[
     "tabela do sistema confere",
     "as tres tabelas conferem",
     "esp: duke.elf aberto e lido",
+    "relocacoes aplicadas",
+    "mapa confere",
     "fim do relatorio",
 ];
 
@@ -1203,12 +1205,60 @@ fn conferir_elf_contra_readelf(relatorio: &[&str], kernel: &Path) -> Result<(), 
         ));
     }
 
+    // E as relocações. O iniciador aplica uma a uma; o `llvm-readobj` conta
+    // quantas o arquivo tem. Uma tabela percorrida com o passo errado, ou
+    // interrompida no meio, dá um número diferente — e um kernel que boota e
+    // falha no primeiro ponteiro constante que usar.
+    let relocacoes_de_fora = contar_relocacoes(&readelf, estilo, kernel)?;
+    let carga = relatorio
+        .iter()
+        .find(|l| l.starts_with("carga:"))
+        .ok_or("o iniciador não relatou a carga")?;
+    let relocacoes_do_iniciador: u64 = extrair_numero_antes(carga, "relocacoes aplicadas")
+        .ok_or_else(|| format!("não consegui contar as relocações de `{carga}`"))?;
+    if relocacoes_do_iniciador != relocacoes_de_fora {
+        return Err(format!(
+            "o iniciador aplicou {relocacoes_do_iniciador} relocações; o llvm-readobj \
+             conta {relocacoes_de_fora} no arquivo"
+        ));
+    }
+
     println!(
         "  [conferido] {tamanho_de_fora} bytes com crc {esperado:#010x}, entrada \
-         {entrada_de_fora:#x} e {carregaveis_de_fora} segmentos — os dois últimos iguais \
-         aos do llvm-readobj"
+         {entrada_de_fora:#x}, {carregaveis_de_fora} segmentos e {relocacoes_de_fora} \
+         relocações — os três últimos iguais aos do llvm-readobj"
     );
     Ok(())
+}
+
+/// Quantas relocações o arquivo tem, segundo a ferramenta de fora.
+fn contar_relocacoes(readelf: &Path, estilo: &str, kernel: &Path) -> Result<u64, String> {
+    let saida = Command::new(readelf)
+        .args([estilo, "--dyn-relocations"])
+        .arg(kernel)
+        .output()
+        .map_err(|e| format!("não foi possível invocar o llvm-readobj: {e}"))?;
+    if !saida.status.success() {
+        return Err("o llvm-readobj recusou listar as relocações".into());
+    }
+
+    let texto = String::from_utf8_lossy(&saida.stdout);
+    let relativas = texto
+        .lines()
+        .filter(|l| l.contains("R_X86_64_RELATIVE"))
+        .count() as u64;
+
+    // Qualquer outro tipo significa que o iniciador teria de resolver
+    // símbolos, que ele recusa fazer. Contar só as relativas esconderia isso;
+    // o total é que diz se há algo além delas.
+    let total = texto.lines().filter(|l| l.contains("R_X86_64_")).count() as u64;
+    if total != relativas {
+        return Err(format!(
+            "o kernel tem {} relocações que não são relativas; o iniciador as recusa",
+            total - relativas
+        ));
+    }
+    Ok(relativas)
 }
 
 /// O número que aparece imediatamente antes de `marca` numa linha.
@@ -3529,6 +3579,53 @@ mod testes {
         );
         assert_eq!(Arquitetura::X86_64.base_do_kernel(), 0xFFFF_8000_0000_0000);
         assert_eq!(Arquitetura::Aarch64.base_do_kernel(), 0);
+    }
+
+    /// O mapa do espaço virtual está escrito em dois lugares, e eles têm de
+    /// concordar.
+    ///
+    /// O kernel o declara em `arch::x86_64`; o iniciador, em `mapa.rs`. Os
+    /// dois compilam para alvos diferentes, em workspaces diferentes, e não
+    /// há um lugar comum onde as constantes caibam sem que um passe a
+    /// depender do outro.
+    ///
+    /// O preço de divergir é alto e mudo: um kernel mapeado num endereço e
+    /// ligado para outro não dá erro de compilação nem mensagem — dá uma
+    /// máquina que reinicia no primeiro salto, antes de haver o que a
+    /// diagnostique.
+    #[test]
+    fn o_mapa_do_iniciador_confere_com_o_do_kernel() {
+        let raiz = raiz_do_projeto();
+        let kernel = std::fs::read_to_string(raiz.join("kernel/src/arch/x86_64/mod.rs"))
+            .expect("o backend x86_64 do kernel precisa existir");
+        let iniciador = std::fs::read_to_string(raiz.join("iniciador/src/mapa.rs"))
+            .expect("o mapa do iniciador precisa existir");
+
+        for (nome, valor) in [
+            ("BASE_DO_KERNEL", "0xFFFF_8000_0000_0000"),
+            ("BASE_DA_MEMORIA_FISICA", "0xFFFF_8800_0000_0000"),
+        ] {
+            let declaracao = format!("pub const {nome}: u64 = {valor};");
+            assert!(
+                kernel.contains(&declaracao),
+                "{nome} mudou no kernel; atualize iniciador/src/mapa.rs"
+            );
+            assert!(
+                iniciador.contains(&declaracao),
+                "{nome} mudou no iniciador; atualize kernel/src/arch/x86_64/mod.rs"
+            );
+        }
+
+        // Esta o kernel chama de `BASE_DO_RESTO` e o iniciador também, mas no
+        // kernel ela é privada — daí a busca ser pelo valor.
+        assert!(
+            kernel.contains("0xFFFF_A000_0000_0000"),
+            "a faixa que o bootloader posiciona mudou no kernel"
+        );
+        assert!(
+            iniciador.contains("pub const BASE_DO_RESTO: u64 = 0xFFFF_A000_0000_0000;"),
+            "a faixa que o bootloader posiciona mudou no iniciador"
+        );
     }
 
     /// Mesmo raciocínio da amarra anterior: o nome do executável vem do

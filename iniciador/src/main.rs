@@ -31,9 +31,12 @@
 #![no_std]
 #![no_main]
 
+mod carga;
 mod crc32;
 mod efi;
 mod elf;
+mod mapa;
+mod paginas;
 mod serial;
 
 use core::fmt::Write;
@@ -116,9 +119,9 @@ fn relatorio(imagem: efi::Handle, sistema: *mut efi::Sistema) -> Result<(), &'st
     )?;
     relatar!("as tres tabelas conferem, por assinatura e por crc");
 
-    descrever_memoria(boot)?;
-    descrever_video(boot)?;
-    descrever_kernel(imagem, boot)?;
+    let fim_da_ram = descrever_memoria(boot)?;
+    let video = descrever_video(boot)?;
+    descrever_kernel(imagem, boot, fim_da_ram, video)?;
     Ok(())
 }
 
@@ -190,7 +193,7 @@ fn conferir_cabecalho(
 /// E o buffer precisa de folga. Alocá-lo é um evento de memória, que pode
 /// partir uma região livre em duas e fazer o mapa crescer entre a pergunta e
 /// a resposta. Duas regiões de sobra cobrem isso com margem.
-fn descrever_memoria(boot: &efi::ServicosDeBoot) -> Result<(), &'static str> {
+fn descrever_memoria(boot: &efi::ServicosDeBoot) -> Result<u64, &'static str> {
     let mut tamanho = 0usize;
     let mut chave = 0usize;
     let mut por_descritor = 0usize;
@@ -256,6 +259,7 @@ fn descrever_memoria(boot: &efi::ServicosDeBoot) -> Result<(), &'static str> {
     let mut paginas_descritas = 0u64;
     let mut paginas_do_iniciador = 0u64;
     let mut maior = 0u64;
+    let mut fim_da_ram = 0u64;
 
     for i in 0..quantos {
         // SAFETY: o passo é o que o firmware declarou, e `quantos` vem da
@@ -279,6 +283,14 @@ fn descrever_memoria(boot: &efi::ServicosDeBoot) -> Result<(), &'static str> {
             if d.paginas > maior {
                 maior = d.paginas;
             }
+        }
+
+        // Até onde vai a RAM, para o mapa da memória física saber o que
+        // cobrir. Só o que é memória de verdade entra: os descritores também
+        // descrevem blocos de dispositivo, e mapear doze gibibytes de buraco
+        // de PCI custaria tabelas para um espaço que o kernel não lê.
+        if e_memoria(d.tipo) {
+            fim_da_ram = fim_da_ram.max(d.fisico + d.paginas * efi::PAGINA);
         }
 
         // O que este programa ocupa. Sai no relatório porque é o que o kernel
@@ -307,18 +319,32 @@ fn descrever_memoria(boot: &efi::ServicosDeBoot) -> Result<(), &'static str> {
         mib(maior)
     );
     relatar!(
-        "o iniciador ocupa {} KiB em {} paginas",
+        "o iniciador ocupa {} KiB em {} paginas, e a RAM vai ate {:#x}",
         paginas_do_iniciador * efi::PAGINA / 1024,
-        paginas_do_iniciador
+        paginas_do_iniciador,
+        fim_da_ram
     );
-    Ok(())
+    Ok(fim_da_ram)
+}
+
+/// Se um tipo de memória descreve RAM de verdade.
+///
+/// Tudo que não é um bloco de dispositivo nem espaço reservado pelo firmware
+/// para hardware. O código e os dados do firmware entram: eles ocupam RAM, e
+/// o kernel precisa alcançá-los pelo mapa da memória física mesmo sem poder
+/// usá-los.
+fn e_memoria(tipo: u32) -> bool {
+    !matches!(
+        tipo,
+        efi::memoria::MAPEADA_EM_MEMORIA | efi::memoria::PORTA_MAPEADA | efi::memoria::RESERVADA
+    )
 }
 
 /// Localiza o protocolo de vídeo e descreve o que ele oferece.
 ///
 /// Sem vídeo o relatório segue: uma máquina headless é uma máquina, e o Duke
 /// já sabe funcionar sem tela. O que não pode é a ausência passar calada.
-fn descrever_video(boot: &efi::ServicosDeBoot) -> Result<(), &'static str> {
+fn descrever_video(boot: &efi::ServicosDeBoot) -> Result<Option<carga::Video>, &'static str> {
     let mut video: *mut core::ffi::c_void = core::ptr::null_mut();
     // SAFETY: o GUID é uma constante nossa, o registro nulo é a forma
     // documentada de pedir a primeira instância, e o destino é uma local.
@@ -327,7 +353,7 @@ fn descrever_video(boot: &efi::ServicosDeBoot) -> Result<(), &'static str> {
     };
     if efi::deu_errado(status) || video.is_null() {
         relatar!("video: nenhum (o firmware devolveu {:#x})", status);
-        return Ok(());
+        return Ok(None);
     }
 
     // SAFETY: o firmware devolveu este ponteiro para o GUID do protocolo de
@@ -358,7 +384,19 @@ fn descrever_video(boot: &efi::ServicosDeBoot) -> Result<(), &'static str> {
         modo.modo_atual,
         modo.quantos_modos
     );
-    Ok(())
+
+    // Um formato que este kernel não sabe desenhar não impede o boot: ele já
+    // sabe funcionar sem tela. O que não pode é o iniciador mapear um
+    // framebuffer e o kernel escrever nele achando que é outra coisa.
+    if info.formato != efi::formato::RGB && info.formato != efi::formato::BGR {
+        relatar!("video: formato que o kernel nao desenha; seguindo sem tela");
+        return Ok(None);
+    }
+
+    Ok(Some(carga::Video {
+        fisico: modo.buffer,
+        bytes: modo.tamanho_do_buffer as u64,
+    }))
 }
 
 /// Onde o kernel mora na partição de sistema.
@@ -405,7 +443,12 @@ const MAIOR_KERNEL: u64 = 32 * 1024 * 1024;
 /// rodando; a imagem sabe de qual **dispositivo** veio; e o dispositivo
 /// oferece o **sistema de arquivos**. Os três elos são o que amarra o kernel
 /// ao iniciador que o carregou.
-fn descrever_kernel(imagem: efi::Handle, boot: &efi::ServicosDeBoot) -> Result<(), &'static str> {
+fn descrever_kernel(
+    imagem: efi::Handle,
+    boot: &efi::ServicosDeBoot,
+    fim_da_ram: u64,
+    video: Option<carga::Video>,
+) -> Result<(), &'static str> {
     let bytes = ler_o_kernel(imagem, boot)?;
     let imagem = elf::Imagem::abrir(bytes)?;
 
@@ -488,6 +531,131 @@ fn descrever_kernel(imagem: efi::Handle, boot: &efi::ServicosDeBoot) -> Result<(
         do_arquivo / 1024,
         na_memoria / 1024
     );
+
+    // O bit que torna o 63 das entradas significativo, antes de qualquer
+    // tabela ser escrita com ele.
+    paginas::ligar_nx();
+
+    let carga = carga::carregar(boot, &imagem, fim_da_ram, video)?;
+    relatar!(
+        "carga: imagem em {:#x} fisico, {} KiB, {} bytes de bss zerados, {} relocacoes aplicadas",
+        carga.base_fisica,
+        carga.bytes / 1024,
+        carga.zerados,
+        carga.relocacoes
+    );
+    relatar!(
+        "mapa: {} paginas de tabela, raiz em {:#x}",
+        carga.tabelas.paginas_usadas(),
+        carga.tabelas.raiz()
+    );
+
+    conferir_o_mapa(&carga, &imagem)?;
+    Ok(())
+}
+
+/// Percorre o mapa recém-montado e confere onde cada região caiu.
+///
+/// # Por que conferir, se acabamos de montar
+///
+/// Porque este é o **último** ponto em que dá para dizer alguma coisa. Depois
+/// do `mov cr3` não há relatório: ou a máquina segue, ou ela reinicia sem
+/// nada na tela e sem ninguém para perguntar.
+///
+/// E porque a leitura é independente da escrita. O
+/// [`traduzir`](paginas::Tabelas::traduzir) desce pelos índices do endereço,
+/// como o processador faria, em vez de consultar uma lista do que foi
+/// mapeado — uma lista concordaria com quem a preencheu.
+fn conferir_o_mapa(carga: &carga::Carga, imagem: &elf::Imagem) -> Result<(), &'static str> {
+    let tabelas = &carga.tabelas;
+
+    // A base do kernel precisa cair exatamente onde a imagem foi posta.
+    let base = mapa::BASE_DO_KERNEL + carga.menor;
+    match tabelas.traduzir(base) {
+        Some(fisico) if fisico == carga.base_fisica => {}
+        outro => {
+            relatar!(
+                "ERRO {:#x} traduz para {:?}, esperava {:#x}",
+                base,
+                outro,
+                carga.base_fisica
+            );
+            return Err("o kernel nao esta mapeado onde foi carregado");
+        }
+    }
+
+    // E a entrada também, já contando o deslocamento dentro da imagem.
+    let esperado = carga.base_fisica + (carga.entrada - mapa::BASE_DO_KERNEL - carga.menor);
+    match tabelas.traduzir(carga.entrada) {
+        Some(fisico) if fisico == esperado => {}
+        outro => {
+            relatar!(
+                "ERRO a entrada traduz para {:?}, esperava {:#x}",
+                outro,
+                esperado
+            );
+            return Err("o ponto de entrada nao esta mapeado onde devia");
+        }
+    }
+
+    // O byte que está na entrada, lido pelo mapa novo, tem de ser o mesmo que
+    // está no arquivo. É o que distingue "mapeado em algum lugar" de
+    // "mapeado no kernel": um mapa que apontasse para outra página daria um
+    // endereço plausível e bytes de outra coisa.
+    //
+    // A relocação não toca no código executável, então os bytes da entrada
+    // no arquivo e na memória são os mesmos.
+    let em = imagem
+        .no_arquivo(carga.entrada - mapa::BASE_DO_KERNEL)?
+        .ok_or("a entrada do kernel nao vem do arquivo")?;
+    let no_arquivo = imagem.byte(em)?;
+    // SAFETY: `esperado` é físico, e a UEFI ainda mapeia a memória por
+    // identidade — a tradução acima acabou de confirmar que a página está no
+    // mapa novo, e esta leitura usa o mapa atual sobre o mesmo endereço.
+    let na_memoria = unsafe { core::ptr::read_volatile(esperado as *const u8) };
+    if no_arquivo != na_memoria {
+        relatar!(
+            "ERRO na entrada ha {:#04x}, e o arquivo tem {:#04x}",
+            na_memoria,
+            no_arquivo
+        );
+        return Err("os bytes da entrada nao sao os do arquivo");
+    }
+
+    // A memória física, pelo deslocamento do kernel.
+    if tabelas.traduzir(mapa::BASE_DA_MEMORIA_FISICA) != Some(0) {
+        return Err("o mapa da memoria fisica nao comeca no endereco zero");
+    }
+
+    // A identidade, que existe só para a troca de CR3 sobreviver. O endereço
+    // conferido é o do próprio código que vai executar o `mov cr3`.
+    let aqui = conferir_o_mapa as *const () as u64;
+    if tabelas.traduzir(aqui) != Some(aqui) {
+        relatar!(
+            "ERRO o codigo do iniciador em {:#x} nao esta na identidade",
+            aqui
+        );
+        return Err("a troca de tabelas nao sobreviveria ao proximo passo");
+    }
+
+    // A pilha: o topo não é mapeado (ele é o endereço logo acima), então
+    // conferimos a última página dela e a guarda lá embaixo.
+    if tabelas.traduzir(carga.topo_da_pilha - 1).is_none() {
+        return Err("a pilha do kernel nao esta mapeada");
+    }
+    if tabelas.traduzir(mapa::PILHA_EM).is_some() {
+        return Err("a pagina de guarda da pilha esta mapeada");
+    }
+
+    match carga.video {
+        Some(em) => {
+            if tabelas.traduzir(em).is_none() {
+                return Err("o framebuffer nao esta mapeado");
+            }
+            relatar!("mapa confere: kernel, memoria fisica, identidade, pilha e video");
+        }
+        None => relatar!("mapa confere: kernel, memoria fisica, identidade e pilha"),
+    }
     Ok(())
 }
 

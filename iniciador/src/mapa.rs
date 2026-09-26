@@ -1,0 +1,73 @@
+//! Onde cada coisa mora no espaço virtual do kernel.
+//!
+//! # Metade de um contrato
+//!
+//! A outra metade está em `kernel/src/arch/x86_64/mod.rs`. Os dois programas
+//! compilam para alvos diferentes, em workspaces diferentes, e não há um
+//! lugar comum onde estas constantes caibam sem que um deles passe a depender
+//! do outro.
+//!
+//! O que impede a divergência é um teste do `xtask`, que lê as duas fontes e
+//! exige que os números batam. É a mesma amarra do `marca_do_setor` e do
+//! padrão por setor do disco, pela mesma razão — e aqui o preço de divergir é
+//! mais alto: um kernel mapeado num endereço e ligado para outro não dá erro,
+//! dá uma máquina que reinicia no primeiro salto.
+//!
+//! # Por que as regiões ficam tão longe umas das outras
+//!
+//! Porque uma tabela de tradução por processo se monta copiando as entradas
+//! de topo do kernel, e uma entrada de topo cobre 512 GiB. Duas regiões do
+//! kernel que dividissem uma entrada com o espaço do usuário levariam junto o
+//! mapa do processo anterior — ou deixariam o kernel sem heap, conforme o
+//! lado que se escolhesse. Desperdiçar espaço virtual num endereçamento de 48
+//! bits não custa nada; descobrir tarde que duas regiões se encostaram custa.
+
+/// Onde a imagem do kernel é carregada.
+pub const BASE_DO_KERNEL: u64 = 0xFFFF_8000_0000_0000;
+
+/// Por onde o kernel enxerga qualquer byte de memória física.
+pub const BASE_DA_MEMORIA_FISICA: u64 = 0xFFFF_8800_0000_0000;
+
+/// Onde fica o que o iniciador posiciona por conta própria.
+///
+/// A pilha inicial e o framebuffer. É a faixa que o kernel reserva para isso
+/// justamente para não disputar espaço com o heap nem com as pilhas de fio.
+pub const BASE_DO_RESTO: u64 = 0xFFFF_A000_0000_0000;
+
+/// Onde a página de guarda da pilha inicial fica.
+///
+/// A pilha começa uma página adiante — ver [`crate::carga`] sobre por que a
+/// guarda é a de baixo.
+pub const PILHA_EM: u64 = BASE_DO_RESTO;
+
+/// Quanto de pilha o kernel recebe para começar.
+///
+/// Trinta e duas páginas, 128 KiB. Ela serve até o kernel criar as próprias
+/// pilhas de fio; o que a dimensiona é a profundidade do boot, que é rasa.
+pub const PAGINAS_DA_PILHA: usize = 32;
+
+/// Onde o framebuffer é mapeado.
+///
+/// Dezesseis mebibytes adiante da base, com folga para uma pilha que cresça
+/// e para um framebuffer de qualquer resolução plausível entre os dois.
+pub const VIDEO_EM: u64 = BASE_DO_RESTO + 0x0100_0000;
+
+/// Quanto espaço virtual uma entrada da tabela de topo cobre.
+pub const COBERTURA_DA_ENTRADA_DE_TOPO: u64 = 512 * 1024 * 1024 * 1024;
+
+/// Qual entrada da tabela de topo cobre um endereço.
+const fn entrada_de_topo(endereco: u64) -> u64 {
+    endereco / COBERTURA_DA_ENTRADA_DE_TOPO
+}
+
+// As regiões não podem se encostar, e a conferência é de compilação porque o
+// erro é de aritmética de endereço: mover uma constante meio tebibyte para o
+// lado não quebra nada visível até o kernel rodar.
+const _: () = {
+    assert!(entrada_de_topo(BASE_DO_KERNEL) != entrada_de_topo(BASE_DA_MEMORIA_FISICA));
+    assert!(entrada_de_topo(BASE_DA_MEMORIA_FISICA) != entrada_de_topo(BASE_DO_RESTO));
+    assert!(entrada_de_topo(BASE_DO_KERNEL) != entrada_de_topo(BASE_DO_RESTO));
+
+    // E o vídeo tem de caber depois da pilha, sem encostar nela.
+    assert!(VIDEO_EM > PILHA_EM + (PAGINAS_DA_PILHA as u64 + 1) * 4096);
+};

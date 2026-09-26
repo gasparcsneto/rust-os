@@ -65,6 +65,33 @@ mod programa {
 
 /// `PT_LOAD`: o único tipo de segmento que vai para a memória.
 const CARREGAVEL: u32 = 1;
+/// `PT_DYNAMIC`: onde o ligador dinâmico procura o que ainda falta resolver.
+const DINAMICO: u32 = 2;
+
+/// As etiquetas da seção dinâmica que um carregador de PIE precisa.
+mod etiqueta {
+    /// Fim da lista.
+    pub const FIM: u64 = 0;
+    /// Quantos bytes de relocações da PLT existem.
+    pub const BYTES_DA_PLT: u64 = 2;
+    /// Onde a tabela de relocações começa, em endereço virtual.
+    pub const RELA: u64 = 7;
+    /// Quantos bytes ela tem.
+    pub const RELA_BYTES: u64 = 8;
+    /// Quanto ocupa cada entrada dela.
+    pub const RELA_ENTRADA: u64 = 9;
+}
+
+/// `R_X86_64_RELATIVE`: some a base de carga ao adendo, e escreva.
+///
+/// É a única relocação que um executável independente de posição sem
+/// símbolos externos produz — e este kernel é exatamente isso. Qualquer
+/// outra exigiria resolver um símbolo, que é trabalho de ligador dinâmico e
+/// não de carregador de kernel.
+pub const RELATIVA: u32 = 8;
+
+/// Quanto ocupa uma entrada `Elf64_Rela`.
+pub const TAMANHO_DA_RELOCACAO: usize = 24;
 
 /// As permissões de um segmento, como bits.
 pub mod permissao {
@@ -185,10 +212,25 @@ impl<'a> Imagem<'a> {
     /// Os que não são `PT_LOAD` são pulados em silêncio: um `PT_NOTE` ou um
     /// `PT_GNU_STACK` descreve o arquivo, não o que vai para a RAM.
     pub fn segmentos(&self) -> impl Iterator<Item = Result<Segmento, &'static str>> + use<'_, 'a> {
-        (0..self.quantos_programas).filter_map(move |i| self.programa(i).transpose())
+        self.de_tipo(CARREGAVEL)
     }
 
-    fn programa(&self, i: usize) -> Result<Option<Segmento>, &'static str> {
+    /// O segmento dinâmico, se houver.
+    ///
+    /// Um executável independente de posição traz um, e é nele que está a
+    /// tabela de relocações. Um de endereço fixo não precisa de nenhum.
+    pub fn dinamica(&self) -> Result<Option<Segmento>, &'static str> {
+        self.de_tipo(DINAMICO).next().transpose()
+    }
+
+    fn de_tipo(
+        &self,
+        tipo: u32,
+    ) -> impl Iterator<Item = Result<Segmento, &'static str>> + use<'_, 'a> {
+        (0..self.quantos_programas).filter_map(move |i| self.programa(i, tipo).transpose())
+    }
+
+    fn programa(&self, i: usize, procurado: u32) -> Result<Option<Segmento>, &'static str> {
         let em = self
             .programas_em
             .checked_add((i * self.tamanho_do_programa) as u64)
@@ -199,7 +241,7 @@ impl<'a> Imagem<'a> {
             .get(em..em.checked_add(programa::TAMANHO).ok_or("transbordo")?)
             .ok_or("a tabela de programas sai do arquivo")?;
 
-        if u32_em(cru, programa::TIPO).ok_or("programa truncado")? != CARREGAVEL {
+        if u32_em(cru, programa::TIPO).ok_or("programa truncado")? != procurado {
             return Ok(None);
         }
 
@@ -230,4 +272,120 @@ impl<'a> Imagem<'a> {
 
         Ok(Some(segmento))
     }
+
+    /// Onde, no arquivo, mora um endereço virtual carregado.
+    ///
+    /// Serve para confrontar o que foi para a memória com o que veio do
+    /// disco. Devolve `None` quando o endereço cai num pedaço que o arquivo
+    /// não traz — a `.bss`, por exemplo, que existe na memória e não no
+    /// arquivo.
+    pub fn no_arquivo(&self, virtual_: u64) -> Result<Option<u64>, &'static str> {
+        for segmento in self.segmentos() {
+            let s = segmento?;
+            if virtual_ >= s.endereco && virtual_ - s.endereco < s.tamanho_no_arquivo {
+                return Ok(Some(s.no_arquivo + (virtual_ - s.endereco)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Um byte do arquivo, pelo deslocamento.
+    pub fn byte(&self, em: u64) -> Result<u8, &'static str> {
+        let em = usize::try_from(em).map_err(|_| "deslocamento grande demais")?;
+        self.bytes
+            .get(em)
+            .copied()
+            .ok_or("o deslocamento esta fora do arquivo")
+    }
+
+    /// Os bytes que um segmento traz do arquivo.
+    pub fn conteudo(&self, segmento: &Segmento) -> Result<&'a [u8], &'static str> {
+        let de = usize::try_from(segmento.no_arquivo).map_err(|_| "deslocamento grande demais")?;
+        let ate = de
+            .checked_add(
+                usize::try_from(segmento.tamanho_no_arquivo)
+                    .map_err(|_| "segmento grande demais")?,
+            )
+            .ok_or("transbordo no conteudo do segmento")?;
+        self.bytes.get(de..ate).ok_or("o segmento sai do arquivo")
+    }
+}
+
+/// Onde a tabela de relocações está, no espaço de endereços do arquivo.
+#[derive(Clone, Copy, Debug)]
+pub struct Relocacoes {
+    pub em: u64,
+    pub quantas: usize,
+}
+
+/// Lê a seção dinâmica e diz onde estão as relocações.
+///
+/// # Por que a imagem na memória, e não o arquivo
+///
+/// Porque é onde as relocações vão ser aplicadas, e porque os endereços que a
+/// seção dinâmica carrega são **virtuais**: usá-los contra o arquivo exigiria
+/// traduzir cada um para deslocamento de arquivo, procurando em que segmento
+/// ele cai. Na imagem copiada o endereço virtual menos a base é o índice, e
+/// não há tradução nenhuma a errar.
+///
+/// `imagem` começa no menor endereço virtual carregado.
+pub fn relocacoes(
+    imagem: &[u8],
+    menor: u64,
+    dinamica_em: u64,
+    dinamica_bytes: u64,
+) -> Result<Relocacoes, &'static str> {
+    let inicio = usize::try_from(
+        dinamica_em
+            .checked_sub(menor)
+            .ok_or("a dinamica esta antes da base")?,
+    )
+    .map_err(|_| "dinamica longe demais")?;
+    let bytes = usize::try_from(dinamica_bytes).map_err(|_| "dinamica grande demais")?;
+    let secao = imagem
+        .get(inicio..inicio.checked_add(bytes).ok_or("transbordo na dinamica")?)
+        .ok_or("a secao dinamica sai da imagem")?;
+
+    let (mut rela, mut rela_bytes, mut rela_entrada, mut plt_bytes) = (0u64, 0u64, 0u64, 0u64);
+
+    // A seção é uma lista de pares (etiqueta, valor) terminada por zero.
+    for par in secao.as_chunks::<16>().0 {
+        let etiqueta = u64_em(par, 0).ok_or("dinamica truncada")?;
+        let valor = u64_em(par, 8).ok_or("dinamica truncada")?;
+        match etiqueta {
+            etiqueta::FIM => break,
+            etiqueta::RELA => rela = valor,
+            etiqueta::RELA_BYTES => rela_bytes = valor,
+            etiqueta::RELA_ENTRADA => rela_entrada = valor,
+            etiqueta::BYTES_DA_PLT => plt_bytes = valor,
+            _ => {}
+        }
+    }
+
+    // Uma PLT significa relocações que este carregador não percorre, e
+    // ignorá-las daria um kernel que salta para o endereço zero na primeira
+    // chamada que passasse por ela. Um kernel `no_std` sem símbolo externo
+    // nenhum não tem PLT — e é por isso que a ausência dela é conferida em
+    // vez de presumida.
+    if plt_bytes != 0 {
+        return Err("o kernel tem relocacoes de PLT, que este carregador nao aplica");
+    }
+
+    if rela == 0 || rela_bytes == 0 {
+        return Ok(Relocacoes { em: 0, quantas: 0 });
+    }
+    // O tamanho da entrada vem do arquivo e é o passo da tabela, pela mesma
+    // razão do `e_phentsize`: um passo menor que o formato faria os campos
+    // saírem sobrepostos.
+    if rela_entrada != TAMANHO_DA_RELOCACAO as u64 {
+        return Err("as relocacoes nao tem o tamanho do formato");
+    }
+    if !rela_bytes.is_multiple_of(rela_entrada) {
+        return Err("a tabela de relocacoes nao e um numero inteiro de entradas");
+    }
+
+    Ok(Relocacoes {
+        em: rela,
+        quantas: (rela_bytes / rela_entrada) as usize,
+    })
 }

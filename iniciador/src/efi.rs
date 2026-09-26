@@ -260,6 +260,12 @@ pub mod memoria {
     /// Do firmware, e livre depois de `ExitBootServices`.
     pub const CODIGO_DE_BOOT: u32 = 3;
     pub const DADOS_DE_BOOT: u32 = 4;
+
+    /// Os que **não** são RAM: blocos de dispositivo e espaço que o firmware
+    /// reservou para hardware. O mapa da memória física não os cobre.
+    pub const RESERVADA: u32 = 0;
+    pub const MAPEADA_EM_MEMORIA: u32 = 11;
+    pub const PORTA_MAPEADA: u32 = 12;
 }
 
 /// O tamanho de uma página da UEFI. Sempre 4 KiB, em toda arquitetura.

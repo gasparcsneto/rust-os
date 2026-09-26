@@ -205,6 +205,9 @@ iniciador/src/       a aplicação UEFI que o firmware carrega da ESP
 ├── main.rs          confere as tabelas da UEFI, abre o kernel e relata
 ├── efi.rs           as tabelas e os protocolos, declarados à mão
 ├── elf.rs           o pedaço do ELF64 que um carregador precisa entender
+├── carga.rs         copia os segmentos, reloca e desenha o mapa
+├── paginas.rs       as quatro tabelas de tradução, e como percorrê-las
+├── mapa.rs          onde cada coisa mora no espaço virtual do kernel
 ├── serial.rs        a COM1, que sobrevive ao fim dos serviços de boot
 └── crc32.rs         o CRC-32 do Ethernet, que confere os cabeçalhos
 
@@ -741,9 +744,14 @@ $ cargo xtask iniciador
   [iniciador] segmento 3 em 0xc46c0:   70840 do arquivo,  72000 na memoria, rw-
   [iniciador] segmento 4 em 0xd6b78:   52168 do arquivo, 120920 na memoria, rw-
   [iniciador] kernel: 4 segmentos, 0x0..0xf43d0, 966 KiB na memoria
+  [iniciador] carga: imagem em 0x57ed000 fisico, 980 KiB,
+              69912 bytes de bss zerados, 3703 relocacoes aplicadas
+  [iniciador] mapa: 12 paginas de tabela, raiz em 0x576d000
+  [iniciador] mapa confere: kernel, memoria fisica, identidade, pilha e video
   [iniciador] fim do relatorio
 
-  [conferido] 7058448 bytes com crc 0x53f802c7, entrada 0x863a0 e 4 segmentos
+  [conferido] 7058448 bytes com crc 0x53f802c7, entrada 0x863a0,
+              4 segmentos e 3703 relocacoes
 
 [xtask] iniciador: 4 kerneis estragados de proposito, que tem de ser recusados
   [recusa] ok  um kernel com a entrada fora de qualquer segmento foi recusado
@@ -751,11 +759,51 @@ $ cargo xtask iniciador
   [recusa] ok  um arquivo que nao e um ELF foi recusado
 ```
 
-**O que ele faz nesta etapa, e o que ainda não faz.** Ele lê a máquina,
-**abre o kernel na ESP** e o interpreta como ELF. Não copia segmento nenhum
-para o endereço em que ele quer morar, não monta tabela de página e não sai
-dos serviços de boot — desliga a máquina no fim. O `bootloader` continua
-sendo quem boota o kernel.
+**O que ele faz nesta etapa, e o que ainda não faz.** Ele lê a máquina, abre
+o kernel na ESP, copia cada segmento para onde ele pede, aplica as
+relocações e **monta o mapa de tradução** em que o kernel vai rodar. O que
+falta é instalar esse mapa: ele não sai dos serviços de boot e não salta —
+desliga a máquina no fim. O `bootloader` continua sendo quem boota o kernel.
+
+**Copiar, relocar, mapear.** O kernel é um executável independente de
+posição: foi ligado a partir do zero e carrega uma lista de 3703 lugares onde
+a base de carga precisa ser somada. Sem essa passagem, todo ponteiro
+constante dele aponta para a metade baixa do espaço, onde não há nada.
+
+A conta tem duas bases, e é aí que ela erra: a relocação diz "no endereço
+virtual `r_offset`, escreva `base + adendo`". A **base** é a virtual, porque
+é onde o kernel vai rodar; o **lugar onde escrever** é físico, porque é onde
+a imagem está agora. Confundi-las escreve o valor certo no lugar errado, ou o
+errado no lugar certo — e as duas dão um kernel que boota e falha depois.
+
+**O mapa tem a metade alta do Duke e a identidade da RAM.** A identidade não
+é para o kernel: é para os poucos ciclos entre o `mov cr3` e o salto. No
+instante seguinte à troca, o processador busca a próxima instrução, que está
+no código do iniciador, num endereço baixo — e uma falha de página sem tabela
+de exceções instalada é um triple fault, a máquina reiniciando sem nada na
+tela.
+
+As duas cobrem a mesma faixa com as mesmas permissões e começam no mesmo
+deslocamento dentro da entrada de topo delas, então a tabela de nível três é
+**a mesma**, apontada por duas entradas da raiz. Meia dúzia de páginas
+economizadas, e uma incoerência a menos: mapas separados poderiam divergir.
+
+**E o mapa é conferido antes de ser instalado**, porque este é o último ponto
+em que dá para dizer alguma coisa. O `traduzir` desce pelos índices do
+endereço como o processador faria — e não consulta uma lista do que foi
+mapeado, que concordaria com quem a preencheu. Ele confere que a base do
+kernel cai onde a imagem foi posta, que o byte no ponto de entrada é o mesmo
+que está no arquivo, que a memória física começa no zero, que o **código do
+próprio iniciador** está na identidade, que a pilha está mapeada e que a
+página de guarda dela **não** está.
+
+**A `.bss` é suja de propósito antes de ser zerada.** A UEFI não promete
+páginas limpas, mas este firmware as entrega limpas — então apagar o
+zeramento não mudava nada, e a conferência passava. Medido por mutação. Agora
+o destino é preenchido com `0xA5` antes, e se o zerar sumir a conferência
+encontra o byte e diz onde. O que está em jogo são os globais do kernel:
+entregá-los com o que o dono anterior da página deixou dá um kernel que às
+vezes boota.
 
 **Como ele acha o kernel.** Seguindo uma corrente de três elos, porque o
 firmware não diz "aqui está o seu disco": ele diz qual **imagem** está
@@ -986,9 +1034,9 @@ padronizado.
       carregado pelo firmware a partir da ESP e confere as três tabelas da
       UEFI, o mapa de memória e o vídeo, e já abre o `duke.elf` na ESP, lê os
       sete mebibytes com o CRC conferido de fora e interpreta os segmentos.
-      Faltam, nesta ordem: copiar os segmentos para onde eles pedem, montar as
-      tabelas de página da metade alta, sair dos serviços de boot e saltar — e
-      só então o crate `bootloader` sai.
+      copia os segmentos, aplica as 3703 relocações e monta o mapa de
+      tradução, conferindo-o antes de instalar. Faltam: sair dos serviços de
+      boot e saltar — e só então o crate `bootloader` sai.
 
 ## Licença
 
