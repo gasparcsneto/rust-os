@@ -71,7 +71,7 @@ Requisitos: Rust nightly (instalado automaticamente pelo `rust-toolchain.toml`)
 e os pacotes do emulador para as arquiteturas desejadas.
 
 ```bash
-# x86_64 (padrão): compila e gera as imagens BIOS e UEFI
+# x86_64 (padrão): compila e põe o iniciador e o kernel na ESP do disco
 cargo xtask build
 cargo xtask run
 
@@ -186,11 +186,11 @@ kernel/src/
 └── arch/
     ├── mod.rs        seleção da arquitetura em tempo de compilação
     ├── x86_64/
-    │   ├── mod.rs    entrada via crate `bootloader`, CPUID, portas de I/O
+    │   ├── mod.rs    entrada pelo iniciador UEFI, CPUID, portas de I/O
     │   ├── gdt.rs    GDT, TSS e pilha dedicada ao double fault
     │   ├── idt.rs    IDT e handlers de exceção e interrupção
     │   ├── pic.rs    controlador 8259 e timer PIT
-    │   ├── paginacao.rs  assume as tabelas de página do bootloader
+    │   ├── paginacao.rs  assume as tabelas de página do iniciador
     │   └── uart.rs   UART 16550 por port-mapped I/O
     └── aarch64/
         ├── mod.rs     boot em assembly, cabeçalho de imagem arm64, MIDR_EL1
@@ -207,7 +207,11 @@ iniciador/src/       a aplicação UEFI que o firmware carrega da ESP
 ├── elf.rs           o pedaço do ELF64 que um carregador precisa entender
 ├── carga.rs         copia os segmentos, reloca e desenha o mapa
 ├── paginas.rs       as quatro tabelas de tradução, e como percorrê-las
-├── mapa.rs          onde cada coisa mora no espaço virtual do kernel
+└── salto.rs         a saida dos servicos de boot, e a entrega da maquina
+
+protocolo/src/       a ABI entre o iniciador e o kernel
+├── lib.rs           o que e entregue ao kernel, com magica e versao
+└── mapa.rs          onde cada coisa mora no espaço virtual
 ├── serial.rs        a COM1, que sobrevive ao fim dos serviços de boot
 └── crc32.rs         o CRC-32 do Ethernet, que confere os cabeçalhos
 
@@ -226,17 +230,17 @@ O contraste no caminho de boot é grande:
 
 | | x86_64 | aarch64 |
 |---|---|---|
-| Carga | crate `bootloader` (BIOS + UEFI) | protocolo de boot do arm64 |
+| Carga | `iniciador/`, aplicação UEFI deste projeto | protocolo de boot do arm64 |
 | Artefato | imagem de disco | binário cru, cabeçalho de 64 bytes |
 | Chegamos em | long mode, com pilha e paginação | MMU desligada, sem pilha |
 | Mapa de memória | struct `BootInfo` pronta | device tree, parseado por nós |
 | Seriais | duas UARTs 16550 (port I/O) | uma PL011 (MMIO) |
 | Exceções | IDT de ponteiros, contexto salvo pela CPU | vetores de código, contexto salvo à mão |
 | Pilha de exceção | IST, índice no TSS | `SP_EL1`, trocado por hardware |
-| Guard page da pilha | instalada pelo bootloader | construída antes de ligar a MMU |
+| Guard page da pilha | instalada pelo iniciador | construída antes de ligar a MMU |
 | Interrupções | PIC 8259 + timer PIT | GIC v2 + timer genérico |
 | Serial do agente | UART 16550 na IRQ 3 | PL011 no INTID 33 (SPI 1) |
-| Vídeo | VGA da máquina `pc`, modo posto pelo bootloader | `bochs-display` no PCI, modo posto por nós |
+| Vídeo | VGA da máquina `pc`, modo posto pelo firmware e mapeado pelo iniciador | `bochs-display` no PCI, modo posto por nós |
 | Teclado | controlador 8042, scancode na IRQ 1 | `virtio-input` no PCI, evento na fila |
 | Teclado USB | `qemu-xhci` no PCI, protocolo de boot do HID | o mesmo controlador, o mesmo driver |
 | Dormir sem corrida | `sti; hlt`, par atômico | `wfi` acorda com IRQ mascarada |
@@ -245,7 +249,7 @@ O contraste no caminho de boot é grande:
 | Sem privilégio | ring 3 | EL0 |
 | Chamada de sistema | `syscall`/`sysret` | `svc`, na tabela de vetores |
 | Pilha na entrada | trocada à mão (`syscall` não troca) | `SP_EL1`, trocada pelo hardware |
-| MMU | já ligada pelo bootloader | desligada; nós a acendemos |
+| MMU | já ligada pelo firmware; o iniciador troca as tabelas | desligada; nós a acendemos |
 | Acesso à memória física | mapeada num deslocamento | identidade |
 | Encerrar emulador | `isa-debug-exit` | semihosting |
 
@@ -259,7 +263,7 @@ vai para biblioteca. Protocolo e estrutura ficam explícitos.
 
 | | de crate | escrito à mão |
 |---|---|---|
-| x86_64 | GDT, TSS, IDT, tabelas de página, portas de I/O (`x86_64`); boot (`bootloader`); UART (`uart_16550`) | PIC 8259 e timer PIT |
+| x86_64 | GDT, TSS, IDT, tabelas de página, portas de I/O (`x86_64`); UART (`uart_16550`) | PIC 8259, timer PIT e o **boot inteiro**, do firmware ao salto |
 | aarch64 | registradores de sistema (`aarch64-cpu`); blocos de MMIO (`tock-registers`) | boot, tabela de vetores, descritores de página, leitor de device tree |
 | comuns | enumeração PCI (`pci_types`); glifos já rasterizados (`noto-sans-mono-bitmap`) | adaptador de vídeo, console de texto, drivers virtio, controlador xHCI e teclado HID |
 
@@ -287,9 +291,10 @@ de uma entrada de topo difere em 512 vezes:
 | Espaço do usuário | 4 GiB | 4 GiB |
 
 No x86 a regra é a clássica — metade alta para o kernel, metade baixa para o
-usuário —, e o endereço da memória física deixou de ser escolhido pelo
-bootloader: ele caía em 2 TiB, dentro da metade que agora é do usuário. Fixá-lo
-tem o mesmo benefício que fixar a base do kernel teve para a simbolização.
+usuário. Estes endereços são escolha nossa, e ficam num pacote que o kernel e
+o iniciador incluem; quando quem escolhia era o crate `bootloader`, a memória
+física caía em 2 TiB, dentro da metade que hoje é do usuário. Fixá-los tem o
+mesmo benefício que fixar a base do kernel teve para a simbolização.
 
 No ARM não existe metade alta (o `TCR_EL1` deste kernel configura 39 bits e
 desliga as buscas por TTBR1), mas também não é preciso: com entradas de 1 GiB,
@@ -720,14 +725,15 @@ que não tinha nada a ver. Hoje ele monta e desmonta pontos que são só dele.
 
 ## O iniciador UEFI
 
-Até aqui o x86 do Duke bootava pelo crate `bootloader`. Um programa de outra
-pessoa fazia a transição para long mode, montava as tabelas de página iniciais
-e entregava ao kernel uma `BootInfo` pronta — funcionava, e escondia
-exatamente a parte que um kernel escrito do zero deveria mostrar.
+O x86 do Duke bootava pelo crate `bootloader`. Um programa de outra pessoa
+fazia a transição para long mode, montava as tabelas de página iniciais e
+entregava ao kernel uma `BootInfo` pronta — funcionava, e escondia exatamente
+a parte que um kernel escrito do zero deveria mostrar.
 
-O `iniciador/` é o substituto sendo construído. Ele é uma **aplicação UEFI**:
-o firmware o carrega de `\EFI\BOOT\BOOTX64.EFI` na partição de sistema do
-mesmo disco que o kernel já lê, e o executa em long mode.
+**Ele saiu.** O `iniciador/` é uma **aplicação UEFI** deste projeto: o
+firmware a carrega de `\EFI\BOOT\BOOTX64.EFI` na partição de sistema do
+mesmo disco que o kernel depois lê, ela põe o kernel de pé e lhe entrega a
+máquina. Não há mais bootloader de terceiros no caminho de boot do Duke.
 
 ```
 $ cargo xtask iniciador
@@ -749,9 +755,17 @@ $ cargo xtask iniciador
   [iniciador] mapa: 12 paginas de tabela, raiz em 0x576d000
   [iniciador] mapa confere: kernel, memoria fisica, identidade, pilha e video
   [iniciador] fim do relatorio
+  [iniciador] saindo dos servicos de boot: 133 regioes, chave 0xb89
+  [iniciador] a maquina e do Duke; saltando para 0xffff8000000d75b0
+
+  =============================================
+    Duke :: agent-native :: x86_64 :: fase 0
+  =============================================
+  [    0]     0ms info boot  Duke iniciado em x86_64, fase 0
 
   [conferido] 7058448 bytes com crc 0x53f802c7, entrada 0x863a0,
               4 segmentos e 3703 relocacoes
+  [conferido] o kernel assumiu a maquina e disse `Duke iniciado em x86_64`
 
 [xtask] iniciador: 4 kerneis estragados de proposito, que tem de ser recusados
   [recusa] ok  um kernel com a entrada fora de qualquer segmento foi recusado
@@ -759,11 +773,19 @@ $ cargo xtask iniciador
   [recusa] ok  um arquivo que nao e um ELF foi recusado
 ```
 
-**O que ele faz nesta etapa, e o que ainda não faz.** Ele lê a máquina, abre
-o kernel na ESP, copia cada segmento para onde ele pede, aplica as
-relocações e **monta o mapa de tradução** em que o kernel vai rodar. O que
-falta é instalar esse mapa: ele não sai dos serviços de boot e não salta —
-desliga a máquina no fim. O `bootloader` continua sendo quem boota o kernel.
+**O caminho inteiro.** O firmware carrega o iniciador; ele confere as três
+tabelas da UEFI, lê a máquina, abre o kernel na ESP, copia cada segmento para
+onde ele pede, aplica as relocações, monta o mapa de tradução, confere o
+mapa, sai dos serviços de boot e salta. A linha do kernel logo abaixo do
+salto é outro programa, noutro espaço de endereços, dizendo que está de pé.
+
+**A ordem do fim, e por que ela é essa.** Alocar tudo que ainda falta;
+**depois** pedir o mapa de memória, que devolve uma *chave* junto; sair com
+aquela chave; e só então trocar o `CR3` e saltar. A chave é o firmware
+dizendo "este é o mapa que eu tenho agora", e ele só aceita sair se quem sai
+provar que viu a versão mais recente — qualquer alocação entre a pergunta e a
+saída a invalida. A especificação prevê uma segunda tentativa, e o iniciador
+a faz uma vez; se a segunda também falhar, insistir seria laço.
 
 **Copiar, relocar, mapear.** O kernel é um executável independente de
 posição: foi ligado a partir do zero e carrega uma lista de 3703 lugares onde
@@ -796,6 +818,32 @@ kernel cai onde a imagem foi posta, que o byte no ponto de entrada é o mesmo
 que está no arquivo, que a memória física começa no zero, que o **código do
 próprio iniciador** está na identidade, que a pilha está mapeada e que a
 página de guarda dela **não** está.
+
+**A identidade da RAM não é para o kernel.** É para os poucos ciclos entre o
+`mov cr3` e o salto: no instante seguinte à troca, o processador busca a
+próxima instrução no código do iniciador, que mora num endereço baixo. Sem
+ela, a busca falha — e uma falha de página sem tabela de exceções instalada é
+um triple fault, a máquina reiniciando sem nada na tela.
+
+Foi exatamente o que aconteceu na primeira tentativa de saltar: a identidade
+estava lá, mas marcada como **não executável**. O mapa estava certo e a
+permissão não, e o sintoma é o mesmo. Ela executa agora, e o kernel a larga
+ao assumir as tabelas — com isso a entrada de topo volta a ser do espaço do
+usuário, e desreferenciar zero dentro do kernel volta a ser uma falha em vez
+de uma leitura do primeiro frame da máquina.
+
+**O que o kernel recebe é uma `struct` de um pacote que os dois incluem.** O
+`protocolo/` tem a entrega — mapa de memória, deslocamento físico, geometria
+do vídeo — e as constantes do espaço virtual. Elas já estiveram declaradas
+nos dois lados, com um teste do `xtask` exigindo que batessem; agora há um
+lugar só, e a divergência deixou de ser uma coisa que um teste evita para ser
+uma coisa que não pode acontecer.
+
+A entrega carrega uma magia, uma versão e o próprio tamanho antes de qualquer
+conteúdo, e o kernel confere os três antes de ler o resto. Uma ESP é um
+sistema de arquivos: nada impede alguém de copiar um `.efi` novo sobre um
+kernel velho, e um mapa de memória lido com deslocamento errado não dá erro —
+dá um alocador que entrega páginas do firmware.
 
 **A `.bss` é suja de propósito antes de ser zerada.** A UEFI não promete
 páginas limpas, mas este firmware as entrega limpas — então apagar o
@@ -903,7 +951,12 @@ iniciador fala pelo canal em que o Duke já fala.
 **O ARM continua fora.** Lá o boot é o protocolo de imagem crua do arm64, que
 não precisa de bootloader nenhum — o QEMU lê o cabeçalho de 64 bytes, deposita
 a imagem e salta. Um iniciador UEFI para aarch64 é a mesma aplicação com outro
-alvo e outro firmware, e entra quando o do x86 estiver de pé.
+alvo e outro firmware, e é o passo seguinte natural desta peça.
+
+**E o `cargo xtask iniciador` é a sonda que afirma tudo isso.** Cinco boots no
+OVMF: um com o kernel de verdade, que só passa quando o kernel fala do outro
+lado do salto, e quatro com kerneis estragados de propósito, que têm de ser
+recusados pelo motivo certo.
 
 ## Testes
 
@@ -984,7 +1037,7 @@ padronizado.
       arquiteturas, em debug e release, com formatação e lints no CI.
 - [x] **Fase 0 — Memória física e paginação.** Alocador de frames por bitmap,
       MMU ligada do zero no ARM com mapa de identidade, controle das tabelas
-      do bootloader no x86, e uma API de mapeamento comum às duas.
+      do iniciador no x86, e uma API de mapeamento comum às duas.
 - [x] **Fase 0 — Heap.** Alocador próprio com lista livre ordenada e fusão de
       blocos adjacentes. `Box`, `Vec` e `String` disponíveis no kernel.
       **Fase 0 completa.**
@@ -1030,13 +1083,12 @@ padronizado.
       listagem de diretório e leitura de arquivo embutido e com extensão; e a
       tabela de descritores por processo, com `abrir`, `ler` e `fechar`
       exercitados por um programa sem privilégio que lê um arquivo do disco.
-      Falta o bootloader UEFI próprio, em andamento: o `iniciador/` já é
-      carregado pelo firmware a partir da ESP e confere as três tabelas da
-      UEFI, o mapa de memória e o vídeo, e já abre o `duke.elf` na ESP, lê os
-      sete mebibytes com o CRC conferido de fora e interpreta os segmentos.
-      copia os segmentos, aplica as 3703 relocações e monta o mapa de
-      tradução, conferindo-o antes de instalar. Faltam: sair dos serviços de
-      boot e saltar — e só então o crate `bootloader` sai.
+      E o **bootloader UEFI próprio**: o `iniciador/` é carregado pelo
+      firmware a partir da ESP, confere as três tabelas da UEFI, lê a
+      máquina, abre o `duke.elf` na mesma partição com o CRC conferido de
+      fora, copia os segmentos, aplica as relocações, monta o mapa de
+      tradução e o confere, sai dos serviços de boot e salta. O crate
+      `bootloader` saiu. **Fase 4 completa.**
 
 ## Licença
 

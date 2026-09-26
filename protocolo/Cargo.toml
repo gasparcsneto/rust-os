@@ -1,0 +1,12 @@
+[package]
+# O que o iniciador entrega ao kernel, e onde cada coisa mora no espaço
+# virtual. É a ABI entre os dois, e existe como pacote por isso: os dois
+# lados compilam para alvos diferentes, e a única forma de eles não
+# divergirem é não haver duas declarações.
+name = "protocolo"
+version = "0.1.0"
+edition = "2024"
+description = "A ABI entre o iniciador UEFI e o kernel do Duke"
+license = "MIT OR Apache-2.0"
+
+[dependencies]

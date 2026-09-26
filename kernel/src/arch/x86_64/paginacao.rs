@@ -405,6 +405,57 @@ pub fn espaco_do_kernel() -> u64 {
 }
 
 /// Cria um espaço de endereços com o kernel mapeado e `entrada_privada` vazia.
+/// Desmonta a identidade que o iniciador deixou na metade baixa.
+///
+/// # Por que ela existia, e por que ela não pode ficar
+///
+/// O iniciador mapeou a RAM duas vezes: uma no deslocamento do kernel, que é
+/// por onde o kernel a alcança, e outra por identidade — virtual igual a
+/// físico. A segunda existe para um instante só: no `mov cr3`, a instrução
+/// seguinte é buscada no código do iniciador, que mora num endereço baixo.
+/// Sem essa identidade, a busca falha e a máquina reinicia.
+///
+/// Passado esse instante ela é um peso. Ela ocupa a entrada de topo que
+/// pertence ao **espaço do usuário** — e, pior, faz o endereço zero ser
+/// memória legível. Desreferenciar um ponteiro nulo dentro do kernel deixaria
+/// de ser uma falha de página e passaria a ler o primeiro frame da máquina,
+/// que é onde a tabela de vetores do BIOS e outras relíquias moram.
+///
+/// Largá-la restaura as duas coisas: a entrada volta a ser do usuário, e
+/// zero volta a ser um endereço que não existe.
+pub fn largar_a_identidade() {
+    // A faixa do usuário e a identidade dividem a entrada de topo zero, e é
+    // essa que sai. Perguntar à constante em vez de escrever `0` é o que
+    // mantém isto correto se o mapa do usuário se mudar de lugar.
+    let entrada = crate::arch::entrada_de_topo(crate::usuario::BASE) as usize;
+
+    crate::arch::sem_interrupcoes(|| {
+        let _guarda = TRAVA.lock();
+        let raiz = espaco_atual();
+        let tabela = acesso_fisico(raiz) as *mut PageTable;
+        if tabela.is_null() {
+            crate::log_error!("mmu", "a raiz nao esta acessivel; identidade mantida");
+            return;
+        }
+
+        // SAFETY: a raiz é a tabela ativa, alcançável pelo mapa da memória
+        // física, e a trava garante que ninguém mais a escreve.
+        let tabela = unsafe { &mut *tabela };
+        tabela[entrada].set_unused();
+
+        // O processador guarda traduções num cache próprio, e apagar a
+        // entrada não o esvazia. Recarregar o `CR3` esvazia — e é o que torna
+        // a mudança efetiva em vez de teórica.
+        x86_64::instructions::tlb::flush_all();
+    });
+
+    crate::log_info!(
+        "mmu",
+        "identidade do iniciador largada, entrada {}",
+        entrada
+    );
+}
+
 pub fn criar_espaco(entrada_privada: usize) -> Result<u64, &'static str> {
     if entrada_privada >= ENTRADAS {
         return Err("entrada de topo fora da tabela");

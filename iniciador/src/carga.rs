@@ -23,9 +23,9 @@
 
 use crate::efi;
 use crate::elf;
-use crate::mapa;
 use crate::paginas::{self, PAGINA, Tabelas, bit};
 use crate::relatar;
+use protocolo::mapa;
 
 /// O resultado de carregar o kernel.
 pub struct Carga {
@@ -43,15 +43,51 @@ pub struct Carga {
     pub tabelas: Tabelas,
     /// O topo da pilha que o kernel vai usar, em endereço virtual.
     pub topo_da_pilha: u64,
-    /// Onde o framebuffer ficou, em endereço virtual, se houver.
-    pub video: Option<u64>,
+    /// Onde o framebuffer ficou, em endereço virtual, se houver, e o que ele é.
+    pub video: Option<(u64, Video)>,
 }
 
-/// O que o vídeo precisa que seja mapeado.
+impl Carga {
+    /// O vídeo, no formato do contrato com o kernel.
+    pub fn entrega_de_video(&self) -> protocolo::Video {
+        match self.video {
+            Some((em, v)) => protocolo::Video {
+                presente: 1,
+                formato: v.formato,
+                em,
+                bytes: v.bytes,
+                largura: v.largura,
+                altura: v.altura,
+                pixels_por_linha: v.pixels_por_linha,
+                bytes_por_pixel: v.bytes_por_pixel,
+            },
+            // Zerado, e o `presente` é o campo que diz isso. Inventar uma
+            // geometria plausível para "não há tela" faria o kernel desenhar
+            // em lugar nenhum achando que desenhou.
+            None => protocolo::Video {
+                presente: 0,
+                formato: 0,
+                em: 0,
+                bytes: 0,
+                largura: 0,
+                altura: 0,
+                pixels_por_linha: 0,
+                bytes_por_pixel: 0,
+            },
+        }
+    }
+}
+
+/// O que o vídeo é, e o que dele precisa ser mapeado.
 #[derive(Clone, Copy)]
 pub struct Video {
     pub fisico: u64,
     pub bytes: u64,
+    pub formato: u32,
+    pub largura: u32,
+    pub altura: u32,
+    pub pixels_por_linha: u32,
+    pub bytes_por_pixel: u32,
 }
 
 /// Copia o kernel, reloca, e monta o mapa em que ele vai rodar.
@@ -130,7 +166,7 @@ pub fn carregar(
     mapear_o_kernel(&mut tabelas, imagem, base_fisica, menor, maior)?;
     let topo_da_pilha = mapear_a_pilha(&mut tabelas, boot)?;
     let video = match video {
-        Some(v) => Some(mapear_o_video(&mut tabelas, v)?),
+        Some(v) => Some((mapear_o_video(&mut tabelas, v)?, v)),
         None => None,
     };
 
@@ -323,31 +359,42 @@ fn relocar(imagem: &elf::Imagem, destino: &mut [u8], menor: u64) -> Result<usize
 
 /// Mapeia a RAM duas vezes: por identidade e no deslocamento do kernel.
 ///
-/// # Por que as duas, e por que na mesma tabela
+/// # Por que as duas
 ///
 /// A identidade é para o instante da troca de `CR3` — ver o topo de
 /// [`crate::paginas`]. O deslocamento é como o kernel alcança qualquer byte
 /// de memória física, inclusive as tabelas de página, cujos descritores
 /// contêm endereços físicos enquanto todo acesso dele é virtual.
 ///
-/// As duas cobrem a mesma faixa com as mesmas permissões, e as duas começam
-/// no deslocamento zero da entrada de topo delas. Então a tabela de nível
-/// três pode ser **a mesma**, apontada por duas entradas da raiz. É meia
-/// dúzia de páginas economizadas, e uma incoerência a menos: mapas separados
-/// poderiam divergir.
+/// # A diferença entre as duas, que custou um boot
 ///
-/// A RAM nunca é executável. O kernel executa a partir da imagem dele, que é
-/// mapeada à parte, e um mapa da memória física que também executasse daria
-/// a qualquer ponteiro corrompido um caminho para rodar dados como código.
+/// O mapa alto **não executa**: o kernel roda a partir da imagem dele, que é
+/// mapeada à parte, e uma memória física executável daria a qualquer ponteiro
+/// corrompido um caminho para rodar dados como código.
+///
+/// A identidade **executa**, e tem de executar. A primeira versão pôs o bit
+/// de não-execução nas duas, e a máquina reiniciou no `mov cr3`: a instrução
+/// seguinte é buscada no código do iniciador, que mora num endereço baixo, e
+/// buscá-la de uma página marcada como não executável é uma falha de página.
+/// Sem tabela de exceções instalada, isso é um triple fault — a máquina
+/// reiniciando sem nada na tela, que é exatamente o desfecho que este módulo
+/// inteiro existe para evitar.
+///
+/// A identidade é transitória: o kernel a desmonta ao assumir as tabelas, e
+/// com ela volta a valer que desreferenciar zero é uma falha.
 fn mapear_memoria_fisica(tabelas: &mut Tabelas, maior_ram: u64) -> Result<(), &'static str> {
     let bytes = maior_ram.next_multiple_of(paginas::PAGINA_GRANDE);
     if bytes > mapa::COBERTURA_DA_ENTRADA_DE_TOPO {
         return Err("ha mais memoria fisica do que uma entrada de topo cobre");
     }
 
-    let bits = bit::ESCRITA | bit::NAO_EXECUTA;
-    tabelas.mapear_faixa(0, 0, bytes, bits)?;
-    tabelas.mapear_faixa(mapa::BASE_DA_MEMORIA_FISICA, 0, bytes, bits)
+    tabelas.mapear_faixa(0, 0, bytes, bit::ESCRITA)?;
+    tabelas.mapear_faixa(
+        mapa::BASE_DA_MEMORIA_FISICA,
+        0,
+        bytes,
+        bit::ESCRITA | bit::NAO_EXECUTA,
+    )
 }
 
 /// Mapeia a imagem do kernel, com as permissões de cada segmento.

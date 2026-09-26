@@ -1,10 +1,10 @@
 //! Backend de arquitetura para x86_64.
 //!
-//! No x86 o trabalho pesado de boot já foi feito quando chegamos aqui: o
-//! crate `bootloader` cuidou do modo real, da transição para long mode e da
-//! montagem das tabelas de página iniciais, e nos entrega um [`BootInfo`]
-//! pronto. Este módulo basicamente traduz esse `BootInfo` para as estruturas
-//! neutras de [`crate::machine`] e segue para o fluxo comum.
+//! Quando chegamos aqui o processador já está em long mode, com paginação
+//! ligada no mapa que o [`iniciador`](../../../iniciador/index.html) montou e
+//! uma pilha própria — e quem fez isso é deste projeto. Este módulo traduz a
+//! [`protocolo::Entrega`] que ele deixou para as estruturas neutras de
+//! [`crate::machine`] e segue para o fluxo comum.
 
 pub mod apic;
 pub mod contexto;
@@ -23,9 +23,6 @@ pub use usuario::{definir_pilha_de_kernel, entrar as entrar_em_usuario, init as 
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use bootloader_api::BootInfo;
-use bootloader_api::info::{MemoryRegionKind, PixelFormat};
-
 use crate::machine::{Regiao, TipoRegiao};
 
 pub use uart::Uart;
@@ -39,29 +36,6 @@ pub const fn nome() -> &'static str {
 ///
 /// A sentinela `u64::MAX` distingue "não fornecido" de um deslocamento zero.
 static DESLOCAMENTO_FISICO: AtomicU64 = AtomicU64::new(u64::MAX);
-
-/// Configuração pedida ao bootloader.
-///
-/// O pedido que importa é `physical_memory`: sem ele, o bootloader não mapeia
-/// a RAM física no espaço virtual, e ficaríamos sem qualquer forma de
-/// *alcançar* as tabelas de página — cujos descritores contêm endereços
-/// físicos, enquanto todo acesso nosso é virtual. É o que torna a paginação
-/// editável.
-const CONFIG: bootloader_api::BootloaderConfig = {
-    use bootloader_api::config::Mapping;
-
-    let mut config = bootloader_api::BootloaderConfig::new_default();
-    config.mappings.physical_memory = Some(Mapping::FixedAddress(BASE_DA_MEMORIA_FISICA));
-    config.mappings.kernel_base = Mapping::FixedAddress(BASE_DO_KERNEL);
-
-    // Tudo o que o bootloader ainda escolhe sozinho — a pilha inicial, a
-    // `BootInfo`, o framebuffer — precisa cair na metade alta. Sem este piso
-    // ele procura um buraco livre a partir do zero, e foi o que aconteceu: o
-    // mapa da memória física apareceu em 2 TiB, dentro da metade que agora
-    // pertence ao usuário.
-    config.mappings.dynamic_range_start = Some(BASE_DO_RESTO);
-    config
-};
 
 // ---------------------------------------------------------------------------
 // O mapa do espaço virtual
@@ -83,31 +57,23 @@ const CONFIG: bootloader_api::BootloaderConfig = {
 // elas. Desperdiçar espaço virtual num endereçamento de 48 bits não custa
 // nada: o que custa é descobrir tarde que duas regiões se encostaram.
 
-/// Onde o mapa da memória física inteira começa.
+/// As bases do espaço virtual, e por que elas não moram mais aqui.
 ///
-/// Fixo pelo mesmo motivo de [`BASE_DO_KERNEL`]: o bootloader escolheria um
-/// endereço estável entre execuções mas desconhecido em tempo de compilação, e
-/// este é o deslocamento por onde o kernel enxerga *qualquer* byte de RAM —
-/// inclusive as tabelas de página. Saber o valor de cor vale numa sessão de
-/// depuração.
-pub const BASE_DA_MEMORIA_FISICA: u64 = 0xFFFF_8800_0000_0000;
-
-/// Onde a faixa de memória de dispositivo começa.
+/// Elas eram declaradas neste arquivo, e o iniciador tinha uma cópia. Um
+/// teste do `xtask` lia as duas fontes e exigia que batessem — funcionava, e
+/// era o remédio para um problema que deixou de existir: agora há um pacote
+/// que os dois incluem, e a divergência não pode acontecer.
 ///
-/// Fica **abaixo** do mapa da memória física de propósito, entre ele e a
-/// imagem do kernel: são entradas de topo que ninguém mais usa, e pô-la
-/// acima significaria disputar espaço com o que o bootloader ainda posiciona
-/// sozinho a partir de [`BASE_DO_RESTO`].
-pub const BASE_DE_MMIO: u64 = 0xFFFF_8400_0000_0000;
+/// O preço de divergir era alto e mudo: um kernel mapeado num endereço e
+/// ligado para outro não dá erro nem mensagem, dá uma máquina que reinicia no
+/// primeiro salto.
+pub use protocolo::mapa::{BASE_DAS_PILHAS, BASE_DE_MMIO, BASE_DO_HEAP};
 
-/// Onde o heap do kernel começa.
-pub const BASE_DO_HEAP: u64 = 0xFFFF_9000_0000_0000;
-
-/// Onde a área das pilhas de fio começa.
-pub const BASE_DAS_PILHAS: u64 = 0xFFFF_9800_0000_0000;
-
-/// Piso para o que o bootloader ainda posiciona por conta própria.
-const BASE_DO_RESTO: u64 = 0xFFFF_A000_0000_0000;
+// A base do kernel e a da memória física não são reexportadas. A primeira é
+// do iniciador e do `xtask`; a segunda o kernel lê da **entrega**, e não da
+// constante — perguntar à constante seria acreditar numa das duas pontas sem
+// ouvir a outra. Quem precisa delas pelo nome (a suíte) as importa do
+// `protocolo`, que é onde elas moram.
 
 /// Quanto espaço virtual uma entrada da tabela de topo cobre.
 ///
@@ -116,94 +82,78 @@ const BASE_DO_RESTO: u64 = 0xFFFF_A000_0000_0000;
 /// usuário — daí as regiões do kernel precisarem estar longe umas das outras.
 pub const COBERTURA_DA_ENTRADA_DE_TOPO: u64 = 512 * 1024 * 1024 * 1024;
 
-/// Endereço virtual onde o kernel é carregado.
+/// A primeira instrução do Duke, e o símbolo que o `e_entry` do ELF aponta.
 ///
-/// # Por que fixo, e não dinâmico
+/// # O que já está pronto quando ela roda
 ///
-/// Por padrão o bootloader escolhe o endereço na hora. O endereço é estável
-/// entre execuções (o ASLR vem desligado), mas **não é conhecido em tempo de
-/// compilação** — e isso custa caro na hora de depurar.
+/// O iniciador deixou a máquina assim: long mode, interrupções desligadas,
+/// paginação no mapa que ele montou — a imagem do kernel na metade alta, a
+/// memória física em [`BASE_DA_MEMORIA_FISICA`], uma pilha com página de
+/// guarda — e os serviços de boot da UEFI já encerrados. O `RDI` traz o
+/// endereço virtual da entrega.
 ///
-/// O binário do kernel é um executável independente de posição, ligado a
-/// partir do zero. Com base dinâmica, todo endereço que o kernel reporta em
-/// tempo de execução — o `pc` de uma exceção em `traps.stats`, um quadro de
-/// pilha no depurador — está deslocado por uma constante desconhecida em
-/// relação ao binário. Traduzir endereço para arquivo e linha exige descobrir
-/// esse deslocamento antes, e um depurador conectado *antes* do boot não tem
-/// como perguntá-lo a ninguém.
+/// # Safety
 ///
-/// Fixando a base, o deslocamento passa a ser esta constante. `cargo xtask
-/// simbolo` e `cargo xtask debug` a usam diretamente.
-///
-/// # Por que este endereço
-///
-/// `0xFFFF_8000_0000_0000` é o primeiro endereço canônico da metade alta do
-/// espaço virtual de 48 bits. É a convenção de quase todo kernel de 64 bits, e
-/// a razão é a fase 1: quando houver processos, a metade baixa inteira fica
-/// para o userspace e a alta para o kernel, sem que o mapa de um precise
-/// negociar espaço com o do outro.
-///
-/// Também aproxima as duas arquiteturas: no ARM a imagem já tem endereço fixo
-/// (`0x4008_0000`, imposto pelo protocolo de boot do arm64 e escrito no script
-/// do linker).
-pub const BASE_DO_KERNEL: u64 = 0xFFFF_8000_0000_0000;
-
-// Declara `inicio` como o ponto de entrada do kernel.
-//
-// A macro gera um símbolo `_start` com a ABI que o bootloader espera e, o
-// mais importante, faz uma verificação de tipo da assinatura em tempo de
-// compilação. Sem isso, uma divergência entre o que o bootloader passa e o
-// que o kernel espera viraria corrupção de memória silenciosa no boot.
-bootloader_api::entry_point!(inicio, config = &CONFIG);
-
-/// Primeira função Rust a executar depois do bootloader.
-///
-/// O `boot_info` é a única fonte de verdade sobre a máquina neste ponto. Ele
-/// é um `&'static mut` porque o bootloader entrega a posse exclusiva da
-/// estrutura ao kernel — não existe mais ninguém rodando.
-fn inicio(boot_info: &'static mut BootInfo) -> ! {
+/// Nada chama esta função: o processador salta para ela. `entrega` precisa
+/// ser o ponteiro que o iniciador pôs no `RDI`, e o contrato inteiro de
+/// [`protocolo`] precisa estar valendo.
+#[unsafe(no_mangle)]
+pub unsafe extern "sysv64" fn _start(entrega: *const protocolo::Entrega) -> ! {
     // A serial vem antes de qualquer outra coisa. Sem ela, qualquer falha a
-    // partir daqui seria uma tela preta sem diagnóstico.
+    // partir daqui seria uma tela preta sem diagnóstico — e aqui isso é
+    // literal: o iniciador acabou de se despedir pela mesma porta.
     let canal = crate::serial::init();
 
-    for regiao in boot_info.memory_regions.iter() {
+    // SAFETY: o ponteiro é o que o iniciador entregou. A conferência abaixo é
+    // o que separa "um ponteiro" de "a entrega": sem ela, um iniciador de
+    // outra versão daria campos deslocados, e um mapa de memória lido com
+    // deslocamento errado não dá erro — dá um alocador que entrega páginas do
+    // firmware.
+    let entrega = unsafe { conferir_a_entrega(entrega) };
+
+    DESLOCAMENTO_FISICO.store(entrega.deslocamento_fisico, Ordering::Relaxed);
+
+    for i in 0..entrega.quantas_regioes {
+        // SAFETY: o ponteiro e a contagem vêm da entrega conferida, e as
+        // regiões estão mapeadas no espaço que já está ativo.
+        let r = unsafe { *(entrega.regioes as *const protocolo::Regiao).add(i as usize) };
         crate::machine::adicionar_regiao(Regiao {
-            inicio: regiao.start,
-            fim: regiao.end,
-            tipo: match regiao.kind {
-                MemoryRegionKind::Usable => TipoRegiao::Utilizavel,
-                MemoryRegionKind::Bootloader => TipoRegiao::Bootloader,
-                // As variantes `UnknownUefi`/`UnknownBios` carregam o código
-                // cru do firmware. Do ponto de vista do kernel todas
-                // significam a mesma coisa: não é nossa para usar.
+            inicio: r.inicio,
+            fim: r.fim,
+            tipo: match r.tipo {
+                protocolo::tipo::UTILIZAVEL => TipoRegiao::Utilizavel,
+                protocolo::tipo::DO_INICIADOR => TipoRegiao::Bootloader,
+                // Do firmware ou de hardware. Do ponto de vista do kernel as
+                // duas significam a mesma coisa: não é nossa para usar.
                 _ => TipoRegiao::Reservada,
             },
         });
     }
 
-    if let Some(deslocamento) = boot_info.physical_memory_offset.into_option() {
-        DESLOCAMENTO_FISICO.store(deslocamento, Ordering::Relaxed);
-    }
-
-    if let Some(fb) = boot_info.framebuffer.as_ref() {
-        let info = fb.info();
-
-        // O endereço vem do próprio buffer que o bootloader entregou, já
-        // mapeado e gravável — é o que torna a tela utilizável desde o
-        // primeiro instante, antes mesmo de a paginação ser nossa. Num kernel
-        // que quer poder desenhar uma tela de falha, esse "desde o primeiro
-        // instante" é a propriedade que importa.
+    if entrega.video.presente != 0 {
+        // O endereço já está mapeado e gravável — é o que torna a tela
+        // utilizável desde o primeiro instante, antes mesmo de a paginação
+        // ser nossa. Num kernel que quer poder desenhar uma tela de falha,
+        // esse "desde o primeiro instante" é a propriedade que importa.
         //
-        // SAFETY: a fatia é do bootloader, tem exatamente o tamanho que a
-        // geometria descreve, e a posse dela passou para o kernel.
+        // SAFETY: a faixa é a que o iniciador mapeou, com exatamente o
+        // tamanho que a geometria descreve, e ninguém mais a tem.
         unsafe {
             crate::tela::registrar(
-                fb.buffer().as_ptr() as u64,
-                info.width as u32,
-                info.height as u32,
-                info.stride as u32,
-                info.bytes_per_pixel as u32,
-                formato_de_pixel(info.pixel_format),
+                entrega.video.em,
+                entrega.video.largura,
+                entrega.video.altura,
+                entrega.video.pixels_por_linha,
+                entrega.video.bytes_por_pixel,
+                match entrega.video.formato {
+                    protocolo::formato::RGB => crate::tela::Formato::Rgb,
+                    protocolo::formato::BGR => crate::tela::Formato::Bgr,
+                    // Um formato que este kernel não sabe desenhar vira
+                    // cinza: é uma escolha visível, e melhor que escrever
+                    // bytes na ordem errada e produzir cores trocadas sem
+                    // ninguém saber por quê.
+                    _ => crate::tela::Formato::Cinza,
+                },
             );
         }
     }
@@ -211,18 +161,91 @@ fn inicio(boot_info: &'static mut BootInfo) -> ! {
     crate::inicio_comum(canal)
 }
 
-/// Traduz o formato do bootloader para o do kernel.
+/// Confere que o ponteiro do `RDI` aponta mesmo para uma entrega desta versão.
 ///
-/// Os formatos que o `bootloader` conhece e este kernel não sabe desenhar
-/// viram cinza. É uma escolha visível — a tela fica em tons de cinza — e
-/// melhor que a alternativa de escrever bytes na ordem errada, que produziria
-/// cores trocadas sem ninguém saber por quê.
-fn formato_de_pixel(formato: PixelFormat) -> crate::tela::Formato {
-    match formato {
-        PixelFormat::Rgb => crate::tela::Formato::Rgb,
-        PixelFormat::Bgr => crate::tela::Formato::Bgr,
-        _ => crate::tela::Formato::Cinza,
+/// # Por que parar em vez de seguir
+///
+/// Porque não há como seguir. Se a entrega não for a que este kernel espera,
+/// o mapa de memória, o deslocamento físico e a geometria do vídeo estão
+/// todos deslocados — e cada um deles vira um defeito que aparece em outro
+/// lugar, páginas depois, sem nada que aponte para aqui.
+///
+/// A serial já está de pé quando esta função roda, e é por isso que ela pode
+/// dizer o que aconteceu antes de parar.
+///
+/// # Safety
+/// `entrega` precisa ser o ponteiro que o iniciador pôs no `RDI`.
+unsafe fn conferir_a_entrega(entrega: *const protocolo::Entrega) -> protocolo::Entrega {
+    let parar = |motivo: &str| -> ! {
+        crate::log_error!("boot", "a entrega do iniciador nao serve: {}", motivo);
+        halt_forever()
+    };
+
+    if entrega.is_null() || !(entrega as usize).is_multiple_of(align_of::<protocolo::Entrega>()) {
+        parar("o ponteiro e nulo ou esta desalinhado");
     }
+
+    // SAFETY: delegada a quem chama; o alinhamento acabou de ser conferido, e
+    // um ponteiro que não aponte para memória mapeada faria uma falha de
+    // página — que é um desfecho melhor que ler campos deslocados.
+    let entrega = unsafe { core::ptr::read(entrega) };
+
+    if entrega.magica != protocolo::MAGICA {
+        crate::log_error!(
+            "boot",
+            "magica {:#018x}, esperava {:#018x}",
+            entrega.magica,
+            protocolo::MAGICA
+        );
+        parar("a magica nao confere");
+    }
+    if entrega.versao != protocolo::VERSAO {
+        crate::log_error!(
+            "boot",
+            "versao {}, este kernel fala a {}",
+            entrega.versao,
+            protocolo::VERSAO
+        );
+        parar("o iniciador e de outra versao do protocolo");
+    }
+    // Menor que o esperado significa campos que este kernel leria e que não
+    // foram escritos. Maior é um iniciador mais novo, e os campos que este
+    // kernel conhece continuam onde estavam — por isso só o menor é recusado.
+    if (entrega.tamanho as usize) < size_of::<protocolo::Entrega>() {
+        crate::log_error!(
+            "boot",
+            "a entrega tem {} bytes, e este kernel le {}",
+            entrega.tamanho,
+            size_of::<protocolo::Entrega>()
+        );
+        parar("a entrega e menor do que este kernel le");
+    }
+    if entrega.regioes == 0 || entrega.quantas_regioes == 0 {
+        parar("a entrega nao traz mapa de memoria");
+    }
+
+    // O ponteiro das regiões é **virtual**, no espaço que o iniciador montou,
+    // e portanto alcançável pelo mapa da memória física. Um ponteiro abaixo
+    // desse deslocamento é físico, e ler por ele funciona **por acidente**:
+    // no instante em que este código roda a identidade que o iniciador
+    // deixou ainda está de pé, e ela faz um endereço físico baixo parecer
+    // válido. Ela sai alguns passos adiante, em `init_paginacao`.
+    //
+    // Medido por mutação: com as regiões entregues em endereço físico, o
+    // kernel bootava e passava em tudo. O defeito só apareceria numa máquina
+    // onde elas caíssem acima da identidade — ou no dia em que ela fosse
+    // largada mais cedo.
+    if entrega.regioes < entrega.deslocamento_fisico {
+        crate::log_error!(
+            "boot",
+            "as regioes estao em {:#x}, abaixo do deslocamento {:#x}",
+            entrega.regioes,
+            entrega.deslocamento_fisico
+        );
+        parar("o ponteiro das regioes nao e do espaco do kernel");
+    }
+
+    entrega
 }
 
 /// Abre as portas seriais: (console humano, canal do agente).
@@ -238,20 +261,22 @@ pub fn init_seriais() -> (Option<Uart>, Option<Uart>) {
     (console, agente)
 }
 
-/// Assume o controle das tabelas de página que o bootloader deixou ativas.
+/// Assume o controle das tabelas de página que o iniciador deixou ativas.
 pub fn init_paginacao() {
     let deslocamento = DESLOCAMENTO_FISICO.load(Ordering::Relaxed);
     if deslocamento == u64::MAX {
         // Sem o mapeamento da memória física não há como editar tabelas. É
         // fatal para a paginação, mas não para o kernel: reportamos e seguimos
         // com o que o bootloader montou, que já basta para executar.
-        crate::log_error!("mmu", "bootloader nao mapeou a memoria fisica");
+        crate::log_error!("mmu", "o iniciador nao mapeou a memoria fisica");
         return;
     }
 
-    // SAFETY: o deslocamento veio do próprio bootloader, que o estabeleceu ao
-    // montar as tabelas.
+    // SAFETY: o deslocamento veio da entrega do iniciador, que o estabeleceu
+    // ao montar as tabelas.
     unsafe { paginacao::init(deslocamento) };
+
+    paginacao::largar_a_identidade();
 }
 
 /// Só para a suíte: o par de conversões de permissão deste backend.
@@ -265,7 +290,7 @@ pub use paginacao::{
 
 /// O nome da falha que um estouro de pilha produz nesta arquitetura.
 ///
-/// A pilha bate na guard page do bootloader e gera uma falha de página. Mas o
+/// A pilha bate na página de guarda e gera uma falha de página. Mas o
 /// processador precisa empilhar o quadro da exceção — na mesma pilha
 /// estourada — e falha de novo, o que escala para *double fault*. É por isso
 /// que a pilha dedicada da IST não é opcional: sem ela, a terceira tentativa
@@ -277,11 +302,11 @@ pub const fn falha_de_estouro_de_pilha() -> &'static str {
 /// Informa faixas de memória física que o alocador de frames não pode
 /// entregar.
 ///
-/// No x86 não há nenhuma: o crate `bootloader` já marca no mapa de memória
-/// tudo que ocupou — a imagem do kernel, as tabelas de página iniciais, o
-/// próprio `BootInfo` — com o tipo `Bootloader`, e nunca como utilizável. A
-/// tradução em [`inicio`] preserva essa distinção, então o alocador já nasce
-/// sabendo o que evitar.
+/// No x86 não há nenhuma: o iniciador marca no mapa de memória tudo que
+/// ocupou — a imagem do kernel, as tabelas de página, a pilha inicial, a
+/// própria entrega — como [`protocolo::tipo::DO_INICIADOR`], e nunca como
+/// utilizável. A tradução em [`_start`] preserva essa distinção, então o
+/// alocador já nasce sabendo o que evitar.
 pub fn reservar_faixas(_f: impl FnMut(u64, u64)) {}
 
 /// Instala GDT, TSS e IDT.

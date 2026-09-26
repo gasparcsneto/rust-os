@@ -351,8 +351,13 @@ fn caminho_monitor(arch: Arquitetura) -> PathBuf {
 
 /// O que o build produziu e o QEMU precisa carregar.
 enum Artefato {
-    /// x86: uma imagem de disco bootável por BIOS (e outra por UEFI).
-    ImagemDeDisco { bios: PathBuf, _uefi: PathBuf },
+    /// x86: o disco de testes, com o iniciador e o kernel na ESP.
+    ///
+    /// Não há mais uma imagem por caminho de boot. O firmware UEFI carrega o
+    /// `\EFI\BOOT\BOOTX64.EFI` da partição de sistema, e é o iniciador
+    /// deste projeto que põe o kernel de pé — o mesmo disco de onde o kernel
+    /// depois lê a raiz em Btrfs.
+    Disco(PathBuf),
     /// ARM: uma imagem binária crua com cabeçalho arm64.
     ///
     /// Não há imagem de disco porque não há bootloader. Em vez disso seguimos
@@ -448,22 +453,18 @@ fn build(arch: Arquitetura, release: bool, modo_teste: bool) -> Result<Artefato,
         }
 
         Arquitetura::X86_64 => {
-            // Geramos as duas variantes porque elas bootam por caminhos
-            // diferentes: a imagem BIOS usa o boot legado por MBR (o QEMU roda
-            // sem firmware extra) e a UEFI é o que máquinas modernas usam.
-            let bios = saida.join("os-bios.img");
-            println!("[xtask] gerando imagem BIOS -> {}", bios.display());
-            bootloader::BiosBoot::new(&elf)
-                .create_disk_image(&bios)
-                .map_err(|e| format!("falha ao gerar a imagem BIOS: {e}"))?;
-
-            let uefi = saida.join("os-uefi.img");
-            println!("[xtask] gerando imagem UEFI -> {}", uefi.display());
-            bootloader::UefiBoot::new(&elf)
-                .create_disk_image(&uefi)
-                .map_err(|e| format!("falha ao gerar a imagem UEFI: {e}"))?;
-
-            Ok(Artefato::ImagemDeDisco { bios, _uefi: uefi })
+            // O x86 boota pela UEFI, com o iniciador deste projeto. Os dois
+            // vão para a ESP do disco de testes: o `.efi` no caminho que todo
+            // firmware procura, e o ELF do kernel ao lado.
+            //
+            // É sempre este kernel, e não o da execução anterior: a cópia é
+            // incondicional porque `test`, `fumaca` e `run` compilam binários
+            // diferentes, e bootar o errado dá um resultado que não é sobre o
+            // que se pediu.
+            let efi = build_do_iniciador(release)?;
+            let disco = disco_de_testes()?;
+            instalar_iniciador(&disco, &efi, &elf)?;
+            Ok(Artefato::Disco(disco))
         }
     }
 }
@@ -702,6 +703,13 @@ const TETO_DO_INICIADOR: Duration = Duration::from_secs(90);
 /// Cada linha aqui é uma afirmação sobre o que foi conferido do outro lado, e
 /// não sobre o texto: `as tres tabelas conferem` só é impressa depois de três
 /// assinaturas e três CRCs baterem. Procurar a linha é procurar a conferência.
+/// A primeira linha que o kernel escreve depois de assumir a máquina.
+///
+/// É ela que prova o salto. Tudo que vem antes é o iniciador falando sobre o
+/// que pretende fazer; esta linha é outro programa, noutro espaço de
+/// endereços, dizendo que está de pé.
+const MARCA_DO_KERNEL: &str = "Duke iniciado em x86_64";
+
 const ESPERADO_DO_INICIADOR: &[&str] = &[
     "vivo, carregado pelo firmware",
     "tabela do sistema confere",
@@ -710,6 +718,8 @@ const ESPERADO_DO_INICIADOR: &[&str] = &[
     "relocacoes aplicadas",
     "mapa confere",
     "fim do relatorio",
+    "saindo dos servicos de boot",
+    "a maquina e do Duke",
 ];
 
 /// Sobe o iniciador no firmware de verdade e confere o que ele relatou.
@@ -735,7 +745,8 @@ fn iniciador(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
     // A rodada que importa: o kernel de verdade, e o relatório inteiro.
     instalar_iniciador(&disco, &efi, &kernel)?;
     println!("\n[xtask] iniciador: o kernel de verdade");
-    let (desfecho, relatorio) = subir_no_firmware(arch, &disco, &firmware)?;
+    let espera = Desenlace::Marca(MARCA_DO_KERNEL);
+    let (desfecho, relatorio) = subir_no_firmware(arch, &disco, &firmware, &espera)?;
     for linha in &relatorio {
         println!("  [iniciador] {linha}");
     }
@@ -747,7 +758,7 @@ fn iniciador(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
         );
     }
 
-    if let Err(motivo) = conferir_desfecho(desfecho) {
+    if let Err(motivo) = conferir_desfecho(desfecho, &espera) {
         eprintln!("[xtask] iniciador: {motivo}");
         falhou = true;
     }
@@ -772,6 +783,7 @@ fn iniciador(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
         eprintln!("[xtask] iniciador: {motivo}");
         falhou = true;
     }
+    println!("  [conferido] o kernel assumiu a maquina e disse `{MARCA_DO_KERNEL}`");
 
     // E as rodadas das recusas: kerneis estragados de propósito, que o
     // iniciador tem de rejeitar em vez de carregar.
@@ -886,10 +898,11 @@ fn rodada_de_recusa(
         .map_err(|e| format!("não foi possível escrever {}: {e}", estragado.display()))?;
     instalar_iniciador(disco, efi, &estragado)?;
 
-    let (desfecho, relatorio) = subir_no_firmware(arch, disco, firmware)?;
+    let espera = Desenlace::Desligamento;
+    let (desfecho, relatorio) = subir_no_firmware(arch, disco, firmware, &espera)?;
     // O iniciador precisa **sobreviver** à recusa: ele relata e desliga. Um
     // travamento aqui é tão defeito quanto aceitar o arquivo.
-    conferir_desfecho(desfecho)?;
+    conferir_desfecho(desfecho, &espera)?;
 
     if !relatorio.iter().any(|l| l.contains(caso.esperado)) {
         for linha in &relatorio {
@@ -903,11 +916,26 @@ fn rodada_de_recusa(
     Ok(())
 }
 
+/// O que a sonda do iniciador espera do emulador.
+enum Desenlace {
+    /// Que a máquina desligue sozinha. É o desfecho de uma recusa: o
+    /// iniciador relata o motivo e encerra.
+    Desligamento,
+    /// Que esta marca apareça na saída, e então o emulador é encerrado.
+    ///
+    /// É o desfecho de um boot que deu certo. O iniciador não desliga nada —
+    /// ele entrega a máquina ao kernel, que fica de pé. Esperar o
+    /// desligamento aqui seria esperar para sempre; o que se espera é o
+    /// **kernel falando**, que é a única prova de que o salto funcionou.
+    Marca(&'static str),
+}
+
 /// Sobe o QEMU com o firmware e devolve o desfecho e as linhas do iniciador.
 fn subir_no_firmware(
     arch: Arquitetura,
     disco: &Path,
     firmware: &(PathBuf, PathBuf),
+    espera: &Desenlace,
 ) -> Result<(Desfecho, Vec<String>), String> {
     let (codigo, variaveis) = firmware;
 
@@ -946,7 +974,10 @@ fn subir_no_firmware(
         .spawn()
         .map_err(|e| format!("não foi possível iniciar o {}: {e}", arch.qemu()))?;
 
-    let desfecho = aguardar_com_teto(filho, TETO_DO_INICIADOR)?;
+    let desfecho = match espera {
+        Desenlace::Desligamento => aguardar_com_teto(filho, TETO_DO_INICIADOR)?,
+        Desenlace::Marca(marca) => aguardar_a_marca(filho, &registro, marca, TETO_DO_INICIADOR)?,
+    };
 
     let bruto = std::fs::read(&registro)
         .map_err(|e| format!("não foi possível ler {}: {e}", registro.display()))?;
@@ -958,20 +989,77 @@ fn subir_no_firmware(
     Ok((desfecho, relatorio))
 }
 
+/// Espera uma marca aparecer na saída, e então encerra o emulador.
+///
+/// Devolve `Codigo(0)` quando a marca apareceu — não porque o processo saiu
+/// com zero, mas porque o que se queria aconteceu. Quem chama confere o
+/// desfecho pela mesma função dos outros casos, e o que distingue um boot
+/// que funcionou de um que travou é justamente ter chegado aqui.
+fn aguardar_a_marca(
+    mut filho: Child,
+    registro: &Path,
+    marca: &str,
+    teto: Duration,
+) -> Result<Desfecho, String> {
+    let inicio = Instant::now();
+
+    loop {
+        // O arquivo é lido a cada volta porque o emulador escreve nele
+        // enquanto roda. Ler o que já chegou é o que permite reagir antes de
+        // o processo terminar — e ele não vai terminar sozinho.
+        if let Ok(bytes) = std::fs::read(registro)
+            && String::from_utf8_lossy(&bytes).contains(marca)
+        {
+            let _ = filho.kill();
+            let _ = filho.wait();
+            return Ok(Desfecho::Codigo(0));
+        }
+
+        // Um emulador que morreu antes da marca é defeito, e esperar o teto
+        // inteiro por ele só atrasa o diagnóstico.
+        if let Some(status) = filho
+            .try_wait()
+            .map_err(|e| format!("falha ao aguardar o emulador: {e}"))?
+        {
+            return Ok(match status.code() {
+                Some(code) => Desfecho::Codigo(code),
+                None => Desfecho::Sinal,
+            });
+        }
+
+        if inicio.elapsed() >= teto {
+            let _ = filho.kill();
+            let _ = filho.wait();
+            return Ok(Desfecho::Estourou);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// O desfecho do emulador é uma afirmação sobre o iniciador.
 ///
-/// Quem desliga a máquina é a última linha do programa — inclusive a que
-/// recusa um kernel estragado. Um estouro de tempo significa que ela não foi
-/// alcançada.
-fn conferir_desfecho(desfecho: Desfecho) -> Result<(), String> {
+/// Numa recusa, quem desliga a máquina é a última linha do iniciador; num
+/// boot que deu certo, quem fala é o kernel. Um estouro de tempo significa
+/// que aquilo não aconteceu.
+fn conferir_desfecho(desfecho: Desfecho, espera: &Desenlace) -> Result<(), String> {
     match desfecho {
         Desfecho::Codigo(0) => Ok(()),
         Desfecho::Codigo(codigo) => Err(format!("o emulador saiu com codigo {codigo}")),
         Desfecho::Sinal => Err("o emulador foi terminado por um sinal".into()),
-        Desfecho::Estourou => Err(format!(
-            "a maquina nao desligou em {}s — o iniciador nao chegou ao fim",
-            TETO_DO_INICIADOR.as_secs()
-        )),
+        // O estouro significa coisas diferentes conforme o que se esperava, e
+        // dizer a errada manda quem depura olhar o lugar errado. Um boot que
+        // não chegou ao kernel não é "a máquina não desligou" — é o salto que
+        // não aconteceu.
+        Desfecho::Estourou => Err(match espera {
+            Desenlace::Desligamento => format!(
+                "a maquina nao desligou em {}s — o iniciador nao chegou ao fim",
+                TETO_DO_INICIADOR.as_secs()
+            ),
+            Desenlace::Marca(marca) => format!(
+                "o kernel nao disse `{marca}` em {}s — o salto nao chegou nele",
+                TETO_DO_INICIADOR.as_secs()
+            ),
+        }),
     }
 }
 
@@ -2053,8 +2141,23 @@ fn comando_qemu(
     let mut qemu = Command::new(arch.qemu());
 
     match (arch, artefato) {
-        (Arquitetura::X86_64, Artefato::ImagemDeDisco { bios, .. }) => {
-            qemu.args(["-drive", &format!("format=raw,file={}", bios.display())]);
+        (Arquitetura::X86_64, Artefato::Disco(disco)) => {
+            // O firmware, em duas partes: o código, que é somente leitura, e
+            // as variáveis, que ele escreve durante o boot e por isso são uma
+            // cópia nossa.
+            let (codigo, variaveis) = firmware_uefi()?;
+            qemu.args([
+                "-drive",
+                &format!("if=pflash,format=raw,readonly=on,file={}", codigo.display()),
+            ]);
+            qemu.args([
+                "-drive",
+                &format!("if=pflash,format=raw,file={}", variaveis.display()),
+            ]);
+            // E o disco de onde o firmware boota, que é o mesmo que o kernel
+            // depois lê. O `-drive` sem `if=` o liga ao controlador padrão da
+            // máquina, que é de onde o firmware procura uma ESP.
+            qemu.args(["-drive", &format!("format=raw,file={}", disco.display())]);
             // O dispositivo que permite ao kernel encerrar o QEMU.
             qemu.args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]);
         }
@@ -2085,10 +2188,27 @@ fn comando_qemu(
     // Um disco virtio, nas duas arquiteturas. `if=none` mais `-device` em vez
     // de `if=virtio` porque só assim o dispositivo aparece no barramento PCI
     // no ARM, onde não há o atalho que o x86 aceita.
+    //
+    // No x86 é **o mesmo arquivo** que o firmware acabou de usar para bootar,
+    // e por isso ele é aberto em modo compartilhado: o QEMU recusa abrir a
+    // mesma imagem duas vezes com trava exclusiva, e recusa com uma mensagem
+    // sobre travas que não diz nada sobre o que se estava tentando fazer.
+    //
+    // Que seja o mesmo disco não é economia: é o que faz o kernel ler a raiz
+    // em Btrfs do disco de onde a máquina ligou, como numa máquina de
+    // verdade.
     let disco = disco_de_testes()?;
+    let compartilhado = if arch == Arquitetura::X86_64 {
+        ",file.locking=off"
+    } else {
+        ""
+    };
     qemu.args([
         "-drive",
-        &format!("format=raw,file={},if=none,id=disco0", disco.display()),
+        &format!(
+            "format=raw,file={},if=none,id=disco0{compartilhado}",
+            disco.display()
+        ),
     ]);
     qemu.args(["-device", "virtio-blk-pci,drive=disco0"]);
 
@@ -3569,69 +3689,24 @@ mod testes {
     /// esta é a única amarra possível.
     #[test]
     fn base_do_kernel_confere_com_a_do_kernel() {
-        let fonte =
-            std::fs::read_to_string(raiz_do_projeto().join("kernel/src/arch/x86_64/mod.rs"))
-                .expect("o backend x86_64 do kernel precisa existir");
+        // Ela mora no `protocolo`, que o kernel e o iniciador incluem. O
+        // `xtask` não pode incluí-lo da mesma forma — ele traduz endereços
+        // para símbolos e precisa da constante como número, não como tipo —,
+        // então continua sendo uma leitura da fonte.
+        //
+        // A diferença é que agora há **uma** fonte para ler. Antes eram duas,
+        // e este teste tinha um irmão que exigia que elas batessem entre si.
+        let fonte = std::fs::read_to_string(raiz_do_projeto().join("protocolo/src/mapa.rs"))
+            .expect("o mapa do protocolo precisa existir");
 
         assert!(
             fonte.contains("pub const BASE_DO_KERNEL: u64 = 0xFFFF_8000_0000_0000;"),
-            "a base do kernel mudou em arch::x86_64; atualize Arquitetura::base_do_kernel"
+            "a base do kernel mudou no protocolo; atualize Arquitetura::base_do_kernel"
         );
         assert_eq!(Arquitetura::X86_64.base_do_kernel(), 0xFFFF_8000_0000_0000);
         assert_eq!(Arquitetura::Aarch64.base_do_kernel(), 0);
     }
 
-    /// O mapa do espaço virtual está escrito em dois lugares, e eles têm de
-    /// concordar.
-    ///
-    /// O kernel o declara em `arch::x86_64`; o iniciador, em `mapa.rs`. Os
-    /// dois compilam para alvos diferentes, em workspaces diferentes, e não
-    /// há um lugar comum onde as constantes caibam sem que um passe a
-    /// depender do outro.
-    ///
-    /// O preço de divergir é alto e mudo: um kernel mapeado num endereço e
-    /// ligado para outro não dá erro de compilação nem mensagem — dá uma
-    /// máquina que reinicia no primeiro salto, antes de haver o que a
-    /// diagnostique.
-    #[test]
-    fn o_mapa_do_iniciador_confere_com_o_do_kernel() {
-        let raiz = raiz_do_projeto();
-        let kernel = std::fs::read_to_string(raiz.join("kernel/src/arch/x86_64/mod.rs"))
-            .expect("o backend x86_64 do kernel precisa existir");
-        let iniciador = std::fs::read_to_string(raiz.join("iniciador/src/mapa.rs"))
-            .expect("o mapa do iniciador precisa existir");
-
-        for (nome, valor) in [
-            ("BASE_DO_KERNEL", "0xFFFF_8000_0000_0000"),
-            ("BASE_DA_MEMORIA_FISICA", "0xFFFF_8800_0000_0000"),
-        ] {
-            let declaracao = format!("pub const {nome}: u64 = {valor};");
-            assert!(
-                kernel.contains(&declaracao),
-                "{nome} mudou no kernel; atualize iniciador/src/mapa.rs"
-            );
-            assert!(
-                iniciador.contains(&declaracao),
-                "{nome} mudou no iniciador; atualize kernel/src/arch/x86_64/mod.rs"
-            );
-        }
-
-        // Esta o kernel chama de `BASE_DO_RESTO` e o iniciador também, mas no
-        // kernel ela é privada — daí a busca ser pelo valor.
-        assert!(
-            kernel.contains("0xFFFF_A000_0000_0000"),
-            "a faixa que o bootloader posiciona mudou no kernel"
-        );
-        assert!(
-            iniciador.contains("pub const BASE_DO_RESTO: u64 = 0xFFFF_A000_0000_0000;"),
-            "a faixa que o bootloader posiciona mudou no iniciador"
-        );
-    }
-
-    /// Mesmo raciocínio da amarra anterior: o nome do executável vem do
-    /// `Cargo.toml` do kernel, e o xtask precisa adivinhá-lo para achar o ELF.
-    /// Se o pacote for renomeado sem atualizar a constante, o build "passa" e
-    /// só o `cargo xtask debug` quebra — longe da causa.
     #[test]
     fn nome_do_binario_confere_com_o_pacote_do_kernel() {
         let manifesto = std::fs::read_to_string(raiz_do_projeto().join("kernel/Cargo.toml"))

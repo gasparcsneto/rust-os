@@ -5,3 +5,10 @@ version = 4
 [[package]]
 name = "iniciador"
 version = "0.1.0"
+dependencies = [
+ "protocolo",
+]
+
+[[package]]
+name = "protocolo"
+version = "0.1.0"

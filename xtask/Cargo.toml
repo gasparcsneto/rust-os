@@ -6,7 +6,9 @@ publish = false
 description = "Build system do projeto: compila o kernel, gera as imagens de disco e roda o QEMU"
 
 [dependencies]
-# Monta as imagens bootáveis. Este crate contém o bootloader em si (estágios
-# BIOS e a aplicação UEFI) e sabe empacotar o ELF do kernel junto com eles
-# num disco FAT inicializável.
-bootloader = "0.11.17"
+# Nenhuma. O `xtask` monta o disco com as ferramentas do hospedeiro —
+# `sgdisk`, `mkfs.vfat`, `mcopy`, `mkfs.btrfs` — e o que boota é o iniciador
+# deste projeto, compilado como mais um alvo.
+#
+# Aqui morava o crate `bootloader`, que gerava as imagens de BIOS e de UEFI.
+# Ele saiu quando o `iniciador/` passou a pôr o kernel de pé sozinho.

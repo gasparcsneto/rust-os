@@ -57,10 +57,14 @@ spin = "0.12.3"
 # peculiaridades acumuladas (GDT, IDT, portas de I/O legadas) que não vale a
 # pena reimplementar.
 [target.'cfg(target_arch = "x86_64")'.dependencies]
-# Define o contrato com o bootloader: a assinatura do entry point e a struct
-# `BootInfo` (mapa de memória, framebuffer, offset da memória física).
-# Atenção: este crate é x86_64-only — daí o port ARM ter boot próprio.
-bootloader_api = "0.11.17"
+# O contrato com o iniciador UEFI: o que ele entrega ao kernel e onde cada
+# coisa mora no espaço virtual. Declarado num pacote, e não nos dois lados,
+# porque duas declarações iguais são duas que podem divergir — e o preço de
+# divergirem aqui é uma máquina que reinicia no primeiro salto.
+#
+# Só do x86: no ARM o boot é o protocolo de imagem crua do arm64, que não
+# precisa de bootloader nenhum e não entrega estrutura nenhuma.
+protocolo = { path = "../protocolo" }
 
 # Abstrações seguras sobre instruções e estruturas do x86_64.
 x86_64 = "0.15.5"

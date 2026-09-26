@@ -2630,6 +2630,56 @@ fn vfs_le_a_partir_de_um_deslocamento() -> Resultado {
     Ok(())
 }
 
+/// A identidade que o iniciador deixou foi largada.
+///
+/// # O que ela era, e por que ela não pode ficar
+///
+/// O iniciador mapeia a RAM duas vezes: no deslocamento do kernel, que é por
+/// onde o kernel a alcança, e por identidade — virtual igual a físico. A
+/// segunda existe para um instante só, o do `mov cr3`: a instrução seguinte é
+/// buscada no código do iniciador, que mora num endereço baixo.
+///
+/// Passado esse instante ela é um peso. Ela ocupa a entrada de topo do
+/// **espaço do usuário**, e faz o endereço zero ser memória legível —
+/// desreferenciar um ponteiro nulo dentro do kernel deixaria de ser uma falha
+/// de página e passaria a ler o primeiro frame da máquina.
+///
+/// # Por que este caso existe
+///
+/// Porque largar a identidade não tem efeito visível: o kernel boota igual
+/// com ela e sem ela. Medido por mutação — desligar o `largar_a_identidade`
+/// não reprovava caso nenhum, e o defeito ficaria esperando o primeiro
+/// ponteiro nulo do kernel para aparecer como uma leitura silenciosa.
+fn mmu_identidade_largada() -> Resultado {
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        crate::log_info!("teste", "so o x86 boota por um iniciador com identidade");
+        Ok(())
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        // Endereços baixos que a identidade cobria e que nada mais mapeia: o
+        // primeiro frame da máquina, e um no meio da faixa onde o iniciador
+        // e as tabelas dele moram.
+        for endereco in [0x1000u64, 0x10_0000, 0x400_0000] {
+            if let Some(fisico) = crate::arch::traduzir(endereco) {
+                crate::log_error!("teste", "{:#x} traduz para {:#x}", endereco, fisico);
+                return Err("um endereco baixo ainda traduz: a identidade ficou");
+            }
+        }
+
+        // E o que substituiu a identidade continua de pé: a memória física
+        // pelo deslocamento do kernel. Sem esta metade, o caso passaria com
+        // um kernel que tivesse largado a tabela inteira.
+        if crate::arch::traduzir(protocolo::mapa::BASE_DA_MEMORIA_FISICA + 0x1000) != Some(0x1000) {
+            return Err("o mapa da memoria fisica saiu junto com a identidade");
+        }
+
+        Ok(())
+    }
+}
+
 /// A tabela de descritores faz o que uma tabela de descritores faz.
 ///
 /// # Por que um caso de unidade, se há um programa que a usa
@@ -6363,6 +6413,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "btrfs: classifica cada tipo de extensao",
         f: btrfs_classifica_cada_extensao,
+    },
+    Caso {
+        nome: "mmu: a identidade do iniciador foi largada",
+        f: mmu_identidade_largada,
     },
     Caso {
         nome: "vfs: le a partir de um deslocamento",

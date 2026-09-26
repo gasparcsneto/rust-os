@@ -35,9 +35,11 @@ mod carga;
 mod crc32;
 mod efi;
 mod elf;
-mod mapa;
 mod paginas;
+mod salto;
 mod serial;
+
+use protocolo::mapa;
 
 use core::fmt::Write;
 use core::panic::PanicInfo;
@@ -56,8 +58,12 @@ pub extern "efiapi" fn efi_main(imagem: efi::Handle, sistema: *mut efi::Sistema)
     serial::init();
     relatar!("vivo, carregado pelo firmware");
 
+    // Em caso de sucesso `relatorio` não volta: ela termina saltando para o
+    // kernel. O desligamento abaixo é o caminho de quem falhou — e ele existe
+    // para que a máquina encerre com um desfecho em vez de ficar de pé sem
+    // ninguém rodando.
     match relatorio(imagem, sistema) {
-        Ok(()) => relatar!("fim do relatorio"),
+        Ok(nunca) => match nunca {},
         Err(motivo) => relatar!("ERRO {}", motivo),
     }
 
@@ -65,7 +71,10 @@ pub extern "efiapi" fn efi_main(imagem: efi::Handle, sistema: *mut efi::Sistema)
 }
 
 /// Confere o que o firmware entregou e descreve a máquina.
-fn relatorio(imagem: efi::Handle, sistema: *mut efi::Sistema) -> Result<(), &'static str> {
+fn relatorio(
+    imagem: efi::Handle,
+    sistema: *mut efi::Sistema,
+) -> Result<core::convert::Infallible, &'static str> {
     if sistema.is_null() {
         return Err("a tabela do sistema veio nula");
     }
@@ -121,8 +130,7 @@ fn relatorio(imagem: efi::Handle, sistema: *mut efi::Sistema) -> Result<(), &'st
 
     let fim_da_ram = descrever_memoria(boot)?;
     let video = descrever_video(boot)?;
-    descrever_kernel(imagem, boot, fim_da_ram, video)?;
-    Ok(())
+    carregar_o_kernel(imagem, boot, fim_da_ram, video)
 }
 
 /// Confere assinatura, tamanho e CRC-32 de um cabeçalho de tabela.
@@ -393,9 +401,22 @@ fn descrever_video(boot: &efi::ServicosDeBoot) -> Result<Option<carga::Video>, &
         return Ok(None);
     }
 
+    // Quantos bytes cada pixel ocupa: a UEFI descreve os dois formatos que
+    // este kernel desenha como quatro bytes, com o último ignorado.
+    const BYTES_POR_PIXEL: u32 = 4;
+
     Ok(Some(carga::Video {
         fisico: modo.buffer,
         bytes: modo.tamanho_do_buffer as u64,
+        formato: if info.formato == efi::formato::RGB {
+            protocolo::formato::RGB
+        } else {
+            protocolo::formato::BGR
+        },
+        largura: info.largura,
+        altura: info.altura,
+        pixels_por_linha: info.pixels_por_linha,
+        bytes_por_pixel: BYTES_POR_PIXEL,
     }))
 }
 
@@ -443,13 +464,13 @@ const MAIOR_KERNEL: u64 = 32 * 1024 * 1024;
 /// rodando; a imagem sabe de qual **dispositivo** veio; e o dispositivo
 /// oferece o **sistema de arquivos**. Os três elos são o que amarra o kernel
 /// ao iniciador que o carregou.
-fn descrever_kernel(
-    imagem: efi::Handle,
+fn carregar_o_kernel(
+    handle: efi::Handle,
     boot: &efi::ServicosDeBoot,
     fim_da_ram: u64,
     video: Option<carga::Video>,
-) -> Result<(), &'static str> {
-    let bytes = ler_o_kernel(imagem, boot)?;
+) -> Result<core::convert::Infallible, &'static str> {
+    let bytes = ler_o_kernel(handle, boot)?;
     let imagem = elf::Imagem::abrir(bytes)?;
 
     if imagem.maquina != elf::MAQUINA_X86_64 {
@@ -551,7 +572,12 @@ fn descrever_kernel(
     );
 
     conferir_o_mapa(&carga, &imagem)?;
-    Ok(())
+    relatar!("fim do relatorio");
+
+    // SAFETY: a imagem foi copiada, relocada e conferida contra o arquivo; o
+    // mapa foi montado e percorrido; o `handle` é o que o firmware entregou
+    // em `efi_main`. É tudo que o salto exige.
+    unsafe { salto::saltar(handle, boot, &carga) }
 }
 
 /// Percorre o mapa recém-montado e confere onde cada região caiu.
@@ -648,7 +674,7 @@ fn conferir_o_mapa(carga: &carga::Carga, imagem: &elf::Imagem) -> Result<(), &'s
     }
 
     match carga.video {
-        Some(em) => {
+        Some((em, _)) => {
             if tabelas.traduzir(em).is_none() {
                 return Err("o framebuffer nao esta mapeado");
             }

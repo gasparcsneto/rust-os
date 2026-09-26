@@ -1,17 +1,18 @@
 //! Onde cada coisa mora no espaço virtual do kernel.
 //!
-//! # Metade de um contrato
+//! # Um lugar só
 //!
-//! A outra metade está em `kernel/src/arch/x86_64/mod.rs`. Os dois programas
-//! compilam para alvos diferentes, em workspaces diferentes, e não há um
-//! lugar comum onde estas constantes caibam sem que um deles passe a depender
-//! do outro.
+//! Estas constantes já foram duas: uma no kernel e outra no iniciador, com um
+//! teste do `xtask` lendo as duas fontes para exigir que batessem. Funcionava,
+//! e era o arranjo que este projeto usa onde ele **não tem escolha** — o
+//! padrão por setor do disco, por exemplo, tem uma metade num programa do
+//! hospedeiro e não há pacote que caiba nos dois.
 //!
-//! O que impede a divergência é um teste do `xtask`, que lê as duas fontes e
-//! exige que os números batam. É a mesma amarra do `marca_do_setor` e do
-//! padrão por setor do disco, pela mesma razão — e aqui o preço de divergir é
-//! mais alto: um kernel mapeado num endereço e ligado para outro não dá erro,
-//! dá uma máquina que reinicia no primeiro salto.
+//! Aqui há. Os dois lados incluem este pacote por caminho, e a divergência
+//! deixa de ser uma coisa que um teste evita para ser uma coisa que não pode
+//! acontecer. O preço de divergir era alto e mudo: um kernel mapeado num
+//! endereço e ligado para outro não dá erro nem mensagem — dá uma máquina que
+//! reinicia no primeiro salto, antes de haver o que a diagnostique.
 //!
 //! # Por que as regiões ficam tão longe umas das outras
 //!
@@ -28,6 +29,20 @@ pub const BASE_DO_KERNEL: u64 = 0xFFFF_8000_0000_0000;
 /// Por onde o kernel enxerga qualquer byte de memória física.
 pub const BASE_DA_MEMORIA_FISICA: u64 = 0xFFFF_8800_0000_0000;
 
+/// Onde a faixa de memória de dispositivo começa.
+///
+/// Fica **abaixo** do mapa da memória física de propósito, entre ele e a
+/// imagem do kernel: são entradas de topo que ninguém mais usa. Só o kernel
+/// mapeia aqui — o iniciador não fala com dispositivo nenhum além da serial,
+/// que é por porta de entrada e saída.
+pub const BASE_DE_MMIO: u64 = 0xFFFF_8400_0000_0000;
+
+/// Onde o heap do kernel começa. Só o kernel mapeia aqui.
+pub const BASE_DO_HEAP: u64 = 0xFFFF_9000_0000_0000;
+
+/// Onde a área das pilhas de fio começa. Só o kernel mapeia aqui.
+pub const BASE_DAS_PILHAS: u64 = 0xFFFF_9800_0000_0000;
+
 /// Onde fica o que o iniciador posiciona por conta própria.
 ///
 /// A pilha inicial e o framebuffer. É a faixa que o kernel reserva para isso
@@ -36,7 +51,7 @@ pub const BASE_DO_RESTO: u64 = 0xFFFF_A000_0000_0000;
 
 /// Onde a página de guarda da pilha inicial fica.
 ///
-/// A pilha começa uma página adiante — ver [`crate::carga`] sobre por que a
+/// A pilha começa uma página adiante — ver o `carga` do iniciador sobre por que a
 /// guarda é a de baixo.
 pub const PILHA_EM: u64 = BASE_DO_RESTO;
 
@@ -64,9 +79,24 @@ const fn entrada_de_topo(endereco: u64) -> u64 {
 // erro é de aritmética de endereço: mover uma constante meio tebibyte para o
 // lado não quebra nada visível até o kernel rodar.
 const _: () = {
-    assert!(entrada_de_topo(BASE_DO_KERNEL) != entrada_de_topo(BASE_DA_MEMORIA_FISICA));
-    assert!(entrada_de_topo(BASE_DA_MEMORIA_FISICA) != entrada_de_topo(BASE_DO_RESTO));
-    assert!(entrada_de_topo(BASE_DO_KERNEL) != entrada_de_topo(BASE_DO_RESTO));
+    // Nenhuma das cinco regiões pode dividir uma entrada de topo com outra.
+    let bases = [
+        BASE_DO_KERNEL,
+        BASE_DE_MMIO,
+        BASE_DA_MEMORIA_FISICA,
+        BASE_DO_HEAP,
+        BASE_DAS_PILHAS,
+        BASE_DO_RESTO,
+    ];
+    let mut i = 0;
+    while i < bases.len() {
+        let mut j = i + 1;
+        while j < bases.len() {
+            assert!(entrada_de_topo(bases[i]) != entrada_de_topo(bases[j]));
+            j += 1;
+        }
+        i += 1;
+    }
 
     // E o vídeo tem de caber depois da pilha, sem encostar nela.
     assert!(VIDEO_EM > PILHA_EM + (PAGINAS_DA_PILHA as u64 + 1) * 4096);

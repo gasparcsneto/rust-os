@@ -14,6 +14,9 @@ license = "MIT OR Apache-2.0"
 [workspace]
 
 [dependencies]
+# A ABI com o kernel: o que é entregue a ele e onde cada coisa mora no espaço
+# virtual. Ver `protocolo/src/lib.rs` sobre por que é um pacote.
+protocolo = { path = "../protocolo" }
 
 [profile.dev]
 panic = "abort"
