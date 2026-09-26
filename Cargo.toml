@@ -1,10 +1,13 @@
 # Workspace do *host*. Contém apenas as ferramentas que rodam na sua máquina.
 #
-# O `kernel` é deliberadamente excluído: ele compila para `x86_64-unknown-none`
-# (bare-metal, sem sistema operacional por baixo), enquanto o `xtask` compila
-# para o host. Um único workspace não consegue ter dois targets padrão, então
-# separamos os dois — o `xtask` invoca o build do kernel explicitamente.
+# O `kernel` e o `iniciador` são deliberadamente excluídos: o primeiro compila
+# para `x86_64-unknown-none` (bare-metal, sem sistema operacional por baixo), o
+# segundo para `x86_64-unknown-uefi` (uma aplicação do firmware), e o `xtask`
+# para o host. Um único workspace não consegue ter três targets padrão, então
+# separamos os três — o `xtask` invoca os outros dois builds explicitamente.
 [workspace]
 resolver = "3"
 members = ["xtask"]
-exclude = ["kernel"]
+# O `kernel` compila para bare-metal e o `iniciador` para UEFI. Cada um é seu
+# próprio workspace; o `xtask` invoca os dois builds explicitamente.
+exclude = ["kernel", "iniciador"]

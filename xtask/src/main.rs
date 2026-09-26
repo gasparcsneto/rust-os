@@ -191,6 +191,7 @@ fn main() -> ExitCode {
             None => Err("uso: cargo xtask asm <simbolo>".into()),
         },
         "elf" => conferir_elfs(arch, release),
+        "iniciador" => iniciador(arch, release),
         "help" | "-h" => {
             ajuda();
             Ok(ExitCode::SUCCESS)
@@ -272,6 +273,7 @@ COMANDOS:
     simbolo <endereco>...     traduz endereços de execução em arquivo e linha
     asm <simbolo>             desmonta uma função do binário compilado
     elf                       confere os programas de usuário embutidos
+    iniciador                 sobe o iniciador UEFI no OVMF e confere o relatório
     help                      mostra esta mensagem
 
 EXEMPLOS:
@@ -511,6 +513,407 @@ fn ferramenta_llvm(nome: &str) -> Result<PathBuf, String> {
          instale o componente com: rustup component add llvm-tools",
         rustlib.display()
     ))
+}
+
+/// O alvo em que o iniciador UEFI compila.
+///
+/// Não é o alvo do kernel: uma aplicação EFI é um **PE/COFF** com uma ABI de
+/// chamada própria, e não um ELF bare-metal. O firmware é quem a carrega, e
+/// ele só conhece um formato.
+const ALVO_DO_INICIADOR: &str = "x86_64-unknown-uefi";
+
+/// Onde o firmware procura o programa de boot num disco removível.
+///
+/// O caminho é fixado pela especificação, e é a razão de a aplicação não
+/// precisar de nenhuma entrada no NVRAM da máquina: qualquer firmware UEFI,
+/// sem configuração nenhuma, procura este arquivo na partição de sistema.
+const CAMINHO_NA_ESP: &str = "::/EFI/BOOT/BOOTX64.EFI";
+
+/// Firmwares UEFI que este comando sabe procurar, em ordem de preferência.
+///
+/// A variante `_4M` é a da versão nova do OVMF, com o espaço de variáveis
+/// separado do código; a outra é o arquivo único das versões antigas. Ambas
+/// existem em distribuições diferentes, e o `xtask` não escolhe por
+/// distribuição — escolhe pelo que está no disco.
+const FIRMWARES: &[(&str, &str)] = &[
+    (
+        "/usr/share/OVMF/OVMF_CODE_4M.fd",
+        "/usr/share/OVMF/OVMF_VARS_4M.fd",
+    ),
+    (
+        "/usr/share/OVMF/OVMF_CODE.fd",
+        "/usr/share/OVMF/OVMF_VARS.fd",
+    ),
+    (
+        "/usr/share/edk2/ovmf/OVMF_CODE.fd",
+        "/usr/share/edk2/ovmf/OVMF_VARS.fd",
+    ),
+];
+
+/// Compila o iniciador e devolve o `.efi` produzido.
+fn build_do_iniciador(release: bool) -> Result<PathBuf, String> {
+    let raiz = raiz_do_projeto();
+    let dir = raiz.join("iniciador");
+    let perfil = if release { "release" } else { "debug" };
+    println!("[xtask] compilando o iniciador UEFI ({perfil})...");
+
+    let mut cargo = Command::new(env!("CARGO"));
+    cargo
+        .current_dir(&dir)
+        .args(["build", "--target", ALVO_DO_INICIADOR]);
+    if release {
+        cargo.arg("--release");
+    }
+    // Pela mesma razão do build do kernel: as variáveis que o cargo exporta
+    // descrevem o build *do xtask*, e herdá-las manda o filho para o target
+    // errado.
+    for var in ["CARGO_ENCODED_RUSTFLAGS", "RUSTFLAGS", "CARGO_TARGET_DIR"] {
+        cargo.env_remove(var);
+    }
+
+    let status = cargo
+        .status()
+        .map_err(|e| format!("não foi possível invocar o cargo: {e}"))?;
+    if !status.success() {
+        return Err("a compilação do iniciador falhou".into());
+    }
+
+    let efi = dir
+        .join("target")
+        .join(ALVO_DO_INICIADOR)
+        .join(perfil)
+        .join("iniciador.efi");
+    if !efi.exists() {
+        return Err(format!(
+            "o cargo reportou sucesso mas o .efi não apareceu em {}",
+            efi.display()
+        ));
+    }
+    Ok(efi)
+}
+
+/// Copia o iniciador para a ESP do disco de testes.
+///
+/// # Por que o disco de testes, e não uma imagem só para isto
+///
+/// Porque ele já é uma GPT de verdade com uma ESP em FAT32 — foi montado para
+/// que o kernel tivesse um disco para ler, e é exatamente o disco de que o
+/// firmware precisa para ter de onde bootar. Duas imagens diferentes, uma
+/// para bootar e outra para ler, seriam duas verdades sobre a mesma máquina.
+///
+/// A cópia acontece a cada execução, por cima do que estiver lá. O disco é
+/// cacheado por uma receita que não menciona o iniciador, de propósito:
+/// recompilá-lo não deve custar a remontagem de 192 MiB, e sobrescrever um
+/// arquivo de 35 KiB é barato o bastante para ser incondicional.
+fn instalar_iniciador(disco: &Path, efi: &Path) -> Result<(), String> {
+    let imagem = format!("{}@@1M", disco.display());
+
+    // `mmd` reclama se o diretório já existe, e existir é o caso comum. O
+    // erro é ignorado aqui e o `mcopy` abaixo é quem diz se algo deu errado
+    // de verdade — ele falha se o caminho não existir.
+    for dir in ["::/EFI", "::/EFI/BOOT"] {
+        let _ = Command::new("mmd").args(["-i", &imagem, dir]).output();
+    }
+
+    ferramenta(
+        "mcopy",
+        &[
+            "-o",
+            "-i",
+            &imagem,
+            &efi.display().to_string(),
+            CAMINHO_NA_ESP,
+        ],
+    )?;
+    println!(
+        "[xtask] iniciador instalado em {} ({} KiB)",
+        CAMINHO_NA_ESP.trim_start_matches("::"),
+        efi.metadata().map(|m| m.len()).unwrap_or(0) / 1024
+    );
+    Ok(())
+}
+
+/// Acha o firmware UEFI e prepara uma cópia gravável das variáveis.
+///
+/// O arquivo de variáveis **precisa** ser gravável e nosso: o firmware
+/// escreve nele durante o boot, e apontar o QEMU para o do sistema ou falha
+/// por permissão ou suja a instalação da máquina.
+fn firmware_uefi() -> Result<(PathBuf, PathBuf), String> {
+    let (codigo, variaveis) = FIRMWARES
+        .iter()
+        .map(|(c, v)| (PathBuf::from(c), PathBuf::from(v)))
+        .find(|(c, v)| c.is_file() && v.is_file())
+        .ok_or_else(|| {
+            let procurados: Vec<&str> = FIRMWARES.iter().map(|(c, _)| *c).collect();
+            format!(
+                "nenhum firmware UEFI encontrado. Procurei em: {}.\n\
+                 Instale o pacote `ovmf` (Debian/Ubuntu) ou `edk2-ovmf` (Fedora).",
+                procurados.join(", ")
+            )
+        })?;
+
+    let nossas = raiz_do_projeto().join("target").join("ovmf-vars.fd");
+    std::fs::copy(&variaveis, &nossas).map_err(|e| {
+        format!(
+            "não foi possível copiar {} para {}: {e}",
+            variaveis.display(),
+            nossas.display()
+        )
+    })?;
+    Ok((codigo, nossas))
+}
+
+/// Quanto o iniciador tem para relatar e desligar a máquina.
+///
+/// Folgado: o firmware sozinho leva alguns segundos para inicializar o vídeo
+/// e varrer os barramentos, e o relatório em si é instantâneo. O teto não
+/// está aqui para medir desempenho — está para que um iniciador que trave
+/// vire um erro em vez de um job pendurado.
+const TETO_DO_INICIADOR: Duration = Duration::from_secs(90);
+
+/// O que o relatório do iniciador precisa dizer para a etapa estar de pé.
+///
+/// Cada linha aqui é uma afirmação sobre o que foi conferido do outro lado, e
+/// não sobre o texto: `as tres tabelas conferem` só é impressa depois de três
+/// assinaturas e três CRCs baterem. Procurar a linha é procurar a conferência.
+const ESPERADO_DO_INICIADOR: &[&str] = &[
+    "vivo, carregado pelo firmware",
+    "tabela do sistema confere",
+    "as tres tabelas conferem",
+    "fim do relatorio",
+];
+
+/// Sobe o iniciador no firmware de verdade e confere o que ele relatou.
+fn iniciador(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
+    if arch != Arquitetura::X86_64 {
+        return Err(format!(
+            "o iniciador UEFI ainda é só do x86_64; o {} continua bootando pelo \
+             protocolo de imagem crua do arm64",
+            arch.nome()
+        ));
+    }
+
+    let efi = build_do_iniciador(release)?;
+    let disco = disco_de_testes()?;
+    instalar_iniciador(&disco, &efi)?;
+    let (codigo, variaveis) = firmware_uefi()?;
+
+    println!("[xtask] subindo o firmware {}", codigo.display());
+
+    // A saída da serial vai para um arquivo, e não para um cano lido em
+    // memória. O motivo é o teto de tempo logo abaixo: `Command::output()`
+    // espera o processo terminar, e um iniciador que não chegue ao
+    // `desligar` deixa o emulador vivo para sempre.
+    //
+    // Não é hipótese: a primeira versão deste comando não tinha teto, e a
+    // primeira mutação que rodei — trocar de lugar os dois conjuntos de
+    // serviços na tabela do sistema — fez o desligamento chamar a função
+    // errada. O QEMU ficou de pé, e o `xtask` com ele.
+    let registro = raiz_do_projeto().join("target").join("iniciador.log");
+    let arquivo = std::fs::File::create(&registro)
+        .map_err(|e| format!("não foi possível criar {}: {e}", registro.display()))?;
+
+    let filho = Command::new(arch.qemu())
+        .stdout(arquivo)
+        .args(["-machine", "q35"])
+        .args([
+            "-drive",
+            &format!("if=pflash,format=raw,readonly=on,file={}", codigo.display()),
+        ])
+        .args([
+            "-drive",
+            &format!("if=pflash,format=raw,file={}", variaveis.display()),
+        ])
+        .args(["-drive", &format!("format=raw,file={}", disco.display())])
+        // O relatório sai pela COM1, que é onde o kernel também fala. Ver o
+        // módulo `serial` do iniciador sobre por que não é o console do
+        // firmware.
+        .args(["-m", "128M", "-display", "none", "-serial", "stdio"])
+        // Sem rede: nada aqui precisa dela, e o firmware tentaria PXE antes do
+        // disco se ela existisse.
+        .args(["-net", "none"])
+        .spawn()
+        .map_err(|e| format!("não foi possível iniciar o {}: {e}", arch.qemu()))?;
+
+    let desfecho = aguardar_com_teto(filho, TETO_DO_INICIADOR)?;
+
+    let bruto = std::fs::read(&registro)
+        .map_err(|e| format!("não foi possível ler {}: {e}", registro.display()))?;
+    let texto = String::from_utf8_lossy(&bruto);
+    let relatorio: Vec<&str> = texto
+        .lines()
+        .filter_map(|l| l.split("iniciador: ").nth(1))
+        .collect();
+
+    println!();
+    for linha in &relatorio {
+        println!("  [iniciador] {linha}");
+    }
+    println!();
+
+    if relatorio.is_empty() {
+        eprintln!("--- saída do QEMU ---\n{texto}");
+        return Err(
+            "o iniciador não disse nada: ou o firmware não o encontrou na ESP, ou ele \
+             morreu antes da primeira linha"
+                .into(),
+        );
+    }
+
+    let mut falhou = false;
+
+    // O desfecho do emulador é uma afirmação sobre o iniciador, e não sobre o
+    // emulador: quem o desliga é a última linha do programa. Um estouro de
+    // tempo significa que ela não foi alcançada.
+    match desfecho {
+        Desfecho::Codigo(0) => {}
+        Desfecho::Codigo(codigo) => {
+            eprintln!("[xtask] iniciador: o emulador saiu com codigo {codigo}");
+            falhou = true;
+        }
+        Desfecho::Sinal => {
+            eprintln!("[xtask] iniciador: o emulador foi terminado por um sinal");
+            falhou = true;
+        }
+        Desfecho::Estourou => {
+            eprintln!(
+                "[xtask] iniciador: a maquina nao desligou em {}s — o iniciador \
+                 nao chegou ao fim",
+                TETO_DO_INICIADOR.as_secs()
+            );
+            falhou = true;
+        }
+    }
+
+    for esperado in ESPERADO_DO_INICIADOR {
+        if !relatorio.iter().any(|l| l.contains(esperado)) {
+            eprintln!("[xtask] iniciador: faltou `{esperado}` no relatório");
+            falhou = true;
+        }
+    }
+    for linha in &relatorio {
+        if linha.starts_with("ERRO") || linha.starts_with("PANICO") {
+            eprintln!("[xtask] iniciador: {linha}");
+            falhou = true;
+        }
+    }
+
+    // E as conferências que olham os números, e não a presença da linha.
+    if let Err(motivo) = conferir_numeros_do_iniciador(&relatorio) {
+        eprintln!("[xtask] iniciador: {motivo}");
+        falhou = true;
+    }
+
+    if falhou {
+        return Ok(ExitCode::FAILURE);
+    }
+    println!("[xtask] iniciador: o firmware carregou o Duke e o relatório confere");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Confere que os números do relatório descrevem a máquina que pedimos.
+///
+/// # Por que isto não é redundante com as linhas
+///
+/// Porque um iniciador que lesse o mapa de memória com o passo errado ainda
+/// imprimiria a linha inteira, com números. O que denuncia o passo errado é o
+/// **valor**: pedimos 128 MiB ao emulador, e uma leitura desalinhada não
+/// devolve nada perto disso.
+fn conferir_numeros_do_iniciador(relatorio: &[&str]) -> Result<(), String> {
+    let memoria = relatorio
+        .iter()
+        .find(|l| l.starts_with("memoria:"))
+        .ok_or("o relatório não trouxe a linha de memória")?;
+
+    let livres: u64 = extrair_numero_antes(memoria, "MiB livres")
+        .ok_or_else(|| format!("não consegui ler os MiB livres de `{memoria}`"))?;
+    // O emulador recebe `-m 128M`. O firmware fica com uma parte, então o
+    // piso é folgado; o teto não, porque não há de onde sair mais memória.
+    if !(64..=128).contains(&livres) {
+        return Err(format!(
+            "o mapa de memória diz {livres} MiB livres numa máquina de 128 MiB"
+        ));
+    }
+
+    let por_descritor: u64 = extrair_numero_antes(memoria, "bytes,")
+        .ok_or_else(|| format!("não consegui ler o tamanho do descritor de `{memoria}`"))?;
+    // 40 é o tamanho do formato documentado. Menos que isso significa que o
+    // firmware e o iniciador discordam sobre o que é um descritor.
+    if por_descritor < 40 {
+        return Err(format!(
+            "descritores de {por_descritor} bytes, menos que o formato"
+        ));
+    }
+
+    // O nome do firmware é o primeiro campo depois do cabeçalho, e é por ele
+    // que se vê se os deslocamentos da tabela batem. Um ponteiro lido do lugar
+    // errado não dá um nome curto — dá interrogações, que é o que o iniciador
+    // imprime no lugar de um byte que não é ASCII.
+    let fabricante = relatorio
+        .iter()
+        .find(|l| l.starts_with("firmware `"))
+        .ok_or("o relatório não trouxe o nome do firmware")?;
+    let nome = fabricante
+        .split('`')
+        .nth(1)
+        .ok_or_else(|| format!("não consegui ler o nome do firmware de `{fabricante}`"))?;
+    if nome.len() < 4 || nome.contains('?') {
+        return Err(format!("o nome do firmware veio como `{nome}`"));
+    }
+
+    // E o vídeo. Uma geometria de zero, ou um buffer no endereço zero, é o que
+    // sai de um protocolo lido no deslocamento errado — e a linha continuaria
+    // impressa do mesmo jeito.
+    let video = relatorio
+        .iter()
+        .find(|l| l.starts_with("video:"))
+        .ok_or("o relatório não trouxe a linha de vídeo")?;
+    let geometria = video
+        .split_whitespace()
+        .nth(1)
+        .and_then(|g| g.split_once('x'))
+        .and_then(|(l, a)| Some((l.parse::<u32>().ok()?, a.parse::<u32>().ok()?)))
+        .ok_or_else(|| format!("não consegui ler a geometria de `{video}`"))?;
+    if geometria.0 < 640 || geometria.1 < 480 {
+        return Err(format!(
+            "o vídeo veio com {}x{}, menor que qualquer modo de verdade",
+            geometria.0, geometria.1
+        ));
+    }
+    let buffer = video
+        .split("buffer em ")
+        .nth(1)
+        .and_then(|r| r.split_whitespace().next())
+        .and_then(|h| u64::from_str_radix(h.trim_start_matches("0x"), 16).ok())
+        .ok_or_else(|| format!("não consegui ler o endereço do buffer de `{video}`"))?;
+    if buffer == 0 {
+        return Err("o framebuffer está no endereço zero".into());
+    }
+
+    // O modo em uso tem de ser um dos que existem. É a conferência que pega
+    // dois campos vizinhos trocados de lugar — e foi precisa: com
+    // `quantos_modos` e `modo_atual` invertidos na struct, o relatório saía
+    // com "modo 30 de 0" e todo o resto conferia. A geometria vem de outra
+    // estrutura, então ela continuava certa.
+    let (atual, total) = video
+        .rsplit("modo ")
+        .next()
+        .and_then(|r| r.split_once(" de "))
+        .and_then(|(a, t)| Some((a.trim().parse::<u32>().ok()?, t.trim().parse::<u32>().ok()?)))
+        .ok_or_else(|| format!("não consegui ler o modo de `{video}`"))?;
+    if total == 0 || atual >= total {
+        return Err(format!(
+            "o vídeo diz estar no modo {atual} de {total}, que não é um modo que exista"
+        ));
+    }
+
+    Ok(())
+}
+
+/// O número que aparece imediatamente antes de `marca` numa linha.
+fn extrair_numero_antes(linha: &str, marca: &str) -> Option<u64> {
+    let antes = linha.split(marca).next()?;
+    antes.split_whitespace().next_back()?.parse().ok()
 }
 
 /// Confere as imagens ELF dos programas de usuário com ferramenta de fora.

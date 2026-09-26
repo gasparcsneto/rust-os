@@ -46,6 +46,7 @@ jobs:
       - name: Formatação
         run: |
           cargo fmt --all -- --check
+          (cd iniciador && cargo fmt --all -- --check)
           cd kernel && cargo fmt --all -- --check
 
       # O xtask roda no host, então tem testes de unidade comuns. São poucos,
@@ -57,6 +58,7 @@ jobs:
       - name: Lints
         run: |
           cargo clippy -p xtask --all-targets -- -D warnings
+          (cd iniciador && cargo clippy --target x86_64-unknown-uefi -- -D warnings)
           cd kernel
           for alvo in x86_64-unknown-none aarch64-unknown-none-softfloat; do
             cargo clippy --target "$alvo" -- -D warnings
@@ -100,7 +102,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             qemu-system-x86 qemu-system-arm \
-            gdisk dosfstools mtools btrfs-progs
+            gdisk dosfstools mtools btrfs-progs ovmf
 
       - name: Suíte de testes
         run: cargo xtask test --arch ${{ matrix.arch }}
@@ -128,6 +130,17 @@ jobs:
       # de ponto cego que a fumaça existe para fechar.
       - name: Fumaça (release)
         run: cargo xtask fumaca --arch ${{ matrix.arch }} --release
+
+      # O iniciador UEFI, que é por onde o x86 vai passar a bootar.
+      #
+      # Ele sobe no OVMF — o firmware EDK II de verdade, o mesmo que uma
+      # máquina moderna roda — a partir da ESP do disco de testes, e o passo
+      # confere o relatório que ele emite. Não é um teste do kernel: é a
+      # afirmação de que o firmware encontra o nosso programa e de que o que
+      # ele lê da máquina bate com a máquina que pedimos ao emulador.
+      - name: Iniciador UEFI
+        if: matrix.arch == 'x86_64'
+        run: cargo xtask iniciador
 
       # E uma terceira, com teclado USB no lugar do nativo.
       #

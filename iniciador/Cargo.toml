@@ -1,0 +1,23 @@
+[package]
+# O nome é o que a peça faz: ela inicia o Duke. Não é um estágio de boot
+# genérico nem um gerenciador de inicialização — é o programa que a UEFI
+# executa para pôr este kernel de pé, e só ele.
+name = "iniciador"
+version = "0.1.0"
+edition = "2024"
+description = "Iniciador UEFI do Duke: a aplicação EFI que carrega o kernel"
+license = "MIT OR Apache-2.0"
+
+# Workspace próprio, pela mesma razão do kernel: ele compila para
+# `x86_64-unknown-uefi`, que não é o alvo de nenhum outro pacote daqui. Um
+# workspace só não consegue ter dois alvos padrão.
+[workspace]
+
+[dependencies]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+debug = true

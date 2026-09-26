@@ -201,6 +201,12 @@ kernel/src/
         ├── fdt.rs     leitor de device tree escrito à mão
         └── linker.ld  layout de memória e símbolos de boot
 
+iniciador/src/       a aplicação UEFI que o firmware carrega da ESP
+├── main.rs          confere as tabelas da UEFI e relata a máquina
+├── efi.rs           as tabelas e os protocolos, declarados à mão
+├── serial.rs        a COM1, que sobrevive ao fim dos serviços de boot
+└── crc32.rs         o CRC-32 do Ethernet, que confere os cabeçalhos
+
 xtask/src/main.rs    build system: compila, gera imagens, roda o emulador,
                      conecta depurador e traduz endereços em símbolos
 
@@ -708,6 +714,88 @@ mexia em `/bin` de verdade e, no dia em que a raiz do disco passou a estar
 montada, falhou **no meio** — deixando `/bin` desmontado e derrubando um caso
 que não tinha nada a ver. Hoje ele monta e desmonta pontos que são só dele.
 
+## O iniciador UEFI
+
+Até aqui o x86 do Duke bootava pelo crate `bootloader`. Um programa de outra
+pessoa fazia a transição para long mode, montava as tabelas de página iniciais
+e entregava ao kernel uma `BootInfo` pronta — funcionava, e escondia
+exatamente a parte que um kernel escrito do zero deveria mostrar.
+
+O `iniciador/` é o substituto sendo construído. Ele é uma **aplicação UEFI**:
+o firmware o carrega de `\EFI\BOOT\BOOTX64.EFI` na partição de sistema do
+mesmo disco que o kernel já lê, e o executa em long mode.
+
+```
+$ cargo xtask iniciador
+[xtask] iniciador instalado em /EFI/BOOT/BOOTX64.EFI (34 KiB)
+[xtask] subindo o firmware /usr/share/OVMF/OVMF_CODE_4M.fd
+
+  [iniciador] vivo, carregado pelo firmware
+  [iniciador] tabela do sistema confere: uefi 2.70, 120 bytes
+  [iniciador] firmware `Ubuntu distribution of EDK II` revisao 0x10000
+  [iniciador] as tres tabelas conferem, por assinatura e por crc
+  [iniciador] memoria: 129 descritores de 48 bytes, 121 MiB livres
+  [iniciador] o iniciador ocupa 56 KiB em 14 paginas
+  [iniciador] video: 1280x800 bgr, buffer em 0x80000000
+  [iniciador] fim do relatorio
+```
+
+**O que ele faz nesta etapa, e o que ainda não faz.** Ele lê a máquina e
+relata: confere as três tabelas da UEFI, imprime o firmware que o carregou,
+conta o mapa de memória e descreve o vídeo. Não carrega o kernel, não monta
+tabela de página nenhuma e não sai dos serviços de boot — desliga a máquina no
+fim. O `bootloader` continua sendo quem boota o kernel.
+
+O corte é o mesmo método que o xHCI e o Btrfs seguiram aqui: cada etapa é
+confirmada por um relatório antes de a seguinte ser escrita. Num bootloader
+isso vale dobrado, porque um erro não produz um teste vermelho — produz uma
+máquina que não liga, sem nada na tela e sem ninguém para perguntar.
+
+**As tabelas da UEFI são declaradas à mão**, e não vêm de um crate. Trocar o
+`bootloader` por um `uefi` seria trocar uma dependência por outra no lugar
+exato onde este projeto quer saber o que está acontecendo. O que está no
+`efi.rs` é a categoria que este projeto já escreve à mão em todo lugar —
+protocolo e estrutura, transcrição de um documento público, sem aritmética de
+bits a acertar.
+
+**Como um erro de transcrição aparece.** É a pergunta que importa, porque um
+campo no deslocamento errado não dá erro de compilação. Três coisas o
+denunciam, e as três são conferidas antes de qualquer ponteiro ser chamado: a
+**assinatura** de oito bytes que cada tabela carrega; o **CRC-32** do
+cabeçalho, que o firmware calculou e nós recalculamos; e a **revisão**, que
+tem de fazer sentido como versão da UEFI.
+
+Foram medidas por mutação. Trocar de lugar os dois conjuntos de serviços na
+tabela do sistema faz a assinatura dos serviços de boot sair como `RUNTSERV`;
+calcular o CRC sem zerar o campo dele faz o CRC não conferir; ler o nome do
+firmware um campo adiante devolve uma string vazia. Cada uma dessas reprova.
+
+**E o que as conferências não pegam, o relatório pega.** Uma tabela válida não
+garante que o campo número trinta esteja certo — o que garante é chamá-lo e
+olhar o que volta. Por isso o `xtask` não confere só a presença das linhas:
+ele lê os números. Pedimos 128 MiB ao emulador, então "121 MiB livres" é uma
+afirmação; "3 MiB livres" — que foi o que saiu quando percorri o mapa de
+memória com o passo errado — é um defeito.
+
+**O passo do mapa de memória não é o tamanho da struct.** A UEFI devolve o
+tamanho de cada descritor junto com o mapa, e o firmware tem direito de
+acrescentar campos no fim. Não é hipótese: o EDK II que roda aqui declara
+descritores de **48** bytes, e o formato documentado tem 40. Percorrer de
+`size_of` em `size_of` sai do compasso no segundo descritor e lê o mapa
+inteiro deslocado — com números plausíveis, porque os campos vizinhos também
+são endereços e contagens.
+
+**O relatório sai pela serial, e não pelo console do firmware.** O console é
+um serviço de boot, e o trabalho deste programa termina depois de
+`ExitBootServices` — exatamente onde esse console deixa de existir. A UART não
+depende de ninguém, e é a mesma COM1 que o kernel abre logo em seguida: o
+iniciador fala pelo canal em que o Duke já fala.
+
+**O ARM continua fora.** Lá o boot é o protocolo de imagem crua do arm64, que
+não precisa de bootloader nenhum — o QEMU lê o cabeçalho de 64 bytes, deposita
+a imagem e salta. Um iniciador UEFI para aarch64 é a mesma aplicação com outro
+alvo e outro firmware, e entra quando o do x86 estiver de pé.
+
 ## Testes
 
 Os testes do kernel **não** rodam com `cargo test`: o harness padrão do Rust
@@ -833,7 +921,11 @@ padronizado.
       listagem de diretório e leitura de arquivo embutido e com extensão; e a
       tabela de descritores por processo, com `abrir`, `ler` e `fechar`
       exercitados por um programa sem privilégio que lê um arquivo do disco.
-      Falta: um bootloader UEFI próprio no lugar do crate `bootloader`.
+      Falta o bootloader UEFI próprio, em andamento: o `iniciador/` já é
+      carregado pelo firmware a partir da ESP e confere as três tabelas da
+      UEFI, o mapa de memória e o vídeo. Faltam, nesta ordem: ler o ELF do
+      kernel da ESP, montar as tabelas de página da metade alta, sair dos
+      serviços de boot e saltar — e só então o crate `bootloader` sai.
 
 ## Licença
 

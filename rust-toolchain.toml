@@ -18,5 +18,11 @@
 [toolchain]
 channel = "nightly"
 components = ["rust-src", "llvm-tools", "rustfmt", "clippy"]
-targets = ["x86_64-unknown-none", "aarch64-unknown-none-softfloat"]
+targets = [
+    "x86_64-unknown-none",
+    "aarch64-unknown-none-softfloat",
+    # O alvo do iniciador UEFI. Não é um alvo bare-metal: uma aplicação EFI é
+    # um PE/COFF com ABI própria, carregado pelo firmware.
+    "x86_64-unknown-uefi",
+]
 profile = "minimal"
