@@ -341,7 +341,7 @@ enum Teclado {
 /// mostra o resultado. O monitor do QEMU tem `sendkey`, que entrega a tecla
 /// ao dispositivo pelo mesmo caminho que um teclado de verdade entregaria.
 ///
-/// É a mesma ideia do `llvm-readelf` conferindo os ELFs de usuário: quem
+/// É a mesma ideia do `llvm-readobj` conferindo os ELFs de usuário: quem
 /// produz o estímulo não é quem o interpreta.
 fn caminho_monitor(arch: Arquitetura) -> PathBuf {
     raiz_do_projeto()
@@ -513,6 +513,27 @@ fn ferramenta_llvm(nome: &str) -> Result<PathBuf, String> {
          instale o componente com: rustup component add llvm-tools",
         rustlib.display()
     ))
+}
+
+/// O `llvm-readobj` do componente `llvm-tools`, no modo de saída do GNU.
+///
+/// # Por que não o `llvm-readelf`
+///
+/// Porque ele **não vem** no componente. As duas ferramentas são o mesmo
+/// binário do LLVM com nomes diferentes — `llvm-readelf` é o `llvm-readobj`
+/// com `--elf-output-style=GNU` — e o `rustup` empacota só o segundo.
+///
+/// Pedir `llvm-readelf` funcionava nesta máquina de desenvolvimento por um
+/// acidente: o pacote `llvm` do Ubuntu põe um `/usr/bin/llvm-readelf`, e o
+/// localizador cai nesse atalho quando não acha o do `rustup`. Num runner
+/// limpo esse arquivo não existe, e o passo do iniciador na CI falhou com
+/// "llvm-readelf não encontrado" — depois de o iniciador ter feito todo o
+/// trabalho dele certo.
+///
+/// É a classe de defeito que este projeto já conhece: uma dependência do
+/// ambiente de quem escreveu, invisível para quem escreveu.
+fn conferidor_de_elf() -> Result<(PathBuf, &'static str), String> {
+    Ok((ferramenta_llvm("llvm-readobj")?, "--elf-output-style=GNU"))
 }
 
 /// O alvo em que o iniciador UEFI compila.
@@ -750,12 +771,20 @@ fn iniciador(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
         falhou = true;
     }
 
-    // E as rodadas das recusas.
+    // E as rodadas das recusas: kerneis estragados de propósito, que o
+    // iniciador tem de rejeitar em vez de carregar.
+    println!(
+        "\n[xtask] iniciador: {} kerneis estragados de proposito, que tem de ser recusados",
+        RECUSAS.len()
+    );
     for caso in RECUSAS {
         match rodada_de_recusa(arch, &disco, &efi, &kernel, &firmware, caso) {
-            Ok(()) => println!("  [recusa] ok  {}", caso.nome),
+            Ok(()) => println!("  [recusa] ok  {} foi recusado", caso.nome),
             Err(motivo) => {
-                eprintln!("  [recusa] {}: {motivo}", caso.nome);
+                eprintln!(
+                    "  [recusa] {} NAO foi recusado como devia: {motivo}",
+                    caso.nome
+                );
                 falhou = true;
             }
         }
@@ -786,6 +815,13 @@ fn iniciador(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
 /// pelo motivo errado é quase tão ruim quanto aceitar, porque manda quem
 /// depura procurar no lugar errado.
 struct Recusa {
+    /// Como o kernel foi estragado, escrito para caber em "… foi recusado".
+    ///
+    /// O nome descreve o **arquivo**, e não o erro: a primeira versão deste
+    /// campo dizia coisas como "a maquina errada", e a linha saía
+    /// `[recusa] ok a maquina errada` — que se lê como um defeito, e não como
+    /// um caso que passou. Uma saída que precisa de quem a escreveu para ser
+    /// entendida é uma saída errada.
     nome: &'static str,
     /// Onde escrever, no ELF.
     em: usize,
@@ -797,28 +833,28 @@ struct Recusa {
 
 const RECUSAS: &[Recusa] = &[
     Recusa {
-        nome: "a entrada fora de qualquer segmento",
+        nome: "um kernel com a entrada fora de qualquer segmento",
         // `e_entry`, no deslocamento 24 do cabeçalho ELF64.
         em: 24,
         bytes: &[0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00],
         esperado: "a entrada do kernel nao cai em segmento nenhum",
     },
     Recusa {
-        nome: "cabecalhos de programa menores que o formato",
+        nome: "um kernel com cabecalhos de programa menores que o formato",
         // `e_phentsize`, no deslocamento 54.
         em: 54,
         bytes: &[8, 0],
         esperado: "os cabecalhos de programa sao menores que o formato",
     },
     Recusa {
-        nome: "a maquina errada",
+        nome: "um kernel compilado para outra arquitetura",
         // `e_machine`, no deslocamento 18. 0xB7 é aarch64.
         em: 18,
         bytes: &[0xB7, 0x00],
         esperado: "o kernel nao e desta arquitetura",
     },
     Recusa {
-        nome: "nao e um ELF",
+        nome: "um arquivo que nao e um ELF",
         // O primeiro byte da identificação.
         em: 0,
         bytes: b"X",
@@ -1066,7 +1102,7 @@ fn crc32_do_arquivo(caminho: &Path) -> Result<u32, String> {
     Ok(!soma)
 }
 
-/// Confronta o que o iniciador leu do ELF com o que o `llvm-readelf` lê.
+/// Confronta o que o iniciador leu do ELF com o que o `llvm-readobj` lê.
 ///
 /// # Por que isto é o teste que importa
 ///
@@ -1074,22 +1110,22 @@ fn crc32_do_arquivo(caminho: &Path) -> Result<u32, String> {
 /// deslocamento de `e_entry` no iniciador e conferir o resultado contra um
 /// número que eu mesmo escrevi aqui, as duas metades concordam no erro.
 ///
-/// O `llvm-readelf` não tem nada a ver com este projeto. Ele lê o **mesmo
+/// O `llvm-readobj` não tem nada a ver com este projeto. Ele lê o **mesmo
 /// arquivo** que foi para a ESP e diz o ponto de entrada e quantos segmentos
 /// carregáveis existem. Se a leitura do iniciador divergir da dele, um dos
-/// dois está errado — e não é o `llvm-readelf`.
+/// dois está errado — e não é o `llvm-readobj`.
 ///
 /// É a mesma disciplina do `cargo xtask elf` sobre os programas de usuário, e
 /// do `sgdisk`/`btrfs inspect-internal` sobre o disco.
 fn conferir_elf_contra_readelf(relatorio: &[&str], kernel: &Path) -> Result<(), String> {
-    let readelf = ferramenta_llvm("llvm-readelf")?;
+    let (readelf, estilo) = conferidor_de_elf()?;
     let saida = Command::new(&readelf)
-        .args(["--file-header", "--program-headers"])
+        .args([estilo, "--file-header", "--program-headers"])
         .arg(kernel)
         .output()
-        .map_err(|e| format!("não foi possível invocar o llvm-readelf: {e}"))?;
+        .map_err(|e| format!("não foi possível invocar o {}: {e}", readelf.display()))?;
     if !saida.status.success() {
-        return Err("o llvm-readelf recusou o ELF do kernel".into());
+        return Err("o llvm-readobj recusou o ELF do kernel".into());
     }
     let texto = String::from_utf8_lossy(&saida.stdout);
 
@@ -1097,7 +1133,7 @@ fn conferir_elf_contra_readelf(relatorio: &[&str], kernel: &Path) -> Result<(), 
         .lines()
         .find_map(|l| l.trim().strip_prefix("Entry point address:"))
         .and_then(|v| u64::from_str_radix(v.trim().trim_start_matches("0x"), 16).ok())
-        .ok_or("o llvm-readelf não disse o ponto de entrada")?;
+        .ok_or("o llvm-readobj não disse o ponto de entrada")?;
     // As linhas de segmento começam com o tipo; `LOAD` é o que vai para a
     // memória. Elas aparecem uma vez cada na listagem de program headers.
     let carregaveis_de_fora = texto
@@ -1156,21 +1192,21 @@ fn conferir_elf_contra_readelf(relatorio: &[&str], kernel: &Path) -> Result<(), 
 
     if entrada_do_iniciador != entrada_de_fora {
         return Err(format!(
-            "o iniciador leu a entrada como {entrada_do_iniciador:#x}; o llvm-readelf diz \
+            "o iniciador leu a entrada como {entrada_do_iniciador:#x}; o llvm-readobj diz \
              {entrada_de_fora:#x}"
         ));
     }
     if carregaveis_do_iniciador != carregaveis_de_fora {
         return Err(format!(
             "o iniciador contou {carregaveis_do_iniciador} segmentos carregáveis; o \
-             llvm-readelf conta {carregaveis_de_fora}"
+             llvm-readobj conta {carregaveis_de_fora}"
         ));
     }
 
     println!(
         "  [conferido] {tamanho_de_fora} bytes com crc {esperado:#010x}, entrada \
          {entrada_de_fora:#x} e {carregaveis_de_fora} segmentos — os dois últimos iguais \
-         aos do llvm-readelf"
+         aos do llvm-readobj"
     );
     Ok(())
 }
@@ -1193,13 +1229,13 @@ fn extrair_numero_antes(linha: &str, marca: &str) -> Option<u64> {
 /// sobre um ELF que nenhuma outra ferramenta aceitaria.
 ///
 /// Este comando extrai as imagens de dentro do binário do kernel e as entrega
-/// ao `llvm-readelf`, que não tem nada a ver com este projeto. Se ele lê os
+/// ao `llvm-readobj`, que não tem nada a ver com este projeto. Se ele lê os
 /// cabeçalhos e os segmentos, o formato está certo por um caminho
 /// independente.
 fn conferir_elfs(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
     build(arch, release, false)?;
     let kernel = caminho_elf(arch, release);
-    let readelf = ferramenta_llvm("llvm-readelf")?;
+    let (readelf, estilo) = conferidor_de_elf()?;
 
     let bytes = std::fs::read(&kernel)
         .map_err(|e| format!("não foi possível ler {}: {e}", kernel.display()))?;
@@ -1226,18 +1262,18 @@ fn conferir_elfs(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
 
         println!("\n[xtask] {nome}: {} bytes -> {}", b - a, caminho.display());
         let status = Command::new(&readelf)
-            .args(["--file-header", "--program-headers"])
+            .args([estilo, "--file-header", "--program-headers"])
             .arg(&caminho)
             .status()
-            .map_err(|e| format!("não foi possível invocar o llvm-readelf: {e}"))?;
+            .map_err(|e| format!("não foi possível invocar o llvm-readobj: {e}"))?;
         if !status.success() {
-            eprintln!("[xtask] o llvm-readelf recusou a imagem de `{nome}`");
+            eprintln!("[xtask] o llvm-readobj recusou a imagem de `{nome}`");
             falhou = true;
         }
     }
 
     if falhou {
-        return Err("uma das imagens nao passou pelo llvm-readelf".into());
+        return Err("uma das imagens nao passou pelo llvm-readobj".into());
     }
     println!("\n[xtask] as imagens sao ELF64 validos para ferramenta de fora");
     Ok(ExitCode::SUCCESS)

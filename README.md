@@ -415,7 +415,7 @@ exatamente como se perde o `W^X`.
 O ELF de exemplo é montado no mesmo bloco de assembly que contém o programa,
 sem um segundo alvo de build. O arranjo tem uma fraqueza óbvia — quem escreve
 o cabeçalho e quem o lê são a mesma pessoa —, e por isso `cargo xtask elf`
-extrai as imagens do binário e as entrega ao `llvm-readelf`, que não tem nada
+extrai as imagens do binário e as entrega ao `llvm-readobj`, que não tem nada
 a ver com este projeto.
 
 O programa usa endereços **absolutos** para alcançar a mensagem, e lê a
@@ -728,31 +728,84 @@ mesmo disco que o kernel já lê, e o executa em long mode.
 
 ```
 $ cargo xtask iniciador
-[xtask] iniciador instalado em /EFI/BOOT/BOOTX64.EFI (34 KiB)
-[xtask] subindo o firmware /usr/share/OVMF/OVMF_CODE_4M.fd
-
   [iniciador] vivo, carregado pelo firmware
   [iniciador] tabela do sistema confere: uefi 2.70, 120 bytes
   [iniciador] firmware `Ubuntu distribution of EDK II` revisao 0x10000
   [iniciador] as tres tabelas conferem, por assinatura e por crc
   [iniciador] memoria: 129 descritores de 48 bytes, 121 MiB livres
-  [iniciador] o iniciador ocupa 56 KiB em 14 paginas
   [iniciador] video: 1280x800 bgr, buffer em 0x80000000
+  [iniciador] esp: duke.elf aberto e lido, 7058448 bytes, crc 0x53f802c7
+  [iniciador] elf: entrada em 0x863a0, independente de posicao
+  [iniciador] segmento 1 em 0x0:      142116 do arquivo, 142116 na memoria, r--
+  [iniciador] segmento 2 em 0x23b30:  654223 do arquivo, 654223 na memoria, r-x
+  [iniciador] segmento 3 em 0xc46c0:   70840 do arquivo,  72000 na memoria, rw-
+  [iniciador] segmento 4 em 0xd6b78:   52168 do arquivo, 120920 na memoria, rw-
+  [iniciador] kernel: 4 segmentos, 0x0..0xf43d0, 966 KiB na memoria
   [iniciador] fim do relatorio
+
+  [conferido] 7058448 bytes com crc 0x53f802c7, entrada 0x863a0 e 4 segmentos
+
+[xtask] iniciador: 4 kerneis estragados de proposito, que tem de ser recusados
+  [recusa] ok  um kernel com a entrada fora de qualquer segmento foi recusado
+  [recusa] ok  um kernel compilado para outra arquitetura foi recusado
+  [recusa] ok  um arquivo que nao e um ELF foi recusado
 ```
 
-**O que ele faz nesta etapa, e o que ainda não faz.** Ele lê a máquina e
-relata: confere as três tabelas da UEFI, imprime o firmware que o carregou,
-conta o mapa de memória e descreve o vídeo. Não carrega o kernel, não monta
-tabela de página nenhuma e não sai dos serviços de boot — desliga a máquina no
-fim. O `bootloader` continua sendo quem boota o kernel.
+**O que ele faz nesta etapa, e o que ainda não faz.** Ele lê a máquina,
+**abre o kernel na ESP** e o interpreta como ELF. Não copia segmento nenhum
+para o endereço em que ele quer morar, não monta tabela de página e não sai
+dos serviços de boot — desliga a máquina no fim. O `bootloader` continua
+sendo quem boota o kernel.
+
+**Como ele acha o kernel.** Seguindo uma corrente de três elos, porque o
+firmware não diz "aqui está o seu disco": ele diz qual **imagem** está
+rodando, a imagem sabe de qual **dispositivo** veio, e o dispositivo oferece
+o **sistema de arquivos**. Numa máquina com dois discos bootáveis, a
+diferença entre isso e "abrir a primeira ESP que aparecer" é carregar o
+kernel de outra instalação.
+
+**E como se sabe que ele leu o arquivo certo, inteiro.** Por um CRC-32 que ele
+calcula sobre os bytes que chegaram à memória e imprime no relatório; o
+`xtask` calcula o mesmo CRC sobre o mesmo arquivo no hospedeiro e compara. Sem
+isso, "leu o kernel" e "leu o começo do kernel" seriam indistinguíveis daqui:
+o buffer tem o tamanho do arquivo aconteça o que acontecer, e o cabeçalho ELF
+está nos primeiros sessenta e quatro bytes.
+
+Foi preciso ir além. Pedindo os sete mebibytes numa chamada só, este firmware
+os devolve inteiros — então o laço de leitura dava uma volta e trocá-lo por
+uma chamada não reprovava nada. Ele passou a pedir em pedaços de 64 KiB, dá
+cento e oito voltas, e parar na primeira agora quebra o CRC. É o mesmo remédio
+que o `grande.txt` do Btrfs recebeu, pelo mesmo diagnóstico.
+
+**O leitor de ELF é conferido contra o `llvm-readobj`.** O iniciador e o
+`xtask` são o mesmo projeto: conferir a leitura dele contra um número que eu
+mesmo escrevi faria as duas metades concordarem no erro. O `llvm-readobj` lê o
+mesmo arquivo que foi para a ESP e diz o ponto de entrada e quantos segmentos
+carregáveis existem — e é com ele que a leitura do iniciador tem de bater.
+
+É o `llvm-readobj` e não o `llvm-readelf` porque é esse que o componente
+`llvm-tools` do `rustup` entrega; os dois são o mesmo binário do LLVM com
+nomes diferentes. Pedir o segundo funcionava na minha máquina por acidente, já
+que o pacote `llvm` do Ubuntu põe um `/usr/bin/llvm-readelf` — e num runner
+limpo ele não existe. Foi assim que a primeira execução deste passo na CI
+falhou, depois de o iniciador ter feito todo o trabalho dele certo.
+
+**E as recusas são exercitadas com kernels estragados de propósito.** As
+conferências do leitor não são falsificáveis contra um arquivo bom: desligar a
+que exige que o ponto de entrada caia dentro de um segmento não reprovava
+nada, porque o kernel de verdade sempre passa nela. Cada caso adultera uma
+cópia do kernel num byte, põe na ESP e exige a recusa **pelo motivo certo** —
+recusar pelo motivo errado manda quem depura procurar no lugar errado. E o
+iniciador tem de sobreviver à recusa e desligar: um travamento ali é tão
+defeito quanto aceitar o arquivo.
 
 O corte é o mesmo método que o xHCI e o Btrfs seguiram aqui: cada etapa é
 confirmada por um relatório antes de a seguinte ser escrita. Num bootloader
 isso vale dobrado, porque um erro não produz um teste vermelho — produz uma
 máquina que não liga, sem nada na tela e sem ninguém para perguntar.
 
-**As tabelas da UEFI são declaradas à mão**, e não vêm de um crate. Trocar o
+**As tabelas e os protocolos da UEFI são declarados à mão**, e não vêm de um
+crate. Trocar o
 `bootloader` por um `uefi` seria trocar uma dependência por outra no lugar
 exato onde este projeto quer saber o que está acontecendo. O que está no
 `efi.rs` é a categoria que este projeto já escreve à mão em todo lugar —
@@ -770,6 +823,13 @@ Foram medidas por mutação. Trocar de lugar os dois conjuntos de serviços na
 tabela do sistema faz a assinatura dos serviços de boot sair como `RUNTSERV`;
 calcular o CRC sem zerar o campo dele faz o CRC não conferir; ler o nome do
 firmware um campo adiante devolve uma string vazia. Cada uma dessas reprova.
+
+O primeiro erro de transcrição deste código foi exatamente do tipo que elas
+existem para pegar, e custou uma execução: o GUID do sistema de arquivos
+escrito como `0964e5b2` em vez de `964e5b22`. O primeiro campo de um GUID tem
+oito dígitos hexadecimais, e um zero na frente desloca todos eles — o valor
+continua sendo um `u32` plausível, e o firmware responde "protocolo não
+suportado" sobre um handle que suporta o protocolo.
 
 **E o que as conferências não pegam, o relatório pega.** Uma tabela válida não
 garante que o campo número trinta esteja certo — o que garante é chamá-lo e
