@@ -118,23 +118,22 @@ struct Fio {
     /// o fio — quando a vaga é reaproveitada, o `Fio` antigo é largado e o
     /// `Drop` do espaço devolve as tabelas e as páginas do processo.
     ///
-    /// # O adiamento, e o que ele custa agora
+    /// # Quem recolhe, e por que não é o escalonador
     ///
-    /// "Quando a vaga é reaproveitada" é literal: um fio morto segura o espaço
-    /// dele até outra criação escolher aquela vaga. É a mesma regra da
-    /// [`pilha::Pilha`], e pelo mesmo motivo — não há fio coletor para
-    /// desmontar o que é dos outros.
+    /// Por muito tempo "quando a vaga é reaproveitada" foi literal: um fio
+    /// morto segurava o espaço dele até outra criação escolher aquela vaga.
+    /// Num kernel que roda um processo de cada vez isso quase não aparece;
+    /// num que bifurca, a vaga passa a segurar um espaço de endereços
+    /// inteiro — raiz, tabelas e todas as páginas do processo — e o sistema
+    /// fica com até dezesseis deles retidos sem nenhum dono vivo.
     ///
-    /// O preço, porém, cresceu. Antes a vaga segurava uma pilha; agora segura
-    /// um espaço de endereços inteiro: raiz, tabelas e todas as páginas do
-    /// processo. O consumo é **limitado e estável** — no pior caso um espaço
-    /// por vaga, e medindo ao vivo ele para de crescer depois da primeira
-    /// volta pelas dezesseis —, mas é maior do que parece à primeira vista.
+    /// Quem recolhe agora é [`recolher_terminados`], chamada por um fio
+    /// próprio. O escalonador **não** pode fazê-lo: largar um espaço
+    /// desmapeia páginas, ou seja, toma as travas da paginação e do alocador
+    /// de frames — e ele trocaria de fio com a trava dele na mão, que é
+    /// justamente o aninhamento que este módulo se recusa a criar.
     ///
-    /// Recuperar mais cedo exigiria largar o espaço no instante em que o
-    /// escalonador troca para fora de um fio encerrado, e isso é trabalho de
-    /// paginação com a trava do escalonador na mão — que é exatamente o que
-    /// este módulo se recusa a fazer.
+    /// O `Drop` continua sendo o mecanismo. O coletor só decide **quando**.
     espaco: Option<crate::paginacao::Espaco>,
     /// Os descritores abertos do processo que este fio hospeda.
     ///
@@ -259,17 +258,129 @@ pub fn init() {
         "escalonador preemptivo ativo, quantum de {} tiques",
         QUANTUM_EM_TIQUES
     );
+
+    // O coletor nasce junto com o escalonador, e não num passo à parte do
+    // boot, porque "há escalonador" e "há quem recolha o que ele deixa para
+    // trás" são o mesmo fato. Separá-los deixaria um caminho de inicialização
+    // capaz de ter o primeiro sem o segundo — e o sintoma disso não é uma
+    // falha, é memória que some devagar.
+    match criar("coletor", coletor, 0) {
+        Ok(id) => crate::log_info!("fios", "coletor de fios mortos no ar, id {}", id.numero()),
+        // Não é fatal: sem coletor o sistema volta a se comportar como antes,
+        // segurando o espaço de cada morto até a vaga dele ser reaproveitada.
+        // Recusar o boot por causa disso trocaria um desperdício limitado por
+        // uma máquina que não sobe.
+        Err(motivo) => crate::log_error!("fios", "o coletor nao subiu: {}", motivo),
+    }
+}
+
+/// Quantos fios já foram recolhidos.
+static RECOLHIDOS: AtomicU64 = AtomicU64::new(0);
+
+/// O fio que desmonta o que os outros deixaram.
+///
+/// # Por que um fio, e não uma tarefa do executor
+///
+/// Porque o executor cooperativo não existe em modo de teste — lá o kernel
+/// roda a suíte e encerra. Um coletor que só existisse em produção seria um
+/// coletor que nunca é exercitado, e a primeira evidência de que ele está
+/// errado viria de uma máquina em uso.
+///
+/// # Por que dormir, e não ceder em laço
+///
+/// Ceder devolveria a CPU imediatamente sempre que não houvesse mais
+/// ninguém pronto, e o núcleo nunca chegaria a parar: um coletor que impede
+/// a máquina de ficar ociosa custa mais do que a memória que ele recupera.
+///
+/// Esperar a interrupção põe o processador para dormir até o próximo tique
+/// do timer, que já ia acontecer de qualquer forma. A latência máxima entre
+/// um fio morrer e o espaço dele voltar ao alocador passa a ser um tique.
+extern "C" fn coletor(_argumento: u64) -> ! {
+    loop {
+        let quantos = recolher_terminados();
+        if quantos > 0 {
+            crate::log_debug!("fios", "coletor recolheu {} fio(s)", quantos);
+        }
+        crate::arch::esperar_interrupcao();
+    }
+}
+
+/// Tira da tabela os fios que já terminaram e devolve o que eles ocupavam:
+/// a pilha de kernel, e o espaço de endereços quando havia um.
+///
+/// Devolve quantos foram recolhidos.
+///
+/// # A vaga do fio atual nunca entra
+///
+/// É a mesma regra de [`Escalonador::vaga_livre`], e pelo mesmo motivo: um
+/// fio que chamou [`terminar`] **segue executando** até ceder a vez, sobre a
+/// própria pilha de kernel. Recolhê-lo ali seria desmapear o chão de quem
+/// está de pé nele.
+///
+/// Um fio encerrado que já não é o atual, por outro lado, nunca mais roda:
+/// [`Escalonador::proximo_pronto`] só escolhe quem está `Pronto`. A pilha
+/// dele está parada, ainda que o último quadro nela seja o de uma função
+/// que "não retornou" — ela não vai retornar.
+///
+/// # Por que um de cada vez, e largado fora da trava
+///
+/// Porque largar um fio desmapeia páginas, e isso toma as travas da
+/// paginação e do alocador de frames. Cada volta do laço tira **um** fio sob
+/// a trava do escalonador e o larga fora dela — a mesma coreografia que
+/// [`nascer`] faz com o ocupante da vaga que ele reaproveita, e pelos mesmos
+/// dois motivos.
+///
+/// O primeiro é ordem de travas: fazê-lo por dentro aninharia três numa
+/// ordem que nenhum outro ponto do kernel usa, e aninhar é como nascem os
+/// travamentos que ninguém reproduz. O segundo é latência: `com_escalonador`
+/// roda com as interrupções mascaradas, e desmontar um espaço de endereços
+/// ali dentro estenderia a seção crítica pelo tempo de desmapear o processo
+/// inteiro.
+///
+/// # Nenhum caso derruba esta escolha, e não há como escrever um
+///
+/// Medido, largando o fio por dentro da trava: a suíte inteira passa. Não é
+/// falha dos casos — hoje nada abaixo da paginação ou do alocador de frames
+/// volta a pedir a trava do escalonador, então a inversão que travaria a
+/// máquina não existe ainda. O que se estende de verdade é a seção crítica,
+/// e isso um caso não vê.
+///
+/// A escolha fica porque ela é sobre o kernel de amanhã: o dia em que
+/// qualquer coisa nesse caminho precisar perguntar algo ao escalonador — um
+/// contador por fio, uma notificação de morte — a versão aninhada trava, e
+/// trava num ponto arbitrário do programa.
+pub fn recolher_terminados() -> usize {
+    let mut quantos = 0;
+
+    loop {
+        let morto = com_escalonador(|e| {
+            let atual = e.atual;
+            let vaga = e.fios.iter().enumerate().position(|(i, f)| {
+                i != atual && matches!(f, Some(fio) if fio.estado == Estado::Terminado)
+            })?;
+            e.fios[vaga].take()
+        });
+
+        let Some(morto) = morto else { break };
+        drop(morto);
+        quantos += 1;
+    }
+
+    if quantos > 0 {
+        RECOLHIDOS.fetch_add(quantos as u64, Ordering::Relaxed);
+    }
+    quantos
+}
+
+/// Quantos fios o coletor já desmontou.
+pub fn recolhidos() -> u64 {
+    RECOLHIDOS.load(Ordering::Relaxed)
 }
 
 /// Cria um fio novo, pronto para rodar.
 ///
 /// `entrada` recebe `argumento` e não deve retornar; se retornar, o fio é
 /// encerrado como se tivesse chamado [`terminar`].
-// O primeiro consumidor de produção chega com os processos, na próxima etapa
-// desta fase: hoje o kernel roda um fio só — aquele em que ele já estava —, e
-// quem exercita a criação é a suíte de testes. Anotar aqui é mais honesto que
-// inventar um fio de demonstração só para o build ficar limpo.
-#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub fn criar(
     nome: &'static str,
     entrada: extern "C" fn(u64) -> !,

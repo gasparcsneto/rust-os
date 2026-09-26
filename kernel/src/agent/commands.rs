@@ -1576,6 +1576,11 @@ fn threads_stats(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.field_u64("quantum_expirations", quanta_vencidos)?;
     w.field_u64("quantum_ticks", crate::fios::QUANTUM_EM_TIQUES as u64)?;
     w.field_u64("max_threads", crate::fios::MAX_FIOS as u64)?;
+    // Quantos fios mortos ja foram desmontados. Comparado com `alive` e com
+    // `max_threads`, e o que distingue "o sistema esta parado" de "o sistema
+    // criou e recolheu centenas de fios" — duas situacoes que um retrato
+    // instantaneo da tabela mostra identicas.
+    w.field_u64("reaped", crate::fios::recolhidos())?;
     w.end_object()
 }
 

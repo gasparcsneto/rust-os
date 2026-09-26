@@ -6186,6 +6186,148 @@ fn memoria_espaco_destruido_devolve_tudo() -> Resultado {
     })
 }
 
+/// O espaço de um processo morto volta ao alocador sem que ninguém peça.
+///
+/// # O que mudou, e por que isto precisa de um caso
+///
+/// O espaço de endereços morre no `Drop` do fio que o hospeda, e por muito
+/// tempo esse `Drop` só acontecia quando **outra** criação escolhia a vaga do
+/// morto. Num kernel que roda um processo de cada vez isso quase não aparece;
+/// num que bifurca, a tabela fica com até dezesseis espaços retidos sem
+/// nenhum dono vivo, e o sintoma não é uma falha — é memória que some.
+///
+/// O caso mede exatamente a diferença: cria um fio que carrega um programa,
+/// espera ele morrer, e **não cria mais nada**. Se o alocador não voltar ao
+/// número de antes sozinho, não há coletor.
+///
+/// # A metade que impede o caso de passar de graça
+///
+/// Um caso que só compare o antes e o depois passa igualmente bem se o fio
+/// nunca tiver ocupado nada. Por isso o próprio fio anota quantos frames
+/// havia livres **enquanto ele estava vivo**: a comparação com esse número é
+/// o que prova que houve o que recolher. Anotar de fora seria uma corrida —
+/// o coletor pode desmontá-lo antes de a suíte olhar.
+fn fios_coletor_recolhe_o_espaco_do_processo_morto() -> Resultado {
+    static PRONTO: AtomicBool = AtomicBool::new(false);
+    static LIVRES_COM_ELE_VIVO: AtomicU64 = AtomicU64::new(0);
+
+    extern "C" fn efemero(_argumento: u64) -> ! {
+        // Um fio que hospeda um processo segura bem mais que a própria
+        // pilha: a raiz de tradução, as tabelas e todas as páginas do
+        // programa.
+        if crate::usuario::programa::carregar(crate::usuario::exemplo::bytes()).is_err() {
+            crate::fios::terminar()
+        }
+
+        let (livres, _) = crate::frames::estatisticas();
+        LIVRES_COM_ELE_VIVO.store(livres as u64, SeqCst);
+        PRONTO.store(true, SeqCst);
+        crate::fios::terminar()
+    }
+
+    PRONTO.store(false, SeqCst);
+    LIVRES_COM_ELE_VIVO.store(0, SeqCst);
+
+    // Drena o que os casos anteriores deixaram, para a medida começar de um
+    // estado conhecido. Duas voltas vazias seguidas, e não uma: um fio que
+    // estivesse cedendo a vez neste instante ainda não está recolhível, e
+    // uma volta só o perderia para depois da medida.
+    //
+    // Chamar `recolher_terminados` daqui também é o que mantém a função
+    // chamável de fora do coletor — se só ele a chamasse, ela seria um
+    // detalhe dele em vez de uma operação do módulo.
+    let mut vazias = 0;
+    let limite = crate::tempo::ticks().saturating_add(100);
+    while vazias < 2 && crate::tempo::ticks() < limite {
+        if crate::fios::recolher_terminados() == 0 {
+            vazias += 1;
+        } else {
+            vazias = 0;
+        }
+        crate::fios::ceder();
+    }
+
+    let (livres_antes, _) = crate::frames::estatisticas();
+    let recolhidos_antes = crate::fios::recolhidos();
+
+    crate::fios::criar("teste-processo-efemero", efemero, 0)?;
+    esperar_ate(|| PRONTO.load(SeqCst), 200)?;
+
+    // O ponto do caso: daqui em diante a suíte não cria nada nem recolhe
+    // nada. Antes do coletor, esta espera terminava no teto.
+    esperar_ate(|| crate::fios::recolhidos() > recolhidos_antes, 200)?;
+
+    let (livres_depois, _) = crate::frames::estatisticas();
+    let com_ele_vivo = LIVRES_COM_ELE_VIVO.load(SeqCst);
+
+    if com_ele_vivo >= livres_antes as u64 {
+        crate::log_error!(
+            "teste",
+            "{} frames livres antes, {} com o fio vivo",
+            livres_antes,
+            com_ele_vivo
+        );
+        return Err("o fio nao chegou a ocupar nada, e o caso nao mediria nada");
+    }
+
+    if livres_depois != livres_antes {
+        crate::log_error!(
+            "teste",
+            "{} frames livres antes, {} com o fio vivo, {} depois de recolhido",
+            livres_antes,
+            com_ele_vivo,
+            livres_depois
+        );
+        return Err("o coletor nao devolveu tudo que o processo morto ocupava");
+    }
+    Ok(())
+}
+
+/// O coletor não recolhe o fio que está executando.
+///
+/// # A única forma de provar isto é ficar de pé no chão que ele desmontaria
+///
+/// A vaga do fio atual é pulada mesmo quando ele já está marcado como
+/// encerrado, e o motivo é concreto: um fio que chamou `sair` **continua
+/// executando** sobre a própria pilha de kernel até ceder a vez. Recolhê-lo
+/// desmapearia essa pilha por baixo dos quadros que estão nela, e a
+/// instrução seguinte morreria numa falha que não aponta para lugar nenhum.
+///
+/// O caso constrói exatamente essa situação: um fio se marca encerrado e,
+/// ainda rodando, pede a coleta. Com a guarda, ele sobrevive e registra que
+/// passou por ali. Sem ela, a máquina não chega ao fim da suíte — que é o
+/// desfecho honesto, porque é literalmente o que aconteceria.
+///
+/// Medido: apagando a comparação com a vaga atual, o kernel morre aqui com
+/// um *double fault* — a falha de pilha tentando empilhar o quadro da falha
+/// de pilha, que é a assinatura exata de um `rsp` apontando para o nada.
+fn fios_coletor_nao_recolhe_quem_esta_de_pe() -> Resultado {
+    static SOBREVIVEU: AtomicBool = AtomicBool::new(false);
+
+    extern "C" fn suicida(_argumento: u64) -> ! {
+        crate::fios::marcar_terminado();
+
+        // Daqui até o `descansar` este fio está marcado como encerrado e
+        // ainda é o fio atual — a janela que a guarda protege.
+        let recolhidos = crate::fios::recolher_terminados();
+
+        // Escrever numa variável estática, e não numa local, é de propósito:
+        // a local moraria na pilha que a coleta teria desmapeado, e o caso
+        // mediria o próprio acidente em vez de sobreviver a ele. Mas a
+        // chamada acima já usou a pilha à vontade, então chegar nesta linha
+        // é a prova.
+        let _ = recolhidos;
+        SOBREVIVEU.store(true, SeqCst);
+
+        crate::fios::descansar()
+    }
+
+    SOBREVIVEU.store(false, SeqCst);
+    crate::fios::criar("teste-suicida", suicida, 0)?;
+    esperar_ate(|| SOBREVIVEU.load(SeqCst), 200)?;
+    Ok(())
+}
+
 /// Nenhuma página de um processo carregado é gravável **e** executável.
 ///
 /// # Por que afirmar isto, e não presumir
@@ -6919,6 +7061,14 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "memoria: espaco destruido devolve tudo",
         f: memoria_espaco_destruido_devolve_tudo,
+    },
+    Caso {
+        nome: "fios: o coletor recolhe o espaco do processo morto",
+        f: fios_coletor_recolhe_o_espaco_do_processo_morto,
+    },
+    Caso {
+        nome: "fios: o coletor nao recolhe quem esta de pe",
+        f: fios_coletor_nao_recolhe_quem_esta_de_pe,
     },
     Caso {
         nome: "usuario: nenhuma pagina gravavel e executavel",

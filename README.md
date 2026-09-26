@@ -607,11 +607,46 @@ como veio. É a promessa que este README fazia quando a busca ainda era numa
 tabela estática — *"o que muda é onde a busca acontece; a chamada de sistema
 continua a mesma"* —, e ela foi cumprida sem que `executar` mudasse de forma.
 
-**O que o espaço de um processo morto custa.** Ele sobrevive até a vaga de fio
-ser reaproveitada, pela mesma razão que a pilha sempre sobreviveu: não há fio
-coletor. O consumo é limitado e estável — medindo ao vivo, para de crescer
-depois da primeira volta pelas dezesseis vagas —, mas agora o que fica retido
-é um espaço de endereços inteiro, e não só uma pilha.
+**Quem recolhe o espaço de um processo morto.** Um fio coletor, criado junto
+com o escalonador. O espaço sempre morreu no `Drop` do fio que o hospeda, mas
+por muito tempo esse `Drop` só acontecia quando **outra** criação escolhia a
+vaga do morto: num kernel que roda um processo de cada vez isso quase não
+aparece, e num que bifurca a tabela fica com até dezesseis espaços retidos
+sem nenhum dono vivo. O sintoma não é uma falha — é memória que some.
+
+O escalonador não pode recolher sozinho: largar um espaço desmapeia páginas,
+ou seja, toma as travas da paginação e do alocador de frames, e ele faria
+isso com a trava dele na mão. O coletor tira **um** fio da tabela sob a
+trava e o larga fora dela, uma volta por fio.
+
+Ele dorme entre as passadas, e não cede em laço. Ceder devolveria a CPU
+imediatamente sempre que não houvesse mais ninguém pronto, e o núcleo nunca
+chegaria a parar — um coletor que impede a máquina de ficar ociosa custa mais
+do que a memória que recupera. Esperando a interrupção, ele acorda no tique
+do timer que já ia acontecer, e a latência entre um fio morrer e o espaço
+dele voltar ao alocador fica em um tique.
+
+É um fio, e não uma tarefa do executor cooperativo, por um motivo de teste: o
+executor não existe em modo de teste — lá o kernel roda a suíte e encerra. Um
+coletor que só existisse em produção nunca seria exercitado, e a primeira
+evidência de que ele está errado viria de uma máquina em uso.
+
+```
+$ cargo xtask agent threads.stats        # depois de alguns user.run
+{"alive":2,"context_switches":168,"quantum_expirations":166,
+ "quantum_ticks":5,"max_threads":16,"reaped":2}
+```
+
+Os dois vivos são o fio em que o kernel já estava e o próprio coletor.
+`reaped` é o que distingue "o sistema está parado" de "o sistema criou e
+recolheu fios o tempo todo" — duas situações que um retrato instantâneo da
+tabela mostra idênticas.
+
+A vaga do fio **atual** nunca é recolhida, mesmo marcada como encerrada: um
+fio que chamou `sair` segue executando sobre a própria pilha de kernel até
+ceder a vez, e desmapeá-la ali seria tirar o chão de quem está de pé nele.
+Um fio encerrado que já não é o atual nunca mais roda — o rodízio só escolhe
+quem está pronto —, e é isso que torna a pilha dele segura de desmontar.
 
 **Cada processo tem o seu espaço de endereços.** Uma tabela de tradução por
 processo, montada copiando as entradas de topo do kernel — o que mantém o
@@ -1042,12 +1077,12 @@ interrupção de hardware de verdade.
 
 ```
 $ cargo xtask test --arch aarch64
-  suite de testes :: aarch64 :: 143 casos
+  suite de testes :: aarch64 :: 145 casos
   ...
   memoria: clonar compartilha sem copiar     ok
-  memoria: filho morto nao leva as paginas do pai ok
   memoria: fork do fork mantem a escrita     ok
-  143 de 143 passaram
+  fios: o coletor nao recolhe quem esta de pe ok
+  145 de 145 passaram
 ```
 
 O CI roda formatação, clippy nas cinco configurações, e a suíte nas duas
