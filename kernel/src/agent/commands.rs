@@ -793,24 +793,48 @@ fn btrfs_chunks(_params: Json, w: &mut JsonWriter) -> fmt::Result {
             w.field_u64("level", u64::from(cabecalho.nivel))?;
             w.end_object()?;
 
-            // E as chaves que ela traz, que são as raízes das outras árvores.
+            // E as raízes das outras árvores, percorridas pela árvore de
+            // raízes inteira — que pode ter mais de um nível, e tem assim
+            // que o sistema de arquivos passa de um punhado de arquivos.
+            // Ler só o nó de topo mostraria as raízes do primeiro nó e
+            // omitiria as outras, sem nenhum sinal de que faltou algo.
+            let mut raizes = alloc::vec::Vec::new();
+            let percurso = volume.percorrer(
+                volume.superbloco.raiz,
+                crate::vfs::btrfs::folha::Chave {
+                    objeto: 0,
+                    tipo: 0,
+                    offset: 0,
+                },
+                |item| {
+                    if item.chave.tipo == crate::vfs::btrfs::folha::tipo::RAIZ {
+                        raizes.push((
+                            item.chave.objeto,
+                            crate::vfs::btrfs::raiz_da_arvore(item.dados).unwrap_or(0),
+                        ));
+                    }
+                    crate::vfs::btrfs::Passo::Segue
+                },
+            );
+
             w.key("roots")?;
             w.begin_array()?;
-            if let Ok(itens) = crate::vfs::btrfs::folha::itens(&bloco) {
-                for item in itens.flatten() {
-                    if item.chave.tipo != crate::vfs::btrfs::folha::tipo::RAIZ {
-                        continue;
-                    }
-                    w.begin_object()?;
-                    w.field_u64("tree", item.chave.objeto)?;
-                    w.field_u64(
-                        "bytenr",
-                        crate::vfs::btrfs::raiz_da_arvore(item.dados).unwrap_or(0),
-                    )?;
-                    w.end_object()?;
-                }
+            for (arvore, bytenr) in &raizes {
+                w.begin_object()?;
+                w.field_u64("tree", *arvore)?;
+                w.field_u64("bytenr", *bytenr)?;
+                // O nível de cada árvore, que é o que diz se a descida está
+                // sendo exercitada de verdade ou se tudo cabe numa folha.
+                w.field_u64(
+                    "level",
+                    u64::from(volume.nivel_da_arvore(*bytenr).unwrap_or(0)),
+                )?;
+                w.end_object()?;
             }
             w.end_array()?;
+            if let Err(motivo) = percurso {
+                w.field_str("roots_error", motivo)?;
+            }
         }
         Err(motivo) => w.field_str("error", motivo)?,
     }

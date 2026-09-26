@@ -776,17 +776,18 @@ $ cargo xtask agent fs.mounts
 $ cargo xtask agent fs.list
 {"path":"/","entries":[{"name":"saudacao.txt","type":"file"},
                        {"name":"dados","type":"dir"},
-                       {"name":"grande.txt","type":"file"}]}
+                       {"name":"grande.txt","type":"file"},
+                       {"name":"enche-1.txt","type":"file"}, ...]}
 
 $ cargo xtask agent fs.read '{"path":"/dados/nota.txt"}'
 {"path":"/dados/nota.txt","size":26,"offset":0,"returned":26,
  "content":"uma nota num subdiretorio\n"}
 ```
 
-**A raiz vem do disco.** Os três nomes acima não estão em lugar nenhum do
+**A raiz vem do disco.** Os nomes acima não estão em lugar nenhum do
 binário: eles foram escritos numa imagem pelo `mkfs.btrfs` do hospedeiro, e o
 caminho até eles passa pela GPT, pelo superbloco com o crc32c conferido, pela
-tradução de endereço lógico e pelos itens de uma folha da árvore de arquivos.
+tradução de endereço lógico e por uma descida pela árvore de arquivos.
 
 Um arquivo pequeno mora **dentro** do item de extensão — o Btrfs não gasta um
 bloco inteiro com vinte e nove bytes — e lê-lo é copiar bytes que já vieram
@@ -796,10 +797,71 @@ inteiramente diferentes, e a imagem de teste tem um arquivo de cada: o
 `grande.txt` tem quarenta e oito kilobytes justamente para que a leitura venha
 em três voltas em vez de uma.
 
-**O que este leitor não lê, declarado:** uma árvore com mais de um nível (ele
-recusa um nó interno em vez de lê-lo como folha, o que mostraria metade do
-conteúdo e pareceria funcionar), mais de uma extensão por arquivo (um arquivo
-escrito em pedaços sai truncado no primeiro), extensões comprimidas,
+### A descida pela árvore
+
+Enquanto o disco tinha meia dúzia de arquivos, a árvore de arquivos cabia
+numa folha e o leitor lia essa folha. O limite estava declarado e conferido:
+um nó interno era **recusado**, em vez de lido como folha — porque os
+descritores de um nó interno são outros (chave mais endereço do filho, trinta
+e três bytes contra vinte e cinco) e lê-los como itens não devolve lixo
+óbvio, devolve nomes de arquivo montados a partir de ponteiros.
+
+Hoje ele desce. Num nó interno, a chave `i` é a menor chave do filho `i`, e
+achar onde uma chave mora é procurar o último `i` cuja chave seja menor ou
+igual a ela — por busca binária, porque um nó comporta centenas de ponteiros
+e a descida acontece uma vez por folha visitada.
+
+O erro que essa escolha esconde é de **um índice**, e ele não tem sintoma
+próprio: descer pelo filho seguinte devolve uma folha cujas chaves começam
+depois do alvo, e a resposta vira "este arquivo não existe" para um arquivo
+que existe. Por isso o caso que o cobre usa um nó forjado, com as sete
+perguntas de borda e a resposta certa sabida de cada uma — antes da primeira
+chave, exatamente em cada chave, entre duas, e depois da última.
+
+**Como o percurso atravessa folhas.** Descendo de novo: ao esgotar uma folha,
+ele pega a última chave dela, calcula a sucessora e desce da raiz outra vez.
+É uma leitura de nó a mais por folha, por nível. A alternativa é o que o
+Btrfs de verdade faz — guardar o caminho inteiro, um nó por nível, e subir só
+o necessário para achar o irmão à direita —, que é mais rápido e custa um
+buffer de nó **por nível**, vivo durante todo o percurso. A escolha aqui é a
+barata em memória: um buffer só.
+
+A sucessora de uma chave não é somar um. Os três campos têm pesos
+diferentes, e somar ao último funciona em todo caso menos nos dois em que ele
+satura — que é exatamente onde o percurso pararia cedo, perdendo entradas de
+um diretório sem erro nenhum.
+
+**A imagem foi refeita para ter por onde descer.** Com o tamanho de nó padrão
+e três arquivos, a árvore continuaria numa folha só, e todo o código acima
+passaria em tudo sem ser executado. A imagem do `xtask` é formatada com nós
+de quatro kilobytes e leva vinte e quatro arquivos de enchimento: a árvore de
+arquivos fica com nível 1 e três folhas, e os inodes dos arquivos nomeados
+caem em folhas diferentes dos nomes deles.
+
+```
+$ cargo xtask test --arch aarch64 | grep 'arvore de arquivos'
+info teste  arvore de arquivos: nivel 1, 3 folhas, 70 itens
+```
+
+Um caso reprova se o nível voltar a ser zero, com a mensagem dizendo o que
+mudar de volta. Sem ele, uma mudança na imagem desligaria silenciosamente
+todos os outros.
+
+O tamanho de nó menor cobre uma segunda coisa de graça: ele é diferente do
+padrão do `mkfs.btrfs`, então o leitor precisa **ler** o campo do superbloco
+em vez de assumir dezesseis kilobytes — uma constante escondida que só
+apareceria no primeiro disco formatado por outra pessoa.
+
+**A receita que decide remontar a imagem passou a ser derivada.** Ela era uma
+lista escrita à mão dos parâmetros que importam, e o tamanho de nó entrou no
+`mkfs` sem entrar nela: o disco antigo ficou no lugar, e a suíte reprovou
+dizendo que a árvore cabia numa folha — verdade sobre uma imagem que já não
+era a do código. Agora a receita é montada a partir das mesmas funções que
+montam o disco, e um caso de `cargo test -p xtask` afirma que todo argumento
+do `mkfs` e todo arquivo da raiz aparecem nela.
+
+**O que este leitor não lê, declarado:** mais de uma extensão por arquivo (um
+arquivo escrito em pedaços sai truncado no primeiro), extensões comprimidas,
 extensões pré-alocadas, subvolumes e os perfis RAID0/10/5/6. Cada uma delas é
 uma recusa escrita no código, ou um limite anotado onde ele mora — não um
 caminho que dá errado calado.

@@ -15,9 +15,9 @@
 //! # O que este módulo não faz
 //!
 //! Não percorre nó interno. Num nível acima de zero os descritores são outros
-//! — chave mais endereço do filho — e quem os segue é a busca na árvore, que
-//! vem depois. Ler um nó interno como folha daria itens montados a partir de
-//! ponteiros, e é por isso que o nível é conferido antes.
+//! — chave mais endereço do filho — e quem os segue é
+//! [`super::interno`]. Ler um nó interno como folha daria itens montados a
+//! partir de ponteiros, e é por isso que o nível é conferido antes.
 
 /// Onde acaba o cabeçalho e começam os descritores.
 const CABECALHO: usize = 101;
@@ -38,11 +38,66 @@ const ITEM_TAMANHO: usize = 21;
 /// cada um significa depende do tipo — num item de pedaço o `offset` é um
 /// endereço lógico; num de diretório é um resumo do nome — e é por isso que
 /// eles são guardados crus em vez de interpretados aqui.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// # A ordem vem da ordem dos campos
+///
+/// `Ord` derivado compara os campos na ordem em que foram declarados, e é
+/// exatamente a precedência que o Btrfs usa. Reordenar os campos desta
+/// struct mudaria, em silêncio, o significado de toda comparação de chave —
+/// e a descida pela árvore é feita inteira de comparações de chave.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Chave {
     pub objeto: u64,
     pub tipo: u8,
     pub offset: u64,
+}
+
+impl Chave {
+    /// A menor chave estritamente maior que esta, ou `None` no fim do
+    /// espaço de chaves.
+    ///
+    /// # Para que serve
+    ///
+    /// Para continuar um percurso depois de esgotar uma folha: a próxima
+    /// chave a procurar é a sucessora da última que a folha trouxe. Somar um
+    /// ao `offset` e parar por aí seria errado nos dois lugares em que o
+    /// campo satura — e é justamente onde o percurso pararia cedo demais,
+    /// deixando de fora itens que existem.
+    ///
+    /// Devolver `None` no topo absoluto, em vez de dar a volta para zero, é
+    /// o que impede o percurso de recomeçar do começo e nunca terminar.
+    pub fn sucessora(self) -> Option<Self> {
+        if self.offset != u64::MAX {
+            return Some(Self {
+                offset: self.offset + 1,
+                ..self
+            });
+        }
+        if self.tipo != u8::MAX {
+            return Some(Self {
+                tipo: self.tipo + 1,
+                offset: 0,
+                ..self
+            });
+        }
+        if self.objeto != u64::MAX {
+            return Some(Self {
+                objeto: self.objeto + 1,
+                tipo: 0,
+                offset: 0,
+            });
+        }
+        None
+    }
+
+    /// A primeira chave possível de um objeto e tipo.
+    pub const fn primeira_de(objeto: u64, tipo: u8) -> Self {
+        Self {
+            objeto,
+            tipo,
+            offset: 0,
+        }
+    }
 }
 
 /// Os tipos de item que este leitor reconhece.

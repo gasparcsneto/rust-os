@@ -1903,14 +1903,26 @@ fn btrfs_superbloco_confere() -> Resultado {
     if crate::vfs::btrfs::rotulo(&bloco) != "duke-raiz" {
         return Err("o rotulo do sistema de arquivos nao e o esperado");
     }
-    if sb.tamanho_de_no as usize != crate::virtio::blk::MAIOR_LEITURA {
+    // O tamanho de nó da imagem é escolhido pelo `xtask`, e é menor que o
+    // padrão do `mkfs.btrfs` de propósito: é o que faz a árvore de arquivos
+    // ganhar níveis com poucos arquivos. Ver `disco::TAMANHO_DE_NO`.
+    //
+    // O que este caso afirma é que o leitor **lê** o campo em vez de
+    // presumir um valor: um nó diferente do padrão, e diferente do tamanho
+    // de uma ida ao disco, é o que separa as duas coisas. O teto continua
+    // valendo — um nó maior que uma ida exigiria remontar a leitura.
+    const TAMANHO_DE_NO: u32 = 4096;
+    if sb.tamanho_de_no != TAMANHO_DE_NO {
         crate::log_error!(
             "teste",
-            "o no tem {} bytes e a leitura traz {}",
+            "o no tem {} bytes e a imagem foi formatada com {}",
             sb.tamanho_de_no,
-            crate::virtio::blk::MAIOR_LEITURA
+            TAMANHO_DE_NO
         );
-        return Err("o tamanho de no nao e o que o disco le numa ida");
+        return Err("o tamanho de no nao e o que o xtask formatou");
+    }
+    if sb.tamanho_de_no as usize > crate::virtio::blk::MAIOR_LEITURA {
+        return Err("o no nao cabe numa ida ao disco");
     }
     if sb.tamanho_de_setor != 4096 {
         return Err("o tamanho de setor do sistema de arquivos mudou");
@@ -2254,6 +2266,315 @@ fn btrfs_percorre_itens_da_folha() -> Resultado {
     Ok(())
 }
 
+/// A árvore de arquivos tem mais de um nível, e a descida chega a todas as
+/// folhas.
+///
+/// # Por que a primeira metade é a mais importante
+///
+/// Porque todos os outros casos do Btrfs continuariam passando se a árvore
+/// voltasse a caber numa folha — e passariam **sem exercitar nada** do
+/// código de descida. A imagem é montada de propósito com nós de quatro
+/// kilobytes e arquivos de enchimento para que ela tenha níveis; se um dia
+/// alguém mudar isso, é aqui que aparece, e com uma mensagem que diz o que
+/// mudar de volta.
+///
+/// # O que a segunda metade prova
+///
+/// Que o percurso atravessa folhas, e ele conta **folhas**, não itens.
+/// Contar itens não serviria: quantos cabem numa folha depende do tamanho
+/// de cada um, e o teto teórico — cento e cinquenta e nove, num nó de
+/// quatro kilobytes com descritores de vinte e cinco bytes e nenhum dado —
+/// é folgado o bastante para que um percurso parado na primeira folha
+/// passasse.
+///
+/// As chaves também precisam sair em ordem estritamente crescente. É o que
+/// pega os dois erros de travessia que não dão erro nenhum: repetir uma
+/// folha — que o percurso faria se a chave procurada não avançasse — e
+/// pular para trás.
+fn btrfs_desce_pela_arvore_de_arquivos() -> Resultado {
+    let tabela = crate::particoes::varrer()?;
+    let particao = tabela
+        .primeira(crate::particoes::Tipo::Dados)
+        .ok_or("nao ha particao de dados")?;
+    let volume = crate::vfs::btrfs::Volume::abrir(particao.primeiro)?;
+    let (raiz, _) = volume.raiz_dos_arquivos()?;
+
+    let nivel = volume.nivel_da_arvore(raiz)?;
+    if nivel == 0 {
+        return Err("a arvore de arquivos cabe numa folha; a descida nao e exercitada");
+    }
+
+    let mut quantos = 0usize;
+    let mut anterior: Option<crate::vfs::btrfs::folha::Chave> = None;
+    let mut fora_de_ordem = 0usize;
+
+    let folhas = volume.percorrer(
+        raiz,
+        crate::vfs::btrfs::folha::Chave {
+            objeto: 0,
+            tipo: 0,
+            offset: 0,
+        },
+        |item| {
+            if let Some(anterior) = anterior
+                && item.chave <= anterior
+            {
+                fora_de_ordem += 1;
+            }
+            anterior = Some(item.chave);
+            quantos += 1;
+            crate::vfs::btrfs::Passo::Segue
+        },
+    )?;
+
+    crate::log_info!(
+        "teste",
+        "arvore de arquivos: nivel {}, {} folhas, {} itens",
+        nivel,
+        folhas,
+        quantos
+    );
+
+    if fora_de_ordem > 0 {
+        return Err("o percurso devolveu chaves fora de ordem: folha repetida ou pulada");
+    }
+    if folhas < 2 {
+        return Err("o percurso parou na primeira folha");
+    }
+
+    // E o percurso precisa ter visto a árvore inteira, e não só as duas
+    // primeiras folhas: o número de itens é o que o `btrfs inspect-internal
+    // dump-tree` conta do lado de fora, somado sobre todas as folhas.
+    if quantos < 60 {
+        crate::log_error!("teste", "{} itens em {} folhas", quantos, folhas);
+        return Err("o percurso trouxe itens de menos para esta imagem");
+    }
+    Ok(())
+}
+
+/// A descida acha um inode que **não** está na primeira folha.
+///
+/// # O caso que o leitor de uma folha só reprovava
+///
+/// Abrir um arquivo exige dois itens: o `DIR_ITEM` que liga o nome ao número
+/// do inode, e o `INODE_ITEM` daquele número. Eles são ordenados por coisas
+/// diferentes — o primeiro pelo resumo do nome, o segundo pelo número — e
+/// numa árvore com níveis eles caem em folhas diferentes.
+///
+/// Este caso escolhe o arquivo pelo caminho mais direto possível: pergunta
+/// ao VFS, que é quem o userspace usa. O que ele confere a mais é **onde** o
+/// inode mora: se ele estiver na mesma folha que a raiz da árvore, o caso
+/// não estaria provando a travessia, e diz isso em vez de passar.
+fn btrfs_acha_inode_fora_da_primeira_folha() -> Resultado {
+    let tabela = crate::particoes::varrer()?;
+    let particao = tabela
+        .primeira(crate::particoes::Tipo::Dados)
+        .ok_or("nao ha particao de dados")?;
+    let volume = crate::vfs::btrfs::Volume::abrir(particao.primeiro)?;
+    let (raiz, diretorio) = volume.raiz_dos_arquivos()?;
+
+    let achada = crate::vfs::btrfs::arvore::procurar(&volume, raiz, diretorio, "grande.txt")?
+        .ok_or("grande.txt nao foi achado na raiz")?;
+
+    // A primeira folha da árvore é onde uma leitura sem descida pararia.
+    let mut primeira = alloc::vec![0u8; volume.superbloco.tamanho_de_no as usize];
+    volume.ler_no(raiz, &mut primeira)?;
+    let na_primeira = crate::vfs::btrfs::folha::itens(&primeira)
+        .map(|itens| {
+            itens.flatten().any(|i| {
+                i.chave.objeto == achada.objeto
+                    && i.chave.tipo == crate::vfs::btrfs::arvore::tipo::INODE
+            })
+        })
+        .unwrap_or(false);
+    if na_primeira {
+        return Err("o inode esta no no de topo; o caso nao prova a travessia");
+    }
+
+    let item = volume
+        .achar(raiz, achada.objeto, crate::vfs::btrfs::arvore::tipo::INODE)?
+        .ok_or("o inode de grande.txt nao foi achado")?;
+    let inode = crate::vfs::btrfs::arvore::ler_inode(&item).ok_or("inode truncado")?;
+
+    if inode.especie != crate::vfs::btrfs::arvore::Especie::Arquivo {
+        return Err("o inode achado nao e de um arquivo");
+    }
+    if inode.tamanho != TAMANHO_DO_GRANDE as u64 {
+        crate::log_error!("teste", "o inode diz {} bytes", inode.tamanho);
+        return Err("o inode achado nao e o de grande.txt");
+    }
+    Ok(())
+}
+
+/// A escolha do filho, num nó interno, é a última chave menor ou igual.
+///
+/// # Por que um nó forjado, e não o do disco
+///
+/// Porque o erro que este caso existe para pegar é de **um índice**, e ele
+/// não aparece com dados reais: escolher o filho seguinte devolve uma folha
+/// cujas chaves começam depois do alvo, e o sintoma é "este arquivo não
+/// existe" — indistinguível de um arquivo que realmente não existe.
+///
+/// Com um nó montado à mão, a resposta certa de cada pergunta é sabida, e
+/// as três que importam são as bordas: antes da primeira chave, exatamente
+/// numa chave, e depois da última.
+fn btrfs_descida_escolhe_o_filho_certo() -> Resultado {
+    use crate::vfs::btrfs::folha::Chave;
+    use crate::vfs::btrfs::interno::descer_para;
+
+    const CABECALHO: usize = 101;
+    const PONTEIRO: usize = 33;
+
+    // Um nó interno de nível 1 com três ponteiros, nas chaves 10, 20 e 30.
+    let mut no = alloc::vec![0u8; 4096];
+    no[100] = 1;
+    no[96..100].copy_from_slice(&3u32.to_le_bytes());
+    for (i, (objeto, bloco)) in [(10u64, 0xAAAAu64), (20, 0xBBBB), (30, 0xCCCC)]
+        .into_iter()
+        .enumerate()
+    {
+        let base = CABECALHO + i * PONTEIRO;
+        no[base..base + 8].copy_from_slice(&objeto.to_le_bytes());
+        no[base + 17..base + 25].copy_from_slice(&bloco.to_le_bytes());
+    }
+
+    let alvo = |objeto: u64| Chave {
+        objeto,
+        tipo: 0,
+        offset: 0,
+    };
+
+    for (objeto, esperado, porque) in [
+        // Antes de tudo: desce pelo primeiro, que é onde as menores chaves
+        // moram. Descer pelo último devolveria a folha errada e "não existe".
+        (5u64, 0xAAAAu64, "antes da primeira chave"),
+        (10, 0xAAAA, "exatamente na primeira"),
+        // No meio de duas: vai para a de baixo. Ir para a de cima é o erro
+        // de um índice, e é o que este caso existe para pegar.
+        (15, 0xAAAA, "entre a primeira e a segunda"),
+        (20, 0xBBBB, "exatamente na segunda"),
+        (29, 0xBBBB, "logo antes da terceira"),
+        (30, 0xCCCC, "exatamente na terceira"),
+        (u64::MAX, 0xCCCC, "depois de todas"),
+    ] {
+        let escolhido = descer_para(&no, alvo(objeto))?;
+        if escolhido != esperado {
+            crate::log_error!(
+                "teste",
+                "{}: alvo {} desceu por {:#x}, esperava {:#x}",
+                porque,
+                objeto,
+                escolhido,
+                esperado
+            );
+            return Err("a descida escolheu o filho errado");
+        }
+    }
+
+    // Uma folha não tem por onde descer, e tratá-la como nó interno leria
+    // descritores de 25 bytes como ponteiros de 33.
+    no[100] = 0;
+    if descer_para(&no, alvo(15)).is_ok() {
+        return Err("uma folha foi tratada como no interno");
+    }
+
+    // E um nó que diz ter mais ponteiros do que cabem nele precisa ser
+    // recusado **antes** da busca: no meio de uma busca binária o índice
+    // lido nem é previsível.
+    no[100] = 1;
+    no[96..100].copy_from_slice(&u32::MAX.to_le_bytes());
+    if descer_para(&no, alvo(15)).is_ok() {
+        return Err("um no com ponteiros demais foi aceito");
+    }
+    Ok(())
+}
+
+/// A sucessora de uma chave é a menor estritamente maior que ela.
+///
+/// # Por que isto não é aritmética óbvia
+///
+/// Porque a chave tem três campos com pesos diferentes, e somar um ao último
+/// funciona em todo caso menos nos dois que importam: quando ele satura. É
+/// exatamente nesses dois que um percurso pararia cedo, deixando de fora
+/// itens que existem — sem erro, sem log, com um diretório que perdeu
+/// entradas.
+fn btrfs_sucessora_de_chave() -> Resultado {
+    use crate::vfs::btrfs::folha::Chave;
+
+    let casos = [
+        (
+            Chave {
+                objeto: 7,
+                tipo: 3,
+                offset: 1,
+            },
+            Some(Chave {
+                objeto: 7,
+                tipo: 3,
+                offset: 2,
+            }),
+        ),
+        // O deslocamento satura: sobe para o tipo seguinte, e o deslocamento
+        // volta a zero. Somar um e deixar transbordar daria (7, 3, 0), que é
+        // **menor** que a chave de partida — o percurso voltaria ao começo.
+        (
+            Chave {
+                objeto: 7,
+                tipo: 3,
+                offset: u64::MAX,
+            },
+            Some(Chave {
+                objeto: 7,
+                tipo: 4,
+                offset: 0,
+            }),
+        ),
+        // O tipo também satura: sobe para o objeto seguinte.
+        (
+            Chave {
+                objeto: 7,
+                tipo: u8::MAX,
+                offset: u64::MAX,
+            },
+            Some(Chave {
+                objeto: 8,
+                tipo: 0,
+                offset: 0,
+            }),
+        ),
+        // E no topo absoluto não há sucessora. Dar a volta para zero faria o
+        // percurso recomeçar do começo e nunca terminar.
+        (
+            Chave {
+                objeto: u64::MAX,
+                tipo: u8::MAX,
+                offset: u64::MAX,
+            },
+            None,
+        ),
+    ];
+
+    for (chave, esperada) in casos {
+        let obtida = chave.sucessora();
+        if obtida != esperada {
+            crate::log_error!(
+                "teste",
+                "{:?} -> {:?}, esperava {:?}",
+                chave,
+                obtida,
+                esperada
+            );
+            return Err("a sucessora de uma chave saiu errada");
+        }
+        if let Some(obtida) = obtida
+            && obtida <= chave
+        {
+            return Err("a sucessora nao e maior que a chave");
+        }
+    }
+    Ok(())
+}
+
 /// Depois de aberto, o volume traduz endereços de metadados.
 ///
 /// # Por que isto vale mais que o caso anterior de tradução
@@ -2378,19 +2699,32 @@ fn btrfs_raiz_montada() -> Resultado {
     // diretório: apagar o filtro por diretório do `arvore::listar` fazia a
     // raiz mostrar `nota.txt`, que está dentro de `dados`, e nenhuma das
     // perguntas reclamava. Um diretório é o conjunto do que está nele.
+    // Os arquivos de enchimento entram na conta: eles existem para dar
+    // níveis à árvore, e a raiz é justamente onde eles estão. Conferir a
+    // lista inteira **com** eles é o que mantém o caso sendo sobre o
+    // conjunto, e não sobre uma amostra — e o que faz a listagem provar que
+    // a travessia de folhas traz tudo, porque as entradas da raiz já não
+    // cabem onde cabiam.
+    const ENCHIMENTO: usize = 24;
+
     let raiz = conteudo("/")?;
-    let esperado: &[(&str, Tipo)] = &[
+    let nomeados: &[(&str, Tipo)] = &[
         ("dados", Tipo::Diretorio),
         ("grande.txt", Tipo::Arquivo),
         ("saudacao.txt", Tipo::Arquivo),
     ];
-    if raiz.len() != esperado.len()
-        || raiz
-            .iter()
-            .zip(esperado)
-            .any(|(v, e)| v.0 != e.0 || v.1 != e.1)
-    {
-        crate::log_error!("teste", "a raiz listou {:?}", raiz);
+
+    let mut esperado: alloc::vec::Vec<(alloc::string::String, Tipo)> = nomeados
+        .iter()
+        .map(|(nome, tipo)| ((*nome).into(), *tipo))
+        .collect();
+    for i in 1..=ENCHIMENTO {
+        esperado.push((alloc::format!("enche-{i}.txt"), Tipo::Arquivo));
+    }
+    esperado.sort_by(|a, b| a.0.cmp(&b.0));
+
+    if raiz != esperado {
+        crate::log_error!("teste", "a raiz listou {} entradas: {:?}", raiz.len(), raiz);
         return Err("a raiz montada nao lista exatamente o que o xtask pos nela");
     }
 
@@ -7121,6 +7455,22 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "btrfs: le a raiz da arvore de pedacos",
         f: btrfs_le_a_raiz_dos_pedacos,
+    },
+    Caso {
+        nome: "btrfs: a sucessora de uma chave",
+        f: btrfs_sucessora_de_chave,
+    },
+    Caso {
+        nome: "btrfs: a descida escolhe o filho certo",
+        f: btrfs_descida_escolhe_o_filho_certo,
+    },
+    Caso {
+        nome: "btrfs: desce pela arvore de arquivos",
+        f: btrfs_desce_pela_arvore_de_arquivos,
+    },
+    Caso {
+        nome: "btrfs: acha inode fora da primeira folha",
+        f: btrfs_acha_inode_fora_da_primeira_folha,
     },
     Caso {
         nome: "btrfs: percorre os itens de uma folha",

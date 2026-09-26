@@ -1844,6 +1844,41 @@ mod disco {
         ("dados/nota.txt", "uma nota num subdiretorio\n"),
     ];
 
+    /// Quantos arquivos de enchimento a raiz leva, e por quê.
+    ///
+    /// # A árvore precisa ter por onde descer
+    ///
+    /// Com meia dúzia de arquivos e o tamanho de nó padrão, a árvore de
+    /// arquivos do Btrfs cabe numa folha só. Um leitor que só soubesse ler
+    /// uma folha passava em tudo — e passava **porque a imagem não tinha
+    /// como reprová-lo**, não porque estivesse certo.
+    ///
+    /// Estes arquivos existem para que a árvore tenha nós internos de
+    /// verdade. Combinados com [`TAMANHO_DE_NO`], eles espalham os itens por
+    /// quatro folhas: os inodes dos arquivos nomeados caem em folhas
+    /// diferentes, então abrir qualquer um deles exige descer pelas chaves.
+    ///
+    /// O conteúdo de cada um é o próprio número, e não um texto fixo: dois
+    /// arquivos idênticos seriam deduplicados no mesmo item de extensão, e
+    /// o enchimento encheria menos do que parece.
+    pub const ENCHIMENTO: usize = 24;
+
+    /// O tamanho de nó com que a imagem é formatada.
+    ///
+    /// # Por que quatro kilobytes, e não os dezesseis do padrão
+    ///
+    /// Porque é o que faz a árvore ganhar níveis com uma quantidade
+    /// razoável de arquivos: com nós de dezesseis, seriam precisos uns
+    /// duzentos arquivos para o mesmo efeito, e a imagem cresceria sem que
+    /// nada além do enchimento mudasse.
+    ///
+    /// Ele também cobre uma segunda coisa de graça. O leitor do kernel lê o
+    /// tamanho de nó do superbloco, e um valor diferente do padrão é o que
+    /// prova que ele o **lê** em vez de assumir dezesseis kilobytes — uma
+    /// constante escondida que só apareceria no primeiro disco formatado
+    /// por outra pessoa.
+    pub const TAMANHO_DE_NO: &str = "4096";
+
     /// Um arquivo grande demais para caber dentro do próprio item.
     ///
     /// # Por que ele existe
@@ -1915,25 +1950,96 @@ const FERRAMENTAS_DO_DISCO: &[(&str, &str)] = &[
 /// por uma versão anterior desta função continuaria sendo usado por esta. O
 /// resumo cobre tudo que entra na receita, então mudar qualquer coisa aqui
 /// invalida o disco que está lá.
+/// Todos os arquivos que vão para dentro da partição de dados.
+///
+/// # Por que uma função, e não duas listas
+///
+/// Porque quem monta a imagem e quem decide se ela precisa ser remontada
+/// precisam olhar **a mesma coisa**. Enquanto eram dois lugares, um arquivo
+/// novo entrava na imagem sem entrar na receita — e a imagem velha ficava no
+/// lugar, com a suíte rodando contra um disco que já não era o que o código
+/// descrevia.
+fn arquivos_da_raiz() -> Vec<(String, Vec<u8>)> {
+    let mut arquivos: Vec<(String, Vec<u8>)> = disco::NA_RAIZ
+        .iter()
+        .map(|(nome, conteudo)| ((*nome).to_string(), conteudo.as_bytes().to_vec()))
+        .collect();
+
+    let (nome_grande, tamanho) = disco::GRANDE;
+    arquivos.push((
+        nome_grande.to_string(),
+        (0..tamanho).map(disco::marca_do_grande).collect(),
+    ));
+
+    // O enchimento que dá níveis à árvore. Ver `disco::ENCHIMENTO`.
+    for i in 1..=disco::ENCHIMENTO {
+        arquivos.push((
+            format!("enche-{i}.txt"),
+            format!("enchimento numero {i}\n").into_bytes(),
+        ));
+    }
+    arquivos
+}
+
+/// Os argumentos com que a partição de dados é formatada.
+///
+/// Mesma razão da lista acima: eles entram na receita inteiros, então um
+/// parâmetro novo de formatação passa a exigir a remontagem sem que ninguém
+/// precise lembrar de acrescentá-lo em dois lugares.
+fn argumentos_do_mkfs(arvore: &Path, raiz: &str) -> Vec<String> {
+    vec![
+        "--rootdir".into(),
+        arvore.display().to_string(),
+        "--nodesize".into(),
+        disco::TAMANHO_DE_NO.into(),
+        "-f".into(),
+        "-L".into(),
+        "duke-raiz".into(),
+        raiz.into(),
+    ]
+}
+
 fn receita_do_disco() -> String {
+    // Tudo que muda a imagem precisa estar aqui, e isso não é uma regra que
+    // alguém precise lembrar: a receita é montada a partir das **mesmas**
+    // funções que montam o disco. Foi o que faltava quando o tamanho de nó
+    // entrou — a lista de parâmetros era uma segunda cópia, o disco velho
+    // ficou no lugar, e os casos da descida reprovaram dizendo a verdade
+    // sobre uma imagem que já não existia no código.
     let mut receita = format!(
-        "v5 setores={} esp={}+{} raiz={}+{} padrao={}..{}\n",
+        "v6 setores={} esp={}+{} raiz={}+{} padrao={}..{}\n",
         disco::SETORES,
         disco::ESP_EM,
         disco::ESP_SETORES,
         disco::RAIZ_EM,
         disco::RAIZ_SETORES,
         disco::PADRAO_DE,
-        disco::PADRAO_ATE
+        disco::PADRAO_ATE,
     );
-    for (nome, conteudo) in disco::NA_ESP.iter().chain(disco::NA_RAIZ) {
+
+    // Os argumentos de formatação, com os caminhos neutralizados: eles
+    // dependem de onde o projeto está, e a receita precisa descrever a
+    // imagem, não a máquina que a montou.
+    receita.push_str("mkfs =");
+    for argumento in argumentos_do_mkfs(Path::new("<arvore>"), "<raiz>") {
+        receita.push(' ');
+        receita.push_str(&argumento);
+    }
+    receita.push('\n');
+
+    for (nome, conteudo) in disco::NA_ESP {
         receita.push_str(&format!("{nome} = {conteudo}"));
     }
-    let (nome, tamanho) = disco::GRANDE;
-    receita.push_str(&format!(
-        "{nome} = {tamanho} bytes, marca({tamanho}/2)={}\n",
-        disco::marca_do_grande(tamanho / 2)
-    ));
+
+    // Os arquivos da raiz entram por resumo, e não por conteúdo: o
+    // `grande.txt` sozinho tem quarenta e oito kilobytes, e uma receita
+    // desse tamanho seria relida a cada invocação do `xtask`. O tamanho mais
+    // um byte do meio distinguem tudo que muda de verdade — é a mesma
+    // aposta que a marca do arquivo grande já faz.
+    for (nome, conteudo) in arquivos_da_raiz() {
+        let meio = conteudo.get(conteudo.len() / 2).copied().unwrap_or(0);
+        receita.push_str(&format!("{nome} = {} bytes, meio={meio}\n", conteudo.len()));
+    }
     receita
 }
 
@@ -2061,26 +2167,16 @@ fn montar_disco(caminho: &Path) -> Result<(), String> {
     // conteúdo de um diretório, sem montar nada e sem privilégio — que é o
     // que torna isto possível dentro de um contêiner.
     let _ = std::fs::remove_dir_all(&arvore);
-    for (nome, conteudo) in disco::NA_RAIZ {
-        escrever_na_arvore(&arvore, nome, conteudo.as_bytes())?;
+    for (nome, conteudo) in arquivos_da_raiz() {
+        escrever_na_arvore(&arvore, &nome, &conteudo)?;
     }
 
-    let (nome_grande, tamanho) = disco::GRANDE;
-    let grande: Vec<u8> = (0..tamanho).map(disco::marca_do_grande).collect();
-    escrever_na_arvore(&arvore, nome_grande, &grande)?;
     std::fs::write(&raiz, vec![0u8; (disco::RAIZ_SETORES * 512) as usize])
         .map_err(|e| format!("não foi possível criar a imagem da raiz: {e}"))?;
-    ferramenta(
-        "mkfs.btrfs",
-        &[
-            "--rootdir",
-            &arvore.display().to_string(),
-            "-f",
-            "-L",
-            "duke-raiz",
-            &raiz,
-        ],
-    )?;
+
+    let argumentos = argumentos_do_mkfs(&arvore, &raiz);
+    let emprestados: Vec<&str> = argumentos.iter().map(String::as_str).collect();
+    ferramenta("mkfs.btrfs", &emprestados)?;
 
     // As duas partições no lugar, e o padrão por setor na faixa reservada.
     let mut conteudo =
@@ -3687,6 +3783,48 @@ mod testes {
     /// simbolização aponta para o lugar errado em silêncio. Os dois arquivos
     /// não compartilham código — um é bare-metal, o outro é do host —, então
     /// esta é a única amarra possível.
+    /// A receita do disco cobre tudo que muda a imagem.
+    ///
+    /// # O defeito que este caso existe para pegar
+    ///
+    /// A imagem só é remontada quando a receita muda. Enquanto a receita era
+    /// uma lista escrita à mão, um parâmetro novo de formatação entrava no
+    /// `mkfs` sem entrar nela — e o disco antigo ficava no lugar. Foi
+    /// exatamente o que aconteceu quando o tamanho de nó mudou: a suíte
+    /// reprovou dizendo que a árvore cabia numa folha, e dizia a verdade
+    /// sobre uma imagem que já não era a do código.
+    ///
+    /// O conserto foi estrutural — a receita é montada a partir das mesmas
+    /// funções que montam o disco —, e este caso é o que segura a estrutura:
+    /// ele afirma que os argumentos do `mkfs` e cada arquivo da raiz
+    /// aparecem na receita. Voltar a escrever a lista à mão o reprova.
+    #[test]
+    fn a_receita_cobre_o_que_monta_a_imagem() {
+        let receita = receita_do_disco();
+
+        for argumento in argumentos_do_mkfs(Path::new("<arvore>"), "<raiz>") {
+            assert!(
+                receita.contains(&argumento),
+                "a receita não menciona o argumento `{argumento}` do mkfs:\n{receita}"
+            );
+        }
+
+        for (nome, conteudo) in arquivos_da_raiz() {
+            assert!(
+                receita.contains(&format!("{nome} = {} bytes", conteudo.len())),
+                "a receita não menciona o arquivo `{nome}`:\n{receita}"
+            );
+        }
+
+        // E os caminhos da máquina ficam **fora**: eles mudam de um
+        // computador para outro sem que a imagem mude, e uma receita que os
+        // carregasse remontaria o disco a cada clone do repositório.
+        assert!(
+            !receita.contains("/home") && !receita.contains("target/"),
+            "a receita carrega um caminho da máquina:\n{receita}"
+        );
+    }
+
     #[test]
     fn base_do_kernel_confere_com_a_do_kernel() {
         // Ela mora no `protocolo`, que o kernel e o iniciador incluem. O

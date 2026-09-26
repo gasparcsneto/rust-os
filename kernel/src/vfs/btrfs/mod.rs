@@ -18,6 +18,7 @@
 pub mod arvore;
 pub mod crc32c;
 pub mod folha;
+pub mod interno;
 pub mod pedacos;
 
 extern crate alloc;
@@ -262,35 +263,59 @@ impl Volume {
     /// outras árvores moram em metadados, ler qualquer uma delas passa a
     /// exigir a aritmética de verdade.
     fn completar_mapa(&mut self) -> Result<(), &'static str> {
-        let mut bloco = alloc::vec![0u8; self.superbloco.tamanho_de_no as usize];
-        let cabecalho = self.ler_no(self.superbloco.raiz_dos_pedacos, &mut bloco)?;
+        // A árvore de pedaços é percorrida como qualquer outra, e a descida
+        // dela funciona antes de o mapa estar completo por construção: ela
+        // mora inteira dentro do pedaço de **sistema**, que é justamente o
+        // que o vetor do superbloco já trouxe. É a mesma circularidade que o
+        // vetor quebra, e ela continua quebrada com mais de um nível.
+        let mut novos = alloc::vec::Vec::new();
+        let mut erro = None;
 
-        // Um nó interno significaria uma árvore de pedaços com mais de um
-        // nível, que este leitor ainda não percorre. Recusar é melhor que
-        // montar um mapa pela metade e descobrir na primeira tradução que
-        // falta um pedaço.
-        if cabecalho.nivel != 0 {
-            return Err("a arvore de pedacos tem mais de um nivel");
+        self.percorrer(
+            self.superbloco.raiz_dos_pedacos,
+            folha::Chave {
+                objeto: 0,
+                tipo: 0,
+                offset: 0,
+            },
+            |item| {
+                if item.chave.tipo != folha::tipo::PEDACO {
+                    return Passo::Segue;
+                }
+                // O endereço lógico do pedaço é o `offset` da chave — o item
+                // em si não o traz.
+                let logico = item.chave.offset;
+                // O vetor do superbloco já trouxe o pedaço de sistema.
+                // Repetí-lo gastaria uma vaga do mapa e daria duas respostas
+                // iguais à mesma pergunta.
+                if self.mapa.traduzir(logico).is_some() {
+                    return Passo::Segue;
+                }
+                match pedacos::ler_item(logico, item.dados) {
+                    Ok((pedaco, _)) => {
+                        novos.push(pedaco);
+                        Passo::Segue
+                    }
+                    // O mapa precisa ficar completo ou não ficar: um pedaço
+                    // que não se sabe ler vira um endereço lógico que traduz
+                    // errado depois, longe daqui.
+                    Err(motivo) => {
+                        erro = Some(motivo);
+                        Passo::Para
+                    }
+                }
+            },
+        )?;
+
+        if let Some(motivo) = erro {
+            return Err(motivo);
         }
-
-        for item in folha::itens(&bloco)? {
-            let item = item?;
-            if item.chave.tipo != folha::tipo::PEDACO {
-                continue;
-            }
-            // O endereço lógico do pedaço é o `offset` da chave — o item em si
-            // não o traz.
-            let logico = item.chave.offset;
-            // O vetor do superbloco já trouxe o pedaço de sistema. Repetí-lo
-            // gastaria uma vaga do mapa e daria duas respostas iguais à mesma
-            // pergunta.
-            if self.mapa.traduzir(logico).is_some() {
-                continue;
-            }
-            let (pedaco, _) = pedacos::ler_item(logico, item.dados)?;
+        // Os pedaços entram no mapa **depois** do percurso: acrescentar ali
+        // dentro exigiria emprestar o volume como mutável enquanto ele
+        // próprio conduz a leitura.
+        for pedaco in novos {
             self.mapa.acrescentar(pedaco)?;
         }
-
         Ok(())
     }
 
@@ -348,6 +373,197 @@ impl Volume {
     }
 }
 
+/// O que fazer depois de olhar um item.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Passo {
+    /// Continua para o próximo item, atravessando folhas se preciso.
+    Segue,
+    /// Encerra o percurso aqui.
+    Para,
+}
+
+/// Quantas folhas um percurso pode visitar antes de desistir.
+///
+/// Não é um limite do formato: é um teto contra uma árvore corrompida que
+/// leve o percurso a andar para sempre. A cada folha a chave procurada cresce
+/// estritamente, então um percurso são termina sozinho; este número é o que
+/// garante que um insano também termine, e com um erro que diz o que houve.
+///
+/// Oito mil folhas de 4 KiB cobrem trinta e dois megabytes de metadados —
+/// muito acima de qualquer coisa que este kernel monte, e ainda assim um
+/// número, e não "até acabar".
+const MAX_FOLHAS: usize = 8192;
+
+impl Volume {
+    /// Chama `f` para cada item da árvore, em ordem de chave, a partir de
+    /// `de`.
+    ///
+    /// # Por que isto substituiu "ler a folha"
+    ///
+    /// Porque a árvore tem mais de um nível assim que o sistema de arquivos
+    /// passa de um punhado de arquivos, e um leitor de uma folha só devolve
+    /// os itens do primeiro nó e nada dos outros — um sistema de arquivos
+    /// que parece funcionar e esconde a maior parte do conteúdo. Era o
+    /// limite declarado deste leitor, e é o que sai aqui.
+    ///
+    /// # Como o percurso atravessa folhas
+    ///
+    /// Descendo de novo. Ao esgotar uma folha, ele pega a **última chave**
+    /// dela, calcula a sucessora e desce da raiz outra vez procurando por
+    /// ela. É uma leitura de nó a mais por folha, por nível da árvore.
+    ///
+    /// A alternativa é o que o Btrfs de verdade faz: guardar o caminho
+    /// inteiro — um nó por nível, com a fatia escolhida em cada um — e subir
+    /// só o necessário para achar o irmão à direita. É mais rápido e custa
+    /// um buffer de nó **por nível**, vivo durante todo o percurso.
+    ///
+    /// A escolha aqui é a barata em memória: um buffer só. Com uma árvore de
+    /// dois níveis, o preço é uma leitura extra por folha, e as leituras de
+    /// nó interno vêm do mesmo punhado de blocos que o disco entrega
+    /// rapidamente. O dia em que a profundidade crescer, ou em que uma
+    /// medição mostrar o custo, o caminho guardado entra — e entra sem mudar
+    /// nenhum chamador, porque todos passam por aqui.
+    /// # O que o número devolvido serve para responder
+    ///
+    /// Quantas folhas foram lidas. É o que permite a um caso afirmar que a
+    /// travessia aconteceu: contar **itens** não serve, porque quantos cabem
+    /// numa folha depende do tamanho de cada um, e um teto teórico é folgado
+    /// demais para reprovar um percurso que parou na primeira.
+    pub fn percorrer<F>(&self, raiz: u64, de: folha::Chave, mut f: F) -> Result<usize, &'static str>
+    where
+        F: FnMut(&folha::Item) -> Passo,
+    {
+        let mut no = alloc::vec![0u8; self.superbloco.tamanho_de_no as usize];
+        let mut procurada = Some(de);
+        let mut folhas = 0usize;
+
+        while let Some(alvo) = procurada {
+            folhas += 1;
+            if folhas > MAX_FOLHAS {
+                return Err("o percurso pela arvore nao termina");
+            }
+
+            self.descer_ate_a_folha(raiz, alvo, &mut no)?;
+
+            // A sucessora é calculada **antes** de percorrer os itens, porque
+            // `f` pode parar no meio e a folha seguinte deixa de interessar.
+            // Calcular depois daria na mesma e obrigaria a repetir a leitura
+            // do cabeçalho nos dois caminhos de saída.
+            let ultima = interno::ultima_chave_da_folha(&no);
+            procurada = match ultima {
+                // A folha acabou antes do alvo: não há mais nada à direita.
+                // Acontece na última folha da árvore, quando o alvo passou de
+                // todas as chaves que existem.
+                Some(ultima) if ultima >= alvo => ultima.sucessora(),
+                _ => None,
+            };
+
+            for item in folha::itens(&no)? {
+                let item = item?;
+                // Uma folha traz chaves anteriores ao alvo sempre que ele cai
+                // no meio dela — que é o caso comum da primeira descida.
+                // Entregá-las seria começar o percurso antes de onde quem
+                // chamou pediu.
+                if item.chave < alvo {
+                    continue;
+                }
+                if f(&item) == Passo::Para {
+                    return Ok(folhas);
+                }
+            }
+        }
+
+        Ok(folhas)
+    }
+
+    /// Desce da raiz até a folha onde `alvo` está, ou estaria.
+    ///
+    /// # O que a descida confere, e por quê
+    ///
+    /// Que o nível cai de exatamente um a cada passo. É a invariante que
+    /// distingue uma árvore de um grafo: um nó que apontasse para si mesmo,
+    /// ou para um irmão, faria a descida girar — e girar lendo do disco, com
+    /// a soma de verificação conferindo em toda volta, porque cada nó é um nó
+    /// de verdade.
+    ///
+    /// O teto de níveis existe pelo mesmo motivo, um degrau acima: ele pega o
+    /// caso em que os níveis até caem, mas a árvore é mais funda do que o
+    /// formato permite.
+    ///
+    /// # Nenhum caso derruba a conferência de nível, e não há como escrever
+    /// um
+    ///
+    /// Medido, apagando-a: a suíte inteira passa. Não é falha dos casos —
+    /// para exercitá-la seria preciso um nó interno apontando para outro do
+    /// nível errado, e um nó desses não é algo que se forje: ele teria de
+    /// estar **no disco**, com a soma de verificação certa, dentro de um
+    /// pedaço mapeado, apontado por uma árvore que o `mkfs.btrfs` não
+    /// produz.
+    ///
+    /// Ela fica porque o custo é uma comparação e o que ela evita é um laço
+    /// de leituras de disco dentro do kernel — e porque o teto de níveis
+    /// sozinho não a cobre: uma árvore que alternasse entre dois nós do
+    /// mesmo nível terminaria no teto, sim, mas depois de oito idas ao disco
+    /// e com a mensagem errada.
+    fn descer_ate_a_folha(
+        &self,
+        raiz: u64,
+        alvo: folha::Chave,
+        no: &mut [u8],
+    ) -> Result<(), &'static str> {
+        let mut endereco = raiz;
+        let mut esperado: Option<u8> = None;
+
+        for _ in 0..=interno::MAX_NIVEL {
+            let cabecalho = self.ler_no(endereco, no)?;
+
+            if let Some(esperado) = esperado
+                && cabecalho.nivel != esperado
+            {
+                return Err("a arvore aponta para um no do nivel errado");
+            }
+            if cabecalho.nivel == 0 {
+                return Ok(());
+            }
+
+            endereco = interno::descer_para(no, alvo)?;
+            esperado = Some(cabecalho.nivel - 1);
+        }
+
+        Err("a arvore e mais funda do que o formato permite")
+    }
+
+    /// O primeiro item com este objeto e tipo, copiado para um vetor.
+    ///
+    /// # Por que copiar, e não devolver uma fatia
+    ///
+    /// Porque a fatia apontaria para dentro do buffer da folha, que morre com
+    /// o percurso. Manter o buffer vivo obrigaria quem chama a carregá-lo
+    /// junto, e o item que interessa tem cento e sessenta bytes num inode e
+    /// alguns milhares numa extensão embutida — uma cópia que não aparece em
+    /// medição nenhuma ao lado da ida ao disco que a precedeu.
+    pub fn achar(
+        &self,
+        raiz: u64,
+        objeto: u64,
+        tipo: u8,
+    ) -> Result<Option<alloc::vec::Vec<u8>>, &'static str> {
+        let mut achado = None;
+        self.percorrer(raiz, folha::Chave::primeira_de(objeto, tipo), |item| {
+            // Como o percurso é em ordem de chave, o primeiro item que sair
+            // do par (objeto, tipo) garante que não há mais nenhum: parar
+            // aqui é o que evita varrer a árvore inteira atrás de algo que
+            // já se sabe que acabou.
+            if item.chave.objeto != objeto || item.chave.tipo != tipo {
+                return Passo::Para;
+            }
+            achado = Some(item.dados.to_vec());
+            Passo::Para
+        })?;
+        Ok(achado)
+    }
+}
+
 /// O endereço lógico da raiz que um item de raiz descreve.
 ///
 /// O item é um `btrfs_root_item`, uma struct grande de que só um campo
@@ -370,50 +586,28 @@ impl Volume {
     /// o diretório raiz — os dois vêm do mesmo item, e separá-los seria ler a
     /// árvore duas vezes.
     pub fn raiz_dos_arquivos(&self) -> Result<(u64, u64), &'static str> {
-        let mut bloco = alloc::vec![0u8; self.superbloco.tamanho_de_no as usize];
-        let cabecalho = self.ler_no(self.superbloco.raiz, &mut bloco)?;
-        if cabecalho.nivel != 0 {
-            return Err("a arvore de raizes tem mais de um nivel");
-        }
+        let item = self
+            .achar(
+                self.superbloco.raiz,
+                arvore::ARVORE_DE_ARQUIVOS,
+                folha::tipo::RAIZ,
+            )?
+            .ok_or("nao ha arvore de arquivos neste sistema de arquivos")?;
 
-        for item in folha::itens(&bloco)? {
-            let item = item?;
-            if item.chave.tipo != folha::tipo::RAIZ
-                || item.chave.objeto != arvore::ARVORE_DE_ARQUIVOS
-            {
-                continue;
-            }
-            let endereco = raiz_da_arvore(item.dados).ok_or("item de raiz truncado")?;
-            let diretorio = diretorio_da_raiz(item.dados).ok_or("item de raiz truncado")?;
-            return Ok((endereco, diretorio));
-        }
-
-        Err("nao ha arvore de arquivos neste sistema de arquivos")
+        let endereco = raiz_da_arvore(&item).ok_or("item de raiz truncado")?;
+        let diretorio = diretorio_da_raiz(&item).ok_or("item de raiz truncado")?;
+        Ok((endereco, diretorio))
     }
 
-    /// Lê a folha da árvore de arquivos para um buffer.
+    /// Quantos níveis a árvore que começa em `raiz` tem acima das folhas.
     ///
-    /// # Por que a cada chamada, e não uma vez
-    ///
-    /// Porque guardar a folha exigiria decidir quando ela deixa de valer, e
-    /// não há escrita neste leitor para invalidá-la. Ler custa cem
-    /// microssegundos — uma ida ao disco, medida —, e um cache que ninguém
-    /// invalida é a forma mais silenciosa de servir conteúdo velho.
-    ///
-    /// Quando houver escrita, ou quando o custo aparecer numa medição, o
-    /// cache entra com a regra de invalidação junto.
-    fn folha_dos_arquivos(&self, raiz: u64, destino: &mut [u8]) -> Result<(), &'static str> {
-        let cabecalho = self.ler_no(raiz, destino)?;
-        // Também não falsificável por esta imagem: com meia dúzia de
-        // arquivos, a árvore cabe numa folha e nunca ganha um nível. A recusa
-        // está aqui porque a alternativa — ler um nó interno como se fosse
-        // folha — devolveria os itens que estão nele, que são ponteiros para
-        // outros nós, interpretados como inodes e diretórios. Nomes de lixo,
-        // ou uma árvore com um terço do conteúdo e nenhum erro.
-        if cabecalho.nivel != 0 {
-            return Err("a arvore de arquivos tem mais de um nivel");
-        }
-        Ok(())
+    /// Existe para a suíte, e por um motivo que não é curiosidade: os casos
+    /// que exercitam a descida só valem se a árvore **tiver** por onde
+    /// descer. Sem esta pergunta, uma mudança na imagem que voltasse a
+    /// caber numa folha faria todos eles passarem sem testar nada.
+    pub fn nivel_da_arvore(&self, raiz: u64) -> Result<u8, &'static str> {
+        let mut no = alloc::vec![0u8; self.superbloco.tamanho_de_no as usize];
+        Ok(self.ler_no(raiz, &mut no)?.nivel)
     }
 }
 
@@ -445,20 +639,14 @@ impl Sistema {
         })
     }
 
-    fn folha(&self) -> Result<alloc::vec::Vec<u8>, crate::vfs::Erro> {
-        let mut bloco = alloc::vec![0u8; self.volume.superbloco.tamanho_de_no as usize];
-        self.volume
-            .folha_dos_arquivos(self.raiz, &mut bloco)
-            .map_err(|_| crate::vfs::Erro::DoDispositivo)?;
-        Ok(bloco)
-    }
-
     /// O nó do VFS para um inode, lendo o item dele.
-    fn no_de(&self, folha: &[u8], numero: u64) -> Result<crate::vfs::No, crate::vfs::Erro> {
-        let dados = arvore::achar(folha, numero, arvore::tipo::INODE)
+    fn no_de(&self, numero: u64) -> Result<crate::vfs::No, crate::vfs::Erro> {
+        let dados = self
+            .volume
+            .achar(self.raiz, numero, arvore::tipo::INODE)
             .map_err(|_| crate::vfs::Erro::DoDispositivo)?
             .ok_or(crate::vfs::Erro::NaoEncontrado)?;
-        let inode = arvore::ler_inode(dados).ok_or(crate::vfs::Erro::DoDispositivo)?;
+        let inode = arvore::ler_inode(&dados).ok_or(crate::vfs::Erro::DoDispositivo)?;
 
         let tipo = match inode.especie {
             arvore::Especie::Arquivo => crate::vfs::Tipo::Arquivo,
@@ -491,8 +679,7 @@ impl crate::vfs::SistemaDeArquivos for Sistema {
         dir: &crate::vfs::No,
         nome: &str,
     ) -> Result<crate::vfs::No, crate::vfs::Erro> {
-        let folha = self.folha()?;
-        let entrada = arvore::procurar(&folha, dir.id, nome)
+        let entrada = arvore::procurar(&self.volume, self.raiz, dir.id, nome)
             .map_err(|_| crate::vfs::Erro::DoDispositivo)?
             .ok_or(crate::vfs::Erro::NaoEncontrado)?;
 
@@ -508,7 +695,7 @@ impl crate::vfs::SistemaDeArquivos for Sistema {
             return Err(crate::vfs::Erro::NaoEncontrado);
         }
 
-        self.no_de(&folha, entrada.objeto)
+        self.no_de(entrada.objeto)
     }
 
     fn ler(
@@ -517,11 +704,12 @@ impl crate::vfs::SistemaDeArquivos for Sistema {
         deslocamento: u64,
         destino: &mut [u8],
     ) -> Result<usize, crate::vfs::Erro> {
-        let folha = self.folha()?;
-        let dados = arvore::achar(&folha, no.id, arvore::tipo::EXTENSAO)
+        let dados = self
+            .volume
+            .achar(self.raiz, no.id, arvore::tipo::EXTENSAO)
             .map_err(|_| crate::vfs::Erro::DoDispositivo)?
             .ok_or(crate::vfs::Erro::NaoEncontrado)?;
-        let conteudo = arvore::ler_extensao(dados).map_err(|_| crate::vfs::Erro::DoDispositivo)?;
+        let conteudo = arvore::ler_extensao(&dados).map_err(|_| crate::vfs::Erro::DoDispositivo)?;
 
         // O que ainda falta ler do arquivo, que é o teto de qualquer extensão.
         let restante = no.tamanho.saturating_sub(deslocamento) as usize;
@@ -612,11 +800,10 @@ impl crate::vfs::SistemaDeArquivos for Sistema {
         dir: &crate::vfs::No,
         indice: usize,
     ) -> Result<Option<crate::vfs::Entrada>, crate::vfs::Erro> {
-        let folha = self.folha()?;
         let mut atual = 0usize;
         let mut achada = None;
 
-        arvore::listar(&folha, dir.id, |entrada| {
+        arvore::listar(&self.volume, self.raiz, dir.id, |entrada| {
             if atual == indice && achada.is_none() {
                 achada = Some((
                     alloc::string::String::from_utf8_lossy(entrada.nome).into_owned(),
@@ -625,6 +812,10 @@ impl crate::vfs::SistemaDeArquivos for Sistema {
                 ));
             }
             atual += 1;
+            // Parar na entrada pedida é o que mantém o custo de listar um
+            // diretório proporcional ao índice, e não ao tamanho da árvore:
+            // sem isto, cada chamada varreria todas as folhas até o fim.
+            achada.is_none()
         })
         .map_err(|_| crate::vfs::Erro::DoDispositivo)?;
 
@@ -638,7 +829,7 @@ impl crate::vfs::SistemaDeArquivos for Sistema {
             }));
         }
 
-        let no = self.no_de(&folha, objeto)?;
+        let no = self.no_de(objeto)?;
         Ok(Some(crate::vfs::Entrada {
             nome,
             tipo: no.tipo,

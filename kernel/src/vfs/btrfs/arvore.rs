@@ -8,28 +8,36 @@
 //! a resposta é "aqui dentro", porque o Btrfs guarda o conteúdo no próprio
 //! item em vez de gastar um bloco inteiro para vinte e nove bytes.
 //!
-//! # O limite deste leitor, declarado
+//! # Como os itens são alcançados
 //!
-//! Ele lê **uma folha**. A árvore de arquivos deste disco tem um nível só, e
-//! percorrer seus itens em ordem é tanto quanto é preciso. Uma árvore com
-//! nós internos exige descer pelas chaves, e isso entra quando houver um
-//! sistema de arquivos grande o bastante para ter dois níveis.
+//! Por [`super::Volume::percorrer`], que desce pelas chaves e atravessa
+//! folhas. Este módulo interpreta os bytes de cada item; quem os encontra é
+//! a árvore.
 //!
-//! Isso está escrito aqui e conferido no código: um nó interno é recusado,
-//! em vez de lido como folha. Um leitor que ignorasse o nível devolveria uma
-//! árvore com os arquivos do primeiro nó e nada dos outros — um sistema de
-//! arquivos que parece funcionar e esconde metade do conteúdo.
+//! Por muito tempo ele leu **uma folha** — o que bastava enquanto o disco
+//! tinha meia dúzia de arquivos e a árvore cabia num nó. O limite estava
+//! escrito e conferido: um nó interno era recusado em vez de lido como
+//! folha, porque um leitor que ignorasse o nível devolveria os arquivos do
+//! primeiro nó e nada dos outros — um sistema de arquivos que parece
+//! funcionar e esconde a maior parte do conteúdo.
 //!
-//! E ele lê **uma extensão por arquivo**: o `achar` devolve o primeiro
+//! # O limite que fica
+//!
+//! Ele lê **uma extensão por arquivo**: o `achar` devolve o primeiro
 //! `EXTENT_DATA` do inode, que é o que começa no byte zero. Um arquivo
 //! escrito em pedaços tem um item por pedaço, com o deslocamento na chave, e
 //! deste leitor sairia só o primeiro — truncado, não corrompido, porque o
 //! tamanho da extensão limita a leitura e o laço do `ler_tudo` para quando
 //! ela acaba. Um arquivo de até 128 MiB gravado de uma vez, como os que o
-//! `mkfs.btrfs` põe na imagem, tem uma extensão só. Escolher a extensão pelo
-//! deslocamento é o mesmo trabalho que descer pelas chaves, e entra junto.
+//! `mkfs.btrfs` põe na imagem, tem uma extensão só.
+//!
+//! Agora que a descida existe, escolher a extensão pelo deslocamento é uma
+//! mudança pequena — trocar a chave procurada por `(inode, EXTENSAO, off)`.
+//! Ela entra quando houver na imagem um arquivo que precise dela, porque um
+//! caminho que nenhum arquivo percorre é um caminho que nenhum caso prova.
 
 use super::folha;
+use super::{Passo, Volume};
 
 /// Os tipos de item que a árvore de arquivos usa.
 pub mod tipo {
@@ -209,59 +217,84 @@ pub fn ler_extensao(dados: &[u8]) -> Result<Conteudo, &'static str> {
     }
 }
 
-/// Procura, numa folha, o primeiro item que case com objeto e tipo.
-pub fn achar(no: &[u8], objeto: u64, tipo: u8) -> Result<Option<&[u8]>, &'static str> {
-    for item in folha::itens(no)? {
-        let item = item?;
-        if item.chave.objeto == objeto && item.chave.tipo == tipo {
-            return Ok(Some(item.dados));
-        }
-    }
-    Ok(None)
+/// Para onde uma entrada de diretório aponta, sem emprestar o item.
+///
+/// A [`Entrada`] traz o nome como fatia do próprio item, que morre com a
+/// folha em que ele estava. Quem sobrevive ao percurso é isto.
+pub struct Achada {
+    pub objeto: u64,
+    pub tipo_da_chave: u8,
 }
 
 /// Procura um nome dentro de um diretório.
 ///
-/// # Por que percorrer em vez de buscar pela chave
+/// # Por que percorrer em vez de buscar pela chave do nome
 ///
-/// Porque a chave de um `DIR_ITEM` é um **resumo** do nome, e calcular o
-/// resumo exige o mesmo crc32c com uma semente específica. Percorrer os itens
-/// do diretório dá a mesma resposta sem uma segunda implementação para
-/// divergir — e numa folha só, que é o que este leitor lê, o custo é o mesmo
-/// laço que a listagem já faz.
+/// Porque a chave de um `DIR_ITEM` é um **resumo** do nome, calculado com
+/// crc32c e uma semente específica. Buscá-lo direto exigiria reproduzir esse
+/// resumo aqui, e uma segunda implementação de um cálculo é uma segunda
+/// chance de ele divergir — com o sintoma "este arquivo não existe" para um
+/// arquivo que existe.
 ///
-/// O dia em que a árvore tiver níveis, a busca por chave deixa de ser uma
-/// economia e passa a ser a única forma de não ler a árvore inteira. É
-/// quando ela entra.
-pub fn procurar<'n>(
-    no: &'n [u8],
+/// O que a descida já resolve, e é o que importava, é não ler a árvore
+/// inteira: o percurso começa na primeira chave do diretório e **para** na
+/// primeira que sai dele. Os itens de um diretório são contíguos na ordem
+/// das chaves, então o custo é proporcional ao tamanho do diretório, e não
+/// ao do sistema de arquivos.
+pub fn procurar(
+    volume: &Volume,
+    raiz: u64,
     diretorio: u64,
     nome: &str,
-) -> Result<Option<Entrada<'n>>, &'static str> {
-    for item in folha::itens(no)? {
-        let item = item?;
-        if item.chave.objeto != diretorio || item.chave.tipo != tipo::DIRETORIO {
-            continue;
-        }
-        for entrada in entradas(item.dados) {
-            if entrada.nome == nome.as_bytes() {
-                return Ok(Some(entrada));
+) -> Result<Option<Achada>, &'static str> {
+    let mut achada = None;
+    volume.percorrer(
+        raiz,
+        folha::Chave::primeira_de(diretorio, tipo::DIRETORIO),
+        |item| {
+            if item.chave.objeto != diretorio || item.chave.tipo != tipo::DIRETORIO {
+                return Passo::Para;
             }
-        }
-    }
-    Ok(None)
+            for entrada in entradas(item.dados) {
+                if entrada.nome == nome.as_bytes() {
+                    achada = Some(Achada {
+                        objeto: entrada.objeto,
+                        tipo_da_chave: entrada.tipo_da_chave,
+                    });
+                    return Passo::Para;
+                }
+            }
+            Passo::Segue
+        },
+    )?;
+    Ok(achada)
 }
 
-/// Chama `f` para cada entrada de um diretório.
-pub fn listar<F: FnMut(&Entrada)>(no: &[u8], diretorio: u64, mut f: F) -> Result<(), &'static str> {
-    for item in folha::itens(no)? {
-        let item = item?;
-        if item.chave.objeto != diretorio || item.chave.tipo != tipo::DIRETORIO {
-            continue;
-        }
-        for entrada in entradas(item.dados) {
-            f(&entrada);
-        }
-    }
+/// Chama `f` para cada entrada de um diretório, até ela pedir para parar.
+///
+/// `f` devolve `true` para continuar. É o que permite a quem procura a
+/// n-ésima entrada parar ao achá-la, em vez de atravessar todas as folhas do
+/// diretório a cada chamada.
+pub fn listar<F: FnMut(&Entrada) -> bool>(
+    volume: &Volume,
+    raiz: u64,
+    diretorio: u64,
+    mut f: F,
+) -> Result<(), &'static str> {
+    volume.percorrer(
+        raiz,
+        folha::Chave::primeira_de(diretorio, tipo::DIRETORIO),
+        |item| {
+            if item.chave.objeto != diretorio || item.chave.tipo != tipo::DIRETORIO {
+                return Passo::Para;
+            }
+            for entrada in entradas(item.dados) {
+                if !f(&entrada) {
+                    return Passo::Para;
+                }
+            }
+            Passo::Segue
+        },
+    )?;
     Ok(())
 }
