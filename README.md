@@ -202,8 +202,9 @@ kernel/src/
         └── linker.ld  layout de memória e símbolos de boot
 
 iniciador/src/       a aplicação UEFI que o firmware carrega da ESP
-├── main.rs          confere as tabelas da UEFI e relata a máquina
+├── main.rs          confere as tabelas da UEFI, abre o kernel e relata
 ├── efi.rs           as tabelas e os protocolos, declarados à mão
+├── elf.rs           o pedaço do ELF64 que um carregador precisa entender
 ├── serial.rs        a COM1, que sobrevive ao fim dos serviços de boot
 └── crc32.rs         o CRC-32 do Ethernet, que confere os cabeçalhos
 
@@ -923,9 +924,11 @@ padronizado.
       exercitados por um programa sem privilégio que lê um arquivo do disco.
       Falta o bootloader UEFI próprio, em andamento: o `iniciador/` já é
       carregado pelo firmware a partir da ESP e confere as três tabelas da
-      UEFI, o mapa de memória e o vídeo. Faltam, nesta ordem: ler o ELF do
-      kernel da ESP, montar as tabelas de página da metade alta, sair dos
-      serviços de boot e saltar — e só então o crate `bootloader` sai.
+      UEFI, o mapa de memória e o vídeo, e já abre o `duke.elf` na ESP, lê os
+      sete mebibytes com o CRC conferido de fora e interpreta os segmentos.
+      Faltam, nesta ordem: copiar os segmentos para onde eles pedem, montar as
+      tabelas de página da metade alta, sair dos serviços de boot e saltar — e
+      só então o crate `bootloader` sai.
 
 ## Licença
 

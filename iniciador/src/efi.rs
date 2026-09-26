@@ -312,3 +312,101 @@ pub mod formato {
     /// Sem buffer alcançável: só a operação de transferência.
     pub const SO_TRANSFERENCIA: u32 = 3;
 }
+
+// ---------------------------------------------------------------------------
+// Os protocolos que levam ao arquivo do kernel
+// ---------------------------------------------------------------------------
+//
+// A corrente tem três elos, e nenhum deles é evitável: o firmware não diz
+// "aqui está o disco de onde você veio". Ele diz qual **imagem** está
+// rodando; a imagem sabe de qual **dispositivo** foi carregada; e o
+// dispositivo, se for um volume, oferece um **sistema de arquivos**.
+//
+// Seguir a corrente é o que faz o iniciador achar o kernel no disco de onde
+// ele mesmo veio, e não num disco qualquer que tenha uma ESP. Numa máquina
+// com dois discos bootáveis, a diferença entre as duas coisas é o kernel de
+// outra instalação.
+
+/// `EFI_LOADED_IMAGE_PROTOCOL`.
+pub const GUID_DA_IMAGEM: Guid = Guid {
+    a: 0x5b1b_31a1,
+    b: 0x9562,
+    c: 0x11d2,
+    d: [0x8e, 0x3f, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b],
+};
+
+/// O que o firmware sabe sobre a aplicação que está rodando.
+#[repr(C)]
+pub struct ImagemCarregada {
+    pub revisao: u32,
+    _pai: Handle,
+    _sistema: *const c_void,
+    /// O dispositivo de onde esta imagem foi carregada.
+    pub dispositivo: Handle,
+    _caminho: *const c_void,
+    _reservado: *const c_void,
+    _tamanho_das_opcoes: u32,
+    _opcoes: *const c_void,
+    /// Onde o firmware pôs esta imagem, e quanto ela ocupa.
+    pub base: *const c_void,
+    pub tamanho: u64,
+    _tipo_de_codigo: u32,
+    _tipo_de_dados: u32,
+    _descarregar: *const c_void,
+}
+
+/// `EFI_SIMPLE_FILE_SYSTEM_PROTOCOL`.
+pub const GUID_DO_SISTEMA_DE_ARQUIVOS: Guid = Guid {
+    // `964e5b22`, e não `0964e5b2`. O primeiro campo de um GUID tem oito
+    // dígitos hexadecimais, e escrevê-lo com um zero na frente desloca todos
+    // eles — o valor continua sendo um `u32` plausível, e o firmware responde
+    // "protocolo nao suportado" sobre um handle que suporta o protocolo. Foi
+    // o primeiro erro de transcrição deste arquivo, e custou uma execução
+    // para aparecer.
+    a: 0x964e_5b22,
+    b: 0x6459,
+    c: 0x11d2,
+    d: [0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b],
+};
+
+#[repr(C)]
+pub struct SistemaDeArquivos {
+    pub revisao: u64,
+    pub abrir_volume:
+        unsafe extern "efiapi" fn(*mut SistemaDeArquivos, *mut *mut Arquivo) -> Status,
+}
+
+/// Um arquivo ou diretório aberto.
+///
+/// As três funções que não são chamadas aqui continuam declaradas, pela mesma
+/// razão dos serviços de boot: pular um ponteiro de função exigiria contar
+/// bytes, e errar a conta chama outra função.
+#[repr(C)]
+pub struct Arquivo {
+    pub revisao: u64,
+    pub abrir:
+        unsafe extern "efiapi" fn(*mut Arquivo, *mut *mut Arquivo, *const u16, u64, u64) -> Status,
+    pub fechar: unsafe extern "efiapi" fn(*mut Arquivo) -> Status,
+    _apagar: *const c_void,
+    pub ler: unsafe extern "efiapi" fn(*mut Arquivo, *mut usize, *mut u8) -> Status,
+    _escrever: *const c_void,
+    pub posicao: unsafe extern "efiapi" fn(*mut Arquivo, *mut u64) -> Status,
+    pub definir_posicao: unsafe extern "efiapi" fn(*mut Arquivo, u64) -> Status,
+    _informacao: *const c_void,
+    _definir_informacao: *const c_void,
+    _descarregar: *const c_void,
+}
+
+/// Abrir só para leitura.
+pub const MODO_LEITURA: u64 = 1;
+
+/// A posição que significa "o fim do arquivo".
+///
+/// É como se descobre o tamanho sem pedir a estrutura de informação do
+/// arquivo: posicionar no fim, perguntar onde se está, e voltar ao começo. A
+/// alternativa — `GetInfo` — exige um GUID a mais, uma struct a mais e a
+/// mesma dança de dois passos para descobrir o tamanho do buffer.
+pub const FIM_DO_ARQUIVO: u64 = u64::MAX;
+
+/// `AllocateAnyPages`: o firmware escolhe onde.
+pub const ALOCAR_QUALQUER: u32 = 0;

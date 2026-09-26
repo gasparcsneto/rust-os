@@ -33,6 +33,7 @@
 
 mod crc32;
 mod efi;
+mod elf;
 mod serial;
 
 use core::fmt::Write;
@@ -48,11 +49,11 @@ use core::panic::PanicInfo;
 const MAIOR_TABELA: u32 = 4096;
 
 #[unsafe(no_mangle)]
-pub extern "efiapi" fn efi_main(_imagem: efi::Handle, sistema: *mut efi::Sistema) -> efi::Status {
+pub extern "efiapi" fn efi_main(imagem: efi::Handle, sistema: *mut efi::Sistema) -> efi::Status {
     serial::init();
     relatar!("vivo, carregado pelo firmware");
 
-    match relatorio(sistema) {
+    match relatorio(imagem, sistema) {
         Ok(()) => relatar!("fim do relatorio"),
         Err(motivo) => relatar!("ERRO {}", motivo),
     }
@@ -61,7 +62,7 @@ pub extern "efiapi" fn efi_main(_imagem: efi::Handle, sistema: *mut efi::Sistema
 }
 
 /// Confere o que o firmware entregou e descreve a máquina.
-fn relatorio(sistema: *mut efi::Sistema) -> Result<(), &'static str> {
+fn relatorio(imagem: efi::Handle, sistema: *mut efi::Sistema) -> Result<(), &'static str> {
     if sistema.is_null() {
         return Err("a tabela do sistema veio nula");
     }
@@ -117,6 +118,7 @@ fn relatorio(sistema: *mut efi::Sistema) -> Result<(), &'static str> {
 
     descrever_memoria(boot)?;
     descrever_video(boot)?;
+    descrever_kernel(imagem, boot)?;
     Ok(())
 }
 
@@ -357,6 +359,312 @@ fn descrever_video(boot: &efi::ServicosDeBoot) -> Result<(), &'static str> {
         modo.quantos_modos
     );
     Ok(())
+}
+
+/// Onde o kernel mora na partição de sistema.
+///
+/// Na raiz da ESP e com nome curto, porque o caminho é escrito em UTF-16
+/// literal aqui embaixo e cada caractere é uma unidade a mais para conferir.
+/// Um layout mais arrumado — `\EFI\duke\kernel.elf` — não compra nada
+/// enquanto houver um kernel só.
+const CAMINHO_DO_KERNEL: &[u16] = &[
+    b'd' as u16,
+    b'u' as u16,
+    b'k' as u16,
+    b'e' as u16,
+    b'.' as u16,
+    b'e' as u16,
+    b'l' as u16,
+    b'f' as u16,
+    0,
+];
+
+/// Quanto o iniciador pede ao firmware por chamada de leitura.
+///
+/// Sessenta e quatro kibibytes. Ver o laço de leitura em [`ler_o_kernel`]
+/// sobre por que a leitura é pedida em pedaços em vez de de uma vez só.
+const PEDACO_DA_LEITURA: usize = 64 * 1024;
+
+/// Maior kernel que o iniciador aceita ler.
+///
+/// Trinta e dois mebibytes. O kernel de depuração, com símbolos, tem sete —
+/// e o teto existe porque o tamanho vem do disco: um número absurdo viraria
+/// um pedido de alocação absurdo, e o firmware o recusaria com uma mensagem
+/// que não diz o que aconteceu.
+const MAIOR_KERNEL: u64 = 32 * 1024 * 1024;
+
+/// Segue a corrente até o arquivo do kernel, lê, e descreve o que leu.
+///
+/// # Por que pelo dispositivo desta imagem, e não por um volume qualquer
+///
+/// Porque "a ESP" não é uma coisa só. Numa máquina com dois discos
+/// bootáveis há duas, e carregar o kernel da errada é carregar o kernel de
+/// outra instalação — com o iniciador de uma e o sistema de outra.
+///
+/// O firmware não diz "aqui está o seu disco". Ele diz qual **imagem** está
+/// rodando; a imagem sabe de qual **dispositivo** veio; e o dispositivo
+/// oferece o **sistema de arquivos**. Os três elos são o que amarra o kernel
+/// ao iniciador que o carregou.
+fn descrever_kernel(imagem: efi::Handle, boot: &efi::ServicosDeBoot) -> Result<(), &'static str> {
+    let bytes = ler_o_kernel(imagem, boot)?;
+    let imagem = elf::Imagem::abrir(bytes)?;
+
+    if imagem.maquina != elf::MAQUINA_X86_64 {
+        relatar!("ERRO o kernel e para a maquina {:#x}", imagem.maquina);
+        return Err("o kernel nao e desta arquitetura");
+    }
+
+    relatar!(
+        "elf: {} bytes, entrada em {:#x}, {}",
+        bytes.len(),
+        imagem.entrada,
+        if imagem.independente_de_posicao {
+            "independente de posicao"
+        } else {
+            "endereco fixo"
+        }
+    );
+
+    let mut quantos = 0;
+    let mut menor = u64::MAX;
+    let mut maior = 0u64;
+    let mut do_arquivo = 0u64;
+    let mut na_memoria = 0u64;
+
+    for segmento in imagem.segmentos() {
+        let s = segmento?;
+        quantos += 1;
+        menor = menor.min(s.endereco);
+        maior = maior.max(s.endereco.saturating_add(s.tamanho_na_memoria));
+        do_arquivo += s.tamanho_no_arquivo;
+        na_memoria += s.tamanho_na_memoria;
+
+        let mut bits = [b'-'; 3];
+        if s.permissoes & elf::permissao::LER != 0 {
+            bits[0] = b'r';
+        }
+        if s.permissoes & elf::permissao::ESCREVER != 0 {
+            bits[1] = b'w';
+        }
+        if s.permissoes & elf::permissao::EXECUTAR != 0 {
+            bits[2] = b'x';
+        }
+        let bits = core::str::from_utf8(&bits).unwrap_or("???");
+
+        relatar!(
+            "segmento {} em {:#x}: {} do arquivo, {} na memoria ({} zeros), {}, alinhado a {}",
+            quantos,
+            s.endereco,
+            s.tamanho_no_arquivo,
+            s.tamanho_na_memoria,
+            s.zeros(),
+            bits,
+            s.alinhamento
+        );
+    }
+
+    if quantos == 0 {
+        return Err("o kernel nao tem segmento nenhum para carregar");
+    }
+
+    // A entrada tem de cair dentro do que vai ser carregado. Um `e_entry`
+    // fora dos segmentos é um salto para memória que ninguém mapeou — e é o
+    // que acontece quando o arquivo na ESP é de outro build.
+    if imagem.entrada < menor || imagem.entrada >= maior {
+        relatar!(
+            "ERRO a entrada {:#x} esta fora dos segmentos {:#x}..{:#x}",
+            imagem.entrada,
+            menor,
+            maior
+        );
+        return Err("a entrada do kernel nao cai em segmento nenhum");
+    }
+
+    relatar!(
+        "kernel: {} segmentos, {:#x}..{:#x}, {} KiB do arquivo, {} KiB na memoria",
+        quantos,
+        menor,
+        maior,
+        do_arquivo / 1024,
+        na_memoria / 1024
+    );
+    Ok(())
+}
+
+/// Abre o kernel na ESP desta imagem e o lê inteiro para a memória.
+fn ler_o_kernel(
+    imagem: efi::Handle,
+    boot: &efi::ServicosDeBoot,
+) -> Result<&'static [u8], &'static str> {
+    // Elo 1: qual dispositivo carregou esta imagem.
+    let mut carregada: *mut core::ffi::c_void = core::ptr::null_mut();
+    // SAFETY: o handle é o que o firmware passou em `efi_main`, o GUID é uma
+    // constante nossa e o destino é uma local.
+    let status =
+        unsafe { (boot.protocolo_do_handle)(imagem, &efi::GUID_DA_IMAGEM, &mut carregada) };
+    if efi::deu_errado(status) || carregada.is_null() {
+        relatar!("ERRO a imagem carregada nao respondeu ({:#x})", status);
+        return Err("o firmware nao descreveu a imagem em execucao");
+    }
+    // SAFETY: o firmware devolveu este ponteiro para o GUID do protocolo da
+    // imagem carregada.
+    let carregada = unsafe { &*(carregada as *const efi::ImagemCarregada) };
+
+    // Elo 2: o sistema de arquivos daquele dispositivo.
+    let mut volume: *mut core::ffi::c_void = core::ptr::null_mut();
+    // SAFETY: o handle veio do protocolo acima; o resto como antes.
+    let status = unsafe {
+        (boot.protocolo_do_handle)(
+            carregada.dispositivo,
+            &efi::GUID_DO_SISTEMA_DE_ARQUIVOS,
+            &mut volume,
+        )
+    };
+    if efi::deu_errado(status) || volume.is_null() {
+        relatar!(
+            "ERRO o dispositivo nao tem sistema de arquivos ({:#x})",
+            status
+        );
+        return Err("o dispositivo de onde viemos nao e um volume");
+    }
+    let volume = volume as *mut efi::SistemaDeArquivos;
+
+    // Elo 3: a raiz do volume, e o arquivo dentro dela.
+    let mut raiz: *mut efi::Arquivo = core::ptr::null_mut();
+    // SAFETY: o protocolo é o que o GUID pediu, e `raiz` é uma local.
+    let status = unsafe { ((*volume).abrir_volume)(volume, &mut raiz) };
+    if efi::deu_errado(status) || raiz.is_null() {
+        return Err("nao foi possivel abrir a raiz da particao de sistema");
+    }
+
+    let mut arquivo: *mut efi::Arquivo = core::ptr::null_mut();
+    // SAFETY: `raiz` é o diretório que o firmware acabou de abrir, e o
+    // caminho é uma constante em UTF-16 terminada em zero.
+    let status = unsafe {
+        ((*raiz).abrir)(
+            raiz,
+            &mut arquivo,
+            CAMINHO_DO_KERNEL.as_ptr(),
+            efi::MODO_LEITURA,
+            0,
+        )
+    };
+    // SAFETY: a raiz não é mais necessária, aberta ou não o arquivo.
+    unsafe { ((*raiz).fechar)(raiz) };
+    if efi::deu_errado(status) || arquivo.is_null() {
+        relatar!("ERRO `duke.elf` nao abriu na ESP ({:#x})", status);
+        return Err("o kernel nao esta na particao de sistema");
+    }
+
+    // O tamanho, pelo fim: posicionar no fim, perguntar onde se está, voltar.
+    let mut tamanho = 0u64;
+    // SAFETY: `arquivo` está aberto e as três chamadas são do protocolo dele.
+    let status = unsafe {
+        let ao_fim = ((*arquivo).definir_posicao)(arquivo, efi::FIM_DO_ARQUIVO);
+        let onde = ((*arquivo).posicao)(arquivo, &mut tamanho);
+        let ao_comeco = ((*arquivo).definir_posicao)(arquivo, 0);
+        if efi::deu_errado(ao_fim) {
+            ao_fim
+        } else if efi::deu_errado(onde) {
+            onde
+        } else {
+            ao_comeco
+        }
+    };
+    if efi::deu_errado(status) {
+        return Err("nao foi possivel medir o kernel");
+    }
+    if tamanho == 0 || tamanho > MAIOR_KERNEL {
+        relatar!("ERRO o kernel tem {} bytes", tamanho);
+        return Err("o kernel tem tamanho implausivel");
+    }
+
+    // Páginas, e não pool: o kernel vai ficar na memória depois que os
+    // serviços de boot saírem de cena, e o que o pool entrega o firmware
+    // considera dele. É a mesma distinção que fará diferença na etapa em que
+    // este buffer virar o kernel carregado.
+    let paginas = tamanho.div_ceil(efi::PAGINA);
+    let mut base = 0u64;
+    // SAFETY: os tipos são os documentados e `base` é uma local que recebe o
+    // endereço.
+    let status = unsafe {
+        (boot.alocar_paginas)(
+            efi::ALOCAR_QUALQUER,
+            efi::memoria::DADOS_DO_CARREGADOR,
+            paginas as usize,
+            &mut base,
+        )
+    };
+    if efi::deu_errado(status) || base == 0 {
+        relatar!(
+            "ERRO o firmware recusou {} paginas ({:#x})",
+            paginas,
+            status
+        );
+        return Err("nao ha memoria para o kernel");
+    }
+
+    // SAFETY: o firmware acabou de reservar estas páginas para nós, e
+    // `tamanho` cabe nelas por construção.
+    let destino = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, tamanho as usize) };
+
+    // A leitura pode voltar curta, como qualquer leitura. O laço é o que
+    // separa "leu o kernel" de "leu o começo do kernel e acreditou".
+    //
+    // # Por que em pedaços, se o firmware entrega tudo de uma vez
+    //
+    // Porque com um pedido só o laço dá uma volta e nunca mais, e um laço que
+    // não dá duas voltas não é um laço — é uma chamada com sintaxe de laço.
+    // Foi medido: pedindo os sete mebibytes numa chamada, este firmware os
+    // devolve inteiros, e trocar o laço por uma leitura só não muda nada.
+    //
+    // Pedindo em pedaços ele roda cento e oito vezes, e parar na primeira
+    // deixa o arquivo truncado — que é o que o CRC do outro lado denuncia.
+    // O custo de cento e oito idas ao firmware, num boot, é invisível.
+    let mut lidos = 0usize;
+    while lidos < destino.len() {
+        let mut quanto = (destino.len() - lidos).min(PEDACO_DA_LEITURA);
+        // SAFETY: `arquivo` está aberto, e o ponteiro aponta para dentro do
+        // buffer que acabamos de reservar.
+        let status =
+            unsafe { ((*arquivo).ler)(arquivo, &mut quanto, destino.as_mut_ptr().add(lidos)) };
+        if efi::deu_errado(status) {
+            relatar!("ERRO a leitura do kernel devolveu {:#x}", status);
+            return Err("o kernel nao pode ser lido inteiro");
+        }
+        if quanto == 0 {
+            relatar!("ERRO o arquivo acabou em {} de {} bytes", lidos, tamanho);
+            return Err("o kernel acabou antes do tamanho que ele mesmo declarou");
+        }
+        lidos += quanto;
+    }
+
+    // SAFETY: o arquivo foi lido e ninguém mais o tem.
+    unsafe { ((*arquivo).fechar)(arquivo) };
+
+    // O CRC dos bytes lidos, para que alguém de fora possa conferir.
+    //
+    // # Por que isto não é zelo excessivo
+    //
+    // Porque sem ele "leu o kernel" e "leu o começo do kernel" são
+    // indistinguíveis daqui. O buffer tem o tamanho do arquivo aconteça o que
+    // acontecer; uma leitura que voltasse curta deixaria o resto como o
+    // firmware o entregou, e o cabeçalho ELF — que está nos primeiros
+    // sessenta e quatro bytes — continuaria conferindo.
+    //
+    // O `xtask` calcula o mesmo CRC sobre o mesmo arquivo, no hospedeiro, e
+    // compara. É a ponta de fora que transforma a leitura numa afirmação.
+    let mut soma = crc32::Parcial::nova();
+    soma.somar(destino);
+
+    relatar!(
+        "esp: duke.elf aberto e lido, {} bytes em {} paginas a partir de {:#x}, crc {:#010x}",
+        tamanho,
+        paginas,
+        base,
+        soma.terminar()
+    );
+    Ok(destino)
 }
 
 /// Desliga a máquina.

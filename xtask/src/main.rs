@@ -529,6 +529,14 @@ const ALVO_DO_INICIADOR: &str = "x86_64-unknown-uefi";
 /// sem configuração nenhuma, procura este arquivo na partição de sistema.
 const CAMINHO_NA_ESP: &str = "::/EFI/BOOT/BOOTX64.EFI";
 
+/// Onde o kernel fica na mesma partição, para o iniciador achá-lo.
+///
+/// O outro lado deste contrato é o `CAMINHO_DO_KERNEL` do iniciador, escrito
+/// em UTF-16. Divergir os dois faz o boot parar com "o kernel nao esta na
+/// particao de sistema" — que é um erro claro, e é a razão de a mensagem
+/// dizer isso em vez de um código do firmware.
+const KERNEL_NA_ESP: &str = "::/duke.elf";
+
 /// Firmwares UEFI que este comando sabe procurar, em ordem de preferência.
 ///
 /// A variante `_4M` é a da versão nova do OVMF, com o espaço de variáveis
@@ -605,7 +613,7 @@ fn build_do_iniciador(release: bool) -> Result<PathBuf, String> {
 /// cacheado por uma receita que não menciona o iniciador, de propósito:
 /// recompilá-lo não deve custar a remontagem de 192 MiB, e sobrescrever um
 /// arquivo de 35 KiB é barato o bastante para ser incondicional.
-fn instalar_iniciador(disco: &Path, efi: &Path) -> Result<(), String> {
+fn instalar_iniciador(disco: &Path, efi: &Path, kernel: &Path) -> Result<(), String> {
     let imagem = format!("{}@@1M", disco.display());
 
     // `mmd` reclama se o diretório já existe, e existir é o caso comum. O
@@ -615,21 +623,18 @@ fn instalar_iniciador(disco: &Path, efi: &Path) -> Result<(), String> {
         let _ = Command::new("mmd").args(["-i", &imagem, dir]).output();
     }
 
-    ferramenta(
-        "mcopy",
-        &[
-            "-o",
-            "-i",
-            &imagem,
-            &efi.display().to_string(),
-            CAMINHO_NA_ESP,
-        ],
-    )?;
-    println!(
-        "[xtask] iniciador instalado em {} ({} KiB)",
-        CAMINHO_NA_ESP.trim_start_matches("::"),
-        efi.metadata().map(|m| m.len()).unwrap_or(0) / 1024
-    );
+    for (origem, destino) in [(efi, CAMINHO_NA_ESP), (kernel, KERNEL_NA_ESP)] {
+        ferramenta(
+            "mcopy",
+            &["-o", "-i", &imagem, &origem.display().to_string(), destino],
+        )?;
+        println!(
+            "[xtask] {} -> {} ({} KiB)",
+            origem.file_name().unwrap_or_default().display(),
+            destino.trim_start_matches("::"),
+            origem.metadata().map(|m| m.len()).unwrap_or(0) / 1024
+        );
+    }
     Ok(())
 }
 
@@ -680,6 +685,7 @@ const ESPERADO_DO_INICIADOR: &[&str] = &[
     "vivo, carregado pelo firmware",
     "tabela do sistema confere",
     "as tres tabelas conferem",
+    "esp: duke.elf aberto e lido",
     "fim do relatorio",
 ];
 
@@ -694,11 +700,178 @@ fn iniciador(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
     }
 
     let efi = build_do_iniciador(release)?;
-    let disco = disco_de_testes()?;
-    instalar_iniciador(&disco, &efi)?;
-    let (codigo, variaveis) = firmware_uefi()?;
+    // O kernel também vai para a ESP: é o que o iniciador vai abrir. Compilar
+    // é o mesmo `build` de sempre — o que muda é para onde o ELF vai.
+    build(arch, release, false)?;
+    let kernel = caminho_elf(arch, release);
 
-    println!("[xtask] subindo o firmware {}", codigo.display());
+    let disco = disco_de_testes()?;
+    let firmware = firmware_uefi()?;
+    let mut falhou = false;
+
+    // A rodada que importa: o kernel de verdade, e o relatório inteiro.
+    instalar_iniciador(&disco, &efi, &kernel)?;
+    println!("\n[xtask] iniciador: o kernel de verdade");
+    let (desfecho, relatorio) = subir_no_firmware(arch, &disco, &firmware)?;
+    for linha in &relatorio {
+        println!("  [iniciador] {linha}");
+    }
+    if relatorio.is_empty() {
+        return Err(
+            "o iniciador não disse nada: ou o firmware não o encontrou na ESP, ou ele \
+             morreu antes da primeira linha"
+                .into(),
+        );
+    }
+
+    if let Err(motivo) = conferir_desfecho(desfecho) {
+        eprintln!("[xtask] iniciador: {motivo}");
+        falhou = true;
+    }
+    let como_str: Vec<&str> = relatorio.iter().map(|l| l.as_str()).collect();
+    for esperado in ESPERADO_DO_INICIADOR {
+        if !como_str.iter().any(|l| l.contains(esperado)) {
+            eprintln!("[xtask] iniciador: faltou `{esperado}` no relatório");
+            falhou = true;
+        }
+    }
+    for linha in &como_str {
+        if linha.starts_with("ERRO") || linha.starts_with("PANICO") {
+            eprintln!("[xtask] iniciador: {linha}");
+            falhou = true;
+        }
+    }
+    if let Err(motivo) = conferir_numeros_do_iniciador(&como_str) {
+        eprintln!("[xtask] iniciador: {motivo}");
+        falhou = true;
+    }
+    if let Err(motivo) = conferir_elf_contra_readelf(&como_str, &kernel) {
+        eprintln!("[xtask] iniciador: {motivo}");
+        falhou = true;
+    }
+
+    // E as rodadas das recusas.
+    for caso in RECUSAS {
+        match rodada_de_recusa(arch, &disco, &efi, &kernel, &firmware, caso) {
+            Ok(()) => println!("  [recusa] ok  {}", caso.nome),
+            Err(motivo) => {
+                eprintln!("  [recusa] {}: {motivo}", caso.nome);
+                falhou = true;
+            }
+        }
+    }
+
+    // O disco fica com o kernel bom, e não com o último adulterado: ele é
+    // compartilhado com todo o resto do `xtask`, e deixá-lo quebrado faria a
+    // próxima execução falhar por um motivo que nada tem a ver com ela.
+    instalar_iniciador(&disco, &efi, &kernel)?;
+
+    if falhou {
+        return Ok(ExitCode::FAILURE);
+    }
+    println!("\n[xtask] iniciador: o firmware carregou o Duke e o relatório confere");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Um kernel deliberadamente estragado, e o que o iniciador tem de dizer.
+///
+/// # Por que isto existe
+///
+/// Porque as conferências do leitor de ELF não são falsificáveis contra um
+/// arquivo bom. Desligar a que exige que o ponto de entrada caia dentro de um
+/// segmento não reprovava nada: o kernel de verdade sempre passa nela.
+///
+/// Medido por mutação, e é o que estes casos corrigem. Cada um adultera uma
+/// cópia do kernel num byte e exige a recusa **pelo motivo certo** — recusar
+/// pelo motivo errado é quase tão ruim quanto aceitar, porque manda quem
+/// depura procurar no lugar errado.
+struct Recusa {
+    nome: &'static str,
+    /// Onde escrever, no ELF.
+    em: usize,
+    /// O que escrever ali.
+    bytes: &'static [u8],
+    /// O pedaço da mensagem de erro que o iniciador tem de emitir.
+    esperado: &'static str,
+}
+
+const RECUSAS: &[Recusa] = &[
+    Recusa {
+        nome: "a entrada fora de qualquer segmento",
+        // `e_entry`, no deslocamento 24 do cabeçalho ELF64.
+        em: 24,
+        bytes: &[0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00],
+        esperado: "a entrada do kernel nao cai em segmento nenhum",
+    },
+    Recusa {
+        nome: "cabecalhos de programa menores que o formato",
+        // `e_phentsize`, no deslocamento 54.
+        em: 54,
+        bytes: &[8, 0],
+        esperado: "os cabecalhos de programa sao menores que o formato",
+    },
+    Recusa {
+        nome: "a maquina errada",
+        // `e_machine`, no deslocamento 18. 0xB7 é aarch64.
+        em: 18,
+        bytes: &[0xB7, 0x00],
+        esperado: "o kernel nao e desta arquitetura",
+    },
+    Recusa {
+        nome: "nao e um ELF",
+        // O primeiro byte da identificação.
+        em: 0,
+        bytes: b"X",
+        esperado: "nao e um ELF64 little-endian",
+    },
+];
+
+/// Põe um kernel adulterado na ESP e exige que o iniciador o recuse.
+fn rodada_de_recusa(
+    arch: Arquitetura,
+    disco: &Path,
+    efi: &Path,
+    kernel: &Path,
+    firmware: &(PathBuf, PathBuf),
+    caso: &Recusa,
+) -> Result<(), String> {
+    let mut bytes = std::fs::read(kernel)
+        .map_err(|e| format!("não foi possível ler {}: {e}", kernel.display()))?;
+    let fim = caso.em + caso.bytes.len();
+    if fim > bytes.len() {
+        return Err("o kernel é menor que o byte a adulterar".into());
+    }
+    bytes[caso.em..fim].copy_from_slice(caso.bytes);
+
+    let estragado = raiz_do_projeto().join("target").join("duke-estragado.elf");
+    std::fs::write(&estragado, &bytes)
+        .map_err(|e| format!("não foi possível escrever {}: {e}", estragado.display()))?;
+    instalar_iniciador(disco, efi, &estragado)?;
+
+    let (desfecho, relatorio) = subir_no_firmware(arch, disco, firmware)?;
+    // O iniciador precisa **sobreviver** à recusa: ele relata e desliga. Um
+    // travamento aqui é tão defeito quanto aceitar o arquivo.
+    conferir_desfecho(desfecho)?;
+
+    if !relatorio.iter().any(|l| l.contains(caso.esperado)) {
+        for linha in &relatorio {
+            eprintln!("    [iniciador] {linha}");
+        }
+        return Err(format!("nao disse `{}`", caso.esperado));
+    }
+    if relatorio.iter().any(|l| l.contains("fim do relatorio")) {
+        return Err("chegou ao fim do relatório com um kernel estragado".into());
+    }
+    Ok(())
+}
+
+/// Sobe o QEMU com o firmware e devolve o desfecho e as linhas do iniciador.
+fn subir_no_firmware(
+    arch: Arquitetura,
+    disco: &Path,
+    firmware: &(PathBuf, PathBuf),
+) -> Result<(Desfecho, Vec<String>), String> {
+    let (codigo, variaveis) = firmware;
 
     // A saída da serial vai para um arquivo, e não para um cano lido em
     // memória. O motivo é o teto de tempo logo abaixo: `Command::output()`
@@ -740,75 +913,28 @@ fn iniciador(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
     let bruto = std::fs::read(&registro)
         .map_err(|e| format!("não foi possível ler {}: {e}", registro.display()))?;
     let texto = String::from_utf8_lossy(&bruto);
-    let relatorio: Vec<&str> = texto
+    let relatorio = texto
         .lines()
-        .filter_map(|l| l.split("iniciador: ").nth(1))
+        .filter_map(|l| l.split("iniciador: ").nth(1).map(String::from))
         .collect();
+    Ok((desfecho, relatorio))
+}
 
-    println!();
-    for linha in &relatorio {
-        println!("  [iniciador] {linha}");
-    }
-    println!();
-
-    if relatorio.is_empty() {
-        eprintln!("--- saída do QEMU ---\n{texto}");
-        return Err(
-            "o iniciador não disse nada: ou o firmware não o encontrou na ESP, ou ele \
-             morreu antes da primeira linha"
-                .into(),
-        );
-    }
-
-    let mut falhou = false;
-
-    // O desfecho do emulador é uma afirmação sobre o iniciador, e não sobre o
-    // emulador: quem o desliga é a última linha do programa. Um estouro de
-    // tempo significa que ela não foi alcançada.
+/// O desfecho do emulador é uma afirmação sobre o iniciador.
+///
+/// Quem desliga a máquina é a última linha do programa — inclusive a que
+/// recusa um kernel estragado. Um estouro de tempo significa que ela não foi
+/// alcançada.
+fn conferir_desfecho(desfecho: Desfecho) -> Result<(), String> {
     match desfecho {
-        Desfecho::Codigo(0) => {}
-        Desfecho::Codigo(codigo) => {
-            eprintln!("[xtask] iniciador: o emulador saiu com codigo {codigo}");
-            falhou = true;
-        }
-        Desfecho::Sinal => {
-            eprintln!("[xtask] iniciador: o emulador foi terminado por um sinal");
-            falhou = true;
-        }
-        Desfecho::Estourou => {
-            eprintln!(
-                "[xtask] iniciador: a maquina nao desligou em {}s — o iniciador \
-                 nao chegou ao fim",
-                TETO_DO_INICIADOR.as_secs()
-            );
-            falhou = true;
-        }
+        Desfecho::Codigo(0) => Ok(()),
+        Desfecho::Codigo(codigo) => Err(format!("o emulador saiu com codigo {codigo}")),
+        Desfecho::Sinal => Err("o emulador foi terminado por um sinal".into()),
+        Desfecho::Estourou => Err(format!(
+            "a maquina nao desligou em {}s — o iniciador nao chegou ao fim",
+            TETO_DO_INICIADOR.as_secs()
+        )),
     }
-
-    for esperado in ESPERADO_DO_INICIADOR {
-        if !relatorio.iter().any(|l| l.contains(esperado)) {
-            eprintln!("[xtask] iniciador: faltou `{esperado}` no relatório");
-            falhou = true;
-        }
-    }
-    for linha in &relatorio {
-        if linha.starts_with("ERRO") || linha.starts_with("PANICO") {
-            eprintln!("[xtask] iniciador: {linha}");
-            falhou = true;
-        }
-    }
-
-    // E as conferências que olham os números, e não a presença da linha.
-    if let Err(motivo) = conferir_numeros_do_iniciador(&relatorio) {
-        eprintln!("[xtask] iniciador: {motivo}");
-        falhou = true;
-    }
-
-    if falhou {
-        return Ok(ExitCode::FAILURE);
-    }
-    println!("[xtask] iniciador: o firmware carregou o Duke e o relatório confere");
-    Ok(ExitCode::SUCCESS)
 }
 
 /// Confere que os números do relatório descrevem a máquina que pedimos.
@@ -907,6 +1033,145 @@ fn conferir_numeros_do_iniciador(relatorio: &[&str]) -> Result<(), String> {
         ));
     }
 
+    Ok(())
+}
+
+/// O CRC-32 do Ethernet, para conferir o que o iniciador leu do disco.
+///
+/// # Por que uma segunda implementação
+///
+/// Pela mesma razão do `marca_do_setor`: as duas pontas rodam em máquinas
+/// diferentes. Esta soma bytes que estão no disco do hospedeiro; a do
+/// iniciador soma os bytes que chegaram à memória do emulador depois de
+/// passarem pelo FAT, pelo firmware e por um laço de leitura. Um lugar comum
+/// onde as duas coubessem não existe — o que impede a divergência é a
+/// comparação, que é justamente o que se quer testar.
+fn crc32_do_arquivo(caminho: &Path) -> Result<u32, String> {
+    let bytes = std::fs::read(caminho)
+        .map_err(|e| format!("não foi possível ler {}: {e}", caminho.display()))?;
+
+    let mut soma = !0u32;
+    for byte in &bytes {
+        soma ^= *byte as u32;
+        for _ in 0..8 {
+            // A forma refletida do polinômio 0x04C11DB7, que é o do Ethernet
+            // e o que a UEFI usa.
+            soma = if soma & 1 != 0 {
+                (soma >> 1) ^ 0xEDB8_8320
+            } else {
+                soma >> 1
+            };
+        }
+    }
+    Ok(!soma)
+}
+
+/// Confronta o que o iniciador leu do ELF com o que o `llvm-readelf` lê.
+///
+/// # Por que isto é o teste que importa
+///
+/// Porque o iniciador e o `xtask` são o mesmo projeto: se eu errar o
+/// deslocamento de `e_entry` no iniciador e conferir o resultado contra um
+/// número que eu mesmo escrevi aqui, as duas metades concordam no erro.
+///
+/// O `llvm-readelf` não tem nada a ver com este projeto. Ele lê o **mesmo
+/// arquivo** que foi para a ESP e diz o ponto de entrada e quantos segmentos
+/// carregáveis existem. Se a leitura do iniciador divergir da dele, um dos
+/// dois está errado — e não é o `llvm-readelf`.
+///
+/// É a mesma disciplina do `cargo xtask elf` sobre os programas de usuário, e
+/// do `sgdisk`/`btrfs inspect-internal` sobre o disco.
+fn conferir_elf_contra_readelf(relatorio: &[&str], kernel: &Path) -> Result<(), String> {
+    let readelf = ferramenta_llvm("llvm-readelf")?;
+    let saida = Command::new(&readelf)
+        .args(["--file-header", "--program-headers"])
+        .arg(kernel)
+        .output()
+        .map_err(|e| format!("não foi possível invocar o llvm-readelf: {e}"))?;
+    if !saida.status.success() {
+        return Err("o llvm-readelf recusou o ELF do kernel".into());
+    }
+    let texto = String::from_utf8_lossy(&saida.stdout);
+
+    let entrada_de_fora = texto
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("Entry point address:"))
+        .and_then(|v| u64::from_str_radix(v.trim().trim_start_matches("0x"), 16).ok())
+        .ok_or("o llvm-readelf não disse o ponto de entrada")?;
+    // As linhas de segmento começam com o tipo; `LOAD` é o que vai para a
+    // memória. Elas aparecem uma vez cada na listagem de program headers.
+    let carregaveis_de_fora = texto
+        .lines()
+        .filter(|l| l.trim_start().starts_with("LOAD "))
+        .count();
+
+    // Antes do cabeçalho, os bytes: o iniciador leu o arquivo inteiro, ou leu
+    // o começo dele e acreditou? O CRC responde, e o cabeçalho ELF não.
+    let esperado = crc32_do_arquivo(kernel)?;
+    let esp = relatorio
+        .iter()
+        .find(|l| l.starts_with("esp:"))
+        .ok_or("o iniciador não relatou a leitura da ESP")?;
+    let lido = esp
+        .split("crc ")
+        .nth(1)
+        .and_then(|h| u32::from_str_radix(h.trim().trim_start_matches("0x"), 16).ok())
+        .ok_or_else(|| format!("não consegui ler o crc de `{esp}`"))?;
+    if lido != esperado {
+        return Err(format!(
+            "o iniciador leu bytes com crc {lido:#010x}; o arquivo no disco tem \
+             {esperado:#010x}"
+        ));
+    }
+    let tamanho_de_fora = std::fs::metadata(kernel)
+        .map(|m| m.len())
+        .map_err(|e| format!("não foi possível medir {}: {e}", kernel.display()))?;
+    let tamanho_do_iniciador: u64 = extrair_numero_antes(esp, "bytes em")
+        .ok_or_else(|| format!("não consegui ler o tamanho de `{esp}`"))?;
+    if tamanho_do_iniciador != tamanho_de_fora {
+        return Err(format!(
+            "o iniciador mediu o kernel em {tamanho_do_iniciador} bytes; o arquivo tem \
+             {tamanho_de_fora}"
+        ));
+    }
+
+    let linha = relatorio
+        .iter()
+        .find(|l| l.starts_with("elf:"))
+        .ok_or("o iniciador não relatou o cabeçalho do ELF")?;
+    let entrada_do_iniciador = linha
+        .split("entrada em ")
+        .nth(1)
+        .and_then(|r| r.split(',').next())
+        .and_then(|h| u64::from_str_radix(h.trim().trim_start_matches("0x"), 16).ok())
+        .ok_or_else(|| format!("não consegui ler a entrada de `{linha}`"))?;
+
+    let resumo = relatorio
+        .iter()
+        .find(|l| l.starts_with("kernel:"))
+        .ok_or("o iniciador não relatou o resumo dos segmentos")?;
+    let carregaveis_do_iniciador: usize = extrair_numero_antes(resumo, "segmentos")
+        .ok_or_else(|| format!("não consegui contar os segmentos de `{resumo}`"))?
+        as usize;
+
+    if entrada_do_iniciador != entrada_de_fora {
+        return Err(format!(
+            "o iniciador leu a entrada como {entrada_do_iniciador:#x}; o llvm-readelf diz \
+             {entrada_de_fora:#x}"
+        ));
+    }
+    if carregaveis_do_iniciador != carregaveis_de_fora {
+        return Err(format!(
+            "o iniciador contou {carregaveis_do_iniciador} segmentos carregáveis; o \
+             llvm-readelf conta {carregaveis_de_fora}"
+        ));
+    }
+
+    println!(
+        "  [conferido] {tamanho_de_fora} bytes com crc {esperado:#010x}, entrada \
+         {entrada_de_fora:#x} e {carregaveis_de_fora} segmentos — os dois últimos iguais \
+         aos do llvm-readelf"
+    );
     Ok(())
 }
 
