@@ -6642,15 +6642,16 @@ fn fios_coletor_nao_recolhe_quem_esta_de_pe() -> Resultado {
         crate::fios::marcar_terminado();
 
         // Daqui até o `descansar` este fio está marcado como encerrado e
-        // ainda é o fio atual — a janela que a guarda protege.
-        let recolhidos = crate::fios::recolher_terminados();
+        // ainda é o fio atual — a janela que a guarda protege. Quantos
+        // outros fios saíram na passada não interessa ao caso: o que ele
+        // afirma é que **este** não saiu.
+        crate::fios::recolher_terminados();
 
         // Escrever numa variável estática, e não numa local, é de propósito:
         // a local moraria na pilha que a coleta teria desmapeado, e o caso
         // mediria o próprio acidente em vez de sobreviver a ele. Mas a
         // chamada acima já usou a pilha à vontade, então chegar nesta linha
         // é a prova.
-        let _ = recolhidos;
         SOBREVIVEU.store(true, SeqCst);
 
         crate::fios::descansar()

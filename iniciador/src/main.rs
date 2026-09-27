@@ -40,6 +40,8 @@ mod carga;
 mod crc32;
 mod efi;
 mod elf;
+#[cfg(target_arch = "aarch64")]
+mod fdt;
 #[cfg(target_arch = "x86_64")]
 mod paginas;
 mod salto;
@@ -142,6 +144,7 @@ fn relatorio(
         0 => relatar!("device tree: nenhum na tabela de configuracao"),
         em => relatar!("device tree em {:#x}, pela tabela de configuracao", em),
     }
+    conferir_a_serial(dispositivos);
 
     carregar_o_kernel(imagem, boot, dispositivos, fim_da_ram, video)
 }
@@ -570,6 +573,50 @@ fn carregar_o_kernel(
     carregar_e_saltar(handle, boot, dispositivos, imagem, fim_da_ram, video)
 }
 
+/// Confronta o endereço de serial escrito no código com o que a placa diz.
+///
+/// # A dependência circular, e o que se faz com ela
+///
+/// O iniciador escreve na serial desde a primeira linha, e o endereço dela
+/// está fixado no código porque **precisa** estar: para relatar que o
+/// device tree diz outro número, é preciso já estar falando por algum.
+/// Alguém tem de chutar primeiro.
+///
+/// O que esta função muda é que o chute deixa de ser silencioso. Numa placa
+/// em que os dois discordem, a discordância aparece numa linha do relatório
+/// — que é mais do que zero, e é exatamente a linha que faltaria para
+/// alguém entender por que a serial emudeceu ao trocar de máquina.
+///
+/// No x86 ela não existe: lá a COM1 está em `0x3F8` desde 1981, entregue
+/// pelo processador em portas de I/O, e não há device tree para ter uma
+/// segunda opinião.
+#[cfg(target_arch = "aarch64")]
+fn conferir_a_serial(dispositivos: u64) {
+    // SAFETY: o ponteiro veio da tabela de configuração e já teve a magia
+    // conferida por `achar_o_device_tree`; o leitor confere de novo e
+    // recusa qualquer tamanho que não caiba num blob plausível.
+    let Some(blob) = (unsafe { fdt::blob(dispositivos) }) else {
+        relatar!("serial: sem device tree para conferir o endereco");
+        return;
+    };
+
+    match fdt::uart_pl011(blob) {
+        Some(endereco) if endereco == alvo::UART => {
+            relatar!("serial: a placa confirma a pl011 em {:#x}", endereco)
+        }
+        Some(endereco) => relatar!(
+            "ERRO a placa poe a pl011 em {:#x} e este iniciador fala em {:#x}",
+            endereco,
+            alvo::UART
+        ),
+        None => relatar!("serial: o device tree nao descreve uma pl011"),
+    }
+}
+
+/// Sem device tree num PC, não há segunda opinião sobre a COM1.
+#[cfg(target_arch = "x86_64")]
+fn conferir_a_serial(_dispositivos: u64) {}
+
 /// Procura o device tree na tabela de configuração do firmware.
 ///
 /// Devolve zero quando não há — que é a resposta de qualquer PC, e não um
@@ -685,6 +732,11 @@ fn carregar_e_saltar(
         entrada: carga.entrada,
         deslocamento: mapa::BASE_DA_MEMORIA_FISICA,
         video: carga.entrega_de_video(),
+        // O **físico**, e não o virtual que vai na entrega: quem compara
+        // com o mapa de memória do firmware precisa do endereço que o
+        // firmware usa. Ver `salto::Destino::tela_fisica`.
+        tela_fisica: carga.video.map_or(0, |(_, tela)| tela.fisico),
+        tela_bytes: carga.video.map_or(0, |(_, tela)| tela.bytes),
         // Não há device tree num PC: o mapa de memória do firmware já diz
         // tudo que o kernel precisa, e é por isso que este campo é zero em
         // vez de ausente. Ver `protocolo::Entrega::dispositivos`.
@@ -788,6 +840,12 @@ fn carregar_e_saltar(
         // para fora do espaço de 39 bits que o kernel configura.
         deslocamento: 0,
         video: entrega_de_video(video),
+        // No ARM o mapa é de identidade, então o endereço que o kernel vai
+        // usar e o que o firmware usa são o mesmo. Escrever os dois campos
+        // assim mesmo é o que mantém a comparação sendo sobre físico nos
+        // dois lados, em vez de depender de eles coincidirem aqui.
+        tela_fisica: video.map_or(0, |t| t.fisico),
+        tela_bytes: video.map_or(0, |t| t.bytes),
         dispositivos,
     };
 

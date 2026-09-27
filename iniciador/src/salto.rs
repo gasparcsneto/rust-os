@@ -63,6 +63,22 @@ pub struct Destino {
     /// apontar para fora do espaço de 39 bits que o kernel configura.
     pub deslocamento: u64,
     pub video: protocolo::Video,
+    /// Onde a tela está **em memória física**, e quanto ela ocupa.
+    ///
+    /// # Por que não basta o que está em `video`
+    ///
+    /// Porque o `video` da entrega carrega o endereço pelo qual o **kernel**
+    /// vai enxergar o framebuffer, e no x86 esse endereço é virtual: o
+    /// iniciador mapeia a tela na metade alta do espaço antes de saltar. O
+    /// mapa de memória do firmware, por outro lado, é todo físico.
+    ///
+    /// Comparar um contra o outro nunca casa, e o modo de falhar é o pior
+    /// possível: a proteção roda, não encontra nada, e não protege nada.
+    /// Foi exatamente o que aconteceu — a primeira versão desta struct
+    /// tinha só o `video`, e o defeito só apareceu quando a sonda passou a
+    /// exigir que a tela fosse **achada** no mapa.
+    pub tela_fisica: u64,
+    pub tela_bytes: u64,
     /// O device tree, em endereço físico, ou zero quando não há.
     pub dispositivos: u64,
 }
@@ -226,6 +242,8 @@ fn ultimo_mapa(
 
     let quantos = tamanho / por_descritor;
     let mut escritas = 0usize;
+    let mut reclassificadas = 0usize;
+    let mut da_tela = 0usize;
 
     for i in 0..quantos {
         // SAFETY: o passo é o que o firmware declarou, e `quantos` vem da
@@ -234,9 +252,30 @@ fn ultimo_mapa(
             core::ptr::read_unaligned(reservado.mapa.add(i * por_descritor) as *const efi::Descritor)
         };
 
-        let tipo = classificar(d.tipo);
+        let mut tipo = classificar(d.tipo);
         let inicio = d.fisico;
         let fim = d.fisico + d.paginas * efi::PAGINA;
+
+        // A tela, quando ela mora **dentro** da RAM.
+        //
+        // No x86 o framebuffer é um BAR de dispositivo, num endereço alto, e
+        // o firmware já o marca como memória mapeada — vira `RESERVADA` sem
+        // que ninguém precise pensar. No ARM da máquina `virt` ele é o
+        // `ramfb`: RAM comum, que o firmware alocou e que este mapa pode
+        // muito bem declarar utilizável.
+        //
+        // Entregá-la ao kernel como livre é dar ao alocador de frames as
+        // páginas que o vídeo está lendo sessenta vezes por segundo. Hoje o
+        // kernel do ARM nem usa esta tela — ele procura a dele no PCI —,
+        // então o defeito não tem sintoma: é exatamente o tipo de armadilha
+        // que espera o próximo a mexer aqui.
+        if video_ocupa(destino, inicio, fim) {
+            da_tela += 1;
+            if tipo == protocolo::tipo::UTILIZAVEL {
+                tipo = protocolo::tipo::RESERVADA;
+                reclassificadas += 1;
+            }
+        }
 
         // O que é do iniciador o kernel não pode entregar ao alocador: ele
         // está rodando dentro disso. O firmware marca as nossas alocações
@@ -258,6 +297,27 @@ fn ultimo_mapa(
         escritas += 1;
     }
 
+    // O relato é **sempre** emitido, e não só quando houve o que consertar.
+    //
+    // A diferença importa. Medido nas duas máquinas, nenhuma reclassificação
+    // acontece hoje: no x86 o framebuffer é um BAR, que o firmware marca
+    // como memória mapeada; no ARM o `ramfb` mora na RAM, e o EDK II já o
+    // tira das regiões utilizáveis por conta.
+    //
+    // Sem esta linha, "a proteção não precisou agir" e "a proteção não
+    // rodou" seriam a mesma ausência de saída — e a segunda é o defeito que
+    // ela existe para impedir. Com ela, a sonda pode exigir que a tela
+    // tenha sido **encontrada** no mapa, que é o que prova que a comparação
+    // aconteceu.
+    if destino.tela_bytes != 0 {
+        relatar!(
+            "a tela em {:#x} fisico cai em {} regiao(oes) do mapa, {} reservada(s) por nos",
+            destino.tela_fisica,
+            da_tela,
+            reclassificadas
+        );
+    }
+
     // Uma conferência barata sobre o resultado: o kernel tem de estar dentro
     // de uma região que **não** seja utilizável. Se ele aparecer como livre,
     // o alocador de frames do kernel vai entregar as páginas em que ele mesmo
@@ -271,6 +331,22 @@ fn ultimo_mapa(
     }
 
     Ok((chave, escritas))
+}
+
+/// Se a tela declarada na entrega cruza a faixa `[inicio, fim)`.
+///
+/// Sem vídeo, sempre `false`: não há o que proteger, e uma comparação com
+/// endereço zero acertaria a primeira região da máquina.
+fn video_ocupa(destino: &Destino, inicio: u64, fim: u64) -> bool {
+    if destino.tela_bytes == 0 {
+        return false;
+    }
+    let tela_inicio = destino.tela_fisica;
+    let tela_fim = destino.tela_fisica.saturating_add(destino.tela_bytes);
+    // Cruzamento de faixas, e não "o começo da tela está dentro": um
+    // framebuffer de três megabytes atravessa mais de uma região do mapa, e
+    // proteger só aquela em que ele começa deixaria o resto livre.
+    tela_inicio < fim && inicio < tela_fim
 }
 
 /// Se um endereço cai numa região que o kernel não vai tratar como livre.

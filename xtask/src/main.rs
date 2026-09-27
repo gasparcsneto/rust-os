@@ -772,6 +772,7 @@ const ESPERADO_DO_INICIADOR: &[&str] = &[
     "relocacoes aplicadas",
     "mapa confere",
     "fim do relatorio",
+    "a tela em",
     "saindo dos servicos de boot",
     "a maquina e do Duke",
 ];
@@ -795,8 +796,14 @@ const ESPERADO_DO_INICIADOR_ARM: &[&str] = &[
     "endereco fixo",
     "kernel conferido",
     "device tree em",
+    // O endereço da PL011 está fixado no código do iniciador — ele precisa
+    // estar, porque é por ela que ele relata qualquer coisa. Esta linha é
+    // a placa confirmando o número, e exigi-la aqui é o que impede a
+    // conferência de sumir sem ninguém notar.
+    "a placa confirma a pl011",
     "carga: imagem em",
     "fim do relatorio",
+    "a tela em",
     "saindo dos servicos de boot",
     "a maquina e do Duke",
 ];
@@ -875,7 +882,7 @@ fn iniciador(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
             falhou = true;
         }
     }
-    if let Err(motivo) = conferir_numeros_do_iniciador(&como_str) {
+    if let Err(motivo) = conferir_numeros_do_iniciador(arch, &como_str) {
         eprintln!("[xtask] iniciador: {motivo}");
         falhou = true;
     }
@@ -1253,7 +1260,52 @@ fn conferir_desfecho(desfecho: Desfecho, espera: &Desenlace) -> Result<(), Strin
 /// imprimiria a linha inteira, com números. O que denuncia o passo errado é o
 /// **valor**: pedimos 128 MiB ao emulador, e uma leitura desalinhada não
 /// devolve nada perto disso.
-fn conferir_numeros_do_iniciador(relatorio: &[&str]) -> Result<(), String> {
+/// Onde a tela caiu no mapa de memória, e por que a resposta certa difere.
+///
+/// # O que esta conferência existe para pegar
+///
+/// O iniciador protege o framebuffer de virar memória livre: se ele cair
+/// numa região que o firmware declarou utilizável, o kernel receberia como
+/// livres as páginas que o vídeo está lendo sessenta vezes por segundo.
+///
+/// A proteção tem dois desfechos que, sem esta linha, seriam a mesma
+/// ausência de saída: "não precisou agir" e "não rodou". O segundo é o
+/// defeito, e foi real — a primeira versão comparava o endereço **virtual**
+/// da tela com o mapa, que é todo físico, e portanto nunca casava. A
+/// conferência o encontrou na primeira execução.
+///
+/// # Por que o número esperado é diferente nas duas máquinas
+///
+/// Porque a tela está em lugares de natureza diferente. No x86 ela é um BAR
+/// de PCI em `0x8000_0000`, fora da RAM — e o mapa de memória da UEFI
+/// descreve memória, não barramento, então ela **não aparece nele**. Zero é
+/// a resposta certa, e exigir zero é o que documenta isso.
+///
+/// No ARM da máquina `virt` ela é o `ramfb`: RAM comum que o firmware
+/// alocou, dentro do mapa. Exigir pelo menos uma região é a metade
+/// falsificável — é ela que reprova se a comparação parar de acontecer.
+fn conferir_a_tela(arch: Arquitetura, relatorio: &[&str]) -> Result<(), String> {
+    let tela = relatorio
+        .iter()
+        .find(|l| l.starts_with("a tela em"))
+        .ok_or("o relatório não disse onde a tela caiu no mapa")?;
+    let regioes: u64 = extrair_numero_antes(tela, "regiao(oes) do mapa")
+        .ok_or_else(|| format!("não consegui ler as regiões da tela de `{tela}`"))?;
+
+    match arch {
+        Arquitetura::X86_64 if regioes != 0 => Err(format!(
+            "a tela caiu em {regioes} região(ões) do mapa de memória; no x86 ela é um \
+             BAR de PCI e não deveria aparecer nele: `{tela}`"
+        )),
+        Arquitetura::Aarch64 if regioes == 0 => Err(format!(
+            "a tela não caiu em região nenhuma do mapa: `{tela}`; no ARM ela é RAM, \
+             então ou o `ramfb` mudou de lugar ou a comparação não aconteceu"
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn conferir_numeros_do_iniciador(arch: Arquitetura, relatorio: &[&str]) -> Result<(), String> {
     let memoria = relatorio
         .iter()
         .find(|l| l.starts_with("memoria:"))
@@ -1278,6 +1330,8 @@ fn conferir_numeros_do_iniciador(relatorio: &[&str]) -> Result<(), String> {
             "descritores de {por_descritor} bytes, menos que o formato"
         ));
     }
+
+    conferir_a_tela(arch, relatorio)?;
 
     // O nome do firmware é o primeiro campo depois do cabeçalho, e é por ele
     // que se vê se os deslocamentos da tabela batem. Um ponteiro lido do lugar
@@ -1494,7 +1548,6 @@ fn conferir_elf_contra_readelf(
         Arquitetura::X86_64 => ("carga:", "relocacoes aplicadas"),
         Arquitetura::Aarch64 => ("kernel conferido:", "relocacoes relativas"),
     };
-    let _ = &prefixo;
     let carga = relatorio
         .iter()
         .find(|l| l.starts_with(prefixo))

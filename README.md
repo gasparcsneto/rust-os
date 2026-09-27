@@ -979,6 +979,57 @@ dia recusar, a saída é tornar o kernel relocável, e a recusa diz isso em vez
 de escolher sozinha. A linha `endereco fixo` do relatório é o registro do
 fato, e a sonda a exige.
 
+### Três coisas que a sonda encontrou depois de tudo funcionar
+
+**O endereço da UART era um chute silencioso.** Ele está fixado no código
+— e precisa estar, porque é por ela que o iniciador relata qualquer coisa:
+para dizer que o device tree discorda, é preciso já estar falando por algum
+endereço. O que mudou é que o chute deixou de ser silencioso. Assim que o
+device tree aparece, o iniciador procura nele o nó compatível com
+`arm,pl011` e compara:
+
+```
+  [iniciador] serial: a placa confirma a pl011 em 0x9000000
+```
+
+Numa placa em que os dois discordem, a discordância vira uma linha em vez
+de virar uma serial muda. O leitor de FDT do iniciador é o mínimo para essa
+pergunta — percorre o bloco de estrutura uma vez e para no primeiro nó
+compatível.
+
+**O salto sujava um registrador que não declarava.** Os dois: o do x86 faz
+`xor rbp, rbp` antes do `jmp`, e o do ARM lê o `SCTLR_EL1` para um
+temporário antes do `br`. Os operandos eram `in(reg)`, e o compilador pode
+escolher justamente aqueles registradores — no dia em que escolhesse, o x86
+saltaria para o endereço zero e o ARM para o valor do `SCTLR_EL1`. Funcionava
+por sorte da alocação, e o sintoma seria um reset sem nada na tela, mudando
+de lugar a cada recompilação. Os quatro operandos passaram a ter registrador
+escrito à mão.
+
+**O framebuffer podia virar memória livre.** Se a tela cai numa região que o
+firmware declarou utilizável, o kernel recebe como livres as páginas que o
+vídeo está lendo. A proteção entrou — e entrou **errada**: ela comparava o
+endereço *virtual* da tela com o mapa de memória, que é todo físico, então
+nunca casava. Rodava e não protegia nada.
+
+O que a encontrou foi exigir da sonda que a comparação tivesse **acontecido**,
+e não só que nada tivesse dado errado:
+
+```
+$ cargo xtask iniciador --arch x86_64
+  [iniciador] a tela em 0x80000000 fisico cai em 0 regiao(oes) do mapa, 0 reservada(s)
+
+$ cargo xtask iniciador --arch aarch64
+  [iniciador] a tela em 0x43d00000 fisico cai em 1 regiao(oes) do mapa, 0 reservada(s)
+```
+
+Os dois números certos são **diferentes**, e é isso que a sonda afirma. No
+x86 a tela é um BAR de PCI: o mapa da UEFI descreve memória, não barramento,
+e zero é a resposta correta. No ARM é o `ramfb`, que é RAM comum dentro do
+mapa — ali pelo menos uma região é obrigatória, e é essa metade que reprova
+se a comparação parar de acontecer. Nenhum dos dois firmwares precisou da
+reclassificação hoje; o relatório diz isso em vez de calar.
+
 ### Um registrador, dois protocolos
 
 `x0` carrega o device tree quando o QEMU carrega o kernel com `-kernel`, e

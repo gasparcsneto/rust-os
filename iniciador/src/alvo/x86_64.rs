@@ -171,6 +171,23 @@ pub struct Partida {
 /// busca a próxima instrução, e ela mora num endereço baixo. Sem essa
 /// cobertura a busca falha, e uma falha de página sem tabela de exceções é
 /// um triple fault — a máquina reiniciando sem nada na tela.
+///
+/// # Por que cada operando tem um registrador escrito à mão
+///
+/// Porque o bloco **suja** o `rbp`, e `in(reg)` deixa o compilador escolher
+/// qualquer registrador de uso geral — inclusive o `rbp`, que ele usa como
+/// mais um quando não há ponteiro de quadro. No dia em que ele escolhesse o
+/// `rbp` para o endereço de entrada, o `xor` logo acima o zeraria e o `jmp`
+/// iria para o endereço zero.
+///
+/// Não é hipótese sobre o futuro: é uma propriedade que o código não tinha
+/// e que só não aparecia porque a alocação calhava de ser outra. O sintoma
+/// seria um triple fault no salto, sem nada na tela — e ele mudaria de
+/// lugar a cada recompilação.
+///
+/// Com registradores nomeados, a escolha some: `rdi` carrega a entrega por
+/// contrato da ABI, e os outros três ocupam registradores que este bloco
+/// não toca.
 pub unsafe fn partir(p: Partida) -> ! {
     // SAFETY: delegada a quem chama. Nada entre o `cli` e o `jmp` toca
     // memória que o mapa novo não descreva.
@@ -179,16 +196,16 @@ pub unsafe fn partir(p: Partida) -> ! {
             // Interrupções fora antes de qualquer coisa: a IDT que ainda está
             // carregada é a do firmware, e o código dela some com o mapa.
             "cli",
-            "mov cr3, {raiz}",
-            "mov rsp, {pilha}",
+            "mov cr3, rax",
+            "mov rsp, rcx",
             // O quadro de pilha acaba aqui. Zerar o ponteiro de base é o que
             // faz um depurador parar de desenrolar em vez de seguir por
             // valores que sobraram do firmware.
             "xor rbp, rbp",
-            "jmp {entrada}",
-            raiz = in(reg) p.raiz,
-            pilha = in(reg) p.pilha,
-            entrada = in(reg) p.entrada,
+            "jmp rdx",
+            in("rax") p.raiz,
+            in("rcx") p.pilha,
+            in("rdx") p.entrada,
             in("rdi") p.entrega,
             options(noreturn)
         );

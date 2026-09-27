@@ -27,3 +27,10 @@ pub mod aarch64;
 pub use aarch64 as atual;
 
 pub use atual::{MAQUINA, Partida, RELOCACAO_RELATIVA, Serial, dormir, init_serial, nome, partir};
+
+/// Onde este iniciador fala, quando o endereço é uma escolha da placa.
+///
+/// Só existe no ARM: no x86 a serial é alcançada por porta de I/O, não por
+/// endereço, e não há device tree que possa discordar.
+#[cfg(target_arch = "aarch64")]
+pub use atual::UART;

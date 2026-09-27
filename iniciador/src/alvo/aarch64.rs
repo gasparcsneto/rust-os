@@ -24,10 +24,13 @@
 //! e para relatar que não o achou é preciso já ter uma serial. A dependência
 //! é circular, e alguém tem de chutar primeiro.
 //!
-//! O que **não** é chute é o resto: o iniciador acha o device tree logo em
-//! seguida e relata o endereço que ele declara para a UART. Numa placa em
-//! que os dois números discordem, a discordância aparece na primeira linha
-//! do relatório — em vez de aparecer como silêncio.
+//! O que **não** é chute é o resto: assim que o device tree aparece, o
+//! iniciador procura nele o nó compatível com `arm,pl011` e compara o
+//! endereço com este. Numa placa em que os dois discordem, a discordância
+//! vira uma linha do relatório — em vez de virar uma serial muda, que é o
+//! que um endereço errado produz.
+//!
+//! Ver [`crate::conferir_a_serial`], e [`crate::fdt`] para o leitor.
 
 use core::fmt;
 use core::ptr::{read_volatile, write_volatile};
@@ -195,11 +198,11 @@ pub unsafe fn partir(p: Partida) -> ! {
             // diante, virtual e físico são a mesma coisa de verdade — e é o
             // mapa de identidade da UEFI que garante que esta própria
             // instrução continue sendo buscada do mesmo lugar.
-            "mrs x9, sctlr_el1",
+            "mrs x2, sctlr_el1",
             // Bit 0 é M (tradução), bit 2 é C (cache de dados).
-            "bic x9, x9, #(1 << 0)",
-            "bic x9, x9, #(1 << 2)",
-            "msr sctlr_el1, x9",
+            "bic x2, x2, #(1 << 0)",
+            "bic x2, x2, #(1 << 2)",
+            "msr sctlr_el1, x2",
             "isb",
 
             // O cache de instruções pode continuar ligado pelo protocolo,
@@ -213,13 +216,17 @@ pub unsafe fn partir(p: Partida) -> ! {
             // E o salto, com a entrega em `x0` — o mesmo registrador em que
             // o protocolo de imagem crua entrega o device tree. É o kernel
             // que distingue os dois, pela magia.
-            "br {entrada}",
-            entrada = in(reg) p.entrada,
-            // `x0` é o primeiro argumento por contrato, e é onde o protocolo
-            // de boot do arm64 entrega o ponteiro. Nomeá-lo aqui, em vez de
-            // um `mov` dentro do bloco, é o que impede o compilador de
-            // escolher `x0` para outra coisa.
+            "br x1",
+            // Os três registradores são escritos à mão, e não deixados a
+            // `in(reg)`, pelo mesmo motivo do lado x86: o bloco suja o `x2`,
+            // e o compilador poderia ter escolhido justamente ele para o
+            // endereço de entrada. O `mrs` logo acima o sobrescreveria com o
+            // valor do `SCTLR_EL1`, e o `br` saltaria para lá.
+            //
+            // `x0` ainda tem um segundo motivo: é onde o protocolo de boot
+            // do arm64 entrega o ponteiro, por contrato.
             in("x0") p.entrega,
+            in("x1") p.entrada,
             options(noreturn)
         );
     }
