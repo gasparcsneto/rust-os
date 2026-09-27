@@ -3325,7 +3325,7 @@ fn usuario_imagem_recusada_nao_custa_o_espaco() -> Resultado {
 /// Os três acima exercitam a aritmética de pixel sobre um buffer da pilha.
 /// Eles passariam num kernel que nunca tocasse no framebuffer de verdade —
 /// e o que pode dar errado ali é tudo que está entre a lógica e a tela: o
-/// endereço que o bootloader entregou, a geometria que ele declarou, e a
+/// endereço que o iniciador entregou, a geometria que ele declarou, e a
 /// escrita chegar mesmo à memória que o controlador de vídeo varre.
 ///
 /// Numa máquina sem tela o caso não tem o que afirmar, e é [`sem_framebuffer`]
@@ -3478,9 +3478,10 @@ fn frames_frame_nulo_nunca_entregue() -> Resultado {
 /// As faixas que cada arquitetura declara ocupadas — no ARM, a imagem do
 /// kernel e o device tree — não podem estar livres.
 ///
-/// No x86 não há faixas declaradas, porque o bootloader já as exclui do mapa;
-/// lá este caso passa sem verificar nada, e isso é honesto: não há o que
-/// verificar.
+/// No x86 não há faixas declaradas, porque a entrega já as classifica: o
+/// firmware marca o que é dele, o iniciador marca o que é seu, e o alocador
+/// nunca vê nenhuma das duas como livre. Lá este caso passa sem verificar
+/// nada, e isso é honesto: não há o que verificar.
 fn frames_faixas_reservadas_fora_de_circulacao() -> Resultado {
     let mut vazou = false;
 
@@ -3525,8 +3526,8 @@ fn frames_estatisticas_coerentes() -> Resultado {
 /// Procura um endereço virtual sem tradução, para os testes de mapeamento.
 ///
 /// Sondar em vez de fixar um endereço é o que mantém o teste válido nas duas
-/// arquiteturas: no x86 o bootloader mapeia a memória física num deslocamento
-/// que ele escolhe, e um endereço fixo poderia cair em cima dele.
+/// arquiteturas: no x86 o iniciador mapeia a memória física num deslocamento
+/// que o protocolo fixa, e um endereço fixo poderia cair em cima dele.
 fn endereco_virtual_livre() -> Option<u64> {
     // Abaixo de 512 GiB para caber nos 39 bits de endereço virtual que
     // configuramos no ARM, e alto o bastante para não colidir com o kernel.

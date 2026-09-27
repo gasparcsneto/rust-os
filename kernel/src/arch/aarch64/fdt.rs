@@ -2,11 +2,17 @@
 //!
 //! # Por que precisamos disto
 //!
-//! No x86 o bootloader entrega um mapa de memória pronto. No ARM não existe
-//! esse intermediário: o firmware (aqui, o QEMU) deposita na RAM um *device
-//! tree* — uma árvore binária descrevendo todo o hardware da placa — e passa
-//! o endereço dela no registrador `x0`. Descobrir quanta memória a máquina
-//! tem significa interpretar essa árvore.
+//! Porque nem todo boot traz um mapa de memória pronto. Pelo iniciador UEFI
+//! traz: a entrega carrega as regiões que o firmware declarou, e este leitor
+//! nem é consultado para isso. Pelo protocolo de imagem crua do arm64 não há
+//! intermediário nenhum — o emulador deposita na RAM um *device tree*, uma
+//! árvore binária descrevendo todo o hardware da placa, e passa o endereço
+//! dela no registrador `x0`. Descobrir quanta memória a máquina tem significa
+//! interpretar essa árvore.
+//!
+//! E mesmo pelo caminho da UEFI ele continua necessário: o mapa de memória
+//! não descreve a UART, o GIC nem o barramento PCI, e é daqui que esses
+//! endereços saem nas duas rotas.
 //!
 //! # Por que continua escrito à mão
 //!

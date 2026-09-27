@@ -20,7 +20,7 @@
 //! adivinhasse o número dele. Não é hipótese: é o que acontece quando a
 //! tabela é única e a numeração é sequencial.
 //!
-//! Ela vive dentro do [`crate::fios::Fio`], e é de lá que vêm as duas
+//! Ela vive dentro do fio (ver [`crate::fios`]), e é de lá que vêm as duas
 //! propriedades que importam sem uma linha de código: ela morre junto com o
 //! processo, e `bifurcar` a duplica porque duplica o fio. Um `fork` que não
 //! herdasse os descritores abertos não seria um `fork`.

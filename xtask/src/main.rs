@@ -360,11 +360,16 @@ enum Artefato {
     Disco(PathBuf),
     /// ARM: uma imagem binária crua com cabeçalho arm64.
     ///
-    /// Não há imagem de disco porque não há bootloader. Em vez disso seguimos
-    /// o protocolo de boot do arm64: um binário cru cujos primeiros 64 bytes
-    /// são um cabeçalho que diz a quem carrega onde depositá-lo e quanta RAM
-    /// reservar. Em troca, recebemos o endereço do device tree em `x0` — que
-    /// é o que o QEMU *não* faz quando lhe entregamos um ELF.
+    /// Não é o único caminho: o ARM também boota do disco, pelo mesmo
+    /// iniciador UEFI do x86, e é assim que a sonda do `xtask` o exercita.
+    /// Este aqui é o caminho sem carregador nenhum — o protocolo de boot do
+    /// arm64, um binário cru cujos primeiros 64 bytes são um cabeçalho que
+    /// diz a quem carrega onde depositá-lo e quanta RAM reservar. Em troca,
+    /// recebemos o endereço do device tree em `x0`, que é o que o QEMU *não*
+    /// faz quando lhe entregamos um ELF.
+    ///
+    /// Ele continua sendo o padrão do `test` e do `fumaca` porque sobe em
+    /// segundos, sem disco montado e sem firmware instalado.
     Binario(PathBuf),
 }
 

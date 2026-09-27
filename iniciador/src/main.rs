@@ -10,23 +10,41 @@
 //! monta — e o executa em long mode, com paginação identidade e os serviços
 //! de boot disponíveis.
 //!
-//! ## O que ele faz nesta etapa, e o que ainda não faz
+//! ## O que ele faz
 //!
 //! Ele **lê a máquina e relata**: confere as três tabelas da UEFI, imprime o
-//! firmware que o carregou, conta o mapa de memória e descreve o vídeo. Não
-//! carrega o kernel, não monta tabela de página nenhuma e não sai dos
-//! serviços de boot — desliga a máquina no fim.
+//! firmware que o carregou, conta o mapa de memória, descreve o vídeo e, no
+//! ARM, confronta o endereço da serial com o que o device tree declara.
 //!
-//! O corte é deliberado, e é o mesmo método que o xHCI e o Btrfs seguiram
-//! neste projeto: cada etapa é confirmada por um relatório antes de a
-//! seguinte ser escrita. Num bootloader isso vale dobrado, porque um erro
+//! E então **põe o kernel de pé**: abre o `duke.elf` na ESP, confere os
+//! cabeçalhos e as relocações contra o que este carregador sabe aplicar,
+//! copia os segmentos, monta a entrega, sai dos serviços de boot e salta.
+//!
+//! O que difere entre as duas arquiteturas é o que ele entrega. No x86 ele
+//! monta tabelas de página — com a memória física num deslocamento que o
+//! `protocolo` fixa —, escolhe uma pilha e salta com as duas no lugar. No ARM
+//! o mapa é de identidade, o kernel monta o dele, e o iniciador desliga a MMU
+//! antes de saltar.
+//!
+//! Isso foi construído em etapas, e o método é o mesmo que o xHCI e o Btrfs
+//! seguiram neste projeto: cada uma confirmada por um relatório antes de a
+//! seguinte ser escrita. Num carregador isso vale dobrado, porque um erro
 //! aqui não produz um teste vermelho — produz uma máquina que não liga, sem
-//! nada na tela e sem ninguém para perguntar.
+//! nada na tela e sem ninguém para perguntar. O relatório ficou: é o que a
+//! sonda do `xtask` confere número por número, contra o `llvm-readobj` e
+//! contra o disco do hospedeiro.
 //!
 //! ## Por que o relatório sai pela serial, e não pelo console do firmware
 //!
-//! Ver [`serial`]. Em resumo: o console é um serviço de boot, e o trabalho
-//! deste programa termina depois de `ExitBootServices`.
+//! Porque o console de texto da UEFI é um **serviço de boot**: ele deixa de
+//! existir em `ExitBootServices`, e é justamente depois dali que este
+//! programa faz o que pode dar errado sem volta — montar a entrega e saltar.
+//! Um relatório que emudece antes da parte perigosa relata a parte fácil.
+//!
+//! A serial não tem esse problema: [`alvo::Serial`] escreve direto nos
+//! registradores da placa, e continua escrevendo com o firmware já
+//! desmontado. É a mesma porta por onde o kernel vai falar em seguida, o que
+//! torna o relatório e o log de boot um texto só.
 
 #![no_std]
 #![no_main]

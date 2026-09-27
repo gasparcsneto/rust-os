@@ -2,9 +2,11 @@
 //!
 //! # O problema que este módulo resolve
 //!
-//! No x86_64 o mapa de memória chega pronto, numa struct `BootInfo` que o
-//! bootloader monta. No aarch64 não existe bootloader equivalente: o QEMU nos
-//! entrega um ponteiro para um *device tree* e cabe a nós interpretá-lo.
+//! O mapa de memória chega de formas diferentes conforme quem bootou. Pelo
+//! iniciador deste projeto ele vem numa [`protocolo::Entrega`], já
+//! classificado pelo firmware. Pelo protocolo de imagem crua do arm64 não vem
+//! nada: o emulador entrega um ponteiro para um *device tree*, cabe a nós
+//! interpretá-lo, e ele descreve a RAM **instalada** — não a livre.
 //!
 //! Se o resto do kernel conhecesse essas diferenças, cada subsistema teria
 //! dois caminhos e o custo de adicionar uma terceira arquitetura seria
@@ -14,10 +16,12 @@
 //!
 //! # Por que copiamos para um array fixo
 //!
-//! No x86 poderíamos apenas emprestar a fatia do `BootInfo`, que é `'static`.
-//! No ARM os dados saem de um parser e não sobrevivem por si. Copiar para um
-//! array estático unifica os dois casos e, de quebra, torna o mapa imune a
-//! qualquer reaproveitamento futuro da memória onde o bootloader o colocou.
+//! Poderíamos emprestar a fatia de regiões que a entrega aponta, em vez de
+//! copiá-la. Não dá: ela vive na memória que o iniciador alocou, e essa
+//! memória é candidata a ser recuperada um dia. No caminho do device tree os
+//! dados nem existem como fatia — saem de um parser e não sobrevivem por si.
+//! Copiar para um array estático unifica os casos e torna o mapa imune ao
+//! reaproveitamento da memória de onde ele veio.
 //!
 //! # O que **não** está aqui
 //!
@@ -37,17 +41,24 @@ const MAX_REGIOES: usize = 64;
 
 /// Para que serve uma faixa de memória física.
 //
-// `Bootloader` e `Reservada` só são construídas pelo backend x86, porque é o
-// único que hoje recebe um mapa com essa distinção — no ARM o device tree
-// descreve a RAM instalada sem dizer o que já está ocupado. As variantes
-// pertencem à abstração, não a uma arquitetura, então ficam aqui; a anotação
-// evita que o build de ARM as acuse de mortas.
+// `Bootloader` só é construída pelo backend x86: é o único que distingue o
+// que é do iniciador do que é do firmware. O ARM recebe as duas coisas e
+// dobra ambas em `Reservada`, porque do ponto de vista dele não há diferença
+// — nenhuma das duas é sua para entregar —, e pelo caminho do device tree
+// não há distinção nenhuma a fazer: ele descreve a RAM instalada sem dizer o
+// que já está ocupado. As variantes pertencem à abstração, não a uma
+// arquitetura, então ficam aqui; a anotação evita que o build de ARM acuse de
+// morta a que ele não constrói.
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TipoRegiao {
     /// Livre para o kernel alocar.
     Utilizavel,
-    /// Em uso pelo bootloader ou pelas suas estruturas.
+    /// Em uso pelo iniciador ou pelas estruturas dele.
+    ///
+    /// O nome da variante é anterior ao iniciador deste projeto, e o nome no
+    /// protocolo do agente (`"bootloader"`) é publicado — trocar os dois é
+    /// uma mudança de contrato, e não de comentário.
     Bootloader,
     /// Reservada por firmware/hardware (MMIO, ACPI, ROM).
     Reservada,
@@ -166,7 +177,7 @@ pub fn com_regioes<F: FnMut(&Regiao)>(mut f: F) {
 pub struct Totais {
     /// RAM que o alocador pode entregar.
     pub utilizavel: u64,
-    /// RAM que o bootloader retém para as estruturas dele.
+    /// RAM que o iniciador retém para as estruturas dele.
     ///
     /// É memória de verdade, e um dia recuperável — daí valer um campo
     /// próprio em vez de sumir dentro de um agregado.

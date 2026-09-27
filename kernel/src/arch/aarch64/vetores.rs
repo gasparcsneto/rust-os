@@ -31,7 +31,8 @@ use aarch64_cpu::asm::barrier;
 use aarch64_cpu::registers::{CurrentEL, ESR_EL1, FAR_EL1, VBAR_EL1};
 use tock_registers::interfaces::{Readable, Writeable};
 
-/// O contexto salvo por [`SALVAR`] quando uma exceção acontece.
+/// O contexto salvo pela macro de assembly `SALVAR` quando uma exceção
+/// acontece.
 ///
 /// O layout precisa casar **exatamente** com os deslocamentos usados no
 /// assembly abaixo: `x0..x30` contíguos a partir do início, depois `elr` e

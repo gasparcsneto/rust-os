@@ -14,7 +14,7 @@
 //! O segundo motivo é simétrico: a tela precisa ser **legível pelo agente**.
 //! Desenhar sem poder conferir o que foi desenhado seria acrescentar uma
 //! superfície que ninguém consegue testar. Daí [`Tela::ler_pixel`] existir ao
-//! lado de [`Tela::pixel`], e o comando `video.sample` devolver uma amostra em
+//! lado de [`Tela::retangulo`], e o comando `video.sample` devolver uma amostra em
 //! grade — a forma de um agente enxergar a tela sem ter olhos.
 //!
 //! # Por que aqui e não em `machine`
@@ -414,8 +414,10 @@ impl Tela {
     ///
     /// # Por que é o único lugar que conhece a ordem
     ///
-    /// Porque houve dois. [`Tela::pixel`] tinha a sua própria conversão, e
-    /// este preenchimento tinha outra — as duas certas, até que uma mudasse.
+    /// Porque houve dois. O desenho de um pixel só — que existiu antes de
+    /// [`Tela::retangulo`] e foi absorvido por ele — tinha a sua própria
+    /// conversão, e este preenchimento tinha outra: as duas certas, até que
+    /// uma mudasse.
     /// Trocar a ordem aqui e deixar a de lá intacta produzia uma tela com as
     /// cores invertidas que o teste de ida e volta de formato **não** pegava,
     /// porque ele só exercitava o outro caminho.
@@ -433,7 +435,7 @@ impl Tela {
 
     /// Pinta um retângulo, recortado na borda da tela.
     ///
-    /// # Por que não é um laço sobre [`Tela::pixel`]
+    /// # Por que não é um laço sobre um desenho de pixel
     ///
     /// Porque era, e custava caro. Cada chamada recalculava o endereço — uma
     /// multiplicação e duas comparações de limite — para um pixel que já se
@@ -494,8 +496,9 @@ impl Tela {
 ///
 /// # Por que limpar, e não só desenhar por cima
 ///
-/// Porque o que está na tela quando o kernel começa não é dele: é o log do
-/// bootloader, linha após linha de texto que já cumpriu o papel. Desenhar uma
+/// Porque o que está na tela quando o kernel começa não é dele: é o que o
+/// firmware e o iniciador deixaram, linha após linha de texto que já cumpriu
+/// o papel. Desenhar uma
 /// faixa em cima disso deixa a tela com duas coisas ao mesmo tempo, e nenhuma
 /// delas dizendo com clareza quem está no comando.
 ///

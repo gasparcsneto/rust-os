@@ -2,17 +2,20 @@
 //!
 //! # O contraste com o x86
 //!
-//! No x86 o crate `bootloader` nos entrega a máquina pronta: já em long mode,
-//! com pilha, com tabelas de página e com um mapa de memória estruturado.
+//! O iniciador deste projeto sobe nas duas arquiteturas, e o que ele entrega
+//! difere. No x86 ele monta tabelas de página, escolhe uma pilha e salta com
+//! as duas no lugar: o kernel acorda com paginação ativa e `RSP` válido. No
+//! ARM ele **desliga** a MMU antes de saltar e entrega um registrador — o
+//! resto é trabalho nosso.
 //!
-//! No ARM não existe esse crate — e nem precisaria existir, porque o
-//! protocolo de boot do arm64 é radicalmente mais simples. O QEMU carrega
-//! nosso ELF, coloca o endereço do device tree em `x0` e salta para o ponto
-//! de entrada. Já estamos em 64 bits, com a MMU desligada. Em troca, tudo o
-//! que o bootloader fazia por nós vira trabalho nosso: pilha, limpeza do
-//! `.bss` e descoberta de memória.
+//! E precisa continuar sendo, porque aqui ele não é o único caminho. Pelo
+//! protocolo de imagem crua do arm64 — que é como o QEMU carrega o kernel com
+//! `-kernel`, e como a suíte sobe — não há iniciador nenhum: o emulador
+//! deposita a imagem, põe o endereço do device tree em `x0` e salta. Já
+//! estamos em 64 bits, com a MMU desligada, sem pilha e sem `.bss` zerado.
 //!
-//! É por isso que este módulo tem assembly e o do x86 não.
+//! Escrever a entrada para o pior dos dois casos é o que faz uma só servir
+//! aos dois. É por isso que este módulo tem assembly e o do x86 não.
 
 pub mod contexto;
 pub(crate) mod fdt;

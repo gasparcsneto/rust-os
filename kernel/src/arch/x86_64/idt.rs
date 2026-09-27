@@ -143,7 +143,8 @@ extern "x86-interrupt" fn espuria(_quadro: InterruptStackFrame) {
 /// Atende a interrupção da linha indicada. Devolve se o escalonador pediu
 /// troca de fio.
 ///
-/// É o gêmeo de [`super::super::aarch64::gic::tratar`] no outro backend, e a
+/// É o gêmeo de `aarch64::gic::tratar` no outro backend — sem link porque o
+/// outro backend não existe nesta compilação —, e a
 /// simetria é deliberada: as duas arquiteturas fazem a mesma sequência — o
 /// mínimo indispensável, contabilizar, sinalizar o fim — e quem lê uma
 /// reconhece a outra.

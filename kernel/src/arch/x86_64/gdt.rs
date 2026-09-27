@@ -158,8 +158,10 @@ pub fn init() {
     // SAFETY: os seletores vêm da GDT que acabamos de carregar, então apontam
     // para descritores válidos.
     unsafe {
-        // Recarregar CS é obrigatório: até aqui ele ainda referencia a GDT
-        // provisória do bootloader, que deixa de valer quando a nossa entra.
+        // Recarregar CS é obrigatório: até aqui ele ainda referencia a GDT do
+        // firmware, que deixa de valer quando a nossa entra. O iniciador
+        // deste projeto não monta GDT nenhuma — ele salta com a que a UEFI
+        // deixou —, então quem herdamos é o EDK II.
         CS::set_reg(*seletor_codigo);
 
         // Recarregar SS é igualmente obrigatório, por um motivo bem menos
@@ -168,15 +170,26 @@ pub fn init() {
         // Em modo longo os registradores de dados são praticamente ignorados,
         // o que dá a falsa impressão de que podem ficar como estão. Mas o
         // `iretq` de 64 bits **sempre** repõe SS:RSP, mesmo quando não há
-        // troca de privilégio. Se SS ainda contiver o seletor herdado do
-        // bootloader, esse valor passa a indexar a *nossa* GDT, onde ele
-        // provavelmente aponta para outro tipo de descritor.
+        // troca de privilégio. Se SS ainda contiver o seletor herdado, esse
+        // valor passa a indexar a *nossa* GDT, onde ele aponta para outro
+        // tipo de descritor.
         //
-        // Foi exatamente o que aconteceu aqui: o bootloader deixava SS=0x10,
-        // e na nossa GDT 0x10 caía sobre o descritor do TSS. O primeiro
-        // `iretq` — o retorno do handler de breakpoint — gerava
-        // #GP(0x10). O breakpoint era tratado corretamente e o kernel morria
-        // ao *voltar* dele.
+        // Este comentário já narrou isso no passado, e a troca do crate
+        // `bootloader` pelo iniciador deste projeto não o tornou histórico —
+        // só trocou o número. Medido hoje: o kernel entra com `cs=0x38
+        // ss=0x30 ds=0x30`, deixados pelo EDK II, e a nossa GDT põe o TSS em
+        // **0x30**. É a mesma coincidência de antes, quando o seletor
+        // herdado era 0x10 e o TSS caía ali.
+        //
+        // E continua sendo o que separa um kernel de pé de um que morre no
+        // primeiro retorno de exceção. Comentando a linha abaixo, a suíte
+        // não chega ao primeiro caso:
+        //
+        //     error traps  FALHA FATAL #0: general_protection_fault
+        //                  em pc=0xffff800000046588 codigo=0x30
+        //
+        // O código de erro do #GP é o próprio seletor ofensor — 0x30, o
+        // nosso TSS.
         SS::set_reg(*seletor_dados);
         DS::set_reg(*seletor_dados);
         ES::set_reg(*seletor_dados);

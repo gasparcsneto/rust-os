@@ -2,10 +2,10 @@
 //!
 //! # O oposto do ARM
 //!
-//! No ARM a MMU chega desligada e precisamos construir tudo. Aqui o crate
-//! `bootloader` já entregou a máquina com paginação ativa, tabelas montadas e
-//! o kernel mapeado. O trabalho não é ligar nada — é **assumir o controle** do
-//! que já está rodando.
+//! No ARM a MMU chega desligada e precisamos construir tudo. Aqui o iniciador
+//! deste projeto já entregou a máquina com paginação ativa, tabelas montadas
+//! e o kernel mapeado — ele salta com o `CR3` dele carregado. O trabalho não
+//! é ligar nada — é **assumir o controle** do que já está rodando.
 //!
 //! # O problema de editar tabelas de página
 //!
@@ -13,11 +13,16 @@
 //! então todo acesso que fazemos é *virtual*. Para editar uma tabela cujo
 //! endereço físico conhecemos, precisamos de alguma forma de alcançá-la.
 //!
-//! A saída adotada é pedir ao bootloader que mapeie toda a memória física num
+//! A saída adotada é o iniciador mapear toda a memória física num
 //! deslocamento fixo do espaço virtual. Com isso, `físico + deslocamento` é o
 //! endereço virtual por onde enxergamos qualquer byte de RAM — inclusive as
-//! próprias tabelas. É o que [`OffsetPageTable`] espera, e é configurado pelo
-//! `BootloaderConfig` em [`super::inicio`].
+//! próprias tabelas. É o que [`OffsetPageTable`] espera.
+//!
+//! O deslocamento não é pedido a ninguém: ele é
+//! [`protocolo::mapa::BASE_DA_MEMORIA_FISICA`], uma constante do contrato que
+//! os dois lados leem. O iniciador a honra ao montar as tabelas, e a repete
+//! em `Entrega::deslocamento_fisico` — o kernel lê o campo em vez da
+//! constante, para que uma entrega de outra versão não passe despercebida.
 //!
 //! No ARM o equivalente é trivial porque o mapa é de identidade: físico e
 //! virtual coincidem. Daí a existência de [`acesso_fisico`] nos dois lados.
@@ -78,7 +83,7 @@ static TRAVA: Mutex<()> = Mutex::new(());
 ///
 /// # Safety
 ///
-/// `deslocamento` precisa ser o endereço virtual onde o bootloader mapeou a
+/// `deslocamento` precisa ser o endereço virtual onde o iniciador mapeou a
 /// memória física completa.
 pub unsafe fn init(deslocamento: u64) {
     DESLOCAMENTO.store(deslocamento, Ordering::Relaxed);
@@ -93,8 +98,11 @@ pub unsafe fn init(deslocamento: u64) {
     // gerar falha de página. Ou seja, marcar uma página como não executável
     // sem habilitar isto antes produziria exatamente o oposto do pretendido.
     //
-    // SAFETY: habilitar NXE é sempre seguro em long mode; o bootloader
-    // provavelmente já o fez, e a operação é idempotente.
+    // SAFETY: habilitar NXE é sempre seguro em long mode, e a operação é
+    // idempotente — o iniciador já o ligou antes de montar as tabelas (ver
+    // `paginas::ligar_nx`), porque ele próprio marca páginas como não
+    // executáveis. Repetir aqui é o que mantém este módulo correto se um dia
+    // o kernel chegar por outro caminho.
     unsafe {
         use x86_64::registers::model_specific::{Efer, EferFlags};
         Efer::update(|flags| flags.insert(EferFlags::NO_EXECUTE_ENABLE));
@@ -350,7 +358,7 @@ pub fn traduzir(virtual_: u64) -> Option<u64> {
 
 /// Endereço virtual por onde o kernel enxerga uma página física.
 ///
-/// Aqui é o deslocamento onde o bootloader mapeou a memória física inteira —
+/// Aqui é o deslocamento onde o iniciador mapeou a memória física inteira —
 /// diferente do ARM, onde a identidade torna a resposta trivial.
 pub fn acesso_fisico(fisico: u64) -> *mut u8 {
     let deslocamento = DESLOCAMENTO.load(Ordering::Relaxed);

@@ -111,7 +111,7 @@ pub async fn atender() {
 /// mesma separação que o `cargo xtask agent` faz, para que quem aprendeu um
 /// saiba o outro.
 ///
-/// Fica numa função sua, e não no meio de [`executar`], porque é a única
+/// Fica numa função sua, e não no meio de `executar`, porque é a única
 /// lógica deste módulo que não depende de hardware — e portanto a única que a
 /// suíte alcança. Ter a de verdade aqui é o que impede o caso de teste de
 /// exercitar uma cópia enquanto o interpretador usa outra.

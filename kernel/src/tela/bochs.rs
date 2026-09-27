@@ -16,12 +16,13 @@
 //!
 //! # Por que o x86 não passa por aqui hoje
 //!
-//! Porque lá o framebuffer chega pronto: o `bootloader` configura o modo por
-//! UEFI ou VBE antes de o kernel existir e entrega a geometria em `BootInfo`.
-//! Este driver entra quando **ninguém** entregou nada — hoje, o ARM que sobe
-//! pelo protocolo de imagem crua do arm64, onde não há firmware que configure
-//! vídeo. Pelo iniciador UEFI o ARM também chega com a tela pronta, e este
-//! driver não roda.
+//! Porque lá o framebuffer chega pronto, e ninguém deste projeto o programou:
+//! o firmware já deixa um modo configurado, o iniciador lê a geometria dele
+//! pelo protocolo de vídeo da UEFI e a põe na entrega. Este driver entra
+//! quando **ninguém** entregou nada — hoje, o ARM que sobe pelo protocolo de
+//! imagem crua do arm64, onde não há firmware que configure vídeo. Pelo
+//! iniciador UEFI o ARM também chega com a tela pronta, e este driver não
+//! roda.
 //!
 //! Ele funciona no x86 também, e um dia pode ser o único caminho nas duas. Não
 //! é hoje: trocar um framebuffer que funciona por um que ainda não foi usado
@@ -78,8 +79,12 @@ const LIGADO_LINEAR: u16 = 0x01 | 0x40;
 
 /// A resolução que pedimos.
 ///
-/// A mesma que o `bootloader` entrega no x86, para que uma pessoa veja a mesma
-/// tela nas duas arquiteturas — que é o ponto de ter vídeo no ARM.
+/// Escolhida para parecer com a do x86 e **não** igual a ela: aqui nós
+/// programamos o modo, e lá ele chega pronto de quem não nos consulta.
+/// Medido, o firmware de cada máquina deixa o que quer — o OVMF do x86 deixa
+/// 1280x800, e o EDK II do ARM deixa 800x600 no `ramfb`. Fixar um número aqui
+/// para "bater com o x86" seria fixá-lo contra uma decisão de outra pessoa,
+/// que muda na próxima versão do firmware.
 ///
 /// Cabe com folga: 1280 × 720 × 4 bytes são 3,5 MiB dos 16 MiB do BAR.
 const LARGURA: u16 = 1280;

@@ -32,7 +32,7 @@ pub const fn nome() -> &'static str {
     "x86_64"
 }
 
-/// Onde o bootloader mapeou a memória física completa.
+/// Onde o iniciador mapeou a memória física completa.
 ///
 /// A sentinela `u64::MAX` distingue "não fornecido" de um deslocamento zero.
 static DESLOCAMENTO_FISICO: AtomicU64 = AtomicU64::new(u64::MAX);
@@ -88,7 +88,7 @@ pub const COBERTURA_DA_ENTRADA_DE_TOPO: u64 = 512 * 1024 * 1024 * 1024;
 ///
 /// O iniciador deixou a máquina assim: long mode, interrupções desligadas,
 /// paginação no mapa que ele montou — a imagem do kernel na metade alta, a
-/// memória física em [`BASE_DA_MEMORIA_FISICA`], uma pilha com página de
+/// memória física em [`protocolo::mapa::BASE_DA_MEMORIA_FISICA`], uma pilha com página de
 /// guarda — e os serviços de boot da UEFI já encerrados. O `RDI` traz o
 /// endereço virtual da entrega.
 ///
@@ -248,7 +248,7 @@ pub fn init_paginacao() {
     if deslocamento == u64::MAX {
         // Sem o mapeamento da memória física não há como editar tabelas. É
         // fatal para a paginação, mas não para o kernel: reportamos e seguimos
-        // com o que o bootloader montou, que já basta para executar.
+        // com o que o iniciador montou, que já basta para executar.
         crate::log_error!("mmu", "o iniciador nao mapeou a memoria fisica");
         return;
     }
@@ -567,7 +567,8 @@ pub fn disparar_breakpoint() {
 /// Endereço garantidamente não mapeado, para provocar uma falha de propósito.
 ///
 /// É canônico (bit 47 zerado, metade baixa) e está muito abaixo de tudo que o
-/// bootloader mapeia: o kernel vive em [`BASE_DO_KERNEL`], a memória física
+/// iniciador mapeia: o kernel vive em [`protocolo::mapa::BASE_DO_KERNEL`], a
+/// memória física
 /// num deslocamento alto, e o heap em 64 GiB. Nada do kernel encosta aqui.
 const ENDERECO_INVALIDO: u64 = 0xDEAD_0000;
 

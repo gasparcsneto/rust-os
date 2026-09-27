@@ -390,7 +390,7 @@ fn conferir_contra_o_pit(hz_pedido: u32) -> bool {
 pub unsafe fn init(hz: u32) -> Option<u32> {
     let fisico = endereco()?;
 
-    // O APIC é memória de dispositivo. O mapa da memória física do bootloader
+    // O APIC é memória de dispositivo. O mapa da memória física do iniciador
     // cobre este endereço, mas como memória normal — e servir a leitura de um
     // registrador pelo cache devolveria um valor velho, sem aviso.
     let virtual_ = crate::mmio::mapear(fisico, 4096).ok()?;

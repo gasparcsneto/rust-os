@@ -2,10 +2,13 @@
 //!
 //! # A diferença que define este módulo
 //!
-//! No x86 o bootloader já entrega a MMU ligada, com tabelas montadas e a
-//! memória física acessível. Aqui ela está **desligada**: todo endereço é
-//! físico, e cabe a nós construir as tabelas de tradução e acender o
-//! mecanismo.
+//! No x86 o iniciador já entrega a MMU ligada, com tabelas montadas e a
+//! memória física acessível. Aqui ela está **desligada** nos dois caminhos de
+//! boot: pelo `-kernel` porque nunca foi ligada, e pelo iniciador UEFI porque
+//! ele a desliga de propósito antes de saltar — o mapa do firmware é dele, e
+//! herdá-lo seria depender de um mapa que ninguém deste lado escreveu. Todo
+//! endereço é físico, e cabe a nós construir as tabelas de tradução e acender
+//! o mecanismo.
 //!
 //! E ligar a MMU é um momento singularmente perigoso. Se o endereço da
 //! instrução seguinte não estiver mapeado, o processador não reporta erro
@@ -92,7 +95,7 @@ const ATTR_DISPOSITIVO: u64 = 0 << 2;
 /// Índice de atributo 1 do `MAIR_EL1`: memória normal, cacheável.
 const ATTR_NORMAL: u64 = 1 << 2;
 
-/// AP[2]: somente leitura. Ausente significa leitura e escrita.
+/// `AP[2]`: somente leitura. Ausente significa leitura e escrita.
 const AP_SOMENTE_LEITURA: u64 = 1 << 7;
 /// `AP[1]`: a página é alcançável a partir de EL0.
 const AP_USUARIO: u64 = 1 << 6;

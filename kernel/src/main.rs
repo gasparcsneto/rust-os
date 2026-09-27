@@ -30,8 +30,9 @@
 //!
 //! `#![no_main]` desliga o ponto de entrada normal do Rust. Um binário comum
 //! começa na `main` da libc, que prepara argumentos e ambiente. Não há libc
-//! aqui: quem nos chama é o bootloader (x86) ou diretamente o firmware (ARM),
-//! e cada caso é tratado no backend de arquitetura correspondente.
+//! aqui: quem nos chama é o iniciador deste projeto, ou — no ARM que sobe por
+//! imagem crua — o próprio emulador, e cada caso é tratado no backend de
+//! arquitetura correspondente.
 
 #![no_std]
 #![no_main]
@@ -228,8 +229,8 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     }
 
     // Com frames disponíveis, a paginação pode criar tabelas. No x86 isto
-    // assume o controle do que o bootloader montou; no ARM, liga a MMU pela
-    // primeira vez.
+    // assume o controle do que o iniciador montou; no ARM, liga a MMU pela
+    // primeira vez — lá ela chega desligada pelos dois caminhos de boot.
     arch::init_paginacao();
 
     // Com a paginação no ar, o heap pode mapear sua faixa. A partir daqui o
@@ -238,10 +239,10 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
         parar_sem_base("heap", motivo, canal_agente);
     }
 
-    // A tela que o firmware entregou pronta, se entregou alguma. É o caso do
-    // x86, onde o `bootloader` configura o modo antes de o kernel existir, e
-    // agora também o do ARM que sobe pelo iniciador UEFI: lá quem configura o
-    // modo é o firmware, e a geometria chega dentro da entrega.
+    // A tela que chegou pronta na entrega, se chegou alguma. É o caso dos dois
+    // boots por UEFI: quem deixa um modo configurado é o firmware, o iniciador
+    // lê a geometria dele e a põe na entrega, e o kernel a adota sem
+    // programar coisa nenhuma.
     //
     // Não há `else` aqui de propósito: no ARM que sobe por imagem crua
     // ninguém entrega nada, e dizer "nenhum framebuffer nesta plataforma"
@@ -277,8 +278,9 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     // ligados. A ordem não é escolha: um driver virtio precisa dos BARs já
     // atribuídos e do decodificador já ligado, que é o que a varredura faz.
     // Com o barramento enumerado, o adaptador de vídeo pode ser procurado e
-    // programado. Só onde ninguém entregou uma tela pronta: no x86, trocar o
-    // framebuffer do `bootloader` por outro não consertaria nada.
+    // programado. Só onde ninguém entregou uma tela pronta: trocar um
+    // framebuffer que o firmware já configurou por outro não consertaria
+    // nada, e custaria a tela durante a troca.
     if tela::tela().is_none() {
         tela::bochs::init();
         if !anunciar_tela() {

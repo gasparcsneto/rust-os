@@ -67,6 +67,33 @@ jobs:
             cargo clippy --target "$alvo" --features modo-teste -- -D warnings
           done
 
+      # Os links da documentação, que é onde o apodrecimento não dói até doer.
+      #
+      # Este projeto explica as decisões nos comentários, e um `[`Fulano`]` que
+      # não resolve mais é o sintoma barato de um problema caro: o item mudou
+      # de nome ou sumiu, e o texto ao lado continua descrevendo o mundo
+      # antigo. Quando esta conferência entrou havia **doze** links quebrados —
+      # entre eles três para um método de desenho de pixel que `Tela::retangulo`
+      # absorveu, um para um módulo `serial` que virou parte de `alvo`, e um
+      # `AP[2]` que o markdown lia como link por falta de crases.
+      #
+      # Nas quatro configurações do kernel porque `cfg` esconde itens: um link
+      # válido fora do `modo-teste` pode não existir dentro dele, e um link
+      # para o outro backend nunca resolve.
+      - name: Documentação
+        env:
+          RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
+        run: |
+          cargo doc --no-deps -p protocolo -p xtask
+          for alvo in x86_64-unknown-uefi aarch64-unknown-uefi; do
+            (cd iniciador && cargo doc --no-deps --target "$alvo")
+          done
+          cd kernel
+          for alvo in x86_64-unknown-none aarch64-unknown-none-softfloat; do
+            cargo doc --no-deps --target "$alvo"
+            cargo doc --no-deps --target "$alvo" --features modo-teste
+          done
+
   testes:
     name: Testes (${{ matrix.arch }})
     runs-on: ubuntu-latest
@@ -133,20 +160,20 @@ jobs:
       - name: Fumaça (release)
         run: cargo xtask fumaca --arch ${{ matrix.arch }} --release
 
-      # O iniciador UEFI, que é por onde o x86 vai passar a bootar.
-      #
-      # Ele sobe no OVMF — o firmware EDK II de verdade, o mesmo que uma
-      # máquina moderna roda — a partir da ESP do disco de testes, e o passo
-      # confere o relatório que ele emite. Não é um teste do kernel: é a
-      # afirmação de que o firmware encontra o nosso programa e de que o que
-      # ele lê da máquina bate com a máquina que pedimos ao emulador.
       # O iniciador UEFI, nas duas arquiteturas e nos dois firmwares.
       #
-      # Não é o mesmo passo duas vezes: no x86 a sonda exige que o kernel
-      # assuma a máquina e fale do outro lado do salto; no ARM ela exige o
-      # relatório até a validação do ELF e a recusa explícita do salto que
-      # ainda não existe. Os dois usam o EDK II de verdade — OVMF de um
-      # lado, AAVMF do outro.
+      # Ele sobe no EDK II de verdade — OVMF de um lado, AAVMF do outro, o
+      # mesmo firmware que uma máquina moderna roda — a partir da ESP do disco
+      # de testes, e o passo confere o relatório número por número: contra o
+      # `llvm-readobj`, contra o CRC do arquivo no hospedeiro e contra a
+      # máquina que pedimos ao emulador.
+      #
+      # Não é o mesmo passo duas vezes. No x86 a sonda espera a linha em que o
+      # kernel anuncia o framebuffer que adotou — que prova o salto e a
+      # adoção. No ARM ela deixa a **suíte inteira** rodar sobre o mapa de
+      # memória do firmware, que tem dezenas de regiões contra a única que o
+      # device tree descreve: passar pelo `-kernel` não diz nada sobre passar
+      # por aqui.
       - name: Iniciador UEFI
         run: cargo xtask iniciador --arch ${{ matrix.arch }}
 

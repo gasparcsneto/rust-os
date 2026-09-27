@@ -9,9 +9,13 @@
 target = "x86_64-unknown-none"
 
 [target.aarch64-unknown-none-softfloat]
-# O ARM não tem bootloader que nos posicione na memória, então o layout é
-# responsabilidade nossa: o script define onde o kernel é carregado, onde o
-# BSS começa e termina, e onde fica a pilha inicial.
+# No ARM o kernel é ligado num endereço fixo, e o layout é responsabilidade
+# nossa: o script define onde o kernel é carregado, onde o BSS começa e
+# termina, e onde fica a pilha inicial. Não é uma escolha de conveniência —
+# pelo protocolo de imagem crua do arm64 não há carregador nenhum para
+# posicionar coisa alguma, e o iniciador UEFI, que existe, carrega a imagem
+# exatamente no endereço em que ela foi ligada, porque o kernel do ARM não é
+# independente de posição.
 #
 # Escolhemos o alvo `-softfloat` de propósito: ele proíbe o compilador de usar
 # registradores de ponto flutuante e NEON. Num kernel isso é desejável, porque

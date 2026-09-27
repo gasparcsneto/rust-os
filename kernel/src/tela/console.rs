@@ -28,8 +28,9 @@
 //! A saída certa para isso existe e fica para quando o console for
 //! interativo: o adaptador tem registradores de altura virtual e
 //! deslocamento vertical, feitos exatamente para rolar sem copiar nada. Ela
-//! exige reprogramar o modo, inclusive no x86, onde hoje quem o programou foi
-//! o `bootloader` — e não é trabalho para o commit que faz o texto aparecer.
+//! exige reprogramar o modo, inclusive onde o kernel não o programou: nos dois
+//! boots por UEFI quem deixou o modo de pé foi o firmware, e o iniciador só
+//! leu a geometria. E não é trabalho para o commit que faz o texto aparecer.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
