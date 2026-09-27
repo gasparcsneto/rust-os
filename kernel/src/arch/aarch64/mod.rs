@@ -233,6 +233,39 @@ extern "C" fn inicio_aarch64(x0: u64) -> ! {
                 entrega.quantas_regioes,
                 entrega.dispositivos
             );
+
+            // E a tela que o firmware configurou, que até aqui era jogada
+            // fora. O mapa é de identidade, então o endereço da entrega já é
+            // o endereço pelo qual o kernel vai desenhar — e ele continua
+            // sendo depois de a MMU ligar: nesta máquina o bloco de 1 GiB da
+            // RAM utilizável já cobre o framebuffer, e `mmu::init` cuida do
+            // caso em que não cobrisse (ver `cobrir_a_tela`, que mede os dois
+            // desfechos no log).
+            //
+            // Adotar aqui, e não depois da paginação, é o que dá ao ARM a
+            // mesma propriedade que o x86 tem desde o primeiro dia: uma tela
+            // de falha disponível antes de o kernel ter uma tabela de
+            // página sua. É onde a tela é mais necessária — antes disso, um
+            // erro é silêncio absoluto se a serial não responder.
+            //
+            // SAFETY: a faixa é a que o firmware alocou e o iniciador
+            // reservou no mapa, com o tamanho que a geometria descreve. A
+            // identidade da UEFI ainda é o mapa ativo neste ponto.
+            if unsafe { crate::tela::adotar(&entrega.video) } {
+                // "alocados", e não "ocupados": este é o tamanho do buffer
+                // que o firmware reservou, que não é o que a geometria
+                // ocupa. Na máquina `virt` o EDK II aloca 3 MiB para uma
+                // tela de 800x600x4, que ocupa 1875 KiB. Confundir os dois
+                // é comparar grandezas diferentes — a sonda reprovou
+                // exatamente por isso antes de aprender a diferença.
+                crate::log_info!(
+                    "video",
+                    "tela do firmware adotada: {:#x}, {} bytes alocados",
+                    entrega.video.em,
+                    entrega.video.bytes
+                );
+            }
+
             entrega.dispositivos
         }
         None => {

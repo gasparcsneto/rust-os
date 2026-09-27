@@ -18,8 +18,10 @@
 //!
 //! Porque lá o framebuffer chega pronto: o `bootloader` configura o modo por
 //! UEFI ou VBE antes de o kernel existir e entrega a geometria em `BootInfo`.
-//! Este driver entra quando **ninguém** entregou nada, que é o caso do ARM —
-//! onde o boot é o protocolo arm64 cru e não há firmware que configure vídeo.
+//! Este driver entra quando **ninguém** entregou nada — hoje, o ARM que sobe
+//! pelo protocolo de imagem crua do arm64, onde não há firmware que configure
+//! vídeo. Pelo iniciador UEFI o ARM também chega com a tela pronta, e este
+//! driver não roda.
 //!
 //! Ele funciona no x86 também, e um dia pode ser o único caminho nas duas. Não
 //! é hoje: trocar um framebuffer que funciona por um que ainda não foi usado

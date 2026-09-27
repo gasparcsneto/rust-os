@@ -168,7 +168,6 @@ pub struct Tela {
 ///
 /// `base` precisa ser um endereço virtual válido, já mapeado e gravável, de
 /// uma região com pelo menos `stride * altura * bytes_por_pixel` bytes.
-#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub unsafe fn registrar(
     base: u64,
     largura: u32,
@@ -200,6 +199,57 @@ pub unsafe fn registrar(
     // decidir que há um framebuffer, então publicá-la antes da geometria
     // abriria uma janela em que alguém desenharia com largura zero.
     BASE.store(base, Ordering::Release);
+}
+
+/// Adota a tela que o iniciador entregou, se ele entregou uma.
+///
+/// Devolve se o kernel ficou com um framebuffer publicado — o que é menos
+/// que "a entrega trazia um": uma geometria incoerente é recusada por
+/// [`registrar`], e quem chama precisa saber a diferença para não anunciar
+/// uma tela que não existe.
+///
+/// # Por que a tradução mora aqui e não em cada arquitetura
+///
+/// Porque ela morava em cada arquitetura, e as duas cópias já tinham
+/// divergido do pior jeito possível: o x86 adotava a tela desde o primeiro
+/// dia, e o ARM lia a mesma entrega, **descartava** o vídeo dela e ia
+/// procurar um adaptador no PCI. O resultado era uma máquina com duas telas
+/// — a que o firmware configurou e ninguém usava, e a que o kernel
+/// programava depois — e ninguém percebia, porque as duas desenhavam.
+///
+/// Com um lugar só, adotar a entrega é a mesma decisão nas duas pontas, e a
+/// tradução de `formato` não tem como ficar para trás de um lado.
+///
+/// # Safety
+///
+/// `video.em` precisa ser um endereço já mapeado e gravável no espaço que
+/// está ativo, com pelo menos `pixels_por_linha * altura * bytes_por_pixel`
+/// bytes — as mesmas condições de [`registrar`], que é quem publica.
+pub unsafe fn adotar(video: &protocolo::Video) -> bool {
+    if video.presente == 0 {
+        return false;
+    }
+
+    // SAFETY: delegada a quem chama.
+    unsafe {
+        registrar(
+            video.em,
+            video.largura,
+            video.altura,
+            video.pixels_por_linha,
+            video.bytes_por_pixel,
+            match video.formato {
+                protocolo::formato::RGB => Formato::Rgb,
+                protocolo::formato::BGR => Formato::Bgr,
+                // Um formato que este kernel não sabe desenhar vira cinza: é
+                // uma escolha visível, e melhor que escrever bytes na ordem
+                // errada e produzir cores trocadas sem ninguém saber por quê.
+                _ => Formato::Cinza,
+            },
+        );
+    }
+
+    tela().is_some()
 }
 
 /// A geometria descreve uma tela em que a aritmética de pixel se sustenta?
@@ -290,6 +340,28 @@ impl Tela {
             bytes_por_pixel,
             formato,
         }
+    }
+
+    /// Onde a tela mora e quantos bytes ela ocupa.
+    ///
+    /// Existe para quem precisa tratá-la como **região de memória** em vez de
+    /// como grade de pixels: o mapa de identidade do ARM, que tem de garantir
+    /// que o framebuffer continue endereçável depois de a MMU ligar, e a
+    /// linha de log que o anuncia. Deduzir a extensão fora daqui seria
+    /// repetir a multiplicação que [`geometria_coerente`] valida, num lugar
+    /// onde ninguém a valida.
+    pub fn faixa(&self) -> (u64, u64) {
+        // Saturante, e não a multiplicação direta: os três fatores vêm da
+        // entrega do iniciador, que é dado de fora, e
+        // [`geometria_coerente`] confere as relações entre eles sem limitar
+        // a magnitude de nenhum. Três `u32` no teto estouram um `u64`, o que
+        // numa compilação de depuração é pânico — e chegar aqui já significa
+        // que algo antes falhou, então o desfecho certo é um número grande
+        // demais para ser aceito adiante, e não a morte do kernel.
+        let bytes = (self.stride as u64)
+            .saturating_mul(self.altura as u64)
+            .saturating_mul(self.bytes_por_pixel as u64);
+        (self.base, bytes)
     }
 
     /// Onde os bytes de um pixel começam, se ele estiver dentro da tela.

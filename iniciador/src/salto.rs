@@ -265,10 +265,10 @@ fn ultimo_mapa(
         // muito bem declarar utilizável.
         //
         // Entregá-la ao kernel como livre é dar ao alocador de frames as
-        // páginas que o vídeo está lendo sessenta vezes por segundo. Hoje o
-        // kernel do ARM nem usa esta tela — ele procura a dele no PCI —,
-        // então o defeito não tem sintoma: é exatamente o tipo de armadilha
-        // que espera o próximo a mexer aqui.
+        // páginas que o vídeo está lendo sessenta vezes por segundo. Quando
+        // esta proteção foi escrita o kernel do ARM nem usava esta tela — ele
+        // procurava a dele no PCI —, e o defeito não teria sintoma nenhum.
+        // Agora usa: a armadilha que a proteção esperava é o caso normal.
         if video_ocupa(destino, inicio, fim) {
             da_tela += 1;
             if tipo == protocolo::tipo::UTILIZAVEL {

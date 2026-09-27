@@ -746,11 +746,15 @@ fn firmware_uefi(arch: Arquitetura) -> Result<(PathBuf, PathBuf), String> {
 /// vire um erro em vez de um job pendurado.
 const TETO_DO_INICIADOR: Duration = Duration::from_secs(240);
 
-/// O que o relatório do iniciador precisa dizer para a etapa estar de pé.
+/// A linha com que o kernel anuncia o framebuffer que adotou.
 ///
-/// Cada linha aqui é uma afirmação sobre o que foi conferido do outro lado, e
-/// não sobre o texto: `as tres tabelas conferem` só é impressa depois de três
-/// assinaturas e três CRCs baterem. Procurar a linha é procurar a conferência.
+/// É o que a sonda do x86 **espera** ver, e não a primeira linha do kernel.
+/// A diferença é o que ela prova: a primeira linha diz que o salto chegou, e
+/// esta diz que o kernel chegou até a tela e ficou com a que o iniciador lhe
+/// deu. Esperar a segunda custa algumas centenas de milissegundos e inclui a
+/// primeira, que continua sendo conferida no texto capturado.
+const MARCA_DA_TELA: &str = "framebuffer ";
+
 /// A primeira linha que o kernel escreve depois de assumir a máquina.
 ///
 /// É ela que prova o salto. Tudo que vem antes é o iniciador falando sobre o
@@ -764,6 +768,10 @@ const fn marca_do_kernel(arch: Arquitetura) -> &'static str {
 }
 
 /// O relatório que o iniciador do x86 precisa produzir, do começo ao salto.
+///
+/// Cada linha aqui é uma afirmação sobre o que foi conferido do outro lado, e
+/// não sobre o texto: `as tres tabelas conferem` só é impressa depois de três
+/// assinaturas e três CRCs baterem. Procurar a linha é procurar a conferência.
 const ESPERADO_DO_INICIADOR: &[&str] = &[
     "vivo em x86_64, carregado pelo firmware",
     "tabela do sistema confere",
@@ -863,7 +871,7 @@ fn iniciador(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
     // nada sobre passar por este caminho.
     let marca = marca_do_kernel(arch);
     let espera = match arch {
-        Arquitetura::X86_64 => Desenlace::Marca(marca),
+        Arquitetura::X86_64 => Desenlace::Marca(MARCA_DA_TELA),
         Arquitetura::Aarch64 => Desenlace::Desligamento,
     };
     let (desfecho, relatorio, bruto) = subir_no_firmware(arch, &disco, &espera)?;
@@ -910,6 +918,19 @@ fn iniciador(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
         falhou = true;
     } else {
         println!("  [conferido] o kernel assumiu a maquina e disse `{marca}`");
+    }
+
+    // A tela em que o kernel desenha é a que o iniciador lhe entregou?
+    match conferir_a_tela_do_kernel(&como_str, &bruto) {
+        Ok(tela) => println!(
+            "  [conferido] o kernel desenha na tela de {}x{} que o iniciador entregou, e os \
+             {} KiB que ela ocupa cabem no buffer do firmware",
+            tela.largura, tela.altura, tela.kib
+        ),
+        Err(motivo) => {
+            eprintln!("[xtask] iniciador: {motivo}");
+            falhou = true;
+        }
     }
 
     // E, no ARM, a suíte inteira rodou sobre o mapa de memória do firmware.
@@ -1230,7 +1251,8 @@ fn conferir_desfecho(
                 TETO_DO_INICIADOR.as_secs()
             ),
             Desenlace::Marca(marca) => format!(
-                "o kernel nao disse `{marca}` em {}s — o salto nao chegou nele",
+                "o kernel nao disse `{marca}` em {}s — ou o salto nao chegou nele, ou ele \
+                 parou antes dessa linha",
                 TETO_DO_INICIADOR.as_secs()
             ),
         }),
@@ -1344,6 +1366,136 @@ fn conferir_a_tela(arch: Arquitetura, relatorio: &[&str]) -> Result<(), String> 
     }
 }
 
+/// A geometria que o iniciador diz ter encontrado, lida do relatório dele.
+///
+/// Mora numa função porque duas conferências diferentes precisam do mesmo
+/// par: uma pergunta se ele descreve um modo de vídeo que exista, e a outra
+/// se o kernel adotou **esse** modo. Lidos em dois lugares, os dois
+/// analisadores divergiriam na primeira mudança de formato da linha.
+fn geometria_do_iniciador(relatorio: &[&str]) -> Result<Tela, String> {
+    let video = relatorio
+        .iter()
+        .find(|l| l.starts_with("video:"))
+        .ok_or("o relatório não trouxe a linha de vídeo")?;
+    let (largura, altura) = video
+        .split_whitespace()
+        .nth(1)
+        .and_then(|g| g.split_once('x'))
+        .and_then(|(l, a)| Some((l.parse::<u32>().ok()?, a.parse::<u32>().ok()?)))
+        .ok_or_else(|| format!("não consegui ler a geometria de `{video}`"))?;
+    let kib = extrair_numero_antes(video, "KiB")
+        .ok_or_else(|| format!("não consegui ler a extensão da tela de `{video}`"))?;
+    Ok(Tela {
+        largura,
+        altura,
+        kib,
+    })
+}
+
+/// A tela como cada uma das duas pontas a descreve.
+///
+/// O endereço fica **fora** desta struct de propósito: o iniciador relata o
+/// físico e o kernel desenha pelo virtual, e no x86 os dois diferem. Comparar
+/// endereços aqui seria escrever uma regra que só vale numa arquitetura —
+/// exatamente o defeito que este projeto já pagou algumas vezes.
+///
+/// O `kib` também não é a mesma grandeza nos dois lados, e descobrir isso
+/// custou uma reprovação: o iniciador relata o tamanho que o **firmware
+/// alocou** (`FrameBufferSize` do protocolo de vídeo da UEFI), e o kernel
+/// relata o que a **geometria ocupa** (`stride * altura * bytes por pixel`).
+/// No x86 os dois coincidem; no ARM da máquina `virt` o EDK II aloca 3072
+/// KiB para uma tela de 800x600x4, que ocupa 1875. A relação que vale nas
+/// duas é de continência, não de igualdade — ver
+/// [`conferir_a_tela_do_kernel`].
+#[derive(Clone, Copy)]
+struct Tela {
+    largura: u32,
+    altura: u32,
+    kib: u64,
+}
+
+/// O kernel desenha na tela que o iniciador lhe entregou — ou em outra?
+///
+/// # O que esta conferência existe para pegar
+///
+/// Um defeito que ficou meses no repositório sem sintoma: o kernel do ARM
+/// lia a entrega inteira, **descartava** o vídeo dela e ia procurar um
+/// adaptador `bochs-display` no PCI. As duas telas funcionavam, as duas
+/// desenhavam, e nada no log dizia que o framebuffer que o firmware havia
+/// configurado estava sendo ignorado — a máquina simplesmente tinha dois
+/// vídeos e usava o segundo.
+///
+/// O que denuncia isso é a **geometria**: o firmware entrega 800x600, e o
+/// adaptador do PCI é programado pelo kernel em 1280x720. Comparar os dois
+/// números é o que transforma "há uma tela" em "há a tela certa".
+///
+/// A segunda conferência é de **extensão**, e ela pergunta outra coisa: o
+/// que o kernel desenha cabe no buffer que o firmware alocou? É a única
+/// grandeza dos dois relatos que depende do `stride`, e a relação entre as
+/// duas é de continência e não de igualdade — ver [`Tela`].
+///
+/// Vale nas duas arquiteturas, e de propósito: é justamente o tipo de regra
+/// que este projeto já viu ser escrita de um lado só.
+fn conferir_a_tela_do_kernel(relatorio: &[&str], bruto: &str) -> Result<Tela, String> {
+    let entregue = geometria_do_iniciador(relatorio)?;
+
+    let linha = bruto
+        .lines()
+        .find(|l| l.contains(MARCA_DA_TELA))
+        .ok_or("o kernel não anunciou framebuffer nenhum")?;
+    let (largura, altura) = linha
+        .split(MARCA_DA_TELA)
+        .nth(1)
+        .and_then(|r| r.split_whitespace().next())
+        .and_then(|g| g.split_once('x'))
+        .and_then(|(l, a)| Some((l.parse::<u32>().ok()?, a.parse::<u32>().ok()?)))
+        .ok_or_else(|| {
+            format!(
+                "não consegui ler a geometria do kernel de `{}`",
+                linha.trim()
+            )
+        })?;
+    let kib = extrair_numero_antes(linha, "KiB").ok_or_else(|| {
+        format!(
+            "não consegui ler a extensão da tela do kernel de `{}`",
+            linha.trim()
+        )
+    })?;
+    let usada = Tela {
+        largura,
+        altura,
+        kib,
+    };
+
+    if (usada.largura, usada.altura) != (entregue.largura, entregue.altura) {
+        return Err(format!(
+            "o iniciador entregou uma tela de {}x{} e o kernel desenha numa de {}x{}: ele \
+             está ignorando a entrega e usando outra",
+            entregue.largura, entregue.altura, usada.largura, usada.altura
+        ));
+    }
+    // E o que o kernel desenha cabe no que o firmware alocou.
+    //
+    // Não é igualdade: as duas pontas medem coisas diferentes (ver
+    // [`Tela`]). É continência, e é a relação que importa — o que passa do
+    // fim do buffer não vira pixel, vira escrita em memória de outra pessoa.
+    //
+    // A conferência não é redundante com a da geometria: a extensão é o
+    // único número dos dois relatos que depende do `stride`, e uma tela com
+    // a geometria certa e o passo de linha errado sai inclinada, sem erro
+    // nenhum. Ela também pega, por outro caminho, a tela trocada: o
+    // `bochs-display` em 1280x720x4 ocupa 3600 KiB e não caberia nos 3072
+    // que o firmware alocou.
+    if usada.kib > entregue.kib {
+        return Err(format!(
+            "o kernel desenha {} KiB de tela e o firmware alocou {}: ele escreve depois do \
+             fim do buffer",
+            usada.kib, entregue.kib
+        ));
+    }
+    Ok(usada)
+}
+
 fn conferir_numeros_do_iniciador(arch: Arquitetura, relatorio: &[&str]) -> Result<(), String> {
     let memoria = relatorio
         .iter()
@@ -1395,16 +1547,11 @@ fn conferir_numeros_do_iniciador(arch: Arquitetura, relatorio: &[&str]) -> Resul
         .iter()
         .find(|l| l.starts_with("video:"))
         .ok_or("o relatório não trouxe a linha de vídeo")?;
-    let geometria = video
-        .split_whitespace()
-        .nth(1)
-        .and_then(|g| g.split_once('x'))
-        .and_then(|(l, a)| Some((l.parse::<u32>().ok()?, a.parse::<u32>().ok()?)))
-        .ok_or_else(|| format!("não consegui ler a geometria de `{video}`"))?;
-    if geometria.0 < 640 || geometria.1 < 480 {
+    let geometria = geometria_do_iniciador(relatorio)?;
+    if geometria.largura < 640 || geometria.altura < 480 {
         return Err(format!(
             "o vídeo veio com {}x{}, menor que qualquer modo de verdade",
-            geometria.0, geometria.1
+            geometria.largura, geometria.altura
         ));
     }
     let buffer = video
@@ -2660,6 +2807,11 @@ fn comando_qemu(
         // `fw_cfg`, sem barramento. Como não é PCI, ele não aparece na
         // varredura do kernel — os dois adaptadores convivem sem que nenhum
         // dos dois lados precise escolher.
+        //
+        // Qual deles o kernel usa depende de como ele subiu, e não de uma
+        // escolha nossa: pela UEFI ele adota a tela que a entrega traz, que
+        // é a do `ramfb`, e nem chega a procurar no PCI; por imagem crua não
+        // há entrega, e o `bochs-display` acima é a única tela que existe.
         //
         // A terceira opção, `virtio-gpu-pci`, tem driver no EDK II e publica
         // um modo só de transferência, sem buffer linear. O iniciador o

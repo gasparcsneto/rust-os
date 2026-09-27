@@ -130,33 +130,14 @@ pub unsafe extern "sysv64" fn _start(entrega: *const protocolo::Entrega) -> ! {
         });
     }
 
-    if entrega.video.presente != 0 {
-        // O endereço já está mapeado e gravável — é o que torna a tela
-        // utilizável desde o primeiro instante, antes mesmo de a paginação
-        // ser nossa. Num kernel que quer poder desenhar uma tela de falha,
-        // esse "desde o primeiro instante" é a propriedade que importa.
-        //
-        // SAFETY: a faixa é a que o iniciador mapeou, com exatamente o
-        // tamanho que a geometria descreve, e ninguém mais a tem.
-        unsafe {
-            crate::tela::registrar(
-                entrega.video.em,
-                entrega.video.largura,
-                entrega.video.altura,
-                entrega.video.pixels_por_linha,
-                entrega.video.bytes_por_pixel,
-                match entrega.video.formato {
-                    protocolo::formato::RGB => crate::tela::Formato::Rgb,
-                    protocolo::formato::BGR => crate::tela::Formato::Bgr,
-                    // Um formato que este kernel não sabe desenhar vira
-                    // cinza: é uma escolha visível, e melhor que escrever
-                    // bytes na ordem errada e produzir cores trocadas sem
-                    // ninguém saber por quê.
-                    _ => crate::tela::Formato::Cinza,
-                },
-            );
-        }
-    }
+    // O endereço já está mapeado e gravável — é o que torna a tela utilizável
+    // desde o primeiro instante, antes mesmo de a paginação ser nossa. Num
+    // kernel que quer poder desenhar uma tela de falha, esse "desde o
+    // primeiro instante" é a propriedade que importa.
+    //
+    // SAFETY: a faixa é a que o iniciador mapeou, com exatamente o tamanho
+    // que a geometria descreve, e ninguém mais a tem.
+    unsafe { crate::tela::adotar(&entrega.video) };
 
     crate::inicio_comum(canal)
 }

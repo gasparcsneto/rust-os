@@ -218,6 +218,27 @@ pub unsafe fn init() {
         }
     });
 
+    // A tela, quando o iniciador entregou uma.
+    //
+    // O laço acima só olha para o que é **utilizável**, e o framebuffer não
+    // é: ele mora na RAM, mas o firmware o declara reservado e o iniciador
+    // confirma a reserva.
+    //
+    // Medido: nesta máquina esta chamada acrescenta **zero** blocos, e
+    // apagá-la deixa a sonda do boot por UEFI inteira verde, com os 150
+    // casos da suíte passando. O motivo é aritmético e não é garantia de
+    // nada: o `ramfb` do EDK II cai em 0x43d0_0000 e a imagem do kernel em
+    // 0x4008_0000, o mesmo bloco de 1 GiB — que a RAM utilizável já mapeou.
+    //
+    // É por isso que ela está escrita. No dia em que a tela cair sozinha num
+    // bloco, a primeira linha de log depois do `ligar` vira falha de
+    // tradução — e a tela é justamente o canal que existe para quando a
+    // serial não responde, ou seja, para quando esse diagnóstico não chega
+    // a lugar nenhum. A parte falsificável é a aritmética, que mora em
+    // [`blocos_da_tela`] e a suíte exercita com telas que esta máquina não
+    // tem.
+    let blocos_de_tela = cobrir_a_tela(l1);
+
     // A guard page exige granularidade de 4 KiB numa região que os blocos de
     // 1 GiB cobrem inteira. Refinamos a árvore aqui, **antes** de ligar a MMU.
     //
@@ -251,13 +272,88 @@ pub unsafe fn init() {
 
     crate::log_info!(
         "mmu",
-        "identidade ativa: 1 bloco de dispositivo, {} de RAM",
-        blocos_de_ram
+        "identidade ativa: 1 bloco de dispositivo, {} de RAM, {} acrescentado(s) pela tela",
+        blocos_de_ram,
+        blocos_de_tela
     );
     match guard_page {
         Some(endereco) => crate::log_info!("mmu", "guard page da pilha em {:#x}", endereco),
         None => crate::log_warn!("mmu", "pilha do kernel sem guard page"),
     }
+}
+
+/// Que entradas de topo uma tela em `base` com `bytes` bytes atravessa.
+///
+/// Devolve o par inclusivo de índices, ou `None` quando não há tela (`bytes`
+/// zero) ou quando ela começa fora do espaço de 39 bits que este kernel
+/// configura.
+///
+/// # Por que a aritmética mora sozinha
+///
+/// Porque é a única parte disto que pode estar errada de um jeito que não
+/// aparece: o efeito de [`cobrir_a_tela`] na máquina de hoje é nulo — a RAM
+/// utilizável já cobre a tela —, e um erro de deslocamento ou um limite
+/// trocado passaria despercebido até o dia em que ela fosse necessária.
+/// Separada assim, a suíte a exercita com telas que não existem nesta
+/// máquina, que é a única forma de falsificá-la aqui.
+pub(crate) fn blocos_da_tela(base: u64, bytes: u64) -> Option<(usize, usize)> {
+    if bytes == 0 {
+        return None;
+    }
+    let primeiro = (base >> 30) as usize;
+    if primeiro >= ENTRADAS {
+        return None;
+    }
+    // O último byte, e não o primeiro depois do fim: uma tela que termina
+    // exatamente na fronteira de 1 GiB não atravessa para o bloco seguinte.
+    let ultimo = (base.saturating_add(bytes - 1) >> 30) as usize;
+    Some((primeiro, ultimo.min(ENTRADAS - 1)))
+}
+
+/// Garante que a faixa da tela esteja no mapa de identidade.
+///
+/// Devolve quantos blocos **precisaram** ser acrescentados — zero quando a
+/// RAM utilizável já cobria a tela, que é o caso de hoje. O número vai para
+/// o log porque é a diferença entre "não precisou" e "não olhou", e essas
+/// duas coisas não podem ser a mesma ausência de saída.
+///
+/// Os blocos são de memória normal, e não de dispositivo, porque é isso que
+/// o framebuffer é: RAM que o firmware alocou. Marcá-lo como dispositivo
+/// faria de cada escrita de pixel um acesso não bufferizado, e desenhar uma
+/// tela cheia passaria a custar um milhão deles.
+///
+/// Só pode ser chamada de dentro de [`init`], com a MMU ainda desligada:
+/// escrever uma entrada de topo com a tradução ativa exigiria
+/// break-before-make. Não é `unsafe` porque a referência exclusiva à tabela
+/// já é o que ninguém mais tem — e quem a tem, neste kernel, é só `init`.
+fn cobrir_a_tela(l1: &mut Tabela) -> usize {
+    let Some(tela) = crate::tela::tela() else {
+        return 0;
+    };
+    let (base, bytes) = tela.faixa();
+    let Some((primeiro, ultimo)) = blocos_da_tela(base, bytes) else {
+        if bytes != 0 {
+            crate::log_warn!("mmu", "a tela em {:#x} cai fora do espaco de 39 bits", base);
+        }
+        return 0;
+    };
+
+    let mut acrescentados = 0;
+    for (deslocamento, entrada) in l1.entradas[primeiro..=ultimo].iter_mut().enumerate() {
+        let indice = primeiro + deslocamento;
+        // O bloco 0 é dispositivo e é assim que tem de ficar: sobrepô-lo
+        // tornaria a UART e o GIC cacheáveis. Uma tela ali seria outra
+        // conversa, e nenhuma máquina que este kernel roda a põe ali.
+        if indice == 0 {
+            crate::log_warn!("mmu", "a tela em {:#x} cai no bloco dos perifericos", base);
+            continue;
+        }
+        if *entrada == 0 {
+            *entrada = bloco((indice as u64) << 30, ATTR_NORMAL, UXN);
+            acrescentados += 1;
+        }
+    }
+    acrescentados
 }
 
 /// Deixa desmapeada a página logo abaixo da pilha do kernel.

@@ -3659,6 +3659,98 @@ fn frames_nunca_entrega_o_frame_zero() -> Resultado {
     Ok(())
 }
 
+/// A tela em que o kernel desenha está mapeada no espaço em que ele roda.
+///
+/// # O que este caso protege
+///
+/// Que "há uma tela registrada" e "dá para escrever nela" não são a mesma
+/// afirmação. [`crate::tela::registrar`] guarda um endereço; quem garante
+/// que aquele endereço traduz é o mapa de páginas, e os dois são montados
+/// em momentos diferentes por código diferente.
+///
+/// No x86 quem mapeia é o iniciador, antes de o kernel existir. No ARM o
+/// kernel adota a tela do firmware com a MMU **desligada** e depois liga a
+/// sua própria — e o mapa de identidade dele cobre o que é utilizável,
+/// enquanto o framebuffer é declarado reservado. Se o bloco da tela não
+/// entrasse no mapa, a primeira linha de log depois de a MMU ligar seria
+/// uma falha de tradução, e ela viria da parte do kernel que existe
+/// justamente para quando a serial não responde.
+///
+/// Os dois extremos são conferidos, e não só a base: uma tela que atravessa
+/// a fronteira de um bloco não está mapeada só porque o começo dela está.
+fn tela_esta_mapeada_no_espaco_do_kernel() -> Resultado {
+    let Some(tela) = crate::tela::tela() else {
+        return sem_framebuffer();
+    };
+
+    let (base, bytes) = tela.faixa();
+    if bytes == 0 {
+        return Err("a tela diz ocupar zero bytes");
+    }
+
+    // Saturante pela mesma razão que [`crate::tela::Tela::faixa`]: a
+    // extensão vem da geometria, que vem da entrega, e um `u64` no teto
+    // estouraria a soma numa compilação de depuração.
+    let ultimo = base.saturating_add(bytes - 1);
+    for endereco in [base, ultimo] {
+        if crate::arch::traduzir(endereco).is_none() {
+            crate::log_error!(
+                "teste",
+                "a tela vai de {:#x} a {:#x} e {:#x} nao traduz",
+                base,
+                ultimo,
+                endereco
+            );
+            return Err("um extremo da tela nao traduz no espaco do kernel");
+        }
+    }
+
+    // E a aritmética que decide **quais** blocos a tela exige do mapa de
+    // identidade. Ela é exercitada aqui com telas que não existem nesta
+    // máquina porque na que existe ela não tem efeito nenhum: a RAM
+    // utilizável já cobre o framebuffer do `ramfb`, e `cobrir_a_tela`
+    // acrescenta zero blocos. Sem estas afirmações, um deslocamento errado
+    // ou um limite trocado passaria até o dia em que ela fosse necessária.
+    #[cfg(target_arch = "aarch64")]
+    {
+        use crate::arch::aarch64::mmu::blocos_da_tela;
+
+        const GIB: u64 = 1024 * 1024 * 1024;
+
+        // Uma tela inteira dentro de um bloco ocupa só ele.
+        if blocos_da_tela(GIB + 0x3d0_0000, 3 * 1024 * 1024) != Some((1, 1)) {
+            return Err("uma tela dentro de um bloco pediu mais de um");
+        }
+        // Uma que atravessa a fronteira pede os dois.
+        if blocos_da_tela(2 * GIB - 4096, 8192) != Some((1, 2)) {
+            return Err("uma tela que atravessa a fronteira pediu um bloco so");
+        }
+        // Uma que termina exatamente na fronteira **não** atravessa: o
+        // índice sai do último byte, e não do primeiro depois do fim.
+        if blocos_da_tela(2 * GIB - 4096, 4096) != Some((1, 1)) {
+            return Err("uma tela que acaba na fronteira invadiu o bloco seguinte");
+        }
+        // Sem tela não há bloco a pedir.
+        if blocos_da_tela(GIB, 0).is_some() {
+            return Err("uma tela de zero bytes pediu um bloco");
+        }
+        // E uma fora do espaço de 39 bits não tem entrada de topo que a
+        // cubra: devolver um índice aqui escreveria fora da tabela.
+        if blocos_da_tela(512 * GIB, 4096).is_some() {
+            return Err("uma tela fora do espaco de 39 bits pediu um bloco");
+        }
+        // Uma extensão absurda não estoura nem escapa: o último índice é
+        // recortado no fim da tabela. A geometria vem da entrega, que é dado
+        // de fora, e a única conferência sobre ela é de coerência — nada
+        // limita a magnitude dos campos.
+        if blocos_da_tela(GIB, u64::MAX) != Some((1, 511)) {
+            return Err("uma tela de extensao absurda escapou do fim da tabela");
+        }
+    }
+
+    Ok(())
+}
+
 /// Uma geometria de tela incoerente é recusada, e a tela em uso sobrevive.
 ///
 /// O `stride` é quantos pixels vão de uma linha à seguinte, e pode exceder a
@@ -7188,6 +7280,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "tela: recusa geometria incoerente",
         f: tela_recusa_geometria_incoerente,
+    },
+    Caso {
+        nome: "tela: o framebuffer esta mapeado no espaco do kernel",
+        f: tela_esta_mapeada_no_espaco_do_kernel,
     },
     Caso {
         nome: "paginacao: frame reciclado vem zerado",

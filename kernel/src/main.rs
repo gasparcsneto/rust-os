@@ -137,20 +137,26 @@ fn parar_sem_base(subsistema: &'static str, motivo: &str, canal_agente: bool) ->
 /// Registra no log a tela que existe, e desenha o indicador de vida.
 ///
 /// Devolve se havia uma. Os dois chamadores precisam saber: o primeiro porque
-/// no ARM ninguém procurou ainda, e o segundo porque é ele quem reporta a
-/// ausência **depois** de ter procurado.
+/// no ARM por imagem crua ninguém procurou ainda, e o segundo porque é ele
+/// quem reporta a ausência **depois** de ter procurado.
 fn anunciar_tela() -> bool {
     let Some(t) = tela::tela() else {
         return false;
     };
 
+    // A extensão vai junto com a geometria, e não é enfeite: é o único campo
+    // desta linha que depende do `stride`, e é o que a sonda compara com o
+    // que o iniciador relatou ter entregado. Geometria igual com extensão
+    // diferente é um kernel que entendeu a tela de outro jeito.
+    let (_, bytes) = t.faixa();
     log_info!(
         "video",
-        "framebuffer {}x{} {} ({} bytes/pixel)",
+        "framebuffer {}x{} {} ({} bytes/pixel, {} KiB)",
         t.largura,
         t.altura,
         t.formato.como_str(),
-        t.bytes_por_pixel
+        t.bytes_por_pixel,
+        bytes / 1024
     );
     // O indicador de que há um kernel vivo desenhando. Vem logo depois do
     // log, e não antes, para que uma falha ao desenhar apareça depois de já
@@ -233,12 +239,15 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     }
 
     // A tela que o firmware entregou pronta, se entregou alguma. É o caso do
-    // x86, onde o `bootloader` configura o modo antes de o kernel existir.
+    // x86, onde o `bootloader` configura o modo antes de o kernel existir, e
+    // agora também o do ARM que sobe pelo iniciador UEFI: lá quem configura o
+    // modo é o firmware, e a geometria chega dentro da entrega.
     //
-    // Não há `else` aqui de propósito: no ARM ninguém entrega nada, e dizer
-    // "nenhum framebuffer nesta plataforma" agora seria uma conclusão tirada
-    // antes de procurar. Quem procura é [`tela::bochs`], e ele precisa do
-    // barramento PCI enumerado — o que só acontece bem mais abaixo.
+    // Não há `else` aqui de propósito: no ARM que sobe por imagem crua
+    // ninguém entrega nada, e dizer "nenhum framebuffer nesta plataforma"
+    // agora seria uma conclusão tirada antes de procurar. Quem procura é
+    // [`tela::bochs`], e ele precisa do barramento PCI enumerado — o que só
+    // acontece bem mais abaixo.
     anunciar_tela();
 
     // Com a GDT carregada, o mecanismo de chamadas de sistema pode ser
