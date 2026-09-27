@@ -254,12 +254,13 @@ extern "C" fn tratar_sync(quadro: &mut Quadro) {
             // Chamada de sistema de um processo.
             super::usuario::atender_chamada(quadro);
 
-            // `sair` apenas marca o fio como encerrado; quem troca de contexto
-            // é este handler, sobre o quadro que ele já tem. Ver
-            // `fios::marcar_terminado` para o porquê de não ser a própria
-            // chamada a ceder.
-            if crate::fios::atual_terminou() {
-                encerrar_fio_atual(quadro);
+            // Uma chamada pode deixar o fio sem poder continuar de duas
+            // formas: ele saiu, ou está esperando um filho. Quem troca de
+            // contexto nos dois casos é este handler, sobre o quadro que ele
+            // já tem. Ver `fios::marcar_terminado` para o porquê de não ser a
+            // própria chamada a ceder.
+            if crate::fios::atual_parado() {
+                parar_o_fio_atual(quadro);
             }
             return;
         }
@@ -326,8 +327,9 @@ extern "C" fn tratar_sync(quadro: &mut Quadro) {
             seq,
             quadro.elr
         );
-        crate::fios::marcar_terminado();
-        encerrar_fio_atual(quadro);
+        // Sem código de saída: este processo não chegou a `sair`.
+        crate::fios::marcar_terminado(None);
+        parar_o_fio_atual(quadro);
         return;
     }
 
@@ -363,18 +365,27 @@ const fn e_escrita_proibida(esr: u64) -> bool {
     esr & WNR != 0 && esr & FAMILIA_DFSC == FALHA_DE_PERMISSAO
 }
 
-/// Tira o fio encerrado de circulação, sobre o quadro da exceção corrente.
+/// Tira de circulação o fio que não pode continuar, sobre o quadro da
+/// exceção corrente.
+///
+/// São dois casos, e a diferença entre eles não aparece aqui: um fio
+/// encerrado nunca mais é escolhido, e um que espera um filho volta quando o
+/// filho sai. Os dois precisam da mesma coisa agora — sair da frente.
 ///
 /// Se não houver outro fio pronto, esperamos aqui dentro em vez de retornar:
 /// um `eret` neste ponto devolveria o controle a um processo que já não
-/// existe.
-fn encerrar_fio_atual(quadro: &mut Quadro) {
+/// existe, ou retomaria um que ainda não pode andar.
+///
+/// A condição de parada é sobre o fio **atual depois da troca**, que já é
+/// outro: sair do laço quer dizer "conseguimos passar a bola para alguém que
+/// pode correr".
+fn parar_o_fio_atual(quadro: &mut Quadro) {
     loop {
         // SAFETY: estamos dentro de um handler de exceção, com as interrupções
         // mascaradas pela própria entrada da exceção.
         unsafe { super::contexto::trocar_no_quadro(quadro) };
 
-        if !crate::fios::atual_terminou() {
+        if !crate::fios::atual_parado() {
             return;
         }
 

@@ -126,6 +126,34 @@ const _: () = assert!(ARQUIVO_DO_LEITOR.len() == 13);
 #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub const DIAGNOSTICO: &str = "diagnostico de userspace";
 
+/// Código de saída do filho do programa que espera.
+///
+/// O pai sai com **este número mais um**, e é essa soma que prova a colheita:
+/// um `esperar` que devolvesse o id certo sem trazer o código de saída faria
+/// o pai sair com o veneno do slot, não com 52.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub const CODIGO_DO_FILHO_PACIENTE: i64 = 51;
+
+/// Com o que o pai paciente sai quando tudo conferiu.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub const CODIGO_DO_PACIENTE: i64 = CODIGO_DO_FILHO_PACIENTE + 1;
+
+/// Com o que o pai paciente sai quando alguma conferência falhou.
+///
+/// São três, e cada uma mataria uma parte diferente de `esperar`: o id
+/// devolvido não é o do filho, a segunda espera **não** foi recusada, ou o
+/// programa chegou onde não devia.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub const CODIGO_DE_FALHA_DO_PACIENTE: i64 = 9;
+
+/// O que o slot do código de saída carrega antes de alguém escrever nele.
+///
+/// Veneno, e não zero: um `esperar` que devolvesse o id mas não escrevesse o
+/// código faria o pai sair com `0 + 1`, que é um número plausível. Com 100 o
+/// pai sairia com 101, que não se confunde com nada.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub const VENENO_DO_SLOT: i64 = 100;
+
 unsafe extern "C" {
     #[link_name = "programa_exemplo_inicio"]
     static INICIO: u8;
@@ -143,6 +171,10 @@ unsafe extern "C" {
     static LEITOR_INICIO: u8;
     #[link_name = "programa_leitor_fim"]
     static LEITOR_FIM: u8;
+    #[link_name = "programa_paciente_inicio"]
+    static PACIENTE_INICIO: u8;
+    #[link_name = "programa_paciente_fim"]
+    static PACIENTE_FIM: u8;
 }
 
 /// A imagem ELF do programa bem-comportado.
@@ -189,6 +221,30 @@ pub fn bytes_do_filho() -> &'static [u8] {
 pub fn bytes_do_leitor() -> &'static [u8] {
     // SAFETY: ver `entre`.
     unsafe { entre(&raw const LEITOR_INICIO, &raw const LEITOR_FIM) }
+}
+
+/// A imagem ELF do programa que bifurca e **espera** o filho.
+///
+/// Existe porque `esperar` é a única chamada deste kernel que bloqueia, e
+/// bloquear é o tipo de coisa que funciona por acidente: um pai que
+/// simplesmente perguntasse em laço até achar o filho passaria em qualquer
+/// teste que só olhasse o código de saída.
+///
+/// Por isso ele confere quatro coisas, e sai com
+/// [`CODIGO_DE_FALHA_DO_PACIENTE`] se qualquer uma falhar:
+///
+/// 0. um ponteiro inválido é recusado **sem** consumir o filho — a colheita
+///    é destrutiva, e conferir depois dela trocaria a resposta pelo erro;
+/// 1. o id devolvido por `esperar` é o do filho que `bifurcar` devolveu;
+/// 2. o código de saída chegou ao slot — o pai sai com ele **mais um**, e o
+///    slot começa envenenado com [`VENENO_DO_SLOT`];
+/// 3. a segunda espera é **recusada**, porque o filho já foi colhido. Sem
+///    esta, um `esperar` que esquecesse de marcar a colheita devolveria o
+///    mesmo filho para sempre.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub fn bytes_do_paciente() -> &'static [u8] {
+    // SAFETY: ver `entre`.
+    unsafe { entre(&raw const PACIENTE_INICIO, &raw const PACIENTE_FIM) }
 }
 
 /// # Safety
@@ -642,6 +698,124 @@ programa_invasor_inicio:
 
 .global programa_invasor_fim
 programa_invasor_fim:
+
+// --- o paciente: bifurca, espera o filho e sai com o codigo dele -----------
+//
+// Dois segmentos: o codigo, e oito bytes gravaveis onde `esperar` deposita o
+// codigo de saida do filho. O slot comeca envenenado -- se ninguem escrever
+// nele, o pai sai com o veneno mais um, que nao se confunde com nada.
+.set OFF_CODIGO_PACIENTE, 32
+.set VADDR_SLOT_PA,       VADDR_DADOS
+.set DADOS_PA,            8
+
+.balign 8
+.global programa_paciente_inicio
+programa_paciente_inicio:
+
+.Lelf_pa:
+    .byte   0x7F, 0x45, 0x4C, 0x46   // \x7fELF
+    .byte   2, 1, 1, 0               // 64 bits, little-endian, versao 1
+    .byte   0, 0, 0, 0, 0, 0, 0, 0   // resto do e_ident
+    .short  2                        // e_type: ET_EXEC
+    .short  0x3E                     // e_machine
+    .long   1                        // e_version
+    .quad   VADDR_CODIGO + OFF_CODIGO_PACIENTE   // e_entry
+    .quad   64                       // e_phoff
+    .quad   0                        // e_shoff
+    .long   0                        // e_flags
+    .short  64                       // e_ehsize
+    .short  56                       // e_phentsize
+    .short  2                        // e_phnum
+    .short  0                        // e_shentsize
+    .short  0                        // e_shnum
+    .short  0                        // e_shstrndx
+
+    // codigo: leitura e execucao
+    .long   1                                   // PT_LOAD
+    .long   5                                   // PF_R | PF_X
+    .quad   .Lcodigo_pa - .Lelf_pa              // p_offset
+    .quad   VADDR_CODIGO                        // p_vaddr
+    .quad   VADDR_CODIGO                        // p_paddr
+    .quad   .Lfim_codigo_pa - .Lcodigo_pa       // p_filesz
+    .quad   .Lfim_codigo_pa - .Lcodigo_pa       // p_memsz
+    .quad   4096                                // p_align
+
+    // dados: leitura e escrita, o slot do codigo de saida
+    .long   1                                   // PT_LOAD
+    .long   6                                   // PF_R | PF_W
+    .quad   .Ldados_pa - .Lelf_pa               // p_offset
+    .quad   VADDR_DADOS                         // p_vaddr
+    .quad   VADDR_DADOS                         // p_paddr
+    .quad   DADOS_PA                            // p_filesz
+    .quad   DADOS_PA                            // p_memsz
+    .quad   4096                                // p_align
+
+.Lcodigo_pa:
+    .space  OFF_CODIGO_PACIENTE
+    // bifurcar()
+    mov     eax, 4
+    syscall
+    test    rax, rax
+    jz      .Lfilho_pa
+
+    // O pai guarda o id do filho em RBX, que o quadro da chamada preserva.
+    mov     rbx, rax
+
+    // Um ponteiro invalido tem de ser recusado **sem** custar o filho: o
+    // endereco 1 esta fora da faixa do usuario. Se a colheita acontecesse
+    // antes da conferencia, esta chamada consumiria o filho e a seguinte
+    // nao acharia mais ninguem.
+    xor     edi, edi
+    mov     esi, 1
+    mov     eax, 9
+    syscall
+    test    rax, rax
+    jns     .Lfalhou_pa
+
+    // esperar(0, &slot): qualquer filho, com o codigo de saida no slot.
+    xor     edi, edi
+    movabs  rsi, offset VADDR_SLOT_PA
+    mov     eax, 9
+    syscall
+
+    // 1. o id colhido tem de ser o do filho
+    cmp     rax, rbx
+    jne     .Lfalhou_pa
+
+    // 2. a segunda espera tem de ser recusada: o filho ja foi colhido
+    xor     edi, edi
+    xor     esi, esi
+    mov     eax, 9
+    syscall
+    test    rax, rax
+    jns     .Lfalhou_pa
+
+    // 3. sair com o codigo do filho mais um
+    movabs  rax, offset VADDR_SLOT_PA
+    mov     rdi, [rax]
+    inc     rdi
+    mov     eax, 0
+    syscall
+
+.Lfilho_pa:
+    mov     eax, 0
+    mov     edi, 51
+    syscall
+
+.Lfalhou_pa:
+    mov     eax, 0
+    mov     edi, 9
+    syscall
+.Lprender_pa:
+    jmp     .Lprender_pa
+.Lfim_codigo_pa:
+
+.Ldados_pa:
+    .quad   100                      // o veneno do slot
+.Lfim_dados_pa:
+
+.global programa_paciente_fim
+programa_paciente_fim:
 "#
 );
 
@@ -1100,5 +1274,125 @@ programa_invasor_inicio:
 
 .global programa_invasor_fim
 programa_invasor_fim:
+
+// --- o paciente: bifurca, espera o filho e sai com o codigo dele -----------
+//
+// Dois segmentos: o codigo, e oito bytes gravaveis onde `esperar` deposita o
+// codigo de saida do filho. O slot comeca envenenado -- se ninguem escrever
+// nele, o pai sai com o veneno mais um, que nao se confunde com nada.
+.set OFF_CODIGO_PACIENTE, 32
+.set VADDR_SLOT_PA,       VADDR_DADOS
+.set DADOS_PA,            8
+
+.balign 8
+.global programa_paciente_inicio
+programa_paciente_inicio:
+
+.Lelf_pa:
+    .byte   0x7F, 0x45, 0x4C, 0x46   // \x7fELF
+    .byte   2, 1, 1, 0               // 64 bits, little-endian, versao 1
+    .byte   0, 0, 0, 0, 0, 0, 0, 0   // resto do e_ident
+    .short  2                        // e_type: ET_EXEC
+    .short  0xB7                     // e_machine
+    .long   1                        // e_version
+    .quad   VADDR_CODIGO + OFF_CODIGO_PACIENTE   // e_entry
+    .quad   64                       // e_phoff
+    .quad   0                        // e_shoff
+    .long   0                        // e_flags
+    .short  64                       // e_ehsize
+    .short  56                       // e_phentsize
+    .short  2                        // e_phnum
+    .short  0                        // e_shentsize
+    .short  0                        // e_shnum
+    .short  0                        // e_shstrndx
+
+    // codigo: leitura e execucao
+    .long   1                                   // PT_LOAD
+    .long   5                                   // PF_R | PF_X
+    .quad   .Lcodigo_pa - .Lelf_pa              // p_offset
+    .quad   VADDR_CODIGO                        // p_vaddr
+    .quad   VADDR_CODIGO                        // p_paddr
+    .quad   .Lfim_codigo_pa - .Lcodigo_pa       // p_filesz
+    .quad   .Lfim_codigo_pa - .Lcodigo_pa       // p_memsz
+    .quad   4096                                // p_align
+
+    // dados: leitura e escrita, o slot do codigo de saida
+    .long   1                                   // PT_LOAD
+    .long   6                                   // PF_R | PF_W
+    .quad   .Ldados_pa - .Lelf_pa               // p_offset
+    .quad   VADDR_DADOS                         // p_vaddr
+    .quad   VADDR_DADOS                         // p_paddr
+    .quad   DADOS_PA                            // p_filesz
+    .quad   DADOS_PA                            // p_memsz
+    .quad   4096                                // p_align
+
+.Lcodigo_pa:
+    .space  OFF_CODIGO_PACIENTE
+    // bifurcar()
+    mov     x8, #4
+    svc     #0
+    cbz     x0, .Lfilho_pa
+
+    // O pai guarda o id do filho em x19, que o quadro da chamada preserva.
+    mov     x19, x0
+
+    // Um ponteiro invalido tem de ser recusado **sem** custar o filho: o
+    // endereco 1 esta fora da faixa do usuario. Se a colheita acontecesse
+    // antes da conferencia, esta chamada consumiria o filho e a seguinte
+    // nao acharia mais ninguem.
+    mov     x0, xzr
+    mov     x1, #1
+    mov     x8, #9
+    svc     #0
+    tbz     x0, #63, .Lfalhou_pa
+
+    // esperar(0, &slot)
+    mov     x0, xzr
+    movz    x1, #(VADDR_SLOT_PA & 0xFFFF)
+    movk    x1, #((VADDR_SLOT_PA >> 16) & 0xFFFF), lsl #16
+    movk    x1, #((VADDR_SLOT_PA >> 32) & 0xFFFF), lsl #32
+    mov     x8, #9
+    svc     #0
+
+    // 1. o id colhido tem de ser o do filho
+    cmp     x0, x19
+    b.ne    .Lfalhou_pa
+
+    // 2. a segunda espera tem de ser recusada: o filho ja foi colhido.
+    //    `tbz` sobre o bit 63 pega qualquer valor nao-negativo.
+    mov     x0, xzr
+    mov     x1, xzr
+    mov     x8, #9
+    svc     #0
+    tbz     x0, #63, .Lfalhou_pa
+
+    // 3. sair com o codigo do filho mais um
+    movz    x2, #(VADDR_SLOT_PA & 0xFFFF)
+    movk    x2, #((VADDR_SLOT_PA >> 16) & 0xFFFF), lsl #16
+    movk    x2, #((VADDR_SLOT_PA >> 32) & 0xFFFF), lsl #32
+    ldr     x0, [x2]
+    add     x0, x0, #1
+    mov     x8, #0
+    svc     #0
+
+.Lfilho_pa:
+    mov     x8, #0
+    mov     x0, #51
+    svc     #0
+
+.Lfalhou_pa:
+    mov     x8, #0
+    mov     x0, #9
+    svc     #0
+.Lprender_pa:
+    b       .Lprender_pa
+.Lfim_codigo_pa:
+
+.Ldados_pa:
+    .quad   100                      // o veneno do slot
+.Lfim_dados_pa:
+
+.global programa_paciente_fim
+programa_paciente_fim:
 "#
 );

@@ -232,7 +232,10 @@ extern "x86-interrupt" fn protecao_geral(quadro: InterruptStackFrame, codigo: u6
             seq,
             pc
         );
-        crate::fios::marcar_terminado();
+        // Sem código de saída: quem morre de falha não chegou a `sair`, e um
+        // pai que estivesse esperando por ele precisa saber a diferença
+        // entre "saiu com zero" e "foi morto".
+        crate::fios::marcar_terminado(None);
         crate::fios::descansar();
     }
 
@@ -301,7 +304,8 @@ extern "x86-interrupt" fn falha_de_pagina(quadro: InterruptStackFrame, codigo: P
             pc,
             endereco.unwrap_or(0)
         );
-        crate::fios::marcar_terminado();
+        // Sem código de saída, pelo mesmo motivo da falha de proteção acima.
+        crate::fios::marcar_terminado(None);
 
         // Cedemos de vez, em vez de retornar. O `iretq` do fim deste handler
         // devolveria o controle a um processo que já não existe — e o

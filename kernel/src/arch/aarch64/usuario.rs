@@ -69,6 +69,33 @@ pub fn atender_chamada(quadro: &mut Quadro) {
             quadro as *mut Quadro as *mut core::ffi::c_void,
         )
     };
+
+    // A chamada pediu para ser reexecutada — hoje só `esperar` faz isso, ao
+    // não achar filho para colher.
+    //
+    // # Por que reexecutar o `svc`, e não voltar para dentro do despacho
+    //
+    // Porque daqui o fio **não volta para dentro do kernel**. Estacioná-lo é
+    // [`super::contexto::trocar_no_quadro`], que salva como contexto dele o
+    // próprio quadro desta exceção: quando ele for escolhido de novo, o que
+    // acontece é um `eret` para EL0. As linhas que viessem depois de um
+    // bloqueio aqui dentro nunca rodariam.
+    //
+    // Então o ponto de retomada tem de estar em EL0, e o único que serve é a
+    // própria instrução que nos trouxe. `ELR_EL1` aponta para a seguinte;
+    // recuar quatro bytes — o tamanho fixo de uma instrução A64 — faz o fio
+    // acordar executando o `svc` de novo, com `x0`, `x1` e `x8` intactos,
+    // porque é justamente por isso que não escrevemos `x0` neste caminho.
+    //
+    // No x86 o mesmo contrato é cumprido de outro jeito, e a diferença não é
+    // estilo: lá a chamada roda sobre uma cadeia de chamadas comum, o fio
+    // pode ser estacionado sem abandonar a pilha de kernel, e ele volta de
+    // dentro do despacho. Ver `arch::x86_64::usuario::despachar_chamada`.
+    if crate::fios::atual_esperando() {
+        quadro.elr -= 4;
+        return;
+    }
+
     quadro.x[0] = resultado as u64;
 }
 

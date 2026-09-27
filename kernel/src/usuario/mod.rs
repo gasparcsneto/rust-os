@@ -67,6 +67,17 @@ pub mod numero {
     pub const LER: u64 = 7;
     /// `fechar(descritor)`: devolve a vaga do descritor à tabela.
     pub const FECHAR: u64 = 8;
+    /// `esperar(id, ponteiro)`: espera um filho terminar.
+    ///
+    /// `id` zero espera qualquer filho; diferente de zero, aquele filho. O
+    /// ponteiro, quando não é nulo, recebe o código de saída como `i64`.
+    /// Devolve o identificador do filho colhido.
+    ///
+    /// É a única chamada deste kernel que **bloqueia**: o fio sai da lista
+    /// do escalonador e volta quando um filho sai. Ver
+    /// [`super::esperar`](crate::usuario) para o que isso exige do backend
+    /// de arquitetura.
+    pub const ESPERAR: u64 = 9;
 }
 
 /// Erros devolvidos ao usuário, sempre negativos.
@@ -93,6 +104,13 @@ pub mod erro {
     /// não existe — a segunda resposta o manda procurar o erro no lugar
     /// errado.
     pub const NAO_EH_ARQUIVO: i64 = -10;
+
+    /// Não há filho por quem esperar.
+    ///
+    /// Distinto de "nenhum filho terminou ainda", que não é erro e nem chega
+    /// ao usuário: aquele caso põe o fio para dormir. Este diz que esperar
+    /// seria esperar para sempre.
+    pub const SEM_FILHOS: i64 = -11;
 }
 
 /// Onde o espaço do usuário começa e termina.
@@ -163,6 +181,19 @@ static BYTES_ESCRITOS: AtomicU64 = AtomicU64::new(0);
 ///
 /// `i64::MIN` marca "nenhum": um processo pode sair com qualquer valor, e
 /// usar zero como sentinela confundiria "saiu com sucesso" com "não rodou".
+///
+/// # Por que isto não é a resposta que um processo quer
+///
+/// Porque é uma global, e "o último" deixou de ser uma pergunta respondível
+/// quando `bifurcar` apareceu: dois filhos que saem deixam um valor só, e
+/// quem perguntou não sabe de quem ele é. O caso da bifurcação contorna isso
+/// lendo os dois códigos do anel de log — o que serve a um teste e não serve
+/// a um programa.
+///
+/// A resposta por processo é [`esperar`], que guarda o código **no fio** e o
+/// entrega a quem tem direito a ele. Esta global fica porque continua sendo
+/// útil ao agente e à suíte: ela responde "alguma coisa saiu, e com quanto",
+/// que é uma pergunta legítima de quem observa a máquina de fora.
 static ULTIMA_SAIDA: AtomicI64 = AtomicI64::new(i64::MIN);
 
 /// Quantos processos já encerraram.
@@ -235,6 +266,7 @@ pub unsafe fn despachar(
         numero::ABRIR => abrir(a0, a1),
         numero::LER => ler(a0, a1, a2),
         numero::FECHAR => fechar(a0),
+        numero::ESPERAR => esperar(a0, a1),
         // SAFETY: o quadro é o desta chamada, garantido por quem nos chamou.
         numero::BIFURCAR => unsafe { bifurcar(quadro) },
         numero::EXECUTAR => unsafe { executar(quadro, a0, a1) },
@@ -257,7 +289,13 @@ fn sair(codigo: i64) -> i64 {
     ULTIMA_SAIDA.store(codigo, Ordering::SeqCst);
     SAIDAS.fetch_add(1, Ordering::SeqCst);
     crate::log_info!("usuario", "processo encerrou com codigo {}", codigo);
-    crate::fios::marcar_terminado();
+    // O código vai junto: é `marcar_terminado` quem o guarda no fio e quem
+    // acorda o pai, e os dois precisam acontecer na mesma seção crítica.
+    // `ULTIMA_SAIDA` acima continua existindo, mas é uma global — com dois
+    // processos saindo ela guarda o último, e "o último" não é pergunta que
+    // alguém queira fazer. Quem quer saber de um processo específico usa
+    // `esperar`.
+    crate::fios::marcar_terminado(Some(codigo));
     codigo
 }
 
@@ -494,6 +532,80 @@ fn fechar(descritor: u64) -> i64 {
         _ => {
             RECUSADAS.fetch_add(1, Ordering::Relaxed);
             erro::DESCRITOR_INVALIDO
+        }
+    }
+}
+
+/// `esperar(id, ponteiro)`: colhe um filho que terminou.
+///
+/// Devolve o identificador do filho colhido, e escreve o código de saída
+/// dele no ponteiro quando ele não é nulo.
+///
+/// # Por que esta chamada precisa poder ser reexecutada
+///
+/// Porque ela é a única que bloqueia, e bloquear no ARM não é possível de
+/// onde ela roda. Uma chamada de sistema ali acontece **dentro de um handler
+/// de exceção**, e trocar de fio no meio dela abandonaria a pilha de kernel
+/// em que o handler está — quando o fio voltasse, ele retomaria pelo quadro
+/// da exceção, e não de dentro desta função. As linhas depois do bloqueio
+/// nunca rodariam.
+///
+/// A saída é não bloquear aqui dentro. Quando não há filho para colher,
+/// [`crate::fios::colher_filho`] marca o fio como
+/// [`Estado::Esperando`](crate::fios::Estado) e esta função **retorna**; o
+/// backend de arquitetura vê que o fio parou, o estaciona, e quando ele
+/// acorda **chama a chamada de novo**, com os mesmos argumentos. A segunda
+/// passagem acha o filho e devolve o resultado de verdade.
+///
+/// É o que um sistema operacional chama de chamada reiniciável, e o preço é
+/// um invariante: `esperar` não pode ter efeito nenhum no caminho em que
+/// devolve "ainda não". Ela não tem — só lê a tabela e marca o próprio fio.
+///
+/// O valor devolvido nesse caminho não chega a usuário nenhum: o backend o
+/// descarta e reexecuta. Devolvemos zero por ser o mais inofensivo se um dia
+/// alguém esquecer de descartá-lo.
+fn esperar(alvo: u64, ponteiro: u64) -> i64 {
+    // O ponteiro é conferido **antes** da colheita, e a ordem não é estilo.
+    //
+    // Colher é destrutivo: marca o filho como colhido e libera o zumbi para o
+    // coletor. Conferindo depois, um ponteiro ruim recusaria a chamada com o
+    // filho já consumido — o código de saída dele deixaria de existir, e a
+    // segunda tentativa do processo ouviria que não há mais filho nenhum. Um
+    // argumento inválido custaria a resposta em vez de custar a chamada.
+    //
+    // Medido: com a conferência depois da colheita, o caso do paciente
+    // reprova — ele pede de propósito uma espera com o endereço 1 antes da
+    // legítima, e do outro lado não acha mais o filho.
+    if ponteiro != 0
+        && let Err(erro) = validar_faixa(ponteiro, 8)
+    {
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return erro;
+    }
+
+    match crate::fios::colher_filho((alvo != 0).then_some(alvo)) {
+        crate::fios::Colheita::Colhido(id, saida) => {
+            if ponteiro != 0 {
+                // SAFETY: `validar_faixa` conferiu acima que os oito bytes
+                // estão na faixa do usuário e mapeados, e estamos no espaço
+                // de endereços do processo que chamou.
+                //
+                // Sem alinhamento garantido: o ponteiro vem do usuário, e um
+                // `write` comum de `i64` num endereço ímpar é comportamento
+                // indefinido no x86 e falha de alinhamento no ARM.
+                unsafe { (ponteiro as *mut i64).write_unaligned(saida.unwrap_or(0)) };
+            }
+            id as i64
+        }
+        // O fio já saiu da lista do escalonador — quem o tirou foi a própria
+        // colheita, na mesma seção crítica em que viu que não havia o que
+        // colher. Esta chamada será reexecutada quando ele voltar; ver o
+        // cabeçalho, e `fios::colher_filho` para o porquê de não haver aqui
+        // uma segunda chamada marcando o estado.
+        crate::fios::Colheita::Aguardando => 0,
+        crate::fios::Colheita::SemFilhos => {
+            RECUSADAS.fetch_add(1, Ordering::Relaxed);
+            erro::SEM_FILHOS
         }
     }
 }

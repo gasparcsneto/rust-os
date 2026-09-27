@@ -1824,8 +1824,23 @@ fn conferir_elfs(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
     std::fs::create_dir_all(&saida)
         .map_err(|e| format!("não foi possível criar {saida:?}: {e}"))?;
 
+    // A lista sai dos **símbolos do kernel**, e não de um array aqui.
+    //
+    // Era um array, com quatro nomes escritos à mão. Ele já tinha divergido:
+    // um programa novo entrou na tabela de embutidos do kernel e não aqui, e
+    // a conferência independente — que é a razão de este comando existir —
+    // simplesmente não o cobria. Nada reclamou, porque o array continuava
+    // certo sobre os quatro que ele listava.
+    //
+    // Derivando do binário, um programa novo é conferido no dia em que
+    // nasce, e um programa removido some daqui sozinho.
+    let nomes = programas_embutidos(&simbolos);
+    if nomes.is_empty() {
+        return Err("nenhum simbolo `programa_*_inicio` no binario do kernel".into());
+    }
+
     let mut falhou = false;
-    for nome in ["exemplo", "filho", "invasor", "leitor"] {
+    for nome in &nomes {
         let inicio = buscar(&simbolos, &format!("programa_{nome}_inicio"))?;
         let fim = buscar(&simbolos, &format!("programa_{nome}_fim"))?;
 
@@ -1881,6 +1896,22 @@ fn simbolos_do_kernel(kernel: &Path) -> Result<Vec<(String, u64)>, String> {
         }
     }
     Ok(tabela)
+}
+
+/// Os programas embutidos, deduzidos dos símbolos `programa_<nome>_inicio`.
+///
+/// Ordenados para que a saída do comando não dependa da ordem em que o
+/// `llvm-nm` resolveu listar: um relatório que muda de ordem entre execuções
+/// é um relatório que ninguém consegue comparar com o anterior.
+fn programas_embutidos(tabela: &[(String, u64)]) -> Vec<String> {
+    let mut nomes: Vec<String> = tabela
+        .iter()
+        .filter_map(|(s, _)| s.strip_prefix("programa_")?.strip_suffix("_inicio"))
+        .map(str::to_string)
+        .collect();
+    nomes.sort();
+    nomes.dedup();
+    nomes
 }
 
 fn buscar(tabela: &[(String, u64)], nome: &str) -> Result<u64, String> {

@@ -2749,7 +2749,7 @@ fn btrfs_raiz_montada() -> Resultado {
     // E `/bin` continua sendo dos programas embutidos.
     let mut programas = 0;
     crate::vfs::listar("/bin", |_| programas += 1).map_err(|e| e.motivo())?;
-    if programas != 4 {
+    if programas != crate::usuario::programa::quantos_embutidos() {
         crate::log_error!("teste", "/bin listou {} entradas", programas);
         return Err("a raiz montada por cima roubou /bin dos programas embutidos");
     }
@@ -5269,6 +5269,158 @@ fn fios_criacao_concorrente_nao_colide() -> Resultado {
 // Userspace — anel sem privilégio e chamadas de sistema
 // ===========================================================================
 
+/// Um pai espera o filho, colhe o código de saída dele, e o segundo pedido é
+/// recusado.
+///
+/// # O que este caso prova que o de `bifurcar` não provava
+///
+/// Que o pai sabe **qual** filho saiu e **com que código**. Até aqui havia um
+/// `bifurcar` e um campo global de última saída: com dois processos saindo,
+/// esse campo guarda o último, e "o último" é uma pergunta que ninguém quer
+/// fazer. O caso da bifurcação contorna isso lendo os dois códigos do anel de
+/// log — o que funciona para um teste e não serve de nada para um programa.
+///
+/// O programa `paciente` faz as três conferências do lado de lá, em ring 3,
+/// e cada uma mata uma parte diferente de `esperar`:
+///
+/// - o id colhido é o que `bifurcar` devolveu ao pai;
+/// - o código de saída chegou ao ponteiro que o pai passou — o slot começa
+///   envenenado com [`crate::usuario::exemplo::VENENO_DO_SLOT`], então um
+///   `esperar` que não escrevesse produziria 101 em vez de 52;
+/// - a segunda espera é **recusada**, porque o filho já foi colhido. Sem
+///   ela, esquecer de marcar a colheita devolveria o mesmo filho para
+///   sempre.
+///
+/// # Por que a última saída volta a servir aqui
+///
+/// Porque a espera **ordena** as duas saídas. O filho sai primeiro, o pai
+/// depois — por construção, não por sorte do escalonador. Num programa que
+/// espera, "a última saída" deixa de ser indeterminada e passa a ser a do
+/// pai, e é por isso que este caso pode afirmar um número em vez de vasculhar
+/// o log.
+fn usuario_espera_o_filho_e_colhe_o_codigo() -> Resultado {
+    static COMECOU: AtomicBool = AtomicBool::new(false);
+
+    extern "C" fn hospedar(_argumento: u64) -> ! {
+        COMECOU.store(true, SeqCst);
+        match crate::usuario::programa::executar(crate::usuario::exemplo::bytes_do_paciente()) {
+            Ok(_) => unreachable!("executar nao retorna em caso de sucesso"),
+            Err(falha) => {
+                crate::log_error!(
+                    "teste",
+                    "nao foi possivel entrar em userspace: {}",
+                    falha.motivo()
+                );
+                crate::fios::terminar()
+            }
+        }
+    }
+
+    crate::usuario::limpar_ultima_saida();
+    COMECOU.store(false, SeqCst);
+    let (_, _, saidas_antes) = crate::usuario::estatisticas_de_processo();
+    let (colhidos_antes, _) = crate::fios::colheita();
+
+    crate::fios::criar("teste-paciente", hospedar, 0)?;
+
+    // Duas saídas: a do filho e a do pai, nessa ordem.
+    esperar_ate(
+        || crate::usuario::estatisticas_de_processo().2 >= saidas_antes + 2,
+        600,
+    )?;
+
+    if !COMECOU.load(SeqCst) {
+        return Err("o fio hospedeiro nunca rodou");
+    }
+
+    let (colhidos, _) = crate::fios::colheita();
+    if colhidos != colhidos_antes + 1 {
+        crate::log_error!(
+            "teste",
+            "colheitas: {} antes, {} depois",
+            colhidos_antes,
+            colhidos
+        );
+        return Err("o pai nao colheu exatamente um filho");
+    }
+
+    match crate::usuario::ultima_saida() {
+        Some(codigo) if codigo == crate::usuario::exemplo::CODIGO_DO_PACIENTE => Ok(()),
+        Some(codigo) if codigo == crate::usuario::exemplo::CODIGO_DE_FALHA_DO_PACIENTE => {
+            Err("o paciente reprovou uma das proprias conferencias")
+        }
+        Some(codigo) if codigo == crate::usuario::exemplo::VENENO_DO_SLOT + 1 => {
+            Err("esperar devolveu o id mas nao escreveu o codigo de saida")
+        }
+        Some(codigo) => {
+            crate::log_error!("teste", "o paciente saiu com {}", codigo);
+            Err("o paciente saiu com um codigo que nao e de ninguem")
+        }
+        None => Err("nenhum processo saiu"),
+    }
+}
+
+/// Um filho que terminou e ainda não foi colhido fica de pé até a colheita.
+///
+/// # O que esta regra custa, e por que ela existe assim mesmo
+///
+/// Uma vaga de fio — das dezesseis — e o espaço de endereços do filho, presos
+/// entre a saída dele e a pergunta do pai. É caro, e é o preço de a resposta
+/// existir: o que resta de um processo morto é um número, e o coletor
+/// recolhendo a vaga antes da pergunta destruiria a única cópia dele.
+///
+/// O caso afirma o outro lado da regra, que é o que a torna segura: assim que
+/// o pai colhe, o zumbi vai embora. Sem isso, "guardar até a pergunta" viraria
+/// "guardar para sempre" — e dezesseis processos que bifurcassem deixariam a
+/// tabela cheia.
+///
+/// # O que este caso não pega, medido
+///
+/// A regra em si. Apagando a condição do zumbi de [`crate::fios`], o coletor
+/// volta a recolher o filho antes da pergunta — e **este caso continua
+/// passando**, porque a janela entre a saída do filho e a passada do coletor
+/// dura um tique, e a sondagem aqui é apertada o bastante para enxergar o
+/// zumbi dentro dela. Quem reprova é o caso do paciente, que pergunta depois
+/// e não acha mais ninguém.
+///
+/// Os dois casos são complementares e nenhum dos dois sozinho basta: este vê
+/// o estado, aquele vê a consequência.
+fn fios_zumbi_espera_a_colheita_e_some_depois_dela() -> Resultado {
+    extern "C" fn hospedar(_argumento: u64) -> ! {
+        match crate::usuario::programa::executar(crate::usuario::exemplo::bytes_do_paciente()) {
+            Ok(_) => unreachable!("executar nao retorna em caso de sucesso"),
+            Err(_) => crate::fios::terminar(),
+        }
+    }
+
+    let (_, zumbis_antes) = crate::fios::colheita();
+    if zumbis_antes != 0 {
+        return Err("a tabela ja tinha zumbi antes do caso comecar");
+    }
+
+    let (_, _, saidas_antes) = crate::usuario::estatisticas_de_processo();
+    crate::fios::criar("teste-zumbi", hospedar, 0)?;
+
+    // O filho sai primeiro e o pai fica esperando: existe uma janela em que a
+    // tabela tem exatamente um zumbi. Ela é curta — o pai acorda no mesmo
+    // instante —, então a sondagem tem de ser apertada.
+    let viu_zumbi = esperar_ate(|| crate::fios::colheita().1 > 0, 600).is_ok();
+
+    esperar_ate(
+        || crate::usuario::estatisticas_de_processo().2 >= saidas_antes + 2,
+        600,
+    )?;
+
+    if !viu_zumbi {
+        return Err("o filho morto nunca apareceu como zumbi");
+    }
+
+    // E depois da colheita ele some. O coletor roda a cada tique, então damos
+    // alguns a ele — o que não pode é o zumbi ficar.
+    esperar_ate(|| crate::fios::colheita().1 == 0, 600)
+        .map_err(|_| "o zumbi continuou na tabela depois de colhido")
+}
+
 /// A travessia completa, do kernel ao anel sem privilégio e de volta — agora
 /// com o processo se duplicando e trocando de imagem no meio do caminho.
 ///
@@ -6732,7 +6884,7 @@ fn fios_coletor_nao_recolhe_quem_esta_de_pe() -> Resultado {
     static SOBREVIVEU: AtomicBool = AtomicBool::new(false);
 
     extern "C" fn suicida(_argumento: u64) -> ! {
-        crate::fios::marcar_terminado();
+        crate::fios::marcar_terminado(None);
 
         // Daqui até o `descansar` este fio está marcado como encerrado e
         // ainda é o fio atual — a janela que a guarda protege. Quantos
@@ -7513,6 +7665,14 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "usuario: executa, bifurca e troca de imagem",
         f: usuario_executa_bifurca_e_troca_de_imagem,
+    },
+    Caso {
+        nome: "usuario: espera o filho e colhe o codigo dele",
+        f: usuario_espera_o_filho_e_colhe_o_codigo,
+    },
+    Caso {
+        nome: "fios: o zumbi espera a colheita e some depois dela",
+        f: fios_zumbi_espera_a_colheita_e_some_depois_dela,
     },
     Caso {
         nome: "pci: regioes atribuidas nao se sobrepoem",

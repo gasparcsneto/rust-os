@@ -1605,6 +1605,17 @@ fn threads_stats(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     // criou e recolheu centenas de fios" — duas situacoes que um retrato
     // instantaneo da tabela mostra identicas.
     w.field_u64("reaped", crate::fios::recolhidos())?;
+    // E os dois numeros do parentesco. `harvested` conta as colheitas de
+    // `esperar`; `zombies` e quantos filhos ja terminaram e ainda guardam o
+    // codigo de saida para um pai que nao perguntou.
+    //
+    // Um `zombies` que so cresce e o sintoma de um processo que bifurca e
+    // nao espera: cada filho retem uma das vagas de fio ate o pai morrer. E
+    // a unica forma de ver isso de fora, porque um retrato da tabela mostra
+    // "done" para o que ja foi e para o que ainda vai ser recolhido.
+    let (colhidos, zumbis) = crate::fios::colheita();
+    w.field_u64("harvested", colhidos)?;
+    w.field_u64("zombies", zumbis as u64)?;
     w.end_object()
 }
 

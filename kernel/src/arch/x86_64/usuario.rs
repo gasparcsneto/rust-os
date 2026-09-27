@@ -256,20 +256,65 @@ extern "C" fn despachar_chamada(quadro: *mut QuadroDeUsuario) -> i64 {
     let q = unsafe { &mut *quadro };
     let (numero, a0, a1, a2) = (q.rax, q.rdi, q.rsi, q.rdx);
 
-    // SAFETY: o quadro é o desta chamada; `bifurcar` e `executar` o leem e o
-    // reescrevem, e é por isso que ele desce até o despacho.
-    let resultado =
-        unsafe { crate::usuario::despachar(numero, a0, a1, a2, quadro as *mut core::ffi::c_void) };
+    // Os argumentos saem do quadro **uma vez**, para locais, e é o que torna
+    // a reexecução abaixo possível: `esperar` precisa ser chamada de novo com
+    // o que o usuário pediu, e o quadro é reescrito no caminho.
+    //
+    // # O mesmo contrato, dois mecanismos
+    //
+    // `esperar` pode dizer "ainda não" e pedir para ser chamada de novo (ver
+    // `crate::usuario::esperar`). Aqui isso é um laço, e pode ser: esta
+    // função roda sobre uma cadeia de chamadas comum na pilha de kernel do
+    // fio, então `estacionar` o guarda sem abandoná-la, e ele volta na
+    // instrução seguinte — dentro do kernel.
+    //
+    // No ARM não pode. Lá a chamada roda dentro de um handler de exceção, e
+    // estacionar o fio salva como contexto dele o **quadro da exceção**: ele
+    // voltaria em EL0, não aqui. O backend de lá recua o `ELR_EL1` para que
+    // o `svc` se repita, o que dá no mesmo de fora e não tem como dar no
+    // mesmo por dentro. Ver `arch::aarch64::usuario::atender_chamada`.
+    loop {
+        // SAFETY: o quadro é o desta chamada; `bifurcar` e `executar` o leem e
+        // o reescrevem, e é por isso que ele desce até o despacho.
+        let resultado = unsafe {
+            crate::usuario::despachar(numero, a0, a1, a2, quadro as *mut core::ffi::c_void)
+        };
 
-    // `sair` apenas marca; quem troca de contexto é quem tem como não voltar.
-    // Aqui estamos numa cadeia de chamadas comum sobre a pilha de kernel do
-    // fio, então ceder de vez basta — e o `sysretq` lá embaixo nunca chega a
-    // executar, que é exatamente o desejado para um processo encerrado.
-    if crate::fios::atual_terminou() {
-        crate::fios::descansar();
+        // O fio continua de pé? Então a chamada acabou e o valor é dela.
+        if !crate::fios::atual_parado() {
+            return resultado;
+        }
+
+        // Não continua. Ou ele terminou — e aí `estacionar` nunca volta, que
+        // é exatamente o desejado: o `sysretq` lá embaixo devolveria o
+        // controle a um processo que já não existe — ou está esperando um
+        // filho, e volta quando o filho sair. Nesse caso o `resultado` acima
+        // é descartado e a chamada roda de novo, agora com o que colher.
+        estacionar();
     }
+}
 
-    resultado
+/// Tira o fio atual de circulação até ele poder continuar.
+///
+/// Só volta quando ele pode. Para um fio encerrado isso nunca acontece, e é
+/// por isso que esta função serve aos dois casos: ela é o `descansar` de
+/// sempre, com uma saída para quem acorda.
+///
+/// Aqui estamos numa cadeia de chamadas comum sobre a pilha de kernel do fio
+/// — e não dentro de um handler, como no ARM —, então ceder de dentro dela é
+/// seguro: o contexto salvo aponta para o meio desta função, e é aqui que o
+/// fio volta.
+fn estacionar() {
+    loop {
+        crate::arch::ceder_cpu();
+        if !crate::fios::atual_parado() {
+            return;
+        }
+        // Se voltamos aqui é porque não havia outro fio pronto. Dormir em vez
+        // de girar: a próxima interrupção pode trazer alguém — ou o filho que
+        // este fio espera.
+        crate::arch::esperar_interrupcao();
+    }
 }
 
 /// Desce para ring 3 e começa a executar em `entrada`. Nunca retorna.

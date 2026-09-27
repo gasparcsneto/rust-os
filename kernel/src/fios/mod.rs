@@ -85,6 +85,18 @@ pub enum Estado {
     Pronto,
     /// É o fio que está executando agora.
     Rodando,
+    /// Esperando um filho terminar.
+    ///
+    /// Um fio nesta lista não é escolhido por [`Escalonador::proximo_pronto`],
+    /// que é o ponto: sem isso, um pai em `esperar` seria escolhido, voltaria
+    /// a perguntar, não acharia nada e cederia — queimando um quantum inteiro
+    /// por volta e impedindo a máquina de ficar ociosa.
+    ///
+    /// Quem tira daqui é [`marcar_terminado`], chamada pelo filho ao sair. É
+    /// a única transição de volta, e é por isso que ela é o lugar onde o
+    /// código de saída é registrado: quem acorda o pai é o mesmo que tem o
+    /// número que o pai foi esperar.
+    Esperando,
     /// Terminou. A vaga pode ser reaproveitada.
     Terminado,
 }
@@ -156,6 +168,27 @@ struct Fio {
     descritores: crate::usuario::descritores::Tabela,
     /// Quantas vezes este fio já foi escalonado.
     escalonamentos: u64,
+    /// Quem bifurcou para criar este fio, quando alguém bifurcou.
+    ///
+    /// `None` em todo fio criado por [`criar`]: um fio do kernel não é filho
+    /// de ninguém, e ninguém vai esperar por ele.
+    ///
+    /// É o que transforma a tabela plana num parentesco, e é o que `esperar`
+    /// consulta para não deixar um processo colher o filho de outro.
+    pai: Option<IdFio>,
+    /// Com que código este fio saiu, quando ele saiu por `sair`.
+    ///
+    /// `None` cobre dois casos que não precisam ser distinguidos: o fio ainda
+    /// roda, ou terminou sem passar por `sair` — um fio do kernel que
+    /// retornou, ou um processo morto por falha de página.
+    saida: Option<i64>,
+    /// O pai já colheu este fio?
+    ///
+    /// Um fio terminado que **ainda não** foi colhido é um zumbi: a vaga
+    /// continua ocupada, mas tudo o que resta dela é o código de saída,
+    /// guardado para uma pergunta que ainda não foi feita. Ver
+    /// [`recolher_terminados`].
+    colhido: bool,
 }
 
 impl Fio {
@@ -247,6 +280,9 @@ pub fn init() {
             espaco: None,
             descritores: crate::usuario::descritores::Tabela::nova(),
             escalonamentos: 1,
+            pai: None,
+            saida: None,
+            colhido: false,
         });
         e.atual = 0;
         e.quantum = QUANTUM_EM_TIQUES;
@@ -310,6 +346,24 @@ extern "C" fn coletor(_argumento: u64) -> ! {
 ///
 /// Devolve quantos foram recolhidos.
 ///
+/// # O que um zumbi tem que um morto não tem
+///
+/// Um filho de `fork` que terminou e cujo pai ainda pode perguntar por ele
+/// **não** é recolhido aqui. O que resta dele é um número — o código de
+/// saída —, e recolhê-lo antes da pergunta destruiria a única resposta que
+/// existe.
+///
+/// A regra está em [`Escalonador::e_zumbi`], e ela é deliberadamente curta:
+/// só é zumbi quem tem pai vivo que ainda não colheu. Um fio sem pai, um
+/// cujo pai já morreu, e um já colhido vão embora na mesma volta em que
+/// iriam antes — que é o que mantém o coletor recolhendo os fios da suíte
+/// como ele sempre recolheu.
+///
+/// A parte que **não** é opcional é o pai morto liberar o filho. Sem ela, um
+/// processo que bifurca e sai sem esperar deixa o filho ocupando uma das
+/// dezesseis vagas para sempre, com o espaço de endereços dele junto. É o
+/// vazamento que o coletor existe para impedir, de volta por outra porta.
+///
 /// # A vaga do fio atual nunca entra
 ///
 /// É a mesma regra de [`Escalonador::vaga_livre`], e pelo mesmo motivo: um
@@ -355,8 +409,10 @@ pub fn recolher_terminados() -> usize {
     loop {
         let morto = com_escalonador(|e| {
             let atual = e.atual;
-            let vaga = e.fios.iter().enumerate().position(|(i, f)| {
-                i != atual && matches!(f, Some(fio) if fio.estado == Estado::Terminado)
+            let vaga = (0..MAX_FIOS).find(|&i| {
+                i != atual
+                    && matches!(&e.fios[i], Some(fio)
+                        if fio.estado == Estado::Terminado && !e.e_zumbi(i))
             })?;
             e.fios[vaga].take()
         });
@@ -463,14 +519,22 @@ fn nascer(nome: &'static str, nascimento: Nascimento) -> Result<IdFio, &'static 
     //
     // Um fio do kernel não herda de ninguém — ele começa com a tabela
     // padrão, que é o que `criar` quer dizer.
-    let (vaga, ocupante_morto, herdada) = com_escalonador(|e| {
+    let (vaga, ocupante_morto, herdada, pai) = com_escalonador(|e| {
         let vaga = e.vaga_livre()?;
-        let herdada = match nascimento {
-            Nascimento::Bifurcacao { .. } => e.fios[e.atual]
-                .as_ref()
-                .map(|pai| pai.descritores.clone())
-                .unwrap_or_default(),
-            Nascimento::Funcao { .. } => crate::usuario::descritores::Tabela::nova(),
+        // O parentesco sai da mesma seção crítica que a tabela de
+        // descritores, e pelo mesmo motivo: as duas descrevem a relação com
+        // quem está chamando, e lê-las em momentos diferentes seria lê-las
+        // de dois fios diferentes se a preempção caísse no meio.
+        //
+        // Só a bifurcação cria filho. `criar` faz um fio do kernel, que não
+        // é de ninguém — e é isso que mantém o coletor recolhendo os fios da
+        // suíte como sempre recolheu.
+        let (herdada, pai) = match nascimento {
+            Nascimento::Bifurcacao { .. } => match e.fios[e.atual].as_ref() {
+                Some(pai) => (pai.descritores.clone(), Some(pai.id)),
+                None => (Default::default(), None),
+            },
+            Nascimento::Funcao { .. } => (crate::usuario::descritores::Tabela::nova(), None),
         };
         let anterior = e.fios[vaga].take();
         e.fios[vaga] = Some(Fio {
@@ -482,8 +546,11 @@ fn nascer(nome: &'static str, nascimento: Nascimento) -> Result<IdFio, &'static 
             espaco: None,
             descritores: herdada.clone(),
             escalonamentos: 0,
+            pai,
+            saida: None,
+            colhido: false,
         });
-        Ok::<_, &'static str>((vaga, anterior, herdada))
+        Ok::<_, &'static str>((vaga, anterior, herdada, pai))
     })?;
 
     // O fio morto que ocupava a vaga morre aqui fora: o `Drop` da pilha dele
@@ -548,6 +615,9 @@ fn nascer(nome: &'static str, nascimento: Nascimento) -> Result<IdFio, &'static 
             espaco,
             descritores: herdada,
             escalonamentos: 0,
+            pai,
+            saida: None,
+            colhido: false,
         })
     });
     drop(marcador);
@@ -576,6 +646,35 @@ impl Escalonador {
                     }
             })
             .ok_or("nao ha vaga livre para outro fio")
+    }
+
+    /// O fio da vaga `i` está esperando ser colhido pelo pai?
+    ///
+    /// Só é zumbi quem terminou, ainda não foi colhido, e tem um pai que
+    /// **ainda pode perguntar**. As três condições importam:
+    ///
+    /// - terminado, porque um fio vivo não tem código de saída a guardar;
+    /// - não colhido, porque depois da pergunta não há mais o que guardar;
+    /// - pai vivo, porque um pai que já morreu nunca mais vai perguntar, e
+    ///   esperar por ele seria reter a vaga para sempre.
+    ///
+    /// "Pai vivo" é: existe na tabela, com aquele id, e não terminou. O id
+    /// entra na comparação porque a vaga é reaproveitada — sem ele, um fio
+    /// novo que caísse na vaga do pai morto herdaria os zumbis dele.
+    fn e_zumbi(&self, i: usize) -> bool {
+        let Some(fio) = self.fios[i].as_ref() else {
+            return false;
+        };
+        if fio.estado != Estado::Terminado || fio.colhido {
+            return false;
+        }
+        let Some(pai) = fio.pai else {
+            return false;
+        };
+        self.fios
+            .iter()
+            .flatten()
+            .any(|candidato| candidato.id == pai && candidato.estado != Estado::Terminado)
     }
 
     /// O próximo fio pronto, em rodízio a partir do atual.
@@ -729,6 +828,128 @@ pub fn pilha_de_kernel_atual() -> u64 {
     })
 }
 
+/// O que [`colher_filho`] encontrou.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Colheita {
+    /// Um filho terminado foi colhido: o id dele, e com que código saiu.
+    ///
+    /// A saída é `Option` porque nem todo fio sai por `sair` — um processo
+    /// morto por falha de página termina sem código nenhum, e inventar zero
+    /// ali seria dizer ao pai que o filho terminou bem.
+    Colhido(u64, Option<i64>),
+    /// Há filhos, mas nenhum terminou ainda.
+    Aguardando,
+    /// Não há filho que satisfaça o pedido — nenhum, ou nenhum com aquele id.
+    SemFilhos,
+}
+
+/// Colhe um filho terminado do fio atual, se houver um.
+///
+/// `alvo` restringe a um id; `None` colhe qualquer filho.
+///
+/// # Por que a colheita é uma operação do escalonador
+///
+/// Porque ela precisa ser atômica em relação à tabela: encontrar o filho,
+/// ler o código de saída e marcá-lo como colhido são três passos que, se
+/// separados, deixam uma janela em que o coletor recolhe a vaga entre o
+/// segundo e o terceiro — e o pai recebe um código de um fio que já não
+/// existe, ou duas colheitas devolvem o mesmo filho duas vezes.
+///
+/// # Por que ela também põe o pai para dormir
+///
+/// Porque decidir "não há o que colher" e "então durma" em duas seções
+/// críticas é o despertar perdido clássico, e aqui ele trava a máquina.
+///
+/// A janela é esta: o pai pergunta, ouve que o filho ainda roda, e **antes**
+/// de se marcar como esperando o timer o preempta. O filho roda, sai, e
+/// [`marcar_terminado`] procura um pai `Esperando` para acordar — não acha,
+/// porque o pai ainda está `Rodando`. O pai volta, marca-se `Esperando`, e
+/// dorme para sempre por um filho que já morreu. O escalonador nunca mais o
+/// escolhe, e o zumbi nunca é colhido.
+///
+/// Uma seção crítica só fecha a janela por construção: ou a colheita acha o
+/// filho, ou o pai já está `Esperando` quando a trava sai da mão — e o filho
+/// que sair depois disso vai achá-lo.
+///
+/// Medido, não deduzido. Separando os dois passos e forçando uma cessão
+/// entre eles — que é escancarar a janela que o timer acertaria sozinho de
+/// vez em quando —, o caso do paciente reprova com `a condicao nao se
+/// cumpriu dentro do teto de tempo`: o pai dorme e não acorda mais.
+pub fn colher_filho(alvo: Option<u64>) -> Colheita {
+    com_escalonador(|e| {
+        let Some(eu) = e.fios[e.atual].as_ref().map(|f| f.id) else {
+            return Colheita::SemFilhos;
+        };
+
+        let meus = |fio: &Fio| fio.pai == Some(eu) && alvo.is_none_or(|a| fio.id.numero() == a);
+
+        // O terminado primeiro: se há um pronto para colher, a resposta é
+        // ele, mesmo que existam outros filhos ainda rodando.
+        if let Some(vaga) = (0..MAX_FIOS).find(|&i| {
+            matches!(&e.fios[i], Some(fio)
+                if meus(fio) && fio.estado == Estado::Terminado && !fio.colhido)
+        }) {
+            let fio = e.fios[vaga].as_mut().expect("a vaga acabou de casar");
+            fio.colhido = true;
+            COLHIDOS.fetch_add(1, Ordering::Relaxed);
+            return Colheita::Colhido(fio.id.numero(), fio.saida);
+        }
+
+        // Nenhum terminado. Ainda há filho vivo pelo qual esperar?
+        //
+        // Um filho já colhido não conta: ele existe na tabela só até o
+        // coletor passar, e contá-lo faria o pai esperar por uma segunda
+        // saída que nunca vem.
+        if e.fios.iter().flatten().any(|f| meus(f) && !f.colhido) {
+            // Na mesma seção crítica: ver o cabeçalho.
+            let atual = e.atual;
+            if let Some(fio) = e.fios[atual].as_mut() {
+                fio.estado = Estado::Esperando;
+            }
+            Colheita::Aguardando
+        } else {
+            Colheita::SemFilhos
+        }
+    })
+}
+
+/// Quantos filhos já foram colhidos.
+static COLHIDOS: AtomicU64 = AtomicU64::new(0);
+
+/// `(colhidos, zumbis agora)`.
+pub fn colheita() -> (u64, usize) {
+    let zumbis = com_escalonador(|e| (0..MAX_FIOS).filter(|&i| e.e_zumbi(i)).count());
+    (COLHIDOS.load(Ordering::Relaxed), zumbis)
+}
+
+/// O fio atual está à espera de um filho?
+///
+/// Só o ARM pergunta. Lá a chamada de sistema precisa distinguir "o fio saiu"
+/// de "o fio espera" para decidir se recua o `ELR_EL1` e reexecuta o `svc`;
+/// no x86 a chamada volta de dentro do despacho e a distinção não muda nada.
+#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
+pub fn atual_esperando() -> bool {
+    com_escalonador(|e| {
+        e.fios[e.atual]
+            .as_ref()
+            .is_some_and(|f| f.estado == Estado::Esperando)
+    })
+}
+
+/// O fio atual não pode continuar de onde estava?
+///
+/// Vale para os dois motivos que existem hoje — ele terminou, ou está
+/// esperando um filho — e é a pergunta que o backend de arquitetura faz
+/// depois de cada chamada de sistema. Uma pergunta só porque a resposta leva
+/// ao mesmo lugar: parar de rodar. O que difere é se ele volta.
+pub fn atual_parado() -> bool {
+    com_escalonador(|e| {
+        e.fios[e.atual]
+            .as_ref()
+            .is_some_and(|f| f.estado == Estado::Terminado || f.estado == Estado::Esperando)
+    })
+}
+
 /// Marca o fio atual como encerrado, sem trocar de contexto.
 ///
 /// Separado de [`terminar`] por causa do ARM. Lá, encerrar de dentro de um
@@ -739,22 +960,40 @@ pub fn pilha_de_kernel_atual() -> u64 {
 ///
 /// Então quem roda num handler marca aqui e deixa o próprio handler fazer a
 /// troca, sobre o quadro que ele já tem em mãos.
-pub fn marcar_terminado() {
+pub fn marcar_terminado(saida: Option<i64>) {
     com_escalonador(|e| {
         let atual = e.atual;
-        if let Some(fio) = e.fios[atual].as_mut() {
-            fio.estado = Estado::Terminado;
+        let pai = match e.fios[atual].as_mut() {
+            Some(fio) => {
+                fio.estado = Estado::Terminado;
+                fio.saida = saida;
+                fio.pai
+            }
+            None => return,
+        };
+
+        // Acordar o pai é a outra metade de terminar, e ela mora aqui pela
+        // mesma razão que o código de saída: quem acaba de morrer é o único
+        // que sabe, no mesmo instante, que há o que colher.
+        //
+        // Feito fora daqui — por exemplo no coletor, uma volta depois — a
+        // espera ganharia a latência de um tique do timer sem precisar, e
+        // ganharia também uma janela: entre o filho sair e o pai acordar,
+        // uma segunda saída poderia sobrescrever o que o pai ia ler.
+        //
+        // Acordamos **sem** conferir por qual filho ele espera. O pai volta,
+        // pergunta de novo, e se o filho que saiu não era o dele ele volta a
+        // esperar. Uma volta perdida é mais barata que guardar em cada fio o
+        // id que ele aguarda — um campo que só poderia divergir do que a
+        // chamada de sistema realmente pediu.
+        let Some(pai) = pai else { return };
+        for fio in e.fios.iter_mut().flatten() {
+            if fio.id == pai && fio.estado == Estado::Esperando {
+                fio.estado = Estado::Pronto;
+                break;
+            }
         }
     });
-}
-
-/// O fio atual já se encerrou?
-pub fn atual_terminou() -> bool {
-    com_escalonador(|e| {
-        e.fios[e.atual]
-            .as_ref()
-            .is_some_and(|f| f.estado == Estado::Terminado)
-    })
 }
 
 /// Encerra o fio atual. Nunca retorna.
@@ -769,7 +1008,11 @@ pub fn atual_terminou() -> bool {
 /// que existe é o do próprio kernel, e ele não termina.
 #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub fn terminar() -> ! {
-    marcar_terminado();
+    // Sem código de saída: um fio do kernel que chega ao fim não saiu por
+    // `sair`, e não há número a guardar. Inventar zero diria a quem
+    // perguntasse que ele terminou bem — e ninguém pergunta, porque um fio
+    // do kernel não tem pai.
+    marcar_terminado(None);
     descansar()
 }
 
@@ -840,14 +1083,25 @@ pub struct Inscricao {
 pub fn com_inscricoes<F: FnMut(Inscricao)>(mut f: F) {
     let instantaneo = com_escalonador(|e| {
         let mut saida = [None; MAX_FIOS];
-        for (destino, fio) in saida.iter_mut().zip(e.fios.iter()) {
-            *destino = fio.as_ref().map(|fio| Inscricao {
+        for i in 0..MAX_FIOS {
+            // O zumbi é conferido aqui, e não deduzido do estado, porque ele
+            // não é um estado: é um terminado que ainda tem quem pergunte por
+            // ele. Para um agente a diferença é toda — `done` some na próxima
+            // volta do coletor, `zombie` fica até alguém colher, e uma lista
+            // cheia de `zombie` é um processo que bifurca e não espera.
+            let zumbi = e.e_zumbi(i);
+            let Some(fio) = e.fios[i].as_ref() else {
+                continue;
+            };
+            saida[i] = Some(Inscricao {
                 id: fio.id.numero(),
                 nome: fio.nome,
                 estado: match fio.estado {
                     Estado::Reservado => "spawning",
                     Estado::Pronto => "ready",
                     Estado::Rodando => "running",
+                    Estado::Esperando => "waiting",
+                    Estado::Terminado if zumbi => "zombie",
                     Estado::Terminado => "done",
                 },
                 escalonamentos: fio.escalonamentos,

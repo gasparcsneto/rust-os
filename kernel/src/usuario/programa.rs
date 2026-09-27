@@ -83,6 +83,10 @@ static EMBUTIDOS: &[Embutido] = &[
         nome: "leitor",
         imagem: super::exemplo::bytes_do_leitor,
     },
+    Embutido {
+        nome: "paciente",
+        imagem: super::exemplo::bytes_do_paciente,
+    },
 ];
 
 /// Procura um programa embutido pelo nome, devolvendo a posição na tabela.
@@ -111,6 +115,17 @@ pub fn embutido_por_indice(indice: usize) -> Option<&'static [u8]> {
 /// O nome do programa que está na posição `indice`.
 pub fn nome_por_indice(indice: usize) -> Option<&'static str> {
     EMBUTIDOS.get(indice).map(|e| e.nome)
+}
+
+/// Quantos programas o kernel carrega consigo.
+///
+/// Existe para a suíte, e por um motivo concreto: o caso que confere que a
+/// raiz em Btrfs não rouba `/bin` comparava com um `4` escrito à mão. Ele
+/// reprovou no dia em que o quinto programa entrou — não por um defeito, mas
+/// porque o número morava longe da lista. Aqui ele não tem como divergir.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub fn quantos_embutidos() -> usize {
+    EMBUTIDOS.len()
 }
 
 /// O que sobrou do processo depois de uma carga que falhou.
