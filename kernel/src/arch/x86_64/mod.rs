@@ -259,6 +259,7 @@ pub fn init_paginacao() {
 
     paginacao::largar_a_identidade();
     exigir_protecao_de_escrita();
+    exigir_que_o_kernel_nao_execute_pagina_de_usuario();
 }
 
 /// Faz o bit de escrita valer também para o anel zero.
@@ -301,6 +302,76 @@ pub fn init_paginacao() {
 ///
 /// O ARM não precisa do equivalente: lá `AP[2]` vale para EL1 do mesmo jeito
 /// que para EL0, e não existe bit que deixe o supervisor passar por cima.
+/// Impede o anel zero de executar uma página marcada como de usuário.
+///
+/// # A proteção que existia numa arquitetura só
+///
+/// O backend do ARM põe `PXN` em **toda** página de usuário, e o comentário
+/// de lá diz, desde que foi escrito: "é a mesma proteção que o x86 chama de
+/// SMEP". Não era. O x86 deste kernel nunca tocou no `CR4` — nem aqui, nem
+/// no iniciador —, e portanto nunca ligou o SMEP.
+///
+/// A diferença é concreta. No ARM, um desvio acidental do kernel para um
+/// endereço de userspace é uma falha de permissão na hora. No x86, era o
+/// processador executando o código do processo com privilégio total, sem
+/// nada no caminho. Um ponteiro de função corrompido, um salto calculado
+/// sobre dado do usuário, e o anel deixa de significar coisa alguma.
+///
+/// Era o defeito característico deste projeto na sua forma mais cara: uma
+/// regra escrita de um lado, afirmada nos dois, e conferida em nenhum.
+///
+/// # Por que só o SMEP, e não o SMAP também
+///
+/// Porque o SMAP proíbe o kernel de **ler e escrever** página de usuário, e
+/// este kernel faz as duas coisas o tempo todo: copiar o buffer de
+/// `escrever`, ler o caminho de `abrir`, depositar o desfecho de `esperar`.
+/// Ligá-lo exigiria `stac`/`clac` em cada um desses pontos, que é outro
+/// trabalho.
+///
+/// E ele não quebraria simetria nenhuma: o equivalente do ARM é o `PAN`, do
+/// ARMv8.1, que este kernel também não liga. SMAP e PAN estão ausentes dos
+/// dois lados — que é uma lacuna, e não uma divergência.
+fn exigir_que_o_kernel_nao_execute_pagina_de_usuario() {
+    use x86_64::registers::control::{Cr4, Cr4Flags};
+
+    // O bit 7 do `EBX` da folha 7, sub-folha 0: é assim que o processador
+    // diz se tem SMEP. Perguntar antes de ligar não é cerimônia — escrever
+    // um bit reservado do `CR4` é `#GP`, e o kernel morreria no boot numa
+    // máquina mais velha em vez de seguir sem a proteção.
+    let tem_smep = core::arch::x86_64::__cpuid_count(7, 0).ebx & (1 << 7) != 0;
+
+    if !tem_smep {
+        crate::log_warn!(
+            "mmu",
+            "esta cpu nao oferece SMEP; o anel zero pode executar pagina de usuario"
+        );
+        return;
+    }
+
+    // SAFETY: o processador declarou o bit, e ligá-lo só torna as
+    // verificações **mais** estritas. O kernel nunca executa código de
+    // userspace com privilégio — quando entra em ring 3, o processador já
+    // mudou de nível antes da primeira instrução do processo.
+    unsafe { Cr4::update(|flags| flags.insert(Cr4Flags::SUPERVISOR_MODE_EXECUTION_PROTECTION)) };
+
+    crate::log_info!(
+        "mmu",
+        "SMEP ligado: o anel zero nao executa pagina de usuario"
+    );
+}
+
+/// O SMEP está ligado, ou esta CPU não o oferece?
+///
+/// Existe para a suíte: é a pergunta que distingue "a proteção está de pé"
+/// de "alguém apagou a linha que a liga".
+#[cfg(feature = "modo-teste")]
+pub fn protecao_de_execucao() -> (bool, bool) {
+    use x86_64::registers::control::{Cr4, Cr4Flags};
+    let tem = core::arch::x86_64::__cpuid_count(7, 0).ebx & (1 << 7) != 0;
+    let ligado = Cr4::read().contains(Cr4Flags::SUPERVISOR_MODE_EXECUTION_PROTECTION);
+    (tem, ligado)
+}
+
 fn exigir_protecao_de_escrita() {
     use x86_64::registers::control::{Cr0, Cr0Flags};
 

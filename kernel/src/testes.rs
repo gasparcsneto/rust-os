@@ -7304,6 +7304,109 @@ fn esperar_ticks(quantos: u64) {
 }
 
 /// Espera uma condição, com teto em tiques para não pendurar o CI.
+/// O anel zero não consegue executar uma página de usuário.
+///
+/// # A proteção que existia numa arquitetura só
+///
+/// O ARM põe `PXN` em toda página de usuário desde sempre, e o comentário
+/// que faz isso diz que é "a mesma proteção que o x86 chama de SMEP". Não
+/// era: o x86 deste kernel nunca tocou no `CR4`, nem aqui nem no
+/// iniciador. A afirmação de paridade estava no código e a paridade não.
+///
+/// A diferença é concreta. Um ponteiro de função corrompido ou um salto
+/// calculado sobre dado do usuário levava o kernel a executar o código do
+/// processo **com privilégio total** — enquanto no ARM a mesma coisa é uma
+/// falha de permissão na instrução seguinte.
+///
+/// # Por que este caso afirma o bit, e não o desvio
+///
+/// Porque provar a proteção de verdade exige saltar para uma página de
+/// usuário a partir do anel zero, e o desfecho disso é uma falha fatal. O
+/// kernel tem como declarar uma falha esperada — é assim que o estouro de
+/// pilha é testado —, mas esse mecanismo **encerra o emulador**, então só
+/// cabe um caso desses por execução, e a vaga já é do estouro de pilha.
+///
+/// Sobra afirmar o bit: com a CPU oferecendo SMEP, o `CR4` tem de estar com
+/// ele ligado ao fim do boot. É falsificável — apagando a linha que o liga,
+/// este caso reprova — e é tudo que se consegue afirmar sem gastar a única
+/// falha fatal da rodada.
+///
+/// O ARM não entra: lá a proteção é por bit de página, aplicada em
+/// `bits_de` a cada mapeamento, e quem a exercita é todo caso que entra em
+/// ring 3.
+fn x86_anel_zero_nao_executa_pagina_de_usuario() -> Resultado {
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        crate::log_info!("teste", "no ARM a mesma protecao e o PXN, por pagina");
+        Ok(())
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        let (tem, ligado) = crate::arch::atual::protecao_de_execucao();
+        if !tem {
+            // Não é aprovação: é a máquina dizendo que não tem como oferecer
+            // a proteção. Fica dito no log, porque uma linha destas numa
+            // execução de CI quer dizer que este caso parou de afirmar algo.
+            crate::log_warn!("teste", "esta cpu nao oferece SMEP; nada a afirmar");
+            return Ok(());
+        }
+        if !ligado {
+            return Err("a cpu oferece SMEP e o kernel nao o ligou");
+        }
+        Ok(())
+    }
+}
+
+/// Ninguém registra uma linha de log com a trava de outro na mão.
+///
+/// # O travamento que este caso existe para impedir
+///
+/// Quatro APIs deste kernel entregam um callback **segurando a trava
+/// delas**, e com as interrupções mascaradas: [`crate::log::ultimos`] com o
+/// anel, `machine::com_regioes` com o mapa, `pci::com_dispositivos` com o
+/// inventário e `irq::com_contadores` com os nomes das linhas.
+///
+/// Um callback que registre uma linha dali de dentro trava o núcleo. O
+/// `Mutex` de spin não é reentrante, ninguém pode soltá-lo porque as
+/// interrupções estão mascaradas, e não há outro núcleo para socorrer. Não
+/// é um travamento provável — é um travamento **total**, na primeira vez.
+///
+/// # Por que ele ainda não aconteceu, e por que isso não basta
+///
+/// Porque todos os callbacks de hoje obedecem: os drivers copiam o que
+/// acharam para uma local e registram depois; os comandos do agente
+/// escrevem numa porta que já vem travada de quem os chamou. A regra é
+/// seguida por unanimidade e não estava escrita em lugar nenhum — que é
+/// exatamente como ela sobrevive até alguém escrever o callback óbvio.
+///
+/// Este caso a escreve de um jeito que não depende de ninguém ler: as
+/// quatro APIs declaram o escopo com [`crate::log::SobTrava`], `registrar`
+/// conta quem desobedeceu, e aqui o número tem de ser zero.
+///
+/// `fios::com_inscricoes` mostra a saída melhor, e é a razão de ela não
+/// entrar nesta lista: ela monta um retrato sob a trava e chama o callback
+/// **fora** dela. Onde isso cabe, dispensa a regra.
+fn log_ninguem_registra_sob_trava_alheia() -> Resultado {
+    // Uma volta por cada uma das quatro, para que o caso exercite os escopos
+    // em vez de só ler um contador que ninguém mexeu.
+    crate::log::ultimos(8, crate::log::Level::Trace, |_| {});
+    crate::machine::com_regioes(|_| {});
+    crate::pci::com_dispositivos(|_| {});
+    crate::irq::com_contadores(|_, _, _| {});
+
+    let quantos = crate::log::registros_sob_trava();
+    if quantos != 0 {
+        crate::log_error!(
+            "teste",
+            "{} linha(s) registradas de dentro de um callback travado",
+            quantos
+        );
+        return Err("alguem registrou log com a trava de outro na mao");
+    }
+    Ok(())
+}
+
 /// A checagem de estouro aritmético está ligada nesta compilação.
 ///
 /// # Por que um caso, e num kernel
@@ -7920,6 +8023,14 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "kernel: a checagem de estouro aritmetico esta ligada",
         f: kernel_checagem_de_estouro_ligada,
+    },
+    Caso {
+        nome: "log: ninguem registra com a trava de outro na mao",
+        f: log_ninguem_registra_sob_trava_alheia,
+    },
+    Caso {
+        nome: "x86: o anel zero nao executa pagina de usuario",
+        f: x86_anel_zero_nao_executa_pagina_de_usuario,
     },
     Caso {
         nome: "pci: regioes atribuidas nao se sobrepoem",

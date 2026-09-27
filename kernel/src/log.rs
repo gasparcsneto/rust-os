@@ -22,6 +22,9 @@
 //! alocar é proibido ou perigoso. Um buffer estático nunca falha.
 
 use core::fmt::{self, Write as _};
+// Só a guarda de callback travado usa atômicos, e ela só existe na suíte.
+#[cfg(feature = "modo-teste")]
+use core::sync::atomic::Ordering;
 
 use spin::Mutex;
 
@@ -178,6 +181,14 @@ impl fmt::Write for Cursor<'_> {
 /// quantos bytes foram de fato aceitos: devolver o tamanho pedido depois de
 /// guardar menos é mentir para quem chamou.
 pub fn registrar(nivel: Level, subsistema: &'static str, args: fmt::Arguments) -> usize {
+    // Registrar de dentro de um callback que roda sob trava é o caminho para
+    // um núcleo travado. Aqui só se conta; quem reprova é a suíte. Ver
+    // [`SobTrava`].
+    #[cfg(feature = "modo-teste")]
+    if PROFUNDIDADE.load(Ordering::Relaxed) > 0 {
+        REGISTROS_SOB_TRAVA.fetch_add(1, Ordering::Relaxed);
+    }
+
     let (seq, guardados) = crate::arch::sem_interrupcoes(|| {
         let mut anel = ANEL.lock();
 
@@ -248,6 +259,7 @@ pub fn registrar(nivel: Level, subsistema: &'static str, args: fmt::Arguments) -
 pub fn ultimos<F: FnMut(&Record)>(max: usize, nivel_minimo: Level, mut f: F) {
     crate::arch::sem_interrupcoes(|| {
         let anel = ANEL.lock();
+        let _sob_trava = SobTrava::nova();
 
         let guardados = (anel.total as usize).min(CAPACIDADE);
         let quantos = max.min(guardados);
@@ -272,6 +284,70 @@ pub fn ultimos<F: FnMut(&Record)>(max: usize, nivel_minimo: Level, mut f: F) {
 /// deadlock que engoliria o relatório da falha.
 pub unsafe fn destravar() {
     unsafe { ANEL.force_unlock() }
+}
+
+// ---------------------------------------------------------------------------
+// A regra que este kernel tinha em quatro lugares e escrita em nenhum
+// ---------------------------------------------------------------------------
+
+/// Marca que, até o fim do escopo, roda código de fora com uma trava deste
+/// kernel na mão.
+///
+/// # O que ela existe para pegar
+///
+/// Quatro APIs entregam um callback **segurando a trava delas**, e com as
+/// interrupções mascaradas: [`ultimos`] com o anel, `machine::com_regioes`
+/// com o mapa, `pci::com_dispositivos` com o inventário e
+/// `irq::com_contadores` com os nomes das linhas. Um callback que registre
+/// uma linha de log dali de dentro trava o núcleo — `Mutex` de spin não é
+/// reentrante, e ninguém pode soltá-lo, porque as interrupções estão
+/// mascaradas e não há outro núcleo.
+///
+/// Hoje **nenhum** callback faz isso: os drivers copiam o que acharam para
+/// uma local e registram depois, e os comandos do agente escrevem numa
+/// porta que já está travada por quem os chamou. A regra é obedecida por
+/// todos e não estava escrita em lugar nenhum — que é como ela sobrevive
+/// até o dia em que alguém escreve o callback óbvio.
+///
+/// `fios::com_inscricoes` é a exceção que mostra a saída: ela monta um
+/// retrato sob a trava e chama o callback **fora** dela. Onde isso cabe, é
+/// melhor que qualquer regra.
+///
+/// # Por que contar em vez de parar
+///
+/// Porque parar seria registrar uma linha sobre não poder registrar. O
+/// contador transforma a regra numa afirmação da suíte — ver o caso `log:
+/// ninguem registra com a trava de outro na mao` —, e o custo fora do modo
+/// de teste é zero: a guarda inteira some.
+pub struct SobTrava;
+
+#[cfg(feature = "modo-teste")]
+static PROFUNDIDADE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(feature = "modo-teste")]
+static REGISTROS_SOB_TRAVA: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+impl SobTrava {
+    /// Abre o escopo. Fora do modo de teste não faz nada.
+    pub fn nova() -> Self {
+        #[cfg(feature = "modo-teste")]
+        PROFUNDIDADE.fetch_add(1, Ordering::Relaxed);
+        SobTrava
+    }
+}
+
+impl Drop for SobTrava {
+    fn drop(&mut self) {
+        #[cfg(feature = "modo-teste")]
+        PROFUNDIDADE.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Quantas linhas foram registradas de dentro de um callback travado.
+///
+/// Zero é a única resposta certa. Ver [`SobTrava`].
+#[cfg(feature = "modo-teste")]
+pub fn registros_sob_trava() -> u64 {
+    REGISTROS_SOB_TRAVA.load(Ordering::Relaxed)
 }
 
 /// Total de registros emitidos desde o boot.

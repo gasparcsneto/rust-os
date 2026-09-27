@@ -559,6 +559,9 @@ pub fn total() -> usize {
 /// Chama `f` para cada dispositivo guardado.
 pub fn com_dispositivos<F: FnMut(&Dispositivo)>(mut f: F) {
     crate::arch::sem_interrupcoes(|| {
+        // O callback roda com a trava do inventário na mão. Ver
+        // [`crate::log::SobTrava`] para o que isso proíbe.
+        let _sob_trava = crate::log::SobTrava::nova();
         for achado in INVENTARIO.lock().iter().flatten() {
             f(achado);
         }

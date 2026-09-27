@@ -100,6 +100,9 @@ pub fn contabilizar(linha: usize) {
 pub fn com_contadores<F: FnMut(usize, &'static str, u64)>(mut f: F) {
     crate::arch::sem_interrupcoes(|| {
         let nomes = NOMES.lock();
+        // O callback roda com a trava dos nomes na mão. Ver
+        // [`crate::log::SobTrava`] para o que isso proíbe.
+        let _sob_trava = crate::log::SobTrava::nova();
         for linha in 0..MAX_LINHAS {
             let total = CONTADORES[linha].load(Ordering::Relaxed);
             if total > 0 {

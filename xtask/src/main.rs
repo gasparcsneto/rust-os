@@ -2710,6 +2710,20 @@ fn comando_qemu(
 
     match (arch, artefato) {
         (Arquitetura::X86_64, Artefato::Disco(disco)) => {
+            // A CPU precisa oferecer SMEP, e a padrão do QEMU não oferece.
+            //
+            // O kernel liga o bit quando o processador o tem, e sem ele a
+            // proteção não existe — o anel zero volta a poder executar página
+            // de usuário. Medido antes desta linha: o kernel registrava
+            // `esta cpu nao oferece SMEP` e o caso da suíte não afirmava
+            // nada, porque não havia o que afirmar.
+            //
+            // `+smep` sobre o modelo padrão, e não um `-cpu host` ou `max`:
+            // acrescentar a característica que se quer exercitar mantém o
+            // resto da máquina igual ao que era, e diz no próprio argumento
+            // por que ela está ali.
+            qemu.args(["-cpu", "qemu64,+smep"]);
+
             // O firmware, em duas partes: o código, que é somente leitura, e
             // as variáveis, que ele escreve durante o boot e por isso são uma
             // cópia nossa.

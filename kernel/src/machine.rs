@@ -150,6 +150,9 @@ pub fn adicionar_regiao(regiao: Regiao) {
 /// Executa `f` para cada região registrada.
 pub fn com_regioes<F: FnMut(&Regiao)>(mut f: F) {
     com_maquina(|m| {
+        // O callback roda com a trava do mapa na mão. Ver
+        // [`crate::log::SobTrava`] para o que isso proíbe.
+        let _sob_trava = crate::log::SobTrava::nova();
         for regiao in &m.regioes[..m.n] {
             f(regiao);
         }
