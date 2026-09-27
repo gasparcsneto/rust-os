@@ -70,8 +70,8 @@ pub mod numero {
     /// `esperar(id, ponteiro)`: espera um filho terminar.
     ///
     /// `id` zero espera qualquer filho; diferente de zero, aquele filho. O
-    /// ponteiro, quando não é nulo, recebe o código de saída como `i64`.
-    /// Devolve o identificador do filho colhido.
+    /// ponteiro, quando não é nulo, aponta para **dois** `i64`: o código de
+    /// saída e se ele vale. Devolve o identificador do filho colhido.
     ///
     /// É a única chamada deste kernel que **bloqueia**: o fio sai da lista
     /// do escalonador e volta quando um filho sai. Ver
@@ -564,6 +564,37 @@ fn fechar(descritor: u64) -> i64 {
 /// O valor devolvido nesse caminho não chega a usuário nenhum: o backend o
 /// descarta e reexecuta. Devolvemos zero por ser o mais inofensivo se um dia
 /// alguém esquecer de descartá-lo.
+/// Quantos bytes o ponteiro de [`esperar`] precisa ter.
+///
+/// Dois `i64`: o código de saída e se ele significa alguma coisa.
+///
+/// # Por que não basta o código
+///
+/// Porque nem todo processo sai por `sair`. Um morto por falha de página ou
+/// de proteção termina sem código nenhum, e a primeira versão desta chamada
+/// escrevia zero nesse caso — que é um código de saída perfeitamente
+/// legítimo, e o mais comum de todos. O pai lia zero e concluía que o filho
+/// tinha terminado bem.
+///
+/// É a pior forma de falhar: não há erro, não há ausência, há uma resposta
+/// plausível e errada. Um supervisor que reinicia trabalhador que morreu
+/// nunca reiniciaria nenhum.
+///
+/// Não dá para resolver dentro de um número só: **todo** `i64` é um código
+/// de saída válido, então não existe sentinela. A segunda palavra é a saída
+/// — e ela cabe também para o que vier depois, como qual falha matou o
+/// processo.
+pub const BYTES_DO_DESFECHO: u64 = 16;
+
+/// O que a segunda palavra do desfecho carrega.
+pub mod desfecho {
+    /// O processo chamou `sair`, e a primeira palavra é o código dele.
+    pub const SAIU: i64 = 1;
+    /// O processo foi morto antes de chamar `sair`. A primeira palavra não
+    /// significa nada, e é escrita como zero para não vazar lixo.
+    pub const MORTO: i64 = 0;
+}
+
 fn esperar(alvo: u64, ponteiro: u64) -> i64 {
     // O ponteiro é conferido **antes** da colheita, e a ordem não é estilo.
     //
@@ -577,7 +608,7 @@ fn esperar(alvo: u64, ponteiro: u64) -> i64 {
     // reprova — ele pede de propósito uma espera com o endereço 1 antes da
     // legítima, e do outro lado não acha mais o filho.
     if ponteiro != 0
-        && let Err(erro) = validar_faixa(ponteiro, 8)
+        && let Err(erro) = validar_faixa(ponteiro, BYTES_DO_DESFECHO)
     {
         RECUSADAS.fetch_add(1, Ordering::Relaxed);
         return erro;
@@ -586,14 +617,25 @@ fn esperar(alvo: u64, ponteiro: u64) -> i64 {
     match crate::fios::colher_filho((alvo != 0).then_some(alvo)) {
         crate::fios::Colheita::Colhido(id, saida) => {
             if ponteiro != 0 {
-                // SAFETY: `validar_faixa` conferiu acima que os oito bytes
-                // estão na faixa do usuário e mapeados, e estamos no espaço
-                // de endereços do processo que chamou.
+                // O código **e** se ele vale. Ver [`BYTES_DO_DESFECHO`] para
+                // por que a segunda palavra não é opcional.
+                let (codigo, valeu) = match saida {
+                    Some(codigo) => (codigo, desfecho::SAIU),
+                    None => (0, desfecho::MORTO),
+                };
+
+                // SAFETY: `validar_faixa` conferiu acima que os dezesseis
+                // bytes estão na faixa do usuário e mapeados, e estamos no
+                // espaço de endereços do processo que chamou.
                 //
                 // Sem alinhamento garantido: o ponteiro vem do usuário, e um
                 // `write` comum de `i64` num endereço ímpar é comportamento
                 // indefinido no x86 e falha de alinhamento no ARM.
-                unsafe { (ponteiro as *mut i64).write_unaligned(saida.unwrap_or(0)) };
+                unsafe {
+                    let destino = ponteiro as *mut i64;
+                    destino.write_unaligned(codigo);
+                    destino.add(1).write_unaligned(valeu);
+                }
             }
             id as i64
         }

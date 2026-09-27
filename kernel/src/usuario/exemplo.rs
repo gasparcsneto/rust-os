@@ -175,6 +175,10 @@ unsafe extern "C" {
     static PACIENTE_INICIO: u8;
     #[link_name = "programa_paciente_fim"]
     static PACIENTE_FIM: u8;
+    #[link_name = "programa_orfao_inicio"]
+    static ORFAO_INICIO: u8;
+    #[link_name = "programa_orfao_fim"]
+    static ORFAO_FIM: u8;
 }
 
 /// A imagem ELF do programa bem-comportado.
@@ -230,7 +234,7 @@ pub fn bytes_do_leitor() -> &'static [u8] {
 /// simplesmente perguntasse em laço até achar o filho passaria em qualquer
 /// teste que só olhasse o código de saída.
 ///
-/// Por isso ele confere quatro coisas, e sai com
+/// Por isso ele confere cinco coisas, e sai com
 /// [`CODIGO_DE_FALHA_DO_PACIENTE`] se qualquer uma falhar:
 ///
 /// 0. um ponteiro inválido é recusado **sem** consumir o filho — a colheita
@@ -245,6 +249,36 @@ pub fn bytes_do_leitor() -> &'static [u8] {
 pub fn bytes_do_paciente() -> &'static [u8] {
     // SAFETY: ver `entre`.
     unsafe { entre(&raw const PACIENTE_INICIO, &raw const PACIENTE_FIM) }
+}
+
+/// Código com que o pai do órfão sai quando o desfecho conferiu.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub const CODIGO_DO_ORFAO: i64 = 53;
+
+/// Código com que o órfão sai quando alguma conferência dele falhou.
+///
+/// Serve também para o filho: se ele **sobreviver** à leitura da memória do
+/// kernel e chegar ao `sair`, é este o número que aparece — e ele denuncia
+/// uma proteção que não protege, não uma espera que não funciona.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub const CODIGO_DE_FALHA_DO_ORFAO: i64 = 10;
+
+/// A imagem ELF do programa cujo filho morre de falha.
+///
+/// # O que ele prova que o paciente não prova
+///
+/// Que o pai distingue "o filho saiu com zero" de "o filho foi morto". Os
+/// dois eram a mesma coisa até a segunda palavra do desfecho existir: quem
+/// morre de falha de página nunca chega a `sair`, não tem código, e o
+/// kernel escrevia zero — o código de saída mais comum que existe.
+///
+/// O filho aqui lê a memória do kernel, que é o mesmo que o `invasor` faz,
+/// e morre por isso. O pai espera e exige `MORTO`. Se o kernel voltar a
+/// inventar um zero, este é o único caso que reprova.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub fn bytes_do_orfao() -> &'static [u8] {
+    // SAFETY: ver `entre`.
+    unsafe { entre(&raw const ORFAO_INICIO, &raw const ORFAO_FIM) }
 }
 
 /// # Safety
@@ -706,7 +740,8 @@ programa_invasor_fim:
 // nele, o pai sai com o veneno mais um, que nao se confunde com nada.
 .set OFF_CODIGO_PACIENTE, 32
 .set VADDR_SLOT_PA,       VADDR_DADOS
-.set DADOS_PA,            8
+.set VADDR_VALEU_PA,      VADDR_DADOS + 8
+.set DADOS_PA,            16
 
 .balign 8
 .global programa_paciente_inicio
@@ -790,7 +825,15 @@ programa_paciente_inicio:
     test    rax, rax
     jns     .Lfalhou_pa
 
-    // 3. sair com o codigo do filho mais um
+    // 3. o desfecho tem de dizer que o filho saiu por `sair`. Sem isto, um
+    //    kernel que escrevesse zero para quem foi morto passaria batido:
+    //    zero e um codigo de saida perfeitamente legitimo.
+    movabs  rax, offset VADDR_VALEU_PA
+    mov     rax, [rax]
+    cmp     rax, 1
+    jne     .Lfalhou_pa
+
+    // 4. sair com o codigo do filho mais um
     movabs  rax, offset VADDR_SLOT_PA
     mov     rdi, [rax]
     inc     rdi
@@ -811,11 +854,116 @@ programa_paciente_inicio:
 .Lfim_codigo_pa:
 
 .Ldados_pa:
-    .quad   100                      // o veneno do slot
+    .quad   100                      // o veneno do codigo
+    .quad   -1                       // o veneno do "vale?"
 .Lfim_dados_pa:
 
 .global programa_paciente_fim
 programa_paciente_fim:
+
+// --- o orfao: o filho morre de falha, e o pai precisa saber disso ---------
+//
+// Mesma forma do paciente, com uma diferenca no filho: em vez de sair, ele
+// le a memoria do kernel e e morto. O que se afirma e do lado do pai -- que
+// o desfecho diga `MORTO`, e nao um codigo de saida inventado.
+.set OFF_CODIGO_ORFAO, 32
+.set VADDR_SLOT_OR,    VADDR_DADOS
+.set VADDR_VALEU_OR,   VADDR_DADOS + 8
+.set DADOS_OR,         16
+
+.balign 8
+.global programa_orfao_inicio
+programa_orfao_inicio:
+
+.Lelf_or:
+    .byte   0x7F, 0x45, 0x4C, 0x46   // \x7fELF
+    .byte   2, 1, 1, 0               // 64 bits, little-endian, versao 1
+    .byte   0, 0, 0, 0, 0, 0, 0, 0   // resto do e_ident
+    .short  2                        // e_type: ET_EXEC
+    .short  0x3E                     // e_machine
+    .long   1                        // e_version
+    .quad   VADDR_CODIGO + OFF_CODIGO_ORFAO      // e_entry
+    .quad   64                       // e_phoff
+    .quad   0                        // e_shoff
+    .long   0                        // e_flags
+    .short  64                       // e_ehsize
+    .short  56                       // e_phentsize
+    .short  2                        // e_phnum
+    .short  0                        // e_shentsize
+    .short  0                        // e_shnum
+    .short  0                        // e_shstrndx
+
+    .long   1                                   // PT_LOAD
+    .long   5                                   // PF_R | PF_X
+    .quad   .Lcodigo_or - .Lelf_or              // p_offset
+    .quad   VADDR_CODIGO                        // p_vaddr
+    .quad   VADDR_CODIGO                        // p_paddr
+    .quad   .Lfim_codigo_or - .Lcodigo_or       // p_filesz
+    .quad   .Lfim_codigo_or - .Lcodigo_or       // p_memsz
+    .quad   4096                                // p_align
+
+    .long   1                                   // PT_LOAD
+    .long   6                                   // PF_R | PF_W
+    .quad   .Ldados_or - .Lelf_or               // p_offset
+    .quad   VADDR_DADOS                         // p_vaddr
+    .quad   VADDR_DADOS                         // p_paddr
+    .quad   DADOS_OR                            // p_filesz
+    .quad   DADOS_OR                            // p_memsz
+    .quad   4096                                // p_align
+
+.Lcodigo_or:
+    .space  OFF_CODIGO_ORFAO
+    // bifurcar()
+    mov     eax, 4
+    syscall
+    test    rax, rax
+    jz      .Lfilho_or
+
+    // esperar(0, &slot)
+    xor     edi, edi
+    movabs  rsi, offset VADDR_SLOT_OR
+    mov     eax, 9
+    syscall
+    test    rax, rax
+    js      .Lfalhou_or
+
+    // O desfecho tem de dizer MORTO (0). Este e o ponto do programa: um
+    // kernel que escrevesse "saiu com 0" para quem foi morto reprovaria
+    // aqui, e em nenhum outro lugar.
+    movabs  rax, offset VADDR_VALEU_OR
+    mov     rax, [rax]
+    test    rax, rax
+    jnz     .Lfalhou_or
+
+    mov     eax, 0
+    mov     edi, 53
+    syscall
+
+.Lfilho_or:
+    // Le o comeco da imagem do kernel. E uma falha de protecao, e o filho
+    // morre sem nunca chamar `sair`.
+    movabs  rax, 0xffff800000000000
+    mov     rax, [rax]
+    // Inalcancavel.
+    mov     eax, 0
+    mov     edi, 10
+    syscall
+
+.Lfalhou_or:
+    mov     eax, 0
+    mov     edi, 10
+    syscall
+.Lprender_or:
+    jmp     .Lprender_or
+.Lfim_codigo_or:
+
+.Ldados_or:
+    .quad   100                      // o veneno do codigo
+    .quad   -1                       // o veneno do "vale?"
+.Lfim_dados_or:
+
+.global programa_orfao_fim
+programa_orfao_fim:
 "#
 );
 
@@ -1282,7 +1430,8 @@ programa_invasor_fim:
 // nele, o pai sai com o veneno mais um, que nao se confunde com nada.
 .set OFF_CODIGO_PACIENTE, 32
 .set VADDR_SLOT_PA,       VADDR_DADOS
-.set DADOS_PA,            8
+.set VADDR_VALEU_PA,      VADDR_DADOS + 8
+.set DADOS_PA,            16
 
 .balign 8
 .global programa_paciente_inicio
@@ -1366,7 +1515,17 @@ programa_paciente_inicio:
     svc     #0
     tbz     x0, #63, .Lfalhou_pa
 
-    // 3. sair com o codigo do filho mais um
+    // 3. o desfecho tem de dizer que o filho saiu por `sair`. Sem isto, um
+    //    kernel que escrevesse zero para quem foi morto passaria batido:
+    //    zero e um codigo de saida perfeitamente legitimo.
+    movz    x2, #(VADDR_VALEU_PA & 0xFFFF)
+    movk    x2, #((VADDR_VALEU_PA >> 16) & 0xFFFF), lsl #16
+    movk    x2, #((VADDR_VALEU_PA >> 32) & 0xFFFF), lsl #32
+    ldr     x0, [x2]
+    cmp     x0, #1
+    b.ne    .Lfalhou_pa
+
+    // 4. sair com o codigo do filho mais um
     movz    x2, #(VADDR_SLOT_PA & 0xFFFF)
     movk    x2, #((VADDR_SLOT_PA >> 16) & 0xFFFF), lsl #16
     movk    x2, #((VADDR_SLOT_PA >> 32) & 0xFFFF), lsl #32
@@ -1389,10 +1548,116 @@ programa_paciente_inicio:
 .Lfim_codigo_pa:
 
 .Ldados_pa:
-    .quad   100                      // o veneno do slot
+    .quad   100                      // o veneno do codigo
+    .quad   -1                       // o veneno do "vale?"
 .Lfim_dados_pa:
 
 .global programa_paciente_fim
 programa_paciente_fim:
+
+// --- o orfao: o filho morre de falha, e o pai precisa saber disso ---------
+//
+// Mesma forma do paciente, com uma diferenca no filho: em vez de sair, ele
+// le a memoria do kernel e e morto. O que se afirma e do lado do pai -- que
+// o desfecho diga `MORTO`, e nao um codigo de saida inventado.
+.set OFF_CODIGO_ORFAO, 32
+.set VADDR_SLOT_OR,    VADDR_DADOS
+.set VADDR_VALEU_OR,   VADDR_DADOS + 8
+.set DADOS_OR,         16
+
+.balign 8
+.global programa_orfao_inicio
+programa_orfao_inicio:
+
+.Lelf_or:
+    .byte   0x7F, 0x45, 0x4C, 0x46   // \x7fELF
+    .byte   2, 1, 1, 0               // 64 bits, little-endian, versao 1
+    .byte   0, 0, 0, 0, 0, 0, 0, 0   // resto do e_ident
+    .short  2                        // e_type: ET_EXEC
+    .short  0xB7                     // e_machine
+    .long   1                        // e_version
+    .quad   VADDR_CODIGO + OFF_CODIGO_ORFAO      // e_entry
+    .quad   64                       // e_phoff
+    .quad   0                        // e_shoff
+    .long   0                        // e_flags
+    .short  64                       // e_ehsize
+    .short  56                       // e_phentsize
+    .short  2                        // e_phnum
+    .short  0                        // e_shentsize
+    .short  0                        // e_shnum
+    .short  0                        // e_shstrndx
+
+    .long   1                                   // PT_LOAD
+    .long   5                                   // PF_R | PF_X
+    .quad   .Lcodigo_or - .Lelf_or              // p_offset
+    .quad   VADDR_CODIGO                        // p_vaddr
+    .quad   VADDR_CODIGO                        // p_paddr
+    .quad   .Lfim_codigo_or - .Lcodigo_or       // p_filesz
+    .quad   .Lfim_codigo_or - .Lcodigo_or       // p_memsz
+    .quad   4096                                // p_align
+
+    .long   1                                   // PT_LOAD
+    .long   6                                   // PF_R | PF_W
+    .quad   .Ldados_or - .Lelf_or               // p_offset
+    .quad   VADDR_DADOS                         // p_vaddr
+    .quad   VADDR_DADOS                         // p_paddr
+    .quad   DADOS_OR                            // p_filesz
+    .quad   DADOS_OR                            // p_memsz
+    .quad   4096                                // p_align
+
+.Lcodigo_or:
+    .space  OFF_CODIGO_ORFAO
+    // bifurcar()
+    mov     x8, #4
+    svc     #0
+    cbz     x0, .Lfilho_or
+
+    // esperar(0, &slot)
+    mov     x0, xzr
+    movz    x1, #(VADDR_SLOT_OR & 0xFFFF)
+    movk    x1, #((VADDR_SLOT_OR >> 16) & 0xFFFF), lsl #16
+    movk    x1, #((VADDR_SLOT_OR >> 32) & 0xFFFF), lsl #32
+    mov     x8, #9
+    svc     #0
+    tbnz    x0, #63, .Lfalhou_or
+
+    // O desfecho tem de dizer MORTO (0). Este e o ponto do programa: um
+    // kernel que escrevesse "saiu com 0" para quem foi morto reprovaria
+    // aqui, e em nenhum outro lugar.
+    movz    x2, #(VADDR_VALEU_OR & 0xFFFF)
+    movk    x2, #((VADDR_VALEU_OR >> 16) & 0xFFFF), lsl #16
+    movk    x2, #((VADDR_VALEU_OR >> 32) & 0xFFFF), lsl #32
+    ldr     x0, [x2]
+    cbnz    x0, .Lfalhou_or
+
+    mov     x8, #0
+    mov     x0, #53
+    svc     #0
+
+.Lfilho_or:
+    // Le o comeco da imagem do kernel, em 0x4008_0000. E uma falha de
+    // protecao, e o filho morre sem nunca chamar `sair`.
+    movz    x0, #0x4008, lsl #16
+    ldr     x0, [x0]
+    // Inalcancavel.
+    mov     x8, #0
+    mov     x0, #10
+    svc     #0
+
+.Lfalhou_or:
+    mov     x8, #0
+    mov     x0, #10
+    svc     #0
+.Lprender_or:
+    b       .Lprender_or
+.Lfim_codigo_or:
+
+.Ldados_or:
+    .quad   100                      // o veneno do codigo
+    .quad   -1                       // o veneno do "vale?"
+.Lfim_dados_or:
+
+.global programa_orfao_fim
+programa_orfao_fim:
 "#
 );

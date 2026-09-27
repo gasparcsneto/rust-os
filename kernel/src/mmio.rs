@@ -89,7 +89,23 @@ pub fn mapear(fisico: u64, tamanho: u64) -> Result<u64, &'static str> {
             // não deixar meia região traduzindo, porque uma escrita nela
             // chegaria ao dispositivo pela metade.
             for desfazer in 0..indice {
-                let _ = crate::arch::desmapear(base + desfazer * TAMANHO_PAGINA);
+                let pagina = base + desfazer * TAMANHO_PAGINA;
+                if let Err(porque) = crate::arch::desmapear(pagina) {
+                    // Aqui o desfazer falhou, e o que sobra é exatamente o
+                    // que este bloco existe para impedir: meia região
+                    // traduzindo, com o resto não. Não há o que fazer além
+                    // de dizer — desfazer o desfazer não é uma operação.
+                    //
+                    // Em silêncio isto era pior que um vazamento: a próxima
+                    // tentativa de mapear a mesma faixa encontraria páginas
+                    // já ocupadas e falharia por um motivo que não é o dela.
+                    crate::log_error!(
+                        "mmio",
+                        "a pagina {:#x} ficou mapeada depois de um mapeamento que falhou: {}",
+                        pagina,
+                        porque
+                    );
+                }
             }
             return Err(motivo);
         }

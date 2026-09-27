@@ -942,6 +942,75 @@ fn fdt_ignora_propriedade_menor_que_uma_celula() -> Resultado {
     }
 }
 
+/// Uma busca no device tree que para no meio **diz** que parou.
+///
+/// # O que este caso protege
+///
+/// Que "esta placa não tem PCI" e "o blob acabou antes de eu achar o PCI"
+/// não sejam a mesma resposta. As buscas por barramento, por controlador de
+/// interrupção e por larguras devolvem `Option`, e `None` já significa
+/// ausência — então um percurso que aborta no meio produz exatamente a
+/// resposta que significa outra coisa.
+///
+/// Cinco chamadas descartavam o `Result` do percurso com `let _ =`. O erro
+/// existia, era específico ("deslocamento fora do blob", "assinatura
+/// invalida") e ia para o chão. O kernel seguia o boot inteiro convencido de
+/// que a máquina não tinha o que ele não conseguiu ler.
+///
+/// O caso corta o `totalsize` do blob para dentro da região de estrutura,
+/// que é o que um firmware truncado produz, e exige a linha de aviso. A
+/// busca continua devolvendo `None` — interromper o boot por um `ranges`
+/// truncado seria pior —, mas agora com rastro.
+fn fdt_busca_que_para_no_meio_avisa() -> Resultado {
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        crate::log_info!("teste", "o leitor de device tree so existe no aarch64");
+        Ok(())
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        use crate::arch::aarch64::fdt;
+
+        const TOTALSIZE: usize = 4;
+
+        let mut blob = [0u8; 256];
+        let usado = montar_dtb(&mut blob, 2, 1);
+
+        // O blob declara-se menor do que é, cortando no meio da estrutura.
+        // O percurso obedece ao `totalsize` — é o único limite que ele tem —
+        // e para ali.
+        let cortado = (usado / 2) as u32;
+        blob[TOTALSIZE..TOTALSIZE + 4].copy_from_slice(&cortado.to_be_bytes());
+
+        // A frase **inteira**, e não só "parou antes do fim".
+        //
+        // A primeira versão deste caso casava com o trecho curto, e passou
+        // numa mutação que tirou o relato de `encontrar_barramento_pci`: a
+        // linha que ela via vinha de `no_do_host_bridge`, que roda antes e
+        // relata por conta. Uma afirmação que casa com qualquer aviso do
+        // subsistema não afirma nada sobre o aviso que se queria.
+        //
+        // E é `no_do_host_bridge` mesmo que este caso alcança: a busca do
+        // barramento começa por ela e devolve `None` com `?` quando ela não
+        // acha nada, sem chegar ao percurso próprio.
+        let marca = "a busca por o host bridge do PCI parou antes do fim";
+        let antes = contar_no_log("fdt", marca);
+
+        // SAFETY: o blob está neste quadro de pilha e traz a assinatura; o
+        // que se afirma é o que o leitor faz quando o `totalsize` mente.
+        let achou = unsafe { fdt::encontrar_barramento_pci(blob.as_ptr()) };
+        if achou.is_some() {
+            return Err("um blob cortado ao meio produziu um barramento PCI");
+        }
+
+        if contar_no_log("fdt", marca) == antes {
+            return Err("a busca parou no meio e nao disse nada");
+        }
+        Ok(())
+    }
+}
+
 fn fdt_confere_deslocamentos_contra_o_tamanho_declarado() -> Resultado {
     #[cfg(not(target_arch = "aarch64"))]
     {
@@ -5360,6 +5429,55 @@ fn usuario_espera_o_filho_e_colhe_o_codigo() -> Resultado {
     }
 }
 
+/// Um pai distingue "o filho saiu com zero" de "o filho foi morto".
+///
+/// # A falha silenciosa que este caso fecha
+///
+/// Nem todo processo sai por `sair`. Um morto por falha de página ou de
+/// proteção termina sem código nenhum, e a primeira versão de `esperar`
+/// escrevia **zero** nesse caso — que é um código de saída legítimo, e o
+/// mais comum de todos. O pai lia zero e concluía sucesso.
+///
+/// Não há como consertar isso dentro de um número: todo `i64` é um código
+/// válido, então não existe sentinela. A segunda palavra do desfecho é a
+/// saída, e este caso é o único lugar onde ela é exercitada com `MORTO`.
+///
+/// O programa `orfao` faz o filho ler a memória do kernel — o mesmo que o
+/// `invasor` faz — e exige, do lado do pai, que o desfecho diga que ele foi
+/// morto. Se o filho **sobreviver** à leitura, ele chega ao `sair` e o caso
+/// reprova com outro código: aí o defeito é da proteção, e não da espera.
+fn usuario_pai_sabe_que_o_filho_foi_morto() -> Resultado {
+    extern "C" fn hospedar(_argumento: u64) -> ! {
+        match crate::usuario::programa::executar(crate::usuario::exemplo::bytes_do_orfao()) {
+            Ok(_) => unreachable!("executar nao retorna em caso de sucesso"),
+            Err(_) => crate::fios::terminar(),
+        }
+    }
+
+    crate::usuario::limpar_ultima_saida();
+    let (_, _, saidas_antes) = crate::usuario::estatisticas_de_processo();
+
+    crate::fios::criar("teste-orfao", hospedar, 0)?;
+
+    // Uma saída só: o filho morre de falha, e quem chama `sair` é o pai.
+    esperar_ate(
+        || crate::usuario::estatisticas_de_processo().2 > saidas_antes,
+        600,
+    )?;
+
+    match crate::usuario::ultima_saida() {
+        Some(codigo) if codigo == crate::usuario::exemplo::CODIGO_DO_ORFAO => Ok(()),
+        Some(codigo) if codigo == crate::usuario::exemplo::CODIGO_DE_FALHA_DO_ORFAO => {
+            Err("o pai nao soube que o filho tinha sido morto, ou o filho sobreviveu")
+        }
+        Some(codigo) => {
+            crate::log_error!("teste", "o orfao saiu com {}", codigo);
+            Err("o orfao saiu com um codigo que nao e de ninguem")
+        }
+        None => Err("nenhum processo saiu"),
+    }
+}
+
 /// Um filho que terminou e ainda não foi colhido fica de pé até a colheita.
 ///
 /// # O que esta regra custa, e por que ela existe assim mesmo
@@ -7247,6 +7365,24 @@ fn arch_dormir_parado_acorda_mascarado() -> Resultado {
     Ok(())
 }
 
+/// Quantos registros de um subsistema contêm um trecho.
+///
+/// Existe para os casos que afirmam que **alguma coisa foi dita**. Contar
+/// antes e depois, em vez de só procurar, é o que distingue a linha que
+/// este caso provocou de uma igual que outro caso deixou no anel.
+///
+/// Hoje só o caso do device tree a usa, e ele só existe no ARM.
+#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
+fn contar_no_log(subsistema: &str, trecho: &str) -> usize {
+    let mut quantos = 0;
+    crate::log::ultimos(256, crate::log::Level::Trace, |r| {
+        if r.subsistema == subsistema && r.mensagem().contains(trecho) {
+            quantos += 1;
+        }
+    });
+    quantos
+}
+
 fn esperar_ate(mut condicao: impl FnMut() -> bool, teto_em_ticks: u64) -> Resultado {
     let limite = crate::tempo::ticks().saturating_add(teto_em_ticks);
     while crate::tempo::ticks() < limite {
@@ -7738,6 +7874,14 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "arch: dormir parado acorda com as interrupcoes mascaradas",
         f: arch_dormir_parado_acorda_mascarado,
+    },
+    Caso {
+        nome: "fdt: busca que para no meio avisa",
+        f: fdt_busca_que_para_no_meio_avisa,
+    },
+    Caso {
+        nome: "usuario: o pai sabe que o filho foi morto",
+        f: usuario_pai_sabe_que_o_filho_foi_morto,
     },
     Caso {
         nome: "pci: regioes atribuidas nao se sobrepoem",

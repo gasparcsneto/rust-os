@@ -65,7 +65,19 @@ impl Uart {
         // Reaplicar a configuração inteira é o caminho que o driver oferece
         // para mexer no IER. É seguro: a sequência é a mesma da abertura, e a
         // porta está ociosa neste ponto do boot.
-        let _ = self.0.init(config);
+        //
+        // "É seguro" não é o mesmo que "não pode falhar", e a diferença é
+        // esta linha. Se falhar, a porta fica sem interrupção de recepção e
+        // o canal do agente passa a depender só da varredura do executor —
+        // que funciona, e devagar. Um canal lento sem motivo aparente é o
+        // tipo de coisa que se procura no lugar errado por horas.
+        if let Err(porque) = self.0.init(config) {
+            crate::log_error!(
+                "serial",
+                "a 16550 recusou a configuracao de interrupcao: {:?}",
+                porque
+            );
+        }
     }
 
     /// Reconhece a interrupção de recepção no próprio dispositivo.

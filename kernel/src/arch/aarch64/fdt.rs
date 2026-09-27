@@ -373,6 +373,45 @@ unsafe fn percorrer(dtb: *const u8, mut f: impl FnMut(&Propriedade)) -> Result<(
 ///
 /// # Safety
 /// `prop` precisa ter vindo de um percurso do blob `dtb`.
+/// Percorre o blob e **diz** se não deu, em vez de devolver o que achou até
+/// parar.
+///
+/// # O que este embrulho existe para impedir
+///
+/// [`percorrer`] devolve `Result`, e por bons motivos: ela recusa ponteiro
+/// nulo, assinatura errada e todo deslocamento que sair do `totalsize`. Cinco
+/// chamadas descartavam esse `Result` com `let _ =`.
+///
+/// O efeito não era perder o erro — era **trocá-lo por outra resposta**. Uma
+/// busca que para no meio devolve `None`, e `None` já quer dizer "esta placa
+/// não tem isso". Quem chama então conclui que a máquina não tem PCI, ou não
+/// tem controlador de interrupção, quando o que houve foi o blob acabar
+/// antes da hora. Nenhuma linha de log, e a conclusão errada vira verdade
+/// para todo o resto do boot.
+///
+/// O device tree é o dado mais externo que este kernel lê — vem do firmware,
+/// e é o único lugar onde ele aceita um mapa de hardware de outra pessoa.
+/// Errar em silêncio sobre ele é errar sobre a máquina inteira.
+///
+/// Continua devolvendo o que achou: interromper o boot porque o `ranges` de
+/// um barramento está truncado seria pior. O que muda é que agora existe uma
+/// linha dizendo o quê, e para quê a busca era.
+///
+/// # Safety
+///
+/// A mesma de [`percorrer`].
+unsafe fn percorrer_relatando(dtb: *const u8, f: impl FnMut(&Propriedade), para_que: &str) {
+    // SAFETY: delegada ao chamador.
+    if let Err(motivo) = unsafe { percorrer(dtb, f) } {
+        crate::log_warn!(
+            "fdt",
+            "a busca por {} parou antes do fim: {}",
+            para_que,
+            motivo
+        );
+    }
+}
+
 unsafe fn ler_reg(dtb: *const u8, prop: &Propriedade, mut f: impl FnMut(u64, u64)) {
     // Soma em `usize`, e não em `u32`: as duas larguras vêm do blob, e somá-las
     // na largura em que foram lidas transbordaria. O percurso já as limita a
@@ -595,7 +634,7 @@ unsafe fn no_do_host_bridge(dtb: *const u8) -> Option<u32> {
     };
 
     // SAFETY: delegada ao chamador.
-    let _ = unsafe { percorrer(dtb, &mut procurar) };
+    unsafe { percorrer_relatando(dtb, &mut procurar, "o host bridge do PCI") };
     alvo
 }
 
@@ -654,7 +693,7 @@ pub unsafe fn encontrar_barramento_pci(dtb: *const u8) -> Option<BarramentoPci> 
     };
 
     // SAFETY: delegada ao chamador.
-    let _ = unsafe { percorrer(dtb, &mut ler_o_no) };
+    unsafe { percorrer_relatando(dtb, &mut ler_o_no, "as janelas do barramento PCI") };
 
     Some(BarramentoPci {
         ecam: ecam?,
@@ -716,7 +755,7 @@ unsafe fn larguras_do_phandle(dtb: *const u8, phandle: u32) -> Option<Larguras> 
         }
     };
     // SAFETY: delegada ao chamador.
-    let _ = unsafe { percorrer(dtb, &mut procurar) };
+    unsafe { percorrer_relatando(dtb, &mut procurar, "o no do controlador de interrupcao") };
     let alvo = alvo?;
 
     // Segunda passada: as larguras que ele declara.
@@ -749,7 +788,7 @@ unsafe fn larguras_do_phandle(dtb: *const u8, phandle: u32) -> Option<Larguras> 
         }
     };
     // SAFETY: delegada ao chamador.
-    let _ = unsafe { percorrer(dtb, &mut ler) };
+    unsafe { percorrer_relatando(dtb, &mut ler, "as larguras do controlador") };
 
     Some(Larguras {
         endereco,
@@ -797,7 +836,7 @@ pub unsafe fn interrupcao_pci(dtb: *const u8, endereco_alto: u32, pino: u8) -> O
         }
     };
     // SAFETY: delegada ao chamador.
-    let _ = unsafe { percorrer(dtb, &mut ler) };
+    unsafe { percorrer_relatando(dtb, &mut ler, "o mapa de interrupcoes do PCI") };
 
     let (mascara_em, mascara_bytes) = mascara?;
     let (mapa_em, mapa_bytes) = mapa?;
