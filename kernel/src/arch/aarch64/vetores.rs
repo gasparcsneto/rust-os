@@ -389,10 +389,16 @@ fn parar_o_fio_atual(quadro: &mut Quadro) {
             return;
         }
 
-        // `wfi` acorda com uma IRQ pendente mesmo mascarada, então a próxima
-        // interrupção do timer nos traz de volta — possivelmente com alguém
+        // `wfi` acorda com uma IRQ pendente mesmo mascarada — e aqui elas
+        // estão, pela própria entrada da exceção —, então a próxima
+        // interrupção do timer nos traz de volta, possivelmente com alguém
         // pronto para rodar.
-        crate::arch::esperar_interrupcao();
+        //
+        // `dormir_parado` porque é ela que promete isso nas duas
+        // arquiteturas. Este comentário já descreveu um `wfi` que não
+        // acontecia: `esperar_interrupcao` copiava a guarda do x86 e girava
+        // quando mascarada, que é sempre, aqui dentro.
+        crate::arch::dormir_parado();
     }
 }
 

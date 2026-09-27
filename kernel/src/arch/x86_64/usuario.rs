@@ -310,10 +310,12 @@ fn estacionar() {
         if !crate::fios::atual_parado() {
             return;
         }
-        // Se voltamos aqui é porque não havia outro fio pronto. Dormir em vez
-        // de girar: a próxima interrupção pode trazer alguém — ou o filho que
-        // este fio espera.
-        crate::arch::esperar_interrupcao();
+        // Se voltamos aqui é porque não havia outro fio pronto. Só uma
+        // interrupção pode mudar isso, e aqui elas estão mascaradas: o
+        // `syscall` as desliga por causa do `SFMask`. `dormir_parado` liga,
+        // dorme e devolve a máscara — ver o cabeçalho dela para por que
+        // `esperar_interrupcao` não serve neste ponto.
+        crate::arch::dormir_parado();
     }
 }
 

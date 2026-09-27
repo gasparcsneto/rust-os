@@ -515,6 +515,48 @@ pub fn esperar_interrupcao() {
     }
 }
 
+/// Dorme até a próxima interrupção, ligando-as se for preciso.
+///
+/// # Quem pode chamar, e por que a pergunta importa
+///
+/// Só quem **não pode prosseguir** e **não tem trava na mão**: um fio que
+/// terminou, ou um que espera um filho. Para esses dois, ligar as
+/// interrupções não encurta seção crítica nenhuma — não há seção — e é a
+/// única coisa que pode mudar a situação deles.
+///
+/// # Por que [`esperar_interrupcao`] não serve
+///
+/// Porque ela se recusa a dormir com as interrupções mascaradas, e está
+/// certa: um `hlt` com `IF=0` para o núcleo até um NMI, ou seja, para
+/// sempre. O problema é que ela então **gira**, e girar com `IF=0` também é
+/// para sempre — o timer não chega nos dois casos. O comentário dela chama
+/// o giro de "recuperável", e ele só é recuperável se outro fio puder rodar
+/// e religar as interrupções; para quem está parado, não há outro momento.
+///
+/// E é justamente de dentro de uma chamada de sistema que isso acontece no
+/// x86: o `syscall` limpa `IF` por causa do `SFMask`, então todo o despacho
+/// roda mascarado.
+///
+/// Medido: o ramo mascarado de [`esperar_interrupcao`] foi tomado **zero**
+/// vezes na suíte inteira. O travamento era latente, e esperava a primeira
+/// máquina em que o coletor não estivesse pronto para rodar.
+///
+/// No ARM esta função é um `wfi` e pronto: lá a instrução já acorda com a
+/// interrupção mascarada, e não há o que ligar.
+pub fn dormir_parado() {
+    use x86_64::instructions::interrupts;
+
+    // Restaurar o estado anterior, e não ligar de vez: quem chamou com as
+    // interrupções ligadas continua com elas ligadas, e quem chamou de
+    // dentro de uma chamada de sistema volta mascarado, como o resto do
+    // despacho espera.
+    let estavam_ligadas = interrupts::are_enabled();
+    interrupts::enable_and_hlt();
+    if !estavam_ligadas {
+        interrupts::disable();
+    }
+}
+
 /// Dorme até a próxima interrupção, mas só se `ocioso` confirmar que não há
 /// trabalho — e sem deixar fresta entre as duas coisas.
 ///

@@ -31,6 +31,8 @@
 //! - `init_paginacao()`, `mapear_frame()`, `desmapear()`, `traduzir()`: a MMU.
 //! - `acesso_fisico()`: endereço virtual por onde se enxerga um físico.
 //! - `esperar_interrupcao()`: dorme até a próxima interrupção.
+//! - `dormir_parado()`: o mesmo, para um fio que não pode prosseguir e não
+//!   tem trava na mão — no x86 isso exige ligar as interrupções, no ARM não.
 //! - `dormir_se_ocioso()`: dorme só se não houver trabalho, sem corrida.
 //! - `disparar_breakpoint()`: gera uma exceção recuperável, para autoteste.
 //! - `disparar_falha_fatal()`: gera uma exceção irrecuperável, de propósito.
@@ -64,11 +66,11 @@ pub use atual::{
     BASE_DAS_PILHAS, BASE_DE_MMIO, BASE_DO_HEAP, COBERTURA_DA_ENTRADA_DE_TOPO, Contexto, Uart,
     acesso_fisico, ceder_cpu, copia_na_escrita_em, criar_espaco, definir_pilha_de_kernel,
     desmapear, destravar_paginacao, destruir_espaco, disparar_breakpoint, disparar_falha_fatal,
-    dormir_se_ocioso, encerrar_emulador, entrar_em_usuario, espaco_atual, espaco_do_kernel,
-    esperar_interrupcao, falha_de_estouro_de_pilha, halt_forever, identificar_cpu, init_excecoes,
-    init_interrupcao_serial, init_interrupcoes, init_paginacao, init_pci, init_seriais,
-    init_timer_definitivo, init_usuario, interrupcoes_habilitadas, mapear_frame,
-    marcar_copia_na_escrita, nome, percorrer_paginas_do_usuario, preparar_contexto,
+    dormir_parado, dormir_se_ocioso, encerrar_emulador, entrar_em_usuario, espaco_atual,
+    espaco_do_kernel, esperar_interrupcao, falha_de_estouro_de_pilha, halt_forever,
+    identificar_cpu, init_excecoes, init_interrupcao_serial, init_interrupcoes, init_paginacao,
+    init_pci, init_seriais, init_timer_definitivo, init_usuario, interrupcoes_habilitadas,
+    mapear_frame, marcar_copia_na_escrita, nome, percorrer_paginas_do_usuario, preparar_contexto,
     preparar_contexto_de_fork, redirecionar_para, reservar_faixas, sem_interrupcoes, traduzir,
     trocar_espaco,
 };

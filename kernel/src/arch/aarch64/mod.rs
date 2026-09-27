@@ -514,12 +514,38 @@ pub fn init_interrupcoes() {
 ///
 /// Devolve o controle imediatamente se as IRQs estiverem mascaradas: `wfi`
 /// com interrupções desabilitadas pararia o núcleo para sempre.
+/// Dorme até a próxima interrupção, mesmo com elas mascaradas.
+///
+/// # Por que aqui não há o `if` que o x86 tem
+///
+/// Porque `wfi` não é `hlt`. A arquitetura define que ele acorda com um
+/// *wake-up event* pendente **independentemente** de `PSTATE.I` — mascarar
+/// adia a entrega da interrupção, não o despertar. Um `wfi` com IRQ
+/// mascarada dorme e acorda; um `hlt` com `IF=0` dorme para sempre.
+///
+/// A versão anterior copiava a guarda do x86 e caía num `spin_loop` quando
+/// mascarada — jogando fora justamente a propriedade que distingue as duas
+/// instruções. E o pior é onde isso doía: dentro de um handler de exceção,
+/// que é onde [`vetores`] estaciona um fio, as IRQ estão sempre mascaradas
+/// pela entrada da exceção. O comentário de lá dizia que o `wfi` nos traria
+/// de volta; o código garantia que ele nunca rodasse.
+///
+/// Medido antes da correção: o ramo mascarado foi tomado **zero** vezes na
+/// suíte inteira, nas duas arquiteturas. Não era um defeito vivo — era um
+/// que esperava a primeira máquina sem outro fio pronto.
 pub fn esperar_interrupcao() {
-    if interrupcoes_habilitadas() {
-        wfi();
-    } else {
-        core::hint::spin_loop();
-    }
+    wfi();
+}
+
+/// Dorme até a próxima interrupção, para quem não pode prosseguir.
+///
+/// Aqui é [`esperar_interrupcao`], sem diferença: o `wfi` já acorda com a
+/// interrupção mascarada. A função existe porque no x86 as duas **não** são
+/// a mesma coisa — lá dormir mascarado exige ligar as interrupções antes —,
+/// e um kernel que chama nomes diferentes para a mesma intenção acaba com a
+/// intenção escrita numa arquitetura só.
+pub fn dormir_parado() {
+    wfi();
 }
 
 /// Onde o firmware depositou o device tree.

@@ -96,6 +96,13 @@ pub enum Estado {
     /// a única transição de volta, e é por isso que ela é o lugar onde o
     /// código de saída é registrado: quem acorda o pai é o mesmo que tem o
     /// número que o pai foi esperar.
+    ///
+    /// E quem **põe** aqui é [`colher_filho`], também num lugar só. Isso
+    /// não é arrumação: o backend de arquitetura reexecuta a chamada de
+    /// sistema quando encontra o fio neste estado, e reexecutar só é
+    /// seguro para uma chamada que não teve efeito. Com uma única escrita,
+    /// "quais chamadas podem parar aqui" tem uma resposta que se lê, em vez
+    /// de uma que se procura.
     Esperando,
     /// Terminou. A vaga pode ser reaproveitada.
     Terminado,
@@ -1025,7 +1032,13 @@ pub fn descansar() -> ! {
         crate::arch::ceder_cpu();
         // Se voltarmos aqui é porque não havia outro fio pronto. Dormir em vez
         // de girar: a próxima interrupção pode trazer alguém.
-        crate::arch::esperar_interrupcao();
+        //
+        // `dormir_parado`, e não `esperar_interrupcao`: este caminho é
+        // alcançado de dentro de uma chamada de sistema, e no x86 o
+        // `syscall` chega com as interrupções mascaradas. A outra função se
+        // recusa a dormir mascarada e gira — e girar aqui é girar para
+        // sempre, porque não há outro fio para religá-las.
+        crate::arch::dormir_parado();
     }
 }
 

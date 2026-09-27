@@ -7186,6 +7186,67 @@ fn esperar_ticks(quantos: u64) {
 }
 
 /// Espera uma condição, com teto em tiques para não pendurar o CI.
+/// Um fio parado dorme de verdade com as interrupções mascaradas, e acorda.
+///
+/// # Por que este caso existe
+///
+/// Os dois caminhos que estacionam um fio — ele terminou, ou espera um filho
+/// — são alcançados **de dentro de uma chamada de sistema**, e no x86 o
+/// `syscall` chega com `IF` limpo por causa do `SFMask`. Um `hlt` ali dorme
+/// até um NMI, e girar no lugar dele gira até o fim do mundo: o timer não
+/// chega nos dois casos. [`crate::arch::dormir_parado`] existe para isso.
+///
+/// # A primeira versão deste caso não testava nada, e a mutação provou
+///
+/// Ela exigia só que a função **voltasse** com a máscara intacta. Trocando a
+/// implementação pelo `esperar_interrupcao` de antes — que com `IF` limpo
+/// cai num `spin_loop`, ou seja, uma instrução e pronto —, o caso continuou
+/// passando: girar também volta, e também mantém a máscara. A afirmação não
+/// distinguia dormir de não fazer nada.
+///
+/// O que distingue é uma interrupção ter sido **atendida**. No x86 dormir
+/// exige ligar as interrupções, então quem dorme de verdade sai do sono com
+/// pelo menos uma servida, e [`crate::irq::total`] sobe. Com o `spin_loop`
+/// ela não sobe, e o caso reprova.
+///
+/// # Por que o ARM afirma menos, e não é desleixo
+///
+/// Porque lá `wfi` acorda com a interrupção **pendente e mascarada** — ele
+/// não a entrega. O fio dorme, acorda e segue com a máscara na mão, sem
+/// handler nenhum ter rodado: `irq::total` não sobe nem quando está tudo
+/// certo. Exigir o mesmo número dos dois lados seria exigir do ARM uma
+/// consequência que a instrução dele não tem.
+///
+/// Sobra o que vale nos dois: a função volta, e a máscara volta com ela. É
+/// a metade fraca, e está dito que é.
+fn arch_dormir_parado_acorda_mascarado() -> Resultado {
+    let irqs_antes = crate::irq::total();
+
+    let mascarado_dentro = crate::arch::sem_interrupcoes(|| {
+        // Se esta chamada não voltar, a suíte estoura o teto. É o ponto.
+        crate::arch::dormir_parado();
+        crate::arch::interrupcoes_habilitadas()
+    });
+
+    if mascarado_dentro {
+        return Err("dormir_parado devolveu o controle com as interrupcoes ligadas");
+    }
+    if !crate::arch::interrupcoes_habilitadas() {
+        return Err("a regiao mascarada nao devolveu as interrupcoes ao sair");
+    }
+
+    // A metade falsificável, só onde ela existe. Ver o cabeçalho.
+    #[cfg(target_arch = "x86_64")]
+    if crate::irq::total() == irqs_antes {
+        crate::log_error!("teste", "irqs antes e depois: {}", irqs_antes);
+        return Err("dormir_parado voltou sem nenhuma interrupcao ter sido atendida");
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = irqs_antes;
+
+    Ok(())
+}
+
 fn esperar_ate(mut condicao: impl FnMut() -> bool, teto_em_ticks: u64) -> Resultado {
     let limite = crate::tempo::ticks().saturating_add(teto_em_ticks);
     while crate::tempo::ticks() < limite {
@@ -7673,6 +7734,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "fios: o zumbi espera a colheita e some depois dela",
         f: fios_zumbi_espera_a_colheita_e_some_depois_dela,
+    },
+    Caso {
+        nome: "arch: dormir parado acorda com as interrupcoes mascaradas",
+        f: arch_dormir_parado_acorda_mascarado,
     },
     Caso {
         nome: "pci: regioes atribuidas nao se sobrepoem",
