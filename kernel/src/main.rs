@@ -41,6 +41,19 @@
 // O `cfg_attr` mantém o atributo fora do build de ARM, onde a ABI não existe
 // e declará-la geraria aviso.
 #![cfg_attr(target_arch = "x86_64", feature(abi_x86_interrupt))]
+// `cfg(overflow_checks)`: a resposta do próprio compilador sobre se esta
+// compilação para ou dá a volta quando uma conta não cabe.
+//
+// É instável, e vale o gate por um motivo específico: as alternativas todas
+// olham para o binário depois de pronto, e as duas que tentei se mostraram
+// enganosas — a mensagem de pânico continua no ELF com a checagem desligada,
+// e o símbolo `panic_const_add_overflow` aparece na compilação de teste por
+// outro caminho do link. Perguntar ao `rustc` é exato; adivinhar pelo
+// artefato não é.
+//
+// Só no modo de teste, porque é só lá que ele é usado: fora dele o atributo
+// vira um `unused-features`, que este projeto trata como erro.
+#![cfg_attr(feature = "modo-teste", feature(cfg_overflow_checks))]
 
 // A `alloc` é a parte da biblioteca padrão que depende apenas de um alocador,
 // e não de um sistema operacional. Com o heap no ar, ela nos dá `Box`, `Vec`,

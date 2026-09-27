@@ -7304,6 +7304,40 @@ fn esperar_ticks(quantos: u64) {
 }
 
 /// Espera uma condição, com teto em tiques para não pendurar o CI.
+/// A checagem de estouro aritmético está ligada nesta compilação.
+///
+/// # Por que um caso, e num kernel
+///
+/// Porque o padrão do Rust em release é **dar a volta**: uma soma que não
+/// cabe vira um número menor, sem aviso. Num programa comum isso é uma conta
+/// errada; aqui é um tamanho que vira índice fora da faixa e um endereço que
+/// aponta para memória de outra pessoa, com o sintoma aparecendo longe da
+/// causa. O perfil de release liga a checagem de propósito, e este caso é o
+/// que impede que ela suma sem ninguém notar.
+///
+/// # Duas tentativas de conferir isso pelo binário, e por que as duas falharam
+///
+/// A primeira procurava a mensagem `attempt to add with overflow` nos bytes
+/// do ELF. Desligando a checagem, a mensagem **continua lá**: as
+/// dependências e a própria `core` a carregam, e o `rustc` emite uma cópia
+/// só que todos os pontos referenciam.
+///
+/// A segunda procurava o símbolo `panic_const_add_overflow`, que de fato
+/// some do binário de produção quando a checagem sai — medido, 6.483.896
+/// bytes com ele contra 6.401.400 sem. Só que na compilação de teste ele
+/// aparece de qualquer jeito, vindo de outro lugar do link. Contar tampouco
+/// serve: o número muda por motivos que não são este.
+///
+/// A resposta certa é a do próprio compilador. `cfg!(overflow_checks)` não
+/// é uma pista sobre o artefato, é o que o `rustc` sabe sobre a compilação
+/// que ele está fazendo — e é exato nos dois perfis.
+fn kernel_checagem_de_estouro_ligada() -> Resultado {
+    if cfg!(overflow_checks) {
+        return Ok(());
+    }
+    Err("esta compilacao da a volta em vez de parar quando uma conta nao cabe")
+}
+
 /// Um fio parado dorme de verdade com as interrupções mascaradas, e acorda.
 ///
 /// # Por que este caso existe
@@ -7882,6 +7916,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "usuario: o pai sabe que o filho foi morto",
         f: usuario_pai_sabe_que_o_filho_foi_morto,
+    },
+    Caso {
+        nome: "kernel: a checagem de estouro aritmetico esta ligada",
+        f: kernel_checagem_de_estouro_ligada,
     },
     Caso {
         nome: "pci: regioes atribuidas nao se sobrepoem",

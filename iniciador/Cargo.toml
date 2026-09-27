@@ -24,3 +24,20 @@ panic = "abort"
 [profile.release]
 panic = "abort"
 debug = true
+# Estouro aritmético para o kernel, e não silêncio.
+#
+# O padrão do Rust em release é dar a volta: `a + b` que não cabe vira um
+# número menor, sem aviso. Num programa comum isso é uma conta errada; num
+# kernel é um tamanho que vira índice fora da faixa, ou um endereço que
+# aponta para memória de outra pessoa — e o sintoma aparece páginas depois,
+# sem nada que ligue uma coisa à outra.
+#
+# Parar é melhor. Este kernel tem modo post-mortem: uma parada vira um canal
+# aberto com a mensagem exata e o `pc`, que é incomparavelmente mais útil
+# que um número errado seguindo adiante.
+#
+# Medido antes de ligar: a suíte inteira passa em release com a checagem
+# ativa, nas duas arquiteturas, 155 casos cada. Nenhum caminho exercitado
+# hoje depende de dar a volta.
+overflow-checks = true
+
