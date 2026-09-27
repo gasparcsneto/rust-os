@@ -81,6 +81,36 @@ impl JanelaMmio {
     }
 }
 
+/// Traduz um endereço do lado do barramento para o lado da CPU.
+///
+/// # Por que duas janelas, e não uma
+///
+/// Porque atribuir e ler são coisas diferentes, e só uma delas é escolha do
+/// kernel.
+///
+/// Onde o kernel atribui — no ARM, que boota sem firmware pelo protocolo de
+/// imagem crua —, ele usa a janela de 32 bits, que é a única em que um BAR
+/// de 32 bits cabe. Onde **um firmware** já atribuiu, o endereço pode estar
+/// na janela de 64 bits: é lá que a UEFI põe os BARs de 64 bits dos
+/// dispositivos virtio, em `0x80_0000_0000`.
+///
+/// Conhecer só a primeira funcionava enquanto o ARM só bootava por imagem
+/// crua. No primeiro boot pela UEFI, o kernel leu os BARs que o firmware
+/// escreveu, não soube traduzi-los, e o disco e a rede não subiram — com um
+/// aviso por BAR e nenhuma pista de que o problema era a janela.
+///
+/// Num PC não há janela declarada nenhuma, e o endereço do barramento é o da
+/// CPU: é o que o `None` no fim quer dizer.
+fn traduzir_do_barramento(distribuidor: Option<&Distribuidor>, no_barramento: u64) -> Option<u64> {
+    if let Some(d) = distribuidor {
+        if let Some(na_cpu) = d.janela.na_cpu(no_barramento) {
+            return Some(na_cpu);
+        }
+        return crate::arch::pci::janela_alta().and_then(|alta| alta.na_cpu(no_barramento));
+    }
+    Some(no_barramento)
+}
+
 /// Distribui uma [`JanelaMmio`] entre os BARs, um dispositivo por vez.
 ///
 /// # Por que um alocador de incremento
@@ -335,19 +365,11 @@ fn preparar(
             }
         };
 
-        // Onde houve firmware não há janela declarada, e não há tradução a
-        // aplicar: num PC o endereço do barramento é o da CPU. Onde há janela,
-        // é ela que sabe a diferença.
-        let na_cpu = match distribuidor.as_ref() {
-            Some(d) => d.janela.na_cpu(no_barramento),
-            None => Some(no_barramento),
-        };
-
-        match na_cpu {
+        match traduzir_do_barramento(distribuidor.as_ref(), no_barramento) {
             Some(base) => achado.regioes[slot] = Some(Regiao { base, tamanho }),
             None => crate::log_warn!(
                 "pci",
-                "BAR {} em {:#x} fica fora da janela conhecida",
+                "BAR {} em {:#x} fica fora das janelas conhecidas",
                 slot,
                 no_barramento
             ),

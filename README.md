@@ -1053,6 +1053,65 @@ ARM publica só a RSDP da ACPI — foi medido, e o iniciador lista os oito
 GUIDs da tabela quando não acha o que procura, justamente para que a
 diferença entre "não tem" e "tem com outro GUID" não precise ser adivinhada.
 
+### A suíte inteira roda pelo caminho da UEFI
+
+No ARM a sonda não para na primeira linha do kernel: ela deixa a suíte
+correr até o fim.
+
+```
+$ cargo xtask iniciador --arch aarch64
+  [conferido] o kernel assumiu a maquina e disse `Duke iniciado em aarch64`
+  [conferido] 149 casos da suite passaram sobre o mapa da UEFI
+```
+
+A diferença não é cosmética. O mapa de memória que o firmware entrega tem
+trinta e três regiões; o do device tree tem uma. Tudo que depende de saber o
+que é memória livre — o alocador de frames, a cópia na escrita, o coletor de
+espaços, o leitor de Btrfs — roda sobre esse mapa pela primeira vez ali.
+Passar no `-kernel` não dizia nada sobre passar por este caminho.
+
+E não dizia mesmo. Na primeira vez que a suíte correu por aqui, **vinte e
+nove casos reprovaram**, e nenhum deles era do kernel.
+
+**A sonda montava uma segunda definição da máquina.** Mais curta, com
+`virtio-blk-device` no lugar do `virtio-blk-pci`, sem semihosting, sem
+teclado. Enquanto ela só olhava a primeira linha do kernel, a diferença não
+aparecia; no dia em que a suíte rodou ali, ela reprovou dizendo que a máquina
+não tinha disco, nem vídeo, nem PCI — e estava certa sobre outro computador.
+A sonda passou a usar a **mesma** função que `test`, `run` e `fumaca` usam,
+que agora sabe bootar o ARM pelo disco.
+
+**E sobrou um defeito de verdade, que só este caminho expõe.** Com a máquina
+certa, ainda faltavam o disco e a rede:
+
+```
+pci     janela de MMIO em 0x10000000 (barramento 0x10000000), 751 MiB
+pci     BAR 4 em 0x8000000000 fica fora da janela conhecida
+virtio  disco nao pode ser ligado: dispositivo sem configuracao comum
+```
+
+O kernel lia da `ranges` do device tree **só a janela de 32 bits**, e com
+razão declarada: é a única em que um BAR de 32 bits cabe, e é lá que ele
+põe os BARs quando é ele quem os distribui. Mas quando é o **firmware** que
+distribui, os BARs de 64 bits dos dispositivos virtio vão para a janela
+alta, em `0x80_0000_0000`. O kernel os lia, não sabia traduzi-los, e
+concluía que o dispositivo não tinha região.
+
+É o mesmo defeito de sempre neste projeto, com outra roupa: funciona
+enquanto **nós** fazemos, quebra quando alguém fez antes. Numa placa ARM de
+verdade é sempre o firmware que atribui.
+
+O conserto separa as duas perguntas. Atribuir continua sendo só na janela de
+32 bits; **ler** passa a tentar as duas. No x86 não há janela declarada
+nenhuma — lá o endereço do barramento é o da CPU — e nada muda.
+
+**A máquina do ARM ganhou uma segunda tela**, e é para o firmware. O EDK II
+do ARM não tem driver de bochs, que é o adaptador que o kernel dirige: sem
+um que ele saiba dirigir, o iniciador não descobre tela nenhuma e o caminho
+que protege o framebuffer nunca roda. O `ramfb` é o que ele dirige, e como
+não é PCI não aparece na varredura do kernel — os dois convivem sem que
+nenhum dos lados precise escolher.
+
 ### A sonda do ARM, e o boot que parecia ter falhado
 
 Ela roda as **mesmas quatro recusas** com kernels estragados de propósito —
@@ -1065,7 +1124,7 @@ campo `e_machine`, o que no ARM é copiar o valor certo por cima dele mesmo.
 O iniciador aceitava o arquivo, com razão, e a rodada reprovava. O byte
 agora é o da **outra** arquitetura, seja qual for a de quem está rodando.
 
-E ela boota a compilação de **teste** do kernel, por um motivo que custou
+Ela boota a compilação de **teste** do kernel, por um motivo que custou
 uma investigação. O primeiro boot por UEFI no ARM pareceu ter falhado: o
 iniciador dizia "a maquina e do Duke; saltando para 0x40080000" e depois
 silêncio. O `-d int` do QEMU mostrou o kernel **vivo** — tomando

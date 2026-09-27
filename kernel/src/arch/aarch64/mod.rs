@@ -573,6 +573,25 @@ pub fn init_pci() {
         tamanho / (1024 * 1024)
     );
     pci::registrar_janela(no_barramento, na_cpu, tamanho);
+
+    // E a janela de 64 bits, que serve só para **ler**.
+    //
+    // O kernel nunca atribui nela: um BAR de 32 bits não alcança
+    // `0x80_0000_0000`. Mas um firmware UEFI atribui, e é lá que ele põe os
+    // BARs de 64 bits dos dispositivos virtio antes de entregar a máquina.
+    // Sem conhecê-la, o kernel lê aqueles endereços, não sabe traduzi-los e
+    // conclui que o dispositivo não tem região — o disco e a rede não sobem,
+    // com um aviso por BAR e nenhuma pista do motivo.
+    if let Some((no_barramento, na_cpu, tamanho)) = barramento.mmio64 {
+        crate::log_info!(
+            "pci",
+            "janela de 64 bits em {:#x} (barramento {:#x}), {} MiB, so para leitura",
+            na_cpu,
+            no_barramento,
+            tamanho / (1024 * 1024)
+        );
+        pci::registrar_janela_alta(no_barramento, na_cpu, tamanho);
+    }
 }
 
 /// Faz a serial do agente interromper quando chegar um byte.

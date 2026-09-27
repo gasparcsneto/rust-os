@@ -451,6 +451,9 @@ const CELULAS_DE_TAMANHO_PCI: usize = 2;
 /// `0b10` é memória de 32 bits e `0b11` é memória de 64 bits.
 const ESPACO_DE_MEMORIA_32: u32 = 0b10;
 
+/// Código do espaço de memória de 64 bits, na mesma palavra alta.
+const ESPACO_DE_MEMORIA_64: u32 = 0b11;
+
 /// O que o device tree diz sobre o barramento PCI desta placa.
 pub struct BarramentoPci {
     /// Onde o espaço de configuração (ECAM) começa, e quanto ele ocupa.
@@ -464,19 +467,41 @@ pub struct BarramentoPci {
     /// coincidir, mas depender disso seria depender de uma coincidência que a
     /// `ranges` existe justamente para descrever.
     pub mmio32: Option<(u64, u64, u64)>,
+    /// A janela de memória de 64 bits, no mesmo formato.
+    ///
+    /// # Por que ela existe, se nada é distribuído nela
+    ///
+    /// Porque o kernel não é sempre quem distribui. Quando ele boota pelo
+    /// protocolo de imagem crua, os BARs chegam zerados e ele os põe na
+    /// janela de 32 bits — que é onde um BAR de 32 bits cabe, e é a única
+    /// que ele usa para **atribuir**.
+    ///
+    /// Quando ele boota pela UEFI, o firmware já atribuiu. E o firmware põe
+    /// os BARs de 64 bits dos dispositivos virtio na janela alta, em
+    /// `0x80_0000_0000`. Sem conhecê-la, o kernel lê aqueles endereços,
+    /// não consegue traduzi-los, e conclui que o dispositivo não tem
+    /// região — que é o que ele fazia: o disco e a rede simplesmente não
+    /// subiam, com um aviso por BAR e nenhuma explicação do porquê.
+    ///
+    /// Atribuir continua sendo só na de 32 bits. O que muda é **ler**.
+    pub mmio64: Option<(u64, u64, u64)>,
 }
 
-/// Lê a `ranges` de um host bridge e devolve a primeira janela de memória de
-/// 32 bits que ela declarar.
+/// Lê a `ranges` de um host bridge e devolve as janelas de memória que ela
+/// declarar: a de 32 bits e a de 64.
 ///
-/// Por que a de 32 bits: é a única em que um BAR de 32 bits — que é o que os
-/// dispositivos virtio do QEMU pedem — consegue ser endereçado. A janela de
-/// 64 bits da máquina `virt` começa em 0x80_0000_0000, muito além do que cabe
-/// num BAR de 32 bits.
+/// As duas servem a propósitos diferentes, e é por isso que as duas voltam.
+/// A de 32 bits é onde o kernel **atribui** BARs, porque é a única em que um
+/// BAR de 32 bits cabe — a de 64 da máquina `virt` começa em
+/// `0x80_0000_0000`, muito além. A de 64 bits é onde ele precisa saber
+/// **ler**, porque é lá que um firmware UEFI põe os BARs de 64 bits antes de
+/// entregar a máquina.
 ///
 /// # Safety
 /// `prop` precisa ter vindo de um percurso do blob `dtb`.
-unsafe fn ler_ranges(dtb: *const u8, prop: &Propriedade) -> Option<(u64, u64, u64)> {
+type Janelas = (Option<(u64, u64, u64)>, Option<(u64, u64, u64)>);
+
+unsafe fn ler_ranges(dtb: *const u8, prop: &Propriedade) -> Janelas {
     // Uma entrada é endereço-filho, endereço-pai e tamanho concatenados. As
     // larguras do filho o binding fixa; a do pai é a que a raiz declarou, e é
     // por isso que `Propriedade` carrega `address_cells`.
@@ -485,41 +510,51 @@ unsafe fn ler_ranges(dtb: *const u8, prop: &Propriedade) -> Option<(u64, u64, u6
     let celulas_do_pai = prop.address_cells as usize;
     let largura = (CELULAS_DE_ENDERECO_PCI + celulas_do_pai + CELULAS_DE_TAMANHO_PCI) * 4;
 
+    let mut de32 = None;
+    let mut de64 = None;
+
     let mut deslocamento = 0usize;
     while deslocamento + largura <= prop.tamanho {
         let entrada = prop.dados + deslocamento;
+        deslocamento += largura;
 
         // SAFETY: delegada ao chamador; o laço confere que a entrada inteira
         // cabe no tamanho que o percurso reportou.
-        let janela = unsafe {
-            let alto = be32(dtb, entrada);
-            if (alto >> 24) & 0b11 != ESPACO_DE_MEMORIA_32 {
-                None
-            } else {
-                // As duas células baixas do endereço do filho formam o
-                // endereço do lado do barramento; a alta só descreve o espaço.
-                let no_barramento = ler_celulas(dtb, entrada + 4, 2);
-                let na_cpu = ler_celulas(
-                    dtb,
-                    entrada + CELULAS_DE_ENDERECO_PCI * 4,
-                    celulas_do_pai as u32,
-                );
-                let tamanho = ler_celulas(
-                    dtb,
-                    entrada + (CELULAS_DE_ENDERECO_PCI + celulas_do_pai) * 4,
-                    CELULAS_DE_TAMANHO_PCI as u32,
-                );
-                Some((no_barramento, na_cpu, tamanho))
+        unsafe {
+            let espaco = (be32(dtb, entrada) >> 24) & 0b11;
+            let destino = match espaco {
+                ESPACO_DE_MEMORIA_32 => &mut de32,
+                ESPACO_DE_MEMORIA_64 => &mut de64,
+                // Configuração e I/O: nem uma coisa nem outra, e nada aqui
+                // sabe o que fazer com elas.
+                _ => continue,
+            };
+            // A primeira de cada espaço ganha. Uma `ranges` com duas janelas
+            // do mesmo tipo existiria numa placa com dois trechos
+            // descontínuos, e este leitor descreveria só o primeiro — o que
+            // é menos memória disponível, e não um endereço errado.
+            if destino.is_some() {
+                continue;
             }
-        };
 
-        if janela.is_some() {
-            return janela;
+            // As duas células baixas do endereço do filho formam o endereço
+            // do lado do barramento; a alta só descreve o espaço.
+            let no_barramento = ler_celulas(dtb, entrada + 4, 2);
+            let na_cpu = ler_celulas(
+                dtb,
+                entrada + CELULAS_DE_ENDERECO_PCI * 4,
+                celulas_do_pai as u32,
+            );
+            let tamanho = ler_celulas(
+                dtb,
+                entrada + (CELULAS_DE_ENDERECO_PCI + celulas_do_pai) * 4,
+                CELULAS_DE_TAMANHO_PCI as u32,
+            );
+            *destino = Some((no_barramento, na_cpu, tamanho));
         }
-        deslocamento += largura;
     }
 
-    None
+    (de32, de64)
 }
 
 /// Acha o nó do host bridge PCI e devolve a numeração dele no percurso.
@@ -591,6 +626,7 @@ pub unsafe fn encontrar_barramento_pci(dtb: *const u8) -> Option<BarramentoPci> 
     let alvo = unsafe { no_do_host_bridge(dtb)? };
     let mut ecam: Option<(u64, u64)> = None;
     let mut mmio32: Option<(u64, u64, u64)> = None;
+    let mut mmio64: Option<(u64, u64, u64)> = None;
 
     let mut ler_o_no = |prop: &Propriedade| {
         if prop.no_seq != alvo {
@@ -606,7 +642,7 @@ pub unsafe fn encontrar_barramento_pci(dtb: *const u8) -> Option<BarramentoPci> 
                 });
             },
             // SAFETY: mesma justificativa.
-            b"ranges" => mmio32 = unsafe { ler_ranges(dtb, prop) },
+            b"ranges" => (mmio32, mmio64) = unsafe { ler_ranges(dtb, prop) },
             _ => {}
         }
     };
@@ -617,6 +653,7 @@ pub unsafe fn encontrar_barramento_pci(dtb: *const u8) -> Option<BarramentoPci> 
     Some(BarramentoPci {
         ecam: ecam?,
         mmio32,
+        mmio64,
     })
 }
 

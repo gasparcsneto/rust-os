@@ -744,7 +744,7 @@ fn firmware_uefi(arch: Arquitetura) -> Result<(PathBuf, PathBuf), String> {
 /// e varrer os barramentos, e o relatório em si é instantâneo. O teto não
 /// está aqui para medir desempenho — está para que um iniciador que trave
 /// vire um erro em vez de um job pendurado.
-const TETO_DO_INICIADOR: Duration = Duration::from_secs(90);
+const TETO_DO_INICIADOR: Duration = Duration::from_secs(240);
 
 /// O que o relatório do iniciador precisa dizer para a etapa estar de pé.
 ///
@@ -841,19 +841,32 @@ fn iniciador(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
     let kernel = caminho_elf(arch, release);
 
     let disco = disco_de_testes()?;
-    let firmware = firmware_uefi(arch)?;
     let mut falhou = false;
 
     // A rodada que importa: o kernel de verdade, e o relatório inteiro.
     instalar_iniciador(arch, &disco, &efi, &kernel)?;
     println!("\n[xtask] iniciador: o kernel de verdade");
 
-    // Nas duas o desfecho é o mesmo: o kernel falando do outro lado do
-    // salto. É a única linha que prova a entrega — tudo antes dela é o
-    // iniciador dizendo o que pretende fazer.
+    // O desfecho difere, e a diferença é o que o ARM ganhou de novo.
+    //
+    // No x86 a sonda sobe o kernel de **produção** e espera a primeira linha
+    // dele: é a prova de que o salto funcionou, e o kernel fica de pé depois
+    // disso — esperar um desligamento seria esperar para sempre.
+    //
+    // No ARM ela sobe a compilação de teste, que é a única com console (ver
+    // o `build` acima). E já que é ela que está lá, a sonda deixa a suíte
+    // **inteira** rodar em vez de parar na primeira linha. A diferença não é
+    // cosmética: o mapa de memória que o firmware entrega tem trinta e três
+    // regiões, e o do device tree tem uma. Todo o resto do kernel — o
+    // alocador de frames, a cópia na escrita, o coletor, o Btrfs — roda
+    // sobre esse mapa pela primeira vez aqui. Passar no `-kernel` não diz
+    // nada sobre passar por este caminho.
     let marca = marca_do_kernel(arch);
-    let espera = Desenlace::Marca(marca);
-    let (desfecho, relatorio) = subir_no_firmware(arch, &disco, &firmware, &espera)?;
+    let espera = match arch {
+        Arquitetura::X86_64 => Desenlace::Marca(marca),
+        Arquitetura::Aarch64 => Desenlace::Desligamento,
+    };
+    let (desfecho, relatorio, bruto) = subir_no_firmware(arch, &disco, &espera)?;
     for linha in &relatorio {
         println!("  [iniciador] {linha}");
     }
@@ -865,7 +878,7 @@ fn iniciador(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
         );
     }
 
-    if let Err(motivo) = conferir_desfecho(desfecho, &espera) {
+    if let Err(motivo) = conferir_desfecho(arch, desfecho, &espera) {
         eprintln!("[xtask] iniciador: {motivo}");
         falhou = true;
     }
@@ -890,7 +903,27 @@ fn iniciador(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
         eprintln!("[xtask] iniciador: {motivo}");
         falhou = true;
     }
-    println!("  [conferido] o kernel assumiu a maquina e disse `{marca}`");
+    // O kernel falou? A linha não tem o prefixo do iniciador, então ela vem
+    // do texto cru — e é a única prova de que o salto chegou do outro lado.
+    if !bruto.contains(marca) {
+        eprintln!("[xtask] iniciador: o kernel nao disse `{marca}`");
+        falhou = true;
+    } else {
+        println!("  [conferido] o kernel assumiu a maquina e disse `{marca}`");
+    }
+
+    // E, no ARM, a suíte inteira rodou sobre o mapa de memória do firmware.
+    if arch == Arquitetura::Aarch64 {
+        match conferir_a_suite(&bruto) {
+            Ok(quantos) => {
+                println!("  [conferido] {quantos} casos da suite passaram sobre o mapa da UEFI")
+            }
+            Err(motivo) => {
+                eprintln!("[xtask] iniciador: {motivo}");
+                falhou = true;
+            }
+        }
+    }
 
     // E as rodadas das recusas: kerneis estragados de propósito, que o
     // iniciador tem de rejeitar em vez de carregar.
@@ -901,7 +934,7 @@ fn iniciador(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
         casos.len()
     );
     for caso in casos {
-        match rodada_de_recusa(arch, &disco, &efi, &kernel, &firmware, caso) {
+        match rodada_de_recusa(arch, &disco, &efi, &kernel, caso) {
             Ok(()) => println!("  [recusa] ok  {} foi recusado", caso.nome),
             Err(motivo) => {
                 eprintln!(
@@ -1009,7 +1042,6 @@ fn rodada_de_recusa(
     disco: &Path,
     efi: &Path,
     kernel: &Path,
-    firmware: &(PathBuf, PathBuf),
     caso: &Recusa,
 ) -> Result<(), String> {
     let mut bytes = std::fs::read(kernel)
@@ -1026,10 +1058,10 @@ fn rodada_de_recusa(
     instalar_iniciador(arch, disco, efi, &estragado)?;
 
     let espera = Desenlace::Desligamento;
-    let (desfecho, relatorio) = subir_no_firmware(arch, disco, firmware, &espera)?;
+    let (desfecho, relatorio, _) = subir_no_firmware(arch, disco, &espera)?;
     // O iniciador precisa **sobreviver** à recusa: ele relata e desliga. Um
     // travamento aqui é tão defeito quanto aceitar o arquivo.
-    conferir_desfecho(desfecho, &espera)?;
+    conferir_desfecho(arch, desfecho, &espera)?;
 
     if !relatorio.iter().any(|l| l.contains(caso.esperado)) {
         for linha in &relatorio {
@@ -1061,11 +1093,8 @@ enum Desenlace {
 fn subir_no_firmware(
     arch: Arquitetura,
     disco: &Path,
-    firmware: &(PathBuf, PathBuf),
     espera: &Desenlace,
-) -> Result<(Desfecho, Vec<String>), String> {
-    let (codigo, variaveis) = firmware;
-
+) -> Result<(Desfecho, Vec<String>, String), String> {
     // A saída da serial vai para um arquivo, e não para um cano lido em
     // memória. O motivo é o teto de tempo logo abaixo: `Command::output()`
     // espera o processo terminar, e um iniciador que não chegue ao
@@ -1079,85 +1108,28 @@ fn subir_no_firmware(
     let arquivo = std::fs::File::create(&registro)
         .map_err(|e| format!("não foi possível criar {}: {e}", registro.display()))?;
 
-    let mut qemu = Command::new(arch.qemu());
+    // A máquina é a **mesma** que `test`, `run` e `fumaca` montam, e vem da
+    // mesma função. Ela já sabe bootar pelo firmware desde que o artefato
+    // seja um disco.
+    //
+    // Ela veio a ser a mesma depois de custar caro. Esta sonda montava uma
+    // definição própria — mais curta, com `virtio-blk-device` no lugar do
+    // `virtio-blk-pci` e sem semihosting —, e enquanto ela só olhava a
+    // primeira linha do kernel, a diferença não aparecia. No dia em que a
+    // suíte inteira passou a rodar aqui, vinte e nove casos reprovaram
+    // dizendo que a máquina não tinha disco, nem vídeo, nem PCI. Nenhum
+    // deles era defeito do kernel: era a segunda definição descrevendo
+    // outro computador.
+    let mut qemu = comando_qemu(
+        arch,
+        &Artefato::Disco(disco.to_path_buf()),
+        None,
+        Teclado::Nativo,
+    )?;
     qemu.stdout(arquivo);
-
-    match arch {
-        Arquitetura::X86_64 => {
-            qemu.args(["-machine", "q35"]);
-        }
-        // A máquina `virt` não tem chipset legado nenhum: o processador
-        // precisa ser dito, porque o padrão dela é um Cortex-A15 de 32 bits
-        // que sequer executaria uma aplicação EFI de 64.
-        Arquitetura::Aarch64 => {
-            // `acpi=off` não é detalhe de configuração: é o que faz o
-            // firmware publicar o **device tree** na tabela de configuração.
-            // Com ACPI ligada — o padrão — o EDK II do ARM publica só a
-            // RSDP, e o kernel deste projeto não lê ACPI: ele descobre a
-            // RAM, o controlador de interrupções e o ECAM do PCI pelo device
-            // tree, como sempre fez.
-            //
-            // Foi medido: com o padrão, a tabela traz oito entradas e
-            // nenhuma delas é de device tree. O iniciador lista os GUIDs
-            // quando não acha, justamente para que a diferença entre "não
-            // tem" e "tem com outro GUID" não precise ser adivinhada.
-            //
-            // O processador também precisa ser dito: o padrão da `virt` é um
-            // Cortex-A15 de 32 bits, que sequer executaria uma aplicação EFI
-            // de 64.
-            qemu.args(["-machine", "virt,acpi=off", "-cpu", "cortex-a72"]);
-        }
-    }
-
-    qemu.args([
-        "-drive",
-        &format!("if=pflash,format=raw,readonly=on,file={}", codigo.display()),
-    ]);
-    qemu.args([
-        "-drive",
-        &format!("if=pflash,format=raw,file={}", variaveis.display()),
-    ]);
-
-    match arch {
-        // O `-drive` sem `if=` liga o disco ao controlador padrão da
-        // máquina, que no q35 é de onde o firmware procura uma ESP.
-        Arquitetura::X86_64 => {
-            qemu.args(["-drive", &format!("format=raw,file={}", disco.display())]);
-        }
-        // A `virt` não tem controlador padrão: o disco precisa de um
-        // dispositivo explícito, e o virtio-blk é o que o EDK II do ARM
-        // enxerga sem nenhuma configuração.
-        Arquitetura::Aarch64 => {
-            qemu.args([
-                "-drive",
-                &format!("format=raw,file={},if=none,id=disco0", disco.display()),
-            ]);
-            qemu.args(["-device", "virtio-blk-device,drive=disco0"]);
-            // E uma tela. A `q35` traz uma VGA de graça e a `virt` não traz
-            // nada: sem isto o firmware não publica o protocolo de vídeo, e
-            // o caminho que lê a geometria da tela nunca é exercitado no
-            // ARM.
-            //
-            // `ramfb`, e não o `bochs-display` que o kernel depois programa,
-            // porque o que importa aqui é **o firmware ter um GOP para
-            // publicar**, e o EDK II do ARM não tem driver de bochs: com ele
-            // a resposta é `EFI_NOT_FOUND`. O `virtio-gpu-pci` tem driver,
-            // mas publica um modo só de transferência, sem buffer linear —
-            // que o iniciador recusa, com razão, e aí o caminho da geometria
-            // também não roda. O `ramfb` é o único dos três que dá uma tela
-            // de verdade: 800x600 em BGR, com endereço.
-            qemu.args(["-device", "ramfb"]);
-        }
-    }
-
-    qemu
-        // O relatório sai pela serial em que o kernel também fala — a COM1 no
-        // x86, a PL011 no ARM. Ver o módulo `alvo` do iniciador sobre por que
-        // não é o console do firmware.
-        .args(["-m", "128M", "-display", "none", "-serial", "stdio"])
-        // Sem rede: nada aqui precisa dela, e o firmware tentaria PXE antes do
-        // disco se ela existisse.
-        .args(["-net", "none"]);
+    // Sem rede: nada aqui precisa dela, e o firmware tentaria PXE antes do
+    // disco se ela existisse.
+    qemu.args(["-net", "none"]);
 
     let filho = qemu
         .spawn()
@@ -1175,7 +1147,10 @@ fn subir_no_firmware(
         .lines()
         .filter_map(|l| l.split("iniciador: ").nth(1).map(String::from))
         .collect();
-    Ok((desfecho, relatorio))
+    // O texto cru vai junto porque o relatório é só o que o **iniciador**
+    // disse. O que o kernel diz depois do salto não tem esse prefixo, e é
+    // justamente o que prova que ele assumiu a máquina.
+    Ok((desfecho, relatorio, texto.into_owned()))
 }
 
 /// Espera uma marca aparecer na saída, e então encerra o emulador.
@@ -1230,9 +1205,19 @@ fn aguardar_a_marca(
 /// Numa recusa, quem desliga a máquina é a última linha do iniciador; num
 /// boot que deu certo, quem fala é o kernel. Um estouro de tempo significa
 /// que aquilo não aconteceu.
-fn conferir_desfecho(desfecho: Desfecho, espera: &Desenlace) -> Result<(), String> {
+fn conferir_desfecho(
+    arch: Arquitetura,
+    desfecho: Desfecho,
+    espera: &Desenlace,
+) -> Result<(), String> {
     match desfecho {
         Desfecho::Codigo(0) => Ok(()),
+        // Quando quem desliga a máquina é a **suíte**, o código de saída é o
+        // dela — o mesmo que `cargo xtask test` aprova. Um iniciador que
+        // desliga por ter recusado o kernel sai com zero; os dois desfechos
+        // são legítimos e distintos, e tratar o segundo como erro reprovaria
+        // justamente a rodada que foi até o fim.
+        Desfecho::Codigo(codigo) if codigo == arch.codigo_de_sucesso() => Ok(()),
         Desfecho::Codigo(codigo) => Err(format!("o emulador saiu com codigo {codigo}")),
         Desfecho::Sinal => Err("o emulador foi terminado por um sinal".into()),
         // O estouro significa coisas diferentes conforme o que se esperava, e
@@ -1260,6 +1245,60 @@ fn conferir_desfecho(desfecho: Desfecho, espera: &Desenlace) -> Result<(), Strin
 /// imprimiria a linha inteira, com números. O que denuncia o passo errado é o
 /// **valor**: pedimos 128 MiB ao emulador, e uma leitura desalinhada não
 /// devolve nada perto disso.
+/// Confere que a suíte de testes rodou inteira, e passou.
+///
+/// # Por que a sonda do boot também olha para a suíte
+///
+/// Porque são a mesma pergunta vista de dois lados. O boot por UEFI entrega
+/// ao kernel um mapa de memória com dezenas de regiões, vindo do firmware;
+/// o boot por imagem crua entrega uma, vinda do device tree. Tudo que
+/// depende de saber o que é memória livre — o alocador de frames, a cópia
+/// na escrita, o coletor de espaços, o leitor de Btrfs — roda sobre esse
+/// mapa, e passar num não diz nada sobre passar no outro.
+///
+/// Deixar a suíte correr custa os mesmos segundos que ela já custa, e
+/// transforma "o kernel disse uma linha" em "as cento e quarenta e nove
+/// afirmações valem também por aqui".
+fn conferir_a_suite(bruto: &str) -> Result<u64, String> {
+    let reprovados: Vec<&str> = bruto
+        .lines()
+        .filter(|l| l.contains("FALHOU"))
+        .map(|l| l.trim())
+        .collect();
+    if !reprovados.is_empty() {
+        return Err(format!(
+            "{} caso(s) da suíte reprovaram no boot por UEFI:\n      {}",
+            reprovados.len(),
+            reprovados.join("\n      ")
+        ));
+    }
+
+    // O placar é a linha "N de M passaram". Exigi-lo — em vez de só a
+    // ausência de reprovações — é o que distingue "todos passaram" de "a
+    // suíte nem chegou ao fim", que sem ele seriam a mesma saída.
+    //
+    // A linha é reconhecida pela **forma** dela, campo por campo, e não por
+    // conter " de ". A primeira versão procurava a substring, e a primeira
+    // linha do log que a contém é `janela de MMIO em ...` — o placar nunca
+    // era achado, e a sonda dizia que a suíte não terminara enquanto ela
+    // terminava com 149 de 149 logo abaixo.
+    let placar = bruto.lines().find_map(|linha| {
+        let mut campos = linha.split_whitespace();
+        let passaram: u64 = campos.next()?.parse().ok()?;
+        (campos.next()? == "de").then_some(())?;
+        let total: u64 = campos.next()?.parse().ok()?;
+        (campos.next()? == "passaram").then_some((passaram, total))
+    });
+
+    let Some((passaram, total)) = placar else {
+        return Err("a suíte não chegou ao placar; o kernel parou antes do fim".into());
+    };
+    if passaram != total || total == 0 {
+        return Err(format!("a suíte terminou em {passaram} de {total}"));
+    }
+    Ok(total)
+}
+
 /// Onde a tela caiu no mapa de memória, e por que a resposta certa difere.
 ///
 /// # O que esta conferência existe para pegar
@@ -2507,6 +2546,34 @@ fn comando_qemu(
             // O dispositivo que permite ao kernel encerrar o QEMU.
             qemu.args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]);
         }
+        (Arquitetura::Aarch64, Artefato::Disco(disco)) => {
+            // O mesmo caminho do x86: o firmware é quem carrega, e o
+            // iniciador está na ESP deste disco. O que difere é a máquina.
+            let (codigo, variaveis) = firmware_uefi(arch)?;
+            qemu.args([
+                "-machine",
+                // `acpi=off` não é detalhe: é o que faz o firmware publicar
+                // o **device tree** na tabela de configuração. Com ACPI
+                // ligada o EDK II do ARM publica só a RSDP, e este kernel
+                // não lê ACPI — ele descobre a RAM, o controlador de
+                // interrupções e o ECAM do PCI pelo device tree.
+                "virt,acpi=off",
+                "-cpu",
+                "cortex-a72",
+            ]);
+            qemu.args([
+                "-drive",
+                &format!("if=pflash,format=raw,readonly=on,file={}", codigo.display()),
+            ]);
+            qemu.args([
+                "-drive",
+                &format!("if=pflash,format=raw,file={}", variaveis.display()),
+            ]);
+            // O encerramento por semihosting vale igual: quem sai do
+            // emulador é o kernel, e como ele chegou lá não muda isso.
+            qemu.args(["-semihosting-config", "enable=on,target=native"]);
+            let _ = disco;
+        }
         (Arquitetura::Aarch64, Artefato::Binario(img)) => {
             qemu.args([
                 // `virt` é a máquina genérica do QEMU para ARM: sem
@@ -2579,6 +2646,25 @@ fn comando_qemu(
     // uma arquitetura só.
     if arch == Arquitetura::Aarch64 {
         qemu.args(["-device", "bochs-display"]);
+
+        // E uma segunda tela, que não é para o kernel: é para o **firmware**.
+        //
+        // O EDK II do ARM não tem driver de bochs — pedir o protocolo de
+        // vídeo a ele numa máquina que só tem bochs devolve
+        // `EFI_NOT_FOUND`, medido. Sem um adaptador que ele saiba dirigir,
+        // o iniciador não descobre tela nenhuma, e o caminho que lê a
+        // geometria e protege o framebuffer do alocador de frames nunca
+        // roda no ARM.
+        //
+        // O `ramfb` é o que ele dirige: um framebuffer linear anunciado por
+        // `fw_cfg`, sem barramento. Como não é PCI, ele não aparece na
+        // varredura do kernel — os dois adaptadores convivem sem que nenhum
+        // dos dois lados precise escolher.
+        //
+        // A terceira opção, `virtio-gpu-pci`, tem driver no EDK II e publica
+        // um modo só de transferência, sem buffer linear. O iniciador o
+        // recusa, com razão, e o caminho continuaria sem rodar.
+        qemu.args(["-device", "ramfb"]);
     }
 
     // E um teclado. Qual, depende do que se quer exercitar — ver [`Teclado`].

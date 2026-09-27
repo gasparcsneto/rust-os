@@ -125,5 +125,11 @@ pub fn janela_mmio() -> Option<crate::pci::JanelaMmio> {
     None
 }
 
+/// Nem uma janela alta: num PC o endereço do barramento é o da CPU, e não há
+/// tradução a aplicar em faixa nenhuma.
+pub fn janela_alta() -> Option<crate::pci::JanelaMmio> {
+    None
+}
+
 /// Como o barramento é alcançado, para o relatório do agente.
 pub const MECANISMO: &str = "port-io-cf8";

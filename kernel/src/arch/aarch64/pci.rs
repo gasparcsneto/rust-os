@@ -27,6 +27,11 @@ static JANELA_NO_BARRAMENTO: AtomicU64 = AtomicU64::new(0);
 static JANELA_NA_CPU: AtomicU64 = AtomicU64::new(0);
 static JANELA_TAMANHO: AtomicU64 = AtomicU64::new(0);
 
+/// A janela de 64 bits, no mesmo formato. Ver [`registrar_janela_alta`].
+static ALTA_NO_BARRAMENTO: AtomicU64 = AtomicU64::new(0);
+static ALTA_NA_CPU: AtomicU64 = AtomicU64::new(0);
+static ALTA_TAMANHO: AtomicU64 = AtomicU64::new(0);
+
 /// Guarda onde o device tree disse que a configuração PCI está.
 pub fn registrar(base: u64, tamanho: u64) {
     BASE.store(base, Ordering::Release);
@@ -43,6 +48,34 @@ pub fn registrar_janela(no_barramento: u64, na_cpu: u64, tamanho: u64) {
     JANELA_NO_BARRAMENTO.store(no_barramento, Ordering::Release);
     JANELA_NA_CPU.store(na_cpu, Ordering::Release);
     JANELA_TAMANHO.store(tamanho, Ordering::Release);
+}
+
+/// Guarda a janela de 64 bits, que serve só para **ler** BARs.
+///
+/// # Por que ela é separada da outra
+///
+/// Porque as duas respondem perguntas diferentes, e misturá-las faria o
+/// distribuidor pôr um BAR de 32 bits num endereço que ele não alcança.
+///
+/// A de 32 bits é onde o kernel **atribui**: é a faixa que cabe num BAR de
+/// 32 bits, que é o que os dispositivos virtio do QEMU pedem. A de 64 é
+/// onde um firmware UEFI já atribuiu antes de entregar a máquina — os BARs
+/// de 64 bits do virtio saem de lá, em `0x80_0000_0000`. O kernel precisa
+/// saber traduzi-los, e não precisa saber ocupá-los.
+pub fn registrar_janela_alta(no_barramento: u64, na_cpu: u64, tamanho: u64) {
+    ALTA_NO_BARRAMENTO.store(no_barramento, Ordering::Release);
+    ALTA_NA_CPU.store(na_cpu, Ordering::Release);
+    ALTA_TAMANHO.store(tamanho, Ordering::Release);
+}
+
+/// A janela de 64 bits desta placa, se houver uma.
+pub fn janela_alta() -> Option<JanelaMmio> {
+    let tamanho = ALTA_TAMANHO.load(Ordering::Acquire);
+    (tamanho > 0).then(|| JanelaMmio {
+        barramento: ALTA_NO_BARRAMENTO.load(Ordering::Acquire),
+        cpu: ALTA_NA_CPU.load(Ordering::Acquire),
+        tamanho,
+    })
 }
 
 /// A janela de MMIO desta placa, se houver uma.
