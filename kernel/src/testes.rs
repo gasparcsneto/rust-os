@@ -1014,11 +1014,6 @@ fn tela_desenhar_nao_regrediu_em_ordem_de_grandeza() -> Resultado {
     };
 
     // Uma passada fora da conta: a primeira paga o que as seguintes não pagam.
-    //
-    // E ela pinta **branco**, que é o oposto do que a conferência lá embaixo
-    // espera. Com preto aqui, um `retangulo` que não desenhasse nada deixaria
-    // a tela preta do aquecimento e a conferência passaria sem que uma única
-    // escrita tivesse acontecido — a asserção seria decoração.
     tela.preencher(branco);
 
     let antes = crate::tempo::uptime_ms();
@@ -1074,11 +1069,37 @@ fn tela_desenhar_nao_regrediu_em_ordem_de_grandeza() -> Resultado {
         }
     }
 
-    // E o desenho continua correto: o último preenchimento foi preto.
-    match tela.ler_pixel(tela.largura / 2, tela.altura / 2) {
-        Some(c) if c.r == 0 && c.g == 0 && c.b == 0 => Ok(()),
-        _ => Err("o preenchimento nao deixou a cor que pintou"),
+    // E o desenho escreve de verdade — senão o laço acima mediu nada.
+    //
+    // # As duas versões erradas desta conferência
+    //
+    // A primeira lia o centro da tela depois do laço, que terminava em preto,
+    // com o aquecimento também em preto: um `retangulo` que não desenhasse
+    // nada deixava a tela preta e passava. A segunda trocou o aquecimento por
+    // branco — e ganhou uma corrida com o console. Entre o último
+    // preenchimento e a leitura havia uma linha de log, o console desenha
+    // log na mesma tela, e com mais casos logando antes deste o cursor dele
+    // caiu no centro da tela de 720 linhas do ARM. Medido: o pixel lido era
+    // `(16, 24, 40)`, o fundo do console.
+    //
+    // Aqui a escrita e a leitura acontecem com as interrupções mascaradas, e
+    // num único núcleo isso quer dizer que nada mais roda entre as duas. Num
+    // retângulo pequeno, e não na tela inteira: em debug um preenchimento
+    // leva 600 ms, e mascarar por isso pararia o relógio do resto da suíte.
+    // Duas cores, e as duas lidas de volta: uma escrita que não acontece
+    // deixa a primeira leitura com a cor de antes.
+    let (claro, escuro) = crate::arch::sem_interrupcoes(|| {
+        let (x, y) = (tela.largura / 2, tela.altura / 2);
+        tela.retangulo(x - 1, y - 1, 3, 3, branco);
+        let claro = tela.ler_pixel(x, y);
+        tela.retangulo(x - 1, y - 1, 3, 3, preto);
+        (claro, tela.ler_pixel(x, y))
+    });
+    if claro != Some(branco) || escuro != Some(preto) {
+        crate::log_error!("teste", "lido {:?} e {:?}", claro, escuro);
+        return Err("desenhar na tela nao deixou a cor que pintou");
     }
+    Ok(())
 }
 
 /// Um cabeçalho de GPT absurdo vira recusa, e não pânico nem laço eterno.
@@ -1216,10 +1237,22 @@ fn mmio_mapeamento_que_falha_no_meio_desfaz_tudo() -> Resultado {
     // região seguinte, que precisa de tabela nova. É ali, e só ali, que este
     // mapeamento chama o alocador — com 511 páginas já mapeadas atrás dele.
     let inicio = fronteira + PAGINA;
-    let livres_antes = crate::frames::estatisticas().1;
-    crate::frames::encomendar_falhas(1);
-    let falho = reservar(REGIAO);
-    let sobraram = crate::frames::encomendar_falhas(0);
+
+    // A contagem de livres e o mapeamento com as interrupções mascaradas, e
+    // pelos dois motivos que o caso de custo do `fork` já seguia. O coletor
+    // de fios mortos devolve frames de processos encerrados em outro fio, a
+    // qualquer momento: medido, em debug no x86 ele caiu dentro desta janela
+    // e os livres **subiram** 44 durante um mapeamento que não devolve
+    // nada. E um handler que alocasse um frame no meio consumiria a falha
+    // encomendada no lugar do mapeamento.
+    let (livres_antes, falho, sobraram, livres_depois) = crate::arch::sem_interrupcoes(|| {
+        let (livres_antes, _) = crate::frames::estatisticas();
+        crate::frames::encomendar_falhas(1);
+        let falho = reservar(REGIAO);
+        let sobraram = crate::frames::encomendar_falhas(0);
+        let (livres_depois, _) = crate::frames::estatisticas();
+        (livres_antes, falho, sobraram, livres_depois)
+    });
 
     if falho.is_ok() {
         return Err("o mapeamento passou apesar da falha encomendada");
@@ -1254,7 +1287,15 @@ fn mmio_mapeamento_que_falha_no_meio_desfaz_tudo() -> Resultado {
     // Nenhum frame ficou pelo caminho. A alocação que falhou não chegou a
     // tirar nada, e o desfazer não devolve físico de dispositivo ao alocador
     // — se este número andar, uma das duas coisas deixou de ser verdade.
-    let livres_depois = crate::frames::estatisticas().1;
+    //
+    // Esta conferência foi decoração do dia em que o caso nasceu até o dia
+    // seguinte: lia `estatisticas().1`, que é o total **rastreado** — uma
+    // constante —, e comparava a constante com ela mesma. Passava sempre, em
+    // silêncio. Quem a denunciou foi o caso da superfície gráfica, que leu o
+    // mesmo campo esperando uma **diferença**, e falhou alto. Uma igualdade
+    // contra uma constante não tem como reprovar; uma diferença tem.
+    //
+    // As duas leituras foram feitas lá em cima, dentro da janela mascarada.
     if livres_depois != livres_antes {
         crate::log_error!(
             "teste",
