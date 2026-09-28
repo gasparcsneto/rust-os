@@ -71,6 +71,11 @@ impl Uart {
         // o canal do agente passa a depender só da varredura do executor —
         // que funciona, e devagar. Um canal lento sem motivo aparente é o
         // tipo de coisa que se procura no lugar errado por horas.
+        //
+        // Sem caso que a prove: fazer o driver da 16550 recusar a
+        // configuração exigiria uma porta que responda errado, e a do
+        // emulador responde certo. Medido pelo contrário — a linha nunca
+        // apareceu em execução nenhuma, que é o esperado.
         if let Err(porque) = self.0.init(config) {
             crate::log_error!(
                 "serial",

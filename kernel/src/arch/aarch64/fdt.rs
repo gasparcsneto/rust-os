@@ -397,10 +397,25 @@ unsafe fn percorrer(dtb: *const u8, mut f: impl FnMut(&Propriedade)) -> Result<(
 /// um barramento está truncado seria pior. O que muda é que agora existe uma
 /// linha dizendo o quê, e para quê a busca era.
 ///
+/// # Por que ela é visível fora do módulo
+///
+/// Para a suíte poder exercitá-la direto. Das cinco buscas que a usam, só
+/// uma é alcançável por um blob de teste: a do host bridge roda primeiro e
+/// as outras quatro só chegam a percorrer depois que ela acha alguma coisa,
+/// o que um blob truncado justamente impede.
+///
+/// Testar o embrulho cobre o mecanismo das cinco — o `Result` conferido, a
+/// linha emitida, o `para_que` no texto. O que sobra por conferir é a
+/// **string** que cada chamada passa, e essa se lê.
+///
 /// # Safety
 ///
 /// A mesma de [`percorrer`].
-unsafe fn percorrer_relatando(dtb: *const u8, f: impl FnMut(&Propriedade), para_que: &str) {
+pub(crate) unsafe fn percorrer_relatando(
+    dtb: *const u8,
+    f: impl FnMut(&Propriedade),
+    para_que: &str,
+) {
     // SAFETY: delegada ao chamador.
     if let Err(motivo) = unsafe { percorrer(dtb, f) } {
         crate::log_warn!(

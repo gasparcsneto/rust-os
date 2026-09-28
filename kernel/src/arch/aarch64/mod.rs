@@ -533,6 +533,17 @@ pub fn init_interrupcoes() {
 /// Medido antes da correção: o ramo mascarado foi tomado **zero** vezes na
 /// suíte inteira, nas duas arquiteturas. Não era um defeito vivo — era um
 /// que esperava a primeira máquina sem outro fio pronto.
+///
+/// # E esta correção, hoje, não muda nada
+///
+/// Dito porque é verdade e porque um dia alguém vai medir. Os caminhos que
+/// podiam chegar aqui mascarados — os dois que estacionam um fio — passaram
+/// a usar [`dormir_parado`], e os que sobraram (o coletor e o laço do
+/// agente) rodam com as interrupções ligadas. Ou seja: o `if` que saiu daqui
+/// escolheria o `wfi` de qualquer jeito nos chamadores de hoje.
+///
+/// A correção fica porque a guarda era **errada sobre a instrução**, e uma
+/// guarda errada só é inofensiva até o primeiro chamador novo.
 pub fn esperar_interrupcao() {
     wfi();
 }

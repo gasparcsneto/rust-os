@@ -942,6 +942,56 @@ fn fdt_ignora_propriedade_menor_que_uma_celula() -> Resultado {
     }
 }
 
+
+/// O embrulho que relata um percurso interrompido diz **para quê** era a
+/// busca.
+///
+/// # Por que este caso existe ao lado do de ponta a ponta
+///
+/// Porque o de ponta a ponta alcança **uma** das cinco buscas. A do host
+/// bridge roda primeiro, e as outras quatro só chegam a percorrer o blob
+/// depois que ela acha alguma coisa — o que um blob truncado justamente
+/// impede. Mutando o relato de qualquer uma das quatro, aquele caso passa.
+///
+/// Este exercita o embrulho que as cinco compartilham: o `Result` conferido,
+/// a linha emitida, e o `para_que` dentro dela. O que fica sem conferência é
+/// a string que cada chamada passa — e essa é uma linha que se lê.
+fn fdt_o_relato_do_percurso_diz_para_que_era() -> Resultado {
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        crate::log_info!("teste", "o leitor de device tree so existe no aarch64");
+        Ok(())
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        use crate::arch::aarch64::fdt;
+
+        // Um blob que não é um device tree: a assinatura é a primeira coisa
+        // que `percorrer` confere, e recusar ali é o caminho mais curto até
+        // o `Err` que o embrulho tem de relatar.
+        let blob = [0u8; 64];
+        let para_que = "uma busca que este caso inventou";
+        let antes = contar_no_log("fdt", para_que);
+
+        // SAFETY: o ponteiro é de um array neste quadro de pilha, e
+        // `percorrer` confere a assinatura antes de ler qualquer outra coisa
+        // — que é exatamente o caminho que este caso exercita.
+        unsafe { fdt::percorrer_relatando(blob.as_ptr(), |_| {}, para_que) };
+
+        if contar_no_log("fdt", para_que) == antes {
+            return Err("o percurso falhou e o embrulho nao disse para que era");
+        }
+
+        // E a linha traz o motivo, não só o rótulo: sem ele, quem lê o log
+        // sabe que algo parou e não sabe o quê.
+        if contar_no_log("fdt", "assinatura de device tree invalida") == 0 {
+            return Err("o relato nao trouxe o motivo da parada");
+        }
+        Ok(())
+    }
+}
+
 /// Uma busca no device tree que para no meio **diz** que parou.
 ///
 /// # O que este caso protege
@@ -8015,6 +8065,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "fdt: busca que para no meio avisa",
         f: fdt_busca_que_para_no_meio_avisa,
+    },
+    Caso {
+        nome: "fdt: o relato diz para que era a busca",
+        f: fdt_o_relato_do_percurso_diz_para_que_era,
     },
     Caso {
         nome: "usuario: o pai sabe que o filho foi morto",
