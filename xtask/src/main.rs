@@ -4799,7 +4799,7 @@ fn tentar_agente(arch: Arquitetura, metodo: &str, params: &str) -> Result<ExitCo
     // fecha o quadro que um cliente anterior possa ter deixado pela metade. O
     // kernel não vê a desconexão; quem sabe que a conexão é nova é o cliente.
     let requisicao = format!(
-        "{}{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"{metodo}\",\"params\":{params}}}\n",
+        "{}{{\"jsonrpc\":\"2.0\",\"id\":{ID_DO_PEDIDO},\"method\":\"{metodo}\",\"params\":{params}}}\n",
         String::from_utf8_lossy(LIMPAR_AO_CONECTAR),
     );
 
@@ -4809,24 +4809,68 @@ fn tentar_agente(arch: Arquitetura, metodo: &str, params: &str) -> Result<ExitCo
         .map_err(|e| Espera::Fatal(format!("falha ao enviar a requisição: {e}")))?;
 
     let mut leitor = BufReader::new(fluxo);
-    let mut resposta = String::new();
-    match leitor.read_line(&mut resposta) {
-        // Silêncio dentro do prazo: o canal pode não ter subido ainda.
-        Ok(0) => Err(Espera::AindaNaoRespondeu),
-        Ok(_) => {
-            print!("{resposta}");
-            Ok(ExitCode::SUCCESS)
+    loop {
+        let mut linha = String::new();
+        match leitor.read_line(&mut linha) {
+            // Silêncio dentro do prazo: o canal pode não ter subido ainda.
+            Ok(0) => return Err(Espera::AindaNaoRespondeu),
+            Ok(_) if e_a_resposta(&linha, ID_DO_PEDIDO) => {
+                print!("{linha}");
+                return Ok(ExitCode::SUCCESS);
+            }
+            // Qualquer outra coisa não é a resposta, e imprimi-la como se
+            // fosse era o defeito — ver [`e_a_resposta`]. Segue lendo: se o
+            // pedido se perdeu antes de o kernel subir, o prazo vence e
+            // `agente` tenta de novo com uma conexão nova.
+            Ok(_) => continue,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Err(Espera::AindaNaoRespondeu);
+            }
+            Err(e) => return Err(Espera::Fatal(format!("falha ao ler a resposta: {e}"))),
         }
-        Err(e)
-            if matches!(
-                e.kind(),
-                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-            ) =>
-        {
-            Err(Espera::AindaNaoRespondeu)
-        }
-        Err(e) => Err(Espera::Fatal(format!("falha ao ler a resposta: {e}"))),
     }
+}
+
+/// O `id` que `cargo xtask agent` põe no pedido, e pelo qual reconhece a
+/// resposta.
+const ID_DO_PEDIDO: u32 = 1;
+
+/// Esta linha é a resposta ao pedido `id`?
+///
+/// # Por que a primeira linha não serve
+///
+/// Porque no x86 a porta do canal não é só do kernel. Antes de ele existir, o
+/// firmware escreve nas duas seriais que encontra, e um cliente que conecta
+/// cedo lê `BdsDxe: loading Boot0001 ...` com as sequências de terminal do
+/// EDK II na frente. Este cliente imprimia essa linha como a resposta e saía
+/// com sucesso — reproduzido duas vezes em duas, conectando assim que o
+/// socket aparece. Um agente que confiasse no código de saída tomaria texto
+/// do firmware pelo resultado do comando que pediu.
+///
+/// E mesmo depois de o kernel subir, a linha vazia de `on_connect` pode
+/// render um quadro de erro sobre o lixo de um cliente anterior, com `id`
+/// nulo. O que `agent.describe` manda fazer — casar a resposta pelo `id` e
+/// ignorar o resto — vale para este cliente também.
+///
+/// O `id` lido é o **primeiro** da linha. Este leitor não interpreta JSON, e
+/// não precisa: o kernel escreve o `id` do envelope antes do resultado (ver
+/// `envelope_ok` no kernel), então um `"id"` que apareça dentro de um
+/// resultado vem sempre depois.
+fn e_a_resposta(linha: &str, id: u32) -> bool {
+    let linha = linha.trim();
+    if !linha.starts_with('{') || !linha.contains("\"jsonrpc\":\"2.0\"") {
+        return false;
+    }
+    let Some(depois) = apos(linha, "\"id\":") else {
+        return false;
+    };
+    let valor = depois.split([',', '}']).next().unwrap_or("");
+    valor == id.to_string()
 }
 
 /// Quanto tempo insistir antes de desistir do canal.
@@ -4852,6 +4896,36 @@ mod testes {
     /// manual é o ponto, e é também onde um erro silencioso doeria mais — um
     /// decimal lido como hexadecimal aponta para o símbolo errado sem reclamar
     /// de nada.
+    #[test]
+    fn a_resposta_e_reconhecida_pelo_id_e_nao_pela_ordem() {
+        // O que o firmware do x86 escreve na porta antes de o kernel subir.
+        let firmware = "\u{1b}[2J\u{1b}[01;01HBdsDxe: loading Boot0001 \"UEFI QEMU HARDDISK\"";
+        assert!(!e_a_resposta(firmware, 1));
+        // O quadro de erro que a linha vazia de `on_connect` pode render.
+        assert!(!e_a_resposta(
+            r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"JSON malformado"}}"#,
+            1
+        ));
+        // A resposta a outro pedido, inclusive com um id que começa igual.
+        assert!(!e_a_resposta(r#"{"jsonrpc":"2.0","id":12,"result":{}}"#, 1));
+        assert!(!e_a_resposta(r#"{"jsonrpc":"2.0","id":2,"result":{}}"#, 1));
+        // A nossa.
+        assert!(e_a_resposta(
+            r#"{"jsonrpc":"2.0","id":1,"result":{"pong":true}}"#,
+            1
+        ));
+        assert!(e_a_resposta(
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601}}"#,
+            1
+        ));
+        // Um `"id":1` dentro do resultado não faz de outra resposta a nossa:
+        // vale o primeiro `id` da linha, que é o do envelope.
+        assert!(!e_a_resposta(
+            r#"{"jsonrpc":"2.0","id":7,"result":{"tasks":[{"id":1,"name":"agent"}]}}"#,
+            1
+        ));
+    }
+
     #[test]
     fn enderecos_em_decimal_e_hexadecimal() {
         assert_eq!(interpretar_endereco("4096"), Ok(4096));

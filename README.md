@@ -22,8 +22,11 @@ Aqui a abordagem é invertida. **O estado do sistema é legível por máquina po
 construção:**
 
 - **Canal de agente estruturado.** Um servidor JSON-RPC 2.0 roda dentro do
-  kernel, falando por uma porta serial dedicada. Toda linha que sai desse
-  canal é um objeto JSON válido. Sem ruído, sem heurística.
+  kernel, falando por uma porta serial dedicada. Toda linha que o kernel
+  escreve nesse canal é um objeto JSON válido. Sem ruído, sem heurística —
+  com uma ressalva que é da máquina, e não dele: no x86, antes de o kernel
+  existir, o firmware escreve nas duas seriais. Um cliente reconhece a
+  resposta pelo `id`, e não por ser a primeira linha.
 
 - **Auto-descrição.** O kernel descreve a própria superfície via
   `agent.describe`, do mesmo jeito que um servidor MCP lista suas ferramentas.
