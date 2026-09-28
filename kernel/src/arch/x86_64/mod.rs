@@ -582,9 +582,32 @@ pub fn esperar_interrupcao() {
     if x86_64::instructions::interrupts::are_enabled() {
         x86_64::instructions::hlt();
     } else {
+        #[cfg(feature = "modo-teste")]
+        GIROS_MASCARADOS.fetch_add(1, Ordering::Relaxed);
         core::hint::spin_loop();
     }
 }
+
+/// Quantas vezes [`esperar_interrupcao`] girou em vez de dormir.
+///
+/// # Por que contar, em vez de deixar escrito que é zero
+///
+/// Porque já estava escrito, e uma frase não se remede sozinha. O ramo
+/// mascarado desta função é um giro que só termina se **outro** fio religar
+/// as interrupções; para quem chamou sem ter para onde voltar, ele é o fim.
+/// A medida de que ele nunca é tomado era o que autorizava os dois chamadores
+/// de hoje — o laço do agente e o descanso do coletor — a usarem esta função
+/// em vez de [`dormir_parado`].
+///
+/// Escrita num comentário, essa medida vale até o próximo chamador. Contada,
+/// vale a cada rodada da suíte.
+#[cfg(feature = "modo-teste")]
+pub fn giros_mascarados() -> u64 {
+    GIROS_MASCARADOS.load(Ordering::Relaxed)
+}
+
+#[cfg(feature = "modo-teste")]
+static GIROS_MASCARADOS: AtomicU64 = AtomicU64::new(0);
 
 /// Dorme até a próxima interrupção, ligando-as se for preciso.
 ///
@@ -608,9 +631,11 @@ pub fn esperar_interrupcao() {
 /// x86: o `syscall` limpa `IF` por causa do `SFMask`, então todo o despacho
 /// roda mascarado.
 ///
-/// Medido: o ramo mascarado de [`esperar_interrupcao`] foi tomado **zero**
-/// vezes na suíte inteira. O travamento era latente, e esperava a primeira
-/// máquina em que o coletor não estivesse pronto para rodar.
+/// Que o ramo mascarado de [`esperar_interrupcao`] seja tomado **zero** vezes
+/// deixou de ser uma medida escrita aqui e virou um caso, contando os giros
+/// sob `modo-teste` em vez de confiar na frase. O travamento era latente, e
+/// esperava a primeira máquina em que o coletor não estivesse pronto para
+/// rodar.
 ///
 /// No ARM esta função é um `wfi` e pronto: lá a instrução já acorda com a
 /// interrupção mascarada, e não há o que ligar.

@@ -1174,11 +1174,15 @@ fn com_descritor_da_folha<R>(
             if mudou {
                 // # A invalidação que nenhum caso derruba, e por quê
                 //
-                // Medido, apagando-a: a suíte inteira passa. Não é falha dos casos.
-                // O único chamador que modifica é o `fork`, e o passo imediatamente
-                // anterior ao lado do pai é uma troca de espaço — que recarrega o
-                // registrador de raiz e descarta a TLB por inteiro. Quando chegamos
-                // aqui não há entrada velha para descartar.
+                // Medido, apagando-a: a suíte inteira passa — remedido com 161
+                // casos, e continua passando. Não é falha dos casos.
+                //
+                // Quem modifica são dois: o `fork` e o caso que confere a marcação.
+                // Nos dois, o passo imediatamente anterior é uma troca de espaço —
+                // que recarrega o registrador de raiz e descarta a TLB por inteiro
+                // —, e nenhum dos dois **escreve** na página depois de marcá-la.
+                // Quando chegamos aqui não há entrada velha para descartar, e se
+                // houvesse ninguém a usaria.
                 //
                 // Ela fica porque essa é uma propriedade **do chamador de hoje**, e
                 // não desta função. Quem marcar uma página sem trocar de espaço

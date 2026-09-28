@@ -942,6 +942,40 @@ fn fdt_ignora_propriedade_menor_que_uma_celula() -> Resultado {
     }
 }
 
+/// Ninguém gira mascarado esperando uma interrupção.
+///
+/// # A frase que este caso substitui
+///
+/// `esperar_interrupcao` tem dois ramos: dorme se as interrupções estiverem
+/// ligadas, gira se não estiverem. O giro é o ramo ruim — ele só termina se
+/// **outro** fio religar as interrupções, e para quem chamou sem ter para
+/// onde voltar ele não termina nunca.
+///
+/// O que autorizava os dois chamadores de hoje — o laço do agente e o
+/// descanso do coletor — a usarem essa função em vez de `dormir_parado` era
+/// uma medida escrita num comentário: o ramo mascarado foi tomado zero vezes
+/// na suíte inteira. Uma medida escrita vale até o próximo chamador; esta
+/// vale a cada rodada.
+///
+/// # O que ele não cobre
+///
+/// O que rodar **depois** dele. O caso mora perto do fim da tabela por isso,
+/// e mesmo assim a garantia é "até aqui" — o preço de perguntar de dentro da
+/// própria suíte.
+#[cfg(target_arch = "x86_64")]
+fn x86_ninguem_gira_mascarado_esperando_interrupcao() -> Resultado {
+    let giros = crate::arch::atual::giros_mascarados();
+    if giros != 0 {
+        crate::log_error!(
+            "teste",
+            "esperar_interrupcao girou mascarada {} vez(es)",
+            giros
+        );
+        return Err("alguem esperou interrupcao com as interrupcoes mascaradas");
+    }
+    Ok(())
+}
+
 /// Um cabeçalho de GPT absurdo vira recusa, e não pânico nem laço eterno.
 ///
 /// # Por que este caso existe
@@ -8263,6 +8297,11 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "gpt: cabecalho absurdo e recusado",
         f: gpt_cabecalho_absurdo_e_recusado,
+    },
+    #[cfg(target_arch = "x86_64")]
+    Caso {
+        nome: "x86: ninguem gira mascarado esperando interrupcao",
+        f: x86_ninguem_gira_mascarado_esperando_interrupcao,
     },
     Caso {
         nome: "usuario: o pai sabe que o filho foi morto",
