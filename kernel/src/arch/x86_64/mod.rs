@@ -281,14 +281,15 @@ pub fn init_paginacao() {
 ///
 /// # Nenhum caso protege esta linha, e o que foi medido
 ///
-/// Apagando-a: a suíte inteira passa, nas 143. O motivo está no próprio log
-/// que a função emite — **o firmware já a deixara ligada**. O EDK II liga o
-/// bit para as próprias proteções de página, e depois do `ExitBootServices`
-/// ninguém mais o toca: nem o iniciador, nem o kernel. A linha não muda nada
-/// nesta máquina.
+/// Apagando-a, a suíte inteira passa — medido nas 143 de então e remedido nas
+/// 162 de hoje. O motivo está no próprio log que a função emite — **o
+/// firmware já a deixara ligada**. O EDK II liga o bit para as próprias
+/// proteções de página, e depois do `ExitBootServices` ninguém mais o toca:
+/// nem o iniciador, nem o kernel. A linha não muda nada nesta máquina.
 ///
 /// O que **é** falsificável é o bit, e vale ter medido: trocando `insert`
-/// por `remove`, quatro casos caem de uma vez — `clonar copia o conteudo`,
+/// por `remove`, quatro casos caem de uma vez — os mesmos quatro das 143 às
+/// 162 — `clonar copia o conteudo`,
 /// `clonar compartilha sem copiar`, `copia na escrita nao copia sem socio` e
 /// `fork do fork mantem a escrita`. Todos pelo mesmo motivo, e nenhum deles
 /// com uma mensagem que aponte para o `CR0`: eles relatam que escrever de um
