@@ -1014,7 +1014,12 @@ fn tela_desenhar_nao_regrediu_em_ordem_de_grandeza() -> Resultado {
     };
 
     // Uma passada fora da conta: a primeira paga o que as seguintes não pagam.
-    tela.preencher(preto);
+    //
+    // E ela pinta **branco**, que é o oposto do que a conferência lá embaixo
+    // espera. Com preto aqui, um `retangulo` que não desenhasse nada deixaria
+    // a tela preta do aquecimento e a conferência passaria sem que uma única
+    // escrita tivesse acontecido — a asserção seria decoração.
+    tela.preencher(branco);
 
     let antes = crate::tempo::uptime_ms();
     for volta in 0..VOLTAS {
@@ -1032,16 +1037,41 @@ fn tela_desenhar_nao_regrediu_em_ordem_de_grandeza() -> Resultado {
         por_tela
     );
 
-    // Folga de mais de dez vezes sobre o medido em cada perfil. O que passa
-    // disto não é uma máquina mais lenta, é outro algoritmo.
-    let teto = if cfg!(debug_assertions) {
-        6_000_000
-    } else {
-        100_000
-    };
-    if por_tela > teto {
-        crate::log_error!("teste", "preenchimento a {} us, teto {} us", por_tela, teto);
-        return Err("desenhar na tela ficou uma ordem de grandeza mais lento");
+    // O teto só vale em release, e o motivo está medido.
+    //
+    // A regressão que este caso existe para recusar é voltar a desenhar por
+    // chamada de função em vez de por laço. Semeada, ela move os números
+    // assim:
+    //
+    // | | limpo | com a regressão | razão |
+    // |---|---|---|---|
+    // | release | 6–8 ms | 59 ms | ~9x |
+    // | debug | 637 ms | 755 ms | 1,19x |
+    //
+    // Em debug o custo por pixel já é dominado pela falta de inline e pelas
+    // conferências de limite, e a chamada a mais quase não aparece. Um teto
+    // que pegasse 755 ms teria de ficar abaixo de 700, que é dentro do ruído
+    // de uma rodada limpa — reprovaria máquina lenta e não reprovaria a
+    // regressão. Seria decoração, e este caso já teve uma: o primeiro teto
+    // que escrevi aqui era de 100 ms em release, e a mutação passou por baixo
+    // dele.
+    //
+    // Então em debug o número é registrado e não julgado. Uma asserção que
+    // não pode falhar pelo motivo que a justifica não é uma asserção.
+    if !cfg!(debug_assertions) {
+        // Quatro vezes o pior medido em release nas duas arquiteturas: absorve
+        // uma máquina bem mais lenta que esta e ainda reprova a chamada por
+        // pixel, que chega a 59 ms.
+        const TETO_US: u64 = 30_000;
+        if por_tela > TETO_US {
+            crate::log_error!(
+                "teste",
+                "preenchimento a {} us, teto {} us",
+                por_tela,
+                TETO_US
+            );
+            return Err("desenhar na tela ficou uma ordem de grandeza mais lento");
+        }
     }
 
     // E o desenho continua correto: o último preenchimento foi preto.
