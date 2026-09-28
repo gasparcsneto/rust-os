@@ -65,6 +65,7 @@ mod agent;
 mod arch;
 mod fios;
 mod frames;
+mod grafico;
 mod heap;
 mod interpretador;
 mod irq;
@@ -300,6 +301,11 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
             log_info!("video", "nenhum framebuffer nesta maquina");
         }
     }
+
+    // A pilha gráfica, sobre a tela que as duas rotas acima tenham publicado.
+    // Depois das duas, e não dentro de uma: pela UEFI a tela vem da entrega,
+    // pelo `-kernel` ela vem do `bochs`, e a pilha não tem por que saber qual.
+    grafico::iniciar();
 
     virtio::blk::init();
     virtio::net::init();

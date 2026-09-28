@@ -510,6 +510,421 @@ fn comando_system_info_responde_arquitetura_correta() -> Resultado {
 }
 
 // ===========================================================================
+// Pilha gráfica
+// ===========================================================================
+
+/// O recorte do dano mantém todo retângulo dentro da área, para qualquer
+/// entrada — inclusive a que o original do Redox deixa escapar.
+fn grafico_dano_recorta_nas_bordas() -> Resultado {
+    use crate::grafico::Dano;
+
+    let casos: [(Dano, Dano, &str); 6] = [
+        (Dano::novo(2, 3, 4, 5), Dano::novo(2, 3, 4, 5), "dentro"),
+        (
+            Dano::novo(10, 0, 20, 1),
+            Dano::novo(10, 0, 6, 1),
+            "cruza a direita",
+        ),
+        (
+            Dano::novo(0, 6, 1, 20),
+            Dano::novo(0, 6, 1, 2),
+            "cruza embaixo",
+        ),
+        (
+            Dano::novo(40, 40, 5, 5),
+            Dano::novo(16, 8, 0, 0),
+            "todo fora",
+        ),
+        (
+            Dano::novo(0, 0, 16, 8),
+            Dano::novo(0, 0, 16, 8),
+            "a area inteira",
+        ),
+        // O que o `Damage::clip` do Redox devolve como x=16, largura=10:
+        // dez colunas fora da área. Aqui, nada.
+        (
+            Dano::novo(u32::MAX - 1, 0, 10, 1),
+            Dano::novo(16, 0, 0, 1),
+            "x no fim do u32",
+        ),
+    ];
+
+    for (entrada, esperado, nome) in casos {
+        let saida = entrada.recortar(16, 8);
+        if saida != esperado {
+            crate::log_error!(
+                "teste",
+                "{}: {:?} recortou para {:?}, esperado {:?}",
+                nome,
+                entrada,
+                saida,
+                esperado
+            );
+            return Err("o recorte do dano devolveu outro retangulo");
+        }
+        // A propriedade que importa, conferida à parte do valor exato: nada
+        // passa da borda.
+        if saida.x as u64 + saida.largura as u64 > 16 || saida.y as u64 + saida.altura as u64 > 8 {
+            return Err("o recorte deixou o retangulo passar da borda");
+        }
+    }
+    Ok(())
+}
+
+/// Unir dois danos dá o menor retângulo que cobre os dois, e unir com um
+/// vazio não muda nada.
+fn grafico_dano_une() -> Resultado {
+    use crate::grafico::Dano;
+
+    if Dano::novo(1, 2, 3, 4).unir(Dano::novo(10, 1, 2, 2)) != Dano::novo(1, 1, 11, 5) {
+        return Err("a uniao de dois danos nao cobre os dois");
+    }
+    if Dano::novo(1, 2, 3, 4).unir(Dano::novo(0, 0, 0, 0)) != Dano::novo(1, 2, 3, 4) {
+        return Err("unir com um dano vazio mudou o retangulo");
+    }
+    if Dano::novo(0, 0, 0, 5).unir(Dano::novo(1, 2, 3, 4)) != Dano::novo(1, 2, 3, 4) {
+        return Err("um dano vazio expandiu a uniao");
+    }
+    Ok(())
+}
+
+/// Uma tela sintética sobre memória própria, cheia de um byte sentinela.
+///
+/// O sentinela é o que permite ver a escrita que **não** deveria ter
+/// acontecido: o preenchimento entre a largura e o stride de cada linha não é
+/// tela, e nada pode tocar nele.
+fn tela_sintetica(
+    largura: u32,
+    altura: u32,
+    stride: u32,
+    bytes_por_pixel: u32,
+    formato: crate::tela::Formato,
+) -> Result<(crate::grafico::memoria::Memoria, crate::tela::Tela), &'static str> {
+    const SENTINELA: u8 = 0x5A;
+    let bytes = stride as u64 * altura as u64 * bytes_por_pixel as u64;
+    let memoria = crate::grafico::memoria::Memoria::nova(bytes)?;
+    // SAFETY: a memória é nossa, mapeada e gravável, com `bytes` de extensão.
+    unsafe { core::ptr::write_bytes(memoria.inicio() as *mut u8, SENTINELA, bytes as usize) };
+    // SAFETY: a mesma memória, que vive enquanto a `Memoria` devolvida viver.
+    let tela = unsafe {
+        crate::tela::sintetica(
+            memoria.inicio(),
+            largura,
+            altura,
+            stride,
+            bytes_por_pixel,
+            formato,
+        )
+    }
+    .ok_or("a tela sintetica foi recusada")?;
+    Ok((memoria, tela))
+}
+
+/// Atualizar leva à tela o retângulo do dano, e só ele — nos quatro
+/// formatos, e sem tocar no preenchimento entre a largura e o stride.
+///
+/// # Por que quatro formatos numa máquina que tem um
+///
+/// As duas máquinas da suíte são BGR de quatro bytes por pixel. Um adaptador
+/// que trocasse vermelho e azul, ou que escrevesse quatro bytes onde a placa
+/// tem três, passaria em toda rodada — e erraria na primeira máquina real com
+/// outra placa. O `vesad`, de onde este adaptador vem, só sabe o formato das
+/// duas máquinas.
+fn grafico_atualizar_leva_so_o_dano() -> Resultado {
+    use crate::grafico::linear::AdaptadorLinear;
+    use crate::grafico::{AdaptadorGrafico, Dano, Superficie};
+    use crate::tela::{Cor, Formato};
+
+    const LARGURA: u32 = 16;
+    const ALTURA: u32 = 8;
+    // Maior que a largura, de propósito: um adaptador que confundisse os
+    // dois desenharia inclinado, e escreveria no preenchimento.
+    const STRIDE: u32 = 20;
+    // Três canais distintos: uma troca de vermelho com azul muda o valor.
+    const ANTES: Cor = Cor::nova(0x11, 0x22, 0x33);
+    const DEPOIS: Cor = Cor::nova(0xAA, 0xBB, 0xCC);
+    let dano = Dano::novo(3, 2, 5, 3);
+
+    for (formato, bytes_por_pixel) in [
+        (Formato::Bgr, 4),
+        (Formato::Rgb, 4),
+        (Formato::Bgr, 3),
+        (Formato::Rgb, 3),
+    ] {
+        let (memoria, tela) = tela_sintetica(LARGURA, ALTURA, STRIDE, bytes_por_pixel, formato)?;
+        let mut adaptador = AdaptadorLinear::novo(tela);
+        let mut superficie = adaptador.criar_superficie(LARGURA, ALTURA)?;
+
+        superficie.pixels_mut().fill(ANTES.para_u32());
+        adaptador.atualizar(0, &superficie, Dano::inteiro(LARGURA, ALTURA))?;
+
+        superficie.pixels_mut().fill(DEPOIS.para_u32());
+        let levado = adaptador.atualizar(0, &superficie, dano)?;
+        if levado != dano {
+            return Err("atualizar nao devolveu o dano que levou");
+        }
+
+        for y in 0..ALTURA {
+            for x in 0..LARGURA {
+                let dentro = x >= dano.x
+                    && x < dano.x + dano.largura
+                    && y >= dano.y
+                    && y < dano.y + dano.altura;
+                let esperada = if dentro { DEPOIS } else { ANTES };
+                if tela.ler_pixel(x, y) != Some(esperada) {
+                    crate::log_error!(
+                        "teste",
+                        "{} {} bytes/pixel: ({}, {}) = {:?}, esperada {:?}",
+                        formato.como_str(),
+                        bytes_por_pixel,
+                        x,
+                        y,
+                        tela.ler_pixel(x, y),
+                        esperada
+                    );
+                    return Err("o pixel na tela nao e o que o dano devia deixar");
+                }
+            }
+        }
+
+        // O preenchimento de cada linha segue intacto.
+        let bytes = memoria.inicio() as *const u8;
+        for y in 0..ALTURA {
+            for x in LARGURA..STRIDE {
+                for b in 0..bytes_por_pixel {
+                    let em = (y * STRIDE + x) * bytes_por_pixel + b;
+                    // SAFETY: `em` está dentro da memória da tela sintética.
+                    if unsafe { core::ptr::read_volatile(bytes.add(em as usize)) } != 0x5A {
+                        crate::log_error!(
+                            "teste",
+                            "{} {} bytes/pixel: preenchimento tocado na linha {}, coluna {}",
+                            formato.como_str(),
+                            bytes_por_pixel,
+                            y,
+                            x
+                        );
+                        return Err("o adaptador escreveu entre a largura e o stride");
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// O dano que escapa do recorte do Redox não escreve nada aqui.
+///
+/// É o caso integrado do que `grafico_dano_recorta_nas_bordas` confere na
+/// aritmética: o mesmo retângulo, agora passando pelo adaptador até a
+/// memória. Com a soma do original, e `overflow-checks` ligado em release,
+/// isto seria pânico do kernel; com a soma que dá a volta, dez colunas além
+/// de cada linha.
+fn grafico_dano_hostil_nao_escreve() -> Resultado {
+    use crate::grafico::linear::AdaptadorLinear;
+    use crate::grafico::{AdaptadorGrafico, Dano, Superficie};
+
+    let (memoria, tela) = tela_sintetica(16, 8, 20, 4, crate::tela::Formato::Bgr)?;
+    let mut adaptador = AdaptadorLinear::novo(tela);
+    let mut superficie = adaptador.criar_superficie(16, 8)?;
+    superficie.pixels_mut().fill(0x00FF_FFFF);
+
+    let levado = adaptador.atualizar(0, &superficie, Dano::novo(u32::MAX - 1, 0, 10, 8))?;
+    if !levado.vazio() {
+        return Err("um dano inteiro fora da tela levou alguma coisa");
+    }
+
+    let bytes = memoria.inicio() as *const u8;
+    for i in 0..(20 * 8 * 4) {
+        // SAFETY: dentro da memória da tela sintética.
+        if unsafe { core::ptr::read_volatile(bytes.add(i)) } != 0x5A {
+            return Err("um dano inteiro fora da tela escreveu na memoria");
+        }
+    }
+    Ok(())
+}
+
+/// Uma superfície devolve ao alocador cada frame que tomou.
+fn grafico_superficie_devolve_os_frames() -> Resultado {
+    use crate::grafico::linear::AdaptadorLinear;
+    use crate::grafico::{AdaptadorGrafico, Superficie};
+
+    let (_memoria, tela) = tela_sintetica(16, 8, 16, 4, crate::tela::Formato::Bgr)?;
+    let mut adaptador = AdaptadorLinear::novo(tela);
+
+    // 64x64 a quatro bytes são quatro páginas, exatas.
+    const PAGINAS: u64 = 4;
+    let (vivas_antes, bytes_antes) = crate::grafico::memoria::vivas();
+
+    let superficie = adaptador.criar_superficie(64, 64)?;
+    if superficie.bytes() != PAGINAS * crate::arch::TAMANHO_PAGINA {
+        return Err("a superficie nao segura as paginas que devia");
+    }
+    let (vivas_com, bytes_com) = crate::grafico::memoria::vivas();
+    if vivas_com != vivas_antes + 1 || bytes_com != bytes_antes + superficie.bytes() {
+        return Err("o relatorio nao contou a superficie nova");
+    }
+
+    // Medido entre criar e largar, e não desde antes de criar: criar pode
+    // montar tabelas de tradução que ficam — elas são do kernel, e não da
+    // superfície. O que a superfície tomou para si, ela devolve inteiro.
+    // Mascarado, pela mesma razão do caso do `mmio`: o coletor de fios
+    // mortos devolve frames em outro fio, e cairia dentro da conta.
+    let (livres_com, livres_depois) = crate::arch::sem_interrupcoes(|| {
+        let (livres_com, _) = crate::frames::estatisticas();
+        drop(superficie);
+        let (livres_depois, _) = crate::frames::estatisticas();
+        (livres_com, livres_depois)
+    });
+    if livres_depois as u64 != livres_com as u64 + PAGINAS {
+        crate::log_error!(
+            "teste",
+            "livres: {} com a superficie, {} depois de largar",
+            livres_com,
+            livres_depois
+        );
+        return Err("largar a superficie nao devolveu os frames dela");
+    }
+    if crate::grafico::memoria::vivas() != (vivas_antes, bytes_antes) {
+        return Err("o relatorio seguiu contando a superficie largada");
+    }
+    Ok(())
+}
+
+/// Uma superfície que falha no meio não deixa página mapeada para trás.
+///
+/// # A armadilha que este caso contorna
+///
+/// Uma falha na **primeira** alocação não prova nada: o desfazer roda com
+/// nada a desfazer. A falha precisa cair depois de ao menos uma página ter
+/// sido mapeada — e para isso as tabelas de tradução da região precisam já
+/// existir, ou a segunda alocação seria uma tabela da página zero, e não o
+/// frame da página um.
+fn grafico_superficie_que_falha_no_meio_desfaz() -> Resultado {
+    use crate::grafico::memoria::{Memoria, proximo, vivas};
+
+    const PAGINA: u64 = crate::arch::TAMANHO_PAGINA;
+    const REGIAO: u64 = PAGINA * 512;
+    // Espaço para o aquecimento e para as duas páginas do caso, com folga.
+    const FOLGA: u64 = 16 * PAGINA;
+
+    if crate::frames::falhas_pendentes() != 0 {
+        return Err("um caso anterior deixou falhas encomendadas pendentes");
+    }
+
+    // Longe da fronteira da região, para as páginas do caso caírem na mesma
+    // tabela que o aquecimento vai montar.
+    let resto = REGIAO - proximo() % REGIAO;
+    if resto < FOLGA {
+        drop(Memoria::nova(resto)?);
+    }
+    // O aquecimento: monta as tabelas da região, e é largado.
+    drop(Memoria::nova(PAGINA)?);
+
+    let inicio = proximo();
+    let antes = vivas();
+
+    // A primeira alocação — o frame da página zero — passa. A segunda — o
+    // da página um — falha.
+    //
+    // Mascarado: a contagem "deixe uma passar" é de alocações do sistema
+    // inteiro, e um handler que alocasse no meio levaria a que era da página
+    // zero.
+    let (resultado, pendentes) = crate::arch::sem_interrupcoes(|| {
+        crate::frames::encomendar_falhas_depois(1, 1);
+        let resultado = Memoria::nova(2 * PAGINA);
+        let pendentes = crate::frames::falhas_pendentes();
+        crate::frames::encomendar_falhas(0);
+        (resultado, pendentes)
+    });
+
+    if resultado.is_ok() {
+        return Err("a superficie foi criada apesar da falha encomendada");
+    }
+    if pendentes != 0 {
+        return Err("a falha encomendada nao chegou ao alocador");
+    }
+    for pagina in [inicio, inicio + PAGINA] {
+        if let Some(fisico) = crate::arch::traduzir(pagina) {
+            crate::log_error!(
+                "teste",
+                "a pagina {:#x} da superficie que falhou ainda traduz para {:#x}",
+                pagina,
+                fisico
+            );
+            return Err("o desfazer deixou pagina mapeada");
+        }
+    }
+    if vivas() != antes {
+        return Err("uma superficie que falhou foi contada como viva");
+    }
+    Ok(())
+}
+
+/// O agente vê a pilha gráfica pelo registro, com o adaptador e a tela certos.
+fn agente_display_info_descreve_a_pilha() -> Resultado {
+    let cmd = registry::encontrar("display.info").ok_or("display.info ausente")?;
+
+    let mut buffer = Buffer::novo();
+    {
+        let mut w = JsonWriter::new(&mut buffer);
+        escrita((cmd.handler)(Json(b"{}"), &mut w))?;
+    }
+    let resposta = Json(buffer.bytes());
+
+    let Some(tela) = crate::tela::tela() else {
+        return match resposta.member("present").and_then(|v| v.as_bool()) {
+            Some(false) => Ok(()),
+            _ => Err("sem tela, display.info nao disse que nao ha pilha"),
+        };
+    };
+
+    if resposta.member("adapter").and_then(|v| v.as_str()) != Some("linear") {
+        crate::log_error!("teste", "resposta: {}", buffer.como_str());
+        return Err("display.info nao nomeou o adaptador linear");
+    }
+    let Some(tela0) = resposta.member("displays").and_then(|d| d.item(0)) else {
+        return Err("display.info nao listou a tela");
+    };
+    let largura = tela0.member("width").and_then(|v| v.as_u64());
+    let altura = tela0.member("height").and_then(|v| v.as_u64());
+    if largura != Some(tela.largura as u64) || altura != Some(tela.altura as u64) {
+        crate::log_error!("teste", "resposta: {}", buffer.como_str());
+        return Err("display.info descreveu outra geometria");
+    }
+
+    // E a pergunta que um agente faz depois de mandar desenhar — "o que
+    // mudou?" — tem de responder o último retângulo que chegou à tela. Os
+    // contadores são os da máquina, e é a suíte registrando um retângulo
+    // conhecido: é o caminho inteiro, do registro até o JSON.
+    let atualizacoes_antes = resposta
+        .member("updates")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    crate::grafico::registrar_atualizacao(crate::grafico::Dano::novo(7, 11, 13, 17));
+
+    let mut buffer = Buffer::novo();
+    {
+        let mut w = JsonWriter::new(&mut buffer);
+        escrita((cmd.handler)(Json(b"{}"), &mut w))?;
+    }
+    let resposta = Json(buffer.bytes());
+    if resposta.member("updates").and_then(|v| v.as_u64()) != Some(atualizacoes_antes + 1) {
+        return Err("display.info nao contou a atualizacao");
+    }
+    let Some(dano) = resposta.member("last_damage") else {
+        return Err("display.info nao trouxe o ultimo dano");
+    };
+    let campo = |nome| dano.member(nome).and_then(|v| v.as_u64());
+    if (campo("x"), campo("y"), campo("width"), campo("height"))
+        != (Some(7), Some(11), Some(13), Some(17))
+    {
+        crate::log_error!("teste", "resposta: {}", buffer.como_str());
+        return Err("display.info devolveu outro retangulo como ultimo dano");
+    }
+    Ok(())
+}
+
+// ===========================================================================
 // Logging
 // ===========================================================================
 
@@ -8443,6 +8858,34 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "gpt: cabecalho absurdo e recusado",
         f: gpt_cabecalho_absurdo_e_recusado,
+    },
+    Caso {
+        nome: "grafico: o dano recorta nas bordas",
+        f: grafico_dano_recorta_nas_bordas,
+    },
+    Caso {
+        nome: "grafico: o dano une",
+        f: grafico_dano_une,
+    },
+    Caso {
+        nome: "grafico: atualizar leva so o dano, nos quatro formatos",
+        f: grafico_atualizar_leva_so_o_dano,
+    },
+    Caso {
+        nome: "grafico: dano hostil nao escreve",
+        f: grafico_dano_hostil_nao_escreve,
+    },
+    Caso {
+        nome: "grafico: superficie devolve os frames",
+        f: grafico_superficie_devolve_os_frames,
+    },
+    Caso {
+        nome: "grafico: superficie que falha no meio desfaz",
+        f: grafico_superficie_que_falha_no_meio_desfaz,
+    },
+    Caso {
+        nome: "agente: display.info descreve a pilha",
+        f: agente_display_info_descreve_a_pilha,
     },
     Caso {
         nome: "tela: desenhar nao regrediu em ordem de grandeza",

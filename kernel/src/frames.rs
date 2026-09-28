@@ -369,6 +369,10 @@ pub fn reservar(inicio: u64, fim: u64) {
 #[cfg(feature = "modo-teste")]
 static FALHAS_ENCOMENDADAS: AtomicUsize = AtomicUsize::new(0);
 
+/// Quantas alocações ainda passam antes de as encomendadas começarem a falhar.
+#[cfg(feature = "modo-teste")]
+static SUCESSOS_ANTES_DA_FALHA: AtomicUsize = AtomicUsize::new(0);
+
 /// Faz as próximas `quantas` alocações de frame falharem.
 ///
 /// Devolve quantas ainda estavam encomendadas de uma chamada anterior, que é
@@ -376,7 +380,26 @@ static FALHAS_ENCOMENDADAS: AtomicUsize = AtomicUsize::new(0);
 /// contamina o seguinte.
 #[cfg(feature = "modo-teste")]
 pub fn encomendar_falhas(quantas: usize) -> usize {
+    SUCESSOS_ANTES_DA_FALHA.store(0, Ordering::SeqCst);
     FALHAS_ENCOMENDADAS.swap(quantas, Ordering::SeqCst)
+}
+
+/// Deixa as próximas `sucessos` alocações passarem, e faz as `quantas`
+/// seguintes falharem.
+///
+/// # Por que "depois"
+///
+/// Porque um caminho de desfazer só é exercitado se a falha cair **depois**
+/// de algo ter sido feito. Com [`encomendar_falhas`] a falha pega a primeira
+/// alocação — e num laço que aloca uma página por volta, a primeira é a da
+/// página zero: o desfazer roda com nada a desfazer, e o caso passa sem ter
+/// provado a linha que veio provar. Foi a armadilha do caso do `mmio`, que a
+/// resolveu pela geometria das tabelas; aqui cada página aloca um frame
+/// próprio, e a geometria não ajuda.
+#[cfg(feature = "modo-teste")]
+pub fn encomendar_falhas_depois(sucessos: usize, quantas: usize) {
+    SUCESSOS_ANTES_DA_FALHA.store(sucessos, Ordering::SeqCst);
+    FALHAS_ENCOMENDADAS.store(quantas, Ordering::SeqCst);
 }
 
 /// Quantas falhas encomendadas ainda não foram consumidas.
@@ -399,9 +422,13 @@ pub fn alocar() -> Option<u64> {
     // A falha encomendada vem antes de tocar no alocador: o que se quer
     // imitar é "não havia frame", e não "havia e deu errado depois".
     #[cfg(feature = "modo-teste")]
-    if FALHAS_ENCOMENDADAS
-        .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-        .is_ok()
+    if FALHAS_ENCOMENDADAS.load(Ordering::SeqCst) > 0
+        && SUCESSOS_ANTES_DA_FALHA
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_err()
+        && FALHAS_ENCOMENDADAS
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
     {
         return None;
     }

@@ -214,6 +214,13 @@ pub static COMANDOS: &[Command] = &[
         handler: video_sample,
     },
     Command {
+        nome: "display.info",
+        resumo: "A pilha grafica: qual adaptador esta ativo, as telas dele, quanta memoria as \
+                 superficies seguram e o ultimo retangulo que chegou a tela.",
+        params: &[],
+        handler: display_info,
+    },
+    Command {
         nome: "disk.partitions",
         resumo: "A tabela de particoes do disco, lida da GPT.",
         params: &[],
@@ -1134,6 +1141,63 @@ fn keyboard_read(params: Json, w: &mut JsonWriter) -> fmt::Result {
         w.field_u64("device_events", eventos)?;
     }
     w.field_u64("usb_reports", crate::usb::hid::relatorios())?;
+
+    w.end_object()
+}
+
+/// A pilha gráfica, como o agente a enxerga.
+///
+/// # Por que o último dano, e não uma captura
+///
+/// Porque é a pergunta que um agente faz de verdade depois de mandar
+/// desenhar: "o que mudou?". Responder com uma captura da tela inteira obriga
+/// quem pergunta a comparar dois quadros para achar a diferença — que é
+/// exatamente o que o compositor já sabe e está jogando fora. Aqui ele diz.
+///
+/// `video.sample` continua existindo para quando a pergunta é outra: "o que
+/// está na tela?".
+fn display_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let Some(r) = crate::grafico::relatorio() else {
+        // Sem pilha gráfica não é erro: a máquina pode não ter tela.
+        w.field_bool("present", false)?;
+        return w.end_object();
+    };
+
+    w.field_bool("present", true)?;
+    w.field_str("adapter", r.adaptador)?;
+
+    w.key("displays")?;
+    w.begin_array()?;
+    for tela in 0..r.telas {
+        w.begin_object()?;
+        w.field_u64("id", tela as u64)?;
+        if tela == 0
+            && let Some((largura, altura)) = r.tamanho
+        {
+            w.field_u64("width", largura as u64)?;
+            w.field_u64("height", altura as u64)?;
+        }
+        w.end_object()?;
+    }
+    w.end_array()?;
+
+    w.field_u64("surfaces", r.superficies)?;
+    w.field_u64("surface_bytes", r.bytes_em_superficies)?;
+    w.field_u64("updates", r.atualizacoes)?;
+
+    w.key("last_damage")?;
+    match r.ultimo_dano {
+        Some(d) => {
+            w.begin_object()?;
+            w.field_u64("x", d.x as u64)?;
+            w.field_u64("y", d.y as u64)?;
+            w.field_u64("width", d.largura as u64)?;
+            w.field_u64("height", d.altura as u64)?;
+            w.end_object()?;
+        }
+        None => w.null_value()?,
+    }
 
     w.end_object()
 }

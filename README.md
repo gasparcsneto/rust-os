@@ -157,6 +157,7 @@ Os dois podem rodar ao mesmo tempo: cada arquitetura tem seu próprio socket.
 | `net.info` | Endereço e contadores da placa de rede, se houver uma |
 | `net.arp` | Pergunta quem atende por um IPv4 e espera a resposta (`ip`, `from`) |
 | `video.sample` | Amostra a tela numa grade de cores (`columns`, `rows`) |
+| `display.info` | A pilha gráfica: adaptador ativo, telas, memória das superfícies e o último retângulo que chegou à tela |
 | `keyboard.read` | O que foi digitado no teclado da máquina, e os contadores dele (`max`) |
 | `log.tail` | Registros de log estruturados (`count`, `min_level`) |
 
@@ -193,6 +194,11 @@ kernel/src/
 │   ├── mod.rs       o framebuffer: desenhar na tela
 │   ├── bochs.rs     o adaptador de vídeo do QEMU, programado do zero
 │   └── console.rs   o console de texto: o que uma pessoa lê na tela
+├── grafico/         a pilha gráfica, no desenho do Redox
+│   ├── mod.rs       o trait de adaptador e o que o agente enxerga dele
+│   ├── dano.rs      o retângulo que mudou, com o recorte que não dá a volta
+│   ├── linear.rs    buffer de fundo sobre um framebuffer (porte do vesad)
+│   └── memoria.rs   as páginas de uma superfície, fora do heap
 ├── fios/
 │   ├── mod.rs       escalonador preemptivo: fios, rodízio e quantum
 │   └── pilha.rs     pilhas de fio, cada uma com sua guard page
@@ -1628,3 +1634,6 @@ padronizado.
 ## Licença
 
 MIT OU Apache-2.0, a critério de quem usa.
+
+Partes da pilha gráfica são porte de código do Redox OS, sob MIT, com o
+aviso de copyright deles — ver [`THIRD_PARTY.md`](THIRD_PARTY.md).

@@ -280,6 +280,46 @@ impl<'a> Json<'a> {
         }
     }
 
+    /// O elemento de índice `indice`, assumindo que este valor é um array.
+    ///
+    /// A mesma varredura de [`Self::member`], sobre `[` em vez de `{`: cada
+    /// valor é pulado inteiro, strings e contêineres aninhados incluídos,
+    /// então um `]` dentro de uma string não encerra o array.
+    ///
+    /// Só existe na compilação de teste porque só a suíte lê arrays das
+    /// respostas hoje. O dia em que um comando precisar ler um array vindo do
+    /// agente, a porta está aqui — e passa a ser entrada hostil, com tudo o
+    /// que o resto deste leitor já faz por isso.
+    #[cfg(feature = "modo-teste")]
+    pub fn item(&self, indice: usize) -> Option<Json<'a>> {
+        let b = self.0;
+        let mut i = pular_espacos(b, 0);
+        if *b.get(i)? != b'[' {
+            return None;
+        }
+        i += 1;
+
+        let mut atual = 0usize;
+        loop {
+            i = pular_espacos(b, i);
+            match *b.get(i)? {
+                b']' => return None,
+                b',' => {
+                    i += 1;
+                    continue;
+                }
+                _ => {}
+            }
+            let inicio = i;
+            let fim = pular_valor(b, i)?;
+            if atual == indice {
+                return Some(Json(&b[inicio..fim]));
+            }
+            atual += 1;
+            i = fim;
+        }
+    }
+
     /// Chama `f` para cada chave do nível imediato deste objeto.
     ///
     /// É a mesma varredura de [`Self::member`], que já sabe pular strings e

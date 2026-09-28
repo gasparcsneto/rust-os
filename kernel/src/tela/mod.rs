@@ -109,6 +109,27 @@ impl Cor {
         Cor { r, g, b }
     }
 
+    /// A cor como um pixel de superfície: `0x00RRGGBB`.
+    ///
+    /// # Por que este formato
+    ///
+    /// É o do Redox e do `orbclient`, de onde vem a pilha gráfica — e não por
+    /// deferência: num little-endian, `0x00RRGGBB` fica na memória como
+    /// `BB GG RR 00`, que é exatamente um pixel BGR de quatro bytes. O formato
+    /// mais comum em firmware de PC, e o das duas máquinas desta suíte, é
+    /// então uma cópia sem conversão nenhuma.
+    // Quem compõe cores em superfícies é o compositor, que ainda não existe;
+    // hoje só a suíte pinta uma.
+    #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+    pub const fn para_u32(self) -> u32 {
+        (self.r as u32) << 16 | (self.g as u32) << 8 | self.b as u32
+    }
+
+    /// O inverso de [`Cor::para_u32`]. O byte alto é ignorado.
+    pub const fn de_u32(pixel: u32) -> Cor {
+        Cor::nova((pixel >> 16) as u8, (pixel >> 8) as u8, pixel as u8)
+    }
+
     /// A luminância aproximada, para telas de um byte por pixel.
     ///
     /// Os pesos são os da percepção humana — o verde domina, o azul quase não
@@ -282,6 +303,41 @@ fn geometria_coerente(
     formato: Formato,
 ) -> bool {
     largura > 0 && altura > 0 && stride >= largura && bytes_por_pixel >= formato.bytes_tocados()
+}
+
+/// Uma tela sobre memória que quem chama possui, sem publicá-la.
+///
+/// Existe para a suíte exercitar formatos que nenhuma das duas máquinas de
+/// teste tem. As duas são BGR de quatro bytes por pixel, então um desenho que
+/// errasse RGB ou três bytes por pixel passaria em todas as rodadas — e só
+/// apareceria na primeira máquina de verdade com outra placa.
+///
+/// A geometria passa pela mesma conferência de [`registrar`].
+///
+/// # Safety
+///
+/// As mesmas de [`registrar`]: `base` mapeado, gravável, com pelo menos
+/// `stride * altura * bytes_por_pixel` bytes, e vivo enquanto a tela durar.
+#[cfg(feature = "modo-teste")]
+pub unsafe fn sintetica(
+    base: u64,
+    largura: u32,
+    altura: u32,
+    stride: u32,
+    bytes_por_pixel: u32,
+    formato: Formato,
+) -> Option<Tela> {
+    if base == 0 || !geometria_coerente(largura, altura, stride, bytes_por_pixel, formato) {
+        return None;
+    }
+    Some(Tela {
+        base,
+        largura,
+        altura,
+        stride,
+        bytes_por_pixel,
+        formato,
+    })
 }
 
 /// A tela desta máquina, se houver uma.
@@ -502,6 +558,65 @@ impl Tela {
                 }
             }
             inicio_da_linha += linha_a_linha;
+        }
+    }
+
+    /// Escreve uma sequência de pixels de superfície a partir de `(x, y)`.
+    ///
+    /// Os pixels vêm no formato de [`Cor::para_u32`] e saem no formato do
+    /// hardware. É o que um adaptador gráfico chama para cada linha de um
+    /// retângulo de dano — e mora aqui, e não no adaptador, porque saber como
+    /// esta placa guarda um pixel é assunto desta estrutura e de mais
+    /// nenhuma. Dois lugares com essa resposta divergiriam no primeiro
+    /// formato novo.
+    ///
+    /// O que passar da borda direita, ou uma linha fora da tela, é descartado
+    /// em silêncio: o recorte é trabalho de quem chama, e aqui ele só impede
+    /// que um erro de quem chama vire escrita fora do framebuffer.
+    ///
+    /// # O caminho rápido
+    ///
+    /// BGR de quatro bytes por pixel — as duas máquinas da suíte — é uma
+    /// escrita de 32 bits por pixel, sem conversão. Os outros formatos
+    /// convertem pixel a pixel. As escritas continuam voláteis pelo motivo
+    /// de sempre: quem lê este buffer não é este programa.
+    pub fn copiar_linha(&self, x: u32, y: u32, pixels: &[u32]) {
+        if y >= self.altura || x >= self.largura {
+            return;
+        }
+        let cabem = (self.largura - x) as usize;
+        let pixels = &pixels[..pixels.len().min(cabem)];
+
+        let Some(inicio) = self.endereco(x, y) else {
+            return;
+        };
+
+        if self.formato == Formato::Bgr && self.bytes_por_pixel == 4 {
+            let destino = inicio as *mut u32;
+            for (i, &pixel) in pixels.iter().enumerate() {
+                // SAFETY: `x + i` está abaixo da largura pelo corte acima, e
+                // `y` abaixo da altura; o registro garantiu a região mapeada e
+                // gravável. Quatro bytes por pixel e base alinhada a página
+                // deixam cada endereço alinhado a 32 bits.
+                unsafe { core::ptr::write_volatile(destino.add(i), pixel) };
+            }
+            return;
+        }
+
+        let passo = self.bytes_por_pixel as usize;
+        for (i, &pixel) in pixels.iter().enumerate() {
+            let (bytes, quantos) = self.bytes_da_cor(Cor::de_u32(pixel));
+            // SAFETY: mesma faixa do caminho rápido; aqui o passo é o do
+            // pixel, e `geometria_coerente` garantiu que ele cobre os bytes
+            // que o formato toca.
+            unsafe {
+                let ponteiro = inicio.add(i * passo);
+                core::ptr::write_volatile(ponteiro, bytes[0]);
+                if quantos == 3 {
+                    core::ptr::write_volatile(ponteiro.add(1), bytes[1]);
+                    core::ptr::write_volatile(ponteiro.add(2), bytes[2]);
+                }
+            }
         }
     }
 
