@@ -67,7 +67,7 @@ static DESLOCAMENTO_FISICO: AtomicU64 = AtomicU64::new(u64::MAX);
 /// O preço de divergir era alto e mudo: um kernel mapeado num endereço e
 /// ligado para outro não dá erro nem mensagem, dá uma máquina que reinicia no
 /// primeiro salto.
-pub use protocolo::mapa::{BASE_DAS_PILHAS, BASE_DE_MMIO, BASE_DO_HEAP};
+pub use protocolo::mapa::{BASE_DAS_PILHAS, BASE_DAS_SUPERFICIES, BASE_DE_MMIO, BASE_DO_HEAP};
 
 // A base do kernel e a da memória física não são reexportadas. A primeira é
 // do iniciador e do `xtask`; a segunda o kernel lê da **entrega**, e não da

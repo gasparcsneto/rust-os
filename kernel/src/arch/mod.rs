@@ -63,14 +63,15 @@ pub use aarch64 as atual;
 // pelos backends, que esconderia código morto de verdade dentro deles.
 #[allow(unused_imports)]
 pub use atual::{
-    BASE_DAS_PILHAS, BASE_DE_MMIO, BASE_DO_HEAP, COBERTURA_DA_ENTRADA_DE_TOPO, Contexto, Uart,
-    acesso_fisico, ceder_cpu, copia_na_escrita_em, criar_espaco, definir_pilha_de_kernel,
-    desmapear, destravar_paginacao, destruir_espaco, disparar_breakpoint, disparar_falha_fatal,
-    dormir_parado, dormir_se_ocioso, encerrar_emulador, entrar_em_usuario, espaco_atual,
-    espaco_do_kernel, esperar_interrupcao, falha_de_estouro_de_pilha, halt_forever,
-    identificar_cpu, init_excecoes, init_interrupcao_serial, init_interrupcoes, init_paginacao,
-    init_pci, init_seriais, init_timer_definitivo, init_usuario, interrupcoes_habilitadas,
-    mapear_frame, marcar_copia_na_escrita, nome, percorrer_paginas_do_usuario, preparar_contexto,
+    BASE_DAS_PILHAS, BASE_DAS_SUPERFICIES, BASE_DE_MMIO, BASE_DO_HEAP,
+    COBERTURA_DA_ENTRADA_DE_TOPO, Contexto, Uart, acesso_fisico, ceder_cpu, copia_na_escrita_em,
+    criar_espaco, definir_pilha_de_kernel, desmapear, destravar_paginacao, destruir_espaco,
+    disparar_breakpoint, disparar_falha_fatal, dormir_parado, dormir_se_ocioso, encerrar_emulador,
+    entrar_em_usuario, espaco_atual, espaco_do_kernel, esperar_interrupcao,
+    falha_de_estouro_de_pilha, halt_forever, identificar_cpu, init_excecoes,
+    init_interrupcao_serial, init_interrupcoes, init_paginacao, init_pci, init_seriais,
+    init_timer_definitivo, init_usuario, interrupcoes_habilitadas, mapear_frame,
+    marcar_copia_na_escrita, nome, percorrer_paginas_do_usuario, preparar_contexto,
     preparar_contexto_de_fork, redirecionar_para, reservar_faixas, sem_interrupcoes, traduzir,
     trocar_espaco,
 };
@@ -101,6 +102,44 @@ pub const fn entrada_de_topo(endereco: u64) -> u64 {
 /// tabelas de nível inferior por referência, e é isso que faz um mapeamento do
 /// kernel valer em todos ao mesmo tempo.
 pub const ENTRADA_PRIVADA: u64 = entrada_de_topo(crate::usuario::BASE);
+
+// As regiões do kernel moram cada uma na sua entrada de topo, e nenhuma na do
+// usuário.
+//
+// O `protocolo::mapa` explica por quê, em prosa: uma tabela por processo se
+// monta copiando as entradas de topo do kernel, e duas regiões que dividissem
+// uma entrada — ou uma que caísse na do usuário — levariam junto o mapa de
+// outro processo, ou deixariam o kernel sem a região. E nada conferia. Uma
+// regra escrita num comentário e em nenhum outro lugar é exatamente o tipo de
+// coisa que este projeto aprendeu a não confiar.
+//
+// Em tempo de compilação, e não na suíte, porque a pergunta é sobre
+// constantes: a resposta existe antes de o kernel existir, e uma faixa nova
+// que colida não chega nem a compilar.
+const _: () = {
+    let regioes = [
+        BASE_DO_HEAP,
+        BASE_DAS_PILHAS,
+        BASE_DE_MMIO,
+        BASE_DAS_SUPERFICIES,
+    ];
+    let mut i = 0;
+    while i < regioes.len() {
+        assert!(
+            entrada_de_topo(regioes[i]) != ENTRADA_PRIVADA,
+            "uma regiao do kernel caiu na entrada de topo do usuario"
+        );
+        let mut j = i + 1;
+        while j < regioes.len() {
+            assert!(
+                entrada_de_topo(regioes[i]) != entrada_de_topo(regioes[j]),
+                "duas regioes do kernel dividem uma entrada de topo"
+            );
+            j += 1;
+        }
+        i += 1;
+    }
+};
 
 /// Este endereço mora na parte do espaço que pertence só a ele?
 ///

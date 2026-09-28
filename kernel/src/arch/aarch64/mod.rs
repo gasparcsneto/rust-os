@@ -68,6 +68,7 @@ static DTB_TAMANHO: AtomicU64 = AtomicU64::new(0);
 //   L1[64]   heap do kernel
 //   L1[128]  pilhas de fio
 //   L1[192]  memória de dispositivo mapeada sob demanda
+//   L1[256]  superfícies gráficas
 //
 // É o que permite montar uma tabela por processo do mesmo jeito nas duas
 // arquiteturas: copiam-se as entradas de topo do kernel, e as do usuário ficam
@@ -87,6 +88,12 @@ pub const BASE_DO_HEAP: u64 = 0x0000_0010_0000_0000;
 
 /// Onde a área das pilhas de fio começa. 128 GiB.
 pub const BASE_DAS_PILHAS: u64 = 0x0000_0020_0000_0000;
+
+/// Onde moram as superfícies gráficas. 256 GiB.
+///
+/// A mesma razão do x86: o heap tem 1 MiB e uma tela inteira tem 4, então
+/// o buffer de uma superfície sai direto do alocador de frames, aqui.
+pub const BASE_DAS_SUPERFICIES: u64 = 0x0000_0040_0000_0000;
 
 /// Quanto espaço virtual uma entrada da tabela de topo cobre.
 ///
