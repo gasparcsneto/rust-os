@@ -16,6 +16,12 @@
 //! escrita por outrem, e a resposta a uma tabela corrompida seria a mesma que
 //! a resposta a uma tabela ausente — um kernel que não monta nada. Entram no
 //! dia em que houver o que fazer de diferente.
+//!
+//! O que ele **não** ignora são os três campos do cabeçalho que viram conta de
+//! endereço: onde começa o vetor de entradas, quantas são e quanto cada uma
+//! ocupa. Ignorar uma soma de verificação custa não detectar uma corrupção;
+//! ignorar esses três custa o kernel — ver [`planejar`], que é onde os três
+//! são conferidos antes de qualquer aritmética.
 
 /// Onde fica o cabeçalho da GPT.
 const CABECALHO_EM: u64 = 1;
@@ -47,6 +53,18 @@ mod entrada {
 /// Oito. O disco tem duas, e o número existe para que uma tabela absurda vire
 /// um teto em vez de um `Vec` crescendo com o que o disco disser.
 pub const MAX: usize = 8;
+
+/// Quantas entradas uma GPT pode declarar e ainda ser levada a sério.
+///
+/// A especificação não dá teto: o campo é um `u32`, e um cabeçalho pode dizer
+/// quatro bilhões. Um disco de verdade diz 128 — é o que as ferramentas de
+/// particionamento escrevem e o que o disco desta máquina traz.
+///
+/// O teto não é zelo. A varredura faz uma leitura de setor por entrada
+/// declarada, e quatro bilhões delas a cem microssegundos cada são cinco dias
+/// de boot. Um número absurdo aqui não corrompe nada — ele faz o kernel nunca
+/// terminar de subir, que é a falha mais difícil de diagnosticar das três.
+const MAX_ENTRADAS: u32 = 1024;
 
 /// O GUID de uma partição de sistema EFI.
 ///
@@ -163,6 +181,78 @@ pub fn ler_entrada(bytes: &[u8]) -> Option<Particao> {
     })
 }
 
+/// Os campos do cabeçalho que a varredura usa para calcular endereços, já
+/// conferidos.
+pub(crate) struct Plano {
+    entradas_em: u64,
+    quantas: u32,
+    tamanho: usize,
+    /// Quantas entradas cabem num setor.
+    por_setor: usize,
+}
+
+impl Plano {
+    /// O setor onde mora a entrada de índice `indice`.
+    ///
+    /// A soma não dá a volta: [`planejar`] já provou que a maior delas cabe, e
+    /// `indice` nunca passa de `quantas - 1`.
+    fn setor_da(&self, indice: u32) -> u64 {
+        self.entradas_em + u64::from(indice) / self.por_setor as u64
+    }
+}
+
+/// Confere o cabeçalho antes de a varredura calcular endereço nenhum.
+///
+/// # Por que é uma função à parte, e visível
+///
+/// Porque a varredura precisa de um disco e esta conta não. Separada, ela
+/// recebe da suíte os valores que nenhum disco desta máquina produz — e é
+/// justamente com esses que ela tem de estar certa.
+///
+/// # A regra que estava escrita de um lado só
+///
+/// O tamanho da entrada já era conferido aqui, com um comentário dizendo por
+/// quê: "sem isto, um tamanho absurdo faria a aritmética de deslocamento
+/// apontar para qualquer lugar do buffer". Os outros dois campos do mesmo
+/// cabeçalho, lidos na mesma função e usados na mesma conta, não eram.
+///
+/// Com `entradas_em` perto do fim do `u64`, a soma que escolhe o setor dá a
+/// volta — silêncio antes de `overflow-checks` entrar no perfil de release, e
+/// pânico do kernel depois dele. Nas duas épocas o cabeçalho deste módulo
+/// prometia outra coisa: que a resposta a uma tabela corrompida seria a mesma
+/// que a resposta a uma tabela ausente.
+pub(crate) fn planejar(
+    entradas_em: u64,
+    quantas: u32,
+    tamanho: usize,
+) -> Result<Plano, &'static str> {
+    // Uma entrada precisa caber num setor e ter os campos que lemos. Sem
+    // isto, um tamanho absurdo faria a aritmética de deslocamento apontar
+    // para qualquer lugar do buffer.
+    if !(entrada::ULTIMO + 8..=crate::virtio::blk::TAMANHO_DO_SETOR).contains(&tamanho) {
+        return Err("tamanho de entrada implausivel na GPT");
+    }
+    if quantas > MAX_ENTRADAS {
+        return Err("entradas demais na GPT");
+    }
+
+    let por_setor = crate::virtio::blk::TAMANHO_DO_SETOR / tamanho;
+
+    // O setor da última entrada é a maior conta que a varredura vai fazer. Se
+    // ele não cabe num `u64`, o vetor começa fora de qualquer disco possível —
+    // e o que a varredura leria seria o endereço que sobrou da volta.
+    entradas_em
+        .checked_add(u64::from(quantas.saturating_sub(1)) / por_setor as u64)
+        .ok_or("o vetor de entradas da GPT comeca fora do disco")?;
+
+    Ok(Plano {
+        entradas_em,
+        quantas,
+        tamanho,
+        por_setor,
+    })
+}
+
 /// Lê a tabela do disco da máquina.
 pub fn varrer() -> Result<Tabela, &'static str> {
     let mut setor = [0u8; crate::virtio::blk::TAMANHO_DO_SETOR];
@@ -177,24 +267,18 @@ pub fn varrer() -> Result<Tabela, &'static str> {
         return Err("o setor um nao traz o cabecalho da GPT");
     }
 
-    let entradas_em = u64_em(&setor, cabecalho::ENTRADAS_EM).ok_or("cabecalho truncado")?;
-    let quantas = u32_em(&setor, cabecalho::QUANTAS).ok_or("cabecalho truncado")?;
-    let tamanho = u32_em(&setor, cabecalho::TAMANHO).ok_or("cabecalho truncado")? as usize;
-
-    // Uma entrada precisa caber num setor e ter os campos que lemos. Sem
-    // isto, um tamanho absurdo faria a aritmética de deslocamento apontar
-    // para qualquer lugar do buffer.
-    if !(entrada::ULTIMO + 8..=crate::virtio::blk::TAMANHO_DO_SETOR).contains(&tamanho) {
-        return Err("tamanho de entrada implausivel na GPT");
-    }
+    let plano = planejar(
+        u64_em(&setor, cabecalho::ENTRADAS_EM).ok_or("cabecalho truncado")?,
+        u32_em(&setor, cabecalho::QUANTAS).ok_or("cabecalho truncado")?,
+        u32_em(&setor, cabecalho::TAMANHO).ok_or("cabecalho truncado")? as usize,
+    )?;
 
     let mut tabela = Tabela::vazia();
-    let por_setor = crate::virtio::blk::TAMANHO_DO_SETOR / tamanho;
     let mut achadas = 0;
     let mut indice = 0u32;
 
-    while indice < quantas && achadas < MAX {
-        let setor_da_entrada = entradas_em + u64::from(indice) / por_setor as u64;
+    while indice < plano.quantas && achadas < MAX {
+        let setor_da_entrada = plano.setor_da(indice);
         let resultado =
             crate::virtio::blk::com_o_disco(|d| d.ler_setor(setor_da_entrada, &mut setor));
         let Some(resultado) = resultado else {
@@ -203,11 +287,11 @@ pub fn varrer() -> Result<Tabela, &'static str> {
         resultado?;
 
         // Todas as entradas que couberem neste setor, antes de ler o próximo.
-        for dentro in 0..por_setor {
-            if indice >= quantas || achadas >= MAX {
+        for dentro in 0..plano.por_setor {
+            if indice >= plano.quantas || achadas >= MAX {
                 break;
             }
-            if let Some(particao) = ler_entrada(&setor[dentro * tamanho..]) {
+            if let Some(particao) = ler_entrada(&setor[dentro * plano.tamanho..]) {
                 tabela.particoes[achadas] = Some(particao);
                 achadas += 1;
             }

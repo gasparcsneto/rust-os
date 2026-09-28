@@ -942,6 +942,66 @@ fn fdt_ignora_propriedade_menor_que_uma_celula() -> Resultado {
     }
 }
 
+/// Um cabeçalho de GPT absurdo vira recusa, e não pânico nem laço eterno.
+///
+/// # Por que este caso existe
+///
+/// Porque a regra estava escrita de um lado só. Dos três campos do cabeçalho
+/// que a varredura usa para calcular endereços, um era conferido — o tamanho
+/// da entrada, com comentário e tudo — e os outros dois não, apesar de serem
+/// lidos na mesma função e usados na mesma conta.
+///
+/// O cabeçalho do módulo promete que uma tabela corrompida dá no mesmo que
+/// uma tabela ausente: um kernel que não monta nada. Com `entradas_em` perto
+/// do fim do `u64`, o que ela dava era outra coisa — a soma que escolhe o
+/// setor voltava ao começo, em silêncio antes de `overflow-checks` entrar no
+/// perfil de release e em pânico do kernel depois dele.
+///
+/// O disco desta máquina nunca vai produzir nenhum destes números, e é por
+/// isso que só um caso os produz.
+fn gpt_cabecalho_absurdo_e_recusado() -> Resultado {
+    use crate::particoes::planejar;
+    const SETOR: usize = crate::virtio::blk::TAMANHO_DO_SETOR;
+
+    // O que o disco desta máquina traz, e que tem de continuar passando: 128
+    // entradas de 128 bytes, o vetor começando no setor 2.
+    if planejar(2, 128, 128).is_err() {
+        return Err("a gpt normal do disco foi recusada");
+    }
+
+    // Tamanho da entrada: a conferência que já existia.
+    if planejar(2, 128, 0).is_ok() {
+        return Err("uma entrada de zero byte foi aceita");
+    }
+    if planejar(2, 128, SETOR + 1).is_ok() {
+        return Err("uma entrada maior que o setor foi aceita");
+    }
+
+    // Quantidade: quatro bilhões de entradas são quatro bilhões de leituras
+    // de setor, ou seja, um kernel que não termina de subir.
+    if planejar(2, u32::MAX, 128).is_ok() {
+        return Err("uma gpt de quatro bilhoes de entradas foi aceita");
+    }
+
+    // Começo do vetor: a soma que escolhe o setor daria a volta.
+    if planejar(u64::MAX, 128, 128).is_ok() {
+        return Err("um vetor de entradas no fim do u64 foi aceito");
+    }
+
+    // E a fronteira exata, que é onde uma conferência frouxa se revela. Com
+    // 128 entradas de 128 bytes cabem quatro por setor, então a última mora
+    // trinta e um setores adiante do começo.
+    let maior = u64::MAX - 31;
+    if planejar(maior, 128, 128).is_err() {
+        return Err("o maior comeco que ainda cabe foi recusado");
+    }
+    if planejar(maior + 1, 128, 128).is_ok() {
+        return Err("um comeco um setor acima do que cabe foi aceito");
+    }
+
+    Ok(())
+}
+
 /// Um mapeamento de MMIO que falha no meio não deixa meia região traduzindo.
 ///
 /// # O caminho que nenhum caso alcançava
@@ -8199,6 +8259,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "mmio: mapeamento que falha no meio desfaz tudo",
         f: mmio_mapeamento_que_falha_no_meio_desfaz_tudo,
+    },
+    Caso {
+        nome: "gpt: cabecalho absurdo e recusado",
+        f: gpt_cabecalho_absurdo_e_recusado,
     },
     Caso {
         nome: "usuario: o pai sabe que o filho foi morto",
