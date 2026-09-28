@@ -235,6 +235,12 @@ pub fn fatal(nome: &'static str, pc: u64, endereco: Option<u64>, codigo: u64) ->
     // que este módulo usa para escrever o relatório. Ela cobria cinco travas,
     // e o post-mortem oferece vinte e cinco comandos que tocam o dobro disso.
     //
+    // E ficou para trás de novo: o teclado, o USB, o VFS e a pilha gráfica
+    // entraram depois dela e não entraram nela — `keyboard.read`, `fs.read` e
+    // `display.info` penduravam o canal se a falha os pegasse com a trava na
+    // mão. Agora `cargo xtask invariantes` reprova todo módulo com uma trava
+    // estática que não seja destravado aqui.
+    //
     // Medido, provocando uma falha de página com a tranca do disco na mão: o
     // cadáver respondia `traps.stats` e `system.info` perfeitamente, e
     // `disk.info` pendurava — a tranca continuava na mão do fio morto, e
@@ -261,6 +267,11 @@ pub fn fatal(nome: &'static str, pc: u64, endereco: Option<u64>, codigo: u64) ->
         crate::tarefas::executor::destravar();
         crate::virtio::blk::destravar();
         crate::virtio::net::destravar();
+        crate::virtio::teclado::destravar();
+        crate::usb::xhci::destravar();
+        crate::teclado::destravar();
+        crate::vfs::destravar();
+        crate::grafico::destravar();
     }
 
     // Para o escalonador antes de qualquer outra coisa. Com multitarefa

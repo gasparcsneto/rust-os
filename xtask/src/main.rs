@@ -1938,10 +1938,103 @@ fn conferir_invariantes() -> Result<ExitCode, String> {
         conferir_parametros_do_agente()?,
         conferir_arvore_do_readme()?,
         conferir_fase_do_readme()?,
+        conferir_travas_do_post_mortem()?,
     ];
     if passos.iter().all(|p| *p == ExitCode::SUCCESS) {
         Ok(ExitCode::SUCCESS)
     } else {
+        Ok(ExitCode::FAILURE)
+    }
+}
+
+/// Confere que toda trava estática do kernel é destravada no caminho fatal.
+///
+/// # Por que isto virou conferência
+///
+/// Porque o post-mortem é o canal respondendo depois de uma falha, e a falha
+/// pode ter acontecido com qualquer trava na mão. `traps::fatal` as destrava à
+/// força antes de voltar a atender; uma que fique de fora pendura, na primeira
+/// pergunta que a tocar, o canal inteiro — e com ele a autópsia.
+///
+/// A lista é escrita à mão, e ficou para trás duas vezes. Na primeira cobria
+/// cinco travas de dezesseis. Na segunda faltavam cinco módulos que entraram
+/// depois dela: o teclado, o teclado virtio, o xHCI, o VFS e a pilha gráfica —
+/// esta última escrita na mesma semana em que a lista foi revisada.
+///
+/// # A regra
+///
+/// Todo arquivo do kernel que declare um `static` com `Mutex` ou `Fila` (que
+/// tem um `Mutex` dentro) precisa ter o seu módulo chamado em `traps.rs` como
+/// `crate::<modulo>::destravar()`. Os backends de arquitetura respondem por
+/// `crate::arch::destravar_paginacao()`, que é a única trava deles; o próprio
+/// `traps.rs` destrava as suas no lugar.
+///
+/// O que a regra não alcança: o **conteúdo** de cada `destravar` — um módulo
+/// com duas travas que solte uma passa aqui —, e uma trava embrulhada num tipo
+/// próprio que não seja `Fila`. O `Alocador` do heap é o caso que existe hoje;
+/// ele está na lista, mas por leitura, não por esta regra.
+fn conferir_travas_do_post_mortem() -> Result<ExitCode, String> {
+    let raiz = raiz_do_projeto();
+    let fonte = raiz.join("kernel/src");
+    let traps = std::fs::read_to_string(fonte.join("traps.rs"))
+        .map_err(|e| format!("não foi possível ler traps.rs: {e}"))?;
+
+    let mut modulos = 0usize;
+    let mut faltando: Vec<String> = Vec::new();
+    percorrer_fontes(&fonte, &mut |caminho| {
+        let relativo = caminho
+            .strip_prefix(&fonte)
+            .map_err(|_| format!("{} fora de kernel/src", caminho.display()))?;
+        let nome = relativo.to_string_lossy().replace('\\', "/");
+        if nome == "traps.rs" || nome == "testes.rs" {
+            return Ok(());
+        }
+        let texto = std::fs::read_to_string(caminho)
+            .map_err(|e| format!("não foi possível ler {}: {e}", caminho.display()))?;
+        let tem_trava = texto.lines().any(|l| {
+            let l = l.trim_start();
+            let l = l.strip_prefix("pub ").unwrap_or(l);
+            l.starts_with("static ")
+                && l.split_once(':').is_some_and(|(_, tipo)| {
+                    let tipo = tipo.trim_start();
+                    tipo.contains("Mutex<") && tipo.find("Mutex<") < tipo.find('=')
+                        || tipo.starts_with("Fila<")
+                })
+        });
+        if !tem_trava {
+            return Ok(());
+        }
+        modulos += 1;
+
+        let chamada = if nome.starts_with("arch/") {
+            "crate::arch::destravar_paginacao()".to_string()
+        } else {
+            let caminho_do_modulo = nome
+                .trim_end_matches(".rs")
+                .trim_end_matches("/mod")
+                .replace('/', "::");
+            format!("crate::{caminho_do_modulo}::destravar()")
+        };
+        if !traps.contains(&chamada) {
+            faltando.push(format!("{nome}: falta `{chamada}` em traps.rs"));
+        }
+        Ok(())
+    })?;
+
+    if faltando.is_empty() {
+        println!(
+            "[xtask] {modulos} módulos com trava estática, todos destravados no caminho fatal"
+        );
+        Ok(ExitCode::SUCCESS)
+    } else {
+        eprintln!("[xtask] travas que o post-mortem não solta:");
+        for f in &faltando {
+            eprintln!("  {f}");
+        }
+        eprintln!(
+            "\nUma falha que pegue uma destas na mão pendura o canal na primeira pergunta \
+             que a tocar. Escreva o `destravar` do módulo e chame-o em `traps::fatal`."
+        );
         Ok(ExitCode::FAILURE)
     }
 }

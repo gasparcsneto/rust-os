@@ -290,3 +290,18 @@ impl core::future::Future for ProximaTecla {
         }
     }
 }
+
+/// Destrava as filas do teclado e quem espera por elas à força, para uso exclusivo do caminho de falha fatal.
+///
+/// # Safety
+///
+/// Só pode ser chamada quando o kernel já está em falha irrecuperável e não
+/// há outro núcleo em execução. Ver [`crate::traps::fatal`].
+pub unsafe fn destravar() {
+    unsafe {
+        TECLADO.destravar();
+        HISTORICO.destravar();
+        #[cfg(not(feature = "modo-teste"))]
+        DESPERTADOR.force_unlock();
+    }
+}

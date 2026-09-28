@@ -1318,3 +1318,15 @@ pub fn colher() {
         }
     });
 }
+
+/// Destrava o controlador xHCI à força, para uso exclusivo do caminho de falha fatal.
+///
+/// # Safety
+///
+/// Só pode ser chamada quando o kernel já está em falha irrecuperável e não
+/// há outro núcleo em execução. Ver [`crate::traps::fatal`].
+pub unsafe fn destravar() {
+    unsafe {
+        XHCI.force_unlock();
+    }
+}
