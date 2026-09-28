@@ -125,13 +125,29 @@ fn com_alocador<R>(f: impl FnOnce(&mut Alocador) -> R) -> R {
 }
 
 impl Alocador {
+    /// Onde mora o bit de um índice: a palavra do bitmap e a máscara dentro
+    /// dela.
+    ///
+    /// # Por que uma função, e não a conta escrita em cada lugar
+    ///
+    /// Porque a conta estava escrita em três, e é do tipo que se copia errado
+    /// uma vez e ninguém percebe: um `/` no lugar de um `%` responde sobre
+    /// outro frame, sempre — e responde com convicção, porque o índice
+    /// resultante existe.
+    ///
+    /// Com a conta num lugar só, copiá-la errado deixa de ser possível. O
+    /// número de lugares também deixa de ser algo que um comentário precise
+    /// manter atualizado.
+    const fn posicao(indice: usize) -> (usize, u64) {
+        (indice / 64, 1u64 << (indice % 64))
+    }
+
     /// Marca um frame como livre, se estiver dentro da janela rastreada.
     fn liberar_indice(&mut self, indice: usize) {
         if indice >= self.rastreados {
             return;
         }
-        let palavra = indice / 64;
-        let bit = 1u64 << (indice % 64);
+        let (palavra, bit) = Self::posicao(indice);
         if self.bitmap[palavra] & bit == 0 {
             self.bitmap[palavra] |= bit;
             self.livres += 1;
@@ -162,8 +178,7 @@ impl Alocador {
         if indice >= self.rastreados {
             return;
         }
-        let palavra = indice / 64;
-        let bit = 1u64 << (indice % 64);
+        let (palavra, bit) = Self::posicao(indice);
         if self.bitmap[palavra] & bit != 0 {
             self.bitmap[palavra] &= !bit;
             self.livres -= 1;
@@ -171,12 +186,9 @@ impl Alocador {
     }
 
     /// Este índice está livre?
-    ///
-    /// O bit e o deslocamento aparecem em quatro lugares diferentes, e a
-    /// conta é do tipo que se copia errado uma vez e ninguém percebe: um `/`
-    /// no lugar de um `%` responde sobre outro frame, sempre.
     fn livre(&self, indice: usize) -> bool {
-        self.bitmap[indice / 64] & (1u64 << (indice % 64)) != 0
+        let (palavra, bit) = Self::posicao(indice);
+        self.bitmap[palavra] & bit != 0
     }
 
     /// Converte um endereço físico no índice do frame que o contém.
