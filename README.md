@@ -41,6 +41,14 @@ construção:**
   vídeo, histórico de log: tudo acessível de forma estruturada, em tempo de
   execução.
 
+- **Uma superfície, três portas.** O que uma pessoa digita no console é
+  despachado pelo **mesmo** registro que o canal do agente publica, com os
+  mesmos handlers — só muda a renderização. Um interpretador com comandos
+  próprios seria uma segunda superfície a manter, e as duas divergiriam na
+  primeira que alguém esquecesse de atualizar: uma pessoa e um agente vendo
+  máquinas diferentes. É a mesma inversão que o log estruturado defende — o
+  texto legível é uma renderização, não a fonte da verdade.
+
 O canal existe desde o primeiro milissegundo do boot, antes de haver
 paginação, heap ou interrupções. Essa precocidade é intencional: ele serve
 para ajudar a construir e depurar as camadas que vêm depois dele.
@@ -1560,6 +1568,62 @@ padronizado.
       linha de `cfg`. O kernel distingue os dois protocolos de boot pela
       magia em `x0`, e o `-kernel` continua funcionando.
       **Fase 5 completa.**
+
+- [ ] **Fase 6 — Vários núcleos.** Primeiro, e não no meio: fazer SMP depois
+      da pilha gráfica significa reescrever o travamento dela inteiro. Partida
+      dos APs, dados por CPU, IPI, e *TLB shootdown* — que é onde a
+      invalidação hoje inofensiva de `com_descritor_da_folha` deixa de ser
+      propriedade do chamador e vira obrigação da função. `threads.list` passa
+      a dizer em que núcleo cada fio está, e a exigência que não pode ser
+      negociada é esta: o canal continua respondendo quando **um** núcleo
+      trava, porque é exatamente aí que alguém precisa dele.
+- [ ] **Fase 7 — ABI compatível com Linux.** Não é preferência, é o que decide
+      o projeto: ninguém porta um navegador para uma ABI nova, e sem navegador
+      não há desktop. Um subconjunto compatível herda o software que já
+      existe. E traz junto uma fronteira que é melhor dizer agora do que
+      descobrir depois: um binário de Linux fala `syscall` direto e **não**
+      passa pelo registro. O registro governa o sistema; o programa é um
+      convidado dentro dele. O que o agente enxerga de um convidado é o que o
+      sistema sabe sobre ele — não o que ele está pensando.
+- [ ] **Fase 8 — Escrita em disco.** Um sistema de arquivos log-estruturado
+      próprio, com journaling e `fsync` honesto. O Btrfs fica somente leitura,
+      para imagens: escrever nele é uma B-tree com cópia na escrita, somas de
+      verificação e transações — dos sistemas de arquivos mais difíceis que
+      existem, por um ganho que um log-estruturado entrega por um décimo do
+      trabalho.
+- [ ] **Fase 9 — Rede e TLS.** IP, UDP, TCP, DHCP e TLS. Com `smoltcp` em vez
+      de escrever a pilha: escrever TCP do zero é um a dois anos-pessoa e não
+      diferencia o Duke em nada. O ARP que existe hoje era a prova de ponta a
+      ponta mais barata possível, e cumpriu o papel dela.
+- [ ] **Fase 10 — GPU, composição e a árvore semântica.** Começa em
+      **virtio-gpu**, que entra pelo transporte genérico que `blk`, `net` e
+      `teclado` já usam — aceleração 2D de verdade sem engenharia reversa de
+      GPU nenhuma. Depois o compositor, o servidor de janelas, o roteamento de
+      entrada e a tipografia.
+      E aqui a inversão do projeto encontra a interface gráfica. O servidor de
+      janelas publica uma **árvore semântica** — que janelas existem, que
+      controles, o que cada um faz — e os pixels são a renderização dela, do
+      mesmo jeito que o texto do console é a renderização de um registro
+      tipado. O agente opera por essa árvore, e não por captura de tela: nada
+      de adivinhar botão por pixel, que é como a automação de interface
+      funciona em toda parte hoje e é por isso que ela quebra a cada tema
+      novo. Acessibilidade e teste automatizado de interface caem no colo,
+      porque são a mesma árvore lida por outro consumidor.
+- [ ] **Fase 11 — Toolkit e linguagem visual.** O "jeito" do sistema mora
+      aqui, não no kernel. Cada widget declara o que é e o que faz, e a árvore
+      semântica da fase 10 é **gerada** disso em vez de escrita à mão — senão
+      ela vira a segunda superfície que este projeto existe para não ter.
+- [ ] **Fase 12 — Consentimento e auditoria.** Se um agente pode fazer tudo
+      que uma pessoa faz, o modelo de permissão precisa ser **mais** forte que
+      o de um desktop comum, e não mais fraco. Três coisas: quem pediu — a
+      pessoa na frente da máquina ou o agente pelo canal —, o que foi feito, e
+      um registro que a pessoa possa ler depois e desfazer. Junto com o resto
+      do que um desktop precisa: assinatura de código, sandbox por aplicativo,
+      cadeia de boot confiável.
+- [ ] **Fase 13 — Hardware real e distribuição.** Instalador, atualização A/B
+      com rollback, imagens assinadas, ACPI de verdade, NVMe, placa de rede
+      real, watchdog. É onde projetos assim costumam morrer, e é por isso que
+      vem por último: até aqui o emulador é hardware suficiente.
 
 ## Licença
 
