@@ -451,6 +451,25 @@ impl Tela {
     /// depois. Uma versão intermediária, que percorria os bytes da cor com um
     /// iterador, chegou a 800 ms — o laço mais interno roda uma vez por
     /// pixel, e ali um iterador custa mais que os acessos que ele economiza.
+    ///
+    /// **Esses três números são de `debug`, e não diziam.** A omissão é o
+    /// defeito: por anos eles foram lidos como o custo de desenhar, e o custo
+    /// de desenhar no binário que se entrega é outro. Remedido, com os quatro
+    /// perfis nomeados:
+    ///
+    /// | | x86_64 | aarch64 |
+    /// |---|---|---|
+    /// | release | 7,3 ms | 8,0 ms |
+    /// | debug | 637 ms | 603 ms |
+    ///
+    /// Oitenta e cinco vezes entre um e outro. Em release são 4,1 MiB em 7 ms,
+    /// ou uns 550 MiB/s — cento e trinta telas cheias por segundo, com folga
+    /// para um compositor a 60 Hz.
+    ///
+    /// O número não mora mais aqui: quem o mede é
+    /// `tela_desenhar_nao_regrediu_em_ordem_de_grandeza`, a cada rodada da
+    /// suíte, com um teto por perfil. Uma medida escrita num comentário vale
+    /// até a próxima mudança; esta vale sempre.
     pub fn retangulo(&self, x: u32, y: u32, largura: u32, altura: u32, cor: Cor) {
         let fim_x = x.saturating_add(largura).min(self.largura);
         let fim_y = y.saturating_add(altura).min(self.altura);

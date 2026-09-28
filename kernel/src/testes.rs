@@ -976,6 +976,81 @@ fn x86_ninguem_gira_mascarado_esperando_interrupcao() -> Resultado {
     Ok(())
 }
 
+/// O custo de desenhar, medido a cada rodada em vez de escrito num comentário.
+///
+/// # O que estava escrito antes, e por que era pior que nada
+///
+/// O doc de [`crate::tela::Tela::retangulo`] dizia "450 ms antes, 250 ms
+/// depois", e o de `tela::console` pendurava uma decisão de projeto nisso: o
+/// console não rola porque rolar custaria meio segundo por linha.
+///
+/// Nenhum dos dois dizia **em que perfil**, e essa omissão é o defeito
+/// inteiro. Era debug. Medido hoje, o mesmo preenchimento leva cerca de 7 ms
+/// em release e 640 ms em debug — o comentário errava por oitenta e cinco
+/// vezes para menos num caso e por duas vezes e meia para mais no outro, ao
+/// mesmo tempo. Uma medida sem a configuração dela não é uma medida.
+///
+/// # Por que um teto, e não um número
+///
+/// Porque o número depende da máquina que roda a suíte, e uma asserção sobre
+/// ele seria falsa na primeira máquina diferente. O teto vale por outro
+/// motivo: o que ele recusa não é variação, é ordem de grandeza — alguém
+/// voltando a desenhar pixel a pixel por uma chamada de função, ou mapeando o
+/// framebuffer como memória de dispositivo em vez de RAM. As duas coisas já
+/// aconteceram neste arquivo, e as duas passariam despercebidas sem isto.
+fn tela_desenhar_nao_regrediu_em_ordem_de_grandeza() -> Resultado {
+    let Some(tela) = crate::tela::tela() else {
+        // Sem tela não há o que medir, e isso não é falha: a máquina pode
+        // legitimamente não ter uma.
+        return Ok(());
+    };
+
+    const VOLTAS: u64 = 20;
+    let preto = crate::tela::Cor { r: 0, g: 0, b: 0 };
+    let branco = crate::tela::Cor {
+        r: 255,
+        g: 255,
+        b: 255,
+    };
+
+    // Uma passada fora da conta: a primeira paga o que as seguintes não pagam.
+    tela.preencher(preto);
+
+    let antes = crate::tempo::uptime_ms();
+    for volta in 0..VOLTAS {
+        tela.preencher(if volta % 2 == 0 { branco } else { preto });
+    }
+    let total = crate::tempo::uptime_ms() - antes;
+    let por_tela = total * 1000 / VOLTAS;
+
+    crate::log_info!(
+        "tela",
+        "{}x{} com {} bytes/pixel: {} us por preenchimento",
+        tela.largura,
+        tela.altura,
+        tela.bytes_por_pixel,
+        por_tela
+    );
+
+    // Folga de mais de dez vezes sobre o medido em cada perfil. O que passa
+    // disto não é uma máquina mais lenta, é outro algoritmo.
+    let teto = if cfg!(debug_assertions) {
+        6_000_000
+    } else {
+        100_000
+    };
+    if por_tela > teto {
+        crate::log_error!("teste", "preenchimento a {} us, teto {} us", por_tela, teto);
+        return Err("desenhar na tela ficou uma ordem de grandeza mais lento");
+    }
+
+    // E o desenho continua correto: o último preenchimento foi preto.
+    match tela.ler_pixel(tela.largura / 2, tela.altura / 2) {
+        Some(c) if c.r == 0 && c.g == 0 && c.b == 0 => Ok(()),
+        _ => Err("o preenchimento nao deixou a cor que pintou"),
+    }
+}
+
 /// Um cabeçalho de GPT absurdo vira recusa, e não pânico nem laço eterno.
 ///
 /// # Por que este caso existe
@@ -8297,6 +8372,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "gpt: cabecalho absurdo e recusado",
         f: gpt_cabecalho_absurdo_e_recusado,
+    },
+    Caso {
+        nome: "tela: desenhar nao regrediu em ordem de grandeza",
+        f: tela_desenhar_nao_regrediu_em_ordem_de_grandeza,
     },
     #[cfg(target_arch = "x86_64")]
     Caso {

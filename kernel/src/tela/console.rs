@@ -14,12 +14,27 @@
 //! funil ([`crate::serial::_print`]). É a mesma ideia que o log estruturado
 //! já defende: o texto é uma **renderização**, e não a fonte da verdade.
 //!
-//! # Por que ele não rola
+//! # Por que ele não rola, e o que mudou nessa conta
 //!
-//! Porque rolar custaria a tela inteira por linha. [`Tela::retangulo`] leva
-//! 250 ms para escrever 1280x720 num emulador sem aceleração, e uma rolagem é
-//! isso mais a leitura — meio segundo por linha de log, o que tornaria o
-//! console mais lento que o que ele mostra.
+//! A razão escrita aqui era de custo: [`Tela::retangulo`] levaria 250 ms para
+//! escrever 1280x720, uma rolagem seria isso mais a leitura, e meio segundo
+//! por linha tornaria o console mais lento que o que ele mostra.
+//!
+//! Remedido, e a conta não é essa. Aqueles 250 ms eram de `debug` e o
+//! comentário não dizia. Em release um preenchimento leva 7 ms e uma leitura
+//! de tela cheia — pelo caminho mais lento que existe, pixel a pixel por
+//! `ler_pixel` — leva 15 ms. Uma rolagem custaria uns 22 ms por linha, e bem
+//! menos com um `memmove` no lugar da leitura pixel a pixel.
+//!
+//! Ou seja: em release rolar é perfeitamente pagável, e em debug não é (lá o
+//! preenchimento sozinho passa de 600 ms). A razão de custo vale para um
+//! perfil só.
+//!
+//! O console segue sem rolar, e agora por um motivo que não depende de
+//! medida: perder o que saiu da tela não custa informação. Os registros estão
+//! no anel de [`crate::log`], e `log.tail` os devolve inteiros — a tela é a
+//! renderização, e não a fonte da verdade. Se um dia rolar for desejável, o
+//! que impede não é o relógio.
 //!
 //! Quando o texto chega ao pé da tela, ela recomeça do topo. Perder o que
 //! saiu não custa informação: os registros estão no anel de [`crate::log`], e
