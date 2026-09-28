@@ -67,16 +67,21 @@ jobs:
             cargo clippy --target "$alvo" --features modo-teste -- -D warnings
           done
 
-      # Todo bloco `unsafe` declara a invariante de que depende.
+      # As duas regras que o projeto segue e ninguém fiscalizava.
       #
-      # A convenção existe desde o primeiro commit e é seguida nos 400 blocos
-      # do projeto — e nada a fiscalizava. Um `unsafe` sem invariante escrita
-      # é um `unsafe` cuja invariante ninguém conferiu, e num kernel isso
-      # volta como corrupção em outro lugar.
+      # A primeira: todo bloco `unsafe` declara a invariante de que depende.
+      # É seguida nos 400 blocos do projeto. Um `unsafe` sem invariante
+      # escrita é um `unsafe` cuja invariante ninguém conferiu, e num kernel
+      # isso volta como corrupção em outro lugar.
       #
-      # A conferência é de fonte, não precisa de alvo nem de emulador, e por
-      # isso mora aqui.
-      - name: Invariantes dos blocos unsafe
+      # A segunda: o nome de cada parâmetro do agente é o mesmo dos dois
+      # lados — na declaração e no `member(...)` do handler. Quando os dois
+      # divergem, nada quebra e nada avisa: o parâmetro ou não faz efeito, ou
+      # é recusado antes de chegar ao handler que o usaria.
+      #
+      # As duas são de fonte, não precisam de alvo nem de emulador, e por isso
+      # moram aqui.
+      - name: Invariantes de fonte
         run: cargo xtask invariantes
 
       # Os links da documentação, que é onde o apodrecimento não dói até doer.

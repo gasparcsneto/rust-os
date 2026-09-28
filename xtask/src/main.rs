@@ -274,7 +274,7 @@ COMANDOS:
     simbolo <endereco>...     traduz endereços de execução em arquivo e linha
     asm <simbolo>             desmonta uma função do binário compilado
     elf                       confere os programas de usuário embutidos
-    invariantes               confere que todo `unsafe` declara a sua
+    invariantes               confere as regras de fonte dos dois lados
     iniciador                 sobe o iniciador UEFI no OVMF e confere o relatório
     help                      mostra esta mensagem
 
@@ -1928,6 +1928,144 @@ fn simbolos_do_kernel(kernel: &Path) -> Result<Vec<(String, u64)>, String> {
 /// esquecimento, não arbitrar a redação: exigir mais produziria ruído, e
 /// ruído é o que faz uma conferência ser desligada.
 fn conferir_invariantes() -> Result<ExitCode, String> {
+    let unsafe_ok = conferir_blocos_unsafe()?;
+    let params_ok = conferir_parametros_do_agente()?;
+    if unsafe_ok == ExitCode::SUCCESS && params_ok == ExitCode::SUCCESS {
+        Ok(ExitCode::SUCCESS)
+    } else {
+        Ok(ExitCode::FAILURE)
+    }
+}
+
+/// Confere que todo parâmetro declarado é lido, e todo parâmetro lido é
+/// declarado.
+///
+/// # A regra, e por que ela cai calada
+///
+/// Cada comando do agente declara seus parâmetros em [`ParamSpec`] e os lê
+/// com `member("...")` no handler. Os dois lados têm de dizer o mesmo nome, e
+/// nada os obriga:
+///
+/// - um nome declarado e não lido é um parâmetro que o agente pode mandar e
+///   que não faz nada. Pior: a validação o **aceita**, porque ele consta da
+///   lista, então nem erro sai;
+/// - um nome lido e não declarado é um parâmetro que o handler usaria e que a
+///   validação **recusa** antes de chegar lá, porque ela reprova todo campo
+///   que não esteja na lista. O comando fica com uma opção inalcançável.
+///
+/// Nas duas direções o sintoma é o mesmo: silêncio. Nenhum teste de resposta
+/// pega isso, porque a resposta continua saindo — só ignora o que lhe
+/// pediram.
+///
+/// Conferido nos 32 comandos quando esta função foi escrita: nenhuma
+/// divergência. É por isso mesmo que ela existe — a primeira vai entrar do
+/// mesmo jeito que estas não entraram, sem ninguém notar.
+fn conferir_parametros_do_agente() -> Result<ExitCode, String> {
+    let caminho = raiz_do_projeto().join("kernel/src/agent/commands.rs");
+    let texto = std::fs::read_to_string(&caminho)
+        .map_err(|e| format!("não foi possível ler {}: {e}", caminho.display()))?;
+
+    let tabela = {
+        let de = texto
+            .find("pub static COMANDOS")
+            .ok_or("a tabela COMANDOS não foi encontrada")?;
+        let ate = texto[de..]
+            .find("\n];\n")
+            .ok_or("o fim da tabela COMANDOS não foi encontrado")?;
+        &texto[de..de + ate]
+    };
+
+    let mut queixas: Vec<String> = Vec::new();
+    let mut conferidos = 0usize;
+
+    for bloco in tabela.split("Command {").skip(1) {
+        let nomes: Vec<&str> = entre_aspas_apos(bloco, "nome: \"");
+        let Some((comando, params)) = nomes.split_first() else {
+            continue;
+        };
+        let Some(handler) = apos(bloco, "handler: ").map(identificador) else {
+            queixas.push(format!("{comando}: não declara handler"));
+            continue;
+        };
+
+        let Some(corpo) = corpo_da_funcao(&texto, handler) else {
+            queixas.push(format!(
+                "{comando}: o handler `{handler}` não foi encontrado"
+            ));
+            continue;
+        };
+        let lidos = entre_aspas_apos(corpo, "member(\"");
+        conferidos += 1;
+
+        for p in params {
+            if !lidos.contains(p) {
+                queixas.push(format!("{comando}: declara `{p}` e nunca o lê"));
+            }
+        }
+        for l in &lidos {
+            if !params.contains(l) {
+                queixas.push(format!("{comando}: lê `{l}` e não o declara"));
+            }
+        }
+    }
+
+    if !queixas.is_empty() {
+        eprintln!("[xtask] parâmetros do agente declarados de um lado só:");
+        for q in &queixas {
+            eprintln!("  {q}");
+        }
+        eprintln!(
+            "\nO nome em `ParamSpec` e o de `member(\"...\")` no handler têm de ser o \
+             mesmo: a validação recusa todo campo fora da lista, e ignora em silêncio \
+             todo campo da lista que o handler não leia."
+        );
+        return Ok(ExitCode::FAILURE);
+    }
+
+    println!("[xtask] {conferidos} comandos do agente, parâmetros declarados e lidos batem");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// O texto logo depois de `marca`, se ela aparecer.
+fn apos<'t>(texto: &'t str, marca: &str) -> Option<&'t str> {
+    texto.find(marca).map(|i| &texto[i + marca.len()..])
+}
+
+/// O identificador no começo de `texto`.
+fn identificador(texto: &str) -> &str {
+    let fim = texto
+        .find(|c: char| !c.is_alphanumeric() && c != '_')
+        .unwrap_or(texto.len());
+    &texto[..fim]
+}
+
+/// Cada trecho entre aspas que venha logo depois de uma ocorrência de `marca`.
+fn entre_aspas_apos<'t>(texto: &'t str, marca: &str) -> Vec<&'t str> {
+    let mut achados = Vec::new();
+    let mut resto = texto;
+    while let Some(depois) = apos(resto, marca) {
+        match depois.find('"') {
+            Some(fim) => {
+                achados.push(&depois[..fim]);
+                resto = &depois[fim..];
+            }
+            None => break,
+        }
+    }
+    achados
+}
+
+/// O corpo de `fn <nome>(`, do cabeçalho até a chave que o fecha na coluna
+/// zero.
+fn corpo_da_funcao<'t>(texto: &'t str, nome: &str) -> Option<&'t str> {
+    let marca = format!("\nfn {nome}(");
+    let de = texto.find(&marca)?;
+    let resto = &texto[de + 1..];
+    let ate = resto.find("\n}\n")?;
+    Some(&resto[..ate])
+}
+
+fn conferir_blocos_unsafe() -> Result<ExitCode, String> {
     let raiz = raiz_do_projeto();
     let mut faltando: Vec<String> = Vec::new();
     let mut total = 0usize;
