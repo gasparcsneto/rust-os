@@ -99,6 +99,15 @@ pub fn mapear(fisico: u64, tamanho: u64) -> Result<u64, &'static str> {
                     // Em silêncio isto era pior que um vazamento: a próxima
                     // tentativa de mapear a mesma faixa encontraria páginas
                     // já ocupadas e falharia por um motivo que não é o dela.
+                    //
+                    // O laço acima tem caso — `frames::encomendar_falhas`
+                    // faz `mapear_frame` errar na página que o caso escolher.
+                    // Esta linha de dentro não tem: para chegá-la, o
+                    // `desmapear` de uma página que **acabou de ser mapeada
+                    // com sucesso** teria de falhar, e não há como encomendar
+                    // isso — nem deveria haver, porque é um estado que as
+                    // duas MMUs tratam como impossível. A linha fica porque o
+                    // que ela relata não tem outro sintoma.
                     crate::log_error!(
                         "mmio",
                         "a pagina {:#x} ficou mapeada depois de um mapeamento que falhou: {}",

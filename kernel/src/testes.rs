@@ -942,6 +942,132 @@ fn fdt_ignora_propriedade_menor_que_uma_celula() -> Resultado {
     }
 }
 
+/// Um mapeamento de MMIO que falha no meio não deixa meia região traduzindo.
+///
+/// # O caminho que nenhum caso alcançava
+///
+/// `mmio::mapear` mapeia página por página, e se uma falhar ele desfaz as
+/// anteriores. Esse desfazer existe desde que o módulo existe e **nunca
+/// rodou**: para chegar até ele, o alocador de frames tem de dar certo numa
+/// página e falhar na seguinte, o que não acontece numa máquina com 128 MiB
+/// livres.
+///
+/// Era um caminho de limpeza lido e considerado correto — que é o mesmo grau
+/// de garantia que um comentário. `frames::encomendar_falhas` existe para
+/// isto: faz a próxima alocação falhar, no ponto que o caso escolher.
+///
+/// # O que se afirma
+///
+/// Que os frames voltam. Um desfazer que esquecesse uma página deixaria o
+/// contador de livres mais baixo do que começou, e a faixa seguinte a pedir
+/// aqueles endereços falharia por um motivo que não é o dela.
+fn mmio_mapeamento_que_falha_no_meio_desfaz_tudo() -> Resultado {
+    const PAGINA: u64 = 4096;
+    /// Páginas de 4 KiB cobertas por uma tabela de último nível.
+    const POR_TABELA: u64 = 512;
+    const REGIAO: u64 = PAGINA * POR_TABELA;
+
+    if crate::frames::falhas_pendentes() != 0 {
+        return Err("um caso anterior deixou falhas encomendadas pendentes");
+    }
+
+    // Cada mapeamento leva uma faixa física própria: `mapear_frame` exige que
+    // o físico não esteja em uso por outro mapeamento, e um caso não pode
+    // violar o contrato que está medindo. Os endereços são altos e de
+    // dispositivo nenhum — nada aqui desreferencia o que mapeia.
+    let mut fisico = 0x0000_0000_E000_0000u64;
+    let mut reservar = |bytes: u64| -> Result<u64, &'static str> {
+        let f = fisico;
+        fisico += bytes;
+        crate::mmio::mapear(f, bytes)
+    };
+
+    // Onde o cursor virtual está. `mapear` devolve o endereço que entregou, e
+    // a faixa de MMIO é um incremento: o próximo mapeamento começa logo
+    // depois deste.
+    let sonda = reservar(PAGINA)?;
+    let cursor = sonda + PAGINA;
+
+    // Empurrar o cursor até uma fronteira de região. Daqui em diante a
+    // geometria é conhecida, que é o que separa este caso de um palpite:
+    // sem isso, a falha encomendada poderia cair na **primeira** página do
+    // mapeamento — e aí o desfazer não teria nada a desfazer, e o caso
+    // passaria sem exercitar a linha que veio medir.
+    let resto = cursor % REGIAO;
+    let fronteira = if resto == 0 {
+        cursor
+    } else {
+        let base = reservar(REGIAO - resto)?;
+        if base != cursor {
+            return Err("a faixa de MMIO nao entregou o endereco seguinte");
+        }
+        cursor + (REGIAO - resto)
+    };
+
+    // A âncora paga a tabela de último nível da região nova, sem falha
+    // encomendada. É o que garante que o mapeamento seguinte comece numa
+    // região cuja tabela já existe.
+    let ancora = reservar(PAGINA)?;
+    if ancora != fronteira {
+        return Err("a ancora nao caiu na fronteira");
+    }
+
+    // E agora 512 páginas a partir de `fronteira + PAGINA`: as 511 primeiras
+    // caem na região da âncora e não pedem frame nenhum; a última cai na
+    // região seguinte, que precisa de tabela nova. É ali, e só ali, que este
+    // mapeamento chama o alocador — com 511 páginas já mapeadas atrás dele.
+    let inicio = fronteira + PAGINA;
+    let livres_antes = crate::frames::estatisticas().1;
+    crate::frames::encomendar_falhas(1);
+    let falho = reservar(REGIAO);
+    let sobraram = crate::frames::encomendar_falhas(0);
+
+    if falho.is_ok() {
+        return Err("o mapeamento passou apesar da falha encomendada");
+    }
+    if sobraram != 0 {
+        return Err("a falha encomendada nao chegou ao alocador");
+    }
+
+    // O que o desfazer existe para garantir: nenhuma página da faixa que
+    // falhou traduz. Meia região traduzindo é o defeito — uma escrita nela
+    // chegaria ao dispositivo pela metade, e a próxima tentativa de mapear a
+    // mesma faixa falharia por um motivo que não é o dela.
+    for i in 0..POR_TABELA {
+        let pagina = inicio + i * PAGINA;
+        if let Some(f) = crate::arch::traduzir(pagina) {
+            crate::log_error!(
+                "teste",
+                "a pagina {:#x} do mapeamento que falhou ainda traduz para {:#x}",
+                pagina,
+                f
+            );
+            return Err("o desfazer deixou paginas do mapeamento que falhou");
+        }
+    }
+
+    // E a âncora, que é de outra chamada, continua onde estava: o desfazer
+    // desfaz o que a chamada fez, não o que ela encontrou.
+    if crate::arch::traduzir(ancora).is_none() {
+        return Err("o desfazer levou junto o mapeamento vizinho");
+    }
+
+    // Nenhum frame ficou pelo caminho. A alocação que falhou não chegou a
+    // tirar nada, e o desfazer não devolve físico de dispositivo ao alocador
+    // — se este número andar, uma das duas coisas deixou de ser verdade.
+    let livres_depois = crate::frames::estatisticas().1;
+    if livres_depois != livres_antes {
+        crate::log_error!(
+            "teste",
+            "livres: {} antes, {} depois do mapeamento que falhou",
+            livres_antes,
+            livres_depois
+        );
+        return Err("o desfazer do mapeamento nao devolveu todos os frames");
+    }
+
+    Ok(())
+}
 
 /// O embrulho que relata um percurso interrompido diz **para quê** era a
 /// busca.
@@ -8069,6 +8195,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "fdt: o relato diz para que era a busca",
         f: fdt_o_relato_do_percurso_diz_para_que_era,
+    },
+    Caso {
+        nome: "mmio: mapeamento que falha no meio desfaz tudo",
+        f: mmio_mapeamento_que_falha_no_meio_desfaz_tudo,
     },
     Caso {
         nome: "usuario: o pai sabe que o filho foi morto",

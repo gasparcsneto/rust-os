@@ -34,6 +34,9 @@
 //! Quem sabe sobre (2) é cada arquitetura, e por motivos diferentes — ver
 //! [`crate::arch::reservar_faixas`].
 
+// Só a injeção de falha da suíte usa atômicos aqui.
+#[cfg(feature = "modo-teste")]
+use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 
 // Toda tomada de `ALOCADOR` abaixo passa por `sem_interrupcoes`, e a partir da
@@ -334,6 +337,42 @@ pub fn reservar(inicio: u64, fim: u64) {
     });
 }
 
+/// Quantas alocações de frame devem falhar de propósito.
+///
+/// # Por que injetar falha, e por que só na suíte
+///
+/// Porque este kernel tem vários caminhos de limpeza que só rodam quando a
+/// memória acaba — `mmio::mapear` desfaz os mapeamentos que já fez,
+/// `clonar_o_ativo` larga o espaço pela metade, `resolver_copia_na_escrita`
+/// tem desfechos distintos para cada metade que falha — e **nenhum deles é
+/// exercitado**. Eles foram lidos e considerados corretos, que é o mesmo
+/// nível de garantia que um comentário.
+///
+/// Fazer a memória acabar de verdade não serve: a máquina de teste tem 128
+/// MiB e esgotá-los levaria a suíte junto. O que se quer é que a **próxima**
+/// alocação falhe, no ponto exato que o caso escolheu.
+///
+/// Fora do modo de teste isto não existe, e `alocar` não ganha nem um
+/// desvio.
+#[cfg(feature = "modo-teste")]
+static FALHAS_ENCOMENDADAS: AtomicUsize = AtomicUsize::new(0);
+
+/// Faz as próximas `quantas` alocações de frame falharem.
+///
+/// Devolve quantas ainda estavam encomendadas de uma chamada anterior, que é
+/// zero em qualquer uso correto — um caso que deixa falhas pendentes
+/// contamina o seguinte.
+#[cfg(feature = "modo-teste")]
+pub fn encomendar_falhas(quantas: usize) -> usize {
+    FALHAS_ENCOMENDADAS.swap(quantas, Ordering::SeqCst)
+}
+
+/// Quantas falhas encomendadas ainda não foram consumidas.
+#[cfg(feature = "modo-teste")]
+pub fn falhas_pendentes() -> usize {
+    FALHAS_ENCOMENDADAS.load(Ordering::SeqCst)
+}
+
 /// Entrega um frame livre, ou `None` se a memória acabou.
 ///
 /// O endereço devolvido é físico e alinhado em [`TAMANHO_FRAME`]. O conteúdo
@@ -345,6 +384,16 @@ pub fn reservar(inicio: u64, fim: u64) {
 // de verdade — quando a paginação chegar, ela some.
 #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub fn alocar() -> Option<u64> {
+    // A falha encomendada vem antes de tocar no alocador: o que se quer
+    // imitar é "não havia frame", e não "havia e deu errado depois".
+    #[cfg(feature = "modo-teste")]
+    if FALHAS_ENCOMENDADAS
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+        .is_ok()
+    {
+        return None;
+    }
+
     com_alocador(|a| {
         if !a.inicializado || a.livres == 0 {
             return None;
