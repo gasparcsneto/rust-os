@@ -37,6 +37,7 @@
 //! - [`fila`]: a virtqueue, que é o canal por onde os pedidos passam.
 //! - [`blk`]: o disco.
 //! - [`net`]: a placa de rede.
+//! - [`teclado`]: o teclado do ARM, por `virtio-input`.
 
 pub mod blk;
 pub mod fila;

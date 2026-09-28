@@ -14,7 +14,7 @@
 //! outros bytes e dizer que está tudo bem. A conferência só tem valor se as
 //! duas pontas forem independentes — o firmware escreveu, nós conferimos.
 //!
-//! É a mesma regra que o resto do projeto segue quando manda o `llvm-readelf`
+//! É a mesma regra que o resto do projeto segue quando manda o `llvm-readobj`
 //! olhar os ELFs que ele mesmo montou.
 
 /// O polinômio do CRC-32, na forma refletida.

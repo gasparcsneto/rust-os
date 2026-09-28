@@ -17,8 +17,8 @@
 //!
 //! Quantas portas físicas atendem esses papéis é decisão de cada arquitetura
 //! (ver [`crate::arch`]). O x86 tem duas UARTs legadas e dá uma para cada. A
-//! máquina `virt` do ARM tem só uma, que vai para o canal do agente — lá não
-//! há console de texto, e os registros de log são lidos por `log.tail`.
+//! máquina `virt` do ARM tem só uma, que vai para o canal do agente — lá o
+//! console humano é só a tela, e quem lê pelo hospedeiro usa `log.tail`.
 //!
 //! O que **não** varia é a regra: onde houver canal do agente, ele é um
 //! stream limpo. Nada de log em texto se mistura a ele, porque senão todo

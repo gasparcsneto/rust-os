@@ -64,10 +64,11 @@ uma segunda para ecoar log em texto, como o x86 tem. Por um bom tempo o canal
 foi literalmente a única interface do sistema ali, e os registros só saíam por
 `log.tail`.
 
-Hoje sai também na tela. O kernel programa o adaptador de vídeo por conta
-própria e desenha nele o mesmo texto que manda ao console humano — o que dá a
-uma pessoa sentada na frente da máquina a mesma leitura nas duas
-arquiteturas, sem depender de um terminal no hospedeiro.
+Hoje sai também na tela. O kernel desenha nela o mesmo texto que manda ao
+console humano — na tela que o firmware deixou configurada, quando o boot é
+pela UEFI, ou num adaptador que ele próprio programa, quando é pela imagem
+crua do ARM. Uma pessoa sentada na frente da máquina tem a mesma leitura nas
+duas arquiteturas, sem depender de um terminal no hospedeiro.
 
 O port para ARM foi o teste mais duro dessa premissa, e ela passou: o primeiro
 bug do boot ARM (`x0` chegando nulo, sem device tree) foi diagnosticado pelo
@@ -83,7 +84,8 @@ e os pacotes do emulador para as arquiteturas desejadas.
 cargo xtask build
 cargo xtask run
 
-# aarch64: compila e gera a imagem arm64 crua
+# aarch64: compila e gera a imagem arm64 crua (a suíte e o `run` sobem por
+# ela; o boot pela UEFI no ARM é o que `cargo xtask iniciador` exercita)
 cargo xtask build --arch aarch64
 cargo xtask run   --arch aarch64
 
@@ -96,7 +98,7 @@ cargo xtask debug                    # sobe congelado, esperando gdb/lldb
 cargo xtask simbolo 0xffff8000...    # endereço -> arquivo, linha e função
 cargo xtask asm consumir_pilha       # o que o otimizador realmente gerou
 cargo xtask elf                      # confere os ELFs de usuário por fora
-cargo xtask invariantes              # regras de fonte: SAFETY e parâmetros do agente
+cargo xtask invariantes              # regras de fonte: SAFETY, parâmetros do agente, README
 ```
 
 Com o kernel rodando, converse com ele de outro terminal:
@@ -104,9 +106,9 @@ Com o kernel rodando, converse com ele de outro terminal:
 ```bash
 $ cargo xtask agent system.info
 {"jsonrpc":"2.0","id":1,"result":{"arch":"x86_64","kernel":"duke",
- "version":"0.1.0","phase":"0","cpu_vendor":"AuthenticAMD",
- "framebuffer":{"width":1280,"height":720,"stride":1280,
- "bytes_per_pixel":3,"pixel_format":"bgr"},"log_records":5}}
+ "version":"0.1.0","phase":"5","cpu_vendor":"AuthenticAMD",
+ "framebuffer":{"width":1280,"height":800,"stride":1280,
+ "bytes_per_pixel":4,"pixel_format":"bgr"},"uptime_ms":1160,...}}
 
 $ cargo xtask agent log.tail '{"count":3,"min_level":"info"}'
 $ cargo xtask agent memory.regions '{"limit":2,"usable_only":true}'
@@ -116,9 +118,10 @@ $ cargo xtask agent agent.describe
 
 # O mesmo protocolo, no kernel ARM
 $ cargo xtask agent --arch aarch64 system.info
-{"jsonrpc":"2.0","id":1,"result":{"arch":"aarch64","cpu_vendor":"ARM Limited",
+{"jsonrpc":"2.0","id":1,"result":{"arch":"aarch64","kernel":"duke",
+ "version":"0.1.0","phase":"5","cpu_vendor":"ARM Limited",
  "framebuffer":{"width":1280,"height":720,"stride":1280,
- "bytes_per_pixel":4,"pixel_format":"bgr"},"log_records":8}}
+ "bytes_per_pixel":4,"pixel_format":"bgr"},"uptime_ms":1730,...}}
 ```
 
 Os dois podem rodar ao mesmo tempo: cada arquitetura tem seu próprio socket.
@@ -297,17 +300,17 @@ O contraste no caminho de boot é grande:
 
 | | x86_64 | aarch64 |
 |---|---|---|
-| Carga | `iniciador/`, aplicação UEFI deste projeto | protocolo de boot do arm64 |
-| Artefato | imagem de disco | binário cru, cabeçalho de 64 bytes |
+| Carga | `iniciador/`, aplicação UEFI deste projeto | protocolo de imagem crua do arm64, ou o mesmo `iniciador/` |
+| Artefato | imagem de disco, com o iniciador e o kernel na ESP | binário cru, cabeçalho de 64 bytes; o ELF na ESP pelo iniciador |
 | Chegamos em | long mode, com pilha e paginação | MMU desligada, sem pilha |
-| Mapa de memória | struct `BootInfo` pronta | device tree, parseado por nós |
+| Mapa de memória | regiões do firmware, na `Entrega` do iniciador | device tree, parseado por nós; ou a `Entrega` |
 | Seriais | duas UARTs 16550 (port I/O) | uma PL011 (MMIO) |
 | Exceções | IDT de ponteiros, contexto salvo pela CPU | vetores de código, contexto salvo à mão |
 | Pilha de exceção | IST, índice no TSS | `SP_EL1`, trocado por hardware |
 | Guard page da pilha | instalada pelo iniciador | construída antes de ligar a MMU |
-| Interrupções | PIC 8259 + timer PIT | GIC v2 + timer genérico |
+| Interrupções | PIC 8259; timer do APIC local, calibrado contra o PIT | GIC v2 + timer genérico |
 | Serial do agente | UART 16550 na IRQ 3 | PL011 no INTID 33 (SPI 1) |
-| Vídeo | VGA da máquina `pc`, modo posto pelo firmware e mapeado pelo iniciador | `bochs-display` no PCI, modo posto por nós |
+| Vídeo | modo posto pelo firmware e mapeado pelo iniciador | `bochs-display` no PCI, modo posto por nós; `ramfb` do firmware pela UEFI |
 | Teclado | controlador 8042, scancode na IRQ 1 | `virtio-input` no PCI, evento na fila |
 | Teclado USB | `qemu-xhci` no PCI, protocolo de boot do HID | o mesmo controlador, o mesmo driver |
 | Dormir sem corrida | `sti; hlt`, par atômico | `wfi` acorda com IRQ mascarada |
@@ -355,6 +358,8 @@ de uma entrada de topo difere em 512 vezes:
 | Memória física mapeada | `0xFFFF_8800_0000_0000` | identidade |
 | Heap | `0xFFFF_9000_0000_0000` | 64 GiB |
 | Pilhas de fio | `0xFFFF_9800_0000_0000` | 128 GiB |
+| Registradores de dispositivo | `0xFFFF_8400_0000_0000` | 192 GiB |
+| Superfícies gráficas | `0xFFFF_A800_0000_0000` | 256 GiB |
 | Espaço do usuário | 4 GiB | 4 GiB |
 
 No x86 a regra é a clássica — metade alta para o kernel, metade baixa para o
@@ -402,7 +407,7 @@ com outro vocabulário.
 É por isso que uma tarefa aqui não tem pilha própria: o que sobreviveria na
 pilha entre dois `.await` o compilador guarda na struct que ele gera. Dá para
 ter muitas tarefas sem pagar uma pilha por cada uma — o oposto do modelo
-preemptivo com threads, que vem na fase 1.
+preemptivo com fios, que convive com ele e está descrito a seguir.
 
 O executor usa *wakers* de verdade. Uma tarefa que devolve `Pending` não é
 consultada de novo até alguém avisar: o handler da serial avisa quando chega
@@ -471,8 +476,8 @@ $ cargo xtask agent log.tail '{"count":3}'
 ... info  "usuario" "processo encerrou com codigo 42"
 ```
 
-As chamadas de sistema são nove: `sair`, `escrever`, `id`, `ceder`, `bifurcar`,
-`executar`, `abrir`, `ler` e `fechar`.
+As chamadas de sistema são dez: `sair`, `escrever`, `id`, `ceder`, `bifurcar`,
+`executar`, `abrir`, `ler`, `fechar` e `esperar`.
 
 **O programa é um ELF64.** O cabeçalho diz onde a execução começa; cada
 segmento diz onde quer morar, quanto traz do arquivo, quanto ocupa na memória
@@ -758,9 +763,11 @@ mecanismo=ecam  count=4
 
 O vídeo aparece nas duas listas com o **mesmo** fabricante e modelo. Não é
 coincidência: a VGA padrão da máquina `pc` e o `bochs-display` da `virt` são a
-mesma implementação do emulador, com a mesma interface de programação. É por
-isso que um driver só (`tela/bochs.rs`) acende a tela nas duas arquiteturas,
-em vez de virtio-gpu de um lado e outra coisa do outro.
+mesma implementação do emulador, com a mesma interface de programação. Um
+driver só (`tela/bochs.rs`) serve as duas. Hoje ele é quem acende a tela do
+ARM quando o kernel sobe pela imagem crua; nos boots pela UEFI o firmware já
+deixou um modo configurado, e o kernel adota a tela que o iniciador lhe
+entrega em vez de reprogramá-la.
 
 O mecanismo difere, a enumeração não. No x86 a configuração é alcançada por um
 par de portas de I/O que existe desde 1993 — não precisa ser descoberto, ao
@@ -795,14 +802,14 @@ duke> system.info
   "kernel": "duke",
   "arch": "aarch64",
   "version": "0.1.0",
-  "phase": "0",
+  "phase": "5",
   "cpu_vendor": "ARM Limited",
   ...
 }
 
 duke> nao.existe
 comando desconhecido: nao.existe
-`ajuda` lista os 26 que existem
+`ajuda` lista os 33 que existem
 ```
 
 **O interpretador não tem comandos próprios.** O que se digita é despachado
@@ -938,10 +945,15 @@ Btrfs entrou, ele entrou por baixo desta mesma interface, sem que `executar`
 mudasse: os programas embutidos continuam em `/bin` porque a montagem mais
 longa ganha.
 
-**O que não está lá**: escrita, `abrir` e `fechar`. Entram quando houver quem
-os chame. Um método de trait que compila e não tem chamador é pior que
-ausência — ele parece uma opção disponível, e o primeiro a usá-lo descobre que
-nunca foi exercitado.
+**O que não está no trait**: escrita, `abrir` e `fechar`. As chamadas de
+sistema `abrir` e `fechar` existem, mas o estado que elas criam — a posição
+de leitura — é do processo, e mora na tabela de descritores; o trait só
+precisou de uma leitura a partir de um deslocamento. Elas descem para o trait
+quando houver escrita, ou um sistema de arquivos que precise saber quantos
+descritores apontam para um nó. Antes disso seriam métodos que todo sistema
+implementa como `Ok(())` — e um método de trait que compila e não tem chamador
+é pior que ausência: ele parece uma opção disponível, e o primeiro a usá-lo
+descobre que nunca foi exercitado.
 
 **A regra da montagem mais longa.** Com `/` e `/bin` montados, `/bin/exemplo`
 pertence ao segundo. A versão errada — a primeira da lista que casar —
@@ -1228,9 +1240,9 @@ $ cargo xtask iniciador
   [iniciador] a maquina e do Duke; saltando para 0xffff8000000d75b0
 
   =============================================
-    Duke :: agent-native :: x86_64 :: fase 0
+    Duke :: agent-native :: x86_64 :: fase 5
   =============================================
-  [    0]     0ms info boot  Duke iniciado em x86_64, fase 0
+  [    0]     0ms info boot  Duke iniciado em x86_64, fase 5
 
   [conferido] 7058448 bytes com crc 0x53f802c7, entrada 0x863a0,
               4 segmentos e 3703 relocacoes
@@ -1288,14 +1300,9 @@ que está no arquivo, que a memória física começa no zero, que o **código do
 próprio iniciador** está na identidade, que a pilha está mapeada e que a
 página de guarda dela **não** está.
 
-**A identidade da RAM não é para o kernel.** É para os poucos ciclos entre o
-`mov cr3` e o salto: no instante seguinte à troca, o processador busca a
-próxima instrução no código do iniciador, que mora num endereço baixo. Sem
-ela, a busca falha — e uma falha de página sem tabela de exceções instalada é
-um triple fault, a máquina reiniciando sem nada na tela.
-
-Foi exatamente o que aconteceu na primeira tentativa de saltar: a identidade
-estava lá, mas marcada como **não executável**. O mapa estava certo e a
+**E a identidade precisa ser executável.** Foi o que faltou na primeira
+tentativa de saltar: a identidade estava lá, mas marcada como **não
+executável**. O mapa estava certo e a
 permissão não, e o sintoma é o mesmo. Ela executa agora, e o kernel a larga
 ao assumir as tabelas — com isso a entrada de topo volta a ser do espaço do
 usuário, e desreferenciar zero dentro do kernel volta a ser uma falha em vez
@@ -1417,13 +1424,8 @@ um serviço de boot, e o trabalho deste programa termina depois de
 depende de ninguém, e é a mesma COM1 que o kernel abre logo em seguida: o
 iniciador fala pelo canal em que o Duke já fala.
 
-**O ARM continua fora.** Lá o boot é o protocolo de imagem crua do arm64, que
-não precisa de bootloader nenhum — o QEMU lê o cabeçalho de 64 bytes, deposita
-a imagem e salta. Um iniciador UEFI para aarch64 é a mesma aplicação com outro
-alvo e outro firmware, e é o passo seguinte natural desta peça.
-
 **E o `cargo xtask iniciador` é a sonda que afirma tudo isso.** Cinco boots no
-OVMF: um com o kernel de verdade, que só passa quando o kernel fala do outro
+firmware: um com o kernel de verdade, que só passa quando o kernel fala do outro
 lado do salto, e quatro com kerneis estragados de propósito, que têm de ser
 recusados pelo motivo certo.
 
@@ -1445,15 +1447,17 @@ interrupção de hardware de verdade.
 
 ```
 $ cargo xtask test --arch aarch64
-  suite de testes :: aarch64 :: 145 casos
+  suite de testes :: aarch64 :: 171 casos
   ...
   memoria: clonar compartilha sem copiar     ok
   memoria: fork do fork mantem a escrita     ok
   fios: o coletor nao recolhe quem esta de pe ok
-  145 de 145 passaram
+  171 de 171 passaram
 ```
 
-O CI roda formatação, clippy nas cinco configurações, e a suíte nas duas
+O CI roda formatação, lints, as conferências de fonte de `cargo xtask
+invariantes`, os testes do `xtask`, a conferência dos ELFs, o boot pela UEFI,
+as sondas de fumaça contra o kernel de produção, e a suíte nas duas
 arquiteturas em debug e release.
 
 ## Depuração
@@ -1481,7 +1485,7 @@ $ cargo xtask simbolo 18446603336221253026
 0xffff80000000dda2
   core::ptr::write_volatile::<u64>
       …/core/src/ptr/mod.rs:2269:9
-  inlinado em kernel::arch::x86_64::disparar_falha_fatal
+  inlinado em duke::arch::x86_64::disparar_falha_fatal
       kernel/src/arch/x86_64/mod.rs:337:14
 ```
 
@@ -1529,21 +1533,20 @@ padronizado.
       roteamento de interrupção de PCI, timer do APIC local e framebuffer
       gráfico.
       **Fase 2 completa.**
-- [ ] **Fase 3 — Operação por uma pessoa.** O Duke precisa ser operável por
+- [x] **Fase 3 — Operação por uma pessoa.** O Duke precisa ser operável por
       alguém sentado na frente dele, nas duas arquiteturas, e não só por um
       agente pelo canal serial. Feito: framebuffer no ARM, por um driver do
       adaptador que as duas máquinas do QEMU expõem com os mesmos
       identificadores (`1234:1111`), e console de texto sobre ele: o mesmo
       texto que vai para o console humano é desenhado na tela, pelo mesmo
-      funil, nas duas arquiteturas. Falta: teclado no x86 (PS/2) e no ARM
+      funil, nas duas arquiteturas. Teclado no x86 (PS/2) e no ARM
       (virtio-input), e teclado USB por um driver xHCI próprio — três
       caminhos de hardware, o mesmo `abC` no fim. E o interpretador, que
       despacha o que se digita pelo **mesmo** registro de comandos que o canal
       do agente publica.
       **Fase 3 completa.**
-- [ ] **Fase 4 — Sistema de arquivos.** A promessa da abertura que falta
-      cumprir. Feito: o disco de testes é uma GPT de verdade, com uma ESP em
-      FAT32 e uma raiz em Btrfs montadas pelas ferramentas do hospedeiro; e o
+- [x] **Fase 4 — Sistema de arquivos.** A promessa da abertura, cumprida: o disco de
+      testes é uma GPT de verdade, com uma ESP em FAT32 e uma raiz em Btrfs montadas pelas ferramentas do hospedeiro; e o
       VFS, com os programas embutidos servidos em `/bin`; e a leitura do disco
       em blocos de 16 KiB numa ida só, que é o tamanho de um nó de Btrfs; a
       tabela de partições; o superbloco do Btrfs, com crc32c conferido; e a
@@ -1601,11 +1604,18 @@ padronizado.
       de escrever a pilha: escrever TCP do zero é um a dois anos-pessoa e não
       diferencia o Duke em nada. O ARP que existe hoje era a prova de ponta a
       ponta mais barata possível, e cumpriu o papel dela.
-- [ ] **Fase 10 — GPU, composição e a árvore semântica.** Começa em
-      **virtio-gpu**, que entra pelo transporte genérico que `blk`, `net` e
-      `teclado` já usam — aceleração 2D de verdade sem engenharia reversa de
-      GPU nenhuma. Depois o compositor, o servidor de janelas, o roteamento de
-      entrada e a tipografia.
+- [ ] **Fase 10 — GPU, composição e a árvore semântica.** Começou antes da
+      6, pela parte que não depende de vários núcleos. Feito: a pilha gráfica
+      no desenho do Redox — um trait de adaptador que o compositor usa sem
+      saber o que está embaixo, o retângulo de dano com o recorte que não dá a
+      volta, o adaptador linear sobre o framebuffer, e `display.info` dizendo
+      ao agente o que chegou à tela. A seguir: a árvore semântica, adiantada;
+      o compositor, com superfícies e ordem de empilhamento; e o virtio-gpu
+      como segundo adaptador atrás do mesmo trait. O que o virtio-gpu 2D traz
+      é retângulo de dano e troca de página sem rasgo — não aceleração, que
+      este texto chegou a prometer: medido, o framebuffer linear já pinta a
+      tela cheia em 7 ms em release, com folga para 60 Hz. Depois, o servidor
+      de janelas, o roteamento de entrada e a tipografia.
       E aqui a inversão do projeto encontra a interface gráfica. O servidor de
       janelas publica uma **árvore semântica** — que janelas existem, que
       controles, o que cada um faz — e os pixels são a renderização dela, do

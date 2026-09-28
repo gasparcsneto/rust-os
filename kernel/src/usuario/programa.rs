@@ -1,14 +1,14 @@
 //! Carrega um programa de usuário e o coloca para rodar.
 //!
-//! # Por que não um ELF, ainda
+//! # De bytes soltos a ELF
 //!
-//! Um carregador de ELF é um parser de formato binário: cabeçalhos, tabela de
-//! segmentos, relocações. Nada disso é difícil, mas é **outra** coisa difícil,
-//! e depurar duas de uma vez é o jeito mais confiável de não entender nenhuma.
-//!
-//! Aqui o programa é um punhado de bytes de instrução, copiado para uma página
-//! e executado a partir do primeiro. Isso deixa a travessia de privilégio
-//! sozinha em cena: se algo falhar, foi ela.
+//! A primeira versão deste arquivo carregava um punhado de bytes de
+//! instrução numa página e os executava a partir do primeiro — de propósito,
+//! para deixar a travessia de privilégio sozinha em cena. Hoje o programa é um
+//! ELF64: [`carregar`] o valida por [`super::elf`], mapeia cada segmento com a
+//! permissão que ele pede e nunca deixa existir uma página gravável e
+//! executável ao mesmo tempo. O que continua deste arquivo é a pilha, com a
+//! guarda abaixo dela, e a descida de privilégio.
 //!
 //! # O mapa que o processo enxerga
 //!
@@ -48,14 +48,15 @@ pub const ENTRADA_PRIVADA: usize = crate::arch::ENTRADA_PRIVADA as usize;
 
 /// Os programas que o kernel carrega consigo, procuráveis por nome.
 ///
-/// # Por que uma tabela, e não um caminho de arquivo
+/// # Por que uma tabela, e não arquivos no disco
 ///
-/// Porque não há sistema de arquivos ainda. `exec` precisa de *alguma* forma
-/// de dizer qual programa carregar, e um número de índice seria uma ABI que
-/// envelhece mal — acrescentar um programa no meio renumeraria os outros.
+/// Porque estes programas nasceram antes do sistema de arquivos, junto do
+/// assembly que os monta. A tabela continua sendo a origem dos bytes; quem a
+/// apresenta como arquivos é [`crate::vfs::programas`], montado em `/bin`, e
+/// `executar` os procura por caminho como procuraria qualquer outro.
 ///
-/// Um nome é o que um `execve` de verdade recebe. No dia em que houver disco,
-/// o que muda é onde a busca acontece; a chamada de sistema continua a mesma.
+/// Um nome, e não um índice, pelo mesmo motivo de um `execve`: acrescentar um
+/// programa no meio não renumera os outros.
 /// Um programa embutido: o nome pelo qual `executar` o encontra e como obter
 /// os bytes dele.
 ///

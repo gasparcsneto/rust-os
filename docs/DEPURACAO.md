@@ -67,18 +67,20 @@ arquitetura cruzada sem instalar nada.
 ### Por que a base do kernel no x86 é fixa
 
 O binário do kernel é um executável independente de posição, ligado a partir
-do zero, e o bootloader o carrega em outro lugar. Se esse lugar for escolhido
+do zero, e o `iniciador/` o reloca para outro lugar. Se esse lugar for escolhido
 em tempo de execução, todo endereço que o kernel reporta está deslocado por
 uma constante que só se descobre perguntando a ele — e um depurador conectado
 *antes* do boot não tem a quem perguntar.
 
-Por isso `arch::x86_64::BASE_DO_KERNEL` fixa a imagem em
+Por isso `protocolo::mapa::BASE_DO_KERNEL` fixa a imagem em
 `0xFFFF_8000_0000_0000`, o primeiro endereço canônico da metade alta. É a
-convenção de quase todo kernel de 64 bits, e não é só estética: na fase 1, com
-processos, a metade baixa inteira fica para o userspace.
+convenção de quase todo kernel de 64 bits, e não é só estética: a metade baixa
+inteira fica para os processos. A constante mora em `protocolo/`, que o kernel e
+o iniciador leem — o iniciador reloca para ela, e o `xtask` a usa para simbolizar.
 
-No ARM não há bootloader e o script do linker já fixa os endereços finais, então
-o deslocamento é zero.
+No ARM o kernel não é relocável: o script do linker fixa os endereços finais, o
+iniciador o copia exatamente para lá, e pelo `-kernel` o QEMU faz o mesmo — o
+deslocamento é zero nos dois caminhos.
 
 ---
 

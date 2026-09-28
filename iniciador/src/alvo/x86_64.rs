@@ -1,8 +1,6 @@
 //! O que o Duke precisa saber sobre o x86_64 para ser iniciado.
 //!
-//! # A porta serial, escrita direto no hardware
-//!
-//! # Por que não o console do firmware
+//! # A porta serial, escrita direto no hardware, e não o console do firmware
 //!
 //! Porque o console do firmware é um serviço de boot, e o trabalho deste
 //! programa termina depois de `ExitBootServices` — exatamente onde esse

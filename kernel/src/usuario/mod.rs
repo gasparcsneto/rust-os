@@ -25,12 +25,16 @@
 //! faixa inteira está na metade do usuário e mapeada. É a checagem que separa
 //! um sistema operacional de uma biblioteca com etapas extras.
 //!
-//! # O que ainda não existe
+//! # O que já existe, e o que ainda não
 //!
-//! Processos ainda compartilham o espaço de endereços do kernel — separá-los
-//! exige uma tabela de tradução por processo, que é o passo seguinte. O que já
-//! existe é a separação de *privilégio*: o processo não alcança as páginas do
-//! kernel, porque elas não têm o bit de usuário.
+//! Cada processo tem o próprio espaço de endereços, com as entradas de topo do
+//! kernel copiadas e a do usuário só dele; `bifurcar` o duplica com cópia na
+//! escrita, `executar` troca a imagem, `esperar` colhe o filho. São dez
+//! chamadas de sistema, listadas em [`numero`].
+//!
+//! O que não existe: vários núcleos, sinais, memória compartilhada entre
+//! processos e uma ABI que um programa de fora saiba falar — a fase 7 do
+//! roteiro é a compatibilidade com Linux.
 
 pub mod descritores;
 pub mod elf;

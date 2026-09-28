@@ -2,9 +2,11 @@
 //!
 //! # Por que não usar `serde_json`
 //!
-//! Nesta fase o kernel ainda **não tem heap**. O alocador só entra na fase 0
-//! tardia, depois da paginação — mas o canal do agente precisa funcionar
-//! muito antes disso, justamente para nos ajudar a depurar a paginação.
+//! Porque o canal precisa funcionar onde não há heap. Ele sobe antes do
+//! alocador — para ajudar a depurar a paginação, que vem antes dele —, e
+//! atende no modo post-mortem, depois de uma falha que pode ter sido
+//! justamente no heap. Um serializador que alocasse deixaria o canal mudo
+//! nos dois momentos em que ele mais importa.
 //!
 //! Então este módulo resolve o problema com duas estratégias que dispensam
 //! completamente alocação dinâmica:
@@ -19,7 +21,8 @@
 //!   chaves sob demanda. `member("method")` varre o texto e devolve outra
 //!   fatia. Zero cópias, zero alocações.
 //!
-//! Quando o heap existir, dá para trocar por `serde` sem mudar o protocolo.
+//! O heap existe hoje, e isso não muda a conta: o caminho post-mortem
+//! continua precisando de um escritor que não aloque.
 
 use core::fmt;
 

@@ -14,9 +14,8 @@
 //! continuar, e nada mais. O preço é confiança — uma tarefa que nunca ceda
 //! trava o sistema inteiro.
 //!
-//! Esta é a fase cooperativa. A preemptiva vem depois, junto com o userspace,
-//! e as duas vão conviver: cooperativa dentro do kernel, preemptiva entre
-//! processos.
+//! As duas convivem neste kernel: a cooperativa dentro dele, num fio só, e a
+//! preemptiva ([`crate::fios`]) entre os fios e os processos.
 //!
 //! # `async`/`await` *é* multitarefa cooperativa
 //!

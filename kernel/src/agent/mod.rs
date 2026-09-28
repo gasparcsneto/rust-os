@@ -2,7 +2,8 @@
 //!
 //! # O que é
 //!
-//! Um servidor JSON-RPC 2.0 rodando dentro do kernel, falando pela COM2. Um
+//! Um servidor JSON-RPC 2.0 rodando dentro do kernel, falando por uma serial
+//! própria — a COM2 no x86, a única PL011 no ARM. Um
 //! objeto JSON por linha entra, um objeto JSON por linha sai. Do lado de fora,
 //! o QEMU liga essa porta a um socket Unix, então o agente conversa com o OS
 //! com um `connect()` comum — sem depurador, sem stub de GDB, sem instrumentar
@@ -11,7 +12,8 @@
 //! # Por que serial, e não rede
 //!
 //! Porque funciona *agora*. Um canal sobre TCP exigiria driver de rede, pilha
-//! IP e, para ser honesto sobre segurança, TLS — tudo isso é fase 3. A UART
+//! IP e, para ser honesto sobre segurança, TLS — tudo isso é a fase 9 do
+//! roteiro. A UART
 //! já está de pé no primeiro milissegundo do boot, antes de haver paginação,
 //! heap ou interrupções.
 //!
@@ -20,8 +22,8 @@
 //! a paginação quebrar, o canal do agente ainda vai estar respondendo.
 //!
 //! O transporte é um detalhe trocável: o conjunto de comandos em
-//! [`commands::COMANDOS`] não sabe nada sobre serial. Na fase 3, expor o mesmo
-//! conjunto sobre TCP é trocar este módulo, não os comandos.
+//! [`commands::COMANDOS`] não sabe nada sobre serial. Quando houver rede,
+//! expor o mesmo conjunto sobre TCP é trocar este módulo, não os comandos.
 //!
 //! # Os dois modos de atendimento
 //!
@@ -36,7 +38,7 @@
 //! Os dois consomem a mesma fila de bytes e compartilham todo o resto:
 //! enquadramento, decodificação e despacho.
 
-// O canal do agente inteiro — enquadramento, parser, escritor e os dezenove
+// O canal do agente inteiro — enquadramento, parser, escritor e todos os
 // comandos — é Rust seguro, e esta linha transforma esse fato num invariante
 // verificado pelo compilador em vez de uma coincidência que o próximo commit
 // desfaz sem ninguém notar.

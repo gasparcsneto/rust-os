@@ -17,12 +17,15 @@
 //!
 //! # Por que espera em laço, e não interrupção
 //!
-//! Porque interrupção de dispositivo PCI exige rotear a linha — MSI-X, ou o
-//! mapeamento de INTx que o device tree descreve no ARM e a ACPI no x86 —, e
-//! isso é um subsistema inteiro que ainda não existe aqui. Esperar em laço é o
-//! que torna o disco utilizável **antes** dele, e o custo é real mas contido:
-//! uma leitura de um setor num dispositivo emulado volta em microssegundos, e
-//! quem chama é o boot ou o canal do agente, não um caminho quente.
+//! A razão escrita aqui era que o roteamento de interrupção de PCI não
+//! existia. Existe: o disco interrompe, e `irq.stats` conta cada aviso dele.
+//! O que falta é alguém **dormir** esperando o aviso — o chamador teria de
+//! esperar um futuro em vez de girar, e os chamadores de hoje (o boot, o
+//! sistema de arquivos, o canal do agente) são síncronos.
+//!
+//! O custo é o medido em `PAGINAS_DE_DADOS`, abaixo: cem microssegundos por ida ao
+//! dispositivo, e não os "microssegundos" que este cabeçalho afirmava sem
+//! medir. É por isso que uma leitura leva até dezesseis kilobytes numa ida.
 //!
 //! O laço tem teto. Um dispositivo que não responde vira um erro, não um
 //! kernel parado — que é a diferença entre um bug diagnosticável e um boot que

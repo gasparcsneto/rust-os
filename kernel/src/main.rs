@@ -92,6 +92,19 @@ mod virtio;
 
 use core::panic::PanicInfo;
 
+/// A última fase **completa** do roteiro do README.
+///
+/// É o número que o banner, a primeira linha de log e `system.info` publicam.
+/// Os três disseram "fase 0" durante cinco fases: estavam escritos à mão em
+/// três lugares, e nada os ligava ao roteiro que dizia outra coisa. Agora há
+/// um lugar só, e `cargo xtask invariantes` reprova se ele divergir da última
+/// fase marcada como feita no README.
+///
+/// Completa, e não "em andamento": o trabalho às vezes adianta uma fase — a
+/// pilha gráfica da fase 10 começou antes da 6 —, e um número que dissesse
+/// "10" prometeria vários núcleos que o kernel não tem.
+pub const FASE: &str = "5";
+
 /// Para o boot quando falta uma base sobre a qual tudo o que vem depois se
 /// apoia, e continua respondendo pelo caminho que não depende dela.
 ///
@@ -191,7 +204,7 @@ fn anunciar_tela() -> bool {
 pub fn inicio_comum(canal_agente: bool) -> ! {
     banner();
 
-    log_info!("boot", "Duke iniciado em {}, fase 0", arch::nome());
+    log_info!("boot", "Duke iniciado em {}, fase {}", arch::nome(), FASE);
 
     let cpu = arch::identificar_cpu();
     log_info!("cpu", "fabricante: {}", cpu.como_str());
@@ -415,13 +428,17 @@ async fn pulso() {
 
 /// Cabeçalho no console humano.
 ///
-/// Em plataformas sem console de texto (o ARM, por ora) isto é um no-op
-/// silencioso — a mesma informação está nos registros de log, acessíveis via
-/// `log.tail` pelo canal do agente.
+/// Sai na tela nas duas arquiteturas, e também na COM1 no x86. No ARM não há
+/// serial de console — a única é do canal do agente —, e quem lê pelo
+/// hospedeiro tem a mesma informação nos registros de log, por `log.tail`.
 fn banner() {
     serial_println!();
     serial_println!("=============================================");
-    serial_println!("  Duke :: agent-native :: {} :: fase 0", arch::nome());
+    serial_println!(
+        "  Duke :: agent-native :: {} :: fase {}",
+        arch::nome(),
+        FASE
+    );
     serial_println!("=============================================");
 }
 

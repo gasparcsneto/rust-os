@@ -15,7 +15,7 @@
 //! **A fraqueza do arranjo, dita em voz alta:** quem escreve o cabeçalho e
 //! quem o lê são a mesma pessoa, então um mal-entendido sobre o formato
 //! apareceria dos dois lados e se cancelaria. Por isso a imagem é conferida
-//! por ferramenta independente — `cargo xtask elf` roda o `llvm-readelf` sobre
+//! por ferramenta independente — `cargo xtask elf` roda o `llvm-readobj` sobre
 //! os bytes embutidos. Um programa compilado à parte continua sendo o passo
 //! natural seguinte.
 //!

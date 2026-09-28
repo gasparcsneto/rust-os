@@ -14,7 +14,8 @@
 //!
 //! # O que ele é por dentro
 //!
-//! Um diretório com três arquivos, todos em memória, todos somente leitura. O
+//! Um diretório com os programas da tabela — seis hoje —, todos em memória,
+//! todos somente leitura. O
 //! `id` de um nó é o índice na tabela — não há inode para inventar, e o
 //! índice é estável porque a tabela é `static`.
 

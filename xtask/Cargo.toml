@@ -6,7 +6,12 @@ publish = false
 description = "Build system do projeto: compila o kernel, gera as imagens de disco e roda o QEMU"
 
 [dependencies]
-# Nenhuma. O `xtask` monta o disco com as ferramentas do hospedeiro —
+# Só o contrato deste projeto: a base do kernel no espaço virtual, que o
+# `xtask` precisa para traduzir o `pc` de uma falha em arquivo e linha. É a
+# mesma constante que o kernel e o iniciador leem, e não uma cópia.
+protocolo = { path = "../protocolo" }
+
+# De fora, nenhuma. O `xtask` monta o disco com as ferramentas do hospedeiro —
 # `sgdisk`, `mkfs.vfat`, `mcopy`, `mkfs.btrfs` — e o que boota é o iniciador
 # deste projeto, compilado como mais um alvo.
 #

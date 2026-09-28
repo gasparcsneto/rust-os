@@ -2,18 +2,23 @@
 //!
 //! # Onde ele está
 //!
-//! No começo. Este módulo lê o superbloco e confere a soma dele; a árvore de
-//! blocos, os diretórios e os arquivos vêm em cima disto, em etapas. O método
-//! é o mesmo do driver xHCI: cada etapa é confirmada pelo canal do agente
-//! antes de a seguinte ser escrita, porque mil linhas escritas às cegas são
-//! mil linhas para depurar de uma vez.
+//! Lê o bastante para montar a raiz: o superbloco com a soma conferida, o mapa
+//! de pedaços que traduz endereço lógico em deslocamento no disco
+//! ([`pedacos`]), a descida por nós internos ([`interno`]) até as folhas
+//! ([`folha`]) e, nelas, inodes, diretórios e extensões ([`arvore`]). O que
+//! ele não lê está declarado no README e recusado no código: escrita, mais de
+//! uma extensão por arquivo, compressão, subvolumes e os perfis RAID0/10/5/6.
+//!
+//! Foi escrito em etapas, com o mesmo método do driver xHCI: cada uma
+//! confirmada pelo canal do agente antes de a seguinte existir, porque mil
+//! linhas escritas às cegas são mil linhas para depurar de uma vez.
 //!
 //! # O gabarito
 //!
 //! A imagem que este código lê foi montada por `mkfs.btrfs`, e
 //! `btrfs inspect-internal dump-super` diz o que deveria estar em cada campo.
 //! Quem confere o leitor não é quem o escreveu — é a mesma disciplina do
-//! `llvm-readelf` sobre os ELFs de usuário e do `sgdisk` sobre a GPT.
+//! `llvm-readobj` sobre os ELFs de usuário e do `sgdisk` sobre a GPT.
 
 pub mod arvore;
 pub mod crc32c;

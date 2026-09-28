@@ -81,12 +81,13 @@ impl Arquitetura {
     /// uma exceção em arquivo e linha.
     ///
     /// No x86 o kernel é um executável independente de posição, ligado a
-    /// partir do zero, e o bootloader o deposita na metade alta do espaço
-    /// virtual (ver `BASE_DO_KERNEL` em `arch::x86_64`). No ARM o script do
-    /// linker já fixa os endereços finais, então não há deslocamento nenhum.
+    /// partir do zero, e o iniciador o reloca para a metade alta do espaço
+    /// virtual — para [`protocolo::mapa::BASE_DO_KERNEL`], que é daqui que o
+    /// número sai. No ARM o script do linker já fixa os endereços finais,
+    /// então não há deslocamento nenhum.
     fn base_do_kernel(self) -> u64 {
         match self {
-            Self::X86_64 => 0xFFFF_8000_0000_0000,
+            Self::X86_64 => protocolo::mapa::BASE_DO_KERNEL,
             Self::Aarch64 => 0,
         }
     }
@@ -1925,19 +1926,69 @@ fn simbolos_do_kernel(kernel: &Path) -> Result<Vec<(String, u64)>, String> {
 ///
 /// # A regra, deliberadamente frouxa
 ///
-/// Ou há um `SAFETY` nas oito linhas acima, ou o bloco está dentro de uma
-/// `unsafe fn` com `# Safety` no doc. Frouxa porque o objetivo é pegar o
-/// esquecimento, não arbitrar a redação: exigir mais produziria ruído, e
-/// ruído é o que faz uma conferência ser desligada.
+/// Ou há um `SAFETY` subindo até dez linhas sem atravessar o fim de outro
+/// bloco, ou o bloco está dentro de uma `unsafe fn` com `# Safety` no doc —
+/// ver [`tem_safety_cobrindo`], que conta como a regra chegou a essa forma.
+/// Frouxa porque o objetivo é pegar o esquecimento, não arbitrar a redação:
+/// exigir mais produziria ruído, e ruído é o que faz uma conferência ser
+/// desligada.
 fn conferir_invariantes() -> Result<ExitCode, String> {
     let passos = [
         conferir_blocos_unsafe()?,
         conferir_parametros_do_agente()?,
         conferir_arvore_do_readme()?,
+        conferir_fase_do_readme()?,
     ];
     if passos.iter().all(|p| *p == ExitCode::SUCCESS) {
         Ok(ExitCode::SUCCESS)
     } else {
+        Ok(ExitCode::FAILURE)
+    }
+}
+
+/// Confere que a fase que o kernel publica é a última que o roteiro dá por
+/// feita.
+///
+/// # Por que isto virou conferência
+///
+/// Porque o banner, a primeira linha de log e o `phase` de `system.info`
+/// disseram "fase 0" durante cinco fases. O número estava escrito à mão em
+/// três lugares do kernel e o roteiro, noutro arquivo, dizia outra coisa; um
+/// agente que perguntasse em que ponto o sistema estava recebia a resposta
+/// do primeiro dia.
+///
+/// O kernel passou a ter um lugar só, `FASE` em `kernel/src/main.rs`. Esta
+/// função liga esse lugar ao roteiro: a fase publicada tem de ser a maior
+/// marcada como feita (`- [x] **Fase N`).
+fn conferir_fase_do_readme() -> Result<ExitCode, String> {
+    let raiz = raiz_do_projeto();
+    let readme = std::fs::read_to_string(raiz.join("README.md"))
+        .map_err(|e| format!("não foi possível ler o README: {e}"))?;
+    let main = std::fs::read_to_string(raiz.join("kernel/src/main.rs"))
+        .map_err(|e| format!("não foi possível ler o main.rs do kernel: {e}"))?;
+
+    let feita = readme
+        .lines()
+        .filter_map(|l| l.trim_start().strip_prefix("- [x] **Fase "))
+        .filter_map(|resto| {
+            let digitos: String = resto.chars().take_while(char::is_ascii_digit).collect();
+            digitos.parse::<u32>().ok()
+        })
+        .max()
+        .ok_or("o roteiro do README não tem nenhuma fase marcada como feita")?;
+
+    let publicada = apos(&main, "pub const FASE: &str = \"")
+        .and_then(|resto| resto.split('"').next())
+        .ok_or("`pub const FASE` não foi encontrada em kernel/src/main.rs")?;
+
+    if publicada == feita.to_string() {
+        println!("[xtask] fase: o kernel publica a fase {feita}, a última feita no roteiro");
+        Ok(ExitCode::SUCCESS)
+    } else {
+        eprintln!(
+            "[xtask] fase: o kernel publica a fase {publicada}, e a última marcada como feita \
+             no roteiro do README é a {feita}"
+        );
         Ok(ExitCode::FAILURE)
     }
 }
@@ -4876,26 +4927,6 @@ mod testes {
             !receita.contains("/home") && !receita.contains("target/"),
             "a receita carrega um caminho da máquina:\n{receita}"
         );
-    }
-
-    #[test]
-    fn base_do_kernel_confere_com_a_do_kernel() {
-        // Ela mora no `protocolo`, que o kernel e o iniciador incluem. O
-        // `xtask` não pode incluí-lo da mesma forma — ele traduz endereços
-        // para símbolos e precisa da constante como número, não como tipo —,
-        // então continua sendo uma leitura da fonte.
-        //
-        // A diferença é que agora há **uma** fonte para ler. Antes eram duas,
-        // e este teste tinha um irmão que exigia que elas batessem entre si.
-        let fonte = std::fs::read_to_string(raiz_do_projeto().join("protocolo/src/mapa.rs"))
-            .expect("o mapa do protocolo precisa existir");
-
-        assert!(
-            fonte.contains("pub const BASE_DO_KERNEL: u64 = 0xFFFF_8000_0000_0000;"),
-            "a base do kernel mudou no protocolo; atualize Arquitetura::base_do_kernel"
-        );
-        assert_eq!(Arquitetura::X86_64.base_do_kernel(), 0xFFFF_8000_0000_0000);
-        assert_eq!(Arquitetura::Aarch64.base_do_kernel(), 0);
     }
 
     #[test]

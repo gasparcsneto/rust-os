@@ -2,13 +2,16 @@
 //!
 //! # Por que ainda usamos hardware dos anos 1980
 //!
-//! O x86 moderno tem o APIC, bem mais capaz: mais linhas, roteamento por
-//! núcleo, prioridades. Mas ele exige descobrir tabelas ACPI para saber onde
-//! está mapeado, o que é um projeto em si. O PIC está sempre nos mesmos
-//! endereços e funciona em qualquer máquina x86 já feita.
+//! O x86 moderno tem o APIC, em duas metades. O **local**, um por núcleo, já
+//! é usado aqui como timer — ver [`super::apic`]; o endereço dele vem de um
+//! MSR. O de **E/S**, que roteia as linhas dos dispositivos, é outra
+//! história: onde ele está só a tabela MADT da ACPI diz, e ler ACPI é um
+//! projeto em si. O PIC está sempre nos mesmos endereços e funciona em
+//! qualquer máquina x86 já feita.
 //!
-//! Começar pelo PIC deixa o caminho de interrupções funcionando *hoje*,
-//! com o custo de trocá-lo pelo APIC quando houver múltiplos núcleos.
+//! Então as linhas de dispositivo continuam passando por ele, e o PIT
+//! continua ligado no boot como o relógio de referência que calibra o APIC.
+//! Trocar o PIC pelo APIC de E/S é trabalho da fase de vários núcleos.
 //!
 //! # A remapeação obrigatória
 //!

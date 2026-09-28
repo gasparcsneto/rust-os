@@ -30,22 +30,21 @@
 //! preenchimento sozinho passa de 600 ms). A razão de custo vale para um
 //! perfil só.
 //!
-//! O console segue sem rolar, e agora por um motivo que não depende de
-//! medida: perder o que saiu da tela não custa informação. Os registros estão
-//! no anel de [`crate::log`], e `log.tail` os devolve inteiros — a tela é a
-//! renderização, e não a fonte da verdade. Se um dia rolar for desejável, o
-//! que impede não é o relógio.
+//! O console segue sem rolar: quando o texto chega ao pé da tela, ela
+//! recomeça do topo. A razão que este cabeçalho dava — "perder o que saiu da
+//! tela não custa informação, `log.tail` devolve tudo" — é verdade para o
+//! agente e não para a pessoa. Quem está na frente da máquina lendo a
+//! resposta de um comando perde o começo dela quando a página vira, e o
+//! `log.tail` que a recuperaria é JSON. Com o interpretador, o console
+//! deixou de ser só um relatório de boot: rolar passou a ser dívida do lado
+//! humano, e fica registrado como tal.
 //!
-//! Quando o texto chega ao pé da tela, ela recomeça do topo. Perder o que
-//! saiu não custa informação: os registros estão no anel de [`crate::log`], e
-//! `log.tail` os devolve inteiros. A tela é a renderização.
-//!
-//! A saída certa para isso existe e fica para quando o console for
-//! interativo: o adaptador tem registradores de altura virtual e
-//! deslocamento vertical, feitos exatamente para rolar sem copiar nada. Ela
-//! exige reprogramar o modo, inclusive onde o kernel não o programou: nos dois
-//! boots por UEFI quem deixou o modo de pé foi o firmware, e o iniciador só
-//! leu a geometria. E não é trabalho para o commit que faz o texto aparecer.
+//! O caminho barato existe: o adaptador tem registradores de altura virtual
+//! e deslocamento vertical, feitos para rolar sem copiar nada. Ele exige
+//! reprogramar o modo, inclusive onde o kernel não o programou — nos dois
+//! boots por UEFI quem deixou o modo de pé foi o firmware —, e por isso a
+//! saída mais provável é redesenhar a partir do texto guardado, que em
+//! release custa os 22 ms por linha medidos acima.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 

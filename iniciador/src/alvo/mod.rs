@@ -13,7 +13,7 @@
 //! arquitetura, e — a partir do momento em que o firmware sai de cena — como
 //! se monta uma tabela de tradução e como se salta para o kernel.
 //!
-//! É a mesma divisão que o kernel faz em [`crate::alvo`]: a fachada expõe as
+//! É a mesma divisão que o kernel faz em `kernel/src/arch`: a fachada expõe as
 //! perguntas, e cada backend responde do jeito da máquina dele.
 
 #[cfg(target_arch = "x86_64")]

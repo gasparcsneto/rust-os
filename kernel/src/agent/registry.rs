@@ -72,10 +72,6 @@ pub struct Command {
     pub handler: Handler,
 }
 
-/// Procura um comando pelo nome.
-///
-/// Busca linear: com uma dezena de comandos, uma tabela hash custaria mais em
-/// complexidade do que economizaria em ciclos.
 /// Todos os comandos, na ordem em que foram declarados.
 ///
 /// Existe para quem precisa **listar**, e não procurar: `agent.describe`, que
@@ -86,6 +82,10 @@ pub fn todos() -> &'static [Command] {
     super::commands::COMANDOS
 }
 
+/// Procura um comando pelo nome.
+///
+/// Busca linear: com algumas dezenas de comandos, uma tabela hash custaria
+/// mais em complexidade do que economizaria em ciclos.
 pub fn encontrar(nome: &str) -> Option<&'static Command> {
     super::commands::COMANDOS.iter().find(|c| c.nome == nome)
 }

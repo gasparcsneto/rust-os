@@ -1,6 +1,7 @@
 //! Os comandos que o kernel expõe ao agente.
 //!
-//! Esta é a superfície de introspecção da fase 0. Cada entrada de
+//! A superfície do sistema, para o agente e para quem digita no console — o
+//! interpretador despacha por esta mesma tabela. Cada entrada de
 //! [`COMANDOS`] é simultaneamente a implementação e a documentação formal do
 //! comando — ver [`super::registry`].
 //!
@@ -9,8 +10,8 @@
 //! É isso que faz a mesma resposta JSON sair de um x86 e de um ARM.
 //!
 //! Convenção de nomes: `<subsistema>.<ação>`. O agrupamento por prefixo deixa
-//! a listagem de `agent.describe` legível e prepara o terreno para as fases
-//! seguintes (`process.list`, `fs.stat`, `irq.stats`).
+//! a listagem de `agent.describe` legível, e um agente que descobre `fs.list`
+//! já sabe onde procurar `fs.read`.
 
 use core::fmt;
 
@@ -421,7 +422,9 @@ fn system_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.field_str("arch", crate::arch::nome())?;
     w.field_str("kernel", env!("CARGO_PKG_NAME"))?;
     w.field_str("version", env!("CARGO_PKG_VERSION"))?;
-    w.field_str("phase", "0")?;
+    // A última fase completa do roteiro. Era um "0" escrito aqui à mão, e
+    // continuou dizendo isso por cinco fases — ver [`crate::FASE`].
+    w.field_str("phase", crate::FASE)?;
 
     let cpu = crate::arch::identificar_cpu();
     w.field_str("cpu_vendor", cpu.como_str())?;
