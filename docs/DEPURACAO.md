@@ -292,6 +292,16 @@ ou a rodada seguinte a refaz do zero. Duas que voltaram limpas:
   só não está na mesma variável.
 
 - **Disciplina de travas.** Varrer todo `.lock()` que não tenha
-  `sem_interrupcoes` acima. As sete ocorrências são legítimas: inicialização
-  antes de a interrupção existir, contrato `unsafe` documentado, ou dentro de
-  handler com as interrupções já mascaradas pela entrada de exceção.
+  `sem_interrupcoes` na mesma linha nem logo acima. Todas as ocorrências são
+  legítimas, e caem em quatro categorias: inicialização antes de a interrupção
+  existir (`*DISCO.lock() = Some(...)` e os irmãos dele), contrato `unsafe`
+  documentado que exige as interrupções já mascaradas (`fios::selecionar`),
+  dentro de handler com as interrupções mascaradas pela entrada de exceção, e
+  maquinaria só de teste.
+
+  O número dessas ocorrências **não** fica escrito aqui de propósito. Ele já
+  esteve: "as sete ocorrências são legítimas", numa época em que eram sete.
+  Hoje são doze, e nenhuma delas é nova irregularidade — o que mudou foi o
+  tamanho do kernel. Um número numa receita de varredura envelhece sozinho e
+  faz parecer que algo mudou quando nada mudou; o que não envelhece são as
+  categorias.

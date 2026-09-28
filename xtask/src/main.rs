@@ -1909,8 +1909,10 @@ fn simbolos_do_kernel(kernel: &Path) -> Result<Vec<(String, u64)>, String> {
 /// uma `unsafe fn` cujo doc já tem uma seção `# Safety`, a invariante é a da
 /// função e não se repete.
 ///
-/// A convenção é seguida em **todos** os 400 blocos do projeto, e não havia
-/// nada que a fiscalizasse: o primeiro bloco sem justificativa entraria sem
+/// A convenção é seguida em **todos** os blocos do projeto — quantos são, o
+/// próprio comando diz ao terminar, e por isso o número não mora aqui
+/// envelhecendo. O que faltava era fiscal: o primeiro bloco sem justificativa
+/// entraria sem
 /// que ninguém notasse, e o que se perde aí não é estilo. Um `unsafe` sem
 /// invariante escrita é um `unsafe` cuja invariante ninguém conferiu — e num
 /// kernel isso volta como corrupção em outro lugar.
@@ -1928,21 +1930,120 @@ fn simbolos_do_kernel(kernel: &Path) -> Result<Vec<(String, u64)>, String> {
 /// esquecimento, não arbitrar a redação: exigir mais produziria ruído, e
 /// ruído é o que faz uma conferência ser desligada.
 fn conferir_invariantes() -> Result<ExitCode, String> {
-    let unsafe_ok = conferir_blocos_unsafe()?;
-    let params_ok = conferir_parametros_do_agente()?;
-    if unsafe_ok == ExitCode::SUCCESS && params_ok == ExitCode::SUCCESS {
+    let passos = [
+        conferir_blocos_unsafe()?,
+        conferir_parametros_do_agente()?,
+        conferir_arvore_do_readme()?,
+    ];
+    if passos.iter().all(|p| *p == ExitCode::SUCCESS) {
         Ok(ExitCode::SUCCESS)
     } else {
         Ok(ExitCode::FAILURE)
     }
 }
 
-/// Confere que todo parâmetro declarado é lido, e todo parâmetro lido é
-/// declarado.
+/// Confere que a árvore de arquivos do README é a árvore que existe.
+///
+/// # Por que isto virou conferência
+///
+/// Porque tinha apodrecido. Quando esta função foi escrita, trinta dos oitenta
+/// e nove arquivos de fonte não apareciam na árvore do README — um terço do
+/// projeto, incluindo subsistemas inteiros: o sistema de arquivos, os
+/// dispositivos virtio, o USB, a tela. E a árvore listava um `serial.rs` no
+/// iniciador que já não existia.
+///
+/// Nada disso quebra o build, e é justamente esse o problema. Um mapa errado
+/// é pior que nenhum mapa: quem chega ao projeto pelo README procura o código
+/// de disco onde ele não está e conclui que não há.
+///
+/// # Como a conferência é feita, e por que por contagem
+///
+/// Contando nomes de arquivo, dos dois lados. Reconstruir o caminho completo
+/// de cada linha exigiria interpretar o recuo dos desenhos de árvore, o que é
+/// frágil por um ganho pequeno; contar pega as duas direções que importam —
+/// um arquivo novo que ninguém documentou, e um documentado que já não
+/// existe. Nomes repetem (`mod.rs` aparece dezenas de vezes), então o que se
+/// compara é quantas vezes cada nome aparece em cada lado.
+fn conferir_arvore_do_readme() -> Result<ExitCode, String> {
+    use std::collections::BTreeMap;
+
+    let raiz = raiz_do_projeto();
+    let readme = std::fs::read_to_string(raiz.join("README.md"))
+        .map_err(|e| format!("não foi possível ler o README: {e}"))?;
+
+    let arvore = {
+        let de = readme
+            .find("kernel/src/\n")
+            .ok_or("a árvore de arquivos não foi encontrada no README")?;
+        let ate = readme[de..]
+            .find("```")
+            .ok_or("o fim da árvore de arquivos não foi encontrado")?;
+        &readme[de..de + ate]
+    };
+
+    let mut no_readme: BTreeMap<&str, usize> = BTreeMap::new();
+    for linha in arvore.lines() {
+        for palavra in linha.split_whitespace() {
+            if palavra.ends_with(".rs") || palavra.ends_with(".ld") {
+                *no_readme.entry(palavra).or_default() += 1;
+            }
+        }
+    }
+
+    let mut no_disco: BTreeMap<String, usize> = BTreeMap::new();
+    for sub in ["kernel/src", "iniciador/src", "protocolo/src", "xtask/src"] {
+        percorrer_fontes_e_ligacao(&raiz.join(sub), &mut |caminho| {
+            let nome = caminho
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or("nome de arquivo ilegível")?
+                .to_string();
+            *no_disco.entry(nome).or_default() += 1;
+            Ok(())
+        })?;
+    }
+
+    let mut queixas: Vec<String> = Vec::new();
+    for (nome, quantos) in &no_disco {
+        let documentados = no_readme.get(nome.as_str()).copied().unwrap_or(0);
+        if documentados < *quantos {
+            queixas.push(format!(
+                "`{nome}` existe {quantos}x e a árvore do README mostra {documentados}x"
+            ));
+        }
+    }
+    for (nome, quantos) in &no_readme {
+        let existem = no_disco.get(*nome).copied().unwrap_or(0);
+        if existem < *quantos {
+            queixas.push(format!(
+                "a árvore do README mostra `{nome}` {quantos}x e existem {existem}x"
+            ));
+        }
+    }
+
+    if !queixas.is_empty() {
+        eprintln!("[xtask] a árvore do README não é a árvore que existe:");
+        for q in &queixas {
+            eprintln!("  {q}");
+        }
+        eprintln!(
+            "\nA seção `## Arquitetura` do README é o mapa por onde alguém entra neste \
+             projeto. Um arquivo novo entra nela junto com o código."
+        );
+        return Ok(ExitCode::FAILURE);
+    }
+
+    let total: usize = no_disco.values().sum();
+    println!("[xtask] {total} arquivos de fonte, todos na árvore do README");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Confere que um comando do agente diz a mesma coisa nos três lugares onde
+/// ele é descrito.
 ///
 /// # A regra, e por que ela cai calada
 ///
-/// Cada comando do agente declara seus parâmetros em [`ParamSpec`] e os lê
+/// Cada comando do agente declara seus parâmetros num `ParamSpec` e os lê
 /// com `member("...")` no handler. Os dois lados têm de dizer o mesmo nome, e
 /// nada os obriga:
 ///
@@ -1957,9 +2058,17 @@ fn conferir_invariantes() -> Result<ExitCode, String> {
 /// pega isso, porque a resposta continua saindo — só ignora o que lhe
 /// pediram.
 ///
-/// Conferido nos 32 comandos quando esta função foi escrita: nenhuma
-/// divergência. É por isso mesmo que ela existe — a primeira vai entrar do
-/// mesmo jeito que estas não entraram, sem ninguém notar.
+/// # O terceiro lugar
+///
+/// A tabela de comandos do README, que é uma cópia à mão desta. O README
+/// afirmava que ela era gerada do registro e que refletia sempre a verdade;
+/// seis comandos tinham entrado no kernel sem passar por ela. Um comando fora
+/// da tabela existe e ninguém descobre — e a afirmação de que não podia
+/// acontecer era o que garantia que ninguém fosse conferir.
+///
+/// Nenhuma divergência quando esta função foi escrita, em comando nenhum. É
+/// por isso mesmo que ela existe — a primeira vai entrar do mesmo jeito que
+/// estas não entraram, sem ninguém notar.
 fn conferir_parametros_do_agente() -> Result<ExitCode, String> {
     let caminho = raiz_do_projeto().join("kernel/src/agent/commands.rs");
     let texto = std::fs::read_to_string(&caminho)
@@ -1975,8 +2084,12 @@ fn conferir_parametros_do_agente() -> Result<ExitCode, String> {
         &texto[de..de + ate]
     };
 
+    let readme = std::fs::read_to_string(raiz_do_projeto().join("README.md"))
+        .map_err(|e| format!("não foi possível ler o README: {e}"))?;
+
     let mut queixas: Vec<String> = Vec::new();
     let mut conferidos = 0usize;
+    let mut na_tabela: Vec<String> = Vec::new();
 
     for bloco in tabela.split("Command {").skip(1) {
         let nomes: Vec<&str> = entre_aspas_apos(bloco, "nome: \"");
@@ -1996,6 +2109,14 @@ fn conferir_parametros_do_agente() -> Result<ExitCode, String> {
         };
         let lidos = entre_aspas_apos(corpo, "member(\"");
         conferidos += 1;
+        na_tabela.push((*comando).to_string());
+
+        // A tabela do README é uma cópia à mão do que está aqui. Quando esta
+        // conferência entrou, seis comandos já tinham escapado dela — e o
+        // próprio README dizia que ela era gerada e refletia sempre a verdade.
+        if !readme.contains(&format!("| `{comando}` |")) {
+            queixas.push(format!("{comando}: não aparece na tabela do README"));
+        }
 
         for p in params {
             if !lidos.contains(p) {
@@ -2009,21 +2130,59 @@ fn conferir_parametros_do_agente() -> Result<ExitCode, String> {
         }
     }
 
+    // E a direção contrária: uma linha do README para um comando que saiu.
+    for linha in readme.lines() {
+        let Some(resto) = linha.strip_prefix("| `") else {
+            continue;
+        };
+        let Some(nome) = resto.split('`').next() else {
+            continue;
+        };
+        // Só o que tem forma de nome de comando: `<subsistema>.<ação>`, que é a
+        // convenção do módulo. Sem isto, qualquer outra tabela do README com
+        // uma célula em crase e um ponto — um `Cargo.toml`, um `0.1.0` —
+        // viraria um comando inexistente.
+        if !parece_nome_de_comando(nome) {
+            continue;
+        }
+        if !na_tabela.iter().any(|c| c == nome) {
+            queixas.push(format!("{nome}: está na tabela do README e não existe"));
+        }
+    }
+
     if !queixas.is_empty() {
-        eprintln!("[xtask] parâmetros do agente declarados de um lado só:");
+        eprintln!("[xtask] o agente descrito de um lado só:");
         for q in &queixas {
             eprintln!("  {q}");
         }
         eprintln!(
-            "\nO nome em `ParamSpec` e o de `member(\"...\")` no handler têm de ser o \
-             mesmo: a validação recusa todo campo fora da lista, e ignora em silêncio \
-             todo campo da lista que o handler não leia."
+            "\nUm comando do agente é descrito em três lugares, e os três têm de dizer \
+             o mesmo: o `ParamSpec` que o declara, o `member(\"...\")` que o handler lê \
+             e a linha da tabela do README. A validação recusa todo campo fora da \
+             lista e ignora em silêncio todo campo da lista que o handler não leia; a \
+             tabela do README é por onde alguém descobre que o comando existe."
         );
         return Ok(ExitCode::FAILURE);
     }
 
-    println!("[xtask] {conferidos} comandos do agente, parâmetros declarados e lidos batem");
+    println!(
+        "[xtask] {conferidos} comandos do agente: parâmetros declarados e lidos batem, \
+         e todos estão na tabela do README"
+    );
     Ok(ExitCode::SUCCESS)
+}
+
+/// Tem forma de nome de comando do agente: `<subsistema>.<ação>`.
+fn parece_nome_de_comando(nome: &str) -> bool {
+    let Some((sub, acao)) = nome.split_once('.') else {
+        return false;
+    };
+    let identificador = |p: &str| {
+        !p.is_empty()
+            && p.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    };
+    identificador(sub) && identificador(acao)
 }
 
 /// O texto logo depois de `marca`, se ela aparecer.
@@ -2211,6 +2370,28 @@ fn dentro_de_unsafe_fn_documentada(linhas: &[&str], i: usize) -> bool {
         return false;
     }
     false
+}
+
+/// Chama `f` para cada arquivo `.rs` ou `.ld` sob `dir`.
+///
+/// O `linker.ld` entra porque ele é fonte como qualquer outra: o layout de
+/// memória do kernel ARM mora lá, e a árvore do README o documenta.
+fn percorrer_fontes_e_ligacao(
+    dir: &Path,
+    f: &mut impl FnMut(&Path) -> Result<(), String>,
+) -> Result<(), String> {
+    let entradas = std::fs::read_dir(dir)
+        .map_err(|e| format!("não foi possível listar {}: {e}", dir.display()))?;
+    for entrada in entradas {
+        let entrada = entrada.map_err(|e| format!("erro ao listar {}: {e}", dir.display()))?;
+        let caminho = entrada.path();
+        if caminho.is_dir() {
+            percorrer_fontes_e_ligacao(&caminho, f)?;
+        } else if caminho.extension().is_some_and(|e| e == "rs" || e == "ld") {
+            f(&caminho)?;
+        }
+    }
+    Ok(())
 }
 
 /// Chama `f` para cada arquivo `.rs` sob `dir`.

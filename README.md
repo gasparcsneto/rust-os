@@ -88,6 +88,7 @@ cargo xtask debug                    # sobe congelado, esperando gdb/lldb
 cargo xtask simbolo 0xffff8000...    # endereço -> arquivo, linha e função
 cargo xtask asm consumir_pilha       # o que o otimizador realmente gerou
 cargo xtask elf                      # confere os ELFs de usuário por fora
+cargo xtask invariantes              # regras de fonte: SAFETY e parâmetros do agente
 ```
 
 Com o kernel rodando, converse com ele de outro terminal:
@@ -136,17 +137,27 @@ Os dois podem rodar ao mesmo tempo: cada arquitetura tem seu próprio socket.
 | `irq.stats` | Contadores de interrupções de hardware por linha |
 | `traps.stats` | Contadores de exceções e detalhes da última falha |
 | `debug.trigger` | Dispara uma exceção de propósito (`kind`: `breakpoint` ou `fatal`) |
+| `pci.list` | Dispositivos do barramento PCI, com fabricante, modelo e função |
+| `disk.info` | Capacidade e estado do disco virtio, se houver um |
+| `disk.read` | Lê um setor de 512 bytes e o devolve em hexadecimal (`sector`, `length`) |
 | `disk.partitions` | A tabela de partições do disco, lida da GPT |
 | `btrfs.info` | O superbloco do Btrfs da partição de dados |
 | `btrfs.chunks` | O mapa de pedaços e a raiz da árvore de pedaços |
 | `fs.mounts` | O que está montado na árvore de arquivos, e de que tipo |
 | `fs.list` | Lista um diretório da árvore (`path`) |
 | `fs.read` | Lê um arquivo da árvore e devolve o conteúdo (`path`, `offset`, `max`) |
+| `net.info` | Endereço e contadores da placa de rede, se houver uma |
+| `net.arp` | Pergunta quem atende por um IPv4 e espera a resposta (`ip`, `from`) |
+| `video.sample` | Amostra a tela numa grade de cores (`columns`, `rows`) |
 | `keyboard.read` | O que foi digitado no teclado da máquina, e os contadores dele (`max`) |
 | `log.tail` | Registros de log estruturados (`count`, `min_level`) |
 
-Esta tabela é gerada a partir do mesmo registro que o kernel usa para validar
-chamadas — `agent.describe` sempre reflete a verdade.
+Esta tabela é escrita à mão e **conferida** contra o registro que o kernel usa
+para validar chamadas: `cargo xtask invariantes` reprova a diferença nas duas
+direções. Dizia-se aqui que ela era gerada e que refletia sempre a verdade —
+seis comandos tinham entrado no kernel sem passar por ela. A verdade continua
+sendo `agent.describe`, que é gerado de fato; esta tabela é uma cópia que
+agora não pode divergir em silêncio.
 
 ## Arquitetura
 
@@ -158,25 +169,58 @@ kernel/src/
 ├── log.rs           logging estruturado em ring buffer
 ├── frames.rs        alocador de frames de memória física (bitmap)
 ├── paginacao.rs     fachada segura de mapeamento
+├── mmio.rs          como o kernel alcança a memória de um dispositivo
 ├── heap.rs          alocador do kernel: lista livre ordenada com fusão
+├── interpretador.rs operar o Duke digitando
+├── teclado.rs       o que uma pessoa digita chega ao kernel
+├── pci.rs           enumeração do barramento PCI
+├── particoes.rs     a tabela de partições GPT do disco
+├── rede.rs          o mínimo de protocolo acima do transporte de quadros
+├── traps.rs         contabilidade de exceções e modo post-mortem
+├── irq.rs           contadores de interrupções de hardware
+├── tempo.rs         contagem de tempo desde o boot
+├── qemu.rs          encerramento do emulador para testes
 ├── testes.rs        suíte de testes que roda dentro do emulador
+├── tela/
+│   ├── mod.rs       o framebuffer: desenhar na tela
+│   ├── bochs.rs     o adaptador de vídeo do QEMU, programado do zero
+│   └── console.rs   o console de texto: o que uma pessoa lê na tela
 ├── fios/
 │   ├── mod.rs       escalonador preemptivo: fios, rodízio e quantum
 │   └── pilha.rs     pilhas de fio, cada uma com sua guard page
 ├── usuario/
 │   ├── mod.rs       ABI das chamadas de sistema e validação de ponteiros
+│   ├── elf.rs       leitor de ELF64: o formato em que um programa chega
 │   ├── programa.rs  mapeia o processo e desce de privilégio
-│   └── exemplo.rs   dois programas mínimos, em assembly
+│   ├── descritores.rs  a tabela de descritores de um processo
+│   └── exemplo.rs   seis programas mínimos, em assembly
 ├── tarefas/
 │   ├── mod.rs       tarefa, identidade e o `yield` explícito
 │   ├── executor.rs  escalonador cooperativo com suporte a wakers
 │   ├── fila.rs      fila de capacidade fixa, escrita de dentro de handlers
 │   ├── relogio.rs   o futuro que espera o tempo passar
 │   └── entrada.rs   bytes do canal do agente, entregues por interrupção
-├── traps.rs         contabilidade de exceções e modo post-mortem
-├── irq.rs           contadores de interrupções de hardware
-├── tempo.rs         contagem de tempo desde o boot
-├── qemu.rs          encerramento do emulador para testes
+├── vfs/
+│   ├── mod.rs       um nome de caminho, muitos sistemas de arquivos
+│   ├── programas.rs os programas embutidos, vistos como sistema de arquivos
+│   └── btrfs/
+│       ├── mod.rs      Btrfs, somente leitura
+│       ├── pedacos.rs  endereço lógico para deslocamento no disco
+│       ├── arvore.rs   inodes, diretórios e extensões
+│       ├── interno.rs  os ponteiros de um nó interno, e por onde descer
+│       ├── folha.rs    os itens de uma folha
+│       └── crc32c.rs   a soma de verificação que o Btrfs usa por padrão
+├── virtio/
+│   ├── mod.rs       dispositivos virtio
+│   ├── transporte.rs  achar os registradores de um dispositivo, e ligá-lo
+│   ├── fila.rs      a virtqueue split: o canal por onde os pedidos passam
+│   ├── blk.rs       o disco
+│   ├── net.rs       a placa de rede
+│   └── teclado.rs   o teclado do ARM, por virtio
+├── usb/
+│   ├── mod.rs       o barramento por onde entram os periféricos de verdade
+│   ├── xhci.rs      o controlador xHCI: a porta de entrada do USB
+│   └── hid.rs       o relatório de um teclado USB, traduzido
 ├── agent/
 │   ├── mod.rs       laço de atendimento e despacho
 │   ├── json.rs      JSON sem alocação (streaming + varredura)
@@ -190,16 +234,23 @@ kernel/src/
     │   ├── gdt.rs    GDT, TSS e pilha dedicada ao double fault
     │   ├── idt.rs    IDT e handlers de exceção e interrupção
     │   ├── pic.rs    controlador 8259 e timer PIT
+    │   ├── apic.rs   o APIC local: o timer por núcleo do x86 moderno
     │   ├── paginacao.rs  assume as tabelas de página do iniciador
+    │   ├── contexto.rs   troca de contexto
+    │   ├── usuario.rs    entrada em ring 3 e chamadas de sistema
+    │   ├── pci.rs    acesso ao espaço de configuração PCI
     │   └── uart.rs   UART 16550 por port-mapped I/O
     └── aarch64/
-        ├── mod.rs     boot em assembly, cabeçalho de imagem arm64, MIDR_EL1
-        ├── vetores.rs tabela de vetores de exceção (VBAR_EL1)
-        ├── gic.rs     GIC v2 e timer genérico do ARM
-        ├── mmu.rs     tabelas de tradução e ativação da MMU
-        ├── uart.rs    PL011 por memory-mapped I/O
-        ├── fdt.rs     leitor de device tree escrito à mão
-        └── linker.ld  layout de memória e símbolos de boot
+        ├── mod.rs      boot em assembly, cabeçalho de imagem arm64, MIDR_EL1
+        ├── vetores.rs  tabela de vetores de exceção (VBAR_EL1)
+        ├── gic.rs      GIC v2 e timer genérico do ARM
+        ├── mmu.rs      tabelas de tradução e ativação da MMU
+        ├── contexto.rs troca de contexto
+        ├── usuario.rs  entrada em EL0 e chamadas de sistema
+        ├── pci.rs      acesso ao espaço de configuração PCI
+        ├── uart.rs     PL011 por memory-mapped I/O
+        ├── fdt.rs      leitor de device tree escrito à mão
+        └── linker.ld   layout de memória e símbolos de boot
 
 iniciador/src/       a aplicação UEFI que o firmware carrega da ESP
 ├── main.rs          confere as tabelas da UEFI, abre o kernel e relata
@@ -207,18 +258,20 @@ iniciador/src/       a aplicação UEFI que o firmware carrega da ESP
 ├── elf.rs           o pedaço do ELF64 que um carregador precisa entender
 ├── carga.rs         copia os segmentos, reloca e desenha o mapa
 ├── paginas.rs       as quatro tabelas de tradução, e como percorrê-las
-└── salto.rs         a saida dos servicos de boot, e a entrega da maquina
+├── salto.rs         a saída dos serviços de boot, e a entrega da máquina
+├── crc32.rs         o CRC-32 que a UEFI usa nos cabeçalhos das tabelas
+├── fdt.rs           o mínimo de device tree para conferir um endereço
+└── alvo/
+    ├── mod.rs       o que muda de uma arquitetura para a outra
+    ├── x86_64.rs    o que o Duke precisa saber sobre o x86_64
+    └── aarch64.rs   o que o Duke precisa saber sobre o aarch64
 
 protocolo/src/       a ABI entre o iniciador e o kernel
-├── lib.rs           o que e entregue ao kernel, com magica e versao
+├── lib.rs           o que é entregue ao kernel, com mágica e versão
 └── mapa.rs          onde cada coisa mora no espaço virtual
-├── serial.rs        a COM1, que sobrevive ao fim dos serviços de boot
-└── crc32.rs         o CRC-32 do Ethernet, que confere os cabeçalhos
 
-xtask/src/main.rs    build system: compila, gera imagens, roda o emulador,
-                     conecta depurador e traduz endereços em símbolos
-
-docs/DEPURACAO.md    o ferramental de depuração, e o que não se aplica aqui
+xtask/src/
+└── main.rs          a ferramenta de build, teste e diagnóstico do projeto
 ```
 
 **Como as duas arquiteturas convivem.** Cada backend em `arch/` traduz o que
