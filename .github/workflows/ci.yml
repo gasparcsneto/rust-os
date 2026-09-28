@@ -67,6 +67,18 @@ jobs:
             cargo clippy --target "$alvo" --features modo-teste -- -D warnings
           done
 
+      # Todo bloco `unsafe` declara a invariante de que depende.
+      #
+      # A convenção existe desde o primeiro commit e é seguida nos 400 blocos
+      # do projeto — e nada a fiscalizava. Um `unsafe` sem invariante escrita
+      # é um `unsafe` cuja invariante ninguém conferiu, e num kernel isso
+      # volta como corrupção em outro lugar.
+      #
+      # A conferência é de fonte, não precisa de alvo nem de emulador, e por
+      # isso mora aqui.
+      - name: Invariantes dos blocos unsafe
+        run: cargo xtask invariantes
+
       # Os links da documentação, que é onde o apodrecimento não dói até doer.
       #
       # Este projeto explica as decisões nos comentários, e um `[`Fulano`]` que
@@ -159,6 +171,23 @@ jobs:
       # de ponto cego que a fumaça existe para fechar.
       - name: Fumaça (release)
         run: cargo xtask fumaca --arch ${{ matrix.arch }} --release
+
+      # As imagens ELF dos programas de usuário, conferidas por fora.
+      #
+      # Elas são montadas à mão, byte a byte, no mesmo assembly do programa —
+      # e o cabeçalho do módulo que as escreve diz, desde sempre, que a
+      # fraqueza do arranjo é compensada por uma ferramenta independente:
+      # "a imagem é conferida por ferramenta independente — `cargo xtask elf`
+      # roda o llvm-readobj sobre os bytes embutidos".
+      #
+      # O comando existia e o CI nunca o rodava. A conferência acontecia
+      # quando alguém a rodava à mão, o que é o mesmo que não acontecer. Dois
+      # programas entraram neste projeto sem nunca passar por ela.
+      #
+      # Fica aqui, e não no job de qualidade, porque precisa do kernel
+      # compilado para o alvo — e este job já o compila.
+      - name: Imagens ELF dos programas
+        run: cargo xtask elf --arch ${{ matrix.arch }}
 
       # O iniciador UEFI, nas duas arquiteturas e nos dois firmwares.
       #

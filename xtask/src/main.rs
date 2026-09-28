@@ -191,6 +191,7 @@ fn main() -> ExitCode {
             None => Err("uso: cargo xtask asm <simbolo>".into()),
         },
         "elf" => conferir_elfs(arch, release),
+        "invariantes" => conferir_invariantes(),
         "iniciador" => iniciador(arch, release),
         "help" | "-h" => {
             ajuda();
@@ -273,6 +274,7 @@ COMANDOS:
     simbolo <endereco>...     traduz endereços de execução em arquivo e linha
     asm <simbolo>             desmonta uma função do binário compilado
     elf                       confere os programas de usuário embutidos
+    invariantes               confere que todo `unsafe` declara a sua
     iniciador                 sobe o iniciador UEFI no OVMF e confere o relatório
     help                      mostra esta mensagem
 
@@ -1896,6 +1898,200 @@ fn simbolos_do_kernel(kernel: &Path) -> Result<Vec<(String, u64)>, String> {
         }
     }
     Ok(tabela)
+}
+
+/// Confere que todo bloco `unsafe` declara a invariante de que depende.
+///
+/// # A convenção, e por que ela precisava de um fiscal
+///
+/// Este kernel escreve um comentário `SAFETY` acima de cada bloco `unsafe`,
+/// dizendo o que torna aquela operação válida. Quando o bloco está dentro de
+/// uma `unsafe fn` cujo doc já tem uma seção `# Safety`, a invariante é a da
+/// função e não se repete.
+///
+/// A convenção é seguida em **todos** os 400 blocos do projeto, e não havia
+/// nada que a fiscalizasse: o primeiro bloco sem justificativa entraria sem
+/// que ninguém notasse, e o que se perde aí não é estilo. Um `unsafe` sem
+/// invariante escrita é um `unsafe` cuja invariante ninguém conferiu — e num
+/// kernel isso volta como corrupção em outro lugar.
+///
+/// # Como se sabe que ela confere alguma coisa
+///
+/// Semeando blocos que ela **tem** de reprovar e blocos que ela **tem** de
+/// aceitar, e olhando quais aparecem. Foi assim que as duas primeiras versões
+/// da regra caíram — ver [`tem_safety_cobrindo`], que conta as duas.
+///
+/// # A regra, deliberadamente frouxa
+///
+/// Ou há um `SAFETY` nas oito linhas acima, ou o bloco está dentro de uma
+/// `unsafe fn` com `# Safety` no doc. Frouxa porque o objetivo é pegar o
+/// esquecimento, não arbitrar a redação: exigir mais produziria ruído, e
+/// ruído é o que faz uma conferência ser desligada.
+fn conferir_invariantes() -> Result<ExitCode, String> {
+    let raiz = raiz_do_projeto();
+    let mut faltando: Vec<String> = Vec::new();
+    let mut total = 0usize;
+
+    for sub in ["kernel/src", "iniciador/src", "protocolo/src"] {
+        percorrer_fontes(&raiz.join(sub), &mut |caminho| {
+            let texto = std::fs::read_to_string(caminho)
+                .map_err(|e| format!("não foi possível ler {}: {e}", caminho.display()))?;
+            let linhas: Vec<&str> = texto.lines().collect();
+
+            for (i, linha) in linhas.iter().enumerate() {
+                if !bloco_unsafe(linha) {
+                    continue;
+                }
+                total += 1;
+                if tem_safety_cobrindo(&linhas, i) {
+                    continue;
+                }
+                if dentro_de_unsafe_fn_documentada(&linhas, i) {
+                    continue;
+                }
+                faltando.push(format!("{}:{}  {}", caminho.display(), i + 1, linha.trim()));
+            }
+            Ok(())
+        })?;
+    }
+
+    if !faltando.is_empty() {
+        eprintln!(
+            "[xtask] {} bloco(s) `unsafe` sem invariante declarada:",
+            faltando.len()
+        );
+        for f in &faltando {
+            eprintln!("  {f}");
+        }
+        eprintln!(
+            "\nEscreva um comentário `SAFETY:` acima do bloco, dizendo o que o torna \
+             válido — ou ponha o bloco dentro de uma `unsafe fn` cujo doc tenha `# Safety`."
+        );
+        return Ok(ExitCode::FAILURE);
+    }
+
+    println!("[xtask] {total} blocos `unsafe`, todos com a invariante declarada");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Há um `SAFETY` cobrindo o bloco da linha `i`?
+///
+/// # As duas versões erradas que vieram antes
+///
+/// A primeira olhava oito linhas para trás e aceitava qualquer `SAFETY` nelas.
+/// Oito linhas é mais ou menos a distância entre dois blocos vizinhos, então
+/// um bloco herdava a justificativa do bloco anterior — e isso não é um risco
+/// teórico: foi assim que a primeira mutação semeada passou sem ser vista.
+///
+/// A segunda parava no primeiro pedaço de código, exigindo o comentário
+/// colado. Reprovou dez blocos legítimos do projeto, todos do mesmo formato:
+///
+/// ```text
+/// // SAFETY: ...
+/// let status =
+///     unsafe { (boot.alocar_pool)(...) };
+/// ```
+///
+/// O `unsafe` mora na continuação de uma expressão cuja primeira linha é que
+/// leva o comentário. Exigir colagem aí seria exigir que o código fosse
+/// escrito de outro jeito para agradar a conferência.
+///
+/// # A regra que ficou
+///
+/// Sobe até dez linhas, atravessando código e comentário, e **para numa chave
+/// de fechamento**. A chave é a fronteira que faltava: ela marca o fim do
+/// bloco anterior, e é justamente o que separa "o `SAFETY` é meu" de "o
+/// `SAFETY` é do vizinho".
+fn tem_safety_cobrindo(linhas: &[&str], i: usize) -> bool {
+    const ALCANCE: usize = 10;
+    for j in (i.saturating_sub(ALCANCE)..i).rev() {
+        let l = linhas[j].trim_start();
+        if l.starts_with('}') {
+            return false;
+        }
+        if l.starts_with("//") && l.contains("SAFETY") {
+            return true;
+        }
+    }
+    false
+}
+
+/// Uma linha que abre um bloco `unsafe`, e não uma que só menciona a palavra.
+fn bloco_unsafe(linha: &str) -> bool {
+    let Some(em) = linha.find("unsafe") else {
+        return false;
+    };
+    // `unsafe fn`, `unsafe impl` e `unsafe trait` não são blocos.
+    let resto = linha[em + "unsafe".len()..].trim_start();
+    resto.starts_with('{')
+}
+
+/// O bloco da linha `i` está dentro de uma `unsafe fn` com `# Safety`?
+fn dentro_de_unsafe_fn_documentada(linhas: &[&str], i: usize) -> bool {
+    // Sobe até a primeira assinatura de função. É uma heurística de coluna,
+    // e basta: este projeto não aninha funções dentro de funções fora de
+    // blocos de teste, e lá o `unsafe` vem com `SAFETY` próprio.
+    for j in (0..=i).rev() {
+        let l = linhas[j];
+        let recuo = l.len() - l.trim_start().len();
+        let t = l.trim_start();
+        let assinatura = t.starts_with("fn ")
+            || t.starts_with("pub fn ")
+            || t.starts_with("unsafe fn ")
+            || t.starts_with("pub unsafe fn ")
+            || t.starts_with("pub(crate) unsafe fn ")
+            || t.starts_with("pub(crate) fn ")
+            || t.starts_with("const fn ")
+            || t.starts_with("pub const fn ")
+            || t.contains(" fn ");
+        if !assinatura || recuo > 4 {
+            continue;
+        }
+        if !t.contains("unsafe fn ") {
+            return false;
+        }
+        // O doc fica acima da assinatura, possivelmente com atributos no meio.
+        let mut k = j;
+        while k > 0 {
+            k -= 1;
+            let d = linhas[k].trim_start();
+            if let Some(corpo) = d.strip_prefix("///") {
+                // O cabeçalho da seção, e não a menção a ela: uma linha de
+                // prosa dizendo "veja a `# Safety` da função" satisfazia a
+                // conferência sem que seção nenhuma existisse. Medido — foi
+                // exatamente assim que a primeira mutação escapou.
+                if corpo.trim() == "# Safety" {
+                    return true;
+                }
+                continue;
+            }
+            if d.starts_with("#[") || d.starts_with("//") || d.is_empty() {
+                continue;
+            }
+            break;
+        }
+        return false;
+    }
+    false
+}
+
+/// Chama `f` para cada arquivo `.rs` sob `dir`.
+fn percorrer_fontes(
+    dir: &Path,
+    f: &mut impl FnMut(&Path) -> Result<(), String>,
+) -> Result<(), String> {
+    let entradas = std::fs::read_dir(dir)
+        .map_err(|e| format!("não foi possível listar {}: {e}", dir.display()))?;
+    for entrada in entradas {
+        let entrada = entrada.map_err(|e| format!("erro ao listar {}: {e}", dir.display()))?;
+        let caminho = entrada.path();
+        if caminho.is_dir() {
+            percorrer_fontes(&caminho, f)?;
+        } else if caminho.extension().is_some_and(|e| e == "rs") {
+            f(&caminho)?;
+        }
+    }
+    Ok(())
 }
 
 /// Os programas embutidos, deduzidos dos símbolos `programa_<nome>_inicio`.
