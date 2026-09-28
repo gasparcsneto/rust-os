@@ -5832,6 +5832,114 @@ fn machine_recusa_regiao_degenerada() -> Resultado {
     Ok(())
 }
 
+/// O mapa de memória que chegou no boot coube inteiro na tabela.
+///
+/// # O defeito que este caso fecha
+///
+/// O iniciador entregava 133 regiões no x86 e o kernel guardava 64. Um aviso
+/// saía no log e a suíte passava inteira: nada afirmava que o mapa tinha
+/// chegado completo. Custava 28 MiB de RAM — 93 utilizáveis onde o firmware
+/// anunciava 121 livres — e o número que sobrava era plausível.
+///
+/// Aqui a afirmação é sobre o boot desta rodada, e não sobre um mapa
+/// forjado: é o mapa de verdade que precisa ter cabido. Por isso ele reprova
+/// no x86 por UEFI, que é onde o firmware descreve o mapa em pedaços, e passa
+/// trivialmente no ARM por `-kernel`, cujo device tree tem uma região só.
+fn machine_o_mapa_do_boot_coube_inteiro() -> Resultado {
+    let sem_vaga = crate::machine::regioes_sem_vaga();
+    let totais = crate::machine::estatisticas();
+    crate::log_info!(
+        "teste",
+        "mapa do boot: {} regioes guardadas, {} sem vaga, {} MiB utilizaveis",
+        totais.regioes,
+        sem_vaga,
+        totais.utilizavel / 1024 / 1024
+    );
+    if sem_vaga != 0 {
+        return Err("regioes de memoria do boot ficaram de fora da tabela");
+    }
+
+    // E a fusão aconteceu de fato. Sem esta metade, tirar a fusão do
+    // registro não reprovaria nada: as 132 regiões do x86 cabem nas 256
+    // vagas, e a tabela só voltaria a encher na primeira máquina com um mapa
+    // maior. O mapa guardado não pode ter duas vizinhas que se fundiriam.
+    let mut anterior: Option<crate::machine::Regiao> = None;
+    let mut fundiveis = 0;
+    crate::machine::com_regioes(|r| {
+        if let Some(a) = anterior
+            && crate::machine::fundir(&a, r).is_some()
+        {
+            fundiveis += 1;
+        }
+        anterior = Some(*r);
+    });
+    if fundiveis != 0 {
+        crate::log_error!(
+            "teste",
+            "{} pares de regioes vizinhas ficaram separados",
+            fundiveis
+        );
+        return Err("o mapa guardado tem regioes vizinhas do mesmo tipo sem fundir");
+    }
+    Ok(())
+}
+
+/// A fusão junta só o que é contínuo e do mesmo tipo.
+///
+/// Sobre a função, e não sobre o mapa da máquina: acrescentar regiões falsas
+/// ao mapa vivo as publicaria em `memory.regions` pelo resto da rodada.
+///
+/// As recusas são as que importam. Fundir uma faixa utilizável a uma
+/// reservada entregaria ao alocador memória que não é dele; fundir através de
+/// um buraco daria a ele endereços que não existem; e fundir sobrepostas
+/// esconderia o mapa incoerente que `memoria: regioes coerentes` acusa.
+fn machine_funde_so_vizinhas_do_mesmo_tipo() -> Resultado {
+    use crate::machine::{Regiao, TipoRegiao, fundir};
+
+    let a = Regiao {
+        inicio: 0x1000,
+        fim: 0x3000,
+        tipo: TipoRegiao::Utilizavel,
+    };
+    let contigua = Regiao {
+        inicio: 0x3000,
+        fim: 0x8000,
+        tipo: TipoRegiao::Utilizavel,
+    };
+    match fundir(&a, &contigua) {
+        Some(r) if r.inicio == 0x1000 && r.fim == 0x8000 && r.tipo == TipoRegiao::Utilizavel => {}
+        Some(_) => return Err("a fusao de duas vizinhas nao cobre as duas exatamente"),
+        None => return Err("duas vizinhas do mesmo tipo nao foram fundidas"),
+    }
+
+    let reservada = Regiao {
+        tipo: TipoRegiao::Reservada,
+        ..contigua
+    };
+    if fundir(&a, &reservada).is_some() {
+        return Err("uma faixa utilizavel foi fundida a uma reservada");
+    }
+    let depois_do_buraco = Regiao {
+        inicio: 0x4000,
+        ..contigua
+    };
+    if fundir(&a, &depois_do_buraco).is_some() {
+        return Err("a fusao atravessou um buraco entre as duas faixas");
+    }
+    let sobreposta = Regiao {
+        inicio: 0x2000,
+        ..contigua
+    };
+    if fundir(&a, &sobreposta).is_some() {
+        return Err("duas faixas sobrepostas foram fundidas");
+    }
+    // E a ordem: a nova vem depois da anterior, não antes.
+    if fundir(&contigua, &a).is_some() {
+        return Err("a fusao aceitou uma faixa que termina onde a anterior comeca");
+    }
+    Ok(())
+}
+
 /// Contabilizar uma falha não pode depender de conseguir a trava.
 ///
 /// É o caminho que roda dentro de handlers de exceção. Uma exceção acontece em
@@ -8722,6 +8830,14 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "machine: recusa regiao degenerada",
         f: machine_recusa_regiao_degenerada,
+    },
+    Caso {
+        nome: "machine: o mapa do boot coube inteiro",
+        f: machine_o_mapa_do_boot_coube_inteiro,
+    },
+    Caso {
+        nome: "machine: funde so vizinhas do mesmo tipo",
+        f: machine_funde_so_vizinhas_do_mesmo_tipo,
     },
     Caso {
         nome: "traps: registrar nao bloqueia",

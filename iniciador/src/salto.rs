@@ -31,13 +31,11 @@
 use crate::efi;
 use crate::relatar;
 
-/// Quantas regiões a entrega cabe.
-///
-/// Duzentas e cinquenta e seis. O firmware deste emulador descreve cento e
-/// vinte e nove; o dobro é a folga para uma máquina de verdade, que tem mais
-/// dispositivos. Estourar é um erro relatado enquanto ainda há como relatar,
-/// e não uma lista truncada que o kernel usaria como se fosse completa.
-const MAX_REGIOES: usize = 256;
+// Quantas regiões a entrega cabe — o teto do contrato, que o kernel também
+// usa para dimensionar a tabela dele. Estourar é um erro relatado enquanto
+// ainda há como relatar, e não uma lista truncada que o kernel usaria como se
+// fosse completa.
+use protocolo::MAX_REGIOES;
 
 /// Para onde o kernel vai, e como ele enxerga a memória.
 ///

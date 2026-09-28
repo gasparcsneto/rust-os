@@ -35,9 +35,18 @@ use spin::Mutex;
 
 /// Quantas regiões de memória o kernel consegue registrar.
 ///
-/// O QEMU x86 reporta ~10 e o `virt` do ARM reporta 1. Firmware UEFI real
-/// costuma ficar abaixo de 40. 64 dá folga confortável.
-const MAX_REGIOES: usize = 64;
+/// O teto do contrato com o iniciador, e não um número deste arquivo. Já foi:
+/// 64, com um comentário dizendo que "o QEMU x86 reporta ~10" — verdade
+/// enquanto quem bootava o x86 era o crate `bootloader`, que entregava o mapa
+/// já fundido. O firmware UEFI descreve cento e trinta regiões, o iniciador
+/// as repassa, e este kernel guardava as 64 primeiras: 93 MiB utilizáveis
+/// numa máquina em que o firmware anunciava 121 livres, com um aviso no log e
+/// a suíte inteira verde.
+///
+/// Com o mesmo número dos dois lados, nada que o iniciador aceitou pode
+/// faltar aqui. A fusão de [`adicionar_regiao`] faz o resto: a tabela
+/// raramente chega perto do teto.
+const MAX_REGIOES: usize = protocolo::MAX_REGIOES;
 
 /// Para que serve uma faixa de memória física.
 //
@@ -102,7 +111,14 @@ struct Maquina {
     regioes: [Regiao; MAX_REGIOES],
     n: usize,
     /// Regiões que não couberam em [`MAX_REGIOES`].
-    descartadas: usize,
+    ///
+    /// Separado de [`Self::degeneradas`] porque a causa é outra e a gravidade
+    /// também: uma região degenerada não descreve memória nenhuma, e recusá-la
+    /// não custa nada; uma região sem vaga é RAM de verdade que o alocador
+    /// nunca vai ver.
+    sem_vaga: usize,
+    /// Regiões recusadas por não descreverem faixa nenhuma.
+    degeneradas: usize,
 }
 
 /// Executa `f` com acesso exclusivo à descrição da máquina.
@@ -117,7 +133,8 @@ fn com_maquina<R>(f: impl FnOnce(&mut Maquina) -> R) -> R {
 static MAQUINA: Mutex<Maquina> = Mutex::new(Maquina {
     regioes: [Regiao::VAZIA; MAX_REGIOES],
     n: 0,
-    descartadas: 0,
+    sem_vaga: 0,
+    degeneradas: 0,
 });
 
 /// Registra uma região. Chamado pelo backend de arquitetura durante o boot.
@@ -134,17 +151,61 @@ static MAQUINA: Mutex<Maquina> = Mutex::new(Maquina {
 /// aqui que passam as regiões das duas arquiteturas.
 pub fn adicionar_regiao(regiao: Regiao) {
     com_maquina(|m| {
-        if regiao.fim <= regiao.inicio || m.n >= MAX_REGIOES {
-            // Contamos em vez de ignorar em silêncio: um mapa truncado faria
-            // `memory.stats` mentir, e um agente não tem como desconfiar de um
-            // número que parece plausível.
-            m.descartadas += 1;
+        // Contamos em vez de ignorar em silêncio: um mapa truncado faria
+        // `memory.stats` mentir, e um agente não tem como desconfiar de um
+        // número que parece plausível.
+        if regiao.fim <= regiao.inicio {
+            m.degeneradas += 1;
+            return;
+        }
+        if let Some(ultima) = m.n.checked_sub(1)
+            && let Some(unidas) = fundir(&m.regioes[ultima], &regiao)
+        {
+            m.regioes[ultima] = unidas;
+            return;
+        }
+        if m.n >= MAX_REGIOES {
+            m.sem_vaga += 1;
             return;
         }
         let n = m.n;
         m.regioes[n] = regiao;
         m.n = n + 1;
     });
+}
+
+/// A região que cobre as duas, se `nova` continua `anterior` sem mudar nada.
+///
+/// # Por que fundir
+///
+/// Porque o firmware descreve a memória pelo **uso** que ele fez dela, e o
+/// kernel só quer saber de quem ela é. O EDK II separa código de carregador,
+/// dados de serviços de boot e memória convencional em descritores vizinhos;
+/// o iniciador classifica os três como utilizáveis, e o que chega aqui são
+/// dezenas de faixas contíguas do mesmo tipo. Guardá-las separadas não
+/// informa nada a ninguém e gasta a tabela — que foi exatamente como ela
+/// encheu.
+///
+/// # Por que só com a anterior
+///
+/// Porque o mapa da UEFI chega ordenado por endereço, e o do device tree tem
+/// uma região. Fundir com qualquer uma exigiria procurar e, quando uma região
+/// nova unisse duas antigas, remover uma do meio. Com a anterior, o caso que
+/// existe é coberto numa comparação, e um mapa fora de ordem só perde a
+/// economia — nunca a correção: sem fusão, cada região continua lá, inteira.
+///
+/// # O que nunca se funde
+///
+/// Tipos diferentes, e faixas que se tocam só por sobreposição. Unir uma
+/// faixa utilizável a uma reservada entregaria ao alocador memória que não é
+/// dele; unir faixas sobrepostas esconderia um mapa incoerente que
+/// `memoria: regioes coerentes` existe para acusar.
+pub fn fundir(anterior: &Regiao, nova: &Regiao) -> Option<Regiao> {
+    (anterior.tipo == nova.tipo && anterior.fim == nova.inicio).then_some(Regiao {
+        inicio: anterior.inicio,
+        fim: nova.fim,
+        tipo: nova.tipo,
+    })
 }
 
 /// Executa `f` para cada região registrada.
@@ -215,9 +276,19 @@ pub fn estatisticas() -> Totais {
     })
 }
 
-/// Quantas regiões foram descartadas por falta de espaço.
+/// Quantas regiões foram recusadas, pelos dois motivos somados.
+///
+/// É o número que `memory.stats` publica como `dropped_regions`.
 pub fn regioes_descartadas() -> usize {
-    com_maquina(|m| m.descartadas)
+    com_maquina(|m| m.sem_vaga + m.degeneradas)
+}
+
+/// Quantas regiões de memória de verdade ficaram de fora por falta de vaga.
+///
+/// Zero é a única resposta certa num boot. Diferente de zero é RAM que o
+/// alocador nunca vai ver — ver [`MAX_REGIOES`].
+pub fn regioes_sem_vaga() -> usize {
+    com_maquina(|m| m.sem_vaga)
 }
 
 /// Destrava a descrição da máquina à força, para uso exclusivo do caminho de falha fatal.

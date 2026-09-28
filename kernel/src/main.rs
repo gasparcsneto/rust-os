@@ -209,21 +209,31 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     let mem = machine::estatisticas();
     log_info!(
         "mem",
-        "{} regioes: {} MiB utilizaveis, {} MiB retidos pelo bootloader, {} MiB de espaco descrito",
+        "{} regioes: {} MiB utilizaveis, {} MiB retidos pelo iniciador, {} MiB de espaco descrito",
         mem.regioes,
         mem.utilizavel / 1024 / 1024,
         mem.bootloader / 1024 / 1024,
         mem.descrito / 1024 / 1024
     );
 
-    let descartadas = machine::regioes_descartadas();
-    if descartadas > 0 {
-        // Nunca deixamos um mapa truncado passar em silêncio: um agente não
-        // tem como desconfiar de um número que parece plausível.
+    // Nunca deixamos um mapa truncado passar em silêncio: um agente não tem
+    // como desconfiar de um número que parece plausível. As duas causas saem
+    // em linhas separadas porque só uma delas custa memória — e a mensagem
+    // única que existia antes atribuía as duas à falta de espaço.
+    let sem_vaga = machine::regioes_sem_vaga();
+    if sem_vaga > 0 {
         log_warn!(
             "mem",
             "{} regioes descartadas por falta de espaco na tabela",
-            descartadas
+            sem_vaga
+        );
+    }
+    let degeneradas = machine::regioes_descartadas() - sem_vaga;
+    if degeneradas > 0 {
+        log_warn!(
+            "mem",
+            "{} regioes recusadas por nao descreverem faixa nenhuma",
+            degeneradas
         );
     }
 

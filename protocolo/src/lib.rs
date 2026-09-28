@@ -97,6 +97,21 @@ pub struct Entrega {
     pub dispositivos: u64,
 }
 
+/// Quantas regiões de memória uma entrega pode carregar, no máximo.
+///
+/// É contrato, e não detalhe de um dos lados, porque os dois precisam do
+/// mesmo número. O iniciador recusa um mapa maior que isto enquanto ainda há
+/// como relatar; o kernel dimensiona a tabela dele por aqui. Quando os dois
+/// eram constantes separadas — 256 de um lado, 64 do outro —, o iniciador
+/// entregava as 133 regiões que o firmware do x86 descreve e o kernel
+/// guardava as 64 primeiras: 28 MiB de RAM sumiam do alocador com a suíte
+/// inteira passando.
+///
+/// Duzentas e cinquenta e seis. O firmware do emulador descreve cento e
+/// trinta; o dobro é a folga para uma máquina de verdade, que tem mais
+/// dispositivos.
+pub const MAX_REGIOES: usize = 256;
+
 /// O framebuffer, já mapeado pelo iniciador.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
