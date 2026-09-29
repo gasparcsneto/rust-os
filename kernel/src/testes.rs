@@ -6362,6 +6362,11 @@ fn recusas_com_a_linha_ativa() -> Resultado {
             return Err("uma acao recusada mexeu na linha de comando");
         }
     }
+    // E o log registra a recusa como recusa. Registrar antes de agir punha
+    // na trilha de auditoria uma ação que não aconteceu.
+    if !log_tem("agente: set_value no elemento 3 recusado") {
+        return Err("o log nao registrou a recusa como recusa");
+    }
     Ok(())
 }
 

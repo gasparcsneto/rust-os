@@ -258,19 +258,42 @@ pub fn agir(
     valor: Option<&str>,
     origem: Origem,
 ) -> Result<Efeito, &'static str> {
+    let desfecho = executar(id, acao, valor, origem);
+    // Registrado **depois**, com o desfecho. Antes da ação, uma recusa por
+    // valor inválido ficava no log como ação feita — e isto é o começo de uma
+    // trilha de auditoria, onde afirmar o que não aconteceu é pior que calar.
+    match &desfecho {
+        Ok(_) => crate::log_info!(
+            "ui",
+            "{}: {} no elemento {}",
+            origem.nome(),
+            acao.nome(),
+            id
+        ),
+        Err(motivo) => crate::log_info!(
+            "ui",
+            "{}: {} no elemento {} recusado: {}",
+            origem.nome(),
+            acao.nome(),
+            id,
+            motivo
+        ),
+    }
+    desfecho
+}
+
+fn executar(
+    id: u32,
+    acao: Acao,
+    valor: Option<&str>,
+    origem: Origem,
+) -> Result<Efeito, &'static str> {
     if !existe(id) {
         return Err("nao ha elemento com este id");
     }
     if !acoes_de(id).contains(&acao) {
         return Err("o elemento nao aceita esta acao");
     }
-    crate::log_info!(
-        "ui",
-        "{}: {} no elemento {}",
-        origem.nome(),
-        acao.nome(),
-        id
-    );
     match acao {
         Acao::DefinirValor => {
             let valor = valor.ok_or("set_value precisa de `value`")?;

@@ -66,6 +66,17 @@ struct Linha {
 // A tomada desta tranca passa por `sem_interrupcoes`, pelo motivo de toda
 // tranca deste kernel, e nunca atravessa a execução de um comando: um comando
 // pode ser `ui.tree`, que lê esta mesma linha.
+//
+// E o desenho mora **dentro** da seção crítica, junto com a mudança que ele
+// desenha. Separados, havia uma janela entre os dois: o timer podia passar a
+// vez a um processo de usuário, o processo registrar uma linha no log, e
+// [`por_cima`] redesenhar a linha com um caractere que ainda não tinha sido
+// desenhado — que em seguida era desenhado de novo. Com as interrupções
+// mascaradas não há troca de fio no meio, e a tela e o buffer mudam juntos.
+//
+// A suíte não consegue falsificar isto: a janela é de algumas instruções, e
+// nenhum caso provoca a preempção nela. Fica escrito aqui, onde quem for
+// separar os dois vai ler.
 static LINHA: Mutex<Linha> = Mutex::new(Linha {
     bytes: [0; LINHA_MAX],
     tam: 0,
@@ -118,27 +129,30 @@ fn aceito(c: char) -> bool {
 
 /// Desenha o prompt e marca ali o começo do campo.
 fn mostrar_prompt() {
-    crate::serial_print!("{PROMPT}");
-    let inicio = crate::tela::console::cursor_em_celulas();
-    com_linha(|l| l.inicio = Some(inicio));
+    com_linha(prompt_em);
     crate::ui::mudou();
 }
 
+/// O mesmo, com a linha já na mão.
+fn prompt_em(l: &mut Linha) {
+    crate::serial_print!("{PROMPT}");
+    l.inicio = Some(crate::tela::console::cursor_em_celulas());
+}
+
 /// Acrescenta um caractere à linha e o desenha. Falso se ele não coube.
+#[cfg(not(feature = "modo-teste"))]
 fn digitar(c: char) -> bool {
-    let coube = com_linha(|l| {
-        if l.tam < LINHA_MAX {
-            l.bytes[l.tam] = c as u8;
-            l.tam += 1;
-            true
-        } else {
-            false
-        }
-    });
-    if coube {
-        crate::serial_print!("{c}");
+    com_linha(|l| digitar_em(l, c))
+}
+
+fn digitar_em(l: &mut Linha, c: char) -> bool {
+    if l.tam >= LINHA_MAX {
+        return false;
     }
-    coube
+    l.bytes[l.tam] = c as u8;
+    l.tam += 1;
+    crate::serial_print!("{c}");
+    true
 }
 
 /// Apaga o último caractere da linha, e da tela.
@@ -150,16 +164,14 @@ fn digitar(c: char) -> bool {
 /// `\u{8} \u{8}`, e não só `\u{8}`: o console da tela apaga a célula com o
 /// primeiro, mas um terminal do outro lado da COM1 só volta o cursor, e o
 /// espaço é o que cobre a letra nele.
+#[cfg(not(feature = "modo-teste"))]
 fn apagar() {
-    let apagou = com_linha(|l| {
-        if l.tam > 0 {
-            l.tam -= 1;
-            true
-        } else {
-            false
-        }
-    });
-    if apagou {
+    com_linha(apagar_em);
+}
+
+fn apagar_em(l: &mut Linha) {
+    if l.tam > 0 {
+        l.tam -= 1;
         crate::serial_print!("\u{8} \u{8}");
     }
 }
@@ -195,12 +207,14 @@ pub fn definir(valor: &str) -> Result<(), &'static str> {
     if !valor.chars().all(aceito) {
         return Err("o valor tem caracteres que nao se digitam na linha de comando");
     }
-    while com_linha(|l| l.tam) > 0 {
-        apagar();
-    }
-    for c in valor.chars() {
-        digitar(c);
-    }
+    com_linha(|l| {
+        while l.tam > 0 {
+            apagar_em(l);
+        }
+        for c in valor.chars() {
+            digitar_em(l, c);
+        }
+    });
     crate::ui::mudou();
     Ok(())
 }
@@ -220,9 +234,9 @@ pub fn confirmar(origem: Origem) -> alloc::string::String {
         copia[..tam].copy_from_slice(&l.bytes[..tam]);
         l.tam = 0;
         l.inicio = None;
+        crate::serial_println!();
         tam
     });
-    crate::serial_println!();
     // `from_utf8` não falha: só entram na linha caracteres ASCII, filtrados
     // em [`digitar`] e em [`definir`]. O `unwrap_or` existe para que um dia
     // em que isso mude vire uma linha vazia, e não um pânico.
@@ -255,25 +269,24 @@ pub fn confirmar(origem: Origem) -> alloc::string::String {
 ///
 /// Sem linha em edição — antes de o interpretador atender, ou enquanto um
 /// comando roda — escreve direto.
+///
+/// Tudo dentro da seção crítica da linha, pelo motivo escrito junto de
+/// [`LINHA`]. `escrever` roda com a linha na mão, então não pode registrar
+/// nada no log — e não registra: quem chama é o eco do próprio log.
 pub fn por_cima(escrever: impl FnOnce()) {
-    let digitado = com_linha(|l| {
-        l.inicio.map(|_| {
-            let mut copia = [0u8; LINHA_MAX];
-            copia[..l.tam].copy_from_slice(&l.bytes[..l.tam]);
-            (copia, l.tam)
-        })
-    });
-    let Some((copia, tam)) = digitado else {
+    com_linha(|l| {
+        if l.inicio.is_none() {
+            escrever();
+            return;
+        }
+        for _ in 0..PROMPT.len() + l.tam {
+            crate::serial_print!("\u{8} \u{8}");
+        }
         escrever();
-        return;
-    };
-
-    for _ in 0..PROMPT.len() + tam {
-        crate::serial_print!("\u{8} \u{8}");
-    }
-    escrever();
-    mostrar_prompt();
-    crate::serial_print!("{}", core::str::from_utf8(&copia[..tam]).unwrap_or(""));
+        prompt_em(l);
+        crate::serial_print!("{}", core::str::from_utf8(&l.bytes[..l.tam]).unwrap_or(""));
+    });
+    crate::ui::mudou();
 }
 
 /// Destrava a linha de comando à força, para uso exclusivo do caminho de
