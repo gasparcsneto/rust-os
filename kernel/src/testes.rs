@@ -4451,7 +4451,11 @@ fn arvore_das_janelas() -> Resultado {
     }
 
     // O que se digita chega ao valor do texto, com a quebra de linha
-    // atravessando os dois escapes — o do servidor e o do JSON.
+    // atravessando os dois escapes — o do servidor e o do JSON. Depois do
+    // foco, e não da abertura: o servidor o pede logo depois de abrir, e uma
+    // tecla que chegasse antes iria, corretamente, para o console — medido,
+    // uma vez em cinco no ARM.
+    esperar_linha("janelas: foco 1")?;
     crate::teclado::evento(0x1E, true);
     crate::teclado::evento(0x1C, true);
     crate::teclado::evento(0x30, true);
