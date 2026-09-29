@@ -96,6 +96,10 @@ cargo xtask run   --arch aarch64
 cargo xtask test
 cargo xtask test --arch aarch64
 
+# A máquina que só tem virtio-gpu, sem tela linear nenhuma
+cargo xtask run  --video virtio
+cargo xtask test --arch aarch64 --video virtio
+
 # Depuração
 cargo xtask debug                    # sobe congelado, esperando gdb/lldb
 cargo xtask simbolo 0xffff8000...    # endereço -> arquivo, linha e função
@@ -319,6 +323,7 @@ O contraste no caminho de boot é grande:
 | Interrupções | PIC 8259; timer do APIC local, calibrado contra o PIT | GIC v2 + timer genérico |
 | Serial do agente | UART 16550 na IRQ 3 | PL011 no INTID 33 (SPI 1) |
 | Vídeo | modo posto pelo firmware e mapeado pelo iniciador | `bochs-display` no PCI, modo posto por nós; `ramfb` do firmware pela UEFI |
+| Vídeo sem tela linear | `virtio-gpu` no PCI, recurso e varredura postos por nós | o mesmo dispositivo, o mesmo driver |
 | Teclado | controlador 8042, scancode na IRQ 1 | `virtio-input` no PCI, evento na fila |
 | Teclado USB | `qemu-xhci` no PCI, protocolo de boot do HID | o mesmo controlador, o mesmo driver |
 | Dormir sem corrida | `sti; hlt`, par atômico | `wfi` acorda com IRQ mascarada |
@@ -908,6 +913,97 @@ avançava, em vez de apagar — a linha no buffer estava certa e a tela afirmava
 outra coisa. E todo registro de log era desenhado no meio do que a pessoa
 estava digitando, partindo a linha em duas. Hoje o apagar apaga, e um registro
 que chega durante a edição aparece acima da linha, que é redesenhada inteira.
+
+## A tela que só mostra o que se manda
+
+Há máquinas em que a única placa de vídeo é um `virtio-gpu`: a máquina
+virtual ARM de nuvem típica, e a que o UTM monta num Mac. Sem VGA, sem
+`bochs-display`, sem um modo que o firmware deixe pronto para o kernel
+adotar. Numa delas, até este driver existir, o Duke subia sem tela — medido,
+com a `virt` do ARM levando só um `virtio-gpu-pci`: "nenhum framebuffer nesta
+maquina". A pessoa na frente dela não via nada.
+
+**A cadeia de quem acende a tela.** A tela que o iniciador entrega, se houver
+uma; senão o `bochs-display`, programado por nós; senão o `virtio-gpu`. Ele é o
+último porque é o único que custa um comando por mudança, e onde há
+framebuffer linear não há razão para pagar isso. O firmware não resolve por
+nós: o EDK II dirige o `virtio-gpu` com um modo só de transferência, sem
+buffer linear, e o iniciador recusa esse modo — com razão, porque não teria
+onde o kernel escrever.
+
+**A diferença que define o driver.** Num framebuffer linear, o que o kernel
+escreve aparece: o dispositivo varre aquela memória sozinho. Aqui o kernel
+escreve na memória de apoio de um recurso — RAM comum — e só o que for
+transferido e depois descarregado chega ao monitor. O console continua
+escrevendo sem trava, como sempre escreveu; cada escrita alarga um retângulo
+sujo guardado em quatro atômicos, e o fim de cada impressão manda só esse
+retângulo. Um caractere impresso atravessa como a célula dele, e não como
+os quatro mebibytes da tela:
+
+```
+$ cargo xtask agent --arch aarch64 display.info
+{"present":true,"adapter":"virtio-gpu",
+ "displays":[{"id":0,"width":1280,"height":800}],
+ "surfaces":1,"surface_bytes":4096000,"updates":0,"last_damage":null,
+ "device":{"commands":36,"flushes":16,"rejected":0,
+  "last_transfer":{"x":8,"y":234,"width":34,"height":10}}}
+```
+
+`device` é nulo num framebuffer linear, onde a pergunta não existe. Aqui ele
+responde a que importa: a diferença entre "o kernel desenhou" e "o monitor
+mostra" é o que foi mandado, e os contadores dizem se está sendo. A superfície
+contada é a própria tela do console: a memória de apoio dela é alocada como a
+de qualquer superfície, na faixa virtual das superfícies gráficas.
+
+**Atrás do mesmo trait.** `AdaptadorVirtio` implementa o mesmo
+`AdaptadorGrafico` do linear, e o compositor que vier não vai saber qual dos
+dois tem embaixo. A diferença é interna: no linear o dano é copiado de um
+buffer de fundo para o framebuffer; aqui a superfície **é** a memória de um
+recurso do dispositivo, nada é copiado pelo kernel, e o dano é o que
+atravessa. Apresentar uma superfície que não está na tela troca o recurso da
+varredura de uma vez — a troca de página sem rasgo que um compositor usa para
+não mostrar um quadro pela metade. Soltar a superfície devolve a tela ao
+console antes de desfazer o recurso, e desfaz o recurso antes de devolver as
+páginas: enquanto ele existir, o dispositivo tem o direito de lê-las.
+
+**Porte do `virtio-gpud` do Redox, com três mudanças.** As estruturas do
+protocolo conferem com as deles (ver `THIRD_PARTY.md`); o comportamento não:
+
+- **O dano chega ao dispositivo.** O `update_plane` do Redox transfere o
+  quadro inteiro a cada atualização, qualquer que seja o dano recebido.
+  Aqui a transferência e a descarga são do retângulo.
+- **Uma recusa do dispositivo é um erro.** O Redox confere cada resposta com
+  `assert_eq!`, e um comando recusado derruba o daemon; no kernel derrubaria
+  a máquina. Aqui a recusa volta para quem pediu, com o nome que a
+  especificação dá a ela, e é contada em `rejected`.
+- **A espera tem teto.** Um dispositivo que não responde desliga o driver e
+  vira uma linha no log, como no disco.
+
+**Duas conferências, porque cada uma é cega para o que a outra vê.** A suíte
+confere o que o kernel mandou: que escrever um caractere transfere a célula
+dele e só ela, que uma superfície apresenta só o dano, que um anexo de
+páginas espalhadas usa várias páginas de entradas, que uma recusa vira erro.
+A fumaça confere o que o monitor mostra: fotografa a tela pelo `screendump` do
+monitor do QEMU — por fora da máquina, sem passar pelo kernel — e compara
+3072 pontos dela com os que `video.sample` diz ter desenhado. Falsificado, uma
+mutação de cada vez:
+
+| Mutação | Suíte | Fumaça |
+|---|---|---|
+| a tela nunca é descarregada | reprova | 3072 de 3072 pontos diferem |
+| transferir a tela inteira, como o Redox | reprova | **passa** — a tela sai certa |
+| o deslocamento da transferência ignora `x` | **passa** | 153 de 3072 diferem |
+| o formato do recurso trocado | **passa** | 3072 de 3072 diferem |
+| sempre fundir páginas no anexo | reprova | — |
+| a resposta do dispositivo não é conferida | reprova | — |
+| soltar a superfície não devolve a tela | reprova | — |
+| o dano não é recortado | reprova | — |
+
+A segunda linha é o defeito do Redox, e a fumaça não o vê porque ele não
+erra a tela: só manda a tela inteira para mudar uma célula. As duas seguintes são o
+contrário — o kernel acredita ter mandado certo, e só quem olha o monitor
+sabe que não. A fumaça fotografa as duas máquinas de vídeo, nas duas
+arquiteturas.
 
 ## Sistema de arquivos
 
@@ -1520,19 +1616,27 @@ teste do relógio verifica que o tempo avança, ele está esperando uma
 interrupção de hardware de verdade.
 
 ```
-$ cargo xtask test --arch aarch64
-  suite de testes :: aarch64 :: 171 casos
+$ cargo xtask test --arch aarch64 --video virtio
+  suite de testes :: aarch64 :: 182 casos
   ...
   memoria: clonar compartilha sem copiar     ok
   memoria: fork do fork mantem a escrita     ok
-  fios: o coletor nao recolhe quem esta de pe ok
-  171 de 171 passaram
+  ...
+  video: escrever descarrega so o que sujou  ok
+  video: superficie apresenta so o dano      ok
+  ...
+  182 de 182 passaram
 ```
+
+A mesma suíte roda nas duas máquinas de vídeo — `--video linear`, o padrão, e
+`--video virtio` —, porque são dois caminhos de tela no kernel, e cada caso
+que depende do adaptador confere o da máquina em que está.
 
 O CI roda formatação, lints, as conferências de fonte de `cargo xtask
 invariantes`, os testes do `xtask`, a conferência dos ELFs, o boot pela UEFI,
 as sondas de fumaça contra o kernel de produção, e a suíte nas duas
-arquiteturas em debug e release.
+arquiteturas em debug e release — e, nas duas, a suíte e a fumaça também na
+máquina que só tem `virtio-gpu`.
 
 ## Depuração
 
@@ -1683,14 +1787,17 @@ padronizado.
       no desenho do Redox — um trait de adaptador que o compositor usa sem
       saber o que está embaixo, o retângulo de dano com o recorte que não dá a
       volta, o adaptador linear sobre o framebuffer, e `display.info` dizendo
-      ao agente o que chegou à tela; e a árvore semântica, adiantada — `ui.tree`
-      e `ui.act`, no desenho da acessibilidade do macOS, gerada do que está
-      na tela e agindo pelo mesmo caminho da pessoa. A seguir: o compositor, com superfícies e ordem de empilhamento; e o virtio-gpu
-      como segundo adaptador atrás do mesmo trait. O que o virtio-gpu 2D traz
-      é retângulo de dano e troca de página sem rasgo — não aceleração, que
-      este texto chegou a prometer: medido, o framebuffer linear já pinta a
-      tela cheia em 7 ms em release, com folga para 60 Hz. Depois, o servidor
-      de janelas, o roteamento de entrada e a tipografia.
+      ao agente o que chegou à tela; o virtio-gpu como segundo adaptador atrás
+      do mesmo trait, que também acende a tela das máquinas que não têm outro;
+      e a árvore semântica, adiantada — `ui.tree` e `ui.act`, no desenho da
+      acessibilidade do macOS, gerada do que está na tela e agindo pelo mesmo
+      caminho da pessoa. O que o virtio-gpu 2D trouxe foi retângulo de dano e
+      troca de página sem rasgo — não aceleração, que este texto chegou a
+      prometer: medido, o framebuffer linear já pinta a tela cheia em 7 ms em
+      release, com folga para 60 Hz. A seguir: o compositor, com superfícies e
+      ordem de empilhamento — e, antes dele, a faixa das superfícies passando a
+      devolver endereço virtual, sem o que uma superfície por janela a esgota.
+      Depois, o servidor de janelas, o roteamento de entrada e a tipografia.
       E aqui a inversão do projeto encontra a interface gráfica. O servidor de
       janelas publica uma **árvore semântica** — que janelas existem, que
       controles, o que cada um faz — e os pixels são a renderização dela, do
