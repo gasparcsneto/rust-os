@@ -94,12 +94,13 @@ pub enum Alvo {
     /// estado de verdade, e não uma lista de apelidos.
     Arquivo { vnode: Vnode, posicao: u64 },
     /// Um canal de eventos que este processo escuta — ver
-    /// [`crate::eventos`]. A vaga é a do canal na tabela de canais.
+    /// [`crate::eventos`], e a [`Chave`](crate::eventos::Chave) para o
+    /// porquê de a vaga não bastar.
     ///
     /// Um `fork` copia o descritor, e não o canal: o canal tem um ouvinte
     /// só, o fio que chamou `escutar`, e o filho que ler por este descritor
     /// é recusado.
-    Eventos { vaga: usize },
+    Eventos { chave: crate::eventos::Chave },
     /// Uma superfície do compositor que este processo criou — ver
     /// [`crate::superficies`], e a [`Chave`](crate::superficies::Chave)
     /// para o porquê de a vaga não bastar.

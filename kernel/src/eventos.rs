@@ -51,7 +51,25 @@ pub const CAPACIDADE: usize = 64;
 /// O maior nome de canal, em bytes.
 pub const NOME_MAX: usize = 32;
 
+/// O que um descritor guarda para achar o seu canal: a vaga, e qual dos
+/// canais que já passaram por ela.
+///
+/// A vaga sozinha não bastava. O filho de um `fork` herda o descritor do
+/// pai; o pai fecha o canal, e a vaga fica livre; o filho escuta um canal e
+/// ele cai na mesma vaga. O descritor herdado passava a alcançar o canal
+/// novo — agora o ouvinte confere, porque é o filho —, e fechá-lo largava
+/// o canal que o filho acabara de abrir. A geração é um número que nenhum
+/// outro canal recebe, e o descritor velho é recusado porque ela não
+/// confere. É a mesma chave das superfícies — ver
+/// [`crate::superficies::Chave`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Chave {
+    pub vaga: usize,
+    pub geracao: u64,
+}
+
 struct Canal {
+    geracao: u64,
     nome: [u8; NOME_MAX],
     tamanho_do_nome: usize,
     /// O fio do processo que escuta.
@@ -81,6 +99,10 @@ static CANAIS_ABERTOS: Mutex<[Option<Canal>; CANAIS]> = Mutex::new([const { None
 /// Quantos canais de ouvinte morto já foram devolvidos.
 static RECUPERADOS: AtomicU64 = AtomicU64::new(0);
 
+/// A geração do próximo canal — ver [`Chave`]. Só anda sob a tranca dos
+/// canais, mas é atômica para não precisar de outra.
+static PROXIMA_GERACAO: AtomicU64 = AtomicU64::new(1);
+
 fn com_canais<R>(f: impl FnOnce(&mut [Option<Canal>; CANAIS]) -> R) -> R {
     crate::arch::sem_interrupcoes(|| f(&mut CANAIS_ABERTOS.lock()))
 }
@@ -108,8 +130,8 @@ pub enum Recusa {
     Ocupado,
 }
 
-/// Torna `ouvinte` o ouvinte do canal `nome`, e devolve a vaga do canal.
-pub fn escutar(nome: &[u8], ouvinte: u64) -> Result<usize, Recusa> {
+/// Torna `ouvinte` o ouvinte do canal `nome`, e devolve a chave do canal.
+pub fn escutar(nome: &[u8], ouvinte: u64) -> Result<Chave, Recusa> {
     if nome.is_empty() || nome.len() > NOME_MAX || core::str::from_utf8(nome).is_err() {
         return Err(Recusa::NomeInvalido);
     }
@@ -124,7 +146,9 @@ pub fn escutar(nome: &[u8], ouvinte: u64) -> Result<usize, Recusa> {
             .ok_or(Recusa::Ocupado)?;
         let mut guardado = [0u8; NOME_MAX];
         guardado[..nome.len()].copy_from_slice(nome);
+        let geracao = PROXIMA_GERACAO.fetch_add(1, Ordering::Relaxed);
         canais[vaga] = Some(Canal {
+            geracao,
             nome: guardado,
             tamanho_do_nome: nome.len(),
             ouvinte,
@@ -136,7 +160,7 @@ pub fn escutar(nome: &[u8], ouvinte: u64) -> Result<usize, Recusa> {
             entregues: 0,
             recusados: 0,
         });
-        Ok(vaga)
+        Ok(Chave { vaga, geracao })
     })
 }
 
@@ -187,7 +211,7 @@ pub enum Colheita {
     NaoEhSeu,
 }
 
-/// Tira até `destino.len()` eventos do canal da `vaga`, para o `ouvinte`.
+/// Tira até `destino.len()` eventos do canal da `chave`, para o `ouvinte`.
 ///
 /// # Estacionar sem efeito
 ///
@@ -198,12 +222,12 @@ pub enum Colheita {
 /// janela em que um evento chegasse entre "está vazio" e "vou dormir": quem
 /// publica toma a mesma tranca, e só vê o ouvinte depois de ele estar
 /// marcado como esperando.
-pub fn colher(vaga: usize, ouvinte: u64, destino: &mut [Evento]) -> Colheita {
+pub fn colher(chave: Chave, ouvinte: u64, destino: &mut [Evento]) -> Colheita {
     com_canais(|canais| {
-        let Some(canal) = canais.get_mut(vaga).and_then(Option::as_mut) else {
+        let Some(canal) = canais.get_mut(chave.vaga).and_then(Option::as_mut) else {
             return Colheita::NaoEhSeu;
         };
-        if canal.ouvinte != ouvinte {
+        if canal.geracao != chave.geracao || canal.ouvinte != ouvinte {
             return Colheita::NaoEhSeu;
         }
         if canal.quantos == 0 {
@@ -222,11 +246,12 @@ pub fn colher(vaga: usize, ouvinte: u64, destino: &mut [Evento]) -> Colheita {
     })
 }
 
-/// Fecha o canal da `vaga`, se ele for do `ouvinte`.
-pub fn largar(vaga: usize, ouvinte: u64) {
+/// Fecha o canal da `chave`, se ele for do `ouvinte`.
+pub fn largar(chave: Chave, ouvinte: u64) {
     com_canais(|canais| {
-        if let Some(v) = canais.get_mut(vaga)
-            && v.as_ref().is_some_and(|c| c.ouvinte == ouvinte)
+        if let Some(v) = canais.get_mut(chave.vaga)
+            && v.as_ref()
+                .is_some_and(|c| c.geracao == chave.geracao && c.ouvinte == ouvinte)
         {
             *v = None;
         }

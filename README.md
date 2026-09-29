@@ -638,6 +638,15 @@ de chamadas de sistema para — ele dorme, não gira; cinco eventos chegam em
 ordem; setenta publicados com ele impedido de rodar enchem a fila e seis são
 recusados; e a soma no fim confere quais sessenta e quatro chegaram.
 
+Onze mutações nos canais, onze reprovadas. E um defeito que elas não
+cobriam, achado ao escrever as superfícies, que têm o mesmo arranjo: a
+chave de um descritor era só a vaga do canal, e a vaga é reaproveitada. O
+pai fecha um canal cujo descritor o filho herdou; o filho escuta outro
+canal, que cai na mesma vaga; e o descritor herdado passava a alcançar o
+canal novo — o ouvinte conferia, porque agora é o filho. Fechá-lo largava
+o canal que o filho acabara de abrir. A chave ganhou uma geração que nenhum
+outro canal recebe, e o `eco` confere o cenário inteiro.
+
 **Mapeada não é gravável.** Duas chamadas escrevem num buffer que o processo
 dá — `ler` e `esperar` —, e o kernel conferia só se a faixa era do processo e
 estava mapeada. Uma página de código é das duas coisas, e é só de leitura: o

@@ -549,8 +549,8 @@ fn ler(descritor: u64, ponteiro: u64, tamanho: u64) -> i64 {
         RECUSADAS.fetch_add(1, Ordering::Relaxed);
         return erro::DESCRITOR_INVALIDO;
     };
-    if let descritores::Alvo::Eventos { vaga } = alvo {
-        return ler_eventos(vaga, ponteiro, tamanho);
+    if let descritores::Alvo::Eventos { chave } = alvo {
+        return ler_eventos(chave, ponteiro, tamanho);
     }
     let descritores::Alvo::Arquivo { vnode, posicao } = alvo else {
         // Os destinos de log não leem. Devolver zero fingiria um arquivo
@@ -627,20 +627,20 @@ fn escutar(ponteiro: u64, tamanho: u64) -> i64 {
         core::ptr::copy_nonoverlapping(ponteiro as *const u8, nome.as_mut_ptr(), tamanho as usize);
     }
     let ouvinte = crate::fios::id_atual();
-    let vaga = match crate::eventos::escutar(&nome[..tamanho as usize], ouvinte) {
-        Ok(vaga) => vaga,
+    let chave = match crate::eventos::escutar(&nome[..tamanho as usize], ouvinte) {
+        Ok(chave) => chave,
         Err(crate::eventos::Recusa::NomeInvalido) => {
             RECUSADAS.fetch_add(1, Ordering::Relaxed);
             return erro::TAMANHO_INVALIDO;
         }
         Err(crate::eventos::Recusa::Ocupado) => return erro::OCUPADO,
     };
-    match crate::fios::com_descritores(|t| t.instalar(descritores::Alvo::Eventos { vaga })) {
+    match crate::fios::com_descritores(|t| t.instalar(descritores::Alvo::Eventos { chave })) {
         Some(Some(descritor)) => descritor as i64,
         // Sem vaga na tabela, o canal aberto agora não teria como ser lido
         // por ninguém: ele é largado antes de a recusa voltar.
         _ => {
-            crate::eventos::largar(vaga, ouvinte);
+            crate::eventos::largar(chave, ouvinte);
             erro::SEM_DESCRITOR
         }
     }
@@ -719,7 +719,7 @@ fn controlar(descritor: u64, op: u64, argumento: u64) -> i64 {
 /// cópia na escrita e passar pelo tratador de falha, e isso não é coisa
 /// para se fazer com a tranca de um recurso que handlers de interrupção
 /// também tomam.
-fn ler_eventos(vaga: usize, ponteiro: u64, tamanho: u64) -> i64 {
+fn ler_eventos(chave: crate::eventos::Chave, ponteiro: u64, tamanho: u64) -> i64 {
     let tamanho_do_evento = evento::TAMANHO as u64;
     // Um buffer menor que um evento é recusado, em vez de receber metade de
     // um — o formato só funciona se o leitor sempre souber onde um evento
@@ -735,7 +735,7 @@ fn ler_eventos(vaga: usize, ponteiro: u64, tamanho: u64) -> i64 {
     }
 
     let mut eventos = [evento::Evento::default(); EVENTOS_POR_LEITURA];
-    match crate::eventos::colher(vaga, crate::fios::id_atual(), &mut eventos[..cabem]) {
+    match crate::eventos::colher(chave, crate::fios::id_atual(), &mut eventos[..cabem]) {
         crate::eventos::Colheita::Entregues(n) => {
             for (i, e) in eventos[..n].iter().enumerate() {
                 let bytes = e.em_bytes();
@@ -769,8 +769,8 @@ fn fechar(descritor: u64) -> i64 {
     // Uma superfície, pelo mesmo motivo: a camada sai da tela quando o
     // processo fecha, e não quando ele morrer.
     match crate::fios::com_descritores(|t| t.alvo(descritor)) {
-        Some(Some(descritores::Alvo::Eventos { vaga })) => {
-            crate::eventos::largar(vaga, crate::fios::id_atual());
+        Some(Some(descritores::Alvo::Eventos { chave })) => {
+            crate::eventos::largar(chave, crate::fios::id_atual());
         }
         Some(Some(descritores::Alvo::Superficie { chave })) => {
             crate::superficies::largar(chave, crate::fios::id_atual());

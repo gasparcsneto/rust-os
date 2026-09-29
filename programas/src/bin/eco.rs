@@ -22,6 +22,39 @@ const CODIGO: i64 = 63;
 /// O canal que a suíte publica.
 const CANAL: &str = "teste-eco";
 
+/// O canal que o pai abre só para o filho herdar o descritor.
+const TEMPORARIO: &str = "teste-eco-temporario";
+
+/// O filho do `fork`. Zero quando tudo confere.
+fn filho(canal: u64, temporario: u64) -> i64 {
+    let mut um = [0u8; 32];
+    if sistema::ler(canal, &mut um) != erro::DESCRITOR_INVALIDO {
+        return 1;
+    }
+    // Espera o pai largar o temporário — escutá-lo só dá certo depois — e
+    // fica com ele. O canal novo cai na vaga que o do pai deixou, e o
+    // descritor herdado aponta para essa vaga. Sem a geração na chave, ele
+    // alcançaria o canal novo, que agora é deste processo: fechá-lo largaria
+    // o canal que o filho acabou de abrir, e escutar de novo daria certo.
+    loop {
+        match sistema::escutar(TEMPORARIO) {
+            r if r >= 0 => break,
+            erro::OCUPADO => sistema::ceder(),
+            _ => return 2,
+        }
+    }
+    // Ler pelo herdado também é recusado — e na hora: alcançando o canal
+    // novo, vazio, a leitura dormiria para sempre.
+    if sistema::ler(temporario, &mut um) != erro::DESCRITOR_INVALIDO {
+        return 4;
+    }
+    sistema::fechar(temporario);
+    if sistema::escutar(TEMPORARIO) != erro::OCUPADO {
+        return 3;
+    }
+    0
+}
+
 #[unsafe(no_mangle)]
 fn principal() -> i64 {
     let canal = sistema::escutar(CANAL);
@@ -42,22 +75,22 @@ fn principal() -> i64 {
         return 3;
     }
 
+    // Um canal que o pai larga logo depois de bifurcar: o filho herda o
+    // descritor dele, e a vaga fica livre para o filho reocupar.
+    let temporario = sistema::escutar(TEMPORARIO);
+    if temporario < 0 {
+        return 10;
+    }
+
     // Um filho de `fork` herda o descritor, e não o canal: o canal tem um
     // ouvinte só, este processo, e o filho que lê é recusado — em vez de
     // dormir numa fila que não é dele, ou de roubar os eventos do pai.
     match sistema::bifurcar() {
-        0 => {
-            let mut um = [0u8; 32];
-            let lido = sistema::ler(canal, &mut um);
-            sistema::sair(if lido == erro::DESCRITOR_INVALIDO {
-                0
-            } else {
-                1
-            });
-        }
+        0 => sistema::sair(filho(canal, temporario as u64)),
         filho if filho < 0 => return 7,
         _ => {}
     }
+    sistema::fechar(temporario as u64);
     if !matches!(sistema::esperar(0), Ok((_, Some(0)))) {
         return 8;
     }
