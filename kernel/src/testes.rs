@@ -4635,6 +4635,135 @@ fn btrfs_descida_escolhe_o_filho_certo() -> Resultado {
     Ok(())
 }
 
+/// Um percurso que começa numa chave que não existe entrega a primeira que
+/// existe depois dela — inclusive quando ela está na folha seguinte.
+///
+/// # O defeito que este caso pega
+///
+/// A descida procura "o último ponteiro cuja chave é menor ou igual ao
+/// alvo". Quando o alvo cai no vão **entre** duas folhas, isso aterrissa na
+/// da esquerda, cujas chaves são todas menores que ele. O percurso lia a
+/// última chave da folha, via que ela não alcançava o alvo, e concluía que
+/// a árvore tinha acabado — sem visitar a folha da direita, onde estava tudo
+/// o que vinha depois.
+///
+/// Ficou escondido enquanto nenhum percurso começou num vão entre folhas.
+/// Apareceu com o terceiro programa compilado no disco: os itens de
+/// `/programas/x86_64` passaram a atravessar uma fronteira de folha, e o
+/// diretório listava um arquivo só dos três — `/programas/x86_64/ola` dava
+/// "não encontrado", com o arquivo lá.
+///
+/// # Por que todos os vãos, e não o do diretório
+///
+/// Porque onde as folhas se dividem depende de tudo que está no disco, e um
+/// caso preso a um diretório passaria no dia em que o diretório mudasse de
+/// folha. Aqui a árvore de arquivos inteira é lida em ordem, e para cada par
+/// de chaves consecutivas com um vão entre elas o percurso recomeça dentro
+/// do vão e tem de entregar a segunda. Os vãos entre folhas estão entre eles
+/// sempre que a árvore tiver mais de uma folha — e ela tem, por causa do
+/// enchimento da raiz.
+fn btrfs_percurso_atravessa_o_vao_entre_folhas() -> Resultado {
+    use crate::vfs::btrfs::Passo;
+    use crate::vfs::btrfs::folha::Chave;
+
+    let tabela = crate::particoes::varrer()?;
+    let particao = tabela
+        .primeira(crate::particoes::Tipo::Dados)
+        .ok_or("nao ha particao de dados")?;
+    let volume = crate::vfs::btrfs::Volume::abrir(particao.primeiro)?;
+    let (raiz, _) = volume.raiz_dos_arquivos()?;
+
+    // A referência: todas as chaves, lidas pela **estrutura** — nó a nó,
+    // filho a filho, da esquerda para a direita —, sem passar pela descida
+    // nem pelo percurso. A primeira versão deste caso tomava a referência do
+    // próprio percurso, começado da chave zero; com o defeito, esse percurso
+    // também parava na primeira fronteira com vão, a referência saía com 71
+    // das chaves, e o caso passava conferindo só o pedaço que o defeito
+    // deixava ver.
+    let mut chaves: alloc::vec::Vec<Chave> = alloc::vec::Vec::new();
+    let mut folhas = 0usize;
+    let mut pendentes: alloc::vec::Vec<u64> = alloc::vec![raiz];
+    let mut no = alloc::vec![0u8; volume.superbloco.tamanho_de_no as usize];
+    while let Some(endereco) = pendentes.pop() {
+        let cabecalho = volume.ler_no(endereco, &mut no)?;
+        if cabecalho.nivel == 0 {
+            folhas += 1;
+            for item in crate::vfs::btrfs::folha::itens(&no)? {
+                chaves.push(item?.chave);
+            }
+        } else {
+            // Empilhados ao contrário, para o da esquerda sair primeiro.
+            let filhos = crate::vfs::btrfs::interno::ponteiros(&no)?;
+            pendentes.extend(filhos.iter().rev().map(|&(_, filho)| filho));
+        }
+    }
+    if folhas < 2 {
+        return Err("a arvore de arquivos tem uma folha so; nao ha vao entre folhas para conferir");
+    }
+    if chaves.windows(2).any(|par| par[0] >= par[1]) {
+        return Err("as folhas lidas pela estrutura nao estao em ordem estrita");
+    }
+
+    // O percurso completo, da chave zero, tem de entregar exatamente as
+    // mesmas.
+    let mut percorridas: alloc::vec::Vec<Chave> = alloc::vec::Vec::new();
+    volume.percorrer(
+        raiz,
+        Chave {
+            objeto: 0,
+            tipo: 0,
+            offset: 0,
+        },
+        |item| {
+            percorridas.push(item.chave);
+            Passo::Segue
+        },
+    )?;
+    if percorridas != chaves {
+        crate::log_error!(
+            "teste",
+            "o percurso entregou {} chaves; a arvore tem {}",
+            percorridas.len(),
+            chaves.len()
+        );
+        return Err("o percurso completo nao entregou todas as chaves da arvore");
+    }
+
+    let mut vaos = 0;
+    for par in chaves.windows(2) {
+        let Some(no_vao) = par[0].sucessora() else {
+            continue;
+        };
+        if no_vao == par[1] {
+            continue;
+        }
+        vaos += 1;
+        let mut primeira = None;
+        volume.percorrer(raiz, no_vao, |item| {
+            primeira = Some(item.chave);
+            Passo::Para
+        })?;
+        if primeira != Some(par[1]) {
+            crate::log_error!(
+                "teste",
+                "do vao depois de {:?}, o percurso deu {:?}, e nao {:?}",
+                par[0],
+                primeira,
+                par[1]
+            );
+            return Err("um percurso comecado num vao nao entregou a chave seguinte");
+        }
+    }
+    crate::log_info!(
+        "teste",
+        "{} chaves em {} folhas, {} vaos conferidos",
+        chaves.len(),
+        folhas,
+        vaos
+    );
+    Ok(())
+}
+
 /// A sucessora de uma chave é a menor estritamente maior que ela.
 ///
 /// # Por que isto não é aritmética óbvia
@@ -11132,6 +11261,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "btrfs: a sucessora de uma chave",
         f: btrfs_sucessora_de_chave,
+    },
+    Caso {
+        nome: "btrfs: o percurso atravessa o vao entre folhas",
+        f: btrfs_percurso_atravessa_o_vao_entre_folhas,
     },
     Caso {
         nome: "btrfs: a descida escolhe o filho certo",

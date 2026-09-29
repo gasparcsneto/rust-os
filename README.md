@@ -1371,17 +1371,36 @@ perguntas de borda e a resposta certa sabida de cada uma — antes da primeira
 chave, exatamente em cada chave, entre duas, e depois da última.
 
 **Como o percurso atravessa folhas.** Descendo de novo: ao esgotar uma folha,
-ele pega a última chave dela, calcula a sucessora e desce da raiz outra vez.
-É uma leitura de nó a mais por folha, por nível. A alternativa é o que o
-Btrfs de verdade faz — guardar o caminho inteiro, um nó por nível, e subir só
-o necessário para achar o irmão à direita —, que é mais rápido e custa um
+ele desce da raiz outra vez, até a primeira chave da folha seguinte. É uma
+leitura de nó a mais por folha, por nível. A alternativa é o que o Btrfs de
+verdade faz — guardar o caminho inteiro, um nó por nível, e subir só o
+necessário para achar o irmão à direita —, que é mais rápido e custa um
 buffer de nó **por nível**, vivo durante todo o percurso. A escolha aqui é a
 barata em memória: um buffer só.
 
-A sucessora de uma chave não é somar um. Os três campos têm pesos
-diferentes, e somar ao último funciona em todo caso menos nos dois em que ele
-satura — que é exatamente onde o percurso pararia cedo, perdendo entradas de
-um diretório sem erro nenhum.
+Onde a folha seguinte começa vem da própria descida: é a chave do ponteiro à
+direita do escolhido, no nível mais baixo que tem um — a chave `i + 1` de um
+nó interno é a menor da subárvore vizinha.
+
+**Um defeito que ficou escondido, e o terceiro programa achou.** Antes, a
+próxima folha era deduzida da última chave da atual: procurava-se a
+sucessora dela, e uma folha cuja última chave fosse menor que o alvo era
+tomada por fim da árvore. As duas coisas erram no **vão entre folhas**. Um
+alvo que não existe e cai entre a última chave de uma folha e a primeira da
+seguinte faz a descida aterrissar na da esquerda — o último ponteiro com
+chave menor ou igual a ele —, e ali todas as chaves são menores. O percurso
+parava. Medido na árvore de arquivos do disco de testes: da chave zero, ele
+entregava 71 das 173 chaves. Ninguém via, porque os casos procuravam o que
+estava antes do primeiro vão; apareceu quando os programas compilados
+passaram a ser três por diretório e `/programas/x86_64` listou um só —
+`/programas/x86_64/ola` dava "não encontrado", com o arquivo lá.
+
+O caso que o cobre lê a árvore inteira pela **estrutura**, nó a nó e filho a
+filho, sem passar pela descida, e exige que o percurso entregue exatamente as
+mesmas chaves; depois, para cada vão entre duas chaves consecutivas, começa
+um percurso dentro do vão e exige a segunda. A primeira versão dele tomava a
+referência do próprio percurso — e passava com o defeito, conferindo só o
+pedaço que o defeito deixava ver.
 
 **A imagem foi refeita para ter por onde descer.** Com o tamanho de nó padrão
 e três arquivos, a árvore continuaria numa folha só, e todo o código acima

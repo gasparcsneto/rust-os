@@ -82,7 +82,24 @@ fn chave_em(no: &[u8], i: usize) -> Chave {
 /// Ela também é o lugar onde um erro de um índice não aparece: escolher o
 /// filho seguinte devolve uma folha cujas chaves começam **depois** do alvo,
 /// e a resposta vira "não existe" para um arquivo que existe.
+// A suíte a usa sobre nós montados à mão; a descida de produção precisa
+// também da vizinha, e chama a de baixo.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub fn descer_para(no: &[u8], alvo: Chave) -> Result<u64, &'static str> {
+    descer_para_com_vizinha(no, alvo).map(|(filho, _)| filho)
+}
+
+/// Como [`descer_para`], e também a chave do ponteiro **seguinte** ao
+/// escolhido, se houver um — que é a menor chave da subárvore vizinha à
+/// direita.
+///
+/// É o que diz ao percurso onde a próxima folha começa. Deduzi-lo da última
+/// chave da folha, como se fazia, erra quando o alvo cai no vão entre duas
+/// folhas — ver [`super::Volume::percorrer`].
+pub fn descer_para_com_vizinha(
+    no: &[u8],
+    alvo: Chave,
+) -> Result<(u64, Option<Chave>), &'static str> {
     if no.len() < CABECALHO {
         return Err("o no nao tem nem cabecalho");
     }
@@ -116,29 +133,35 @@ pub fn descer_para(no: &[u8], alvo: Chave) -> Result<u64, &'static str> {
         }
     }
 
-    Ok(u64_em(no, CABECALHO + escolhido * PONTEIRO + BLOCO))
+    let vizinha = (escolhido + 1 < quantos).then(|| chave_em(no, escolhido + 1));
+    Ok((
+        u64_em(no, CABECALHO + escolhido * PONTEIRO + BLOCO),
+        vizinha,
+    ))
 }
 
-/// A última chave de uma folha, ou `None` se ela estiver vazia.
+/// Os ponteiros de um nó interno, em ordem: a chave e o endereço lógico de
+/// cada filho.
 ///
-/// É o que diz onde continuar depois de esgotar uma folha: a próxima chave a
-/// procurar é a sucessora desta.
-pub fn ultima_chave_da_folha(no: &[u8]) -> Option<Chave> {
-    /// Um descritor de folha, que é menor que um ponteiro de nó interno.
-    const DESCRITOR: usize = 25;
-
-    if no.len() < CABECALHO || no[100] != 0 {
-        return None;
+/// Para a suíte, que percorre a árvore pela estrutura — nó a nó, filho a
+/// filho — e confere que o percurso por chave entrega o mesmo. É uma
+/// segunda leitura da árvore que não passa pela descida, e é por isso que
+/// ela serve de referência: um defeito na descida não aparece nas duas.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub fn ponteiros(no: &[u8]) -> Result<alloc::vec::Vec<(Chave, u64)>, &'static str> {
+    if no.len() < CABECALHO || no[100] == 0 {
+        return Err("so um no interno tem ponteiros");
     }
     let quantos = quantos(no);
-    let ultimo = quantos.checked_sub(1)?;
-    let base = CABECALHO + ultimo * DESCRITOR;
-    if base + DESCRITOR > no.len() {
-        return None;
+    if CABECALHO + quantos * PONTEIRO > no.len() {
+        return Err("o no diz ter mais ponteiros do que cabem nele");
     }
-    Some(Chave {
-        objeto: u64_em(no, base + CHAVE_OBJETO),
-        tipo: no[base + CHAVE_TIPO],
-        offset: u64_em(no, base + CHAVE_OFFSET),
-    })
+    Ok((0..quantos)
+        .map(|i| {
+            (
+                chave_em(no, i),
+                u64_em(no, CABECALHO + i * PONTEIRO + BLOCO),
+            )
+        })
+        .collect())
 }

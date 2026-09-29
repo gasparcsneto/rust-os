@@ -58,14 +58,18 @@ impl Chave {
     ///
     /// # Para que serve
     ///
-    /// Para continuar um percurso depois de esgotar uma folha: a próxima
-    /// chave a procurar é a sucessora da última que a folha trouxe. Somar um
-    /// ao `offset` e parar por aí seria errado nos dois lugares em que o
-    /// campo satura — e é justamente onde o percurso pararia cedo demais,
-    /// deixando de fora itens que existem.
+    /// Servia para continuar um percurso depois de esgotar uma folha — a
+    /// próxima chave a procurar era a sucessora da última que a folha
+    /// trouxe —, e foi esse arranjo que errava no vão entre folhas: ver
+    /// [`super::Volume::percorrer`]. Hoje o percurso sabe onde a próxima
+    /// folha começa pela própria descida.
     ///
-    /// Devolver `None` no topo absoluto, em vez de dar a volta para zero, é
-    /// o que impede o percurso de recomeçar do começo e nunca terminar.
+    /// Ficou para a suíte, que a usa para achar um ponto **dentro** de cada
+    /// vão entre duas chaves e começar um percurso ali. Somar um ao `offset`
+    /// e parar por aí seria errado nos dois lugares em que o campo satura, e
+    /// devolver `None` no topo absoluto, em vez de dar a volta para zero, é o
+    /// que mantém "a menor chave maior que esta" verdadeiro até o fim.
+    #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
     pub fn sucessora(self) -> Option<Self> {
         if self.offset != u64::MAX {
             return Some(Self {

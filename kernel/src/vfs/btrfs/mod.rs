@@ -448,20 +448,24 @@ impl Volume {
                 return Err("o percurso pela arvore nao termina");
             }
 
-            self.descer_ate_a_folha(raiz, alvo, &mut no)?;
-
-            // A sucessora é calculada **antes** de percorrer os itens, porque
-            // `f` pode parar no meio e a folha seguinte deixa de interessar.
-            // Calcular depois daria na mesma e obrigaria a repetir a leitura
-            // do cabeçalho nos dois caminhos de saída.
-            let ultima = interno::ultima_chave_da_folha(&no);
-            procurada = match ultima {
-                // A folha acabou antes do alvo: não há mais nada à direita.
-                // Acontece na última folha da árvore, quando o alvo passou de
-                // todas as chaves que existem.
-                Some(ultima) if ultima >= alvo => ultima.sucessora(),
-                _ => None,
-            };
+            // Onde a próxima folha começa vem da própria descida: é a chave
+            // do ponteiro à direita do escolhido, no nível mais baixo que tem
+            // um. Na folha mais à direita da árvore não há, e o percurso acaba
+            // nela.
+            //
+            // # O defeito que isto fechou
+            //
+            // Antes, a próxima folha era deduzida da **última chave desta**:
+            // procurava-se a sucessora dela, e uma folha cuja última chave
+            // fosse menor que o alvo era tomada por fim da árvore. As duas
+            // coisas erram no vão entre folhas. A descida procura o último
+            // ponteiro com chave menor ou igual ao alvo; um alvo que não
+            // existe e cai entre a última chave de uma folha e a primeira da
+            // seguinte aterrissa na da **esquerda** — e ali todas as chaves
+            // são menores que ele. Medido na árvore de arquivos do disco de
+            // testes: o percurso desde a chave zero entregava 71 das 173
+            // chaves, e `/programas/x86_64` listava um dos três programas.
+            procurada = self.descer_ate_a_folha(raiz, alvo, &mut no)?;
 
             for item in folha::itens(&no)? {
                 let item = item?;
@@ -515,9 +519,14 @@ impl Volume {
         raiz: u64,
         alvo: folha::Chave,
         no: &mut [u8],
-    ) -> Result<(), &'static str> {
+    ) -> Result<Option<folha::Chave>, &'static str> {
         let mut endereco = raiz;
         let mut esperado: Option<u8> = None;
+        // A primeira chave da folha à direita: a vizinha do nível mais baixo
+        // que tiver uma. Um nível mais baixo dá uma chave mais próxima, e é
+        // por isso que ele substitui o de cima; um nível sem vizinha — o
+        // último ponteiro do nó — mantém a de cima.
+        let mut proxima = None;
 
         for _ in 0..=interno::MAX_NIVEL {
             let cabecalho = self.ler_no(endereco, no)?;
@@ -528,10 +537,12 @@ impl Volume {
                 return Err("a arvore aponta para um no do nivel errado");
             }
             if cabecalho.nivel == 0 {
-                return Ok(());
+                return Ok(proxima);
             }
 
-            endereco = interno::descer_para(no, alvo)?;
+            let (filho, vizinha) = interno::descer_para_com_vizinha(no, alvo)?;
+            endereco = filho;
+            proxima = vizinha.or(proxima);
             esperado = Some(cabecalho.nivel - 1);
         }
 
