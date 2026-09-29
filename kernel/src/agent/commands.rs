@@ -1261,6 +1261,17 @@ fn display_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
 
     w.field_u64("surfaces", r.superficies)?;
     w.field_u64("surface_bytes", r.bytes_em_superficies)?;
+
+    // As superfícies de processos: quantas estão vivas, quantas já foram
+    // criadas e quantas o coletor tirou da tela porque o dono morreu. A
+    // terceira é a que diz se um processo está morrendo com janelas abertas.
+    let (vivas, criadas, recolhidas) = crate::superficies::estatisticas();
+    w.key("process_surfaces")?;
+    w.begin_object()?;
+    w.field_u64("live", vivas)?;
+    w.field_u64("created", criadas)?;
+    w.field_u64("reclaimed", recolhidas)?;
+    w.end_object()?;
     w.field_u64("updates", r.atualizacoes)?;
 
     w.key("last_damage")?;

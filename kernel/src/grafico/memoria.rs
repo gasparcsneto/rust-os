@@ -165,7 +165,13 @@ impl Drop for Memoria {
         let mut todas_sairam = true;
         for indice in 0..self.paginas {
             let pagina = self.inicio + indice * TAMANHO_PAGINA;
-            if let Err(porque) = crate::paginacao::desmapear_e_liberar(pagina) {
+            // Soltar, e não liberar: a superfície de um processo tem os
+            // mesmos frames mapeados no espaço dele — ver
+            // `paginacao::espelhar_no_usuario` —, e o processo pode ainda
+            // estar desenhando neles. O frame volta ao alocador com o último
+            // dos dois donos; numa superfície do kernel, que tem um só, soltar
+            // é liberar.
+            if let Err(porque) = crate::arch::desmapear(pagina).map(crate::frames::soltar) {
                 todas_sairam = false;
                 crate::log_error!(
                     "grafico",

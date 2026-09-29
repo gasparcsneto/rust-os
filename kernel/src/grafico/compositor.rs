@@ -305,8 +305,8 @@ impl Compositor {
         nome: &'static str,
         x: i32,
         y: i32,
-        largura: u32,
-        altura: u32,
+        (largura, altura): (u32, u32),
+        opacidade: u8,
     ) -> Result<u32, &'static str> {
         if largura == 0 || altura == 0 {
             return Err("camada sem area");
@@ -333,7 +333,7 @@ impl Compositor {
                 altura,
                 memoria,
                 mistura: Mistura::Opaca,
-                opacidade: u8::MAX,
+                opacidade,
                 no_topo: false,
             },
         );
@@ -402,6 +402,15 @@ impl Compositor {
     }
 }
 
+/// Por que uma camada não nasceu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NaoCriada {
+    /// Não há compositor: sem tela, ou a pilha gráfica não subiu.
+    SemCompositor,
+    /// O compositor recusou — memória, área, identificadores.
+    Recusada(&'static str),
+}
+
 /// Uma camada acima do console, enquanto este valor viver.
 ///
 /// Soltá-lo tira a camada da tela e devolve a memória dela — o mesmo
@@ -421,9 +430,67 @@ impl Camada {
         largura: u32,
         altura: u32,
     ) -> Result<Camada, &'static str> {
-        let id = super::com_compositor(|c| c.criar(nome, x, y, largura, altura))
+        let id = super::com_compositor(|c| c.criar(nome, x, y, (largura, altura), u8::MAX))
             .ok_or("nao ha compositor")??;
         Ok(Camada { id })
+    }
+
+    /// Cria uma camada **invisível** na origem — opacidade zero —, para
+    /// quem vai pintá-la antes de mostrá-la.
+    ///
+    /// É como nasce a superfície de um processo: ele desenha na memória dela
+    /// e só então a mostra. Nascer visível mostraria um retângulo preto
+    /// entre a criação e o primeiro desenho — e um processo lento para
+    /// desenhar o deixaria ali.
+    pub fn nova_oculta(nome: &'static str, largura: u32, altura: u32) -> Result<Camada, NaoCriada> {
+        super::com_compositor(|c| c.criar(nome, 0, 0, (largura, altura), 0))
+            .ok_or(NaoCriada::SemCompositor)?
+            .map(|id| Camada { id })
+            .map_err(NaoCriada::Recusada)
+    }
+
+    /// Onde a memória da camada está mapeada no kernel, e quantos bytes ela
+    /// tem — para quem vai mapear os mesmos frames em outro lugar.
+    pub fn memoria(&self) -> Option<(u64, u64)> {
+        super::com_compositor(|c| {
+            let i = c.indice(self.id)?;
+            let m = &c.camadas[i].memoria;
+            Some((m.inicio(), m.bytes()))
+        })
+        .flatten()
+    }
+
+    /// Recompõe o retângulo `(x, y, largura, altura)` **da camada**, que
+    /// alguém redesenhou sem passar por [`Camada::pintar`].
+    ///
+    /// É o dano de uma superfície de processo: o processo escreve na
+    /// memória por conta própria, e diz onde. O retângulo é recortado à
+    /// camada, e depois à tela.
+    pub fn recompor(
+        &self,
+        x: u32,
+        y: u32,
+        largura: u32,
+        altura: u32,
+    ) -> Result<Dano, &'static str> {
+        super::com_compositor(|c| {
+            let i = c.indice(self.id).ok_or("camada inexistente")?;
+            let e = &c.camadas[i];
+            let local = Dano::novo(x, y, largura, altura).recortar(e.largura, e.altura);
+            if local.vazio() {
+                return Ok(local);
+            }
+            let na_tela = recortar_posicionado(
+                e.x.saturating_add_unsigned(local.x),
+                e.y.saturating_add_unsigned(local.y),
+                local.largura,
+                local.altura,
+                c.largura,
+                c.altura,
+            );
+            c.compor(na_tela)
+        })
+        .ok_or("nao ha compositor")?
     }
 
     pub fn id(&self) -> u32 {
@@ -479,9 +546,6 @@ impl Camada {
     }
 
     /// Muda a opacidade da camada inteira, de 0 a 255, e a recompõe.
-    // Sem cliente de produção ainda: o servidor de janelas vai desbotar e
-    // reordenar janelas; hoje só a suíte o faz.
-    #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
     pub fn definir_opacidade(&self, opacidade: u8) -> Result<Dano, &'static str> {
         super::com_compositor(|c| {
             let i = c.indice(self.id).ok_or("camada inexistente")?;
@@ -505,9 +569,6 @@ impl Camada {
     }
 
     /// Põe a camada no topo da pilha — abaixo das fixas.
-    // Sem cliente de produção ainda: o servidor de janelas vai desbotar e
-    // reordenar janelas; hoje só a suíte o faz.
-    #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
     pub fn trazer_para_frente(&self) -> Result<Dano, &'static str> {
         super::com_compositor(|c| {
             let i = c.indice(self.id).ok_or("camada inexistente")?;

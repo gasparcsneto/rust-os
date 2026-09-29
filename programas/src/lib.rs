@@ -4,7 +4,8 @@
 //!
 //! Um programa compilado para `none` não tem `std`, e sem `std` não tem quem
 //! o comece, quem fale com o kernel, de onde alocar nem para onde ir quando
-//! entra em pânico. Este pacote é essas quatro coisas, e mais nada:
+//! entra em pânico. Este pacote é essas quatro coisas — e as superfícies, que
+//! são o que um programa com janela precisa a mais:
 //!
 //! - **a entrada** — `_start`, abaixo: alinha a pilha e chama o `principal`
 //!   do programa; o que ele devolver é o código de saída;
@@ -12,7 +13,9 @@
 //!   [`protocolo::usuario`], os mesmos que o kernel inclui;
 //! - **o monte** — [`monte`], um alocador que pede páginas ao kernel por
 //!   `mapear` e as reparte, e é o que faz `Vec` e `String` funcionarem;
-//! - **a saída** — [`escreverln!`], uma linha formatada por chamada.
+//! - **a saída** — [`escreverln!`], uma linha formatada por chamada;
+//! - **as superfícies** — [`superficie`], uma camada do compositor com os
+//!   pixels na memória do processo, e o endereço escolhido por ele.
 //!
 //! # Como um programa se escreve
 //!
@@ -44,6 +47,7 @@ extern crate alloc;
 pub mod monte;
 pub mod saida;
 pub mod sistema;
+pub mod superficie;
 
 // A função que cada programa define. O nome é o contrato — ver o cabeçalho.
 unsafe extern "Rust" {

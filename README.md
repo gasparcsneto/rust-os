@@ -196,6 +196,7 @@ kernel/src/
 ├── barra.rs         a barra superior: o nome, o primeiro botão e o tempo ligado
 ├── ponteiro.rs      o mouse: onde ele está, o cursor, e o clique
 ├── eventos.rs       canais de eventos: o kernel publica, um processo escuta e dorme
+├── superficies.rs   as camadas do compositor que são de processos, e quem é dono de cada uma
 ├── ui.rs            a árvore semântica: o que está na tela, e o que se faz com cada coisa
 ├── teclado.rs       o que uma pessoa digita chega ao kernel
 ├── pci.rs           enumeração do barramento PCI
@@ -312,11 +313,14 @@ programas/           os programas de usuário, compilados à parte do kernel
     ├── sistema.rs   as chamadas de sistema, uma função por chamada
     ├── monte.rs     o monte do processo, sobre `mapear`
     ├── saida.rs     uma linha formatada por chamada de `escrever`
+    ├── superficie.rs uma camada do compositor com os pixels no processo
     └── bin/
         ├── ola.rs        o primeiro programa em Rust: monte, formatação e pilha
         ├── memoria.rs    confere `mapear` e o monte do lado de quem pede
         ├── ponteiros.rs  pede ao kernel que escreva no código, e confere a recusa
-        └── eco.rs        escuta um canal de eventos e diz o que chega
+        ├── eco.rs        escuta um canal de eventos e diz o que chega
+        ├── superficie.rs desenha numa superfície, bifurca, fecha e sai sem fechar
+        └── herdeira.rs   depois de um `exec`, fecha a superfície herdada sem perder a sua
 
 xtask/src/
 └── main.rs          a ferramenta de build, teste e diagnóstico do projeto
@@ -510,9 +514,9 @@ $ cargo xtask agent log.tail '{"count":3}'
 ... info  "usuario" "processo encerrou com codigo 42"
 ```
 
-As chamadas de sistema são doze: `sair`, `escrever`, `id`, `ceder`,
-`bifurcar`, `executar`, `abrir`, `ler`, `fechar`, `esperar`, `mapear` e
-`escutar`. Os
+As chamadas de sistema são catorze: `sair`, `escrever`, `id`, `ceder`,
+`bifurcar`, `executar`, `abrir`, `ler`, `fechar`, `esperar`, `mapear`,
+`escutar`, `superficie` e `controlar`. Os
 números, os erros e o mapa do espaço do usuário moram em
 `protocolo::usuario`, que o kernel e os programas incluem — uma declaração
 só, pelo motivo de sempre: duas iguais são duas que podem divergir, e um
@@ -649,6 +653,61 @@ do kernel é resolvida como a dele seria. Três mutações, três reprovadas:
 tirar a conferência do `ler` ou do `esperar` devolve a falha fatal, e deixar
 de contar a marca de cópia na escrita reprova quatro casos de `fork` que
 escrevem o desfecho numa página marcada.
+
+**Superfícies do compositor, com os pixels no processo.** A janela do
+servidor de janelas, antes de haver servidor. `superficie(tamanho, endereco)`
+cria uma camada do compositor e mapeia os pixels dela no processo, no
+endereço que ele escolhe — os **mesmos** frames que o compositor lê ao
+compor, mapeados dos dois lados. O processo desenha escrevendo na memória, e
+diz onde escreveu com `controlar(descritor, DANO, retângulo)`; o compositor
+recompõe só aquilo. Nada é copiado entre os dois lados: é o arranjo do
+Orbital, o compositor do Redox. `controlar` também move a camada, a traz
+para a frente, muda a opacidade e a mistura. Ela nasce **invisível**: uma
+camada que aparecesse ao nascer mostraria preto até o primeiro desenho.
+
+Cada frame tem dois donos contados — a memória da camada e o espaço do
+processo —, e cada lado solta o seu: o frame volta ao alocador com o último,
+em qualquer ordem. Por isso a memória das superfícies passou a **soltar**
+os frames, e não a liberá-los: liberar entregaria ao alocador pixels que o
+processo ainda desenha.
+
+Três coisas o `fork` e a morte pediam, e cada uma falharia em silêncio:
+
+- **o `fork` não leva a superfície ao filho.** Levaria como cópia na
+  escrita, como toda página gravável — e a primeira escrita do **pai** depois
+  de bifurcar iria para uma cópia particular: a janela congelaria na tela sem
+  erro nenhum. As páginas de superfície carregam uma marca no descritor, no
+  bit do software vizinho ao da cópia na escrita, e o `fork` as pula. O filho
+  herda o descritor e é recusado se o usar;
+- **um descritor herdado não alcança a superfície seguinte na mesma vaga.**
+  O pai fecha, a vaga fica livre, o filho cria a própria superfície e ela cai
+  ali: o descritor herdado passaria a controlar a janela nova do filho, e
+  fechá-lo a fecharia. A chave de um descritor é a vaga **e** uma geração
+  que nenhuma outra superfície recebe;
+- **o dono que morre sem fechar.** Um processo morto não fecha os
+  descritores, e ninguém procuraria a camada dele: ela ficaria na tela. O
+  coletor de fios tira as camadas de dono morto na mesma volta em que
+  desmonta os fios.
+
+Fechar tira a camada da tela **e** os pixels do processo — uma janela aberta
+e fechada mil vezes não pode custar mil superfícies de memória até o processo
+sair. Só o mapeamento que ainda aponta para os frames da camada é desfeito:
+depois de um `exec`, o mesmo endereço pode ser memória do programa novo. O
+runtime tem um tipo `Superficie` que escolhe o endereço na metade de cima da
+região mapeável, acima de onde o monte chega, e devolve a faixa quando é
+largado.
+
+O programa `superficie` é o outro lado do caso da suíte: confere as recusas
+da ABI, pinta, bifurca, pinta de novo — a suíte procura na tela a cor de
+**depois** do `fork` —, fecha a primeira e sai sem fechar a segunda. Um
+filho dele cria uma superfície e troca de imagem pelo `herdeira`, que põe a
+dele no **mesmo endereço** e fecha o que herdou: sem a conferência do frame,
+fechar a herdada arrancaria a memória da nova. E esse filho morre sem ser
+colhido — um zumbi, com o espaço de pé —, que é a ordem em que a camada
+solta os frames antes do espaço: liberar ali, em vez de soltar, entregaria a
+outro dono memória que o zumbi ainda mapeia. O
+`display.info` ganhou `process_surfaces`: vivas, criadas e recolhidas de
+donos mortos.
 
 **A proteção é testada, não presumida.** Existe um segundo programa que tenta
 ler a memória do kernel. O caso `usuario: nao alcanca o kernel` exige duas

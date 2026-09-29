@@ -143,6 +143,90 @@ pub fn desmapear_e_liberar(virtual_: u64) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// Mapeia no espaço ativo, a partir de `destino`, os mesmos frames que o
+/// kernel enxerga a partir de `origem` — `paginas` páginas, graváveis pelo
+/// usuário e marcadas como compartilhadas.
+///
+/// É como os pixels de uma superfície do compositor chegam ao processo: os
+/// dois lados escrevem e leem a mesma memória física, e nada é copiado.
+///
+/// # Por que isto é seguro, se `mapear_frame` pede um frame sem uso
+///
+/// Porque cada frame ganha um dono a mais **antes** de ser mapeado — a
+/// mesma coreografia do `fork`. O compositor e o processo passam a soltá-lo
+/// cada um por si: o `Drop` da memória da superfície de um lado, a
+/// destruição do espaço do outro. O frame volta ao alocador com o último
+/// dos dois, em qualquer ordem.
+///
+/// # Tudo ou nada
+///
+/// Uma falha no meio desfaz as páginas já mapeadas, com os donos que elas
+/// ganharam: um erro com metade da superfície no processo deixaria frames
+/// com um dono que nenhum espaço representa.
+pub fn espelhar_no_usuario(origem: u64, destino: u64, paginas: u64) -> Result<(), &'static str> {
+    let permissoes = Permissoes::DADOS_USUARIO;
+    for i in 0..paginas {
+        let virtual_ = destino + i * TAMANHO_PAGINA;
+        let feito = (|| {
+            let frame =
+                arch::traduzir(origem + i * TAMANHO_PAGINA).ok_or("superficie sem pagina")?;
+            if !crate::frames::compartilhar(frame) {
+                return Err("frame da superficie nao pode ser compartilhado");
+            }
+            // SAFETY: o frame é da superfície e acaba de ganhar um dono a
+            // mais, então não volta ao alocador enquanto este mapeamento
+            // existir — o caso que o contrato de `mapear_frame` deixa ao
+            // chamador, satisfeito pela contagem de donos.
+            if let Err(motivo) = unsafe { arch::mapear_frame(virtual_, frame, permissoes) } {
+                crate::frames::soltar(frame);
+                return Err(motivo);
+            }
+            arch::marcar_compartilhada(virtual_)
+        })();
+        if let Err(motivo) = feito {
+            // A página `i` pode ter ficado mapeada sem a marca — o mapeamento
+            // deu certo e a marca não. Desfazer até ela também é o que deixa
+            // a contagem certa: `desfazer_espelho` só desfaz a página que
+            // aponta para o frame da origem.
+            desfazer_espelho(origem, destino, i + 1);
+            return Err(motivo);
+        }
+    }
+    Ok(())
+}
+
+/// Desfaz o que [`espelhar_no_usuario`] fez: no espaço ativo, desmapeia
+/// cada página a partir de `destino` que aponta para o mesmo frame que a
+/// página correspondente a partir de `origem`, e solta o dono que ela
+/// ganhou.
+///
+/// # Por que conferir o frame, e não só desmapear
+///
+/// Porque quem desfaz nem sempre é quem espelhou, no mesmo instante. Uma
+/// superfície fechada depois de um `exec` tem o endereço antigo no espaço de
+/// um programa novo, que pode ter posto a própria memória ali. Desmapear às
+/// cegas arrancaria a memória do programa novo — e soltaria um dono que não
+/// era da superfície.
+///
+/// A conferência é exata porque os frames da origem estão vivos enquanto
+/// ela existir: nenhum outro mapeamento pode ter recebido um deles do
+/// alocador. Um endereço que aponta para um deles é o espelho, e nenhum
+/// outro.
+pub fn desfazer_espelho(origem: u64, destino: u64, paginas: u64) {
+    for i in 0..paginas {
+        let virtual_ = destino + i * TAMANHO_PAGINA;
+        let Some(esperado) = arch::traduzir(origem + i * TAMANHO_PAGINA) else {
+            continue;
+        };
+        if arch::traduzir(virtual_) != Some(esperado) {
+            continue;
+        }
+        if let Ok(frame) = arch::desmapear(virtual_) {
+            crate::frames::soltar(frame);
+        }
+    }
+}
+
 /// Um espaço de endereços, dono das tabelas que o descrevem.
 ///
 /// # Por que RAII, e não um par criar/destruir
@@ -222,13 +306,22 @@ impl Espaco {
         // A lista é montada antes de qualquer troca de espaço: percorrer as
         // tabelas da origem e escrever no destino ao mesmo tempo exigiria que
         // os dois estivessem ativos, e só um pode estar.
+        //
+        // As páginas de superfície ficam de fora: são os pixels de uma camada
+        // do compositor, e a camada é de quem a criou. Levá-las ao filho como
+        // cópia na escrita seria pior que não levar: a primeira escrita do
+        // **pai** depois do `fork` tiraria uma cópia particular, e o pai
+        // passaria a desenhar numa memória que o compositor não lê mais — a
+        // janela congelaria sem erro nenhum.
         let mut paginas = alloc::vec::Vec::new();
         arch::sem_interrupcoes(|| {
             // SAFETY: a raiz é nossa e é válida; as interrupções mascaradas
             // garantem que ninguém altera as tabelas durante o percurso.
             unsafe {
                 arch::percorrer_paginas_do_usuario(origem, privada, &mut |pagina| {
-                    paginas.push(pagina);
+                    if !pagina.compartilhada {
+                        paginas.push(pagina);
+                    }
                 });
             }
         });

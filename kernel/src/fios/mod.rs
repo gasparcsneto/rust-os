@@ -439,6 +439,12 @@ pub fn recolher_terminados() -> usize {
         quantos += 1;
     }
 
+    // As camadas de quem morreu saem da tela na mesma volta: um processo
+    // morto não fecha os descritores, e ninguém mais procuraria a camada
+    // dele — ver `superficies::recolher_orfas`. Fora do laço e de qualquer
+    // tranca, pela mesma razão de largar o fio fora dela.
+    crate::superficies::recolher_orfas();
+
     if quantos > 0 {
         RECOLHIDOS.fetch_add(quantos as u64, Ordering::Relaxed);
     }

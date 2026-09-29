@@ -81,6 +81,7 @@ mod ponteiro;
 mod qemu;
 mod rede;
 mod serial;
+mod superficies;
 mod tarefas;
 mod teclado;
 mod tela;

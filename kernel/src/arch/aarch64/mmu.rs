@@ -127,6 +127,15 @@ const UXN: u64 = 1 << 54;
 /// descritor existir sem ela ou ela sobreviver ao descritor.
 const COPIA_NA_ESCRITA: u64 = 1 << 55;
 
+/// O bit de descritor que marca uma página como **compartilhada com o
+/// compositor** — a memória de uma superfície, mapeada no processo.
+///
+/// O vizinho de [`COPIA_NA_ESCRITA`], entre os bits do software, e pelo
+/// mesmo motivo: a marca viaja dentro do descritor, e some com ele. Quem a
+/// lê é o `fork`, que não leva estas páginas ao filho — ver
+/// `Espaco::clonar_o_ativo`.
+const COMPARTILHADA: u64 = 1 << 56;
+
 /// Programa `MAIR_EL1`, a tabela de atributos de memória.
 ///
 /// Os descritores de página não carregam os atributos de cache: carregam um
@@ -1089,6 +1098,9 @@ unsafe fn liberar_subarvore(descritor: u64, nivel: u8) {
 /// bifurcou uma vez, e a página dele já saiu de gravável na primeira vez.
 pub fn marcar_copia_na_escrita(virtual_: u64) -> Result<(), &'static str> {
     com_descritor_da_folha(virtual_, |descritor| {
+        if *descritor & COMPARTILHADA != 0 {
+            return Err("pagina compartilhada com o compositor nao vira copia na escrita");
+        }
         if *descritor & COPIA_NA_ESCRITA != 0 {
             return Ok(((), false));
         }
@@ -1096,6 +1108,22 @@ pub fn marcar_copia_na_escrita(virtual_: u64) -> Result<(), &'static str> {
             return Err("pagina somente leitura nao vira copia na escrita");
         }
         *descritor |= AP_SOMENTE_LEITURA | COPIA_NA_ESCRITA;
+        Ok(((), true))
+    })
+}
+
+/// Marca a página como compartilhada com o compositor — ver
+/// [`COMPARTILHADA`].
+///
+/// Uma página de cópia na escrita é recusada: as duas marcas dizem coisas
+/// opostas sobre quem enxerga uma escrita, e uma página não pode ser das
+/// duas.
+pub fn marcar_compartilhada(virtual_: u64) -> Result<(), &'static str> {
+    com_descritor_da_folha(virtual_, |descritor| {
+        if *descritor & COPIA_NA_ESCRITA != 0 {
+            return Err("pagina de copia na escrita nao vira compartilhada");
+        }
+        *descritor |= COMPARTILHADA;
         Ok(((), true))
     })
 }
@@ -1308,6 +1336,7 @@ pub unsafe fn percorrer_paginas_do_usuario(
                     fisico: e3 & MASCARA_ENDERECO,
                     permissoes: permissoes_de(e3),
                     copia_na_escrita: e3 & COPIA_NA_ESCRITA != 0,
+                    compartilhada: e3 & COMPARTILHADA != 0,
                 });
             }
         }

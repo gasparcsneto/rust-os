@@ -66,6 +66,25 @@ pub mod numero {
     /// o kernel publicar no canal. Um canal tem um ouvinte só; o segundo
     /// ouve [`erro::OCUPADO`](super::erro::OCUPADO).
     pub const ESCUTAR: u64 = 11;
+    /// `superficie(tamanho, endereco)`: cria uma superfície do compositor e
+    /// a mapeia no processo, em `endereco`. Devolve um descritor.
+    ///
+    /// `tamanho` é a largura e a altura empacotadas por
+    /// [`superficie::tamanho`](super::superficie::tamanho). Os pixels ficam
+    /// em `[endereco, endereco + largura * altura * 4)`, linha a linha, no
+    /// formato `0xAARRGGBB`; o processo desenha neles direto, e o
+    /// compositor lê dos mesmos frames — nada é copiado.
+    ///
+    /// A camada nasce **invisível** e na origem: o processo desenha, e só
+    /// então a posiciona e a mostra com [`CONTROLAR`]. Uma camada que
+    /// aparecesse ao nascer mostraria preto até o primeiro desenho.
+    ///
+    /// Tudo ou nada, como `mapear`: no erro, não há camada nem página.
+    pub const SUPERFICIE: u64 = 12;
+    /// `controlar(descritor, operacao, argumento)`: mexe na camada de uma
+    /// superfície — ver [`superficie::operacao`](super::superficie::operacao).
+    /// Zero, ou um erro.
+    pub const CONTROLAR: u64 = 13;
 }
 
 /// Erros devolvidos ao usuário, sempre negativos.
@@ -106,6 +125,109 @@ pub mod erro {
     pub const JA_MAPEADO: i64 = -12;
     /// O canal de eventos já tem ouvinte, ou a tabela de canais está cheia.
     pub const OCUPADO: i64 = -13;
+    /// A operação pedida a `controlar` não existe, ou o argumento dela não
+    /// faz sentido — uma opacidade acima de 255, um retângulo fora da
+    /// superfície.
+    pub const ARGUMENTO_INVALIDO: i64 = -14;
+    /// Não há compositor: a máquina não tem tela, ou a pilha gráfica não
+    /// subiu. Distinto de [`SEM_MEMORIA`]: tentar de novo não adianta.
+    pub const SEM_TELA: i64 = -15;
+}
+
+/// As superfícies do compositor, como um processo as vê.
+///
+/// # O que o processo tem na mão
+///
+/// Um descritor e uma faixa de memória. A faixa são os pixels da camada —
+/// os **mesmos** frames que o compositor lê ao compor, mapeados nos dois
+/// lados —, e o descritor é o que o processo passa a `controlar` para mover
+/// a camada, mostrá-la e dizer o que mudou nela.
+///
+/// Desenhar é escrever na faixa; nada aparece até o processo dizer onde
+/// escreveu, com [`operacao::DANO`]. É o arranjo do Orbital, o compositor do
+/// Redox: a janela é memória do cliente, e o compositor recompõe o
+/// retângulo que o cliente acusa.
+///
+/// # O que um `fork` faz com ela
+///
+/// O filho herda o descritor e **não** herda a faixa: ela não é mapeada no
+/// espaço dele, e `controlar` pelo descritor herdado é recusado. A camada é
+/// de quem a criou — dois processos desenhando na mesma janela, cada um sem
+/// saber do outro, seria o defeito, e não o recurso.
+///
+/// # Quando ela some
+///
+/// Quando o processo fecha o descritor, ou quando ele morre: a camada sai
+/// da tela, e os frames voltam ao alocador quando o último dos dois lados —
+/// o compositor e o espaço do processo — os soltar.
+pub mod superficie {
+    /// O maior lado, em pixels.
+    pub const MAIOR_LADO: u32 = 4096;
+    /// O maior tamanho, em bytes: 16 MiB, uma tela de 2048 por 2048.
+    ///
+    /// O teto é de latência, como o de `mapear`: criar e mapear acontecem
+    /// numa chamada só, com as interrupções mascaradas em boa parte dela.
+    pub const MAIOR_TAMANHO: u64 = 16 * 1024 * 1024;
+
+    /// A largura e a altura num argumento: a largura nos 32 bits de baixo.
+    pub const fn tamanho(largura: u32, altura: u32) -> u64 {
+        largura as u64 | (altura as u64) << 32
+    }
+
+    /// O inverso de [`tamanho`].
+    pub const fn de_tamanho(argumento: u64) -> (u32, u32) {
+        (argumento as u32, (argumento >> 32) as u32)
+    }
+
+    /// Uma posição na tela num argumento: `x` nos 32 bits de baixo. As
+    /// duas coordenadas são com sinal — uma janela pode sair pela borda.
+    pub const fn posicao(x: i32, y: i32) -> u64 {
+        x as u32 as u64 | (y as u32 as u64) << 32
+    }
+
+    /// O inverso de [`posicao`].
+    pub const fn de_posicao(argumento: u64) -> (i32, i32) {
+        (argumento as u32 as i32, (argumento >> 32) as u32 as i32)
+    }
+
+    /// Um retângulo **da superfície** num argumento: x, y, largura e
+    /// altura, dezesseis bits cada, de baixo para cima. Dezesseis bastam:
+    /// o maior lado é [`MAIOR_LADO`].
+    pub const fn retangulo(x: u16, y: u16, largura: u16, altura: u16) -> u64 {
+        x as u64 | (y as u64) << 16 | (largura as u64) << 32 | (altura as u64) << 48
+    }
+
+    /// O inverso de [`retangulo`].
+    pub const fn de_retangulo(argumento: u64) -> (u16, u16, u16, u16) {
+        (
+            argumento as u16,
+            (argumento >> 16) as u16,
+            (argumento >> 32) as u16,
+            (argumento >> 48) as u16,
+        )
+    }
+
+    /// O que `controlar` sabe fazer com a camada.
+    pub mod operacao {
+        /// Leva o canto superior esquerdo a
+        /// [`posicao`](super::posicao)`(x, y)`.
+        pub const MOVER: u64 = 1;
+        /// Recompõe o [`retangulo`](super::retangulo) da superfície que o
+        /// processo redesenhou.
+        pub const DANO: u64 = 2;
+        /// Põe a camada no topo — abaixo do cursor.
+        pub const FRENTE: u64 = 3;
+        /// A opacidade da camada inteira, de 0 (invisível, como ela nasce)
+        /// a 255.
+        pub const OPACIDADE: u64 = 4;
+        /// Como os pixels se misturam com o de baixo: [`OPACA`] ignora o
+        /// byte alto, [`ALFA`] o usa como opacidade do pixel.
+        pub const MISTURA: u64 = 5;
+
+        /// Argumentos de [`MISTURA`].
+        pub const OPACA: u64 = 0;
+        pub const ALFA: u64 = 1;
+    }
 }
 
 /// Um evento, como `ler` o entrega a quem escuta um canal.

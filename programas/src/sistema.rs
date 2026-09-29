@@ -135,6 +135,31 @@ pub fn ler_eventos(descritor: u64, destino: &mut [Evento]) -> Result<usize, i64>
     Ok(quantos)
 }
 
+/// Cria uma superfície do compositor de `largura` por `altura` e a mapeia em
+/// `endereco`. Um descritor, ou um erro — e, no erro, nada foi mapeado.
+///
+/// Quem quer só desenhar numa janela usa
+/// [`Superficie`](crate::superficie::Superficie), que escolhe o endereço.
+pub fn superficie(largura: u32, altura: u32, endereco: u64) -> i64 {
+    // SAFETY: o kernel não escreve em memória existente por este pedido — ele
+    // cria a faixa, e recusa uma já em uso com `JA_MAPEADO`.
+    unsafe {
+        chamar(
+            numero::SUPERFICIE,
+            protocolo::usuario::superficie::tamanho(largura, altura),
+            endereco,
+            0,
+        )
+    }
+}
+
+/// Faz `operacao` com `argumento` na camada da superfície `descritor` — ver
+/// [`protocolo::usuario::superficie::operacao`]. Zero, ou um erro.
+pub fn controlar(descritor: u64, operacao: u64, argumento: u64) -> i64 {
+    // SAFETY: `controlar` não recebe ponteiro.
+    unsafe { chamar(numero::CONTROLAR, descritor, operacao, argumento) }
+}
+
 /// Abre o arquivo do `caminho`. Um descritor, ou um erro.
 pub fn abrir(caminho: &str) -> i64 {
     // SAFETY: a fatia é deste processo e tem o tamanho dito.
@@ -178,6 +203,21 @@ pub fn fechar(descritor: u64) -> i64 {
 pub unsafe fn ler_cru(descritor: u64, ponteiro: u64, tamanho: u64) -> i64 {
     // SAFETY: o contrato é de quem chama.
     unsafe { chamar(numero::LER, descritor, ponteiro, tamanho) }
+}
+
+/// Troca a imagem deste processo pelo programa do `caminho`. Não volta
+/// quando dá certo; o erro, quando volta.
+pub fn executar(caminho: &str) -> i64 {
+    // SAFETY: a fatia é deste processo e tem o tamanho dito; o kernel a
+    // copia antes de trocar a imagem.
+    unsafe {
+        chamar(
+            numero::EXECUTAR,
+            caminho.as_ptr() as u64,
+            caminho.len() as u64,
+            0,
+        )
+    }
 }
 
 /// Duplica o processo. Zero no filho; o identificador do filho no pai; ou

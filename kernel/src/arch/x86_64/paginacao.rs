@@ -627,6 +627,14 @@ unsafe fn liberar_subarvore(entrada: &PageTableEntry, nivel: u8) {
 /// descritor existir sem ela ou ela sobreviver ao descritor.
 const COPIA_NA_ESCRITA: PageTableFlags = PageTableFlags::BIT_9;
 
+/// O bit de descritor que marca uma página como **compartilhada com o
+/// compositor** — a memória de uma superfície, mapeada no processo.
+///
+/// O vizinho de [`COPIA_NA_ESCRITA`], e pelo mesmo motivo: a marca viaja
+/// dentro do descritor, e some com ele. Quem a lê é o `fork`, que não leva
+/// estas páginas ao filho — ver `Espaco::clonar_o_ativo`.
+const COMPARTILHADA: PageTableFlags = PageTableFlags::BIT_10;
+
 /// Tira a escrita da página e a marca como cópia na escrita.
 ///
 /// Opera sobre o espaço **ativo**, que é onde `fork` encontra o pai e onde
@@ -645,6 +653,9 @@ const COPIA_NA_ESCRITA: PageTableFlags = PageTableFlags::BIT_9;
 pub fn marcar_copia_na_escrita(virtual_: u64) -> Result<(), &'static str> {
     com_descritor_da_folha(virtual_, |descritor| {
         let flags = descritor.flags();
+        if flags.contains(COMPARTILHADA) {
+            return Err("pagina compartilhada com o compositor nao vira copia na escrita");
+        }
         if flags.contains(COPIA_NA_ESCRITA) {
             return Ok(((), false));
         }
@@ -652,6 +663,23 @@ pub fn marcar_copia_na_escrita(virtual_: u64) -> Result<(), &'static str> {
             return Err("pagina somente leitura nao vira copia na escrita");
         }
         descritor.set_flags((flags - PageTableFlags::WRITABLE) | COPIA_NA_ESCRITA);
+        Ok(((), true))
+    })
+}
+
+/// Marca a página como compartilhada com o compositor — ver
+/// [`COMPARTILHADA`].
+///
+/// Uma página de cópia na escrita é recusada: as duas marcas dizem coisas
+/// opostas sobre quem enxerga uma escrita, e uma página não pode ser das
+/// duas.
+pub fn marcar_compartilhada(virtual_: u64) -> Result<(), &'static str> {
+    com_descritor_da_folha(virtual_, |descritor| {
+        let flags = descritor.flags();
+        if flags.contains(COPIA_NA_ESCRITA) {
+            return Err("pagina de copia na escrita nao vira compartilhada");
+        }
+        descritor.set_flags(flags | COMPARTILHADA);
         Ok(((), true))
     })
 }
@@ -871,6 +899,7 @@ pub unsafe fn percorrer_paginas_do_usuario(
                         fisico: frame.start_address().as_u64(),
                         permissoes: permissoes_de(e1.flags().bits()),
                         copia_na_escrita: e1.flags().contains(COPIA_NA_ESCRITA),
+                        compartilhada: e1.flags().contains(COMPARTILHADA),
                     });
                 }
             }

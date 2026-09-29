@@ -100,6 +100,13 @@ pub enum Alvo {
     /// só, o fio que chamou `escutar`, e o filho que ler por este descritor
     /// é recusado.
     Eventos { vaga: usize },
+    /// Uma superfície do compositor que este processo criou — ver
+    /// [`crate::superficies`], e a [`Chave`](crate::superficies::Chave)
+    /// para o porquê de a vaga não bastar.
+    ///
+    /// Como o canal: um `fork` copia o descritor, e não a superfície, e o
+    /// filho que a controlar por ele é recusado.
+    Superficie { chave: crate::superficies::Chave },
 }
 
 /// A tabela de descritores de um processo.

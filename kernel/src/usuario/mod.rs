@@ -247,6 +247,8 @@ pub unsafe fn despachar(
         numero::ESPERAR => esperar(a0, a1),
         numero::MAPEAR => mapear(a0, a1),
         numero::ESCUTAR => escutar(a0, a1),
+        numero::SUPERFICIE => superficie(a0, a1),
+        numero::CONTROLAR => controlar(a0, a1, a2),
         // SAFETY: o quadro é o desta chamada, garantido por quem nos chamou.
         numero::BIFURCAR => unsafe { bifurcar(quadro) },
         numero::EXECUTAR => unsafe { executar(quadro, a0, a1) },
@@ -265,6 +267,30 @@ pub unsafe fn despachar(
 /// interrupções mascaradas, e zerar 4096 páginas de uma vez já é o bastante
 /// para um tique do relógio esperar.
 pub const MAIOR_MAPEAMENTO: u64 = 16 * 1024 * 1024;
+
+/// Confere uma faixa que o processo quer ocupar com memória nova: alinhada,
+/// dentro de [`protocolo::usuario::MAPEAVEL`], e livre. Os mesmos erros para
+/// `mapear` e para `superficie`, porque a pergunta é a mesma.
+fn conferir_faixa_livre(endereco: u64, tamanho: u64) -> Result<(), i64> {
+    use crate::arch::TAMANHO_PAGINA;
+    let (inicio, fim) = protocolo::usuario::MAPEAVEL;
+
+    if !endereco.is_multiple_of(TAMANHO_PAGINA) {
+        return Err(erro::ENDERECO_INVALIDO);
+    }
+    // A soma vem do usuário: conferida antes de comparar.
+    let Some(ate) = endereco.checked_add(tamanho) else {
+        return Err(erro::ENDERECO_INVALIDO);
+    };
+    if endereco < inicio || ate > fim {
+        return Err(erro::ENDERECO_INVALIDO);
+    }
+    let paginas = tamanho.div_ceil(TAMANHO_PAGINA);
+    if (0..paginas).any(|i| crate::arch::traduzir(endereco + i * TAMANHO_PAGINA).is_some()) {
+        return Err(erro::JA_MAPEADO);
+    }
+    Ok(())
+}
 
 /// `mapear(endereco, tamanho)`: memória nova para o processo.
 ///
@@ -285,7 +311,6 @@ pub const MAIOR_MAPEAMENTO: u64 = 16 * 1024 * 1024;
 /// faixa mapeada deixaria o processo sem saber o que tem.
 fn mapear(endereco: u64, tamanho: u64) -> i64 {
     use crate::arch::TAMANHO_PAGINA;
-    let (inicio, fim) = protocolo::usuario::MAPEAVEL;
 
     if !endereco.is_multiple_of(TAMANHO_PAGINA) {
         RECUSADAS.fetch_add(1, Ordering::Relaxed);
@@ -295,20 +320,16 @@ fn mapear(endereco: u64, tamanho: u64) -> i64 {
         RECUSADAS.fetch_add(1, Ordering::Relaxed);
         return erro::TAMANHO_INVALIDO;
     }
-    // A soma vem do usuário: conferida antes de comparar.
-    let Some(ate) = endereco.checked_add(tamanho) else {
-        RECUSADAS.fetch_add(1, Ordering::Relaxed);
-        return erro::ENDERECO_INVALIDO;
-    };
-    if endereco < inicio || ate > fim {
-        RECUSADAS.fetch_add(1, Ordering::Relaxed);
-        return erro::ENDERECO_INVALIDO;
+    match conferir_faixa_livre(endereco, tamanho) {
+        Ok(()) => {}
+        Err(erro::JA_MAPEADO) => return erro::JA_MAPEADO,
+        Err(e) => {
+            RECUSADAS.fetch_add(1, Ordering::Relaxed);
+            return e;
+        }
     }
 
     let paginas = tamanho / TAMANHO_PAGINA;
-    if (0..paginas).any(|i| crate::arch::traduzir(endereco + i * TAMANHO_PAGINA).is_some()) {
-        return erro::JA_MAPEADO;
-    }
 
     for i in 0..paginas {
         let pagina = endereco + i * TAMANHO_PAGINA;
@@ -373,7 +394,12 @@ fn escrever(descritor: u64, ponteiro: u64, tamanho: u64) -> i64 {
         // está na tabela não recebe nada. As duas respostas são a mesma de
         // propósito: um processo que sondasse descritores alheios não deve
         // aprender, pelo motivo, qual deles existe.
-        Some(descritores::Alvo::Arquivo { .. } | descritores::Alvo::Eventos { .. }) | None => {
+        Some(
+            descritores::Alvo::Arquivo { .. }
+            | descritores::Alvo::Eventos { .. }
+            | descritores::Alvo::Superficie { .. },
+        )
+        | None => {
             RECUSADAS.fetch_add(1, Ordering::Relaxed);
             return erro::DESCRITOR_INVALIDO;
         }
@@ -620,6 +646,70 @@ fn escutar(ponteiro: u64, tamanho: u64) -> i64 {
     }
 }
 
+/// `superficie(tamanho, endereco)`: uma camada do compositor, com os pixels
+/// mapeados no processo — ver [`protocolo::usuario::numero::SUPERFICIE`] e
+/// [`crate::superficies`].
+///
+/// A ordem das conferências é a de `mapear`: primeiro o que se sabe sem
+/// tocar em nada — o tamanho, a faixa —, depois a criação, e o descritor por
+/// último. Sem vaga de descritor, a superfície recém-criada é desfeita: um
+/// processo não pode ficar com uma camada que ele não tem como controlar
+/// nem fechar.
+fn superficie(tamanho: u64, endereco: u64) -> i64 {
+    let (largura, altura) = protocolo::usuario::superficie::de_tamanho(tamanho);
+    let Some(bytes) = crate::superficies::bytes_de(largura, altura) else {
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return erro::TAMANHO_INVALIDO;
+    };
+    match conferir_faixa_livre(endereco, bytes) {
+        Ok(()) => {}
+        Err(erro::JA_MAPEADO) => return erro::JA_MAPEADO,
+        Err(e) => {
+            RECUSADAS.fetch_add(1, Ordering::Relaxed);
+            return e;
+        }
+    }
+
+    let dono = crate::fios::id_atual();
+    let chave = match crate::superficies::criar(dono, largura, altura, endereco) {
+        Ok(chave) => chave,
+        Err(crate::superficies::Recusa::SemTela) => return erro::SEM_TELA,
+        Err(crate::superficies::Recusa::Tamanho) => return erro::TAMANHO_INVALIDO,
+        Err(_) => return erro::SEM_MEMORIA,
+    };
+    match crate::fios::com_descritores(|t| t.instalar(descritores::Alvo::Superficie { chave })) {
+        Some(Some(descritor)) => descritor as i64,
+        _ => {
+            crate::superficies::largar(chave, dono);
+            erro::SEM_DESCRITOR
+        }
+    }
+}
+
+/// `controlar(descritor, operacao, argumento)`: mexe na camada de uma
+/// superfície.
+fn controlar(descritor: u64, op: u64, argumento: u64) -> i64 {
+    let Some(Some(descritores::Alvo::Superficie { chave })) =
+        crate::fios::com_descritores(|t| t.alvo(descritor))
+    else {
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return erro::DESCRITOR_INVALIDO;
+    };
+    match crate::superficies::controlar(chave, crate::fios::id_atual(), op, argumento) {
+        Ok(()) => 0,
+        Err(crate::superficies::Recusa::Argumento) => {
+            RECUSADAS.fetch_add(1, Ordering::Relaxed);
+            erro::ARGUMENTO_INVALIDO
+        }
+        // O filho que herdou o descritor: para ele, este descritor não
+        // aponta para nada que seja dele.
+        Err(_) => {
+            RECUSADAS.fetch_add(1, Ordering::Relaxed);
+            erro::DESCRITOR_INVALIDO
+        }
+    }
+}
+
 /// `ler` num canal de eventos: eventos inteiros, ou o fio estaciona.
 ///
 /// # Por que passar por um buffer, se as interrupções estão mascaradas
@@ -675,10 +765,17 @@ fn ler_eventos(vaga: usize, ponteiro: u64, tamanho: u64) -> i64 {
 fn fechar(descritor: u64) -> i64 {
     // Um canal de eventos é largado antes da vaga: o nome fica livre para o
     // próximo ouvinte na hora, e não quando alguém tropeçar no ouvinte morto.
-    if let Some(Some(descritores::Alvo::Eventos { vaga })) =
-        crate::fios::com_descritores(|t| t.alvo(descritor))
-    {
-        crate::eventos::largar(vaga, crate::fios::id_atual());
+    //
+    // Uma superfície, pelo mesmo motivo: a camada sai da tela quando o
+    // processo fecha, e não quando ele morrer.
+    match crate::fios::com_descritores(|t| t.alvo(descritor)) {
+        Some(Some(descritores::Alvo::Eventos { vaga })) => {
+            crate::eventos::largar(vaga, crate::fios::id_atual());
+        }
+        Some(Some(descritores::Alvo::Superficie { chave })) => {
+            crate::superficies::largar(chave, crate::fios::id_atual());
+        }
+        _ => {}
     }
     match crate::fios::com_descritores(|t| t.fechar(descritor)) {
         Some(true) => 0,

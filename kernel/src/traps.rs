@@ -288,6 +288,7 @@ pub fn fatal(nome: &'static str, pc: u64, endereco: Option<u64>, codigo: u64) ->
         crate::virtio::gpu::destravar();
         crate::interpretador::destravar();
         crate::barra::destravar();
+        crate::superficies::destravar();
         crate::ponteiro::destravar();
         crate::eventos::destravar();
     }

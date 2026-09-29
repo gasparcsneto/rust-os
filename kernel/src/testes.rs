@@ -3855,6 +3855,207 @@ fn eventos_canal_dorme_entrega_e_recusa() -> Resultado {
     Ok(())
 }
 
+/// Uma superfície de processo: o que ele desenha aparece na tela, o `fork`
+/// não a leva ao filho, fechar a tira da tela e da memória, e a de um
+/// processo morto sai sozinha.
+///
+/// # O que este caso protege
+///
+/// A janela do servidor de janelas, antes de haver servidor. Cada uma destas
+/// falha em silêncio, e a tela é o único lugar onde aparece:
+///
+/// - **a memória é a mesma.** Os pixels que o processo escreve são os que o
+///   compositor lê — ou a tela mostraria preto;
+/// - **o `fork` não a transforma em cópia na escrita.** Se transformasse, a
+///   primeira escrita do pai depois de bifurcar iria para uma cópia
+///   particular, e a tela continuaria mostrando a cor de antes;
+/// - **fechar solta os dois lados.** A camada sai da tela e as páginas saem
+///   do processo — o programa confere mapeando a faixa de novo;
+/// - **o dono que morre sem fechar.** A camada dele sai da tela pelo
+///   coletor, e os frames voltam ao alocador.
+///
+/// As recusas da ABI — tamanhos, endereços, operações e o descritor
+/// herdado — o programa confere do lado dele, e diz qual falhou pelo código
+/// de saída.
+fn superficies_o_processo_desenha_e_some() -> Resultado {
+    use crate::tela::Cor;
+    use crate::usuario::DIRETORIO_DOS_COMPILADOS;
+    use alloc::format;
+    use protocolo::usuario::evento::{Evento, tipo};
+
+    const CANAL: &str = "teste-superficie";
+    // As do programa — ver `programas/src/bin/superficie.rs`.
+    let (x, y, largura, altura) = (200u32, 200u32, 64u32, 32u32);
+    let antes = Cor::nova(0x20, 0xC0, 0x40);
+    let depois = Cor::nova(0xD0, 0x30, 0x30);
+
+    if crate::tela::tela_fisica().is_none() {
+        return sem_framebuffer();
+    }
+    let desde = crate::log::total_emitidos();
+    let visto = |procurada: &str| {
+        let mut achou = false;
+        crate::log::ultimos(24, crate::log::Level::Trace, |r| {
+            achou |=
+                r.seq >= desde && r.subsistema == "usuario" && r.mensagem().starts_with(procurada);
+        });
+        achou
+    };
+    // Um processo que termina sem ser pelo código de sucesso: morto, ou
+    // saindo com o número da conferência que falhou. O filho do `fork` sai
+    // com zero, e não conta.
+    let terminou_mal = || {
+        let mut mal = false;
+        crate::log::ultimos(24, crate::log::Level::Trace, |r| {
+            let m = r.mensagem();
+            mal |= r.seq >= desde
+                && r.subsistema == "usuario"
+                && (m.starts_with("processo morto por")
+                    || (m.starts_with("processo encerrou com codigo ")
+                        && !m.ends_with(" 0")
+                        && !m.ends_with(" 66")));
+        });
+        mal
+    };
+    let camadas_de_processo = || {
+        let mut n = 0;
+        crate::grafico::camadas(|c| n += (c.nome == crate::superficies::NOME_DA_CAMADA) as usize);
+        n
+    };
+    // O coletor passa antes da medida: fios de casos anteriores ainda podem
+    // estar segurando frames.
+    let _ = esperar_ate(|| false, 30);
+    let livres_antes = crate::frames::estatisticas().0;
+    let (_, criadas_antes, recolhidas_antes) = crate::superficies::estatisticas();
+
+    crate::usuario::lancar(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/superficie")))?;
+    esperar_ate(|| visto("superficie: pronta") || terminou_mal(), 600)?;
+    if terminou_mal() {
+        return Err("o programa da superficie falhou antes de ficar pronto");
+    }
+    // O filho zumbi: o coletor tira a camada dele com o espaço ainda de pé.
+    esperar_ate(
+        || crate::superficies::estatisticas().2 == recolhidas_antes + 1,
+        200,
+    )
+    .map_err(|_| "a camada de um filho zumbi nao saiu da tela")?;
+    // E nenhum frame dela voltou ao alocador com o zumbi ainda de pé: é o
+    // que acontece quando a memória da camada **libera** em vez de soltar —
+    // o frame é entregue a outro enquanto o espaço do zumbi ainda o mapeia.
+    let mut devolvido_com_dono = false;
+    crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+        devolvido_com_dono |=
+            r.seq >= desde && r.subsistema == "frames" && r.mensagem().contains("liberado com");
+    });
+    if devolvido_com_dono {
+        return Err("um frame de superficie voltou ao alocador com o zumbi de pe");
+    }
+
+    // Duas camadas de processo, de baixo para cima: a que nunca se mostrou,
+    // invisível e na origem, e a janela — trazida para a frente depois de a
+    // outra nascer, misturada por alfa, e onde o programa a pôs.
+    let mut delas = alloc::vec::Vec::new();
+    crate::grafico::camadas(|c| {
+        if c.nome == crate::superficies::NOME_DA_CAMADA {
+            delas.push(c);
+        }
+    });
+    let [oculta, janela] = delas[..] else {
+        crate::log_error!("teste", "camadas de processo: {:?}", delas);
+        return Err("o processo nao tem as duas camadas que criou, na ordem que pediu");
+    };
+    if (oculta.x, oculta.y, oculta.largura, oculta.opacidade) != (0, 0, 8, 0) {
+        crate::log_error!("teste", "a oculta: {:?}", oculta);
+        return Err("uma superficie de processo nao nasceu invisivel na origem");
+    }
+    if (
+        janela.x,
+        janela.y,
+        janela.largura,
+        janela.altura,
+        janela.opacidade,
+    ) != (x as i32, y as i32, largura, altura, 255)
+        || janela.mistura != crate::grafico::compositor::Mistura::Alfa
+    {
+        crate::log_error!("teste", "a janela: {:?}", janela);
+        return Err("a camada do processo nao esta como ele a pos");
+    }
+
+    // A tela mostra a cor de **depois** do `fork`, nos quatro cantos.
+    let cantos = [
+        (x, y),
+        (x + largura - 1, y),
+        (x, y + altura - 1),
+        (x + largura - 1, y + altura - 1),
+    ];
+    for &(px, py) in &cantos {
+        let lido = pixel_na_tela(px, py)?;
+        if lido == antes {
+            return Err("depois do fork, o que o pai desenha nao chega a tela");
+        }
+        if lido != depois {
+            crate::log_error!("teste", "em ({}, {}): {:?}", px, py, lido);
+            return Err("a tela nao mostra o que o processo desenhou");
+        }
+    }
+
+    // O programa fecha a primeira, abre a segunda e sai sem fechá-la.
+    crate::eventos::publicar(
+        CANAL,
+        Evento {
+            tipo: tipo::TESTE,
+            a: 1,
+            b: 0,
+            c: 0,
+        },
+    )
+    .map_err(|_| "o programa da superficie nao escutava o canal")?;
+    esperar_ate(
+        || visto("processo encerrou com codigo 66") || terminou_mal(),
+        600,
+    )?;
+    if terminou_mal() {
+        return Err("o programa da superficie nao saiu com o codigo dele");
+    }
+
+    // O coletor tira a segunda da tela, e os frames das duas voltam.
+    esperar_ate(|| camadas_de_processo() == 0, 200)
+        .map_err(|_| "a camada de um processo morto continuou na tela")?;
+    // Sete criadas — a janela, a oculta, a temporária, a do filho, as duas
+    // do zumbi, antes e depois do `exec`, e a segunda —, e duas sem fechar:
+    // a do zumbi depois do `exec`, e a segunda.
+    let (vivas, criadas, recolhidas) = crate::superficies::estatisticas();
+    if (
+        vivas,
+        criadas - criadas_antes,
+        recolhidas - recolhidas_antes,
+    ) != (0, 7, 2)
+    {
+        crate::log_error!(
+            "teste",
+            "superficies: {} vivas, {} criadas, {} recolhidas",
+            vivas,
+            criadas - criadas_antes,
+            recolhidas - recolhidas_antes
+        );
+        return Err("a conta das superficies nao fecha: sete criadas, duas recolhidas");
+    }
+    mostra_o_console(&[(x + 100, y), (x + 115, y + 15)])
+        .map_err(|_| "a tela ainda mostra a superficie de um processo morto")?;
+    let _ = esperar_ate(|| false, 30);
+    let livres_depois = crate::frames::estatisticas().0;
+    if livres_depois + 64 < livres_antes {
+        crate::log_error!(
+            "teste",
+            "frames livres: {} antes da superficie, {} depois",
+            livres_antes,
+            livres_depois
+        );
+        return Err("os frames das superficies nao voltaram ao alocador");
+    }
+    Ok(())
+}
+
 /// Uma linha digitada se separa em nome de comando e parâmetros.
 ///
 /// # O que este caso protege
@@ -10854,6 +11055,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "eventos: o canal dorme, entrega e recusa",
         f: eventos_canal_dorme_entrega_e_recusa,
+    },
+    Caso {
+        nome: "superficies: o processo desenha, bifurca, fecha e morre",
+        f: superficies_o_processo_desenha_e_some,
     },
     Caso {
         nome: "usb: o relatorio hid vira teclas",

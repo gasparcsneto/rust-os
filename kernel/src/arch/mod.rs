@@ -71,9 +71,9 @@ pub use atual::{
     falha_de_estouro_de_pilha, gravavel_pelo_usuario, halt_forever, identificar_cpu, iniciar_mouse,
     init_excecoes, init_interrupcao_serial, init_interrupcoes, init_paginacao, init_pci,
     init_seriais, init_timer_definitivo, init_usuario, interrupcoes_habilitadas, mapear_frame,
-    marcar_copia_na_escrita, nome, percorrer_paginas_do_usuario, preparar_contexto,
-    preparar_contexto_de_fork, redirecionar_para, reservar_faixas, sem_interrupcoes, traduzir,
-    trocar_espaco,
+    marcar_compartilhada, marcar_copia_na_escrita, nome, percorrer_paginas_do_usuario,
+    preparar_contexto, preparar_contexto_de_fork, redirecionar_para, reservar_faixas,
+    sem_interrupcoes, traduzir, trocar_espaco,
 };
 
 /// Só para a suíte: o par de conversões de permissão de cada backend.
@@ -243,6 +243,9 @@ pub struct PaginaDoUsuario {
     /// A página é compartilhada com outro espaço e volta a ser gravável na
     /// primeira escrita.
     pub copia_na_escrita: bool,
+    /// A página é memória de uma superfície do compositor: os pixels que o
+    /// processo desenha e o compositor lê. Um `fork` não a leva ao filho.
+    pub compartilhada: bool,
 }
 
 impl PaginaDoUsuario {
