@@ -21,6 +21,7 @@
 use programas::monte::FIM_DO_MONTE;
 use programas::sistema;
 use programas::superficie::Superficie;
+use protocolo::usuario::superficie::operacao;
 
 #[unsafe(no_mangle)]
 fn principal() -> i64 {
@@ -41,6 +42,11 @@ fn principal() -> i64 {
     minha.pixels().fill(0xFF12_3456);
     if minha.pixels()[63] != 0xFF12_3456 || minha.danificar_tudo().is_err() {
         return 3;
+    }
+    // O foco, que o processo leva consigo ao morrer: a suíte confere que
+    // ele volta ao kernel quando o coletor tira a camada.
+    if sistema::controlar(minha.descritor(), operacao::FOCO, 1) != 0 {
+        return 4;
     }
     core::mem::forget(minha);
     0

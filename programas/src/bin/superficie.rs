@@ -140,6 +140,16 @@ fn principal() -> i64 {
     {
         return 11;
     }
+    // O foco: pedido e devolvido — a suíte confere que ele não ficou com
+    // este processo —, e um argumento que não é nem um nem outro.
+    if sistema::controlar(fd, operacao::FOCO, 1) != 0
+        || sistema::controlar(fd, operacao::FOCO, 0) != 0
+    {
+        return 27;
+    }
+    if sistema::controlar(fd, operacao::FOCO, 2) != erro::ARGUMENTO_INVALIDO {
+        return 28;
+    }
     // A saída padrão não é uma superfície.
     if sistema::controlar(sistema::SAIDA, operacao::MOVER, 0) != erro::DESCRITOR_INVALIDO {
         return 12;

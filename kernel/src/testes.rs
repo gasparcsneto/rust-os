@@ -3939,6 +3939,17 @@ fn superficies_o_processo_desenha_e_some() -> Resultado {
         200,
     )
     .map_err(|_| "a camada de um filho zumbi nao saiu da tela")?;
+    // O zumbi tinha pedido o foco, e o programa, pedido e devolvido o dele:
+    // com o dono morto e a devolução feita, o foco é do kernel.
+    if crate::superficies::foco_ativo() {
+        return Err("o foco ficou numa superficie devolvida, ou de um processo morto");
+    }
+    // A camada que nunca se mostrou não recebe clique: o ponteiro sobre ela
+    // está sobre o que há embaixo.
+    if crate::grafico::camada_em(2, 2).is_some_and(|c| c.nome == crate::superficies::NOME_DA_CAMADA)
+    {
+        return Err("uma camada invisivel recebe o ponteiro");
+    }
     // E nenhum frame dela voltou ao alocador com o zumbi ainda de pé: é o
     // que acontece quando a memória da camada **libera** em vez de soltar —
     // o frame é entregue a outro enquanto o espaço do zumbi ainda o mapeia.
@@ -4191,16 +4202,25 @@ fn janelas_operadas() -> Resultado {
         return Err("com o foco numa janela, a tecla chegou ao console");
     }
 
-    // Arrastar pela barra de título: aperta, anda e solta. O andar sai da
-    // janela antes de ela acompanhar — é a captura que o leva ao servidor.
+    // Arrastar pela barra de título: aperta, anda e solta. O andar leva o
+    // ponteiro para **fora** de onde a janela está — mais longe que a
+    // largura dela —, antes de ela acompanhar: é a captura que o leva ao
+    // servidor, e não o que está debaixo dele.
     mover(x + 200, y + 10);
     crate::ponteiro::botao(true);
-    mover(x + 250, y + 60);
+    mover(x + 540, y + 60);
     crate::ponteiro::botao(false);
-    let (x1, y1) = (x + 50, y + 50);
+    let (x1, y1) = (x + 340, y + 50);
     esperar_linha(&format!("janelas: arrastada 1 para {x1} {y1}"))?;
     if janelas_na_tela() != [(x1, y1)] {
         return Err("a janela arrastada nao foi para onde o ponteiro a levou");
+    }
+    // Solto o botão, a captura acabou: andar sobre o console não é mais do
+    // servidor.
+    let contados = crate::ponteiro::para_as_janelas_contados();
+    mover(fora_x, fora_y);
+    if crate::ponteiro::para_as_janelas_contados() != contados {
+        return Err("depois de soltar o botao, o ponteiro continuou capturado");
     }
 
     // Uma segunda, por cima e com o foco; um clique na parte da primeira que
@@ -4240,6 +4260,15 @@ fn janelas_operadas() -> Resultado {
     esperar_linha("janelas: fechada 1")?;
     if janelas_na_tela() != [(x2, y2)] {
         return Err("a caixa de fechar nao fechou a janela");
+    }
+    // A janela fechada tinha o foco — o clique na caixa a focou antes —, e
+    // ele não fica preso numa superfície que não existe mais.
+    if crate::superficies::foco_ativo() {
+        return Err("fechar a janela com o foco nao devolveu o foco ao kernel");
+    }
+    // E nenhum dos cliques sobre janelas virou clique do kernel.
+    if crate::teclado::ler().is_some() {
+        return Err("um clique numa janela chegou ao kernel como clique");
     }
     mover(fora_x, fora_y);
 
