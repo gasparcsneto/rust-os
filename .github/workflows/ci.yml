@@ -229,3 +229,21 @@ jobs:
       # afirmação sobre qual driver funciona.
       - name: Fumaça (teclado USB)
         run: cargo xtask fumaca --arch ${{ matrix.arch }} --teclado usb
+
+      # E a máquina que só tem `virtio-gpu`: sem VGA, sem `bochs`, sem tela
+      # linear deixada pelo firmware. É outro caminho de tela no kernel — ele
+      # escreve numa memória que o dispositivo só lê quando mandado —, e cada
+      # uma das duas conferências vê o que a outra não vê.
+      #
+      # A suíte confere o que o kernel mandou: que só o dano atravessou, que
+      # uma recusa do dispositivo virou erro. A fumaça fotografa o monitor
+      # pelo `screendump` do emulador e compara com o que o kernel diz ter
+      # desenhado. Medido com mutações: transferir a tela inteira a cada
+      # escrita só a suíte reprova, porque a tela sai certa; errar o
+      # deslocamento ou o formato do pixel só a fumaça reprova, porque o
+      # kernel acredita ter mandado certo.
+      - name: Suíte de testes (virtio-gpu)
+        run: cargo xtask test --arch ${{ matrix.arch }} --video virtio
+
+      - name: Fumaça (virtio-gpu)
+        run: cargo xtask fumaca --arch ${{ matrix.arch }} --video virtio
