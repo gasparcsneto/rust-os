@@ -28,9 +28,21 @@ use std::{
 /// aceitável: o bootloader pode falhar e reiniciar em laço, uma exceção não
 /// tratada pode causar triple fault e reboot, um teste pode entrar num laço
 /// sem saída. Sem teto, qualquer um desses casos vira um job de CI pendurado
-/// que não diz nada — o pior modo de falhar. Dois minutos é muito acima dos
-/// poucos segundos que a suíte leva.
-const TETO_DOS_TESTES: Duration = Duration::from_secs(120);
+/// que não diz nada — o pior modo de falhar.
+///
+/// # Por que cinco minutos
+///
+/// Porque dois deixaram de ser folga. Este comentário dizia que a suíte leva
+/// "poucos segundos"; com duzentos casos, a do x86 em debug leva cem, e o
+/// teto de dois minutos passou a reprovar suítes saudáveis. Medido nesta
+/// bancada, a mesma suíte levou de 102 a 137 segundos conforme **onde os
+/// dados do kernel caem na memória**: o commit que acrescentou duas
+/// variáveis atômicas ficou 28% mais lento em casos que não as tocam, e um
+/// quilobyte de dado inerte no fim da `.data` o devolveu aos 102. É o
+/// emulador — o TCG é sensível ao endereço dos dados quentes —, e não custo
+/// do código. Um teto que cabe dentro dessa variação é um teto que falha ao
+/// acaso; o dobro do pior medido não cabe.
+const TETO_DOS_TESTES: Duration = Duration::from_secs(300);
 
 /// As arquiteturas que o kernel suporta.
 ///
