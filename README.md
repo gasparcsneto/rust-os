@@ -809,6 +809,22 @@ A fumaça a opera como uma pessoa: leva o mouse da máquina ao botão pela
 moldura que a árvore publica, clica, espera a janela aparecer na árvore,
 arrasta pela barra de título e confere a moldura nova, e fecha pela caixa.
 Pelos drivers de verdade, e pelo servidor lançado no boot de produção.
+Oito mutações na etapa, oito reprovadas — uma delas, tirar o botão do
+desenho, só depois de o caso conferir o pixel do botão: o clique e a árvore
+usam a moldura, e passavam sem ele.
+
+**A corrida do foco.** A matriz reprovou o caso da etapa 4 uma vez em
+poucas no x86, e o motivo era real. Um clique numa janela faz o servidor
+pedir o foco; se a pessoa clica fora antes de o pedido chegar, o kernel via
+o foco consigo, nem avisava o servidor, e o pedido atrasado ficava com o
+foco — o servidor achando que não o tinha, e o kernel mandando as teclas
+para ele, para serem jogadas fora. Agora o kernel avisa em todo clique fora
+das janelas, e o servidor, avisado, solta o foco pela superfície. O caso
+provoca a corrida de propósito — os dois cliques com as interrupções
+mascaradas, para o servidor recebê-los no mesmo lote —, e desfazer
+qualquer das duas metades o reprova. A mesma matriz achou que o caso não
+cabia na tela de 800 por 600 que a UEFI entrega no ARM: a caixa de fechar
+da janela arrastada caía fora da tela.
 
 **A proteção é testada, não presumida.** Existe um segundo programa que tenta
 ler a memória do kernel. O caso `usuario: nao alcanca o kernel` exige duas
