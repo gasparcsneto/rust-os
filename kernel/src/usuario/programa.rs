@@ -17,9 +17,9 @@
 //!                 │    código    │  usuário, executável, somente leitura
 //!                 ├──────────────┤
 //!                 │      …       │  não mapeado
-//!   TETO - 8 KiB  ├──────────────┤
+//!   TETO - 68 KiB ├──────────────┤
 //!                 │  guard page  │  não mapeada
-//!   TETO - 4 KiB  ├──────────────┤
+//!   TETO - 64 KiB ├──────────────┤
 //!                 │    pilha     │  usuário, gravável, não executável
 //!   TETO          └──────────────┘
 //! ```
@@ -34,8 +34,9 @@ use super::TETO;
 
 /// Onde a pilha do processo termina (o endereço mais alto, exclusivo).
 const TOPO_DA_PILHA: u64 = TETO;
-/// Primeira página da pilha.
-const BASE_DA_PILHA: u64 = TETO - TAMANHO_PAGINA;
+/// Primeira página da pilha — ver [`protocolo::usuario::PAGINAS_DA_PILHA`]
+/// sobre por que são dezesseis, e não mais uma só.
+const BASE_DA_PILHA: u64 = TETO - protocolo::usuario::PAGINAS_DA_PILHA * TAMANHO_PAGINA;
 /// A página não mapeada logo abaixo da pilha.
 const GUARD_DA_PILHA: u64 = BASE_DA_PILHA - TAMANHO_PAGINA;
 
@@ -295,8 +296,13 @@ pub fn carregar(imagem: &[u8]) -> Result<Programa, Falha> {
         .map_err(Falha::SemVolta)?;
     }
 
-    crate::paginacao::mapear_novo(BASE_DA_PILHA, Permissoes::DADOS_USUARIO)
+    for i in 0..protocolo::usuario::PAGINAS_DA_PILHA {
+        crate::paginacao::mapear_novo(
+            BASE_DA_PILHA + i * TAMANHO_PAGINA,
+            Permissoes::DADOS_USUARIO,
+        )
         .map_err(Falha::SemVolta)?;
+    }
 
     Ok(Programa {
         entrada: elf.entrada(),
@@ -328,9 +334,26 @@ fn faixa_de_paginas(inicio: u64, tamanho: u64) -> Result<(u64, u64), &'static st
 /// O mapeamento **sobrevive** a esta função: o processo continua executando
 /// depois dela, e desmontá-lo aqui puxaria o chão de baixo dele. Quem o desfaz
 /// é a morte deste fio, que larga o espaço de endereços inteiro de uma vez.
+// Os casos da suíte a chamam com imagens estáticas; em produção, quem lança
+// é `usuario::lancar`, que carrega de uma imagem possuída e usa os dois
+// passos — ver [`entrar`].
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub fn executar(imagem: &[u8]) -> Result<core::convert::Infallible, Falha> {
-    let programa = carregar(imagem)?;
+    entrar(carregar(imagem)?)
+}
 
+/// Desce para o anel sem privilégio num programa já carregado. Nunca
+/// retorna.
+///
+/// # Por que separada de [`executar`]
+///
+/// Para quem carrega de uma imagem que **possui**: um `Vec` lido do disco.
+/// `executar` recebe a imagem emprestada e não volta, então quem a possui
+/// nunca chegaria a largá-la — o `Vec` ficava no heap do kernel para
+/// sempre, um por programa lançado do disco. Carregar copia os segmentos
+/// para as páginas do processo; entre carregar e entrar a imagem já não
+/// serve para nada, e é ali que quem a possui a larga.
+pub fn entrar(programa: Programa) -> Result<core::convert::Infallible, Falha> {
     let pilha_de_kernel = crate::fios::pilha_de_kernel_atual();
     if pilha_de_kernel == 0 {
         // Depois da carga, portanto depois da troca: o espaço anterior deste

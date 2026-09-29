@@ -299,9 +299,21 @@ iniciador/src/       a aplicação UEFI que o firmware carrega da ESP
     ├── x86_64.rs    o que o Duke precisa saber sobre o x86_64
     └── aarch64.rs   o que o Duke precisa saber sobre o aarch64
 
-protocolo/src/       a ABI entre o iniciador e o kernel
+protocolo/src/       as ABIs: do iniciador com o kernel, e do kernel com os programas
 ├── lib.rs           o que é entregue ao kernel, com mágica e versão
-└── mapa.rs          onde cada coisa mora no espaço virtual
+├── mapa.rs          onde cada coisa mora no espaço virtual
+└── usuario.rs       as chamadas de sistema, os erros e o mapa do espaço do usuário
+
+programas/           os programas de usuário, compilados à parte do kernel
+├── usuario.ld       o mapa de um programa: três segmentos a partir de BASE
+└── src/
+    ├── lib.rs       o runtime: a entrada, o pânico e o contrato do `principal`
+    ├── sistema.rs   as chamadas de sistema, uma função por chamada
+    ├── monte.rs     o monte do processo, sobre `mapear`
+    ├── saida.rs     uma linha formatada por chamada de `escrever`
+    └── bin/
+        ├── ola.rs      o primeiro programa em Rust: monte, formatação e pilha
+        └── memoria.rs  confere `mapear` e o monte do lado de quem pede
 
 xtask/src/
 └── main.rs          a ferramenta de build, teste e diagnóstico do projeto
@@ -495,8 +507,13 @@ $ cargo xtask agent log.tail '{"count":3}'
 ... info  "usuario" "processo encerrou com codigo 42"
 ```
 
-As chamadas de sistema são dez: `sair`, `escrever`, `id`, `ceder`, `bifurcar`,
-`executar`, `abrir`, `ler`, `fechar` e `esperar`.
+As chamadas de sistema são onze: `sair`, `escrever`, `id`, `ceder`,
+`bifurcar`, `executar`, `abrir`, `ler`, `fechar`, `esperar` e `mapear`. Os
+números, os erros e o mapa do espaço do usuário moram em
+`protocolo::usuario`, que o kernel e os programas incluem — uma declaração
+só, pelo motivo de sempre: duas iguais são duas que podem divergir, e um
+número trocado não dá erro de compilação, dá um programa que pede para ler e
+escreve.
 
 **O programa é um ELF64.** O cabeçalho diz onde a execução começa; cada
 segmento diz onde quer morar, quanto traz do arquivo, quanto ocupa na memória
@@ -522,6 +539,61 @@ própria `.bss` antes de sair. As duas coisas são propositais: só funcionam se
 o carregador tiver honrado `e_entry`, `p_vaddr` e a diferença entre `p_filesz`
 e `p_memsz`. Se a `.bss` chegar com lixo, o processo sai com outro código e o
 teste acusa.
+
+**Programas em Rust, compilados à parte.** Os programas acima são montados
+à mão, em assembly, dentro do kernel. O pacote `programas` é o passo que o
+próprio carregador anunciava como o natural seguinte: um workspace próprio,
+com um runtime mínimo — a entrada que alinha a pilha e chama o `principal`
+do programa, as chamadas de sistema, um monte e a saída formatada — e um
+programa por arquivo em `src/bin`.
+
+```
+... info  usuario  ola do Rust, no anel sem privilegio
+... info  usuario  10000 quadrados, o ultimo 99980001
+... info  usuario  processo encerrou com codigo 61
+```
+
+O `xtask` compila os dois alvos em release e põe os executáveis no disco, em
+`/programas/x86_64` e `/programas/aarch64` — o disco de testes é um só para as
+duas máquinas, e cada kernel procura no diretório da sua. A receita do disco
+os resume pelo conteúdo inteiro, e não pelo tamanho: um executável
+recompilado muda bytes sem mudar de tamanho.
+
+Três coisas o carregador exige, e um compilador não entrega sem pedir: um
+executável de **endereço fixo** (o carregador não faz relocação), que more
+acima dos 4 GiB, e com um segmento por permissão em páginas separadas. No ARM
+basta o modelo de código padrão; no x86 o `core` pré-compilado usa o modelo
+do kernel, e o que funciona é manter o código independente de posição — que
+endereça tudo relativo ao `rip` — e pedir ao ligador `--no-pie`. O script de
+ligação repete o endereço de `protocolo::usuario::BASE`, porque um script
+não inclui Rust; `cargo xtask elf` lê cada executável pronto com o
+`llvm-readobj` e confere, contra as constantes do próprio `protocolo`, o
+tipo, a entrada, os segmentos, o `W^X` e a ausência de relocações.
+
+**`mapear`, e o monte do processo.** `mapear(endereco, tamanho)` dá memória
+nova, zerada, gravável e não executável, numa faixa que o **processo**
+escolhe dentro da região mapeável — como um `mmap` com endereço fixo. A
+alternativa, o kernel guardar onde o monte termina como um `brk`, pediria
+estado novo por processo, copiado no `fork` e zerado no `exec`. Com o
+endereço vindo do processo, esse estado mora na memória dele: o `fork` o
+copia e o `exec` o joga fora junto com o resto. O kernel confere a faixa
+inteira antes de mapear a primeira página, e desfaz o que já tinha feito se
+faltar memória no meio — tudo ou nada. Uma faixa já mapeada é recusada com
+um erro próprio, e não sobrescrita.
+
+O monte do runtime é o desenho do heap do kernel — lista livre ordenada por
+endereço, com fusão — sobre páginas pedidas a `mapear` de 64 KiB em 64 KiB. E
+a pilha de um processo passou de uma página para dezesseis: um programa
+compilado passa de 4 KiB de pilha sem que ninguém perceba, e o que se
+perceberia seria a página de guarda.
+
+**Um vazamento que os programas do disco trouxeram.** Lançar um programa do
+disco lê a imagem num `Vec` do heap do kernel, e `executar` não volta — o
+`Vec` nunca era largado. Com os programas embutidos não aparecia, porque a
+imagem é estática; com os do disco, cada lançamento custaria uns 20 KiB de um
+heap de 1 MiB. Carregar e entrar em userspace viraram dois passos, e a imagem
+é largada entre eles. O caso da suíte lança o `ola` cinco vezes e confere que
+o heap cresce menos que uma imagem.
 
 **A proteção é testada, não presumida.** Existe um segundo programa que tenta
 ler a memória do kernel. O caso `usuario: nao alcanca o kernel` exige duas
@@ -2046,8 +2118,14 @@ padronizado.
       aceita `press` — pela árvore e pela F1, pelo mesmo caminho. E o console
       rolando, em vez de recomeçar do topo. E o mouse — PS/2 no x86,
       `virtio-tablet` no ARM, USB nas duas —, com o cursor como camada transparente fixa no
-      topo e o clique no mesmo botão. A seguir: o servidor de janelas, o
-      roteamento de entrada e a tipografia.
+      topo e o clique no mesmo botão. E o servidor de janelas, em userspace
+      como o do Redox — o kernel compõe e tem os drivers, o servidor decide
+      janelas, decoração, foco e roteamento —, começou pela base: programas
+      de usuário em Rust, compilados à parte, com monte e `mapear`. A
+      seguir: a leitura que bloqueia e o canal de eventos, as superfícies do
+      compositor para processos, o servidor, a árvore semântica atravessando
+      a fronteira, e a primeira janela, o "Sobre o Duke" pela barra. Mais
+      adiante, o console como uma janela (o Terminal) e a tipografia.
       E aqui a inversão do projeto encontra a interface gráfica. O servidor de
       janelas publica uma **árvore semântica** — que janelas existem, que
       controles, o que cada um faz — e os pixels são a renderização dela, do

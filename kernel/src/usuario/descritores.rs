@@ -48,21 +48,9 @@ use crate::vfs::Vnode;
 /// existe.
 pub const MAX: usize = 16;
 
-/// Os descritores que todo processo recebe abertos.
-///
-/// Os números são os do Unix, e isso é deliberado: não porque o Duke pretenda
-/// ser POSIX, mas porque qualquer pessoa que já escreveu um programa sabe de
-/// cor o que 1 e 2 significam. Inventar uma numeração própria cobraria esse
-/// conhecimento de volta sem devolver nada.
-pub mod padrao {
-    /// Leitura. Reservado: ainda não há de onde ler, e **escrever nele é
-    /// erro** — é o caso que prova que a tabela é consultada de verdade.
-    pub const ENTRADA: u64 = 0;
-    /// Saída comum. Vai para o log do kernel em nível `info`.
-    pub const SAIDA: u64 = 1;
-    /// Saída de erro. Vai para o mesmo log em nível `error`.
-    pub const ERRO: u64 = 2;
-}
+// Os descritores que todo processo recebe abertos são ABI: os números são
+// declarados uma vez só, com os programas — ver `protocolo::usuario::padrao`.
+pub use protocolo::usuario::padrao;
 
 /// O menor descritor que [`Tabela::abrir`] entrega.
 ///

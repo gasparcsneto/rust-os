@@ -2043,6 +2043,13 @@ fn user_stats(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.field_u64("opens", aberturas)?;
     w.field_u64("reads", leituras)?;
     w.field_u64("bytes_read", bytes_lidos)?;
+    // Memoria nova que os processos pediram por `mapear`: quantas chamadas
+    // deram certo e quantas paginas elas deram, desde o boot. Paginas sem
+    // mapeamentos nao existem; mapeamentos que crescem sem parar sao um
+    // processo pedindo memoria que nao devolve.
+    let (mapeamentos, paginas) = crate::usuario::estatisticas_de_memoria();
+    w.field_u64("maps", mapeamentos)?;
+    w.field_u64("pages_mapped", paginas)?;
     // Quantos descritores o fio que atende este comando tem abertos. E o do
     // canal do agente, nao o de um processo -- ele mostra os tres padrao, que
     // e o que todo fio recebe.

@@ -1,0 +1,41 @@
+[package]
+# Os programas de usuário do Duke, compilados à parte do kernel.
+#
+# Um workspace próprio, como o `kernel` e o `iniciador`, e pelo mesmo motivo:
+# o alvo padrão é outro, e o ligador precisa de um script próprio — o
+# executável mora no espaço do usuário, e não onde o kernel mora.
+#
+# A biblioteca é o runtime (a entrada, as chamadas de sistema, o monte e a
+# saída); cada arquivo em `src/bin` é um programa, e o `xtask` põe cada um no
+# disco, em `/programas`.
+name = "programas"
+version = "0.1.0"
+edition = "2024"
+description = "Os programas de usuário do Duke e o runtime que eles usam"
+license = "MIT OR Apache-2.0"
+
+[lib]
+test = false
+doctest = false
+bench = false
+
+[dependencies]
+# Os números das chamadas de sistema, os erros e o mapa do espaço do
+# usuário: a mesma declaração que o kernel inclui.
+protocolo = { path = "../protocolo" }
+
+# Sem `unwind`: não há quem desenrole a pilha no espaço do usuário, e um
+# pânico encerra o processo com um código — ver `src/lib.rs`.
+[profile.dev]
+panic = "abort"
+
+# Os programas vão para o disco sempre em release. Não por velocidade, mas
+# por tamanho: em debug o `ola` passa de 200 KiB, e cada byte é lido do
+# disco a cada `executar`.
+[profile.release]
+panic = "abort"
+opt-level = "s"
+codegen-units = 1
+lto = true
+
+[workspace]

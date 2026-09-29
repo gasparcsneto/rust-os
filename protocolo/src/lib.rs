@@ -33,6 +33,7 @@
 #![no_std]
 
 pub mod mapa;
+pub mod usuario;
 
 /// `DUKEBOOT`, em little-endian.
 ///

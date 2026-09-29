@@ -29,8 +29,9 @@
 //!
 //! Cada processo tem o próprio espaço de endereços, com as entradas de topo do
 //! kernel copiadas e a do usuário só dele; `bifurcar` o duplica com cópia na
-//! escrita, `executar` troca a imagem, `esperar` colhe o filho. São dez
-//! chamadas de sistema, listadas em [`numero`].
+//! escrita, `executar` troca a imagem, `esperar` colhe o filho, e `mapear`
+//! dá memória nova ao processo. São onze chamadas de sistema, listadas em
+//! [`numero`].
 //!
 //! O que não existe: vários núcleos, sinais, memória compartilhada entre
 //! processos e uma ABI que um programa de fora saiba falar — a fase 7 do
@@ -44,89 +45,27 @@ pub mod programa;
 use alloc::string::String;
 use core::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
-/// Números das chamadas de sistema.
-///
-/// Iguais nas duas arquiteturas: o que muda é o registrador que carrega cada
-/// coisa, e isso é detalhe do backend.
-pub mod numero {
-    /// `sair(codigo)`: encerra o processo. Não retorna.
-    pub const SAIR: u64 = 0;
-    /// `escrever(descritor, ptr, tamanho)`: manda bytes para onde o
-    /// descritor apontar.
-    pub const ESCREVER: u64 = 1;
-    /// `id()`: devolve o identificador do fio que executa o processo.
-    pub const ID: u64 = 2;
-    /// `ceder()`: devolve a CPU voluntariamente.
-    pub const CEDER: u64 = 3;
-    /// `bifurcar()`: duplica o processo. Devolve 0 ao filho e o identificador
-    /// do filho ao pai.
-    pub const BIFURCAR: u64 = 4;
-    /// `executar(ptr, tamanho)`: troca a imagem do processo pela que o nome
-    /// indicar. Não retorna em caso de sucesso — retorna noutro programa.
-    pub const EXECUTAR: u64 = 5;
-    /// `abrir(ptr, tamanho)`: abre o arquivo do caminho e devolve o descritor.
-    pub const ABRIR: u64 = 6;
-    /// `ler(descritor, ptr, tamanho)`: traz bytes de onde o descritor apontar
-    /// e avança a posição dele.
-    pub const LER: u64 = 7;
-    /// `fechar(descritor)`: devolve a vaga do descritor à tabela.
-    pub const FECHAR: u64 = 8;
-    /// `esperar(id, ponteiro)`: espera um filho terminar.
-    ///
-    /// `id` zero espera qualquer filho; diferente de zero, aquele filho. O
-    /// ponteiro, quando não é nulo, aponta para **dois** `i64`: o código de
-    /// saída e se ele vale. Devolve o identificador do filho colhido.
-    ///
-    /// É a única chamada deste kernel que **bloqueia**: o fio sai da lista
-    /// do escalonador e volta quando um filho sai. Ver
-    /// [`super::esperar`](crate::usuario) para o que isso exige do backend
-    /// de arquitetura.
-    pub const ESPERAR: u64 = 9;
-}
+// A ABI com os programas — os números das chamadas, os erros e o mapa do
+// espaço do usuário — é declarada uma vez só, no pacote que os programas
+// também incluem. Ver `protocolo::usuario`.
+pub use protocolo::usuario::{BASE, TETO, erro, numero};
 
-/// Erros devolvidos ao usuário, sempre negativos.
+/// Onde ficam, no disco, os programas compilados à parte — os do pacote
+/// `programas`, que o `xtask` põe na raiz.
 ///
-/// Negativo porque o valor de retorno é um `i64` e as chamadas que dão certo
-/// devolvem zero ou uma contagem. É a convenção do Linux, e existe porque
-/// distingue erro de resultado sem precisar de um segundo canal.
-pub mod erro {
-    pub const NUMERO_INVALIDO: i64 = -1;
-    pub const ENDERECO_INVALIDO: i64 = -2;
-    pub const TAMANHO_INVALIDO: i64 = -3;
-    pub const DESCRITOR_INVALIDO: i64 = -4;
-    pub const SEM_MEMORIA: i64 = -5;
-    pub const SEM_VAGA_DE_FIO: i64 = -6;
-    pub const PROGRAMA_DESCONHECIDO: i64 = -7;
-    /// A tabela de descritores do processo está cheia.
-    pub const SEM_DESCRITOR: i64 = -8;
-    /// O caminho não existe, ou não dá para resolvê-lo.
-    pub const NAO_ENCONTRADO: i64 = -9;
-    /// O caminho existe e não é um arquivo.
-    ///
-    /// Distinto de [`NAO_ENCONTRADO`] de propósito: um programa que tente
-    /// abrir um diretório merece saber que errou o tipo, e não que o caminho
-    /// não existe — a segunda resposta o manda procurar o erro no lugar
-    /// errado.
-    pub const NAO_EH_ARQUIVO: i64 = -10;
-
-    /// Não há filho por quem esperar.
-    ///
-    /// Distinto de "nenhum filho terminou ainda", que não é erro e nem chega
-    /// ao usuário: aquele caso põe o fio para dormir. Este diz que esperar
-    /// seria esperar para sempre.
-    pub const SEM_FILHOS: i64 = -11;
-}
-
-/// Onde o espaço do usuário começa e termina.
+/// Um diretório por arquitetura, porque o disco de testes é um só para as
+/// duas máquinas e um executável do x86 não roda no ARM. O nome do
+/// diretório é o que [`crate::arch::nome`] devolve, e a suíte confere que
+/// os dois não divergiram.
 ///
-/// Uma faixa baixa e modesta, bem longe do heap (64 GiB), das pilhas de fio
-/// (128 GiB) e do kernel. No x86 o kernel vive na metade alta, então qualquer
-/// endereço aqui é inequivocamente do usuário; no ARM o kernel está em
-/// `0x4008_0000`, e por isso a faixa começa acima dos 4 GiB — não há como
-/// confundir uma com a outra.
-pub const BASE: u64 = 0x0000_0001_0000_0000;
-/// Fim exclusivo da faixa do usuário.
-pub const TETO: u64 = BASE + 0x1000_0000;
+/// Só a suíte a lê, por enquanto; o primeiro consumidor de produção é o
+/// servidor de janelas, que o kernel vai lançar daqui.
+#[cfg(target_arch = "x86_64")]
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub const DIRETORIO_DOS_COMPILADOS: &str = "/programas/x86_64";
+#[cfg(target_arch = "aarch64")]
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub const DIRETORIO_DOS_COMPILADOS: &str = "/programas/aarch64";
 
 // O espaço do usuário inteiro tem de caber numa única entrada da tabela de
 // topo, e nenhuma região do kernel pode dividir essa entrada com ele.
@@ -180,6 +119,9 @@ static BIFURCACOES: AtomicU64 = AtomicU64::new(0);
 static TROCAS_DE_IMAGEM: AtomicU64 = AtomicU64::new(0);
 static RECUSADAS: AtomicU64 = AtomicU64::new(0);
 static BYTES_ESCRITOS: AtomicU64 = AtomicU64::new(0);
+/// Quantas chamadas a `mapear` deram certo, e quantas páginas elas deram.
+static MAPEAMENTOS: AtomicU64 = AtomicU64::new(0);
+static PAGINAS_MAPEADAS: AtomicU64 = AtomicU64::new(0);
 
 /// Código de saída do último processo encerrado, se houve algum.
 ///
@@ -271,6 +213,7 @@ pub unsafe fn despachar(
         numero::LER => ler(a0, a1, a2),
         numero::FECHAR => fechar(a0),
         numero::ESPERAR => esperar(a0, a1),
+        numero::MAPEAR => mapear(a0, a1),
         // SAFETY: o quadro é o desta chamada, garantido por quem nos chamou.
         numero::BIFURCAR => unsafe { bifurcar(quadro) },
         numero::EXECUTAR => unsafe { executar(quadro, a0, a1) },
@@ -281,7 +224,74 @@ pub unsafe fn despachar(
     }
 }
 
-/// `sair(codigo)`. Nunca retorna.
+/// O maior pedido que `mapear` atende de uma vez: 16 MiB.
+///
+/// Não é cota — uma cota por processo é trabalho da fase de consentimento, e
+/// sem ela um processo pode pedir de 16 em 16 até o fim da memória, e ouvir
+/// [`erro::SEM_MEMORIA`]. É teto de **latência**: a chamada roda com as
+/// interrupções mascaradas, e zerar 4096 páginas de uma vez já é o bastante
+/// para um tique do relógio esperar.
+pub const MAIOR_MAPEAMENTO: u64 = 16 * 1024 * 1024;
+
+/// `mapear(endereco, tamanho)`: memória nova para o processo.
+///
+/// # Quem escolhe o endereço, e por quê
+///
+/// O processo, como num `mmap` com endereço fixo. A alternativa — o kernel
+/// guardar onde o monte de cada processo termina, como o `brk` — precisaria
+/// de estado novo por processo, e esse estado teria de acompanhar `fork`
+/// (copiado) e `exec` (zerado). Com o endereço vindo do processo, o estado
+/// mora na memória dele: o `fork` o copia junto com o resto, e o `exec` o
+/// joga fora junto com o resto. O que o kernel guarda é o que ele sempre
+/// guardou — as tabelas de páginas.
+///
+/// # Tudo ou nada
+///
+/// A faixa inteira é conferida antes de a primeira página ser mapeada, e
+/// uma falha no meio desfaz as que já foram: um erro devolvido com metade da
+/// faixa mapeada deixaria o processo sem saber o que tem.
+fn mapear(endereco: u64, tamanho: u64) -> i64 {
+    use crate::arch::TAMANHO_PAGINA;
+    let (inicio, fim) = protocolo::usuario::MAPEAVEL;
+
+    if !endereco.is_multiple_of(TAMANHO_PAGINA) {
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return erro::ENDERECO_INVALIDO;
+    }
+    if tamanho == 0 || !tamanho.is_multiple_of(TAMANHO_PAGINA) || tamanho > MAIOR_MAPEAMENTO {
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return erro::TAMANHO_INVALIDO;
+    }
+    // A soma vem do usuário: conferida antes de comparar.
+    let Some(ate) = endereco.checked_add(tamanho) else {
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return erro::ENDERECO_INVALIDO;
+    };
+    if endereco < inicio || ate > fim {
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return erro::ENDERECO_INVALIDO;
+    }
+
+    let paginas = tamanho / TAMANHO_PAGINA;
+    if (0..paginas).any(|i| crate::arch::traduzir(endereco + i * TAMANHO_PAGINA).is_some()) {
+        return erro::JA_MAPEADO;
+    }
+
+    for i in 0..paginas {
+        let pagina = endereco + i * TAMANHO_PAGINA;
+        if crate::paginacao::mapear_novo(pagina, crate::arch::Permissoes::DADOS_USUARIO).is_err() {
+            for j in 0..i {
+                let _ = crate::paginacao::desmapear_e_liberar(endereco + j * TAMANHO_PAGINA);
+            }
+            return erro::SEM_MEMORIA;
+        }
+    }
+
+    MAPEAMENTOS.fetch_add(1, Ordering::Relaxed);
+    PAGINAS_MAPEADAS.fetch_add(paginas, Ordering::Relaxed);
+    0
+}
+
 /// `sair(codigo)`.
 ///
 /// Marca o fio como encerrado e **retorna**, em vez de trocar de contexto aqui
@@ -835,8 +845,12 @@ pub fn lancar(caminho: Option<&str>) -> Result<u64, &'static str> {
             }
         };
 
-        match programa::executar(&imagem) {
-            Ok(_) => unreachable!("executar nao retorna em caso de sucesso"),
+        // Carregar e entrar em dois passos, com a imagem largada no meio: ver
+        // `programa::entrar` sobre o vazamento que isto fecha.
+        let carregado = programa::carregar(&imagem);
+        drop(imagem);
+        match carregado.and_then(programa::entrar) {
+            Ok(_) => unreachable!("entrar nao retorna em caso de sucesso"),
             Err(falha) => {
                 crate::log_error!(
                     "usuario",
@@ -880,6 +894,14 @@ pub fn estatisticas() -> (u64, u64, u64) {
         CHAMADAS.load(Ordering::Relaxed),
         RECUSADAS.load(Ordering::Relaxed),
         BYTES_ESCRITOS.load(Ordering::Relaxed),
+    )
+}
+
+/// `(mapeamentos, páginas mapeadas)`: o que `mapear` deu, desde o boot.
+pub fn estatisticas_de_memoria() -> (u64, u64) {
+    (
+        MAPEAMENTOS.load(Ordering::Relaxed),
+        PAGINAS_MAPEADAS.load(Ordering::Relaxed),
     )
 }
 

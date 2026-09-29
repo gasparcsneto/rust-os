@@ -1,0 +1,33 @@
+# Alvo padrão quando se roda `cargo build` de dentro de `programas/`. O xtask
+# sempre passa o alvo explicitamente, e compila nas duas arquiteturas.
+[build]
+target = "x86_64-unknown-none"
+
+# O executável de um programa do Duke tem endereço fixo — o carregador do
+# kernel recusa um independente de posição, que exigiria relocação — e mora
+# a partir de `protocolo::usuario::BASE`, que está acima dos 4 GiB.
+#
+# No x86 o caminho é outro. O `core` e o `alloc` que vêm pré-compilados
+# para este alvo usam o código independente de posição e o modelo de código
+# do kernel, e o LTO recusa misturar modelos — pedir `static` com `large`
+# aqui falha na ligação. O código independente de posição, por outro lado,
+# endereça tudo relativo ao `rip` e funciona em qualquer endereço; o que
+# muda é só o que o ligador produz, e `--no-pie` pede o executável de
+# endereço fixo, depois do `-pie` que o rustc passa.
+#
+# Nos dois, `max-page-size` de 4 KiB: o padrão do ARM é 64 KiB, e o ligador
+# alinhava cada segmento no **arquivo** a 64 KiB — um programa de 8 KiB de
+# código ocupava 82 KiB no disco, e o `executar` lia tudo.
+[target.x86_64-unknown-none]
+rustflags = [
+    "-C", "link-arg=-Tusuario.ld",
+    "-C", "link-arg=--no-pie",
+    "-C", "link-arg=-zmax-page-size=4096",
+]
+
+[target.aarch64-unknown-none-softfloat]
+rustflags = [
+    "-C", "link-arg=-Tusuario.ld",
+    "-C", "relocation-model=static",
+    "-C", "link-arg=-zmax-page-size=4096",
+]

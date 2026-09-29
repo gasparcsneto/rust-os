@@ -3599,6 +3599,124 @@ fn usb_relatorio_hid_vira_teclas() -> Resultado {
     Ok(())
 }
 
+/// Os programas compilados à parte rodam: saem com o código deles e dizem o
+/// que deviam dizer, lidos do disco.
+///
+/// # O que este caso protege
+///
+/// A cadeia inteira, que nenhum outro caso atravessa: o pacote `programas`
+/// compilado pelo `xtask`, posto no disco, lido pelo VFS, validado pelo
+/// carregador de ELF e executado. O `ola` usa o monte, a formatação e 40 KiB
+/// de pilha; o `memoria` confere as recusas de `mapear` do lado de quem
+/// pede, e que o monte reaproveita o que libera. Os dois dizem o que deu
+/// errado pelo código de saída — ver cada um em `programas/src/bin`.
+///
+/// E um vazamento: lançar do disco guardava a imagem num `Vec` do heap do
+/// kernel que ninguém largava, porque `executar` não volta. Cinco
+/// lançamentos seguidos custariam cinco imagens; o caso confere que custam
+/// menos que uma.
+fn usuario_programas_compilados_rodam() -> Resultado {
+    use crate::usuario::DIRETORIO_DOS_COMPILADOS;
+    use alloc::format;
+
+    if !DIRETORIO_DOS_COMPILADOS.ends_with(crate::arch::nome()) {
+        return Err("o diretorio dos programas compilados nao e o desta arquitetura");
+    }
+
+    let rodar = |nome: &str| -> Resultado {
+        let caminho = format!("{DIRETORIO_DOS_COMPILADOS}/{nome}");
+        let saidas = crate::usuario::estatisticas_de_processo().2;
+        crate::usuario::lancar(Some(&caminho))?;
+        esperar_ate(
+            || crate::usuario::estatisticas_de_processo().2 > saidas,
+            600,
+        )
+    };
+
+    // Os frames livres antes: o `memoria` esgota a memória de propósito, e
+    // o que ele segurava tem de voltar quando ele sair.
+    let livres_antes = crate::frames::estatisticas().0;
+
+    for (nome, codigo, marca) in [
+        ("ola", 61, "ola do Rust, no anel sem privilegio"),
+        ("memoria", 62, "memoria conferida:"),
+    ] {
+        let mapeamentos = crate::usuario::estatisticas_de_memoria().0;
+        rodar(nome)?;
+        let saida = crate::usuario::ultima_saida();
+        if saida != Some(codigo) {
+            crate::log_error!("teste", "{} saiu com {:?}, e nao {}", nome, saida, codigo);
+            return Err("um programa compilado nao saiu com o codigo dele");
+        }
+        let mut disse = false;
+        crate::log::ultimos(32, crate::log::Level::Trace, |r| {
+            disse |= r.subsistema == "usuario" && r.mensagem().starts_with(marca);
+        });
+        if !disse {
+            return Err("um programa compilado nao disse o que devia");
+        }
+        // Os dois usam o monte, e o monte vem de `mapear`.
+        if crate::usuario::estatisticas_de_memoria().0 == mapeamentos {
+            return Err("um programa compilado rodou sem pedir memoria ao kernel");
+        }
+    }
+
+    // A linha longa do `ola`: cortada no tamanho de um registro, e marcada
+    // com a reticência — uma linha truncada que parecesse inteira mentiria
+    // para quem lê o log.
+    let mut cortada = false;
+    crate::log::ultimos(32, crate::log::Level::Trace, |r| {
+        let m = r.mensagem();
+        cortada |= r.subsistema == "usuario" && m.starts_with("longa longa") && m.ends_with('…');
+    });
+    if !cortada {
+        return Err("a linha longa do ola nao chegou cortada e marcada");
+    }
+
+    // O vazamento: cinco lançamentos, e o heap do kernel no fim cresce menos
+    // que uma imagem. O coletor precisa passar para largar os fios mortos, e
+    // é por isso que a medida é tomada depois de uma espera.
+    let imagem = crate::vfs::ler_tudo(&format!("{DIRETORIO_DOS_COMPILADOS}/ola"))
+        .map_err(|_| "o ola nao esta no disco")?
+        .len();
+    let esperar_o_coletor = || {
+        let _ = esperar_ate(|| false, 30);
+    };
+    esperar_o_coletor();
+    let antes = crate::heap::estatisticas().alocado;
+    for _ in 0..5 {
+        rodar("ola")?;
+    }
+    esperar_o_coletor();
+    let depois = crate::heap::estatisticas().alocado;
+
+    // E o `memoria` esgotou a memória e deixou a máquina inteira: os frames
+    // que ele segurava voltaram quando ele saiu e o coletor passou. A folga
+    // é de um punhado de frames — tabelas de página que o kernel guarda para
+    // o próximo processo, e não um espaço de endereços retido.
+    let livres_depois = crate::frames::estatisticas().0;
+    if livres_depois + 64 < livres_antes {
+        crate::log_error!(
+            "teste",
+            "frames livres: {} antes dos programas, {} depois",
+            livres_antes,
+            livres_depois
+        );
+        return Err("a memoria que o programa esgotou nao voltou quando ele saiu");
+    }
+
+    if depois > antes + imagem {
+        crate::log_error!(
+            "teste",
+            "o heap do kernel cresceu {} bytes em cinco lancamentos de {} bytes",
+            depois - antes,
+            imagem
+        );
+        return Err("lancar do disco vaza a imagem no heap do kernel");
+    }
+    Ok(())
+}
+
 /// Uma linha digitada se separa em nome de comando e parâmetros.
 ///
 /// # O que este caso protege
@@ -4719,6 +4837,9 @@ fn btrfs_raiz_montada() -> Resultado {
     let nomeados: &[(&str, Tipo)] = &[
         ("dados", Tipo::Diretorio),
         ("grande.txt", Tipo::Arquivo),
+        // Os programas compilados à parte, um diretório por arquitetura —
+        // ver `usuario::DIRETORIO_DOS_COMPILADOS`.
+        ("programas", Tipo::Diretorio),
         ("saudacao.txt", Tipo::Arquivo),
     ];
 
@@ -4741,6 +4862,17 @@ fn btrfs_raiz_montada() -> Resultado {
     if dados.len() != 1 || dados[0].0 != "nota.txt" || dados[0].1 != Tipo::Arquivo {
         crate::log_error!("teste", "/dados listou {:?}", dados);
         return Err("o subdiretorio nao lista exatamente o que esta dentro dele");
+    }
+
+    // E `/programas` tem uma arquitetura por diretório, as duas, e nada mais:
+    // o disco é o mesmo para as duas máquinas.
+    let arquiteturas = conteudo("/programas")?;
+    if arquiteturas.len() != 2
+        || arquiteturas[0] != ("aarch64".into(), Tipo::Diretorio)
+        || arquiteturas[1] != ("x86_64".into(), Tipo::Diretorio)
+    {
+        crate::log_error!("teste", "/programas listou {:?}", arquiteturas);
+        return Err("/programas nao tem um diretorio por arquitetura");
     }
 
     // A busca por nome também respeita o diretório: o que está na raiz não é
@@ -10447,6 +10579,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "teclado: soltar nao digita de novo",
         f: teclado_soltar_nao_digita,
+    },
+    Caso {
+        nome: "usuario: programas compilados rodam",
+        f: usuario_programas_compilados_rodam,
     },
     Caso {
         nome: "usb: o relatorio hid vira teclas",

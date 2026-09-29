@@ -1926,7 +1926,117 @@ fn conferir_elfs(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
         return Err("uma das imagens nao passou pelo llvm-readobj".into());
     }
     println!("\n[xtask] as imagens sao ELF64 validos para ferramenta de fora");
+
+    conferir_programas_compilados(arch, &readelf, estilo)?;
     Ok(ExitCode::SUCCESS)
+}
+
+/// Confere os programas do pacote `programas` com o `llvm-readobj`.
+///
+/// # O que esta conferência fecha
+///
+/// O script de ligação dos programas repete o endereço de
+/// `protocolo::usuario::BASE`, porque um script não inclui Rust. É uma
+/// segunda declaração, e das que divergem em silêncio: um executável ligado
+/// noutro endereço seria recusado pelo carregador com "fora do espaço do
+/// usuário", no boot, longe de quem mudou o script. Aqui a divergência
+/// aparece no build, lida por ferramenta de fora, contra as constantes do
+/// próprio `protocolo`.
+///
+/// E o resto do que o carregador exige, pela mesma ferramenta: executável de
+/// endereço fixo, sem relocação, e nenhum segmento gravável e executável.
+fn conferir_programas_compilados(
+    arch: Arquitetura,
+    readelf: &Path,
+    estilo: &str,
+) -> Result<(), String> {
+    use protocolo::usuario::{BASE, MAPEAVEL};
+
+    let programas = programas_do_disco()?;
+    let prefixo = format!("programas/{}/", arch.nome());
+    let saida = raiz_do_projeto().join("target").join("elfs");
+    let mut conferidos = 0;
+    for (nome, bytes) in programas.iter().filter(|(n, _)| n.starts_with(&prefixo)) {
+        let curto = &nome[prefixo.len()..];
+        let caminho = saida.join(format!("programa-{curto}.elf"));
+        std::fs::write(&caminho, bytes)
+            .map_err(|e| format!("não foi possível escrever {caminho:?}: {e}"))?;
+        let relatorio = Command::new(readelf)
+            .args([
+                estilo,
+                "--file-header",
+                "--program-headers",
+                "--relocations",
+            ])
+            .arg(&caminho)
+            .output()
+            .map_err(|e| format!("não foi possível invocar o llvm-readobj: {e}"))?;
+        if !relatorio.status.success() {
+            return Err(format!("o llvm-readobj recusou o programa `{curto}`"));
+        }
+        let texto = String::from_utf8_lossy(&relatorio.stdout);
+
+        let erro = |motivo: &str| format!("programa `{curto}`: {motivo}\n{texto}");
+        if !texto
+            .lines()
+            .any(|l| l.trim_start().starts_with("Type:") && l.contains("EXEC"))
+        {
+            return Err(erro("não é um executável de endereço fixo"));
+        }
+        let entrada = texto
+            .lines()
+            .find_map(|l| l.trim_start().strip_prefix("Entry point address:"))
+            .and_then(|v| u64::from_str_radix(v.trim().trim_start_matches("0x"), 16).ok())
+            .ok_or_else(|| erro("o llvm-readobj não disse o ponto de entrada"))?;
+        // O programa mora entre `BASE` e o começo do que `mapear` dá.
+        let faixa = BASE..MAPEAVEL.0;
+        if !faixa.contains(&entrada) {
+            return Err(erro(&format!(
+                "a entrada {entrada:#x} está fora de {:#x}..{:#x} — o script de ligação divergiu do protocolo?",
+                faixa.start, faixa.end
+            )));
+        }
+        let mut segmentos = 0;
+        for linha in texto.lines().filter(|l| l.trim_start().starts_with("LOAD")) {
+            let campos: Vec<&str> = linha.split_whitespace().collect();
+            // LOAD <offset> <vaddr> <paddr> <filesz> <memsz> <flags...> <align>
+            let numero = |i: usize| {
+                campos
+                    .get(i)
+                    .and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok())
+            };
+            let (Some(inicio), Some(tamanho)) = (numero(2), numero(5)) else {
+                return Err(erro(&format!("segmento ilegível: `{linha}`")));
+            };
+            if inicio < faixa.start || inicio + tamanho > faixa.end {
+                return Err(erro(&format!(
+                    "o segmento em {inicio:#x} sai de {:#x}..{:#x}",
+                    faixa.start, faixa.end
+                )));
+            }
+            let bandeiras = campos[6..campos.len() - 1].concat();
+            if bandeiras.contains('W') && bandeiras.contains('E') {
+                return Err(erro("um segmento é gravável e executável"));
+            }
+            segmentos += 1;
+        }
+        if segmentos == 0 {
+            return Err(erro("nenhum segmento carregável"));
+        }
+        if !texto.contains("There are no relocations in this file") {
+            return Err(erro(
+                "o executável tem relocações, que o carregador não faz",
+            ));
+        }
+        println!(
+            "[xtask] programa {curto}: EXEC, entrada {entrada:#x}, {segmentos} segmentos, sem relocação"
+        );
+        conferidos += 1;
+    }
+    if conferidos == 0 {
+        return Err(format!("nenhum programa compilado para {}", arch.nome()));
+    }
+    Ok(())
 }
 
 /// Tabela `nome -> endereço` dos símbolos do kernel, via `llvm-nm`.
@@ -2188,7 +2298,13 @@ fn conferir_arvore_do_readme() -> Result<ExitCode, String> {
     }
 
     let mut no_disco: BTreeMap<String, usize> = BTreeMap::new();
-    for sub in ["kernel/src", "iniciador/src", "protocolo/src", "xtask/src"] {
+    for sub in [
+        "kernel/src",
+        "iniciador/src",
+        "protocolo/src",
+        "programas/src",
+        "xtask/src",
+    ] {
         percorrer_fontes_e_ligacao(&raiz.join(sub), &mut |caminho| {
             let nome = caminho
                 .file_name()
@@ -2198,6 +2314,11 @@ fn conferir_arvore_do_readme() -> Result<ExitCode, String> {
             *no_disco.entry(nome).or_default() += 1;
             Ok(())
         })?;
+    }
+    // E o script de ligação dos programas, que mora fora de `src` — ao lado
+    // do `Cargo.toml` que o usa, e não no meio do código.
+    if raiz.join("programas").join("usuario.ld").is_file() {
+        *no_disco.entry("usuario.ld".to_string()).or_default() += 1;
     }
 
     let mut queixas: Vec<String> = Vec::new();
@@ -2426,7 +2547,12 @@ fn conferir_blocos_unsafe() -> Result<ExitCode, String> {
     let mut faltando: Vec<String> = Vec::new();
     let mut total = 0usize;
 
-    for sub in ["kernel/src", "iniciador/src", "protocolo/src"] {
+    for sub in [
+        "kernel/src",
+        "iniciador/src",
+        "protocolo/src",
+        "programas/src",
+    ] {
         percorrer_fontes(&raiz.join(sub), &mut |caminho| {
             let texto = std::fs::read_to_string(caminho)
                 .map_err(|e| format!("não foi possível ler {}: {e}", caminho.display()))?;
@@ -3171,6 +3297,76 @@ fn arquivos_da_raiz() -> Vec<(String, Vec<u8>)> {
     arquivos
 }
 
+/// Os programas de usuário compilados, prontos para a raiz do disco.
+///
+/// Um por arquitetura, em `programas/<arquitetura>/<nome>`: o disco de
+/// testes é um só para as duas máquinas, e um executável do x86 não roda no
+/// ARM. Cada kernel procura no diretório da sua — ver
+/// `crate::usuario::DIRETORIO_DOS_COMPILADOS` no kernel.
+///
+/// Compilados sempre em release, e sempre os dois: quem monta o disco não
+/// sabe qual máquina vai usá-lo depois.
+fn programas_do_disco() -> Result<Vec<(String, Vec<u8>)>, String> {
+    let dir = raiz_do_projeto().join("programas");
+    let nomes = nomes_dos_programas(&dir)?;
+    let mut programas = Vec::new();
+    for arch in [Arquitetura::X86_64, Arquitetura::Aarch64] {
+        let mut cargo = Command::new(env!("CARGO"));
+        cargo
+            .current_dir(&dir)
+            .args(["build", "--release", "--target", arch.alvo()]);
+        // Pelo mesmo motivo do build do kernel: o que o cargo exporta para o
+        // xtask descreve o build do xtask.
+        for var in ["CARGO_ENCODED_RUSTFLAGS", "RUSTFLAGS", "CARGO_TARGET_DIR"] {
+            cargo.env_remove(var);
+        }
+        let status = cargo
+            .status()
+            .map_err(|e| format!("não foi possível compilar os programas: {e}"))?;
+        if !status.success() {
+            return Err(format!("os programas não compilaram para {}", arch.nome()));
+        }
+        for nome in &nomes {
+            let caminho = dir
+                .join("target")
+                .join(arch.alvo())
+                .join("release")
+                .join(nome);
+            let bytes = std::fs::read(&caminho)
+                .map_err(|e| format!("não foi possível ler {}: {e}", caminho.display()))?;
+            programas.push((format!("programas/{}/{nome}", arch.nome()), bytes));
+        }
+    }
+    Ok(programas)
+}
+
+/// Os nomes dos programas: um por arquivo em `programas/src/bin`, em ordem.
+fn nomes_dos_programas(dir: &Path) -> Result<Vec<String>, String> {
+    let bin = dir.join("src").join("bin");
+    let mut nomes: Vec<String> = std::fs::read_dir(&bin)
+        .map_err(|e| format!("não foi possível listar {}: {e}", bin.display()))?
+        .filter_map(|entrada| {
+            let caminho = entrada.ok()?.path();
+            (caminho.extension()? == "rs")
+                .then(|| caminho.file_stem()?.to_str().map(String::from))
+                .flatten()
+        })
+        .collect();
+    nomes.sort();
+    Ok(nomes)
+}
+
+/// Um resumo de 64 bits do conteúdo inteiro (FNV-1a).
+///
+/// Para a receita do disco. Não é criptográfico, nem precisa: o que ele
+/// separa é "o programa mudou" de "não mudou", e um executável recompilado
+/// muda bytes no meio sem mudar de tamanho.
+fn resumo(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
 /// Os argumentos com que a partição de dados é formatada.
 ///
 /// Mesma razão da lista acima: eles entram na receita inteiros, então um
@@ -3189,7 +3385,7 @@ fn argumentos_do_mkfs(arvore: &Path, raiz: &str) -> Vec<String> {
     ]
 }
 
-fn receita_do_disco() -> String {
+fn receita_do_disco(programas: &[(String, Vec<u8>)]) -> String {
     // Tudo que muda a imagem precisa estar aqui, e isso não é uma regra que
     // alguém precise lembrar: a receita é montada a partir das **mesmas**
     // funções que montam o disco. Foi o que faltava quando o tamanho de nó
@@ -3230,6 +3426,18 @@ fn receita_do_disco() -> String {
         let meio = conteudo.get(conteudo.len() / 2).copied().unwrap_or(0);
         receita.push_str(&format!("{nome} = {} bytes, meio={meio}\n", conteudo.len()));
     }
+
+    // Os programas não: um executável recompilado muda bytes sem mudar de
+    // tamanho, e o byte do meio é uma aposta que ele perde. Entram pelo
+    // resumo do conteúdo inteiro, que é pequeno na receita e barato de
+    // calcular sobre algumas dezenas de KiB.
+    for (nome, conteudo) in programas {
+        receita.push_str(&format!(
+            "{nome} = {} bytes, resumo={:016x}\n",
+            conteudo.len(),
+            resumo(conteudo)
+        ));
+    }
     receita
 }
 
@@ -3261,7 +3469,7 @@ fn ferramenta(nome: &str, args: &[&str]) -> Result<(), String> {
 }
 
 /// Monta o disco de testes com as ferramentas do hospedeiro.
-fn montar_disco(caminho: &Path) -> Result<(), String> {
+fn montar_disco(caminho: &Path, programas: &[(String, Vec<u8>)]) -> Result<(), String> {
     let faltando: Vec<&str> = FERRAMENTAS_DO_DISCO
         .iter()
         .filter(|(binario, _)| which(binario).is_none())
@@ -3360,6 +3568,9 @@ fn montar_disco(caminho: &Path) -> Result<(), String> {
     for (nome, conteudo) in arquivos_da_raiz() {
         escrever_na_arvore(&arvore, &nome, &conteudo)?;
     }
+    for (nome, conteudo) in programas {
+        escrever_na_arvore(&arvore, nome, conteudo)?;
+    }
 
     std::fs::write(&raiz, vec![0u8; (disco::RAIZ_SETORES * 512) as usize])
         .map_err(|e| format!("não foi possível criar a imagem da raiz: {e}"))?;
@@ -3403,14 +3614,15 @@ fn which(nome: &str) -> Option<PathBuf> {
 fn disco_de_testes() -> Result<PathBuf, String> {
     let caminho = raiz_do_projeto().join("target").join("disco.img");
     let receita = raiz_do_projeto().join("target").join("disco.receita");
-    let esperada = receita_do_disco();
+    let programas = programas_do_disco()?;
+    let esperada = receita_do_disco(&programas);
 
     if caminho.is_file() && std::fs::read_to_string(&receita).is_ok_and(|atual| atual == esperada) {
         return Ok(caminho);
     }
 
     println!("[xtask] montando o disco de testes (GPT, ESP em FAT32, raiz em Btrfs)");
-    montar_disco(&caminho)?;
+    montar_disco(&caminho, &programas)?;
     std::fs::write(&receita, &esperada)
         .map_err(|e| format!("não foi possível gravar a receita do disco: {e}"))?;
     println!("[xtask] disco de testes em {}", caminho.display());
@@ -6058,7 +6270,23 @@ mod testes {
     /// aparecem na receita. Voltar a escrever a lista à mão o reprova.
     #[test]
     fn a_receita_cobre_o_que_monta_a_imagem() {
-        let receita = receita_do_disco();
+        // Dois executáveis falsos, do mesmo tamanho e com o mesmo byte do
+        // meio, diferentes num byte só: a receita precisa separá-los.
+        let mut um = vec![0u8; 64];
+        let mut outro = vec![0u8; 64];
+        um[3] = 1;
+        outro[3] = 2;
+        let receita = receita_do_disco(&[("programas/x86_64/ola".to_string(), um.clone())]);
+        assert!(
+            receita.contains("programas/x86_64/ola = 64 bytes"),
+            "a receita não menciona o programa:\n{receita}"
+        );
+        assert_ne!(
+            receita,
+            receita_do_disco(&[("programas/x86_64/ola".to_string(), outro)]),
+            "dois programas diferentes de mesmo tamanho deram a mesma receita"
+        );
+        let receita = receita_do_disco(&[("programas/x86_64/ola".to_string(), um)]);
 
         for argumento in argumentos_do_mkfs(Path::new("<arvore>"), "<raiz>") {
             assert!(
