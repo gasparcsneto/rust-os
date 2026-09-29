@@ -904,10 +904,11 @@ info console  executado: agent.ping (pessoa)
 É o começo do que a fase 12 chama de auditoria: se um agente pode fazer tudo
 que uma pessoa faz, o registro precisa dizer qual dos dois fez.
 
-**O que ainda não há.** Botões: a interface de hoje é um console, e nenhum
-elemento aceita `press` — a árvore diz isso em vez de fingir; o primeiro vem
-com a barra superior. As camadas do compositor já aparecem nela, como
-`window`, mas hoje só a suíte cria alguma. Consentimento: um `set_value` do agente troca o que a pessoa
+**O primeiro botão.** A barra superior tem o **Limpar**, que aceita `press` —
+ver a seção da barra, abaixo. As camadas do compositor também aparecem na
+árvore, como `window`, mas hoje só a suíte cria alguma.
+
+**O que ainda não há.** Consentimento: um `set_value` do agente troca o que a pessoa
 estava digitando, e nada pergunta a ela antes. A árvore mostra o que está
 digitado, e o log registra quem agiu, mas pedir licença é trabalho da fase 12.
 
@@ -1050,8 +1051,8 @@ console aparecem como `window`, com um identificador que não se repete: um
 agente que guardou o de uma janela que fechou recebe "não existe", e não a
 janela que veio depois.
 
-**O que ainda não há.** Quem crie camadas em produção: hoje só a suíte cria —
-a primeira de verdade é a barra superior, e depois o servidor de janelas. Nem
+**O que ainda não há.** Quem crie janelas em produção: a única camada de
+produção é a barra superior, e o servidor de janelas vem depois. Nem
 o roteamento de entrada para elas, nem a transparência.
 
 Conferido pela suíte — a camada de cima vence, soltá-la revela o console,
@@ -1060,6 +1061,60 @@ letra escrita debaixo de uma camada não vaza e aparece quando ela sai, uma
 camada que passa da borda é composta só no que cai dentro — e pela fumaça,
 que compara a tela montada com a foto do monitor. Dez mutações, nove
 reprovadas pelo caso certo; a décima é a do desvio acima.
+
+## A barra superior
+
+No topo da tela, por cima do console: o nome do sistema, o botão **Limpar** e
+o tempo desde o boot. É uma camada do compositor — a primeira que não é da
+suíte — e o console passou a começar abaixo dela. A linha de acento que
+dizia "há um kernel vivo" desceu para a borda de baixo da barra.
+
+**O primeiro `press`.** O botão limpa o console e recomeça do topo, com o que
+estava digitado redesenhado no prompt. A pessoa aperta **F1**; o agente pede
+`ui.act` com `press`. Os dois caminhos chegam em `ui::agir`, cada um com a
+sua origem, e dali na mesma função — e o log diz quem foi:
+
+```
+info ui  agente: press no elemento 5
+info ui  pessoa: press no elemento 5
+```
+
+**F1 nos três teclados.** As teclas de função não existiam: o teclado deste
+kernel só entendia texto. Agora F1 a F12 chegam do 8042, do `virtio-input` e
+do USB — no USB por uma tabela de tradução, conferida em tempo de
+compilação. Chegam à fila do interpretador como caracteres da área de uso
+privado do Unicode, os mesmos que o macOS usa para elas (`NSF1FunctionKey` é
+U+F704), e não entram no histórico que `keyboard.read` devolve, que é o que
+foi digitado. Pela fila, e não dentro da interrupção: limpar a tela inteira
+não é trabalho para um handler.
+
+**O relógio.** Uma tarefa do executor redesenha o tempo ligado a cada
+segundo. Não é hora do dia — o kernel ainda não lê o relógio de parede. A
+árvore publica o texto que está desenhado, e a suíte confere que é o mesmo,
+pixel a pixel pela mesma fonte: sem isso a árvore poderia afirmar uma hora
+que a tela não mostra, e foi o que uma das mutações mostrou.
+
+```
+{"id":4,"role":"menu_bar","label":"barra superior",...,"children":[
+ {"id":6,"role":"static_text","label":"nome","value":"Duke",...},
+ {"id":5,"role":"button","label":"Limpar","actions":["press"],...},
+ {"id":7,"role":"static_text","label":"tempo ligado","value":"ligado 0:00:12",...}]}
+```
+
+Conferido pela suíte — a barra no topo e o console abaixo dela, o relógio
+andando e desenhado, o `press` do agente limpando, a F1 da pessoa pelo mesmo
+caminho e com a outra origem, a linha digitada sobrevivendo à limpeza — e
+pela fumaça, no kernel de produção: `press` pela árvore, F1 pelo `sendkey`
+do monitor nos três teclados, e o relógio andando sozinho, que só a tarefa
+de produção faz. Onze mutações, onze reprovadas — duas delas só depois de os
+casos que as deixavam passar serem corrigidos.
+
+**Uma dívida que ela expôs.** O console não rola: quando enche, recomeça do
+topo, e a última linha escrita some junto com a página. A barra tirou duas
+linhas da página, e um caso da árvore passou a cair exatamente nessa virada.
+O caso agora começa de uma página limpa, porque o que ele confere é outra
+coisa. Rolar continua sendo dívida do lado humano — e ficou barato: o console
+é uma camada em memória, e rolar é mover memória e recompor.
 
 ## Sistema de arquivos
 
@@ -1869,10 +1924,11 @@ padronizado.
       release, com folga para 60 Hz. A faixa das superfícies devolvendo o
       endereço virtual quando uma superfície sai — antes, ela só subia, e uma
       superfície por janela a esgotaria. E o compositor, com camadas opacas e
-      ordem de empilhamento, e o console como a camada de baixo. A seguir: a
-      transparência por camada, e a barra superior, com o primeiro elemento
-      que aceita `press`. Depois, o servidor de janelas, o roteamento de
-      entrada e a tipografia.
+      ordem de empilhamento, e o console como a camada de baixo. E a barra
+      superior, com o primeiro elemento que aceita `press` — pela árvore e
+      pela F1, pelo mesmo caminho. A seguir: o mouse, com o clique no mesmo
+      botão; o console rolando; e a transparência por camada. Depois, o
+      servidor de janelas, o roteamento de entrada e a tipografia.
       E aqui a inversão do projeto encontra a interface gráfica. O servidor de
       janelas publica uma **árvore semântica** — que janelas existem, que
       controles, o que cada um faz — e os pixels são a renderização dela, do
