@@ -800,27 +800,31 @@ fn grafico_superficie_devolve_os_frames() -> Resultado {
 /// existir, ou a segunda alocação seria uma tabela da página zero, e não o
 /// frame da página um.
 fn grafico_superficie_que_falha_no_meio_desfaz() -> Resultado {
-    use crate::grafico::memoria::{Memoria, proximo, vivas};
+    use crate::grafico::memoria::{Memoria, onde_cairia, vivas};
 
     const PAGINA: u64 = crate::arch::TAMANHO_PAGINA;
-    const REGIAO: u64 = PAGINA * 512;
-    // Espaço para o aquecimento e para as duas páginas do caso, com folga.
-    const FOLGA: u64 = 16 * PAGINA;
 
     if crate::frames::falhas_pendentes() != 0 {
         return Err("um caso anterior deixou falhas encomendadas pendentes");
     }
 
-    // Longe da fronteira da região, para as páginas do caso caírem na mesma
-    // tabela que o aquecimento vai montar.
-    let resto = REGIAO - proximo() % REGIAO;
-    if resto < FOLGA {
-        drop(Memoria::nova(resto)?);
+    // O aquecimento: duas páginas, do tamanho do caso, que montam as tabelas
+    // de onde elas caem e são largadas. Largadas, o endereço volta à faixa —
+    // e a reserva seguinte do mesmo tamanho o recebe de volta, porque o
+    // trecho que ele deixa é o primeiro em que ela cabe.
+    let aquecimento = Memoria::nova(2 * PAGINA)?;
+    let aquecido = aquecimento.inicio();
+    drop(aquecimento);
+    let inicio = onde_cairia(2 * PAGINA).ok_or("a faixa das superficies se esgotou")?;
+    if inicio != aquecido {
+        crate::log_error!(
+            "teste",
+            "o aquecimento caiu em {:#x}, e a proxima em {:#x}",
+            aquecido,
+            inicio
+        );
+        return Err("o endereco devolvido nao e o que a proxima reserva recebe");
     }
-    // O aquecimento: monta as tabelas da região, e é largado.
-    drop(Memoria::nova(PAGINA)?);
-
-    let inicio = proximo();
     let antes = vivas();
 
     // A primeira alocação — o frame da página zero — passa. A segunda — o
@@ -856,6 +860,148 @@ fn grafico_superficie_que_falha_no_meio_desfaz() -> Resultado {
     }
     if vivas() != antes {
         return Err("uma superficie que falhou foi contada como viva");
+    }
+    // E o endereço voltou à faixa: sem isso, cada criação que falha gastaria
+    // espaço virtual para sempre.
+    if onde_cairia(2 * PAGINA) != Some(inicio) {
+        return Err("a superficie que falhou nao devolveu o endereco");
+    }
+    Ok(())
+}
+
+/// A aritmética da faixa das superfícies, sobre uma faixa de mentira.
+///
+/// Reaproveitar, partir, fundir dos dois lados, descer o topo e recusar
+/// quando não cabe. Uma faixa de mentira porque nenhum destes precisa de
+/// página mapeada, e porque a de verdade tem superfícies vivas de outros
+/// casos no meio — a conta não seria reproduzível.
+fn grafico_a_faixa_reaproveita_e_funde() -> Resultado {
+    use crate::grafico::memoria::{Faixa, MAX_TRECHOS};
+
+    const P: u64 = crate::arch::TAMANHO_PAGINA;
+    const BASE: u64 = 0x1000_0000;
+    // A faixa inteira de mentira mora em `static`: são 4 KiB de trechos, e a
+    // pilha de um fio não é lugar para eles.
+    static FAIXA: spin::Mutex<Faixa> = spin::Mutex::new(Faixa::nova(0, 0));
+
+    let mut f = FAIXA.lock();
+    *f = Faixa::nova(BASE, BASE + 16 * P);
+
+    let a = f.reservar(P).ok_or("a primeira reserva falhou")?;
+    let b = f.reservar(2 * P).ok_or("a segunda reserva falhou")?;
+    let c = f.reservar(P).ok_or("a terceira reserva falhou")?;
+    if (a, b, c, f.topo()) != (BASE, BASE + P, BASE + 3 * P, BASE + 4 * P) {
+        return Err("reservas numa faixa vazia nao sairam em sequencia");
+    }
+
+    // Reaproveitar: o buraco do meio volta para quem cabe nele.
+    f.devolver(b, 2 * P);
+    if f.trechos() != 1 || f.reservar(2 * P) != Some(b) || f.trechos() != 0 {
+        return Err("o trecho devolvido nao foi reaproveitado inteiro");
+    }
+
+    // Partir: um pedido menor que o trecho leva o começo dele.
+    f.devolver(b, 2 * P);
+    if f.reservar(P) != Some(b) || f.reservar(P) != Some(b + P) || f.trechos() != 0 {
+        return Err("um pedido menor nao partiu o trecho pelo comeco");
+    }
+
+    // Fundir dos dois lados: dois trechos separados, e o do meio os junta.
+    f.devolver(a, P);
+    f.devolver(b + P, P);
+    if f.trechos() != 2 {
+        return Err("dois trechos separados viraram um");
+    }
+    f.devolver(b, P);
+    if f.trechos() != 1 || f.onde_cairia(3 * P) != Some(a) {
+        return Err("o trecho do meio nao fundiu os dois lados");
+    }
+
+    // O topo desce, e leva junto o trecho livre que encosta nele.
+    f.devolver(c, P);
+    if f.topo() != BASE || f.trechos() != 0 {
+        return Err("devolver o ultimo nao desceu o topo ate o trecho livre");
+    }
+
+    // Recusar o que não cabe, e caber de novo depois de devolver.
+    let tudo = f.reservar(16 * P).ok_or("a faixa inteira nao coube")?;
+    if f.reservar(P).is_some() {
+        return Err("a faixa cheia aceitou mais uma reserva");
+    }
+    f.devolver(tudo, 16 * P);
+    if f.reservar(u64::MAX).is_some() || f.reservar(0).is_some() {
+        return Err("uma reserva impossivel foi aceita");
+    }
+
+    // Fundir só com o vizinho de cima.
+    let x = f.reservar(P).ok_or("reserva depois de esvaziar falhou")?;
+    let y = f.reservar(P).ok_or("reserva depois de esvaziar falhou")?;
+    let _z = f.reservar(P).ok_or("reserva depois de esvaziar falhou")?;
+    f.devolver(y, P);
+    f.devolver(x, P);
+    if f.trechos() != 1 || f.onde_cairia(2 * P) != Some(x) {
+        return Err("um trecho nao fundiu com o vizinho de cima");
+    }
+
+    // A tabela cheia: um trecho a mais não cabe, e quem devolve fica sabendo.
+    *f = Faixa::nova(BASE, BASE + (2 * MAX_TRECHOS as u64 + 4) * P);
+    let mut enderecos = [0u64; 2 * MAX_TRECHOS + 3];
+    for e in enderecos.iter_mut() {
+        *e = f
+            .reservar(P)
+            .ok_or("a faixa grande se esgotou antes do previsto")?;
+    }
+    // Um sim, um não, para nenhum fundir com o vizinho, e longe do topo.
+    for i in 0..MAX_TRECHOS {
+        if !f.devolver(enderecos[2 * i], P) {
+            return Err("a tabela recusou um trecho antes de encher");
+        }
+    }
+    if f.trechos() != MAX_TRECHOS {
+        return Err("a tabela nao guardou um trecho por devolucao");
+    }
+    if f.devolver(enderecos[2 * MAX_TRECHOS], P) {
+        return Err("a tabela cheia aceitou mais um trecho sem dizer que perdeu");
+    }
+    // Mas um que funde não precisa de vaga.
+    if !f.devolver(enderecos[1], P) || f.trechos() != MAX_TRECHOS - 1 {
+        return Err("um trecho que funde foi recusado com a tabela cheia");
+    }
+    Ok(())
+}
+
+/// Criar e soltar superfícies não gasta a faixa.
+///
+/// Era o defeito que impedia o compositor: a reserva só subia, e no ARM
+/// umas duzentas e cinquenta telas a esgotavam com a memória sobrando. Aqui
+/// três superfícies nascem e morrem fora de ordem, e a faixa tem de voltar ao
+/// que era — topo e trechos. Voltando, um laço infinito de criações não a
+/// esgota.
+fn grafico_soltar_superficies_devolve_a_faixa() -> Resultado {
+    use crate::grafico::memoria::{Memoria, onde_cairia, perdidos, topo};
+
+    const KIB_64: u64 = 64 * 1024;
+    let topo_antes = topo();
+    let perdidos_antes = perdidos();
+
+    let a = Memoria::nova(KIB_64)?;
+    let b = Memoria::nova(2 * KIB_64)?;
+    let c = Memoria::nova(KIB_64)?;
+    let em_b = b.inicio();
+    drop(b);
+    // O buraco de `b` é o primeiro lugar em que uma superfície do tamanho
+    // dele cabe — a menos que já houvesse um trecho livre mais baixo.
+    if onde_cairia(2 * KIB_64).is_none_or(|e| e > em_b) {
+        return Err("o endereco da superficie solta nao voltou a faixa");
+    }
+    drop(a);
+    drop(c);
+    if topo() != topo_antes {
+        crate::log_error!("teste", "topo foi de {:#x} para {:#x}", topo_antes, topo());
+        return Err("soltar as superficies nao devolveu a faixa");
+    }
+    if perdidos() != perdidos_antes {
+        return Err("a faixa perdeu endereco com tres superficies");
     }
     Ok(())
 }
@@ -9707,6 +9853,14 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "grafico: superficie que falha no meio desfaz",
         f: grafico_superficie_que_falha_no_meio_desfaz,
+    },
+    Caso {
+        nome: "grafico: a faixa reaproveita e funde",
+        f: grafico_a_faixa_reaproveita_e_funde,
+    },
+    Caso {
+        nome: "grafico: soltar superficies devolve a faixa",
+        f: grafico_soltar_superficies_devolve_a_faixa,
     },
     Caso {
         nome: "video: a tela mora onde o monitor a mostra",
