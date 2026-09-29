@@ -314,6 +314,9 @@ pub mod evento {
     pub mod janela {
         /// Uma janela vazia, que mostra o que se digita nela. A da suíte.
         pub const TESTE: i64 = 1;
+        /// "Sobre o Duke": o que é este sistema. Uma só de cada vez — pedir
+        /// de novo traz a aberta para a frente. Do botão da barra.
+        pub const SOBRE: i64 = 2;
     }
 
     /// Um evento: o tipo e três campos.

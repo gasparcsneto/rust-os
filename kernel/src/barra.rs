@@ -1,4 +1,4 @@
-//! A barra superior: o nome do sistema, o primeiro botão e o tempo ligado.
+//! A barra superior: o nome do sistema, os botões e o tempo ligado.
 //!
 //! # O que ela é
 //!
@@ -14,6 +14,15 @@
 //! regra que a árvore semântica segue desde o começo: agir é passar pelo
 //! caminho da pessoa, e o log diz quem foi. O clique chega pelo mesmo lugar
 //! quando houver mouse.
+//!
+//! # O segundo botão
+//!
+//! **Sobre**, que abre a janela "Sobre o Duke". Ele não faz nada do lado de
+//! cá: publica um pedido de abrir no canal das janelas, e o servidor de
+//! janelas, no espaço do usuário, abre e desenha a janela. É o primeiro
+//! botão do kernel cujo efeito mora do outro lado da fronteira — e, sem
+//! servidor no ar, o `press` é recusado com o motivo, em vez de não fazer
+//! nada em silêncio. A pessoa o aperta com a F2, ou com o clique.
 //!
 //! # O relógio
 //!
@@ -43,6 +52,9 @@ pub const NOME: &str = "Duke";
 /// O rótulo do botão na árvore. Na tela ele leva a tecla junto.
 pub const ROTULO_DO_BOTAO: &str = "Limpar";
 const TEXTO_DO_BOTAO: &str = "Limpar (F1)";
+/// O segundo botão: o rótulo na árvore, e o texto na tela.
+pub const ROTULO_DO_SOBRE: &str = "Sobre";
+const TEXTO_DO_SOBRE: &str = "Sobre (F2)";
 
 const MARGEM: u32 = 8;
 /// Onde o texto começa na vertical: centrado nos 22 pixels acima do acento,
@@ -157,6 +169,28 @@ pub fn pressionar() {
     crate::interpretador::limpar();
 }
 
+/// O que o botão "Sobre" faz: pedir ao servidor de janelas a janela
+/// "Sobre o Duke". Recusado, com o motivo, se não há servidor.
+pub fn pressionar_sobre() -> Result<(), &'static str> {
+    use protocolo::usuario::evento::{CANAL_DAS_JANELAS, Evento, janela, tipo};
+    let tela = crate::tela::tela_fisica().ok_or("sem tela")?;
+    match crate::eventos::publicar(
+        CANAL_DAS_JANELAS,
+        Evento {
+            tipo: tipo::ABRIR,
+            a: janela::SOBRE,
+            b: tela.largura as i64,
+            c: tela.altura as i64,
+        },
+    ) {
+        Ok(()) => Ok(()),
+        Err(crate::eventos::NaoPublicado::SemOuvinte) => {
+            Err("o servidor de janelas nao esta no ar")
+        }
+        Err(crate::eventos::NaoPublicado::Cheio) => Err("a fila do servidor de janelas esta cheia"),
+    }
+}
+
 /// Quantas vezes o botão foi pressionado desde o boot. Para a suíte.
 #[cfg(feature = "modo-teste")]
 pub fn pressionado() -> u64 {
@@ -178,6 +212,19 @@ pub fn moldura() -> Option<Moldura> {
 pub fn moldura_do_botao() -> Option<Moldura> {
     ativa().then(|| {
         let (x, largura) = posicao_do_botao();
+        Moldura {
+            x,
+            y: BOTAO_Y,
+            largura,
+            altura: BOTAO_ALTURA,
+        }
+    })
+}
+
+/// A moldura do botão "Sobre", se a barra existe.
+pub fn moldura_do_sobre() -> Option<Moldura> {
+    ativa().then(|| {
+        let (x, largura) = posicao_do_sobre();
         Moldura {
             x,
             y: BOTAO_Y,
@@ -233,6 +280,15 @@ fn posicao_do_botao() -> (u32, u32) {
     (x, largura_do_texto(TEXTO_DO_BOTAO) + 2 * BOTAO_FOLGA)
 }
 
+/// O botão "Sobre", logo à direita do primeiro.
+fn posicao_do_sobre() -> (u32, u32) {
+    let (x, largura) = posicao_do_botao();
+    (
+        x + largura + MARGEM,
+        largura_do_texto(TEXTO_DO_SOBRE) + 2 * BOTAO_FOLGA,
+    )
+}
+
 fn pintar_retangulo(pixels: &mut [u32], largura: u32, m: Moldura, cor: Cor) {
     let valor = cor.para_u32();
     for y in m.y..m.y + m.altura {
@@ -259,27 +315,31 @@ fn desenhar_tudo(pixels: &mut [u32], largura: u32, segundo: u64) {
     );
     desenhar_texto_em(pixels, largura, MARGEM, TEXTO_Y, NOME, TEXTO, FUNDO);
 
-    let (x, largura_do_botao) = posicao_do_botao();
-    pintar_retangulo(
-        pixels,
-        largura,
-        Moldura {
-            x,
-            y: BOTAO_Y,
-            largura: largura_do_botao,
-            altura: BOTAO_ALTURA,
-        },
-        FUNDO_DO_BOTAO,
-    );
-    desenhar_texto_em(
-        pixels,
-        largura,
-        x + BOTAO_FOLGA,
-        TEXTO_Y,
-        TEXTO_DO_BOTAO,
-        TEXTO,
-        FUNDO_DO_BOTAO,
-    );
+    for ((x, largura_do_botao), texto) in [
+        (posicao_do_botao(), TEXTO_DO_BOTAO),
+        (posicao_do_sobre(), TEXTO_DO_SOBRE),
+    ] {
+        pintar_retangulo(
+            pixels,
+            largura,
+            Moldura {
+                x,
+                y: BOTAO_Y,
+                largura: largura_do_botao,
+                altura: BOTAO_ALTURA,
+            },
+            FUNDO_DO_BOTAO,
+        );
+        desenhar_texto_em(
+            pixels,
+            largura,
+            x + BOTAO_FOLGA,
+            TEXTO_Y,
+            texto,
+            TEXTO,
+            FUNDO_DO_BOTAO,
+        );
+    }
 
     desenhar_relogio(pixels, largura, segundo);
 }

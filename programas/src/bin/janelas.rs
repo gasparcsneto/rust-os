@@ -86,8 +86,11 @@ struct Janela {
     /// Onde o canto superior esquerdo está na tela.
     x: i32,
     y: i32,
-    /// O que se digitou nela.
+    /// O que ela mostra: o que se digitou, ou o texto fixo dela.
     texto: String,
+    /// Que janela é, de [`janela`] — a de teste aceita digitação; a
+    /// "Sobre o Duke", não.
+    qual: i64,
 }
 
 impl Janela {
@@ -232,6 +235,19 @@ impl Janela {
     }
 }
 
+/// O que a janela "Sobre o Duke" diz. Sem acento: a fonte do console tem o
+/// bloco básico do latim, e uma letra fora dele sairia como `?`.
+#[cfg(target_arch = "x86_64")]
+const SOBRE: &str = "Duke, um sistema operacional didatico\n\
+escrito em Rust, rodando em x86_64.\n\n\
+Esta janela e desenhada por um processo:\n\
+o servidor de janelas, fora do kernel.";
+#[cfg(target_arch = "aarch64")]
+const SOBRE: &str = "Duke, um sistema operacional didatico\n\
+escrito em Rust, rodando em aarch64.\n\n\
+Esta janela e desenhada por um processo:\n\
+o servidor de janelas, fora do kernel.";
+
 /// Quantos identificadores de elemento cada janela reserva.
 const ELEMENTOS_POR_JANELA: u32 = 16;
 /// Os elementos de uma janela, na árvore.
@@ -280,8 +296,18 @@ impl Servidor {
     }
 
     fn abrir(&mut self, qual: i64, largura_da_tela: i64, altura_da_tela: i64) {
-        let (titulo, largura, altura) = match qual {
-            janela::TESTE => ("Teste", 320, 160),
+        // Uma "Sobre o Duke" só: pedir de novo traz a aberta para a frente.
+        if qual == janela::SOBRE
+            && let Some(id) = self.janelas.iter().find(|j| j.qual == qual).map(|j| j.id)
+        {
+            self.trazer_para_frente(id);
+            self.focar(id);
+            escreverln!("janelas: ja aberta {}", id);
+            return;
+        }
+        let (titulo, largura, altura, texto) = match qual {
+            janela::TESTE => ("Teste", 320, 160, String::new()),
+            janela::SOBRE => ("Sobre o Duke", 400, 180, String::from(SOBRE)),
             _ => {
                 escreverln!("janelas: pedido de janela desconhecida {}", qual);
                 return;
@@ -307,7 +333,8 @@ impl Servidor {
             titulo,
             x: x as i32,
             y: y as i32,
-            texto: String::new(),
+            texto,
+            qual,
         };
         j.desenhar(false);
         if j.superficie.transparente(true).is_err()
@@ -406,6 +433,10 @@ impl Servidor {
         let Some(i) = self.indice(id) else {
             return;
         };
+        // O texto do "Sobre o Duke" é fixo.
+        if self.janelas[i].qual != janela::TESTE {
+            return;
+        }
         let texto = &mut self.janelas[i].texto;
         match c {
             '\u{8}' => {

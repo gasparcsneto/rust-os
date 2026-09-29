@@ -4332,6 +4332,7 @@ fn conversar(
     sob_arvore(&mut escrita, &mut leitor)?;
     sob_barra(monitor, &mut escrita, &mut leitor)?;
     sob_mouse(qmp, teclado, &mut escrita, &mut leitor)?;
+    sob_janelas(qmp, &mut escrita, &mut leitor)?;
     sob_tela(monitor, tela_no_monitor, &mut escrita, &mut leitor)?;
     sob_fragmento(&mut escrita, &mut leitor)?;
     // Por último, porque não há volta: depois dela o kernel só responde o
@@ -5234,6 +5235,230 @@ fn sob_mouse(
     Err(format!(
         "mouse: o clique nao pressionou o botao\n  {ultima}"
     ))
+}
+
+/// Leva o ponteiro da máquina a `(x, y)`, pelo mouse do emulador, e espera
+/// o kernel dizer que ele chegou.
+///
+/// O mesmo arranjo de [`sob_mouse`]: uma posição absoluta, para quem tem
+/// tablet, e o resto em passos relativos de até cem, para quem tem mouse — o
+/// PS/2 do emulador engole um salto grande. Chegou quando o kernel diz, a
+/// dois pixels.
+fn levar_o_ponteiro(
+    qmp_escrita: &mut UnixStream,
+    qmp_leitor: &mut BufReader<UnixStream>,
+    pedir: &mut dyn FnMut(&str, &str) -> Result<String, String>,
+    (x, y): (u32, u32),
+    (largura, altura): (u32, u32),
+) -> Result<(), String> {
+    let escala = |v: u32, lado: u32| (v as u64 * 32767 / (lado.max(2) - 1) as u64) as u32;
+    let posicao = |info: &str| -> (i64, i64) {
+        let ponteiro = info.find(r#""pointer":"#).map(|i| &info[i..]).unwrap_or("");
+        let eixo = |chave: &str| {
+            valor_de(ponteiro, chave)
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0)
+        };
+        (eixo(r#""x":"#), eixo(r#""y":"#))
+    };
+    qmp_eventos(
+        qmp_escrita,
+        qmp_leitor,
+        &format!(
+            r#"{{"type":"abs","data":{{"axis":"x","value":{}}}}},{{"type":"abs","data":{{"axis":"y","value":{}}}}}"#,
+            escala(x, largura),
+            escala(y, altura)
+        ),
+        "abs",
+    )?;
+    std::thread::sleep(Duration::from_millis(150));
+    let (px, py) = posicao(&pedir("display.info", "{}")?);
+    let (mut faltam_x, mut faltam_y) = (x as i64 - px, y as i64 - py);
+    while faltam_x != 0 || faltam_y != 0 {
+        let (passo_x, passo_y) = (faltam_x.clamp(-100, 100), faltam_y.clamp(-100, 100));
+        if !qmp_eventos(
+            qmp_escrita,
+            qmp_leitor,
+            &format!(
+                r#"{{"type":"rel","data":{{"axis":"x","value":{passo_x}}}}},{{"type":"rel","data":{{"axis":"y","value":{passo_y}}}}}"#
+            ),
+            "rel",
+        )? {
+            break;
+        }
+        faltam_x -= passo_x;
+        faltam_y -= passo_y;
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    let limite = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let info = pedir("display.info", "{}")?;
+        let (px, py) = posicao(&info);
+        if px.abs_diff(x as i64) <= 2 && py.abs_diff(y as i64) <= 2 {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= limite {
+            return Err(format!(
+                "janelas: o ponteiro nao chegou a ({x}, {y}); esta em ({px}, {py})"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Aperta, ou solta, o botão esquerdo do mouse da máquina.
+fn botao_do_mouse(
+    qmp_escrita: &mut UnixStream,
+    qmp_leitor: &mut BufReader<UnixStream>,
+    apertado: bool,
+) -> Result<(), String> {
+    qmp_eventos(
+        qmp_escrita,
+        qmp_leitor,
+        &format!(r#"{{"type":"btn","data":{{"down":{apertado},"button":"left"}}}}"#),
+        "btn",
+    )?;
+    std::thread::sleep(Duration::from_millis(100));
+    Ok(())
+}
+
+/// A moldura `(x, y, largura, altura)` do primeiro elemento da árvore
+/// depois de `marca`.
+fn moldura_depois(arvore: &str, marca: &str) -> Option<(u32, u32, u32, u32)> {
+    let resto = &arvore[arvore.find(marca)?..];
+    let resto = &resto[resto.find(r#""frame":"#)?..];
+    let numero = |chave: &str| valor_de(resto, chave)?.parse().ok();
+    Some((
+        numero(r#""x":"#)?,
+        numero(r#""y":"#)?,
+        numero(r#""width":"#)?,
+        numero(r#""height":"#)?,
+    ))
+}
+
+/// A primeira janela: "Sobre o Duke", aberta pelo clique no botão da barra,
+/// arrastada pela barra de título e fechada pela caixa — tudo pelo mouse da
+/// máquina.
+///
+/// # O que esta sonda prova que a suíte não prova
+///
+/// A suíte opera o servidor de janelas pelas funções que os drivers chamam.
+/// Esta passa pelos drivers de verdade — o PS/2, o `virtio-tablet`, o USB —,
+/// pelo servidor lançado no boot de produção, e confere pelo que o agente
+/// lê: a árvore semântica, onde a janela aparece, anda e some.
+fn sob_janelas(
+    qmp: &Path,
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+) -> Result<(), String> {
+    println!("[xtask] fumaça: a janela Sobre o Duke, pelo mouse");
+    const SOBRE: u32 = 8;
+    const TITULO: &str = r#""role":"window","label":"Sobre o Duke""#;
+
+    let mut id = 8100;
+    let mut pedir = |metodo: &str, params: &str| -> Result<String, String> {
+        id += 1;
+        escrita
+            .write_all(
+                format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"{metodo}","params":{params}}}"#)
+                    .as_bytes(),
+            )
+            .and_then(|()| escrita.write_all(b"\n"))
+            .and_then(|()| escrita.flush())
+            .map_err(|e| format!("janelas: falha ao pedir `{metodo}`: {e}"))?;
+        let resposta = ler_resposta(leitor).map_err(|e| format!("janelas: {e}"))?;
+        if !e_a_resposta(&resposta, id) {
+            return Err(format!(
+                "janelas: veio a resposta de outro pedido\n  {resposta}"
+            ));
+        }
+        Ok(resposta)
+    };
+    // Espera a árvore satisfazer `condicao`, e a devolve.
+    let esperar_arvore = |pedir: &mut dyn FnMut(&str, &str) -> Result<String, String>,
+                          condicao: &dyn Fn(&str) -> bool,
+                          o_que: &str|
+     -> Result<String, String> {
+        let limite = std::time::Instant::now() + Duration::from_secs(8);
+        loop {
+            let arvore = pedir("ui.tree", "{}")?;
+            if condicao(&arvore) {
+                return Ok(arvore);
+            }
+            if std::time::Instant::now() >= limite {
+                return Err(format!("janelas: {o_que}\n  {arvore}"));
+            }
+            std::thread::sleep(Duration::from_millis(150));
+        }
+    };
+
+    let info = pedir("display.info", "{}")?;
+    let dimensao = |chave: &str| -> Result<u32, String> {
+        valor_de(&info, &format!(r#""{chave}":"#))
+            .and_then(|v| v.parse().ok())
+            .ok_or_else(|| format!("janelas: display.info nao tem `{chave}`\n  {info}"))
+    };
+    let tela = (dimensao("width")?, dimensao("height")?);
+    let (mut qe, mut ql) = qmp_abrir(qmp)?;
+
+    // Abrir: o clique no botão "Sobre", pela moldura que a árvore publica.
+    let arvore = pedir("ui.tree", "{}")?;
+    let (bx, by, bl, ba) = moldura_depois(&arvore, &format!(r#""id":{SOBRE},"role":"button""#))
+        .ok_or_else(|| format!("janelas: a arvore nao tem o botao Sobre\n  {arvore}"))?;
+    levar_o_ponteiro(
+        &mut qe,
+        &mut ql,
+        &mut pedir,
+        (bx + bl / 2, by + ba / 2),
+        tela,
+    )?;
+    botao_do_mouse(&mut qe, &mut ql, true)?;
+    botao_do_mouse(&mut qe, &mut ql, false)?;
+    let arvore = esperar_arvore(
+        &mut pedir,
+        &|a| a.contains(TITULO),
+        "o clique no botao Sobre nao abriu a janela",
+    )?;
+    let (jx, jy, _, _) =
+        moldura_depois(&arvore, TITULO).ok_or("janelas: a janela nao tem moldura")?;
+    println!("  [janelas] ok  o clique no botao abriu \"Sobre o Duke\" em ({jx}, {jy})");
+
+    // Arrastar pela barra de título: aperta, anda, solta.
+    levar_o_ponteiro(&mut qe, &mut ql, &mut pedir, (jx + 100, jy + 10), tela)?;
+    botao_do_mouse(&mut qe, &mut ql, true)?;
+    levar_o_ponteiro(&mut qe, &mut ql, &mut pedir, (jx + 180, jy + 70), tela)?;
+    botao_do_mouse(&mut qe, &mut ql, false)?;
+    let (ax, ay) = (jx + 80, jy + 60);
+    let arvore = esperar_arvore(
+        &mut pedir,
+        &|a| {
+            moldura_depois(a, TITULO)
+                .is_some_and(|(x, y, _, _)| x.abs_diff(ax) <= 3 && y.abs_diff(ay) <= 3)
+        },
+        "a janela arrastada nao foi para onde o mouse a levou",
+    )?;
+    println!("  [janelas] ok  arrastada pela barra de titulo para ({ax}, {ay})");
+
+    // Fechar pela caixa, pela moldura do botão "Fechar" da janela.
+    let depois = &arvore[arvore.find(TITULO).unwrap_or(0)..];
+    let (fx, fy, fl, fa) = moldura_depois(depois, r#""role":"button","label":"Fechar""#)
+        .ok_or_else(|| format!("janelas: a janela nao tem o botao Fechar\n  {arvore}"))?;
+    levar_o_ponteiro(
+        &mut qe,
+        &mut ql,
+        &mut pedir,
+        (fx + fl / 2, fy + fa / 2),
+        tela,
+    )?;
+    botao_do_mouse(&mut qe, &mut ql, true)?;
+    botao_do_mouse(&mut qe, &mut ql, false)?;
+    esperar_arvore(
+        &mut pedir,
+        &|a| !a.contains(TITULO),
+        "o clique na caixa de fechar nao fechou a janela",
+    )?;
+    println!("  [janelas] ok  fechada pela caixa, e fora da arvore");
+    Ok(())
 }
 
 /// O botão da barra superior, pressionado pelos dois caminhos.

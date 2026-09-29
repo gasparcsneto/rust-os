@@ -135,6 +135,15 @@ pub fn tratar_tecla(c: char) {
                 Origem::Pessoa,
             );
         }
+        // F2, o botão "Sobre", pelo mesmo caminho.
+        crate::teclado::F2 => {
+            let _ = crate::ui::agir(
+                crate::ui::ID_DO_BOTAO_SOBRE,
+                crate::ui::Acao::Pressionar,
+                None,
+                Origem::Pessoa,
+            );
+        }
         // Só o que é texto entra na linha. Teclas sem caractere já não
         // chegam aqui, mas o controle que sobra — um tab, por exemplo —
         // desalinharia a conta entre o que está no buffer e o que está

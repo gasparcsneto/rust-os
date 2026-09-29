@@ -107,6 +107,9 @@ pub const fn tecla_de_funcao(n: u8) -> char {
 /// F1: a tecla do botão da barra superior.
 pub const F1: char = tecla_de_funcao(1);
 
+/// F2: a tecla do botão "Sobre" da barra superior.
+pub const F2: char = tecla_de_funcao(2);
+
 /// Um clique do ponteiro, na fila do interpretador.
 ///
 /// Pelo mesmo motivo das teclas de função: o interpretador é quem atende a

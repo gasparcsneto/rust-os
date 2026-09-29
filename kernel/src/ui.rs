@@ -33,9 +33,9 @@
 //!
 //! Pouco, porque a interface é pouca: a tela, o console de texto sobre ela, a
 //! linha de comando do interpretador, e a barra superior com o nome, o
-//! relógio e o botão **Limpar** — o primeiro elemento que aceita `press`. Ele
-//! é acionado por três caminhos, e todos chegam em [`agir`]: o `ui.act` do
-//! agente, a F1 e o clique da pessoa. As camadas do compositor acima do
+//! relógio e os botões **Limpar** — o primeiro elemento que aceita `press` —
+//! e **Sobre**. Cada um é acionado por três caminhos, e todos chegam em
+//! [`agir`]: o `ui.act` do agente, a tecla (F1, F2) e o clique da pessoa. As camadas do compositor acima do
 //! console aparecem como janelas — as do servidor de janelas, e as que a
 //! suíte cria.
 
@@ -149,6 +149,7 @@ pub const ID_DA_BARRA: u32 = 4;
 pub const ID_DO_BOTAO_LIMPAR: u32 = 5;
 pub const ID_DO_NOME: u32 = 6;
 pub const ID_DO_RELOGIO: u32 = 7;
+pub const ID_DO_BOTAO_SOBRE: u32 = 8;
 pub const ID_DAS_CAMADAS: u32 = 1000;
 
 /// O identificador na árvore de uma camada do compositor.
@@ -272,7 +273,7 @@ pub fn moldura_da_linha_de_comando() -> Option<Moldura> {
 pub fn acoes_de(id: u32) -> &'static [Acao] {
     match id {
         ID_DA_LINHA_DE_COMANDO => &[Acao::Confirmar, Acao::Cancelar, Acao::DefinirValor],
-        ID_DO_BOTAO_LIMPAR => &[Acao::Pressionar],
+        ID_DO_BOTAO_LIMPAR | ID_DO_BOTAO_SOBRE => &[Acao::Pressionar],
         // Um botão que um processo descreveu. O que ele faz é do processo;
         // o kernel só leva o pedido.
         id if com_elemento(id, |e| e.tipo == crate::superficies::Tipo::Botao) == Some(true) => {
@@ -289,9 +290,13 @@ pub fn acoes_de(id: u32) -> &'static [Acao] {
 /// agente concordem sobre onde o botão está.
 pub fn acionavel_em(x: u32, y: u32) -> Option<u32> {
     let dentro = |m: Moldura| x >= m.x && x < m.x + m.largura && y >= m.y && y < m.y + m.altura;
-    crate::barra::moldura_do_botao()
-        .filter(|&m| dentro(m))
-        .map(|_| ID_DO_BOTAO_LIMPAR)
+    [
+        (crate::barra::moldura_do_botao(), ID_DO_BOTAO_LIMPAR),
+        (crate::barra::moldura_do_sobre(), ID_DO_BOTAO_SOBRE),
+    ]
+    .into_iter()
+    .find(|&(m, _)| m.is_some_and(dentro))
+    .map(|(_, id)| id)
 }
 
 /// O elemento existe agora?
@@ -301,7 +306,9 @@ pub fn existe(id: u32) -> bool {
         ID_DA_LINHA_DE_COMANDO => {
             crate::tela::tela().is_some() && crate::interpretador::inicio_do_campo().is_some()
         }
-        ID_DA_BARRA | ID_DO_BOTAO_LIMPAR | ID_DO_NOME | ID_DO_RELOGIO => crate::barra::ativa(),
+        ID_DA_BARRA | ID_DO_BOTAO_LIMPAR | ID_DO_BOTAO_SOBRE | ID_DO_NOME | ID_DO_RELOGIO => {
+            crate::barra::ativa()
+        }
         // Antes das camadas: os identificadores de elemento também são
         // maiores que o delas.
         id if elemento_de(id).is_some() => com_elemento(id, |_| ()).is_some(),
@@ -412,7 +419,9 @@ fn executar(
         // O botão da barra, ou um que um processo descreveu: a conferência
         // acima já recusou os outros.
         Acao::Pressionar => {
-            if let Some(do_processo) = com_elemento(id, |e| e.id) {
+            if id == ID_DO_BOTAO_SOBRE {
+                crate::barra::pressionar_sobre()?;
+            } else if let Some(do_processo) = com_elemento(id, |e| e.id) {
                 pressionar_no_processo(do_processo)?;
             } else {
                 crate::barra::pressionar();

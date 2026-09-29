@@ -790,7 +790,25 @@ quem foi. O caso da suíte lê a árvore do `ui.tree` de verdade, digita
 `a`, Enter e `b` e espera o valor `a\nb` no texto, confere que o texto não
 aceita `press`, e fecha a janela pelo botão da árvore. Outro caso confere
 o parser: a descrição válida lida como escrita, e oito formas de texto que
-o kernel não entende, recusadas.
+o kernel não entende, recusadas. Doze mutações, onze reprovadas. A que passa tira o aviso de que
+a árvore mudou quando a descrição muda; ela muda sempre junto com um
+desenho e uma linha do servidor no console, que avisam também, e o caso
+não consegue separar um aviso do outro.
+
+**A primeira janela: "Sobre o Duke".** A barra ganhou o segundo botão,
+**Sobre**, e ele é o primeiro do kernel cujo efeito mora do outro lado da
+fronteira: o `press` — pelo clique, pela F2 ou pelo agente, os três pelo
+mesmo caminho — publica um pedido de abrir no canal das janelas, e o
+servidor abre a janela, desenha e a descreve. Sem servidor no ar, o `press`
+é recusado com o motivo, em vez de ser aceito sem que nada aconteça. A
+janela é uma só: pedir de novo a traz para a frente. O texto dela diz o que
+o Duke é e em que arquitetura está rodando, sem acento — a fonte do console
+tem o bloco básico do latim, e uma letra fora dele sairia como `?`.
+
+A fumaça a opera como uma pessoa: leva o mouse da máquina ao botão pela
+moldura que a árvore publica, clica, espera a janela aparecer na árvore,
+arrasta pela barra de título e confere a moldura nova, e fecha pela caixa.
+Pelos drivers de verdade, e pelo servidor lançado no boot de produção.
 
 **A proteção é testada, não presumida.** Existe um segundo programa que tenta
 ler a memória do kernel. O caso `usuario: nao alcanca o kernel` exige duas
@@ -2343,9 +2361,10 @@ padronizado.
       arrasto, ordem e fechar, e o ponteiro e o teclado roteados a ele pelo
       kernel; e a árvore semântica atravessando a fronteira — o servidor
       descreve cada janela, e o `press` do agente chega a ele pelo mesmo
-      caminho do clique. A seguir: a primeira janela, o "Sobre o Duke" pela
-      barra. Mais adiante, o console
-      como uma janela (o Terminal) e a tipografia.
+      caminho do clique; e a primeira janela, o "Sobre o Duke", pelo botão
+      **Sobre** da barra, pela F2 ou pelo agente — aberta, arrastada e
+      fechada pelo mouse de verdade na fumaça. O que falta da fase é a
+      tipografia; o console como janela é a fase 11.
       E aqui a inversão do projeto encontra a interface gráfica. O servidor de
       janelas publica uma **árvore semântica** — que janelas existem, que
       controles, o que cada um faz — e os pixels são a renderização dela, do
@@ -2355,10 +2374,16 @@ padronizado.
       funciona em toda parte hoje e é por isso que ela quebra a cada tema
       novo. Acessibilidade e teste automatizado de interface caem no colo,
       porque são a mesma árvore lida por outro consumidor.
-- [ ] **Fase 11 — Toolkit e linguagem visual.** O "jeito" do sistema mora
-      aqui, não no kernel. Cada widget declara o que é e o que faz, e a árvore
-      semântica da fase 10 é **gerada** disso em vez de escrita à mão — senão
-      ela vira a segunda superfície que este projeto existe para não ter.
+- [ ] **Fase 11 — Toolkit, linguagem visual e o Terminal.** O "jeito" do
+      sistema mora aqui, não no kernel. Cada widget declara o que é e o que
+      faz, e a árvore semântica da fase 10 é **gerada** disso em vez de
+      escrita à mão — senão ela vira a segunda superfície que este projeto
+      existe para não ter. E o console vira uma janela: o **Terminal**, um
+      programa do servidor de janelas, com o interpretador do outro lado de
+      um canal — em vez da camada de baixo do compositor, desenhada pelo
+      kernel. É a primeira janela de trabalho, e a que tira do kernel a
+      última coisa que ele desenha para uma pessoa além da barra e do
+      cursor.
 - [ ] **Fase 12 — Consentimento e auditoria.** Se um agente pode fazer tudo
       que uma pessoa faz, o modelo de permissão precisa ser **mais** forte que
       o de um desktop comum, e não mais fraco. Três coisas: quem pediu — a

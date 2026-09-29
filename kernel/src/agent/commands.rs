@@ -1530,6 +1530,14 @@ fn escrever_barra(w: &mut JsonWriter, moldura: crate::ui::Moldura) -> fmt::Resul
         crate::barra::moldura_do_botao(),
         None,
     )?;
+    folha(
+        w,
+        ui::ID_DO_BOTAO_SOBRE,
+        ui::Papel::Botao,
+        crate::barra::ROTULO_DO_SOBRE,
+        crate::barra::moldura_do_sobre(),
+        None,
+    )?;
     if let Some((m, texto)) = crate::barra::relogio_na_tela() {
         folha(
             w,

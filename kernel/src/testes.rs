@@ -4492,6 +4492,150 @@ fn arvore_das_janelas() -> Resultado {
     Ok(())
 }
 
+/// O botão "Sobre" da barra abre a janela "Sobre o Duke" do servidor, uma
+/// só, e ela fecha pela árvore.
+///
+/// # O que este caso protege
+///
+/// O primeiro botão do kernel cujo efeito mora do outro lado da fronteira:
+/// o clique da pessoa no botão, pelo mesmo caminho do agente e da F2, vira
+/// um pedido no canal das janelas, e o servidor abre a janela e a descreve.
+/// Sem servidor, o `press` é recusado com o motivo — e não aceito sem que
+/// nada aconteça.
+fn janelas_sobre_o_duke_pela_barra() -> Resultado {
+    let resultado = sobre_o_duke();
+    if resultado.is_err() {
+        let _ = crate::eventos::publicar(
+            protocolo::usuario::evento::CANAL_DAS_JANELAS,
+            protocolo::usuario::evento::Evento {
+                tipo: protocolo::usuario::evento::tipo::ENCERRAR,
+                ..Default::default()
+            },
+        );
+        let _ = esperar_ate(|| !crate::superficies::foco_ativo(), 200);
+        crate::superficies::devolver_foco();
+        crate::teclado::esvaziar();
+    }
+    resultado
+}
+
+fn sobre_o_duke() -> Resultado {
+    use crate::ui::{Acao, ID_DO_BOTAO_SOBRE, Origem};
+    use crate::usuario::DIRETORIO_DOS_COMPILADOS;
+    use alloc::format;
+    use protocolo::usuario::evento::{CANAL_DAS_JANELAS, Evento, tipo};
+
+    let Some(tela) = crate::tela::tela_fisica() else {
+        return sem_framebuffer();
+    };
+    if !crate::barra::ativa() {
+        return Err("sem barra superior, com tela");
+    }
+    let (w, h) = (tela.largura as i64, tela.altura as i64);
+    let desde = crate::log::total_emitidos();
+    let visto = |procurada: &str| {
+        let mut achou = false;
+        crate::log::ultimos(32, crate::log::Level::Trace, |r| {
+            achou |= r.seq >= desde && r.subsistema == "usuario" && r.mensagem() == procurada;
+        });
+        achou
+    };
+    let esperar_linha = |linha: &str| -> Resultado {
+        esperar_ate(|| visto(linha), 600).map_err(|_| {
+            crate::log_error!("teste", "o servidor nao disse `{}`", linha);
+            "o servidor de janelas nao fez o que devia"
+        })
+    };
+
+    // Sem servidor, o botão diz por que não fez nada.
+    if crate::ui::agir(ID_DO_BOTAO_SOBRE, Acao::Pressionar, None, Origem::Agente).is_ok() {
+        return Err("o botao Sobre foi aceito sem servidor de janelas no ar");
+    }
+
+    crate::usuario::lancar(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/janelas")))?;
+    esperar_linha("janelas: pronto")?;
+
+    // O clique da pessoa, no meio do botão.
+    let m = crate::barra::moldura_do_sobre().ok_or("a barra nao tem o botao Sobre")?;
+    let (cx, cy) = (m.x + m.largura / 2, m.y + m.altura / 2);
+    if crate::ui::acionavel_em(cx, cy) != Some(ID_DO_BOTAO_SOBRE) {
+        return Err("o clique no botao Sobre nao o alcanca");
+    }
+    if crate::ponteiro::tratar_clique(cx, cy) != Some(ID_DO_BOTAO_SOBRE) {
+        return Err("o clique no botao Sobre nao o pressionou");
+    }
+    let (x, y) = ((w - 400) / 2, (h - 180) / 2);
+    esperar_linha(&format!("janelas: aberta 1 Sobre o Duke em {x} {y}"))?;
+    esperar_linha("janelas: foco 1")?;
+
+    // A árvore: a janela com o título, e o texto com o que o Duke é — e a
+    // arquitetura em que ele está rodando.
+    let texto = format!("rodando em {}.", crate::arch::nome());
+    esperar_ate(
+        || {
+            chamar("ui.tree", "{}").is_ok_and(|a| {
+                a.contains("\"role\":\"window\",\"label\":\"Sobre o Duke\"")
+                    && a.contains("Duke, um sistema operacional didatico")
+                    && a.contains(&texto)
+            })
+        },
+        200,
+    )
+    .map_err(|_| {
+        crate::log_error!("teste", "arvore: {:?}", chamar("ui.tree", "{}"));
+        "a arvore nao mostra a janela Sobre o Duke como o servidor a descreveu"
+    })?;
+
+    // Pedir de novo — pela F2, o caminho da tecla — não abre outra.
+    crate::ui::agir(ID_DO_BOTAO_SOBRE, Acao::Pressionar, None, Origem::Pessoa)?;
+    esperar_linha("janelas: ja aberta 1")?;
+    let mut delas = 0;
+    crate::grafico::camadas(|c| delas += (c.nome == crate::superficies::NOME_DA_CAMADA) as usize);
+    if delas != 1 {
+        return Err("pedir o Sobre de novo abriu uma segunda janela");
+    }
+
+    let mut camada = None;
+    crate::grafico::camadas(|c| {
+        if c.nome == crate::superficies::NOME_DA_CAMADA {
+            camada = Some(c.id);
+        }
+    });
+    let camada = camada.ok_or("a janela Sobre nao virou camada")?;
+
+    // O texto dela é fixo: a tecla chega ao servidor — e não ao console —,
+    // e não muda nada. A descrição dela, e não a árvore inteira: o console
+    // está na árvore, e muda sozinho.
+    let descricao = || crate::superficies::com_descricao(camada, Clone::clone);
+    let antes = descricao().ok_or("a janela Sobre nao foi descrita")?;
+    crate::teclado::esvaziar();
+    crate::teclado::evento(0x1E, true);
+    if crate::teclado::ler().is_some() {
+        return Err("com o foco na janela Sobre, a tecla foi para o console");
+    }
+    let _ = esperar_ate(|| false, 20);
+    if descricao() != Some(antes) {
+        return Err("digitar na janela Sobre mudou o texto dela");
+    }
+    crate::teclado::esvaziar();
+
+    // E fecha pela árvore, como qualquer janela.
+    let fechar = crate::ui::id_do_elemento(camada, 0).ok_or("id de elemento fora da faixa")?;
+    crate::ui::agir(fechar, Acao::Pressionar, None, Origem::Agente)?;
+    esperar_linha("janelas: fechada 1")?;
+
+    crate::eventos::publicar(
+        CANAL_DAS_JANELAS,
+        Evento {
+            tipo: tipo::ENCERRAR,
+            ..Default::default()
+        },
+    )
+    .map_err(|_| "o servidor de janelas nao escuta o canal")?;
+    esperar_linha("janelas: encerrado")?;
+    Ok(())
+}
+
 /// Uma linha digitada se separa em nome de comando e parâmetros.
 ///
 /// # O que este caso protege
@@ -11507,6 +11651,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "janelas: a arvore semantica atravessa a fronteira",
         f: janelas_a_arvore_atravessa_a_fronteira,
+    },
+    Caso {
+        nome: "janelas: sobre o duke pela barra",
+        f: janelas_sobre_o_duke_pela_barra,
     },
     Caso {
         nome: "usb: o relatorio hid vira teclas",
