@@ -516,9 +516,9 @@ $ cargo xtask agent log.tail '{"count":3}'
 ... info  "usuario" "processo encerrou com codigo 42"
 ```
 
-As chamadas de sistema são catorze: `sair`, `escrever`, `id`, `ceder`,
+As chamadas de sistema são quinze: `sair`, `escrever`, `id`, `ceder`,
 `bifurcar`, `executar`, `abrir`, `ler`, `fechar`, `esperar`, `mapear`,
-`escutar`, `superficie` e `controlar`. Os
+`escutar`, `superficie`, `controlar` e `descrever`. Os
 números, os erros e o mapa do espaço do usuário moram em
 `protocolo::usuario`, que o kernel e os programas incluem — uma declaração
 só, pelo motivo de sempre: duas iguais são duas que podem divergir, e um
@@ -763,6 +763,34 @@ andava 50 pixels numa janela de 320, e a captura não era testada. A que
 passou tirava a devolução do foco quando a tecla não tem quem a escute; o
 coletor já a faz no tique seguinte, e a tecla segue para o console de
 qualquer jeito. Era o mesmo efeito escrito duas vezes, e saiu.
+
+**A árvore semântica atravessa a fronteira.** Uma janela do servidor é uma
+camada de processo, e o kernel não sabe o que há nela — só o servidor sabe.
+Então o servidor **diz**: `descrever(descritor, texto)` manda o que a janela
+é, uma linha por coisa, com os campos separados por tabulação — o título,
+a caixa de fechar como botão, o conteúdo como texto, cada um com o
+identificador que o servidor deu e o retângulo na superfície. O kernel lê
+tudo ou recusa tudo: uma descrição com uma linha que ele não entende
+deixaria a árvore descrevendo o que não está na tela. Um rótulo ou valor com
+tabulação, quebra de linha ou barra invertida vai escapado, e a volta é
+conferida inteira — o servidor escapa, o kernel resolve, e o JSON escapa de
+novo.
+
+A descrição é gerada do mesmo estado que o desenho, a cada vez que ele
+muda. Em `ui.tree`, a janela aparece com o título como rótulo, e os
+elementos como filhos, com a moldura **na tela** — a da camada somada ao
+retângulo que o servidor deu. O identificador de um elemento é derivado da
+camada e da posição dele na descrição, e não guardado: vale enquanto a
+janela vive, e o de uma janela que fechou não aponta para a seguinte.
+
+`ui.act press` num botão descrito vira um evento `ACAO` no canal, com o
+identificador do servidor; o servidor faz o que o clique faria. A caixa de
+fechar fecha pelos dois caminhos — o do agente e o da pessoa —, e o log diz
+quem foi. O caso da suíte lê a árvore do `ui.tree` de verdade, digita
+`a`, Enter e `b` e espera o valor `a\nb` no texto, confere que o texto não
+aceita `press`, e fecha a janela pelo botão da árvore. Outro caso confere
+o parser: a descrição válida lida como escrita, e oito formas de texto que
+o kernel não entende, recusadas.
 
 **A proteção é testada, não presumida.** Existe um segundo programa que tenta
 ler a memória do kernel. O caso `usuario: nao alcanca o kernel` exige duas
@@ -2313,8 +2341,10 @@ padronizado.
       que bloqueia e o canal de eventos; as superfícies do compositor com os
       pixels no processo; e o servidor, lançado no boot, com moldura, foco,
       arrasto, ordem e fechar, e o ponteiro e o teclado roteados a ele pelo
-      kernel. A seguir: a árvore semântica atravessando a fronteira, e a
-      primeira janela, o "Sobre o Duke" pela barra. Mais adiante, o console
+      kernel; e a árvore semântica atravessando a fronteira — o servidor
+      descreve cada janela, e o `press` do agente chega a ele pelo mesmo
+      caminho do clique. A seguir: a primeira janela, o "Sobre o Duke" pela
+      barra. Mais adiante, o console
       como uma janela (o Terminal) e a tipografia.
       E aqui a inversão do projeto encontra a interface gráfica. O servidor de
       janelas publica uma **árvore semântica** — que janelas existem, que

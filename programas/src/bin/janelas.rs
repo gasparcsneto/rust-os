@@ -19,7 +19,16 @@
 //! - **as teclas**, quando uma janela tem o foco;
 //! - **os pedidos de abrir** uma janela, da barra do kernel ou da suíte;
 //! - **o foco perdido**, quando a pessoa clica fora de toda janela;
+//! - **as ações da árvore semântica** — o `press` do agente num elemento
+//!   que o servidor descreveu;
 //! - **o pedido de encerrar**, que fecha todas e sai.
+//!
+//! # O que sai dele, além dos pixels
+//!
+//! A descrição de cada janela, para a árvore semântica: o título, a caixa
+//! de fechar e o texto. Gerada do mesmo estado que o desenho, a cada vez
+//! que ele muda — o agente lê a janela pela árvore, e aciona a caixa de
+//! fechar pelo mesmo caminho do clique.
 //!
 //! O servidor não pergunta nada: dorme na leitura do canal e acorda quando
 //! há o que fazer.
@@ -42,10 +51,14 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use core::fmt::Write;
 use programas::desenho::{Tela, tamanho_do_caractere};
 use programas::escreverln;
 use programas::sistema;
 use programas::superficie::Superficie;
+
+use protocolo::usuario::descricao;
+use protocolo::usuario::evento::acao as evento_acao;
 use protocolo::usuario::evento::{BOTAO_ESQUERDO, CANAL_DAS_JANELAS, Evento, janela, tipo};
 use protocolo::usuario::superficie::operacao;
 
@@ -172,8 +185,58 @@ impl Janela {
             y += altura_da_linha;
         }
         let _ = self.superficie.danificar_tudo();
+        self.descrever();
+    }
+
+    /// Os identificadores que esta janela dá aos seus elementos na árvore:
+    /// o da janela vezes dezesseis, mais o elemento. É o que volta num
+    /// evento de ação, e o que diz de qual janela ele é.
+    fn id_do_elemento(&self, elemento: u32) -> i64 {
+        (self.id * ELEMENTOS_POR_JANELA + elemento) as i64
+    }
+
+    /// Diz ao kernel o que a janela é: o título, a caixa de fechar e o
+    /// texto — o mesmo que acabou de ser desenhado, gerado do mesmo estado.
+    fn descrever(&self) {
+        let (cx, cy, lado) = self.caixa_de_fechar();
+        let mut d = String::new();
+        let _ = write!(d, "janela\t");
+        let _ = descricao::escapar(self.titulo, &mut d);
+        let _ = write!(
+            d,
+            "\nbotao\t{}\t{}\t{}\t{}\t{}\tFechar",
+            self.id_do_elemento(ELEMENTO_FECHAR),
+            cx,
+            cy,
+            lado,
+            lado
+        );
+        let _ = write!(
+            d,
+            "\ntexto\t{}\t{}\t{}\t{}\t{}\tconteudo\t",
+            self.id_do_elemento(ELEMENTO_CONTEUDO),
+            BORDA,
+            ALTURA_DO_TITULO,
+            self.largura() - 2 * BORDA,
+            self.altura() - ALTURA_DO_TITULO - BORDA
+        );
+        let _ = descricao::escapar(&self.texto, &mut d);
+        let r = sistema::descrever(self.superficie.descritor(), &d);
+        if r != 0 {
+            escreverln!(
+                "janelas: a descricao da janela {} foi recusada: {}",
+                self.id,
+                r
+            );
+        }
     }
 }
+
+/// Quantos identificadores de elemento cada janela reserva.
+const ELEMENTOS_POR_JANELA: u32 = 16;
+/// Os elementos de uma janela, na árvore.
+const ELEMENTO_FECHAR: u32 = 1;
+const ELEMENTO_CONTEUDO: u32 = 2;
 
 struct Servidor {
     /// De baixo para cima: a última é a de cima.
@@ -355,6 +418,27 @@ impl Servidor {
         escreverln!("janelas: tecla {} em {}", codigo, id);
     }
 
+    /// Uma ação pela árvore semântica: o `press` do agente num elemento que
+    /// o servidor descreveu. Faz o que o clique faria.
+    fn acao(&mut self, elemento: i64, acao: i64) {
+        let Ok(elemento) = u32::try_from(elemento) else {
+            return;
+        };
+        let (id, qual) = (
+            elemento / ELEMENTOS_POR_JANELA,
+            elemento % ELEMENTOS_POR_JANELA,
+        );
+        escreverln!(
+            "janelas: acao {} no elemento {} da janela {}",
+            acao,
+            qual,
+            id
+        );
+        if acao == evento_acao::PRESSIONAR && qual == ELEMENTO_FECHAR {
+            self.fechar(id);
+        }
+    }
+
     fn foco_perdido(&mut self) {
         if let Some(anterior) = self.foco.take() {
             self.redesenhar(anterior);
@@ -394,6 +478,7 @@ fn principal() -> i64 {
                 tipo::TECLA => servidor.tecla(e.a),
                 tipo::ABRIR => servidor.abrir(e.a, e.b, e.c),
                 tipo::FOCO_PERDIDO => servidor.foco_perdido(),
+                tipo::ACAO => servidor.acao(e.a, e.b),
                 tipo::ENCERRAR => {
                     while let Some(j) = servidor.janelas.last() {
                         let id = j.id;

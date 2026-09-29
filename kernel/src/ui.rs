@@ -156,6 +156,41 @@ pub const fn id_da_camada(camada: u32) -> u32 {
     ID_DAS_CAMADAS.saturating_add(camada)
 }
 
+/// Onde começam os identificadores dos elementos **dentro** de uma janela —
+/// os que o processo dono dela descreveu.
+///
+/// O identificador carrega a camada e a posição do elemento na descrição:
+/// `BASE | camada << 5 | índice`. Derivado, e não guardado, pelo motivo dos
+/// da camada: ele vale enquanto a janela vive, e o de uma janela que fechou
+/// não aponta para a seguinte, porque a camada seguinte tem outro número.
+/// Cabe enquanto a camada for menor que 2^26 — sessenta e sete milhões de
+/// janelas abertas no mesmo boot.
+pub const BASE_DOS_ELEMENTOS: u32 = 0x8000_0000;
+
+/// Quantos elementos por janela os cinco bits do índice alcançam.
+const ELEMENTOS_POR_JANELA: usize = 32;
+
+const _: () = assert!(protocolo::usuario::descricao::MAIS_ELEMENTOS <= ELEMENTOS_POR_JANELA);
+
+/// O identificador do elemento `indice` da janela da `camada`.
+pub fn id_do_elemento(camada: u32, indice: usize) -> Option<u32> {
+    if camada >= 1 << 26 || indice >= ELEMENTOS_POR_JANELA {
+        return None;
+    }
+    Some(BASE_DOS_ELEMENTOS | camada << 5 | indice as u32)
+}
+
+/// A camada e o índice de um identificador de elemento.
+pub fn elemento_de(id: u32) -> Option<(u32, usize)> {
+    (id & BASE_DOS_ELEMENTOS != 0).then_some(((id & !BASE_DOS_ELEMENTOS) >> 5, (id & 31) as usize))
+}
+
+/// O elemento descrito com este identificador, entregue a `f`.
+fn com_elemento<R>(id: u32, f: impl FnOnce(&crate::superficies::Elemento) -> R) -> Option<R> {
+    let (camada, indice) = elemento_de(id)?;
+    crate::superficies::com_descricao(camada, |d| d.elementos.get(indice).map(f)).flatten()
+}
+
 /// Um retângulo na tela, em pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Moldura {
@@ -238,6 +273,11 @@ pub fn acoes_de(id: u32) -> &'static [Acao] {
     match id {
         ID_DA_LINHA_DE_COMANDO => &[Acao::Confirmar, Acao::Cancelar, Acao::DefinirValor],
         ID_DO_BOTAO_LIMPAR => &[Acao::Pressionar],
+        // Um botão que um processo descreveu. O que ele faz é do processo;
+        // o kernel só leva o pedido.
+        id if com_elemento(id, |e| e.tipo == crate::superficies::Tipo::Botao) == Some(true) => {
+            &[Acao::Pressionar]
+        }
         _ => &[],
     }
 }
@@ -262,6 +302,9 @@ pub fn existe(id: u32) -> bool {
             crate::tela::tela().is_some() && crate::interpretador::inicio_do_campo().is_some()
         }
         ID_DA_BARRA | ID_DO_BOTAO_LIMPAR | ID_DO_NOME | ID_DO_RELOGIO => crate::barra::ativa(),
+        // Antes das camadas: os identificadores de elemento também são
+        // maiores que o delas.
+        id if elemento_de(id).is_some() => com_elemento(id, |_| ()).is_some(),
         id if id > ID_DAS_CAMADAS => {
             // A camada da barra não é uma janela: ela está na árvore com o
             // papel dela, e não uma segunda vez como camada.
@@ -366,11 +409,40 @@ fn executar(
             Ok(Efeito::Cancelado)
         }
         Acao::Confirmar => Ok(Efeito::Executado(crate::interpretador::confirmar(origem))),
-        // Só o botão da barra aceita, e a conferência acima já recusou os
-        // outros.
+        // O botão da barra, ou um que um processo descreveu: a conferência
+        // acima já recusou os outros.
         Acao::Pressionar => {
-            crate::barra::pressionar();
+            if let Some(do_processo) = com_elemento(id, |e| e.id) {
+                pressionar_no_processo(do_processo)?;
+            } else {
+                crate::barra::pressionar();
+            }
             Ok(Efeito::Pressionado)
         }
+    }
+}
+
+/// Leva ao processo dono da janela o `press` num elemento que ele descreveu,
+/// com o identificador que ele deu.
+///
+/// Pelo canal das janelas, como o clique da pessoa: quem decide o que o
+/// botão faz é o servidor, e ele o faz pelo mesmo caminho do clique — o
+/// agente e a pessoa acionam a mesma coisa.
+fn pressionar_no_processo(id_do_processo: i64) -> Result<(), &'static str> {
+    use protocolo::usuario::evento::{CANAL_DAS_JANELAS, Evento, acao, tipo};
+    match crate::eventos::publicar(
+        CANAL_DAS_JANELAS,
+        Evento {
+            tipo: tipo::ACAO,
+            a: id_do_processo,
+            b: acao::PRESSIONAR,
+            c: 0,
+        },
+    ) {
+        Ok(()) => Ok(()),
+        Err(crate::eventos::NaoPublicado::SemOuvinte) => {
+            Err("o servidor de janelas nao escuta o canal")
+        }
+        Err(crate::eventos::NaoPublicado::Cheio) => Err("a fila do servidor de janelas esta cheia"),
     }
 }

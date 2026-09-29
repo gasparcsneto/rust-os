@@ -160,6 +160,21 @@ pub fn controlar(descritor: u64, operacao: u64, argumento: u64) -> i64 {
     unsafe { chamar(numero::CONTROLAR, descritor, operacao, argumento) }
 }
 
+/// Diz ao kernel o que a janela da superfície `descritor` é, para a árvore
+/// semântica — no formato de [`protocolo::usuario::descricao`]. Zero, ou um
+/// erro.
+pub fn descrever(descritor: u64, descricao: &str) -> i64 {
+    // SAFETY: a fatia é deste processo e tem o tamanho dito.
+    unsafe {
+        chamar(
+            numero::DESCREVER,
+            descritor,
+            descricao.as_ptr() as u64,
+            descricao.len() as u64,
+        )
+    }
+}
+
 /// Abre o arquivo do `caminho`. Um descritor, ou um erro.
 pub fn abrir(caminho: &str) -> i64 {
     // SAFETY: a fatia é deste processo e tem o tamanho dito.

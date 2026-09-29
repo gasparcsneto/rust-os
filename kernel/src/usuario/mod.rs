@@ -271,6 +271,7 @@ pub unsafe fn despachar(
         numero::ESCUTAR => escutar(a0, a1),
         numero::SUPERFICIE => superficie(a0, a1),
         numero::CONTROLAR => controlar(a0, a1, a2),
+        numero::DESCREVER => descrever(a0, a1, a2),
         // SAFETY: o quadro é o desta chamada, garantido por quem nos chamou.
         numero::BIFURCAR => unsafe { bifurcar(quadro) },
         numero::EXECUTAR => unsafe { executar(quadro, a0, a1) },
@@ -725,6 +726,47 @@ fn controlar(descritor: u64, op: u64, argumento: u64) -> i64 {
         }
         // O filho que herdou o descritor: para ele, este descritor não
         // aponta para nada que seja dele.
+        Err(_) => {
+            RECUSADAS.fetch_add(1, Ordering::Relaxed);
+            erro::DESCRITOR_INVALIDO
+        }
+    }
+}
+
+/// `descrever(descritor, ptr, tamanho)`: o que a janela de uma superfície é,
+/// para a árvore semântica — ver [`protocolo::usuario::descricao`].
+fn descrever(descritor: u64, ponteiro: u64, tamanho: u64) -> i64 {
+    let Some(Some(descritores::Alvo::Superficie { chave })) =
+        crate::fios::com_descritores(|t| t.alvo(descritor))
+    else {
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return erro::DESCRITOR_INVALIDO;
+    };
+    if tamanho == 0 || tamanho as usize > protocolo::usuario::descricao::MAIOR {
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return erro::TAMANHO_INVALIDO;
+    }
+    if let Err(e) = validar_faixa(ponteiro, tamanho) {
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return e;
+    }
+    let mut copia = alloc::vec![0u8; tamanho as usize];
+    // SAFETY: `validar_faixa` confirmou a faixa no espaço do usuário e
+    // mapeada, e estamos no espaço do processo que chamou; a cópia tem o
+    // tamanho dela.
+    unsafe {
+        core::ptr::copy_nonoverlapping(ponteiro as *const u8, copia.as_mut_ptr(), copia.len());
+    }
+    let Ok(texto) = core::str::from_utf8(&copia) else {
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return erro::ARGUMENTO_INVALIDO;
+    };
+    match crate::superficies::descrever(chave, crate::fios::id_atual(), texto) {
+        Ok(()) => 0,
+        Err(crate::superficies::Recusa::Argumento) => {
+            RECUSADAS.fetch_add(1, Ordering::Relaxed);
+            erro::ARGUMENTO_INVALIDO
+        }
         Err(_) => {
             RECUSADAS.fetch_add(1, Ordering::Relaxed);
             erro::DESCRITOR_INVALIDO

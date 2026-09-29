@@ -1549,25 +1549,69 @@ fn escrever_camada(w: &mut JsonWriter, c: crate::grafico::compositor::InfoCamada
     use crate::ui;
 
     let id = ui::id_da_camada(c.id);
+    // A descrição que o processo dono deu, se é uma janela de processo e
+    // ele a descreveu. Copiada para fora da tranca das superfícies: a
+    // escrita da resposta não é coisa para se fazer com ela na mão.
+    let descricao = crate::superficies::com_descricao(c.id, Clone::clone);
     w.begin_object()?;
     w.field_u64("id", id as u64)?;
     w.field_str("role", ui::Papel::Janela.nome())?;
-    w.field_str("label", c.nome)?;
-    if let Some(tela) = ui::moldura_da_tela() {
-        let d = c.na_tela(tela.largura, tela.altura);
-        escrever_moldura(
-            w,
-            ui::Moldura {
-                x: d.x,
-                y: d.y,
-                largura: d.largura,
-                altura: d.altura,
-            },
-        )?;
+    w.field_str(
+        "label",
+        descricao.as_ref().map_or(c.nome, |d| d.titulo.as_str()),
+    )?;
+    let tela = ui::moldura_da_tela();
+    // Um retângulo da camada, levado à tela e recortado a ela.
+    let na_tela = |x: u32, y: u32, largura: u32, altura: u32| {
+        let tela = tela?;
+        let d = crate::grafico::compositor::InfoCamada {
+            x: c.x.saturating_add_unsigned(x),
+            y: c.y.saturating_add_unsigned(y),
+            largura,
+            altura,
+            ..c
+        }
+        .na_tela(tela.largura, tela.altura);
+        Some(ui::Moldura {
+            x: d.x,
+            y: d.y,
+            largura: d.largura,
+            altura: d.altura,
+        })
+    };
+    if let Some(m) = na_tela(0, 0, c.largura, c.altura) {
+        escrever_moldura(w, m)?;
     }
     escrever_acoes(w, id)?;
     w.key("children")?;
     w.begin_array()?;
+    for (i, e) in descricao
+        .iter()
+        .flat_map(|d| d.elementos.iter().enumerate())
+    {
+        let Some(id) = ui::id_do_elemento(c.id, i) else {
+            continue;
+        };
+        w.begin_object()?;
+        w.field_u64("id", id as u64)?;
+        let papel = match e.tipo {
+            crate::superficies::Tipo::Botao => ui::Papel::Botao,
+            crate::superficies::Tipo::Texto => ui::Papel::Texto,
+        };
+        w.field_str("role", papel.nome())?;
+        w.field_str("label", &e.rotulo)?;
+        if let Some(m) = na_tela(e.x, e.y, e.largura, e.altura) {
+            escrever_moldura(w, m)?;
+        }
+        if let Some(v) = &e.valor {
+            w.field_str("value", v)?;
+        }
+        escrever_acoes(w, id)?;
+        w.key("children")?;
+        w.begin_array()?;
+        w.end_array()?;
+        w.end_object()?;
+    }
     w.end_array()?;
     w.end_object()
 }

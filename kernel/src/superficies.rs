@@ -49,6 +49,9 @@ use spin::Mutex;
 
 use crate::arch::TAMANHO_PAGINA;
 use crate::grafico::compositor::{Camada, Mistura, NaoCriada};
+use alloc::string::String;
+use alloc::vec::Vec;
+use protocolo::usuario::descricao;
 use protocolo::usuario::superficie::{self, operacao};
 
 /// Quantas superfícies de processo podem existir ao mesmo tempo, somando
@@ -79,10 +82,112 @@ pub struct Chave {
     pub geracao: u64,
 }
 
+/// O que um elemento descrito é, na árvore.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tipo {
+    Botao,
+    Texto,
+}
+
+/// Um elemento que o processo descreveu dentro da janela.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Elemento {
+    pub tipo: Tipo,
+    /// O identificador que o processo deu, e que volta a ele numa ação.
+    pub id: i64,
+    /// O retângulo, na superfície.
+    pub x: u32,
+    pub y: u32,
+    pub largura: u32,
+    pub altura: u32,
+    pub rotulo: String,
+    pub valor: Option<String>,
+}
+
+/// O que o processo disse que a janela é — ver
+/// [`protocolo::usuario::descricao`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Descricao {
+    pub titulo: String,
+    pub elementos: Vec<Elemento>,
+}
+
+impl Descricao {
+    /// Lê o texto de uma descrição, ou diz o que não entendeu.
+    ///
+    /// Tudo ou nada: uma linha errada recusa a descrição inteira, e a
+    /// anterior continua valendo. Uma árvore com metade de uma janela
+    /// descreveria algo que não está na tela.
+    pub fn ler(texto: &str) -> Result<Descricao, &'static str> {
+        let mut linhas = texto.split('\n').filter(|l| !l.is_empty());
+        let primeira = linhas.next().ok_or("descricao vazia")?;
+        let titulo = match primeira.split_once('\t') {
+            Some(("janela", titulo)) => resolver(titulo)?,
+            _ => return Err("a descricao nao comeca pela linha `janela`"),
+        };
+        let mut elementos = Vec::new();
+        for linha in linhas {
+            if elementos.len() == descricao::MAIS_ELEMENTOS {
+                return Err("elementos demais");
+            }
+            let mut campos = linha.split('\t');
+            let tipo = match campos.next() {
+                Some("botao") => Tipo::Botao,
+                Some("texto") => Tipo::Texto,
+                _ => return Err("linha que nao e `botao` nem `texto`"),
+            };
+            let mut numero = || -> Result<i64, &'static str> {
+                campos
+                    .next()
+                    .and_then(|c| c.parse().ok())
+                    .ok_or("campo numerico ausente ou invalido")
+            };
+            let id = numero()?;
+            let mut lado = || -> Result<u32, &'static str> {
+                u32::try_from(numero()?).map_err(|_| "coordenada negativa ou grande demais")
+            };
+            let (x, y, largura, altura) = (lado()?, lado()?, lado()?, lado()?);
+            let rotulo = resolver(campos.next().ok_or("elemento sem rotulo")?)?;
+            let valor = match tipo {
+                Tipo::Texto => Some(resolver(campos.next().ok_or("texto sem valor")?)?),
+                Tipo::Botao => None,
+            };
+            if campos.next().is_some() {
+                return Err("campos demais numa linha");
+            }
+            elementos.push(Elemento {
+                tipo,
+                id,
+                x,
+                y,
+                largura,
+                altura,
+                rotulo,
+                valor,
+            });
+        }
+        Ok(Descricao { titulo, elementos })
+    }
+}
+
+/// Um rótulo ou valor, com o escape resolvido e o tamanho conferido.
+fn resolver(texto: &str) -> Result<String, &'static str> {
+    let mut saida = String::new();
+    if !descricao::resolver(texto, |c| saida.push(c)) {
+        return Err("escape invalido");
+    }
+    if saida.len() > descricao::MAIOR_TEXTO {
+        return Err("rotulo ou valor grande demais");
+    }
+    Ok(saida)
+}
+
 struct Vaga {
     /// O fio que criou a superfície.
     dono: u64,
     geracao: u64,
+    /// O que o processo disse que a janela é, se disse.
+    descricao: Option<Descricao>,
     camada: Camada,
     largura: u32,
     altura: u32,
@@ -171,6 +276,7 @@ pub fn criar(dono: u64, largura: u32, altura: u32, endereco: u64) -> Result<Chav
     let vaga = Vaga {
         dono,
         geracao,
+        descricao: None,
         camada,
         largura,
         altura,
@@ -260,6 +366,39 @@ pub fn controlar(chave: Chave, dono: u64, op: u64, argumento: u64) -> Result<(),
             _ => return Err(Recusa::Argumento),
         };
         Ok(())
+    })
+}
+
+/// Troca a descrição da superfície da `chave`, se ela for de `dono`.
+pub fn descrever(chave: Chave, dono: u64, texto: &str) -> Result<(), Recusa> {
+    let nova = Descricao::ler(texto).map_err(|motivo| {
+        crate::log_warn!("superficies", "descricao recusada: {}", motivo);
+        Recusa::Argumento
+    })?;
+    com_vagas(|vagas| {
+        let Some(v) = vagas.get_mut(chave.vaga).and_then(Option::as_mut) else {
+            return Err(Recusa::NaoEhSua);
+        };
+        if !confere(v, chave, dono) {
+            return Err(Recusa::NaoEhSua);
+        }
+        v.descricao = Some(nova);
+        Ok(())
+    })?;
+    crate::ui::mudou();
+    Ok(())
+}
+
+/// A descrição da superfície cuja camada é `camada`, se ela for de processo
+/// e tiver sido descrita — entregue a `f` sob a tranca.
+pub fn com_descricao<R>(camada: u32, f: impl FnOnce(&Descricao) -> R) -> Option<R> {
+    com_vagas(|vagas| {
+        vagas
+            .iter()
+            .flatten()
+            .find(|v| v.camada.id() == camada)
+            .and_then(|v| v.descricao.as_ref())
+            .map(f)
     })
 }
 

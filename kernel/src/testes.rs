@@ -4284,6 +4284,210 @@ fn janelas_operadas() -> Resultado {
     Ok(())
 }
 
+/// A descrição de uma janela é lida inteira, ou recusada inteira.
+///
+/// # O que este caso protege
+///
+/// O texto que vem de um processo e vira árvore semântica: o kernel é quem
+/// lê, e cada coisa que ele aceitasse sem entender seria uma árvore que
+/// descreve o que não está na tela. Os escapes, em particular, fazem a volta
+/// completa — o servidor escapa, o kernel resolve —, e um erro de um lado só
+/// trocaria uma quebra de linha por uma barra e um `n`.
+fn superficies_a_descricao_recusa_o_que_nao_entende() -> Resultado {
+    use crate::superficies::{Descricao, Tipo};
+
+    let d = Descricao::ler(
+        "janela\tUm\\ttitulo\nbotao\t17\t1\t2\t3\t4\tFechar\ntexto\t18\t0\t0\t9\t9\tconteudo\tlinha\\num \\\\ dois\n",
+    )?;
+    if d.titulo != "Um\ttitulo" || d.elementos.len() != 2 {
+        return Err("a descricao valida nao foi lida como escrita");
+    }
+    let (b, t) = (&d.elementos[0], &d.elementos[1]);
+    if (
+        b.tipo,
+        b.id,
+        b.x,
+        b.y,
+        b.largura,
+        b.altura,
+        b.rotulo.as_str(),
+        &b.valor,
+    ) != (Tipo::Botao, 17, 1, 2, 3, 4, "Fechar", &None)
+    {
+        return Err("o botao descrito nao foi lido como escrito");
+    }
+    if (t.tipo, t.id, t.valor.as_deref()) != (Tipo::Texto, 18, Some("linha\num \\ dois")) {
+        crate::log_error!("teste", "texto lido: {:?}", t);
+        return Err("o valor escapado do texto nao voltou ao que era");
+    }
+
+    for (motivo, texto) in [
+        ("vazia", ""),
+        ("sem a linha da janela", "botao\t1\t0\t0\t1\t1\tX"),
+        ("tipo desconhecido", "janela\tA\nlista\t1\t0\t0\t1\t1\tX"),
+        ("escape que nao existe", "janela\tA\\x"),
+        ("coordenada negativa", "janela\tA\nbotao\t1\t-1\t0\t1\t1\tX"),
+        (
+            "numero que nao e numero",
+            "janela\tA\nbotao\t1\tum\t0\t1\t1\tX",
+        ),
+        ("campo a mais", "janela\tA\nbotao\t1\t0\t0\t1\t1\tX\tY"),
+        ("texto sem valor", "janela\tA\ntexto\t1\t0\t0\t1\t1\tX"),
+    ] {
+        if Descricao::ler(texto).is_ok() {
+            crate::log_error!("teste", "descricao aceita: {}", motivo);
+            return Err("uma descricao que o kernel nao entende foi aceita");
+        }
+    }
+    // Elementos demais, um além do limite.
+    let mut muitos = alloc::string::String::from("janela\tA");
+    for i in 0..=protocolo::usuario::descricao::MAIS_ELEMENTOS {
+        muitos.push_str(&alloc::format!("\nbotao\t{i}\t0\t0\t1\t1\tX"));
+    }
+    if Descricao::ler(&muitos).is_ok() {
+        return Err("uma descricao com elementos demais foi aceita");
+    }
+    Ok(())
+}
+
+/// O servidor descreve a janela, a árvore a publica, e o `press` do agente
+/// na caixa de fechar chega ao servidor e fecha a janela.
+///
+/// # O que este caso protege
+///
+/// A árvore semântica atravessando a fronteira: o que está na tela e é de
+/// um processo aparece em `ui.tree` com o que o processo disse que é — o
+/// título, o botão com a moldura dele na tela, o texto com o que se
+/// digitou —, e `ui.act` age sobre isso pelo mesmo caminho do clique.
+fn janelas_a_arvore_atravessa_a_fronteira() -> Resultado {
+    let resultado = arvore_das_janelas();
+    if resultado.is_err() {
+        let _ = crate::eventos::publicar(
+            protocolo::usuario::evento::CANAL_DAS_JANELAS,
+            protocolo::usuario::evento::Evento {
+                tipo: protocolo::usuario::evento::tipo::ENCERRAR,
+                ..Default::default()
+            },
+        );
+        let _ = esperar_ate(|| !crate::superficies::foco_ativo(), 200);
+        crate::superficies::devolver_foco();
+        crate::teclado::esvaziar();
+    }
+    resultado
+}
+
+fn arvore_das_janelas() -> Resultado {
+    use crate::ui::{Acao, Origem};
+    use crate::usuario::DIRETORIO_DOS_COMPILADOS;
+    use alloc::format;
+    use protocolo::usuario::evento::{CANAL_DAS_JANELAS, Evento, janela, tipo};
+
+    let Some(tela) = crate::tela::tela_fisica() else {
+        return sem_framebuffer();
+    };
+    let (w, h) = (tela.largura as i64, tela.altura as i64);
+    let desde = crate::log::total_emitidos();
+    let visto = |procurada: &str| {
+        let mut achou = false;
+        crate::log::ultimos(32, crate::log::Level::Trace, |r| {
+            achou |= r.seq >= desde && r.subsistema == "usuario" && r.mensagem() == procurada;
+        });
+        achou
+    };
+    let esperar_linha = |linha: &str| -> Resultado {
+        esperar_ate(|| visto(linha), 600).map_err(|_| {
+            crate::log_error!("teste", "o servidor nao disse `{}`", linha);
+            "o servidor de janelas nao fez o que devia"
+        })
+    };
+    let publicar = |tipo: u32, a: i64| {
+        crate::eventos::publicar(
+            CANAL_DAS_JANELAS,
+            Evento {
+                tipo,
+                a,
+                b: w,
+                c: h,
+            },
+        )
+        .map_err(|_| "o servidor de janelas nao escuta o canal")
+    };
+    crate::teclado::esvaziar();
+
+    crate::usuario::lancar(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/janelas")))?;
+    esperar_linha("janelas: pronto")?;
+    publicar(tipo::ABRIR, janela::TESTE)?;
+    let (x, y) = ((w - 320) / 2, (h - 160) / 2);
+    esperar_linha(&format!("janelas: aberta 1 Teste em {x} {y}"))?;
+
+    let mut camada = None;
+    crate::grafico::camadas(|c| {
+        if c.nome == crate::superficies::NOME_DA_CAMADA {
+            camada = Some(c.id);
+        }
+    });
+    let camada = camada.ok_or("a janela aberta nao virou camada")?;
+    let janela = crate::ui::id_da_camada(camada);
+    let fechar = crate::ui::id_do_elemento(camada, 0).ok_or("id de elemento fora da faixa")?;
+    let conteudo = crate::ui::id_do_elemento(camada, 1).ok_or("id de elemento fora da faixa")?;
+
+    // A árvore: a janela com o título dela, a caixa de fechar como botão,
+    // com a moldura na tela, e o texto.
+    let arvore = chamar("ui.tree", "{}")?;
+    let marcas = [
+        format!("\"id\":{janela},\"role\":\"window\",\"label\":\"Teste\""),
+        format!(
+            "\"id\":{fechar},\"role\":\"button\",\"label\":\"Fechar\",\"frame\":{{\"x\":{},\"y\":{},\"width\":16,\"height\":16}},\"actions\":[\"press\"]",
+            x + 300,
+            y + 3
+        ),
+        format!("\"id\":{conteudo},\"role\":\"static_text\",\"label\":\"conteudo\""),
+    ];
+    for marca in &marcas {
+        if !arvore.contains(marca.as_str()) {
+            crate::log_error!("teste", "falta `{}` em {}", marca, arvore);
+            return Err("a arvore nao mostra a janela como o servidor a descreveu");
+        }
+    }
+
+    // O que se digita chega ao valor do texto, com a quebra de linha
+    // atravessando os dois escapes — o do servidor e o do JSON.
+    crate::teclado::evento(0x1E, true);
+    crate::teclado::evento(0x1C, true);
+    crate::teclado::evento(0x30, true);
+    esperar_linha("janelas: tecla 98 em 1")?;
+    let valor = "\"value\":\"a\\nb\"";
+    esperar_ate(
+        || chamar("ui.tree", "{}").is_ok_and(|a| a.contains(valor)),
+        200,
+    )
+    .map_err(|_| {
+        crate::log_error!("teste", "arvore: {:?}", chamar("ui.tree", "{}"));
+        "o texto digitado nao chegou ao valor do elemento na arvore"
+    })?;
+
+    // Só o botão aceita `press`, e ele chega ao servidor, que fecha a janela.
+    if crate::ui::agir(conteudo, Acao::Pressionar, None, Origem::Agente).is_ok() {
+        return Err("um texto descrito aceitou press");
+    }
+    crate::ui::agir(fechar, Acao::Pressionar, None, Origem::Agente)?;
+    esperar_linha("janelas: acao 1 no elemento 1 da janela 1")?;
+    esperar_linha("janelas: fechada 1")?;
+    if crate::ui::existe(fechar) || crate::ui::existe(janela) {
+        return Err("a janela fechada continuou na arvore");
+    }
+    crate::teclado::esvaziar();
+
+    publicar(tipo::ENCERRAR, 0)?;
+    esperar_linha("janelas: encerrado")?;
+    // Sem servidor, o `press` num elemento não tem a quem chegar — e o
+    // elemento nem existe mais.
+    if crate::ui::agir(fechar, Acao::Pressionar, None, Origem::Agente).is_ok() {
+        return Err("um press num elemento de janela fechada foi aceito");
+    }
+    Ok(())
+}
+
 /// Uma linha digitada se separa em nome de comando e parâmetros.
 ///
 /// # O que este caso protege
@@ -11291,6 +11495,14 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "janelas: o servidor abre, foca, arrasta e fecha",
         f: janelas_o_servidor_abre_foca_arrasta_e_fecha,
+    },
+    Caso {
+        nome: "superficies: a descricao recusa o que nao entende",
+        f: superficies_a_descricao_recusa_o_que_nao_entende,
+    },
+    Caso {
+        nome: "janelas: a arvore semantica atravessa a fronteira",
+        f: janelas_a_arvore_atravessa_a_fronteira,
     },
     Caso {
         nome: "usb: o relatorio hid vira teclas",

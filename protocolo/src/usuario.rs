@@ -85,6 +85,12 @@ pub mod numero {
     /// superfície — ver [`superficie::operacao`](super::superficie::operacao).
     /// Zero, ou um erro.
     pub const CONTROLAR: u64 = 13;
+    /// `descrever(descritor, ptr, tamanho)`: diz ao kernel o que a janela
+    /// de uma superfície **é** — o título, os botões e os textos —, para a
+    /// árvore semântica. O formato está em
+    /// [`descricao`](super::descricao). Substitui a descrição anterior
+    /// inteira. Zero, ou um erro.
+    pub const DESCREVER: u64 = 14;
 }
 
 /// Erros devolvidos ao usuário, sempre negativos.
@@ -284,6 +290,17 @@ pub mod evento {
         /// Um pedido para o servidor fechar tudo e sair. Da suíte, que
         /// não deixa um servidor vivo para os casos seguintes.
         pub const ENCERRAR: u32 = 6;
+        /// Uma ação sobre um elemento que o servidor descreveu — ver
+        /// [`descricao`](crate::usuario::descricao): `a` é o identificador
+        /// que o servidor deu ao elemento, `b` a ação, de
+        /// [`acao`](super::acao).
+        pub const ACAO: u32 = 7;
+    }
+
+    /// As ações de um evento [`tipo::ACAO`].
+    pub mod acao {
+        /// Acionar, como um clique num botão — o `press` da árvore.
+        pub const PRESSIONAR: i64 = 1;
     }
 
     /// O bit do botão esquerdo em `c` de um evento de ponteiro.
@@ -334,6 +351,74 @@ pub mod evento {
                 c: palavra(24),
             }
         }
+    }
+}
+
+/// Como um processo descreve uma janela para a árvore semântica — o texto
+/// que [`numero::DESCREVER`] recebe.
+///
+/// # Por que texto
+///
+/// Porque quem lê é o kernel, que recusa o que não entende, e quem escreve
+/// é um programa, que pode imprimir a mesma linha no log para ver o que
+/// mandou. Um formato binário seria mais curto e nada mais fácil de
+/// conferir.
+///
+/// # O formato
+///
+/// Uma linha por coisa, e os campos separados por tabulação:
+///
+/// ```text
+/// janela  <título>
+/// botao   <id> <x> <y> <largura> <altura> <rótulo>
+/// texto   <id> <x> <y> <largura> <altura> <rótulo> <valor>
+/// ```
+///
+/// A linha `janela` vem primeiro, e uma vez. O `id` é do servidor: é o que
+/// volta a ele num evento de [`ACAO`](evento::tipo::ACAO) quando alguém
+/// aciona o elemento pela árvore. O retângulo é **da superfície**, e o
+/// kernel o leva à tela somando a posição da camada. Num rótulo ou num
+/// valor, a tabulação, a quebra de linha e a barra invertida vão como
+/// `\t`, `\n` e `\\` — ver [`escapar`](descricao::escapar).
+pub mod descricao {
+    /// O maior texto de descrição, em bytes.
+    pub const MAIOR: usize = 2048;
+    /// Quantos elementos uma janela descreve, no máximo.
+    pub const MAIS_ELEMENTOS: usize = 16;
+    /// O maior rótulo ou valor, em bytes, depois de resolvido o escape.
+    pub const MAIOR_TEXTO: usize = 512;
+
+    /// Escreve `texto` em `destino` com a tabulação, a quebra de linha e a
+    /// barra invertida escapadas.
+    pub fn escapar(texto: &str, destino: &mut impl core::fmt::Write) -> core::fmt::Result {
+        for c in texto.chars() {
+            match c {
+                '\t' => destino.write_str("\\t")?,
+                '\n' => destino.write_str("\\n")?,
+                '\\' => destino.write_str("\\\\")?,
+                c => destino.write_char(c)?,
+            }
+        }
+        Ok(())
+    }
+
+    /// O inverso de [`escapar`], chamando `f` com cada caractere. Falso num
+    /// escape que não é nenhum dos três — texto que ninguém escapou assim.
+    pub fn resolver(texto: &str, mut f: impl FnMut(char)) -> bool {
+        let mut chars = texto.chars();
+        while let Some(c) = chars.next() {
+            if c != '\\' {
+                f(c);
+                continue;
+            }
+            match chars.next() {
+                Some('t') => f('\t'),
+                Some('n') => f('\n'),
+                Some('\\') => f('\\'),
+                _ => return false,
+            }
+        }
+        true
     }
 }
 
