@@ -57,6 +57,10 @@ fn filho(fd_janela: u64, fd_temporaria: u64, endereco: u64) -> i64 {
     if sistema::mapear(endereco, PAGINA) != 0 {
         return 2;
     }
+    // Nem descrever a janela do pai: a árvore diria o que ele não disse.
+    if sistema::descrever(fd_janela, "janela\tde outro") != erro::DESCRITOR_INVALIDO {
+        return 7;
+    }
     // Fechar o descritor herdado não fecha a camada do pai — a suíte a vê
     // na tela depois.
     sistema::fechar(fd_janela);
@@ -149,6 +153,16 @@ fn principal() -> i64 {
     }
     if sistema::controlar(fd, operacao::FOCO, 2) != erro::ARGUMENTO_INVALIDO {
         return 28;
+    }
+    // A descrição: uma que o kernel entende, uma que não, e uma vazia.
+    if sistema::descrever(fd, "janela\tsuperficie de teste") != 0 {
+        return 29;
+    }
+    if sistema::descrever(fd, "isto nao e uma descricao") != erro::ARGUMENTO_INVALIDO {
+        return 30;
+    }
+    if sistema::descrever(fd, "") != erro::TAMANHO_INVALIDO {
+        return 31;
     }
     // A saída padrão não é uma superfície.
     if sistema::controlar(sistema::SAIDA, operacao::MOVER, 0) != erro::DESCRITOR_INVALIDO {
