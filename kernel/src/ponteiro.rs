@@ -34,7 +34,8 @@
 //! acompanhar, e sem a captura o servidor perderia o resto do arrasto.
 //!
 //! Um aperto fora de toda janela devolve o foco do teclado ao kernel, e o
-//! servidor é avisado.
+//! servidor é avisado — sempre, mesmo com o foco já no kernel: um pedido de
+//! foco do servidor pode estar a caminho.
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
@@ -159,12 +160,20 @@ pub fn botao(pressionado: bool) {
             return;
         }
         // Fora de toda janela: o clique é do kernel, e o teclado também.
-        if crate::superficies::devolver_foco() {
-            publicar(Evento {
-                tipo: tipo::FOCO_PERDIDO,
-                ..Evento::default()
-            });
-        }
+        //
+        // O aviso ao servidor vai **sempre**, e não só quando o kernel via o
+        // foco numa janela. Um clique numa janela seguido de um clique fora,
+        // antes de o servidor rodar, é o caso: no segundo clique o foco ainda
+        // é do kernel — o pedido do servidor está a caminho —, e sem o aviso
+        // o pedido chegaria depois e ficaria com o foco, sem ninguém saber
+        // que a pessoa clicou fora. O servidor recebe o aviso depois do
+        // próprio pedido, e solta o foco. Sem janela com o foco, o aviso não
+        // muda nada do lado de lá.
+        crate::superficies::devolver_foco();
+        publicar(Evento {
+            tipo: tipo::FOCO_PERDIDO,
+            ..Evento::default()
+        });
         crate::teclado::clique();
     } else if !pressionado && antes && CAPTURADO.swap(false, Ordering::Relaxed) {
         para_as_janelas(x, y);

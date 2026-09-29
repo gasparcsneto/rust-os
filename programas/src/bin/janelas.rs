@@ -470,8 +470,28 @@ impl Servidor {
         }
     }
 
+    /// O kernel devolveu o foco a si mesmo: a pessoa clicou fora de toda
+    /// janela.
+    ///
+    /// # Por que soltar o foco aqui, se o kernel já o tomou
+    ///
+    /// Porque um pedido de foco deste servidor pode ter chegado ao kernel
+    /// **depois** que ele o tomou de volta. Um clique numa janela faz o
+    /// servidor pedir o foco; se a pessoa clica fora antes de o pedido
+    /// chegar, o kernel devolve o foco, e o pedido atrasado o retoma. Sem
+    /// soltar aqui, o servidor acharia que não tem o foco e o kernel acharia
+    /// que tem — e as teclas viriam para cá, para serem jogadas fora.
+    /// Medido: uma vez em poucas execuções no x86, o caso da suíte via o foco
+    /// ativo depois de o servidor dizer que o devolveu.
+    ///
+    /// Soltar é pela superfície: o kernel só solta se o foco for dela, e um
+    /// que já voltou ao kernel fica onde está.
     fn foco_perdido(&mut self) {
         if let Some(anterior) = self.foco.take() {
+            if let Some(i) = self.indice(anterior) {
+                let fd = self.janelas[i].superficie.descritor();
+                sistema::controlar(fd, operacao::FOCO, 0);
+            }
             self.redesenhar(anterior);
             escreverln!("janelas: foco devolvido");
         }

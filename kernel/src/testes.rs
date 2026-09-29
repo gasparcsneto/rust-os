@@ -4133,6 +4133,17 @@ fn janelas_operadas() -> Resultado {
             "o servidor de janelas nao fez o que devia"
         })
     };
+    // Quantas vezes o servidor disse `linha` desde o começo do caso. Para a
+    // linha que se repete — o foco na mesma janela, duas vezes —, esperar
+    // por ela de novo é esperar pela contagem, e não por existir uma.
+    let vezes = |procurada: &str| {
+        let mut n = 0;
+        crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+            n +=
+                (r.seq >= desde && r.subsistema == "usuario" && r.mensagem() == procurada) as usize;
+        });
+        n
+    };
     // O ponteiro, como um tablet o moveria, e o botão, como um mouse.
     let mover = |x: i64, y: i64| {
         crate::ponteiro::absoluto(x as u32, y as u32, w - 1, h - 1);
@@ -4203,14 +4214,20 @@ fn janelas_operadas() -> Resultado {
     }
 
     // Arrastar pela barra de título: aperta, anda e solta. O andar leva o
-    // ponteiro para **fora** de onde a janela está — mais longe que a
-    // largura dela —, antes de ela acompanhar: é a captura que o leva ao
-    // servidor, e não o que está debaixo dele.
+    // ponteiro para **fora** de onde a janela está — ele a pega a 200
+    // pixels da borda esquerda, numa janela de 320, e anda 140 —, antes de
+    // ela acompanhar: é a captura que o leva ao servidor, e não o que está
+    // debaixo dele.
+    //
+    // E tudo cabe numa tela de 800 por 600, a que a UEFI entrega no ARM: a
+    // primeira versão andava 340, e lá a caixa de fechar da janela
+    // arrastada caía fora da tela — o ponteiro, preso na borda, nunca a
+    // alcançava.
     mover(x + 200, y + 10);
     crate::ponteiro::botao(true);
-    mover(x + 540, y + 60);
+    mover(x + 340, y + 60);
     crate::ponteiro::botao(false);
-    let (x1, y1) = (x + 340, y + 50);
+    let (x1, y1) = (x + 140, y + 50);
     esperar_linha(&format!("janelas: arrastada 1 para {x1} {y1}"))?;
     if janelas_na_tela() != [(x1, y1)] {
         return Err("a janela arrastada nao foi para onde o ponteiro a levou");
@@ -4231,7 +4248,10 @@ fn janelas_operadas() -> Resultado {
     esperar_linha("janelas: foco 2")?;
     apertar(x1 + largura - 10, y1 + altura - 10);
     esperar_linha("janelas: frente 1")?;
-    esperar_linha("janelas: foco 1")?;
+    // O segundo `foco 1`: o primeiro foi o da abertura, e esperar por ele
+    // deixava o caso seguir antes de o servidor pedir o foco de novo.
+    esperar_ate(|| vezes("janelas: foco 1") >= 2, 600)
+        .map_err(|_| "o clique na janela de tras nao lhe deu o foco")?;
     if janelas_na_tela() != [(x2, y2), (x1, y1)] {
         return Err("o clique numa janela de tras nao a trouxe para a frente");
     }
@@ -4255,7 +4275,23 @@ fn janelas_operadas() -> Resultado {
         return Err("sem foco nas janelas, a tecla nao voltou ao console");
     }
 
-    // Fechar a da frente pela caixa, na ponta direita da barra de título.
+    // A corrida do foco: um clique na janela de trás e um clique fora, sem
+    // o servidor rodar no meio. O kernel devolve o foco ao segundo clique,
+    // e o pedido de foco que o servidor faz pelo primeiro chega **depois**.
+    // O servidor precisa soltá-lo ao saber que o perdeu — senão o kernel
+    // mandaria as teclas a quem acha que não tem o foco.
+    crate::arch::sem_interrupcoes(|| {
+        apertar(x2 + 5, y2 + 100);
+        apertar(fora_x, fora_y);
+    });
+    esperar_ate(|| vezes("janelas: foco devolvido") >= 2, 600)
+        .map_err(|_| "o servidor nao soube que perdeu o foco pela segunda vez")?;
+    if crate::superficies::foco_ativo() {
+        return Err("um pedido de foco atrasado ficou com o foco depois de o kernel o devolver");
+    }
+    crate::teclado::esvaziar();
+
+    // Fechar a primeira pela caixa, na ponta direita da barra de título.
     apertar(x1 + largura - 12, y1 + 11);
     esperar_linha("janelas: fechada 1")?;
     if janelas_na_tela() != [(x2, y2)] {
