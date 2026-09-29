@@ -81,8 +81,9 @@ impl Memoria {
 
     /// O endereço virtual da primeira página.
     ///
-    /// Hoje só a suíte pergunta, para montar uma tela sintética por cima.
-    #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+    /// Quem pergunta é quem precisa tratar a memória como endereço: a tela do
+    /// kernel quando ela mora sobre um `virtio-gpu`, o driver dele para achar
+    /// as páginas físicas, e a suíte para montar uma tela sintética por cima.
     pub fn inicio(&self) -> u64 {
         self.inicio
     }

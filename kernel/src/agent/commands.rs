@@ -217,7 +217,8 @@ pub static COMANDOS: &[Command] = &[
     Command {
         nome: "display.info",
         resumo: "A pilha grafica: qual adaptador esta ativo, as telas dele, quanta memoria as \
-                 superficies seguram e o ultimo retangulo que chegou a tela.",
+                 superficies seguram, o ultimo retangulo que chegou a tela e, num adaptador que \
+                 so mostra o que se manda, o que atravessou para o dispositivo.",
         params: &[],
         handler: display_info,
     },
@@ -1230,6 +1231,33 @@ fn display_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
             w.field_u64("y", d.y as u64)?;
             w.field_u64("width", d.largura as u64)?;
             w.field_u64("height", d.altura as u64)?;
+            w.end_object()?;
+        }
+        None => w.null_value()?,
+    }
+
+    // Num adaptador que só mostra o que se manda, a diferença entre "o
+    // kernel desenhou" e "o monitor mostra" é o que foi mandado. Os três
+    // números dizem se está sendo: comandos, descargas e recusas. Nulo num
+    // framebuffer linear, onde a pergunta não existe.
+    w.key("device")?;
+    match r.dispositivo {
+        Some((comandos, descargas, recusas)) => {
+            w.begin_object()?;
+            w.field_u64("commands", comandos)?;
+            w.field_u64("flushes", descargas)?;
+            w.field_u64("rejected", recusas)?;
+            // O último retângulo que atravessou para o dispositivo. Ao lado
+            // de `last_damage`, que é o que a pilha pediu, é o que de fato
+            // foi — e numa tela de console, o que o console acabou de sujar.
+            let t = crate::virtio::gpu::ultima_transferencia();
+            w.key("last_transfer")?;
+            w.begin_object()?;
+            w.field_u64("x", t.x as u64)?;
+            w.field_u64("y", t.y as u64)?;
+            w.field_u64("width", t.largura as u64)?;
+            w.field_u64("height", t.altura as u64)?;
+            w.end_object()?;
             w.end_object()?;
         }
         None => w.null_value()?,

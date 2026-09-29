@@ -51,6 +51,7 @@
 pub mod dano;
 pub mod linear;
 pub(crate) mod memoria;
+pub mod virtio;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -116,28 +117,31 @@ pub trait AdaptadorGrafico {
 /// O adaptador que esta máquina usa.
 ///
 /// Uma enumeração, e não um objeto de trait, porque o trait tem tipo
-/// associado — e a lista de adaptadores é pequena e conhecida. Quando o
-/// virtio-gpu entrar, ele entra aqui como segunda variante.
+/// associado — e a lista de adaptadores é pequena e conhecida.
 pub enum Adaptador {
     Linear(linear::AdaptadorLinear),
+    Virtio(virtio::AdaptadorVirtio),
 }
 
 impl Adaptador {
     pub fn nome(&self) -> &'static str {
         match self {
             Adaptador::Linear(a) => a.nome(),
+            Adaptador::Virtio(a) => a.nome(),
         }
     }
 
     pub fn tamanho_da_tela(&self, tela: usize) -> Option<(u32, u32)> {
         match self {
             Adaptador::Linear(a) => a.tamanho_da_tela(tela),
+            Adaptador::Virtio(a) => a.tamanho_da_tela(tela),
         }
     }
 
     pub fn telas(&self) -> usize {
         match self {
             Adaptador::Linear(a) => a.telas(),
+            Adaptador::Virtio(a) => a.telas(),
         }
     }
 }
@@ -163,7 +167,14 @@ pub fn iniciar() {
         crate::log_info!("grafico", "sem tela, pilha grafica desligada");
         return;
     };
-    let adaptador = Adaptador::Linear(linear::AdaptadorLinear::novo(tela));
+    // O adaptador é o de quem mostra a tela. Se ela mora sobre um
+    // `virtio-gpu`, copiar superfícies para dentro dela como o linear faz
+    // escreveria numa memória que ninguém descarrega — nada apareceria.
+    let adaptador = if crate::virtio::gpu::tem_a_tela() {
+        Adaptador::Virtio(virtio::AdaptadorVirtio)
+    } else {
+        Adaptador::Linear(linear::AdaptadorLinear::novo(tela))
+    };
     crate::log_info!(
         "grafico",
         "adaptador {} sobre {}x{}",
@@ -198,6 +209,10 @@ pub struct Relatorio {
     pub bytes_em_superficies: u64,
     pub atualizacoes: u64,
     pub ultimo_dano: Option<Dano>,
+    /// Num adaptador que só mostra o que se manda: comandos mandados,
+    /// descargas feitas e recusas do dispositivo. `None` num linear, onde não
+    /// há o que mandar.
+    pub dispositivo: Option<(u64, u64, u64)>,
 }
 
 /// O relatório, se a pilha estiver ligada.
@@ -230,6 +245,7 @@ pub fn relatorio() -> Option<Relatorio> {
         bytes_em_superficies,
         atualizacoes,
         ultimo_dano,
+        dispositivo: crate::tela::precisa_descarregar().then(crate::virtio::gpu::contadores),
     })
 }
 

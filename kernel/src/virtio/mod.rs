@@ -38,9 +38,11 @@
 //! - [`blk`]: o disco.
 //! - [`net`]: a placa de rede.
 //! - [`teclado`]: o teclado do ARM, por `virtio-input`.
+//! - [`gpu`]: o adaptador de vídeo, que só mostra o que se manda mostrar.
 
 pub mod blk;
 pub mod fila;
+pub mod gpu;
 pub mod net;
 pub mod teclado;
 pub mod transporte;
@@ -53,10 +55,11 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// Quantos dispositivos virtio podem pedir para ser avisados.
 ///
-/// Dois hoje — disco e rede —, e o teto existe para que a tabela seja um
-/// `static` de tamanho fixo em vez de depender do heap. Um handler de
+/// Quatro hoje — disco, rede, teclado e vídeo —, e o teto existe para que a
+/// tabela seja um `static` de tamanho fixo em vez de depender do heap. Oito
+/// deixa folga: com quatro, o vídeo teria sido o último a caber. Um handler de
 /// interrupção não é lugar de alocar.
-const MAX_REGISTROS: usize = 4;
+const MAX_REGISTROS: usize = 8;
 
 /// Nenhuma linha. `u32::MAX` porque zero é uma linha válida no PIC.
 const SEM_LINHA: u32 = u32::MAX;
@@ -111,12 +114,14 @@ const NOME_NENHUM: u32 = 0;
 const NOME_DISCO: u32 = 1;
 const NOME_REDE: u32 = 2;
 const NOME_TECLADO: u32 = 3;
+const NOME_VIDEO: u32 = 4;
 
 fn nome_de(codigo: u32) -> &'static str {
     match codigo {
         NOME_DISCO => "disco",
         NOME_REDE => "rede",
         NOME_TECLADO => "teclado",
+        NOME_VIDEO => "video",
         _ => "?",
     }
 }

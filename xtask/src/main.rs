@@ -158,6 +158,16 @@ fn main() -> ExitCode {
         }
     };
 
+    // Qual adaptador de vídeo a máquina vai ter. Ver [`Video`].
+    let video = match extrair_valor(&args, "--video") {
+        None | Some("linear") => Video::Linear,
+        Some("virtio") => Video::Virtio,
+        Some(outro) => {
+            eprintln!("erro: video desconhecido `{outro}`; use `linear` ou `virtio`");
+            return ExitCode::FAILURE;
+        }
+    };
+
     // Posicionais: tudo que não é flag nem valor de flag.
     let mut posicionais: Vec<&str> = Vec::new();
     let mut pular = false;
@@ -177,9 +187,9 @@ fn main() -> ExitCode {
 
     let resultado = match comando {
         "build" => build(arch, release, false).map(|_| ExitCode::SUCCESS),
-        "run" => run(arch, release),
-        "test" => test(arch, release),
-        "fumaca" => fumaca(arch, release, teclado),
+        "run" => run(arch, release, video),
+        "test" => test(arch, release, video),
+        "fumaca" => fumaca(arch, release, teclado, video),
         "agent" => {
             let metodo = posicionais.get(1).copied().unwrap_or("agent.describe");
             let params = posicionais.get(2).copied().unwrap_or("{}");
@@ -332,6 +342,20 @@ enum Teclado {
     /// Um teclado USB, atrás do controlador xHCI. O mesmo dispositivo e o
     /// mesmo driver nas duas arquiteturas.
     Usb,
+}
+
+/// O adaptador de vídeo da máquina.
+///
+/// Duas máquinas porque são dois caminhos de tela no kernel, e um caminho
+/// que nenhuma máquina exercita é um caminho que só falha na de alguém.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Video {
+    /// Um framebuffer que o dispositivo varre sozinho: a VGA do x86 posta
+    /// pelo firmware, o `bochs-display` do ARM programado pelo kernel.
+    Linear,
+    /// Só um `virtio-gpu`, que mostra apenas o que o kernel manda. É a
+    /// máquina de nuvem ARM típica, e a que o UTM monta num Mac.
+    Virtio,
 }
 
 /// Onde fica o monitor do emulador desta arquitetura.
@@ -1154,6 +1178,7 @@ fn subir_no_firmware(
         &Artefato::Disco(disco.to_path_buf()),
         None,
         Teclado::Nativo,
+        Video::Linear,
     )?;
     qemu.stdout(arquivo);
     // Sem rede: nada aqui precisa dela, e o firmware tentaria PXE antes do
@@ -2661,7 +2686,13 @@ fn depurar(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
     let elf = caminho_elf(arch, release);
     let socket = caminho_socket(arch);
 
-    let mut qemu = comando_qemu(arch, &artefato, Some(&socket), Teclado::Nativo)?;
+    let mut qemu = comando_qemu(
+        arch,
+        &artefato,
+        Some(&socket),
+        Teclado::Nativo,
+        Video::Linear,
+    )?;
     // `-S` congela a CPU antes da primeira instrução; `-gdb` abre o servidor.
     // Sem o `-S`, o kernel bootaria inteiro antes de dar tempo de conectar, e
     // qualquer breakpoint de boot seria perdido.
@@ -3364,6 +3395,7 @@ fn comando_qemu(
     artefato: &Artefato,
     socket_agente: Option<&Path>,
     teclado: Teclado,
+    video: Video,
 ) -> Result<Command, String> {
     let mut qemu = Command::new(arch.qemu());
 
@@ -3495,13 +3527,21 @@ fn comando_qemu(
     // seria um segundo. No ARM a máquina `virt` não traz nenhum: sem isto, o
     // kernel não tem o que programar, e uma pessoa não tem o que olhar.
     //
-    // `bochs-display` e não `virtio-gpu` porque é o **mesmo** dispositivo que
-    // o x86 já tem (`1234:1111`), com a mesma interface de programação. Um
-    // driver serve as duas arquiteturas; virtio-gpu seria um segundo caminho
-    // para a mesma coisa, e este kernel já pagou caro por regras que valem em
-    // uma arquitetura só.
-    if arch == Arquitetura::Aarch64 {
-        qemu.args(["-device", "bochs-display"]);
+    // `bochs-display` na máquina padrão porque é o **mesmo** dispositivo que
+    // o x86 já tem (`1234:1111`), com a mesma interface de programação: um
+    // driver serve as duas arquiteturas, e a máquina de todo dia exercita o
+    // mesmo caminho nas duas.
+    //
+    // Tudo isto é a máquina **linear**. A outra — só um `virtio-gpu` — vem
+    // logo abaixo. Ela não repete este caminho: é outro, em que a tela do
+    // kernel mora sobre um adaptador que só mostra o que se manda, e existe
+    // porque há máquinas de verdade que só têm esse.
+    //
+    // O `id=video0` é para o `screendump` da fumaça: ele fotografa a tela de
+    // um dispositivo, e numa máquina com duas — o `bochs` e o `ramfb` — a
+    // padrão pode ser a que o kernel não usa.
+    if arch == Arquitetura::Aarch64 && video == Video::Linear {
+        qemu.args(["-device", "bochs-display,id=video0"]);
 
         // E uma segunda tela, que não é para o kernel: é para o **firmware**.
         //
@@ -3526,6 +3566,17 @@ fn comando_qemu(
         // um modo só de transferência, sem buffer linear. O iniciador o
         // recusa, com razão, e o caminho continuaria sem rodar.
         qemu.args(["-device", "ramfb"]);
+    }
+    if video == Video::Virtio {
+        // Só o `virtio-gpu`: no x86 a VGA de fábrica sai, no ARM o `bochs` e
+        // o `ramfb` não entram. É a máquina em que o firmware não deixa tela
+        // linear nenhuma — o EDK II dirige o `virtio-gpu` com um modo só de
+        // transferência, que o iniciador recusa —, e o kernel precisa pôr a
+        // tela de pé sozinho.
+        if arch == Arquitetura::X86_64 {
+            qemu.args(["-vga", "none"]);
+        }
+        qemu.args(["-device", "virtio-gpu-pci,id=video0"]);
     }
 
     // E um teclado. Qual, depende do que se quer exercitar — ver [`Teclado`].
@@ -3614,7 +3665,7 @@ fn anexar_socket(qemu: &mut Command, socket: &Path) {
     ]);
 }
 
-fn run(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
+fn run(arch: Arquitetura, release: bool, video: Video) -> Result<ExitCode, String> {
     let artefato = build(arch, release, false)?;
     let socket = caminho_socket(arch);
 
@@ -3631,7 +3682,7 @@ fn run(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
         );
     }
 
-    comando_qemu(arch, &artefato, Some(&socket), Teclado::Nativo)?
+    comando_qemu(arch, &artefato, Some(&socket), Teclado::Nativo, video)?
         .status()
         .map_err(|e| format!("não foi possível iniciar o {}: {e}", arch.qemu()))?;
 
@@ -3806,7 +3857,12 @@ const SONDAS: &[Sonda] = &[
 /// Não substitui a suíte: não confere nenhum invariante interno. É a outra
 /// metade — a suíte olha o kernel por dentro, isto olha pelo buraco da
 /// fechadura por onde o agente olha.
-fn fumaca(arch: Arquitetura, release: bool, teclado: Teclado) -> Result<ExitCode, String> {
+fn fumaca(
+    arch: Arquitetura,
+    release: bool,
+    teclado: Teclado,
+    video: Video,
+) -> Result<ExitCode, String> {
     let artefato = build(arch, release, false)?;
     let socket = caminho_socket(arch);
 
@@ -3815,15 +3871,26 @@ fn fumaca(arch: Arquitetura, release: bool, teclado: Teclado) -> Result<ExitCode
         arch.nome()
     );
 
-    let mut filho = comando_qemu(arch, &artefato, Some(&socket), teclado)?
+    let mut filho = comando_qemu(arch, &artefato, Some(&socket), teclado, video)?
         .spawn()
         .map_err(|e| format!("não foi possível iniciar o {}: {e}", arch.qemu()))?;
 
     // A sonda de reconexão vem depois de `conversar` e não dentro dela porque
     // precisa da conexão principal **fechada**: o que ela exercita é o que um
     // cliente novo herda de um cliente que sumiu.
-    let resultado = conversar(&socket, &caminho_monitor(arch), teclado, filho.id())
-        .and_then(|()| sob_reconexao(&socket));
+    // Qual tela o `screendump` fotografa. A padrão, na VGA do x86, que é a
+    // única; o `video0` nas outras, onde a padrão pode ser uma que o kernel
+    // não usa.
+    let tela_no_monitor =
+        (arch == Arquitetura::Aarch64 || video == Video::Virtio).then_some("video0");
+    let resultado = conversar(
+        &socket,
+        &caminho_monitor(arch),
+        teclado,
+        tela_no_monitor,
+        filho.id(),
+    )
+    .and_then(|()| sob_reconexao(&socket));
 
     // O emulador morre aconteça o que acontecer: um QEMU órfão segura a
     // imagem de disco e faz a *próxima* execução falhar por um motivo que
@@ -3845,7 +3912,13 @@ fn fumaca(arch: Arquitetura, release: bool, teclado: Teclado) -> Result<ExitCode
 }
 
 /// Espera o canal subir e roda as sondas numa conexão só.
-fn conversar(socket: &Path, monitor: &Path, teclado: Teclado, qemu: u32) -> Result<(), String> {
+fn conversar(
+    socket: &Path,
+    monitor: &Path,
+    teclado: Teclado,
+    tela_no_monitor: Option<&str>,
+    qemu: u32,
+) -> Result<(), String> {
     let limite = std::time::Instant::now() + ESPERA_PELA_FUMACA;
 
     // Conectar não é o mesmo que ser atendido. O QEMU aceita a conexão assim
@@ -3999,6 +4072,7 @@ fn conversar(socket: &Path, monitor: &Path, teclado: Teclado, qemu: u32) -> Resu
     sob_teclado(monitor, teclado, &mut escrita, &mut leitor)?;
     sob_interpretador(monitor, &mut escrita, &mut leitor)?;
     sob_arvore(&mut escrita, &mut leitor)?;
+    sob_tela(monitor, tela_no_monitor, &mut escrita, &mut leitor)?;
     sob_fragmento(&mut escrita, &mut leitor)
 }
 
@@ -4147,6 +4221,247 @@ fn sob_teclado(
 /// linha ainda está aberta no interpretador. Executá-la — e receber
 /// "comando desconhecido" — é o que devolve a linha vazia, e de quebra
 /// exercita o caminho de recusa.
+/// A tela que o kernel acha que desenhou é a que o hospedeiro mostra.
+///
+/// # A pergunta que nada mais responde
+///
+/// `video.sample` lê de volta a memória onde o kernel desenha. Num
+/// framebuffer linear, o que está ali é o que aparece — o dispositivo varre
+/// aquela memória sozinho. Num `virtio-gpu`, não: só aparece o que foi
+/// transferido e descarregado, e o kernel pode ter a tela certa na memória e
+/// o monitor preto. Os testes do kernel perguntam ao kernel, e o kernel não
+/// tem como saber o que o hospedeiro mostra.
+///
+/// O hospedeiro tem: o `screendump` do monitor fotografa a tela como ela sai
+/// do dispositivo. A sonda amostra pelo agente, fotografa, amostra de novo, e
+/// compara ponto por ponto — os mesmos pontos, pela mesma conta de
+/// `video.sample`. Se as duas amostras diferirem, a tela mudou no meio, e a
+/// rodada é refeita.
+///
+/// Roda nas duas máquinas: na linear ela afirma que a tela do kernel é a do
+/// monitor, o que já devia ser verdade e passa a ser conferido; na do
+/// `virtio-gpu` ela afirma que a descarga acontece.
+fn sob_tela(
+    monitor: &Path,
+    tela_no_monitor: Option<&str>,
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+) -> Result<(), String> {
+    println!("[xtask] fumaça: a tela que o kernel desenhou é a que o hospedeiro mostra");
+    let destino = raiz_do_projeto()
+        .join("target")
+        .join(format!("tela-{}.ppm", std::process::id()));
+
+    let mut motivo = String::from("nenhuma rodada chegou a comparar");
+    for rodada in 0..5u32 {
+        let antes = amostra_da_tela(escrita, leitor, 8801 + rodada * 2)?;
+        let foto = fotografar(monitor, &destino, tela_no_monitor);
+        let depois = amostra_da_tela(escrita, leitor, 8802 + rodada * 2)?;
+        let foto = foto?;
+        if antes != depois {
+            motivo = "a tela mudou enquanto era fotografada, em todas as rodadas".into();
+            std::thread::sleep(Duration::from_millis(300));
+            continue;
+        }
+        match comparar_com_a_foto(&antes, &foto) {
+            Ok(pontos) => {
+                let _ = std::fs::remove_file(&destino);
+                println!(
+                    "  [tela] ok  {pontos} pontos iguais entre a amostra do kernel e o screendump do hospedeiro ({}x{})",
+                    foto.largura, foto.altura
+                );
+                return Ok(());
+            }
+            Err(diferenca) => motivo = diferenca,
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    let _ = std::fs::remove_file(&destino);
+    Err(format!("tela: {motivo}"))
+}
+
+/// O que `video.sample` devolve.
+#[derive(PartialEq, Eq, Debug)]
+struct Amostra {
+    largura: u32,
+    altura: u32,
+    colunas: u32,
+    linhas: u32,
+    grade: Vec<String>,
+}
+
+fn amostra_da_tela(
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+    id: u32,
+) -> Result<Amostra, String> {
+    escrita
+        .write_all(
+            format!(
+                r#"{{"jsonrpc":"2.0","id":{id},"method":"video.sample","params":{{"columns":64,"rows":48}}}}"#
+            )
+            .as_bytes(),
+        )
+        .and_then(|()| escrita.write_all(b"\n"))
+        .and_then(|()| escrita.flush())
+        .map_err(|e| format!("tela: falha ao pedir a amostra: {e}"))?;
+    let resposta = ler_resposta(leitor).map_err(|e| format!("tela: {e}"))?;
+    if !e_a_resposta(&resposta, id) {
+        return Err(format!(
+            "tela: veio a resposta de outro pedido\n  {resposta}"
+        ));
+    }
+    ler_amostra(&resposta).ok_or_else(|| format!("tela: a amostra nao se le\n  {resposta}"))
+}
+
+/// Tira de uma resposta de `video.sample` o que a comparação precisa.
+///
+/// À mão, porque o `xtask` não depende de biblioteca de JSON, e o que se lê
+/// aqui são quatro números e uma lista de strings sem escape nenhum — só
+/// dígitos hexadecimais, espaços e pontos.
+fn ler_amostra(resposta: &str) -> Option<Amostra> {
+    let numero = |chave: &str| -> Option<u32> {
+        let resto = apos(resposta, &format!("\"{chave}\":"))?;
+        resto
+            .split(|c: char| !c.is_ascii_digit())
+            .next()?
+            .parse()
+            .ok()
+    };
+    let grade_bruta = apos(resposta, "\"grid\":[")?.split(']').next()?;
+    let grade: Vec<String> = grade_bruta
+        .split('"')
+        .skip(1)
+        .step_by(2)
+        .map(String::from)
+        .collect();
+    Some(Amostra {
+        largura: numero("width")?,
+        altura: numero("height")?,
+        colunas: numero("columns")?,
+        linhas: numero("rows")?,
+        grade,
+    })
+}
+
+/// Uma foto da tela, em RGB de 8 bits por componente.
+struct Foto {
+    largura: u32,
+    altura: u32,
+    pixels: Vec<u8>,
+}
+
+/// Pede ao monitor um `screendump` e espera o arquivo ficar inteiro.
+///
+/// O monitor não diz quando terminou de escrever; o que diz é o tamanho do
+/// arquivo. Um PPM tem o cabeçalho e três bytes por pixel, e só com os dois
+/// batendo a foto está pronta.
+fn fotografar(monitor: &Path, destino: &Path, dispositivo: Option<&str>) -> Result<Foto, String> {
+    let _ = std::fs::remove_file(destino);
+    let mut mon = UnixStream::connect(monitor)
+        .map_err(|e| format!("tela: o monitor nao aceitou conexao: {e}"))?;
+    let comando = match dispositivo {
+        Some(d) => format!("screendump {} -f ppm {d}\n", destino.display()),
+        None => format!("screendump {} -f ppm\n", destino.display()),
+    };
+    mon.write_all(comando.as_bytes())
+        .and_then(|()| mon.flush())
+        .map_err(|e| format!("tela: falha ao pedir o screendump: {e}"))?;
+
+    let limite = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < limite {
+        if let Ok(bytes) = std::fs::read(destino)
+            && let Some(foto) = ler_ppm(&bytes)
+        {
+            return Ok(foto);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Err(format!(
+        "tela: o screendump nao produziu uma imagem inteira em {} em 5s",
+        destino.display()
+    ))
+}
+
+/// Lê um PPM binário (P6) de 8 bits. `None` se ele ainda não está inteiro.
+fn ler_ppm(bytes: &[u8]) -> Option<Foto> {
+    // O cabeçalho são quatro campos separados por espaço em branco — `P6`,
+    // largura, altura e o valor máximo —, e depois dele um único espaço em
+    // branco antes dos pixels.
+    let mut campos = Vec::new();
+    let mut i = 0;
+    while campos.len() < 4 {
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let inicio = i;
+        while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if inicio == i {
+            return None;
+        }
+        campos.push(std::str::from_utf8(&bytes[inicio..i]).ok()?);
+    }
+    if campos[0] != "P6" || campos[3] != "255" {
+        return None;
+    }
+    let largura: u32 = campos[1].parse().ok()?;
+    let altura: u32 = campos[2].parse().ok()?;
+    let pixels = bytes.get(i + 1..)?;
+    (pixels.len() == largura as usize * altura as usize * 3).then(|| Foto {
+        largura,
+        altura,
+        pixels: pixels.to_vec(),
+    })
+}
+
+/// Compara a amostra do kernel com a foto, ponto por ponto. Devolve quantos
+/// pontos foram comparados.
+fn comparar_com_a_foto(amostra: &Amostra, foto: &Foto) -> Result<usize, String> {
+    if (foto.largura, foto.altura) != (amostra.largura, amostra.altura) {
+        return Err(format!(
+            "o hospedeiro mostra uma tela de {}x{}, e o kernel desenha numa de {}x{}",
+            foto.largura, foto.altura, amostra.largura, amostra.altura
+        ));
+    }
+    if amostra.grade.len() != amostra.linhas as usize {
+        return Err("a amostra nao tem as linhas que diz ter".into());
+    }
+    let mut pontos = 0;
+    let mut diferentes = Vec::new();
+    for (linha, cores) in amostra.grade.iter().enumerate() {
+        let linha = linha as u32;
+        // A mesma conta de `video.sample`: o centro de cada célula.
+        let y = (linha * 2 + 1) * amostra.altura / (amostra.linhas * 2);
+        for (coluna, cor) in cores.split(' ').enumerate() {
+            let coluna = coluna as u32;
+            let x = (coluna * 2 + 1) * amostra.largura / (amostra.colunas * 2);
+            let i = (y as usize * foto.largura as usize + x as usize) * 3;
+            let na_foto = format!(
+                "{:02x}{:02x}{:02x}",
+                foto.pixels[i],
+                foto.pixels[i + 1],
+                foto.pixels[i + 2]
+            );
+            pontos += 1;
+            if na_foto != cor {
+                diferentes.push(format!("({x},{y}): kernel {cor}, hospedeiro {na_foto}"));
+            }
+        }
+    }
+    if diferentes.is_empty() {
+        Ok(pontos)
+    } else {
+        Err(format!(
+            "{} de {} pontos diferem entre o que o kernel desenhou e o que o hospedeiro mostra; os primeiros:\n  {}",
+            diferentes.len(),
+            pontos,
+            diferentes[..diferentes.len().min(5)].join("\n  ")
+        ))
+    }
+}
+
 /// O agente opera a máquina pela árvore semântica, no kernel de produção.
 ///
 /// A suíte exercita a árvore no lugar do interpretador, porque em modo de
@@ -4842,14 +5157,18 @@ fn quadro_fechado(linha: &str) -> bool {
     nivel == 0
 }
 
-fn test(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
+fn test(arch: Arquitetura, release: bool, video: Video) -> Result<ExitCode, String> {
     let artefato = build(arch, release, true)?;
     println!(
-        "[xtask] executando a suíte de testes no QEMU ({})\n",
-        arch.nome()
+        "[xtask] executando a suíte de testes no QEMU ({}, video {})\n",
+        arch.nome(),
+        match video {
+            Video::Linear => "linear",
+            Video::Virtio => "virtio",
+        }
     );
 
-    let filho = comando_qemu(arch, &artefato, None, Teclado::Nativo)?
+    let filho = comando_qemu(arch, &artefato, None, Teclado::Nativo, video)?
         .spawn()
         .map_err(|e| format!("não foi possível iniciar o {}: {e}", arch.qemu()))?;
 

@@ -878,9 +878,26 @@ fn agente_display_info_descreve_a_pilha() -> Resultado {
         };
     };
 
-    if resposta.member("adapter").and_then(|v| v.as_str()) != Some("linear") {
+    // O adaptador é o de quem mostra a tela: o linear num framebuffer que o
+    // dispositivo varre sozinho, o virtio-gpu quando a tela mora sobre ele.
+    let sobre_virtio = crate::virtio::gpu::tem_a_tela();
+    let esperado = if sobre_virtio { "virtio-gpu" } else { "linear" };
+    if resposta.member("adapter").and_then(|v| v.as_str()) != Some(esperado) {
         crate::log_error!("teste", "resposta: {}", buffer.como_str());
-        return Err("display.info nao nomeou o adaptador linear");
+        return Err("display.info nao nomeou o adaptador de quem mostra a tela");
+    }
+    // E os números do dispositivo existem só onde há o que mandar a ele.
+    let descargas = resposta
+        .member("device")
+        .and_then(|d| d.member("flushes"))
+        .and_then(|v| v.as_u64());
+    match (sobre_virtio, descargas) {
+        (true, Some(n)) if n > 0 => {}
+        (false, None) => {}
+        _ => {
+            crate::log_error!("teste", "resposta: {}", buffer.como_str());
+            return Err("display.info nao descreveu o dispositivo como ele e");
+        }
     }
     let Some(tela0) = resposta.member("displays").and_then(|d| d.item(0)) else {
         return Err("display.info nao listou a tela");
@@ -5941,6 +5958,211 @@ fn machine_funde_so_vizinhas_do_mesmo_tipo() -> Resultado {
 }
 
 // ===========================================================================
+// O virtio-gpu
+// ===========================================================================
+
+/// Registra que um caso de virtio-gpu não se aplica a esta máquina.
+///
+/// Os casos passam numa máquina sem o dispositivo, e o log diz por quê: a
+/// máquina que os exercita é a de `--video virtio`, que o CI sobe à parte.
+fn sem_virtio_gpu(caso: &str) -> Resultado {
+    crate::log_info!(
+        "teste",
+        "{}: esta maquina nao tem a tela sobre um virtio-gpu",
+        caso
+    );
+    Ok(())
+}
+
+/// A tela mora onde o monitor a mostra.
+///
+/// Numa máquina linear, nada precisa ser descarregado. Numa com a tela sobre
+/// o virtio-gpu, precisa — e a geometria da tela é a que o dispositivo
+/// descreve. Uma tela registrada sobre o recurso sem o descarregador ligado
+/// seria desenhada na memória e nunca vista.
+fn video_a_tela_mora_onde_o_monitor_a_mostra() -> Resultado {
+    let sobre_virtio = crate::virtio::gpu::tem_a_tela();
+    if sobre_virtio != crate::tela::precisa_descarregar() {
+        return Err("a tela esta sobre o virtio-gpu e ninguem a descarrega, ou o contrario");
+    }
+    if !sobre_virtio {
+        return sem_virtio_gpu("video: a tela mora onde o monitor a mostra");
+    }
+    let tela = crate::tela::tela().ok_or("a tela sobre o virtio-gpu nao foi publicada")?;
+    if crate::virtio::gpu::tamanho_da_tela() != Some((tela.largura, tela.altura)) {
+        return Err("a tela do kernel nao tem a geometria que o dispositivo descreve");
+    }
+    if crate::virtio::gpu::na_varredura() != Some(crate::virtio::gpu::RECURSO_DA_TELA) {
+        return Err("o recurso na tela 0 nao e o da tela do kernel");
+    }
+    Ok(())
+}
+
+/// Escrever no console leva ao dispositivo só o que sujou.
+///
+/// É a diferença para o Redox, que transfere o quadro inteiro a cada
+/// atualização. A sonda de fora não pega isso — o monitor mostraria a mesma
+/// imagem —, e por isso a afirmação é daqui: depois de um caractere, nada
+/// fica sujo, e o que atravessou cabe na célula dele.
+fn video_escrever_descarrega_so_o_que_sujou() -> Resultado {
+    if !crate::virtio::gpu::tem_a_tela() {
+        return sem_virtio_gpu("video: escrever descarrega so o que sujou");
+    }
+    let g = crate::tela::console::geometria().ok_or("sem geometria de console")?;
+    crate::serial_println!();
+    let (coluna, linha) = crate::tela::console::cursor_em_celulas();
+    let (_, descargas_antes, _) = crate::virtio::gpu::contadores();
+    crate::serial_print!("Q");
+    let (_, descargas_depois, _) = crate::virtio::gpu::contadores();
+    let sujo = crate::tela::sujo();
+    let t = crate::virtio::gpu::ultima_transferencia();
+    crate::serial_println!();
+
+    if sujo.is_some() {
+        return Err("a escrita deixou a tela suja em vez de descarrega-la");
+    }
+    if descargas_depois <= descargas_antes {
+        return Err("a escrita nao descarregou nada");
+    }
+    let (x0, y0) = (
+        g.margem_x + coluna * g.largura_da_celula,
+        g.margem_y + linha * g.altura_da_celula,
+    );
+    let dentro = t.largura > 0
+        && t.altura > 0
+        && t.x >= x0
+        && t.y >= y0
+        && t.x + t.largura <= x0 + g.largura_da_celula
+        && t.y + t.altura <= y0 + g.altura_da_celula;
+    if !dentro {
+        crate::log_error!(
+            "teste",
+            "transferido {},{} {}x{}; a celula e {},{} {}x{}",
+            t.x,
+            t.y,
+            t.largura,
+            t.altura,
+            x0,
+            y0,
+            g.largura_da_celula,
+            g.altura_da_celula
+        );
+        return Err("o que atravessou para o dispositivo nao e a celula do caractere");
+    }
+    Ok(())
+}
+
+/// Uma superfície apresenta só o dano, e a tela volta ao kernel depois dela.
+///
+/// É o trait usado pelo compositor que vier: criar, desenhar, apresentar um
+/// retângulo. O dano atravessa recortado; um dano hostil, que o recorte do
+/// Redox faria dar a volta, vira nada — e não um comando que o dispositivo
+/// recusa. E ao soltar a superfície, a tela 0 volta ao recurso do kernel e a
+/// memória volta ao alocador.
+fn video_superficie_apresenta_so_o_dano() -> Resultado {
+    use crate::grafico::virtio::AdaptadorVirtio;
+    use crate::grafico::{AdaptadorGrafico, Dano, Superficie};
+
+    if !crate::virtio::gpu::tem_a_tela() {
+        return sem_virtio_gpu("video: superficie apresenta so o dano");
+    }
+    let (vivas_antes, _) = crate::grafico::memoria::vivas();
+    let (_, _, recusas_antes) = crate::virtio::gpu::contadores();
+    let mut adaptador = AdaptadorVirtio;
+
+    let resultado = (|| {
+        let mut superficie = adaptador.criar_superficie(64, 32)?;
+        for (i, pixel) in superficie.pixels_mut().iter_mut().enumerate() {
+            *pixel = 0x0000_8000 | i as u32 & 0xFF;
+        }
+
+        let levado = adaptador.atualizar(0, &superficie, Dano::novo(8, 8, 16, 8))?;
+        if levado != Dano::novo(8, 8, 16, 8) {
+            return Err("o dano dentro da superficie nao atravessou inteiro");
+        }
+        let t = crate::virtio::gpu::ultima_transferencia();
+        if (t.x, t.y, t.largura, t.altura) != (8, 8, 16, 8) {
+            return Err("o que atravessou nao foi o dano");
+        }
+        if crate::virtio::gpu::na_varredura() != Some(superficie.recurso()) {
+            return Err("apresentar a superficie nao a pos na tela");
+        }
+
+        // O dano hostil do Redox: perto do fim do tipo, com uma largura que
+        // dá a volta na soma.
+        let hostil = adaptador.atualizar(0, &superficie, Dano::novo(u32::MAX - 1, 0, 10, 10))?;
+        if !hostil.vazio() {
+            return Err("um dano fora da superficie virou um retangulo");
+        }
+        Ok(())
+    })();
+
+    // Solta a superfície (se ela chegou a existir, já saiu de escopo acima).
+    if crate::virtio::gpu::na_varredura() != Some(crate::virtio::gpu::RECURSO_DA_TELA) {
+        return Err("ao soltar a superficie, a tela nao voltou ao kernel");
+    }
+    resultado?;
+    if crate::grafico::memoria::vivas().0 != vivas_antes {
+        return Err("a memoria da superficie nao voltou");
+    }
+    if crate::virtio::gpu::contadores().2 != recusas_antes {
+        return Err("o dispositivo recusou algum comando da superficie");
+    }
+    Ok(())
+}
+
+/// Anexar memória fragmentada usa mais de uma página de entradas.
+///
+/// Logo depois do boot as páginas de uma superfície são fisicamente
+/// vizinhas, e o anexo cabe numa entrada ou poucas: o caminho de várias
+/// páginas de entradas nunca rodaria. Aqui cada página vira uma entrada — 300
+/// delas, duas páginas —, e o dispositivo tem de aceitar e mostrar.
+fn video_anexar_memoria_fragmentada() -> Resultado {
+    use crate::grafico::virtio::AdaptadorVirtio;
+    use crate::grafico::{AdaptadorGrafico, Dano};
+
+    if !crate::virtio::gpu::tem_a_tela() {
+        return sem_virtio_gpu("video: anexar memoria fragmentada");
+    }
+    let mut adaptador = AdaptadorVirtio;
+    let superficie = adaptador.criar_superficie_fragmentada(640, 480)?;
+    let entradas = crate::virtio::gpu::entradas_do_ultimo_anexo();
+    if entradas != 300 {
+        crate::log_error!("teste", "{} entradas no anexo", entradas);
+        return Err("o anexo sem fundir nao mandou uma entrada por pagina");
+    }
+    adaptador.atualizar(0, &superficie, Dano::novo(0, 0, 640, 480))?;
+    Ok(())
+}
+
+/// Uma recusa do dispositivo volta como erro, com o nome que a especificação
+/// dá a ela — e não como pânico, que é o que o `assert_eq!` do Redox faria.
+fn video_recusa_do_dispositivo_e_erro() -> Resultado {
+    if !crate::virtio::gpu::tem_a_tela() {
+        return sem_virtio_gpu("video: recusa do dispositivo e erro");
+    }
+    let (_, _, antes) = crate::virtio::gpu::contadores();
+    let r = crate::virtio::gpu::Retangulo {
+        x: 0,
+        y: 0,
+        largura: 8,
+        altura: 8,
+    };
+    match crate::virtio::gpu::transferir_sem_conferir(999, r) {
+        Err(motivo) if motivo.contains("ERR_INVALID_RESOURCE_ID") => {}
+        Err(motivo) => {
+            crate::log_error!("teste", "recusa: {}", motivo);
+            return Err("a recusa voltou com outro nome");
+        }
+        Ok(()) => return Err("um recurso inexistente foi aceito"),
+    }
+    if crate::virtio::gpu::contadores().2 != antes + 1 {
+        return Err("a recusa nao foi contada");
+    }
+    Ok(())
+}
+
+// ===========================================================================
 // A árvore semântica
 // ===========================================================================
 
@@ -9428,6 +9650,26 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "grafico: superficie que falha no meio desfaz",
         f: grafico_superficie_que_falha_no_meio_desfaz,
+    },
+    Caso {
+        nome: "video: a tela mora onde o monitor a mostra",
+        f: video_a_tela_mora_onde_o_monitor_a_mostra,
+    },
+    Caso {
+        nome: "video: escrever descarrega so o que sujou",
+        f: video_escrever_descarrega_so_o_que_sujou,
+    },
+    Caso {
+        nome: "video: superficie apresenta so o dano",
+        f: video_superficie_apresenta_so_o_dano,
+    },
+    Caso {
+        nome: "video: anexar memoria fragmentada",
+        f: video_anexar_memoria_fragmentada,
+    },
+    Caso {
+        nome: "video: recusa do dispositivo e erro",
+        f: video_recusa_do_dispositivo_e_erro,
     },
     Caso {
         nome: "ui: a arvore descreve a tela que existe",

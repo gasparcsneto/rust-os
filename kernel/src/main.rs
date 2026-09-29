@@ -321,6 +321,15 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     // nada, e custaria a tela durante a troca.
     if tela::tela().is_none() {
         tela::bochs::init();
+        // E, por último, um adaptador que não varre memória nenhuma sozinho:
+        // o `virtio-gpu`. É o que sobra em máquinas que não têm outro — uma VM
+        // ARM de nuvem, ou a que o UTM monta num Mac —, e sem ele elas ficavam
+        // sem tela. Por último porque um framebuffer linear, quando existe, é
+        // melhor para o caminho de falha: ele aparece sem mandar nada a
+        // ninguém.
+        if tela::tela().is_none() {
+            virtio::gpu::init();
+        }
         if !anunciar_tela() {
             log_info!("video", "nenhum framebuffer nesta maquina");
         }

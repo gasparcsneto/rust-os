@@ -163,7 +163,7 @@ Os dois podem rodar ao mesmo tempo: cada arquitetura tem seu próprio socket.
 | `net.info` | Endereço e contadores da placa de rede, se houver uma |
 | `net.arp` | Pergunta quem atende por um IPv4 e espera a resposta (`ip`, `from`) |
 | `video.sample` | Amostra a tela numa grade de cores (`columns`, `rows`) |
-| `display.info` | A pilha gráfica: adaptador ativo, telas, memória das superfícies e o último retângulo que chegou à tela |
+| `display.info` | A pilha gráfica: adaptador ativo, telas, memória das superfícies, o último retângulo que chegou à tela e, no virtio-gpu, o que atravessou para o dispositivo |
 | `ui.tree` | A árvore semântica do que está na tela: papel, rótulo, valor, moldura e ações de cada elemento |
 | `ui.act` | Age sobre um elemento pelo mesmo caminho de quem está na frente da máquina (`id`, `action`, `value`) |
 | `keyboard.read` | O que foi digitado no teclado da máquina, e os contadores dele (`max`) |
@@ -207,6 +207,7 @@ kernel/src/
 │   ├── mod.rs       o trait de adaptador e o que o agente enxerga dele
 │   ├── dano.rs      o retângulo que mudou, com o recorte que não dá a volta
 │   ├── linear.rs    buffer de fundo sobre um framebuffer (porte do vesad)
+│   ├── virtio.rs    a superfície que é um recurso do virtio-gpu
 │   └── memoria.rs   as páginas de uma superfície, fora do heap
 ├── fios/
 │   ├── mod.rs       escalonador preemptivo: fios, rodízio e quantum
@@ -239,6 +240,7 @@ kernel/src/
 │   ├── fila.rs      a virtqueue split: o canal por onde os pedidos passam
 │   ├── blk.rs       o disco
 │   ├── net.rs       a placa de rede
+│   ├── gpu.rs       o vídeo que só mostra o que se manda (porte do virtio-gpud)
 │   └── teclado.rs   o teclado do ARM, por virtio
 ├── usb/
 │   ├── mod.rs       o barramento por onde entram os periféricos de verdade

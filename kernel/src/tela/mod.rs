@@ -164,6 +164,30 @@ static STRIDE: AtomicU32 = AtomicU32::new(0);
 static BYTES_POR_PIXEL: AtomicU32 = AtomicU32::new(0);
 static FORMATO: AtomicU32 = AtomicU32::new(0);
 
+/// Quem precisa ser avisado para a tela mostrar o que se escreveu nela.
+///
+/// Nenhum, num framebuffer linear: o dispositivo varre a memória sozinho, e o
+/// que se escreve aparece. Um adaptador como o `virtio-gpu` não varre nada —
+/// só mostra o que lhe mandam —, e então a tela anota o retângulo que sujou e
+/// o entrega a ele em [`descarregar`].
+///
+/// Um atômico, e não uma trava, porque a tela é alcançável do caminho de
+/// falha fatal. Zero é "ninguém".
+static DESCARREGADOR: AtomicU32 = AtomicU32::new(0);
+const DESCARREGADOR_VIRTIO: u32 = 1;
+
+/// O retângulo sujo desde a última descarga: `[x0, x1) × [y0, y1)`.
+///
+/// Vazio quando `x0 >= x1`. Quatro atômicos que crescem por mínimo e máximo:
+/// quem escreve só alarga, e quem descarrega troca pelo vazio. Entre as duas
+/// coisas não há corrida de verdade — as escritas na tela acontecem com as
+/// interrupções mascaradas, num núcleo só —, e se um dia houver, o pior
+/// desfecho é descarregar um pouco a mais.
+static SUJO_X0: AtomicU32 = AtomicU32::new(u32::MAX);
+static SUJO_Y0: AtomicU32 = AtomicU32::new(u32::MAX);
+static SUJO_X1: AtomicU32 = AtomicU32::new(0);
+static SUJO_Y1: AtomicU32 = AtomicU32::new(0);
+
 /// Um framebuffer linear pronto para desenhar.
 #[derive(Clone, Copy, Debug)]
 pub struct Tela {
@@ -220,6 +244,71 @@ pub unsafe fn registrar(
     // decidir que há um framebuffer, então publicá-la antes da geometria
     // abriria uma janela em que alguém desenharia com largura zero.
     BASE.store(base, Ordering::Release);
+}
+
+/// A partir de agora, o que se escreve na tela precisa ser levado ao
+/// dispositivo por `quem`. Ver [`DESCARREGADOR`].
+pub fn descarregar_por(quem: crate::virtio::gpu::Descarregador) {
+    match quem {
+        crate::virtio::gpu::Descarregador::Virtio => {
+            DESCARREGADOR.store(DESCARREGADOR_VIRTIO, Ordering::Release)
+        }
+    }
+}
+
+/// Esta tela precisa ser descarregada para aparecer?
+pub fn precisa_descarregar() -> bool {
+    DESCARREGADOR.load(Ordering::Acquire) != 0
+}
+
+/// Leva ao dispositivo o que a tela sujou desde a última vez.
+///
+/// Chamada depois de cada escrita no console, do banner e da tela de falha.
+/// Num framebuffer linear não faz nada. Se o dispositivo não pôde levar
+/// agora, o retângulo volta a ser sujo e vai junto com a próxima escrita —
+/// nada se perde, só atrasa.
+pub fn descarregar() {
+    if DESCARREGADOR.load(Ordering::Acquire) != DESCARREGADOR_VIRTIO {
+        return;
+    }
+    let x0 = SUJO_X0.swap(u32::MAX, Ordering::Relaxed);
+    let y0 = SUJO_Y0.swap(u32::MAX, Ordering::Relaxed);
+    let x1 = SUJO_X1.swap(0, Ordering::Relaxed);
+    let y1 = SUJO_Y1.swap(0, Ordering::Relaxed);
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+    let r = crate::virtio::gpu::Retangulo {
+        x: x0,
+        y: y0,
+        largura: x1 - x0,
+        altura: y1 - y0,
+    };
+    if !crate::virtio::gpu::descarregar_tela(r) {
+        sujar(x0, y0, x1, y1);
+    }
+}
+
+/// Alarga o retângulo sujo para cobrir `[x0, x1) × [y0, y1)`.
+fn sujar(x0: u32, y0: u32, x1: u32, y1: u32) {
+    SUJO_X0.fetch_min(x0, Ordering::Relaxed);
+    SUJO_Y0.fetch_min(y0, Ordering::Relaxed);
+    SUJO_X1.fetch_max(x1, Ordering::Relaxed);
+    SUJO_Y1.fetch_max(y1, Ordering::Relaxed);
+}
+
+/// O retângulo sujo agora, sem tocá-lo. Para a suíte.
+#[cfg(feature = "modo-teste")]
+pub fn sujo() -> Option<(u32, u32, u32, u32)> {
+    let (x0, y0) = (
+        SUJO_X0.load(Ordering::Relaxed),
+        SUJO_Y0.load(Ordering::Relaxed),
+    );
+    let (x1, y1) = (
+        SUJO_X1.load(Ordering::Relaxed),
+        SUJO_Y1.load(Ordering::Relaxed),
+    );
+    (x0 < x1 && y0 < y1).then_some((x0, y0, x1, y1))
 }
 
 /// Adota a tela que o iniciador entregou, se ele entregou uma.
@@ -420,6 +509,18 @@ impl Tela {
         (self.base, bytes)
     }
 
+    /// Anota que `[x0, x1) × [y0, y1)` mudou, se esta for a tela da máquina e
+    /// ela precisar ser descarregada.
+    ///
+    /// A comparação da base é o que deixa de fora as telas sintéticas da
+    /// suíte: elas desenham em memória de quem as criou, e sujá-las não diz
+    /// nada sobre o que o monitor mostra.
+    fn sujar(&self, x0: u32, y0: u32, x1: u32, y1: u32) {
+        if DESCARREGADOR.load(Ordering::Relaxed) != 0 && self.base == BASE.load(Ordering::Relaxed) {
+            sujar(x0, y0, x1, y1);
+        }
+    }
+
     /// Onde os bytes de um pixel começam, se ele estiver dentro da tela.
     fn endereco(&self, x: u32, y: u32) -> Option<*mut u8> {
         if x >= self.largura || y >= self.altura {
@@ -532,6 +633,7 @@ impl Tela {
         if x >= fim_x || y >= fim_y {
             return;
         }
+        self.sujar(x, y, fim_x, fim_y);
 
         let (bytes, quantos) = self.bytes_da_cor(cor);
         let passo = self.bytes_por_pixel as u64;
@@ -586,6 +688,7 @@ impl Tela {
         }
         let cabem = (self.largura - x) as usize;
         let pixels = &pixels[..pixels.len().min(cabem)];
+        self.sujar(x, y, x + pixels.len() as u32, y + 1);
 
         let Some(inicio) = self.endereco(x, y) else {
             return;
@@ -648,6 +751,7 @@ pub fn banner() {
     // A tela ficou em branco; o cursor do console precisa saber disso, ou a
     // primeira linha de texto sai onde ele parou da última vez.
     console::recomecar();
+    descarregar();
 }
 
 /// Pinta a tela de falha.
@@ -662,4 +766,9 @@ pub fn falha() {
     if let Some(tela) = tela() {
         tela.preencher(Cor::FALHA);
     }
+    // Num adaptador que só mostra o que se manda, a tela de falha precisa ser
+    // mandada. O caminho fatal destravou o dispositivo antes de chegar aqui;
+    // se a falha foi dentro de um comando dele, a fila pode estar pela metade
+    // e a descarga não chegar — e a tela fica como estava, sem pior desfecho.
+    descarregar();
 }
