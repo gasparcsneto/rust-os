@@ -375,8 +375,9 @@ impl<'a> Json<'a> {
     /// O conteúdo de uma string JSON, sem as aspas e sem desescapar.
     ///
     /// Não desescapamos porque os campos que lemos (nomes de método, níveis de
-    /// log) são identificadores que nunca contêm escapes. Aceitar escapes
-    /// exigiria um buffer de destino, ou seja, alocação.
+    /// log) são identificadores que nunca contêm escapes. Para texto com
+    /// escapes, ver [`Self::desescapar_em`], que escreve num destino de quem
+    /// chama.
     pub fn as_str(&self) -> Option<&'a str> {
         let b = self.0;
         if b.len() >= 2 && b[0] == b'"' && b[b.len() - 1] == b'"' {
@@ -384,6 +385,75 @@ impl<'a> Json<'a> {
         } else {
             None
         }
+    }
+
+    /// O conteúdo de uma string JSON, com os escapes resolvidos, escrito em
+    /// `destino`.
+    ///
+    /// # Por que existe, ao lado de [`Self::as_str`]
+    ///
+    /// Porque `as_str` devolve os bytes crus, e para um identificador isso
+    /// basta. Para um texto que vai ser **usado** não basta: o `value` de
+    /// `ui.act` é uma linha de comando, e uma linha de comando carrega
+    /// parâmetros em JSON — com aspas, que dentro de uma string JSON só chegam
+    /// escapadas. Sem resolver `\"`, um agente que pedisse
+    /// `log.tail {"count":3}` teria a barra digitada na linha, e o comando
+    /// nunca receberia JSON válido.
+    ///
+    /// O destino é de quem chama, e não do heap: este módulo não aloca.
+    ///
+    /// Devolve `None` se não for uma string, se um escape for inválido ou se
+    /// o resultado não couber. `\u` é aceito para qualquer ponto de código
+    /// fora da faixa dos substitutos — um par de substitutos é recusado em vez
+    /// de meio decodificado.
+    pub fn desescapar_em<'d>(&self, destino: &'d mut [u8]) -> Option<&'d str> {
+        let bruto = self.as_str()?.as_bytes();
+        let mut i = 0;
+        let mut n = 0;
+        let mut por = |b: &[u8], n: &mut usize| -> Option<()> {
+            let fim = n.checked_add(b.len())?;
+            destino.get_mut(*n..fim)?.copy_from_slice(b);
+            *n = fim;
+            Some(())
+        };
+        while i < bruto.len() {
+            if bruto[i] != b'\\' {
+                por(&bruto[i..i + 1], &mut n)?;
+                i += 1;
+                continue;
+            }
+            let escape = *bruto.get(i + 1)?;
+            i += 2;
+            let simples = match escape {
+                b'"' => Some(b'"'),
+                b'\\' => Some(b'\\'),
+                b'/' => Some(b'/'),
+                b'b' => Some(0x08),
+                b'f' => Some(0x0C),
+                b'n' => Some(b'\n'),
+                b'r' => Some(b'\r'),
+                b't' => Some(b'\t'),
+                b'u' => None,
+                _ => return None,
+            };
+            match simples {
+                Some(b) => por(&[b], &mut n)?,
+                None => {
+                    let hex = bruto.get(i..i + 4)?;
+                    // `from_str_radix` aceita um `+` na frente; o JSON, não.
+                    if !hex.iter().all(u8::is_ascii_hexdigit) {
+                        return None;
+                    }
+                    let ponto = u32::from_str_radix(core::str::from_utf8(hex).ok()?, 16).ok()?;
+                    i += 4;
+                    let c = char::from_u32(ponto)?;
+                    let mut utf8 = [0u8; 4];
+                    por(c.encode_utf8(&mut utf8).as_bytes(), &mut n)?;
+                }
+            }
+        }
+        let feito: &'d [u8] = destino;
+        core::str::from_utf8(&feito[..n]).ok()
     }
 
     pub fn as_u64(&self) -> Option<u64> {

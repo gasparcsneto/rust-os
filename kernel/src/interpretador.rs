@@ -19,30 +19,62 @@
 //! No console humano, que é a tela nas duas arquiteturas e também a COM1 no
 //! x86. Não no canal do agente: as duas conversas são independentes, e
 //! misturá-las quebraria o enquadramento de quem está do outro lado.
+//!
+//! # A linha de comando tem dois donos, e um caminho
+//!
+//! Quem está na frente da máquina edita a linha pelo teclado; um agente, pela
+//! árvore semântica ([`crate::ui`]), com `set_value` e `confirm`. Os dois
+//! passam pelas **mesmas** funções deste módulo — [`definir`], [`confirmar`]
+//! —, que editam o mesmo buffer, desenham na mesma tela e registram no mesmo
+//! log, com a origem dizendo quem foi. Um caminho à parte para o agente seria
+//! uma segunda forma de executar um comando, e a pessoa não veria o que ele
+//! fez.
 
 // Em `modo-teste` o laço do agente é trocado pelo executor da suíte, e o
-// interpretador — que é uma tarefa desse laço — não é lançado. O que sobra do
-// módulo é [`separar`], que a suíte exercita; o resto não existe nessa
-// compilação, em vez de existir sem chamador.
-#[cfg(not(feature = "modo-teste"))]
+// interpretador — que é uma tarefa desse laço — não é lançado. O resto do
+// módulo existe nas duas compilações: a suíte ativa a linha de comando à mão
+// e age sobre ela pelo mesmo caminho que o agente usa em produção.
 use core::fmt;
 
-#[cfg(not(feature = "modo-teste"))]
+use spin::Mutex;
+
 use crate::agent::json::{Json, JsonWriter};
-#[cfg(not(feature = "modo-teste"))]
 use crate::agent::registry;
+use crate::ui::Origem;
 
 /// O maior comando que se pode digitar.
 ///
 /// Não há heap no caminho de uma tecla, então a linha é um buffer fixo. Cento
 /// e vinte caracteres cobrem o maior comando com parâmetros que este kernel
 /// tem; o que passar disso é recusado com aviso, e não truncado em silêncio.
-#[cfg(not(feature = "modo-teste"))]
-const LINHA_MAX: usize = 120;
+pub const LINHA_MAX: usize = 120;
 
 /// O que aparece antes do que se digita.
-#[cfg(not(feature = "modo-teste"))]
 const PROMPT: &str = "duke> ";
+
+/// A linha de comando: o que foi digitado e ainda não confirmado.
+struct Linha {
+    bytes: [u8; LINHA_MAX],
+    tam: usize,
+    /// Onde o campo começa na tela, em células — logo depois do prompt.
+    ///
+    /// `None` enquanto o interpretador não está atendendo: não há campo, e a
+    /// árvore não o publica.
+    inicio: Option<(u32, u32)>,
+}
+
+// A tomada desta tranca passa por `sem_interrupcoes`, pelo motivo de toda
+// tranca deste kernel, e nunca atravessa a execução de um comando: um comando
+// pode ser `ui.tree`, que lê esta mesma linha.
+static LINHA: Mutex<Linha> = Mutex::new(Linha {
+    bytes: [0; LINHA_MAX],
+    tam: 0,
+    inicio: None,
+});
+
+fn com_linha<R>(f: impl FnOnce(&mut Linha) -> R) -> R {
+    crate::arch::sem_interrupcoes(|| f(&mut LINHA.lock()))
+}
 
 /// Lê o teclado e executa o que for digitado. Nunca retorna.
 ///
@@ -53,56 +85,226 @@ const PROMPT: &str = "duke> ";
 #[cfg(not(feature = "modo-teste"))]
 pub async fn atender() {
     crate::serial_println!();
-    crate::serial_print!("{PROMPT}");
-
-    let mut linha = [0u8; LINHA_MAX];
-    let mut tam = 0usize;
+    mostrar_prompt();
 
     loop {
-        let c = crate::teclado::proxima_tecla().await;
-
-        match c {
+        match crate::teclado::proxima_tecla().await {
             '\n' => {
-                crate::serial_println!();
-                // `from_utf8` não falha: só entram aqui bytes ASCII
-                // imprimíveis, filtrados abaixo. O `unwrap_or` existe para
-                // que um dia em que isso mude vire uma linha vazia, e não um
-                // pânico dentro do interpretador.
-                executar(core::str::from_utf8(&linha[..tam]).unwrap_or(""));
-                tam = 0;
-                crate::serial_print!("{PROMPT}");
+                confirmar(Origem::Pessoa);
             }
-
-            // O apagar precisa apagar na tela também, e não só no buffer.
-            // Uma tela que mostra o que foi apagado é pior que nenhuma: ela
-            // afirma algo falso sobre o que será executado.
-            '\u{8}' => {
-                if tam > 0 {
-                    tam -= 1;
-                    crate::serial_print!("\u{8}");
-                }
-            }
-
+            '\u{8}' => apagar(),
             // Só o que é texto entra na linha. Teclas sem caractere já não
             // chegam aqui, mas o controle que sobra — um tab, por exemplo —
             // desalinharia a conta entre o que está no buffer e o que está
             // desenhado.
-            c if c.is_ascii_graphic() || c == ' ' => {
-                if tam < LINHA_MAX {
-                    linha[tam] = c as u8;
-                    tam += 1;
-                    crate::serial_print!("{c}");
-                } else {
+            c if aceito(c) => {
+                let coube = digitar(c);
+                if !coube {
                     crate::serial_println!();
                     crate::serial_println!("linha longa demais; ate {} caracteres", LINHA_MAX);
-                    tam = 0;
-                    crate::serial_print!("{PROMPT}");
+                    com_linha(|l| l.tam = 0);
+                    mostrar_prompt();
                 }
             }
-
             _ => {}
         }
     }
+}
+
+/// Um caractere que uma pessoa consegue pôr na linha.
+fn aceito(c: char) -> bool {
+    c.is_ascii_graphic() || c == ' '
+}
+
+/// Desenha o prompt e marca ali o começo do campo.
+fn mostrar_prompt() {
+    crate::serial_print!("{PROMPT}");
+    let inicio = crate::tela::console::cursor_em_celulas();
+    com_linha(|l| l.inicio = Some(inicio));
+    crate::ui::mudou();
+}
+
+/// Acrescenta um caractere à linha e o desenha. Falso se ele não coube.
+fn digitar(c: char) -> bool {
+    let coube = com_linha(|l| {
+        if l.tam < LINHA_MAX {
+            l.bytes[l.tam] = c as u8;
+            l.tam += 1;
+            true
+        } else {
+            false
+        }
+    });
+    if coube {
+        crate::serial_print!("{c}");
+    }
+    coube
+}
+
+/// Apaga o último caractere da linha, e da tela.
+///
+/// O apagar precisa apagar na tela também, e não só no buffer. Uma tela que
+/// mostra o que foi apagado é pior que nenhuma: ela afirma algo falso sobre o
+/// que será executado.
+///
+/// `\u{8} \u{8}`, e não só `\u{8}`: o console da tela apaga a célula com o
+/// primeiro, mas um terminal do outro lado da COM1 só volta o cursor, e o
+/// espaço é o que cobre a letra nele.
+fn apagar() {
+    let apagou = com_linha(|l| {
+        if l.tam > 0 {
+            l.tam -= 1;
+            true
+        } else {
+            false
+        }
+    });
+    if apagou {
+        crate::serial_print!("\u{8} \u{8}");
+    }
+}
+
+/// Onde o campo da linha de comando começa na tela, em células, se o
+/// interpretador estiver atendendo.
+pub fn inicio_do_campo() -> Option<(u32, u32)> {
+    com_linha(|l| l.inicio)
+}
+
+/// O que está digitado agora. Para a árvore semântica.
+pub fn com_valor<R>(f: impl FnOnce(&str) -> R) -> R {
+    com_linha(|l| f(core::str::from_utf8(&l.bytes[..l.tam]).unwrap_or("")))
+}
+
+/// Troca o que está na linha, apagando o que havia e digitando o novo.
+///
+/// É o `set_value` da árvore semântica. Passa pelo apagar e pelo digitar de
+/// quem está na frente da máquina, caractere por caractere, para que a tela
+/// termine igual ao que uma pessoa veria se tivesse digitado — inclusive onde
+/// a linha quebra.
+///
+/// Recusa antes de mexer em qualquer coisa: um valor longo demais, ou com
+/// algo que uma pessoa não conseguiria digitar, não apaga a linha que estava
+/// lá.
+pub fn definir(valor: &str) -> Result<(), &'static str> {
+    if com_linha(|l| l.inicio.is_none()) {
+        return Err("a linha de comando nao esta atendendo");
+    }
+    if valor.len() > LINHA_MAX {
+        return Err("o valor nao cabe na linha de comando");
+    }
+    if !valor.chars().all(aceito) {
+        return Err("o valor tem caracteres que nao se digitam na linha de comando");
+    }
+    while com_linha(|l| l.tam) > 0 {
+        apagar();
+    }
+    for c in valor.chars() {
+        digitar(c);
+    }
+    crate::ui::mudou();
+    Ok(())
+}
+
+/// Executa a linha, como o Enter.
+///
+/// Devolve o nome do comando que foi executado, vazio se a linha estava
+/// vazia. A trava da linha é solta **antes** de executar: o comando pode ser
+/// `ui.tree`, que lê a linha, ou `ui.act`, que a edita.
+pub fn confirmar(origem: Origem) -> alloc::string::String {
+    let mut copia = [0u8; LINHA_MAX];
+    // O campo deixa de existir enquanto o comando roda, e volta com o prompt
+    // seguinte. É o que diz a [`por_cima`] que a linha na tela já não está em
+    // edição — a saída do comando vem depois dela, e não por cima.
+    let tam = com_linha(|l| {
+        let tam = l.tam;
+        copia[..tam].copy_from_slice(&l.bytes[..tam]);
+        l.tam = 0;
+        l.inicio = None;
+        tam
+    });
+    crate::serial_println!();
+    // `from_utf8` não falha: só entram na linha caracteres ASCII, filtrados
+    // em [`digitar`] e em [`definir`]. O `unwrap_or` existe para que um dia
+    // em que isso mude vire uma linha vazia, e não um pânico.
+    let linha = core::str::from_utf8(&copia[..tam]).unwrap_or("");
+    let nome = executar(linha, origem);
+    mostrar_prompt();
+    nome
+}
+
+/// Escreve algo no console sem partir a linha que está sendo digitada.
+///
+/// # O defeito
+///
+/// Todo registro de log é ecoado no console, e o console é a mesma tela em
+/// que a pessoa digita. Uma linha de log que chegasse no meio da edição era
+/// desenhada depois do que já estava digitado, e o que a pessoa digitasse em
+/// seguida continuava na linha de baixo: `duke> sys` numa linha, o registro,
+/// e `tem.info` embaixo. A linha que seria executada não era nenhuma das que
+/// estavam na tela.
+///
+/// A árvore semântica tornou isso visível — a própria ação do agente registra
+/// uma linha antes de agir —, mas o defeito é anterior a ela e vale para
+/// qualquer registro, inclusive os do timer e dos drivers.
+///
+/// # O conserto
+///
+/// O que um terminal faz: com uma linha em edição, apagá-la, escrever o que
+/// chegou, e redesenhar o prompt com o que já estava digitado. A pessoa vê o
+/// registro aparecer acima da linha dela, e a linha continua inteira.
+///
+/// Sem linha em edição — antes de o interpretador atender, ou enquanto um
+/// comando roda — escreve direto.
+pub fn por_cima(escrever: impl FnOnce()) {
+    let digitado = com_linha(|l| {
+        l.inicio.map(|_| {
+            let mut copia = [0u8; LINHA_MAX];
+            copia[..l.tam].copy_from_slice(&l.bytes[..l.tam]);
+            (copia, l.tam)
+        })
+    });
+    let Some((copia, tam)) = digitado else {
+        escrever();
+        return;
+    };
+
+    for _ in 0..PROMPT.len() + tam {
+        crate::serial_print!("\u{8} \u{8}");
+    }
+    escrever();
+    mostrar_prompt();
+    crate::serial_print!("{}", core::str::from_utf8(&copia[..tam]).unwrap_or(""));
+}
+
+/// Destrava a linha de comando à força, para uso exclusivo do caminho de
+/// falha fatal.
+///
+/// # Safety
+///
+/// Só pode ser chamada quando o kernel já está em falha irrecuperável e não
+/// há outro núcleo em execução. Ver [`crate::traps::fatal`].
+pub unsafe fn destravar() {
+    unsafe { LINHA.force_unlock() };
+}
+
+/// Liga a linha de comando sem a tarefa do interpretador. Para a suíte, que
+/// roda no lugar do laço em que a tarefa viveria.
+#[cfg(feature = "modo-teste")]
+pub fn ativar_para_teste() {
+    com_linha(|l| l.tam = 0);
+    mostrar_prompt();
+}
+
+/// Desliga a linha de comando de novo, para que os casos seguintes vejam a
+/// máquina como a suíte a encontra.
+#[cfg(feature = "modo-teste")]
+pub fn desativar_para_teste() {
+    com_linha(|l| {
+        l.tam = 0;
+        l.inicio = None;
+    });
+    crate::serial_println!();
+    crate::ui::mudou();
 }
 
 /// Separa o nome do comando dos parâmetros.
@@ -130,25 +332,24 @@ pub fn separar(linha: &str) -> (&str, &str) {
     }
 }
 
-/// Executa uma linha digitada.
-#[cfg(not(feature = "modo-teste"))]
-fn executar(linha: &str) {
+/// Executa uma linha, e devolve o nome do comando que ela pedia.
+fn executar(linha: &str, origem: Origem) -> alloc::string::String {
     let linha = linha.trim();
     if linha.is_empty() {
-        return;
+        return alloc::string::String::new();
     }
 
     let (nome, params) = separar(linha);
 
     match nome {
-        "ajuda" => ajuda(),
-        _ => despachar(nome, params),
+        "ajuda" => ajuda(origem),
+        _ => despachar(nome, params, origem),
     }
+    alloc::string::String::from(nome)
 }
 
 /// Manda o comando ao registro do agente e desenha a resposta.
-#[cfg(not(feature = "modo-teste"))]
-fn despachar(nome: &str, params: &str) {
+fn despachar(nome: &str, params: &str, origem: Origem) {
     let Some(comando) = registry::encontrar(nome) else {
         crate::serial_println!("comando desconhecido: {}", nome);
         crate::serial_println!("`ajuda` lista os {} que existem", registry::todos().len());
@@ -157,9 +358,10 @@ fn despachar(nome: &str, params: &str) {
 
     // No log, e não só na tela, porque é o que torna o interpretador
     // observável de fora: o canal do agente lê `log.tail` e vê o que foi
-    // digitado na máquina. É também o que permite a uma sonda conferir que a
-    // tecla virou comando, sem precisar enxergar a tela.
-    crate::log_info!("console", "executado: {}", nome);
+    // executado na máquina — e por quem. A origem é o começo da auditoria que
+    // a fase 12 do roteiro pede: se um agente pode fazer tudo que uma pessoa
+    // faz, o registro precisa dizer qual dos dois fez.
+    crate::log_info!("console", "executado: {} ({})", nome, origem.nome());
 
     let mut saida = SaidaHumana::nova();
     let mut escritor = JsonWriter::new(&mut saida);
@@ -173,9 +375,8 @@ fn despachar(nome: &str, params: &str) {
 ///
 /// Sai do mesmo registro que `agent.describe` publica. Uma lista escrita à
 /// mão aqui seria a segunda superfície que este módulo existe para não ter.
-#[cfg(not(feature = "modo-teste"))]
-fn ajuda() {
-    crate::log_info!("console", "executado: ajuda");
+fn ajuda(origem: Origem) {
+    crate::log_info!("console", "executado: ajuda ({})", origem.nome());
     for comando in registry::todos() {
         crate::serial_println!("  {:<18} {}", comando.nome, comando.resumo);
     }
@@ -191,14 +392,12 @@ fn ajuda() {
 /// agente recebe. Isto aqui não entende nada: conta chaves, respeita strings,
 /// e quebra linha onde a leitura pede. O conteúdo é byte a byte o que sai no
 /// canal.
-#[cfg(not(feature = "modo-teste"))]
 struct SaidaHumana {
     profundidade: u32,
     dentro_de_string: bool,
     escapado: bool,
 }
 
-#[cfg(not(feature = "modo-teste"))]
 impl SaidaHumana {
     fn nova() -> SaidaHumana {
         SaidaHumana {
@@ -256,7 +455,6 @@ impl SaidaHumana {
     }
 }
 
-#[cfg(not(feature = "modo-teste"))]
 impl fmt::Write for SaidaHumana {
     fn write_str(&mut self, pedaco: &str) -> fmt::Result {
         for c in pedaco.chars() {

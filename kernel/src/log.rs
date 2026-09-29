@@ -228,14 +228,19 @@ pub fn registrar(nivel: Level, subsistema: &'static str, args: fmt::Arguments) -
     // funciona aqui: a string de formato chega via `concat!` dentro da macro
     // `serial_println!`, e o `format_args!` se recusa a capturar variáveis do
     // escopo quando o literal veio de uma expansão de macro.
-    crate::serial_println!(
-        "[{:>5}] {:>8}ms {:<5} {:<8} {}",
-        seq,
-        crate::tempo::uptime_ms(),
-        nivel.nome(),
-        subsistema,
-        args
-    );
+    //
+    // Por cima da linha de comando, e não no meio dela: ver
+    // [`crate::interpretador::por_cima`].
+    crate::interpretador::por_cima(|| {
+        crate::serial_println!(
+            "[{:>5}] {:>8}ms {:<5} {:<8} {}",
+            seq,
+            crate::tempo::uptime_ms(),
+            nivel.nome(),
+            subsistema,
+            args
+        )
+    });
 
     guardados
 }

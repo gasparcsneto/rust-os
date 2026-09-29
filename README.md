@@ -164,6 +164,8 @@ Os dois podem rodar ao mesmo tempo: cada arquitetura tem seu próprio socket.
 | `net.arp` | Pergunta quem atende por um IPv4 e espera a resposta (`ip`, `from`) |
 | `video.sample` | Amostra a tela numa grade de cores (`columns`, `rows`) |
 | `display.info` | A pilha gráfica: adaptador ativo, telas, memória das superfícies e o último retângulo que chegou à tela |
+| `ui.tree` | A árvore semântica do que está na tela: papel, rótulo, valor, moldura e ações de cada elemento |
+| `ui.act` | Age sobre um elemento pelo mesmo caminho de quem está na frente da máquina (`id`, `action`, `value`) |
 | `keyboard.read` | O que foi digitado no teclado da máquina, e os contadores dele (`max`) |
 | `log.tail` | Registros de log estruturados (`count`, `min_level`) |
 
@@ -187,6 +189,7 @@ kernel/src/
 ├── mmio.rs          como o kernel alcança a memória de um dispositivo
 ├── heap.rs          alocador do kernel: lista livre ordenada com fusão
 ├── interpretador.rs operar o Duke digitando
+├── ui.rs            a árvore semântica: o que está na tela, e o que se faz com cada coisa
 ├── teclado.rs       o que uma pessoa digita chega ao kernel
 ├── pci.rs           enumeração do barramento PCI
 ├── particoes.rs     a tabela de partições GPT do disco
@@ -812,7 +815,7 @@ duke> system.info
 
 duke> nao.existe
 comando desconhecido: nao.existe
-`ajuda` lista os 33 que existem
+`ajuda` lista os 35 que existem
 ```
 
 **O interpretador não tem comandos próprios.** O que se digita é despachado
@@ -837,6 +840,72 @@ por ele. `keyboard.read` lê um histórico paralelo, escrito junto e consumido
 separado — porque um segundo consumidor da mesma fila não observa o que foi
 digitado, rouba. Foi medido: com os dois lendo a mesma fila, a sonda recebeu
 uma das três teclas que mandou.
+
+## A árvore semântica
+
+Um agente que opera uma interface gráfica hoje, em quase todo sistema, tira
+uma captura da tela e adivinha onde está o botão. Funciona até o tema mudar ou
+o texto ser traduzido, e aí quebra sem dizer por quê: ele está lendo a
+renderização em vez da coisa.
+
+O Duke publica a coisa. `ui.tree` devolve a árvore do que está na tela —
+cada elemento com papel, rótulo, valor, moldura em pixels e as ações que
+aceita —, e `ui.act` age sobre um elemento pelo `id`:
+
+```
+$ cargo xtask agent ui.tree
+{"revision":4013,"root":{"id":1,"role":"screen","label":"tela",
+ "frame":{"x":0,"y":0,"width":1280,"height":800},"actions":[],"children":[
+  {"id":2,"role":"text_area","label":"console","frame":{...},
+   "value":"...\nduke> ","value_complete":true,"actions":[],"children":[
+    {"id":3,"role":"text_field","label":"linha de comando","frame":{...},
+     "value":"","focused":true,"actions":["confirm","cancel","set_value"],
+     "children":[]}]}]}}
+
+$ cargo xtask agent ui.act '{"id":3,"action":"set_value","value":"system.uptime"}'
+$ cargo xtask agent ui.act '{"id":3,"action":"confirm"}'
+{"id":3,"action":"confirm","ok":true,"executed":"system.uptime","revision":4102}
+```
+
+**O desenho é o da acessibilidade do macOS**, que é público: o `AXUIElement`,
+com papel, valor e ações como `AXPress` e `AXConfirm`. O vocabulário das ações
+é o mesmo — `press`, `confirm`, `cancel`, `set_value` —, para que quem conhece
+um reconheça o outro. Código da Apple não há nenhum aqui.
+
+**A árvore é gerada, e não escrita à mão.** O texto do console é o que o
+próprio console guardou no instante em que desenhou cada caractere; a linha de
+comando é o buffer que o interpretador edita; as molduras saem da geometria da
+tela. É a regra que a fase 11 do roteiro fixa para o toolkit: uma árvore
+mantida ao lado da interface seria a segunda superfície que este projeto
+existe para não ter. A suíte confere as duas pontas — acha na árvore o texto
+que escreveu e confere, glifo por glifo, que é aquele caractere que está
+desenhado naquela linha e coluna.
+
+**Agir é passar pelo caminho da pessoa.** Confirmar a linha de comando executa
+o que está nela exatamente como o Enter: pelo interpretador, que despacha pelo
+registro, desenha a resposta na tela e registra no log. Quem está na frente da
+máquina vê o comando aparecer e a resposta ser desenhada — nada acontece por
+trás da tela. E o log diz quem foi:
+
+```
+info console  executado: system.uptime (agente)
+info console  executado: agent.ping (pessoa)
+```
+
+É o começo do que a fase 12 chama de auditoria: se um agente pode fazer tudo
+que uma pessoa faz, o registro precisa dizer qual dos dois fez.
+
+**O que ainda não há.** Botões: a interface de hoje é um console, e nenhum
+elemento aceita `press` — a árvore diz isso em vez de fingir; o primeiro vem
+com o compositor. Consentimento: um `set_value` do agente troca o que a pessoa
+estava digitando, e nada pergunta a ela antes. A árvore mostra o que está
+digitado, e o log registra quem agiu, mas pedir licença é trabalho da fase 12.
+
+**Duas coisas que ela destapou no console.** O apagar desenhava um `?` e
+avançava, em vez de apagar — a linha no buffer estava certa e a tela afirmava
+outra coisa. E todo registro de log era desenhado no meio do que a pessoa
+estava digitando, partindo a linha em duas. Hoje o apagar apaga, e um registro
+que chega durante a edição aparece acima da linha, que é redesenhada inteira.
 
 ## Sistema de arquivos
 
@@ -1612,8 +1681,9 @@ padronizado.
       no desenho do Redox — um trait de adaptador que o compositor usa sem
       saber o que está embaixo, o retângulo de dano com o recorte que não dá a
       volta, o adaptador linear sobre o framebuffer, e `display.info` dizendo
-      ao agente o que chegou à tela. A seguir: a árvore semântica, adiantada;
-      o compositor, com superfícies e ordem de empilhamento; e o virtio-gpu
+      ao agente o que chegou à tela; e a árvore semântica, adiantada — `ui.tree`
+      e `ui.act`, no desenho da acessibilidade do macOS, gerada do que está
+      na tela e agindo pelo mesmo caminho da pessoa. A seguir: o compositor, com superfícies e ordem de empilhamento; e o virtio-gpu
       como segundo adaptador atrás do mesmo trait. O que o virtio-gpu 2D traz
       é retângulo de dano e troca de página sem rasgo — não aceleração, que
       este texto chegou a prometer: medido, o framebuffer linear já pinta a

@@ -85,6 +85,55 @@ const PAPEL: Cor = Cor::FUNDO;
 static CURSOR_X: AtomicU32 = AtomicU32::new(MARGEM_X);
 static CURSOR_Y: AtomicU32 = AtomicU32::new(MARGEM_Y);
 
+/// O maior console que a grade de texto acompanha, em caracteres.
+///
+/// Folgado para as telas que existem aqui — 1280x800 dá 180 colunas por 49
+/// linhas com esta fonte — e para uma de 1920x1080. O que passar disto é
+/// desenhado e não guardado; [`texto_completo`] diz quando isso aconteceu.
+const MAX_COLUNAS: usize = 256;
+const MAX_LINHAS: usize = 72;
+
+/// O texto que está na tela, caractere por caractere.
+///
+/// # Por que guardar o que já foi desenhado
+///
+/// Porque a árvore semântica ([`crate::ui`]) descreve o que está na tela, e a
+/// tela é pixels. Ler os pixels de volta e reconhecer letras seria adivinhar;
+/// guardar o texto no instante em que ele é desenhado faz a árvore dizer
+/// exatamente o que foi posto ali. É a inversão que o projeto repete desde o
+/// log estruturado: o texto é a fonte, e os pixels a renderização dele.
+///
+/// Atômica pela mesma razão do cursor: este módulo é alcançável do caminho de
+/// falha fatal, onde uma trava pode estar tomada. Zero é célula vazia.
+static GRADE: [AtomicU32; MAX_COLUNAS * MAX_LINHAS] =
+    [const { AtomicU32::new(0) }; MAX_COLUNAS * MAX_LINHAS];
+
+/// Alguma célula ficou fora da grade desde a última limpeza?
+static TRANSBORDOU: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// A célula da grade na posição de pixel `(x, y)`, se ela couber.
+fn celula(x: u32, y: u32) -> Option<&'static AtomicU32> {
+    let (largura, altura) = tamanho_do_caractere();
+    let coluna = (x.checked_sub(MARGEM_X)? / largura) as usize;
+    let linha = (y.checked_sub(MARGEM_Y)? / altura) as usize;
+    if coluna >= MAX_COLUNAS || linha >= MAX_LINHAS {
+        TRANSBORDOU.store(true, Ordering::Relaxed);
+        return None;
+    }
+    GRADE.get(linha * MAX_COLUNAS + coluna)
+}
+
+fn limpar_grade() {
+    for c in &GRADE {
+        c.store(0, Ordering::Relaxed);
+    }
+    TRANSBORDOU.store(false, Ordering::Relaxed);
+}
+
+fn tamanho_do_caractere() -> (u32, u32) {
+    (get_raster_width(PESO, ALTURA) as u32, ALTURA.val() as u32)
+}
+
 /// Escreve um texto na tela, se houver uma.
 ///
 /// Devolve se escreveu. Quem chama usa isso para saber se o texto chegou a
@@ -94,8 +143,7 @@ pub fn escrever(texto: &str) -> bool {
         return false;
     };
 
-    let largura_do_glifo = get_raster_width(PESO, ALTURA) as u32;
-    let altura_do_glifo = ALTURA.val() as u32;
+    let (largura_do_glifo, altura_do_glifo) = tamanho_do_caractere();
 
     let mut x = CURSOR_X.load(Ordering::Relaxed);
     let mut y = CURSOR_Y.load(Ordering::Relaxed);
@@ -110,6 +158,35 @@ pub fn escrever(texto: &str) -> bool {
             // linha atual. Ninguém no kernel manda um hoje; tratá-lo custa
             // uma linha e evita que um dia ele vire um glifo de lixo.
             '\r' => x = MARGEM_X,
+            // Apagar o caractere anterior: voltar uma célula e pintá-la de
+            // fundo.
+            //
+            // Não era tratado, e o interpretador o manda a cada tecla de
+            // apagar: a fonte não tem glifo para ele, o desenho caía no de
+            // substituição, e uma pessoa que apagasse via um `?` aparecer e o
+            // cursor **avançar**. A linha no buffer estava certa e a tela
+            // afirmava outra coisa — que é o que um console não pode fazer.
+            //
+            // Voltar do começo de uma linha sobe para a última coluna da de
+            // cima: é onde a quebra por largura deixou o caractere anterior.
+            // No topo da tela não há para onde voltar, e o apagar se perde —
+            // o texto de antes da última limpeza já não está lá.
+            '\u{8}' => {
+                if x >= MARGEM_X + largura_do_glifo {
+                    x -= largura_do_glifo;
+                } else if y >= MARGEM_Y + altura_do_glifo {
+                    y -= altura_do_glifo;
+                    let colunas = colunas_da_tela(&tela, largura_do_glifo);
+                    x = MARGEM_X + colunas.saturating_sub(1) * largura_do_glifo;
+                } else {
+                    continue;
+                }
+                tela.retangulo(x, y, largura_do_glifo, altura_do_glifo, PAPEL);
+                if let Some(celula) = celula(x, y) {
+                    celula.store(0, Ordering::Relaxed);
+                }
+                continue;
+            }
             _ => {
                 // Uma letra que não cabe na linha desce para a seguinte, em
                 // vez de ser cortada pela borda. O recorte de
@@ -122,6 +199,9 @@ pub fn escrever(texto: &str) -> bool {
 
                 y = recomecar_se_encheu(&tela, y, altura_do_glifo);
                 desenhar(&tela, c, x, y);
+                if let Some(celula) = celula(x, y) {
+                    celula.store(c as u32, Ordering::Relaxed);
+                }
                 x += largura_do_glifo;
                 continue;
             }
@@ -132,7 +212,16 @@ pub fn escrever(texto: &str) -> bool {
 
     CURSOR_X.store(x, Ordering::Relaxed);
     CURSOR_Y.store(y, Ordering::Relaxed);
+    crate::ui::mudou();
     true
+}
+
+/// Quantas colunas de texto cabem numa linha desta tela.
+///
+/// A conta é a da quebra de linha em [`escrever`]: uma letra cabe enquanto o
+/// fim dela não passar da margem direita.
+fn colunas_da_tela(tela: &Tela, largura_do_glifo: u32) -> u32 {
+    tela.largura.saturating_sub(2 * MARGEM_X) / largura_do_glifo
 }
 
 /// Volta ao topo quando não cabe mais uma linha, limpando a tela.
@@ -150,6 +239,7 @@ fn recomecar_se_encheu(tela: &Tela, y: u32, altura_do_glifo: u32) -> u32 {
     // kernel vivo — que é justamente o que uma pessoa olha primeiro.
     let topo = crate::tela::ALTURA_DO_ACENTO;
     tela.retangulo(0, topo, tela.largura, tela.altura - topo, PAPEL);
+    limpar_grade();
     MARGEM_Y
 }
 
@@ -221,6 +311,68 @@ fn misturar(fundo: Cor, frente: Cor, cobertura: u8) -> Cor {
 pub fn recomecar() {
     CURSOR_X.store(MARGEM_X, Ordering::Relaxed);
     CURSOR_Y.store(MARGEM_Y, Ordering::Relaxed);
+    // Quem chama limpou a tela, e o texto que a grade guardava não está mais
+    // lá. Uma árvore que continuasse a descrevê-lo descreveria o passado.
+    limpar_grade();
+    crate::ui::mudou();
+}
+
+/// A geometria do console, em caracteres e em pixels.
+pub struct Geometria {
+    /// Quantas colunas e linhas a tela comporta — limitadas ao que a grade
+    /// guarda.
+    pub colunas: u32,
+    pub linhas: u32,
+    /// O tamanho de uma célula, em pixels.
+    pub largura_da_celula: u32,
+    pub altura_da_celula: u32,
+    /// Onde a primeira célula começa.
+    pub margem_x: u32,
+    pub margem_y: u32,
+}
+
+/// A geometria do console desta tela, se houver uma.
+pub fn geometria() -> Option<Geometria> {
+    let tela = crate::tela::tela()?;
+    let (largura, altura) = tamanho_do_caractere();
+    let colunas = colunas_da_tela(&tela, largura).min(MAX_COLUNAS as u32);
+    let linhas = (tela.altura.saturating_sub(2 * MARGEM_Y) / altura).min(MAX_LINHAS as u32);
+    Some(Geometria {
+        colunas,
+        linhas,
+        largura_da_celula: largura,
+        altura_da_celula: altura,
+        margem_x: MARGEM_X,
+        margem_y: MARGEM_Y,
+    })
+}
+
+/// O caractere guardado na célula `(coluna, linha)`, ou `None` se ela está
+/// vazia ou fora da grade.
+pub fn caractere(coluna: u32, linha: u32) -> Option<char> {
+    let (coluna, linha) = (coluna as usize, linha as usize);
+    if coluna >= MAX_COLUNAS || linha >= MAX_LINHAS {
+        return None;
+    }
+    char::from_u32(GRADE[linha * MAX_COLUNAS + coluna].load(Ordering::Relaxed))
+        .filter(|&c| c != '\0')
+}
+
+/// A grade guardou tudo o que foi desenhado desde a última limpeza?
+///
+/// Falso numa tela maior que a grade. É o que a árvore publica para que um
+/// texto cortado não se passe por inteiro.
+pub fn texto_completo() -> bool {
+    !TRANSBORDOU.load(Ordering::Relaxed)
+}
+
+/// Onde o cursor está, em células.
+pub fn cursor_em_celulas() -> (u32, u32) {
+    let (largura, altura) = tamanho_do_caractere();
+    (
+        CURSOR_X.load(Ordering::Relaxed).saturating_sub(MARGEM_X) / largura,
+        CURSOR_Y.load(Ordering::Relaxed).saturating_sub(MARGEM_Y) / altura,
+    )
 }
 
 /// Onde o cursor está, em pixels. Para a suíte.
@@ -298,5 +450,28 @@ pub fn conferir_glifo(c: char, x: u32, y: u32) -> Result<(), &'static str> {
         }
     }
 
+    Ok(())
+}
+
+/// Confere que a célula com o canto em `(x, y)` está vazia: só fundo.
+///
+/// O par de [`conferir_glifo`] para o apagar. Mora aqui pelo mesmo motivo:
+/// "vazio" é a cor de fundo que este módulo usa, e a suíte não deveria ter
+/// uma segunda cópia dela.
+#[cfg(feature = "modo-teste")]
+pub fn conferir_celula_vazia(x: u32, y: u32) -> Result<(), &'static str> {
+    let Some(tela) = crate::tela::tela() else {
+        return Err("nao ha tela para conferir");
+    };
+    let (largura, altura) = tamanho_do_caractere();
+    for linha in 0..altura {
+        for coluna in 0..largura {
+            match tela.ler_pixel(x + coluna, y + linha) {
+                Some(cor) if cor == PAPEL => {}
+                Some(_) => return Err("a celula apagada ainda tem tinta"),
+                None => return Err("a celula caiu fora da tela"),
+            }
+        }
+    }
     Ok(())
 }

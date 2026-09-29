@@ -222,6 +222,39 @@ pub static COMANDOS: &[Command] = &[
         handler: display_info,
     },
     Command {
+        nome: "ui.tree",
+        resumo: "A arvore semantica do que esta na tela: cada elemento com papel, rotulo, valor, \
+                 moldura e as acoes que aceita. Leia isto em vez de amostrar pixels.",
+        params: &[],
+        handler: ui_tree,
+    },
+    Command {
+        nome: "ui.act",
+        resumo: "Age sobre um elemento da arvore semantica pelo mesmo caminho de quem esta na \
+                 frente da maquina. Acoes: press, confirm, cancel, set_value.",
+        params: &[
+            ParamSpec {
+                nome: "id",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: true,
+                descricao: "O id do elemento, como `ui.tree` o publica.",
+            },
+            ParamSpec {
+                nome: "action",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "Uma das acoes que o elemento aceita, como `ui.tree` as lista.",
+            },
+            ParamSpec {
+                nome: "value",
+                tipo: TipoParam::Texto,
+                obrigatorio: false,
+                descricao: "O valor novo, para `set_value`.",
+            },
+        ],
+        handler: ui_act,
+    },
+    Command {
         nome: "disk.partitions",
         resumo: "A tabela de particoes do disco, lida da GPT.",
         params: &[],
@@ -1202,6 +1235,204 @@ fn display_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
         None => w.null_value()?,
     }
 
+    w.end_object()
+}
+
+// ---------------------------------------------------------------------------
+// ui.*
+// ---------------------------------------------------------------------------
+
+/// Escreve a moldura de um elemento.
+fn escrever_moldura(w: &mut JsonWriter, m: crate::ui::Moldura) -> fmt::Result {
+    w.key("frame")?;
+    w.begin_object()?;
+    w.field_u64("x", m.x as u64)?;
+    w.field_u64("y", m.y as u64)?;
+    w.field_u64("width", m.largura as u64)?;
+    w.field_u64("height", m.altura as u64)?;
+    w.end_object()
+}
+
+/// Escreve a lista de ações que um elemento aceita.
+fn escrever_acoes(w: &mut JsonWriter, id: u32) -> fmt::Result {
+    w.key("actions")?;
+    w.begin_array()?;
+    for acao in crate::ui::acoes_de(id) {
+        w.str_value(acao.nome())?;
+    }
+    w.end_array()
+}
+
+/// O texto do console, linha por linha, como está na tela.
+///
+/// As células vazias no meio de uma linha viram espaço; as do fim da linha e
+/// as linhas vazias do fim da tela somem. É o texto que uma pessoa leria, e
+/// não uma grade com lacunas.
+fn escrever_texto_do_console(
+    w: &mut JsonWriter,
+    g: &crate::tela::console::Geometria,
+) -> fmt::Result {
+    use crate::tela::console::caractere;
+
+    let ultima_linha = (0..g.linhas)
+        .rev()
+        .find(|&l| (0..g.colunas).any(|c| caractere(c, l).is_some()));
+    w.begin_str()?;
+    if let Some(ultima_linha) = ultima_linha {
+        for linha in 0..=ultima_linha {
+            if linha > 0 {
+                w.push_char('\n')?;
+            }
+            let fim = (0..g.colunas)
+                .rev()
+                .find(|&c| caractere(c, linha).is_some())
+                .map_or(0, |c| c + 1);
+            for coluna in 0..fim {
+                w.push_char(caractere(coluna, linha).unwrap_or(' '))?;
+            }
+        }
+    }
+    w.end_str()
+}
+
+/// A árvore semântica.
+///
+/// # Por que ela, e não `video.sample`
+///
+/// Porque a amostra responde "que cores estão onde", e o agente quase nunca
+/// quer saber isso. Ele quer saber o que está escrito, o que é editável e o
+/// que dá para fazer — e a amostra obriga a adivinhar as três coisas a
+/// partir de pixels. A árvore as diz. A amostra continua existindo para a
+/// pergunta que só os pixels respondem: se o desenho saiu.
+///
+/// Sem tela, `root` é nulo, e não um erro: a máquina pode legitimamente não
+/// ter uma.
+fn ui_tree(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    use crate::ui;
+
+    w.begin_object()?;
+    w.field_u64("revision", ui::revisao())?;
+    w.key("root")?;
+    let (Some(tela), Some(g)) = (ui::moldura_da_tela(), crate::tela::console::geometria()) else {
+        w.null_value()?;
+        return w.end_object();
+    };
+
+    w.begin_object()?;
+    w.field_u64("id", ui::ID_DA_TELA as u64)?;
+    w.field_str("role", ui::Papel::Tela.nome())?;
+    w.field_str("label", "tela")?;
+    escrever_moldura(w, tela)?;
+    escrever_acoes(w, ui::ID_DA_TELA)?;
+    w.key("children")?;
+    w.begin_array()?;
+
+    // O console.
+    w.begin_object()?;
+    w.field_u64("id", ui::ID_DO_CONSOLE as u64)?;
+    w.field_str("role", ui::Papel::AreaDeTexto.nome())?;
+    w.field_str("label", "console")?;
+    if let Some(m) = ui::moldura_do_console() {
+        escrever_moldura(w, m)?;
+    }
+    w.key("value")?;
+    escrever_texto_do_console(w, &g)?;
+    // Numa tela maior que a grade, o texto guardado é parte do desenhado. O
+    // campo existe para que um texto cortado não se passe por inteiro.
+    w.field_bool("value_complete", crate::tela::console::texto_completo())?;
+    escrever_acoes(w, ui::ID_DO_CONSOLE)?;
+    w.key("children")?;
+    w.begin_array()?;
+
+    // A linha de comando, se o interpretador estiver atendendo.
+    if ui::existe(ui::ID_DA_LINHA_DE_COMANDO) {
+        w.begin_object()?;
+        w.field_u64("id", ui::ID_DA_LINHA_DE_COMANDO as u64)?;
+        w.field_str("role", ui::Papel::CampoDeTexto.nome())?;
+        w.field_str("label", "linha de comando")?;
+        if let Some(m) = ui::moldura_da_linha_de_comando() {
+            escrever_moldura(w, m)?;
+        }
+        w.key("value")?;
+        crate::interpretador::com_valor(|v| w.str_value(v))?;
+        // É o único elemento que recebe texto, e é para ele que o teclado vai.
+        w.field_bool("focused", true)?;
+        escrever_acoes(w, ui::ID_DA_LINHA_DE_COMANDO)?;
+        w.key("children")?;
+        w.begin_array()?;
+        w.end_array()?;
+        w.end_object()?;
+    }
+
+    w.end_array()?;
+    w.end_object()?;
+
+    w.end_array()?;
+    w.end_object()?;
+    w.end_object()
+}
+
+/// Age sobre um elemento da árvore.
+///
+/// # Por que o erro vem no corpo
+///
+/// Pela mesma razão de `fs.list`: um elemento que não existe mais, ou uma
+/// ação que ele não aceita, é uma resposta legítima a um pedido bem formado —
+/// a árvore que o agente leu pode ter mudado desde então. `-32602` fica para
+/// o pedido que o registro recusa.
+fn ui_act(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let id = params.member("id").and_then(|v| v.as_u64()).unwrap_or(0);
+    let nome = params
+        .member("action")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    w.begin_object()?;
+    w.field_u64("id", id)?;
+    w.field_str("action", nome)?;
+
+    let Some(acao) = crate::ui::Acao::de_nome(nome) else {
+        w.field_bool("ok", false)?;
+        w.field_str(
+            "error",
+            "acao desconhecida; as que existem: press, confirm, cancel, set_value",
+        )?;
+        return w.end_object();
+    };
+
+    // O valor chega como string JSON, e uma linha de comando carrega JSON
+    // nos parâmetros: as aspas vêm escapadas e precisam ser resolvidas.
+    let mut buffer = [0u8; crate::interpretador::LINHA_MAX];
+    let valor = match params.member("value") {
+        None => None,
+        Some(v) => match v.desescapar_em(&mut buffer) {
+            Some(texto) => Some(texto),
+            None => {
+                w.field_bool("ok", false)?;
+                w.field_str(
+                    "error",
+                    "o valor nao cabe na linha de comando, ou tem um escape invalido",
+                )?;
+                return w.end_object();
+            }
+        },
+    };
+
+    let id = u32::try_from(id).unwrap_or(0);
+    match crate::ui::agir(id, acao, valor, crate::ui::Origem::Agente) {
+        Ok(efeito) => {
+            w.field_bool("ok", true)?;
+            if let crate::ui::Efeito::Executado(comando) = efeito {
+                w.field_str("executed", &comando)?;
+            }
+        }
+        Err(motivo) => {
+            w.field_bool("ok", false)?;
+            w.field_str("error", motivo)?;
+        }
+    }
+    // Depois da ação: é a revisão da árvore que o agente precisa ler de novo.
+    w.field_u64("revision", crate::ui::revisao())?;
     w.end_object()
 }
 

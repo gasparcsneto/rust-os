@@ -85,6 +85,7 @@ mod tempo;
 #[cfg(feature = "modo-teste")]
 mod testes;
 mod traps;
+mod ui;
 mod usb;
 mod usuario;
 mod vfs;

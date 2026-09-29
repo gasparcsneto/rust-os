@@ -5940,6 +5940,431 @@ fn machine_funde_so_vizinhas_do_mesmo_tipo() -> Resultado {
     Ok(())
 }
 
+// ===========================================================================
+// A árvore semântica
+// ===========================================================================
+
+/// Chama um comando do registro como o canal chamaria — validação e handler —
+/// e devolve a resposta inteira.
+///
+/// Num `String` do heap, e não no `Buffer` de tamanho fixo: a árvore carrega
+/// o texto do console, que passa fácil de um kilobyte.
+fn chamar(nome: &str, params: &str) -> Result<alloc::string::String, &'static str> {
+    let cmd = registry::encontrar(nome).ok_or("comando ausente do registro")?;
+    if registry::validar(cmd, Json(params.as_bytes())).is_err() {
+        return Err("o registro recusou os parametros");
+    }
+    let mut saida = alloc::string::String::new();
+    {
+        let mut w = JsonWriter::new(&mut saida);
+        (cmd.handler)(Json(params.as_bytes()), &mut w).map_err(|_| "a resposta nao foi escrita")?;
+    }
+    Ok(saida)
+}
+
+/// O console da árvore, e a linha de comando dentro dele se houver.
+fn console_da_arvore(arvore: &str) -> Result<(Json<'_>, Option<Json<'_>>), &'static str> {
+    let raiz = Json(arvore.as_bytes())
+        .member("root")
+        .ok_or("a arvore nao tem raiz")?;
+    let console = raiz
+        .member("children")
+        .and_then(|c| c.item(0))
+        .ok_or("a tela nao tem o console como filho")?;
+    let linha = console.member("children").and_then(|c| c.item(0));
+    Ok((console, linha))
+}
+
+/// O texto do console na árvore, desescapado.
+///
+/// A árvore o publica como string JSON: as quebras de linha chegam como `\n`
+/// e as aspas como `\"`. Comparar o texto cru com o que foi escrito
+/// compararia duas grafias da mesma coisa.
+fn texto_do_console(console: &Json<'_>) -> Result<alloc::string::String, &'static str> {
+    let valor = console.member("value").ok_or("o console nao tem valor")?;
+    let mut buffer = alloc::vec![0u8; valor.as_str().map_or(0, str::len)];
+    valor
+        .desescapar_em(&mut buffer)
+        .map(alloc::string::String::from)
+        .ok_or("o texto do console nao e uma string JSON valida")
+}
+
+/// A árvore descreve a tela que existe, e só ela.
+///
+/// Gerada, e não escrita à mão: a raiz tem a geometria da tela desta rodada,
+/// e a linha de comando só aparece quando o interpretador está atendendo — a
+/// suíte roda no lugar dele, então aqui ela **não** pode aparecer. Uma árvore
+/// escrita à mão a publicaria sempre.
+fn ui_a_arvore_descreve_a_tela_que_existe() -> Resultado {
+    let arvore = chamar("ui.tree", "{}")?;
+    let raiz = Json(arvore.as_bytes()).member("root").ok_or("sem raiz")?;
+    let Some(tela) = crate::tela::tela() else {
+        return if raiz.is_null() {
+            Ok(())
+        } else {
+            Err("sem tela, a arvore publicou uma raiz")
+        };
+    };
+
+    if raiz.member("role").and_then(|v| v.as_str()) != Some("screen") {
+        crate::log_error!("teste", "arvore: {}", arvore);
+        return Err("a raiz nao e a tela");
+    }
+    let moldura = raiz.member("frame").ok_or("a raiz nao tem moldura")?;
+    if moldura.member("width").and_then(|v| v.as_u64()) != Some(tela.largura as u64)
+        || moldura.member("height").and_then(|v| v.as_u64()) != Some(tela.altura as u64)
+    {
+        return Err("a moldura da raiz nao e a geometria da tela");
+    }
+
+    let (console, linha) = console_da_arvore(&arvore)?;
+    if console.member("role").and_then(|v| v.as_str()) != Some("text_area") {
+        return Err("o filho da tela nao e o console");
+    }
+    if console
+        .member("frame")
+        .and_then(|m| m.member("y"))
+        .and_then(|v| v.as_u64())
+        != Some(crate::tela::ALTURA_DO_ACENTO as u64)
+    {
+        return Err("a moldura do console nao comeca abaixo da faixa do banner");
+    }
+    if linha.is_some() {
+        return Err("a arvore publicou a linha de comando sem interpretador atendendo");
+    }
+    Ok(())
+}
+
+/// O texto que a árvore publica é o que está nos pixels.
+///
+/// É a afirmação que dá sentido à árvore. Escreve uma marca no console, acha
+/// a marca no valor do console na árvore — e então confere, glifo por glifo,
+/// que naquela linha e coluna da tela está desenhado exatamente aquele
+/// caractere. Uma grade que guardasse o texto numa posição e o desenho fosse
+/// para outra passaria na primeira metade e reprovaria na segunda.
+///
+/// Sem quebra de linha depois da marca: um `\n` na última linha da tela a
+/// limparia antes da conferência.
+fn ui_o_texto_da_arvore_e_o_que_esta_na_tela() -> Resultado {
+    use crate::tela::console::{caractere, conferir_glifo, geometria};
+
+    const MARCA: &str = "arvore-marca-7Q";
+    let Some(g) = geometria() else {
+        return Ok(());
+    };
+    crate::serial_println!();
+    crate::serial_print!("{}", MARCA);
+
+    let arvore = chamar("ui.tree", "{}")?;
+    let (console, _) = console_da_arvore(&arvore)?;
+    let texto = texto_do_console(&console)?;
+    if !texto.contains(MARCA) {
+        crate::serial_println!();
+        return Err("o texto escrito no console nao apareceu na arvore");
+    }
+
+    // Onde a grade diz que a marca está.
+    let (coluna_do_cursor, linha) = crate::tela::console::cursor_em_celulas();
+    let tamanho = MARCA.len() as u32;
+    let Some(coluna) = coluna_do_cursor.checked_sub(tamanho) else {
+        crate::serial_println!();
+        return Err("a marca quebrou de linha, e o caso nao sabe onde ela ficou");
+    };
+    let resultado = MARCA.chars().enumerate().try_for_each(|(i, c)| {
+        let coluna = coluna + i as u32;
+        if caractere(coluna, linha) != Some(c) {
+            return Err("a grade nao tem a marca onde o cursor diz que ela esta");
+        }
+        conferir_glifo(
+            c,
+            g.margem_x + coluna * g.largura_da_celula,
+            g.margem_y + linha * g.altura_da_celula,
+        )
+    });
+    crate::serial_println!();
+    resultado
+}
+
+/// Apagar apaga na tela e na árvore.
+///
+/// O console desenhava o glifo de substituição para `\u{8}` e avançava: uma
+/// pessoa que apagasse via um `?` aparecer. Aqui a célula apagada tem de
+/// estar só com fundo, a anterior intacta, e a grade tem de concordar.
+fn ui_apagar_apaga_na_tela_e_na_arvore() -> Resultado {
+    use crate::tela::console::{caractere, conferir_celula_vazia, conferir_glifo, geometria};
+
+    let Some(g) = geometria() else {
+        return Ok(());
+    };
+    crate::serial_println!();
+    crate::serial_print!("zq\u{8}");
+    let (coluna, linha) = crate::tela::console::cursor_em_celulas();
+    let resultado = (|| {
+        let anterior = coluna
+            .checked_sub(1)
+            .ok_or("o apagar voltou alem do comeco da linha")?;
+        let x = |c: u32| g.margem_x + c * g.largura_da_celula;
+        let y = g.margem_y + linha * g.altura_da_celula;
+        if caractere(coluna, linha).is_some() {
+            return Err("a grade ainda tem o caractere apagado");
+        }
+        if caractere(anterior, linha) != Some('z') {
+            return Err("o apagar levou junto o caractere anterior");
+        }
+        conferir_celula_vazia(x(coluna), y)?;
+        conferir_glifo('z', x(anterior), y)
+    })();
+    crate::serial_println!();
+    resultado
+}
+
+/// As ações da árvore passam pelo caminho de quem está na frente da máquina.
+///
+/// `set_value` e `confirm` sobre a linha de comando: o valor aparece na
+/// árvore e na tela, o comando é executado pelo interpretador, e o log diz
+/// quem pediu. E o caminho da pessoa, pelas mesmas funções, registra a outra
+/// origem — é a distinção que a auditoria vai precisar.
+fn ui_agir_pela_linha_de_comando() -> Resultado {
+    if crate::tela::tela().is_none() {
+        return Ok(());
+    }
+    crate::interpretador::ativar_para_teste();
+    let resultado = agir_pela_linha_de_comando();
+    crate::interpretador::desativar_para_teste();
+    resultado
+}
+
+fn agir_pela_linha_de_comando() -> Resultado {
+    let valor_da_linha = || -> Result<alloc::string::String, &'static str> {
+        let arvore = chamar("ui.tree", "{}")?;
+        let (_, linha) = console_da_arvore(&arvore)?;
+        let linha = linha.ok_or("a linha de comando nao apareceu na arvore")?;
+        // Desescapado: a árvore publica o valor como string JSON, e as aspas
+        // de uma linha com parâmetros chegam como `\"`.
+        let mut buffer = [0u8; 256];
+        Ok(alloc::string::String::from(
+            linha
+                .member("value")
+                .and_then(|v| v.desescapar_em(&mut buffer))
+                .unwrap_or("<sem valor>"),
+        ))
+    };
+    let ok = |resposta: &str| {
+        Json(resposta.as_bytes())
+            .member("ok")
+            .and_then(|v| v.as_bool())
+    };
+    let revisao = || -> u64 { crate::ui::revisao() };
+
+    // As ações que ela aceita, como a árvore as publica.
+    let arvore = chamar("ui.tree", "{}")?;
+    let (_, linha) = console_da_arvore(&arvore)?;
+    let linha = linha.ok_or("a linha de comando nao apareceu com o interpretador atendendo")?;
+    let acoes = linha
+        .member("actions")
+        .ok_or("a linha de comando nao lista acoes")?;
+    let publicadas: alloc::vec::Vec<&str> =
+        (0..8).filter_map(|i| acoes.item(i)?.as_str()).collect();
+    if publicadas != ["confirm", "cancel", "set_value"] {
+        crate::log_error!("teste", "acoes: {:?}", publicadas);
+        return Err("a linha de comando nao publicou confirm, cancel e set_value");
+    }
+
+    // set_value, e o valor aparece na árvore e no texto do console.
+    let antes = revisao();
+    let r = chamar(
+        "ui.act",
+        r#"{"id":3,"action":"set_value","value":"agent.ping"}"#,
+    )?;
+    if ok(&r) != Some(true) {
+        crate::log_error!("teste", "resposta: {}", r);
+        return Err("set_value na linha de comando foi recusado");
+    }
+    if valor_da_linha()? != "agent.ping" {
+        return Err("a linha de comando nao ficou com o valor definido");
+    }
+    if revisao() <= antes {
+        return Err("a revisao da arvore nao mudou depois de uma acao");
+    }
+    let arvore = chamar("ui.tree", "{}")?;
+    let (console, _) = console_da_arvore(&arvore)?;
+    let texto = texto_do_console(&console)?;
+    if !texto.ends_with("duke> agent.ping") {
+        return Err("o valor definido nao foi desenhado depois do prompt");
+    }
+
+    // Um valor com aspas escapadas chega à linha com as aspas, e não com as
+    // barras: é o que deixa um agente passar parâmetros em JSON.
+    let r = chamar(
+        "ui.act",
+        r#"{"id":3,"action":"set_value","value":"log.tail {\"count\":1}"}"#,
+    )?;
+    if ok(&r) != Some(true) || valor_da_linha()? != r#"log.tail {"count":1}"# {
+        crate::log_error!("teste", "resposta: {} linha: {:?}", r, valor_da_linha());
+        return Err("as aspas escapadas nao chegaram resolvidas a linha");
+    }
+
+    // confirm executa pelo interpretador, e o log diz que foi o agente.
+    let r = chamar("ui.act", r#"{"id":3,"action":"confirm"}"#)?;
+    if Json(r.as_bytes())
+        .member("executed")
+        .and_then(|v| v.as_str())
+        != Some("log.tail")
+    {
+        crate::log_error!("teste", "resposta: {}", r);
+        return Err("confirm nao executou o comando da linha");
+    }
+    if !valor_da_linha()?.is_empty() {
+        return Err("a linha nao ficou vazia depois de confirmada");
+    }
+    if !log_tem("executado: log.tail (agente)") {
+        return Err("o log nao registrou o comando com a origem do agente");
+    }
+
+    // cancel esvazia.
+    chamar("ui.act", r#"{"id":3,"action":"set_value","value":"xyz"}"#)?;
+    let r = chamar("ui.act", r#"{"id":3,"action":"cancel"}"#)?;
+    if ok(&r) != Some(true) || !valor_da_linha()?.is_empty() {
+        return Err("cancel nao esvaziou a linha de comando");
+    }
+
+    // E a pessoa, pelas mesmas funções, registra a outra origem.
+    crate::interpretador::definir("agent.ping")?;
+    crate::interpretador::confirmar(crate::ui::Origem::Pessoa);
+    if !log_tem("executado: agent.ping (pessoa)") {
+        return Err("o log nao distinguiu a pessoa do agente");
+    }
+    Ok(())
+}
+
+/// Alguma das últimas linhas do log tem este texto?
+fn log_tem(texto: &str) -> bool {
+    let mut achou = false;
+    crate::log::ultimos(32, Level::Trace, |r| achou |= r.mensagem().contains(texto));
+    achou
+}
+
+/// Um registro de log que chega durante a edição não parte a linha.
+///
+/// Todo registro é ecoado no console, e o console é a tela em que se digita.
+/// Antes, o registro era desenhado depois do que estava digitado, e o resto
+/// da digitação continuava embaixo dele — a linha que seria executada não era
+/// nenhuma das que estavam na tela. Aqui o registro tem de aparecer acima, e a
+/// linha `duke> abc` tem de existir uma vez só, inteira, por último.
+fn ui_registro_nao_parte_a_linha_digitada() -> Resultado {
+    if crate::tela::tela().is_none() {
+        return Ok(());
+    }
+    crate::interpretador::ativar_para_teste();
+    let resultado = (|| {
+        crate::interpretador::definir("abc")?;
+        crate::log_info!("teste", "registro-por-cima");
+        let arvore = chamar("ui.tree", "{}")?;
+        let (console, linha) = console_da_arvore(&arvore)?;
+        let texto = texto_do_console(&console)?;
+        let mut linhas = texto.rsplit('\n');
+        if linhas.next() != Some("duke> abc") {
+            crate::log_error!("teste", "fim do console: {:?}", texto.rsplit('\n').next());
+            return Err("a linha digitada nao ficou inteira e por ultimo");
+        }
+        let acima = linhas.next();
+        if !acima.is_some_and(|l| l.contains("registro-por-cima")) {
+            crate::log_error!("teste", "acima da linha: {:?}", acima);
+            return Err("o registro nao apareceu logo acima da linha digitada");
+        }
+        if texto.matches("duke> abc").count() != 1 {
+            return Err("a linha digitada ficou na tela duas vezes");
+        }
+        // E a moldura do campo acompanha: ele começa na linha nova.
+        let (_, linha_do_cursor) = crate::tela::console::cursor_em_celulas();
+        let g = crate::tela::console::geometria().ok_or("sem geometria")?;
+        let y = linha
+            .and_then(|l| l.member("frame"))
+            .and_then(|m| m.member("y"))
+            .and_then(|v| v.as_u64());
+        if y != Some((g.margem_y + linha_do_cursor * g.altura_da_celula) as u64) {
+            return Err("a moldura do campo ficou na linha antiga");
+        }
+        Ok(())
+    })();
+    crate::interpretador::desativar_para_teste();
+    resultado
+}
+
+/// O que a árvore recusa, ela recusa sem mexer em nada.
+///
+/// Uma ação sobre um elemento que não a aceita, sobre um elemento que não
+/// existe, com um nome que não é ação, ou com um valor que uma pessoa não
+/// conseguiria digitar. Em todos, `ok` é falso e a linha que estava lá
+/// continua lá — recusar depois de ter apagado seria pior que aceitar.
+fn ui_acoes_recusadas_nao_deixam_rastro() -> Resultado {
+    if crate::tela::tela().is_none() {
+        return Ok(());
+    }
+    // Sem interpretador, a linha de comando não existe.
+    let r = chamar("ui.act", r#"{"id":3,"action":"confirm"}"#)?;
+    if Json(r.as_bytes()).member("ok").and_then(|v| v.as_bool()) != Some(false) {
+        return Err("confirm foi aceito sem a linha de comando existir");
+    }
+
+    crate::interpretador::ativar_para_teste();
+    let resultado = recusas_com_a_linha_ativa();
+    crate::interpretador::desativar_para_teste();
+    resultado
+}
+
+fn recusas_com_a_linha_ativa() -> Resultado {
+    crate::interpretador::definir("abc")?;
+    let longo = "x".repeat(crate::interpretador::LINHA_MAX + 1);
+    let valor_longo = alloc::format!(r#"{{"id":3,"action":"set_value","value":"{}"}}"#, longo);
+    let pedidos: [(&str, &str); 7] = [
+        (
+            r#"{"id":3,"action":"press"}"#,
+            "press aceito por um campo de texto",
+        ),
+        (
+            r#"{"id":2,"action":"set_value","value":"x"}"#,
+            "set_value aceito pelo console",
+        ),
+        (
+            r#"{"id":99,"action":"confirm"}"#,
+            "acao aceita num elemento que nao existe",
+        ),
+        (
+            r#"{"id":3,"action":"voar"}"#,
+            "acao que nao existe foi aceita",
+        ),
+        (
+            r#"{"id":3,"action":"set_value"}"#,
+            "set_value aceito sem valor",
+        ),
+        (
+            r#"{"id":3,"action":"set_value","value":"café"}"#,
+            "valor que nao se digita foi aceito",
+        ),
+        (
+            r#"{"id":3,"action":"set_value","value":"a\x"}"#,
+            "escape invalido foi aceito",
+        ),
+    ];
+    for (pedido, erro) in pedidos
+        .iter()
+        .copied()
+        .chain([(valor_longo.as_str(), "valor longo demais foi aceito")])
+    {
+        let r = chamar("ui.act", pedido)?;
+        if Json(r.as_bytes()).member("ok").and_then(|v| v.as_bool()) != Some(false) {
+            crate::log_error!("teste", "pedido: {} resposta: {}", pedido, r);
+            return Err(erro);
+        }
+        if crate::interpretador::com_valor(|v| v != "abc") {
+            crate::log_error!("teste", "pedido: {}", pedido);
+            return Err("uma acao recusada mexeu na linha de comando");
+        }
+    }
+    Ok(())
+}
+
 /// Contabilizar uma falha não pode depender de conseguir a trava.
 ///
 /// É o caminho que roda dentro de handlers de exceção. Uma exceção acontece em
@@ -8998,6 +9423,30 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "grafico: superficie que falha no meio desfaz",
         f: grafico_superficie_que_falha_no_meio_desfaz,
+    },
+    Caso {
+        nome: "ui: a arvore descreve a tela que existe",
+        f: ui_a_arvore_descreve_a_tela_que_existe,
+    },
+    Caso {
+        nome: "ui: o texto da arvore e o que esta na tela",
+        f: ui_o_texto_da_arvore_e_o_que_esta_na_tela,
+    },
+    Caso {
+        nome: "ui: apagar apaga na tela e na arvore",
+        f: ui_apagar_apaga_na_tela_e_na_arvore,
+    },
+    Caso {
+        nome: "ui: agir pela linha de comando",
+        f: ui_agir_pela_linha_de_comando,
+    },
+    Caso {
+        nome: "ui: registro nao parte a linha digitada",
+        f: ui_registro_nao_parte_a_linha_digitada,
+    },
+    Caso {
+        nome: "ui: acoes recusadas nao deixam rastro",
+        f: ui_acoes_recusadas_nao_deixam_rastro,
     },
     Caso {
         nome: "agente: display.info descreve a pilha",

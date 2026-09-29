@@ -3998,6 +3998,7 @@ fn conversar(socket: &Path, monitor: &Path, teclado: Teclado, qemu: u32) -> Resu
     sob_despejo(&mut escrita, &mut leitor)?;
     sob_teclado(monitor, teclado, &mut escrita, &mut leitor)?;
     sob_interpretador(monitor, &mut escrita, &mut leitor)?;
+    sob_arvore(&mut escrita, &mut leitor)?;
     sob_fragmento(&mut escrita, &mut leitor)
 }
 
@@ -4146,6 +4147,82 @@ fn sob_teclado(
 /// linha ainda está aberta no interpretador. Executá-la — e receber
 /// "comando desconhecido" — é o que devolve a linha vazia, e de quebra
 /// exercita o caminho de recusa.
+/// O agente opera a máquina pela árvore semântica, no kernel de produção.
+///
+/// A suíte exercita a árvore no lugar do interpretador, porque em modo de
+/// teste a tarefa dele não existe. Aqui ela existe: a linha de comando é a
+/// que a pessoa na frente da máquina está vendo, e o que o agente faz nela
+/// passa pela tarefa de verdade.
+///
+/// A prova fecha o ciclo inteiro por fora: o agente define o valor da linha,
+/// confirma, e lê **pela própria árvore** a resposta desenhada no console —
+/// sem amostrar pixel nenhum. E o log diz que foi o agente.
+fn sob_arvore(escrita: &mut UnixStream, leitor: &mut BufReader<UnixStream>) -> Result<(), String> {
+    println!("[xtask] fumaça: o agente age pela árvore semântica");
+
+    let mut pedir = |id: u32, metodo: &str, params: &str| -> Result<String, String> {
+        escrita
+            .write_all(
+                format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"{metodo}","params":{params}}}"#)
+                    .as_bytes(),
+            )
+            .and_then(|()| escrita.write_all(b"\n"))
+            .and_then(|()| escrita.flush())
+            .map_err(|e| format!("arvore: falha ao pedir `{metodo}`: {e}"))?;
+        let resposta = ler_resposta(leitor).map_err(|e| format!("arvore: {e}"))?;
+        if !e_a_resposta(&resposta, id) {
+            return Err(format!(
+                "arvore: veio a resposta de outro pedido\n  {resposta}"
+            ));
+        }
+        Ok(resposta)
+    };
+
+    let arvore = pedir(7701, "ui.tree", "{}")?;
+    if !arvore.contains(r#""role":"text_field""#) {
+        return Err(format!(
+            "arvore: com o interpretador atendendo, a linha de comando nao esta na arvore\n  {arvore}"
+        ));
+    }
+
+    let r = pedir(
+        7702,
+        "ui.act",
+        r#"{"id":3,"action":"set_value","value":"system.uptime"}"#,
+    )?;
+    if !r.contains(r#""ok":true"#) {
+        return Err(format!("arvore: set_value recusado\n  {r}"));
+    }
+    let arvore = pedir(7703, "ui.tree", "{}")?;
+    if !arvore.contains(r#""value":"system.uptime""#) {
+        return Err(format!(
+            "arvore: a linha de comando nao ficou com o valor\n  {arvore}"
+        ));
+    }
+
+    let r = pedir(7704, "ui.act", r#"{"id":3,"action":"confirm"}"#)?;
+    if !r.contains(r#""executed":"system.uptime""#) {
+        return Err(format!("arvore: confirm nao executou a linha\n  {r}"));
+    }
+
+    // A resposta do comando foi desenhada no console, e a árvore a lê de lá.
+    let arvore = pedir(7705, "ui.tree", "{}")?;
+    if !arvore.contains("uptime_ms") {
+        return Err(format!(
+            "arvore: a resposta do comando nao apareceu no texto do console\n  {arvore}"
+        ));
+    }
+    let log = pedir(7706, "log.tail", r#"{"count":16}"#)?;
+    if !log.contains("executado: system.uptime (agente)") {
+        return Err(format!(
+            "arvore: o log nao registrou o agente como origem\n  {log}"
+        ));
+    }
+
+    println!("  [arvore] ok  set_value, confirm e a resposta lida de volta pela arvore");
+    Ok(())
+}
+
 fn sob_interpretador(
     monitor: &Path,
     escrita: &mut UnixStream,
@@ -4190,13 +4267,22 @@ fn sob_interpretador(
                 "interpretador: veio a resposta de outro pedido\n  {ultima}"
             ));
         }
-        if ultima.contains("executado: agent.ping") {
-            println!("  [interpretador] ok  `agent.ping` digitado e executado");
+        // Com a origem: foi uma pessoa, pelo teclado. É a metade da
+        // auditoria que a sonda da árvore semântica não alcança.
+        if ultima.contains("executado: agent.ping (pessoa)") {
+            println!("  [interpretador] ok  `agent.ping` digitado e executado, pela pessoa");
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(100));
     }
 
+    // Executado, mas atribuído a quem não o digitou, é outro defeito — e a
+    // mensagem precisa dizer qual, ou manda quem depura procurar no teclado.
+    if ultima.contains("executado: agent.ping") {
+        return Err(format!(
+            "interpretador: o comando digitado foi executado, mas o log nao o atribui a pessoa\n  {ultima}"
+        ));
+    }
     Err(format!(
         "interpretador: o comando digitado nao chegou a ser executado\n  {ultima}"
     ))
