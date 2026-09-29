@@ -65,7 +65,7 @@ pub mod linear;
 pub(crate) mod memoria;
 pub mod virtio;
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use spin::Mutex;
 
@@ -158,7 +158,38 @@ static ATIVO: Mutex<Option<Compositor>> = Mutex::new(None);
 /// Para quem mexe nas camadas — nunca de dentro de uma escrita no console,
 /// que usa [`compor`].
 fn com_compositor<R>(f: impl FnOnce(&mut Compositor) -> R) -> Option<R> {
+    if DESLIGADO.load(Ordering::Acquire) {
+        return None;
+    }
     crate::arch::sem_interrupcoes(|| ATIVO.lock().as_mut().map(f))
+}
+
+/// O compositor foi desligado pela falha fatal — ver [`desligar`].
+static DESLIGADO: AtomicBool = AtomicBool::new(false);
+
+/// Desliga o compositor, para sempre: nada mais passa por ele até a tela.
+///
+/// # Por que a falha desliga, e não só passa por baixo
+///
+/// O caminho fatal pinta a tela física sem o compositor, porque não pode
+/// confiar nele. Passar por baixo não bastava: o compositor continuava
+/// vivo, e o que ainda chegasse a ele compunha por cima da tela de falha.
+/// Medido: um `ui.act` do agente no post-mortem redesenhava a barra e
+/// apagava a tela de falha inteira — de 99,8% da tela na cor de falha para
+/// zero.
+///
+/// E desligado, ele deixa de levar à tela o que a falha pintasse por
+/// engano na camada do console, em vez da tela física: esse desvio, que
+/// antes passava pela fumaça, agora não chega ao monitor.
+///
+/// Sozinho, desligar não se vê hoje: a interface também recusa agir no
+/// post-mortem, e ela era o único caminho de produção que ainda chegava ao
+/// compositor ali — o relógio da barra para com o executor, e o mouse com
+/// as interrupções, mascaradas desde a entrada da exceção. A mutação que o
+/// tira passa pela fumaça. Ele é a segunda trava, para o próximo caminho
+/// que chegar ao compositor sem passar pela interface.
+pub fn desligar() {
+    DESLIGADO.store(true, Ordering::Release);
 }
 
 /// Recompõe `dano` na tela. Chamado por [`crate::tela::descarregar`], com o
@@ -173,6 +204,9 @@ fn com_compositor<R>(f: impl FnOnce(&mut Compositor) -> R) -> Option<R> {
 /// lugar — inclusive de dentro do próprio compositor, quando algo que ele
 /// chama registra no log. Esperar pela trava ali seria esperar por si mesmo.
 pub fn compor(dano: Dano) -> bool {
+    if DESLIGADO.load(Ordering::Acquire) {
+        return false;
+    }
     crate::arch::sem_interrupcoes(|| {
         let Some(mut guarda) = ATIVO.try_lock() else {
             return false;

@@ -1052,12 +1052,22 @@ que mudou. A diferença mora em um método do trait, `superficie_da_tela`, que o
 `GraphicsAdapter` do Redox não tem.
 
 **Por baixo dele, a tela de falha.** O caminho fatal não pode confiar na
-trava nem no heap do compositor, e não passa por ele: devolve o console à tela
-física e pinta direto nela. A fumaça provoca uma falha fatal pelo agente, no
-fim da conversa, e fotografa o monitor — 99,7% da tela na cor de falha no
-ARM linear, 99,8% nas outras três máquinas; o resto é o texto do post-mortem. O que ela **não** prova é o porquê do desvio: com o
-compositor são, pintar a camada também chegaria ao monitor. Medido — com essa
-mutação a sonda passa. O desvio protege a falha que acontece dentro do
+trava nem no heap do compositor, e não passa por ele: desliga o compositor,
+devolve o console à tela física e pinta direto nela. A fumaça provoca uma
+falha fatal pelo agente, no fim da conversa, e fotografa o monitor — 99,7%
+da tela na cor de falha no ARM linear, 99,8% nas outras três máquinas; o
+resto é o texto do post-mortem.
+
+**E o post-mortem não a apaga.** O compositor desligar, e não só ficar de
+lado, veio de uma medição: o canal do agente segue respondendo no
+post-mortem, e um `ui.act` com `press` no botão da barra limpava o console e
+redesenhava a barra por cima da tela de falha — de 99,8% da foto na cor dela
+para zero, nas duas arquiteturas. Agora a interface recusa agir no
+post-mortem, com o motivo, e a fumaça pede esse `press` depois da falha e
+fotografa de novo. E, com o compositor desligado, a mutação que pintava a
+camada do console em vez da tela física — e que passava pela sonda, porque o
+compositor vivo a levava ao monitor — agora é reprovada: a camada não chega
+mais a lugar nenhum. O desvio em si protege a falha que acontece dentro do
 próprio compositor, e essa nenhuma sonda sabe provocar ainda.
 
 **O agente vê as camadas.** `display.info` lista cada uma, com posição e
@@ -1215,11 +1225,13 @@ Doze mutações no mouse, doze reprovadas — uma delas, a de clicar ao
 soltar, só pelo caso do PS/2 até o caso do clique passar a conferir a fila
 no apertar, e esse roda também no ARM.
 
-O mouse USB trouxe mais oito. Sete reprovadas. Uma delas — o pedido de
-relatório cortado em três bytes — só depois de a sonda do teclado passar a
-segurar duas teclas juntas (`d-e`): com uma tecla de cada vez, três bytes
-bastam. A que sobra declara um slot só ao controlador, e o do emulador não
-cobra o limite.
+O mouse USB trouxe mais onze, contando as do post-mortem (ver "O
+compositor"). Nove reprovadas. Uma delas — o pedido de relatório cortado em
+três bytes — só depois de a sonda do teclado passar a segurar duas teclas
+juntas (`d-e`): com uma tecla de cada vez, três bytes bastam. Das duas que
+sobram, uma declara um slot só ao controlador, e o do emulador não cobra o
+limite; a outra tira o desligamento do compositor na falha, que hoje é a
+segunda trava — a primeira, a recusa da interface, é reprovada sozinha.
 
 ## Sistema de arquivos
 

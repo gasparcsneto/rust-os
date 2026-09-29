@@ -23,7 +23,7 @@
 //! É exatamente o tipo de coisa que só vale a pena construir num OS projetado
 //! para ser operado por um agente, e é barata porque o canal já existe.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use spin::Mutex;
 
@@ -192,6 +192,18 @@ pub fn total() -> u64 {
     TOTAL.load(Ordering::Relaxed)
 }
 
+/// O kernel entrou em post-mortem: uma falha fatal aconteceu, e daqui em
+/// diante ele só responde.
+static EM_POST_MORTEM: AtomicBool = AtomicBool::new(false);
+
+/// O kernel está em post-mortem?
+///
+/// Para quem faria trabalho que o post-mortem não admite — hoje, a interface,
+/// que apagaria a tela de falha: ver [`crate::ui::agir`].
+pub fn em_post_mortem() -> bool {
+    EM_POST_MORTEM.load(Ordering::Acquire)
+}
+
 /// Quantas falhas ficaram sem detalhamento por disputa da trava.
 pub fn detalhes_perdidos() -> u64 {
     DETALHES_PERDIDOS.load(Ordering::Relaxed)
@@ -313,6 +325,10 @@ pub fn fatal(nome: &'static str, pc: u64, endereco: Option<u64>, codigo: u64) ->
         "traps",
         "entrando em modo post-mortem; o canal do agente segue respondendo"
     );
+
+    // Daqui em diante, o post-mortem: quem faria trabalho que ele não admite
+    // pergunta por isto.
+    EM_POST_MORTEM.store(true, Ordering::Release);
 
     // E a tela, se houver uma. Ela é o único canal que sobra quando a serial
     // não chegou a subir, ou quando o que matou o kernel a levou junto — e é

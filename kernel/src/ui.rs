@@ -341,6 +341,13 @@ fn executar(
     valor: Option<&str>,
     origem: Origem,
 ) -> Result<Efeito, &'static str> {
+    // No post-mortem a interface não age. Toda ação muda a tela — limpar o
+    // console, redesenhar a barra, digitar no prompt —, e a tela é a de
+    // falha, a única coisa que uma pessoa na frente da máquina vê. Medido:
+    // antes desta recusa, um `press` do agente a apagava inteira.
+    if crate::traps::em_post_mortem() {
+        return Err("o kernel esta em post-mortem; a interface nao age sobre a tela de falha");
+    }
     if !existe(id) {
         return Err("nao ha elemento com este id");
     }

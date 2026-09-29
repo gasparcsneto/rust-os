@@ -929,7 +929,10 @@ pub fn falha() {
     // O console volta à tela física antes de tudo: daqui em diante não há
     // compositor em quem confiar, e o que se escrever depois da tela de falha
     // — o relatório do post-mortem — tem de sair por cima dela, e não numa
-    // camada que ninguém mais compõe.
+    // camada que ninguém mais compõe. E o compositor é desligado, para que
+    // nada que ainda chegue a ele componha por cima — ver
+    // [`crate::grafico::desligar`].
+    crate::grafico::desligar();
     BASE_DO_CONSOLE.store(0, Ordering::Release);
     if let Some(tela) = tela_fisica() {
         tela.preencher(Cor::FALHA);

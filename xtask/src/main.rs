@@ -4112,7 +4112,7 @@ fn conversar(
     sob_fragmento(&mut escrita, &mut leitor)?;
     // Por último, porque não há volta: depois dela o kernel só responde o
     // relatório da falha.
-    sob_falha(monitor, tela_no_monitor, &mut escrita)
+    sob_falha(monitor, tela_no_monitor, &mut escrita, &mut leitor)
 }
 
 /// A cor que a tela de falha pinta — `Cor::FALHA` do kernel.
@@ -4126,15 +4126,15 @@ const COR_DE_FALHA: [u8; 3] = [0x60, 0x10, 0x10];
 /// pode confiar na trava nem no heap que o compositor usa —, e nada o
 /// exercitava: nem a suíte, que morreria junto, nem a fumaça.
 ///
-/// # O que ela não prova
+/// # O porquê de ir por baixo
 ///
-/// O porquê de ir por baixo. Com o compositor são, pintar a camada do
-/// console em vez da tela física também chega ao monitor — o compositor
-/// leva a camada vermelha como levaria qualquer outra escrita. Medido: com
-/// essa mutação, esta sonda passa. Ir direto à tela física é para a falha
-/// que acontece **dentro** do compositor, com o quadro pela metade ou a
-/// trava no meio de uma operação, e essa falha a sonda não sabe provocar:
-/// `debug.trigger` falha na tarefa do agente.
+/// Ir direto à tela física é para a falha que acontece **dentro** do
+/// compositor, com o quadro pela metade ou a trava no meio de uma operação —
+/// e essa falha a sonda não sabe provocar: `debug.trigger` falha na tarefa
+/// do agente. O que ela prova é o resto: a falha desliga o compositor, e
+/// por isso pintar a camada do console em vez da tela física não chega mais
+/// ao monitor. Com o compositor vivo, chegava — medido, essa mutação passava
+/// por esta sonda.
 ///
 /// # O que conta como passar
 ///
@@ -4146,6 +4146,7 @@ fn sob_falha(
     monitor: &Path,
     tela_no_monitor: Option<&str>,
     escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
 ) -> Result<(), String> {
     println!("[xtask] fumaça: a tela de falha chega ao monitor");
     escrita
@@ -4179,7 +4180,13 @@ fn sob_falha(
                 foto.largura,
                 foto.altura
             );
-            return Ok(());
+            return sob_falha_o_post_mortem_nao_desenha(
+                monitor,
+                tela_no_monitor,
+                &destino,
+                escrita,
+                leitor,
+            );
         }
     }
     let _ = std::fs::remove_file(&destino);
@@ -4187,6 +4194,80 @@ fn sob_falha(
         "falha: a tela de falha nao chegou ao monitor; so {:.1}% da foto tem a cor dela",
         fracao * 100.0
     ))
+}
+
+/// Depois da tela de falha, o que o agente pede não desenha por cima dela.
+///
+/// # Por que esta parte existe
+///
+/// Porque desenhava. O canal do agente segue respondendo no post-mortem, e
+/// um `ui.act` com `press` no botão da barra limpava o console e
+/// redesenhava a barra pelo compositor, que continuava vivo. Medido nas duas
+/// arquiteturas: a foto ia de 99,8% da tela na cor de falha para zero. Agora
+/// o compositor é desligado na falha, e a interface recusa agir no
+/// post-mortem.
+///
+/// # O que conta como passar
+///
+/// A ação recusada, com o motivo, e a tela ainda nove décimos na cor de
+/// falha depois dela.
+fn sob_falha_o_post_mortem_nao_desenha(
+    monitor: &Path,
+    tela_no_monitor: Option<&str>,
+    destino: &Path,
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+) -> Result<(), String> {
+    escrita
+        .write_all(
+            b"{\"jsonrpc\":\"2.0\",\"id\":8902,\"method\":\"ui.act\",\"params\":{\"id\":5,\"action\":\"press\"}}\n",
+        )
+        .and_then(|()| escrita.flush())
+        .map_err(|e| format!("falha: nao consegui pedir o press: {e}"))?;
+    // A resposta ao pedido da falha pode vir antes: ela sai inteira, e só
+    // então o kernel falha.
+    let mut resposta = String::new();
+    for _ in 0..4 {
+        resposta = ler_resposta(leitor).map_err(|e| format!("falha: {e}"))?;
+        if e_a_resposta(&resposta, 8902) {
+            break;
+        }
+    }
+    if !e_a_resposta(&resposta, 8902) {
+        return Err(format!(
+            "falha: o press do post-mortem nao teve resposta\n  {resposta}"
+        ));
+    }
+    if !resposta.contains(r#""ok":false"#) || !resposta.contains("post-mortem") {
+        return Err(format!(
+            "falha: a interface agiu no post-mortem\n  {}",
+            resposta.trim()
+        ));
+    }
+
+    std::thread::sleep(Duration::from_millis(500));
+    let foto = fotografar(monitor, destino, tela_no_monitor)?;
+    let _ = std::fs::remove_file(destino);
+    let total = (foto.largura as usize * foto.altura as usize).max(1);
+    let vermelhos = foto
+        .pixels
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .filter(|p| **p == COR_DE_FALHA)
+        .count();
+    let fracao = vermelhos as f64 / total as f64;
+    if fracao < 0.9 {
+        return Err(format!(
+            "falha: o press do post-mortem apagou a tela de falha; so {:.1}% da foto tem a cor dela",
+            fracao * 100.0
+        ));
+    }
+    println!(
+        "  [falha] ok  o press do post-mortem foi recusado, e a tela de falha ficou ({:.1}%)",
+        fracao * 100.0
+    );
+    Ok(())
 }
 
 /// O que as três teclas da sonda devem produzir.
