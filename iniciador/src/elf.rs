@@ -21,12 +21,28 @@
 //! programas de usuário. A diferença é o que está em jogo: lá um arquivo
 //! malformado mata um processo; aqui ele mata o boot.
 
-/// Os oito primeiros bytes de todo ELF64 little-endian.
+/// Os sete primeiros bytes de todo ELF64 little-endian.
 ///
 /// `\x7fELF`, depois classe 2 (64 bits), codificação 1 (little-endian) e
-/// versão 1. Conferir os oito juntos é mais barato e mais claro que quatro
+/// versão 1. Conferir os sete juntos é mais barato e mais claro que quatro
 /// comparações, e erra menos.
-const IDENTIFICACAO: [u8; 8] = [0x7F, b'E', b'L', b'F', 2, 1, 1, 0];
+///
+/// # Por que sete, e não oito
+///
+/// O oitavo é o ABI (`EI_OSABI`), e ele não é assinatura: dois valores são
+/// legítimos para o kernel. Zero, o System V, é o que o ligador grava
+/// normalmente; três, o GNU, é o que o `lld` grava quando uma seção pede
+/// para ser retida (`SHF_GNU_RETAIN`) — o que todo `#[used]` pede. Esta
+/// constante já teve oito bytes, com o zero no fim, e o primeiro `#[used]`
+/// no kernel o deixou sem boot, com "não é um ELF64 little-endian" na tela:
+/// um arquivo perfeitamente válido, recusado por um campo que não muda nada
+/// para um executável sem intérprete. Achado por acaso, medindo outra coisa.
+const IDENTIFICACAO: [u8; 7] = [0x7F, b'E', b'L', b'F', 2, 1, 1];
+
+/// O byte do ABI, e os dois que o kernel pode trazer — ver [`IDENTIFICACAO`].
+const ABI: usize = 7;
+const ABI_SYSTEM_V: u8 = 0;
+const ABI_GNU: u8 = 3;
 
 /// Os tipos de arquivo que um carregador aceita.
 mod tipo {
@@ -153,8 +169,11 @@ impl<'a> Imagem<'a> {
         if bytes.len() < cabecalho::TAMANHO {
             return Err("o arquivo e menor que um cabecalho ELF");
         }
-        if bytes[..8] != IDENTIFICACAO {
+        if bytes[..IDENTIFICACAO.len()] != IDENTIFICACAO {
             return Err("nao e um ELF64 little-endian");
+        }
+        if !matches!(bytes[ABI], ABI_SYSTEM_V | ABI_GNU) {
+            return Err("o ELF e de um ABI que o kernel nao usa");
         }
 
         let tipo = u16_em(bytes, cabecalho::TIPO).ok_or("cabecalho truncado")?;
