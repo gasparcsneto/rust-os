@@ -159,6 +159,11 @@ impl<'w> JsonWriter<'w> {
         self.u64_value(valor)
     }
 
+    pub fn field_i64(&mut self, chave: &str, valor: i64) -> fmt::Result {
+        self.key(chave)?;
+        self.i64_value(valor)
+    }
+
     pub fn field_bool(&mut self, chave: &str, valor: bool) -> fmt::Result {
         self.key(chave)?;
         self.bool_value(valor)

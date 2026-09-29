@@ -167,7 +167,7 @@ Os dois podem rodar ao mesmo tempo: cada arquitetura tem seu próprio socket.
 | `net.info` | Endereço e contadores da placa de rede, se houver uma |
 | `net.arp` | Pergunta quem atende por um IPv4 e espera a resposta (`ip`, `from`) |
 | `video.sample` | Amostra a tela numa grade de cores (`columns`, `rows`) |
-| `display.info` | A pilha gráfica: adaptador ativo, telas, memória das superfícies, o último retângulo que chegou à tela e, no virtio-gpu, o que atravessou para o dispositivo |
+| `display.info` | A pilha gráfica: adaptador ativo, telas, as camadas do compositor, memória das superfícies, o último retângulo que chegou à tela e, no virtio-gpu, o que atravessou para o dispositivo |
 | `ui.tree` | A árvore semântica do que está na tela: papel, rótulo, valor, moldura e ações de cada elemento |
 | `ui.act` | Age sobre um elemento pelo mesmo caminho de quem está na frente da máquina (`id`, `action`, `value`) |
 | `keyboard.read` | O que foi digitado no teclado da máquina, e os contadores dele (`max`) |
@@ -209,6 +209,7 @@ kernel/src/
 │   └── console.rs   o console de texto: o que uma pessoa lê na tela
 ├── grafico/         a pilha gráfica, no desenho do Redox
 │   ├── mod.rs       o trait de adaptador e o que o agente enxerga dele
+│   ├── compositor.rs  as camadas, e a tela que elas deixam ver
 │   ├── dano.rs      o retângulo que mudou, com o recorte que não dá a volta
 │   ├── linear.rs    buffer de fundo sobre um framebuffer (porte do vesad)
 │   ├── virtio.rs    a superfície que é um recurso do virtio-gpu

@@ -838,18 +838,21 @@ pub enum Descarregador {
     Virtio,
 }
 
-/// Leva à tela o retângulo que a tela do kernel sujou.
+/// Leva ao monitor um retângulo da tela do kernel.
 ///
-/// Devolve falso se não pôde — a trava estava tomada, ou o dispositivo
-/// recusou. Quem chama guarda o retângulo para a próxima vez.
+/// Quem chama é o compositor, depois de montar o retângulo na tela — ou a
+/// própria tela, antes de haver compositor e depois de uma falha fatal.
+/// Devolve falso se não pôde — a trava estava tomada, outra superfície está
+/// na varredura, ou o dispositivo recusou. Quem chama guarda o retângulo
+/// para a próxima vez.
 ///
 /// # Por que `try_lock`
 ///
-/// Porque quem chama é a escrita no console, e a escrita no console acontece
-/// em qualquer lugar — inclusive de dentro deste módulo, quando um comando
-/// falha e registra no log. Esperar pela trava ali seria esperar por si
-/// mesmo. Não conseguir agora não perde nada: o retângulo continua sujo, e a
-/// próxima escrita o leva junto com o dela.
+/// Porque os dois chamadores rodam de dentro de uma escrita no console, e a
+/// escrita no console acontece em qualquer lugar — inclusive de dentro deste
+/// módulo, quando um comando falha e registra no log. Esperar pela trava ali
+/// seria esperar por si mesmo. Não conseguir agora não perde nada: o
+/// retângulo fica guardado, e vai junto com a próxima escrita.
 pub fn descarregar_tela(r: Retangulo) -> bool {
     crate::arch::sem_interrupcoes(|| {
         let Some(mut guarda) = GPU.try_lock() else {
@@ -885,6 +888,17 @@ pub fn tamanho_da_tela() -> Option<(u32, u32)> {
 /// Este dispositivo carrega a tela do kernel?
 pub fn tem_a_tela() -> bool {
     com_gpu(|g| g.tela.is_some()).unwrap_or(false)
+}
+
+/// Onde mora a memória da tela, e a geometria dela: o que o compositor usa
+/// como quadro. `None` se este dispositivo não carrega a tela.
+pub fn memoria_da_tela() -> Option<(u64, u32, u32)> {
+    com_gpu(|g| {
+        g.tela
+            .as_ref()
+            .map(|t| (t.memoria.inicio(), t.largura, t.altura))
+    })
+    .flatten()
 }
 
 /// Cria um recurso com a memória de uma superfície.

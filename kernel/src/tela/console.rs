@@ -422,6 +422,18 @@ pub fn conferir_glifo(c: char, x: u32, y: u32) -> Result<(), &'static str> {
     let Some(tela) = crate::tela::tela() else {
         return Err("nao ha tela para conferir");
     };
+    conferir_glifo_em(&tela, c, x, y)
+}
+
+/// [`conferir_glifo`] numa tela dada — a física, para conferir que o
+/// compositor levou até ela o que o console desenhou na camada dele.
+#[cfg(feature = "modo-teste")]
+pub fn conferir_glifo_em(
+    tela: &crate::tela::Tela,
+    c: char,
+    x: u32,
+    y: u32,
+) -> Result<(), &'static str> {
     let Some(glifo) = get_raster(c, PESO, ALTURA) else {
         return Err("a fonte nao tem este glifo");
     };

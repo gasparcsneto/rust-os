@@ -45,9 +45,6 @@ pub struct Dano {
     pub altura: u32,
 }
 
-// `inteiro` e `unir` são do compositor, que ainda não existe; ver a nota em
-// `grafico::Superficie`.
-#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 impl Dano {
     pub const fn novo(x: u32, y: u32, largura: u32, altura: u32) -> Dano {
         Dano {
@@ -59,6 +56,9 @@ impl Dano {
     }
 
     /// Uma área inteira, a partir da origem.
+    // O compositor recompõe o que muda, nunca a tela inteira de propósito;
+    // hoje só a suíte pede uma área inteira.
+    #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
     pub const fn inteiro(largura: u32, altura: u32) -> Dano {
         Dano::novo(0, 0, largura, altura)
     }

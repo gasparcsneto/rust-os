@@ -169,7 +169,7 @@ fn parar_sem_base(subsistema: &'static str, motivo: &str, canal_agente: bool) ->
 /// no ARM por imagem crua ninguém procurou ainda, e o segundo porque é ele
 /// quem reporta a ausência **depois** de ter procurado.
 fn anunciar_tela() -> bool {
-    let Some(t) = tela::tela() else {
+    let Some(t) = tela::tela_fisica() else {
         return false;
     };
 
@@ -319,7 +319,7 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     // programado. Só onde ninguém entregou uma tela pronta: trocar um
     // framebuffer que o firmware já configurou por outro não consertaria
     // nada, e custaria a tela durante a troca.
-    if tela::tela().is_none() {
+    if tela::tela_fisica().is_none() {
         tela::bochs::init();
         // E, por último, um adaptador que não varre memória nenhuma sozinho:
         // o `virtio-gpu`. É o que sobra em máquinas que não têm outro — uma VM
@@ -327,7 +327,7 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
         // sem tela. Por último porque um framebuffer linear, quando existe, é
         // melhor para o caminho de falha: ele aparece sem mandar nada a
         // ninguém.
-        if tela::tela().is_none() {
+        if tela::tela_fisica().is_none() {
             virtio::gpu::init();
         }
         if !anunciar_tela() {
