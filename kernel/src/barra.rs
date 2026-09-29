@@ -42,7 +42,7 @@ use crate::ui::Moldura;
 
 pub const FUNDO: Cor = Cor::nova(0x1A, 0x24, 0x36);
 pub const TEXTO: Cor = Cor::nova(0xD8, 0xDE, 0xE8);
-const FUNDO_DO_BOTAO: Cor = Cor::nova(0x2A, 0x3C, 0x58);
+pub const FUNDO_DO_BOTAO: Cor = Cor::nova(0x2A, 0x3C, 0x58);
 
 /// A linha de acento sob a barra: o indicador de que há um kernel vivo, que
 /// antes era a faixa do banner no topo da tela e ficou debaixo da barra.

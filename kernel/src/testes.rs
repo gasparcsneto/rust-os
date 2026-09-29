@@ -4591,8 +4591,12 @@ fn sobre_o_duke() -> Resultado {
     crate::usuario::lancar(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/janelas")))?;
     esperar_linha("janelas: pronto")?;
 
-    // O clique da pessoa, no meio do botão.
+    // O botão está desenhado na barra — o fundo dele, na borda, fora do
+    // texto — e o clique da pessoa, no meio dele.
     let m = crate::barra::moldura_do_sobre().ok_or("a barra nao tem o botao Sobre")?;
+    if pixel_na_tela(m.x + 1, m.y + 1)? != crate::barra::FUNDO_DO_BOTAO {
+        return Err("o botao Sobre nao esta desenhado onde a arvore diz");
+    }
     let (cx, cy) = (m.x + m.largura / 2, m.y + m.altura / 2);
     if crate::ui::acionavel_em(cx, cy) != Some(ID_DO_BOTAO_SOBRE) {
         return Err("o clique no botao Sobre nao o alcanca");
@@ -4622,8 +4626,9 @@ fn sobre_o_duke() -> Resultado {
         "a arvore nao mostra a janela Sobre o Duke como o servidor a descreveu"
     })?;
 
-    // Pedir de novo — pela F2, o caminho da tecla — não abre outra.
-    crate::ui::agir(ID_DO_BOTAO_SOBRE, Acao::Pressionar, None, Origem::Pessoa)?;
+    // Pedir de novo — pela F2, pelo interpretador, que é quem atende a
+    // tecla da pessoa — não abre outra.
+    crate::interpretador::tratar_tecla(crate::teclado::F2);
     esperar_linha("janelas: ja aberta 1")?;
     let mut delas = 0;
     crate::grafico::camadas(|c| delas += (c.nome == crate::superficies::NOME_DA_CAMADA) as usize);
