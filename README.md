@@ -1109,12 +1109,33 @@ do monitor nos três teclados, e o relógio andando sozinho, que só a tarefa
 de produção faz. Onze mutações, onze reprovadas — duas delas só depois de os
 casos que as deixavam passar serem corrigidos.
 
-**Uma dívida que ela expôs.** O console não rola: quando enche, recomeça do
-topo, e a última linha escrita some junto com a página. A barra tirou duas
-linhas da página, e um caso da árvore passou a cair exatamente nessa virada.
-O caso agora começa de uma página limpa, porque o que ele confere é outra
-coisa. Rolar continua sendo dívida do lado humano — e ficou barato: o console
-é uma camada em memória, e rolar é mover memória e recompor.
+**Uma dívida que ela expôs, e que foi paga.** O console não rolava: quando
+enchia, recomeçava do topo, e a última linha escrita sumia junto com a
+página. A barra tirou duas linhas da página, e um caso da árvore passou a
+cair exatamente nessa virada. Agora o console rola — ver a seção seguinte.
+
+## O console rola
+
+Quando o texto chega ao pé da tela, ele sobe uma linha e a nova entra
+embaixo, como num terminal. Antes a tela recomeçava do topo, limpando: quem
+lia a resposta de um comando perdia o começo dela, e a última linha escrita
+sumia com a página.
+
+A razão para não rolar era de custo — em debug, repintar a tela passa de
+600 ms. O compositor mudou a conta: o console desenha numa camada em memória
+comum, e rolar é mover um bloco de memória (as linhas de pixel são contíguas)
+e pintar só a última linha. O compositor leva à tela o que mudou.
+
+Duas coisas sobem junto com o texto. A grade de caracteres, para a árvore
+semântica continuar descrevendo o que está na tela. E a linha de comando: o
+interpretador guarda quantas rolagens havia quando o prompt foi desenhado, e
+a moldura do campo desce o que a tela subiu desde então — uma impressão do
+kernel no pé da tela, com o prompt aberto, não deixa a árvore apontando para
+a linha errada.
+
+Seis mutações, seis reprovadas — entre elas a de voltar a recomeçar do topo,
+que o caso do registro de log, livre do paliativo que tinha ganhado, agora
+pega sozinho.
 
 ## Sistema de arquivos
 
@@ -1926,9 +1947,10 @@ padronizado.
       superfície por janela a esgotaria. E o compositor, com camadas opacas e
       ordem de empilhamento, e o console como a camada de baixo. E a barra
       superior, com o primeiro elemento que aceita `press` — pela árvore e
-      pela F1, pelo mesmo caminho. A seguir: o mouse, com o clique no mesmo
-      botão; o console rolando; e a transparência por camada. Depois, o
-      servidor de janelas, o roteamento de entrada e a tipografia.
+      pela F1, pelo mesmo caminho. E o console rolando, em vez de recomeçar
+      do topo. A seguir: a transparência por camada, e o mouse, com o clique
+      no mesmo botão. Depois, o servidor de janelas, o roteamento de entrada
+      e a tipografia.
       E aqui a inversão do projeto encontra a interface gráfica. O servidor de
       janelas publica uma **árvore semântica** — que janelas existem, que
       controles, o que cada um faz — e os pixels são a renderização dela, do

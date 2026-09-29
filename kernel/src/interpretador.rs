@@ -61,6 +61,10 @@ struct Linha {
     /// `None` enquanto o interpretador não está atendendo: não há campo, e a
     /// árvore não o publica.
     inicio: Option<(u32, u32)>,
+    /// Quantas vezes o console tinha rolado quando o campo começou. O campo
+    /// sobe uma linha a cada rolagem desde então — ver
+    /// [`crate::tela::console::rolagens`].
+    rolagens: u32,
 }
 
 // A tomada desta tranca passa por `sem_interrupcoes`, pelo motivo de toda
@@ -81,6 +85,7 @@ static LINHA: Mutex<Linha> = Mutex::new(Linha {
     bytes: [0; LINHA_MAX],
     tam: 0,
     inicio: None,
+    rolagens: 0,
 });
 
 fn com_linha<R>(f: impl FnOnce(&mut Linha) -> R) -> R {
@@ -156,6 +161,7 @@ fn mostrar_prompt() {
 fn prompt_em(l: &mut Linha) {
     crate::serial_print!("{PROMPT}");
     l.inicio = Some(crate::tela::console::cursor_em_celulas());
+    l.rolagens = crate::tela::console::rolagens();
 }
 
 /// Acrescenta um caractere à linha e o desenha. Falso se ele não coube.
@@ -217,7 +223,14 @@ pub fn limpar() {
 /// Onde o campo da linha de comando começa na tela, em células, se o
 /// interpretador estiver atendendo.
 pub fn inicio_do_campo() -> Option<(u32, u32)> {
-    com_linha(|l| l.inicio)
+    com_linha(|l| {
+        let (coluna, linha) = l.inicio?;
+        // Cada rolagem desde o prompt subiu o campo uma linha. Um campo que
+        // subiu além do topo começa, para quem pergunta, na primeira linha:
+        // o que saiu da tela não tem moldura.
+        let subiu = crate::tela::console::rolagens().wrapping_sub(l.rolagens);
+        Some((coluna, linha.saturating_sub(subiu)))
+    })
 }
 
 /// O que está digitado agora. Para a árvore semântica.

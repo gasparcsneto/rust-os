@@ -855,6 +855,37 @@ impl Tela {
         quantos
     }
 
+    /// Sobe a faixa `[topo, topo + altura)` em `passo` linhas de pixel, e
+    /// pinta com `cor` as `passo` linhas que ficam livres embaixo.
+    ///
+    /// É a rolagem do console. Uma cópia só, da faixa inteira: as linhas de
+    /// pixel são contíguas na memória — com o `stride` no meio, que vai
+    /// junto e é da própria tela —, então subir tudo é mover um bloco, e não
+    /// reler e reescrever pixel a pixel. Numa camada do compositor é memória
+    /// comum; num framebuffer, é o que um driver de console faz com ele.
+    ///
+    /// Uma faixa que não cabe na tela, ou um passo que não é menor que ela,
+    /// não rola nada: quem chama recomeça do topo.
+    pub fn rolar(&self, topo: u32, altura: u32, passo: u32, cor: Cor) -> bool {
+        let fim = topo.saturating_add(altura);
+        if passo == 0 || passo >= altura || fim > self.altura {
+            return false;
+        }
+        let linha = self.stride as usize * self.bytes_por_pixel as usize;
+        let de = self.base as usize + (topo + passo) as usize * linha;
+        let para = self.base as usize + topo as usize * linha;
+        let bytes = (altura - passo) as usize * linha;
+        // SAFETY: origem e destino estão dentro da faixa `[topo, fim)`, que
+        // cabe na tela — conferido acima —, e o registro garantiu a tela
+        // inteira mapeada e gravável. `copy`, e não `copy_nonoverlapping`:
+        // as duas faixas se sobrepõem, e a cópia tem de andar do começo para
+        // o fim.
+        unsafe { core::ptr::copy(de as *const u8, para as *mut u8, bytes) };
+        self.sujar(0, topo, self.largura, fim);
+        self.retangulo(0, fim - passo, self.largura, passo, cor);
+        true
+    }
+
     /// Pinta a tela inteira.
     pub fn preencher(&self, cor: Cor) {
         self.retangulo(0, 0, self.largura, self.altura, cor);

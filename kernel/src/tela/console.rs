@@ -14,37 +14,27 @@
 //! funil ([`crate::serial::_print`]). É a mesma ideia que o log estruturado
 //! já defende: o texto é uma **renderização**, e não a fonte da verdade.
 //!
-//! # Por que ele não rola, e o que mudou nessa conta
+//! # Ele rola
 //!
-//! A razão escrita aqui era de custo: [`Tela::retangulo`] levaria 250 ms para
-//! escrever 1280x720, uma rolagem seria isso mais a leitura, e meio segundo
-//! por linha tornaria o console mais lento que o que ele mostra.
+//! Quando o texto chega ao pé da tela, ele sobe uma linha, e a nova entra
+//! embaixo. Por muito tempo não foi assim: a tela recomeçava do topo,
+//! limpando, e quem estava lendo a resposta de um comando perdia o começo
+//! dela quando a página virava. A razão escrita aqui era de custo — um
+//! preenchimento de tela em debug passa de 600 ms, e uma rolagem seria isso
+//! mais a leitura.
 //!
-//! Remedido, e a conta não é essa. Aqueles 250 ms eram de `debug` e o
-//! comentário não dizia. Em release um preenchimento leva 7 ms e uma leitura
-//! de tela cheia — pelo caminho mais lento que existe, pixel a pixel por
-//! `ler_pixel` — leva 15 ms. Uma rolagem custaria uns 22 ms por linha, e bem
-//! menos com um `memmove` no lugar da leitura pixel a pixel.
+//! A conta mudou com o compositor. O console desenha numa camada em memória
+//! comum, e rolar é mover um bloco de memória — as linhas de pixel são
+//! contíguas — e pintar só a última linha: [`Tela::rolar`]. O compositor
+//! leva à tela o que mudou. A grade de caracteres sobe junto, para a árvore
+//! semântica continuar descrevendo o que está na tela, e um contador
+//! ([`rolagens`]) diz a quem guardou uma posição em linhas — a linha de
+//! comando — quanto ela subiu.
 //!
-//! Ou seja: em release rolar é perfeitamente pagável, e em debug não é (lá o
-//! preenchimento sozinho passa de 600 ms). A razão de custo vale para um
-//! perfil só.
-//!
-//! O console segue sem rolar: quando o texto chega ao pé da tela, ela
-//! recomeça do topo. A razão que este cabeçalho dava — "perder o que saiu da
-//! tela não custa informação, `log.tail` devolve tudo" — é verdade para o
-//! agente e não para a pessoa. Quem está na frente da máquina lendo a
-//! resposta de um comando perde o começo dela quando a página vira, e o
-//! `log.tail` que a recuperaria é JSON. Com o interpretador, o console
-//! deixou de ser só um relatório de boot: rolar passou a ser dívida do lado
-//! humano, e fica registrado como tal.
-//!
-//! O caminho barato existe: o adaptador tem registradores de altura virtual
-//! e deslocamento vertical, feitos para rolar sem copiar nada. Ele exige
-//! reprogramar o modo, inclusive onde o kernel não o programou — nos dois
-//! boots por UEFI quem deixou o modo de pé foi o firmware —, e por isso a
-//! saída mais provável é redesenhar a partir do texto guardado, que em
-//! release custa os 22 ms por linha medidos acima.
+//! A página que virava tinha um defeito além do incômodo: a última linha
+//! escrita sumia junto com ela. Um registro de log que caísse no pé da tela
+//! desaparecia antes de alguém lê-lo, e um caso da árvore semântica passou a
+//! reprovar por isso quando a barra superior tirou duas linhas da página.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -130,6 +120,32 @@ fn limpar_grade() {
         c.store(0, Ordering::Relaxed);
     }
     TRANSBORDOU.store(false, Ordering::Relaxed);
+}
+
+/// Sobe a grade uma linha, junto com a tela, e esvazia a de baixo.
+fn rolar_grade() {
+    for linha in 0..MAX_LINHAS - 1 {
+        for coluna in 0..MAX_COLUNAS {
+            let abaixo = GRADE[(linha + 1) * MAX_COLUNAS + coluna].load(Ordering::Relaxed);
+            GRADE[linha * MAX_COLUNAS + coluna].store(abaixo, Ordering::Relaxed);
+        }
+    }
+    for c in &GRADE[(MAX_LINHAS - 1) * MAX_COLUNAS..] {
+        c.store(0, Ordering::Relaxed);
+    }
+}
+
+/// Quantas vezes o console rolou desde o boot.
+///
+/// Para quem guarda uma posição em linhas de texto — o começo da linha de
+/// comando — saber quanto ela subiu desde que foi guardada. Um contador, e
+/// não um aviso a quem guarda: quem escreve aqui é o console, sem trava, e
+/// quem guarda a posição é o interpretador, que escreve no console com a
+/// trava dele na mão.
+static ROLAGENS: AtomicU32 = AtomicU32::new(0);
+
+pub fn rolagens() -> u32 {
+    ROLAGENS.load(Ordering::Relaxed)
 }
 
 fn tamanho_do_caractere() -> (u32, u32) {
@@ -226,15 +242,24 @@ fn colunas_da_tela(tela: &Tela, largura_do_glifo: u32) -> u32 {
     tela.largura.saturating_sub(2 * MARGEM_X) / largura_do_glifo
 }
 
-/// Volta ao topo quando não cabe mais uma linha, limpando a tela.
+/// Rola uma linha quando não cabe mais uma, e devolve onde a próxima vai.
 ///
-/// Ver a nota do módulo sobre por que não se rola. Limpar é o que separa
-/// texto novo de texto velho: sem isso, as linhas de cima ficariam sendo as
-/// da volta anterior, e uma pessoa leria as duas como se fossem a mesma
-/// sequência.
+/// O texto sobe, a linha de cima sai, e a nova entra embaixo — o que um
+/// terminal faz, e o que uma pessoa lendo a resposta de um comando espera. A
+/// grade de caracteres sobe junto, para a árvore semântica continuar
+/// descrevendo a tela.
+///
+/// Numa tela pequena demais para rolar — menos de duas linhas de texto —
+/// recomeça do topo, limpando: é o que o console fazia sempre, antes de
+/// rolar.
 fn recomecar_se_encheu(tela: &Tela, y: u32, altura_do_glifo: u32) -> u32 {
     if y + altura_do_glifo <= tela.altura.saturating_sub(MARGEM_DE_BAIXO) {
         return y;
+    }
+    if tela.rolar(MARGEM_Y, y - MARGEM_Y, altura_do_glifo, PAPEL) {
+        rolar_grade();
+        ROLAGENS.fetch_add(1, Ordering::Relaxed);
+        return y - altura_do_glifo;
     }
     // Só a região do console, e não a tela inteira: a faixa da barra
     // superior fica de fora. Com a barra por cima ela não aparece, e limpá-la

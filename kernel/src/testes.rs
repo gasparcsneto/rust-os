@@ -2913,7 +2913,7 @@ fn console_log_humano_chega_a_tela() -> Resultado {
     })
 }
 
-/// A linha quebra na borda direita, e a tela recomeça quando enche.
+/// A linha quebra na borda direita, e o texto rola quando chega ao pé.
 ///
 /// # Por que os dois no mesmo caso
 ///
@@ -2927,16 +2927,21 @@ fn console_log_humano_chega_a_tela() -> Resultado {
 /// zero — e o desenho pula pixel de cobertura zero. Encher a tela com letras
 /// de verdade custaria centenas de milhares de escritas em memória de
 /// dispositivo; com espaços, custa a mesma lógica e quase nenhum pixel.
-fn console_quebra_na_borda_e_recomeca() -> Resultado {
+fn console_quebra_na_borda_e_rola() -> Resultado {
     let Some(tela) = crate::tela::tela() else {
         return sem_framebuffer();
     };
-    sem_intrusos(|| quebra_na_borda_e_recomeca(&tela))
+    sem_intrusos(|| quebra_na_borda_e_rola(&tela))
 }
 
-fn quebra_na_borda_e_recomeca(tela: &crate::tela::Tela) -> Resultado {
+fn quebra_na_borda_e_rola(tela: &crate::tela::Tela) -> Resultado {
     crate::tela::banner();
     let (largura_do_glifo, altura_do_glifo) = crate::tela::console::tamanho_do_glifo();
+    let (x_topo, y_topo) = crate::tela::console::cursor();
+
+    // Uma letra na segunda linha, para ver o texto subir.
+    crate::tela::console::escrever("\nR\n");
+
     let (x_inicial, y_inicial) = crate::tela::console::cursor();
 
     // Espaços suficientes para passar da borda direita com folga.
@@ -2954,43 +2959,107 @@ fn quebra_na_borda_e_recomeca(tela: &crate::tela::Tela) -> Resultado {
         return Err("a quebra nao desceu exatamente uma linha");
     }
 
-    // E agora o pé da tela. Uma quebra de linha por vez, que não desenha
-    // nada, e parando na primeira vez que o cursor **sobe** — que é o
-    // recomeço acontecendo.
+    // E agora o pé da tela. Uma quebra de linha por vez, parando na primeira
+    // em que o cursor **não desce** — que é a rolagem acontecendo: o texto
+    // sobe, e o cursor fica na última linha.
     //
-    // Parar no primeiro recomeço, e não contar quantas linhas cabem e
-    // conferir no fim, porque a segunda forma exige acertar o número exato:
-    // errando por um, o laço passa do recomeço e o cursor está de volta no
-    // meio da tela, indistinguível de nunca ter recomeçado. Foi assim que
-    // este caso reprovou na primeira escrita.
+    // Parar na primeira, e não contar quantas linhas cabem e conferir no
+    // fim, porque a segunda forma exige acertar o número exato — foi assim
+    // que a versão deste caso para o recomeço do topo reprovou na primeira
+    // escrita.
     let linhas = tela.altura / altura_do_glifo;
-    let mut recomecou = false;
+    let rolagens_antes = crate::tela::console::rolagens();
+    let mut rolou = false;
     for _ in 0..=linhas {
         let (_, antes) = crate::tela::console::cursor();
         crate::tela::console::escrever("\n");
         let (_, agora) = crate::tela::console::cursor();
-        if agora < antes {
-            if agora != y_inicial {
-                crate::log_error!("teste", "recomecou em {}, e nao em {}", agora, y_inicial);
-                return Err("o recomeco nao voltou ao topo da regiao do console");
-            }
-            recomecou = true;
+        if agora == antes {
+            rolou = true;
             break;
         }
+        if agora < antes {
+            return Err("o console recomecou do topo em vez de rolar");
+        }
+    }
+    if !rolou {
+        return Err("o console nunca rolou, mesmo passando do pe");
+    }
+    if crate::tela::console::rolagens() != rolagens_antes + 1 {
+        return Err("rolar uma linha nao contou uma rolagem");
     }
 
-    if !recomecou {
-        return Err("a tela nunca recomecou, mesmo passando do pe");
+    // A letra subiu uma linha: estava na segunda, está na primeira — na grade
+    // e nos pixels.
+    if crate::tela::console::caractere(0, 0) != Some('R') {
+        return Err("a grade nao subiu junto com a tela");
+    }
+    crate::tela::console::conferir_glifo('R', x_topo, y_topo)?;
+    // E na tela física, depois que o compositor levar: uma rolagem que não
+    // marcasse a região como suja ficaria na camada, e o monitor mostraria o
+    // texto no lugar antigo.
+    crate::tela::descarregar();
+    let fisica = crate::tela::tela_fisica().ok_or("a tela fisica sumiu")?;
+    crate::tela::console::conferir_glifo_em(&fisica, 'R', x_topo, y_topo)?;
+    // E a linha de baixo subiu também: a segunda linha tem agora o que a
+    // terceira tinha — os espaços da quebra na borda.
+    if crate::tela::console::caractere(0, 1) != Some(' ') {
+        return Err("a linha de baixo nao subiu junto com a da letra");
     }
 
-    // E a faixa de acento sobreviveu ao recomeço: a região do console começa
-    // abaixo dela, e limpar a tela inteira apagaria o indicador de que há um
-    // kernel vivo.
+    // E a faixa de cima da região do console não foi tocada.
     match tela.ler_pixel(0, 0) {
         Some(topo) if topo == Cor::ACENTO => Ok(()),
-        Some(_) => Err("o recomeco do console apagou a faixa do banner"),
+        Some(_) => Err("a rolagem do console subiu por cima da faixa de cima"),
         None => Err("o canto da tela nao pode ser lido"),
     }
+}
+
+/// A linha de comando continua descrita onde está quando a tela rola com
+/// ela aberta: qualquer impressão do kernel no pé da tela faz subir, e o
+/// campo sobe junto — na árvore e na grade.
+fn console_rolar_leva_a_linha_de_comando() -> Resultado {
+    let Some(g) = crate::tela::console::geometria() else {
+        return sem_framebuffer();
+    };
+    sem_intrusos(|| {
+        // Até o pé da tela, com o interpretador desligado.
+        crate::tela::banner();
+        for _ in 0..g.linhas {
+            crate::tela::console::escrever("\n");
+        }
+        crate::interpretador::ativar_para_teste();
+        let resultado = (|| {
+            let (_, linha_do_prompt) =
+                crate::interpretador::inicio_do_campo().ok_or("a linha de comando nao abriu")?;
+            crate::interpretador::definir("abc")?;
+            // Uma impressão comum, que não passa pelo log nem redesenha o
+            // prompt: a tela sobe por baixo do campo.
+            let rolagens = crate::tela::console::rolagens();
+            crate::serial_println!();
+            if crate::tela::console::rolagens() == rolagens {
+                return Err("imprimir no pe da tela nao rolou");
+            }
+            let (_, linha) =
+                crate::interpretador::inicio_do_campo().ok_or("a linha de comando sumiu")?;
+            if linha + 1 != linha_do_prompt {
+                crate::log_error!(
+                    "teste",
+                    "o campo estava na {} e ficou na {}",
+                    linha_do_prompt,
+                    linha
+                );
+                return Err("o campo nao subiu junto com a tela");
+            }
+            if crate::tela::console::caractere(0, linha) != Some('d') {
+                return Err("onde a arvore diz que o campo comeca nao esta o prompt");
+            }
+            Ok(())
+        })();
+        crate::interpretador::desativar_para_teste();
+        crate::interpretador::limpar();
+        resultado
+    })
 }
 
 /// Os códigos comuns ao PS/2 e ao virtio-input produzem o caractere certo.
@@ -7177,12 +7246,6 @@ fn ui_registro_nao_parte_a_linha_digitada() -> Resultado {
     if crate::tela::tela().is_none() {
         return Ok(());
     }
-    // De uma página limpa. O console não rola: quando o registro cai na
-    // última linha, a página vira e leva ele junto, e a linha de cima deixa
-    // de ser o registro. Medido, depois que a barra superior tirou duas
-    // linhas da página. Isso é a dívida de rolar, escrita no cabeçalho do
-    // console; o que este caso confere é o `por_cima`.
-    crate::tela::banner();
     crate::interpretador::ativar_para_teste();
     let resultado = sem_intrusos(|| {
         crate::interpretador::definir("abc")?;
@@ -9990,8 +10053,12 @@ static CASOS: &[Caso] = &[
         f: console_texto_chega_ao_framebuffer,
     },
     Caso {
-        nome: "console: quebra na borda e recomeca no pe",
-        f: console_quebra_na_borda_e_recomeca,
+        nome: "console: quebra na borda e rola no pe",
+        f: console_quebra_na_borda_e_rola,
+    },
+    Caso {
+        nome: "console: rolar leva a linha de comando",
+        f: console_rolar_leva_a_linha_de_comando,
     },
     Caso {
         nome: "console: o log humano chega a tela",
