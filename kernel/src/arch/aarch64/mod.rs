@@ -102,13 +102,14 @@ pub const BASE_DAS_SUPERFICIES: u64 = 0x0000_0040_0000_0000;
 /// endereços altos para separar kernel de usuário.
 pub const COBERTURA_DA_ENTRADA_DE_TOPO: u64 = 1024 * 1024 * 1024;
 
-/// Nome da arquitetura, exposto no protocolo do agente.
 /// Não há mouse de fábrica no ARM: a máquina `virt` não tem 8042, e o
-/// ponteiro chega por um tablet virtio — ver [`crate::virtio::teclado`].
+/// ponteiro chega por um tablet virtio — ver [`crate::virtio::teclado`] — ou
+/// por um mouse USB — ver [`crate::usb::hid`].
 pub fn iniciar_mouse() -> bool {
     false
 }
 
+/// Nome da arquitetura, exposto no protocolo do agente.
 pub const fn nome() -> &'static str {
     "aarch64"
 }

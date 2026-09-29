@@ -31,12 +31,13 @@
 //!
 //! # O que existe hoje
 //!
-//! Pouco, porque a interface é pouca: a tela, o console de texto sobre ela e
-//! a linha de comando do interpretador. Nenhum deles é um botão, então
-//! `press` existe no vocabulário e nenhum elemento o aceita ainda — a árvore
-//! diz isso em vez de fingir. O primeiro botão vem com o compositor e o
-//! toolkit do roteiro; quando vier, ele entra por aqui, e o agente o encontra
-//! pelo mesmo `ui.tree`.
+//! Pouco, porque a interface é pouca: a tela, o console de texto sobre ela, a
+//! linha de comando do interpretador, e a barra superior com o nome, o
+//! relógio e o botão **Limpar** — o primeiro elemento que aceita `press`. Ele
+//! é acionado por três caminhos, e todos chegam em [`agir`]: o `ui.act` do
+//! agente, a F1 e o clique da pessoa. As camadas do compositor acima do
+//! console aparecem como janelas, que hoje só a suíte cria; o servidor de
+//! janelas do roteiro é quem vai criá-las de verdade.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 

@@ -2,9 +2,9 @@
 //!
 //! # De onde vem o movimento
 //!
-//! De três tipos de dispositivo, e o que cada um entrega é diferente. Um
-//! tablet — o `virtio-tablet` do ARM, o tablet USB — diz **onde** o ponteiro
-//! está, numa escala dele; um mouse — o PS/2 do x86 — diz **quanto** ele
+//! De três dispositivos, e o que cada um entrega é diferente. Um tablet — o
+//! `virtio-tablet` do ARM — diz **onde** o ponteiro está, numa escala dele;
+//! um mouse — o PS/2 do x86, o mouse USB nas duas — diz **quanto** ele
 //! andou. Os drivers traduzem o formato de cada um e chamam [`absoluto`] ou
 //! [`relativo`]; daqui para cima não se sabe qual dos dois chegou.
 //!
