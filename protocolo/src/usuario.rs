@@ -144,7 +144,7 @@ pub mod erro {
 /// a camada, mostrá-la e dizer o que mudou nela.
 ///
 /// Desenhar é escrever na faixa; nada aparece até o processo dizer onde
-/// escreveu, com [`operacao::DANO`]. É o arranjo do Orbital, o compositor do
+/// escreveu, com [`operacao::DANO`](superficie::operacao::DANO). É o arranjo do Orbital, o compositor do
 /// Redox: a janela é memória do cliente, e o compositor recompõe o
 /// retângulo que o cliente acusa.
 ///
@@ -248,7 +248,8 @@ pub mod superficie {
 /// menor que um evento é recusado, em vez de receber metade de um.
 ///
 /// Os bytes são little-endian, escritos e lidos campo a campo por
-/// [`Evento::em_bytes`] e [`Evento::de_bytes`], e não pela memória da
+/// [`Evento::em_bytes`](evento::Evento::em_bytes) e
+/// [`Evento::de_bytes`](evento::Evento::de_bytes), e não pela memória da
 /// `struct`: o kernel e o programa são compilados à parte, e o layout que
 /// importa é o que está escrito aqui.
 pub mod evento {
