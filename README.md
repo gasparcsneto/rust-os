@@ -1037,8 +1037,8 @@ que mudou. A diferença mora em um método do trait, `superficie_da_tela`, que o
 **Por baixo dele, a tela de falha.** O caminho fatal não pode confiar na
 trava nem no heap do compositor, e não passa por ele: devolve o console à tela
 física e pinta direto nela. A fumaça provoca uma falha fatal pelo agente, no
-fim da conversa, e fotografa o monitor — 99,8% da tela na cor de falha, nas
-quatro máquinas. O que ela **não** prova é o porquê do desvio: com o
+fim da conversa, e fotografa o monitor — 99,7% da tela na cor de falha no
+ARM linear, 99,8% nas outras três máquinas; o resto é o texto do post-mortem. O que ela **não** prova é o porquê do desvio: com o
 compositor são, pintar a camada também chegaria ao monitor. Medido — com essa
 mutação a sonda passa. O desvio protege a falha que acontece dentro do
 próprio compositor, e essa nenhuma sonda sabe provocar ainda.
