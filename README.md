@@ -312,8 +312,9 @@ programas/           os programas de usuário, compilados à parte do kernel
     ├── monte.rs     o monte do processo, sobre `mapear`
     ├── saida.rs     uma linha formatada por chamada de `escrever`
     └── bin/
-        ├── ola.rs      o primeiro programa em Rust: monte, formatação e pilha
-        └── memoria.rs  confere `mapear` e o monte do lado de quem pede
+        ├── ola.rs        o primeiro programa em Rust: monte, formatação e pilha
+        ├── memoria.rs    confere `mapear` e o monte do lado de quem pede
+        └── ponteiros.rs  pede ao kernel que escreva no código, e confere a recusa
 
 xtask/src/
 └── main.rs          a ferramenta de build, teste e diagnóstico do projeto
@@ -602,6 +603,22 @@ ele fazia reaproveitava sempre os mesmos blocos, e nenhuma fusão acontecia. E
 uma, a pilha de volta a uma página, era reprovada pelo motivo errado — um
 estouro de tempo, porque a espera do caso contava saídas e um processo morto
 não sai; agora o caso diz que o programa morreu.
+
+**Mapeada não é gravável.** Duas chamadas escrevem num buffer que o processo
+dá — `ler` e `esperar` —, e o kernel conferia só se a faixa era do processo e
+estava mapeada. Uma página de código é das duas coisas, e é só de leitura: o
+kernel escrevia nela pelo anel zero, a proteção de escrita do processador
+recusava, e a falha era **do kernel** — fatal. Qualquer processo derrubava a
+máquina com um `ler` para o endereço de uma função. O programa `ponteiros`
+reproduziu (`FALHA FATAL #1: page_fault`, com o endereço acusado dentro do
+código dele); agora as duas chamadas conferem, página a página, que o
+processo pode escrever ali, e ele confere que o kernel recusa com
+`ENDERECO_INVALIDO` e continua de pé. Uma página de cópia na escrita conta
+como gravável, e é de propósito: o processo pode escrever nela, e a escrita
+do kernel é resolvida como a dele seria. Três mutações, três reprovadas:
+tirar a conferência do `ler` ou do `esperar` devolve a falha fatal, e deixar
+de contar a marca de cópia na escrita reprova quatro casos de `fork` que
+escrevem o desfecho numa página marcada.
 
 **A proteção é testada, não presumida.** Existe um segundo programa que tenta
 ler a memória do kernel. O caso `usuario: nao alcanca o kernel` exige duas

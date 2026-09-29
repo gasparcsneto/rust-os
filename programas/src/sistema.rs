@@ -140,3 +140,48 @@ pub fn fechar(descritor: u64) -> i64 {
     // SAFETY: `fechar` não recebe ponteiro.
     unsafe { chamar(numero::FECHAR, descritor, 0, 0) }
 }
+
+/// `ler` com o ponteiro cru, sem uma fatia no meio.
+///
+/// # Safety
+///
+/// Nenhuma do lado do Rust — o kernel confere a faixa e recusa o que não
+/// for do processo, ou não for gravável. Existe para os programas que
+/// conferem essa recusa, e marcada `unsafe` porque uma faixa que o kernel
+/// aceite é escrita, e o compilador não sabe.
+pub unsafe fn ler_cru(descritor: u64, ponteiro: u64, tamanho: u64) -> i64 {
+    // SAFETY: o contrato é de quem chama.
+    unsafe { chamar(numero::LER, descritor, ponteiro, tamanho) }
+}
+
+/// Duplica o processo. Zero no filho; o identificador do filho no pai; ou
+/// um erro.
+pub fn bifurcar() -> i64 {
+    // SAFETY: `bifurcar` não recebe ponteiro.
+    unsafe { chamar(numero::BIFURCAR, 0, 0, 0) }
+}
+
+/// Espera o filho `id` — ou qualquer um, com zero — e devolve o
+/// identificador do colhido e o código de saída dele, quando ele saiu; o
+/// código vem `None` quando ele morreu por uma falha.
+pub fn esperar(id: u64) -> Result<(i64, Option<i64>), i64> {
+    let mut desfecho = [0i64; 2];
+    // SAFETY: os dezesseis bytes são deste processo e graváveis.
+    let colhido = unsafe { esperar_cru(id, desfecho.as_mut_ptr() as u64) };
+    if colhido < 0 {
+        return Err(colhido);
+    }
+    // A segunda palavra diz se o código vale — ver
+    // `protocolo::usuario::numero::ESPERAR`.
+    Ok((colhido, (desfecho[1] != 0).then_some(desfecho[0])))
+}
+
+/// `esperar` com o ponteiro cru.
+///
+/// # Safety
+///
+/// Como [`ler_cru`]: uma faixa que o kernel aceite é escrita.
+pub unsafe fn esperar_cru(id: u64, ponteiro: u64) -> i64 {
+    // SAFETY: o contrato é de quem chama.
+    unsafe { chamar(numero::ESPERAR, id, ponteiro, 0) }
+}

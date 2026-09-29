@@ -3623,32 +3623,35 @@ fn usuario_programas_compilados_rodam() -> Resultado {
         return Err("o diretorio dos programas compilados nao e o desta arquitetura");
     }
 
-    // Espera o processo sair — ou morrer. Um processo morto por falha não
-    // conta como saída, e esperar só pela saída transformava a morte num
-    // estouro de tempo sem motivo: medido, com a pilha de volta a uma
-    // página, o caso dizia "a condicao nao se cumpriu" em vez de dizer que o
-    // programa morreu.
-    let rodar = |nome: &str| -> Resultado {
+    // Espera o processo sair com o código dele — ou morrer. Pela linha do
+    // log a partir do lançamento, e não por um contador de saídas: um
+    // programa que bifurca tem duas, e a primeira pode ser a do filho. E um
+    // processo morto por falha não sai; esperar só pela saída transformava
+    // a morte num estouro de tempo sem motivo — medido, com a pilha de volta
+    // a uma página, o caso dizia "a condicao nao se cumpriu" em vez de dizer
+    // que o programa morreu.
+    let rodar = |nome: &str, codigo: i64| -> Resultado {
         let caminho = format!("{DIRETORIO_DOS_COMPILADOS}/{nome}");
-        let saidas = crate::usuario::estatisticas_de_processo().2;
         let desde = crate::log::total_emitidos();
-        let morreu = || {
-            let mut morto = false;
-            crate::log::ultimos(16, crate::log::Level::Trace, |r| {
-                morto |= r.seq >= desde
+        let saida = format!("processo encerrou com codigo {codigo}");
+        let visto = |procurada: &str| {
+            let mut achou = false;
+            crate::log::ultimos(24, crate::log::Level::Trace, |r| {
+                achou |= r.seq >= desde
                     && r.subsistema == "usuario"
-                    && r.mensagem().starts_with("processo morto por");
+                    && r.mensagem().starts_with(procurada);
             });
-            morto
+            achou
         };
         crate::usuario::lancar(Some(&caminho))?;
-        esperar_ate(
-            || crate::usuario::estatisticas_de_processo().2 > saidas || morreu(),
-            600,
-        )?;
-        if morreu() {
+        let _ = esperar_ate(|| visto(&saida) || visto("processo morto por"), 600);
+        if visto("processo morto por") {
             crate::log_error!("teste", "{} morreu por uma falha", nome);
             return Err("um programa compilado morreu por uma falha");
+        }
+        if !visto(&saida) {
+            crate::log_error!("teste", "{} nao saiu com {}", nome, codigo);
+            return Err("um programa compilado nao saiu com o codigo dele");
         }
         Ok(())
     };
@@ -3657,17 +3660,15 @@ fn usuario_programas_compilados_rodam() -> Resultado {
     // o que ele segurava tem de voltar quando ele sair.
     let livres_antes = crate::frames::estatisticas().0;
 
-    for (nome, codigo, marca) in [
-        ("ola", 61, "ola do Rust, no anel sem privilegio"),
-        ("memoria", 62, "memoria conferida:"),
+    // O quarto campo diz se o programa usa o monte — e, portanto, se tem de
+    // ter pedido memória ao kernel.
+    for (nome, codigo, marca, usa_o_monte) in [
+        ("ola", 61, "ola do Rust, no anel sem privilegio", true),
+        ("memoria", 62, "memoria conferida:", true),
+        ("ponteiros", 64, "ponteiros conferidos:", false),
     ] {
         let mapeamentos = crate::usuario::estatisticas_de_memoria().0;
-        rodar(nome)?;
-        let saida = crate::usuario::ultima_saida();
-        if saida != Some(codigo) {
-            crate::log_error!("teste", "{} saiu com {:?}, e nao {}", nome, saida, codigo);
-            return Err("um programa compilado nao saiu com o codigo dele");
-        }
+        rodar(nome, codigo)?;
         let mut disse = false;
         crate::log::ultimos(32, crate::log::Level::Trace, |r| {
             disse |= r.subsistema == "usuario" && r.mensagem().starts_with(marca);
@@ -3675,8 +3676,8 @@ fn usuario_programas_compilados_rodam() -> Resultado {
         if !disse {
             return Err("um programa compilado nao disse o que devia");
         }
-        // Os dois usam o monte, e o monte vem de `mapear`.
-        if crate::usuario::estatisticas_de_memoria().0 == mapeamentos {
+        // O monte vem de `mapear`.
+        if usa_o_monte && crate::usuario::estatisticas_de_memoria().0 == mapeamentos {
             return Err("um programa compilado rodou sem pedir memoria ao kernel");
         }
     }
@@ -3705,7 +3706,7 @@ fn usuario_programas_compilados_rodam() -> Resultado {
     esperar_o_coletor();
     let antes = crate::heap::estatisticas().alocado;
     for _ in 0..5 {
-        rodar("ola")?;
+        rodar("ola", 61)?;
     }
     esperar_o_coletor();
     let depois = crate::heap::estatisticas().alocado;

@@ -656,6 +656,24 @@ pub fn marcar_copia_na_escrita(virtual_: u64) -> Result<(), &'static str> {
     })
 }
 
+/// O processo pode escrever nesta página?
+///
+/// Pelo bit de escrita **ou** pela marca de cópia na escrita — a mesma
+/// pergunta de [`PaginaDoUsuario::gravavel_para_o_processo`](crate::arch::PaginaDoUsuario),
+/// feita sobre um endereço. É o que o kernel confere antes de escrever num
+/// buffer que o processo lhe deu: uma página só de leitura, escrita pelo
+/// anel zero, é uma falha do kernel, e o kernel morreria por ela.
+pub fn gravavel_pelo_usuario(virtual_: u64) -> bool {
+    com_descritor_da_folha(virtual_ & !(TAMANHO_PAGINA - 1), |descritor| {
+        let bandeiras = descritor.flags();
+        let permissoes = permissoes_de(bandeiras.bits());
+        let gravavel =
+            permissoes.usuario && (permissoes.escrita || bandeiras.contains(COPIA_NA_ESCRITA));
+        Ok((gravavel, false))
+    })
+    .unwrap_or(false)
+}
+
 /// O frame e as permissões de uma página marcada como cópia na escrita.
 ///
 /// `None` quando a página não está mapeada ou não carrega a marca — que é o

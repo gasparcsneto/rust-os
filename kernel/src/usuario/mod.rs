@@ -187,6 +187,38 @@ pub fn validar_faixa(inicio: u64, tamanho: u64) -> Result<(), i64> {
     Ok(())
 }
 
+/// Como [`validar_faixa`], e a faixa inteira precisa ser **gravável** pelo
+/// processo.
+///
+/// # Por que mapeada não basta
+///
+/// Porque o kernel escreve nela, pelo anel zero, com a proteção de escrita
+/// do processador ligada. Uma página de código é do processo e está
+/// mapeada — passa por [`validar_faixa`] — e é só de leitura: a escrita do
+/// kernel falhava ali, a falha era do **kernel**, e era fatal. Qualquer
+/// processo derrubava a máquina com um `ler` para o endereço de uma função.
+/// Medido com o programa `ponteiros`: `FALHA FATAL #1: page_fault`, com o
+/// endereço acusado dentro do código dele.
+///
+/// Uma página de cópia na escrita conta como gravável, e é de propósito: o
+/// processo pode escrever nela, e a escrita do kernel é resolvida pelo
+/// tratador de falha como a dele seria — ver `resolver_copia_na_escrita`.
+pub fn validar_escrita(inicio: u64, tamanho: u64) -> Result<(), i64> {
+    validar_faixa(inicio, tamanho)?;
+    if tamanho == 0 {
+        return Ok(());
+    }
+    let fim = inicio + tamanho;
+    let mut endereco = inicio & !(crate::arch::TAMANHO_PAGINA - 1);
+    while endereco < fim {
+        if !crate::arch::gravavel_pelo_usuario(endereco) {
+            return Err(erro::ENDERECO_INVALIDO);
+        }
+        endereco += crate::arch::TAMANHO_PAGINA;
+    }
+    Ok(())
+}
+
 /// Atende uma chamada de sistema. Chamado pelo backend de arquitetura.
 /// # Safety
 ///
@@ -498,7 +530,7 @@ fn ler(descritor: u64, ponteiro: u64, tamanho: u64) -> i64 {
         return erro::DESCRITOR_INVALIDO;
     };
 
-    if let Err(e) = validar_faixa(ponteiro, tamanho) {
+    if let Err(e) = validar_escrita(ponteiro, tamanho) {
         RECUSADAS.fetch_add(1, Ordering::Relaxed);
         return e;
     }
@@ -622,7 +654,7 @@ fn esperar(alvo: u64, ponteiro: u64) -> i64 {
     // reprova — ele pede de propósito uma espera com o endereço 1 antes da
     // legítima, e do outro lado não acha mais o filho.
     if ponteiro != 0
-        && let Err(erro) = validar_faixa(ponteiro, BYTES_DO_DESFECHO)
+        && let Err(erro) = validar_escrita(ponteiro, BYTES_DO_DESFECHO)
     {
         RECUSADAS.fetch_add(1, Ordering::Relaxed);
         return erro;
