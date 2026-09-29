@@ -212,6 +212,27 @@ pub fn evento(codigo_da_tecla: u8, pressionada: bool) {
 
     PRESSIONADAS.fetch_add(1, Ordering::Relaxed);
 
+    // Com o foco numa janela, o caractere é do servidor de janelas. Se não
+    // houver quem escute — o servidor morreu —, o foco volta ao kernel e o
+    // caractere segue para o console, em vez de sumir.
+    if crate::superficies::foco_ativo() {
+        let evento = protocolo::usuario::evento::Evento {
+            tipo: protocolo::usuario::evento::tipo::TECLA,
+            a: c as i64,
+            b: 0,
+            c: 0,
+        };
+        match crate::eventos::publicar(protocolo::usuario::evento::CANAL_DAS_JANELAS, evento) {
+            Err(crate::eventos::NaoPublicado::SemOuvinte) => {
+                crate::superficies::devolver_foco();
+            }
+            _ => {
+                let _ = HISTORICO.enfileirar(c);
+                return;
+            }
+        }
+    }
+
     // Fila cheia é fila cheia: o contador de descartados da própria fila
     // guarda quantos se perderam, e não há para quem reclamar aqui dentro —
     // isto roda num handler de interrupção.

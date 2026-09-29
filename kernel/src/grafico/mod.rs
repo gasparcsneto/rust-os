@@ -55,9 +55,11 @@
 //! a ela. A árvore semântica mora em [`crate::ui`], porque descreve a
 //! interface, e não o adaptador.
 //!
-//! O que ainda não há: transparência, quem crie camadas em produção — a
-//! barra superior, o servidor de janelas —, e o roteamento de entrada para
-//! elas. Ver o roteiro, fase 10.
+//! Quem cria camadas: a barra superior e o cursor, no kernel; e os
+//! processos, por [`crate::superficies`] — o servidor de janelas, uma por
+//! janela. A entrada chega às janelas por [`crate::ponteiro`] e
+//! [`crate::teclado`], que perguntam a [`camada_em`] o que está debaixo do
+//! ponteiro.
 
 pub mod compositor;
 pub mod dano;
@@ -225,6 +227,12 @@ pub fn compor(dano: Dano) -> bool {
 /// sem compositor.
 pub fn camadas(f: impl FnMut(compositor::InfoCamada)) {
     com_compositor(|c| c.camadas(f));
+}
+
+/// A camada de cima em `(x, y)`, sem o cursor nem as invisíveis — ver
+/// [`Compositor::camada_em`]. `None` sobre o console, ou sem compositor.
+pub fn camada_em(x: u32, y: u32) -> Option<compositor::InfoCamada> {
+    com_compositor(|c| c.camada_em(x, y)).flatten()
 }
 
 /// Quantas atualizações chegaram à tela, e a última delas.

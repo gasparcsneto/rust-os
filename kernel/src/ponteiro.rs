@@ -23,12 +23,25 @@
 //! pessoa. É o mesmo lugar onde chegam a F1 e o `press` do agente. Pela
 //! fila, e não aqui: quem chama estas funções são handlers de interrupção, e
 //! o que um clique aciona pode ser limpar a tela inteira.
+//!
+//! # Sobre uma janela
+//!
+//! Quando o que está debaixo do ponteiro é a superfície de um processo — uma
+//! janela do servidor de janelas —, o movimento e o botão não são do kernel:
+//! vão como eventos para o canal das janelas, e o servidor decide o que
+//! fazem. Um aperto sobre uma janela **captura** o ponteiro até o botão
+//! soltar: arrastando depressa, o ponteiro sai da janela antes de ela
+//! acompanhar, e sem a captura o servidor perderia o resto do arrasto.
+//!
+//! Um aperto fora de toda janela devolve o foco do teclado ao kernel, e o
+//! servidor é avisado.
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use spin::Mutex;
 
 use crate::grafico::compositor::{Camada, Mistura};
+use protocolo::usuario::evento::{BOTAO_ESQUERDO, CANAL_DAS_JANELAS, Evento, tipo};
 
 /// Onde o ponteiro está, em pixels da tela.
 static X: AtomicU32 = AtomicU32::new(0);
@@ -36,6 +49,13 @@ static Y: AtomicU32 = AtomicU32::new(0);
 
 /// O botão esquerdo, como estava no último evento.
 static ESQUERDO: AtomicBool = AtomicBool::new(false);
+
+/// O botão foi apertado sobre uma janela e ainda não soltou: tudo o que o
+/// ponteiro fizer vai para o servidor.
+static CAPTURADO: AtomicBool = AtomicBool::new(false);
+
+/// Quantos eventos de ponteiro foram para o servidor de janelas.
+static PARA_AS_JANELAS: AtomicU64 = AtomicU64::new(0);
 
 /// O ponteiro andou desde a última vez que o cursor foi posto no lugar.
 static ANDOU: AtomicBool = AtomicBool::new(false);
@@ -130,12 +150,64 @@ pub fn relativo(dx: i32, dy: i32) {
 /// O botão esquerdo, pressionado ou não. O clique é o apertar.
 pub fn botao(pressionado: bool) {
     let antes = ESQUERDO.swap(pressionado, Ordering::Relaxed);
+    let (x, y) = posicao();
     if pressionado && !antes {
-        let (x, y) = posicao();
         ULTIMO_CLIQUE.store((x as u64) << 32 | y as u64, Ordering::Relaxed);
         CLIQUES.fetch_add(1, Ordering::Relaxed);
+        if sobre_uma_janela(x, y) && para_as_janelas(x, y) {
+            CAPTURADO.store(true, Ordering::Relaxed);
+            return;
+        }
+        // Fora de toda janela: o clique é do kernel, e o teclado também.
+        if crate::superficies::devolver_foco() {
+            publicar(Evento {
+                tipo: tipo::FOCO_PERDIDO,
+                ..Evento::default()
+            });
+        }
         crate::teclado::clique();
+    } else if !pressionado && antes && CAPTURADO.swap(false, Ordering::Relaxed) {
+        para_as_janelas(x, y);
     }
+}
+
+/// O que está debaixo de `(x, y)` é a superfície de um processo?
+fn sobre_uma_janela(x: u32, y: u32) -> bool {
+    crate::grafico::camada_em(x, y).is_some_and(|c| c.nome == crate::superficies::NOME_DA_CAMADA)
+}
+
+/// Manda ao servidor de janelas onde o ponteiro está e os botões. Falso se
+/// não havia quem escutasse — e então o ponteiro é do kernel.
+fn para_as_janelas(x: u32, y: u32) -> bool {
+    let botoes = if ESQUERDO.load(Ordering::Relaxed) {
+        BOTAO_ESQUERDO
+    } else {
+        0
+    };
+    let foi = publicar(Evento {
+        tipo: tipo::PONTEIRO,
+        a: x as i64,
+        b: y as i64,
+        c: botoes,
+    });
+    if foi {
+        PARA_AS_JANELAS.fetch_add(1, Ordering::Relaxed);
+    }
+    foi
+}
+
+/// Publica no canal das janelas. Uma fila cheia conta como entregue: o
+/// servidor existe, e o canal contou o que recusou.
+fn publicar(evento: Evento) -> bool {
+    !matches!(
+        crate::eventos::publicar(CANAL_DAS_JANELAS, evento),
+        Err(crate::eventos::NaoPublicado::SemOuvinte)
+    )
+}
+
+/// Quantos eventos de ponteiro foram para o servidor de janelas.
+pub fn para_as_janelas_contados() -> u64 {
+    PARA_AS_JANELAS.load(Ordering::Relaxed)
 }
 
 /// Fim de um lote de eventos: põe o cursor onde o ponteiro está.
@@ -159,6 +231,10 @@ pub fn sincronizar() {
         }
     });
     crate::ui::mudou();
+    // Andando sobre uma janela, ou arrastando uma: é do servidor.
+    if CAPTURADO.load(Ordering::Relaxed) || sobre_uma_janela(x, y) {
+        para_as_janelas(x, y);
+    }
 }
 
 /// A camada da seta, fixa no topo. `None` sem compositor.

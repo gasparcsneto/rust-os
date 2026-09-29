@@ -58,14 +58,36 @@ pub use protocolo::usuario::{BASE, TETO, erro, evento, numero};
 /// diretório é o que [`crate::arch::nome`] devolve, e a suíte confere que
 /// os dois não divergiram.
 ///
-/// Só a suíte a lê, por enquanto; o primeiro consumidor de produção é o
-/// servidor de janelas, que o kernel vai lançar daqui.
+/// É de onde o kernel lança o servidor de janelas no boot — ver
+/// [`lancar_o_servidor_de_janelas`].
 #[cfg(target_arch = "x86_64")]
-#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub const DIRETORIO_DOS_COMPILADOS: &str = "/programas/x86_64";
 #[cfg(target_arch = "aarch64")]
-#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub const DIRETORIO_DOS_COMPILADOS: &str = "/programas/aarch64";
+
+/// Lança o servidor de janelas, do disco.
+///
+/// Só com compositor: sem tela não há janela a servir. E sem o programa no
+/// disco — uma máquina sem o disco dos programas —, o kernel segue sem
+/// janelas, e diz por quê. A suíte não passa por aqui: ela lança o servidor
+/// no caso dela, e o encerra no fim, para ele não ficar vivo nos seguintes.
+#[cfg_attr(feature = "modo-teste", allow(dead_code))]
+pub fn lancar_o_servidor_de_janelas() {
+    if crate::grafico::relatorio().is_none() {
+        crate::log_info!("janelas", "sem compositor, sem servidor de janelas");
+        return;
+    }
+    let caminho = alloc::format!("{DIRETORIO_DOS_COMPILADOS}/janelas");
+    match lancar(Some(&caminho)) {
+        Ok(id) => crate::log_info!("janelas", "servidor de janelas no fio {}", id),
+        Err(motivo) => crate::log_warn!(
+            "janelas",
+            "servidor de janelas nao lancado de {}: {}",
+            caminho,
+            motivo
+        ),
+    }
+}
 
 // O espaço do usuário inteiro tem de caber numa única entrada da tabela de
 // topo, e nenhuma região do kernel pode dividir essa entrada com ele.

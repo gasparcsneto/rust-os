@@ -313,12 +313,14 @@ programas/           os programas de usuário, compilados à parte do kernel
     ├── sistema.rs   as chamadas de sistema, uma função por chamada
     ├── monte.rs     o monte do processo, sobre `mapear`
     ├── saida.rs     uma linha formatada por chamada de `escrever`
+    ├── desenho.rs   retângulos e texto, com a fonte do console
     ├── superficie.rs uma camada do compositor com os pixels no processo
     └── bin/
         ├── ola.rs        o primeiro programa em Rust: monte, formatação e pilha
         ├── memoria.rs    confere `mapear` e o monte do lado de quem pede
         ├── ponteiros.rs  pede ao kernel que escreva no código, e confere a recusa
         ├── eco.rs        escuta um canal de eventos e diz o que chega
+        ├── janelas.rs    o servidor de janelas: moldura, foco, arrasto, ordem e fechar
         ├── superficie.rs desenha numa superfície, bifurca, fecha e sai sem fechar
         └── herdeira.rs   depois de um `exec`, fecha a superfície herdada sem perder a sua
 
@@ -716,7 +718,44 @@ colhido — um zumbi, com o espaço de pé —, que é a ordem em que a camada
 solta os frames antes do espaço: liberar ali, em vez de soltar, entregaria a
 outro dono memória que o zumbi ainda mapeia. O
 `display.info` ganhou `process_surfaces`: vivas, criadas e recolhidas de
-donos mortos.
+donos mortos. Treze mutações nas superfícies, treze reprovadas. Duas delas —
+liberar em vez de soltar, e desfazer o espelho sem conferir o frame — só
+reprovam pelos cenários do zumbi e do `exec`, escritos para elas depois de
+ver que nenhum caso passava por aquelas ordens.
+
+**O servidor de janelas, no espaço do usuário.** O programa `janelas` é o
+servidor: o kernel o lança do disco no boot, quando há compositor, e ele
+dorme na leitura do canal `janelas` até haver o que fazer. A divisão é a
+aprovada — **o kernel compõe, o servidor decide**. O kernel guarda as
+camadas, desenha o cursor e a barra, e leva à tela o que mudou; o servidor
+decide o que é uma janela, desenha a moldura dela com a mesma fonte do
+console, e responde ao que a pessoa faz: foco, arrastar pela barra de
+título, trazer para a frente e fechar pela caixa da ponta direita.
+
+O que atravessa a fronteira é pouco, e é tudo evento de 32 bytes no mesmo
+canal:
+
+- **o ponteiro**, só quando o que está debaixo dele é a superfície de um
+  processo — o kernel pergunta ao compositor qual camada cobre o ponto, sem
+  contar o cursor nem as invisíveis. Um aperto sobre uma janela **captura** o
+  ponteiro até soltar: arrastando depressa, ele sai da janela antes de ela
+  acompanhar, e sem a captura o resto do arrasto viraria clique do kernel;
+- **as teclas**, enquanto uma janela tem o foco. O servidor o pede com
+  `controlar(FOCO)`; um clique fora de toda janela o devolve ao kernel, e o
+  servidor é avisado para apagar a barra de título. Se o servidor morrer com
+  o foco, a tecla seguinte o devolve sozinha e segue para o console, em vez
+  de sumir;
+- **os pedidos de abrir** uma janela, com o tamanho da tela para
+  posicioná-la, e o de **encerrar**.
+
+O caso da suíte lança o servidor e o opera pelas mesmas funções que os
+drivers chamam: abre uma janela e confere a barra acesa na tela; digita, e a
+tecla não chega ao console; arrasta pela barra e confere a camada onde o
+ponteiro a levou; abre uma segunda e traz a primeira para a frente com um
+clique; clica fora, e a barra apaga e a tecla volta ao console; fecha pela
+caixa; e encerra o servidor, que não fica vivo para os casos seguintes. O
+`display.info` ganhou `to_windows`, os eventos de ponteiro que foram para o
+servidor em vez de virar clique do kernel.
 
 **A proteção é testada, não presumida.** Existe um segundo programa que tenta
 ler a memória do kernel. O caso `usuario: nao alcanca o kernel` exige duas
@@ -2263,11 +2302,13 @@ padronizado.
       topo e o clique no mesmo botão. E o servidor de janelas, em userspace
       como o do Redox — o kernel compõe e tem os drivers, o servidor decide
       janelas, decoração, foco e roteamento —, começou pela base: programas
-      de usuário em Rust, compilados à parte, com monte e `mapear`. A
-      seguir: a leitura que bloqueia e o canal de eventos, as superfícies do
-      compositor para processos, o servidor, a árvore semântica atravessando
-      a fronteira, e a primeira janela, o "Sobre o Duke" pela barra. Mais
-      adiante, o console como uma janela (o Terminal) e a tipografia.
+      de usuário em Rust, compilados à parte, com monte e `mapear`; a leitura
+      que bloqueia e o canal de eventos; as superfícies do compositor com os
+      pixels no processo; e o servidor, lançado no boot, com moldura, foco,
+      arrasto, ordem e fechar, e o ponteiro e o teclado roteados a ele pelo
+      kernel. A seguir: a árvore semântica atravessando a fronteira, e a
+      primeira janela, o "Sobre o Duke" pela barra. Mais adiante, o console
+      como uma janela (o Terminal) e a tipografia.
       E aqui a inversão do projeto encontra a interface gráfica. O servidor de
       janelas publica uma **árvore semântica** — que janelas existem, que
       controles, o que cada um faz — e os pixels são a renderização dela, do

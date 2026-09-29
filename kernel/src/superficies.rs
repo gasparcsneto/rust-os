@@ -103,6 +103,12 @@ static OCUPADAS: AtomicU64 = AtomicU64::new(0);
 static CRIADAS: AtomicU64 = AtomicU64::new(0);
 /// A geração da próxima superfície — ver [`Chave`].
 static PROXIMA_GERACAO: AtomicU64 = AtomicU64::new(1);
+
+/// A geração da superfície que tem o foco do teclado, ou zero.
+///
+/// A geração, e não a vaga: é o que nenhuma outra superfície recebe, então
+/// uma que feche e dê lugar a outra na mesma vaga não herda o foco.
+static FOCO: AtomicU64 = AtomicU64::new(0);
 static RECOLHIDAS: AtomicU64 = AtomicU64::new(0);
 
 fn com_vagas<R>(f: impl FnOnce(&mut [Option<Vaga>; MAX]) -> R) -> R {
@@ -231,6 +237,21 @@ pub fn controlar(chave: Chave, dono: u64, op: u64, argumento: u64) -> Result<(),
                 let opacidade = u8::try_from(argumento).map_err(|_| Recusa::Argumento)?;
                 camada.definir_opacidade(opacidade)
             }
+            operacao::FOCO => {
+                match argumento {
+                    1 => FOCO.store(v.geracao, Ordering::Relaxed),
+                    0 => {
+                        let _ = FOCO.compare_exchange(
+                            v.geracao,
+                            0,
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                        );
+                    }
+                    _ => return Err(Recusa::Argumento),
+                }
+                return Ok(());
+            }
             operacao::MISTURA => camada.definir_mistura(match argumento {
                 operacao::OPACA => Mistura::Opaca,
                 operacao::ALFA => Mistura::Alfa,
@@ -260,6 +281,7 @@ pub fn largar(chave: Chave, dono: u64) {
         return;
     };
     OCUPADAS.fetch_sub(1, Ordering::Relaxed);
+    soltar_o_foco(v.geracao);
     // O mapeamento do processo sai antes da camada, e só onde ele ainda é
     // o da camada: depois de um `exec`, o mesmo endereço pode ser memória
     // do programa novo, e `desfazer_espelho` confere frame a frame.
@@ -286,6 +308,9 @@ pub fn recolher_orfas() -> usize {
         let mut n = 0;
         for v in vagas.iter_mut() {
             if v.as_ref().is_some_and(|v| !crate::fios::vivo(v.dono)) {
+                if let Some(v) = v.as_ref() {
+                    soltar_o_foco(v.geracao);
+                }
                 orfas[n] = v.take();
                 n += 1;
             }
@@ -298,6 +323,23 @@ pub fn recolher_orfas() -> usize {
         RECOLHIDAS.fetch_add(quantas as u64, Ordering::Relaxed);
     }
     quantas
+}
+
+/// Tira o foco da superfície `geracao`, se for dela.
+fn soltar_o_foco(geracao: u64) {
+    let _ = FOCO.compare_exchange(geracao, 0, Ordering::Relaxed, Ordering::Relaxed);
+}
+
+/// Alguma superfície tem o foco do teclado? As teclas vão para o canal das
+/// janelas enquanto tiver.
+pub fn foco_ativo() -> bool {
+    FOCO.load(Ordering::Relaxed) != 0
+}
+
+/// Devolve o foco ao kernel. Verdadeiro se alguma superfície o tinha — e
+/// então o dono precisa saber.
+pub fn devolver_foco() -> bool {
+    FOCO.swap(0, Ordering::Relaxed) != 0
 }
 
 /// `(vivas, criadas, recolhidas de donos mortos)`.

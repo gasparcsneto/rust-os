@@ -1257,6 +1257,9 @@ fn display_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     // Quantos relatórios o mouse USB entregou: numa máquina com o PS/2 e o
     // USB, é o que diz por qual dos dois o ponteiro andou.
     w.field_u64("usb_reports", crate::usb::hid::relatorios_do_mouse())?;
+    // Quantos eventos foram para o servidor de janelas, em vez de virar
+    // clique do kernel: é o que diz que o ponteiro chegou às janelas.
+    w.field_u64("to_windows", crate::ponteiro::para_as_janelas_contados())?;
     w.end_object()?;
 
     w.field_u64("surfaces", r.superficies)?;

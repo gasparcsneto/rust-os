@@ -4056,6 +4056,205 @@ fn superficies_o_processo_desenha_e_some() -> Resultado {
     Ok(())
 }
 
+/// O servidor de janelas: abre uma janela, recebe as teclas com o foco,
+/// arrasta pela barra de título, traz para a frente, devolve o foco e fecha.
+///
+/// # O que este caso protege
+///
+/// A fronteira inteira, dos dois lados. Do kernel: o ponteiro sobre uma
+/// janela vira evento no canal, e não clique do kernel; o aperto captura o
+/// ponteiro até soltar; as teclas vão para o servidor com o foco numa
+/// janela, e voltam ao console quando a pessoa clica fora. Do servidor: a
+/// moldura, o foco — a barra acesa ou apagada, na tela —, o arrasto, a
+/// ordem e o fechar.
+///
+/// O ponteiro é movido pelas mesmas funções que os drivers chamam, e as
+/// teclas também: da fronteira do driver para cima, o caminho é o de uma
+/// pessoa. O servidor diz cada coisa que fez no log, e a suíte confere na
+/// tela e nas camadas.
+fn janelas_o_servidor_abre_foca_arrasta_e_fecha() -> Resultado {
+    let resultado = janelas_operadas();
+    // Em qualquer desfecho, o servidor sai e o foco volta ao kernel: um caso
+    // que reprovasse no meio deixaria as teclas dos casos seguintes indo
+    // para um servidor vivo — e eles reprovariam por um motivo que não é o
+    // deles.
+    if resultado.is_err() {
+        let _ = crate::eventos::publicar(
+            protocolo::usuario::evento::CANAL_DAS_JANELAS,
+            protocolo::usuario::evento::Evento {
+                tipo: protocolo::usuario::evento::tipo::ENCERRAR,
+                ..Default::default()
+            },
+        );
+        let _ = esperar_ate(|| !crate::superficies::foco_ativo(), 200);
+        crate::superficies::devolver_foco();
+        crate::teclado::esvaziar();
+    }
+    resultado
+}
+
+fn janelas_operadas() -> Resultado {
+    use crate::tela::Cor;
+    use crate::usuario::DIRETORIO_DOS_COMPILADOS;
+    use alloc::format;
+    use protocolo::usuario::evento::{CANAL_DAS_JANELAS, Evento, janela, tipo};
+
+    let Some(tela) = crate::tela::tela_fisica() else {
+        return sem_framebuffer();
+    };
+    let (w, h) = (tela.largura, tela.altura);
+    // As do servidor — ver `programas/src/bin/janelas.rs`.
+    let acesa = Cor::nova(0x3A, 0x8F, 0xD0);
+    let apagada = Cor::nova(0x2A, 0x3C, 0x58);
+    let (largura, altura) = (320i64, 160i64);
+
+    let desde = crate::log::total_emitidos();
+    let visto = |procurada: &str| {
+        let mut achou = false;
+        crate::log::ultimos(32, crate::log::Level::Trace, |r| {
+            achou |= r.seq >= desde && r.subsistema == "usuario" && r.mensagem() == procurada;
+        });
+        achou
+    };
+    let esperar_linha = |linha: &str| -> Resultado {
+        esperar_ate(|| visto(linha), 600).map_err(|_| {
+            crate::log_error!("teste", "o servidor nao disse `{}`", linha);
+            "o servidor de janelas nao fez o que devia"
+        })
+    };
+    // O ponteiro, como um tablet o moveria, e o botão, como um mouse.
+    let mover = |x: i64, y: i64| {
+        crate::ponteiro::absoluto(x as u32, y as u32, w - 1, h - 1);
+        crate::ponteiro::sincronizar();
+    };
+    let apertar = |x: i64, y: i64| {
+        mover(x, y);
+        crate::ponteiro::botao(true);
+        crate::ponteiro::botao(false);
+    };
+    let janelas_na_tela = || {
+        let mut delas = alloc::vec::Vec::new();
+        crate::grafico::camadas(|c| {
+            if c.nome == crate::superficies::NOME_DA_CAMADA {
+                delas.push((c.x as i64, c.y as i64));
+            }
+        });
+        delas
+    };
+    let publicar = |tipo: u32, a: i64| {
+        crate::eventos::publicar(
+            CANAL_DAS_JANELAS,
+            Evento {
+                tipo,
+                a,
+                b: w as i64,
+                c: h as i64,
+            },
+        )
+        .map_err(|_| "o servidor de janelas nao escuta o canal")
+    };
+    // Um canto do console, longe de toda janela: o cursor fica ali durante
+    // as leituras da tela.
+    let (fora_x, fora_y) = (1, h as i64 - 2);
+    mover(fora_x, fora_y);
+    crate::teclado::esvaziar();
+    let eventos_antes = crate::ponteiro::para_as_janelas_contados();
+
+    crate::usuario::lancar(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/janelas")))?;
+    esperar_linha("janelas: pronto")?;
+
+    // Abrir: no centro, com o foco, a barra acesa.
+    let (x, y) = ((w as i64 - largura) / 2, (h as i64 - altura) / 2);
+    publicar(tipo::ABRIR, janela::TESTE)?;
+    esperar_linha(&format!("janelas: aberta 1 Teste em {x} {y}"))?;
+    esperar_linha("janelas: foco 1")?;
+    if janelas_na_tela() != [(x, y)] {
+        return Err("a janela aberta nao esta na tela onde o servidor disse");
+    }
+    if !crate::superficies::foco_ativo() {
+        return Err("o servidor pediu o foco e o kernel nao o deu");
+    }
+    // Longe do título, que começa à esquerda, e da caixa de fechar.
+    let titulo = |jx: i64, jy: i64| pixel_na_tela((jx + 200) as u32, (jy + 4) as u32);
+    if titulo(x, y)? != acesa {
+        return Err("a barra de titulo da janela com o foco nao esta acesa");
+    }
+
+    // Uma tecla, com o foco na janela: vai para o servidor, e não para o
+    // console.
+    crate::teclado::evento(0x1E, true);
+    crate::teclado::evento(0x1E, false);
+    esperar_linha("janelas: tecla 97 em 1")?;
+    // A fila do console, e não o histórico de diagnóstico, que registra a
+    // tecla nos dois casos.
+    if crate::teclado::ler().is_some() {
+        return Err("com o foco numa janela, a tecla chegou ao console");
+    }
+
+    // Arrastar pela barra de título: aperta, anda e solta. O andar sai da
+    // janela antes de ela acompanhar — é a captura que o leva ao servidor.
+    mover(x + 200, y + 10);
+    crate::ponteiro::botao(true);
+    mover(x + 250, y + 60);
+    crate::ponteiro::botao(false);
+    let (x1, y1) = (x + 50, y + 50);
+    esperar_linha(&format!("janelas: arrastada 1 para {x1} {y1}"))?;
+    if janelas_na_tela() != [(x1, y1)] {
+        return Err("a janela arrastada nao foi para onde o ponteiro a levou");
+    }
+
+    // Uma segunda, por cima e com o foco; um clique na parte da primeira que
+    // a segunda não cobre traz a primeira para a frente.
+    publicar(tipo::ABRIR, janela::TESTE)?;
+    let (x2, y2) = (x + 24, y + 24);
+    esperar_linha(&format!("janelas: aberta 2 Teste em {x2} {y2}"))?;
+    esperar_linha("janelas: foco 2")?;
+    apertar(x1 + largura - 10, y1 + altura - 10);
+    esperar_linha("janelas: frente 1")?;
+    esperar_linha("janelas: foco 1")?;
+    if janelas_na_tela() != [(x2, y2), (x1, y1)] {
+        return Err("o clique numa janela de tras nao a trouxe para a frente");
+    }
+
+    // Um clique fora de toda janela devolve o foco: a barra apaga, e a
+    // tecla seguinte é do console.
+    apertar(fora_x, fora_y);
+    esperar_linha("janelas: foco devolvido")?;
+    if crate::superficies::foco_ativo() {
+        return Err("um clique fora das janelas nao devolveu o foco ao kernel");
+    }
+    if titulo(x1, y1)? != apagada {
+        return Err("a barra de titulo nao apagou quando a janela perdeu o foco");
+    }
+    crate::teclado::esvaziar();
+    crate::teclado::evento(0x1E, true);
+    crate::teclado::evento(0x1E, false);
+    let voltou = crate::teclado::ler() == Some('a');
+    crate::teclado::esvaziar();
+    if !voltou {
+        return Err("sem foco nas janelas, a tecla nao voltou ao console");
+    }
+
+    // Fechar a da frente pela caixa, na ponta direita da barra de título.
+    apertar(x1 + largura - 12, y1 + 11);
+    esperar_linha("janelas: fechada 1")?;
+    if janelas_na_tela() != [(x2, y2)] {
+        return Err("a caixa de fechar nao fechou a janela");
+    }
+    mover(fora_x, fora_y);
+
+    if crate::ponteiro::para_as_janelas_contados() == eventos_antes {
+        return Err("nenhum evento de ponteiro foi contado para as janelas");
+    }
+
+    // E o fim: o servidor fecha o que sobrou e sai.
+    publicar(tipo::ENCERRAR, 0)?;
+    esperar_linha("janelas: encerrado")?;
+    esperar_ate(|| janelas_na_tela().is_empty(), 200)
+        .map_err(|_| "uma janela ficou na tela depois de o servidor sair")?;
+    Ok(())
+}
+
 /// Uma linha digitada se separa em nome de comando e parâmetros.
 ///
 /// # O que este caso protege
@@ -11059,6 +11258,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "superficies: o processo desenha, bifurca, fecha e morre",
         f: superficies_o_processo_desenha_e_some,
+    },
+    Caso {
+        nome: "janelas: o servidor abre, foca, arrasta e fecha",
+        f: janelas_o_servidor_abre_foca_arrasta_e_fecha,
     },
     Caso {
         nome: "usb: o relatorio hid vira teclas",

@@ -36,8 +36,8 @@
 //! relógio e o botão **Limpar** — o primeiro elemento que aceita `press`. Ele
 //! é acionado por três caminhos, e todos chegam em [`agir`]: o `ui.act` do
 //! agente, a F1 e o clique da pessoa. As camadas do compositor acima do
-//! console aparecem como janelas, que hoje só a suíte cria; o servidor de
-//! janelas do roteiro é quem vai criá-las de verdade.
+//! console aparecem como janelas — as do servidor de janelas, e as que a
+//! suíte cria.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 

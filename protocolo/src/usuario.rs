@@ -224,6 +224,13 @@ pub mod superficie {
         /// byte alto, [`ALFA`] o usa como opacidade do pixel.
         pub const MISTURA: u64 = 5;
 
+        /// O teclado: `1` pede que as teclas venham para o dono desta
+        /// superfície, como eventos de [`TECLA`](crate::usuario::evento::tipo::TECLA)
+        /// no canal das janelas; `0` as devolve ao console. O foco também
+        /// volta ao console quando a superfície fecha, ou quando a pessoa
+        /// clica fora de toda superfície de processo.
+        pub const FOCO: u64 = 6;
+
         /// Argumentos de [`MISTURA`].
         pub const OPACA: u64 = 0;
         pub const ALFA: u64 = 1;
@@ -255,6 +262,40 @@ pub mod evento {
         /// canal. `a` é um número que o ouvinte devolve; zero pede que ele
         /// termine.
         pub const TESTE: u32 = 1;
+        /// O ponteiro, sobre uma janela ou arrastando uma: `a` e `b` são x e
+        /// y na tela, `c` os botões — ver [`BOTAO_ESQUERDO`](super::BOTAO_ESQUERDO).
+        ///
+        /// O kernel publica quando o ponteiro anda ou um botão muda, se o
+        /// que está debaixo dele é uma superfície de processo — ou se o
+        /// botão foi apertado sobre uma e ainda não soltou: é o que deixa
+        /// arrastar uma janela mais depressa do que ela acompanha.
+        pub const PONTEIRO: u32 = 2;
+        /// Uma tecla que virou caractere, com o foco numa superfície: `a` é
+        /// o código do caractere.
+        pub const TECLA: u32 = 3;
+        /// Um pedido para abrir uma janela — da barra do kernel, ou da
+        /// suíte. `a` é qual, de [`janela`](super::janela); `b` e `c` são a
+        /// largura e a altura da tela, para quem vai posicioná-la.
+        pub const ABRIR: u32 = 4;
+        /// O foco voltou ao kernel: a pessoa clicou fora de toda superfície
+        /// de processo, e as teclas voltam ao console.
+        pub const FOCO_PERDIDO: u32 = 5;
+        /// Um pedido para o servidor fechar tudo e sair. Da suíte, que
+        /// não deixa um servidor vivo para os casos seguintes.
+        pub const ENCERRAR: u32 = 6;
+    }
+
+    /// O bit do botão esquerdo em `c` de um evento de ponteiro.
+    pub const BOTAO_ESQUERDO: i64 = 1;
+
+    /// O canal onde o kernel publica a entrada das janelas e os pedidos de
+    /// abrir uma: quem o escuta é o servidor de janelas.
+    pub const CANAL_DAS_JANELAS: &str = "janelas";
+
+    /// Que janela um [`tipo::ABRIR`] pede.
+    pub mod janela {
+        /// Uma janela vazia, que mostra o que se digita nela. A da suíte.
+        pub const TESTE: i64 = 1;
     }
 
     /// Um evento: o tipo e três campos.

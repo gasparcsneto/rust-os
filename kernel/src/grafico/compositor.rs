@@ -147,6 +147,19 @@ impl Mistura {
 }
 
 impl Entrada {
+    fn info(&self) -> InfoCamada {
+        InfoCamada {
+            id: self.id,
+            nome: self.nome,
+            x: self.x,
+            y: self.y,
+            largura: self.largura,
+            altura: self.altura,
+            mistura: self.mistura,
+            opacidade: self.opacidade,
+        }
+    }
+
     /// Onde a camada cai na tela, recortada a ela.
     fn na_tela(&self, largura: u32, altura: u32) -> Dano {
         recortar_posicionado(self.x, self.y, self.largura, self.altura, largura, altura)
@@ -388,17 +401,27 @@ impl Compositor {
             opacidade: u8::MAX,
         });
         for c in &self.camadas {
-            f(InfoCamada {
-                id: c.id,
-                nome: c.nome,
-                x: c.x,
-                y: c.y,
-                largura: c.largura,
-                altura: c.altura,
-                mistura: c.mistura,
-                opacidade: c.opacidade,
-            });
+            f(c.info());
         }
+    }
+
+    /// A camada de cima que cobre `(x, y)` na tela, sem contar as fixas no
+    /// topo — o cursor está sempre debaixo do ponteiro — nem as invisíveis,
+    /// que não se veem e não recebem clique. `None` quando o que está ali é
+    /// o console.
+    ///
+    /// É a pergunta do roteamento de entrada: o ponteiro está sobre o quê?
+    pub fn camada_em(&self, x: u32, y: u32) -> Option<InfoCamada> {
+        let (x, y) = (x as i64, y as i64);
+        self.camadas
+            .iter()
+            .rev()
+            .filter(|c| !c.no_topo && c.opacidade > 0)
+            .find(|c| {
+                let (x0, y0) = (c.x as i64, c.y as i64);
+                x >= x0 && y >= y0 && x < x0 + c.largura as i64 && y < y0 + c.altura as i64
+            })
+            .map(Entrada::info)
     }
 }
 
