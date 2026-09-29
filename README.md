@@ -905,7 +905,8 @@ que uma pessoa faz, o registro precisa dizer qual dos dois fez.
 
 **O que ainda não há.** Botões: a interface de hoje é um console, e nenhum
 elemento aceita `press` — a árvore diz isso em vez de fingir; o primeiro vem
-com o compositor. Consentimento: um `set_value` do agente troca o que a pessoa
+com a barra superior. As camadas do compositor já aparecem nela, como
+`window`, mas hoje só a suíte cria alguma. Consentimento: um `set_value` do agente troca o que a pessoa
 estava digitando, e nada pergunta a ela antes. A árvore mostra o que está
 digitado, e o log registra quem agiu, mas pedir licença é trabalho da fase 12.
 
@@ -945,27 +946,29 @@ os quatro mebibytes da tela:
 $ cargo xtask agent --arch aarch64 display.info
 {"present":true,"adapter":"virtio-gpu",
  "displays":[{"id":0,"width":1280,"height":800}],
- "surfaces":1,"surface_bytes":4096000,"updates":0,"last_damage":null,
+ "layers":[{"id":0,"name":"console","x":0,"y":0,"width":1280,"height":800}],
+ "surfaces":2,"surface_bytes":8192000,"updates":14,
+ "last_damage":{"x":8,"y":234,"width":34,"height":10},
  "device":{"commands":36,"flushes":16,"rejected":0,
   "last_transfer":{"x":8,"y":234,"width":34,"height":10}}}
 ```
 
 `device` é nulo num framebuffer linear, onde a pergunta não existe. Aqui ele
 responde a que importa: a diferença entre "o kernel desenhou" e "o monitor
-mostra" é o que foi mandado, e os contadores dizem se está sendo. A superfície
-contada é a própria tela do console: a memória de apoio dela é alocada como a
-de qualquer superfície, na faixa virtual das superfícies gráficas.
+mostra" é o que foi mandado, e os contadores dizem se está sendo. As duas
+superfícies contadas são a tela — a memória de apoio do recurso — e a camada
+do console, que o compositor põe sobre ela (ver a seção seguinte).
 
 **Atrás do mesmo trait.** `AdaptadorVirtio` implementa o mesmo
-`AdaptadorGrafico` do linear, e o compositor que vier não vai saber qual dos
-dois tem embaixo. A diferença é interna: no linear o dano é copiado de um
-buffer de fundo para o framebuffer; aqui a superfície **é** a memória de um
-recurso do dispositivo, nada é copiado pelo kernel, e o dano é o que
-atravessa. Apresentar uma superfície que não está na tela troca o recurso da
-varredura de uma vez — a troca de página sem rasgo que um compositor usa para
-não mostrar um quadro pela metade. Soltar a superfície devolve a tela ao
-console antes de desfazer o recurso, e desfaz o recurso antes de devolver as
-páginas: enquanto ele existir, o dispositivo tem o direito de lê-las.
+`AdaptadorGrafico` do linear, e o compositor não sabe qual dos dois tem
+embaixo. A diferença é interna: no linear o dano é copiado de um buffer de
+fundo para o framebuffer; aqui o quadro do compositor **é** a memória do
+recurso da tela, nada é copiado pelo kernel, e o dano é o que atravessa.
+Apresentar outra superfície troca o recurso da varredura de uma vez — a troca
+de página sem rasgo que uma superfície de tela cheia vai usar. Soltá-la
+devolve a tela ao kernel antes de desfazer o recurso, e desfaz o recurso antes
+de devolver as páginas: enquanto ele existir, o dispositivo tem o direito de
+lê-las.
 
 **Porte do `virtio-gpud` do Redox, com três mudanças.** As estruturas do
 protocolo conferem com as deles (ver `THIRD_PARTY.md`); o comportamento não:
@@ -1005,6 +1008,57 @@ erra a tela: só manda a tela inteira para mudar uma célula. As duas seguintes 
 contrário — o kernel acredita ter mandado certo, e só quem olha o monitor
 sabe que não. A fumaça fotografa as duas máquinas de vídeo, nas duas
 arquiteturas.
+
+## O compositor
+
+Até aqui o console era a tela: cada letra ia direto para o framebuffer. Com
+janelas, isso não serve — uma letra escrita debaixo de uma janela apareceria
+por cima dela até alguém redesenhá-la, e o texto piscaria por baixo de tudo.
+Agora o console é uma **camada**: a de baixo. Ele continua escrevendo como
+sempre, sem trava e de qualquer lugar, mas numa memória só dele; o compositor
+monta a tela com o que cada camada deixa ver e entrega o resultado ao
+adaptador.
+
+**Só o retângulo que mudou.** A escrita no console alarga o mesmo retângulo
+sujo que o `virtio-gpu` já usava, e o fim de cada impressão o entrega ao
+compositor. Ele recompõe só ali: copia o console, depois cada camada que
+cruza o retângulo, de baixo para cima, e apresenta. As camadas são opacas — a
+de cima esconde a de baixo inteira onde as duas se cruzam —, então compor é
+copiar linhas, sem ler o fundo. Transparência, para as sombras e o vidro que
+o visual do macOS pede, é outra conta e outro incremento.
+
+**O quadro.** A tela é montada num quadro antes de aparecer, para que nenhuma
+camada seja vista pela metade. No `virtio-gpu` o quadro é a própria memória da
+tela, porque ali o monitor só vê o que se transfere; num framebuffer linear,
+um buffer de fundo que o adaptador copia para o framebuffer só no retângulo
+que mudou. A diferença mora em um método do trait, `superficie_da_tela`, que o
+`GraphicsAdapter` do Redox não tem.
+
+**Por baixo dele, a tela de falha.** O caminho fatal não pode confiar na
+trava nem no heap do compositor, e não passa por ele: devolve o console à tela
+física e pinta direto nela. A fumaça provoca uma falha fatal pelo agente, no
+fim da conversa, e fotografa o monitor — 99,8% da tela na cor de falha, nas
+quatro máquinas. O que ela **não** prova é o porquê do desvio: com o
+compositor são, pintar a camada também chegaria ao monitor. Medido — com essa
+mutação a sonda passa. O desvio protege a falha que acontece dentro do
+próprio compositor, e essa nenhuma sonda sabe provocar ainda.
+
+**O agente vê as camadas.** `display.info` lista cada uma, com posição e
+tamanho, de baixo para cima. Na árvore semântica, as que ficam acima do
+console aparecem como `window`, com um identificador que não se repete: um
+agente que guardou o de uma janela que fechou recebe "não existe", e não a
+janela que veio depois.
+
+**O que ainda não há.** Quem crie camadas em produção: hoje só a suíte cria —
+a primeira de verdade é a barra superior, e depois o servidor de janelas. Nem
+o roteamento de entrada para elas, nem a transparência.
+
+Conferido pela suíte — a camada de cima vence, soltá-la revela o console,
+mover não deixa rastro, a ordem de empilhamento decide quem aparece, uma
+letra escrita debaixo de uma camada não vaza e aparece quando ela sai, uma
+camada que passa da borda é composta só no que cai dentro — e pela fumaça,
+que compara a tela montada com a foto do monitor. Dez mutações, nove
+reprovadas pelo caso certo; a décima é a do desvio acima.
 
 ## Sistema de arquivos
 
@@ -1811,11 +1865,13 @@ padronizado.
       caminho da pessoa. O que o virtio-gpu 2D trouxe foi retângulo de dano e
       troca de página sem rasgo — não aceleração, que este texto chegou a
       prometer: medido, o framebuffer linear já pinta a tela cheia em 7 ms em
-      release, com folga para 60 Hz. E a faixa das superfícies devolvendo o
+      release, com folga para 60 Hz. A faixa das superfícies devolvendo o
       endereço virtual quando uma superfície sai — antes, ela só subia, e uma
-      superfície por janela a esgotaria. A seguir: o compositor, com
-      superfícies e ordem de empilhamento. Depois, o servidor de janelas, o
-      roteamento de entrada e a tipografia.
+      superfície por janela a esgotaria. E o compositor, com camadas opacas e
+      ordem de empilhamento, e o console como a camada de baixo. A seguir: a
+      transparência por camada, e a barra superior, com o primeiro elemento
+      que aceita `press`. Depois, o servidor de janelas, o roteamento de
+      entrada e a tipografia.
       E aqui a inversão do projeto encontra a interface gráfica. O servidor de
       janelas publica uma **árvore semântica** — que janelas existem, que
       controles, o que cada um faz — e os pixels são a renderização dela, do
