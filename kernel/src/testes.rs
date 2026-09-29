@@ -2221,24 +2221,27 @@ fn console_texto_chega_ao_framebuffer() -> Resultado {
     // O banner limpa a tela e devolve o cursor ao começo. Sem isso o glifo
     // sairia sobre o que as linhas de log já escreveram, e o que se conferiria
     // seria a soma dos dois.
-    crate::tela::banner();
-    let (x, y) = crate::tela::console::cursor();
+    sem_intrusos(|| {
+        crate::tela::banner();
+        let (x, y) = crate::tela::console::cursor();
 
-    if !crate::tela::console::escrever("A") {
-        return Err("o console recusou escrever com a tela de pe");
-    }
-    crate::tela::console::conferir_glifo('A', x, y)?;
+        if !crate::tela::console::escrever("A") {
+            return Err("o console recusou escrever com a tela de pe");
+        }
+        crate::tela::console::conferir_glifo('A', x, y)?;
 
-    // E o cursor andou exatamente a largura de um glifo. Uma fonte
-    // monoespaçada é o que torna isso uma igualdade em vez de um intervalo.
-    let (largura, _) = crate::tela::console::tamanho_do_glifo();
-    let (depois, _) = crate::tela::console::cursor();
-    if depois != x + largura {
-        crate::log_error!("teste", "o cursor foi de {} para {}", x, depois);
-        return Err("o cursor nao andou uma largura de glifo");
-    }
+        // E o cursor andou exatamente a largura de um glifo. Uma fonte
+        // monoespaçada é o que torna isso uma igualdade em vez de um
+        // intervalo.
+        let (largura, _) = crate::tela::console::tamanho_do_glifo();
+        let (depois, _) = crate::tela::console::cursor();
+        if depois != x + largura {
+            crate::log_error!("teste", "o cursor foi de {} para {}", x, depois);
+            return Err("o cursor nao andou uma largura de glifo");
+        }
 
-    Ok(())
+        Ok(())
+    })
 }
 
 /// O texto que o kernel manda ao console humano aparece na tela.
@@ -2258,12 +2261,14 @@ fn console_log_humano_chega_a_tela() -> Resultado {
         return sem_framebuffer();
     }
 
-    crate::tela::banner();
-    let (x, y) = crate::tela::console::cursor();
+    sem_intrusos(|| {
+        crate::tela::banner();
+        let (x, y) = crate::tela::console::cursor();
 
-    crate::serial_print!("X");
+        crate::serial_print!("X");
 
-    crate::tela::console::conferir_glifo('X', x, y)
+        crate::tela::console::conferir_glifo('X', x, y)
+    })
 }
 
 /// A linha quebra na borda direita, e a tela recomeça quando enche.
@@ -2284,7 +2289,10 @@ fn console_quebra_na_borda_e_recomeca() -> Resultado {
     let Some(tela) = crate::tela::tela() else {
         return sem_framebuffer();
     };
+    sem_intrusos(|| quebra_na_borda_e_recomeca(&tela))
+}
 
+fn quebra_na_borda_e_recomeca(tela: &crate::tela::Tela) -> Resultado {
     crate::tela::banner();
     let (largura_do_glifo, altura_do_glifo) = crate::tela::console::tamanho_do_glifo();
     let (x_inicial, y_inicial) = crate::tela::console::cursor();
@@ -4194,6 +4202,44 @@ fn sem_framebuffer() -> Resultado {
     Err("esta maquina deveria ter framebuffer e nao tem")
 }
 
+/// Roda `f` sem que outro fio escreva no console no meio.
+///
+/// # Por que os casos de tela precisam disto
+///
+/// Porque eles imprimem e depois conferem o que ficou — o cursor, a grade,
+/// os pixels, o que atravessou para o dispositivo —, e o console é de todo
+/// mundo. Entre uma coisa e outra, qualquer fio preemptivo pode imprimir: o
+/// coletor de fios registra cada vez que recolhe um morto, e ele acorda a
+/// cada tique. A linha dele cai no meio do caso.
+///
+/// Medido, e não suposto: com a suíte em release sobre o `virtio-gpu`, o
+/// registro do coletor entrou duas vezes em três rodadas entre o `"zq\u{8}"`
+/// do caso de apagar e a conferência. Numa, desceu o cursor uma linha — "o
+/// apagar voltou alem do comeco da linha"; na outra, desenhou o `[` dele na
+/// célula recém-apagada — "a celula apagada ainda tem tinta". O console
+/// estava certo nas duas; o caso é que não era dono da tela que conferia.
+///
+/// # Por que mascarar as interrupções resolve
+///
+/// Porque a máquina tem um núcleo, e quem tira a vez de um fio é o timer.
+/// Sem a interrupção dele, nenhum outro fio roda até o fim de `f`, e o que
+/// está na tela é só o que o caso escreveu. O tique não se perde: fica
+/// pendente e chega quando elas voltam.
+///
+/// `f` não pode esperar por interrupção nenhuma — ela não viria. Os casos
+/// que usam isto desenham, leem memória e falam com o `virtio-gpu`, que
+/// responde por varredura.
+///
+/// Nem pode precisar de uma trava que outro fio segure com as interrupções
+/// ligadas: esse fio, preemptado no meio, nunca mais rodaria para soltá-la.
+/// As que estes casos tocam — o log, o heap, o console, a linha do
+/// interpretador, o `virtio-gpu` — são todas tomadas com as interrupções já
+/// mascaradas, pela mesma razão de poderem ser usadas de dentro de um
+/// handler, e ninguém é preemptado segurando uma delas.
+fn sem_intrusos<R>(f: impl FnOnce() -> R) -> R {
+    crate::arch::sem_interrupcoes(f)
+}
+
 /// Uma imagem que o validador recusa não custa o espaço de quem chamou.
 ///
 /// # O que este caso protege
@@ -6009,14 +6055,17 @@ fn video_escrever_descarrega_so_o_que_sujou() -> Resultado {
         return sem_virtio_gpu("video: escrever descarrega so o que sujou");
     }
     let g = crate::tela::console::geometria().ok_or("sem geometria de console")?;
-    crate::serial_println!();
-    let (coluna, linha) = crate::tela::console::cursor_em_celulas();
-    let (_, descargas_antes, _) = crate::virtio::gpu::contadores();
-    crate::serial_print!("Q");
-    let (_, descargas_depois, _) = crate::virtio::gpu::contadores();
-    let sujo = crate::tela::sujo();
-    let t = crate::virtio::gpu::ultima_transferencia();
-    crate::serial_println!();
+    let (coluna, linha, descargas_antes, descargas_depois, sujo, t) = sem_intrusos(|| {
+        crate::serial_println!();
+        let (coluna, linha) = crate::tela::console::cursor_em_celulas();
+        let (_, descargas_antes, _) = crate::virtio::gpu::contadores();
+        crate::serial_print!("Q");
+        let (_, descargas_depois, _) = crate::virtio::gpu::contadores();
+        let sujo = crate::tela::sujo();
+        let t = crate::virtio::gpu::ultima_transferencia();
+        crate::serial_println!();
+        (coluna, linha, descargas_antes, descargas_depois, sujo, t)
+    });
 
     if sujo.is_some() {
         return Err("a escrita deixou a tela suja em vez de descarrega-la");
@@ -6268,12 +6317,18 @@ fn ui_a_arvore_descreve_a_tela_que_existe() -> Resultado {
 /// Sem quebra de linha depois da marca: um `\n` na última linha da tela a
 /// limparia antes da conferência.
 fn ui_o_texto_da_arvore_e_o_que_esta_na_tela() -> Resultado {
-    use crate::tela::console::{caractere, conferir_glifo, geometria};
+    use crate::tela::console::geometria;
 
-    const MARCA: &str = "arvore-marca-7Q";
     let Some(g) = geometria() else {
         return Ok(());
     };
+    sem_intrusos(|| texto_da_arvore_e_o_que_esta_na_tela(&g))
+}
+
+fn texto_da_arvore_e_o_que_esta_na_tela(g: &crate::tela::console::Geometria) -> Resultado {
+    use crate::tela::console::{caractere, conferir_glifo};
+
+    const MARCA: &str = "arvore-marca-7Q";
     crate::serial_println!();
     crate::serial_print!("{}", MARCA);
 
@@ -6318,26 +6373,28 @@ fn ui_apagar_apaga_na_tela_e_na_arvore() -> Resultado {
     let Some(g) = geometria() else {
         return Ok(());
     };
-    crate::serial_println!();
-    crate::serial_print!("zq\u{8}");
-    let (coluna, linha) = crate::tela::console::cursor_em_celulas();
-    let resultado = (|| {
-        let anterior = coluna
-            .checked_sub(1)
-            .ok_or("o apagar voltou alem do comeco da linha")?;
-        let x = |c: u32| g.margem_x + c * g.largura_da_celula;
-        let y = g.margem_y + linha * g.altura_da_celula;
-        if caractere(coluna, linha).is_some() {
-            return Err("a grade ainda tem o caractere apagado");
-        }
-        if caractere(anterior, linha) != Some('z') {
-            return Err("o apagar levou junto o caractere anterior");
-        }
-        conferir_celula_vazia(x(coluna), y)?;
-        conferir_glifo('z', x(anterior), y)
-    })();
-    crate::serial_println!();
-    resultado
+    sem_intrusos(|| {
+        crate::serial_println!();
+        crate::serial_print!("zq\u{8}");
+        let (coluna, linha) = crate::tela::console::cursor_em_celulas();
+        let resultado = (|| {
+            let anterior = coluna
+                .checked_sub(1)
+                .ok_or("o apagar voltou alem do comeco da linha")?;
+            let x = |c: u32| g.margem_x + c * g.largura_da_celula;
+            let y = g.margem_y + linha * g.altura_da_celula;
+            if caractere(coluna, linha).is_some() {
+                return Err("a grade ainda tem o caractere apagado");
+            }
+            if caractere(anterior, linha) != Some('z') {
+                return Err("o apagar levou junto o caractere anterior");
+            }
+            conferir_celula_vazia(x(coluna), y)?;
+            conferir_glifo('z', x(anterior), y)
+        })();
+        crate::serial_println!();
+        resultado
+    })
 }
 
 /// As ações da árvore passam pelo caminho de quem está na frente da máquina.
@@ -6478,7 +6535,7 @@ fn ui_registro_nao_parte_a_linha_digitada() -> Resultado {
         return Ok(());
     }
     crate::interpretador::ativar_para_teste();
-    let resultado = (|| {
+    let resultado = sem_intrusos(|| {
         crate::interpretador::definir("abc")?;
         crate::log_info!("teste", "registro-por-cima");
         let arvore = chamar("ui.tree", "{}")?;
@@ -6508,7 +6565,7 @@ fn ui_registro_nao_parte_a_linha_digitada() -> Resultado {
             return Err("a moldura do campo ficou na linha antiga");
         }
         Ok(())
-    })();
+    });
     crate::interpretador::desativar_para_teste();
     resultado
 }
