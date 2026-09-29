@@ -1638,6 +1638,22 @@ as sondas de fumaça contra o kernel de produção, e a suíte nas duas
 arquiteturas em debug e release — e, nas duas, a suíte e a fumaça também na
 máquina que só tem `virtio-gpu`.
 
+**Por que o QEMU.** É a bancada do Duke, e continua sendo — decisão tomada
+depois de comparar as alternativas. É a mesma do Redox, cujo caminho de todo
+dia é o `make qemu`; o Linux testa nele, o emulador do Android e o UTM do Mac
+são construídos sobre ele. O kernel não depende dele: fala com dispositivos
+— VGA, `bochs-display`, virtio, xHCI, PL011 —, e o QEMU só os imita. O que é
+dele de verdade é a bancada: o código de saída da suíte, o `screendump` e o
+`sendkey` da fumaça.
+
+Dois limites conhecidos, e o que fazer com cada um. A velocidade: sem
+aceleração, o QEMU interpreta cada instrução, e com interface gráfica e
+vários núcleos isso vai pesar — a resposta é o KVM no Linux e o HVF no Mac,
+que ele já suporta, ligados por uma opção do `xtask` quando for preciso. A
+fidelidade: o QEMU é bem-comportado demais, e tempos, caches e tabelas ACPI
+com defeito de fábrica só aparecem em hardware de verdade. Esse limite
+nenhum emulador resolve.
+
 ## Depuração
 
 Um kernel não pode ser depurado como um programa comum: não há processo para
