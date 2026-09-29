@@ -1256,6 +1256,8 @@ fn agente_ve_as_camadas() -> Resultado {
         .ok_or("display.info nao lista a camada criada")?;
     if achada.member("x").and_then(|v| v.as_u64()) != Some(40)
         || achada.member("width").and_then(|v| v.as_u64()) != Some(24)
+        || achada.member("blend").and_then(|v| v.as_str()) != Some("opaque")
+        || achada.member("opacity").and_then(|v| v.as_u64()) != Some(255)
     {
         return Err("display.info descreve a camada com outra geometria");
     }
@@ -1493,6 +1495,74 @@ fn barra_limpar_guarda_a_linha() -> Resultado {
     // quantas vezes uma linha aparece no console.
     crate::interpretador::limpar();
     resultado
+}
+
+/// Uma camada transparente mistura cada pixel com o que está embaixo, pela
+/// opacidade dele; e a opacidade da camada inteira multiplica a dos pixels.
+///
+/// As contas são as da mistura com arredondamento: alfa 0 é o de baixo, 255
+/// é o de cima, e o meio é a fórmula — escrita aqui de novo, para o caso não
+/// conferir o compositor contra ele mesmo.
+fn compositor_transparencia() -> Resultado {
+    use crate::grafico::compositor::{Camada, Mistura};
+    use crate::tela::Cor;
+
+    if crate::tela::tela_fisica().is_none() {
+        return sem_framebuffer();
+    }
+    let esperado = |fundo: Cor, frente: Cor, alfa: u32| {
+        let c = |f: u8, b: u8| ((f as u32 * alfa + b as u32 * (255 - alfa) + 127) / 255) as u8;
+        Cor::nova(
+            c(frente.r, fundo.r),
+            c(frente.g, fundo.g),
+            c(frente.b, fundo.b),
+        )
+    };
+    let vermelho = Cor::nova(0xFF, 0, 0);
+    let verde = Cor::nova(0, 0xFF, 0);
+
+    sem_intrusos(|| {
+        // Embaixo, uma camada opaca vermelha; em cima, uma transparente com
+        // três faixas de alfa: 0, 128 e 255.
+        let fundo = camada_de_cor("fundo", 400, 400, 60, 20, vermelho)?;
+        let cima = Camada::nova("cima", 400, 400, 60, 20)?;
+        cima.definir_mistura(Mistura::Alfa)?;
+        cima.pintar(|pixels, largura, _| {
+            for (i, p) in pixels.iter_mut().enumerate() {
+                let alfa: u32 = match i as u32 % largura / 20 {
+                    0 => 0,
+                    1 => 128,
+                    _ => 255,
+                };
+                *p = alfa << 24 | verde.para_u32();
+            }
+        })?;
+        mostra_a_cor(vermelho, &[(405, 405)])?;
+        mostra_a_cor(esperado(vermelho, verde, 128), &[(425, 405)])?;
+        mostra_a_cor(verde, &[(445, 405)])?;
+
+        // A opacidade da camada multiplica a do pixel: 255 vira 128.
+        cima.definir_opacidade(128)?;
+        mostra_a_cor(esperado(vermelho, verde, 128), &[(445, 405)])?;
+        mostra_a_cor(esperado(vermelho, verde, 64), &[(425, 405)])?;
+        // E zero some com a camada.
+        cima.definir_opacidade(0)?;
+        mostra_a_cor(vermelho, &[(425, 405), (445, 405)])?;
+
+        // Uma camada opaca ignora o byte alto: o que já desenhava com
+        // `0x00RRGGBB`, ou com lixo ali, continua opaco.
+        cima.definir_opacidade(255)?;
+        cima.definir_mistura(Mistura::Opaca)?;
+        mostra_a_cor(verde, &[(405, 405), (425, 405)])?;
+
+        // Opaca com opacidade de camada: meio a meio, também.
+        cima.definir_opacidade(128)?;
+        mostra_a_cor(esperado(vermelho, verde, 128), &[(405, 405)])?;
+
+        drop(cima);
+        drop(fundo);
+        mostra_o_console(&[(405, 405), (445, 405)])
+    })
 }
 
 /// O agente vê a pilha gráfica pelo registro, com o adaptador e a tela certos.
@@ -10459,6 +10529,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "compositor: camada na borda",
         f: compositor_camada_na_borda,
+    },
+    Caso {
+        nome: "compositor: transparencia",
+        f: compositor_transparencia,
     },
     Caso {
         nome: "agente: ve as camadas",

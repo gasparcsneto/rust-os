@@ -1235,6 +1235,8 @@ fn display_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
                 w.field_i64("y", c.y as i64)?;
                 w.field_u64("width", c.largura as u64)?;
                 w.field_u64("height", c.altura as u64)?;
+                w.field_str("blend", c.mistura.nome())?;
+                w.field_u64("opacity", c.opacidade as u64)?;
                 w.end_object()
             })();
         }

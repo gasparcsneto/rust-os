@@ -4,10 +4,14 @@
 //!
 //! Guarda uma pilha de camadas — cada uma uma superfície com posição — e,
 //! quando algo muda num retângulo, recompõe só esse retângulo, de baixo para
-//! cima, num quadro, e entrega o quadro ao adaptador. As camadas são opacas:
-//! a de cima esconde a de baixo inteira onde as duas se cruzam, e compor é
-//! copiar linhas, sem ler o fundo. A transparência, quando vier, é outra
-//! conta e outro custo.
+//! cima, num quadro, e entrega o quadro ao adaptador.
+//!
+//! Uma camada é opaca ou transparente — ver [`Mistura`]. A opaca esconde a
+//! de baixo inteira onde as duas se cruzam, e compô-la é copiar linhas, sem
+//! ler o fundo. A transparente tem alfa por pixel, e compô-la é misturar
+//! cada pixel com o que as camadas de baixo já deixaram no quadro. Toda
+//! camada tem também uma opacidade própria, que multiplica a dos pixels: é o
+//! que desbota uma janela inteira sem redesenhá-la.
 //!
 //! A camada de baixo é o console. Ele escreve nela como sempre escreveu na
 //! tela — sem trava, de qualquer lugar —, e o retângulo que ele suja chega
@@ -105,6 +109,41 @@ struct Entrada {
     largura: u32,
     altura: u32,
     memoria: Memoria,
+    mistura: Mistura,
+    /// A opacidade da camada inteira, de 0 (invisível) a 255. Multiplica a
+    /// de cada pixel.
+    opacidade: u8,
+}
+
+/// Como os pixels de uma camada se misturam com o que está embaixo.
+///
+/// # Por que duas, e não sempre alfa
+///
+/// Porque a opaca é uma cópia de linha, e a alfa é uma conta por pixel que
+/// lê o que está embaixo. A camada que não precisa de transparência — o
+/// console, a barra, uma janela sem sombra — não paga por ela. E porque o
+/// formato dos pixels é o mesmo nas duas, `0x00RRGGBB`: numa camada opaca o
+/// byte alto é ignorado, como sempre foi, e ninguém que já desenhava precisa
+/// mudar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mistura {
+    /// Cada pixel esconde o de baixo.
+    Opaca,
+    /// O byte alto de cada pixel é a opacidade dele: `0xAARRGGBB`, com alfa
+    /// não pré-multiplicado — 0 não desenha nada, 255 esconde o de baixo.
+    // O primeiro usuário de produção é o cursor do mouse; até ele, só a
+    // suíte cria camadas transparentes.
+    #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+    Alfa,
+}
+
+impl Mistura {
+    pub const fn nome(self) -> &'static str {
+        match self {
+            Mistura::Opaca => "opaque",
+            Mistura::Alfa => "alpha",
+        }
+    }
 }
 
 impl Entrada {
@@ -123,6 +162,8 @@ pub struct InfoCamada {
     pub y: i32,
     pub largura: u32,
     pub altura: u32,
+    pub mistura: Mistura,
+    pub opacidade: u8,
 }
 
 impl InfoCamada {
@@ -289,6 +330,8 @@ impl Compositor {
             largura,
             altura,
             memoria,
+            mistura: Mistura::Opaca,
+            opacidade: u8::MAX,
         });
         crate::ui::mudou();
         let _ = self.compor_camada(id);
@@ -331,6 +374,8 @@ impl Compositor {
             y: 0,
             largura: self.largura,
             altura: self.altura,
+            mistura: Mistura::Opaca,
+            opacidade: u8::MAX,
         });
         for c in &self.camadas {
             f(InfoCamada {
@@ -340,6 +385,8 @@ impl Compositor {
                 y: c.y,
                 largura: c.largura,
                 altura: c.altura,
+                mistura: c.mistura,
+                opacidade: c.opacidade,
             });
         }
     }
@@ -412,6 +459,28 @@ impl Camada {
             crate::ui::mudou();
             let depois = c.camadas[i].na_tela(c.largura, c.altura);
             c.compor(antes.unir(depois))
+        })
+        .ok_or("nao ha compositor")?
+    }
+
+    /// Muda como a camada se mistura com o que está embaixo, e a recompõe.
+    pub fn definir_mistura(&self, mistura: Mistura) -> Result<Dano, &'static str> {
+        super::com_compositor(|c| {
+            let i = c.indice(self.id).ok_or("camada inexistente")?;
+            c.camadas[i].mistura = mistura;
+            crate::ui::mudou();
+            c.compor_camada(self.id)
+        })
+        .ok_or("nao ha compositor")?
+    }
+
+    /// Muda a opacidade da camada inteira, de 0 a 255, e a recompõe.
+    pub fn definir_opacidade(&self, opacidade: u8) -> Result<Dano, &'static str> {
+        super::com_compositor(|c| {
+            let i = c.indice(self.id).ok_or("camada inexistente")?;
+            c.camadas[i].opacidade = opacidade;
+            crate::ui::mudou();
+            c.compor_camada(self.id)
         })
         .ok_or("nao ha compositor")?
     }
@@ -495,16 +564,66 @@ fn compor_em(
         if cruza.vazio() {
             continue;
         }
+        // Só economia: sem isto a conta daria alfa zero em cada pixel, e o
+        // fundo sairia igual — uma mutação que tirou esta linha passou na
+        // suíte, e passaria em qualquer uma.
+        if camada.opacidade == 0 {
+            continue;
+        }
         let pixels = camada.memoria.pixels();
         // Da tela para a camada: a posição pode ser negativa, e o
         // recorte garantiu que `cruza` está dentro das duas.
         let dx = (cruza.x as i64 - camada.x as i64) as usize;
         let dy = (cruza.y as i64 - camada.y as i64) as usize;
+        let copia = camada.mistura == Mistura::Opaca && camada.opacidade == u8::MAX;
         for i in 0..cruza.altura as usize {
             let de = (dy + i) * camada.largura as usize + dx;
             let para = (cruza.y as usize + i) * linha + cruza.x as usize;
             let n = cruza.largura as usize;
-            quadro[para..para + n].copy_from_slice(&pixels[de..de + n]);
+            let origem = &pixels[de..de + n];
+            let destino = &mut quadro[para..para + n];
+            if copia {
+                destino.copy_from_slice(origem);
+                continue;
+            }
+            // O que está em `destino` já é o composto das camadas de baixo —
+            // o console e as anteriores —, e é sobre ele que esta se mistura.
+            for (d, &o) in destino.iter_mut().zip(origem) {
+                let alfa = match camada.mistura {
+                    Mistura::Opaca => u8::MAX,
+                    Mistura::Alfa => (o >> 24) as u8,
+                };
+                *d = misturar(*d, o, multiplicar(alfa, camada.opacidade));
+            }
+        }
+    }
+}
+
+/// `a * b / 255`, arredondado: a opacidade de um pixel dentro de uma camada
+/// que tem opacidade própria.
+fn multiplicar(a: u8, b: u8) -> u8 {
+    ((a as u32 * b as u32 + 127) / 255) as u8
+}
+
+/// Mistura o pixel `frente` sobre `fundo` com opacidade `alfa`.
+///
+/// Aritmética inteira, pelo motivo do console: o ARM deste kernel é
+/// `softfloat`. Com arredondamento, e dividindo por 255 e não deslocando 8:
+/// alfa 255 tem de dar exatamente a frente, e alfa 0 exatamente o fundo — e
+/// os dois extremos saem direto, sem conta. O byte alto do resultado é zero,
+/// o formato do quadro.
+fn misturar(fundo: u32, frente: u32, alfa: u8) -> u32 {
+    match alfa {
+        0 => fundo,
+        u8::MAX => frente & 0x00FF_FFFF,
+        a => {
+            let a = a as u32;
+            let canal = |deslocamento: u32| {
+                let f = (frente >> deslocamento) & 0xFF;
+                let b = (fundo >> deslocamento) & 0xFF;
+                ((f * a + b * (255 - a) + 127) / 255) << deslocamento
+            };
+            canal(16) | canal(8) | canal(0)
         }
     }
 }

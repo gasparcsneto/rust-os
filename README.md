@@ -1024,10 +1024,21 @@ adaptador.
 **Só o retângulo que mudou.** A escrita no console alarga o mesmo retângulo
 sujo que o `virtio-gpu` já usava, e o fim de cada impressão o entrega ao
 compositor. Ele recompõe só ali: copia o console, depois cada camada que
-cruza o retângulo, de baixo para cima, e apresenta. As camadas são opacas — a
-de cima esconde a de baixo inteira onde as duas se cruzam —, então compor é
-copiar linhas, sem ler o fundo. Transparência, para as sombras e o vidro que
-o visual do macOS pede, é outra conta e outro incremento.
+cruza o retângulo, de baixo para cima, e apresenta. Uma camada opaca esconde
+a de baixo inteira onde as duas se cruzam, e compô-la é copiar linhas, sem
+ler o fundo.
+
+**Transparência.** Uma camada pode ser `alpha`: o byte alto de cada pixel é
+a opacidade dele (`0xAARRGGBB`), e compô-la é misturar cada pixel com o que
+as camadas de baixo já deixaram no quadro. E toda camada tem uma opacidade
+própria, de 0 a 255, que multiplica a dos pixels — é o que desbota uma janela
+inteira sem redesenhá-la. As contas são inteiras, com arredondamento, porque
+o ARM deste kernel é `softfloat`; alfa 0 dá exatamente o de baixo e 255
+exatamente o de cima. O formato é o mesmo nas duas: numa camada opaca o byte
+alto é ignorado, e quem já desenhava não precisou mudar nada. `display.info`
+diz a mistura e a opacidade de cada camada. A suíte confere as contas
+contra a fórmula escrita no caso, e não contra o próprio compositor; oito
+mutações nelas, oito reprovadas.
 
 **O quadro.** A tela é montada num quadro antes de aparecer, para que nenhuma
 camada seja vista pela metade. No `virtio-gpu` o quadro é a própria memória da
@@ -1053,7 +1064,7 @@ janela que veio depois.
 
 **O que ainda não há.** Quem crie janelas em produção: a única camada de
 produção é a barra superior, e o servidor de janelas vem depois. Nem
-o roteamento de entrada para elas, nem a transparência.
+o roteamento de entrada para elas.
 
 Conferido pela suíte — a camada de cima vence, soltá-la revela o console,
 mover não deixa rastro, a ordem de empilhamento decide quem aparece, uma
@@ -1944,11 +1955,11 @@ padronizado.
       prometer: medido, o framebuffer linear já pinta a tela cheia em 7 ms em
       release, com folga para 60 Hz. A faixa das superfícies devolvendo o
       endereço virtual quando uma superfície sai — antes, ela só subia, e uma
-      superfície por janela a esgotaria. E o compositor, com camadas opacas e
-      ordem de empilhamento, e o console como a camada de baixo. E a barra
-      superior, com o primeiro elemento que aceita `press` — pela árvore e
-      pela F1, pelo mesmo caminho. E o console rolando, em vez de recomeçar
-      do topo. A seguir: a transparência por camada, e o mouse, com o clique
+      superfície por janela a esgotaria. E o compositor, com ordem de
+      empilhamento, camadas opacas e transparentes, e o console como a
+      camada de baixo. E a barra superior, com o primeiro elemento que
+      aceita `press` — pela árvore e pela F1, pelo mesmo caminho. E o console
+      rolando, em vez de recomeçar do topo. A seguir: o mouse, com o clique
       no mesmo botão. Depois, o servidor de janelas, o roteamento de entrada
       e a tipografia.
       E aqui a inversão do projeto encontra a interface gráfica. O servidor de
