@@ -133,6 +133,45 @@ fn principal() -> i64 {
         return 10;
     }
 
+    // A fusão: blocos lado a lado liberados fora de ordem — os pares
+    // subindo, os ímpares descendo — voltam a ser um bloco só, e a lista
+    // volta ao número de blocos livres que tinha antes. Sem fundir com o
+    // vizinho de cima ou com o de baixo, os pedaços ficam soltos e a
+    // contagem sobe. A rotação acima não pegava isso: com os mesmos
+    // tamanhos, ela reaproveita exatamente os mesmos blocos, e nenhuma
+    // fusão acontece.
+    //
+    // Antes, o monte cresce de uma vez, com um bloco grande que volta
+    // inteiro: a contagem é tomada depois, e o ciclo cabe no que ele deixou
+    // livre sem crescer de novo. Um ciclo de aquecimento no lugar disso não
+    // servia — medido, sem a fusão com o vizinho de cima ele deixava a
+    // lista fragmentada, o segundo ciclo reproduzia a mesma fragmentação, e
+    // as duas contagens batiam.
+    drop(alloc::vec![0u8; 256 * 1024]);
+    let livres = monte::blocos_livres();
+    let crescido = monte::mapeados();
+    {
+        let mut lado_a_lado: Vec<Option<Box<[u8; 1024]>>> =
+            (0..64).map(|_| Some(Box::new([0u8; 1024]))).collect();
+        for i in (0..64).step_by(2) {
+            lado_a_lado[i] = None;
+        }
+        for i in (1..64).step_by(2).rev() {
+            lado_a_lado[i] = None;
+        }
+    }
+    if monte::mapeados() != crescido {
+        return 15;
+    }
+    if monte::blocos_livres() != livres {
+        escreverln!(
+            "a lista tinha {} blocos livres e ficou com {} depois de liberar tudo",
+            livres,
+            monte::blocos_livres()
+        );
+        return 14;
+    }
+
     // Tudo ou nada: pedidos de 16 MiB até a memória acabar. O pedido que
     // falha por falta de memória falha no meio — já tinha mapeado páginas
     // quando o alocador de frames secou —, e o kernel precisa desfazê-las.

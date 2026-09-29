@@ -3623,14 +3623,34 @@ fn usuario_programas_compilados_rodam() -> Resultado {
         return Err("o diretorio dos programas compilados nao e o desta arquitetura");
     }
 
+    // Espera o processo sair — ou morrer. Um processo morto por falha não
+    // conta como saída, e esperar só pela saída transformava a morte num
+    // estouro de tempo sem motivo: medido, com a pilha de volta a uma
+    // página, o caso dizia "a condicao nao se cumpriu" em vez de dizer que o
+    // programa morreu.
     let rodar = |nome: &str| -> Resultado {
         let caminho = format!("{DIRETORIO_DOS_COMPILADOS}/{nome}");
         let saidas = crate::usuario::estatisticas_de_processo().2;
+        let desde = crate::log::total_emitidos();
+        let morreu = || {
+            let mut morto = false;
+            crate::log::ultimos(16, crate::log::Level::Trace, |r| {
+                morto |= r.seq >= desde
+                    && r.subsistema == "usuario"
+                    && r.mensagem().starts_with("processo morto por");
+            });
+            morto
+        };
         crate::usuario::lancar(Some(&caminho))?;
         esperar_ate(
-            || crate::usuario::estatisticas_de_processo().2 > saidas,
+            || crate::usuario::estatisticas_de_processo().2 > saidas || morreu(),
             600,
-        )
+        )?;
+        if morreu() {
+            crate::log_error!("teste", "{} morreu por uma falha", nome);
+            return Err("um programa compilado morreu por uma falha");
+        }
+        Ok(())
     };
 
     // Os frames livres antes: o `memoria` esgota a memória de propósito, e

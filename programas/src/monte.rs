@@ -84,6 +84,22 @@ pub fn mapeados() -> u64 {
     unsafe { (*MONTE.0.get()).mapeados }
 }
 
+/// Quantos blocos a lista livre tem agora. Para quem confere a fusão: um
+/// monte que funde volta ao mesmo número depois de liberar tudo que tirou.
+pub fn blocos_livres() -> usize {
+    let mut quantos = 0;
+    // SAFETY: leitura da lista, no único fluxo do processo; todo bloco dela
+    // é um `Livre` válido.
+    unsafe {
+        let mut atual = (*MONTE.0.get()).primeiro;
+        while !atual.is_null() {
+            quantos += 1;
+            atual = (*atual).proximo;
+        }
+    }
+    quantos
+}
+
 const fn arredondar(valor: usize, multiplo: usize) -> usize {
     valor.div_ceil(multiplo) * multiplo
 }

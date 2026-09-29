@@ -595,6 +595,14 @@ heap de 1 MiB. Carregar e entrar em userspace viraram dois passos, e a imagem
 é largada entre eles. O caso da suíte lança o `ola` cinco vezes e confere que
 o heap cresce menos que uma imagem.
 
+Catorze mutações nesta base, catorze reprovadas. Duas — tirar a fusão do
+monte com o vizinho de cima, ou com o de baixo — só depois de o `memoria`
+passar a liberar blocos fora de ordem e contar a lista livre: a rotação que
+ele fazia reaproveitava sempre os mesmos blocos, e nenhuma fusão acontecia. E
+uma, a pilha de volta a uma página, era reprovada pelo motivo errado — um
+estouro de tempo, porque a espera do caso contava saídas e um processo morto
+não sai; agora o caso diz que o programa morreu.
+
 **A proteção é testada, não presumida.** Existe um segundo programa que tenta
 ler a memória do kernel. O caso `usuario: nao alcanca o kernel` exige duas
 coisas ao mesmo tempo: que ele **não consiga** — se conseguisse, seguiria e
