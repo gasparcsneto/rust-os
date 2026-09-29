@@ -195,6 +195,7 @@ kernel/src/
 ├── interpretador.rs operar o Duke digitando
 ├── barra.rs         a barra superior: o nome, o primeiro botão e o tempo ligado
 ├── ponteiro.rs      o mouse: onde ele está, o cursor, e o clique
+├── eventos.rs       canais de eventos: o kernel publica, um processo escuta e dorme
 ├── ui.rs            a árvore semântica: o que está na tela, e o que se faz com cada coisa
 ├── teclado.rs       o que uma pessoa digita chega ao kernel
 ├── pci.rs           enumeração do barramento PCI
@@ -314,7 +315,8 @@ programas/           os programas de usuário, compilados à parte do kernel
     └── bin/
         ├── ola.rs        o primeiro programa em Rust: monte, formatação e pilha
         ├── memoria.rs    confere `mapear` e o monte do lado de quem pede
-        └── ponteiros.rs  pede ao kernel que escreva no código, e confere a recusa
+        ├── ponteiros.rs  pede ao kernel que escreva no código, e confere a recusa
+        └── eco.rs        escuta um canal de eventos e diz o que chega
 
 xtask/src/
 └── main.rs          a ferramenta de build, teste e diagnóstico do projeto
@@ -508,8 +510,9 @@ $ cargo xtask agent log.tail '{"count":3}'
 ... info  "usuario" "processo encerrou com codigo 42"
 ```
 
-As chamadas de sistema são onze: `sair`, `escrever`, `id`, `ceder`,
-`bifurcar`, `executar`, `abrir`, `ler`, `fechar`, `esperar` e `mapear`. Os
+As chamadas de sistema são doze: `sair`, `escrever`, `id`, `ceder`,
+`bifurcar`, `executar`, `abrir`, `ler`, `fechar`, `esperar`, `mapear` e
+`escutar`. Os
 números, os erros e o mapa do espaço do usuário moram em
 `protocolo::usuario`, que o kernel e os programas incluem — uma declaração
 só, pelo motivo de sempre: duas iguais são duas que podem divergir, e um
@@ -603,6 +606,33 @@ ele fazia reaproveitava sempre os mesmos blocos, e nenhuma fusão acontecia. E
 uma, a pilha de volta a uma página, era reprovada pelo motivo errado — um
 estouro de tempo, porque a espera do caso contava saídas e um processo morto
 não sai; agora o caso diz que o programa morreu.
+
+**Canais de eventos, e a leitura que dorme.** Por onde o servidor de janelas
+vai saber do mundo — o ponteiro andou, uma tecla chegou, alguém pediu uma
+ação pela árvore semântica. Um processo chama `escutar("nome")` e recebe um
+descritor; `ler` nele entrega eventos inteiros, de 32 bytes cada — o tipo e
+três campos, little-endian, escritos campo a campo pelo `protocolo` e não pela
+memória de uma `struct` —, e **bloqueia** enquanto a fila está vazia. O kernel
+publica pelo nome, e publicar acorda o ouvinte.
+
+Bloquear reaproveita o mecanismo que o `esperar` já tinha: a chamada que não
+tem o que entregar estaciona o fio sem efeito nenhum, e o backend de
+arquitetura a reexecuta quando ele acorda — em laço no x86, recuando o
+`ELR_EL1` no ARM. O canal marca que o ouvinte espera com a própria tranca na
+mão, e quem publica toma a mesma tranca: não há janela entre "está vazio" e
+"vou dormir" em que um evento se perca.
+
+O que não cabe na fila, de sessenta e quatro, é **recusado** e contado — e
+não o mais antigo jogado fora: assim o que o ouvinte recebe é sempre um
+prefixo do que foi publicado. Um canal tem um ouvinte só; um filho de `fork`
+herda o descritor, não o canal, e é recusado se ler. E um ouvinte que morre
+sem fechar o descritor não deixa o nome preso: o canal guarda o fio do
+ouvinte, e quem o procura confere se ele vive.
+
+O programa `eco` é o outro lado do caso da suíte: com a fila vazia, a conta
+de chamadas de sistema para — ele dorme, não gira; cinco eventos chegam em
+ordem; setenta publicados com ele impedido de rodar enchem a fila e seis são
+recusados; e a soma no fim confere quais sessenta e quatro chegaram.
 
 **Mapeada não é gravável.** Duas chamadas escrevem num buffer que o processo
 dá — `ler` e `esperar` —, e o kernel conferia só se a faixa era do processo e

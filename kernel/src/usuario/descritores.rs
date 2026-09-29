@@ -93,6 +93,13 @@ pub enum Alvo {
     /// o mesmo arquivo leem cada um no seu ritmo. É o que torna a tabela
     /// estado de verdade, e não uma lista de apelidos.
     Arquivo { vnode: Vnode, posicao: u64 },
+    /// Um canal de eventos que este processo escuta — ver
+    /// [`crate::eventos`]. A vaga é a do canal na tabela de canais.
+    ///
+    /// Um `fork` copia o descritor, e não o canal: o canal tem um ouvinte
+    /// só, o fio que chamou `escutar`, e o filho que ler por este descritor
+    /// é recusado.
+    Eventos { vaga: usize },
 }
 
 /// A tabela de descritores de um processo.
@@ -135,6 +142,20 @@ impl Tabela {
             .map(|(i, _)| i)?;
 
         self.entradas[livre] = Some(Alvo::Arquivo { vnode, posicao: 0 });
+        Some(livre as u64)
+    }
+
+    /// Instala `alvo` no menor descritor livre acima dos padrão, e devolve o
+    /// número. `None` com a tabela cheia.
+    pub fn instalar(&mut self, alvo: Alvo) -> Option<u64> {
+        let livre = self
+            .entradas
+            .iter()
+            .enumerate()
+            .skip(PRIMEIRO_LIVRE)
+            .find(|(_, e)| e.is_none())
+            .map(|(i, _)| i)?;
+        self.entradas[livre] = Some(alvo);
         Some(livre as u64)
     }
 

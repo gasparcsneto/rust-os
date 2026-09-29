@@ -57,6 +57,15 @@ pub mod numero {
     /// [`MAPEAVEL`](super::MAPEAVEL), e a faixa inteira precisa estar livre.
     /// Devolve zero, ou um erro — e, no erro, nada foi mapeado.
     pub const MAPEAR: u64 = 10;
+    /// `escutar(ptr, tamanho)`: torna o processo o ouvinte do canal de
+    /// eventos com o nome dado, e devolve um descritor.
+    ///
+    /// `ler` nesse descritor entrega eventos inteiros —
+    /// [`evento::TAMANHO`](super::evento::TAMANHO) bytes cada — e **bloqueia**
+    /// enquanto a fila estiver vazia: o fio sai do escalonador e volta quando
+    /// o kernel publicar no canal. Um canal tem um ouvinte só; o segundo
+    /// ouve [`erro::OCUPADO`](super::erro::OCUPADO).
+    pub const ESCUTAR: u64 = 11;
 }
 
 /// Erros devolvidos ao usuário, sempre negativos.
@@ -95,6 +104,105 @@ pub mod erro {
     /// que já a usa. Mapear por cima trocaria em silêncio memória que ele
     /// ainda lê por páginas zeradas.
     pub const JA_MAPEADO: i64 = -12;
+    /// O canal de eventos já tem ouvinte, ou a tabela de canais está cheia.
+    pub const OCUPADO: i64 = -13;
+}
+
+/// Um evento, como `ler` o entrega a quem escuta um canal.
+///
+/// # Por que um formato fixo
+///
+/// Porque o leitor precisa saber onde um evento termina sem ler o seguinte.
+/// Trinta e dois bytes, sempre, com o tipo na frente e três campos cujo
+/// significado o tipo diz: um evento de ponteiro põe x, y e os botões; um
+/// de tecla, o caractere. `ler` só entrega eventos inteiros — um buffer
+/// menor que um evento é recusado, em vez de receber metade de um.
+///
+/// Os bytes são little-endian, escritos e lidos campo a campo por
+/// [`Evento::em_bytes`] e [`Evento::de_bytes`], e não pela memória da
+/// `struct`: o kernel e o programa são compilados à parte, e o layout que
+/// importa é o que está escrito aqui.
+pub mod evento {
+    /// Quantos bytes um evento ocupa no buffer de `ler`.
+    pub const TAMANHO: usize = 32;
+
+    /// Os tipos de evento. Cada etapa que publica um tipo novo o declara
+    /// aqui, com o que os três campos querem dizer.
+    pub mod tipo {
+        /// Um evento que só a suíte do kernel publica, para conferir o
+        /// canal. `a` é um número que o ouvinte devolve; zero pede que ele
+        /// termine.
+        pub const TESTE: u32 = 1;
+    }
+
+    /// Um evento: o tipo e três campos.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct Evento {
+        pub tipo: u32,
+        pub a: i64,
+        pub b: i64,
+        pub c: i64,
+    }
+
+    impl Evento {
+        /// Os 32 bytes do evento: o tipo, quatro bytes reservados em zero,
+        /// e os três campos.
+        pub fn em_bytes(&self) -> [u8; TAMANHO] {
+            let mut bytes = [0u8; TAMANHO];
+            bytes[0..4].copy_from_slice(&self.tipo.to_le_bytes());
+            bytes[8..16].copy_from_slice(&self.a.to_le_bytes());
+            bytes[16..24].copy_from_slice(&self.b.to_le_bytes());
+            bytes[24..32].copy_from_slice(&self.c.to_le_bytes());
+            bytes
+        }
+
+        /// O evento que os 32 bytes descrevem.
+        pub fn de_bytes(bytes: &[u8; TAMANHO]) -> Evento {
+            let palavra = |de: usize| {
+                let mut oito = [0u8; 8];
+                oito.copy_from_slice(&bytes[de..de + 8]);
+                i64::from_le_bytes(oito)
+            };
+            Evento {
+                tipo: u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+                a: palavra(8),
+                b: palavra(16),
+                c: palavra(24),
+            }
+        }
+    }
+}
+
+/// Quantos bytes o ponteiro de `esperar` precisa ter — ver
+/// [`numero::ESPERAR`].
+///
+/// Dois `i64`: o código de saída e se ele significa alguma coisa.
+///
+/// # Por que não basta o código
+///
+/// Porque nem todo processo sai por `sair`. Um morto por falha de página ou
+/// de proteção termina sem código nenhum, e a primeira versão desta chamada
+/// escrevia zero nesse caso — que é um código de saída perfeitamente
+/// legítimo, e o mais comum de todos. O pai lia zero e concluía que o filho
+/// tinha terminado bem.
+///
+/// É a pior forma de falhar: não há erro, não há ausência, há uma resposta
+/// plausível e errada. Um supervisor que reinicia trabalhador que morreu
+/// nunca reiniciaria nenhum.
+///
+/// Não dá para resolver dentro de um número só: **todo** `i64` é um código
+/// de saída válido, então não existe sentinela. A segunda palavra é a saída
+/// — e ela cabe também para o que vier depois, como qual falha matou o
+/// processo.
+pub const BYTES_DO_DESFECHO: u64 = 16;
+
+/// O que a segunda palavra do desfecho carrega.
+pub mod desfecho {
+    /// O processo chamou `sair`, e a primeira palavra é o código dele.
+    pub const SAIU: i64 = 1;
+    /// O processo foi morto antes de chamar `sair`. A primeira palavra não
+    /// significa nada, e é escrita como zero para não vazar lixo.
+    pub const MORTO: i64 = 0;
 }
 
 /// Os descritores que todo processo recebe abertos.

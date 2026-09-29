@@ -3738,6 +3738,123 @@ fn usuario_programas_compilados_rodam() -> Resultado {
     Ok(())
 }
 
+/// Um canal de eventos: o ouvinte dorme com a fila vazia, recebe em ordem o
+/// que o kernel publica, e o que não cabe é recusado e contado.
+///
+/// # O que este caso protege
+///
+/// O mecanismo por onde o servidor de janelas vai saber do mundo. Quatro
+/// coisas, e cada uma falha em silêncio:
+///
+/// - **dormir de verdade.** Um ouvinte que girasse perguntando também
+///   receberia tudo, e o caso só passaria a ver a diferença na conta das
+///   chamadas de sistema: com a fila vazia, ela não pode andar;
+/// - **a ordem.** Uma fila circular com o índice errado entrega tudo, fora
+///   de ordem;
+/// - **o que não cabe.** Setenta eventos numa fila de sessenta e quatro, com
+///   o ouvinte impedido de rodar no meio: seis recusados, contados, e os
+///   sessenta e quatro entregues — a soma no fim confere quais;
+/// - **o ouvinte que morre.** Ele não fecha o descritor; o canal volta a
+///   ser de ninguém quando alguém o procura, e o nome fica livre.
+fn eventos_canal_dorme_entrega_e_recusa() -> Resultado {
+    use crate::eventos::{self, CAPACIDADE, NaoPublicado};
+    use crate::usuario::DIRETORIO_DOS_COMPILADOS;
+    use alloc::format;
+    use protocolo::usuario::evento::{Evento, tipo};
+
+    const CANAL: &str = "teste-eco";
+    let teste = |a: i64| Evento {
+        tipo: tipo::TESTE,
+        a,
+        b: 0,
+        c: 0,
+    };
+    let desde = crate::log::total_emitidos();
+    let visto = |procurada: &str| {
+        let mut achou = false;
+        crate::log::ultimos(24, crate::log::Level::Trace, |r| {
+            achou |= r.seq >= desde && r.subsistema == "usuario" && r.mensagem() == procurada;
+        });
+        achou
+    };
+
+    // Ninguém escuta ainda.
+    if eventos::publicar(CANAL, teste(1)) != Err(NaoPublicado::SemOuvinte) {
+        return Err("publicar num canal sem ouvinte nao foi recusado");
+    }
+
+    crate::usuario::lancar(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/eco")))?;
+    esperar_ate(|| visto("eco: escutando"), 600)?;
+
+    // Dormindo: o canal sabe que o ouvinte espera, e a conta de chamadas de
+    // sistema para enquanto a fila está vazia.
+    esperar_ate(|| eventos::estado(CANAL).is_some_and(|e| e.esperando), 200)?;
+    let chamadas = crate::usuario::estatisticas().0;
+    let _ = esperar_ate(|| false, 20);
+    if crate::usuario::estatisticas().0 != chamadas {
+        return Err("o ouvinte fez chamadas de sistema com a fila vazia, em vez de dormir");
+    }
+
+    // Cinco eventos, e as linhas na ordem em que foram publicados.
+    for n in 1..=5 {
+        eventos::publicar(CANAL, teste(n))
+            .map_err(|_| "o canal recusou um evento com a fila vazia")?;
+    }
+    esperar_ate(|| visto("eco 5"), 600)?;
+    let mut ordem = alloc::vec::Vec::new();
+    crate::log::ultimos(24, crate::log::Level::Trace, |r| {
+        if r.seq >= desde
+            && let Some(n) = r.mensagem().strip_prefix("eco ")
+            && let Ok(n) = n.parse::<i64>()
+        {
+            ordem.push(n);
+        }
+    });
+    if ordem != [1, 2, 3, 4, 5] {
+        crate::log_error!("teste", "o ouvinte disse {:?}", ordem);
+        return Err("os eventos nao chegaram na ordem em que foram publicados");
+    }
+
+    // A rajada, com as interrupções mascaradas: o ouvinte não roda no meio,
+    // e a fila enche.
+    let rajada = 70;
+    let recusados = crate::arch::sem_interrupcoes(|| {
+        (100..100 + rajada)
+            .filter(|&n| eventos::publicar(CANAL, teste(n)) == Err(NaoPublicado::Cheio))
+            .count()
+    });
+    if recusados != rajada as usize - CAPACIDADE {
+        crate::log_error!("teste", "{} de {} recusados", recusados, rajada);
+        return Err("a fila cheia nao recusou exatamente o que nao cabia");
+    }
+    esperar_ate(
+        || eventos::estado(CANAL).is_some_and(|e| e.entregues == 5 + CAPACIDADE as u64),
+        600,
+    )?;
+    if eventos::estado(CANAL).map(|e| e.recusados) != Some(recusados as u64) {
+        return Err("o canal nao contou os recusados");
+    }
+
+    // O fim: a contagem e a soma dizem que chegaram os cinco e os sessenta
+    // e quatro **primeiros** da rajada — de 100 a 163.
+    eventos::publicar(CANAL, teste(0)).map_err(|_| "o canal recusou o fim")?;
+    let soma = 15 + (100..100 + CAPACIDADE as i64).sum::<i64>();
+    let fim = format!("eco: fim, {} eventos, soma {}", 5 + CAPACIDADE, soma);
+    esperar_ate(|| visto(&fim), 600).map_err(|_| "o ouvinte nao disse o fim esperado")?;
+    esperar_ate(|| visto("processo encerrou com codigo 63"), 600)?;
+
+    // O ouvinte saiu sem fechar o descritor: o canal volta a ser de ninguém
+    // na primeira vez que alguém o procura.
+    let recuperados = eventos::recuperados();
+    if eventos::publicar(CANAL, teste(1)) != Err(NaoPublicado::SemOuvinte) {
+        return Err("o canal de um ouvinte morto continuou aceitando eventos");
+    }
+    if eventos::recuperados() != recuperados + 1 || eventos::estado(CANAL).is_some() {
+        return Err("o canal do ouvinte morto nao foi recuperado");
+    }
+    Ok(())
+}
+
 /// Uma linha digitada se separa em nome de comando e parâmetros.
 ///
 /// # O que este caso protege
@@ -10733,6 +10850,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "usuario: programas compilados rodam",
         f: usuario_programas_compilados_rodam,
+    },
+    Caso {
+        nome: "eventos: o canal dorme, entrega e recusa",
+        f: eventos_canal_dorme_entrega_e_recusa,
     },
     Caso {
         nome: "usb: o relatorio hid vira teclas",

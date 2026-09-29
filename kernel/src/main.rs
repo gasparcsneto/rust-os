@@ -64,6 +64,7 @@ extern crate alloc;
 mod agent;
 mod arch;
 mod barra;
+mod eventos;
 mod fios;
 mod frames;
 mod grafico;

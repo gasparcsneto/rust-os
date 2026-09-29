@@ -85,24 +85,34 @@ pub enum Estado {
     Pronto,
     /// É o fio que está executando agora.
     Rodando,
-    /// Esperando um filho terminar.
+    /// Esperando um filho terminar, ou um evento chegar a um canal que o
+    /// processo escuta.
     ///
     /// Um fio nesta lista não é escolhido por [`Escalonador::proximo_pronto`],
     /// que é o ponto: sem isso, um pai em `esperar` seria escolhido, voltaria
     /// a perguntar, não acharia nada e cederia — queimando um quantum inteiro
     /// por volta e impedindo a máquina de ficar ociosa.
     ///
-    /// Quem tira daqui é [`marcar_terminado`], chamada pelo filho ao sair. É
-    /// a única transição de volta, e é por isso que ela é o lugar onde o
-    /// código de saída é registrado: quem acorda o pai é o mesmo que tem o
-    /// número que o pai foi esperar.
+    /// Quem tira daqui é [`marcar_terminado`], chamada pelo filho ao sair —
+    /// e é por isso que ela é o lugar onde o código de saída é registrado:
+    /// quem acorda o pai é o mesmo que tem o número que o pai foi esperar —,
+    /// ou [`acordar`], chamada por quem publica um evento.
     ///
-    /// E quem **põe** aqui é [`colher_filho`], também num lugar só. Isso
-    /// não é arrumação: o backend de arquitetura reexecuta a chamada de
-    /// sistema quando encontra o fio neste estado, e reexecutar só é
-    /// seguro para uma chamada que não teve efeito. Com uma única escrita,
-    /// "quais chamadas podem parar aqui" tem uma resposta que se lê, em vez
-    /// de uma que se procura.
+    /// E quem **põe** aqui são duas funções, e nenhuma outra:
+    /// [`colher_filho`] e [`estacionar_atual`], esta chamada só pela leitura
+    /// de um canal de eventos vazio. Isso não é arrumação: o backend de
+    /// arquitetura reexecuta a chamada de sistema quando encontra o fio
+    /// neste estado, e reexecutar só é seguro para uma chamada que não teve
+    /// efeito — as duas conferem que não havia o que colher antes de
+    /// estacionar. Com duas escritas, "quais chamadas podem parar aqui" tem
+    /// uma resposta que se lê, em vez de uma que se procura.
+    ///
+    /// # Acordar a mais é inofensivo
+    ///
+    /// Um pai que também escuta um canal é acordado pela saída de um filho
+    /// enquanto espera um evento, e o contrário. Não há o que separar: a
+    /// chamada reexecutada confere de novo, e volta a estacionar se ainda
+    /// não houver o que ela esperava.
     Esperando,
     /// Terminou. A vaga pode ser reaproveitada.
     Terminado,
@@ -940,6 +950,49 @@ pub fn atual_esperando() -> bool {
         e.fios[e.atual]
             .as_ref()
             .is_some_and(|f| f.estado == Estado::Esperando)
+    })
+}
+
+/// Tira o fio atual de circulação até [`acordar`] o devolver.
+///
+/// Para uma chamada de sistema que conferiu, sem efeito nenhum, que não há
+/// o que entregar — ver [`Estado::Esperando`] sobre por que isso importa: o
+/// backend de arquitetura vai reexecutá-la quando o fio voltar.
+pub fn estacionar_atual() {
+    com_escalonador(|e| {
+        if let Some(fio) = e.fios[e.atual].as_mut() {
+            fio.estado = Estado::Esperando;
+        }
+    });
+}
+
+/// Devolve à circulação o fio `id`, se ele estiver esperando.
+///
+/// Quem chama é quem publica num canal de eventos — ver [`crate::eventos`],
+/// que ainda só a suíte faz.
+///
+/// Devolve se ele ainda existe e não terminou — esperando ou não.
+pub fn acordar(id: u64) -> bool {
+    com_escalonador(|e| {
+        for fio in e.fios.iter_mut().flatten() {
+            if fio.id.numero() == id {
+                if fio.estado == Estado::Esperando {
+                    fio.estado = Estado::Pronto;
+                }
+                return fio.estado != Estado::Terminado;
+            }
+        }
+        false
+    })
+}
+
+/// O fio `id` existe e não terminou?
+pub fn vivo(id: u64) -> bool {
+    com_escalonador(|e| {
+        e.fios
+            .iter()
+            .flatten()
+            .any(|f| f.id.numero() == id && f.estado != Estado::Terminado)
     })
 }
 

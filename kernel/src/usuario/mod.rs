@@ -48,7 +48,7 @@ use core::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 // A ABI com os programas — os números das chamadas, os erros e o mapa do
 // espaço do usuário — é declarada uma vez só, no pacote que os programas
 // também incluem. Ver `protocolo::usuario`.
-pub use protocolo::usuario::{BASE, TETO, erro, numero};
+pub use protocolo::usuario::{BASE, TETO, erro, evento, numero};
 
 /// Onde ficam, no disco, os programas compilados à parte — os do pacote
 /// `programas`, que o `xtask` põe na raiz.
@@ -246,6 +246,7 @@ pub unsafe fn despachar(
         numero::FECHAR => fechar(a0),
         numero::ESPERAR => esperar(a0, a1),
         numero::MAPEAR => mapear(a0, a1),
+        numero::ESCUTAR => escutar(a0, a1),
         // SAFETY: o quadro é o desta chamada, garantido por quem nos chamou.
         numero::BIFURCAR => unsafe { bifurcar(quadro) },
         numero::EXECUTAR => unsafe { executar(quadro, a0, a1) },
@@ -372,7 +373,7 @@ fn escrever(descritor: u64, ponteiro: u64, tamanho: u64) -> i64 {
         // está na tabela não recebe nada. As duas respostas são a mesma de
         // propósito: um processo que sondasse descritores alheios não deve
         // aprender, pelo motivo, qual deles existe.
-        Some(descritores::Alvo::Arquivo { .. }) | None => {
+        Some(descritores::Alvo::Arquivo { .. } | descritores::Alvo::Eventos { .. }) | None => {
             RECUSADAS.fetch_add(1, Ordering::Relaxed);
             return erro::DESCRITOR_INVALIDO;
         }
@@ -522,6 +523,9 @@ fn ler(descritor: u64, ponteiro: u64, tamanho: u64) -> i64 {
         RECUSADAS.fetch_add(1, Ordering::Relaxed);
         return erro::DESCRITOR_INVALIDO;
     };
+    if let descritores::Alvo::Eventos { vaga } = alvo {
+        return ler_eventos(vaga, ponteiro, tamanho);
+    }
     let descritores::Alvo::Arquivo { vnode, posicao } = alvo else {
         // Os destinos de log não leem. Devolver zero fingiria um arquivo
         // vazio, e um programa que leia até o fim entenderia isso como "o
@@ -571,8 +575,111 @@ fn ler(descritor: u64, ponteiro: u64, tamanho: u64) -> i64 {
     lidos as i64
 }
 
+/// Quantos eventos uma leitura entrega, no máximo.
+///
+/// Eles passam por um buffer na pilha do kernel antes de ir ao processo —
+/// ver [`ler_eventos`] —, e dezesseis são 512 bytes. Um programa que queira
+/// mais lê de novo; a fila não perde nada entre uma leitura e outra.
+const EVENTOS_POR_LEITURA: usize = 16;
+
+/// `escutar(ptr, tamanho)`: torna o processo o ouvinte do canal de eventos
+/// com o nome dado, e devolve um descritor para ler dele.
+fn escutar(ponteiro: u64, tamanho: u64) -> i64 {
+    if tamanho == 0 || tamanho as usize > crate::eventos::NOME_MAX {
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return erro::TAMANHO_INVALIDO;
+    }
+    if let Err(e) = validar_faixa(ponteiro, tamanho) {
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return e;
+    }
+    let mut nome = [0u8; crate::eventos::NOME_MAX];
+    // SAFETY: `validar_faixa` confirmou a faixa no espaço do usuário e
+    // mapeada, e estamos no espaço do processo que chamou; o tamanho cabe no
+    // buffer pela conferência acima.
+    unsafe {
+        core::ptr::copy_nonoverlapping(ponteiro as *const u8, nome.as_mut_ptr(), tamanho as usize);
+    }
+    let ouvinte = crate::fios::id_atual();
+    let vaga = match crate::eventos::escutar(&nome[..tamanho as usize], ouvinte) {
+        Ok(vaga) => vaga,
+        Err(crate::eventos::Recusa::NomeInvalido) => {
+            RECUSADAS.fetch_add(1, Ordering::Relaxed);
+            return erro::TAMANHO_INVALIDO;
+        }
+        Err(crate::eventos::Recusa::Ocupado) => return erro::OCUPADO,
+    };
+    match crate::fios::com_descritores(|t| t.instalar(descritores::Alvo::Eventos { vaga })) {
+        Some(Some(descritor)) => descritor as i64,
+        // Sem vaga na tabela, o canal aberto agora não teria como ser lido
+        // por ninguém: ele é largado antes de a recusa voltar.
+        _ => {
+            crate::eventos::largar(vaga, ouvinte);
+            erro::SEM_DESCRITOR
+        }
+    }
+}
+
+/// `ler` num canal de eventos: eventos inteiros, ou o fio estaciona.
+///
+/// # Por que passar por um buffer, se as interrupções estão mascaradas
+///
+/// Porque a cópia para o processo acontece **fora** da tranca dos canais, e
+/// não dentro: escrever na memória do processo pode falhar numa página de
+/// cópia na escrita e passar pelo tratador de falha, e isso não é coisa
+/// para se fazer com a tranca de um recurso que handlers de interrupção
+/// também tomam.
+fn ler_eventos(vaga: usize, ponteiro: u64, tamanho: u64) -> i64 {
+    let tamanho_do_evento = evento::TAMANHO as u64;
+    // Um buffer menor que um evento é recusado, em vez de receber metade de
+    // um — o formato só funciona se o leitor sempre souber onde um evento
+    // começa.
+    if tamanho < tamanho_do_evento {
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return erro::TAMANHO_INVALIDO;
+    }
+    let cabem = ((tamanho / tamanho_do_evento) as usize).min(EVENTOS_POR_LEITURA);
+    if let Err(e) = validar_escrita(ponteiro, cabem as u64 * tamanho_do_evento) {
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return e;
+    }
+
+    let mut eventos = [evento::Evento::default(); EVENTOS_POR_LEITURA];
+    match crate::eventos::colher(vaga, crate::fios::id_atual(), &mut eventos[..cabem]) {
+        crate::eventos::Colheita::Entregues(n) => {
+            for (i, e) in eventos[..n].iter().enumerate() {
+                let bytes = e.em_bytes();
+                // SAFETY: `validar_escrita` confirmou os `cabem` eventos no
+                // espaço do usuário, mapeados e graváveis, e `i < n <= cabem`.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        bytes.as_ptr(),
+                        (ponteiro + i as u64 * tamanho_do_evento) as *mut u8,
+                        bytes.len(),
+                    );
+                }
+            }
+            (n as u64 * tamanho_do_evento) as i64
+        }
+        // O fio foi estacionado. O backend de arquitetura reexecuta a
+        // chamada quando ele acordar; o valor daqui não chega a ninguém.
+        crate::eventos::Colheita::Estacionado => 0,
+        crate::eventos::Colheita::NaoEhSeu => {
+            RECUSADAS.fetch_add(1, Ordering::Relaxed);
+            erro::DESCRITOR_INVALIDO
+        }
+    }
+}
+
 /// `fechar(descritor)`: devolve a vaga à tabela do processo.
 fn fechar(descritor: u64) -> i64 {
+    // Um canal de eventos é largado antes da vaga: o nome fica livre para o
+    // próximo ouvinte na hora, e não quando alguém tropeçar no ouvinte morto.
+    if let Some(Some(descritores::Alvo::Eventos { vaga })) =
+        crate::fios::com_descritores(|t| t.alvo(descritor))
+    {
+        crate::eventos::largar(vaga, crate::fios::id_atual());
+    }
     match crate::fios::com_descritores(|t| t.fechar(descritor)) {
         Some(true) => 0,
         _ => {
@@ -581,6 +688,10 @@ fn fechar(descritor: u64) -> i64 {
         }
     }
 }
+
+// O desfecho que `esperar` escreve é ABI, e mora com o resto dela — ver
+// `protocolo::usuario::BYTES_DO_DESFECHO`.
+pub use protocolo::usuario::{BYTES_DO_DESFECHO, desfecho};
 
 /// `esperar(id, ponteiro)`: colhe um filho que terminou.
 ///
@@ -610,37 +721,6 @@ fn fechar(descritor: u64) -> i64 {
 /// O valor devolvido nesse caminho não chega a usuário nenhum: o backend o
 /// descarta e reexecuta. Devolvemos zero por ser o mais inofensivo se um dia
 /// alguém esquecer de descartá-lo.
-/// Quantos bytes o ponteiro de [`esperar`] precisa ter.
-///
-/// Dois `i64`: o código de saída e se ele significa alguma coisa.
-///
-/// # Por que não basta o código
-///
-/// Porque nem todo processo sai por `sair`. Um morto por falha de página ou
-/// de proteção termina sem código nenhum, e a primeira versão desta chamada
-/// escrevia zero nesse caso — que é um código de saída perfeitamente
-/// legítimo, e o mais comum de todos. O pai lia zero e concluía que o filho
-/// tinha terminado bem.
-///
-/// É a pior forma de falhar: não há erro, não há ausência, há uma resposta
-/// plausível e errada. Um supervisor que reinicia trabalhador que morreu
-/// nunca reiniciaria nenhum.
-///
-/// Não dá para resolver dentro de um número só: **todo** `i64` é um código
-/// de saída válido, então não existe sentinela. A segunda palavra é a saída
-/// — e ela cabe também para o que vier depois, como qual falha matou o
-/// processo.
-pub const BYTES_DO_DESFECHO: u64 = 16;
-
-/// O que a segunda palavra do desfecho carrega.
-pub mod desfecho {
-    /// O processo chamou `sair`, e a primeira palavra é o código dele.
-    pub const SAIU: i64 = 1;
-    /// O processo foi morto antes de chamar `sair`. A primeira palavra não
-    /// significa nada, e é escrita como zero para não vazar lixo.
-    pub const MORTO: i64 = 0;
-}
-
 fn esperar(alvo: u64, ponteiro: u64) -> i64 {
     // O ponteiro é conferido **antes** da colheita, e a ordem não é estilo.
     //

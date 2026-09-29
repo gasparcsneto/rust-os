@@ -18,6 +18,7 @@
 //! aqui seria uma segunda tradução da mesma tabela, e uma a mais para
 //! divergir.
 
+use protocolo::usuario::evento::{self, Evento};
 use protocolo::usuario::numero;
 
 pub use protocolo::usuario::erro;
@@ -109,6 +110,31 @@ pub fn mapear(endereco: u64, tamanho: u64) -> i64 {
     unsafe { chamar(numero::MAPEAR, endereco, tamanho, 0) }
 }
 
+/// Torna este processo o ouvinte do canal de eventos `nome`. Um descritor
+/// para ler os eventos, ou um erro — `OCUPADO` se o canal já tem ouvinte.
+pub fn escutar(nome: &str) -> i64 {
+    // SAFETY: a fatia é deste processo e tem o tamanho dito.
+    unsafe { chamar(numero::ESCUTAR, nome.as_ptr() as u64, nome.len() as u64, 0) }
+}
+
+/// Lê eventos de um canal para `destino`, e devolve quantos vieram — ou um
+/// erro. **Bloqueia** enquanto não houver nenhum.
+pub fn ler_eventos(descritor: u64, destino: &mut [Evento]) -> Result<usize, i64> {
+    let mut bytes = [0u8; 16 * evento::TAMANHO];
+    let cabem = destino.len().min(16);
+    let lidos = ler(descritor, &mut bytes[..cabem * evento::TAMANHO]);
+    if lidos < 0 {
+        return Err(lidos);
+    }
+    let quantos = lidos as usize / evento::TAMANHO;
+    for (i, alvo) in destino.iter_mut().take(quantos).enumerate() {
+        let mut um = [0u8; evento::TAMANHO];
+        um.copy_from_slice(&bytes[i * evento::TAMANHO..(i + 1) * evento::TAMANHO]);
+        *alvo = Evento::de_bytes(&um);
+    }
+    Ok(quantos)
+}
+
 /// Abre o arquivo do `caminho`. Um descritor, ou um erro.
 pub fn abrir(caminho: &str) -> i64 {
     // SAFETY: a fatia é deste processo e tem o tamanho dito.
@@ -171,9 +197,9 @@ pub fn esperar(id: u64) -> Result<(i64, Option<i64>), i64> {
     if colhido < 0 {
         return Err(colhido);
     }
-    // A segunda palavra diz se o código vale — ver
-    // `protocolo::usuario::numero::ESPERAR`.
-    Ok((colhido, (desfecho[1] != 0).then_some(desfecho[0])))
+    // A segunda palavra diz se o código vale.
+    let saiu = desfecho[1] == protocolo::usuario::desfecho::SAIU;
+    Ok((colhido, saiu.then_some(desfecho[0])))
 }
 
 /// `esperar` com o ponteiro cru.
