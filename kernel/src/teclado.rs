@@ -107,6 +107,20 @@ pub const fn tecla_de_funcao(n: u8) -> char {
 /// F1: a tecla do botão da barra superior.
 pub const F1: char = tecla_de_funcao(1);
 
+/// Um clique do ponteiro, na fila do interpretador.
+///
+/// Pelo mesmo motivo das teclas de função: o interpretador é quem atende a
+/// pessoa, e o clique precisa chegar a ele na ordem, fora da interrupção.
+/// Onde foi o clique fica em [`crate::ponteiro::ultimo_clique`].
+pub const CLIQUE: char = '\u{F8FE}';
+
+/// Enfileira um clique para o interpretador. Chamado pelo ponteiro.
+pub fn clique() {
+    let _ = TECLADO.enfileirar(CLIQUE);
+    #[cfg(not(feature = "modo-teste"))]
+    despertar();
+}
+
 /// Qual tecla de função um código é, de 1 a 12.
 fn funcao(codigo_da_tecla: u8) -> Option<u8> {
     match codigo_da_tecla {

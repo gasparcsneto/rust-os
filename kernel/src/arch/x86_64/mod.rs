@@ -10,6 +10,7 @@ pub mod apic;
 pub mod contexto;
 pub mod gdt;
 pub mod idt;
+pub mod mouse;
 pub mod paginacao;
 pub mod pci;
 pub mod pic;
@@ -28,6 +29,11 @@ use crate::machine::{Regiao, TipoRegiao};
 pub use uart::Uart;
 
 /// Nome da arquitetura, exposto no protocolo do agente.
+/// Liga o mouse PS/2 da máquina, se houver um. Devolve se ligou.
+pub fn iniciar_mouse() -> bool {
+    mouse::init()
+}
+
 pub const fn nome() -> &'static str {
     "x86_64"
 }

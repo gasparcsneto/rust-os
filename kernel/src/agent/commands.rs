@@ -1244,6 +1244,18 @@ fn display_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     resultado?;
     w.end_array()?;
 
+    // O ponteiro: onde está, e quanto já se mexeu e clicou. Zero e zero numa
+    // máquina sem mouse, ou num que ninguém tocou.
+    let (x, y) = crate::ponteiro::posicao();
+    let (cliques, movimentos) = crate::ponteiro::contadores();
+    w.key("pointer")?;
+    w.begin_object()?;
+    w.field_u64("x", x as u64)?;
+    w.field_u64("y", y as u64)?;
+    w.field_u64("clicks", cliques)?;
+    w.field_u64("moves", movimentos)?;
+    w.end_object()?;
+
     w.field_u64("surfaces", r.superficies)?;
     w.field_u64("surface_bytes", r.bytes_em_superficies)?;
     w.field_u64("updates", r.atualizacoes)?;
@@ -1429,10 +1441,12 @@ fn ui_tree(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     // última é a que está por cima. A moldura é a parte que cai na tela. A
     // da barra fica de fora — ela já está acima, com o papel dela.
     let barra = crate::barra::camada();
+    let cursor = crate::ponteiro::camada();
     let mut resultado = Ok(());
     crate::grafico::camadas(|c| {
         if c.id == crate::grafico::compositor::CAMADA_DO_CONSOLE
             || Some(c.id) == barra
+            || Some(c.id) == cursor
             || resultado.is_err()
         {
             return;

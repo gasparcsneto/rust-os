@@ -121,6 +121,12 @@ pub fn tratar_tecla(c: char) {
         // F1 é o botão da barra superior. Pelo mesmo caminho do `press` do
         // agente — [`crate::ui::agir`] —, com a outra origem: é o que faz o
         // log dizer quem apertou, e o que impede os dois de divergirem.
+        // Um clique: o que estiver debaixo do ponteiro, se aceitar `press`,
+        // é acionado pelo mesmo caminho — ver [`crate::ponteiro`].
+        crate::teclado::CLIQUE => {
+            let (x, y) = crate::ponteiro::ultimo_clique();
+            crate::ponteiro::tratar_clique(x, y);
+        }
         crate::teclado::F1 => {
             let _ = crate::ui::agir(
                 crate::ui::ID_DO_BOTAO_LIMPAR,

@@ -176,6 +176,11 @@ fn atender(linha: u8) -> bool {
         // resposta acontece fora daqui.
         3 => crate::tarefas::entrada::coletar(),
 
+        // O mouse PS/2. Ler o byte é obrigatório pelo mesmo motivo do
+        // teclado: o 8042 só arma a próxima interrupção depois dele — mas só
+        // quando há um byte, ver `mouse::atender`.
+        super::mouse::IRQ_MOUSE => super::mouse::atender(),
+
         // As demais são dos dispositivos que o kernel dirige. Perguntar a
         // eles é o que evita uma tabela de handlers — e, com dois
         // dispositivos, uma tabela seria generalidade sem cliente.

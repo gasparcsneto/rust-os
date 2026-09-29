@@ -76,6 +76,7 @@ mod mmio;
 mod paginacao;
 mod particoes;
 mod pci;
+mod ponteiro;
 mod qemu;
 mod rede;
 mod serial;
@@ -346,6 +347,11 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     virtio::blk::init();
     virtio::net::init();
     virtio::teclado::init();
+    // O mouse de fábrica do x86. No ARM o ponteiro vem de um tablet virtio,
+    // ligado junto com o teclado logo acima.
+    if arch::iniciar_mouse() {
+        log_info!("mouse", "mouse PS/2 pronto, na IRQ 12");
+    }
     usb::xhci::init();
 
     // E o sistema de arquivos virtual, com o único sistema que existe por

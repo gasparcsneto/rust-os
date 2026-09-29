@@ -241,6 +241,18 @@ pub fn acoes_de(id: u32) -> &'static [Acao] {
     }
 }
 
+/// O elemento que aceita `press` no ponto `(x, y)` da tela, se houver um.
+///
+/// É o que um clique aciona. Hoje só o botão da barra superior aceita; a
+/// pergunta é pela moldura que a árvore publica, para que o clique e o
+/// agente concordem sobre onde o botão está.
+pub fn acionavel_em(x: u32, y: u32) -> Option<u32> {
+    let dentro = |m: Moldura| x >= m.x && x < m.x + m.largura && y >= m.y && y < m.y + m.altura;
+    crate::barra::moldura_do_botao()
+        .filter(|&m| dentro(m))
+        .map(|_| ID_DO_BOTAO_LIMPAR)
+}
+
 /// O elemento existe agora?
 pub fn existe(id: u32) -> bool {
     match id {
@@ -253,9 +265,10 @@ pub fn existe(id: u32) -> bool {
             // A camada da barra não é uma janela: ela está na árvore com o
             // papel dela, e não uma segunda vez como camada.
             let barra = crate::barra::camada();
+            let cursor = crate::ponteiro::camada();
             let mut achou = false;
             crate::grafico::camadas(|c| {
-                achou |= Some(c.id) != barra && id_da_camada(c.id) == id;
+                achou |= Some(c.id) != barra && Some(c.id) != cursor && id_da_camada(c.id) == id;
             });
             achou
         }

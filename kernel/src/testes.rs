@@ -1565,6 +1565,255 @@ fn compositor_transparencia() -> Resultado {
     })
 }
 
+// ===========================================================================
+// O ponteiro
+// ===========================================================================
+//
+// No fim da lista de propósito: o cursor, depois que aparece, fica fixo no
+// topo da tela, e um caso de pixels que viesse depois poderia esbarrar nele.
+
+/// Um tablet e um mouse levam o ponteiro ao mesmo lugar da tela, pela
+/// escala de cada um, e o ponteiro não sai dela.
+fn ponteiro_absoluto_e_relativo() -> Resultado {
+    let Some(tela) = crate::tela::tela_fisica() else {
+        return sem_framebuffer();
+    };
+    sem_intrusos(|| {
+        // O meio da escala de um tablet é o meio da tela.
+        crate::ponteiro::absoluto(16384, 16384, 32767, 32767);
+        let (x, y) = crate::ponteiro::posicao();
+        if x.abs_diff(tela.largura / 2) > 1 || y.abs_diff(tela.altura / 2) > 1 {
+            crate::log_error!("teste", "meio do tablet em ({}, {})", x, y);
+            return Err("a escala do tablet nao leva o meio ao meio da tela");
+        }
+        // Um mouse anda a partir de onde está.
+        crate::ponteiro::relativo(-10, 5);
+        if crate::ponteiro::posicao() != (x - 10, y + 5) {
+            return Err("o deslocamento do mouse nao andou o que disse");
+        }
+        // E a borda prende.
+        crate::ponteiro::relativo(-100_000, 100_000);
+        if crate::ponteiro::posicao() != (0, tela.altura - 1) {
+            return Err("o ponteiro saiu da tela");
+        }
+        crate::ponteiro::absoluto(40_000, 40_000, 32767, 32767);
+        if crate::ponteiro::posicao() != (tela.largura - 1, tela.altura - 1) {
+            return Err("um tablet alem da escala tirou o ponteiro da tela");
+        }
+        Ok(())
+    })
+}
+
+/// O cursor aparece no primeiro movimento e segue o ponteiro: a seta onde
+/// ele está, transparente em volta, e nada onde ele estava.
+fn ponteiro_o_cursor_segue() -> Resultado {
+    if crate::tela::tela_fisica().is_none() {
+        return sem_framebuffer();
+    }
+    sem_intrusos(|| {
+        crate::ponteiro::absoluto(0, 0, 32767, 32767);
+        crate::ponteiro::relativo(300, 300);
+        crate::ponteiro::sincronizar();
+        let mut cursor = None;
+        crate::grafico::camadas(|c| {
+            if c.nome == "cursor" {
+                cursor = Some(c);
+            }
+        });
+        let cursor = cursor.ok_or("o cursor nao apareceu nas camadas")?;
+        if cursor.mistura != crate::grafico::compositor::Mistura::Alfa {
+            return Err("o cursor nao e uma camada transparente");
+        }
+        // A ponta da seta é contorno; à direita dela, na primeira linha, é
+        // transparente — o console aparece.
+        mostra_a_cor(
+            crate::tela::Cor::de_u32(crate::ponteiro::CONTORNO),
+            &[(300, 300)],
+        )?;
+        mostra_o_console(&[(310, 300)])?;
+        // E anda: onde estava volta a ser o console.
+        crate::ponteiro::relativo(40, 0);
+        crate::ponteiro::sincronizar();
+        mostra_a_cor(
+            crate::tela::Cor::de_u32(crate::ponteiro::CONTORNO),
+            &[(340, 300)],
+        )?;
+        mostra_o_console(&[(300, 300)])?;
+        // E fica por cima de uma camada criada depois dele: o cursor é fixo
+        // no topo, e uma janela nova entra abaixo.
+        let janela = camada_de_cor("janela", 320, 290, 60, 40, VERDE)?;
+        mostra_a_cor(
+            crate::tela::Cor::de_u32(crate::ponteiro::CONTORNO),
+            &[(340, 300)],
+        )?;
+        mostra_a_cor(VERDE, &[(360, 320)])?;
+        janela.trazer_para_frente()?;
+        mostra_a_cor(
+            crate::tela::Cor::de_u32(crate::ponteiro::CONTORNO),
+            &[(340, 300)],
+        )
+    })
+}
+
+/// Um clique no botão da barra o pressiona pelo caminho da pessoa — o
+/// mesmo da F1 —, e um clique fora dele não aciona nada.
+fn ponteiro_clique_no_botao() -> Resultado {
+    let Some(tela) = crate::tela::tela_fisica() else {
+        return sem_framebuffer();
+    };
+    let botao = crate::barra::moldura_do_botao().ok_or("a barra nao tem o botao")?;
+    crate::teclado::esvaziar();
+    let antes = crate::barra::pressionado();
+
+    // Pelo tablet, até o meio do botão.
+    let escala = |v: u32, lado: u32| v * 32767 / (lado - 1);
+    let (cx, cy) = (botao.x + botao.largura / 2, botao.y + botao.altura / 2);
+    crate::ponteiro::absoluto(
+        escala(cx, tela.largura),
+        escala(cy, tela.altura),
+        32767,
+        32767,
+    );
+    crate::ponteiro::sincronizar();
+    // O clique é o apertar: chega à fila antes de o botão ser solto.
+    crate::ponteiro::botao(true);
+    let tecla = crate::teclado::ler().ok_or("o clique nao chegou a fila ao apertar o botao")?;
+    crate::ponteiro::botao(false);
+    if crate::teclado::ler().is_some() {
+        return Err("soltar o botao contou outro clique");
+    }
+    if tecla != crate::teclado::CLIQUE {
+        return Err("o clique chegou como outra tecla");
+    }
+    crate::interpretador::tratar_tecla(tecla);
+    if crate::barra::pressionado() != antes + 1 {
+        return Err("o clique no botao nao o pressionou");
+    }
+    if !log_tem(&alloc::format!(
+        "pessoa: press no elemento {}",
+        crate::ui::ID_DO_BOTAO_LIMPAR
+    )) {
+        return Err("o log nao registrou o clique com a origem da pessoa");
+    }
+
+    // Fora do botão: nada.
+    crate::ponteiro::absoluto(
+        escala(cx, tela.largura),
+        escala(tela.altura / 2, tela.altura),
+        32767,
+        32767,
+    );
+    crate::ponteiro::botao(true);
+    crate::ponteiro::botao(false);
+    let tecla = crate::teclado::ler().ok_or("o segundo clique nao chegou")?;
+    crate::interpretador::tratar_tecla(tecla);
+    if crate::barra::pressionado() != antes + 1 {
+        return Err("um clique fora do botao pressionou o botao");
+    }
+    // E segurar não é clicar de novo.
+    crate::ponteiro::botao(true);
+    crate::ponteiro::botao(true);
+    crate::ponteiro::botao(false);
+    let mut cliques = 0;
+    while crate::teclado::ler().is_some() {
+        cliques += 1;
+    }
+    if cliques != 1 {
+        return Err("segurar o botao contou mais de um clique");
+    }
+    Ok(())
+}
+
+/// Os eventos do virtio chegam ao ponteiro: eixos absolutos na escala que o
+/// dispositivo declarou, o botão esquerdo, e o sincronismo que move o
+/// cursor. Montados à mão, com a função que o driver usa.
+fn ponteiro_eventos_do_virtio() -> Resultado {
+    use crate::virtio::teclado::{evento, traduzir};
+    let Some(tela) = crate::tela::tela_fisica() else {
+        return sem_framebuffer();
+    };
+    const EV_SYN: u16 = 0;
+    const EV_KEY: u16 = 1;
+    const EV_ABS: u16 = 3;
+    const BTN_LEFT: u16 = 0x110;
+    let maximo = (1000, 1000);
+    let mut posicao = (0, 0);
+    let (cliques, movimentos) = crate::ponteiro::contadores();
+    crate::teclado::esvaziar();
+
+    traduzir(&mut posicao, maximo, evento(EV_ABS, 0, 500));
+    traduzir(&mut posicao, maximo, evento(EV_ABS, 1, 1000));
+    traduzir(&mut posicao, maximo, evento(EV_SYN, 0, 0));
+    if crate::ponteiro::posicao() != ((tela.largura - 1) / 2, tela.altura - 1) {
+        return Err("os eixos do tablet nao levaram o ponteiro ao lugar");
+    }
+    if crate::ponteiro::contadores().1 != movimentos + 1 {
+        return Err("o sincronismo nao moveu o cursor");
+    }
+    traduzir(&mut posicao, maximo, evento(EV_KEY, BTN_LEFT, 1));
+    traduzir(&mut posicao, maximo, evento(EV_KEY, BTN_LEFT, 0));
+    if crate::ponteiro::contadores().0 != cliques + 1 {
+        return Err("o botao do tablet nao clicou");
+    }
+    // O clique entra na fila, e sai dela — sem acionar nada no meio da tela.
+    if crate::teclado::ler() != Some(crate::teclado::CLIQUE) {
+        return Err("o clique do tablet nao chegou a fila");
+    }
+    Ok(())
+}
+
+/// O pacote do mouse PS/2: três bytes, o primeiro com o bit 3 ligado; um
+/// byte fora de fase é descartado até achar o começo de novo.
+#[cfg(target_arch = "x86_64")]
+fn ponteiro_pacote_ps2() -> Resultado {
+    use crate::arch::atual::mouse::{byte, esquecer};
+    crate::teclado::esvaziar();
+    // Nada pendurado: a IRQ 12 que o PIC guarda da inicialização não pode
+    // ter virado byte — ver `mouse::atender`.
+    let pendentes = esquecer();
+    if pendentes != 0 {
+        crate::log_error!(
+            "teste",
+            "{} byte(s) de um pacote PS/2 pela metade",
+            pendentes
+        );
+        return Err("sobrou um pedaco de pacote PS/2 de antes do primeiro movimento");
+    }
+    crate::ponteiro::relativo(-100_000, -100_000);
+    let (cliques, _) = crate::ponteiro::contadores();
+    // Um byte sem o bit 3: não é começo de pacote, e não conta.
+    byte(0x00);
+    // Botão esquerdo, x +10, y -5 (para cima no PS/2 é para baixo na tela):
+    // estado 0x08 | 0x01 | sinal de y (0x20), dx 10, dy 0xFB (-5).
+    byte(0x29);
+    byte(10);
+    byte(0xFB);
+    if crate::ponteiro::posicao() != (10, 5) {
+        crate::log_error!(
+            "teste",
+            "posicao depois do pacote: {:?}",
+            crate::ponteiro::posicao()
+        );
+        return Err("o pacote PS/2 nao moveu o ponteiro o que dizia");
+    }
+    if crate::ponteiro::contadores().0 != cliques + 1 {
+        return Err("o botao do pacote PS/2 nao clicou");
+    }
+    // Soltar, sem mover.
+    byte(0x08);
+    byte(0);
+    byte(0);
+    crate::teclado::esvaziar();
+    Ok(())
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn ponteiro_pacote_ps2() -> Resultado {
+    // O ARM não tem 8042; o ponteiro dele chega pelo virtio, conferido no
+    // caso anterior.
+    Ok(())
+}
+
 /// O agente vê a pilha gráfica pelo registro, com o adaptador e a tela certos.
 fn agente_display_info_descreve_a_pilha() -> Resultado {
     let cmd = registry::encontrar("display.info").ok_or("display.info ausente")?;
@@ -10762,6 +11011,26 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "usuario: imagem recusada nao custa o espaco",
         f: usuario_imagem_recusada_nao_custa_o_espaco,
+    },
+    Caso {
+        nome: "ponteiro: absoluto e relativo",
+        f: ponteiro_absoluto_e_relativo,
+    },
+    Caso {
+        nome: "ponteiro: o cursor segue",
+        f: ponteiro_o_cursor_segue,
+    },
+    Caso {
+        nome: "ponteiro: clique no botao",
+        f: ponteiro_clique_no_botao,
+    },
+    Caso {
+        nome: "ponteiro: eventos do virtio",
+        f: ponteiro_eventos_do_virtio,
+    },
+    Caso {
+        nome: "ponteiro: pacote PS/2",
+        f: ponteiro_pacote_ps2,
     },
 ];
 

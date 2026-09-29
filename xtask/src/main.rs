@@ -376,6 +376,22 @@ fn caminho_monitor(arch: Arquitetura) -> PathBuf {
         .join(format!("monitor-{}.sock", arch.nome()))
 }
 
+/// Onde fica o QMP do emulador desta arquitetura.
+///
+/// # Por que o QMP, além do monitor
+///
+/// Para o mouse. O `mouse_move` do monitor manda movimento relativo, e um
+/// tablet — o `virtio-tablet` do ARM — só entende posição absoluta: o evento
+/// se perde. O `input-send-event` do QMP manda os dois tipos, e cada
+/// dispositivo recebe o que entende. É o mesmo caminho que um mouse de
+/// verdade, porque o emulador entrega o evento ao dispositivo, e o
+/// dispositivo ao kernel.
+fn caminho_qmp(arch: Arquitetura) -> PathBuf {
+    raiz_do_projeto()
+        .join("target")
+        .join(format!("qmp-{}.sock", arch.nome()))
+}
+
 /// O que o build produziu e o QEMU precisa carregar.
 enum Artefato {
     /// x86: o disco de testes, com o iniciador e o kernel na ESP.
@@ -3588,6 +3604,10 @@ fn comando_qemu(
     match (teclado, arch) {
         (Teclado::Nativo, Arquitetura::Aarch64) => {
             qemu.args(["-device", "virtio-keyboard-pci"]);
+            // E o ponteiro, que no ARM também é um `virtio-input`: um tablet,
+            // que diz onde o ponteiro está. O x86 tem o mouse PS/2 de
+            // fábrica, e não precisa de nada.
+            qemu.args(["-device", "virtio-tablet-pci"]);
         }
         (Teclado::Nativo, Arquitetura::X86_64) => {}
         (Teclado::Usb, _) => {
@@ -3608,6 +3628,12 @@ fn comando_qemu(
     // morrer. Ver [`caminho_monitor`] sobre por que ele é necessário.
     if socket_agente.is_some() {
         anexar_monitor(&mut qemu, &caminho_monitor(arch));
+        let qmp = caminho_qmp(arch);
+        let _ = std::fs::remove_file(&qmp);
+        qemu.args([
+            "-qmp",
+            &format!("unix:{},server=on,wait=off", qmp.display()),
+        ]);
     }
 
     // A ordem das opções `-serial` é significativa: a primeira vira a COM1 do
@@ -3883,9 +3909,14 @@ fn fumaca(
     // não usa.
     let tela_no_monitor =
         (arch == Arquitetura::Aarch64 || video == Video::Virtio).then_some("video0");
+    // Um apontador para a sonda do mouse: o PS/2 do x86, que existe em toda
+    // máquina `pc`, e o tablet virtio do ARM, que só entra com o teclado
+    // nativo. O tablet USB ainda não tem driver.
+    let tem_apontador = arch == Arquitetura::X86_64 || teclado == Teclado::Nativo;
     let resultado = conversar(
         &socket,
         &caminho_monitor(arch),
+        tem_apontador.then(|| caminho_qmp(arch)).as_deref(),
         teclado,
         tela_no_monitor,
         filho.id(),
@@ -3915,6 +3946,7 @@ fn fumaca(
 fn conversar(
     socket: &Path,
     monitor: &Path,
+    qmp: Option<&Path>,
     teclado: Teclado,
     tela_no_monitor: Option<&str>,
     qemu: u32,
@@ -4073,6 +4105,10 @@ fn conversar(
     sob_interpretador(monitor, &mut escrita, &mut leitor)?;
     sob_arvore(&mut escrita, &mut leitor)?;
     sob_barra(monitor, &mut escrita, &mut leitor)?;
+    match qmp {
+        Some(qmp) => sob_mouse(qmp, &mut escrita, &mut leitor)?,
+        None => println!("[xtask] fumaça: esta máquina não tem apontador; o mouse fica de fora"),
+    }
     sob_tela(monitor, tela_no_monitor, &mut escrita, &mut leitor)?;
     sob_fragmento(&mut escrita, &mut leitor)?;
     // Por último, porque não há volta: depois dela o kernel só responde o
@@ -4614,6 +4650,237 @@ fn sob_arvore(escrita: &mut UnixStream, leitor: &mut BufReader<UnixStream>) -> R
 
     println!("  [arvore] ok  set_value, confirm e a resposta lida de volta pela arvore");
     Ok(())
+}
+
+/// Um pedido ao QMP, e a resposta dele.
+///
+/// O QMP responde uma linha por pedido, mas também manda eventos quando quer
+/// — um `{"event": ...}` pode chegar antes da resposta. Lê até a resposta.
+fn qmp_pedir(
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+    pedido: &str,
+) -> Result<String, String> {
+    escrita
+        .write_all(pedido.as_bytes())
+        .and_then(|()| escrita.write_all(b"\n"))
+        .and_then(|()| escrita.flush())
+        .map_err(|e| format!("mouse: falha ao falar com o QMP: {e}"))?;
+    loop {
+        let mut linha = String::new();
+        leitor
+            .read_line(&mut linha)
+            .map_err(|e| format!("mouse: o QMP nao respondeu: {e}"))?;
+        if linha.is_empty() {
+            return Err("mouse: o QMP fechou a conexao".into());
+        }
+        if linha.contains("\"return\"") || linha.contains("\"error\"") {
+            return Ok(linha);
+        }
+    }
+}
+
+/// O ponteiro, pelo mouse da máquina: vai até o botão da barra e clica.
+///
+/// O movimento sai do QMP do emulador nos dois formatos — posição absoluta
+/// e deslocamento — e cada dispositivo recebe o que entende: o tablet virtio
+/// do ARM, a posição; o mouse PS/2 do x86, o deslocamento. O relativo começa
+/// por um deslocamento enorme para o canto de cima, que o kernel prende em
+/// zero: a partir dali, andar até o botão é andar a posição dele.
+///
+/// Onde está o botão sai da árvore semântica, e não de um número escrito
+/// aqui: a sonda clica onde a árvore diz que ele está, e é isso que ela
+/// confere — que o clique e a árvore concordam.
+fn sob_mouse(
+    qmp: &Path,
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+) -> Result<(), String> {
+    println!("[xtask] fumaça: o mouse, até o botão da barra");
+    const BOTAO: u32 = 5;
+
+    let mut pedir = |id: u32, metodo: &str, params: &str| -> Result<String, String> {
+        escrita
+            .write_all(
+                format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"{metodo}","params":{params}}}"#)
+                    .as_bytes(),
+            )
+            .and_then(|()| escrita.write_all(b"\n"))
+            .and_then(|()| escrita.flush())
+            .map_err(|e| format!("mouse: falha ao pedir `{metodo}`: {e}"))?;
+        let resposta = ler_resposta(leitor).map_err(|e| format!("mouse: {e}"))?;
+        if !e_a_resposta(&resposta, id) {
+            return Err(format!(
+                "mouse: veio a resposta de outro pedido\n  {resposta}"
+            ));
+        }
+        Ok(resposta)
+    };
+
+    // O centro do botão, pela moldura que a árvore publica.
+    let arvore = pedir(7901, "ui.tree", "{}")?;
+    let marca = format!(r#""id":{BOTAO},"role":"button""#);
+    let resto = &arvore[arvore
+        .find(&marca)
+        .ok_or_else(|| format!("mouse: a arvore nao tem o botao\n  {arvore}"))?..];
+    let numero = |chave: &str| -> Result<u32, String> {
+        valor_de(resto, &format!(r#""{chave}":"#))
+            .and_then(|v| v.parse().ok())
+            .ok_or_else(|| format!("mouse: a moldura do botao nao tem `{chave}`"))
+    };
+    let (bx, by, bl, ba) = (
+        numero("x")?,
+        numero("y")?,
+        numero("width")?,
+        numero("height")?,
+    );
+    let (cx, cy) = (bx + bl / 2, by + ba / 2);
+    let info = pedir(7902, "display.info", "{}")?;
+    let dimensao = |chave: &str| -> Result<u32, String> {
+        valor_de(&info, &format!(r#""{chave}":"#))
+            .and_then(|v| v.parse().ok())
+            .ok_or_else(|| format!("mouse: display.info nao tem `{chave}`\n  {info}"))
+    };
+    let (largura, altura) = (dimensao("width")?, dimensao("height")?);
+
+    let fluxo = UnixStream::connect(qmp).map_err(|e| format!("mouse: o QMP nao aceitou: {e}"))?;
+    fluxo
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|e| format!("mouse: {e}"))?;
+    let mut qmp_escrita = fluxo.try_clone().map_err(|e| format!("mouse: {e}"))?;
+    let mut qmp_leitor = BufReader::new(fluxo);
+    let mut saudacao = String::new();
+    qmp_leitor
+        .read_line(&mut saudacao)
+        .map_err(|e| format!("mouse: o QMP nao saudou: {e}"))?;
+    qmp_pedir(
+        &mut qmp_escrita,
+        &mut qmp_leitor,
+        r#"{"execute":"qmp_capabilities"}"#,
+    )?;
+
+    let eventos = |lista: &str| {
+        format!(r#"{{"execute":"input-send-event","arguments":{{"events":[{lista}]}}}}"#)
+    };
+    // A escala do QMP para posição absoluta vai de 0 a 32767.
+    let escala = |v: u32, lado: u32| (v as u64 * 32767 / (lado.max(2) - 1) as u64) as u32;
+    let absoluto = format!(
+        r#"{{"type":"abs","data":{{"axis":"x","value":{}}}}},{{"type":"abs","data":{{"axis":"y","value":{}}}}}"#,
+        escala(cx, largura),
+        escala(cy, altura)
+    );
+    let relativo = |dx: i64, dy: i64| {
+        format!(
+            r#"{{"type":"rel","data":{{"axis":"x","value":{dx}}}}},{{"type":"rel","data":{{"axis":"y","value":{dy}}}}}"#
+        )
+    };
+    // O QMP recusa o formato que nenhum dispositivo da máquina entende — o
+    // relativo no ARM, o absoluto no x86 — com "Input handler not found".
+    // Essa recusa é esperada; qualquer outra é defeito.
+    let mut enviar = |pedido: &str, formato: &str| -> Result<bool, String> {
+        let r = qmp_pedir(&mut qmp_escrita, &mut qmp_leitor, pedido)?;
+        if !r.contains("\"error\"") {
+            return Ok(true);
+        }
+        if r.contains(&format!("Input handler not found for event type {formato}")) {
+            return Ok(false);
+        }
+        Err(format!("mouse: o QMP recusou o movimento\n  {r}"))
+    };
+    let absoluto_aceito = enviar(&eventos(&absoluto), "abs")?;
+    std::thread::sleep(Duration::from_millis(150));
+
+    // O relativo anda a diferença entre onde o ponteiro está e o botão, em
+    // passos de até cem. Não um salto só, nem um "vá para o canto" antes: o
+    // mouse PS/2 do emulador acumula o deslocamento e o entrega aos pedaços,
+    // conforme a fila dele esvazia, e um salto grande fica pendurado no
+    // acumulador e engole o movimento seguinte — medido, um -4000 para o
+    // canto seguido de +96 deixou o ponteiro em zero.
+    let info = pedir(7903, "display.info", "{}")?;
+    let ponteiro = info.find(r#""pointer":"#).map(|i| &info[i..]).unwrap_or("");
+    let px: i64 = valor_de(ponteiro, r#""x":"#)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let py: i64 = valor_de(ponteiro, r#""y":"#)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let (mut faltam_x, mut faltam_y) = (cx as i64 - px, cy as i64 - py);
+    let mut relativo_aceito = false;
+    while faltam_x != 0 || faltam_y != 0 {
+        let passo_x = faltam_x.clamp(-100, 100);
+        let passo_y = faltam_y.clamp(-100, 100);
+        if !enviar(&eventos(&relativo(passo_x, passo_y)), "rel")? {
+            break;
+        }
+        relativo_aceito = true;
+        faltam_x -= passo_x;
+        faltam_y -= passo_y;
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    if !absoluto_aceito && !relativo_aceito && (px, py) != (cx as i64, cy as i64) {
+        return Err("mouse: nenhum dispositivo da maquina aceitou movimento".into());
+    }
+
+    // O ponteiro chegou ao botão — pelo que o kernel diz.
+    let limite = std::time::Instant::now() + Duration::from_secs(5);
+    let mut id = 7904;
+    let mut ultima: String;
+    let chegou = loop {
+        ultima = pedir(id, "display.info", "{}")?;
+        id += 1;
+        let ponteiro = ultima
+            .find(r#""pointer":"#)
+            .map(|i| &ultima[i..])
+            .unwrap_or("");
+        let px: u32 = valor_de(ponteiro, r#""x":"#)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let py: u32 = valor_de(ponteiro, r#""y":"#)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        if px.abs_diff(cx) <= 2 && py.abs_diff(cy) <= 2 {
+            break true;
+        }
+        if std::time::Instant::now() >= limite {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    if !chegou {
+        return Err(format!(
+            "mouse: o ponteiro nao chegou ao botao em ({cx}, {cy})\n  {ultima}"
+        ));
+    }
+    if !ultima.contains(r#""name":"cursor""#) || !ultima.contains(r#""blend":"alpha""#) {
+        return Err(format!("mouse: o cursor nao esta nas camadas\n  {ultima}"));
+    }
+    println!("  [mouse] ok  o ponteiro chegou ao botao em ({cx}, {cy}), com o cursor na tela");
+
+    // O clique.
+    for down in [true, false] {
+        qmp_pedir(
+            &mut qmp_escrita,
+            &mut qmp_leitor,
+            &eventos(&format!(
+                r#"{{"type":"btn","data":{{"down":{down},"button":"left"}}}}"#
+            )),
+        )?;
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let pessoa = format!("pessoa: press no elemento {BOTAO}");
+    let limite = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < limite {
+        ultima = pedir(id, "log.tail", r#"{"count":16}"#)?;
+        id += 1;
+        if ultima.contains(&pessoa) {
+            println!("  [mouse] ok  o clique pressionou o botao, pela pessoa");
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err(format!(
+        "mouse: o clique nao pressionou o botao\n  {ultima}"
+    ))
 }
 
 /// O botão da barra superior, pressionado pelos dois caminhos.

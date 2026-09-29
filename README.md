@@ -194,6 +194,7 @@ kernel/src/
 ├── heap.rs          alocador do kernel: lista livre ordenada com fusão
 ├── interpretador.rs operar o Duke digitando
 ├── barra.rs         a barra superior: o nome, o primeiro botão e o tempo ligado
+├── ponteiro.rs      o mouse: onde ele está, o cursor, e o clique
 ├── ui.rs            a árvore semântica: o que está na tela, e o que se faz com cada coisa
 ├── teclado.rs       o que uma pessoa digita chega ao kernel
 ├── pci.rs           enumeração do barramento PCI
@@ -247,7 +248,7 @@ kernel/src/
 │   ├── blk.rs       o disco
 │   ├── net.rs       a placa de rede
 │   ├── gpu.rs       o vídeo que só mostra o que se manda (porte do virtio-gpud)
-│   └── teclado.rs   o teclado do ARM, por virtio
+│   └── teclado.rs   o teclado e o tablet do ARM, por virtio
 ├── usb/
 │   ├── mod.rs       o barramento por onde entram os periféricos de verdade
 │   ├── xhci.rs      o controlador xHCI: a porta de entrada do USB
@@ -264,6 +265,7 @@ kernel/src/
     │   ├── mod.rs    entrada pelo iniciador UEFI, CPUID, portas de I/O
     │   ├── gdt.rs    GDT, TSS e pilha dedicada ao double fault
     │   ├── idt.rs    IDT e handlers de exceção e interrupção
+    │   ├── mouse.rs  o mouse PS/2, pela porta auxiliar do 8042
     │   ├── pic.rs    controlador 8259 e timer PIT
     │   ├── apic.rs   o APIC local: o timer por núcleo do x86 moderno
     │   ├── paginacao.rs  assume as tabelas de página do iniciador
@@ -1148,6 +1150,56 @@ Seis mutações, seis reprovadas — entre elas a de voltar a recomeçar do topo
 que o caso do registro de log, livre do paliativo que tinha ganhado, agora
 pega sozinho.
 
+## O mouse
+
+Uma seta que segue o mouse, e o clique no botão **Limpar** — o terceiro
+caminho até o mesmo `press`, depois do `ui.act` do agente e da F1:
+
+```
+info ui  pessoa: press no elemento 5
+```
+
+**Dois tipos de dispositivo.** No x86, o mouse PS/2, pela porta auxiliar do
+mesmo 8042 do teclado, na IRQ 12: diz **quanto** andou, em pacotes de três
+bytes. No ARM, que não tem 8042, o `virtio-tablet`: diz **onde** o ponteiro
+está, numa escala dele que o driver lê do espaço de configuração. Os dois
+drivers traduzem para `ponteiro::relativo` ou `ponteiro::absoluto`; daí para
+cima ninguém sabe qual chegou.
+
+**O cursor é uma camada.** Transparente fora da seta, pelo alfa por pixel do
+compositor, e fixa no topo: uma janela trazida para a frente continua
+debaixo dela. Aparece no primeiro movimento — uma máquina sem mouse não
+mostra um ponteiro que ninguém move. Não entra na árvore semântica, que
+descreve o que se opera, e não o que aponta; `display.info` diz onde o
+ponteiro está e quantos cliques e movimentos chegaram.
+
+**O clique vai pela fila.** O handler de interrupção só anota onde foi e
+põe um caractere reservado na fila do interpretador, como a F1. Quem trata
+é a tarefa do interpretador: pergunta à interface o que está debaixo do
+ponteiro e, se aceitar `press`, aciona por `ui::agir`, com a origem da
+pessoa.
+
+**Uma interrupção sem byte.** A configuração do 8042 liga a IRQ 12 antes dos
+comandos ao mouse, e o PIC guarda o pedido enquanto a linha está mascarada.
+Ao desmascarar, ele o entrega — e ler a porta ali devolvia o último byte de
+novo, o 0xFA do aceite, que tem o bit que marca o começo de um pacote. O
+primeiro movimento de verdade saía fora de fase. A suíte achou isso: o
+handler agora confere, no registrador de estado, que há byte e que ele veio
+do mouse, e o caso confere que nenhum byte ficou pendurado.
+
+Conferido pela suíte — as duas escalas, o cursor seguindo e ficando por
+cima de uma camada nova, a transparência fora da seta, o clique no botão
+limpando, os eventos do `virtio-input` e os pacotes PS/2 montados à mão — e
+pela fumaça, no kernel de produção, com o QEMU mandando eventos de verdade
+pelo QMP: o ponteiro vai até o botão, a seta aparece lá, e o clique limpa.
+Nas cinco máquinas que têm ponteiro; o ARM com teclado USB não tem, porque o
+driver xHCI atende um dispositivo só, e o tablet USB fica para quando atender
+mais.
+
+Doze mutações, doze reprovadas — uma delas, a de clicar ao soltar, só pelo
+caso do PS/2 até o caso do clique passar a conferir a fila no apertar, e
+esse roda também no ARM.
+
 ## Sistema de arquivos
 
 A camada que o Unix chamou de VFS: um *vnode* (um objeto do sistema de
@@ -1959,9 +2011,10 @@ padronizado.
       empilhamento, camadas opacas e transparentes, e o console como a
       camada de baixo. E a barra superior, com o primeiro elemento que
       aceita `press` — pela árvore e pela F1, pelo mesmo caminho. E o console
-      rolando, em vez de recomeçar do topo. A seguir: o mouse, com o clique
-      no mesmo botão. Depois, o servidor de janelas, o roteamento de entrada
-      e a tipografia.
+      rolando, em vez de recomeçar do topo. E o mouse — PS/2 no x86,
+      `virtio-tablet` no ARM —, com o cursor como camada transparente fixa no
+      topo e o clique no mesmo botão. A seguir: o servidor de janelas, o
+      roteamento de entrada e a tipografia.
       E aqui a inversão do projeto encontra a interface gráfica. O servidor de
       janelas publica uma **árvore semântica** — que janelas existem, que
       controles, o que cada um faz — e os pixels são a renderização dela, do

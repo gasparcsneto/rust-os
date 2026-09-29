@@ -68,7 +68,7 @@ pub use atual::{
     criar_espaco, definir_pilha_de_kernel, desmapear, destravar_paginacao, destruir_espaco,
     disparar_breakpoint, disparar_falha_fatal, dormir_parado, dormir_se_ocioso, encerrar_emulador,
     entrar_em_usuario, espaco_atual, espaco_do_kernel, esperar_interrupcao,
-    falha_de_estouro_de_pilha, halt_forever, identificar_cpu, init_excecoes,
+    falha_de_estouro_de_pilha, halt_forever, identificar_cpu, iniciar_mouse, init_excecoes,
     init_interrupcao_serial, init_interrupcoes, init_paginacao, init_pci, init_seriais,
     init_timer_definitivo, init_usuario, interrupcoes_habilitadas, mapear_frame,
     marcar_copia_na_escrita, nome, percorrer_paginas_do_usuario, preparar_contexto,

@@ -113,6 +113,9 @@ struct Entrada {
     /// A opacidade da camada inteira, de 0 (invisível) a 255. Multiplica a
     /// de cada pixel.
     opacidade: u8,
+    /// Fica acima de toda camada que não esteja também fixa: o cursor. Uma
+    /// camada nova, ou uma trazida para a frente, entra abaixo dela.
+    no_topo: bool,
 }
 
 /// Como os pixels de uma camada se misturam com o que está embaixo.
@@ -131,9 +134,6 @@ pub enum Mistura {
     Opaca,
     /// O byte alto de cada pixel é a opacidade dele: `0xAARRGGBB`, com alfa
     /// não pré-multiplicado — 0 não desenha nada, 255 esconde o de baixo.
-    // O primeiro usuário de produção é o cursor do mouse; até ele, só a
-    // suíte cria camadas transparentes.
-    #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
     Alfa,
 }
 
@@ -300,7 +300,6 @@ impl Compositor {
     }
 
     /// Põe uma camada nova no topo e a compõe. Os pixels começam pretos.
-    #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
     fn criar(
         &mut self,
         nome: &'static str,
@@ -322,36 +321,47 @@ impl Compositor {
             .proximo_id
             .checked_add(1)
             .ok_or("identificadores esgotados")?;
-        self.camadas.push(Entrada {
-            id,
-            nome,
-            x,
-            y,
-            largura,
-            altura,
-            memoria,
-            mistura: Mistura::Opaca,
-            opacidade: u8::MAX,
-        });
+        let onde = self.onde_entra();
+        self.camadas.insert(
+            onde,
+            Entrada {
+                id,
+                nome,
+                x,
+                y,
+                largura,
+                altura,
+                memoria,
+                mistura: Mistura::Opaca,
+                opacidade: u8::MAX,
+                no_topo: false,
+            },
+        );
         crate::ui::mudou();
         let _ = self.compor_camada(id);
         Ok(id)
     }
 
-    #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+    /// Onde uma camada que vem para a frente entra: no topo, mas abaixo das
+    /// fixas.
+    fn onde_entra(&self) -> usize {
+        self.camadas
+            .iter()
+            .position(|c| c.no_topo)
+            .unwrap_or(self.camadas.len())
+    }
+
     fn indice(&self, id: u32) -> Option<usize> {
         self.camadas.iter().position(|c| c.id == id)
     }
 
     /// Recompõe o retângulo que uma camada ocupa na tela.
-    #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
     fn compor_camada(&mut self, id: u32) -> Result<Dano, &'static str> {
         let i = self.indice(id).ok_or("camada inexistente")?;
         let onde = self.camadas[i].na_tela(self.largura, self.altura);
         self.compor(onde)
     }
 
-    #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
     fn remover(&mut self, id: u32) {
         let Some(i) = self.indice(id) else {
             return;
@@ -397,16 +407,10 @@ impl Compositor {
 /// Soltá-lo tira a camada da tela e devolve a memória dela — o mesmo
 /// arranjo de [`Memoria`], pelo mesmo motivo: quem esquece de desfazer é o
 /// compilador, e ele não esquece.
-// Hoje só a suíte cria camadas: o primeiro cliente de produção é a barra
-// superior, ou o servidor de janelas, e nenhum dos dois existe ainda. A
-// anotação mantém o build de produção limpo sem esconder código morto de
-// verdade — na compilação de teste, onde há consumidor, ela não vale.
-#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub struct Camada {
     id: u32,
 }
 
-#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 impl Camada {
     /// Cria uma camada no topo, em `(x, y)`, e a mostra. Os pixels começam
     /// pretos; quem a criou pinta com [`Camada::pintar`].
@@ -475,6 +479,9 @@ impl Camada {
     }
 
     /// Muda a opacidade da camada inteira, de 0 a 255, e a recompõe.
+    // Sem cliente de produção ainda: o servidor de janelas vai desbotar e
+    // reordenar janelas; hoje só a suíte o faz.
+    #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
     pub fn definir_opacidade(&self, opacidade: u8) -> Result<Dano, &'static str> {
         super::com_compositor(|c| {
             let i = c.indice(self.id).ok_or("camada inexistente")?;
@@ -485,12 +492,32 @@ impl Camada {
         .ok_or("nao ha compositor")?
     }
 
-    /// Põe a camada no topo da pilha.
+    /// Fixa a camada acima de todas as outras, e a leva para lá.
+    pub fn fixar_no_topo(&self) -> Result<Dano, &'static str> {
+        super::com_compositor(|c| {
+            let i = c.indice(self.id).ok_or("camada inexistente")?;
+            let mut entrada = c.camadas.remove(i);
+            entrada.no_topo = true;
+            c.camadas.push(entrada);
+            c.compor_camada(self.id)
+        })
+        .ok_or("nao ha compositor")?
+    }
+
+    /// Põe a camada no topo da pilha — abaixo das fixas.
+    // Sem cliente de produção ainda: o servidor de janelas vai desbotar e
+    // reordenar janelas; hoje só a suíte o faz.
+    #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
     pub fn trazer_para_frente(&self) -> Result<Dano, &'static str> {
         super::com_compositor(|c| {
             let i = c.indice(self.id).ok_or("camada inexistente")?;
             let entrada = c.camadas.remove(i);
-            c.camadas.push(entrada);
+            let onde = if entrada.no_topo {
+                c.camadas.len()
+            } else {
+                c.onde_entra()
+            };
+            c.camadas.insert(onde, entrada);
             crate::ui::mudou();
             c.compor_camada(self.id)
         })
