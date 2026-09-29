@@ -743,8 +743,8 @@ canal:
 - **as teclas**, enquanto uma janela tem o foco. O servidor o pede com
   `controlar(FOCO)`; um clique fora de toda janela o devolve ao kernel, e o
   servidor é avisado para apagar a barra de título. Se o servidor morrer com
-  o foco, a tecla seguinte o devolve sozinha e segue para o console, em vez
-  de sumir;
+  o foco, a tecla segue para o console em vez de sumir, e o coletor devolve
+  o foco ao kernel na volta seguinte;
 - **os pedidos de abrir** uma janela, com o tamanho da tela para
   posicioná-la, e o de **encerrar**.
 
@@ -756,6 +756,13 @@ clique; clica fora, e a barra apaga e a tecla volta ao console; fecha pela
 caixa; e encerra o servidor, que não fica vivo para os casos seguintes. O
 `display.info` ganhou `to_windows`, os eventos de ponteiro que foram para o
 servidor em vez de virar clique do kernel.
+
+Catorze mutações na etapa, treze reprovadas — depois de o caso ser relido
+contra elas e reforçado: o arrasto que o comentário dizia sair da janela
+andava 50 pixels numa janela de 320, e a captura não era testada. A que
+passou tirava a devolução do foco quando a tecla não tem quem a escute; o
+coletor já a faz no tique seguinte, e a tecla segue para o console de
+qualquer jeito. Era o mesmo efeito escrito duas vezes, e saiu.
 
 **A proteção é testada, não presumida.** Existe um segundo programa que tenta
 ler a memória do kernel. O caso `usuario: nao alcanca o kernel` exige duas

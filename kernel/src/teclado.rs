@@ -213,8 +213,14 @@ pub fn evento(codigo_da_tecla: u8, pressionada: bool) {
     PRESSIONADAS.fetch_add(1, Ordering::Relaxed);
 
     // Com o foco numa janela, o caractere é do servidor de janelas. Se não
-    // houver quem escute — o servidor morreu —, o foco volta ao kernel e o
-    // caractere segue para o console, em vez de sumir.
+    // houver quem escute — o servidor morreu e o coletor ainda não passou
+    // para devolver o foco —, o caractere segue para o console, em vez de
+    // sumir.
+    //
+    // Devolver o foco aqui também era a primeira versão, e ela era o mesmo
+    // efeito escrito duas vezes: a mutação que tirava a devolução passava na
+    // suíte, porque a tecla seguia para o console de qualquer jeito e o
+    // coletor devolvia o foco no tique seguinte. Quem devolve é o coletor.
     if crate::superficies::foco_ativo() {
         let evento = protocolo::usuario::evento::Evento {
             tipo: protocolo::usuario::evento::tipo::TECLA,
@@ -222,14 +228,12 @@ pub fn evento(codigo_da_tecla: u8, pressionada: bool) {
             b: 0,
             c: 0,
         };
-        match crate::eventos::publicar(protocolo::usuario::evento::CANAL_DAS_JANELAS, evento) {
-            Err(crate::eventos::NaoPublicado::SemOuvinte) => {
-                crate::superficies::devolver_foco();
-            }
-            _ => {
-                let _ = HISTORICO.enfileirar(c);
-                return;
-            }
+        if !matches!(
+            crate::eventos::publicar(protocolo::usuario::evento::CANAL_DAS_JANELAS, evento),
+            Err(crate::eventos::NaoPublicado::SemOuvinte)
+        ) {
+            let _ = HISTORICO.enfileirar(c);
+            return;
         }
     }
 
