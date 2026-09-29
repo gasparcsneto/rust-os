@@ -1418,11 +1418,21 @@ fn ui_tree(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.end_array()?;
     w.end_object()?;
 
+    // A barra superior, com o que há nela.
+    if let Some(m) = crate::barra::moldura() {
+        escrever_barra(w, m)?;
+    }
+
     // As camadas acima do console, na ordem em que estão empilhadas: a
-    // última é a que está por cima. A moldura é a parte que cai na tela.
+    // última é a que está por cima. A moldura é a parte que cai na tela. A
+    // da barra fica de fora — ela já está acima, com o papel dela.
+    let barra = crate::barra::camada();
     let mut resultado = Ok(());
     crate::grafico::camadas(|c| {
-        if c.id == crate::grafico::compositor::CAMADA_DO_CONSOLE || resultado.is_err() {
+        if c.id == crate::grafico::compositor::CAMADA_DO_CONSOLE
+            || Some(c.id) == barra
+            || resultado.is_err()
+        {
             return;
         }
         resultado = escrever_camada(w, c);
@@ -1431,6 +1441,73 @@ fn ui_tree(_params: Json, w: &mut JsonWriter) -> fmt::Result {
 
     w.end_array()?;
     w.end_object()?;
+    w.end_object()
+}
+
+/// A barra superior e o que há nela: o nome, o botão e o relógio.
+fn escrever_barra(w: &mut JsonWriter, moldura: crate::ui::Moldura) -> fmt::Result {
+    use crate::ui;
+
+    // Um elemento sem filhos, com rótulo, moldura e, se houver, valor.
+    let folha = |w: &mut JsonWriter,
+                 id: u32,
+                 papel: ui::Papel,
+                 rotulo: &str,
+                 moldura: Option<ui::Moldura>,
+                 valor: Option<&str>|
+     -> fmt::Result {
+        w.begin_object()?;
+        w.field_u64("id", id as u64)?;
+        w.field_str("role", papel.nome())?;
+        w.field_str("label", rotulo)?;
+        if let Some(m) = moldura {
+            escrever_moldura(w, m)?;
+        }
+        if let Some(v) = valor {
+            w.field_str("value", v)?;
+        }
+        escrever_acoes(w, id)?;
+        w.key("children")?;
+        w.begin_array()?;
+        w.end_array()?;
+        w.end_object()
+    };
+
+    w.begin_object()?;
+    w.field_u64("id", ui::ID_DA_BARRA as u64)?;
+    w.field_str("role", ui::Papel::BarraSuperior.nome())?;
+    w.field_str("label", "barra superior")?;
+    escrever_moldura(w, moldura)?;
+    escrever_acoes(w, ui::ID_DA_BARRA)?;
+    w.key("children")?;
+    w.begin_array()?;
+    folha(
+        w,
+        ui::ID_DO_NOME,
+        ui::Papel::Texto,
+        "nome",
+        crate::barra::moldura_do_nome(),
+        Some(crate::barra::NOME),
+    )?;
+    folha(
+        w,
+        ui::ID_DO_BOTAO_LIMPAR,
+        ui::Papel::Botao,
+        crate::barra::ROTULO_DO_BOTAO,
+        crate::barra::moldura_do_botao(),
+        None,
+    )?;
+    if let Some((m, texto)) = crate::barra::relogio_na_tela() {
+        folha(
+            w,
+            ui::ID_DO_RELOGIO,
+            ui::Papel::Texto,
+            "tempo ligado",
+            Some(m),
+            Some(&texto),
+        )?;
+    }
+    w.end_array()?;
     w.end_object()
 }
 

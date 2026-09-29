@@ -36,9 +36,9 @@ const SHIFT_DIREITO: u8 = 1 << 5;
 /// O código do AT correspondente a cada *usage* do HID.
 ///
 /// Zero é "não traduzimos", e é o que sobra para tudo que não produz texto.
-/// A tabela vai até 0x38 porque é onde acaba o bloco que interessa; o que vem
-/// depois são teclas de função, navegação e o teclado numérico.
-const DE_HID: [u8; 0x39] = [
+/// A tabela vai até as teclas de função, 0x45; o que vem depois é navegação
+/// e o teclado numérico.
+const DE_HID: [u8; 0x46] = [
     // 0x00 a 0x03: nenhuma tecla, e os três códigos de erro que o teclado usa
     // para dizer que não consegue reportar (excesso de teclas simultâneas).
     0, 0, 0, 0, //
@@ -57,7 +57,12 @@ const DE_HID: [u8; 0x39] = [
     // 0x32: a tecla que só existe em teclados não americanos.
     0, //
     // 0x33 a 0x38: ; ' ` , . /
-    39, 40, 41, 51, 52, 53,
+    39, 40, 41, 51, 52, 53, //
+    // 0x39: caps lock, que o teclado deste kernel ainda não trata.
+    0, //
+    // 0x3A a 0x45: F1 a F12. No AT, F1 a F10 são seguidas e F11 e F12 vieram
+    // depois, num buraco mais adiante.
+    59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 87, 88,
 ];
 
 // A tabela é escrita à mão, e um elemento a mais ou a menos em qualquer linha
@@ -70,6 +75,9 @@ const _: () = assert!(DE_HID[0x27] == 11); // 0
 const _: () = assert!(DE_HID[0x28] == 28); // enter
 const _: () = assert!(DE_HID[0x2C] == 57); // espaço
 const _: () = assert!(DE_HID[0x38] == 53); // barra
+const _: () = assert!(DE_HID[0x3A] == 59); // F1
+const _: () = assert!(DE_HID[0x43] == 68); // F10
+const _: () = assert!(DE_HID[0x45] == 88); // F12
 
 /// O estado do teclado no relatório anterior, para saber o que mudou.
 ///

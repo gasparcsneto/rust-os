@@ -99,26 +99,45 @@ pub async fn atender() {
     mostrar_prompt();
 
     loop {
-        match crate::teclado::proxima_tecla().await {
-            '\n' => {
-                confirmar(Origem::Pessoa);
-            }
-            '\u{8}' => apagar(),
-            // Só o que é texto entra na linha. Teclas sem caractere já não
-            // chegam aqui, mas o controle que sobra — um tab, por exemplo —
-            // desalinharia a conta entre o que está no buffer e o que está
-            // desenhado.
-            c if aceito(c) => {
-                let coube = digitar(c);
-                if !coube {
-                    crate::serial_println!();
-                    crate::serial_println!("linha longa demais; ate {} caracteres", LINHA_MAX);
-                    com_linha(|l| l.tam = 0);
-                    mostrar_prompt();
-                }
-            }
-            _ => {}
+        tratar_tecla(crate::teclado::proxima_tecla().await);
+    }
+}
+
+/// O que uma tecla faz, quando chega a quem está na frente da máquina.
+///
+/// Separado do laço para a suíte alcançá-lo: em modo de teste não há
+/// executor, e sem isto o caminho da pessoa só seria exercitado pela fumaça.
+pub fn tratar_tecla(c: char) {
+    match c {
+        '\n' => {
+            confirmar(Origem::Pessoa);
         }
+        '\u{8}' => apagar(),
+        // F1 é o botão da barra superior. Pelo mesmo caminho do `press` do
+        // agente — [`crate::ui::agir`] —, com a outra origem: é o que faz o
+        // log dizer quem apertou, e o que impede os dois de divergirem.
+        crate::teclado::F1 => {
+            let _ = crate::ui::agir(
+                crate::ui::ID_DO_BOTAO_LIMPAR,
+                crate::ui::Acao::Pressionar,
+                None,
+                Origem::Pessoa,
+            );
+        }
+        // Só o que é texto entra na linha. Teclas sem caractere já não
+        // chegam aqui, mas o controle que sobra — um tab, por exemplo —
+        // desalinharia a conta entre o que está no buffer e o que está
+        // desenhado.
+        c if aceito(c) => {
+            let coube = digitar(c);
+            if !coube {
+                crate::serial_println!();
+                crate::serial_println!("linha longa demais; ate {} caracteres", LINHA_MAX);
+                com_linha(|l| l.tam = 0);
+                mostrar_prompt();
+            }
+        }
+        _ => {}
     }
 }
 
@@ -140,7 +159,6 @@ fn prompt_em(l: &mut Linha) {
 }
 
 /// Acrescenta um caractere à linha e o desenha. Falso se ele não coube.
-#[cfg(not(feature = "modo-teste"))]
 fn digitar(c: char) -> bool {
     com_linha(|l| digitar_em(l, c))
 }
@@ -164,7 +182,6 @@ fn digitar_em(l: &mut Linha, c: char) -> bool {
 /// `\u{8} \u{8}`, e não só `\u{8}`: o console da tela apaga a célula com o
 /// primeiro, mas um terminal do outro lado da COM1 só volta o cursor, e o
 /// espaço é o que cobre a letra nele.
-#[cfg(not(feature = "modo-teste"))]
 fn apagar() {
     com_linha(apagar_em);
 }
@@ -174,6 +191,27 @@ fn apagar_em(l: &mut Linha) {
         l.tam -= 1;
         crate::serial_print!("\u{8} \u{8}");
     }
+}
+
+/// Limpa o console e recomeça do topo, com a linha que estava sendo
+/// digitada redesenhada no prompt.
+///
+/// É o que o botão da barra superior faz. O que estava digitado não se
+/// perde: limpar a tela não é desistir do comando, e uma pessoa que apertou
+/// o botão no meio de uma linha espera encontrá-la ali.
+///
+/// Tudo na seção crítica da linha, pelo motivo escrito junto de [`LINHA`]:
+/// um registro que chegasse entre a limpeza e o prompt seria desenhado por
+/// [`por_cima`] contando com um prompt que ainda não existe.
+pub fn limpar() {
+    com_linha(|l| {
+        crate::tela::banner();
+        if l.inicio.is_some() {
+            prompt_em(l);
+            crate::serial_print!("{}", core::str::from_utf8(&l.bytes[..l.tam]).unwrap_or(""));
+        }
+    });
+    crate::ui::mudou();
 }
 
 /// Onde o campo da linha de comando começa na tela, em células, se o

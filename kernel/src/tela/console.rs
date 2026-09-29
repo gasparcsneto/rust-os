@@ -54,8 +54,8 @@ use crate::tela::{Cor, Tela};
 
 /// O peso e a altura dos glifos.
 ///
-/// Uma altura só, e a menor que a fonte oferece. Uma tela de 720 linhas dá 44
-/// linhas de texto com esta, o que é um relatório de boot inteiro sem
+/// Uma altura só, e a menor que a fonte oferece. Uma tela de 720 linhas dá 42
+/// linhas de texto com esta, abaixo da barra superior, o que é um relatório de boot inteiro sem
 /// recomeçar; alturas maiores existiriam para serem escolhidas por alguém, e
 /// não há ninguém para escolher.
 const PESO: FontWeight = FontWeight::Regular;
@@ -63,10 +63,12 @@ const ALTURA: RasterHeight = RasterHeight::Size16;
 
 /// A margem entre o texto e a borda da tela.
 ///
-/// Vertical maior que a faixa de acento do banner (3 px), para que a primeira
-/// linha não encoste nela.
+/// No topo, abaixo da barra superior, que fica por cima dele: a primeira
+/// linha começa oito pixels depois de onde a barra acaba. Embaixo e dos
+/// lados, oito pixels da borda.
 const MARGEM_X: u32 = 8;
-const MARGEM_Y: u32 = 8;
+const MARGEM_Y: u32 = crate::tela::ALTURA_DA_BARRA + 8;
+const MARGEM_DE_BAIXO: u32 = 8;
 
 /// O que o glifo desenha, e sobre o quê.
 const TINTA: Cor = Cor::nova(0xD8, 0xDE, 0xE8);
@@ -87,7 +89,7 @@ static CURSOR_Y: AtomicU32 = AtomicU32::new(MARGEM_Y);
 
 /// O maior console que a grade de texto acompanha, em caracteres.
 ///
-/// Folgado para as telas que existem aqui — 1280x800 dá 180 colunas por 49
+/// Folgado para as telas que existem aqui — 1280x800 dá 180 colunas por 47
 /// linhas com esta fonte — e para uma de 1920x1080. O que passar disto é
 /// desenhado e não guardado; [`texto_completo`] diz quando isso aconteceu.
 const MAX_COLUNAS: usize = 256;
@@ -231,13 +233,14 @@ fn colunas_da_tela(tela: &Tela, largura_do_glifo: u32) -> u32 {
 /// da volta anterior, e uma pessoa leria as duas como se fossem a mesma
 /// sequência.
 fn recomecar_se_encheu(tela: &Tela, y: u32, altura_do_glifo: u32) -> u32 {
-    if y + altura_do_glifo <= tela.altura.saturating_sub(MARGEM_Y) {
+    if y + altura_do_glifo <= tela.altura.saturating_sub(MARGEM_DE_BAIXO) {
         return y;
     }
-    // Só a região do console, e não a tela inteira. A faixa de acento sob o
-    // topo é do banner, e apagá-la tira da tela o indicador de que há um
-    // kernel vivo — que é justamente o que uma pessoa olha primeiro.
-    let topo = crate::tela::ALTURA_DO_ACENTO;
+    // Só a região do console, e não a tela inteira: a faixa da barra
+    // superior fica de fora. Com a barra por cima ela não aparece, e limpá-la
+    // seria recompor a barra à toa; sem a barra, é onde o banner desenhou o
+    // acento que diz que há um kernel vivo.
+    let topo = crate::tela::ALTURA_DA_BARRA;
     tela.retangulo(0, topo, tela.largura, tela.altura - topo, PAPEL);
     limpar_grade();
     MARGEM_Y
@@ -280,6 +283,59 @@ fn desenhar(tela: &Tela, c: char, x: u32, y: u32) {
             );
         }
     }
+}
+
+/// Desenha `texto` numa memória de pixels, no formato das superfícies.
+///
+/// Para quem desenha fora do console — a barra superior, numa camada do
+/// compositor — com a mesma fonte e a mesma mistura. Uma segunda cópia da
+/// fonte seria uma segunda resposta para "como uma letra fica na tela".
+///
+/// Ao contrário do console, pinta também os pixels sem tinta, com `papel`:
+/// uma camada não tem o fundo já pintado embaixo, e redesenhar um texto
+/// sobre o anterior — o relógio da barra — precisa apagar o que havia.
+/// Recorta no que couber em `largura` e no fim da memória. Devolve onde o
+/// texto acabou.
+pub fn desenhar_texto_em(
+    pixels: &mut [u32],
+    largura: u32,
+    x: u32,
+    y: u32,
+    texto: &str,
+    tinta: Cor,
+    papel: Cor,
+) -> u32 {
+    let (largura_do_glifo, _) = tamanho_do_caractere();
+    let mut x = x;
+    for c in texto.chars() {
+        let glifo = get_raster(c, PESO, ALTURA).or_else(|| get_raster('?', PESO, ALTURA));
+        if let Some(glifo) = glifo {
+            for (linha, cobertura) in glifo.raster().iter().enumerate() {
+                for (coluna, &c) in cobertura.iter().enumerate() {
+                    let (px, py) = (x + coluna as u32, y + linha as u32);
+                    if px >= largura {
+                        continue;
+                    }
+                    let i = py as usize * largura as usize + px as usize;
+                    if let Some(pixel) = pixels.get_mut(i) {
+                        *pixel = misturar(papel, tinta, c).para_u32();
+                    }
+                }
+            }
+        }
+        x += largura_do_glifo;
+    }
+    x
+}
+
+/// A altura de uma linha de texto com esta fonte, em pixels.
+pub fn altura_do_texto() -> u32 {
+    tamanho_do_caractere().1
+}
+
+/// Quantos pixels `texto` ocupa na horizontal com esta fonte.
+pub fn largura_do_texto(texto: &str) -> u32 {
+    texto.chars().count() as u32 * tamanho_do_caractere().0
 }
 
 /// A cor de um pixel com cobertura parcial de tinta.
@@ -336,7 +392,8 @@ pub fn geometria() -> Option<Geometria> {
     let tela = crate::tela::tela()?;
     let (largura, altura) = tamanho_do_caractere();
     let colunas = colunas_da_tela(&tela, largura).min(MAX_COLUNAS as u32);
-    let linhas = (tela.altura.saturating_sub(2 * MARGEM_Y) / altura).min(MAX_LINHAS as u32);
+    let linhas =
+        (tela.altura.saturating_sub(MARGEM_Y + MARGEM_DE_BAIXO) / altura).min(MAX_LINHAS as u32);
     Some(Geometria {
         colunas,
         linhas,

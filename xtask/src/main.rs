@@ -4072,6 +4072,7 @@ fn conversar(
     sob_teclado(monitor, teclado, &mut escrita, &mut leitor)?;
     sob_interpretador(monitor, &mut escrita, &mut leitor)?;
     sob_arvore(&mut escrita, &mut leitor)?;
+    sob_barra(monitor, &mut escrita, &mut leitor)?;
     sob_tela(monitor, tela_no_monitor, &mut escrita, &mut leitor)?;
     sob_fragmento(&mut escrita, &mut leitor)?;
     // Por último, porque não há volta: depois dela o kernel só responde o
@@ -4613,6 +4614,102 @@ fn sob_arvore(escrita: &mut UnixStream, leitor: &mut BufReader<UnixStream>) -> R
 
     println!("  [arvore] ok  set_value, confirm e a resposta lida de volta pela arvore");
     Ok(())
+}
+
+/// O botão da barra superior, pressionado pelos dois caminhos.
+///
+/// O agente pede `press` pela árvore; a pessoa aperta F1 no teclado da
+/// máquina — pelo `sendkey` do monitor, que entrega a tecla ao dispositivo
+/// como um teclado de verdade: o 8042 no x86, o virtio no ARM, o USB quando
+/// a fumaça roda com `--teclado usb`. Os dois têm de chegar à mesma ação, e
+/// o log tem de dizer quem foi em cada vez.
+fn sob_barra(
+    monitor: &Path,
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+) -> Result<(), String> {
+    println!("[xtask] fumaça: o botão da barra, pelo agente e pela pessoa");
+    const BOTAO: u32 = 5;
+
+    let mut pedir = |id: u32, metodo: &str, params: &str| -> Result<String, String> {
+        escrita
+            .write_all(
+                format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"{metodo}","params":{params}}}"#)
+                    .as_bytes(),
+            )
+            .and_then(|()| escrita.write_all(b"\n"))
+            .and_then(|()| escrita.flush())
+            .map_err(|e| format!("barra: falha ao pedir `{metodo}`: {e}"))?;
+        let resposta = ler_resposta(leitor).map_err(|e| format!("barra: {e}"))?;
+        if !e_a_resposta(&resposta, id) {
+            return Err(format!(
+                "barra: veio a resposta de outro pedido\n  {resposta}"
+            ));
+        }
+        Ok(resposta)
+    };
+
+    let arvore = pedir(7801, "ui.tree", "{}")?;
+    let botao = format!(r#""id":{BOTAO},"role":"button""#);
+    if !arvore.contains(r#""role":"menu_bar""#) || !arvore.contains(&botao) {
+        return Err(format!(
+            "barra: a arvore nao mostra a barra com o botao\n  {arvore}"
+        ));
+    }
+
+    // O relógio anda sozinho. Quem o redesenha é uma tarefa do executor, que
+    // só existe no kernel de produção: a suíte chama o redesenho à mão, e
+    // esta é a única conferência de que a tarefa roda.
+    let relogio = |arvore: &str| {
+        let resto = &arvore[arvore.find(r#""label":"tempo ligado""#)?..];
+        valor_de(resto, r#""value":"#)
+    };
+    let antes = relogio(&arvore)
+        .ok_or_else(|| format!("barra: a arvore nao mostra o relogio\n  {arvore}"))?;
+    std::thread::sleep(Duration::from_millis(2200));
+    let depois = relogio(&pedir(7810, "ui.tree", "{}")?).unwrap_or_default();
+    if antes == depois {
+        return Err(format!("barra: o relogio parou em `{antes}`"));
+    }
+    println!("  [barra] ok  o relogio anda sozinho: `{antes}` -> `{depois}`");
+
+    let r = pedir(
+        7802,
+        "ui.act",
+        &format!(r#"{{"id":{BOTAO},"action":"press"}}"#),
+    )?;
+    if !r.contains(r#""ok":true"#) {
+        return Err(format!("barra: o press do agente foi recusado\n  {r}"));
+    }
+    let agente = format!("agente: press no elemento {BOTAO}");
+    let log = pedir(7803, "log.tail", r#"{"count":16}"#)?;
+    if !log.contains(&agente) {
+        return Err(format!(
+            "barra: o log nao registrou o press do agente\n  {log}"
+        ));
+    }
+    println!("  [barra] ok  press pelo agente, pela arvore");
+
+    let mut mon = UnixStream::connect(monitor)
+        .map_err(|e| format!("barra: o monitor nao aceitou conexao: {e}"))?;
+    mon.write_all(b"sendkey f1\n")
+        .and_then(|()| mon.flush())
+        .map_err(|e| format!("barra: falha ao mandar F1: {e}"))?;
+
+    let pessoa = format!("pessoa: press no elemento {BOTAO}");
+    let limite = std::time::Instant::now() + Duration::from_secs(5);
+    let mut ultima = String::new();
+    let mut id = 7804;
+    while std::time::Instant::now() < limite {
+        ultima = pedir(id, "log.tail", r#"{"count":16}"#)?;
+        id += 1;
+        if ultima.contains(&pessoa) {
+            println!("  [barra] ok  F1 pela pessoa, pelo teclado da maquina");
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err(format!("barra: F1 nao pressionou o botao\n  {ultima}"))
 }
 
 fn sob_interpretador(

@@ -275,6 +275,7 @@ pub fn fatal(nome: &'static str, pc: u64, endereco: Option<u64>, codigo: u64) ->
         crate::grafico::memoria::destravar();
         crate::virtio::gpu::destravar();
         crate::interpretador::destravar();
+        crate::barra::destravar();
     }
 
     // Para o escalonador antes de qualquer outra coisa. Com multitarefa

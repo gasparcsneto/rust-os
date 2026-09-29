@@ -52,6 +52,12 @@ pub enum Papel {
     /// Uma camada do compositor acima do console: o que um dia será uma
     /// janela, e hoje só a suíte cria.
     Janela,
+    /// A barra no topo da tela — `AXMenuBar`.
+    BarraSuperior,
+    /// Algo que se aciona — `AXButton`.
+    Botao,
+    /// Texto que só se lê, dentro de outro elemento — `AXStaticText`.
+    Texto,
 }
 
 impl Papel {
@@ -61,6 +67,9 @@ impl Papel {
             Papel::AreaDeTexto => "text_area",
             Papel::CampoDeTexto => "text_field",
             Papel::Janela => "window",
+            Papel::BarraSuperior => "menu_bar",
+            Papel::Botao => "button",
+            Papel::Texto => "static_text",
         }
     }
 }
@@ -135,6 +144,10 @@ impl Origem {
 pub const ID_DA_TELA: u32 = 1;
 pub const ID_DO_CONSOLE: u32 = 2;
 pub const ID_DA_LINHA_DE_COMANDO: u32 = 3;
+pub const ID_DA_BARRA: u32 = 4;
+pub const ID_DO_BOTAO_LIMPAR: u32 = 5;
+pub const ID_DO_NOME: u32 = 6;
+pub const ID_DO_RELOGIO: u32 = 7;
 pub const ID_DAS_CAMADAS: u32 = 1000;
 
 /// O identificador na árvore de uma camada do compositor.
@@ -184,7 +197,7 @@ pub fn moldura_da_tela() -> Option<Moldura> {
 /// A moldura do console: a região que ele limpa e onde escreve.
 pub fn moldura_do_console() -> Option<Moldura> {
     let tela = crate::tela::tela()?;
-    let topo = crate::tela::ALTURA_DO_ACENTO;
+    let topo = crate::tela::ALTURA_DA_BARRA;
     Some(Moldura {
         x: 0,
         y: topo,
@@ -223,6 +236,7 @@ pub fn moldura_da_linha_de_comando() -> Option<Moldura> {
 pub fn acoes_de(id: u32) -> &'static [Acao] {
     match id {
         ID_DA_LINHA_DE_COMANDO => &[Acao::Confirmar, Acao::Cancelar, Acao::DefinirValor],
+        ID_DO_BOTAO_LIMPAR => &[Acao::Pressionar],
         _ => &[],
     }
 }
@@ -234,9 +248,15 @@ pub fn existe(id: u32) -> bool {
         ID_DA_LINHA_DE_COMANDO => {
             crate::tela::tela().is_some() && crate::interpretador::inicio_do_campo().is_some()
         }
+        ID_DA_BARRA | ID_DO_BOTAO_LIMPAR | ID_DO_NOME | ID_DO_RELOGIO => crate::barra::ativa(),
         id if id > ID_DAS_CAMADAS => {
+            // A camada da barra não é uma janela: ela está na árvore com o
+            // papel dela, e não uma segunda vez como camada.
+            let barra = crate::barra::camada();
             let mut achou = false;
-            crate::grafico::camadas(|c| achou |= id_da_camada(c.id) == id);
+            crate::grafico::camadas(|c| {
+                achou |= Some(c.id) != barra && id_da_camada(c.id) == id;
+            });
             achou
         }
         _ => false,
@@ -252,6 +272,8 @@ pub enum Efeito {
     /// A linha foi executada — com o nome do comando, ou vazia se não havia
     /// nada para executar.
     Executado(alloc::string::String),
+    /// O botão foi acionado.
+    Pressionado,
 }
 
 /// Age sobre um elemento, pelo mesmo caminho de quem está na frente da
@@ -323,7 +345,11 @@ fn executar(
             Ok(Efeito::Cancelado)
         }
         Acao::Confirmar => Ok(Efeito::Executado(crate::interpretador::confirmar(origem))),
-        // Nenhum elemento de hoje aceita, e a conferência acima já recusou.
-        Acao::Pressionar => Err("o elemento nao aceita esta acao"),
+        // Só o botão da barra aceita, e a conferência acima já recusou os
+        // outros.
+        Acao::Pressionar => {
+            crate::barra::pressionar();
+            Ok(Efeito::Pressionado)
+        }
     }
 }

@@ -33,12 +33,24 @@ pub mod console;
 
 /// Altura do traço de acento que o banner desenha sob o topo da tela.
 ///
+/// Com compositor, a barra superior fica por cima dele, e o indicador de
+/// kernel vivo passa a ser a linha de acento da barra.
+///
 /// Mora aqui, e não dentro de [`banner`], porque o console de texto precisa
 /// saber onde ele acaba: a faixa é do banner, e limpar a tela inteira para
 /// recomeçar uma página de texto apagaria o indicador de que há um kernel
 /// vivo. Foi o que aconteceu — o caso `tela: o banner esta na tela de
 /// verdade` reprovou assim que o console passou a escrever.
 pub(crate) const ALTURA_DO_ACENTO: u32 = 3;
+
+/// Altura da barra superior, que o compositor põe por cima do topo da tela.
+///
+/// Mora aqui pelo mesmo motivo da faixa de acento: o console precisa saber
+/// onde ela acaba, para começar abaixo dela e para não limpar por baixo
+/// dela à toa. Sem compositor não há barra, e a faixa fica vazia — o
+/// console não muda de lugar conforme ela existe ou não, e o texto de uma
+/// máquina e da outra cai nas mesmas linhas.
+pub(crate) const ALTURA_DA_BARRA: u32 = 24;
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 

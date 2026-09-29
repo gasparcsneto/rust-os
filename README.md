@@ -193,6 +193,7 @@ kernel/src/
 ├── mmio.rs          como o kernel alcança a memória de um dispositivo
 ├── heap.rs          alocador do kernel: lista livre ordenada com fusão
 ├── interpretador.rs operar o Duke digitando
+├── barra.rs         a barra superior: o nome, o primeiro botão e o tempo ligado
 ├── ui.rs            a árvore semântica: o que está na tela, e o que se faz com cada coisa
 ├── teclado.rs       o que uma pessoa digita chega ao kernel
 ├── pci.rs           enumeração do barramento PCI

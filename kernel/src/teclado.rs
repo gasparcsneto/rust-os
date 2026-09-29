@@ -75,6 +75,46 @@ mod codigo {
     pub const SHIFT_ESQ: u8 = 42;
     pub const SHIFT_DIR: u8 = 54;
     pub const ESPACO: u8 = 57;
+    pub const F1: u8 = 59;
+    pub const F10: u8 = 68;
+    pub const F11: u8 = 87;
+    pub const F12: u8 = 88;
+}
+
+/// O caractere que uma tecla de função produz na fila do interpretador.
+///
+/// # Por que um caractere, e não outra fila
+///
+/// Porque a fila do teclado já tem dono — o interpretador — e já é o caminho
+/// de quem está na frente da máquina. Uma tecla de função precisa chegar a
+/// ele na ordem em que foi apertada em relação às letras, e fora do handler
+/// de interrupção: o que ela aciona pode ser limpar a tela inteira, e isso
+/// não é trabalho para dentro de uma interrupção.
+///
+/// Os valores são os que a Apple usa para as teclas de função
+/// (`NSF1FunctionKey` é U+F704): área de uso privado do Unicode, que nenhum
+/// texto de verdade contém. Não entram no histórico que `keyboard.read`
+/// devolve, que é o que foi **digitado**.
+pub const fn tecla_de_funcao(n: u8) -> char {
+    // De U+F704 a U+F70F é sempre um escalar válido, e o `None` não
+    // acontece; mas `char::from_u32` é o que existe num `const fn`.
+    match char::from_u32(0xF704 + n as u32 - 1) {
+        Some(c) => c,
+        None => '\u{F704}',
+    }
+}
+
+/// F1: a tecla do botão da barra superior.
+pub const F1: char = tecla_de_funcao(1);
+
+/// Qual tecla de função um código é, de 1 a 12.
+fn funcao(codigo_da_tecla: u8) -> Option<u8> {
+    match codigo_da_tecla {
+        codigo::F1..=codigo::F10 => Some(codigo_da_tecla - codigo::F1 + 1),
+        codigo::F11 => Some(11),
+        codigo::F12 => Some(12),
+        _ => None,
+    }
 }
 
 /// O que cada código produz sem shift, na ordem em que os códigos crescem.
@@ -142,6 +182,14 @@ pub fn evento(codigo_da_tecla: u8, pressionada: bool) {
         // gera texto, e tratar os dois geraria cada letra em dobro.
         _ if !pressionada => return,
         _ => {}
+    }
+
+    if let Some(n) = funcao(codigo_da_tecla) {
+        PRESSIONADAS.fetch_add(1, Ordering::Relaxed);
+        let _ = TECLADO.enfileirar(tecla_de_funcao(n));
+        #[cfg(not(feature = "modo-teste"))]
+        despertar();
+        return;
     }
 
     let Some(c) = caractere(codigo_da_tecla) else {

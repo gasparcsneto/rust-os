@@ -63,6 +63,7 @@ extern crate alloc;
 
 mod agent;
 mod arch;
+mod barra;
 mod fios;
 mod frames;
 mod grafico;
@@ -339,6 +340,8 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     // Depois das duas, e não dentro de uma: pela UEFI a tela vem da entrega,
     // pelo `-kernel` ela vem do `bochs`, e a pilha não tem por que saber qual.
     grafico::iniciar();
+    // E a barra superior, que é uma camada dele.
+    barra::iniciar();
 
     virtio::blk::init();
     virtio::net::init();
@@ -408,6 +411,8 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
         executor.lancar(tarefas::Tarefa::nova("pulso", pulso()));
         // E o interpretador, que atende quem estiver na frente da máquina.
         executor.lancar(tarefas::Tarefa::nova("console", interpretador::atender()));
+        // E o relógio da barra superior, que se redesenha a cada segundo.
+        executor.lancar(tarefas::Tarefa::nova("barra", barra::relogio()));
         executor.rodar()
     } else {
         log_error!("agent", "nenhuma porta serial para o canal do agente");

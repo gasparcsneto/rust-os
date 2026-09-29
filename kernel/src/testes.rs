@@ -1192,19 +1192,22 @@ fn compositor_camada_na_borda() -> Resultado {
         return sem_framebuffer();
     };
     sem_intrusos(|| {
+        // No canto de baixo, que é do console: o de cima é da barra.
+        //
         // Cada pixel do canto diz de onde veio na camada: verde é a coluna,
         // azul é a linha. Uma cor só esconderia um deslocamento errado — todo
         // pixel da camada seria igual a qualquer outro.
-        let canto = crate::grafico::compositor::Camada::nova("canto", -20, -10, 40, 30)?;
+        let h = fisica.altura;
+        let canto = crate::grafico::compositor::Camada::nova("canto", -20, h as i32 - 20, 40, 30)?;
         canto.pintar(|pixels, largura, _| {
             for (i, p) in pixels.iter_mut().enumerate() {
                 let (x, y) = (i as u32 % largura, i as u32 / largura);
                 *p = crate::tela::Cor::nova(0x80, x as u8, y as u8).para_u32();
             }
         })?;
-        mostra_a_cor(crate::tela::Cor::nova(0x80, 20, 10), &[(0, 0)])?;
-        mostra_a_cor(crate::tela::Cor::nova(0x80, 39, 29), &[(19, 19)])?;
-        mostra_o_console(&[(20, 0), (0, 20)])?;
+        mostra_a_cor(crate::tela::Cor::nova(0x80, 20, 0), &[(0, h - 20)])?;
+        mostra_a_cor(crate::tela::Cor::nova(0x80, 39, 19), &[(19, h - 1)])?;
+        mostra_o_console(&[(20, h - 1), (0, h - 21)])?;
         let longe = camada_de_cor("longe", fisica.largura as i32 + 10, 0, 16, 16, VERDE)?;
         drop(longe);
         let direita = camada_de_cor(
@@ -1218,7 +1221,11 @@ fn compositor_camada_na_borda() -> Resultado {
         mostra_a_cor(VERDE, &[(fisica.largura - 1, fisica.altura - 1)])?;
         drop(direita);
         drop(canto);
-        mostra_o_console(&[(0, 0), (19, 19), (fisica.largura - 1, fisica.altura - 1)])
+        mostra_o_console(&[
+            (0, h - 20),
+            (19, h - 1),
+            (fisica.largura - 1, fisica.altura - 1),
+        ])
     })
 }
 
@@ -1270,6 +1277,222 @@ fn agente_ve_as_camadas() -> Resultado {
         return Err("a arvore seguiu mostrando uma camada que saiu");
     }
     Ok(())
+}
+
+// ===========================================================================
+// A barra superior
+// ===========================================================================
+
+/// A barra está no topo da tela, e o console começa abaixo dela.
+fn barra_esta_no_topo() -> Resultado {
+    let Some(fisica) = crate::tela::tela_fisica() else {
+        return sem_framebuffer();
+    };
+    if !crate::barra::ativa() {
+        return Err("com compositor, a barra superior nao subiu");
+    }
+    let altura = crate::tela::ALTURA_DA_BARRA;
+    // O fundo dela, a linha de acento embaixo, e tinta onde está o nome.
+    mostra_a_cor(crate::barra::FUNDO, &[(fisica.largura / 2, 1)])?;
+    mostra_a_cor(
+        crate::tela::Cor::ACENTO,
+        &[(0, altura - 1), (fisica.largura - 1, altura - 2)],
+    )?;
+    let nome = crate::barra::moldura_do_nome().ok_or("a barra nao tem o nome")?;
+    let mut tinta = false;
+    for y in nome.y..nome.y + nome.altura {
+        for x in nome.x..nome.x + nome.largura {
+            tinta |= pixel_na_tela(x, y)? != crate::barra::FUNDO;
+        }
+    }
+    if !tinta {
+        return Err("o nome na barra nao foi desenhado");
+    }
+    // O console, abaixo dela.
+    let g = crate::tela::console::geometria().ok_or("sem geometria")?;
+    if g.margem_y < altura {
+        return Err("o console comeca debaixo da barra");
+    }
+    Ok(())
+}
+
+/// O relógio da barra anda, e a árvore publica o que ele mostra.
+fn barra_o_relogio_anda() -> Resultado {
+    if !crate::barra::ativa() {
+        return sem_framebuffer();
+    }
+    if crate::barra::texto_do_relogio(3723) != "ligado 1:02:03" {
+        return Err("o relogio nao formata horas, minutos e segundos");
+    }
+    // Espera o segundo virar, e o relógio tem de ser redesenhado.
+    let agora = crate::tempo::uptime_ms() / 1000;
+    let limite = crate::tempo::uptime_ms() + 2_500;
+    while crate::tempo::uptime_ms() / 1000 == agora {
+        if crate::tempo::uptime_ms() > limite {
+            return Err("o tempo nao andou");
+        }
+        core::hint::spin_loop();
+    }
+    if !crate::barra::atualizar_relogio() {
+        return Err("o segundo virou e o relogio nao foi redesenhado");
+    }
+    let (moldura, texto) = crate::barra::relogio_na_tela().ok_or("a barra nao tem relogio")?;
+    let esperado = crate::barra::texto_do_relogio(crate::tempo::uptime_ms() / 1000);
+    let anterior = crate::barra::texto_do_relogio(crate::tempo::uptime_ms() / 1000 - 1);
+    if texto != esperado && texto != anterior {
+        crate::log_error!("teste", "relogio: {:?}, esperado {:?}", texto, esperado);
+        return Err("o relogio na tela nao e o tempo ligado");
+    }
+    // E o que a árvore diz é o que está desenhado: o texto, pela mesma fonte,
+    // pixel a pixel na moldura. Sem isto a árvore poderia publicar uma hora
+    // que a tela não mostra — medido, um relógio que não redesenhava passava.
+    let mut esperado_px =
+        alloc::vec![crate::barra::FUNDO.para_u32(); (moldura.largura * moldura.altura) as usize];
+    crate::tela::console::desenhar_texto_em(
+        &mut esperado_px,
+        moldura.largura,
+        0,
+        0,
+        &texto,
+        crate::barra::TEXTO,
+        crate::barra::FUNDO,
+    );
+    for y in 0..moldura.altura {
+        for x in 0..moldura.largura {
+            let esperado =
+                crate::tela::Cor::de_u32(esperado_px[(y * moldura.largura + x) as usize]);
+            if pixel_na_tela(moldura.x + x, moldura.y + y)? != esperado {
+                return Err("o relogio desenhado nao e o que a arvore publica");
+            }
+        }
+    }
+    let arvore = chamar("ui.tree", "{}")?;
+    if !arvore.contains(&alloc::format!("\"value\":\"{}\"", texto)) {
+        return Err("a arvore nao publica o relogio que esta desenhado");
+    }
+    Ok(())
+}
+
+/// O agente pressiona o botão: o console é limpo, e o log diz que foi ele.
+fn barra_press_do_agente_limpa() -> Resultado {
+    if !crate::barra::ativa() {
+        return sem_framebuffer();
+    }
+    const MARCA: &str = "marca-antes-de-limpar";
+    crate::serial_println!("{}", MARCA);
+    let antes = crate::barra::pressionado();
+
+    let arvore = chamar("ui.tree", "{}")?;
+    let botao = alloc::format!(
+        "\"id\":{},\"role\":\"button\",\"label\":\"Limpar\"",
+        crate::ui::ID_DO_BOTAO_LIMPAR
+    );
+    if !arvore.contains(&botao) || !arvore.contains("\"actions\":[\"press\"]") {
+        crate::log_error!("teste", "arvore: {}", arvore);
+        return Err("a arvore nao mostra o botao Limpar aceitando press");
+    }
+
+    let r = chamar(
+        "ui.act",
+        &alloc::format!(
+            r#"{{"id":{},"action":"press"}}"#,
+            crate::ui::ID_DO_BOTAO_LIMPAR
+        ),
+    )?;
+    if Json(r.as_bytes()).member("ok").and_then(|v| v.as_bool()) != Some(true) {
+        crate::log_error!("teste", "resposta: {}", r);
+        return Err("o press do agente foi recusado");
+    }
+    if crate::barra::pressionado() != antes + 1 {
+        return Err("o press nao chegou ao botao");
+    }
+    let arvore = chamar("ui.tree", "{}")?;
+    let (console, _) = console_da_arvore(&arvore)?;
+    if texto_do_console(&console)?.contains(MARCA) {
+        return Err("o console nao foi limpo");
+    }
+    if !log_tem(&alloc::format!(
+        "agente: press no elemento {}",
+        crate::ui::ID_DO_BOTAO_LIMPAR
+    )) {
+        return Err("o log nao registrou o press com a origem do agente");
+    }
+    Ok(())
+}
+
+/// F1 da pessoa passa pelo mesmo caminho do press do agente.
+///
+/// Do evento de tecla — o mesmo que os três drivers de teclado entregam —
+/// até a ação, pela fila e pelo interpretador. Só o laço que espera a tecla
+/// fica de fora: em modo de teste não há executor.
+fn barra_f1_da_pessoa_pressiona() -> Resultado {
+    if !crate::barra::ativa() {
+        return sem_framebuffer();
+    }
+    crate::teclado::esvaziar();
+    while crate::teclado::observar().is_some() {}
+    let antes = crate::barra::pressionado();
+
+    crate::teclado::evento(59, true);
+    crate::teclado::evento(59, false);
+    let tecla = crate::teclado::ler().ok_or("F1 nao chegou a fila do interpretador")?;
+    if tecla != crate::teclado::F1 {
+        return Err("F1 chegou como outra tecla");
+    }
+    if crate::teclado::observar().is_some() {
+        return Err("F1 entrou no historico do que foi digitado");
+    }
+    crate::interpretador::tratar_tecla(tecla);
+
+    if crate::barra::pressionado() != antes + 1 {
+        return Err("F1 nao pressionou o botao");
+    }
+    if !log_tem(&alloc::format!(
+        "pessoa: press no elemento {}",
+        crate::ui::ID_DO_BOTAO_LIMPAR
+    )) {
+        return Err("o log nao registrou o press com a origem da pessoa");
+    }
+    // E o USB traduz F1 e F12 para os mesmos códigos.
+    if crate::usb::hid::traduzir(0x3A) != Some(59) || crate::usb::hid::traduzir(0x45) != Some(88) {
+        return Err("o teclado USB nao traduz as teclas de funcao");
+    }
+    Ok(())
+}
+
+/// Limpar não perde o que estava sendo digitado.
+fn barra_limpar_guarda_a_linha() -> Resultado {
+    if !crate::barra::ativa() {
+        return sem_framebuffer();
+    }
+    crate::interpretador::ativar_para_teste();
+    let resultado = (|| {
+        crate::interpretador::definir("limpo")?;
+        // Direto, e não pelo botão: o botão registra no log, e o registro
+        // redesenha o prompt por conta própria — medido, um `limpar` que não
+        // o redesenhasse passaria por aqui se o caso fosse pelo botão.
+        crate::interpretador::limpar();
+        let arvore = chamar("ui.tree", "{}")?;
+        let (console, linha) = console_da_arvore(&arvore)?;
+        let texto = texto_do_console(&console)?;
+        if texto.rsplit('\n').next() != Some("duke> limpo") {
+            crate::log_error!("teste", "console: {:?}", texto);
+            return Err("depois de limpar, a linha digitada nao esta no prompt");
+        }
+        let mut buffer = [0u8; 64];
+        let valor = linha
+            .and_then(|l| l.member("value"))
+            .and_then(|v| v.desescapar_em(&mut buffer));
+        if valor != Some("limpo") {
+            return Err("depois de limpar, a linha de comando perdeu o valor");
+        }
+        Ok(())
+    })();
+    crate::interpretador::desativar_para_teste();
+    // Sem deixar prompt para trás: os casos da árvore que vêm depois contam
+    // quantas vezes uma linha aparece no console.
+    crate::interpretador::limpar();
+    resultado
 }
 
 /// O agente vê a pilha gráfica pelo registro, com o adaptador e a tela certos.
@@ -6716,9 +6939,9 @@ fn ui_a_arvore_descreve_a_tela_que_existe() -> Resultado {
         .member("frame")
         .and_then(|m| m.member("y"))
         .and_then(|v| v.as_u64())
-        != Some(crate::tela::ALTURA_DO_ACENTO as u64)
+        != Some(crate::tela::ALTURA_DA_BARRA as u64)
     {
-        return Err("a moldura do console nao comeca abaixo da faixa do banner");
+        return Err("a moldura do console nao comeca abaixo da barra superior");
     }
     if linha.is_some() {
         return Err("a arvore publicou a linha de comando sem interpretador atendendo");
@@ -6954,6 +7177,12 @@ fn ui_registro_nao_parte_a_linha_digitada() -> Resultado {
     if crate::tela::tela().is_none() {
         return Ok(());
     }
+    // De uma página limpa. O console não rola: quando o registro cai na
+    // última linha, a página vira e leva ele junto, e a linha de cima deixa
+    // de ser o registro. Medido, depois que a barra superior tirou duas
+    // linhas da página. Isso é a dívida de rolar, escrita no cabeçalho do
+    // console; o que este caso confere é o `por_cima`.
+    crate::tela::banner();
     crate::interpretador::ativar_para_teste();
     let resultado = sem_intrusos(|| {
         crate::interpretador::definir("abc")?;
@@ -10167,6 +10396,26 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "agente: ve as camadas",
         f: agente_ve_as_camadas,
+    },
+    Caso {
+        nome: "barra: esta no topo",
+        f: barra_esta_no_topo,
+    },
+    Caso {
+        nome: "barra: o relogio anda",
+        f: barra_o_relogio_anda,
+    },
+    Caso {
+        nome: "barra: press do agente limpa",
+        f: barra_press_do_agente_limpa,
+    },
+    Caso {
+        nome: "barra: F1 da pessoa pressiona",
+        f: barra_f1_da_pessoa_pressiona,
+    },
+    Caso {
+        nome: "barra: limpar guarda a linha",
+        f: barra_limpar_guarda_a_linha,
     },
     Caso {
         nome: "video: a tela mora onde o monitor a mostra",
