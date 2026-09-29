@@ -9,25 +9,64 @@
 //! reservada para isso em cada arquitetura
 //! ([`crate::arch::BASE_DAS_SUPERFICIES`]).
 //!
-//! # Por que a reserva nunca anda para trás
+//! # Por que a faixa é devolvida, e não só reservada
 //!
-//! O mesmo arranjo de [`crate::mmio`]: um incremento, sem reaproveitar
-//! endereço virtual. Serve enquanto superfícies nascerem poucas vezes — hoje,
-//! a da tela e as da suíte. **Não** serve para um compositor que cria uma
-//! superfície por janela: no ARM a faixa é uma entrada de topo, 1 GiB, e
-//! telas de 4 MiB a esgotam depois de umas duzentas e cinquenta. O que acaba
-//! é o espaço virtual, e não a memória — os frames voltam ao alocador no
-//! `Drop`. Antes do compositor, a reserva precisa passar a devolver faixa.
+//! Porque um compositor cria e solta uma superfície a cada janela. A reserva
+//! era um incremento que nunca andava para trás — o arranjo de
+//! [`crate::mmio`], onde o que se mapeia fica para sempre —, e no ARM a faixa
+//! é uma entrada de topo, 1 GiB: telas de 4 MiB a esgotavam depois de umas
+//! duzentas e cinquenta criações, **com a memória sobrando**, porque os
+//! frames sempre voltaram ao alocador no `Drop`. O que acabava era o espaço
+//! virtual.
+//!
+//! Agora o `Drop` devolve também o endereço. A faixa guarda os trechos
+//! livres abaixo do topo, em ordem e já fundidos com os vizinhos, e a
+//! reserva pega o primeiro que caiba antes de subir o topo. Um trecho
+//! devolvido que encosta no topo faz o topo descer, em vez de virar um
+//! trecho livre — é o caso comum, o da superfície que nasce e morre em
+//! seguida.
+//!
+//! # Por que reaproveitar um endereço é seguro
+//!
+//! Porque desmapear invalida a tradução no TLB, nas duas arquiteturas, antes
+//! de o frame voltar ao alocador. A superfície seguinte que cair no mesmo
+//! endereço não enxerga as páginas da anterior. Com um núcleo só, invalidar
+//! o TLB local basta; quando houver outros, cada um terá a própria cópia da
+//! tradução, e desmapear vai precisar avisá-los.
+//!
+//! # Por que uma tabela fixa de trechos
+//!
+//! Porque ela não pode depender do heap, que tem 1 MiB e que uma falha de
+//! alocação no meio de um `Drop` não teria como devolver. E porque o tamanho
+//! dela tem um teto que se calcula: cada trecho livre abaixo do topo tem uma
+//! superfície viva logo acima, então há no máximo tantos trechos quantas
+//! superfícies vivas. [`MAX_TRECHOS`] trechos cobrem 256 superfícies vivas
+//! ao mesmo tempo — no ARM, a faixa inteira em telas de 4 MiB. Passar disso
+//! perde endereço virtual, e não memória, e fica no log e em
+//! [`perdidos`].
 //!
 //! Esgotar não corrompe nada: a reserva recusa, e a criação da superfície
 //! falha com um erro que diz o quê.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use spin::Mutex;
+
 use crate::arch::{BASE_DAS_SUPERFICIES, COBERTURA_DA_ENTRADA_DE_TOPO, Permissoes, TAMANHO_PAGINA};
 
-/// O próximo endereço livre da faixa.
-static PROXIMO: AtomicU64 = AtomicU64::new(BASE_DAS_SUPERFICIES);
+/// Quantos trechos livres a faixa acompanha. Ver o cabeçalho do módulo.
+pub const MAX_TRECHOS: usize = 256;
+
+/// O espaço virtual das superfícies: o que está livre abaixo do topo, e o
+/// topo.
+static FAIXA: Mutex<Faixa> = Mutex::new(Faixa::nova(
+    BASE_DAS_SUPERFICIES,
+    BASE_DAS_SUPERFICIES + COBERTURA_DA_ENTRADA_DE_TOPO,
+));
+
+/// Quantos bytes de endereço virtual se perderam por falta de vaga na tabela
+/// de trechos.
+static PERDIDOS: AtomicU64 = AtomicU64::new(0);
 
 /// Quantas superfícies estão vivas, e quantos bytes elas seguram.
 ///
@@ -59,9 +98,11 @@ impl Memoria {
         for indice in 0..paginas {
             let pagina = inicio + indice * TAMANHO_PAGINA;
             if let Err(motivo) = crate::paginacao::mapear_novo(pagina, Permissoes::DADOS) {
+                let mut todas_sairam = true;
                 for desfazer in 0..indice {
                     let pagina = inicio + desfazer * TAMANHO_PAGINA;
                     if let Err(porque) = crate::paginacao::desmapear_e_liberar(pagina) {
+                        todas_sairam = false;
                         crate::log_error!(
                             "grafico",
                             "a pagina {:#x} ficou presa depois de uma superficie que falhou: {}",
@@ -69,6 +110,12 @@ impl Memoria {
                             porque
                         );
                     }
+                }
+                // O endereço volta junto, e só se nada ficou mapeado nele: a
+                // próxima superfície que o recebesse tentaria mapear por cima
+                // de uma página que ainda está lá.
+                if todas_sairam {
+                    devolver(inicio, paginas * TAMANHO_PAGINA);
                 }
                 return Err(motivo);
             }
@@ -115,9 +162,11 @@ impl Memoria {
 
 impl Drop for Memoria {
     fn drop(&mut self) {
+        let mut todas_sairam = true;
         for indice in 0..self.paginas {
             let pagina = self.inicio + indice * TAMANHO_PAGINA;
             if let Err(porque) = crate::paginacao::desmapear_e_liberar(pagina) {
+                todas_sairam = false;
                 crate::log_error!(
                     "grafico",
                     "a pagina {:#x} de uma superficie nao voltou ao alocador: {}",
@@ -126,19 +175,39 @@ impl Drop for Memoria {
                 );
             }
         }
+        // Como no desfazer de `nova`: uma página que não saiu ainda está
+        // mapeada, e o endereço dela não pode ir para outra superfície.
+        if todas_sairam {
+            devolver(self.inicio, self.bytes());
+        }
         VIVAS.fetch_sub(1, Ordering::Relaxed);
         BYTES_VIVOS.fetch_sub(self.bytes(), Ordering::Relaxed);
     }
 }
 
-/// Onde a próxima superfície vai cair.
+/// Onde uma superfície de `bytes` cairia se fosse criada agora.
 ///
 /// Só para a suíte: é o que permite a um caso saber que páginas conferir
-/// depois de uma criação que falhou — o endereço reservado se perde junto
-/// com o erro, e o incremento não anda para trás.
+/// depois de uma criação que falhou, e a outro conferir que um endereço
+/// devolvido é o que a próxima reserva recebe.
 #[cfg(feature = "modo-teste")]
-pub fn proximo() -> u64 {
-    PROXIMO.load(Ordering::Acquire)
+pub fn onde_cairia(bytes: u64) -> Option<u64> {
+    let bytes = bytes.div_ceil(TAMANHO_PAGINA) * TAMANHO_PAGINA;
+    crate::arch::sem_interrupcoes(|| FAIXA.lock().onde_cairia(bytes))
+}
+
+/// O topo da faixa: acima dele, nada foi reservado. Para a suíte.
+#[cfg(feature = "modo-teste")]
+pub fn topo() -> u64 {
+    crate::arch::sem_interrupcoes(|| FAIXA.lock().topo)
+}
+
+/// Quantos bytes de endereço virtual se perderam por falta de vaga na tabela
+/// de trechos. Zero, enquanto houver menos superfícies vivas que
+/// [`MAX_TRECHOS`].
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub fn perdidos() -> u64 {
+    PERDIDOS.load(Ordering::Relaxed)
 }
 
 /// Quantas superfícies estão vivas, e quantos bytes elas seguram.
@@ -151,15 +220,169 @@ pub fn vivas() -> (u64, u64) {
 
 /// Reserva espaço virtual na faixa das superfícies.
 ///
-/// O mesmo `try_update` de [`crate::mmio`], pelo mesmo motivo: a reserva
-/// precisa ser atômica, e a alternativa seria uma tranca para proteger um
-/// `u64`.
+/// Com as interrupções mascaradas, como toda trava que o caminho fatal
+/// solta: um fio preemptado segurando esta deixaria qualquer outra criação
+/// de superfície girando.
 fn reservar(bytes: u64) -> Result<u64, &'static str> {
-    let fim_da_faixa = BASE_DAS_SUPERFICIES + COBERTURA_DA_ENTRADA_DE_TOPO;
-    PROXIMO
-        .try_update(Ordering::AcqRel, Ordering::Acquire, |atual| {
-            let fim = atual.checked_add(bytes)?;
-            (fim <= fim_da_faixa).then_some(fim)
-        })
-        .map_err(|_| "a faixa das superficies se esgotou")
+    crate::arch::sem_interrupcoes(|| FAIXA.lock().reservar(bytes))
+        .ok_or("a faixa das superficies se esgotou")
+}
+
+/// Devolve à faixa o endereço de uma superfície que saiu.
+fn devolver(inicio: u64, bytes: u64) {
+    if !crate::arch::sem_interrupcoes(|| FAIXA.lock().devolver(inicio, bytes)) {
+        PERDIDOS.fetch_add(bytes, Ordering::Relaxed);
+        crate::log_error!(
+            "grafico",
+            "{} KiB de endereco virtual em {:#x} se perderam: a tabela de trechos livres encheu",
+            bytes / 1024,
+            inicio
+        );
+    }
+}
+
+/// Solta a trava da faixa.
+///
+/// # Safety
+///
+/// Só pode ser chamada quando o kernel já está em falha irrecuperável e não
+/// há outro núcleo em execução. Ver [`crate::traps::fatal`].
+pub unsafe fn destravar() {
+    unsafe {
+        FAIXA.force_unlock();
+    }
+}
+
+/// O espaço virtual de uma faixa: os trechos livres abaixo do topo, e o topo.
+///
+/// Separada da trava e dos endereços de verdade para a suíte poder
+/// exercitá-la com uma faixa de mentira — os casos que importam aqui são
+/// de aritmética, e nenhum precisa mapear página nenhuma.
+pub struct Faixa {
+    /// Os trechos livres, `(início, bytes)`, em ordem de endereço e sem
+    /// dois vizinhos: dois trechos que se tocam são um só.
+    trechos: [(u64, u64); MAX_TRECHOS],
+    quantos: usize,
+    /// Acima dele, nada foi reservado.
+    topo: u64,
+    fim: u64,
+}
+
+impl Faixa {
+    pub const fn nova(inicio: u64, fim: u64) -> Self {
+        Faixa {
+            trechos: [(0, 0); MAX_TRECHOS],
+            quantos: 0,
+            topo: inicio,
+            fim,
+        }
+    }
+
+    /// O primeiro trecho livre em que `bytes` cabem; senão, o topo, se couber
+    /// antes do fim.
+    ///
+    /// O primeiro, e não o de tamanho mais próximo: com superfícies de poucos
+    /// tamanhos — a tela, as janelas —, os trechos tendem a ser do tamanho do
+    /// que saiu, e o primeiro que cabe costuma ser exato. Procurar o melhor
+    /// custaria percorrer a tabela inteira a cada criação.
+    pub fn onde_cairia(&self, bytes: u64) -> Option<u64> {
+        if bytes == 0 {
+            return None;
+        }
+        self.trechos[..self.quantos]
+            .iter()
+            .find(|&&(_, tamanho)| tamanho >= bytes)
+            .map(|&(inicio, _)| inicio)
+            .or_else(|| {
+                let fim = self.topo.checked_add(bytes)?;
+                (fim <= self.fim).then_some(self.topo)
+            })
+    }
+
+    pub fn reservar(&mut self, bytes: u64) -> Option<u64> {
+        let inicio = self.onde_cairia(bytes)?;
+        // Nenhum trecho livre começa no topo: estão todos abaixo dele.
+        if inicio == self.topo {
+            self.topo += bytes;
+            return Some(inicio);
+        }
+        let i = self.trechos[..self.quantos]
+            .iter()
+            .position(|&(outro, _)| outro == inicio)?;
+        let tamanho = self.trechos[i].1;
+        if tamanho == bytes {
+            self.remover(i);
+        } else {
+            self.trechos[i] = (inicio + bytes, tamanho - bytes);
+        }
+        Some(inicio)
+    }
+
+    /// Devolve um trecho. `false` se ele não coube na tabela — o endereço se
+    /// perde, e quem chamou registra.
+    pub fn devolver(&mut self, inicio: u64, bytes: u64) -> bool {
+        if bytes == 0 {
+            return true;
+        }
+        // O caso comum: a última superfície a nascer é a primeira a morrer.
+        // O topo desce, e desce mais se o trecho livre de baixo encostar.
+        if inicio + bytes == self.topo {
+            self.topo = inicio;
+            if self.quantos > 0 {
+                let (ultimo, tamanho) = self.trechos[self.quantos - 1];
+                if ultimo + tamanho == self.topo {
+                    self.topo = ultimo;
+                    self.quantos -= 1;
+                }
+            }
+            return true;
+        }
+
+        // Onde ele entra na ordem: antes do primeiro trecho que começa
+        // depois dele.
+        let i = self.trechos[..self.quantos]
+            .iter()
+            .position(|&(outro, _)| outro > inicio)
+            .unwrap_or(self.quantos);
+        let funde_antes = i > 0 && {
+            let (anterior, tamanho) = self.trechos[i - 1];
+            anterior + tamanho == inicio
+        };
+        let funde_depois = i < self.quantos && inicio + bytes == self.trechos[i].0;
+
+        match (funde_antes, funde_depois) {
+            (true, true) => {
+                let (_, depois) = self.trechos[i];
+                self.trechos[i - 1].1 += bytes + depois;
+                self.remover(i);
+            }
+            (true, false) => self.trechos[i - 1].1 += bytes,
+            (false, true) => self.trechos[i] = (inicio, bytes + self.trechos[i].1),
+            (false, false) => {
+                if self.quantos == MAX_TRECHOS {
+                    return false;
+                }
+                self.trechos.copy_within(i..self.quantos, i + 1);
+                self.trechos[i] = (inicio, bytes);
+                self.quantos += 1;
+            }
+        }
+        true
+    }
+
+    /// Quantos trechos livres há abaixo do topo.
+    #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+    pub fn trechos(&self) -> usize {
+        self.quantos
+    }
+
+    #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+    pub fn topo(&self) -> u64 {
+        self.topo
+    }
+
+    fn remover(&mut self, i: usize) {
+        self.trechos.copy_within(i + 1..self.quantos, i);
+        self.quantos -= 1;
+    }
 }

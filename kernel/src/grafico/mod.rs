@@ -44,9 +44,11 @@
 //!
 //! # O que ainda não existe aqui
 //!
-//! O adaptador virtio-gpu, o compositor e a árvore semântica que o agente
-//! vai ler — ver o roteiro, fase 10. Por ora há o adaptador linear e o que o
-//! agente precisa para saber qual adaptador está ativo e o que ele fez.
+//! O compositor — ver o roteiro, fase 10. Há os dois adaptadores, o linear
+//! e o [`virtio`], a memória das superfícies com a faixa que volta quando
+//! elas saem ([`memoria`]), e o que o agente precisa para saber qual
+//! adaptador está ativo e o que ele fez. A árvore semântica mora em
+//! [`crate::ui`], porque descreve a interface, e não o adaptador.
 
 pub mod dano;
 pub mod linear;

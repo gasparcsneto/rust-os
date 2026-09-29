@@ -1794,10 +1794,11 @@ padronizado.
       caminho da pessoa. O que o virtio-gpu 2D trouxe foi retângulo de dano e
       troca de página sem rasgo — não aceleração, que este texto chegou a
       prometer: medido, o framebuffer linear já pinta a tela cheia em 7 ms em
-      release, com folga para 60 Hz. A seguir: o compositor, com superfícies e
-      ordem de empilhamento — e, antes dele, a faixa das superfícies passando a
-      devolver endereço virtual, sem o que uma superfície por janela a esgota.
-      Depois, o servidor de janelas, o roteamento de entrada e a tipografia.
+      release, com folga para 60 Hz. E a faixa das superfícies devolvendo o
+      endereço virtual quando uma superfície sai — antes, ela só subia, e uma
+      superfície por janela a esgotaria. A seguir: o compositor, com
+      superfícies e ordem de empilhamento. Depois, o servidor de janelas, o
+      roteamento de entrada e a tipografia.
       E aqui a inversão do projeto encontra a interface gráfica. O servidor de
       janelas publica uma **árvore semântica** — que janelas existem, que
       controles, o que cada um faz — e os pixels são a renderização dela, do
