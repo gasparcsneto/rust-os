@@ -826,6 +826,14 @@ qualquer das duas metades o reprova. A mesma matriz achou que o caso não
 cabia na tela de 800 por 600 que a UEFI entrega no ARM: a caixa de fechar
 da janela arrastada caía fora da tela.
 
+E a matriz seguinte pegou a árvore mostrando uma janela **invisível**. O
+servidor descreve a janela antes de posicioná-la e mostrá-la — é o que
+evita um retângulo preto na tela —, e a árvore publicava a camada na
+origem, com opacidade zero. A fumaça, lendo a moldura como um agente leria,
+levou o mouse à barra de título dela e clicou no botão da barra superior
+que estava ali de verdade. A árvore descreve a tela: uma camada invisível
+não está nela, nem para `ui.tree` nem para `ui.act`.
+
 **A proteção é testada, não presumida.** Existe um segundo programa que tenta
 ler a memória do kernel. O caso `usuario: nao alcanca o kernel` exige duas
 coisas ao mesmo tempo: que ele **não consiga** — se conseguisse, seguiria e

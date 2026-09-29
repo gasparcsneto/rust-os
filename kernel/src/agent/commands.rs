@@ -1456,16 +1456,11 @@ fn ui_tree(_params: Json, w: &mut JsonWriter) -> fmt::Result {
 
     // As camadas acima do console, na ordem em que estão empilhadas: a
     // última é a que está por cima. A moldura é a parte que cai na tela. A
-    // da barra fica de fora — ela já está acima, com o papel dela.
-    let barra = crate::barra::camada();
-    let cursor = crate::ponteiro::camada();
+    // da barra fica de fora — ela já está acima, com o papel dela —, e as
+    // invisíveis também: ver `ui::e_janela`.
     let mut resultado = Ok(());
     crate::grafico::camadas(|c| {
-        if c.id == crate::grafico::compositor::CAMADA_DO_CONSOLE
-            || Some(c.id) == barra
-            || Some(c.id) == cursor
-            || resultado.is_err()
-        {
+        if !ui::e_janela(&c) || resultado.is_err() {
             return;
         }
         resultado = escrever_camada(w, c);

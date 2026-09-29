@@ -311,20 +311,36 @@ pub fn existe(id: u32) -> bool {
         }
         // Antes das camadas: os identificadores de elemento também são
         // maiores que o delas.
-        id if elemento_de(id).is_some() => com_elemento(id, |_| ()).is_some(),
+        // E só os de uma janela que está na árvore.
+        id if elemento_de(id).is_some() => {
+            com_elemento(id, |_| ()).is_some()
+                && elemento_de(id).is_some_and(|(camada, _)| existe(id_da_camada(camada)))
+        }
         id if id > ID_DAS_CAMADAS => {
-            // A camada da barra não é uma janela: ela está na árvore com o
-            // papel dela, e não uma segunda vez como camada.
-            let barra = crate::barra::camada();
-            let cursor = crate::ponteiro::camada();
             let mut achou = false;
             crate::grafico::camadas(|c| {
-                achou |= Some(c.id) != barra && Some(c.id) != cursor && id_da_camada(c.id) == id;
+                achou |= id_da_camada(c.id) == id && e_janela(&c);
             });
             achou
         }
         _ => false,
     }
+}
+
+/// Esta camada do compositor aparece na árvore como janela?
+///
+/// Não a barra, que está na árvore com o papel dela, e não uma segunda vez;
+/// não o cursor; e não uma camada **invisível**. A árvore descreve a tela, e
+/// uma camada de opacidade zero não está nela. Mostrá-la foi o primeiro
+/// arranjo, e a fumaça o pegou: o servidor descreve a janela antes de
+/// posicioná-la e mostrá-la, e a árvore publicava a janela na origem — a
+/// fumaça, lendo a moldura, levou o mouse à barra de título dela, e clicou
+/// no botão da barra superior que estava ali de verdade.
+pub fn e_janela(c: &crate::grafico::compositor::InfoCamada) -> bool {
+    c.id != crate::grafico::compositor::CAMADA_DO_CONSOLE
+        && Some(c.id) != crate::barra::camada()
+        && Some(c.id) != crate::ponteiro::camada()
+        && c.opacidade > 0
 }
 
 /// O que uma ação produziu.

@@ -3979,6 +3979,13 @@ fn superficies_o_processo_desenha_e_some() -> Resultado {
         crate::log_error!("teste", "a oculta: {:?}", oculta);
         return Err("uma superficie de processo nao nasceu invisivel na origem");
     }
+    // Invisível, ela não está na árvore — que descreve a tela —, e a janela
+    // está.
+    if crate::ui::existe(crate::ui::id_da_camada(oculta.id))
+        || !crate::ui::existe(crate::ui::id_da_camada(janela.id))
+    {
+        return Err("a arvore mostra uma camada invisivel, ou esconde uma visivel");
+    }
     if (
         janela.x,
         janela.y,
