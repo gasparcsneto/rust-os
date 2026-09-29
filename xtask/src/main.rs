@@ -4073,7 +4073,84 @@ fn conversar(
     sob_interpretador(monitor, &mut escrita, &mut leitor)?;
     sob_arvore(&mut escrita, &mut leitor)?;
     sob_tela(monitor, tela_no_monitor, &mut escrita, &mut leitor)?;
-    sob_fragmento(&mut escrita, &mut leitor)
+    sob_fragmento(&mut escrita, &mut leitor)?;
+    // Por último, porque não há volta: depois dela o kernel só responde o
+    // relatório da falha.
+    sob_falha(monitor, tela_no_monitor, &mut escrita)
+}
+
+/// A cor que a tela de falha pinta — `Cor::FALHA` do kernel.
+const COR_DE_FALHA: [u8; 3] = [0x60, 0x10, 0x10];
+
+/// A tela de falha chega ao monitor.
+///
+/// # Por que esta sonda existe
+///
+/// Porque o caminho fatal é o único que desenha sem o compositor — ele não
+/// pode confiar na trava nem no heap que o compositor usa —, e nada o
+/// exercitava: nem a suíte, que morreria junto, nem a fumaça.
+///
+/// # O que ela não prova
+///
+/// O porquê de ir por baixo. Com o compositor são, pintar a camada do
+/// console em vez da tela física também chega ao monitor — o compositor
+/// leva a camada vermelha como levaria qualquer outra escrita. Medido: com
+/// essa mutação, esta sonda passa. Ir direto à tela física é para a falha
+/// que acontece **dentro** do compositor, com o quadro pela metade ou a
+/// trava no meio de uma operação, e essa falha a sonda não sabe provocar:
+/// `debug.trigger` falha na tarefa do agente.
+///
+/// # O que conta como passar
+///
+/// Nove décimos da foto na cor de falha. Não a foto inteira: depois da tela
+/// de falha o post-mortem escreve por cima dela, e esse texto ocupa um
+/// canto. O que a sonda recusa é a tela que continua mostrando o console —
+/// que não tem quase nada dessa cor.
+fn sob_falha(
+    monitor: &Path,
+    tela_no_monitor: Option<&str>,
+    escrita: &mut UnixStream,
+) -> Result<(), String> {
+    println!("[xtask] fumaça: a tela de falha chega ao monitor");
+    escrita
+        .write_all(
+            b"{\"jsonrpc\":\"2.0\",\"id\":8901,\"method\":\"debug.trigger\",\"params\":{\"kind\":\"fatal\"}}\n",
+        )
+        .and_then(|()| escrita.flush())
+        .map_err(|e| format!("falha: nao consegui pedir a falha: {e}"))?;
+
+    let destino = raiz_do_projeto()
+        .join("target")
+        .join(format!("falha-{}.ppm", std::process::id()));
+    let mut fracao = 0.0f64;
+    for _ in 0..10 {
+        std::thread::sleep(Duration::from_millis(500));
+        let foto = fotografar(monitor, &destino, tela_no_monitor)?;
+        let total = (foto.largura as usize * foto.altura as usize).max(1);
+        let vermelhos = foto
+            .pixels
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .filter(|p| **p == COR_DE_FALHA)
+            .count();
+        fracao = vermelhos as f64 / total as f64;
+        if fracao >= 0.9 {
+            let _ = std::fs::remove_file(&destino);
+            println!(
+                "  [falha] ok  {:.1}% da tela na cor de falha ({}x{})",
+                fracao * 100.0,
+                foto.largura,
+                foto.altura
+            );
+            return Ok(());
+        }
+    }
+    let _ = std::fs::remove_file(&destino);
+    Err(format!(
+        "falha: a tela de falha nao chegou ao monitor; so {:.1}% da foto tem a cor dela",
+        fracao * 100.0
+    ))
 }
 
 /// O que as três teclas da sonda devem produzir.

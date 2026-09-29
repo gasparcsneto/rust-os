@@ -330,7 +330,7 @@ pub(crate) fn blocos_da_tela(base: u64, bytes: u64) -> Option<(usize, usize)> {
 /// break-before-make. Não é `unsafe` porque a referência exclusiva à tabela
 /// já é o que ninguém mais tem — e quem a tem, neste kernel, é só `init`.
 fn cobrir_a_tela(l1: &mut Tabela) -> usize {
-    let Some(tela) = crate::tela::tela() else {
+    let Some(tela) = crate::tela::tela_fisica() else {
         return 0;
     };
     let (base, bytes) = tela.faixa();

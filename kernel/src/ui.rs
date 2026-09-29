@@ -49,6 +49,9 @@ pub enum Papel {
     AreaDeTexto,
     /// Texto que se edita e se confirma — a linha de comando.
     CampoDeTexto,
+    /// Uma camada do compositor acima do console: o que um dia será uma
+    /// janela, e hoje só a suíte cria.
+    Janela,
 }
 
 impl Papel {
@@ -57,6 +60,7 @@ impl Papel {
             Papel::Tela => "screen",
             Papel::AreaDeTexto => "text_area",
             Papel::CampoDeTexto => "text_field",
+            Papel::Janela => "window",
         }
     }
 }
@@ -123,11 +127,20 @@ impl Origem {
 ///
 /// Fixos, e não gerados a cada leitura: um agente que leu a árvore e agiu
 /// sobre o elemento 3 precisa que o 3 continue sendo a linha de comando na
-/// chamada seguinte. Quando houver janelas que nascem e morrem, o
-/// identificador passa a vir de quem cria o elemento.
+/// chamada seguinte. As camadas do compositor nascem e morrem, e o
+/// identificador delas vem de quem as cria: o do compositor, somado a
+/// [`ID_DAS_CAMADAS`]. Ele não se repete enquanto o kernel vive, então um
+/// agente que guardou o de uma janela que fechou recebe "não existe", e não
+/// a janela que veio depois.
 pub const ID_DA_TELA: u32 = 1;
 pub const ID_DO_CONSOLE: u32 = 2;
 pub const ID_DA_LINHA_DE_COMANDO: u32 = 3;
+pub const ID_DAS_CAMADAS: u32 = 1000;
+
+/// O identificador na árvore de uma camada do compositor.
+pub const fn id_da_camada(camada: u32) -> u32 {
+    ID_DAS_CAMADAS.saturating_add(camada)
+}
 
 /// Um retângulo na tela, em pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -220,6 +233,11 @@ pub fn existe(id: u32) -> bool {
         ID_DA_TELA | ID_DO_CONSOLE => crate::tela::tela().is_some(),
         ID_DA_LINHA_DE_COMANDO => {
             crate::tela::tela().is_some() && crate::interpretador::inicio_do_campo().is_some()
+        }
+        id if id > ID_DAS_CAMADAS => {
+            let mut achou = false;
+            crate::grafico::camadas(|c| achou |= id_da_camada(c.id) == id);
+            achou
         }
         _ => false,
     }

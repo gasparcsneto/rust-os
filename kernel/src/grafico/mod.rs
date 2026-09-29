@@ -29,6 +29,10 @@
 //! - **Atualizar devolve o que foi atualizado**, depois do recorte. O
 //!   original não devolve nada. É a resposta que o agente quer: não "o que
 //!   pediram para redesenhar", mas "o que de fato mudou na tela".
+//! - **A superfície da tela.** Um método que o original não tem,
+//!   [`AdaptadorGrafico::superficie_da_tela`]: onde a tela já é um buffer
+//!   que o monitor só vê quando mandado, o compositor monta a tela nela em
+//!   vez de pedir outra do mesmo tamanho.
 //! - **Sem cursor.** O trait original tem cinco métodos de cursor de
 //!   hardware; este kernel ainda não tem mouse, e cinco métodos sem chamador
 //!   seriam cinco métodos que ninguém confere.
@@ -42,14 +46,20 @@
 //! direto no hardware, **por baixo** de tudo isto, e é por isso que ele
 //! continua funcionando quando é exatamente esta pilha que quebrou.
 //!
-//! # O que ainda não existe aqui
+//! # O que há aqui
 //!
-//! O compositor — ver o roteiro, fase 10. Há os dois adaptadores, o linear
-//! e o [`virtio`], a memória das superfícies com a faixa que volta quando
-//! elas saem ([`memoria`]), e o que o agente precisa para saber qual
-//! adaptador está ativo e o que ele fez. A árvore semântica mora em
-//! [`crate::ui`], porque descreve a interface, e não o adaptador.
+//! Os dois adaptadores, o linear e o [`virtio`]; o [`compositor`], com o
+//! console como a camada de baixo; a memória das superfícies, com a faixa
+//! que volta quando elas saem ([`memoria`]); e o que o agente precisa para
+//! saber qual adaptador está ativo, que camadas estão na tela e o que chegou
+//! a ela. A árvore semântica mora em [`crate::ui`], porque descreve a
+//! interface, e não o adaptador.
+//!
+//! O que ainda não há: transparência, quem crie camadas em produção — a
+//! barra superior, o servidor de janelas —, e o roteamento de entrada para
+//! elas. Ver o roteiro, fase 10.
 
+pub mod compositor;
 pub mod dano;
 pub mod linear;
 pub(crate) mod memoria;
@@ -59,23 +69,22 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use spin::Mutex;
 
+use compositor::Compositor;
 pub use dano::Dano;
 
-// Hoje só a suíte desenha por aqui: quem vai criar superfícies e atualizar a
-// tela em produção é o compositor, que é o próximo passo da fase 10. Até lá a
-// anotação mantém o build de produção limpo sem esconder código morto de
-// verdade — na compilação de teste, onde há consumidor, ela não vale, e o que
-// sobrar sem uso lá aparece. Quando o compositor chegar, ela some.
 /// Um buffer de pixels onde se desenha antes de a tela ver.
 ///
 /// Os pixels estão no formato de [`crate::tela::Cor::para_u32`].
-#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub trait Superficie {
     fn largura(&self) -> u32;
     fn altura(&self) -> u32;
     fn pixels(&self) -> &[u32];
     fn pixels_mut(&mut self) -> &mut [u32];
-    /// Quanta memória a superfície segura — o que o relatório do agente mede.
+    /// Quanta memória a superfície segura.
+    ///
+    /// Hoje só a suíte pergunta, para conferir que criar e soltar mexem na
+    /// conta de [`memoria::vivas`] — que é o que o relatório do agente lê.
+    #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
     fn bytes(&self) -> u64;
 }
 
@@ -83,7 +92,6 @@ pub trait Superficie {
 ///
 /// Porte de `GraphicsAdapter` do Redox — ver o cabeçalho do módulo para o
 /// que mudou e por quê.
-#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub trait AdaptadorGrafico {
     /// A superfície deste adaptador: memória onde se desenha, mais o que o
     /// adaptador precisar associar a ela. No linear, nada; no virtio-gpu,
@@ -104,6 +112,29 @@ pub trait AdaptadorGrafico {
         altura: u32,
     ) -> Result<Self::Superficie, &'static str>;
 
+    /// A superfície que a tela já mostra, quando ela serve de quadro ao
+    /// compositor.
+    ///
+    /// # Por que um adaptador tem e o outro não
+    ///
+    /// O quadro é onde o compositor monta a tela antes de ela aparecer, e
+    /// precisa ser invisível enquanto está pela metade — senão o console
+    /// apareceria por um instante debaixo de cada janela. No `virtio-gpu` a
+    /// memória da tela já é assim: o monitor só vê o que se transfere, e
+    /// compor nela não mostra nada até o fim. Usá-la economiza uma tela
+    /// inteira de memória, e deixa a tela física sendo o que o monitor
+    /// mostra — que é onde o caminho de falha pinta.
+    ///
+    /// Num framebuffer linear, o que se escreve aparece: compor nele
+    /// mostraria cada camada sendo pintada. Ali não há superfície da tela, e
+    /// o compositor cria um quadro com [`AdaptadorGrafico::criar_superficie`]
+    /// — o buffer de fundo do `vesad`.
+    ///
+    /// É extensão do porte: o `GraphicsAdapter` do Redox não tem isto.
+    fn superficie_da_tela(&mut self, _tela: usize) -> Option<Self::Superficie> {
+        None
+    }
+
     /// Leva à tela o retângulo `dano` da superfície.
     ///
     /// Devolve o retângulo que de fato foi levado, depois do recorte — que
@@ -116,42 +147,51 @@ pub trait AdaptadorGrafico {
     ) -> Result<Dano, &'static str>;
 }
 
-/// O adaptador que esta máquina usa.
-///
-/// Uma enumeração, e não um objeto de trait, porque o trait tem tipo
-/// associado — e a lista de adaptadores é pequena e conhecida.
-pub enum Adaptador {
-    Linear(linear::AdaptadorLinear),
-    Virtio(virtio::AdaptadorVirtio),
-}
-
-impl Adaptador {
-    pub fn nome(&self) -> &'static str {
-        match self {
-            Adaptador::Linear(a) => a.nome(),
-            Adaptador::Virtio(a) => a.nome(),
-        }
-    }
-
-    pub fn tamanho_da_tela(&self, tela: usize) -> Option<(u32, u32)> {
-        match self {
-            Adaptador::Linear(a) => a.tamanho_da_tela(tela),
-            Adaptador::Virtio(a) => a.tamanho_da_tela(tela),
-        }
-    }
-
-    pub fn telas(&self) -> usize {
-        match self {
-            Adaptador::Linear(a) => a.telas(),
-            Adaptador::Virtio(a) => a.telas(),
-        }
-    }
-}
-
+/// O compositor da tela, com o adaptador embaixo dele.
 // A tomada desta tranca passa por `sem_interrupcoes`, pelo motivo de toda
 // tranca deste kernel: um handler que a pedisse enquanto ela estivesse na mão
 // do código interrompido giraria para sempre.
-static ATIVO: Mutex<Option<Adaptador>> = Mutex::new(None);
+static ATIVO: Mutex<Option<Compositor>> = Mutex::new(None);
+
+/// Roda `f` com o compositor, se houver um. Espera pela trava.
+///
+/// Para quem mexe nas camadas — nunca de dentro de uma escrita no console,
+/// que usa [`compor`].
+fn com_compositor<R>(f: impl FnOnce(&mut Compositor) -> R) -> Option<R> {
+    crate::arch::sem_interrupcoes(|| ATIVO.lock().as_mut().map(f))
+}
+
+/// Recompõe `dano` na tela. Chamado por [`crate::tela::descarregar`], com o
+/// que o console sujou.
+///
+/// Devolve falso se não pôde agora — a trava estava tomada —, e quem chama
+/// guarda o retângulo para a próxima vez.
+///
+/// # Por que `try_lock`
+///
+/// Porque quem chama é a escrita no console, e ela acontece em qualquer
+/// lugar — inclusive de dentro do próprio compositor, quando algo que ele
+/// chama registra no log. Esperar pela trava ali seria esperar por si mesmo.
+pub fn compor(dano: Dano) -> bool {
+    crate::arch::sem_interrupcoes(|| {
+        let Some(mut guarda) = ATIVO.try_lock() else {
+            return false;
+        };
+        let Some(compositor) = guarda.as_mut() else {
+            return false;
+        };
+        // Uma apresentação recusada não devolve falso: o compositor guardou o
+        // dano como pendente, e o retângulo do console já foi composto.
+        let _ = compositor.compor(dano);
+        true
+    })
+}
+
+/// As camadas da tela, de baixo para cima, começando pelo console. Nenhuma
+/// sem compositor.
+pub fn camadas(f: impl FnMut(compositor::InfoCamada)) {
+    com_compositor(|c| c.camadas(f));
+}
 
 /// Quantas atualizações chegaram à tela, e a última delas.
 ///
@@ -160,39 +200,59 @@ static ATIVO: Mutex<Option<Adaptador>> = Mutex::new(None);
 static ATUALIZACOES: AtomicU64 = AtomicU64::new(0);
 static ULTIMO_DANO: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
 
-/// Liga a pilha gráfica sobre a tela que o boot publicou, se houver uma.
+/// Liga a pilha gráfica sobre a tela que o boot publicou, se houver uma, e
+/// põe o console na camada de baixo do compositor.
 ///
 /// Sem tela, não há o que ligar, e isso não é erro: a máquina pode
-/// legitimamente não ter uma, e a pilha fica desligada.
+/// legitimamente não ter uma, e a pilha fica desligada. Sem memória para o
+/// compositor, também não: o console continua desenhando direto na tela,
+/// como desenhava antes de haver um.
 pub fn iniciar() {
-    let Some(tela) = crate::tela::tela() else {
+    let Some(fisica) = crate::tela::tela_fisica() else {
         crate::log_info!("grafico", "sem tela, pilha grafica desligada");
         return;
     };
-    // O adaptador é o de quem mostra a tela. Se ela mora sobre um
-    // `virtio-gpu`, copiar superfícies para dentro dela como o linear faz
-    // escreveria numa memória que ninguém descarrega — nada apareceria.
-    let adaptador = if crate::virtio::gpu::tem_a_tela() {
-        Adaptador::Virtio(virtio::AdaptadorVirtio)
-    } else {
-        Adaptador::Linear(linear::AdaptadorLinear::novo(tela))
+    // O adaptador é o de quem mostra a tela: sobre um `virtio-gpu`, o dele;
+    // sobre um framebuffer, o linear. Ver `Compositor::novo`.
+    let mut compositor = match Compositor::novo(fisica) {
+        Ok(c) => c,
+        Err(motivo) => {
+            crate::log_error!(
+                "grafico",
+                "compositor nao montado: {}; o console segue direto na tela",
+                motivo
+            );
+            return;
+        }
     };
+    let nome = compositor.nome();
+
+    // Adotar o que está na tela e desviar o console, sem ninguém escrever no
+    // meio: uma linha escrita entre as duas coisas iria para a tela física e
+    // faltaria na camada, e a próxima composição daquela região a apagaria.
+    crate::arch::sem_interrupcoes(|| {
+        compositor.adotar(&fisica);
+        let base = compositor.base_do_console();
+        *ATIVO.lock() = Some(compositor);
+        // SAFETY: a camada do console é do compositor, que acabou de ir para
+        // `ATIVO` e vive até o fim do kernel; ela tem a geometria da tela
+        // física em quatro bytes por pixel — ver `Compositor::novo`.
+        unsafe { crate::tela::desviar_console(base) };
+    });
     crate::log_info!(
         "grafico",
-        "adaptador {} sobre {}x{}",
-        adaptador.nome(),
-        tela.largura,
-        tela.altura
+        "compositor sobre o adaptador {}, {}x{}; o console e a camada de baixo",
+        nome,
+        fisica.largura,
+        fisica.altura
     );
-    crate::arch::sem_interrupcoes(|| *ATIVO.lock() = Some(adaptador));
 }
 
 /// Registra, para o relatório, uma atualização que chegou à tela.
 ///
-/// Quem chama é quem atualiza — o compositor, quando existir, e hoje a
-/// suíte. O adaptador não registra sozinho porque ele não sabe se a tela em
-/// que escreve é a da máquina ou uma sintética de teste.
-#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+/// Quem chama é quem atualiza — o compositor, e a suíte. O adaptador não
+/// registra sozinho porque ele não sabe se a tela em que escreve é a da
+/// máquina ou uma sintética de teste.
 pub fn registrar_atualizacao(dano: Dano) {
     ATUALIZACOES.fetch_add(1, Ordering::Relaxed);
     ULTIMO_DANO[0].store((dano.x as u64) << 32 | dano.y as u64, Ordering::Relaxed);
@@ -219,12 +279,8 @@ pub struct Relatorio {
 
 /// O relatório, se a pilha estiver ligada.
 pub fn relatorio() -> Option<Relatorio> {
-    let (adaptador, telas, tamanho) = crate::arch::sem_interrupcoes(|| {
-        ATIVO
-            .lock()
-            .as_ref()
-            .map(|a| (a.nome(), a.telas(), a.tamanho_da_tela(0)))
-    })?;
+    let (adaptador, telas, tamanho) =
+        com_compositor(|c| (c.nome(), c.telas(), c.tamanho_da_tela()))?;
 
     let (superficies, bytes_em_superficies) = memoria::vivas();
     let atualizacoes = ATUALIZACOES.load(Ordering::Relaxed);

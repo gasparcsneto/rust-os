@@ -1006,6 +1006,272 @@ fn grafico_soltar_superficies_devolve_a_faixa() -> Resultado {
     Ok(())
 }
 
+// ===========================================================================
+// O compositor
+// ===========================================================================
+
+/// O pixel que o monitor mostra em `(x, y)`.
+fn pixel_na_tela(x: u32, y: u32) -> Result<crate::tela::Cor, &'static str> {
+    crate::tela::tela_fisica()
+        .and_then(|t| t.ler_pixel(x, y))
+        .ok_or("ponto fora da tela fisica")
+}
+
+/// O pixel da camada do console em `(x, y)`.
+fn pixel_no_console(x: u32, y: u32) -> Result<crate::tela::Cor, &'static str> {
+    crate::tela::tela()
+        .and_then(|t| t.ler_pixel(x, y))
+        .ok_or("ponto fora da camada do console")
+}
+
+/// Confere que a tela mostra o console, e não outra coisa, em cada ponto.
+fn mostra_o_console(pontos: &[(u32, u32)]) -> Resultado {
+    for &(x, y) in pontos {
+        if pixel_na_tela(x, y)? != pixel_no_console(x, y)? {
+            crate::log_error!("teste", "em ({}, {}) a tela nao mostra o console", x, y);
+            return Err("a tela nao mostra o console onde nenhuma camada o cobre");
+        }
+    }
+    Ok(())
+}
+
+/// Confere que a tela mostra `cor` em cada ponto.
+fn mostra_a_cor(cor: crate::tela::Cor, pontos: &[(u32, u32)]) -> Resultado {
+    for &(x, y) in pontos {
+        let lido = pixel_na_tela(x, y)?;
+        if lido != cor {
+            crate::log_error!("teste", "em ({}, {}): {:?}, esperado {:?}", x, y, lido, cor);
+            return Err("a tela nao mostra a camada que esta por cima");
+        }
+    }
+    Ok(())
+}
+
+/// Uma camada pintada inteira de uma cor.
+fn camada_de_cor(
+    nome: &'static str,
+    x: i32,
+    y: i32,
+    largura: u32,
+    altura: u32,
+    cor: crate::tela::Cor,
+) -> Result<crate::grafico::compositor::Camada, &'static str> {
+    let camada = crate::grafico::compositor::Camada::nova(nome, x, y, largura, altura)?;
+    camada.pintar(|pixels, _, _| pixels.fill(cor.para_u32()))?;
+    Ok(camada)
+}
+
+const VERDE: crate::tela::Cor = crate::tela::Cor::nova(0x20, 0xC0, 0x40);
+const VERMELHO: crate::tela::Cor = crate::tela::Cor::nova(0xD0, 0x30, 0x30);
+
+/// O console é a camada de baixo, e a tela física é outra memória.
+///
+/// Sem isto, todos os casos de console continuariam passando com o
+/// compositor desligado: eles leem a tela onde o console desenha, e sem
+/// compositor ela é a física.
+fn compositor_o_console_e_a_camada_de_baixo() -> Resultado {
+    let (Some(console), Some(fisica)) = (crate::tela::tela(), crate::tela::tela_fisica()) else {
+        return sem_framebuffer();
+    };
+    if !crate::tela::console_desviado() {
+        return Err("com tela, o console nao foi para uma camada do compositor");
+    }
+    if console.faixa().0 == fisica.faixa().0 {
+        return Err("o console desviado ainda desenha na tela fisica");
+    }
+    // A camada adotou o que o boot desenhou: a faixa de acento do banner,
+    // pintada antes de o compositor existir, está nela. Sem a adoção ela
+    // começaria preta, e cada composição apagaria um pedaço do boot.
+    if console.ler_pixel(0, 0) != Some(crate::tela::Cor::ACENTO) {
+        return Err("a camada do console nao adotou o que estava na tela");
+    }
+    let mut primeira = None;
+    crate::grafico::camadas(|c| {
+        primeira.get_or_insert(c);
+    });
+    match primeira {
+        Some(c)
+            if c.id == crate::grafico::compositor::CAMADA_DO_CONSOLE
+                && (c.largura, c.altura) == (fisica.largura, fisica.altura) =>
+        {
+            Ok(())
+        }
+        _ => Err("a camada de baixo nao e o console do tamanho da tela"),
+    }
+}
+
+/// A camada de cima vence, e soltá-la revela o console.
+fn compositor_a_camada_de_cima_vence() -> Resultado {
+    if crate::tela::tela_fisica().is_none() {
+        return sem_framebuffer();
+    }
+    sem_intrusos(|| {
+        let dentro = [(100, 120), (147, 151), (120, 130)];
+        let fora = [(99, 120), (148, 120), (100, 152)];
+        let camada = camada_de_cor("teste", 100, 120, 48, 32, VERDE)?;
+        mostra_a_cor(VERDE, &dentro)?;
+        mostra_o_console(&fora)?;
+        drop(camada);
+        mostra_o_console(&dentro)
+    })
+}
+
+/// Mover recompõe onde a camada estava e onde ela está.
+fn compositor_mover_nao_deixa_rastro() -> Resultado {
+    if crate::tela::tela_fisica().is_none() {
+        return sem_framebuffer();
+    }
+    sem_intrusos(|| {
+        let camada = camada_de_cor("teste", 200, 200, 40, 40, VERMELHO)?;
+        camada.mover(260, 200)?;
+        mostra_o_console(&[(205, 205), (239, 239)])?;
+        mostra_a_cor(VERMELHO, &[(265, 205), (299, 239)])
+    })
+}
+
+/// A ordem de empilhamento decide quem aparece onde duas se cruzam.
+fn compositor_ordem_de_empilhamento() -> Resultado {
+    if crate::tela::tela_fisica().is_none() {
+        return sem_framebuffer();
+    }
+    sem_intrusos(|| {
+        let baixo = camada_de_cor("baixo", 300, 300, 40, 40, VERDE)?;
+        let _cima = camada_de_cor("cima", 320, 300, 40, 40, VERMELHO)?;
+        mostra_a_cor(VERDE, &[(305, 305)])?;
+        mostra_a_cor(VERMELHO, &[(325, 305), (345, 305)])?;
+        baixo.trazer_para_frente()?;
+        mostra_a_cor(VERDE, &[(305, 305), (325, 305), (339, 339)])?;
+        mostra_a_cor(VERMELHO, &[(345, 305)])
+    })
+}
+
+/// O que o console escreve debaixo de uma camada não aparece por cima dela,
+/// e aparece quando ela sai.
+///
+/// É o defeito que a opção de desenhar o console direto na tela teria: cada
+/// letra escrita sob uma janela apareceria por cima dela até a janela ser
+/// redesenhada.
+fn compositor_escrever_debaixo_nao_vaza() -> Resultado {
+    let Some(g) = crate::tela::console::geometria() else {
+        return sem_framebuffer();
+    };
+    sem_intrusos(|| {
+        crate::serial_println!();
+        let (x, y) = crate::tela::console::cursor();
+        let camada = camada_de_cor(
+            "cobre",
+            0,
+            y as i32,
+            x + 8 * g.largura_da_celula,
+            g.altura_da_celula,
+            VERDE,
+        )?;
+        crate::serial_print!("W");
+        let resultado = (|| {
+            crate::tela::console::conferir_glifo('W', x, y)?;
+            for dy in 0..g.altura_da_celula {
+                for dx in 0..g.largura_da_celula {
+                    if pixel_na_tela(x + dx, y + dy)? != VERDE {
+                        return Err("a letra escrita sob a camada apareceu por cima dela");
+                    }
+                }
+            }
+            drop(camada);
+            let fisica = crate::tela::tela_fisica().ok_or("a tela fisica sumiu")?;
+            crate::tela::console::conferir_glifo_em(&fisica, 'W', x, y)
+        })();
+        crate::serial_println!();
+        resultado
+    })
+}
+
+/// Uma camada que passa da borda é composta só no que cai dentro, e uma
+/// fora da tela não quebra nada.
+fn compositor_camada_na_borda() -> Resultado {
+    let Some(fisica) = crate::tela::tela_fisica() else {
+        return sem_framebuffer();
+    };
+    sem_intrusos(|| {
+        // Cada pixel do canto diz de onde veio na camada: verde é a coluna,
+        // azul é a linha. Uma cor só esconderia um deslocamento errado — todo
+        // pixel da camada seria igual a qualquer outro.
+        let canto = crate::grafico::compositor::Camada::nova("canto", -20, -10, 40, 30)?;
+        canto.pintar(|pixels, largura, _| {
+            for (i, p) in pixels.iter_mut().enumerate() {
+                let (x, y) = (i as u32 % largura, i as u32 / largura);
+                *p = crate::tela::Cor::nova(0x80, x as u8, y as u8).para_u32();
+            }
+        })?;
+        mostra_a_cor(crate::tela::Cor::nova(0x80, 20, 10), &[(0, 0)])?;
+        mostra_a_cor(crate::tela::Cor::nova(0x80, 39, 29), &[(19, 19)])?;
+        mostra_o_console(&[(20, 0), (0, 20)])?;
+        let longe = camada_de_cor("longe", fisica.largura as i32 + 10, 0, 16, 16, VERDE)?;
+        drop(longe);
+        let direita = camada_de_cor(
+            "direita",
+            fisica.largura as i32 - 8,
+            fisica.altura as i32 - 8,
+            32,
+            32,
+            VERDE,
+        )?;
+        mostra_a_cor(VERDE, &[(fisica.largura - 1, fisica.altura - 1)])?;
+        drop(direita);
+        drop(canto);
+        mostra_o_console(&[(0, 0), (19, 19), (fisica.largura - 1, fisica.altura - 1)])
+    })
+}
+
+/// O agente vê as camadas: `display.info` as lista, e a árvore mostra as de
+/// cima como janelas, que deixam de existir quando saem.
+fn agente_ve_as_camadas() -> Resultado {
+    if crate::tela::tela_fisica().is_none() {
+        return sem_framebuffer();
+    }
+    let camada = camada_de_cor("vista-pelo-agente", 40, 60, 24, 16, VERDE)?;
+    let id = crate::ui::id_da_camada(camada.id());
+
+    let info = chamar("display.info", "{}")?;
+    let camadas = Json(info.as_bytes())
+        .member("layers")
+        .ok_or("display.info nao lista as camadas")?;
+    if camadas
+        .item(0)
+        .and_then(|c| c.member("name"))
+        .and_then(|v| v.as_str())
+        != Some("console")
+    {
+        return Err("a primeira camada listada nao e o console");
+    }
+    let achada = (0..64)
+        .filter_map(|i| camadas.item(i))
+        .find(|c| c.member("name").and_then(|v| v.as_str()) == Some("vista-pelo-agente"))
+        .ok_or("display.info nao lista a camada criada")?;
+    if achada.member("x").and_then(|v| v.as_u64()) != Some(40)
+        || achada.member("width").and_then(|v| v.as_u64()) != Some(24)
+    {
+        return Err("display.info descreve a camada com outra geometria");
+    }
+
+    let arvore = chamar("ui.tree", "{}")?;
+    let marca = alloc::format!("\"id\":{},\"role\":\"window\"", id);
+    if !arvore.contains(&marca) {
+        crate::log_error!("teste", "arvore: {}", arvore);
+        return Err("a arvore nao mostra a camada como janela");
+    }
+    if !crate::ui::existe(id) {
+        return Err("a janela da arvore nao existe para ui.act");
+    }
+    drop(camada);
+    if crate::ui::existe(id) {
+        return Err("a janela continuou existindo depois de a camada sair");
+    }
+    if chamar("ui.tree", "{}")?.contains(&marca) {
+        return Err("a arvore seguiu mostrando uma camada que saiu");
+    }
+    Ok(())
+}
+
 /// O agente vê a pilha gráfica pelo registro, com o adaptador e a tela certos.
 fn agente_display_info_descreve_a_pilha() -> Resultado {
     let cmd = registry::encontrar("display.info").ok_or("display.info ausente")?;
@@ -2413,7 +2679,14 @@ fn console_log_humano_chega_a_tela() -> Resultado {
 
         crate::serial_print!("X");
 
-        crate::tela::console::conferir_glifo('X', x, y)
+        crate::tela::console::conferir_glifo('X', x, y)?;
+
+        // E na tela física. Com o compositor, o console desenha numa camada,
+        // e a conferência de cima só prova que a camada tem a letra — um
+        // compositor que não levasse nada à tela passaria nela. Esta prova que
+        // a letra chegou ao que o monitor mostra.
+        let fisica = crate::tela::tela_fisica().ok_or("a tela fisica sumiu")?;
+        crate::tela::console::conferir_glifo_em(&fisica, 'X', x, y)
     })
 }
 
@@ -6249,8 +6522,9 @@ fn video_escrever_descarrega_so_o_que_sujou() -> Resultado {
 
 /// Uma superfície apresenta só o dano, e a tela volta ao kernel depois dela.
 ///
-/// É o trait usado pelo compositor que vier: criar, desenhar, apresentar um
-/// retângulo. O dano atravessa recortado; um dano hostil, que o recorte do
+/// É o trait pelo qual o compositor entrega a tela: criar, desenhar,
+/// apresentar um retângulo. Aqui com uma superfície própria, fora do
+/// compositor. O dano atravessa recortado; um dano hostil, que o recorte do
 /// Redox faria dar a volta, vira nada — e não um comando que o dispositivo
 /// recusa. E ao soltar a superfície, a tela 0 volta ao recurso do kernel e a
 /// memória volta ao alocador.
@@ -9326,6 +9600,14 @@ fn esperar_ate(mut condicao: impl FnMut() -> bool, teto_em_ticks: u64) -> Result
 }
 
 static CASOS: &[Caso] = &[
+    // Primeiro, e não junto dos outros do compositor: ele confere que a
+    // camada do console adotou o que o boot desenhou, e os casos de console
+    // redesenham o banner — depois deles, a camada teria a faixa de acento
+    // com ou sem a adoção.
+    Caso {
+        nome: "compositor: o console e a camada de baixo",
+        f: compositor_o_console_e_a_camada_de_baixo,
+    },
     Caso {
         nome: "json: objeto simples",
         f: json_objeto_simples,
@@ -9861,6 +10143,30 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "grafico: soltar superficies devolve a faixa",
         f: grafico_soltar_superficies_devolve_a_faixa,
+    },
+    Caso {
+        nome: "compositor: a camada de cima vence",
+        f: compositor_a_camada_de_cima_vence,
+    },
+    Caso {
+        nome: "compositor: mover nao deixa rastro",
+        f: compositor_mover_nao_deixa_rastro,
+    },
+    Caso {
+        nome: "compositor: ordem de empilhamento",
+        f: compositor_ordem_de_empilhamento,
+    },
+    Caso {
+        nome: "compositor: escrever debaixo nao vaza",
+        f: compositor_escrever_debaixo_nao_vaza,
+    },
+    Caso {
+        nome: "compositor: camada na borda",
+        f: compositor_camada_na_borda,
+    },
+    Caso {
+        nome: "agente: ve as camadas",
+        f: agente_ve_as_camadas,
     },
     Caso {
         nome: "video: a tela mora onde o monitor a mostra",

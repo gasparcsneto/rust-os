@@ -118,9 +118,6 @@ impl Cor {
     /// `BB GG RR 00`, que é exatamente um pixel BGR de quatro bytes. O formato
     /// mais comum em firmware de PC, e o das duas máquinas desta suíte, é
     /// então uma cópia sem conversão nenhuma.
-    // Quem compõe cores em superfícies é o compositor, que ainda não existe;
-    // hoje só a suíte pinta uma.
-    #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
     pub const fn para_u32(self) -> u32 {
         (self.r as u32) << 16 | (self.g as u32) << 8 | self.b as u32
     }
@@ -164,7 +161,8 @@ static STRIDE: AtomicU32 = AtomicU32::new(0);
 static BYTES_POR_PIXEL: AtomicU32 = AtomicU32::new(0);
 static FORMATO: AtomicU32 = AtomicU32::new(0);
 
-/// Quem precisa ser avisado para a tela mostrar o que se escreveu nela.
+/// Quem precisa ser avisado para a tela física mostrar o que se escreveu
+/// nela.
 ///
 /// Nenhum, num framebuffer linear: o dispositivo varre a memória sozinho, e o
 /// que se escreve aparece. Um adaptador como o `virtio-gpu` não varre nada —
@@ -175,6 +173,26 @@ static FORMATO: AtomicU32 = AtomicU32::new(0);
 /// falha fatal. Zero é "ninguém".
 static DESCARREGADOR: AtomicU32 = AtomicU32::new(0);
 const DESCARREGADOR_VIRTIO: u32 = 1;
+
+/// Onde o console desenha quando há compositor: a camada de baixo, em
+/// memória comum. Zero enquanto ele desenha direto na tela física.
+///
+/// # Por que duas telas
+///
+/// Porque o console deixou de ser a tela e passou a ser uma camada dela. Com
+/// janelas por cima, desenhar direto no framebuffer escreveria **sobre** elas
+/// — e redesenhá-las depois de cada letra faria o texto piscar por baixo. O
+/// console escreve na camada dele, e o compositor põe na tela física o que
+/// cada camada deixa ver.
+///
+/// A tela física continua registrada e continua sendo a do caminho de falha
+/// fatal: [`falha`] zera este desvio e pinta direto nela, sem compositor, sem
+/// trava e sem heap — que é o que se pode ter ali.
+///
+/// A geometria da camada é a da tela física, com o formato das superfícies
+/// ([`Cor::para_u32`], quatro bytes por pixel, uma linha de `largura`
+/// pixels). Só a base muda.
+static BASE_DO_CONSOLE: AtomicU64 = AtomicU64::new(0);
 
 /// O retângulo sujo desde a última descarga: `[x0, x1) × [y0, y1)`.
 ///
@@ -256,19 +274,55 @@ pub fn descarregar_por(quem: crate::virtio::gpu::Descarregador) {
     }
 }
 
-/// Esta tela precisa ser descarregada para aparecer?
+/// A tela física precisa ser descarregada para aparecer?
 pub fn precisa_descarregar() -> bool {
     DESCARREGADOR.load(Ordering::Acquire) != 0
 }
 
-/// Leva ao dispositivo o que a tela sujou desde a última vez.
+/// Desvia o console para uma camada do compositor.
+///
+/// Daqui em diante [`tela`] devolve a camada, e o que se escreve nela é
+/// levado à tela física pelo compositor, em [`descarregar`].
+///
+/// # Safety
+///
+/// `base` precisa ter `largura * altura * 4` bytes mapeados e graváveis,
+/// com a geometria da tela física, e viver enquanto o desvio durar.
+pub unsafe fn desviar_console(base: u64) {
+    BASE_DO_CONSOLE.store(base, Ordering::Release);
+}
+
+/// O console está numa camada do compositor?
+pub fn console_desviado() -> bool {
+    BASE_DO_CONSOLE.load(Ordering::Acquire) != 0
+}
+
+/// A base da tela cujas escritas são anotadas no retângulo sujo, ou zero.
+///
+/// A camada do console, se ele estiver desviado — o compositor leva o que
+/// ela sujou. Senão a tela física, se ela precisar ser descarregada. Senão
+/// ninguém: um framebuffer linear sem compositor mostra o que se escreve.
+fn base_rastreada() -> u64 {
+    let console = BASE_DO_CONSOLE.load(Ordering::Relaxed);
+    if console != 0 {
+        console
+    } else if DESCARREGADOR.load(Ordering::Relaxed) != 0 {
+        BASE.load(Ordering::Relaxed)
+    } else {
+        0
+    }
+}
+
+/// Leva à tela física o que o console sujou desde a última vez.
 ///
 /// Chamada depois de cada escrita no console, do banner e da tela de falha.
-/// Num framebuffer linear não faz nada. Se o dispositivo não pôde levar
-/// agora, o retângulo volta a ser sujo e vai junto com a próxima escrita —
-/// nada se perde, só atrasa.
+/// Com o console numa camada, quem leva é o compositor; sem, e num
+/// `virtio-gpu`, o dispositivo; num framebuffer linear sem compositor, não
+/// há o que fazer. Se quem leva não pôde agora, o retângulo volta a ser
+/// sujo e vai junto com a próxima escrita — nada se perde, só atrasa.
 pub fn descarregar() {
-    if DESCARREGADOR.load(Ordering::Acquire) != DESCARREGADOR_VIRTIO {
+    let desviado = console_desviado();
+    if !desviado && DESCARREGADOR.load(Ordering::Acquire) != DESCARREGADOR_VIRTIO {
         return;
     }
     let x0 = SUJO_X0.swap(u32::MAX, Ordering::Relaxed);
@@ -278,13 +332,17 @@ pub fn descarregar() {
     if x0 >= x1 || y0 >= y1 {
         return;
     }
-    let r = crate::virtio::gpu::Retangulo {
-        x: x0,
-        y: y0,
-        largura: x1 - x0,
-        altura: y1 - y0,
+    let levou = if desviado {
+        crate::grafico::compor(crate::grafico::Dano::novo(x0, y0, x1 - x0, y1 - y0))
+    } else {
+        crate::virtio::gpu::descarregar_tela(crate::virtio::gpu::Retangulo {
+            x: x0,
+            y: y0,
+            largura: x1 - x0,
+            altura: y1 - y0,
+        })
     };
-    if !crate::virtio::gpu::descarregar_tela(r) {
+    if !levou {
         sujar(x0, y0, x1, y1);
     }
 }
@@ -359,7 +417,7 @@ pub unsafe fn adotar(video: &protocolo::Video) -> bool {
         );
     }
 
-    tela().is_some()
+    tela_fisica().is_some()
 }
 
 /// A geometria descreve uma tela em que a aritmética de pixel se sustenta?
@@ -429,8 +487,30 @@ pub unsafe fn sintetica(
     })
 }
 
-/// A tela desta máquina, se houver uma.
+/// A tela onde o console desenha, se houver uma.
+///
+/// A camada do console, quando há compositor; a tela física, antes dele e
+/// depois de uma falha fatal. Quem desenha texto quer esta. Quem quer saber o
+/// que o monitor mostra quer [`tela_fisica`].
 pub fn tela() -> Option<Tela> {
+    let fisica = tela_fisica()?;
+    let console = BASE_DO_CONSOLE.load(Ordering::Acquire);
+    if console == 0 {
+        return Some(fisica);
+    }
+    Some(Tela {
+        base: console,
+        largura: fisica.largura,
+        altura: fisica.altura,
+        stride: fisica.largura,
+        bytes_por_pixel: 4,
+        formato: Formato::Bgr,
+    })
+}
+
+/// A tela que o monitor mostra: o framebuffer, ou a memória do recurso do
+/// `virtio-gpu` que está na varredura.
+pub fn tela_fisica() -> Option<Tela> {
     let base = BASE.load(Ordering::Acquire);
     if base == 0 {
         return None;
@@ -513,10 +593,13 @@ impl Tela {
     /// ela precisar ser descarregada.
     ///
     /// A comparação da base é o que deixa de fora as telas sintéticas da
-    /// suíte: elas desenham em memória de quem as criou, e sujá-las não diz
-    /// nada sobre o que o monitor mostra.
+    /// suíte — elas desenham em memória de quem as criou, e sujá-las não diz
+    /// nada sobre o que o monitor mostra — e a tela física quando o console
+    /// está numa camada: aí quem escreve nela é o compositor, que já sabe o
+    /// que escreveu.
     fn sujar(&self, x0: u32, y0: u32, x1: u32, y1: u32) {
-        if DESCARREGADOR.load(Ordering::Relaxed) != 0 && self.base == BASE.load(Ordering::Relaxed) {
+        let rastreada = base_rastreada();
+        if rastreada != 0 && self.base == rastreada {
             sujar(x0, y0, x1, y1);
         }
     }
@@ -723,6 +806,43 @@ impl Tela {
         }
     }
 
+    /// Lê uma sequência de pixels a partir de `(x, y)`, no formato de
+    /// [`Cor::para_u32`]. O inverso de [`Tela::copiar_linha`].
+    ///
+    /// Existe para o compositor adotar o que já está na tela quando ele
+    /// assume — o banner e as linhas do boot —, em vez de começar de uma tela
+    /// em branco. Devolve quantos pixels leu: o que passar da borda direita,
+    /// ou uma linha fora da tela, não é lido.
+    pub fn ler_linha(&self, x: u32, y: u32, pixels: &mut [u32]) -> usize {
+        if y >= self.altura || x >= self.largura {
+            return 0;
+        }
+        let quantos = pixels.len().min((self.largura - x) as usize);
+        let Some(inicio) = self.endereco(x, y) else {
+            return 0;
+        };
+
+        if self.formato == Formato::Bgr && self.bytes_por_pixel == 4 {
+            let origem = inicio as *const u32;
+            for (i, pixel) in pixels[..quantos].iter_mut().enumerate() {
+                // SAFETY: as mesmas do caminho rápido de `copiar_linha`: `x +
+                // i` abaixo da largura, `y` abaixo da altura, região mapeada
+                // e alinhada a 32 bits. O byte alto — o alfa que ninguém usa
+                // — é zerado para o pixel sair no formato das superfícies.
+                *pixel = unsafe { core::ptr::read_volatile(origem.add(i)) } & 0x00FF_FFFF;
+            }
+            return quantos;
+        }
+
+        for (i, pixel) in pixels[..quantos].iter_mut().enumerate() {
+            *pixel = self
+                .ler_pixel(x + i as u32, y)
+                .map(Cor::para_u32)
+                .unwrap_or(0);
+        }
+        quantos
+    }
+
     /// Pinta a tela inteira.
     pub fn preencher(&self, cor: Cor) {
         self.retangulo(0, 0, self.largura, self.altura, cor);
@@ -763,7 +883,12 @@ pub fn banner() {
 /// A tela inteira aqui, e não uma faixa: o custo deixou de importar, e o que
 /// importa passou a ser não haver dúvida sobre o que aconteceu.
 pub fn falha() {
-    if let Some(tela) = tela() {
+    // O console volta à tela física antes de tudo: daqui em diante não há
+    // compositor em quem confiar, e o que se escrever depois da tela de falha
+    // — o relatório do post-mortem — tem de sair por cima dela, e não numa
+    // camada que ninguém mais compõe.
+    BASE_DO_CONSOLE.store(0, Ordering::Release);
+    if let Some(tela) = tela_fisica() {
         tela.preencher(Cor::FALHA);
     }
     // Num adaptador que só mostra o que se manda, a tela de falha precisa ser

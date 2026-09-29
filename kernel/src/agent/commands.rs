@@ -216,9 +216,10 @@ pub static COMANDOS: &[Command] = &[
     },
     Command {
         nome: "display.info",
-        resumo: "A pilha grafica: qual adaptador esta ativo, as telas dele, quanta memoria as \
-                 superficies seguram, o ultimo retangulo que chegou a tela e, num adaptador que \
-                 so mostra o que se manda, o que atravessou para o dispositivo.",
+        resumo: "A pilha grafica: qual adaptador esta ativo, as telas dele, as camadas do \
+                 compositor de baixo para cima, quanta memoria as superficies seguram, o ultimo \
+                 retangulo que chegou a tela e, num adaptador que so mostra o que se manda, o \
+                 que atravessou para o dispositivo.",
         params: &[],
         handler: display_info,
     },
@@ -464,7 +465,7 @@ fn system_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.field_str("cpu_vendor", cpu.como_str())?;
 
     w.key("framebuffer")?;
-    match crate::tela::tela() {
+    match crate::tela::tela_fisica() {
         Some(t) => {
             w.begin_object()?;
             w.field_u64("width", t.largura as u64)?;
@@ -1219,6 +1220,28 @@ fn display_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     }
     w.end_array()?;
 
+    // As camadas do compositor, de baixo para cima: o console primeiro. A
+    // posição é a da camada, que pode passar da tela.
+    w.key("layers")?;
+    w.begin_array()?;
+    let mut resultado = Ok(());
+    crate::grafico::camadas(|c| {
+        if resultado.is_ok() {
+            resultado = (|| {
+                w.begin_object()?;
+                w.field_u64("id", c.id as u64)?;
+                w.field_str("name", c.nome)?;
+                w.field_i64("x", c.x as i64)?;
+                w.field_i64("y", c.y as i64)?;
+                w.field_u64("width", c.largura as u64)?;
+                w.field_u64("height", c.altura as u64)?;
+                w.end_object()
+            })();
+        }
+    });
+    resultado?;
+    w.end_array()?;
+
     w.field_u64("surfaces", r.superficies)?;
     w.field_u64("surface_bytes", r.bytes_em_superficies)?;
     w.field_u64("updates", r.atualizacoes)?;
@@ -1395,8 +1418,47 @@ fn ui_tree(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.end_array()?;
     w.end_object()?;
 
+    // As camadas acima do console, na ordem em que estão empilhadas: a
+    // última é a que está por cima. A moldura é a parte que cai na tela.
+    let mut resultado = Ok(());
+    crate::grafico::camadas(|c| {
+        if c.id == crate::grafico::compositor::CAMADA_DO_CONSOLE || resultado.is_err() {
+            return;
+        }
+        resultado = escrever_camada(w, c);
+    });
+    resultado?;
+
     w.end_array()?;
     w.end_object()?;
+    w.end_object()
+}
+
+/// Uma camada do compositor, como elemento da árvore.
+fn escrever_camada(w: &mut JsonWriter, c: crate::grafico::compositor::InfoCamada) -> fmt::Result {
+    use crate::ui;
+
+    let id = ui::id_da_camada(c.id);
+    w.begin_object()?;
+    w.field_u64("id", id as u64)?;
+    w.field_str("role", ui::Papel::Janela.nome())?;
+    w.field_str("label", c.nome)?;
+    if let Some(tela) = ui::moldura_da_tela() {
+        let d = c.na_tela(tela.largura, tela.altura);
+        escrever_moldura(
+            w,
+            ui::Moldura {
+                x: d.x,
+                y: d.y,
+                largura: d.largura,
+                altura: d.altura,
+            },
+        )?;
+    }
+    escrever_acoes(w, id)?;
+    w.key("children")?;
+    w.begin_array()?;
+    w.end_array()?;
     w.end_object()
 }
 
@@ -1478,7 +1540,9 @@ fn video_sample(params: Json, w: &mut JsonWriter) -> fmt::Result {
 
     w.begin_object()?;
 
-    let Some(tela) = crate::tela::tela() else {
+    // A tela física: o que o monitor mostra, depois do compositor. É contra
+    // ela que a fumaça compara a fotografia do hospedeiro.
+    let Some(tela) = crate::tela::tela_fisica() else {
         w.field_bool("present", false)?;
         return w.end_object();
     };
