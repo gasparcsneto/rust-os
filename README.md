@@ -252,7 +252,7 @@ kernel/src/
 ├── usb/
 │   ├── mod.rs       o barramento por onde entram os periféricos de verdade
 │   ├── xhci.rs      o controlador xHCI: a porta de entrada do USB
-│   └── hid.rs       o relatório de um teclado USB, traduzido
+│   └── hid.rs       os relatórios de um teclado e de um mouse USB, traduzidos
 ├── agent/
 │   ├── mod.rs       laço de atendimento e despacho
 │   ├── json.rs      JSON sem alocação (streaming + varredura)
@@ -330,6 +330,8 @@ O contraste no caminho de boot é grande:
 | Vídeo sem tela linear | `virtio-gpu` no PCI, recurso e varredura postos por nós | o mesmo dispositivo, o mesmo driver |
 | Teclado | controlador 8042, scancode na IRQ 1 | `virtio-input` no PCI, evento na fila |
 | Teclado USB | `qemu-xhci` no PCI, protocolo de boot do HID | o mesmo controlador, o mesmo driver |
+| Mouse | PS/2, pela porta auxiliar do 8042, na IRQ 12 | `virtio-tablet` no PCI, posição absoluta |
+| Mouse USB | o mesmo controlador do teclado USB, protocolo de boot | o mesmo controlador, o mesmo driver |
 | Dormir sem corrida | `sti; hlt`, par atômico | `wfi` acorda com IRQ mascarada |
 | Troca de contexto | troca de pilha (`rsp`) | troca do quadro de exceção |
 | Ceder a vez | chamada de função comum | `svc`, pelo mesmo caminho da preempção |
@@ -1159,12 +1161,24 @@ caminho até o mesmo `press`, depois do `ui.act` do agente e da F1:
 info ui  pessoa: press no elemento 5
 ```
 
-**Dois tipos de dispositivo.** No x86, o mouse PS/2, pela porta auxiliar do
-mesmo 8042 do teclado, na IRQ 12: diz **quanto** andou, em pacotes de três
-bytes. No ARM, que não tem 8042, o `virtio-tablet`: diz **onde** o ponteiro
-está, numa escala dele que o driver lê do espaço de configuração. Os dois
-drivers traduzem para `ponteiro::relativo` ou `ponteiro::absoluto`; daí para
-cima ninguém sabe qual chegou.
+**Três dispositivos.** No x86, o mouse PS/2, pela porta auxiliar do mesmo
+8042 do teclado, na IRQ 12: diz **quanto** andou, em pacotes de três bytes.
+No ARM, que não tem 8042, o `virtio-tablet`: diz **onde** o ponteiro está,
+numa escala dele que o driver lê do espaço de configuração. E, nas duas, o
+mouse USB, no protocolo de boot do HID — o mesmo que o teclado USB fala, e
+pela mesma razão: três bytes com significado fixo, sem interpretar o
+descritor de relatório. Os três drivers traduzem para `ponteiro::relativo`
+ou `ponteiro::absoluto`; daí para cima ninguém sabe qual chegou.
+
+**O xHCI com mais de um dispositivo.** O driver USB nasceu atendendo um só —
+o teclado da fase 3 —, e o mouse precisou do segundo. O que era de cada
+dispositivo (porta, slot, endpoint de controle, buffer, o relatório anterior
+do teclado) saiu do controlador para uma estrutura por dispositivo, e o anel
+de eventos, que é um só para todos, passou a ser lido pelo slot e pelo
+endpoint de cada evento: sem isso, um relatório do mouse seria lido como
+tecla. Os relatórios só são pendurados depois de todos os dispositivos
+configurados, para que um relatório do teclado não seja tomado pela
+conclusão de um pedido de configuração do mouse.
 
 **O cursor é uma camada.** Transparente fora da seta, pelo alfa por pixel do
 compositor, e fixa no topo: uma janela trazida para a frente continua
@@ -1192,13 +1206,20 @@ cima de uma camada nova, a transparência fora da seta, o clique no botão
 limpando, os eventos do `virtio-input` e os pacotes PS/2 montados à mão — e
 pela fumaça, no kernel de produção, com o QEMU mandando eventos de verdade
 pelo QMP: o ponteiro vai até o botão, a seta aparece lá, e o clique limpa.
-Nas cinco máquinas que têm ponteiro; o ARM com teclado USB não tem, porque o
-driver xHCI atende um dispositivo só, e o tablet USB fica para quando atender
-mais.
+Nas seis máquinas. Nas duas com USB, a sonda confere também **por onde** o
+ponteiro andou — relatórios do mouse USB contados em `display.info` —, como
+a do teclado já fazia: no x86 o PS/2 continua lá, e sem essa conferência a
+sonda passaria pelo mouse que o emulador escolhesse.
 
-Doze mutações, doze reprovadas — uma delas, a de clicar ao soltar, só pelo
-caso do PS/2 até o caso do clique passar a conferir a fila no apertar, e
-esse roda também no ARM.
+Doze mutações no mouse, doze reprovadas — uma delas, a de clicar ao
+soltar, só pelo caso do PS/2 até o caso do clique passar a conferir a fila
+no apertar, e esse roda também no ARM.
+
+O mouse USB trouxe mais oito. Sete reprovadas. Uma delas — o pedido de
+relatório cortado em três bytes — só depois de a sonda do teclado passar a
+segurar duas teclas juntas (`d-e`): com uma tecla de cada vez, três bytes
+bastam. A que sobra declara um slot só ao controlador, e o do emulador não
+cobra o limite.
 
 ## Sistema de arquivos
 
@@ -1930,7 +1951,7 @@ padronizado.
       texto que vai para o console humano é desenhado na tela, pelo mesmo
       funil, nas duas arquiteturas. Teclado no x86 (PS/2) e no ARM
       (virtio-input), e teclado USB por um driver xHCI próprio — três
-      caminhos de hardware, o mesmo `abC` no fim. E o interpretador, que
+      caminhos de hardware, o mesmo `abCde` no fim. E o interpretador, que
       despacha o que se digita pelo **mesmo** registro de comandos que o canal
       do agente publica.
       **Fase 3 completa.**
@@ -2012,7 +2033,7 @@ padronizado.
       camada de baixo. E a barra superior, com o primeiro elemento que
       aceita `press` — pela árvore e pela F1, pelo mesmo caminho. E o console
       rolando, em vez de recomeçar do topo. E o mouse — PS/2 no x86,
-      `virtio-tablet` no ARM —, com o cursor como camada transparente fixa no
+      `virtio-tablet` no ARM, USB nas duas —, com o cursor como camada transparente fixa no
       topo e o clique no mesmo botão. A seguir: o servidor de janelas, o
       roteamento de entrada e a tipografia.
       E aqui a inversão do projeto encontra a interface gráfica. O servidor de

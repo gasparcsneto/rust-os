@@ -1254,6 +1254,9 @@ fn display_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.field_u64("y", y as u64)?;
     w.field_u64("clicks", cliques)?;
     w.field_u64("moves", movimentos)?;
+    // Quantos relatórios o mouse USB entregou: numa máquina com o PS/2 e o
+    // USB, é o que diz por qual dos dois o ponteiro andou.
+    w.field_u64("usb_reports", crate::usb::hid::relatorios_do_mouse())?;
     w.end_object()?;
 
     w.field_u64("surfaces", r.superficies)?;

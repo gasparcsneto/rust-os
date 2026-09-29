@@ -3611,10 +3611,16 @@ fn comando_qemu(
         }
         (Teclado::Nativo, Arquitetura::X86_64) => {}
         (Teclado::Usb, _) => {
-            // O controlador antes do dispositivo: o `usb-kbd` precisa de um
+            // O controlador antes dos dispositivos: o `usb-kbd` precisa de um
             // barramento USB para se pendurar, e é o `qemu-xhci` que o cria.
             qemu.args(["-device", "qemu-xhci"]);
             qemu.args(["-device", "usb-kbd"]);
+            // E o mouse USB, pela mesma razão do teclado: o mesmo
+            // dispositivo e o mesmo driver nas duas arquiteturas. No x86 ele
+            // convive com o PS/2, e é ele que recebe o movimento — o
+            // emulador entrega ao último mouse que o kernel começou a ler, e
+            // a sonda confere que foi o USB.
+            qemu.args(["-device", "usb-mouse"]);
         }
     }
 
@@ -3909,14 +3915,10 @@ fn fumaca(
     // não usa.
     let tela_no_monitor =
         (arch == Arquitetura::Aarch64 || video == Video::Virtio).then_some("video0");
-    // Um apontador para a sonda do mouse: o PS/2 do x86, que existe em toda
-    // máquina `pc`, e o tablet virtio do ARM, que só entra com o teclado
-    // nativo. O tablet USB ainda não tem driver.
-    let tem_apontador = arch == Arquitetura::X86_64 || teclado == Teclado::Nativo;
     let resultado = conversar(
         &socket,
         &caminho_monitor(arch),
-        tem_apontador.then(|| caminho_qmp(arch)).as_deref(),
+        &caminho_qmp(arch),
         teclado,
         tela_no_monitor,
         filho.id(),
@@ -3946,7 +3948,7 @@ fn fumaca(
 fn conversar(
     socket: &Path,
     monitor: &Path,
-    qmp: Option<&Path>,
+    qmp: &Path,
     teclado: Teclado,
     tela_no_monitor: Option<&str>,
     qemu: u32,
@@ -4105,10 +4107,7 @@ fn conversar(
     sob_interpretador(monitor, &mut escrita, &mut leitor)?;
     sob_arvore(&mut escrita, &mut leitor)?;
     sob_barra(monitor, &mut escrita, &mut leitor)?;
-    match qmp {
-        Some(qmp) => sob_mouse(qmp, &mut escrita, &mut leitor)?,
-        None => println!("[xtask] fumaça: esta máquina não tem apontador; o mouse fica de fora"),
-    }
+    sob_mouse(qmp, teclado, &mut escrita, &mut leitor)?;
     sob_tela(monitor, tela_no_monitor, &mut escrita, &mut leitor)?;
     sob_fragmento(&mut escrita, &mut leitor)?;
     // Por último, porque não há volta: depois dela o kernel só responde o
@@ -4191,7 +4190,7 @@ fn sob_falha(
 }
 
 /// O que as três teclas da sonda devem produzir.
-const ESPERADO_DO_TECLADO: &str = "abC";
+const ESPERADO_DO_TECLADO: &str = "abCde";
 
 /// O valor que vem logo depois de uma chave, sem interpretar o JSON inteiro.
 ///
@@ -4226,6 +4225,12 @@ fn valor_de(resposta: &str, chave: &str) -> Option<String> {
 ///
 /// `shift-c` está aqui de propósito: ele exercita o estado de modificador,
 /// que é a parte com memória — e portanto a que pode ficar presa.
+///
+/// E `d-e`, as duas seguradas juntas: no USB, o relatório passa a carregar
+/// duas teclas, e só a segunda é nova. Um driver que lesse o relatório pela
+/// metade — os três primeiros bytes, que bastam para uma tecla de cada vez —
+/// perderia o `e`. Medido: com essa mutação no pedido do xHCI, o resto da
+/// fumaça passava.
 fn sob_teclado(
     monitor: &Path,
     teclado: Teclado,
@@ -4245,7 +4250,7 @@ fn sob_teclado(
     mon.set_read_timeout(Some(Duration::from_millis(500)))
         .map_err(|e| format!("teclado: timeout do monitor: {e}"))?;
 
-    for tecla in ["a", "b", "shift-c"] {
+    for tecla in ["a", "b", "shift-c", "d-e"] {
         mon.write_all(format!("sendkey {tecla}\n").as_bytes())
             .and_then(|()| mon.flush())
             .map_err(|e| format!("teclado: falha ao mandar `{tecla}`: {e}"))?;
@@ -4312,7 +4317,7 @@ fn sob_teclado(
         _ => {}
     }
 
-    println!("  [teclado] ok  `a`, `b` e `shift-c` chegaram como `{ESPERADO_DO_TECLADO}`");
+    println!("  [teclado] ok  `a`, `b`, `shift-c` e `d-e` chegaram como `{ESPERADO_DO_TECLADO}`");
     Ok(())
 }
 
@@ -4331,7 +4336,7 @@ fn sob_teclado(
 /// sem precisar ler pixels. Uma sonda que conferisse a tela teria de
 /// reconhecer glifos, e passaria a testar o reconhecedor.
 ///
-/// O `ret` da frente não é enfeite: a sonda anterior digitou `abC` e essa
+/// O `ret` da frente não é enfeite: a sonda anterior digitou `abCde` e essa
 /// linha ainda está aberta no interpretador. Executá-la — e receber
 /// "comando desconhecido" — é o que devolve a linha vazia, e de quebra
 /// exercita o caminho de recusa.
@@ -4656,6 +4661,52 @@ fn sob_arvore(escrita: &mut UnixStream, leitor: &mut BufReader<UnixStream>) -> R
 ///
 /// O QMP responde uma linha por pedido, mas também manda eventos quando quer
 /// — um `{"event": ...}` pode chegar antes da resposta. Lê até a resposta.
+/// Abre o QMP do emulador e passa da saudação e da negociação.
+fn qmp_abrir(qmp: &Path) -> Result<(UnixStream, BufReader<UnixStream>), String> {
+    let fluxo = UnixStream::connect(qmp).map_err(|e| format!("mouse: o QMP nao aceitou: {e}"))?;
+    fluxo
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|e| format!("mouse: {e}"))?;
+    let mut escrita = fluxo.try_clone().map_err(|e| format!("mouse: {e}"))?;
+    let mut leitor = BufReader::new(fluxo);
+    let mut saudacao = String::new();
+    leitor
+        .read_line(&mut saudacao)
+        .map_err(|e| format!("mouse: o QMP nao saudou: {e}"))?;
+    qmp_pedir(
+        &mut escrita,
+        &mut leitor,
+        r#"{"execute":"qmp_capabilities"}"#,
+    )?;
+    Ok((escrita, leitor))
+}
+
+/// Manda eventos de entrada pelo QMP.
+///
+/// O QMP recusa o formato que nenhum dispositivo da máquina entende — o
+/// relativo numa máquina só com o tablet, o absoluto numa sem tablet — com
+/// "Input handler not found". Essa recusa é esperada, e devolve falso;
+/// qualquer outra é defeito.
+fn qmp_eventos(
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+    lista: &str,
+    formato: &str,
+) -> Result<bool, String> {
+    let r = qmp_pedir(
+        escrita,
+        leitor,
+        &format!(r#"{{"execute":"input-send-event","arguments":{{"events":[{lista}]}}}}"#),
+    )?;
+    if !r.contains("\"error\"") {
+        return Ok(true);
+    }
+    if r.contains(&format!("Input handler not found for event type {formato}")) {
+        return Ok(false);
+    }
+    Err(format!("mouse: o QMP recusou o movimento\n  {r}"))
+}
+
 fn qmp_pedir(
     escrita: &mut UnixStream,
     leitor: &mut BufReader<UnixStream>,
@@ -4684,15 +4735,16 @@ fn qmp_pedir(
 ///
 /// O movimento sai do QMP do emulador nos dois formatos — posição absoluta
 /// e deslocamento — e cada dispositivo recebe o que entende: o tablet virtio
-/// do ARM, a posição; o mouse PS/2 do x86, o deslocamento. O relativo começa
-/// por um deslocamento enorme para o canto de cima, que o kernel prende em
-/// zero: a partir dali, andar até o botão é andar a posição dele.
+/// do ARM, a posição; o mouse PS/2 do x86 e o mouse USB, o deslocamento. O
+/// relativo anda a diferença entre onde o kernel diz que o ponteiro está e o
+/// botão.
 ///
 /// Onde está o botão sai da árvore semântica, e não de um número escrito
 /// aqui: a sonda clica onde a árvore diz que ele está, e é isso que ela
 /// confere — que o clique e a árvore concordam.
 fn sob_mouse(
     qmp: &Path,
+    teclado: Teclado,
     escrita: &mut UnixStream,
     leitor: &mut BufReader<UnixStream>,
 ) -> Result<(), String> {
@@ -4743,25 +4795,7 @@ fn sob_mouse(
     };
     let (largura, altura) = (dimensao("width")?, dimensao("height")?);
 
-    let fluxo = UnixStream::connect(qmp).map_err(|e| format!("mouse: o QMP nao aceitou: {e}"))?;
-    fluxo
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .map_err(|e| format!("mouse: {e}"))?;
-    let mut qmp_escrita = fluxo.try_clone().map_err(|e| format!("mouse: {e}"))?;
-    let mut qmp_leitor = BufReader::new(fluxo);
-    let mut saudacao = String::new();
-    qmp_leitor
-        .read_line(&mut saudacao)
-        .map_err(|e| format!("mouse: o QMP nao saudou: {e}"))?;
-    qmp_pedir(
-        &mut qmp_escrita,
-        &mut qmp_leitor,
-        r#"{"execute":"qmp_capabilities"}"#,
-    )?;
-
-    let eventos = |lista: &str| {
-        format!(r#"{{"execute":"input-send-event","arguments":{{"events":[{lista}]}}}}"#)
-    };
+    let (mut qmp_escrita, mut qmp_leitor) = qmp_abrir(qmp)?;
     // A escala do QMP para posição absoluta vai de 0 a 32767.
     let escala = |v: u32, lado: u32| (v as u64 * 32767 / (lado.max(2) - 1) as u64) as u32;
     let absoluto = format!(
@@ -4774,20 +4808,7 @@ fn sob_mouse(
             r#"{{"type":"rel","data":{{"axis":"x","value":{dx}}}}},{{"type":"rel","data":{{"axis":"y","value":{dy}}}}}"#
         )
     };
-    // O QMP recusa o formato que nenhum dispositivo da máquina entende — o
-    // relativo no ARM, o absoluto no x86 — com "Input handler not found".
-    // Essa recusa é esperada; qualquer outra é defeito.
-    let mut enviar = |pedido: &str, formato: &str| -> Result<bool, String> {
-        let r = qmp_pedir(&mut qmp_escrita, &mut qmp_leitor, pedido)?;
-        if !r.contains("\"error\"") {
-            return Ok(true);
-        }
-        if r.contains(&format!("Input handler not found for event type {formato}")) {
-            return Ok(false);
-        }
-        Err(format!("mouse: o QMP recusou o movimento\n  {r}"))
-    };
-    let absoluto_aceito = enviar(&eventos(&absoluto), "abs")?;
+    let absoluto_aceito = qmp_eventos(&mut qmp_escrita, &mut qmp_leitor, &absoluto, "abs")?;
     std::thread::sleep(Duration::from_millis(150));
 
     // O relativo anda a diferença entre onde o ponteiro está e o botão, em
@@ -4809,7 +4830,12 @@ fn sob_mouse(
     while faltam_x != 0 || faltam_y != 0 {
         let passo_x = faltam_x.clamp(-100, 100);
         let passo_y = faltam_y.clamp(-100, 100);
-        if !enviar(&eventos(&relativo(passo_x, passo_y)), "rel")? {
+        if !qmp_eventos(
+            &mut qmp_escrita,
+            &mut qmp_leitor,
+            &relativo(passo_x, passo_y),
+            "rel",
+        )? {
             break;
         }
         relativo_aceito = true;
@@ -4854,16 +4880,38 @@ fn sob_mouse(
     if !ultima.contains(r#""name":"cursor""#) || !ultima.contains(r#""blend":"alpha""#) {
         return Err(format!("mouse: o cursor nao esta nas camadas\n  {ultima}"));
     }
+    // E por **onde** andou, pela mesma razão da sonda do teclado: numa
+    // máquina com dois mouses, sem esta parte ela provaria só aquele que o
+    // emulador escolhesse.
+    let ponteiro = ultima
+        .find(r#""pointer":"#)
+        .map(|i| &ultima[i..])
+        .unwrap_or("");
+    let relatorios: u64 = valor_de(ponteiro, r#""usb_reports":"#)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    match teclado {
+        Teclado::Usb if relatorios == 0 => {
+            return Err(format!(
+                "mouse: o ponteiro andou sem passar pelo mouse USB\n  {ultima}"
+            ));
+        }
+        Teclado::Nativo if relatorios > 0 => {
+            return Err(format!(
+                "mouse: o ponteiro passou pelo USB numa maquina sem mouse USB\n  {ultima}"
+            ));
+        }
+        _ => {}
+    }
     println!("  [mouse] ok  o ponteiro chegou ao botao em ({cx}, {cy}), com o cursor na tela");
 
     // O clique.
     for down in [true, false] {
-        qmp_pedir(
+        qmp_eventos(
             &mut qmp_escrita,
             &mut qmp_leitor,
-            &eventos(&format!(
-                r#"{{"type":"btn","data":{{"down":{down},"button":"left"}}}}"#
-            )),
+            &format!(r#"{{"type":"btn","data":{{"down":{down},"button":"left"}}}}"#),
+            "btn",
         )?;
         std::thread::sleep(Duration::from_millis(100));
     }

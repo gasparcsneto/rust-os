@@ -9,15 +9,26 @@
 //!
 //! # O que este driver é
 //!
-//! O mínimo para um teclado. O xHCI é uma máquina de anéis: um anel de
-//! comandos que o driver preenche e o controlador consome, um anel de eventos
-//! ao contrário, e um anel de transferência por endpoint. Tudo o que este
-//! módulo faz é montar esses anéis, pedir um slot para o dispositivo, e ler o
-//! que a porta entrega.
+//! O mínimo para um teclado e um mouse. O xHCI é uma máquina de anéis: um
+//! anel de comandos que o driver preenche e o controlador consome, um anel de
+//! eventos ao contrário, e um anel de transferência por endpoint. Tudo o que
+//! este módulo faz é montar esses anéis, pedir um slot para cada dispositivo
+//! nas portas da raiz, e ler o que eles entregam.
 //!
-//! Não há detecção a quente, nem `hub`, nem mais de um dispositivo. Cada uma
-//! dessas coisas é um subsistema, e nenhuma é necessária para responder à
-//! pergunta que a fase 3 faz: uma pessoa consegue digitar?
+//! # Um dispositivo por porta, vários por controlador
+//!
+//! Nasceu com um dispositivo só — a fase 3 perguntava se uma pessoa
+//! consegue digitar, e um teclado respondia. O mouse trouxe o segundo, e
+//! com ele o que um só não pedia: o que é de cada dispositivo (porta, slot,
+//! endpoint de controle, buffer, o relatório anterior do teclado) saiu do
+//! controlador para [`DispositivoUsb`], e o anel de eventos, que é um só
+//! para todos, passou a ser lido pelo slot e pelo endpoint de cada evento.
+//!
+//! Não há detecção a quente, nem `hub`: o que estiver nas portas da raiz no
+//! boot é o que há. Cada uma dessas coisas é um subsistema, e nenhuma é
+//! necessária para uma pessoa digitar e apontar.
+
+use alloc::vec::Vec;
 
 use crate::pci::Dispositivo;
 
@@ -438,44 +449,71 @@ const SUCESSO: u32 = 1;
 /// não vai responder.
 const VOLTAS_DE_EVENTO: u32 = 100_000;
 
+/// Quantos dispositivos este driver atende.
+///
+/// Quatro: um teclado e um mouse, com folga. O controlador precisa saber
+/// quantos slots vão ser usados antes de aceitar qualquer comando, e cada
+/// slot a mais custa uma entrada de tabela que ninguém lê. Um dispositivo
+/// além disso fica sem slot, e o log diz em que porta.
+const DISPOSITIVOS: usize = 4;
+
 /// Tudo o que este driver precisa guardar entre uma chamada e outra.
 pub struct Xhci {
     c: Controlador,
     comandos: Anel,
     eventos: AnelDeEventos,
-    /// A porta onde o dispositivo está, contada a partir de 1.
+    /// A tabela de contextos de dispositivo.
+    dcbaa: u64,
+    /// Os dispositivos configurados, um por slot.
+    dispositivos: Vec<DispositivoUsb>,
+}
+
+/// Um dispositivo numa porta da raiz, depois de endereçado.
+struct DispositivoUsb {
+    /// A porta onde ele está, contada a partir de 1.
     porta: u8,
     /// A velocidade que a porta reportou depois do reinício.
     velocidade: u32,
-    /// A tabela de contextos de dispositivo.
-    dcbaa: u64,
-    /// O slot que o controlador deu a este dispositivo.
+    /// O slot que o controlador deu a ele.
     slot: u8,
-    /// O contexto que o controlador mantém sobre o dispositivo.
-    contexto: u64,
     /// O contexto que **nós** preenchemos para pedir mudanças.
     entrada: u64,
     /// O anel de transferência do endpoint de controle.
-    ep0: Option<Anel>,
-    /// A página por onde os dados de controle entram e saem.
+    ep0: Anel,
+    /// A página por onde os dados de controle e os relatórios entram.
     buffer: u64,
-    /// O teclado, depois de configurado.
-    teclado: Option<TecladoUsb>,
+    /// O teclado ou o mouse, depois de configurado.
+    hid: Option<Hid>,
 }
 
 // SAFETY: os ponteiros apontam para frames que este driver aloca e nunca
 // devolve, e todo acesso passa pelo `Mutex` que guarda o dono.
 unsafe impl Send for Xhci {}
 
-impl Xhci {
+impl Controlador {
     /// Toca a campainha de um slot. Slot zero é o anel de comandos.
     fn campainha(&self, slot: u8, valor: u32) {
-        let endereco = self.c.campainhas + u64::from(slot) * 4;
+        let endereco = self.campainhas + u64::from(slot) * 4;
         // SAFETY: o array de campainhas tem uma entrada por slot, e `slot` é
         // no máximo o número de slots que o controlador declarou.
-        unsafe { self.c.escrever32(endereco, valor) };
+        unsafe { self.escrever32(endereco, valor) };
     }
 
+    /// Diz ao controlador até onde o anel de eventos foi lido.
+    fn devolver_eventos(&self, eventos: &AnelDeEventos) {
+        // SAFETY: o bloco de tempo de execução está dentro do BAR.
+        unsafe {
+            // Bit 3 é "handler busy", e escrevê-lo de volta é como se
+            // reconhece a interrupção do interruptor.
+            self.escrever64(
+                self.execucao + intr::BASE + intr::ERDP,
+                eventos.ponteiro_de_leitura() | (1 << 3),
+            );
+        }
+    }
+}
+
+impl Xhci {
     /// Espera um evento do tipo pedido e devolve-o.
     ///
     /// Espera em laço porque não há mais nada para fazer: isto roda no boot,
@@ -486,22 +524,15 @@ impl Xhci {
             while let Some(evento) = self.eventos.colher() {
                 // O ponteiro de leitura é atualizado a cada evento colhido, e
                 // não só no fim: é ele que diz ao controlador que há espaço.
-                let ponteiro = self.eventos.ponteiro_de_leitura();
-                // SAFETY: o bloco de tempo de execução está dentro do BAR.
-                unsafe {
-                    // Bit 3 é "handler busy", e escrevê-lo de volta é como se
-                    // reconhece a interrupção do interruptor.
-                    self.c.escrever64(
-                        self.c.execucao + intr::BASE + intr::ERDP,
-                        ponteiro | (1 << 3),
-                    );
-                }
+                self.c.devolver_eventos(&self.eventos);
                 if tipo_de(evento.controle) == tipo {
                     return Some(evento);
                 }
                 // Eventos de outro tipo — mudança de porta, sobretudo —
                 // chegam no meio e são consumidos em silêncio: eles não são
-                // erro, são o controlador contando o que fez.
+                // erro, são o controlador contando o que fez. Relatórios não
+                // chegam aqui: eles só são pendurados depois de todos os
+                // dispositivos configurados — ver [`init`].
             }
             core::hint::spin_loop();
         }
@@ -513,7 +544,7 @@ impl Xhci {
     /// Devolve o TRB do evento, de onde saem o código de conclusão e o slot.
     fn comandar(&mut self, parametro: u64, controle: u32) -> Option<Trb> {
         self.comandos.empurrar(parametro, 0, controle);
-        self.campainha(0, 0);
+        self.c.campainha(0, 0);
         self.esperar_evento(trb::EVENTO_DE_COMANDO)
     }
 
@@ -523,10 +554,13 @@ impl Xhci {
         c.reiniciar()?;
 
         // O controlador precisa saber quantos slots vamos usar antes de
-        // aceitar qualquer comando. Um só: há um teclado, e slots que ninguém
-        // usa custam uma entrada de tabela cada.
+        // aceitar qualquer comando — ver [`DISPOSITIVOS`]. O do emulador não
+        // cobra: com um slot declarado, ele dá o segundo do mesmo jeito, e a
+        // mutação que declara um só passa pela fumaça. O número certo está
+        // aqui pela especificação, que manda o controlador recusar.
+        let slots = (DISPOSITIVOS as u32).min(u32::from(c.slots));
         // SAFETY: registradores operacionais, dentro do BAR.
-        unsafe { c.escrever32(c.operacional + op::CONFIG, 1) };
+        unsafe { c.escrever32(c.operacional + op::CONFIG, slots) };
 
         // A tabela de contextos de dispositivo. O controlador escreve nela o
         // endereço do contexto de cada slot; a entrada zero é reservada para
@@ -586,24 +620,14 @@ impl Xhci {
             c,
             comandos,
             eventos,
-            porta: 0,
-            velocidade: 0,
             dcbaa,
-            slot: 0,
-            contexto: 0,
-            entrada: 0,
-            ep0: None,
-            buffer: crate::frames::alocar().ok_or("sem frame para o buffer de controle")?,
-            teclado: None,
+            dispositivos: Vec::new(),
         })
     }
 
-    /// Acha a porta com dispositivo e a reinicia, deixando-a habilitada.
-    fn preparar_porta(&mut self) -> Result<(), &'static str> {
-        let porta = (1..=self.c.portas)
-            .find(|p| self.c.portsc(*p) & PORTA_CONECTADA != 0)
-            .ok_or("nenhuma porta com dispositivo")?;
-
+    /// Reinicia uma porta com dispositivo, deixando-a habilitada, e devolve
+    /// a velocidade que ela reportou.
+    fn preparar_porta(&self, porta: u8) -> Result<u32, &'static str> {
         // O reinício da porta é o que a habilita. Escrever preservando os bits
         // de estado que se limpam com 1 é obrigatório: uma escrita ingênua
         // apagaria as mudanças que ainda não foram lidas.
@@ -622,18 +646,67 @@ impl Xhci {
             return Err("a porta nao habilitou depois do reinicio");
         }
 
-        self.porta = porta;
         // A velocidade só é válida depois do reinício, e é ela que decide o
         // tamanho do pacote do endpoint de controle.
-        self.velocidade = (estado >> 10) & 0xF;
-        Ok(())
+        Ok((estado >> 10) & 0xF)
+    }
+
+    /// Leva o dispositivo de uma porta de "conectado" a "falando": porta
+    /// habilitada, endereço, e o teclado ou o mouse configurado.
+    fn preparar_dispositivo(&mut self, porta: u8) -> Result<DispositivoUsb, &'static str> {
+        let velocidade = self.preparar_porta(porta)?;
+        crate::log_info!(
+            "usb",
+            "porta {} habilitada, velocidade {}",
+            porta,
+            velocidade
+        );
+
+        // E o primeiro comando de verdade, que é o que prova que os dois anéis
+        // funcionam: o de comandos, que o controlador leu, e o de eventos, por
+        // onde ele respondeu.
+        let mut d = self.enderecar(porta, velocidade)?;
+        crate::log_info!("usb", "dispositivo no slot {}, enderecado", d.slot);
+
+        // Quem é o dispositivo, antes de configurá-lo. Não muda decisão
+        // nenhuma: está aqui porque um teclado que não funciona e um
+        // dispositivo que não é teclado são investigações diferentes, e esta
+        // linha separa as duas.
+        match self.controle(
+            &mut d,
+            pedido::ENTRADA_PADRAO,
+            pedido::PEGAR_DESCRITOR,
+            pedido::DESCRITOR_DE_DISPOSITIVO,
+            0,
+            18,
+        ) {
+            Ok(_) => crate::log_info!(
+                "usb",
+                "dispositivo {:04x}:{:04x}",
+                u16::from(d.byte(8)) | (u16::from(d.byte(9)) << 8),
+                u16::from(d.byte(10)) | (u16::from(d.byte(11)) << 8)
+            ),
+            Err(motivo) => crate::log_warn!("usb", "descritor do dispositivo nao veio: {}", motivo),
+        }
+
+        self.preparar_hid(&mut d)?;
+        Ok(d)
     }
 }
 
 /// O controlador da máquina, se houver um.
 static XHCI: spin::Mutex<Option<Xhci>> = spin::Mutex::new(None);
 
-/// Procura o controlador, sobe-o e prepara a porta do dispositivo.
+/// Procura o controlador, sobe-o e configura o que estiver nas portas.
+///
+/// # A ordem: todos configurados, e só então os relatórios
+///
+/// Configurar um dispositivo é esperar eventos de transferência do
+/// endpoint de controle dele. Se o teclado já tivesse relatórios
+/// pendurados enquanto o mouse é configurado, um relatório do teclado
+/// poderia chegar no meio, e seria tomado pela conclusão de um pedido do
+/// mouse — e consumido. Pendurar tudo no fim deixa a configuração com um
+/// anel de eventos que só fala de configuração.
 pub fn init() {
     let mut alvo = None;
     crate::pci::com_dispositivos(|d| {
@@ -672,54 +745,36 @@ pub fn init() {
         xhci.c.portas
     );
 
-    if let Err(motivo) = xhci.preparar_porta() {
-        crate::log_warn!("usb", "porta nao preparada: {}", motivo);
-        return;
-    }
-
-    crate::log_info!(
-        "usb",
-        "porta {} habilitada, velocidade {}",
-        xhci.porta,
-        xhci.velocidade
-    );
-
-    // E o primeiro comando de verdade, que é o que prova que os dois anéis
-    // funcionam: o de comandos, que o controlador leu, e o de eventos, por
-    // onde ele respondeu.
-    if let Err(motivo) = xhci.enderecar() {
-        crate::log_warn!("usb", "dispositivo nao enderecado: {}", motivo);
-        return;
-    }
-    crate::log_info!("usb", "dispositivo no slot {}, enderecado", xhci.slot);
-
-    // Quem é o dispositivo, antes de configurá-lo. Não muda decisão nenhuma:
-    // está aqui porque um teclado que não funciona e um dispositivo que não é
-    // teclado são investigações diferentes, e esta linha separa as duas.
-    match xhci.controle(
-        pedido::ENTRADA_PADRAO,
-        pedido::PEGAR_DESCRITOR,
-        pedido::DESCRITOR_DE_DISPOSITIVO,
-        0,
-        18,
-    ) {
-        Ok(_) => crate::log_info!(
-            "usb",
-            "dispositivo {:04x}:{:04x}",
-            u16::from(xhci.byte(8)) | (u16::from(xhci.byte(9)) << 8),
-            u16::from(xhci.byte(10)) | (u16::from(xhci.byte(11)) << 8)
-        ),
-        Err(motivo) => crate::log_warn!("usb", "descritor do dispositivo nao veio: {}", motivo),
-    }
-
-    match xhci.preparar_teclado() {
-        Ok(()) => crate::log_info!("usb", "teclado usb pronto, protocolo de boot"),
-        Err(motivo) => {
-            crate::log_warn!("usb", "teclado usb nao preparado: {}", motivo);
-            return;
+    // Cada porta com dispositivo, uma de cada vez. Um dispositivo que falha
+    // não leva os outros junto: o log diz qual porta e por quê, e a próxima
+    // é tentada.
+    for porta in 1..=xhci.c.portas {
+        if xhci.c.portsc(porta) & PORTA_CONECTADA == 0 {
+            continue;
+        }
+        if xhci.dispositivos.len() == DISPOSITIVOS {
+            crate::log_warn!(
+                "usb",
+                "porta {}: sem slot, o driver atende {}",
+                porta,
+                DISPOSITIVOS
+            );
+            continue;
+        }
+        match xhci.preparar_dispositivo(porta) {
+            Ok(d) => xhci.dispositivos.push(d),
+            Err(motivo) => crate::log_warn!("usb", "porta {}: {}", porta, motivo),
         }
     }
 
+    if xhci.dispositivos.is_empty() {
+        crate::log_warn!("usb", "nenhum teclado nem mouse nas portas");
+        return;
+    }
+
+    for i in 0..xhci.dispositivos.len() {
+        xhci.pendurar_relatorios(i);
+    }
     *XHCI.lock() = Some(xhci);
 }
 // ---------------------------------------------------------------------------
@@ -757,34 +812,36 @@ impl Xhci {
     fn escrever_contexto(&self, frame: u64, contexto: usize, dword: usize, valor: u32) {
         let base = crate::arch::acesso_fisico(frame);
         let deslocamento = contexto * self.tamanho_do_contexto() + dword * 4;
-        // SAFETY: o maior contexto que este driver usa é o de índice 3, e
-        // 4 * 64 bytes cabem folgados no frame de 4096.
+        // SAFETY: o maior DCI que um endpoint pode ter é 31, e o contexto dele
+        // é o de índice 32: 33 contextos de 64 bytes são 2112, que cabem no
+        // frame de 4096.
         unsafe { core::ptr::write_volatile(base.add(deslocamento) as *mut u32, valor.to_le()) };
     }
 
     /// Pede um slot ao controlador e dá um endereço ao dispositivo.
-    fn enderecar(&mut self) -> Result<(), &'static str> {
+    fn enderecar(&mut self, porta: u8, velocidade: u32) -> Result<DispositivoUsb, &'static str> {
         let evento = self
             .comandar(0, trb::HABILITAR_SLOT << 10)
             .ok_or("o controlador nao respondeu ao habilitar slot")?;
         if (evento.estado >> 24) & 0xFF != SUCESSO {
             return Err("habilitar slot foi recusado");
         }
-        self.slot = ((evento.controle >> 24) & 0xFF) as u8;
+        let slot = ((evento.controle >> 24) & 0xFF) as u8;
 
         // O contexto do dispositivo é escrito pelo **controlador**; nós só
         // damos a página e anotamos onde ela está.
         let contexto = crate::frames::alocar().ok_or("sem frame para o contexto do dispositivo")?;
-        // SAFETY: frame recém-alocado de 4096 bytes.
+        // SAFETY: frame recém-alocado de 4096 bytes; e a entrada do slot na
+        // tabela, que tem uma entrada por slot que o controlador declarou.
         unsafe {
             core::ptr::write_bytes(
                 crate::arch::acesso_fisico(contexto),
                 0,
                 crate::arch::TAMANHO_PAGINA as usize,
             );
-            // E a entrada do slot na tabela, que é como o controlador o acha.
+            // A entrada do slot na tabela é como o controlador o acha.
             core::ptr::write_volatile(
-                (crate::arch::acesso_fisico(self.dcbaa) as *mut u64).add(self.slot as usize),
+                (crate::arch::acesso_fisico(self.dcbaa) as *mut u64).add(slot as usize),
                 contexto.to_le(),
             );
         }
@@ -800,6 +857,7 @@ impl Xhci {
         };
 
         let ep0 = Anel::novo().ok_or("sem frame para o anel de controle")?;
+        let buffer = crate::frames::alocar().ok_or("sem frame para o buffer de controle")?;
 
         // Contexto de controle de entrada: quais contextos o comando deve
         // olhar. O bit 0 é o do slot, o bit 1 o do endpoint de controle.
@@ -807,15 +865,17 @@ impl Xhci {
 
         // Contexto do slot: uma entrada de contexto (o de controle), a
         // velocidade que a porta reportou, e em que porta da raiz ele está.
-        self.escrever_contexto(entrada, 1, 0, (1 << 27) | (self.velocidade << 20));
-        self.escrever_contexto(entrada, 1, 1, u32::from(self.porta) << 16);
+        self.escrever_contexto(entrada, 1, 0, (1 << 27) | (velocidade << 20));
+        self.escrever_contexto(entrada, 1, 1, u32::from(porta) << 16);
 
         // Contexto do endpoint de controle.
         self.escrever_contexto(
             entrada,
             2,
             1,
-            (self.pacote_do_controle() << 16) | (EP_CONTROLE << 3) | (TENTATIVAS_DO_ENDPOINT << 1),
+            (pacote_do_controle(velocidade) << 16)
+                | (EP_CONTROLE << 3)
+                | (TENTATIVAS_DO_ENDPOINT << 1),
         );
         let ponteiro = ep0.ponteiro_inicial();
         self.escrever_contexto(entrada, 2, 2, ponteiro as u32);
@@ -825,29 +885,42 @@ impl Xhci {
         self.escrever_contexto(entrada, 2, 4, 8);
 
         let evento = self
-            .comandar(
-                entrada,
-                (trb::ENDERECAR << 10) | (u32::from(self.slot) << 24),
-            )
+            .comandar(entrada, (trb::ENDERECAR << 10) | (u32::from(slot) << 24))
             .ok_or("o controlador nao respondeu ao enderecar")?;
         if (evento.estado >> 24) & 0xFF != SUCESSO {
             return Err("enderecar o dispositivo foi recusado");
         }
 
-        self.contexto = contexto;
-        self.entrada = entrada;
-        self.ep0 = Some(ep0);
-        Ok(())
+        Ok(DispositivoUsb {
+            porta,
+            velocidade,
+            slot,
+            entrada,
+            ep0,
+            buffer,
+            hid: None,
+        })
     }
+}
 
-    /// O tamanho do pacote do endpoint de controle, que depende da velocidade.
-    ///
-    /// Oito para baixa velocidade, 64 para o resto. É o que a especificação
-    /// do USB fixa, e errar para mais faz o dispositivo ignorar metade de cada
-    /// pedido — sem dizer nada.
-    fn pacote_do_controle(&self) -> u32 {
-        // Velocidade 2 é a baixa; 1 é a cheia, 3 a alta, 4 e 5 as super.
-        if self.velocidade == 2 { 8 } else { 64 }
+/// O tamanho do pacote do endpoint de controle, que depende da velocidade.
+///
+/// Oito para baixa velocidade, 64 para o resto. É o que a especificação do
+/// USB fixa, e errar para mais faz o dispositivo ignorar metade de cada
+/// pedido — sem dizer nada.
+fn pacote_do_controle(velocidade: u32) -> u32 {
+    // Velocidade 2 é a baixa; 1 é a cheia, 3 a alta, 4 e 5 as super.
+    if velocidade == 2 { 8 } else { 64 }
+}
+
+impl DispositivoUsb {
+    /// Um byte do buffer de transferência.
+    fn byte(&self, deslocamento: usize) -> u8 {
+        // SAFETY: o buffer é um frame de 4096 bytes, e todo chamador daqui
+        // pede deslocamentos dentro do que acabou de ser lido.
+        unsafe {
+            core::ptr::read_volatile(crate::arch::acesso_fisico(self.buffer).add(deslocamento))
+        }
     }
 }
 
@@ -887,7 +960,8 @@ const IMEDIATO: u32 = 1 << 6;
 const AVISAR: u32 = 1 << 5;
 
 impl Xhci {
-    /// Faz uma transferência de controle e devolve quantos bytes vieram.
+    /// Faz uma transferência de controle com um dispositivo e devolve quantos
+    /// bytes vieram.
     ///
     /// # Por que três TRBs
     ///
@@ -897,6 +971,7 @@ impl Xhci {
     /// evento para cada um encheria o anel de eventos com o que ninguém lê.
     fn controle(
         &mut self,
+        d: &mut DispositivoUsb,
         tipo: u8,
         requisicao: u8,
         valor: u16,
@@ -904,16 +979,11 @@ impl Xhci {
         tamanho: u16,
     ) -> Result<u32, &'static str> {
         let entrada = tipo & 0x80 != 0;
-        let buffer = self.buffer;
 
         let transferencia = match (tamanho, entrada) {
             (0, _) => SEM_DADOS,
             (_, true) => DADOS_DE_ENTRADA,
             (_, false) => DADOS_DE_SAIDA,
-        };
-
-        let Some(anel) = self.ep0.as_mut() else {
-            return Err("o endpoint de controle nao esta de pe");
         };
 
         // O pedido cabe nos oito bytes do parâmetro, que é para isso que o
@@ -923,15 +993,15 @@ impl Xhci {
             | (u64::from(valor) << 16)
             | (u64::from(indice) << 32)
             | (u64::from(tamanho) << 48);
-        anel.empurrar(
+        d.ep0.empurrar(
             pedido,
             8,
             (trb::SETUP << 10) | IMEDIATO | (transferencia << 16),
         );
 
         if tamanho > 0 {
-            anel.empurrar(
-                buffer,
+            d.ep0.empurrar(
+                d.buffer,
                 u32::from(tamanho),
                 (trb::DADOS << 10) | if entrada { SENTIDO_ENTRADA } else { 0 },
             );
@@ -944,9 +1014,10 @@ impl Xhci {
         } else {
             SENTIDO_ENTRADA
         };
-        anel.empurrar(0, 0, (trb::ESTADO << 10) | AVISAR | sentido_da_confirmacao);
+        d.ep0
+            .empurrar(0, 0, (trb::ESTADO << 10) | AVISAR | sentido_da_confirmacao);
 
-        self.campainha(self.slot, u32::from(DCI_DO_CONTROLE));
+        self.c.campainha(d.slot, u32::from(DCI_DO_CONTROLE));
 
         let evento = self
             .esperar_evento(trb::EVENTO_DE_TRANSFERENCIA)
@@ -963,22 +1034,13 @@ impl Xhci {
         let restante = evento.estado & 0x00FF_FFFF;
         Ok(u32::from(tamanho).saturating_sub(restante))
     }
-
-    /// Um byte do buffer de transferência.
-    fn byte(&self, deslocamento: usize) -> u8 {
-        // SAFETY: o buffer é um frame de 4096 bytes, e todo chamador daqui
-        // pede deslocamentos dentro do que acabou de ser lido.
-        unsafe {
-            core::ptr::read_volatile(crate::arch::acesso_fisico(self.buffer).add(deslocamento))
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
-// O teclado
+// O teclado e o mouse
 // ---------------------------------------------------------------------------
 
-/// Onde, dentro do buffer, ficam os relatórios do teclado.
+/// Onde, dentro do buffer, ficam os relatórios.
 ///
 /// Depois dos dados de controle, que ocupam o começo da página. Os dois
 /// convivem no mesmo frame porque um descritor de configuração inteiro tem
@@ -986,10 +1048,17 @@ impl Xhci {
 /// desperdiçado.
 const RELATORIOS_EM: usize = 256;
 
+/// O espaço de cada relatório no buffer, e o maior que se pede.
+///
+/// Oito, o do teclado. O do mouse de boot tem três bytes que importam e
+/// mais o que o dispositivo quiser — a roda, quase sempre —, e oito cobrem
+/// os mouses de boot que existem; o que passar disso o controlador corta.
+const TAMANHO_DO_RELATORIO: usize = crate::usb::hid::TAMANHO_DO_RELATORIO;
+
 /// Quantos relatórios ficam pendurados no controlador ao mesmo tempo.
 ///
 /// Quatro. Cada um é uma transferência que o controlador completa quando o
-/// teclado tem algo a dizer; com a colheita a cada tique, quatro cobrem
+/// dispositivo tem algo a dizer; com a colheita a cada tique, quatro cobrem
 /// quarenta milissegundos de digitação sem que nenhuma se perca.
 const RELATORIOS: usize = 4;
 
@@ -997,13 +1066,32 @@ const RELATORIOS: usize = 4;
 const DESCRITOR_INTERFACE: u8 = 4;
 const DESCRITOR_ENDPOINT: u8 = 5;
 
-/// A classe, subclasse e protocolo de um teclado que fala o protocolo de boot.
+/// A classe e a subclasse de um dispositivo que fala o protocolo de boot, e
+/// os dois protocolos que ele pode falar.
 const CLASSE_HID: u8 = 3;
 const SUBCLASSE_BOOT: u8 = 1;
 const PROTOCOLO_TECLADO: u8 = 1;
+const PROTOCOLO_MOUSE: u8 = 2;
+
+/// O que um dispositivo de boot é.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TipoHid {
+    Teclado,
+    Mouse,
+}
+
+impl TipoHid {
+    fn nome(self) -> &'static str {
+        match self {
+            TipoHid::Teclado => "teclado",
+            TipoHid::Mouse => "mouse",
+        }
+    }
+}
 
 /// O que procuramos no descritor de configuração.
 struct Achado {
+    tipo: TipoHid,
     configuracao: u8,
     interface: u8,
     endpoint: u8,
@@ -1012,7 +1100,8 @@ struct Achado {
 }
 
 impl Xhci {
-    /// Lê a configuração do dispositivo e acha o teclado dentro dela.
+    /// Lê a configuração do dispositivo e acha o teclado ou o mouse dentro
+    /// dela.
     ///
     /// # Por que caminhar em vez de assumir
     ///
@@ -1022,22 +1111,24 @@ impl Xhci {
     /// conferir. Um dispositivo com duas interfaces faria a versão que assume
     /// pendurar transferências no endpoint errado, e o sintoma seria um
     /// teclado mudo sem nenhuma mensagem.
-    fn achar_teclado(&mut self) -> Result<Achado, &'static str> {
+    fn achar_hid(&mut self, d: &mut DispositivoUsb) -> Result<Achado, &'static str> {
         // O cabeçalho primeiro, que é quem diz o tamanho do resto.
         self.controle(
+            d,
             pedido::ENTRADA_PADRAO,
             pedido::PEGAR_DESCRITOR,
             pedido::DESCRITOR_DE_CONFIGURACAO,
             0,
             9,
         )?;
-        let total = u16::from(self.byte(2)) | (u16::from(self.byte(3)) << 8);
-        let configuracao = self.byte(5);
+        let total = u16::from(d.byte(2)) | (u16::from(d.byte(3)) << 8);
+        let configuracao = d.byte(5);
 
         // E um teto nosso: um descritor que se dissesse maior que a página
         // faria a leitura passar do fim do buffer.
         let total = total.min(RELATORIOS_EM as u16);
         self.controle(
+            d,
             pedido::ENTRADA_PADRAO,
             pedido::PEGAR_DESCRITOR,
             pedido::DESCRITOR_DE_CONFIGURACAO,
@@ -1048,8 +1139,8 @@ impl Xhci {
         let mut interface = None;
         let mut i = 0usize;
         while i + 2 <= total as usize {
-            let tamanho = self.byte(i) as usize;
-            let tipo = self.byte(i + 1);
+            let tamanho = d.byte(i) as usize;
+            let tipo = d.byte(i + 1);
             // Um descritor de tamanho zero não avança o cursor, e o laço
             // giraria para sempre lendo o mesmo byte.
             if tamanho == 0 {
@@ -1058,28 +1149,31 @@ impl Xhci {
 
             match tipo {
                 DESCRITOR_INTERFACE if tamanho >= 9 => {
-                    interface = (self.byte(i + 5) == CLASSE_HID
-                        && self.byte(i + 6) == SUBCLASSE_BOOT
-                        && self.byte(i + 7) == PROTOCOLO_TECLADO)
-                        .then_some(self.byte(i + 2));
+                    let boot = d.byte(i + 5) == CLASSE_HID && d.byte(i + 6) == SUBCLASSE_BOOT;
+                    let tipo = match d.byte(i + 7) {
+                        PROTOCOLO_TECLADO => Some(TipoHid::Teclado),
+                        PROTOCOLO_MOUSE => Some(TipoHid::Mouse),
+                        _ => None,
+                    };
+                    interface = tipo.filter(|_| boot).map(|t| (d.byte(i + 2), t));
                 }
                 // Só os endpoints que vêm **depois** da interface certa. Um
                 // endpoint pertence à última interface declarada, e é isso
                 // que torna a ordem significativa.
                 DESCRITOR_ENDPOINT if tamanho >= 7 => {
-                    if let Some(numero_da_interface) = interface {
-                        let endereco = self.byte(i + 2);
-                        let atributos = self.byte(i + 3);
+                    if let Some((numero_da_interface, tipo)) = interface {
+                        let endereco = d.byte(i + 2);
+                        let atributos = d.byte(i + 3);
                         // Bit 7 do endereço é o sentido: entrada. Os dois bits
                         // baixos dos atributos são o tipo: 3 é interrupção.
                         if endereco & 0x80 != 0 && atributos & 0x3 == 3 {
                             return Ok(Achado {
+                                tipo,
                                 configuracao,
                                 interface: numero_da_interface,
                                 endpoint: endereco & 0x0F,
-                                pacote: u16::from(self.byte(i + 4))
-                                    | (u16::from(self.byte(i + 5)) << 8),
-                                intervalo: self.byte(i + 6),
+                                pacote: u16::from(d.byte(i + 4)) | (u16::from(d.byte(i + 5)) << 8),
+                                intervalo: d.byte(i + 6),
                             });
                         }
                     }
@@ -1089,64 +1183,45 @@ impl Xhci {
             i += tamanho;
         }
 
-        Err("nenhum teclado de boot na configuracao")
+        Err("nem teclado nem mouse de boot na configuracao")
     }
 
-    /// O intervalo do endpoint, na codificação do xHCI.
-    ///
-    /// O USB conta em unidades que dependem da velocidade e o xHCI conta
-    /// sempre em potências de dois de 125 microssegundos. Em alta velocidade o
-    /// descritor já traz o expoente, e a conversão é subtrair um; em
-    /// velocidade cheia ele traz milissegundos, e o expoente sai do logaritmo.
-    fn intervalo_do_xhci(&self, bintervalo: u8) -> u32 {
-        if self.velocidade >= 3 {
-            u32::from(bintervalo.saturating_sub(1)).min(15)
-        } else {
-            let milissegundos = u32::from(bintervalo).max(1);
-            (milissegundos.ilog2() + 3).min(15)
-        }
-    }
-
-    /// Configura o endpoint de interrupção e põe o teclado para falar.
-    fn preparar_teclado(&mut self) -> Result<(), &'static str> {
-        let achado = self.achar_teclado()?;
+    /// Configura o endpoint de interrupção e põe o dispositivo para falar.
+    fn preparar_hid(&mut self, d: &mut DispositivoUsb) -> Result<(), &'static str> {
+        let achado = self.achar_hid(d)?;
 
         // O identificador do endpoint dentro do slot: entrada é ímpar.
         let dci = achado.endpoint * 2 + 1;
-        let anel = Anel::novo().ok_or("sem frame para o anel do teclado")?;
+        let anel = Anel::novo().ok_or("sem frame para o anel de relatorios")?;
         let ponteiro = anel.ponteiro_inicial();
 
         // O contexto de entrada, outra vez: o do slot porque o número de
         // contextos mudou, e o do endpoint novo.
-        self.escrever_contexto(self.entrada, 0, 0, 0);
-        self.escrever_contexto(self.entrada, 0, 1, 1 | (1 << dci));
-        self.escrever_contexto(
-            self.entrada,
-            1,
-            0,
-            (u32::from(dci) << 27) | (self.velocidade << 20),
-        );
-        self.escrever_contexto(self.entrada, 1, 1, u32::from(self.porta) << 16);
+        let entrada = d.entrada;
+        self.escrever_contexto(entrada, 0, 0, 0);
+        self.escrever_contexto(entrada, 0, 1, 1 | (1 << dci));
+        self.escrever_contexto(entrada, 1, 0, (u32::from(dci) << 27) | (d.velocidade << 20));
+        self.escrever_contexto(entrada, 1, 1, u32::from(d.porta) << 16);
 
         let contexto_do_ep = usize::from(dci) + 1;
         self.escrever_contexto(
-            self.entrada,
+            entrada,
             contexto_do_ep,
             0,
-            self.intervalo_do_xhci(achado.intervalo) << 16,
+            intervalo_do_xhci(d.velocidade, achado.intervalo) << 16,
         );
         self.escrever_contexto(
-            self.entrada,
+            entrada,
             contexto_do_ep,
             1,
             (u32::from(achado.pacote) << 16)
                 | (EP_INTERRUPCAO_ENTRADA << 3)
                 | (TENTATIVAS_DO_ENDPOINT << 1),
         );
-        self.escrever_contexto(self.entrada, contexto_do_ep, 2, ponteiro as u32);
-        self.escrever_contexto(self.entrada, contexto_do_ep, 3, (ponteiro >> 32) as u32);
+        self.escrever_contexto(entrada, contexto_do_ep, 2, ponteiro as u32);
+        self.escrever_contexto(entrada, contexto_do_ep, 3, (ponteiro >> 32) as u32);
         self.escrever_contexto(
-            self.entrada,
+            entrada,
             contexto_do_ep,
             4,
             u32::from(achado.pacote) | (u32::from(achado.pacote) << 16),
@@ -1154,8 +1229,8 @@ impl Xhci {
 
         let evento = self
             .comandar(
-                self.entrada,
-                (trb::CONFIGURAR_ENDPOINT << 10) | (u32::from(self.slot) << 24),
+                entrada,
+                (trb::CONFIGURAR_ENDPOINT << 10) | (u32::from(d.slot) << 24),
             )
             .ok_or("o controlador nao respondeu ao configurar endpoint")?;
         if (evento.estado >> 24) & 0xFF != SUCESSO {
@@ -1165,6 +1240,7 @@ impl Xhci {
         // Só agora o dispositivo é posto na configuração, e só depois disso
         // ele aceita o pedido de classe que escolhe o protocolo de boot.
         self.controle(
+            d,
             pedido::SAIDA_PADRAO,
             pedido::DEFINIR_CONFIGURACAO,
             u16::from(achado.configuracao),
@@ -1172,6 +1248,7 @@ impl Xhci {
             0,
         )?;
         self.controle(
+            d,
             pedido::SAIDA_DE_CLASSE,
             pedido::DEFINIR_PROTOCOLO,
             // Zero é o protocolo de boot; um é o de relatório, que exigiria
@@ -1181,113 +1258,142 @@ impl Xhci {
             0,
         )?;
 
-        self.teclado = Some(TecladoUsb {
+        crate::log_info!(
+            "usb",
+            "{} usb pronto na porta {}, protocolo de boot",
+            achado.tipo.nome(),
+            d.porta
+        );
+        d.hid = Some(Hid {
+            tipo: achado.tipo,
             anel,
             dci,
+            // O relatório inteiro, até o espaço que ele tem no buffer. Pedir
+            // menos que o pacote faria o controlador cortar o relatório —
+            // e, num teclado, perder teclas.
+            tamanho: usize::from(achado.pacote).clamp(1, TAMANHO_DO_RELATORIO),
             submetidos: 0,
             colhidos: 0,
+            anterior: [0; TAMANHO_DO_RELATORIO],
         });
-        self.pendurar_relatorios();
         Ok(())
     }
 
-    /// O endereço físico do buffer do relatório `i`.
-    fn relatorio_em(&self, i: usize) -> u64 {
-        self.buffer + (RELATORIOS_EM + i * crate::usb::hid::TAMANHO_DO_RELATORIO) as u64
-    }
-
-    /// Pendura no controlador as transferências que faltam — só as que faltam.
-    fn pendurar_relatorios(&mut self) {
-        let buffer = self.buffer;
-        let slot = self.slot;
-        let Some(teclado) = self.teclado.as_mut() else {
+    /// Pendura no controlador as transferências que faltam ao dispositivo
+    /// `i` — só as que faltam.
+    fn pendurar_relatorios(&mut self, i: usize) {
+        let Some(d) = self.dispositivos.get_mut(i) else {
             return;
         };
-        let dci = teclado.dci;
+        let Some(hid) = d.hid.as_mut() else {
+            return;
+        };
 
         let mut pendurou = false;
-        while teclado.submetidos - teclado.colhidos < RELATORIOS as u64 {
-            let i = (teclado.submetidos % RELATORIOS as u64) as usize;
-            let endereco =
-                buffer + (RELATORIOS_EM + i * crate::usb::hid::TAMANHO_DO_RELATORIO) as u64;
-            teclado.anel.empurrar(
-                endereco,
-                crate::usb::hid::TAMANHO_DO_RELATORIO as u32,
-                (trb::NORMAL << 10) | AVISAR,
-            );
-            teclado.submetidos += 1;
+        while hid.submetidos - hid.colhidos < RELATORIOS as u64 {
+            let endereco = d.buffer + relatorio_em((hid.submetidos % RELATORIOS as u64) as usize);
+            hid.anel
+                .empurrar(endereco, hid.tamanho as u32, (trb::NORMAL << 10) | AVISAR);
+            hid.submetidos += 1;
             pendurou = true;
         }
 
         if pendurou {
-            self.campainha(slot, u32::from(dci));
+            self.c.campainha(d.slot, u32::from(hid.dci));
         }
     }
 
     /// Lê os relatórios que chegaram e devolve as transferências.
     fn colher_relatorios(&mut self) {
-        if self.teclado.is_none() {
-            return;
-        }
-
-        let mut colhidos = 0;
+        let mut colheu = [false; DISPOSITIVOS];
         while let Some(evento) = self.eventos.colher() {
             // O ponteiro de leitura é atualizado sempre, mesmo para eventos
             // que não nos interessam: é ele que diz ao controlador que há
             // espaço no anel.
-            let ponteiro = self.eventos.ponteiro_de_leitura();
-            // SAFETY: bloco de tempo de execução, dentro do BAR mapeado.
-            unsafe {
-                self.c.escrever64(
-                    self.c.execucao + intr::BASE + intr::ERDP,
-                    ponteiro | (1 << 3),
-                );
-            }
+            self.c.devolver_eventos(&self.eventos);
 
             if tipo_de(evento.controle) != trb::EVENTO_DE_TRANSFERENCIA {
                 continue;
             }
 
+            // De quem é: o evento diz o slot e o endpoint. Sem conferir os
+            // dois, o relatório do mouse seria lido como uma tecla.
+            let slot = (evento.controle >> 24) as u8;
+            let dci = ((evento.controle >> 16) & 0x1F) as u8;
+            let Some(i) = self
+                .dispositivos
+                .iter()
+                .position(|d| d.slot == slot && d.hid.as_ref().is_some_and(|h| h.dci == dci))
+            else {
+                continue;
+            };
+            let d = &mut self.dispositivos[i];
+            let hid = d.hid.as_mut().expect("conferido acima");
+
             // As transferências de um endpoint completam na ordem em que
             // foram penduradas, então qual delas voltou sai de um contador —
             // e não do endereço do TRB, que exigiria procurar no anel.
-            let indice = {
-                let teclado = self.teclado.as_mut().expect("conferido acima");
-                let indice = (teclado.colhidos % RELATORIOS as u64) as usize;
-                teclado.colhidos += 1;
-                indice
-            };
+            let indice = (hid.colhidos % RELATORIOS as u64) as usize;
+            hid.colhidos += 1;
+            colheu[i] = true;
 
             let codigo = (evento.estado >> 24) & 0xFF;
-            if codigo == SUCESSO || codigo == 13 {
-                let base = crate::arch::acesso_fisico(self.relatorio_em(indice));
-                // SAFETY: o endereço é de um buffer de oito bytes dentro do
-                // frame que este driver alocou, e o controlador acabou de
-                // dizer que terminou de escrever nele.
-                let relatorio = unsafe {
-                    core::ptr::read_volatile(
-                        base as *const [u8; crate::usb::hid::TAMANHO_DO_RELATORIO],
-                    )
-                };
-                // SAFETY: esta função roda com as interrupções desligadas, no
-                // pulso do relógio, que é a condição que `processar` pede.
-                unsafe { crate::usb::hid::processar(relatorio) };
+            if codigo != SUCESSO && codigo != 13 {
+                continue;
             }
-
-            colhidos += 1;
+            let base = crate::arch::acesso_fisico(d.buffer + relatorio_em(indice));
+            // SAFETY: o endereço é de um buffer de oito bytes dentro do frame
+            // que este driver alocou, e o controlador acabou de dizer que
+            // terminou de escrever nele.
+            let relatorio = unsafe { core::ptr::read_volatile(base as *const [u8; 8]) };
+            // Quanto veio: o pedido menos o que faltou. Um mouse que manda
+            // menos que os três bytes do boot não é lido — ver
+            // [`crate::usb::hid::processar_mouse`].
+            let veio = hid
+                .tamanho
+                .saturating_sub((evento.estado & 0x00FF_FFFF) as usize);
+            match hid.tipo {
+                TipoHid::Teclado => crate::usb::hid::processar(&mut hid.anterior, relatorio),
+                TipoHid::Mouse => crate::usb::hid::processar_mouse(&relatorio[..veio]),
+            }
         }
 
-        if colhidos > 0 {
-            self.pendurar_relatorios();
+        for (i, colheu) in colheu.into_iter().enumerate() {
+            if colheu {
+                self.pendurar_relatorios(i);
+            }
         }
     }
 }
 
-/// O teclado, depois de configurado.
-struct TecladoUsb {
+/// O intervalo do endpoint, na codificação do xHCI.
+///
+/// O USB conta em unidades que dependem da velocidade e o xHCI conta sempre
+/// em potências de dois de 125 microssegundos. Em alta velocidade o
+/// descritor já traz o expoente, e a conversão é subtrair um; em velocidade
+/// cheia ele traz milissegundos, e o expoente sai do logaritmo.
+fn intervalo_do_xhci(velocidade: u32, bintervalo: u8) -> u32 {
+    if velocidade >= 3 {
+        u32::from(bintervalo.saturating_sub(1)).min(15)
+    } else {
+        let milissegundos = u32::from(bintervalo).max(1);
+        (milissegundos.ilog2() + 3).min(15)
+    }
+}
+
+/// Onde, dentro do buffer de um dispositivo, fica o relatório `i`.
+fn relatorio_em(i: usize) -> u64 {
+    (RELATORIOS_EM + i * TAMANHO_DO_RELATORIO) as u64
+}
+
+/// O teclado ou o mouse, depois de configurado.
+struct Hid {
+    tipo: TipoHid,
     anel: Anel,
     /// O identificador do endpoint dentro do slot.
     dci: u8,
+    /// Quantos bytes cada relatório pede.
+    tamanho: usize,
     /// Quantas transferências já foram entregues ao controlador.
     submetidos: u64,
     /// Quantas já voltaram.
@@ -1308,9 +1414,12 @@ struct TecladoUsb {
     /// executava. É o mesmo defeito que a placa de rede documenta, pela mesma
     /// razão: entregar o mesmo buffer duas vezes não deixa marca no que se lê.
     colhidos: u64,
+    /// O relatório anterior, para um teclado deduzir o que mudou — ver
+    /// [`crate::usb::hid::processar`]. Um mouse não usa.
+    anterior: [u8; TAMANHO_DO_RELATORIO],
 }
 
-/// Recolhe o que o teclado USB tiver entregue.
+/// Recolhe o que o teclado e o mouse USB tiverem entregue.
 pub fn colher() {
     crate::arch::sem_interrupcoes(|| {
         if let Some(xhci) = XHCI.lock().as_mut() {

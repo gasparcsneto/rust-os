@@ -1814,6 +1814,52 @@ fn ponteiro_pacote_ps2() -> Resultado {
     Ok(())
 }
 
+/// O relatório de um mouse USB no protocolo de boot: botões, x e y com
+/// sinal — y positivo para baixo, ao contrário do PS/2 —, e o que vem depois
+/// ignorado. Um relatório curto demais não é lido.
+fn ponteiro_relatorio_usb() -> Resultado {
+    use crate::usb::hid::{processar_mouse, relatorios_do_mouse};
+    if crate::tela::tela_fisica().is_none() {
+        return sem_framebuffer();
+    }
+    crate::teclado::esvaziar();
+    crate::ponteiro::relativo(-100_000, -100_000);
+    let (cliques, movimentos) = crate::ponteiro::contadores();
+    let antes = relatorios_do_mouse();
+
+    // Botão esquerdo, x +12, y +7, e uma roda de -1 que não é da conta do
+    // ponteiro.
+    processar_mouse(&[0x01, 12, 7, 0xFF]);
+    if crate::ponteiro::posicao() != (12, 7) {
+        crate::log_error!(
+            "teste",
+            "posicao depois do relatorio: {:?}",
+            crate::ponteiro::posicao()
+        );
+        return Err("o relatorio do mouse USB nao moveu o ponteiro o que dizia");
+    }
+    if crate::ponteiro::contadores() != (cliques + 1, movimentos + 1) {
+        return Err("o relatorio do mouse USB nao clicou nem moveu o cursor");
+    }
+    if crate::teclado::ler() != Some(crate::teclado::CLIQUE) {
+        return Err("o clique do mouse USB nao chegou a fila");
+    }
+    // Soltar e voltar: -2 e -3 em complemento de dois.
+    processar_mouse(&[0x00, 0xFE, 0xFD]);
+    if crate::ponteiro::posicao() != (10, 4) {
+        return Err("o mouse USB nao leu o deslocamento negativo");
+    }
+    // Curto demais: nem move, nem conta.
+    processar_mouse(&[0x01, 50]);
+    if crate::ponteiro::posicao() != (10, 4) || crate::teclado::ler().is_some() {
+        return Err("um relatorio de dois bytes foi lido como mouse");
+    }
+    if relatorios_do_mouse() != antes + 2 {
+        return Err("o mouse USB nao contou os relatorios que leu");
+    }
+    Ok(())
+}
+
 /// O agente vê a pilha gráfica pelo registro, com o adaptador e a tela certos.
 fn agente_display_info_descreve_a_pilha() -> Resultado {
     let cmd = registry::encontrar("display.info").ok_or("display.info ausente")?;
@@ -3505,35 +3551,42 @@ fn teclado_soltar_nao_digita() -> Resultado {
 /// modificador e a letra dentro do mesmo relatório: o shift precisa valer
 /// antes de a letra ser traduzida, ou a maiúscula sai minúscula.
 ///
-/// É o único pedaço do caminho USB que a suíte alcança. O controlador xHCI
-/// depende de hardware que ela não tem como acionar, e quem o exercita é a
-/// fumaça com `--teclado usb`.
+/// E uma quarta, desde que o controlador atende mais de um dispositivo: a
+/// memória do relatório anterior é de cada teclado, e não do módulo.
+///
+/// É, com o relatório do mouse, o pedaço do caminho USB que a suíte alcança.
+/// O controlador xHCI depende de hardware que ela não tem como acionar, e
+/// quem o exercita é a fumaça com `--teclado usb`.
 fn usb_relatorio_hid_vira_teclas() -> Resultado {
+    use crate::usb::hid::processar;
     crate::teclado::esvaziar();
-    crate::usb::hid::esquecer();
+    let mut anterior = [0u8; 8];
 
     // `a` é 0x04 no HID e 30 no AT — os dois números mais distantes que esta
     // tabela precisa ligar.
-    // SAFETY: a suíte roda numa tarefa só, que é a condição de `processar`.
-    unsafe { crate::usb::hid::processar([0, 0, 0x04, 0, 0, 0, 0, 0]) };
+    processar(&mut anterior, [0, 0, 0x04, 0, 0, 0, 0, 0]);
     if crate::teclado::ler() != Some('a') {
         return Err("o relatorio com `a` nao produziu a letra");
     }
 
     // O mesmo relatório outra vez é a tecla **continuando** pressionada.
-    // SAFETY: como acima.
-    unsafe { crate::usb::hid::processar([0, 0, 0x04, 0, 0, 0, 0, 0]) };
+    processar(&mut anterior, [0, 0, 0x04, 0, 0, 0, 0, 0]);
     if let Some(c) = crate::teclado::ler() {
         crate::log_error!("teste", "segurar a tecla digitou {:?} de novo", c);
         return Err("segurar a tecla repetiu a letra");
     }
 
-    // Solta tudo, e então shift com `b` no mesmo relatório.
-    // SAFETY: como acima.
-    unsafe {
-        crate::usb::hid::processar([0, 0, 0, 0, 0, 0, 0, 0]);
-        crate::usb::hid::processar([0x02, 0, 0x05, 0, 0, 0, 0, 0]);
+    // Outro teclado, com a memória dele: o `a` que o primeiro segura é, para
+    // este, uma tecla nova.
+    let mut outro = [0u8; 8];
+    processar(&mut outro, [0, 0, 0x04, 0, 0, 0, 0, 0]);
+    if crate::teclado::ler() != Some('a') {
+        return Err("um segundo teclado herdou o que o primeiro segurava");
     }
+
+    // Solta tudo, e então shift com `b` no mesmo relatório.
+    processar(&mut anterior, [0, 0, 0, 0, 0, 0, 0, 0]);
+    processar(&mut anterior, [0x02, 0, 0x05, 0, 0, 0, 0, 0]);
     if crate::teclado::ler() != Some('B') {
         return Err("shift e `b` no mesmo relatorio nao deram maiuscula");
     }
@@ -11031,6 +11084,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "ponteiro: pacote PS/2",
         f: ponteiro_pacote_ps2,
+    },
+    Caso {
+        nome: "ponteiro: relatorio do mouse USB",
+        f: ponteiro_relatorio_usb,
     },
 ];
 

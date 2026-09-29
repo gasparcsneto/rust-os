@@ -1,4 +1,4 @@
-//! O relatório de um teclado USB, traduzido.
+//! Os relatórios de um teclado e de um mouse USB, traduzidos.
 //!
 //! # O terceiro espaço de códigos
 //!
@@ -18,8 +18,13 @@
 //! é uma linguagem inteira, com coleções, usos e tamanhos declarados campo a
 //! campo. O protocolo de boot existe justamente para que uma BIOS consiga ler
 //! um teclado sem implementar aquilo, e a razão dela é a nossa.
+//!
+//! O mouse tem o seu protocolo de boot pela mesma razão, e com o mesmo
+//! ganho: três bytes fixos — botões, x, y — e o resto do dispositivo.
 
-/// O relatório do protocolo de boot: oito bytes.
+use core::sync::atomic::{AtomicU64, Ordering};
+
+/// O relatório do teclado no protocolo de boot: oito bytes.
 ///
 /// O primeiro são os modificadores, o segundo é reservado, e os seis últimos
 /// são as teclas pressionadas **agora** — não as que mudaram. Um teclado USB
@@ -32,6 +37,9 @@ const TECLAS: usize = 6;
 /// Os bits de shift no byte de modificadores.
 const SHIFT_ESQUERDO: u8 = 1 << 1;
 const SHIFT_DIREITO: u8 = 1 << 5;
+
+/// O botão esquerdo, no primeiro byte do relatório de um mouse.
+const BOTAO_ESQUERDO: u8 = 1 << 0;
 
 /// O código do AT correspondente a cada *usage* do HID.
 ///
@@ -79,38 +87,40 @@ const _: () = assert!(DE_HID[0x3A] == 59); // F1
 const _: () = assert!(DE_HID[0x43] == 68); // F10
 const _: () = assert!(DE_HID[0x45] == 88); // F12
 
-/// O estado do teclado no relatório anterior, para saber o que mudou.
-///
-/// Um teclado USB manda o estado completo a cada mudança, então quem quer
-/// eventos precisa comparar. Sem esta memória, segurar uma tecla mandaria a
-/// letra a cada relatório — e soltar não mandaria nada.
-static mut ANTERIOR: [u8; TAMANHO_DO_RELATORIO] = [0; TAMANHO_DO_RELATORIO];
-
-/// Quantos relatórios já foram processados.
+/// Quantos relatórios de teclado já foram processados.
 ///
 /// Existe para separar "o teclado USB não entregou nada" de "entregou e nada
 /// virou tecla". Com dois teclados na mesma máquina, é também o que diz por
 /// onde o que foi digitado chegou — sem ele, a sonda passaria sem saber qual
 /// dos dois caminhos exercitou.
-static RELATORIOS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static RELATORIOS: AtomicU64 = AtomicU64::new(0);
+
+/// Quantos relatórios de mouse, pela mesma razão: numa máquina com o mouse
+/// PS/2 e o USB, é o que diz qual dos dois moveu o ponteiro.
+static RELATORIOS_DO_MOUSE: AtomicU64 = AtomicU64::new(0);
 
 /// Quantos relatórios o teclado USB entregou.
 pub fn relatorios() -> u64 {
-    RELATORIOS.load(core::sync::atomic::Ordering::Relaxed)
+    RELATORIOS.load(Ordering::Relaxed)
 }
 
-/// Traduz um relatório em eventos de tecla.
-///
-/// # Safety
-///
-/// Precisa ser chamada de um contexto só — o `static mut` do relatório
-/// anterior não tem proteção nenhuma. Hoje quem chama é a colheita do
-/// controlador, que roda com as interrupções desligadas no pulso do relógio.
-pub unsafe fn processar(relatorio: [u8; TAMANHO_DO_RELATORIO]) {
-    RELATORIOS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+/// Quantos relatórios o mouse USB entregou.
+pub fn relatorios_do_mouse() -> u64 {
+    RELATORIOS_DO_MOUSE.load(Ordering::Relaxed)
+}
 
-    // SAFETY: a condição está no contrato desta função.
-    let anterior = unsafe { ANTERIOR };
+/// Traduz um relatório de teclado em eventos de tecla.
+///
+/// `anterior` é o relatório anterior **deste** teclado, que a função
+/// atualiza. Um teclado USB manda o estado completo a cada mudança, então
+/// quem quer eventos precisa comparar. Sem esta memória, segurar uma tecla
+/// mandaria a letra a cada relatório — e soltar não mandaria nada.
+///
+/// A memória é de quem chama, e não um estático daqui: cada teclado tem a
+/// sua, e dois teclados não confundem o que um soltou com o que o outro
+/// segura.
+pub fn processar(anterior: &mut [u8; TAMANHO_DO_RELATORIO], relatorio: [u8; TAMANHO_DO_RELATORIO]) {
+    RELATORIOS.fetch_add(1, Ordering::Relaxed);
 
     // Os modificadores primeiro, e é obrigatório que seja antes: o shift
     // precisa estar valendo quando a letra do mesmo relatório for traduzida.
@@ -127,7 +137,7 @@ pub unsafe fn processar(relatorio: [u8; TAMANHO_DO_RELATORIO]) {
         t.copy_from_slice(&r[2..2 + TECLAS]);
         t
     };
-    let antes = teclas_de(&anterior);
+    let antes = teclas_de(anterior);
     let agora = teclas_de(&relatorio);
 
     // Pressionadas: as que estão no relatório novo e não estavam no anterior.
@@ -143,20 +153,34 @@ pub unsafe fn processar(relatorio: [u8; TAMANHO_DO_RELATORIO]) {
         }
     }
 
-    // SAFETY: mesma condição do começo.
-    unsafe { ANTERIOR = relatorio };
+    *anterior = relatorio;
+}
+
+/// O relatório de um mouse no protocolo de boot: botões, x e y.
+///
+/// # O formato
+///
+/// Os três primeiros bytes são fixos: os botões — o esquerdo no bit 0 —, e
+/// quanto o mouse andou em x e em y, com sinal, em complemento de dois. O
+/// que vem depois — a roda, quase sempre — é do dispositivo, e o protocolo
+/// de boot diz para ignorar. Ao contrário do PS/2, y positivo é para baixo,
+/// como na tela.
+///
+/// Um mouse não precisa da memória que o teclado precisa: o relatório diz
+/// quanto andou, e não onde está, e o botão já é comparado com o anterior
+/// em [`crate::ponteiro::botao`].
+pub fn processar_mouse(relatorio: &[u8]) {
+    let [botoes, dx, dy, ..] = *relatorio else {
+        return;
+    };
+    RELATORIOS_DO_MOUSE.fetch_add(1, Ordering::Relaxed);
+    crate::ponteiro::relativo(i32::from(dx as i8), i32::from(dy as i8));
+    crate::ponteiro::botao(botoes & BOTAO_ESQUERDO != 0);
+    crate::ponteiro::sincronizar();
 }
 
 /// O código do AT para um *usage* do HID, se houver um.
 pub fn traduzir(usage: u8) -> Option<u8> {
     let codigo = *DE_HID.get(usage as usize)?;
     (codigo != 0).then_some(codigo)
-}
-
-/// Esquece o relatório anterior. Para a suíte.
-#[cfg(feature = "modo-teste")]
-pub fn esquecer() {
-    // SAFETY: a suíte roda numa tarefa só, e esta função existe justamente
-    // para pôr o estado num ponto conhecido antes de cada caso.
-    unsafe { ANTERIOR = [0; TAMANHO_DO_RELATORIO] };
 }
