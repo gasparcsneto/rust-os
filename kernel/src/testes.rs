@@ -4196,7 +4196,7 @@ fn janelas_operadas() -> Resultado {
     };
     let (w, h) = (tela.largura, tela.altura);
     // As do servidor — ver `programas/src/bin/janelas.rs`.
-    let acesa = Cor::nova(0x3A, 0x8F, 0xD0);
+    let acesa = Cor::de(aparencia::paleta::ACENTO);
     let apagada = Cor::nova(0x2A, 0x3C, 0x58);
     let (largura, altura) = (320i64, 160i64);
 
@@ -5219,7 +5219,7 @@ fn terminal_operado() -> Resultado {
     // `programas/src/janela.rs`.
     let (tx, ty) = (24i64, 40i64);
     let largura = 2 + 2 * 4 + 80 * Estilo::TEXTO.largura() as i64;
-    let acesa = Cor::nova(0x3A, 0x8F, 0xD0);
+    let acesa = Cor::de(aparencia::paleta::ACENTO);
 
     let desde = crate::log::total_emitidos();
     let vezes = |procurada: &str| {

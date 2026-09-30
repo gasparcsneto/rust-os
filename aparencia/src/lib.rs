@@ -72,7 +72,12 @@ pub mod paleta {
     /// Dois passos acima: os botões, e o que está sem foco.
     pub const ACO: Cor = Cor::nova(0x2A, 0x3C, 0x58);
     /// O acento: o que está vivo, ou com o foco.
-    pub const ACENTO: Cor = Cor::nova(0x3A, 0x8F, 0xD0);
+    ///
+    /// Escuro o bastante para o papel se ler sobre ele — o título da janela
+    /// com o foco é papel sobre o acento —, e claro o bastante para se ver
+    /// sobre a noite, onde ele é o cursor. O primeiro acento, `3A8FD0`, dava
+    /// 3,2 ao título: abaixo dos 4,5 de texto de corpo.
+    pub const ACENTO: Cor = Cor::nova(0x2B, 0x73, 0xB0);
     /// O texto sobre o escuro.
     pub const NEVOA: Cor = Cor::nova(0xD8, 0xDE, 0xE8);
     /// O claro: o fundo do conteúdo de uma janela, e o texto sobre o acento.
@@ -225,21 +230,36 @@ mod testes {
                 uso::TITULO_SEM_FOCO,
                 "titulo sem foco",
             ),
+            (
+                uso::TEXTO_DO_TITULO,
+                uso::TITULO_COM_FOCO,
+                "titulo com foco",
+            ),
             (uso::TEXTO_DO_CONTEUDO, uso::FUNDO_DO_CONTEUDO, "conteudo"),
         ] {
             let c = contraste(texto, fundo);
             assert!(c >= 4.5, "{nome}: contraste {c:.2}");
         }
-        // A exceção, medida e registrada, e não escondida: o título da
-        // janela com o foco, papel sobre o acento, fica em 3,2 — abaixo do
-        // mínimo para texto de corpo. O título é negrito, e está acima dos
-        // 3 que a WCAG pede para texto grande; mas 16 pixels em negrito não
-        // são texto grande. Corrigir é mudar o acento ou o texto sobre ele,
-        // e isso é uma decisão sobre o jeito do sistema, não uma extração.
-        let titulo = contraste(uso::TEXTO_DO_TITULO, uso::TITULO_COM_FOCO);
-        assert!(
-            (3.0..4.5).contains(&titulo),
-            "o titulo com foco mudou de contraste ({titulo:.2}): rever a nota"
-        );
+        // O que não é texto, mas tem de ser visto: 3, o mínimo da WCAG para
+        // um componente de interface e o indicador de foco. O cursor sobre
+        // o console, a linha de acento sob a barra, e as bordas do campo
+        // sobre o conteúdo — com e sem o foco.
+        for (cor, fundo, nome) in [
+            (uso::CURSOR_DE_TEXTO, uso::FUNDO_DO_CONSOLE, "cursor"),
+            (uso::LINHA_DE_ACENTO, uso::FUNDO_DA_BARRA, "linha de acento"),
+            (
+                uso::BORDA_COM_FOCO,
+                uso::FUNDO_DO_CONTEUDO,
+                "borda com foco",
+            ),
+            (
+                uso::BORDA_DO_CAMPO,
+                uso::FUNDO_DO_CONTEUDO,
+                "borda do campo",
+            ),
+        ] {
+            let c = contraste(cor, fundo);
+            assert!(c >= 3.0, "{nome}: contraste {c:.2}");
+        }
     }
 }

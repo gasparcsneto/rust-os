@@ -979,9 +979,11 @@ descrição saem dela pelo mesmo percurso, na mesma ordem, com as mesmas
 a paleta pelo nome — a noite, a ardósia, o aço, o acento, a névoa —, os
 papéis de cada cor, as medidas e os estilos de texto. O botão de uma
 janela é o botão da barra do kernel porque os dois leem o mesmo token. Um
-teste confere o contraste de cada par texto-fundo pela conta da WCAG; o
-título da janela com o foco mede 3,22, abaixo dos 4,5 do texto de corpo, e
-ficou registrado como exceção, à espera de decisão. A suíte confere a
+teste confere o contraste de cada par texto-fundo pela conta da WCAG — 4,5
+para o texto, 3 para o que só tem de ser visto, como o cursor e a borda do
+foco. O primeiro acento dava 3,22 ao título da janela com o foco, e ficou
+um tempo registrado como exceção; ele escureceu de `3A8FD0` para `2B73B0`,
+e o título foi a 4,64 sem o cursor sumir sobre a noite. A suíte confere a
 tela contra a paleta pelo nome, e não contra as constantes do kernel: uma
 troca de cor mudava os dois lados da conferência, e passava.
 
