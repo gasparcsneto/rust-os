@@ -4766,14 +4766,20 @@ fn terminal_o_anel_a_fila_e_a_posse() -> Resultado {
             return Err("o pseudo-terminal digitou o que nao e texto");
         }
 
-        // A fila cheia: uma escrita parcial, do tamanho que coube.
-        let longa = [b'z'; 100];
-        let aceitos = pty::escrever(chave, eu, core::str::from_utf8(&longa).unwrap_or(""));
+        // A fila cheia: uma escrita parcial, do tamanho que coube — e ela
+        // para ali. Uma tecla de função depois do que não coube não conta
+        // como aceita: pular o que não coube e seguir contaria.
+        let mut longa = alloc::string::String::new();
+        for _ in 0..100 {
+            longa.push('z');
+        }
+        longa.push('\u{F704}');
+        let aceitos = pty::escrever(chave, eu, &longa);
         let mut na_fila = 0;
         while crate::teclado::ler().is_some() {
             na_fila += 1;
         }
-        if aceitos != Some(na_fila) || na_fila == 0 || na_fila >= longa.len() {
+        if aceitos != Some(na_fila) || na_fila == 0 || na_fila >= 100 {
             crate::log_error!("teste", "aceitos {:?}, na fila {}", aceitos, na_fila);
             return Err("a fila cheia nao virou uma escrita parcial honesta");
         }
@@ -4794,11 +4800,20 @@ fn terminal_o_anel_a_fila_e_a_posse() -> Resultado {
         if pty::dono().is_some() || pty::ler(chave, eu, &mut lido).is_some() {
             return Err("o pseudo-terminal fechado continuou aberto");
         }
+        // E abrir já avisa, sem saída nova: o que está no anel é saída que
+        // o dono novo ainda não leu, e quem dormisse no canal esperando a
+        // próxima impressão não veria o que veio antes dele.
+        esvaziar_o_canal();
         let nova = pty::abrir(eu, canal).map_err(|_| "o pseudo-terminal fechado nao reabriu")?;
+        pty::avisar_se_preciso();
+        let avisado = eventos::estado(CANAL).map(|e| e.na_fila) == Some(1);
         let velha_recusada = pty::ler(chave, eu, &mut lido).is_none();
         pty::fechar(nova, eu);
         if !velha_recusada {
             return Err("a chave velha alcancou a abertura seguinte");
+        }
+        if !avisado {
+            return Err("abrir o pseudo-terminal nao avisou do que ja estava no anel");
         }
 
         // O dono morto não segura o pseudo-terminal.
