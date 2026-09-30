@@ -7,11 +7,12 @@
 # separamos os três — o `xtask` invoca os outros dois builds explicitamente.
 [workspace]
 resolver = "3"
-members = ["protocolo", "xtask"]
+members = ["protocolo", "tipografia", "xtask"]
 # O `kernel` compila para bare-metal e o `iniciador` para UEFI. Cada um é seu
 # próprio workspace; o `xtask` invoca os dois builds explicitamente.
 #
-# O `protocolo` é membro daqui, e não excluído: ele é uma biblioteca `no_std`
-# que compila para qualquer alvo, e os outros dois a incluem por caminho. Ser
-# membro é o que põe o `cargo fmt` e o `cargo clippy` da raiz em cima dela.
+# O `protocolo` e a `tipografia` são membros daqui, e não excluídos: são
+# bibliotecas `no_std` que compilam para qualquer alvo, e os outros as incluem
+# por caminho. Ser membro é o que põe o `cargo fmt`, o `cargo clippy` e os
+# testes da raiz em cima delas.
 exclude = ["kernel", "iniciador"]

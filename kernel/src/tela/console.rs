@@ -38,18 +38,17 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use noto_sans_mono_bitmap::{FontWeight, RasterHeight, get_raster, get_raster_width};
+use tipografia::Estilo;
 
 use crate::tela::{Cor, Tela};
 
-/// O peso e a altura dos glifos.
+/// O estilo do console: o texto de todo dia, regular e de 16 pixels.
 ///
 /// Uma altura só, e a menor que a fonte oferece. Uma tela de 720 linhas dá 42
-/// linhas de texto com esta, abaixo da barra superior, o que é um relatório de boot inteiro sem
-/// recomeçar; alturas maiores existiriam para serem escolhidas por alguém, e
-/// não há ninguém para escolher.
-const PESO: FontWeight = FontWeight::Regular;
-const ALTURA: RasterHeight = RasterHeight::Size16;
+/// linhas de texto com esta, abaixo da barra superior, o que é um relatório de
+/// boot inteiro sem recomeçar. A fonte e os outros estilos moram no pacote
+/// `tipografia`, com os programas de usuário.
+const ESTILO: Estilo = Estilo::TEXTO;
 
 /// A margem entre o texto e a borda da tela.
 ///
@@ -149,7 +148,7 @@ pub fn rolagens() -> u32 {
 }
 
 fn tamanho_do_caractere() -> (u32, u32) {
-    (get_raster_width(PESO, ALTURA) as u32, ALTURA.val() as u32)
+    (ESTILO.largura(), ESTILO.altura())
 }
 
 /// Escreve um texto na tela, se houver uma.
@@ -279,42 +278,36 @@ fn recomecar_se_encheu(tela: &Tela, y: u32, altura_do_glifo: u32) -> u32 {
 /// só "tem tinta ou não" jogaria fora justamente o que torna texto de 16
 /// pixels de altura legível — as bordas deixam de ser serrilhadas porque os
 /// pixels da borda são parciais.
+///
+/// Uma letra que a fonte não tem sai como o substituto da `tipografia`, e
+/// não como nada: um buraco não se distingue de um espaço.
 fn desenhar(tela: &Tela, c: char, x: u32, y: u32) {
-    // Um caractere fora do bloco básico do latim não tem glifo nesta fonte.
-    // Desenhar nada deixaria um buraco que ninguém consegue distinguir de um
-    // espaço; um losango diz que havia algo ali que não soubemos mostrar.
-    let glifo = get_raster(c, PESO, ALTURA).or_else(|| get_raster('?', PESO, ALTURA));
-    let Some(glifo) = glifo else {
-        return;
-    };
-
-    for (linha, pixels) in glifo.raster().iter().enumerate() {
-        for (coluna, &cobertura) in pixels.iter().enumerate() {
-            // Pular o transparente não é otimização de gosto: a maior parte
-            // de um glifo é fundo, e cada pixel escrito é um acesso a memória
-            // de dispositivo, sem cache.
-            if cobertura == 0 {
-                continue;
-            }
-            // Um pixel é um retângulo de um por um, que é o único caminho de
-            // escrita da tela — ver a nota em [`Tela::retangulo`] sobre por
-            // que não existe um segundo.
-            tela.retangulo(
-                x + coluna as u32,
-                y + linha as u32,
-                1,
-                1,
-                misturar(PAPEL, TINTA, cobertura),
-            );
+    tipografia::percorrer(c, ESTILO, |coluna, linha, cobertura| {
+        // Pular o transparente não é otimização de gosto: a maior parte de
+        // um glifo é fundo, e cada pixel escrito é um acesso a memória de
+        // dispositivo, sem cache.
+        if cobertura == 0 {
+            return;
         }
-    }
+        // Um pixel é um retângulo de um por um, que é o único caminho de
+        // escrita da tela — ver a nota em [`Tela::retangulo`] sobre por que
+        // não existe um segundo.
+        tela.retangulo(
+            x + coluna,
+            y + linha,
+            1,
+            1,
+            misturar(PAPEL, TINTA, cobertura),
+        );
+    });
 }
 
-/// Desenha `texto` numa memória de pixels, no formato das superfícies.
+/// Desenha `texto` no `estilo` numa memória de pixels, no formato das
+/// superfícies.
 ///
 /// Para quem desenha fora do console — a barra superior, numa camada do
-/// compositor — com a mesma fonte e a mesma mistura. Uma segunda cópia da
-/// fonte seria uma segunda resposta para "como uma letra fica na tela".
+/// compositor. É o desenho da `tipografia`, o mesmo que o servidor de janelas
+/// usa, com as cores do kernel.
 ///
 /// Ao contrário do console, pinta também os pixels sem tinta, com `papel`:
 /// uma camada não tem o fundo já pintado embaixo, e redesenhar um texto
@@ -324,64 +317,30 @@ fn desenhar(tela: &Tela, c: char, x: u32, y: u32) {
 pub fn desenhar_texto_em(
     pixels: &mut [u32],
     largura: u32,
-    x: u32,
-    y: u32,
+    (x, y): (u32, u32),
     texto: &str,
-    tinta: Cor,
-    papel: Cor,
+    estilo: Estilo,
+    (tinta, papel): (Cor, Cor),
 ) -> u32 {
-    let (largura_do_glifo, _) = tamanho_do_caractere();
-    let mut x = x;
-    for c in texto.chars() {
-        let glifo = get_raster(c, PESO, ALTURA).or_else(|| get_raster('?', PESO, ALTURA));
-        if let Some(glifo) = glifo {
-            for (linha, cobertura) in glifo.raster().iter().enumerate() {
-                for (coluna, &c) in cobertura.iter().enumerate() {
-                    let (px, py) = (x + coluna as u32, y + linha as u32);
-                    if px >= largura {
-                        continue;
-                    }
-                    let i = py as usize * largura as usize + px as usize;
-                    if let Some(pixel) = pixels.get_mut(i) {
-                        *pixel = misturar(papel, tinta, c).para_u32();
-                    }
-                }
-            }
-        }
-        x += largura_do_glifo;
-    }
-    x
-}
-
-/// A altura de uma linha de texto com esta fonte, em pixels.
-pub fn altura_do_texto() -> u32 {
-    tamanho_do_caractere().1
-}
-
-/// Quantos pixels `texto` ocupa na horizontal com esta fonte.
-pub fn largura_do_texto(texto: &str) -> u32 {
-    texto.chars().count() as u32 * tamanho_do_caractere().0
-}
-
-/// A cor de um pixel com cobertura parcial de tinta.
-///
-/// Aritmética inteira de ponta a ponta: o alvo ARM deste kernel é
-/// `softfloat`, onde uma multiplicação em ponto flutuante não é só lenta —
-/// ela não existe sem a biblioteca que a emula.
-fn misturar(fundo: Cor, frente: Cor, cobertura: u8) -> Cor {
-    let c = u16::from(cobertura);
-    let componente = |f: u8, t: u8| -> u8 {
-        let mistura = u16::from(f) * (255 - c) + u16::from(t) * c;
-        // Divisão por 255, e não deslocamento de 8: com o deslocamento, uma
-        // cobertura cheia devolveria a cor levemente escurecida, e texto
-        // branco nunca sairia branco.
-        (mistura / 255) as u8
-    };
-    Cor::nova(
-        componente(fundo.r, frente.r),
-        componente(fundo.g, frente.g),
-        componente(fundo.b, frente.b),
+    tipografia::escrever(
+        pixels,
+        largura,
+        (x, y),
+        texto,
+        estilo,
+        tinta.para_u32(),
+        papel.para_u32(),
     )
+}
+
+/// A cor de um pixel com cobertura parcial de tinta — a mistura da
+/// `tipografia`, a mesma dos programas de usuário, sobre as cores do kernel.
+fn misturar(fundo: Cor, frente: Cor, cobertura: u8) -> Cor {
+    Cor::de_u32(tipografia::misturar(
+        fundo.para_u32(),
+        frente.para_u32(),
+        cobertura,
+    ))
 }
 
 /// Devolve o cursor ao começo, sem tocar na tela.
@@ -469,7 +428,7 @@ pub fn cursor() -> (u32, u32) {
 /// O tamanho de um glifo, em pixels. Para a suíte.
 #[cfg(feature = "modo-teste")]
 pub fn tamanho_do_glifo() -> (u32, u32) {
-    (get_raster_width(PESO, ALTURA) as u32, ALTURA.val() as u32)
+    tamanho_do_caractere()
 }
 
 /// O console como destino de `core::fmt`.
@@ -516,35 +475,37 @@ pub fn conferir_glifo_em(
     x: u32,
     y: u32,
 ) -> Result<(), &'static str> {
-    let Some(glifo) = get_raster(c, PESO, ALTURA) else {
+    if !tipografia::tem_glifo(c, ESTILO) {
         return Err("a fonte nao tem este glifo");
-    };
-
-    for (linha, pixels) in glifo.raster().iter().enumerate() {
-        for (coluna, &cobertura) in pixels.iter().enumerate() {
-            let esperado = misturar(PAPEL, TINTA, cobertura);
-            let Some(lido) = tela.ler_pixel(x + coluna as u32, y + linha as u32) else {
-                return Err("o glifo caiu fora da tela");
-            };
-            if lido != esperado {
-                crate::log_error!(
-                    "teste",
-                    "pixel {},{} do glifo: {:02x}{:02x}{:02x}, esperado {:02x}{:02x}{:02x}",
-                    coluna,
-                    linha,
-                    lido.r,
-                    lido.g,
-                    lido.b,
-                    esperado.r,
-                    esperado.g,
-                    esperado.b
-                );
-                return Err("o glifo na tela nao e o da fonte");
-            }
-        }
     }
 
-    Ok(())
+    let mut resultado = Ok(());
+    tipografia::percorrer(c, ESTILO, |coluna, linha, cobertura| {
+        if resultado.is_err() {
+            return;
+        }
+        let esperado = misturar(PAPEL, TINTA, cobertura);
+        let Some(lido) = tela.ler_pixel(x + coluna, y + linha) else {
+            resultado = Err("o glifo caiu fora da tela");
+            return;
+        };
+        if lido != esperado {
+            crate::log_error!(
+                "teste",
+                "pixel {},{} do glifo: {:02x}{:02x}{:02x}, esperado {:02x}{:02x}{:02x}",
+                coluna,
+                linha,
+                lido.r,
+                lido.g,
+                lido.b,
+                esperado.r,
+                esperado.g,
+                esperado.b
+            );
+            resultado = Err("o glifo na tela nao e o da fonte");
+        }
+    });
+    resultado
 }
 
 /// Confere que a célula com o canto em `(x, y)` está vazia: só fundo.

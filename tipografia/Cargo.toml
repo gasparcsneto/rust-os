@@ -1,0 +1,36 @@
+[package]
+# A tipografia do Duke: a fonte, os estilos e como uma letra vira pixels.
+#
+# Um pacote, e não um módulo do kernel, porque dois lados desenham texto: o
+# kernel — o console, a barra — e os programas — o servidor de janelas. Com
+# a fonte declarada em cada um, eram duas respostas para "como uma letra fica
+# na tela", e elas já tinham divergido uma vez: a mistura da cobertura com o
+# fundo estava escrita duas vezes, com arredondamentos diferentes.
+#
+# `no_std`, e membro do workspace da raiz, como o `protocolo`: compila para
+# qualquer alvo, e o kernel e os programas o incluem por caminho.
+name = "tipografia"
+version = "0.1.0"
+edition = "2024"
+description = "A fonte e o desenho de texto do Duke, dos dois lados da fronteira"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Glifos já rasterizados, um byte de cobertura por pixel. Ver o cabeçalho de
+# `src/lib.rs` para por que estes pesos, estas alturas e estes blocos.
+noto-sans-mono-bitmap = { version = "0.3.2", default-features = false, features = [
+    "regular",
+    "bold",
+    "size_16",
+    "unicode-basic-latin",
+    "unicode-latin-1-supplement",
+] }
+
+[features]
+# O estilo de título, de 24 pixels. Opcional porque a altura é massa de
+# dados, e só os programas a usam: o kernel desenha tudo em 16, e desliga as
+# padrão. Medido no kernel x86 em release: com ela, a tipografia somava
+# 593 KiB de texto e dados; sem ela, 200 KiB — a altura de 24 era dois
+# terços do custo.
+default = ["titulo"]
+titulo = ["noto-sans-mono-bitmap/size_24"]

@@ -306,6 +306,9 @@ protocolo/src/       as ABIs: do iniciador com o kernel, e do kernel com os prog
 ├── mapa.rs          onde cada coisa mora no espaço virtual
 └── usuario.rs       as chamadas de sistema, os erros e o mapa do espaço do usuário
 
+tipografia/src/      a fonte e o desenho de texto, dos dois lados da fronteira
+└── lib.rs           os estilos, os glifos, a mistura e a escrita numa memória de pixels
+
 programas/           os programas de usuário, compilados à parte do kernel
 ├── usuario.ld       o mapa de um programa: três segmentos a partir de BASE
 └── src/
@@ -802,8 +805,8 @@ mesmo caminho — publica um pedido de abrir no canal das janelas, e o
 servidor abre a janela, desenha e a descreve. Sem servidor no ar, o `press`
 é recusado com o motivo, em vez de ser aceito sem que nada aconteça. A
 janela é uma só: pedir de novo a traz para a frente. O texto dela diz o que
-o Duke é e em que arquitetura está rodando, sem acento — a fonte do console
-tem o bloco básico do latim, e uma letra fora dele sairia como `?`.
+o Duke é e em que arquitetura está rodando — com acento, desde a
+tipografia, abaixo.
 
 A fumaça a opera como uma pessoa: leva o mouse da máquina ao botão pela
 moldura que a árvore publica, clica, espera a janela aparecer na árvore,
@@ -833,6 +836,42 @@ origem, com opacidade zero. A fumaça, lendo a moldura como um agente leria,
 levou o mouse à barra de título dela e clicou no botão da barra superior
 que estava ali de verdade. A árvore descreve a tela: uma camada invisível
 não está nela, nem para `ui.tree` nem para `ui.act`.
+
+**A tipografia.** Até aqui a fonte vivia em dois lugares: o console e a
+barra do kernel a declaravam de um jeito, o servidor de janelas de outro. E
+os dois já tinham divergido — a mistura da cobertura do glifo com o fundo
+truncava num lado e arredondava no outro, e a mesma letra saía com pixels
+diferentes numa janela e no console. Agora ela mora no pacote `tipografia`,
+`no_std` como o `protocolo`, que os dois lados incluem: os estilos, os
+glifos, o substituto de uma letra que a fonte não tem, a mistura e a escrita
+numa memória de pixels.
+
+O que ela trouxe de novo:
+
+- **as letras do português.** A fonte tinha só o latim básico, e `ação`
+  saía `a??o` — o texto do sistema era escrito sem acento para não sair `?`.
+  O bloco Latin-1 entrou, e com ele `á`, `ã`, `ç`, `é`, `ô` e as outras. O
+  "Sobre o Duke" passou a ser escrito como se escreve;
+- **o negrito**, para o que se lê primeiro: o nome na barra e o título de
+  cada janela;
+- **um tamanho de título**, de 24 pixels, para o cabeçalho de uma janela —
+  o "Duke" no alto do "Sobre o Duke".
+
+O custo foi medido, e mudou uma decisão. Com as duas alturas, a tipografia
+somava ao kernel x86 em release 593 KiB de texto e dados; a altura de 24
+era dois terços disso, e só os programas a usam. Ela ficou atrás de uma
+feature que o kernel não liga, e o acréscimo caiu para 200 KiB no x86 e 85
+KiB no ARM. O servidor de janelas, que usa as duas, foi de 59 para 329 KiB
+no disco do x86.
+
+O teclado continua o americano: as letras acentuadas aparecem, mas ainda
+não se digitam. A suíte confere `ação é útil` no console pixel a pixel
+contra o glifo de cada letra — e a conferência recusa uma letra que a fonte
+não tem, então o substituto não passaria por ela —, a grade guardando as
+letras acentuadas, e o nome na barra contra o desenho em negrito, com o
+regular conferido como diferente. O pacote tem os próprios testes, no
+hospedeiro: os glifos do português nos três estilos, o substituto, as
+dimensões e a mistura, exata nos extremos e arredondando no meio.
 
 **A proteção é testada, não presumida.** Existe um segundo programa que tenta
 ler a memória do kernel. O caso `usuario: nao alcanca o kernel` exige duas
@@ -2356,7 +2395,7 @@ padronizado.
       de escrever a pilha: escrever TCP do zero é um a dois anos-pessoa e não
       diferencia o Duke em nada. O ARP que existe hoje era a prova de ponta a
       ponta mais barata possível, e cumpriu o papel dela.
-- [ ] **Fase 10 — GPU, composição e a árvore semântica.** Começou antes da
+- [x] **Fase 10 — GPU, composição e a árvore semântica.** Começou antes da
       6, pela parte que não depende de vários núcleos. Feito: a pilha gráfica
       no desenho do Redox — um trait de adaptador que o compositor usa sem
       saber o que está embaixo, o retângulo de dano com o recorte que não dá a
@@ -2387,8 +2426,9 @@ padronizado.
       descreve cada janela, e o `press` do agente chega a ele pelo mesmo
       caminho do clique; e a primeira janela, o "Sobre o Duke", pelo botão
       **Sobre** da barra, pela F2 ou pelo agente — aberta, arrastada e
-      fechada pelo mouse de verdade na fumaça. O que falta da fase é a
-      tipografia; o console como janela é a fase 11.
+      fechada pelo mouse de verdade na fumaça; e a tipografia — uma fonte
+      num lugar só, para o kernel e os programas, com as letras do português,
+      negrito e um tamanho de título. O console como janela é a fase 11.
       E aqui a inversão do projeto encontra a interface gráfica. O servidor de
       janelas publica uma **árvore semântica** — que janelas existem, que
       controles, o que cada um faz — e os pixels são a renderização dela, do

@@ -24,12 +24,9 @@ bench = false
 # usuário: a mesma declaração que o kernel inclui.
 protocolo = { path = "../protocolo" }
 
-# A fonte com que o servidor de janelas escreve os títulos: a mesma do
-# console do kernel, na mesma versão, pelo motivo que o kernel dá no dele —
-# uma fonte é massa de dados, e rasterizar uma vetorial pediria ponto
-# flutuante. Dois lados com a mesma letra é o que faz uma janela e o
-# console parecerem da mesma máquina.
-noto-sans-mono-bitmap = "0.3.2"
+# A fonte e o desenho de texto: os mesmos do kernel — ver
+# `tipografia/src/lib.rs`.
+tipografia = { path = "../tipografia" }
 
 # Sem `unwind`: não há quem desenrole a pilha no espaço do usuário, e um
 # pânico encerra o processo com um código — ver `src/lib.rs`.

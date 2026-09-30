@@ -52,7 +52,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use core::fmt::Write;
-use programas::desenho::{Tela, tamanho_do_caractere};
+use programas::desenho::{Estilo, Tela, largura_do_texto};
 use programas::escreverln;
 use programas::sistema;
 use programas::superficie::Superficie;
@@ -86,6 +86,8 @@ struct Janela {
     /// Onde o canto superior esquerdo está na tela.
     x: i32,
     y: i32,
+    /// Um título grande no alto do conteúdo, se ela tiver um.
+    cabecalho: Option<&'static str>,
     /// O que ela mostra: o que se digitou, ou o texto fixo dela.
     texto: String,
     /// Que janela é, de [`janela`] — a de teste aceita digitação; a
@@ -137,7 +139,7 @@ impl Janela {
     fn desenhar(&mut self, com_foco: bool) {
         let (largura, altura) = (self.largura(), self.altura());
         let (cx, cy, lado) = self.caixa_de_fechar();
-        let (_, altura_da_linha) = tamanho_do_caractere();
+        let altura_da_linha = Estilo::TEXTO.altura();
         let cor_do_titulo = if com_foco { ACENTO } else { TITULO_APAGADO };
         let titulo = self.titulo;
         let texto = self.texto.clone();
@@ -154,22 +156,20 @@ impl Janela {
             ALTURA_DO_TITULO - BORDA,
             cor_do_titulo,
         );
+        // O título em negrito: é o que se lê primeiro numa janela.
         tela.texto(
-            8,
-            (ALTURA_DO_TITULO - altura_da_linha) / 2,
+            (8, (ALTURA_DO_TITULO - Estilo::NEGRITO.altura()) / 2),
             titulo,
-            TEXTO_DO_TITULO,
-            cor_do_titulo,
+            Estilo::NEGRITO,
+            (TEXTO_DO_TITULO, cor_do_titulo),
         );
         // A caixa de fechar: um quadrado mais claro com um x no meio.
         tela.retangulo(cx, cy, lado, lado, TITULO_APAGADO);
-        let (largura_do_x, _) = tamanho_do_caractere();
         tela.texto(
-            cx + (lado - largura_do_x) / 2,
-            cy,
+            (cx + (lado - Estilo::TEXTO.largura()) / 2, cy),
             "x",
-            TEXTO_DO_TITULO,
-            TITULO_APAGADO,
+            Estilo::TEXTO,
+            (TEXTO_DO_TITULO, TITULO_APAGADO),
         );
         tela.retangulo(
             BORDA,
@@ -178,13 +178,18 @@ impl Janela {
             altura - ALTURA_DO_TITULO - BORDA,
             CONTEUDO,
         );
-        // O texto, linha a linha, cortado no que couber.
+        // O cabeçalho, se houver, no estilo de título; e o texto, linha a
+        // linha, cortado no que couber.
         let mut y = ALTURA_DO_TITULO + 8;
+        if let Some(cabecalho) = self.cabecalho {
+            tela.texto((10, y), cabecalho, Estilo::TITULO, (TEXTO, CONTEUDO));
+            y += Estilo::TITULO.altura() + 6;
+        }
         for linha in texto.split('\n') {
             if y + altura_da_linha > altura - BORDA {
                 break;
             }
-            tela.texto(10, y, linha, TEXTO, CONTEUDO);
+            tela.texto((10, y), linha, Estilo::TEXTO, (TEXTO, CONTEUDO));
             y += altura_da_linha;
         }
         let _ = self.superficie.danificar_tudo();
@@ -224,6 +229,20 @@ impl Janela {
             self.altura() - ALTURA_DO_TITULO - BORDA
         );
         let _ = descricao::escapar(&self.texto, &mut d);
+        // O cabeçalho, depois do conteúdo: a posição de cada elemento na
+        // descrição é o que dá o identificador dele na árvore, e o da caixa
+        // e o do conteúdo não mudam de uma janela para a outra.
+        if let Some(cabecalho) = self.cabecalho {
+            let _ = write!(
+                d,
+                "\ntexto\t{}\t10\t{}\t{}\t{}\tcabeçalho\t",
+                self.id_do_elemento(ELEMENTO_CABECALHO),
+                ALTURA_DO_TITULO + 8,
+                largura_do_texto(cabecalho, Estilo::TITULO),
+                Estilo::TITULO.altura()
+            );
+            let _ = descricao::escapar(cabecalho, &mut d);
+        }
         let r = sistema::descrever(self.superficie.descritor(), &d);
         if r != 0 {
             escreverln!(
@@ -235,17 +254,17 @@ impl Janela {
     }
 }
 
-/// O que a janela "Sobre o Duke" diz. Sem acento: a fonte do console tem o
-/// bloco básico do latim, e uma letra fora dele sairia como `?`.
+/// O que a janela "Sobre o Duke" diz, abaixo do cabeçalho. Com acento: a
+/// `tipografia` tem o bloco Latin-1, onde moram as letras do português.
 #[cfg(target_arch = "x86_64")]
-const SOBRE: &str = "Duke, um sistema operacional didatico\n\
-escrito em Rust, rodando em x86_64.\n\n\
-Esta janela e desenhada por um processo:\n\
+const SOBRE: &str = "Um sistema operacional didático, escrito\n\
+em Rust, rodando em x86_64.\n\n\
+Esta janela é desenhada por um processo:\n\
 o servidor de janelas, fora do kernel.";
 #[cfg(target_arch = "aarch64")]
-const SOBRE: &str = "Duke, um sistema operacional didatico\n\
-escrito em Rust, rodando em aarch64.\n\n\
-Esta janela e desenhada por um processo:\n\
+const SOBRE: &str = "Um sistema operacional didático, escrito\n\
+em Rust, rodando em aarch64.\n\n\
+Esta janela é desenhada por um processo:\n\
 o servidor de janelas, fora do kernel.";
 
 /// Quantos identificadores de elemento cada janela reserva.
@@ -253,6 +272,7 @@ const ELEMENTOS_POR_JANELA: u32 = 16;
 /// Os elementos de uma janela, na árvore.
 const ELEMENTO_FECHAR: u32 = 1;
 const ELEMENTO_CONTEUDO: u32 = 2;
+const ELEMENTO_CABECALHO: u32 = 3;
 
 struct Servidor {
     /// De baixo para cima: a última é a de cima.
@@ -305,9 +325,9 @@ impl Servidor {
             escreverln!("janelas: ja aberta {}", id);
             return;
         }
-        let (titulo, largura, altura, texto) = match qual {
-            janela::TESTE => ("Teste", 320, 160, String::new()),
-            janela::SOBRE => ("Sobre o Duke", 400, 180, String::from(SOBRE)),
+        let (titulo, largura, altura, cabecalho, texto) = match qual {
+            janela::TESTE => ("Teste", 320, 160, None, String::new()),
+            janela::SOBRE => ("Sobre o Duke", 400, 190, Some("Duke"), String::from(SOBRE)),
             _ => {
                 escreverln!("janelas: pedido de janela desconhecida {}", qual);
                 return;
@@ -333,6 +353,7 @@ impl Servidor {
             titulo,
             x: x as i32,
             y: y as i32,
+            cabecalho,
             texto,
             qual,
         };

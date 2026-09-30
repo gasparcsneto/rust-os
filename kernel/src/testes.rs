@@ -1353,11 +1353,10 @@ fn barra_o_relogio_anda() -> Resultado {
     crate::tela::console::desenhar_texto_em(
         &mut esperado_px,
         moldura.largura,
-        0,
-        0,
+        (0, 0),
         &texto,
-        crate::barra::TEXTO,
-        crate::barra::FUNDO,
+        tipografia::Estilo::TEXTO,
+        (crate::barra::TEXTO, crate::barra::FUNDO),
     );
     for y in 0..moldura.altura {
         for x in 0..moldura.largura {
@@ -3213,6 +3212,81 @@ fn tela_recorta_na_borda() -> Resultado {
 /// A conferência é pixel a pixel contra a própria fonte, e mora em
 /// [`crate::tela::console::conferir_glifo`] para não haver duas cópias da
 /// resposta — uma no desenho e outra no teste, livres para errarem juntas.
+/// O console escreve as letras do português, e o nome na barra sai em
+/// negrito.
+///
+/// # O que este caso protege
+///
+/// A tipografia, do lado do kernel. Até ela, a fonte tinha só o latim
+/// básico, e `ação` saía `a??o` — o texto do sistema era escrito sem acento
+/// para não sair `?`. Aqui cada letra é conferida pixel a pixel contra o
+/// glifo dela, e não contra o substituto: a conferência recusa uma letra que
+/// a fonte não tem. E a grade guarda a letra, que é o que a árvore publica.
+///
+/// E o negrito: o nome na barra é conferido contra o desenho em negrito da
+/// `tipografia`, e o regular é conferido como diferente — sem isso, os dois
+/// estilos poderiam ser o mesmo, e o caso passaria.
+fn tipografia_portugues_e_negrito() -> Resultado {
+    use tipografia::Estilo;
+
+    let Some(fisica) = crate::tela::tela_fisica() else {
+        return sem_framebuffer();
+    };
+    const PALAVRA: &str = "ação é útil";
+    sem_intrusos(|| {
+        crate::tela::banner();
+        let (x, y) = crate::tela::console::cursor();
+        let (coluna, linha) = crate::tela::console::cursor_em_celulas();
+        if !crate::tela::console::escrever(PALAVRA) {
+            return Err("o console recusou escrever com a tela de pe");
+        }
+        let (largura, _) = crate::tela::console::tamanho_do_glifo();
+        for (i, c) in PALAVRA.chars().enumerate() {
+            crate::tela::console::conferir_glifo(c, x + i as u32 * largura, y)?;
+            if crate::tela::console::caractere(coluna + i as u32, linha) != Some(c) {
+                return Err("a grade nao guardou a letra acentuada que foi desenhada");
+            }
+        }
+        Ok(())
+    })?;
+
+    // O nome na barra, em negrito. O cursor sai de cima dele antes.
+    crate::ponteiro::absoluto(
+        fisica.largura - 1,
+        fisica.altura - 1,
+        fisica.largura - 1,
+        fisica.altura - 1,
+    );
+    crate::ponteiro::sincronizar();
+    let m = crate::barra::moldura_do_nome().ok_or("sem a barra superior, com tela")?;
+    let desenhar = |estilo: Estilo| {
+        let mut px = alloc::vec![crate::barra::FUNDO.para_u32(); (m.largura * m.altura) as usize];
+        crate::tela::console::desenhar_texto_em(
+            &mut px,
+            m.largura,
+            (0, 0),
+            crate::barra::NOME,
+            estilo,
+            (crate::barra::TEXTO, crate::barra::FUNDO),
+        );
+        px
+    };
+    let (negrito, regular) = (desenhar(Estilo::NEGRITO), desenhar(Estilo::TEXTO));
+    if negrito == regular {
+        return Err("o negrito e o regular desenham o mesmo nome");
+    }
+    for y in 0..m.altura {
+        for x in 0..m.largura {
+            let esperado = crate::tela::Cor::de_u32(negrito[(y * m.largura + x) as usize]);
+            if pixel_na_tela(m.x + x, m.y + y)? != esperado {
+                crate::log_error!("teste", "o nome difere do negrito em ({}, {})", x, y);
+                return Err("o nome na barra nao esta em negrito");
+            }
+        }
+    }
+    Ok(())
+}
+
 fn console_texto_chega_ao_framebuffer() -> Resultado {
     if crate::tela::tela().is_none() {
         return sem_framebuffer();
@@ -4611,7 +4685,7 @@ fn sobre_o_duke() -> Resultado {
     if crate::ponteiro::tratar_clique(cx, cy) != Some(ID_DO_BOTAO_SOBRE) {
         return Err("o clique no botao Sobre nao o pressionou");
     }
-    let (x, y) = ((w - 400) / 2, (h - 180) / 2);
+    let (x, y) = ((w - 400) / 2, (h - 190) / 2);
     esperar_linha(&format!("janelas: aberta 1 Sobre o Duke em {x} {y}"))?;
     esperar_linha("janelas: foco 1")?;
 
@@ -4622,7 +4696,8 @@ fn sobre_o_duke() -> Resultado {
         || {
             chamar("ui.tree", "{}").is_ok_and(|a| {
                 a.contains("\"role\":\"window\",\"label\":\"Sobre o Duke\"")
-                    && a.contains("Duke, um sistema operacional didatico")
+                    && a.contains("\"label\":\"cabeçalho\"")
+                    && a.contains("Um sistema operacional didático")
                     && a.contains(&texto)
             })
         },
@@ -11651,6 +11726,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "console: o texto chega ao framebuffer",
         f: console_texto_chega_ao_framebuffer,
+    },
+    Caso {
+        nome: "tipografia: o console escreve portugues, e a barra em negrito",
+        f: tipografia_portugues_e_negrito,
     },
     Caso {
         nome: "console: quebra na borda e rola no pe",

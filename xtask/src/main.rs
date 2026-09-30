@@ -2223,14 +2223,7 @@ fn conferir_fase_do_readme() -> Result<ExitCode, String> {
     let main = std::fs::read_to_string(raiz.join("kernel/src/main.rs"))
         .map_err(|e| format!("não foi possível ler o main.rs do kernel: {e}"))?;
 
-    let feita = readme
-        .lines()
-        .filter_map(|l| l.trim_start().strip_prefix("- [x] **Fase "))
-        .filter_map(|resto| {
-            let digitos: String = resto.chars().take_while(char::is_ascii_digit).collect();
-            digitos.parse::<u32>().ok()
-        })
-        .max()
+    let feita = ultima_fase_completa(&readme)
         .ok_or("o roteiro do README não tem nenhuma fase marcada como feita")?;
 
     let publicada = apos(&main, "pub const FASE: &str = \"")
@@ -2238,15 +2231,50 @@ fn conferir_fase_do_readme() -> Result<ExitCode, String> {
         .ok_or("`pub const FASE` não foi encontrada em kernel/src/main.rs")?;
 
     if publicada == feita.to_string() {
-        println!("[xtask] fase: o kernel publica a fase {feita}, a última feita no roteiro");
+        println!("[xtask] fase: o kernel publica a fase {feita}, a última completa no roteiro");
         Ok(ExitCode::SUCCESS)
     } else {
         eprintln!(
-            "[xtask] fase: o kernel publica a fase {publicada}, e a última marcada como feita \
+            "[xtask] fase: o kernel publica a fase {publicada}, e a última completa \
              no roteiro do README é a {feita}"
         );
         Ok(ExitCode::FAILURE)
     }
+}
+
+/// A última fase **completa** do roteiro: a maior `N` tal que todo item de
+/// fase até `N` está marcado como feito.
+///
+/// # Por que não a maior marcada
+///
+/// Porque era isso, e deixou de servir no dia em que a fase 10 terminou com
+/// as de 6 a 9 abertas. A maior marcada seria 10, e o kernel passaria a
+/// publicar uma fase que promete vários núcleos que ele não tem — o que a
+/// documentação de `FASE` avisa desde que ela existe. Completa é até onde
+/// não há buraco.
+fn ultima_fase_completa(readme: &str) -> Option<u32> {
+    let mut fases: Vec<(u32, bool)> = readme
+        .lines()
+        .filter_map(|l| {
+            let l = l.trim_start();
+            let (feita, resto) = if let Some(r) = l.strip_prefix("- [x] **Fase ") {
+                (true, r)
+            } else {
+                (false, l.strip_prefix("- [ ] **Fase ")?)
+            };
+            let digitos: String = resto.chars().take_while(char::is_ascii_digit).collect();
+            Some((digitos.parse().ok()?, feita))
+        })
+        .collect();
+    fases.sort_by_key(|&(n, _)| n);
+    let mut completa = None;
+    for (n, feita) in fases {
+        if !feita {
+            break;
+        }
+        completa = Some(n);
+    }
+    completa
 }
 
 /// Confere que a árvore de arquivos do README é a árvore que existe.
@@ -2302,6 +2330,7 @@ fn conferir_arvore_do_readme() -> Result<ExitCode, String> {
         "kernel/src",
         "iniciador/src",
         "protocolo/src",
+        "tipografia/src",
         "programas/src",
         "xtask/src",
     ] {
@@ -2551,6 +2580,7 @@ fn conferir_blocos_unsafe() -> Result<ExitCode, String> {
         "kernel/src",
         "iniciador/src",
         "protocolo/src",
+        "tipografia/src",
         "programas/src",
     ] {
         percorrer_fontes(&raiz.join(sub), &mut |caminho| {
@@ -6405,6 +6435,23 @@ const ESPERA_PELO_CANAL: Duration = Duration::from_secs(30);
 
 #[cfg(test)]
 mod testes {
+    #[test]
+    fn a_fase_completa_e_ate_o_primeiro_buraco() {
+        let roteiro = "\
+- [x] **Fase 0 — A.**
+- [x] **Fase 0 — B.**
+- [x] **Fase 1 — C.**
+- [ ] **Fase 2 — D.**
+- [x] **Fase 3 — E.**
+";
+        assert_eq!(super::ultima_fase_completa(roteiro), Some(1));
+        assert_eq!(super::ultima_fase_completa("- [ ] **Fase 0 — A.**"), None);
+        assert_eq!(
+            super::ultima_fase_completa("- [x] **Fase 0 — A.**\n- [x] **Fase 1 — B.**"),
+            Some(1)
+        );
+    }
+
     use super::*;
 
     /// O comando `simbolo` recebe endereços de duas origens com formatos

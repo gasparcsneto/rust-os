@@ -12,10 +12,17 @@ checksum = "f102c477fd4ec864c149803bf606ecc23bc9329602ec0f99073a728abf454abc"
 name = "programas"
 version = "0.1.0"
 dependencies = [
- "noto-sans-mono-bitmap",
  "protocolo",
+ "tipografia",
 ]
 
 [[package]]
 name = "protocolo"
 version = "0.1.0"
+
+[[package]]
+name = "tipografia"
+version = "0.1.0"
+dependencies = [
+ "noto-sans-mono-bitmap",
+]

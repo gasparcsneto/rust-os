@@ -34,10 +34,10 @@ name = "duke"
 version = "0.1.0"
 dependencies = [
  "aarch64-cpu",
- "noto-sans-mono-bitmap",
  "pci_types",
  "protocolo",
  "spin",
+ "tipografia",
  "tock-registers",
  "uart_16550",
  "x86_64",
@@ -91,6 +91,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0134f9043ed38b087ac4f7d4af44c79e2c9e5094421fe3164f435ce585953b10"
 dependencies = [
  "lock_api",
+]
+
+[[package]]
+name = "tipografia"
+version = "0.1.0"
+dependencies = [
+ "noto-sans-mono-bitmap",
 ]
 
 [[package]]

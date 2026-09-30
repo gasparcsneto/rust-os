@@ -36,9 +36,19 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
 use crate::grafico::compositor::Camada;
-use crate::tela::console::{desenhar_texto_em, largura_do_texto};
+use crate::tela::console::desenhar_texto_em;
 use crate::tela::{ALTURA_DA_BARRA, Cor};
 use crate::ui::Moldura;
+use tipografia::Estilo;
+
+/// O nome vai em negrito — é o que se lê primeiro na barra —, e o resto, no
+/// texto de todo dia.
+const ESTILO_DO_NOME: Estilo = Estilo::NEGRITO;
+const ESTILO: Estilo = Estilo::TEXTO;
+
+fn largura_do_texto(texto: &str, estilo: Estilo) -> u32 {
+    tipografia::largura_do_texto(texto, estilo)
+}
 
 pub const FUNDO: Cor = Cor::nova(0x1A, 0x24, 0x36);
 pub const TEXTO: Cor = Cor::nova(0xD8, 0xDE, 0xE8);
@@ -239,8 +249,8 @@ pub fn moldura_do_nome() -> Option<Moldura> {
     ativa().then(|| Moldura {
         x: MARGEM,
         y: TEXTO_Y,
-        largura: largura_do_texto(NOME),
-        altura: crate::tela::console::altura_do_texto(),
+        largura: largura_do_texto(NOME, ESTILO_DO_NOME),
+        altura: ESTILO_DO_NOME.altura(),
     })
 }
 
@@ -252,13 +262,13 @@ pub fn relogio_na_tela() -> Option<(Moldura, alloc::string::String)> {
     }
     let segundo = SEGUNDO_DESENHADO.load(Ordering::Relaxed);
     let texto = texto_do_relogio(segundo);
-    let largura = largura_do_texto(&texto);
+    let largura = largura_do_texto(&texto, ESTILO);
     Some((
         Moldura {
             x: tela.largura.saturating_sub(MARGEM + largura),
             y: TEXTO_Y,
             largura,
-            altura: crate::tela::console::altura_do_texto(),
+            altura: ESTILO.altura(),
         },
         texto,
     ))
@@ -276,8 +286,11 @@ pub fn texto_do_relogio(segundo: u64) -> alloc::string::String {
 
 /// Onde o botão começa e quanto ele ocupa, na horizontal.
 fn posicao_do_botao() -> (u32, u32) {
-    let x = MARGEM + largura_do_texto(NOME) + 2 * MARGEM;
-    (x, largura_do_texto(TEXTO_DO_BOTAO) + 2 * BOTAO_FOLGA)
+    let x = MARGEM + largura_do_texto(NOME, ESTILO_DO_NOME) + 2 * MARGEM;
+    (
+        x,
+        largura_do_texto(TEXTO_DO_BOTAO, ESTILO) + 2 * BOTAO_FOLGA,
+    )
 }
 
 /// O botão "Sobre", logo à direita do primeiro.
@@ -285,7 +298,7 @@ fn posicao_do_sobre() -> (u32, u32) {
     let (x, largura) = posicao_do_botao();
     (
         x + largura + MARGEM,
-        largura_do_texto(TEXTO_DO_SOBRE) + 2 * BOTAO_FOLGA,
+        largura_do_texto(TEXTO_DO_SOBRE, ESTILO) + 2 * BOTAO_FOLGA,
     )
 }
 
@@ -313,7 +326,14 @@ fn desenhar_tudo(pixels: &mut [u32], largura: u32, segundo: u64) {
         },
         Cor::ACENTO,
     );
-    desenhar_texto_em(pixels, largura, MARGEM, TEXTO_Y, NOME, TEXTO, FUNDO);
+    desenhar_texto_em(
+        pixels,
+        largura,
+        (MARGEM, TEXTO_Y),
+        NOME,
+        ESTILO_DO_NOME,
+        (TEXTO, FUNDO),
+    );
 
     for ((x, largura_do_botao), texto) in [
         (posicao_do_botao(), TEXTO_DO_BOTAO),
@@ -333,11 +353,10 @@ fn desenhar_tudo(pixels: &mut [u32], largura: u32, segundo: u64) {
         desenhar_texto_em(
             pixels,
             largura,
-            x + BOTAO_FOLGA,
-            TEXTO_Y,
+            (x + BOTAO_FOLGA, TEXTO_Y),
             texto,
-            TEXTO,
-            FUNDO_DO_BOTAO,
+            ESTILO,
+            (TEXTO, FUNDO_DO_BOTAO),
         );
     }
 
@@ -351,7 +370,7 @@ fn desenhar_tudo(pixels: &mut [u32], largura: u32, segundo: u64) {
 /// e o dígito que sobrasse ficaria desenhado.
 fn desenhar_relogio(pixels: &mut [u32], largura: u32, segundo: u64) {
     let texto = texto_do_relogio(segundo);
-    let reservado = largura_do_texto("ligado 0000:00:00");
+    let reservado = largura_do_texto("ligado 0000:00:00", ESTILO);
     pintar_retangulo(
         pixels,
         largura,
@@ -363,8 +382,15 @@ fn desenhar_relogio(pixels: &mut [u32], largura: u32, segundo: u64) {
         },
         FUNDO,
     );
-    let x = largura.saturating_sub(MARGEM + largura_do_texto(&texto));
-    desenhar_texto_em(pixels, largura, x, TEXTO_Y, &texto, TEXTO, FUNDO);
+    let x = largura.saturating_sub(MARGEM + largura_do_texto(&texto, ESTILO));
+    desenhar_texto_em(
+        pixels,
+        largura,
+        (x, TEXTO_Y),
+        &texto,
+        ESTILO,
+        (TEXTO, FUNDO),
+    );
 }
 
 /// Destrava a barra à força, para uso exclusivo do caminho de falha fatal.
