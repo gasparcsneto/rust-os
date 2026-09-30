@@ -467,6 +467,309 @@ pub mod descricao {
         }
         true
     }
+
+    /// O que um elemento é, na árvore.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Tipo {
+        Botao,
+        Texto,
+    }
+
+    impl Tipo {
+        /// A palavra que abre a linha do elemento.
+        pub const fn palavra(self) -> &'static str {
+            match self {
+                Tipo::Botao => "botao",
+                Tipo::Texto => "texto",
+            }
+        }
+
+        #[cfg(feature = "alloc")]
+        fn da_palavra(palavra: &str) -> Option<Tipo> {
+            match palavra {
+                "botao" => Some(Tipo::Botao),
+                "texto" => Some(Tipo::Texto),
+                _ => None,
+            }
+        }
+
+        /// O tipo leva um valor além do rótulo?
+        pub const fn tem_valor(self) -> bool {
+            matches!(self, Tipo::Texto)
+        }
+    }
+
+    /// Um retângulo, em pixels da superfície.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct Retangulo {
+        pub x: u32,
+        pub y: u32,
+        pub largura: u32,
+        pub altura: u32,
+    }
+
+    #[cfg(feature = "alloc")]
+    pub use com_alocacao::*;
+
+    /// O leitor e o escritor, que alocam.
+    ///
+    /// # Por que os dois aqui
+    ///
+    /// Porque o formato é um só, e o lugar dele é um só. O leitor morava no
+    /// kernel, e cada programa com janela escrevia as linhas à mão: eram
+    /// uma leitura e várias escritas do mesmo formato, e nada conferia que
+    /// concordavam além de o kernel recusar a descrição inteira quando não
+    /// concordavam. Com os dois lado a lado, um teste faz a volta completa.
+    #[cfg(feature = "alloc")]
+    mod com_alocacao {
+        use super::{MAIOR, MAIOR_TEXTO, MAIS_ELEMENTOS, Retangulo, Tipo, escapar, resolver};
+        use alloc::string::String;
+        use alloc::vec::Vec;
+        use core::fmt::Write;
+
+        /// Um elemento que o processo descreveu dentro da janela.
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        pub struct Elemento {
+            pub tipo: Tipo,
+            /// O identificador que o processo deu, e que volta a ele numa
+            /// ação.
+            pub id: i64,
+            /// O retângulo, na superfície.
+            pub moldura: Retangulo,
+            pub rotulo: String,
+            pub valor: Option<String>,
+        }
+
+        /// O que o processo disse que a janela é.
+        #[derive(Clone, Debug, Default, PartialEq, Eq)]
+        pub struct Descricao {
+            pub titulo: String,
+            pub elementos: Vec<Elemento>,
+        }
+
+        impl Descricao {
+            /// Lê o texto de uma descrição, ou diz o que não entendeu.
+            ///
+            /// Tudo ou nada: uma linha errada recusa a descrição inteira, e
+            /// quem lê fica com a anterior. Uma árvore com metade de uma
+            /// janela descreveria algo que não está na tela.
+            pub fn ler(texto: &str) -> Result<Descricao, &'static str> {
+                if texto.len() > MAIOR {
+                    return Err("descricao grande demais");
+                }
+                let mut linhas = texto.split('\n').filter(|l| !l.is_empty());
+                let primeira = linhas.next().ok_or("descricao vazia")?;
+                let titulo = match primeira.split_once('\t') {
+                    Some(("janela", titulo)) => resolvido(titulo)?,
+                    _ => return Err("a descricao nao comeca pela linha `janela`"),
+                };
+                let mut elementos = Vec::new();
+                for linha in linhas {
+                    if elementos.len() == MAIS_ELEMENTOS {
+                        return Err("elementos demais");
+                    }
+                    let mut campos = linha.split('\t');
+                    let tipo = campos
+                        .next()
+                        .and_then(Tipo::da_palavra)
+                        .ok_or("linha que nao e `botao` nem `texto`")?;
+                    let mut numero = || -> Result<i64, &'static str> {
+                        campos
+                            .next()
+                            .and_then(|c| c.parse().ok())
+                            .ok_or("campo numerico ausente ou invalido")
+                    };
+                    let id = numero()?;
+                    let mut lado = || -> Result<u32, &'static str> {
+                        u32::try_from(numero()?).map_err(|_| "coordenada negativa ou grande demais")
+                    };
+                    let moldura = Retangulo {
+                        x: lado()?,
+                        y: lado()?,
+                        largura: lado()?,
+                        altura: lado()?,
+                    };
+                    let rotulo = resolvido(campos.next().ok_or("elemento sem rotulo")?)?;
+                    let valor = if tipo.tem_valor() {
+                        Some(resolvido(campos.next().ok_or("texto sem valor")?)?)
+                    } else {
+                        None
+                    };
+                    if campos.next().is_some() {
+                        return Err("campos demais numa linha");
+                    }
+                    elementos.push(Elemento {
+                        tipo,
+                        id,
+                        moldura,
+                        rotulo,
+                        valor,
+                    });
+                }
+                Ok(Descricao { titulo, elementos })
+            }
+        }
+
+        /// Um rótulo ou valor, com o escape resolvido e o tamanho conferido.
+        fn resolvido(texto: &str) -> Result<String, &'static str> {
+            let mut saida = String::new();
+            if !resolver(texto, |c| saida.push(c)) {
+                return Err("escape invalido");
+            }
+            if saida.len() > MAIOR_TEXTO {
+                return Err("rotulo ou valor grande demais");
+            }
+            Ok(saida)
+        }
+
+        /// Escreve uma descrição, com as mesmas regras de quem a lê.
+        ///
+        /// Os limites são conferidos aqui, e não só no kernel: um texto
+        /// longo demais ou elementos demais viram um erro de quem escreve,
+        /// no processo, em vez de uma descrição inteira recusada do outro
+        /// lado da fronteira sem ninguém saber por quê.
+        pub struct Escritor {
+            texto: String,
+            elementos: usize,
+            erro: Option<&'static str>,
+        }
+
+        impl Escritor {
+            /// Uma descrição nova, da janela com este título.
+            pub fn nova(titulo: &str) -> Escritor {
+                let mut e = Escritor {
+                    texto: String::new(),
+                    elementos: 0,
+                    erro: None,
+                };
+                e.texto.push_str("janela\t");
+                e.campo_de_texto(titulo);
+                e
+            }
+
+            fn campo_de_texto(&mut self, texto: &str) {
+                if texto.len() > MAIOR_TEXTO {
+                    self.erro.get_or_insert("rotulo ou valor grande demais");
+                }
+                let _ = escapar(texto, &mut self.texto);
+            }
+
+            /// Acrescenta um elemento. O valor vai só nos tipos que o
+            /// levam — ver [`Tipo::tem_valor`] —, e é ignorado nos outros.
+            pub fn elemento(
+                &mut self,
+                tipo: Tipo,
+                id: i64,
+                moldura: Retangulo,
+                rotulo: &str,
+                valor: &str,
+            ) -> &mut Escritor {
+                self.elementos += 1;
+                if self.elementos > MAIS_ELEMENTOS {
+                    self.erro.get_or_insert("elementos demais");
+                }
+                let _ = write!(
+                    self.texto,
+                    "\n{}\t{}\t{}\t{}\t{}\t{}\t",
+                    tipo.palavra(),
+                    id,
+                    moldura.x,
+                    moldura.y,
+                    moldura.largura,
+                    moldura.altura
+                );
+                self.campo_de_texto(rotulo);
+                if tipo.tem_valor() {
+                    self.texto.push('\t');
+                    self.campo_de_texto(valor);
+                }
+                self
+            }
+
+            /// O texto pronto, ou o primeiro limite que ele passou.
+            pub fn terminar(self) -> Result<String, &'static str> {
+                if let Some(erro) = self.erro {
+                    return Err(erro);
+                }
+                if self.texto.len() > MAIOR {
+                    return Err("descricao grande demais");
+                }
+                Ok(self.texto)
+            }
+        }
+    }
+}
+
+#[cfg(all(test, feature = "alloc"))]
+mod testes {
+    use super::descricao::*;
+
+    fn r(x: u32, y: u32, largura: u32, altura: u32) -> Retangulo {
+        Retangulo {
+            x,
+            y,
+            largura,
+            altura,
+        }
+    }
+
+    #[test]
+    fn o_que_se_escreve_e_o_que_se_le() {
+        let mut e = Escritor::nova("Sobre\to Duke");
+        e.elemento(Tipo::Botao, 1, r(10, 2, 16, 16), "Fechar", "ignorado")
+            .elemento(
+                Tipo::Texto,
+                2,
+                r(1, 22, 398, 167),
+                "conteudo",
+                "linha 1\nlinha\\2",
+            );
+        let texto = e.terminar().unwrap();
+        let d = Descricao::ler(&texto).unwrap();
+        assert_eq!(d.titulo, "Sobre\to Duke");
+        assert_eq!(d.elementos.len(), 2);
+        assert_eq!(d.elementos[0].tipo, Tipo::Botao);
+        assert_eq!(d.elementos[0].valor, None);
+        assert_eq!(d.elementos[0].moldura, r(10, 2, 16, 16));
+        assert_eq!(d.elementos[1].valor.as_deref(), Some("linha 1\nlinha\\2"));
+        assert_eq!(d.elementos[1].id, 2);
+    }
+
+    #[test]
+    fn o_escritor_recusa_o_que_o_leitor_recusaria() {
+        let mut e = Escritor::nova("x");
+        for i in 0..=MAIS_ELEMENTOS as i64 {
+            e.elemento(Tipo::Botao, i, r(0, 0, 1, 1), "b", "");
+        }
+        assert_eq!(e.terminar(), Err("elementos demais"));
+
+        let longo = "a".repeat(MAIOR_TEXTO + 1);
+        let mut e = Escritor::nova("x");
+        e.elemento(Tipo::Texto, 1, r(0, 0, 1, 1), "t", &longo);
+        assert!(e.terminar().is_err());
+
+        // E o que passa pelo escritor passa pelo leitor, no limite exato.
+        let mut e = Escritor::nova("x");
+        for i in 0..MAIS_ELEMENTOS as i64 {
+            e.elemento(Tipo::Botao, i, r(0, 0, 1, 1), "b", "");
+        }
+        assert!(Descricao::ler(&e.terminar().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn o_leitor_recusa_o_que_nao_entende() {
+        for ruim in [
+            "",
+            "botao\t1\t0\t0\t1\t1\tb",
+            "janela\tx\ncaixa\t1\t0\t0\t1\t1\tb",
+            "janela\tx\nbotao\t1\t-1\t0\t1\t1\tb",
+            "janela\tx\nbotao\t1\t0\t0\t1\t1\tb\tsobra",
+            "janela\tx\ntexto\t1\t0\t0\t1\t1\tsem valor",
+            "janela\tx\\q",
+        ] {
+            assert!(Descricao::ler(ruim).is_err(), "aceitou {ruim:?}");
+        }
+    }
 }
 
 /// Quantos bytes o ponteiro de `esperar` precisa ter — ver

@@ -1,0 +1,22 @@
+[package]
+# O toolkit do Duke: widgets que se desenham e se descrevem do mesmo estado.
+#
+# Um pacote, e não um módulo do runtime dos programas, para ser testado no
+# hospedeiro: o layout, o desenho e a descrição são contas, e contas se
+# conferem com `cargo test`, sem emulador. O runtime não compila para o
+# hospedeiro — ele é a entrada e as chamadas de sistema de um processo do
+# Duke —, e o que morasse nele só seria conferido pela suíte, lá dentro.
+#
+# `no_std` com `alloc`, e membro do workspace da raiz, como a `tipografia`.
+name = "toolkit"
+version = "0.1.0"
+edition = "2024"
+description = "Os widgets do Duke: desenho e árvore semântica do mesmo estado"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# O formato da descrição — o escritor e o leitor —, e a fonte e a
+# linguagem visual. Os três são os mesmos que o kernel usa.
+protocolo = { path = "../protocolo", features = ["alloc"] }
+tipografia = { path = "../tipografia" }
+aparencia = { path = "../aparencia" }

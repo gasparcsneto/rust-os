@@ -30,7 +30,10 @@
 //! deslocamento errado não dá erro, dá um alocador que entrega páginas do
 //! firmware.
 
-#![no_std]
+#![cfg_attr(not(test), no_std)]
+
+#[cfg(feature = "alloc")]
+extern crate alloc;
 
 pub mod mapa;
 pub mod usuario;

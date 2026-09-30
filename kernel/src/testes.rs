@@ -4446,10 +4446,10 @@ fn superficies_a_descricao_recusa_o_que_nao_entende() -> Resultado {
     if (
         b.tipo,
         b.id,
-        b.x,
-        b.y,
-        b.largura,
-        b.altura,
+        b.moldura.x,
+        b.moldura.y,
+        b.moldura.largura,
+        b.moldura.altura,
         b.rotulo.as_str(),
         &b.valor,
     ) != (Tipo::Botao, 17, 1, 2, 3, 4, "Fechar", &None)

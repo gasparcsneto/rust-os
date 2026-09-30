@@ -313,6 +313,13 @@ tipografia/src/      a fonte e o desenho de texto, dos dois lados da fronteira
 aparencia/src/       a linguagem visual, dos dois lados da fronteira
 └── lib.rs           a paleta, onde cada cor vai, as medidas e os estilos de texto pelo uso
 
+toolkit/src/         os widgets: desenho e árvore semântica do mesmo estado
+├── lib.rs           a regra, e o que existe
+├── arvore.rs        o trait, e as viagens pela árvore: desenhar, descrever, achar
+├── widgets.rs       o texto, o botão, a coluna e a linha
+├── tela.rs          a memória de pixels onde os widgets desenham
+└── testes.rs        o layout, o desenho e a descrição, conferidos no hospedeiro
+
 programas/           os programas de usuário, compilados à parte do kernel
 ├── usuario.ld       o mapa de um programa: três segmentos a partir de BASE
 └── src/

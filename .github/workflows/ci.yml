@@ -57,13 +57,17 @@ jobs:
       # A tipografia também: ela é `no_std` só fora dos testes, e os dela
       # conferem a fonte — os glifos do português, o substituto e a mistura.
       # E a aparência, pelo mesmo motivo: os dela conferem o contraste de
-      # cada par de texto e fundo que o sistema desenha.
-      - name: Testes do xtask, da tipografia e da aparência
-        run: cargo test -p xtask -p tipografia -p aparencia
+      # cada par de texto e fundo que o sistema desenha. E o toolkit, cujo
+      # layout, desenho e descrição são contas, conferidas aqui sem
+      # emulador — com o leitor de descrição do protocolo, o mesmo do
+      # kernel, e os testes dele junto.
+      - name: Testes no hospedeiro
+        run: cargo test -p xtask -p tipografia -p aparencia -p toolkit -p protocolo --features protocolo/alloc
 
       - name: Lints
         run: |
-          cargo clippy -p xtask -p tipografia -p aparencia --all-targets -- -D warnings
+          cargo clippy -p xtask -p tipografia -p aparencia -p toolkit --all-targets -- -D warnings
+          cargo clippy -p protocolo --features alloc --all-targets -- -D warnings
           for alvo in x86_64-unknown-uefi aarch64-unknown-uefi; do
             (cd iniciador && cargo clippy --target "$alvo" -- -D warnings)
           done
@@ -118,7 +122,7 @@ jobs:
         env:
           RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
         run: |
-          cargo doc --no-deps -p protocolo -p tipografia -p aparencia -p xtask
+          cargo doc --no-deps -p protocolo -p tipografia -p aparencia -p toolkit -p xtask --features protocolo/alloc
           for alvo in x86_64-unknown-uefi aarch64-unknown-uefi; do
             (cd iniciador && cargo doc --no-deps --target "$alvo")
           done

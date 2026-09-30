@@ -1628,7 +1628,12 @@ fn escrever_camada(w: &mut JsonWriter, c: crate::grafico::compositor::InfoCamada
         };
         w.field_str("role", papel.nome())?;
         w.field_str("label", &e.rotulo)?;
-        if let Some(m) = na_tela(e.x, e.y, e.largura, e.altura) {
+        if let Some(m) = na_tela(
+            e.moldura.x,
+            e.moldura.y,
+            e.moldura.largura,
+            e.moldura.altura,
+        ) {
             escrever_moldura(w, m)?;
         }
         if let Some(v) = &e.valor {

@@ -10,3 +10,9 @@ description = "A ABI entre o iniciador UEFI e o kernel do Duke"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+
+[features]
+# O leitor e o escritor da descrição de uma janela — ver
+# `usuario::descricao`. Pedem alocação, e ficam de fora para quem não tem
+# alocador: o iniciador UEFI inclui este pacote e não aloca nada.
+alloc = []
