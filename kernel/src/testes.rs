@@ -4307,8 +4307,13 @@ fn janelas_operadas() -> Resultado {
     mover(x + 200, y + 10);
     crate::ponteiro::botao(true);
     mover(x + 340, y + 60);
-    crate::ponteiro::botao(false);
+    // A janela acompanha **antes** de o botão soltar: o soltar também vai
+    // ao servidor, com a posição final, e um caso que só olhasse o fim não
+    // veria a captura faltando no meio do arrasto.
     let (x1, y1) = (x + 140, y + 50);
+    esperar_ate(|| janelas_na_tela() == [(x1, y1)], 600)
+        .map_err(|_| "a janela nao acompanhou o ponteiro com o botao apertado")?;
+    crate::ponteiro::botao(false);
     esperar_linha(&format!("janelas: arrastada 1 para {x1} {y1}"))?;
     if janelas_na_tela() != [(x1, y1)] {
         return Err("a janela arrastada nao foi para onde o ponteiro a levou");
@@ -5068,6 +5073,26 @@ fn entradas_separadas() -> Resultado {
     let botao = crate::ui::id_do_elemento(camada.id, 0).ok_or("sem identificador")?;
     crate::ui::agir(botao, Acao::Pressionar, None, Origem::Agente)?;
     esperar_vezes("entrada: acao 5 1", 1)?;
+
+    // A corrida entre dois processos: um aperto na janela do servidor e
+    // outro na do programa, sem o servidor rodar no meio. O foco fica com
+    // o programa. Se o servidor pedisse o foco pelo aperto, o pedido
+    // atrasado o tomaria do programa — e, avisado de que o perdeu, o
+    // servidor o soltaria: o foco ficaria com ninguém, e o programa, que
+    // recebeu o último aperto, sem as teclas.
+    crate::arch::sem_interrupcoes(|| {
+        apertar(jx + 100, jy + 100);
+        apertar(px, py);
+    });
+    esperar_vezes(&format!("entrada: ponteiro {px} {py} 1"), 2)?;
+    esperar_vezes("janelas: foco devolvido", 3)?;
+    let _ = esperar_ate(|| false, 20);
+    if crate::superficies::destino_do_foco()
+        .and_then(|d| d.entrada)
+        .is_none()
+    {
+        return Err("o aperto atrasado na janela do servidor tirou o foco do programa");
+    }
 
     // O fim: os dois saem.
     let encerrar = Evento {
