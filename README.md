@@ -1026,8 +1026,8 @@ pelo `user.run`, preenche os campos e aperta o OK pelo canal do agente,
 digita no mesmo campo e confirma com o Enter pelo teclado da máquina, e o
 fecha pela caixa com o mouse — como fecha o "Sobre o Duke" pelo OK.
 
-Noventa e quatro mutações nas seis etapas, e as noventa e quatro
-reprovadas — várias só depois de o caso ser reforçado. Seis das oito da
+Noventa e seis mutações nas seis etapas, e as noventa e seis reprovadas —
+várias só depois de o caso ser reforçado. Seis das oito da
 linguagem visual passavam: a suíte conferia a tela contra as constantes
 do kernel, e as constantes vinham do token mutado. No campo, seis das
 dezoito do hospedeiro passavam, e cada uma virou uma pergunta nova — o
