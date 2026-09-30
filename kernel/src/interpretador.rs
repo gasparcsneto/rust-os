@@ -114,7 +114,7 @@ pub async fn atender() {
 /// Separado do laço para a suíte alcançá-lo: em modo de teste não há
 /// executor, e sem isto o caminho da pessoa só seria exercitado pela fumaça.
 pub fn tratar_tecla(c: char) {
-    use protocolo::usuario::terminal::{APAGAR_A_LINHA, CONFIRMAR_PELO_AGENTE};
+    use protocolo::usuario::terminal::{APAGAR_A_LINHA, agente_que_confirmou};
     match c {
         '\n' => {
             confirmar(Origem::Pessoa);
@@ -126,8 +126,10 @@ pub fn tratar_tecla(c: char) {
         APAGAR_A_LINHA => {
             let _ = definir("");
         }
-        CONFIRMAR_PELO_AGENTE => {
-            confirmar(Origem::Agente);
+        c if agente_que_confirmou(c).is_some() => {
+            if let Some(sessao) = agente_que_confirmou(c) {
+                confirmar(Origem::Agente(sessao));
+            }
         }
         // F1 é o botão da barra superior. Pelo mesmo caminho do `press` do
         // agente — [`crate::ui::agir`] —, com a outra origem: é o que faz o
@@ -459,7 +461,7 @@ fn despachar(nome: &str, params: &str, origem: Origem) {
     // executado na máquina — e por quem. A origem é o começo da auditoria que
     // a fase 12 do roteiro pede: se um agente pode fazer tudo que uma pessoa
     // faz, o registro precisa dizer qual dos dois fez.
-    crate::log_info!("console", "executado: {} ({})", nome, origem.nome());
+    crate::log_info!("console", "executado: {} ({})", nome, origem);
 
     let mut saida = SaidaHumana::nova();
     let mut escritor = JsonWriter::new(&mut saida);
@@ -474,7 +476,7 @@ fn despachar(nome: &str, params: &str, origem: Origem) {
 /// Sai do mesmo registro que `agent.describe` publica. Uma lista escrita à
 /// mão aqui seria a segunda superfície que este módulo existe para não ter.
 fn ajuda(origem: Origem) {
-    crate::log_info!("console", "executado: ajuda ({})", origem.nome());
+    crate::log_info!("console", "executado: ajuda ({})", origem);
     for comando in registry::todos() {
         crate::serial_println!("  {:<18} {}", comando.nome, comando.resumo);
     }

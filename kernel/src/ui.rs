@@ -119,17 +119,34 @@ impl Acao {
 /// Vai para o log junto com o que foi feito. É o começo do que a fase 12 do
 /// roteiro chama de auditoria: se um agente pode fazer tudo que uma pessoa
 /// faz, o registro precisa dizer qual dos dois fez.
+///
+/// E, com vários agentes ao mesmo tempo, **qual** agente: o da sessão por
+/// onde o pedido chegou — ver [`crate::agent::sessao`]. O número é o da
+/// sessão, que o kernel atribui pelo canal, e não um nome que o agente diz.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Origem {
     Pessoa,
-    Agente,
+    Agente(u8),
 }
 
 impl Origem {
-    pub const fn nome(self) -> &'static str {
+    /// O `c` de um evento de ação que esta origem pede — ver
+    /// `protocolo::usuario::evento::origem`.
+    pub const fn codigo(self) -> i64 {
+        use protocolo::usuario::evento::origem;
         match self {
-            Origem::Pessoa => "pessoa",
-            Origem::Agente => "agente",
+            Origem::Pessoa => origem::PESSOA,
+            Origem::Agente(sessao) => origem::agente(sessao),
+        }
+    }
+}
+
+/// `pessoa`, ou `agente N`: como o log diz quem foi.
+impl core::fmt::Display for Origem {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Origem::Pessoa => f.write_str("pessoa"),
+            Origem::Agente(sessao) => write!(f, "agente {sessao}"),
         }
     }
 }
@@ -393,17 +410,11 @@ pub fn agir(
     // valor inválido ficava no log como ação feita — e isto é o começo de uma
     // trilha de auditoria, onde afirmar o que não aconteceu é pior que calar.
     match &desfecho {
-        Ok(_) => crate::log_info!(
-            "ui",
-            "{}: {} no elemento {}",
-            origem.nome(),
-            acao.nome(),
-            id
-        ),
+        Ok(_) => crate::log_info!("ui", "{}: {} no elemento {}", origem, acao.nome(), id),
         Err(motivo) => crate::log_info!(
             "ui",
             "{}: {} no elemento {} recusado: {}",
-            origem.nome(),
+            origem,
             acao.nome(),
             id,
             motivo
@@ -436,7 +447,7 @@ fn executar(
         && let Some(do_processo) = com_elemento(id, |e| e.id)
         && acao != Acao::Pressionar
     {
-        return agir_no_campo(id, do_processo, acao, valor);
+        return agir_no_campo(id, do_processo, acao, valor, origem);
     }
     match acao {
         Acao::DefinirValor => {
@@ -457,7 +468,7 @@ fn executar(
             } else if id == ID_DO_BOTAO_TERMINAL {
                 crate::barra::pressionar_terminal()?;
             } else if let Some(do_processo) = com_elemento(id, |e| e.id) {
-                pressionar_no_processo(id, do_processo)?;
+                pressionar_no_processo(id, do_processo, origem)?;
             } else {
                 crate::barra::pressionar();
             }
@@ -479,6 +490,7 @@ fn agir_no_campo(
     id_do_processo: i64,
     acao: Acao,
     valor: Option<&str>,
+    origem: Origem,
 ) -> Result<Efeito, &'static str> {
     use protocolo::usuario::evento::{Evento, acao as codigo, tipo};
     let (camada, _) = elemento_de(id).ok_or("o elemento nao e de uma janela")?;
@@ -498,7 +510,7 @@ fn agir_no_campo(
         tipo: tipo::ACAO,
         a: id_do_processo,
         b: numero,
-        c: 0,
+        c: origem.codigo(),
     };
     match crate::superficies::publicar_para(destino, evento) {
         Ok(()) => Ok(efeito),
@@ -522,7 +534,11 @@ fn agir_no_campo(
 /// Pelo canal de entrada da janela, como o clique da pessoa: quem decide o
 /// que o botão faz é o dono dela, e ele o faz pelo mesmo caminho do clique —
 /// o agente e a pessoa acionam a mesma coisa.
-fn pressionar_no_processo(id: u32, id_do_processo: i64) -> Result<(), &'static str> {
+fn pressionar_no_processo(
+    id: u32,
+    id_do_processo: i64,
+    origem: Origem,
+) -> Result<(), &'static str> {
     use protocolo::usuario::evento::{Evento, acao, tipo};
     let destino = elemento_de(id)
         .and_then(|(camada, _)| crate::superficies::destino_da_camada(camada))
@@ -533,7 +549,7 @@ fn pressionar_no_processo(id: u32, id_do_processo: i64) -> Result<(), &'static s
             tipo: tipo::ACAO,
             a: id_do_processo,
             b: acao::PRESSIONAR,
-            c: 0,
+            c: origem.codigo(),
         },
     ) {
         Ok(()) => Ok(()),

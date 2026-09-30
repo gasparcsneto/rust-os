@@ -57,12 +57,14 @@ pub mod commands;
 pub mod json;
 pub mod protocol;
 pub mod registry;
+pub mod sessao;
 
 use core::fmt;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use json::JsonWriter;
 use protocol::{Requisicao, RpcError};
+use sessao::Canal;
 
 /// Um comando pediu que o kernel falhasse de propósito.
 ///
@@ -147,6 +149,11 @@ const LINHA_MAX: usize = 2048;
 /// única parte com estado, e duplicá-lo seria duplicar exatamente a lógica
 /// mais fácil de errar: o que fazer com uma linha longa demais.
 struct Montador {
+    /// De onde vêm os bytes, e para onde vai a resposta.
+    canal: Canal,
+    /// A geração do canal quando este quadro começou — ver
+    /// [`Canal::geracao`]. Uma conexão nova recomeça o quadro.
+    geracao: u64,
     buffer: [u8; LINHA_MAX],
     tam: usize,
     /// Quantos bytes o canal já tinha perdido quando este quadro começou.
@@ -193,8 +200,10 @@ struct Montador {
 }
 
 impl Montador {
-    const fn novo() -> Self {
+    const fn novo(canal: Canal) -> Self {
         Self {
+            canal,
+            geracao: 0,
             buffer: [0; LINHA_MAX],
             tam: 0,
             perdas_ao_abrir: 0,
@@ -217,6 +226,18 @@ impl Montador {
         // ouvindo, e mandar um erro só confundiria quem acabou de chegar — que
         // não fez nada de errado e cuja requisição precisa ser atendida
         // normalmente.
+        // Uma conexão nova, num canal que as enxerga: o que estava pela
+        // metade era de quem saiu, e fica com ele. Sem erro, pela mesma
+        // razão da ociosidade logo abaixo.
+        let geracao = self.canal.geracao();
+        if geracao != self.geracao {
+            self.geracao = geracao;
+            self.tam = 0;
+            self.estourou = false;
+            self.danificado = false;
+            self.abrir_quadro();
+        }
+
         let agora = crate::tempo::ticks();
         if self.tam > 0 && agora.saturating_sub(self.ultimo_byte_em) > TETO_DO_QUADRO_EM_TIQUES {
             self.tam = 0;
@@ -231,8 +252,8 @@ impl Montador {
         // qualquer forma — o handler repõe o delimitador que não coube, ver
         // [`crate::tarefas::entrada::coletar`] —, mas esperar por ele seria
         // responder só depois de o cliente terminar de despejar.
-        if !self.danificado && crate::tarefas::entrada::perdidos() != self.perdas_ao_abrir {
-            responder_erro(None, RpcError::ENTRADA_PERDIDA, None);
+        if !self.danificado && self.canal.perdidos() != self.perdas_ao_abrir {
+            responder_erro(self.canal, None, RpcError::ENTRADA_PERDIDA, None);
             self.tam = 0;
             self.estourou = false;
 
@@ -254,7 +275,7 @@ impl Montador {
             // é o que devolve a fila ao pedido seguinte antes que ele chegue.
             // Sem isso, a requisição legítima que vem depois não cabe e se
             // perde junto — foi o que a CI pegou e a máquina daqui não.
-            if crate::tarefas::entrada::descartar_ate_nova_linha() {
+            if self.canal.descartar_ate_nova_linha() {
                 self.abrir_quadro();
                 return true;
             }
@@ -272,9 +293,9 @@ impl Montador {
                 if self.danificado {
                     // nada a responder
                 } else if self.estourou {
-                    responder_erro(None, RpcError::LINHA_MUITO_LONGA, None);
+                    responder_erro(self.canal, None, RpcError::LINHA_MUITO_LONGA, None);
                 } else if self.tam > 0 {
-                    processar(&self.buffer[..self.tam]);
+                    processar(self.canal, &self.buffer[..self.tam]);
                 }
 
                 self.danificado = false;
@@ -308,7 +329,7 @@ impl Montador {
     /// quadro passado e o fim dele, inclusive a que acontecer antes de o
     /// primeiro byte dele chegar — que é justamente onde some um `\n`.
     fn abrir_quadro(&mut self) {
-        self.perdas_ao_abrir = crate::tarefas::entrada::perdidos();
+        self.perdas_ao_abrir = self.canal.perdidos();
     }
 }
 
@@ -333,20 +354,26 @@ impl Montador {
 /// Em modo de teste esta função não tem chamador: a suíte roda no lugar do
 /// atendimento, e uma tarefa que nunca termina não teria como devolver o
 /// controle ao relatório.
+///
+/// Uma por canal: a serial, e cada porta do `virtio-console` — ver
+/// [`sessao`].
 #[cfg_attr(feature = "modo-teste", allow(dead_code))]
-pub async fn atender() {
+pub async fn atender(canal: Canal) {
     crate::log_info!(
         "agent",
-        "canal assincrono pronto, {} comandos registrados",
+        "sessao {} ({}) pronta, {} comandos registrados",
+        canal.sessao(),
+        canal.transporte(),
         commands::COMANDOS.len()
     );
 
-    let mut montador = Montador::novo();
+    let mut montador = Montador::novo(canal);
     // A linha de partida do primeiro quadro é aqui, e não no `const fn`: o
     // contador de perdas não existe em tempo de compilação.
+    montador.geracao = canal.geracao();
     montador.abrir_quadro();
     loop {
-        let byte = crate::tarefas::entrada::proximo_byte().await;
+        let byte = canal.proximo_byte().await;
         if montador.alimentar(byte) {
             // Acabamos de executar um comando, o que pode ter custado um
             // tempo arbitrário. Um cliente que envie várias requisições
@@ -377,7 +404,7 @@ pub fn servir() -> ! {
         commands::COMANDOS.len()
     );
 
-    let mut montador = Montador::novo();
+    let mut montador = Montador::novo(Canal::Serial);
     // A linha de partida do primeiro quadro é aqui, e não no `const fn`: o
     // contador de perdas não existe em tempo de compilação.
     montador.abrir_quadro();
@@ -406,6 +433,36 @@ pub fn servir() -> ! {
     }
 }
 
+/// Em modo de teste: uma sessão atendida à mão, sem o executor — a suíte
+/// põe bytes na entrada do canal e manda atender, como a tarefa faria.
+#[cfg(feature = "modo-teste")]
+pub struct SessaoDeTeste {
+    montador: Montador,
+}
+
+#[cfg(feature = "modo-teste")]
+impl SessaoDeTeste {
+    /// Uma porta do `virtio-console`, de 1 a 4.
+    pub fn porta(p: u8) -> SessaoDeTeste {
+        let canal = Canal::Porta(p);
+        let mut montador = Montador::novo(canal);
+        montador.geracao = canal.geracao();
+        montador.abrir_quadro();
+        SessaoDeTeste { montador }
+    }
+
+    /// Consome o que estiver na entrada da porta, respondendo cada quadro
+    /// que fechar.
+    pub fn atender(&mut self) {
+        let Canal::Porta(p) = self.montador.canal else {
+            return;
+        };
+        while let Some(byte) = crate::virtio::console::retirar(p) {
+            self.montador.alimentar(byte);
+        }
+    }
+}
+
 /// Remove ruído das bordas de um quadro.
 ///
 /// Descarta bytes de controle e espaços no começo e no fim da linha. Isso
@@ -429,8 +486,9 @@ pub(crate) fn limpar_quadro(linha: &[u8]) -> &[u8] {
     &linha[inicio..=fim]
 }
 
-/// Decodifica uma linha, despacha o comando e responde.
-fn processar(linha: &[u8]) {
+/// Decodifica uma linha, despacha o comando como a sessão do canal, e
+/// responde pelo mesmo canal.
+fn processar(canal: Canal, linha: &[u8]) {
     let linha = limpar_quadro(linha);
     if linha.is_empty() {
         return;
@@ -438,23 +496,30 @@ fn processar(linha: &[u8]) {
 
     let requisicao = match Requisicao::parse(linha) {
         Ok(r) => r,
-        Err((id, erro)) => return responder_erro(id, erro, None),
+        Err((id, erro)) => return responder_erro(canal, id, erro, None),
     };
 
     let Some(comando) = registry::encontrar(requisicao.metodo) else {
-        return responder_erro(requisicao.id, RpcError::METODO_NAO_ENCONTRADO, None);
+        return responder_erro(canal, requisicao.id, RpcError::METODO_NAO_ENCONTRADO, None);
     };
 
     // Validar antes de escrever qualquer coisa é obrigatório: a serialização
     // é em streaming, então depois de emitir `"result":` não há como voltar
     // atrás e transformar a resposta num erro.
     if let Err(campo) = registry::validar(comando, requisicao.params) {
-        return responder_erro(requisicao.id, RpcError::PARAMS_INVALIDOS, Some(campo));
+        return responder_erro(
+            canal,
+            requisicao.id,
+            RpcError::PARAMS_INVALIDOS,
+            Some(campo),
+        );
     }
 
-    com_saida(|w| {
-        protocol::envelope_ok(w, requisicao.id, |w| {
-            (comando.handler)(requisicao.params, w)
+    sessao::com_sessao(canal.sessao(), || {
+        com_saida(canal, |w| {
+            protocol::envelope_ok(w, requisicao.id, |w| {
+                (comando.handler)(requisicao.params, w)
+            })
         })
     });
 
@@ -466,12 +531,30 @@ fn processar(linha: &[u8]) {
     }
 }
 
-fn responder_erro(id: Option<json::Json>, erro: RpcError, detalhe: Option<&str>) {
-    com_saida(|w| protocol::envelope_erro(w, id, erro, detalhe));
+fn responder_erro(canal: Canal, id: Option<json::Json>, erro: RpcError, detalhe: Option<&str>) {
+    com_saida(canal, |w| protocol::envelope_erro(w, id, erro, detalhe));
 }
 
-/// Emite uma resposta completa na COM2, seguida do delimitador de quadro.
-fn com_saida(f: impl FnOnce(&mut JsonWriter) -> fmt::Result) {
+/// Emite uma resposta completa pelo canal, seguida do delimitador de quadro.
+///
+/// Na serial, direto no fio, com as interrupções mascaradas, como sempre.
+/// Numa porta do `virtio-console`, montada inteira antes e entregue ao
+/// driver, que a leva ao dispositivo em pedaços.
+fn com_saida(canal: Canal, f: impl FnOnce(&mut JsonWriter) -> fmt::Result) {
+    let Canal::Porta(p) = canal else {
+        return com_saida_serial(f);
+    };
+    let mut texto = alloc::string::String::new();
+    {
+        let mut w = JsonWriter::new(&mut texto);
+        let _ = f(&mut w);
+    }
+    texto.push('\n');
+    crate::virtio::console::enviar(p, texto.as_bytes());
+}
+
+/// Emite uma resposta completa na serial.
+fn com_saida_serial(f: impl FnOnce(&mut JsonWriter) -> fmt::Result) {
     crate::arch::sem_interrupcoes(|| {
         let mut guarda = crate::serial::AGENT_LINK.lock();
         let Some(porta) = guarda.as_mut() else {

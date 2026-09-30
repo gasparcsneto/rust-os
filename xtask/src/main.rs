@@ -188,7 +188,7 @@ fn main() -> ExitCode {
             pular = false;
             continue;
         }
-        if a == "--arch" || a == "--teclado" {
+        if a == "--arch" || a == "--teclado" || a == "--canal" {
             pular = true;
         } else if !a.starts_with("--") {
             posicionais.push(a);
@@ -205,7 +205,13 @@ fn main() -> ExitCode {
         "agent" => {
             let metodo = posicionais.get(1).copied().unwrap_or("agent.describe");
             let params = posicionais.get(2).copied().unwrap_or("{}");
-            agente(arch, metodo, params)
+            match extrair_valor(&args, "--canal").map(str::parse::<u8>) {
+                None => agente(arch, 0, metodo, params),
+                Some(Ok(canal)) if canal <= PORTAS_DE_AGENTE => agente(arch, canal, metodo, params),
+                Some(_) => Err(format!(
+                    "--canal vai de 0 (a serial) a {PORTAS_DE_AGENTE} (as portas do console virtio)"
+                )),
+            }
         }
         "debug" => depurar(arch, release),
         "simbolo" => simbolizar(arch, release, &posicionais[1..]),
@@ -333,6 +339,21 @@ fn caminho_socket(arch: Arquitetura) -> PathBuf {
     raiz_do_projeto()
         .join("target")
         .join(format!("agent-{}.sock", arch.nome()))
+}
+
+/// Quantas portas de agente a máquina tem, no console virtio — as sessões 1
+/// a 4 do kernel. A 0 é a serial, em [`caminho_socket`].
+const PORTAS_DE_AGENTE: u8 = 4;
+
+/// Onde fica o socket da porta de agente `porta`, de 1 a
+/// [`PORTAS_DE_AGENTE`] — ou o da serial, na 0.
+fn caminho_canal(arch: Arquitetura, porta: u8) -> PathBuf {
+    if porta == 0 {
+        return caminho_socket(arch);
+    }
+    raiz_do_projeto()
+        .join("target")
+        .join(format!("agente-{porta}-{}.sock", arch.nome()))
 }
 
 /// Qual teclado a máquina vai ter.
@@ -4016,11 +4037,51 @@ fn comando_qemu(
         },
     }
 
+    anexar_portas_de_agente(&mut qemu, arch, socket_agente.is_some());
+
     // Sem janela gráfica: este ambiente é headless, e toda a informação que
     // nos importa já sai pelas seriais.
     qemu.args(["-display", "none"]);
 
     Ok(qemu)
+}
+
+/// O console virtio com as portas de agente: uma por agente, cada uma num
+/// socket próprio — ver `virtio::console` no kernel.
+///
+/// Na suíte, sem ninguém para conversar, as portas vão para o `null`: o
+/// dispositivo e as portas existem, e o kernel as põe de pé, mas o que a
+/// suíte confere nelas passa pela captura do driver.
+fn anexar_portas_de_agente(qemu: &mut Command, arch: Arquitetura, com_sockets: bool) {
+    // `max_ports` conta a porta 0, a do console do hospedeiro, que o Duke
+    // não usa.
+    qemu.args([
+        "-device",
+        &format!(
+            "virtio-serial-pci,id=agentes,max_ports={}",
+            PORTAS_DE_AGENTE + 1
+        ),
+    ]);
+    for porta in 1..=PORTAS_DE_AGENTE {
+        let chardev = if com_sockets {
+            let caminho = caminho_canal(arch, porta);
+            let _ = std::fs::remove_file(&caminho);
+            format!(
+                "socket,id=agente{porta},path={},server=on,wait=off",
+                caminho.display()
+            )
+        } else {
+            format!("null,id=agente{porta}")
+        };
+        qemu.args([
+            "-chardev",
+            &chardev,
+            "-device",
+            &format!(
+                "virtserialport,bus=agentes.0,nr={porta},chardev=agente{porta},name=duke.agente.{porta}"
+            ),
+        ]);
+    }
 }
 
 /// Anexa o monitor do emulador a um socket.
@@ -4467,6 +4528,7 @@ fn conversar(
     sob_mouse(qmp, teclado, &mut escrita, &mut leitor)?;
     sob_janelas(qmp, &mut escrita, &mut leitor)?;
     sob_formulario(arch, monitor, qmp, &mut escrita, &mut leitor)?;
+    sob_agentes(arch)?;
     sob_tela(monitor, tela_no_monitor, &mut escrita, &mut leitor)?;
     sob_fragmento(&mut escrita, &mut leitor)?;
     // Por último, porque não há volta: depois dela o kernel só responde o
@@ -5087,7 +5149,7 @@ fn sob_arvore(escrita: &mut UnixStream, leitor: &mut BufReader<UnixStream>) -> R
         ));
     }
     let log = pedir(7706, "log.tail", r#"{"count":16}"#)?;
-    if !log.contains("executado: system.uptime (agente)") {
+    if !log.contains("executado: system.uptime (agente 0)") {
         return Err(format!(
             "arvore: o log nao registrou o agente como origem\n  {log}"
         ));
@@ -5630,6 +5692,158 @@ fn sob_janelas(
     Ok(())
 }
 
+/// Um agente numa porta do console virtio: a conexão, e os pedidos por ela.
+struct AgenteNaPorta {
+    porta: u8,
+    escrita: UnixStream,
+    leitor: BufReader<UnixStream>,
+    proximo_id: u32,
+}
+
+impl AgenteNaPorta {
+    fn conectar(arch: Arquitetura, porta: u8) -> Result<AgenteNaPorta, String> {
+        let fluxo = UnixStream::connect(caminho_canal(arch, porta))
+            .map_err(|e| format!("agentes: a porta {porta} nao aceitou conexao: {e}"))?;
+        fluxo
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .map_err(|e| format!("agentes: {e}"))?;
+        let leitor = BufReader::new(fluxo.try_clone().map_err(|e| format!("agentes: {e}"))?);
+        Ok(AgenteNaPorta {
+            porta,
+            escrita: fluxo,
+            leitor,
+            proximo_id: porta as u32 * 100_000,
+        })
+    }
+
+    fn pedir(&mut self, metodo: &str, params: &str) -> Result<String, String> {
+        self.proximo_id += 1;
+        let id = self.proximo_id;
+        self.escrita
+            .write_all(
+                format!(
+                    "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"{metodo}\",\"params\":{params}}}\n"
+                )
+                .as_bytes(),
+            )
+            .and_then(|()| self.escrita.flush())
+            .map_err(|e| format!("agentes: a porta {} nao aceitou o pedido: {e}", self.porta))?;
+        let resposta = ler_resposta(&mut self.leitor)
+            .map_err(|e| format!("agentes: porta {}: {e}", self.porta))?;
+        if !e_a_resposta(&resposta, id) {
+            return Err(format!(
+                "agentes: a porta {} respondeu outro pedido\n  {resposta}",
+                self.porta
+            ));
+        }
+        Ok(resposta)
+    }
+
+    /// Pede `metodo` até a resposta satisfazer `condicao`, por oito segundos.
+    fn esperar(
+        &mut self,
+        metodo: &str,
+        params: &str,
+        condicao: &dyn Fn(&str) -> bool,
+        o_que: &str,
+    ) -> Result<String, String> {
+        let limite = std::time::Instant::now() + Duration::from_secs(8);
+        loop {
+            let r = self.pedir(metodo, params)?;
+            if condicao(&r) {
+                return Ok(r);
+            }
+            if std::time::Instant::now() >= limite {
+                return Err(format!("agentes: {o_que}\n  {r}"));
+            }
+            std::thread::sleep(Duration::from_millis(150));
+        }
+    }
+}
+
+/// Quatro agentes ao mesmo tempo, cada um na sua porta do console virtio.
+///
+/// # O que esta sonda prova que a suíte não prova
+///
+/// A suíte atende as portas à mão, com o que ela mesma põe na entrada. Esta
+/// passa pelo dispositivo de verdade e pelos sockets do hospedeiro, com os
+/// quatro agentes falando **ao mesmo tempo**, em fios do hospedeiro: cada um
+/// recebe só as respostas dele, com o número da sessão dele. E um deles
+/// opera o Terminal pela linha de comando da janela, e o log do
+/// interpretador diz que foi ele — o número atravessa a porta, a ação, o
+/// Terminal e o pseudo-terminal.
+fn sob_agentes(arch: Arquitetura) -> Result<(), String> {
+    println!("[xtask] fumaça: quatro agentes ao mesmo tempo, cada um na sua porta");
+    const PEDIDOS: u32 = 50;
+    let fios: Vec<_> = (1..=PORTAS_DE_AGENTE)
+        .map(|porta| {
+            std::thread::spawn(move || -> Result<(), String> {
+                let mut agente = AgenteNaPorta::conectar(arch, porta)?;
+                let esperado = format!("\"session\":{porta},\"transport\":\"virtio-console\"");
+                for _ in 0..PEDIDOS {
+                    let r = agente.pedir("agent.session", "{}")?;
+                    if !r.contains(&esperado) {
+                        return Err(format!(
+                            "agentes: a porta {porta} respondeu outra sessao\n  {r}"
+                        ));
+                    }
+                }
+                Ok(())
+            })
+        })
+        .collect();
+    for fio in fios {
+        fio.join()
+            .map_err(|_| "agentes: um fio do hospedeiro morreu".to_string())??;
+    }
+    println!(
+        "  [agentes] ok  {} pedidos em cada uma das {PORTAS_DE_AGENTE} portas, ao mesmo tempo, cada resposta na sua",
+        PEDIDOS
+    );
+
+    // O agente da porta 2 no Terminal, pela linha de comando da janela.
+    const GRADE: &str = r#""role":"text_area","label":"terminal""#;
+    const LINHA: &str = r#""role":"text_field","label":"linha de comando""#;
+    let mut agente = AgenteNaPorta::conectar(arch, 2)?;
+    let arvore = agente.pedir("ui.tree", "{}")?;
+    let linha = arvore
+        .find(GRADE)
+        .and_then(|i| id_antes(&arvore[i..], LINHA))
+        .ok_or_else(|| format!("agentes: o Terminal nao tem a linha de comando\n  {arvore}"))?;
+    let r = agente.pedir(
+        "ui.act",
+        &format!(r#"{{"id":{linha},"action":"set_value","value":"system.info"}}"#),
+    )?;
+    if !r.contains(r#""ok":true"#) {
+        return Err(format!(
+            "agentes: o set_value da porta 2 foi recusado\n  {r}"
+        ));
+    }
+    agente.esperar(
+        "ui.tree",
+        "{}",
+        &|a| {
+            a.find(GRADE)
+                .map(|i| &a[i..])
+                .and_then(|g| g.find(LINHA).map(|j| &g[j..]))
+                .is_some_and(|l| l.contains(r#""value":"system.info""#))
+        },
+        "o set_value da porta 2 nao chegou a linha de comando do Terminal",
+    )?;
+    let r = agente.pedir("ui.act", &format!(r#"{{"id":{linha},"action":"confirm"}}"#))?;
+    if !r.contains(r#""ok":true"#) {
+        return Err(format!("agentes: o confirm da porta 2 foi recusado\n  {r}"));
+    }
+    agente.esperar(
+        "log.tail",
+        r#"{"count":24}"#,
+        &|l| l.contains("executado: system.info (agente 2)"),
+        "o comando do agente da porta 2 nao executou, ou o log nao diz que foi ele",
+    )?;
+    println!("  [agentes] ok  o agente da porta 2 executou no Terminal, e o log diz `agente 2`");
+    Ok(())
+}
+
 /// O `id` do elemento da árvore marcado por `marca` — o papel e o rótulo,
 /// que vêm logo depois dele no objeto.
 fn id_antes(arvore: &str, marca: &str) -> Option<u64> {
@@ -5871,7 +6085,7 @@ fn sob_barra(
     if !r.contains(r#""ok":true"#) {
         return Err(format!("barra: o press do agente foi recusado\n  {r}"));
     }
-    let agente = format!("agente: press no elemento {BOTAO}");
+    let agente = format!("agente 0: press no elemento {BOTAO}");
     let log = pedir(7803, "log.tail", r#"{"count":16}"#)?;
     if !log.contains(&agente) {
         return Err(format!(
@@ -6099,7 +6313,7 @@ fn sob_terminal_pelo_agente(
     let limite = std::time::Instant::now() + Duration::from_secs(8);
     loop {
         let log = pedir("log.tail", r#"{"count":24}"#)?;
-        if log.contains("executado: system.uptime (agente)") {
+        if log.contains("executado: system.uptime (agente 0)") {
             break;
         }
         if std::time::Instant::now() >= limite {
@@ -6745,12 +6959,12 @@ fn aguardar_com_teto(mut filho: Child, teto: Duration) -> Result<Desfecho, Strin
 /// requisição JSON-RPC e imprime a resposta. É o comando que torna o kernel
 /// operável de fora com uma única linha de shell — e é idêntico nas duas
 /// arquiteturas, porque o protocolo é o mesmo.
-fn agente(arch: Arquitetura, metodo: &str, params: &str) -> Result<ExitCode, String> {
+fn agente(arch: Arquitetura, canal: u8, metodo: &str, params: &str) -> Result<ExitCode, String> {
     let limite = std::time::Instant::now() + ESPERA_PELO_CANAL;
     let mut avisou = false;
 
     loop {
-        match tentar_agente(arch, metodo, params) {
+        match tentar_agente(arch, canal, metodo, params) {
             Ok(code) => return Ok(code),
             // O kernel ainda não subiu o canal: insistir é o comportamento
             // certo, e desistir cedo transformaria uma espera em erro.
@@ -6783,8 +6997,13 @@ enum Espera {
     Fatal(String),
 }
 
-fn tentar_agente(arch: Arquitetura, metodo: &str, params: &str) -> Result<ExitCode, Espera> {
-    let socket = caminho_socket(arch);
+fn tentar_agente(
+    arch: Arquitetura,
+    canal: u8,
+    metodo: &str,
+    params: &str,
+) -> Result<ExitCode, Espera> {
+    let socket = caminho_canal(arch, canal);
 
     let mut fluxo = UnixStream::connect(&socket).map_err(|e| {
         Espera::Fatal(format!(

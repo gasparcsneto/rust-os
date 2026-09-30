@@ -1,0 +1,109 @@
+//! As sessões do canal do agente: vários agentes ao mesmo tempo.
+//!
+//! # O que é uma sessão
+//!
+//! Um agente conectado por um canal. Cada canal tem o seu quadro sendo
+//! montado, a sua tarefa que o atende e a sua saída — o pedido de um não
+//! cola no do outro, e a resposta de um não sai pelo canal do outro. O
+//! número da sessão é atribuído pelo kernel, pelo canal por onde o pedido
+//! chegou, e não dito pelo agente: é o que vai para o log como quem fez.
+//!
+//! - a **sessão 0** é a serial: o canal de sempre, e o de emergência — o
+//!   único que responde no modo post-mortem;
+//! - as **sessões 1 a 4** são as portas do `virtio-console`, uma por
+//!   agente — ver [`crate::virtio::console`].
+//!
+//! # Acima do transporte
+//!
+//! O resto do canal — o enquadramento, o JSON-RPC, os comandos — não sabe
+//! por onde os bytes vieram: pergunta ao [`Canal`]. Um transporte novo — o
+//! TCP, quando houver rede — é mais um caso aqui, e nada muda em cima.
+
+use core::sync::atomic::{AtomicU8, Ordering};
+
+/// O número de uma sessão.
+pub type Sessao = u8;
+
+/// A serial: a sessão de sempre, e a de emergência.
+pub const SERIAL: Sessao = 0;
+
+/// Por onde uma sessão fala.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Canal {
+    /// A serial do agente: a COM2 no x86, a PL011 no ARM.
+    Serial,
+    /// Uma porta do `virtio-console`, da 1 à 4.
+    Porta(u8),
+}
+
+impl Canal {
+    /// A sessão deste canal.
+    pub const fn sessao(self) -> Sessao {
+        match self {
+            Canal::Serial => SERIAL,
+            Canal::Porta(p) => p,
+        }
+    }
+
+    /// O nome do transporte, para o relatório.
+    pub const fn transporte(self) -> &'static str {
+        match self {
+            Canal::Serial => "serial",
+            Canal::Porta(_) => "virtio-console",
+        }
+    }
+
+    /// Quantos bytes este canal já perdeu na entrada.
+    pub fn perdidos(self) -> u64 {
+        match self {
+            Canal::Serial => crate::tarefas::entrada::perdidos(),
+            Canal::Porta(p) => crate::virtio::console::perdidos(p),
+        }
+    }
+
+    /// Descarta a entrada até a próxima quebra de linha. Verdadeiro se a
+    /// achou.
+    pub fn descartar_ate_nova_linha(self) -> bool {
+        match self {
+            Canal::Serial => crate::tarefas::entrada::descartar_ate_nova_linha(),
+            Canal::Porta(p) => crate::virtio::console::descartar_ate_nova_linha(p),
+        }
+    }
+
+    /// Quantas vezes o outro lado deste canal abriu. A serial não sabe —
+    /// não há linha de modem entre ela e o socket —, e diz sempre zero.
+    pub fn geracao(self) -> u64 {
+        match self {
+            Canal::Serial => 0,
+            Canal::Porta(p) => crate::virtio::console::geracao(p),
+        }
+    }
+
+    /// O próximo byte, quando houver.
+    pub async fn proximo_byte(self) -> u8 {
+        match self {
+            Canal::Serial => crate::tarefas::entrada::proximo_byte().await,
+            Canal::Porta(p) => crate::virtio::console::proximo_byte(p).await,
+        }
+    }
+}
+
+/// A sessão cujo pedido está sendo atendido agora.
+///
+/// Um núcleo, e um comando por vez: o executor não troca de tarefa no meio
+/// de um comando, que não tem `.await`. Então a sessão atual é um número só,
+/// posto antes do despacho e tirado depois — ver [`com_sessao`].
+static ATUAL: AtomicU8 = AtomicU8::new(SERIAL);
+
+/// A sessão do pedido que está sendo atendido: quem está agindo.
+pub fn atual() -> Sessao {
+    ATUAL.load(Ordering::Relaxed)
+}
+
+/// Roda `f` como a sessão `sessao`, e volta à anterior.
+pub fn com_sessao<R>(sessao: Sessao, f: impl FnOnce() -> R) -> R {
+    let anterior = ATUAL.swap(sessao, Ordering::Relaxed);
+    let r = f();
+    ATUAL.store(anterior, Ordering::Relaxed);
+    r
+}

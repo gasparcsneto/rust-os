@@ -27,6 +27,21 @@ pub static COMANDOS: &[Command] = &[
         handler: ping,
     },
     Command {
+        nome: "agent.session",
+        resumo: "A sessao deste pedido: o numero que o kernel deu ao canal por onde ele \
+                 chegou, e o transporte. E o numero que o log registra como quem agiu.",
+        params: &[],
+        handler: agent_session,
+    },
+    Command {
+        nome: "agent.sessions",
+        resumo: "As sessoes do canal do agente: a serial, e cada porta do console virtio, \
+                 com o nome, se ha um agente conectado, quantas conexoes ja houve e os \
+                 bytes perdidos na entrada e na saida.",
+        params: &[],
+        handler: agent_sessions,
+    },
+    Command {
         nome: "agent.describe",
         resumo: "Lista todos os comandos disponiveis com seus parametros. \
                  Chame isto primeiro para descobrir a superficie do sistema.",
@@ -379,6 +394,52 @@ pub static COMANDOS: &[Command] = &[
 // ---------------------------------------------------------------------------
 // agent.*
 // ---------------------------------------------------------------------------
+
+fn agent_session(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let sessao = super::sessao::atual();
+    let canal = if sessao == super::sessao::SERIAL {
+        super::sessao::Canal::Serial
+    } else {
+        super::sessao::Canal::Porta(sessao)
+    };
+    w.begin_object()?;
+    w.field_u64("session", sessao as u64)?;
+    w.field_str("transport", canal.transporte())?;
+    w.end_object()
+}
+
+fn agent_sessions(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    use crate::virtio::console;
+    w.begin_object()?;
+    w.field_u64("current", super::sessao::atual() as u64)?;
+    w.key("sessions")?;
+    w.begin_array()?;
+    w.begin_object()?;
+    w.field_u64("session", super::sessao::SERIAL as u64)?;
+    w.field_str("transport", "serial")?;
+    w.end_object()?;
+    for p in 1..=console::PORTAS {
+        if !console::anunciada(p) {
+            continue;
+        }
+        let mut nome = [0u8; 32];
+        let n = console::nome(p, &mut nome);
+        w.begin_object()?;
+        w.field_u64("session", p as u64)?;
+        w.field_str("transport", "virtio-console")?;
+        w.field_str("name", core::str::from_utf8(&nome[..n]).unwrap_or(""))?;
+        w.field_bool("connected", console::aberta(p))?;
+        w.field_u64("connections", console::geracao(p))?;
+        w.field_u64("lost_in", console::perdidos(p))?;
+        w.field_u64("lost_out", console::perdidos_na_saida(p))?;
+        w.end_object()?;
+    }
+    w.end_array()?;
+    let (recebidos, enviados) = console::trafego();
+    w.field_u64("console_bytes_in", recebidos)?;
+    w.field_u64("console_bytes_out", enviados)?;
+    w.end_object()
+}
 
 fn ping(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.begin_object()?;
@@ -1700,7 +1761,12 @@ fn ui_act(params: Json, w: &mut JsonWriter) -> fmt::Result {
     };
 
     let id = u32::try_from(id).unwrap_or(0);
-    match crate::ui::agir(id, acao, valor, crate::ui::Origem::Agente) {
+    match crate::ui::agir(
+        id,
+        acao,
+        valor,
+        crate::ui::Origem::Agente(super::sessao::atual()),
+    ) {
         Ok(efeito) => {
             w.field_bool("ok", true)?;
             if let crate::ui::Efeito::Executado(comando) = efeito {

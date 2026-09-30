@@ -338,7 +338,8 @@ pub mod evento {
         /// Uma ação sobre um elemento que o servidor descreveu — ver
         /// [`descricao`](crate::usuario::descricao): `a` é o identificador
         /// que o servidor deu ao elemento, `b` a ação, de
-        /// [`acao`](super::acao).
+        /// [`acao`](super::acao), e `c` quem pediu — ver
+        /// [`origem`](super::origem).
         pub const ACAO: u32 = 7;
         /// Há saída nova no pseudo-terminal — ver
         /// [`TERMINAL`](crate::usuario::numero::TERMINAL). Sem campos: quem
@@ -347,6 +348,31 @@ pub mod evento {
     }
 
     /// As ações de um evento [`tipo::ACAO`].
+    /// Quem pediu uma [`ACAO`](tipo::ACAO), no `c` do evento: a pessoa, ou
+    /// o agente de uma sessão do canal.
+    ///
+    /// Vários agentes operam o Duke ao mesmo tempo, cada um numa sessão; o
+    /// processo que recebe a ação sabe de qual veio, e pode dizê-lo adiante
+    /// — o Terminal diz ao interpretador quem apertou o Enter.
+    pub mod origem {
+        /// A pessoa na frente da máquina.
+        pub const PESSOA: i64 = -1;
+
+        /// O `c` de uma ação pedida pelo agente da sessão `sessao`.
+        pub const fn agente(sessao: u8) -> i64 {
+            sessao as i64
+        }
+
+        /// A sessão do agente que pediu, se foi um agente.
+        pub const fn sessao(c: i64) -> Option<u8> {
+            if c >= 0 && c <= u8::MAX as i64 {
+                Some(c as u8)
+            } else {
+                None
+            }
+        }
+    }
+
     pub mod acao {
         /// Acionar, como um clique num botão — o `press` da árvore.
         pub const PRESSIONAR: i64 = 1;
@@ -468,8 +494,16 @@ pub mod terminal {
     /// precisa saber quantas letras há na linha para trocá-la.
     pub const APAGAR_A_LINHA: char = '\u{15}';
 
-    /// O Enter de um agente: executa a linha como o Enter, e o log diz
-    /// `(agente)`.
+    /// O Enter de um agente, sem dizer qual: um marcador, e não uma tecla.
+    ///
+    /// É o que um widget da linha de comando pede ao ser confirmado pela
+    /// árvore — ele não sabe de que sessão veio a ação. O programa que a
+    /// recebeu sabe, e troca o marcador por [`confirmar_pelo_agente`] antes
+    /// de digitar; o pseudo-terminal não deixa o marcador passar.
+    pub const CONFIRMAR_PELO_AGENTE: char = '\u{F8FD}';
+
+    /// O Enter do agente da sessão `sessao`: executa a linha como o Enter, e
+    /// o log diz `(agente N)`.
     ///
     /// # Por que um caractere à parte
     ///
@@ -485,7 +519,26 @@ pub mod terminal {
     /// pedido por um agente. Atribuir ao agente o que a pessoa fez é o erro
     /// menos grave dos dois; o registro que a pessoa possa conferir é da
     /// fase 12.
-    pub const CONFIRMAR_PELO_AGENTE: char = '\u{F8FD}';
+    ///
+    /// Um caractere por sessão, de U+F600 a U+F6FF.
+    pub const fn confirmar_pelo_agente(sessao: u8) -> char {
+        // De U+F600 a U+F6FF é sempre um escalar válido; o `None` não
+        // acontece, mas `char::from_u32` é o que existe num `const fn`.
+        match char::from_u32(0xF600 + sessao as u32) {
+            Some(c) => c,
+            None => '\u{F600}',
+        }
+    }
+
+    /// A sessão do agente cujo Enter é `c`, se `c` é o Enter de um agente.
+    pub const fn agente_que_confirmou(c: char) -> Option<u8> {
+        let n = c as u32;
+        if n >= 0xF600 && n <= 0xF6FF {
+            Some((n - 0xF600) as u8)
+        } else {
+            None
+        }
+    }
 }
 
 pub mod descricao {
@@ -769,6 +822,28 @@ pub mod descricao {
 
 #[cfg(all(test, feature = "alloc"))]
 mod testes {
+    #[test]
+    fn o_enter_de_cada_agente_diz_qual() {
+        use super::terminal::{agente_que_confirmou, confirmar_pelo_agente};
+        for sessao in [0u8, 1, 4, 255] {
+            assert_eq!(
+                agente_que_confirmou(confirmar_pelo_agente(sessao)),
+                Some(sessao)
+            );
+        }
+        assert_eq!(agente_que_confirmou('\n'), None);
+        assert_eq!(
+            agente_que_confirmou(super::terminal::CONFIRMAR_PELO_AGENTE),
+            None
+        );
+        assert_eq!(agente_que_confirmou('\u{F5FF}'), None);
+        assert_eq!(agente_que_confirmou('\u{F700}'), None);
+        use super::evento::origem;
+        assert_eq!(origem::sessao(origem::agente(3)), Some(3));
+        assert_eq!(origem::sessao(origem::PESSOA), None);
+        assert_eq!(origem::sessao(256), None);
+    }
+
     use super::descricao::*;
 
     fn r(x: u32, y: u32, largura: u32, altura: u32) -> Retangulo {

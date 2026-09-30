@@ -1413,7 +1413,7 @@ fn barra_press_do_agente_limpa() -> Resultado {
         return Err("o console nao foi limpo");
     }
     if !log_tem(&alloc::format!(
-        "agente: press no elemento {}",
+        "agente 0: press no elemento {}",
         crate::ui::ID_DO_BOTAO_LIMPAR
     )) {
         return Err("o log nao registrou o press com a origem do agente");
@@ -4658,20 +4658,25 @@ fn arvore_das_janelas() -> Resultado {
     // O agente faz o mesmo pela árvore: troca o valor — com acento, que
     // atravessa o kernel, o servidor e o JSON —, confirma, e aperta o
     // Limpar, que esvazia o campo.
-    crate::ui::agir(campo, Acao::DefinirValor, Some("Olá, Duke"), Origem::Agente)?;
+    crate::ui::agir(
+        campo,
+        Acao::DefinirValor,
+        Some("Olá, Duke"),
+        Origem::Agente(0),
+    )?;
     valor_na_arvore("Olá, Duke", "o set_value do agente nao chegou ao campo")?;
-    crate::ui::agir(campo, Acao::Confirmar, None, Origem::Agente)?;
+    crate::ui::agir(campo, Acao::Confirmar, None, Origem::Agente(0))?;
     esperar_linha("janelas: escrito 1 [Olá, Duke]")?;
-    crate::ui::agir(limpar, Acao::Pressionar, None, Origem::Agente)?;
+    crate::ui::agir(limpar, Acao::Pressionar, None, Origem::Agente(0))?;
     esperar_linha("janelas: limpa 1")?;
     valor_na_arvore("", "o Limpar nao esvaziou o campo")?;
 
     // O campo não aceita `press`; a caixa de fechar aceita, e o pedido
     // chega ao servidor, que fecha a janela.
-    if crate::ui::agir(campo, Acao::Pressionar, None, Origem::Agente).is_ok() {
+    if crate::ui::agir(campo, Acao::Pressionar, None, Origem::Agente(0)).is_ok() {
         return Err("um campo descrito aceitou press");
     }
-    crate::ui::agir(fechar, Acao::Pressionar, None, Origem::Agente)?;
+    crate::ui::agir(fechar, Acao::Pressionar, None, Origem::Agente(0))?;
     esperar_linha("janelas: acao 1 no elemento 0 da janela 1")?;
     esperar_linha("janelas: fechada 1")?;
     if crate::ui::existe(fechar) || crate::ui::existe(janela) {
@@ -4683,7 +4688,7 @@ fn arvore_das_janelas() -> Resultado {
     esperar_linha("janelas: encerrado")?;
     // Sem servidor, o `press` num elemento não tem a quem chegar — e o
     // elemento nem existe mais.
-    if crate::ui::agir(fechar, Acao::Pressionar, None, Origem::Agente).is_ok() {
+    if crate::ui::agir(fechar, Acao::Pressionar, None, Origem::Agente(0)).is_ok() {
         return Err("um press num elemento de janela fechada foi aceito");
     }
     Ok(())
@@ -5133,7 +5138,7 @@ fn entradas_separadas() -> Resultado {
 
     // A ação da árvore no botão que o programa descreveu vai ao canal dele.
     let botao = crate::ui::id_do_elemento(camada.id, 0).ok_or("sem identificador")?;
-    crate::ui::agir(botao, Acao::Pressionar, None, Origem::Agente)?;
+    crate::ui::agir(botao, Acao::Pressionar, None, Origem::Agente(0))?;
     esperar_vezes("entrada: acao 5 1", 1)?;
 
     // A corrida entre dois processos: um aperto na janela do servidor e
@@ -5259,14 +5264,26 @@ fn terminal_operado() -> Resultado {
     crate::teclado::esvaziar();
 
     // Sem servidor e sem Terminal, o botão é recusado com o motivo.
-    if crate::ui::agir(ID_DO_BOTAO_TERMINAL, Acao::Pressionar, None, Origem::Agente).is_ok() {
+    if crate::ui::agir(
+        ID_DO_BOTAO_TERMINAL,
+        Acao::Pressionar,
+        None,
+        Origem::Agente(0),
+    )
+    .is_ok()
+    {
         return Err("o botao Terminal foi aceito sem servidor nem terminal no ar");
     }
 
     // Com o servidor, o botão o faz lançar o Terminal.
     crate::usuario::lancar(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/janelas")))?;
     esperar_vezes("janelas: pronto", 1)?;
-    crate::ui::agir(ID_DO_BOTAO_TERMINAL, Acao::Pressionar, None, Origem::Agente)?;
+    crate::ui::agir(
+        ID_DO_BOTAO_TERMINAL,
+        Acao::Pressionar,
+        None,
+        Origem::Agente(0),
+    )?;
     esperar_vezes("janelas: terminal lancado", 1)?;
     esperar_vezes("terminal: pronto", 1)?;
     let camada = crate::grafico::camada_em(tx as u32 + 1, ty as u32 + 1)
@@ -5384,8 +5401,8 @@ fn terminal_operado() -> Resultado {
         })
         .flatten()
     };
-    let executado = |comando: &str| {
-        let procurada = format!("executado: {comando} (agente)");
+    let executado = |comando: &str, sessao: u8| {
+        let procurada = format!("executado: {comando} (agente {sessao})");
         let mut achou = false;
         crate::log::ultimos(64, crate::log::Level::Trace, |r| {
             achou |= r.seq >= desde && r.subsistema == "console" && r.mensagem() == procurada;
@@ -5409,7 +5426,7 @@ fn terminal_operado() -> Resultado {
         600,
     )
     .map_err(|_| "o set_value do agente nao chegou a linha de comando do terminal")?;
-    crate::ui::agir(linha, Acao::Cancelar, None, Origem::Agente)?;
+    crate::ui::agir(linha, Acao::Cancelar, None, Origem::Agente(0))?;
     esperar_ate(
         || {
             atender();
@@ -5424,7 +5441,7 @@ fn terminal_operado() -> Resultado {
         linha,
         Acao::DefinirValor,
         Some("agent.ping"),
-        Origem::Agente,
+        Origem::Agente(0),
     )?;
     esperar_ate(
         || {
@@ -5434,11 +5451,13 @@ fn terminal_operado() -> Resultado {
         600,
     )
     .map_err(|_| "o comando do agente nao chegou a linha de comando do terminal")?;
-    crate::ui::agir(linha, Acao::Confirmar, None, Origem::Agente)?;
+    // Pelo agente da sessão 3: o número atravessa a ação, o Terminal e o
+    // pseudo-terminal até o log do interpretador.
+    crate::ui::agir(linha, Acao::Confirmar, None, Origem::Agente(3))?;
     esperar_ate(
         || {
             atender();
-            executado("agent.ping")
+            executado("agent.ping", 3)
         },
         600,
     )
@@ -5505,7 +5524,7 @@ fn terminal_operado() -> Resultado {
         .map_err(|_| "o terminal fechado continuou com o pseudo-terminal")
     };
     let fechar = crate::ui::id_do_elemento(camada.id, 0).ok_or("id de elemento fora da faixa")?;
-    crate::ui::agir(fechar, Acao::Pressionar, None, Origem::Agente)?;
+    crate::ui::agir(fechar, Acao::Pressionar, None, Origem::Agente(0))?;
     esperar_vezes("terminal: fechado", 1)?;
     livre()?;
     // Depois o clique da pessoa, num Terminal lançado de novo. Contado
@@ -5519,7 +5538,12 @@ fn terminal_operado() -> Resultado {
         });
         n
     };
-    crate::ui::agir(ID_DO_BOTAO_TERMINAL, Acao::Pressionar, None, Origem::Agente)?;
+    crate::ui::agir(
+        ID_DO_BOTAO_TERMINAL,
+        Acao::Pressionar,
+        None,
+        Origem::Agente(0),
+    )?;
     esperar_ate(|| de_novo("terminal: pronto") == 1, 600)
         .map_err(|_| "o terminal nao foi lancado de novo")?;
     apertar(tx + largura - 12, ty + 11);
@@ -5675,7 +5699,12 @@ fn formulario_preenchido() -> Resultado {
         },
     )
     .map_err(|_| "o formulario nao escuta o canal dele")?;
-    let efeito = crate::ui::agir(nome, Acao::DefinirValor, Some("Ana Maria"), Origem::Agente)?;
+    let efeito = crate::ui::agir(
+        nome,
+        Acao::DefinirValor,
+        Some("Ana Maria"),
+        Origem::Agente(0),
+    )?;
     if efeito != Efeito::ValorDefinido {
         return Err("o set_value num campo nao disse que definiu o valor");
     }
@@ -5689,8 +5718,13 @@ fn formulario_preenchido() -> Resultado {
     // Os dois campos, sem o processo rodar entre os pedidos: cada um fica
     // com o seu.
     crate::arch::sem_interrupcoes(|| -> Resultado {
-        crate::ui::agir(nome, Acao::DefinirValor, Some("Beatriz"), Origem::Agente)?;
-        crate::ui::agir(sobrenome, Acao::DefinirValor, Some("Souza"), Origem::Agente)?;
+        crate::ui::agir(nome, Acao::DefinirValor, Some("Beatriz"), Origem::Agente(0))?;
+        crate::ui::agir(
+            sobrenome,
+            Acao::DefinirValor,
+            Some("Souza"),
+            Origem::Agente(0),
+        )?;
         Ok(())
     })?;
     esperar_ate(
@@ -5706,11 +5740,11 @@ fn formulario_preenchido() -> Resultado {
     let recusado = crate::arch::sem_interrupcoes(|| {
         for i in 0..MAIS_VALORES {
             let texto = format!("v{i}");
-            if crate::ui::agir(nome, Acao::DefinirValor, Some(&texto), Origem::Agente).is_err() {
+            if crate::ui::agir(nome, Acao::DefinirValor, Some(&texto), Origem::Agente(0)).is_err() {
                 return false;
             }
         }
-        crate::ui::agir(nome, Acao::DefinirValor, Some("demais"), Origem::Agente).is_err()
+        crate::ui::agir(nome, Acao::DefinirValor, Some("demais"), Origem::Agente(0)).is_err()
     });
     if !recusado {
         return Err("a fila de valores de um campo nao tem teto");
@@ -5733,7 +5767,7 @@ fn formulario_preenchido() -> Resultado {
                 },
             );
         }
-        crate::ui::agir(nome, Acao::DefinirValor, Some("perdido"), Origem::Agente).is_err()
+        crate::ui::agir(nome, Acao::DefinirValor, Some("perdido"), Origem::Agente(0)).is_err()
     });
     if !recusado {
         return Err("o set_value com o canal do programa cheio foi aceito");
@@ -5742,7 +5776,7 @@ fn formulario_preenchido() -> Resultado {
         || crate::eventos::estado("teste-formulario").is_some_and(|e| e.na_fila == 0),
         600,
     );
-    crate::ui::agir(nome, Acao::DefinirValor, Some(&ultimo), Origem::Agente)?;
+    crate::ui::agir(nome, Acao::DefinirValor, Some(&ultimo), Origem::Agente(0))?;
     // O programa de volta à espera, com a fila vazia: ele atendeu tudo.
     let _ = esperar_ate(
         || {
@@ -5757,16 +5791,16 @@ fn formulario_preenchido() -> Resultado {
     }
 
     // Confirmar chega ao campo, com o código dele; esvaziar o esvazia.
-    let efeito = crate::ui::agir(nome, Acao::Confirmar, None, Origem::Agente)?;
+    let efeito = crate::ui::agir(nome, Acao::Confirmar, None, Origem::Agente(0))?;
     if efeito != Efeito::Confirmado {
         return Err("o confirm num campo nao disse que confirmou");
     }
     esperar(&format!("formulario: acionado 1 [{ultimo}] [Souza]"))?;
-    crate::ui::agir(sobrenome, Acao::Cancelar, None, Origem::Agente)?;
+    crate::ui::agir(sobrenome, Acao::Cancelar, None, Origem::Agente(0))?;
     esperar_ate(|| valor_de("sobrenome").as_deref() == Some(""), 600)
         .map_err(|_| "o cancel nao esvaziou o campo")?;
     // E o `press` no botão.
-    crate::ui::agir(ok, Acao::Pressionar, None, Origem::Agente)?;
+    crate::ui::agir(ok, Acao::Pressionar, None, Origem::Agente(0))?;
     esperar(&format!("formulario: acionado 3 [{ultimo}] []"))?;
 
     // A pessoa, pelo teclado: o foco da janela está no primeiro campo, e o
@@ -5788,7 +5822,7 @@ fn formulario_preenchido() -> Resultado {
     // E o agente fecha a janela pela caixa de fechar da árvore: o programa
     // sai, como sai quando a pessoa a fecha com o mouse — ver a fumaça.
     let fechar = crate::ui::id_do_elemento(camada, 0).ok_or("sem identificador")?;
-    crate::ui::agir(fechar, Acao::Pressionar, None, Origem::Agente)?;
+    crate::ui::agir(fechar, Acao::Pressionar, None, Origem::Agente(0))?;
     esperar("formulario: fechado")?;
     esperar_ate(
         || {
@@ -5831,7 +5865,7 @@ fn sobre_o_duke() -> Resultado {
     };
 
     // Sem servidor, o botão diz por que não fez nada.
-    if crate::ui::agir(ID_DO_BOTAO_SOBRE, Acao::Pressionar, None, Origem::Agente).is_ok() {
+    if crate::ui::agir(ID_DO_BOTAO_SOBRE, Acao::Pressionar, None, Origem::Agente(0)).is_ok() {
         return Err("o botao Sobre foi aceito sem servidor de janelas no ar");
     }
 
@@ -5966,7 +6000,7 @@ fn sobre_o_duke() -> Resultado {
         .position(|e| e.rotulo == "OK")
         .and_then(|i| crate::ui::id_do_elemento(camada, i))
         .ok_or("a janela Sobre nao tem o OK")?;
-    crate::ui::agir(ok, Acao::Pressionar, None, Origem::Agente)?;
+    crate::ui::agir(ok, Acao::Pressionar, None, Origem::Agente(0))?;
     esperar_linha("janelas: fechada 1")?;
 
     // O da pessoa: aberta de novo, o clique no meio do OK, onde a árvore
@@ -10139,7 +10173,7 @@ fn agir_pela_linha_de_comando() -> Resultado {
     if !valor_da_linha()?.is_empty() {
         return Err("a linha nao ficou vazia depois de confirmada");
     }
-    if !log_tem("executado: log.tail (agente)") {
+    if !log_tem("executado: log.tail (agente 0)") {
         return Err("o log nao registrou o comando com a origem do agente");
     }
 
@@ -10160,6 +10194,204 @@ fn agir_pela_linha_de_comando() -> Resultado {
 }
 
 /// Alguma das últimas linhas do log tem este texto?
+/// As portas de agente estão de pé: o console virtio, e as quatro portas
+/// anunciadas pelo dispositivo, com os nomes que o hospedeiro deu.
+///
+/// # O que este caso protege
+///
+/// O aperto de mão do `MULTIPORT` — o driver diz que está pronto, o
+/// dispositivo anuncia cada porta, o driver a põe de pé e o hospedeiro
+/// manda o nome. Sem ele, as portas existiriam no QEMU e não no Duke, e os
+/// agentes conectariam em sockets que ninguém atende.
+fn agentes_as_portas_estao_de_pe() -> Resultado {
+    use crate::virtio::console;
+    if !console::presente() {
+        return Err("o console virtio nao subiu");
+    }
+    for p in 1..=console::PORTAS {
+        if !console::anunciada(p) {
+            crate::log_error!("teste", "porta {} nao anunciada", p);
+            return Err("uma porta de agente nao foi anunciada pelo dispositivo");
+        }
+        let mut nome = [0u8; 32];
+        let n = console::nome(p, &mut nome);
+        let esperado = alloc::format!("duke.agente.{p}");
+        if &nome[..n] != esperado.as_bytes() {
+            crate::log_error!("teste", "porta {} com o nome {:?}", p, &nome[..n]);
+            return Err("uma porta de agente nao tem o nome que o hospedeiro deu");
+        }
+    }
+    Ok(())
+}
+
+/// Um pedido JSON-RPC de `agent.session`, com o `id` dado.
+fn pedido_de_sessao(id: u32) -> alloc::string::String {
+    alloc::format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"agent.session","params":{{}}}}"#)
+}
+
+/// As respostas que saíram pela porta `p`, uma por linha.
+fn respostas_da_porta(p: u8) -> alloc::vec::Vec<alloc::string::String> {
+    let bytes = crate::virtio::console::capturado(p);
+    core::str::from_utf8(&bytes)
+        .unwrap_or("")
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(alloc::string::String::from)
+        .collect()
+}
+
+/// Cada agente é atendido na sua sessão: o pedido de um não cola no do
+/// outro, e a resposta volta só pela porta de quem pediu, com o número dela.
+///
+/// # O que este caso protege
+///
+/// O que torna vários agentes possíveis: um quadro sendo montado por
+/// canal, e a saída de cada canal separada. Os pedidos chegam intercalados
+/// — metade do da porta 1, o da 2 inteiro, o resto do da 1 —, que é o que
+/// acontece quando dois agentes escrevem ao mesmo tempo.
+fn agentes_cada_sessao_responde_pelo_seu_canal() -> Resultado {
+    use crate::agent::SessaoDeTeste;
+    use crate::virtio::console;
+    for p in 1..=console::PORTAS {
+        console::capturar(p, true);
+    }
+    let resultado = sessoes_intercaladas();
+    for p in 1..=console::PORTAS {
+        console::capturar(p, false);
+    }
+    resultado?;
+
+    // Sem ninguém do outro lado, a resposta não tem a quem ir: é
+    // descartada, e contada.
+    console::simular_conexao(4, false);
+    let antes = console::perdidos_na_saida(4);
+    console::simular(4, pedido_de_sessao(9).as_bytes());
+    console::simular(4, b"\n");
+    SessaoDeTeste::porta(4).atender();
+    if console::perdidos_na_saida(4) <= antes {
+        return Err("a resposta a uma porta sem agente nao foi contada como perdida");
+    }
+    Ok(())
+}
+
+fn sessoes_intercaladas() -> Resultado {
+    use crate::agent::SessaoDeTeste;
+    use crate::virtio::console;
+    let mut sessoes = [
+        SessaoDeTeste::porta(1),
+        SessaoDeTeste::porta(2),
+        SessaoDeTeste::porta(3),
+        SessaoDeTeste::porta(4),
+    ];
+    let um = pedido_de_sessao(101);
+    let (comeco, fim) = um.split_at(um.len() / 2);
+    console::simular(1, comeco.as_bytes());
+    sessoes[0].atender();
+    console::simular(2, alloc::format!("{}\n", pedido_de_sessao(202)).as_bytes());
+    sessoes[1].atender();
+    console::simular(1, alloc::format!("{fim}\n").as_bytes());
+    sessoes[0].atender();
+    for p in 3..=4u8 {
+        let id = p as u32 * 101;
+        console::simular(p, alloc::format!("{}\n", pedido_de_sessao(id)).as_bytes());
+        sessoes[p as usize - 1].atender();
+    }
+    for p in 1..=4u8 {
+        let respostas = respostas_da_porta(p);
+        let id = p as u32 * 101;
+        let esperada =
+            alloc::format!(r#""id":{id},"result":{{"session":{p},"transport":"virtio-console"}}"#);
+        if respostas.len() != 1 || !respostas[0].contains(&esperada) {
+            crate::log_error!("teste", "porta {}: {:?}", p, respostas);
+            return Err("uma sessao nao respondeu so o pedido dela, pelo canal dela");
+        }
+    }
+    Ok(())
+}
+
+/// Uma conexão nova numa porta recomeça o quadro: o fragmento de quem saiu
+/// não cola no pedido de quem chegou.
+///
+/// # O que este caso protege
+///
+/// O que a serial não consegue: ela não enxerga a conexão, e convive com o
+/// fragmento por um teto de ociosidade. A porta enxerga — o dispositivo
+/// avisa cada abertura —, e o caso confere as duas pontas: sem conexão
+/// nova, o fragmento colado dá um pedido quebrado; com ela, só o pedido de
+/// quem chegou é respondido.
+fn agentes_uma_conexao_nova_recomeca_o_quadro() -> Resultado {
+    use crate::agent::SessaoDeTeste;
+    use crate::virtio::console;
+    console::capturar(3, true);
+    let resultado = (|| -> Resultado {
+        let mut sessao = SessaoDeTeste::porta(3);
+        let fragmento = r#"{"jsonrpc":"2.0","id":7,"method":"agent.pi"#;
+        // Sem conexão nova, o fragmento cola, e o pedido se perde.
+        console::simular(3, fragmento.as_bytes());
+        console::simular(3, alloc::format!("{}\n", pedido_de_sessao(8)).as_bytes());
+        sessao.atender();
+        let colado = respostas_da_porta(3);
+        if colado.len() != 1 || colado[0].contains(r#""id":8,"result""#) {
+            crate::log_error!("teste", "sem conexao nova: {:?}", colado);
+            return Err("o fragmento colado nao estragou o pedido: o caso nao prova nada");
+        }
+        // Com conexão nova no meio, o fragmento fica com quem saiu.
+        console::simular(3, fragmento.as_bytes());
+        sessao.atender();
+        console::simular_conexao(3, true);
+        console::simular(3, alloc::format!("{}\n", pedido_de_sessao(9)).as_bytes());
+        sessao.atender();
+        let respostas = respostas_da_porta(3);
+        if respostas.len() != 1 || !respostas[0].contains(r#""id":9,"result""#) {
+            crate::log_error!("teste", "com conexao nova: {:?}", respostas);
+            return Err("o fragmento de uma conexao colou no pedido da seguinte");
+        }
+        Ok(())
+    })();
+    console::capturar(3, false);
+    resultado
+}
+
+/// O log diz qual agente agiu: o número da sessão por onde o pedido
+/// chegou.
+///
+/// # O que este caso protege
+///
+/// A auditoria com vários agentes. "Agente" no log, sem número, não diz
+/// qual de quatro fez; e o número tem de ser o que o kernel deu ao canal,
+/// e não um que o agente diga.
+fn agentes_o_log_diz_qual_agente() -> Resultado {
+    use crate::agent::SessaoDeTeste;
+    use crate::virtio::console;
+    console::capturar(2, true);
+    let resultado = (|| -> Resultado {
+        let mut sessao = SessaoDeTeste::porta(2);
+        let pedido = |id: u32, acao: &str| {
+            alloc::format!(
+                r#"{{"jsonrpc":"2.0","id":{id},"method":"ui.act","params":{{"id":{},"action":"{acao}"}}}}"#,
+                crate::ui::ID_DA_LINHA_DE_COMANDO
+            )
+        };
+        console::simular(2, alloc::format!("{}\n", pedido(1, "cancel")).as_bytes());
+        sessao.atender();
+        let respostas = respostas_da_porta(2);
+        if respostas.len() != 1 || !respostas[0].contains(r#""ok":true"#) {
+            crate::log_error!("teste", "ui.act pela porta 2: {:?}", respostas);
+            return Err("o ui.act pela porta 2 nao foi atendido");
+        }
+        let procurada = alloc::format!(
+            "agente 2: cancel no elemento {}",
+            crate::ui::ID_DA_LINHA_DE_COMANDO
+        );
+        if !log_tem(&procurada) {
+            return Err("o log nao diz que foi o agente da sessao 2");
+        }
+        Ok(())
+    })();
+    console::capturar(2, false);
+    resultado
+}
+
 fn log_tem(texto: &str) -> bool {
     let mut achou = false;
     crate::log::ultimos(32, Level::Trace, |r| achou |= r.mensagem().contains(texto));
@@ -10286,7 +10518,7 @@ fn recusas_com_a_linha_ativa() -> Resultado {
     }
     // E o log registra a recusa como recusa. Registrar antes de agir punha
     // na trilha de auditoria uma ação que não aconteceu.
-    if !log_tem("agente: set_value no elemento 3 recusado") {
+    if !log_tem("agente 0: set_value no elemento 3 recusado") {
         return Err("o log nao registrou a recusa como recusa");
     }
     Ok(())
@@ -13139,6 +13371,22 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "toolkit: o agente preenche um formulario",
         f: toolkit_o_agente_preenche_um_formulario,
+    },
+    Caso {
+        nome: "agentes: as portas estao de pe",
+        f: agentes_as_portas_estao_de_pe,
+    },
+    Caso {
+        nome: "agentes: cada sessao responde pelo seu canal",
+        f: agentes_cada_sessao_responde_pelo_seu_canal,
+    },
+    Caso {
+        nome: "agentes: uma conexao nova recomeca o quadro",
+        f: agentes_uma_conexao_nova_recomeca_o_quadro,
+    },
+    Caso {
+        nome: "agentes: o log diz qual agente",
+        f: agentes_o_log_diz_qual_agente,
     },
     Caso {
         nome: "usb: o relatorio hid vira teclas",

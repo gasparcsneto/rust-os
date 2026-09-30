@@ -224,12 +224,10 @@ pub fn escrever(chave: Chave, fio: u64, texto: &str) -> Option<usize> {
 
 /// Um caractere que o pseudo-terminal deixa chegar ao interpretador.
 fn e_digitavel(c: char) -> bool {
-    use protocolo::usuario::terminal::{APAGAR_A_LINHA, CONFIRMAR_PELO_AGENTE};
+    use protocolo::usuario::terminal::{APAGAR_A_LINHA, agente_que_confirmou};
     c.is_ascii_graphic()
-        || matches!(
-            c,
-            ' ' | '\n' | '\u{8}' | APAGAR_A_LINHA | CONFIRMAR_PELO_AGENTE
-        )
+        || matches!(c, ' ' | '\n' | '\u{8}' | APAGAR_A_LINHA)
+        || agente_que_confirmou(c).is_some()
 }
 
 /// Fecha o pseudo-terminal, se a `chave` for a abertura de `fio`.

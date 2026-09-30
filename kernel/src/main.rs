@@ -350,6 +350,7 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     virtio::blk::init();
     virtio::net::init();
     virtio::teclado::init();
+    virtio::console::init();
     // O mouse de fábrica do x86. No ARM o ponteiro vem de um tablet virtio,
     // ligado junto com o teclado logo acima.
     if arch::iniciar_mouse() {
@@ -424,7 +425,20 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
         // o canal do agente é apenas uma das tarefas que ele roda. Esta
         // chamada nunca retorna: é o laço principal do sistema.
         let mut executor = tarefas::executor::Executor::novo();
-        executor.lancar(tarefas::Tarefa::nova("agent", agent::atender()));
+        executor.lancar(tarefas::Tarefa::nova(
+            "agent",
+            agent::atender(agent::sessao::Canal::Serial),
+        ));
+        // Uma tarefa por porta de agente, se o console virtio está de pé:
+        // cada agente é atendido na sua, e um não espera o outro.
+        if virtio::console::presente() {
+            const NOMES: [&str; virtio::console::PORTAS as usize] =
+                ["agente 1", "agente 2", "agente 3", "agente 4"];
+            for (i, nome) in NOMES.iter().enumerate() {
+                let canal = agent::sessao::Canal::Porta(i as u8 + 1);
+                executor.lancar(tarefas::Tarefa::nova(nome, agent::atender(canal)));
+            }
+        }
         executor.lancar(tarefas::Tarefa::nova("pulso", pulso()));
         // E o interpretador, que atende quem estiver na frente da máquina.
         executor.lancar(tarefas::Tarefa::nova("console", interpretador::atender()));

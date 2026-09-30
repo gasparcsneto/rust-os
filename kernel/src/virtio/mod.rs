@@ -39,8 +39,10 @@
 //! - [`net`]: a placa de rede.
 //! - [`teclado`]: o teclado do ARM, por `virtio-input`.
 //! - [`gpu`]: o adaptador de vídeo, que só mostra o que se manda mostrar.
+//! - [`console`]: o canal local dos agentes, uma porta por agente.
 
 pub mod blk;
+pub mod console;
 pub mod fila;
 pub mod gpu;
 pub mod net;
@@ -115,6 +117,7 @@ const NOME_DISCO: u32 = 1;
 const NOME_REDE: u32 = 2;
 const NOME_TECLADO: u32 = 3;
 const NOME_VIDEO: u32 = 4;
+const NOME_CONSOLE: u32 = 5;
 
 fn nome_de(codigo: u32) -> &'static str {
     match codigo {
@@ -122,6 +125,7 @@ fn nome_de(codigo: u32) -> &'static str {
         NOME_REDE => "rede",
         NOME_TECLADO => "teclado",
         NOME_VIDEO => "video",
+        NOME_CONSOLE => "console",
         _ => "?",
     }
 }

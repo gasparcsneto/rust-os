@@ -280,6 +280,7 @@ pub fn fatal(nome: &'static str, pc: u64, endereco: Option<u64>, codigo: u64) ->
         crate::virtio::blk::destravar();
         crate::virtio::net::destravar();
         crate::virtio::teclado::destravar();
+        crate::virtio::console::destravar();
         crate::usb::xhci::destravar();
         crate::teclado::destravar();
         crate::vfs::destravar();

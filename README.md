@@ -133,12 +133,23 @@ $ cargo xtask agent --arch aarch64 system.info
 
 Os dois podem rodar ao mesmo tempo: cada arquitetura tem seu próprio socket.
 
+Vários agentes podem operar a mesma máquina ao mesmo tempo, cada um no seu
+canal — a serial é a sessão 0, e as portas do console virtio, as sessões 1
+a 4:
+
+```bash
+$ cargo xtask agent --canal 2 agent.session
+{"jsonrpc":"2.0","id":1,"result":{"session":2,"transport":"virtio-console"}}
+```
+
 ## Comandos disponíveis
 
 | Comando | Descrição |
 |---|---|
 | `agent.ping` | Verifica se o canal está vivo |
 | `agent.describe` | Lista todos os comandos e parâmetros |
+| `agent.session` | A sessão deste pedido: o número que o kernel deu ao canal, e o transporte |
+| `agent.sessions` | As sessões: a serial e cada porta do console virtio, conectada ou não, com as perdas |
 | `system.info` | Kernel, CPU, vídeo, uptime e mecanismo de guarda da pilha |
 | `system.uptime` | Ticks do timer e milissegundos desde o boot |
 | `memory.stats` | Totais agregados de memória física |
@@ -251,6 +262,7 @@ kernel/src/
 │   ├── blk.rs       o disco
 │   ├── net.rs       a placa de rede
 │   ├── gpu.rs       o vídeo que só mostra o que se manda (porte do virtio-gpud)
+│   ├── console.rs   o canal local dos agentes: uma porta do console virtio por agente
 │   └── teclado.rs   o teclado e o tablet do ARM, por virtio
 ├── usb/
 │   ├── mod.rs       o barramento por onde entram os periféricos de verdade
@@ -261,6 +273,7 @@ kernel/src/
 │   ├── json.rs      JSON sem alocação (streaming + varredura)
 │   ├── protocol.rs  envelope JSON-RPC 2.0
 │   ├── registry.rs  registro de comandos auto-descritivo
+│   ├── sessao.rs    as sessões: um agente por canal, e quem está agindo
 │   └── commands.rs  implementações dos comandos
 └── arch/
     ├── mod.rs        seleção da arquitetura em tempo de compilação
@@ -1046,7 +1059,8 @@ da área de uso privado que nenhum teclado produz: o que chega pelo
 pseudo-terminal vem pela fila do teclado, e sem ele um comando que o
 agente executou pelo Terminal ficaria no log como da pessoa. O caso da
 suíte e a fumaça conferem os dois: o agente digita, esvazia, digita de
-novo e executa, e o log diz `executado: agent.ping (agente)`. Um processo
+novo e executa, e o log diz `executado: agent.ping (agente 3)` — o número
+da sessão do agente, que o Terminal leva junto com o Enter. Um processo
 com o pseudo-terminal pode escrever o Enter do agente sem ter sido pedido
 — atribuir ao agente o que a pessoa fez é o erro menos grave, e o registro
 que a pessoa confira é da fase 12.
@@ -1295,6 +1309,60 @@ que se esquece de chamar `destruir` vaza tabelas até a memória acabar. Há um
 caso de teste que dá dez voltas de criar-mapear-destruir e exige que o
 alocador de frames volte ao número exato de antes.
 
+## Vários agentes
+
+O Duke atende vários agentes ao mesmo tempo, cada um numa **sessão**: um
+canal com o seu quadro sendo montado, a sua tarefa e a sua saída. O pedido
+de um não cola no do outro, e a resposta de um não sai pelo canal do outro.
+O número da sessão é dado pelo kernel, pelo canal por onde o pedido chegou
+— e não dito pelo agente —, e é ele que o log registra como quem agiu:
+
+```
+info ui       agente 2: confirm no elemento 3
+info console  executado: agent.ping (agente 2)
+```
+
+**Os canais.** A serial continua sendo a sessão 0, e a de emergência: a
+única que responde no modo post-mortem. Os agentes têm, além dela, o
+transporte local: o `virtio-console` com várias portas — o recurso
+`MULTIPORT` —, cada porta num socket próprio no hospedeiro, as sessões 1 a
+4. O driver faz o aperto de mão do `MULTIPORT` pela fila de controle: diz
+que está pronto, o dispositivo anuncia cada porta, o driver a põe de pé e a
+abre do lado dele, e o hospedeiro manda o nome dela. `agent.session` diz a
+um agente qual é a sessão dele; `agent.sessions` lista todas, com quem está
+conectado e o que se perdeu.
+
+**Uma coisa que a serial não dava: a conexão.** A serial não enxerga quando
+um cliente conecta ou cai, e convive com isso por um teto de ociosidade e
+uma linha vazia que o cliente manda ao chegar. A porta enxerga: o
+dispositivo avisa cada abertura, e o quadro que estava pela metade fica com
+quem saiu. Uma resposta para uma porta sem ninguém do outro lado é
+descartada e contada, e uma que ninguém lê não cresce sem fim.
+
+**Acima do transporte.** O enquadramento, o JSON-RPC e os comandos não
+sabem por onde os bytes vieram: perguntam ao canal da sessão. É o que deixa
+o próximo transporte — o TCP, quando houver rede, e o vsock, para as máquinas
+virtuais — entrar como mais um caso, sem mudar nada em cima. É a primeira
+de sete etapas: depois vêm o canal seguro (Noise, com a identidade de cada
+agente na chave pública dele), a camada de controle (política, auditoria
+encadeada, limites), os conflitos entre agentes, as mensagens entre eles, e
+o indicador na barra.
+
+**O Terminal também.** Um agente que digita no Terminal pela linha de
+comando da janela chega ao interpretador pelo pseudo-terminal, como uma
+pessoa — e o interpretador precisa saber qual agente foi. A ação que chega
+ao Terminal diz a sessão de quem a pediu, e o Terminal digita o Enter
+daquele agente: um caractere da área de uso privado por sessão. O log diz
+`(agente 2)`, e não só `(agente)`.
+
+A suíte atende as portas à mão — põe bytes na entrada de cada uma e
+confere a saída — com os pedidos intercalados entre duas portas, uma
+conexão nova no meio de um quadro, e o `ui.act` de uma porta chegando ao
+log com o número dela. A fumaça passa pelo dispositivo de verdade: quatro
+agentes, em quatro fios do hospedeiro, cinquenta pedidos cada, ao mesmo
+tempo, cada um recebendo só as respostas dele; e o agente da porta 2
+executando um comando no Terminal, com o log dizendo `agente 2`.
+
 ## Barramento PCI
 
 Até a fase 1, todo dispositivo que o kernel tocava tinha endereço conhecido de
@@ -1439,7 +1507,7 @@ máquina vê o comando aparecer e a resposta ser desenhada — nada acontece por
 trás da tela. E o log diz quem foi:
 
 ```
-info console  executado: system.uptime (agente)
+info console  executado: system.uptime (agente 0)
 info console  executado: agent.ping (pessoa)
 ```
 

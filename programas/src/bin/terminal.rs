@@ -55,8 +55,9 @@ use programas::escreverln;
 use programas::janela::{Gesto, Janela};
 use programas::sistema;
 
+use protocolo::usuario::evento::origem;
 use protocolo::usuario::evento::{BOTAO_ESQUERDO, CANAL_DO_TERMINAL, Evento, janela, tipo};
-use protocolo::usuario::terminal::PROMPT;
+use protocolo::usuario::terminal::{CONFIRMAR_PELO_AGENTE, PROMPT, confirmar_pelo_agente};
 use toolkit::{AreaDeTexto, Indice, Interface, LinhaDeComando};
 
 /// A grade: colunas e linhas.
@@ -128,15 +129,22 @@ impl Terminal {
     }
 
     /// Uma ação da árvore: a caixa de fechar, ou a linha de comando.
+    /// `quem` é o `c` do evento — ver `protocolo::usuario::evento::origem`.
     /// Devolve se a janela foi fechada.
-    fn acao(&mut self, elemento: i64, qual: i64) -> bool {
+    fn acao(&mut self, elemento: i64, qual: i64, quem: i64) -> bool {
         match self.janela.acao(elemento, qual) {
             Some(Gesto::Fechar) => true,
             Some(Gesto::Acionado(DIGITAR)) => {
-                let pedido = self
+                // O widget pede o Enter "de um agente"; quem recebeu a ação
+                // sabe qual, e é ele que o diz ao interpretador.
+                let enter = origem::sessao(quem).map_or('\n', confirmar_pelo_agente);
+                let pedido: String = self
                     .janela
                     .com_widget::<LinhaDeComando, _>(LINHA, |l| l.tirar_pedido())
-                    .unwrap_or_default();
+                    .unwrap_or_default()
+                    .chars()
+                    .map(|c| if c == CONFIRMAR_PELO_AGENTE { enter } else { c })
+                    .collect();
                 self.digitar(&pedido);
                 escreverln!(
                     "terminal: o agente digitou {} caractere(s)",
@@ -259,7 +267,7 @@ fn principal() -> i64 {
                 // O `press` do agente na caixa de fechar — o mesmo fechar do
                 // clique —, ou uma ação na linha de comando.
                 tipo::ACAO => {
-                    if t.acao(e.a, e.b) {
+                    if t.acao(e.a, e.b, e.c) {
                         escreverln!("terminal: fechado");
                         return 0;
                     }
