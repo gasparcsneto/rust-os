@@ -967,6 +967,75 @@ foco no aperto passava com uma janela só: com dois processos, o pedido
 atrasado tomava o foco do outro, e o foco ficava com ninguém — o caso
 provoca essa corrida agora.
 
+**O toolkit.** A segunda parte da fase 11, e a regra dela: uma janela não
+se descreve à mão. Até aqui, o servidor de janelas e o Terminal desenhavam
+e, ao lado, escreviam a descrição para a árvore semântica — duas contas
+para o mesmo retângulo, e bastava uma mudar para o agente ler o que não
+estava na tela. Agora cada janela é uma árvore de widgets, e o desenho e a
+descrição saem dela pelo mesmo percurso, na mesma ordem, com as mesmas
+áreas. Veio em seis etapas.
+
+**A linguagem visual.** O pacote `aparencia`, dos dois lados da fronteira:
+a paleta pelo nome — a noite, a ardósia, o aço, o acento, a névoa —, os
+papéis de cada cor, as medidas e os estilos de texto. O botão de uma
+janela é o botão da barra do kernel porque os dois leem o mesmo token. Um
+teste confere o contraste de cada par texto-fundo pela conta da WCAG; o
+título da janela com o foco mede 3,22, abaixo dos 4,5 do texto de corpo, e
+ficou registrado como exceção, à espera de decisão. A suíte confere a
+tela contra a paleta pelo nome, e não contra as constantes do kernel: uma
+troca de cor mudava os dois lados da conferência, e passava.
+
+**Os widgets.** O pacote `toolkit`: o rótulo, o botão, o campo de texto, a
+área de texto, e a coluna e a linha que os põem um depois do outro. Cada um
+sabe o tamanho que pede, se desenha na área que recebe, e diz o que é. A
+descrição que o toolkit gera é lida de volta, nos testes do hospedeiro,
+pelo **mesmo** leitor que o kernel usa, do `protocolo`.
+
+**Três caminhos, uma chegada.** O aperto do ponteiro vai ao widget mais
+fundo sob ele, e lhe dá o foco; o Tab leva o foco adiante; o Enter e o
+espaço acionam o botão com o foco; e o `press` do agente chega ao widget
+pelo identificador que a árvore publicou. Os três chegam ao mesmo
+`tratar`, e o "OK" do agente é o "OK" da pessoa. O anel do botão e o
+cursor do campo só aparecem na janela com o foco — é onde a tecla vai
+cair.
+
+**O campo, e o caminho do agente até ele.** O `set_value` traz um texto
+que não cabe num evento de 32 bytes. Ele espera no kernel, numa fila da
+superfície de no máximo quatro, e o processo, avisado por uma ação,
+o tira com a chamada `valor` — a décima sexta. Uma fila, e não um lugar
+só: dois campos definidos antes de o processo rodar trocariam de valor. Se
+o aviso não chega, o texto sai da fila junto com ele. O buffer do `ui.act`
+passou a ter o tamanho do maior valor da árvore, 512 bytes.
+
+**As janelas do Duke.** O "Sobre o Duke" ganhou um **OK**; a janela de
+teste virou um formulário, com um campo e o **Limpar**; e a grade do
+Terminal virou a `AreaDeTexto`, um widget que o programa escreve de fora e
+que redesenha só a linha do cursor enquanto não rola — o que a fumaça do
+ARM exige. No runtime, toda janela tem uma interface: a janela vazia, a
+tela crua da moldura e o escritor da descrição ficaram privados. E
+`cargo xtask invariantes` confere que nenhum programa pega a memória de
+pixels, chama `descrever` ou escreve um elemento, fora a moldura do
+runtime e três programas que conferem a ABI crua do kernel — cada um com
+o motivo escrito ao lado.
+
+**Pelos dois caminhos.** Cada caso confere o que a pessoa faz e o que o
+agente faz. O programa `formulario` — dois campos, dois botões — é o outro
+lado de um caso da suíte que o preenche pelo `ui.tree` e pelo `ui.act` de
+verdade, e pelo teclado. A fumaça faz o mesmo de fora: lança o formulário
+pelo `user.run`, preenche os campos e aperta o OK pelo canal do agente,
+digita no mesmo campo e confirma com o Enter pelo teclado da máquina, e o
+fecha pela caixa com o mouse — como fecha o "Sobre o Duke" pelo OK.
+
+Noventa e quatro mutações nas seis etapas, e as noventa e quatro
+reprovadas — várias só depois de o caso ser reforçado. Seis das oito da
+linguagem visual passavam: a suíte conferia a tela contra as constantes
+do kernel, e as constantes vinham do token mutado. No campo, seis das
+dezoito do hospedeiro passavam, e cada uma virou uma pergunta nova — o
+apagar no meio do texto, o teto ao digitar, o corte no meio de uma letra.
+Na migração, a janela um pixel mais curta passava porque nenhum caso media
+o tamanho de uma janela; e as duzentas linhas que o Terminal guardava
+passavam porque nada as lia — foram tiradas, em vez de testadas.
+
 **A proteção é testada, não presumida.** Existe um segundo programa que tenta
 ler a memória do kernel. O caso `usuario: nao alcanca o kernel` exige duas
 coisas ao mesmo tempo: que ele **não consiga** — se conseguisse, seguiria e
@@ -1353,8 +1422,10 @@ info console  executado: agent.ping (pessoa)
 que uma pessoa faz, o registro precisa dizer qual dos dois fez.
 
 **O primeiro botão.** A barra superior tem o **Limpar**, que aceita `press` —
-ver a seção da barra, abaixo. As camadas do compositor também aparecem na
-árvore, como `window`, mas hoje só a suíte cria alguma.
+ver a seção da barra, abaixo. As janelas também aparecem na árvore, como
+`window`, com os widgets delas: o servidor de janelas e o Terminal as
+montam com o toolkit, e a descrição é gerada deles — ver o toolkit, em
+Userspace.
 
 **O que ainda não há.** Consentimento: um `set_value` do agente troca o que a pessoa
 estava digitando, e nada pergunta a ela antes. A árvore mostra o que está
@@ -1520,9 +1591,9 @@ console aparecem como `window`, com um identificador que não se repete: um
 agente que guardou o de uma janela que fechou recebe "não existe", e não a
 janela que veio depois.
 
-**O que ainda não há.** Quem crie janelas em produção: a única camada de
-produção é a barra superior, e o servidor de janelas vem depois. Nem
-o roteamento de entrada para elas.
+**O que veio depois.** Quem crie janelas em produção: o servidor de
+janelas e o Terminal, com o roteamento da entrada de cada superfície ao
+processo dono dela — ver Userspace.
 
 Conferido pela suíte — a camada de cima vence, soltá-la revela o console,
 mover não deixa rastro, a ordem de empilhamento decide quem aparece, uma
@@ -2533,7 +2604,7 @@ padronizado.
       funciona em toda parte hoje e é por isso que ela quebra a cada tema
       novo. Acessibilidade e teste automatizado de interface caem no colo,
       porque são a mesma árvore lida por outro consumidor.
-- [ ] **Fase 11 — Toolkit, linguagem visual e o Terminal.** O "jeito" do
+- [x] **Fase 11 — Toolkit, linguagem visual e o Terminal.** O "jeito" do
       sistema mora aqui, não no kernel. Cada widget declara o que é e o que
       faz, e a árvore semântica da fase 10 é **gerada** disso em vez de
       escrita à mão — senão ela vira a segunda superfície que este projeto
@@ -2546,8 +2617,11 @@ padronizado.
       kernel, a entrada de cada janela indo ao processo dono dela, a janela
       do runtime compartilhada com o servidor, e o programa, lançado no
       boot e pelo botão da barra. O console do kernel ficou como fundo e
-      reserva. O toolkit — os widgets que se declaram, e a árvore gerada
-      deles — é o que falta.
+      reserva. Depois, o toolkit: a linguagem visual num pacote dos dois
+      lados da fronteira, os widgets que se desenham e se descrevem do mesmo
+      estado, o campo de texto com o caminho do agente até ele, e as janelas
+      do Duke refeitas com eles — nenhuma descrita à mão, e uma conferência
+      que impede a próxima de ser.
 - [ ] **Fase 12 — Consentimento e auditoria.** Se um agente pode fazer tudo
       que uma pessoa faz, o modelo de permissão precisa ser **mais** forte que
       o de um desktop comum, e não mais fraco. Três coisas: quem pediu — a

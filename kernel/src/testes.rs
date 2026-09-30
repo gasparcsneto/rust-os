@@ -5449,7 +5449,8 @@ fn terminal_operado() -> Resultado {
 ///   pequeno recusa, e o texto continua na fila para a leitura seguinte;
 /// - **a fila tem teto**, e o pedido além dele é recusado ao agente;
 /// - **confirmar e esvaziar** chegam ao campo, e o `press` ao botão;
-/// - **o teclado da pessoa** chega ao mesmo campo, pelo foco da janela.
+/// - **o teclado da pessoa** chega ao mesmo campo, pelo foco da janela;
+/// - **fechar pela árvore** faz o programa sair, e a janela sai da tela.
 fn toolkit_o_agente_preenche_um_formulario() -> Resultado {
     let resultado = formulario_preenchido();
     let _ = crate::eventos::publicar(
@@ -5676,6 +5677,21 @@ fn formulario_preenchido() -> Resultado {
         600,
     )
     .map_err(|_| "o teclado da pessoa nao chegou ao campo com o foco")?;
+
+    // E o agente fecha a janela pela caixa de fechar da árvore: o programa
+    // sai, como sai quando a pessoa a fecha com o mouse — ver a fumaça.
+    let fechar = crate::ui::id_do_elemento(camada, 0).ok_or("sem identificador")?;
+    crate::ui::agir(fechar, Acao::Pressionar, None, Origem::Agente)?;
+    esperar("formulario: fechado")?;
+    esperar_ate(
+        || {
+            let mut aberta = false;
+            crate::grafico::camadas(|c| aberta |= c.id == camada);
+            !aberta
+        },
+        600,
+    )
+    .map_err(|_| "o formulario fechado continuou na tela")?;
     Ok(())
 }
 

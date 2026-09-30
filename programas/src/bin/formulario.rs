@@ -7,7 +7,8 @@
 //! confere pelo que o programa diz no log — `formulario: ...` — e pela
 //! descrição que a janela publica.
 //!
-//! Sai com [`CODIGO`] quando a suíte pede o fim.
+//! Sai com [`CODIGO`] quando a suíte pede o fim, ou quando a janela é
+//! fechada — pela caixa, ou pelo `press` do agente nela.
 //!
 //! A suíte também pode pedir, com um evento de teste — ver [`SONDAR`] —,
 //! que o próximo texto seja lido primeiro num buffer pequeno demais: a
@@ -162,7 +163,10 @@ fn principal() -> i64 {
                 Gesto::Redesenhada => {
                     escreverln!("formulario: agora [{}] [{}]", nome, sobrenome)
                 }
-                Gesto::Fechar => escreverln!("formulario: fechar"),
+                Gesto::Fechar => {
+                    escreverln!("formulario: fechado");
+                    return CODIGO;
+                }
                 _ => 0,
             };
         }

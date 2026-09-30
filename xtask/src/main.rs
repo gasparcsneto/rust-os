@@ -4270,6 +4270,7 @@ fn fumaca(
     let tela_no_monitor =
         (arch == Arquitetura::Aarch64 || video == Video::Virtio).then_some("video0");
     let resultado = conversar(
+        arch,
         &socket,
         &caminho_monitor(arch),
         &caminho_qmp(arch),
@@ -4300,6 +4301,7 @@ fn fumaca(
 
 /// Espera o canal subir e roda as sondas numa conexão só.
 fn conversar(
+    arch: Arquitetura,
     socket: &Path,
     monitor: &Path,
     qmp: &Path,
@@ -4464,6 +4466,7 @@ fn conversar(
     sob_barra(monitor, &mut escrita, &mut leitor)?;
     sob_mouse(qmp, teclado, &mut escrita, &mut leitor)?;
     sob_janelas(qmp, &mut escrita, &mut leitor)?;
+    sob_formulario(arch, monitor, qmp, &mut escrita, &mut leitor)?;
     sob_tela(monitor, tela_no_monitor, &mut escrita, &mut leitor)?;
     sob_fragmento(&mut escrita, &mut leitor)?;
     // Por último, porque não há volta: depois dela o kernel só responde o
@@ -5589,6 +5592,217 @@ fn sob_janelas(
         "o clique na caixa de fechar nao fechou a janela",
     )?;
     println!("  [janelas] ok  fechada pela caixa, e fora da arvore");
+
+    // De novo, para o OK: o botão do toolkit, apertado no meio da moldura
+    // que a árvore publica para ele.
+    levar_o_ponteiro(
+        &mut qe,
+        &mut ql,
+        &mut pedir,
+        (bx + bl / 2, by + ba / 2),
+        tela,
+    )?;
+    botao_do_mouse(&mut qe, &mut ql, true)?;
+    botao_do_mouse(&mut qe, &mut ql, false)?;
+    let arvore = esperar_arvore(
+        &mut pedir,
+        &|a| a.contains(TITULO),
+        "o clique no botao Sobre nao abriu a janela de novo",
+    )?;
+    let depois = &arvore[arvore.find(TITULO).unwrap_or(0)..];
+    let (ox, oy, ol, oa) = moldura_depois(depois, r#""role":"button","label":"OK""#)
+        .ok_or_else(|| format!("janelas: a janela nao tem o botao OK\n  {arvore}"))?;
+    levar_o_ponteiro(
+        &mut qe,
+        &mut ql,
+        &mut pedir,
+        (ox + ol / 2, oy + oa / 2),
+        tela,
+    )?;
+    botao_do_mouse(&mut qe, &mut ql, true)?;
+    botao_do_mouse(&mut qe, &mut ql, false)?;
+    esperar_arvore(
+        &mut pedir,
+        &|a| !a.contains(TITULO),
+        "o clique no OK nao fechou a janela",
+    )?;
+    println!("  [janelas] ok  o OK do toolkit fechou a janela, pelo clique");
+    Ok(())
+}
+
+/// O `id` do elemento da árvore marcado por `marca` — o papel e o rótulo,
+/// que vêm logo depois dele no objeto.
+fn id_antes(arvore: &str, marca: &str) -> Option<u64> {
+    let antes = &arvore[..arvore.find(marca)?];
+    let inicio = antes.rfind(r#""id":"#)? + r#""id":"#.len();
+    antes[inicio..].trim_end_matches(',').parse().ok()
+}
+
+/// Um formulário do toolkit, preenchido pelo agente e pela pessoa.
+///
+/// # O que esta sonda prova que a suíte não prova
+///
+/// A suíte age no campo pelas funções do kernel. Esta passa pelo canal do
+/// agente de verdade — o `ui.act` com o `set_value`, que atravessa o JSON,
+/// a fila da superfície e a chamada `valor` até o widget —, e pelo teclado e
+/// o mouse da máquina: a pessoa digita no mesmo campo, confirma com o Enter,
+/// e fecha a janela pela caixa. O programa é lançado pelo `user.run`, como
+/// um agente lançaria.
+fn sob_formulario(
+    arch: Arquitetura,
+    monitor: &Path,
+    qmp: &Path,
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+) -> Result<(), String> {
+    println!("[xtask] fumaça: um formulário do toolkit, pelo agente e pela pessoa");
+    const TITULO: &str = r#""role":"window","label":"Formulário""#;
+
+    let mut id = 8600;
+    let mut pedir = |metodo: &str, params: &str| -> Result<String, String> {
+        id += 1;
+        escrita
+            .write_all(
+                format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"{metodo}","params":{params}}}"#)
+                    .as_bytes(),
+            )
+            .and_then(|()| escrita.write_all(b"\n"))
+            .and_then(|()| escrita.flush())
+            .map_err(|e| format!("formulario: falha ao pedir `{metodo}`: {e}"))?;
+        let resposta = ler_resposta(leitor).map_err(|e| format!("formulario: {e}"))?;
+        if !e_a_resposta(&resposta, id) {
+            return Err(format!(
+                "formulario: veio a resposta de outro pedido\n  {resposta}"
+            ));
+        }
+        Ok(resposta)
+    };
+    // Espera `condicao` valer na resposta de `metodo`, e a devolve.
+    let esperar = |pedir: &mut dyn FnMut(&str, &str) -> Result<String, String>,
+                   (metodo, params): (&str, &str),
+                   condicao: &dyn Fn(&str) -> bool,
+                   o_que: &str|
+     -> Result<String, String> {
+        let limite = std::time::Instant::now() + Duration::from_secs(8);
+        loop {
+            let resposta = pedir(metodo, params)?;
+            if condicao(&resposta) {
+                return Ok(resposta);
+            }
+            if std::time::Instant::now() >= limite {
+                return Err(format!("formulario: {o_que}\n  {resposta}"));
+            }
+            std::thread::sleep(Duration::from_millis(150));
+        }
+    };
+    let arvore = ("ui.tree", "{}");
+    let log = ("log.tail", r#"{"count":24}"#);
+    // O que vem na árvore depois do título da janela: a janela dela.
+    let da_janela = |a: &str| a.find(TITULO).map(|i| a[i..].to_string());
+
+    let lancado = pedir(
+        "user.run",
+        &format!(r#"{{"path":"/programas/{}/formulario"}}"#, arch.nome()),
+    )?;
+    if !lancado.contains(r#""launched":true"#) {
+        return Err(format!("formulario: o user.run nao o lancou\n  {lancado}"));
+    }
+    let a = esperar(
+        &mut pedir,
+        arvore,
+        &|a| a.contains(TITULO),
+        "a janela do formulario nao apareceu na arvore",
+    )?;
+    let janela = da_janela(&a).unwrap_or_default();
+    let campo = |rotulo: &str| {
+        id_antes(
+            &janela,
+            &format!(r#""role":"text_field","label":"{rotulo}""#),
+        )
+        .ok_or_else(|| format!("formulario: a janela nao tem o campo {rotulo}\n  {janela}"))
+    };
+    let (nome, sobrenome) = (campo("nome")?, campo("sobrenome")?);
+    let ok = id_antes(&janela, r#""role":"button","label":"OK""#)
+        .ok_or_else(|| format!("formulario: a janela nao tem o OK\n  {janela}"))?;
+
+    // O agente: os dois campos pelo `set_value`, e o OK pelo `press`.
+    for (campo, valor) in [(nome, "Ana"), (sobrenome, "Souza")] {
+        let r = pedir(
+            "ui.act",
+            &format!(r#"{{"id":{campo},"action":"set_value","value":"{valor}"}}"#),
+        )?;
+        if !r.contains(r#""ok":true"#) {
+            return Err(format!("formulario: o set_value foi recusado\n  {r}"));
+        }
+    }
+    esperar(
+        &mut pedir,
+        arvore,
+        &|a| {
+            da_janela(a)
+                .is_some_and(|j| j.contains(r#""value":"Ana""#) && j.contains(r#""value":"Souza""#))
+        },
+        "os valores do agente nao chegaram aos campos",
+    )?;
+    let r = pedir("ui.act", &format!(r#"{{"id":{ok},"action":"press"}}"#))?;
+    if !r.contains(r#""ok":true"#) {
+        return Err(format!("formulario: o press no OK foi recusado\n  {r}"));
+    }
+    esperar(
+        &mut pedir,
+        log,
+        &|l| l.contains("formulario: acionado 3 [Ana] [Souza]"),
+        "o OK do agente nao chegou ao programa com os valores",
+    )?;
+    println!("  [formulario] ok  preenchido e confirmado pelo agente, pela arvore");
+
+    // A pessoa: uma letra no campo com o foco — o primeiro —, e o Enter,
+    // pelo teclado da máquina.
+    let mut mon = UnixStream::connect(monitor)
+        .map_err(|e| format!("formulario: o monitor nao aceitou conexao: {e}"))?;
+    for tecla in ["x", "ret"] {
+        mon.write_all(format!("sendkey {tecla}\n").as_bytes())
+            .and_then(|()| mon.flush())
+            .map_err(|e| format!("formulario: falha ao mandar `{tecla}`: {e}"))?;
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    esperar(
+        &mut pedir,
+        log,
+        &|l| l.contains("formulario: acionado 1 [Anax] [Souza]"),
+        "o que a pessoa digitou nao chegou ao campo, ou o Enter nao o confirmou",
+    )?;
+    println!("  [formulario] ok  a pessoa digitou no mesmo campo e confirmou com o Enter");
+
+    // E fecha pela caixa, com o mouse.
+    let info = pedir("display.info", "{}")?;
+    let dimensao = |chave: &str| -> Result<u32, String> {
+        valor_de(&info, &format!(r#""{chave}":"#))
+            .and_then(|v| v.parse().ok())
+            .ok_or_else(|| format!("formulario: display.info nao tem `{chave}`\n  {info}"))
+    };
+    let tela = (dimensao("width")?, dimensao("height")?);
+    let a = pedir("ui.tree", "{}")?;
+    let janela = da_janela(&a).unwrap_or_default();
+    let (fx, fy, fl, fa) = moldura_depois(&janela, r#""role":"button","label":"Fechar""#)
+        .ok_or_else(|| format!("formulario: a janela nao tem o botao Fechar\n  {janela}"))?;
+    let (mut qe, mut ql) = qmp_abrir(qmp)?;
+    levar_o_ponteiro(
+        &mut qe,
+        &mut ql,
+        &mut pedir,
+        (fx + fl / 2, fy + fa / 2),
+        tela,
+    )?;
+    botao_do_mouse(&mut qe, &mut ql, true)?;
+    botao_do_mouse(&mut qe, &mut ql, false)?;
+    esperar(
+        &mut pedir,
+        arvore,
+        &|a| !a.contains(TITULO),
+        "o clique na caixa de fechar nao fechou o formulario",
+    )?;
+    println!("  [formulario] ok  fechado pela caixa, pelo mouse");
     Ok(())
 }
 
