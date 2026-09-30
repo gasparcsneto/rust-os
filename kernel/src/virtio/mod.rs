@@ -155,10 +155,42 @@ static REGISTROS: [Registro; MAX_REGISTROS] = [REGISTRO_VAZIO; MAX_REGISTROS];
 
 /// Liga a interrupção de um dispositivo: registra o dono e libera a linha.
 ///
-/// Os dois drivers fazem exatamente isto, e a ordem importa — registrar
-/// **antes** de liberar. Uma linha liberada sem dono registrado entrega uma
-/// interrupção que ninguém reconhece no dispositivo, e uma linha de nível que
-/// ninguém reconhece dispara de novo imediatamente, para sempre.
+/// Os drivers fazem exatamente isto, e a ordem importa — registrar **antes**
+/// de liberar. Uma linha liberada sem dono registrado entrega uma
+/// interrupção que ninguém reconhece no dispositivo, e uma linha que ninguém
+/// reconhece ou dispara de novo para sempre, ou nunca mais — conforme o
+/// controlador a receba por nível ou por borda; ver [`atender_interrupcao`].
+///
+/// # E antes do `DRIVER_OK`, não só antes de liberar a linha
+///
+/// "Registrar antes de liberar a linha" só protege o **primeiro** dono dela.
+/// Numa linha compartilhada, o segundo chega com ela já liberada pelo
+/// primeiro, e o que o protege é outra ordem: registrar-se antes de o
+/// dispositivo poder interromper — antes de [`transporte::Transporte::liberar`].
+/// Depois dele o dispositivo trabalha, e uma interrupção sua que chegue antes
+/// do registro encontra só o outro dono: o registrador do recém-chegado fica
+/// sem ler, e ele segue segurando a linha.
+///
+/// Os drivers registravam depois do `DRIVER_OK`, e o defeito dormiu enquanto
+/// nenhum segundo dono interrompia cedo. O `virtio-console` interrompe, e as
+/// duas formas apareceram, medidas:
+///
+/// - no ARM com teclado USB, console e disco caem no INTID 36. O GIC recebe
+///   por nível: o registrador de pendentes e o de ativos mostravam o 36 nos
+///   dois ao mesmo tempo, e o processador não saía do handler — o kernel
+///   nunca terminou de subir, e a fumaça só viu o canal mudo;
+/// - no x86 com vídeo virtio, os dois caem na linha 10, e o PIC recebe por
+///   borda: a linha foi entregue uma vez, nenhum dos dois foi creditado, e
+///   nunca mais.
+///
+/// Registrar antes de o dispositivo existir para o barramento não custa
+/// nada: ler o registrador de estado de quem ainda não trabalha dá zero.
+///
+/// Só a ordem do console tem quem a proteja — medido: devolvê-la para depois
+/// do `DRIVER_OK` derruba os dois casos de `irq` no x86 com vídeo virtio e a
+/// fumaça do ARM com teclado USB. Nos outros drivers a inversão passa (na
+/// rede, medido), porque nenhum deles interrompe antes de receber trabalho.
+/// A ordem é a mesma nos cinco para que o próximo driver copie a certa.
 ///
 /// Nada disto é obrigatório para o driver funcionar: os dois esperam em laço
 /// e leem o anel de usados, que não depende de interrupção nenhuma. Falhar
@@ -238,9 +270,11 @@ fn registrar(linha: u32, isr: Option<u64>, nome: u32) -> bool {
         // na IRQ 11, e a rede se registra depois.
         //
         // Uma interrupção nessa janela é entregue, o handler não encontra
-        // quem a reconheça, e a linha é de **nível**: o dispositivo segue
-        // segurando o sinal e o controlador entrega de novo, imediatamente.
-        // O kernel para de progredir sem uma linha de log.
+        // quem a reconheça, e o dispositivo segue segurando o sinal. Num
+        // controlador que recebe a linha por nível ele entrega de novo,
+        // imediatamente, e o kernel para de progredir sem uma linha de log;
+        // num que a recebe por borda, como o PIC do x86, a linha emudece —
+        // ver [`atender_interrupcao`].
         //
         // As duas escritas abaixo podem ser `Relaxed`: quem as ordena é a
         // publicação da linha, que é `Release`, e o handler lê a linha com
@@ -272,15 +306,20 @@ fn registrar(linha: u32, isr: Option<u64>, nome: u32) -> bool {
 ///
 /// # Por que ler o registrador de estado é obrigatório
 ///
-/// Uma interrupção de PCI por linha é **de nível**: o dispositivo mantém o
-/// sinal ativo até ser atendido, e não manda um pulso. Reconhecê-la no
-/// controlador não basta — enquanto o dispositivo mantiver a linha baixa, o
-/// controlador entrega outra, e outra, para sempre. O sistema não trava com
-/// uma mensagem de erro; ele para de progredir porque nunca sai do handler.
+/// O dispositivo mantém o sinal ativo até ser atendido, e não manda um
+/// pulso. A leitura do registrador de estado é o que faz o dispositivo
+/// soltar a linha, e ela **limpa o registrador ao ser lida** — é o
+/// mecanismo, não um efeito colateral.
 ///
-/// A leitura do registrador de estado é o que faz o dispositivo soltar a
-/// linha, e ela **limpa o registrador ao ser lida** — é o mecanismo, não um
-/// efeito colateral.
+/// O que acontece quando ninguém lê depende de como o controlador recebe a
+/// linha. **Por nível**, ele entrega de novo, e de novo, para sempre — o
+/// sistema para de progredir sem uma linha de log. **Por borda**, o defeito
+/// é o avesso, e mais quieto: a linha fica alta, não há borda nova, e nada
+/// mais chega por ela.
+///
+/// O PIC do x86 recebe estas linhas por borda: o registrador que escolheria
+/// nível para elas (o ELCR, nas portas `0x4D0` e `0x4D1`) está zerado quando
+/// o kernel chega — medido, lido de dentro de um caso da suíte.
 ///
 /// # Por que todos os registros, e não o primeiro que combinar
 ///
@@ -288,7 +327,42 @@ fn registrar(linha: u32, isr: Option<u64>, nome: u32) -> bool {
 /// quantos dispositivos a placa tiver. Dois dispositivos na mesma linha que
 /// interrompam juntos produzem uma única entrega, e atender só um deixaria o
 /// outro segurando o sinal.
+///
+/// # Por que repetir até uma volta quieta
+///
+/// Por causa da borda. Com os donos `A` e `B` lidos nessa ordem, `A` pode
+/// interromper logo depois de ser lido, enquanto `B` ainda segura a linha:
+/// ela não desce, e a interrupção de `A` não faz borda. Ler `B` em seguida
+/// não resolve — `A` continua segurando, e ninguém volta a ler `A`.
+///
+/// Uma volta em que **todos** leem zero fecha a janela: nela ninguém segurava
+/// a linha na hora de ser lido, e só a leitura faz um dispositivo soltá-la.
+/// Então quem interromper depois dessa leitura sobe uma linha que estava
+/// baixa, e isso é uma borda — outra entrega, e outra passagem por aqui.
+///
+/// O teto de voltas existe para um dispositivo que interrompa sem parar não
+/// prender o processador no handler. Atingi-lo pode perder uma entrega;
+/// ficar aqui para sempre perderia todas.
+///
+/// Nenhum teste protege as voltas, e isso foi medido: com uma volta só, a
+/// suíte inteira passa, também no x86 com vídeo virtio, onde a linha é
+/// dividida. A janela é a de um dispositivo interromper entre duas leituras
+/// do mesmo handler, e nenhum caso consegue pô-lo lá.
 pub fn atender_interrupcao(linha: u32) {
+    for _ in 0..MAX_VOLTAS_NO_HANDLER {
+        if !uma_volta(linha) {
+            return;
+        }
+    }
+}
+
+/// Quantas voltas [`atender_interrupcao`] dá, no máximo, numa entrega.
+const MAX_VOLTAS_NO_HANDLER: usize = 16;
+
+/// Lê o registrador de estado de todos os donos de `linha`. Verdadeiro se
+/// algum deles tinha interrompido.
+fn uma_volta(linha: u32) -> bool {
+    let mut alguem = false;
     for registro in &REGISTROS {
         if registro.linha_publicada() != Some(linha) {
             continue;
@@ -312,8 +386,10 @@ pub fn atender_interrupcao(linha: u32) {
         // eu", e é a resposta esperada do outro dispositivo da linha.
         if estado != 0 {
             registro.avisos.fetch_add(1, Ordering::Relaxed);
+            alguem = true;
         }
     }
+    alguem
 }
 
 /// Quantas interrupções os dispositivos virtio já receberam, ao todo.

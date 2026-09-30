@@ -295,11 +295,13 @@ impl Disco {
         // varredura do barramento.
         crate::pci::habilitar_mestre(d);
 
+        // O dono se registra antes do `DRIVER_OK` — ver
+        // [`super::ligar_interrupcao`] sobre por que a ordem importa.
+        super::ligar_interrupcao(d, &transporte, super::NOME_DISCO);
+
         // E só agora o dispositivo pode começar a trabalhar. Antes desta
         // escrita a fila não existia para ele.
         transporte.liberar();
-
-        super::ligar_interrupcao(d, &transporte, super::NOME_DISCO);
 
         Ok(Disco {
             transporte,

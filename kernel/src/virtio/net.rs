@@ -252,10 +252,11 @@ impl Placa {
         // chegasse na janela entre as duas coisas.
         crate::pci::habilitar_mestre(d);
         placa.pendurar_buffers();
+        // O dono se registra antes do `DRIVER_OK` — ver
+        // [`super::ligar_interrupcao`] sobre por que a ordem importa.
+        super::ligar_interrupcao(d, &placa.transporte, super::NOME_REDE);
         placa.transporte.liberar();
         placa.recepcao.notificar(&placa.transporte);
-
-        super::ligar_interrupcao(d, &placa.transporte, super::NOME_REDE);
 
         Ok(placa)
     }

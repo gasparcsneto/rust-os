@@ -125,10 +125,11 @@ impl Teclado {
         // partir dele o dispositivo pode entregar, e precisa ter onde pôr.
         crate::pci::habilitar_mestre(d);
         teclado.pendurar();
+        // O dono se registra antes do `DRIVER_OK` — ver
+        // [`super::ligar_interrupcao`] sobre por que a ordem importa.
+        super::ligar_interrupcao(d, &teclado.transporte, super::NOME_TECLADO);
         teclado.transporte.liberar();
         teclado.eventos.notificar(&teclado.transporte);
-
-        super::ligar_interrupcao(d, &teclado.transporte, super::NOME_TECLADO);
 
         Ok(teclado)
     }

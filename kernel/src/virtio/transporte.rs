@@ -208,9 +208,9 @@ pub struct Transporte {
     do_dispositivo: Option<Mmio>,
     /// O registrador que diz **por que** uma interrupção chegou.
     ///
-    /// Passou a importar quando as interrupções passaram a ser entregues: uma
-    /// linha de PCI é de nível, e é a leitura deste registrador que faz o
-    /// dispositivo soltá-la. Ver [`crate::virtio::atender_interrupcao`].
+    /// Passou a importar quando as interrupções passaram a ser entregues: o
+    /// dispositivo segura a linha até ser atendido, e é a leitura deste
+    /// registrador que faz ele soltá-la. Ver [`crate::virtio::atender_interrupcao`].
     isr: Option<Mmio>,
 }
 

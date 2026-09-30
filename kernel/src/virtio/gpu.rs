@@ -373,8 +373,10 @@ impl Gpu {
         let base = crate::arch::acesso_fisico(trabalho);
 
         crate::pci::habilitar_mestre(d);
-        transporte.liberar();
+        // O dono se registra antes do `DRIVER_OK` — ver
+        // [`super::ligar_interrupcao`] sobre por que a ordem importa.
         super::ligar_interrupcao(d, &transporte, super::NOME_VIDEO);
+        transporte.liberar();
 
         let mut gpu = Gpu {
             transporte,
