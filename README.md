@@ -319,6 +319,7 @@ programas/           os programas de usuário, compilados à parte do kernel
     ├── saida.rs     uma linha formatada por chamada de `escrever`
     ├── desenho.rs   retângulos e texto, com a fonte do console
     ├── superficie.rs uma camada do compositor com os pixels no processo
+    ├── janela.rs    a moldura, o arrasto e a caixa de fechar, do servidor e do Terminal
     └── bin/
         ├── ola.rs        o primeiro programa em Rust: monte, formatação e pilha
         ├── memoria.rs    confere `mapear` e o monte do lado de quem pede

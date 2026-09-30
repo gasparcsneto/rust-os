@@ -15,8 +15,9 @@
 //!   `mapear` e as reparte, e é o que faz `Vec` e `String` funcionarem;
 //! - **a saída** — [`escreverln!`], uma linha formatada por chamada;
 //! - **as superfícies** — [`superficie`], uma camada do compositor com os
-//!   pixels na memória do processo, e o endereço escolhido por ele; e
-//!   [`desenho`], retângulos e texto com a fonte do console.
+//!   pixels na memória do processo, e o endereço escolhido por ele;
+//!   [`desenho`], retângulos e texto com a fonte do console; e [`janela`],
+//!   a moldura que o servidor de janelas e o Terminal compartilham.
 //!
 //! # Como um programa se escreve
 //!
@@ -46,6 +47,7 @@
 extern crate alloc;
 
 pub mod desenho;
+pub mod janela;
 pub mod monte;
 pub mod saida;
 pub mod sistema;

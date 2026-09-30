@@ -37,9 +37,10 @@
 //!
 //! # Uma janela
 //!
-//! Uma [`Superficie`] com moldura: a barra de título, com o nome e a caixa
-//! de fechar, e o conteúdo embaixo. A barra da janela com o foco tem a cor
-//! de acento do kernel; as outras, apagada. A ordem de empilhamento é a do
+//! Uma [`Janela`] do runtime — a moldura, a barra de título com o nome e a
+//! caixa de fechar, e o arrasto, os mesmos do Terminal —, e o conteúdo que
+//! o servidor desenha dentro dela. A barra da janela com o foco tem a cor de
+//! acento do kernel; as outras, apagada. A ordem de empilhamento é a do
 //! vetor — a última é a de cima —, e o compositor é avisado a cada mudança.
 //!
 //! Cada coisa que o servidor faz vira uma linha no log, `janelas: ...`: é
@@ -54,40 +55,25 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use core::fmt::Write;
-use programas::desenho::{Estilo, Tela, largura_do_texto};
+use programas::desenho::{Estilo, largura_do_texto};
 use programas::escreverln;
+use programas::janela::{Aperto, Janela};
 use programas::sistema;
-use programas::superficie::Superficie;
 
 use protocolo::usuario::descricao;
 use protocolo::usuario::evento::acao as evento_acao;
 use protocolo::usuario::evento::{BOTAO_ESQUERDO, CANAL_DAS_JANELAS, Evento, janela, tipo};
 use protocolo::usuario::superficie::operacao;
 
-/// A altura da barra de título.
-const ALTURA_DO_TITULO: u32 = 22;
-/// O lado da caixa de fechar, na ponta direita da barra de título.
-const LADO_DO_FECHAR: u32 = 16;
-/// A borda em volta da janela.
-const BORDA: u32 = 1;
-
-// A paleta do kernel — a da barra superior e a do acento —, para a janela
-// parecer da mesma máquina. Com o byte alto cheio: as janelas se misturam
-// por alfa, e um pixel de alfa zero não apareceria.
-const ACENTO: u32 = 0xFF3A_8FD0;
-const TITULO_APAGADO: u32 = 0xFF2A_3C58;
-const TEXTO_DO_TITULO: u32 = 0xFFF4_F6FA;
+// O conteúdo, na paleta do kernel — a moldura é a do runtime, ver
+// `programas::janela`.
 const CONTEUDO: u32 = 0xFFF4_F6FA;
 const TEXTO: u32 = 0xFF1A_2436;
-const BORDA_COR: u32 = 0xFF10_1828;
 
-struct Janela {
+/// Uma janela aberta pelo servidor: a moldura, e o que vai dentro.
+struct Aberta {
     id: u32,
-    superficie: Superficie,
-    titulo: &'static str,
-    /// Onde o canto superior esquerdo está na tela.
-    x: i32,
-    y: i32,
+    janela: Janela,
     /// Um título grande no alto do conteúdo, se ela tiver um.
     cabecalho: Option<&'static str>,
     /// O que ela mostra: o que se digitou, ou o texto fixo dela.
@@ -97,104 +83,30 @@ struct Janela {
     qual: i64,
 }
 
-impl Janela {
-    fn largura(&self) -> u32 {
-        self.superficie.largura()
-    }
-
-    fn altura(&self) -> u32 {
-        self.superficie.altura()
-    }
-
-    fn contem(&self, x: i64, y: i64) -> bool {
-        let (x0, y0) = (self.x as i64, self.y as i64);
-        x >= x0 && y >= y0 && x < x0 + self.largura() as i64 && y < y0 + self.altura() as i64
-    }
-
-    /// `(x, y)` da tela, em coordenadas da janela.
-    fn local(&self, x: i64, y: i64) -> (i64, i64) {
-        (x - self.x as i64, y - self.y as i64)
-    }
-
-    fn na_barra_de_titulo(&self, x: i64, y: i64) -> bool {
-        let (_, ly) = self.local(x, y);
-        ly < ALTURA_DO_TITULO as i64
-    }
-
-    /// A caixa de fechar: `(x, y, lado)` em coordenadas da janela.
-    fn caixa_de_fechar(&self) -> (u32, u32, u32) {
-        let lado = LADO_DO_FECHAR;
-        (
-            self.largura() - BORDA - 3 - lado,
-            (ALTURA_DO_TITULO - lado) / 2,
-            lado,
-        )
-    }
-
-    fn no_fechar(&self, x: i64, y: i64) -> bool {
-        let (lx, ly) = self.local(x, y);
-        let (cx, cy, lado) = self.caixa_de_fechar();
-        lx >= cx as i64 && ly >= cy as i64 && lx < (cx + lado) as i64 && ly < (cy + lado) as i64
-    }
-
+impl Aberta {
     /// Desenha a janela inteira e acusa o dano.
     fn desenhar(&mut self, com_foco: bool) {
-        let (largura, altura) = (self.largura(), self.altura());
-        let (cx, cy, lado) = self.caixa_de_fechar();
+        let (cx, cy, cl, ca) = self.janela.conteudo();
         let altura_da_linha = Estilo::TEXTO.altura();
-        let cor_do_titulo = if com_foco { ACENTO } else { TITULO_APAGADO };
-        let titulo = self.titulo;
         let texto = self.texto.clone();
-
-        let mut tela = Tela {
-            pixels: self.superficie.pixels(),
-            largura,
-        };
-        tela.retangulo(0, 0, largura, altura, BORDA_COR);
-        tela.retangulo(
-            BORDA,
-            BORDA,
-            largura - 2 * BORDA,
-            ALTURA_DO_TITULO - BORDA,
-            cor_do_titulo,
-        );
-        // O título em negrito: é o que se lê primeiro numa janela.
-        tela.texto(
-            (8, (ALTURA_DO_TITULO - Estilo::NEGRITO.altura()) / 2),
-            titulo,
-            Estilo::NEGRITO,
-            (TEXTO_DO_TITULO, cor_do_titulo),
-        );
-        // A caixa de fechar: um quadrado mais claro com um x no meio.
-        tela.retangulo(cx, cy, lado, lado, TITULO_APAGADO);
-        tela.texto(
-            (cx + (lado - Estilo::TEXTO.largura()) / 2, cy),
-            "x",
-            Estilo::TEXTO,
-            (TEXTO_DO_TITULO, TITULO_APAGADO),
-        );
-        tela.retangulo(
-            BORDA,
-            ALTURA_DO_TITULO,
-            largura - 2 * BORDA,
-            altura - ALTURA_DO_TITULO - BORDA,
-            CONTEUDO,
-        );
+        let cabecalho = self.cabecalho;
+        let mut tela = self.janela.desenhar_moldura(com_foco);
+        tela.retangulo(cx, cy, cl, ca, CONTEUDO);
         // O cabeçalho, se houver, no estilo de título; e o texto, linha a
         // linha, cortado no que couber.
-        let mut y = ALTURA_DO_TITULO + 8;
-        if let Some(cabecalho) = self.cabecalho {
+        let mut y = cy + 8;
+        if let Some(cabecalho) = cabecalho {
             tela.texto((10, y), cabecalho, Estilo::TITULO, (TEXTO, CONTEUDO));
             y += Estilo::TITULO.altura() + 6;
         }
         for linha in texto.split('\n') {
-            if y + altura_da_linha > altura - BORDA {
+            if y + altura_da_linha > cy + ca {
                 break;
             }
             tela.texto((10, y), linha, Estilo::TEXTO, (TEXTO, CONTEUDO));
             y += altura_da_linha;
         }
-        let _ = self.superficie.danificar_tudo();
+        let _ = self.janela.superficie().danificar_tudo();
         self.descrever();
     }
 
@@ -208,27 +120,18 @@ impl Janela {
     /// Diz ao kernel o que a janela é: o título, a caixa de fechar e o
     /// texto — o mesmo que acabou de ser desenhado, gerado do mesmo estado.
     fn descrever(&self) {
-        let (cx, cy, lado) = self.caixa_de_fechar();
         let mut d = String::new();
-        let _ = write!(d, "janela\t");
-        let _ = descricao::escapar(self.titulo, &mut d);
-        let _ = write!(
-            d,
-            "\nbotao\t{}\t{}\t{}\t{}\t{}\tFechar",
-            self.id_do_elemento(ELEMENTO_FECHAR),
-            cx,
-            cy,
-            lado,
-            lado
-        );
+        self.janela
+            .descrever_moldura(self.id_do_elemento(ELEMENTO_FECHAR), &mut d);
+        let (cx, cy, cl, ca) = self.janela.conteudo();
         let _ = write!(
             d,
             "\ntexto\t{}\t{}\t{}\t{}\t{}\tconteudo\t",
             self.id_do_elemento(ELEMENTO_CONTEUDO),
-            BORDA,
-            ALTURA_DO_TITULO,
-            self.largura() - 2 * BORDA,
-            self.altura() - ALTURA_DO_TITULO - BORDA
+            cx,
+            cy,
+            cl,
+            ca
         );
         let _ = descricao::escapar(&self.texto, &mut d);
         // O cabeçalho, depois do conteúdo: a posição de cada elemento na
@@ -239,13 +142,13 @@ impl Janela {
                 d,
                 "\ntexto\t{}\t10\t{}\t{}\t{}\tcabeçalho\t",
                 self.id_do_elemento(ELEMENTO_CABECALHO),
-                ALTURA_DO_TITULO + 8,
+                cy + 8,
                 largura_do_texto(cabecalho, Estilo::TITULO),
                 Estilo::TITULO.altura()
             );
             let _ = descricao::escapar(cabecalho, &mut d);
         }
-        let r = sistema::descrever(self.superficie.descritor(), &d);
+        let r = sistema::descrever(self.janela.descritor(), &d);
         if r != 0 {
             escreverln!(
                 "janelas: a descricao da janela {} foi recusada: {}",
@@ -278,11 +181,11 @@ const ELEMENTO_CABECALHO: u32 = 3;
 
 struct Servidor {
     /// De baixo para cima: a última é a de cima.
-    janelas: Vec<Janela>,
+    janelas: Vec<Aberta>,
     /// A janela com o foco, pelo identificador.
     foco: Option<u32>,
-    /// A janela sendo arrastada, e onde o ponteiro a pegou.
-    arrasto: Option<(u32, i64, i64)>,
+    /// A janela sendo arrastada — onde o ponteiro a pegou, ela sabe.
+    arrasto: Option<u32>,
     botoes: i64,
     proximo_id: u32,
 }
@@ -316,7 +219,7 @@ impl Servidor {
         }
         self.redesenhar(id);
         if pedir && let Some(i) = self.indice(id) {
-            let fd = self.janelas[i].superficie.descritor();
+            let fd = self.janelas[i].janela.descritor();
             sistema::controlar(fd, operacao::FOCO, 1);
         }
         escreverln!("janelas: foco {}", id);
@@ -340,35 +243,29 @@ impl Servidor {
                 return;
             }
         };
-        let superficie = match Superficie::nova(largura, altura) {
-            Ok(s) => s,
-            Err(e) => {
-                escreverln!("janelas: sem superficie para {}: {}", titulo, e);
-                return;
-            }
-        };
         // No centro da tela, e cada uma um pouco abaixo e à direita da
         // anterior: duas janelas iguais uma sobre a outra pareceriam uma.
         let degrau = 24 * self.janelas.len() as i64;
         let x = (largura_da_tela - largura as i64) / 2 + degrau;
         let y = (altura_da_tela - altura as i64) / 2 + degrau;
+        let janela = match Janela::nova(titulo, largura, altura, x as i32, y as i32) {
+            Ok(j) => j,
+            Err(e) => {
+                escreverln!("janelas: sem superficie para {}: {}", titulo, e);
+                return;
+            }
+        };
         let id = self.proximo_id;
         self.proximo_id += 1;
-        let mut j = Janela {
+        let mut j = Aberta {
             id,
-            superficie,
-            titulo,
-            x: x as i32,
-            y: y as i32,
+            janela,
             cabecalho,
             texto,
             qual,
         };
         j.desenhar(false);
-        if j.superficie.transparente(true).is_err()
-            || j.superficie.mover(j.x, j.y).is_err()
-            || j.superficie.mostrar().is_err()
-        {
+        if j.janela.mostrar().is_err() {
             escreverln!("janelas: a janela {} nao pode ser mostrada", id);
             return;
         }
@@ -397,8 +294,8 @@ impl Servidor {
         if i + 1 == self.janelas.len() {
             return;
         }
-        let j = self.janelas.remove(i);
-        let _ = j.superficie.trazer_para_frente();
+        let mut j = self.janelas.remove(i);
+        let _ = j.janela.superficie().trazer_para_frente();
         self.janelas.push(j);
         escreverln!("janelas: frente {}", id);
     }
@@ -408,18 +305,14 @@ impl Servidor {
         let soltou = botoes & BOTAO_ESQUERDO == 0 && self.botoes & BOTAO_ESQUERDO != 0;
         self.botoes = botoes;
 
-        if let Some((id, dx, dy)) = self.arrasto {
+        if let Some(id) = self.arrasto {
             let Some(i) = self.indice(id) else {
                 self.arrasto = None;
                 return;
             };
-            let j = &mut self.janelas[i];
-            j.x = (x - dx) as i32;
-            j.y = (y - dy) as i32;
-            let _ = j.superficie.mover(j.x, j.y);
-            if soltou {
+            if let Some((jx, jy)) = self.janelas[i].janela.arrastar(x, y, soltou) {
                 self.arrasto = None;
-                escreverln!("janelas: arrastada {} para {} {}", id, j.x, j.y);
+                escreverln!("janelas: arrastada {} para {} {}", id, jx, jy);
             }
             return;
         }
@@ -432,7 +325,7 @@ impl Servidor {
             .janelas
             .iter()
             .rev()
-            .find(|j| j.contem(x, y))
+            .find(|j| j.janela.contem(x, y))
             .map(|j| j.id)
         else {
             return;
@@ -442,12 +335,10 @@ impl Servidor {
         let Some(i) = self.indice(id) else {
             return;
         };
-        let j = &self.janelas[i];
-        if j.no_fechar(x, y) {
-            self.fechar(id);
-        } else if j.na_barra_de_titulo(x, y) {
-            let (lx, ly) = j.local(x, y);
-            self.arrasto = Some((id, lx, ly));
+        match self.janelas[i].janela.apertar(x, y) {
+            Aperto::Fechar => self.fechar(id),
+            Aperto::Arrasto => self.arrasto = Some(id),
+            Aperto::Conteudo(..) => {}
         }
     }
 
@@ -518,7 +409,7 @@ impl Servidor {
     fn foco_perdido(&mut self) {
         if let Some(anterior) = self.foco.take() {
             if let Some(i) = self.indice(anterior) {
-                let fd = self.janelas[i].superficie.descritor();
+                let fd = self.janelas[i].janela.descritor();
                 sistema::controlar(fd, operacao::FOCO, 0);
             }
             self.redesenhar(anterior);
