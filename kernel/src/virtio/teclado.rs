@@ -46,11 +46,12 @@ const TAMANHO_DO_EVENTO: u32 = 8;
 
 /// Quantos eventos podem estar pendurados no dispositivo ao mesmo tempo.
 ///
-/// O teto é o número de descritores da fila. Uma tecla produz dois eventos —
-/// o de tecla e o de sincronismo —, então oito buffers são quatro teclas
-/// entre duas colheitas. Com a colheita a cada tique do relógio, isso são
-/// quatro teclas em dez milissegundos: quatrocentas por segundo, umas vinte
-/// vezes mais rápido do que alguém digita.
+/// O teto é o número de descritores da fila. Uma tecla produz quatro
+/// eventos — apertar e soltar, cada um fechado por um sincronismo —, então
+/// trinta e dois buffers são oito teclas entre duas colheitas: com a
+/// colheita a cada tique do relógio, uma colheita pode atrasar oitenta
+/// milissegundos sem perder nada, digitando a vinte por tecla. Com oito
+/// buffers — duas teclas —, perdia: ver [`super::fila::DESCRITORES`].
 const BUFFERS: usize = super::fila::DESCRITORES as usize;
 
 /// Os tipos de evento que interessam, na numeração do Linux.

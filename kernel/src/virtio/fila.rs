@@ -41,16 +41,23 @@ use crate::arch::TAMANHO_PAGINA;
 
 /// Quantos descritores uma fila deste kernel tem.
 ///
-/// # Por que oito
+/// # Por que trinta e dois
 ///
-/// Porque o driver de bloco submete um pedido por vez e espera por ele. Com
-/// uma requisição em voo, três descritores bastariam; oito dá margem para um
-/// segundo cliente sem custar nada, e mantém tudo dentro de um frame.
+/// Eram oito, pelo driver de bloco: ele submete um pedido por vez e espera
+/// por ele, e três descritores bastariam. Quem mudou a conta foi o teclado
+/// virtio, que pendura um buffer por descritor e é colhido no pulso do
+/// relógio: uma tecla são quatro eventos — apertar, sincronismo, soltar,
+/// sincronismo —, e oito buffers eram duas teclas entre duas colheitas. Uma
+/// colheita atrasada em quarenta milissegundos perdia tecla. Medido com o
+/// Terminal no ARM emulado, digitando a vinte milissegundos por tecla: uma
+/// execução em quatro perdia uma, e toda perda coincidia com uma colheita
+/// que achou os oito buffers cheios. Trinta e dois são oito teclas, e tudo
+/// continua cabendo num frame.
 ///
 /// Precisa ser potência de dois: os índices dos anéis crescem para sempre e
 /// são reduzidos ao anel por resto, e o formato assume que esse resto é uma
 /// máscara de bits.
-pub const DESCRITORES: u16 = 8;
+pub const DESCRITORES: u16 = 32;
 
 /// Um descritor: onde está um buffer e o que o dispositivo pode fazer com ele.
 ///
@@ -136,11 +143,11 @@ const fn alinhar(valor: u64, a: u64) -> u64 {
 /// O bitmap de descritores livres quando a fila está vazia.
 ///
 /// Um bit por descritor, e é por isso que [`DESCRITORES`] não pode passar de
-/// oito sem trocar o tipo. A asserção abaixo transforma esse acoplamento num
-/// erro de compilação em vez de num bug.
-const TODOS_LIVRES: u8 = u8::MAX;
+/// trinta e dois sem trocar o tipo. A asserção abaixo transforma esse
+/// acoplamento num erro de compilação em vez de num bug.
+const TODOS_LIVRES: u32 = u32::MAX;
 
-const _: () = assert!(DESCRITORES as u32 <= u8::BITS);
+const _: () = assert!(DESCRITORES as u32 == u32::BITS);
 
 // Que tudo caiba num frame é premissa do arquivo inteiro, não sorte. Se um dia
 // `DESCRITORES` crescer além do que cabe, a compilação para aqui em vez de o
@@ -192,7 +199,7 @@ pub struct Fila {
     /// Um bitmap, e não uma lista encadeada pelo campo `proximo` dos
     /// descritores livres, que é a técnica clássica: a lista mora na memória
     /// que o dispositivo também enxerga, e um `u8` aqui do lado do kernel não.
-    livres: u8,
+    livres: u32,
     /// Quantos descritores da cadeia já foram publicados.
     ///
     /// Cresce para sempre e transborda de propósito: o formato define a
