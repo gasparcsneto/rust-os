@@ -327,7 +327,8 @@ programas/           os programas de usuário, compilados à parte do kernel
         ├── janelas.rs    o servidor de janelas: moldura, foco, arrasto, ordem e fechar
         ├── superficie.rs desenha numa superfície, bifurca, fecha e sai sem fechar
         ├── herdeira.rs   depois de um `exec`, fecha a superfície herdada sem perder a sua
-        └── pseudo.rs     digita no interpretador pelo pseudo-terminal, e lê a resposta
+        ├── pseudo.rs     digita no interpretador pelo pseudo-terminal, e lê a resposta
+        └── entrada.rs    uma janela fora do servidor, com o canal de entrada dela
 
 xtask/src/
 └── main.rs          a ferramenta de build, teste e diagnóstico do projeto

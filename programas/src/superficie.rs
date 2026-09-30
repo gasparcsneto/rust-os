@@ -180,6 +180,18 @@ impl Superficie {
         let mistura = if sim { operacao::ALFA } else { operacao::OPACA };
         self.controlar(operacao::MISTURA, mistura)
     }
+
+    /// Manda a entrada desta superfície — o ponteiro sobre ela, as teclas
+    /// com o foco nela — para o canal de eventos `canal`, um descritor que
+    /// este processo escuta. Sem isso, ela vai para o canal das janelas.
+    pub fn entrada(&self, canal: u64) -> Result<(), i64> {
+        self.controlar(operacao::ENTRADA, canal)
+    }
+
+    /// Pede o foco do teclado para esta superfície.
+    pub fn focar(&self) -> Result<(), i64> {
+        self.controlar(operacao::FOCO, 1)
+    }
 }
 
 impl Drop for Superficie {

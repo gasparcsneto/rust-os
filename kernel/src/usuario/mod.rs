@@ -725,7 +725,23 @@ fn controlar(descritor: u64, op: u64, argumento: u64) -> i64 {
         RECUSADAS.fetch_add(1, Ordering::Relaxed);
         return erro::DESCRITOR_INVALIDO;
     };
-    match crate::superficies::controlar(chave, crate::fios::id_atual(), op, argumento) {
+    let dono = crate::fios::id_atual();
+    let feito = if op == protocolo::usuario::superficie::operacao::ENTRADA {
+        // O argumento é um descritor, e tem de ser de um canal que este
+        // processo escuta: apontar a entrada de uma janela para o canal de
+        // outro processo seria mandar a ele o que a pessoa digita aqui.
+        match crate::fios::com_descritores(|t| t.alvo(argumento)) {
+            Some(Some(descritores::Alvo::Eventos { chave: canal }))
+                if crate::eventos::e_ouvinte(canal, dono) =>
+            {
+                crate::superficies::definir_entrada(chave, dono, canal)
+            }
+            _ => Err(crate::superficies::Recusa::Argumento),
+        }
+    } else {
+        crate::superficies::controlar(chave, dono, op, argumento)
+    };
+    match feito {
         Ok(()) => 0,
         Err(crate::superficies::Recusa::Argumento) => {
             RECUSADAS.fetch_add(1, Ordering::Relaxed);

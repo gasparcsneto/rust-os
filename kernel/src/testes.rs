@@ -4884,6 +4884,172 @@ fn terminal_o_interpretador_do_outro_lado() -> Resultado {
     Ok(())
 }
 
+/// Duas janelas de dois processos: cada uma recebe a sua entrada, e o foco
+/// passa de um ao outro no aperto do botão.
+///
+/// # O que este caso protege
+///
+/// O que o Terminal vai precisar para existir ao lado do servidor de
+/// janelas, e que falha em silêncio — a tecla vai para o processo errado, e
+/// quem devia recebê-la simplesmente não a vê:
+///
+/// - **o ponteiro vai ao dono da superfície** debaixo dele, pelo canal que
+///   ele escolheu, e não ao servidor;
+/// - **o foco é dado no aperto**, pelo kernel, e as teclas seguem o foco;
+/// - **quem perde o foco é avisado**, no canal dele — e só ele;
+/// - **a ação da árvore** num elemento vai ao dono daquela janela.
+fn janelas_cada_superficie_recebe_a_sua_entrada() -> Resultado {
+    let resultado = entradas_separadas();
+    // Em qualquer desfecho, os dois saem e o foco volta ao kernel — ver
+    // `janelas_o_servidor_abre_foca_arrasta_e_fecha`.
+    let encerrar = protocolo::usuario::evento::Evento {
+        tipo: protocolo::usuario::evento::tipo::ENCERRAR,
+        ..Default::default()
+    };
+    let _ = crate::eventos::publicar("teste-entrada", encerrar);
+    if resultado.is_err() {
+        let _ = crate::eventos::publicar(protocolo::usuario::evento::CANAL_DAS_JANELAS, encerrar);
+    }
+    let _ = esperar_ate(|| !crate::superficies::foco_ativo(), 200);
+    crate::superficies::devolver_foco();
+    crate::teclado::esvaziar();
+    resultado
+}
+
+fn entradas_separadas() -> Resultado {
+    use crate::ui::{Acao, Origem};
+    use crate::usuario::DIRETORIO_DOS_COMPILADOS;
+    use alloc::format;
+    use protocolo::usuario::evento::{CANAL_DAS_JANELAS, Evento, janela, tipo};
+
+    let Some(tela) = crate::tela::tela_fisica() else {
+        return sem_framebuffer();
+    };
+    let (w, h) = (tela.largura, tela.altura);
+    // As do programa `entrada` — ver `programas/src/bin/entrada.rs`.
+    let (ex, ey) = (20i64, 60i64);
+
+    let desde = crate::log::total_emitidos();
+    let vezes = |procurada: &str| {
+        let mut n = 0;
+        crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+            n +=
+                (r.seq >= desde && r.subsistema == "usuario" && r.mensagem() == procurada) as usize;
+        });
+        n
+    };
+    let esperar_vezes = |linha: &str, n: usize| -> Resultado {
+        esperar_ate(|| vezes(linha) >= n, 600).map_err(|_| {
+            crate::log_error!("teste", "nao veio `{}` ({} vez(es))", linha, n);
+            "um processo nao recebeu o que devia"
+        })
+    };
+    let mover = |x: i64, y: i64| {
+        crate::ponteiro::absoluto(x as u32, y as u32, w - 1, h - 1);
+        crate::ponteiro::sincronizar();
+    };
+    let apertar = |x: i64, y: i64| {
+        mover(x, y);
+        crate::ponteiro::botao(true);
+        crate::ponteiro::botao(false);
+    };
+    let digitar_a = || {
+        crate::teclado::evento(0x1E, true);
+        crate::teclado::evento(0x1E, false);
+    };
+    let (fora_x, fora_y) = (1, h as i64 - 2);
+    mover(fora_x, fora_y);
+    crate::teclado::esvaziar();
+
+    // O servidor, com uma janela no centro e o foco nela.
+    crate::usuario::lancar(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/janelas")))?;
+    esperar_vezes("janelas: pronto", 1)?;
+    crate::eventos::publicar(
+        CANAL_DAS_JANELAS,
+        Evento {
+            tipo: tipo::ABRIR,
+            a: janela::TESTE,
+            b: w as i64,
+            c: h as i64,
+        },
+    )
+    .map_err(|_| "o servidor de janelas nao escuta o canal")?;
+    esperar_vezes("janelas: foco 1", 1)?;
+    let (jx, jy) = ((w as i64 - 320) / 2, (h as i64 - 160) / 2);
+
+    // E a outra janela, de outro processo, com o canal de entrada dela.
+    crate::usuario::lancar(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/entrada")))?;
+    esperar_vezes("entrada: pronta", 1)?;
+    let camada = crate::grafico::camada_em(ex as u32 + 1, ey as u32 + 1)
+        .filter(|c| c.nome == crate::superficies::NOME_DA_CAMADA)
+        .ok_or("a janela do programa entrada nao esta na tela")?;
+
+    // Um aperto nela: o ponteiro vai ao canal dela, e o foco também — e o
+    // servidor, que o tinha, é avisado.
+    let (px, py) = (ex + 60, ey + 60);
+    apertar(px, py);
+    esperar_vezes(&format!("entrada: ponteiro {px} {py} 1"), 1)?;
+    esperar_vezes(&format!("entrada: ponteiro {px} {py} 0"), 1)?;
+    esperar_vezes("janelas: foco devolvido", 1)
+        .map_err(|_| "o servidor nao soube que perdeu o foco para outro processo")?;
+    if crate::superficies::destino_do_foco()
+        .and_then(|d| d.entrada)
+        .is_none()
+    {
+        return Err("o aperto na janela de outro processo nao lhe deu o foco");
+    }
+
+    // A tecla segue o foco: ao programa, e não ao servidor nem ao console.
+    digitar_a();
+    esperar_vezes("entrada: tecla 97", 1)?;
+    if vezes("janelas: tecla 97 em 1") != 0 || crate::teclado::ler().is_some() {
+        return Err("a tecla com o foco no programa chegou a outro lugar");
+    }
+
+    // Um aperto na janela do servidor: o foco volta a ele, e o programa é
+    // avisado.
+    apertar(jx + 100, jy + 100);
+    esperar_vezes("janelas: foco 1", 2)?;
+    esperar_vezes("entrada: foco perdido", 1)
+        .map_err(|_| "o programa nao soube que perdeu o foco")?;
+    if crate::superficies::destino_do_foco().map(|d| d.entrada) != Some(None) {
+        return Err("o aperto na janela do servidor nao lhe devolveu o foco");
+    }
+    digitar_a();
+    esperar_vezes("janelas: tecla 97 em 1", 1)?;
+
+    // Fora de tudo: o servidor perde o foco; o programa, que não o tinha,
+    // não é avisado de novo.
+    apertar(fora_x, fora_y);
+    esperar_vezes("janelas: foco devolvido", 2)?;
+    let _ = esperar_ate(|| false, 20);
+    if vezes("entrada: foco perdido") != 1 {
+        return Err("quem nao tinha o foco foi avisado de que o perdeu");
+    }
+    if vezes(&format!("entrada: ponteiro {} {} 1", fora_x, fora_y)) != 0 {
+        return Err("um aperto fora da janela chegou ao programa");
+    }
+    crate::teclado::esvaziar();
+
+    // A ação da árvore no botão que o programa descreveu vai ao canal dele.
+    let botao = crate::ui::id_do_elemento(camada.id, 0).ok_or("sem identificador")?;
+    crate::ui::agir(botao, Acao::Pressionar, None, Origem::Agente)?;
+    esperar_vezes("entrada: acao 5 1", 1)?;
+
+    // O fim: os dois saem.
+    let encerrar = Evento {
+        tipo: tipo::ENCERRAR,
+        ..Default::default()
+    };
+    crate::eventos::publicar("teste-entrada", encerrar)
+        .map_err(|_| "o programa entrada nao escuta o canal")?;
+    crate::eventos::publicar(CANAL_DAS_JANELAS, encerrar)
+        .map_err(|_| "o servidor de janelas nao escuta o canal")?;
+    esperar_vezes("processo encerrou com codigo 70", 1)?;
+    esperar_vezes("janelas: encerrado", 1)?;
+    Ok(())
+}
+
 fn sobre_o_duke() -> Resultado {
     use crate::ui::{Acao, ID_DO_BOTAO_SOBRE, Origem};
     use crate::usuario::DIRETORIO_DOS_COMPILADOS;
@@ -12038,6 +12204,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "terminal: o interpretador do outro lado",
         f: terminal_o_interpretador_do_outro_lado,
+    },
+    Caso {
+        nome: "janelas: cada superficie recebe a sua entrada",
+        f: janelas_cada_superficie_recebe_a_sua_entrada,
     },
     Caso {
         nome: "usb: o relatorio hid vira teclas",

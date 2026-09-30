@@ -27,21 +27,25 @@
 //! # Sobre uma janela
 //!
 //! Quando o que está debaixo do ponteiro é a superfície de um processo — uma
-//! janela do servidor de janelas —, o movimento e o botão não são do kernel:
-//! vão como eventos para o canal das janelas, e o servidor decide o que
-//! fazem. Um aperto sobre uma janela **captura** o ponteiro até o botão
-//! soltar: arrastando depressa, o ponteiro sai da janela antes de ela
-//! acompanhar, e sem a captura o servidor perderia o resto do arrasto.
+//! janela do servidor de janelas, ou a do Terminal —, o movimento e o botão
+//! não são do kernel: vão como eventos para o canal de entrada daquela
+//! superfície, e o processo dono decide o que fazem — ver
+//! [`crate::superficies::Destino`]. Um aperto sobre uma janela lhe dá o foco
+//! do teclado e **captura** o ponteiro até o botão soltar: arrastando
+//! depressa, o ponteiro sai da janela antes de ela acompanhar, e sem a
+//! captura o dono perderia o resto do arrasto.
 //!
-//! Um aperto fora de toda janela devolve o foco do teclado ao kernel, e o
-//! servidor é avisado — sempre, mesmo com o foco já no kernel: um pedido de
-//! foco do servidor pode estar a caminho.
+//! Um aperto fora de toda janela devolve o foco do teclado ao kernel, e quem
+//! o tinha é avisado. O servidor de janelas é avisado **sempre**, mesmo com
+//! o foco já no kernel: um pedido de foco dele — o de uma janela que acabou
+//! de abrir — pode estar a caminho.
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use spin::Mutex;
 
 use crate::grafico::compositor::{Camada, Mistura};
+use crate::superficies::Destino;
 use protocolo::usuario::evento::{BOTAO_ESQUERDO, CANAL_DAS_JANELAS, Evento, tipo};
 
 /// Onde o ponteiro está, em pixels da tela.
@@ -52,8 +56,9 @@ static Y: AtomicU32 = AtomicU32::new(0);
 static ESQUERDO: AtomicBool = AtomicBool::new(false);
 
 /// O botão foi apertado sobre uma janela e ainda não soltou: tudo o que o
-/// ponteiro fizer vai para o servidor.
-static CAPTURADO: AtomicBool = AtomicBool::new(false);
+/// ponteiro fizer vai para o dono dela. Tomada por `sem_interrupcoes`, e
+/// solta no caminho fatal.
+static CAPTURA: Mutex<Option<Destino>> = Mutex::new(None);
 
 /// Quantos eventos de ponteiro foram para o servidor de janelas.
 static PARA_AS_JANELAS: AtomicU64 = AtomicU64::new(0);
@@ -155,63 +160,74 @@ pub fn botao(pressionado: bool) {
     if pressionado && !antes {
         ULTIMO_CLIQUE.store((x as u64) << 32 | y as u64, Ordering::Relaxed);
         CLIQUES.fetch_add(1, Ordering::Relaxed);
-        if sobre_uma_janela(x, y) && para_as_janelas(x, y) {
-            CAPTURADO.store(true, Ordering::Relaxed);
+        if let Some(destino) = janela_em(x, y)
+            && para_a_janela(destino, x, y)
+        {
+            // O foco é de quem recebeu o aperto, dado aqui e não pedido
+            // pelo dono: um pedido chegaria depois, e um clique fora feito
+            // antes dele seria desfeito pelo pedido atrasado.
+            crate::superficies::focar(destino);
+            crate::arch::sem_interrupcoes(|| *CAPTURA.lock() = Some(destino));
             return;
         }
         // Fora de toda janela: o clique é do kernel, e o teclado também.
+        // Quem tinha o foco é avisado no canal dele.
         //
-        // O aviso ao servidor vai **sempre**, e não só quando o kernel via o
-        // foco numa janela. Um clique numa janela seguido de um clique fora,
-        // antes de o servidor rodar, é o caso: no segundo clique o foco ainda
-        // é do kernel — o pedido do servidor está a caminho —, e sem o aviso
-        // o pedido chegaria depois e ficaria com o foco, sem ninguém saber
-        // que a pessoa clicou fora. O servidor recebe o aviso depois do
-        // próprio pedido, e solta o foco. Sem janela com o foco, o aviso não
+        // E o servidor de janelas é avisado **sempre**, e não só quando o
+        // foco era dele. Uma janela que ele acabou de abrir tem um pedido de
+        // foco a caminho; se a pessoa clica fora antes de ele rodar, o pedido
+        // chegaria depois e ficaria com o foco, sem ninguém saber que a
+        // pessoa clicou fora. O servidor recebe o aviso depois do próprio
+        // pedido, e solta o foco. Sem janela dele com o foco, o aviso não
         // muda nada do lado de lá.
+        let tinha = crate::superficies::destino_do_foco();
         crate::superficies::devolver_foco();
-        publicar(Evento {
-            tipo: tipo::FOCO_PERDIDO,
-            ..Evento::default()
-        });
+        if tinha.is_none_or(|d| d.entrada.is_some()) {
+            let _ = crate::eventos::publicar(
+                CANAL_DAS_JANELAS,
+                Evento {
+                    tipo: tipo::FOCO_PERDIDO,
+                    ..Evento::default()
+                },
+            );
+        }
         crate::teclado::clique();
-    } else if !pressionado && antes && CAPTURADO.swap(false, Ordering::Relaxed) {
-        para_as_janelas(x, y);
+    } else if !pressionado
+        && antes
+        && let Some(destino) = crate::arch::sem_interrupcoes(|| CAPTURA.lock().take())
+    {
+        para_a_janela(destino, x, y);
     }
 }
 
-/// O que está debaixo de `(x, y)` é a superfície de um processo?
-fn sobre_uma_janela(x: u32, y: u32) -> bool {
-    crate::grafico::camada_em(x, y).is_some_and(|c| c.nome == crate::superficies::NOME_DA_CAMADA)
+/// A superfície de processo debaixo de `(x, y)`, se for uma.
+fn janela_em(x: u32, y: u32) -> Option<Destino> {
+    let camada =
+        crate::grafico::camada_em(x, y).filter(|c| c.nome == crate::superficies::NOME_DA_CAMADA)?;
+    crate::superficies::destino_da_camada(camada.id)
 }
 
-/// Manda ao servidor de janelas onde o ponteiro está e os botões. Falso se
-/// não havia quem escutasse — e então o ponteiro é do kernel.
-fn para_as_janelas(x: u32, y: u32) -> bool {
+/// Manda ao dono da janela onde o ponteiro está e os botões. Falso se não
+/// havia quem escutasse — e então o ponteiro é do kernel.
+fn para_a_janela(destino: Destino, x: u32, y: u32) -> bool {
     let botoes = if ESQUERDO.load(Ordering::Relaxed) {
         BOTAO_ESQUERDO
     } else {
         0
     };
-    let foi = publicar(Evento {
-        tipo: tipo::PONTEIRO,
-        a: x as i64,
-        b: y as i64,
-        c: botoes,
-    });
+    let foi = crate::superficies::entregar(
+        destino,
+        Evento {
+            tipo: tipo::PONTEIRO,
+            a: x as i64,
+            b: y as i64,
+            c: botoes,
+        },
+    );
     if foi {
         PARA_AS_JANELAS.fetch_add(1, Ordering::Relaxed);
     }
     foi
-}
-
-/// Publica no canal das janelas. Uma fila cheia conta como entregue: o
-/// servidor existe, e o canal contou o que recusou.
-fn publicar(evento: Evento) -> bool {
-    !matches!(
-        crate::eventos::publicar(CANAL_DAS_JANELAS, evento),
-        Err(crate::eventos::NaoPublicado::SemOuvinte)
-    )
 }
 
 /// Quantos eventos de ponteiro foram para o servidor de janelas.
@@ -240,9 +256,10 @@ pub fn sincronizar() {
         }
     });
     crate::ui::mudou();
-    // Andando sobre uma janela, ou arrastando uma: é do servidor.
-    if CAPTURADO.load(Ordering::Relaxed) || sobre_uma_janela(x, y) {
-        para_as_janelas(x, y);
+    // Arrastando uma janela, ou andando sobre uma: é do dono dela.
+    let capturado = crate::arch::sem_interrupcoes(|| *CAPTURA.lock());
+    if let Some(destino) = capturado.or_else(|| janela_em(x, y)) {
+        para_a_janela(destino, x, y);
     }
 }
 
@@ -310,5 +327,8 @@ pub fn tratar_clique(x: u32, y: u32) -> Option<u32> {
 /// Só pode ser chamada quando o kernel já está em falha irrecuperável e não
 /// há outro núcleo em execução. Ver [`crate::traps::fatal`].
 pub unsafe fn destravar() {
-    unsafe { CURSOR.force_unlock() };
+    unsafe {
+        CURSOR.force_unlock();
+        CAPTURA.force_unlock();
+    }
 }

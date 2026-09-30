@@ -11,14 +11,16 @@
 //!
 //! # O que chega a ele
 //!
-//! Tudo pelo canal [`CANAL_DAS_JANELAS`], como eventos de 32 bytes:
+//! Tudo pelo canal [`CANAL_DAS_JANELAS`], como eventos de 32 bytes — o
+//! canal de entrada de toda superfície que não escolheu outro:
 //!
 //! - **o ponteiro**, quando está sobre uma janela, ou arrastando uma — o
-//!   kernel olha que camada está debaixo dele e só publica quando é de
-//!   processo;
+//!   kernel olha que camada está debaixo dele e só publica quando é deste
+//!   servidor. Um aperto já chega com o foco dado pelo kernel;
 //! - **as teclas**, quando uma janela tem o foco;
 //! - **os pedidos de abrir** uma janela, da barra do kernel ou da suíte;
-//! - **o foco perdido**, quando a pessoa clica fora de toda janela;
+//! - **o foco perdido**, quando a pessoa clica fora de toda janela, ou na de
+//!   outro processo;
 //! - **as ações da árvore semântica** — o `press` do agente num elemento
 //!   que o servidor descreveu;
 //! - **o pedido de encerrar**, que fecha todas e sai.
@@ -297,9 +299,14 @@ impl Servidor {
         }
     }
 
-    /// Dá o foco a `id` — a barra dela acende, a da anterior apaga — e pede
-    /// ao kernel as teclas.
-    fn focar(&mut self, id: u32) {
+    /// Dá o foco a `id`: a barra dela acende, a da anterior apaga.
+    ///
+    /// `pedir` é se o kernel precisa ser pedido. Num aperto do ponteiro, não
+    /// precisa: o kernel dá o foco à janela em que a pessoa apertou, antes
+    /// de o evento chegar aqui, e um pedido feito agora chegaria atrasado —
+    /// se a pessoa já tivesse clicado fora, ele retomaria o foco. Numa
+    /// janela que acabou de abrir, precisa: ninguém apertou nada nela.
+    fn focar(&mut self, id: u32, pedir: bool) {
         let anterior = self.foco.replace(id);
         if anterior == Some(id) {
             return;
@@ -308,7 +315,7 @@ impl Servidor {
             self.redesenhar(anterior);
         }
         self.redesenhar(id);
-        if let Some(i) = self.indice(id) {
+        if pedir && let Some(i) = self.indice(id) {
             let fd = self.janelas[i].superficie.descritor();
             sistema::controlar(fd, operacao::FOCO, 1);
         }
@@ -321,7 +328,7 @@ impl Servidor {
             && let Some(id) = self.janelas.iter().find(|j| j.qual == qual).map(|j| j.id)
         {
             self.trazer_para_frente(id);
-            self.focar(id);
+            self.focar(id, true);
             escreverln!("janelas: ja aberta {}", id);
             return;
         }
@@ -367,7 +374,7 @@ impl Servidor {
         }
         self.janelas.push(j);
         escreverln!("janelas: aberta {} {} em {} {}", id, titulo, x, y);
-        self.focar(id);
+        self.focar(id, true);
     }
 
     fn fechar(&mut self, id: u32) {
@@ -431,7 +438,7 @@ impl Servidor {
             return;
         };
         self.trazer_para_frente(id);
-        self.focar(id);
+        self.focar(id, false);
         let Some(i) = self.indice(id) else {
             return;
         };
@@ -491,19 +498,20 @@ impl Servidor {
         }
     }
 
-    /// O kernel devolveu o foco a si mesmo: a pessoa clicou fora de toda
-    /// janela.
+    /// O foco saiu das janelas deste servidor: a pessoa clicou fora de
+    /// todas, ou na de outro processo.
     ///
     /// # Por que soltar o foco aqui, se o kernel já o tomou
     ///
     /// Porque um pedido de foco deste servidor pode ter chegado ao kernel
-    /// **depois** que ele o tomou de volta. Um clique numa janela faz o
-    /// servidor pedir o foco; se a pessoa clica fora antes de o pedido
+    /// **depois** que ele o tomou de volta. Uma janela que acabou de abrir
+    /// faz o servidor pedir o foco; se a pessoa clica fora antes de o pedido
     /// chegar, o kernel devolve o foco, e o pedido atrasado o retoma. Sem
     /// soltar aqui, o servidor acharia que não tem o foco e o kernel acharia
     /// que tem — e as teclas viriam para cá, para serem jogadas fora.
-    /// Medido: uma vez em poucas execuções no x86, o caso da suíte via o foco
-    /// ativo depois de o servidor dizer que o devolveu.
+    /// Medido, quando o clique também pedia o foco: uma vez em poucas
+    /// execuções no x86, o caso da suíte via o foco ativo depois de o
+    /// servidor dizer que o devolveu.
     ///
     /// Soltar é pela superfície: o kernel só solta se o foco for dela, e um
     /// que já voltou ao kernel fica onde está.

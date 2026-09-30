@@ -38,10 +38,30 @@
 //! processo tira também o mapeamento dele: uma janela aberta e fechada mil
 //! vezes não pode custar mil superfícies de memória até o processo sair.
 //!
+//! # Para onde vai a entrada
+//!
+//! Cada superfície tem um canal de entrada: o ponteiro sobre ela, as teclas
+//! com o foco nela e o aviso de foco perdido vão para lá — ver
+//! [`Destino`]. O processo escolhe o canal com
+//! [`ENTRADA`](protocolo::usuario::superficie::operacao::ENTRADA); sem
+//! escolher, é o canal das janelas, onde o servidor escuta. É o que deixa
+//! dois processos terem janelas ao mesmo tempo — o servidor e o Terminal —,
+//! cada um recebendo o que acontece nas suas.
+//!
+//! # O foco
+//!
+//! De uma superfície de cada vez, e é o kernel quem o dá quando a pessoa
+//! aperta o botão sobre ela — ver [`focar`]. O processo que o perde é
+//! avisado no canal dele. Dar o foco no aperto, e não esperar o processo
+//! pedi-lo, é o que desfaz a corrida em que o pedido atrasado de um processo
+//! retomava o foco depois de a pessoa já ter clicado em outro lugar.
+//!
 //! # A ordem das travas
 //!
 //! Superfícies, depois o compositor — é o que uma operação faz, com a vaga
-//! na mão, para mexer na camada. O compositor nunca pergunta nada aqui.
+//! na mão, para mexer na camada. O compositor nunca pergunta nada aqui. Os
+//! canais de eventos vêm **depois** de soltar a vaga: publicar acorda um
+//! fio, e isso não se faz com a tabela parada.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -186,6 +206,8 @@ struct Vaga {
     /// O fio que criou a superfície.
     dono: u64,
     geracao: u64,
+    /// O canal de entrada, se o processo escolheu um — ver [`Destino`].
+    entrada: Option<crate::eventos::Chave>,
     /// O que o processo disse que a janela é, se disse.
     descricao: Option<Descricao>,
     camada: Camada,
@@ -276,6 +298,7 @@ pub fn criar(dono: u64, largura: u32, altura: u32, endereco: u64) -> Result<Chav
     let vaga = Vaga {
         dono,
         geracao,
+        entrada: None,
         descricao: None,
         camada,
         largura,
@@ -310,7 +333,31 @@ fn confere(v: &Vaga, chave: Chave, dono: u64) -> bool {
 
 /// Faz a operação `op` com `argumento` na superfície da `chave`, se ela for
 /// de `dono`.
+///
+/// [`ENTRADA`](operacao::ENTRADA) não passa por aqui — o argumento dela é um
+/// descritor, que só quem atende a chamada sabe resolver: ver
+/// [`definir_entrada`].
 pub fn controlar(chave: Chave, dono: u64, op: u64, argumento: u64) -> Result<(), Recusa> {
+    if op == operacao::FOCO {
+        let destino = com_vagas(|vagas| {
+            let v = vagas.get(chave.vaga).and_then(Option::as_ref);
+            match v {
+                Some(v) if confere(v, chave, dono) => Ok(v.destino()),
+                _ => Err(Recusa::NaoEhSua),
+            }
+        })?;
+        match argumento {
+            1 => {
+                focar(destino);
+            }
+            0 => {
+                let _ =
+                    FOCO.compare_exchange(destino.geracao, 0, Ordering::Relaxed, Ordering::Relaxed);
+            }
+            _ => return Err(Recusa::Argumento),
+        }
+        return Ok(());
+    }
     com_vagas(|vagas| {
         let Some(v) = vagas.get(chave.vaga).and_then(Option::as_ref) else {
             return Err(Recusa::NaoEhSua);
@@ -343,21 +390,9 @@ pub fn controlar(chave: Chave, dono: u64, op: u64, argumento: u64) -> Result<(),
                 let opacidade = u8::try_from(argumento).map_err(|_| Recusa::Argumento)?;
                 camada.definir_opacidade(opacidade)
             }
-            operacao::FOCO => {
-                match argumento {
-                    1 => FOCO.store(v.geracao, Ordering::Relaxed),
-                    0 => {
-                        let _ = FOCO.compare_exchange(
-                            v.geracao,
-                            0,
-                            Ordering::Relaxed,
-                            Ordering::Relaxed,
-                        );
-                    }
-                    _ => return Err(Recusa::Argumento),
-                }
-                return Ok(());
-            }
+            // O foco pedido não passa por aqui: ele precisa avisar quem o
+            // perde, e isso é fora da tranca — ver `controlar`.
+            operacao::FOCO => return Err(Recusa::Argumento),
             operacao::MISTURA => camada.definir_mistura(match argumento {
                 operacao::OPACA => Mistura::Opaca,
                 operacao::ALFA => Mistura::Alfa,
@@ -367,6 +402,149 @@ pub fn controlar(chave: Chave, dono: u64, op: u64, argumento: u64) -> Result<(),
         };
         Ok(())
     })
+}
+
+/// Faz de `canal` o canal de entrada da superfície da `chave`, se ela for de
+/// `dono`. Quem chama já conferiu que `dono` escuta o canal.
+pub fn definir_entrada(
+    chave: Chave,
+    dono: u64,
+    canal: crate::eventos::Chave,
+) -> Result<(), Recusa> {
+    com_vagas(|vagas| {
+        let Some(v) = vagas.get_mut(chave.vaga).and_then(Option::as_mut) else {
+            return Err(Recusa::NaoEhSua);
+        };
+        if !confere(v, chave, dono) {
+            return Err(Recusa::NaoEhSua);
+        }
+        v.entrada = Some(canal);
+        Ok(())
+    })
+}
+
+/// Para quem vai a entrada de uma superfície: qual ela é, e o canal.
+///
+/// Uma cópia, tirada sob a tranca e usada fora dela: a entrega publica num
+/// canal, e publicar não se faz com a tabela parada. Se a superfície fechar
+/// entre um e outro, o evento vai para um canal que ainda existe — e que o
+/// processo, que acabou de fechar a janela, ignora —, ou para nenhum.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Destino {
+    /// A geração da superfície — ver [`Chave`].
+    pub geracao: u64,
+    /// O canal de entrada; `None` é o canal das janelas.
+    pub entrada: Option<crate::eventos::Chave>,
+}
+
+impl Destino {
+    /// O mesmo canal que `outro`: o mesmo processo, para quem a troca de
+    /// foco entre duas janelas suas não é perda.
+    pub fn mesmo_canal(&self, outro: &Destino) -> bool {
+        self.entrada == outro.entrada
+    }
+}
+
+impl Vaga {
+    fn destino(&self) -> Destino {
+        Destino {
+            geracao: self.geracao,
+            entrada: self.entrada,
+        }
+    }
+}
+
+/// Publica `evento` no canal de entrada de `destino`.
+pub fn publicar_para(
+    destino: Destino,
+    evento: protocolo::usuario::evento::Evento,
+) -> Result<(), crate::eventos::NaoPublicado> {
+    match destino.entrada {
+        Some(canal) => crate::eventos::publicar_em(canal, evento),
+        None => crate::eventos::publicar(protocolo::usuario::evento::CANAL_DAS_JANELAS, evento),
+    }
+}
+
+/// O mesmo, dizendo só se havia quem escutasse. Uma fila cheia conta como
+/// entregue: o processo existe, e o canal contou o que recusou.
+pub fn entregar(destino: Destino, evento: protocolo::usuario::evento::Evento) -> bool {
+    !matches!(
+        publicar_para(destino, evento),
+        Err(crate::eventos::NaoPublicado::SemOuvinte)
+    )
+}
+
+/// Para quem vai a entrada da superfície cuja camada é `camada`, se ela for
+/// de processo.
+pub fn destino_da_camada(camada: u32) -> Option<Destino> {
+    com_vagas(|vagas| {
+        vagas
+            .iter()
+            .flatten()
+            .find(|v| v.camada.id() == camada)
+            .map(Vaga::destino)
+    })
+}
+
+/// Para quem vão as teclas: a superfície com o foco, se alguma tem.
+pub fn destino_do_foco() -> Option<Destino> {
+    let foco = FOCO.load(Ordering::Relaxed);
+    if foco == 0 {
+        return None;
+    }
+    com_vagas(|vagas| {
+        vagas
+            .iter()
+            .flatten()
+            .find(|v| v.geracao == foco)
+            .map(Vaga::destino)
+    })
+}
+
+/// Dá o foco a `destino`, e avisa quem o perdeu — se era de outro canal.
+/// Devolve se o foco mudou de mãos.
+///
+/// Chamada pelo ponteiro, quando a pessoa aperta o botão sobre a superfície,
+/// e pelo processo que o pede com [`FOCO`](operacao::FOCO).
+pub fn focar(destino: Destino) -> bool {
+    // Sem interrupções entre ler quem tinha e trocar: um aperto do ponteiro
+    // no meio de um pedido de foco avisaria o dono errado.
+    crate::arch::sem_interrupcoes(|| {
+        let anterior = destino_do_foco();
+        FOCO.store(destino.geracao, Ordering::Relaxed);
+        avisar_perda(anterior, Some(destino))
+    })
+}
+
+/// Devolve o foco ao kernel, e avisa quem o tinha. Devolve se alguma
+/// superfície o tinha.
+pub fn devolver_foco() -> bool {
+    crate::arch::sem_interrupcoes(|| {
+        let anterior = destino_do_foco();
+        FOCO.store(0, Ordering::Relaxed);
+        avisar_perda(anterior, None)
+    })
+}
+
+/// Avisa `anterior` de que perdeu o foco para `novo`, se ele existia e não é
+/// do mesmo canal. Devolve se houve troca de mãos.
+fn avisar_perda(anterior: Option<Destino>, novo: Option<Destino>) -> bool {
+    let Some(anterior) = anterior else {
+        return false;
+    };
+    if novo.is_some_and(|n| n.geracao == anterior.geracao) {
+        return false;
+    }
+    if novo.is_none_or(|n| !n.mesmo_canal(&anterior)) {
+        let _ = publicar_para(
+            anterior,
+            protocolo::usuario::evento::Evento {
+                tipo: protocolo::usuario::evento::tipo::FOCO_PERDIDO,
+                ..Default::default()
+            },
+        );
+    }
+    true
 }
 
 /// Troca a descrição da superfície da `chave`, se ela for de `dono`.
@@ -469,16 +647,11 @@ fn soltar_o_foco(geracao: u64) {
     let _ = FOCO.compare_exchange(geracao, 0, Ordering::Relaxed, Ordering::Relaxed);
 }
 
-/// Alguma superfície tem o foco do teclado? As teclas vão para o canal das
-/// janelas enquanto tiver.
+/// Alguma superfície tem o foco do teclado? Para a suíte: o kernel pergunta
+/// quem tem, com [`destino_do_foco`].
+#[cfg(feature = "modo-teste")]
 pub fn foco_ativo() -> bool {
     FOCO.load(Ordering::Relaxed) != 0
-}
-
-/// Devolve o foco ao kernel. Verdadeiro se alguma superfície o tinha — e
-/// então o dono precisa saber.
-pub fn devolver_foco() -> bool {
-    FOCO.swap(0, Ordering::Relaxed) != 0
 }
 
 /// `(vivas, criadas, recolhidas de donos mortos)`.

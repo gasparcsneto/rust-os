@@ -244,12 +244,23 @@ pub mod superficie {
         /// byte alto, [`ALFA`] o usa como opacidade do pixel.
         pub const MISTURA: u64 = 5;
 
-        /// O teclado: `1` pede que as teclas venham para o dono desta
-        /// superfície, como eventos de [`TECLA`](crate::usuario::evento::tipo::TECLA)
-        /// no canal das janelas; `0` as devolve ao console. O foco também
-        /// volta ao console quando a superfície fecha, ou quando a pessoa
-        /// clica fora de toda superfície de processo.
+        /// O teclado: `1` pede que as teclas venham para esta superfície,
+        /// como eventos de [`TECLA`](crate::usuario::evento::tipo::TECLA) no
+        /// canal de [`ENTRADA`] dela; `0` as devolve ao console. O kernel
+        /// também dá o foco sozinho, à superfície em que a pessoa aperta o
+        /// botão; e o devolve ao console quando a superfície fecha, ou quando
+        /// a pessoa clica fora de toda superfície de processo.
         pub const FOCO: u64 = 6;
+        /// Para onde vai a entrada desta superfície: o argumento é o
+        /// descritor de um canal de eventos que o processo escuta, e o
+        /// ponteiro sobre ela, as teclas com o foco nela e o
+        /// [`FOCO_PERDIDO`](crate::usuario::evento::tipo::FOCO_PERDIDO)
+        /// passam a ir para ele. Sem isso, vão para o canal das janelas —
+        /// ver [`CANAL_DAS_JANELAS`](crate::usuario::evento::CANAL_DAS_JANELAS).
+        ///
+        /// É o que deixa dois processos terem janelas: cada um recebe o que
+        /// acontece nas suas.
+        pub const ENTRADA: u64 = 7;
 
         /// Argumentos de [`MISTURA`].
         pub const OPACA: u64 = 0;
@@ -298,8 +309,13 @@ pub mod evento {
         /// suíte. `a` é qual, de [`janela`](super::janela); `b` e `c` são a
         /// largura e a altura da tela, para quem vai posicioná-la.
         pub const ABRIR: u32 = 4;
-        /// O foco voltou ao kernel: a pessoa clicou fora de toda superfície
-        /// de processo, e as teclas voltam ao console.
+        /// O foco saiu das superfícies deste canal: a pessoa apertou o
+        /// botão sobre a de outro processo, ou fora de toda superfície de
+        /// processo, e as teclas vão para outro lugar.
+        ///
+        /// Não chega quando o foco passa de uma superfície a outra do
+        /// mesmo canal: quem tem várias janelas sabe, pelo aperto que
+        /// recebe, qual delas ficou com ele.
         pub const FOCO_PERDIDO: u32 = 5;
         /// Um pedido para o servidor fechar tudo e sair. Da suíte, que
         /// não deixa um servidor vivo para os casos seguintes.

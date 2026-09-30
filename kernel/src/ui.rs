@@ -438,7 +438,7 @@ fn executar(
             if id == ID_DO_BOTAO_SOBRE {
                 crate::barra::pressionar_sobre()?;
             } else if let Some(do_processo) = com_elemento(id, |e| e.id) {
-                pressionar_no_processo(do_processo)?;
+                pressionar_no_processo(id, do_processo)?;
             } else {
                 crate::barra::pressionar();
             }
@@ -450,13 +450,16 @@ fn executar(
 /// Leva ao processo dono da janela o `press` num elemento que ele descreveu,
 /// com o identificador que ele deu.
 ///
-/// Pelo canal das janelas, como o clique da pessoa: quem decide o que o
-/// botão faz é o servidor, e ele o faz pelo mesmo caminho do clique — o
-/// agente e a pessoa acionam a mesma coisa.
-fn pressionar_no_processo(id_do_processo: i64) -> Result<(), &'static str> {
-    use protocolo::usuario::evento::{CANAL_DAS_JANELAS, Evento, acao, tipo};
-    match crate::eventos::publicar(
-        CANAL_DAS_JANELAS,
+/// Pelo canal de entrada da janela, como o clique da pessoa: quem decide o
+/// que o botão faz é o dono dela, e ele o faz pelo mesmo caminho do clique —
+/// o agente e a pessoa acionam a mesma coisa.
+fn pressionar_no_processo(id: u32, id_do_processo: i64) -> Result<(), &'static str> {
+    use protocolo::usuario::evento::{Evento, acao, tipo};
+    let destino = elemento_de(id)
+        .and_then(|(camada, _)| crate::superficies::destino_da_camada(camada))
+        .ok_or("a janela do elemento fechou")?;
+    match crate::superficies::publicar_para(
+        destino,
         Evento {
             tipo: tipo::ACAO,
             a: id_do_processo,
@@ -466,8 +469,8 @@ fn pressionar_no_processo(id_do_processo: i64) -> Result<(), &'static str> {
     ) {
         Ok(()) => Ok(()),
         Err(crate::eventos::NaoPublicado::SemOuvinte) => {
-            Err("o servidor de janelas nao escuta o canal")
+            Err("o dono da janela nao escuta o canal dela")
         }
-        Err(crate::eventos::NaoPublicado::Cheio) => Err("a fila do servidor de janelas esta cheia"),
+        Err(crate::eventos::NaoPublicado::Cheio) => Err("a fila do dono da janela esta cheia"),
     }
 }
