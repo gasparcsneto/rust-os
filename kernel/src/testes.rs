@@ -4393,6 +4393,24 @@ fn janelas_operadas() -> Resultado {
         return Err("nenhum evento de ponteiro foi contado para as janelas");
     }
 
+    // A corrida que sobrou depois de o kernel dar o foco no aperto: uma
+    // janela que abre, e um clique fora antes de o servidor rodar. O pedido
+    // de foco da janela nova chega **depois** do clique; o aviso que o
+    // kernel manda ao servidor — mesmo sem o foco ser dele — chega depois
+    // do pedido, e o servidor solta.
+    let devolvidos = vezes("janelas: foco devolvido");
+    crate::arch::sem_interrupcoes(|| -> Resultado {
+        publicar(tipo::ABRIR, janela::TESTE)?;
+        apertar(fora_x, fora_y);
+        Ok(())
+    })?;
+    esperar_ate(|| vezes("janelas: foco devolvido") > devolvidos, 600)
+        .map_err(|_| "o servidor nao soube do clique fora feito antes de a janela abrir")?;
+    if crate::superficies::foco_ativo() {
+        return Err("o pedido de foco da janela nova ficou com o foco depois do clique fora");
+    }
+    crate::teclado::esvaziar();
+
     // E o fim: o servidor fecha o que sobrou e sai.
     publicar(tipo::ENCERRAR, 0)?;
     esperar_linha("janelas: encerrado")?;

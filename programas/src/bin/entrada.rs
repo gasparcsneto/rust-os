@@ -9,7 +9,8 @@
 //! aciona, e confere que chegou aqui, e não ao servidor.
 //!
 //! As recusas de [`ENTRADA`](protocolo::usuario::superficie::operacao::ENTRADA)
-//! — um descritor que não é de canal — o programa confere do lado dele, e
+//! — um descritor que não é de canal, e o canal herdado por um filho — o
+//! programa confere do lado dele, e
 //! diz qual falhou pelo código de saída. Sai com [`CODIGO`] quando a suíte
 //! pede o fim.
 
@@ -62,6 +63,23 @@ fn principal() -> i64 {
     }
     if janela.entrada(canal).is_err() {
         return 5;
+    }
+    // E o canal tem de ser **deste** processo: o filho de um `fork` herda o
+    // descritor do canal, e não o canal. Apontar para ele a entrada da
+    // janela do filho mandaria ao pai o que se digita no filho.
+    match sistema::bifurcar() {
+        0 => {
+            let codigo = match Superficie::nova(8, 8) {
+                Ok(minha) if minha.entrada(canal) == Err(erro::ARGUMENTO_INVALIDO) => 0,
+                _ => 1,
+            };
+            sistema::sair(codigo)
+        }
+        filho if filho < 0 => return 8,
+        _ => {}
+    }
+    if !matches!(sistema::esperar(0), Ok((_, Some(0)))) {
+        return 9;
     }
 
     janela.pixels().fill(0xFF20_C040);
