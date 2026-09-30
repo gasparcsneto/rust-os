@@ -88,6 +88,13 @@ impl Janela {
         })
     }
 
+    /// A janela não tem pixel transparente: o compositor a copia, em vez de
+    /// misturá-la com o que está embaixo — e copiar é mais barato. Para quem
+    /// redesenha muito, como o Terminal.
+    pub fn opaca(&self) -> Result<(), i64> {
+        self.superficie.transparente(false)
+    }
+
     /// Mostra a janela.
     pub fn mostrar(&self) -> Result<(), i64> {
         self.superficie.mostrar()

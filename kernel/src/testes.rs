@@ -5083,6 +5083,183 @@ fn entradas_separadas() -> Resultado {
     Ok(())
 }
 
+/// O Terminal: lançado pelo botão da barra, digita no interpretador o que
+/// a pessoa digita na máquina, e mostra a resposta.
+///
+/// # O que este caso protege
+///
+/// O caminho inteiro, de ponta a ponta, que nenhum caso anterior percorre:
+///
+/// - **o botão lança pelo servidor**, que bifurca duas vezes e troca de
+///   imagem; e, com um Terminal no ar, **o traz para a frente** em vez de
+///   lançar outro;
+/// - **a tecla da máquina chega ao interpretador pelo Terminal**: vai ao
+///   canal dele, que tem o foco, e ele a escreve no pseudo-terminal;
+/// - **a resposta chega à janela**: o kernel imprime, avisa, o Terminal lê
+///   e desenha — e descreve, que é o que o caso lê;
+/// - **a caixa de fechar** encerra o programa, e o pseudo-terminal fica
+///   livre.
+///
+/// A suíte faz o papel da tarefa do interpretador, como no caso do
+/// pseudo-terminal.
+fn terminal_digita_e_mostra_a_resposta() -> Resultado {
+    let resultado = terminal_operado();
+    let encerrar = protocolo::usuario::evento::Evento {
+        tipo: protocolo::usuario::evento::tipo::ENCERRAR,
+        ..Default::default()
+    };
+    let _ = crate::eventos::publicar(protocolo::usuario::evento::CANAL_DO_TERMINAL, encerrar);
+    let _ = crate::eventos::publicar(protocolo::usuario::evento::CANAL_DAS_JANELAS, encerrar);
+    let _ = esperar_ate(|| !crate::superficies::foco_ativo(), 200);
+    crate::superficies::devolver_foco();
+    crate::teclado::esvaziar();
+    resultado
+}
+
+fn terminal_operado() -> Resultado {
+    use crate::tela::Cor;
+    use crate::ui::{Acao, ID_DO_BOTAO_TERMINAL, Origem};
+    use crate::usuario::DIRETORIO_DOS_COMPILADOS;
+    use alloc::format;
+    use protocolo::usuario::evento::{CANAL_DAS_JANELAS, Evento, tipo};
+    use tipografia::Estilo;
+
+    let Some(tela) = crate::tela::tela_fisica() else {
+        return sem_framebuffer();
+    };
+    let (w, h) = (tela.largura, tela.altura);
+    // As do programa — ver `programas/src/bin/terminal.rs` e
+    // `programas/src/janela.rs`.
+    let (tx, ty) = (24i64, 40i64);
+    let largura = 2 + 2 * 4 + 80 * Estilo::TEXTO.largura() as i64;
+    let acesa = Cor::nova(0x3A, 0x8F, 0xD0);
+
+    let desde = crate::log::total_emitidos();
+    let vezes = |procurada: &str| {
+        let mut n = 0;
+        crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+            n +=
+                (r.seq >= desde && r.subsistema == "usuario" && r.mensagem() == procurada) as usize;
+        });
+        n
+    };
+    // Enquanto espera, a suíte é a tarefa do interpretador.
+    let esperar_vezes = |linha: &str, n: usize| -> Resultado {
+        esperar_ate(
+            || {
+                while let Some(c) = crate::teclado::ler() {
+                    crate::interpretador::tratar_tecla(c);
+                }
+                vezes(linha) >= n
+            },
+            600,
+        )
+        .map_err(|_| {
+            crate::log_error!("teste", "nao veio `{}` ({} vez(es))", linha, n);
+            "o terminal nao fez o que devia"
+        })
+    };
+    let mover = |x: i64, y: i64| {
+        crate::ponteiro::absoluto(x as u32, y as u32, w - 1, h - 1);
+        crate::ponteiro::sincronizar();
+    };
+    let apertar = |x: i64, y: i64| {
+        mover(x, y);
+        crate::ponteiro::botao(true);
+        crate::ponteiro::botao(false);
+    };
+    mover(1, h as i64 - 2);
+    crate::teclado::esvaziar();
+
+    // Sem servidor e sem Terminal, o botão é recusado com o motivo.
+    if crate::ui::agir(ID_DO_BOTAO_TERMINAL, Acao::Pressionar, None, Origem::Agente).is_ok() {
+        return Err("o botao Terminal foi aceito sem servidor nem terminal no ar");
+    }
+
+    // Com o servidor, o botão o faz lançar o Terminal.
+    crate::usuario::lancar(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/janelas")))?;
+    esperar_vezes("janelas: pronto", 1)?;
+    crate::ui::agir(ID_DO_BOTAO_TERMINAL, Acao::Pressionar, None, Origem::Agente)?;
+    esperar_vezes("janelas: terminal lancado", 1)?;
+    esperar_vezes("terminal: pronto", 1)?;
+    let camada = crate::grafico::camada_em(tx as u32 + 1, ty as u32 + 1)
+        .filter(|c| c.nome == crate::superficies::NOME_DA_CAMADA)
+        .ok_or("a janela do terminal nao esta na tela onde devia")?;
+    if crate::superficies::destino_do_foco()
+        .and_then(|d| d.entrada)
+        .is_none()
+    {
+        return Err("o terminal abriu sem o foco");
+    }
+    if pixel_na_tela((tx + 300) as u32, (ty + 4) as u32)? != acesa {
+        return Err("a barra de titulo do terminal com o foco nao esta acesa");
+    }
+
+    // Digitar na máquina: `xyzzy` e a quebra de linha, pelo teclado.
+    for codigo in [0x2D, 0x15, 0x2C, 0x2C, 0x15, 0x1C] {
+        crate::teclado::evento(codigo, true);
+        crate::teclado::evento(codigo, false);
+    }
+    // A resposta, na descrição que o Terminal faz do que desenhou.
+    let resposta = "comando desconhecido: xyzzy";
+    let mostra = || {
+        crate::superficies::com_descricao(camada.id, |d| {
+            d.elementos.iter().any(|e| {
+                e.rotulo == "terminal" && e.valor.as_deref().is_some_and(|v| v.contains(resposta))
+            })
+        })
+        .unwrap_or(false)
+    };
+    esperar_ate(
+        || {
+            while let Some(c) = crate::teclado::ler() {
+                crate::interpretador::tratar_tecla(c);
+            }
+            mostra()
+        },
+        600,
+    )
+    .map_err(|_| "a resposta do interpretador nao apareceu no terminal")?;
+
+    // O botão de novo, com o Terminal no ar: ele vem para a frente, e o
+    // servidor não lança outro. Pela F3, e pelo clique no botão — que tem
+    // de estar desenhado onde a árvore diz.
+    crate::interpretador::tratar_tecla(crate::teclado::F3);
+    esperar_vezes("terminal: frente", 1)?;
+    let m = crate::barra::moldura_do_terminal().ok_or("a barra nao tem o botao Terminal")?;
+    if pixel_na_tela(m.x + 2, m.y + 2)? != crate::barra::FUNDO_DO_BOTAO {
+        return Err("o botao Terminal nao esta desenhado onde a arvore diz");
+    }
+    let (bx, by) = (m.x + m.largura / 2, m.y + m.altura / 2);
+    if crate::ponteiro::tratar_clique(bx, by) != Some(ID_DO_BOTAO_TERMINAL) {
+        return Err("o clique no botao Terminal nao o acionou");
+    }
+    esperar_vezes("terminal: frente", 2)?;
+    if vezes("janelas: terminal lancado") != 1 {
+        return Err("com um terminal no ar, o botao lancou outro");
+    }
+
+    // A caixa de fechar: o programa sai, e o pseudo-terminal fica livre.
+    apertar(tx + largura - 12, ty + 11);
+    esperar_vezes("terminal: fechado", 1)?;
+    esperar_ate(
+        || !crate::pseudoterminal::dono().is_some_and(crate::fios::vivo),
+        200,
+    )
+    .map_err(|_| "o terminal fechado continuou com o pseudo-terminal")?;
+
+    crate::eventos::publicar(
+        CANAL_DAS_JANELAS,
+        Evento {
+            tipo: tipo::ENCERRAR,
+            ..Default::default()
+        },
+    )
+    .map_err(|_| "o servidor de janelas nao escuta o canal")?;
+    esperar_vezes("janelas: encerrado", 1)?;
+    Ok(())
+}
+
 fn sobre_o_duke() -> Resultado {
     use crate::ui::{Acao, ID_DO_BOTAO_SOBRE, Origem};
     use crate::usuario::DIRETORIO_DOS_COMPILADOS;
@@ -12241,6 +12418,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "janelas: cada superficie recebe a sua entrada",
         f: janelas_cada_superficie_recebe_a_sua_entrada,
+    },
+    Caso {
+        nome: "terminal: digita e mostra a resposta",
+        f: terminal_digita_e_mostra_a_resposta,
     },
     Caso {
         nome: "usb: o relatorio hid vira teclas",

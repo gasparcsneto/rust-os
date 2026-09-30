@@ -24,6 +24,13 @@
 //! servidor no ar, o `press` é recusado com o motivo, em vez de não fazer
 //! nada em silêncio. A pessoa o aperta com a F2, ou com o clique.
 //!
+//! # O terceiro botão
+//!
+//! **Terminal**, com a F3. Com um Terminal no ar, o pedido vai a ele, no
+//! canal dele, e ele vem para a frente com o foco; sem nenhum, vai ao
+//! servidor de janelas, que o lança. O kernel não lança programas por um
+//! botão: quem decide o que abre é o servidor.
+//!
 //! # O relógio
 //!
 //! O tempo desde o boot, à direita, redesenhado a cada segundo por uma
@@ -65,6 +72,9 @@ const TEXTO_DO_BOTAO: &str = "Limpar (F1)";
 /// O segundo botão: o rótulo na árvore, e o texto na tela.
 pub const ROTULO_DO_SOBRE: &str = "Sobre";
 const TEXTO_DO_SOBRE: &str = "Sobre (F2)";
+/// O terceiro.
+pub const ROTULO_DO_TERMINAL: &str = "Terminal";
+const TEXTO_DO_TERMINAL: &str = "Terminal (F3)";
 
 const MARGEM: u32 = 8;
 /// Onde o texto começa na vertical: centrado nos 22 pixels acima do acento,
@@ -201,6 +211,31 @@ pub fn pressionar_sobre() -> Result<(), &'static str> {
     }
 }
 
+/// O que o botão "Terminal" faz: trazer o Terminal para a frente, se há um
+/// no ar, ou pedir ao servidor de janelas que lance um. Recusado, com o
+/// motivo, se não há nem um nem outro.
+pub fn pressionar_terminal() -> Result<(), &'static str> {
+    use crate::eventos::NaoPublicado;
+    use protocolo::usuario::evento::{CANAL_DAS_JANELAS, CANAL_DO_TERMINAL, Evento, janela, tipo};
+    let tela = crate::tela::tela_fisica().ok_or("sem tela")?;
+    let pedido = Evento {
+        tipo: tipo::ABRIR,
+        a: janela::TERMINAL,
+        b: tela.largura as i64,
+        c: tela.altura as i64,
+    };
+    match crate::eventos::publicar(CANAL_DO_TERMINAL, pedido) {
+        Ok(()) => return Ok(()),
+        Err(NaoPublicado::Cheio) => return Err("a fila do terminal esta cheia"),
+        Err(NaoPublicado::SemOuvinte) => {}
+    }
+    match crate::eventos::publicar(CANAL_DAS_JANELAS, pedido) {
+        Ok(()) => Ok(()),
+        Err(NaoPublicado::SemOuvinte) => Err("o servidor de janelas nao esta no ar"),
+        Err(NaoPublicado::Cheio) => Err("a fila do servidor de janelas esta cheia"),
+    }
+}
+
 /// Quantas vezes o botão foi pressionado desde o boot. Para a suíte.
 #[cfg(feature = "modo-teste")]
 pub fn pressionado() -> u64 {
@@ -235,6 +270,19 @@ pub fn moldura_do_botao() -> Option<Moldura> {
 pub fn moldura_do_sobre() -> Option<Moldura> {
     ativa().then(|| {
         let (x, largura) = posicao_do_sobre();
+        Moldura {
+            x,
+            y: BOTAO_Y,
+            largura,
+            altura: BOTAO_ALTURA,
+        }
+    })
+}
+
+/// A moldura do botão "Terminal", se a barra existe.
+pub fn moldura_do_terminal() -> Option<Moldura> {
+    ativa().then(|| {
+        let (x, largura) = posicao_do_terminal();
         Moldura {
             x,
             y: BOTAO_Y,
@@ -302,6 +350,15 @@ fn posicao_do_sobre() -> (u32, u32) {
     )
 }
 
+/// O botão "Terminal", à direita do "Sobre".
+fn posicao_do_terminal() -> (u32, u32) {
+    let (x, largura) = posicao_do_sobre();
+    (
+        x + largura + MARGEM,
+        largura_do_texto(TEXTO_DO_TERMINAL, ESTILO) + 2 * BOTAO_FOLGA,
+    )
+}
+
 fn pintar_retangulo(pixels: &mut [u32], largura: u32, m: Moldura, cor: Cor) {
     let valor = cor.para_u32();
     for y in m.y..m.y + m.altura {
@@ -338,6 +395,7 @@ fn desenhar_tudo(pixels: &mut [u32], largura: u32, segundo: u64) {
     for ((x, largura_do_botao), texto) in [
         (posicao_do_botao(), TEXTO_DO_BOTAO),
         (posicao_do_sobre(), TEXTO_DO_SOBRE),
+        (posicao_do_terminal(), TEXTO_DO_TERMINAL),
     ] {
         pintar_retangulo(
             pixels,

@@ -135,10 +135,18 @@ pub fn tratar_tecla(c: char) {
                 Origem::Pessoa,
             );
         }
-        // F2, o botão "Sobre", pelo mesmo caminho.
+        // F2, o botão "Sobre", e F3, o "Terminal", pelo mesmo caminho.
         crate::teclado::F2 => {
             let _ = crate::ui::agir(
                 crate::ui::ID_DO_BOTAO_SOBRE,
+                crate::ui::Acao::Pressionar,
+                None,
+                Origem::Pessoa,
+            );
+        }
+        crate::teclado::F3 => {
+            let _ = crate::ui::agir(
+                crate::ui::ID_DO_BOTAO_TERMINAL,
                 crate::ui::Acao::Pressionar,
                 None,
                 Origem::Pessoa,

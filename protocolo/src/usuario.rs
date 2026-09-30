@@ -344,6 +344,10 @@ pub mod evento {
     /// abrir uma: quem o escuta é o servidor de janelas.
     pub const CANAL_DAS_JANELAS: &str = "janelas";
 
+    /// O canal que o Terminal escuta: a entrada da janela dele, os avisos
+    /// de saída do pseudo-terminal, e o pedido de vir para a frente.
+    pub const CANAL_DO_TERMINAL: &str = "terminal";
+
     /// Que janela um [`tipo::ABRIR`] pede.
     pub mod janela {
         /// Uma janela vazia, que mostra o que se digita nela. A da suíte.
@@ -351,6 +355,12 @@ pub mod evento {
         /// "Sobre o Duke": o que é este sistema. Uma só de cada vez — pedir
         /// de novo traz a aberta para a frente. Do botão da barra.
         pub const SOBRE: i64 = 2;
+        /// O Terminal: o servidor não o desenha, ele o **lança** — é um
+        /// programa à parte, com a janela dele. Do botão da barra, quando
+        /// não há Terminal no ar; com um no ar, o pedido vai a ele, no
+        /// [`CANAL_DO_TERMINAL`](super::CANAL_DO_TERMINAL), e ele vem para
+        /// a frente.
+        pub const TERMINAL: i64 = 3;
     }
 
     /// Um evento: o tipo e três campos.

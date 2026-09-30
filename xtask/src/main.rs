@@ -4359,6 +4359,7 @@ fn conversar(
     sob_despejo(&mut escrita, &mut leitor)?;
     sob_teclado(monitor, teclado, &mut escrita, &mut leitor)?;
     sob_interpretador(monitor, &mut escrita, &mut leitor)?;
+    sob_terminal(&mut escrita, &mut leitor)?;
     sob_arvore(&mut escrita, &mut leitor)?;
     sob_barra(monitor, &mut escrita, &mut leitor)?;
     sob_mouse(qmp, teclado, &mut escrita, &mut leitor)?;
@@ -5650,6 +5651,60 @@ fn sob_interpretador(
     Err(format!(
         "interpretador: o comando digitado nao chegou a ser executado\n  {ultima}"
     ))
+}
+
+/// O comando que a sonda anterior digitou aparece no Terminal, com a
+/// resposta.
+///
+/// # O que esta sonda prova
+///
+/// Que o Terminal lançado no boot é o caminho da pessoa até o interpretador:
+/// com o foco nele, as teclas da máquina vão ao canal dele, ele as escreve
+/// no pseudo-terminal, o interpretador as executa, e o que ele imprime volta
+/// ao Terminal pelo mesmo pseudo-terminal. A sonda anterior já viu o
+/// comando executado, pelo log; esta vê o que a pessoa vê, pela árvore —
+/// a linha digitada depois do prompt, e o `"pong": true` da resposta, que o
+/// interpretador escreve indentada.
+fn sob_terminal(
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+) -> Result<(), String> {
+    println!("[xtask] fumaça: o comando digitado aparece no Terminal");
+    const TITULO: &str = r#""role":"window","label":"Terminal""#;
+    let limite = std::time::Instant::now() + Duration::from_secs(8);
+    let mut id = 6700;
+    loop {
+        id += 1;
+        escrita
+            .write_all(
+                format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"ui.tree","params":{{}}}}"#)
+                    .as_bytes(),
+            )
+            .and_then(|()| escrita.write_all(b"\n"))
+            .and_then(|()| escrita.flush())
+            .map_err(|e| format!("terminal: falha ao pedir a arvore: {e}"))?;
+        let arvore = ler_resposta(leitor).map_err(|e| format!("terminal: {e}"))?;
+        if !e_a_resposta(&arvore, id) {
+            return Err(format!(
+                "terminal: veio a resposta de outro pedido\n  {arvore}"
+            ));
+        }
+        // O texto da janela do Terminal: o que vem depois do título dela.
+        let janela = arvore.find(TITULO).map(|i| &arvore[i..]);
+        let mostra = janela
+            .is_some_and(|j| j.contains("duke> agent.ping") && j.contains(r#"\"pong\": true"#));
+        if mostra {
+            println!("  [terminal] ok  `agent.ping` e a resposta, na janela do Terminal");
+            return Ok(());
+        }
+        if std::time::Instant::now() >= limite {
+            return Err(match janela {
+                None => format!("terminal: a arvore nao tem a janela do Terminal\n  {arvore}"),
+                Some(j) => format!("terminal: o Terminal nao mostra o comando e a resposta\n  {j}"),
+            });
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
 }
 
 /// Um pedaço de requisição abandonado não pode colar no pedido seguinte.

@@ -226,6 +226,10 @@ impl Servidor {
     }
 
     fn abrir(&mut self, qual: i64, largura_da_tela: i64, altura_da_tela: i64) {
+        if qual == janela::TERMINAL {
+            lancar_o_terminal();
+            return;
+        }
         // Uma "Sobre o Duke" só: pedir de novo traz a aberta para a frente.
         if qual == janela::SOBRE
             && let Some(id) = self.janelas.iter().find(|j| j.qual == qual).map(|j| j.id)
@@ -414,6 +418,43 @@ impl Servidor {
             }
             self.redesenhar(anterior);
             escreverln!("janelas: foco devolvido");
+        }
+    }
+}
+
+/// Onde o Terminal está no disco — ver `DIRETORIO_DOS_COMPILADOS`, no
+/// kernel.
+#[cfg(target_arch = "x86_64")]
+const TERMINAL: &str = "/programas/x86_64/terminal";
+#[cfg(target_arch = "aarch64")]
+const TERMINAL: &str = "/programas/aarch64/terminal";
+
+/// Lança o Terminal: ele é outro programa, com a janela dele, e o servidor
+/// não o desenha — só decide abri-lo.
+///
+/// # Por que bifurcar duas vezes
+///
+/// Porque este processo não espera ninguém: ele dorme no canal das janelas.
+/// Um filho que saísse ficaria zumbi até o pai perguntar por ele, e o pai
+/// nunca pergunta. Então o filho bifurca de novo e sai na hora — o servidor
+/// o colhe logo —, e o neto, que troca de imagem para o Terminal, fica sem
+/// pai vivo: quando sair, o coletor do kernel o recolhe sozinho.
+fn lancar_o_terminal() {
+    match sistema::bifurcar() {
+        0 => {
+            if sistema::bifurcar() == 0 {
+                let r = sistema::executar(TERMINAL);
+                escreverln!("janelas: o terminal nao foi executado: {}", r);
+                sistema::sair(1);
+            }
+            sistema::sair(0);
+        }
+        filho if filho < 0 => {
+            escreverln!("janelas: o terminal nao foi lancado: {}", filho);
+        }
+        filho => {
+            let _ = sistema::esperar(filho as u64);
+            escreverln!("janelas: terminal lancado");
         }
     }
 }

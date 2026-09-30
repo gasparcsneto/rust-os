@@ -397,10 +397,13 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
         Err(motivo) => log_warn!("vfs", "a tabela de particoes nao foi lida: {}", motivo),
     }
 
-    // O servidor de janelas, agora que o disco onde ele mora está montado.
-    // Na suíte, é o caso dele que o lança.
+    // O servidor de janelas e o Terminal, agora que o disco onde eles moram
+    // está montado. Na suíte, é o caso de cada um que o lança.
     #[cfg(not(feature = "modo-teste"))]
-    usuario::lancar_o_servidor_de_janelas();
+    {
+        usuario::lancar_o_servidor_de_janelas();
+        usuario::lancar_o_terminal();
+    }
 
     // Com heap e interrupções no ar, a serial do agente pode deixar de ser
     // consultada em laço e passar a avisar quando chega um byte. É o que

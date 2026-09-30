@@ -89,6 +89,27 @@ pub fn lancar_o_servidor_de_janelas() {
     }
 }
 
+/// Lança o Terminal, do disco — o interpretador numa janela, ao lado do
+/// servidor de janelas.
+///
+/// No boot, pelo kernel, como o servidor: é o que a pessoa vê ao ligar a
+/// máquina. Depois, quem o lança de novo é o servidor, pelo botão da barra
+/// — ver `barra::pressionar_terminal`. Nas mesmas condições do servidor, e
+/// pelos mesmos motivos; a suíte o lança no caso dela.
+#[cfg_attr(feature = "modo-teste", allow(dead_code))]
+pub fn lancar_o_terminal() {
+    if crate::grafico::relatorio().is_none() {
+        return;
+    }
+    let caminho = alloc::format!("{DIRETORIO_DOS_COMPILADOS}/terminal");
+    match lancar(Some(&caminho)) {
+        Ok(id) => crate::log_info!("janelas", "terminal no fio {}", id),
+        Err(motivo) => {
+            crate::log_warn!("janelas", "terminal nao lancado de {}: {}", caminho, motivo)
+        }
+    }
+}
+
 // O espaço do usuário inteiro tem de caber numa única entrada da tabela de
 // topo, e nenhuma região do kernel pode dividir essa entrada com ele.
 //
