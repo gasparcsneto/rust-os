@@ -12215,6 +12215,87 @@ fn esperar_ate(mut condicao: impl FnMut() -> bool, teto_em_ticks: u64) -> Result
     Err("a condicao nao se cumpriu dentro do teto de tempo")
 }
 
+/// A tela tem as cores e as medidas da linguagem visual.
+///
+/// # Por que este caso existe
+///
+/// Porque os outros casos conferem que o kernel desenha **com** as cores
+/// dele — o console contra `Cor::FUNDO`, a barra contra `barra::FUNDO` —, e
+/// essas constantes vêm da `aparencia`. Trocar, no uso, o fundo do console
+/// pela ardósia mudava a tela inteira, e as mutações mostraram: a suíte
+/// passava. A conferência daqui é a da especificação, escrita como o que se
+/// vê: o fundo do console **é** a noite da paleta, o botão **é** o aço. Uma
+/// troca de cor é uma decisão, e ela passa por este caso de propósito.
+fn aparencia_a_tela_tem_a_linguagem_visual() -> Resultado {
+    use crate::tela::Cor;
+    use aparencia::paleta;
+
+    let Some(tela) = crate::tela::tela_fisica() else {
+        return sem_framebuffer();
+    };
+    if !crate::barra::ativa() {
+        return Err("sem barra superior, o caso nao tem o que conferir");
+    }
+    let (w, h) = (tela.largura, tela.altura);
+    let e = |ponto: (u32, u32), cor: aparencia::Cor, o_que: &'static str| -> Resultado {
+        let visto = pixel_na_tela(ponto.0, ponto.1)?;
+        if visto != Cor::de(cor) {
+            crate::log_error!("teste", "{} em {:?}: {:?}", o_que, ponto, visto);
+            return Err(o_que);
+        }
+        Ok(())
+    };
+
+    // O console: a margem de baixo, que nenhum texto alcança.
+    e(
+        (w - 3, h - 3),
+        paleta::NOITE,
+        "o fundo do console nao e a noite",
+    )?;
+    // A barra: um ponto vazio dela, a linha de acento embaixo, e um botão.
+    let terminal = crate::barra::moldura_do_terminal().ok_or("sem o botao Terminal")?;
+    let vazio = (terminal.x + terminal.largura + 20, 1);
+    e(vazio, paleta::ARDOSIA, "o fundo da barra nao e a ardosia")?;
+    let acento = (w / 2, crate::tela::ALTURA_DA_BARRA - 1);
+    e(acento, paleta::ACENTO, "a linha sob a barra nao e o acento")?;
+    let botao = crate::barra::moldura_do_botao().ok_or("sem o botao Limpar")?;
+    e(
+        (botao.x + 1, botao.y + 1),
+        paleta::ACO,
+        "o botao nao e o aco",
+    )?;
+    // O texto da barra: no nome, algum pixel de cobertura inteira, que é a
+    // tinta pura — a névoa.
+    let nome = crate::barra::moldura_do_nome().ok_or("sem o nome")?;
+    let mut tinta = false;
+    for y in nome.y..nome.y + nome.altura {
+        for x in nome.x..nome.x + nome.largura {
+            tinta |= pixel_na_tela(x, y)? == Cor::de(paleta::NEVOA);
+        }
+    }
+    if !tinta {
+        return Err("o texto da barra nao e a nevoa");
+    }
+    // E as medidas: o nome começa a oito pixels da borda, e a barra tem
+    // vinte e quatro de altura.
+    if nome.x != 8 || crate::tela::ALTURA_DA_BARRA != 24 {
+        return Err("a barra nao tem as medidas da linguagem visual");
+    }
+
+    // O cursor: o canto de cima da seta é o contorno, o carvão.
+    let (cx, cy) = (w / 2, h / 2);
+    crate::ponteiro::absoluto(cx, cy, w - 1, h - 1);
+    crate::ponteiro::sincronizar();
+    let contorno = e(
+        (cx, cy),
+        paleta::CARVAO,
+        "o contorno do cursor nao e o carvao",
+    );
+    crate::ponteiro::absoluto(1, h - 2, w - 1, h - 1);
+    crate::ponteiro::sincronizar();
+    contorno
+}
+
 static CASOS: &[Caso] = &[
     // Primeiro, e não junto dos outros do compositor: ele confere que a
     // camada do console adotou o que o boot desenhou, e os casos de console
@@ -13092,6 +13173,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "ponteiro: relatorio do mouse USB",
         f: ponteiro_relatorio_usb,
+    },
+    Caso {
+        nome: "aparencia: a tela tem a linguagem visual",
+        f: aparencia_a_tela_tem_a_linguagem_visual,
     },
 ];
 
