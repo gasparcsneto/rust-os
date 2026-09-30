@@ -183,20 +183,39 @@ pub fn publicar(nome: &str, evento: Evento) -> Result<(), NaoPublicado> {
             .ok_or(NaoPublicado::SemOuvinte)?;
         recuperar_se_orfao(vaga);
         let canal = vaga.as_mut().ok_or(NaoPublicado::SemOuvinte)?;
-        if canal.quantos == CAPACIDADE {
-            canal.recusados += 1;
-            return Err(NaoPublicado::Cheio);
-        }
-        let posicao = (canal.inicio + canal.quantos) % CAPACIDADE;
-        canal.fila[posicao] = evento;
-        canal.quantos += 1;
-        canal.publicados += 1;
-        if canal.esperando {
-            canal.esperando = false;
-            crate::fios::acordar(canal.ouvinte);
-        }
-        Ok(())
+        entregar(canal, evento)
     })
+}
+
+/// Publica `evento` no canal da `chave` — pelo canal que um processo deu ao
+/// kernel, e não pelo nome. Mesmas regras de [`publicar`].
+pub fn publicar_em(chave: Chave, evento: Evento) -> Result<(), NaoPublicado> {
+    com_canais(|canais| {
+        let vaga = canais.get_mut(chave.vaga).ok_or(NaoPublicado::SemOuvinte)?;
+        if vaga.as_ref().is_none_or(|c| c.geracao != chave.geracao) {
+            return Err(NaoPublicado::SemOuvinte);
+        }
+        recuperar_se_orfao(vaga);
+        let canal = vaga.as_mut().ok_or(NaoPublicado::SemOuvinte)?;
+        entregar(canal, evento)
+    })
+}
+
+/// Põe o evento na fila do canal e acorda o ouvinte, ou recusa e conta.
+fn entregar(canal: &mut Canal, evento: Evento) -> Result<(), NaoPublicado> {
+    if canal.quantos == CAPACIDADE {
+        canal.recusados += 1;
+        return Err(NaoPublicado::Cheio);
+    }
+    let posicao = (canal.inicio + canal.quantos) % CAPACIDADE;
+    canal.fila[posicao] = evento;
+    canal.quantos += 1;
+    canal.publicados += 1;
+    if canal.esperando {
+        canal.esperando = false;
+        crate::fios::acordar(canal.ouvinte);
+    }
+    Ok(())
 }
 
 /// O que uma leitura do canal deu.
@@ -243,6 +262,16 @@ pub fn colher(chave: Chave, ouvinte: u64, destino: &mut [Evento]) -> Colheita {
         canal.quantos -= n;
         canal.entregues += n as u64;
         Colheita::Entregues(n)
+    })
+}
+
+/// A `chave` é de um canal aberto que o `ouvinte` escuta?
+pub fn e_ouvinte(chave: Chave, ouvinte: u64) -> bool {
+    com_canais(|canais| {
+        canais
+            .get(chave.vaga)
+            .and_then(Option::as_ref)
+            .is_some_and(|c| c.geracao == chave.geracao && c.ouvinte == ouvinte)
     })
 }
 

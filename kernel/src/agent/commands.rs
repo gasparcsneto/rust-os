@@ -1275,6 +1275,23 @@ fn display_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.field_u64("created", criadas)?;
     w.field_u64("reclaimed", recolhidas)?;
     w.end_object()?;
+
+    // O pseudo-terminal: quem o tem aberto, quantos avisos de saída foram
+    // entregues, quantas teclas ele digitou, e quantos bytes da saída saíram
+    // do anel sem ninguém lê-los. O último é o que diz se o Terminal está
+    // perdendo o que o kernel imprime.
+    let (perdidos, avisos, digitados) = crate::pseudoterminal::estatisticas();
+    w.key("terminal")?;
+    w.begin_object()?;
+    w.key("owner")?;
+    match crate::pseudoterminal::dono() {
+        Some(fio) => w.u64_value(fio)?,
+        None => w.null_value()?,
+    }
+    w.field_u64("notices", avisos)?;
+    w.field_u64("typed", digitados)?;
+    w.field_u64("dropped", perdidos)?;
+    w.end_object()?;
     w.field_u64("updates", r.atualizacoes)?;
 
     w.key("last_damage")?;

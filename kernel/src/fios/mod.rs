@@ -354,6 +354,9 @@ extern "C" fn coletor(_argumento: u64) -> ! {
         if quantos > 0 {
             crate::log_debug!("fios", "coletor recolheu {} fio(s)", quantos);
         }
+        // O aviso de saída do pseudo-terminal é dado daqui, sem tranca na
+        // mão — ver `pseudoterminal`, sobre por que o `_print` não o dá.
+        crate::pseudoterminal::avisar_se_preciso();
         crate::arch::esperar_interrupcao();
     }
 }

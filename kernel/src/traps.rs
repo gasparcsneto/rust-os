@@ -291,6 +291,7 @@ pub fn fatal(nome: &'static str, pc: u64, endereco: Option<u64>, codigo: u64) ->
         crate::superficies::destravar();
         crate::ponteiro::destravar();
         crate::eventos::destravar();
+        crate::pseudoterminal::destravar();
     }
 
     // Para o escalonador antes de qualquer outra coisa. Com multitarefa

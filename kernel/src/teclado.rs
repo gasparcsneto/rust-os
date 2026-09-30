@@ -124,6 +124,19 @@ pub fn clique() {
     despertar();
 }
 
+/// Enfileira `c` para o interpretador, como se tivesse sido digitado na
+/// máquina. Chamado pelo pseudo-terminal. Falso com a fila cheia.
+///
+/// Não entra no histórico, que é o que uma pessoa digitou no teclado desta
+/// máquina: quem digita no Terminal já passou por ele, na tecla que o
+/// servidor recebeu.
+pub fn injetar(c: char) -> bool {
+    let coube = TECLADO.enfileirar(c).is_ok();
+    #[cfg(not(feature = "modo-teste"))]
+    despertar();
+    coube
+}
+
 /// Qual tecla de função um código é, de 1 a 12.
 fn funcao(codigo_da_tecla: u8) -> Option<u8> {
     match codigo_da_tecla {

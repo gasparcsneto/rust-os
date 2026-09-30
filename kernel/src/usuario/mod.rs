@@ -272,6 +272,7 @@ pub unsafe fn despachar(
         numero::SUPERFICIE => superficie(a0, a1),
         numero::CONTROLAR => controlar(a0, a1, a2),
         numero::DESCREVER => descrever(a0, a1, a2),
+        numero::TERMINAL => terminal(a0),
         // SAFETY: o quadro é o desta chamada, garantido por quem nos chamou.
         numero::BIFURCAR => unsafe { bifurcar(quadro) },
         numero::EXECUTAR => unsafe { executar(quadro, a0, a1) },
@@ -411,6 +412,9 @@ fn escrever(descritor: u64, ponteiro: u64, tamanho: u64) -> i64 {
     // de existir. Antes desta etapa havia um `static` de três posições, e ele
     // dava a resposta certa por não haver nenhuma outra possível.
     let nivel = match crate::fios::com_descritores(|t| t.alvo(descritor)).flatten() {
+        Some(descritores::Alvo::Terminal { chave }) => {
+            return escrever_no_terminal(chave, ponteiro, tamanho);
+        }
         Some(descritores::Alvo::Registro) => crate::log::Level::Info,
         Some(descritores::Alvo::Diagnostico) => crate::log::Level::Error,
         // Um arquivo não recebe escrita neste kernel, e um número que não
@@ -574,6 +578,9 @@ fn ler(descritor: u64, ponteiro: u64, tamanho: u64) -> i64 {
     };
     if let descritores::Alvo::Eventos { chave } = alvo {
         return ler_eventos(chave, ponteiro, tamanho);
+    }
+    if let descritores::Alvo::Terminal { chave } = alvo {
+        return ler_do_terminal(chave, ponteiro, tamanho);
     }
     let descritores::Alvo::Arquivo { vnode, posicao } = alvo else {
         // Os destinos de log não leem. Devolver zero fingiria um arquivo
@@ -774,6 +781,102 @@ fn descrever(descritor: u64, ponteiro: u64, tamanho: u64) -> i64 {
     }
 }
 
+/// Quantos bytes uma leitura ou escrita do pseudo-terminal move, no máximo.
+///
+/// Passam por um buffer na pilha do kernel, pelo motivo de [`ler_eventos`]. O
+/// resto fica para a próxima chamada — as duas direções aceitam uma resposta
+/// parcial.
+const BYTES_DO_TERMINAL: usize = 512;
+
+/// `terminal(canal)`: abre o pseudo-terminal, com os avisos de saída no
+/// canal de eventos do descritor `canal`.
+///
+/// O canal tem de ser um que este processo escuta: o aviso vai para quem
+/// ouve o canal, e um processo que apontasse o canal de outro faria o kernel
+/// acordar um processo alheio a cada linha impressa.
+fn terminal(canal: u64) -> i64 {
+    let fio = crate::fios::id_atual();
+    let Some(Some(descritores::Alvo::Eventos { chave: canal })) =
+        crate::fios::com_descritores(|t| t.alvo(canal))
+    else {
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return erro::DESCRITOR_INVALIDO;
+    };
+    if !crate::eventos::e_ouvinte(canal, fio) {
+        // O filho de um `fork` com o descritor do pai: o canal não é dele.
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return erro::DESCRITOR_INVALIDO;
+    }
+    let chave = match crate::pseudoterminal::abrir(fio, canal) {
+        Ok(chave) => chave,
+        Err(crate::pseudoterminal::Recusa::Ocupado) => return erro::OCUPADO,
+    };
+    match crate::fios::com_descritores(|t| t.instalar(descritores::Alvo::Terminal { chave })) {
+        Some(Some(descritor)) => descritor as i64,
+        _ => {
+            crate::pseudoterminal::fechar(chave, fio);
+            erro::SEM_DESCRITOR
+        }
+    }
+}
+
+/// `escrever` no pseudo-terminal: digitar no interpretador.
+fn escrever_no_terminal(chave: crate::pseudoterminal::Chave, ponteiro: u64, tamanho: u64) -> i64 {
+    if let Err(e) = validar_faixa(ponteiro, tamanho) {
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return e;
+    }
+    let n = (tamanho as usize).min(BYTES_DO_TERMINAL);
+    let mut copia = [0u8; BYTES_DO_TERMINAL];
+    // SAFETY: `validar_faixa` confirmou a faixa no espaço do usuário e
+    // mapeada, e estamos no espaço do processo que chamou; `n` cabe nela e
+    // no buffer.
+    unsafe {
+        core::ptr::copy_nonoverlapping(ponteiro as *const u8, copia.as_mut_ptr(), n);
+    }
+    // Um caractere cortado no fim do pedaço não é texto inválido: é o começo
+    // do próximo pedaço. Só o que vem antes dele é digitado agora.
+    let texto = match core::str::from_utf8(&copia[..n]) {
+        Ok(texto) => texto,
+        Err(e) if e.error_len().is_none() && e.valid_up_to() > 0 => {
+            // SAFETY: `valid_up_to` é, por contrato, onde o UTF-8 válido acaba.
+            unsafe { core::str::from_utf8_unchecked(&copia[..e.valid_up_to()]) }
+        }
+        Err(_) => {
+            RECUSADAS.fetch_add(1, Ordering::Relaxed);
+            return erro::ARGUMENTO_INVALIDO;
+        }
+    };
+    match crate::pseudoterminal::escrever(chave, crate::fios::id_atual(), texto) {
+        Some(aceitos) => aceitos as i64,
+        None => {
+            RECUSADAS.fetch_add(1, Ordering::Relaxed);
+            erro::DESCRITOR_INVALIDO
+        }
+    }
+}
+
+/// `ler` no pseudo-terminal: o que o kernel imprimiu, sem bloquear.
+fn ler_do_terminal(chave: crate::pseudoterminal::Chave, ponteiro: u64, tamanho: u64) -> i64 {
+    let n = (tamanho as usize).min(BYTES_DO_TERMINAL);
+    if let Err(e) = validar_escrita(ponteiro, n as u64) {
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return e;
+    }
+    let mut buffer = [0u8; BYTES_DO_TERMINAL];
+    let Some(lidos) = crate::pseudoterminal::ler(chave, crate::fios::id_atual(), &mut buffer[..n])
+    else {
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return erro::DESCRITOR_INVALIDO;
+    };
+    // SAFETY: `validar_escrita` confirmou os `n` bytes no espaço do usuário,
+    // mapeados e graváveis, e `lidos <= n`.
+    unsafe {
+        core::ptr::copy_nonoverlapping(buffer.as_ptr(), ponteiro as *mut u8, lidos);
+    }
+    lidos as i64
+}
+
 /// `ler` num canal de eventos: eventos inteiros, ou o fio estaciona.
 ///
 /// # Por que passar por um buffer, se as interrupções estão mascaradas
@@ -838,6 +941,9 @@ fn fechar(descritor: u64) -> i64 {
         }
         Some(Some(descritores::Alvo::Superficie { chave })) => {
             crate::superficies::largar(chave, crate::fios::id_atual());
+        }
+        Some(Some(descritores::Alvo::Terminal { chave })) => {
+            crate::pseudoterminal::fechar(chave, crate::fios::id_atual());
         }
         _ => {}
     }

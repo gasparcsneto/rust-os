@@ -4636,6 +4636,254 @@ fn janelas_sobre_o_duke_pela_barra() -> Resultado {
     resultado
 }
 
+/// O pseudo-terminal por dentro: o anel, a fila do teclado e a posse.
+///
+/// # O que este caso protege
+///
+/// O que o Terminal assume sem ter como conferir, e que falha em silêncio:
+///
+/// - **o `_print` alimenta o anel.** Sem isso o Terminal abre e fica vazio;
+/// - **o anel cheio perde o mais antigo, e conta.** Perder o mais novo
+///   deixaria o Terminal mostrando o boot para sempre; não contar deixaria a
+///   perda invisível;
+/// - **escrever é digitar, e só texto.** Uma tecla de função escrita pelo
+///   processo apertaria um botão do kernel; e a fila cheia devolve uma
+///   escrita parcial, e não uma mentira;
+/// - **o aviso vai para o canal do dono, uma vez por saída nova;**
+/// - **a posse.** Um dono de cada vez, a chave velha recusada depois de
+///   fechar, e o dono morto não segurando o pseudo-terminal.
+///
+/// Tudo o que depende de nada mais imprimir no meio — o coletor, o relógio —
+/// roda com as interrupções mascaradas.
+fn terminal_o_anel_a_fila_e_a_posse() -> Resultado {
+    use crate::eventos::{self, Colheita};
+    use crate::pseudoterminal::{self as pty, ANEL, Recusa};
+    use protocolo::usuario::evento::{Evento, tipo};
+
+    const CANAL: &str = "teste-pty";
+    // Um fio que não existe: o número é maior que qualquer um que o
+    // escalonador dá numa suíte.
+    const MORTO: u64 = u64::MAX - 7;
+
+    if pty::dono().is_some_and(crate::fios::vivo) {
+        return Err("o pseudo-terminal ja tinha dono vivo antes do caso");
+    }
+    let eu = crate::fios::id_atual();
+    let canal = eventos::escutar(CANAL.as_bytes(), eu).map_err(|_| "o canal do caso nao abriu")?;
+    let chave = match pty::abrir(eu, canal) {
+        Ok(chave) => chave,
+        Err(_) => {
+            eventos::largar(canal, eu);
+            return Err("o pseudo-terminal livre recusou abrir");
+        }
+    };
+
+    let resultado = crate::arch::sem_interrupcoes(|| -> Resultado {
+        let mut buffer = [0u8; 256];
+        let mut esvaziar_o_anel =
+            || while pty::ler(chave, eu, &mut buffer).is_some_and(|n| n > 0) {};
+        let esvaziar_o_canal = || {
+            let mut eventos = [Evento::default(); 16];
+            while eventos::estado(CANAL).is_some_and(|e| e.na_fila > 0) {
+                let _ = eventos::colher(canal, eu, &mut eventos);
+            }
+        };
+
+        // A posse: o próprio dono não abre de novo.
+        if pty::abrir(eu, canal) != Err(Recusa::Ocupado) || pty::dono() != Some(eu) {
+            return Err("o pseudo-terminal com dono vivo abriu para outro");
+        }
+
+        // O `_print` alimenta o anel, com exatamente o que imprimiu.
+        esvaziar_o_anel();
+        crate::serial_print!("marca-do-pty\n");
+        let mut lido = [0u8; 64];
+        let n = pty::ler(chave, eu, &mut lido).ok_or("o dono foi recusado na leitura")?;
+        if &lido[..n] != b"marca-do-pty\n" {
+            crate::log_error!(
+                "teste",
+                "o anel devolveu {:?}",
+                core::str::from_utf8(&lido[..n])
+            );
+            return Err("o anel nao devolveu o que o kernel imprimiu");
+        }
+        if pty::ler(chave, eu, &mut lido) != Some(0) {
+            return Err("o anel vazio nao devolveu zero");
+        }
+
+        // O anel cheio: dez bytes de marca e um anel inteiro de `x` depois
+        // deles. Os dez são os que saem, e são contados.
+        let perdidos = pty::estatisticas().0;
+        pty::registrar("0123456789");
+        let xis = [b'x'; 256];
+        let xis = core::str::from_utf8(&xis).unwrap_or("");
+        for _ in 0..ANEL / xis.len() {
+            pty::registrar(xis);
+        }
+        if pty::estatisticas().0 != perdidos + 10 {
+            return Err("o anel cheio nao contou exatamente o que perdeu");
+        }
+        let mut total = 0;
+        let mut so_xis = true;
+        while let Some(n) = pty::ler(chave, eu, &mut buffer).filter(|&n| n > 0) {
+            so_xis &= buffer[..n].iter().all(|&b| b == b'x');
+            total += n;
+        }
+        if total != ANEL || !so_xis {
+            crate::log_error!("teste", "{} bytes lidos, so x: {}", total, so_xis);
+            return Err("o anel cheio nao perdeu o mais antigo");
+        }
+
+        // O aviso: um por saída nova, no canal do dono.
+        esvaziar_o_canal();
+        pty::avisar_se_preciso();
+        if eventos::estado(CANAL).map(|e| e.na_fila) != Some(1) {
+            return Err("a saida nova nao virou um aviso no canal do dono");
+        }
+        pty::avisar_se_preciso();
+        if eventos::estado(CANAL).map(|e| e.na_fila) != Some(1) {
+            return Err("o aviso se repetiu sem saida nova");
+        }
+        let mut recebidos = [Evento::default(); 4];
+        match eventos::colher(canal, eu, &mut recebidos) {
+            Colheita::Entregues(1) if recebidos[0].tipo == tipo::SAIDA => {}
+            _ => return Err("o aviso no canal nao era de saida"),
+        }
+
+        // Escrever é digitar: a tecla de função é aceita e engolida.
+        crate::teclado::esvaziar();
+        let digitados = pty::estatisticas().2;
+        let linha = "\u{F704}ab\n";
+        if pty::escrever(chave, eu, linha) != Some(linha.len()) {
+            return Err("a escrita no pseudo-terminal nao aceitou a linha inteira");
+        }
+        let mut fila = alloc::string::String::new();
+        while let Some(c) = crate::teclado::ler() {
+            fila.push(c);
+        }
+        if fila != "ab\n" || pty::estatisticas().2 != digitados + 3 {
+            crate::log_error!("teste", "a fila do teclado recebeu {:?}", fila);
+            return Err("o pseudo-terminal digitou o que nao e texto");
+        }
+
+        // A fila cheia: uma escrita parcial, do tamanho que coube.
+        let longa = [b'z'; 100];
+        let aceitos = pty::escrever(chave, eu, core::str::from_utf8(&longa).unwrap_or(""));
+        let mut na_fila = 0;
+        while crate::teclado::ler().is_some() {
+            na_fila += 1;
+        }
+        if aceitos != Some(na_fila) || na_fila == 0 || na_fila >= longa.len() {
+            crate::log_error!("teste", "aceitos {:?}, na fila {}", aceitos, na_fila);
+            return Err("a fila cheia nao virou uma escrita parcial honesta");
+        }
+
+        // A chave é do dono: outro fio é recusado nos dois sentidos, e o
+        // fechar dele não fecha nada.
+        if pty::ler(chave, MORTO, &mut lido).is_some() || pty::escrever(chave, MORTO, "a").is_some()
+        {
+            return Err("o pseudo-terminal aceitou quem nao e o dono");
+        }
+        pty::fechar(chave, MORTO);
+        if pty::dono() != Some(eu) {
+            return Err("quem nao e o dono fechou o pseudo-terminal");
+        }
+
+        // Fechado, a chave velha não alcança a abertura seguinte.
+        pty::fechar(chave, eu);
+        if pty::dono().is_some() || pty::ler(chave, eu, &mut lido).is_some() {
+            return Err("o pseudo-terminal fechado continuou aberto");
+        }
+        let nova = pty::abrir(eu, canal).map_err(|_| "o pseudo-terminal fechado nao reabriu")?;
+        let velha_recusada = pty::ler(chave, eu, &mut lido).is_none();
+        pty::fechar(nova, eu);
+        if !velha_recusada {
+            return Err("a chave velha alcancou a abertura seguinte");
+        }
+
+        // O dono morto não segura o pseudo-terminal.
+        let do_morto = pty::abrir(MORTO, canal).map_err(|_| "o livre recusou abrir")?;
+        let minha = pty::abrir(eu, canal).map_err(|_| "o dono morto segurou o pseudo-terminal")?;
+        let morto_recusado = pty::ler(do_morto, MORTO, &mut lido).is_none();
+        pty::fechar(minha, eu);
+        if !morto_recusado {
+            return Err("a chave do dono morto continuou valendo");
+        }
+        Ok(())
+    });
+
+    pty::fechar(chave, eu);
+    eventos::largar(canal, eu);
+    crate::teclado::esvaziar();
+    resultado
+}
+
+/// O interpretador do outro lado do pseudo-terminal, visto de um processo.
+///
+/// O programa `pseudo` digita uma linha e espera a resposta, dormindo no
+/// canal até o aviso de saída — o caminho inteiro do Terminal, sem a janela.
+/// A suíte faz o papel da tarefa do interpretador, que não existe em modo de
+/// teste: tira as teclas da fila e as entrega a ele.
+///
+/// As recusas da ABI — o canal que não é canal, o segundo dono, o filho do
+/// `fork` — o programa confere do lado dele, e diz qual falhou pelo código
+/// de saída.
+fn terminal_o_interpretador_do_outro_lado() -> Resultado {
+    use crate::pseudoterminal as pty;
+    use crate::usuario::DIRETORIO_DOS_COMPILADOS;
+    use alloc::format;
+
+    let desde = crate::log::total_emitidos();
+    let visto = |procurada: &str| {
+        let mut achou = false;
+        crate::log::ultimos(24, crate::log::Level::Trace, |r| {
+            achou |=
+                r.seq >= desde && r.subsistema == "usuario" && r.mensagem().starts_with(procurada);
+        });
+        achou
+    };
+    let (_, avisos, digitados) = pty::estatisticas();
+    crate::teclado::esvaziar();
+
+    crate::usuario::lancar(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/pseudo")))?;
+    let _ = esperar_ate(
+        || {
+            while let Some(c) = crate::teclado::ler() {
+                crate::interpretador::tratar_tecla(c);
+            }
+            visto("processo encerrou com codigo 68") || visto("processo morto por")
+        },
+        1200,
+    );
+    if !visto("pseudo-terminal conferido") || !visto("processo encerrou com codigo 68") {
+        return Err("o programa nao conferiu o pseudo-terminal");
+    }
+
+    // O que passou pelo pseudo-terminal: a linha sem a tecla de função, e
+    // pelo menos um aviso.
+    let (_, avisos_depois, digitados_depois) = pty::estatisticas();
+    if digitados_depois != digitados + "duke-pty\n".len() as u64 {
+        crate::log_error!("teste", "{} teclas digitadas", digitados_depois - digitados);
+        return Err("o pseudo-terminal nao digitou exatamente a linha");
+    }
+    if avisos_depois == avisos {
+        return Err("o programa leu a resposta sem nenhum aviso");
+    }
+
+    // O programa saiu com o pseudo-terminal aberto. Morto, ele não o segura.
+    let eu = crate::fios::id_atual();
+    let _ = esperar_ate(|| !pty::dono().is_some_and(crate::fios::vivo), 200);
+    let canal =
+        crate::eventos::escutar(b"teste-pty-morto", eu).map_err(|_| "o canal do caso nao abriu")?;
+    let aberto = pty::abrir(eu, canal);
+    if let Ok(chave) = aberto {
+        pty::fechar(chave, eu);
+    }
+    crate::eventos::largar(canal, eu);
+    aberto.map_err(|_| "o processo morto segurou o pseudo-terminal")?;
+    Ok(())
+}
+
 fn sobre_o_duke() -> Resultado {
     use crate::ui::{Acao, ID_DO_BOTAO_SOBRE, Origem};
     use crate::usuario::DIRETORIO_DOS_COMPILADOS;
@@ -11782,6 +12030,14 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "janelas: sobre o duke pela barra",
         f: janelas_sobre_o_duke_pela_barra,
+    },
+    Caso {
+        nome: "terminal: o anel, a fila e a posse",
+        f: terminal_o_anel_a_fila_e_a_posse,
+    },
+    Caso {
+        nome: "terminal: o interpretador do outro lado",
+        f: terminal_o_interpretador_do_outro_lado,
     },
     Caso {
         nome: "usb: o relatorio hid vira teclas",

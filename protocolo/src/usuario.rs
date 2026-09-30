@@ -91,6 +91,20 @@ pub mod numero {
     /// [`descricao`](super::descricao). Substitui a descrição anterior
     /// inteira. Zero, ou um erro.
     pub const DESCREVER: u64 = 14;
+    /// `terminal(canal)`: abre o pseudo-terminal do kernel — o interpretador
+    /// visto de um processo — e devolve um descritor.
+    ///
+    /// `escrever` nele é digitar: cada caractere chega ao interpretador como
+    /// uma tecla. `ler` entrega o que o kernel imprimiu — as respostas do
+    /// interpretador e o log —, e **não** bloqueia: devolve zero quando não
+    /// há nada. Quem espera, espera no `canal` — o descritor de um canal de
+    /// eventos que o processo escuta —, onde o kernel avisa com um evento
+    /// [`SAIDA`](super::evento::tipo::SAIDA) quando há o que ler. Assim um
+    /// processo espera o teclado, o ponteiro e a saída num lugar só.
+    ///
+    /// O pseudo-terminal tem um dono só; o segundo ouve
+    /// [`OCUPADO`](super::erro::OCUPADO).
+    pub const TERMINAL: u64 = 15;
 }
 
 /// Erros devolvidos ao usuário, sempre negativos.
@@ -295,6 +309,10 @@ pub mod evento {
         /// que o servidor deu ao elemento, `b` a ação, de
         /// [`acao`](super::acao).
         pub const ACAO: u32 = 7;
+        /// Há saída nova no pseudo-terminal — ver
+        /// [`TERMINAL`](crate::usuario::numero::TERMINAL). Sem campos: quem
+        /// recebe lê o descritor até ele devolver zero.
+        pub const SAIDA: u32 = 8;
     }
 
     /// As ações de um evento [`tipo::ACAO`].

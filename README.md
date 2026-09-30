@@ -197,6 +197,7 @@ kernel/src/
 ├── ponteiro.rs      o mouse: onde ele está, o cursor, e o clique
 ├── eventos.rs       canais de eventos: o kernel publica, um processo escuta e dorme
 ├── superficies.rs   as camadas do compositor que são de processos, e quem é dono de cada uma
+├── pseudoterminal.rs o interpretador visto de um processo: escrever é digitar, ler é a saída
 ├── ui.rs            a árvore semântica: o que está na tela, e o que se faz com cada coisa
 ├── teclado.rs       o que uma pessoa digita chega ao kernel
 ├── pci.rs           enumeração do barramento PCI
@@ -325,7 +326,8 @@ programas/           os programas de usuário, compilados à parte do kernel
         ├── eco.rs        escuta um canal de eventos e diz o que chega
         ├── janelas.rs    o servidor de janelas: moldura, foco, arrasto, ordem e fechar
         ├── superficie.rs desenha numa superfície, bifurca, fecha e sai sem fechar
-        └── herdeira.rs   depois de um `exec`, fecha a superfície herdada sem perder a sua
+        ├── herdeira.rs   depois de um `exec`, fecha a superfície herdada sem perder a sua
+        └── pseudo.rs     digita no interpretador pelo pseudo-terminal, e lê a resposta
 
 xtask/src/
 └── main.rs          a ferramenta de build, teste e diagnóstico do projeto

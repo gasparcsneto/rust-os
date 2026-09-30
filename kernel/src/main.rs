@@ -78,6 +78,7 @@ mod paginacao;
 mod particoes;
 mod pci;
 mod ponteiro;
+mod pseudoterminal;
 mod qemu;
 mod rede;
 mod serial;

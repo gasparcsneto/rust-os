@@ -108,6 +108,13 @@ pub enum Alvo {
     /// Como o canal: um `fork` copia o descritor, e não a superfície, e o
     /// filho que a controlar por ele é recusado.
     Superficie { chave: crate::superficies::Chave },
+    /// O pseudo-terminal, aberto por este processo — ver
+    /// [`crate::pseudoterminal`]. Escrever é digitar no interpretador; ler é
+    /// receber o que o kernel imprimiu.
+    ///
+    /// Como o canal e a superfície: um `fork` copia o descritor, e não a
+    /// abertura, e o filho que o usar é recusado.
+    Terminal { chave: crate::pseudoterminal::Chave },
 }
 
 /// A tabela de descritores de um processo.

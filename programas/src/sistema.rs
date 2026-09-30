@@ -175,6 +175,17 @@ pub fn descrever(descritor: u64, descricao: &str) -> i64 {
     }
 }
 
+/// Abre o pseudo-terminal do kernel, com os avisos de saída no canal de
+/// eventos `canal` — ver [`numero::TERMINAL`]. Um descritor, ou um erro —
+/// `OCUPADO` se outro processo o tem aberto.
+///
+/// `escrever` no descritor digita no interpretador; `ler` devolve o que o
+/// kernel imprimiu, e zero quando não há nada — sem bloquear.
+pub fn terminal(canal: u64) -> i64 {
+    // SAFETY: `terminal` não recebe ponteiro.
+    unsafe { chamar(numero::TERMINAL, canal, 0, 0) }
+}
+
 /// Abre o arquivo do `caminho`. Um descritor, ou um erro.
 pub fn abrir(caminho: &str) -> i64 {
     // SAFETY: a fatia é deste processo e tem o tamanho dito.
