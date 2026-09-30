@@ -50,6 +50,11 @@ tock-registers = "0.10.1"
 # programas, e o kernel não carrega a massa de dados dele.
 tipografia = { path = "../tipografia", default-features = false }
 
+# A linguagem visual — a paleta, as medidas e os estilos pelo uso: a mesma
+# dos programas — ver `aparencia/src/lib.rs`. Sem as padrão, pelo título de
+# 24 pixels, como a tipografia.
+aparencia = { path = "../aparencia", default-features = false }
+
 # Primitivas de sincronização baseadas em spinlock. Num kernel não existe
 # scheduler para bloquear uma thread, então `std::sync::Mutex` não se aplica.
 spin = "0.12.3"

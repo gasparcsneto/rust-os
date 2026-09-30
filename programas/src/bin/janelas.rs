@@ -55,7 +55,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use core::fmt::Write;
-use programas::desenho::{Estilo, largura_do_texto};
+use programas::desenho::largura_do_texto;
 use programas::escreverln;
 use programas::janela::{Aperto, Janela};
 use programas::sistema;
@@ -67,8 +67,10 @@ use protocolo::usuario::superficie::operacao;
 
 // O conteúdo, na paleta do kernel — a moldura é a do runtime, ver
 // `programas::janela`.
-const CONTEUDO: u32 = 0xFFF4_F6FA;
-const TEXTO: u32 = 0xFF1A_2436;
+const CONTEUDO: u32 = aparencia::uso::FUNDO_DO_CONTEUDO.argb();
+const TEXTO: u32 = aparencia::uso::TEXTO_DO_CONTEUDO.argb();
+use aparencia::medidas::{ESPACO_DO_CABECALHO, ESPACO_DO_CONTEUDO, RECUO_DO_CONTEUDO};
+use aparencia::texto::{CABECALHO, CORPO};
 
 /// Uma janela aberta pelo servidor: a moldura, e o que vai dentro.
 struct Aberta {
@@ -87,23 +89,28 @@ impl Aberta {
     /// Desenha a janela inteira e acusa o dano.
     fn desenhar(&mut self, com_foco: bool) {
         let (cx, cy, cl, ca) = self.janela.conteudo();
-        let altura_da_linha = Estilo::TEXTO.altura();
+        let altura_da_linha = CORPO.altura();
         let texto = self.texto.clone();
         let cabecalho = self.cabecalho;
         let mut tela = self.janela.desenhar_moldura(com_foco);
         tela.retangulo(cx, cy, cl, ca, CONTEUDO);
         // O cabeçalho, se houver, no estilo de título; e o texto, linha a
         // linha, cortado no que couber.
-        let mut y = cy + 8;
+        let mut y = cy + ESPACO_DO_CONTEUDO;
         if let Some(cabecalho) = cabecalho {
-            tela.texto((10, y), cabecalho, Estilo::TITULO, (TEXTO, CONTEUDO));
-            y += Estilo::TITULO.altura() + 6;
+            tela.texto(
+                (RECUO_DO_CONTEUDO, y),
+                cabecalho,
+                CABECALHO,
+                (TEXTO, CONTEUDO),
+            );
+            y += CABECALHO.altura() + ESPACO_DO_CABECALHO;
         }
         for linha in texto.split('\n') {
             if y + altura_da_linha > cy + ca {
                 break;
             }
-            tela.texto((10, y), linha, Estilo::TEXTO, (TEXTO, CONTEUDO));
+            tela.texto((RECUO_DO_CONTEUDO, y), linha, CORPO, (TEXTO, CONTEUDO));
             y += altura_da_linha;
         }
         let _ = self.janela.superficie().danificar_tudo();
@@ -140,11 +147,12 @@ impl Aberta {
         if let Some(cabecalho) = self.cabecalho {
             let _ = write!(
                 d,
-                "\ntexto\t{}\t10\t{}\t{}\t{}\tcabeçalho\t",
+                "\ntexto\t{}\t{}\t{}\t{}\t{}\tcabeçalho\t",
                 self.id_do_elemento(ELEMENTO_CABECALHO),
-                cy + 8,
-                largura_do_texto(cabecalho, Estilo::TITULO),
-                Estilo::TITULO.altura()
+                RECUO_DO_CONTEUDO,
+                cy + ESPACO_DO_CONTEUDO,
+                largura_do_texto(cabecalho, CABECALHO),
+                CABECALHO.altura()
             );
             let _ = descricao::escapar(cabecalho, &mut d);
         }

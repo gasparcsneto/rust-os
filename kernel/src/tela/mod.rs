@@ -50,7 +50,7 @@ pub(crate) const ALTURA_DO_ACENTO: u32 = 3;
 /// dela à toa. Sem compositor não há barra, e a faixa fica vazia — o
 /// console não muda de lugar conforme ela existe ou não, e o texto de uma
 /// máquina e da outra cai nas mesmas linhas.
-pub(crate) const ALTURA_DA_BARRA: u32 = 24;
+pub(crate) const ALTURA_DA_BARRA: u32 = aparencia::medidas::ALTURA_DA_BARRA;
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -134,6 +134,11 @@ impl Cor {
         (self.r as u32) << 16 | (self.g as u32) << 8 | self.b as u32
     }
 
+    /// Uma cor da linguagem visual — ver [`aparencia`].
+    pub const fn de(cor: aparencia::Cor) -> Cor {
+        Cor::nova(cor.r(), cor.g(), cor.b())
+    }
+
     /// O inverso de [`Cor::para_u32`]. O byte alto é ignorado.
     pub const fn de_u32(pixel: u32) -> Cor {
         Cor::nova((pixel >> 16) as u8, (pixel >> 8) as u8, pixel as u8)
@@ -155,13 +160,12 @@ impl Cor {
     pub const PRETO: Cor = Cor::nova(0, 0, 0);
     #[cfg(feature = "modo-teste")]
     pub const BRANCO: Cor = Cor::nova(0xFF, 0xFF, 0xFF);
-    /// O fundo do banner de boot: um azul escuro que não cansa numa tela
-    /// ligada o tempo todo.
-    pub const FUNDO: Cor = Cor::nova(0x10, 0x18, 0x28);
-    /// A faixa de acento do banner.
-    pub const ACENTO: Cor = Cor::nova(0x3A, 0x8F, 0xD0);
+    /// O fundo do console — ver [`aparencia::paleta::NOITE`].
+    pub const FUNDO: Cor = Cor::de(aparencia::uso::FUNDO_DO_CONSOLE);
+    /// A linha de acento, que diz que há um kernel vivo.
+    pub const ACENTO: Cor = Cor::de(aparencia::uso::LINHA_DE_ACENTO);
     /// O fundo da tela de falha fatal.
-    pub const FALHA: Cor = Cor::nova(0x60, 0x10, 0x10);
+    pub const FALHA: Cor = Cor::de(aparencia::uso::FUNDO_DA_FALHA);
 }
 
 // O estado é atômico, e não um `Mutex`, porque a tela precisa ser alcançável

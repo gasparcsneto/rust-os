@@ -2331,6 +2331,7 @@ fn conferir_arvore_do_readme() -> Result<ExitCode, String> {
         "iniciador/src",
         "protocolo/src",
         "tipografia/src",
+        "aparencia/src",
         "programas/src",
         "xtask/src",
     ] {
@@ -2581,6 +2582,7 @@ fn conferir_blocos_unsafe() -> Result<ExitCode, String> {
         "iniciador/src",
         "protocolo/src",
         "tipografia/src",
+        "aparencia/src",
         "programas/src",
     ] {
         percorrer_fontes(&raiz.join(sub), &mut |caminho| {

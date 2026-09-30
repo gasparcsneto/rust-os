@@ -55,13 +55,13 @@ const ESTILO: Estilo = Estilo::TEXTO;
 /// No topo, abaixo da barra superior, que fica por cima dele: a primeira
 /// linha começa oito pixels depois de onde a barra acaba. Embaixo e dos
 /// lados, oito pixels da borda.
-const MARGEM_X: u32 = 8;
-const MARGEM_Y: u32 = crate::tela::ALTURA_DA_BARRA + 8;
-const MARGEM_DE_BAIXO: u32 = 8;
+const MARGEM_X: u32 = aparencia::medidas::MARGEM;
+const MARGEM_Y: u32 = crate::tela::ALTURA_DA_BARRA + aparencia::medidas::MARGEM;
+const MARGEM_DE_BAIXO: u32 = aparencia::medidas::MARGEM;
 
 /// O que o glifo desenha, e sobre o quê.
-const TINTA: Cor = Cor::nova(0xD8, 0xDE, 0xE8);
-const PAPEL: Cor = Cor::FUNDO;
+const TINTA: Cor = Cor::de(aparencia::uso::TEXTO_DO_CONSOLE);
+const PAPEL: Cor = Cor::de(aparencia::uso::FUNDO_DO_CONSOLE);
 
 /// Onde a próxima letra vai, em pixels.
 ///

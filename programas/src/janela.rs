@@ -28,20 +28,21 @@ use protocolo::usuario::descricao;
 use crate::desenho::{Estilo, Tela};
 use crate::superficie::Superficie;
 
-/// A altura da barra de título.
-pub const ALTURA_DO_TITULO: u32 = 22;
-/// O lado da caixa de fechar, na ponta direita da barra de título.
-pub const LADO_DO_FECHAR: u32 = 16;
-/// A borda em volta da janela.
-pub const BORDA: u32 = 1;
+const ESTILO_DO_TITULO: Estilo = aparencia::texto::TITULO_DA_JANELA;
 
-// A paleta do kernel — a da barra superior e a do acento —, para a janela
-// parecer da mesma máquina. Com o byte alto cheio: as janelas se misturam
+// As medidas e as cores da moldura são as da linguagem visual — as mesmas
+// da barra do kernel, para a janela parecer da mesma máquina. Ver
+// `aparencia`. As cores vão com o byte alto cheio: as janelas se misturam
 // por alfa, e um pixel de alfa zero não apareceria.
-pub const ACENTO: u32 = 0xFF3A_8FD0;
-pub const TITULO_APAGADO: u32 = 0xFF2A_3C58;
-pub const TEXTO_DO_TITULO: u32 = 0xFFF4_F6FA;
-pub const BORDA_COR: u32 = 0xFF10_1828;
+pub use aparencia::medidas::{ALTURA_DO_TITULO, BORDA, LADO_DO_FECHAR};
+use aparencia::medidas::{RECUO_DO_FECHAR, RECUO_DO_TITULO};
+use aparencia::uso;
+
+const TITULO_COM_FOCO: u32 = uso::TITULO_COM_FOCO.argb();
+const TITULO_SEM_FOCO: u32 = uso::TITULO_SEM_FOCO.argb();
+const TEXTO_DO_TITULO: u32 = uso::TEXTO_DO_TITULO.argb();
+const CAIXA_DE_FECHAR: u32 = uso::CAIXA_DE_FECHAR.argb();
+const BORDA_DA_JANELA: u32 = uso::BORDA_DA_JANELA.argb();
 
 /// O que um aperto do botão numa janela foi.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -150,7 +151,7 @@ impl Janela {
     pub fn caixa_de_fechar(&self) -> (u32, u32, u32) {
         let lado = LADO_DO_FECHAR;
         (
-            self.largura() - BORDA - 3 - lado,
+            self.largura() - BORDA - RECUO_DO_FECHAR - lado,
             (ALTURA_DO_TITULO - lado) / 2,
             lado,
         )
@@ -201,13 +202,17 @@ impl Janela {
     pub fn desenhar_moldura(&mut self, com_foco: bool) -> Tela<'_> {
         let (largura, altura) = (self.largura(), self.altura());
         let (cx, cy, lado) = self.caixa_de_fechar();
-        let cor_do_titulo = if com_foco { ACENTO } else { TITULO_APAGADO };
+        let cor_do_titulo = if com_foco {
+            TITULO_COM_FOCO
+        } else {
+            TITULO_SEM_FOCO
+        };
         let titulo = self.titulo;
         let mut tela = Tela {
             pixels: self.superficie.pixels(),
             largura,
         };
-        tela.retangulo(0, 0, largura, altura, BORDA_COR);
+        tela.retangulo(0, 0, largura, altura, BORDA_DA_JANELA);
         tela.retangulo(
             BORDA,
             BORDA,
@@ -217,18 +222,21 @@ impl Janela {
         );
         // O título em negrito: é o que se lê primeiro numa janela.
         tela.texto(
-            (8, (ALTURA_DO_TITULO - Estilo::NEGRITO.altura()) / 2),
+            (
+                RECUO_DO_TITULO,
+                (ALTURA_DO_TITULO - ESTILO_DO_TITULO.altura()) / 2,
+            ),
             titulo,
-            Estilo::NEGRITO,
+            ESTILO_DO_TITULO,
             (TEXTO_DO_TITULO, cor_do_titulo),
         );
         // A caixa de fechar: um quadrado mais claro com um x no meio.
-        tela.retangulo(cx, cy, lado, lado, TITULO_APAGADO);
+        tela.retangulo(cx, cy, lado, lado, CAIXA_DE_FECHAR);
         tela.texto(
             (cx + (lado - Estilo::TEXTO.largura()) / 2, cy),
             "x",
             Estilo::TEXTO,
-            (TEXTO_DO_TITULO, TITULO_APAGADO),
+            (TEXTO_DO_TITULO, CAIXA_DE_FECHAR),
         );
         tela
     }

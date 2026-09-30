@@ -310,6 +310,9 @@ protocolo/src/       as ABIs: do iniciador com o kernel, e do kernel com os prog
 tipografia/src/      a fonte e o desenho de texto, dos dois lados da fronteira
 └── lib.rs           os estilos, os glifos, a mistura e a escrita numa memória de pixels
 
+aparencia/src/       a linguagem visual, dos dois lados da fronteira
+└── lib.rs           a paleta, onde cada cor vai, as medidas e os estilos de texto pelo uso
+
 programas/           os programas de usuário, compilados à parte do kernel
 ├── usuario.ld       o mapa de um programa: três segmentos a partir de BASE
 └── src/

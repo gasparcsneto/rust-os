@@ -50,20 +50,22 @@ use tipografia::Estilo;
 
 /// O nome vai em negrito — é o que se lê primeiro na barra —, e o resto, no
 /// texto de todo dia.
-const ESTILO_DO_NOME: Estilo = Estilo::NEGRITO;
-const ESTILO: Estilo = Estilo::TEXTO;
+const ESTILO_DO_NOME: Estilo = aparencia::texto::NOME;
+const ESTILO: Estilo = aparencia::texto::CORPO;
 
 fn largura_do_texto(texto: &str, estilo: Estilo) -> u32 {
     tipografia::largura_do_texto(texto, estilo)
 }
 
-pub const FUNDO: Cor = Cor::nova(0x1A, 0x24, 0x36);
-pub const TEXTO: Cor = Cor::nova(0xD8, 0xDE, 0xE8);
-pub const FUNDO_DO_BOTAO: Cor = Cor::nova(0x2A, 0x3C, 0x58);
+// As cores e as medidas da barra são as da linguagem visual — ver
+// `aparencia`. Os nomes daqui são os de sempre, e o que cada um é está lá.
+pub const FUNDO: Cor = Cor::de(aparencia::uso::FUNDO_DA_BARRA);
+pub const TEXTO: Cor = Cor::de(aparencia::uso::TEXTO_DA_BARRA);
+pub const FUNDO_DO_BOTAO: Cor = Cor::de(aparencia::uso::FUNDO_DO_BOTAO);
 
 /// A linha de acento sob a barra: o indicador de que há um kernel vivo, que
 /// antes era a faixa do banner no topo da tela e ficou debaixo da barra.
-const ALTURA_DO_ACENTO: u32 = 2;
+const ALTURA_DO_ACENTO: u32 = aparencia::medidas::ALTURA_DO_ACENTO;
 
 pub const NOME: &str = "Duke";
 /// O rótulo do botão na árvore. Na tela ele leva a tecla junto.
@@ -76,14 +78,14 @@ const TEXTO_DO_SOBRE: &str = "Sobre (F2)";
 pub const ROTULO_DO_TERMINAL: &str = "Terminal";
 const TEXTO_DO_TERMINAL: &str = "Terminal (F3)";
 
-const MARGEM: u32 = 8;
+const MARGEM: u32 = aparencia::medidas::MARGEM;
 /// Onde o texto começa na vertical: centrado nos 22 pixels acima do acento,
 /// com glifos de 16.
-const TEXTO_Y: u32 = 3;
+const TEXTO_Y: u32 = aparencia::medidas::TEXTO_DA_BARRA_Y;
 /// O botão, na vertical: dois pixels de folga em cima e embaixo.
-const BOTAO_Y: u32 = 2;
-const BOTAO_ALTURA: u32 = 18;
-const BOTAO_FOLGA: u32 = 6;
+const BOTAO_Y: u32 = aparencia::medidas::BOTAO_DA_BARRA_Y;
+const BOTAO_ALTURA: u32 = aparencia::medidas::ALTURA_DO_BOTAO;
+const BOTAO_FOLGA: u32 = aparencia::medidas::FOLGA_DO_BOTAO;
 
 /// A camada da barra, se ela existe. Sem compositor não há barra.
 // A tomada desta tranca passa por `sem_interrupcoes`, como toda tranca deste

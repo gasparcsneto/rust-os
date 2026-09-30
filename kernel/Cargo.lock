@@ -12,6 +12,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "aparencia"
+version = "0.1.0"
+dependencies = [
+ "tipografia",
+]
+
+[[package]]
 name = "bit_field"
 version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -34,6 +41,7 @@ name = "duke"
 version = "0.1.0"
 dependencies = [
  "aarch64-cpu",
+ "aparencia",
  "pci_types",
  "protocolo",
  "spin",

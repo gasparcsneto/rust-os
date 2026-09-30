@@ -1,0 +1,25 @@
+[package]
+# A linguagem visual do Duke: as cores, as medidas e os estilos de texto.
+#
+# Um pacote, e não um módulo, pelo motivo da `tipografia`: dois lados
+# desenham — o kernel, a barra e o console; os programas, as janelas e o
+# Terminal —, e a paleta estava copiada em três lugares. Uma cor mudada num
+# deles não mudava nos outros, e ninguém perceberia até olhar a tela.
+#
+# `no_std`, e membro do workspace da raiz, como a `tipografia` e o
+# `protocolo`: o kernel e os programas o incluem por caminho.
+name = "aparencia"
+version = "0.1.0"
+edition = "2024"
+description = "A linguagem visual do Duke: paleta, medidas e estilos de texto"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Os estilos de texto são os da tipografia, com nome de uso.
+tipografia = { path = "../tipografia", default-features = false }
+
+[features]
+# O estilo de cabeçalho usa o título de 24 pixels da tipografia, que o
+# kernel não carrega — ver `tipografia/Cargo.toml`.
+default = ["titulo"]
+titulo = ["tipografia/titulo"]

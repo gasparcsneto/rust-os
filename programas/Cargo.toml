@@ -28,6 +28,10 @@ protocolo = { path = "../protocolo" }
 # `tipografia/src/lib.rs`.
 tipografia = { path = "../tipografia" }
 
+# A linguagem visual — a paleta, as medidas e os estilos pelo uso: a mesma
+# do kernel. Ver `aparencia/src/lib.rs`.
+aparencia = { path = "../aparencia" }
+
 # Sem `unwind`: não há quem desenrole a pilha no espaço do usuário, e um
 # pânico encerra o processo com um código — ver `src/lib.rs`.
 [profile.dev]

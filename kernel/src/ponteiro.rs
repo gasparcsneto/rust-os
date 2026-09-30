@@ -104,8 +104,8 @@ const SETA: [&str; 19] = [
 ];
 const LARGURA_DA_SETA: u32 = 12;
 const ALTURA_DA_SETA: u32 = 19;
-pub const CONTORNO: u32 = 0xFF10_1010;
-const MIOLO: u32 = 0xFFF4_F4F4;
+pub const CONTORNO: u32 = aparencia::uso::CONTORNO_DO_CURSOR.argb();
+const MIOLO: u32 = aparencia::uso::MIOLO_DO_CURSOR.argb();
 
 /// Onde o ponteiro está agora.
 pub fn posicao() -> (u32, u32) {

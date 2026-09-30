@@ -56,15 +56,17 @@ const LINHAS: usize = 24;
 const GUARDADAS: usize = 200;
 
 /// A folga entre a moldura e a grade.
-const FOLGA: u32 = 4;
+const FOLGA: u32 = aparencia::medidas::FOLGA_DA_GRADE;
+/// O estilo da grade: o do console.
+const ESTILO: Estilo = aparencia::texto::CORPO;
 /// Onde a janela abre.
 const X: i32 = 24;
 const Y: i32 = 40;
 
 // A paleta do console do kernel, para o Terminal ser o mesmo console.
-const FUNDO: u32 = 0xFF10_1828;
-const TINTA: u32 = 0xFFD8_DEE8;
-const CURSOR: u32 = 0xFF3A_8FD0;
+const FUNDO: u32 = aparencia::uso::FUNDO_DO_CONSOLE.argb();
+const TINTA: u32 = aparencia::uso::TEXTO_DO_CONSOLE.argb();
+const CURSOR: u32 = aparencia::uso::CURSOR_DE_TEXTO.argb();
 
 /// Os elementos da janela, na árvore.
 const ELEMENTO_FECHAR: i64 = 1;
@@ -195,7 +197,7 @@ impl Terminal {
     /// perdeu. Uma tecla muda uma linha só, e é ela que se redesenha.
     fn desenhar(&mut self) {
         let (cx, cy, cl, ca) = self.janela.conteudo();
-        let (lc, ac) = (Estilo::TEXTO.largura(), Estilo::TEXTO.altura());
+        let (lc, ac) = (ESTILO.largura(), ESTILO.altura());
         let visiveis: Vec<String> = self
             .grade
             .visiveis()
@@ -224,12 +226,7 @@ impl Terminal {
         };
         let primeira = if tudo { 0 } else { linha_do_cursor };
         for (i, linha) in visiveis.iter().enumerate().skip(primeira) {
-            tela.texto(
-                (x0, y0 + i as u32 * ac),
-                linha,
-                Estilo::TEXTO,
-                (TINTA, FUNDO),
-            );
+            tela.texto((x0, y0 + i as u32 * ac), linha, ESTILO, (TINTA, FUNDO));
         }
         // O cursor: um bloco com o foco, um traço sem ele.
         let (x, y) = (
@@ -242,12 +239,7 @@ impl Terminal {
                 .and_then(|l| l.chars().nth(coluna_do_cursor))
                 .unwrap_or(' ');
             let mut um = [0u8; 4];
-            tela.texto(
-                (x, y),
-                sob.encode_utf8(&mut um),
-                Estilo::TEXTO,
-                (FUNDO, CURSOR),
-            );
+            tela.texto((x, y), sob.encode_utf8(&mut um), ESTILO, (FUNDO, CURSOR));
         } else {
             tela.retangulo(x, y + ac - 2, lc, 2, CURSOR);
         }
@@ -384,7 +376,7 @@ fn principal() -> i64 {
         return 2;
     }
 
-    let (lc, ac) = (Estilo::TEXTO.largura(), Estilo::TEXTO.altura());
+    let (lc, ac) = (ESTILO.largura(), ESTILO.altura());
     let largura = 2 * programas::janela::BORDA + 2 * FOLGA + COLUNAS as u32 * lc;
     let altura = programas::janela::ALTURA_DO_TITULO
         + programas::janela::BORDA

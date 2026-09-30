@@ -56,12 +56,14 @@ jobs:
       # no formato errado aponta para o símbolo errado sem reclamar de nada.
       # A tipografia também: ela é `no_std` só fora dos testes, e os dela
       # conferem a fonte — os glifos do português, o substituto e a mistura.
-      - name: Testes do xtask e da tipografia
-        run: cargo test -p xtask -p tipografia
+      # E a aparência, pelo mesmo motivo: os dela conferem o contraste de
+      # cada par de texto e fundo que o sistema desenha.
+      - name: Testes do xtask, da tipografia e da aparência
+        run: cargo test -p xtask -p tipografia -p aparencia
 
       - name: Lints
         run: |
-          cargo clippy -p xtask -p tipografia --all-targets -- -D warnings
+          cargo clippy -p xtask -p tipografia -p aparencia --all-targets -- -D warnings
           for alvo in x86_64-unknown-uefi aarch64-unknown-uefi; do
             (cd iniciador && cargo clippy --target "$alvo" -- -D warnings)
           done
@@ -116,7 +118,7 @@ jobs:
         env:
           RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
         run: |
-          cargo doc --no-deps -p protocolo -p tipografia -p xtask
+          cargo doc --no-deps -p protocolo -p tipografia -p aparencia -p xtask
           for alvo in x86_64-unknown-uefi aarch64-unknown-uefi; do
             (cd iniciador && cargo doc --no-deps --target "$alvo")
           done
