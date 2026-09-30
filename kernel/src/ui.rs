@@ -47,12 +47,12 @@ use core::sync::atomic::{AtomicU64, Ordering};
 pub enum Papel {
     /// A tela inteira: a raiz.
     Tela,
-    /// Texto que se lê e não se edita — o console.
+    /// Texto que se lê e não se edita — o console, e a grade do Terminal.
     AreaDeTexto,
     /// Texto que se edita e se confirma — a linha de comando.
     CampoDeTexto,
-    /// Uma camada do compositor acima do console: o que um dia será uma
-    /// janela, e hoje só a suíte cria.
+    /// Uma camada do compositor acima do console: uma janela, do servidor
+    /// de janelas, do Terminal ou de outro processo.
     Janela,
     /// A barra no topo da tela — `AXMenuBar`.
     BarraSuperior,

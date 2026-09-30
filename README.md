@@ -1028,6 +1028,29 @@ pelo `user.run`, preenche os campos e aperta o OK pelo canal do agente,
 digita no mesmo campo e confirma com o Enter pelo teclado da máquina, e o
 fecha pela caixa com o mouse — como fecha o "Sobre o Duke" pelo OK.
 
+**O Terminal, pelo agente.** O Terminal era a única janela em que o
+agente lia e não fazia: a pessoa digitava nele, e o agente, para digitar
+no mesmo interpretador, ia pela linha de comando do console do kernel —
+outro caminho. Agora a grade do Terminal tem uma `LinhaDeComando` do
+toolkit: na árvore, a grade é uma área de texto e a linha é um campo dentro
+dela, o mesmo par que o console publica. O valor da linha é lido da grade
+— o que vem depois do prompt, até o cursor, inclusive quando quebra na
+borda —, e é, portanto, o que a pessoa vê, seja quem for que digitou. O
+`set_value`, o `cancel` e o `confirm` do agente viram o que o Terminal
+digita no pseudo-terminal, pelo mesmo caminho das teclas da pessoa.
+
+Duas coisas no interpretador tornaram isso possível sem adivinhar nada.
+Apagar a linha inteira — o Ctrl-U dos terminais —, para trocar o que está
+digitado sem saber quantas letras há. E um Enter do agente, um caractere
+da área de uso privado que nenhum teclado produz: o que chega pelo
+pseudo-terminal vem pela fila do teclado, e sem ele um comando que o
+agente executou pelo Terminal ficaria no log como da pessoa. O caso da
+suíte e a fumaça conferem os dois: o agente digita, esvazia, digita de
+novo e executa, e o log diz `executado: agent.ping (agente)`. Um processo
+com o pseudo-terminal pode escrever o Enter do agente sem ter sido pedido
+— atribuir ao agente o que a pessoa fez é o erro menos grave, e o registro
+que a pessoa confira é da fase 12.
+
 Noventa e seis mutações nas seis etapas, e as noventa e seis reprovadas —
 várias só depois de o caso ser reforçado. Seis das oito da
 linguagem visual passavam: a suíte conferia a tela contra as constantes

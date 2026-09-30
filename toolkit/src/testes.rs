@@ -640,7 +640,7 @@ fn a_area_diz_o_fim_da_grade_na_arvore() {
     }
     a.receber(b"fim   ");
     let s = a.semantica().unwrap();
-    assert_eq!((s.tipo, s.rotulo), (Tipo::Texto, "terminal"));
+    assert_eq!((s.tipo, s.rotulo), (Tipo::Area, "terminal"));
     let teto = protocolo::usuario::descricao::MAIOR_TEXTO;
     // As linhas de baixo que cabem, sem os espaços do fim, e nenhuma
     // cortada no meio.
@@ -743,4 +743,114 @@ fn o_widget_volta_com_o_tipo_dele() {
     ui.descrever(AREA, 0, &mut e);
     let d = Descricao::ler(&e.terminar().unwrap()).unwrap();
     assert_eq!(d.elementos[1].valor.as_deref(), Some("outro"));
+}
+
+// A linha de comando da área de texto.
+
+const DIGITAR: u32 = 77;
+
+fn terminal(colunas: usize, bytes: &[u8]) -> Interface {
+    let mut ui = Interface::nova(
+        AreaDeTexto::nova("terminal", colunas, 4).com_linha_de_comando(LinhaDeComando::nova(
+            "linha de comando",
+            "duke> ",
+            DIGITAR,
+        )),
+    );
+    ui.com_widget::<AreaDeTexto, _>(0, |a| a.receber(bytes));
+    ui
+}
+
+fn descricao(ui: &Interface) -> Descricao {
+    let mut e = Escritor::nova("Terminal");
+    ui.descrever(AREA, 0, &mut e);
+    Descricao::ler(&e.terminar().unwrap()).unwrap()
+}
+
+#[test]
+fn a_linha_de_comando_e_o_que_esta_depois_do_prompt() {
+    let ui = terminal(40, b"boot\nduke> agent.pi");
+    let d = descricao(&ui);
+    // A área e a linha, como o console do kernel: uma área de texto, e um
+    // campo dentro dela.
+    assert_eq!(d.elementos[0].tipo, Tipo::Area);
+    let linha = &d.elementos[1];
+    assert_eq!(
+        (linha.tipo, linha.rotulo.as_str()),
+        (Tipo::Campo, "linha de comando")
+    );
+    assert_eq!(linha.valor.as_deref(), Some("agent.pi"));
+    // Na linha do prompt — a segunda —, logo depois dele.
+    let (lc, ac) = (texto::CORPO.largura(), texto::CORPO.altura());
+    let (x0, y0) = (
+        AREA.x + medidas::FOLGA_DA_GRADE,
+        AREA.y + medidas::FOLGA_DA_GRADE,
+    );
+    assert_eq!(linha.moldura, r(x0 + 6 * lc, y0 + ac, 34 * lc, ac));
+    // O foco continua na área: é ela que mostra o cursor.
+    assert_eq!(ui.foco(), Some(0));
+}
+
+#[test]
+fn a_linha_de_comando_segue_a_grade() {
+    // O apagar do interpretador — volta, espaço, volta — tira a letra do
+    // valor: ele vai até o cursor, e não até o fim do que está na linha.
+    let mut ui = terminal(40, b"duke> agent.pi");
+    ui.com_widget::<AreaDeTexto, _>(0, |a| a.receber(b"\x08 \x08"));
+    assert_eq!(
+        descricao(&ui).elementos[1].valor.as_deref(),
+        Some("agent.p")
+    );
+    // A linha longa quebra na borda, e continua sendo a linha: do prompt,
+    // duas linhas acima, até o cursor.
+    let ui = terminal(10, b"duke> abcdefghij");
+    let d = descricao(&ui);
+    assert_eq!(d.elementos[1].valor.as_deref(), Some("abcdefghij"));
+    let (lc, ac) = (texto::CORPO.largura(), texto::CORPO.altura());
+    let (x0, y0) = (
+        AREA.x + medidas::FOLGA_DA_GRADE,
+        AREA.y + medidas::FOLGA_DA_GRADE,
+    );
+    assert_eq!(d.elementos[1].moldura, r(x0, y0, 10 * lc, 2 * ac));
+    // Uma linha que só parece continuação — a de cima não está cheia — não
+    // é a linha de comando.
+    let ui = terminal(10, b"duke> ab\nsaida");
+    assert_eq!(descricao(&ui).elementos[1].valor.as_deref(), Some(""));
+    // Sem prompt, nada digitado.
+    let ui = terminal(40, b"rodando um comando");
+    assert_eq!(descricao(&ui).elementos[1].valor.as_deref(), Some(""));
+}
+
+#[test]
+fn o_agente_na_linha_de_comando_vira_o_que_digitar() {
+    use protocolo::usuario::terminal::{APAGAR_A_LINHA, CONFIRMAR_PELO_AGENTE};
+    let mut ui = terminal(40, b"duke> velho");
+    let pedido = |ui: &mut Interface| {
+        ui.com_widget::<LinhaDeComando, _>(1, |l| l.tirar_pedido())
+            .unwrap()
+    };
+    // Trocar o valor é apagar a linha inteira e digitar o novo; a grade não
+    // muda até o eco chegar.
+    assert_eq!(
+        ui.definir_valor(1, "agent.ping"),
+        Resposta::Acionado(DIGITAR)
+    );
+    assert_eq!(
+        pedido(&mut ui),
+        alloc::format!("{APAGAR_A_LINHA}agent.ping")
+    );
+    assert_eq!(descricao(&ui).elementos[1].valor.as_deref(), Some("velho"));
+    // Tirar esvazia.
+    assert_eq!(pedido(&mut ui), "");
+    // Confirmar é o Enter do agente; esvaziar, apagar a linha; e o pedido
+    // guarda a ordem.
+    assert_eq!(ui.acao(1, acao::CONFIRMAR), Resposta::Acionado(DIGITAR));
+    assert_eq!(ui.acao(1, acao::CANCELAR), Resposta::Acionado(DIGITAR));
+    assert_eq!(
+        pedido(&mut ui),
+        alloc::format!("{CONFIRMAR_PELO_AGENTE}{APAGAR_A_LINHA}")
+    );
+    // O `press` não é da linha.
+    assert_eq!(ui.acao(1, acao::PRESSIONAR), Resposta::Nada);
+    assert_eq!(pedido(&mut ui), "");
 }

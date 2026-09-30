@@ -31,6 +31,16 @@
 //!
 //! As teclas não são da grade: vão ao pseudo-terminal, e voltam como eco.
 //!
+//! # O agente, pelo mesmo caminho
+//!
+//! A grade tem uma [`LinhaDeComando`]: o que está digitado depois do prompt,
+//! na árvore como um campo — lido da grade, e portanto o que a pessoa vê.
+//! O `set_value`, o `confirm` e o `cancel` do agente nela viram o que digitar,
+//! e vão ao pseudo-terminal pelo mesmo `Terminal::digitar` das teclas: o
+//! agente digita no Terminal como a pessoa. O Enter dele é outro caractere,
+//! para o log do interpretador dizer quem executou — ver
+//! `protocolo::usuario::terminal`.
+//!
 //! Cada coisa que o programa faz de notável vira uma linha no log,
 //! `terminal: ...`: é por elas que a suíte acompanha o que aconteceu.
 
@@ -46,7 +56,8 @@ use programas::janela::{Gesto, Janela};
 use programas::sistema;
 
 use protocolo::usuario::evento::{BOTAO_ESQUERDO, CANAL_DO_TERMINAL, Evento, janela, tipo};
-use toolkit::{AreaDeTexto, Indice, Interface};
+use protocolo::usuario::terminal::PROMPT;
+use toolkit::{AreaDeTexto, Indice, Interface, LinhaDeComando};
 
 /// A grade: colunas e linhas.
 const COLUNAS: usize = 80;
@@ -56,11 +67,15 @@ const LINHAS: usize = 24;
 const X: i32 = 24;
 const Y: i32 = 40;
 
-/// A base dos identificadores na árvore: a caixa de fechar é a base, e a
-/// grade, o primeiro widget, a seguinte.
+/// A base dos identificadores na árvore: a caixa de fechar é a base, a
+/// grade a seguinte, e a linha de comando dentro dela a outra.
 const BASE: i64 = 1;
-/// A grade, na interface.
+/// A grade e a linha de comando, na interface.
 const GRADE: Indice = 0;
+const LINHA: Indice = 1;
+
+/// O código da linha de comando: há o que digitar.
+const DIGITAR: u32 = 1;
 
 struct Terminal {
     janela: Janela,
@@ -99,10 +114,37 @@ impl Terminal {
         }
     }
 
+    /// Digita no interpretador — o caminho da pessoa e o do agente.
+    fn digitar(&mut self, texto: &str) {
+        self.pendente.push_str(texto);
+        self.digitar_pendente();
+    }
+
     fn tecla(&mut self, codigo: i64) {
         if let Some(c) = u32::try_from(codigo).ok().and_then(char::from_u32) {
-            self.pendente.push(c);
-            self.digitar_pendente();
+            let mut um = [0u8; 4];
+            self.digitar(c.encode_utf8(&mut um));
+        }
+    }
+
+    /// Uma ação da árvore: a caixa de fechar, ou a linha de comando.
+    /// Devolve se a janela foi fechada.
+    fn acao(&mut self, elemento: i64, qual: i64) -> bool {
+        match self.janela.acao(elemento, qual) {
+            Some(Gesto::Fechar) => true,
+            Some(Gesto::Acionado(DIGITAR)) => {
+                let pedido = self
+                    .janela
+                    .com_widget::<LinhaDeComando, _>(LINHA, |l| l.tirar_pedido())
+                    .unwrap_or_default();
+                self.digitar(&pedido);
+                escreverln!(
+                    "terminal: o agente digitou {} caractere(s)",
+                    pedido.chars().count()
+                );
+                false
+            }
+            _ => false,
         }
     }
 
@@ -165,7 +207,8 @@ fn principal() -> i64 {
         return 2;
     }
 
-    let grade = AreaDeTexto::nova("terminal", COLUNAS, LINHAS);
+    let grade = AreaDeTexto::nova("terminal", COLUNAS, LINHAS)
+        .com_linha_de_comando(LinhaDeComando::nova("linha de comando", PROMPT, DIGITAR));
     let mut janela = match Janela::com_interface("Terminal", Interface::nova(grade), BASE, X, Y) {
         Ok(j) => j,
         Err(e) => {
@@ -213,10 +256,10 @@ fn principal() -> i64 {
                 }
                 tipo::FOCO_PERDIDO => t.janela.focar(false),
                 tipo::ABRIR if e.a == janela::TERMINAL => t.vir_para_a_frente(),
-                // O `press` do agente na caixa de fechar: o mesmo fechar do
-                // clique.
+                // O `press` do agente na caixa de fechar — o mesmo fechar do
+                // clique —, ou uma ação na linha de comando.
                 tipo::ACAO => {
-                    if t.janela.acao(e.a, e.b) == Some(Gesto::Fechar) {
+                    if t.acao(e.a, e.b) {
                         escreverln!("terminal: fechado");
                         return 0;
                     }

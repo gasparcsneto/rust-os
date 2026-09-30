@@ -49,8 +49,9 @@ use crate::ui::Origem;
 /// tem; o que passar disso é recusado com aviso, e não truncado em silêncio.
 pub const LINHA_MAX: usize = 120;
 
-/// O que aparece antes do que se digita.
-const PROMPT: &str = "duke> ";
+/// O que aparece antes do que se digita. No protocolo, porque o Terminal o
+/// procura na saída para achar a linha de comando.
+use protocolo::usuario::terminal::PROMPT;
 
 /// A linha de comando: o que foi digitado e ainda não confirmado.
 struct Linha {
@@ -113,11 +114,21 @@ pub async fn atender() {
 /// Separado do laço para a suíte alcançá-lo: em modo de teste não há
 /// executor, e sem isto o caminho da pessoa só seria exercitado pela fumaça.
 pub fn tratar_tecla(c: char) {
+    use protocolo::usuario::terminal::{APAGAR_A_LINHA, CONFIRMAR_PELO_AGENTE};
     match c {
         '\n' => {
             confirmar(Origem::Pessoa);
         }
         '\u{8}' => apagar(),
+        // A linha inteira, e o Enter de um agente: o que o Terminal escreve
+        // pelo pseudo-terminal quando a ação vem da árvore — o `cancel` e o
+        // `confirm` da linha de comando dele. Ver `protocolo::usuario::terminal`.
+        APAGAR_A_LINHA => {
+            let _ = definir("");
+        }
+        CONFIRMAR_PELO_AGENTE => {
+            confirmar(Origem::Agente);
+        }
         // F1 é o botão da barra superior. Pelo mesmo caminho do `press` do
         // agente — [`crate::ui::agir`] —, com a outra origem: é o que faz o
         // log dizer quem apertou, e o que impede os dois de divergirem.

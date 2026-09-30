@@ -5356,6 +5356,113 @@ fn terminal_operado() -> Resultado {
     )
     .map_err(|_| "a resposta do interpretador nao apareceu no terminal")?;
 
+    // O agente, pelo mesmo caminho: a linha de comando do Terminal é um
+    // campo na árvore, dentro da grade — uma área de texto, como o console.
+    // O `set_value` e o `confirm` nela viram o que o Terminal digita no
+    // pseudo-terminal, e o valor é o que o eco pôs na grade.
+    let arvore = chamar("ui.tree", "{}")?;
+    if !arvore.contains(r#""role":"text_area","label":"terminal""#)
+        || !arvore.contains(r#""role":"text_field","label":"linha de comando""#)
+    {
+        crate::log_error!("teste", "arvore: {}", arvore);
+        return Err("a grade e a linha de comando do terminal nao estao na arvore");
+    }
+    let linha = crate::superficies::com_descricao(camada.id, |d| {
+        d.elementos
+            .iter()
+            .position(|e| e.rotulo == "linha de comando")
+    })
+    .flatten()
+    .and_then(|i| crate::ui::id_do_elemento(camada.id, i))
+    .ok_or("o terminal nao descreveu a linha de comando")?;
+    let valor_da_linha = || {
+        crate::superficies::com_descricao(camada.id, |d| {
+            d.elementos
+                .iter()
+                .find(|e| e.rotulo == "linha de comando")
+                .and_then(|e| e.valor.clone())
+        })
+        .flatten()
+    };
+    let executado = |comando: &str| {
+        let procurada = format!("executado: {comando} (agente)");
+        let mut achou = false;
+        crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+            achou |= r.seq >= desde && r.subsistema == "console" && r.mensagem() == procurada;
+        });
+        achou
+    };
+    // Um texto qualquer, e o `cancel`: a linha esvazia na grade.
+    let r = chamar(
+        "ui.act",
+        &format!(r#"{{"id":{linha},"action":"set_value","value":"lixo"}}"#),
+    )?;
+    if !r.contains(r#""ok":true"#) {
+        crate::log_error!("teste", "ui.act: {}", r);
+        return Err("o set_value na linha de comando do terminal foi recusado");
+    }
+    esperar_ate(
+        || {
+            atender();
+            valor_da_linha().as_deref() == Some("lixo")
+        },
+        600,
+    )
+    .map_err(|_| "o set_value do agente nao chegou a linha de comando do terminal")?;
+    crate::ui::agir(linha, Acao::Cancelar, None, Origem::Agente)?;
+    esperar_ate(
+        || {
+            atender();
+            valor_da_linha().as_deref() == Some("")
+        },
+        600,
+    )
+    .map_err(|_| "o cancel do agente nao esvaziou a linha de comando do terminal")?;
+    // E o comando: trocado por cima do que houver, e confirmado. A resposta
+    // aparece na grade, e o log diz que foi o agente.
+    crate::ui::agir(
+        linha,
+        Acao::DefinirValor,
+        Some("agent.ping"),
+        Origem::Agente,
+    )?;
+    esperar_ate(
+        || {
+            atender();
+            valor_da_linha().as_deref() == Some("agent.ping")
+        },
+        600,
+    )
+    .map_err(|_| "o comando do agente nao chegou a linha de comando do terminal")?;
+    crate::ui::agir(linha, Acao::Confirmar, None, Origem::Agente)?;
+    esperar_ate(
+        || {
+            atender();
+            executado("agent.ping")
+        },
+        600,
+    )
+    .map_err(|_| "o confirm do agente no terminal nao executou, ou o log nao diz que foi ele")?;
+    let pong = || {
+        crate::superficies::com_descricao(camada.id, |d| {
+            d.elementos.iter().any(|e| {
+                e.rotulo == "terminal"
+                    && e.valor
+                        .as_deref()
+                        .is_some_and(|v| v.contains("\"pong\": true"))
+            })
+        })
+        .unwrap_or(false)
+    };
+    esperar_ate(
+        || {
+            atender();
+            pong()
+        },
+        600,
+    )
+    .map_err(|_| "a resposta do comando do agente nao apareceu no terminal")?;
+
     // Um clique fora: o foco volta ao console, e o Terminal, avisado, apaga
     // a barra de título e troca o bloco do cursor pelo traço.
     apertar(1, h as i64 - 2);

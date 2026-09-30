@@ -1626,6 +1626,7 @@ fn escrever_camada(w: &mut JsonWriter, c: crate::grafico::compositor::InfoCamada
             crate::superficies::Tipo::Botao => ui::Papel::Botao,
             crate::superficies::Tipo::Texto => ui::Papel::Texto,
             crate::superficies::Tipo::Campo => ui::Papel::CampoDeTexto,
+            crate::superficies::Tipo::Area => ui::Papel::AreaDeTexto,
         };
         w.field_str("role", papel.nome())?;
         w.field_str("label", &e.rotulo)?;

@@ -442,11 +442,13 @@ pub mod evento {
 /// botao   <id> <x> <y> <largura> <altura> <rótulo>
 /// texto   <id> <x> <y> <largura> <altura> <rótulo> <valor>
 /// campo   <id> <x> <y> <largura> <altura> <rótulo> <valor>
+/// area    <id> <x> <y> <largura> <altura> <rótulo> <valor>
 /// ```
 ///
 /// Um `texto` se lê; um `campo` também se edita — na árvore, ele aceita
 /// confirmar, esvaziar e trocar o valor, e cada uma chega ao processo como
-/// uma [`ACAO`](evento::tipo::ACAO).
+/// uma [`ACAO`](evento::tipo::ACAO). Uma `area` é texto de várias linhas que
+/// se lê e não se edita, como o console do kernel: a grade do Terminal.
 ///
 /// A linha `janela` vem primeiro, e uma vez. O `id` é do servidor: é o que
 /// volta a ele num evento de [`ACAO`](evento::tipo::ACAO) quando alguém
@@ -454,6 +456,38 @@ pub mod evento {
 /// kernel o leva à tela somando a posição da camada. Num rótulo ou num
 /// valor, a tabulação, a quebra de linha e a barra invertida vão como
 /// `\t`, `\n` e `\\` — ver [`escapar`](descricao::escapar).
+/// O que o interpretador do kernel espera de quem digita nele pelo
+/// pseudo-terminal — ver [`numero::TERMINAL`].
+pub mod terminal {
+    /// O que o interpretador escreve antes da linha de comando. Quem lê a
+    /// saída acha a linha que se está digitando logo depois dele.
+    pub const PROMPT: &str = "duke> ";
+
+    /// Apaga a linha de comando inteira — o Ctrl-U dos terminais. É o
+    /// `cancel` da árvore, e o começo de um `set_value`: quem digita não
+    /// precisa saber quantas letras há na linha para trocá-la.
+    pub const APAGAR_A_LINHA: char = '\u{15}';
+
+    /// O Enter de um agente: executa a linha como o Enter, e o log diz
+    /// `(agente)`.
+    ///
+    /// # Por que um caractere à parte
+    ///
+    /// Porque o que se escreve no pseudo-terminal chega ao interpretador
+    /// pela fila do teclado, a mesma da pessoa. O Terminal sabe quem pediu
+    /// — a tecla veio do teclado, ou o `confirm` veio da árvore —, e o
+    /// interpretador não; sem este caractere, um comando que o agente
+    /// executou pelo Terminal ficaria no log como da pessoa. Da área de uso
+    /// privado do Unicode, como as teclas de função do kernel: nenhum
+    /// teclado o produz.
+    ///
+    /// Um processo com o pseudo-terminal pode escrevê-lo sem ter sido
+    /// pedido por um agente. Atribuir ao agente o que a pessoa fez é o erro
+    /// menos grave dos dois; o registro que a pessoa possa conferir é da
+    /// fase 12.
+    pub const CONFIRMAR_PELO_AGENTE: char = '\u{F8FD}';
+}
+
 pub mod descricao {
     /// O maior texto de descrição, em bytes.
     pub const MAIOR: usize = 2048;
@@ -501,6 +535,7 @@ pub mod descricao {
         Botao,
         Texto,
         Campo,
+        Area,
     }
 
     impl Tipo {
@@ -510,6 +545,7 @@ pub mod descricao {
                 Tipo::Botao => "botao",
                 Tipo::Texto => "texto",
                 Tipo::Campo => "campo",
+                Tipo::Area => "area",
             }
         }
 
@@ -519,13 +555,14 @@ pub mod descricao {
                 "botao" => Some(Tipo::Botao),
                 "texto" => Some(Tipo::Texto),
                 "campo" => Some(Tipo::Campo),
+                "area" => Some(Tipo::Area),
                 _ => None,
             }
         }
 
         /// O tipo leva um valor além do rótulo?
         pub const fn tem_valor(self) -> bool {
-            matches!(self, Tipo::Texto | Tipo::Campo)
+            matches!(self, Tipo::Texto | Tipo::Campo | Tipo::Area)
         }
     }
 
@@ -602,7 +639,7 @@ pub mod descricao {
                     let tipo = campos
                         .next()
                         .and_then(Tipo::da_palavra)
-                        .ok_or("linha que nao e `botao`, `texto` nem `campo`")?;
+                        .ok_or("linha que nao e `botao`, `texto`, `campo` nem `area`")?;
                     let mut numero = || -> Result<i64, &'static str> {
                         campos
                             .next()
@@ -754,11 +791,14 @@ mod testes {
                 "conteudo",
                 "linha 1\nlinha\\2",
             )
-            .elemento(Tipo::Campo, 3, r(10, 60, 200, 22), "nome", "Ana\tMaria");
+            .elemento(Tipo::Campo, 3, r(10, 60, 200, 22), "nome", "Ana\tMaria")
+            .elemento(Tipo::Area, 4, r(0, 0, 640, 384), "terminal", "duke> \nok");
         let texto = e.terminar().unwrap();
         let d = Descricao::ler(&texto).unwrap();
         assert_eq!(d.titulo, "Sobre\to Duke");
-        assert_eq!(d.elementos.len(), 3);
+        assert_eq!(d.elementos.len(), 4);
+        assert_eq!(d.elementos[3].tipo, Tipo::Area);
+        assert_eq!(d.elementos[3].valor.as_deref(), Some("duke> \nok"));
         assert_eq!(d.elementos[2].tipo, Tipo::Campo);
         assert_eq!(d.elementos[2].valor.as_deref(), Some("Ana\tMaria"));
         assert_eq!(d.elementos[0].tipo, Tipo::Botao);
@@ -799,6 +839,7 @@ mod testes {
             "janela\tx\nbotao\t1\t0\t0\t1\t1\tb\tsobra",
             "janela\tx\ntexto\t1\t0\t0\t1\t1\tsem valor",
             "janela\tx\ncampo\t1\t0\t0\t1\t1\tsem valor",
+            "janela\tx\narea\t1\t0\t0\t1\t1\tsem valor",
             "janela\tx\\q",
         ] {
             assert!(Descricao::ler(ruim).is_err(), "aceitou {ruim:?}");

@@ -201,8 +201,9 @@ pub fn ler(chave: Chave, fio: u64, destino: &mut [u8]) -> Option<usize> {
 /// A fila do teclado carrega também as teclas de função e o clique — é por
 /// ela que F1 limpa a tela. Um processo que escrevesse esses caracteres
 /// apertaria botões do kernel por um canal que só deveria digitar. Então só
-/// passa o que a linha do interpretador aceitaria de uma pessoa: texto, a
-/// quebra de linha e o apagar. O resto conta como aceito, porque recusá-lo
+/// passa o que mexe na linha do interpretador: texto, a quebra de linha, o
+/// apagar, o apagar da linha inteira e o Enter de um agente — ver
+/// `protocolo::usuario::terminal`. O resto conta como aceito, porque recusá-lo
 /// deixaria quem escreve repetindo para sempre o mesmo caractere.
 pub fn escrever(chave: Chave, fio: u64, texto: &str) -> Option<usize> {
     if !confere(chave, fio) {
@@ -223,7 +224,12 @@ pub fn escrever(chave: Chave, fio: u64, texto: &str) -> Option<usize> {
 
 /// Um caractere que o pseudo-terminal deixa chegar ao interpretador.
 fn e_digitavel(c: char) -> bool {
-    c.is_ascii_graphic() || matches!(c, ' ' | '\n' | '\u{8}')
+    use protocolo::usuario::terminal::{APAGAR_A_LINHA, CONFIRMAR_PELO_AGENTE};
+    c.is_ascii_graphic()
+        || matches!(
+            c,
+            ' ' | '\n' | '\u{8}' | APAGAR_A_LINHA | CONFIRMAR_PELO_AGENTE
+        )
 }
 
 /// Fecha o pseudo-terminal, se a `chave` for a abertura de `fio`.

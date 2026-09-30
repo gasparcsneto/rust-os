@@ -6009,7 +6009,7 @@ fn sob_terminal(
             .is_some_and(|j| j.contains("duke> agent.ping") && j.contains(r#"\"pong\": true"#));
         if mostra {
             println!("  [terminal] ok  `agent.ping` e a resposta, na janela do Terminal");
-            return Ok(());
+            return sob_terminal_pelo_agente(escrita, leitor);
         }
         if std::time::Instant::now() >= limite {
             return Err(match janela {
@@ -6019,6 +6019,98 @@ fn sob_terminal(
         }
         std::thread::sleep(Duration::from_millis(150));
     }
+}
+
+/// O agente digita no Terminal pelo mesmo caminho: a linha de comando dele,
+/// na árvore.
+///
+/// A sonda anterior viu a pessoa digitar; esta pede, pelo canal do agente,
+/// o `set_value` e o `confirm` na linha de comando do Terminal — o campo
+/// dentro da grade dele, e não o do console do kernel —, e confere que o
+/// comando executou atribuído ao agente, e que a resposta está na grade.
+fn sob_terminal_pelo_agente(
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+) -> Result<(), String> {
+    const GRADE: &str = r#""role":"text_area","label":"terminal""#;
+    const LINHA: &str = r#""role":"text_field","label":"linha de comando""#;
+    let mut id = 6800;
+    let mut pedir = |metodo: &str, params: &str| -> Result<String, String> {
+        id += 1;
+        escrita
+            .write_all(
+                format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"{metodo}","params":{params}}}"#)
+                    .as_bytes(),
+            )
+            .and_then(|()| escrita.write_all(b"\n"))
+            .and_then(|()| escrita.flush())
+            .map_err(|e| format!("terminal: falha ao pedir `{metodo}`: {e}"))?;
+        let resposta = ler_resposta(leitor).map_err(|e| format!("terminal: {e}"))?;
+        if !e_a_resposta(&resposta, id) {
+            return Err(format!(
+                "terminal: veio a resposta de outro pedido\n  {resposta}"
+            ));
+        }
+        Ok(resposta)
+    };
+    // O que vem depois da grade do Terminal: a linha de comando é o elemento
+    // seguinte. O texto da grade vai escapado, e não tem como conter a marca.
+    let arvore = pedir("ui.tree", "{}")?;
+    let linha = arvore
+        .find(GRADE)
+        .and_then(|i| id_antes(&arvore[i..], LINHA))
+        .ok_or_else(|| format!("terminal: a grade nao tem a linha de comando\n  {arvore}"))?;
+    for (acao, valor) in [
+        ("set_value", r#","value":"system.uptime""#),
+        ("confirm", ""),
+    ] {
+        let r = pedir(
+            "ui.act",
+            &format!(r#"{{"id":{linha},"action":"{acao}"{valor}}}"#),
+        )?;
+        if !r.contains(r#""ok":true"#) {
+            return Err(format!(
+                "terminal: o `{acao}` na linha de comando foi recusado\n  {r}"
+            ));
+        }
+        // O `confirm` depois de o eco chegar: é a linha na tela que ele
+        // executa.
+        if acao == "set_value" {
+            let limite = std::time::Instant::now() + Duration::from_secs(8);
+            loop {
+                let a = pedir("ui.tree", "{}")?;
+                let chegou = a
+                    .find(GRADE)
+                    .map(|i| &a[i..])
+                    .and_then(|g| g.find(LINHA).map(|j| &g[j..]))
+                    .is_some_and(|l| l.contains(r#""value":"system.uptime""#));
+                if chegou {
+                    break;
+                }
+                if std::time::Instant::now() >= limite {
+                    return Err(format!(
+                        "terminal: o set_value nao chegou a linha de comando\n  {a}"
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(150));
+            }
+        }
+    }
+    let limite = std::time::Instant::now() + Duration::from_secs(8);
+    loop {
+        let log = pedir("log.tail", r#"{"count":24}"#)?;
+        if log.contains("executado: system.uptime (agente)") {
+            break;
+        }
+        if std::time::Instant::now() >= limite {
+            return Err(format!(
+                "terminal: o comando do agente nao executou, ou nao foi atribuido a ele\n  {log}"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    println!("  [terminal] ok  `system.uptime` pelo agente, na linha de comando do Terminal");
+    Ok(())
 }
 
 /// Um pedaço de requisição abandonado não pode colar no pedido seguinte.
