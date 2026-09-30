@@ -19,6 +19,9 @@
 //! - [`Botao`]: algo que se aciona;
 //! - [`Coluna`] e [`Linha`]: os filhos um depois do outro.
 //!
+//! E a [`Interface`], que guarda a árvore de uma janela e o foco, e leva a
+//! ela o que chega: o aperto do ponteiro, a tecla e a ação de um agente.
+//!
 //! A cor, a medida e o estilo de texto de cada um vêm da [`aparencia`]: o
 //! botão de uma janela é o botão da barra do kernel.
 //!
@@ -33,10 +36,12 @@
 extern crate alloc;
 
 pub mod arvore;
+mod interface;
 mod tela;
 mod widgets;
 
-pub use arvore::{Indice, Semantica, Widget};
+pub use arvore::{Entrada, Indice, Resposta, Semantica, Widget};
+pub use interface::Interface;
 pub use protocolo::usuario::descricao::{Escritor, Retangulo, Tipo};
 pub use tela::Tela;
 pub use widgets::{Botao, Coluna, Linha, Pilha, Rotulo};

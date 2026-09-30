@@ -9,6 +9,9 @@ use aparencia::{medidas, texto, uso};
 use protocolo::usuario::descricao::{Retangulo, Tipo};
 use tipografia::Estilo;
 
+use protocolo::usuario::evento::acao;
+
+use crate::arvore::{Entrada, Resposta};
 use crate::{Semantica, Tela, Widget};
 
 /// Texto que se lê: uma linha ou várias, separadas por `\n`.
@@ -77,7 +80,7 @@ impl Widget for Rotulo {
 
     /// Linha a linha, cortado no que couber na área: a fonte é
     /// monoespaçada, e quantas letras cabem é uma divisão.
-    fn desenhar(&self, tela: &mut Tela, area: Retangulo) {
+    fn desenhar(&self, tela: &mut Tela, area: Retangulo, _foco: bool) {
         let (lc, altura) = (self.estilo.largura(), self.estilo.altura());
         let cabem = (area.largura / lc.max(1)) as usize;
         for (i, linha) in self.linhas().enumerate() {
@@ -108,14 +111,22 @@ impl Widget for Rotulo {
 }
 
 /// Algo que se aciona.
+///
+/// Pelo ponteiro, pelo Enter ou pelo espaço com o foco nele, ou pelo `press`
+/// de um agente na árvore — os três respondem [`Resposta::Acionado`] com o
+/// código que o programa deu ao botão. Não há um caminho do agente e outro
+/// da pessoa: o agente aperta o mesmo botão.
 pub struct Botao {
     rotulo: String,
+    codigo: u32,
 }
 
 impl Botao {
-    pub fn novo(rotulo: &str) -> Botao {
+    /// Um botão com `rotulo`, que responde `codigo` quando acionado.
+    pub fn novo(rotulo: &str, codigo: u32) -> Botao {
         Botao {
             rotulo: String::from(rotulo),
+            codigo,
         }
     }
 
@@ -134,9 +145,19 @@ impl Widget for Botao {
         )
     }
 
-    fn desenhar(&self, tela: &mut Tela, area: Retangulo) {
+    /// Com o foco, um anel no acento em volta — o que diz a quem usa o
+    /// teclado onde o Enter vai cair.
+    fn desenhar(&self, tela: &mut Tela, area: Retangulo, foco: bool) {
         let fundo = uso::FUNDO_DO_BOTAO.argb();
         tela.preencher(area, fundo);
+        if foco {
+            let anel = uso::TITULO_COM_FOCO.argb();
+            let (x, y, l, a) = (area.x, area.y, area.largura, area.altura);
+            tela.retangulo(x, y, l, 2, anel);
+            tela.retangulo(x, (y + a).saturating_sub(2), l, 2, anel);
+            tela.retangulo(x, y, 2, a, anel);
+            tela.retangulo((x + l).saturating_sub(2), y, 2, a, anel);
+        }
         let y = area.y + area.altura.saturating_sub(texto::CORPO.altura()) / 2;
         tela.texto(
             (area.x + medidas::FOLGA_DO_BOTAO, y),
@@ -152,6 +173,19 @@ impl Widget for Botao {
             rotulo: &self.rotulo,
             valor: "",
         })
+    }
+
+    fn focavel(&self) -> bool {
+        true
+    }
+
+    fn tratar(&mut self, entrada: Entrada) -> Resposta {
+        match entrada {
+            Entrada::Aperto { .. }
+            | Entrada::Tecla('\n' | ' ')
+            | Entrada::Acao(acao::PRESSIONAR) => Resposta::Acionado(self.codigo),
+            _ => Resposta::Nada,
+        }
     }
 }
 
@@ -248,7 +282,7 @@ impl Widget for Pilha {
         }
     }
 
-    fn desenhar(&self, tela: &mut Tela, area: Retangulo) {
+    fn desenhar(&self, tela: &mut Tela, area: Retangulo, _foco: bool) {
         if let Some(cor) = self.fundo {
             tela.preencher(area, cor);
         }

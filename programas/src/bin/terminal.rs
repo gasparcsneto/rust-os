@@ -39,14 +39,13 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::fmt::Write;
 
 use programas::desenho::Estilo;
 use programas::escreverln;
 use programas::janela::{Aperto, Janela};
 use programas::sistema;
 
-use protocolo::usuario::descricao;
+use protocolo::usuario::descricao::{self, Retangulo, Tipo};
 use protocolo::usuario::evento::acao as evento_acao;
 use protocolo::usuario::evento::{BOTAO_ESQUERDO, CANAL_DO_TERMINAL, Evento, janela, tipo};
 
@@ -256,14 +255,8 @@ impl Terminal {
     /// Diz à árvore o que a janela é: a moldura, e o texto de baixo da
     /// grade.
     fn descrever(&self, visiveis: &[String]) {
-        let mut d = String::new();
-        self.janela.descrever_moldura(ELEMENTO_FECHAR, &mut d);
+        let mut d = self.janela.descrever_moldura(ELEMENTO_FECHAR);
         let (cx, cy, cl, ca) = self.janela.conteudo();
-        let _ = write!(
-            d,
-            "\ntexto\t{}\t{}\t{}\t{}\t{}\tterminal\t",
-            ELEMENTO_TEXTO, cx, cy, cl, ca
-        );
         // As linhas de baixo que cabem, na ordem.
         let mut usados = 0;
         let mut primeira = visiveis.len();
@@ -276,8 +269,25 @@ impl Terminal {
             primeira = i;
         }
         let texto: Vec<&str> = visiveis[primeira..].iter().map(|l| l.trim_end()).collect();
-        let _ = descricao::escapar(&texto.join("\n"), &mut d);
-        let r = sistema::descrever(self.janela.descritor(), &d);
+        d.elemento(
+            Tipo::Texto,
+            ELEMENTO_TEXTO,
+            Retangulo {
+                x: cx,
+                y: cy,
+                largura: cl,
+                altura: ca,
+            },
+            "terminal",
+            &texto.join("\n"),
+        );
+        let r = match d.terminar() {
+            Ok(texto) => sistema::descrever(self.janela.descritor(), &texto),
+            Err(motivo) => {
+                escreverln!("terminal: a descricao nao cabe: {}", motivo);
+                return;
+            }
+        };
         if r != 0 {
             escreverln!("terminal: a descricao foi recusada: {}", r);
         }

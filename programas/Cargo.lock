@@ -22,6 +22,7 @@ dependencies = [
  "aparencia",
  "protocolo",
  "tipografia",
+ "toolkit",
 ]
 
 [[package]]
@@ -33,4 +34,13 @@ name = "tipografia"
 version = "0.1.0"
 dependencies = [
  "noto-sans-mono-bitmap",
+]
+
+[[package]]
+name = "toolkit"
+version = "0.1.0"
+dependencies = [
+ "aparencia",
+ "protocolo",
+ "tipografia",
 ]

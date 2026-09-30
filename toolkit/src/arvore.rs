@@ -28,6 +28,43 @@ use crate::Tela;
 /// coisa para duas pessoas escreverem igual.
 pub type Indice = u32;
 
+/// O que chega a um widget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Entrada {
+    /// O botão do ponteiro apertado em `(x, y)`, na área do widget.
+    Aperto { x: u32, y: u32 },
+    /// Uma tecla, com o foco no widget.
+    Tecla(char),
+    /// Uma ação da árvore semântica — o `press` de um agente —, com o
+    /// número dela: ver `protocolo::usuario::evento::acao`.
+    Acao(i64),
+}
+
+/// O que um widget responde ao que chegou.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Resposta {
+    /// Nada mudou.
+    Nada,
+    /// O widget mudou e precisa ser redesenhado.
+    Redesenhar,
+    /// O widget foi acionado, e o código é o que o programa lhe deu: é
+    /// assim que o programa sabe que o "OK" foi apertado, pelo ponteiro,
+    /// pela tecla ou pelo agente — os três chegam aqui do mesmo jeito.
+    Acionado(u32),
+}
+
+impl Resposta {
+    /// A mais importante das duas: acionar vence redesenhar, que vence
+    /// nada.
+    pub fn e(self, outra: Resposta) -> Resposta {
+        match (self, outra) {
+            (Resposta::Acionado(c), _) | (_, Resposta::Acionado(c)) => Resposta::Acionado(c),
+            (Resposta::Redesenhar, _) | (_, Resposta::Redesenhar) => Resposta::Redesenhar,
+            _ => Resposta::Nada,
+        }
+    }
+}
+
 /// O que um widget é, para a árvore semântica.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Semantica<'a> {
@@ -44,9 +81,20 @@ pub trait Widget {
     /// A largura e a altura que o widget pede.
     fn medir(&self) -> (u32, u32);
 
-    /// Desenha o widget em `area`. Os filhos são desenhados depois, por
-    /// cima — quem os percorre é [`desenhar`], e não o widget.
-    fn desenhar(&self, _tela: &mut Tela, _area: Retangulo) {}
+    /// Desenha o widget em `area`; `foco` diz se é ele quem tem o foco da
+    /// janela. Os filhos são desenhados depois, por cima — quem os
+    /// percorre é [`desenhar`], e não o widget.
+    fn desenhar(&self, _tela: &mut Tela, _area: Retangulo, _foco: bool) {}
+
+    /// O widget recebe o foco — é parado pelo Tab, e pelo aperto?
+    fn focavel(&self) -> bool {
+        false
+    }
+
+    /// O que chegou a ele.
+    fn tratar(&mut self, _entrada: Entrada) -> Resposta {
+        Resposta::Nada
+    }
 
     /// O que o widget é na árvore semântica. `None` para o que só organiza
     /// os outros, como uma coluna: ela não é nada que alguém leia ou acione.
@@ -95,9 +143,11 @@ fn visitar<'a>(
     }
 }
 
-/// Desenha a árvore inteira em `area`.
-pub fn desenhar(raiz: &dyn Widget, tela: &mut Tela, area: Retangulo) {
-    percorrer(raiz, area, &mut |_, w, r| w.desenhar(tela, r));
+/// Desenha a árvore inteira em `area`, com o foco no widget `foco`.
+pub fn desenhar(raiz: &dyn Widget, tela: &mut Tela, area: Retangulo, foco: Option<Indice>) {
+    percorrer(raiz, area, &mut |i, w, r| {
+        w.desenhar(tela, r, foco == Some(i))
+    });
 }
 
 /// Acrescenta ao escritor cada widget que é alguma coisa na árvore, com o

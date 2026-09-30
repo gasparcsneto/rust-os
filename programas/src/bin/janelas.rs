@@ -54,13 +54,12 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use core::fmt::Write;
 use programas::desenho::largura_do_texto;
 use programas::escreverln;
 use programas::janela::{Aperto, Janela};
 use programas::sistema;
 
-use protocolo::usuario::descricao;
+use protocolo::usuario::descricao::{Retangulo, Tipo};
 use protocolo::usuario::evento::acao as evento_acao;
 use protocolo::usuario::evento::{BOTAO_ESQUERDO, CANAL_DAS_JANELAS, Evento, janela, tipo};
 use protocolo::usuario::superficie::operacao;
@@ -127,36 +126,50 @@ impl Aberta {
     /// Diz ao kernel o que a janela é: o título, a caixa de fechar e o
     /// texto — o mesmo que acabou de ser desenhado, gerado do mesmo estado.
     fn descrever(&self) {
-        let mut d = String::new();
-        self.janela
-            .descrever_moldura(self.id_do_elemento(ELEMENTO_FECHAR), &mut d);
+        let mut d = self
+            .janela
+            .descrever_moldura(self.id_do_elemento(ELEMENTO_FECHAR));
         let (cx, cy, cl, ca) = self.janela.conteudo();
-        let _ = write!(
-            d,
-            "\ntexto\t{}\t{}\t{}\t{}\t{}\tconteudo\t",
+        d.elemento(
+            Tipo::Texto,
             self.id_do_elemento(ELEMENTO_CONTEUDO),
-            cx,
-            cy,
-            cl,
-            ca
+            Retangulo {
+                x: cx,
+                y: cy,
+                largura: cl,
+                altura: ca,
+            },
+            "conteudo",
+            &self.texto,
         );
-        let _ = descricao::escapar(&self.texto, &mut d);
         // O cabeçalho, depois do conteúdo: a posição de cada elemento na
         // descrição é o que dá o identificador dele na árvore, e o da caixa
         // e o do conteúdo não mudam de uma janela para a outra.
         if let Some(cabecalho) = self.cabecalho {
-            let _ = write!(
-                d,
-                "\ntexto\t{}\t{}\t{}\t{}\t{}\tcabeçalho\t",
+            d.elemento(
+                Tipo::Texto,
                 self.id_do_elemento(ELEMENTO_CABECALHO),
-                RECUO_DO_CONTEUDO,
-                cy + ESPACO_DO_CONTEUDO,
-                largura_do_texto(cabecalho, CABECALHO),
-                CABECALHO.altura()
+                Retangulo {
+                    x: RECUO_DO_CONTEUDO,
+                    y: cy + ESPACO_DO_CONTEUDO,
+                    largura: largura_do_texto(cabecalho, CABECALHO),
+                    altura: CABECALHO.altura(),
+                },
+                "cabeçalho",
+                cabecalho,
             );
-            let _ = descricao::escapar(cabecalho, &mut d);
         }
-        let r = sistema::descrever(self.janela.descritor(), &d);
+        let r = match d.terminar() {
+            Ok(texto) => sistema::descrever(self.janela.descritor(), &texto),
+            Err(motivo) => {
+                escreverln!(
+                    "janelas: a descricao da janela {} nao cabe: {}",
+                    self.id,
+                    motivo
+                );
+                return;
+            }
+        };
         if r != 0 {
             escreverln!(
                 "janelas: a descricao da janela {} foi recusada: {}",

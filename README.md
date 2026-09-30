@@ -316,6 +316,7 @@ aparencia/src/       a linguagem visual, dos dois lados da fronteira
 toolkit/src/         os widgets: desenho e árvore semântica do mesmo estado
 ├── lib.rs           a regra, e o que existe
 ├── arvore.rs        o trait, e as viagens pela árvore: desenhar, descrever, achar
+├── interface.rs     a árvore de uma janela e o foco: o aperto, a tecla e a ação do agente
 ├── widgets.rs       o texto, o botão, a coluna e a linha
 ├── tela.rs          a memória de pixels onde os widgets desenham
 └── testes.rs        o layout, o desenho e a descrição, conferidos no hospedeiro
@@ -329,7 +330,7 @@ programas/           os programas de usuário, compilados à parte do kernel
     ├── saida.rs     uma linha formatada por chamada de `escrever`
     ├── desenho.rs   retângulos e texto, com a fonte do console
     ├── superficie.rs uma camada do compositor com os pixels no processo
-    ├── janela.rs    a moldura, o arrasto e a caixa de fechar, do servidor e do Terminal
+    ├── janela.rs    a moldura, o arrasto e a caixa de fechar, e a interface dentro dela
     └── bin/
         ├── ola.rs        o primeiro programa em Rust: monte, formatação e pilha
         ├── memoria.rs    confere `mapear` e o monte do lado de quem pede

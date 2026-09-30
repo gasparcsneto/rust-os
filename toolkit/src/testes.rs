@@ -18,6 +18,9 @@ fn r(x: u32, y: u32, largura: u32, altura: u32) -> Retangulo {
     }
 }
 
+const OK: u32 = 7;
+const CANCELAR: u32 = 8;
+
 /// Uma janela pequena: um título, um texto e dois botões numa linha.
 fn formulario() -> Pilha {
     formulario_com("linha um\nlinha dois")
@@ -33,8 +36,8 @@ fn formulario_com(conteudo: &str) -> Pilha {
         .com(
             Linha::nova()
                 .espaco(6)
-                .com(Botao::novo("OK"))
-                .com(Botao::novo("Cancelar")),
+                .com(Botao::novo("OK", OK))
+                .com(Botao::novo("Cancelar", CANCELAR)),
         )
 }
 
@@ -158,7 +161,7 @@ fn o_desenho_pinta_onde_a_descricao_diz() {
         largura,
     };
     let area = r(0, 0, largura, altura);
-    arvore::desenhar(&f, &mut tela, area);
+    arvore::desenhar(&f, &mut tela, area, None);
 
     // O fundo da coluna, no recuo.
     assert_eq!(tela.pixel(2, 2), Some(uso::FUNDO_DO_CONTEUDO.argb()));
@@ -196,7 +199,11 @@ fn o_rotulo_corta_na_area_e_nao_desenha_fora_dela() {
     };
     let lc = texto::CORPO.largura();
     // Cabem cinco letras e meia: saem cinco.
-    rotulo.desenhar(&mut tela, r(0, 0, 5 * lc + lc / 2, texto::CORPO.altura()));
+    rotulo.desenhar(
+        &mut tela,
+        r(0, 0, 5 * lc + lc / 2, texto::CORPO.altura()),
+        false,
+    );
     for y in 0..altura {
         for x in 5 * lc..largura {
             assert_eq!(
@@ -219,7 +226,7 @@ fn os_widgets_tem_as_cores_da_paleta() {
         pixels: &mut pixels,
         largura,
     };
-    Rotulo::novo("t", "H").desenhar(&mut tela, r(0, 0, 100, 20));
+    Rotulo::novo("t", "H").desenhar(&mut tela, r(0, 0, 100, 20), false);
     assert_eq!(tela.pixel(0, 0), Some(paleta::PAPEL.argb()));
     // A tinta pura só aparece onde a cobertura do glifo é inteira, e o
     // `H` regular chega a 227: o que se espera é a mistura da ardósia com
@@ -229,6 +236,140 @@ fn os_widgets_tem_as_cores_da_paleta() {
     let esperado = tipografia::misturar(paleta::PAPEL.argb(), paleta::ARDOSIA.argb(), maior);
     let tinta = (0..20).any(|y| (0..10).any(|x| tela.pixel(x, y) == Some(esperado)));
     assert!(tinta, "o texto nao e a ardosia");
-    Botao::novo("OK").desenhar(&mut tela, r(120, 0, 40, 18));
+    Botao::novo("OK", OK).desenhar(&mut tela, r(120, 0, 40, 18), false);
     assert_eq!(tela.pixel(121, 1), Some(paleta::ACO.argb()));
+}
+
+// A interação: os três caminhos até um widget.
+
+use protocolo::usuario::evento::acao;
+
+const AREA: Retangulo = Retangulo {
+    x: 0,
+    y: 0,
+    largura: 400,
+    altura: 300,
+};
+
+fn centro(r: Retangulo) -> (u32, u32) {
+    (r.x + r.largura / 2, r.y + r.altura / 2)
+}
+
+#[test]
+fn o_aperto_aciona_o_botao_debaixo_dele_e_lhe_da_o_foco() {
+    let mut ui = Interface::nova(formulario());
+    // O foco começa no primeiro que o recebe: o OK.
+    assert_eq!(ui.foco(), Some(4));
+    let cancelar = area_de(ui.raiz(), AREA, 5).unwrap();
+    let (x, y) = centro(cancelar);
+    assert_eq!(ui.apertar(AREA, x, y), Resposta::Acionado(CANCELAR));
+    assert_eq!(ui.foco(), Some(5));
+    // Um aperto no texto não aciona nada e não tira o foco do botão.
+    let texto = area_de(ui.raiz(), AREA, 2).unwrap();
+    let (x, y) = centro(texto);
+    assert_eq!(ui.apertar(AREA, x, y), Resposta::Nada);
+    assert_eq!(ui.foco(), Some(5));
+    // E fora de tudo, nada.
+    assert_eq!(ui.apertar(AREA, 399, 299), Resposta::Nada);
+}
+
+#[test]
+fn o_tab_da_a_volta_nos_que_recebem_o_foco() {
+    let mut ui = Interface::nova(formulario());
+    assert_eq!(ui.focaveis(), vec![4, 5]);
+    assert_eq!(ui.tecla('\t'), Resposta::Redesenhar);
+    assert_eq!(ui.foco(), Some(5));
+    assert_eq!(ui.tecla('\t'), Resposta::Redesenhar);
+    assert_eq!(ui.foco(), Some(4));
+    // O Enter e o espaço acionam o botão com o foco; uma letra, não.
+    assert_eq!(ui.tecla('\n'), Resposta::Acionado(OK));
+    assert_eq!(ui.tecla(' '), Resposta::Acionado(OK));
+    assert_eq!(ui.tecla('x'), Resposta::Nada);
+}
+
+#[test]
+fn o_agente_aciona_o_mesmo_botao_pelo_indice_da_arvore() {
+    let mut ui = Interface::nova(formulario());
+    // O índice é o que a descrição publicou: `base + índice` volta ao
+    // programa, e ele tira a base.
+    let mut e = Escritor::nova("x");
+    ui.descrever(AREA, 1000, &mut e);
+    let d = Descricao::ler(&e.terminar().unwrap()).unwrap();
+    let cancelar = d.elementos.iter().find(|e| e.rotulo == "Cancelar").unwrap();
+    let indice = (cancelar.id - 1000) as Indice;
+    assert_eq!(
+        ui.acao(indice, acao::PRESSIONAR),
+        Resposta::Acionado(CANCELAR)
+    );
+    // Sem mexer no foco, e só a ação que o botão entende.
+    assert_eq!(ui.foco(), Some(4));
+    assert_eq!(ui.acao(indice, 99), Resposta::Nada);
+    // Um texto não é acionado, e um índice que não existe não é nada.
+    assert_eq!(ui.acao(2, acao::PRESSIONAR), Resposta::Nada);
+    assert_eq!(ui.acao(99, acao::PRESSIONAR), Resposta::Nada);
+}
+
+#[test]
+fn o_foco_se_ve() {
+    // O botão com o foco tem o anel no acento; o outro, não.
+    let ui = Interface::nova(formulario());
+    let mut pixels = vec![0u32; (AREA.largura * AREA.altura) as usize];
+    let mut tela = Tela {
+        pixels: &mut pixels,
+        largura: AREA.largura,
+    };
+    ui.desenhar(&mut tela, AREA);
+    let (ok, cancelar) = (
+        area_de(ui.raiz(), AREA, 4).unwrap(),
+        area_de(ui.raiz(), AREA, 5).unwrap(),
+    );
+    let acento = aparencia::paleta::ACENTO.argb();
+    assert_eq!(tela.pixel(ok.x, ok.y + ok.altura / 2), Some(acento));
+    assert_eq!(
+        tela.pixel(cancelar.x, cancelar.y + cancelar.altura / 2),
+        Some(aparencia::paleta::ACO.argb())
+    );
+}
+
+#[test]
+fn a_resposta_mais_importante_vence() {
+    use Resposta::*;
+    assert_eq!(Nada.e(Redesenhar), Redesenhar);
+    assert_eq!(Redesenhar.e(Acionado(3)), Acionado(3));
+    assert_eq!(Acionado(3).e(Nada), Acionado(3));
+    assert_eq!(Nada.e(Nada), Nada);
+}
+
+/// Um widget só de teste, que responde onde foi apertado, nas coordenadas
+/// dele: `x * 1000 + y`.
+struct Sonda;
+
+impl Widget for Sonda {
+    fn medir(&self) -> (u32, u32) {
+        (50, 30)
+    }
+
+    fn tratar(&mut self, entrada: Entrada) -> Resposta {
+        match entrada {
+            Entrada::Aperto { x, y } => Resposta::Acionado(x * 1000 + y),
+            _ => Resposta::Nada,
+        }
+    }
+}
+
+#[test]
+fn o_aperto_chega_nas_coordenadas_do_widget() {
+    // A sonda fica depois de um recuo de 10 e de um texto: o aperto em
+    // (13, y) da janela é o (3, ...) dela.
+    let mut ui = Interface::nova(
+        Coluna::nova()
+            .recuo(10)
+            .com(Rotulo::novo("t", "x"))
+            .com(Sonda),
+    );
+    let sonda = area_de(ui.raiz(), AREA, 2).unwrap();
+    assert_eq!(
+        ui.apertar(AREA, sonda.x + 3, sonda.y + 4),
+        Resposta::Acionado(3004)
+    );
 }
