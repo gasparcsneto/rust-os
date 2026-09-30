@@ -17,6 +17,7 @@
 //!
 //! - [`Rotulo`]: texto que se lê, com um nome para a árvore;
 //! - [`Botao`]: algo que se aciona;
+//! - [`Campo`]: uma linha de texto que se edita;
 //! - [`Coluna`] e [`Linha`]: os filhos um depois do outro.
 //!
 //! E a [`Interface`], que guarda a árvore de uma janela e o foco, e leva a
@@ -44,7 +45,7 @@ pub use arvore::{Entrada, Indice, Resposta, Semantica, Widget};
 pub use interface::Interface;
 pub use protocolo::usuario::descricao::{Escritor, Retangulo, Tipo};
 pub use tela::Tela;
-pub use widgets::{Botao, Coluna, Linha, Pilha, Rotulo};
+pub use widgets::{Botao, Campo, Coluna, Linha, Pilha, Rotulo};
 
 #[cfg(test)]
 mod testes;

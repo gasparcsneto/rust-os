@@ -228,9 +228,14 @@ impl Janela {
         self.depois(resposta)
     }
 
-    /// Uma ação da árvore semântica — o `press` de um agente — no
-    /// elemento `id`. Devolve `None` se o `id` não é desta janela.
+    /// Uma ação da árvore semântica — o `press`, o `confirm`, o `cancel`
+    /// ou o `set_value` de um agente — no elemento `id`. Devolve `None` se o
+    /// `id` não é desta janela.
     pub fn acao(&mut self, id: i64, qual: i64) -> Option<Gesto> {
+        // O texto de um `set_value` espera no kernel, um por aviso, na
+        // ordem: tirá-lo antes de qualquer outra coisa, seja de que
+        // elemento for, é o que mantém os textos e os avisos em par.
+        let valor = (qual == acao::DEFINIR_VALOR).then(|| self.tirar_valor());
         if id == self.base {
             return Some(if qual == acao::PRESSIONAR {
                 Gesto::Fechar
@@ -240,8 +245,22 @@ impl Janela {
         }
         let ui = self.interface.as_mut()?;
         let indice = u32::try_from(id - self.base - 1).ok()?;
-        let resposta = ui.acao(indice, qual);
+        let resposta = match &valor {
+            Some(texto) => ui.definir_valor(indice, texto),
+            None => ui.acao(indice, qual),
+        };
         Some(self.depois(resposta))
+    }
+
+    /// O texto mais antigo que um agente pediu para um campo desta janela.
+    fn tirar_valor(&self) -> alloc::string::String {
+        let mut bytes = [0u8; protocolo::usuario::descricao::MAIOR_TEXTO];
+        let n = crate::sistema::valor(self.descritor(), &mut bytes);
+        if n < 0 {
+            crate::escreverln!("janela: um valor pedido nao estava no kernel: {}", n);
+            return alloc::string::String::new();
+        }
+        alloc::string::String::from(core::str::from_utf8(&bytes[..n as usize]).unwrap_or(""))
     }
 
     fn depois(&mut self, resposta: Resposta) -> Gesto {

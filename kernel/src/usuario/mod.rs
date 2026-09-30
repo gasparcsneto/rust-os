@@ -294,6 +294,7 @@ pub unsafe fn despachar(
         numero::CONTROLAR => controlar(a0, a1, a2),
         numero::DESCREVER => descrever(a0, a1, a2),
         numero::TERMINAL => terminal(a0),
+        numero::VALOR => valor(a0, a1, a2),
         // SAFETY: o quadro é o desta chamada, garantido por quem nos chamou.
         numero::BIFURCAR => unsafe { bifurcar(quadro) },
         numero::EXECUTAR => unsafe { executar(quadro, a0, a1) },
@@ -912,6 +913,45 @@ fn ler_do_terminal(chave: crate::pseudoterminal::Chave, ponteiro: u64, tamanho: 
         core::ptr::copy_nonoverlapping(buffer.as_ptr(), ponteiro as *mut u8, lidos);
     }
     lidos as i64
+}
+
+/// `valor(descritor, ptr, tamanho)`: o texto mais antigo que um agente
+/// pediu para um campo da janela da superfície — ver
+/// [`protocolo::usuario::numero::VALOR`].
+///
+/// Passa por um buffer do kernel, pelo motivo de [`ler_eventos`]: a tranca
+/// das superfícies não fica tomada enquanto se escreve na memória do
+/// processo.
+fn valor(descritor: u64, ponteiro: u64, tamanho: u64) -> i64 {
+    use crate::superficies::SemValor;
+    let Some(Some(descritores::Alvo::Superficie { chave })) =
+        crate::fios::com_descritores(|t| t.alvo(descritor))
+    else {
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return erro::DESCRITOR_INVALIDO;
+    };
+    let n = (tamanho as usize).min(protocolo::usuario::descricao::MAIOR_TEXTO);
+    if let Err(e) = validar_escrita(ponteiro, n as u64) {
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return e;
+    }
+    let mut buffer = [0u8; protocolo::usuario::descricao::MAIOR_TEXTO];
+    match crate::superficies::tirar_valor(chave, crate::fios::id_atual(), &mut buffer[..n]) {
+        Ok(lidos) => {
+            // SAFETY: `validar_escrita` confirmou os `n` bytes no espaço do
+            // usuário, mapeados e graváveis, e `lidos <= n`.
+            unsafe {
+                core::ptr::copy_nonoverlapping(buffer.as_ptr(), ponteiro as *mut u8, lidos);
+            }
+            lidos as i64
+        }
+        Err(SemValor::Nenhum) => erro::NAO_ENCONTRADO,
+        Err(SemValor::NaoCabe) => erro::TAMANHO_INVALIDO,
+        Err(SemValor::NaoEhSua) => {
+            RECUSADAS.fetch_add(1, Ordering::Relaxed);
+            erro::DESCRITOR_INVALIDO
+        }
+    }
 }
 
 /// `ler` num canal de eventos: eventos inteiros, ou o fio estaciona.

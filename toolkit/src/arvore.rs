@@ -96,6 +96,12 @@ pub trait Widget {
         Resposta::Nada
     }
 
+    /// Um valor novo, pedido por um agente pela árvore — o `set_value`. Só
+    /// o que tem valor editável o aceita.
+    fn definir_valor(&mut self, _valor: &str) -> Resposta {
+        Resposta::Nada
+    }
+
     /// O que o widget é na árvore semântica. `None` para o que só organiza
     /// os outros, como uma coluna: ela não é nada que alguém leia ou acione.
     fn semantica(&self) -> Option<Semantica<'_>> {

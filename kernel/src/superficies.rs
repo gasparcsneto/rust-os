@@ -110,6 +110,10 @@ struct Vaga {
     geracao: u64,
     /// O canal de entrada, se o processo escolheu um — ver [`Destino`].
     entrada: Option<crate::eventos::Chave>,
+    /// Os textos que um agente pediu para os campos desta janela, cada um
+    /// com o identificador do campo, na ordem dos pedidos — ver
+    /// [`enfileirar_valor`].
+    valores: alloc::collections::VecDeque<(i64, alloc::string::String)>,
     /// O que o processo disse que a janela é, se disse.
     descricao: Option<Descricao>,
     camada: Camada,
@@ -201,6 +205,7 @@ pub fn criar(dono: u64, largura: u32, altura: u32, endereco: u64) -> Result<Chav
         dono,
         geracao,
         entrada: None,
+        valores: alloc::collections::VecDeque::new(),
         descricao: None,
         camada,
         largura,
@@ -322,6 +327,81 @@ pub fn definir_entrada(
         }
         v.entrada = Some(canal);
         Ok(())
+    })
+}
+
+/// Quantos textos de campo esperam, no máximo, numa superfície.
+///
+/// Um processo que não os tira não faz o kernel guardar texto sem fim: o
+/// quinto pedido é recusado ao agente, com o motivo.
+pub const MAIS_VALORES: usize = 4;
+
+/// Guarda `texto` para o campo `id` da janela da `camada`, e devolve para
+/// quem vai o aviso.
+///
+/// # Por que uma fila, e não um lugar só
+///
+/// Porque o aviso — um evento de ação — e o texto andam separados: o texto
+/// não cabe num evento. Com um lugar só, dois campos definidos um depois do
+/// outro, antes de o processo rodar, deixariam no lugar o texto do segundo,
+/// e o processo, atendendo o aviso do primeiro, o poria no primeiro campo.
+/// Com a fila, cada aviso tira o texto dele, na ordem.
+pub fn enfileirar_valor(camada: u32, id: i64, texto: &str) -> Result<Destino, &'static str> {
+    com_vagas(|vagas| {
+        let v = vagas
+            .iter_mut()
+            .flatten()
+            .find(|v| v.camada.id() == camada)
+            .ok_or("a janela do campo fechou")?;
+        if v.valores.len() == MAIS_VALORES {
+            return Err("o dono da janela nao tirou os valores anteriores");
+        }
+        v.valores
+            .push_back((id, alloc::string::String::from(texto)));
+        Ok(v.destino())
+    })
+}
+
+/// Desiste do último texto guardado para a janela da `camada`: o aviso dele
+/// não chegou ao processo, e um texto sem aviso ficaria na frente do texto
+/// do próximo.
+pub fn desistir_do_valor(camada: u32) {
+    com_vagas(|vagas| {
+        if let Some(v) = vagas.iter_mut().flatten().find(|v| v.camada.id() == camada) {
+            v.valores.pop_back();
+        }
+    });
+}
+
+/// Por que um texto de campo não foi entregue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SemValor {
+    /// A superfície não é de quem pediu.
+    NaoEhSua,
+    /// Não há texto esperando.
+    Nenhum,
+    /// O texto é maior que o buffer; ele fica na fila.
+    NaoCabe,
+}
+
+/// Tira o texto mais antigo que espera na superfície da `chave`, se ela for
+/// de `dono` e ele couber em `destino`. Devolve quantos bytes.
+pub fn tirar_valor(chave: Chave, dono: u64, destino: &mut [u8]) -> Result<usize, SemValor> {
+    com_vagas(|vagas| {
+        let v = vagas
+            .get_mut(chave.vaga)
+            .and_then(Option::as_mut)
+            .filter(|v| confere(v, chave, dono))
+            .ok_or(SemValor::NaoEhSua)?;
+        let (_, texto) = v.valores.front().ok_or(SemValor::Nenhum)?;
+        let bytes = texto.as_bytes();
+        if bytes.len() > destino.len() {
+            return Err(SemValor::NaoCabe);
+        }
+        destino[..bytes.len()].copy_from_slice(bytes);
+        let n = bytes.len();
+        v.valores.pop_front();
+        Ok(n)
     })
 }
 

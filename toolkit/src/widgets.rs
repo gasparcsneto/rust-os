@@ -6,7 +6,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use aparencia::{medidas, texto, uso};
-use protocolo::usuario::descricao::{Retangulo, Tipo};
+use protocolo::usuario::descricao::{MAIOR_TEXTO, Retangulo, Tipo};
 use tipografia::Estilo;
 
 use protocolo::usuario::evento::acao;
@@ -186,6 +186,175 @@ impl Widget for Botao {
             | Entrada::Acao(acao::PRESSIONAR) => Resposta::Acionado(self.codigo),
             _ => Resposta::Nada,
         }
+    }
+}
+
+/// Uma linha de texto que se edita.
+///
+/// A pessoa digita com o foco nele, apaga com o backspace, põe o cursor com
+/// o aperto, e confirma com o Enter; o agente confirma, esvazia e troca o
+/// valor pela árvore — `confirm`, `cancel` e `set_value`. Os dois caminhos
+/// chegam aqui pelo mesmo [`Widget::tratar`], e o confirmar responde o
+/// código que o programa deu ao campo, venha de quem vier.
+pub struct Campo {
+    nome: String,
+    valor: String,
+    /// Onde o cursor está, em caracteres.
+    cursor: usize,
+    /// Quantas letras cabem à vista.
+    letras: u32,
+    codigo: u32,
+}
+
+impl Campo {
+    /// Um campo vazio com `letras` de largura, que responde `codigo` quando
+    /// confirmado. O `nome` é o rótulo dele na árvore.
+    pub fn novo(nome: &str, letras: u32, codigo: u32) -> Campo {
+        Campo {
+            nome: String::from(nome),
+            valor: String::new(),
+            cursor: 0,
+            letras: letras.max(1),
+            codigo,
+        }
+    }
+
+    pub fn valor(&self) -> &str {
+        &self.valor
+    }
+
+    fn caracteres(&self) -> usize {
+        self.valor.chars().count()
+    }
+
+    /// O byte onde o caractere `n` começa.
+    fn byte(&self, n: usize) -> usize {
+        self.valor
+            .char_indices()
+            .nth(n)
+            .map_or(self.valor.len(), |(i, _)| i)
+    }
+
+    /// O primeiro caractere à vista: o texto rola para o cursor não sair
+    /// dela, deixando uma coluna para ele depois do fim.
+    fn inicio(&self) -> usize {
+        self.cursor.saturating_sub(self.letras as usize - 1)
+    }
+
+    fn borda(foco: bool) -> u32 {
+        if foco { 2 } else { 1 }
+    }
+}
+
+impl Widget for Campo {
+    fn medir(&self) -> (u32, u32) {
+        (
+            self.letras * texto::CORPO.largura() + 2 * (medidas::FOLGA_DO_CAMPO + 2),
+            medidas::ALTURA_DO_CAMPO,
+        )
+    }
+
+    fn desenhar(&self, tela: &mut Tela, area: Retangulo, foco: bool) {
+        let papel = uso::FUNDO_DO_CONTEUDO.argb();
+        let (cor, b) = if foco {
+            (uso::BORDA_COM_FOCO.argb(), Campo::borda(true))
+        } else {
+            (uso::BORDA_DO_CAMPO.argb(), Campo::borda(false))
+        };
+        tela.preencher(area, cor);
+        let dentro = Retangulo {
+            x: area.x + b,
+            y: area.y + b,
+            largura: area.largura.saturating_sub(2 * b),
+            altura: area.altura.saturating_sub(2 * b),
+        };
+        tela.preencher(dentro, papel);
+        let lc = texto::CORPO.largura();
+        let x0 = area.x + 2 + medidas::FOLGA_DO_CAMPO;
+        let y = area.y + area.altura.saturating_sub(texto::CORPO.altura()) / 2;
+        let inicio = self.inicio();
+        let visivel: String = self
+            .valor
+            .chars()
+            .skip(inicio)
+            .take(self.letras as usize)
+            .collect();
+        tela.texto(
+            (x0, y),
+            &visivel,
+            texto::CORPO,
+            (uso::TEXTO_DO_CONTEUDO.argb(), papel),
+        );
+        if foco {
+            let x = x0 + (self.cursor - inicio) as u32 * lc;
+            tela.retangulo(x, y, 2, texto::CORPO.altura(), uso::CURSOR_DE_TEXTO.argb());
+        }
+    }
+
+    fn semantica(&self) -> Option<Semantica<'_>> {
+        Some(Semantica {
+            tipo: Tipo::Campo,
+            rotulo: &self.nome,
+            valor: &self.valor,
+        })
+    }
+
+    fn focavel(&self) -> bool {
+        true
+    }
+
+    fn tratar(&mut self, entrada: Entrada) -> Resposta {
+        match entrada {
+            Entrada::Tecla('\n') | Entrada::Acao(acao::CONFIRMAR) => {
+                Resposta::Acionado(self.codigo)
+            }
+            Entrada::Acao(acao::CANCELAR) => {
+                self.valor.clear();
+                self.cursor = 0;
+                Resposta::Redesenhar
+            }
+            Entrada::Tecla('\u{8}') => {
+                if self.cursor == 0 {
+                    return Resposta::Nada;
+                }
+                self.cursor -= 1;
+                let i = self.byte(self.cursor);
+                self.valor.remove(i);
+                Resposta::Redesenhar
+            }
+            Entrada::Tecla(c) if !c.is_control() => {
+                if self.valor.len() + c.len_utf8() > MAIOR_TEXTO {
+                    return Resposta::Nada;
+                }
+                let i = self.byte(self.cursor);
+                self.valor.insert(i, c);
+                self.cursor += 1;
+                Resposta::Redesenhar
+            }
+            Entrada::Aperto { x, .. } => {
+                let coluna = x.saturating_sub(2 + medidas::FOLGA_DO_CAMPO) / texto::CORPO.largura();
+                let cursor = (self.inicio() + coluna as usize).min(self.caracteres());
+                if cursor == self.cursor {
+                    return Resposta::Nada;
+                }
+                self.cursor = cursor;
+                Resposta::Redesenhar
+            }
+            _ => Resposta::Nada,
+        }
+    }
+
+    /// O valor inteiro trocado, cortado no teto de um valor da árvore, com
+    /// o cursor no fim — onde a pessoa continuaria digitando.
+    fn definir_valor(&mut self, valor: &str) -> Resposta {
+        let mut fim = valor.len().min(MAIOR_TEXTO);
+        while !valor.is_char_boundary(fim) {
+            fim -= 1;
+        }
+        self.valor.clear();
+        self.valor.push_str(&valor[..fim]);
+        self.cursor = self.caracteres();
+        Resposta::Redesenhar
     }
 }
 

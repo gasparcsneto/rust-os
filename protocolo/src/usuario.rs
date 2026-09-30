@@ -105,6 +105,21 @@ pub mod numero {
     /// O pseudo-terminal tem um dono só; o segundo ouve
     /// [`OCUPADO`](super::erro::OCUPADO).
     pub const TERMINAL: u64 = 15;
+    /// `valor(descritor, ptr, tamanho)`: o texto que um agente pediu para
+    /// um campo da janela da superfície `descritor` — ver o tipo `campo` em
+    /// [`descricao`](super::descricao).
+    ///
+    /// O pedido chega como um evento de [`ACAO`](super::evento::tipo::ACAO)
+    /// com [`DEFINIR_VALOR`](super::evento::acao::DEFINIR_VALOR), e o texto
+    /// não cabe num evento de 32 bytes: ele espera no kernel, numa fila da
+    /// superfície, e esta chamada tira o mais antigo. Um por evento, na
+    /// ordem dos eventos — dois campos definidos um depois do outro não
+    /// trocam de valor.
+    ///
+    /// Devolve quantos bytes escreveu; [`NAO_ENCONTRADO`](super::erro::NAO_ENCONTRADO)
+    /// sem texto esperando; [`TAMANHO_INVALIDO`](super::erro::TAMANHO_INVALIDO)
+    /// se o texto não cabe no buffer — e então ele continua na fila.
+    pub const VALOR: u64 = 16;
 }
 
 /// Erros devolvidos ao usuário, sempre negativos.
@@ -335,6 +350,13 @@ pub mod evento {
     pub mod acao {
         /// Acionar, como um clique num botão — o `press` da árvore.
         pub const PRESSIONAR: i64 = 1;
+        /// Confirmar um campo, como o Enter — o `confirm` da árvore.
+        pub const CONFIRMAR: i64 = 2;
+        /// Esvaziar um campo — o `cancel` da árvore.
+        pub const CANCELAR: i64 = 3;
+        /// Trocar o texto de um campo — o `set_value` da árvore. O texto
+        /// espera no kernel: ver [`VALOR`](crate::usuario::numero::VALOR).
+        pub const DEFINIR_VALOR: i64 = 4;
     }
 
     /// O bit do botão esquerdo em `c` de um evento de ponteiro.
@@ -419,7 +441,12 @@ pub mod evento {
 /// janela  <título>
 /// botao   <id> <x> <y> <largura> <altura> <rótulo>
 /// texto   <id> <x> <y> <largura> <altura> <rótulo> <valor>
+/// campo   <id> <x> <y> <largura> <altura> <rótulo> <valor>
 /// ```
+///
+/// Um `texto` se lê; um `campo` também se edita — na árvore, ele aceita
+/// confirmar, esvaziar e trocar o valor, e cada uma chega ao processo como
+/// uma [`ACAO`](evento::tipo::ACAO).
 ///
 /// A linha `janela` vem primeiro, e uma vez. O `id` é do servidor: é o que
 /// volta a ele num evento de [`ACAO`](evento::tipo::ACAO) quando alguém
@@ -473,6 +500,7 @@ pub mod descricao {
     pub enum Tipo {
         Botao,
         Texto,
+        Campo,
     }
 
     impl Tipo {
@@ -481,6 +509,7 @@ pub mod descricao {
             match self {
                 Tipo::Botao => "botao",
                 Tipo::Texto => "texto",
+                Tipo::Campo => "campo",
             }
         }
 
@@ -489,13 +518,14 @@ pub mod descricao {
             match palavra {
                 "botao" => Some(Tipo::Botao),
                 "texto" => Some(Tipo::Texto),
+                "campo" => Some(Tipo::Campo),
                 _ => None,
             }
         }
 
         /// O tipo leva um valor além do rótulo?
         pub const fn tem_valor(self) -> bool {
-            matches!(self, Tipo::Texto)
+            matches!(self, Tipo::Texto | Tipo::Campo)
         }
     }
 
@@ -572,7 +602,7 @@ pub mod descricao {
                     let tipo = campos
                         .next()
                         .and_then(Tipo::da_palavra)
-                        .ok_or("linha que nao e `botao` nem `texto`")?;
+                        .ok_or("linha que nao e `botao`, `texto` nem `campo`")?;
                     let mut numero = || -> Result<i64, &'static str> {
                         campos
                             .next()
@@ -591,7 +621,7 @@ pub mod descricao {
                     };
                     let rotulo = resolvido(campos.next().ok_or("elemento sem rotulo")?)?;
                     let valor = if tipo.tem_valor() {
-                        Some(resolvido(campos.next().ok_or("texto sem valor")?)?)
+                        Some(resolvido(campos.next().ok_or("texto ou campo sem valor")?)?)
                     } else {
                         None
                     };
@@ -723,11 +753,14 @@ mod testes {
                 r(1, 22, 398, 167),
                 "conteudo",
                 "linha 1\nlinha\\2",
-            );
+            )
+            .elemento(Tipo::Campo, 3, r(10, 60, 200, 22), "nome", "Ana\tMaria");
         let texto = e.terminar().unwrap();
         let d = Descricao::ler(&texto).unwrap();
         assert_eq!(d.titulo, "Sobre\to Duke");
-        assert_eq!(d.elementos.len(), 2);
+        assert_eq!(d.elementos.len(), 3);
+        assert_eq!(d.elementos[2].tipo, Tipo::Campo);
+        assert_eq!(d.elementos[2].valor.as_deref(), Some("Ana\tMaria"));
         assert_eq!(d.elementos[0].tipo, Tipo::Botao);
         assert_eq!(d.elementos[0].valor, None);
         assert_eq!(d.elementos[0].moldura, r(10, 2, 16, 16));
@@ -765,6 +798,7 @@ mod testes {
             "janela\tx\nbotao\t1\t-1\t0\t1\t1\tb",
             "janela\tx\nbotao\t1\t0\t0\t1\t1\tb\tsobra",
             "janela\tx\ntexto\t1\t0\t0\t1\t1\tsem valor",
+            "janela\tx\ncampo\t1\t0\t0\t1\t1\tsem valor",
             "janela\tx\\q",
         ] {
             assert!(Descricao::ler(ruim).is_err(), "aceitou {ruim:?}");

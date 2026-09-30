@@ -341,6 +341,7 @@ programas/           os programas de usuário, compilados à parte do kernel
         ├── herdeira.rs   depois de um `exec`, fecha a superfície herdada sem perder a sua
         ├── pseudo.rs     digita no interpretador pelo pseudo-terminal, e lê a resposta
         ├── entrada.rs    uma janela fora do servidor, com o canal de entrada dela
+        ├── formulario.rs dois campos e dois botões do toolkit, que o agente preenche
         └── terminal.rs   o Terminal: o interpretador numa janela, pelo pseudo-terminal
 
 xtask/src/

@@ -106,6 +106,11 @@ pub mod uso {
     /// Um botão, na barra ou numa janela.
     pub const FUNDO_DO_BOTAO: Cor = ACO;
 
+    /// Um campo de texto: o papel do conteúdo, com a borda do aço — e a do
+    /// acento, com o foco.
+    pub const BORDA_DO_CAMPO: Cor = ACO;
+    pub const BORDA_COM_FOCO: Cor = ACENTO;
+
     /// A moldura de uma janela.
     pub const BORDA_DA_JANELA: Cor = NOITE;
     pub const TITULO_COM_FOCO: Cor = ACENTO;
@@ -158,6 +163,11 @@ pub mod medidas {
 
     /// A folga entre a moldura do Terminal e a grade.
     pub const FOLGA_DA_GRADE: u32 = 4;
+
+    /// Um campo de texto: a folga entre a borda e o texto, e a altura — a
+    /// de um botão, para os dois ficarem lado a lado numa linha.
+    pub const FOLGA_DO_CAMPO: u32 = 4;
+    pub const ALTURA_DO_CAMPO: u32 = ALTURA_DO_BOTAO;
 }
 
 /// Os estilos de texto, pelo uso.

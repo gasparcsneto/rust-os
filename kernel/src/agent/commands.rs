@@ -1625,6 +1625,7 @@ fn escrever_camada(w: &mut JsonWriter, c: crate::grafico::compositor::InfoCamada
         let papel = match e.tipo {
             crate::superficies::Tipo::Botao => ui::Papel::Botao,
             crate::superficies::Tipo::Texto => ui::Papel::Texto,
+            crate::superficies::Tipo::Campo => ui::Papel::CampoDeTexto,
         };
         w.field_str("role", papel.nome())?;
         w.field_str("label", &e.rotulo)?;
@@ -1678,8 +1679,10 @@ fn ui_act(params: Json, w: &mut JsonWriter) -> fmt::Result {
     };
 
     // O valor chega como string JSON, e uma linha de comando carrega JSON
-    // nos parâmetros: as aspas vêm escapadas e precisam ser resolvidas.
-    let mut buffer = [0u8; crate::interpretador::LINHA_MAX];
+    // nos parâmetros: as aspas vêm escapadas e precisam ser resolvidas. Do
+    // tamanho do maior valor de um campo de janela: o da linha de comando é
+    // menor, e ela confere o dela.
+    let mut buffer = [0u8; protocolo::usuario::descricao::MAIOR_TEXTO];
     let valor = match params.member("value") {
         None => None,
         Some(v) => match v.desescapar_em(&mut buffer) {
@@ -1688,7 +1691,7 @@ fn ui_act(params: Json, w: &mut JsonWriter) -> fmt::Result {
                 w.field_bool("ok", false)?;
                 w.field_str(
                     "error",
-                    "o valor nao cabe na linha de comando, ou tem um escape invalido",
+                    "o valor e grande demais, ou tem um escape invalido",
                 )?;
                 return w.end_object();
             }

@@ -61,6 +61,10 @@ fn filho(fd_janela: u64, fd_temporaria: u64, endereco: u64) -> i64 {
     if sistema::descrever(fd_janela, "janela\tde outro") != erro::DESCRITOR_INVALIDO {
         return 7;
     }
+    // Nem tirar o texto que um agente pediu para um campo dela.
+    if sistema::valor(fd_janela, &mut [0u8; 8]) != erro::DESCRITOR_INVALIDO {
+        return 8;
+    }
     // Fechar o descritor herdado não fecha a camada do pai — a suíte a vê
     // na tela depois.
     sistema::fechar(fd_janela);

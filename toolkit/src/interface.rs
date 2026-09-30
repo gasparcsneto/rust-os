@@ -125,6 +125,13 @@ impl Interface {
             .unwrap_or(Resposta::Nada)
     }
 
+    /// Um valor novo para o widget `indice`, pedido por um agente pela
+    /// árvore. Como [`Interface::acao`], não mexe no foco.
+    pub fn definir_valor(&mut self, indice: Indice, valor: &str) -> Resposta {
+        com_widget_mut(self.raiz.as_mut(), indice, |w| w.definir_valor(valor))
+            .unwrap_or(Resposta::Nada)
+    }
+
     /// Uma ação da árvore semântica no widget `indice` — o `press` de um
     /// agente. Não mexe no foco: o agente aciona sem escolher, como quem
     /// aperta um atalho.

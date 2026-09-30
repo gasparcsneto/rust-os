@@ -5285,6 +5285,253 @@ fn terminal_operado() -> Resultado {
     Ok(())
 }
 
+/// Um formulário feito com o toolkit, preenchido por um agente pela árvore
+/// e por uma pessoa pelo teclado.
+///
+/// # O que este caso protege
+///
+/// O caminho do agente até um campo de uma janela de processo, que nenhum
+/// outro caso percorre — e a janela com interface do runtime, a primeira
+/// vez dentro do Duke:
+///
+/// - **`set_value` chega ao campo.** O texto espera no kernel, o processo
+///   é avisado e o tira com `valor`, e a janela se redescreve com ele;
+/// - **dois campos seguidos não trocam de valor.** Os dois pedidos antes
+///   de o processo rodar: cada aviso tira o texto dele, na ordem;
+/// - **o texto que não cabe fica.** A chamada `valor` com um buffer
+///   pequeno recusa, e o texto continua na fila para a leitura seguinte;
+/// - **a fila tem teto**, e o pedido além dele é recusado ao agente;
+/// - **confirmar e esvaziar** chegam ao campo, e o `press` ao botão;
+/// - **o teclado da pessoa** chega ao mesmo campo, pelo foco da janela.
+fn toolkit_o_agente_preenche_um_formulario() -> Resultado {
+    let resultado = formulario_preenchido();
+    let _ = crate::eventos::publicar(
+        "teste-formulario",
+        protocolo::usuario::evento::Evento {
+            tipo: protocolo::usuario::evento::tipo::ENCERRAR,
+            ..Default::default()
+        },
+    );
+    let _ = esperar_ate(|| !crate::superficies::foco_ativo(), 200);
+    crate::superficies::devolver_foco();
+    crate::teclado::esvaziar();
+    resultado
+}
+
+fn formulario_preenchido() -> Resultado {
+    use crate::superficies::{MAIS_VALORES, Tipo};
+    use crate::ui::{Acao, Efeito, Origem};
+    use crate::usuario::DIRETORIO_DOS_COMPILADOS;
+    use alloc::format;
+
+    if crate::tela::tela_fisica().is_none() {
+        return sem_framebuffer();
+    }
+    let desde = crate::log::total_emitidos();
+    let vezes = |procurada: &str| {
+        let mut n = 0;
+        crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+            n +=
+                (r.seq >= desde && r.subsistema == "usuario" && r.mensagem() == procurada) as usize;
+        });
+        n
+    };
+    let esperar = |linha: &str| -> Resultado {
+        esperar_ate(|| vezes(linha) >= 1, 600).map_err(|_| {
+            crate::log_error!("teste", "o formulario nao disse `{}`", linha);
+            "o formulario nao fez o que devia"
+        })
+    };
+    crate::teclado::esvaziar();
+    crate::usuario::lancar(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/formulario")))?;
+    esperar("formulario: pronto")?;
+
+    // Os elementos da janela, como a árvore os publica: a camada dela e o
+    // índice de cada um na descrição.
+    let mut camada = None;
+    crate::grafico::camadas(|c| {
+        if c.nome == crate::superficies::NOME_DA_CAMADA
+            && crate::superficies::com_descricao(c.id, |d| d.titulo == "Formulário") == Some(true)
+        {
+            camada = Some(c.id);
+        }
+    });
+    let camada = camada.ok_or("a janela do formulario nao esta na arvore")?;
+    let elemento = |rotulo: &str| -> Result<u32, &'static str> {
+        let indice = crate::superficies::com_descricao(camada, |d| {
+            d.elementos.iter().position(|e| e.rotulo == rotulo)
+        })
+        .flatten()
+        .ok_or("o formulario nao descreveu um elemento")?;
+        crate::ui::id_do_elemento(camada, indice).ok_or("sem identificador")
+    };
+    let valor_de = |rotulo: &str| -> Option<alloc::string::String> {
+        crate::superficies::com_descricao(camada, |d| {
+            d.elementos
+                .iter()
+                .find(|e| e.rotulo == rotulo)
+                .and_then(|e| e.valor.clone())
+        })
+        .flatten()
+    };
+    let (nome, sobrenome, ok) = (elemento("nome")?, elemento("sobrenome")?, elemento("OK")?);
+
+    // Um campo é um campo de texto na árvore: aceita o que a linha de
+    // comando aceita, e não `press`.
+    let tipo = crate::superficies::com_descricao(camada, |d| {
+        d.elementos
+            .iter()
+            .find(|e| e.rotulo == "nome")
+            .map(|e| e.tipo)
+    })
+    .flatten();
+    if tipo != Some(Tipo::Campo)
+        || crate::ui::acoes_de(nome) != [Acao::Confirmar, Acao::Cancelar, Acao::DefinirValor]
+    {
+        return Err("o campo nao e um campo de texto na arvore");
+    }
+
+    // Na árvore que o agente lê de verdade, o campo é um campo de texto.
+    let arvore = chamar("ui.tree", "{}")?;
+    if !arvore.contains(r#""role":"text_field","label":"nome""#) {
+        return Err("o campo nao aparece como text_field no ui.tree");
+    }
+
+    // O agente define o valor pelo `ui.act` de verdade, com um texto maior
+    // que a linha de comando do kernel — que tem 120 bytes —, e a janela o
+    // mostra.
+    let longo = "Ana Maria ".repeat(20);
+    let pedido = format!(r#"{{"id":{nome},"action":"set_value","value":"{longo}"}}"#);
+    let resposta = chamar("ui.act", &pedido)?;
+    if !resposta.contains(r#""ok":true"#) {
+        crate::log_error!("teste", "ui.act respondeu {}", resposta);
+        return Err("o set_value pelo ui.act num campo foi recusado");
+    }
+    esperar_ate(|| valor_de("nome").as_deref() == Some(longo.as_str()), 600)
+        .map_err(|_| "o valor pedido pelo agente nao chegou ao campo")?;
+    // O segundo, com a sonda armada: o programa o lê antes num buffer de um
+    // byte, a chamada recusa, e o texto fica na fila para a janela.
+    crate::eventos::publicar(
+        "teste-formulario",
+        protocolo::usuario::evento::Evento {
+            tipo: protocolo::usuario::evento::tipo::TESTE,
+            a: 1,
+            ..Default::default()
+        },
+    )
+    .map_err(|_| "o formulario nao escuta o canal dele")?;
+    let efeito = crate::ui::agir(nome, Acao::DefinirValor, Some("Ana Maria"), Origem::Agente)?;
+    if efeito != Efeito::ValorDefinido {
+        return Err("o set_value num campo nao disse que definiu o valor");
+    }
+    esperar(&format!(
+        "formulario: sonda {}",
+        protocolo::usuario::erro::TAMANHO_INVALIDO
+    ))?;
+    esperar_ate(|| valor_de("nome").as_deref() == Some("Ana Maria"), 600)
+        .map_err(|_| "o texto que nao coube no buffer saiu da fila")?;
+
+    // Os dois campos, sem o processo rodar entre os pedidos: cada um fica
+    // com o seu.
+    crate::arch::sem_interrupcoes(|| -> Resultado {
+        crate::ui::agir(nome, Acao::DefinirValor, Some("Beatriz"), Origem::Agente)?;
+        crate::ui::agir(sobrenome, Acao::DefinirValor, Some("Souza"), Origem::Agente)?;
+        Ok(())
+    })?;
+    esperar_ate(
+        || {
+            valor_de("nome").as_deref() == Some("Beatriz")
+                && valor_de("sobrenome").as_deref() == Some("Souza")
+        },
+        600,
+    )
+    .map_err(|_| "dois campos definidos em seguida trocaram de valor")?;
+
+    // A fila tem teto: com o processo parado, o pedido além dele é recusado.
+    let recusado = crate::arch::sem_interrupcoes(|| {
+        for i in 0..MAIS_VALORES {
+            let texto = format!("v{i}");
+            if crate::ui::agir(nome, Acao::DefinirValor, Some(&texto), Origem::Agente).is_err() {
+                return false;
+            }
+        }
+        crate::ui::agir(nome, Acao::DefinirValor, Some("demais"), Origem::Agente).is_err()
+    });
+    if !recusado {
+        return Err("a fila de valores de um campo nao tem teto");
+    }
+    let ultimo = format!("v{}", MAIS_VALORES - 1);
+    esperar_ate(|| valor_de("nome").as_deref() == Some(ultimo.as_str()), 600)
+        .map_err(|_| "os valores enfileirados nao chegaram ao campo")?;
+
+    // O aviso que não chega leva o texto junto. Com o canal do programa
+    // cheio — e o programa parado —, o `set_value` é recusado; se o texto
+    // ficasse na fila sem o aviso dele, o próximo aviso traria esse texto,
+    // e não o seu.
+    let recusado = crate::arch::sem_interrupcoes(|| {
+        for _ in 0..crate::eventos::CAPACIDADE {
+            let _ = crate::eventos::publicar(
+                "teste-formulario",
+                protocolo::usuario::evento::Evento {
+                    tipo: protocolo::usuario::evento::tipo::TESTE,
+                    ..Default::default()
+                },
+            );
+        }
+        crate::ui::agir(nome, Acao::DefinirValor, Some("perdido"), Origem::Agente).is_err()
+    });
+    if !recusado {
+        return Err("o set_value com o canal do programa cheio foi aceito");
+    }
+    let _ = esperar_ate(
+        || crate::eventos::estado("teste-formulario").is_some_and(|e| e.na_fila == 0),
+        600,
+    );
+    crate::ui::agir(nome, Acao::DefinirValor, Some(&ultimo), Origem::Agente)?;
+    // O programa de volta à espera, com a fila vazia: ele atendeu tudo.
+    let _ = esperar_ate(
+        || {
+            crate::eventos::estado("teste-formulario")
+                .is_some_and(|e| e.na_fila == 0 && e.esperando)
+        },
+        600,
+    );
+    if valor_de("nome").as_deref() != Some(ultimo.as_str()) {
+        crate::log_error!("teste", "o campo ficou com {:?}", valor_de("nome"));
+        return Err("o texto de um aviso que nao chegou ficou na fila");
+    }
+
+    // Confirmar chega ao campo, com o código dele; esvaziar o esvazia.
+    let efeito = crate::ui::agir(nome, Acao::Confirmar, None, Origem::Agente)?;
+    if efeito != Efeito::Confirmado {
+        return Err("o confirm num campo nao disse que confirmou");
+    }
+    esperar(&format!("formulario: acionado 1 [{ultimo}] [Souza]"))?;
+    crate::ui::agir(sobrenome, Acao::Cancelar, None, Origem::Agente)?;
+    esperar_ate(|| valor_de("sobrenome").as_deref() == Some(""), 600)
+        .map_err(|_| "o cancel nao esvaziou o campo")?;
+    // E o `press` no botão.
+    crate::ui::agir(ok, Acao::Pressionar, None, Origem::Agente)?;
+    esperar(&format!("formulario: acionado 3 [{ultimo}] []"))?;
+
+    // A pessoa, pelo teclado: o foco da janela está no primeiro campo, e o
+    // backspace e as letras chegam a ele pelo mesmo caminho.
+    crate::teclado::evento(0x0E, true); // backspace
+    crate::teclado::evento(0x0E, false);
+    for codigo in [0x2D, 0x15] {
+        crate::teclado::evento(codigo, true);
+        crate::teclado::evento(codigo, false);
+    }
+    // O último valor, sem a última letra, e `xy` depois.
+    let esperado = format!("{}xy", &ultimo[..ultimo.len() - 1]);
+    esperar_ate(
+        || valor_de("nome").as_deref() == Some(esperado.as_str()),
+        600,
+    )
+    .map_err(|_| "o teclado da pessoa nao chegou ao campo com o foco")?;
+    Ok(())
+}
+
 fn sobre_o_duke() -> Resultado {
     use crate::ui::{Acao, ID_DO_BOTAO_SOBRE, Origem};
     use crate::usuario::DIRETORIO_DOS_COMPILADOS;
@@ -12528,6 +12775,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "terminal: digita e mostra a resposta",
         f: terminal_digita_e_mostra_a_resposta,
+    },
+    Caso {
+        nome: "toolkit: o agente preenche um formulario",
+        f: toolkit_o_agente_preenche_um_formulario,
     },
     Caso {
         nome: "usb: o relatorio hid vira teclas",

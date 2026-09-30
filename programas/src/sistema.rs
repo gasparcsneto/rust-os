@@ -186,6 +186,21 @@ pub fn terminal(canal: u64) -> i64 {
     unsafe { chamar(numero::TERMINAL, canal, 0, 0) }
 }
 
+/// O texto mais antigo que um agente pediu para um campo da janela da
+/// superfície `descritor` — ver [`numero::VALOR`]. Quantos bytes vieram, ou
+/// um erro: `NAO_ENCONTRADO` sem texto esperando.
+pub fn valor(descritor: u64, destino: &mut [u8]) -> i64 {
+    // SAFETY: a fatia é deste processo, gravável, e tem o tamanho dito.
+    unsafe {
+        chamar(
+            numero::VALOR,
+            descritor,
+            destino.as_mut_ptr() as u64,
+            destino.len() as u64,
+        )
+    }
+}
+
 /// Abre o arquivo do `caminho`. Um descritor, ou um erro.
 pub fn abrir(caminho: &str) -> i64 {
     // SAFETY: a fatia é deste processo e tem o tamanho dito.

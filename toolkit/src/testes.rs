@@ -373,3 +373,158 @@ fn o_aperto_chega_nas_coordenadas_do_widget() {
         Resposta::Acionado(3004)
     );
 }
+
+// O campo de texto.
+
+fn campo_com_foco() -> Interface {
+    Interface::nova(Coluna::nova().com(Campo::novo("nome", 5, 9)))
+}
+
+fn valor(ui: &Interface) -> alloc::string::String {
+    let mut v = alloc::string::String::new();
+    arvore::percorrer(ui.raiz(), AREA, &mut |_, w, _| {
+        if let Some(s) = w.semantica() {
+            v = alloc::string::String::from(s.valor);
+        }
+    });
+    v
+}
+
+#[test]
+fn o_campo_recebe_o_que_se_digita_e_apaga() {
+    let mut ui = campo_com_foco();
+    assert_eq!(ui.foco(), Some(1));
+    for c in "ação".chars() {
+        assert_eq!(ui.tecla(c), Resposta::Redesenhar);
+    }
+    assert_eq!(valor(&ui), "ação");
+    assert_eq!(ui.tecla('\u{8}'), Resposta::Redesenhar);
+    assert_eq!(valor(&ui), "açã");
+    // Um controle que não é o apagar nem o Enter não entra.
+    assert_eq!(ui.tecla('\u{1}'), Resposta::Nada);
+    // O Enter confirma, com o código do campo.
+    assert_eq!(ui.tecla('\n'), Resposta::Acionado(9));
+    // Apagar com o campo vazio não faz nada.
+    for _ in 0..3 {
+        ui.tecla('\u{8}');
+    }
+    assert_eq!(ui.tecla('\u{8}'), Resposta::Nada);
+}
+
+#[test]
+fn o_agente_confirma_esvazia_e_troca_o_valor() {
+    let mut ui = campo_com_foco();
+    assert_eq!(ui.definir_valor(1, "Ana"), Resposta::Redesenhar);
+    assert_eq!(valor(&ui), "Ana");
+    // O cursor fica no fim: a pessoa continua de onde o agente parou.
+    ui.tecla('!');
+    assert_eq!(valor(&ui), "Ana!");
+    assert_eq!(ui.acao(1, acao::CONFIRMAR), Resposta::Acionado(9));
+    assert_eq!(ui.acao(1, acao::PRESSIONAR), Resposta::Nada);
+    assert_eq!(ui.acao(1, acao::CANCELAR), Resposta::Redesenhar);
+    assert_eq!(valor(&ui), "");
+    // Esvaziar leva o cursor ao começo: o que se digita depois entra, e o
+    // apagar o tira — com o cursor no fim antigo, o apagar cairia fora.
+    ui.tecla('x');
+    ui.tecla('\u{8}');
+    assert_eq!(valor(&ui), "");
+    // O valor grande demais é cortado no teto, numa fronteira de letra: o
+    // `a` na frente põe o teto no meio de um `é`.
+    let teto = protocolo::usuario::descricao::MAIOR_TEXTO;
+    let grande = alloc::format!("a{}", "é".repeat(teto));
+    ui.definir_valor(1, &grande);
+    assert_eq!(valor(&ui).len(), teto - 1);
+    // E a pessoa não passa do teto digitando.
+    ui.definir_valor(1, &"a".repeat(teto));
+    assert_eq!(ui.tecla('b'), Resposta::Nada);
+    assert_eq!(valor(&ui).len(), teto);
+    // E um widget sem valor não aceita.
+    let mut ui = Interface::nova(formulario());
+    assert_eq!(ui.definir_valor(4, "x"), Resposta::Nada);
+}
+
+#[test]
+fn o_campo_e_um_campo_na_descricao() {
+    let mut ui = campo_com_foco();
+    ui.definir_valor(1, "Ana\tMaria");
+    let mut e = Escritor::nova("x");
+    ui.descrever(AREA, 0, &mut e);
+    let d = Descricao::ler(&e.terminar().unwrap()).unwrap();
+    assert_eq!(d.elementos[0].tipo, Tipo::Campo);
+    assert_eq!(d.elementos[0].rotulo, "nome");
+    assert_eq!(d.elementos[0].valor.as_deref(), Some("Ana\tMaria"));
+}
+
+#[test]
+fn o_aperto_poe_o_cursor_e_o_texto_rola_para_ele() {
+    let mut ui = campo_com_foco();
+    ui.definir_valor(1, "abcdefgh");
+    let area = area_de(ui.raiz(), AREA, 1).unwrap();
+    let lc = texto::CORPO.largura();
+    // O campo mostra cinco letras, e o cursor no fim: à vista, `efgh` e o
+    // cursor. O aperto na primeira coluna põe o cursor antes do `e`.
+    let x0 = area.x + 2 + medidas::FOLGA_DO_CAMPO;
+    assert_eq!(ui.apertar(AREA, x0 + 1, area.y + 5), Resposta::Redesenhar);
+    ui.tecla('_');
+    assert_eq!(valor(&ui), "abcd_efgh");
+    // Depois de digitar, o cursor anda e o texto rola com ele: à vista,
+    // `bcd_e`, e a quarta coluna é logo depois do `_`.
+    ui.apertar(AREA, x0 + 4 * lc + 1, area.y + 5);
+    ui.tecla('!');
+    assert_eq!(valor(&ui), "abcd_!efgh");
+    // Com um texto curto, um aperto além do fim põe o cursor no fim.
+    ui.definir_valor(1, "ab");
+    ui.apertar(AREA, x0 + 1, area.y + 5);
+    ui.apertar(AREA, x0 + 4 * lc + 1, area.y + 5);
+    ui.tecla('!');
+    assert_eq!(valor(&ui), "ab!");
+    // O apagar tira a letra antes do cursor, e não a última.
+    ui.apertar(AREA, x0 + lc + 1, area.y + 5);
+    ui.tecla('\u{8}');
+    assert_eq!(valor(&ui), "b!");
+}
+
+#[test]
+fn o_foco_do_campo_se_ve() {
+    let ui = campo_com_foco();
+    let mut pixels = vec![0u32; (AREA.largura * AREA.altura) as usize];
+    let mut tela = Tela {
+        pixels: &mut pixels,
+        largura: AREA.largura,
+    };
+    ui.desenhar(&mut tela, AREA);
+    let area = area_de(ui.raiz(), AREA, 1).unwrap();
+    // A borda do acento, com dois pixels, com o foco; e o cursor de texto
+    // no começo.
+    for x in [area.x, area.x + 1] {
+        assert_eq!(
+            tela.pixel(x, area.y + area.altura / 2),
+            Some(aparencia::paleta::ACENTO.argb())
+        );
+    }
+    let x0 = area.x + 2 + medidas::FOLGA_DO_CAMPO;
+    let y = area.y + area.altura.saturating_sub(texto::CORPO.altura()) / 2;
+    assert_eq!(
+        tela.pixel(x0, y + 2),
+        Some(aparencia::uso::CURSOR_DE_TEXTO.argb())
+    );
+}
+
+#[test]
+fn sem_o_foco_a_borda_e_fina_e_discreta() {
+    let ui = campo_com_foco();
+    let mut pixels = vec![0u32; (AREA.largura * AREA.altura) as usize];
+    let mut tela = Tela {
+        pixels: &mut pixels,
+        largura: AREA.largura,
+    };
+    arvore::desenhar(ui.raiz(), &mut tela, AREA, None);
+    let area = area_de(ui.raiz(), AREA, 1).unwrap();
+    let meio = area.y + area.altura / 2;
+    assert_eq!(tela.pixel(area.x, meio), Some(uso::BORDA_DO_CAMPO.argb()));
+    assert_eq!(
+        tela.pixel(area.x + 1, meio),
+        Some(uso::FUNDO_DO_CONTEUDO.argb())
+    );
+    assert_ne!(uso::BORDA_DO_CAMPO, uso::BORDA_COM_FOCO);
+}

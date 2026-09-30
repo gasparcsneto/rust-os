@@ -276,12 +276,16 @@ pub fn acoes_de(id: u32) -> &'static [Acao] {
     match id {
         ID_DA_LINHA_DE_COMANDO => &[Acao::Confirmar, Acao::Cancelar, Acao::DefinirValor],
         ID_DO_BOTAO_LIMPAR | ID_DO_BOTAO_SOBRE | ID_DO_BOTAO_TERMINAL => &[Acao::Pressionar],
-        // Um botão que um processo descreveu. O que ele faz é do processo;
-        // o kernel só leva o pedido.
-        id if com_elemento(id, |e| e.tipo == crate::superficies::Tipo::Botao) == Some(true) => {
-            &[Acao::Pressionar]
-        }
-        _ => &[],
+        // Um elemento que um processo descreveu. O que ele faz é do
+        // processo; o kernel só leva o pedido — o botão aceita o que um
+        // botão aceita, e o campo o que a linha de comando aceita.
+        id => match com_elemento(id, |e| e.tipo) {
+            Some(crate::superficies::Tipo::Botao) => &[Acao::Pressionar],
+            Some(crate::superficies::Tipo::Campo) => {
+                &[Acao::Confirmar, Acao::Cancelar, Acao::DefinirValor]
+            }
+            _ => &[],
+        },
     }
 }
 
@@ -346,6 +350,7 @@ pub fn e_janela(c: &crate::grafico::compositor::InfoCamada) -> bool {
 }
 
 /// O que uma ação produziu.
+#[derive(Debug, PartialEq, Eq)]
 pub enum Efeito {
     /// O valor do elemento mudou.
     ValorDefinido,
@@ -356,6 +361,9 @@ pub enum Efeito {
     Executado(alloc::string::String),
     /// O botão foi acionado.
     Pressionado,
+    /// O campo de uma janela foi confirmado: o dono dela foi avisado, e o
+    /// que confirmar faz é dele.
+    Confirmado,
 }
 
 /// Age sobre um elemento, pelo mesmo caminho de quem está na frente da
@@ -423,6 +431,13 @@ fn executar(
     if !acoes_de(id).contains(&acao) {
         return Err("o elemento nao aceita esta acao");
     }
+    // Um campo de uma janela de processo: o pedido vai ao dono dela.
+    if id != ID_DA_LINHA_DE_COMANDO
+        && let Some(do_processo) = com_elemento(id, |e| e.id)
+        && acao != Acao::Pressionar
+    {
+        return agir_no_campo(id, do_processo, acao, valor);
+    }
     match acao {
         Acao::DefinirValor => {
             let valor = valor.ok_or("set_value precisa de `value`")?;
@@ -447,6 +462,56 @@ fn executar(
                 crate::barra::pressionar();
             }
             Ok(Efeito::Pressionado)
+        }
+    }
+}
+
+/// Leva ao processo dono da janela uma ação num campo que ele descreveu:
+/// confirmar, esvaziar, ou trocar o valor.
+///
+/// O texto de um `set_value` não cabe no evento: ele espera no kernel, na
+/// fila da superfície, e o processo o tira com a chamada `valor` — ver
+/// [`crate::superficies::enfileirar_valor`]. Se o aviso não chegar ao
+/// processo, o texto sai da fila: sem aviso, ele ficaria na frente do texto
+/// do próximo.
+fn agir_no_campo(
+    id: u32,
+    id_do_processo: i64,
+    acao: Acao,
+    valor: Option<&str>,
+) -> Result<Efeito, &'static str> {
+    use protocolo::usuario::evento::{Evento, acao as codigo, tipo};
+    let (camada, _) = elemento_de(id).ok_or("o elemento nao e de uma janela")?;
+    let (numero, efeito) = match acao {
+        Acao::Confirmar => (codigo::CONFIRMAR, Efeito::Confirmado),
+        Acao::Cancelar => (codigo::CANCELAR, Efeito::Cancelado),
+        Acao::DefinirValor => (codigo::DEFINIR_VALOR, Efeito::ValorDefinido),
+        Acao::Pressionar => return Err("o elemento nao aceita esta acao"),
+    };
+    let destino = if acao == Acao::DefinirValor {
+        let valor = valor.ok_or("set_value precisa de `value`")?;
+        crate::superficies::enfileirar_valor(camada, id_do_processo, valor)?
+    } else {
+        crate::superficies::destino_da_camada(camada).ok_or("a janela do elemento fechou")?
+    };
+    let evento = Evento {
+        tipo: tipo::ACAO,
+        a: id_do_processo,
+        b: numero,
+        c: 0,
+    };
+    match crate::superficies::publicar_para(destino, evento) {
+        Ok(()) => Ok(efeito),
+        Err(motivo) => {
+            if acao == Acao::DefinirValor {
+                crate::superficies::desistir_do_valor(camada);
+            }
+            Err(match motivo {
+                crate::eventos::NaoPublicado::SemOuvinte => {
+                    "o dono da janela nao escuta o canal dela"
+                }
+                crate::eventos::NaoPublicado::Cheio => "a fila do dono da janela esta cheia",
+            })
         }
     }
 }
