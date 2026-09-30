@@ -524,9 +524,9 @@ $ cargo xtask agent log.tail '{"count":3}'
 ... info  "usuario" "processo encerrou com codigo 42"
 ```
 
-As chamadas de sistema são quinze: `sair`, `escrever`, `id`, `ceder`,
+As chamadas de sistema são dezesseis: `sair`, `escrever`, `id`, `ceder`,
 `bifurcar`, `executar`, `abrir`, `ler`, `fechar`, `esperar`, `mapear`,
-`escutar`, `superficie`, `controlar` e `descrever`. Os
+`escutar`, `superficie`, `controlar`, `descrever` e `terminal`. Os
 números, os erros e o mapa do espaço do usuário moram em
 `protocolo::usuario`, que o kernel e os programas incluem — uma declaração
 só, pelo motivo de sempre: duas iguais são duas que podem divergir, e um
@@ -748,9 +748,10 @@ canal:
   contar o cursor nem as invisíveis. Um aperto sobre uma janela **captura** o
   ponteiro até soltar: arrastando depressa, ele sai da janela antes de ela
   acompanhar, e sem a captura o resto do arrasto viraria clique do kernel;
-- **as teclas**, enquanto uma janela tem o foco. O servidor o pede com
-  `controlar(FOCO)`; um clique fora de toda janela o devolve ao kernel, e o
-  servidor é avisado para apagar a barra de título. Se o servidor morrer com
+- **as teclas**, enquanto uma janela tem o foco. O servidor o pedia com
+  `controlar(FOCO)` — desde o Terminal, é o kernel que o dá, no aperto do
+  botão; ver abaixo —; um clique fora de toda janela o devolve ao kernel, e
+  o servidor é avisado para apagar a barra de título. Se o servidor morrer com
   o foco, a tecla segue para o console em vez de sumir, e o coletor devolve
   o foco ao kernel na volta seguinte;
 - **os pedidos de abrir** uma janela, com o tamanho da tela para
@@ -877,6 +878,82 @@ letras acentuadas, e o nome na barra contra o desenho em negrito, com o
 regular conferido como diferente. O pacote tem os próprios testes, no
 hospedeiro: os glifos do português nos três estilos, o substituto, as
 dimensões e a mistura, exata nos extremos e arredondando no meio.
+
+**O Terminal.** A primeira janela de trabalho, e a primeira parte da fase
+11. O console era a camada de baixo do compositor, desenhada pelo kernel;
+o Terminal é um programa, com a janela dele, e o interpretador do outro
+lado de um descritor. Não há um segundo interpretador: o console continua
+embaixo, desenhando o mesmo texto — é o fundo, e a reserva, o que se vê no
+boot antes de o Terminal subir e o que a tela de falha cobre. Veio em
+quatro etapas.
+
+**O pseudo-terminal.** `terminal(canal)` abre o interpretador visto de um
+processo, e devolve um descritor. Escrever nele é digitar: cada caractere
+entra na fila do teclado que o interpretador lê, como se tivesse sido
+digitado na máquina — só texto, a quebra de linha e o apagar, porque a
+mesma fila carrega F1, F2 e o clique, e um processo não aperta botões do
+kernel por ali. Ler é a saída: tudo o que passa pelo `_print` vai também
+para um anel de 16 KiB, desde o boot, e o Terminal começa mostrando o que
+aconteceu antes dele. A leitura não bloqueia — o processo espera no canal
+de eventos, onde o kernel avisa com `SAIDA`, e assim espera o teclado, o
+ponteiro e a saída num lugar só. O aviso é dado pelo coletor de fios, e
+não pelo `_print`: o `_print` roda dentro da tranca do escalonador, e
+publicar ali acordaria o ouvinte tomando a mesma tranca. Um dono de cada
+vez, com uma geração na chave, como os canais e as superfícies; o dono
+morto não segura o pseudo-terminal. `display.info` ganhou `terminal`: o
+dono, os avisos, as teclas digitadas e os bytes que saíram do anel sem
+ninguém lê-los.
+
+**Cada superfície recebe a sua entrada.** Com dois processos com janela,
+a entrada não podia ir sempre ao servidor. `controlar(fd, ENTRADA, canal)`
+aponta a entrada de uma superfície para um canal que o processo escuta —
+o ponteiro sobre ela, as teclas com o foco nela, o foco perdido e as ações
+da árvore vão para lá; sem escolher, vão para o canal das janelas. Um
+canal que o processo não escuta é recusado, inclusive o que um filho
+herdou do pai. E o kernel passou a dar o foco no aperto do botão, em vez
+de esperar o dono pedi-lo: o pedido atrasado era o que fazia um clique
+fora ser desfeito — a corrida da etapa 6 —, e o servidor agora só pede o
+foco para a janela que acabou de abrir. Quem perde o foco é avisado no
+canal dele, e só quando ele sai para outro canal.
+
+**A janela vai para o runtime.** A moldura, a barra de título, a caixa de
+fechar e o arrasto moravam no servidor; o Terminal seria a segunda cópia.
+`programas::janela` é a janela uma vez só, e o servidor passou a usá-la
+sem mudar um pixel nem um elemento da árvore.
+
+**O programa.** Uma grade de 80 por 24, com 200 linhas guardadas, e o
+cursor na última: o kernel manda texto, a quebra, o retorno e o apagar —
+que volta uma coluna sem apagar, porque o interpretador apaga escrevendo
+um espaço por cima. O kernel o lança no boot, ao lado do servidor, com o
+foco. Depois, o botão **Terminal** da barra, com a F3: com um Terminal no
+ar, o pedido vai a ele, e ele vem para a frente; sem nenhum, vai ao
+servidor, que o lança bifurcando duas vezes — o servidor nunca espera
+ninguém, e um filho direto viraria zumbi.
+
+A fumaça fecha o caminho da pessoa: digita `agent.ping` no teclado da
+máquina e confere, pela árvore, que o Terminal mostra a linha depois do
+prompt e a resposta. Foi ela que achou teclas perdidas no ARM emulado, a
+vinte milissegundos por tecla. Na primeira versão, o Terminal redesenhava
+a grade inteira a cada eco, e chegaram `agent.` e o Enter — o `ping` se
+perdeu. Redesenhando só a linha que mudou, a perda ficou mais rara, e não
+sumiu: duas fumaças em cinco. A outra metade era do driver. A colheita do
+teclado virtio tinha oito posições, que são duas teclas — e não quatro,
+como o comentário dizia: soltar também é evento. Um registro temporário em
+cada colheita mostrou a perda coincidindo com os oito buffers cheios, e
+nenhuma fumaça sem perda com uma colheita cheia. Com trinta e duas
+posições nas filas virtio, quatro fumaças seguidas no ARM, e nenhuma
+colheita perto do teto.
+
+Trinta e oito mutações nas quatro etapas, e as trinta e oito reprovadas —
+quatro delas só depois de o caso ser reforçado, cada uma mostrando o que
+ele não perguntava. A escrita que pulava o que não coube na fila, em vez de
+parar, dava a mesma conta para uma linha só de texto. Abrir sem avisar do
+que já estava no anel passava porque o programa lê logo ao abrir. Tirar a
+captura do ponteiro no movimento passava porque o soltar levava a posição
+final, e o caso só olhava o fim do arrasto. E o servidor voltar a pedir o
+foco no aperto passava com uma janela só: com dois processos, o pedido
+atrasado tomava o foco do outro, e o foco ficava com ninguém — o caso
+provoca essa corrida agora.
 
 **A proteção é testada, não presumida.** Existe um segundo programa que tenta
 ler a memória do kernel. O caso `usuario: nao alcanca o kernel` exige duas
@@ -2433,7 +2510,8 @@ padronizado.
       **Sobre** da barra, pela F2 ou pelo agente — aberta, arrastada e
       fechada pelo mouse de verdade na fumaça; e a tipografia — uma fonte
       num lugar só, para o kernel e os programas, com as letras do português,
-      negrito e um tamanho de título. O console como janela é a fase 11.
+      negrito e um tamanho de título. O console como janela é a fase 11 —
+      e ela começou por aí.
       E aqui a inversão do projeto encontra a interface gráfica. O servidor de
       janelas publica uma **árvore semântica** — que janelas existem, que
       controles, o que cada um faz — e os pixels são a renderização dela, do
@@ -2452,7 +2530,12 @@ padronizado.
       um canal — em vez da camada de baixo do compositor, desenhada pelo
       kernel. É a primeira janela de trabalho, e a que tira do kernel a
       última coisa que ele desenha para uma pessoa além da barra e do
-      cursor.
+      cursor. Começou pelo Terminal, que já existe: o pseudo-terminal no
+      kernel, a entrada de cada janela indo ao processo dono dela, a janela
+      do runtime compartilhada com o servidor, e o programa, lançado no
+      boot e pelo botão da barra. O console do kernel ficou como fundo e
+      reserva. O toolkit — os widgets que se declaram, e a árvore gerada
+      deles — é o que falta.
 - [ ] **Fase 12 — Consentimento e auditoria.** Se um agente pode fazer tudo
       que uma pessoa faz, o modelo de permissão precisa ser **mais** forte que
       o de um desktop comum, e não mais fraco. Três coisas: quem pediu — a
