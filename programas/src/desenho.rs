@@ -5,5 +5,5 @@
 //! console e na barra. Uma letra numa janela e no console saem com os
 //! mesmos pixels.
 
-pub use tipografia::{Estilo, largura_do_texto};
+pub use tipografia::Estilo;
 pub use toolkit::Tela;

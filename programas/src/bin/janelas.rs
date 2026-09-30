@@ -21,27 +21,29 @@
 //! - **os pedidos de abrir** uma janela, da barra do kernel ou da suíte;
 //! - **o foco perdido**, quando a pessoa clica fora de toda janela, ou na de
 //!   outro processo;
-//! - **as ações da árvore semântica** — o `press` do agente num elemento
-//!   que o servidor descreveu;
+//! - **as ações da árvore semântica** — o `press`, o `confirm`, o `cancel`
+//!   e o `set_value` do agente num elemento de uma janela dele;
 //! - **o pedido de encerrar**, que fecha todas e sai.
 //!
 //! # O que sai dele, além dos pixels
 //!
-//! A descrição de cada janela, para a árvore semântica: o título, a caixa
-//! de fechar e o texto. Gerada do mesmo estado que o desenho, a cada vez
-//! que ele muda — o agente lê a janela pela árvore, e aciona a caixa de
-//! fechar pelo mesmo caminho do clique.
+//! A descrição de cada janela, para a árvore semântica — e o servidor não
+//! a escreve: cada janela é uma árvore de widgets do toolkit, e a descrição
+//! é gerada dela, pelo mesmo percurso que a desenha. O agente lê a janela
+//! pela árvore, e aciona o que está nela — a caixa de fechar, o OK, o campo
+//! — pelo mesmo caminho do clique e da tecla.
 //!
 //! O servidor não pergunta nada: dorme na leitura do canal e acorda quando
 //! há o que fazer.
 //!
 //! # Uma janela
 //!
-//! Uma [`Janela`] do runtime — a moldura, a barra de título com o nome e a
-//! caixa de fechar, e o arrasto, os mesmos do Terminal —, e o conteúdo que
-//! o servidor desenha dentro dela. A barra da janela com o foco tem a cor de
-//! acento do kernel; as outras, apagada. A ordem de empilhamento é a do
-//! vetor — a última é a de cima —, e o compositor é avisado a cada mudança.
+//! Uma [`Janela`] do runtime com uma [`Interface`] do toolkit dentro: a
+//! moldura, a barra de título com o nome e a caixa de fechar, e o arrasto,
+//! os mesmos do Terminal; e os widgets, que se desenham, se descrevem e
+//! recebem o que chega. A barra da janela com o foco tem a cor de acento do
+//! kernel; as outras, apagada. A ordem de empilhamento é a do vetor — a
+//! última é a de cima —, e o compositor é avisado a cada mudança.
 //!
 //! Cada coisa que o servidor faz vira uma linha no log, `janelas: ...`: é
 //! por elas que a suíte acompanha o que aconteceu do lado de cá.
@@ -54,130 +56,23 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use programas::desenho::largura_do_texto;
 use programas::escreverln;
-use programas::janela::{Aperto, Janela};
+use programas::janela::{Gesto, Janela};
 use programas::sistema;
 
-use protocolo::usuario::descricao::{Retangulo, Tipo};
 use protocolo::usuario::evento::acao as evento_acao;
 use protocolo::usuario::evento::{BOTAO_ESQUERDO, CANAL_DAS_JANELAS, Evento, janela, tipo};
 use protocolo::usuario::superficie::operacao;
+use toolkit::{Botao, Campo, Coluna, Indice, Interface, Rotulo};
 
-// O conteúdo, na paleta do kernel — a moldura é a do runtime, ver
-// `programas::janela`.
-const CONTEUDO: u32 = aparencia::uso::FUNDO_DO_CONTEUDO.argb();
-const TEXTO: u32 = aparencia::uso::TEXTO_DO_CONTEUDO.argb();
-use aparencia::medidas::{ESPACO_DO_CABECALHO, ESPACO_DO_CONTEUDO, RECUO_DO_CONTEUDO};
-use aparencia::texto::{CABECALHO, CORPO};
+use aparencia::medidas::{ALTURA_DO_TITULO, BORDA, ESPACO_DO_CONTEUDO, RECUO_DO_CONTEUDO};
 
-/// Uma janela aberta pelo servidor: a moldura, e o que vai dentro.
+/// Uma janela aberta pelo servidor.
 struct Aberta {
     id: u32,
     janela: Janela,
-    /// Um título grande no alto do conteúdo, se ela tiver um.
-    cabecalho: Option<&'static str>,
-    /// O que ela mostra: o que se digitou, ou o texto fixo dela.
-    texto: String,
-    /// Que janela é, de [`janela`] — a de teste aceita digitação; a
-    /// "Sobre o Duke", não.
+    /// Que janela é, de [`janela`].
     qual: i64,
-}
-
-impl Aberta {
-    /// Desenha a janela inteira e acusa o dano.
-    fn desenhar(&mut self, com_foco: bool) {
-        let (cx, cy, cl, ca) = self.janela.conteudo();
-        let altura_da_linha = CORPO.altura();
-        let texto = self.texto.clone();
-        let cabecalho = self.cabecalho;
-        let mut tela = self.janela.desenhar_moldura(com_foco);
-        tela.retangulo(cx, cy, cl, ca, CONTEUDO);
-        // O cabeçalho, se houver, no estilo de título; e o texto, linha a
-        // linha, cortado no que couber.
-        let mut y = cy + ESPACO_DO_CONTEUDO;
-        if let Some(cabecalho) = cabecalho {
-            tela.texto(
-                (RECUO_DO_CONTEUDO, y),
-                cabecalho,
-                CABECALHO,
-                (TEXTO, CONTEUDO),
-            );
-            y += CABECALHO.altura() + ESPACO_DO_CABECALHO;
-        }
-        for linha in texto.split('\n') {
-            if y + altura_da_linha > cy + ca {
-                break;
-            }
-            tela.texto((RECUO_DO_CONTEUDO, y), linha, CORPO, (TEXTO, CONTEUDO));
-            y += altura_da_linha;
-        }
-        let _ = self.janela.superficie().danificar_tudo();
-        self.descrever();
-    }
-
-    /// Os identificadores que esta janela dá aos seus elementos na árvore:
-    /// o da janela vezes dezesseis, mais o elemento. É o que volta num
-    /// evento de ação, e o que diz de qual janela ele é.
-    fn id_do_elemento(&self, elemento: u32) -> i64 {
-        (self.id * ELEMENTOS_POR_JANELA + elemento) as i64
-    }
-
-    /// Diz ao kernel o que a janela é: o título, a caixa de fechar e o
-    /// texto — o mesmo que acabou de ser desenhado, gerado do mesmo estado.
-    fn descrever(&self) {
-        let mut d = self
-            .janela
-            .descrever_moldura(self.id_do_elemento(ELEMENTO_FECHAR));
-        let (cx, cy, cl, ca) = self.janela.conteudo();
-        d.elemento(
-            Tipo::Texto,
-            self.id_do_elemento(ELEMENTO_CONTEUDO),
-            Retangulo {
-                x: cx,
-                y: cy,
-                largura: cl,
-                altura: ca,
-            },
-            "conteudo",
-            &self.texto,
-        );
-        // O cabeçalho, depois do conteúdo: a posição de cada elemento na
-        // descrição é o que dá o identificador dele na árvore, e o da caixa
-        // e o do conteúdo não mudam de uma janela para a outra.
-        if let Some(cabecalho) = self.cabecalho {
-            d.elemento(
-                Tipo::Texto,
-                self.id_do_elemento(ELEMENTO_CABECALHO),
-                Retangulo {
-                    x: RECUO_DO_CONTEUDO,
-                    y: cy + ESPACO_DO_CONTEUDO,
-                    largura: largura_do_texto(cabecalho, CABECALHO),
-                    altura: CABECALHO.altura(),
-                },
-                "cabeçalho",
-                cabecalho,
-            );
-        }
-        let r = match d.terminar() {
-            Ok(texto) => sistema::descrever(self.janela.descritor(), &texto),
-            Err(motivo) => {
-                escreverln!(
-                    "janelas: a descricao da janela {} nao cabe: {}",
-                    self.id,
-                    motivo
-                );
-                return;
-            }
-        };
-        if r != 0 {
-            escreverln!(
-                "janelas: a descricao da janela {} foi recusada: {}",
-                self.id,
-                r
-            );
-        }
-    }
 }
 
 /// O que a janela "Sobre o Duke" diz, abaixo do cabeçalho. Com acento: a
@@ -193,12 +88,61 @@ em Rust, rodando em aarch64.\n\n\
 Esta janela é desenhada por um processo:\n\
 o servidor de janelas, fora do kernel.";
 
+/// Os códigos que o servidor dá ao que se aciona nas janelas dele — o que
+/// volta num [`Gesto::Acionado`], do clique, da tecla ou do agente.
+const OK: u32 = 1;
+const LIMPAR: u32 = 2;
+const ESCRITO: u32 = 3;
+
+/// A janela de teste tem o tamanho de sempre, com a moldura: é o que a
+/// suíte conhece, e onde ela aperta.
+const LARGURA_DO_TESTE: u32 = 320;
+const ALTURA_DO_TESTE: u32 = 160;
+/// O campo da janela de teste, na interface dela: depois da coluna.
+const CAMPO_DO_TESTE: Indice = 1;
+
+/// O conteúdo de uma janela: uma coluna no fundo claro, com o recuo e o
+/// espaço da linguagem visual.
+fn conteudo() -> toolkit::Pilha {
+    Coluna::nova()
+        .recuo(RECUO_DO_CONTEUDO)
+        .espaco(ESPACO_DO_CONTEUDO)
+        .fundo(aparencia::uso::FUNDO_DO_CONTEUDO.argb())
+}
+
+/// O "Sobre o Duke": o nome, o que ele é, e o OK que fecha.
+fn sobre() -> Interface {
+    Interface::nova(
+        conteudo()
+            .com(Rotulo::titulo("cabeçalho", "Duke"))
+            .com(Rotulo::novo("conteudo", SOBRE))
+            .com(Botao::novo("OK", OK)),
+    )
+}
+
+/// A janela de teste: um campo onde se digita, e o botão que o esvazia.
+fn teste() -> Interface {
+    Interface::nova(
+        conteudo()
+            .minimo(
+                LARGURA_DO_TESTE - 2 * BORDA,
+                ALTURA_DO_TESTE - ALTURA_DO_TITULO - BORDA,
+            )
+            .com(Campo::novo("texto", 30, ESCRITO))
+            .com(Botao::novo("Limpar", LIMPAR)),
+    )
+}
+
 /// Quantos identificadores de elemento cada janela reserva.
 const ELEMENTOS_POR_JANELA: u32 = 16;
-/// Os elementos de uma janela, na árvore.
-const ELEMENTO_FECHAR: u32 = 1;
-const ELEMENTO_CONTEUDO: u32 = 2;
-const ELEMENTO_CABECALHO: u32 = 3;
+
+/// A base dos identificadores da janela `id` na árvore: a caixa de fechar
+/// é a base, e o widget de índice `i`, a base mais um mais `i` — ver
+/// [`Janela::com_interface`]. É o que volta num evento de ação, e o que
+/// diz de qual janela ele é.
+fn base(id: u32) -> i64 {
+    (id * ELEMENTOS_POR_JANELA) as i64
+}
 
 struct Servidor {
     /// De baixo para cima: a última é a de cima.
@@ -216,10 +160,10 @@ impl Servidor {
         self.janelas.iter().position(|j| j.id == id)
     }
 
-    fn redesenhar(&mut self, id: u32) {
-        let foco = self.foco == Some(id);
+    /// A barra de título de `id` acende ou apaga.
+    fn acender(&mut self, id: u32, foco: bool) {
         if let Some(i) = self.indice(id) {
-            self.janelas[i].desenhar(foco);
+            self.janelas[i].janela.focar(foco);
         }
     }
 
@@ -236,9 +180,9 @@ impl Servidor {
             return;
         }
         if let Some(anterior) = anterior {
-            self.redesenhar(anterior);
+            self.acender(anterior, false);
         }
-        self.redesenhar(id);
+        self.acender(id, true);
         if pedir && let Some(i) = self.indice(id) {
             let fd = self.janelas[i].janela.descritor();
             sistema::controlar(fd, operacao::FOCO, 1);
@@ -260,9 +204,9 @@ impl Servidor {
             escreverln!("janelas: ja aberta {}", id);
             return;
         }
-        let (titulo, largura, altura, cabecalho, texto) = match qual {
-            janela::TESTE => ("Teste", 320, 160, None, String::new()),
-            janela::SOBRE => ("Sobre o Duke", 400, 190, Some("Duke"), String::from(SOBRE)),
+        let (titulo, interface) = match qual {
+            janela::TESTE => ("Teste", teste()),
+            janela::SOBRE => ("Sobre o Duke", sobre()),
             _ => {
                 escreverln!("janelas: pedido de janela desconhecida {}", qual);
                 return;
@@ -270,31 +214,24 @@ impl Servidor {
         };
         // No centro da tela, e cada uma um pouco abaixo e à direita da
         // anterior: duas janelas iguais uma sobre a outra pareceriam uma.
+        let (largura, altura) = Janela::tamanho_para(&interface);
         let degrau = 24 * self.janelas.len() as i64;
         let x = (largura_da_tela - largura as i64) / 2 + degrau;
         let y = (altura_da_tela - altura as i64) / 2 + degrau;
-        let janela = match Janela::nova(titulo, largura, altura, x as i32, y as i32) {
+        let id = self.proximo_id;
+        let janela = match Janela::com_interface(titulo, interface, base(id), x as i32, y as i32) {
             Ok(j) => j,
             Err(e) => {
                 escreverln!("janelas: sem superficie para {}: {}", titulo, e);
                 return;
             }
         };
-        let id = self.proximo_id;
         self.proximo_id += 1;
-        let mut j = Aberta {
-            id,
-            janela,
-            cabecalho,
-            texto,
-            qual,
-        };
-        j.desenhar(false);
-        if j.janela.mostrar().is_err() {
+        if janela.mostrar().is_err() {
             escreverln!("janelas: a janela {} nao pode ser mostrada", id);
             return;
         }
-        self.janelas.push(j);
+        self.janelas.push(Aberta { id, janela, qual });
         escreverln!("janelas: aberta {} {} em {} {}", id, titulo, x, y);
         self.focar(id, true);
     }
@@ -308,6 +245,9 @@ impl Servidor {
         drop(self.janelas.remove(i));
         if self.foco == Some(id) {
             self.foco = None;
+        }
+        if self.arrasto == Some(id) {
+            self.arrasto = None;
         }
         escreverln!("janelas: fechada {}", id);
     }
@@ -360,13 +300,16 @@ impl Servidor {
         let Some(i) = self.indice(id) else {
             return;
         };
-        match self.janelas[i].janela.apertar(x, y) {
-            Aperto::Fechar => self.fechar(id),
-            Aperto::Arrasto => self.arrasto = Some(id),
-            Aperto::Conteudo(..) => {}
+        // A caixa de fechar, a barra de título — que começa o arrasto — ou
+        // um widget: a janela sabe.
+        let gesto = self.janelas[i].janela.apertar_em(x, y);
+        if self.janelas[i].janela.arrastando() {
+            self.arrasto = Some(id);
         }
+        self.atender(id, gesto);
     }
 
+    /// Uma tecla, com o foco numa janela: vai ao widget com o foco nela.
     fn tecla(&mut self, codigo: i64) {
         let Some(id) = self.foco else {
             return;
@@ -377,40 +320,53 @@ impl Servidor {
         let Some(i) = self.indice(id) else {
             return;
         };
-        // O texto do "Sobre o Duke" é fixo.
-        if self.janelas[i].qual != janela::TESTE {
-            return;
-        }
-        let texto = &mut self.janelas[i].texto;
-        match c {
-            '\u{8}' => {
-                texto.pop();
-            }
-            c if c == '\n' || !c.is_control() => texto.push(c),
-            _ => return,
-        }
-        self.redesenhar(id);
         escreverln!("janelas: tecla {} em {}", codigo, id);
+        let gesto = self.janelas[i].janela.tecla(c);
+        self.atender(id, gesto);
     }
 
-    /// Uma ação pela árvore semântica: o `press` do agente num elemento que
-    /// o servidor descreveu. Faz o que o clique faria.
+    /// Uma ação pela árvore semântica: o `press`, o `confirm`, o `cancel`
+    /// ou o `set_value` do agente num elemento de uma janela. Vai ao mesmo
+    /// widget do clique e da tecla.
     fn acao(&mut self, elemento: i64, acao: i64) {
-        let Ok(elemento) = u32::try_from(elemento) else {
+        let Ok(id) = u32::try_from(elemento / ELEMENTOS_POR_JANELA as i64) else {
             return;
         };
-        let (id, qual) = (
-            elemento / ELEMENTOS_POR_JANELA,
-            elemento % ELEMENTOS_POR_JANELA,
-        );
         escreverln!(
             "janelas: acao {} no elemento {} da janela {}",
             acao,
-            qual,
+            elemento % ELEMENTOS_POR_JANELA as i64,
             id
         );
-        if acao == evento_acao::PRESSIONAR && qual == ELEMENTO_FECHAR {
-            self.fechar(id);
+        let Some(i) = self.indice(id) else {
+            return;
+        };
+        if let Some(gesto) = self.janelas[i].janela.acao(elemento, acao) {
+            self.atender(id, gesto);
+        }
+    }
+
+    /// O que a janela `id` disse que aconteceu nela.
+    fn atender(&mut self, id: u32, gesto: Gesto) {
+        let Some(i) = self.indice(id) else {
+            return;
+        };
+        match gesto {
+            Gesto::Fechar | Gesto::Acionado(OK) => self.fechar(id),
+            // Esvaziar o campo é o `cancel` dele: o mesmo caminho do agente.
+            Gesto::Acionado(LIMPAR) => {
+                let campo = base(id) + 1 + CAMPO_DO_TESTE as i64;
+                self.janelas[i].janela.acao(campo, evento_acao::CANCELAR);
+                escreverln!("janelas: limpa {}", id);
+            }
+            Gesto::Acionado(ESCRITO) => {
+                let texto = self.janelas[i]
+                    .janela
+                    .com_widget::<Campo, _>(CAMPO_DO_TESTE, |c| String::from(c.valor()))
+                    .unwrap_or_default();
+                escreverln!("janelas: escrito {} [{}]", id, texto);
+            }
+            _ => {}
         }
     }
 
@@ -437,7 +393,7 @@ impl Servidor {
                 let fd = self.janelas[i].janela.descritor();
                 sistema::controlar(fd, operacao::FOCO, 0);
             }
-            self.redesenhar(anterior);
+            self.acender(anterior, false);
             escreverln!("janelas: foco devolvido");
         }
     }

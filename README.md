@@ -317,7 +317,8 @@ toolkit/src/         os widgets: desenho e árvore semântica do mesmo estado
 ├── lib.rs           a regra, e o que existe
 ├── arvore.rs        o trait, e as viagens pela árvore: desenhar, descrever, achar
 ├── interface.rs     a árvore de uma janela e o foco: o aperto, a tecla e a ação do agente
-├── widgets.rs       o texto, o botão, a coluna e a linha
+├── widgets.rs       o texto, o botão, o campo, a coluna e a linha
+├── area.rs          a área de texto: a grade do Terminal, que redesenha só a linha que mudou
 ├── tela.rs          a memória de pixels onde os widgets desenham
 └── testes.rs        o layout, o desenho e a descrição, conferidos no hospedeiro
 
@@ -807,8 +808,8 @@ janela vive, e o de uma janela que fechou não aponta para a seguinte.
 `ui.act press` num botão descrito vira um evento `ACAO` no canal, com o
 identificador do servidor; o servidor faz o que o clique faria. A caixa de
 fechar fecha pelos dois caminhos — o do agente e o da pessoa —, e o log diz
-quem foi. O caso da suíte lê a árvore do `ui.tree` de verdade, digita
-`a`, Enter e `b` e espera o valor `a\nb` no texto, confere que o texto não
+quem foi. O caso da suíte lê a árvore do `ui.tree` de verdade, digita na
+janela e espera o que digitou no valor, confere que o que não é botão não
 aceita `press`, e fecha a janela pelo botão da árvore. Outro caso confere
 o parser: a descrição válida lida como escrita, e oito formas de texto que
 o kernel não entende, recusadas. Doze mutações, onze reprovadas. A que passa tira o aviso de que
@@ -933,8 +934,7 @@ fechar e o arrasto moravam no servidor; o Terminal seria a segunda cópia.
 `programas::janela` é a janela uma vez só, e o servidor passou a usá-la
 sem mudar um pixel nem um elemento da árvore.
 
-**O programa.** Uma grade de 80 por 24, com 200 linhas guardadas, e o
-cursor na última: o kernel manda texto, a quebra, o retorno e o apagar —
+**O programa.** Uma grade de 80 por 24, e o cursor na última: o kernel manda texto, a quebra, o retorno e o apagar —
 que volta uma coluna sem apagar, porque o interpretador apaga escrevendo
 um espaço por cima. O kernel o lança no boot, ao lado do servidor, com o
 foco. Depois, o botão **Terminal** da barra, com a F3: com um Terminal no

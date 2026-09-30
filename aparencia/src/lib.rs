@@ -155,11 +155,10 @@ pub mod medidas {
     /// Onde o título começa, na horizontal.
     pub const RECUO_DO_TITULO: u32 = 8;
 
-    /// O conteúdo de uma janela: o recuo do texto à esquerda, o espaço acima
-    /// dele, e o que separa um cabeçalho do texto embaixo.
+    /// O conteúdo de uma janela: o recuo em volta dos widgets, e o espaço
+    /// entre um e o seguinte.
     pub const RECUO_DO_CONTEUDO: u32 = 10;
     pub const ESPACO_DO_CONTEUDO: u32 = 8;
-    pub const ESPACO_DO_CABECALHO: u32 = 6;
 
     /// A folga entre a moldura do Terminal e a grade.
     pub const FOLGA_DA_GRADE: u32 = 4;

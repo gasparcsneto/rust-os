@@ -318,7 +318,7 @@ fn o_foco_se_ve() {
         pixels: &mut pixels,
         largura: AREA.largura,
     };
-    ui.desenhar(&mut tela, AREA);
+    ui.desenhar(&mut tela, AREA, true);
     let (ok, cancelar) = (
         area_de(ui.raiz(), AREA, 4).unwrap(),
         area_de(ui.raiz(), AREA, 5).unwrap(),
@@ -492,7 +492,7 @@ fn o_foco_do_campo_se_ve() {
         pixels: &mut pixels,
         largura: AREA.largura,
     };
-    ui.desenhar(&mut tela, AREA);
+    ui.desenhar(&mut tela, AREA, true);
     let area = area_de(ui.raiz(), AREA, 1).unwrap();
     // A borda do acento, com dois pixels, com o foco; e o cursor de texto
     // no começo.
@@ -527,4 +527,220 @@ fn sem_o_foco_a_borda_e_fina_e_discreta() {
         Some(uso::FUNDO_DO_CONTEUDO.argb())
     );
     assert_ne!(uso::BORDA_DO_CAMPO, uso::BORDA_COM_FOCO);
+}
+
+#[test]
+fn sem_o_foco_da_janela_nada_mostra_o_foco() {
+    let ui = campo_com_foco();
+    let mut pixels = vec![0u32; (AREA.largura * AREA.altura) as usize];
+    let mut tela = Tela {
+        pixels: &mut pixels,
+        largura: AREA.largura,
+    };
+    // O campo tem o foco da interface, e a janela não tem o dela: a borda
+    // é a discreta, e o cursor não aparece.
+    ui.desenhar(&mut tela, AREA, false);
+    let area = area_de(ui.raiz(), AREA, 1).unwrap();
+    assert_eq!(
+        tela.pixel(area.x, area.y + area.altura / 2),
+        Some(uso::BORDA_DO_CAMPO.argb())
+    );
+    let x0 = area.x + 2 + medidas::FOLGA_DO_CAMPO;
+    let y = area.y + area.altura.saturating_sub(texto::CORPO.altura()) / 2;
+    assert_eq!(tela.pixel(x0, y + 2), Some(uso::FUNDO_DO_CONTEUDO.argb()));
+}
+
+#[test]
+fn a_pilha_pede_ao_menos_o_minimo() {
+    let (l, a) = Botao::novo("OK", OK).medir();
+    let c = Coluna::nova().minimo(300, 100).com(Botao::novo("OK", OK));
+    assert_eq!(c.medir(), (300, 100));
+    // O que os filhos pedem, se passa do mínimo, vence.
+    let c = Coluna::nova().minimo(1, 1).com(Botao::novo("OK", OK));
+    assert_eq!(c.medir(), (l, a));
+    // O fundo pinta a área inteira, e o filho fica no alto.
+    let ui = Interface::nova(
+        Coluna::nova()
+            .minimo(300, 100)
+            .fundo(uso::FUNDO_DO_CONTEUDO.argb())
+            .com(Botao::novo("OK", OK)),
+    );
+    assert_eq!(area_de(ui.raiz(), AREA, 1), Some(r(AREA.x, AREA.y, l, a)));
+    let mut pixels = vec![0u32; (AREA.largura * AREA.altura) as usize];
+    let mut tela = Tela {
+        pixels: &mut pixels,
+        largura: AREA.largura,
+    };
+    ui.desenhar(&mut tela, AREA, true);
+    assert_eq!(
+        tela.pixel(AREA.x + 299, AREA.y + 99),
+        Some(uso::FUNDO_DO_CONTEUDO.argb())
+    );
+}
+
+// A área de texto.
+
+fn area_de_texto(colunas: usize, linhas: usize, bytes: &[u8]) -> AreaDeTexto {
+    let mut a = AreaDeTexto::nova("terminal", colunas, linhas);
+    a.receber(bytes);
+    a
+}
+
+#[test]
+fn a_area_escreve_quebra_e_rola() {
+    let a = area_de_texto(5, 2, b"abc");
+    assert_eq!(a.texto_visivel(), ["abc"]);
+    assert_eq!(a.cursor(), (0, 3));
+    // A linha longa quebra na borda.
+    let mut a = area_de_texto(5, 2, b"abcdefg");
+    assert_eq!(a.texto_visivel(), ["abcde", "fg"]);
+    assert_eq!(a.cursor(), (1, 2));
+    // Mostra as duas de baixo; a de cima é esquecida.
+    a.receber(b"\n1\n2\n3");
+    assert_eq!(a.texto_visivel(), ["2", "3"]);
+    // A última coluna cheia: o cursor fica nela, e a quebra espera a
+    // próxima letra.
+    let mut a = area_de_texto(5, 2, b"abcde");
+    assert_eq!(a.cursor(), (0, 4));
+    a.receber(b"f");
+    assert_eq!(a.texto_visivel(), ["abcde", "f"]);
+    // O apagar volta sem apagar: as letras ficam, e o cursor anda.
+    let a = area_de_texto(10, 2, b"abc\x08\x08");
+    assert_eq!(
+        (a.texto_visivel(), a.cursor()),
+        (vec![String::from("abc")], (0, 1))
+    );
+    // O apagar volta uma coluna sem apagar, e o retorno vai ao começo:
+    // quem apaga escreve por cima.
+    let a = area_de_texto(10, 2, b"ab\x08c\rX");
+    assert_eq!(a.texto_visivel(), ["Xc"]);
+    // A tabulação anda até a próxima coluna múltipla de oito.
+    let a = area_de_texto(20, 2, b"a\tb");
+    assert_eq!(a.texto_visivel(), ["a       b"]);
+    // Um controle que não é nenhum desses não se escreve.
+    let a = area_de_texto(20, 2, b"a\x07b");
+    assert_eq!(a.texto_visivel(), ["ab"]);
+}
+
+#[test]
+fn a_area_junta_o_caractere_partido_e_troca_o_invalido() {
+    let e = "é".as_bytes();
+    let mut a = area_de_texto(10, 2, &e[..1]);
+    assert_eq!(a.texto_visivel(), [""]);
+    a.receber(&e[1..]);
+    a.receber(&[0xFF, b'z']);
+    assert_eq!(a.texto_visivel(), ["é?z"]);
+}
+
+#[test]
+fn a_area_diz_o_fim_da_grade_na_arvore() {
+    let mut a = AreaDeTexto::nova("terminal", 80, 24);
+    for i in 0..30 {
+        a.receber(alloc::format!("linha {i:02} {}   \n", "x".repeat(50)).as_bytes());
+    }
+    a.receber(b"fim   ");
+    let s = a.semantica().unwrap();
+    assert_eq!((s.tipo, s.rotulo), (Tipo::Texto, "terminal"));
+    let teto = protocolo::usuario::descricao::MAIOR_TEXTO;
+    // As linhas de baixo que cabem, sem os espaços do fim, e nenhuma
+    // cortada no meio.
+    assert!(s.valor.len() <= teto);
+    assert!(s.valor.len() > teto - 62, "{}", s.valor.len());
+    assert!(
+        s.valor
+            .ends_with(&alloc::format!("linha 29 {}\nfim", "x".repeat(50)))
+    );
+    assert!(s.valor.lines().all(|l| l == "fim" || l.len() == 59));
+    // E a descrição gerada é aceita pelo leitor do kernel.
+    let mut e = Escritor::nova("Terminal");
+    let ui = Interface::nova(a);
+    ui.descrever(AREA, 0, &mut e);
+    let d = Descricao::ler(&e.terminar().unwrap()).unwrap();
+    assert!(d.elementos[0].valor.as_deref().unwrap().ends_with("fim"));
+}
+
+#[test]
+fn o_fim_da_grade_conta_as_quebras_de_linha() {
+    // Quarenta linhas de vinte letras, e o `fim`: sem contar as quebras,
+    // vinte e cinco delas caberiam em 512 bytes com ele — e com as quebras
+    // são 528. Cabem vinte e quatro, e o `fim`.
+    let mut a = AreaDeTexto::nova("terminal", 80, 40);
+    for i in 0..40 {
+        a.receber(alloc::format!("{i:02}{}\n", "x".repeat(18)).as_bytes());
+    }
+    a.receber(b"fim");
+    let s = a.semantica().unwrap();
+    assert!(s.valor.len() <= protocolo::usuario::descricao::MAIOR_TEXTO);
+    assert_eq!(s.valor.lines().count(), 25);
+}
+
+#[test]
+fn a_area_redesenha_so_a_linha_do_cursor() {
+    const MARCA: u32 = 0x1234_5678;
+    let mut ui = Interface::nova(AreaDeTexto::nova("terminal", 20, 4));
+    let mut pixels = vec![MARCA; (AREA.largura * AREA.altura) as usize];
+    let mut tela = Tela {
+        pixels: &mut pixels,
+        largura: AREA.largura,
+    };
+    let fundo = uso::FUNDO_DO_CONSOLE.argb();
+    let ac = texto::CORPO.altura();
+    let y0 = AREA.y + medidas::FOLGA_DA_GRADE;
+    // Nunca desenhada: o primeiro desenho é inteiro.
+    assert_eq!(ui.desenhar_mudado(0, &mut tela, AREA, true), None);
+    ui.desenhar(&mut tela, AREA, true);
+    assert_eq!(tela.pixel(AREA.x, AREA.y + 3 * ac), Some(fundo));
+
+    // Uma letra: só a faixa da linha do cursor.
+    tela.pixels.fill(MARCA);
+    assert_eq!(
+        ui.com_widget::<AreaDeTexto, _>(0, |a| a.receber(b"x")),
+        Some(())
+    );
+    let faixa = ui.desenhar_mudado(0, &mut tela, AREA, true);
+    assert_eq!(faixa, Some(r(AREA.x, y0, AREA.largura, ac)));
+    assert_eq!(tela.pixel(AREA.x, y0), Some(fundo));
+    assert_eq!(tela.pixel(AREA.x, y0 + ac), Some(MARCA));
+    // O cursor, depois do `x`, com o foco: um bloco na cor dele.
+    let x_do_cursor = AREA.x + medidas::FOLGA_DA_GRADE + texto::CORPO.largura();
+    assert_eq!(
+        tela.pixel(x_do_cursor, y0 + 1),
+        Some(uso::CURSOR_DE_TEXTO.argb())
+    );
+    // Sem o foco, um traço embaixo, e o bloco não.
+    ui.desenhar_mudado(0, &mut tela, AREA, false);
+    assert_eq!(tela.pixel(x_do_cursor, y0 + 1), Some(fundo));
+    assert_eq!(
+        tela.pixel(x_do_cursor, y0 + ac - 1),
+        Some(uso::CURSOR_DE_TEXTO.argb())
+    );
+
+    // Uma quebra de linha: o desenho seguinte é inteiro, e depois dele a
+    // faixa é a da linha nova.
+    ui.com_widget::<AreaDeTexto, _>(0, |a| a.receber(b"\n"));
+    assert_eq!(ui.desenhar_mudado(0, &mut tela, AREA, true), None);
+    ui.desenhar(&mut tela, AREA, true);
+    assert_eq!(
+        ui.desenhar_mudado(0, &mut tela, AREA, true),
+        Some(r(AREA.x, y0 + ac, AREA.largura, ac))
+    );
+}
+
+#[test]
+fn o_widget_volta_com_o_tipo_dele() {
+    let mut ui = Interface::nova(formulario());
+    // O botão OK é o índice 4: coluna, cabeçalho, conteúdo, linha, OK.
+    assert_eq!(
+        ui.com_widget::<Botao, _>(4, |b| String::from(b.rotulo())),
+        Some(String::from("OK"))
+    );
+    // De outro tipo, ou fora da árvore: nada.
+    assert_eq!(ui.com_widget::<Campo, _>(4, |_| ()), None);
+    assert_eq!(ui.com_widget::<Botao, _>(40, |_| ()), None);
+    // E a mudança fica: o texto do conteúdo trocado aparece na descrição.
+    ui.com_widget::<Rotulo, _>(2, |r| r.definir_texto("outro"));
+    let mut e = Escritor::nova("x");
+    ui.descrever(AREA, 0, &mut e);
+    let d = Descricao::ler(&e.terminar().unwrap()).unwrap();
+    assert_eq!(d.elementos[1].valor.as_deref(), Some("outro"));
 }

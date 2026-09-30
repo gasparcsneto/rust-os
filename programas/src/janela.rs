@@ -16,18 +16,27 @@
 //! levar a si mesma pela barra de título enquanto o botão estiver apertado.
 //! Diz à árvore semântica o título e a caixa de fechar.
 //!
-//! E pode hospedar uma [`Interface`] do toolkit: a janela se mede por ela,
-//! a desenha e a descreve dentro da moldura, e leva a ela o aperto, a tecla
-//! e a ação de um agente — ver [`Janela::com_interface`]. O que volta ao
-//! programa é um [`Gesto`]: fechar, redesenhar, ou o código do botão
-//! acionado, venha do ponteiro, do teclado ou do agente.
+//! Dentro da moldura mora uma [`Interface`] do toolkit: a janela se mede
+//! por ela, a desenha e a descreve, e leva a ela o aperto, a tecla e a ação
+//! de um agente — ver [`Janela::com_interface`]. O que volta ao programa é
+//! um [`Gesto`]: fechar, redesenhar, ou o código do botão acionado, venha
+//! do ponteiro, do teclado ou do agente.
+//!
+//! # Por que toda janela tem uma interface
+//!
+//! Porque a descrição de uma janela é gerada da interface dela, e não
+//! escrita: um programa não tem como desenhar à mão o que o agente não lê.
+//! O que o runtime não oferece — uma janela vazia, a tela crua da moldura,
+//! o escritor da descrição — é o que faria uma janela ter duas superfícies,
+//! a que a pessoa vê e a que o agente lê. `cargo xtask invariantes` confere
+//! que só o toolkit e esta moldura desenham e descrevem janelas.
 //!
 //! Não sabe das outras janelas: a ordem de empilhamento e qual delas tem o
 //! foco são de quem as tem — o servidor, com várias; o Terminal, com uma.
 
 use protocolo::usuario::descricao::{Escritor, Retangulo, Tipo};
 use protocolo::usuario::evento::acao;
-use toolkit::{Interface, Resposta};
+use toolkit::{Indice, Interface, Resposta, Widget};
 
 use crate::desenho::{Estilo, Tela};
 use crate::superficie::Superficie;
@@ -50,7 +59,7 @@ const BORDA_DA_JANELA: u32 = uso::BORDA_DA_JANELA.argb();
 
 /// O que um aperto do botão numa janela foi.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Aperto {
+enum Aperto {
     /// Na caixa de fechar: quem tem a janela decide o que é fechar.
     Fechar,
     /// Na barra de título: o arrasto começou, e a janela acompanha o
@@ -60,9 +69,7 @@ pub enum Aperto {
     Conteudo(i64, i64),
 }
 
-/// Uma superfície com moldura.
-/// O que o que chegou a uma janela com interface significa para o
-/// programa.
+/// O que o que chegou a uma janela significa para o programa.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Gesto {
     /// Nada que o programa precise saber.
@@ -75,10 +82,9 @@ pub enum Gesto {
     Fechar,
     /// Um botão foi acionado; o código é o que o programa lhe deu.
     Acionado(u32),
-    /// O arrasto acabou, com a janela aqui.
-    Arrastada(i32, i32),
 }
 
+/// Uma superfície com moldura, e a interface dentro.
 pub struct Janela {
     superficie: Superficie,
     titulo: &'static str,
@@ -87,9 +93,8 @@ pub struct Janela {
     y: i32,
     /// O arrasto em curso: onde o ponteiro pegou a janela, nela.
     pega: Option<(i64, i64)>,
-    /// A árvore de widgets, numa janela feita com
-    /// [`Janela::com_interface`].
-    interface: Option<Interface>,
+    /// A árvore de widgets.
+    interface: Interface,
     /// A base dos identificadores na árvore semântica: a caixa de fechar é
     /// a base, e o widget de índice `i` é `base + 1 + i`.
     base: i64,
@@ -98,30 +103,6 @@ pub struct Janela {
 }
 
 impl Janela {
-    /// Uma janela de `largura` por `altura`, moldura incluída, em `(x, y)` —
-    /// ainda invisível: desenhe, e então [`Janela::mostrar`].
-    pub fn nova(
-        titulo: &'static str,
-        largura: u32,
-        altura: u32,
-        x: i32,
-        y: i32,
-    ) -> Result<Janela, i64> {
-        let superficie = Superficie::nova(largura, altura)?;
-        superficie.transparente(true)?;
-        superficie.mover(x, y)?;
-        Ok(Janela {
-            superficie,
-            titulo,
-            x,
-            y,
-            pega: None,
-            interface: None,
-            base: 0,
-            foco: false,
-        })
-    }
-
     /// Uma janela com a `interface` dentro, do tamanho que ela pede mais a
     /// moldura, em `(x, y)`. `base` separa os identificadores desta janela
     /// dos de outras do mesmo processo — ver [`Janela::acao`].
@@ -134,19 +115,51 @@ impl Janela {
         x: i32,
         y: i32,
     ) -> Result<Janela, i64> {
-        let (l, a) = interface.medir();
-        let largura = l + 2 * BORDA;
-        let altura = a + ALTURA_DO_TITULO + BORDA;
-        let mut janela = Janela::nova(titulo, largura, altura, x, y)?;
-        janela.interface = Some(interface);
-        janela.base = base;
+        let (largura, altura) = Janela::tamanho_para(&interface);
+        let superficie = Superficie::nova(largura, altura)?;
+        superficie.transparente(true)?;
+        superficie.mover(x, y)?;
+        let mut janela = Janela {
+            superficie,
+            titulo,
+            x,
+            y,
+            pega: None,
+            interface,
+            base,
+            foco: false,
+        };
         janela.redesenhar();
         Ok(janela)
     }
 
-    /// A interface, numa janela que tem uma.
-    pub fn interface(&self) -> Option<&Interface> {
-        self.interface.as_ref()
+    /// O tamanho da janela que [`Janela::com_interface`] faz para a
+    /// `interface`: o que ela pede, mais a moldura. Para quem quer saber
+    /// antes de criá-la — o servidor, que a põe no centro da tela.
+    pub fn tamanho_para(interface: &Interface) -> (u32, u32) {
+        let (l, a) = interface.medir();
+        (l + 2 * BORDA, a + ALTURA_DO_TITULO + BORDA)
+    }
+
+    pub fn interface(&self) -> &Interface {
+        &self.interface
+    }
+
+    /// Entrega a `f` o widget `indice` da interface, com o tipo `T` que o
+    /// programa pôs ali — ver [`Interface::com_widget`]. Quem muda o widget
+    /// pede o desenho depois: [`Janela::atualizar`], ou
+    /// [`Janela::redesenhar`].
+    pub fn com_widget<T: Widget, R>(
+        &mut self,
+        indice: Indice,
+        f: impl FnOnce(&mut T) -> R,
+    ) -> Option<R> {
+        self.interface.com_widget(indice, f)
+    }
+
+    /// A barra de título está acesa?
+    pub fn com_foco(&self) -> bool {
+        self.foco
     }
 
     /// A área do conteúdo, na janela.
@@ -169,31 +182,57 @@ impl Janela {
     }
 
     /// Desenha a moldura e a interface, acusa o dano e descreve a janela.
-    /// Numa janela sem interface, só a moldura.
     pub fn redesenhar(&mut self) {
         let area = self.area_do_conteudo();
-        let foco = self.foco;
-        let interface = self.interface.take();
-        {
-            let mut tela = self.desenhar_moldura(foco);
-            if let Some(ui) = &interface {
-                ui.desenhar(&mut tela, area);
-            }
-        }
-        self.interface = interface;
+        self.desenhar_moldura();
+        let largura = self.largura();
+        let mut tela = Tela {
+            pixels: self.superficie.pixels(),
+            largura,
+        };
+        self.interface.desenhar(&mut tela, area, self.foco);
         let _ = self.superficie.danificar_tudo();
         if let Err(motivo) = self.descrever() {
             crate::escreverln!("janela: a descricao de {} falhou: {}", self.titulo, motivo);
         }
     }
 
+    /// Redesenha só o que mudou no widget `indice` — mudado pelo programa,
+    /// por [`Janela::com_widget`] —, acusa só esse dano e redescreve a
+    /// janela. Se o widget não sabe dizer o que mudou, a janela inteira:
+    /// ver [`Widget::desenhar_mudado`].
+    pub fn atualizar(&mut self, indice: Indice) {
+        let area = self.area_do_conteudo();
+        let largura = self.largura();
+        let mut tela = Tela {
+            pixels: self.superficie.pixels(),
+            largura,
+        };
+        match self
+            .interface
+            .desenhar_mudado(indice, &mut tela, area, self.foco)
+        {
+            Some(r) => {
+                let _ = self.superficie.danificar(
+                    r.x as u16,
+                    r.y as u16,
+                    r.largura as u16,
+                    r.altura as u16,
+                );
+                if let Err(motivo) = self.descrever() {
+                    crate::escreverln!("janela: a descricao de {} falhou: {}", self.titulo, motivo);
+                }
+            }
+            None => self.redesenhar(),
+        }
+    }
+
     /// Diz ao kernel o que a janela é: a moldura, e a interface gerada da
     /// árvore. Devolve o erro, se a descrição não coube nos limites.
     pub fn descrever(&self) -> Result<(), &'static str> {
-        let mut e = self.descrever_moldura(self.base);
-        if let Some(ui) = &self.interface {
-            ui.descrever(self.area_do_conteudo(), self.base + 1, &mut e);
-        }
+        let mut e = self.descrever_moldura();
+        self.interface
+            .descrever(self.area_do_conteudo(), self.base + 1, &mut e);
         let texto = e.terminar()?;
         match crate::sistema::descrever(self.descritor(), &texto) {
             0 => Ok(()),
@@ -210,10 +249,7 @@ impl Janela {
             Aperto::Conteudo(lx, ly) => {
                 let area = self.area_do_conteudo();
                 let (px, py) = (area.x as i64 + lx, area.y as i64 + ly);
-                let resposta = match &mut self.interface {
-                    Some(ui) => ui.apertar(area, px as u32, py as u32),
-                    None => Resposta::Nada,
-                };
+                let resposta = self.interface.apertar(area, px as u32, py as u32);
                 self.depois(resposta)
             }
         }
@@ -221,10 +257,7 @@ impl Janela {
 
     /// Uma tecla, com o foco nesta janela.
     pub fn tecla(&mut self, c: char) -> Gesto {
-        let resposta = match &mut self.interface {
-            Some(ui) => ui.tecla(c),
-            None => Resposta::Nada,
-        };
+        let resposta = self.interface.tecla(c);
         self.depois(resposta)
     }
 
@@ -243,11 +276,10 @@ impl Janela {
                 Gesto::Nada
             });
         }
-        let ui = self.interface.as_mut()?;
         let indice = u32::try_from(id - self.base - 1).ok()?;
         let resposta = match &valor {
-            Some(texto) => ui.definir_valor(indice, texto),
-            None => ui.acao(indice, qual),
+            Some(texto) => self.interface.definir_valor(indice, texto),
+            None => self.interface.acao(indice, qual),
         };
         Some(self.depois(resposta))
     }
@@ -349,7 +381,7 @@ impl Janela {
 
     /// O que um aperto em `(x, y)` da tela, dentro da janela, é. Na barra de
     /// título, começa o arrasto.
-    pub fn apertar(&mut self, x: i64, y: i64) -> Aperto {
+    fn apertar(&mut self, x: i64, y: i64) -> Aperto {
         let (lx, ly) = self.local(x, y);
         if self.no_fechar(lx, ly) {
             Aperto::Fechar
@@ -382,9 +414,9 @@ impl Janela {
     }
 
     /// Desenha a moldura — a borda, a barra de título acesa ou apagada, a
-    /// caixa de fechar — e devolve a tela para o conteúdo ser desenhado.
-    /// Quem desenha acusa o dano.
-    pub fn desenhar_moldura(&mut self, com_foco: bool) -> Tela<'_> {
+    /// caixa de fechar. Quem desenha acusa o dano.
+    fn desenhar_moldura(&mut self) {
+        let com_foco = self.foco;
         let (largura, altura) = (self.largura(), self.altura());
         let (cx, cy, lado) = self.caixa_de_fechar();
         let cor_do_titulo = if com_foco {
@@ -423,18 +455,17 @@ impl Janela {
             Estilo::TEXTO,
             (TEXTO_DO_TITULO, CAIXA_DE_FECHAR),
         );
-        tela
     }
 
     /// Começa a descrição da janela para a árvore semântica: o título, e a
-    /// caixa de fechar com o identificador `fechar`. Quem descreve
-    /// acrescenta o conteúdo pelo escritor, e o termina.
-    pub fn descrever_moldura(&self, fechar: i64) -> Escritor {
+    /// caixa de fechar com o identificador da base. A interface acrescenta
+    /// o resto.
+    fn descrever_moldura(&self) -> Escritor {
         let (cx, cy, lado) = self.caixa_de_fechar();
         let mut e = Escritor::nova(self.titulo);
         e.elemento(
             Tipo::Botao,
-            fechar,
+            self.base,
             Retangulo {
                 x: cx,
                 y: cy,

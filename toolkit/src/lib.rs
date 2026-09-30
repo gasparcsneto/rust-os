@@ -18,6 +18,8 @@
 //! - [`Rotulo`]: texto que se lê, com um nome para a árvore;
 //! - [`Botao`]: algo que se aciona;
 //! - [`Campo`]: uma linha de texto que se edita;
+//! - [`AreaDeTexto`]: uma grade de texto que o programa escreve, como a
+//!   tela de um terminal;
 //! - [`Coluna`] e [`Linha`]: os filhos um depois do outro.
 //!
 //! E a [`Interface`], que guarda a árvore de uma janela e o foco, e leva a
@@ -36,11 +38,13 @@
 
 extern crate alloc;
 
+mod area;
 pub mod arvore;
 mod interface;
 mod tela;
 mod widgets;
 
+pub use area::AreaDeTexto;
 pub use arvore::{Entrada, Indice, Resposta, Semantica, Widget};
 pub use interface::Interface;
 pub use protocolo::usuario::descricao::{Escritor, Retangulo, Tipo};

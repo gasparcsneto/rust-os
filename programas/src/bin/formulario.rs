@@ -46,8 +46,10 @@ fn valores(janela: &Janela) -> (&str, &str) {
     // acha pelo índice na árvore: 2 e 3.
     let mut nome = "";
     let mut sobrenome = "";
-    if let Some(ui) = janela.interface() {
-        toolkit::arvore::percorrer(ui.raiz(), Default::default(), &mut |i, w, _| {
+    toolkit::arvore::percorrer(
+        janela.interface().raiz(),
+        Default::default(),
+        &mut |i, w, _| {
             if let Some(s) = w.semantica() {
                 match i {
                     2 => nome = s.valor,
@@ -55,8 +57,8 @@ fn valores(janela: &Janela) -> (&str, &str) {
                     _ => {}
                 }
             }
-        });
-    }
+        },
+    );
     (nome, sobrenome)
 }
 
@@ -70,8 +72,8 @@ fn principal() -> i64 {
 
     let interface = Interface::nova(
         Coluna::nova()
-            .recuo(10)
-            .espaco(8)
+            .recuo(aparencia::medidas::RECUO_DO_CONTEUDO)
+            .espaco(aparencia::medidas::ESPACO_DO_CONTEUDO)
             .fundo(aparencia::uso::FUNDO_DO_CONTEUDO.argb())
             .com(Rotulo::novo("instrucao", "Quem é você?"))
             .com(Campo::novo("nome", 20, NOME))

@@ -4274,6 +4274,18 @@ fn janelas_operadas() -> Resultado {
     if janelas_na_tela() != [(x, y)] {
         return Err("a janela aberta nao esta na tela onde o servidor disse");
     }
+    // Do tamanho que a suíte conhece, com a moldura: a interface pede o
+    // conteúdo, e a janela soma a borda e a barra de título.
+    let mut tamanho = None;
+    crate::grafico::camadas(|c| {
+        if c.nome == crate::superficies::NOME_DA_CAMADA {
+            tamanho = Some((c.largura as i64, c.altura as i64));
+        }
+    });
+    if tamanho != Some((largura, altura)) {
+        crate::log_error!("teste", "a janela de teste tem {:?}", tamanho);
+        return Err("a janela de teste nao tem o tamanho dela");
+    }
     if !crate::superficies::foco_ativo() {
         return Err("o servidor pediu o foco e o kernel nao o deu");
     }
@@ -4281,6 +4293,14 @@ fn janelas_operadas() -> Resultado {
     let titulo = |jx: i64, jy: i64| pixel_na_tela((jx + 200) as u32, (jy + 4) as u32);
     if titulo(x, y)? != acesa {
         return Err("a barra de titulo da janela com o foco nao esta acesa");
+    }
+    // O campo da janela, que tem o foco dentro dela, mostra a borda do
+    // foco — com a janela ativa. A borda esquerda, no meio da altura: a
+    // moldura, e o recuo do conteúdo.
+    let borda_do_campo =
+        |jx: i64, jy: i64| pixel_na_tela((jx + 11) as u32, (jy + 22 + 10 + 9) as u32);
+    if borda_do_campo(x, y)? != acesa {
+        return Err("o campo da janela com o foco nao mostra o foco");
     }
 
     // Uma tecla, com o foco na janela: vai para o servidor, e não para o
@@ -4351,6 +4371,9 @@ fn janelas_operadas() -> Resultado {
     }
     if titulo(x1, y1)? != apagada {
         return Err("a barra de titulo nao apagou quando a janela perdeu o foco");
+    }
+    if borda_do_campo(x1, y1)? != Cor::de(aparencia::uso::BORDA_DO_CAMPO) {
+        return Err("o campo da janela sem o foco continuou mostrando o foco");
     }
     crate::teclado::esvaziar();
     crate::teclado::evento(0x1E, true);
@@ -4490,15 +4513,17 @@ fn superficies_a_descricao_recusa_o_que_nao_entende() -> Resultado {
     Ok(())
 }
 
-/// O servidor descreve a janela, a árvore a publica, e o `press` do agente
-/// na caixa de fechar chega ao servidor e fecha a janela.
+/// A janela do servidor aparece na árvore como os widgets dela são, e o
+/// agente faz nela o que a pessoa faz.
 ///
 /// # O que este caso protege
 ///
 /// A árvore semântica atravessando a fronteira: o que está na tela e é de
-/// um processo aparece em `ui.tree` com o que o processo disse que é — o
-/// título, o botão com a moldura dele na tela, o texto com o que se
-/// digitou —, e `ui.act` age sobre isso pelo mesmo caminho do clique.
+/// um processo aparece em `ui.tree` com o que ele é — o título, a caixa de
+/// fechar com a moldura dela na tela, o campo com o que se digitou, o
+/// botão —, e `ui.act` age sobre isso pelo mesmo caminho da tecla e do
+/// clique: a pessoa digita e confirma com o Enter; o agente troca o valor,
+/// confirma, esvazia pelo Limpar e fecha pela caixa.
 fn janelas_a_arvore_atravessa_a_fronteira() -> Resultado {
     let resultado = arvore_das_janelas();
     if resultado.is_err() {
@@ -4569,10 +4594,12 @@ fn arvore_das_janelas() -> Resultado {
     let camada = camada.ok_or("a janela aberta nao virou camada")?;
     let janela = crate::ui::id_da_camada(camada);
     let fechar = crate::ui::id_do_elemento(camada, 0).ok_or("id de elemento fora da faixa")?;
-    let conteudo = crate::ui::id_do_elemento(camada, 1).ok_or("id de elemento fora da faixa")?;
+    let campo = crate::ui::id_do_elemento(camada, 1).ok_or("id de elemento fora da faixa")?;
+    let limpar = crate::ui::id_do_elemento(camada, 2).ok_or("id de elemento fora da faixa")?;
 
     // A árvore: a janela com o título dela, a caixa de fechar como botão,
-    // com a moldura na tela, e o texto.
+    // com a moldura na tela, o campo e o botão que o esvazia — gerados pelo
+    // toolkit dos widgets que o servidor montou.
     let arvore = chamar("ui.tree", "{}")?;
     let marcas = [
         format!("\"id\":{janela},\"role\":\"window\",\"label\":\"Teste\""),
@@ -4581,7 +4608,8 @@ fn arvore_das_janelas() -> Resultado {
             x + 300,
             y + 3
         ),
-        format!("\"id\":{conteudo},\"role\":\"static_text\",\"label\":\"conteudo\""),
+        format!("\"id\":{campo},\"role\":\"text_field\",\"label\":\"texto\""),
+        format!("\"id\":{limpar},\"role\":\"button\",\"label\":\"Limpar\""),
     ];
     for marca in &marcas {
         if !arvore.contains(marca.as_str()) {
@@ -4590,32 +4618,61 @@ fn arvore_das_janelas() -> Resultado {
         }
     }
 
-    // O que se digita chega ao valor do texto, com a quebra de linha
-    // atravessando os dois escapes — o do servidor e o do JSON. Depois do
-    // foco, e não da abertura: o servidor o pede logo depois de abrir, e uma
-    // tecla que chegasse antes iria, corretamente, para o console — medido,
-    // uma vez em cinco no ARM.
+    let valor_na_arvore = |valor: &str, o_que: &'static str| -> Resultado {
+        let marca = format!("\"id\":{campo},\"role\":\"text_field\",\"label\":\"texto\",");
+        let valor = format!("\"value\":\"{valor}\"");
+        esperar_ate(
+            || {
+                chamar("ui.tree", "{}").is_ok_and(|a| {
+                    a.find(marca.as_str()).is_some_and(|i| {
+                        a[i..]
+                            .split('}')
+                            .nth(1)
+                            .is_some_and(|r| r.contains(valor.as_str()))
+                    })
+                })
+            },
+            200,
+        )
+        .map_err(|_| {
+            crate::log_error!("teste", "arvore: {:?}", chamar("ui.tree", "{}"));
+            o_que
+        })
+    };
+
+    // A pessoa digita: o que chega vai ao campo, que tem o foco da janela,
+    // e o Enter o confirma. Depois do foco, e não da abertura: o servidor o
+    // pede logo depois de abrir, e uma tecla que chegasse antes iria,
+    // corretamente, para o console — medido, uma vez em cinco no ARM.
     esperar_linha("janelas: foco 1")?;
     crate::teclado::evento(0x1E, true);
-    crate::teclado::evento(0x1C, true);
     crate::teclado::evento(0x30, true);
     esperar_linha("janelas: tecla 98 em 1")?;
-    let valor = "\"value\":\"a\\nb\"";
-    esperar_ate(
-        || chamar("ui.tree", "{}").is_ok_and(|a| a.contains(valor)),
-        200,
-    )
-    .map_err(|_| {
-        crate::log_error!("teste", "arvore: {:?}", chamar("ui.tree", "{}"));
-        "o texto digitado nao chegou ao valor do elemento na arvore"
-    })?;
+    valor_na_arvore(
+        "ab",
+        "o texto digitado nao chegou ao valor do campo na arvore",
+    )?;
+    crate::teclado::evento(0x1C, true);
+    esperar_linha("janelas: escrito 1 [ab]")?;
 
-    // Só o botão aceita `press`, e ele chega ao servidor, que fecha a janela.
-    if crate::ui::agir(conteudo, Acao::Pressionar, None, Origem::Agente).is_ok() {
-        return Err("um texto descrito aceitou press");
+    // O agente faz o mesmo pela árvore: troca o valor — com acento, que
+    // atravessa o kernel, o servidor e o JSON —, confirma, e aperta o
+    // Limpar, que esvazia o campo.
+    crate::ui::agir(campo, Acao::DefinirValor, Some("Olá, Duke"), Origem::Agente)?;
+    valor_na_arvore("Olá, Duke", "o set_value do agente nao chegou ao campo")?;
+    crate::ui::agir(campo, Acao::Confirmar, None, Origem::Agente)?;
+    esperar_linha("janelas: escrito 1 [Olá, Duke]")?;
+    crate::ui::agir(limpar, Acao::Pressionar, None, Origem::Agente)?;
+    esperar_linha("janelas: limpa 1")?;
+    valor_na_arvore("", "o Limpar nao esvaziou o campo")?;
+
+    // O campo não aceita `press`; a caixa de fechar aceita, e o pedido
+    // chega ao servidor, que fecha a janela.
+    if crate::ui::agir(campo, Acao::Pressionar, None, Origem::Agente).is_ok() {
+        return Err("um campo descrito aceitou press");
     }
     crate::ui::agir(fechar, Acao::Pressionar, None, Origem::Agente)?;
-    esperar_linha("janelas: acao 1 no elemento 1 da janela 1")?;
+    esperar_linha("janelas: acao 1 no elemento 0 da janela 1")?;
     esperar_linha("janelas: fechada 1")?;
     if crate::ui::existe(fechar) || crate::ui::existe(janela) {
         return Err("a janela fechada continuou na arvore");
@@ -4633,7 +4690,7 @@ fn arvore_das_janelas() -> Resultado {
 }
 
 /// O botão "Sobre" da barra abre a janela "Sobre o Duke" do servidor, uma
-/// só, e ela fecha pela árvore.
+/// só, e o OK dela a fecha — pelo agente e pela pessoa.
 ///
 /// # O que este caso protege
 ///
@@ -4642,6 +4699,11 @@ fn arvore_das_janelas() -> Resultado {
 /// um pedido no canal das janelas, e o servidor abre a janela e a descreve.
 /// Sem servidor, o `press` é recusado com o motivo — e não aceito sem que
 /// nada aconteça.
+///
+/// E a janela feita de widgets: do tamanho que eles pedem, no centro, com
+/// o OK na árvore onde ele está desenhado. O `press` do agente e o clique
+/// da pessoa no meio da moldura que a árvore publica fecham a janela pelo
+/// mesmo caminho.
 fn janelas_sobre_o_duke_pela_barra() -> Resultado {
     let resultado = sobre_o_duke();
     if resultado.is_err() {
@@ -5220,11 +5282,59 @@ fn terminal_operado() -> Resultado {
         return Err("a barra de titulo do terminal com o foco nao esta acesa");
     }
 
-    // Digitar na máquina: `xyzzy` e a quebra de linha, pelo teclado.
-    for codigo in [0x2D, 0x15, 0x2C, 0x2C, 0x15, 0x1C] {
-        crate::teclado::evento(codigo, true);
-        crate::teclado::evento(codigo, false);
-    }
+    // Digitar na máquina, pelo teclado: primeiro `xyz`, sem a quebra de
+    // linha. O eco muda só a linha do cursor, e o Terminal a redesenha
+    // sozinha — e a redescreve: a árvore mostra o eco, e a tela, o cursor
+    // logo depois dele.
+    let digitar = |codigos: &[u8]| {
+        for &codigo in codigos {
+            crate::teclado::evento(codigo, true);
+            crate::teclado::evento(codigo, false);
+        }
+    };
+    let atender = || {
+        while let Some(c) = crate::teclado::ler() {
+            crate::interpretador::tratar_tecla(c);
+        }
+    };
+    let ultima_linha = || {
+        crate::superficies::com_descricao(camada.id, |d| {
+            d.elementos
+                .iter()
+                .find(|e| e.rotulo == "terminal")
+                .and_then(|e| e.valor.as_deref())
+                .and_then(|v| v.rsplit('\n').next())
+                .map(alloc::string::String::from)
+        })
+        .flatten()
+    };
+    digitar(&[0x2D, 0x15, 0x2C]);
+    esperar_ate(
+        || {
+            atender();
+            ultima_linha().is_some_and(|l| l.ends_with("xyz"))
+        },
+        600,
+    )
+    .map_err(|_| "o eco sem quebra de linha nao chegou a descricao do terminal")?;
+    // O cursor é um bloco na cor de acento, a única coisa nessa cor dentro
+    // da grade: na coluna logo depois do eco, numa das linhas.
+    let coluna = ultima_linha().map_or(0, |l| l.chars().count()) as i64;
+    let (lc, ac) = (
+        Estilo::TEXTO.largura() as i64,
+        Estilo::TEXTO.altura() as i64,
+    );
+    let (gx, gy) = (tx + 1 + 4, ty + 22 + 4);
+    let bloco_em = |coluna: i64| {
+        (0..24).any(|linha| {
+            pixel_na_tela((gx + coluna * lc + 1) as u32, (gy + linha * ac + 1) as u32)
+                .is_ok_and(|p| p == acesa)
+        })
+    };
+    esperar_ate(|| bloco_em(coluna), 200)
+        .map_err(|_| "a tela do terminal nao mostra o cursor depois do eco")?;
+    // E o resto: `zy` e a quebra de linha.
+    digitar(&[0x2C, 0x15, 0x1C]);
     // A resposta, na descrição que o Terminal faz do que desenhou.
     let resposta = "comando desconhecido: xyzzy";
     let mostra = || {
@@ -5246,6 +5356,20 @@ fn terminal_operado() -> Resultado {
     )
     .map_err(|_| "a resposta do interpretador nao apareceu no terminal")?;
 
+    // Um clique fora: o foco volta ao console, e o Terminal, avisado, apaga
+    // a barra de título e troca o bloco do cursor pelo traço.
+    apertar(1, h as i64 - 2);
+    let apagada = Cor::nova(0x2A, 0x3C, 0x58);
+    esperar_ate(
+        || pixel_na_tela((tx + 300) as u32, (ty + 4) as u32).is_ok_and(|p| p == apagada),
+        600,
+    )
+    .map_err(|_| "o terminal nao apagou a barra quando perdeu o foco")?;
+    let coluna = ultima_linha().map_or(0, |l| l.chars().count()) as i64;
+    if bloco_em(coluna) {
+        return Err("sem o foco, o cursor do terminal continuou um bloco");
+    }
+
     // O botão de novo, com o Terminal no ar: ele vem para a frente, e o
     // servidor não lança outro. Pela F3, e pelo clique no botão — que tem
     // de estar desenhado onde a árvore diz.
@@ -5264,14 +5388,37 @@ fn terminal_operado() -> Resultado {
         return Err("com um terminal no ar, o botao lancou outro");
     }
 
-    // A caixa de fechar: o programa sai, e o pseudo-terminal fica livre.
-    apertar(tx + largura - 12, ty + 11);
+    // A caixa de fechar, pelos dois caminhos: o programa sai, e o
+    // pseudo-terminal fica livre. Primeiro o `press` do agente na árvore.
+    let livre = || {
+        esperar_ate(
+            || !crate::pseudoterminal::dono().is_some_and(crate::fios::vivo),
+            200,
+        )
+        .map_err(|_| "o terminal fechado continuou com o pseudo-terminal")
+    };
+    let fechar = crate::ui::id_do_elemento(camada.id, 0).ok_or("id de elemento fora da faixa")?;
+    crate::ui::agir(fechar, Acao::Pressionar, None, Origem::Agente)?;
     esperar_vezes("terminal: fechado", 1)?;
-    esperar_ate(
-        || !crate::pseudoterminal::dono().is_some_and(crate::fios::vivo),
-        200,
-    )
-    .map_err(|_| "o terminal fechado continuou com o pseudo-terminal")?;
+    livre()?;
+    // Depois o clique da pessoa, num Terminal lançado de novo. Contado
+    // daqui: o log que o caso lê é o das últimas linhas.
+    let desde = crate::log::total_emitidos();
+    let de_novo = |procurada: &str| {
+        let mut n = 0;
+        crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+            n +=
+                (r.seq >= desde && r.subsistema == "usuario" && r.mensagem() == procurada) as usize;
+        });
+        n
+    };
+    crate::ui::agir(ID_DO_BOTAO_TERMINAL, Acao::Pressionar, None, Origem::Agente)?;
+    esperar_ate(|| de_novo("terminal: pronto") == 1, 600)
+        .map_err(|_| "o terminal nao foi lancado de novo")?;
+    apertar(tx + largura - 12, ty + 11);
+    esperar_ate(|| de_novo("terminal: fechado") == 1, 600)
+        .map_err(|_| "o clique na caixa de fechar nao fechou o terminal")?;
+    livre()?;
 
     crate::eventos::publicar(
         CANAL_DAS_JANELAS,
@@ -5581,20 +5728,71 @@ fn sobre_o_duke() -> Resultado {
     if crate::ponteiro::tratar_clique(cx, cy) != Some(ID_DO_BOTAO_SOBRE) {
         return Err("o clique no botao Sobre nao o pressionou");
     }
-    let (x, y) = ((w - 400) / 2, (h - 190) / 2);
-    esperar_linha(&format!("janelas: aberta 1 Sobre o Duke em {x} {y}"))?;
     esperar_linha("janelas: foco 1")?;
+    // O tamanho é o que os widgets pedem, e a janela abre no centro.
+    let janela_na_tela = || {
+        let mut achada = None;
+        crate::grafico::camadas(|c| {
+            if c.nome == crate::superficies::NOME_DA_CAMADA {
+                achada = Some(c);
+            }
+        });
+        achada
+    };
+    let c = janela_na_tela().ok_or("a janela Sobre nao virou camada")?;
+    let (x, y) = ((w - c.largura as i64) / 2, (h - c.altura as i64) / 2);
+    // E o tamanho é o dos widgets mais a moldura: o recuo do conteúdo e a
+    // borda depois do texto mais largo, e depois do OK, que é o de baixo —
+    // e inteiro: uma janela curta demais cortaria o OK, e o fim dele subiria
+    // junto com ela.
+    let (direita, embaixo, altura_do_ok) = crate::superficies::com_descricao(c.id, |d| {
+        let achar = |rotulo: &str| {
+            d.elementos
+                .iter()
+                .find(|e| e.rotulo == rotulo)
+                .map(|e| e.moldura)
+        };
+        let (conteudo, ok) = (achar("conteudo"), achar("OK"));
+        (
+            conteudo.map(|m| m.x + m.largura),
+            ok.map(|m| m.y + m.altura),
+            ok.map(|m| m.altura),
+        )
+    })
+    .ok_or("a janela Sobre nao foi descrita")?;
+    if altura_do_ok != Some(aparencia::medidas::ALTURA_DO_BOTAO) {
+        return Err("o OK da janela Sobre nao esta inteiro");
+    }
+    let folga = aparencia::medidas::RECUO_DO_CONTEUDO + aparencia::medidas::BORDA;
+    if (direita.map(|d| d + folga), embaixo.map(|e| e + folga)) != (Some(c.largura), Some(c.altura))
+    {
+        crate::log_error!(
+            "teste",
+            "a janela Sobre tem {}x{}, e os widgets acabam em {:?} {:?}",
+            c.largura,
+            c.altura,
+            direita,
+            embaixo
+        );
+        return Err("a janela Sobre nao tem o tamanho dos widgets mais a moldura");
+    }
+    esperar_linha(&format!("janelas: aberta 1 Sobre o Duke em {x} {y}"))?;
+    if (c.x as i64, c.y as i64) != (x, y) {
+        return Err("a janela Sobre nao abriu no centro da tela");
+    }
 
-    // A árvore: a janela com o título, e o texto com o que o Duke é — e a
-    // arquitetura em que ele está rodando.
+    // A árvore: a janela com o título, o texto com o que o Duke é — a
+    // quebra de linha atravessa o escape do servidor e o do JSON —, a
+    // arquitetura em que ele está rodando, e o OK.
     let texto = format!("rodando em {}.", crate::arch::nome());
     esperar_ate(
         || {
             chamar("ui.tree", "{}").is_ok_and(|a| {
                 a.contains("\"role\":\"window\",\"label\":\"Sobre o Duke\"")
                     && a.contains("\"label\":\"cabeçalho\"")
-                    && a.contains("Um sistema operacional didático")
+                    && a.contains("Um sistema operacional didático, escrito\\nem Rust")
                     && a.contains(&texto)
+                    && a.contains("\"role\":\"button\",\"label\":\"OK\"")
             })
         },
         200,
@@ -5632,16 +5830,55 @@ fn sobre_o_duke() -> Resultado {
     if crate::teclado::ler().is_some() {
         return Err("com o foco na janela Sobre, a tecla foi para o console");
     }
-    let _ = esperar_ate(|| false, 20);
-    if descricao() != Some(antes) {
+    esperar_linha("janelas: tecla 97 em 1")?;
+    if descricao() != Some(antes.clone()) {
         return Err("digitar na janela Sobre mudou o texto dela");
     }
     crate::teclado::esvaziar();
 
-    // E fecha pela árvore, como qualquer janela.
-    let fechar = crate::ui::id_do_elemento(camada, 0).ok_or("id de elemento fora da faixa")?;
-    crate::ui::agir(fechar, Acao::Pressionar, None, Origem::Agente)?;
+    // O OK fecha, pelos dois caminhos. O do agente: o `press` na árvore.
+    let ok = antes
+        .elementos
+        .iter()
+        .position(|e| e.rotulo == "OK")
+        .and_then(|i| crate::ui::id_do_elemento(camada, i))
+        .ok_or("a janela Sobre nao tem o OK")?;
+    crate::ui::agir(ok, Acao::Pressionar, None, Origem::Agente)?;
     esperar_linha("janelas: fechada 1")?;
+
+    // O da pessoa: aberta de novo, o clique no meio do OK, onde a árvore
+    // diz que ele está — o mesmo retângulo em que ele foi desenhado.
+    crate::interpretador::tratar_tecla(crate::teclado::F2);
+    esperar_linha("janelas: foco 2")?;
+    let c = janela_na_tela().ok_or("a janela Sobre nao abriu de novo")?;
+    let m = crate::superficies::com_descricao(c.id, |d| {
+        d.elementos
+            .iter()
+            .find(|e| e.rotulo == "OK")
+            .map(|e| e.moldura)
+    })
+    .flatten()
+    .ok_or("a janela Sobre aberta de novo nao tem o OK")?;
+    let (ox, oy) = (
+        c.x as u32 + m.x + m.largura / 2,
+        c.y as u32 + m.y + m.altura / 2,
+    );
+    // Dentro do anel do foco, que tem dois pixels, e antes do texto; com o
+    // cursor longe, num canto do console.
+    let mover = |x: u32, y: u32| {
+        crate::ponteiro::absoluto(x, y, w as u32 - 1, h as u32 - 1);
+        crate::ponteiro::sincronizar();
+    };
+    mover(1, h as u32 - 2);
+    if pixel_na_tela(c.x as u32 + m.x + 3, c.y as u32 + m.y + 3)?
+        != crate::tela::Cor::de(aparencia::uso::FUNDO_DO_BOTAO)
+    {
+        return Err("o OK nao esta desenhado onde a arvore diz");
+    }
+    mover(ox, oy);
+    crate::ponteiro::botao(true);
+    crate::ponteiro::botao(false);
+    esperar_linha("janelas: fechada 2")?;
 
     crate::eventos::publicar(
         CANAL_DAS_JANELAS,

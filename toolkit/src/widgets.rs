@@ -374,6 +374,8 @@ pub struct Pilha {
     espaco: u32,
     recuo: u32,
     fundo: Option<u32>,
+    /// O menor tamanho que a pilha pede, ainda que os filhos peçam menos.
+    minimo: (u32, u32),
 }
 
 /// Os filhos de cima para baixo.
@@ -404,6 +406,7 @@ impl Pilha {
             espaco: 0,
             recuo: 0,
             fundo: None,
+            minimo: (0, 0),
         }
     }
 
@@ -430,6 +433,13 @@ impl Pilha {
         self.fundo = Some(cor);
         self
     }
+
+    /// Pede ao menos `largura` por `altura`: uma janela de um tamanho
+    /// dado, com os filhos no alto e o resto do fundo.
+    pub fn minimo(mut self, largura: u32, altura: u32) -> Pilha {
+        self.minimo = (largura, altura);
+        self
+    }
 }
 
 impl Widget for Pilha {
@@ -445,10 +455,11 @@ impl Widget for Pilha {
             atravessado = atravessado.max(largo);
         }
         let (longo, largo) = (ao_longo + 2 * self.recuo, atravessado + 2 * self.recuo);
-        match self.direcao {
+        let (l, a) = match self.direcao {
             Direcao::Vertical => (largo, longo),
             Direcao::Horizontal => (longo, largo),
-        }
+        };
+        (l.max(self.minimo.0), a.max(self.minimo.1))
     }
 
     fn desenhar(&self, tela: &mut Tela, area: Retangulo, _foco: bool) {

@@ -12,6 +12,7 @@
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use core::any::Any;
 
 use protocolo::usuario::descricao::{Escritor, Retangulo};
 
@@ -60,8 +61,50 @@ impl Interface {
         todos
     }
 
-    pub fn desenhar(&self, tela: &mut Tela, area: Retangulo) {
-        arvore::desenhar(self.raiz.as_ref(), tela, area, self.foco);
+    /// Desenha a árvore em `area`. `ativa` diz se a janela tem o foco: o
+    /// anel de um botão e o cursor de um campo só aparecem na janela que
+    /// recebe as teclas — é onde a tecla vai cair.
+    pub fn desenhar(&self, tela: &mut Tela, area: Retangulo, ativa: bool) {
+        arvore::desenhar(self.raiz.as_ref(), tela, area, self.foco.filter(|_| ativa));
+    }
+
+    /// Desenha só o que mudou no widget `indice`, e diz onde — ver
+    /// [`Widget::desenhar_mudado`]. `None` quando ele não sabe dizer, ou
+    /// não existe: aí se redesenha tudo.
+    pub fn desenhar_mudado(
+        &self,
+        indice: Indice,
+        tela: &mut Tela,
+        area: Retangulo,
+        ativa: bool,
+    ) -> Option<Retangulo> {
+        let foco = self.foco.filter(|_| ativa);
+        let mut dano = None;
+        percorrer(self.raiz.as_ref(), area, &mut |i, w, r| {
+            if i == indice {
+                dano = w.desenhar_mudado(tela, r, foco == Some(i));
+            }
+        });
+        dano
+    }
+
+    /// Entrega a `f` o widget `indice` com o tipo `T` que o programa pôs
+    /// ali — para mudá-lo por fora da entrada, como a saída que chega a um
+    /// terminal. `None` se o índice não existe, ou se o widget é de outro
+    /// tipo.
+    ///
+    /// Quem muda um widget por aqui pede o desenho depois: a interface não
+    /// sabe o que mudou.
+    pub fn com_widget<T: Widget, R>(
+        &mut self,
+        indice: Indice,
+        f: impl FnOnce(&mut T) -> R,
+    ) -> Option<R> {
+        com_widget_mut(self.raiz.as_mut(), indice, |w| {
+            let w: &mut dyn Any = w;
+            w.downcast_mut::<T>().map(f)
+        })
+        .flatten()
     }
 
     /// Acrescenta a árvore ao escritor, com os identificadores

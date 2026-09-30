@@ -12,6 +12,7 @@
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use core::any::Any;
 
 use protocolo::usuario::descricao::{Escritor, Retangulo, Tipo};
 
@@ -77,7 +78,10 @@ pub struct Semantica<'a> {
 
 /// Uma coisa numa janela: sabe o tamanho que pede, se desenha na área que
 /// recebe, e diz o que é.
-pub trait Widget {
+///
+/// É [`Any`] para o programa achar de volta o widget que pôs na árvore,
+/// com o tipo dele — ver [`Interface::com_widget`](crate::Interface::com_widget).
+pub trait Widget: Any {
     /// A largura e a altura que o widget pede.
     fn medir(&self) -> (u32, u32);
 
@@ -85,6 +89,23 @@ pub trait Widget {
     /// janela. Os filhos são desenhados depois, por cima — quem os
     /// percorre é [`desenhar`], e não o widget.
     fn desenhar(&self, _tela: &mut Tela, _area: Retangulo, _foco: bool) {}
+
+    /// Desenha só o que mudou desde o último desenho, e diz onde — ou
+    /// `None`, se não sabe dizer: aí quem pediu redesenha a janela inteira.
+    ///
+    /// É para o widget que muda por fora da entrada, e pouco de cada vez:
+    /// a saída que chega a um terminal muda uma linha, e redesenhar a
+    /// janela inteira a cada eco é o que o terminal não pode — ver
+    /// [`AreaDeTexto`](crate::AreaDeTexto). O que muda pela entrada não
+    /// precisa: a resposta dele já pede o desenho inteiro.
+    fn desenhar_mudado(
+        &self,
+        _tela: &mut Tela,
+        _area: Retangulo,
+        _foco: bool,
+    ) -> Option<Retangulo> {
+        None
+    }
 
     /// O widget recebe o foco — é parado pelo Tab, e pelo aperto?
     fn focavel(&self) -> bool {

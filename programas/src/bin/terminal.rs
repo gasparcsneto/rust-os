@@ -23,11 +23,13 @@
 //!
 //! # A grade
 //!
-//! [`COLUNAS`] por [`LINHAS`], com as últimas [`GUARDADAS`] linhas guardadas.
-//! O cursor anda só na última: o que o kernel manda é texto, a quebra de
-//! linha, o retorno e o apagar — o `\u{8}` volta uma coluna sem apagar, e o
-//! interpretador apaga escrevendo um espaço por cima, como num terminal de
-//! verdade. A linha longa quebra na borda.
+//! Uma [`AreaDeTexto`] do toolkit, de [`COLUNAS`] por [`LINHAS`]: a grade
+//! que o Terminal tinha, e que agora é um widget como os outros — ela se desenha, se descreve para
+//! a árvore com o fim do que está nela, e redesenha só a linha que mudou.
+//! O programa só escreve nela o que o pseudo-terminal entrega, e pede o
+//! desenho do que mudou: [`Janela::atualizar`].
+//!
+//! As teclas não são da grade: vão ao pseudo-terminal, e voltam como eco.
 //!
 //! Cada coisa que o programa faz de notável vira uma linha no log,
 //! `terminal: ...`: é por elas que a suíte acompanha o que aconteceu.
@@ -38,144 +40,31 @@
 extern crate alloc;
 
 use alloc::string::String;
-use alloc::vec::Vec;
 
-use programas::desenho::Estilo;
 use programas::escreverln;
-use programas::janela::{Aperto, Janela};
+use programas::janela::{Gesto, Janela};
 use programas::sistema;
 
-use protocolo::usuario::descricao::{self, Retangulo, Tipo};
-use protocolo::usuario::evento::acao as evento_acao;
 use protocolo::usuario::evento::{BOTAO_ESQUERDO, CANAL_DO_TERMINAL, Evento, janela, tipo};
+use toolkit::{AreaDeTexto, Indice, Interface};
 
-/// A grade: colunas e linhas visíveis, e quantas linhas se guardam.
+/// A grade: colunas e linhas.
 const COLUNAS: usize = 80;
 const LINHAS: usize = 24;
-const GUARDADAS: usize = 200;
 
-/// A folga entre a moldura e a grade.
-const FOLGA: u32 = aparencia::medidas::FOLGA_DA_GRADE;
-/// O estilo da grade: o do console.
-const ESTILO: Estilo = aparencia::texto::CORPO;
 /// Onde a janela abre.
 const X: i32 = 24;
 const Y: i32 = 40;
 
-// A paleta do console do kernel, para o Terminal ser o mesmo console.
-const FUNDO: u32 = aparencia::uso::FUNDO_DO_CONSOLE.argb();
-const TINTA: u32 = aparencia::uso::TEXTO_DO_CONSOLE.argb();
-const CURSOR: u32 = aparencia::uso::CURSOR_DE_TEXTO.argb();
-
-/// Os elementos da janela, na árvore.
-const ELEMENTO_FECHAR: i64 = 1;
-const ELEMENTO_TEXTO: i64 = 2;
-
-/// Quantos bytes do fim da grade vão para a árvore: o valor de um elemento
-/// tem um teto — ver [`descricao::MAIOR_TEXTO`] —, e o que interessa a quem
-/// lê é o que está embaixo, onde a resposta acabou de chegar.
-const TEXTO_NA_ARVORE: usize = descricao::MAIOR_TEXTO - 64;
-
-/// O texto: as linhas guardadas, e a coluna do cursor na última.
-struct Grade {
-    linhas: Vec<Vec<char>>,
-    coluna: usize,
-    /// Houve quebra de linha desde o último desenho: a grade rolou, e tudo
-    /// tem de ser redesenhado. Sem quebra, só a última linha mudou — é nela
-    /// que o cursor anda, e só nela que se escreve.
-    quebrou: bool,
-    /// Os bytes de um caractere que chegou partido entre duas leituras.
-    partido: [u8; 4],
-    partidos: usize,
-}
-
-impl Grade {
-    fn nova() -> Grade {
-        Grade {
-            linhas: alloc::vec![Vec::new()],
-            coluna: 0,
-            quebrou: true,
-            partido: [0; 4],
-            partidos: 0,
-        }
-    }
-
-    fn quebrar(&mut self) {
-        self.quebrou = true;
-        self.linhas.push(Vec::new());
-        if self.linhas.len() > GUARDADAS {
-            self.linhas.remove(0);
-        }
-        self.coluna = 0;
-    }
-
-    fn escrever(&mut self, c: char) {
-        match c {
-            '\n' => self.quebrar(),
-            '\r' => self.coluna = 0,
-            '\u{8}' => self.coluna = self.coluna.saturating_sub(1),
-            '\t' => {
-                let proxima = (self.coluna / 8 + 1) * 8;
-                while self.coluna < proxima.min(COLUNAS) {
-                    self.escrever(' ');
-                }
-            }
-            c if c.is_control() => {}
-            c => {
-                if self.coluna >= COLUNAS {
-                    self.quebrar();
-                }
-                let coluna = self.coluna;
-                // A grade sempre tem uma linha: nasce com uma, e quebrar
-                // põe a nova antes de tirar a mais velha.
-                if let Some(linha) = self.linhas.last_mut() {
-                    if coluna < linha.len() {
-                        linha[coluna] = c;
-                    } else {
-                        linha.resize(coluna, ' ');
-                        linha.push(c);
-                    }
-                }
-                self.coluna += 1;
-            }
-        }
-    }
-
-    /// Escreve os bytes que o pseudo-terminal entregou. Um caractere partido
-    /// no fim fica guardado até a próxima leitura; um byte que não é UTF-8
-    /// vira o substituto.
-    fn receber(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.partido[self.partidos] = b;
-            self.partidos += 1;
-            match core::str::from_utf8(&self.partido[..self.partidos]) {
-                Ok(s) => {
-                    let c = s.chars().next().unwrap_or('?');
-                    self.partidos = 0;
-                    self.escrever(c);
-                }
-                Err(e) if e.error_len().is_none() && self.partidos < 4 => {}
-                Err(_) => {
-                    self.partidos = 0;
-                    self.escrever('?');
-                }
-            }
-        }
-    }
-
-    /// As linhas visíveis: as últimas [`LINHAS`].
-    fn visiveis(&self) -> &[Vec<char>] {
-        &self.linhas[self.linhas.len().saturating_sub(LINHAS)..]
-    }
-}
+/// A base dos identificadores na árvore: a caixa de fechar é a base, e a
+/// grade, o primeiro widget, a seguinte.
+const BASE: i64 = 1;
+/// A grade, na interface.
+const GRADE: Indice = 0;
 
 struct Terminal {
     janela: Janela,
-    grade: Grade,
     pty: u64,
-    foco: bool,
-    /// A moldura mudou desde o último desenho — o foco veio ou foi.
-    moldura_mudou: bool,
     botoes: i64,
     /// O que foi digitado e o pseudo-terminal ainda não aceitou: a fila do
     /// teclado do kernel estava cheia.
@@ -183,118 +72,8 @@ struct Terminal {
 }
 
 impl Terminal {
-    /// Desenha o que mudou e acusa o dano.
-    ///
-    /// # Por que não redesenhar tudo sempre
-    ///
-    /// Porque cada tecla ecoa, e cada eco é uma saída nova. Redesenhar a
-    /// grade inteira a cada uma fazia o compositor recompor a janela inteira
-    /// a cada tecla — e, no ARM emulado, isso demorava mais do que a folga
-    /// do teclado virtio, que guarda duas teclas entre duas colheitas do
-    /// relógio. Medido na fumaça: de `agent.ping` digitado a vinte
-    /// milissegundos por tecla, chegaram `agent.` e o Enter, e o `ping` se
-    /// perdeu. Uma tecla muda uma linha só, e é ela que se redesenha.
-    fn desenhar(&mut self) {
-        let (cx, cy, cl, ca) = self.janela.conteudo();
-        let (lc, ac) = (ESTILO.largura(), ESTILO.altura());
-        let visiveis: Vec<String> = self
-            .grade
-            .visiveis()
-            .iter()
-            .map(|l| l.iter().collect())
-            .collect();
-        let linha_do_cursor = visiveis.len().saturating_sub(1);
-        let coluna_do_cursor = self.grade.coluna.min(COLUNAS - 1);
-        let foco = self.foco;
-        let tudo = self.grade.quebrou || self.moldura_mudou;
-        self.grade.quebrou = false;
-        self.moldura_mudou = false;
-        let (x0, y0) = (cx + FOLGA, cy + FOLGA);
-        let mut tela = if tudo {
-            let mut tela = self.janela.desenhar_moldura(foco);
-            tela.retangulo(cx, cy, cl, ca, FUNDO);
-            tela
-        } else {
-            let largura = self.janela.largura();
-            let mut tela = programas::desenho::Tela {
-                pixels: self.janela.superficie().pixels(),
-                largura,
-            };
-            tela.retangulo(cx, y0 + linha_do_cursor as u32 * ac, cl, ac, FUNDO);
-            tela
-        };
-        let primeira = if tudo { 0 } else { linha_do_cursor };
-        for (i, linha) in visiveis.iter().enumerate().skip(primeira) {
-            tela.texto((x0, y0 + i as u32 * ac), linha, ESTILO, (TINTA, FUNDO));
-        }
-        // O cursor: um bloco com o foco, um traço sem ele.
-        let (x, y) = (
-            x0 + coluna_do_cursor as u32 * lc,
-            y0 + linha_do_cursor as u32 * ac,
-        );
-        if foco {
-            let sob = visiveis
-                .get(linha_do_cursor)
-                .and_then(|l| l.chars().nth(coluna_do_cursor))
-                .unwrap_or(' ');
-            let mut um = [0u8; 4];
-            tela.texto((x, y), sob.encode_utf8(&mut um), ESTILO, (FUNDO, CURSOR));
-        } else {
-            tela.retangulo(x, y + ac - 2, lc, 2, CURSOR);
-        }
-        let _ = if tudo {
-            self.janela.superficie().danificar_tudo()
-        } else {
-            self.janela
-                .superficie()
-                .danificar(cx as u16, y as u16, cl as u16, ac as u16)
-        };
-        self.descrever(&visiveis);
-    }
-
-    /// Diz à árvore o que a janela é: a moldura, e o texto de baixo da
-    /// grade.
-    fn descrever(&self, visiveis: &[String]) {
-        let mut d = self.janela.descrever_moldura(ELEMENTO_FECHAR);
-        let (cx, cy, cl, ca) = self.janela.conteudo();
-        // As linhas de baixo que cabem, na ordem.
-        let mut usados = 0;
-        let mut primeira = visiveis.len();
-        for (i, linha) in visiveis.iter().enumerate().rev() {
-            let custo = linha.trim_end().len() + 1;
-            if usados + custo > TEXTO_NA_ARVORE {
-                break;
-            }
-            usados += custo;
-            primeira = i;
-        }
-        let texto: Vec<&str> = visiveis[primeira..].iter().map(|l| l.trim_end()).collect();
-        d.elemento(
-            Tipo::Texto,
-            ELEMENTO_TEXTO,
-            Retangulo {
-                x: cx,
-                y: cy,
-                largura: cl,
-                altura: ca,
-            },
-            "terminal",
-            &texto.join("\n"),
-        );
-        let r = match d.terminar() {
-            Ok(texto) => sistema::descrever(self.janela.descritor(), &texto),
-            Err(motivo) => {
-                escreverln!("terminal: a descricao nao cabe: {}", motivo);
-                return;
-            }
-        };
-        if r != 0 {
-            escreverln!("terminal: a descricao foi recusada: {}", r);
-        }
-    }
-
-    /// Lê o que o kernel imprimiu, até o pseudo-terminal devolver zero.
-    /// Devolve se veio alguma coisa.
+    /// Lê o que o kernel imprimiu, até o pseudo-terminal devolver zero, e
+    /// escreve na grade. Devolve se veio alguma coisa.
     fn ler_a_saida(&mut self) -> bool {
         let mut bytes = [0u8; 512];
         let mut veio = false;
@@ -303,7 +82,8 @@ impl Terminal {
             if n <= 0 {
                 return veio;
             }
-            self.grade.receber(&bytes[..n as usize]);
+            self.janela
+                .com_widget::<AreaDeTexto, _>(GRADE, |g| g.receber(&bytes[..n as usize]));
             veio = true;
         }
     }
@@ -326,6 +106,14 @@ impl Terminal {
         }
     }
 
+    /// A barra de título acende; e o log diz, se ela estava apagada.
+    fn focar(&mut self) {
+        if !self.janela.com_foco() {
+            self.janela.focar(true);
+            escreverln!("terminal: foco");
+        }
+    }
+
     /// Devolve se a pessoa fechou a janela.
     fn ponteiro(&mut self, x: i64, y: i64, botoes: i64) -> bool {
         let apertou = botoes & BOTAO_ESQUERDO != 0 && self.botoes & BOTAO_ESQUERDO == 0;
@@ -343,24 +131,15 @@ impl Terminal {
         // O aperto já trouxe o foco — o kernel o dá —, e traz a janela para
         // a frente.
         let _ = self.janela.superficie().trazer_para_frente();
-        if !self.foco {
-            self.foco = true;
-            self.moldura_mudou = true;
-            self.desenhar();
-            escreverln!("terminal: foco");
-        }
-        self.janela.apertar(x, y) == Aperto::Fechar
+        self.focar();
+        self.janela.apertar_em(x, y) == Gesto::Fechar
     }
 
     /// A barra pediu o Terminal: para a frente, com o foco.
     fn vir_para_a_frente(&mut self) {
         let _ = self.janela.superficie().trazer_para_frente();
         let _ = self.janela.superficie().focar();
-        if !self.foco {
-            self.foco = true;
-            self.moldura_mudou = true;
-        }
-        self.desenhar();
+        self.focar();
         escreverln!("terminal: frente");
     }
 }
@@ -386,13 +165,8 @@ fn principal() -> i64 {
         return 2;
     }
 
-    let (lc, ac) = (ESTILO.largura(), ESTILO.altura());
-    let largura = 2 * programas::janela::BORDA + 2 * FOLGA + COLUNAS as u32 * lc;
-    let altura = programas::janela::ALTURA_DO_TITULO
-        + programas::janela::BORDA
-        + 2 * FOLGA
-        + LINHAS as u32 * ac;
-    let mut janela = match Janela::nova("Terminal", largura, altura, X, Y) {
+    let grade = AreaDeTexto::nova("terminal", COLUNAS, LINHAS);
+    let mut janela = match Janela::com_interface("Terminal", Interface::nova(grade), BASE, X, Y) {
         Ok(j) => j,
         Err(e) => {
             escreverln!("terminal: sem janela: {}", e);
@@ -402,18 +176,16 @@ fn principal() -> i64 {
     if janela.opaca().is_err() || janela.superficie().entrada(canal).is_err() {
         return 4;
     }
+    janela.focar(true);
     let mut t = Terminal {
         janela,
-        grade: Grade::nova(),
         pty: pty as u64,
-        foco: true,
-        moldura_mudou: true,
         botoes: 0,
         pendente: String::new(),
     };
     // O que o kernel já tinha impresso — o boot inteiro, se couber no anel.
     t.ler_a_saida();
-    t.desenhar();
+    t.janela.atualizar(GRADE);
     if t.janela.mostrar().is_err() || t.janela.superficie().focar().is_err() {
         return 5;
     }
@@ -439,15 +211,15 @@ fn principal() -> i64 {
                         return 0;
                     }
                 }
-                tipo::FOCO_PERDIDO => {
-                    t.foco = false;
-                    t.moldura_mudou = true;
-                    mudou = true;
-                }
+                tipo::FOCO_PERDIDO => t.janela.focar(false),
                 tipo::ABRIR if e.a == janela::TERMINAL => t.vir_para_a_frente(),
-                tipo::ACAO if e.a == ELEMENTO_FECHAR && e.b == evento_acao::PRESSIONAR => {
-                    escreverln!("terminal: fechado");
-                    return 0;
+                // O `press` do agente na caixa de fechar: o mesmo fechar do
+                // clique.
+                tipo::ACAO => {
+                    if t.janela.acao(e.a, e.b) == Some(Gesto::Fechar) {
+                        escreverln!("terminal: fechado");
+                        return 0;
+                    }
                 }
                 tipo::ENCERRAR => {
                     escreverln!("terminal: encerrado");
@@ -459,7 +231,7 @@ fn principal() -> i64 {
         // O que ficou pendente numa fila cheia: o interpretador já andou.
         t.digitar_pendente();
         if mudou {
-            t.desenhar();
+            t.janela.atualizar(GRADE);
         }
     }
 }

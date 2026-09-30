@@ -2102,6 +2102,7 @@ fn conferir_invariantes() -> Result<ExitCode, String> {
         conferir_arvore_do_readme()?,
         conferir_fase_do_readme()?,
         conferir_travas_do_post_mortem()?,
+        conferir_janelas_pelo_toolkit()?,
     ];
     if passos.iter().all(|p| *p == ExitCode::SUCCESS) {
         Ok(ExitCode::SUCCESS)
@@ -2197,6 +2198,101 @@ fn conferir_travas_do_post_mortem() -> Result<ExitCode, String> {
         eprintln!(
             "\nUma falha que pegue uma destas na mão pendura o canal na primeira pergunta \
              que a tocar. Escreva o `destravar` do módulo e chame-o em `traps::fatal`."
+        );
+        Ok(ExitCode::FAILURE)
+    }
+}
+
+/// Os programas que desenham ou descrevem uma superfície à mão, e por quê:
+/// eles conferem a ABI crua do kernel, por baixo do runtime.
+const SUPERFICIE_CRUA: &[(&str, &str)] = &[
+    (
+        "bin/superficie.rs",
+        "confere as recusas de `descrever` e o que o compositor mostra dos pixels do processo",
+    ),
+    (
+        "bin/entrada.rs",
+        "uma superfície crua, fora do runtime, para conferir a entrada por superfície",
+    ),
+    (
+        "bin/herdeira.rs",
+        "depois de um `exec`, desenha na superfície dela para conferir que a herdada não é a sua",
+    ),
+];
+
+/// O que numa linha de programa desenha ou descreve uma janela sem o
+/// toolkit: a memória de pixels, a chamada ao kernel, o escritor, um
+/// elemento.
+const A_MAO: &[&str] = &[".pixels()", "sistema::descrever(", "Escritor", ".elemento("];
+
+/// A primeira linha de `texto` — o número e ela — que desenha ou descreve
+/// uma janela à mão, fora dos comentários.
+fn linha_a_mao(texto: &str) -> Option<(usize, &str)> {
+    texto.lines().enumerate().find_map(|(i, linha)| {
+        let codigo = linha.trim_start();
+        let a_mao = !codigo.starts_with("//") && A_MAO.iter().any(|t| codigo.contains(t));
+        a_mao.then_some((i + 1, codigo))
+    })
+}
+
+/// Confere que só o toolkit e a moldura do runtime desenham e descrevem
+/// janelas.
+///
+/// # Por que isto virou conferência
+///
+/// Porque a árvore semântica é como um agente opera o Duke, e uma descrição
+/// escrita à mão ao lado do desenho é a segunda superfície que o toolkit
+/// existe para não ter. Até a fase 11, o servidor de janelas e o Terminal
+/// escreviam as suas: o retângulo do texto e o do desenho eram contas
+/// separadas, e bastava uma mudar para o agente ler o que não estava na
+/// tela. Agora o desenho e a descrição saem dos widgets — e esta
+/// conferência impede a próxima janela de voltar a fazer um dos dois à mão:
+/// o pixel pintado fora de um widget é o que a pessoa vê e o agente não lê.
+///
+/// # A regra
+///
+/// Nenhum arquivo de `programas/src` pega a memória de pixels, chama
+/// `sistema::descrever`, usa o `Escritor` ou acrescenta um `.elemento(` — a
+/// não ser `janela.rs`, a moldura do runtime, que desenha a interface e
+/// entrega ao kernel o que ela gerou, e os programas de
+/// [`SUPERFICIE_CRUA`], que conferem a ABI crua.
+fn conferir_janelas_pelo_toolkit() -> Result<ExitCode, String> {
+    let raiz = raiz_do_projeto();
+    let fonte = raiz.join("programas/src");
+    let mut arquivos = 0usize;
+    let mut fora: Vec<String> = Vec::new();
+    percorrer_fontes(&fonte, &mut |caminho| {
+        let nome = caminho
+            .strip_prefix(&fonte)
+            .map_err(|_| format!("{} fora de programas/src", caminho.display()))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        arquivos += 1;
+        if nome == "janela.rs" || SUPERFICIE_CRUA.iter().any(|(a, _)| *a == nome) {
+            return Ok(());
+        }
+        let texto = std::fs::read_to_string(caminho)
+            .map_err(|e| format!("não foi possível ler {}: {e}", caminho.display()))?;
+        if let Some((n, linha)) = linha_a_mao(&texto) {
+            fora.push(format!("programas/src/{nome}:{n}: {linha}"));
+        }
+        Ok(())
+    })?;
+    if fora.is_empty() {
+        println!(
+            "[xtask] {arquivos} arquivos de programas: as janelas são desenhadas e descritas só pelo toolkit \
+             ({} com a ABI crua, para conferi-la)",
+            SUPERFICIE_CRUA.len()
+        );
+        Ok(ExitCode::SUCCESS)
+    } else {
+        eprintln!("[xtask] janelas desenhadas ou descritas à mão:");
+        for f in &fora {
+            eprintln!("  {f}");
+        }
+        eprintln!(
+            "\nUma janela se desenha e se descreve pelo toolkit: monte widgets numa `Interface`, e a \
+             `Janela::com_interface` do runtime gera o desenho e a descrição do mesmo estado."
         );
         Ok(ExitCode::FAILURE)
     }
@@ -6494,6 +6590,33 @@ const ESPERA_PELO_CANAL: Duration = Duration::from_secs(30);
 
 #[cfg(test)]
 mod testes {
+    #[test]
+    fn a_janela_a_mao_e_achada_fora_dos_comentarios() {
+        use super::linha_a_mao as linha_que_descreve;
+        // O comentário que fala da chamada não é a chamada.
+        assert_eq!(
+            linha_que_descreve("// ver `sistema::descrever(`\n/// o `Escritor`\nfn f() {}"),
+            None
+        );
+        assert_eq!(
+            linha_que_descreve("fn f() {\n    sistema::descrever(fd, \"janela\\tx\");\n}"),
+            Some((2, "sistema::descrever(fd, \"janela\\tx\");"))
+        );
+        assert_eq!(
+            linha_que_descreve("let e = Escritor::nova(\"x\");").map(|(n, _)| n),
+            Some(1)
+        );
+        assert_eq!(
+            linha_que_descreve("x\n  d.elemento(Tipo::Botao, 1, r, \"OK\", \"\");").map(|(n, _)| n),
+            Some(2)
+        );
+        assert_eq!(
+            linha_que_descreve("janela.superficie().pixels().fill(0);").map(|(n, _)| n),
+            Some(1)
+        );
+        assert_eq!(linha_que_descreve("let ui = Interface::nova(c);"), None);
+    }
+
     #[test]
     fn a_fase_completa_e_ate_o_primeiro_buraco() {
         let roteiro = "\
