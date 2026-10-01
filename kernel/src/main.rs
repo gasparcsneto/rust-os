@@ -72,8 +72,6 @@ mod frames;
 mod grafico;
 mod heap;
 mod identidade;
-// O login do console, que usa a autenticação e as sessões, entra no passo
-// seguinte; até lá, só a suíte e as operações administrativas as alcançam.
 mod interpretador;
 mod irq;
 mod log;
@@ -82,7 +80,6 @@ mod mmio;
 mod paginacao;
 mod particoes;
 mod pci;
-#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 mod pessoas;
 mod ponteiro;
 mod pseudoterminal;

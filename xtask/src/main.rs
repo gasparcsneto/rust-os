@@ -4948,8 +4948,10 @@ fn conversar(
     sob_carga(&mut escrita, &mut leitor)?;
     sob_despejo(&mut escrita, &mut leitor)?;
     sob_teclado(monitor, teclado, &mut escrita, &mut leitor)?;
+    sob_login_no_terminal(monitor, &mut escrita, &mut leitor)?;
     sob_interpretador(monitor, &mut escrita, &mut leitor)?;
     sob_terminal(&mut escrita, &mut leitor)?;
+    sob_login_no_console(monitor, qmp, &mut escrita, &mut leitor)?;
     sob_arvore(&mut escrita, &mut leitor)?;
     sob_barra(monitor, &mut escrita, &mut leitor)?;
     sob_mouse(qmp, teclado, &mut escrita, &mut leitor)?;
@@ -7324,6 +7326,233 @@ fn sob_barra(
         std::thread::sleep(Duration::from_millis(100));
     }
     Err(format!("barra: F1 nao pressionou o botao\n  {ultima}"))
+}
+
+/// O nome de uma tecla no `sendkey` do monitor, para um caractere do que a
+/// fumaça digita: letras minúsculas, dígitos, o ponto, o hífen e o Enter.
+fn tecla_do_monitor(c: char) -> Option<String> {
+    match c {
+        'a'..='z' | '0'..='9' => Some(c.to_string()),
+        '.' => Some("dot".into()),
+        '-' => Some("minus".into()),
+        ' ' => Some("spc".into()),
+        '\n' => Some("ret".into()),
+        _ => None,
+    }
+}
+
+/// Digita um texto no teclado da máquina, pelo monitor, uma tecla por vez.
+fn digitar_pelo_monitor(mon: &mut UnixStream, texto: &str, quem: &str) -> Result<(), String> {
+    for c in texto.chars() {
+        let nome = tecla_do_monitor(c)
+            .ok_or_else(|| format!("{quem}: a fumaca nao sabe digitar {c:?}"))?;
+        mon.write_all(format!("sendkey {nome}\n").as_bytes())
+            .and_then(|()| mon.flush())
+            .map_err(|e| format!("{quem}: falha ao mandar `{nome}`: {e}"))?;
+        // O emulador entrega uma tecla por vez, e mandá-las sem respiro faz
+        // algumas se perderem entre o monitor e o dispositivo.
+        //
+        // E depois do Enter, mais: no console da máquina, cheio, cada linha
+        // nova rola a tela e a recompõe inteira, com as interrupções
+        // desligadas — no build de depuração, perto de um quarto de segundo.
+        // As teclas que chegam nesse meio esperam na fila do PS/2 do
+        // emulador, que é curta: medido, a vinte milissegundos por tecla o
+        // Enter depois do nome se perdia, e a senha entrava ecoada no nome.
+        let respiro = if c == '\n' { 600 } else { 20 };
+        std::thread::sleep(Duration::from_millis(respiro));
+    }
+    Ok(())
+}
+
+/// As sessões abertas da pessoa de desenvolvimento, pelos consoles delas,
+/// como `person.registry` as mostra.
+fn consoles_da_pessoa_dev(registro: &str) -> Vec<String> {
+    let marca = format!(r#""name":"{}""#, chaves::NOME_DA_PESSOA_DEV);
+    let Some(resto) = registro.find(&marca).map(|i| &registro[i..]) else {
+        return Vec::new();
+    };
+    // Até o fim do objeto dela: o próximo `"id":"pessoa:` é de outra.
+    let fim = resto[1..]
+        .find(r#""id":"pessoa:"#)
+        .map_or(resto.len(), |i| i + 1);
+    let mut consoles = Vec::new();
+    let mut texto = &resto[..fim];
+    while let Some(i) = texto.find(r#""console":""#) {
+        texto = &texto[i + r#""console":""#.len()..];
+        if let Some(f) = texto.find('"') {
+            consoles.push(texto[..f].to_string());
+        }
+    }
+    consoles
+}
+
+/// Espera a pessoa de desenvolvimento ter uma sessão num console cujo nome
+/// começa com `prefixo`.
+fn esperar_sessao_dev(
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+    id: &mut u32,
+    prefixo: &str,
+    quem: &str,
+) -> Result<Vec<String>, String> {
+    let limite = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let registro = pedir_pela_serial(escrita, leitor, id, "person.registry", "{}")
+            .map_err(|e| format!("{quem}: {e}"))?;
+        let consoles = consoles_da_pessoa_dev(&registro);
+        if consoles.iter().any(|c| c.starts_with(prefixo)) {
+            return Ok(consoles);
+        }
+        if std::time::Instant::now() >= limite {
+            return Err(format!(
+                "{quem}: a pessoa `{}` nao entrou em {prefixo}\n  {registro}",
+                chaves::NOME_DA_PESSOA_DEV
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Entrar no Terminal: antes do login nada passa, e com a senha de
+/// `target/chaves/` a pessoa de desenvolvimento entra — e a senha não fica
+/// no que `keyboard.read` devolve.
+///
+/// # O que esta sonda prova que a suíte não prova
+///
+/// A suíte entrega os caracteres ao console à mão. Aqui eles saem do
+/// teclado da máquina, vão à janela do Terminal — que tem o foco desde o
+/// boot —, ao pseudo-terminal dele, e ao console dele; a credencial é a da
+/// imagem, calculada pelo `xtask` no hospedeiro e conferida pelo Argon2id
+/// do kernel.
+fn sob_login_no_terminal(
+    monitor: &Path,
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+) -> Result<(), String> {
+    println!("[xtask] fumaça: entrar no Terminal");
+    let senha = chaves::Chaves::garantir()?.pessoa_dev().2;
+    let mut mon = UnixStream::connect(monitor)
+        .map_err(|e| format!("login: o monitor nao aceitou conexao: {e}"))?;
+    let mut id = 6600;
+
+    // Antes do login: o comando é recusado, e gravado com o console.
+    digitar_pelo_monitor(&mut mon, "\nagent.ping\n", "login")?;
+    let limite = std::time::Instant::now() + Duration::from_secs(8);
+    loop {
+        let cauda = pedir_pela_serial(escrita, leitor, &mut id, "audit.tail", r#"{"count":32}"#)
+            .map_err(|e| format!("login: {e}"))?;
+        let registros = objetos_planos(apos(&cauda, r#""records":["#).unwrap_or(""))?;
+        let recusado = registros.iter().any(|campos| {
+            let campo = |nome: &str| {
+                campos
+                    .iter()
+                    .find(|(n, _)| n == nome)
+                    .and_then(|(_, v)| v.clone())
+                    .unwrap_or_default()
+            };
+            campo("method") == "agent.ping"
+                && campo("holder") == "anonymous"
+                && campo("code") == "DENY_NOT_AUTHENTICATED"
+                && campo("resource").starts_with("terminal:")
+        });
+        if recusado {
+            break;
+        }
+        if std::time::Instant::now() >= limite {
+            return Err(format!(
+                "login: o comando antes do login nao foi recusado e gravado\n  {cauda}"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    println!(
+        "  [login] ok  antes do login, `agent.ping` no Terminal e DENY_NOT_AUTHENTICATED, gravado"
+    );
+
+    // O histórico, vazio antes de digitar o login.
+    let _ = pedir_pela_serial(escrita, leitor, &mut id, "keyboard.read", r#"{"max":256}"#);
+    digitar_pelo_monitor(
+        &mut mon,
+        &format!("login\n{}\n{senha}\n", chaves::NOME_DA_PESSOA_DEV),
+        "login",
+    )?;
+    let consoles = esperar_sessao_dev(escrita, leitor, &mut id, "terminal:", "login")?;
+    println!(
+        "  [login] ok  `{}` entrou no Terminal, com a senha da imagem ({})",
+        chaves::NOME_DA_PESSOA_DEV,
+        consoles.join(", ")
+    );
+
+    // A senha não ficou no histórico do teclado; o nome, sim.
+    let historico = pedir_pela_serial(escrita, leitor, &mut id, "keyboard.read", r#"{"max":256}"#)
+        .map_err(|e| format!("login: {e}"))?;
+    if historico.contains(&senha) || !historico.contains(chaves::NOME_DA_PESSOA_DEV) {
+        return Err(format!(
+            "login: o historico do teclado nao e o que devia — a senha nao entra, o nome entra\n  {historico}"
+        ));
+    }
+    println!("  [login] ok  a senha nao entrou no historico do teclado");
+    Ok(())
+}
+
+/// Entrar no console físico também: um clique fora das janelas devolve o
+/// foco ao console, e a mesma pessoa entra nele — duas sessões, a mesma
+/// identidade.
+fn sob_login_no_console(
+    monitor: &Path,
+    qmp: &Path,
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+) -> Result<(), String> {
+    println!("[xtask] fumaça: entrar no console da máquina");
+    let senha = chaves::Chaves::garantir()?.pessoa_dev().2;
+    let mut id = 6650;
+    let info = pedir_pela_serial(escrita, leitor, &mut id, "display.info", "{}")
+        .map_err(|e| format!("login: {e}"))?;
+    let dimensao = |chave: &str| -> Result<u32, String> {
+        valor_de(&info, &format!(r#""{chave}":"#))
+            .and_then(|v| v.parse().ok())
+            .ok_or_else(|| format!("login: display.info nao tem `{chave}`\n  {info}"))
+    };
+    let (largura, altura) = (dimensao("width")?, dimensao("height")?);
+    // O canto de baixo, à direita: a área do console, longe do Terminal.
+    let fora = (largura - 40, altura - 40);
+    let (mut qmp_escrita, mut qmp_leitor) = qmp_abrir(qmp)?;
+    {
+        let mut pedir = |metodo: &str, params: &str| {
+            pedir_pela_serial(escrita, leitor, &mut id, metodo, params)
+                .map_err(|e| format!("login: {e}"))
+        };
+        levar_o_ponteiro(
+            &mut qmp_escrita,
+            &mut qmp_leitor,
+            &mut pedir,
+            fora,
+            (largura, altura),
+        )?;
+    }
+    botao_do_mouse(&mut qmp_escrita, &mut qmp_leitor, true)?;
+    botao_do_mouse(&mut qmp_escrita, &mut qmp_leitor, false)?;
+
+    let mut mon = UnixStream::connect(monitor)
+        .map_err(|e| format!("login: o monitor nao aceitou conexao: {e}"))?;
+    digitar_pelo_monitor(
+        &mut mon,
+        &format!("\nlogin\n{}\n{senha}\n", chaves::NOME_DA_PESSOA_DEV),
+        "login",
+    )?;
+    let consoles = esperar_sessao_dev(escrita, leitor, &mut id, "console", "login")?;
+    if !consoles.iter().any(|c| c.starts_with("terminal:")) {
+        return Err(format!(
+            "login: entrar no console tirou a pessoa do Terminal ({})",
+            consoles.join(", ")
+        ));
+    }
+    println!(
+        "  [login] ok  a mesma pessoa no console e no Terminal: duas sessoes ({})",
+        consoles.join(", ")
+    );
+    Ok(())
 }
 
 fn sob_interpretador(

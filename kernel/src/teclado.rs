@@ -52,6 +52,34 @@ static TECLADO: Fila<char, CAPACIDADE> = Fila::nova();
 /// e conta os descartes, que é o comportamento certo para um diagnóstico.
 static HISTORICO: Fila<char, CAPACIDADE> = Fila::nova();
 
+/// Os consoles que estão pedindo uma senha agora, um bit cada.
+///
+/// Enquanto houver algum, nada entra no [`HISTORICO`]: o histórico é o que
+/// `keyboard.read` devolve, e uma senha digitada — no console físico ou na
+/// janela de um Terminal, que recebe as teclas pelo canal dela — não é
+/// diagnóstico de ninguém. O kernel não sabe para qual janela uma tecla vai
+/// virar senha, então não grava tecla nenhuma até o último console sair do
+/// pedido de senha.
+static PEDINDO_SENHA: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Marca se o console `indice` está pedindo uma senha. Chamada pelo
+/// interpretador.
+pub fn pedindo_senha(indice: usize, pedindo: bool) {
+    let bit = 1u32 << (indice % 32);
+    if pedindo {
+        PEDINDO_SENHA.fetch_or(bit, Ordering::Relaxed);
+    } else {
+        PEDINDO_SENHA.fetch_and(!bit, Ordering::Relaxed);
+    }
+}
+
+/// Guarda no histórico, se nenhum console estiver pedindo senha.
+fn registrar_no_historico(c: char) {
+    if PEDINDO_SENHA.load(Ordering::Relaxed) == 0 {
+        let _ = HISTORICO.enfileirar(c);
+    }
+}
+
 /// Alguma das duas teclas de shift está pressionada?
 ///
 /// Uma só para as duas: o hardware distingue a esquerda da direita, e nada
@@ -125,19 +153,6 @@ pub fn clique() {
     let _ = TECLADO.enfileirar(CLIQUE);
     #[cfg(not(feature = "modo-teste"))]
     despertar();
-}
-
-/// Enfileira `c` para o interpretador, como se tivesse sido digitado na
-/// máquina. Chamado pelo pseudo-terminal. Falso com a fila cheia.
-///
-/// Não entra no histórico, que é o que uma pessoa digitou no teclado desta
-/// máquina: quem digita no Terminal já passou por ele, na tecla que o
-/// servidor recebeu.
-pub fn injetar(c: char) -> bool {
-    let coube = TECLADO.enfileirar(c).is_ok();
-    #[cfg(not(feature = "modo-teste"))]
-    despertar();
-    coube
 }
 
 /// Qual tecla de função um código é, de 1 a 12.
@@ -248,7 +263,7 @@ pub fn evento(codigo_da_tecla: u8, pressionada: bool) {
             c: 0,
         };
         if crate::superficies::entregar(destino, evento) {
-            let _ = HISTORICO.enfileirar(c);
+            registrar_no_historico(c);
             return;
         }
     }
@@ -257,7 +272,7 @@ pub fn evento(codigo_da_tecla: u8, pressionada: bool) {
     // guarda quantos se perderam, e não há para quem reclamar aqui dentro —
     // isto roda num handler de interrupção.
     let _ = TECLADO.enfileirar(c);
-    let _ = HISTORICO.enfileirar(c);
+    registrar_no_historico(c);
 
     // E avisar quem espera. Depois de enfileirar, nunca antes: um waker
     // acordado para uma fila ainda vazia faz a tarefa consultar, não achar
@@ -345,29 +360,46 @@ fn despertar() {
     });
 }
 
-/// A próxima tecla digitada, quando houver uma.
-#[cfg(not(feature = "modo-teste"))]
-pub fn proxima_tecla() -> ProximaTecla {
-    ProximaTecla
+/// Acorda o interpretador: há o que ler numa fila de entrada de um
+/// pseudo-terminal. Na suíte não há tarefa para acordar.
+pub fn despertar_o_interpretador() {
+    #[cfg(not(feature = "modo-teste"))]
+    despertar();
 }
 
-/// O futuro devolvido por [`proxima_tecla`].
-///
-/// Sem estado: tudo de que precisa está nos `static` do módulo.
+/// A próxima entrada de algum console: uma tecla do teclado da máquina —
+/// do console físico — ou um caractere digitado num pseudo-terminal.
 #[cfg(not(feature = "modo-teste"))]
-pub struct ProximaTecla;
+fn proxima() -> Option<(crate::pessoas::Console, char)> {
+    ler()
+        .map(|c| (crate::pessoas::Console::Fisico, c))
+        .or_else(crate::pseudoterminal::proxima_entrada)
+}
+
+/// A próxima entrada de algum console, quando houver uma.
+#[cfg(not(feature = "modo-teste"))]
+pub fn proxima_entrada() -> ProximaEntrada {
+    ProximaEntrada
+}
+
+/// O futuro devolvido por [`proxima_entrada`].
+///
+/// Sem estado: tudo de que precisa está nos `static` do módulo e das filas
+/// dos pseudo-terminais.
+#[cfg(not(feature = "modo-teste"))]
+pub struct ProximaEntrada;
 
 #[cfg(not(feature = "modo-teste"))]
-impl core::future::Future for ProximaTecla {
-    type Output = char;
+impl core::future::Future for ProximaEntrada {
+    type Output = (crate::pessoas::Console, char);
 
     fn poll(
         self: core::pin::Pin<&mut Self>,
         contexto: &mut core::task::Context,
-    ) -> core::task::Poll<char> {
-        // Caminho rápido: com teclas na fila, nem tocamos no waker.
-        if let Some(c) = ler() {
-            return core::task::Poll::Ready(c);
+    ) -> core::task::Poll<Self::Output> {
+        // Caminho rápido: com entrada na fila, nem tocamos no waker.
+        if let Some(e) = proxima() {
+            return core::task::Poll::Ready(e);
         }
 
         crate::arch::sem_interrupcoes(|| {
@@ -387,8 +419,8 @@ impl core::future::Future for ProximaTecla {
         // chegasse entre a primeira consulta e o registro acordaria um waker
         // que ainda não existia, e o aviso se perderia — a tarefa dormiria
         // para sempre com a tecla na fila.
-        match ler() {
-            Some(c) => core::task::Poll::Ready(c),
+        match proxima() {
+            Some(e) => core::task::Poll::Ready(e),
             None => core::task::Poll::Pending,
         }
     }

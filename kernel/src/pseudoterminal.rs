@@ -1,26 +1,31 @@
-//! O pseudo-terminal: o interpretador do kernel, visto de um processo.
+//! Os pseudo-terminais: um console do interpretador para cada Terminal.
 //!
-//! # O que ele é
+//! # O que eles são
 //!
-//! O arranjo do Unix, reduzido ao que o Terminal precisa. Dois sentidos, e
-//! nenhum deles novo para o kernel:
+//! O arranjo do Unix, reduzido ao que o Terminal precisa. Cada Terminal que
+//! abre recebe um pseudo-terminal **seu**, e com ele um console seu do
+//! interpretador — ver [`crate::interpretador`]: a linha de comando, a
+//! pessoa que entrou nele e a sessão dela. Dois sentidos, por instância:
 //!
-//! - **o que o processo escreve é digitado.** Cada caractere entra na fila
-//!   do teclado que o interpretador lê, como se uma pessoa o tivesse
-//!   digitado na máquina. O interpretador não sabe de onde veio;
-//! - **o que o kernel imprime é lido.** Tudo o que passa por
-//!   [`crate::serial::_print`] — as respostas do interpretador, o eco do que
-//!   se digita, o log — vai também para um anel de bytes daqui, e o processo
+//! - **o que o processo escreve é digitado** no console dele: cada caractere
+//!   entra na fila de entrada desta instância, que o interpretador lê;
+//! - **o que o console imprime é lido**: o eco, o prompt e as respostas do
+//!   console desta instância vão para um anel de bytes daqui, e o processo
 //!   o lê.
 //!
-//! O console do kernel continua desenhando o mesmo texto na camada de baixo:
-//! ele é o fundo, e a reserva — o que se vê no boot, sem servidor, e o
-//! caminho da tela de falha. O Terminal é outra janela sobre o mesmo
-//! interpretador, e não um segundo interpretador.
+//! # Por que um console por Terminal, e não um espelho do físico
+//!
+//! Antes, o Terminal era outra janela sobre o mesmo interpretador: o que se
+//! digitava nele caía na fila do teclado da máquina, e o anel guardava tudo
+//! o que o kernel imprimia. Com pessoas, isso não serve: quem entra num
+//! Terminal é uma sessão, e a pessoa no console físico é outra — mesmo que
+//! seja a mesma pessoa. Cada uma tem a sua linha, o seu login e o que ela
+//! pode; o que uma digita não aparece na outra, e o log do kernel continua
+//! no console físico, que é o fundo e a reserva.
 //!
 //! # Por que a leitura não bloqueia
 //!
-//! Porque o Terminal espera duas coisas: a saída do kernel e o teclado. Um
+//! Porque o Terminal espera duas coisas: a saída do console e o teclado. Um
 //! processo deste kernel tem um fio só, e um fio que dormisse na leitura do
 //! pseudo-terminal não veria a tecla que chegasse no canal dele. Então a
 //! espera é uma só, no canal de eventos: o kernel avisa ali, com um evento
@@ -29,27 +34,33 @@
 //!
 //! # Por que o aviso é adiado
 //!
-//! Porque quem escreve no anel é o `_print`, e o `_print` roda em qualquer
-//! lugar — inclusive dentro da tranca do escalonador, quando o próprio
-//! escalonador registra algo no log. Avisar é publicar no canal, e publicar
-//! acorda o ouvinte, que toma a tranca do escalonador: por dentro dela, o
-//! kernel giraria para sempre. O `_print` só marca que há saída nova, e quem
+//! Porque quem escreve no anel pode rodar com a tranca do escalonador na
+//! mão. Avisar é publicar no canal, e publicar acorda o ouvinte, que toma a
+//! tranca do escalonador. Quem escreve só marca que há saída nova, e quem
 //! avisa é o coletor de fios, a cada volta — um tique de atraso, de um lugar
 //! sem tranca nenhuma na mão.
 //!
 //! # O anel
 //!
-//! Guarda os últimos [`ANEL`] bytes impressos, desde o boot, tenha ou não um
-//! Terminal aberto: é o que faz o Terminal começar mostrando o que aconteceu
-//! antes dele. O que não cabe empurra o mais antigo para fora, e é contado —
-//! o kernel não espera um leitor lento para imprimir.
+//! Guarda os últimos [`ANEL`] bytes que o console imprimiu. O que não cabe
+//! empurra o mais antigo para fora, e é contado — o kernel não espera um
+//! leitor lento para imprimir.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use spin::Mutex;
 
-/// Quantos bytes da saída o anel guarda.
+use crate::pessoas::Console;
+use crate::tarefas::fila::Fila;
+
+/// Quantos Terminais podem ter um pseudo-terminal aberto ao mesmo tempo.
+pub const TERMINAIS: usize = 4;
+
+/// Quantos bytes da saída o anel de cada um guarda.
 pub const ANEL: usize = 16 * 1024;
+
+/// Quantos caracteres digitados cabem esperando o interpretador.
+pub const ENTRADA: usize = 256;
 
 struct Anel {
     bytes: [u8; ANEL],
@@ -59,6 +70,12 @@ struct Anel {
 }
 
 impl Anel {
+    const VAZIO: Anel = Anel {
+        bytes: [0; ANEL],
+        inicio: 0,
+        quantos: 0,
+    };
+
     fn pôr(&mut self, bytes: &[u8]) {
         for &b in bytes {
             if self.quantos == ANEL {
@@ -81,17 +98,14 @@ impl Anel {
         self.quantos -= n;
         n
     }
+
+    fn esvaziar(&mut self) {
+        self.inicio = 0;
+        self.quantos = 0;
+    }
 }
 
-// Tomada por `try_lock` do `_print` — que já roda com as interrupções
-// mascaradas — e por `sem_interrupcoes` do resto. Solta no caminho fatal.
-static SAIDA: Mutex<Anel> = Mutex::new(Anel {
-    bytes: [0; ANEL],
-    inicio: 0,
-    quantos: 0,
-});
-
-/// Quem tem o pseudo-terminal aberto.
+/// Quem tem um pseudo-terminal aberto.
 #[derive(Clone, Copy)]
 struct Dono {
     fio: u64,
@@ -100,124 +114,169 @@ struct Dono {
     canal: crate::eventos::Chave,
 }
 
-static DONO: Mutex<Option<Dono>> = Mutex::new(None);
+// Tomadas por `try_lock` de quem escreve — que pode rodar com as
+// interrupções mascaradas — e por `sem_interrupcoes` do resto. Soltas no
+// caminho fatal.
+static SAIDAS: [Mutex<Anel>; TERMINAIS] = [const { Mutex::new(Anel::VAZIO) }; TERMINAIS];
+static DONOS: Mutex<[Option<Dono>; TERMINAIS]> = Mutex::new([None; TERMINAIS]);
+static ENTRADAS: [Fila<char, ENTRADA>; TERMINAIS] = [const { Fila::nova() }; TERMINAIS];
 
-/// Houve saída desde o último aviso.
-static PENDENTE: AtomicBool = AtomicBool::new(false);
+/// Houve saída desde o último aviso, por instância.
+static PENDENTES: [AtomicBool; TERMINAIS] = [const { AtomicBool::new(false) }; TERMINAIS];
 static PROXIMA_GERACAO: AtomicU64 = AtomicU64::new(1);
-/// Bytes que saíram do anel sem ninguém lê-los; avisos entregues; teclas
-/// digitadas pelo pseudo-terminal.
+/// Bytes que saíram de um anel sem ninguém lê-los; avisos entregues; teclas
+/// digitadas pelos pseudo-terminais.
 static PERDIDOS: AtomicU64 = AtomicU64::new(0);
 static AVISOS: AtomicU64 = AtomicU64::new(0);
 static DIGITADOS: AtomicU64 = AtomicU64::new(0);
 
-/// O que um descritor do pseudo-terminal guarda: qual abertura ele é.
+/// O que um descritor de pseudo-terminal guarda: qual instância, e qual
+/// abertura dela.
 ///
 /// Uma geração, pelo motivo dos canais e das superfícies: o descritor de
-/// quem fechou não alcança a abertura seguinte.
+/// quem fechou não alcança a abertura seguinte da mesma instância.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Chave {
+    pub indice: u8,
     pub geracao: u64,
 }
 
-/// Guarda `texto` no anel. Chamada pelo `_print`, de qualquer lugar.
-///
-/// Uma tranca tomada perde o texto, em vez de esperar: quem imprime não pode
-/// esperar ninguém. Com as interrupções mascaradas em toda tomada, só uma
-/// exceção no meio de uma leitura do anel a encontra tomada — e esperar ali
-/// seria esperar para sempre.
-pub fn registrar(texto: &str) {
-    if let Some(mut anel) = SAIDA.try_lock() {
-        anel.pôr(texto.as_bytes());
-        PENDENTE.store(true, Ordering::Relaxed);
+impl Chave {
+    /// O console desta instância.
+    pub fn console(self) -> Console {
+        Console::Terminal(u16::from(self.indice))
     }
 }
 
-/// O `_print` escreve pelo `core::fmt`, e isto é o destino dele.
-pub struct Registro;
+/// O que o console da instância `indice` imprimiu. Chamada pelo
+/// interpretador.
+///
+/// Uma tranca tomada perde o texto, em vez de esperar: quem imprime não pode
+/// esperar ninguém.
+pub fn saida(indice: u8, texto: &str) {
+    let Some(anel) = SAIDAS.get(usize::from(indice)) else {
+        return;
+    };
+    if let Some(mut anel) = anel.try_lock() {
+        anel.pôr(texto.as_bytes());
+        PENDENTES[usize::from(indice)].store(true, Ordering::Relaxed);
+    }
+}
 
-impl core::fmt::Write for Registro {
+/// O `core::fmt` do console de uma instância.
+pub struct Saida(pub u8);
+
+impl core::fmt::Write for Saida {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        registrar(s);
+        saida(self.0, s);
         Ok(())
     }
 }
 
-/// Por que o pseudo-terminal não abriu.
+/// Por que um pseudo-terminal não abriu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Recusa {
-    /// Há outro dono vivo.
+    /// Todas as instâncias têm dono vivo, ou quem pede já tem uma: um
+    /// processo, um console.
     Ocupado,
 }
 
-/// Abre o pseudo-terminal para `fio`, com os avisos no `canal`.
+/// Abre um pseudo-terminal para `fio`, com os avisos no `canal`: a primeira
+/// instância livre. Um dono morto não segura a dele: quem abre confere, e
+/// toma o lugar.
 ///
-/// Um dono morto não o segura: quem abre confere, e toma o lugar.
+/// O console da instância começa do zero — sem ninguém entrado, a linha
+/// vazia, o anel e a entrada vazios —, e o que ficou de uma abertura
+/// anterior é encerrado antes: a sessão de quem estava nele acaba.
 pub fn abrir(fio: u64, canal: crate::eventos::Chave) -> Result<Chave, Recusa> {
-    let chave = crate::arch::sem_interrupcoes(|| {
-        let mut dono = DONO.lock();
-        if dono.is_some_and(|d| crate::fios::vivo(d.fio)) {
+    let (chave, anterior) = crate::arch::sem_interrupcoes(|| {
+        let mut donos = DONOS.lock();
+        if donos
+            .iter()
+            .any(|d| d.is_some_and(|d| d.fio == fio && crate::fios::vivo(d.fio)))
+        {
             return Err(Recusa::Ocupado);
         }
+        let indice = donos
+            .iter()
+            .position(|d| d.is_none_or(|d| !crate::fios::vivo(d.fio)))
+            .ok_or(Recusa::Ocupado)?;
+        let anterior = donos[indice].is_some();
         let geracao = PROXIMA_GERACAO.fetch_add(1, Ordering::Relaxed);
-        *dono = Some(Dono {
+        donos[indice] = Some(Dono {
             fio,
             geracao,
             canal,
         });
-        Ok(Chave { geracao })
+        SAIDAS[indice].lock().esvaziar();
+        while ENTRADAS[indice].desenfileirar().is_some() {}
+        Ok((
+            Chave {
+                indice: indice as u8,
+                geracao,
+            },
+            anterior,
+        ))
     })?;
-    // O que já está no anel é saída que o dono novo ainda não leu.
-    PENDENTE.store(true, Ordering::Relaxed);
+    if anterior {
+        crate::interpretador::fechar_console(chave.console(), "o terminal anterior morreu");
+    }
+    crate::interpretador::abrir_console(chave.console());
+    PENDENTES[usize::from(chave.indice)].store(true, Ordering::Relaxed);
     Ok(chave)
 }
 
-/// A `chave` é a abertura viva, e de `fio`?
+/// A `chave` é a abertura viva da instância, e de `fio`?
 fn confere(chave: Chave, fio: u64) -> bool {
     crate::arch::sem_interrupcoes(|| {
-        DONO.lock()
-            .is_some_and(|d| d.geracao == chave.geracao && d.fio == fio)
+        DONOS
+            .lock()
+            .get(usize::from(chave.indice))
+            .is_some_and(|d| d.is_some_and(|d| d.geracao == chave.geracao && d.fio == fio))
     })
 }
 
-/// Lê para `destino` o que o kernel imprimiu. Zero quando não há nada — não
-/// bloqueia. `None` se a chave não é de `fio`.
+/// Lê para `destino` o que o console imprimiu. Zero quando não há nada —
+/// não bloqueia. `None` se a chave não é de `fio`.
 pub fn ler(chave: Chave, fio: u64, destino: &mut [u8]) -> Option<usize> {
     if !confere(chave, fio) {
         return None;
     }
     Some(crate::arch::sem_interrupcoes(|| {
-        SAIDA.lock().tirar(destino)
+        SAIDAS[usize::from(chave.indice)].lock().tirar(destino)
     }))
 }
 
-/// Digita `texto` no interpretador, caractere por caractere, até a fila do
-/// teclado encher. Devolve quantos bytes foram aceitos — uma escrita
+/// Digita `texto` no console da instância, caractere por caractere, até a
+/// fila de entrada encher. Devolve quantos bytes foram aceitos — uma escrita
 /// parcial, como a de um `write` num pipe cheio. `None` se a chave não é de
 /// `fio`.
 ///
 /// # O que não é texto é consumido e descartado
 ///
-/// A fila do teclado carrega também as teclas de função e o clique — é por
-/// ela que F1 limpa a tela. Um processo que escrevesse esses caracteres
-/// apertaria botões do kernel por um canal que só deveria digitar. Então só
-/// passa o que mexe na linha do interpretador: texto, a quebra de linha, o
-/// apagar, o apagar da linha inteira e o Enter de um agente — ver
-/// `protocolo::usuario::terminal`. O resto conta como aceito, porque recusá-lo
-/// deixaria quem escreve repetindo para sempre o mesmo caractere.
+/// Só passa o que mexe na linha do interpretador: texto, a quebra de linha,
+/// o apagar, o apagar da linha inteira e o Enter de um agente — ver
+/// `protocolo::usuario::terminal`. As teclas de função e o clique são do
+/// console físico; um processo que os escrevesse apertaria botões da barra
+/// por um canal que só deveria digitar. O resto conta como aceito, porque
+/// recusá-lo deixaria quem escreve repetindo para sempre o mesmo caractere.
 pub fn escrever(chave: Chave, fio: u64, texto: &str) -> Option<usize> {
     if !confere(chave, fio) {
         return None;
     }
+    let fila = &ENTRADAS[usize::from(chave.indice)];
     let mut aceitos = 0;
     for c in texto.chars() {
         if e_digitavel(c) {
-            if !crate::teclado::injetar(c) {
+            if fila.enfileirar(c).is_err() {
                 break;
             }
             DIGITADOS.fetch_add(1, Ordering::Relaxed);
         }
         aceitos += c.len_utf8();
+    }
+    if aceitos > 0 {
+        crate::teclado::despertar_o_interpretador();
     }
     Some(aceitos)
 }
@@ -230,36 +289,79 @@ fn e_digitavel(c: char) -> bool {
         || agente_que_confirmou(c).is_some()
 }
 
-/// Fecha o pseudo-terminal, se a `chave` for a abertura de `fio`.
-pub fn fechar(chave: Chave, fio: u64) {
-    crate::arch::sem_interrupcoes(|| {
-        let mut dono = DONO.lock();
-        if dono.is_some_and(|d| d.geracao == chave.geracao && d.fio == fio) {
-            *dono = None;
+/// O próximo caractere digitado em algum pseudo-terminal, com o console de
+/// onde veio. Uma volta pelas instâncias, a partir da seguinte à da última
+/// vez: um Terminal que digita muito não deixa os outros esperando.
+pub fn proxima_entrada() -> Option<(Console, char)> {
+    static VEZ: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+    let comeco = VEZ.load(Ordering::Relaxed);
+    for passo in 0..TERMINAIS {
+        let i = (comeco + passo) % TERMINAIS;
+        if let Some(c) = ENTRADAS[i].desenfileirar() {
+            VEZ.store(i + 1, Ordering::Relaxed);
+            return Some((Console::Terminal(i as u16), c));
         }
-    });
+    }
+    None
 }
 
-/// Avisa o dono, no canal dele, que há saída nova. Chamada pelo coletor de
-/// fios a cada volta — ver o cabeçalho sobre por que o aviso é adiado.
+/// Fecha o pseudo-terminal, se a `chave` for a abertura de `fio`. O console
+/// dele fecha junto: a sessão de quem estava nele acaba.
+pub fn fechar(chave: Chave, fio: u64) {
+    let fechou = crate::arch::sem_interrupcoes(|| {
+        let mut donos = DONOS.lock();
+        match donos.get_mut(usize::from(chave.indice)) {
+            Some(d) if d.is_some_and(|d| d.geracao == chave.geracao && d.fio == fio) => {
+                *d = None;
+                true
+            }
+            _ => false,
+        }
+    });
+    if fechou {
+        crate::interpretador::fechar_console(chave.console(), "o terminal fechou");
+    }
+}
+
+/// Avisa cada dono, no canal dele, que há saída nova; e fecha o console de
+/// um dono que morreu sem fechar. Chamada pelo coletor de fios a cada volta
+/// — ver o cabeçalho sobre por que o aviso é adiado.
 ///
 /// Um aviso por volta, e não um por impressão: o dono lê tudo o que houver
-/// quando acordar. A fila cheia do canal não perde nada que importe — o
-/// próximo aviso vem na volta seguinte, se ainda houver o que ler.
+/// quando acordar.
 pub fn avisar_se_preciso() {
-    if !PENDENTE.load(Ordering::Relaxed) {
-        return;
-    }
-    let Some(dono) = crate::arch::sem_interrupcoes(|| *DONO.lock()) else {
-        return;
-    };
-    PENDENTE.store(false, Ordering::Relaxed);
-    let aviso = protocolo::usuario::evento::Evento {
-        tipo: protocolo::usuario::evento::tipo::SAIDA,
-        ..Default::default()
-    };
-    if crate::eventos::publicar_em(dono.canal, aviso).is_ok() {
-        AVISOS.fetch_add(1, Ordering::Relaxed);
+    for (i, pendente) in PENDENTES.iter().enumerate() {
+        let dono = crate::arch::sem_interrupcoes(|| DONOS.lock()[i]);
+        let Some(dono) = dono else {
+            continue;
+        };
+        if !crate::fios::vivo(dono.fio) {
+            let largou = crate::arch::sem_interrupcoes(|| {
+                let mut donos = DONOS.lock();
+                let mesmo = donos[i].is_some_and(|d| d.geracao == dono.geracao);
+                if mesmo {
+                    donos[i] = None;
+                }
+                mesmo
+            });
+            if largou {
+                crate::interpretador::fechar_console(
+                    Console::Terminal(i as u16),
+                    "o terminal morreu",
+                );
+            }
+            continue;
+        }
+        if !pendente.swap(false, Ordering::Relaxed) {
+            continue;
+        }
+        let aviso = protocolo::usuario::evento::Evento {
+            tipo: protocolo::usuario::evento::tipo::SAIDA,
+            ..Default::default()
+        };
+        if crate::eventos::publicar_em(dono.canal, aviso).is_ok() {
+            AVISOS.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -272,12 +374,12 @@ pub fn estatisticas() -> (u64, u64, u64) {
     )
 }
 
-/// O fio que tem o pseudo-terminal aberto, se algum.
-pub fn dono() -> Option<u64> {
-    crate::arch::sem_interrupcoes(|| DONO.lock().map(|d| d.fio))
+/// Os fios que têm um pseudo-terminal aberto, por instância.
+pub fn donos() -> [Option<u64>; TERMINAIS] {
+    crate::arch::sem_interrupcoes(|| DONOS.lock().map(|d| d.map(|d| d.fio)))
 }
 
-/// Destrava o anel e o dono à força, para o caminho de falha fatal.
+/// Destrava os anéis e os donos à força, para o caminho de falha fatal.
 ///
 /// # Safety
 ///
@@ -285,7 +387,12 @@ pub fn dono() -> Option<u64> {
 /// há outro núcleo em execução. Ver [`crate::traps::fatal`].
 pub unsafe fn destravar() {
     unsafe {
-        SAIDA.force_unlock();
-        DONO.force_unlock();
+        for anel in &SAIDAS {
+            anel.force_unlock();
+        }
+        DONOS.force_unlock();
+        for fila in &ENTRADAS {
+            fila.destravar();
+        }
     }
 }

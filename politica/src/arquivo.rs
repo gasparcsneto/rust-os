@@ -26,8 +26,9 @@
 //! - `taxa <papel> <por segundo> <rajada>`: o balde de pedidos do papel.
 //! - `apertos <quantos> <janela em ms>`: apertos de mão por porta.
 //! - `serial <papel>`: o papel da sessão 0. Obrigatória.
-//! - `local <papel>`: o papel da autoridade local — a pessoa no console e
-//!   os processos do sistema. Obrigatória. Ela não é exceção à política:
+//! - `local <papel>`: o papel da autoridade local — os processos do
+//!   sistema. Obrigatória. A pessoa num console não é a autoridade local:
+//!   decide pelo papel dela no registro de pessoas. Ela não é exceção à política:
 //!   decide pela mesma conta, com as permissões que o papel enumera.
 //!
 //! # Validar antes de valer
@@ -314,8 +315,7 @@ impl Politica {
         &self.serial
     }
 
-    /// O papel da autoridade local: a pessoa no console e os processos do
-    /// sistema.
+    /// O papel da autoridade local: os processos do sistema.
     pub fn local(&self) -> &str {
         &self.local
     }

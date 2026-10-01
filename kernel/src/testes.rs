@@ -4726,28 +4726,34 @@ fn janelas_sobre_o_duke_pela_barra() -> Resultado {
     resultado
 }
 
-/// O pseudo-terminal por dentro: o anel, a fila do teclado e a posse.
+/// Os pseudo-terminais por dentro: um console por instância, o anel, a fila
+/// de entrada e a posse.
 ///
 /// # O que este caso protege
 ///
 /// O que o Terminal assume sem ter como conferir, e que falha em silêncio:
 ///
-/// - **o `_print` alimenta o anel.** Sem isso o Terminal abre e fica vazio;
+/// - **cada instância é um console seu.** Abrir já mostra o convite do
+///   console novo, sem ninguém entrado; o que o console de uma imprime não
+///   vai para a outra, e o que o kernel imprime no físico não vai para
+///   nenhuma;
 /// - **o anel cheio perde o mais antigo, e conta.** Perder o mais novo
-///   deixaria o Terminal mostrando o boot para sempre; não contar deixaria a
-///   perda invisível;
-/// - **escrever é digitar, e só texto.** Uma tecla de função escrita pelo
-///   processo apertaria um botão do kernel; e a fila cheia devolve uma
-///   escrita parcial, e não uma mentira;
+///   deixaria o Terminal mostrando o começo para sempre; não contar deixaria
+///   a perda invisível;
+/// - **escrever é digitar, e só texto, no console da instância.** Uma tecla
+///   de função escrita pelo processo apertaria um botão da barra; e a fila
+///   cheia devolve uma escrita parcial, e não uma mentira;
 /// - **o aviso vai para o canal do dono, uma vez por saída nova;**
-/// - **a posse.** Um dono de cada vez, a chave velha recusada depois de
-///   fechar, e o dono morto não segurando o pseudo-terminal.
+/// - **a posse.** Um processo, um console; a chave velha recusada depois de
+///   fechar; o dono morto não segurando a instância; e fechar acaba a sessão
+///   de quem estava no console.
 ///
 /// Tudo o que depende de nada mais imprimir no meio — o coletor, o relógio —
 /// roda com as interrupções mascaradas.
 fn terminal_o_anel_a_fila_e_a_posse() -> Resultado {
     use crate::eventos::{self, Colheita};
-    use crate::pseudoterminal::{self as pty, ANEL, Recusa};
+    use crate::pessoas::{Encerramento, EstadoDaSessao};
+    use crate::pseudoterminal::{self as pty, ANEL, ENTRADA, Recusa};
     use protocolo::usuario::evento::{Evento, tipo};
 
     const CANAL: &str = "teste-pty";
@@ -4755,8 +4761,11 @@ fn terminal_o_anel_a_fila_e_a_posse() -> Resultado {
     // escalonador dá numa suíte.
     const MORTO: u64 = u64::MAX - 7;
 
-    if pty::dono().is_some_and(crate::fios::vivo) {
-        return Err("o pseudo-terminal ja tinha dono vivo antes do caso");
+    if pty::donos()
+        .iter()
+        .any(|d| d.is_some_and(crate::fios::vivo))
+    {
+        return Err("um pseudo-terminal ja tinha dono vivo antes do caso");
     }
     let eu = crate::fios::id_atual();
     let canal = eventos::escutar(CANAL.as_bytes(), eu).map_err(|_| "o canal do caso nao abriu")?;
@@ -4767,11 +4776,17 @@ fn terminal_o_anel_a_fila_e_a_posse() -> Resultado {
             return Err("o pseudo-terminal livre recusou abrir");
         }
     };
+    let console = chave.console();
 
     let resultado = crate::arch::sem_interrupcoes(|| -> Resultado {
-        let mut buffer = [0u8; 256];
-        let mut esvaziar_o_anel =
-            || while pty::ler(chave, eu, &mut buffer).is_some_and(|n| n > 0) {};
+        let mut buffer = [0u8; 512];
+        let mut ler_tudo = |chave: pty::Chave, fio: u64| {
+            let mut texto = alloc::string::String::new();
+            while let Some(n) = pty::ler(chave, fio, &mut buffer).filter(|&n| n > 0) {
+                texto.push_str(core::str::from_utf8(&buffer[..n]).unwrap_or("?"));
+            }
+            texto
+        };
         let esvaziar_o_canal = || {
             let mut eventos = [Evento::default(); 16];
             while eventos::estado(CANAL).is_some_and(|e| e.na_fila > 0) {
@@ -4779,53 +4794,56 @@ fn terminal_o_anel_a_fila_e_a_posse() -> Resultado {
             }
         };
 
-        // A posse: o próprio dono não abre de novo.
-        if pty::abrir(eu, canal) != Err(Recusa::Ocupado) || pty::dono() != Some(eu) {
-            return Err("o pseudo-terminal com dono vivo abriu para outro");
+        // Um processo, um console: o próprio dono não abre outro.
+        if pty::abrir(eu, canal) != Err(Recusa::Ocupado) {
+            return Err("o dono de um pseudo-terminal abriu outro");
         }
 
-        // O `_print` alimenta o anel, com exatamente o que imprimiu.
-        esvaziar_o_anel();
-        crate::serial_print!("marca-do-pty\n");
-        let mut lido = [0u8; 64];
-        let n = pty::ler(chave, eu, &mut lido).ok_or("o dono foi recusado na leitura")?;
-        if &lido[..n] != b"marca-do-pty\n" {
-            crate::log_error!(
-                "teste",
-                "o anel devolveu {:?}",
-                core::str::from_utf8(&lido[..n])
-            );
-            return Err("o anel nao devolveu o que o kernel imprimiu");
+        // Abrir já mostra o console novo, sem ninguém entrado.
+        let convite = ler_tudo(chave, eu);
+        if !convite.contains("Ninguem entrou")
+            || !convite.ends_with(protocolo::usuario::terminal::PROMPT)
+        {
+            crate::log_error!("teste", "o anel devolveu {:?}", convite);
+            return Err("o console novo nao convidou para o login");
         }
-        if pty::ler(chave, eu, &mut lido) != Some(0) {
-            return Err("o anel vazio nao devolveu zero");
+        // O que o kernel imprime no console físico não vai para ele.
+        crate::serial_print!("marca-do-fisico\n");
+        if !ler_tudo(chave, eu).is_empty() {
+            return Err("o console fisico vazou para o pseudo-terminal");
+        }
+        // O que o console dele imprime, sim: `ajuda` sem login diz como
+        // entrar, e só isso.
+        for c in "ajuda\n".chars() {
+            crate::interpretador::tratar(console, c);
+        }
+        let ajuda = ler_tudo(chave, eu);
+        if !ajuda.contains("login") || ajuda.contains("system.info") {
+            crate::log_error!("teste", "{:?}", ajuda);
+            return Err("a ajuda sem login nao foi so a de entrar");
         }
 
         // O anel cheio: dez bytes de marca e um anel inteiro de `x` depois
         // deles. Os dez são os que saem, e são contados.
         let perdidos = pty::estatisticas().0;
-        pty::registrar("0123456789");
+        pty::saida(chave.indice, "0123456789");
         let xis = [b'x'; 256];
         let xis = core::str::from_utf8(&xis).unwrap_or("");
         for _ in 0..ANEL / xis.len() {
-            pty::registrar(xis);
+            pty::saida(chave.indice, xis);
         }
         if pty::estatisticas().0 != perdidos + 10 {
             return Err("o anel cheio nao contou exatamente o que perdeu");
         }
-        let mut total = 0;
-        let mut so_xis = true;
-        while let Some(n) = pty::ler(chave, eu, &mut buffer).filter(|&n| n > 0) {
-            so_xis &= buffer[..n].iter().all(|&b| b == b'x');
-            total += n;
-        }
-        if total != ANEL || !so_xis {
-            crate::log_error!("teste", "{} bytes lidos, so x: {}", total, so_xis);
+        let cheio = ler_tudo(chave, eu);
+        if cheio.len() != ANEL || !cheio.bytes().all(|b| b == b'x') {
+            crate::log_error!("teste", "{} bytes lidos", cheio.len());
             return Err("o anel cheio nao perdeu o mais antigo");
         }
 
         // O aviso: um por saída nova, no canal do dono.
         esvaziar_o_canal();
+        pty::saida(chave.indice, "nova");
         pty::avisar_se_preciso();
         if eventos::estado(CANAL).map(|e| e.na_fila) != Some(1) {
             return Err("a saida nova nao virou um aviso no canal do dono");
@@ -4839,87 +4857,138 @@ fn terminal_o_anel_a_fila_e_a_posse() -> Resultado {
             Colheita::Entregues(1) if recebidos[0].tipo == tipo::SAIDA => {}
             _ => return Err("o aviso no canal nao era de saida"),
         }
+        let _ = ler_tudo(chave, eu);
 
-        // Escrever é digitar: a tecla de função é aceita e engolida.
+        // Escrever é digitar no console da instância: a tecla de função é
+        // aceita e engolida, e nada vai para o teclado da máquina.
         crate::teclado::esvaziar();
+        while pty::proxima_entrada().is_some() {}
         let digitados = pty::estatisticas().2;
         let linha = "\u{F704}ab\n";
         if pty::escrever(chave, eu, linha) != Some(linha.len()) {
             return Err("a escrita no pseudo-terminal nao aceitou a linha inteira");
         }
         let mut fila = alloc::string::String::new();
-        while let Some(c) = crate::teclado::ler() {
+        while let Some((de, c)) = pty::proxima_entrada() {
+            if de != console {
+                return Err("a entrada chegou a outro console");
+            }
             fila.push(c);
         }
         if fila != "ab\n" || pty::estatisticas().2 != digitados + 3 {
-            crate::log_error!("teste", "a fila do teclado recebeu {:?}", fila);
+            crate::log_error!("teste", "a fila recebeu {:?}", fila);
             return Err("o pseudo-terminal digitou o que nao e texto");
+        }
+        if crate::teclado::ler().is_some() {
+            return Err("o pseudo-terminal digitou no teclado da maquina");
         }
 
         // A fila cheia: uma escrita parcial, do tamanho que coube — e ela
         // para ali. Uma tecla de função depois do que não coube não conta
         // como aceita: pular o que não coube e seguir contaria.
         let mut longa = alloc::string::String::new();
-        for _ in 0..100 {
+        for _ in 0..ENTRADA + 50 {
             longa.push('z');
         }
         longa.push('\u{F704}');
         let aceitos = pty::escrever(chave, eu, &longa);
         let mut na_fila = 0;
-        while crate::teclado::ler().is_some() {
+        while pty::proxima_entrada().is_some() {
             na_fila += 1;
         }
-        if aceitos != Some(na_fila) || na_fila == 0 || na_fila >= 100 {
+        if aceitos != Some(na_fila) || na_fila == 0 || na_fila > ENTRADA {
             crate::log_error!("teste", "aceitos {:?}, na fila {}", aceitos, na_fila);
             return Err("a fila cheia nao virou uma escrita parcial honesta");
         }
 
+        // Dois consoles: o que se digita num não aparece no outro.
+        let outra = pty::abrir(MORTO - 1, canal).map_err(|_| "a segunda instancia nao abriu")?;
+        let _ = ler_tudo(outra, MORTO - 1);
+        let _ = ler_tudo(chave, eu);
+        for c in "ajuda\n".chars() {
+            crate::interpretador::tratar(outra.console(), c);
+        }
+        if outra.indice == chave.indice
+            || !ler_tudo(chave, eu).is_empty()
+            || !ler_tudo(outra, MORTO - 1).contains("login")
+        {
+            return Err("dois pseudo-terminais dividiram um console");
+        }
+
         // A chave é do dono: outro fio é recusado nos dois sentidos, e o
         // fechar dele não fecha nada.
+        let mut lido = [0u8; 8];
         if pty::ler(chave, MORTO, &mut lido).is_some() || pty::escrever(chave, MORTO, "a").is_some()
         {
             return Err("o pseudo-terminal aceitou quem nao e o dono");
         }
         pty::fechar(chave, MORTO);
-        if pty::dono() != Some(eu) {
+        if !pty::donos().contains(&Some(eu)) {
             return Err("quem nao e o dono fechou o pseudo-terminal");
         }
 
-        // Fechado, a chave velha não alcança a abertura seguinte.
+        // Fechar acaba a sessão de quem estava no console, e a chave velha
+        // não alcança a abertura seguinte.
+        let sessao = crate::interpretador::entrar_para_teste(console, "pessoa-do-pty", "operador");
         pty::fechar(chave, eu);
-        if pty::dono().is_some() || pty::ler(chave, eu, &mut lido).is_some() {
+        if pty::donos().contains(&Some(eu)) || pty::ler(chave, eu, &mut lido).is_some() {
             return Err("o pseudo-terminal fechado continuou aberto");
         }
-        // E abrir já avisa, sem saída nova: o que está no anel é saída que
-        // o dono novo ainda não leu, e quem dormisse no canal esperando a
-        // próxima impressão não veria o que veio antes dele.
+        if crate::pessoas::sessao(sessao) != EstadoDaSessao::Encerrada(Encerramento::ConsoleFechado)
+        {
+            return Err("fechar o terminal nao acabou a sessao de quem estava nele");
+        }
+        // E abrir já avisa: o convite do console novo é saída que o dono
+        // ainda não leu.
         esvaziar_o_canal();
         let nova = pty::abrir(eu, canal).map_err(|_| "o pseudo-terminal fechado nao reabriu")?;
         pty::avisar_se_preciso();
         let avisado = eventos::estado(CANAL).map(|e| e.na_fila) == Some(1);
         let velha_recusada = pty::ler(chave, eu, &mut lido).is_none();
+        let sem_sessao = crate::interpretador::sessao_do_console(nova.console()).is_none();
         pty::fechar(nova, eu);
         if !velha_recusada {
             return Err("a chave velha alcancou a abertura seguinte");
         }
         if !avisado {
-            return Err("abrir o pseudo-terminal nao avisou do que ja estava no anel");
+            return Err("abrir o pseudo-terminal nao avisou do convite");
+        }
+        if !sem_sessao {
+            return Err("o console reaberto herdou a sessao do anterior");
         }
 
-        // O dono morto não segura o pseudo-terminal.
-        let do_morto = pty::abrir(MORTO, canal).map_err(|_| "o livre recusou abrir")?;
-        let minha = pty::abrir(eu, canal).map_err(|_| "o dono morto segurou o pseudo-terminal")?;
-        let morto_recusado = pty::ler(do_morto, MORTO, &mut lido).is_none();
-        pty::fechar(minha, eu);
+        // O dono morto não segura a instância: o coletor a fecha, com o
+        // console e a sessão de quem estava nele.
+        let morta = pty::abrir(MORTO - 2, canal).map_err(|_| "a instancia livre recusou")?;
+        let sessao =
+            crate::interpretador::entrar_para_teste(morta.console(), "pessoa-do-pty", "operador");
+        pty::avisar_se_preciso();
+        if pty::donos().contains(&Some(MORTO - 2))
+            || crate::pessoas::sessao(sessao)
+                != EstadoDaSessao::Encerrada(Encerramento::ConsoleFechado)
+        {
+            return Err("o dono morto segurou o pseudo-terminal, ou a sessao dele");
+        }
+        // Um dono morto que o coletor ainda não viu: quem abre confere, e
+        // toma o lugar.
+        let do_morto = pty::abrir(MORTO - 10, canal).map_err(|_| "a instancia livre recusou")?;
+        let tomou = pty::abrir(eu, canal);
+        let morto_recusado = pty::ler(do_morto, MORTO - 10, &mut lido).is_none();
+        if let Ok(c) = tomou {
+            pty::fechar(c, eu);
+        }
         if !morto_recusado {
             return Err("a chave do dono morto continuou valendo");
         }
+        tomou.map_err(|_| "um dono morto segurou a instancia")?;
         Ok(())
     });
 
     pty::fechar(chave, eu);
     eventos::largar(canal, eu);
     crate::teclado::esvaziar();
+    while pty::proxima_entrada().is_some() {}
+    crate::pessoas::esquecer_registradas();
     resultado
 }
 
@@ -4953,8 +5022,8 @@ fn terminal_o_interpretador_do_outro_lado() -> Resultado {
     crate::usuario::lancar(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/pseudo")))?;
     let _ = esperar_ate(
         || {
-            while let Some(c) = crate::teclado::ler() {
-                crate::interpretador::tratar_tecla(c);
+            while let Some((console, c)) = pty::proxima_entrada() {
+                crate::interpretador::tratar(console, c);
             }
             visto("processo encerrou com codigo 68") || visto("processo morto por")
         },
@@ -4977,7 +5046,14 @@ fn terminal_o_interpretador_do_outro_lado() -> Resultado {
 
     // O programa saiu com o pseudo-terminal aberto. Morto, ele não o segura.
     let eu = crate::fios::id_atual();
-    let _ = esperar_ate(|| !pty::dono().is_some_and(crate::fios::vivo), 200);
+    let _ = esperar_ate(
+        || {
+            !pty::donos()
+                .iter()
+                .any(|d| d.is_some_and(crate::fios::vivo))
+        },
+        200,
+    );
     let canal =
         crate::eventos::escutar(b"teste-pty-morto", eu).map_err(|_| "o canal do caso nao abriu")?;
     let aberto = pty::abrir(eu, canal);
@@ -5239,9 +5315,7 @@ fn terminal_operado() -> Resultado {
     let esperar_vezes = |linha: &str, n: usize| -> Resultado {
         esperar_ate(
             || {
-                while let Some(c) = crate::teclado::ler() {
-                    crate::interpretador::tratar_tecla(c);
-                }
+                atender_consoles();
                 vezes(linha) >= n
             },
             600,
@@ -5299,6 +5373,15 @@ fn terminal_operado() -> Resultado {
         return Err("a barra de titulo do terminal com o foco nao esta acesa");
     }
 
+    // O console do Terminal é um console novo, sem ninguém: a pessoa de
+    // teste entra nele — o login de verdade tem os casos próprios.
+    let console = console_do_terminal().ok_or("o terminal nao abriu um pseudo-terminal")?;
+    crate::interpretador::entrar_para_teste(
+        console,
+        crate::interpretador::PESSOA_DE_TESTE,
+        crate::interpretador::PAPEL_DA_PESSOA_DE_TESTE,
+    );
+
     // Digitar na máquina, pelo teclado: primeiro `xyz`, sem a quebra de
     // linha. O eco muda só a linha do cursor, e o Terminal a redesenha
     // sozinha — e a redescreve: a árvore mostra o eco, e a tela, o cursor
@@ -5309,11 +5392,7 @@ fn terminal_operado() -> Resultado {
             crate::teclado::evento(codigo, false);
         }
     };
-    let atender = || {
-        while let Some(c) = crate::teclado::ler() {
-            crate::interpretador::tratar_tecla(c);
-        }
-    };
+    let atender = atender_consoles;
     let ultima_linha = || {
         crate::superficies::com_descricao(camada.id, |d| {
             d.elementos
@@ -5364,9 +5443,7 @@ fn terminal_operado() -> Resultado {
     };
     esperar_ate(
         || {
-            while let Some(c) = crate::teclado::ler() {
-                crate::interpretador::tratar_tecla(c);
-            }
+            atender_consoles();
             mostra()
         },
         600,
@@ -5405,7 +5482,9 @@ fn terminal_operado() -> Resultado {
         let procurada = format!("executado: {comando} (agente {sessao})");
         let mut achou = false;
         crate::log::ultimos(64, crate::log::Level::Trace, |r| {
-            achou |= r.seq >= desde && r.subsistema == "console" && r.mensagem() == procurada;
+            achou |= r.seq >= desde
+                && r.subsistema == "console"
+                && r.mensagem().starts_with(&alloc::format!("{procurada} em "));
         });
         achou
     };
@@ -5561,7 +5640,11 @@ fn terminal_operado() -> Resultado {
     // pseudo-terminal fica livre. Primeiro o `press` do agente na árvore.
     let livre = || {
         esperar_ate(
-            || !crate::pseudoterminal::dono().is_some_and(crate::fios::vivo),
+            || {
+                !crate::pseudoterminal::donos()
+                    .iter()
+                    .any(|d| d.is_some_and(crate::fios::vivo))
+            },
             200,
         )
         .map_err(|_| "o terminal fechado continuou com o pseudo-terminal")
@@ -10588,7 +10671,9 @@ fn agentes_uma_conexao_nova_recomeca_o_quadro() -> Resultado {
 /// e não um que o agente diga.
 fn agentes_o_log_diz_qual_agente() -> Resultado {
     use crate::agent::SessaoDeTeste;
-    com_agentes_de_teste(|| {
+    // A linha de comando do físico, atendendo: é nela que o agente age.
+    crate::interpretador::ativar_para_teste();
+    let resultado = com_agentes_de_teste(|| {
         let mut sessao = SessaoDeTeste::porta(2);
         let mut agente = AgenteDeTeste::conectar(2, &mut sessao, &chave_de_teste(2))?;
         let pedido = alloc::format!(
@@ -10609,7 +10694,9 @@ fn agentes_o_log_diz_qual_agente() -> Resultado {
             return Err("o log nao diz que foi o agente da sessao 2");
         }
         Ok(())
-    })
+    });
+    crate::interpretador::desativar_para_teste();
+    resultado
 }
 
 /// Uma chave fora do registro não entra, mesmo provando que é dela.
@@ -11726,6 +11813,398 @@ fn pessoas_estados_nao_se_confundem() -> Resultado {
     resultado
 }
 
+// ---------------------------------------------------------------------------
+// consoles: o físico e cada Terminal, cada um com a sua sessão
+// ---------------------------------------------------------------------------
+
+/// Faz o papel da tarefa do interpretador, que não existe em modo de teste:
+/// entrega cada entrada que espera — do teclado da máquina e de cada
+/// pseudo-terminal — ao console dela.
+fn atender_consoles() {
+    while let Some(c) = crate::teclado::ler() {
+        crate::interpretador::tratar_tecla(c);
+    }
+    while let Some((console, c)) = crate::pseudoterminal::proxima_entrada() {
+        crate::interpretador::tratar(console, c);
+    }
+}
+
+/// O console do Terminal que está no ar: o do pseudo-terminal com dono vivo.
+fn console_do_terminal() -> Option<crate::pessoas::Console> {
+    crate::pseudoterminal::donos()
+        .iter()
+        .position(|d| d.is_some_and(crate::fios::vivo))
+        .map(|i| crate::pessoas::Console::Terminal(i as u16))
+}
+
+/// Digita uma linha num console, como a pessoa no teclado dele.
+fn digitar_no_console(console: crate::pessoas::Console, linha: &str) {
+    for c in linha.chars() {
+        crate::interpretador::tratar(console, c);
+    }
+}
+
+/// Entra num console pelo caminho de verdade: `login`, o nome, a senha.
+fn entrar_no_console(
+    console: crate::pessoas::Console,
+    nome: &str,
+    senha: &str,
+) -> Result<crate::pessoas::IdSessao, &'static str> {
+    digitar_no_console(console, "login\n");
+    digitar_no_console(console, &alloc::format!("{nome}\n"));
+    digitar_no_console(console, &alloc::format!("{senha}\n"));
+    crate::interpretador::sessao_do_console(console).ok_or("o login nao abriu sessao no console")
+}
+
+/// O registro da auditoria mais recente que satisfaz `f`.
+fn ultimo_que(
+    f: impl Fn(&politica::auditoria::Evento) -> bool,
+) -> Option<politica::auditoria::Evento> {
+    crate::autorizacao::com_auditoria(|c| {
+        c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+            .filter(|r| f(&r.evento))
+            .last()
+            .map(|r| r.evento.clone())
+    })
+    .flatten()
+}
+
+/// Antes do login, nada além de entrar: um comando — conhecido ou não —,
+/// uma tecla de função e um clique são `DENY_NOT_AUTHENTICATED`, gravados
+/// com o console; `ajuda` diz só como entrar. Um agente que confirma a linha
+/// age como ele mesmo, e não entra por ninguém.
+fn consoles_nada_antes_do_login() -> Resultado {
+    use crate::pessoas::Console;
+    use crate::ui::Origem;
+    use politica::Codigo;
+    use politica::auditoria::Titular;
+    crate::pessoas::esquecer_registradas();
+    crate::teclado::esvaziar();
+    crate::interpretador::abrir_console(Console::Fisico);
+    let resultado = (|| -> Resultado {
+        if crate::interpretador::sessao_do_console(Console::Fisico).is_some() {
+            return Err("o console abriu com alguem entrado");
+        }
+        let sem_login = |metodo: &str| {
+            ultimo_registro().is_some_and(|r| {
+                r.evento.metodo == metodo
+                    && r.evento.titular == Titular::Anonimo
+                    && r.evento.codigo == Codigo::DenyNotAuthenticated
+                    && r.evento.recurso.starts_with("console")
+            })
+        };
+        for (linha, metodo) in [
+            ("system.info\n", "system.info"),
+            ("agent.ping\n", "agent.ping"),
+            ("nao-existe\n", "nao-existe"),
+        ] {
+            let antes = crate::log::total_emitidos();
+            digitar_no_console(Console::Fisico, linha);
+            if !sem_login(metodo) {
+                crate::log_error!("teste", "{:?}", ultimo_registro().map(|r| r.evento));
+                return Err("um comando antes do login nao foi recusado e gravado");
+            }
+            let mut executou = false;
+            crate::log::ultimos(16, crate::log::Level::Trace, |r| {
+                executou |= r.seq >= antes && r.mensagem().starts_with("executado:");
+            });
+            if executou {
+                return Err("um comando antes do login chegou a executar");
+            }
+        }
+        // A tecla de função: a barra não é acionada — `ui::agir` registra
+        // toda ação, feita ou recusada —, e a recusa é gravada.
+        let antes = crate::log::total_emitidos();
+        crate::interpretador::tratar(Console::Fisico, crate::teclado::F2);
+        if !sem_login("ui.act") {
+            return Err("F2 antes do login nao foi recusada e gravada");
+        }
+        let mut agiu = false;
+        crate::log::ultimos(16, crate::log::Level::Trace, |r| {
+            agiu |= r.seq >= antes && r.subsistema == "ui";
+        });
+        if agiu {
+            return Err("F2 antes do login acionou a barra");
+        }
+        // A ajuda passa, e só diz como entrar.
+        let antes = crate::log::total_emitidos();
+        digitar_no_console(Console::Fisico, "ajuda\n");
+        let mut ajudou = false;
+        crate::log::ultimos(8, crate::log::Level::Trace, |r| {
+            ajudou |= r.seq >= antes && r.mensagem().starts_with("executado: ajuda");
+        });
+        if !ajudou {
+            return Err("a ajuda antes do login nao foi atendida");
+        }
+        // Um agente que confirma a linha age como a sessão dele — a serial
+        // —, e não como uma pessoa.
+        crate::interpretador::definir("agent.ping").map_err(|_| "o set_value foi recusado")?;
+        if crate::interpretador::confirmar(Origem::Agente(0)) != "agent.ping"
+            || !ultimo_registro().is_some_and(|r| {
+                r.evento.metodo == "agent.ping"
+                    && r.evento.titular == Titular::Serial
+                    && r.evento.codigo.permite()
+            })
+        {
+            return Err("o agente no console sem login nao agiu como ele mesmo");
+        }
+        // E não entra por ninguém: o login confirmado por ele é recusado.
+        crate::interpretador::definir("login").map_err(|_| "o set_value foi recusado")?;
+        crate::interpretador::confirmar(Origem::Agente(0));
+        if crate::interpretador::modo() != crate::interpretador::Modo::Comando {
+            return Err("um agente comecou o login de uma pessoa");
+        }
+        Ok(())
+    })();
+    crate::interpretador::desativar_para_teste();
+    resultado
+}
+
+/// O login de verdade: o nome, a senha sem eco — nem na tela, nem na árvore,
+/// nem no histórico do teclado —, a sessão aberta, os comandos com o papel
+/// da pessoa, e o `logout` voltando ao começo. Um agente não edita a linha
+/// que pede a senha.
+fn consoles_login_e_logout() -> Resultado {
+    use crate::interpretador::Modo;
+    use crate::pessoas::Console;
+    use crate::ui::Origem;
+    use politica::auditoria::Titular;
+    crate::pessoas::esquecer_registradas();
+    crate::teclado::esvaziar();
+    let ana = crate::pessoas::registrar_de_teste("ana", "operador", SENHA_DE_TESTE);
+    crate::interpretador::abrir_console(Console::Fisico);
+    let resultado = (|| -> Resultado {
+        digitar_no_console(Console::Fisico, "login\n");
+        if crate::interpretador::modo() != Modo::Nome {
+            return Err("login nao pediu o nome");
+        }
+        digitar_no_console(Console::Fisico, "ana\n");
+        if crate::interpretador::modo() != Modo::Senha {
+            return Err("o nome nao levou a senha");
+        }
+        // A meio da senha: a árvore não a vê, o agente não a edita, e uma
+        // tecla de verdade não entra no histórico.
+        digitar_no_console(Console::Fisico, "cavalo");
+        if crate::interpretador::com_valor(|v| !v.is_empty()) {
+            return Err("a arvore viu a senha");
+        }
+        if crate::interpretador::definir("outra").is_ok() {
+            return Err("um agente editou a linha da senha");
+        }
+        if !crate::interpretador::confirmar(Origem::Agente(0)).is_empty()
+            || crate::interpretador::modo() != Modo::Senha
+        {
+            return Err("um agente confirmou a senha");
+        }
+        crate::teclado::esvaziar();
+        crate::teclado::evento(30, true); // `a`
+        crate::teclado::evento(30, false);
+        if crate::teclado::observar().is_some() {
+            return Err("uma tecla digitada durante a senha entrou no historico");
+        }
+        let _ = crate::teclado::ler();
+        let resto = core::str::from_utf8(&SENHA_DE_TESTE["cavalo".len()..]).unwrap_or("");
+        digitar_no_console(Console::Fisico, &alloc::format!("{resto}\n"));
+        let sessao = crate::interpretador::sessao_do_console(Console::Fisico)
+            .ok_or("a senha certa nao abriu sessao")?;
+        if crate::pessoas::dona_da_sessao(sessao) != Some(ana) {
+            return Err("a sessao aberta nao e da pessoa que entrou");
+        }
+        // E a tela: o que o console mostra tem a saudação, e não a senha.
+        if crate::tela::tela().is_some() {
+            let arvore = chamar("ui.tree", "{}")?;
+            let (console, _) = console_da_arvore(&arvore)?;
+            let texto = texto_do_console(&console)?;
+            if texto.contains("cavalo") || !texto.contains("ola, ana") {
+                crate::log_error!("teste", "{}", texto);
+                return Err("a senha apareceu na tela, ou a saudacao nao");
+            }
+        }
+        // Depois da senha o histórico volta a gravar.
+        crate::teclado::evento(30, true);
+        crate::teclado::evento(30, false);
+        if crate::teclado::observar() != Some('a') {
+            return Err("o historico nao voltou depois da senha");
+        }
+        let _ = crate::teclado::ler();
+
+        // Um comando, com o papel da pessoa, gravado como dela.
+        digitar_no_console(Console::Fisico, "agent.ping\n");
+        let r = ultimo_que(|e| e.metodo == "agent.ping").ok_or("o comando nao foi gravado")?;
+        if r.titular != Titular::Pessoa
+            || r.agente != ana.texto()
+            || r.sessao_de_pessoa != Some(sessao.0)
+            || r.papel != "operador"
+            || !r.codigo.permite()
+        {
+            crate::log_error!("teste", "{:?}", r);
+            return Err("o comando da pessoa nao foi gravado como dela");
+        }
+        // O que o papel não deixa, ela não faz.
+        digitar_no_console(Console::Fisico, "keyboard.read\n");
+        let r = ultimo_que(|e| e.metodo == "keyboard.read").ok_or("a recusa nao foi gravada")?;
+        if r.codigo != politica::Codigo::DenyPermission || r.agente != ana.texto() {
+            return Err("a pessoa fez o que o papel dela nao deixa");
+        }
+
+        // `logout`: a sessão acaba, e o console volta ao começo.
+        digitar_no_console(Console::Fisico, "logout\n");
+        if crate::interpretador::sessao_do_console(Console::Fisico).is_some()
+            || crate::pessoas::sessao(sessao)
+                != crate::pessoas::EstadoDaSessao::Encerrada(crate::pessoas::Encerramento::Saida)
+        {
+            return Err("o logout nao acabou a sessao");
+        }
+        digitar_no_console(Console::Fisico, "agent.ping\n");
+        let r = ultimo_que(|e| e.metodo == "agent.ping").ok_or("o pedido nao foi gravado")?;
+        if r.codigo != politica::Codigo::DenyNotAuthenticated {
+            return Err("depois do logout um comando passou");
+        }
+
+        // A senha errada: nenhuma sessão, a mesma resposta.
+        digitar_no_console(Console::Fisico, "login ana\n");
+        digitar_no_console(Console::Fisico, "errada\n");
+        if crate::interpretador::sessao_do_console(Console::Fisico).is_some()
+            || crate::interpretador::modo() != Modo::Comando
+        {
+            return Err("a senha errada abriu sessao, ou prendeu o console");
+        }
+        Ok(())
+    })();
+    crate::interpretador::desativar_para_teste();
+    crate::pessoas::esquecer_registradas();
+    crate::teclado::esvaziar();
+    resultado
+}
+
+/// Duas pessoas no mesmo console, uma depois da outra, são duas sessões de
+/// duas identidades; a mesma pessoa no console físico e num Terminal, ao
+/// mesmo tempo, são duas sessões da mesma identidade — com estado
+/// independente: o que uma digita não vai para a outra, e sair de uma não
+/// tira a pessoa da outra.
+fn consoles_pessoas_e_consoles_nao_se_confundem() -> Resultado {
+    use crate::pessoas::Console;
+    use politica::auditoria::Titular;
+    crate::pessoas::esquecer_registradas();
+    let ana = crate::pessoas::registrar_de_teste("ana", "operador", SENHA_DE_TESTE);
+    let bia = crate::pessoas::registrar_de_teste("bia", "observador", SENHA_DE_TESTE);
+    let senha = core::str::from_utf8(SENHA_DE_TESTE).unwrap_or("");
+    let terminal = Console::Terminal(1);
+    crate::interpretador::abrir_console(Console::Fisico);
+    crate::interpretador::abrir_console(terminal);
+    let resultado = (|| -> Resultado {
+        // Duas pessoas, o mesmo console.
+        let a = entrar_no_console(Console::Fisico, "ana", senha)?;
+        digitar_no_console(Console::Fisico, "logout\n");
+        let b = entrar_no_console(Console::Fisico, "bia", senha)?;
+        if a == b
+            || crate::pessoas::dona_da_sessao(b) != Some(bia)
+            || crate::pessoas::sessao(a).eq(&crate::pessoas::sessao(b))
+        {
+            return Err("duas pessoas no mesmo console se confundiram");
+        }
+        digitar_no_console(Console::Fisico, "agent.ping\n");
+        let r = ultimo_que(|e| e.metodo == "agent.ping").ok_or("o pedido nao foi gravado")?;
+        if r.agente != bia.texto() || r.papel != "observador" || r.titular != Titular::Pessoa {
+            return Err("o pedido de bia foi gravado como de outra pessoa");
+        }
+        digitar_no_console(Console::Fisico, "logout\n");
+
+        // A mesma pessoa, dois consoles, ao mesmo tempo.
+        let fisico = entrar_no_console(Console::Fisico, "ana", senha)?;
+        let no_terminal = entrar_no_console(terminal, "ana", senha)?;
+        if fisico == no_terminal
+            || crate::pessoas::dona_da_sessao(fisico) != Some(ana)
+            || crate::pessoas::dona_da_sessao(no_terminal) != Some(ana)
+        {
+            return Err("a mesma pessoa em dois consoles nao teve duas sessoes suas");
+        }
+        // Estado independente: meia linha no físico não vai para o
+        // Terminal, e o comando do Terminal é gravado com a sessão dele.
+        digitar_no_console(Console::Fisico, "agent.");
+        digitar_no_console(terminal, "system.uptime\n");
+        let r = ultimo_que(|e| e.metodo == "system.uptime").ok_or("o pedido nao foi gravado")?;
+        if r.sessao_de_pessoa != Some(no_terminal.0) || r.agente != ana.texto() {
+            return Err("o comando do terminal nao foi gravado com a sessao dele");
+        }
+        if crate::interpretador::com_valor(|v| v != "agent.") {
+            return Err("o terminal mexeu na linha do console fisico");
+        }
+        crate::interpretador::definir("").map_err(|_| "a linha nao se limpou")?;
+        // Sair de um não tira a pessoa do outro.
+        digitar_no_console(terminal, "logout\n");
+        if crate::interpretador::sessao_do_console(terminal).is_some()
+            || crate::interpretador::sessao_valida(Console::Fisico) != Some(fisico)
+        {
+            return Err("sair do terminal mexeu no console fisico");
+        }
+        Ok(())
+    })();
+    crate::interpretador::fechar_console(terminal, "fim do caso");
+    crate::interpretador::desativar_para_teste();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// Uma sessão revogada por fora acaba no console na hora: o comando
+/// seguinte é recusado, e o console volta a pedir o login. E o processo
+/// que a pessoa lançou age como ela — pelo papel dela, e sem nada depois
+/// da revogação.
+fn consoles_sessao_revogada_e_processo_da_pessoa() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    use core::sync::atomic::Ordering;
+    use politica::Codigo;
+    crate::pessoas::esquecer_registradas();
+    crate::interpretador::abrir_console(Console::Fisico);
+    let resultado = (|| -> Resultado {
+        let sessao = crate::interpretador::entrar_para_teste(Console::Fisico, "ana", "operador");
+        let sondar = |autoridade| -> Result<[u8; 4], &'static str> {
+            for s in &SONDA {
+                s.store(u8::MAX, Ordering::SeqCst);
+            }
+            crate::fios::criar_como("sonda", sonda_de_autoridade, 0, autoridade)?;
+            esperar_ate(|| SONDA[4].load(Ordering::SeqCst) != u8::MAX, 200)
+                .map_err(|_| "a sonda nao respondeu")?;
+            Ok(core::array::from_fn(|i| SONDA[i].load(Ordering::SeqCst)))
+        };
+        // Um fio lançado pela pessoa decide como um operador.
+        let vistos = sondar(Autoridade::Pessoa { sessao })?;
+        let esperados = [
+            Codigo::DenyResource,
+            Codigo::Allow,
+            Codigo::DenyResource,
+            Codigo::DenyPermission,
+        ]
+        .map(|c| c as u8);
+        if vistos != esperados {
+            crate::log_error!("teste", "sonda: {:?}", vistos);
+            return Err("o fio lancado pela pessoa nao decidiu pelo papel dela");
+        }
+
+        // Revogada por fora: o console fica sabendo no comando seguinte.
+        crate::pessoas::revogar_sessao(sessao).map_err(|_| "a revogacao falhou")?;
+        digitar_no_console(Console::Fisico, "agent.ping\n");
+        if crate::interpretador::sessao_do_console(Console::Fisico).is_some() {
+            return Err("o console continuou com a sessao revogada");
+        }
+        let r = ultimo_que(|e| e.metodo == "agent.ping").ok_or("o pedido nao foi gravado")?;
+        if r.codigo != Codigo::DenyNotAuthenticated {
+            return Err("um comando passou com a sessao revogada");
+        }
+        // E o fio dela não abre mais nada.
+        let vistos = sondar(Autoridade::Pessoa { sessao })?;
+        if vistos[1] != Codigo::DenyRole as u8 {
+            crate::log_error!("teste", "sonda: {:?}", vistos);
+            return Err("depois da revogacao o fio da pessoa continuou abrindo");
+        }
+        Ok(())
+    })();
+    crate::interpretador::desativar_para_teste();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
 /// Ninguém se dá mais do que tem: nem o próprio papel, nem um papel maior
 /// que o seu, nem a política de quem administra.
 ///
@@ -12138,8 +12617,8 @@ fn politica_processo_age_como_o_agente() -> Resultado {
 }
 
 /// Sem política no disco, a de emergência, embutida: o `sistema` continua
-/// com a autoridade máxima enumerada — para a serial, a pessoa e os
-/// processos do sistema —, e um agente cujo papel ela não tem é recusado.
+/// com a autoridade máxima enumerada — para a serial e os processos do
+/// sistema —, e um agente ou uma pessoa cujo papel ela não tem é recusado.
 fn politica_emergencia_mantem_o_sistema() -> Resultado {
     use crate::autorizacao::{Chamador, autorizar, autorizar_processo};
     use politica::{Codigo, Permissao};
@@ -12165,11 +12644,18 @@ fn politica_emergencia_mantem_o_sistema() -> Resultado {
         }
         let disco = registry::encontrar("disk.read").ok_or("sem disk.read")?;
         let params = Json(br#"{"sector":0}"#);
-        for chamador in [Chamador::Pessoa, Chamador::Sessao(0)] {
-            if autorizar(chamador, disco, params).is_err() {
-                crate::log_error!("teste", "{:?}", chamador);
-                return Err("sem politica no disco, o sistema perdeu fs.raw_read");
-            }
+        if autorizar(Chamador::Sessao(0), disco, params).is_err() {
+            return Err("sem politica no disco, o sistema perdeu fs.raw_read");
+        }
+        // Uma pessoa de papel `operador`: como o agente, recusada.
+        let pessoa = crate::pessoas::sessao_de_teste(
+            crate::pessoas::Console::Fisico,
+            "pessoa-da-emergencia",
+            "operador",
+        );
+        let ping = registry::encontrar("agent.ping").ok_or("sem agent.ping")?;
+        if autorizar(Chamador::Pessoa(pessoa), ping, Json(b"{}")).err() != Some(Codigo::DenyRole) {
+            return Err("com a politica de emergencia uma pessoa operador foi atendida");
         }
         // Este fio é do sistema: a decisão de um processo do sistema.
         if autorizar_processo(Permissao::TerminalAttach, "", "terminal.attach") != Codigo::Allow {
@@ -12178,6 +12664,7 @@ fn politica_emergencia_mantem_o_sistema() -> Resultado {
         Ok(())
     });
     crate::autorizacao::carregar();
+    crate::pessoas::esquecer_registradas();
     if !crate::autorizacao::politica_do_disco() {
         return Err("a politica do disco nao voltou");
     }
@@ -12185,17 +12672,20 @@ fn politica_emergencia_mantem_o_sistema() -> Resultado {
 }
 
 /// A autoridade local não é um passe livre: decide pelo papel que a
-/// política dá a ela. Com `local operador`, a pessoa no console e um
-/// processo do sistema podem o que o operador pode — e a auditoria grava as
-/// recusas deles como de qualquer um.
+/// política dá a ela. Com `local operador`, um processo do sistema pode o
+/// que o operador pode — e a auditoria grava as recusas dele como de
+/// qualquer um. A pessoa no console não é a autoridade local: decide pelo
+/// papel dela no registro, com `local` qualquer.
 ///
 /// # O que este caso protege
 ///
-/// Que não volte a existir um `ALLOW` por ser sistema: a pessoa pelo ponto
-/// de decisão dos comandos, e o processo pelo das chamadas de sistema — o
-/// mesmo que decide `abrir`, `executar` e o pseudo-terminal.
+/// Que não volte a existir um `ALLOW` por ser sistema: o processo pelo
+/// ponto de decisão das chamadas de sistema — o mesmo que decide `abrir`,
+/// `executar` e o pseudo-terminal. E que estar no console não promova
+/// ninguém: a pessoa é gravada como pessoa, com o papel dela.
 fn politica_o_sistema_decide_pela_politica() -> Resultado {
     use crate::autorizacao::{Chamador, autorizar, autorizar_processo};
+    use politica::auditoria::Titular;
     use politica::{Codigo, Permissao};
     let texto = politica::PADRAO.replace("local sistema", "local operador");
     let menor = politica::Politica::ler(&texto).map_err(|_| "a politica do caso nao vale")?;
@@ -12204,14 +12694,29 @@ fn politica_o_sistema_decide_pela_politica() -> Resultado {
             r.evento.agente == agente && r.evento.papel == "operador" && r.evento.codigo == codigo
         })
     };
+    let pessoa = crate::pessoas::sessao_de_teste(
+        crate::pessoas::Console::Fisico,
+        "pessoa-do-console",
+        "operador",
+    );
+    let id = crate::pessoas::dona_da_sessao(pessoa)
+        .ok_or("a sessao de teste nao tem dona")?
+        .texto();
+    let disco = registry::encontrar("disk.read").ok_or("sem disk.read")?;
+    let params = Json(br#"{"sector":0}"#);
+    let a_pessoa_decide_pelo_papel_dela = || {
+        autorizar(Chamador::Pessoa(pessoa), disco, params).err() == Some(Codigo::DenyPermission)
+            && ultimo_registro().is_some_and(|r| {
+                r.evento.titular == Titular::Pessoa
+                    && r.evento.agente == id
+                    && r.evento.sessao_de_pessoa == Some(pessoa.0)
+                    && r.evento.papel == "operador"
+            })
+    };
     crate::autorizacao::trocar_politica(menor);
     let resultado = (|| -> Resultado {
-        let disco = registry::encontrar("disk.read").ok_or("sem disk.read")?;
-        let params = Json(br#"{"sector":0}"#);
-        if autorizar(Chamador::Pessoa, disco, params).err() != Some(Codigo::DenyPermission)
-            || !gravou("pessoa", Codigo::DenyPermission)
-        {
-            return Err("a pessoa no console nao decidiu pelo papel local");
+        if !a_pessoa_decide_pelo_papel_dela() {
+            return Err("a pessoa no console nao decidiu pelo papel dela");
         }
         // Este fio é do sistema.
         if autorizar_processo(Permissao::FsRead, "/etc/duke/agentes", "fs.open")
@@ -12229,17 +12734,26 @@ fn politica_o_sistema_decide_pela_politica() -> Resultado {
         Ok(())
     })();
     crate::autorizacao::carregar();
-    resultado?;
-    // De volta ao `sistema`: o mesmo pedido passa, e é gravado como dele.
-    let disco = registry::encontrar("disk.read").ok_or("sem disk.read")?;
-    if autorizar(Chamador::Pessoa, disco, Json(br#"{"sector":0}"#)).is_err()
-        || !ultimo_registro().is_some_and(|r| {
-            r.evento.agente == "pessoa" && r.evento.papel == "sistema" && r.evento.codigo.permite()
-        })
-    {
-        return Err("com o papel sistema a pessoa no console foi recusada");
-    }
-    Ok(())
+    let de_volta = (|| -> Resultado {
+        resultado?;
+        // De volta ao `sistema`: o processo passa, e é gravado como dele; a
+        // pessoa continua com o papel dela.
+        if autorizar_processo(Permissao::TerminalAttach, "", "terminal.attach") != Codigo::Allow
+            || !ultimo_registro().is_some_and(|r| {
+                r.evento.agente == "sistema"
+                    && r.evento.titular == Titular::Sistema
+                    && r.evento.papel == "sistema"
+            })
+        {
+            return Err("com o papel sistema o processo do sistema foi recusado");
+        }
+        if !a_pessoa_decide_pelo_papel_dela() {
+            return Err("a linha local promoveu a pessoa do console");
+        }
+        Ok(())
+    })();
+    crate::pessoas::esquecer_registradas();
+    de_volta
 }
 
 /// O aperto de mão vai para a auditoria, e tem limite por janela.
@@ -15375,6 +15889,22 @@ static CASOS: &[Caso] = &[
         f: pessoas_estados_nao_se_confundem,
     },
     Caso {
+        nome: "consoles: nada antes do login",
+        f: consoles_nada_antes_do_login,
+    },
+    Caso {
+        nome: "consoles: login e logout",
+        f: consoles_login_e_logout,
+    },
+    Caso {
+        nome: "consoles: pessoas e consoles nao se confundem",
+        f: consoles_pessoas_e_consoles_nao_se_confundem,
+    },
+    Caso {
+        nome: "consoles: a sessao revogada e o processo da pessoa",
+        f: consoles_sessao_revogada_e_processo_da_pessoa,
+    },
+    Caso {
         nome: "usb: o relatorio hid vira teclas",
         f: usb_relatorio_hid_vira_teclas,
     },
@@ -16609,6 +17139,10 @@ pub fn executar_todos() -> ! {
         CASOS.len()
     );
     crate::serial_println!("=====================================================");
+
+    // A máquina como a suíte a usa: alguém entrado no console físico — ver
+    // `interpretador::pessoa_padrao_para_teste`.
+    crate::interpretador::pessoa_padrao_para_teste();
 
     let mut falhas = 0usize;
 

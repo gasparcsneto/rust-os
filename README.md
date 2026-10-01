@@ -971,6 +971,10 @@ morto não segura o pseudo-terminal. `display.info` ganhou `terminal`: o
 dono, os avisos, as teclas digitadas e os bytes que saíram do anel sem
 ninguém lê-los.
 
+Com as pessoas, o Terminal deixou de ser outra janela sobre o mesmo
+interpretador: cada um tem um pseudo-terminal e um console seus, com a
+sessão de quem entrou nele — ver [Consoles](#consoles).
+
 **Cada superfície recebe a sua entrada.** Com dois processos com janela,
 a entrada não podia ir sempre ao servidor. `controlar(fd, ENTRADA, canal)`
 aponta a entrada de uma superfície para um canal que o processo escuta —
@@ -1502,9 +1506,9 @@ papéis.
 não é um passe livre: lista cada permissão pelo nome — tudo, menos as
 administrativas (que são do administrador, com a prova) e as de escrita
 (que nenhuma operação usa) —, e o alcance de cada uma de caminho numa linha
-`recurso`, `/`. A autoridade local — a pessoa no console e os processos do
-sistema — tem o papel da linha `local` da política, e decide pela mesma conta
-e grava na mesma auditoria que qualquer agente: não há `ALLOW` por ser
+`recurso`, `/`. A autoridade local — os processos do sistema: o servidor de
+janelas, o Terminal — tem o papel da linha `local` da política, e decide
+pela mesma conta e grava na mesma auditoria que qualquer agente: não há `ALLOW` por ser
 sistema. Uma linha de `policy.write` não encolhe o papel da serial nem o da
 autoridade local.
 
@@ -1521,10 +1525,11 @@ nem do `sistema`.
 pedem a mesma decisão e só a licença que ela devolve chama o handler — o
 `cargo xtask invariantes` reprova uma chamada `(…handler)(` em qualquer
 outro arquivo. O interpretador valida os parâmetros como o canal; a pessoa
-na frente da máquina decide pelo papel local, gravada como `pessoa`, e um
-agente que confirma uma linha no Terminal decide como a sessão dele. Todo
-processo carrega a autoridade de quem o lançou — a local, ou a do agente
-(`user.run`) —, e o `fork` a herda: as chamadas `abrir` e `executar`
+num console decide pelo papel dela no registro, pela sessão que abriu — ver
+[Pessoas](#pessoas) —, e um agente que confirma uma linha no Terminal
+decide como a sessão dele. Todo processo carrega a autoridade de quem o
+lançou — a do sistema, a da pessoa ou a do agente (`user.run`) —, e o
+`fork` a herda: as chamadas `abrir` e `executar`
 decidem com esse papel, e prender-se ao pseudo-terminal é a permissão
 `terminal.attach`, que só o `sistema` enumera — um processo de agente não o
 abre, nem quando a janela do Terminal está fechada. O papel é procurado a
@@ -1676,6 +1681,61 @@ longa demais — e o limite de tentativas de um console sem prender outro; e
 os seis estados — registrada, autenticada, sessão ativa, credencial válida,
 sessão revogada, pessoa revogada — pelas operações de verdade, com a prova,
 sem que um se passe pelo outro.
+
+### Consoles
+
+O console não é a identidade: é onde uma pessoa entra. Há o console
+físico — o teclado e a tela da máquina — e um para cada Terminal aberto,
+pelo pseudo-terminal dele. Cada um tem a sua linha, o seu modo e a sua
+sessão:
+
+```
+pessoa → sessão → console → comando → decisão → auditoria
+```
+
+A saída de cada console vai para o lugar dele — a do físico para a tela e a
+COM1, a de um Terminal para o anel do pseudo-terminal dele —, e o que se
+digita num não aparece no outro. O log do kernel continua no console
+físico. Fechar o Terminal, ou o processo dele morrer, fecha o console e
+acaba a sessão de quem estava nele.
+
+**Antes do login, nada além de entrar.** Um console sem ninguém aceita
+`login` e `ajuda` — a ajuda diz só como entrar. Todo o resto — um comando,
+conhecido ou não, uma tecla de função, um clique na barra — é
+`DENY_NOT_AUTHENTICATED`, gravado com o console. Não há login automático.
+
+**Entrar.** `login` pede o nome e a senha (`login nome` pede só a senha).
+A senha não ecoa, não aparece na árvore semântica — o valor da linha
+fica vazio —, e o buffer dela é apagado depois da conferência. Enquanto um
+console pede senha, nada entra no histórico que `keyboard.read` devolve: o
+kernel não sabe para qual janela uma tecla vai virar senha, então não grava
+tecla nenhuma. Um agente não edita nem confirma a linha que pede nome ou
+senha, e não confirma `login` nem `logout`: o login é de quem está no
+teclado.
+
+**Depois do login**, cada comando decide pelo papel da pessoa **agora**. A
+sessão que acaba por fora — `session.revoke`, a pessoa revogada — acaba no
+console no comando seguinte, que é recusado, e o console volta a pedir o
+login. As teclas de função e o clique na barra decidem `ui.act` com a
+sessão de quem está no console físico. Um processo lançado pela pessoa
+(`user.run`) carrega a autoridade da sessão dela, procurada a cada decisão.
+
+Um agente que confirma uma linha num console continua sendo ele mesmo: age
+como a sessão dele, com o papel dele, entrado alguém no console ou não.
+
+A suíte confere, num console sem ninguém, os comandos e a F2 recusados e
+gravados, e a ajuda atendida; o login de verdade — o nome, a senha sem eco
+na árvore e fora do histórico, o comando gravado como da pessoa, o que o
+papel dela não deixa recusado, o `logout`; duas pessoas no mesmo console e
+a mesma pessoa no físico e num Terminal ao mesmo tempo, com linhas e
+sessões independentes; a sessão revogada voltando ao login; um fio lançado
+pela pessoa decidindo pelo papel dela, e por nada depois da revogação; e
+os pseudo-terminais — um console por instância, a saída de um que não vai
+para o outro, a sessão que acaba quando o Terminal fecha ou morre. A fumaça
+entra pelo teclado da máquina com a pessoa da imagem: no Terminal, depois
+de ver o comando antes do login recusado e gravado, e com a senha fora do
+histórico; e no console físico, depois de um clique fora das janelas —
+duas sessões, a mesma identidade.
 
 ## Barramento PCI
 

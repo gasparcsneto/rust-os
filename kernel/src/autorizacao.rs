@@ -30,8 +30,8 @@
 //!
 //! # O sistema decide como os outros
 //!
-//! A autoridade local — a pessoa no console e os processos do sistema — é a
-//! máxima, e passa pela mesma conta: o papel dela é o da linha `local` da
+//! A autoridade local — os processos do sistema: o servidor de janelas, o
+//! Terminal — é a máxima, e passa pela mesma conta: o papel dela é o da linha `local` da
 //! política, o `sistema`, que enumera cada permissão e o alcance de cada uma.
 //! Não há `ALLOW` por ser sistema. A única exceção é o boot do próprio
 //! kernel, que carrega a chave, o registro e a política antes de haver o que
@@ -105,8 +105,8 @@ static TAXAS: Mutex<Taxas> = Mutex::new(Taxas {
 /// trava do escalonador na mão — ver `crate::fios`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Autoridade {
-    /// A autoridade local: a pessoa na frente da máquina, ou um processo
-    /// lançado pelo sistema. É a máxima, e **não** é um passe livre: decide
+    /// A autoridade local: um processo lançado pelo sistema — o servidor de
+    /// janelas, o Terminal. É a máxima, e **não** é um passe livre: decide
     /// pela política como as outras, com o papel da linha `local` — o
     /// `sistema`, que enumera o que pode —, e vai para a auditoria.
     Sistema,
@@ -116,6 +116,11 @@ pub enum Autoridade {
     /// revogação ou uma troca de papel valham na hora — também para o
     /// processo já lançado.
     Sessao { sessao: u8, chave: Option<[u8; 32]> },
+    /// Uma pessoa, pela sessão que ela abriu num console, e o que ela
+    /// lançou. Como a de um agente, o papel é procurado a cada decisão: a
+    /// sessão que acaba — a pessoa sai, é revogada, o console fecha — leva
+    /// junto a autoridade dos processos que ela lançou.
+    Pessoa { sessao: crate::pessoas::IdSessao },
 }
 
 impl Autoridade {
@@ -326,8 +331,45 @@ fn quem_da_sessao(sessao: u8) -> Result<Quem, Quem> {
     }
 }
 
-/// A autoridade local, com o papel que a política dá a ela agora: o agente
-/// é `pessoa` para o console e `sistema` para um processo.
+/// Quem é uma sessão de pessoa, procurada agora. `Err` com o que se sabe,
+/// se a sessão não vale mais.
+fn quem_da_pessoa(id: crate::pessoas::IdSessao) -> Result<Quem, Quem> {
+    match crate::pessoas::sessao(id) {
+        crate::pessoas::EstadoDaSessao::Ativa { pessoa, papel, .. } => Ok(Quem {
+            titular: Titular::Pessoa,
+            sessao: SESSAO_DA_PESSOA,
+            sessao_de_pessoa: Some(id.0),
+            agente: pessoa.texto(),
+            chave: None,
+            papel: Some(papel),
+        }),
+        _ => Err(Quem {
+            titular: Titular::Anonimo,
+            sessao: SESSAO_DA_PESSOA,
+            sessao_de_pessoa: Some(id.0),
+            agente: crate::pessoas::dona_da_sessao(id)
+                .map(|p| p.texto())
+                .unwrap_or_default(),
+            chave: None,
+            papel: None,
+        }),
+    }
+}
+
+/// Ninguém num console: o titular de um pedido feito antes do login.
+fn quem_sem_login() -> Quem {
+    Quem {
+        titular: Titular::Anonimo,
+        sessao: SESSAO_DA_PESSOA,
+        sessao_de_pessoa: None,
+        agente: String::new(),
+        chave: None,
+        papel: None,
+    }
+}
+
+/// A autoridade local, com o papel que a política dá a ela agora: o dos
+/// processos do sistema.
 fn quem_local(agente: &str) -> Quem {
     Quem {
         titular: Titular::Sistema,
@@ -477,8 +519,8 @@ pub enum Chamador {
     /// Uma sessão do canal: a serial, uma porta, ou um agente confirmando
     /// no Terminal — que age como a sessão dele.
     Sessao(u8),
-    /// A pessoa na frente da máquina, pelo teclado.
-    Pessoa,
+    /// Uma pessoa, pela sessão que ela abriu num console.
+    Pessoa(crate::pessoas::IdSessao),
 }
 
 /// A licença para executar um comando: só [`autorizar`] a cria, e só ela
@@ -509,11 +551,24 @@ pub fn autorizar(
     params: Json,
 ) -> Result<Autorizado, Codigo> {
     let parametros = params.0;
-    // Quem pede, e com que autoridade o comando roda se passar. A pessoa no
-    // console decide como a autoridade local, pelo papel dela na política —
-    // a mesma conta das sessões, e a mesma auditoria.
+    // Quem pede, e com que autoridade o comando roda se passar. A pessoa
+    // decide pelo papel dela no registro, procurado agora pela sessão — a
+    // mesma conta dos agentes, e a mesma auditoria.
     let (quem, autoridade) = match chamador {
-        Chamador::Pessoa => (quem_local("pessoa"), Autoridade::Sistema),
+        Chamador::Pessoa(id) => match quem_da_pessoa(id) {
+            Ok(q) => (q, Autoridade::Pessoa { sessao: id }),
+            Err(q) => {
+                auditar(
+                    &q,
+                    comando.nome,
+                    "",
+                    Codigo::DenyNotAuthenticated,
+                    parametros,
+                    "sessao de pessoa que acabou",
+                );
+                return Err(Codigo::DenyNotAuthenticated);
+            }
+        },
         Chamador::Sessao(sessao) => match quem_da_sessao(sessao) {
             Ok(q) => {
                 let chave = q.chave;
@@ -560,7 +615,9 @@ pub fn autorizar(
 /// desconhecido, parâmetros recusados. `INVALID_ARGUMENT`.
 pub fn auditar_invalido(chamador: Chamador, metodo: &str, parametros: &[u8], detalhe: &str) {
     let quem = match chamador {
-        Chamador::Pessoa => quem_local("pessoa"),
+        Chamador::Pessoa(id) => match quem_da_pessoa(id) {
+            Ok(q) | Err(q) => q,
+        },
         Chamador::Sessao(s) => match quem_da_sessao(s) {
             Ok(q) | Err(q) => q,
         },
@@ -588,9 +645,67 @@ pub fn autorizar_processo(permissao: Permissao, recurso: &str, metodo: &str) -> 
     let quem = match crate::fios::autoridade_atual() {
         Autoridade::Sistema => quem_local("sistema"),
         Autoridade::Sessao { sessao, chave } => quem_da_autoridade(sessao, chave),
+        // Uma sessão que acabou não tem papel, e o papel vazio recusa.
+        Autoridade::Pessoa { sessao } => match quem_da_pessoa(sessao) {
+            Ok(q) | Err(q) => q,
+        },
     };
     let (codigo, detalhe) = decidir(quem.papel.as_deref(), permissao, recurso);
     auditar(&quem, metodo, recurso, codigo, &[], detalhe);
+    codigo
+}
+
+/// Recusa um pedido feito num console sem ninguém entrado: só `login` e
+/// `ajuda` passam antes do login, e o resto — um comando, conhecido ou não —
+/// é `DENY_NOT_AUTHENTICATED`, gravado com o console.
+pub fn recusar_sem_login(console: crate::pessoas::Console, metodo: &str, parametros: &[u8]) {
+    auditar(
+        &quem_sem_login(),
+        metodo,
+        &console.texto(),
+        Codigo::DenyNotAuthenticated,
+        parametros,
+        "ninguem entrou no console",
+    );
+}
+
+/// Decide uma ação da pessoa de um console na interface — uma tecla de
+/// função, um clique num botão da barra —: `ui.act` sobre o elemento, com a
+/// sessão de quem está no console. Sem ninguém entrado, ou com uma sessão
+/// que acabou, `DENY_NOT_AUTHENTICATED`. Grava nos dois casos.
+pub fn autorizar_acao_da_pessoa(
+    console: crate::pessoas::Console,
+    sessao: Option<crate::pessoas::IdSessao>,
+    elemento: u32,
+) -> Codigo {
+    let recurso = alloc::format!("{} elemento {}", console.texto(), elemento);
+    let quem = match sessao.map(quem_da_pessoa) {
+        Some(Ok(q)) => q,
+        Some(Err(q)) => {
+            auditar(
+                &q,
+                "ui.act",
+                &recurso,
+                Codigo::DenyNotAuthenticated,
+                &[],
+                "sessao de pessoa que acabou",
+            );
+            return Codigo::DenyNotAuthenticated;
+        }
+        None => {
+            auditar(
+                &quem_sem_login(),
+                "ui.act",
+                &recurso,
+                Codigo::DenyNotAuthenticated,
+                &[],
+                "ninguem entrou no console",
+            );
+            return Codigo::DenyNotAuthenticated;
+        }
+    };
+    let (codigo, detalhe) = decidir(quem.papel.as_deref(), Permissao::UiAct, "");
+    auditar(&quem, "ui.act", &recurso, codigo, &[], detalhe);
     codigo
 }
 

@@ -5,9 +5,11 @@
 //! impresso, escrever uma linha, dormir no canal até o aviso de saída, e
 //! achar a resposta do interpretador no que se lê.
 //!
-//! O comando é um que não existe, de propósito: a resposta — "comando
-//! desconhecido" — é do próprio interpretador, sempre a mesma, e não depende
-//! de nenhum comando do registro continuar com a saída que tem hoje.
+//! O console do pseudo-terminal é um console novo, sem ninguém entrado: a
+//! resposta a qualquer comando é a recusa de quem não fez o login —
+//! `DENY_NOT_AUTHENTICATED` —, do próprio interpretador, sempre a mesma. É
+//! também a prova, de dentro de um processo, de que um Terminal não herda a
+//! sessão de ninguém.
 //!
 //! No caminho, as recusas: o segundo `terminal` do mesmo dono, um canal que
 //! não é canal, e o filho de um `fork`, que herda os descritores e não a
@@ -33,8 +35,8 @@ const DO_FILHO: i64 = 69;
 /// tem de engolir sem entregar ao interpretador — a suíte conta as teclas.
 const LINHA: &str = "\u{F704}duke-pty\n";
 
-/// O que o interpretador responde a ela.
-const RESPOSTA: &[u8] = b"comando desconhecido: duke-pty";
+/// O que o interpretador responde a ela, num console sem ninguém entrado.
+const RESPOSTA: &[u8] = b"negado: DENY_NOT_AUTHENTICATED";
 
 /// Quantos avisos esperar pela resposta antes de desistir.
 const AVISOS: usize = 200;

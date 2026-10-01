@@ -178,9 +178,6 @@ pub fn _print(args: fmt::Arguments) {
         // vão para o anel de `crate::log` de qualquer forma, e `log.tail` os
         // devolve.
         let _ = crate::tela::console::Saida.write_fmt(args);
-        // E no anel do pseudo-terminal, que é o mesmo console visto por um
-        // processo — o Terminal. O mesmo texto pelo mesmo motivo.
-        let _ = crate::pseudoterminal::Registro.write_fmt(args);
         // E, num adaptador que só mostra o que se manda, mandar. Aqui, e não
         // dentro do console, para que uma escrita longa seja uma descarga só.
         crate::tela::descarregar();

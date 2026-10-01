@@ -149,6 +149,8 @@ pub enum Encerramento {
     Revogada,
     /// Um administrador revogou a pessoa.
     PessoaRevogada,
+    /// O console fechou: a janela do Terminal, ou o processo dela morreu.
+    ConsoleFechado,
 }
 
 /// O que se sabe de uma sessão agora.
@@ -510,6 +512,21 @@ pub fn sair(id: IdSessao) -> bool {
     true
 }
 
+/// O console onde a sessão estava fechou: a sessão acaba com ele.
+pub fn encerrar_pelo_console(id: IdSessao, detalhe: &str) {
+    let Some(sessao) = com_tabela(|t| tirar(t, id, Encerramento::ConsoleFechado)) else {
+        return;
+    };
+    crate::autorizacao::auditar_pessoa(
+        Some((&sessao.pessoa.texto(), id.0)),
+        None,
+        "person.logout",
+        &sessao.console.texto(),
+        Codigo::Allow,
+        detalhe,
+    );
+}
+
 /// O que se sabe de uma sessão agora: a pessoa e o papel dela **de agora**.
 pub fn sessao(id: IdSessao) -> EstadoDaSessao {
     com_tabela(|t| {
@@ -721,10 +738,45 @@ pub fn credencial_de_teste(senha: &[u8]) -> Credencial {
     }
 }
 
-/// Devolve o registro ao que a imagem diz, e fecha todas as sessões.
+/// Abre uma sessão direto, sem credencial nem limite de tentativas, para a
+/// suíte pôr uma pessoa num console sem pagar um Argon2id em cada caso. A
+/// pessoa é registrada se ainda não existe. O caminho da credencial tem os
+/// casos próprios.
+#[cfg(feature = "modo-teste")]
+pub fn sessao_de_teste(console: Console, nome: &str, papel: &str) -> IdSessao {
+    let id = match com_tabela(|t| t.pessoas.iter().find(|p| p.nome == nome).map(|p| p.id)) {
+        Some(id) => id,
+        None => registrar_de_teste(nome, papel, b"senha de teste"),
+    };
+    let mut bytes = [0u8; 8];
+    crate::aleatorio::preencher(&mut bytes).expect("a suite tem entropia");
+    let sessao = IdSessao(bytes);
+    com_tabela(|t| {
+        t.sessoes.push(Sessao {
+            id: sessao,
+            pessoa: id,
+            console,
+            desde_ms: crate::tempo::uptime_ms(),
+        })
+    });
+    crate::autorizacao::auditar_pessoa(
+        Some((&id.texto(), sessao.0)),
+        Some(papel),
+        "person.login",
+        &console.texto(),
+        Codigo::Allow,
+        "sessao de teste",
+    );
+    sessao
+}
+
+/// Devolve o registro ao que a imagem diz, fecha todas as sessões, e põe de
+/// volta a pessoa que a suíte deixa no console físico entre os casos — ver
+/// [`crate::interpretador::pessoa_padrao_para_teste`].
 #[cfg(feature = "modo-teste")]
 pub fn esquecer_registradas() {
     carregar();
+    crate::interpretador::pessoa_padrao_para_teste();
 }
 
 /// Destrava a tabela à força, para uso exclusivo do caminho de falha fatal.
