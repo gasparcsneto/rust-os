@@ -488,7 +488,9 @@ fn despachar(nome: &str, params: &str, origem: Origem) {
 
     let mut saida = SaidaHumana::nova();
     let mut escritor = JsonWriter::new(&mut saida);
-    if licenca.executar(params, &mut escritor).is_err() {
+    let escreveu = licenca.executar(params, &mut escritor);
+    saida.descarregar();
+    if escreveu.is_err() {
         crate::serial_println!("a resposta nao coube");
     }
     crate::serial_println!();
@@ -506,7 +508,22 @@ fn ajuda(origem: Origem) {
     crate::serial_println!("  {:<18} {}", "ajuda", "Esta lista.");
 }
 
+/// O maior pedaço da resposta que [`SaidaHumana`] junta antes de escrever.
+const PEDACO_DA_RESPOSTA: usize = 2048;
+
 /// Desenha JSON de um jeito que uma pessoa consiga ler.
+///
+/// # Por que em pedaços, e não caractere a caractere
+///
+/// Porque cada escrita no console é uma descarga da tela, com as
+/// interrupções desligadas. Com o console cheio, cada linha nova rola a
+/// camada inteira, e a descarga seguinte recompõe a tela toda: escrita
+/// caractere a caractere, uma resposta de trinta linhas eram trinta
+/// recomposições de tela inteira seguidas. Medido no build de depuração, a
+/// máquina ficava segundos sem atender o canal do agente — a fumaça via a
+/// porta sem resposta. Juntando a resposta em pedaços de
+/// [`PEDACO_DA_RESPOSTA`] bytes, cada pedaço é uma descarga só, por mais
+/// linhas que role.
 ///
 /// # Por que reformatar, e não interpretar
 ///
@@ -519,6 +536,8 @@ struct SaidaHumana {
     profundidade: u32,
     dentro_de_string: bool,
     escapado: bool,
+    /// O que já foi formatado e ainda não foi escrito.
+    pendente: alloc::string::String,
 }
 
 impl SaidaHumana {
@@ -527,13 +546,34 @@ impl SaidaHumana {
             profundidade: 0,
             dentro_de_string: false,
             escapado: false,
+            pendente: alloc::string::String::new(),
         }
     }
 
-    fn quebrar(&self) {
-        crate::serial_println!();
+    /// Escreve no console o que estiver pendente, numa escrita só.
+    fn descarregar(&mut self) {
+        if !self.pendente.is_empty() {
+            crate::serial_print!("{}", self.pendente);
+            self.pendente.clear();
+        }
+    }
+
+    fn pôr(&mut self, texto: &str) {
+        self.pendente.push_str(texto);
+        if self.pendente.len() >= PEDACO_DA_RESPOSTA {
+            self.descarregar();
+        }
+    }
+
+    fn pôr_char(&mut self, c: char) {
+        let mut b = [0u8; 4];
+        self.pôr(c.encode_utf8(&mut b));
+    }
+
+    fn quebrar(&mut self) {
+        self.pôr("\n");
         for _ in 0..self.profundidade {
-            crate::serial_print!("  ");
+            self.pôr("  ");
         }
     }
 
@@ -542,7 +582,7 @@ impl SaidaHumana {
         // abre nível nenhum. Sem esta distinção, um valor que contivesse `{`
         // desalinharia a indentação de tudo que viesse depois.
         if self.dentro_de_string {
-            crate::serial_print!("{c}");
+            self.pôr_char(c);
             if self.escapado {
                 self.escapado = false;
             } else if c == '\\' {
@@ -556,24 +596,27 @@ impl SaidaHumana {
         match c {
             '"' => {
                 self.dentro_de_string = true;
-                crate::serial_print!("{c}");
+                self.pôr_char(c);
             }
             '{' | '[' => {
-                crate::serial_print!("{c}");
+                self.pôr_char(c);
                 self.profundidade += 1;
                 self.quebrar();
             }
             '}' | ']' => {
                 self.profundidade = self.profundidade.saturating_sub(1);
                 self.quebrar();
-                crate::serial_print!("{c}");
+                self.pôr_char(c);
             }
             ',' => {
-                crate::serial_print!("{c}");
+                self.pôr_char(c);
                 self.quebrar();
             }
-            ':' => crate::serial_print!("{c} "),
-            _ => crate::serial_print!("{c}"),
+            ':' => {
+                self.pôr_char(c);
+                self.pôr(" ");
+            }
+            _ => self.pôr_char(c),
         }
     }
 }
