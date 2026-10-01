@@ -11750,6 +11750,14 @@ fn pessoas_estados_nao_se_confundem() -> Resultado {
         if pessoa(id).map(|p| p.estado) != Some(Estado::Revogada) {
             return Err("a pessoa revogada saiu do registro, ou nao ficou revogada");
         }
+        // E as sessões saíram da tabela, e não só deixaram de valer: o
+        // registro não as mostra, e elas não ocupam vaga.
+        if crate::pessoas::resumos()
+            .iter()
+            .any(|p| p.id == id && !p.sessoes.is_empty())
+        {
+            return Err("as sessoes da pessoa revogada continuaram na tabela");
+        }
         if autenticar(Console::Terminal(4), "cora", b"outra senha")
             != Err(RecusaDeLogin::NaoConfere)
         {
