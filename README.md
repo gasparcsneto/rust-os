@@ -154,8 +154,9 @@ $ cargo xtask agent --canal 2 agent.session
 | `agent.session` | A sessão deste pedido: o número que o kernel deu ao canal, o transporte e quem provou a chave |
 | `agent.sessions` | As sessões: a serial e cada porta do console virtio, conectada ou não, quem está nela, as perdas e as recusas |
 | `agent.registry` | Quem pode entrar pelas portas: a chave do Duke e cada agente registrado, com a origem |
+| `person.registry` | Quem pode entrar pelos consoles: cada pessoa, com identificador, nome, papel, estado e sessões abertas — sem credencial |
 | `admin.challenge` | Um desafio de uso único para uma operação administrativa nesta sessão |
-| `admin.execute` | Uma operação administrativa com a prova de um administrador (`challenge`, `command`, `params`, `admin`, `proof`): `agent.register`, `agent.revoke`, `policy.assign`, `policy.write` |
+| `admin.execute` | Uma operação administrativa com a prova de um administrador (`challenge`, `command`, `params`, `admin`, `proof`): `agent.register`, `agent.revoke`, `policy.assign`, `policy.write`, `person.register`, `person.revoke`, `credential.rotate`, `session.revoke` |
 | `audit.tail` | Os registros mais recentes da auditoria encadeada, com o que basta para refazer cada elo (`count`) |
 | `audit.head` | A cabeça da auditoria — o elo do último registro, para ancorar fora da máquina —, a âncora e quantos há |
 | `audit.verify` | Refaz a cadeia guardada a partir da âncora e diz se cada elo confere |
@@ -215,6 +216,7 @@ kernel/src/
 ├── heap.rs          alocador do kernel: lista livre ordenada com fusão
 ├── interpretador.rs operar o Duke digitando
 ├── identidade.rs    quem é quem: a chave do Duke, os agentes, os administradores e os desafios
+├── pessoas.rs       quem entra pelos consoles: o registro, as credenciais e as sessões
 ├── autorizacao.rs   o ponto único de decisão: papel, permissão, recurso, taxa e auditoria
 ├── sessoes.rs       quem está em cada porta, e as chaves do transporte cifrado dela
 ├── aleatorio.rs     o gerador de números aleatórios, semeado pelo virtio-rng
@@ -347,6 +349,8 @@ sigilo/src/          o canal seguro, dos dois lados da conversa
 ├── resumo.rs        o BLAKE2s, o HMAC e os dois HKDF
 ├── administracao.rs a prova de uma operação administrativa, presa ao contexto
 ├── gerador.rs       ChaCha20 com apagamento rápido da chave
+├── credencial.rs    o verificador Argon2id de uma senha, conferido em tempo constante
+├── pessoas.rs       o identificador de uma pessoa e o formato do registro delas
 ├── quadro.rs        como as mensagens se delimitam no fluxo da porta
 └── registro.rs      o formato dos arquivos de chaves autorizadas
 
@@ -1533,8 +1537,11 @@ reservado só é chamada pela identidade, e as duas cargas só pelo boot — o
 sistema, console, serial ou pseudo-terminal as alcança.
 
 **Tudo vai para a auditoria.** Permitido ou não, cada decisão vira um
-registro: número, milissegundos desde o boot, sessão, agente, chave
-pública, papel, método, recurso, código e um BLAKE2s dos parâmetros. Os
+registro: número, milissegundos desde o boot, o tipo de titular (kernel,
+sistema, serial, agente, pessoa, administrador ou ninguém ainda), sessão,
+sessão de pessoa, identificador, chave pública, papel, método, recurso,
+código e um BLAKE2s dos parâmetros. O titular e a sessão de pessoa entram no
+elo: um registro de pessoa não vira um de agente trocando um texto. Os
 parâmetros não entram — podem trazer o que um agente escreveu, ou uma prova
 administrativa. Cada registro carrega o elo do anterior, e o seu é o
 BLAKE2s do anterior com a codificação dele; mudar, tirar ou reordenar um
@@ -1557,7 +1564,8 @@ Duke duas trocas Diffie-Hellman, e quem não tem chave registrada pode
 pedi-los à vontade.
 
 **Administrar: prova e papel, os dois.** As operações administrativas —
-`agent.register`, `agent.revoke`, `policy.assign` e `policy.write` — só
+`agent.register`, `agent.revoke`, `policy.assign`, `policy.write`, e as de
+pessoas (ver adiante) — só
 existem dentro de `admin.execute`, depois da prova do administrador; e a
 prova não basta: o papel do administrador, na política, precisa ter a
 permissão. Ele é o **teto** do que o administrador delega:
@@ -1593,6 +1601,81 @@ pseudo-terminal também —; a pessoa e um processo do sistema recusados
 quando a política dá à autoridade local um papel menor; a política de
 emergência mantendo o `sistema`; e o aperto auditado e limitado. A fumaça faz o mesmo por fora, com o cliente do `xtask`, e refaz
 no hospedeiro a cadeia inteira que o kernel mostrou.
+
+### Pessoas
+
+Uma pessoa não é um agente com outra chave. É uma entidade do registro, com
+identidade persistente e credencial própria:
+
+```
+pessoa registrada → autenticação → sessão → papel → permissões
+```
+
+**Registro ≠ autenticação ≠ autorização.** Estar registrada não abre nada.
+Autenticar — provar, num console, que é ela — cria uma **sessão de pessoa**,
+e não dá permissão nenhuma: cada pedido da sessão passa pelo mesmo ponto de
+decisão dos agentes, com o papel que o registro dá à pessoa agora. Pessoa e
+agente estão no mesmo nível, abaixo do `sistema`; a pessoa da imagem de
+desenvolvimento é `operador`.
+
+**O registro.** Em `/etc/duke/privado/pessoas`, no diretório reservado, uma
+linha por pessoa: `pessoa:<16 hex>`, nome, papel, estado (`ativa` ou
+`revogada`) e a credencial. O identificador tem um `:` que nenhum nome de
+agente pode ter, e a auditoria grava o tipo de titular no elo: os dois não
+se confundem nem em texto nem na cadeia.
+
+**A credencial é um verificador Argon2id**, nunca a senha:
+`argon2id:m=4096,t=3,p=1:<sal>:<verificador>`. O custo vai escrito em cada
+uma, entre um mínimo (1 MiB, 2 passadas) e um máximo que o kernel aceita
+calcular (16 MiB, 10 passadas). A memória de trabalho sai do alocador de
+frames — o heap tem 1 MiB — e é zerada antes de voltar. A comparação é em
+tempo constante, e um nome desconhecido paga o mesmo Argon2id, contra uma
+credencial que não confere com nada: o tempo da recusa não diz se o nome
+existe. A forma começa pelo tipo: uma credencial de dispositivo ou de chave
+pública entra como outro tipo, sem mudar o que uma pessoa é.
+
+**Sessões.** O número da sessão é sorteado no login; a sessão diz qual
+pessoa e em qual console — o físico ou um Terminal. A mesma pessoa em dois
+consoles tem duas sessões, com a mesma identidade; duas pessoas no mesmo
+console, uma depois da outra, também são duas. Cada console tem um limite de
+tentativas (cinco por minuto), conferido antes do cálculo. A resposta a quem
+erra não diz se foi o nome ou a senha; a auditoria diz, e grava contra quem
+— um nome que não é de ninguém não é gravado, porque pode ser uma senha
+digitada no lugar errado. A serial não tem pessoa: é o canal de controle e
+emergência.
+
+**Mudar o registro é administrar.** Quatro operações, dentro de
+`admin.execute`, com a prova e com a permissão de mesmo nome no papel do
+administrador — o mesmo teto dos agentes: ele não alcança uma pessoa de
+papel maior que o dele.
+
+- `person.register` registra com o **verificador**, calculado fora: a senha
+  nunca viaja nem é guardada; uma senha no lugar da credencial é recusada.
+- `person.revoke` revoga a pessoa: ela não entra mais, as sessões dela
+  acabam na hora, e o registro fica, com o estado `revogada` — a auditoria de
+  ontem continua apontando para alguém. O nome continua dela.
+- `credential.rotate` troca a credencial: a mesma pessoa, o mesmo
+  identificador; a senha velha não entra mais, e as sessões abertas
+  continuam — encerrá-las é a operação seguinte, de propósito separada.
+- `session.revoke` acaba uma sessão, sem tocar na pessoa, que pode entrar de
+  novo.
+
+O disco é só leitura: o que elas mudam vale até o próximo boot.
+
+**A pessoa de desenvolvimento.** A imagem de desenvolvimento e de testes
+traz uma pessoa, `dev`, para quem roda o Duke aqui ter com quem entrar — um
+mecanismo explícito de desenvolvimento, e não um login automático: a senha
+ainda se digita. O identificador, o sal e a senha saem de 32 bytes sorteados
+em `target/chaves/pessoa-dev.chave`, fora do repositório; a senha fica em
+`target/chaves/pessoa-dev.senha`, e a imagem tem só o verificador.
+
+A suíte confere a pessoa da imagem e o registro fora do alcance do canal;
+duas pessoas no mesmo console e a mesma pessoa em dois, com a auditoria de
+cada login e saída; as recusas — senha errada, nome desconhecido, senha
+longa demais — e o limite de tentativas de um console sem prender outro; e
+os seis estados — registrada, autenticada, sessão ativa, credencial válida,
+sessão revogada, pessoa revogada — pelas operações de verdade, com a prova,
+sem que um se passe pelo outro.
 
 ## Barramento PCI
 

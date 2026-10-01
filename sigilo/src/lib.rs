@@ -38,7 +38,9 @@ extern crate alloc;
 pub mod administracao;
 pub mod aperto;
 pub mod cifra;
+pub mod credencial;
 pub mod gerador;
+pub mod pessoas;
 pub mod quadro;
 pub mod registro;
 pub mod resumo;
@@ -104,9 +106,14 @@ impl Erro {
 
 /// Uma chave em hexadecimal, como ela aparece nos arquivos e no relatório.
 pub fn hex(chave: &[u8; TAM_CHAVE]) -> alloc::string::String {
+    hex_de(chave)
+}
+
+/// Bytes quaisquer em hexadecimal, dois dígitos minúsculos por byte.
+pub fn hex_de(bytes: &[u8]) -> alloc::string::String {
     use core::fmt::Write;
-    let mut s = alloc::string::String::with_capacity(2 * TAM_CHAVE);
-    for b in chave {
+    let mut s = alloc::string::String::with_capacity(2 * bytes.len());
+    for b in bytes {
         let _ = write!(s, "{b:02x}");
     }
     s
@@ -115,13 +122,18 @@ pub fn hex(chave: &[u8; TAM_CHAVE]) -> alloc::string::String {
 /// Uma chave a partir do hexadecimal. `None` se não forem exatamente 64
 /// dígitos.
 pub fn de_hex(texto: &str) -> Option<[u8; TAM_CHAVE]> {
-    let texto = texto.trim();
-    if texto.len() != 2 * TAM_CHAVE || !texto.is_ascii() {
+    de_hex_fixo(texto.trim())
+}
+
+/// `N` bytes a partir de exatamente `2N` dígitos hexadecimais, sem espaço
+/// em volta.
+pub fn de_hex_fixo<const N: usize>(texto: &str) -> Option<[u8; N]> {
+    if texto.len() != 2 * N || !texto.is_ascii() {
         return None;
     }
-    let mut chave = [0u8; TAM_CHAVE];
-    for (i, b) in chave.iter_mut().enumerate() {
+    let mut saida = [0u8; N];
+    for (i, b) in saida.iter_mut().enumerate() {
         *b = u8::from_str_radix(&texto[2 * i..2 * i + 2], 16).ok()?;
     }
-    Some(chave)
+    Some(saida)
 }

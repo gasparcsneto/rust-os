@@ -3,7 +3,8 @@
 //! # A regra
 //!
 //! Uma operação administrativa — registrar e revogar um agente, atribuir um
-//! papel, mudar a política — não é um comando como os outros. Ela não está
+//! papel, mudar a política, registrar e revogar uma pessoa, trocar a
+//! credencial dela, encerrar uma sessão de pessoa — não é um comando como os outros. Ela não está
 //! em [`super::commands::COMANDOS`] e não se chama pelo nome: chega
 //! embrulhada em `admin.execute`, com a prova de um administrador para
 //! **aquele** pedido, naquela sessão, com aquele desafio. Ver
@@ -116,6 +117,36 @@ static OPERACOES: &[Operacao] = &[
                  nao muda.",
         permissao: Permissao::PolicyWrite,
         executar: escrever_politica,
+    },
+    Operacao {
+        nome: "person.register",
+        resumo: "Registra uma pessoa: {\"name\": nome, \"role\": papel, \"credential\": \
+                 \"argon2id:m=..,t=..,p=1:<sal>:<verificador>\"}. O verificador e calculado \
+                 fora: a senha nunca vem. O papel cabe no do administrador. Devolve o \
+                 identificador. Vale ate o proximo boot.",
+        permissao: Permissao::PersonRegister,
+        executar: registrar_pessoa,
+    },
+    Operacao {
+        nome: "person.revoke",
+        resumo: "Revoga uma pessoa: {\"person\": \"pessoa:<16 hex>\"}. Ela nao entra mais, e \
+                 as sessoes dela acabam na hora; o registro fica, com o estado revogada.",
+        permissao: Permissao::PersonRevoke,
+        executar: revogar_pessoa,
+    },
+    Operacao {
+        nome: "credential.rotate",
+        resumo: "Troca a credencial de uma pessoa: {\"person\": identificador, \"credential\": \
+                 verificador como no registro}. A pessoa e a mesma; as sessoes continuam.",
+        permissao: Permissao::CredentialRotate,
+        executar: rotacionar_credencial,
+    },
+    Operacao {
+        nome: "session.revoke",
+        resumo: "Encerra uma sessao de pessoa: {\"session\": 16 hex}. A pessoa continua \
+                 registrada e pode entrar de novo.",
+        permissao: Permissao::SessionRevoke,
+        executar: revogar_sessao,
     },
 ];
 
@@ -500,4 +531,109 @@ fn escrever_politica(pedinte: &Pedinte, params: Json, w: &mut JsonWriter) -> Res
         _ => String::new(),
     };
     Ok(recurso)
+}
+
+// ---------------------------------------------------------------------------
+// Pessoas
+// ---------------------------------------------------------------------------
+
+fn recusa_de_pessoas(r: crate::pessoas::Recusa) -> Falha {
+    use crate::pessoas::Recusa as R;
+    let codigo = match r {
+        R::Cheio | R::SemEntropia => Codigo::Error,
+        R::Nome | R::Papel | R::NomeRepetido | R::Desconhecida | R::JaRevogada => {
+            Codigo::InvalidArgument
+        }
+    };
+    falha(codigo, r.motivo())
+}
+
+/// Uma credencial, na forma do registro. Só o verificador: uma senha não
+/// tem esta forma, e não é aceita.
+fn credencial(params: Json) -> Result<sigilo::credencial::Credencial, Falha> {
+    sigilo::credencial::Credencial::ler(texto(params, "credential")?)
+        .map_err(|e| falha(Codigo::InvalidArgument, e.motivo()))
+}
+
+/// A pessoa com este identificador existe, e o papel dela cabe no do
+/// administrador: como com os agentes, quem pode mais que ele não é
+/// revogado nem tem a credencial trocada por ele.
+fn pessoa_alcancavel(pedinte: &Pedinte, params: Json) -> Result<sigilo::pessoas::Pessoa, Falha> {
+    let id = sigilo::pessoas::IdPessoa::ler(texto(params, "person")?).ok_or_else(|| {
+        falha(
+            Codigo::InvalidArgument,
+            "`person` nao e um identificador pessoa:<16 hex>",
+        )
+    })?;
+    let pessoa = crate::pessoas::pessoa(id)
+        .ok_or_else(|| recusa_de_pessoas(crate::pessoas::Recusa::Desconhecida))?;
+    cabe(pedinte, &pessoa.papel)?;
+    Ok(pessoa)
+}
+
+fn registrar_pessoa(pedinte: &Pedinte, params: Json, w: &mut JsonWriter) -> Result<String, Falha> {
+    let nome = texto(params, "name")?;
+    let papel = texto(params, "role")?;
+    let credencial = credencial(params)?;
+    cabe(pedinte, papel)?;
+    let id = crate::pessoas::registrar(nome, papel, credencial).map_err(recusa_de_pessoas)?;
+    crate::log_info!(
+        "admin",
+        "pessoa {} registrada como {} ({})",
+        nome,
+        papel,
+        id.texto()
+    );
+    let _ = w.field_str("person", &id.texto());
+    let _ = w.field_str("name", nome);
+    let _ = w.field_str("role", papel);
+    Ok(id.texto())
+}
+
+fn revogar_pessoa(pedinte: &Pedinte, params: Json, w: &mut JsonWriter) -> Result<String, Falha> {
+    let pessoa = pessoa_alcancavel(pedinte, params)?;
+    let encerradas = crate::pessoas::revogar_pessoa(pessoa.id).map_err(recusa_de_pessoas)?;
+    crate::log_info!(
+        "admin",
+        "pessoa {} revogada; {} sessoes encerradas",
+        pessoa.nome,
+        encerradas.len()
+    );
+    let _ = w.field_str("person", &pessoa.id.texto());
+    let _ = w.key("sessions_closed");
+    let _ = w.begin_array();
+    for s in &encerradas {
+        let _ = w.str_value(&s.texto());
+    }
+    let _ = w.end_array();
+    Ok(pessoa.id.texto())
+}
+
+fn rotacionar_credencial(
+    pedinte: &Pedinte,
+    params: Json,
+    w: &mut JsonWriter,
+) -> Result<String, Falha> {
+    let pessoa = pessoa_alcancavel(pedinte, params)?;
+    let credencial = credencial(params)?;
+    crate::pessoas::rotacionar(pessoa.id, credencial).map_err(recusa_de_pessoas)?;
+    crate::log_info!("admin", "credencial de {} trocada", pessoa.nome);
+    let _ = w.field_str("person", &pessoa.id.texto());
+    Ok(pessoa.id.texto())
+}
+
+fn revogar_sessao(pedinte: &Pedinte, params: Json, w: &mut JsonWriter) -> Result<String, Falha> {
+    let id = crate::pessoas::IdSessao::ler(texto(params, "session")?)
+        .ok_or_else(|| falha(Codigo::InvalidArgument, "`session` nao e 16 hex"))?;
+    // A sessão é de uma pessoa, e a pessoa precisa estar ao alcance: o
+    // papel dela cabe no do administrador.
+    let dona = crate::pessoas::dona_da_sessao(id)
+        .and_then(crate::pessoas::pessoa)
+        .ok_or_else(|| recusa_de_pessoas(crate::pessoas::Recusa::Desconhecida))?;
+    cabe(pedinte, &dona.papel)?;
+    crate::pessoas::revogar_sessao(id).map_err(recusa_de_pessoas)?;
+    crate::log_info!("admin", "sessao {} de {} revogada", id.texto(), dona.nome);
+    let _ = w.field_str("session", &id.texto());
+    let _ = w.field_str("person", &dona.id.texto());
+    Ok(id.texto())
 }

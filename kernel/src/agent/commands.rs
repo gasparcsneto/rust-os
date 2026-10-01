@@ -59,6 +59,16 @@ pub static COMANDOS: &[Command] = &[
         handler: agent_registry,
     },
     Command {
+        nome: "person.registry",
+        resumo: "Quem pode entrar pelos consoles: cada pessoa registrada, com o \
+                 identificador, o nome, o papel, o estado (ativa ou revogada, que fica no \
+                 registro) e as sessoes abertas, com o console de cada uma. Sem credencial.",
+        params: &[],
+        acesso: Acesso::Exige(Permissao::AgentRead),
+        recurso: None,
+        handler: person_registry,
+    },
+    Command {
         nome: "admin.challenge",
         resumo: "Um desafio para uma operacao administrativa nesta sessao: numero, nonce e \
                  chave efemera. Vale uma tentativa, por pouco tempo; pedir outro descarta \
@@ -642,7 +652,13 @@ fn audit_tail(params: Json, w: &mut JsonWriter) -> fmt::Result {
         w.begin_object()?;
         w.field_u64("seq", r.seq)?;
         w.field_u64("ts_ms", e.ts_ms)?;
+        w.field_str("holder", e.titular.nome())?;
         w.field_u64("session", u64::from(e.sessao))?;
+        w.key("person_session")?;
+        match &e.sessao_de_pessoa {
+            Some(s) => w.str_value(&sigilo::hex_de(s))?,
+            None => w.null_value()?,
+        }
         w.field_str("agent", &e.agente)?;
         w.key("key")?;
         match &e.chave {
@@ -811,6 +827,32 @@ fn agent_registry(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.begin_array()?;
     for (nome, _) in super::administracao::operacoes() {
         w.str_value(nome)?;
+    }
+    w.end_array()?;
+    w.end_object()
+}
+
+fn person_registry(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    w.key("persons")?;
+    w.begin_array()?;
+    for p in crate::pessoas::resumos() {
+        w.begin_object()?;
+        w.field_str("id", &p.id.texto())?;
+        w.field_str("name", &p.nome)?;
+        w.field_str("role", &p.papel)?;
+        w.field_str("state", p.estado.nome())?;
+        w.key("sessions")?;
+        w.begin_array()?;
+        for (id, console, desde) in &p.sessoes {
+            w.begin_object()?;
+            w.field_str("session", &id.texto())?;
+            w.field_str("console", &console.texto())?;
+            w.field_u64("since_ms", *desde)?;
+            w.end_object()?;
+        }
+        w.end_array()?;
+        w.end_object()?;
     }
     w.end_array()?;
     w.end_object()

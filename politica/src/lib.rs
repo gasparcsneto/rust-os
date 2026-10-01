@@ -61,7 +61,7 @@ recurso sistema fs.read /
 recurso sistema process.run /
 taxa sistema 400 800
 
-papel administrador agent.read system.read log.read ui.read ui.act process.run net.send fs.read audit.read policy.read agent.register agent.revoke policy.assign policy.write
+papel administrador agent.read system.read log.read ui.read ui.act process.run net.send fs.read audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke
 recurso administrador fs.read /dados /bin /programas
 recurso administrador process.run /bin /programas
 taxa administrador 10 20
@@ -83,7 +83,8 @@ pub const PADRAO: &str = concat!(
 # A politica do Duke: papeis, permissoes, recursos e taxas.
 #
 # Uma permissao sensivel (fs.*, keyboard.read, debug.trigger, terminal.attach,
-# policy.*, agent.register, agent.revoke) nao atravessa a inclusao de outro
+# policy.*, agent.register, agent.revoke, person.*, credential.rotate,
+# session.revoke) nao atravessa a inclusao de outro
 # papel: cada papel que a tem a escreve. Toda permissao de caminho tem o
 # alcance escrito numa linha `recurso`. Nao ha curinga.
 

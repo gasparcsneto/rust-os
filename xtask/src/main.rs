@@ -2408,16 +2408,21 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
         "(operacao.executar)(",
         &["kernel/src/agent/administracao.rs"],
     ),
-    // A exceção do boot: a chave privada, o registro e a política são lidos
-    // antes de haver o que decidir — e só ali. A leitura do diretório
-    // reservado é definida no VFS e chamada só pela identidade; as duas
-    // cargas, só pelo boot.
+    // A exceção do boot: a chave privada, os registros e a política são
+    // lidos antes de haver o que decidir — e só ali. A leitura do diretório
+    // reservado é definida no VFS e chamada só pela identidade e pelo
+    // registro de pessoas; as três cargas, só pelo boot.
     (
         "ler_segredo(",
-        &["kernel/src/vfs/mod.rs", "kernel/src/identidade.rs"],
+        &[
+            "kernel/src/vfs/mod.rs",
+            "kernel/src/identidade.rs",
+            "kernel/src/pessoas.rs",
+        ],
     ),
     ("identidade::carregar()", &["kernel/src/main.rs"]),
     ("autorizacao::carregar()", &["kernel/src/main.rs"]),
+    ("pessoas::carregar()", &["kernel/src/main.rs"]),
 ];
 
 /// Confere que nenhum caminho chega a uma operação protegida sem passar pelo
@@ -3482,7 +3487,17 @@ mod chaves {
         pub agentes: Vec<[u8; 32]>,
         pub administrador: [u8; 32],
         pub intruso: [u8; 32],
+        /// O segredo da pessoa de desenvolvimento: o identificador, o sal e
+        /// a senha saem dele — ver [`Chaves::pessoa_dev`].
+        pub pessoa_dev: [u8; 32],
     }
+
+    /// O nome da pessoa de desenvolvimento.
+    pub const NOME_DA_PESSOA_DEV: &str = "dev";
+
+    /// O papel dela: um papel comum, como o de uma pessoa qualquer. Pessoa e
+    /// agente estão no mesmo nível; o `sistema` não é papel de pessoa.
+    pub const PAPEL_DA_PESSOA_DEV: &str = "operador";
 
     /// Onde as chaves moram.
     pub fn diretorio() -> PathBuf {
@@ -3540,7 +3555,72 @@ mod chaves {
                     .collect::<Result<_, _>>()?,
                 administrador: chave("administrador")?,
                 intruso: chave("intruso")?,
+                pessoa_dev: chave("pessoa-dev")?,
             })
+        }
+
+        /// A pessoa de desenvolvimento: o identificador, o sal e a senha.
+        ///
+        /// Existe **só** na imagem de desenvolvimento e de testes — é o
+        /// mecanismo explícito para quem roda o Duke aqui ter com quem
+        /// entrar, e não um login automático: a pessoa ainda digita a senha.
+        /// Tudo sai de um arquivo de 32 bytes sorteados em `target/chaves/`,
+        /// fora do repositório: os 8 primeiros são o identificador, os 16
+        /// seguintes o sal, e os 8 últimos, em hexadecimal, a senha. A
+        /// imagem tem só o verificador; a senha fica em
+        /// `target/chaves/pessoa-dev.senha`.
+        pub fn pessoa_dev(&self) -> ([u8; 8], [u8; 16], String) {
+            let b = &self.pessoa_dev;
+            let mut id = [0u8; 8];
+            id.copy_from_slice(&b[..8]);
+            let mut sal = [0u8; 16];
+            sal.copy_from_slice(&b[8..24]);
+            (id, sal, sigilo::hex_de(&b[24..]))
+        }
+
+        /// Escreve a senha da pessoa de desenvolvimento em
+        /// `target/chaves/pessoa-dev.senha`, se ainda não está lá: é ela que
+        /// se digita no console.
+        pub fn escrever_senha_dev(&self) -> Result<(), String> {
+            let caminho = diretorio().join("pessoa-dev.senha");
+            if caminho.exists() {
+                return Ok(());
+            }
+            let mut arquivo = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&caminho)
+                .map_err(|e| format!("não foi possível criar {}: {e}", caminho.display()))?;
+            writeln!(arquivo, "{}", self.pessoa_dev().2)
+                .map_err(|e| format!("não foi possível escrever {}: {e}", caminho.display()))?;
+            println!(
+                "[xtask] pessoa de desenvolvimento `{NOME_DA_PESSOA_DEV}`: senha em {}",
+                caminho.display()
+            );
+            Ok(())
+        }
+
+        /// O registro de pessoas da imagem: a pessoa de desenvolvimento, com
+        /// o verificador Argon2id da senha dela e o custo padrão.
+        pub fn registro_de_pessoas(&self) -> Result<String, String> {
+            let (id, sal, senha) = self.pessoa_dev();
+            let credencial =
+                sigilo::credencial::nova(senha.as_bytes(), sal, sigilo::credencial::Custo::PADRAO)
+                    .map_err(|e| format!("a credencial da pessoa dev: {}", e.motivo()))?;
+            let pessoa = sigilo::pessoas::Pessoa {
+                id: sigilo::pessoas::IdPessoa(id),
+                nome: NOME_DA_PESSOA_DEV.to_string(),
+                papel: PAPEL_DA_PESSOA_DEV.to_string(),
+                estado: sigilo::pessoas::Estado::Ativa,
+                credencial,
+            };
+            Ok(format!(
+                "# As pessoas que podem entrar pelo console. So o verificador da senha.\n\
+                 # Imagem de desenvolvimento: a pessoa `{NOME_DA_PESSOA_DEV}` existe para quem roda\n\
+                 # o Duke aqui ter com quem entrar.\n{}",
+                sigilo::pessoas::linha(&pessoa)
+            ))
         }
 
         /// A chave privada do agente da porta `p`.
@@ -3549,7 +3629,7 @@ mod chaves {
         }
 
         /// Os arquivos que vão para a imagem.
-        pub fn arquivos(&self) -> Vec<(String, Vec<u8>)> {
+        pub fn arquivos(&self) -> Result<Vec<(String, Vec<u8>)>, String> {
             let mut agentes =
                 String::from("# Os agentes que podem abrir uma porta: chave publica e nome.\n");
             for p in 1..=AGENTES {
@@ -3567,10 +3647,18 @@ mod chaves {
                     Some("administrador"),
                 )
             );
-            vec![
+            self.escrever_senha_dev()?;
+            Ok(vec![
                 (
                     "etc/duke/privado/chave".to_string(),
                     format!("{}\n", sigilo::hex(&self.duke)).into_bytes(),
+                ),
+                // O registro de pessoas, no diretório reservado: o
+                // verificador não é a senha, mas quem o tem testa palpites
+                // fora da máquina.
+                (
+                    "etc/duke/privado/pessoas".to_string(),
+                    self.registro_de_pessoas()?.into_bytes(),
                 ),
                 ("etc/duke/agentes".to_string(), agentes.into_bytes()),
                 // A política: o mesmo texto que os testes do pacote
@@ -3583,7 +3671,7 @@ mod chaves {
                     "etc/duke/administradores".to_string(),
                     administradores.into_bytes(),
                 ),
-            ]
+            ])
         }
     }
 }
@@ -4100,7 +4188,7 @@ fn disco_de_testes() -> Result<PathBuf, String> {
     // duzentas e cinquenta e seis — com uma imagem velha, de chaves velhas,
     // ficando no lugar.
     let mut programas = programas_do_disco()?;
-    programas.extend(chaves::Chaves::garantir()?.arquivos());
+    programas.extend(chaves::Chaves::garantir()?.arquivos()?);
     let esperada = receita_do_disco(&programas);
 
     if caminho.is_file() && std::fs::read_to_string(&receita).is_ok_and(|atual| atual == esperada) {
@@ -6900,7 +6988,12 @@ fn sob_politica(
         codigos.insert(codigo.nome());
         let evento = politica::auditoria::Evento {
             ts_ms: numero("ts_ms")?,
+            titular: politica::auditoria::Titular::de_nome(&campo("holder")?)
+                .ok_or("politica: titular desconhecido na auditoria")?,
             sessao: numero("session")? as u8,
+            sessao_de_pessoa: campo("person_session")
+                .ok()
+                .and_then(|k| sigilo::de_hex_fixo(&k)),
             agente: campo("agent")?,
             chave: campo("key").ok().and_then(|k| sigilo::de_hex(&k)),
             papel: campo("role")?,

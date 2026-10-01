@@ -52,7 +52,7 @@ use alloc::string::{String, ToString};
 use core::fmt;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use politica::auditoria::{Cadeia, Evento, resumo_dos_parametros};
+use politica::auditoria::{Cadeia, Evento, Titular, resumo_dos_parametros};
 use politica::taxa::{Balde, Janela};
 use politica::{Codigo, Permissao, Politica};
 use spin::Mutex;
@@ -139,7 +139,9 @@ pub fn autoridade_atual() -> Autoridade {
 
 /// Quem está numa decisão, como a auditoria o grava.
 struct Quem {
+    titular: Titular,
     sessao: u8,
+    sessao_de_pessoa: Option<[u8; 8]>,
     agente: String,
     chave: Option<[u8; 32]>,
     papel: Option<String>,
@@ -174,7 +176,9 @@ pub fn carregar() {
         }
     });
     let sistema = Quem {
+        titular: Titular::Kernel,
         sessao: SESSAO_DA_PESSOA,
+        sessao_de_pessoa: None,
         agente: "kernel".to_string(),
         chave: None,
         papel: None,
@@ -255,7 +259,9 @@ fn auditar(
     let metodo = cortado(metodo, MAIOR_RECURSO);
     let evento = Evento {
         ts_ms: crate::tempo::uptime_ms(),
+        titular: quem.titular,
         sessao: quem.sessao,
+        sessao_de_pessoa: quem.sessao_de_pessoa,
         agente: quem.agente.clone(),
         chave: quem.chave,
         papel: quem.papel.clone().unwrap_or_default(),
@@ -282,7 +288,9 @@ pub fn com_auditoria<R>(f: impl FnOnce(&Cadeia) -> R) -> Option<R> {
 fn quem_da_sessao(sessao: u8) -> Result<Quem, Quem> {
     if sessao == crate::agent::sessao::SERIAL {
         return Ok(Quem {
+            titular: Titular::Serial,
             sessao,
+            sessao_de_pessoa: None,
             agente: "serial".to_string(),
             chave: None,
             papel: Some(com_politica(|p| p.serial().to_string())),
@@ -292,19 +300,25 @@ fn quem_da_sessao(sessao: u8) -> Result<Quem, Quem> {
         // A chave saiu do registro depois do aperto: a revogação vale na
         // hora, mesmo que a sessão ainda não tenha sido derrubada.
         Some(id) if crate::identidade::agente(&id.chave).is_none() => Err(Quem {
+            titular: Titular::Agente,
             sessao,
+            sessao_de_pessoa: None,
             agente: id.nome,
             chave: Some(id.chave),
             papel: None,
         }),
         Some(id) => Ok(Quem {
+            titular: Titular::Agente,
             sessao,
+            sessao_de_pessoa: None,
             papel: crate::identidade::papel_do_agente(&id.chave),
             agente: id.nome,
             chave: Some(id.chave),
         }),
         None => Err(Quem {
+            titular: Titular::Anonimo,
             sessao,
+            sessao_de_pessoa: None,
             agente: String::new(),
             chave: None,
             papel: None,
@@ -316,7 +330,9 @@ fn quem_da_sessao(sessao: u8) -> Result<Quem, Quem> {
 /// é `pessoa` para o console e `sistema` para um processo.
 fn quem_local(agente: &str) -> Quem {
     Quem {
+        titular: Titular::Sistema,
         sessao: SESSAO_DA_PESSOA,
+        sessao_de_pessoa: None,
         agente: agente.to_string(),
         chave: None,
         papel: Some(com_politica(|p| p.local().to_string())),
@@ -329,19 +345,25 @@ fn quem_local(agente: &str) -> Quem {
 fn quem_da_autoridade(sessao: u8, chave: Option<[u8; 32]>) -> Quem {
     match (sessao, chave) {
         (crate::agent::sessao::SERIAL, None) => Quem {
+            titular: Titular::Serial,
             sessao,
+            sessao_de_pessoa: None,
             agente: "serial".to_string(),
             chave: None,
             papel: Some(com_politica(|p| p.serial().to_string())),
         },
         (_, Some(k)) => Quem {
+            titular: Titular::Agente,
             sessao,
+            sessao_de_pessoa: None,
             agente: crate::identidade::agente(&k).unwrap_or_else(|| "(revogado)".to_string()),
             chave: Some(k),
             papel: crate::identidade::papel_do_agente(&k),
         },
         (_, None) => Quem {
+            titular: Titular::Anonimo,
             sessao,
+            sessao_de_pessoa: None,
             agente: String::new(),
             chave: None,
             papel: None,
@@ -595,7 +617,9 @@ pub fn permitir_aperto(p: u8) -> bool {
     });
     if !passou && primeiro {
         let quem = Quem {
+            titular: Titular::Anonimo,
             sessao: p,
+            sessao_de_pessoa: None,
             agente: String::new(),
             chave: None,
             papel: None,
@@ -618,8 +642,17 @@ pub fn auditar_aperto(p: u8, chave: Option<[u8; 32]>, nome: &str, codigo: Codigo
         (Some(k), Codigo::Allow) => crate::identidade::papel_do_agente(k),
         _ => None,
     };
+    // Um aperto que entrou é de um agente; um recusado, de ninguém ainda —
+    // o nome e a chave dizem o que ele alegou.
+    let titular = if codigo.permite() {
+        Titular::Agente
+    } else {
+        Titular::Anonimo
+    };
     let quem = Quem {
+        titular,
         sessao: p,
+        sessao_de_pessoa: None,
         agente: nome.to_string(),
         chave,
         papel,
@@ -647,13 +680,70 @@ pub fn auditar_administracao(
     parametros: &[u8],
     detalhe: &str,
 ) {
+    // Sem administrador conhecido — a prova não conferiu —, ninguém ainda.
+    let titular = if administrador.is_some() {
+        Titular::Administrador
+    } else {
+        Titular::Anonimo
+    };
     let quem = Quem {
+        titular,
         sessao,
+        sessao_de_pessoa: None,
         agente: administrador.map(|a| a.0.to_string()).unwrap_or_default(),
         chave: administrador.map(|a| *a.1),
         papel: papel.map(ToString::to_string),
     };
     auditar(&quem, metodo, recurso, codigo, parametros, detalhe);
+}
+
+/// Grava um desfecho de sessão de pessoa: o login, a saída, uma tentativa
+/// recusada por limite. Com a pessoa e a sessão, o titular é a pessoa; sem,
+/// é ninguém ainda — um console sem login.
+pub fn auditar_pessoa(
+    pessoa: Option<(&str, [u8; 8])>,
+    papel: Option<&str>,
+    metodo: &str,
+    recurso: &str,
+    codigo: Codigo,
+    detalhe: &str,
+) {
+    let quem = Quem {
+        titular: if pessoa.is_some() {
+            Titular::Pessoa
+        } else {
+            Titular::Anonimo
+        },
+        sessao: SESSAO_DA_PESSOA,
+        sessao_de_pessoa: pessoa.map(|p| p.1),
+        agente: pessoa.map(|p| p.0.to_string()).unwrap_or_default(),
+        chave: None,
+        papel: papel.map(ToString::to_string),
+    };
+    auditar(&quem, metodo, recurso, codigo, &[], detalhe);
+}
+
+/// Grava um login recusado. O titular é ninguém — não houve autenticação —,
+/// e o identificador é o da pessoa que se tentou ser, se o nome era de
+/// alguém: é o que mostra uma pessoa sendo atacada. Um nome que não é de
+/// ninguém não é gravado.
+pub fn auditar_pessoa_recusada(alvo: Option<&str>, metodo: &str, recurso: &str, detalhe: &str) {
+    let quem = Quem {
+        titular: Titular::Anonimo,
+        sessao: SESSAO_DA_PESSOA,
+        sessao_de_pessoa: None,
+        agente: alvo.unwrap_or_default().to_string(),
+        chave: None,
+        papel: None,
+    };
+    auditar(
+        &quem,
+        metodo,
+        recurso,
+        Codigo::DenyNotAuthenticated,
+        &[],
+        detalhe,
+    );
 }
 
 /// Muda a política em vigor por uma conta sobre ela, numa seção só: ler a

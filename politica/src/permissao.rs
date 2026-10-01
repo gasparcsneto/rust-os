@@ -59,10 +59,19 @@ pub enum Permissao {
     PolicyAssign,
     /// Mudar a definição de um papel.
     PolicyWrite,
+    /// Registrar uma pessoa.
+    PersonRegister,
+    /// Revogar uma pessoa: ela não entra mais, e as sessões dela acabam. O
+    /// registro dela fica, para a auditoria.
+    PersonRevoke,
+    /// Trocar a credencial de uma pessoa, sem criar outra pessoa.
+    CredentialRotate,
+    /// Encerrar uma sessão de pessoa, sem tocar na pessoa.
+    SessionRevoke,
 }
 
 /// Todas, na ordem do relatório.
-pub const TODAS: [Permissao; 20] = [
+pub const TODAS: [Permissao; 24] = [
     Permissao::AgentRead,
     Permissao::SystemRead,
     Permissao::LogRead,
@@ -83,6 +92,10 @@ pub const TODAS: [Permissao; 20] = [
     Permissao::AgentRevoke,
     Permissao::PolicyAssign,
     Permissao::PolicyWrite,
+    Permissao::PersonRegister,
+    Permissao::PersonRevoke,
+    Permissao::CredentialRotate,
+    Permissao::SessionRevoke,
 ];
 
 impl Permissao {
@@ -109,6 +122,10 @@ impl Permissao {
             Permissao::AgentRevoke => "agent.revoke",
             Permissao::PolicyAssign => "policy.assign",
             Permissao::PolicyWrite => "policy.write",
+            Permissao::PersonRegister => "person.register",
+            Permissao::PersonRevoke => "person.revoke",
+            Permissao::CredentialRotate => "credential.rotate",
+            Permissao::SessionRevoke => "session.revoke",
         }
     }
 
@@ -133,6 +150,10 @@ impl Permissao {
                 | Permissao::AgentRevoke
                 | Permissao::PolicyAssign
                 | Permissao::PolicyWrite
+                | Permissao::PersonRegister
+                | Permissao::PersonRevoke
+                | Permissao::CredentialRotate
+                | Permissao::SessionRevoke
         )
     }
 
@@ -144,6 +165,10 @@ impl Permissao {
                 | Permissao::AgentRevoke
                 | Permissao::PolicyAssign
                 | Permissao::PolicyWrite
+                | Permissao::PersonRegister
+                | Permissao::PersonRevoke
+                | Permissao::CredentialRotate
+                | Permissao::SessionRevoke
         )
     }
 
@@ -186,6 +211,21 @@ mod testes {
             "policy.write",
         ] {
             assert!(Permissao::de_nome(nome).unwrap().sensivel(), "{nome}");
+        }
+    }
+
+    /// As operações sobre pessoas só se exercem com prova, e o papel que as
+    /// tem as escreve pelo nome.
+    #[test]
+    fn as_de_pessoa_sao_administrativas() {
+        for nome in [
+            "person.register",
+            "person.revoke",
+            "credential.rotate",
+            "session.revoke",
+        ] {
+            let p = Permissao::de_nome(nome).unwrap();
+            assert!(p.administrativa() && p.sensivel(), "{nome}");
         }
     }
 }

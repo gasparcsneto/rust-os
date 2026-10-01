@@ -2,7 +2,8 @@
 //!
 //! # O que um registro diz
 //!
-//! Quem (sessão, agente, chave pública, papel), o quê (método e recurso),
+//! Quem (que tipo de titular, sessão, identificador, chave pública, papel),
+//! o quê (método e recurso),
 //! o desfecho (o resultado em uma palavra e o código), quando (sequência e
 //! milissegundos desde o boot), um BLAKE2s dos parâmetros e um detalhe curto.
 //! Os parâmetros não entram por inteiro: podem trazer o que um agente
@@ -10,13 +11,22 @@
 //! pedido para quem tem o pedido, e não o revela para quem só tem a
 //! auditoria.
 //!
+//! # Pessoa não é agente
+//!
+//! O [`Titular`] diz que tipo de identidade agiu, e entra no elo: um
+//! registro de pessoa não vira um de agente trocando o texto do nome. O
+//! identificador de uma pessoa é `pessoa:<16 hex>` — com um `:` que nenhum
+//! nome de agente tem — e a sessão dela, sorteada no login, vai no campo
+//! próprio: a mesma pessoa em dois consoles são duas sessões, e duas
+//! pessoas no mesmo console, uma depois da outra, também.
+//!
 //! # A cadeia
 //!
 //! Cada registro carrega o elo do anterior, e o seu elo é o BLAKE2s do elo
 //! anterior com a codificação do registro:
 //!
 //! ```text
-//! elo(n) = BLAKE2s("Duke auditoria v1" || elo(n-1) || codificacao(n))
+//! elo(n) = BLAKE2s("Duke auditoria v2" || elo(n-1) || codificacao(n))
 //! ```
 //!
 //! Mudar, tirar ou reordenar um registro muda todos os elos dali para a
@@ -37,7 +47,10 @@ use blake2::{Blake2s256, Digest};
 use crate::codigo::Codigo;
 
 /// O rótulo do elo, para ele nunca coincidir com outro resumo do sistema.
-const ROTULO: &[u8] = b"Duke auditoria v1";
+///
+/// A v2 acrescentou o titular e a sessão de pessoa: um elo da v1 não é
+/// refeito pela conta da v2, e nem deve ser.
+const ROTULO: &[u8] = b"Duke auditoria v2";
 
 /// O elo antes do primeiro registro.
 pub const GENESE: [u8; 32] = [0; 32];
@@ -45,11 +58,69 @@ pub const GENESE: [u8; 32] = [0; 32];
 /// O maior detalhe, em bytes.
 pub const MAIOR_DETALHE: usize = 96;
 
+/// Que tipo de identidade agiu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Titular {
+    /// O próprio kernel, no boot: carregar a chave, o registro e a política.
+    Kernel = 0,
+    /// Um processo do sistema — o servidor de janelas, o Terminal.
+    Sistema = 1,
+    /// A serial: o canal de controle e emergência, sem identidade de pessoa.
+    Serial = 2,
+    /// Um agente, pela chave que provou o aperto.
+    Agente = 3,
+    /// Uma pessoa do registro, pela sessão que abriu com a credencial dela.
+    Pessoa = 4,
+    /// Um administrador, pela prova de uma operação administrativa.
+    Administrador = 5,
+    /// Ninguém ainda: uma porta sem aperto, um console sem login.
+    Anonimo = 6,
+}
+
+impl Titular {
+    /// Todos, na ordem do número.
+    pub const TODOS: [Titular; 7] = [
+        Titular::Kernel,
+        Titular::Sistema,
+        Titular::Serial,
+        Titular::Agente,
+        Titular::Pessoa,
+        Titular::Administrador,
+        Titular::Anonimo,
+    ];
+
+    /// O nome, como `audit.tail` o escreve.
+    pub const fn nome(self) -> &'static str {
+        match self {
+            Titular::Kernel => "kernel",
+            Titular::Sistema => "system",
+            Titular::Serial => "serial",
+            Titular::Agente => "agent",
+            Titular::Pessoa => "person",
+            Titular::Administrador => "admin",
+            Titular::Anonimo => "anonymous",
+        }
+    }
+
+    /// O caminho de volta de [`Titular::nome`].
+    pub fn de_nome(nome: &str) -> Option<Titular> {
+        Titular::TODOS.into_iter().find(|t| t.nome() == nome)
+    }
+}
+
 /// O que um registro diz, antes de entrar na cadeia.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Evento {
     pub ts_ms: u64,
+    pub titular: Titular,
+    /// A sessão do canal: a serial, uma porta, ou a da autoridade local.
     pub sessao: u8,
+    /// A sessão de pessoa, sorteada no login. Só para [`Titular::Pessoa`],
+    /// e para o login recusado de um console, que diz qual console era.
+    pub sessao_de_pessoa: Option<[u8; 8]>,
+    /// O identificador de quem agiu: o nome do agente ou do administrador,
+    /// `pessoa:<16 hex>`, `serial`, `kernel`.
     pub agente: String,
     pub chave: Option<[u8; 32]>,
     pub papel: String,
@@ -92,7 +163,15 @@ pub fn elo(anterior: &[u8; 32], seq: u64, e: &Evento) -> [u8; 32] {
     h.update(anterior);
     h.update(seq.to_le_bytes());
     h.update(e.ts_ms.to_le_bytes());
+    h.update([e.titular as u8]);
     h.update([e.sessao]);
+    match &e.sessao_de_pessoa {
+        Some(s) => {
+            h.update([1]);
+            h.update(s);
+        }
+        None => h.update([0]),
+    }
     campo(&mut h, e.agente.as_bytes());
     match &e.chave {
         Some(k) => {
@@ -225,7 +304,9 @@ mod testes {
     fn evento(i: u64) -> Evento {
         Evento {
             ts_ms: i * 10,
+            titular: Titular::Agente,
             sessao: 2,
+            sessao_de_pessoa: None,
             agente: "agente-2".to_string(),
             chave: Some([7; 32]),
             papel: "operador".to_string(),
@@ -256,9 +337,11 @@ mod testes {
             c.anexar(evento(i));
         }
         let original: Vec<Registro> = copiar(c.ultimos(5));
-        let mudancas: [fn(&mut Evento); 8] = [
+        let mudancas: [fn(&mut Evento); 10] = [
             |e| e.ts_ms += 1,
+            |e| e.titular = Titular::Pessoa,
             |e| e.sessao = 3,
+            |e| e.sessao_de_pessoa = Some([0; 8]),
             |e| e.agente.push('x'),
             |e| e.chave = None,
             |e| e.papel = "sistema".to_string(),
@@ -289,6 +372,17 @@ mod testes {
         assert_ne!(c.ancora(), GENESE);
         assert_eq!(c.verificar(), Ok(c.cabeca()));
         assert_eq!(c.ultimos(10).next().map(|r| r.seq), Some(7));
+    }
+
+    /// O nome do titular vai e volta, e o número de cada um é a posição
+    /// dele: é o número que entra no elo.
+    #[test]
+    fn titular_vai_e_volta() {
+        for (i, t) in Titular::TODOS.into_iter().enumerate() {
+            assert_eq!(t as usize, i);
+            assert_eq!(Titular::de_nome(t.nome()), Some(t));
+        }
+        assert_eq!(Titular::de_nome("pessoa"), None);
     }
 
     #[test]

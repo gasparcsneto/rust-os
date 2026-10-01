@@ -34,6 +34,11 @@ blake2 = { version = "0.11.0", default-features = false }
 # tempo diga quantos bytes acertaram.
 zeroize = { version = "1.9.0", default-features = false, features = ["alloc"] }
 subtle = { version = "2.6.1", default-features = false }
+# A credencial de uma pessoa: o verificador Argon2id da senha. Sem `std` e
+# sem o `password-hash` (a forma PHC em base64): a forma escrita é a deste
+# pacote, e a memória de trabalho pode vir de quem chama — o kernel, que não
+# tem heap para ela. Ver `credencial`.
+argon2 = { version = "0.6.0", default-features = false, features = ["alloc", "zeroize"] }
 
 [dev-dependencies]
 # A implementação independente contra a qual esta conversa, nos dois

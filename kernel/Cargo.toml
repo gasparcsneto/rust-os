@@ -130,6 +130,10 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.sigilo]
 opt-level = 3
+# O Argon2id da credencial das pessoas: sem otimização, o login esperaria
+# segundos por um cálculo que é de propósito caro.
+[profile.dev.package.argon2]
+opt-level = 3
 
 [profile.release]
 panic = "abort"

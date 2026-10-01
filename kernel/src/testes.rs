@@ -11314,6 +11314,418 @@ fn politica_revogar_derruba_a_sessao() -> Resultado {
     resultado
 }
 
+// ---------------------------------------------------------------------------
+// pessoas: o registro, a autenticação e as sessões
+// ---------------------------------------------------------------------------
+
+/// A senha das pessoas que a suíte registra.
+const SENHA_DE_TESTE: &[u8] = b"cavalo correto bateria grampo";
+
+/// O último registro da auditoria com este método.
+fn ultimo_com_metodo(metodo: &str) -> Option<politica::auditoria::Evento> {
+    crate::autorizacao::com_auditoria(|c| {
+        c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+            .filter(|r| r.evento.metodo == metodo)
+            .last()
+            .map(|r| r.evento.clone())
+    })
+    .flatten()
+}
+
+/// A pessoa ativa de uma sessão, ou o erro.
+fn pessoa_da_sessao(
+    id: crate::pessoas::IdSessao,
+) -> Result<sigilo::pessoas::IdPessoa, &'static str> {
+    match crate::pessoas::sessao(id) {
+        crate::pessoas::EstadoDaSessao::Ativa { pessoa, .. } => Ok(pessoa),
+        outro => {
+            crate::log_error!("teste", "{:?}", outro);
+            Err("a sessao nao esta ativa")
+        }
+    }
+}
+
+/// O registro da imagem: a pessoa de desenvolvimento, com papel comum, e o
+/// relatório sem credencial. O arquivo mora no diretório reservado, que
+/// papel nenhum lê — nem o `sistema`.
+fn pessoas_o_registro_da_imagem() -> Resultado {
+    crate::pessoas::esquecer_registradas();
+    let r = chamar("person.registry", "{}")?;
+    if !r.contains(r#""name":"dev""#)
+        || !r.contains(r#""role":"operador""#)
+        || !r.contains(r#""state":"ativa""#)
+        || !r.contains(r#""id":"pessoa:"#)
+    {
+        crate::log_error!("teste", "{}", r);
+        return Err("a pessoa de desenvolvimento nao esta no registro da imagem");
+    }
+    if r.contains("argon2id") {
+        return Err("o relatorio do registro mostrou a credencial");
+    }
+    // Pela decisão, como a serial — o `sistema` —, e pelo próprio handler:
+    // os dois recusam.
+    let params = r#"{"path":"/etc/duke/privado/pessoas"}"#;
+    let comando = registry::encontrar("fs.read").ok_or("fs.read ausente")?;
+    let decisao = crate::autorizacao::autorizar(
+        crate::autorizacao::Chamador::Sessao(crate::agent::sessao::SERIAL),
+        comando,
+        Json(params.as_bytes()),
+    );
+    if !matches!(decisao, Err(politica::Codigo::DenyResource)) {
+        return Err("o registro de pessoas passou pela decisao");
+    }
+    let r = chamar("fs.read", params)?;
+    if !r.contains("reservado ao kernel") || r.contains("argon2id") {
+        crate::log_error!("teste", "{}", r);
+        return Err("o registro de pessoas se leu pelo handler");
+    }
+    Ok(())
+}
+
+/// Duas pessoas no mesmo console são duas sessões de duas identidades; a
+/// mesma pessoa em dois consoles são duas sessões da mesma identidade, que
+/// acabam uma sem a outra. E a auditoria grava a pessoa como pessoa: o
+/// titular, o identificador que não é nome de agente e a sessão no elo.
+fn pessoas_sessoes_por_console() -> Resultado {
+    use crate::pessoas::{Console, Encerramento, EstadoDaSessao, autenticar, sair, sessao};
+    use politica::auditoria::Titular;
+    crate::pessoas::esquecer_registradas();
+    let resultado = (|| {
+        let ana = crate::pessoas::registrar_de_teste("ana", "operador", SENHA_DE_TESTE);
+        let bia = crate::pessoas::registrar_de_teste("bia", "observador", SENHA_DE_TESTE);
+
+        // A mesma pessoa em dois consoles.
+        let a1 = autenticar(Console::Fisico, "ana", SENHA_DE_TESTE)
+            .map_err(|_| "ana nao entrou no console")?;
+        let login = ultimo_com_metodo("person.login").ok_or("o login nao foi gravado")?;
+        if login.titular != Titular::Pessoa
+            || login.agente != ana.texto()
+            || login.sessao_de_pessoa != Some(a1.0)
+            || login.recurso != "console"
+            || login.papel != "operador"
+            || login.codigo != politica::Codigo::Allow
+            || login.chave.is_some()
+        {
+            crate::log_error!("teste", "{:?}", login);
+            return Err("o login nao foi gravado como uma pessoa");
+        }
+        if sigilo::registro::nome_valido(&login.agente) {
+            return Err("o identificador da pessoa passaria por nome de agente");
+        }
+        let a2 = autenticar(Console::Terminal(1), "ana", SENHA_DE_TESTE)
+            .map_err(|_| "ana nao entrou no terminal")?;
+        if a1 == a2 || pessoa_da_sessao(a1)? != ana || pessoa_da_sessao(a2)? != ana {
+            return Err("a mesma pessoa em dois consoles nao teve duas sessoes suas");
+        }
+        match sessao(a2) {
+            EstadoDaSessao::Ativa {
+                console: Console::Terminal(1),
+                ..
+            } => {}
+            _ => return Err("a sessao nao lembra o console"),
+        }
+        // Sair de um console não tira a pessoa do outro.
+        if !sair(a1) {
+            return Err("a saida nao achou a sessao");
+        }
+        if sessao(a1) != EstadoDaSessao::Encerrada(Encerramento::Saida)
+            || pessoa_da_sessao(a2)? != ana
+        {
+            return Err("sair de um console mexeu no outro");
+        }
+        if sair(a1) {
+            return Err("uma sessao saiu duas vezes");
+        }
+        let saida = ultimo_com_metodo("person.logout").ok_or("a saida nao foi gravada")?;
+        if saida.titular != Titular::Pessoa || saida.sessao_de_pessoa != Some(a1.0) {
+            crate::log_error!("teste", "{:?}", saida);
+            return Err("a saida nao foi gravada com a pessoa e a sessao");
+        }
+
+        // Duas pessoas no mesmo console, uma depois da outra.
+        let b1 = autenticar(Console::Fisico, "bia", SENHA_DE_TESTE)
+            .map_err(|_| "bia nao entrou no console")?;
+        if pessoa_da_sessao(b1)? != bia || b1 == a1 {
+            return Err("duas pessoas no mesmo console se confundiram");
+        }
+        match sessao(b1) {
+            EstadoDaSessao::Ativa { papel, nome, .. } if papel == "observador" && nome == "bia" => {
+            }
+            _ => return Err("a sessao nao tem o papel da pessoa"),
+        }
+        // Um número que nunca foi sessão.
+        if sessao(crate::pessoas::IdSessao([0x5a; 8])) != EstadoDaSessao::Desconhecida {
+            return Err("uma sessao inventada nao e desconhecida");
+        }
+        Ok(())
+    })();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// As recusas: a resposta não diz se foi o nome ou a senha, a auditoria
+/// diz — sem gravar um nome que não é de ninguém. E um console que tenta
+/// demais para antes do cálculo, sem prender os outros.
+fn pessoas_recusas_e_tentativas() -> Resultado {
+    use crate::pessoas::{Console, RecusaDeLogin, TENTATIVAS, autenticar};
+    use politica::auditoria::Titular;
+    crate::pessoas::esquecer_registradas();
+    let resultado = (|| {
+        let ana = crate::pessoas::registrar_de_teste("ana", "operador", SENHA_DE_TESTE);
+        let console = Console::Terminal(7);
+
+        if autenticar(console, "ana", b"errada") != Err(RecusaDeLogin::NaoConfere) {
+            return Err("uma senha errada entrou");
+        }
+        let e = ultimo_com_metodo("person.login").ok_or("a recusa nao foi gravada")?;
+        if e.titular != Titular::Anonimo
+            || e.agente != ana.texto()
+            || e.sessao_de_pessoa.is_some()
+            || e.codigo != politica::Codigo::DenyNotAuthenticated
+            || e.detalhe != "senha nao confere"
+        {
+            crate::log_error!("teste", "{:?}", e);
+            return Err("a senha errada nao foi gravada como recusa contra a pessoa");
+        }
+        if autenticar(console, "ninguem-aqui", SENHA_DE_TESTE) != Err(RecusaDeLogin::NaoConfere) {
+            return Err("um nome desconhecido entrou");
+        }
+        let e = ultimo_com_metodo("person.login").ok_or("a recusa nao foi gravada")?;
+        if e.titular != Titular::Anonimo || !e.agente.is_empty() || e.detalhe != "nome desconhecido"
+        {
+            crate::log_error!("teste", "{:?}", e);
+            return Err("o nome desconhecido foi gravado");
+        }
+        // Uma senha longa demais é só uma senha que não confere.
+        let longa = [b'a'; crate::pessoas::MAIOR_SENHA + 1];
+        if autenticar(console, "ana", &longa) != Err(RecusaDeLogin::NaoConfere) {
+            return Err("uma senha longa demais nao foi recusada");
+        }
+        // Até aqui, três tentativas no console. As que faltam para o limite
+        // ainda passam pelo cálculo; a seguinte não.
+        for _ in 3..TENTATIVAS.quantos {
+            if autenticar(console, "ana", b"errada") != Err(RecusaDeLogin::NaoConfere) {
+                return Err("uma tentativa dentro do limite nao foi conferida");
+            }
+        }
+        if autenticar(console, "ana", SENHA_DE_TESTE) != Err(RecusaDeLogin::Tentativas) {
+            return Err("o console passou do limite de tentativas e ainda conferiu");
+        }
+        let e = ultimo_com_metodo("person.login").ok_or("o limite nao foi gravado")?;
+        if e.codigo != politica::Codigo::RateLimit || e.recurso != "terminal:7" {
+            crate::log_error!("teste", "{:?}", e);
+            return Err("o limite de tentativas nao foi gravado com o console");
+        }
+        // Outro console não herda o limite.
+        let s = autenticar(Console::Terminal(8), "ana", SENHA_DE_TESTE)
+            .map_err(|_| "o limite de um console prendeu outro")?;
+        if pessoa_da_sessao(s)? != ana {
+            return Err("a sessao do outro console nao e da pessoa");
+        }
+        Ok(())
+    })();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// Registrada, autenticada, sessão ativa, credencial válida, sessão
+/// revogada, pessoa revogada: seis estados, pelas operações de verdade,
+/// com a prova — e nenhum se passa pelo outro.
+///
+/// # O que este caso protege
+///
+/// - `session.revoke` acaba a sessão na hora e não toca na pessoa, que
+///   entra de novo;
+/// - `credential.rotate` troca a senha e não cria outra pessoa: o
+///   identificador é o mesmo, a senha velha não entra mais, a sessão aberta
+///   continua;
+/// - `person.revoke` acaba as sessões e deixa a pessoa no registro,
+///   revogada, sem entrar;
+/// - nenhuma recebe uma senha: só o verificador; e o administrador não
+///   alcança uma pessoa de papel maior que o dele.
+fn pessoas_estados_nao_se_confundem() -> Resultado {
+    use crate::pessoas::{
+        Console, Encerramento, EstadoDaSessao, RecusaDeLogin, autenticar, pessoa, sessao,
+    };
+    use politica::auditoria::Titular;
+    use sigilo::pessoas::Estado;
+    crate::pessoas::esquecer_registradas();
+    crate::identidade::registrar_administrador_de_teste(
+        sigilo::publica_de(&ADMIN_DE_TESTE),
+        "administrador",
+    );
+    let resultado = (|| {
+        // Registrada pela operação, com o verificador: ainda não
+        // autenticada, sem sessão nenhuma.
+        let credencial = crate::pessoas::credencial_de_teste(SENHA_DE_TESTE).escrever();
+        let r = executar_admin_com(
+            0,
+            &ADMIN_DE_TESTE,
+            "person.register",
+            &alloc::format!(r#"{{"name":"cora","role":"operador","credential":"{credencial}"}}"#),
+            &alloc::format!(r#"{{"name":"cora","role":"operador","credential":"{credencial}"}}"#),
+        )?;
+        let id = Json(r.as_bytes())
+            .member("person")
+            .and_then(|v| v.as_str())
+            .and_then(sigilo::pessoas::IdPessoa::ler)
+            .ok_or("o registro nao devolveu o identificador")?;
+        let reg = ultimo_registro().ok_or("a auditoria esta vazia")?;
+        if reg.evento.titular != Titular::Administrador || reg.evento.recurso != id.texto() {
+            crate::log_error!("teste", "{:?}", reg.evento);
+            return Err("o registro da pessoa nao foi gravado pelo administrador");
+        }
+        let cora = pessoa(id).ok_or("a pessoa registrada nao esta no registro")?;
+        if cora.estado != Estado::Ativa
+            || crate::pessoas::resumos()
+                .iter()
+                .any(|p| p.id == id && !p.sessoes.is_empty())
+        {
+            return Err("registrar autenticou");
+        }
+
+        // Autenticada: uma sessão ativa.
+        let s1 = autenticar(Console::Fisico, "cora", SENHA_DE_TESTE)
+            .map_err(|_| "a pessoa registrada nao entrou")?;
+        let s2 = autenticar(Console::Terminal(2), "cora", SENHA_DE_TESTE)
+            .map_err(|_| "a pessoa registrada nao entrou no terminal")?;
+
+        // Sessão revogada: só ela acaba, a pessoa fica e entra de novo.
+        admin_espera(
+            0,
+            &ADMIN_DE_TESTE,
+            "session.revoke",
+            &alloc::format!(r#"{{"session":"{}"}}"#, s1.texto()),
+            None,
+        )?;
+        if sessao(s1) != EstadoDaSessao::Encerrada(Encerramento::Revogada)
+            || pessoa_da_sessao(s2)? != id
+            || pessoa(id).map(|p| p.estado) != Some(Estado::Ativa)
+        {
+            return Err("revogar a sessao fez mais, ou menos, que acabar a sessao");
+        }
+        let s3 = autenticar(Console::Fisico, "cora", SENHA_DE_TESTE)
+            .map_err(|_| "a pessoa da sessao revogada nao entrou de novo")?;
+
+        // Credencial trocada: a mesma pessoa, a senha velha não entra, a
+        // sessão aberta continua.
+        let nova = crate::pessoas::credencial_de_teste(b"outra senha").escrever();
+        admin_espera(
+            0,
+            &ADMIN_DE_TESTE,
+            "credential.rotate",
+            &alloc::format!(r#"{{"person":"{}","credential":"{nova}"}}"#, id.texto()),
+            None,
+        )?;
+        if autenticar(Console::Terminal(3), "cora", SENHA_DE_TESTE)
+            != Err(RecusaDeLogin::NaoConfere)
+        {
+            return Err("a senha velha entrou depois da troca");
+        }
+        let s4 = autenticar(Console::Terminal(3), "cora", b"outra senha")
+            .map_err(|_| "a senha nova nao entrou")?;
+        if pessoa_da_sessao(s4)? != id || pessoa_da_sessao(s3)? != id {
+            return Err("a troca de credencial mudou a pessoa ou acabou a sessao");
+        }
+
+        // Nada disso aceita uma senha no lugar do verificador, nem um custo
+        // abaixo do mínimo.
+        for credencial in [
+            "outra senha",
+            "argon2id:m=8,t=1,p=1:00000000000000000000000000000000:\
+             0000000000000000000000000000000000000000000000000000000000000000",
+        ] {
+            admin_espera(
+                0,
+                &ADMIN_DE_TESTE,
+                "credential.rotate",
+                &alloc::format!(
+                    r#"{{"person":"{}","credential":"{credencial}"}}"#,
+                    id.texto()
+                ),
+                Some("INVALID_ARGUMENT"),
+            )?;
+        }
+
+        // Pessoa revogada: as sessões acabam, o registro fica, não entra.
+        admin_espera(
+            0,
+            &ADMIN_DE_TESTE,
+            "person.revoke",
+            &alloc::format!(r#"{{"person":"{}"}}"#, id.texto()),
+            None,
+        )?;
+        for s in [s2, s3, s4] {
+            if sessao(s) != EstadoDaSessao::Encerrada(Encerramento::PessoaRevogada) {
+                return Err("uma sessao da pessoa revogada continuou");
+            }
+        }
+        if pessoa(id).map(|p| p.estado) != Some(Estado::Revogada) {
+            return Err("a pessoa revogada saiu do registro, ou nao ficou revogada");
+        }
+        if autenticar(Console::Terminal(4), "cora", b"outra senha")
+            != Err(RecusaDeLogin::NaoConfere)
+        {
+            return Err("a pessoa revogada entrou");
+        }
+        let e = ultimo_com_metodo("person.login").ok_or("a recusa nao foi gravada")?;
+        if e.detalhe != "pessoa revogada" || e.agente != id.texto() {
+            crate::log_error!("teste", "{:?}", e);
+            return Err("a recusa da pessoa revogada nao diz o motivo");
+        }
+        // O nome continua dela: não se registra outra cora.
+        admin_espera(
+            0,
+            &ADMIN_DE_TESTE,
+            "person.register",
+            &alloc::format!(r#"{{"name":"cora","role":"operador","credential":"{credencial}"}}"#),
+            Some("INVALID_ARGUMENT"),
+        )?;
+        // Revogada não se revoga de novo, nem tem a credencial trocada.
+        admin_espera(
+            0,
+            &ADMIN_DE_TESTE,
+            "credential.rotate",
+            &alloc::format!(r#"{{"person":"{}","credential":"{nova}"}}"#, id.texto()),
+            Some("INVALID_ARGUMENT"),
+        )?;
+
+        // Quem pode mais que o administrador não é alcançado por ele, nem
+        // registrado por ele.
+        let alta = crate::pessoas::registrar_de_teste("alta", "sistema", SENHA_DE_TESTE);
+        admin_espera(
+            0,
+            &ADMIN_DE_TESTE,
+            "person.revoke",
+            &alloc::format!(r#"{{"person":"{}"}}"#, alta.texto()),
+            Some("DENY_POLICY"),
+        )?;
+        admin_espera(
+            0,
+            &ADMIN_DE_TESTE,
+            "person.register",
+            &alloc::format!(r#"{{"name":"dora","role":"sistema","credential":"{credencial}"}}"#),
+            Some("DENY_POLICY"),
+        )?;
+        let s = autenticar(Console::Terminal(5), "alta", SENHA_DE_TESTE)
+            .map_err(|_| "a pessoa fora do alcance nao entrou")?;
+        admin_espera(
+            0,
+            &ADMIN_DE_TESTE,
+            "session.revoke",
+            &alloc::format!(r#"{{"session":"{}"}}"#, s.texto()),
+            Some("DENY_POLICY"),
+        )?;
+        if pessoa_da_sessao(s)? != alta {
+            return Err("a sessao fora do alcance foi revogada");
+        }
+        Ok(())
+    })();
+    crate::pessoas::esquecer_registradas();
+    crate::identidade::esquecer_registrados();
+    resultado
+}
+
 /// Ninguém se dá mais do que tem: nem o próprio papel, nem um papel maior
 /// que o seu, nem a política de quem administra.
 ///
@@ -11530,7 +11942,13 @@ fn politica_auditoria_encadeada() -> Resultado {
             let numero = |k: &str| j.member(k).and_then(|v| v.as_u64()).ok_or("sem numero");
             let evento = politica::auditoria::Evento {
                 ts_ms: numero("ts_ms")?,
+                titular: politica::auditoria::Titular::de_nome(&texto("holder")?)
+                    .ok_or("titular desconhecido")?,
                 sessao: numero("session")? as u8,
+                sessao_de_pessoa: j
+                    .member("person_session")
+                    .and_then(|v| v.as_str())
+                    .and_then(sigilo::de_hex_fixo),
                 agente: texto("agent")?,
                 chave: j
                     .member("key")
@@ -14939,6 +15357,22 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "politica: o aperto e auditado e limitado",
         f: politica_aperto_auditado_e_limitado,
+    },
+    Caso {
+        nome: "pessoas: o registro da imagem",
+        f: pessoas_o_registro_da_imagem,
+    },
+    Caso {
+        nome: "pessoas: uma sessao por console",
+        f: pessoas_sessoes_por_console,
+    },
+    Caso {
+        nome: "pessoas: recusas e tentativas",
+        f: pessoas_recusas_e_tentativas,
+    },
+    Caso {
+        nome: "pessoas: os estados nao se confundem",
+        f: pessoas_estados_nao_se_confundem,
     },
     Caso {
         nome: "usb: o relatorio hid vira teclas",

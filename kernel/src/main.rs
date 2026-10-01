@@ -72,6 +72,8 @@ mod frames;
 mod grafico;
 mod heap;
 mod identidade;
+// O login do console, que usa a autenticação e as sessões, entra no passo
+// seguinte; até lá, só a suíte e as operações administrativas as alcançam.
 mod interpretador;
 mod irq;
 mod log;
@@ -80,6 +82,8 @@ mod mmio;
 mod paginacao;
 mod particoes;
 mod pci;
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+mod pessoas;
 mod ponteiro;
 mod pseudoterminal;
 mod qemu;
@@ -412,6 +416,8 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     // E o que cada papel pode: a política, do mesmo disco. Sem ela, a de
     // emergência — ver [`autorizacao`].
     autorizacao::carregar();
+    // E as pessoas que podem entrar pelo console — ver [`pessoas`].
+    pessoas::carregar();
 
     // O servidor de janelas e o Terminal, agora que o disco onde eles moram
     // está montado. Na suíte, é o caso de cada um que o lança.

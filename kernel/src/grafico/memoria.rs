@@ -155,6 +155,26 @@ impl Memoria {
         unsafe { core::slice::from_raw_parts_mut(self.inicio as *mut u32, self.quantos_u32()) }
     }
 
+    /// A memória como blocos de 1 KiB do Argon2id: a memória de trabalho de
+    /// conferir uma senha, que não cabe no heap — ver [`crate::pessoas`].
+    pub fn blocos_mut(&mut self) -> &mut [sigilo::credencial::Block] {
+        use sigilo::credencial::Block;
+        const {
+            assert!(core::mem::size_of::<Block>() == 1024);
+            assert!(core::mem::align_of::<Block>() <= TAMANHO_PAGINA as usize);
+        }
+        // SAFETY: as de `pixels_mut`; o início é alinhado a página, que é
+        // mais que o alinhamento de um bloco, e um bloco é um arranjo de
+        // `u64`, para o qual qualquer padrão de bits — os zeros de `nova`,
+        // inclusive — é válido.
+        unsafe {
+            core::slice::from_raw_parts_mut(
+                self.inicio as *mut Block,
+                (self.bytes() / 1024) as usize,
+            )
+        }
+    }
+
     fn quantos_u32(&self) -> usize {
         (self.bytes() / 4) as usize
     }
