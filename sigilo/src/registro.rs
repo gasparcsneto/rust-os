@@ -1,0 +1,128 @@
+//! O formato dos arquivos de chaves autorizadas.
+//!
+//! ```text
+//! # comentário
+//! 9f2c...64 dígitos hexadecimais...  agente-1
+//! ```
+//!
+//! Uma chave por linha: a pública, em hexadecimal, e o nome que vai aparecer
+//! nos relatórios. É o formato do `authorized_keys` do OpenSSH reduzido ao
+//! que se usa aqui.
+//!
+//! Mora neste pacote, e não no kernel, porque são dois lados: o `xtask`
+//! escreve o arquivo na imagem e o kernel o lê. Um formato escrito por um e
+//! lido por outro é o lugar clássico de divergência silenciosa — um espaço a
+//! mais, e a chave de um agente some do registro sem erro nenhum.
+
+use alloc::string::String;
+
+use crate::{TAM_CHAVE, de_hex, hex};
+
+/// O maior nome de agente.
+pub const MAIOR_NOME: usize = 32;
+
+/// Um nome de agente aceitável: letras minúsculas, dígitos, `-`, `_` e `.`.
+///
+/// Curto e sem espaço porque ele vai para o log e para a barra: um nome
+/// com quebra de linha ou com sequência de controle seria um jeito de um
+/// agente escrever no log o que quisesse. O nome vem do registro, e não do
+/// agente — mas quem registra pode errar, e a regra vale para os dois
+/// caminhos de registro.
+pub fn nome_valido(nome: &str) -> bool {
+    !nome.is_empty()
+        && nome.len() <= MAIOR_NOME
+        && nome
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"-_.".contains(&b))
+}
+
+/// Por que uma linha não entrou.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ErroDeLinha {
+    /// A chave não tem 64 dígitos hexadecimais.
+    Chave,
+    /// Falta o nome, ou ele tem caracteres fora da regra.
+    Nome,
+    /// Há algo depois do nome.
+    Sobra,
+}
+
+impl ErroDeLinha {
+    /// Uma frase curta, para o log.
+    pub const fn motivo(self) -> &'static str {
+        match self {
+            ErroDeLinha::Chave => "chave que nao tem 64 digitos hexadecimais",
+            ErroDeLinha::Nome => "nome ausente ou fora da regra",
+            ErroDeLinha::Sobra => "algo depois do nome",
+        }
+    }
+}
+
+/// Uma entrada lida.
+pub type Entrada<'a> = ([u8; TAM_CHAVE], &'a str);
+
+/// Lê uma linha. `Ok(None)` para linha vazia ou comentário.
+pub fn ler_linha(linha: &str) -> Result<Option<Entrada<'_>>, ErroDeLinha> {
+    let linha = linha.trim();
+    if linha.is_empty() || linha.starts_with('#') {
+        return Ok(None);
+    }
+    let mut partes = linha.split_ascii_whitespace();
+    let chave = partes.next().and_then(de_hex).ok_or(ErroDeLinha::Chave)?;
+    let nome = partes
+        .next()
+        .filter(|n| nome_valido(n))
+        .ok_or(ErroDeLinha::Nome)?;
+    if partes.next().is_some() {
+        return Err(ErroDeLinha::Sobra);
+    }
+    Ok(Some((chave, nome)))
+}
+
+/// A linha de uma entrada, com a quebra no fim.
+pub fn linha(chave: &[u8; TAM_CHAVE], nome: &str) -> String {
+    alloc::format!("{} {nome}\n", hex(chave))
+}
+
+#[cfg(test)]
+mod testes {
+    use super::*;
+
+    #[test]
+    fn ida_e_volta() {
+        let chave = [0xab; 32];
+        let l = linha(&chave, "agente-1");
+        assert_eq!(ler_linha(&l), Ok(Some((chave, "agente-1"))));
+    }
+
+    #[test]
+    fn comentario_e_vazia_nao_sao_entrada() {
+        assert_eq!(ler_linha("   "), Ok(None));
+        assert_eq!(ler_linha("# administradores"), Ok(None));
+    }
+
+    #[test]
+    fn linhas_erradas_dizem_por_que() {
+        let k = hex(&[1; 32]);
+        assert_eq!(ler_linha("abc nome"), Err(ErroDeLinha::Chave));
+        assert_eq!(ler_linha(&k), Err(ErroDeLinha::Nome));
+        assert_eq!(
+            ler_linha(&alloc::format!("{k} Nome")),
+            Err(ErroDeLinha::Nome)
+        );
+        assert_eq!(
+            ler_linha(&alloc::format!("{k} a\u{1b}[2J")),
+            Err(ErroDeLinha::Nome)
+        );
+        assert_eq!(
+            ler_linha(&alloc::format!("{k} a b")),
+            Err(ErroDeLinha::Sobra)
+        );
+    }
+
+    #[test]
+    fn nome_no_limite() {
+        assert!(nome_valido(&"a".repeat(MAIOR_NOME)));
+        assert!(!nome_valido(&"a".repeat(MAIOR_NOME + 1)));
+    }
+}

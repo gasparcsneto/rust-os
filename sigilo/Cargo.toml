@@ -1,0 +1,43 @@
+[package]
+# O canal seguro entre os agentes e o Duke: o Noise, a prova das operações
+# administrativas e o gerador de números aleatórios.
+#
+# Um pacote, e não um módulo do kernel, porque a conversa tem dois lados — o
+# kernel e o cliente do agente (hoje o `xtask`) —, e os dois precisam fazer a
+# mesma conta. Duas implementações seriam duas respostas para "o que este
+# byte cifrado quer dizer", e a divergência apareceria como um aperto de mão
+# que falha sem explicação.
+#
+# Uma implementação só, por outro lado, concorda consigo mesma mesmo errada.
+# Por isso os testes deste pacote não conversam só com ele: conferem os
+# vetores publicados do Noise e conversam com o `snow`, uma implementação
+# independente — ver `tests/vetores.rs`.
+#
+# `no_std` com `alloc`, como o `protocolo`: compila para qualquer alvo.
+name = "sigilo"
+version = "0.1.0"
+edition = "2024"
+description = "O canal seguro do Duke: Noise IK, prova administrativa e gerador"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# As primitivas são as do RustCrypto e do dalek, e não escritas aqui. Uma
+# curva elíptica ou uma cifra autenticada escrita à mão é o exemplo clássico
+# de código que passa em todos os testes e vaza a chave pelo tempo de
+# execução. O que este pacote escreve é a composição — o Noise —, que é
+# protocolo e não aritmética.
+x25519-dalek = { version = "3.0.0", default-features = false, features = ["static_secrets", "zeroize"] }
+chacha20poly1305 = { version = "0.11.0", default-features = false }
+chacha20 = { version = "0.10.2", default-features = false, features = ["cipher"] }
+blake2 = { version = "0.11.0", default-features = false }
+# Apagar segredos da memória quando saem de uso, e comparar provas sem que o
+# tempo diga quantos bytes acertaram.
+zeroize = { version = "1.9.0", default-features = false, features = ["alloc"] }
+subtle = { version = "2.6.1", default-features = false }
+
+[dev-dependencies]
+# A implementação independente contra a qual esta conversa, nos dois
+# sentidos. Só nos testes: no kernel ela não compilaria, e nem deveria.
+snow = { version = "0.9.6", default-features = false, features = ["default-resolver"] }
+# Para ler os arquivos de vetores, que são JSON.
+serde_json = "1"
