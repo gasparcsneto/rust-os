@@ -11410,6 +11410,15 @@ fn politica_nao_autoprivilegia() -> Resultado {
             r#"{"line":"papel operador @observador ui.act"}"#,
             Some("DENY_POLICY"),
         )?;
+        // O papel da serial e o da autoridade local — o `sistema`, que a
+        // sessão 1 nem tem —: a autoridade de sistema não encolhe por aqui.
+        admin_espera(
+            1,
+            a,
+            "policy.write",
+            r#"{"line":"papel sistema agent.read"}"#,
+            Some("DENY_POLICY"),
+        )?;
         admin_espera(
             1,
             a,
@@ -11588,7 +11597,7 @@ extern "C" fn sonda_de_autoridade(_: u64) -> ! {
         autorizar_processo(Permissao::FsRead, "/etc/duke/agentes", "fs.open"),
         autorizar_processo(Permissao::FsRead, "/bin/ola", "fs.open"),
         autorizar_processo(Permissao::ProcessRun, "/dados/x", "process.exec"),
-        crate::autorizacao::autorizar_so_sistema("terminal.open"),
+        autorizar_processo(Permissao::TerminalAttach, "", "terminal.attach"),
         // O que a autoridade do fio diz: herdada de quem o criou.
         match crate::fios::autoridade_atual() {
             crate::autorizacao::Autoridade::Sessao { sessao: 1, .. } => politica::Codigo::Allow,
@@ -11710,25 +11719,43 @@ fn politica_processo_age_como_o_agente() -> Resultado {
     resultado
 }
 
-/// Sem política no disco, a de emergência: a serial lê, e nada mais; uma
-/// porta não tem papel nela, e recusa tudo.
-fn politica_emergencia_fecha() -> Resultado {
+/// Sem política no disco, a de emergência, embutida: o `sistema` continua
+/// com a autoridade máxima enumerada — para a serial, a pessoa e os
+/// processos do sistema —, e um agente cujo papel ela não tem é recusado.
+fn politica_emergencia_mantem_o_sistema() -> Resultado {
+    use crate::autorizacao::{Chamador, autorizar, autorizar_processo};
+    use politica::{Codigo, Permissao};
     let resultado = com_agentes_de_teste(|| {
         let (mut agente, mut sessao) = conectado(1)?;
+        crate::identidade::atribuir(&nome_de_teste(1), "operador")
+            .map_err(|_| "a atribuicao falhou")?;
         crate::autorizacao::trocar_politica(politica::Politica::emergencia());
+        // Um operador: o papel não existe na de emergência, e a porta recusa.
         let r = pela_porta(&mut agente, &mut sessao, "agent.ping", "{}")?;
         if !recusado_com(&r, "DENY_ROLE") {
             crate::log_error!("teste", "{}", r);
-            return Err("com a politica de emergencia uma porta foi atendida");
+            return Err("com a politica de emergencia um operador foi atendido");
         }
-        let serial = crate::autorizacao::com_politica(|p| alloc::string::String::from(p.serial()));
-        let decide =
-            |perm| crate::autorizacao::com_politica(|p| p.decidir(Some(&serial), perm, None));
-        if decide(politica::Permissao::SystemRead) != politica::Codigo::Allow
-            || decide(politica::Permissao::FsRead) != politica::Codigo::DenyPermission
-            || decide(politica::Permissao::DebugTrigger) != politica::Codigo::DenyPermission
-        {
-            return Err("a serial na politica de emergencia nao e so leitura");
+        // Um agente de papel `sistema` continua `sistema`: ninguém ganha nem
+        // perde papel na emergência.
+        crate::identidade::atribuir(&nome_de_teste(1), "sistema")
+            .map_err(|_| "a atribuicao falhou")?;
+        let r = pela_porta(&mut agente, &mut sessao, "agent.ping", "{}")?;
+        if !r.contains(r#""result":"#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("com a politica de emergencia o sistema de uma porta foi recusado");
+        }
+        let disco = registry::encontrar("disk.read").ok_or("sem disk.read")?;
+        let params = Json(br#"{"sector":0}"#);
+        for chamador in [Chamador::Pessoa, Chamador::Sessao(0)] {
+            if autorizar(chamador, disco, params).is_err() {
+                crate::log_error!("teste", "{:?}", chamador);
+                return Err("sem politica no disco, o sistema perdeu fs.raw_read");
+            }
+        }
+        // Este fio é do sistema: a decisão de um processo do sistema.
+        if autorizar_processo(Permissao::TerminalAttach, "", "terminal.attach") != Codigo::Allow {
+            return Err("sem politica no disco, o sistema perdeu terminal.attach");
         }
         Ok(())
     });
@@ -11737,6 +11764,64 @@ fn politica_emergencia_fecha() -> Resultado {
         return Err("a politica do disco nao voltou");
     }
     resultado
+}
+
+/// A autoridade local não é um passe livre: decide pelo papel que a
+/// política dá a ela. Com `local operador`, a pessoa no console e um
+/// processo do sistema podem o que o operador pode — e a auditoria grava as
+/// recusas deles como de qualquer um.
+///
+/// # O que este caso protege
+///
+/// Que não volte a existir um `ALLOW` por ser sistema: a pessoa pelo ponto
+/// de decisão dos comandos, e o processo pelo das chamadas de sistema — o
+/// mesmo que decide `abrir`, `executar` e o pseudo-terminal.
+fn politica_o_sistema_decide_pela_politica() -> Resultado {
+    use crate::autorizacao::{Chamador, autorizar, autorizar_processo};
+    use politica::{Codigo, Permissao};
+    let texto = politica::PADRAO.replace("local sistema", "local operador");
+    let menor = politica::Politica::ler(&texto).map_err(|_| "a politica do caso nao vale")?;
+    let gravou = |agente: &str, codigo: Codigo| {
+        ultimo_registro().is_some_and(|r| {
+            r.evento.agente == agente && r.evento.papel == "operador" && r.evento.codigo == codigo
+        })
+    };
+    crate::autorizacao::trocar_politica(menor);
+    let resultado = (|| -> Resultado {
+        let disco = registry::encontrar("disk.read").ok_or("sem disk.read")?;
+        let params = Json(br#"{"sector":0}"#);
+        if autorizar(Chamador::Pessoa, disco, params).err() != Some(Codigo::DenyPermission)
+            || !gravou("pessoa", Codigo::DenyPermission)
+        {
+            return Err("a pessoa no console nao decidiu pelo papel local");
+        }
+        // Este fio é do sistema.
+        if autorizar_processo(Permissao::FsRead, "/etc/duke/agentes", "fs.open")
+            != Codigo::DenyResource
+            || !gravou("sistema", Codigo::DenyResource)
+        {
+            return Err("um processo do sistema nao decidiu pelo papel local");
+        }
+        if autorizar_processo(Permissao::TerminalAttach, "", "terminal.attach")
+            != Codigo::DenyPermission
+            || !gravou("sistema", Codigo::DenyPermission)
+        {
+            return Err("o pseudo-terminal nao decidiu pelo papel local");
+        }
+        Ok(())
+    })();
+    crate::autorizacao::carregar();
+    resultado?;
+    // De volta ao `sistema`: o mesmo pedido passa, e é gravado como dele.
+    let disco = registry::encontrar("disk.read").ok_or("sem disk.read")?;
+    if autorizar(Chamador::Pessoa, disco, Json(br#"{"sector":0}"#)).is_err()
+        || !ultimo_registro().is_some_and(|r| {
+            r.evento.agente == "pessoa" && r.evento.papel == "sistema" && r.evento.codigo.permite()
+        })
+    {
+        return Err("com o papel sistema a pessoa no console foi recusada");
+    }
+    Ok(())
 }
 
 /// O aperto de mão vai para a auditoria, e tem limite por janela.
@@ -14844,8 +14929,12 @@ static CASOS: &[Caso] = &[
         f: politica_processo_age_como_o_agente,
     },
     Caso {
-        nome: "politica: sem politica, emergencia",
-        f: politica_emergencia_fecha,
+        nome: "politica: sem politica, o sistema fica",
+        f: politica_emergencia_mantem_o_sistema,
+    },
+    Caso {
+        nome: "politica: o sistema decide pela politica",
+        f: politica_o_sistema_decide_pela_politica,
     },
     Caso {
         nome: "politica: o aperto e auditado e limitado",

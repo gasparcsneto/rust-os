@@ -561,8 +561,8 @@ pub static COMANDOS: &[Command] = &[
     Command {
         nome: "policy.show",
         resumo: "A politica em vigor: cada papel com as permissoes, os recursos e a taxa; o \
-                 papel da serial; o limite de apertos; e se ela veio do disco ou e a de \
-                 emergencia.",
+                 papel da serial e o da autoridade local (o console e os processos do \
+                 sistema); o limite de apertos; e se ela veio do disco ou e a de emergencia.",
         params: &[],
         acesso: Acesso::Exige(Permissao::PolicyRead),
         recurso: None,
@@ -709,6 +709,7 @@ fn policy_show(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.field_str("path", crate::autorizacao::CAMINHO_DA_POLITICA)?;
     w.field_bool("from_disk", crate::autorizacao::politica_do_disco())?;
     w.field_str("serial_role", politica.serial())?;
+    w.field_str("local_role", politica.local())?;
     let apertos = politica.apertos();
     w.key("handshakes")?;
     w.begin_object()?;

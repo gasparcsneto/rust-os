@@ -44,6 +44,9 @@ pub enum Permissao {
     KeyboardRead,
     /// Provocar uma falha fatal de propósito.
     DebugTrigger,
+    /// Prender-se ao pseudo-terminal: o que se escreve nele o interpretador
+    /// executa como a pessoa na frente da máquina.
+    TerminalAttach,
     /// Ler a auditoria.
     AuditRead,
     /// Ler a política.
@@ -59,7 +62,7 @@ pub enum Permissao {
 }
 
 /// Todas, na ordem do relatório.
-pub const TODAS: [Permissao; 19] = [
+pub const TODAS: [Permissao; 20] = [
     Permissao::AgentRead,
     Permissao::SystemRead,
     Permissao::LogRead,
@@ -73,6 +76,7 @@ pub const TODAS: [Permissao; 19] = [
     Permissao::NetSend,
     Permissao::KeyboardRead,
     Permissao::DebugTrigger,
+    Permissao::TerminalAttach,
     Permissao::AuditRead,
     Permissao::PolicyRead,
     Permissao::AgentRegister,
@@ -98,6 +102,7 @@ impl Permissao {
             Permissao::NetSend => "net.send",
             Permissao::KeyboardRead => "keyboard.read",
             Permissao::DebugTrigger => "debug.trigger",
+            Permissao::TerminalAttach => "terminal.attach",
             Permissao::AuditRead => "audit.read",
             Permissao::PolicyRead => "policy.read",
             Permissao::AgentRegister => "agent.register",
@@ -122,6 +127,7 @@ impl Permissao {
                 | Permissao::FsRawWrite
                 | Permissao::KeyboardRead
                 | Permissao::DebugTrigger
+                | Permissao::TerminalAttach
                 | Permissao::PolicyRead
                 | Permissao::AgentRegister
                 | Permissao::AgentRevoke
@@ -173,6 +179,7 @@ mod testes {
             "fs.raw_read",
             "fs.raw_write",
             "debug.trigger",
+            "terminal.attach",
             "agent.register",
             "agent.revoke",
             "policy.read",

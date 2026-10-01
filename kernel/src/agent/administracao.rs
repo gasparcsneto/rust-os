@@ -470,8 +470,13 @@ fn atribuir_papel(pedinte: &Pedinte, params: Json, w: &mut JsonWriter) -> Result
 fn escrever_politica(pedinte: &Pedinte, params: Json, w: &mut JsonWriter) -> Result<String, Falha> {
     let linha = texto(params, "line")?;
     // Protegidos: o papel de cada administrador — e o de quem pede é um
-    // deles —, e o da sessão de onde o pedido vem. Nenhum muda por aqui.
+    // deles —, o da sessão de onde o pedido vem, e os da serial e da
+    // autoridade local: a autoridade de sistema não encolhe por uma linha
+    // escrita em tempo de execução. Nenhum muda por aqui.
     let mut protegidos = crate::identidade::papeis_dos_administradores();
+    protegidos.extend(autorizacao::com_politica(|p| {
+        [p.serial().to_string(), p.local().to_string()]
+    }));
     let da_sessao = match pedinte.chave_da_sessao {
         Some(k) => crate::identidade::papel_do_agente(&k),
         None if pedinte.sessao == super::sessao::SERIAL => {

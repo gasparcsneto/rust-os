@@ -2398,13 +2398,26 @@ fn conferir_janelas_pelo_toolkit() -> Result<ExitCode, String> {
     }
 }
 
-/// As chamadas que executam uma operação protegida, e o único arquivo onde
-/// cada uma pode aparecer.
-const CHAMADAS_PROTEGIDAS: &[(&str, &str)] = &[
+/// As chamadas que executam uma operação protegida, e os únicos arquivos
+/// onde cada uma pode aparecer.
+const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
     // O handler de um comando: só a licença de `autorizacao::autorizar`.
-    (".handler)(", "kernel/src/autorizacao.rs"),
+    (".handler)(", &["kernel/src/autorizacao.rs"]),
     // Uma operação administrativa: só depois da prova e da decisão.
-    ("(operacao.executar)(", "kernel/src/agent/administracao.rs"),
+    (
+        "(operacao.executar)(",
+        &["kernel/src/agent/administracao.rs"],
+    ),
+    // A exceção do boot: a chave privada, o registro e a política são lidos
+    // antes de haver o que decidir — e só ali. A leitura do diretório
+    // reservado é definida no VFS e chamada só pela identidade; as duas
+    // cargas, só pelo boot.
+    (
+        "ler_segredo(",
+        &["kernel/src/vfs/mod.rs", "kernel/src/identidade.rs"],
+    ),
+    ("identidade::carregar()", &["kernel/src/main.rs"]),
+    ("autorizacao::carregar()", &["kernel/src/main.rs"]),
 ];
 
 /// Confere que nenhum caminho chega a uma operação protegida sem passar pelo
@@ -2417,6 +2430,12 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &str)] = &[
 /// administrativa num lugar só, depois da prova e do papel. Uma chamada
 /// direta em qualquer outro arquivo é um atalho: o canal, o interpretador ou
 /// um módulo novo executando sem decisão e sem auditoria.
+///
+/// E a única exceção — o boot, que carrega a chave, o registro e a política
+/// antes de haver ponto de decisão — fica presa ao boot: a leitura do
+/// diretório reservado só é chamada pela identidade, e as duas cargas só
+/// pelo `main.rs`. Nenhum comando, chamada de sistema ou caminho do console
+/// as alcança.
 ///
 /// O compilador não pega isso: o handler é um ponteiro de função público, e
 /// chamá-lo é uma linha que compila em qualquer lugar. Antes desta etapa
@@ -2443,11 +2462,11 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
         let texto = std::fs::read_to_string(caminho)
             .map_err(|e| format!("não foi possível ler {}: {e}", caminho.display()))?;
         for (n, linha) in texto.lines().enumerate() {
-            for (i, (chamada, dono)) in CHAMADAS_PROTEGIDAS.iter().enumerate() {
+            for (i, (chamada, donos)) in CHAMADAS_PROTEGIDAS.iter().enumerate() {
                 if !linha.contains(chamada) {
                     continue;
                 }
-                if relativo == *dono {
+                if donos.contains(&relativo.as_str()) {
                     achadas[i] += 1;
                 } else {
                     fora.push(format!("{relativo}:{}: {}", n + 1, linha.trim()));
@@ -2458,17 +2477,17 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
     })?;
     // A chamada legítima tem de existir: uma busca que não acha nem ela
     // está procurando a coisa errada, e passaria por qualquer atalho.
-    for ((chamada, dono), quantas) in CHAMADAS_PROTEGIDAS.iter().zip(&achadas) {
-        if *quantas == 0 {
+    for ((chamada, donos), quantas) in CHAMADAS_PROTEGIDAS.iter().zip(&achadas) {
+        if *quantas < donos.len() {
             fora.push(format!(
-                "`{chamada}` não aparece em {dono}: a conferência está cega"
+                "`{chamada}` não aparece em todos de {donos:?}: a conferência está cega"
             ));
         }
     }
     if fora.is_empty() {
         println!(
             "[xtask] o handler de um comando e a operação administrativa são chamados só pelo \
-             ponto de decisão"
+             ponto de decisão, e as cargas do boot só pelo boot"
         );
         Ok(ExitCode::SUCCESS)
     } else {

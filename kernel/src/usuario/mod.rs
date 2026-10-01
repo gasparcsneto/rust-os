@@ -844,9 +844,13 @@ const BYTES_DO_TERMINAL: usize = 512;
 /// acordar um processo alheio a cada linha impressa.
 fn terminal(canal: u64) -> i64 {
     // O pseudo-terminal é a linha de comando da pessoa: o que se digita nele
-    // roda com a presença física dela. Um processo que um agente lançou não
-    // o abre — nem quando ele está livre, com a janela do Terminal fechada.
-    if !crate::autorizacao::autorizar_so_sistema("terminal.open").permite() {
+    // o interpretador executa como ela. Prender-se a ele é `terminal.attach`,
+    // uma permissão que a política enumera — no papel `sistema`, e em nenhum
+    // dos agentes: um processo que um agente lançou não o abre, nem quando
+    // ele está livre, com a janela do Terminal fechada.
+    if !crate::autorizacao::autorizar_processo(Permissao::TerminalAttach, "", "terminal.attach")
+        .permite()
+    {
         RECUSADAS.fetch_add(1, Ordering::Relaxed);
         return erro::NEGADO;
     }

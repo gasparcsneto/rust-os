@@ -1485,15 +1485,29 @@ chama num lugar só: `autorizacao::autorizar`.
 **Papéis, e não listas por agente.** Quatro na imagem: `observador` observa
 o sistema e a tela, e não lê arquivos; `operador` observa e age — a tela,
 programas de `/bin` e `/programas`, arquivos de `/dados`, `/bin` e
-`/programas`; `sistema` é o da serial; `administrador` é o teto do que um
+`/programas`; `sistema` é a autoridade máxima — a da serial, da pessoa no
+console e dos processos do sistema; `administrador` é o teto do que um
 administrador delega. Um papel pode incluir outro (`@observador`), mas as
 permissões **sensíveis** — `fs.read`, `fs.raw_read`, `keyboard.read`,
-`debug.trigger`, as administrativas — não atravessam a inclusão: cada papel
-que as tem as escreve. Não há curinga: `*` é um erro de leitura. Quatro
-agentes ou quatrocentos, a política continua do tamanho dos papéis.
+`debug.trigger`, `terminal.attach`, as administrativas — não atravessam a
+inclusão: cada papel que as tem as escreve. Não há curinga: `*` é um erro de
+leitura. Quatro agentes ou quatrocentos, a política continua do tamanho dos
+papéis.
 
-**Recursos por caminho.** `fs.read` e `process.run` podem ser limitados a
-prefixos. O caminho é conferido na forma normal — a mesma função que o VFS
+**O sistema é o máximo, e enumerado.** O papel `sistema` não inclui outro e
+não é um passe livre: lista cada permissão pelo nome — tudo, menos as
+administrativas (que são do administrador, com a prova) e as de escrita
+(que nenhuma operação usa) —, e o alcance de cada uma de caminho numa linha
+`recurso`, `/`. A autoridade local — a pessoa no console e os processos do
+sistema — tem o papel da linha `local` da política, e decide pela mesma conta
+e grava na mesma auditoria que qualquer agente: não há `ALLOW` por ser
+sistema. Uma linha de `policy.write` não encolhe o papel da serial nem o da
+autoridade local.
+
+**Recursos por caminho.** `fs.read` e `process.run` têm o alcance escrito
+numa linha `recurso`, sempre: sem ela a política é recusada, porque "sem
+limite" seria um curinga escrito pela ausência. O alcance inteiro também se
+escreve — `/`. O caminho é conferido na forma normal — a mesma função que o VFS
 usa, do pacote `politica` —, um `..` é recusado e não resolvido, e um
 prefixo vale em fronteira de componente: `/dados` contém `/dados/x`, e não
 `/dadosx`. O diretório reservado do kernel não é recurso de papel nenhum,
@@ -1503,13 +1517,20 @@ nem do `sistema`.
 pedem a mesma decisão e só a licença que ela devolve chama o handler — o
 `cargo xtask invariantes` reprova uma chamada `(…handler)(` em qualquer
 outro arquivo. O interpretador valida os parâmetros como o canal; a pessoa
-na frente da máquina passa por presença física, gravada como `pessoa`, e um
-agente que confirma uma linha no Terminal decide como a sessão dele. Um
-processo lançado por um agente (`user.run`) carrega a autoridade dele: as
-chamadas `abrir` e `executar` decidem com o papel do agente, e o
-pseudo-terminal é só de processos do sistema — um processo de agente não o
+na frente da máquina decide pelo papel local, gravada como `pessoa`, e um
+agente que confirma uma linha no Terminal decide como a sessão dele. Todo
+processo carrega a autoridade de quem o lançou — a local, ou a do agente
+(`user.run`) —, e o `fork` a herda: as chamadas `abrir` e `executar`
+decidem com esse papel, e prender-se ao pseudo-terminal é a permissão
+`terminal.attach`, que só o `sistema` enumera — um processo de agente não o
 abre, nem quando a janela do Terminal está fechada. O papel é procurado a
 cada decisão: uma revogação vale também para o processo que já roda.
+
+**A única exceção é o boot.** Antes de haver política, o kernel lê a sua
+chave privada, o registro e a própria política. A leitura do diretório
+reservado só é chamada pela identidade, e as duas cargas só pelo boot — o
+`cargo xtask invariantes` confere os dois —, e nenhum comando, chamada de
+sistema, console, serial ou pseudo-terminal as alcança.
 
 **Tudo vai para a auditoria.** Permitido ou não, cada decisão vira um
 registro: número, milissegundos desde o boot, sessão, agente, chave
@@ -1555,17 +1576,22 @@ validação do arquivo e entra inteira, numa troca só; vale na decisão
 seguinte. Uma linha inválida, ou que tire de quem administra a autoridade
 de administrar, é recusada, e a política velha fica.
 
-**Sem política, fechado.** Se `/etc/duke/politica` falta ou não se lê,
-vale a de emergência: a serial lê o estado do sistema, o log e a
-auditoria, e nada mais; uma porta não tem papel nela, e recusa tudo.
+**Sem política no disco, a embutida.** Se `/etc/duke/politica` falta ou não
+se lê, vale a de emergência, embutida no kernel: o mesmo `sistema`, do mesmo
+texto da padrão, para a serial e a autoridade local — a autoridade máxima
+não encolhe, e não vira curinga —, e o mesmo `administrador`, para quem tem
+a prova recuperar a política em memória. Os outros papéis não existem nela:
+um agente de papel `operador` ou `observador` é recusado; um de papel
+`sistema` continua o que era — ninguém ganha nem perde papel na emergência.
 
 A suíte confere a matriz pelo canal cifrado, linha a linha, e o que a
 auditoria gravou de cada uma; a taxa; a revogação derrubando a sessão; cada
 regra de quem administra, pela operação de verdade; a cadeia refeita a
 partir do que `audit.tail` mostra; um fio e dois programas lançados como
 um operador — o que abre `/saudacao.txt` é recusado, o que pede o
-pseudo-terminal também —; a política de emergência; e o aperto auditado e
-limitado. A fumaça faz o mesmo por fora, com o cliente do `xtask`, e refaz
+pseudo-terminal também —; a pessoa e um processo do sistema recusados
+quando a política dá à autoridade local um papel menor; a política de
+emergência mantendo o `sistema`; e o aperto auditado e limitado. A fumaça faz o mesmo por fora, com o cliente do `xtask`, e refaz
 no hospedeiro a cadeia inteira que o kernel mostrou.
 
 ## Barramento PCI

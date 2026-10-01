@@ -7,20 +7,28 @@
 //! papel observador agent.read system.read log.read ui.read
 //! papel operador @observador ui.act process.run net.send fs.read
 //! recurso operador fs.read /dados /bin /programas
+//! recurso operador process.run /bin /programas
 //! taxa operador 50 100
 //! apertos 10 10000
 //! serial sistema
+//! local sistema
 //! ```
 //!
 //! - `papel <nome> <item>...`: um item é uma permissão do vocabulário ou
 //!   `@<papel>`, a inclusão de outro papel. A inclusão traz só as permissões
 //!   **não sensíveis** do outro: uma sensível precisa estar escrita em cada
 //!   papel que a tem. Não há curinga — `*` é um erro com nome próprio.
-//! - `recurso <papel> <permissão> <prefixo>...`: limita uma permissão cujo
-//!   recurso é um caminho aos prefixos dados.
+//! - `recurso <papel> <permissão> <prefixo>...`: o alcance de uma
+//!   permissão cujo recurso é um caminho. **Obrigatório** para cada papel
+//!   que tem uma delas: sem a linha, o papel não seria limitado — e "sem
+//!   limite" seria um curinga escrito pela ausência. O alcance inteiro se
+//!   escreve: `recurso sistema fs.read /`.
 //! - `taxa <papel> <por segundo> <rajada>`: o balde de pedidos do papel.
 //! - `apertos <quantos> <janela em ms>`: apertos de mão por porta.
 //! - `serial <papel>`: o papel da sessão 0. Obrigatória.
+//! - `local <papel>`: o papel da autoridade local — a pessoa no console e
+//!   os processos do sistema. Obrigatória. Ela não é exceção à política:
+//!   decide pela mesma conta, com as permissões que o papel enumera.
 //!
 //! # Validar antes de valer
 //!
@@ -109,6 +117,7 @@ impl Papel {
 pub struct Politica {
     papeis: Vec<Papel>,
     serial: String,
+    local: String,
     apertos: Apertos,
 }
 
@@ -133,9 +142,14 @@ pub enum ErroTipo {
     RecursoSemPermissao(String),
     /// Um `recurso` para uma permissão cujo recurso não é caminho.
     RecursoNaoECaminho(String),
+    /// Um papel com uma permissão de caminho sem o `recurso` que diz o
+    /// alcance dela: (papel, permissão).
+    RecursoFaltando(String, String),
     CaminhoInvalido(String),
     /// Falta a linha `serial`.
     SemSerial,
+    /// Falta a linha `local`.
+    SemLocal,
 }
 
 /// Um erro, com a linha onde está. Linha zero: a política como um todo.
@@ -162,8 +176,12 @@ impl Erro {
                 format!("recurso para `{p}`, que o papel nao tem")
             }
             ErroTipo::RecursoNaoECaminho(p) => format!("o recurso de `{p}` nao e caminho"),
+            ErroTipo::RecursoFaltando(papel, p) => {
+                format!("`{papel}` tem `{p}` sem a linha `recurso` que diz o alcance")
+            }
             ErroTipo::CaminhoInvalido(c) => format!("caminho invalido `{c}`"),
             ErroTipo::SemSerial => "falta a linha `serial`".to_string(),
+            ErroTipo::SemLocal => "falta a linha `local`".to_string(),
         };
         if self.linha == 0 {
             o_que
@@ -224,6 +242,7 @@ impl Politica {
         let mut p = Politica {
             papeis: Vec::new(),
             serial: String::new(),
+            local: String::new(),
             apertos: APERTOS_PADRAO,
         };
         let mut recursos_e_taxas: Vec<(usize, &str)> = Vec::new();
@@ -251,30 +270,29 @@ impl Politica {
                 tipo: ErroTipo::SemSerial,
             });
         }
+        if p.local.is_empty() {
+            return Err(Erro {
+                linha: 0,
+                tipo: ErroTipo::SemLocal,
+            });
+        }
         p.validar()?;
         Ok(p)
     }
 
     /// A política de emergência: o que vale quando a do disco falta ou não
-    /// se lê. Um papel só, de leitura, e é o da serial — as portas não têm
-    /// papel nenhum e recusam tudo. Falhar fechado: sem política não se
-    /// adivinha uma.
+    /// se lê — [`crate::EMERGENCIA`], embutida.
+    ///
+    /// O `sistema` continua com a autoridade máxima, enumerada como na
+    /// política normal, e é o papel da serial e da autoridade local; o
+    /// `administrador` continua o teto do que se delega, para recuperar a
+    /// política em memória com a prova. Os outros papéis não existem nela: um
+    /// agente cujo papel ela não tem é recusado.
     pub fn emergencia() -> Politica {
-        let mut papel = Papel::novo("emergencia");
-        papel.diretas = alloc::vec![
-            Permissao::AgentRead,
-            Permissao::SystemRead,
-            Permissao::LogRead,
-            Permissao::AuditRead,
-        ];
-        let mut p = Politica {
-            papeis: alloc::vec![papel],
-            serial: "emergencia".to_string(),
-            apertos: APERTOS_PADRAO,
-        };
-        // Não falha: o papel é fixo e válido.
-        let _ = p.validar();
-        p
+        // O texto é deste pacote, e um teste confere que ele vale. Uma
+        // política embutida inválida é erro de quem a escreveu, e não um
+        // estado do sistema.
+        Politica::ler(crate::EMERGENCIA).expect("a politica de emergencia embutida vale")
     }
 
     fn papel_mut(&mut self, nome: &str) -> Option<&mut Papel> {
@@ -294,6 +312,12 @@ impl Politica {
     /// O papel da serial.
     pub fn serial(&self) -> &str {
         &self.serial
+    }
+
+    /// O papel da autoridade local: a pessoa no console e os processos do
+    /// sistema.
+    pub fn local(&self) -> &str {
+        &self.local
     }
 
     /// O limite de apertos por porta.
@@ -389,12 +413,16 @@ impl Politica {
                     janela_ms: u64::from(janela),
                 };
             }
-            "serial" => {
+            "serial" | "local" => {
                 let nome = partes.next().ok_or(erro(ErroTipo::Sintaxe))?;
                 if partes.next().is_some() {
                     return Err(erro(ErroTipo::Sintaxe));
                 }
-                self.serial = nome.to_string();
+                if palavra == "serial" {
+                    self.serial = nome.to_string();
+                } else {
+                    self.local = nome.to_string();
+                }
             }
             _ => return Err(erro(ErroTipo::LinhaDesconhecida)),
         }
@@ -404,8 +432,10 @@ impl Politica {
     /// Confere o que só se confere com tudo lido, e calcula as permissões.
     fn validar(&mut self) -> Result<(), Erro> {
         let geral = |tipo| Erro { linha: 0, tipo };
-        if self.papel(&self.serial).is_none() {
-            return Err(geral(ErroTipo::PapelDesconhecido(self.serial.clone())));
+        for papel in [&self.serial, &self.local] {
+            if self.papel(papel).is_none() {
+                return Err(geral(ErroTipo::PapelDesconhecido(papel.clone())));
+            }
         }
         for papel in &self.papeis {
             for incluido in &papel.inclui {
@@ -426,6 +456,17 @@ impl Politica {
             for p in papel.recursos.keys() {
                 if !papel.tem(*p) {
                     return Err(geral(ErroTipo::RecursoSemPermissao(p.nome().to_string())));
+                }
+            }
+            // E o contrário: cada permissão de caminho tem o alcance
+            // escrito. Também a que veio por inclusão — o alcance é de cada
+            // papel, e não se herda.
+            for p in papel.permissoes() {
+                if p.recurso_e_caminho() && !papel.recursos.contains_key(&p) {
+                    return Err(geral(ErroTipo::RecursoFaltando(
+                        papel.nome.clone(),
+                        p.nome().to_string(),
+                    )));
                 }
             }
         }
@@ -463,9 +504,10 @@ impl Politica {
     ///
     /// `recurso` é o caminho, para as permissões de caminho; para as outras,
     /// não é olhado. Sem papel, ou com um que a política não tem:
-    /// `DENY_ROLE`. Sem a permissão: `DENY_PERMISSION`. Com a permissão
-    /// limitada e o recurso fora dos prefixos — ou ausente, ou que não se
-    /// normaliza —: `DENY_RESOURCE`.
+    /// `DENY_ROLE`. Sem a permissão: `DENY_PERMISSION`. Com o recurso fora
+    /// do alcance — ou ausente, ou que não se normaliza, ou sem alcance
+    /// escrito —: `DENY_RESOURCE`. Não há papel que pule esta conta: o
+    /// `sistema` passa por ela como os outros, com o que ele enumera.
     pub fn decidir(&self, papel: Option<&str>, p: Permissao, recurso: Option<&str>) -> Codigo {
         let Some(papel) = papel.and_then(|n| self.papel(n)) else {
             return Codigo::DenyRole;
@@ -473,7 +515,11 @@ impl Politica {
         if !papel.tem(p) {
             return Codigo::DenyPermission;
         }
-        if let Some(prefixos) = papel.recursos.get(&p) {
+        if p.recurso_e_caminho() {
+            // A validação exige o alcance; sem ele, fechado — nunca "tudo".
+            let Some(prefixos) = papel.recursos.get(&p) else {
+                return Codigo::DenyResource;
+            };
             let Some(normal) = recurso.and_then(caminho::normalizar) else {
                 return Codigo::DenyResource;
             };
@@ -536,7 +582,8 @@ impl Politica {
         let palavra = linha.split_ascii_whitespace().next().unwrap_or("");
         if !matches!(palavra, "papel" | "recurso" | "taxa") {
             return Err(Recusa::Proibida(
-                "policy.write muda papel, recurso ou taxa; a serial muda por policy.assign"
+                "policy.write muda papel, recurso ou taxa; a serial muda por policy.assign, e o \
+                 papel local e os apertos so pela imagem"
                     .to_string(),
             ));
         }
@@ -608,12 +655,13 @@ impl Politica {
     }
 }
 
-/// O limite `a` está contido no limite `b`. `None` é sem limite: contém
-/// tudo e só está contido em outro sem limite.
+/// O alcance `a` está contido no alcance `b`. `None` é alcance nenhum — o de
+/// uma permissão que não é de caminho, ou o de um papel sem a permissão: está
+/// contido em qualquer um, e não contém nada além de outro `None`.
 fn recurso_contido(a: Option<&Vec<String>>, b: Option<&Vec<String>>) -> bool {
     match (a, b) {
-        (_, None) => true,
-        (None, Some(_)) => false,
+        (None, _) => true,
+        (Some(_), None) => false,
         (Some(a), Some(b)) => a
             .iter()
             .all(|pa| b.iter().any(|pb| caminho::dentro_de(pa, pb))),
@@ -629,4 +677,25 @@ fn numero(texto: Option<&str>, n: usize) -> Result<u32, Erro> {
         linha: n,
         tipo: ErroTipo::Numero(texto.to_string()),
     })
+}
+
+#[cfg(test)]
+mod testes {
+    use super::*;
+
+    /// A decisão fecha sozinha: um papel com permissão de caminho e sem
+    /// alcance — que a validação não deixa existir — não alcança nada. É a
+    /// segunda linha de defesa, e não pode virar "tudo" se a primeira um
+    /// dia falhar.
+    #[test]
+    fn caminho_sem_alcance_nao_e_tudo_na_decisao() {
+        let mut p = Politica::ler(crate::PADRAO).unwrap();
+        let sistema = p.papel_mut("sistema").unwrap();
+        sistema.recursos.remove(&Permissao::FsRead);
+        assert!(p.papel("sistema").unwrap().tem(Permissao::FsRead));
+        assert_eq!(
+            p.decidir(Some("sistema"), Permissao::FsRead, Some("/dados/x")),
+            Codigo::DenyResource
+        );
+    }
 }

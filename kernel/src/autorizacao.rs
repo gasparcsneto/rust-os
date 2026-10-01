@@ -28,11 +28,25 @@
 //! agente, chave, papel), o quê (método e recurso), o código, o BLAKE2s dos
 //! parâmetros e um detalhe. Ver [`politica::auditoria`].
 //!
-//! # Sem política, fechado
+//! # O sistema decide como os outros
 //!
-//! A política vem do disco no boot. Se falta, ou não se lê, vale a de
-//! emergência ([`politica::Politica::emergencia`]): só leitura, e só pela
-//! serial. Uma porta não tem papel nela, e recusa tudo.
+//! A autoridade local — a pessoa no console e os processos do sistema — é a
+//! máxima, e passa pela mesma conta: o papel dela é o da linha `local` da
+//! política, o `sistema`, que enumera cada permissão e o alcance de cada uma.
+//! Não há `ALLOW` por ser sistema. A única exceção é o boot do próprio
+//! kernel, que carrega a chave, o registro e a política antes de haver o que
+//! decidir — ver [`crate::identidade::carregar`] e [`carregar`] —, e esse
+//! caminho não é alcançável por processo, agente, console, serial ou
+//! pseudo-terminal: o `xtask` confere quem chama cada um.
+//!
+//! # Sem política no disco
+//!
+//! Se falta, ou não se lê, vale a de emergência, embutida
+//! ([`politica::Politica::emergencia`]): o mesmo `sistema`, com as mesmas
+//! permissões enumeradas, para a serial e a autoridade local, e o mesmo
+//! `administrador`. Os outros papéis não estão nela: um agente de papel
+//! `operador` ou `observador` é recusado; um de papel `sistema` continua o
+//! que era — ninguém ganha nem perde papel na emergência.
 
 use alloc::string::{String, ToString};
 use core::fmt;
@@ -56,8 +70,8 @@ pub const CAPACIDADE_DA_AUDITORIA: usize = 1024;
 /// As sessões com balde: a serial e as quatro portas.
 const SESSOES: usize = 1 + crate::sessoes::PORTAS;
 
-/// A sessão que a auditoria atribui à pessoa na frente da máquina: ela não é
-/// uma sessão do canal.
+/// A sessão que a auditoria atribui à autoridade local — a pessoa na frente
+/// da máquina e os processos do sistema: ela não é uma sessão do canal.
 pub const SESSAO_DA_PESSOA: u8 = u8::MAX;
 
 static POLITICA: Mutex<Option<Politica>> = Mutex::new(None);
@@ -91,9 +105,10 @@ static TAXAS: Mutex<Taxas> = Mutex::new(Taxas {
 /// trava do escalonador na mão — ver `crate::fios`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Autoridade {
-    /// O kernel, a pessoa na frente da máquina, ou um processo lançado por
-    /// eles. Não passa pela política de agentes: a pessoa tem presença
-    /// física, e o resto é o próprio sistema.
+    /// A autoridade local: a pessoa na frente da máquina, ou um processo
+    /// lançado pelo sistema. É a máxima, e **não** é um passe livre: decide
+    /// pela política como as outras, com o papel da linha `local` — o
+    /// `sistema`, que enumera o que pode —, e vai para a auditoria.
     Sistema,
     /// Uma sessão do canal, e o que ela lançou: a serial (`chave` vazia) ou
     /// uma porta, com a chave de quem provou o aperto. O papel não é
@@ -297,6 +312,17 @@ fn quem_da_sessao(sessao: u8) -> Result<Quem, Quem> {
     }
 }
 
+/// A autoridade local, com o papel que a política dá a ela agora: o agente
+/// é `pessoa` para o console e `sistema` para um processo.
+fn quem_local(agente: &str) -> Quem {
+    Quem {
+        sessao: SESSAO_DA_PESSOA,
+        agente: agente.to_string(),
+        chave: None,
+        papel: Some(com_politica(|p| p.local().to_string())),
+    }
+}
+
 /// Quem é uma autoridade de sessão, procurado agora: o nome e o papel do
 /// registro de hoje. Uma chave revogada não tem nenhum dos dois, e o papel
 /// vazio recusa.
@@ -461,49 +487,33 @@ pub fn autorizar(
     params: Json,
 ) -> Result<Autorizado, Codigo> {
     let parametros = params.0;
-    let sessao = match chamador {
-        Chamador::Pessoa => {
-            let quem = Quem {
-                sessao: SESSAO_DA_PESSOA,
-                agente: "pessoa".to_string(),
-                chave: None,
-                papel: Some("local".to_string()),
-            };
-            let recurso = recurso_do_pedido(comando, params);
-            auditar(
-                &quem,
-                comando.nome,
-                &recurso,
-                Codigo::Allow,
-                parametros,
-                "presenca fisica",
-            );
-            return Ok(Autorizado {
-                comando,
-                autoridade: Autoridade::Sistema,
-            });
-        }
-        Chamador::Sessao(s) => s,
-    };
-
-    let quem = match quem_da_sessao(sessao) {
-        Ok(q) => q,
-        Err(q) => {
-            let detalhe = if q.chave.is_some() {
-                "chave revogada"
-            } else {
-                "sessao sem aperto"
-            };
-            auditar(
-                &q,
-                comando.nome,
-                "",
-                Codigo::DenyNotAuthenticated,
-                parametros,
-                detalhe,
-            );
-            return Err(Codigo::DenyNotAuthenticated);
-        }
+    // Quem pede, e com que autoridade o comando roda se passar. A pessoa no
+    // console decide como a autoridade local, pelo papel dela na política —
+    // a mesma conta das sessões, e a mesma auditoria.
+    let (quem, autoridade) = match chamador {
+        Chamador::Pessoa => (quem_local("pessoa"), Autoridade::Sistema),
+        Chamador::Sessao(sessao) => match quem_da_sessao(sessao) {
+            Ok(q) => {
+                let chave = q.chave;
+                (q, Autoridade::Sessao { sessao, chave })
+            }
+            Err(q) => {
+                let detalhe = if q.chave.is_some() {
+                    "chave revogada"
+                } else {
+                    "sessao sem aperto"
+                };
+                auditar(
+                    &q,
+                    comando.nome,
+                    "",
+                    Codigo::DenyNotAuthenticated,
+                    parametros,
+                    detalhe,
+                );
+                return Err(Codigo::DenyNotAuthenticated);
+            }
+        },
     };
     passar_pela_taxa(&quem, comando.nome, parametros)?;
 
@@ -520,10 +530,7 @@ pub fn autorizar(
     }
     Ok(Autorizado {
         comando,
-        autoridade: Autoridade::Sessao {
-            sessao,
-            chave: quem.chave,
-        },
+        autoridade,
     })
 }
 
@@ -531,12 +538,7 @@ pub fn autorizar(
 /// desconhecido, parâmetros recusados. `INVALID_ARGUMENT`.
 pub fn auditar_invalido(chamador: Chamador, metodo: &str, parametros: &[u8], detalhe: &str) {
     let quem = match chamador {
-        Chamador::Pessoa => Quem {
-            sessao: SESSAO_DA_PESSOA,
-            agente: "pessoa".to_string(),
-            chave: None,
-            papel: Some("local".to_string()),
-        },
+        Chamador::Pessoa => quem_local("pessoa"),
         Chamador::Sessao(s) => match quem_da_sessao(s) {
             Ok(q) | Err(q) => q,
         },
@@ -552,38 +554,22 @@ pub fn auditar_invalido(chamador: Chamador, metodo: &str, parametros: &[u8], det
 }
 
 /// Decide uma chamada de sistema de um processo: abrir um arquivo, executar
-/// um programa. Com a autoridade do processo, que é a de quem o lançou.
+/// um programa, prender-se ao pseudo-terminal. Com a autoridade do processo,
+/// que é a de quem o lançou.
 ///
 /// Um processo do sistema — o servidor de janelas, o Terminal, o que a
-/// pessoa lançou — não passa pela política de agentes, e não vai para a
-/// auditoria: o volume dele afogaria o que importa. O que um agente lançou
-/// passa, e vai.
+/// pessoa lançou — decide pelo papel da autoridade local, e vai para a
+/// auditoria como os outros: a autoridade dele é a máxima que a política
+/// enumera, e não um passe livre. O de um agente decide pelo papel do
+/// agente, procurado agora.
 pub fn autorizar_processo(permissao: Permissao, recurso: &str, metodo: &str) -> Codigo {
-    let Autoridade::Sessao { sessao, chave } = crate::fios::autoridade_atual() else {
-        return Codigo::Allow;
+    let quem = match crate::fios::autoridade_atual() {
+        Autoridade::Sistema => quem_local("sistema"),
+        Autoridade::Sessao { sessao, chave } => quem_da_autoridade(sessao, chave),
     };
-    let quem = quem_da_autoridade(sessao, chave);
     let (codigo, detalhe) = decidir(quem.papel.as_deref(), permissao, recurso);
     auditar(&quem, metodo, recurso, codigo, &[], detalhe);
     codigo
-}
-
-/// Decide uma chamada de sistema que é só do sistema: abrir o
-/// pseudo-terminal. Um processo de agente é recusado, e a recusa é gravada.
-pub fn autorizar_so_sistema(metodo: &str) -> Codigo {
-    let Autoridade::Sessao { sessao, chave } = crate::fios::autoridade_atual() else {
-        return Codigo::Allow;
-    };
-    let quem = quem_da_autoridade(sessao, chave);
-    auditar(
-        &quem,
-        metodo,
-        "",
-        Codigo::DenyPermission,
-        &[],
-        "so um processo do sistema",
-    );
-    Codigo::DenyPermission
 }
 
 /// Conta um aperto de mão na janela da porta `p`. Falso se passou do
