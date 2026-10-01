@@ -1,0 +1,23 @@
+[package]
+# A política de autorização do Duke: quem pode o quê, a decisão, o limite de
+# taxa e a auditoria encadeada.
+#
+# Um pacote, e não um módulo do kernel, pelos mesmos dois motivos do
+# `sigilo`: a política é lida pelo kernel e escrita pelo `xtask` na imagem —
+# o formato é um contrato entre os dois —, e a auditoria é encadeada pelo
+# kernel e recalculada pelo `xtask` do lado de fora, para conferir que a
+# cadeia que o kernel mostra é a cadeia que os registros produzem. E as
+# regras — a decisão, a contenção que impede o autoprivilegiamento — são
+# contas que se conferem melhor no hospedeiro, sem emulador.
+#
+# `no_std` com `alloc`.
+name = "politica"
+version = "0.1.0"
+edition = "2024"
+description = "A política de autorização do Duke: papéis, permissões, taxa e auditoria"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# O resumo dos parâmetros e o elo da cadeia de auditoria. O mesmo BLAKE2s do
+# canal seguro.
+blake2 = { version = "0.11.0", default-features = false }
