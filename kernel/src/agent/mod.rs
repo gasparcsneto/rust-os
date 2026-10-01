@@ -64,6 +64,7 @@ pub mod sessao;
 use core::fmt;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use crate::autorizacao::{self, Chamador};
 use json::JsonWriter;
 use protocol::{Requisicao, RpcError};
 use sessao::Canal;
@@ -517,12 +518,25 @@ fn processar(canal: Canal, linha: &[u8]) {
         return;
     }
 
+    // Quem pede, para a auditoria: até um pedido que não chega a ser
+    // comando fica gravado, com o que se pôde ler dele.
+    let chamador = Chamador::Sessao(canal.sessao());
+
     let requisicao = match Requisicao::parse(linha) {
         Ok(r) => r,
-        Err((id, erro)) => return responder_erro(canal, id, erro, None),
+        Err((id, erro)) => {
+            autorizacao::auditar_invalido(chamador, "", linha, erro.mensagem);
+            return responder_erro(canal, id, erro, None);
+        }
     };
 
     let Some(comando) = registry::encontrar(requisicao.metodo) else {
+        autorizacao::auditar_invalido(
+            chamador,
+            requisicao.metodo,
+            requisicao.params.0,
+            "metodo nao encontrado",
+        );
         return responder_erro(canal, requisicao.id, RpcError::METODO_NAO_ENCONTRADO, None);
     };
 
@@ -530,6 +544,7 @@ fn processar(canal: Canal, linha: &[u8]) {
     // é em streaming, então depois de emitir `"result":` não há como voltar
     // atrás e transformar a resposta num erro.
     if let Err(campo) = registry::validar(comando, requisicao.params) {
+        autorizacao::auditar_invalido(chamador, comando.nome, requisicao.params.0, campo);
         return responder_erro(
             canal,
             requisicao.id,
@@ -538,11 +553,23 @@ fn processar(canal: Canal, linha: &[u8]) {
         );
     }
 
+    // A decisão: identidade, sessão, papel, permissão. Só a licença que ela
+    // devolve chama o handler — ver [`autorizacao`].
+    let licenca = match autorizacao::autorizar(chamador, comando, requisicao.params) {
+        Ok(l) => l,
+        Err(codigo) => {
+            return responder_erro(
+                canal,
+                requisicao.id,
+                RpcError::da_recusa(codigo),
+                Some(codigo.nome()),
+            );
+        }
+    };
+
     sessao::com_sessao(canal.sessao(), || {
         com_saida(canal, |w| {
-            protocol::envelope_ok(w, requisicao.id, |w| {
-                (comando.handler)(requisicao.params, w)
-            })
+            protocol::envelope_ok(w, requisicao.id, |w| licenca.executar(requisicao.params, w))
         })
     });
 

@@ -40,6 +40,7 @@ use spin::Mutex;
 
 use crate::agent::json::{Json, JsonWriter};
 use crate::agent::registry;
+use crate::autorizacao::{self, Chamador};
 use crate::ui::Origem;
 
 /// O maior comando que se pode digitar.
@@ -463,9 +464,31 @@ fn despachar(nome: &str, params: &str, origem: Origem) {
     // faz, o registro precisa dizer qual dos dois fez.
     crate::log_info!("console", "executado: {} ({})", nome, origem);
 
+    // A linha passa pelo mesmo crivo do canal: os parâmetros que o comando
+    // declara, e a decisão. A pessoa tem presença física e passa; um agente
+    // que confirmou a linha no Terminal é a sessão dele, com o papel dele —
+    // o Terminal não é um atalho para o que o canal recusaria.
+    let params = Json(params.as_bytes());
+    let chamador = match origem {
+        Origem::Pessoa => Chamador::Pessoa,
+        Origem::Agente(sessao) => Chamador::Sessao(sessao),
+    };
+    if let Err(campo) = registry::validar(comando, params) {
+        autorizacao::auditar_invalido(chamador, comando.nome, params.0, campo);
+        crate::serial_println!("parametro invalido: {}", campo);
+        return;
+    }
+    let licenca = match autorizacao::autorizar(chamador, comando, params) {
+        Ok(l) => l,
+        Err(codigo) => {
+            crate::serial_println!("negado: {}", codigo.nome());
+            return;
+        }
+    };
+
     let mut saida = SaidaHumana::nova();
     let mut escritor = JsonWriter::new(&mut saida);
-    if (comando.handler)(Json(params.as_bytes()), &mut escritor).is_err() {
+    if licenca.executar(params, &mut escritor).is_err() {
         crate::serial_println!("a resposta nao coube");
     }
     crate::serial_println!();

@@ -8,7 +8,7 @@
 //! `unsafe`.
 
 use alloc::string::String;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use sigilo::{TAM_CHAVE, Transporte};
 use spin::Mutex;
@@ -91,6 +91,23 @@ pub fn esquecer(p: u8) -> Option<Identificada> {
 pub fn identidade(p: u8) -> Option<Identificada> {
     let i = indice(p)?;
     crate::arch::sem_interrupcoes(|| IDENTIDADES.lock()[i].clone())
+}
+
+/// As portas cuja sessão foi encerrada por fora — por uma revogação — e
+/// que já receberam a recusa: a porta se dá por encerrada sem mandar outra.
+static AVISADAS: [AtomicBool; PORTAS] = [const { AtomicBool::new(false) }; PORTAS];
+
+/// Marca que a sessão da porta `p` foi encerrada por fora, com a recusa já
+/// enviada.
+pub fn marcar_avisada(p: u8) {
+    if let Some(i) = indice(p) {
+        AVISADAS[i].store(true, Ordering::SeqCst);
+    }
+}
+
+/// Consome a marca de [`marcar_avisada`]: verdadeiro uma vez.
+pub fn tirar_aviso(p: u8) -> bool {
+    indice(p).is_some_and(|i| AVISADAS[i].swap(false, Ordering::SeqCst))
 }
 
 /// Conta um aperto recusado.

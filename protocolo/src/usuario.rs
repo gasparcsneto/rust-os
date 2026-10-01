@@ -167,6 +167,10 @@ pub mod erro {
     /// Não há compositor: a máquina não tem tela, ou a pilha gráfica não
     /// subiu. Distinto de [`SEM_MEMORIA`]: tentar de novo não adianta.
     pub const SEM_TELA: i64 = -15;
+    /// A política recusou: o processo age com a autoridade do agente que o
+    /// lançou, e o papel dele não alcança este arquivo, este programa ou
+    /// esta chamada. Distinto de [`NAO_ENCONTRADO`]: o caminho pode existir.
+    pub const NEGADO: i64 = -16;
 }
 
 /// As superfícies do compositor, como um processo as vê.

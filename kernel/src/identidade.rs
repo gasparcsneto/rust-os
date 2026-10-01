@@ -74,6 +74,9 @@ pub struct Agente {
     pub chave: [u8; TAM_CHAVE],
     pub nome: String,
     pub origem: Origem,
+    /// O papel, que a política define. Sem papel, o agente entra e não pode
+    /// nada: `DENY_ROLE`.
+    pub papel: Option<String>,
 }
 
 /// Um administrador.
@@ -81,6 +84,10 @@ pub struct Agente {
 pub struct Administrador {
     pub chave: [u8; TAM_CHAVE],
     pub nome: String,
+    /// O papel dele: o teto do que ele delega, e as operações
+    /// administrativas que pode. Só a imagem o define — não muda em tempo
+    /// de execução.
+    pub papel: Option<String>,
 }
 
 struct Identidade {
@@ -123,15 +130,16 @@ pub fn carregar() {
 
     let agentes: Vec<Agente> = ler_arquivo(CAMINHO_DOS_AGENTES)
         .into_iter()
-        .map(|(chave, nome)| Agente {
+        .map(|(chave, nome, papel)| Agente {
             chave,
             nome,
             origem: Origem::Imagem,
+            papel,
         })
         .collect();
     let administradores: Vec<Administrador> = ler_arquivo(CAMINHO_DOS_ADMINISTRADORES)
         .into_iter()
-        .map(|(chave, nome)| Administrador { chave, nome })
+        .map(|(chave, nome, papel)| Administrador { chave, nome, papel })
         .collect();
 
     if let Some(c) = &chave {
@@ -157,7 +165,7 @@ pub fn carregar() {
 /// outras entram. Recusar o arquivo inteiro por uma linha deixaria todo
 /// agente de fora por um erro de digitação em outro — e um arquivo ausente é
 /// um registro vazio, e não um erro: é o estado de uma máquina sem agentes.
-fn ler_arquivo(caminho: &str) -> Vec<([u8; TAM_CHAVE], String)> {
+fn ler_arquivo(caminho: &str) -> Vec<([u8; TAM_CHAVE], String, Option<String>)> {
     let Ok(bytes) = crate::vfs::ler_tudo(caminho) else {
         crate::log_info!("agent", "{} nao existe: nenhuma chave dali", caminho);
         return Vec::new();
@@ -169,16 +177,16 @@ fn ler_arquivo(caminho: &str) -> Vec<([u8; TAM_CHAVE], String)> {
     let mut entradas = Vec::new();
     for (i, linha) in texto.lines().enumerate() {
         match registro::ler_linha(linha) {
-            Ok(Some((chave, nome))) => {
+            Ok(Some((chave, nome, papel))) => {
                 if entradas.len() >= MAIOR_REGISTRO {
                     crate::log_warn!("agent", "{}: mais de {} chaves", caminho, MAIOR_REGISTRO);
                     break;
                 }
-                if entradas.iter().any(|(c, _)| *c == chave) {
+                if entradas.iter().any(|(c, _, _)| *c == chave) {
                     crate::log_warn!("agent", "{}:{}: chave repetida, ignorada", caminho, i + 1);
                     continue;
                 }
-                entradas.push((chave, String::from(nome)));
+                entradas.push((chave, String::from(nome), papel.map(String::from)));
             }
             Ok(None) => {}
             Err(e) => avisar_linha(caminho, i + 1, e),
@@ -240,6 +248,59 @@ pub fn administrador(chave: &[u8; TAM_CHAVE]) -> Option<String> {
     })
 }
 
+/// O papel do agente com esta chave. `None` se a chave não está no
+/// registro — foi revogada — ou não tem papel.
+pub fn papel_do_agente(chave: &[u8; TAM_CHAVE]) -> Option<String> {
+    crate::arch::sem_interrupcoes(|| {
+        IDENTIDADE
+            .lock()
+            .agentes
+            .iter()
+            .find(|a| a.chave == *chave)
+            .and_then(|a| a.papel.clone())
+    })
+}
+
+/// O nome e o papel do administrador com esta chave.
+pub fn papel_do_administrador(chave: &[u8; TAM_CHAVE]) -> Option<(String, Option<String>)> {
+    crate::arch::sem_interrupcoes(|| {
+        IDENTIDADE
+            .lock()
+            .administradores
+            .iter()
+            .find(|a| a.chave == *chave)
+            .map(|a| (a.nome.clone(), a.papel.clone()))
+    })
+}
+
+/// Os papéis dos administradores: os que nenhuma mudança em tempo de
+/// execução pode tocar.
+pub fn papeis_dos_administradores() -> Vec<String> {
+    crate::arch::sem_interrupcoes(|| {
+        let mut papeis: Vec<String> = IDENTIDADE
+            .lock()
+            .administradores
+            .iter()
+            .filter_map(|a| a.papel.clone())
+            .collect();
+        papeis.sort();
+        papeis.dedup();
+        papeis
+    })
+}
+
+/// A chave do agente com este nome.
+pub fn chave_do_agente(nome: &str) -> Option<[u8; TAM_CHAVE]> {
+    crate::arch::sem_interrupcoes(|| {
+        IDENTIDADE
+            .lock()
+            .agentes
+            .iter()
+            .find(|a| a.nome == nome)
+            .map(|a| a.chave)
+    })
+}
+
 /// Por que um registro foi recusado.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Recusa {
@@ -252,6 +313,8 @@ pub enum Recusa {
     NomeRepetido,
     /// O registro está no teto.
     Cheio,
+    /// Não há agente com esta chave, ou com este nome.
+    Desconhecido,
 }
 
 impl Recusa {
@@ -261,13 +324,14 @@ impl Recusa {
             Recusa::ChaveRepetida => "chave ja registrada",
             Recusa::NomeRepetido => "nome ja usado por outra chave",
             Recusa::Cheio => "registro cheio",
+            Recusa::Desconhecido => "agente desconhecido",
         }
     }
 }
 
 /// Registra um agente. Só [`crate::agent::administracao`] chama, depois de a
 /// prova conferir.
-pub fn registrar(chave: [u8; TAM_CHAVE], nome: &str) -> Result<(), Recusa> {
+pub fn registrar(chave: [u8; TAM_CHAVE], nome: &str, papel: &str) -> Result<(), Recusa> {
     if !registro::nome_valido(nome) {
         return Err(Recusa::Nome);
     }
@@ -286,7 +350,36 @@ pub fn registrar(chave: [u8; TAM_CHAVE], nome: &str) -> Result<(), Recusa> {
             chave,
             nome: String::from(nome),
             origem: Origem::Administracao,
+            papel: Some(String::from(papel)),
         });
+        Ok(())
+    })
+}
+
+/// Tira um agente do registro. Devolve o nome dele. As sessões vivas da
+/// chave quem encerra é quem chama — ver [`crate::agent::administracao`].
+pub fn revogar(chave: &[u8; TAM_CHAVE]) -> Result<String, Recusa> {
+    crate::arch::sem_interrupcoes(|| {
+        let mut id = IDENTIDADE.lock();
+        let i = id
+            .agentes
+            .iter()
+            .position(|a| a.chave == *chave)
+            .ok_or(Recusa::Desconhecido)?;
+        Ok(id.agentes.remove(i).nome)
+    })
+}
+
+/// Troca o papel de um agente, pelo nome.
+pub fn atribuir(nome: &str, papel: &str) -> Result<(), Recusa> {
+    crate::arch::sem_interrupcoes(|| {
+        let mut id = IDENTIDADE.lock();
+        let agente = id
+            .agentes
+            .iter_mut()
+            .find(|a| a.nome == nome)
+            .ok_or(Recusa::Desconhecido)?;
+        agente.papel = Some(String::from(papel));
         Ok(())
     })
 }
@@ -310,13 +403,14 @@ const ADMINISTRADOR_DE_TESTE: &str = "administrador-de-teste";
 /// administrador da imagem — e não deveria ter —, e precisa de uma para
 /// provar operações.
 #[cfg(feature = "modo-teste")]
-pub fn registrar_administrador_de_teste(chave: [u8; TAM_CHAVE]) {
+pub fn registrar_administrador_de_teste(chave: [u8; TAM_CHAVE], papel: &str) {
     crate::arch::sem_interrupcoes(|| {
         let mut id = IDENTIDADE.lock();
         if !id.administradores.iter().any(|a| a.chave == chave) {
             id.administradores.push(Administrador {
                 chave,
                 nome: String::from(ADMINISTRADOR_DE_TESTE),
+                papel: Some(String::from(papel)),
             });
         }
     });
@@ -325,20 +419,16 @@ pub fn registrar_administrador_de_teste(chave: [u8; TAM_CHAVE]) {
 /// Registra um agente direto, sem prova, para a suíte montar as sessões
 /// dela. O caminho com prova tem os casos próprios.
 #[cfg(feature = "modo-teste")]
-pub fn registrar_agente_de_teste(chave: [u8; TAM_CHAVE], nome: &str) {
-    let _ = registrar(chave, nome);
+pub fn registrar_agente_de_teste(chave: [u8; TAM_CHAVE], nome: &str, papel: &str) {
+    let _ = registrar(chave, nome, papel);
 }
 
-/// Esquece o que a suíte registrou em tempo de execução: os agentes e os
-/// administradores dela. O caso seguinte encontra o registro da imagem.
+/// Devolve o registro ao que a imagem diz: relê os arquivos. O que a suíte
+/// registrou, revogou ou mudou de papel volta ao que era. O caso seguinte
+/// encontra o registro da imagem.
 #[cfg(feature = "modo-teste")]
 pub fn esquecer_registrados() {
-    crate::arch::sem_interrupcoes(|| {
-        let mut id = IDENTIDADE.lock();
-        id.agentes.retain(|a| a.origem == Origem::Imagem);
-        id.administradores
-            .retain(|a| a.nome != ADMINISTRADOR_DE_TESTE);
-    });
+    carregar();
 }
 
 // ---------------------------------------------------------------------------

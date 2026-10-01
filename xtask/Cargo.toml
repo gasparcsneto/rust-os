@@ -15,6 +15,10 @@ protocolo = { path = "../protocolo" }
 # dele, e o formato dos arquivos de chaves que o `xtask` grava na imagem.
 sigilo = { path = "../sigilo" }
 
+# A política padrão que vai para a imagem, e a conferência da cadeia de
+# auditoria que a fumaça recalcula do lado de fora.
+politica = { path = "../politica" }
+
 # De fora, nenhuma. O `xtask` monta o disco com as ferramentas do hospedeiro —
 # `sgdisk`, `mkfs.vfat`, `mcopy`, `mkfs.btrfs` — e o que boota é o iniciador
 # deste projeto, compilado como mais um alvo.

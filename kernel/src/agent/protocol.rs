@@ -85,6 +85,27 @@ impl RpcError {
         codigo: -32001,
         mensagem: "bytes perdidos no caminho; a requisicao foi descartada",
     };
+    /// A política recusou o pedido. O `data` da resposta é o código da
+    /// recusa (`DENY_PERMISSION`, `DENY_RESOURCE`…), o mesmo que a auditoria
+    /// grava — ver [`crate::autorizacao`].
+    pub const NEGADO: Self = Self {
+        codigo: -32010,
+        mensagem: "operacao negada pela politica",
+    };
+    /// A sessão passou da taxa do papel dela. Separado do [`Self::NEGADO`]
+    /// porque o remédio é outro: esperar e repetir, e não pedir permissão.
+    pub const LIMITE_DE_TAXA: Self = Self {
+        codigo: -32011,
+        mensagem: "taxa de pedidos do papel esgotada",
+    };
+
+    /// O erro de uma recusa da política, com o código dela como `data`.
+    pub fn da_recusa(codigo: politica::Codigo) -> Self {
+        match codigo {
+            politica::Codigo::RateLimit => Self::LIMITE_DE_TAXA,
+            _ => Self::NEGADO,
+        }
+    }
 }
 
 /// Uma requisição já decomposta, com todos os campos emprestando da linha

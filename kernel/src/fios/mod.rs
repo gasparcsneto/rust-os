@@ -206,6 +206,13 @@ struct Fio {
     /// guardado para uma pergunta que ainda não foi feita. Ver
     /// [`recolher_terminados`].
     colhido: bool,
+    /// Com que autoridade este fio age: a de quem o lançou.
+    ///
+    /// Mora aqui pelo mesmo motivo dos descritores: morre com o processo, e
+    /// a bifurcação a herda sem uma linha a mais — um filho de um processo
+    /// que um agente lançou é tão desse agente quanto o pai. É `Copy`, sem
+    /// nada no heap, porque é copiada com a trava do escalonador na mão.
+    autoridade: crate::autorizacao::Autoridade,
 }
 
 impl Fio {
@@ -300,6 +307,7 @@ pub fn init() {
             pai: None,
             saida: None,
             colhido: false,
+            autoridade: crate::autorizacao::Autoridade::Sistema,
         });
         e.atual = 0;
         e.quantum = QUANTUM_EM_TIQUES;
@@ -468,7 +476,30 @@ pub fn criar(
     entrada: extern "C" fn(u64) -> !,
     argumento: u64,
 ) -> Result<IdFio, &'static str> {
-    nascer(nome, Nascimento::Funcao { entrada, argumento })
+    criar_como(
+        nome,
+        entrada,
+        argumento,
+        crate::autorizacao::Autoridade::Sistema,
+    )
+}
+
+/// Cria um fio que age com a autoridade de outro: um processo que um agente
+/// lançou age como o agente — ver [`crate::autorizacao::autorizar_processo`].
+pub fn criar_como(
+    nome: &'static str,
+    entrada: extern "C" fn(u64) -> !,
+    argumento: u64,
+    autoridade: crate::autorizacao::Autoridade,
+) -> Result<IdFio, &'static str> {
+    nascer(
+        nome,
+        Nascimento::Funcao {
+            entrada,
+            argumento,
+            autoridade,
+        },
+    )
 }
 
 /// Como um fio novo recebe o primeiro contexto.
@@ -477,10 +508,12 @@ pub fn criar(
 /// escolher a vaga, mapear a pilha, instalar — é idêntico, e é por isso que
 /// elas compartilham [`nascer`] em vez de duplicá-lo.
 enum Nascimento {
-    /// Um fio do kernel, que começa entrando numa função Rust.
+    /// Um fio do kernel, que começa entrando numa função Rust, com a
+    /// autoridade que quem o criou lhe deu.
     Funcao {
         entrada: extern "C" fn(u64) -> !,
         argumento: u64,
+        autoridade: crate::autorizacao::Autoridade,
     },
     /// Um filho de `fork`, que começa **retornando** da chamada de sistema que
     /// o pai fez, com o espaço de endereços que o pai lhe deu.
@@ -545,7 +578,7 @@ fn nascer(nome: &'static str, nascimento: Nascimento) -> Result<IdFio, &'static 
     //
     // Um fio do kernel não herda de ninguém — ele começa com a tabela
     // padrão, que é o que `criar` quer dizer.
-    let (vaga, ocupante_morto, herdada, pai) = com_escalonador(|e| {
+    let (vaga, ocupante_morto, herdada, pai, autoridade) = com_escalonador(|e| {
         let vaga = e.vaga_livre()?;
         // O parentesco sai da mesma seção crítica que a tabela de
         // descritores, e pelo mesmo motivo: as duas descrevem a relação com
@@ -555,12 +588,24 @@ fn nascer(nome: &'static str, nascimento: Nascimento) -> Result<IdFio, &'static 
         // Só a bifurcação cria filho. `criar` faz um fio do kernel, que não
         // é de ninguém — e é isso que mantém o coletor recolhendo os fios da
         // suíte como sempre recolheu.
-        let (herdada, pai) = match nascimento {
+        // A autoridade também: a do pai numa bifurcação, a dada numa
+        // criação. Um filho sem pai legível fica com a de sistema só se
+        // nasceu de `criar`; de uma bifurcação, sem pai não há o que herdar,
+        // e a de sessão nenhuma — a serial sem chave — é a menor que há.
+        let (herdada, pai, autoridade) = match nascimento {
             Nascimento::Bifurcacao { .. } => match e.fios[e.atual].as_ref() {
-                Some(pai) => (pai.descritores.clone(), Some(pai.id)),
-                None => (Default::default(), None),
+                Some(pai) => (pai.descritores.clone(), Some(pai.id), pai.autoridade),
+                None => (
+                    Default::default(),
+                    None,
+                    crate::autorizacao::Autoridade::NENHUMA,
+                ),
             },
-            Nascimento::Funcao { .. } => (crate::usuario::descritores::Tabela::nova(), None),
+            Nascimento::Funcao { autoridade, .. } => (
+                crate::usuario::descritores::Tabela::nova(),
+                None,
+                autoridade,
+            ),
         };
         let anterior = e.fios[vaga].take();
         e.fios[vaga] = Some(Fio {
@@ -575,8 +620,9 @@ fn nascer(nome: &'static str, nascimento: Nascimento) -> Result<IdFio, &'static 
             pai,
             saida: None,
             colhido: false,
+            autoridade,
         });
-        Ok::<_, &'static str>((vaga, anterior, herdada, pai))
+        Ok::<_, &'static str>((vaga, anterior, herdada, pai, autoridade))
     })?;
 
     // O fio morto que ocupava a vaga morre aqui fora: o `Drop` da pilha dele
@@ -612,7 +658,9 @@ fn nascer(nome: &'static str, nascimento: Nascimento) -> Result<IdFio, &'static 
 
     let mut contexto = Contexto::vazio();
     let espaco = match nascimento {
-        Nascimento::Funcao { entrada, argumento } => {
+        Nascimento::Funcao {
+            entrada, argumento, ..
+        } => {
             // SAFETY: a pilha foi mapeada agora e pertence exclusivamente a
             // este fio; `topo` é o endereço logo acima dela, alinhado em
             // página.
@@ -644,6 +692,7 @@ fn nascer(nome: &'static str, nascimento: Nascimento) -> Result<IdFio, &'static 
             pai,
             saida: None,
             colhido: false,
+            autoridade,
         })
     });
     drop(marcador);
@@ -811,6 +860,16 @@ pub fn adotar_espaco(espaco: crate::paginacao::Espaco) -> Option<crate::paginaca
 #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub fn ceder() {
     crate::arch::ceder_cpu();
+}
+
+/// A autoridade do fio que está executando — ver [`Fio::autoridade`].
+pub fn autoridade_atual() -> crate::autorizacao::Autoridade {
+    com_escalonador(|e| {
+        e.fios[e.atual]
+            .as_ref()
+            .map(|f| f.autoridade)
+            .unwrap_or(crate::autorizacao::Autoridade::NENHUMA)
+    })
 }
 
 /// O identificador do fio que está executando.

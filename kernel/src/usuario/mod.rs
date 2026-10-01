@@ -45,6 +45,8 @@ pub mod programa;
 use alloc::string::String;
 use core::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
+use politica::Permissao;
+
 // A ABI com os programas — os números das chamadas, os erros e o mapa do
 // espaço do usuário — é declarada uma vez só, no pacote que os programas
 // também incluem. Ver `protocolo::usuario`.
@@ -549,6 +551,14 @@ fn abrir(ponteiro: u64, tamanho: u64) -> i64 {
         return erro::NAO_ENCONTRADO;
     };
 
+    // Antes de resolver: um processo que um agente lançou abre o que o papel
+    // do agente lê, e nada mais. Decidir antes de olhar o disco também não
+    // conta a quem foi recusado se o caminho existe.
+    if !crate::autorizacao::autorizar_processo(Permissao::FsRead, caminho, "fs.open").permite() {
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return erro::NEGADO;
+    }
+
     let vnode = match crate::vfs::resolver(caminho) {
         Ok(vnode) => vnode,
         Err(_) => {
@@ -833,6 +843,13 @@ const BYTES_DO_TERMINAL: usize = 512;
 /// ouve o canal, e um processo que apontasse o canal de outro faria o kernel
 /// acordar um processo alheio a cada linha impressa.
 fn terminal(canal: u64) -> i64 {
+    // O pseudo-terminal é a linha de comando da pessoa: o que se digita nele
+    // roda com a presença física dela. Um processo que um agente lançou não
+    // o abre — nem quando ele está livre, com a janela do Terminal fechada.
+    if !crate::autorizacao::autorizar_so_sistema("terminal.open").permite() {
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return erro::NEGADO;
+    }
     let fio = crate::fios::id_atual();
     let Some(Some(descritores::Alvo::Eventos { chave: canal })) =
         crate::fios::com_descritores(|t| t.alvo(canal))
@@ -1208,6 +1225,15 @@ unsafe fn executar(quadro: *mut core::ffi::c_void, ponteiro: u64, tamanho: u64) 
         alloc::format!("{}/{}", crate::vfs::DIRETORIO_DOS_PROGRAMAS, nome)
     };
 
+    // A decisão é sobre o caminho já resolvido: um nome sem barra vira o de
+    // `/bin`, e é esse que a política confere.
+    if !crate::autorizacao::autorizar_processo(Permissao::ProcessRun, &caminho, "process.exec")
+        .permite()
+    {
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return erro::NEGADO;
+    }
+
     let imagem = match crate::vfs::ler_tudo(&caminho) {
         Ok(bytes) => bytes,
         Err(motivo) => {
@@ -1280,6 +1306,15 @@ unsafe fn executar(quadro: *mut core::ffi::c_void, ponteiro: u64, tamanho: u64) 
 /// caminho do primeiro antes de ele ler. O ponteiro não tem essa pergunta,
 /// porque cada fio recebe o dele.
 pub fn lancar(caminho: Option<&str>) -> Result<u64, &'static str> {
+    lancar_como(caminho, crate::autorizacao::Autoridade::Sistema)
+}
+
+/// Como [`lancar`], com a autoridade de quem pediu: um processo que um
+/// agente lança age como o agente — ver [`crate::fios::criar_como`].
+pub fn lancar_como(
+    caminho: Option<&str>,
+    autoridade: crate::autorizacao::Autoridade,
+) -> Result<u64, &'static str> {
     extern "C" fn hospedar(argumento: u64) -> ! {
         let imagem = if argumento == 0 {
             alloc::borrow::Cow::Borrowed(exemplo::bytes())
@@ -1327,7 +1362,7 @@ pub fn lancar(caminho: Option<&str>) -> Result<u64, &'static str> {
         }
     };
 
-    match crate::fios::criar("usuario", hospedar, argumento) {
+    match crate::fios::criar_como("usuario", hospedar, argumento, autoridade) {
         Ok(id) => Ok(id.numero()),
         Err(motivo) => {
             // O fio não nasceu, então ninguém vai reconstruir a caixa. Largá-la

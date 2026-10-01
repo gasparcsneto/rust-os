@@ -5452,7 +5452,10 @@ fn terminal_operado() -> Resultado {
     )
     .map_err(|_| "o comando do agente nao chegou a linha de comando do terminal")?;
     // Pelo agente da sessão 3: o número atravessa a ação, o Terminal e o
-    // pseudo-terminal até o log do interpretador.
+    // pseudo-terminal até o log do interpretador — e até o ponto de decisão,
+    // que decide como a sessão 3. Ela não tem aperto: a linha é recusada,
+    // e a recusa aparece no Terminal. O Terminal não é atalho para o que o
+    // canal recusaria.
     crate::ui::agir(linha, Acao::Confirmar, None, Origem::Agente(3))?;
     esperar_ate(
         || {
@@ -5462,6 +5465,46 @@ fn terminal_operado() -> Resultado {
         600,
     )
     .map_err(|_| "o confirm do agente no terminal nao executou, ou o log nao diz que foi ele")?;
+    let na_grade = |texto: &str| {
+        crate::superficies::com_descricao(camada.id, |d| {
+            d.elementos.iter().any(|e| {
+                e.rotulo == "terminal" && e.valor.as_deref().is_some_and(|v| v.contains(texto))
+            })
+        })
+        .unwrap_or(false)
+    };
+    esperar_ate(
+        || {
+            atender();
+            na_grade("negado: DENY_NOT_AUTHENTICATED")
+        },
+        600,
+    )
+    .map_err(|_| "a linha de uma sessao sem aperto nao foi recusada no terminal")?;
+    // E pela sessão 0, a serial, com o papel dela: a resposta aparece.
+    crate::ui::agir(
+        linha,
+        Acao::DefinirValor,
+        Some("agent.ping"),
+        Origem::Agente(0),
+    )?;
+    esperar_ate(
+        || {
+            atender();
+            valor_da_linha().as_deref() == Some("agent.ping")
+        },
+        600,
+    )
+    .map_err(|_| "o segundo comando do agente nao chegou a linha de comando do terminal")?;
+    crate::ui::agir(linha, Acao::Confirmar, None, Origem::Agente(0))?;
+    esperar_ate(
+        || {
+            atender();
+            executado("agent.ping", 0)
+        },
+        600,
+    )
+    .map_err(|_| "o confirm da sessao 0 no terminal nao executou")?;
     let pong = || {
         crate::superficies::com_descricao(camada.id, |d| {
             d.elementos.iter().any(|e| {
@@ -10374,6 +10417,11 @@ impl AgenteDeTeste {
 
 use alloc::string::String;
 
+/// O papel dos agentes de teste: o de sistema, para que os casos do canal
+/// exercitem os comandos, e não a política. Os casos da política registram
+/// os papéis que querem conferir.
+const PAPEL_DE_TESTE: &str = "sistema";
+
 /// Registra os agentes de teste, roda `f` com as portas capturadas, e
 /// devolve tudo como estava: sessões, registro e capturas.
 fn com_agentes_de_teste(f: impl FnOnce() -> Resultado) -> Resultado {
@@ -10382,6 +10430,7 @@ fn com_agentes_de_teste(f: impl FnOnce() -> Resultado) -> Resultado {
         crate::identidade::registrar_agente_de_teste(
             sigilo::publica_de(&chave_de_teste(p)),
             &nome_de_teste(p),
+            PAPEL_DE_TESTE,
         );
         console::capturar(p, true);
     }
@@ -10781,6 +10830,25 @@ fn executar_admin(
     prova_de: &str,
     parametros: &str,
 ) -> Result<alloc::string::String, &'static str> {
+    executar_admin_de(
+        sessao,
+        desafio,
+        chave,
+        "agent.register",
+        prova_de,
+        parametros,
+    )
+}
+
+/// Como [`executar_admin`], para qualquer operação.
+fn executar_admin_de(
+    sessao: u8,
+    desafio: (u64, [u8; 32], [u8; 32]),
+    chave: &[u8; 32],
+    comando: &str,
+    prova_de: &str,
+    parametros: &str,
+) -> Result<alloc::string::String, &'static str> {
     let (id, nonce, efemera) = desafio;
     let publica = sigilo::publica_de(chave);
     let contexto = sigilo::administracao::Contexto {
@@ -10788,7 +10856,7 @@ fn executar_admin(
         sessao,
         administrador: &publica,
         efemera: &efemera,
-        comando: "agent.register",
+        comando,
         parametros: prova_de,
     };
     let prova = sigilo::administracao::provar(chave, &contexto).map_err(|_| "sem prova")?;
@@ -10800,7 +10868,7 @@ fn executar_admin(
         escapado.push(c);
     }
     let pedido = alloc::format!(
-        r#"{{"challenge":{id},"command":"agent.register","params":"{escapado}","admin":"{}","proof":"{}"}}"#,
+        r#"{{"challenge":{id},"command":"{comando}","params":"{escapado}","admin":"{}","proof":"{}"}}"#,
         sigilo::hex(&publica),
         sigilo::hex(&prova)
     );
@@ -10817,9 +10885,15 @@ fn executar_admin(
 /// entra sem prova.
 fn admin_registro_exige_prova() -> Resultado {
     let novo = sigilo::publica_de(&[0x77; 32]);
-    let parametros = alloc::format!(r#"{{"key":"{}","name":"novo"}}"#, sigilo::hex(&novo));
+    let parametros = alloc::format!(
+        r#"{{"key":"{}","name":"novo","role":"observador"}}"#,
+        sigilo::hex(&novo)
+    );
     let resultado = (|| -> Resultado {
-        crate::identidade::registrar_administrador_de_teste(sigilo::publica_de(&ADMIN_DE_TESTE));
+        crate::identidade::registrar_administrador_de_teste(
+            sigilo::publica_de(&ADMIN_DE_TESTE),
+            "administrador",
+        );
 
         // Sem administrador registrado para a chave: recusado.
         let r = executar_admin(0, desafio()?, &[0x42; 32], &parametros, &parametros)?;
@@ -10866,6 +10940,858 @@ fn admin_registro_exige_prova() -> Resultado {
         Ok(())
     })();
     crate::identidade::esquecer_registrados();
+    resultado
+}
+
+// ---------------------------------------------------------------------------
+// politica: o ponto único de decisão, os papéis, a taxa, a auditoria
+// ---------------------------------------------------------------------------
+
+/// Um pedido pelo canal cifrado de uma porta, e a resposta dele.
+fn pela_porta(
+    agente: &mut AgenteDeTeste,
+    sessao: &mut crate::agent::SessaoDeTeste,
+    metodo: &str,
+    params: &str,
+) -> Result<alloc::string::String, &'static str> {
+    agente.pedir(
+        sessao,
+        &alloc::format!(r#"{{"jsonrpc":"2.0","id":31,"method":"{metodo}","params":{params}}}"#),
+    )?;
+    let mut respostas = agente.respostas();
+    if respostas.len() != 1 {
+        crate::log_error!("teste", "{}: {:?}", metodo, respostas);
+        return Err("o pedido pela porta nao teve uma resposta so");
+    }
+    Ok(respostas.remove(0))
+}
+
+/// A resposta é a recusa da política com este código.
+fn recusado_com(resposta: &str, codigo: &str) -> bool {
+    let rpc = if codigo == "RATE_LIMIT" {
+        -32011
+    } else {
+        -32010
+    };
+    resposta.contains(&alloc::format!(r#""code":{rpc}"#))
+        && resposta.contains(&alloc::format!(r#""data":"{codigo}""#))
+}
+
+/// O último registro da auditoria.
+fn ultimo_registro() -> Option<politica::auditoria::Registro> {
+    crate::autorizacao::com_auditoria(|c| c.ultimos(1).next().cloned()).flatten()
+}
+
+/// Um agente de teste conectado na porta `p`, com a captura ligada.
+fn conectado(p: u8) -> Result<(AgenteDeTeste, crate::agent::SessaoDeTeste), &'static str> {
+    let mut sessao = crate::agent::SessaoDeTeste::porta(p);
+    let agente = AgenteDeTeste::conectar(p, &mut sessao, &chave_de_teste(p))?;
+    if agente.transporte.is_none() {
+        crate::log_error!("teste", "porta {}: recusa {:?}", p, agente.recusa);
+        return Err("um agente de teste registrado nao completou o aperto");
+    }
+    Ok((agente, sessao))
+}
+
+/// A matriz aprovada, pelo canal de verdade: cada linha decide pelo papel do
+/// agente da sessão, a resposta diz o código, e a auditoria grava quem, o
+/// quê e o código.
+///
+/// # O que este caso protege
+///
+/// A cadeia identidade → sessão → papel → permissão → operação, no kernel:
+/// o papel é o do registro **agora** — trocado entre um pedido e outro —, a
+/// permissão é a que o comando declara, e o recurso é o caminho já na forma
+/// normal, com o diretório reservado fora do alcance de qualquer papel.
+fn politica_a_matriz_pelo_canal() -> Resultado {
+    com_agentes_de_teste(|| {
+        let (mut agente, mut sessao) = conectado(1)?;
+        let nome = nome_de_teste(1);
+        // (papel, método, parâmetros, recusa esperada — `None` se passa)
+        let linhas: &[(&str, &str, &str, Option<&str>)] = &[
+            ("observador", "system.info", "{}", None),
+            (
+                "observador",
+                "fs.list",
+                r#"{"path":"/bin"}"#,
+                Some("DENY_PERMISSION"),
+            ),
+            (
+                "observador",
+                "ui.act",
+                r#"{"id":1,"action":"press"}"#,
+                Some("DENY_PERMISSION"),
+            ),
+            ("operador", "fs.list", r#"{"path":"/bin"}"#, None),
+            (
+                "operador",
+                "fs.read",
+                r#"{"path":"/etc/duke/agentes"}"#,
+                Some("DENY_RESOURCE"),
+            ),
+            (
+                "operador",
+                "fs.read",
+                r#"{"path":"/bin/../etc/duke/agentes"}"#,
+                Some("DENY_RESOURCE"),
+            ),
+            (
+                "operador",
+                "fs.list",
+                r#"{"path":"/binario"}"#,
+                Some("DENY_RESOURCE"),
+            ),
+            ("operador", "keyboard.read", "{}", Some("DENY_PERMISSION")),
+            (
+                "operador",
+                "disk.read",
+                r#"{"sector":0}"#,
+                Some("DENY_PERMISSION"),
+            ),
+            (
+                "operador",
+                "debug.trigger",
+                r#"{"kind":"fatal"}"#,
+                Some("DENY_PERMISSION"),
+            ),
+            ("operador", "audit.head", "{}", Some("DENY_PERMISSION")),
+            (
+                "operador",
+                "user.run",
+                r#"{"path":"/dados/x"}"#,
+                Some("DENY_RESOURCE"),
+            ),
+            (
+                "sistema",
+                "fs.read",
+                r#"{"path":"/etc/duke/privado/chave"}"#,
+                Some("DENY_RESOURCE"),
+            ),
+            (
+                "sistema",
+                "fs.read",
+                r#"{"path":"/etc/duke/agentes"}"#,
+                None,
+            ),
+            ("sistema", "audit.head", "{}", None),
+            ("sistema", "policy.show", "{}", None),
+            ("fantasma", "agent.ping", "{}", Some("DENY_ROLE")),
+        ];
+        for (papel, metodo, params, recusa) in linhas {
+            crate::identidade::atribuir(&nome, papel).map_err(|_| "a atribuicao falhou")?;
+            let r = pela_porta(&mut agente, &mut sessao, metodo, params)?;
+            let certo = match recusa {
+                Some(codigo) => recusado_com(&r, codigo),
+                None => r.contains(r#""result":"#),
+            };
+            if !certo {
+                crate::log_error!("teste", "{} {} {}: {}", papel, metodo, params, r);
+                return Err("uma linha da matriz nao decidiu como a politica manda");
+            }
+            // E a auditoria gravou exatamente esta decisão.
+            let reg = ultimo_registro().ok_or("a auditoria esta vazia")?;
+            let codigo = recusa.unwrap_or("ALLOW");
+            if reg.evento.metodo != *metodo
+                || reg.evento.codigo.nome() != codigo
+                || reg.evento.agente != nome
+                || reg.evento.papel != *papel
+                || reg.evento.sessao != 1
+                || reg.evento.chave != Some(sigilo::publica_de(&chave_de_teste(1)))
+            {
+                crate::log_error!("teste", "{} {}: {:?}", papel, metodo, reg.evento);
+                return Err("a auditoria nao gravou a decisao como ela foi");
+            }
+        }
+
+        // O recurso decidido é o que a operação usa: o valor cru. Um `..`
+        // escrito com escapes não é `..` para a decisão nem para o VFS — os
+        // dois veem o mesmo nome, que não existe —, e nada de fora do
+        // alcance volta.
+        crate::identidade::atribuir(&nome, "operador").map_err(|_| "a atribuicao falhou")?;
+        let r = pela_porta(
+            &mut agente,
+            &mut sessao,
+            "fs.read",
+            r#"{"path":"/bin/\u002e\u002e/etc/duke/agentes"}"#,
+        )?;
+        if r.contains("agente-1") {
+            crate::log_error!("teste", "{}", r);
+            return Err("um caminho com escapes leu fora do alcance do papel");
+        }
+        let reg = ultimo_registro().ok_or("a auditoria esta vazia")?;
+        if reg.evento.recurso != r"/bin/\u002e\u002e/etc/duke/agentes" {
+            crate::log_error!("teste", "{:?}", reg.evento);
+            return Err("a decisao nao foi sobre o valor cru que a operacao usa");
+        }
+
+        // O `user.run` de um operador: o programa roda com a autoridade
+        // dele — e o `autoridade` confere de dentro que foi recusado onde o
+        // papel manda.
+        let desde = crate::log::total_emitidos();
+        let caminho = alloc::format!("{}/autoridade", crate::usuario::DIRETORIO_DOS_COMPILADOS);
+        let r = pela_porta(
+            &mut agente,
+            &mut sessao,
+            "user.run",
+            &alloc::format!(r#"{{"path":"{caminho}"}}"#),
+        )?;
+        if !r.contains(r#""launched":true"#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o operador nao lancou um programa de /programas");
+        }
+        esperar_ate(
+            || {
+                let mut achou = false;
+                crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+                    achou |= r.seq >= desde
+                        && r.subsistema == "usuario"
+                        && r.mensagem() == "processo encerrou com codigo 72";
+                });
+                achou
+            },
+            600,
+        )
+        .map_err(|_| "o programa lancado pelo operador nao rodou com a autoridade dele")?;
+        Ok(())
+    })
+}
+
+/// O balde do papel: passou da rajada, `RATE_LIMIT`, com o erro próprio, e
+/// a auditoria grava o primeiro da sequência.
+fn politica_taxa_do_papel() -> Resultado {
+    let texto = politica::PADRAO.replace("taxa observador 20 40", "taxa observador 1 2");
+    let apertada = politica::Politica::ler(&texto).map_err(|_| "a politica do caso nao vale")?;
+    let resultado = com_agentes_de_teste(|| {
+        let (mut agente, mut sessao) = conectado(1)?;
+        crate::identidade::atribuir(&nome_de_teste(1), "observador")
+            .map_err(|_| "a atribuicao falhou")?;
+        crate::autorizacao::trocar_politica(apertada);
+        for _ in 0..2 {
+            let r = pela_porta(&mut agente, &mut sessao, "agent.ping", "{}")?;
+            if !r.contains(r#""result":"#) {
+                crate::log_error!("teste", "{}", r);
+                return Err("a rajada do papel nao passou");
+            }
+        }
+        let r = pela_porta(&mut agente, &mut sessao, "agent.ping", "{}")?;
+        if !recusado_com(&r, "RATE_LIMIT") {
+            crate::log_error!("teste", "{}", r);
+            return Err("passado da rajada, o pedido nao foi limitado");
+        }
+        let reg = ultimo_registro().ok_or("a auditoria esta vazia")?;
+        if reg.evento.codigo != politica::Codigo::RateLimit || reg.evento.metodo != "agent.ping" {
+            crate::log_error!("teste", "{:?}", reg.evento);
+            return Err("a recusa por taxa nao foi gravada");
+        }
+        // A segunda recusa seguida não grava outro registro: a enxurrada não
+        // empurra para fora do anel o que importa.
+        let seq = reg.seq;
+        let _ = pela_porta(&mut agente, &mut sessao, "agent.ping", "{}")?;
+        if ultimo_registro().map(|r| r.seq) != Some(seq) {
+            return Err("cada recusa por taxa virou um registro");
+        }
+        Ok(())
+    });
+    crate::autorizacao::carregar();
+    resultado
+}
+
+/// Um `admin.execute` de `comando`, com a prova calculada para `prova_de`
+/// e mandado com `parametros`, como a sessão `sessao`.
+fn executar_admin_com(
+    sessao: u8,
+    chave: &[u8; 32],
+    comando: &str,
+    prova_de: &str,
+    parametros: &str,
+) -> Result<alloc::string::String, &'static str> {
+    let d = crate::agent::sessao::com_sessao(sessao, desafio)?;
+    executar_admin_de(sessao, d, chave, comando, prova_de, parametros)
+}
+
+/// Executa uma operação e confere o código da recusa — ou, com `None`, que
+/// ela foi executada.
+fn admin_espera(
+    sessao: u8,
+    chave: &[u8; 32],
+    comando: &str,
+    parametros: &str,
+    recusa: Option<&str>,
+) -> Resultado {
+    let r = executar_admin_com(sessao, chave, comando, parametros, parametros)?;
+    let certo = match recusa {
+        Some(codigo) => {
+            r.contains(r#""executed":false"#) && r.contains(&alloc::format!(r#""code":"{codigo}""#))
+        }
+        None => r.contains(r#""executed":true"#),
+    };
+    if !certo {
+        crate::log_error!("teste", "{} {}: {}", comando, parametros, r);
+        return Err("uma operacao administrativa nao teve o desfecho que as regras mandam");
+    }
+    // E foi gravada, com o administrador e o código.
+    let reg = ultimo_registro().ok_or("a auditoria esta vazia")?;
+    if reg.evento.metodo != comando || reg.evento.codigo.nome() != recusa.unwrap_or("ALLOW") {
+        crate::log_error!("teste", "{:?}", reg.evento);
+        return Err("o desfecho administrativo nao foi gravado");
+    }
+    Ok(())
+}
+
+/// Revogar derruba as sessões vivas da chave, na hora, com a recusa — e
+/// ninguém revoga a chave da própria sessão, nem quem pode mais do que ele.
+fn politica_revogar_derruba_a_sessao() -> Resultado {
+    let resultado = com_agentes_de_teste(|| {
+        crate::identidade::registrar_administrador_de_teste(
+            sigilo::publica_de(&ADMIN_DE_TESTE),
+            "administrador",
+        );
+        let (mut um, mut s1) = conectado(1)?;
+        let (mut dois, mut s2) = conectado(2)?;
+        for p in [1, 2] {
+            crate::identidade::atribuir(&nome_de_teste(p), "operador")
+                .map_err(|_| "a atribuicao falhou")?;
+        }
+        let chave = |p: u8| sigilo::hex(&sigilo::publica_de(&chave_de_teste(p)));
+
+        // Da sessão 1, a chave da sessão 1: não.
+        admin_espera(
+            1,
+            &ADMIN_DE_TESTE,
+            "agent.revoke",
+            &alloc::format!(r#"{{"key":"{}"}}"#, chave(1)),
+            Some("DENY_POLICY"),
+        )?;
+        // Um agente de sistema: o papel dele não cabe no do administrador.
+        admin_espera(
+            0,
+            &ADMIN_DE_TESTE,
+            "agent.revoke",
+            &alloc::format!(r#"{{"key":"{}"}}"#, chave(3)),
+            Some("DENY_POLICY"),
+        )?;
+        // O agente da porta 2, da serial: revogado, e a sessão cai agora.
+        let r = executar_admin_com(
+            0,
+            &ADMIN_DE_TESTE,
+            "agent.revoke",
+            &alloc::format!(r#"{{"key":"{}"}}"#, chave(2)),
+            &alloc::format!(r#"{{"key":"{}"}}"#, chave(2)),
+        )?;
+        if !r.contains(r#""executed":true"#) || !r.contains(r#""sessions_closed":[2]"#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("a revogacao nao encerrou a sessao viva da chave");
+        }
+        let _ = dois.respostas();
+        if dois.recusa.as_deref() != Some("chave revogada") {
+            crate::log_error!("teste", "recusa: {:?}", dois.recusa);
+            return Err("o agente revogado nao recebeu a recusa");
+        }
+        if crate::sessoes::identidade(2).is_some()
+            || crate::identidade::agente(&sigilo::publica_de(&chave_de_teste(2))).is_some()
+        {
+            return Err("a chave revogada continuou no registro ou na sessao");
+        }
+        // O que ela mandar depois não tem resposta: nem a recusa de novo.
+        let q = dois.quadro(&alloc::format!("{}\n", pedido_de_sessao(77)))?;
+        crate::virtio::console::simular(2, &q);
+        s2.atender();
+        if !crate::virtio::console::capturado(2).is_empty() {
+            return Err("a porta da chave revogada respondeu depois da recusa");
+        }
+        // Uma chave que sai do registro por outro caminho, com a sessão de
+        // pé: o pedido seguinte dela já não é autenticado.
+        crate::identidade::revogar(&sigilo::publica_de(&chave_de_teste(1)))
+            .map_err(|_| "a revogacao de teste falhou")?;
+        let r = pela_porta(&mut um, &mut s1, "agent.ping", "{}")?;
+        if !recusado_com(&r, "DENY_NOT_AUTHENTICATED") {
+            crate::log_error!("teste", "{}", r);
+            return Err("uma sessao de chave revogada continuou autenticada");
+        }
+        Ok(())
+    });
+    crate::identidade::esquecer_registrados();
+    resultado
+}
+
+/// Ninguém se dá mais do que tem: nem o próprio papel, nem um papel maior
+/// que o seu, nem a política de quem administra.
+///
+/// # O que este caso protege
+///
+/// As regras de não-autoprivilegiamento de `policy.assign`, `policy.write` e
+/// `agent.register`, cada uma pela operação de verdade, com a prova — e que
+/// uma mudança da política vale na decisão seguinte, e só em memória.
+fn politica_nao_autoprivilegia() -> Resultado {
+    let resultado = com_agentes_de_teste(|| {
+        crate::identidade::registrar_administrador_de_teste(
+            sigilo::publica_de(&ADMIN_DE_TESTE),
+            "administrador",
+        );
+        let (_um, _s1) = conectado(1)?;
+        crate::identidade::atribuir(&nome_de_teste(1), "operador")
+            .map_err(|_| "a atribuicao falhou")?;
+        crate::identidade::atribuir(&nome_de_teste(2), "operador")
+            .map_err(|_| "a atribuicao falhou")?;
+        let a = &ADMIN_DE_TESTE;
+
+        // policy.assign
+        admin_espera(
+            1,
+            a,
+            "policy.assign",
+            r#"{"agent":"teste-1","role":"observador"}"#,
+            Some("DENY_POLICY"),
+        )?;
+        admin_espera(
+            1,
+            a,
+            "policy.assign",
+            r#"{"agent":"teste-2","role":"sistema"}"#,
+            Some("DENY_POLICY"),
+        )?;
+        admin_espera(
+            1,
+            a,
+            "policy.assign",
+            r#"{"agent":"teste-3","role":"observador"}"#,
+            Some("DENY_POLICY"),
+        )?;
+        admin_espera(
+            1,
+            a,
+            "policy.assign",
+            r#"{"agent":"serial","role":"observador"}"#,
+            Some("DENY_POLICY"),
+        )?;
+        admin_espera(
+            1,
+            a,
+            "policy.assign",
+            r#"{"agent":"teste-2","role":"observador"}"#,
+            None,
+        )?;
+        if crate::identidade::papel_do_agente(&sigilo::publica_de(&chave_de_teste(2))).as_deref()
+            != Some("observador")
+        {
+            return Err("a atribuicao executada nao mudou o papel");
+        }
+
+        // agent.register
+        let novo = sigilo::hex(&sigilo::publica_de(&[0x78; 32]));
+        admin_espera(
+            1,
+            a,
+            "agent.register",
+            &alloc::format!(r#"{{"key":"{novo}","name":"maior","role":"sistema"}}"#),
+            Some("DENY_POLICY"),
+        )?;
+        let do_admin = sigilo::hex(&sigilo::publica_de(a));
+        admin_espera(
+            1,
+            a,
+            "agent.register",
+            &alloc::format!(r#"{{"key":"{do_admin}","name":"eu","role":"observador"}}"#),
+            Some("DENY_POLICY"),
+        )?;
+
+        // policy.write
+        admin_espera(
+            1,
+            a,
+            "policy.write",
+            r#"{"line":"papel administrador agent.read"}"#,
+            Some("DENY_POLICY"),
+        )?;
+        admin_espera(
+            1,
+            a,
+            "policy.write",
+            r#"{"line":"papel operador @observador ui.act"}"#,
+            Some("DENY_POLICY"),
+        )?;
+        admin_espera(
+            1,
+            a,
+            "policy.write",
+            r#"{"line":"papel observador *"}"#,
+            Some("INVALID_ARGUMENT"),
+        )?;
+        // Um papel novo, que cabe: vale na decisão seguinte, e não no
+        // próximo boot. (Um papel incluído pelo da sessão — o observador,
+        // que o operador inclui — é protegido como o dela.)
+        let decide =
+            |papel, perm| crate::autorizacao::com_politica(|p| p.decidir(Some(papel), perm, None));
+        if decide("leitor", politica::Permissao::UiRead) != politica::Codigo::DenyRole {
+            return Err("o papel do caso ja existia");
+        }
+        admin_espera(
+            1,
+            a,
+            "policy.write",
+            r#"{"line":"papel observador agent.read"}"#,
+            Some("DENY_POLICY"),
+        )?;
+        admin_espera(
+            1,
+            a,
+            "policy.write",
+            r#"{"line":"papel leitor ui.read"}"#,
+            None,
+        )?;
+        if decide("leitor", politica::Permissao::UiRead) != politica::Codigo::Allow {
+            return Err("a politica escrita nao valeu na decisao seguinte");
+        }
+        admin_espera(
+            1,
+            a,
+            "policy.write",
+            r#"{"line":"papel leitor agent.read"}"#,
+            None,
+        )?;
+        if decide("leitor", politica::Permissao::UiRead) != politica::Codigo::DenyPermission {
+            return Err("a segunda linha escrita nao valeu na decisao seguinte");
+        }
+        if !crate::autorizacao::politica_do_disco() {
+            return Err("a politica deixou de ser a do disco");
+        }
+
+        // Um administrador cujo papel não tem a permissão: a prova confere,
+        // e o papel recusa. E um sem papel que a política conheça.
+        let fraco = [0x43; 32];
+        crate::identidade::registrar_administrador_de_teste(
+            sigilo::publica_de(&fraco),
+            "observador",
+        );
+        admin_espera(
+            0,
+            &fraco,
+            "policy.write",
+            r#"{"line":"papel observador agent.read"}"#,
+            Some("DENY_PERMISSION"),
+        )?;
+        let sem_papel = [0x44; 32];
+        crate::identidade::registrar_administrador_de_teste(
+            sigilo::publica_de(&sem_papel),
+            "fantasma",
+        );
+        admin_espera(
+            0,
+            &sem_papel,
+            "agent.revoke",
+            &alloc::format!(r#"{{"key":"{novo}"}}"#),
+            Some("DENY_ROLE"),
+        )?;
+        Ok(())
+    });
+    crate::autorizacao::carregar();
+    crate::identidade::esquecer_registrados();
+    resultado
+}
+
+/// A auditoria é uma cadeia: cada registro refeito pelos campos que
+/// `audit.tail` mostra dá o elo dele, e o anterior do seguinte; a cabeça é
+/// o último elo. E os parâmetros entram só como resumo.
+fn politica_auditoria_encadeada() -> Resultado {
+    com_agentes_de_teste(|| {
+        let (mut agente, mut sessao) = conectado(1)?;
+        let params = r#"{"path":"/bin"}"#;
+        let r = pela_porta(&mut agente, &mut sessao, "fs.list", params)?;
+        if !r.contains(r#""result":"#) {
+            return Err("o pedido do caso nao passou");
+        }
+        let cauda = chamar("audit.tail", r#"{"count":16}"#)?;
+        let registros = Json(cauda.as_bytes())
+            .member("records")
+            .ok_or("audit.tail sem registros")?;
+        let mut anterior: Option<[u8; 32]> = None;
+        let mut i = 0;
+        let mut ultimo = None;
+        while let Some(j) = registros.item(i) {
+            i += 1;
+            let texto = |k: &str| {
+                j.member(k)
+                    .and_then(|v| v.as_str())
+                    .map(alloc::string::String::from)
+                    .ok_or("um campo do registro faltou")
+            };
+            let hex32 = |k: &str| -> Result<[u8; 32], &'static str> {
+                sigilo::de_hex(&texto(k)?).ok_or("um campo do registro nao e hex")
+            };
+            let numero = |k: &str| j.member(k).and_then(|v| v.as_u64()).ok_or("sem numero");
+            let evento = politica::auditoria::Evento {
+                ts_ms: numero("ts_ms")?,
+                sessao: numero("session")? as u8,
+                agente: texto("agent")?,
+                chave: j
+                    .member("key")
+                    .and_then(|v| v.as_str())
+                    .and_then(sigilo::de_hex),
+                papel: texto("role")?,
+                metodo: texto("method")?,
+                recurso: texto("resource")?,
+                codigo: politica::Codigo::de_nome(&texto("code")?).ok_or("codigo desconhecido")?,
+                parametros: hex32("params")?,
+                detalhe: texto("detail")?,
+            };
+            let seq = numero("seq")?;
+            let prev = hex32("prev")?;
+            let link = hex32("link")?;
+            if anterior.is_some_and(|a| a != prev)
+                || politica::auditoria::elo(&prev, seq, &evento) != link
+            {
+                crate::log_error!("teste", "registro {}: {:?}", seq, evento);
+                return Err("um registro da cauda nao refaz o elo dele");
+            }
+            anterior = Some(link);
+            ultimo = Some(evento);
+        }
+        if i < 2 {
+            return Err("a cauda veio curta demais para conferir");
+        }
+        // O pedido do caso é o último, com o resumo dos parâmetros dele.
+        let ultimo = ultimo.ok_or("sem registros")?;
+        if ultimo.metodo != "fs.list"
+            || ultimo.parametros != politica::auditoria::resumo_dos_parametros(params.as_bytes())
+            || ultimo.recurso != "/bin"
+        {
+            crate::log_error!("teste", "{:?}", ultimo);
+            return Err("o registro do pedido nao tem o resumo dos parametros");
+        }
+        let cabeca = chamar("audit.head", "{}")?;
+        if !cabeca.contains(&alloc::format!(
+            r#""head":"{}""#,
+            sigilo::hex(&anterior.unwrap_or_default())
+        )) {
+            crate::log_error!("teste", "{}", cabeca);
+            return Err("a cabeca nao e o elo do ultimo registro");
+        }
+        let verificada = chamar("audit.verify", "{}")?;
+        if !verificada.contains(r#""ok":true"#) {
+            crate::log_error!("teste", "{}", verificada);
+            return Err("a cadeia guardada nao confere");
+        }
+        Ok(())
+    })
+}
+
+/// O que a sonda de autoridade viu, de dentro de um fio lançado como um
+/// agente: abrir fora e dentro do alcance, executar fora, e o terminal.
+static SONDA: [core::sync::atomic::AtomicU8; 5] =
+    [const { core::sync::atomic::AtomicU8::new(u8::MAX) }; 5];
+
+extern "C" fn sonda_de_autoridade(_: u64) -> ! {
+    use crate::autorizacao::autorizar_processo;
+    use core::sync::atomic::Ordering;
+    use politica::Permissao;
+    let vistos = [
+        autorizar_processo(Permissao::FsRead, "/etc/duke/agentes", "fs.open"),
+        autorizar_processo(Permissao::FsRead, "/bin/ola", "fs.open"),
+        autorizar_processo(Permissao::ProcessRun, "/dados/x", "process.exec"),
+        crate::autorizacao::autorizar_so_sistema("terminal.open"),
+        // O que a autoridade do fio diz: herdada de quem o criou.
+        match crate::fios::autoridade_atual() {
+            crate::autorizacao::Autoridade::Sessao { sessao: 1, .. } => politica::Codigo::Allow,
+            _ => politica::Codigo::Error,
+        },
+    ];
+    for (i, c) in vistos.into_iter().enumerate() {
+        SONDA[i].store(c as u8, Ordering::SeqCst);
+    }
+    crate::fios::terminar()
+}
+
+/// Um processo lançado por um agente age como o agente: abre e executa o
+/// que o papel dele alcança, não abre o pseudo-terminal — e uma revogação
+/// vale também para ele, que já está rodando.
+fn politica_processo_age_como_o_agente() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use core::sync::atomic::Ordering;
+    use politica::Codigo;
+    let chave = sigilo::publica_de(&chave_de_teste(1));
+    let autoridade = Autoridade::Sessao {
+        sessao: 1,
+        chave: Some(chave),
+    };
+    let sondar = || -> Result<[u8; 5], &'static str> {
+        for s in &SONDA {
+            s.store(u8::MAX, Ordering::SeqCst);
+        }
+        crate::fios::criar_como("sonda", sonda_de_autoridade, 0, autoridade)?;
+        esperar_ate(|| SONDA[4].load(Ordering::SeqCst) != u8::MAX, 200)
+            .map_err(|_| "a sonda nao respondeu")?;
+        Ok(core::array::from_fn(|i| SONDA[i].load(Ordering::SeqCst)))
+    };
+    let resultado = (|| -> Resultado {
+        crate::identidade::registrar_agente_de_teste(chave, &nome_de_teste(1), "operador");
+        let vistos = sondar()?;
+        let esperados = [
+            Codigo::DenyResource,
+            Codigo::Allow,
+            Codigo::DenyResource,
+            Codigo::DenyPermission,
+            Codigo::Allow,
+        ]
+        .map(|c| c as u8);
+        if vistos != esperados {
+            crate::log_error!("teste", "sonda: {:?}", vistos);
+            return Err("o fio lancado como o agente nao decidiu pelo papel dele");
+        }
+        // Revogado, o fio que ele lançou não abre mais nada.
+        crate::identidade::revogar(&chave).map_err(|_| "a revogacao de teste falhou")?;
+        let vistos = sondar()?;
+        if vistos[1] != Codigo::DenyRole as u8 {
+            crate::log_error!("teste", "sonda: {:?}", vistos);
+            return Err("depois da revogacao o fio do agente continuou abrindo");
+        }
+
+        // E pelas chamadas de sistema de verdade: o programa `autoridade`
+        // confere de dentro a abertura, a herança pelo `fork` e o `executar`
+        // — e sai com 72 se tudo foi recusado como devia. Lançado pelo
+        // sistema, a primeira abertura passa, e ele sai com 1: a recusa é
+        // do papel, e não do arquivo.
+        crate::identidade::registrar_agente_de_teste(chave, &nome_de_teste(1), "operador");
+        let dir = crate::usuario::DIRETORIO_DOS_COMPILADOS;
+        let programa = alloc::format!("{dir}/autoridade");
+        let desde = crate::log::total_emitidos();
+        let visto = |procurada: &str| {
+            let mut achou = false;
+            crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+                achou |= r.seq >= desde && r.subsistema == "usuario" && r.mensagem() == procurada;
+            });
+            achou
+        };
+        crate::usuario::lancar_como(Some(&programa), autoridade)?;
+        esperar_ate(|| visto("processo encerrou com codigo 72"), 600)
+            .map_err(|_| "o programa do agente nao foi recusado como o papel manda")?;
+        let mut metodos = alloc::vec::Vec::new();
+        crate::autorizacao::com_auditoria(|c| {
+            for r in c.ultimos(3) {
+                metodos.push((r.evento.metodo.clone(), r.evento.codigo));
+            }
+        });
+        let esperados = [
+            (alloc::string::String::from("fs.open"), Codigo::DenyResource),
+            (alloc::string::String::from("fs.open"), Codigo::DenyResource),
+            (
+                alloc::string::String::from("process.exec"),
+                Codigo::DenyResource,
+            ),
+        ];
+        if metodos != esperados {
+            crate::log_error!("teste", "{:?}", metodos);
+            return Err("as recusas do processo do agente nao foram gravadas");
+        }
+        let desde = crate::log::total_emitidos();
+        let visto = |procurada: &str| {
+            let mut achou = false;
+            crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+                achou |= r.seq >= desde && r.subsistema == "usuario" && r.mensagem() == procurada;
+            });
+            achou
+        };
+        crate::usuario::lancar(Some(&programa))?;
+        esperar_ate(|| visto("processo encerrou com codigo 1"), 600)
+            .map_err(|_| "lancado pelo sistema, o programa foi recusado")?;
+        let desde = crate::log::total_emitidos();
+        let visto = |procurada: &str| {
+            let mut achou = false;
+            crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+                achou |= r.seq >= desde && r.subsistema == "usuario" && r.mensagem() == procurada;
+            });
+            achou
+        };
+        crate::usuario::lancar_como(Some(&alloc::format!("{dir}/pseudo")), autoridade)?;
+        esperar_ate(|| visto("processo encerrou com codigo 2"), 600)
+            .map_err(|_| "o programa do agente abriu o pseudo-terminal")?;
+        Ok(())
+    })();
+    crate::identidade::esquecer_registrados();
+    resultado
+}
+
+/// Sem política no disco, a de emergência: a serial lê, e nada mais; uma
+/// porta não tem papel nela, e recusa tudo.
+fn politica_emergencia_fecha() -> Resultado {
+    let resultado = com_agentes_de_teste(|| {
+        let (mut agente, mut sessao) = conectado(1)?;
+        crate::autorizacao::trocar_politica(politica::Politica::emergencia());
+        let r = pela_porta(&mut agente, &mut sessao, "agent.ping", "{}")?;
+        if !recusado_com(&r, "DENY_ROLE") {
+            crate::log_error!("teste", "{}", r);
+            return Err("com a politica de emergencia uma porta foi atendida");
+        }
+        let serial = crate::autorizacao::com_politica(|p| alloc::string::String::from(p.serial()));
+        let decide =
+            |perm| crate::autorizacao::com_politica(|p| p.decidir(Some(&serial), perm, None));
+        if decide(politica::Permissao::SystemRead) != politica::Codigo::Allow
+            || decide(politica::Permissao::FsRead) != politica::Codigo::DenyPermission
+            || decide(politica::Permissao::DebugTrigger) != politica::Codigo::DenyPermission
+        {
+            return Err("a serial na politica de emergencia nao e so leitura");
+        }
+        Ok(())
+    });
+    crate::autorizacao::carregar();
+    if !crate::autorizacao::politica_do_disco() {
+        return Err("a politica do disco nao voltou");
+    }
+    resultado
+}
+
+/// O aperto de mão vai para a auditoria, e tem limite por janela.
+fn politica_aperto_auditado_e_limitado() -> Resultado {
+    // Um aperto a cada 250 ms: a janela tem de ser maior que o próprio
+    // aperto, que em debug leva dezenas de milissegundos — e curta, porque
+    // cada espera dela é tempo da suíte.
+    let texto = politica::PADRAO.replace("apertos 10 10000", "apertos 1 250");
+    let apertada = politica::Politica::ler(&texto).map_err(|_| "a politica do caso nao vale")?;
+    let resultado = com_agentes_de_teste(|| {
+        crate::autorizacao::trocar_politica(apertada);
+        // Uma janela nova nas duas portas do caso: passado o tamanho dela,
+        // a contagem recomeça.
+        let agora = crate::tempo::uptime_ms();
+        let _ = esperar_ate(|| crate::tempo::uptime_ms() > agora + 260, 100);
+        let mut sessao = crate::agent::SessaoDeTeste::porta(3);
+        let um = AgenteDeTeste::conectar(3, &mut sessao, &chave_de_teste(3))?;
+        if um.transporte.is_none() {
+            return Err("o primeiro aperto da janela foi recusado");
+        }
+        let reg = ultimo_registro().ok_or("a auditoria esta vazia")?;
+        if reg.evento.metodo != "session.open"
+            || reg.evento.codigo != politica::Codigo::Allow
+            || reg.evento.agente != nome_de_teste(3)
+        {
+            crate::log_error!("teste", "{:?}", reg.evento);
+            return Err("o aperto completo nao foi gravado");
+        }
+        // O segundo na mesma janela: recusado antes de qualquer conta.
+        crate::virtio::console::simular_conexao(3, false);
+        crate::virtio::console::simular_conexao(3, true);
+        let mut sessao = crate::agent::SessaoDeTeste::porta(3);
+        let dois = AgenteDeTeste::conectar(3, &mut sessao, &chave_de_teste(3))?;
+        if dois.transporte.is_some()
+            || dois.recusa.as_deref() != Some("apertos demais; espere a janela")
+        {
+            crate::log_error!("teste", "recusa: {:?}", dois.recusa);
+            return Err("o segundo aperto da janela nao foi recusado");
+        }
+        // E uma chave fora do registro, na outra porta — a janela é de
+        // cada porta: gravada como não autenticada, com a chave.
+        let mut sessao = crate::agent::SessaoDeTeste::porta(4);
+        let intrusa = [0x5A; 32];
+        let _ = AgenteDeTeste::conectar(4, &mut sessao, &intrusa)?;
+        let reg = ultimo_registro().ok_or("a auditoria esta vazia")?;
+        if reg.evento.codigo != politica::Codigo::DenyNotAuthenticated
+            || reg.evento.chave != Some(sigilo::publica_de(&intrusa))
+            || reg.evento.sessao != 4
+        {
+            crate::log_error!("teste", "{:?}", reg.evento);
+            return Err("o aperto de uma chave fora do registro nao foi gravado");
+        }
+        Ok(())
+    });
+    crate::autorizacao::carregar();
     resultado
 }
 
@@ -13892,6 +14818,38 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "admin: o registro exige prova",
         f: admin_registro_exige_prova,
+    },
+    Caso {
+        nome: "politica: a matriz pelo canal",
+        f: politica_a_matriz_pelo_canal,
+    },
+    Caso {
+        nome: "politica: a taxa do papel",
+        f: politica_taxa_do_papel,
+    },
+    Caso {
+        nome: "politica: revogar derruba a sessao",
+        f: politica_revogar_derruba_a_sessao,
+    },
+    Caso {
+        nome: "politica: ninguem se da mais do que tem",
+        f: politica_nao_autoprivilegia,
+    },
+    Caso {
+        nome: "politica: a auditoria e uma cadeia",
+        f: politica_auditoria_encadeada,
+    },
+    Caso {
+        nome: "politica: o processo age como o agente",
+        f: politica_processo_age_como_o_agente,
+    },
+    Caso {
+        nome: "politica: sem politica, emergencia",
+        f: politica_emergencia_fecha,
+    },
+    Caso {
+        nome: "politica: o aperto e auditado e limitado",
+        f: politica_aperto_auditado_e_limitado,
     },
     Caso {
         nome: "usb: o relatorio hid vira teclas",

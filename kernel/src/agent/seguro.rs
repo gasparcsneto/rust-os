@@ -45,6 +45,9 @@ use alloc::vec;
 use sigilo::quadro::{self, Leitor, Tipo};
 use sigilo::{Respondedor, Transporte};
 
+use politica::Codigo;
+
+use crate::autorizacao;
 use crate::sessoes;
 use crate::virtio::console;
 
@@ -92,6 +95,29 @@ pub fn enviar(p: u8, texto: &[u8]) -> bool {
     inteiro
 }
 
+/// Encerra toda sessão aberta com `chave`: a chave foi revogada. Devolve as
+/// portas encerradas.
+///
+/// Quem revoga é outra sessão — a de um administrador —, e a da chave
+/// revogada pode estar no meio de qualquer coisa. Esquecer a sessão basta
+/// para o resto: sem identidade, o ponto de decisão recusa o próximo pedido
+/// dela, e a porta, no próximo quadro, se dá por encerrada. A recusa em
+/// claro sai daqui, agora, para o agente saber já, e por quê.
+pub fn revogar(chave: &[u8; 32]) -> alloc::vec::Vec<u8> {
+    let mut encerradas = alloc::vec::Vec::new();
+    for p in 1..=sessoes::PORTAS as u8 {
+        if sessoes::identidade(p).is_some_and(|id| id.chave == *chave) {
+            let _ = sessoes::esquecer(p);
+            sessoes::contar_encerrada();
+            crate::log_warn!("agent", "porta {}: chave revogada; sessao encerrada", p);
+            mandar_quadro(p, Tipo::Recusa, b"chave revogada");
+            sessoes::marcar_avisada(p);
+            encerradas.push(p);
+        }
+    }
+    encerradas
+}
+
 /// Em que ponto a sessão de uma porta está.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Estado {
@@ -137,6 +163,7 @@ impl Porta {
             }
             self.estado = Estado::Aguardando;
             let _ = sessoes::esquecer(self.p);
+            let _ = sessoes::tirar_aviso(self.p);
         }
 
         // Um byte perdido na entrada desalinha os quadros, ou corrompe um.
@@ -158,6 +185,13 @@ impl Porta {
             Ok(None) => return,
             Err(e) => return self.encerrar(e.motivo()),
         };
+
+        // Uma sessão que a revogação encerrou por fora: a recusa já foi —
+        // ver [`revogar`]. Daqui até o outro lado reconectar, nada.
+        if sessoes::tirar_aviso(self.p) && self.estado == Estado::Estabelecida {
+            self.estado = Estado::Encerrada;
+            return;
+        }
 
         match (self.estado, tipo) {
             (Estado::Aguardando, Tipo::Inicio) => self.apertar(&corpo),
@@ -182,15 +216,30 @@ impl Porta {
         mandar_quadro(self.p, Tipo::Recusa, motivo.as_bytes());
     }
 
+    /// Recusa o aperto: grava na auditoria e encerra.
+    fn recusar_aperto(&mut self, chave: Option<[u8; 32]>, codigo: Codigo, motivo: &str) {
+        autorizacao::auditar_aperto(self.p, chave, "", codigo, motivo);
+        self.encerrar(motivo);
+    }
+
     /// O aperto de mão: lê a primeira mensagem, confere o registro, responde.
     fn apertar(&mut self, mensagem: &[u8]) {
+        // Antes de qualquer conta: cada aperto custa ao Duke duas trocas
+        // Diffie-Hellman e um sorteio, e quem não tem chave registrada pode
+        // pedi-los à vontade. A política limita quantos por janela.
+        if !autorizacao::permitir_aperto(self.p) {
+            return self.encerrar("apertos demais; espere a janela");
+        }
+
         let mut carga = vec![0u8; sigilo::MAIOR_MENSAGEM];
         let lido = crate::identidade::com_chave_do_duke(|chave| {
             Respondedor::novo(sigilo::PROLOGO, chave).ler(mensagem, &mut carga)
         });
         let recebido = match lido {
-            None => return self.encerrar("o Duke nao tem chave"),
-            Some(Err(e)) => return self.encerrar(e.motivo()),
+            None => return self.recusar_aperto(None, Codigo::Error, "o Duke nao tem chave"),
+            Some(Err(e)) => {
+                return self.recusar_aperto(None, Codigo::DenyNotAuthenticated, e.motivo());
+            }
             Some(Ok((_, recebido))) => recebido,
         };
 
@@ -204,11 +253,15 @@ impl Porta {
                 self.p,
                 crate::identidade::impressao(&chave)
             );
-            return self.encerrar("chave fora do registro");
+            return self.recusar_aperto(
+                Some(chave),
+                Codigo::DenyNotAuthenticated,
+                "chave fora do registro",
+            );
         };
 
         let Ok(efemera) = crate::aleatorio::chave() else {
-            return self.encerrar("sem entropia para o aperto");
+            return self.recusar_aperto(Some(chave), Codigo::Error, "sem entropia para o aperto");
         };
 
         // A resposta diz ao agente quem o Duke acha que ele é, e em que
@@ -231,8 +284,13 @@ impl Porta {
                 Err(e) => return self.encerrar(e.motivo()),
             };
         if !mandar_quadro(self.p, Tipo::Resposta, &resposta[..n]) {
-            return self.encerrar("a resposta do aperto nao saiu");
+            return self.recusar_aperto(
+                Some(chave),
+                Codigo::Error,
+                "a resposta do aperto nao saiu",
+            );
         }
+        autorizacao::auditar_aperto(self.p, Some(chave), &nome, Codigo::Allow, "aperto completo");
 
         crate::log_info!(
             "agent",

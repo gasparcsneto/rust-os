@@ -2,16 +2,36 @@
 //!
 //! # A regra
 //!
-//! Uma operação administrativa — hoje, registrar um agente — não é um
-//! comando como os outros. Ela não está em [`super::commands::COMANDOS`] e
-//! não se chama pelo nome: chega embrulhada em `admin.execute`, com a prova
-//! de um administrador para **aquele** pedido, naquela sessão, com aquele
-//! desafio. Ver [`sigilo::administracao`] para o protocolo e para o que a
-//! prova amarra.
+//! Uma operação administrativa — registrar e revogar um agente, atribuir um
+//! papel, mudar a política — não é um comando como os outros. Ela não está
+//! em [`super::commands::COMANDOS`] e não se chama pelo nome: chega
+//! embrulhada em `admin.execute`, com a prova de um administrador para
+//! **aquele** pedido, naquela sessão, com aquele desafio. Ver
+//! [`sigilo::administracao`] para o protocolo e para o que a prova amarra.
 //!
 //! Vale em qualquer sessão, e é por isso que existe: a serial é aberta — é o
 //! canal de emergência —, e o que se faz por ela sem prova não pode incluir
 //! dar a uma chave o direito de entrar.
+//!
+//! # Prova e papel, os dois
+//!
+//! A prova diz **quem** pede; o papel do administrador, na política, diz se
+//! ele pode **isto**. Uma permissão administrativa num papel nunca substitui
+//! a prova: não há outro caminho até [`OPERACOES`] além deste arquivo, e
+//! aqui a prova vem primeiro. E a prova não substitui o papel: um
+//! administrador cujo papel não tem `policy.write` não muda a política.
+//!
+//! # Ninguém se dá mais do que tem
+//!
+//! O papel do administrador é o **teto** do que ele concede:
+//!
+//! - registra e atribui só papéis que cabem no dele, e só mexe em agentes
+//!   cujo papel de agora também cabe — não rebaixa nem revoga quem pode mais
+//!   que ele;
+//! - não muda o papel da sessão de onde pede, nem revoga a chave dela;
+//! - não registra como agente uma chave de administrador;
+//! - não edita o próprio papel, nem os dos outros administradores, nem o da
+//!   sessão de onde pede — ver [`politica::Politica::com_linha`].
 //!
 //! # O caminho de um pedido
 //!
@@ -20,30 +40,84 @@
 //!    **o texto exato** dos parâmetros, que vai como string e só é
 //!    interpretado depois de a prova conferir.
 //! 3. `admin.execute` tira o desafio (uma tentativa só), confere que a chave
-//!    é de um administrador e que a prova confere, e executa.
+//!    é de um administrador e que a prova confere, decide pelo papel dele, e
+//!    executa.
 //!
-//! Qualquer falha é registrada no log com o motivo, e a resposta diz qual
-//! foi: quem administra precisa saber se errou a prova ou o desafio venceu.
+//! Cada desfecho vai para a auditoria, com o código — e a resposta diz qual
+//! foi: quem administra precisa saber se errou a prova, se o papel não deixa,
+//! ou se a política recusou a mudança.
 
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 use core::fmt;
 
+use politica::{Codigo, Permissao, Recusa};
+
 use super::json::{Json, JsonWriter};
+use crate::autorizacao;
 use sigilo::administracao::{Contexto, conferir};
 
-/// Uma operação administrativa: o nome e o que ela faz com os parâmetros.
+/// Quem pede uma operação, já com a prova conferida.
+struct Pedinte<'a> {
+    sessao: u8,
+    nome: &'a str,
+    /// O papel do administrador: o teto do que ele concede.
+    papel: &'a str,
+    /// A chave do agente na sessão de onde o pedido veio — nenhuma na
+    /// serial. É o "si mesmo" das regras de não-autoprivilegiamento.
+    chave_da_sessao: Option<[u8; sigilo::TAM_CHAVE]>,
+}
+
+/// Por que uma operação não foi feita: o código da auditoria e o motivo.
+type Falha = (Codigo, String);
+
+fn falha(codigo: Codigo, motivo: impl Into<String>) -> Falha {
+    (codigo, motivo.into())
+}
+
+/// Uma operação administrativa: o nome, a permissão que o papel do
+/// administrador precisa ter, e o que ela faz com os parâmetros. Devolve o
+/// recurso, para a auditoria.
 struct Operacao {
     nome: &'static str,
     resumo: &'static str,
-    executar: fn(Json, &mut JsonWriter) -> Result<(), &'static str>,
+    permissao: Permissao,
+    executar: fn(&Pedinte, Json, &mut JsonWriter) -> Result<String, Falha>,
 }
 
 /// As operações que `admin.execute` aceita.
-static OPERACOES: &[Operacao] = &[Operacao {
-    nome: "agent.register",
-    resumo: "Registra um agente: {\"key\": chave publica em hex, \"name\": nome}. Vale ate \
-             o proximo boot.",
-    executar: registrar_agente,
-}];
+static OPERACOES: &[Operacao] = &[
+    Operacao {
+        nome: "agent.register",
+        resumo: "Registra um agente: {\"key\": chave publica em hex, \"name\": nome, \"role\": \
+                 papel}. O papel cabe no do administrador. Vale ate o proximo boot.",
+        permissao: Permissao::AgentRegister,
+        executar: registrar_agente,
+    },
+    Operacao {
+        nome: "agent.revoke",
+        resumo: "Revoga um agente: {\"key\": chave publica em hex}. As sessoes abertas com a \
+                 chave sao encerradas na hora. Nao vale para a chave da propria sessao.",
+        permissao: Permissao::AgentRevoke,
+        executar: revogar_agente,
+    },
+    Operacao {
+        nome: "policy.assign",
+        resumo: "Atribui um papel: {\"agent\": nome, ou \"serial\", \"role\": papel}. O papel \
+                 novo e o de agora cabem no do administrador; nao vale para a propria sessao.",
+        permissao: Permissao::PolicyAssign,
+        executar: atribuir_papel,
+    },
+    Operacao {
+        nome: "policy.write",
+        resumo: "Muda uma linha da politica em memoria: {\"line\": \"papel ...\", \"recurso ...\" \
+                 ou \"taxa ...\"}. Validada como o arquivo; vale na decisao seguinte; o disco \
+                 nao muda.",
+        permissao: Permissao::PolicyWrite,
+        executar: escrever_politica,
+    },
+];
 
 /// Os nomes das operações, para o `agent.describe` e para o resumo.
 pub fn operacoes() -> impl Iterator<Item = (&'static str, &'static str)> {
@@ -87,37 +161,80 @@ pub struct Pedido<'a> {
 pub(crate) fn executar(pedido: Pedido, w: &mut JsonWriter) -> fmt::Result {
     let sessao = super::sessao::atual();
     w.begin_object()?;
-    if let Err(motivo) = conferir_e_executar(sessao, pedido, w) {
+    if let Err((codigo, motivo)) = conferir_e_executar(sessao, pedido, w) {
         crate::log_warn!(
             "admin",
-            "sessao {}: operacao administrativa recusada: {}",
+            "sessao {}: operacao administrativa recusada: {} ({})",
             sessao,
-            motivo
+            motivo,
+            codigo.nome()
         );
         w.field_bool("executed", false)?;
-        w.field_str("error", motivo)?;
+        w.field_str("code", codigo.nome())?;
+        w.field_str("error", &motivo)?;
     }
     w.end_object()
 }
 
-/// Confere tudo e executa. Um `Err` é o motivo da recusa.
-fn conferir_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) -> Result<(), &'static str> {
-    let id = pedido.desafio.ok_or("falta o desafio")?;
-    let comando = pedido.comando.ok_or("falta o comando")?;
-    let parametros = pedido
-        .parametros
-        .ok_or("parametros ausentes, invalidos ou grandes demais")?;
-    let administrador = pedido
-        .administrador
-        .ok_or("chave de administrador ausente ou invalida")?;
-    let prova = pedido.prova.ok_or("prova ausente ou invalida")?;
+/// Confere tudo, decide e executa. Um `Err` é a recusa, já auditada.
+fn conferir_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) -> Result<(), Falha> {
+    let bytes = pedido.parametros.unwrap_or("").as_bytes();
+    let metodo = pedido.comando.unwrap_or("admin.execute");
+    // Uma recusa antes de se saber quem é o administrador: a auditoria grava
+    // a chave que veio, se veio, e o nome vazio.
+    let recusar_anonimo = |codigo: Codigo, motivo: &str| -> Falha {
+        let chave = pedido.administrador.unwrap_or([0; 32]);
+        let administrador = pedido.administrador.map(|_| ("", &chave));
+        autorizacao::auditar_administracao(
+            sessao,
+            administrador,
+            None,
+            metodo,
+            "",
+            codigo,
+            bytes,
+            motivo,
+        );
+        falha(codigo, motivo)
+    };
+
+    let Some(id) = pedido.desafio else {
+        return Err(recusar_anonimo(Codigo::InvalidArgument, "falta o desafio"));
+    };
+    let Some(comando) = pedido.comando else {
+        return Err(recusar_anonimo(Codigo::InvalidArgument, "falta o comando"));
+    };
+    let Some(parametros) = pedido.parametros else {
+        return Err(recusar_anonimo(
+            Codigo::InvalidArgument,
+            "parametros ausentes, invalidos ou grandes demais",
+        ));
+    };
+    let Some(administrador) = pedido.administrador else {
+        return Err(recusar_anonimo(
+            Codigo::InvalidArgument,
+            "chave de administrador ausente ou invalida",
+        ));
+    };
+    let Some(prova) = pedido.prova else {
+        return Err(recusar_anonimo(
+            Codigo::InvalidArgument,
+            "prova ausente ou invalida",
+        ));
+    };
 
     // O desafio sai primeiro, e sai de qualquer jeito: daqui para baixo,
     // errar qualquer coisa gasta a tentativa.
-    let desafio = crate::identidade::consumir(sessao, id).map_err(|e| e.motivo())?;
+    let desafio = match crate::identidade::consumir(sessao, id) {
+        Ok(d) => d,
+        Err(e) => return Err(recusar_anonimo(Codigo::DenyNotAuthenticated, e.motivo())),
+    };
 
-    let Some(nome) = crate::identidade::administrador(&administrador) else {
-        return Err("chave fora do registro de administradores");
+    let Some((nome, papel)) = crate::identidade::papel_do_administrador(&administrador) else {
+        return Err(recusar_anonimo(
+            Codigo::DenyNotAuthenticated,
+            "chave fora do registro de administradores",
+        ));
     };
 
     let efemera = sigilo::publica_de(&desafio.efemera);
@@ -129,51 +246,253 @@ fn conferir_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) -> Result
         comando,
         parametros,
     };
+    // A partir daqui a auditoria grava o administrador pelo nome.
+    let gravar = |codigo: Codigo, recurso: &str, motivo: &str| {
+        autorizacao::auditar_administracao(
+            sessao,
+            Some((&nome, &administrador)),
+            papel.as_deref(),
+            comando,
+            recurso,
+            codigo,
+            bytes,
+            motivo,
+        );
+    };
     if !conferir(&desafio.efemera, &contexto, &prova) {
-        return Err("a prova nao confere");
+        gravar(Codigo::DenyNotAuthenticated, "", "a prova nao confere");
+        return Err(falha(Codigo::DenyNotAuthenticated, "a prova nao confere"));
     }
 
     // Só agora o comando é procurado, e só agora os parâmetros são lidos:
     // até aqui eles eram bytes cobertos pela prova, e nada mais.
-    let operacao = OPERACOES
-        .iter()
-        .find(|o| o.nome == comando)
-        .ok_or("operacao administrativa desconhecida")?;
+    let Some(operacao) = OPERACOES.iter().find(|o| o.nome == comando) else {
+        gravar(
+            Codigo::InvalidArgument,
+            "",
+            "operacao administrativa desconhecida",
+        );
+        return Err(falha(
+            Codigo::InvalidArgument,
+            "operacao administrativa desconhecida",
+        ));
+    };
+
+    // A prova disse quem; a política diz se o papel dele pode isto.
+    let decisao = autorizacao::decidir_administracao(papel.as_deref(), operacao.permissao);
+    let papel = match (decisao, papel.as_deref()) {
+        (Codigo::Allow, Some(papel)) => papel,
+        (Codigo::DenyRole, _) | (_, None) => {
+            let motivo = "administrador sem papel, ou papel que a politica nao tem";
+            gravar(Codigo::DenyRole, "", motivo);
+            return Err(falha(Codigo::DenyRole, motivo));
+        }
+        (codigo, Some(_)) => {
+            let motivo = "o papel do administrador nao tem a permissao";
+            gravar(codigo, "", motivo);
+            return Err(falha(codigo, motivo));
+        }
+    };
+
+    let pedinte = Pedinte {
+        sessao,
+        nome: &nome,
+        papel,
+        chave_da_sessao: crate::sessoes::identidade(sessao).map(|id| id.chave),
+    };
+
     // A operação escreve os campos dela só se der certo; os de cima vêm
     // depois, para uma recusa da operação não deixar um `executed` dizendo
     // o contrário na mesma resposta.
-    (operacao.executar)(Json(parametros.as_bytes()), w)?;
-    let _ = w.field_bool("executed", true);
-    let _ = w.field_str("command", operacao.nome);
-    let _ = w.field_str("by", &nome);
-    crate::log_info!(
-        "admin",
-        "sessao {}: {} executou {}",
-        sessao,
-        nome,
-        operacao.nome
-    );
-    Ok(())
+    match (operacao.executar)(&pedinte, Json(parametros.as_bytes()), w) {
+        Ok(recurso) => {
+            gravar(Codigo::Allow, &recurso, "prova conferida; executada");
+            let _ = w.field_bool("executed", true);
+            let _ = w.field_str("command", operacao.nome);
+            let _ = w.field_str("by", &nome);
+            crate::log_info!(
+                "admin",
+                "sessao {}: {} executou {} ({})",
+                sessao,
+                nome,
+                operacao.nome,
+                recurso
+            );
+            Ok(())
+        }
+        Err((codigo, motivo)) => {
+            gravar(codigo, "", &motivo);
+            Err((codigo, motivo))
+        }
+    }
 }
 
-fn registrar_agente(params: Json, w: &mut JsonWriter) -> Result<(), &'static str> {
-    let chave = params
-        .member("key")
+/// Um parâmetro de texto obrigatório.
+fn texto<'a>(params: Json<'a>, nome: &str) -> Result<&'a str, Falha> {
+    params
+        .member(nome)
         .and_then(|v| v.as_str())
-        .and_then(sigilo::de_hex)
-        .ok_or("falta a chave do agente, em hex")?;
-    let nome = params
-        .member("name")
-        .and_then(|v| v.as_str())
-        .ok_or("falta o nome do agente")?;
-    crate::identidade::registrar(chave, nome).map_err(|r| r.motivo())?;
+        .ok_or_else(|| falha(Codigo::InvalidArgument, format!("falta `{nome}`")))
+}
+
+/// Uma chave pública em hex, obrigatória.
+fn chave(params: Json, nome: &str) -> Result<[u8; sigilo::TAM_CHAVE], Falha> {
+    sigilo::de_hex(texto(params, nome)?).ok_or_else(|| {
+        falha(
+            Codigo::InvalidArgument,
+            format!("`{nome}` nao e uma chave em hex"),
+        )
+    })
+}
+
+/// O papel `papel` cabe no do administrador. A recusa é da política.
+fn cabe(pedinte: &Pedinte, papel: &str) -> Result<(), Falha> {
+    autorizacao::com_politica(|p| p.cabe_em(papel, pedinte.papel))
+        .map_err(|r| falha(r.codigo(), r.motivo()))
+}
+
+fn recusa_do_registro(r: crate::identidade::Recusa) -> Falha {
+    use crate::identidade::Recusa as R;
+    let codigo = match r {
+        R::Cheio => Codigo::Error,
+        R::Nome | R::ChaveRepetida | R::NomeRepetido | R::Desconhecido => Codigo::InvalidArgument,
+    };
+    falha(codigo, r.motivo())
+}
+
+fn registrar_agente(pedinte: &Pedinte, params: Json, w: &mut JsonWriter) -> Result<String, Falha> {
+    let chave = chave(params, "key")?;
+    let nome = texto(params, "name")?;
+    let papel = texto(params, "role")?;
+    // Uma chave de administrador como agente seria o administrador
+    // exercendo, por uma sessão, as permissões que no papel dele só dizem o
+    // que ele concede.
+    if crate::identidade::administrador(&chave).is_some() {
+        return Err(falha(
+            Codigo::DenyPolicy,
+            "uma chave de administrador nao se registra como agente",
+        ));
+    }
+    cabe(pedinte, papel)?;
+    crate::identidade::registrar(chave, nome, papel).map_err(recusa_do_registro)?;
     crate::log_info!(
         "admin",
-        "agente {} registrado ({})",
+        "agente {} registrado como {} ({})",
         nome,
+        papel,
         crate::identidade::impressao(&chave)
     );
     let _ = w.field_str("agent", nome);
     let _ = w.field_str("key", &sigilo::hex(&chave));
+    let _ = w.field_str("role", papel);
+    Ok(nome.to_string())
+}
+
+/// O agente com esta chave existe, e o papel de agora dele cabe no do
+/// administrador: quem pode mais que ele não é rebaixado nem revogado por
+/// ele. Sem papel, o agente não pode nada, e mexer nele não alcança mais.
+fn alcancavel(pedinte: &Pedinte, chave: &[u8; sigilo::TAM_CHAVE]) -> Result<(), Falha> {
+    if crate::identidade::agente(chave).is_none() {
+        return Err(falha(Codigo::InvalidArgument, "agente desconhecido"));
+    }
+    if let Some(atual) = crate::identidade::papel_do_agente(chave) {
+        cabe(pedinte, &atual)?;
+    }
     Ok(())
+}
+
+fn revogar_agente(pedinte: &Pedinte, params: Json, w: &mut JsonWriter) -> Result<String, Falha> {
+    let chave = chave(params, "key")?;
+    if pedinte.chave_da_sessao == Some(chave) {
+        return Err(falha(
+            Codigo::DenyPolicy,
+            "uma sessao nao revoga a propria chave",
+        ));
+    }
+    alcancavel(pedinte, &chave)?;
+    let nome = crate::identidade::revogar(&chave).map_err(recusa_do_registro)?;
+    // As sessões vivas da chave caem agora, e não no próximo aperto.
+    let encerradas = super::seguro::revogar(&chave);
+    crate::log_info!(
+        "admin",
+        "agente {} revogado; {} sessoes encerradas",
+        nome,
+        encerradas.len()
+    );
+    let _ = w.field_str("agent", &nome);
+    let _ = w.key("sessions_closed");
+    let _ = w.begin_array();
+    for p in &encerradas {
+        let _ = w.u64_value(u64::from(*p));
+    }
+    let _ = w.end_array();
+    Ok(nome)
+}
+
+/// O nome que a atribuição usa para a serial.
+const ALVO_SERIAL: &str = "serial";
+
+fn atribuir_papel(pedinte: &Pedinte, params: Json, w: &mut JsonWriter) -> Result<String, Falha> {
+    let alvo = texto(params, "agent")?;
+    let papel = texto(params, "role")?;
+    cabe(pedinte, papel)?;
+
+    if alvo == ALVO_SERIAL {
+        if pedinte.sessao == super::sessao::SERIAL {
+            return Err(falha(
+                Codigo::DenyPolicy,
+                "uma sessao nao muda o proprio papel",
+            ));
+        }
+        // O papel de agora da serial também precisa caber: um administrador
+        // não rebaixa o canal de emergência abaixo do que ele mesmo é.
+        let atual = autorizacao::com_politica(|p| p.serial().to_string());
+        cabe(pedinte, &atual)?;
+        autorizacao::mudar_politica(|p| p.com_serial(papel))
+            .map_err(|r: Recusa| falha(r.codigo(), r.motivo()))?;
+    } else {
+        let chave = crate::identidade::chave_do_agente(alvo)
+            .ok_or_else(|| falha(Codigo::InvalidArgument, "agente desconhecido"))?;
+        if pedinte.chave_da_sessao == Some(chave) {
+            return Err(falha(
+                Codigo::DenyPolicy,
+                "uma sessao nao muda o proprio papel",
+            ));
+        }
+        alcancavel(pedinte, &chave)?;
+        crate::identidade::atribuir(alvo, papel).map_err(recusa_do_registro)?;
+    }
+    let _ = w.field_str("agent", alvo);
+    let _ = w.field_str("role", papel);
+    Ok(format!("{alvo} -> {papel}"))
+}
+
+fn escrever_politica(pedinte: &Pedinte, params: Json, w: &mut JsonWriter) -> Result<String, Falha> {
+    let linha = texto(params, "line")?;
+    // Protegidos: o papel de cada administrador — e o de quem pede é um
+    // deles —, e o da sessão de onde o pedido vem. Nenhum muda por aqui.
+    let mut protegidos = crate::identidade::papeis_dos_administradores();
+    let da_sessao = match pedinte.chave_da_sessao {
+        Some(k) => crate::identidade::papel_do_agente(&k),
+        None if pedinte.sessao == super::sessao::SERIAL => {
+            Some(autorizacao::com_politica(|p| p.serial().to_string()))
+        }
+        None => None,
+    };
+    protegidos.extend(da_sessao);
+    let protegidos: Vec<&str> = protegidos.iter().map(String::as_str).collect();
+    autorizacao::mudar_politica(|p| p.com_linha(linha, pedinte.papel, &protegidos))
+        .map_err(|r: Recusa| falha(r.codigo(), r.motivo()))?;
+    let _ = w.field_str("line", linha);
+    let _ = w.field_str("by", pedinte.nome);
+    // O recurso da auditoria: as duas primeiras palavras, que dizem o que a
+    // linha muda — `papel operador`, `taxa observador`. O resto está no
+    // resumo dos parâmetros.
+    let mut palavras = linha.split_whitespace();
+    let recurso = match (palavras.next(), palavras.next()) {
+        (Some(a), Some(b)) => format!("{a} {b}"),
+        (Some(a), None) => a.to_string(),
+        _ => String::new(),
+    };
+    Ok(recurso)
 }

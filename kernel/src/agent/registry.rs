@@ -64,11 +64,33 @@ pub struct ParamSpec {
 /// para emitir um erro — a escrita é em streaming e não tem desfazer.
 pub type Handler = fn(Json<'_>, &mut JsonWriter<'_>) -> fmt::Result;
 
+/// O que um comando exige de quem pede.
+///
+/// Todo comando declara o seu, e não há valor padrão: um comando novo sem
+/// esta linha não compila. É a primeira metade da cadeia
+/// `identidade → sessão → papel → permissão → operação` — a operação diz a
+/// permissão; a política, quem a tem; e [`crate::autorizacao`] decide.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Acesso {
+    /// A permissão que o papel de quem pede precisa ter.
+    Exige(politica::Permissao),
+    /// Nenhuma permissão de sessão: a autenticação é a prova do
+    /// administrador, conferida dentro da própria operação — ver
+    /// [`super::administracao`]. Só `admin.challenge` e `admin.execute`.
+    PorProva,
+}
+
 /// Um comando exposto ao agente.
 pub struct Command {
     pub nome: &'static str,
     pub resumo: &'static str,
     pub params: &'static [ParamSpec],
+    /// A permissão que o comando exige.
+    pub acesso: Acesso,
+    /// O parâmetro que nomeia o recurso, quando há um: o caminho, o setor, o
+    /// elemento. Vai para a auditoria, e é o que a política limita nas
+    /// permissões de caminho.
+    pub recurso: Option<&'static str>,
     pub handler: Handler,
 }
 

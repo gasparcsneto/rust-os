@@ -181,6 +181,7 @@ dependencies = [
  "aarch64-cpu",
  "aparencia",
  "pci_types",
+ "politica",
  "protocolo",
  "sigilo",
  "spin",
@@ -243,6 +244,13 @@ checksum = "f0c2a105c657261a938ff68ee231c199a3d80eef33976004829de761ef5b1a9b"
 dependencies = [
  "bit_field",
  "bitflags",
+]
+
+[[package]]
+name = "politica"
+version = "0.1.0"
+dependencies = [
+ "blake2",
 ]
 
 [[package]]

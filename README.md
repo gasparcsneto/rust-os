@@ -155,7 +155,11 @@ $ cargo xtask agent --canal 2 agent.session
 | `agent.sessions` | As sessões: a serial e cada porta do console virtio, conectada ou não, quem está nela, as perdas e as recusas |
 | `agent.registry` | Quem pode entrar pelas portas: a chave do Duke e cada agente registrado, com a origem |
 | `admin.challenge` | Um desafio de uso único para uma operação administrativa nesta sessão |
-| `admin.execute` | Uma operação administrativa com a prova de um administrador (`challenge`, `command`, `params`, `admin`, `proof`) |
+| `admin.execute` | Uma operação administrativa com a prova de um administrador (`challenge`, `command`, `params`, `admin`, `proof`): `agent.register`, `agent.revoke`, `policy.assign`, `policy.write` |
+| `audit.tail` | Os registros mais recentes da auditoria encadeada, com o que basta para refazer cada elo (`count`) |
+| `audit.head` | A cabeça da auditoria — o elo do último registro, para ancorar fora da máquina —, a âncora e quantos há |
+| `audit.verify` | Refaz a cadeia guardada a partir da âncora e diz se cada elo confere |
+| `policy.show` | A política em vigor: papéis, permissões, recursos, taxas, o papel da serial e se veio do disco |
 | `system.info` | Kernel, CPU, vídeo, uptime e mecanismo de guarda da pilha |
 | `system.uptime` | Ticks do timer e milissegundos desde o boot |
 | `memory.stats` | Totais agregados de memória física |
@@ -211,6 +215,7 @@ kernel/src/
 ├── heap.rs          alocador do kernel: lista livre ordenada com fusão
 ├── interpretador.rs operar o Duke digitando
 ├── identidade.rs    quem é quem: a chave do Duke, os agentes, os administradores e os desafios
+├── autorizacao.rs   o ponto único de decisão: papel, permissão, recurso, taxa e auditoria
 ├── sessoes.rs       quem está em cada porta, e as chaves do transporte cifrado dela
 ├── aleatorio.rs     o gerador de números aleatórios, semeado pelo virtio-rng
 ├── barra.rs         a barra superior: o nome, o primeiro botão e o tempo ligado
@@ -345,6 +350,15 @@ sigilo/src/          o canal seguro, dos dois lados da conversa
 ├── quadro.rs        como as mensagens se delimitam no fluxo da porta
 └── registro.rs      o formato dos arquivos de chaves autorizadas
 
+politica/src/        a política de autorização, a mesma no kernel e no hospedeiro
+├── lib.rs           a cadeia de decisão, e a política padrão da imagem
+├── permissao.rs     o vocabulário fechado de permissões, e quais são sensíveis
+├── codigo.rs        os códigos de decisão: ALLOW, DENY_*, RATE_LIMIT, INVALID_ARGUMENT, ERROR
+├── arquivo.rs       o formato, a validação, a decisão e as regras de mudança
+├── caminho.rs       a forma normal dos caminhos, a mesma do VFS
+├── taxa.rs          o balde de pedidos e a janela de apertos de mão
+└── auditoria.rs     os registros e a cadeia de elos BLAKE2s
+
 aparencia/src/       a linguagem visual, dos dois lados da fronteira
 └── lib.rs           a paleta, onde cada cor vai, as medidas e os estilos de texto pelo uso
 
@@ -371,6 +385,7 @@ programas/           os programas de usuário, compilados à parte do kernel
         ├── ola.rs        o primeiro programa em Rust: monte, formatação e pilha
         ├── memoria.rs    confere `mapear` e o monte do lado de quem pede
         ├── ponteiros.rs  pede ao kernel que escreva no código, e confere a recusa
+        ├── autoridade.rs confere de dentro que o processo age com o papel de quem o lançou
         ├── eco.rs        escuta um canal de eventos e diz o que chega
         ├── janelas.rs    o servidor de janelas: moldura, foco, arrasto, ordem e fechar
         ├── superficie.rs desenha numa superfície, bifurca, fecha e sai sem fechar
@@ -1410,7 +1425,8 @@ em vez de gerar chaves que alguém reproduza.
 **A serial continua aberta.** É o canal de emergência, independente do Noise
 — e o único que responde no modo post-mortem, quando fazer criptografia
 seria pedir ao heap e ao escalonador, que podem ser o que quebrou. O nível
-de acesso dela vai ser configurável na política da etapa seguinte.
+de acesso dela é configurável na política — a linha `serial` —, e é o de
+`sistema` na imagem de desenvolvimento.
 
 **Operações administrativas têm autenticação própria.** Registrar um agente
 (`agent.register`, que vale até o próximo boot — o disco é só de leitura)
@@ -1448,6 +1464,109 @@ mesmo tempo, cada um recebendo só as respostas dele; o agente da porta 2
 executando um comando no Terminal, com o log dizendo `agente 2`; as recusas
 chegando ao hospedeiro; e um agente registrado pela serial, com a prova do
 administrador, entrando pela porta logo depois.
+
+### A política
+
+O canal seguro diz **quem** pede; a política diz **o que** cada um pode. A
+cadeia é uma só, e cada elo tem um dono:
+
+```
+identidade → sessão → papel → permissão → operação
+```
+
+A identidade é a chave que provou o aperto (ou a serial, que é aberta); a
+sessão, o canal por onde o pedido chegou; o papel vem do registro — uma
+terceira coluna em `/etc/duke/agentes` —, e a política, em
+`/etc/duke/politica`, diz o que cada papel pode. Cada comando declara a
+permissão que exige e, quando ela é sobre um caminho, de qual parâmetro sai
+o recurso. A decisão é uma conta só, no pacote `politica`, e o kernel a
+chama num lugar só: `autorizacao::autorizar`.
+
+**Papéis, e não listas por agente.** Quatro na imagem: `observador` observa
+o sistema e a tela, e não lê arquivos; `operador` observa e age — a tela,
+programas de `/bin` e `/programas`, arquivos de `/dados`, `/bin` e
+`/programas`; `sistema` é o da serial; `administrador` é o teto do que um
+administrador delega. Um papel pode incluir outro (`@observador`), mas as
+permissões **sensíveis** — `fs.read`, `fs.raw_read`, `keyboard.read`,
+`debug.trigger`, as administrativas — não atravessam a inclusão: cada papel
+que as tem as escreve. Não há curinga: `*` é um erro de leitura. Quatro
+agentes ou quatrocentos, a política continua do tamanho dos papéis.
+
+**Recursos por caminho.** `fs.read` e `process.run` podem ser limitados a
+prefixos. O caminho é conferido na forma normal — a mesma função que o VFS
+usa, do pacote `politica` —, um `..` é recusado e não resolvido, e um
+prefixo vale em fronteira de componente: `/dados` contém `/dados/x`, e não
+`/dadosx`. O diretório reservado do kernel não é recurso de papel nenhum,
+nem do `sistema`.
+
+**Nenhum outro caminho.** O canal (serial e portas) e o interpretador
+pedem a mesma decisão e só a licença que ela devolve chama o handler — o
+`cargo xtask invariantes` reprova uma chamada `(…handler)(` em qualquer
+outro arquivo. O interpretador valida os parâmetros como o canal; a pessoa
+na frente da máquina passa por presença física, gravada como `pessoa`, e um
+agente que confirma uma linha no Terminal decide como a sessão dele. Um
+processo lançado por um agente (`user.run`) carrega a autoridade dele: as
+chamadas `abrir` e `executar` decidem com o papel do agente, e o
+pseudo-terminal é só de processos do sistema — um processo de agente não o
+abre, nem quando a janela do Terminal está fechada. O papel é procurado a
+cada decisão: uma revogação vale também para o processo que já roda.
+
+**Tudo vai para a auditoria.** Permitido ou não, cada decisão vira um
+registro: número, milissegundos desde o boot, sessão, agente, chave
+pública, papel, método, recurso, código e um BLAKE2s dos parâmetros. Os
+parâmetros não entram — podem trazer o que um agente escreveu, ou uma prova
+administrativa. Cada registro carrega o elo do anterior, e o seu é o
+BLAKE2s do anterior com a codificação dele; mudar, tirar ou reordenar um
+registro muda todos os elos dali para a frente. A cadeia mora num anel de
+mil e vinte e quatro registros; o que sai pela ponta deixa o elo como
+âncora. `audit.head` dá a cabeça para ancorar fora da máquina, e a fumaça
+refaz a cauda no hospedeiro com o mesmo pacote. Uma enxurrada recusada por
+taxa grava o primeiro e soma os seguintes, para não empurrar para fora o
+que importa.
+
+**Os códigos.** `ALLOW`, `DENY_NOT_AUTHENTICATED`, `DENY_ROLE`,
+`DENY_PERMISSION`, `DENY_RESOURCE`, `DENY_POLICY`, `RATE_LIMIT`,
+`INVALID_ARGUMENT` e `ERROR`. Uma recusa chega ao agente como o erro
+JSON-RPC `-32010` (ou `-32011`, para a taxa), com o código no `data`.
+
+**Taxa.** Cada papel tem um balde — pedidos por segundo e rajada —, por
+sessão e por chave: reconectar não enche o balde. O aperto de mão tem o seu
+limite por porta, contado antes de qualquer conta: cada aperto custa ao
+Duke duas trocas Diffie-Hellman, e quem não tem chave registrada pode
+pedi-los à vontade.
+
+**Administrar: prova e papel, os dois.** As operações administrativas —
+`agent.register`, `agent.revoke`, `policy.assign` e `policy.write` — só
+existem dentro de `admin.execute`, depois da prova do administrador; e a
+prova não basta: o papel do administrador, na política, precisa ter a
+permissão. Ele é o **teto** do que o administrador delega:
+
+- registra e atribui só papéis que cabem no dele, e só mexe em agentes cujo
+  papel de agora também cabe — não rebaixa nem revoga quem pode mais;
+- não muda o papel da sessão de onde pede, nem revoga a chave dela, nem
+  registra a própria chave como agente;
+- não edita o próprio papel, o de outro administrador, o da sessão de onde
+  pede, nem um papel que algum desses inclua.
+
+Revogar derruba na hora as sessões vivas da chave, com uma recusa em claro.
+`policy.write` muda uma linha — de papel, de recurso ou de taxa — **em
+memória**: o disco é só de leitura. A política nova passa pela mesma
+validação do arquivo e entra inteira, numa troca só; vale na decisão
+seguinte. Uma linha inválida, ou que tire de quem administra a autoridade
+de administrar, é recusada, e a política velha fica.
+
+**Sem política, fechado.** Se `/etc/duke/politica` falta ou não se lê,
+vale a de emergência: a serial lê o estado do sistema, o log e a
+auditoria, e nada mais; uma porta não tem papel nela, e recusa tudo.
+
+A suíte confere a matriz pelo canal cifrado, linha a linha, e o que a
+auditoria gravou de cada uma; a taxa; a revogação derrubando a sessão; cada
+regra de quem administra, pela operação de verdade; a cadeia refeita a
+partir do que `audit.tail` mostra; um fio e dois programas lançados como
+um operador — o que abre `/saudacao.txt` é recusado, o que pede o
+pseudo-terminal também —; a política de emergência; e o aperto auditado e
+limitado. A fumaça faz o mesmo por fora, com o cliente do `xtask`, e refaz
+no hospedeiro a cadeia inteira que o kernel mostrou.
 
 ## Barramento PCI
 

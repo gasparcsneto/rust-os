@@ -64,6 +64,7 @@ extern crate alloc;
 mod agent;
 mod aleatorio;
 mod arch;
+mod autorizacao;
 mod barra;
 mod eventos;
 mod fios;
@@ -408,6 +409,9 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     // Quem pode falar pelas portas: a chave do Duke e os registros, do disco
     // que acabou de montar.
     identidade::carregar();
+    // E o que cada papel pode: a política, do mesmo disco. Sem ela, a de
+    // emergência — ver [`autorizacao`].
+    autorizacao::carregar();
 
     // O servidor de janelas e o Terminal, agora que o disco onde eles moram
     // está montado. Na suíte, é o caso de cada um que o lança.

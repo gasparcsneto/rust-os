@@ -16,7 +16,8 @@
 use core::fmt;
 
 use super::json::{Json, JsonWriter};
-use super::registry::{Command, ParamSpec, TipoParam};
+use super::registry::{Acesso, Command, ParamSpec, TipoParam};
+use politica::Permissao;
 
 /// A tabela de comandos do kernel.
 pub static COMANDOS: &[Command] = &[
@@ -24,6 +25,8 @@ pub static COMANDOS: &[Command] = &[
         nome: "agent.ping",
         resumo: "Verifica se o canal do agente esta vivo e responsivo.",
         params: &[],
+        acesso: Acesso::Exige(Permissao::AgentRead),
+        recurso: None,
         handler: ping,
     },
     Command {
@@ -31,6 +34,8 @@ pub static COMANDOS: &[Command] = &[
         resumo: "A sessao deste pedido: o numero que o kernel deu ao canal por onde ele \
                  chegou, e o transporte. E o numero que o log registra como quem agiu.",
         params: &[],
+        acesso: Acesso::Exige(Permissao::AgentRead),
+        recurso: None,
         handler: agent_session,
     },
     Command {
@@ -39,6 +44,8 @@ pub static COMANDOS: &[Command] = &[
                  com o nome, se ha um agente conectado, quantas conexoes ja houve e os \
                  bytes perdidos na entrada e na saida.",
         params: &[],
+        acesso: Acesso::Exige(Permissao::AgentRead),
+        recurso: None,
         handler: agent_sessions,
     },
     Command {
@@ -47,6 +54,8 @@ pub static COMANDOS: &[Command] = &[
                  registrado, com o nome, a chave e de onde veio (a imagem, ou um registro \
                  administrativo, que vale ate o proximo boot).",
         params: &[],
+        acesso: Acesso::Exige(Permissao::AgentRead),
+        recurso: None,
         handler: agent_registry,
     },
     Command {
@@ -55,13 +64,15 @@ pub static COMANDOS: &[Command] = &[
                  chave efemera. Vale uma tentativa, por pouco tempo; pedir outro descarta \
                  o anterior.",
         params: &[],
+        acesso: Acesso::PorProva,
+        recurso: None,
         handler: admin_challenge,
     },
     Command {
         nome: "admin.execute",
         resumo: "Executa uma operacao administrativa com a prova de um administrador sobre \
                  o desafio, a sessao, o comando e o texto exato dos parametros. Operacoes: \
-                 agent.register.",
+                 agent.register, agent.revoke, policy.assign, policy.write.",
         params: &[
             ParamSpec {
                 nome: "challenge",
@@ -94,6 +105,8 @@ pub static COMANDOS: &[Command] = &[
                 descricao: "A prova, em hex",
             },
         ],
+        acesso: Acesso::PorProva,
+        recurso: Some("command"),
         handler: admin_execute,
     },
     Command {
@@ -101,18 +114,24 @@ pub static COMANDOS: &[Command] = &[
         resumo: "Lista todos os comandos disponiveis com seus parametros. \
                  Chame isto primeiro para descobrir a superficie do sistema.",
         params: &[],
+        acesso: Acesso::Exige(Permissao::AgentRead),
+        recurso: None,
         handler: describe,
     },
     Command {
         nome: "system.info",
         resumo: "Identificacao do kernel, arquitetura, CPU e video.",
         params: &[],
+        acesso: Acesso::Exige(Permissao::SystemRead),
+        recurso: None,
         handler: system_info,
     },
     Command {
         nome: "memory.stats",
         resumo: "Totais agregados de memoria fisica e de MMIO mapeado.",
         params: &[],
+        acesso: Acesso::Exige(Permissao::SystemRead),
+        recurso: None,
         handler: memory_stats,
     },
     Command {
@@ -132,18 +151,24 @@ pub static COMANDOS: &[Command] = &[
                 descricao: "Se verdadeiro, retorna apenas regioes utilizaveis.",
             },
         ],
+        acesso: Acesso::Exige(Permissao::SystemRead),
+        recurso: None,
         handler: memory_regions,
     },
     Command {
         nome: "memory.frames",
         resumo: "Estado do alocador de frames de memoria fisica.",
         params: &[],
+        acesso: Acesso::Exige(Permissao::SystemRead),
+        recurso: None,
         handler: memory_frames,
     },
     Command {
         nome: "heap.stats",
         resumo: "Estado do heap do kernel, incluindo fragmentacao.",
         params: &[],
+        acesso: Acesso::Exige(Permissao::SystemRead),
+        recurso: None,
         handler: heap_stats,
     },
     Command {
@@ -155,36 +180,48 @@ pub static COMANDOS: &[Command] = &[
             obrigatorio: true,
             descricao: "Endereco virtual a traduzir, em decimal.",
         }],
+        acesso: Acesso::Exige(Permissao::SystemRead),
+        recurso: Some("address"),
         handler: paging_translate,
     },
     Command {
         nome: "system.uptime",
         resumo: "Tempo desde o boot, em ticks do timer e em milissegundos.",
         params: &[],
+        acesso: Acesso::Exige(Permissao::SystemRead),
+        recurso: None,
         handler: system_uptime,
     },
     Command {
         nome: "tasks.stats",
         resumo: "Estado do escalonador cooperativo e da fila de entrada.",
         params: &[],
+        acesso: Acesso::Exige(Permissao::SystemRead),
+        recurso: None,
         handler: tasks_stats,
     },
     Command {
         nome: "tasks.list",
         resumo: "Tarefas ja lancadas, com id, nome e se ainda estao vivas.",
         params: &[],
+        acesso: Acesso::Exige(Permissao::SystemRead),
+        recurso: None,
         handler: tasks_list,
     },
     Command {
         nome: "threads.stats",
         resumo: "Estado do escalonador preemptivo: fios vivos, trocas de contexto e preempcoes.",
         params: &[],
+        acesso: Acesso::Exige(Permissao::SystemRead),
+        recurso: None,
         handler: threads_stats,
     },
     Command {
         nome: "threads.list",
         resumo: "Fios de execucao do kernel, com id, nome, estado e quantas vezes rodaram.",
         params: &[],
+        acesso: Acesso::Exige(Permissao::SystemRead),
+        recurso: None,
         handler: threads_list,
     },
     Command {
@@ -199,6 +236,8 @@ pub static COMANDOS: &[Command] = &[
             descricao: "Caminho do programa na arvore de arquivos, por exemplo \
                         `/bin/leitor` (padrao: o exemplo embutido).",
         }],
+        acesso: Acesso::Exige(Permissao::ProcessRun),
+        recurso: Some("path"),
         handler: user_run,
     },
     Command {
@@ -206,6 +245,8 @@ pub static COMANDOS: &[Command] = &[
         resumo: "Chamadas de sistema atendidas e recusadas, bifurcacoes, trocas de \
                  imagem, saidas e o ultimo codigo de saida.",
         params: &[],
+        acesso: Acesso::Exige(Permissao::SystemRead),
+        recurso: None,
         handler: user_stats,
     },
     Command {
@@ -213,12 +254,16 @@ pub static COMANDOS: &[Command] = &[
         resumo: "Dispositivos encontrados no barramento PCI, com fabricante, \
                  modelo e o que cada um faz.",
         params: &[],
+        acesso: Acesso::Exige(Permissao::SystemRead),
+        recurso: None,
         handler: pci_list,
     },
     Command {
         nome: "disk.info",
         resumo: "Capacidade e estado do disco virtio, se houver um.",
         params: &[],
+        acesso: Acesso::Exige(Permissao::SystemRead),
+        recurso: None,
         handler: disk_info,
     },
     Command {
@@ -238,12 +283,16 @@ pub static COMANDOS: &[Command] = &[
                 descricao: "Quantos bytes do setor mostrar (padrao: 64, maximo: 512).",
             },
         ],
+        acesso: Acesso::Exige(Permissao::FsRawRead),
+        recurso: Some("sector"),
         handler: disk_read,
     },
     Command {
         nome: "net.info",
         resumo: "Endereco e contadores da placa de rede, se houver uma.",
         params: &[],
+        acesso: Acesso::Exige(Permissao::SystemRead),
+        recurso: None,
         handler: net_info,
     },
     Command {
@@ -263,6 +312,8 @@ pub static COMANDOS: &[Command] = &[
                 descricao: "IPv4 anunciado como origem (padrao: 10.0.2.15).",
             },
         ],
+        acesso: Acesso::Exige(Permissao::NetSend),
+        recurso: Some("ip"),
         handler: net_arp,
     },
     Command {
@@ -282,6 +333,8 @@ pub static COMANDOS: &[Command] = &[
                 descricao: "Linhas da grade (padrao: 8, maximo: 64).",
             },
         ],
+        acesso: Acesso::Exige(Permissao::UiRead),
+        recurso: None,
         handler: video_sample,
     },
     Command {
@@ -291,6 +344,8 @@ pub static COMANDOS: &[Command] = &[
                  retangulo que chegou a tela e, num adaptador que so mostra o que se manda, o \
                  que atravessou para o dispositivo.",
         params: &[],
+        acesso: Acesso::Exige(Permissao::SystemRead),
+        recurso: None,
         handler: display_info,
     },
     Command {
@@ -298,6 +353,8 @@ pub static COMANDOS: &[Command] = &[
         resumo: "A arvore semantica do que esta na tela: cada elemento com papel, rotulo, valor, \
                  moldura e as acoes que aceita. Leia isto em vez de amostrar pixels.",
         params: &[],
+        acesso: Acesso::Exige(Permissao::UiRead),
+        recurso: None,
         handler: ui_tree,
     },
     Command {
@@ -324,30 +381,40 @@ pub static COMANDOS: &[Command] = &[
                 descricao: "O valor novo, para `set_value`.",
             },
         ],
+        acesso: Acesso::Exige(Permissao::UiAct),
+        recurso: Some("id"),
         handler: ui_act,
     },
     Command {
         nome: "disk.partitions",
         resumo: "A tabela de particoes do disco, lida da GPT.",
         params: &[],
+        acesso: Acesso::Exige(Permissao::SystemRead),
+        recurso: None,
         handler: disk_partitions,
     },
     Command {
         nome: "btrfs.chunks",
         resumo: "O mapa de pedacos do Btrfs e a raiz da arvore de pedacos, lida por endereco logico.",
         params: &[],
+        acesso: Acesso::Exige(Permissao::SystemRead),
+        recurso: None,
         handler: btrfs_chunks,
     },
     Command {
         nome: "btrfs.info",
         resumo: "O superbloco do sistema de arquivos da particao de dados.",
         params: &[],
+        acesso: Acesso::Exige(Permissao::SystemRead),
+        recurso: None,
         handler: btrfs_info,
     },
     Command {
         nome: "fs.mounts",
         resumo: "O que esta montado na arvore de arquivos, e de que tipo.",
         params: &[],
+        acesso: Acesso::Exige(Permissao::SystemRead),
+        recurso: None,
         handler: fs_mounts,
     },
     Command {
@@ -373,6 +440,8 @@ pub static COMANDOS: &[Command] = &[
                 descricao: "Quantos bytes devolver (padrao: 256, maximo: 4096).",
             },
         ],
+        acesso: Acesso::Exige(Permissao::FsRead),
+        recurso: Some("path"),
         handler: fs_read,
     },
     Command {
@@ -384,6 +453,8 @@ pub static COMANDOS: &[Command] = &[
             obrigatorio: false,
             descricao: "Caminho absoluto do diretorio (padrao: /bin).",
         }],
+        acesso: Acesso::Exige(Permissao::FsRead),
+        recurso: Some("path"),
         handler: fs_list,
     },
     Command {
@@ -395,18 +466,24 @@ pub static COMANDOS: &[Command] = &[
             obrigatorio: false,
             descricao: "Quantos caracteres tirar da fila (padrao: 64, maximo: 64).",
         }],
+        acesso: Acesso::Exige(Permissao::KeyboardRead),
+        recurso: None,
         handler: keyboard_read,
     },
     Command {
         nome: "irq.stats",
         resumo: "Contadores de interrupcoes de hardware por linha.",
         params: &[],
+        acesso: Acesso::Exige(Permissao::SystemRead),
+        recurso: None,
         handler: irq_stats,
     },
     Command {
         nome: "traps.stats",
         resumo: "Contadores de excecoes por tipo e detalhes da ultima falha.",
         params: &[],
+        acesso: Acesso::Exige(Permissao::SystemRead),
+        recurso: None,
         handler: traps_stats,
     },
     Command {
@@ -423,6 +500,8 @@ pub static COMANDOS: &[Command] = &[
                         o kernel entra em modo post-mortem e passa a responder \
                         apenas o relatorio da falha.",
         }],
+        acesso: Acesso::Exige(Permissao::DebugTrigger),
+        recurso: Some("kind"),
         handler: debug_trigger,
     },
     Command {
@@ -442,7 +521,52 @@ pub static COMANDOS: &[Command] = &[
                 descricao: "Severidade minima: error, warn, info, debug ou trace (padrao: trace).",
             },
         ],
+        acesso: Acesso::Exige(Permissao::LogRead),
+        recurso: None,
         handler: log_tail,
+    },
+    Command {
+        nome: "audit.tail",
+        resumo: "Os registros mais recentes da auditoria encadeada, com tudo o que entra no \
+                 elo: quem, o que, o codigo, o BLAKE2s dos parametros, o elo anterior e o \
+                 proprio. Basta para refazer a cadeia fora da maquina.",
+        params: &[ParamSpec {
+            nome: "count",
+            tipo: TipoParam::Inteiro,
+            obrigatorio: false,
+            descricao: "Quantos registros, do mais recente para tras (padrao: 32, teto: 128).",
+        }],
+        acesso: Acesso::Exige(Permissao::AuditRead),
+        recurso: None,
+        handler: audit_tail,
+    },
+    Command {
+        nome: "audit.head",
+        resumo: "A cabeca da auditoria: o elo do ultimo registro, para ancorar fora da \
+                 maquina, com o numero dele, a ancora da janela guardada e quantos ha nela.",
+        params: &[],
+        acesso: Acesso::Exige(Permissao::AuditRead),
+        recurso: None,
+        handler: audit_head,
+    },
+    Command {
+        nome: "audit.verify",
+        resumo: "Refaz a cadeia guardada a partir da ancora e diz se cada elo confere; se \
+                 nao, o primeiro registro que nao confere.",
+        params: &[],
+        acesso: Acesso::Exige(Permissao::AuditRead),
+        recurso: None,
+        handler: audit_verify,
+    },
+    Command {
+        nome: "policy.show",
+        resumo: "A politica em vigor: cada papel com as permissoes, os recursos e a taxa; o \
+                 papel da serial; o limite de apertos; e se ela veio do disco ou e a de \
+                 emergencia.",
+        params: &[],
+        acesso: Acesso::Exige(Permissao::PolicyRead),
+        recurso: None,
+        handler: policy_show,
     },
 ];
 
@@ -469,17 +593,165 @@ fn agent_session(_params: Json, w: &mut JsonWriter) -> fmt::Result {
 fn escrever_identidade(w: &mut JsonWriter, sessao: u8) -> fmt::Result {
     if sessao == super::sessao::SERIAL {
         w.field_bool("authenticated", false)?;
-        return w.field_bool("emergency", true);
+        w.field_bool("emergency", true)?;
+        let papel = crate::autorizacao::com_politica(|p| alloc::string::String::from(p.serial()));
+        return w.field_str("role", &papel);
     }
     match crate::sessoes::identidade(sessao) {
         Some(id) => {
             w.field_bool("authenticated", true)?;
             w.field_str("agent", &id.nome)?;
             w.field_str("key", &sigilo::hex(&id.chave))?;
+            w.key("role")?;
+            // O papel de agora, e não o do aperto: uma atribuição vale na
+            // hora — ver [`crate::autorizacao`].
+            match crate::identidade::papel_do_agente(&id.chave) {
+                Some(papel) => w.str_value(&papel)?,
+                None => w.null_value()?,
+            }
             w.field_u64("since_ms", id.desde_ms)
         }
         None => w.field_bool("authenticated", false),
     }
+}
+
+// ---------------------------------------------------------------------------
+// audit.* e policy.*
+// ---------------------------------------------------------------------------
+
+/// O teto de `audit.tail`: a resposta inteira é montada na memória antes de
+/// sair por uma porta, e cada registro tem perto de quinhentos bytes.
+const MAIOR_CAUDA_DA_AUDITORIA: u64 = 128;
+
+fn audit_tail(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let n = params
+        .member("count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(32)
+        .min(MAIOR_CAUDA_DA_AUDITORIA) as usize;
+    // Copiados, e a trava solta antes de escrever: a escrita vai ao canal,
+    // e o canal não é lugar de segurar a trava da auditoria.
+    let registros =
+        crate::autorizacao::com_auditoria(|c| politica::auditoria::copiar(c.ultimos(n)))
+            .unwrap_or_default();
+    w.begin_object()?;
+    w.key("records")?;
+    w.begin_array()?;
+    for r in &registros {
+        let e = &r.evento;
+        w.begin_object()?;
+        w.field_u64("seq", r.seq)?;
+        w.field_u64("ts_ms", e.ts_ms)?;
+        w.field_u64("session", u64::from(e.sessao))?;
+        w.field_str("agent", &e.agente)?;
+        w.key("key")?;
+        match &e.chave {
+            Some(k) => w.str_value(&sigilo::hex(k))?,
+            None => w.null_value()?,
+        }
+        w.field_str("role", &e.papel)?;
+        w.field_str("method", &e.metodo)?;
+        w.field_str("resource", &e.recurso)?;
+        w.field_str("result", e.codigo.resultado())?;
+        w.field_str("code", e.codigo.nome())?;
+        w.field_str("params", &sigilo::hex(&e.parametros))?;
+        w.field_str("detail", &e.detalhe)?;
+        w.field_str("prev", &sigilo::hex(&r.anterior))?;
+        w.field_str("link", &sigilo::hex(&r.elo))?;
+        w.end_object()?;
+    }
+    w.end_array()?;
+    w.end_object()
+}
+
+fn audit_head(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let estado = crate::autorizacao::com_auditoria(|c| {
+        (c.ultima_seq(), c.cabeca(), c.ancora(), c.guardados())
+    });
+    w.begin_object()?;
+    match estado {
+        Some((seq, cabeca, ancora, guardados)) => {
+            w.field_u64("seq", seq)?;
+            w.field_str("head", &sigilo::hex(&cabeca))?;
+            w.field_str("anchor", &sigilo::hex(&ancora))?;
+            w.field_u64("stored", guardados as u64)?;
+            w.field_u64(
+                "capacity",
+                crate::autorizacao::CAPACIDADE_DA_AUDITORIA as u64,
+            )?;
+        }
+        None => w.field_str("error", "a auditoria nao foi iniciada")?,
+    }
+    w.end_object()
+}
+
+fn audit_verify(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let r = crate::autorizacao::com_auditoria(|c| (c.verificar(), c.guardados()));
+    w.begin_object()?;
+    match r {
+        Some((Ok(cabeca), guardados)) => {
+            w.field_bool("ok", true)?;
+            w.field_str("head", &sigilo::hex(&cabeca))?;
+            w.field_u64("checked", guardados as u64)?;
+        }
+        Some((Err(seq), _)) => {
+            w.field_bool("ok", false)?;
+            w.field_u64("failed_at", seq)?;
+        }
+        None => w.field_str("error", "a auditoria nao foi iniciada")?,
+    }
+    w.end_object()
+}
+
+fn policy_show(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let politica = crate::autorizacao::com_politica(Clone::clone);
+    w.begin_object()?;
+    w.field_str("path", crate::autorizacao::CAMINHO_DA_POLITICA)?;
+    w.field_bool("from_disk", crate::autorizacao::politica_do_disco())?;
+    w.field_str("serial_role", politica.serial())?;
+    let apertos = politica.apertos();
+    w.key("handshakes")?;
+    w.begin_object()?;
+    w.field_u64("max", u64::from(apertos.quantos))?;
+    w.field_u64("window_ms", apertos.janela_ms)?;
+    w.end_object()?;
+    w.key("roles")?;
+    w.begin_array()?;
+    for papel in politica.papeis() {
+        w.begin_object()?;
+        w.field_str("name", &papel.nome)?;
+        w.key("includes")?;
+        w.begin_array()?;
+        for incluido in &papel.inclui {
+            w.str_value(incluido)?;
+        }
+        w.end_array()?;
+        w.key("permissions")?;
+        w.begin_array()?;
+        for p in papel.permissoes() {
+            w.str_value(p.nome())?;
+        }
+        w.end_array()?;
+        w.key("resources")?;
+        w.begin_object()?;
+        for (p, prefixos) in &papel.recursos {
+            w.key(p.nome())?;
+            w.begin_array()?;
+            for prefixo in prefixos {
+                w.str_value(prefixo)?;
+            }
+            w.end_array()?;
+        }
+        w.end_object()?;
+        w.key("rate")?;
+        w.begin_object()?;
+        w.field_u64("per_second", u64::from(papel.taxa.por_segundo))?;
+        w.field_u64("burst", u64::from(papel.taxa.rajada))?;
+        w.end_object()?;
+        w.end_object()?;
+    }
+    w.end_array()?;
+    w.end_object()
 }
 
 fn admin_challenge(_params: Json, w: &mut JsonWriter) -> fmt::Result {
@@ -521,6 +793,11 @@ fn agent_registry(_params: Json, w: &mut JsonWriter) -> fmt::Result {
         w.begin_object()?;
         w.field_str("name", &a.nome)?;
         w.field_str("key", &sigilo::hex(&a.chave))?;
+        w.key("role")?;
+        match &a.papel {
+            Some(papel) => w.str_value(papel)?,
+            None => w.null_value()?,
+        }
         w.field_str("origin", a.origem.como_str())?;
         w.end_object()?;
     }
@@ -2322,7 +2599,9 @@ fn user_run(params: Json, w: &mut JsonWriter) -> fmt::Result {
     // processo, entao quem perguntar depois precisa saber a qual programa o
     // `last_exit` se refere.
     w.field_str("program", caminho.unwrap_or("<exemplo embutido>"))?;
-    match crate::usuario::lancar(caminho) {
+    // Com a autoridade de quem pediu: o processo de um agente abre e executa
+    // o que o papel do agente alcança — ver [`crate::autorizacao`].
+    match crate::usuario::lancar_como(caminho, crate::autorizacao::autoridade_atual()) {
         Ok(id) => {
             w.field_bool("launched", true)?;
             w.field_u64("thread_id", id)?;

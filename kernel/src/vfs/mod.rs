@@ -228,8 +228,9 @@ pub fn montar(
 /// `fs.read`, não a leia de dentro da máquina.
 pub const DIRETORIO_RESERVADO: &str = "/etc/duke/privado";
 
-/// Se um caminho já normalizado é do diretório reservado.
-fn reservado(normalizado: &str) -> bool {
+/// Se um caminho já normalizado é do diretório reservado. Pública porque a
+/// autorização a usa também: o diretório não é recurso de papel nenhum.
+pub fn reservado(normalizado: &str) -> bool {
     normalizado
         .strip_prefix(DIRETORIO_RESERVADO)
         .is_some_and(|resto| resto.is_empty() || resto.starts_with('/'))
@@ -243,21 +244,12 @@ fn reservado(normalizado: &str) -> bool {
 /// é sólida se o caminho escrito for o caminho percorrido. Com `..`
 /// aceito, `/etc/x/../duke/privado` dependeria de um detalhe de cada sistema
 /// de arquivos para continuar fechado.
+///
+/// A conta é a de [`politica::caminho::normalizar`]: a política limita
+/// recursos por prefixo de caminho, e o caminho que ela confere precisa ser
+/// o mesmo que o VFS percorre.
 fn normalizar(caminho: &str) -> Result<String, Erro> {
-    if !caminho.starts_with('/') {
-        return Err(Erro::CaminhoInvalido);
-    }
-    let mut saida = String::from("/");
-    for parte in caminho.split('/').filter(|p| !p.is_empty() && *p != ".") {
-        if parte == ".." {
-            return Err(Erro::CaminhoInvalido);
-        }
-        if saida.len() > 1 {
-            saida.push('/');
-        }
-        saida.push_str(parte);
-    }
-    Ok(saida)
+    politica::caminho::normalizar(caminho).ok_or(Erro::CaminhoInvalido)
 }
 
 /// Qual montagem responde por um caminho, e o que sobra dele depois do ponto.

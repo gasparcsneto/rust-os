@@ -42,7 +42,17 @@ use std::{
 /// emulador — o TCG é sensível ao endereço dos dados quentes —, e não custo
 /// do código. Um teto que cabe dentro dessa variação é um teto que falha ao
 /// acaso; o dobro do pior medido não cabe.
-const TETO_DOS_TESTES: Duration = Duration::from_secs(300);
+///
+/// # Por que dez
+///
+/// Pela mesma conta, de novo. Com a política de autorização a suíte do x86
+/// em debug foi de 243 para 302 segundos, medidos na mesma bancada no mesmo
+/// dia: uns 30 são dos casos novos — apertos de mão, programas lançados
+/// como um agente, a janela de apertos —, e o resto é o efeito de cima. O
+/// preenchimento de tela, que não toca nada da política, foi de 746 para
+/// 873 ms por quadro: 17% mais lento. Cinco minutos passaram a reprovar a
+/// suíte saudável; dez são o dobro do pior medido.
+const TETO_DOS_TESTES: Duration = Duration::from_secs(600);
 
 /// As arquiteturas que o kernel suporta.
 ///
@@ -2192,6 +2202,7 @@ fn conferir_invariantes() -> Result<ExitCode, String> {
         conferir_fase_do_readme()?,
         conferir_travas_do_post_mortem()?,
         conferir_janelas_pelo_toolkit()?,
+        conferir_ponto_unico_de_decisao()?,
     ];
     if passos.iter().all(|p| *p == ExitCode::SUCCESS) {
         Ok(ExitCode::SUCCESS)
@@ -2387,6 +2398,93 @@ fn conferir_janelas_pelo_toolkit() -> Result<ExitCode, String> {
     }
 }
 
+/// As chamadas que executam uma operação protegida, e o único arquivo onde
+/// cada uma pode aparecer.
+const CHAMADAS_PROTEGIDAS: &[(&str, &str)] = &[
+    // O handler de um comando: só a licença de `autorizacao::autorizar`.
+    (".handler)(", "kernel/src/autorizacao.rs"),
+    // Uma operação administrativa: só depois da prova e da decisão.
+    ("(operacao.executar)(", "kernel/src/agent/administracao.rs"),
+];
+
+/// Confere que nenhum caminho chega a uma operação protegida sem passar pelo
+/// ponto de decisão.
+///
+/// # A regra
+///
+/// O handler de um comando é chamado num lugar só — `Autorizado::executar`,
+/// que só existe depois de `autorizacao::autorizar` decidir — e a operação
+/// administrativa num lugar só, depois da prova e do papel. Uma chamada
+/// direta em qualquer outro arquivo é um atalho: o canal, o interpretador ou
+/// um módulo novo executando sem decisão e sem auditoria.
+///
+/// O compilador não pega isso: o handler é um ponteiro de função público, e
+/// chamá-lo é uma linha que compila em qualquer lugar. Antes desta etapa
+/// havia dois lugares que o chamavam — o canal e o interpretador — e o
+/// segundo não validava nem os parâmetros.
+///
+/// A suíte (`testes.rs`) fica de fora: ela chama handlers para conferir as
+/// respostas deles, e não é caminho de produção — não é compilada sem
+/// `modo-teste`.
+fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
+    let raiz = raiz_do_projeto();
+    let fonte = raiz.join("kernel/src");
+    let mut fora: Vec<String> = Vec::new();
+    let mut achadas = vec![0usize; CHAMADAS_PROTEGIDAS.len()];
+    percorrer_fontes(&fonte, &mut |caminho| {
+        let relativo = caminho
+            .strip_prefix(&raiz)
+            .map_err(|_| format!("{} fora do projeto", caminho.display()))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        if relativo == "kernel/src/testes.rs" {
+            return Ok(());
+        }
+        let texto = std::fs::read_to_string(caminho)
+            .map_err(|e| format!("não foi possível ler {}: {e}", caminho.display()))?;
+        for (n, linha) in texto.lines().enumerate() {
+            for (i, (chamada, dono)) in CHAMADAS_PROTEGIDAS.iter().enumerate() {
+                if !linha.contains(chamada) {
+                    continue;
+                }
+                if relativo == *dono {
+                    achadas[i] += 1;
+                } else {
+                    fora.push(format!("{relativo}:{}: {}", n + 1, linha.trim()));
+                }
+            }
+        }
+        Ok(())
+    })?;
+    // A chamada legítima tem de existir: uma busca que não acha nem ela
+    // está procurando a coisa errada, e passaria por qualquer atalho.
+    for ((chamada, dono), quantas) in CHAMADAS_PROTEGIDAS.iter().zip(&achadas) {
+        if *quantas == 0 {
+            fora.push(format!(
+                "`{chamada}` não aparece em {dono}: a conferência está cega"
+            ));
+        }
+    }
+    if fora.is_empty() {
+        println!(
+            "[xtask] o handler de um comando e a operação administrativa são chamados só pelo \
+             ponto de decisão"
+        );
+        Ok(ExitCode::SUCCESS)
+    } else {
+        eprintln!("[xtask] uma operação protegida chamada fora do ponto de decisão:");
+        for f in &fora {
+            eprintln!("  {f}");
+        }
+        eprintln!(
+            "\nUm comando executa por `autorizacao::autorizar` e `Autorizado::executar`, que \
+             decidem pela política e gravam na auditoria; uma operação administrativa, por \
+             `admin.execute`, depois da prova."
+        );
+        Ok(ExitCode::FAILURE)
+    }
+}
+
 /// Confere que a fase que o kernel publica é a última que o roteiro dá por
 /// feita.
 ///
@@ -2519,6 +2617,7 @@ fn conferir_arvore_do_readme() -> Result<ExitCode, String> {
         "aparencia/src",
         "toolkit/src",
         "sigilo/src",
+        "politica/src",
         "programas/src",
         "xtask/src",
     ] {
@@ -2772,6 +2871,7 @@ fn conferir_blocos_unsafe() -> Result<ExitCode, String> {
         "aparencia/src",
         "toolkit/src",
         "sigilo/src",
+        "politica/src",
         "programas/src",
     ] {
         percorrer_fontes(&raiz.join(sub), &mut |caminho| {
@@ -3375,6 +3475,16 @@ mod chaves {
         format!("agente-{p}")
     }
 
+    /// O papel do agente da porta `p` na imagem de desenvolvimento: três
+    /// operadores e um de sistema. O observador da fumaça é o intruso, que
+    /// entra registrado pela serial com esse papel — ver `sob_politica`.
+    pub fn papel_do_agente(p: u8) -> &'static str {
+        match p {
+            1..=3 => "operador",
+            _ => "sistema",
+        }
+    }
+
     /// Lê uma chave, ou a cria se ainda não existe.
     fn chave(nome: &str) -> Result<[u8; 32], String> {
         let caminho = diretorio().join(format!("{nome}.chave"));
@@ -3427,11 +3537,16 @@ mod chaves {
                 agentes.push_str(&sigilo::registro::linha(
                     &sigilo::publica_de(&self.do_agente(p)),
                     &nome_do_agente(p),
+                    Some(papel_do_agente(p)),
                 ));
             }
             let administradores = format!(
                 "# Quem pode provar uma operacao administrativa.\n{}",
-                sigilo::registro::linha(&sigilo::publica_de(&self.administrador), "administrador")
+                sigilo::registro::linha(
+                    &sigilo::publica_de(&self.administrador),
+                    "administrador",
+                    Some("administrador"),
+                )
             );
             vec![
                 (
@@ -3439,6 +3554,12 @@ mod chaves {
                     format!("{}\n", sigilo::hex(&self.duke)).into_bytes(),
                 ),
                 ("etc/duke/agentes".to_string(), agentes.into_bytes()),
+                // A política: o mesmo texto que os testes do pacote
+                // `politica` leem.
+                (
+                    "etc/duke/politica".to_string(),
+                    politica::PADRAO.as_bytes().to_vec(),
+                ),
                 (
                     "etc/duke/administradores".to_string(),
                     administradores.into_bytes(),
@@ -4730,6 +4851,7 @@ fn conversar(
     sob_agentes(arch)?;
     sob_sigilo(arch)?;
     sob_administracao(arch, &mut escrita, &mut leitor)?;
+    sob_politica(arch, &mut escrita, &mut leitor)?;
     sob_tela(monitor, tela_no_monitor, &mut escrita, &mut leitor)?;
     sob_fragmento(&mut escrita, &mut leitor)?;
     // Por último, porque não há volta: depois dela o kernel só responde o
@@ -6350,60 +6472,25 @@ fn sob_administracao(
     let chaves = chaves::Chaves::garantir()?;
     // Fora da faixa que comeca em 9, que `ler_resposta` pula — ver la.
     let mut id = 6300;
-    let mut pedir = |metodo: &str, params: &str| -> Result<String, String> {
-        id += 1;
-        escrita
-            .write_all(
-                format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"{metodo}","params":{params}}}"#)
-                    .as_bytes(),
-            )
-            .and_then(|()| escrita.write_all(b"\n"))
-            .and_then(|()| escrita.flush())
-            .map_err(|e| format!("admin: falha ao pedir `{metodo}`: {e}"))?;
-        loop {
-            let resposta = ler_resposta(leitor).map_err(|e| format!("admin: {e}"))?;
-            if e_a_resposta(&resposta, id) {
-                return Ok(resposta);
-            }
-        }
-    };
-
     let intruso = sigilo::publica_de(&chaves.intruso);
-    let parametros = format!(r#"{{"key":"{}","name":"intruso"}}"#, sigilo::hex(&intruso));
-    let campo = |r: &str, nome: &str| -> Option<String> {
-        let depois = apos(r, &format!("\"{nome}\":"))?;
-        let depois = depois.trim_start_matches('"');
-        Some(depois.split(['"', ',', '}']).next()?.to_string())
-    };
+    let parametros = format!(
+        r#"{{"key":"{}","name":"intruso","role":"observador"}}"#,
+        sigilo::hex(&intruso)
+    );
 
     let mut executar = |prova_de: &str| -> Result<String, String> {
-        let r = pedir("admin.challenge", "{}")?;
-        let desafio: u64 = campo(&r, "challenge")
-            .and_then(|v| v.parse().ok())
-            .ok_or_else(|| format!("admin: sem desafio\n  {r}"))?;
-        let nonce = campo(&r, "nonce")
-            .and_then(|v| sigilo::de_hex(&v))
-            .ok_or("admin: sem nonce")?;
-        let efemera = campo(&r, "ephemeral")
-            .and_then(|v| sigilo::de_hex(&v))
-            .ok_or("admin: sem efemera")?;
-        let publica = sigilo::publica_de(&chaves.administrador);
-        let contexto = sigilo::administracao::Contexto {
-            nonce: &nonce,
-            sessao: 0,
-            administrador: &publica,
-            efemera: &efemera,
-            comando: "agent.register",
-            parametros: prova_de,
+        let mut pedir = |metodo: &str, params: &str| {
+            pedir_pela_serial(escrita, leitor, &mut id, metodo, params)
         };
-        let prova = sigilo::administracao::provar(&chaves.administrador, &contexto)
-            .map_err(|e| format!("admin: sem prova: {}", e.motivo()))?;
-        let pedido = format!(
-            r#"{{"challenge":{desafio},"command":"agent.register","params":"{}","admin":"{}","proof":"{}"}}"#,
-            parametros.replace('"', "\\\""),
-            sigilo::hex(&publica),
-            sigilo::hex(&prova)
-        );
+        let desafio = pedir("admin.challenge", "{}")?;
+        let pedido = pedido_administrativo(
+            &chaves,
+            0,
+            &desafio,
+            "agent.register",
+            &parametros,
+            prova_de,
+        )?;
         let primeira = pedir("admin.execute", &pedido)?;
         // O mesmo pedido de novo: o desafio já foi gasto.
         let segunda = pedir("admin.execute", &pedido)?;
@@ -6437,6 +6524,421 @@ fn sob_administracao(
         ));
     }
     println!("  [admin] ok  o agente registrado pela serial entra pela porta 1");
+    Ok(())
+}
+
+/// Pede pela serial, em claro, e devolve a resposta deste pedido.
+fn pedir_pela_serial(
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+    id: &mut u32,
+    metodo: &str,
+    params: &str,
+) -> Result<String, String> {
+    *id += 1;
+    let id = *id;
+    escrita
+        .write_all(
+            format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"{metodo}","params":{params}}}"#)
+                .as_bytes(),
+        )
+        .and_then(|()| escrita.write_all(b"\n"))
+        .and_then(|()| escrita.flush())
+        .map_err(|e| format!("falha ao pedir `{metodo}` pela serial: {e}"))?;
+    loop {
+        let resposta = ler_resposta(leitor)?;
+        if e_a_resposta(&resposta, id) {
+            return Ok(resposta);
+        }
+    }
+}
+
+/// O valor cru de um campo simples de uma resposta: o texto sem aspas, ou o
+/// número.
+fn campo_simples(r: &str, nome: &str) -> Option<String> {
+    let depois = apos(r, &format!("\"{nome}\":"))?;
+    let depois = depois.trim_start_matches('"');
+    Some(depois.split(['"', ',', '}']).next()?.to_string())
+}
+
+/// Os parâmetros de um `admin.execute` de `comando` com `parametros`, e a
+/// prova do administrador da imagem sobre `prova_de`, para o desafio que
+/// `admin.challenge` devolveu na sessão `sessao`.
+fn pedido_administrativo(
+    chaves: &chaves::Chaves,
+    sessao: u8,
+    desafio: &str,
+    comando: &str,
+    parametros: &str,
+    prova_de: &str,
+) -> Result<String, String> {
+    let numero: u64 = campo_simples(desafio, "challenge")
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(|| format!("admin: sem desafio\n  {desafio}"))?;
+    let nonce = campo_simples(desafio, "nonce")
+        .and_then(|v| sigilo::de_hex(&v))
+        .ok_or("admin: sem nonce")?;
+    let efemera = campo_simples(desafio, "ephemeral")
+        .and_then(|v| sigilo::de_hex(&v))
+        .ok_or("admin: sem efemera")?;
+    let publica = sigilo::publica_de(&chaves.administrador);
+    let contexto = sigilo::administracao::Contexto {
+        nonce: &nonce,
+        sessao,
+        administrador: &publica,
+        efemera: &efemera,
+        comando,
+        parametros: prova_de,
+    };
+    let prova = sigilo::administracao::provar(&chaves.administrador, &contexto)
+        .map_err(|e| format!("admin: sem prova: {}", e.motivo()))?;
+    Ok(format!(
+        r#"{{"challenge":{numero},"command":"{comando}","params":"{}","admin":"{}","proof":"{}"}}"#,
+        parametros.replace('"', "\\\""),
+        sigilo::hex(&publica),
+        sigilo::hex(&prova)
+    ))
+}
+
+/// A resposta é a recusa da política com `codigo`.
+fn recusado_com(resposta: &str, codigo: &str) -> bool {
+    let rpc = if codigo == "RATE_LIMIT" {
+        -32011
+    } else {
+        -32010
+    };
+    resposta.contains(&format!(r#""code":{rpc}"#))
+        && resposta.contains(&format!(r#""data":"{codigo}""#))
+}
+
+/// Um objeto JSON plano: os campos, com o valor sem escape — `None` para
+/// `null`.
+type ObjetoPlano = Vec<(String, Option<String>)>;
+
+/// Os objetos de um array JSON de objetos planos — campos de texto, número
+/// ou `null` —, cada um como pares de nome e valor já sem escape.
+///
+/// É o que `audit.tail` devolve. O `xtask` não tem um leitor de JSON, e
+/// esta é a forma mais curta que respeita aspas e escapes: um `,` ou um `}`
+/// dentro de um texto não fecha nada.
+fn objetos_planos(texto: &str) -> Result<Vec<ObjetoPlano>, String> {
+    let b: Vec<char> = texto.chars().collect();
+    let mut i = 0;
+    let mut objetos = Vec::new();
+    let texto_em = |i: &mut usize| -> Result<String, String> {
+        let mut s = String::new();
+        *i += 1;
+        while *i < b.len() && b[*i] != '"' {
+            if b[*i] == '\\' {
+                *i += 1;
+                match b.get(*i) {
+                    Some('n') => s.push('\n'),
+                    Some('t') => s.push('\t'),
+                    Some('r') => s.push('\r'),
+                    Some('u') => {
+                        let hex: String = b
+                            .get(*i + 1..*i + 5)
+                            .ok_or("escape curto")?
+                            .iter()
+                            .collect();
+                        let c = u32::from_str_radix(&hex, 16)
+                            .ok()
+                            .and_then(char::from_u32)
+                            .ok_or("escape invalido")?;
+                        s.push(c);
+                        *i += 4;
+                    }
+                    Some(c) => s.push(*c),
+                    None => return Err("texto sem fim".into()),
+                }
+            } else {
+                s.push(b[*i]);
+            }
+            *i += 1;
+        }
+        *i += 1;
+        Ok(s)
+    };
+    while i < b.len() {
+        if b[i] != '{' {
+            i += 1;
+            continue;
+        }
+        i += 1;
+        let mut campos = Vec::new();
+        loop {
+            while i < b.len() && (b[i] == ',' || b[i].is_whitespace()) {
+                i += 1;
+            }
+            if i >= b.len() {
+                return Err("objeto sem fim".into());
+            }
+            if b[i] == '}' {
+                i += 1;
+                break;
+            }
+            if b[i] != '"' {
+                return Err(format!("esperava um nome na posicao {i}"));
+            }
+            let nome = texto_em(&mut i)?;
+            while i < b.len() && (b[i] == ':' || b[i].is_whitespace()) {
+                i += 1;
+            }
+            let valor = if b.get(i) == Some(&'"') {
+                Some(texto_em(&mut i)?)
+            } else {
+                let inicio = i;
+                while i < b.len() && b[i] != ',' && b[i] != '}' {
+                    i += 1;
+                }
+                let cru: String = b[inicio..i].iter().collect();
+                let cru = cru.trim().to_string();
+                (cru != "null").then_some(cru)
+            };
+            campos.push((nome, valor));
+        }
+        objetos.push(campos);
+    }
+    Ok(objetos)
+}
+
+/// A política, por fora: papéis que recusam, a taxa, a revogação, as regras
+/// de quem administra, e a auditoria refeita no hospedeiro.
+///
+/// # O que esta sonda prova que a suíte não prova
+///
+/// Que o que a suíte confere por dentro vale pelo dispositivo, com o cliente
+/// de verdade: as recusas chegam como erros JSON-RPC com o código no `data`,
+/// a revogação derruba uma conexão do hospedeiro, e a cadeia da auditoria é
+/// refeita fora da máquina com o mesmo `politica` — que é o que a ancoragem
+/// externa vai fazer.
+fn sob_politica(
+    arch: Arquitetura,
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+) -> Result<(), String> {
+    println!("[xtask] fumaça: a política — papéis, taxa, revogação, administração e auditoria");
+    let chaves = chaves::Chaves::garantir()?;
+    let mut id = 6400;
+    let mut pedir =
+        |metodo: &str, params: &str| pedir_pela_serial(escrita, leitor, &mut id, metodo, params);
+    // As provas mandadas, para conferir no fim que nenhuma foi gravada.
+    let provas: std::cell::RefCell<Vec<String>> = Default::default();
+    let administrar = |pedir: &mut dyn FnMut(&str, &str) -> Result<String, String>,
+                       comando: &str,
+                       parametros: &str|
+     -> Result<String, String> {
+        let desafio = pedir("admin.challenge", "{}")?;
+        let pedido = pedido_administrativo(&chaves, 0, &desafio, comando, parametros, parametros)?;
+        provas.borrow_mut().extend(campo_simples(&pedido, "proof"));
+        pedir("admin.execute", &pedido)
+    };
+
+    // O intruso, registrado como observador: observa, e não lê arquivos.
+    let mut intruso = AgenteNaPorta::conectar_com(arch, 1, &chaves.intruso, &chaves.duke)?;
+    let r = intruso.pedir("system.info", "{}")?;
+    if !r.contains(r#""result":"#) {
+        return Err(format!("politica: o observador nao observou\n  {r}"));
+    }
+    let r = intruso.pedir("fs.list", r#"{"path":"/bin"}"#)?;
+    if !recusado_com(&r, "DENY_PERMISSION") {
+        return Err(format!("politica: o observador listou arquivos\n  {r}"));
+    }
+    // Um operador: lê o que o recurso dele alcança, e nada além.
+    let mut operador = AgenteNaPorta::conectar(arch, 2)?;
+    let r = operador.pedir("fs.list", r#"{"path":"/bin"}"#)?;
+    if !r.contains(r#""result":"#) {
+        return Err(format!("politica: o operador nao listou /bin\n  {r}"));
+    }
+    for caminho in [
+        "/etc/duke/agentes",
+        "/etc/duke/privado/chave",
+        "/bin/../etc/duke/agentes",
+    ] {
+        let r = operador.pedir("fs.read", &format!(r#"{{"path":"{caminho}"}}"#))?;
+        if !recusado_com(&r, "DENY_RESOURCE") {
+            return Err(format!("politica: o operador leu {caminho}\n  {r}"));
+        }
+    }
+    println!(
+        "  [politica] ok  o observador observa e nao le arquivos; o operador le so o alcance dele"
+    );
+
+    // O operador tenta administrar a própria sessão, com a prova do
+    // administrador: a prova confere, e a regra recusa.
+    for (comando, parametros) in [
+        (
+            "policy.assign",
+            r#"{"agent":"agente-2","role":"observador"}"#,
+        ),
+        (
+            "policy.write",
+            r#"{"line":"papel operador @observador ui.act"}"#,
+        ),
+    ] {
+        let desafio = operador.pedir("admin.challenge", "{}")?;
+        let pedido = pedido_administrativo(&chaves, 2, &desafio, comando, parametros, parametros)?;
+        provas.borrow_mut().extend(campo_simples(&pedido, "proof"));
+        let r = operador.pedir("admin.execute", &pedido)?;
+        if !r.contains(r#""code":"DENY_POLICY""#) {
+            return Err(format!(
+                "politica: {comando} mudou o papel da propria sessao\n  {r}"
+            ));
+        }
+    }
+    let r = administrar(
+        &mut pedir,
+        "policy.write",
+        r#"{"line":"papel administrador agent.read"}"#,
+    )?;
+    if !r.contains(r#""code":"DENY_POLICY""#) {
+        return Err(format!("politica: o papel do administrador mudou\n  {r}"));
+    }
+    println!(
+        "  [politica] ok  ninguem muda o proprio papel nem o de quem administra, com prova e tudo"
+    );
+
+    // Um papel novo, com taxa curta, escrito em memória e atribuído ao
+    // intruso: vale no pedido seguinte dele.
+    for (comando, parametros) in [
+        ("policy.write", r#"{"line":"papel leitor agent.read"}"#),
+        ("policy.write", r#"{"line":"taxa leitor 1 2"}"#),
+        ("policy.assign", r#"{"agent":"intruso","role":"leitor"}"#),
+    ] {
+        let r = administrar(&mut pedir, comando, parametros)?;
+        if !r.contains(r#""executed":true"#) {
+            return Err(format!(
+                "politica: {comando} {parametros} nao executou\n  {r}"
+            ));
+        }
+    }
+    let r = intruso.pedir("system.info", "{}")?;
+    if !recusado_com(&r, "DENY_PERMISSION") {
+        return Err(format!(
+            "politica: a atribuicao nao valeu no pedido seguinte\n  {r}"
+        ));
+    }
+    let mut limitado = false;
+    for _ in 0..4 {
+        let r = intruso.pedir("agent.ping", "{}")?;
+        limitado |= recusado_com(&r, "RATE_LIMIT");
+    }
+    if !limitado {
+        return Err("politica: quatro pedidos seguidos passaram de uma rajada de dois".into());
+    }
+    println!(
+        "  [politica] ok  policy.write e policy.assign valem no pedido seguinte; a taxa limita"
+    );
+
+    // Revogado, o intruso cai na hora: a recusa chega sem ele pedir nada.
+    let parametros = format!(
+        r#"{{"key":"{}"}}"#,
+        sigilo::hex(&sigilo::publica_de(&chaves.intruso))
+    );
+    let r = administrar(&mut pedir, "agent.revoke", &parametros)?;
+    if !r.contains(r#""executed":true"#) || !r.contains(r#""sessions_closed":[1]"#) {
+        return Err(format!(
+            "politica: a revogacao nao derrubou a sessao\n  {r}"
+        ));
+    }
+    match intruso.proxima_linha() {
+        Err(e) if e.contains("recusa: chave revogada") => {}
+        outro => {
+            return Err(format!(
+                "politica: o agente revogado nao recebeu a recusa: {outro:?}"
+            ));
+        }
+    }
+    drop(intruso);
+    println!("  [politica] ok  revogar derruba a sessao viva da chave, com a recusa");
+
+    // A auditoria, refeita aqui fora.
+    let cauda = pedir("audit.tail", r#"{"count":128}"#)?;
+    let cabeca = pedir("audit.head", "{}")?;
+    let registros = objetos_planos(
+        apos(&cauda, r#""records":["#).ok_or("politica: audit.tail sem registros")?,
+    )?;
+    let mut anterior: Option<[u8; 32]> = None;
+    let mut codigos = std::collections::BTreeSet::new();
+    for campos in &registros {
+        let campo = |nome: &str| -> Result<String, String> {
+            campos
+                .iter()
+                .find(|(n, _)| n == nome)
+                .and_then(|(_, v)| v.clone())
+                .ok_or_else(|| format!("politica: registro sem `{nome}`"))
+        };
+        let hex32 = |nome: &str| -> Result<[u8; 32], String> {
+            sigilo::de_hex(&campo(nome)?).ok_or_else(|| format!("politica: `{nome}` nao e hex"))
+        };
+        let numero = |nome: &str| -> Result<u64, String> {
+            campo(nome)?
+                .parse()
+                .map_err(|_| format!("politica: `{nome}` nao e numero"))
+        };
+        let codigo = politica::Codigo::de_nome(&campo("code")?)
+            .ok_or("politica: codigo desconhecido na auditoria")?;
+        codigos.insert(codigo.nome());
+        let evento = politica::auditoria::Evento {
+            ts_ms: numero("ts_ms")?,
+            sessao: numero("session")? as u8,
+            agente: campo("agent")?,
+            chave: campo("key").ok().and_then(|k| sigilo::de_hex(&k)),
+            papel: campo("role")?,
+            metodo: campo("method")?,
+            recurso: campo("resource")?,
+            codigo,
+            parametros: hex32("params")?,
+            detalhe: campo("detail")?,
+        };
+        let seq = numero("seq")?;
+        let prev = hex32("prev")?;
+        if anterior.is_some_and(|a| a != prev)
+            || politica::auditoria::elo(&prev, seq, &evento) != hex32("link")?
+        {
+            return Err(format!(
+                "politica: o registro {seq} da auditoria nao refaz o elo\n  {evento:?}"
+            ));
+        }
+        anterior = Some(hex32("link")?);
+    }
+    // O `audit.tail` também foi gravado, depois de responder: a cabeça
+    // agora está um elo além da cauda. O `audit.head` é o elo de quem o
+    // pediu — e o anterior dele é o último da cauda.
+    let ultimo = anterior.ok_or("politica: a auditoria veio vazia")?;
+    if campo_simples(&cabeca, "head").is_none() || registros.len() < 16 {
+        return Err(format!(
+            "politica: a cabeca ou a cauda vieram curtas\n  {cabeca}"
+        ));
+    }
+    for esperado in [
+        "ALLOW",
+        "DENY_PERMISSION",
+        "DENY_RESOURCE",
+        "DENY_POLICY",
+        "RATE_LIMIT",
+    ] {
+        if !codigos.contains(esperado) {
+            return Err(format!("politica: a auditoria nao tem nenhum {esperado}"));
+        }
+    }
+    // Nada de material criptográfico: as provas mandadas nesta sonda não
+    // aparecem em lugar nenhum da auditoria.
+    let provas = provas.borrow();
+    if provas.is_empty() || provas.iter().any(|p| cauda.contains(p.as_str())) {
+        return Err("politica: uma prova administrativa foi parar na auditoria".into());
+    }
+    let verificada = pedir("audit.verify", "{}")?;
+    if !verificada.contains(r#""ok":true"#) {
+        return Err(format!(
+            "politica: a cadeia guardada nao confere\n  {verificada}"
+        ));
+    }
+    println!(
+        "  [politica] ok  {} registros da auditoria refeitos aqui fora, elo a elo, ate {}…; sem nenhuma prova dentro",
+        registros.len(),
+        &sigilo::hex(&ultimo)[..16]
+    );
     Ok(())
 }
 
