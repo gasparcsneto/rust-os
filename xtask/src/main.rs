@@ -2423,6 +2423,27 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
     ("identidade::carregar()", &["kernel/src/main.rs"]),
     ("autorizacao::carregar()", &["kernel/src/main.rs"]),
     ("pessoas::carregar()", &["kernel/src/main.rs"]),
+    // Agir na interface: o `ui.act` do agente só pelo handler — que só a
+    // licença do ponto de decisão chama —, e a pessoa só pelo
+    // interpretador, depois da decisão com a sessão dela. O clique na barra
+    // também. Nenhum caminho interno aciona um elemento por fora.
+    ("ui::agir_com_versao(", &["kernel/src/agent/commands.rs"]),
+    (
+        "ui::agir(",
+        &["kernel/src/interpretador.rs", "kernel/src/ponteiro.rs"],
+    ),
+    ("ponteiro::tratar_clique(", &["kernel/src/interpretador.rs"]),
+    // A linha de comando do físico se edita e se confirma, por fora do
+    // interpretador, só pela interface — onde a coordenação confere o
+    // arrendamento e a versão antes.
+    ("interpretador::definir(", &["kernel/src/ui.rs"]),
+    ("interpretador::confirmar(", &["kernel/src/ui.rs"]),
+    // Quebrar o arrendamento de outro só pela operação administrativa,
+    // com a prova.
+    (
+        "coordenacao::revogar(",
+        &["kernel/src/agent/administracao.rs"],
+    ),
 ];
 
 /// Confere que nenhum caminho chega a uma operação protegida sem passar pelo
@@ -2491,8 +2512,9 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
     }
     if fora.is_empty() {
         println!(
-            "[xtask] o handler de um comando e a operação administrativa são chamados só pelo \
-             ponto de decisão, e as cargas do boot só pelo boot"
+            "[xtask] o handler de um comando, a operação administrativa e as ações na interface \
+             só passam pelo ponto de decisão; o arrendamento de outro só cai com prova; e as \
+             cargas do boot só pelo boot"
         );
         Ok(ExitCode::SUCCESS)
     } else {
@@ -7181,6 +7203,22 @@ fn sob_formulario(
         "o OK do agente nao chegou ao programa com os valores",
     )?;
     println!("  [formulario] ok  preenchido e confirmado pelo agente, pela arvore");
+
+    // Os campos que o agente editou são dele até soltar: a árvore mostra o
+    // arrendamento, e o agente o solta para a pessoa digitar.
+    let a = pedir("ui.tree", "{}")?;
+    if !da_janela(&a).is_some_and(|j| j.contains(r#""holder":"agent""#)) {
+        return Err(format!(
+            "formulario: a arvore nao mostra o arrendamento dos campos\n  {a}"
+        ));
+    }
+    for campo in [nome, sobrenome] {
+        let r = pedir("ui.release", &format!(r#"{{"id":{campo}}}"#))?;
+        if !r.contains(r#""ok":true"#) {
+            return Err(format!("formulario: o ui.release foi recusado\n  {r}"));
+        }
+    }
+    println!("  [formulario] ok  os campos editados arrendados ao agente, e soltos por ele");
 
     // A pessoa: uma letra no campo com o foco — o primeiro —, e o Enter,
     // pelo teclado da máquina.

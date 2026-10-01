@@ -21,6 +21,8 @@
 //!   tem;
 //! - [`taxa`]: o balde de pedidos e a janela de apertos de mão;
 //! - [`auditoria`]: os registros e a cadeia de elos;
+//! - [`arrendamento`]: a versão e o arrendamento de cada recurso
+//!   compartilhado — quem está mexendo nele agora;
 //! - [`caminho`]: a forma normal dos caminhos, a mesma do VFS do kernel.
 
 #![no_std]
@@ -28,6 +30,7 @@
 extern crate alloc;
 
 pub mod arquivo;
+pub mod arrendamento;
 pub mod auditoria;
 pub mod caminho;
 pub mod codigo;
@@ -60,11 +63,13 @@ papel sistema agent.read system.read log.read ui.read ui.act process.run net.sen
 recurso sistema fs.read /
 recurso sistema process.run /
 taxa sistema 400 800
+processos sistema 32
 
-papel administrador agent.read system.read log.read ui.read ui.act process.run net.send fs.read audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke
+papel administrador agent.read system.read log.read ui.read ui.act process.run net.send fs.read audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke
 recurso administrador fs.read /dados /bin /programas
 recurso administrador process.run /bin /programas
 taxa administrador 10 20
+processos administrador 8
 "
     };
 }
@@ -84,17 +89,19 @@ pub const PADRAO: &str = concat!(
 #
 # Uma permissao sensivel (fs.*, keyboard.read, debug.trigger, terminal.attach,
 # policy.*, agent.register, agent.revoke, person.*, credential.rotate,
-# session.revoke) nao atravessa a inclusao de outro
+# session.revoke, lease.revoke) nao atravessa a inclusao de outro
 # papel: cada papel que a tem a escreve. Toda permissao de caminho tem o
 # alcance escrito numa linha `recurso`. Nao ha curinga.
 
 papel observador agent.read system.read log.read ui.read
 taxa observador 20 40
+processos observador 2
 
 papel operador @observador ui.act process.run net.send fs.read
 recurso operador fs.read /dados /bin /programas
 recurso operador process.run /bin /programas
 taxa operador 50 100
+processos operador 8
 
 ",
     papeis_de_sistema!(),

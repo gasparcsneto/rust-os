@@ -4307,6 +4307,7 @@ fn janelas_operadas() -> Resultado {
     // console.
     crate::teclado::evento(0x1E, true);
     crate::teclado::evento(0x1E, false);
+    atender_consoles();
     esperar_linha("janelas: tecla 97 em 1")?;
     // A fila do console, e não o histórico de diagnóstico, que registra a
     // tecla nos dois casos.
@@ -4647,12 +4648,14 @@ fn arvore_das_janelas() -> Resultado {
     esperar_linha("janelas: foco 1")?;
     crate::teclado::evento(0x1E, true);
     crate::teclado::evento(0x30, true);
+    atender_consoles();
     esperar_linha("janelas: tecla 98 em 1")?;
     valor_na_arvore(
         "ab",
         "o texto digitado nao chegou ao valor do campo na arvore",
     )?;
     crate::teclado::evento(0x1C, true);
+    atender_consoles();
     esperar_linha("janelas: escrito 1 [ab]")?;
 
     // O agente faz o mesmo pela árvore: troca o valor — com acento, que
@@ -5137,6 +5140,7 @@ fn entradas_separadas() -> Resultado {
     let digitar_a = || {
         crate::teclado::evento(0x1E, true);
         crate::teclado::evento(0x1E, false);
+        atender_consoles();
     };
     let (fora_x, fora_y) = (1, h as i64 - 2);
     mover(fora_x, fora_y);
@@ -5535,6 +5539,14 @@ fn terminal_operado() -> Resultado {
     // que decide como a sessão 3. Ela não tem aperto: a linha é recusada,
     // e a recusa aparece no Terminal. O Terminal não é atalho para o que o
     // canal recusaria.
+    //
+    // A linha é de quem a editou — o agente 0, que a solta: confirmar a
+    // linha arrendada por outro seria `CONFLICT`, e não chegaria ao
+    // interpretador. A sessão 3, sem aperto, não tem titular, e confirma só
+    // a linha livre.
+    let titular_0 = crate::coordenacao::titular_do_agente(0).ok_or("a serial sem titular")?;
+    crate::coordenacao::soltar(&crate::coordenacao::recurso(linha), titular_0)
+        .map_err(|_| "o agente 0 nao tinha a linha que editou")?;
     crate::ui::agir(linha, Acao::Confirmar, None, Origem::Agente(3))?;
     esperar_ate(
         || {
@@ -5937,6 +5949,7 @@ fn formulario_preenchido() -> Resultado {
         crate::teclado::evento(codigo, true);
         crate::teclado::evento(codigo, false);
     }
+    atender_consoles();
     // O último valor, sem a última letra, e `xy` depois.
     let esperado = format!("{}xy", &ultimo[..ultimo.len() - 1]);
     esperar_ate(
@@ -6113,6 +6126,7 @@ fn sobre_o_duke() -> Resultado {
     if crate::teclado::ler().is_some() {
         return Err("com o foco na janela Sobre, a tecla foi para o console");
     }
+    atender_consoles();
     esperar_linha("janelas: tecla 97 em 1")?;
     if descricao() != Some(antes.clone()) {
         return Err("digitar na janela Sobre mudou o texto dela");
@@ -11826,9 +11840,12 @@ fn pessoas_estados_nao_se_confundem() -> Resultado {
 // ---------------------------------------------------------------------------
 
 /// Faz o papel da tarefa do interpretador, que não existe em modo de teste:
-/// entrega cada entrada que espera — do teclado da máquina e de cada
-/// pseudo-terminal — ao console dela.
+/// entrega cada entrada que espera — as teclas para a janela com o foco, as
+/// do teclado da máquina e as de cada pseudo-terminal — a quem é dela.
 fn atender_consoles() {
+    while let Some(c) = crate::teclado::ler_para_janela() {
+        crate::interpretador::tratar_tecla_de_janela(c);
+    }
     while let Some(c) = crate::teclado::ler() {
         crate::interpretador::tratar_tecla(c);
     }
@@ -12211,6 +12228,800 @@ fn consoles_sessao_revogada_e_processo_da_pessoa() -> Resultado {
     crate::interpretador::desativar_para_teste();
     crate::pessoas::esquecer_registradas();
     resultado
+}
+
+// ---------------------------------------------------------------------------
+// coordenacao: versões e arrendamentos, pelo canal e pelo teclado
+// ---------------------------------------------------------------------------
+
+/// A versão da linha de comando do físico, como `ui.tree` a publica.
+fn versao_da_linha() -> u64 {
+    crate::coordenacao::estado(&crate::coordenacao::recurso(
+        crate::ui::ID_DA_LINHA_DE_COMANDO,
+    ))
+    .versao
+}
+
+/// Quem tem a linha de comando do físico arrendada agora.
+fn dono_da_linha() -> Option<politica::arrendamento::Titular> {
+    crate::coordenacao::estado(&crate::coordenacao::recurso(
+        crate::ui::ID_DA_LINHA_DE_COMANDO,
+    ))
+    .arrendamento
+    .map(|a| a.titular)
+}
+
+/// Um pedido sobre a linha de comando pela porta de um agente de teste.
+fn na_linha(
+    agente: &mut AgenteDeTeste,
+    sessao: &mut crate::agent::SessaoDeTeste,
+    metodo: &str,
+    extra: &str,
+) -> Result<alloc::string::String, &'static str> {
+    let params = alloc::format!(r#"{{"id":{}{extra}}}"#, crate::ui::ID_DA_LINHA_DE_COMANDO);
+    pela_porta(agente, sessao, metodo, &params)
+}
+
+/// A recusa da coordenação, com o código, gravada contra quem pediu.
+fn recusa_gravada(metodo: &str, codigo: politica::Codigo) -> bool {
+    ultimo_registro().is_some_and(|r| {
+        r.evento.metodo == metodo
+            && r.evento.codigo == codigo
+            && r.evento.recurso == crate::coordenacao::recurso(crate::ui::ID_DA_LINHA_DE_COMANDO)
+    })
+}
+
+/// Os cenários de concorrência, entre dois agentes, na linha de comando:
+///
+/// 1. A lê v, B lê v, A muda → v+1; B muda esperando v → CONFLICT, e nada
+///    muda;
+/// 2. A toma, B tenta → CONFLICT; A solta, B toma;
+/// 3. A tem o arrendamento, A é revogado: o arrendamento sai na hora;
+/// 4. A tem o arrendamento, ele vence, B toma, A tenta → CONFLICT;
+/// 5. A tem o arrendamento e o solta; B muda; A volta e confirma com a
+///    versão velha → CONFLICT.
+///
+/// E confirmar sem o arrendamento é DENY_LEASE. Cada recusa vai para a
+/// auditoria. Os agentes de teste têm o papel `sistema`: a autoridade
+/// máxima, sem passe sobre o arrendamento de outro.
+fn coordenacao_concorrencia_entre_agentes() -> Resultado {
+    use politica::Codigo;
+    crate::interpretador::ativar_para_teste();
+    crate::coordenacao::esquecer();
+    let resultado = com_agentes_de_teste(|| {
+        let (mut a, mut sa) = conectado(1)?;
+        let (mut b, mut sb) = conectado(2)?;
+        let ok = |r: &str| r.contains(r#""ok":true"#);
+        let conflito = |r: &str| r.contains(r#""code":"CONFLICT""#);
+
+        // 1. Duas leituras, uma mudança.
+        let lida = versao_da_linha();
+        let r = na_linha(
+            &mut a,
+            &mut sa,
+            "ui.act",
+            &alloc::format!(
+                r#","action":"set_value","value":"agent.ping","expect_version":{lida}"#
+            ),
+        )?;
+        if !ok(&r) || versao_da_linha() != lida + 1 {
+            crate::log_error!("teste", "{}", r);
+            return Err("a mudanca com a versao lida nao passou");
+        }
+        na_linha(&mut a, &mut sa, "ui.release", "")?;
+        let r = na_linha(
+            &mut b,
+            &mut sb,
+            "ui.act",
+            &alloc::format!(
+                r#","action":"set_value","value":"system.info","expect_version":{lida}"#
+            ),
+        )?;
+        if !conflito(&r)
+            || versao_da_linha() != lida + 1
+            || crate::interpretador::com_valor(|v| v != "agent.ping")
+            || !recusa_gravada("ui.act", Codigo::Conflict)
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("a mudanca com a versao velha nao foi CONFLICT, ou mudou algo");
+        }
+
+        // 2. Exclusivo até soltar.
+        if !ok(&na_linha(&mut a, &mut sa, "ui.claim", "")?) {
+            return Err("o arrendamento livre nao foi tomado");
+        }
+        let r = na_linha(&mut b, &mut sb, "ui.claim", "")?;
+        if !conflito(&r) || !recusa_gravada("ui.claim", Codigo::Conflict) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o arrendamento de outro foi tomado");
+        }
+        let r = na_linha(&mut b, &mut sb, "ui.act", r#","action":"cancel""#)?;
+        if !conflito(&r) || crate::interpretador::com_valor(|v| v.is_empty()) {
+            return Err("o agente sem o arrendamento editou a linha de outro");
+        }
+        if !ok(&na_linha(&mut a, &mut sa, "ui.release", "")?)
+            || !ok(&na_linha(&mut b, &mut sb, "ui.claim", "")?)
+        {
+            return Err("depois de solto, o arrendamento nao foi para o outro");
+        }
+        na_linha(&mut b, &mut sb, "ui.release", "")?;
+
+        // Confirmar sem o arrendamento: DENY_LEASE, e a linha não executa.
+        let r = na_linha(&mut a, &mut sa, "ui.act", r#","action":"confirm""#)?;
+        if !r.contains(r#""code":"DENY_LEASE""#)
+            || crate::interpretador::com_valor(|v| v != "agent.ping")
+            || !recusa_gravada("ui.act", Codigo::DenyLease)
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("o confirm sem o arrendamento passou");
+        }
+
+        // 5. A solta, B muda, A volta e confirma com a versão velha.
+        na_linha(&mut a, &mut sa, "ui.claim", "")?;
+        let velha = versao_da_linha();
+        na_linha(&mut a, &mut sa, "ui.release", "")?;
+        if !ok(&na_linha(
+            &mut b,
+            &mut sb,
+            "ui.act",
+            r#","action":"set_value","value":"agent.ping""#,
+        )?) {
+            return Err("o agente B nao mudou a linha livre");
+        }
+        na_linha(&mut b, &mut sb, "ui.release", "")?;
+        na_linha(&mut a, &mut sa, "ui.claim", "")?;
+        let r = na_linha(
+            &mut a,
+            &mut sa,
+            "ui.act",
+            &alloc::format!(r#","action":"confirm","expect_version":{velha}"#),
+        )?;
+        if !conflito(&r) || r.contains("executed") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o confirm com a versao velha passou");
+        }
+        // Com a versão de agora, passa, executa, e solta.
+        let r = na_linha(
+            &mut a,
+            &mut sa,
+            "ui.act",
+            &alloc::format!(
+                r#","action":"confirm","expect_version":{}"#,
+                versao_da_linha()
+            ),
+        )?;
+        if !r.contains(r#""executed":"agent.ping""#) || dono_da_linha().is_some() {
+            crate::log_error!("teste", "{}", r);
+            return Err("o confirm com a versao de agora nao executou, ou nao soltou");
+        }
+
+        // 4. Vencido, vai para outro. O prazo vence sem ninguém pedir nada:
+        // o coletor tira o arrendamento e o grava, antes de B tentar.
+        na_linha(&mut a, &mut sa, "ui.claim", r#","ttl_ms":1000"#)?;
+        let desde = ultimo_registro().map_or(0, |r| r.seq);
+        let linha = crate::coordenacao::recurso(crate::ui::ID_DA_LINHA_DE_COMANDO);
+        let vencido_gravado = || {
+            crate::autorizacao::com_auditoria(|c| {
+                c.ultimos(64).any(|r| {
+                    r.seq > desde && r.evento.metodo == "lease.expire" && r.evento.recurso == linha
+                })
+            })
+            .unwrap_or(false)
+        };
+        esperar_ate(vencido_gravado, 400)
+            .map_err(|_| "o arrendamento vencido nao saiu sozinho, ou nao foi gravado")?;
+        if !ok(&na_linha(&mut b, &mut sb, "ui.claim", "")?) {
+            return Err("o arrendamento vencido nao foi para o outro");
+        }
+        if !conflito(&na_linha(
+            &mut a,
+            &mut sa,
+            "ui.act",
+            r#","action":"cancel""#,
+        )?) {
+            return Err("quem perdeu o arrendamento vencido continuou editando");
+        }
+        na_linha(&mut b, &mut sb, "ui.release", "")?;
+
+        // A sessão do canal que acaba leva o arrendamento dela.
+        na_linha(&mut b, &mut sb, "ui.claim", r#","ttl_ms":300000"#)?;
+        let _ = crate::sessoes::esquecer(2);
+        if dono_da_linha().is_some() {
+            return Err("o arrendamento sobreviveu ao fim da sessao do canal");
+        }
+
+        // 3. Revogado, perde na hora.
+        na_linha(&mut a, &mut sa, "ui.claim", r#","ttl_ms":300000"#)?;
+        crate::identidade::revogar(&sigilo::publica_de(&chave_de_teste(1)))
+            .map_err(|_| "a revogacao de teste falhou")?;
+        let invalidado = ultimo_registro().is_some_and(|r| r.evento.metodo == "lease.invalidate");
+        if dono_da_linha().is_some() || !invalidado {
+            return Err("o arrendamento sobreviveu a revogacao da chave");
+        }
+        let r = na_linha(&mut a, &mut sa, "ui.act", r#","action":"cancel""#)?;
+        if !recusado_com(&r, "DENY_NOT_AUTHENTICATED") {
+            return Err("o agente revogado agiu na linha");
+        }
+        if !crate::coordenacao::um_por_recurso() {
+            return Err("um recurso ficou com dois arrendamentos");
+        }
+        Ok(())
+    });
+    crate::coordenacao::esquecer();
+    crate::interpretador::desativar_para_teste();
+    resultado
+}
+
+/// Pessoa e agente, simétricos, na mesma linha:
+///
+/// - a pessoa digita: a primeira tecla arrenda a linha para ela, uma vez na
+///   auditoria; o agente tenta → CONFLICT;
+/// - o agente edita: a linha é dele; a tecla da pessoa é recusada e não
+///   muda nada;
+/// - duas pessoas — duas sessões — na mesma linha: CONFLICT;
+/// - o `logout` solta; o `lease.revoke` de um administrador, com a prova,
+///   tira de qualquer um, e vai para a auditoria.
+fn coordenacao_pessoa_e_agente_simetricos() -> Resultado {
+    use crate::pessoas::Console;
+    use politica::Codigo;
+    use politica::arrendamento::Titular;
+    crate::interpretador::ativar_para_teste();
+    crate::coordenacao::esquecer();
+    crate::identidade::registrar_administrador_de_teste(
+        sigilo::publica_de(&ADMIN_DE_TESTE),
+        "administrador",
+    );
+    let resultado = com_agentes_de_teste(|| {
+        let (mut a, mut sa) = conectado(1)?;
+        let conflito = |r: &str| r.contains(r#""code":"CONFLICT""#);
+
+        // A pessoa digita: a linha é dela.
+        let claims_antes = crate::autorizacao::com_auditoria(|c| {
+            c.ultimos(1024)
+                .filter(|r| r.evento.metodo == "ui.claim")
+                .count()
+        })
+        .unwrap_or(0);
+        digitar_no_console(Console::Fisico, "agent");
+        if !dono_da_linha().is_some_and(|t| t.e_pessoa()) {
+            return Err("a primeira tecla nao arrendou a linha para a pessoa");
+        }
+        let claims = crate::autorizacao::com_auditoria(|c| {
+            c.ultimos(1024)
+                .filter(|r| r.evento.metodo == "ui.claim")
+                .count()
+        })
+        .unwrap_or(0);
+        if claims != claims_antes + 1 {
+            return Err("o arrendamento implicito nao foi gravado uma vez so");
+        }
+        // 1. Pessoa contra agente.
+        let r = na_linha(
+            &mut a,
+            &mut sa,
+            "ui.act",
+            r#","action":"set_value","value":"x""#,
+        )?;
+        if !conflito(&r) || crate::interpretador::com_valor(|v| v != "agent") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o agente editou a linha da pessoa");
+        }
+        // A pessoa confirma: executa, e a linha fica livre.
+        digitar_no_console(Console::Fisico, ".ping\n");
+        if dono_da_linha().is_some() || !log_tem("executado: agent.ping (pessoa)") {
+            return Err("a pessoa nao confirmou a linha dela, ou nao a soltou");
+        }
+
+        // 2. Agente contra pessoa.
+        na_linha(
+            &mut a,
+            &mut sa,
+            "ui.act",
+            r#","action":"set_value","value":"agent.ping""#,
+        )?;
+        let versao = versao_da_linha();
+        digitar_no_console(Console::Fisico, "x");
+        crate::interpretador::tratar(Console::Fisico, '\u{8}');
+        if crate::interpretador::com_valor(|v| v != "agent.ping")
+            || versao_da_linha() != versao
+            || !recusa_gravada("keyboard", Codigo::Conflict)
+        {
+            return Err("a tecla da pessoa mudou a linha do agente");
+        }
+        na_linha(&mut a, &mut sa, "ui.release", "")?;
+
+        // 4. Duas pessoas, duas sessões, a mesma linha.
+        digitar_no_console(Console::Fisico, "!");
+        let primeira = dono_da_linha();
+        crate::interpretador::entrar_para_teste(Console::Fisico, "outra-pessoa", "operador");
+        digitar_no_console(Console::Fisico, "?");
+        if dono_da_linha() != primeira || crate::interpretador::com_valor(|v| v.ends_with('?')) {
+            return Err("a segunda pessoa editou a linha da primeira");
+        }
+
+        // 7. O administrador revoga, com a prova; a revogação é gravada em
+        // nome de quem tinha, e a operação em nome dele.
+        admin_espera(
+            0,
+            &ADMIN_DE_TESTE,
+            "lease.revoke",
+            &alloc::format!(r#"{{"id":{}}}"#, crate::ui::ID_DA_LINHA_DE_COMANDO),
+            None,
+        )?;
+        if dono_da_linha().is_some() {
+            return Err("o lease.revoke nao tirou o arrendamento");
+        }
+        let gravada = crate::autorizacao::com_auditoria(|c| {
+            c.ultimos(8).any(|r| {
+                r.evento.metodo == "lease.invalidate"
+                    && r.evento.detalhe == "revogado por um administrador"
+                    && r.evento.titular == politica::auditoria::Titular::Pessoa
+            })
+        })
+        .unwrap_or(false);
+        if !gravada {
+            return Err("a revogacao do arrendamento nao foi gravada em nome de quem o tinha");
+        }
+        // Sem prova, não.
+        crate::coordenacao::tomar(
+            &crate::coordenacao::recurso(crate::ui::ID_DA_LINHA_DE_COMANDO),
+            Titular::Agente {
+                sessao: 1,
+                chave: Some(sigilo::publica_de(&chave_de_teste(1))),
+            },
+            30_000,
+        )
+        .map_err(|_| "o agente nao tomou a linha livre")?;
+        let r = executar_admin_com(
+            0,
+            &[0x55; 32],
+            "lease.revoke",
+            &alloc::format!(r#"{{"id":{}}}"#, crate::ui::ID_DA_LINHA_DE_COMANDO),
+            &alloc::format!(r#"{{"id":{}}}"#, crate::ui::ID_DA_LINHA_DE_COMANDO),
+        )?;
+        if !r.contains(r#""executed":false"#) || dono_da_linha().is_none() {
+            return Err("um lease.revoke sem a prova de um administrador tirou o arrendamento");
+        }
+
+        // 6 e o logout: a sessão que sai solta o que tinha.
+        crate::coordenacao::esquecer();
+        let sessao = crate::interpretador::sessao_do_console(Console::Fisico)
+            .ok_or("sem pessoa no console")?;
+        digitar_no_console(Console::Fisico, "a");
+        crate::pessoas::sair(sessao);
+        if dono_da_linha().is_some() {
+            return Err("o arrendamento da pessoa sobreviveu a saida dela");
+        }
+        // A sessão revogada, e a pessoa revogada, também.
+        let sessao =
+            crate::interpretador::entrar_para_teste(Console::Fisico, "revogada", "operador");
+        digitar_no_console(Console::Fisico, "a");
+        crate::pessoas::revogar_sessao(sessao).map_err(|_| "a sessao nao foi revogada")?;
+        if dono_da_linha().is_some() {
+            return Err("o arrendamento sobreviveu a revogacao da sessao");
+        }
+        let sessao =
+            crate::interpretador::entrar_para_teste(Console::Fisico, "revogada", "operador");
+        digitar_no_console(Console::Fisico, "a");
+        let pessoa = pessoa_da_sessao(sessao)?;
+        crate::pessoas::revogar_pessoa(pessoa).map_err(|_| "a pessoa nao foi revogada")?;
+        if dono_da_linha().is_some() {
+            return Err("o arrendamento sobreviveu a revogacao da pessoa");
+        }
+        Ok(())
+    });
+    crate::coordenacao::esquecer();
+    crate::interpretador::desativar_para_teste();
+    crate::identidade::esquecer_registrados();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// Aperta e solta a tecla de `codigo`, como o teclado da máquina.
+fn teclar(codigo: u8) {
+    crate::teclado::evento(codigo, true);
+    crate::teclado::evento(codigo, false);
+}
+
+/// A recusa de uma tecla da pessoa, com o código, gravada contra o recurso
+/// do elemento `id`.
+fn tecla_recusada_em(id: u32, codigo: politica::Codigo) -> bool {
+    ultimo_com_metodo("keyboard")
+        .is_some_and(|e| e.codigo == codigo && e.recurso == crate::coordenacao::recurso(id))
+}
+
+/// Campos de uma janela, com o foco declarado por ela: o arrendamento é por
+/// campo, e o kernel o confere antes de entregar uma tecla.
+///
+/// - o agente A edita o `nome`: o campo é dele, e a tecla da pessoa no
+///   campo com o foco é `CONFLICT` — gravada, e não entregue;
+/// - o agente B edita o `sobrenome` ao mesmo tempo: campos diferentes, sem
+///   conflito; no `nome`, `CONFLICT`;
+/// - A solta: a tecla da pessoa arrenda o `nome` para ela, e agora quem
+///   tenta é A — `CONFLICT`;
+/// - o Enter da pessoa confirma o campo e o solta.
+fn coordenacao_campos_de_janela() -> Resultado {
+    let resultado = com_agentes_de_teste(campos_de_janela);
+    let _ = crate::eventos::publicar(
+        "teste-formulario",
+        protocolo::usuario::evento::Evento {
+            tipo: protocolo::usuario::evento::tipo::ENCERRAR,
+            ..Default::default()
+        },
+    );
+    let _ = esperar_ate(|| !crate::superficies::foco_ativo(), 200);
+    crate::superficies::devolver_foco();
+    crate::teclado::esvaziar();
+    crate::coordenacao::esquecer();
+    resultado
+}
+
+fn campos_de_janela() -> Resultado {
+    use crate::usuario::DIRETORIO_DOS_COMPILADOS;
+    use alloc::format;
+    use politica::Codigo;
+
+    if crate::tela::tela_fisica().is_none() {
+        return sem_framebuffer();
+    }
+    crate::teclado::esvaziar();
+    crate::coordenacao::esquecer();
+    let desde = crate::log::total_emitidos();
+    let disse = |procurada: &str| {
+        let mut achou = false;
+        crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+            achou |= r.seq >= desde && r.subsistema == "usuario" && r.mensagem() == procurada;
+        });
+        achou
+    };
+    crate::usuario::lancar(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/formulario")))?;
+    esperar_ate(|| disse("formulario: pronto"), 600).map_err(|_| "o formulario nao abriu")?;
+
+    let mut camada = None;
+    crate::grafico::camadas(|c| {
+        if c.nome == crate::superficies::NOME_DA_CAMADA
+            && crate::superficies::com_descricao(c.id, |d| d.titulo == "Formulário") == Some(true)
+        {
+            camada = Some(c.id);
+        }
+    });
+    let camada = camada.ok_or("a janela do formulario nao esta na arvore")?;
+    let elemento = |rotulo: &str| -> Result<u32, &'static str> {
+        let indice = crate::superficies::com_descricao(camada, |d| {
+            d.elementos.iter().position(|e| e.rotulo == rotulo)
+        })
+        .flatten()
+        .ok_or("o formulario nao descreveu um elemento")?;
+        crate::ui::id_do_elemento(camada, indice).ok_or("sem identificador")
+    };
+    let valor_de = |rotulo: &str| -> Option<alloc::string::String> {
+        crate::superficies::com_descricao(camada, |d| {
+            d.elementos
+                .iter()
+                .find(|e| e.rotulo == rotulo)
+                .and_then(|e| e.valor.clone())
+        })
+        .flatten()
+    };
+    let (nome, sobrenome) = (elemento("nome")?, elemento("sobrenome")?);
+    // O foco declarado pela janela é o `nome`: é por ele que o kernel sabe
+    // que recurso uma tecla edita.
+    let declarado = crate::superficies::janela_com_foco()
+        .and_then(|j| j.campo)
+        .and_then(|(i, _)| crate::ui::id_do_elemento(camada, i));
+    if declarado != Some(nome) {
+        return Err("a janela nao declarou o campo com o foco");
+    }
+
+    let (mut a, mut sa) = conectado(1)?;
+    let (mut b, mut sb) = conectado(2)?;
+    let ok = |r: &str| r.contains(r#""ok":true"#);
+    let conflito = |r: &str| r.contains(r#""code":"CONFLICT""#);
+    let no = |id: u32, extra: &str| format!(r#"{{"id":{id}{extra}}}"#);
+
+    // A edita o `nome`: o campo é dele.
+    let r = pela_porta(
+        &mut a,
+        &mut sa,
+        "ui.act",
+        &no(nome, r#","action":"set_value","value":"Ana""#),
+    )?;
+    if !ok(&r) {
+        crate::log_error!("teste", "{}", r);
+        return Err("o agente nao editou o campo livre");
+    }
+    esperar_ate(|| valor_de("nome").as_deref() == Some("Ana"), 600)
+        .map_err(|_| "o valor do agente nao chegou ao campo")?;
+    let arvore = pela_porta(&mut a, &mut sa, "ui.tree", "{}")?;
+    if !arvore.contains(r#""holder":"agent""#) {
+        return Err("o ui.tree nao mostrou o arrendamento do campo");
+    }
+
+    // A tecla da pessoa no campo do agente: recusada, gravada, e não chega.
+    teclar(0x2D); // x
+    atender_consoles();
+    if !tecla_recusada_em(nome, Codigo::Conflict) {
+        return Err("a tecla da pessoa no campo do agente nao foi CONFLICT gravado");
+    }
+
+    // B, em outro campo: sem conflito. No campo de A: CONFLICT.
+    let r = pela_porta(
+        &mut b,
+        &mut sb,
+        "ui.act",
+        &no(sobrenome, r#","action":"set_value","value":"Souza""#),
+    )?;
+    if !ok(&r) {
+        crate::log_error!("teste", "{}", r);
+        return Err("dois agentes nao trabalharam em campos diferentes");
+    }
+    let r = pela_porta(
+        &mut b,
+        &mut sb,
+        "ui.act",
+        &no(nome, r#","action":"set_value","value":"Bia""#),
+    )?;
+    if !conflito(&r) {
+        crate::log_error!("teste", "{}", r);
+        return Err("o agente B editou o campo de A");
+    }
+    esperar_ate(|| valor_de("sobrenome").as_deref() == Some("Souza"), 600)
+        .map_err(|_| "o valor de B nao chegou ao campo dele")?;
+    if valor_de("nome").as_deref() != Some("Ana") {
+        return Err("um pedido recusado mudou o campo");
+    }
+
+    // A solta; a tecla da pessoa arrenda o campo para ela.
+    if !ok(&pela_porta(&mut a, &mut sa, "ui.release", &no(nome, ""))?) {
+        return Err("o agente nao soltou o campo dele");
+    }
+    teclar(0x15); // y
+    atender_consoles();
+    esperar_ate(|| valor_de("nome").as_deref() == Some("Anay"), 600).map_err(|_| {
+        crate::log_error!("teste", "o campo ficou com {:?}", valor_de("nome"));
+        "a tecla da pessoa no campo livre nao chegou, ou a recusada chegou"
+    })?;
+    let da_pessoa = crate::coordenacao::estado(&crate::coordenacao::recurso(nome))
+        .arrendamento
+        .is_some_and(|a| a.titular.e_pessoa());
+    if !da_pessoa {
+        return Err("a tecla da pessoa nao arrendou o campo para ela");
+    }
+    let r = pela_porta(
+        &mut a,
+        &mut sa,
+        "ui.act",
+        &no(nome, r#","action":"set_value","value":"Ana""#),
+    )?;
+    if !conflito(&r) {
+        crate::log_error!("teste", "{}", r);
+        return Err("o agente editou o campo da pessoa");
+    }
+
+    // O Enter da pessoa confirma o campo, e o solta.
+    teclar(0x1C);
+    atender_consoles();
+    esperar_ate(|| disse("formulario: acionado 1 [Anay] [Souza]"), 600)
+        .map_err(|_| "o Enter da pessoa nao confirmou o campo")?;
+    // A mudança feita vai para a auditoria, em nome da pessoa, sem o texto.
+    let gravada = ultimo_com_metodo("keyboard").is_some_and(|e| {
+        e.codigo == Codigo::Allow
+            && e.recurso == crate::coordenacao::recurso(nome)
+            && e.titular == politica::auditoria::Titular::Pessoa
+            && e.detalhe.starts_with("confirmado na versao")
+            && !e.detalhe.contains("Anay")
+    });
+    if !gravada {
+        return Err("a confirmacao da pessoa nao foi gravada");
+    }
+    if crate::coordenacao::estado(&crate::coordenacao::recurso(nome))
+        .arrendamento
+        .is_some()
+    {
+        return Err("o campo confirmado ficou arrendado");
+    }
+    // A tecla e o Enter em seguida, antes de a janela se redescrever: o
+    // Enter vê o campo como estava — vazio —, e ainda assim confirma o que
+    // a pessoa arrendou ao digitar, e o solta.
+    crate::ui::agir(
+        nome,
+        crate::ui::Acao::Cancelar,
+        None,
+        crate::ui::Origem::Agente(1),
+    )
+    .map_err(|_| "o agente nao esvaziou o campo livre")?;
+    if !ok(&pela_porta(&mut a, &mut sa, "ui.release", &no(nome, ""))?) {
+        return Err("o agente nao soltou o campo que esvaziou");
+    }
+    esperar_ate(|| valor_de("nome").as_deref() == Some(""), 600)
+        .map_err(|_| "o cancel nao esvaziou o campo")?;
+    teclar(0x2C); // z
+    teclar(0x1C);
+    atender_consoles();
+    esperar_ate(|| disse("formulario: acionado 1 [z] [Souza]"), 600)
+        .map_err(|_| "a tecla e o Enter em seguida nao confirmaram o campo")?;
+    if crate::coordenacao::estado(&crate::coordenacao::recurso(nome))
+        .arrendamento
+        .is_some()
+    {
+        return Err("o Enter logo depois da tecla deixou o campo arrendado");
+    }
+    if !crate::coordenacao::um_por_recurso() {
+        return Err("um recurso ficou com dois arrendamentos");
+    }
+    Ok(())
+}
+
+/// O teclado tem um cursor por leitor: dois agentes lendo pelo
+/// `keyboard.read` recebem as mesmas teclas, sem roubar um do outro, e quem
+/// ficou para trás além do anel fica sabendo quantas perdeu.
+fn coordenacao_teclado_por_leitor() -> Resultado {
+    crate::teclado::esvaziar();
+    let resultado = com_agentes_de_teste(|| {
+        let (mut a, mut sa) = conectado(1)?;
+        let (mut b, mut sb) = conectado(2)?;
+        let leu = |r: &str, texto: &str, perdidas: u64| {
+            r.contains(&alloc::format!(r#""text":"{texto}""#))
+                && r.contains(&alloc::format!(r#""missed":{perdidas}"#))
+        };
+        teclar(0x2D); // x
+        teclar(0x15); // y
+        let ra = pela_porta(&mut a, &mut sa, "keyboard.read", "{}")?;
+        let rb = pela_porta(&mut b, &mut sb, "keyboard.read", "{}")?;
+        if !leu(&ra, "xy", 0) || !leu(&rb, "xy", 0) {
+            crate::log_error!("teste", "{} / {}", ra, rb);
+            return Err("os dois leitores nao leram as mesmas teclas");
+        }
+        teclar(0x2D);
+        let ra = pela_porta(&mut a, &mut sa, "keyboard.read", "{}")?;
+        let de_novo = pela_porta(&mut a, &mut sa, "keyboard.read", "{}")?;
+        if !leu(&ra, "x", 0) || !leu(&de_novo, "", 0) {
+            crate::log_error!("teste", "{} / {}", ra, de_novo);
+            return Err("um leitor nao leu so o que veio depois da leitura dele");
+        }
+        // B fica para trás além do anel; A lê o tempo todo.
+        let demais = crate::teclado::HISTORIA + 5;
+        for i in 0..demais {
+            teclar(0x15);
+            if i % 32 == 31 {
+                atender_consoles();
+                let r = pela_porta(&mut a, &mut sa, "keyboard.read", r#"{"max":64}"#)?;
+                if !r.contains(r#""missed":0"#) {
+                    return Err("o leitor em dia perdeu teclas");
+                }
+            }
+        }
+        atender_consoles();
+        // As 6 de B que sobraram (a `x` e 5 `y`) saíram do anel.
+        let rb = pela_porta(&mut b, &mut sb, "keyboard.read", "{}")?;
+        if !rb.contains(r#""missed":6"#) || !rb.contains(r#""read":64"#) {
+            crate::log_error!("teste", "{}", rb);
+            return Err("o leitor que ficou para tras nao soube quantas perdeu");
+        }
+        Ok(())
+    });
+    crate::teclado::esvaziar();
+    crate::coordenacao::esquecer();
+    resultado
+}
+
+/// A cota de processos do papel, por titular: com `processos operador 1`,
+/// a pessoa de papel operador tem um processo vivo, e o segundo — lançado
+/// ou bifurcado — é recusado e gravado; outra pessoa, de mesmo papel, tem a
+/// sua; e quando o primeiro sai, a cota volta.
+fn coordenacao_cota_de_processos() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    let texto = politica::PADRAO.replace("processos operador 8", "processos operador 1");
+    if texto == politica::PADRAO {
+        return Err("a politica padrao nao tem a cota do operador");
+    }
+    let apertada = politica::Politica::ler(&texto).map_err(|_| "a politica do caso nao vale")?;
+    let pessoa = crate::pessoas::sessao_de_teste(
+        crate::pessoas::Console::Terminal(0),
+        "pessoa-da-cota",
+        "operador",
+    );
+    let outra = crate::pessoas::sessao_de_teste(
+        crate::pessoas::Console::Terminal(1),
+        "outra-da-cota",
+        "operador",
+    );
+    crate::autorizacao::trocar_politica(apertada);
+    let resultado = cota_apertada(
+        Autoridade::Pessoa { sessao: pessoa },
+        Autoridade::Pessoa { sessao: outra },
+        pessoa,
+    );
+    let _ = crate::eventos::publicar(
+        "teste-formulario",
+        protocolo::usuario::evento::Evento {
+            tipo: protocolo::usuario::evento::tipo::ENCERRAR,
+            ..Default::default()
+        },
+    );
+    let _ = esperar_ate(
+        || crate::fios::processos_de(Autoridade::Pessoa { sessao: pessoa }) == 0,
+        600,
+    );
+    let _ = esperar_ate(|| !crate::superficies::foco_ativo(), 200);
+    crate::superficies::devolver_foco();
+    crate::teclado::esvaziar();
+    crate::autorizacao::carregar();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+fn cota_apertada(
+    autoridade: crate::autorizacao::Autoridade,
+    outra: crate::autorizacao::Autoridade,
+    pessoa: crate::pessoas::IdSessao,
+) -> Resultado {
+    use crate::usuario::DIRETORIO_DOS_COMPILADOS;
+    use alloc::format;
+    use politica::Codigo;
+    let recusa = |metodo: &str| {
+        ultimo_com_metodo(metodo).is_some_and(|e| {
+            e.codigo == Codigo::DenyPolicy
+                && e.titular == politica::auditoria::Titular::Pessoa
+                && e.sessao_de_pessoa == Some(pessoa.0)
+        })
+    };
+    let desde = crate::log::total_emitidos();
+    let vezes = |procurada: &str| {
+        let mut n = 0;
+        crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+            n +=
+                (r.seq >= desde && r.subsistema == "usuario" && r.mensagem() == procurada) as usize;
+        });
+        n
+    };
+    let disse = |procurada: &str| vezes(procurada) >= 1;
+
+    // O `entrada` bifurca: com a cota em 1, o filho não nasce, e o
+    // programa sai com o código que diz isso.
+    crate::usuario::lancar_como(
+        Some(&format!("{DIRETORIO_DOS_COMPILADOS}/entrada")),
+        autoridade,
+    )?;
+    esperar_ate(|| disse("processo encerrou com codigo 8"), 600)
+        .map_err(|_| "o fork alem da cota nao foi recusado")?;
+    if !recusa("process.fork") {
+        return Err("o fork alem da cota nao foi gravado");
+    }
+    let _ = esperar_ate(|| crate::fios::processos_de(autoridade) == 0, 600);
+
+    // Um processo vivo; o segundo, recusado, gravado, e não nasce.
+    let formulario = format!("{DIRETORIO_DOS_COMPILADOS}/formulario");
+    crate::usuario::lancar_como(Some(&formulario), autoridade)?;
+    esperar_ate(|| disse("formulario: pronto"), 600).map_err(|_| "o formulario nao abriu")?;
+    if crate::usuario::lancar_como(Some(&formulario), autoridade).is_ok() {
+        return Err("o processo alem da cota nasceu");
+    }
+    if !recusa("process.run") || crate::fios::processos_de(autoridade) != 1 {
+        return Err("o processo alem da cota nao foi gravado, ou nasceu");
+    }
+    // Outra pessoa, mesmo papel: a cota é dela.
+    crate::usuario::lancar_como(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/ola")), outra)
+        .map_err(|_| "a cota de uma pessoa recusou a outra")?;
+
+    // O primeiro sai: a cota volta.
+    crate::eventos::publicar(
+        "teste-formulario",
+        protocolo::usuario::evento::Evento {
+            tipo: protocolo::usuario::evento::tipo::ENCERRAR,
+            ..Default::default()
+        },
+    )
+    .map_err(|_| "o formulario nao escuta o canal dele")?;
+    esperar_ate(|| crate::fios::processos_de(autoridade) == 0, 600)
+        .map_err(|_| "o formulario encerrado continuou contando")?;
+    crate::usuario::lancar_como(Some(&formulario), autoridade)
+        .map_err(|_| "a cota nao voltou depois que o processo saiu")?;
+    // O segundo `pronto`: o encerramento do caso só chega a quem já
+    // escuta o canal.
+    esperar_ate(|| vezes("formulario: pronto") >= 2, 600)
+        .map_err(|_| "o formulario relancado nao abriu")?;
+    Ok(())
 }
 
 /// Ninguém se dá mais do que tem: nem o próprio papel, nem um papel maior
@@ -15913,6 +16724,26 @@ static CASOS: &[Caso] = &[
         f: consoles_sessao_revogada_e_processo_da_pessoa,
     },
     Caso {
+        nome: "coordenacao: concorrencia entre agentes",
+        f: coordenacao_concorrencia_entre_agentes,
+    },
+    Caso {
+        nome: "coordenacao: pessoa e agente simetricos",
+        f: coordenacao_pessoa_e_agente_simetricos,
+    },
+    Caso {
+        nome: "coordenacao: campos de janela",
+        f: coordenacao_campos_de_janela,
+    },
+    Caso {
+        nome: "coordenacao: teclado por leitor",
+        f: coordenacao_teclado_por_leitor,
+    },
+    Caso {
+        nome: "coordenacao: cota de processos",
+        f: coordenacao_cota_de_processos,
+    },
+    Caso {
         nome: "usb: o relatorio hid vira teclas",
         f: usb_relatorio_hid_vira_teclas,
     },
@@ -17155,6 +17986,9 @@ pub fn executar_todos() -> ! {
     let mut falhas = 0usize;
 
     for caso in CASOS {
+        // Cada caso começa sem arrendamento nenhum: um que outro caso deixou
+        // seria um conflito que este não pediu.
+        crate::coordenacao::esquecer();
         // O resultado é impresso *depois* de rodar, e não antes, porque um
         // teste que emite log jogaria essas linhas no meio de uma linha de
         // relatório pela metade. Assim cada linha do relatório fica íntegra e

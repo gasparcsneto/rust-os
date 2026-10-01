@@ -99,10 +99,20 @@ impl RpcError {
         mensagem: "taxa de pedidos do papel esgotada",
     };
 
+    /// O recurso mudou, ou outro titular o tem — `CONFLICT`. Separado do
+    /// [`Self::NEGADO`] pelo mesmo motivo da taxa: o remédio é outro — ler
+    /// de novo e repetir, ou esperar o arrendamento acabar —, e não pedir
+    /// permissão.
+    pub const CONFLITO: Self = Self {
+        codigo: -32012,
+        mensagem: "conflito: o recurso mudou, ou outro titular o tem",
+    };
+
     /// O erro de uma recusa da política, com o código dela como `data`.
     pub fn da_recusa(codigo: politica::Codigo) -> Self {
         match codigo {
             politica::Codigo::RateLimit => Self::LIMITE_DE_TAXA,
+            politica::Codigo::Conflict => Self::CONFLITO,
             _ => Self::NEGADO,
         }
     }

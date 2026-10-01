@@ -219,6 +219,9 @@ pub fn carregar() {
         t.encerradas.clear();
         t.tentativas.clear();
     });
+    // Nenhuma sessão de pessoa sobrou: nenhum arrendamento de pessoa
+    // também.
+    crate::coordenacao::invalidar_pessoas("o registro de pessoas foi recarregado");
 }
 
 fn ler_registro(bytes: &[u8]) -> Vec<Pessoa> {
@@ -501,6 +504,7 @@ pub fn sair(id: IdSessao) -> bool {
     let Some(sessao) = com_tabela(|t| tirar(t, id, Encerramento::Saida)) else {
         return false;
     };
+    crate::coordenacao::invalidar_pessoa(id, "a pessoa saiu");
     crate::autorizacao::auditar_pessoa(
         Some((&sessao.pessoa.texto(), id.0)),
         None,
@@ -517,6 +521,7 @@ pub fn encerrar_pelo_console(id: IdSessao, detalhe: &str) {
     let Some(sessao) = com_tabela(|t| tirar(t, id, Encerramento::ConsoleFechado)) else {
         return;
     };
+    crate::coordenacao::invalidar_pessoa(id, detalhe);
     crate::autorizacao::auditar_pessoa(
         Some((&sessao.pessoa.texto(), id.0)),
         None,
@@ -621,7 +626,7 @@ pub fn registrar(nome: &str, papel: &str, credencial: Credencial) -> Result<IdPe
 /// Revoga uma pessoa: o estado vira `revogada`, e as sessões dela acabam
 /// agora. Devolve as sessões encerradas.
 pub fn revogar_pessoa(id: IdPessoa) -> Result<Vec<IdSessao>, Recusa> {
-    com_tabela(|t| {
+    let encerradas = com_tabela(|t| {
         let p = t
             .pessoas
             .iter_mut()
@@ -641,7 +646,11 @@ pub fn revogar_pessoa(id: IdPessoa) -> Result<Vec<IdSessao>, Recusa> {
             tirar(t, *s, Encerramento::PessoaRevogada);
         }
         Ok(ids)
-    })
+    })?;
+    for s in &encerradas {
+        crate::coordenacao::invalidar_pessoa(*s, "a pessoa foi revogada");
+    }
+    Ok(encerradas)
 }
 
 /// Troca a credencial de uma pessoa ativa. A pessoa é a mesma — o mesmo
@@ -663,9 +672,11 @@ pub fn rotacionar(id: IdPessoa, credencial: Credencial) -> Result<(), Recusa> {
 
 /// Encerra uma sessão, sem tocar na pessoa. Devolve de quem era.
 pub fn revogar_sessao(id: IdSessao) -> Result<IdPessoa, Recusa> {
-    com_tabela(|t| tirar(t, id, Encerramento::Revogada))
+    let dona = com_tabela(|t| tirar(t, id, Encerramento::Revogada))
         .map(|s| s.pessoa)
-        .ok_or(Recusa::Desconhecida)
+        .ok_or(Recusa::Desconhecida)?;
+    crate::coordenacao::invalidar_pessoa(id, "a sessao foi revogada");
+    Ok(dona)
 }
 
 /// A pessoa com este identificador.

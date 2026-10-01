@@ -68,10 +68,14 @@ pub enum Permissao {
     CredentialRotate,
     /// Encerrar uma sessão de pessoa, sem tocar na pessoa.
     SessionRevoke,
+    /// Revogar o arrendamento de um recurso, de quem for. A única forma de
+    /// quebrar o arrendamento de outro — ninguém o toma por ter um papel
+    /// maior.
+    LeaseRevoke,
 }
 
 /// Todas, na ordem do relatório.
-pub const TODAS: [Permissao; 24] = [
+pub const TODAS: [Permissao; 25] = [
     Permissao::AgentRead,
     Permissao::SystemRead,
     Permissao::LogRead,
@@ -96,6 +100,7 @@ pub const TODAS: [Permissao; 24] = [
     Permissao::PersonRevoke,
     Permissao::CredentialRotate,
     Permissao::SessionRevoke,
+    Permissao::LeaseRevoke,
 ];
 
 impl Permissao {
@@ -126,6 +131,7 @@ impl Permissao {
             Permissao::PersonRevoke => "person.revoke",
             Permissao::CredentialRotate => "credential.rotate",
             Permissao::SessionRevoke => "session.revoke",
+            Permissao::LeaseRevoke => "lease.revoke",
         }
     }
 
@@ -154,6 +160,7 @@ impl Permissao {
                 | Permissao::PersonRevoke
                 | Permissao::CredentialRotate
                 | Permissao::SessionRevoke
+                | Permissao::LeaseRevoke
         )
     }
 
@@ -169,6 +176,7 @@ impl Permissao {
                 | Permissao::PersonRevoke
                 | Permissao::CredentialRotate
                 | Permissao::SessionRevoke
+                | Permissao::LeaseRevoke
         )
     }
 
@@ -223,6 +231,7 @@ mod testes {
             "person.revoke",
             "credential.rotate",
             "session.revoke",
+            "lease.revoke",
         ] {
             let p = Permissao::de_nome(nome).unwrap();
             assert!(p.administrativa() && p.sensivel(), "{nome}");

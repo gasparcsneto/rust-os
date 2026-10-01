@@ -1152,6 +1152,13 @@ fn esperar(alvo: u64, ponteiro: u64) -> i64 {
 ///
 /// `quadro` precisa ser o quadro de usuário desta chamada.
 unsafe fn bifurcar(quadro: *mut core::ffi::c_void) -> i64 {
+    // O filho herda a autoridade, e conta na cota do papel dela.
+    if !crate::autorizacao::permitir_processo(crate::fios::autoridade_atual(), "process.fork")
+        .permite()
+    {
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return erro::NEGADO;
+    }
     let espaco = match crate::paginacao::Espaco::clonar_o_ativo(programa::ENTRADA_PRIVADA) {
         Ok(espaco) => espaco,
         Err(motivo) => {
@@ -1358,6 +1365,11 @@ pub fn lancar_como(
     }
 
     limpar_ultima_saida();
+
+    // A cota de processos do papel de quem lança: contada antes de nascer.
+    if !crate::autorizacao::permitir_processo(autoridade, "process.run").permite() {
+        return Err("a cota de processos do papel de quem lanca esta esgotada");
+    }
 
     let argumento = match caminho {
         None => 0,

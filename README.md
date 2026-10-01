@@ -156,7 +156,7 @@ $ cargo xtask agent --canal 2 agent.session
 | `agent.registry` | Quem pode entrar pelas portas: a chave do Duke e cada agente registrado, com a origem |
 | `person.registry` | Quem pode entrar pelos consoles: cada pessoa, com identificador, nome, papel, estado e sessões abertas — sem credencial |
 | `admin.challenge` | Um desafio de uso único para uma operação administrativa nesta sessão |
-| `admin.execute` | Uma operação administrativa com a prova de um administrador (`challenge`, `command`, `params`, `admin`, `proof`): `agent.register`, `agent.revoke`, `policy.assign`, `policy.write`, `person.register`, `person.revoke`, `credential.rotate`, `session.revoke` |
+| `admin.execute` | Uma operação administrativa com a prova de um administrador (`challenge`, `command`, `params`, `admin`, `proof`): `agent.register`, `agent.revoke`, `policy.assign`, `policy.write`, `person.register`, `person.revoke`, `credential.rotate`, `session.revoke`, `lease.revoke` |
 | `audit.tail` | Os registros mais recentes da auditoria encadeada, com o que basta para refazer cada elo (`count`) |
 | `audit.head` | A cabeça da auditoria — o elo do último registro, para ancorar fora da máquina —, a âncora e quantos há |
 | `audit.verify` | Refaz a cadeia guardada a partir da âncora e diz se cada elo confere |
@@ -190,9 +190,11 @@ $ cargo xtask agent --canal 2 agent.session
 | `net.arp` | Pergunta quem atende por um IPv4 e espera a resposta (`ip`, `from`) |
 | `video.sample` | Amostra a tela numa grade de cores (`columns`, `rows`) |
 | `display.info` | A pilha gráfica: adaptador ativo, telas, as camadas do compositor, memória das superfícies, o último retângulo que chegou à tela e, no virtio-gpu, o que atravessou para o dispositivo |
-| `ui.tree` | A árvore semântica do que está na tela: papel, rótulo, valor, moldura e ações de cada elemento |
-| `ui.act` | Age sobre um elemento pelo mesmo caminho de quem está na frente da máquina (`id`, `action`, `value`) |
-| `keyboard.read` | O que foi digitado no teclado da máquina, e os contadores dele (`max`) |
+| `ui.tree` | A árvore semântica do que está na tela: papel, rótulo, valor, moldura e ações de cada elemento; de cada campo, a versão e o arrendamento |
+| `ui.act` | Age sobre um elemento pelo mesmo caminho de quem está na frente da máquina (`id`, `action`, `value`, `expect_version`) |
+| `ui.claim` | Arrenda um campo para esta sessão, por um prazo (`id`, `ttl_ms`) |
+| `ui.release` | Solta o arrendamento desta sessão num campo (`id`) |
+| `keyboard.read` | O que foi digitado no teclado da máquina desde a última leitura de quem pede, e os contadores dele (`max`) |
 | `log.tail` | Registros de log estruturados (`count`, `min_level`) |
 
 Esta tabela é escrita à mão e **conferida** contra o registro que o kernel usa
@@ -217,6 +219,7 @@ kernel/src/
 ├── interpretador.rs operar o Duke digitando
 ├── identidade.rs    quem é quem: a chave do Duke, os agentes, os administradores e os desafios
 ├── pessoas.rs       quem entra pelos consoles: o registro, as credenciais e as sessões
+├── coordenacao.rs   versões e arrendamentos: quem edita cada campo agora
 ├── autorizacao.rs   o ponto único de decisão: papel, permissão, recurso, taxa e auditoria
 ├── sessoes.rs       quem está em cada porta, e as chaves do transporte cifrado dela
 ├── aleatorio.rs     o gerador de números aleatórios, semeado pelo virtio-rng
@@ -361,6 +364,7 @@ politica/src/        a política de autorização, a mesma no kernel e no hosped
 ├── arquivo.rs       o formato, a validação, a decisão e as regras de mudança
 ├── caminho.rs       a forma normal dos caminhos, a mesma do VFS
 ├── taxa.rs          o balde de pedidos e a janela de apertos de mão
+├── arrendamento.rs  a versão e o arrendamento de cada recurso compartilhado
 └── auditoria.rs     os registros e a cadeia de elos BLAKE2s
 
 aparencia/src/       a linguagem visual, dos dois lados da fronteira
@@ -1493,8 +1497,8 @@ chama num lugar só: `autorizacao::autorizar`.
 **Papéis, e não listas por agente.** Quatro na imagem: `observador` observa
 o sistema e a tela, e não lê arquivos; `operador` observa e age — a tela,
 programas de `/bin` e `/programas`, arquivos de `/dados`, `/bin` e
-`/programas`; `sistema` é a autoridade máxima — a da serial, da pessoa no
-console e dos processos do sistema; `administrador` é o teto do que um
+`/programas`; `sistema` é a autoridade máxima — a da serial e dos
+processos do sistema; `administrador` é o teto do que um
 administrador delega. Um papel pode incluir outro (`@observador`), mas as
 permissões **sensíveis** — `fs.read`, `fs.raw_read`, `keyboard.read`,
 `debug.trigger`, `terminal.attach`, as administrativas — não atravessam a
@@ -1736,6 +1740,78 @@ entra pelo teclado da máquina com a pessoa da imagem: no Terminal, depois
 de ver o comando antes do login recusado e gravado, e com a senha fora do
 histórico; e no console físico, depois de um clique fora das janelas —
 duas sessões, a mesma identidade.
+
+### Coordenação
+
+Pessoas e agentes dividem a mesma tela, e a mesma tela não aceita dois
+donos ao mesmo tempo. Cada recurso compartilhado tem uma **versão**, que só
+sobe com uma mudança que valeu, e no máximo um **arrendamento**: quem o tem,
+desde quando e até quando. Hoje são recursos a linha de comando do console
+físico e cada campo de texto de uma janela.
+
+**Foco ≠ autoridade ≠ arrendamento.** Ter `ui.act` no papel deixa pedir; não
+dá a posse de nada. Ter o foco diz para onde a tecla vai; não diz que ela
+pode mudar o campo. E o arrendamento diz quem edita agora; não substitui a
+decisão. Um pedido passa pelos três, nessa ordem: o ponto de decisão, a
+versão, o arrendamento.
+
+**Versão.** `ui.act` aceita `expect_version`: se a versão não é mais a que
+quem pede leu, a resposta é `CONFLICT` (JSON-RPC `-32012`), nada muda e a
+recusa vai para a auditoria. A resposta de uma mudança traz a versão nova;
+`ui.tree` mostra a versão e o arrendamento de cada campo.
+
+**Arrendamento.** `ui.claim` arrenda um campo livre por um prazo (de 1 a
+300 segundos; 30 sem `ttl_ms`), ligado à sessão e à identidade de quem
+pede; `ui.release` o solta. Editar um campo livre o arrenda por 60 segundos,
+e editar de novo renova; confirmar exige o arrendamento — sem ele,
+`DENY_LEASE` — e o solta depois. No campo de outro, editar ou arrendar é
+`CONFLICT`, sem tirar ninguém: não há preempção. O arrendamento acaba
+quando vence, quando a sessão acaba — o `logout`, a porta que cai —, quando
+a chave ou a pessoa é revogada, e quando um administrador o revoga.
+
+**A pessoa pelo mesmo caminho.** A primeira tecla de uma pessoa na linha
+livre a arrenda para a sessão dela, uma vez na auditoria, e cada tecla
+renova; uma tecla na linha de outro é `CONFLICT`, gravada, e não muda
+nada. Numa janela, o campo é o que a descrição dela declara na linha
+`foco <id>` — o toolkit a escreve —, e o kernel confere o arrendamento
+desse campo antes de entregar a tecla: dois agentes trabalham em campos
+diferentes da mesma janela, e a pessoa num terceiro. Pessoa e agente estão
+no mesmo nível: a mesma decisão, a mesma auditoria, os mesmos
+arrendamentos, nenhuma prioridade de um sobre o outro.
+
+**O sistema não passa por cima.** O papel `sistema` é a autoridade máxima,
+e um arrendamento de outro vale contra ele como contra qualquer um. Tirar
+um arrendamento é uma operação administrativa explícita — `lease.revoke`,
+dentro de `admin.execute`, com a prova e a permissão de mesmo nome —,
+gravada em nome de quem o tinha e de quem o tirou.
+
+**A auditoria grava** cada arrendamento tomado, solto, recusado, vencido e
+invalidado, cada `CONFLICT` de versão, cada confirmação sem arrendamento, e
+a mudança que valeu.
+
+**O teclado tem um cursor por leitor.** `keyboard.read` lê do histórico —
+as últimas 256 teclas — a partir do cursor de quem pede: dois agentes lendo
+recebem as mesmas teclas, sem roubar um do outro, e quem ficou para trás
+além do anel recebe `missed`, quantas perdeu.
+
+**A cota de processos.** Cada papel tem um teto de processos vivos — a
+linha `processos <papel> <n>`, de 1 a 64, 4 sem ela; na imagem, 32 para o
+`sistema`, 8 para o operador e o administrador, 2 para o observador —,
+contado por titular: uma sessão de agente, uma de pessoa, o sistema. O
+processo além da cota — lançado ou bifurcado — não nasce, e a recusa vai
+para a auditoria.
+
+O `cargo xtask invariantes` confere que só o canal chama
+`ui::agir_com_versao`, que só a administração revoga um arrendamento, e que
+a linha do interpretador só muda pela árvore. A suíte confere os cenários
+de concorrência entre dois agentes — duas leituras e uma mudança, exclusivo
+até soltar, revogado, vencido, confirmação com a versão velha —; pessoa
+contra agente, agente contra pessoa, duas pessoas, o `logout` e o
+`lease.revoke` com e sem a prova; os campos de uma janela, com o foco
+declarado; dois leitores do teclado; e a cota de processos, lançada e
+bifurcada. A tabela do pacote `politica` confere, no hospedeiro, que nunca
+há dois arrendamentos num recurso, que nenhum sobrevive à revogação, e que
+a versão só sobe com uma mudança que valeu.
 
 ## Barramento PCI
 

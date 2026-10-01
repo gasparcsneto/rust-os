@@ -223,8 +223,10 @@ pub async fn atender() {
     abrir_console(Console::Fisico);
 
     loop {
-        let (console, c) = crate::teclado::proxima_entrada().await;
-        tratar(console, c);
+        match crate::teclado::proxima_entrada().await {
+            crate::teclado::Entrada::Console(console, c) => tratar(console, c),
+            crate::teclado::Entrada::Janela(c) => tratar_tecla_de_janela(c),
+        }
     }
 }
 
@@ -316,6 +318,9 @@ pub fn tratar(console: Console, c: char) {
     if !com_estado(console, |e| e.aberto).unwrap_or(false) {
         return;
     }
+    if console == Console::Fisico && !tecla_coordenada(c) {
+        return;
+    }
     match c {
         '\n' => {
             confirmar_em(console, Origem::Pessoa);
@@ -354,6 +359,105 @@ pub fn tratar(console: Console, c: char) {
     if console == Console::Fisico {
         crate::ui::mudou();
     }
+}
+
+/// Uma tecla para a janela com o foco: decidida, e então entregue.
+///
+/// - Quem digita: numa janela de Terminal, a pessoa entrada no console
+///   dele; em qualquer outra, a pessoa entrada no console físico — o
+///   teclado é o da máquina. Numa janela que não é de Terminal, sem ninguém
+///   entrado no físico, nada: `DENY_NOT_AUTHENTICATED`, gravado. No
+///   Terminal a tecla passa — o login é dele, e o console dele decide.
+/// - O campo que a janela declara na linha `foco` é um recurso arrendável:
+///   a tecla que o edita passa pela coordenação como a do console físico —
+///   arrenda o campo livre, e é recusada (`CONFLICT`, gravado) no campo de
+///   outro. O Enter de um campo com algo pede o arrendamento.
+/// - Sem quem escute na janela — o dono morreu e o foco ainda não voltou
+///   —, a tecla vai para o console físico, em vez de sumir.
+pub fn tratar_tecla_de_janela(c: char) {
+    let Some(janela) = crate::superficies::janela_com_foco() else {
+        tratar(Console::Fisico, c);
+        return;
+    };
+    let terminal = crate::pseudoterminal::donos()
+        .iter()
+        .position(|d| *d == Some(janela.dono))
+        .map(|i| Console::Terminal(i as u16));
+    let console = terminal.unwrap_or(Console::Fisico);
+    let titular = crate::coordenacao::titular(Origem::Pessoa, console);
+    if terminal.is_none() && titular.is_none() {
+        crate::autorizacao::recusar_sem_login(Console::Fisico, "keyboard", &[]);
+        return;
+    }
+    if let Some((indice, valor)) = &janela.campo
+        && let Some(id) = crate::ui::id_do_elemento(janela.camada, *indice)
+    {
+        let recurso = crate::coordenacao::recurso(id);
+        // O valor vem da última descrição da janela, que pode não ter
+        // chegado ainda à tecla de antes: o Enter logo depois de digitar
+        // veria o campo vazio. Por isso o Enter só passa sem confirmar no
+        // campo vazio **e** livre — com arrendamento, confirma: o de quem
+        // digitou é solto, e o de outro é `CONFLICT`.
+        let livre = || crate::coordenacao::estado(&recurso).arrendamento.is_none();
+        let r = match c {
+            '\n' if valor.is_empty() && livre() => Ok(0),
+            '\n' => crate::coordenacao::confirmar(&recurso, titular, None, "keyboard"),
+            '\u{8}' => crate::coordenacao::editar(&recurso, titular, None, "keyboard"),
+            c if aceito(c) => crate::coordenacao::editar(&recurso, titular, None, "keyboard"),
+            _ => Ok(0),
+        };
+        if let Err(codigo) = r {
+            crate::log_info!("console", "tecla na janela recusada: {}", codigo.nome());
+            return;
+        }
+    }
+    let evento = protocolo::usuario::evento::Evento {
+        tipo: protocolo::usuario::evento::tipo::TECLA,
+        a: c as i64,
+        b: 0,
+        c: 0,
+    };
+    if !crate::superficies::entregar(janela.destino, evento) {
+        tratar(Console::Fisico, c);
+    }
+}
+
+/// A tecla da pessoa na linha do console físico, pela coordenação — ver
+/// [`crate::coordenacao`]: a linha é um recurso compartilhado com os
+/// agentes, pela árvore.
+///
+/// Uma edição — um caractere, o apagar — arrenda a linha livre para a
+/// pessoa entrada no console, e renova o arrendamento dela; o Enter de uma
+/// linha com algo pede o arrendamento, e o solta depois. Na linha arrendada
+/// por outro, a tecla é recusada — `CONFLICT`, gravado —, e não substitui
+/// em silêncio quem estava ali. Falso se a tecla não deve ter efeito.
+///
+/// Sem ninguém entrado — a pessoa digitando o `login` —, a tecla só passa
+/// na linha livre, e não a arrenda.
+fn tecla_coordenada(c: char) -> bool {
+    let recurso = crate::coordenacao::recurso(crate::ui::ID_DA_LINHA_DE_COMANDO);
+    let titular = || crate::coordenacao::titular(Origem::Pessoa, Console::Fisico);
+    let r = match c {
+        '\n' => {
+            let (modo, vazia) = com_fisico(|e| (e.modo, e.tam == 0));
+            if modo != Modo::Comando || vazia {
+                return true;
+            }
+            crate::coordenacao::confirmar(&recurso, titular(), None, "keyboard")
+        }
+        '\u{8}' => crate::coordenacao::editar(&recurso, titular(), None, "keyboard"),
+        c if aceito(c) => crate::coordenacao::editar(&recurso, titular(), None, "keyboard"),
+        _ => return true,
+    };
+    if let Err(codigo) = r {
+        crate::log_info!(
+            "console",
+            "tecla na linha de comando recusada: {}",
+            codigo.nome()
+        );
+        return false;
+    }
+    true
 }
 
 /// A pessoa no console pode acionar o elemento `id`? Decide `ui.act` com a
@@ -561,6 +665,39 @@ fn definir_em(console: Console, valor: &str) -> Result<(), &'static str> {
     });
     if console == Console::Fisico {
         crate::ui::mudou();
+    }
+    Ok(())
+}
+
+/// A linha do físico aceitaria este valor? A conferência de [`definir`],
+/// sem mudar nada: quem pede confere antes de pedir o arrendamento — ver
+/// [`crate::coordenacao`] —, para uma recusa por valor não fazer a versão
+/// crescer.
+pub fn pode_definir(valor: &str) -> Result<(), &'static str> {
+    let (aberto, modo, inicio) = com_estado(Console::Fisico, |e| (e.aberto, e.modo, e.inicio))
+        .unwrap_or((false, Modo::Comando, None));
+    if !aberto || inicio.is_none() {
+        return Err("a linha de comando nao esta atendendo");
+    }
+    if valor.len() > LINHA_MAX {
+        return Err("o valor nao cabe na linha de comando");
+    }
+    if !valor.chars().all(aceito) {
+        return Err("o valor tem caracteres que nao se digitam na linha de comando");
+    }
+    if modo != Modo::Comando && !valor.is_empty() {
+        return Err("a linha esta pedindo o login de uma pessoa; so se digita pelo teclado");
+    }
+    Ok(())
+}
+
+/// A linha do físico aceitaria o `confirm` de `origem`? Um agente não
+/// confirma a linha do login.
+pub fn pode_confirmar(origem: Origem) -> Result<(), &'static str> {
+    if let Origem::Agente(_) = origem
+        && com_fisico(|e| e.modo) != Modo::Comando
+    {
+        return Err("a linha esta pedindo o login de uma pessoa; so se confirma pelo teclado");
     }
     Ok(())
 }

@@ -66,6 +66,7 @@ mod aleatorio;
 mod arch;
 mod autorizacao;
 mod barra;
+mod coordenacao;
 mod eventos;
 mod fios;
 mod frames;

@@ -286,6 +286,7 @@ pub fn fatal(nome: &'static str, pc: u64, endereco: Option<u64>, codigo: u64) ->
         crate::identidade::destravar();
         crate::autorizacao::destravar();
         crate::pessoas::destravar();
+        crate::coordenacao::destravar();
         crate::sessoes::destravar();
         crate::usb::xhci::destravar();
         crate::teclado::destravar();

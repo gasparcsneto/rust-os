@@ -323,6 +323,13 @@ pub fn acionavel_em(x: u32, y: u32) -> Option<u32> {
     .map(|(_, id)| id)
 }
 
+/// O elemento é um campo — um recurso que se edita e se arrenda: a linha
+/// de comando, ou um campo de janela.
+pub fn e_campo(id: u32) -> bool {
+    id == ID_DA_LINHA_DE_COMANDO
+        || com_elemento(id, |e| e.tipo) == Some(crate::superficies::Tipo::Campo)
+}
+
 /// O elemento existe agora?
 pub fn existe(id: u32) -> bool {
     match id {
@@ -366,6 +373,56 @@ pub fn e_janela(c: &crate::grafico::compositor::InfoCamada) -> bool {
         && c.opacidade > 0
 }
 
+/// Uma ação recusada: o motivo e, quando a recusa é da coordenação, o
+/// código — `CONFLICT` ou `DENY_LEASE` —, que o agente precisa distinguir
+/// de um pedido mal feito.
+///
+/// Conversível de e para `&'static str`: os chamadores que só querem o
+/// motivo — a suíte, as teclas — continuam com ele.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Recusada {
+    pub motivo: &'static str,
+    pub codigo: Option<politica::Codigo>,
+}
+
+impl From<&'static str> for Recusada {
+    fn from(motivo: &'static str) -> Recusada {
+        Recusada {
+            motivo,
+            codigo: None,
+        }
+    }
+}
+
+impl From<Recusada> for &'static str {
+    fn from(r: Recusada) -> &'static str {
+        r.motivo
+    }
+}
+
+impl core::fmt::Display for Recusada {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.codigo {
+            Some(c) => write!(f, "{} ({})", self.motivo, c.nome()),
+            None => f.write_str(self.motivo),
+        }
+    }
+}
+
+/// A recusa da coordenação, com o código dela.
+fn da_coordenacao(codigo: politica::Codigo) -> Recusada {
+    Recusada {
+        motivo: match codigo {
+            politica::Codigo::Conflict => {
+                "conflito: o recurso mudou, ou outro titular tem o arrendamento"
+            }
+            politica::Codigo::DenyLease => "a acao pede o arrendamento do recurso",
+            _ => "recusada pela coordenacao",
+        },
+        codigo: Some(codigo),
+    }
+}
+
 /// O que uma ação produziu.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Efeito {
@@ -399,13 +456,20 @@ pub enum Efeito {
 /// Elemento que não existe, ação que ele não aceita, valor que não caberia
 /// na linha ou que uma pessoa não conseguiria digitar. Recusar antes de
 /// mexer em qualquer coisa: uma ação recusada não deixa rastro na tela.
-pub fn agir(
+pub fn agir(id: u32, acao: Acao, valor: Option<&str>, origem: Origem) -> Result<Efeito, Recusada> {
+    agir_com_versao(id, acao, valor, origem, None)
+}
+
+/// [`agir`], com a versão que quem pede leu: o `expect_version` do
+/// `ui.act`. Se não é a de agora, `CONFLICT`, e nada muda.
+pub fn agir_com_versao(
     id: u32,
     acao: Acao,
     valor: Option<&str>,
     origem: Origem,
-) -> Result<Efeito, &'static str> {
-    let desfecho = executar(id, acao, valor, origem);
+    esperada: Option<u64>,
+) -> Result<Efeito, Recusada> {
+    let desfecho = executar(id, acao, valor, origem, esperada);
     // Registrado **depois**, com o desfecho. Antes da ação, uma recusa por
     // valor inválido ficava no log como ação feita — e isto é o começo de uma
     // trilha de auditoria, onde afirmar o que não aconteceu é pior que calar.
@@ -428,38 +492,73 @@ fn executar(
     acao: Acao,
     valor: Option<&str>,
     origem: Origem,
-) -> Result<Efeito, &'static str> {
+    esperada: Option<u64>,
+) -> Result<Efeito, Recusada> {
     // No post-mortem a interface não age. Toda ação muda a tela — limpar o
     // console, redesenhar a barra, digitar no prompt —, e a tela é a de
     // falha, a única coisa que uma pessoa na frente da máquina vê. Medido:
     // antes desta recusa, um `press` do agente a apagava inteira.
     if crate::traps::em_post_mortem() {
-        return Err("o kernel esta em post-mortem; a interface nao age sobre a tela de falha");
+        return Err(
+            "o kernel esta em post-mortem; a interface nao age sobre a tela de falha".into(),
+        );
     }
     if !existe(id) {
-        return Err("nao ha elemento com este id");
+        return Err("nao ha elemento com este id".into());
     }
     if !acoes_de(id).contains(&acao) {
-        return Err("o elemento nao aceita esta acao");
+        return Err("o elemento nao aceita esta acao".into());
     }
+    // Um campo — a linha de comando, ou um campo de janela — é um recurso
+    // compartilhado: editar o arrenda para quem editou, confirmar pede o
+    // arrendamento, e a versão esperada é conferida. Quem age é o agente
+    // da sessão, ou a pessoa no console físico. Ver [`crate::coordenacao`].
+    let recurso = crate::coordenacao::recurso(id);
+    let titular = || crate::coordenacao::titular(origem, crate::pessoas::Console::Fisico);
+    let editar = || {
+        crate::coordenacao::editar(&recurso, titular(), esperada, "ui.act").map_err(da_coordenacao)
+    };
+    let confirmar = || {
+        crate::coordenacao::confirmar(&recurso, titular(), esperada, "ui.act")
+            .map_err(da_coordenacao)
+    };
     // Um campo de uma janela de processo: o pedido vai ao dono dela.
     if id != ID_DA_LINHA_DE_COMANDO
         && let Some(do_processo) = com_elemento(id, |e| e.id)
         && acao != Acao::Pressionar
     {
-        return agir_no_campo(id, do_processo, acao, valor, origem);
+        // A recusa por valor que não cabe vem antes da conta: uma ação
+        // recusada não faz a versão crescer.
+        if let (Acao::DefinirValor, Some(v)) = (acao, valor)
+            && v.len() > protocolo::usuario::descricao::MAIOR_TEXTO
+        {
+            return Err("o valor nao cabe no campo".into());
+        }
+        match acao {
+            Acao::Confirmar => confirmar()?,
+            _ => editar()?,
+        };
+        return agir_no_campo(id, do_processo, acao, valor, origem).map_err(Into::into);
     }
     match acao {
         Acao::DefinirValor => {
             let valor = valor.ok_or("set_value precisa de `value`")?;
+            crate::interpretador::pode_definir(valor)?;
+            editar()?;
             crate::interpretador::definir(valor)?;
             Ok(Efeito::ValorDefinido)
         }
         Acao::Cancelar => {
+            crate::interpretador::pode_definir("")?;
+            editar()?;
             crate::interpretador::definir("")?;
             Ok(Efeito::Cancelado)
         }
-        Acao::Confirmar => Ok(Efeito::Executado(crate::interpretador::confirmar(origem))),
+        Acao::Confirmar => {
+            crate::interpretador::pode_confirmar(origem)?;
+            confirmar()?;
+            Ok(Efeito::Executado(crate::interpretador::confirmar(origem)))
+        }
         // O botão da barra, ou um que um processo descreveu: a conferência
         // acima já recusou os outros.
         Acao::Pressionar => {

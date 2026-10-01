@@ -655,6 +655,28 @@ pub fn autorizar_processo(permissao: Permissao, recurso: &str, metodo: &str) -> 
     codigo
 }
 
+/// Grava um evento de arrendamento — ver [`crate::coordenacao`] —, em nome
+/// de quem o tem ou o pediu: a pessoa pela sessão dela, o agente pela
+/// sessão do canal e a chave. Sem titular, ninguém: uma pessoa num console
+/// sem login.
+pub fn auditar_arrendamento(
+    titular: Option<&politica::arrendamento::Titular>,
+    metodo: &str,
+    recurso: &str,
+    codigo: Codigo,
+    detalhe: &str,
+) {
+    use politica::arrendamento::Titular as T;
+    let quem = match titular {
+        Some(T::Pessoa { sessao, .. }) => match quem_da_pessoa(crate::pessoas::IdSessao(*sessao)) {
+            Ok(q) | Err(q) => q,
+        },
+        Some(T::Agente { sessao, chave }) => quem_da_autoridade(*sessao, *chave),
+        None => quem_sem_login(),
+    };
+    auditar(&quem, metodo, recurso, codigo, &[], detalhe);
+}
+
 /// Recusa um pedido feito num console sem ninguém entrado: só `login` e
 /// `ajuda` passam antes do login, e o resto — um comando, conhecido ou não —
 /// é `DENY_NOT_AUTHENTICATED`, gravado com o console.
@@ -707,6 +729,48 @@ pub fn autorizar_acao_da_pessoa(
     let (codigo, detalhe) = decidir(quem.papel.as_deref(), Permissao::UiAct, "");
     auditar(&quem, "ui.act", &recurso, codigo, &[], detalhe);
     codigo
+}
+
+/// Pode nascer mais um processo com a autoridade `autoridade`? A cota de
+/// processos vivos do papel de quem é a autoridade — a linha `processos` da
+/// política —, contada por titular: uma sessão de agente, uma de pessoa, o
+/// sistema. Sem papel, nada nasce. Uma recusa vai para a auditoria.
+pub fn permitir_processo(autoridade: Autoridade, metodo: &str) -> Codigo {
+    let quem = match autoridade {
+        Autoridade::Sistema => quem_local("sistema"),
+        Autoridade::Sessao { sessao, chave } => quem_da_autoridade(sessao, chave),
+        Autoridade::Pessoa { sessao } => match quem_da_pessoa(sessao) {
+            Ok(q) | Err(q) => q,
+        },
+    };
+    let cota = quem
+        .papel
+        .as_deref()
+        .and_then(|papel| com_politica(|p| p.papel(papel).map(|r| r.processos)));
+    let Some(cota) = cota else {
+        auditar(
+            &quem,
+            metodo,
+            "",
+            Codigo::DenyRole,
+            &[],
+            "sem papel, nenhum processo",
+        );
+        return Codigo::DenyRole;
+    };
+    let vivos = crate::fios::processos_de(autoridade);
+    if vivos >= cota as usize {
+        auditar(
+            &quem,
+            metodo,
+            "",
+            Codigo::DenyPolicy,
+            &[],
+            &alloc::format!("cota de processos do papel: {vivos} de {cota}"),
+        );
+        return Codigo::DenyPolicy;
+    }
+    Codigo::Allow
 }
 
 /// Conta um aperto de mão na janela da porta `p`. Falso se passou do

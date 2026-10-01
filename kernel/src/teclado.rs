@@ -37,9 +37,12 @@ const CAPACIDADE: usize = 64;
 
 static TECLADO: Fila<char, CAPACIDADE> = Fila::nova();
 
-/// O que foi digitado, para quem pergunta de fora.
+/// Quantas teclas o histórico guarda.
+pub const HISTORIA: usize = 256;
+
+/// O que foi digitado, para quem pergunta de fora — `keyboard.read`.
 ///
-/// # Por que uma segunda fila, e não uma leitura da primeira
+/// # Por que não a fila do teclado
 ///
 /// Porque a fila do teclado tem **dono**: o interpretador, que atende quem
 /// está na frente da máquina. Um segundo consumidor tirando dela não observa
@@ -47,10 +50,49 @@ static TECLADO: Fila<char, CAPACIDADE> = Fila::nova();
 /// interpretador lendo a mesma fila, a sonda de fumaça recebeu `a` das três
 /// teclas que mandou, e as outras duas foram para o interpretador.
 ///
-/// Esta aqui é escrita junto com a outra e lida só pelo canal. Quem a
-/// consome não tira nada de ninguém — e se ninguém a consumir, ela transborda
-/// e conta os descartes, que é o comportamento certo para um diagnóstico.
-static HISTORICO: Fila<char, CAPACIDADE> = Fila::nova();
+/// # Por que um anel com cursores, e não uma fila
+///
+/// Porque uma fila tem o mesmo defeito entre os leitores de fora: dois
+/// agentes lendo, um rouba do outro. O histórico é um anel das últimas
+/// [`HISTORIA`] teclas, numeradas desde o boot, e cada leitor tem o seu
+/// cursor — ver [`ler_para`]: cada um lê tudo o que foi digitado desde a
+/// última leitura dele, e não tira nada de ninguém. O que sai do anel antes
+/// de um leitor ler é contado como perdido para ele.
+struct Historia {
+    teclas: [char; HISTORIA],
+    /// Quantas teclas entraram desde o boot: a de número `n` está em
+    /// `teclas[n % HISTORIA]`, enquanto `n` for maior que `total - HISTORIA`.
+    total: u64,
+}
+
+// Tomada pelo tratador da interrupção — que já roda com as interrupções
+// mascaradas — e por `sem_interrupcoes` do resto. Solta no caminho fatal.
+static HISTORICO: spin::Mutex<Historia> = spin::Mutex::new(Historia {
+    teclas: ['\0'; HISTORIA],
+    total: 0,
+});
+
+/// O cursor de cada leitor: a autoridade de quem lê — a sessão do agente, a
+/// sessão da pessoa, o sistema — e o número da próxima tecla que ele não
+/// leu. Com teto: um leitor esquecido sai, e começa de novo do mais antigo
+/// que o anel guarda.
+static CURSORES: spin::Mutex<alloc::vec::Vec<(crate::autorizacao::Autoridade, u64)>> =
+    spin::Mutex::new(alloc::vec::Vec::new());
+
+/// Quantos leitores têm cursor ao mesmo tempo.
+const MAIS_LEITORES: usize = 32;
+
+/// As teclas para a janela com o foco, esperando a tarefa do
+/// interpretador.
+///
+/// # Por que não entregar já, na interrupção
+///
+/// Porque antes de entregar há o que decidir: a tecla edita o campo que a
+/// janela declara, e esse campo é um recurso arrendável — ver
+/// [`crate::coordenacao`]. Decidir e gravar na auditoria não é trabalho de
+/// um tratador de interrupção, então a tecla espera aqui e quem decide é a
+/// tarefa, como para o console.
+static PARA_JANELAS: Fila<char, CAPACIDADE> = Fila::nova();
 
 /// Os consoles que estão pedindo uma senha agora, um bit cada.
 ///
@@ -76,7 +118,12 @@ pub fn pedindo_senha(indice: usize, pedindo: bool) {
 /// Guarda no histórico, se nenhum console estiver pedindo senha.
 fn registrar_no_historico(c: char) {
     if PEDINDO_SENHA.load(Ordering::Relaxed) == 0 {
-        let _ = HISTORICO.enfileirar(c);
+        crate::arch::sem_interrupcoes(|| {
+            let mut h = HISTORICO.lock();
+            let i = (h.total % HISTORIA as u64) as usize;
+            h.teclas[i] = c;
+            h.total += 1;
+        });
     }
 }
 
@@ -246,26 +293,17 @@ pub fn evento(codigo_da_tecla: u8, pressionada: bool) {
 
     PRESSIONADAS.fetch_add(1, Ordering::Relaxed);
 
-    // Com o foco numa janela, o caractere é do dono dela, no canal de
-    // entrada da superfície. Se não houver quem escute — o dono morreu e o
-    // coletor ainda não passou para devolver o foco —, o caractere segue
-    // para o console, em vez de sumir.
-    //
-    // Devolver o foco aqui também era a primeira versão, e ela era o mesmo
-    // efeito escrito duas vezes: a mutação que tirava a devolução passava na
-    // suíte, porque a tecla seguia para o console de qualquer jeito e o
-    // coletor devolvia o foco no tique seguinte. Quem devolve é o coletor.
-    if let Some(destino) = crate::superficies::destino_do_foco() {
-        let evento = protocolo::usuario::evento::Evento {
-            tipo: protocolo::usuario::evento::tipo::TECLA,
-            a: c as i64,
-            b: 0,
-            c: 0,
-        };
-        if crate::superficies::entregar(destino, evento) {
-            registrar_no_historico(c);
-            return;
-        }
+    // Com o foco numa janela, o caractere é do dono dela — mas quem o
+    // entrega é a tarefa do interpretador, depois de decidir: ver
+    // [`PARA_JANELAS`]. Se, na hora de entregar, não houver quem escute — o
+    // dono morreu e o coletor ainda não passou para devolver o foco —, ele
+    // segue para o console, em vez de sumir.
+    if crate::superficies::foco_ativo() {
+        let _ = PARA_JANELAS.enfileirar(c);
+        registrar_no_historico(c);
+        #[cfg(not(feature = "modo-teste"))]
+        despertar();
+        return;
     }
 
     // Fila cheia é fila cheia: o contador de descartados da própria fila
@@ -306,9 +344,66 @@ pub fn ler() -> Option<char> {
     TECLADO.desenfileirar()
 }
 
-/// Tira o próximo caractere do histórico de diagnóstico.
+/// O que um leitor leu do histórico.
+pub struct Leitura {
+    /// As teclas que saíram do anel antes de o leitor lê-las.
+    pub perdidas: u64,
+    /// As que ainda esperam por ele, depois desta leitura.
+    pub esperando: u64,
+}
+
+/// Lê do histórico, para `leitor`, até `max` teclas, a partir do cursor
+/// dele — chamando `f` com cada uma —, e avança o cursor. Não tira nada de
+/// nenhum outro leitor.
+pub fn ler_para(
+    leitor: crate::autorizacao::Autoridade,
+    max: usize,
+    mut f: impl FnMut(char),
+) -> Leitura {
+    // A cópia sai da trava antes de `f` rodar: `f` escreve no canal.
+    let (teclas, perdidas, esperando) = crate::arch::sem_interrupcoes(|| {
+        let h = HISTORICO.lock();
+        let mut cursores = CURSORES.lock();
+        let mais_antiga = h.total.saturating_sub(HISTORIA as u64);
+        let i = match cursores.iter().position(|(l, _)| *l == leitor) {
+            Some(i) => i,
+            None => {
+                if cursores.len() >= MAIS_LEITORES {
+                    cursores.remove(0);
+                }
+                cursores.push((leitor, mais_antiga));
+                cursores.len() - 1
+            }
+        };
+        let cursor = cursores[i].1;
+        let perdidas = mais_antiga.saturating_sub(cursor);
+        let desde = cursor.max(mais_antiga);
+        let ate = h.total.min(desde + max as u64);
+        let mut teclas = alloc::vec::Vec::with_capacity((ate - desde) as usize);
+        for n in desde..ate {
+            teclas.push(h.teclas[(n % HISTORIA as u64) as usize]);
+        }
+        cursores[i].1 = ate;
+        (teclas, perdidas, h.total - ate)
+    });
+    for c in teclas {
+        f(c);
+    }
+    Leitura {
+        perdidas,
+        esperando,
+    }
+}
+
+/// Tira a próxima tecla do histórico para o leitor do sistema. Para a suíte,
+/// que observa o histórico como um leitor.
+#[cfg(feature = "modo-teste")]
 pub fn observar() -> Option<char> {
-    HISTORICO.desenfileirar()
+    let mut lida = None;
+    ler_para(crate::autorizacao::Autoridade::Sistema, 1, |c| {
+        lida = Some(c)
+    });
+    lida
 }
 
 /// Quantas teclas viraram caractere desde o boot.
@@ -316,25 +411,22 @@ pub fn pressionadas() -> u64 {
     PRESSIONADAS.load(Ordering::Relaxed)
 }
 
-/// Quantos caracteres se perderam por ninguém ler.
-///
-/// Soma as duas filas: perder no histórico é perder um diagnóstico, perder na
-/// do interpretador é perder o que alguém digitou. As duas contam, e quem
-/// investiga quer saber que houve perda antes de saber onde.
+/// Quantos caracteres se perderam por ninguém ler a tempo: na fila do
+/// console e na das janelas — perder ali é perder o que alguém digitou. O
+/// que um leitor do histórico perdeu é dele, e vai na leitura dele.
 pub fn descartados() -> u64 {
-    TECLADO.descartados() + HISTORICO.descartados()
-}
-
-/// Quantos caracteres estão esperando no histórico.
-pub fn esperando() -> usize {
-    HISTORICO.ocupacao()
+    TECLADO.descartados() + PARA_JANELAS.descartados()
 }
 
 /// Devolve o teclado ao estado de quem não digitou nada. Para a suíte.
 #[cfg(feature = "modo-teste")]
 pub fn esvaziar() {
     while TECLADO.desenfileirar().is_some() {}
-    while HISTORICO.desenfileirar().is_some() {}
+    while PARA_JANELAS.desenfileirar().is_some() {}
+    crate::arch::sem_interrupcoes(|| {
+        HISTORICO.lock().total = 0;
+        CURSORES.lock().clear();
+    });
     SHIFT.store(false, Ordering::Relaxed);
 }
 
@@ -367,13 +459,30 @@ pub fn despertar_o_interpretador() {
     despertar();
 }
 
-/// A próxima entrada de algum console: uma tecla do teclado da máquina —
-/// do console físico — ou um caractere digitado num pseudo-terminal.
+/// Tira a próxima tecla para a janela com o foco, se houver.
+pub fn ler_para_janela() -> Option<char> {
+    PARA_JANELAS.desenfileirar()
+}
+
+/// O que chega à tarefa do interpretador.
 #[cfg(not(feature = "modo-teste"))]
-fn proxima() -> Option<(crate::pessoas::Console, char)> {
-    ler()
-        .map(|c| (crate::pessoas::Console::Fisico, c))
-        .or_else(crate::pseudoterminal::proxima_entrada)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Entrada {
+    /// Um caractere para um console: do teclado da máquina para o físico,
+    /// ou de um pseudo-terminal para o console dele.
+    Console(crate::pessoas::Console, char),
+    /// Uma tecla para a janela com o foco.
+    Janela(char),
+}
+
+/// A próxima entrada: uma tecla para uma janela, uma do teclado da máquina
+/// para o console físico, ou um caractere digitado num pseudo-terminal.
+#[cfg(not(feature = "modo-teste"))]
+fn proxima() -> Option<Entrada> {
+    ler_para_janela()
+        .map(Entrada::Janela)
+        .or_else(|| ler().map(|c| Entrada::Console(crate::pessoas::Console::Fisico, c)))
+        .or_else(|| crate::pseudoterminal::proxima_entrada().map(|(c, ch)| Entrada::Console(c, ch)))
 }
 
 /// A próxima entrada de algum console, quando houver uma.
@@ -391,7 +500,7 @@ pub struct ProximaEntrada;
 
 #[cfg(not(feature = "modo-teste"))]
 impl core::future::Future for ProximaEntrada {
-    type Output = (crate::pessoas::Console, char);
+    type Output = Entrada;
 
     fn poll(
         self: core::pin::Pin<&mut Self>,
@@ -435,7 +544,9 @@ impl core::future::Future for ProximaEntrada {
 pub unsafe fn destravar() {
     unsafe {
         TECLADO.destravar();
-        HISTORICO.destravar();
+        HISTORICO.force_unlock();
+        CURSORES.force_unlock();
+        PARA_JANELAS.destravar();
         #[cfg(not(feature = "modo-teste"))]
         DESPERTADOR.force_unlock();
     }

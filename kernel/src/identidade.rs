@@ -359,7 +359,7 @@ pub fn registrar(chave: [u8; TAM_CHAVE], nome: &str, papel: &str) -> Result<(), 
 /// Tira um agente do registro. Devolve o nome dele. As sessões vivas da
 /// chave quem encerra é quem chama — ver [`crate::agent::administracao`].
 pub fn revogar(chave: &[u8; TAM_CHAVE]) -> Result<String, Recusa> {
-    crate::arch::sem_interrupcoes(|| {
+    let nome = crate::arch::sem_interrupcoes(|| {
         let mut id = IDENTIDADE.lock();
         let i = id
             .agentes
@@ -367,7 +367,10 @@ pub fn revogar(chave: &[u8; TAM_CHAVE]) -> Result<String, Recusa> {
             .position(|a| a.chave == *chave)
             .ok_or(Recusa::Desconhecido)?;
         Ok(id.agentes.remove(i).nome)
-    })
+    })?;
+    // Os arrendamentos da chave acabam com ela, na hora — em qualquer sessão.
+    crate::coordenacao::invalidar_chave(chave, "a chave foi revogada");
+    Ok(nome)
 }
 
 /// Troca o papel de um agente, pelo nome.

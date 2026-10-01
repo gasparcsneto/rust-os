@@ -4,7 +4,8 @@
 //!
 //! Uma operação administrativa — registrar e revogar um agente, atribuir um
 //! papel, mudar a política, registrar e revogar uma pessoa, trocar a
-//! credencial dela, encerrar uma sessão de pessoa — não é um comando como os outros. Ela não está
+//! credencial dela, encerrar uma sessão de pessoa, revogar um arrendamento
+//! — não é um comando como os outros. Ela não está
 //! em [`super::commands::COMANDOS`] e não se chama pelo nome: chega
 //! embrulhada em `admin.execute`, com a prova de um administrador para
 //! **aquele** pedido, naquela sessão, com aquele desafio. Ver
@@ -147,6 +148,13 @@ static OPERACOES: &[Operacao] = &[
                  registrada e pode entrar de novo.",
         permissao: Permissao::SessionRevoke,
         executar: revogar_sessao,
+    },
+    Operacao {
+        nome: "lease.revoke",
+        resumo: "Revoga o arrendamento de um campo, de quem for: {\"id\": o id do campo em \
+                 ui.tree}. A unica forma de quebrar o arrendamento de outro.",
+        permissao: Permissao::LeaseRevoke,
+        executar: revogar_arrendamento,
     },
 ];
 
@@ -636,4 +644,35 @@ fn revogar_sessao(pedinte: &Pedinte, params: Json, w: &mut JsonWriter) -> Result
     let _ = w.field_str("session", &id.texto());
     let _ = w.field_str("person", &dona.id.texto());
     Ok(id.texto())
+}
+
+// ---------------------------------------------------------------------------
+// Arrendamentos
+// ---------------------------------------------------------------------------
+
+/// `lease.revoke`: tira o arrendamento de um campo, de quem for.
+///
+/// Sem preempção, esta é a única forma de quebrar o arrendamento de outro:
+/// com a prova, com a permissão no papel do administrador, e gravada — o
+/// arrendamento que saiu vai para a auditoria em nome de quem o tinha, e a
+/// operação em nome do administrador. O `sistema` não tem um atalho para
+/// isto.
+fn revogar_arrendamento(
+    _pedinte: &Pedinte,
+    params: Json,
+    w: &mut JsonWriter,
+) -> Result<String, Falha> {
+    let id = params
+        .member("id")
+        .and_then(|v| v.as_u64())
+        .and_then(|id| u32::try_from(id).ok())
+        .ok_or_else(|| falha(Codigo::InvalidArgument, "falta `id`"))?;
+    let recurso = crate::coordenacao::recurso(id);
+    let saiu = crate::coordenacao::revogar(&recurso)
+        .ok_or_else(|| falha(Codigo::InvalidArgument, "o campo nao esta arrendado"))?;
+    let (tipo, quem) = crate::coordenacao::descrever(&saiu.titular);
+    let _ = w.field_str("resource", &recurso);
+    let _ = w.field_str("holder", tipo);
+    let _ = w.field_str("by", &quem);
+    Ok(recurso)
 }

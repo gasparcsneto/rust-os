@@ -365,6 +365,9 @@ extern "C" fn coletor(_argumento: u64) -> ! {
         // O aviso de saída do pseudo-terminal é dado daqui, sem tranca na
         // mão — ver `pseudoterminal`, sobre por que o `_print` não o dá.
         crate::pseudoterminal::avisar_se_preciso();
+        // E os arrendamentos vencidos saem daqui, e vão para a auditoria:
+        // um prazo vence sem ninguém pedir nada.
+        crate::coordenacao::vencer_todos();
         crate::arch::esperar_interrupcao();
     }
 }
@@ -1051,6 +1054,22 @@ pub fn acordar(id: u64) -> bool {
             }
         }
         false
+    })
+}
+
+/// Quantos processos vivos têm esta autoridade: os fios que hospedam um
+/// programa — lançados por `user.run` ou pelo sistema, ou bifurcados — e não
+/// terminaram. É a conta da cota de processos do papel — ver
+/// [`crate::autorizacao::permitir_processo`].
+pub fn processos_de(autoridade: crate::autorizacao::Autoridade) -> usize {
+    com_escalonador(|e| {
+        e.fios
+            .iter()
+            .flatten()
+            .filter(|f| {
+                f.nome == "usuario" && f.estado != Estado::Terminado && f.autoridade == autoridade
+            })
+            .count()
     })
 }
 

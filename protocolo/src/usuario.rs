@@ -669,6 +669,11 @@ pub mod descricao {
         pub struct Descricao {
             pub titulo: String,
             pub elementos: Vec<Elemento>,
+            /// O campo que recebe as teclas agora: o identificador de um
+            /// elemento `campo` da descrição, na linha `foco`. É por ele
+            /// que o kernel sabe que recurso uma tecla edita, e confere o
+            /// arrendamento antes de entregá-la.
+            pub foco: Option<i64>,
         }
 
         impl Descricao {
@@ -688,7 +693,15 @@ pub mod descricao {
                     _ => return Err("a descricao nao comeca pela linha `janela`"),
                 };
                 let mut elementos = Vec::new();
+                let mut foco = None;
                 for linha in linhas {
+                    if let Some(id) = linha.strip_prefix("foco\t") {
+                        if foco.is_some() {
+                            return Err("mais de uma linha `foco`");
+                        }
+                        foco = Some(id.parse::<i64>().map_err(|_| "foco que nao e numero")?);
+                        continue;
+                    }
                     if elementos.len() == MAIS_ELEMENTOS {
                         return Err("elementos demais");
                     }
@@ -730,7 +743,21 @@ pub mod descricao {
                         valor,
                     });
                 }
-                Ok(Descricao { titulo, elementos })
+                // O foco é de um campo que a descrição tem: um foco num
+                // botão, ou num elemento que não existe, não diz que
+                // recurso a tecla edita.
+                if let Some(id) = foco
+                    && !elementos
+                        .iter()
+                        .any(|e: &Elemento| e.id == id && e.tipo == Tipo::Campo)
+                {
+                    return Err("foco que nao e um campo da descricao");
+                }
+                Ok(Descricao {
+                    titulo,
+                    elementos,
+                    foco,
+                })
             }
         }
 
@@ -755,6 +782,7 @@ pub mod descricao {
         pub struct Escritor {
             texto: String,
             elementos: usize,
+            foco: Option<i64>,
             erro: Option<&'static str>,
         }
 
@@ -764,6 +792,7 @@ pub mod descricao {
                 let mut e = Escritor {
                     texto: String::new(),
                     elementos: 0,
+                    foco: None,
                     erro: None,
                 };
                 e.texto.push_str("janela\t");
@@ -810,10 +839,20 @@ pub mod descricao {
                 self
             }
 
+            /// Declara o campo que recebe as teclas: o identificador de um
+            /// elemento `campo` já acrescentado ou ainda por acrescentar.
+            pub fn foco(&mut self, id: i64) -> &mut Escritor {
+                self.foco = Some(id);
+                self
+            }
+
             /// O texto pronto, ou o primeiro limite que ele passou.
-            pub fn terminar(self) -> Result<String, &'static str> {
+            pub fn terminar(mut self) -> Result<String, &'static str> {
                 if let Some(erro) = self.erro {
                     return Err(erro);
+                }
+                if let Some(id) = self.foco {
+                    let _ = write!(self.texto, "\nfoco\t{id}");
                 }
                 if self.texto.len() > MAIOR {
                     return Err("descricao grande demais");
@@ -885,6 +924,30 @@ mod testes {
         assert_eq!(d.elementos[0].moldura, r(10, 2, 16, 16));
         assert_eq!(d.elementos[1].valor.as_deref(), Some("linha 1\nlinha\\2"));
         assert_eq!(d.elementos[1].id, 2);
+    }
+
+    /// O foco vai e volta; sem ele, nenhum; e o leitor recusa o foco que
+    /// não é de um campo da descrição, ou repetido.
+    #[test]
+    fn o_foco_e_de_um_campo() {
+        let mut e = Escritor::nova("x");
+        e.elemento(Tipo::Botao, 1, r(0, 0, 1, 1), "b", "")
+            .elemento(Tipo::Campo, 2, r(0, 0, 1, 1), "nome", "")
+            .foco(2);
+        let texto = e.terminar().unwrap();
+        assert!(texto.ends_with("\nfoco\t2"));
+        assert_eq!(Descricao::ler(&texto).unwrap().foco, Some(2));
+        let mut sem = Escritor::nova("x");
+        sem.elemento(Tipo::Campo, 2, r(0, 0, 1, 1), "nome", "");
+        assert_eq!(Descricao::ler(&sem.terminar().unwrap()).unwrap().foco, None);
+        for ruim in [
+            "janela\tx\nbotao\t1\t0\t0\t1\t1\tb\nfoco\t1",
+            "janela\tx\ncampo\t2\t0\t0\t1\t1\tc\tv\nfoco\t9",
+            "janela\tx\ncampo\t2\t0\t0\t1\t1\tc\tv\nfoco\t2\nfoco\t2",
+            "janela\tx\ncampo\t2\t0\t0\t1\t1\tc\tv\nfoco\tdois",
+        ] {
+            assert!(Descricao::ler(ruim).is_err(), "{ruim:?}");
+        }
     }
 
     #[test]

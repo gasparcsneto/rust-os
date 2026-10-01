@@ -390,10 +390,54 @@ pub static COMANDOS: &[Command] = &[
                 obrigatorio: false,
                 descricao: "O valor novo, para `set_value`.",
             },
+            ParamSpec {
+                nome: "expect_version",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "A versao do campo que voce leu em `ui.tree`. Se ele mudou desde \
+                            entao, CONFLICT, e nada muda.",
+            },
         ],
         acesso: Acesso::Exige(Permissao::UiAct),
         recurso: Some("id"),
         handler: ui_act,
+    },
+    Command {
+        nome: "ui.claim",
+        resumo: "Arrenda um campo da arvore para a sua sessao: ninguem mais o edita ou confirma \
+                 ate voce soltar, o prazo vencer ou a sua sessao acabar. Editar um campo livre \
+                 ja o arrenda; confirmar pede o arrendamento. Sem preempcao: o campo de outro \
+                 e CONFLICT.",
+        params: &[
+            ParamSpec {
+                nome: "id",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: true,
+                descricao: "O id do campo, como `ui.tree` o publica.",
+            },
+            ParamSpec {
+                nome: "ttl_ms",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "O prazo, de 1000 a 300000 ms; 30000 se ausente. A atividade o renova.",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::UiAct),
+        recurso: Some("id"),
+        handler: ui_claim,
+    },
+    Command {
+        nome: "ui.release",
+        resumo: "Solta o arrendamento de um campo, se for seu.",
+        params: &[ParamSpec {
+            nome: "id",
+            tipo: TipoParam::Inteiro,
+            obrigatorio: true,
+            descricao: "O id do campo, como `ui.tree` o publica.",
+        }],
+        acesso: Acesso::Exige(Permissao::UiAct),
+        recurso: Some("id"),
+        handler: ui_release,
     },
     Command {
         nome: "disk.partitions",
@@ -1689,21 +1733,29 @@ fn keyboard_read(params: Json, w: &mut JsonWriter) -> fmt::Result {
     // O texto sai como string escrita aos pedaços: um caractere por vez, sem
     // um buffer intermediário. Montar a string antes exigiria um array do
     // tamanho do teto e, com ele, um truncamento que nada reportaria.
+    //
+    // Cada leitor tem o seu cursor no histórico — a autoridade de quem pede
+    // é o leitor —: dois agentes lendo não roubam um do outro, e cada um lê
+    // tudo o que foi digitado desde a última leitura dele.
     w.key("text")?;
     w.begin_str()?;
     let mut lidos = 0;
-    while lidos < max {
-        let Some(c) = crate::teclado::observar() else {
-            break;
-        };
-        w.push_char(c)?;
-        lidos += 1;
-    }
+    let mut escrita = Ok(());
+    let leitura =
+        crate::teclado::ler_para(crate::autorizacao::autoridade_atual(), max as usize, |c| {
+            if escrita.is_ok() {
+                escrita = w.push_char(c);
+                lidos += 1;
+            }
+        });
+    escrita?;
     w.end_str()?;
 
     w.field_u64("read", lidos)?;
     // Depois da leitura, e não antes: é o que sobrou, que é a pergunta útil.
-    w.field_u64("waiting", crate::teclado::esperando() as u64)?;
+    w.field_u64("waiting", leitura.esperando)?;
+    // O que saiu do anel antes de este leitor ler.
+    w.field_u64("missed", leitura.perdidas)?;
 
     // Quantos eventos o dispositivo entregou, onde há um que os conte.
     // Separa "ninguem digitou" de "chegou e nao virou caractere" — um codigo
@@ -1992,6 +2044,7 @@ fn ui_tree(_params: Json, w: &mut JsonWriter) -> fmt::Result {
         }
         w.key("value")?;
         crate::interpretador::com_valor(|v| w.str_value(v))?;
+        escrever_coordenacao(w, ui::ID_DA_LINHA_DE_COMANDO)?;
         // É o único elemento que recebe texto, e é para ele que o teclado vai.
         w.field_bool("focused", true)?;
         escrever_acoes(w, ui::ID_DA_LINHA_DE_COMANDO)?;
@@ -2179,6 +2232,9 @@ fn escrever_camada(w: &mut JsonWriter, c: crate::grafico::compositor::InfoCamada
         if let Some(v) = &e.valor {
             w.field_str("value", v)?;
         }
+        if e.tipo == crate::superficies::Tipo::Campo {
+            escrever_coordenacao(w, id)?;
+        }
         escrever_acoes(w, id)?;
         w.key("children")?;
         w.begin_array()?;
@@ -2238,11 +2294,13 @@ fn ui_act(params: Json, w: &mut JsonWriter) -> fmt::Result {
     };
 
     let id = u32::try_from(id).unwrap_or(0);
-    match crate::ui::agir(
+    let esperada = params.member("expect_version").and_then(|v| v.as_u64());
+    match crate::ui::agir_com_versao(
         id,
         acao,
         valor,
         crate::ui::Origem::Agente(super::sessao::atual()),
+        esperada,
     ) {
         Ok(efeito) => {
             w.field_bool("ok", true)?;
@@ -2250,10 +2308,21 @@ fn ui_act(params: Json, w: &mut JsonWriter) -> fmt::Result {
                 w.field_str("executed", &comando)?;
             }
         }
-        Err(motivo) => {
+        Err(recusa) => {
             w.field_bool("ok", false)?;
-            w.field_str("error", motivo)?;
+            if let Some(codigo) = recusa.codigo {
+                w.field_str("code", codigo.nome())?;
+            }
+            w.field_str("error", recusa.motivo)?;
         }
+    }
+    // A versão do campo depois da ação: a que o próximo `expect_version`
+    // diz.
+    if crate::ui::e_campo(id) {
+        w.field_u64(
+            "version",
+            crate::coordenacao::estado(&crate::coordenacao::recurso(id)).versao,
+        )?;
     }
     // Depois da ação: é a revisão da árvore que o agente precisa ler de novo.
     w.field_u64("revision", crate::ui::revisao())?;
@@ -3039,4 +3108,101 @@ fn log_tail(params: Json, w: &mut JsonWriter) -> fmt::Result {
         Some(e) => Err(e),
         None => Ok(()),
     }
+}
+
+/// A versão de um campo e quem o tem arrendado agora — `null` se ninguém.
+/// É o que um agente lê antes de editar: a versão vai no `expect_version`,
+/// e o arrendamento diz se o campo é de outro.
+fn escrever_coordenacao(w: &mut JsonWriter, id: u32) -> fmt::Result {
+    let e = crate::coordenacao::estado(&crate::coordenacao::recurso(id));
+    w.field_u64("version", e.versao)?;
+    w.key("lease")?;
+    match &e.arrendamento {
+        Some(a) => escrever_arrendamento(w, a),
+        None => w.null_value(),
+    }
+}
+
+/// O arrendamento de um campo, como o relatório o escreve.
+fn escrever_arrendamento(
+    w: &mut JsonWriter,
+    a: &politica::arrendamento::Arrendamento,
+) -> fmt::Result {
+    let (tipo, quem) = crate::coordenacao::descrever(&a.titular);
+    w.begin_object()?;
+    w.field_str("holder", tipo)?;
+    w.field_str("by", &quem)?;
+    w.field_u64("since_ms", a.desde_ms)?;
+    w.field_u64("expires_ms", a.expira_ms)?;
+    w.end_object()
+}
+
+/// O campo de `ui.claim` e `ui.release`: o elemento, se é um campo.
+fn campo_do_pedido(id: Option<u64>) -> Option<u32> {
+    let id = u32::try_from(id?).ok()?;
+    (crate::ui::existe(id) && crate::ui::e_campo(id)).then_some(id)
+}
+
+fn ui_claim(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let Some(id) = campo_do_pedido(params.member("id").and_then(|v| v.as_u64())) else {
+        w.field_bool("ok", false)?;
+        return w
+            .field_str("error", "nao ha campo com este id")
+            .and_then(|()| w.end_object());
+    };
+    let Some(titular) = crate::coordenacao::titular_do_agente(super::sessao::atual()) else {
+        w.field_bool("ok", false)?;
+        return w
+            .field_str("error", "sessao sem aperto")
+            .and_then(|()| w.end_object());
+    };
+    let prazo = params
+        .member("ttl_ms")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(crate::coordenacao::PRAZO_PADRAO_MS);
+    let recurso = crate::coordenacao::recurso(id);
+    match crate::coordenacao::tomar(&recurso, titular, prazo) {
+        Ok(a) => {
+            w.field_bool("ok", true)?;
+            w.key("lease")?;
+            escrever_arrendamento(w, &a)?;
+        }
+        Err(codigo) => {
+            w.field_bool("ok", false)?;
+            w.field_str("code", codigo.nome())?;
+            w.field_str("error", "outro titular tem o arrendamento")?;
+            if let Some(a) = crate::coordenacao::estado(&recurso).arrendamento {
+                w.key("lease")?;
+                escrever_arrendamento(w, &a)?;
+            }
+        }
+    }
+    w.field_u64("version", crate::coordenacao::estado(&recurso).versao)?;
+    w.end_object()
+}
+
+fn ui_release(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let Some(id) = campo_do_pedido(params.member("id").and_then(|v| v.as_u64())) else {
+        w.field_bool("ok", false)?;
+        return w
+            .field_str("error", "nao ha campo com este id")
+            .and_then(|()| w.end_object());
+    };
+    let Some(titular) = crate::coordenacao::titular_do_agente(super::sessao::atual()) else {
+        w.field_bool("ok", false)?;
+        return w
+            .field_str("error", "sessao sem aperto")
+            .and_then(|()| w.end_object());
+    };
+    match crate::coordenacao::soltar(&crate::coordenacao::recurso(id), titular) {
+        Ok(()) => w.field_bool("ok", true)?,
+        Err(codigo) => {
+            w.field_bool("ok", false)?;
+            w.field_str("code", codigo.nome())?;
+            w.field_str("error", "o arrendamento nao e seu")?;
+        }
+    }
+    w.end_object()
 }

@@ -25,6 +25,11 @@ pub enum Codigo {
     InvalidArgument = 7,
     /// Permitida, e falhou ao executar.
     Error = 8,
+    /// O recurso mudou, ou outro titular o tem: a versão esperada não é a
+    /// de agora, ou o arrendamento é de outro. Nada mudou.
+    Conflict = 9,
+    /// A operação pede o arrendamento do recurso, e quem pediu não o tem.
+    DenyLease = 10,
 }
 
 impl Codigo {
@@ -40,11 +45,13 @@ impl Codigo {
             Codigo::RateLimit => "RATE_LIMIT",
             Codigo::InvalidArgument => "INVALID_ARGUMENT",
             Codigo::Error => "ERROR",
+            Codigo::Conflict => "CONFLICT",
+            Codigo::DenyLease => "DENY_LEASE",
         }
     }
 
     /// Todos, na ordem do número.
-    pub const TODOS: [Codigo; 9] = [
+    pub const TODOS: [Codigo; 11] = [
         Codigo::Allow,
         Codigo::DenyNotAuthenticated,
         Codigo::DenyRole,
@@ -54,6 +61,8 @@ impl Codigo {
         Codigo::RateLimit,
         Codigo::InvalidArgument,
         Codigo::Error,
+        Codigo::Conflict,
+        Codigo::DenyLease,
     ];
 
     /// O código de um nome, como [`Codigo::nome`] o escreve: o caminho de

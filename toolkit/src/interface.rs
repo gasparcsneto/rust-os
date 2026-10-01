@@ -23,6 +23,10 @@ use crate::arvore::{self, Entrada, Indice, Resposta, Widget, com_widget_mut, per
 pub struct Interface {
     raiz: Box<dyn Widget>,
     foco: Option<Indice>,
+    /// O campo que recebe as teclas sempre, se a janela as manda a um campo
+    /// só, sem o foco do toolkit — o Terminal, que as escreve no
+    /// pseudo-terminal e as vê voltar na linha de comando.
+    campo_das_teclas: Option<Indice>,
 }
 
 impl Interface {
@@ -31,6 +35,7 @@ impl Interface {
         let mut i = Interface {
             raiz: Box::new(raiz),
             foco: None,
+            campo_das_teclas: None,
         };
         i.foco = i.focaveis().first().copied();
         i
@@ -48,6 +53,30 @@ impl Interface {
     /// O widget com o foco, se algum.
     pub fn foco(&self) -> Option<Indice> {
         self.foco
+    }
+
+    /// Diz que as teclas desta janela vão sempre ao campo `indice` — ver
+    /// [`Interface::campo_com_as_teclas`].
+    pub fn com_campo_das_teclas(mut self, indice: Indice) -> Interface {
+        self.campo_das_teclas = Some(indice);
+        self
+    }
+
+    /// O campo que recebe as teclas agora: o fixado pela janela, ou o
+    /// widget com o foco — se ele for um campo. É o que a descrição declara
+    /// na linha `foco`, e por onde o kernel sabe que recurso uma tecla
+    /// edita antes de entregá-la.
+    pub fn campo_com_as_teclas(&self) -> Option<Indice> {
+        let indice = self.campo_das_teclas.or(self.foco)?;
+        let mut e_campo = false;
+        percorrer(self.raiz.as_ref(), Retangulo::default(), &mut |i, w, _| {
+            if i == indice {
+                e_campo = w
+                    .semantica()
+                    .is_some_and(|s| s.tipo == protocolo::usuario::descricao::Tipo::Campo);
+            }
+        });
+        e_campo.then_some(indice)
     }
 
     /// Os widgets que recebem o foco, na ordem do Tab — a da árvore.
@@ -111,6 +140,9 @@ impl Interface {
     /// `base + índice`.
     pub fn descrever(&self, area: Retangulo, base: i64, escritor: &mut Escritor) {
         arvore::descrever(self.raiz.as_ref(), area, base, escritor);
+        if let Some(campo) = self.campo_com_as_teclas() {
+            escritor.foco(base + campo as i64);
+        }
     }
 
     /// O botão do ponteiro apertado em `(x, y)`, nas coordenadas de `area`.

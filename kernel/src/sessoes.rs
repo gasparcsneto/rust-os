@@ -84,6 +84,10 @@ pub fn esquecer(p: u8) -> Option<Identificada> {
         (IDENTIDADES.lock()[i].take(), TRANSPORTES.lock()[i].take())
     });
     drop(transporte);
+    // A sessão acabou: os arrendamentos dela também, na hora.
+    if identidade.is_some() {
+        crate::coordenacao::invalidar_sessao_do_canal(p, "a sessao do canal acabou");
+    }
     identidade
 }
 

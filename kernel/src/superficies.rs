@@ -468,6 +468,38 @@ pub fn destino_da_camada(camada: u32) -> Option<Destino> {
     })
 }
 
+/// A janela com o foco, para quem decide uma tecla: para onde ela vai, de
+/// quem é a janela, e o campo que a descrição declara que recebe as teclas
+/// — o índice dele na descrição, o identificador do processo e o valor.
+pub struct JanelaComFoco {
+    pub destino: Destino,
+    pub dono: u64,
+    pub camada: u32,
+    pub campo: Option<(usize, alloc::string::String)>,
+}
+
+/// A janela com o foco, se alguma tem.
+pub fn janela_com_foco() -> Option<JanelaComFoco> {
+    let foco = FOCO.load(Ordering::Relaxed);
+    if foco == 0 {
+        return None;
+    }
+    com_vagas(|vagas| {
+        let v = vagas.iter().flatten().find(|v| v.geracao == foco)?;
+        let campo = v.descricao.as_ref().and_then(|d| {
+            let id = d.foco?;
+            let i = d.elementos.iter().position(|e| e.id == id)?;
+            Some((i, d.elementos[i].valor.clone().unwrap_or_default()))
+        });
+        Some(JanelaComFoco {
+            destino: v.destino(),
+            dono: v.dono,
+            camada: v.camada.id(),
+            campo,
+        })
+    })
+}
+
 /// Para quem vão as teclas: a superfície com o foco, se alguma tem.
 pub fn destino_do_foco() -> Option<Destino> {
     let foco = FOCO.load(Ordering::Relaxed);
@@ -629,9 +661,9 @@ fn soltar_o_foco(geracao: u64) {
     let _ = FOCO.compare_exchange(geracao, 0, Ordering::Relaxed, Ordering::Relaxed);
 }
 
-/// Alguma superfície tem o foco do teclado? Para a suíte: o kernel pergunta
-/// quem tem, com [`destino_do_foco`].
-#[cfg(feature = "modo-teste")]
+/// Alguma superfície tem o foco do teclado? É o que o tratador do teclado
+/// pergunta, sem trava: se tem, a tecla espera a tarefa do interpretador,
+/// que decide e entrega — ver [`crate::teclado`].
 pub fn foco_ativo() -> bool {
     FOCO.load(Ordering::Relaxed) != 0
 }

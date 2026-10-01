@@ -24,6 +24,9 @@
 //!   limite" seria um curinga escrito pela ausência. O alcance inteiro se
 //!   escreve: `recurso sistema fs.read /`.
 //! - `taxa <papel> <por segundo> <rajada>`: o balde de pedidos do papel.
+//! - `processos <papel> <quantos>`: a cota de processos vivos de cada
+//!   titular do papel — uma sessão de agente, uma de pessoa, o sistema —,
+//!   de 1 a 64; sem a linha, 4.
 //! - `apertos <quantos> <janela em ms>`: apertos de mão por porta.
 //! - `serial <papel>`: o papel da sessão 0. Obrigatória.
 //! - `local <papel>`: o papel da autoridade local — os processos do
@@ -61,6 +64,13 @@ pub const TAXA_PADRAO: Taxa = Taxa {
     rajada: 20,
 };
 
+/// Quantos processos vivos um titular de um papel que não declara a sua
+/// cota pode ter.
+pub const PROCESSOS_PADRAO: u32 = 4;
+
+/// A maior cota de processos que a política aceita.
+pub const MAIS_PROCESSOS: u32 = 64;
+
 /// O limite de apertos de mão por porta.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Apertos {
@@ -85,6 +95,9 @@ pub struct Papel {
     /// Os prefixos a que uma permissão de caminho está limitada.
     pub recursos: BTreeMap<Permissao, Vec<String>>,
     pub taxa: Taxa,
+    /// Quantos processos vivos cada titular do papel — uma sessão de agente,
+    /// uma de pessoa, o sistema — pode ter ao mesmo tempo.
+    pub processos: u32,
     /// As diretas mais as não sensíveis dos incluídos. Calculadas pela
     /// validação.
     permissoes: BTreeSet<Permissao>,
@@ -98,6 +111,7 @@ impl Papel {
             diretas: Vec::new(),
             recursos: BTreeMap::new(),
             taxa: TAXA_PADRAO,
+            processos: PROCESSOS_PADRAO,
             permissoes: BTreeSet::new(),
         }
     }
@@ -402,6 +416,17 @@ impl Politica {
                     rajada,
                 };
             }
+            "processos" => {
+                let nome = partes.next().ok_or(erro(ErroTipo::Sintaxe))?;
+                let quantos = numero(partes.next(), n)?;
+                if partes.next().is_some() || quantos == 0 || quantos > MAIS_PROCESSOS {
+                    return Err(erro(ErroTipo::Sintaxe));
+                }
+                let papel = self
+                    .papel_mut(nome)
+                    .ok_or(erro(ErroTipo::PapelDesconhecido(nome.to_string())))?;
+                papel.processos = quantos;
+            }
             "apertos" => {
                 let quantos = numero(partes.next(), n)?;
                 let janela = numero(partes.next(), n)?;
@@ -580,10 +605,10 @@ impl Politica {
     ) -> Result<Politica, Recusa> {
         let linha = linha.split('#').next().unwrap_or("").trim();
         let palavra = linha.split_ascii_whitespace().next().unwrap_or("");
-        if !matches!(palavra, "papel" | "recurso" | "taxa") {
+        if !matches!(palavra, "papel" | "recurso" | "taxa" | "processos") {
             return Err(Recusa::Proibida(
-                "policy.write muda papel, recurso ou taxa; a serial muda por policy.assign, e o \
-                 papel local e os apertos so pela imagem"
+                "policy.write muda papel, recurso, taxa ou processos; a serial muda por \
+                 policy.assign, e o papel local e os apertos so pela imagem"
                     .to_string(),
             ));
         }
@@ -682,6 +707,36 @@ fn numero(texto: Option<&str>, n: usize) -> Result<u32, Erro> {
 #[cfg(test)]
 mod testes {
     use super::*;
+
+    /// A cota de processos: a da linha, a padrão sem ela, e a linha fora da
+    /// faixa recusada; e `policy.write` a muda.
+    #[test]
+    fn a_cota_de_processos() {
+        let p = Politica::ler(crate::PADRAO).unwrap();
+        assert_eq!(p.papel("sistema").unwrap().processos, 32);
+        assert_eq!(p.papel("observador").unwrap().processos, 2);
+        let sem = crate::PADRAO.replace("processos observador 2\n", "");
+        assert_eq!(
+            Politica::ler(&sem)
+                .unwrap()
+                .papel("observador")
+                .unwrap()
+                .processos,
+            PROCESSOS_PADRAO
+        );
+        for ruim in [
+            "processos observador 0",
+            "processos observador 65",
+            "processos fantasma 2",
+        ] {
+            let texto = alloc::format!("{}\n{ruim}\n", crate::PADRAO);
+            assert!(Politica::ler(&texto).is_err(), "{ruim}");
+        }
+        let nova = p
+            .com_linha("processos observador 3", "administrador", &[])
+            .unwrap();
+        assert_eq!(nova.papel("observador").unwrap().processos, 3);
+    }
 
     /// A decisão fecha sozinha: um papel com permissão de caminho e sem
     /// alcance — que a validação não deixa existir — não alcança nada. É a

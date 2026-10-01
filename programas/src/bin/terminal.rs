@@ -2,15 +2,13 @@
 //!
 //! # O que ele é
 //!
-//! Uma [`Janela`] do runtime com uma grade de texto dentro, e o
+//! Uma [`Janela`] do runtime com uma grade de texto dentro, e um
 //! pseudo-terminal do kernel do outro lado — ver
-//! [`TERMINAL`](protocolo::usuario::numero::TERMINAL). O que se digita na
-//! janela é escrito no pseudo-terminal, e chega ao interpretador como se
-//! tivesse sido digitado na máquina; o que o kernel imprime — o eco, as
-//! respostas, o log — é lido do pseudo-terminal e desenhado na grade.
-//!
-//! Não há um segundo interpretador: o Terminal é outra janela sobre o mesmo.
-//! O console do kernel continua embaixo, desenhando o mesmo texto: ele é o
+//! [`TERMINAL`](protocolo::usuario::numero::TERMINAL). O pseudo-terminal é
+//! um console do interpretador, só deste Terminal: com a linha, o login e a
+//! sessão dele. O que se digita na janela é escrito ali; o que o console
+//! imprime — o eco, o prompt, as respostas — é lido dali e desenhado na
+//! grade. O console físico continua embaixo, com o log do kernel: ele é o
 //! fundo, e a reserva — o que se vê no boot, sem Terminal, e na falha.
 //!
 //! # Uma espera só
@@ -217,7 +215,11 @@ fn principal() -> i64 {
 
     let grade = AreaDeTexto::nova("terminal", COLUNAS, LINHAS)
         .com_linha_de_comando(LinhaDeComando::nova("linha de comando", PROMPT, DIGITAR));
-    let mut janela = match Janela::com_interface("Terminal", Interface::nova(grade), BASE, X, Y) {
+    // As teclas vão sempre à linha de comando — pelo pseudo-terminal —, e a
+    // descrição o declara: é o campo cujo arrendamento o kernel confere
+    // antes de entregar uma tecla.
+    let interface = Interface::nova(grade).com_campo_das_teclas(LINHA);
+    let mut janela = match Janela::com_interface("Terminal", interface, BASE, X, Y) {
         Ok(j) => j,
         Err(e) => {
             escreverln!("terminal: sem janela: {}", e);
@@ -234,7 +236,7 @@ fn principal() -> i64 {
         botoes: 0,
         pendente: String::new(),
     };
-    // O que o kernel já tinha impresso — o boot inteiro, se couber no anel.
+    // O que o console já imprimiu: o convite para entrar.
     t.ler_a_saida();
     t.janela.atualizar(GRADE);
     if t.janela.mostrar().is_err() || t.janela.superficie().focar().is_err() {
