@@ -42,6 +42,61 @@ pub static COMANDOS: &[Command] = &[
         handler: agent_sessions,
     },
     Command {
+        nome: "agent.registry",
+        resumo: "Quem pode entrar pelas portas: a chave publica do Duke e cada agente \
+                 registrado, com o nome, a chave e de onde veio (a imagem, ou um registro \
+                 administrativo, que vale ate o proximo boot).",
+        params: &[],
+        handler: agent_registry,
+    },
+    Command {
+        nome: "admin.challenge",
+        resumo: "Um desafio para uma operacao administrativa nesta sessao: numero, nonce e \
+                 chave efemera. Vale uma tentativa, por pouco tempo; pedir outro descarta \
+                 o anterior.",
+        params: &[],
+        handler: admin_challenge,
+    },
+    Command {
+        nome: "admin.execute",
+        resumo: "Executa uma operacao administrativa com a prova de um administrador sobre \
+                 o desafio, a sessao, o comando e o texto exato dos parametros. Operacoes: \
+                 agent.register.",
+        params: &[
+            ParamSpec {
+                nome: "challenge",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: true,
+                descricao: "O numero do desafio, de admin.challenge",
+            },
+            ParamSpec {
+                nome: "command",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "A operacao administrativa",
+            },
+            ParamSpec {
+                nome: "params",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "Os parametros da operacao, como texto JSON: o texto exato coberto pela prova",
+            },
+            ParamSpec {
+                nome: "admin",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "A chave publica do administrador, em hex",
+            },
+            ParamSpec {
+                nome: "proof",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "A prova, em hex",
+            },
+        ],
+        handler: admin_execute,
+    },
+    Command {
         nome: "agent.describe",
         resumo: "Lista todos os comandos disponiveis com seus parametros. \
                  Chame isto primeiro para descobrir a superficie do sistema.",
@@ -405,6 +460,81 @@ fn agent_session(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.begin_object()?;
     w.field_u64("session", sessao as u64)?;
     w.field_str("transport", canal.transporte())?;
+    escrever_identidade(w, sessao)?;
+    w.end_object()
+}
+
+/// Quem está numa sessão: numa porta, o agente que provou a chave; na
+/// serial, ninguém — ela é aberta, o canal de emergência.
+fn escrever_identidade(w: &mut JsonWriter, sessao: u8) -> fmt::Result {
+    if sessao == super::sessao::SERIAL {
+        w.field_bool("authenticated", false)?;
+        return w.field_bool("emergency", true);
+    }
+    match crate::sessoes::identidade(sessao) {
+        Some(id) => {
+            w.field_bool("authenticated", true)?;
+            w.field_str("agent", &id.nome)?;
+            w.field_str("key", &sigilo::hex(&id.chave))?;
+            w.field_u64("since_ms", id.desde_ms)
+        }
+        None => w.field_bool("authenticated", false),
+    }
+}
+
+fn admin_challenge(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    super::administracao::desafiar(w)
+}
+
+/// Os parâmetros são lidos aqui, como os de todo comando; quem confere a
+/// prova e executa é [`super::administracao`].
+fn admin_execute(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let mut buffer = [0u8; super::administracao::MAIORES_PARAMETROS];
+    let pedido = super::administracao::Pedido {
+        desafio: params.member("challenge").and_then(|v| v.as_u64()),
+        comando: params.member("command").and_then(|v| v.as_str()),
+        parametros: params
+            .member("params")
+            .and_then(|v| v.desescapar_em(&mut buffer)),
+        administrador: params
+            .member("admin")
+            .and_then(|v| v.as_str())
+            .and_then(sigilo::de_hex),
+        prova: params
+            .member("proof")
+            .and_then(|v| v.as_str())
+            .and_then(sigilo::de_hex),
+    };
+    super::administracao::executar(pedido, w)
+}
+
+fn agent_registry(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    w.key("duke_key")?;
+    match crate::identidade::publica_do_duke() {
+        Some(k) => w.str_value(&sigilo::hex(&k))?,
+        None => w.null_value()?,
+    }
+    w.key("agents")?;
+    w.begin_array()?;
+    for a in crate::identidade::agentes() {
+        w.begin_object()?;
+        w.field_str("name", &a.nome)?;
+        w.field_str("key", &sigilo::hex(&a.chave))?;
+        w.field_str("origin", a.origem.como_str())?;
+        w.end_object()?;
+    }
+    w.end_array()?;
+    w.field_u64(
+        "administrators",
+        crate::identidade::quantos_administradores() as u64,
+    )?;
+    w.key("admin_operations")?;
+    w.begin_array()?;
+    for (nome, _) in super::administracao::operacoes() {
+        w.str_value(nome)?;
+    }
+    w.end_array()?;
     w.end_object()
 }
 
@@ -417,6 +547,8 @@ fn agent_sessions(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.begin_object()?;
     w.field_u64("session", super::sessao::SERIAL as u64)?;
     w.field_str("transport", "serial")?;
+    escrever_identidade(w, super::sessao::SERIAL)?;
+    w.field_u64("lost_in", super::sessao::Canal::Serial.perdidos())?;
     w.end_object()?;
     for p in 1..=console::PORTAS {
         if !console::anunciada(p) {
@@ -432,9 +564,13 @@ fn agent_sessions(_params: Json, w: &mut JsonWriter) -> fmt::Result {
         w.field_u64("connections", console::geracao(p))?;
         w.field_u64("lost_in", console::perdidos(p))?;
         w.field_u64("lost_out", console::perdidos_na_saida(p))?;
+        escrever_identidade(w, p)?;
         w.end_object()?;
     }
     w.end_array()?;
+    let (recusados, encerradas) = crate::sessoes::contadores();
+    w.field_u64("handshakes_refused", recusados)?;
+    w.field_u64("sessions_ended", encerradas)?;
     let (recebidos, enviados) = console::trafego();
     w.field_u64("console_bytes_in", recebidos)?;
     w.field_u64("console_bytes_out", enviados)?;
@@ -557,6 +693,23 @@ fn system_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.begin_object()?;
     w.field_str("mechanism", "guard-page")?;
     w.field_str("fault", crate::arch::falha_de_estouro_de_pilha())?;
+    w.end_object()?;
+
+    // De onde vêm as chaves efêmeras. Sem fonte, o gerador não é semeado e
+    // as portas de agente recusam o aperto de mão: este campo é o que diz
+    // por quê, de dentro da serial, que continua aberta.
+    w.key("entropy")?;
+    w.begin_object()?;
+    w.field_str("source", "virtio-rng")?;
+    w.field_bool("present", crate::virtio::entropia::presente())?;
+    w.field_bool("generator_seeded", crate::aleatorio::semeado())?;
+    match crate::virtio::entropia::entregues() {
+        Some(n) => w.field_u64("bytes_delivered", n)?,
+        None => {
+            w.key("bytes_delivered")?;
+            w.null_value()?
+        }
+    }
     w.end_object()?;
 
     w.end_object()

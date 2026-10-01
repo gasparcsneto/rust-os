@@ -76,6 +76,8 @@ pub enum Erro {
     GrandeDemais,
     /// O dispositivo por baixo recusou, ou o que veio dele não faz sentido.
     DoDispositivo,
+    /// O caminho é de um segredo do kernel — ver [`DIRETORIO_RESERVADO`].
+    Reservado,
 }
 
 impl Erro {
@@ -90,6 +92,7 @@ impl Erro {
             Erro::JaMontado => "ja ha algo montado neste ponto",
             Erro::GrandeDemais => "o arquivo nao cabe no teto de leitura",
             Erro::DoDispositivo => "o dispositivo recusou ou devolveu algo sem sentido",
+            Erro::Reservado => "reservado ao kernel",
         }
     }
 }
@@ -208,13 +211,47 @@ pub fn montar(
     })
 }
 
+/// Onde moram os segredos do kernel: a chave privada do Duke.
+///
+/// # Por que o VFS recusa, e não quem pede
+///
+/// Três caminhos leem arquivos: o `open` dos processos, o `executar`, e os
+/// comandos `fs.*` do agente. Uma conferência em cada um seria três lugares
+/// para alguém esquecer o quarto. Aqui ela fica na única porta por onde os
+/// três passam, [`resolver`]: o que está abaixo deste diretório não é
+/// alcançável por caminho nenhum, e o kernel lê o que precisa por
+/// [`ler_segredo`], que existe só para isso.
+///
+/// O disco é de quem tem a imagem, e quem tem a imagem tem a chave — é a
+/// mesma condição de um servidor e o arquivo da chave dele. O que esta
+/// recusa garante é outra coisa: que um processo, ou um agente com acesso ao
+/// `fs.read`, não a leia de dentro da máquina.
+pub const DIRETORIO_RESERVADO: &str = "/etc/duke/privado";
+
+/// Se um caminho já normalizado é do diretório reservado.
+fn reservado(normalizado: &str) -> bool {
+    normalizado
+        .strip_prefix(DIRETORIO_RESERVADO)
+        .is_some_and(|resto| resto.is_empty() || resto.starts_with('/'))
+}
+
 /// Um caminho absoluto sem barras repetidas nem barra final.
+///
+/// Um `..` é recusado, e não resolvido. O Btrfs não guarda `..` — o pai é uma
+/// conta do VFS no Linux —, então hoje ele já não levaria a lugar nenhum; mas
+/// a conferência do [`DIRETORIO_RESERVADO`] olha o caminho **escrito**, e só
+/// é sólida se o caminho escrito for o caminho percorrido. Com `..`
+/// aceito, `/etc/x/../duke/privado` dependeria de um detalhe de cada sistema
+/// de arquivos para continuar fechado.
 fn normalizar(caminho: &str) -> Result<String, Erro> {
     if !caminho.starts_with('/') {
         return Err(Erro::CaminhoInvalido);
     }
     let mut saida = String::from("/");
     for parte in caminho.split('/').filter(|p| !p.is_empty() && *p != ".") {
+        if parte == ".." {
+            return Err(Erro::CaminhoInvalido);
+        }
         if saida.len() > 1 {
             saida.push('/');
         }
@@ -253,7 +290,15 @@ fn dona<'c>(montagens: &[Montagem], caminho: &'c str) -> Option<(usize, &'c str)
 /// link simbólico para seguir, nem diretório de trabalho para caminhos
 /// relativos. Um caminho precisa ser absoluto.
 pub fn resolver(caminho: &str) -> Result<Vnode, Erro> {
+    resolver_como(caminho, false)
+}
+
+/// [`resolver`], com o diretório reservado aberto ou não.
+fn resolver_como(caminho: &str, do_kernel: bool) -> Result<Vnode, Erro> {
     let caminho = normalizar(caminho)?;
+    if !do_kernel && reservado(&caminho) {
+        return Err(Erro::Reservado);
+    }
 
     crate::arch::sem_interrupcoes(|| {
         let montagens = MONTAGENS.lock();
@@ -323,7 +368,22 @@ pub fn ler_em(vnode: &Vnode, deslocamento: u64, destino: &mut [u8]) -> Result<us
 /// vez: um ELF é conferido campo a campo antes de virar processo, e conferir
 /// por pedaços exigiria guardar estado entre as leituras.
 pub fn ler_tudo(caminho: &str) -> Result<Vec<u8>, Erro> {
-    let vnode = resolver(caminho)?;
+    ler_vnode(resolver(caminho)?)
+}
+
+/// Lê um segredo do kernel, de dentro do [`DIRETORIO_RESERVADO`].
+///
+/// Só aceita caminhos de lá: é a única coisa que ela faz que [`ler_tudo`]
+/// não faz, e assim ela não vira um `ler_tudo` sem conferência para quem
+/// estiver com pressa.
+pub fn ler_segredo(caminho: &str) -> Result<Vec<u8>, Erro> {
+    if !reservado(&normalizar(caminho)?) {
+        return Err(Erro::CaminhoInvalido);
+    }
+    ler_vnode(resolver_como(caminho, true)?)
+}
+
+fn ler_vnode(vnode: Vnode) -> Result<Vec<u8>, Erro> {
     if vnode.no.tipo != Tipo::Arquivo {
         return Err(Erro::NaoEhArquivo);
     }

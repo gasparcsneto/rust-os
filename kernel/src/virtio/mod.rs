@@ -40,9 +40,11 @@
 //! - [`teclado`]: o teclado do ARM, por `virtio-input`.
 //! - [`gpu`]: o adaptador de vídeo, que só mostra o que se manda mostrar.
 //! - [`console`]: o canal local dos agentes, uma porta por agente.
+//! - [`entropia`]: a fonte de bytes aleatórios, pelo `virtio-rng`.
 
 pub mod blk;
 pub mod console;
+pub mod entropia;
 pub mod fila;
 pub mod gpu;
 pub mod net;
@@ -118,6 +120,7 @@ const NOME_REDE: u32 = 2;
 const NOME_TECLADO: u32 = 3;
 const NOME_VIDEO: u32 = 4;
 const NOME_CONSOLE: u32 = 5;
+const NOME_ENTROPIA: u32 = 6;
 
 fn nome_de(codigo: u32) -> &'static str {
     match codigo {
@@ -126,6 +129,7 @@ fn nome_de(codigo: u32) -> &'static str {
         NOME_TECLADO => "teclado",
         NOME_VIDEO => "video",
         NOME_CONSOLE => "console",
+        NOME_ENTROPIA => "entropia",
         _ => "?",
     }
 }

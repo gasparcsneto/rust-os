@@ -542,12 +542,80 @@ fn build(arch: Arquitetura, release: bool, modo_teste: bool) -> Result<Artefato,
             // incondicional porque `test`, `fumaca` e `run` compilam binários
             // diferentes, e bootar o errado dá um resultado que não é sobre o
             // que se pediu.
+            conferir_sem_simd(&elf)?;
             let efi = build_do_iniciador(arch, release)?;
             let disco = disco_de_testes()?;
             instalar_iniciador(arch, &disco, &efi, &elf)?;
             Ok(Artefato::Disco(disco))
         }
     }
+}
+
+/// Confere que o kernel do x86 não usa registrador de SIMD nenhum.
+///
+/// # Por que é preciso conferir
+///
+/// Os registradores `xmm`, `ymm` e `zmm` são do processo que estava rodando:
+/// este kernel não os salva ao entrar, e uma instrução que os use dentro do
+/// kernel corrompe o estado de quem foi interrompido — sem erro, só números
+/// errados num programa que nem sabia que tinha sido interrompido.
+///
+/// O alvo `x86_64-unknown-none` impede o compilador de gerar SIMD por conta
+/// própria. O que ele não impede é o código que **pede** SIMD, função a
+/// função, depois de perguntar ao processador — e as primitivas do canal
+/// seguro fazem isso. Três opções em `kernel/.cargo/config.toml` desligam
+/// esse caminho.
+///
+/// # O que foi medido, e o que não
+///
+/// Tirar as opções hoje não chega a pôr SIMD no binário: dois dos pacotes
+/// deixam de compilar para este alvo, e o terceiro compila sem gerar — ver o
+/// `config.toml`. O defeito que esta conferência pega é o de amanhã: uma
+/// versão nova de um destes pacotes, ou um pacote novo, que compile e gere.
+/// Que ela o pega foi medido de outro jeito: uma instrução `pxor xmm0`
+/// injetada à mão em `aleatorio::chave` fez o build parar, com a função e a
+/// instrução no erro.
+///
+/// Só o x86. No ARM o alvo `-softfloat` não deixa o NEON existir nem em
+/// código que o peça: a função não compila.
+fn conferir_sem_simd(elf: &Path) -> Result<(), String> {
+    let objdump = ferramenta_llvm("llvm-objdump")?;
+    let saida = Command::new(&objdump)
+        .args(["-d", "--no-show-raw-insn"])
+        .arg(elf)
+        .output()
+        .map_err(|e| format!("não foi possível invocar o llvm-objdump: {e}"))?;
+    if !saida.status.success() {
+        return Err(format!(
+            "llvm-objdump falhou: {}",
+            String::from_utf8_lossy(&saida.stderr)
+        ));
+    }
+    let texto = String::from_utf8_lossy(&saida.stdout);
+    let mut funcao = "";
+    let mut achados: Vec<String> = Vec::new();
+    let mut total = 0usize;
+    for linha in texto.lines() {
+        if linha.ends_with(">:") {
+            funcao = linha;
+            continue;
+        }
+        if ["%xmm", "%ymm", "%zmm"].iter().any(|r| linha.contains(r)) {
+            total += 1;
+            if achados.len() < 5 {
+                achados.push(format!("{funcao}\n      {}", linha.trim()));
+            }
+        }
+    }
+    if total > 0 {
+        return Err(format!(
+            "o kernel usa registradores de SIMD em {total} instrução(ões) — os de um processo \
+             interrompido, que este kernel não salva. As primeiras:\n  {}\n\
+             Confira as opções de backend em `kernel/.cargo/config.toml`.",
+            achados.join("\n  ")
+        ));
+    }
+    Ok(())
 }
 
 /// Encontra o `llvm-objcopy` que acompanha o toolchain Rust.
@@ -2450,6 +2518,7 @@ fn conferir_arvore_do_readme() -> Result<ExitCode, String> {
         "tipografia/src",
         "aparencia/src",
         "toolkit/src",
+        "sigilo/src",
         "programas/src",
         "xtask/src",
     ] {
@@ -2702,6 +2771,7 @@ fn conferir_blocos_unsafe() -> Result<ExitCode, String> {
         "tipografia/src",
         "aparencia/src",
         "toolkit/src",
+        "sigilo/src",
         "programas/src",
     ] {
         percorrer_fontes(&raiz.join(sub), &mut |caminho| {
@@ -3260,6 +3330,124 @@ fn desmontar(arch: Arquitetura, release: bool, simbolo: &str) -> Result<ExitCode
 /// ESP e `btrfs inspect-internal dump-tree` lê a raiz, os dois sem montar
 /// nada e sem privilégio. É a mesma disciplina do `llvm-readelf` conferindo
 /// os ELFs de usuário.
+/// As chaves do canal seguro das portas de agente.
+///
+/// # Geradas uma vez, e guardadas
+///
+/// Em `target/chaves/`, uma por arquivo, em hexadecimal: a do Duke, a de
+/// cada agente das portas, a do administrador e a de um **intruso** — uma
+/// chave válida que não está em registro nenhum, para a fumaça conferir que
+/// ela é recusada.
+///
+/// Fora do repositório de propósito: uma chave privada versionada é uma
+/// chave pública. Quem clona gera as suas na primeira execução, e o disco de
+/// testes é montado com elas.
+///
+/// # O que vai para a imagem
+///
+/// A chave **privada** do Duke, em `/etc/duke/privado/chave` — que o kernel
+/// lê e não deixa ninguém mais ler —, e as **públicas** dos agentes e do
+/// administrador. As privadas dos agentes ficam do lado de fora: são a
+/// identidade de quem conversa com a máquina, e a máquina não tem por que
+/// tê-las.
+mod chaves {
+    use std::io::{Read, Write};
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::path::PathBuf;
+
+    /// Quantos agentes têm chave: um por porta.
+    pub const AGENTES: u8 = super::PORTAS_DE_AGENTE;
+
+    pub struct Chaves {
+        pub duke: [u8; 32],
+        pub agentes: Vec<[u8; 32]>,
+        pub administrador: [u8; 32],
+        pub intruso: [u8; 32],
+    }
+
+    /// Onde as chaves moram.
+    pub fn diretorio() -> PathBuf {
+        super::raiz_do_projeto().join("target").join("chaves")
+    }
+
+    /// O nome do agente da porta `p`, no registro e no relatório.
+    pub fn nome_do_agente(p: u8) -> String {
+        format!("agente-{p}")
+    }
+
+    /// Lê uma chave, ou a cria se ainda não existe.
+    fn chave(nome: &str) -> Result<[u8; 32], String> {
+        let caminho = diretorio().join(format!("{nome}.chave"));
+        if let Ok(texto) = std::fs::read_to_string(&caminho) {
+            return sigilo::de_hex(&texto)
+                .ok_or_else(|| format!("{} não tem uma chave válida", caminho.display()));
+        }
+        std::fs::create_dir_all(diretorio())
+            .map_err(|e| format!("não foi possível criar {}: {e}", diretorio().display()))?;
+        let mut chave = [0u8; 32];
+        std::fs::File::open("/dev/urandom")
+            .and_then(|mut f| f.read_exact(&mut chave))
+            .map_err(|e| format!("sem /dev/urandom para gerar a chave {nome}: {e}"))?;
+        // Só o dono lê: é uma chave privada, mesmo que de testes.
+        let mut arquivo = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&caminho)
+            .map_err(|e| format!("não foi possível criar {}: {e}", caminho.display()))?;
+        writeln!(arquivo, "{}", sigilo::hex(&chave))
+            .map_err(|e| format!("não foi possível escrever {}: {e}", caminho.display()))?;
+        println!("[xtask] chave nova: {}", caminho.display());
+        Ok(chave)
+    }
+
+    impl Chaves {
+        /// As chaves, criando as que faltarem.
+        pub fn garantir() -> Result<Chaves, String> {
+            Ok(Chaves {
+                duke: chave("duke")?,
+                agentes: (1..=AGENTES)
+                    .map(|p| chave(&nome_do_agente(p)))
+                    .collect::<Result<_, _>>()?,
+                administrador: chave("administrador")?,
+                intruso: chave("intruso")?,
+            })
+        }
+
+        /// A chave privada do agente da porta `p`.
+        pub fn do_agente(&self, p: u8) -> [u8; 32] {
+            self.agentes[usize::from(p) - 1]
+        }
+
+        /// Os arquivos que vão para a imagem.
+        pub fn arquivos(&self) -> Vec<(String, Vec<u8>)> {
+            let mut agentes =
+                String::from("# Os agentes que podem abrir uma porta: chave publica e nome.\n");
+            for p in 1..=AGENTES {
+                agentes.push_str(&sigilo::registro::linha(
+                    &sigilo::publica_de(&self.do_agente(p)),
+                    &nome_do_agente(p),
+                ));
+            }
+            let administradores = format!(
+                "# Quem pode provar uma operacao administrativa.\n{}",
+                sigilo::registro::linha(&sigilo::publica_de(&self.administrador), "administrador")
+            );
+            vec![
+                (
+                    "etc/duke/privado/chave".to_string(),
+                    format!("{}\n", sigilo::hex(&self.duke)).into_bytes(),
+                ),
+                ("etc/duke/agentes".to_string(), agentes.into_bytes()),
+                (
+                    "etc/duke/administradores".to_string(),
+                    administradores.into_bytes(),
+                ),
+            ]
+        }
+    }
+}
+
 mod disco {
     /// O disco inteiro.
     pub const SETORES: u64 = 192 * 1024 * 1024 / 512;
@@ -3765,7 +3953,14 @@ fn which(nome: &str) -> Option<PathBuf> {
 fn disco_de_testes() -> Result<PathBuf, String> {
     let caminho = raiz_do_projeto().join("target").join("disco.img");
     let receita = raiz_do_projeto().join("target").join("disco.receita");
-    let programas = programas_do_disco()?;
+    // Os programas compilados e as chaves vão pela mesma lista: os dois são
+    // gerados, e os dois entram na receita pelo resumo do conteúdo inteiro.
+    // Uma chave nova muda bytes sem mudar o tamanho, e o byte do meio que
+    // basta para os arquivos fixos seria uma aposta perdida uma vez em
+    // duzentas e cinquenta e seis — com uma imagem velha, de chaves velhas,
+    // ficando no lugar.
+    let mut programas = programas_do_disco()?;
+    programas.extend(chaves::Chaves::garantir()?.arquivos());
     let esperada = receita_do_disco(&programas);
 
     if caminho.is_file() && std::fs::read_to_string(&receita).is_ok_and(|atual| atual == esperada) {
@@ -4001,6 +4196,10 @@ fn comando_qemu(
 
     qemu.args(["-netdev", "user,id=rede0"]);
     qemu.args(["-device", "virtio-net-pci,netdev=rede0"]);
+
+    // A fonte de entropia do kernel: o `/dev/urandom` do hospedeiro, pelo
+    // `virtio-rng`. Sem ela as portas de agente recusam o aperto de mão.
+    qemu.args(["-device", "virtio-rng-pci"]);
 
     qemu.args(["-m", "128M"]);
 
@@ -4529,6 +4728,8 @@ fn conversar(
     sob_janelas(qmp, &mut escrita, &mut leitor)?;
     sob_formulario(arch, monitor, qmp, &mut escrita, &mut leitor)?;
     sob_agentes(arch)?;
+    sob_sigilo(arch)?;
+    sob_administracao(arch, &mut escrita, &mut leitor)?;
     sob_tela(monitor, tela_no_monitor, &mut escrita, &mut leitor)?;
     sob_fragmento(&mut escrita, &mut leitor)?;
     // Por último, porque não há volta: depois dela o kernel só responde o
@@ -5692,51 +5893,208 @@ fn sob_janelas(
     Ok(())
 }
 
-/// Um agente numa porta do console virtio: a conexão, e os pedidos por ela.
+/// Por que um aperto de mão numa porta não deu certo.
+enum FalhaDoAperto {
+    /// O Duke respondeu com uma recusa, e disse por quê.
+    Recusado(String),
+    /// Ninguém respondeu no prazo: o kernel pode não ter subido ainda.
+    Silencio,
+    /// Algo que não melhora com o tempo.
+    Outra(String),
+}
+
+/// Bytes do `/dev/urandom` do hospedeiro: a chave efêmera do cliente.
+fn aleatorios() -> Result<[u8; 32], String> {
+    use std::io::Read;
+    let mut chave = [0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut chave))
+        .map_err(|e| format!("sem /dev/urandom: {e}"))?;
+    Ok(chave)
+}
+
+/// Um agente numa porta do console virtio, pelo canal cifrado: o aperto de
+/// mão, e os pedidos por ele.
+///
+/// É o mesmo `sigilo` que o kernel usa do lado dele — ver o pacote. A chave
+/// do agente é a de `target/chaves/`, e a pública do Duke sai da privada que
+/// o `xtask` gerou: quem provisiona a máquina conhece as duas. Um cliente de
+/// verdade receberia só a pública.
 struct AgenteNaPorta {
     porta: u8,
-    escrita: UnixStream,
-    leitor: BufReader<UnixStream>,
+    fluxo: UnixStream,
+    transporte: sigilo::Transporte,
+    leitor: sigilo::quadro::Leitor,
+    /// Texto decifrado que ainda não fechou uma linha.
+    pendente: Vec<u8>,
     proximo_id: u32,
+    /// O que o Duke disse ao completar o aperto: a sessão e o nome.
+    boas_vindas: String,
 }
 
 impl AgenteNaPorta {
+    /// Conecta pela porta `porta` com a chave do agente dela.
     fn conectar(arch: Arquitetura, porta: u8) -> Result<AgenteNaPorta, String> {
-        let fluxo = UnixStream::connect(caminho_canal(arch, porta))
-            .map_err(|e| format!("agentes: a porta {porta} nao aceitou conexao: {e}"))?;
+        let chaves = chaves::Chaves::garantir()?;
+        Self::conectar_com(arch, porta, &chaves.do_agente(porta), &chaves.duke)
+    }
+
+    /// Conecta pela porta `porta` com uma chave qualquer, insistindo enquanto
+    /// o kernel não responde. Uma recusa é a resposta, e não se insiste.
+    fn conectar_com(
+        arch: Arquitetura,
+        porta: u8,
+        chave: &[u8; 32],
+        duke: &[u8; 32],
+    ) -> Result<AgenteNaPorta, String> {
+        let limite = Instant::now() + Duration::from_secs(30);
+        loop {
+            match Self::tentar_aperto(arch, porta, chave, duke) {
+                Ok(agente) => return Ok(agente),
+                Err(FalhaDoAperto::Recusado(motivo)) => {
+                    return Err(format!("agentes: porta {porta}: recusado: {motivo}"));
+                }
+                Err(FalhaDoAperto::Outra(e)) => return Err(format!("agentes: porta {porta}: {e}")),
+                Err(FalhaDoAperto::Silencio) if Instant::now() < limite => {
+                    std::thread::sleep(Duration::from_millis(300));
+                }
+                Err(FalhaDoAperto::Silencio) => {
+                    return Err(format!(
+                        "agentes: porta {porta}: o aperto nao foi respondido"
+                    ));
+                }
+            }
+        }
+    }
+
+    fn tentar_aperto(
+        arch: Arquitetura,
+        porta: u8,
+        chave: &[u8; 32],
+        duke: &[u8; 32],
+    ) -> Result<AgenteNaPorta, FalhaDoAperto> {
+        use sigilo::quadro::{Tipo, montar};
+        let mut fluxo = UnixStream::connect(caminho_canal(arch, porta))
+            .map_err(|e| FalhaDoAperto::Outra(format!("a porta nao aceitou conexao: {e}")))?;
         fluxo
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .map_err(|e| format!("agentes: {e}"))?;
-        let leitor = BufReader::new(fluxo.try_clone().map_err(|e| format!("agentes: {e}"))?);
-        Ok(AgenteNaPorta {
-            porta,
-            escrita: fluxo,
-            leitor,
-            proximo_id: porta as u32 * 100_000,
-        })
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .map_err(|e| FalhaDoAperto::Outra(e.to_string()))?;
+
+        let efemera = aleatorios().map_err(FalhaDoAperto::Outra)?;
+        let mut mensagem = vec![0u8; 1024];
+        let (n, aguardando) =
+            sigilo::Iniciador::novo(sigilo::PROLOGO, chave, &sigilo::publica_de(duke))
+                .escrever(efemera, b"", &mut mensagem)
+                .map_err(|e| FalhaDoAperto::Outra(e.motivo().to_string()))?;
+        let quadro = montar(Tipo::Inicio, &mensagem[..n])
+            .map_err(|e| FalhaDoAperto::Outra(e.motivo().to_string()))?;
+        fluxo
+            .write_all(&quadro)
+            .and_then(|()| fluxo.flush())
+            .map_err(|e| FalhaDoAperto::Outra(e.to_string()))?;
+
+        let mut leitor = sigilo::quadro::Leitor::novo();
+        let (tipo, corpo) = match ler_quadro(&mut fluxo, &mut leitor) {
+            Ok(Some(q)) => q,
+            Ok(None) => return Err(FalhaDoAperto::Silencio),
+            Err(e) => return Err(FalhaDoAperto::Outra(e)),
+        };
+        match tipo {
+            Tipo::Resposta => {
+                let mut carga = vec![0u8; corpo.len()];
+                let (m, transporte) = aguardando.ler(&corpo, &mut carga).map_err(|e| {
+                    FalhaDoAperto::Outra(format!("a resposta do aperto nao abriu: {}", e.motivo()))
+                })?;
+                fluxo
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .map_err(|e| FalhaDoAperto::Outra(e.to_string()))?;
+                Ok(AgenteNaPorta {
+                    porta,
+                    fluxo,
+                    transporte,
+                    leitor,
+                    pendente: Vec::new(),
+                    proximo_id: porta as u32 * 100_000,
+                    boas_vindas: String::from_utf8_lossy(&carga[..m]).into_owned(),
+                })
+            }
+            Tipo::Recusa => Err(FalhaDoAperto::Recusado(
+                String::from_utf8_lossy(&corpo).into_owned(),
+            )),
+            _ => Err(FalhaDoAperto::Outra("quadro inesperado no aperto".into())),
+        }
+    }
+
+    /// Um pedido cifrado, num quadro pronto, sem mandar. Para as sondas que
+    /// adulteram ou repetem.
+    fn quadro_do_pedido(&mut self, metodo: &str, params: &str) -> Result<(u32, Vec<u8>), String> {
+        self.proximo_id += 1;
+        let id = self.proximo_id;
+        let linha = format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"{metodo}\",\"params\":{params}}}\n"
+        );
+        let mut quadros = Vec::new();
+        let mut cifrado = vec![0u8; sigilo::MAIOR_MENSAGEM];
+        for pedaco in linha.as_bytes().chunks(sigilo::Transporte::MAIOR_CLARO) {
+            let n = self
+                .transporte
+                .cifrar(pedaco, &mut cifrado)
+                .map_err(|e| format!("agentes: nao cifrou: {}", e.motivo()))?;
+            quadros.extend(
+                sigilo::quadro::montar(sigilo::quadro::Tipo::Dados, &cifrado[..n])
+                    .map_err(|e| e.motivo().to_string())?,
+            );
+        }
+        Ok((id, quadros))
+    }
+
+    /// Manda bytes crus pela porta.
+    fn mandar(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.fluxo
+            .write_all(bytes)
+            .and_then(|()| self.fluxo.flush())
+            .map_err(|e| format!("agentes: a porta {} nao aceitou o pedido: {e}", self.porta))
+    }
+
+    /// A próxima linha de resposta, decifrada. `Err` com o motivo se o Duke
+    /// mandou uma recusa.
+    fn proxima_linha(&mut self) -> Result<String, String> {
+        loop {
+            if let Some(fim) = self.pendente.iter().position(|&b| b == b'\n') {
+                let linha: Vec<u8> = self.pendente.drain(..=fim).collect();
+                return Ok(String::from_utf8_lossy(&linha).trim_end().to_string());
+            }
+            let (tipo, corpo) = ler_quadro(&mut self.fluxo, &mut self.leitor)?
+                .ok_or_else(|| format!("agentes: porta {}: sem resposta", self.porta))?;
+            match tipo {
+                sigilo::quadro::Tipo::Dados => {
+                    let mut claro = vec![0u8; corpo.len()];
+                    let n = self.transporte.decifrar(&corpo, &mut claro).map_err(|e| {
+                        format!(
+                            "agentes: porta {}: resposta que nao abre: {}",
+                            self.porta,
+                            e.motivo()
+                        )
+                    })?;
+                    self.pendente.extend_from_slice(&claro[..n]);
+                }
+                sigilo::quadro::Tipo::Recusa => {
+                    return Err(format!("recusa: {}", String::from_utf8_lossy(&corpo)));
+                }
+                _ => return Err(format!("agentes: porta {}: quadro inesperado", self.porta)),
+            }
+        }
     }
 
     fn pedir(&mut self, metodo: &str, params: &str) -> Result<String, String> {
-        self.proximo_id += 1;
-        let id = self.proximo_id;
-        self.escrita
-            .write_all(
-                format!(
-                    "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"{metodo}\",\"params\":{params}}}\n"
-                )
-                .as_bytes(),
-            )
-            .and_then(|()| self.escrita.flush())
-            .map_err(|e| format!("agentes: a porta {} nao aceitou o pedido: {e}", self.porta))?;
-        let resposta = ler_resposta(&mut self.leitor)
-            .map_err(|e| format!("agentes: porta {}: {e}", self.porta))?;
-        if !e_a_resposta(&resposta, id) {
-            return Err(format!(
-                "agentes: a porta {} respondeu outro pedido\n  {resposta}",
-                self.porta
-            ));
+        let (id, quadro) = self.quadro_do_pedido(metodo, params)?;
+        self.mandar(&quadro)?;
+        loop {
+            let resposta = self.proxima_linha()?;
+            if e_a_resposta(&resposta, id) {
+                return Ok(resposta);
+            }
         }
-        Ok(resposta)
     }
 
     /// Pede `metodo` até a resposta satisfazer `condicao`, por oito segundos.
@@ -5761,6 +6119,38 @@ impl AgenteNaPorta {
     }
 }
 
+/// Lê bytes até um quadro se completar. `Ok(None)` se o prazo do fluxo
+/// venceu sem quadro inteiro.
+fn ler_quadro(
+    fluxo: &mut UnixStream,
+    leitor: &mut sigilo::quadro::Leitor,
+) -> Result<Option<(sigilo::quadro::Tipo, Vec<u8>)>, String> {
+    use std::io::Read;
+    let mut byte = [0u8; 1];
+    loop {
+        match fluxo.read(&mut byte) {
+            Ok(0) => return Err("a porta fechou".into()),
+            Ok(_) => {
+                if let Some((tipo, corpo)) = leitor
+                    .empurrar(byte[0])
+                    .map_err(|e| e.motivo().to_string())?
+                {
+                    return Ok(Some((tipo, corpo.to_vec())));
+                }
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+}
+
 /// Quatro agentes ao mesmo tempo, cada um na sua porta do console virtio.
 ///
 /// # O que esta sonda prova que a suíte não prova
@@ -5775,11 +6165,15 @@ impl AgenteNaPorta {
 fn sob_agentes(arch: Arquitetura) -> Result<(), String> {
     println!("[xtask] fumaça: quatro agentes ao mesmo tempo, cada um na sua porta");
     const PEDIDOS: u32 = 50;
+    let inicio = Instant::now();
     let fios: Vec<_> = (1..=PORTAS_DE_AGENTE)
         .map(|porta| {
             std::thread::spawn(move || -> Result<(), String> {
                 let mut agente = AgenteNaPorta::conectar(arch, porta)?;
-                let esperado = format!("\"session\":{porta},\"transport\":\"virtio-console\"");
+                let esperado = format!(
+                    "\"session\":{porta},\"transport\":\"virtio-console\",\"authenticated\":true,\"agent\":\"{}\"",
+                    chaves::nome_do_agente(porta)
+                );
                 for _ in 0..PEDIDOS {
                     let r = agente.pedir("agent.session", "{}")?;
                     if !r.contains(&esperado) {
@@ -5796,9 +6190,15 @@ fn sob_agentes(arch: Arquitetura) -> Result<(), String> {
         fio.join()
             .map_err(|_| "agentes: um fio do hospedeiro morreu".to_string())??;
     }
+    // O tempo inclui os quatro apertos de mão: é o custo de um agente
+    // chegar e trabalhar, e não só o de um pedido.
+    let total = inicio.elapsed();
     println!(
-        "  [agentes] ok  {} pedidos em cada uma das {PORTAS_DE_AGENTE} portas, ao mesmo tempo, cada resposta na sua",
-        PEDIDOS
+        "  [agentes] ok  {} pedidos em cada uma das {PORTAS_DE_AGENTE} portas, ao mesmo tempo, cada resposta na sua \
+         ({} ms ao todo, aperto incluso; {:.1} ms por ida e volta em cada porta)",
+        PEDIDOS,
+        total.as_millis(),
+        total.as_secs_f64() * 1000.0 / f64::from(PEDIDOS)
     );
 
     // O agente da porta 2 no Terminal, pela linha de comando da janela.
@@ -5841,6 +6241,202 @@ fn sob_agentes(arch: Arquitetura) -> Result<(), String> {
         "o comando do agente da porta 2 nao executou, ou o log nao diz que foi ele",
     )?;
     println!("  [agentes] ok  o agente da porta 2 executou no Terminal, e o log diz `agente 2`");
+    Ok(())
+}
+
+/// O canal cifrado das portas, por fora: o que ele recusa.
+///
+/// # O que esta sonda prova que a suíte não prova
+///
+/// A suíte conversa com o kernel pela captura do driver, com o `sigilo`
+/// dentro do próprio kernel dos dois lados. Esta conversa pelos sockets do
+/// QEMU, com o cliente do `xtask` do lado de fora: o aperto atravessa o
+/// dispositivo, e as recusas chegam como quadros ao hospedeiro.
+fn sob_sigilo(arch: Arquitetura) -> Result<(), String> {
+    println!("[xtask] fumaça: o canal cifrado das portas, e o que ele recusa");
+    let chaves = chaves::Chaves::garantir()?;
+
+    // A chave do intruso é válida — ele tem a privada —, e não está no
+    // registro.
+    match AgenteNaPorta::conectar_com(arch, 1, &chaves.intruso, &chaves.duke) {
+        Err(e) if e.contains("recusado: chave fora do registro") => {}
+        Err(e) => {
+            return Err(format!(
+                "sigilo: o intruso foi recusado pelo motivo errado: {e}"
+            ));
+        }
+        Ok(_) => return Err("sigilo: uma chave fora do registro entrou".into()),
+    }
+    println!("  [sigilo] ok  uma chave fora do registro e recusada no aperto, com o motivo");
+
+    // O Duke diz quem o agente é: a sessão e o nome do registro.
+    let agente = AgenteNaPorta::conectar(arch, 2)?;
+    let esperado = format!(r#"{{"session":2,"agent":"{}"}}"#, chaves::nome_do_agente(2));
+    if agente.boas_vindas != esperado {
+        return Err(format!(
+            "sigilo: o aperto nao disse quem o agente e\n  {}",
+            agente.boas_vindas
+        ));
+    }
+    drop(agente);
+
+    // Um bit trocado: a sessão acaba, com uma recusa.
+    let mut agente = AgenteNaPorta::conectar(arch, 3)?;
+    let (_, mut quadro) = agente.quadro_do_pedido("agent.ping", "{}")?;
+    // (As sondas seguintes são em outras portas; esta conexão fecha no fim
+    // da função, e nenhuma outra nesta porta espera por ela.)
+    let ultimo = quadro.len() - 1;
+    quadro[ultimo] ^= 0x01;
+    agente.mandar(&quadro)?;
+    match agente.proxima_linha() {
+        Err(e) if e.contains("recusa: a autenticacao falhou") => {}
+        outro => {
+            return Err(format!(
+                "sigilo: um quadro adulterado nao encerrou a sessao: {outro:?}"
+            ));
+        }
+    }
+    println!("  [sigilo] ok  um quadro adulterado encerra a sessao");
+
+    // O mesmo quadro duas vezes: a primeira é respondida, a segunda acaba
+    // com a sessão.
+    let mut agente = AgenteNaPorta::conectar(arch, 4)?;
+    let (id, quadro) = agente.quadro_do_pedido("agent.ping", "{}")?;
+    agente.mandar(&quadro)?;
+    let r = agente.proxima_linha()?;
+    if !e_a_resposta(&r, id) {
+        return Err(format!(
+            "sigilo: o pedido original nao foi respondido\n  {r}"
+        ));
+    }
+    agente.mandar(&quadro)?;
+    match agente.proxima_linha() {
+        Err(e) if e.contains("recusa:") => {}
+        outro => {
+            return Err(format!(
+                "sigilo: um quadro repetido nao encerrou a sessao: {outro:?}"
+            ));
+        }
+    }
+    println!("  [sigilo] ok  um quadro repetido encerra a sessao");
+
+    // E uma conexão nova na mesma porta recomeça do aperto.
+    //
+    // A anterior fecha antes, e explicitamente. O socket do QEMU atende um
+    // cliente por vez, e um segundo `connect` com o primeiro aberto não é
+    // recusado: fica na fila de espera do hospedeiro — e, com ela cheia, o
+    // `connect` do Linux bloqueia sem prazo. Foi o que aconteceu: sombrear a
+    // variável não a fecha, e a fumaça parou aqui.
+    drop(agente);
+    let mut agente = AgenteNaPorta::conectar(arch, 4)?;
+    agente.pedir("agent.ping", "{}")?;
+    println!("  [sigilo] ok  depois da recusa, uma conexao nova recomeca do aperto");
+    Ok(())
+}
+
+/// Uma operação administrativa pela serial, com a prova do administrador.
+///
+/// # O que esta sonda prova
+///
+/// Que a serial — aberta, o canal de emergência — não registra ninguém sem
+/// prova, e que com a prova o registro vale na hora: o intruso, recusado na
+/// sonda anterior, entra depois de registrado. E que o desafio vale uma vez.
+fn sob_administracao(
+    arch: Arquitetura,
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+) -> Result<(), String> {
+    println!("[xtask] fumaça: registrar um agente pela serial, com prova");
+    let chaves = chaves::Chaves::garantir()?;
+    // Fora da faixa que comeca em 9, que `ler_resposta` pula — ver la.
+    let mut id = 6300;
+    let mut pedir = |metodo: &str, params: &str| -> Result<String, String> {
+        id += 1;
+        escrita
+            .write_all(
+                format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"{metodo}","params":{params}}}"#)
+                    .as_bytes(),
+            )
+            .and_then(|()| escrita.write_all(b"\n"))
+            .and_then(|()| escrita.flush())
+            .map_err(|e| format!("admin: falha ao pedir `{metodo}`: {e}"))?;
+        loop {
+            let resposta = ler_resposta(leitor).map_err(|e| format!("admin: {e}"))?;
+            if e_a_resposta(&resposta, id) {
+                return Ok(resposta);
+            }
+        }
+    };
+
+    let intruso = sigilo::publica_de(&chaves.intruso);
+    let parametros = format!(r#"{{"key":"{}","name":"intruso"}}"#, sigilo::hex(&intruso));
+    let campo = |r: &str, nome: &str| -> Option<String> {
+        let depois = apos(r, &format!("\"{nome}\":"))?;
+        let depois = depois.trim_start_matches('"');
+        Some(depois.split(['"', ',', '}']).next()?.to_string())
+    };
+
+    let mut executar = |prova_de: &str| -> Result<String, String> {
+        let r = pedir("admin.challenge", "{}")?;
+        let desafio: u64 = campo(&r, "challenge")
+            .and_then(|v| v.parse().ok())
+            .ok_or_else(|| format!("admin: sem desafio\n  {r}"))?;
+        let nonce = campo(&r, "nonce")
+            .and_then(|v| sigilo::de_hex(&v))
+            .ok_or("admin: sem nonce")?;
+        let efemera = campo(&r, "ephemeral")
+            .and_then(|v| sigilo::de_hex(&v))
+            .ok_or("admin: sem efemera")?;
+        let publica = sigilo::publica_de(&chaves.administrador);
+        let contexto = sigilo::administracao::Contexto {
+            nonce: &nonce,
+            sessao: 0,
+            administrador: &publica,
+            efemera: &efemera,
+            comando: "agent.register",
+            parametros: prova_de,
+        };
+        let prova = sigilo::administracao::provar(&chaves.administrador, &contexto)
+            .map_err(|e| format!("admin: sem prova: {}", e.motivo()))?;
+        let pedido = format!(
+            r#"{{"challenge":{desafio},"command":"agent.register","params":"{}","admin":"{}","proof":"{}"}}"#,
+            parametros.replace('"', "\\\""),
+            sigilo::hex(&publica),
+            sigilo::hex(&prova)
+        );
+        let primeira = pedir("admin.execute", &pedido)?;
+        // O mesmo pedido de novo: o desafio já foi gasto.
+        let segunda = pedir("admin.execute", &pedido)?;
+        if !segunda.contains("desafio desconhecido nesta sessao") {
+            return Err(format!("admin: um desafio valeu duas vezes\n  {segunda}"));
+        }
+        Ok(primeira)
+    };
+
+    // A prova feita para outros parâmetros não registra.
+    let r = executar(&parametros.replace("intruso", "outro"))?;
+    if !r.contains("a prova nao confere") {
+        return Err(format!(
+            "admin: uma prova de outros parametros passou\n  {r}"
+        ));
+    }
+    // A prova certa registra.
+    let r = executar(&parametros)?;
+    if !r.contains(r#""executed":true"#) {
+        return Err(format!("admin: a prova certa nao registrou\n  {r}"));
+    }
+    println!(
+        "  [admin] ok  sem a prova certa nada entra; com ela o registro vale, uma vez por desafio"
+    );
+
+    let mut agente = AgenteNaPorta::conectar_com(arch, 1, &chaves.intruso, &chaves.duke)?;
+    let r = agente.pedir("agent.session", "{}")?;
+    if !r.contains(r#""authenticated":true,"agent":"intruso""#) {
+        return Err(format!(
+            "admin: o agente registrado entrou com outro nome\n  {r}"
+        ));
+    }
+    println!("  [admin] ok  o agente registrado pela serial entra pela porta 1");
     Ok(())
 }
 
@@ -7003,6 +7599,15 @@ fn tentar_agente(
     metodo: &str,
     params: &str,
 ) -> Result<ExitCode, Espera> {
+    // Uma porta de agente só fala depois do aperto de mão, com a chave do
+    // agente dela — ver [`AgenteNaPorta`]. A serial continua em claro: é o
+    // canal de emergência.
+    if canal != 0 {
+        let mut agente = AgenteNaPorta::conectar(arch, canal).map_err(Espera::Fatal)?;
+        let resposta = agente.pedir(metodo, params).map_err(Espera::Fatal)?;
+        println!("{resposta}");
+        return Ok(ExitCode::SUCCESS);
+    }
     let socket = caminho_canal(arch, canal);
 
     let mut fluxo = UnixStream::connect(&socket).map_err(|e| {

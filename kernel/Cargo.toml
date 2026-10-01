@@ -59,6 +59,15 @@ aparencia = { path = "../aparencia", default-features = false }
 # scheduler para bloquear uma thread, então `std::sync::Mutex` não se aplica.
 spin = "0.12.3"
 
+# O canal seguro das portas de agente: o Noise, a prova administrativa e o
+# gerador de números aleatórios. Um pacote compartilhado com o cliente, pela
+# razão do `protocolo`: os dois lados da conversa fazem a mesma conta.
+#
+# Ele traz as primitivas do RustCrypto, que no x86 escolhem SIMD em tempo de
+# execução. Num kernel isso não pode acontecer — ver `.cargo/config.toml`,
+# que força as versões em software.
+sigilo = { path = "../sigilo" }
+
 # --- x86_64 -----------------------------------------------------------------
 #
 # No x86 nos apoiamos em crates maduros porque a plataforma tem décadas de
@@ -93,6 +102,29 @@ aarch64-cpu = "11.2.0"
 
 [profile.dev]
 panic = "abort"
+
+# As primitivas do canal seguro otimizadas mesmo no build de depuração.
+#
+# Sem otimização, o X25519 é aritmética de 255 bits feita por funções que
+# nunca são inlinadas: medido, um aperto de mão inteiro — os dois lados, na
+# suíte — levava duzentos e dez milissegundos. Com elas otimizadas, ver o
+# número no commit que trouxe estas linhas. O código do kernel continua sem
+# otimização, que é o que importa para depurar: ninguém põe um ponto de
+# parada dentro do ChaCha20.
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+[profile.dev.package.x25519-dalek]
+opt-level = 3
+[profile.dev.package.chacha20]
+opt-level = 3
+[profile.dev.package.chacha20poly1305]
+opt-level = 3
+[profile.dev.package.poly1305]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
+[profile.dev.package.sigilo]
+opt-level = 3
 
 [profile.release]
 panic = "abort"

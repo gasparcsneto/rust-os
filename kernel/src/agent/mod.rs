@@ -53,10 +53,12 @@
 // módulo de arquitetura e chamá-lo daqui, não relaxar a regra.
 #![deny(unsafe_code)]
 
+pub mod administracao;
 pub mod commands;
 pub mod json;
 pub mod protocol;
 pub mod registry;
+pub mod seguro;
 pub mod sessao;
 
 use core::fmt;
@@ -252,7 +254,7 @@ impl Montador {
         // qualquer forma — o handler repõe o delimitador que não coube, ver
         // [`crate::tarefas::entrada::coletar`] —, mas esperar por ele seria
         // responder só depois de o cliente terminar de despejar.
-        if !self.danificado && self.canal.perdidos() != self.perdas_ao_abrir {
+        if !self.danificado && self.canal.perdidos_no_texto() != self.perdas_ao_abrir {
             responder_erro(self.canal, None, RpcError::ENTRADA_PERDIDA, None);
             self.tam = 0;
             self.estourou = false;
@@ -329,7 +331,7 @@ impl Montador {
     /// quadro passado e o fim dele, inclusive a que acontecer antes de o
     /// primeiro byte dele chegar — que é justamente onde some um `\n`.
     fn abrir_quadro(&mut self) {
-        self.perdas_ao_abrir = self.canal.perdidos();
+        self.perdas_ao_abrir = self.canal.perdidos_no_texto();
     }
 }
 
@@ -372,9 +374,23 @@ pub async fn atender(canal: Canal) {
     // contador de perdas não existe em tempo de compilação.
     montador.geracao = canal.geracao();
     montador.abrir_quadro();
+    // Numa porta, os bytes passam antes pela sessão cifrada: o montador só
+    // vê o texto que sobreviveu à decifração.
+    let mut porta = match canal {
+        Canal::Porta(p) => Some(seguro::Porta::nova(p)),
+        Canal::Serial => None,
+    };
     loop {
         let byte = canal.proximo_byte().await;
-        if montador.alimentar(byte) {
+        let fechou = match porta.as_mut() {
+            Some(porta) => {
+                let mut fechou = false;
+                porta.receber(byte, |b| fechou |= montador.alimentar(b));
+                fechou
+            }
+            None => montador.alimentar(byte),
+        };
+        if fechou {
             // Acabamos de executar um comando, o que pode ter custado um
             // tempo arbitrário. Um cliente que envie várias requisições
             // emendadas manteria esta tarefa rodando sem parar, porque o
@@ -438,6 +454,7 @@ pub fn servir() -> ! {
 #[cfg(feature = "modo-teste")]
 pub struct SessaoDeTeste {
     montador: Montador,
+    porta: seguro::Porta,
 }
 
 #[cfg(feature = "modo-teste")]
@@ -448,7 +465,10 @@ impl SessaoDeTeste {
         let mut montador = Montador::novo(canal);
         montador.geracao = canal.geracao();
         montador.abrir_quadro();
-        SessaoDeTeste { montador }
+        SessaoDeTeste {
+            montador,
+            porta: seguro::Porta::nova(p),
+        }
     }
 
     /// Consome o que estiver na entrada da porta, respondendo cada quadro
@@ -458,7 +478,10 @@ impl SessaoDeTeste {
             return;
         };
         while let Some(byte) = crate::virtio::console::retirar(p) {
-            self.montador.alimentar(byte);
+            let montador = &mut self.montador;
+            self.porta.receber(byte, |b| {
+                montador.alimentar(b);
+            });
         }
     }
 }
@@ -538,8 +561,8 @@ fn responder_erro(canal: Canal, id: Option<json::Json>, erro: RpcError, detalhe:
 /// Emite uma resposta completa pelo canal, seguida do delimitador de quadro.
 ///
 /// Na serial, direto no fio, com as interrupções mascaradas, como sempre.
-/// Numa porta do `virtio-console`, montada inteira antes e entregue ao
-/// driver, que a leva ao dispositivo em pedaços.
+/// Numa porta do `virtio-console`, montada inteira antes, cifrada pela
+/// sessão da porta e entregue ao driver em quadros.
 fn com_saida(canal: Canal, f: impl FnOnce(&mut JsonWriter) -> fmt::Result) {
     let Canal::Porta(p) = canal else {
         return com_saida_serial(f);
@@ -550,7 +573,10 @@ fn com_saida(canal: Canal, f: impl FnOnce(&mut JsonWriter) -> fmt::Result) {
         let _ = f(&mut w);
     }
     texto.push('\n');
-    crate::virtio::console::enviar(p, texto.as_bytes());
+    // Sem sessão estabelecida não há a quem: a resposta é descartada. Não
+    // acontece por um pedido — um pedido só chega decifrado —, mas acontece
+    // quando a sessão cai entre o pedido e a resposta.
+    seguro::enviar(p, texto.as_bytes());
 }
 
 /// Emite uma resposta completa na serial.

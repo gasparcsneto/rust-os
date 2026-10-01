@@ -147,6 +147,10 @@ struct Fluxo {
     /// suíte não tem um agente do outro lado de um socket.
     #[cfg(feature = "modo-teste")]
     captura: Option<alloc::vec::Vec<u8>>,
+    /// Em modo de teste: recusar todo envio, como uma fila de saída cheia —
+    /// ver [`recusar_envio`].
+    #[cfg(feature = "modo-teste")]
+    recusar: bool,
 }
 
 impl Fluxo {
@@ -161,6 +165,8 @@ impl Fluxo {
             despertador: None,
             #[cfg(feature = "modo-teste")]
             captura: None,
+            #[cfg(feature = "modo-teste")]
+            recusar: false,
         }
     }
 }
@@ -523,6 +529,12 @@ fn fechar(p: u8) {
             w.wake();
         }
     });
+    // Quem fechou levou a sessão junto: as chaves dela não servem a mais
+    // ninguém, e o relatório não deve mostrar como presente um agente que
+    // saiu. Fora da trava da porta — as duas nunca ficam presas juntas.
+    if let Some(saiu) = crate::sessoes::esquecer(p) {
+        crate::log_info!("agent", "porta {}: {} saiu", p, saiu.nome);
+    }
 }
 
 /// Procura o `virtio-console` e o põe de pé.
@@ -640,20 +652,6 @@ pub fn trafego() -> (u64, u64) {
     )
 }
 
-/// Descarta o que está na entrada da porta `p` até a próxima quebra de
-/// linha, inclusive. Verdadeiro se a achou — ver o mesmo, na serial.
-pub fn descartar_ate_nova_linha(p: u8) -> bool {
-    fluxo(p, |f| {
-        while let Some(b) = f.entrada.pop_front() {
-            if b == b'\n' {
-                return true;
-            }
-        }
-        false
-    })
-    .unwrap_or(false)
-}
-
 /// O próximo byte da porta `p`, quando houver.
 pub fn proximo_byte(p: u8) -> ProximoByte {
     ProximoByte(p)
@@ -694,29 +692,38 @@ impl core::future::Future for ProximoByte {
 }
 
 /// Manda `bytes` pela porta `p`. Sem ninguém do outro lado, não há a quem:
-/// são descartados, e contados.
-pub fn enviar(p: u8, bytes: &[u8]) {
-    let aceitou = fluxo(p, |f| {
+/// são descartados, e contados. Devolve se foram aceitos.
+pub fn enviar(p: u8, bytes: &[u8]) -> bool {
+    // Três desfechos: na captura da suíte, na fila da porta, ou descartado.
+    // O descarte é de tudo ou nada — nunca metade dos bytes —, e quem manda
+    // fica sabendo: o canal cifrado depende disso, porque um quadro que não
+    // saiu deixa o contador de mensagens dos dois lados desencontrado.
+    let desfecho = fluxo(p, |f| {
+        #[cfg(feature = "modo-teste")]
+        if f.recusar {
+            return None;
+        }
         #[cfg(feature = "modo-teste")]
         if let Some(captura) = f.captura.as_mut() {
             captura.extend_from_slice(bytes);
-            return false;
+            return Some(false);
         }
         if !f.aberta || f.saida.len() + bytes.len() > MAIOR_SAIDA {
             f.perdidos_na_saida += bytes.len() as u64;
-            return false;
+            return None;
         }
         f.saida.extend(bytes.iter().copied());
-        true
+        Some(true)
     })
-    .unwrap_or(false);
-    if aceitou {
+    .flatten();
+    if desfecho == Some(true) {
         crate::arch::sem_interrupcoes(|| {
             if let Some(console) = CONSOLE.lock().as_mut() {
                 console.bombear(p);
             }
         });
     }
+    desfecho.is_some()
 }
 
 /// Em modo de teste: a saída da porta `p` vai para uma captura que a suíte
@@ -725,6 +732,17 @@ pub fn enviar(p: u8, bytes: &[u8]) {
 #[cfg(feature = "modo-teste")]
 pub fn capturar(p: u8, liga: bool) {
     fluxo(p, |f| f.captura = liga.then(alloc::vec::Vec::new));
+}
+
+/// Em modo de teste: a porta `p` passa a recusar todo envio, como faria com
+/// a fila de saída cheia — ou volta a aceitar, com `liga` falso.
+///
+/// Existe porque a outra forma de um envio falhar, a porta fechada, leva a
+/// sessão junto (ver [`fechar`]), e esconde o que o caso quer conferir: que
+/// uma resposta que não saiu encerra a sessão por si só.
+#[cfg(feature = "modo-teste")]
+pub fn recusar_envio(p: u8, liga: bool) {
+    fluxo(p, |f| f.recusar = liga);
 }
 
 /// Em modo de teste: o que o outro lado da porta `p` teria mandado, na

@@ -8,6 +8,40 @@
 [build]
 target = "x86_64-unknown-none"
 
+# As primitivas do canal seguro em software, sem SIMD.
+#
+# O ChaCha20, o Poly1305 e o curve25519 do RustCrypto, no x86_64, conferem em
+# tempo de execução se o processador tem AVX2 ou SSE2 e, tendo, usam. Num
+# programa comum é o certo. Num kernel não: os registradores de SIMD são do
+# processo que estava rodando, este kernel não os salva ao entrar, e uma
+# função de cifra que os usasse corromperia o estado de quem foi
+# interrompido — sem erro nenhum, só números errados num programa que nem
+# sabia que tinha sido interrompido.
+#
+# O alvo `x86_64-unknown-none` já proíbe o compilador de gerar SIMD por
+# conta própria, mas não alcança o código que pede SIMD explicitamente,
+# função a função, depois de perguntar ao processador. Estas três opções são
+# as que os próprios pacotes oferecem para desligar esse caminho.
+#
+# Medido, tirando uma de cada vez: sem a do Poly1305, o LLVM não compila o
+# caminho AVX2 para este alvo ("Do not know how to split the result of this
+# operator"); sem a do curve25519, o próprio rustc morre com SIGILL; sem a
+# do ChaCha20, compila, e nenhuma instrução de SIMD sai — o pacote não
+# chega a gerá-las aqui. Ou seja: hoje elas são o que faz estes pacotes
+# compilarem para o kernel, e o defeito de "SIMD dentro do kernel" não
+# chegaria ao binário. A conferência do `xtask` — `conferir_sem_simd` — é
+# para a versão seguinte de um destes pacotes, que pode compilar e gerar.
+#
+# No ARM o alvo `-softfloat` já não deixa o NEON existir; as opções são as
+# mesmas lá para a escolha estar escrita, e não depender de um detalhe do
+# alvo.
+[target.x86_64-unknown-none]
+rustflags = [
+    "--cfg", 'chacha20_backend="soft"',
+    "--cfg", 'poly1305_backend="soft"',
+    "--cfg", 'curve25519_dalek_backend="serial"',
+]
+
 [target.aarch64-unknown-none-softfloat]
 # No ARM o kernel é ligado num endereço fixo, e o layout é responsabilidade
 # nossa: o script define onde o kernel é carregado, onde o BSS começa e
@@ -21,4 +55,9 @@ target = "x86_64-unknown-none"
 # registradores de ponto flutuante e NEON. Num kernel isso é desejável, porque
 # usar FP/SIMD em EL1 sem antes habilitar o acesso (CPACR_EL1) gera uma
 # exceção — um bug sutil e difícil de rastrear.
-rustflags = ["-C", "link-arg=-Tsrc/arch/aarch64/linker.ld"]
+rustflags = [
+    "-C", "link-arg=-Tsrc/arch/aarch64/linker.ld",
+    "--cfg", 'chacha20_backend="soft"',
+    "--cfg", 'poly1305_backend="soft"',
+    "--cfg", 'curve25519_dalek_backend="serial"',
+]

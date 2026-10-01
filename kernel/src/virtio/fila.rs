@@ -208,6 +208,14 @@ pub struct Fila {
     proximo_disponivel: u16,
     /// Até onde já consumimos o anel de usados.
     ultimo_usado: u16,
+    /// Quantos descritores esta fila tem: [`DESCRITORES`], ou menos numa
+    /// [`Fila::pequena`].
+    tamanho: u16,
+    /// Onde começam o anel de disponíveis e o de usados, dentro do frame.
+    /// Dependem do tamanho; numa fila de [`DESCRITORES`] são [`DISP_EM`] e
+    /// [`USADOS_EM`].
+    disp_em: u64,
+    usados_em: u64,
 }
 
 // SAFETY: o ponteiro que o tipo guarda aponta para um frame de propriedade
@@ -229,6 +237,44 @@ impl Fila {
         if capacidade < DESCRITORES {
             return Err("fila do dispositivo e menor que a minima deste kernel");
         }
+        Self::montar(transporte, indice, DESCRITORES)
+    }
+
+    /// Uma fila com o que o dispositivo oferecer, até [`DESCRITORES`].
+    ///
+    /// # Por que existe
+    ///
+    /// O `virtio-rng` do QEMU tem uma fila de **oito** descritores, fixa no
+    /// código dele, e a [`Fila::nova`] exige trinta e dois. Para os drivers
+    /// que penduram muitos buffers — a rede, o teclado, o console —, o mínimo
+    /// é uma garantia: uma fila menor perderia pacotes e teclas em silêncio,
+    /// e recusá-la na construção é dizer isso em voz alta. Para a entropia,
+    /// que tem um pedido de cada vez, oito sobram.
+    ///
+    /// Então são duas portas de entrada, e quem escolhe é o driver, que sabe
+    /// do que precisa. O tamanho é a maior potência de dois que cabe no que
+    /// o dispositivo oferece: os índices dos anéis são reduzidos por resto, e
+    /// o formato só garante a volta certa com potências de dois.
+    pub fn pequena(transporte: &Transporte, indice: u16) -> Result<Fila, &'static str> {
+        let capacidade = transporte.tamanho_da_fila(indice);
+        if capacidade == 0 {
+            return Err("dispositivo nao tem essa fila");
+        }
+        let teto = capacidade.min(DESCRITORES);
+        let tamanho = 1 << (u16::BITS - 1 - teto.leading_zeros());
+        Self::montar(transporte, indice, tamanho)
+    }
+
+    /// Monta uma fila de `tamanho` descritores, potência de dois até
+    /// [`DESCRITORES`].
+    fn montar(transporte: &Transporte, indice: u16, tamanho: u16) -> Result<Fila, &'static str> {
+        debug_assert!(tamanho.is_power_of_two() && tamanho <= DESCRITORES);
+        // O mesmo desenho das constantes, com o tamanho de agora. Numa fila
+        // de `DESCRITORES` os dois deslocamentos são exatamente `DISP_EM` e
+        // `USADOS_EM`, e a asserção de compilação que confina aqueles ao
+        // frame confina estes também: são menores ou iguais.
+        let disp_em = alinhar(DESC_EM + 16 * tamanho as u64, 2);
+        let usados_em = alinhar(disp_em + 2 + 2 + 2 * tamanho as u64 + 2, 4);
 
         let frame = crate::frames::alocar().ok_or("sem frame para a fila")?;
         let base = crate::arch::acesso_fisico(frame);
@@ -252,17 +298,17 @@ impl Fila {
         // do anel de disponíveis.
         unsafe {
             core::ptr::write_volatile(
-                base.add((DISP_EM + DISP_FLAGS) as usize) as *mut u16,
+                base.add((disp_em + DISP_FLAGS) as usize) as *mut u16,
                 AVISAR_SEMPRE.to_le(),
             )
         };
 
         let notificacao = match transporte.configurar_fila(
             indice,
-            DESCRITORES,
+            tamanho,
             frame + DESC_EM,
-            frame + DISP_EM,
-            frame + USADOS_EM,
+            frame + disp_em,
+            frame + usados_em,
         ) {
             Ok(notificacao) => notificacao,
             Err(motivo) => {
@@ -286,13 +332,24 @@ impl Fila {
             }
         };
 
+        // Só os bits das posições que existem começam livres: numa fila de
+        // oito, as outras vinte e quatro não podem ser reservadas nunca.
+        let livres = if tamanho == DESCRITORES {
+            TODOS_LIVRES
+        } else {
+            (1u32 << tamanho) - 1
+        };
+
         Ok(Fila {
             indice,
             notificacao,
             base,
-            livres: TODOS_LIVRES,
+            livres,
             proximo_disponivel: 0,
             ultimo_usado: 0,
+            tamanho,
+            disp_em,
+            usados_em,
         })
     }
 
@@ -317,8 +374,9 @@ impl Fila {
             proximo: descritor.proximo.to_le(),
         };
 
-        // SAFETY: `posicao` é sempre menor que `DESCRITORES`, e a asserção de
-        // compilação no topo garante que a tabela inteira cabe no frame.
+        // SAFETY: `posicao` é sempre menor que o tamanho da fila, que não passa
+        // de `DESCRITORES`, e a asserção de compilação no topo garante que a
+        // tabela inteira cabe no frame.
         unsafe {
             let ponteiro =
                 self.base.add((DESC_EM + 16 * posicao as u64) as usize) as *mut Descritor;
@@ -379,7 +437,7 @@ impl Fila {
         }
 
         let mut achados = 0;
-        for posicao in 0..DESCRITORES {
+        for posicao in 0..self.tamanho {
             if achados == quantos {
                 break;
             }
@@ -410,8 +468,8 @@ impl Fila {
     /// interrupções mascaradas é um kernel travado sem diagnóstico.
     fn liberar_cadeia(&mut self, cabeca: u16) {
         let mut posicao = cabeca;
-        for _ in 0..DESCRITORES {
-            if posicao >= DESCRITORES {
+        for _ in 0..self.tamanho {
+            if posicao >= self.tamanho {
                 crate::log_warn!("virtio", "cadeia aponta para o descritor {}", posicao);
                 return;
             }
@@ -434,7 +492,7 @@ impl Fila {
     /// buffer, mantida pelo driver — e duas cópias da mesma informação são
     /// duas coisas que podem divergir.
     pub fn endereco_do_descritor(&self, posicao: u16) -> Option<u64> {
-        (posicao < DESCRITORES).then(|| self.ler_descritor(posicao).endereco)
+        (posicao < self.tamanho).then(|| self.ler_descritor(posicao).endereco)
     }
 
     /// Este descritor está com o dispositivo agora?
@@ -444,7 +502,7 @@ impl Fila {
     /// cadeia ser colhida, porque liberar um descritor só apaga o bit do
     /// bitmap. Sem esta distinção, um endereço velho passa por entrega viva.
     pub fn em_uso(&self, posicao: u16) -> bool {
-        posicao < DESCRITORES && self.livres & (1 << posicao) == 0
+        posicao < self.tamanho && self.livres & (1 << posicao) == 0
     }
 
     /// Quantos descritores estão livres agora.
@@ -468,7 +526,7 @@ impl Fila {
         }
 
         let mut posicoes = [0u16; DESCRITORES as usize];
-        if cadeia.len() > posicoes.len() {
+        if cadeia.len() > usize::from(self.tamanho) {
             return Err("cadeia maior que a fila");
         }
         if self.reservar(cadeia.len(), &mut posicoes).is_none() {
@@ -506,8 +564,11 @@ impl Fila {
         // O anel é indexado pelo contador reduzido ao tamanho da fila; o
         // contador em si não é reduzido, e é essa diferença que permite
         // distinguir "vazio" de "cheio" sem um bit extra.
-        let posicao_no_anel = self.proximo_disponivel % DESCRITORES;
-        self.escrever_u16(DISP_EM + DISP_ANEL + 2 * posicao_no_anel as u64, cabeca);
+        let posicao_no_anel = self.proximo_disponivel % self.tamanho;
+        self.escrever_u16(
+            self.disp_em + DISP_ANEL + 2 * posicao_no_anel as u64,
+            cabeca,
+        );
 
         // A barreira é o contrato inteiro deste arquivo em uma linha.
         //
@@ -546,7 +607,7 @@ impl Fila {
         fence(Ordering::SeqCst);
 
         self.proximo_disponivel = self.proximo_disponivel.wrapping_add(1);
-        self.escrever_u16(DISP_EM + DISP_IDX, self.proximo_disponivel);
+        self.escrever_u16(self.disp_em + DISP_IDX, self.proximo_disponivel);
 
         // E de novo antes de notificar, pela mesma razão: a notificação é uma
         // escrita em MMIO, e não há motivo para o processador mantê-la depois
@@ -566,7 +627,7 @@ impl Fila {
     /// Devolve `(índice do primeiro descritor, bytes escritos pelo
     /// dispositivo)`.
     pub fn colher(&mut self) -> Option<(u16, u32)> {
-        let publicados = self.ler_u16(USADOS_EM + USADOS_IDX);
+        let publicados = self.ler_u16(self.usados_em + USADOS_IDX);
         if publicados == self.ultimo_usado {
             return None;
         }
@@ -576,13 +637,13 @@ impl Fila {
         // devolveria lixo do ciclo anterior.
         fence(Ordering::SeqCst);
 
-        let posicao = (self.ultimo_usado % DESCRITORES) as u64;
-        // SAFETY: `posicao` é menor que `DESCRITORES`, e o anel inteiro cabe
-        // no frame pela asserção de compilação.
+        let posicao = (self.ultimo_usado % self.tamanho) as u64;
+        // SAFETY: `posicao` é menor que o tamanho da fila, e o anel inteiro
+        // cabe no frame pela asserção de compilação.
         let usado = unsafe {
             core::ptr::read_volatile(
                 self.base
-                    .add((USADOS_EM + USADOS_ANEL + 8 * posicao) as usize)
+                    .add((self.usados_em + USADOS_ANEL + 8 * posicao) as usize)
                     as *const Usado,
             )
         };

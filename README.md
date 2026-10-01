@@ -135,11 +135,14 @@ Os dois podem rodar ao mesmo tempo: cada arquitetura tem seu próprio socket.
 
 Vários agentes podem operar a mesma máquina ao mesmo tempo, cada um no seu
 canal — a serial é a sessão 0, e as portas do console virtio, as sessões 1
-a 4:
+a 4. Uma porta só fala depois do aperto de mão cifrado, com a chave do
+agente dela; o `xtask` gera as chaves em `target/chaves/` na primeira vez e
+as grava na imagem — ver [Vários agentes](#vários-agentes):
 
 ```bash
 $ cargo xtask agent --canal 2 agent.session
-{"jsonrpc":"2.0","id":1,"result":{"session":2,"transport":"virtio-console"}}
+{"jsonrpc":"2.0","id":1,"result":{"session":2,"transport":"virtio-console",
+ "authenticated":true,"agent":"agente-2","key":"…","since_ms":4210}}
 ```
 
 ## Comandos disponíveis
@@ -148,8 +151,11 @@ $ cargo xtask agent --canal 2 agent.session
 |---|---|
 | `agent.ping` | Verifica se o canal está vivo |
 | `agent.describe` | Lista todos os comandos e parâmetros |
-| `agent.session` | A sessão deste pedido: o número que o kernel deu ao canal, e o transporte |
-| `agent.sessions` | As sessões: a serial e cada porta do console virtio, conectada ou não, com as perdas |
+| `agent.session` | A sessão deste pedido: o número que o kernel deu ao canal, o transporte e quem provou a chave |
+| `agent.sessions` | As sessões: a serial e cada porta do console virtio, conectada ou não, quem está nela, as perdas e as recusas |
+| `agent.registry` | Quem pode entrar pelas portas: a chave do Duke e cada agente registrado, com a origem |
+| `admin.challenge` | Um desafio de uso único para uma operação administrativa nesta sessão |
+| `admin.execute` | Uma operação administrativa com a prova de um administrador (`challenge`, `command`, `params`, `admin`, `proof`) |
 | `system.info` | Kernel, CPU, vídeo, uptime e mecanismo de guarda da pilha |
 | `system.uptime` | Ticks do timer e milissegundos desde o boot |
 | `memory.stats` | Totais agregados de memória física |
@@ -204,6 +210,9 @@ kernel/src/
 ├── mmio.rs          como o kernel alcança a memória de um dispositivo
 ├── heap.rs          alocador do kernel: lista livre ordenada com fusão
 ├── interpretador.rs operar o Duke digitando
+├── identidade.rs    quem é quem: a chave do Duke, os agentes, os administradores e os desafios
+├── sessoes.rs       quem está em cada porta, e as chaves do transporte cifrado dela
+├── aleatorio.rs     o gerador de números aleatórios, semeado pelo virtio-rng
 ├── barra.rs         a barra superior: o nome, o primeiro botão e o tempo ligado
 ├── ponteiro.rs      o mouse: onde ele está, o cursor, e o clique
 ├── eventos.rs       canais de eventos: o kernel publica, um processo escuta e dorme
@@ -263,6 +272,7 @@ kernel/src/
 │   ├── net.rs       a placa de rede
 │   ├── gpu.rs       o vídeo que só mostra o que se manda (porte do virtio-gpud)
 │   ├── console.rs   o canal local dos agentes: uma porta do console virtio por agente
+│   ├── entropia.rs  a fonte de entropia: o virtio-rng
 │   └── teclado.rs   o teclado e o tablet do ARM, por virtio
 ├── usb/
 │   ├── mod.rs       o barramento por onde entram os periféricos de verdade
@@ -274,6 +284,8 @@ kernel/src/
 │   ├── protocol.rs  envelope JSON-RPC 2.0
 │   ├── registry.rs  registro de comandos auto-descritivo
 │   ├── sessao.rs    as sessões: um agente por canal, e quem está agindo
+│   ├── seguro.rs    a sessão cifrada de uma porta: quadros, aperto de mão, decifrar
+│   ├── administracao.rs  as operações administrativas, e a prova que cada uma exige
 │   └── commands.rs  implementações dos comandos
 └── arch/
     ├── mod.rs        seleção da arquitetura em tempo de compilação
@@ -322,6 +334,16 @@ protocolo/src/       as ABIs: do iniciador com o kernel, e do kernel com os prog
 
 tipografia/src/      a fonte e o desenho de texto, dos dois lados da fronteira
 └── lib.rs           os estilos, os glifos, a mistura e a escrita numa memória de pixels
+
+sigilo/src/          o canal seguro, dos dois lados da conversa
+├── lib.rs           a identidade é a chave, e por que o Noise
+├── aperto.rs        o aperto Noise_IK_25519_ChaChaPoly_BLAKE2s, e o transporte
+├── cifra.rs         o estado de uma cifra: a chave e o contador
+├── resumo.rs        o BLAKE2s, o HMAC e os dois HKDF
+├── administracao.rs a prova de uma operação administrativa, presa ao contexto
+├── gerador.rs       ChaCha20 com apagamento rápido da chave
+├── quadro.rs        como as mensagens se delimitam no fluxo da porta
+└── registro.rs      o formato dos arquivos de chaves autorizadas
 
 aparencia/src/       a linguagem visual, dos dois lados da fronteira
 └── lib.rs           a paleta, onde cada cor vai, as medidas e os estilos de texto pelo uso
@@ -1342,11 +1364,69 @@ descartada e contada, e uma que ninguém lê não cresce sem fim.
 **Acima do transporte.** O enquadramento, o JSON-RPC e os comandos não
 sabem por onde os bytes vieram: perguntam ao canal da sessão. É o que deixa
 o próximo transporte — o TCP, quando houver rede, e o vsock, para as máquinas
-virtuais — entrar como mais um caso, sem mudar nada em cima. É a primeira
-de sete etapas: depois vêm o canal seguro (Noise, com a identidade de cada
-agente na chave pública dele), a camada de controle (política, auditoria
-encadeada, limites), os conflitos entre agentes, as mensagens entre eles, e
-o indicador na barra.
+virtuais — entrar como mais um caso, sem mudar nada em cima. São sete
+etapas: o transporte e as sessões; o canal seguro, abaixo; depois a camada
+de controle (política, auditoria encadeada, limites, revogação), os
+conflitos entre agentes, as mensagens entre eles, e o indicador na barra.
+
+### O canal seguro
+
+**A identidade é a chave.** Um agente é a sua chave pública X25519. Ele não
+declara nome nem senha: prova, no aperto de mão, que tem a privada que
+corresponde à pública, e o nome que o log e os relatórios mostram vem do
+registro do Duke, não dele.
+
+**O aperto: `Noise_IK_25519_ChaChaPoly_BLAKE2s`.** O padrão do WireGuard. O
+agente já conhece a chave pública do Duke — foi provisionada —, então basta
+uma ida e volta; a chave do agente viaja cifrada desde a primeira mensagem;
+e os dois lados se autenticam. Depois dele, cada mensagem vai cifrada com
+ChaCha20-Poly1305 e um contador: uma mensagem adulterada, repetida ou fora
+de ordem não abre, e a sessão acaba ali — o contador não sabe mais onde o
+outro lado está, e tentar adivinhar seria abrir a porta para quem está no
+meio. Uma conexão nova recomeça do aperto. Na porta, as mensagens vão em
+quadros com o tamanho na frente (o JSON por linha continua por dentro): uma
+mensagem cifrada tem qualquer byte, inclusive `\n`.
+
+**Uma implementação, conferida por fora.** O Noise está no pacote `sigilo`,
+usado pelo kernel e pelo cliente do `xtask` — a mesma conta dos dois lados.
+E uma implementação só concorda consigo mesma mesmo errada, então os testes
+do `sigilo` conferem os vetores publicados do padrão — um deles gerado pela
+Cacophony, em Haskell — e conversam com o `snow`, outra implementação em
+Rust, nos dois papéis. As primitivas são do RustCrypto e do dalek, e no
+kernel vão sem SIMD: os registradores de SIMD são do processo interrompido,
+e este kernel não os salva.
+
+**Autenticado não é autorizado.** Uma chave que completa o aperto ainda
+precisa estar no registro, ou recebe uma recusa — com o motivo, em claro.
+O registro vem da imagem: o `xtask` gera as chaves em `target/chaves/` (fora
+do repositório: uma chave privada versionada é pública) e grava no disco as
+públicas dos agentes, em `/etc/duke/agentes`, a dos administradores, e a
+privada do Duke em `/etc/duke/privado/`, que o VFS recusa a qualquer caminho
+que não seja o do kernel — nem um processo, nem o `fs.read` de um agente a
+alcançam. As chaves efêmeras vêm de um gerador ChaCha20 com apagamento rápido
+da chave, semeado pelo `virtio-rng`; sem entropia, as portas recusam o aperto
+em vez de gerar chaves que alguém reproduza.
+
+**A serial continua aberta.** É o canal de emergência, independente do Noise
+— e o único que responde no modo post-mortem, quando fazer criptografia
+seria pedir ao heap e ao escalonador, que podem ser o que quebrou. O nível
+de acesso dela vai ser configurável na política da etapa seguinte.
+
+**Operações administrativas têm autenticação própria.** Registrar um agente
+(`agent.register`, que vale até o próximo boot — o disco é só de leitura)
+não é um comando que se chame: vai embrulhado em `admin.execute`, com a
+prova de um administrador. O Duke dá um desafio — um nonce e uma chave
+efêmera —, o administrador faz o Diffie-Hellman da chave dele com a efêmera,
+e o segredo **não** vira chave direto: passa por um HKDF que amarra a chave
+ao nonce, à sessão, às duas chaves públicas, ao comando e ao texto exato dos
+parâmetros. A prova feita para um pedido não serve para outro nome, outro
+comando, outra sessão ou outro desafio, e o desafio vale uma tentativa, por
+trinta segundos. Vale em qualquer sessão — inclusive na serial, que é aberta
+e por isso mesmo não pode registrar ninguém sem prova.
+
+Medido: um aperto de mão leva, com os dois lados dentro da suíte em debug,
+de 30 a 70 ms — eram 210 antes de as primitivas serem compiladas otimizadas
+mesmo no build de depuração.
 
 **O Terminal também.** Um agente que digita no Terminal pela linha de
 comando da janela chega ao interpretador pelo pseudo-terminal, como uma
@@ -1356,12 +1436,18 @@ daquele agente: um caractere da área de uso privado por sessão. O log diz
 `(agente 2)`, e não só `(agente)`.
 
 A suíte atende as portas à mão — põe bytes na entrada de cada uma e
-confere a saída — com os pedidos intercalados entre duas portas, uma
-conexão nova no meio de um quadro, e o `ui.act` de uma porta chegando ao
-log com o número dela. A fumaça passa pelo dispositivo de verdade: quatro
-agentes, em quatro fios do hospedeiro, cinquenta pedidos cada, ao mesmo
-tempo, cada um recebendo só as respostas dele; e o agente da porta 2
-executando um comando no Terminal, com o log dizendo `agente 2`.
+confere a saída —, com um agente de teste que faz o aperto de mão inteiro:
+os pedidos intercalados entre duas portas, um pedido partido em dois
+quadros cifrados, uma conexão nova no meio de um quadro, o `ui.act` de uma
+porta chegando ao log com o número dela, uma chave fora do registro, um
+quadro adulterado, um quadro repetido, a chave do Duke fora do alcance do
+VFS, o gerador semeado, e o registro administrativo com e sem a prova
+certa. A fumaça passa pelo dispositivo de verdade, com o cliente do `xtask`:
+quatro agentes, em quatro fios do hospedeiro, cinquenta pedidos cada, ao
+mesmo tempo, cada um recebendo só as respostas dele; o agente da porta 2
+executando um comando no Terminal, com o log dizendo `agente 2`; as recusas
+chegando ao hospedeiro; e um agente registrado pela serial, com a prova do
+administrador, entrando pela porta logo depois.
 
 ## Barramento PCI
 

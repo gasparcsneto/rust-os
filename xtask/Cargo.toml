@@ -11,6 +11,10 @@ description = "Build system do projeto: compila o kernel, gera as imagens de dis
 # mesma constante que o kernel e o iniciador leem, e não uma cópia.
 protocolo = { path = "../protocolo" }
 
+# O canal seguro, do lado do cliente: o mesmo Noise que o kernel faz do lado
+# dele, e o formato dos arquivos de chaves que o `xtask` grava na imagem.
+sigilo = { path = "../sigilo" }
+
 # De fora, nenhuma. O `xtask` monta o disco com as ferramentas do hospedeiro —
 # `sgdisk`, `mkfs.vfat`, `mcopy`, `mkfs.btrfs` — e o que boota é o iniciador
 # deste projeto, compilado como mais um alvo.

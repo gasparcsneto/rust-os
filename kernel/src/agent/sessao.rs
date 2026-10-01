@@ -61,12 +61,31 @@ impl Canal {
         }
     }
 
+    /// Quantos bytes **de texto** este canal já perdeu: o que o montador
+    /// confere para saber se um quadro chegou inteiro.
+    ///
+    /// Na serial, é o mesmo que [`Canal::perdidos`]. Numa porta é sempre
+    /// zero, e não por otimismo: os bytes passam pela sessão cifrada antes de
+    /// virar texto, e um byte perdido no caminho faz a etiqueta do quadro não
+    /// conferir — a sessão acaba ali, em [`crate::agent::seguro`], e nenhum
+    /// texto danificado chega ao montador.
+    pub fn perdidos_no_texto(self) -> u64 {
+        match self {
+            Canal::Serial => crate::tarefas::entrada::perdidos(),
+            Canal::Porta(_) => 0,
+        }
+    }
+
     /// Descarta a entrada até a próxima quebra de linha. Verdadeiro se a
     /// achou.
+    ///
+    /// Só a serial: numa porta o texto não perde bytes — ver
+    /// [`Canal::perdidos_no_texto`] —, e a entrada crua é cifrada, onde uma
+    /// "quebra de linha" é só um byte qualquer.
     pub fn descartar_ate_nova_linha(self) -> bool {
         match self {
             Canal::Serial => crate::tarefas::entrada::descartar_ate_nova_linha(),
-            Canal::Porta(p) => crate::virtio::console::descartar_ate_nova_linha(p),
+            Canal::Porta(_) => false,
         }
     }
 

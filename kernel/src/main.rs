@@ -62,6 +62,7 @@
 extern crate alloc;
 
 mod agent;
+mod aleatorio;
 mod arch;
 mod barra;
 mod eventos;
@@ -69,6 +70,7 @@ mod fios;
 mod frames;
 mod grafico;
 mod heap;
+mod identidade;
 mod interpretador;
 mod irq;
 mod log;
@@ -82,6 +84,7 @@ mod pseudoterminal;
 mod qemu;
 mod rede;
 mod serial;
+mod sessoes;
 mod superficies;
 mod tarefas;
 mod teclado;
@@ -351,6 +354,10 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     virtio::net::init();
     virtio::teclado::init();
     virtio::console::init();
+    // A entropia, e o gerador que ela semeia. Antes das tarefas das portas,
+    // que sorteiam uma chave efêmera a cada aperto de mão.
+    virtio::entropia::init();
+    aleatorio::init();
     // O mouse de fábrica do x86. No ARM o ponteiro vem de um tablet virtio,
     // ligado junto com o teclado logo acima.
     if arch::iniciar_mouse() {
@@ -397,6 +404,10 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
         },
         Err(motivo) => log_warn!("vfs", "a tabela de particoes nao foi lida: {}", motivo),
     }
+
+    // Quem pode falar pelas portas: a chave do Duke e os registros, do disco
+    // que acabou de montar.
+    identidade::carregar();
 
     // O servidor de janelas e o Terminal, agora que o disco onde eles moram
     // está montado. Na suíte, é o caso de cada um que o lança.

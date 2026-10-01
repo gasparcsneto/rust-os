@@ -7297,6 +7297,10 @@ fn btrfs_raiz_montada() -> Resultado {
     let raiz = conteudo("/")?;
     let nomeados: &[(&str, Tipo)] = &[
         ("dados", Tipo::Diretorio),
+        // As chaves do canal seguro: as públicas dos agentes e dos
+        // administradores, e a privada do Duke num diretório que só o kernel
+        // lê — ver `identidade`.
+        ("etc", Tipo::Diretorio),
         ("grande.txt", Tipo::Arquivo),
         // Os programas compilados à parte, um diretório por arquitetura —
         // ver `usuario::DIRETORIO_DOS_COMPILADOS`.
@@ -10229,127 +10233,300 @@ fn pedido_de_sessao(id: u32) -> alloc::string::String {
     alloc::format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"agent.session","params":{{}}}}"#)
 }
 
-/// As respostas que saíram pela porta `p`, uma por linha.
-fn respostas_da_porta(p: u8) -> alloc::vec::Vec<alloc::string::String> {
-    let bytes = crate::virtio::console::capturado(p);
-    core::str::from_utf8(&bytes)
-        .unwrap_or("")
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(alloc::string::String::from)
-        .collect()
+/// A chave privada do agente de teste da porta `p`: fixa, e registrada pela
+/// própria suíte — a imagem só tem as públicas dos agentes de verdade, e a
+/// suíte não deveria ter as privadas deles.
+fn chave_de_teste(p: u8) -> [u8; 32] {
+    [0x60 + p; 32]
+}
+
+/// O nome do agente de teste da porta `p`.
+fn nome_de_teste(p: u8) -> alloc::string::String {
+    alloc::format!("teste-{p}")
+}
+
+/// O lado do agente numa porta, dentro da suíte: faz o aperto, cifra os
+/// pedidos e decifra o que a porta mandou para a captura.
+///
+/// É o mesmo `sigilo` do cliente de verdade. A fumaça conversa pelos
+/// sockets do QEMU com o cliente do `xtask`; aqui a conversa é pela captura
+/// do driver, e o que se confere é o kernel — o que ele aceita, recusa e
+/// responde.
+struct AgenteDeTeste {
+    p: u8,
+    transporte: Option<sigilo::Transporte>,
+    leitor: sigilo::quadro::Leitor,
+    /// O texto decifrado que ainda não fechou uma linha.
+    texto: alloc::string::String,
+    /// O motivo da última recusa que o Duke mandou, se mandou.
+    recusa: Option<alloc::string::String>,
+}
+
+impl AgenteDeTeste {
+    /// Conecta pela porta `p` com a chave `chave`, fazendo o aperto inteiro.
+    /// A porta precisa estar com a captura ligada.
+    fn conectar(
+        p: u8,
+        sessao: &mut crate::agent::SessaoDeTeste,
+        chave: &[u8; 32],
+    ) -> Result<Self, &'static str> {
+        use sigilo::quadro::{Tipo, montar};
+        let duke = crate::identidade::publica_do_duke().ok_or("o Duke nao tem chave")?;
+        let efemera = crate::aleatorio::chave().map_err(|_| "sem entropia")?;
+        let mut mensagem = alloc::vec![0u8; 1024];
+        let (n, aguardando) = sigilo::Iniciador::novo(sigilo::PROLOGO, chave, &duke)
+            .escrever(efemera, b"", &mut mensagem)
+            .map_err(|_| "o aperto nao foi escrito")?;
+        // O que a porta tinha mandado antes é de outra conversa: a captura
+        // entrega o que saiu desde a última leitura, e esta leitura a esvazia.
+        let _ = crate::virtio::console::capturado(p);
+        let mut agente = AgenteDeTeste {
+            p,
+            transporte: None,
+            leitor: sigilo::quadro::Leitor::novo(),
+            texto: alloc::string::String::new(),
+            recusa: None,
+        };
+        crate::virtio::console::simular(p, &montar(Tipo::Inicio, &mensagem[..n]).unwrap());
+        sessao.atender();
+
+        let mut aguardando = Some(aguardando);
+        for (tipo, corpo) in agente.quadros_novos() {
+            match tipo {
+                Tipo::Resposta => {
+                    let mut carga = alloc::vec![0u8; corpo.len()];
+                    let (_, t) = aguardando
+                        .take()
+                        .ok_or("duas respostas ao aperto")?
+                        .ler(&corpo, &mut carga)
+                        .map_err(|_| "a resposta do aperto nao abriu")?;
+                    agente.transporte = Some(t);
+                }
+                Tipo::Recusa => {
+                    agente.recusa = Some(String::from_utf8_lossy(&corpo).into_owned());
+                }
+                _ => return Err("quadro inesperado no aperto"),
+            }
+        }
+        Ok(agente)
+    }
+
+    /// Os quadros que apareceram na captura desde a última leitura.
+    fn quadros_novos(&mut self) -> alloc::vec::Vec<(sigilo::quadro::Tipo, alloc::vec::Vec<u8>)> {
+        let mut quadros = alloc::vec::Vec::new();
+        for b in crate::virtio::console::capturado(self.p) {
+            if let Ok(Some((tipo, corpo))) = self.leitor.empurrar(b) {
+                quadros.push((tipo, corpo.to_vec()));
+            }
+        }
+        quadros
+    }
+
+    /// Um pedido cifrado, num quadro pronto para mandar.
+    fn quadro(&mut self, texto: &str) -> Result<alloc::vec::Vec<u8>, &'static str> {
+        let t = self.transporte.as_mut().ok_or("sem sessao")?;
+        let mut cifrado = alloc::vec![0u8; texto.len() + 16];
+        let n = t
+            .cifrar(texto.as_bytes(), &mut cifrado)
+            .map_err(|_| "nao cifrou")?;
+        Ok(sigilo::quadro::montar(sigilo::quadro::Tipo::Dados, &cifrado[..n]).unwrap())
+    }
+
+    /// Manda um pedido — uma linha — e deixa a porta atender.
+    fn pedir(
+        &mut self,
+        sessao: &mut crate::agent::SessaoDeTeste,
+        linha: &str,
+    ) -> Result<(), &'static str> {
+        let q = self.quadro(&alloc::format!("{linha}\n"))?;
+        crate::virtio::console::simular(self.p, &q);
+        sessao.atender();
+        Ok(())
+    }
+
+    /// As respostas inteiras que chegaram desde a última leitura.
+    fn respostas(&mut self) -> alloc::vec::Vec<alloc::string::String> {
+        for (tipo, corpo) in self.quadros_novos() {
+            match tipo {
+                sigilo::quadro::Tipo::Dados => {
+                    let Some(t) = self.transporte.as_mut() else {
+                        continue;
+                    };
+                    let mut claro = alloc::vec![0u8; corpo.len()];
+                    if let Ok(n) = t.decifrar(&corpo, &mut claro) {
+                        self.texto.push_str(&String::from_utf8_lossy(&claro[..n]));
+                    }
+                }
+                sigilo::quadro::Tipo::Recusa => {
+                    self.recusa = Some(String::from_utf8_lossy(&corpo).into_owned());
+                }
+                _ => {}
+            }
+        }
+        let mut linhas = alloc::vec::Vec::new();
+        while let Some(fim) = self.texto.find('\n') {
+            let linha: alloc::string::String = self.texto.drain(..=fim).collect();
+            linhas.push(alloc::string::String::from(linha.trim_end()));
+        }
+        linhas
+    }
+}
+
+use alloc::string::String;
+
+/// Registra os agentes de teste, roda `f` com as portas capturadas, e
+/// devolve tudo como estava: sessões, registro e capturas.
+fn com_agentes_de_teste(f: impl FnOnce() -> Resultado) -> Resultado {
+    use crate::virtio::console;
+    for p in 1..=console::PORTAS {
+        crate::identidade::registrar_agente_de_teste(
+            sigilo::publica_de(&chave_de_teste(p)),
+            &nome_de_teste(p),
+        );
+        console::capturar(p, true);
+    }
+    let resultado = f();
+    for p in 1..=console::PORTAS {
+        console::capturar(p, false);
+        let _ = crate::sessoes::esquecer(p);
+        // Uma geração nova: a próxima sessão de teste começa do aperto, e
+        // não herda o estado encerrado desta.
+        console::simular_conexao(p, true);
+    }
+    crate::identidade::esquecer_registrados();
+    resultado
 }
 
 /// Cada agente é atendido na sua sessão: o pedido de um não cola no do
-/// outro, e a resposta volta só pela porta de quem pediu, com o número dela.
+/// outro, e a resposta volta só pela porta de quem pediu, com o número
+/// dela e o nome de quem provou a chave.
 ///
 /// # O que este caso protege
 ///
 /// O que torna vários agentes possíveis: um quadro sendo montado por
-/// canal, e a saída de cada canal separada. Os pedidos chegam intercalados
-/// — metade do da porta 1, o da 2 inteiro, o resto do da 1 —, que é o que
-/// acontece quando dois agentes escrevem ao mesmo tempo.
+/// canal, uma sessão cifrada por canal, e a saída de cada canal separada.
+/// Os pedidos chegam intercalados — metade do quadro cifrado da porta 1, o
+/// da 2 inteiro, o resto do da 1 —, que é o que acontece quando dois
+/// agentes escrevem ao mesmo tempo; e o da porta 3 vem partido em **dois
+/// quadros**, que o montador junta depois de decifrar.
 fn agentes_cada_sessao_responde_pelo_seu_canal() -> Resultado {
     use crate::agent::SessaoDeTeste;
     use crate::virtio::console;
-    for p in 1..=console::PORTAS {
-        console::capturar(p, true);
-    }
-    let resultado = sessoes_intercaladas();
-    for p in 1..=console::PORTAS {
-        console::capturar(p, false);
-    }
-    resultado?;
-
-    // Sem ninguém do outro lado, a resposta não tem a quem ir: é
-    // descartada, e contada.
-    console::simular_conexao(4, false);
-    let antes = console::perdidos_na_saida(4);
-    console::simular(4, pedido_de_sessao(9).as_bytes());
-    console::simular(4, b"\n");
-    SessaoDeTeste::porta(4).atender();
-    if console::perdidos_na_saida(4) <= antes {
-        return Err("a resposta a uma porta sem agente nao foi contada como perdida");
-    }
-    Ok(())
-}
-
-fn sessoes_intercaladas() -> Resultado {
-    use crate::agent::SessaoDeTeste;
-    use crate::virtio::console;
-    let mut sessoes = [
-        SessaoDeTeste::porta(1),
-        SessaoDeTeste::porta(2),
-        SessaoDeTeste::porta(3),
-        SessaoDeTeste::porta(4),
-    ];
-    let um = pedido_de_sessao(101);
-    let (comeco, fim) = um.split_at(um.len() / 2);
-    console::simular(1, comeco.as_bytes());
-    sessoes[0].atender();
-    console::simular(2, alloc::format!("{}\n", pedido_de_sessao(202)).as_bytes());
-    sessoes[1].atender();
-    console::simular(1, alloc::format!("{fim}\n").as_bytes());
-    sessoes[0].atender();
-    for p in 3..=4u8 {
-        let id = p as u32 * 101;
-        console::simular(p, alloc::format!("{}\n", pedido_de_sessao(id)).as_bytes());
-        sessoes[p as usize - 1].atender();
-    }
-    for p in 1..=4u8 {
-        let respostas = respostas_da_porta(p);
-        let id = p as u32 * 101;
-        let esperada =
-            alloc::format!(r#""id":{id},"result":{{"session":{p},"transport":"virtio-console"}}"#);
-        if respostas.len() != 1 || !respostas[0].contains(&esperada) {
-            crate::log_error!("teste", "porta {}: {:?}", p, respostas);
-            return Err("uma sessao nao respondeu so o pedido dela, pelo canal dela");
+    com_agentes_de_teste(|| {
+        let mut sessoes = [
+            SessaoDeTeste::porta(1),
+            SessaoDeTeste::porta(2),
+            SessaoDeTeste::porta(3),
+            SessaoDeTeste::porta(4),
+        ];
+        let mut agentes = alloc::vec::Vec::new();
+        for p in 1..=4u8 {
+            let a = AgenteDeTeste::conectar(p, &mut sessoes[p as usize - 1], &chave_de_teste(p))?;
+            if a.transporte.is_none() {
+                crate::log_error!("teste", "porta {}: recusa {:?}", p, a.recusa);
+                return Err("um agente registrado nao completou o aperto");
+            }
+            agentes.push(a);
         }
-    }
-    Ok(())
+
+        let um = agentes[0].quadro(&alloc::format!("{}\n", pedido_de_sessao(101)))?;
+        let (comeco, fim) = um.split_at(um.len() / 2);
+        console::simular(1, comeco);
+        sessoes[0].atender();
+        agentes[1].pedir(&mut sessoes[1], &pedido_de_sessao(202))?;
+        console::simular(1, fim);
+        sessoes[0].atender();
+
+        let tres = pedido_de_sessao(303);
+        let (a, b) = tres.split_at(tres.len() / 2);
+        let qa = agentes[2].quadro(a)?;
+        let qb = agentes[2].quadro(&alloc::format!("{b}\n"))?;
+        console::simular(3, &qa);
+        console::simular(3, &qb);
+        sessoes[2].atender();
+        agentes[3].pedir(&mut sessoes[3], &pedido_de_sessao(404))?;
+
+        for p in 1..=4u8 {
+            let respostas = agentes[p as usize - 1].respostas();
+            let id = p as u32 * 101;
+            let esperada = alloc::format!(
+                r#""id":{id},"result":{{"session":{p},"transport":"virtio-console","authenticated":true,"agent":"teste-{p}""#
+            );
+            if respostas.len() != 1 || !respostas[0].contains(&esperada) {
+                crate::log_error!("teste", "porta {}: {:?}", p, respostas);
+                return Err("uma sessao nao respondeu so o pedido dela, pelo canal dela");
+            }
+        }
+
+        // Quem fecha a porta leva a sessão: as chaves dela somem, e o que
+        // ainda chegar por ela não é respondido — a recusa que o Duke manda
+        // não tem a quem ir, e é contada como perdida.
+        console::capturar(4, false);
+        let antes = console::perdidos_na_saida(4);
+        let q = agentes[3].quadro(&alloc::format!("{}\n", pedido_de_sessao(9)))?;
+        console::simular_conexao(4, false);
+        if crate::sessoes::identidade(4).is_some() {
+            return Err("a sessao ficou de pe depois de o agente fechar a porta");
+        }
+        console::simular(4, &q);
+        sessoes[3].atender();
+        if console::perdidos_na_saida(4) <= antes {
+            return Err("a saida para uma porta fechada nao foi contada como perdida");
+        }
+        Ok(())
+    })
 }
 
-/// Uma conexão nova numa porta recomeça o quadro: o fragmento de quem saiu
-/// não cola no pedido de quem chegou.
+/// Uma conexão nova numa porta recomeça do aperto: o fragmento de quem saiu
+/// não cola em nada de quem chegou.
 ///
 /// # O que este caso protege
 ///
-/// O que a serial não consegue: ela não enxerga a conexão, e convive com o
-/// fragmento por um teto de ociosidade. A porta enxerga — o dispositivo
-/// avisa cada abertura —, e o caso confere as duas pontas: sem conexão
-/// nova, o fragmento colado dá um pedido quebrado; com ela, só o pedido de
-/// quem chegou é respondido.
+/// Sem conexão nova, meio quadro seguido de outro desalinha o leitor, e o
+/// que sai do desalinho não abre: a sessão é encerrada com uma recusa, e o
+/// pedido não é respondido — é o que um fluxo cifrado deve fazer com bytes
+/// que não fecham. Com conexão nova no meio, o meio quadro fica com quem
+/// saiu, o aperto recomeça, e só o pedido de quem chegou é respondido.
 fn agentes_uma_conexao_nova_recomeca_o_quadro() -> Resultado {
     use crate::agent::SessaoDeTeste;
     use crate::virtio::console;
-    console::capturar(3, true);
-    let resultado = (|| -> Resultado {
+    com_agentes_de_teste(|| {
         let mut sessao = SessaoDeTeste::porta(3);
-        let fragmento = r#"{"jsonrpc":"2.0","id":7,"method":"agent.pi"#;
-        // Sem conexão nova, o fragmento cola, e o pedido se perde.
-        console::simular(3, fragmento.as_bytes());
-        console::simular(3, alloc::format!("{}\n", pedido_de_sessao(8)).as_bytes());
+        let mut agente = AgenteDeTeste::conectar(3, &mut sessao, &chave_de_teste(3))?;
+        let meio = agente.quadro(&alloc::format!("{}\n", pedido_de_sessao(7)))?;
+        let inteiro = agente.quadro(&alloc::format!("{}\n", pedido_de_sessao(8)))?;
+        console::simular(3, &meio[..meio.len() / 2]);
+        console::simular(3, &inteiro);
         sessao.atender();
-        let colado = respostas_da_porta(3);
-        if colado.len() != 1 || colado[0].contains(r#""id":8,"result""#) {
-            crate::log_error!("teste", "sem conexao nova: {:?}", colado);
-            return Err("o fragmento colado nao estragou o pedido: o caso nao prova nada");
+        let colado = agente.respostas();
+        if !colado.is_empty() || agente.recusa.is_none() {
+            crate::log_error!(
+                "teste",
+                "sem conexao nova: {:?} {:?}",
+                colado,
+                agente.recusa
+            );
+            return Err("meio quadro colado nao encerrou a sessao: o caso nao prova nada");
         }
-        // Com conexão nova no meio, o fragmento fica com quem saiu.
-        console::simular(3, fragmento.as_bytes());
+
+        // Conexão nova: o aperto de novo, e o pedido de quem chegou.
+        console::simular(3, &meio[..meio.len() / 2]);
         sessao.atender();
         console::simular_conexao(3, true);
-        console::simular(3, alloc::format!("{}\n", pedido_de_sessao(9)).as_bytes());
-        sessao.atender();
-        let respostas = respostas_da_porta(3);
+        let mut novo = AgenteDeTeste::conectar(3, &mut sessao, &chave_de_teste(3))?;
+        novo.pedir(&mut sessao, &pedido_de_sessao(9))?;
+        let respostas = novo.respostas();
         if respostas.len() != 1 || !respostas[0].contains(r#""id":9,"result""#) {
-            crate::log_error!("teste", "com conexao nova: {:?}", respostas);
-            return Err("o fragmento de uma conexao colou no pedido da seguinte");
+            crate::log_error!(
+                "teste",
+                "com conexao nova: {:?} {:?}",
+                respostas,
+                novo.recusa
+            );
+            return Err("o fragmento de uma conexao atrapalhou a seguinte");
         }
         Ok(())
-    })();
-    console::capturar(3, false);
-    resultado
+    })
 }
 
 /// O log diz qual agente agiu: o número da sessão por onde o pedido
@@ -10362,19 +10539,15 @@ fn agentes_uma_conexao_nova_recomeca_o_quadro() -> Resultado {
 /// e não um que o agente diga.
 fn agentes_o_log_diz_qual_agente() -> Resultado {
     use crate::agent::SessaoDeTeste;
-    use crate::virtio::console;
-    console::capturar(2, true);
-    let resultado = (|| -> Resultado {
+    com_agentes_de_teste(|| {
         let mut sessao = SessaoDeTeste::porta(2);
-        let pedido = |id: u32, acao: &str| {
-            alloc::format!(
-                r#"{{"jsonrpc":"2.0","id":{id},"method":"ui.act","params":{{"id":{},"action":"{acao}"}}}}"#,
-                crate::ui::ID_DA_LINHA_DE_COMANDO
-            )
-        };
-        console::simular(2, alloc::format!("{}\n", pedido(1, "cancel")).as_bytes());
-        sessao.atender();
-        let respostas = respostas_da_porta(2);
+        let mut agente = AgenteDeTeste::conectar(2, &mut sessao, &chave_de_teste(2))?;
+        let pedido = alloc::format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"ui.act","params":{{"id":{},"action":"cancel"}}}}"#,
+            crate::ui::ID_DA_LINHA_DE_COMANDO
+        );
+        agente.pedir(&mut sessao, &pedido)?;
+        let respostas = agente.respostas();
         if respostas.len() != 1 || !respostas[0].contains(r#""ok":true"#) {
             crate::log_error!("teste", "ui.act pela porta 2: {:?}", respostas);
             return Err("o ui.act pela porta 2 nao foi atendido");
@@ -10387,8 +10560,312 @@ fn agentes_o_log_diz_qual_agente() -> Resultado {
             return Err("o log nao diz que foi o agente da sessao 2");
         }
         Ok(())
+    })
+}
+
+/// Uma chave fora do registro não entra, mesmo provando que é dela.
+///
+/// # O que este caso protege
+///
+/// A diferença entre autenticar e autorizar. O aperto de uma chave
+/// desconhecida é **válido** — ela tem a privada, a mensagem abre —, e o
+/// que a barra é o registro. Sem a conferência, qualquer um que gerasse uma
+/// chave entraria.
+fn sigilo_chave_fora_do_registro_e_recusada() -> Resultado {
+    use crate::agent::SessaoDeTeste;
+    com_agentes_de_teste(|| {
+        let (recusados, _) = crate::sessoes::contadores();
+        let mut sessao = SessaoDeTeste::porta(1);
+        let agente = AgenteDeTeste::conectar(1, &mut sessao, &[0x99; 32])?;
+        if agente.transporte.is_some() {
+            return Err("uma chave fora do registro completou o aperto");
+        }
+        if agente.recusa.as_deref() != Some("chave fora do registro") {
+            crate::log_error!("teste", "recusa: {:?}", agente.recusa);
+            return Err("a recusa nao disse o motivo");
+        }
+        if crate::sessoes::identidade(1).is_some() {
+            return Err("a porta ficou com uma identidade recusada");
+        }
+        if crate::sessoes::contadores().0 <= recusados {
+            return Err("a recusa nao foi contada");
+        }
+        Ok(())
+    })
+}
+
+/// Um quadro adulterado encerra a sessão, e o original depois dele não é
+/// respondido.
+///
+/// # O que este caso protege
+///
+/// A integridade, e o que fazer quando ela falha. Um bit trocado não pode
+/// virar um pedido diferente executado; e, depois do erro, a sessão não
+/// continua — o contador não sabe mais onde o outro lado está, e aceitar o
+/// próximo seria deixar quem está no meio tentar de novo.
+fn sigilo_quadro_adulterado_encerra_a_sessao() -> Resultado {
+    use crate::agent::SessaoDeTeste;
+    use crate::virtio::console;
+    com_agentes_de_teste(|| {
+        let mut sessao = SessaoDeTeste::porta(2);
+        let mut agente = AgenteDeTeste::conectar(2, &mut sessao, &chave_de_teste(2))?;
+        let original = agente.quadro(&alloc::format!("{}\n", pedido_de_sessao(1)))?;
+        let mut adulterado = original.clone();
+        let ultimo = adulterado.len() - 1;
+        adulterado[ultimo] ^= 0x01;
+        console::simular(2, &adulterado);
+        sessao.atender();
+        console::simular(2, &original);
+        sessao.atender();
+        let respostas = agente.respostas();
+        if !respostas.is_empty() {
+            crate::log_error!("teste", "respostas: {:?}", respostas);
+            return Err("um quadro depois do adulterado foi respondido");
+        }
+        if agente.recusa.is_none() || crate::sessoes::identidade(2).is_some() {
+            return Err("o quadro adulterado nao encerrou a sessao");
+        }
+        Ok(())
+    })
+}
+
+/// Um quadro repetido encerra a sessão.
+///
+/// # O que este caso protege
+///
+/// A repetição: quem grava um pedido cifrado no caminho não pode mandá-lo
+/// de novo e fazê-lo executar duas vezes. O contador do Noise é a defesa, e
+/// este caso confere que o kernel a respeita.
+fn sigilo_quadro_repetido_encerra_a_sessao() -> Resultado {
+    use crate::agent::SessaoDeTeste;
+    use crate::virtio::console;
+    com_agentes_de_teste(|| {
+        let mut sessao = SessaoDeTeste::porta(3);
+        let mut agente = AgenteDeTeste::conectar(3, &mut sessao, &chave_de_teste(3))?;
+        let q = agente.quadro(&alloc::format!("{}\n", pedido_de_sessao(5)))?;
+        console::simular(3, &q);
+        sessao.atender();
+        if agente.respostas().len() != 1 {
+            return Err("o pedido original nao foi respondido");
+        }
+        console::simular(3, &q);
+        sessao.atender();
+        if !agente.respostas().is_empty() {
+            return Err("o pedido repetido foi respondido de novo");
+        }
+        if agente.recusa.is_none() || crate::sessoes::identidade(3).is_some() {
+            return Err("o quadro repetido nao encerrou a sessao");
+        }
+        Ok(())
+    })
+}
+
+/// Uma resposta que não saiu inteira encerra a sessão.
+///
+/// # O que este caso protege
+///
+/// O contador do Noise. Um quadro cifrado que a porta não aceitou — a fila
+/// de saída cheia — andou o contador do lado do Duke e não o do agente: a
+/// próxima resposta usaria um nonce que o agente não espera, e nada mais
+/// abriria. Seguir com a sessão seria fingir que ela ainda funciona; o caso
+/// confere que ela acaba ali, e é contada.
+fn sigilo_resposta_que_nao_sai_encerra_a_sessao() -> Resultado {
+    use crate::agent::SessaoDeTeste;
+    use crate::virtio::console;
+    com_agentes_de_teste(|| {
+        let mut sessao = SessaoDeTeste::porta(1);
+        let mut agente = AgenteDeTeste::conectar(1, &mut sessao, &chave_de_teste(1))?;
+        let (_, encerradas) = crate::sessoes::contadores();
+        console::recusar_envio(1, true);
+        let resultado = agente.pedir(&mut sessao, &pedido_de_sessao(1));
+        console::recusar_envio(1, false);
+        resultado?;
+        if crate::sessoes::identidade(1).is_some() {
+            return Err("a sessao seguiu depois de uma resposta que nao saiu");
+        }
+        if crate::sessoes::contadores().1 <= encerradas {
+            return Err("o fim da sessao nao foi contado");
+        }
+        Ok(())
+    })
+}
+
+/// A chave privada do Duke não se lê de dentro da máquina.
+///
+/// # O que este caso protege
+///
+/// O [`crate::vfs::DIRETORIO_RESERVADO`]: nem o `fs.read` do agente, nem o
+/// caminho com barras dobradas ou `.`, nem o `..` alcançam a chave — e o
+/// kernel continua lendo-a pelo caminho dele.
+fn sigilo_a_chave_do_duke_nao_se_le() -> Resultado {
+    use crate::vfs::{Erro, ler_segredo, ler_tudo, listar};
+    let caminho = crate::identidade::CAMINHO_DA_CHAVE;
+    if ler_tudo(caminho).err() != Some(Erro::Reservado)
+        || ler_tudo("/etc//duke/./privado/chave").err() != Some(Erro::Reservado)
+        || listar("/etc/duke/privado", |_| {}).err() != Some(Erro::Reservado)
+    {
+        return Err("a chave do Duke foi alcancada pelo VFS");
+    }
+    if ler_tudo("/etc/duke/agentes/../privado/chave").err() != Some(Erro::CaminhoInvalido) {
+        return Err("um caminho com .. nao foi recusado");
+    }
+    let r = chamar("fs.read", r#"{"path":"/etc/duke/privado/chave"}"#)?;
+    if !r.contains("reservado ao kernel") {
+        crate::log_error!("teste", "fs.read: {}", r);
+        return Err("o fs.read do agente leu a chave do Duke");
+    }
+    match ler_segredo(caminho) {
+        Ok(bytes) if bytes.len() == 65 => {}
+        _ => return Err("o kernel nao le a propria chave"),
+    }
+    if ler_segredo(crate::identidade::CAMINHO_DOS_AGENTES).is_ok() {
+        return Err("ler_segredo leu fora do diretorio reservado");
+    }
+    // E o registro da imagem chegou: os quatro agentes e o administrador.
+    if crate::identidade::agentes().len() != 4 || crate::identidade::quantos_administradores() != 1
+    {
+        return Err("o registro da imagem nao foi carregado");
+    }
+    Ok(())
+}
+
+/// O gerador foi semeado pelo `virtio-rng`, e produz.
+fn sigilo_o_gerador_tem_semente() -> Resultado {
+    if !crate::virtio::entropia::presente() || !crate::aleatorio::semeado() {
+        return Err("sem fonte de entropia, ou o gerador nao foi semeado");
+    }
+    let a = crate::aleatorio::chave().map_err(|_| "o gerador falhou")?;
+    let b = crate::aleatorio::chave().map_err(|_| "o gerador falhou")?;
+    if a == b || a == [0; 32] {
+        return Err("o gerador repetiu, ou devolveu zeros");
+    }
+    let r = chamar("system.info", "{}")?;
+    if !r.contains(r#""entropy":{"source":"virtio-rng","present":true,"generator_seeded":true"#) {
+        crate::log_error!("teste", "system.info: {}", r);
+        return Err("o system.info nao relata a entropia");
+    }
+    Ok(())
+}
+
+/// A chave do administrador de teste. Ver
+/// [`crate::identidade::registrar_administrador_de_teste`].
+const ADMIN_DE_TESTE: [u8; 32] = [0x41; 32];
+
+/// Pede um desafio e devolve o número, o nonce e a efêmera.
+fn desafio() -> Result<(u64, [u8; 32], [u8; 32]), &'static str> {
+    let r = chamar("admin.challenge", "{}")?;
+    let j = Json(r.as_bytes());
+    let id = j
+        .member("challenge")
+        .and_then(|v| v.as_u64())
+        .ok_or("sem desafio")?;
+    let nonce = j
+        .member("nonce")
+        .and_then(|v| v.as_str())
+        .and_then(sigilo::de_hex)
+        .ok_or("sem nonce")?;
+    let efemera = j
+        .member("ephemeral")
+        .and_then(|v| v.as_str())
+        .and_then(sigilo::de_hex)
+        .ok_or("sem efemera")?;
+    Ok((id, nonce, efemera))
+}
+
+/// Um `admin.execute` com a prova calculada para `prova_de` e mandado com
+/// `parametros`.
+fn executar_admin(
+    sessao: u8,
+    desafio: (u64, [u8; 32], [u8; 32]),
+    chave: &[u8; 32],
+    prova_de: &str,
+    parametros: &str,
+) -> Result<alloc::string::String, &'static str> {
+    let (id, nonce, efemera) = desafio;
+    let publica = sigilo::publica_de(chave);
+    let contexto = sigilo::administracao::Contexto {
+        nonce: &nonce,
+        sessao,
+        administrador: &publica,
+        efemera: &efemera,
+        comando: "agent.register",
+        parametros: prova_de,
+    };
+    let prova = sigilo::administracao::provar(chave, &contexto).map_err(|_| "sem prova")?;
+    let mut escapado = alloc::string::String::new();
+    for c in parametros.chars() {
+        if c == '"' || c == '\\' {
+            escapado.push('\\');
+        }
+        escapado.push(c);
+    }
+    let pedido = alloc::format!(
+        r#"{{"challenge":{id},"command":"agent.register","params":"{escapado}","admin":"{}","proof":"{}"}}"#,
+        sigilo::hex(&publica),
+        sigilo::hex(&prova)
+    );
+    crate::agent::sessao::com_sessao(sessao, || chamar("admin.execute", &pedido))
+}
+
+/// O registro de um agente exige a prova de um administrador — e a prova
+/// vale para aquele desafio, aquela sessão e aqueles parâmetros, uma vez.
+///
+/// # O que este caso protege
+///
+/// A autenticação própria das operações administrativas, independente do
+/// canal: este caso roda pela sessão 0, a serial aberta, e mesmo nela nada
+/// entra sem prova.
+fn admin_registro_exige_prova() -> Resultado {
+    let novo = sigilo::publica_de(&[0x77; 32]);
+    let parametros = alloc::format!(r#"{{"key":"{}","name":"novo"}}"#, sigilo::hex(&novo));
+    let resultado = (|| -> Resultado {
+        crate::identidade::registrar_administrador_de_teste(sigilo::publica_de(&ADMIN_DE_TESTE));
+
+        // Sem administrador registrado para a chave: recusado.
+        let r = executar_admin(0, desafio()?, &[0x42; 32], &parametros, &parametros)?;
+        if !r.contains("chave fora do registro de administradores") {
+            crate::log_error!("teste", "{}", r);
+            return Err("uma chave que nao e de administrador foi aceita");
+        }
+        // A prova feita para outros parâmetros: recusada.
+        let outro = parametros.replace("novo", "outro");
+        let r = executar_admin(0, desafio()?, &ADMIN_DE_TESTE, &outro, &parametros)?;
+        if !r.contains("a prova nao confere") {
+            crate::log_error!("teste", "{}", r);
+            return Err("uma prova de outros parametros foi aceita");
+        }
+        // O desafio pedido na sessão 0 usado na sessão 2: desconhecido lá.
+        let r = executar_admin(2, desafio()?, &ADMIN_DE_TESTE, &parametros, &parametros)?;
+        if !r.contains("desafio desconhecido nesta sessao") {
+            crate::log_error!("teste", "{}", r);
+            return Err("um desafio valeu em outra sessao");
+        }
+        if crate::identidade::agente(&novo).is_some() {
+            return Err("uma prova recusada registrou o agente mesmo assim");
+        }
+
+        // A prova certa: registra.
+        let d = desafio()?;
+        let r = executar_admin(0, d, &ADMIN_DE_TESTE, &parametros, &parametros)?;
+        if !r.contains(r#""executed":true"#)
+            || crate::identidade::agente(&novo).as_deref() != Some("novo")
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("a prova certa nao registrou o agente");
+        }
+        // E o mesmo desafio, de novo, já não vale.
+        let r = executar_admin(0, d, &ADMIN_DE_TESTE, &parametros, &parametros)?;
+        if !r.contains("desafio desconhecido nesta sessao") {
+            crate::log_error!("teste", "{}", r);
+            return Err("um desafio valeu duas vezes");
+        }
+        // O registro não é um comando que se chame direto.
+        if registry::encontrar("agent.register").is_some() {
+            return Err("agent.register esta na tabela de comandos comuns");
+        }
+        Ok(())
     })();
-    console::capturar(2, false);
+    crate::identidade::esquecer_registrados();
     resultado
 }
 
@@ -13387,6 +13864,34 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "agentes: o log diz qual agente",
         f: agentes_o_log_diz_qual_agente,
+    },
+    Caso {
+        nome: "sigilo: uma chave fora do registro e recusada",
+        f: sigilo_chave_fora_do_registro_e_recusada,
+    },
+    Caso {
+        nome: "sigilo: um quadro adulterado encerra a sessao",
+        f: sigilo_quadro_adulterado_encerra_a_sessao,
+    },
+    Caso {
+        nome: "sigilo: um quadro repetido encerra a sessao",
+        f: sigilo_quadro_repetido_encerra_a_sessao,
+    },
+    Caso {
+        nome: "sigilo: uma resposta que nao sai encerra a sessao",
+        f: sigilo_resposta_que_nao_sai_encerra_a_sessao,
+    },
+    Caso {
+        nome: "sigilo: a chave do Duke nao se le",
+        f: sigilo_a_chave_do_duke_nao_se_le,
+    },
+    Caso {
+        nome: "sigilo: o gerador tem semente",
+        f: sigilo_o_gerador_tem_semente,
+    },
+    Caso {
+        nome: "admin: o registro exige prova",
+        f: admin_registro_exige_prova,
     },
     Caso {
         nome: "usb: o relatorio hid vira teclas",
