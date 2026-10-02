@@ -6742,9 +6742,12 @@ fn sob_agentes(arch: Arquitetura) -> Result<(), String> {
         "  [atividade] ok  a porta 3 ve as duas no agent.list, com o ultimo comando e a ultima \
          acao; a barra diz que a porta 1 agiu por ultimo"
     );
-    // As portas só aceitam um cliente cada: as conexões de antes saem, ou
-    // o fio da porta 2 ficaria insistindo numa porta ocupada.
-    drop((um, tres, agente));
+    // As sessões já abertas vão para os fios, em vez de sair e voltar:
+    // fechar uma porta e reconectar logo em seguida é uma corrida — o aviso
+    // de que a conexão antiga caiu pode chegar ao kernel depois do aperto
+    // da nova, e derrubá-la. A porta 4 está livre, e conecta. Os nonces da
+    // rodada começam em 10: a sessão da porta 1 já mandou com o 1.
+    let mut abertas: Vec<Option<AgenteNaPorta>> = vec![Some(um), Some(agente), Some(tres), None];
 
     // Os quatro ao mesmo tempo, de verdade: um fio do hospedeiro por porta,
     // soltos juntos por uma barreira. Cada um manda uma mensagem a cada um
@@ -6756,8 +6759,12 @@ fn sob_agentes(arch: Arquitetura) -> Result<(), String> {
     let fios: Vec<_> = (1..=PORTAS_DE_AGENTE)
         .map(|porta| {
             let barreira = barreira.clone();
+            let aberta = abertas[usize::from(porta) - 1].take();
             std::thread::spawn(move || -> Result<(), String> {
-                let mut agente = AgenteNaPorta::conectar(arch, porta)?;
+                let mut agente = match aberta {
+                    Some(a) => a,
+                    None => AgenteNaPorta::conectar(arch, porta)?,
+                };
                 barreira.esperar()?;
                 let outros: Vec<u8> = (1..=PORTAS_DE_AGENTE).filter(|&q| q != porta).collect();
                 for (n, para) in outros.iter().enumerate() {
@@ -6766,7 +6773,7 @@ fn sob_agentes(arch: Arquitetura) -> Result<(), String> {
                         &format!(
                             r#"{{"to":"{}","body":"todos: de {porta} para {para}","nonce":{}}}"#,
                             chaves::nome_do_agente(*para),
-                            n + 1
+                            n + 10
                         ),
                     )?;
                     if !r.contains(r#""ok":true"#) {
