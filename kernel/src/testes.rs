@@ -5068,6 +5068,22 @@ fn terminal_o_interpretador_do_outro_lado() -> Resultado {
     Ok(())
 }
 
+/// Espera o servidor de janelas e o Terminal saírem de verdade: o canal sem
+/// ouvinte vivo. Dizer "encerrado" não é ter saído — o fio ainda percorre a
+/// saída, e até lá o canal tem ouvinte, e um pedido a ele é aceito. Um caso
+/// que deixa o servidor saindo faz o seguinte ver um servidor no ar.
+fn esperar_sem_servidor_de_janelas() -> Resultado {
+    use protocolo::usuario::evento::{CANAL_DAS_JANELAS, CANAL_DO_TERMINAL};
+    esperar_ate(
+        || {
+            crate::eventos::estado(CANAL_DAS_JANELAS).is_none()
+                && crate::eventos::estado(CANAL_DO_TERMINAL).is_none()
+        },
+        600,
+    )
+    .map_err(|_| "o servidor de janelas, ou o Terminal, continuou no ar")
+}
+
 /// Duas janelas de dois processos: cada uma recebe a sua entrada, e o foco
 /// passa de um ao outro no aperto do botão.
 ///
@@ -5097,7 +5113,9 @@ fn janelas_cada_superficie_recebe_a_sua_entrada() -> Resultado {
     let _ = esperar_ate(|| !crate::superficies::foco_ativo(), 200);
     crate::superficies::devolver_foco();
     crate::teclado::esvaziar();
-    resultado
+    // O servidor que o caso fechou sai de verdade antes do próximo caso.
+    let saiu = esperar_sem_servidor_de_janelas();
+    resultado.and(saiu)
 }
 
 fn entradas_separadas() -> Resultado {
@@ -5341,7 +5359,10 @@ fn terminal_operado() -> Resultado {
     mover(1, h as i64 - 2);
     crate::teclado::esvaziar();
 
-    // Sem servidor e sem Terminal, o botão é recusado com o motivo.
+    // Sem servidor e sem Terminal, o botão é recusado com o motivo. O de um
+    // caso anterior pode ainda estar saindo: o caso espera que saia, e
+    // diz, se não sair.
+    esperar_sem_servidor_de_janelas()?;
     if crate::ui::agir(
         ID_DO_BOTAO_TERMINAL,
         Acao::Pressionar,
