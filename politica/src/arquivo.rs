@@ -689,6 +689,25 @@ impl Politica {
                         depois.nome
                     )));
                 }
+                // O alcance ao papel do administrador é do teto — para que o
+                // alcance do sistema e o dele caibam nele —, e não se dá a
+                // mais ninguém em tempo de execução: só o papel local, o do
+                // sistema, o recebe. Um operador ou um observador que
+                // alcançasse o administrador seria um canal para levar quem
+                // tem o papel mais forte a agir.
+                if p.recurso_e_destino() {
+                    let do_teto = alloc::format!("{PREFIXO_DE_DESTINO}{teto}");
+                    let tem = |r: Option<&Vec<String>>| r.is_some_and(|r| r.contains(&do_teto));
+                    let ganhou = tem(depois.recursos.get(&p))
+                        && !antes.is_some_and(|a| tem(a.recursos.get(&p)));
+                    if ganhou && depois.nome != self.local {
+                        return Err(Recusa::Proibida(format!(
+                            "a mudanca daria a `{}` o alcance a `{do_teto}`, que so o sistema e \
+                             o proprio administrador tem",
+                            depois.nome
+                        )));
+                    }
+                }
                 if (!ja_tinha || alargou)
                     && !recurso_contido(p, depois.recursos.get(&p), t.recursos.get(&p))
                 {
@@ -785,8 +804,10 @@ mod testes {
 
     /// O alcance de `message.send`: papéis enumerados, `papel:<nome>`, sem
     /// curinga. A política da imagem: o `sistema` alcança observador,
-    /// operador e sistema; o `operador`, operador e sistema; o `observador`
-    /// só lê; ninguém alcança o `administrador`.
+    /// operador, sistema e administrador; o `operador`, operador e sistema;
+    /// o `observador` só lê; o `administrador`, operador, sistema e ele
+    /// mesmo. Só o sistema e o próprio administrador alcançam o
+    /// administrador.
     #[test]
     fn o_alcance_das_mensagens() {
         use Codigo::*;
@@ -800,8 +821,13 @@ mod testes {
         assert_eq!(manda("operador", "papel:sistema"), Allow);
         assert_eq!(manda("operador", "papel:observador"), DenyResource);
         assert_eq!(manda("observador", "papel:operador"), DenyPermission);
+        for papel in ["sistema", "administrador"] {
+            assert_eq!(manda(papel, "papel:administrador"), Allow, "{papel}");
+        }
+        assert_eq!(manda("operador", "papel:administrador"), DenyResource);
+        assert_eq!(manda("observador", "papel:administrador"), DenyPermission);
+        assert_eq!(manda("administrador", "papel:observador"), DenyResource);
         for papel in ["sistema", "operador", "administrador"] {
-            assert_eq!(manda(papel, "papel:administrador"), DenyResource, "{papel}");
             // Sem destinatário resolvido, nada; e nada de curinga.
             assert_eq!(manda(papel, ""), DenyResource);
             assert_eq!(p.decidir(Some(papel), MessageSend, None), DenyResource);
@@ -879,8 +905,10 @@ mod testes {
     }
 
     /// O teto: o administrador concede o que alcança. O operador cabe nele;
-    /// um papel que alcançasse o administrador, ou o observador, não cabe —
-    /// nem por `policy.write`.
+    /// um papel que alcançasse o observador não cabe. O alcance ao
+    /// administrador está no teto — é o que torna representável o do
+    /// sistema e o dele —, e ainda assim nenhum `policy.write` o dá a outro
+    /// papel: nem ao operador, nem ao observador, nem a um papel novo.
     #[test]
     fn o_teto_das_mensagens() {
         let p = Politica::ler(crate::PADRAO).unwrap();
@@ -888,7 +916,28 @@ mod testes {
         assert!(p.cabe_em("observador", "administrador").is_ok());
         for linha in [
             "recurso operador message.send papel:operador papel:sistema papel:administrador",
+            "recurso operador message.send papel:administrador",
             "recurso operador message.send papel:operador papel:sistema papel:observador",
+        ] {
+            assert!(p.com_linha(linha, "administrador", &[]).is_err(), "{linha}");
+        }
+        // O operador, que já manda: o alcance ao administrador é recusado
+        // pelo que é — e não por efeito de outra regra.
+        let r = p.com_linha(
+            "recurso operador message.send papel:operador papel:sistema papel:administrador",
+            "administrador",
+            &[],
+        );
+        assert!(
+            matches!(&r, Err(Recusa::Proibida(m)) if m.contains("papel:administrador")),
+            "{r:?}"
+        );
+        // O observador nem chega a mandar: `message.send` exige a linha de
+        // alcance, e a linha de alcance exige a permissão — cada linha de
+        // `policy.write` é validada sozinha, e nenhuma das duas passa.
+        for linha in [
+            "recurso observador message.send papel:administrador",
+            "papel observador agent.read system.read log.read ui.read message.read message.send",
         ] {
             assert!(p.com_linha(linha, "administrador", &[]).is_err(), "{linha}");
         }

@@ -63,14 +63,14 @@ macro_rules! papeis_de_sistema {
 papel sistema agent.read system.read log.read ui.read ui.act process.run net.send fs.read fs.raw_read keyboard.read debug.trigger terminal.attach audit.read policy.read message.send message.read
 recurso sistema fs.read /
 recurso sistema process.run /
-recurso sistema message.send papel:observador papel:operador papel:sistema
+recurso sistema message.send papel:observador papel:operador papel:sistema papel:administrador
 taxa sistema 400 800
 processos sistema 32
 
 papel administrador agent.read system.read log.read ui.read ui.act process.run net.send fs.read audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge
 recurso administrador fs.read /dados /bin /programas
 recurso administrador process.run /bin /programas
-recurso administrador message.send papel:operador papel:sistema
+recurso administrador message.send papel:operador papel:sistema papel:administrador
 taxa administrador 10 20
 processos administrador 8
 "
@@ -96,7 +96,8 @@ pub const PADRAO: &str = concat!(
 # outro papel: cada papel que a tem a escreve. Toda permissao de caminho, e
 # o message.send, tem o alcance escrito numa linha `recurso` — o de
 # message.send e o papel do destinatario, `papel:<nome>`, enumerado. Nao ha
-# curinga. Ninguem alcanca o administrador.
+# curinga. So o sistema e o proprio administrador alcancam o administrador:
+# nenhum policy.write da esse alcance a outro papel.
 
 papel observador agent.read system.read log.read ui.read message.read
 taxa observador 20 40

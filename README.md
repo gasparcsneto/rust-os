@@ -1836,12 +1836,20 @@ escreve. `message.read` é sobre as próprias mensagens — ler e confirmar
 a caixa, consultar o estado, cancelar a que mandou e ninguém leu. O recurso
 de `message.send` é o **papel do destinatário** —
 `papel:<nome>` —, e o alcance de cada papel é enumerado numa linha
-`recurso`, sem curinga. Na imagem: o `sistema` alcança observador, operador
-e sistema; o `operador`, operador e sistema; o `observador` só lê; o
-`administrador`, o teto do que delega — operador e sistema. Ninguém alcança
-o papel `administrador`, e um `policy.write` não o faz alcançável: o
-alcance novo tem de caber no teto. O `sistema` não tem passe: lê só a
-própria caixa, e decide pelo alcance que enumera.
+`recurso`, sem curinga. Na imagem: o `sistema` alcança observador, operador,
+sistema e administrador; o `operador`, operador e sistema; o `observador`
+só lê; o `administrador`, o teto do que delega — operador, sistema e ele
+mesmo. **Só o sistema e o próprio administrador alcançam o
+administrador.** O alcance a ele está no teto, para que o do sistema e o do
+administrador sejam representáveis; e ainda assim nenhum `policy.write` o
+dá a outro papel — a mudança que daria a um papel que não é o local o
+alcance ao papel do administrador é recusada, e o observador nem chega a
+mandar. O alcance novo, de resto, tem de caber no teto. O `sistema` não tem
+passe: lê só a própria caixa, e decide pelo alcance que enumera.
+
+Um agente ou uma pessoa com o papel `administrador` é um titular de sessão
+como os outros: manda, recebe, lê e confirma pelas mesmas regras — a
+decisão, o alcance enumerado, a revogação, as cotas e a auditoria.
 
 **Quem manda é a sessão.** O remetente nunca vem dos parâmetros: o kernel o
 deriva da sessão autenticada — a chave do aperto, a sessão de pessoa, a
@@ -1851,11 +1859,13 @@ destinatário é resolvido **na decisão** — o papel dele é o recurso —, e 
 handler recebe pela licença o destinatário decidido, sem resolvê-lo de novo.
 A pessoa manda pelo interpretador, com o mesmo comando e a mesma decisão.
 
-**O administrador, só com prova.** A chave de um administrador nunca abre
-sessão. Ele manda, lê e confirma por `admin.execute` — `message.send`,
-`message.read`, `message.ack` —, com a prova, decidido pelo papel dele,
-com o mesmo alcance e as mesmas cotas. `message.purge` tira a mensagem de
-outro, também só com prova.
+**A chave do administrador, só com prova.** A chave que assina provas
+nunca abre sessão. Ela manda, lê e confirma por `admin.execute` —
+`message.send`, `message.read`, `message.ack` —, com a prova, decidido
+pelo papel dela, com o mesmo alcance e as mesmas cotas. Como o papel dela é
+o `administrador`, o sistema e o administrador a alcançam (`admin:<nome>`);
+a caixa dela se lê só pela prova. `message.purge` tira a mensagem de outro,
+também só com prova.
 
 **Estados.** Uma mensagem aceita é `pending`; a primeira leitura a faz
 `delivered`; o `ack` de quem recebeu a tira (`acked`). Ler **não consome**:
@@ -1898,7 +1908,8 @@ nenhuma.
 
 A suíte confere, pelo canal de verdade, cada categoria que as mutações
 procuram: o remetente da sessão e o `from` recusado; o observador, o
-alcance do operador e o administrador inalcançável; o reenvio e o replay;
+alcance do operador, o administrador alcançado só pelo sistema e por ele
+mesmo, e o titular com papel administrador que recebe; o reenvio e o replay;
 a anulação pela revogação, de chave e de pessoa; o destinatário
 inexistente e revogado; ler sem consumir, o `ack` e o cancelamento; a
 ordem; as cotas e o prazo; o vazamento entre sessões; e o administrador

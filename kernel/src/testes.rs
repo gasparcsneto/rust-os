@@ -13264,20 +13264,59 @@ fn mensagens_sem_atalho_na_autorizacao() -> Resultado {
         if codigo != Codigo::DenyResource || destino.is_some() {
             return Err("a decisao que recusou entregou o destinatario");
         }
-        // Ninguém alcança o administrador — nem o sistema.
-        let (mut b, mut sb) = conectado(2)?;
-        for (agente, sessao) in [(&mut a, &mut sa), (&mut b, &mut sb)] {
-            let r = mandar(agente, sessao, "chefe", "oi", 9)?;
-            if !recusado_com(&r, "DENY_RESOURCE") {
-                crate::log_error!("teste", "{}", r);
-                return Err("uma mensagem alcancou o papel administrador");
-            }
+        // O administrador: só o sistema e o próprio administrador o
+        // alcançam. O operador, não — recusado pela decisão, gravado —, e o
+        // observador nem manda.
+        let chefe = politica::mensagens::Dono::Agente(sigilo::publica_de(&[0x77; 32]));
+        let r = mandar(&mut a, &mut sa, "chefe", "do operador", 9)?;
+        if !recusado_com(&r, "DENY_RESOURCE") || !gravou(Codigo::DenyResource) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o operador alcancou o administrador");
         }
-        if crate::mensagens::na_caixa(politica::mensagens::Dono::Agente(sigilo::publica_de(
-            &[0x77; 32],
-        ))) != 0
-        {
-            return Err("a caixa do administrador recebeu algo");
+        let r = mandar(&mut c, &mut sc, "chefe", "do observador", 9)?;
+        if !recusado_com(&r, "DENY_PERMISSION") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o observador alcancou o administrador");
+        }
+        if crate::mensagens::na_caixa(chefe) != 0 {
+            return Err("a caixa do administrador recebeu de quem nao o alcanca");
+        }
+        let (mut b, mut sb) = conectado(2)?;
+        if !mandar(&mut b, &mut sb, "chefe", "do sistema", 9)?.contains(r#""ok":true"#) {
+            return Err("o sistema nao alcancou o administrador");
+        }
+        // Um titular de sessão com o papel administrador é um titular comum:
+        // manda — ao administrador, também —, recebe, lê e confirma pelas
+        // mesmas regras.
+        crate::identidade::atribuir(&nome_de_teste(3), "administrador")
+            .map_err(|_| "a atribuicao falhou")?;
+        if !mandar(&mut c, &mut sc, "chefe", "do administrador", 10)?.contains(r#""ok":true"#) {
+            return Err("o administrador nao alcancou o administrador");
+        }
+        if crate::mensagens::na_caixa(chefe) != 2 {
+            return Err("a caixa do administrador nao recebeu do sistema e do administrador");
+        }
+        let r = mandar(&mut c, &mut sc, "teste-4", "ao observador", 11)?;
+        if !recusado_com(&r, "DENY_RESOURCE") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o administrador alcancou o observador");
+        }
+        mandar(&mut b, &mut sb, "teste-3", "ao administrador de sessao", 10)?;
+        let lida = pela_porta(&mut c, &mut sc, "message.read", "{}")?;
+        let id = ids_de(&lida);
+        if id.len() != 1 || !lida.contains("ao administrador de sessao") {
+            crate::log_error!("teste", "{}", lida);
+            return Err("o titular com papel administrador nao recebeu");
+        }
+        let r = pela_porta(
+            &mut c,
+            &mut sc,
+            "message.ack",
+            &alloc::format!(r#"{{"id":"{}"}}"#, id[0]),
+        )?;
+        if !r.contains(r#""state":"acked""#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o titular com papel administrador nao confirmou");
         }
         Ok(())
     })
@@ -13684,16 +13723,37 @@ fn mensagens_o_administrador_por_prova() -> Resultado {
         {
             return Err("uma mensagem sem prova passou como do administrador");
         }
-        // Ninguém alcança o administrador, nem o sistema.
-        let r = mandar(&mut b, &mut sb, "admin:administrador-de-teste", "oi", 1)?;
-        if !recusado_com(&r, "DENY_RESOURCE") {
+        // A chave do administrador recebe do sistema — o papel dela é o
+        // administrador, que o sistema alcança —, e lê só pela prova: a
+        // chave não tem sessão. O operador não a alcança.
+        let r = mandar(
+            &mut b,
+            &mut sb,
+            "admin:administrador-de-teste",
+            "para a chave",
+            1,
+        )?;
+        if !r.contains(r#""ok":true"#) {
             crate::log_error!("teste", "{}", r);
-            return Err("o sistema alcancou o administrador");
+            return Err("o sistema nao alcancou a chave do administrador");
         }
         let r = executar_admin_com(1, &ADMIN_DE_TESTE, "message.read", "{}", "{}")?;
-        if !r.contains(r#""executed":true"#) || !r.contains(r#""messages":[]"#) {
+        if !r.contains(r#""executed":true"#) || !r.contains("para a chave") {
             crate::log_error!("teste", "{}", r);
-            return Err("o administrador nao leu a propria caixa vazia");
+            return Err("a chave do administrador nao leu, pela prova, o que recebeu");
+        }
+        crate::identidade::atribuir(&nome_de_teste(1), "operador")
+            .map_err(|_| "a atribuicao falhou")?;
+        let r = mandar(
+            &mut a,
+            &mut sa,
+            "admin:administrador-de-teste",
+            "do operador",
+            1,
+        )?;
+        if !recusado_com(&r, "DENY_RESOURCE") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o operador alcancou a chave do administrador");
         }
         // Tirar a mensagem de outro: com prova, gravado.
         let id = ids_de(&mandar(&mut a, &mut sa, "teste-2", "a tirar", 1)?);

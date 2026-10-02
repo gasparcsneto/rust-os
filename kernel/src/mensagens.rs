@@ -102,8 +102,9 @@ pub struct Destino {
 ///
 /// - `serial`: a serial;
 /// - `pessoa:<16 hex>`: uma pessoa do registro, ativa;
-/// - `admin:<nome>`: um administrador — que a política da imagem não deixa
-///   ninguém alcançar;
+/// - `admin:<nome>`: a chave de um administrador, com o papel dela — que a
+///   política da imagem deixa só o sistema e o próprio administrador
+///   alcançarem; a chave lê a caixa só pela prova;
 /// - qualquer outro: o nome de um agente do registro.
 pub fn resolver(texto: &str) -> Result<Destino, &'static str> {
     let destino = |dono, papel: Option<String>| {
