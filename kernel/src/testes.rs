@@ -12608,6 +12608,29 @@ fn coordenacao_pessoa_e_agente_simetricos() -> Resultado {
         if dono_da_linha().is_some() {
             return Err("o arrendamento sobreviveu a revogacao da pessoa");
         }
+
+        // Sem ninguém entrado — a pessoa digitando o `login` —, a tecla
+        // passa só na linha livre, e não a arrenda: na linha de um agente,
+        // é `CONFLICT`, gravada sem titular.
+        crate::coordenacao::esquecer();
+        crate::interpretador::abrir_console(Console::Fisico);
+        if crate::interpretador::sessao_do_console(Console::Fisico).is_some() {
+            return Err("o console aberto de novo ficou com alguem");
+        }
+        na_linha(&mut a, &mut sa, "ui.claim", "")?;
+        digitar_no_console(Console::Fisico, "l");
+        if crate::interpretador::com_valor(|v| !v.is_empty())
+            || !recusa_gravada("keyboard", Codigo::Conflict)
+            || ultimo_registro()
+                .is_none_or(|r| r.evento.titular != politica::auditoria::Titular::Anonimo)
+        {
+            return Err("a tecla sem login editou a linha arrendada por um agente");
+        }
+        na_linha(&mut a, &mut sa, "ui.release", "")?;
+        digitar_no_console(Console::Fisico, "l");
+        if crate::interpretador::com_valor(|v| v != "l") || dono_da_linha().is_some() {
+            return Err("sem login, a tecla na linha livre nao passou, ou arrendou a linha");
+        }
         Ok(())
     });
     crate::coordenacao::esquecer();
