@@ -153,6 +153,7 @@ $ cargo xtask agent --canal 2 agent.session
 | `agent.describe` | Lista todos os comandos e parâmetros |
 | `agent.session` | A sessão deste pedido: o número que o kernel deu ao canal, o transporte e quem provou a chave |
 | `agent.sessions` | As sessões: a serial e cada porta do console virtio, conectada ou não, quem está nela, as perdas e as recusas |
+| `agent.list` | Os agentes conectados agora: a porta, o nome, o papel, há quanto tempo, quantos arrendamentos, o último comando e a última ação, cada um com há quanto tempo; quem agiu por último e o texto da barra — nunca parâmetros |
 | `agent.registry` | Quem pode entrar pelas portas: a chave do Duke e cada agente registrado, com a origem |
 | `person.registry` | Quem pode entrar pelos consoles: cada pessoa, com identificador, nome, papel, estado e sessões abertas — sem credencial |
 | `admin.challenge` | Um desafio de uso único para uma operação administrativa nesta sessão |
@@ -226,10 +227,11 @@ kernel/src/
 ├── pessoas.rs       quem entra pelos consoles: o registro, as credenciais e as sessões
 ├── coordenacao.rs   versões e arrendamentos: quem edita cada campo agora
 ├── mensagens.rs     as mensagens entre titulares: um recurso, pelo mesmo ponto de decisão
+├── atividade.rs     quem está agindo: os agentes conectados e quem agiu por último
 ├── autorizacao.rs   o ponto único de decisão: papel, permissão, recurso, taxa e auditoria
 ├── sessoes.rs       quem está em cada porta, e as chaves do transporte cifrado dela
 ├── aleatorio.rs     o gerador de números aleatórios, semeado pelo virtio-rng
-├── barra.rs         a barra superior: o nome, o primeiro botão e o tempo ligado
+├── barra.rs         a barra superior: o nome, os botões, quem está agindo e o tempo ligado
 ├── ponteiro.rs      o mouse: onde ele está, o cursor, e o clique
 ├── eventos.rs       canais de eventos: o kernel publica, um processo escuta e dorme
 ├── superficies.rs   as camadas do compositor que são de processos, e quem é dono de cada uma
@@ -405,6 +407,7 @@ programas/           os programas de usuário, compilados à parte do kernel
         ├── janelas.rs    o servidor de janelas: moldura, foco, arrasto, ordem e fechar
         ├── superficie.rs desenha numa superfície, bifurca, fecha e sai sem fechar
         ├── herdeira.rs   depois de um `exec`, fecha a superfície herdada sem perder a sua
+        ├── cobrir.rs     um programa hostil: pinta uma barra falsa e tenta pô-la sobre a do kernel
         ├── pseudo.rs     digita no interpretador pelo pseudo-terminal, e lê a resposta
         ├── entrada.rs    uma janela fora do servidor, com o canal de entrada dela
         ├── formulario.rs dois campos e dois botões do toolkit, que o agente preenche
@@ -1901,6 +1904,69 @@ inexistente e revogado; ler sem consumir, o `ack` e o cancelamento; a
 ordem; as cotas e o prazo; o vazamento entre sessões; e o administrador
 por prova. A tabela pura tem os mesmos testes no hospedeiro, com as
 cotas de caixa e de total.
+
+### Quem está agindo
+
+A pessoa diante da tela precisa saber que não está sozinha. A barra
+superior mostra, o tempo todo, quantos agentes estão conectados e quem
+agiu por último:
+
+```
+Duke  [Limpar (F1)] [Sobre (F2)] [Terminal (F3)]  agentes: 2 · último: teste-1 (operador)   ligado 0:04:12
+```
+
+**A conta é feita na decisão.** `autorizacao` registra quem passou —
+depois do `ALLOW`, e só dele — e mais ninguém registra: o `xtask
+invariantes` confere. Não há como agir sem passar por lá, então não há como
+agir sem aparecer. Uma recusa não conta: quem foi recusado não agiu.
+
+**Agir é mudar alguma coisa.** O "último" é quem exerceu por último uma
+permissão que muda o estado — `Permissao::muda_estado`, um `match`
+exaustivo no vocabulário, testado no hospedeiro: uma permissão nova não
+compila sem alguém dizer de que lado fica. Ler a árvore, o log ou a caixa
+não é agir; `message.ack` e `message.cancel` vão com `message.read`, e
+mexem só nas mensagens do próprio titular. A pessoa entra pelo mesmo
+critério — o comando no interpretador, a tecla de função, o clique num
+botão da barra — como `pessoa:<nome>`; o administrador pela prova, como
+`admin:<nome>`. Um nome de agente não tem `:`, e por isso não se passa por
+nenhum dos dois. A tecla digitada numa linha não conta: quem digita está
+diante da tela, e o arrendamento da linha já diz de quem ela é. O processo
+do sistema não aparece: age por quem o lançou, que apareceu ao lançá-lo.
+
+**Os agentes se veem.** `agent.list` — com `agent.read`, a mesma permissão
+de `agent.sessions` — lista cada agente conectado: a porta, o nome, o papel
+de agora, há quanto tempo está conectado, quantos arrendamentos tem, o
+**último comando** que passou pela decisão (leitura ou não) e a **última
+ação**, cada um com há quanto tempo. E quem agiu por último na máquina, e o
+texto da barra. Nunca os parâmetros de ninguém, e nada das caixas de
+mensagem dos outros — quantas mensagens um tem diria quem fala com quem.
+Uma sessão nova não herda o que a anterior fez, nem com a mesma chave; uma
+chave revogada sai da conta na hora, antes de a porta cair.
+
+**Na árvore**, o indicador é um `static_text` da barra (id 10), com o texto
+que está desenhado — o agente lê o que a pessoa vê. Um texto que não cabe
+é cortado com reticências; o `agent.list` tem o resto.
+
+**Ninguém cobre a barra.** Um indicador que um processo pudesse cobrir não
+valeria nada: uma janela por cima desenharia uma barra falsa, e receberia o
+clique de quem acreditasse nela. Por isso, três defesas, cada uma conferida
+sozinha:
+
+- a barra fica **fixa no topo** das camadas — só o cursor, fixado depois,
+  fica acima; uma janela trazida para a frente entra abaixo dela;
+- nenhuma superfície de processo **ocupa a faixa**: ela nasce abaixo da
+  barra, e um `MOVER` para cima dela a para na borda —
+  `superficie::PRIMEIRA_LINHA` na ABI, conferida contra a altura da barra
+  ao compilar. O pedido é aceito, e o `y` não: um programa que põe a janela
+  em `(0, 0)` continua funcionando. O runtime de janelas faz a mesma conta,
+  para o ponteiro, que chega em coordenadas da tela, cair no lugar certo;
+- o **ponteiro na faixa é da barra**, mesmo que uma janela chegasse lá.
+
+A suíte roda um programa hostil, `cobrir`, que pinta uma barra falsa e
+tenta pô-la sobre a do kernel — sem mover, e pedindo `y = -40`. Confere
+onde as duas pararam, que a barra continua acima delas na pilha, que a
+faixa mostra a barra; e, levando uma à força ao topo, que a barra ainda
+aparece por cima e o ponteiro ali ainda não vai à janela.
 
 ## Barramento PCI
 

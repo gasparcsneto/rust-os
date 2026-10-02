@@ -4037,8 +4037,9 @@ fn superficies_o_processo_desenha_e_some() -> Resultado {
     }
 
     // Duas camadas de processo, de baixo para cima: a que nunca se mostrou,
-    // invisível e na origem, e a janela — trazida para a frente depois de a
-    // outra nascer, misturada por alfa, e onde o programa a pôs.
+    // invisível e logo abaixo da barra — nem uma camada oculta nasce na
+    // faixa dela —, e a janela — trazida para a frente depois de a outra
+    // nascer, misturada por alfa, e onde o programa a pôs.
     let mut delas = alloc::vec::Vec::new();
     crate::grafico::camadas(|c| {
         if c.nome == crate::superficies::NOME_DA_CAMADA {
@@ -4049,9 +4050,10 @@ fn superficies_o_processo_desenha_e_some() -> Resultado {
         crate::log_error!("teste", "camadas de processo: {:?}", delas);
         return Err("o processo nao tem as duas camadas que criou, na ordem que pediu");
     };
-    if (oculta.x, oculta.y, oculta.largura, oculta.opacidade) != (0, 0, 8, 0) {
+    let topo = protocolo::usuario::superficie::PRIMEIRA_LINHA;
+    if (oculta.x, oculta.y, oculta.largura, oculta.opacidade) != (0, topo, 8, 0) {
         crate::log_error!("teste", "a oculta: {:?}", oculta);
-        return Err("uma superficie de processo nao nasceu invisivel na origem");
+        return Err("uma superficie de processo nao nasceu invisivel abaixo da barra");
     }
     // Invisível, ela não está na árvore — que descreve a tela —, e a janela
     // está.
@@ -13719,6 +13721,400 @@ fn mensagens_o_administrador_por_prova() -> Resultado {
     })
 }
 
+// ===========================================================================
+// A barra: quem está agindo, e ninguém a cobre
+// ===========================================================================
+
+/// O texto que o indicador da barra mostra agora.
+fn indicador() -> Result<alloc::string::String, &'static str> {
+    crate::barra::indicador_na_tela()
+        .map(|(_, t)| t)
+        .ok_or("sem o indicador na barra")
+}
+
+/// O indicador começa com `esperado`.
+fn indicador_diz(esperado: &str) -> Resultado {
+    let texto = indicador()?;
+    if !texto.starts_with(esperado) {
+        crate::log_error!("teste", "indicador: {:?}, esperado {:?}", texto, esperado);
+        return Err("o indicador da barra nao diz o que aconteceu");
+    }
+    Ok(())
+}
+
+/// Os casos da atividade: começam sem "último", com as mensagens e os
+/// agentes de teste, e devolvem tudo como estava.
+fn com_atividade(f: impl FnOnce() -> Resultado) -> Resultado {
+    if !crate::barra::ativa() {
+        return sem_framebuffer();
+    }
+    crate::atividade::esquecer();
+    let resultado = com_mensagens(f);
+    crate::atividade::esquecer();
+    resultado
+}
+
+/// Um programa hostil pinta uma barra falsa e tenta pô-la sobre a do
+/// kernel: uma superfície que se mostra sem mover, e outra que pede para
+/// subir acima da barra. Nenhuma chega à faixa; a barra continua acima de
+/// toda camada de processo; e, se uma chegasse — o limite falhando —, a
+/// barra ainda apareceria por cima, e o ponteiro na faixa ainda seria dela.
+fn barra_nenhuma_superficie_a_cobre() -> Resultado {
+    use crate::usuario::DIRETORIO_DOS_COMPILADOS;
+    use protocolo::usuario::evento::Evento;
+    use protocolo::usuario::superficie::PRIMEIRA_LINHA;
+
+    const CANAL: &str = "teste-cobrir";
+    // As do programa — ver `programas/src/bin/cobrir.rs`.
+    let (alta_x, altura) = (300i32, 48u32);
+    let falsa = crate::tela::Cor::nova(0xE0, 0x10, 0x10);
+
+    if crate::tela::tela_fisica().is_none() || !crate::barra::ativa() {
+        return sem_framebuffer();
+    }
+    let desde = crate::log::total_emitidos();
+    let visto = |procurada: &str| {
+        let mut achou = false;
+        crate::log::ultimos(24, crate::log::Level::Trace, |r| {
+            achou |=
+                r.seq >= desde && r.subsistema == "usuario" && r.mensagem().starts_with(procurada);
+        });
+        achou
+    };
+    let terminou_mal = || {
+        let mut mal = false;
+        crate::log::ultimos(24, crate::log::Level::Trace, |r| {
+            let m = r.mensagem();
+            mal |= r.seq >= desde
+                && r.subsistema == "usuario"
+                && (m.starts_with("processo morto por")
+                    || (m.starts_with("processo encerrou com codigo ") && !m.ends_with(" 0")));
+        });
+        mal
+    };
+    crate::usuario::lancar(Some(&alloc::format!("{DIRETORIO_DOS_COMPILADOS}/cobrir")))?;
+    esperar_ate(|| visto("cobrir: pronto") || terminou_mal(), 600)?;
+    if terminou_mal() {
+        return Err("o programa que tenta cobrir a barra falhou antes de ficar pronto");
+    }
+
+    let resultado = (|| {
+        // As camadas, de baixo para cima, e onde está a barra entre elas.
+        let barra = crate::barra::camada().ok_or("a barra nao tem camada")?;
+        let mut pilha = alloc::vec::Vec::new();
+        crate::grafico::camadas(|c| pilha.push(c));
+        let na_pilha = |id: u32| pilha.iter().position(|c| c.id == id);
+        let delas: alloc::vec::Vec<_> = pilha
+            .iter()
+            .filter(|c| c.nome == crate::superficies::NOME_DA_CAMADA)
+            .copied()
+            .collect();
+        let [parada, alta] = delas[..] else {
+            crate::log_error!("teste", "camadas de processo: {:?}", delas);
+            return Err("o programa nao tem as duas camadas que criou");
+        };
+        // A que não se moveu nasceu abaixo da barra; a que pediu para subir
+        // parou nela — o pedido foi aceito, e o `y` não.
+        if (parada.x, parada.y) != (0, PRIMEIRA_LINHA) {
+            crate::log_error!("teste", "a parada: {:?}", parada);
+            return Err("uma superficie nasceu na faixa da barra");
+        }
+        if (alta.x, alta.y) != (alta_x, PRIMEIRA_LINHA) {
+            crate::log_error!("teste", "a alta: {:?}", alta);
+            return Err("uma superficie subiu acima da barra");
+        }
+        // As duas vieram para a frente depois de a barra existir, e a barra
+        // continua acima delas.
+        let b = na_pilha(barra).ok_or("a barra saiu da pilha")?;
+        if [parada.id, alta.id]
+            .iter()
+            .any(|&id| na_pilha(id).is_none_or(|i| i > b))
+        {
+            crate::log_error!("teste", "pilha: {:?}", pilha);
+            return Err("uma superficie de processo ficou acima da barra");
+        }
+        // Na faixa, a barra; logo abaixo dela, a falsa, que está ali.
+        let x = alta_x as u32 + 2;
+        if pixel_na_tela(x, 1)? != crate::barra::FUNDO {
+            return Err("a faixa da barra mostra outra coisa");
+        }
+        if pixel_na_tela(x, PRIMEIRA_LINHA as u32 + 2)? != falsa {
+            return Err("a superficie do programa nao esta logo abaixo da barra");
+        }
+
+        // E se o limite falhasse: a superfície levada à força para o topo
+        // continua debaixo da barra, e o ponteiro na faixa não vai para ela.
+        if !crate::superficies::mover_sem_limite(alta.id, alta_x, 0) {
+            return Err("a superficie nao foi movida a forca");
+        }
+        if pixel_na_tela(x, 1)? != crate::barra::FUNDO {
+            return Err("uma superficie no topo apareceu por cima da barra");
+        }
+        if crate::ponteiro::janela_recebe(x, 1) {
+            return Err("o ponteiro na faixa da barra foi para uma janela");
+        }
+        if !crate::ponteiro::janela_recebe(x, altura - 2) {
+            return Err("o ponteiro abaixo da faixa nao foi para a janela");
+        }
+        Ok(())
+    })();
+
+    let solto = crate::eventos::publicar(CANAL, Evento::default());
+    let saiu = esperar_ate(|| visto("cobrir: fim") || terminou_mal(), 600)
+        .map_err(|_| "o programa que tenta cobrir a barra nao saiu");
+    resultado?;
+    solto.map_err(|_| "o programa nao escuta o canal dele")?;
+    saiu?;
+    if terminou_mal() {
+        return Err("o programa que tenta cobrir a barra saiu mal");
+    }
+    Ok(())
+}
+
+/// O indicador conta os agentes conectados: entra um, sai um, e a chave
+/// revogada sai da conta na hora — antes de a porta cair. A árvore publica
+/// o que está desenhado, e um texto que não cabe é cortado com reticências.
+fn atividade_o_indicador_conta_os_agentes() -> Resultado {
+    com_atividade(|| {
+        indicador_diz("agentes: 0 · último: ninguém")?;
+        let (_a, _sa) = conectado(1)?;
+        indicador_diz("agentes: 1 ·")?;
+        let (_b, _sb) = conectado(2)?;
+        indicador_diz("agentes: 2 ·")?;
+        // A árvore: um texto da barra, com o que está desenhado.
+        let texto = indicador()?;
+        let arvore = chamar("ui.tree", "{}")?;
+        let no = alloc::format!(
+            r#""id":{},"role":"static_text","label":"agentes","#,
+            crate::ui::ID_DO_INDICADOR
+        );
+        let valor = alloc::format!(r#""value":"{texto}""#);
+        if !arvore.contains(&no) || !arvore.contains(&valor) {
+            crate::log_error!("teste", "{}", arvore);
+            return Err("a arvore nao publica o indicador que esta desenhado");
+        }
+        // A chave revogada: fora da conta, com a sessão ainda de pé.
+        crate::identidade::revogar(&sigilo::publica_de(&chave_de_teste(2)))
+            .map_err(|_| "a revogacao falhou")?;
+        if crate::sessoes::identidade(2).is_none() {
+            return Err("a revogacao derrubou a porta; o caso queria a sessao de pe");
+        }
+        indicador_diz("agentes: 1 ·")?;
+        // A porta que fecha.
+        crate::virtio::console::simular_conexao(1, false);
+        indicador_diz("agentes: 0 ·")?;
+        // Um nome que não cabe: cortado, com reticências, dentro da faixa.
+        let comprido = crate::barra::caber(
+            alloc::format!("agentes: 1 · último: {} (operador)", "x".repeat(400)),
+            200,
+        );
+        if !comprido.ends_with("...")
+            || tipografia::largura_do_texto(&comprido, aparencia::texto::CORPO) > 200
+        {
+            crate::log_error!("teste", "{:?}", comprido);
+            return Err("um texto comprido nao foi cortado para caber");
+        }
+        if crate::barra::caber(alloc::string::String::from("curto"), 200) != "curto" {
+            return Err("um texto que cabe foi cortado");
+        }
+        Ok(())
+    })
+}
+
+/// Só quem agiu é o último: uma leitura não toma o lugar de quem mudou
+/// alguma coisa, e uma recusa não conta. O `agent.list` diz, de cada
+/// agente, o último comando e a última ação, com há quanto tempo — e nunca
+/// os parâmetros.
+fn atividade_so_quem_agiu_e_o_ultimo() -> Resultado {
+    com_atividade(|| {
+        let (mut a, mut sa) = conectado(1)?;
+        let (mut b, mut sb) = conectado(2)?;
+        crate::identidade::atribuir(&nome_de_teste(2), "observador")
+            .map_err(|_| "a atribuicao falhou")?;
+        // Uma leitura: ninguém agiu ainda.
+        pela_porta(&mut a, &mut sa, "ui.tree", "{}")?;
+        indicador_diz("agentes: 2 · último: ninguém")?;
+        // Uma ação, com um corpo que não pode aparecer em lugar nenhum.
+        mandar(&mut a, &mut sa, "teste-2", "segredo-do-corpo", 1)?;
+        indicador_diz("agentes: 2 · último: teste-1 (sistema)")?;
+        // A recusa não conta: o observador não manda.
+        let r = mandar(&mut b, &mut sb, "teste-1", "nao", 1)?;
+        if !recusado_com(&r, "DENY_PERMISSION") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o observador mandou uma mensagem");
+        }
+        indicador_diz("agentes: 2 · último: teste-1 (sistema)")?;
+        // A leitura de outro também não.
+        pela_porta(&mut b, &mut sb, "message.read", "{}")?;
+        indicador_diz("agentes: 2 · último: teste-1 (sistema)")?;
+
+        let lista = pela_porta(&mut b, &mut sb, "agent.list", "{}")?;
+        let j = Json(lista.as_bytes())
+            .member("result")
+            .ok_or("agent.list sem resultado")?;
+        let agentes = j.member("agents").ok_or("agent.list sem agentes")?;
+        let um = agentes.item(0).ok_or("agent.list sem o primeiro")?;
+        let dois = agentes.item(1).ok_or("agent.list sem o segundo")?;
+        let metodo = |a: Json, campo: &str| {
+            a.member(campo)
+                .and_then(|f| f.member("method"))
+                .and_then(|m| m.as_str())
+                .map(alloc::string::String::from)
+        };
+        let ha = |a: Json, campo: &str| {
+            a.member(campo)
+                .and_then(|f| f.member("ago_ms"))
+                .and_then(|m| m.as_u64())
+        };
+        let texto = |a: Json, campo: &str| {
+            a.member(campo)
+                .and_then(|n| n.as_str())
+                .map(alloc::string::String::from)
+        };
+        let nome = |a: Json| texto(a, "name");
+        let papel = |a: Json| texto(a, "role");
+        if j.member("connected").and_then(|n| n.as_u64()) != Some(2)
+            || nome(um).as_deref() != Some("teste-1")
+            || papel(um).as_deref() != Some("sistema")
+            || nome(dois).as_deref() != Some("teste-2")
+            || papel(dois).as_deref() != Some("observador")
+        {
+            crate::log_error!("teste", "{}", lista);
+            return Err("agent.list nao lista os agentes conectados, com o papel de agora");
+        }
+        // O primeiro: o último comando foi a ação. O segundo: o último
+        // comando é este `agent.list`, e ele nunca agiu — a recusa não conta.
+        if metodo(um, "last_command").as_deref() != Some("message.send")
+            || metodo(um, "last_action").as_deref() != Some("message.send")
+            || ha(um, "last_action").is_none()
+            || metodo(dois, "last_command").as_deref() != Some("agent.list")
+            || !dois.member("last_action").is_some_and(|v| v.0 == b"null")
+        {
+            crate::log_error!("teste", "{}", lista);
+            return Err("agent.list nao diz o ultimo comando e a ultima acao de cada um");
+        }
+        let ultimo = j.member("last").ok_or("agent.list sem o ultimo")?;
+        if ultimo.member("actor").and_then(|v| v.as_str()) != Some("teste-1")
+            || ultimo.member("method").and_then(|v| v.as_str()) != Some("message.send")
+            || j.member("indicator").and_then(|v| v.as_str()) != Some(indicador()?.as_str())
+        {
+            crate::log_error!("teste", "{}", lista);
+            return Err("agent.list nao diz quem agiu por ultimo como a barra diz");
+        }
+        // Os parâmetros de ninguém, e nada das caixas.
+        if lista.contains("segredo") || lista.contains("teste-2\",\"body") {
+            crate::log_error!("teste", "{}", lista);
+            return Err("agent.list vazou os parametros de um pedido");
+        }
+        // O tempo anda.
+        let antes = ha(um, "last_action").unwrap_or(0);
+        let alvo = crate::tempo::uptime_ms() + 30;
+        esperar_ate(|| crate::tempo::uptime_ms() >= alvo, 100)?;
+        let depois = pela_porta(&mut b, &mut sb, "agent.list", "{}")?;
+        let agora = Json(depois.as_bytes())
+            .member("result")
+            .and_then(|r| r.member("agents"))
+            .and_then(|a| a.item(0))
+            .and_then(|a| ha(a, "last_action"))
+            .unwrap_or(0);
+        if agora < antes + 20 {
+            return Err("ha quanto tempo o agente agiu nao anda com o relogio");
+        }
+        Ok(())
+    })
+}
+
+/// A pessoa e o administrador aparecem como são: `pessoa:<nome>` pelo
+/// comando no interpretador e pela tecla de função; `admin:<nome>` pela
+/// operação com prova — e a leitura dele, como a de todos, não conta. Um
+/// agente não se faz passar por nenhum dos dois: o nome dele não tem `:`.
+fn atividade_a_pessoa_e_o_administrador() -> Resultado {
+    use crate::pessoas::Console;
+    com_atividade(|| {
+        let (_a, _sa) = conectado(1)?;
+        crate::interpretador::ativar_para_teste();
+        let pessoa = crate::interpretador::PESSOA_DE_TESTE;
+        let papel = crate::interpretador::PAPEL_DA_PESSOA_DE_TESTE;
+        let esperado = alloc::format!("agentes: 1 · último: pessoa:{pessoa} ({papel})");
+        digitar_no_console(
+            Console::Fisico,
+            r#"message.send {"to":"teste-1","body":"da pessoa","nonce":1}"#,
+        );
+        digitar_no_console(Console::Fisico, "\n");
+        indicador_diz(&esperado)?;
+
+        // O administrador, pela prova.
+        crate::identidade::registrar_administrador_de_teste(
+            sigilo::publica_de(&ADMIN_DE_TESTE),
+            "administrador",
+        );
+        admin_espera(
+            1,
+            &ADMIN_DE_TESTE,
+            "message.send",
+            r#"{"to":"teste-1","body":"do administrador","nonce":1}"#,
+            None,
+        )?;
+        let admin = alloc::format!(
+            "agentes: 1 · último: admin:{} (administrador)",
+            crate::identidade::ADMINISTRADOR_DE_TESTE
+        );
+        indicador_diz(&admin)?;
+
+        // A tecla de função da pessoa: um `ui.act` decidido, que conta.
+        crate::interpretador::tratar_tecla(crate::teclado::F1);
+        indicador_diz(&esperado)?;
+
+        // A leitura do administrador não conta: a pessoa continua a última.
+        // Depois de outro ter agido, e não logo depois do envio dele — com
+        // ele ainda o último, o texto seria o mesmo contando ou não, e o
+        // caso não provaria nada. Foi a mutação que contava toda operação
+        // administrativa como ação que mostrou isso.
+        let r = executar_admin_com(1, &ADMIN_DE_TESTE, "message.read", "{}", "{}")?;
+        if !r.contains(r#""executed":true"#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o administrador nao leu a propria caixa");
+        }
+        indicador_diz(&esperado)?;
+
+        // Nenhum agente se chama como uma pessoa ou um administrador.
+        for falso in ["pessoa:ana", "admin:raiz"] {
+            if sigilo::registro::nome_valido(falso) {
+                return Err("um nome de agente pode se passar por pessoa ou administrador");
+            }
+        }
+        Ok(())
+    })
+}
+
+/// O que uma sessão fez sai com ela: a mesma chave, numa sessão nova, não
+/// herda o último comando nem a última ação da anterior. O "último" da
+/// barra fica — ele diz quem agiu, e isso aconteceu.
+fn atividade_a_sessao_nova_nao_herda() -> Resultado {
+    com_atividade(|| {
+        let (mut a, mut sa) = conectado(1)?;
+        let (mut b, mut sb) = conectado(2)?;
+        mandar(&mut a, &mut sa, "teste-2", "antes de sair", 1)?;
+        crate::virtio::console::simular_conexao(1, false);
+        crate::virtio::console::simular_conexao(1, true);
+        let (_a, _sa) = conectado(1)?;
+        indicador_diz("agentes: 2 · último: teste-1 (sistema)")?;
+        let lista = pela_porta(&mut b, &mut sb, "agent.list", "{}")?;
+        let um = Json(lista.as_bytes())
+            .member("result")
+            .and_then(|r| r.member("agents"))
+            .and_then(|a| a.item(0))
+            .ok_or("agent.list sem o primeiro")?;
+        if !um.member("last_command").is_some_and(|v| v.0 == b"null")
+            || !um.member("last_action").is_some_and(|v| v.0 == b"null")
+        {
+            crate::log_error!("teste", "{}", lista);
+            return Err("a sessao nova herdou o que a anterior fez");
+        }
+        Ok(())
+    })
+}
+
 /// Ninguém se dá mais do que tem: nem o próprio papel, nem um papel maior
 /// que o seu, nem a política de quem administra.
 ///
@@ -17477,6 +17873,26 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "mensagens: o administrador por prova",
         f: mensagens_o_administrador_por_prova,
+    },
+    Caso {
+        nome: "barra: nenhuma superficie a cobre",
+        f: barra_nenhuma_superficie_a_cobre,
+    },
+    Caso {
+        nome: "atividade: o indicador conta os agentes",
+        f: atividade_o_indicador_conta_os_agentes,
+    },
+    Caso {
+        nome: "atividade: so quem agiu e o ultimo",
+        f: atividade_so_quem_agiu_e_o_ultimo,
+    },
+    Caso {
+        nome: "atividade: a pessoa e o administrador",
+        f: atividade_a_pessoa_e_o_administrador,
+    },
+    Caso {
+        nome: "atividade: a sessao nova nao herda",
+        f: atividade_a_sessao_nova_nao_herda,
     },
     Caso {
         nome: "usb: o relatorio hid vira teclas",

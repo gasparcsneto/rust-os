@@ -164,6 +164,44 @@ struct Quem {
     papel: Option<String>,
 }
 
+/// Quem está numa decisão, como a barra o mostra — ver [`crate::atividade`].
+/// `None` para quem não aparece: um processo do sistema, que age por quem o
+/// lançou, ou ninguém autenticado.
+fn ator(quem: &Quem) -> Option<crate::atividade::Ator> {
+    use crate::atividade::Ator;
+    match quem.titular {
+        Titular::Agente => Some(Ator::Agente {
+            sessao: quem.sessao,
+            chave: quem.chave?,
+            nome: quem.agente.clone(),
+        }),
+        Titular::Serial => Some(Ator::Serial),
+        // O nome, e não o identificador da auditoria: é o que a pessoa
+        // reconhece na barra.
+        Titular::Pessoa => {
+            match crate::pessoas::sessao(crate::pessoas::IdSessao(quem.sessao_de_pessoa?)) {
+                crate::pessoas::EstadoDaSessao::Ativa { nome, .. } => Some(Ator::Pessoa { nome }),
+                _ => None,
+            }
+        }
+        Titular::Administrador => Some(Ator::Administrador {
+            nome: quem.agente.clone(),
+        }),
+        Titular::Kernel | Titular::Sistema | Titular::Anonimo => None,
+    }
+}
+
+/// Conta, na atividade, o que acabou de ser permitido: `metodo`, por
+/// `quem`, exercendo `permissao` — ou nenhuma, num comando por prova, cuja
+/// operação conta por si quando executa.
+fn contar(quem: &Quem, metodo: &'static str, permissao: Option<Permissao>) {
+    let Some(ator) = ator(quem) else {
+        return;
+    };
+    let muda = permissao.is_some_and(Permissao::muda_estado);
+    crate::atividade::registrar(ator, quem.papel.as_deref().unwrap_or(""), metodo, muda);
+}
+
 /// Roda `f` com a política em vigor.
 pub fn com_politica<R>(f: impl FnOnce(&Politica) -> R) -> R {
     crate::arch::sem_interrupcoes(|| match POLITICA.lock().as_ref() {
@@ -660,6 +698,12 @@ pub fn autorizar(
     if !codigo.permite() {
         return Err(codigo);
     }
+    // Depois do `ALLOW`, e só dele: quem foi recusado não agiu.
+    let permissao = match comando.acesso {
+        Acesso::Exige(p) => Some(p),
+        Acesso::PorProva => None,
+    };
+    contar(&quem, comando.nome, permissao);
     Ok(Autorizado {
         comando,
         autoridade,
@@ -850,6 +894,9 @@ pub fn autorizar_acao_da_pessoa(
     };
     let (codigo, detalhe) = decidir(quem.papel.as_deref(), Permissao::UiAct, "");
     auditar(&quem, "ui.act", &recurso, codigo, &[], detalhe);
+    if codigo.permite() {
+        contar(&quem, "ui.act", Some(Permissao::UiAct));
+    }
     codigo
 }
 
@@ -991,6 +1038,22 @@ pub fn papel_tem(papel: Option<&str>, permissao: Permissao) -> Codigo {
         Some(r) if !r.tem(permissao) => Codigo::DenyPermission,
         Some(_) => Codigo::Allow,
     })
+}
+
+/// Conta, na atividade, uma operação administrativa que executou: o
+/// administrador `nome`, pela prova, com o `papel` dele. Quem chama é a
+/// operação, depois de executar — a decisão dela é a prova e o papel, e
+/// mora lá.
+pub fn contar_administracao(nome: &str, papel: &str, metodo: &'static str, permissao: Permissao) {
+    let quem = Quem {
+        titular: Titular::Administrador,
+        sessao: SESSAO_DA_PESSOA,
+        sessao_de_pessoa: None,
+        agente: nome.to_string(),
+        chave: None,
+        papel: Some(papel.to_string()),
+    };
+    contar(&quem, metodo, Some(permissao));
 }
 
 /// Grava um desfecho de operação administrativa. `administrador` vazio

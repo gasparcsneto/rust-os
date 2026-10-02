@@ -49,6 +49,18 @@ pub static COMANDOS: &[Command] = &[
         handler: agent_sessions,
     },
     Command {
+        nome: "agent.list",
+        resumo: "Os agentes conectados agora, para os agentes se verem: a porta, o nome, \
+                 o papel, ha quanto tempo esta conectado, quantos arrendamentos tem, o \
+                 ultimo comando que passou pela decisao e a ultima acao (um comando que \
+                 muda o estado), cada um com ha quanto tempo. E quem agiu por ultimo na \
+                 maquina, e o texto que a barra mostra. Nunca os parametros de ninguem.",
+        params: &[],
+        acesso: Acesso::Exige(Permissao::AgentRead),
+        recurso: None,
+        handler: agent_list,
+    },
+    Command {
         nome: "agent.registry",
         resumo: "Quem pode entrar pelas portas: a chave publica do Duke e cada agente \
                  registrado, com o nome, a chave e de onde veio (a imagem, ou um registro \
@@ -1058,6 +1070,72 @@ fn agent_sessions(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     let (recebidos, enviados) = console::trafego();
     w.field_u64("console_bytes_in", recebidos)?;
     w.field_u64("console_bytes_out", enviados)?;
+    w.end_object()
+}
+
+/// `agent.list`: quem está conectado, e o que cada um fez por último.
+///
+/// O comando e o momento, e nunca os parâmetros: o que um agente pediu é
+/// dele — a auditoria guarda o resumo, e só quem tem `audit.read` o lê. E
+/// nada das caixas de mensagem dos outros: quantas mensagens um tem diria
+/// quem fala com quem.
+fn agent_list(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let agora = crate::tempo::uptime_ms();
+    // Um comando e o momento dele, como `{method, ago_ms}`, ou `null`.
+    let feito = |w: &mut JsonWriter, chave: &str, f: Option<(&str, u64)>| -> fmt::Result {
+        w.key(chave)?;
+        match f {
+            Some((metodo, quando)) => {
+                w.begin_object()?;
+                w.field_str("method", metodo)?;
+                w.field_u64("ago_ms", agora.saturating_sub(quando))?;
+                w.end_object()
+            }
+            None => w.null_value(),
+        }
+    };
+    let conectados: alloc::vec::Vec<_> = crate::atividade::conectados().collect();
+    w.begin_object()?;
+    w.field_u64("connected", conectados.len() as u64)?;
+    w.key("agents")?;
+    w.begin_array()?;
+    for (p, id) in &conectados {
+        let uso = crate::atividade::uso(*p, &id.chave);
+        w.begin_object()?;
+        w.field_u64("session", u64::from(*p))?;
+        w.field_str("name", &id.nome)?;
+        match crate::identidade::papel_do_agente(&id.chave) {
+            Some(papel) => w.field_str("role", &papel)?,
+            None => {
+                w.key("role")?;
+                w.null_value()?;
+            }
+        }
+        w.field_u64("connected_ms", agora.saturating_sub(id.desde_ms))?;
+        w.field_u64(
+            "leases",
+            crate::coordenacao::quantos_do_agente(*p, id.chave) as u64,
+        )?;
+        feito(w, "last_command", uso.and_then(|u| u.comando))?;
+        feito(w, "last_action", uso.and_then(|u| u.acao))?;
+        w.end_object()?;
+    }
+    w.end_array()?;
+    w.key("last")?;
+    match crate::atividade::ultima() {
+        Some(a) => {
+            w.begin_object()?;
+            w.field_str("actor", &a.rotulo)?;
+            w.field_str("role", &a.papel)?;
+            w.field_str("method", a.metodo)?;
+            w.field_u64("ago_ms", agora.saturating_sub(a.quando_ms))?;
+            w.end_object()?;
+        }
+        None => w.null_value()?,
+    }
+    if let Some((_, texto)) = crate::barra::indicador_na_tela() {
+        w.field_str("indicator", &texto)?;
+    }
     w.end_object()
 }
 
@@ -2269,6 +2347,16 @@ fn escrever_barra(w: &mut JsonWriter, moldura: crate::ui::Moldura) -> fmt::Resul
         crate::barra::moldura_do_terminal(),
         None,
     )?;
+    if let Some((m, texto)) = crate::barra::indicador_na_tela() {
+        folha(
+            w,
+            ui::ID_DO_INDICADOR,
+            ui::Papel::Texto,
+            "agentes",
+            Some(m),
+            Some(&texto),
+        )?;
+    }
     if let Some((m, texto)) = crate::barra::relogio_na_tela() {
         folha(
             w,

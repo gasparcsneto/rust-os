@@ -405,6 +405,7 @@ fn conferir_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) -> Result
     match (operacao.executar)(&pedinte, Json(parametros.as_bytes()), w) {
         Ok(recurso) => {
             gravar(Codigo::Allow, &recurso, "prova conferida; executada");
+            autorizacao::contar_administracao(&nome, papel, operacao.nome, operacao.permissao);
             let _ = w.field_bool("executed", true);
             let _ = w.field_str("command", operacao.nome);
             let _ = w.field_str("by", &nome);

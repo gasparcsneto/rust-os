@@ -64,6 +64,7 @@ extern crate alloc;
 mod agent;
 mod aleatorio;
 mod arch;
+mod atividade;
 mod autorizacao;
 mod barra;
 mod coordenacao;

@@ -40,6 +40,7 @@ use toolkit::{Indice, Interface, Resposta, Widget};
 
 use crate::desenho::{Estilo, Tela};
 use crate::superficie::Superficie;
+use protocolo::usuario::superficie::posicao_permitida;
 
 const ESTILO_DO_TITULO: Estilo = aparencia::texto::TITULO_DA_JANELA;
 
@@ -118,6 +119,9 @@ impl Janela {
         let (largura, altura) = Janela::tamanho_para(&interface);
         let superficie = Superficie::nova(largura, altura)?;
         superficie.transparente(true)?;
+        // A posição que o kernel vai dar, e não a pedida: é por ela que o
+        // ponteiro, em coordenadas da tela, cai no lugar certo da janela.
+        let (x, y) = posicao_permitida(x, y);
         superficie.mover(x, y)?;
         let mut janela = Janela {
             superficie,
@@ -403,8 +407,9 @@ impl Janela {
     /// ele. Com `soltou`, o arrasto acaba, e a posição final volta.
     pub fn arrastar(&mut self, x: i64, y: i64, soltou: bool) -> Option<(i32, i32)> {
         let (dx, dy) = self.pega?;
-        self.x = (x - dx) as i32;
-        self.y = (y - dy) as i32;
+        // Arrastada para cima da barra, a janela para nela — o kernel a para
+        // ali, e a posição guardada tem de ser a mesma.
+        (self.x, self.y) = posicao_permitida((x - dx) as i32, (y - dy) as i32);
         let _ = self.superficie.mover(self.x, self.y);
         if soltou {
             self.pega = None;

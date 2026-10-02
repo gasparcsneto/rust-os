@@ -2316,6 +2316,10 @@ const SUPERFICIE_CRUA: &[(&str, &str)] = &[
         "uma superfície crua, fora do runtime, para conferir a entrada por superfície",
     ),
     (
+        "bin/cobrir.rs",
+        "um programa hostil, que pinta uma barra falsa e tenta pô-la sobre a do kernel",
+    ),
+    (
         "bin/herdeira.rs",
         "depois de um `exec`, desenha na superfície dela para conferir que a herdada não é a sua",
     ),
@@ -2481,6 +2485,27 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
         "mensagens::anular_titular(",
         &["kernel/src/identidade.rs", "kernel/src/pessoas.rs"],
     ),
+    // Quem agiu por último só se conta no ponto de decisão — depois do
+    // `ALLOW` de um comando, de uma ação da pessoa, ou de uma operação
+    // administrativa que executou. Sem os parênteses: um `use` que trouxesse
+    // a função para chamá-la sem o caminho também é pego.
+    ("atividade::registrar", &["kernel/src/autorizacao.rs"]),
+    (
+        "autorizacao::contar_administracao(",
+        &["kernel/src/agent/administracao.rs"],
+    ),
+    ("atividade::sessao_acabou(", &["kernel/src/sessoes.rs"]),
+    // Nenhuma camada sobe acima da barra, a não ser o cursor; e uma
+    // superfície de processo só vai aonde a ABI deixa.
+    (
+        ".fixar_no_topo(",
+        &["kernel/src/barra.rs", "kernel/src/ponteiro.rs"],
+    ),
+    (
+        "superficie::posicao_permitida(",
+        &["kernel/src/superficies.rs"],
+    ),
+    ("mover_sem_limite(", &["kernel/src/superficies.rs"]),
 ];
 
 /// As funções que tratam um pedido de mensagem: os handlers da sessão e as
@@ -2641,8 +2666,8 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
         println!(
             "[xtask] o handler de um comando, a operação administrativa e as ações na interface \
              só passam pelo ponto de decisão; o arrendamento de outro só cai com prova; as \
-             mensagens só pelos handlers, pela prova e pela revogação; e as \
-             cargas do boot só pelo boot"
+             mensagens só pelos handlers, pela prova e pela revogação; quem agiu só se conta \
+             na decisão; nenhuma camada sobe acima da barra; e as cargas do boot só pelo boot"
         );
         Ok(ExitCode::SUCCESS)
     } else {
@@ -6675,6 +6700,36 @@ fn sob_agentes(arch: Arquitetura) -> Result<(), String> {
     println!(
         "  [mensagens] ok  da porta 1 para a 3: o remetente da sessao, `from` recusado, o reenvio \
          com o mesmo id, lida sem consumir e confirmada"
+    );
+
+    // Quem está agindo, no kernel de produção: a porta 3 se vê e vê a 1 no
+    // `agent.list`; o último a agir foi a 1 — o `ack` da 3 é leitura da
+    // própria caixa, e não conta —; e a barra diz o mesmo, na árvore.
+    let nome_um = chaves::nome_do_agente(1);
+    let lista = tres.pedir("agent.list", "{}")?;
+    let ultimo = format!(r#""last":{{"actor":"{nome_um}","#);
+    if !lista.contains(&format!(r#""name":"{nome_um}""#))
+        || !lista.contains(&format!(r#""name":"{para}""#))
+        || !lista.contains(r#""last_action":{"method":"message.send""#)
+        || !lista.contains(r#""last_command":{"method":"agent.list""#)
+        || !lista.contains(&ultimo)
+        || lista.contains("oi, porta 3")
+    {
+        return Err(format!(
+            "atividade: agent.list nao diz quem esta conectado e quem agiu\n  {lista}"
+        ));
+    }
+    let arvore = tres.pedir("ui.tree", "{}")?;
+    let na_barra = format!("· último: {nome_um} (");
+    if !arvore.contains(r#""role":"static_text","label":"agentes""#) || !arvore.contains(&na_barra)
+    {
+        return Err(format!(
+            "atividade: a barra nao mostra quem agiu por ultimo\n  {arvore}"
+        ));
+    }
+    println!(
+        "  [atividade] ok  a porta 3 ve as duas no agent.list, com o ultimo comando e a ultima \
+         acao; a barra diz que a porta 1 agiu por ultimo"
     );
     Ok(())
 }

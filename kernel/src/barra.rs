@@ -31,6 +31,20 @@
 //! servidor de janelas, que o lança. O kernel não lança programas por um
 //! botão: quem decide o que abre é o servidor.
 //!
+//! # Quem está agindo
+//!
+//! Entre os botões e o relógio, o indicador: quantos agentes estão
+//! conectados e quem agiu por último — `agentes: 2 · último: teste-1
+//! (operador)`. O texto vem de [`crate::atividade`], que o ponto de decisão
+//! alimenta, e é redesenhado quando muda: um agente entra ou sai, uma chave
+//! é revogada, alguém age. A árvore publica o que está desenhado, como o
+//! relógio.
+//!
+//! Ele só vale se ninguém puder cobri-lo: a barra fica fixa no topo das
+//! camadas, nenhuma superfície de processo sobe até a faixa dela, e o
+//! clique na faixa é sempre da barra — ver
+//! `protocolo::usuario::superficie::PRIMEIRA_LINHA`.
+//!
 //! # O relógio
 //!
 //! O tempo desde o boot, à direita, redesenhado a cada segundo por uma
@@ -99,6 +113,10 @@ static SEGUNDO_DESENHADO: AtomicU64 = AtomicU64::new(u64::MAX);
 /// Quantas vezes o botão foi pressionado, por qualquer um dos caminhos.
 static PRESSIONADO: AtomicU64 = AtomicU64::new(0);
 
+/// O texto do indicador que está desenhado agora — é o que a árvore
+/// publica. Vazio antes do primeiro desenho.
+static INDICADOR: Mutex<alloc::string::String> = Mutex::new(alloc::string::String::new());
+
 fn com_barra<R>(f: impl FnOnce(&Option<Camada>) -> R) -> R {
     crate::arch::sem_interrupcoes(|| f(&BARRA.lock()))
 }
@@ -119,6 +137,13 @@ pub fn iniciar() {
             return;
         }
     };
+    // Fixa no topo: nenhuma camada que venha para a frente passa por cima
+    // dela. A barra diz quem está agindo na máquina, e o que a cobrisse
+    // poderia dizer outra coisa. Só o cursor, fixado depois, fica acima.
+    if let Err(motivo) = camada.fixar_no_topo() {
+        crate::log_error!("barra", "a barra superior nao ficou no topo: {}", motivo);
+        return;
+    }
     let largura = tela.largura;
     let segundo = crate::tempo::uptime_ms() / 1000;
     let desenhada = camada.pintar(|pixels, _, _| {
@@ -130,6 +155,7 @@ pub fn iniciar() {
     }
     SEGUNDO_DESENHADO.store(segundo, Ordering::Relaxed);
     crate::arch::sem_interrupcoes(|| *BARRA.lock() = Some(camada));
+    atualizar_indicador();
     crate::ui::mudou();
     crate::log_info!(
         "barra",
@@ -173,11 +199,90 @@ pub fn atualizar_relogio() -> bool {
     redesenhou
 }
 
+/// Redesenha o indicador, se o texto mudou. Devolve se redesenhou.
+///
+/// Quem muda o que ele diz chama: a atividade quando alguém age, as sessões
+/// quando um agente entra ou sai, a identidade quando uma chave é revogada.
+/// A tarefa do relógio também, a cada segundo — uma rede para o que mudar
+/// por um caminho que esqueceu de chamar.
+///
+/// O texto é calculado e desenhado com as interrupções desligadas, de uma
+/// vez: duas chamadas seguidas — a de uma tarefa e a do pulso, que fecha a
+/// porta de um agente que saiu — não desenham na ordem trocada, com o texto
+/// velho por cima do novo.
+pub fn atualizar_indicador() -> bool {
+    crate::arch::sem_interrupcoes(|| {
+        let barra = BARRA.lock();
+        let Some(camada) = barra.as_ref() else {
+            return false;
+        };
+        let Some(tela) = crate::tela::tela_fisica() else {
+            return false;
+        };
+        let (_, largura_livre) = posicao_do_indicador(tela.largura);
+        let texto = caber(crate::atividade::texto_do_indicador(), largura_livre);
+        let mut desenhado = INDICADOR.lock();
+        if *desenhado == texto {
+            return false;
+        }
+        if camada
+            .pintar(|pixels, largura, _| desenhar_indicador(pixels, largura, &texto))
+            .is_err()
+        {
+            return false;
+        }
+        *desenhado = texto;
+        crate::ui::mudou();
+        true
+    })
+}
+
+/// A moldura do indicador, e o texto desenhado nela, se a barra existe.
+pub fn indicador_na_tela() -> Option<(Moldura, alloc::string::String)> {
+    let tela = crate::tela::tela_fisica()?;
+    if !ativa() {
+        return None;
+    }
+    let texto = crate::arch::sem_interrupcoes(|| INDICADOR.lock().clone());
+    let (x, _) = posicao_do_indicador(tela.largura);
+    Some((
+        Moldura {
+            x,
+            y: TEXTO_Y,
+            largura: largura_do_texto(&texto, ESTILO),
+            altura: ESTILO.altura(),
+        },
+        texto,
+    ))
+}
+
+/// O texto, cortado para caber em `largura`: com reticências no fim, se
+/// foi cortado. Vazio se nem as reticências cabem.
+///
+/// Cortar, e não deixar passar: o texto que não coubesse correria por
+/// baixo do relógio. E as reticências dizem que há mais — o `agent.list`
+/// tem o resto.
+pub fn caber(texto: alloc::string::String, largura: u32) -> alloc::string::String {
+    if largura_do_texto(&texto, ESTILO) <= largura {
+        return texto;
+    }
+    let mut cortado = texto;
+    while !cortado.is_empty() {
+        cortado.pop();
+        let com = alloc::format!("{}...", cortado.trim_end());
+        if largura_do_texto(&com, ESTILO) <= largura {
+            return com;
+        }
+    }
+    alloc::string::String::new()
+}
+
 /// A tarefa que mantém o relógio da barra andando.
 #[cfg(not(feature = "modo-teste"))]
 pub async fn relogio() {
     loop {
         atualizar_relogio();
+        atualizar_indicador();
         crate::tarefas::relogio::por_ms(1000).await;
     }
 }
@@ -361,6 +466,38 @@ fn posicao_do_terminal() -> (u32, u32) {
     )
 }
 
+/// Onde o indicador começa, e quanto ele pode ocupar: do fim do último
+/// botão até a faixa reservada ao relógio, com uma margem de cada lado.
+fn posicao_do_indicador(largura_da_tela: u32) -> (u32, u32) {
+    let (x, largura) = posicao_do_terminal();
+    let inicio = x + largura + 2 * MARGEM;
+    let fim = largura_da_tela.saturating_sub(MARGEM + largura_do_relogio_reservada() + MARGEM);
+    (inicio, fim.saturating_sub(inicio))
+}
+
+/// A largura que o relógio pode ocupar: a do maior texto que ele escreve.
+fn largura_do_relogio_reservada() -> u32 {
+    largura_do_texto("ligado 0000:00:00", ESTILO)
+}
+
+/// Redesenha o indicador sobre o anterior, limpando antes a faixa inteira
+/// dele — o texto novo pode ser mais curto.
+fn desenhar_indicador(pixels: &mut [u32], largura: u32, texto: &str) {
+    let (x, livre) = posicao_do_indicador(largura);
+    pintar_retangulo(
+        pixels,
+        largura,
+        Moldura {
+            x,
+            y: 0,
+            largura: livre,
+            altura: ALTURA_DA_BARRA - ALTURA_DO_ACENTO,
+        },
+        FUNDO,
+    );
+    desenhar_texto_em(pixels, largura, (x, TEXTO_Y), texto, ESTILO, (TEXTO, FUNDO));
+}
+
 fn pintar_retangulo(pixels: &mut [u32], largura: u32, m: Moldura, cor: Cor) {
     let valor = cor.para_u32();
     for y in m.y..m.y + m.altura {
@@ -430,7 +567,7 @@ fn desenhar_tudo(pixels: &mut [u32], largura: u32, segundo: u64) {
 /// e o dígito que sobrasse ficaria desenhado.
 fn desenhar_relogio(pixels: &mut [u32], largura: u32, segundo: u64) {
     let texto = texto_do_relogio(segundo);
-    let reservado = largura_do_texto("ligado 0000:00:00", ESTILO);
+    let reservado = largura_do_relogio_reservada();
     pintar_retangulo(
         pixels,
         largura,
@@ -460,5 +597,8 @@ fn desenhar_relogio(pixels: &mut [u32], largura: u32, segundo: u64) {
 /// Só pode ser chamada quando o kernel já está em falha irrecuperável e não
 /// há outro núcleo em execução. Ver [`crate::traps::fatal`].
 pub unsafe fn destravar() {
-    unsafe { BARRA.force_unlock() };
+    unsafe {
+        BARRA.force_unlock();
+        INDICADOR.force_unlock();
+    }
 }

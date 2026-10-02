@@ -78,6 +78,11 @@ pub const MAX: usize = 16;
 /// O nome das camadas de processo, no relatório das camadas.
 pub const NOME_DA_CAMADA: &str = "superficie";
 
+// A faixa que a ABI reserva à barra é a altura da barra, e não um número
+// parecido: uma linha a menos deixaria uma janela cobrir o acento, e uma a
+// mais, um vão onde ninguém desenha.
+const _: () = assert!(superficie::PRIMEIRA_LINHA as u32 == crate::tela::ALTURA_DA_BARRA);
+
 /// O que um descritor guarda para achar a sua superfície: a vaga, e qual
 /// das superfícies que já passaram por ela.
 ///
@@ -185,10 +190,15 @@ pub fn bytes_de(largura: u32, altura: u32) -> Option<u64> {
 /// erro, nem camada nem página.
 pub fn criar(dono: u64, largura: u32, altura: u32, endereco: u64) -> Result<Chave, Recusa> {
     bytes_de(largura, altura).ok_or(Recusa::Tamanho)?;
-    let camada = Camada::nova_oculta(NOME_DA_CAMADA, largura, altura).map_err(|e| match e {
-        NaoCriada::SemCompositor => Recusa::SemTela,
-        NaoCriada::Recusada(_) => Recusa::SemMemoria,
-    })?;
+    // Nasce abaixo da barra, e não na origem: invisível ou não, uma camada
+    // de processo não fica, nem por um instante, na faixa da barra — a
+    // opacidade é do processo, e ele a mostraria ali sem mover.
+    let (x, y) = superficie::posicao_permitida(0, 0);
+    let camada =
+        Camada::nova_oculta(NOME_DA_CAMADA, x, y, largura, altura).map_err(|e| match e {
+            NaoCriada::SemCompositor => Recusa::SemTela,
+            NaoCriada::Recusada(_) => Recusa::SemMemoria,
+        })?;
     let (origem, bytes) = camada.memoria().ok_or(Recusa::SemMemoria)?;
     let paginas = bytes / TAMANHO_PAGINA;
     crate::paginacao::espelhar_no_usuario(origem, endereco, paginas).map_err(|motivo| {
@@ -278,7 +288,10 @@ pub fn controlar(chave: Chave, dono: u64, op: u64, argumento: u64) -> Result<(),
         // pendente no compositor.
         let _ = match op {
             operacao::MOVER => {
+                // Para cima da barra, não: a superfície para nela, como numa
+                // borda — ver `superficie::PRIMEIRA_LINHA`.
                 let (x, y) = superficie::de_posicao(argumento);
+                let (x, y) = superficie::posicao_permitida(x, y);
                 camada.mover(x, y)
             }
             operacao::DANO => {
@@ -308,6 +321,21 @@ pub fn controlar(chave: Chave, dono: u64, op: u64, argumento: u64) -> Result<(),
             _ => return Err(Recusa::Argumento),
         };
         Ok(())
+    })
+}
+
+/// Leva a camada `camada` de um processo a `(x, y)` **sem** o limite da
+/// barra — para a suíte simular o que aconteceria se ele falhasse, e
+/// conferir as defesas que não dependem dele. Falso se não há superfície
+/// com essa camada.
+#[cfg(feature = "modo-teste")]
+pub fn mover_sem_limite(camada: u32, x: i32, y: i32) -> bool {
+    com_vagas(|vagas| {
+        vagas
+            .iter()
+            .flatten()
+            .find(|v| v.camada.id() == camada)
+            .is_some_and(|v| v.camada.mover(x, y).is_ok())
     })
 }
 

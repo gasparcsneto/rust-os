@@ -208,6 +208,35 @@ pub mod superficie {
     /// numa chamada só, com as interrupções mascaradas em boa parte dela.
     pub const MAIOR_TAMANHO: u64 = 16 * 1024 * 1024;
 
+    /// A primeira linha da tela que uma superfície de processo pode
+    /// ocupar: as de cima são da barra do kernel.
+    ///
+    /// # Por que o kernel a impõe
+    ///
+    /// Porque a barra diz quem está agindo na máquina — os agentes
+    /// conectados e quem agiu por último. Uma janela que pudesse cobri-la
+    /// desenharia uma barra falsa, e receberia o clique de quem acreditasse
+    /// nela. A superfície nasce abaixo desta linha, e um
+    /// [`MOVER`](operacao::MOVER) para cima dela a leva até ela, e não além:
+    /// quem arrasta uma janela para o topo a vê parar na barra, como numa
+    /// borda. O programa que guarda a própria posição faz a mesma conta —
+    /// ou o ponteiro, que chega em coordenadas da tela, cairia no lugar
+    /// errado da janela.
+    ///
+    /// É a altura da barra em `aparencia`; o kernel confere, ao compilar,
+    /// que as duas são a mesma.
+    pub const PRIMEIRA_LINHA: i32 = 24;
+
+    /// A posição que o kernel dá a um pedido de levar a superfície a
+    /// `(x, y)`: a mesma, com `y` trazido para baixo da barra.
+    pub const fn posicao_permitida(x: i32, y: i32) -> (i32, i32) {
+        if y < PRIMEIRA_LINHA {
+            (x, PRIMEIRA_LINHA)
+        } else {
+            (x, y)
+        }
+    }
+
     /// A largura e a altura num argumento: a largura nos 32 bits de baixo.
     pub const fn tamanho(largura: u32, altura: u32) -> u64 {
         largura as u64 | (altura as u64) << 32
@@ -249,7 +278,8 @@ pub mod superficie {
     /// O que `controlar` sabe fazer com a camada.
     pub mod operacao {
         /// Leva o canto superior esquerdo a
-        /// [`posicao`](super::posicao)`(x, y)`.
+        /// [`posicao`](super::posicao)`(x, y)` — com `y` abaixo da barra:
+        /// ver [`PRIMEIRA_LINHA`](super::PRIMEIRA_LINHA).
         pub const MOVER: u64 = 1;
         /// Recompõe o [`retangulo`](super::retangulo) da superfície que o
         /// processo redesenhou.
@@ -885,6 +915,20 @@ mod testes {
         assert_eq!(origem::sessao(origem::agente(3)), Some(3));
         assert_eq!(origem::sessao(origem::PESSOA), None);
         assert_eq!(origem::sessao(256), None);
+    }
+
+    #[test]
+    fn nenhuma_superficie_sobe_acima_da_barra() {
+        use super::superficie::{PRIMEIRA_LINHA, posicao_permitida};
+        assert_eq!(posicao_permitida(5, 0), (5, PRIMEIRA_LINHA));
+        assert_eq!(posicao_permitida(-9, i32::MIN), (-9, PRIMEIRA_LINHA));
+        assert_eq!(
+            posicao_permitida(0, PRIMEIRA_LINHA - 1),
+            (0, PRIMEIRA_LINHA)
+        );
+        // Na linha, e abaixo dela, a posição pedida vale como veio.
+        assert_eq!(posicao_permitida(7, PRIMEIRA_LINHA), (7, PRIMEIRA_LINHA));
+        assert_eq!(posicao_permitida(7, 300), (7, 300));
     }
 
     use super::descricao::*;

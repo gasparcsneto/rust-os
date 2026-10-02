@@ -201,10 +201,25 @@ pub fn botao(pressionado: bool) {
 }
 
 /// A superfície de processo debaixo de `(x, y)`, se for uma.
+///
+/// Na faixa da barra, nenhuma: ali o ponteiro é da barra. Nenhuma
+/// superfície chega lá — o kernel as para abaixo dela —, e esta conta não
+/// depende disso: um clique na barra que fosse a uma janela seria o clique
+/// que uma barra falsa queria receber.
 fn janela_em(x: u32, y: u32) -> Option<Destino> {
+    if crate::barra::ativa() && y < crate::tela::ALTURA_DA_BARRA {
+        return None;
+    }
     let camada =
         crate::grafico::camada_em(x, y).filter(|c| c.nome == crate::superficies::NOME_DA_CAMADA)?;
     crate::superficies::destino_da_camada(camada.id)
+}
+
+/// Há uma janela de processo que receberia o ponteiro em `(x, y)`? Para a
+/// suíte.
+#[cfg(feature = "modo-teste")]
+pub fn janela_recebe(x: u32, y: u32) -> bool {
+    janela_em(x, y).is_some()
 }
 
 /// Manda ao dono da janela onde o ponteiro está e os botões. Falso se não

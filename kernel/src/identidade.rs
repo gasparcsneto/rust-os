@@ -389,6 +389,9 @@ pub fn revogar(chave: &[u8; TAM_CHAVE]) -> Result<String, Recusa> {
         politica::mensagens::Dono::Agente(*chave),
         "com a chave revogada",
     );
+    // A chave revogada não conta mais como agente conectado, mesmo antes de
+    // a porta cair: a barra diz isso na hora.
+    crate::barra::atualizar_indicador();
     Ok(nome)
 }
 
@@ -419,7 +422,7 @@ pub fn agentes() -> Vec<Agente> {
 
 /// O nome com que a suíte registra os administradores dela.
 #[cfg(feature = "modo-teste")]
-const ADMINISTRADOR_DE_TESTE: &str = "administrador-de-teste";
+pub const ADMINISTRADOR_DE_TESTE: &str = "administrador-de-teste";
 
 /// Registra um administrador, para a suíte: ela não tem a chave privada do
 /// administrador da imagem — e não deveria ter —, e precisa de uma para

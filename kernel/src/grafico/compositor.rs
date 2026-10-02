@@ -458,15 +458,21 @@ impl Camada {
         Ok(Camada { id })
     }
 
-    /// Cria uma camada **invisível** na origem — opacidade zero —, para
+    /// Cria uma camada **invisível** em `(x, y)` — opacidade zero —, para
     /// quem vai pintá-la antes de mostrá-la.
     ///
     /// É como nasce a superfície de um processo: ele desenha na memória dela
     /// e só então a mostra. Nascer visível mostraria um retângulo preto
     /// entre a criação e o primeiro desenho — e um processo lento para
     /// desenhar o deixaria ali.
-    pub fn nova_oculta(nome: &'static str, largura: u32, altura: u32) -> Result<Camada, NaoCriada> {
-        super::com_compositor(|c| c.criar(nome, 0, 0, (largura, altura), 0))
+    pub fn nova_oculta(
+        nome: &'static str,
+        x: i32,
+        y: i32,
+        largura: u32,
+        altura: u32,
+    ) -> Result<Camada, NaoCriada> {
+        super::com_compositor(|c| c.criar(nome, x, y, (largura, altura), 0))
             .ok_or(NaoCriada::SemCompositor)?
             .map(|id| Camada { id })
             .map_err(NaoCriada::Recusada)

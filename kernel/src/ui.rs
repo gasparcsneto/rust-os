@@ -169,6 +169,8 @@ pub const ID_DO_NOME: u32 = 6;
 pub const ID_DO_RELOGIO: u32 = 7;
 pub const ID_DO_BOTAO_SOBRE: u32 = 8;
 pub const ID_DO_BOTAO_TERMINAL: u32 = 9;
+/// Quantos agentes estão conectados e quem agiu por último.
+pub const ID_DO_INDICADOR: u32 = 10;
 pub const ID_DAS_CAMADAS: u32 = 1000;
 
 /// O identificador na árvore de uma camada do compositor.
@@ -338,7 +340,7 @@ pub fn existe(id: u32) -> bool {
             crate::tela::tela().is_some() && crate::interpretador::inicio_do_campo().is_some()
         }
         ID_DA_BARRA | ID_DO_BOTAO_LIMPAR | ID_DO_BOTAO_SOBRE | ID_DO_BOTAO_TERMINAL
-        | ID_DO_NOME | ID_DO_RELOGIO => crate::barra::ativa(),
+        | ID_DO_NOME | ID_DO_RELOGIO | ID_DO_INDICADOR => crate::barra::ativa(),
         // Antes das camadas: os identificadores de elemento também são
         // maiores que o delas.
         // E só os de uma janela que está na árvore.

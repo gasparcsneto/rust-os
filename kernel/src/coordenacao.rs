@@ -94,6 +94,21 @@ pub fn titular(origem: Origem, console: Console) -> Option<Titular> {
     }
 }
 
+/// Quantos arrendamentos válidos a sessão `sessao` do canal tem agora,
+/// com a chave `chave` — para o `agent.list`.
+pub fn quantos_do_agente(sessao: u8, chave: [u8; 32]) -> usize {
+    let agora = crate::tempo::uptime_ms();
+    let dele = Titular::Agente {
+        sessao,
+        chave: Some(chave),
+    };
+    com_tabela(|t| {
+        t.arrendados(agora)
+            .filter(|(_, e)| e.arrendamento.is_some_and(|a| a.titular == dele))
+            .count()
+    })
+}
+
 /// O texto de um titular, para o relatório: o tipo e o identificador.
 pub fn descrever(t: &Titular) -> (&'static str, String) {
     match t {

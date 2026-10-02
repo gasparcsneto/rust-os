@@ -216,6 +216,56 @@ impl Permissao {
         matches!(self, Permissao::MessageSend)
     }
 
+    /// Exercê-la muda alguma coisa na máquina — o que a pessoa vê, um
+    /// arquivo, um processo, o registro, a caixa de outro —, em vez de só
+    /// ler. É o que a barra conta como **agir**: quem a exerceu por último é
+    /// o "último" do indicador, e o momento é o "há quanto tempo" do
+    /// `agent.list`.
+    ///
+    /// # Por que pela permissão, e não pelo comando
+    ///
+    /// Porque a permissão é o que a decisão vê, e a conta é feita no ponto
+    /// de decisão: não há comando que mude algo sem passar por uma destas.
+    /// E porque o `match` é exaustivo — uma permissão nova não compila sem
+    /// alguém dizer de que lado ela fica.
+    ///
+    /// `message.read` é leitura, e leva junto `message.ack` e
+    /// `message.cancel`: confirmar e cancelar mexem só nas mensagens do
+    /// próprio titular — a caixa dele, as que ele mandou —, e não no que
+    /// outro vê da máquina.
+    pub const fn muda_estado(self) -> bool {
+        match self {
+            Permissao::AgentRead
+            | Permissao::SystemRead
+            | Permissao::LogRead
+            | Permissao::UiRead
+            | Permissao::FsRead
+            | Permissao::FsRawRead
+            | Permissao::KeyboardRead
+            | Permissao::AuditRead
+            | Permissao::PolicyRead
+            | Permissao::MessageRead => false,
+            Permissao::UiAct
+            | Permissao::FsWrite
+            | Permissao::FsRawWrite
+            | Permissao::ProcessRun
+            | Permissao::NetSend
+            | Permissao::DebugTrigger
+            | Permissao::TerminalAttach
+            | Permissao::AgentRegister
+            | Permissao::AgentRevoke
+            | Permissao::PolicyAssign
+            | Permissao::PolicyWrite
+            | Permissao::PersonRegister
+            | Permissao::PersonRevoke
+            | Permissao::CredentialRotate
+            | Permissao::SessionRevoke
+            | Permissao::LeaseRevoke
+            | Permissao::MessageSend
+            | Permissao::MessagePurge => true,
+        }
+    }
+
     /// O papel limita o recurso desta permissão por uma linha `recurso`: de
     /// caminho ou de destino. A linha é obrigatória para quem a tem.
     pub const fn tem_alcance(self) -> bool {
@@ -226,6 +276,35 @@ impl Permissao {
 #[cfg(test)]
 mod testes {
     use super::*;
+
+    #[test]
+    fn as_que_mudam_o_estado() {
+        // As de leitura, pelo nome: tudo o mais muda alguma coisa.
+        let leituras = [
+            "agent.read",
+            "system.read",
+            "log.read",
+            "ui.read",
+            "fs.read",
+            "fs.raw_read",
+            "keyboard.read",
+            "audit.read",
+            "policy.read",
+            "message.read",
+        ];
+        for p in TODAS {
+            assert_eq!(
+                p.muda_estado(),
+                !leituras.contains(&p.nome()),
+                "{} do lado errado",
+                p.nome()
+            );
+        }
+        // Toda administrativa muda: a prova não é pedida para ler.
+        for p in TODAS.into_iter().filter(|p| p.administrativa()) {
+            assert!(p.muda_estado(), "{}", p.nome());
+        }
+    }
 
     #[test]
     fn nomes_vao_e_voltam() {
