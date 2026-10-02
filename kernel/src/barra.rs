@@ -256,6 +256,14 @@ pub fn indicador_na_tela() -> Option<(Moldura, alloc::string::String)> {
     ))
 }
 
+/// Quanto o indicador pode ocupar na horizontal, se a barra existe — para a
+/// suíte saber o que o texto inteiro vira depois de [`caber`].
+#[cfg(feature = "modo-teste")]
+pub fn largura_do_indicador() -> Option<u32> {
+    let tela = crate::tela::tela_fisica()?;
+    ativa().then(|| posicao_do_indicador(tela.largura).1)
+}
+
 /// O texto, cortado para caber em `largura`: com reticências no fim, se
 /// foi cortado. Vazio se nem as reticências cabem.
 ///

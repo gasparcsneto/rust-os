@@ -13732,11 +13732,26 @@ fn indicador() -> Result<alloc::string::String, &'static str> {
         .ok_or("sem o indicador na barra")
 }
 
-/// O indicador começa com `esperado`.
+/// O indicador diz `esperado`: o texto inteiro da atividade começa com ele,
+/// e o desenhado é esse texto cortado para caber na faixa da barra.
+///
+/// As duas coisas, e não só o desenhado: numa tela estreita — o boot pela
+/// UEFI do ARM sobe em 800x600 — o texto é cortado com reticências, e o
+/// nome de quem agiu pode não caber. O inteiro diz quem agiu em qualquer
+/// tela; a comparação com o desenhado pega a barra que não foi redesenhada.
 fn indicador_diz(esperado: &str) -> Resultado {
-    let texto = indicador()?;
-    if !texto.starts_with(esperado) {
-        crate::log_error!("teste", "indicador: {:?}, esperado {:?}", texto, esperado);
+    let inteiro = crate::atividade::texto_do_indicador();
+    let largura = crate::barra::largura_do_indicador().ok_or("sem o indicador na barra")?;
+    let desenhado = indicador()?;
+    let cortado = crate::barra::caber(inteiro.clone(), largura);
+    if !inteiro.starts_with(esperado) || desenhado != cortado {
+        crate::log_error!(
+            "teste",
+            "indicador: {:?} desenhado, {:?} inteiro, esperado {:?}",
+            desenhado,
+            inteiro,
+            esperado
+        );
         return Err("o indicador da barra nao diz o que aconteceu");
     }
     Ok(())
