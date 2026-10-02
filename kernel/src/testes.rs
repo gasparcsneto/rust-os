@@ -10523,6 +10523,7 @@ const PAPEL_DE_TESTE: &str = "sistema";
 /// devolve tudo como estava: sessões, registro e capturas.
 fn com_agentes_de_teste(f: impl FnOnce() -> Resultado) -> Resultado {
     use crate::virtio::console;
+    crate::autorizacao::esquecer_apertos();
     for p in 1..=console::PORTAS {
         crate::identidade::registrar_agente_de_teste(
             sigilo::publica_de(&chave_de_teste(p)),

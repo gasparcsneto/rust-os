@@ -773,6 +773,19 @@ pub fn permitir_processo(autoridade: Autoridade, metodo: &str) -> Codigo {
     Codigo::Allow
 }
 
+/// Zera as janelas de apertos de todas as portas, para a suíte: cada caso
+/// com agentes começa como um agente que acabou de chegar. Em release a
+/// suíte corre mais depressa, e os apertos de casos seguidos caíam na
+/// mesma janela da política — a recusa era de outro caso.
+#[cfg(feature = "modo-teste")]
+pub fn esquecer_apertos() {
+    crate::arch::sem_interrupcoes(|| {
+        let mut t = TAXAS.lock();
+        t.janelas = [Janela::NOVA; crate::sessoes::PORTAS];
+        t.apertos_suprimidos = [0; crate::sessoes::PORTAS];
+    });
+}
+
 /// Conta um aperto de mão na janela da porta `p`. Falso se passou do
 /// limite da política — e grava o primeiro da sequência.
 pub fn permitir_aperto(p: u8) -> bool {
