@@ -156,7 +156,7 @@ $ cargo xtask agent --canal 2 agent.session
 | `agent.registry` | Quem pode entrar pelas portas: a chave do Duke e cada agente registrado, com a origem |
 | `person.registry` | Quem pode entrar pelos consoles: cada pessoa, com identificador, nome, papel, estado e sessões abertas — sem credencial |
 | `admin.challenge` | Um desafio de uso único para uma operação administrativa nesta sessão |
-| `admin.execute` | Uma operação administrativa com a prova de um administrador (`challenge`, `command`, `params`, `admin`, `proof`): `agent.register`, `agent.revoke`, `policy.assign`, `policy.write`, `person.register`, `person.revoke`, `credential.rotate`, `session.revoke`, `lease.revoke` |
+| `admin.execute` | Uma operação administrativa com a prova de um administrador (`challenge`, `command`, `params`, `admin`, `proof`): `agent.register`, `agent.revoke`, `policy.assign`, `policy.write`, `person.register`, `person.revoke`, `credential.rotate`, `session.revoke`, `lease.revoke`, `message.send`, `message.read`, `message.ack`, `message.purge` |
 | `audit.tail` | Os registros mais recentes da auditoria encadeada, com o que basta para refazer cada elo (`count`) |
 | `audit.head` | A cabeça da auditoria — o elo do último registro, para ancorar fora da máquina —, a âncora e quantos há |
 | `audit.verify` | Refaz a cadeia guardada a partir da âncora e diz se cada elo confere |
@@ -194,6 +194,11 @@ $ cargo xtask agent --canal 2 agent.session
 | `ui.act` | Age sobre um elemento pelo mesmo caminho de quem está na frente da máquina (`id`, `action`, `value`, `expect_version`) |
 | `ui.claim` | Arrenda um campo para esta sessão, por um prazo (`id`, `ttl_ms`) |
 | `ui.release` | Solta o arrendamento desta sessão num campo (`id`) |
+| `message.send` | Manda uma mensagem a outro titular, como a sessão que pede (`to`, `body`, `nonce`, `ttl_ms`) |
+| `message.read` | Lê a caixa da sessão, em ordem, sem consumir (`after`, `max`) |
+| `message.ack` | Confirma uma mensagem lida: ela sai da caixa (`id`, `expect_version`) |
+| `message.cancel` | Cancela uma mensagem mandada, enquanto ninguém a leu (`id`, `expect_version`) |
+| `message.status` | O estado de uma mensagem mandada ou recebida (`id`) |
 | `keyboard.read` | O que foi digitado no teclado da máquina desde a última leitura de quem pede, e os contadores dele (`max`) |
 | `log.tail` | Registros de log estruturados (`count`, `min_level`) |
 
@@ -220,6 +225,7 @@ kernel/src/
 ├── identidade.rs    quem é quem: a chave do Duke, os agentes, os administradores e os desafios
 ├── pessoas.rs       quem entra pelos consoles: o registro, as credenciais e as sessões
 ├── coordenacao.rs   versões e arrendamentos: quem edita cada campo agora
+├── mensagens.rs     as mensagens entre titulares: um recurso, pelo mesmo ponto de decisão
 ├── autorizacao.rs   o ponto único de decisão: papel, permissão, recurso, taxa e auditoria
 ├── sessoes.rs       quem está em cada porta, e as chaves do transporte cifrado dela
 ├── aleatorio.rs     o gerador de números aleatórios, semeado pelo virtio-rng
@@ -365,6 +371,7 @@ politica/src/        a política de autorização, a mesma no kernel e no hosped
 ├── caminho.rs       a forma normal dos caminhos, a mesma do VFS
 ├── taxa.rs          o balde de pedidos e a janela de apertos de mão
 ├── arrendamento.rs  a versão e o arrendamento de cada recurso compartilhado
+├── mensagens.rs     as caixas, os estados, as cotas e os nonces das mensagens
 └── auditoria.rs     os registros e a cadeia de elos BLAKE2s
 
 aparencia/src/       a linguagem visual, dos dois lados da fronteira
@@ -1812,6 +1819,88 @@ declarado; dois leitores do teclado; e a cota de processos, lançada e
 bifurcada. A tabela do pacote `politica` confere, no hospedeiro, que nunca
 há dois arrendamentos num recurso, que nenhum sobrevive à revogação, e que
 a versão só sobe com uma mudança que valeu.
+
+### Mensagens
+
+Uma mensagem entre titulares — agente, pessoa, serial, administrador — é um
+**recurso do sistema**, e não um canal privilegiado. Mandar, ler, confirmar,
+cancelar e consultar são comandos do registro, e passam por
+`autorizacao::autorizar` → `decidir` como qualquer outro.
+
+**Quem pode.** `message.send`, `message.read` e `message.purge` são
+permissões sensíveis: não atravessam `@inclusão`, cada papel que as tem as
+escreve. `message.read` é sobre as próprias mensagens — ler e confirmar
+a caixa, consultar o estado, cancelar a que mandou e ninguém leu. O recurso
+de `message.send` é o **papel do destinatário** —
+`papel:<nome>` —, e o alcance de cada papel é enumerado numa linha
+`recurso`, sem curinga. Na imagem: o `sistema` alcança observador, operador
+e sistema; o `operador`, operador e sistema; o `observador` só lê; o
+`administrador`, o teto do que delega — operador e sistema. Ninguém alcança
+o papel `administrador`, e um `policy.write` não o faz alcançável: o
+alcance novo tem de caber no teto. O `sistema` não tem passe: lê só a
+própria caixa, e decide pelo alcance que enumera.
+
+**Quem manda é a sessão.** O remetente nunca vem dos parâmetros: o kernel o
+deriva da sessão autenticada — a chave do aperto, a sessão de pessoa, a
+serial. O comando não declara `from`, a validação recusa o campo, e o
+`xtask invariantes` confere que nenhuma função de mensagem o lê. O
+destinatário é resolvido **na decisão** — o papel dele é o recurso —, e o
+handler recebe pela licença o destinatário decidido, sem resolvê-lo de novo.
+A pessoa manda pelo interpretador, com o mesmo comando e a mesma decisão.
+
+**O administrador, só com prova.** A chave de um administrador nunca abre
+sessão. Ele manda, lê e confirma por `admin.execute` — `message.send`,
+`message.read`, `message.ack` —, com a prova, decidido pelo papel dele,
+com o mesmo alcance e as mesmas cotas. `message.purge` tira a mensagem de
+outro, também só com prova.
+
+**Estados.** Uma mensagem aceita é `pending`; a primeira leitura a faz
+`delivered`; o `ack` de quem recebeu a tira (`acked`). Ler **não consome**:
+uma resposta perdida se relê, com o mesmo id — entrega pelo menos uma vez,
+com id estável para descartar a duplicata. Quem mandou cancela só antes da
+primeira leitura (`canceled`). Saem também por revogação (`voided`), pelo
+prazo (`expired`) e pelo `message.purge` (`purged`). Cada transição tem
+versão, e `expect_version` diferente é `CONFLICT`. Ao sair, o corpo é
+zerado; fica uma lápide curta para o `message.status`, e a auditoria.
+
+**Replay e duplicata.** O transporte cifrado já não deixa um quadro se
+repetir. Acima dele, cada pedido de `message.send` traz um `nonce` que só
+cresce na sessão: o mesmo nonce com o mesmo conteúdo é o reenvio — o mesmo
+id, nada criado —; um nonce velho, ou o mesmo com outro conteúdo, é
+`DENY_REPLAY`. Uma sessão nova conta do zero.
+
+**Ordem e cotas.** A caixa se lê em ordem de aceitação, com cursor
+`after`. Corpo até 512 bytes; até 32 pendentes por caixa, 8 por remetente,
+128 no total; prazo de 10 minutos, até 60. A recusa não gasta id nem nonce.
+
+**Revogação.** A chave ou a pessoa revogada tem anuladas, na hora, as
+mensagens vivas que mandou e as que ia receber — cada anulação gravada. A
+mesma chave de volta ao registro encontra a caixa vazia. O fim de uma
+sessão não anula nada: a caixa é da identidade.
+
+**Destinatário inexistente**, revogado ou sem papel: `DENY_RESOURCE`, a
+mesma resposta de um destinatário fora do alcance; a auditoria grava o
+motivo exato. A permissão vem antes: quem não pode mandar ouve
+`DENY_PERMISSION`, e não descobre quem existe. Um id alheio responde como
+um que não existe.
+
+**Auditoria.** Cada decisão, cada recusa e cada transição — aceita,
+reenvio, entregue, confirmada, cancelada, anulada, vencida, tirada —, com
+o id e a versão. Nunca o corpo: o kernel não o interpreta, e a auditoria
+guarda o resumo dos parâmetros.
+
+As mensagens moram em memória: o disco é só leitura, e um boot as perde. A
+época no id deixa isso explícito — um id de outro boot não é de mensagem
+nenhuma.
+
+A suíte confere, pelo canal de verdade, cada categoria que as mutações
+procuram: o remetente da sessão e o `from` recusado; o observador, o
+alcance do operador e o administrador inalcançável; o reenvio e o replay;
+a anulação pela revogação, de chave e de pessoa; o destinatário
+inexistente e revogado; ler sem consumir, o `ack` e o cancelamento; a
+ordem; as cotas e o prazo; o vazamento entre sessões; e o administrador
+por prova. A tabela pura tem os mesmos testes no hospedeiro, com as
+cotas de caixa e de total.
 
 ## Barramento PCI
 

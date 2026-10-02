@@ -30,6 +30,9 @@ pub enum Codigo {
     Conflict = 9,
     /// A operação pede o arrendamento do recurso, e quem pediu não o tem.
     DenyLease = 10,
+    /// O pedido repete um que já passou: o `nonce` não é novo nesta sessão
+    /// — menor que o último, ou o mesmo com outro conteúdo. Nada mudou.
+    DenyReplay = 11,
 }
 
 impl Codigo {
@@ -47,11 +50,12 @@ impl Codigo {
             Codigo::Error => "ERROR",
             Codigo::Conflict => "CONFLICT",
             Codigo::DenyLease => "DENY_LEASE",
+            Codigo::DenyReplay => "DENY_REPLAY",
         }
     }
 
     /// Todos, na ordem do número.
-    pub const TODOS: [Codigo; 11] = [
+    pub const TODOS: [Codigo; 12] = [
         Codigo::Allow,
         Codigo::DenyNotAuthenticated,
         Codigo::DenyRole,
@@ -63,6 +67,7 @@ impl Codigo {
         Codigo::Error,
         Codigo::Conflict,
         Codigo::DenyLease,
+        Codigo::DenyReplay,
     ];
 
     /// O código de um nome, como [`Codigo::nome`] o escreve: o caminho de

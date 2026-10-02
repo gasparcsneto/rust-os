@@ -87,6 +87,9 @@ pub fn esquecer(p: u8) -> Option<Identificada> {
     // A sessão acabou: os arrendamentos dela também, na hora.
     if identidade.is_some() {
         crate::coordenacao::invalidar_sessao_do_canal(p, "a sessao do canal acabou");
+        // Os nonces da sessão também: a próxima sessão nesta porta conta do
+        // zero — os quadros desta não se repetem lá, que tem outras chaves.
+        crate::mensagens::canal_acabou(politica::mensagens::Canal::Sessao(p));
     }
     identidade
 }

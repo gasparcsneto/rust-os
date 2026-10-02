@@ -440,6 +440,126 @@ pub static COMANDOS: &[Command] = &[
         handler: ui_release,
     },
     Command {
+        nome: "message.send",
+        resumo: "Manda uma mensagem a outro titular: um agente pelo nome, `pessoa:<id>`, \
+                 `serial` ou `admin:<nome>`. Quem manda e a sua sessao, nunca um parametro. \
+                 O papel do destinatario e o recurso da decisao: so os papeis do alcance do seu. \
+                 O corpo e texto opaco, ate 512 bytes. O `nonce` cresce a cada pedido da \
+                 sessao; o mesmo pedido com o mesmo nonce devolve o mesmo id.",
+        params: &[
+            ParamSpec {
+                nome: "to",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "O destinatario: nome de agente, `pessoa:<16 hex>`, `serial` ou \
+                            `admin:<nome>`.",
+            },
+            ParamSpec {
+                nome: "body",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "O texto, ate 512 bytes. O kernel nao o interpreta.",
+            },
+            ParamSpec {
+                nome: "nonce",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: true,
+                descricao: "Maior que o ultimo desta sessao; o mesmo de um pedido igual e o \
+                            reenvio dele.",
+            },
+            ParamSpec {
+                nome: "ttl_ms",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "O prazo, ate 3600000 ms; 600000 se ausente.",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::MessageSend),
+        recurso: Some("to"),
+        handler: message_send,
+    },
+    Command {
+        nome: "message.read",
+        resumo: "Le a sua caixa, em ordem de aceitacao. Ler nao consome: a mensagem fica ate \
+                 o `message.ack`. Sempre a caixa da sua sessao.",
+        params: &[
+            ParamSpec {
+                nome: "after",
+                tipo: TipoParam::Texto,
+                obrigatorio: false,
+                descricao: "So as depois deste id.",
+            },
+            ParamSpec {
+                nome: "max",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "Quantas, de 1 a 32; 8 se ausente.",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::MessageRead),
+        recurso: None,
+        handler: message_read,
+    },
+    Command {
+        nome: "message.ack",
+        resumo: "Confirma uma mensagem da sua caixa, ja lida: ela sai da caixa.",
+        params: &[
+            ParamSpec {
+                nome: "id",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "O id da mensagem.",
+            },
+            ParamSpec {
+                nome: "expect_version",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "A versao lida; outra e CONFLICT.",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::MessageRead),
+        recurso: Some("id"),
+        handler: message_ack,
+    },
+    Command {
+        nome: "message.cancel",
+        resumo: "Cancela uma mensagem que voce mandou, enquanto ninguem a leu.",
+        params: &[
+            ParamSpec {
+                nome: "id",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "O id da mensagem.",
+            },
+            ParamSpec {
+                nome: "expect_version",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "A versao conhecida; outra e CONFLICT.",
+            },
+        ],
+        // A permissão sobre as próprias mensagens, e não a de mandar: o
+        // recurso de `message.send` é sempre um destinatário, e aqui é um
+        // id. Só quem mandou cancela — a tabela confere —, e só antes da
+        // primeira leitura.
+        acesso: Acesso::Exige(Permissao::MessageRead),
+        recurso: Some("id"),
+        handler: message_cancel,
+    },
+    Command {
+        nome: "message.status",
+        resumo: "O estado de uma mensagem que voce mandou ou recebeu.",
+        params: &[ParamSpec {
+            nome: "id",
+            tipo: TipoParam::Texto,
+            obrigatorio: true,
+            descricao: "O id da mensagem.",
+        }],
+        acesso: Acesso::Exige(Permissao::MessageRead),
+        recurso: Some("id"),
+        handler: message_status,
+    },
+    Command {
         nome: "disk.partitions",
         resumo: "A tabela de particoes do disco, lida da GPT.",
         params: &[],
@@ -3205,4 +3325,199 @@ fn ui_release(params: Json, w: &mut JsonWriter) -> fmt::Result {
         }
     }
     w.end_object()
+}
+
+// ---------------------------------------------------------------------------
+// Mensagens: ver crate::mensagens. Cada handler age pelo titular da sessão
+// que pediu — nunca por um parâmetro — e o de `message.send`, sobre o
+// destinatário que a decisão resolveu.
+// ---------------------------------------------------------------------------
+
+/// Escreve a recusa de uma operação de mensagem.
+fn recusa_de_mensagem(w: &mut JsonWriter, codigo: politica::Codigo, motivo: &str) -> fmt::Result {
+    w.field_bool("ok", false)?;
+    w.field_str("code", codigo.nome())?;
+    w.field_str("error", motivo)?;
+    w.end_object()
+}
+
+/// O titular da sessão, ou a recusa escrita.
+fn titular_de_mensagens(w: &mut JsonWriter) -> Result<crate::mensagens::Remetente, fmt::Result> {
+    crate::mensagens::Remetente::da_sessao().ok_or_else(|| {
+        recusa_de_mensagem(
+            w,
+            politica::Codigo::DenyNotAuthenticated,
+            "a sessao nao tem titular de mensagens",
+        )
+    })
+}
+
+fn message_send(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let remetente = match titular_de_mensagens(w) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    // O destinatário é o que a decisão viu: o handler não o resolve de novo.
+    // E confere que é o do pedido — a licença e os parâmetros são do mesmo
+    // comando; se um dia não forem, nada é mandado.
+    let pedido = params.member("to").and_then(|v| v.as_str());
+    let Some(destino) =
+        crate::autorizacao::destino_decidido().filter(|d| Some(d.texto.as_str()) == pedido)
+    else {
+        return recusa_de_mensagem(
+            w,
+            politica::Codigo::DenyResource,
+            "sem destinatario decidido",
+        );
+    };
+    let nonce = params.member("nonce").and_then(|v| v.as_u64()).unwrap_or(0);
+    let prazo = params.member("ttl_ms").and_then(|v| v.as_u64());
+    // O corpo desescapado nunca é maior que o escrito: um buffer do tamanho
+    // do escrito sempre cabe, e o teto é conta da tabela, gravada lá.
+    let bruto = params.member("body");
+    let mut buffer = alloc::vec![0u8; bruto.map_or(0, |b| b.0.len())];
+    let Some(corpo) = bruto.and_then(|b| b.desescapar_em(&mut buffer)) else {
+        crate::autorizacao::auditar_mensagem(
+            crate::autorizacao::AtorDeMensagem::Autoridade(crate::autorizacao::autoridade_atual()),
+            "message.send",
+            &destino.texto,
+            politica::Codigo::InvalidArgument,
+            "o corpo nao e texto",
+        );
+        return recusa_de_mensagem(w, politica::Codigo::InvalidArgument, "o corpo nao e texto");
+    };
+    match crate::mensagens::enviar(&remetente, &destino, corpo, nonce, prazo) {
+        Ok((id, e)) => {
+            w.field_bool("ok", true)?;
+            w.field_str("id", &id)?;
+            w.field_u64("version", e.versao)?;
+            w.field_bool("duplicate", e.duplicata)?;
+            w.field_str("to", &destino.texto)?;
+            w.end_object()
+        }
+        Err(r) => recusa_de_mensagem(w, r.codigo(), r.motivo()),
+    }
+}
+
+/// O remetente de uma mensagem, como a leitura o escreve: o tipo e quem.
+fn escrever_remetente(w: &mut JsonWriter, dono: politica::mensagens::Dono) -> fmt::Result {
+    let (tipo, quem) = crate::mensagens::descrever(dono);
+    w.key("from")?;
+    w.begin_object()?;
+    w.field_str("type", tipo)?;
+    if let Some((campo, valor)) = quem {
+        w.field_str(campo, &valor)?;
+    }
+    if let politica::mensagens::Dono::Agente(k) | politica::mensagens::Dono::Administrador(k) = dono
+    {
+        w.field_str("key", &sigilo::hex(&k))?;
+    }
+    w.end_object()
+}
+
+/// A leitura da caixa de `remetente`, escrita em `w` — pela sessão, aqui, e
+/// pela operação administrativa, com a prova.
+pub(crate) fn escrever_caixa(
+    w: &mut JsonWriter,
+    remetente: &crate::mensagens::Remetente,
+    apos: Option<&str>,
+    max: Option<u64>,
+) -> Result<(), (politica::Codigo, &'static str)> {
+    let max = max
+        .unwrap_or(8)
+        .clamp(1, politica::mensagens::MAIS_POR_CAIXA as u64) as usize;
+    let (epoca, lidas) =
+        crate::mensagens::ler(remetente, apos, max).map_err(|r| (r.codigo(), r.motivo()))?;
+    let escrever = |w: &mut JsonWriter| -> fmt::Result {
+        w.field_str("epoch", &epoca)?;
+        w.key("messages")?;
+        w.begin_array()?;
+        for (id, l) in &lidas {
+            w.begin_object()?;
+            w.field_str("id", id)?;
+            escrever_remetente(w, l.de)?;
+            w.field_str("body", &l.corpo)?;
+            w.field_u64("sent_ms", l.criada_ms)?;
+            w.field_u64("expires_ms", l.expira_ms)?;
+            w.field_str("state", l.estado.nome())?;
+            w.field_u64("version", l.versao)?;
+            w.end_object()?;
+        }
+        w.end_array()
+    };
+    escrever(w).map_err(|_| (politica::Codigo::Error, "a resposta nao foi escrita"))
+}
+
+fn message_read(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let remetente = match titular_de_mensagens(w) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let apos = params.member("after").and_then(|v| v.as_str());
+    let max = params.member("max").and_then(|v| v.as_u64());
+    match escrever_caixa(w, &remetente, apos, max) {
+        Ok(()) => {
+            w.field_bool("ok", true)?;
+            w.end_object()
+        }
+        Err((codigo, motivo)) => recusa_de_mensagem(w, codigo, motivo),
+    }
+}
+
+/// Uma transição pedida por id, e a resposta: o estado novo, ou a recusa.
+fn responder_transicao(
+    w: &mut JsonWriter,
+    r: Result<politica::mensagens::Transicao, politica::mensagens::Recusa>,
+) -> fmt::Result {
+    match r {
+        Ok(t) => {
+            w.field_bool("ok", true)?;
+            w.field_str("state", t.estado.nome())?;
+            w.field_u64("version", t.versao)?;
+            w.end_object()
+        }
+        Err(r) => recusa_de_mensagem(w, r.codigo(), r.motivo()),
+    }
+}
+
+fn message_ack(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let remetente = match titular_de_mensagens(w) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let id = params.member("id").and_then(|v| v.as_str()).unwrap_or("");
+    let esperada = params.member("expect_version").and_then(|v| v.as_u64());
+    responder_transicao(w, crate::mensagens::confirmar(&remetente, id, esperada))
+}
+
+fn message_cancel(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let remetente = match titular_de_mensagens(w) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let id = params.member("id").and_then(|v| v.as_str()).unwrap_or("");
+    let esperada = params.member("expect_version").and_then(|v| v.as_u64());
+    responder_transicao(w, crate::mensagens::cancelar(&remetente, id, esperada))
+}
+
+fn message_status(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let remetente = match titular_de_mensagens(w) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let id = params.member("id").and_then(|v| v.as_str()).unwrap_or("");
+    match crate::mensagens::estado(&remetente, id) {
+        Ok((estado, versao)) => {
+            w.field_bool("ok", true)?;
+            w.field_str("state", estado.nome())?;
+            w.field_u64("version", versao)?;
+            w.end_object()
+        }
+        Err(r) => recusa_de_mensagem(w, r.codigo(), r.motivo()),
+    }
 }

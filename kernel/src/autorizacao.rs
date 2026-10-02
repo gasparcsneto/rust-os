@@ -142,6 +142,18 @@ pub fn autoridade_atual() -> Autoridade {
     crate::arch::sem_interrupcoes(|| *AUTORIDADE_ATUAL.lock())
 }
 
+/// O destinatário que a decisão de `message.send` resolveu e decidiu, para
+/// o handler do comando em execução — ver [`Autorizado::executar`]. O
+/// handler não resolve o destinatário de novo: usa este, que é o que a
+/// política viu.
+static DESTINO_ATUAL: Mutex<Option<crate::mensagens::Destino>> = Mutex::new(None);
+
+/// O destinatário decidido do comando em execução. `None` fora de um
+/// `message.send` autorizado.
+pub fn destino_decidido() -> Option<crate::mensagens::Destino> {
+    crate::arch::sem_interrupcoes(|| DESTINO_ATUAL.lock().clone())
+}
+
 /// Quem está numa decisão, como a auditoria o grava.
 struct Quem {
     titular: Titular,
@@ -513,6 +525,34 @@ fn decidir(papel: Option<&str>, permissao: Permissao, recurso: &str) -> (Codigo,
     (codigo, detalhe)
 }
 
+/// A decisão de uma permissão cujo recurso é o papel de um destinatário —
+/// `message.send`. O destinatário é resolvido aqui, e o papel dele é o
+/// recurso: `papel:<nome>`, contra o alcance enumerado de quem pede.
+///
+/// A permissão vem antes da existência: quem não tem `message.send` ouve
+/// `DENY_PERMISSION`, e não descobre se o destinatário existe. Quem tem, e
+/// pede um destinatário inexistente, revogado ou sem papel, ouve
+/// `DENY_RESOURCE` — o mesmo de um fora do alcance —, e a auditoria grava o
+/// motivo exato. Devolve o destinatário só quando a decisão permite.
+pub fn decidir_destino(
+    papel: Option<&str>,
+    permissao: Permissao,
+    alvo: &str,
+) -> (Codigo, &'static str, Option<crate::mensagens::Destino>) {
+    match crate::mensagens::resolver(alvo) {
+        Ok(d) => {
+            let recurso = alloc::format!("{}{}", politica::arquivo::PREFIXO_DE_DESTINO, d.papel);
+            let (codigo, detalhe) = decidir(papel, permissao, &recurso);
+            let d = codigo.permite().then_some(d);
+            (codigo, detalhe, d)
+        }
+        Err(motivo) => match decidir(papel, permissao, "") {
+            (Codigo::DenyResource, _) => (Codigo::DenyResource, motivo, None),
+            (codigo, detalhe) => (codigo, detalhe, None),
+        },
+    }
+}
+
 /// Quem pede um comando.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Chamador {
@@ -528,17 +568,25 @@ pub enum Chamador {
 pub struct Autorizado {
     comando: &'static Command,
     autoridade: Autoridade,
+    /// O destinatário de um `message.send`, como a decisão o resolveu.
+    destino: Option<crate::mensagens::Destino>,
 }
 
 impl Autorizado {
     /// Executa o comando com a autoridade de quem pediu — que `user.run`,
     /// por exemplo, grava no processo que lança.
     pub fn executar(self, params: Json, w: &mut JsonWriter) -> fmt::Result {
-        let anterior = crate::arch::sem_interrupcoes(|| {
-            core::mem::replace(&mut *AUTORIDADE_ATUAL.lock(), self.autoridade)
+        let (anterior, destino_anterior) = crate::arch::sem_interrupcoes(|| {
+            (
+                core::mem::replace(&mut *AUTORIDADE_ATUAL.lock(), self.autoridade),
+                core::mem::replace(&mut *DESTINO_ATUAL.lock(), self.destino),
+            )
         });
         let r = (self.comando.handler)(params, w);
-        crate::arch::sem_interrupcoes(|| *AUTORIDADE_ATUAL.lock() = anterior);
+        crate::arch::sem_interrupcoes(|| {
+            *AUTORIDADE_ATUAL.lock() = anterior;
+            *DESTINO_ATUAL.lock() = destino_anterior;
+        });
         r
     }
 }
@@ -595,10 +643,17 @@ pub fn autorizar(
     passar_pela_taxa(&quem, comando.nome, parametros)?;
 
     let recurso = recurso_do_pedido(comando, params);
+    let mut destino = None;
     let (codigo, detalhe) = match comando.acesso {
         // A prova é conferida dentro da operação, e a decisão dela é
         // gravada lá, com o papel do administrador.
         Acesso::PorProva => (Codigo::Allow, "a autorizacao e a prova"),
+        Acesso::Exige(permissao) if permissao.recurso_e_destino() => {
+            let (codigo, detalhe, resolvido) =
+                decidir_destino(quem.papel.as_deref(), permissao, &recurso);
+            destino = resolvido;
+            (codigo, detalhe)
+        }
         Acesso::Exige(permissao) => decidir(quem.papel.as_deref(), permissao, &recurso),
     };
     auditar(&quem, comando.nome, &recurso, codigo, parametros, detalhe);
@@ -608,6 +663,7 @@ pub fn autorizar(
     Ok(Autorizado {
         comando,
         autoridade,
+        destino,
     })
 }
 
@@ -653,6 +709,72 @@ pub fn autorizar_processo(permissao: Permissao, recurso: &str, metodo: &str) -> 
     let (codigo, detalhe) = decidir(quem.papel.as_deref(), permissao, recurso);
     auditar(&quem, metodo, recurso, codigo, &[], detalhe);
     codigo
+}
+
+/// Quem faz uma transição de mensagem, para a auditoria: a autoridade do
+/// comando em execução, um titular que não está agindo — o revogado, o
+/// administrador pela prova —, ou o próprio kernel, quando o prazo vence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AtorDeMensagem {
+    Autoridade(Autoridade),
+    Dono(politica::mensagens::Dono),
+    Kernel,
+}
+
+/// Grava um evento de mensagem — ver [`crate::mensagens`]. Nunca o corpo:
+/// o recurso é o id, e o detalhe, o que aconteceu.
+pub fn auditar_mensagem(
+    ator: AtorDeMensagem,
+    metodo: &str,
+    recurso: &str,
+    codigo: Codigo,
+    detalhe: &str,
+) {
+    use politica::mensagens::Dono;
+    let quem = match ator {
+        AtorDeMensagem::Autoridade(Autoridade::Sistema) => quem_local("sistema"),
+        AtorDeMensagem::Autoridade(Autoridade::Sessao { sessao, chave }) => {
+            quem_da_autoridade(sessao, chave)
+        }
+        AtorDeMensagem::Autoridade(Autoridade::Pessoa { sessao }) => match quem_da_pessoa(sessao) {
+            Ok(q) | Err(q) => q,
+        },
+        AtorDeMensagem::Dono(Dono::Serial) => {
+            quem_da_autoridade(crate::agent::sessao::SERIAL, None)
+        }
+        AtorDeMensagem::Dono(Dono::Agente(k)) => quem_da_autoridade(SESSAO_DA_PESSOA, Some(k)),
+        AtorDeMensagem::Dono(Dono::Pessoa(p)) => {
+            let id = sigilo::pessoas::IdPessoa(p);
+            Quem {
+                titular: Titular::Pessoa,
+                sessao: SESSAO_DA_PESSOA,
+                sessao_de_pessoa: None,
+                agente: id.texto(),
+                chave: None,
+                papel: crate::pessoas::pessoa(id).map(|p| p.papel),
+            }
+        }
+        AtorDeMensagem::Dono(Dono::Administrador(k)) => {
+            let papel = crate::identidade::papel_do_administrador(&k);
+            Quem {
+                titular: Titular::Administrador,
+                sessao: SESSAO_DA_PESSOA,
+                sessao_de_pessoa: None,
+                agente: papel.as_ref().map(|(n, _)| n.clone()).unwrap_or_default(),
+                chave: Some(k),
+                papel: papel.and_then(|(_, p)| p),
+            }
+        }
+        AtorDeMensagem::Kernel => Quem {
+            titular: Titular::Kernel,
+            sessao: SESSAO_DA_PESSOA,
+            sessao_de_pessoa: None,
+            agente: "kernel".to_string(),
+            chave: None,
+            papel: None,
+        },
+    };
+    auditar(&quem, metodo, recurso, codigo, &[], detalhe);
 }
 
 /// Grava um evento de arrendamento — ver [`crate::coordenacao`] —, em nome
@@ -857,6 +979,18 @@ pub fn auditar_aperto(p: u8, chave: Option<[u8; 32]>, nome: &str, codigo: Codigo
 /// vez, com o desfecho inteiro — ver [`auditar_administracao`].
 pub fn decidir_administracao(papel: Option<&str>, permissao: Permissao) -> Codigo {
     com_politica(|p| p.decidir(papel, permissao, None))
+}
+
+/// Se o papel tem a permissão, sem olhar recurso: o primeiro passo de uma
+/// operação administrativa cujo recurso só se conhece depois de ler os
+/// parâmetros — o destinatário de `message.send`, decidido em seguida por
+/// [`decidir_destino`], com o papel do administrador.
+pub fn papel_tem(papel: Option<&str>, permissao: Permissao) -> Codigo {
+    com_politica(|p| match papel.and_then(|n| p.papel(n)) {
+        None => Codigo::DenyRole,
+        Some(r) if !r.tem(permissao) => Codigo::DenyPermission,
+        Some(_) => Codigo::Allow,
+    })
 }
 
 /// Grava um desfecho de operação administrativa. `administrador` vazio

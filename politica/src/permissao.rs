@@ -72,10 +72,20 @@ pub enum Permissao {
     /// quebrar o arrendamento de outro — ninguém o toma por ter um papel
     /// maior.
     LeaseRevoke,
+    /// Mandar uma mensagem a outro titular. O recurso é o papel do
+    /// destinatário, e o alcance de cada papel é enumerado: `papel:<nome>`.
+    MessageSend,
+    /// Ler e confirmar a **própria** caixa, consultar as próprias
+    /// mensagens, e cancelar as que mandou enquanto ninguém as leu. Nunca a
+    /// caixa de outro: a caixa vem da sessão, e não de um parâmetro.
+    MessageRead,
+    /// Tirar mensagens de outro titular, ou uma caixa inteira — só pela
+    /// operação administrativa, com prova.
+    MessagePurge,
 }
 
 /// Todas, na ordem do relatório.
-pub const TODAS: [Permissao; 25] = [
+pub const TODAS: [Permissao; 28] = [
     Permissao::AgentRead,
     Permissao::SystemRead,
     Permissao::LogRead,
@@ -101,6 +111,9 @@ pub const TODAS: [Permissao; 25] = [
     Permissao::CredentialRotate,
     Permissao::SessionRevoke,
     Permissao::LeaseRevoke,
+    Permissao::MessageSend,
+    Permissao::MessageRead,
+    Permissao::MessagePurge,
 ];
 
 impl Permissao {
@@ -132,6 +145,9 @@ impl Permissao {
             Permissao::CredentialRotate => "credential.rotate",
             Permissao::SessionRevoke => "session.revoke",
             Permissao::LeaseRevoke => "lease.revoke",
+            Permissao::MessageSend => "message.send",
+            Permissao::MessageRead => "message.read",
+            Permissao::MessagePurge => "message.purge",
         }
     }
 
@@ -161,6 +177,9 @@ impl Permissao {
                 | Permissao::CredentialRotate
                 | Permissao::SessionRevoke
                 | Permissao::LeaseRevoke
+                | Permissao::MessageSend
+                | Permissao::MessageRead
+                | Permissao::MessagePurge
         )
     }
 
@@ -177,6 +196,7 @@ impl Permissao {
                 | Permissao::CredentialRotate
                 | Permissao::SessionRevoke
                 | Permissao::LeaseRevoke
+                | Permissao::MessagePurge
         )
     }
 
@@ -187,6 +207,19 @@ impl Permissao {
             self,
             Permissao::FsRead | Permissao::FsWrite | Permissao::ProcessRun
         )
+    }
+
+    /// O recurso desta permissão é o papel de um destinatário — `papel:<nome>`
+    /// —, e um papel o limita a uma lista enumerada de papéis. Sem curinga:
+    /// um papel que não está na lista não é alcançado.
+    pub const fn recurso_e_destino(self) -> bool {
+        matches!(self, Permissao::MessageSend)
+    }
+
+    /// O papel limita o recurso desta permissão por uma linha `recurso`: de
+    /// caminho ou de destino. A linha é obrigatória para quem a tem.
+    pub const fn tem_alcance(self) -> bool {
+        self.recurso_e_caminho() || self.recurso_e_destino()
     }
 }
 
@@ -236,5 +269,22 @@ mod testes {
             let p = Permissao::de_nome(nome).unwrap();
             assert!(p.administrativa() && p.sensivel(), "{nome}");
         }
+    }
+
+    /// As de mensagem não atravessam a inclusão: cada papel que manda ou lê
+    /// as escreve pelo nome. Tirar mensagem de outro é administrativo; mandar
+    /// e ler, não. E só mandar tem o papel do destinatário como recurso.
+    #[test]
+    fn as_de_mensagem() {
+        let (manda, le, purga) = (
+            Permissao::MessageSend,
+            Permissao::MessageRead,
+            Permissao::MessagePurge,
+        );
+        assert!(manda.sensivel() && le.sensivel() && purga.sensivel());
+        assert!(!manda.administrativa() && !le.administrativa() && purga.administrativa());
+        assert!(manda.recurso_e_destino() && !manda.recurso_e_caminho());
+        assert!(!le.recurso_e_destino() && !purga.recurso_e_destino());
+        assert!(TODAS.iter().filter(|p| p.recurso_e_destino()).count() == 1);
     }
 }

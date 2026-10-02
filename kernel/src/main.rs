@@ -77,6 +77,7 @@ mod interpretador;
 mod irq;
 mod log;
 mod machine;
+mod mensagens;
 mod mmio;
 mod paginacao;
 mod particoes;

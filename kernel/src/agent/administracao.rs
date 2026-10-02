@@ -69,6 +69,12 @@ struct Pedinte<'a> {
     /// A chave do agente na sessão de onde o pedido veio — nenhuma na
     /// serial. É o "si mesmo" das regras de não-autoprivilegiamento.
     chave_da_sessao: Option<[u8; sigilo::TAM_CHAVE]>,
+    /// A chave do administrador que provou: o titular das mensagens dele,
+    /// que nunca abre sessão.
+    administrador: [u8; sigilo::TAM_CHAVE],
+    /// O destinatário de um `message.send`, como a decisão o resolveu — com
+    /// o papel do administrador.
+    destino: Option<crate::mensagens::Destino>,
 }
 
 /// Por que uma operação não foi feita: o código da auditoria e o motivo.
@@ -155,6 +161,34 @@ static OPERACOES: &[Operacao] = &[
                  ui.tree}. A unica forma de quebrar o arrendamento de outro.",
         permissao: Permissao::LeaseRevoke,
         executar: revogar_arrendamento,
+    },
+    Operacao {
+        nome: "message.send",
+        resumo: "Manda uma mensagem como o administrador: {\"to\", \"body\", \"nonce\", \
+                 \"ttl_ms\"?}, como `message.send`. O alcance e o do papel do administrador; \
+                 a chave dele nunca abre sessao.",
+        permissao: Permissao::MessageSend,
+        executar: mandar_mensagem,
+    },
+    Operacao {
+        nome: "message.read",
+        resumo: "Le a caixa do administrador: {\"after\"?, \"max\"?}, como `message.read`.",
+        permissao: Permissao::MessageRead,
+        executar: ler_mensagens,
+    },
+    Operacao {
+        nome: "message.ack",
+        resumo: "Confirma uma mensagem da caixa do administrador: {\"id\", \
+                 \"expect_version\"?}.",
+        permissao: Permissao::MessageRead,
+        executar: confirmar_mensagem,
+    },
+    Operacao {
+        nome: "message.purge",
+        resumo: "Tira uma mensagem viva, de quem for: {\"id\"}. Fica a lapide, e a \
+                 auditoria.",
+        permissao: Permissao::MessagePurge,
+        executar: purgar_mensagem,
     },
 ];
 
@@ -317,8 +351,14 @@ fn conferir_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) -> Result
         ));
     };
 
-    // A prova disse quem; a política diz se o papel dele pode isto.
-    let decisao = autorizacao::decidir_administracao(papel.as_deref(), operacao.permissao);
+    // A prova disse quem; a política diz se o papel dele pode isto. A
+    // permissão de destino tem o recurso nos parâmetros: o papel primeiro,
+    // e o destinatário logo abaixo.
+    let decisao = if operacao.permissao.recurso_e_destino() {
+        autorizacao::papel_tem(papel.as_deref(), operacao.permissao)
+    } else {
+        autorizacao::decidir_administracao(papel.as_deref(), operacao.permissao)
+    };
     let papel = match (decisao, papel.as_deref()) {
         (Codigo::Allow, Some(papel)) => papel,
         (Codigo::DenyRole, _) | (_, None) => {
@@ -333,11 +373,30 @@ fn conferir_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) -> Result
         }
     };
 
+    // O destinatário, pelo mesmo `decidir_destino` da sessão, com o papel do
+    // administrador: o alcance dele, enumerado como o de todos.
+    let mut destino = None;
+    if operacao.permissao.recurso_e_destino() {
+        let alvo = Json(parametros.as_bytes())
+            .member("to")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let (codigo, motivo, resolvido) =
+            autorizacao::decidir_destino(Some(papel), operacao.permissao, alvo);
+        if !codigo.permite() {
+            gravar(codigo, alvo, motivo);
+            return Err(falha(codigo, motivo));
+        }
+        destino = resolvido;
+    }
+
     let pedinte = Pedinte {
         sessao,
         nome: &nome,
         papel,
         chave_da_sessao: crate::sessoes::identidade(sessao).map(|id| id.chave),
+        administrador,
+        destino,
     };
 
     // A operação escreve os campos dela só se der certo; os de cima vêm
@@ -675,4 +734,61 @@ fn revogar_arrendamento(
     let _ = w.field_str("holder", tipo);
     let _ = w.field_str("by", &quem);
     Ok(recurso)
+}
+
+/// A falha de uma operação de mensagem.
+fn falha_de_mensagem(r: politica::mensagens::Recusa) -> Falha {
+    falha(r.codigo(), r.motivo())
+}
+
+fn mandar_mensagem(pedinte: &Pedinte, params: Json, w: &mut JsonWriter) -> Result<String, Falha> {
+    let destino = pedinte
+        .destino
+        .as_ref()
+        .ok_or_else(|| falha(Codigo::DenyResource, "sem destinatario decidido"))?;
+    let nonce = params.member("nonce").and_then(|v| v.as_u64()).unwrap_or(0);
+    let prazo = params.member("ttl_ms").and_then(|v| v.as_u64());
+    let bruto = params
+        .member("body")
+        .ok_or_else(|| falha(Codigo::InvalidArgument, "falta `body`"))?;
+    let mut buffer = alloc::vec![0u8; bruto.0.len()];
+    let corpo = bruto
+        .desescapar_em(&mut buffer)
+        .ok_or_else(|| falha(Codigo::InvalidArgument, "o corpo nao e texto"))?;
+    let remetente = crate::mensagens::Remetente::do_administrador(pedinte.administrador);
+    let (id, e) = crate::mensagens::enviar(&remetente, destino, corpo, nonce, prazo)
+        .map_err(falha_de_mensagem)?;
+    let _ = w.field_str("id", &id);
+    let _ = w.field_bool("duplicate", e.duplicata);
+    Ok(format!("msg:{id}"))
+}
+
+fn ler_mensagens(pedinte: &Pedinte, params: Json, w: &mut JsonWriter) -> Result<String, Falha> {
+    let remetente = crate::mensagens::Remetente::do_administrador(pedinte.administrador);
+    let apos = params.member("after").and_then(|v| v.as_str());
+    let max = params.member("max").and_then(|v| v.as_u64());
+    super::commands::escrever_caixa(w, &remetente, apos, max)
+        .map_err(|(codigo, motivo)| falha(codigo, motivo))?;
+    Ok(String::from("caixa"))
+}
+
+fn confirmar_mensagem(
+    pedinte: &Pedinte,
+    params: Json,
+    w: &mut JsonWriter,
+) -> Result<String, Falha> {
+    let id = texto(params, "id")?;
+    let esperada = params.member("expect_version").and_then(|v| v.as_u64());
+    let remetente = crate::mensagens::Remetente::do_administrador(pedinte.administrador);
+    let t = crate::mensagens::confirmar(&remetente, id, esperada).map_err(falha_de_mensagem)?;
+    let _ = w.field_str("state", t.estado.nome());
+    Ok(format!("msg:{id}"))
+}
+
+fn purgar_mensagem(pedinte: &Pedinte, params: Json, w: &mut JsonWriter) -> Result<String, Falha> {
+    let id = texto(params, "id")?;
+    let remetente = crate::mensagens::Remetente::do_administrador(pedinte.administrador);
+    let t = crate::mensagens::purgar(&remetente, id).map_err(falha_de_mensagem)?;
+    let _ = w.field_str("state", t.estado.nome());
+    Ok(format!("msg:{id}"))
 }

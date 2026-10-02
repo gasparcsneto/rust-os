@@ -1,0 +1,467 @@
+//! As mensagens entre titulares, no kernel: um recurso do sistema, e não um
+//! canal privilegiado.
+//!
+//! A conta — caixas, estados, cotas, nonces — é a de
+//! [`politica::mensagens`]. Aqui ela ganha o relógio, a identidade de quem
+//! pede, o destinatário resolvido e a auditoria. Nenhum caminho daqui
+//! contorna a decisão:
+//!
+//! - **Mandar** é `message.send`, que passa por
+//!   [`crate::autorizacao::autorizar`]: o destinatário é resolvido **lá**, e
+//!   o papel dele é o recurso da decisão — `papel:<nome>`, contra o alcance
+//!   enumerado do papel de quem pede. O handler recebe pela licença o
+//!   destinatário que foi decidido, e não o resolve de novo.
+//! - **Quem manda** é derivado da sessão autenticada — a chave do aperto, a
+//!   sessão de pessoa, a serial —, por [`Remetente::da_sessao`]. Nunca vem
+//!   dos parâmetros: o comando não declara `from`, e a validação recusa o
+//!   campo.
+//! - **Ler, confirmar, consultar e cancelar** são sempre sobre a caixa e as
+//!   mensagens do titular da sessão. A caixa não é parâmetro.
+//! - **O administrador** não abre sessão: manda, lê e confirma só por
+//!   operação administrativa, com prova — [`Remetente::do_administrador`],
+//!   chamado só por [`crate::agent::administracao`].
+//! - **A revogação** de uma chave ou de uma pessoa anula, na hora, as
+//!   mensagens vivas que ela mandou e as que ia receber.
+//! - **O corpo não é interpretado.** Vai para a caixa e volta para quem lê;
+//!   a auditoria grava o resumo dos parâmetros do pedido, nunca o texto.
+
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
+use politica::Codigo;
+use politica::mensagens::{Caixas, Canal, Dono, Enviada, Estado, Lida, Recusa, Transicao};
+use spin::Mutex;
+
+use crate::autorizacao::{AtorDeMensagem, Autoridade};
+
+struct Tabela {
+    caixas: Caixas,
+    /// Sorteada no primeiro uso: um id de outro boot não é confundido com
+    /// um deste.
+    epoca: [u8; 8],
+}
+
+static TABELA: Mutex<Option<Tabela>> = Mutex::new(None);
+
+fn com_tabela<R>(f: impl FnOnce(&mut Tabela) -> R) -> R {
+    // A época sai do gerador antes da trava: sortear dentro dela seria
+    // pedir outra trava com esta na mão.
+    let precisa = crate::arch::sem_interrupcoes(|| TABELA.lock().is_none());
+    let nova = precisa.then(|| {
+        let mut epoca = [0u8; 8];
+        if crate::aleatorio::preencher(&mut epoca).is_err() {
+            // Sem entropia, o relógio: a época só distingue boots, e não
+            // protege nada que precise ser imprevisível.
+            epoca = crate::tempo::uptime_ms().to_le_bytes();
+        }
+        Tabela {
+            caixas: Caixas::nova(),
+            epoca,
+        }
+    });
+    crate::arch::sem_interrupcoes(|| {
+        let mut t = TABELA.lock();
+        if t.is_none() {
+            *t = nova;
+        }
+        f(t.as_mut().expect("a tabela acabou de ser criada"))
+    })
+}
+
+/// O id de uma mensagem como o relatório o escreve: a época e o número.
+fn id_texto(epoca: &[u8; 8], n: u64) -> String {
+    format!("{}:{n}", sigilo::hex_de(epoca))
+}
+
+/// O número de um id deste boot. Um id de outra época, ou malformado, não é
+/// de mensagem nenhuma.
+fn ler_id(epoca: &[u8; 8], texto: &str) -> Option<u64> {
+    let (e, n) = texto.split_once(':')?;
+    (e == sigilo::hex_de(epoca)).then_some(())?;
+    n.parse().ok()
+}
+
+/// O recurso de uma mensagem na auditoria.
+fn recurso(epoca: &[u8; 8], n: u64) -> String {
+    format!("msg:{}", id_texto(epoca, n))
+}
+
+/// Um destinatário resolvido: o titular, o papel dele agora — o recurso da
+/// decisão —, e o texto como veio no pedido.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Destino {
+    pub dono: Dono,
+    pub papel: String,
+    pub texto: String,
+}
+
+/// Resolve o destinatário de um envio. O `Err` é o motivo exato, para a
+/// auditoria — a resposta a quem pede é a mesma para todos: o inexistente,
+/// o revogado e o sem papel são `DENY_RESOURCE`, sem dizer qual.
+///
+/// - `serial`: a serial;
+/// - `pessoa:<16 hex>`: uma pessoa do registro, ativa;
+/// - `admin:<nome>`: um administrador — que a política da imagem não deixa
+///   ninguém alcançar;
+/// - qualquer outro: o nome de um agente do registro.
+pub fn resolver(texto: &str) -> Result<Destino, &'static str> {
+    let destino = |dono, papel: Option<String>| {
+        papel
+            .map(|papel| Destino {
+                dono,
+                papel,
+                texto: texto.to_string(),
+            })
+            .ok_or("destinatario sem papel")
+    };
+    if texto == "serial" {
+        let papel = crate::autorizacao::com_politica(|p| p.serial().to_string());
+        return destino(Dono::Serial, Some(papel));
+    }
+    if let Some(nome) = texto.strip_prefix("admin:") {
+        let (chave, papel) =
+            crate::identidade::administrador_por_nome(nome).ok_or("destinatario inexistente")?;
+        return destino(Dono::Administrador(chave), papel);
+    }
+    if texto.starts_with("pessoa:") {
+        let id = sigilo::pessoas::IdPessoa::ler(texto).ok_or("destinatario inexistente")?;
+        return match crate::pessoas::pessoa(id) {
+            Some(p) if p.estado == sigilo::pessoas::Estado::Ativa => {
+                destino(Dono::Pessoa(id.0), Some(p.papel))
+            }
+            Some(_) => Err("destinatario revogado"),
+            None => Err("destinatario inexistente"),
+        };
+    }
+    let chave = crate::identidade::chave_do_agente(texto).ok_or("destinatario inexistente")?;
+    destino(
+        Dono::Agente(chave),
+        crate::identidade::papel_do_agente(&chave),
+    )
+}
+
+/// Quem age sobre as mensagens: o titular, o canal dos nonces dele, e como
+/// a auditoria o grava. Só se cria de dois jeitos — pela sessão autenticada
+/// do pedido, ou pela prova de um administrador —, e nunca de um parâmetro.
+pub struct Remetente {
+    dono: Dono,
+    canal: Canal,
+    ator: AtorDeMensagem,
+}
+
+impl Remetente {
+    /// O titular da sessão que pediu o comando que está rodando. `None` sem
+    /// titular de mensagens: a autoridade local — um processo do sistema —
+    /// não tem caixa, e uma sessão de pessoa que acabou também não.
+    pub fn da_sessao() -> Option<Remetente> {
+        let autoridade = crate::autorizacao::autoridade_atual();
+        let (dono, canal) = match autoridade {
+            Autoridade::Sistema => return None,
+            Autoridade::Sessao {
+                sessao: crate::agent::sessao::SERIAL,
+                chave: None,
+            } => (Dono::Serial, Canal::Sessao(crate::agent::sessao::SERIAL)),
+            Autoridade::Sessao {
+                sessao,
+                chave: Some(k),
+            } => (Dono::Agente(k), Canal::Sessao(sessao)),
+            Autoridade::Sessao { chave: None, .. } => return None,
+            Autoridade::Pessoa { sessao } => match crate::pessoas::sessao(sessao) {
+                crate::pessoas::EstadoDaSessao::Ativa { pessoa, .. } => {
+                    (Dono::Pessoa(pessoa.0), Canal::Pessoa(sessao.0))
+                }
+                _ => return None,
+            },
+        };
+        Some(Remetente {
+            dono,
+            canal,
+            ator: AtorDeMensagem::Autoridade(autoridade),
+        })
+    }
+
+    /// O administrador de uma operação administrativa, com a prova já
+    /// conferida. Só [`crate::agent::administracao`] chama — o `xtask
+    /// invariantes` confere.
+    pub fn do_administrador(chave: [u8; 32]) -> Remetente {
+        let dono = Dono::Administrador(chave);
+        Remetente {
+            dono,
+            canal: Canal::Administrador(chave),
+            ator: AtorDeMensagem::Dono(dono),
+        }
+    }
+}
+
+/// Grava cada transição que não foi pedida por quem está agindo: a entrega
+/// a quem lê, o vencimento, a anulação.
+fn gravar_transicoes(epoca: &[u8; 8], ator: AtorDeMensagem, ts: &[Transicao]) {
+    for t in ts {
+        let (metodo, ator, detalhe) = match t.estado {
+            Estado::Entregue => ("message.deliver", ator, "lida pela primeira vez"),
+            Estado::Expirada => ("message.expire", AtorDeMensagem::Kernel, "o prazo venceu"),
+            Estado::Confirmada => ("message.ack", ator, "confirmada por quem recebeu"),
+            Estado::Cancelada => ("message.cancel", ator, "cancelada por quem mandou"),
+            Estado::Anulada => ("message.void", ator, "anulada"),
+            Estado::Purgada => ("message.purge", ator, "tirada por um administrador"),
+            Estado::Pendente => continue,
+        };
+        crate::autorizacao::auditar_mensagem(
+            ator,
+            metodo,
+            &recurso(epoca, t.id),
+            Codigo::Allow,
+            &format!("{detalhe}; versao {}", t.versao),
+        );
+    }
+}
+
+/// Manda. O destinatário é o que a decisão resolveu; o remetente, o da
+/// sessão. Devolve o id e o desfecho; a recusa vai para a auditoria.
+pub fn enviar(
+    r: &Remetente,
+    destino: &Destino,
+    corpo: &str,
+    nonce: u64,
+    prazo_ms: Option<u64>,
+) -> Result<(String, Enviada), Recusa> {
+    let agora = crate::tempo::uptime_ms();
+    let (epoca, resultado, vencidas) = com_tabela(|t| {
+        let (res, venc) =
+            t.caixas
+                .enviar(r.canal, r.dono, destino.dono, corpo, nonce, prazo_ms, agora);
+        (t.epoca, res, venc)
+    });
+    gravar_transicoes(&epoca, r.ator, &vencidas);
+    match resultado {
+        Ok(e) => {
+            let detalhe = if e.duplicata {
+                "reenvio do mesmo pedido: o mesmo id, nada criado"
+            } else {
+                "aceita, pendente"
+            };
+            crate::autorizacao::auditar_mensagem(
+                r.ator,
+                "message.send",
+                &recurso(&epoca, e.id),
+                Codigo::Allow,
+                detalhe,
+            );
+            Ok((id_texto(&epoca, e.id), e))
+        }
+        Err(recusa) => {
+            crate::autorizacao::auditar_mensagem(
+                r.ator,
+                "message.send",
+                &destino.texto,
+                recusa.codigo(),
+                recusa.motivo(),
+            );
+            Err(recusa)
+        }
+    }
+}
+
+/// Lê a própria caixa, a partir do id `apos`. Não consome; a primeira
+/// leitura de cada uma vai para a auditoria. O `Err` é um `apos` que não é
+/// id deste boot.
+pub fn ler(
+    r: &Remetente,
+    apos: Option<&str>,
+    max: usize,
+) -> Result<(String, Vec<(String, Lida)>), Recusa> {
+    let agora = crate::tempo::uptime_ms();
+    let (epoca, res) = com_tabela(|t| {
+        let apos = match apos {
+            None => Some(0),
+            Some(texto) => ler_id(&t.epoca, texto),
+        };
+        let res = apos.map(|apos| t.caixas.ler(r.dono, apos, max, agora));
+        (t.epoca, res)
+    });
+    let Some((lidas, transicoes)) = res else {
+        return Err(Recusa::Desconhecida);
+    };
+    gravar_transicoes(&epoca, r.ator, &transicoes);
+    let lidas = lidas
+        .into_iter()
+        .map(|l| (id_texto(&epoca, l.id), l))
+        .collect();
+    Ok((sigilo::hex_de(&epoca), lidas))
+}
+
+/// Uma operação sobre uma mensagem pelo id: confirmar ou cancelar.
+fn sobre_uma(
+    r: &Remetente,
+    id: &str,
+    metodo: &str,
+    f: impl FnOnce(&mut Caixas, u64, u64) -> (Result<Transicao, Recusa>, Vec<Transicao>),
+) -> Result<Transicao, Recusa> {
+    let agora = crate::tempo::uptime_ms();
+    let (epoca, res) = com_tabela(|t| {
+        let res = match ler_id(&t.epoca, id) {
+            Some(n) => f(&mut t.caixas, n, agora),
+            None => (Err(Recusa::Desconhecida), Vec::new()),
+        };
+        (t.epoca, res)
+    });
+    let (resultado, vencidas) = res;
+    gravar_transicoes(&epoca, r.ator, &vencidas);
+    match resultado {
+        Ok(t) => {
+            gravar_transicoes(&epoca, r.ator, &[t]);
+            Ok(t)
+        }
+        Err(recusa) => {
+            // O id como veio: a recusa de um id alheio e a de um que não
+            // existe são gravadas iguais para quem pediu — e o motivo exato
+            // é o da tabela.
+            crate::autorizacao::auditar_mensagem(
+                r.ator,
+                metodo,
+                &format!("msg:{id}"),
+                recusa.codigo(),
+                recusa.motivo(),
+            );
+            Err(recusa)
+        }
+    }
+}
+
+/// O `ack` de quem recebeu: a mensagem entregue sai da caixa.
+pub fn confirmar(r: &Remetente, id: &str, esperada: Option<u64>) -> Result<Transicao, Recusa> {
+    sobre_uma(r, id, "message.ack", |c, n, agora| {
+        c.confirmar(r.dono, n, esperada, agora)
+    })
+}
+
+/// O cancelamento de quem mandou, antes da primeira leitura.
+pub fn cancelar(r: &Remetente, id: &str, esperada: Option<u64>) -> Result<Transicao, Recusa> {
+    sobre_uma(r, id, "message.cancel", |c, n, agora| {
+        c.cancelar(r.dono, n, esperada, agora)
+    })
+}
+
+/// O estado de uma mensagem, para quem tem parte nela.
+pub fn estado(r: &Remetente, id: &str) -> Result<(Estado, u64), Recusa> {
+    com_tabela(|t| {
+        ler_id(&t.epoca, id)
+            .and_then(|n| t.caixas.estado(r.dono, n))
+            .ok_or(Recusa::Desconhecida)
+    })
+}
+
+/// O titular foi revogado: as mensagens vivas que ele mandou e as que ia
+/// receber são anuladas, e cada anulação vai para a auditoria em nome
+/// dele. Chamada por [`crate::identidade::revogar`] e
+/// [`crate::pessoas::revogar_pessoa`].
+pub fn anular_titular(dono: Dono, motivo: &str) {
+    let (epoca, anuladas) = com_tabela(|t| (t.epoca, t.caixas.anular(dono)));
+    for a in anuladas {
+        let papel = if a.de == dono {
+            "remetente"
+        } else {
+            "destinatario"
+        };
+        crate::autorizacao::auditar_mensagem(
+            AtorDeMensagem::Dono(dono),
+            "message.void",
+            &recurso(&epoca, a.id),
+            Codigo::Allow,
+            &format!("anulada: {papel} {motivo}; versao {}", a.versao),
+        );
+    }
+}
+
+/// `message.purge`: uma mensagem, de quem for. Só a operação
+/// administrativa, com prova, chama — e ela grava o desfecho dela.
+pub fn purgar(r: &Remetente, id: &str) -> Result<Transicao, Recusa> {
+    let (epoca, t) = com_tabela(|t| {
+        let saiu = ler_id(&t.epoca, id).and_then(|n| t.caixas.purgar(n));
+        (t.epoca, saiu)
+    });
+    let t = t.ok_or(Recusa::Desconhecida)?;
+    gravar_transicoes(&epoca, r.ator, &[t]);
+    Ok(t)
+}
+
+/// A sessão do canal acabou: os nonces dela também.
+pub fn canal_acabou(canal: Canal) {
+    com_tabela(|t| t.caixas.esquecer_canal(canal));
+}
+
+/// As que venceram saem, e vão para a auditoria. Chamada pelo coletor de
+/// fios — uma vez por segundo basta.
+pub fn vencer_todos() {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static ULTIMA: AtomicU64 = AtomicU64::new(0);
+    let agora = crate::tempo::uptime_ms();
+    if agora.saturating_sub(ULTIMA.load(Ordering::Relaxed)) < 1_000 {
+        return;
+    }
+    ULTIMA.store(agora, Ordering::Relaxed);
+    // Sem tabela, nada a vencer — e nenhuma razão para sortear a época.
+    if crate::arch::sem_interrupcoes(|| TABELA.lock().is_none()) {
+        return;
+    }
+    let (epoca, vencidas) = com_tabela(|t| (t.epoca, t.caixas.vencer(agora)));
+    gravar_transicoes(&epoca, AtorDeMensagem::Kernel, &vencidas);
+}
+
+/// O remetente de uma mensagem, para o relatório: o tipo e quem.
+pub fn descrever(dono: Dono) -> (&'static str, Option<(&'static str, String)>) {
+    match dono {
+        Dono::Serial => ("serial", None),
+        Dono::Agente(k) => (
+            "agent",
+            Some((
+                "name",
+                crate::identidade::agente(&k).unwrap_or_else(|| sigilo::hex(&k)),
+            )),
+        ),
+        Dono::Pessoa(p) => (
+            "person",
+            Some(("person", sigilo::pessoas::IdPessoa(p).texto())),
+        ),
+        Dono::Administrador(k) => (
+            "admin",
+            Some((
+                "name",
+                crate::identidade::administrador(&k).unwrap_or_else(|| sigilo::hex(&k)),
+            )),
+        ),
+    }
+}
+
+/// Esvazia a tabela, para a suíte: cada caso começa sem mensagens.
+#[cfg(feature = "modo-teste")]
+pub fn esquecer() {
+    crate::arch::sem_interrupcoes(|| *TABELA.lock() = None);
+}
+
+/// Para o invariante da suíte: ids em ordem, nenhum repetido, nenhuma viva
+/// num estado final.
+#[cfg(feature = "modo-teste")]
+pub fn coerente() -> bool {
+    com_tabela(|t| t.caixas.coerente())
+}
+
+/// Quantas vivas há para `dono` — para a suíte conferir uma caixa sem lê-la
+/// como ele.
+#[cfg(feature = "modo-teste")]
+pub fn na_caixa(dono: Dono) -> usize {
+    com_tabela(|t| t.caixas.na_caixa(dono))
+}
+
+/// Destrava a tabela à força, para uso exclusivo do caminho de falha fatal.
+///
+/// # Safety
+///
+/// Só pode ser chamada quando o kernel já está em falha irrecuperável e não
+/// há outro núcleo em execução. Ver [`crate::traps::fatal`].
+pub unsafe fn destravar() {
+    unsafe {
+        TABELA.force_unlock();
+    }
+}

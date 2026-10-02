@@ -34,6 +34,7 @@ pub mod arrendamento;
 pub mod auditoria;
 pub mod caminho;
 pub mod codigo;
+pub mod mensagens;
 pub mod permissao;
 pub mod taxa;
 
@@ -59,15 +60,17 @@ pub use permissao::Permissao;
 macro_rules! papeis_de_sistema {
     () => {
         "\
-papel sistema agent.read system.read log.read ui.read ui.act process.run net.send fs.read fs.raw_read keyboard.read debug.trigger terminal.attach audit.read policy.read
+papel sistema agent.read system.read log.read ui.read ui.act process.run net.send fs.read fs.raw_read keyboard.read debug.trigger terminal.attach audit.read policy.read message.send message.read
 recurso sistema fs.read /
 recurso sistema process.run /
+recurso sistema message.send papel:observador papel:operador papel:sistema
 taxa sistema 400 800
 processos sistema 32
 
-papel administrador agent.read system.read log.read ui.read ui.act process.run net.send fs.read audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke
+papel administrador agent.read system.read log.read ui.read ui.act process.run net.send fs.read audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge
 recurso administrador fs.read /dados /bin /programas
 recurso administrador process.run /bin /programas
+recurso administrador message.send papel:operador papel:sistema
 taxa administrador 10 20
 processos administrador 8
 "
@@ -89,17 +92,20 @@ pub const PADRAO: &str = concat!(
 #
 # Uma permissao sensivel (fs.*, keyboard.read, debug.trigger, terminal.attach,
 # policy.*, agent.register, agent.revoke, person.*, credential.rotate,
-# session.revoke, lease.revoke) nao atravessa a inclusao de outro
-# papel: cada papel que a tem a escreve. Toda permissao de caminho tem o
-# alcance escrito numa linha `recurso`. Nao ha curinga.
+# session.revoke, lease.revoke, message.*) nao atravessa a inclusao de
+# outro papel: cada papel que a tem a escreve. Toda permissao de caminho, e
+# o message.send, tem o alcance escrito numa linha `recurso` — o de
+# message.send e o papel do destinatario, `papel:<nome>`, enumerado. Nao ha
+# curinga. Ninguem alcanca o administrador.
 
-papel observador agent.read system.read log.read ui.read
+papel observador agent.read system.read log.read ui.read message.read
 taxa observador 20 40
 processos observador 2
 
-papel operador @observador ui.act process.run net.send fs.read
+papel operador @observador ui.act process.run net.send fs.read message.send message.read
 recurso operador fs.read /dados /bin /programas
 recurso operador process.run /bin /programas
+recurso operador message.send papel:operador papel:sistema
 taxa operador 50 100
 processos operador 8
 
@@ -348,12 +354,14 @@ mod testes {
         ));
         // Dar ao operador o que o administrador tem: vale.
         let nova =
-            mudar("papel operador @observador ui.act process.run net.send fs.read audit.read")
+            mudar("papel operador @observador ui.act process.run net.send fs.read message.send message.read audit.read")
                 .unwrap();
         assert!(nova.papel("operador").unwrap().tem(Permissao::AuditRead));
         // O que ele não tem: não.
         assert!(matches!(
-            mudar("papel operador @observador ui.act process.run net.send fs.read keyboard.read"),
+            mudar(
+                "papel operador @observador ui.act process.run net.send fs.read message.send message.read keyboard.read"
+            ),
             Err(Recusa::Proibida(_))
         ));
         // Alargar o recurso do operador além do alcance do administrador:

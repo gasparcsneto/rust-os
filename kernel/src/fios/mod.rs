@@ -368,6 +368,8 @@ extern "C" fn coletor(_argumento: u64) -> ! {
         // E os arrendamentos vencidos saem daqui, e vão para a auditoria:
         // um prazo vence sem ninguém pedir nada.
         crate::coordenacao::vencer_todos();
+        // E as mensagens vencidas, também sem ninguém pedir.
+        crate::mensagens::vencer_todos();
         crate::arch::esperar_interrupcao();
     }
 }

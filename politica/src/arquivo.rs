@@ -161,6 +161,8 @@ pub enum ErroTipo {
     /// alcance dela: (papel, permissão).
     RecursoFaltando(String, String),
     CaminhoInvalido(String),
+    /// Um destino que não é `papel:<nome>`, com o nome na regra.
+    DestinoInvalido(String),
     /// Falta a linha `serial`.
     SemSerial,
     /// Falta a linha `local`.
@@ -190,11 +192,16 @@ impl Erro {
             ErroTipo::RecursoSemPermissao(p) => {
                 format!("recurso para `{p}`, que o papel nao tem")
             }
-            ErroTipo::RecursoNaoECaminho(p) => format!("o recurso de `{p}` nao e caminho"),
+            ErroTipo::RecursoNaoECaminho(p) => {
+                format!("`{p}` nao tem alcance: nem caminho, nem destino")
+            }
             ErroTipo::RecursoFaltando(papel, p) => {
                 format!("`{papel}` tem `{p}` sem a linha `recurso` que diz o alcance")
             }
             ErroTipo::CaminhoInvalido(c) => format!("caminho invalido `{c}`"),
+            ErroTipo::DestinoInvalido(d) => {
+                format!("destino invalido `{d}`: so `papel:<nome>`, sem curinga")
+            }
             ErroTipo::SemSerial => "falta a linha `serial`".to_string(),
             ErroTipo::SemLocal => "falta a linha `local`".to_string(),
         };
@@ -384,14 +391,27 @@ impl Politica {
                 let p = partes.next().ok_or(erro(ErroTipo::Sintaxe))?;
                 let p = Permissao::de_nome(p)
                     .ok_or(erro(ErroTipo::PermissaoDesconhecida(p.to_string())))?;
-                if !p.recurso_e_caminho() {
+                if !p.tem_alcance() {
                     return Err(erro(ErroTipo::RecursoNaoECaminho(p.nome().to_string())));
                 }
                 let mut prefixos = Vec::new();
                 for c in partes {
-                    let normal = caminho::normalizar(c)
-                        .ok_or(erro(ErroTipo::CaminhoInvalido(c.to_string())))?;
-                    prefixos.push(normal);
+                    if p.recurso_e_destino() {
+                        // Um papel pelo nome, e só: nada de curinga, nada de
+                        // identidade solta. Se o papel existe é a decisão que
+                        // confere, com a política em vigor — a de emergência
+                        // não tem o operador, e o alcance do `sistema` é o
+                        // mesmo texto nas duas.
+                        let nome = c
+                            .strip_prefix(PREFIXO_DE_DESTINO)
+                            .filter(|n| nome_valido(n))
+                            .ok_or(erro(ErroTipo::DestinoInvalido(c.to_string())))?;
+                        prefixos.push(alloc::format!("{PREFIXO_DE_DESTINO}{nome}"));
+                    } else {
+                        let normal = caminho::normalizar(c)
+                            .ok_or(erro(ErroTipo::CaminhoInvalido(c.to_string())))?;
+                        prefixos.push(normal);
+                    }
                 }
                 if prefixos.is_empty() {
                     return Err(erro(ErroTipo::Sintaxe));
@@ -487,7 +507,7 @@ impl Politica {
             // escrito. Também a que veio por inclusão — o alcance é de cada
             // papel, e não se herda.
             for p in papel.permissoes() {
-                if p.recurso_e_caminho() && !papel.recursos.contains_key(&p) {
+                if p.tem_alcance() && !papel.recursos.contains_key(&p) {
                     return Err(geral(ErroTipo::RecursoFaltando(
                         papel.nome.clone(),
                         p.nome().to_string(),
@@ -552,6 +572,23 @@ impl Politica {
                 return Codigo::DenyResource;
             }
         }
+        if p.recurso_e_destino() {
+            // O papel do destinatário, igual a um dos enumerados — e um
+            // papel que esta política tem. Sem destinatário resolvido, ou
+            // fora da lista: fechado.
+            let Some(alcance) = papel.recursos.get(&p) else {
+                return Codigo::DenyResource;
+            };
+            let Some(alvo) = recurso else {
+                return Codigo::DenyResource;
+            };
+            let existe = alvo
+                .strip_prefix(PREFIXO_DE_DESTINO)
+                .is_some_and(|nome| self.papel(nome).is_some());
+            if !existe || !alcance.iter().any(|a| a == alvo) {
+                return Codigo::DenyResource;
+            }
+        }
         Codigo::Allow
     }
 
@@ -574,7 +611,7 @@ impl Politica {
                     p.nome()
                 )));
             }
-            if !recurso_contido(a.recursos.get(&p), t.recursos.get(&p)) {
+            if !recurso_contido(p, a.recursos.get(&p), t.recursos.get(&p)) {
                 return Err(Recusa::Proibida(format!(
                     "`{papel}` alcanca com `{}` caminhos fora do alcance do administrador",
                     p.nome()
@@ -643,7 +680,7 @@ impl Politica {
             for p in depois.permissoes() {
                 let ja_tinha = antes.is_some_and(|a| a.tem(p));
                 let alargou = antes.is_some_and(|a| {
-                    a.tem(p) && !recurso_contido(depois.recursos.get(&p), a.recursos.get(&p))
+                    a.tem(p) && !recurso_contido(p, depois.recursos.get(&p), a.recursos.get(&p))
                 });
                 if !ja_tinha && !t.tem(p) {
                     return Err(Recusa::Proibida(format!(
@@ -653,7 +690,7 @@ impl Politica {
                     )));
                 }
                 if (!ja_tinha || alargou)
-                    && !recurso_contido(depois.recursos.get(&p), t.recursos.get(&p))
+                    && !recurso_contido(p, depois.recursos.get(&p), t.recursos.get(&p))
                 {
                     return Err(Recusa::Proibida(format!(
                         "a mudanca alargaria `{}` de `{}` alem do alcance do administrador",
@@ -683,15 +720,23 @@ impl Politica {
 /// O alcance `a` está contido no alcance `b`. `None` é alcance nenhum — o de
 /// uma permissão que não é de caminho, ou o de um papel sem a permissão: está
 /// contido em qualquer um, e não contém nada além de outro `None`.
-fn recurso_contido(a: Option<&Vec<String>>, b: Option<&Vec<String>>) -> bool {
+///
+/// Um caminho está contido no prefixo que o contém; um destino, só no mesmo
+/// destino — papéis não têm hierarquia de nome.
+fn recurso_contido(p: Permissao, a: Option<&Vec<String>>, b: Option<&Vec<String>>) -> bool {
     match (a, b) {
         (None, _) => true,
         (Some(_), None) => false,
+        (Some(a), Some(b)) if p.recurso_e_destino() => a.iter().all(|pa| b.contains(pa)),
         (Some(a), Some(b)) => a
             .iter()
             .all(|pa| b.iter().any(|pb| caminho::dentro_de(pa, pb))),
     }
 }
+
+/// Como um destino se escreve no alcance de `message.send`, e como a
+/// decisão o recebe: o papel do destinatário.
+pub const PREFIXO_DE_DESTINO: &str = "papel:";
 
 fn numero(texto: Option<&str>, n: usize) -> Result<u32, Erro> {
     let texto = texto.ok_or(Erro {
@@ -736,6 +781,133 @@ mod testes {
             .com_linha("processos observador 3", "administrador", &[])
             .unwrap();
         assert_eq!(nova.papel("observador").unwrap().processos, 3);
+    }
+
+    /// O alcance de `message.send`: papéis enumerados, `papel:<nome>`, sem
+    /// curinga. A política da imagem: o `sistema` alcança observador,
+    /// operador e sistema; o `operador`, operador e sistema; o `observador`
+    /// só lê; ninguém alcança o `administrador`.
+    #[test]
+    fn o_alcance_das_mensagens() {
+        use Codigo::*;
+        use Permissao::{MessagePurge, MessageRead, MessageSend};
+        let p = Politica::ler(crate::PADRAO).unwrap();
+        let manda = |papel: &str, alvo: &str| p.decidir(Some(papel), MessageSend, Some(alvo));
+        for alvo in ["papel:observador", "papel:operador", "papel:sistema"] {
+            assert_eq!(manda("sistema", alvo), Allow, "sistema -> {alvo}");
+        }
+        assert_eq!(manda("operador", "papel:operador"), Allow);
+        assert_eq!(manda("operador", "papel:sistema"), Allow);
+        assert_eq!(manda("operador", "papel:observador"), DenyResource);
+        assert_eq!(manda("observador", "papel:operador"), DenyPermission);
+        for papel in ["sistema", "operador", "administrador"] {
+            assert_eq!(manda(papel, "papel:administrador"), DenyResource, "{papel}");
+            // Sem destinatário resolvido, nada; e nada de curinga.
+            assert_eq!(manda(papel, ""), DenyResource);
+            assert_eq!(p.decidir(Some(papel), MessageSend, None), DenyResource);
+            assert_eq!(manda(papel, "papel:*"), DenyResource);
+            assert_eq!(manda(papel, "*"), DenyResource);
+            assert_eq!(manda(papel, "operador"), DenyResource);
+        }
+        // Um papel que a política em vigor não tem não é alcançado, mesmo
+        // escrito no alcance.
+        let fantasma = crate::PADRAO.replace(
+            "recurso operador message.send papel:operador papel:sistema",
+            "recurso operador message.send papel:operador papel:sistema papel:fantasma",
+        );
+        let f = Politica::ler(&fantasma).unwrap();
+        assert_eq!(
+            f.decidir(Some("operador"), MessageSend, Some("papel:fantasma")),
+            DenyResource
+        );
+        // Ler a própria caixa: quem tem a permissão.
+        for papel in ["observador", "operador", "sistema", "administrador"] {
+            assert_eq!(p.decidir(Some(papel), MessageRead, None), Allow, "{papel}");
+        }
+        // Tirar a mensagem de outro: só o administrador, e só com prova.
+        assert_eq!(p.decidir(Some("administrador"), MessagePurge, None), Allow);
+        for papel in ["observador", "operador", "sistema"] {
+            assert_eq!(
+                p.decidir(Some(papel), MessagePurge, None),
+                DenyPermission,
+                "{papel}"
+            );
+        }
+    }
+
+    /// A linha de alcance de destino: só `papel:<nome>`, com nome na regra,
+    /// e obrigatória para quem tem `message.send` — também a que viria por
+    /// inclusão, que não vem: as de mensagem são sensíveis.
+    #[test]
+    fn a_linha_de_destino() {
+        for ruim in [
+            "recurso operador message.send papel:*",
+            "recurso operador message.send *",
+            "recurso operador message.send operador",
+            "recurso operador message.send /dados",
+            "recurso operador message.send papel:",
+            "recurso operador message.send papel:Nao-Vale",
+            "recurso operador message.send",
+            "recurso operador fs.read papel:operador",
+            "recurso operador message.read papel:operador",
+        ] {
+            let texto = alloc::format!("{}\n{ruim}\n", crate::PADRAO);
+            assert!(Politica::ler(&texto).is_err(), "{ruim}");
+        }
+        let sem = crate::PADRAO.replace(
+            "recurso operador message.send papel:operador papel:sistema\n",
+            "",
+        );
+        assert!(Politica::ler(&sem).is_err(), "message.send sem alcance");
+        // A inclusão não traz mensagem: o papel que inclui o operador não
+        // manda nem lê.
+        let texto = alloc::format!(
+            "{}\npapel herdeiro @operador\nrecurso herdeiro process.run /bin\n",
+            crate::PADRAO
+        );
+        let h = Politica::ler(&texto).unwrap();
+        assert!(!h.papel("herdeiro").unwrap().tem(Permissao::MessageSend));
+        assert!(!h.papel("herdeiro").unwrap().tem(Permissao::MessageRead));
+        assert_eq!(
+            h.decidir(
+                Some("herdeiro"),
+                Permissao::MessageSend,
+                Some("papel:operador")
+            ),
+            Codigo::DenyPermission
+        );
+    }
+
+    /// O teto: o administrador concede o que alcança. O operador cabe nele;
+    /// um papel que alcançasse o administrador, ou o observador, não cabe —
+    /// nem por `policy.write`.
+    #[test]
+    fn o_teto_das_mensagens() {
+        let p = Politica::ler(crate::PADRAO).unwrap();
+        assert!(p.cabe_em("operador", "administrador").is_ok());
+        assert!(p.cabe_em("observador", "administrador").is_ok());
+        for linha in [
+            "recurso operador message.send papel:operador papel:sistema papel:administrador",
+            "recurso operador message.send papel:operador papel:sistema papel:observador",
+        ] {
+            assert!(p.com_linha(linha, "administrador", &[]).is_err(), "{linha}");
+        }
+        // Encolher cabe.
+        let menor = p
+            .com_linha(
+                "recurso operador message.send papel:sistema",
+                "administrador",
+                &[],
+            )
+            .unwrap();
+        assert_eq!(
+            menor.decidir(
+                Some("operador"),
+                Permissao::MessageSend,
+                Some("papel:operador")
+            ),
+            Codigo::DenyResource
+        );
     }
 
     /// A decisão fecha sozinha: um papel com permissão de caminho e sem

@@ -13048,6 +13048,635 @@ fn cota_apertada(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// mensagens: um recurso do sistema, pelo mesmo ponto de decisão
+// ---------------------------------------------------------------------------
+
+/// Manda uma mensagem pela porta de um agente de teste.
+fn mandar(
+    agente: &mut AgenteDeTeste,
+    sessao: &mut crate::agent::SessaoDeTeste,
+    para: &str,
+    corpo: &str,
+    nonce: u64,
+) -> Result<alloc::string::String, &'static str> {
+    pela_porta(
+        agente,
+        sessao,
+        "message.send",
+        &alloc::format!(r#"{{"to":"{para}","body":"{corpo}","nonce":{nonce}}}"#),
+    )
+}
+
+/// Os ids de mensagem de uma resposta, na ordem em que aparecem. O id do
+/// envelope JSON-RPC é um número, e não entra.
+fn ids_de(resposta: &str) -> alloc::vec::Vec<alloc::string::String> {
+    resposta
+        .match_indices(r#""id":""#)
+        .map(|(i, m)| {
+            let resto = &resposta[i + m.len()..];
+            alloc::string::String::from(&resto[..resto.find('"').unwrap_or(0)])
+        })
+        .collect()
+}
+
+/// O número de um id de mensagem — a parte depois da época.
+fn numero_do_id(id: &str) -> u64 {
+    id.rsplit(':')
+        .next()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0)
+}
+
+/// A recusa de um comando de mensagem, como o handler a responde.
+fn recusa_de_mensagem(resposta: &str, codigo: &str) -> bool {
+    resposta.contains(r#""ok":false"#) && resposta.contains(&alloc::format!(r#""code":"{codigo}""#))
+}
+
+/// A última transição gravada com `metodo`, para a mensagem `id`.
+fn transicao_gravada(metodo: &str, id: &str) -> bool {
+    let recurso = alloc::format!("msg:{id}");
+    crate::autorizacao::com_auditoria(|c| {
+        c.ultimos(64)
+            .any(|r| r.evento.metodo == metodo && r.evento.recurso == recurso)
+    })
+    .unwrap_or(false)
+}
+
+/// Roda `f` com a tabela de mensagens vazia, e a deixa vazia e coerente.
+fn com_mensagens(f: impl FnOnce() -> Resultado) -> Resultado {
+    crate::mensagens::esquecer();
+    let resultado = com_agentes_de_teste(f);
+    let coerente = crate::mensagens::coerente();
+    crate::mensagens::esquecer();
+    crate::interpretador::desativar_para_teste();
+    crate::identidade::esquecer_registrados();
+    crate::pessoas::esquecer_registradas();
+    crate::autorizacao::carregar();
+    resultado?;
+    if !coerente {
+        return Err("a tabela de mensagens ficou incoerente");
+    }
+    Ok(())
+}
+
+/// Falsificação do remetente: quem manda é a sessão que pediu, e nunca um
+/// parâmetro. `from` no pedido é recusado pela validação, e gravado; a
+/// mensagem que chega diz o agente que provou a chave — e, pela pessoa no
+/// console, a pessoa da sessão.
+fn mensagens_o_remetente_vem_da_sessao() -> Resultado {
+    use crate::pessoas::Console;
+    com_mensagens(|| {
+        let (mut a, mut sa) = conectado(1)?;
+        let (mut b, mut sb) = conectado(2)?;
+        let r = pela_porta(
+            &mut a,
+            &mut sa,
+            "message.send",
+            r#"{"to":"teste-2","body":"falso","nonce":1,"from":"teste-3"}"#,
+        )?;
+        // Recusado pela validação — o comando não conhece `from` —, e
+        // gravado como pedido inválido.
+        let gravado = ultimo_com_metodo("message.send")
+            .is_some_and(|e| e.codigo == politica::Codigo::InvalidArgument && e.detalhe == "from");
+        if !r.contains(r#""code":-32602"#) || !r.contains(r#""data":"from""#) || !gravado {
+            crate::log_error!("teste", "{}", r);
+            return Err("um pedido com `from` foi aceito, ou a recusa nao foi gravada");
+        }
+        if !ids_de(&pela_porta(&mut b, &mut sb, "message.read", "{}")?).is_empty() {
+            return Err("o pedido com `from` deixou uma mensagem");
+        }
+        mandar(&mut a, &mut sa, "teste-2", "de verdade", 1)?;
+        let lida = pela_porta(&mut b, &mut sb, "message.read", "{}")?;
+        let chave_a = sigilo::hex(&sigilo::publica_de(&chave_de_teste(1)));
+        if !lida.contains(r#""type":"agent","name":"teste-1""#)
+            || !lida.contains(&chave_a)
+            || lida.contains("teste-3")
+        {
+            crate::log_error!("teste", "{}", lida);
+            return Err("o remetente nao e o agente da sessao");
+        }
+        // A pessoa no console, pelo interpretador: o mesmo comando, a mesma
+        // decisão, e o remetente é a pessoa da sessão.
+        crate::interpretador::ativar_para_teste();
+        let sessao = crate::interpretador::sessao_do_console(Console::Fisico)
+            .ok_or("sem pessoa no console")?;
+        let pessoa = pessoa_da_sessao(sessao)?;
+        digitar_no_console(
+            Console::Fisico,
+            r#"message.send {"to":"teste-2","body":"da pessoa","nonce":1}"#,
+        );
+        digitar_no_console(Console::Fisico, "\n");
+        let lida = pela_porta(&mut b, &mut sb, "message.read", "{}")?;
+        let esperado = alloc::format!(r#""type":"person","person":"{}""#, pessoa.texto());
+        if !lida.contains(&esperado) || !lida.contains("da pessoa") {
+            crate::log_error!("teste", "{}", lida);
+            return Err("a mensagem da pessoa nao veio da pessoa da sessao");
+        }
+        Ok(())
+    })
+}
+
+/// Bypass de autorização: cada envio passa por `decidir`, com o papel do
+/// destinatário como recurso. O observador não manda; o operador alcança
+/// operador e sistema, e não o observador; ninguém alcança o
+/// administrador; e cada recusa vai para a auditoria.
+fn mensagens_sem_atalho_na_autorizacao() -> Resultado {
+    use politica::Codigo;
+    com_mensagens(|| {
+        let (mut a, mut sa) = conectado(1)?;
+        let (mut c, mut sc) = conectado(3)?;
+        crate::identidade::atribuir(&nome_de_teste(1), "operador")
+            .map_err(|_| "a atribuicao falhou")?;
+        crate::identidade::atribuir(&nome_de_teste(3), "observador")
+            .map_err(|_| "a atribuicao falhou")?;
+        crate::identidade::atribuir(&nome_de_teste(4), "observador")
+            .map_err(|_| "a atribuicao falhou")?;
+        crate::identidade::registrar_agente_de_teste(
+            sigilo::publica_de(&[0x77; 32]),
+            "chefe",
+            "administrador",
+        );
+        let gravou =
+            |codigo: Codigo| ultimo_com_metodo("message.send").is_some_and(|e| e.codigo == codigo);
+        // Toda permissão de destino é exigida por um comando que nomeia o
+        // destinatário: a decisão resolve o `to`, e só ele. Um comando com
+        // essa permissão e outro recurso seria decidido sobre a coisa errada.
+        for c in crate::agent::registry::todos() {
+            if let crate::agent::registry::Acesso::Exige(p) = c.acesso
+                && p.recurso_e_destino()
+                && c.recurso != Some("to")
+            {
+                crate::log_error!("teste", "{}", c.nome);
+                return Err("um comando com permissao de destino nao nomeia o destinatario");
+            }
+        }
+        // O observador só lê.
+        let r = mandar(&mut c, &mut sc, "teste-2", "oi", 1)?;
+        if !recusado_com(&r, "DENY_PERMISSION") || !gravou(Codigo::DenyPermission) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o observador mandou uma mensagem");
+        }
+        if !pela_porta(&mut c, &mut sc, "message.read", "{}")?.contains(r#""messages":[]"#) {
+            return Err("o observador nao leu a propria caixa");
+        }
+        // O operador: sistema sim, observador não.
+        if !mandar(&mut a, &mut sa, "teste-2", "oi", 1)?.contains(r#""ok":true"#) {
+            return Err("o operador nao alcancou o sistema");
+        }
+        let r = mandar(&mut a, &mut sa, "teste-4", "oi", 2)?;
+        if !recusado_com(&r, "DENY_RESOURCE") || !gravou(Codigo::DenyResource) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o operador alcancou o observador");
+        }
+        // Ninguém alcança o administrador — nem o sistema.
+        let (mut b, mut sb) = conectado(2)?;
+        for (agente, sessao) in [(&mut a, &mut sa), (&mut b, &mut sb)] {
+            let r = mandar(agente, sessao, "chefe", "oi", 9)?;
+            if !recusado_com(&r, "DENY_RESOURCE") {
+                crate::log_error!("teste", "{}", r);
+                return Err("uma mensagem alcancou o papel administrador");
+            }
+        }
+        if crate::mensagens::na_caixa(politica::mensagens::Dono::Agente(sigilo::publica_de(
+            &[0x77; 32],
+        ))) != 0
+        {
+            return Err("a caixa do administrador recebeu algo");
+        }
+        Ok(())
+    })
+}
+
+/// Replay e duplicata: o mesmo pedido, pelo mesmo nonce, devolve o mesmo
+/// id e não cria outra; com outro conteúdo, ou um nonce velho, é
+/// `DENY_REPLAY`, gravado. Uma sessão nova começa a contar do zero.
+fn mensagens_replay_e_reenvio() -> Resultado {
+    use politica::Codigo;
+    com_mensagens(|| {
+        let (mut a, mut sa) = conectado(1)?;
+        let (mut b, mut sb) = conectado(2)?;
+        let r1 = mandar(&mut a, &mut sa, "teste-2", "um", 7)?;
+        let r2 = mandar(&mut a, &mut sa, "teste-2", "um", 7)?;
+        let (i1, i2) = (ids_de(&r1), ids_de(&r2));
+        if i1.len() != 1 || i1 != i2 || !r2.contains(r#""duplicate":true"#) {
+            crate::log_error!("teste", "{} / {}", r1, r2);
+            return Err("o reenvio do mesmo pedido nao devolveu o mesmo id");
+        }
+        for (corpo, nonce) in [("outro", 7), ("um", 6), ("um", 0)] {
+            let r = mandar(&mut a, &mut sa, "teste-2", corpo, nonce)?;
+            if !recusa_de_mensagem(&r, "DENY_REPLAY")
+                || !ultimo_com_metodo("message.send")
+                    .is_some_and(|e| e.codigo == Codigo::DenyReplay)
+            {
+                crate::log_error!("teste", "{}", r);
+                return Err("um nonce repetido ou velho foi aceito, ou nao foi gravado");
+            }
+        }
+        if ids_de(&pela_porta(&mut b, &mut sb, "message.read", "{}")?).len() != 1 {
+            return Err("o replay criou mensagens");
+        }
+        // Uma sessão nova na porta: conta do zero.
+        crate::virtio::console::simular_conexao(1, false);
+        crate::virtio::console::simular_conexao(1, true);
+        let (mut a, mut sa) = conectado(1)?;
+        let r = mandar(&mut a, &mut sa, "teste-2", "nova sessao", 1)?;
+        if !r.contains(r#""duplicate":false"#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("a sessao nova herdou os nonces da anterior");
+        }
+        Ok(())
+    })
+}
+
+/// Entrega após revogação: a chave revogada tem anuladas as que mandou e
+/// as que ia receber — gravadas —; quem ia receber dela não recebe, e a
+/// mesma chave de volta ao registro encontra a caixa vazia. A pessoa
+/// revogada, igual.
+fn mensagens_revogacao_anula() -> Resultado {
+    use crate::pessoas::Console;
+    com_mensagens(|| {
+        let (mut a, mut sa) = conectado(1)?;
+        let (mut b, mut sb) = conectado(2)?;
+        let (mut c, mut sc) = conectado(3)?;
+        let de_a = ids_de(&mandar(&mut a, &mut sa, "teste-2", "de a", 1)?);
+        let para_a = ids_de(&mandar(&mut c, &mut sc, "teste-1", "para a", 1)?);
+        let de_c = ids_de(&mandar(&mut c, &mut sc, "teste-2", "de c", 2)?);
+        crate::identidade::revogar(&sigilo::publica_de(&chave_de_teste(1)))
+            .map_err(|_| "a revogacao falhou")?;
+        if !transicao_gravada("message.void", &de_a[0])
+            || !transicao_gravada("message.void", &para_a[0])
+        {
+            return Err("a anulacao pela revogacao nao foi gravada");
+        }
+        if ids_de(&pela_porta(&mut b, &mut sb, "message.read", "{}")?) != de_c {
+            return Err("a mensagem do remetente revogado foi entregue");
+        }
+        crate::identidade::registrar_agente_de_teste(
+            sigilo::publica_de(&chave_de_teste(1)),
+            &nome_de_teste(1),
+            PAPEL_DE_TESTE,
+        );
+        crate::virtio::console::simular_conexao(1, false);
+        crate::virtio::console::simular_conexao(1, true);
+        let (mut a, mut sa) = conectado(1)?;
+        if !ids_de(&pela_porta(&mut a, &mut sa, "message.read", "{}")?).is_empty() {
+            return Err("a chave de volta recebeu o que era de antes da revogacao");
+        }
+        // A pessoa revogada: a que ela mandou é anulada.
+        crate::interpretador::ativar_para_teste();
+        let sessao = crate::interpretador::sessao_do_console(Console::Fisico)
+            .ok_or("sem pessoa no console")?;
+        let pessoa = pessoa_da_sessao(sessao)?;
+        digitar_no_console(
+            Console::Fisico,
+            "message.send {\"to\":\"teste-3\",\"body\":\"da pessoa\",\"nonce\":1}\n",
+        );
+        if crate::mensagens::na_caixa(politica::mensagens::Dono::Agente(sigilo::publica_de(
+            &chave_de_teste(3),
+        ))) != 1
+        {
+            return Err("a mensagem da pessoa nao chegou a caixa");
+        }
+        crate::pessoas::revogar_pessoa(pessoa).map_err(|_| "a pessoa nao foi revogada")?;
+        if !ids_de(&pela_porta(&mut c, &mut sc, "message.read", "{}")?).is_empty() {
+            return Err("a mensagem da pessoa revogada foi entregue");
+        }
+        Ok(())
+    })
+}
+
+/// Destinatário inexistente: recusado pela decisão, `DENY_RESOURCE`, com a
+/// mesma resposta do revogado e do fora de alcance — e a auditoria grava o
+/// motivo exato. Nenhum id é gasto.
+fn mensagens_destinatario_inexistente() -> Resultado {
+    com_mensagens(|| {
+        let (mut a, mut sa) = conectado(1)?;
+        let primeiro = ids_de(&mandar(&mut a, &mut sa, "teste-2", "um", 1)?);
+        let revogada = crate::pessoas::registrar_de_teste("sumida", "operador", b"x");
+        crate::pessoas::revogar_pessoa(revogada).map_err(|_| "a revogacao falhou")?;
+        let detalhe = |esperado: &str| {
+            ultimo_com_metodo("message.send").is_some_and(|e| e.detalhe == esperado)
+        };
+        let texto_da_revogada = revogada.texto();
+        let para = [
+            ("ninguem", "destinatario inexistente"),
+            ("pessoa:0000000000000000", "destinatario inexistente"),
+            (texto_da_revogada.as_str(), "destinatario revogado"),
+        ];
+        let mut respostas = alloc::vec::Vec::new();
+        for (n, (alvo, motivo)) in para.iter().enumerate() {
+            let r = mandar(&mut a, &mut sa, alvo, "x", 10 + n as u64)?;
+            if !recusado_com(&r, "DENY_RESOURCE") || !detalhe(motivo) {
+                crate::log_error!("teste", "{}: {}", alvo, r);
+                return Err("o destinatario inexistente ou revogado nao foi recusado como tal");
+            }
+            respostas.push(r);
+        }
+        if respostas.windows(2).any(|w| w[0] != w[1]) {
+            return Err("a resposta distingue inexistente de revogado");
+        }
+        let depois = ids_de(&mandar(&mut a, &mut sa, "teste-2", "dois", 20)?);
+        if numero_do_id(&depois[0]) != numero_do_id(&primeiro[0]) + 1 {
+            return Err("uma recusa gastou um id");
+        }
+        Ok(())
+    })
+}
+
+/// Duplicação: ler não consome — a releitura devolve o mesmo id —; o `ack`
+/// tira; o segundo `ack` é `CONFLICT`; e a primeira leitura e o `ack` vão
+/// para a auditoria.
+fn mensagens_ler_nao_consome() -> Resultado {
+    com_mensagens(|| {
+        let (mut a, mut sa) = conectado(1)?;
+        let (mut b, mut sb) = conectado(2)?;
+        let id = ids_de(&mandar(&mut a, &mut sa, "teste-2", "uma", 1)?);
+        let l1 = ids_de(&pela_porta(&mut b, &mut sb, "message.read", "{}")?);
+        let l2 = ids_de(&pela_porta(&mut b, &mut sb, "message.read", "{}")?);
+        if l1 != id || l2 != id {
+            return Err("a leitura consumiu a mensagem, ou trocou o id");
+        }
+        if !transicao_gravada("message.deliver", &id[0]) {
+            return Err("a entrega nao foi gravada");
+        }
+        let ack = alloc::format!(r#"{{"id":"{}"}}"#, id[0]);
+        if !pela_porta(&mut b, &mut sb, "message.ack", &ack)?.contains(r#""ok":true"#)
+            || !transicao_gravada("message.ack", &id[0])
+        {
+            return Err("o ack nao tirou a mensagem, ou nao foi gravado");
+        }
+        if !ids_de(&pela_porta(&mut b, &mut sb, "message.read", "{}")?).is_empty() {
+            return Err("a mensagem confirmada continuou na caixa");
+        }
+        if !recusa_de_mensagem(
+            &pela_porta(&mut b, &mut sb, "message.ack", &ack)?,
+            "CONFLICT",
+        ) {
+            return Err("o segundo ack nao foi conflito");
+        }
+        // Cancelar: só quem mandou, e só antes da primeira leitura.
+        let id = ids_de(&mandar(&mut a, &mut sa, "teste-2", "outra", 2)?);
+        let cancela = alloc::format!(r#"{{"id":"{}"}}"#, id[0]);
+        if !pela_porta(&mut a, &mut sa, "message.cancel", &cancela)?.contains(r#""ok":true"#)
+            || !ids_de(&pela_porta(&mut b, &mut sb, "message.read", "{}")?).is_empty()
+        {
+            return Err("o cancelamento antes da leitura nao tirou a mensagem");
+        }
+        let id = ids_de(&mandar(&mut a, &mut sa, "teste-2", "lida", 3)?);
+        pela_porta(&mut b, &mut sb, "message.read", "{}")?;
+        let cancela = alloc::format!(r#"{{"id":"{}"}}"#, id[0]);
+        if !recusa_de_mensagem(
+            &pela_porta(&mut a, &mut sa, "message.cancel", &cancela)?,
+            "CONFLICT",
+        ) {
+            return Err("a mensagem lida foi cancelada");
+        }
+        Ok(())
+    })
+}
+
+/// Reordenação: a caixa se lê em ordem de aceitação, de remetentes
+/// diferentes, e o cursor `after` respeita a ordem.
+fn mensagens_em_ordem() -> Resultado {
+    com_mensagens(|| {
+        let (mut a, mut sa) = conectado(1)?;
+        let (mut b, mut sb) = conectado(2)?;
+        let (mut c, mut sc) = conectado(3)?;
+        let mut enviados = alloc::vec::Vec::new();
+        enviados.extend(ids_de(&mandar(&mut a, &mut sa, "teste-2", "a1", 1)?));
+        enviados.extend(ids_de(&mandar(&mut c, &mut sc, "teste-2", "c1", 1)?));
+        enviados.extend(ids_de(&mandar(&mut a, &mut sa, "teste-2", "a2", 2)?));
+        enviados.extend(ids_de(&mandar(&mut c, &mut sc, "teste-2", "c2", 2)?));
+        let lidos = ids_de(&pela_porta(&mut b, &mut sb, "message.read", "{}")?);
+        if lidos != enviados
+            || lidos
+                .windows(2)
+                .any(|w| numero_do_id(&w[0]) >= numero_do_id(&w[1]))
+        {
+            crate::log_error!("teste", "{:?} / {:?}", enviados, lidos);
+            return Err("a caixa nao veio na ordem de aceitacao");
+        }
+        let depois = pela_porta(
+            &mut b,
+            &mut sb,
+            "message.read",
+            &alloc::format!(r#"{{"after":"{}","max":1}}"#, enviados[1]),
+        )?;
+        if ids_de(&depois) != enviados[2..3] {
+            crate::log_error!("teste", "{}", depois);
+            return Err("o cursor nao respeitou a ordem");
+        }
+        Ok(())
+    })
+}
+
+/// Estouro de cota: o corpo maior que 512 bytes, o prazo maior que uma
+/// hora e o nono pendente do mesmo remetente são recusados e gravados; e o
+/// prazo vence sozinho.
+fn mensagens_cotas() -> Resultado {
+    use politica::Codigo;
+    com_mensagens(|| {
+        let (mut a, mut sa) = conectado(1)?;
+        let (mut b, mut sb) = conectado(2)?;
+        let grande = "x".repeat(politica::mensagens::MAIOR_CORPO + 1);
+        let r = mandar(&mut a, &mut sa, "teste-2", &grande, 1)?;
+        if !recusa_de_mensagem(&r, "INVALID_ARGUMENT") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o corpo grande demais foi aceito");
+        }
+        let r = pela_porta(
+            &mut a,
+            &mut sa,
+            "message.send",
+            r#"{"to":"teste-2","body":"x","nonce":2,"ttl_ms":3600001}"#,
+        )?;
+        if !recusa_de_mensagem(&r, "INVALID_ARGUMENT") {
+            return Err("o prazo maior que uma hora foi aceito");
+        }
+        for n in 0..politica::mensagens::MAIS_POR_REMETENTE as u64 {
+            let r = mandar(&mut a, &mut sa, "teste-2", "x", 10 + n)?;
+            if !r.contains(r#""ok":true"#) {
+                crate::log_error!("teste", "{}", r);
+                return Err("uma mensagem dentro da cota foi recusada");
+            }
+        }
+        let r = mandar(&mut a, &mut sa, "teste-2", "x", 30)?;
+        if !recusa_de_mensagem(&r, "DENY_POLICY")
+            || !ultimo_com_metodo("message.send").is_some_and(|e| e.codigo == Codigo::DenyPolicy)
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("o nono pendente do remetente foi aceito");
+        }
+        // O prazo vence sozinho, e vai para a auditoria.
+        let (mut c, mut sc) = conectado(3)?;
+        let r = pela_porta(
+            &mut c,
+            &mut sc,
+            "message.send",
+            r#"{"to":"teste-2","body":"curta","nonce":1,"ttl_ms":1000}"#,
+        )?;
+        let id = ids_de(&r);
+        // Ninguém lê nem manda: o coletor tira a vencida sozinho, e grava.
+        esperar_ate(|| transicao_gravada("message.expire", &id[0]), 400)
+            .map_err(|_| "a mensagem vencida nao saiu sozinha, ou nao foi gravada")?;
+        let lidos = ids_de(&pela_porta(
+            &mut b,
+            &mut sb,
+            "message.read",
+            r#"{"max":32}"#,
+        )?);
+        if lidos.contains(&id[0]) {
+            return Err("a mensagem vencida foi entregue");
+        }
+        Ok(())
+    })
+}
+
+/// Vazamento entre sessões: um terceiro não lê, não consulta, não confirma
+/// e não cancela a mensagem de outros — e a resposta é a do id que não
+/// existe. A pessoa tem a caixa dela, que não é a de agente nenhum.
+fn mensagens_sem_vazamento() -> Resultado {
+    use crate::pessoas::Console;
+    com_mensagens(|| {
+        let (mut a, mut sa) = conectado(1)?;
+        let (mut b, mut sb) = conectado(2)?;
+        let (mut c, mut sc) = conectado(3)?;
+        let id = ids_de(&mandar(&mut a, &mut sa, "teste-2", "segredo", 1)?);
+        if !pela_porta(&mut c, &mut sc, "message.read", "{}")?.contains(r#""messages":[]"#) {
+            return Err("um terceiro leu a caixa de outro");
+        }
+        let epoca = id[0].rsplit_once(':').map_or("", |(e, _)| e);
+        let inexistente = alloc::format!("{epoca}:999999");
+        for metodo in ["message.status", "message.ack", "message.cancel"] {
+            let alheio = pela_porta(
+                &mut c,
+                &mut sc,
+                metodo,
+                &alloc::format!(r#"{{"id":"{}"}}"#, id[0]),
+            )?;
+            let nenhum = pela_porta(
+                &mut c,
+                &mut sc,
+                metodo,
+                &alloc::format!(r#"{{"id":"{inexistente}"}}"#),
+            )?;
+            if !recusa_de_mensagem(&alheio, "DENY_RESOURCE")
+                || alheio.replace(&id[0], "") != nenhum.replace(&inexistente, "")
+            {
+                crate::log_error!("teste", "{}: {} / {}", metodo, alheio, nenhum);
+                return Err("o id alheio responde diferente do inexistente");
+            }
+        }
+        // A pessoa no console: a caixa dela é dela.
+        crate::interpretador::ativar_para_teste();
+        let sessao = crate::interpretador::sessao_do_console(Console::Fisico)
+            .ok_or("sem pessoa no console")?;
+        let pessoa = pessoa_da_sessao(sessao)?;
+        if crate::mensagens::na_caixa(politica::mensagens::Dono::Pessoa(pessoa.0)) != 0 {
+            return Err("a caixa da pessoa tem o que era de um agente");
+        }
+        // Quem recebeu lê e consulta.
+        if ids_de(&pela_porta(&mut b, &mut sb, "message.read", "{}")?) != id
+            || !pela_porta(
+                &mut b,
+                &mut sb,
+                "message.status",
+                &alloc::format!(r#"{{"id":"{}"}}"#, id[0]),
+            )?
+            .contains(r#""state":"delivered""#)
+        {
+            return Err("o destinatario nao leu, ou nao consultou, a propria mensagem");
+        }
+        Ok(())
+    })
+}
+
+/// O administrador, só por prova: manda, lê e confirma dentro de
+/// `admin.execute`, e tira a mensagem de outro com `message.purge` —
+/// gravado. Sem a prova, nada. A chave dele não abre sessão. E ninguém
+/// alcança a caixa dele.
+fn mensagens_o_administrador_por_prova() -> Resultado {
+    com_mensagens(|| {
+        crate::identidade::registrar_administrador_de_teste(
+            sigilo::publica_de(&ADMIN_DE_TESTE),
+            "administrador",
+        );
+        let (mut a, mut sa) = conectado(1)?;
+        let (mut b, mut sb) = conectado(2)?;
+        admin_espera(
+            1,
+            &ADMIN_DE_TESTE,
+            "message.send",
+            r#"{"to":"teste-2","body":"do administrador","nonce":1}"#,
+            None,
+        )?;
+        let lida = pela_porta(&mut b, &mut sb, "message.read", "{}")?;
+        if !lida.contains(r#""type":"admin""#) || !lida.contains("do administrador") {
+            crate::log_error!("teste", "{}", lida);
+            return Err("a mensagem do administrador nao chegou como dele");
+        }
+        // O alcance dele é enumerado como o de todos: operador e sistema, e
+        // não o observador.
+        crate::identidade::atribuir(&nome_de_teste(3), "observador")
+            .map_err(|_| "a atribuicao falhou")?;
+        admin_espera(
+            1,
+            &ADMIN_DE_TESTE,
+            "message.send",
+            r#"{"to":"teste-3","body":"fora do alcance","nonce":2}"#,
+            Some("DENY_RESOURCE"),
+        )?;
+        // Sem a prova de um administrador: nada.
+        let r = executar_admin_com(
+            1,
+            &[0x55; 32],
+            "message.send",
+            r#"{"to":"teste-2","body":"sem prova","nonce":3}"#,
+            r#"{"to":"teste-2","body":"sem prova","nonce":3}"#,
+        )?;
+        if !r.contains(r#""executed":false"#)
+            || pela_porta(&mut b, &mut sb, "message.read", "{}")?.contains("sem prova")
+        {
+            return Err("uma mensagem sem prova passou como do administrador");
+        }
+        // Ninguém alcança o administrador, nem o sistema.
+        let r = mandar(&mut b, &mut sb, "admin:administrador-de-teste", "oi", 1)?;
+        if !recusado_com(&r, "DENY_RESOURCE") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o sistema alcancou o administrador");
+        }
+        let r = executar_admin_com(1, &ADMIN_DE_TESTE, "message.read", "{}", "{}")?;
+        if !r.contains(r#""executed":true"#) || !r.contains(r#""messages":[]"#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o administrador nao leu a propria caixa vazia");
+        }
+        // Tirar a mensagem de outro: com prova, gravado.
+        let id = ids_de(&mandar(&mut a, &mut sa, "teste-2", "a tirar", 1)?);
+        admin_espera(
+            1,
+            &ADMIN_DE_TESTE,
+            "message.purge",
+            &alloc::format!(r#"{{"id":"{}"}}"#, id[0]),
+            None,
+        )?;
+        if !transicao_gravada("message.purge", &id[0])
+            || pela_porta(&mut b, &mut sb, "message.read", "{}")?.contains("a tirar")
+        {
+            return Err("o purge nao tirou a mensagem, ou nao foi gravado");
+        }
+        // A chave do administrador não abre sessão.
+        crate::virtio::console::simular_conexao(4, false);
+        crate::virtio::console::simular_conexao(4, true);
+        let mut sessao = crate::agent::SessaoDeTeste::porta(4);
+        let admin = AgenteDeTeste::conectar(4, &mut sessao, &ADMIN_DE_TESTE)?;
+        if admin.transporte.is_some() {
+            return Err("a chave do administrador abriu uma sessao");
+        }
+        Ok(())
+    })
+}
+
 /// Ninguém se dá mais do que tem: nem o próprio papel, nem um papel maior
 /// que o seu, nem a política de quem administra.
 ///
@@ -16766,6 +17395,46 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "coordenacao: cota de processos",
         f: coordenacao_cota_de_processos,
+    },
+    Caso {
+        nome: "mensagens: o remetente vem da sessao",
+        f: mensagens_o_remetente_vem_da_sessao,
+    },
+    Caso {
+        nome: "mensagens: sem atalho na autorizacao",
+        f: mensagens_sem_atalho_na_autorizacao,
+    },
+    Caso {
+        nome: "mensagens: replay e reenvio",
+        f: mensagens_replay_e_reenvio,
+    },
+    Caso {
+        nome: "mensagens: a revogacao anula",
+        f: mensagens_revogacao_anula,
+    },
+    Caso {
+        nome: "mensagens: destinatario inexistente",
+        f: mensagens_destinatario_inexistente,
+    },
+    Caso {
+        nome: "mensagens: ler nao consome",
+        f: mensagens_ler_nao_consome,
+    },
+    Caso {
+        nome: "mensagens: em ordem",
+        f: mensagens_em_ordem,
+    },
+    Caso {
+        nome: "mensagens: cotas",
+        f: mensagens_cotas,
+    },
+    Caso {
+        nome: "mensagens: sem vazamento",
+        f: mensagens_sem_vazamento,
+    },
+    Caso {
+        nome: "mensagens: o administrador por prova",
+        f: mensagens_o_administrador_por_prova,
     },
     Caso {
         nome: "usb: o relatorio hid vira teclas",

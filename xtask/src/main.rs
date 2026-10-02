@@ -2203,6 +2203,7 @@ fn conferir_invariantes() -> Result<ExitCode, String> {
         conferir_travas_do_post_mortem()?,
         conferir_janelas_pelo_toolkit()?,
         conferir_ponto_unico_de_decisao()?,
+        conferir_remetente_da_sessao()?,
     ];
     if passos.iter().all(|p| *p == ExitCode::SUCCESS) {
         Ok(ExitCode::SUCCESS)
@@ -2444,7 +2445,133 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
         "coordenacao::revogar(",
         &["kernel/src/agent/administracao.rs"],
     ),
+    // As mensagens: mandar, ler, confirmar, cancelar e consultar só pelos
+    // handlers — depois da decisão — e pela operação administrativa, com a
+    // prova. O titular sai da sessão autenticada, ou da prova; o
+    // destinatário, da decisão.
+    (
+        "mensagens::enviar(",
+        &[
+            "kernel/src/agent/commands.rs",
+            "kernel/src/agent/administracao.rs",
+        ],
+    ),
+    ("mensagens::ler(", &["kernel/src/agent/commands.rs"]),
+    (
+        "mensagens::confirmar(",
+        &[
+            "kernel/src/agent/commands.rs",
+            "kernel/src/agent/administracao.rs",
+        ],
+    ),
+    ("mensagens::cancelar(", &["kernel/src/agent/commands.rs"]),
+    ("mensagens::estado(", &["kernel/src/agent/commands.rs"]),
+    ("Remetente::da_sessao(", &["kernel/src/agent/commands.rs"]),
+    (
+        "Remetente::do_administrador(",
+        &["kernel/src/agent/administracao.rs"],
+    ),
+    (
+        "autorizacao::destino_decidido(",
+        &["kernel/src/agent/commands.rs"],
+    ),
+    // Tirar a mensagem de outro, só com prova; anular, só a revogação.
+    ("mensagens::purgar(", &["kernel/src/agent/administracao.rs"]),
+    (
+        "mensagens::anular_titular(",
+        &["kernel/src/identidade.rs", "kernel/src/pessoas.rs"],
+    ),
 ];
+
+/// As funções que tratam um pedido de mensagem: os handlers da sessão e as
+/// operações administrativas.
+const FUNCOES_DE_MENSAGEM: &[&str] = &[
+    "message_send",
+    "message_read",
+    "message_ack",
+    "message_cancel",
+    "message_status",
+    "escrever_caixa",
+    "mandar_mensagem",
+    "ler_mensagens",
+    "confirmar_mensagem",
+    "purgar_mensagem",
+];
+
+/// Confere que o remetente de uma mensagem nunca vem do pedido.
+///
+/// Quem manda é a sessão autenticada — ou a prova do administrador —, e o
+/// kernel o deriva: `Remetente::da_sessao` e `Remetente::do_administrador`.
+/// Nenhuma função que trata um pedido de mensagem lê `from`, nem `sender`,
+/// nem `owner`; e o módulo de mensagens não lê parâmetro nenhum — recebe o
+/// titular pronto. Um `member("from")` num handler de mensagem seria o
+/// remetente escolhido por quem pede.
+///
+/// `net.arp` tem um `from` legítimo — o endereço de origem —, e por isso a
+/// conferência é das funções de mensagem, e não de todo o kernel.
+fn conferir_remetente_da_sessao() -> Result<ExitCode, String> {
+    let raiz = raiz_do_projeto();
+    let mut fora = Vec::new();
+    for arquivo in [
+        "kernel/src/agent/commands.rs",
+        "kernel/src/agent/administracao.rs",
+    ] {
+        let texto = std::fs::read_to_string(raiz.join(arquivo))
+            .map_err(|e| format!("não foi possível ler {arquivo}: {e}"))?;
+        let mut achadas = 0;
+        let mut dentro: Option<&str> = None;
+        for (n, linha) in texto.lines().enumerate() {
+            if let Some(resto) = linha
+                .strip_prefix("fn ")
+                .or(linha.strip_prefix("pub(crate) fn "))
+            {
+                let nome = resto.split(['(', '<']).next().unwrap_or("");
+                dentro = FUNCOES_DE_MENSAGEM.iter().copied().find(|f| *f == nome);
+                achadas += usize::from(dentro.is_some());
+            }
+            if let Some(f) = dentro
+                && ["\"from\"", "\"sender\"", "\"owner\""]
+                    .iter()
+                    .any(|c| linha.contains(&format!("member({c})")))
+            {
+                fora.push(format!("{arquivo}:{}: {f}: {}", n + 1, linha.trim()));
+            }
+        }
+        if achadas == 0 {
+            fora.push(format!(
+                "{arquivo}: nenhuma função de mensagem: a conferência está cega"
+            ));
+        }
+    }
+    let modulo = std::fs::read_to_string(raiz.join("kernel/src/mensagens.rs"))
+        .map_err(|e| format!("não foi possível ler kernel/src/mensagens.rs: {e}"))?;
+    for (n, linha) in modulo.lines().enumerate() {
+        if linha.contains(".member(") {
+            fora.push(format!(
+                "kernel/src/mensagens.rs:{}: {}",
+                n + 1,
+                linha.trim()
+            ));
+        }
+    }
+    if fora.is_empty() {
+        println!(
+            "[xtask] o remetente de uma mensagem vem da sessão, ou da prova: nenhuma função de \
+             mensagem lê `from`, e o módulo de mensagens não lê parâmetro"
+        );
+        Ok(ExitCode::SUCCESS)
+    } else {
+        println!("[xtask] o remetente de uma mensagem lido do pedido:");
+        for f in &fora {
+            println!("  {f}");
+        }
+        println!(
+            "\nQuem manda uma mensagem é a sessão autenticada, ou a prova de um administrador — \
+             nunca um parâmetro."
+        );
+        Ok(ExitCode::FAILURE)
+    }
+}
 
 /// Confere que nenhum caminho chega a uma operação protegida sem passar pelo
 /// ponto de decisão.
@@ -2513,7 +2640,8 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
     if fora.is_empty() {
         println!(
             "[xtask] o handler de um comando, a operação administrativa e as ações na interface \
-             só passam pelo ponto de decisão; o arrendamento de outro só cai com prova; e as \
+             só passam pelo ponto de decisão; o arrendamento de outro só cai com prova; as \
+             mensagens só pelos handlers, pela prova e pela revogação; e as \
              cargas do boot só pelo boot"
         );
         Ok(ExitCode::SUCCESS)
@@ -6494,6 +6622,60 @@ fn sob_agentes(arch: Arquitetura) -> Result<(), String> {
         "o comando do agente da porta 2 nao executou, ou o log nao diz que foi ele",
     )?;
     println!("  [agentes] ok  o agente da porta 2 executou no Terminal, e o log diz `agente 2`");
+
+    // As mensagens, pelo cliente de verdade: a porta 1 manda à 3; o
+    // remetente é a sessão — e `from` no pedido é recusado —; a 3 lê duas
+    // vezes o mesmo id, confirma, e a caixa fica vazia; o reenvio pelo
+    // mesmo nonce devolve o mesmo id.
+    let mut um = AgenteNaPorta::conectar(arch, 1)?;
+    let mut tres = AgenteNaPorta::conectar(arch, 3)?;
+    let para = chaves::nome_do_agente(3);
+    let r = um.pedir(
+        "message.send",
+        &format!(r#"{{"to":"{para}","body":"oi, porta 3","nonce":1,"from":"outro"}}"#),
+    )?;
+    if !r.contains(r#""data":"from""#) {
+        return Err(format!("mensagens: um pedido com `from` foi aceito\n  {r}"));
+    }
+    let pedido = format!(r#"{{"to":"{para}","body":"oi, porta 3","nonce":1}}"#);
+    // O id da mensagem é texto; o do envelope JSON-RPC, um número — e vem
+    // antes.
+    let id_de = |r: &str| {
+        let chave = r#""id":""#;
+        let resto = &r[r.find(chave)? + chave.len()..];
+        Some(resto[..resto.find('"')?].to_string())
+    };
+    let r = um.pedir("message.send", &pedido)?;
+    let id = id_de(&r)
+        .filter(|_| r.contains(r#""ok":true"#))
+        .ok_or_else(|| format!("mensagens: o envio foi recusado\n  {r}"))?;
+    let de_novo = um.pedir("message.send", &pedido)?;
+    if id_de(&de_novo).as_deref() != Some(id.as_str()) || !de_novo.contains(r#""duplicate":true"#) {
+        return Err(format!(
+            "mensagens: o reenvio nao devolveu o mesmo id\n  {de_novo}"
+        ));
+    }
+    let lida = tres.pedir("message.read", "{}")?;
+    let de = format!(
+        r#""from":{{"type":"agent","name":"{}""#,
+        chaves::nome_do_agente(1)
+    );
+    if !lida.contains(&id) || !lida.contains(&de) || !lida.contains("oi, porta 3") {
+        return Err(format!(
+            "mensagens: a porta 3 nao leu a mensagem da porta 1\n  {lida}"
+        ));
+    }
+    if !tres.pedir("message.read", "{}")?.contains(&id) {
+        return Err("mensagens: a leitura consumiu a mensagem".into());
+    }
+    let r = tres.pedir("message.ack", &format!(r#"{{"id":"{id}"}}"#))?;
+    if !r.contains(r#""state":"acked""#) || tres.pedir("message.read", "{}")?.contains(&id) {
+        return Err(format!("mensagens: o ack nao tirou a mensagem\n  {r}"));
+    }
+    println!(
+        "  [mensagens] ok  da porta 1 para a 3: o remetente da sessao, `from` recusado, o reenvio \
+         com o mesmo id, lida sem consumir e confirmada"
+    );
     Ok(())
 }
 
