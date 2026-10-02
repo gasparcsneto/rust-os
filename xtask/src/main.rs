@@ -6742,7 +6742,131 @@ fn sob_agentes(arch: Arquitetura) -> Result<(), String> {
         "  [atividade] ok  a porta 3 ve as duas no agent.list, com o ultimo comando e a ultima \
          acao; a barra diz que a porta 1 agiu por ultimo"
     );
+    // As portas só aceitam um cliente cada: as conexões de antes saem, ou
+    // o fio da porta 2 ficaria insistindo numa porta ocupada.
+    drop((um, tres, agente));
+
+    // Os quatro ao mesmo tempo, de verdade: um fio do hospedeiro por porta,
+    // soltos juntos por uma barreira. Cada um manda uma mensagem a cada um
+    // dos outros três, e espera os outros terminarem; então cada um lê a
+    // própria caixa: exatamente uma de cada um dos outros, em ordem de
+    // aceitação, sem duplicata. A porta 4, de papel `sistema`, confere a
+    // cadeia da auditoria no fim.
+    let barreira = std::sync::Arc::new(Encontro::novo(usize::from(PORTAS_DE_AGENTE)));
+    let fios: Vec<_> = (1..=PORTAS_DE_AGENTE)
+        .map(|porta| {
+            let barreira = barreira.clone();
+            std::thread::spawn(move || -> Result<(), String> {
+                let mut agente = AgenteNaPorta::conectar(arch, porta)?;
+                barreira.esperar()?;
+                let outros: Vec<u8> = (1..=PORTAS_DE_AGENTE).filter(|&q| q != porta).collect();
+                for (n, para) in outros.iter().enumerate() {
+                    let r = agente.pedir(
+                        "message.send",
+                        &format!(
+                            r#"{{"to":"{}","body":"todos: de {porta} para {para}","nonce":{}}}"#,
+                            chaves::nome_do_agente(*para),
+                            n + 1
+                        ),
+                    )?;
+                    if !r.contains(r#""ok":true"#) {
+                        return Err(format!("todos: a porta {porta} nao mandou a {para}\n  {r}"));
+                    }
+                }
+                barreira.esperar()?;
+                let lida = agente.pedir("message.read", "{}")?;
+                let de_cada = outros
+                    .iter()
+                    .all(|q| lida.matches(&format!("todos: de {q} para {porta}")).count() == 1);
+                // Os ids das mensagens desta rodada, na ordem da caixa.
+                let ordens: Vec<u64> = lida
+                    .match_indices(r#""id":""#)
+                    .filter_map(|(i, m)| {
+                        let resto = &lida[i + m.len()..];
+                        let id = &resto[..resto.find('"')?];
+                        id.rsplit(':').next()?.parse().ok()
+                    })
+                    .collect();
+                let em_ordem = ordens.windows(2).all(|w| w[0] < w[1]);
+                if !de_cada || !em_ordem {
+                    return Err(format!(
+                        "todos: a caixa da porta {porta} nao tem uma de cada, em ordem\n  {lida}"
+                    ));
+                }
+                barreira.esperar()?;
+                if porta == PORTAS_DE_AGENTE {
+                    let lista = agente.pedir("agent.list", "{}")?;
+                    if !lista.contains(&format!(r#""connected":{PORTAS_DE_AGENTE}"#)) {
+                        return Err(format!("todos: agent.list nao ve os quatro\n  {lista}"));
+                    }
+                    let cadeia = agente.pedir("audit.verify", "{}")?;
+                    if !cadeia.contains(r#""ok":true"#) {
+                        return Err(format!("todos: a auditoria nao confere\n  {cadeia}"));
+                    }
+                }
+                barreira.esperar()?;
+                Ok(())
+            })
+        })
+        .collect();
+    // Todos os erros, e o da causa primeiro: os que só esperaram no
+    // encontro vêm depois do que falhou de verdade.
+    let mut erros: Vec<String> = fios
+        .into_iter()
+        .filter_map(|fio| match fio.join() {
+            Ok(Ok(())) => None,
+            Ok(Err(e)) => Some(e),
+            Err(_) => Some("todos: um fio do hospedeiro morreu".to_string()),
+        })
+        .collect();
+    erros.sort_by_key(|e| e.contains("encontro"));
+    if !erros.is_empty() {
+        return Err(erros.join("\n"));
+    }
+    println!(
+        "  [todos] ok  quatro portas ao mesmo tempo, cada uma mandando a cada outra: cada caixa \
+         com uma de cada, em ordem; agent.list ve os quatro; a auditoria confere"
+    );
     Ok(())
+}
+
+/// Uma barreira com prazo: os fios da fumaça se encontram nela, e um que
+/// falhou não deixa os outros esperando para sempre — quem espera demais
+/// recebe um erro, e a fumaça falha em vez de pendurar o CI.
+struct Encontro {
+    quantos: usize,
+    estado: std::sync::Mutex<(usize, u64)>,
+    acordar: std::sync::Condvar,
+}
+
+impl Encontro {
+    fn novo(quantos: usize) -> Encontro {
+        Encontro {
+            quantos,
+            estado: std::sync::Mutex::new((0, 0)),
+            acordar: std::sync::Condvar::new(),
+        }
+    }
+
+    /// Espera os outros chegarem, por até trinta segundos.
+    fn esperar(&self) -> Result<(), String> {
+        let mut estado = self.estado.lock().map_err(|_| "encontro envenenado")?;
+        let rodada = estado.1;
+        estado.0 += 1;
+        if estado.0 == self.quantos {
+            *estado = (0, rodada + 1);
+            self.acordar.notify_all();
+            return Ok(());
+        }
+        let (estado, prazo) = self
+            .acordar
+            .wait_timeout_while(estado, Duration::from_secs(30), |e| e.1 == rodada)
+            .map_err(|_| "encontro envenenado")?;
+        if prazo.timed_out() && estado.1 == rodada {
+            return Err("todos: um fio nao chegou ao encontro — outro falhou antes".into());
+        }
+        Ok(())
+    }
 }
 
 /// O canal cifrado das portas, por fora: o que ele recusa.

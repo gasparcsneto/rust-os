@@ -1404,7 +1404,35 @@ o próximo transporte — o TCP, quando houver rede, e o vsock, para as máquina
 virtuais — entrar como mais um caso, sem mudar nada em cima. São sete
 etapas: o transporte e as sessões; o canal seguro, abaixo; depois a camada
 de controle (política, auditoria encadeada, limites, revogação), os
-conflitos entre agentes, as mensagens entre eles, e o indicador na barra.
+conflitos entre agentes, as mensagens entre eles, o indicador na barra, e
+os testes com os quatro ao mesmo tempo.
+
+**Quatro ao mesmo tempo.** Cada etapa tem os casos dela; a última confere o
+que só aparece com todos juntos. Na suíte, quatro agentes — três
+operadores e um sistema, como na imagem — com os pedidos intercalados:
+todos chegam antes de qualquer um ser atendido, e as portas são atendidas
+em ordens diferentes a cada rodada.
+
+- **A disputa por um campo:** os quatro pedem a linha de comando; um a
+  toma, os outros três ouvem `CONFLICT`; os quatro tentam escrever, e só o
+  dono escreve.
+- **Todos para todos:** cada um manda uma mensagem a cada um dos outros,
+  em três rodadas intercaladas; cada caixa tem exatamente três, uma de cada
+  remetente, na ordem de aceitação, sem duplicata, e o reenvio devolve o
+  mesmo id.
+- **A revogação no meio:** a chave do dono do campo é revogada; o
+  arrendamento sai, as mensagens dele — mandadas e por receber — são
+  anuladas, a barra conta três, ele é recusado, e os outros seguem: o
+  campo vai para o próximo que pedir.
+- **No fim,** a cadeia da auditoria confere, nenhum recurso tem dois
+  arrendamentos, e a tabela de mensagens está coerente.
+
+Na fumaça, o mesmo pelas portas de verdade: quatro fios do hospedeiro,
+soltos juntos por uma barreira, mandando cada um a cada outro; cada caixa
+com uma de cada, em ordem; `agent.list` vendo os quatro; e a auditoria
+conferida pela porta de papel `sistema`. A barreira tem prazo: um fio que
+falha não deixa os outros esperando, e a fumaça falha com o motivo dele
+em vez de pendurar.
 
 ### O canal seguro
 

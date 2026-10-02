@@ -13782,6 +13782,244 @@ fn mensagens_o_administrador_por_prova() -> Resultado {
 }
 
 // ===========================================================================
+// Quatro agentes ao mesmo tempo
+// ===========================================================================
+
+/// Cada um dos quatro agentes manda o seu pedido — todos chegam antes de
+/// qualquer um ser atendido —, e as portas são atendidas na `ordem` dada.
+/// Devolve a resposta de cada porta, na ordem das portas.
+fn todos_ao_mesmo_tempo(
+    agentes: &mut [AgenteDeTeste],
+    sessoes: &mut [crate::agent::SessaoDeTeste],
+    ordem: [u8; 4],
+    pedido: impl Fn(u8) -> Option<alloc::string::String>,
+) -> Result<alloc::vec::Vec<Option<alloc::string::String>>, &'static str> {
+    let mut pediu = [false; 4];
+    for p in 1..=4u8 {
+        let i = usize::from(p) - 1;
+        if let Some(linha) = pedido(p) {
+            let q = agentes[i].quadro(&alloc::format!("{linha}\n"))?;
+            crate::virtio::console::simular(p, &q);
+            pediu[i] = true;
+        }
+    }
+    for p in ordem {
+        sessoes[usize::from(p) - 1].atender();
+    }
+    let mut respostas = alloc::vec::Vec::new();
+    for (i, agente) in agentes.iter_mut().enumerate() {
+        let mut r = agente.respostas();
+        if pediu[i] && r.len() != 1 {
+            crate::log_error!("teste", "porta {}: {:?}", i + 1, r);
+            return Err("um agente nao teve uma resposta so ao pedido dele");
+        }
+        respostas.push(r.pop());
+    }
+    Ok(respostas)
+}
+
+/// Um pedido JSON-RPC inteiro, numa linha.
+fn pedido_rpc(metodo: &str, params: &str) -> alloc::string::String {
+    alloc::format!(r#"{{"jsonrpc":"2.0","id":71,"method":"{metodo}","params":{params}}}"#)
+}
+
+/// O número de ordem de um id de mensagem, `<época>:<n>`.
+fn ordem_do_id(id: &str) -> u64 {
+    id.rsplit(':')
+        .next()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(u64::MAX)
+}
+
+/// Quatro agentes ao mesmo tempo — três operadores e um sistema, como na
+/// imagem —, com os pedidos intercalados: todos chegam antes de qualquer
+/// um ser atendido.
+///
+/// # O que este caso protege
+///
+/// O que só aparece com vários ao mesmo tempo:
+///
+/// 1. **A disputa por um campo.** Os quatro pedem a linha de comando: um a
+///    toma — o primeiro atendido —, os outros três ouvem `CONFLICT`. Os
+///    quatro tentam escrever nela: só o dono escreve.
+/// 2. **Mensagens de todos para todos.** Cada um manda uma a cada um dos
+///    outros, em três rodadas intercaladas: cada caixa tem exatamente três,
+///    uma de cada remetente, na ordem de aceitação, sem duplicata; o
+///    reenvio devolve o mesmo id.
+/// 3. **A revogação no meio.** A chave do dono do campo é revogada: o
+///    arrendamento sai, as mensagens dele — mandadas e por receber — são
+///    anuladas, a barra conta três, o pedido seguinte dele é recusado, e
+///    os outros seguem: o campo vai para o próximo que pedir.
+/// 4. **No fim**, a auditoria encadeada confere, cada recurso tem no
+///    máximo um arrendamento, e a tabela de mensagens está coerente.
+fn agentes_quatro_ao_mesmo_tempo() -> Resultado {
+    use crate::agent::SessaoDeTeste;
+    crate::interpretador::ativar_para_teste();
+    crate::coordenacao::esquecer();
+    crate::atividade::esquecer();
+    let resultado = com_mensagens(|| {
+        let mut sessoes = alloc::vec::Vec::new();
+        let mut agentes = alloc::vec::Vec::new();
+        for p in 1..=4u8 {
+            let mut s = SessaoDeTeste::porta(p);
+            let a = AgenteDeTeste::conectar(p, &mut s, &chave_de_teste(p))?;
+            if a.transporte.is_none() {
+                return Err("um dos quatro agentes nao completou o aperto");
+            }
+            sessoes.push(s);
+            agentes.push(a);
+        }
+        for p in 1..=3u8 {
+            crate::identidade::atribuir(&nome_de_teste(p), "operador")
+                .map_err(|_| "a atribuicao falhou")?;
+        }
+        indicador_diz("agentes: 4 ·")?;
+        let ok = |r: &Option<alloc::string::String>| {
+            r.as_deref().is_some_and(|r| r.contains(r#""ok":true"#))
+        };
+        let conflito = |r: &Option<alloc::string::String>| {
+            r.as_deref()
+                .is_some_and(|r| r.contains(r#""code":"CONFLICT""#))
+        };
+        let linha = crate::ui::ID_DA_LINHA_DE_COMANDO;
+
+        // 1. A disputa: os quatro pedem a linha; a porta 3 é atendida
+        // primeiro.
+        let r = todos_ao_mesmo_tempo(&mut agentes, &mut sessoes, [3, 1, 4, 2], |_| {
+            Some(pedido_rpc(
+                "ui.claim",
+                &alloc::format!(r#"{{"id":{linha}}}"#),
+            ))
+        })?;
+        if !ok(&r[2]) || !conflito(&r[0]) || !conflito(&r[1]) || !conflito(&r[3]) {
+            crate::log_error!("teste", "{:?}", r);
+            return Err("na disputa pela linha, nao foi um so que a tomou");
+        }
+        let dono_e = |p: u8| matches!(dono_da_linha(), Some(politica::arrendamento::Titular::Agente { sessao, .. }) if sessao == p);
+        if !dono_e(3) || !crate::coordenacao::um_por_recurso() {
+            return Err("o arrendamento da linha nao ficou com quem a tomou");
+        }
+        let r = todos_ao_mesmo_tempo(&mut agentes, &mut sessoes, [1, 2, 4, 3], |p| {
+            Some(pedido_rpc(
+                "ui.act",
+                &alloc::format!(r#"{{"id":{linha},"action":"set_value","value":"valor-{p}"}}"#),
+            ))
+        })?;
+        if !ok(&r[2])
+            || ![0, 1, 3].iter().all(|&i| conflito(&r[i]))
+            || crate::interpretador::com_valor(|v| v != "valor-3")
+        {
+            crate::log_error!("teste", "{:?}", r);
+            return Err("outro agente escreveu na linha arrendada");
+        }
+
+        // 2. Todos para todos, em três rodadas intercaladas.
+        let ordens = [[1, 2, 3, 4], [4, 3, 2, 1], [2, 4, 1, 3]];
+        for (rodada, ordem) in ordens.into_iter().enumerate() {
+            let r = todos_ao_mesmo_tempo(&mut agentes, &mut sessoes, ordem, |p| {
+                // Na rodada k, o agente p manda ao k-ésimo dos outros.
+                let outros: alloc::vec::Vec<u8> = (1..=4).filter(|&q| q != p).collect();
+                let para = outros[rodada];
+                Some(pedido_rpc(
+                    "message.send",
+                    &alloc::format!(
+                        r#"{{"to":"{}","body":"de {p} para {para}","nonce":{}}}"#,
+                        nome_de_teste(para),
+                        rodada + 1
+                    ),
+                ))
+            })?;
+            if !r.iter().all(ok) {
+                crate::log_error!("teste", "{:?}", r);
+                return Err("um envio entre os quatro foi recusado");
+            }
+        }
+        // O reenvio pelo mesmo nonce: o mesmo id, nada criado.
+        let primeiro = mandar(
+            &mut agentes[0],
+            &mut sessoes[0],
+            "teste-2",
+            "de 1 para 2",
+            1,
+        )?;
+        if !primeiro.contains(r#""duplicate":true"#) {
+            crate::log_error!("teste", "{}", primeiro);
+            return Err("o reenvio entre os quatro criou outra mensagem");
+        }
+        for p in 1..=4u8 {
+            let i = usize::from(p) - 1;
+            let lida = pela_porta(&mut agentes[i], &mut sessoes[i], "message.read", "{}")?;
+            let ids = ids_de(&lida);
+            let de_cada = (1..=4u8)
+                .filter(|&q| q != p)
+                .all(|q| lida.matches(&alloc::format!("de {q} para {p}")).count() == 1);
+            let em_ordem = ids
+                .windows(2)
+                .all(|w| ordem_do_id(&w[0]) < ordem_do_id(&w[1]));
+            if ids.len() != 3 || !de_cada || !em_ordem {
+                crate::log_error!("teste", "porta {}: {}", p, lida);
+                return Err("uma caixa nao tem uma de cada um dos outros, em ordem");
+            }
+        }
+
+        // 3. A revogação no meio: a porta 2 manda mais uma à 3, e a chave da
+        // 3 — a dona da linha — é revogada.
+        if !mandar(&mut agentes[1], &mut sessoes[1], "teste-3", "depois", 4)?
+            .contains(r#""ok":true"#)
+        {
+            return Err("o envio antes da revogacao foi recusado");
+        }
+        crate::identidade::revogar(&sigilo::publica_de(&chave_de_teste(3)))
+            .map_err(|_| "a revogacao falhou")?;
+        let tres = politica::mensagens::Dono::Agente(sigilo::publica_de(&chave_de_teste(3)));
+        if dono_da_linha().is_some() {
+            return Err("o arrendamento do revogado ficou");
+        }
+        if crate::mensagens::na_caixa(tres) != 0 {
+            return Err("a caixa do revogado ficou com mensagens vivas");
+        }
+        let lida = pela_porta(&mut agentes[0], &mut sessoes[0], "message.read", "{}")?;
+        if lida.contains("de 3 para 1") || ids_de(&lida).len() != 2 {
+            crate::log_error!("teste", "{}", lida);
+            return Err("a mensagem do revogado ficou na caixa de outro");
+        }
+        indicador_diz("agentes: 3 ·")?;
+        let r = pela_porta(&mut agentes[2], &mut sessoes[2], "agent.ping", "{}")?;
+        if !recusado_com(&r, "DENY_NOT_AUTHENTICATED") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o revogado continuou sendo atendido");
+        }
+        // Os outros seguem: o campo vai para o próximo que pedir.
+        let r = todos_ao_mesmo_tempo(&mut agentes, &mut sessoes, [4, 1, 2, 3], |p| {
+            (p != 3).then(|| pedido_rpc("ui.claim", &alloc::format!(r#"{{"id":{linha}}}"#)))
+        })?;
+        if !ok(&r[3]) || !conflito(&r[0]) || !conflito(&r[1]) || !dono_e(4) {
+            crate::log_error!("teste", "{:?}", r);
+            return Err("depois da revogacao o campo nao foi para o proximo");
+        }
+        let lista = pela_porta(&mut agentes[0], &mut sessoes[0], "agent.list", "{}")?;
+        if !lista.contains(r#""connected":3"#) || lista.contains(r#""name":"teste-3""#) {
+            crate::log_error!("teste", "{}", lista);
+            return Err("agent.list nao mostra os tres que ficaram");
+        }
+
+        // 4. No fim: a cadeia confere, um arrendamento por recurso.
+        let verificada = chamar("audit.verify", "{}")?;
+        if !verificada.contains(r#""ok":true"#) {
+            crate::log_error!("teste", "{}", verificada);
+            return Err("a auditoria nao confere depois dos quatro");
+        }
+        if !crate::coordenacao::um_por_recurso() {
+            return Err("um recurso ficou com dois arrendamentos");
+        }
+        Ok(())
+    });
+    crate::coordenacao::esquecer();
+    crate::atividade::esquecer();
+    resultado
+}
+
+// ===========================================================================
 // A barra: quem está agindo, e ninguém a cobre
 // ===========================================================================
 
@@ -18019,6 +18257,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "atividade: a sessao nova nao herda",
         f: atividade_a_sessao_nova_nao_herda,
+    },
+    Caso {
+        nome: "agentes: quatro ao mesmo tempo",
+        f: agentes_quatro_ao_mesmo_tempo,
     },
     Caso {
         nome: "usb: o relatorio hid vira teclas",
