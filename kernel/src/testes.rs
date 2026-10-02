@@ -13229,6 +13229,18 @@ fn mensagens_sem_atalho_na_autorizacao() -> Resultado {
             crate::log_error!("teste", "{}", r);
             return Err("o operador alcancou o observador");
         }
+        // A decisão que recusa não entrega o destinatário: só a licença de
+        // uma decisão que permite o leva até o handler. São duas camadas —
+        // a recusa, e o destinatário que não sai dela —, e cada uma é
+        // conferida sozinha.
+        let (codigo, _, destino) = crate::autorizacao::decidir_destino(
+            Some("operador"),
+            politica::Permissao::MessageSend,
+            "teste-4",
+        );
+        if codigo != Codigo::DenyResource || destino.is_some() {
+            return Err("a decisao que recusou entregou o destinatario");
+        }
         // Ninguém alcança o administrador — nem o sistema.
         let (mut b, mut sb) = conectado(2)?;
         for (agente, sessao) in [(&mut a, &mut sa), (&mut b, &mut sb)] {
@@ -13627,6 +13639,15 @@ fn mensagens_o_administrador_por_prova() -> Resultado {
             r#"{"to":"teste-3","body":"fora do alcance","nonce":2}"#,
             Some("DENY_RESOURCE"),
         )?;
+        // E a recusa é da decisão, com o motivo dela — e não de uma guarda
+        // mais adiante, que só a esconderia.
+        let pela_decisao = ultimo_com_metodo("message.send").is_some_and(|e| {
+            e.codigo == politica::Codigo::DenyResource
+                && e.detalhe == "recurso fora do alcance do papel"
+        });
+        if !pela_decisao {
+            return Err("a recusa do administrador fora do alcance nao veio da decisao");
+        }
         // Sem a prova de um administrador: nada.
         let r = executar_admin_com(
             1,
