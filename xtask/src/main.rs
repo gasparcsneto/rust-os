@@ -3823,6 +3823,17 @@ mod chaves {
                 )
             );
             self.escrever_senha_dev()?;
+            // A política só entra na imagem se cumpre o invariante que o
+            // kernel confere no boot: só o sistema e o próprio
+            // administrador alcançam o administrador. Uma imagem que o
+            // violasse subiria com a política de emergência; aqui ela nem é
+            // gerada, e o erro aparece antes de qualquer boot.
+            politica::Politica::ler(politica::PADRAO)
+                .map_err(|e| format!("a politica da imagem nao se le: {}", e.motivo()))?
+                .conferir_alcance_aos_administradores(&["administrador"])
+                .map_err(|m| {
+                    format!("a politica da imagem viola o alcance ao administrador: {m}")
+                })?;
             Ok(vec![
                 (
                     "etc/duke/privado/chave".to_string(),

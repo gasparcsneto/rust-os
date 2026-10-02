@@ -592,6 +592,44 @@ impl Politica {
         Codigo::Allow
     }
 
+    /// Só o papel local — o do sistema — e o próprio papel de administrador
+    /// alcançam um papel de administrador com `message.send`.
+    ///
+    /// É um invariante da política, e não uma preferência da imagem: um
+    /// operador ou um observador que alcançasse o administrador seria um
+    /// canal para levar quem tem o papel mais forte a agir. O kernel o
+    /// confere no boot — uma política que o viole não vigora, e vale a de
+    /// emergência —, o `xtask` antes de pôr a política na imagem, e
+    /// `policy.write` em cada mudança.
+    ///
+    /// `administradores` são os papéis a proteger: o `administrador`, e os
+    /// das chaves de administrador do registro.
+    pub fn conferir_alcance_aos_administradores(
+        &self,
+        administradores: &[&str],
+    ) -> Result<(), String> {
+        for admin in administradores {
+            let alvo = format!("{PREFIXO_DE_DESTINO}{admin}");
+            for papel in &self.papeis {
+                if papel.nome == self.local || papel.nome == *admin {
+                    continue;
+                }
+                let alcanca = papel
+                    .recursos
+                    .get(&Permissao::MessageSend)
+                    .is_some_and(|r| r.contains(&alvo));
+                if alcanca {
+                    return Err(format!(
+                        "o papel `{}` alcanca `{alvo}`: so o sistema e o proprio administrador o \
+                         alcancam",
+                        papel.nome
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// O papel `papel` cabe inteiro no papel `teto`: cada permissão dele o
     /// teto tem, e com recurso no mínimo tão limitado quanto o do teto.
     ///
@@ -663,6 +701,11 @@ impl Politica {
         nova.aplicar(1, linha, Modo::Mudanca)
             .map_err(Recusa::Invalida)?;
         nova.validar().map_err(Recusa::Invalida)?;
+        // O alcance ao administrador está no teto — é o que torna o do
+        // sistema e o dele representáveis —, e ainda assim não se dá a mais
+        // ninguém: o invariante vale para a política que resultaria.
+        nova.conferir_alcance_aos_administradores(&[teto])
+            .map_err(Recusa::Proibida)?;
         let t = self.papel(teto).ok_or(Recusa::Proibida(format!(
             "o papel `{teto}` do administrador nao existe"
         )))?;
@@ -688,25 +731,6 @@ impl Politica {
                         p.nome(),
                         depois.nome
                     )));
-                }
-                // O alcance ao papel do administrador é do teto — para que o
-                // alcance do sistema e o dele caibam nele —, e não se dá a
-                // mais ninguém em tempo de execução: só o papel local, o do
-                // sistema, o recebe. Um operador ou um observador que
-                // alcançasse o administrador seria um canal para levar quem
-                // tem o papel mais forte a agir.
-                if p.recurso_e_destino() {
-                    let do_teto = alloc::format!("{PREFIXO_DE_DESTINO}{teto}");
-                    let tem = |r: Option<&Vec<String>>| r.is_some_and(|r| r.contains(&do_teto));
-                    let ganhou = tem(depois.recursos.get(&p))
-                        && !antes.is_some_and(|a| tem(a.recursos.get(&p)));
-                    if ganhou && depois.nome != self.local {
-                        return Err(Recusa::Proibida(format!(
-                            "a mudanca daria a `{}` o alcance a `{do_teto}`, que so o sistema e \
-                             o proprio administrador tem",
-                            depois.nome
-                        )));
-                    }
                 }
                 if (!ja_tinha || alargou)
                     && !recurso_contido(p, depois.recursos.get(&p), t.recursos.get(&p))
@@ -901,6 +925,55 @@ mod testes {
                 Some("papel:operador")
             ),
             Codigo::DenyPermission
+        );
+    }
+
+    /// Só o sistema e o próprio administrador alcançam o administrador: a
+    /// política da imagem e a de emergência cumprem o invariante, e uma que
+    /// o dê ao operador, ao observador ou a um papel qualquer não.
+    #[test]
+    fn so_o_sistema_e_o_administrador_alcancam_o_administrador() {
+        for texto in [crate::PADRAO, crate::EMERGENCIA] {
+            let p = Politica::ler(texto).unwrap();
+            assert!(
+                p.conferir_alcance_aos_administradores(&["administrador"])
+                    .is_ok()
+            );
+        }
+        let violadoras = [
+            crate::PADRAO.replace(
+                "recurso operador message.send papel:operador papel:sistema",
+                "recurso operador message.send papel:operador papel:sistema papel:administrador",
+            ),
+            alloc::format!(
+                "{}\npapel outro agent.read message.send\nrecurso outro message.send papel:administrador\n",
+                crate::PADRAO
+            ),
+        ];
+        for texto in &violadoras {
+            let p = Politica::ler(texto).unwrap();
+            let r = p.conferir_alcance_aos_administradores(&["administrador"]);
+            assert!(
+                matches!(&r, Err(m) if m.contains("papel:administrador")),
+                "{r:?}"
+            );
+        }
+        // O papel de uma chave de administrador com outro nome também.
+        let chefe = alloc::format!(
+            "{}\npapel chefe agent.read message.send message.read\nrecurso chefe message.send papel:chefe\n",
+            crate::PADRAO.replace(
+                "recurso operador message.send papel:operador papel:sistema",
+                "recurso operador message.send papel:operador papel:sistema papel:chefe",
+            )
+        );
+        let p = Politica::ler(&chefe).unwrap();
+        assert!(
+            p.conferir_alcance_aos_administradores(&["administrador"])
+                .is_ok()
+        );
+        assert!(
+            p.conferir_alcance_aos_administradores(&["administrador", "chefe"])
+                .is_err()
         );
     }
 

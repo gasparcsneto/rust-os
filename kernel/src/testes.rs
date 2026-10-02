@@ -14604,6 +14604,53 @@ fn politica_processo_age_como_o_agente() -> Resultado {
 /// Sem política no disco, a de emergência, embutida: o `sistema` continua
 /// com a autoridade máxima enumerada — para a serial e os processos do
 /// sistema —, e um agente ou uma pessoa cujo papel ela não tem é recusado.
+/// O boot recusa uma política que dê o alcance ao administrador a quem não
+/// é o sistema nem o próprio administrador: ela não vigora, e vale a de
+/// emergência — o mesmo caminho de uma política malformada. Os papéis
+/// protegidos são o `administrador` e os das chaves de administrador do
+/// registro.
+fn politica_o_boot_recusa_quem_alcanca_o_administrador() -> Resultado {
+    use crate::autorizacao::politica_que_vigora;
+    let padrao = politica::PADRAO;
+    if politica_que_vigora(padrao.as_bytes()).is_err() {
+        return Err("a politica da imagem nao passou no boot");
+    }
+    let alcance = "recurso operador message.send papel:operador papel:sistema";
+    let violadoras = [
+        padrao.replace(alcance, &alloc::format!("{alcance} papel:administrador")),
+        alloc::format!(
+            "{padrao}\npapel outro agent.read message.send\nrecurso outro message.send papel:administrador\n"
+        ),
+    ];
+    for texto in &violadoras {
+        match politica_que_vigora(texto.as_bytes()) {
+            Err(m) if m.contains("papel:administrador") => {}
+            outro => {
+                crate::log_error!("teste", "{:?}", outro.map(|_| ()));
+                return Err("o boot aceitou uma politica que da o alcance ao administrador");
+            }
+        }
+    }
+    // O papel de uma chave de administrador do registro também é protegido.
+    let chefe = padrao.replace(alcance, &alloc::format!("{alcance} papel:chefe"))
+        + "\npapel chefe agent.read message.send message.read\nrecurso chefe message.send papel:chefe\n";
+    if politica_que_vigora(chefe.as_bytes()).is_err() {
+        return Err("sem a chave, um papel qualquer foi tratado como de administrador");
+    }
+    crate::identidade::registrar_administrador_de_teste(sigilo::publica_de(&[0x45; 32]), "chefe");
+    let com_a_chave = politica_que_vigora(chefe.as_bytes());
+    crate::identidade::esquecer_registrados();
+    if com_a_chave.is_ok() {
+        return Err("o boot aceitou o alcance ao papel de uma chave de administrador");
+    }
+    // E a política em vigor continua a do disco.
+    crate::autorizacao::carregar();
+    if !crate::autorizacao::politica_do_disco() {
+        return Err("a politica da imagem deixou de vigorar");
+    }
+    Ok(())
+}
+
 fn politica_emergencia_mantem_o_sistema() -> Resultado {
     use crate::autorizacao::{Chamador, autorizar, autorizar_processo};
     use politica::{Codigo, Permissao};
@@ -17848,6 +17895,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "politica: sem politica, o sistema fica",
         f: politica_emergencia_mantem_o_sistema,
+    },
+    Caso {
+        nome: "politica: o boot recusa quem alcanca o administrador",
+        f: politica_o_boot_recusa_quem_alcanca_o_administrador,
     },
     Caso {
         nome: "politica: o sistema decide pela politica",

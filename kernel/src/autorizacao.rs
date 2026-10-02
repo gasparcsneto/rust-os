@@ -241,10 +241,7 @@ pub fn carregar() {
     let (politica, codigo, detalhe, resumo) = match crate::vfs::ler_tudo(CAMINHO_DA_POLITICA) {
         Ok(bytes) => {
             let resumo = bytes.clone();
-            match core::str::from_utf8(&bytes)
-                .map_err(|_| "a politica nao e texto".to_string())
-                .and_then(|t| Politica::ler(t).map_err(|e| e.motivo()))
-            {
+            match politica_que_vigora(&bytes) {
                 Ok(p) => (p, Codigo::Allow, String::new(), resumo),
                 Err(motivo) => (Politica::emergencia(), Codigo::DenyPolicy, motivo, resumo),
             }
@@ -283,6 +280,33 @@ pub fn carregar() {
         &detalhe,
     );
 }
+
+/// A política que os bytes do disco descrevem, se ela pode vigorar: texto,
+/// bem formada, e cumprindo os invariantes que nenhuma imagem desliga.
+///
+/// # O alcance ao administrador
+///
+/// Só o sistema e o próprio administrador o alcançam — ver
+/// [`Politica::conferir_alcance_aos_administradores`]. Uma imagem cuja
+/// política o dê a outro papel não sobe com ela: vale a de emergência, como
+/// para uma política malformada, e a auditoria grava o motivo. Os papéis
+/// protegidos são o `administrador` — o de quem tem esse papel numa sessão
+/// — e os das chaves do registro de administradores, que o boot já leu.
+pub(crate) fn politica_que_vigora(bytes: &[u8]) -> Result<Politica, String> {
+    let texto = core::str::from_utf8(bytes).map_err(|_| "a politica nao e texto".to_string())?;
+    let politica = Politica::ler(texto).map_err(|e| e.motivo())?;
+    let mut protegidos = crate::identidade::papeis_dos_administradores();
+    if !protegidos.iter().any(|p| p == PAPEL_DE_ADMINISTRADOR) {
+        protegidos.push(PAPEL_DE_ADMINISTRADOR.to_string());
+    }
+    let nomes: alloc::vec::Vec<&str> = protegidos.iter().map(String::as_str).collect();
+    politica.conferir_alcance_aos_administradores(&nomes)?;
+    Ok(politica)
+}
+
+/// O papel de administrador que todo boot protege, mesmo sem chave de
+/// administrador no registro: um agente ou uma pessoa podem tê-lo.
+const PAPEL_DE_ADMINISTRADOR: &str = "administrador";
 
 /// O maior recurso que a auditoria grava, em bytes. O recurso vem do pedido
 /// — um caminho, um número —, e um pedido hostil poderia mandar um caminho

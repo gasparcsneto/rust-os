@@ -1844,7 +1844,15 @@ administrador.** O alcance a ele está no teto, para que o do sistema e o do
 administrador sejam representáveis; e ainda assim nenhum `policy.write` o
 dá a outro papel — a mudança que daria a um papel que não é o local o
 alcance ao papel do administrador é recusada, e o observador nem chega a
-mandar. O alcance novo, de resto, tem de caber no teto. O `sistema` não tem
+mandar. O alcance novo, de resto, tem de caber no teto.
+
+É um **invariante do boot**, e não só uma escolha da imagem padrão. O
+kernel o confere ao ler a política do disco: uma política que dê o alcance
+ao administrador a outro papel não vigora — vale a de emergência, como
+para uma política malformada, e a auditoria grava o motivo. Os papéis
+protegidos são o `administrador` e os das chaves do registro de
+administradores. O `xtask` confere o mesmo antes de pôr a política na
+imagem, e uma imagem que o viole nem é gerada. O `sistema` não tem
 passe: lê só a própria caixa, e decide pelo alcance que enumera.
 
 Um agente ou uma pessoa com o papel `administrador` é um titular de sessão
