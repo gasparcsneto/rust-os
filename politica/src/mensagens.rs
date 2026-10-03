@@ -557,6 +557,23 @@ impl Caixas {
         saidas
     }
 
+    /// O estado de uma mensagem agora: vence os prazos antes de responder.
+    ///
+    /// É o que `message.status` usa. [`Caixas::estado`] só olha a tabela, e
+    /// uma mensagem vencida apareceria como pendente até o coletor passar;
+    /// a leitura, a confirmação e o cancelamento já vencem antes, e a
+    /// consulta faz o mesmo. Devolve também as que venceram, para a
+    /// auditoria.
+    pub fn consultar(
+        &mut self,
+        dono: Dono,
+        id: u64,
+        agora_ms: u64,
+    ) -> (Option<(Estado, u64)>, Vec<Transicao>) {
+        let vencidas = self.vencer(agora_ms);
+        (self.estado(dono, id), vencidas)
+    }
+
     /// O estado de uma mensagem, para quem tem parte nela. Para qualquer
     /// outro, nada — como a inexistente.
     pub fn estado(&self, dono: Dono, id: u64) -> Option<(Estado, u64)> {
@@ -909,7 +926,14 @@ mod testes {
         // A padrão: dez minutos.
         let id = manda(&mut t, PA, A, B, 2).unwrap().id;
         assert_eq!(t.vencer(PRAZO_PADRAO_MS - 1).len(), 0);
-        assert_eq!(t.vencer(PRAZO_PADRAO_MS)[0].id, id);
+        // A consulta vence antes de responder: no instante do prazo, a
+        // mensagem já é `Expirada`, e a transição volta para a auditoria.
+        let (agora, vencidas) = t.consultar(A, id, PRAZO_PADRAO_MS);
+        assert_eq!(agora.map(|(e, _)| e), Some(Estado::Expirada));
+        assert_eq!(vencidas.len(), 1);
+        assert_eq!((vencidas[0].id, vencidas[0].estado), (id, Estado::Expirada));
+        // E uma vez: o coletor depois não acha mais nada.
+        assert!(t.vencer(PRAZO_PADRAO_MS).is_empty());
     }
 
     /// A operação administrativa tira uma mensagem, ou uma caixa, de quem

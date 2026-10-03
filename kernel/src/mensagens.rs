@@ -346,11 +346,19 @@ pub fn cancelar(r: &Remetente, id: &str, esperada: Option<u64>) -> Result<Transi
 
 /// O estado de uma mensagem, para quem tem parte nela.
 pub fn estado(r: &Remetente, id: &str) -> Result<(Estado, u64), Recusa> {
-    com_tabela(|t| {
-        ler_id(&t.epoca, id)
-            .and_then(|n| t.caixas.estado(r.dono, n))
-            .ok_or(Recusa::Desconhecida)
-    })
+    // Vence antes de responder: uma mensagem cujo prazo passou é `expired`
+    // agora, e não quando o coletor passar. As que vencem aqui vão para a
+    // auditoria como as do coletor.
+    let agora = crate::tempo::uptime_ms();
+    let (epoca, estado, vencidas) = com_tabela(|t| {
+        let (estado, vencidas) = match ler_id(&t.epoca, id) {
+            Some(n) => t.caixas.consultar(r.dono, n, agora),
+            None => (None, t.caixas.vencer(agora)),
+        };
+        (t.epoca, estado, vencidas)
+    });
+    gravar_transicoes(&epoca, AtorDeMensagem::Kernel, &vencidas);
+    estado.ok_or(Recusa::Desconhecida)
 }
 
 /// O titular foi revogado: as mensagens vivas que ele mandou e as que ia

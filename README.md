@@ -375,6 +375,7 @@ politica/src/        a política de autorização, a mesma no kernel e no hosped
 ├── arrendamento.rs  a versão e o arrendamento de cada recurso compartilhado
 ├── mensagens.rs     as caixas, os estados, as cotas e os nonces das mensagens
 ├── sigiloso.rs      o texto que sai da memória zerado: o corpo e a resposta que o leva
+├── sigiloso.rs      o texto que sai da memória zerado: o corpo e a resposta que o leva
 └── auditoria.rs     os registros e a cadeia de elos BLAKE2s
 
 aparencia/src/       a linguagem visual, dos dois lados da fronteira
@@ -1911,7 +1912,17 @@ com id estável para descartar a duplicata. Quem mandou cancela só antes da
 primeira leitura (`canceled`). Saem também por revogação (`voided`), pelo
 prazo (`expired`) e pelo `message.purge` (`purged`). Cada transição tem
 versão, e `expect_version` diferente é `CONFLICT`. Ao sair, o corpo é
-zerado; fica uma lápide curta para o `message.status`, e a auditoria.
+zerado; fica uma lápide curta para o `message.status`, e a auditoria. O
+prazo vence na consulta: uma mensagem cujo prazo passou é `expired` no
+`message.status` na hora, e não quando o coletor passar.
+
+**O corpo sai da memória zerado** — o guardado na caixa e cada cópia
+dele: a que a leitura devolve, e o texto da resposta que a leva até o fio,
+montado num texto que zera cada bloco que larga ao crescer (um `String`
+comum devolveria o bloco antigo ao alocador com o corpo dentro). Zera o
+bloco inteiro, a capacidade e não só o comprimento, com escrita volátil
+— ver `politica::sigiloso`. Os testes no hospedeiro conferem com um
+alocador que olha cada bloco ao ser devolvido.
 
 **O corpo sai da memória zerado** — o guardado na caixa e cada cópia
 dele: a que a leitura devolve, e o texto da resposta que a leva até o fio,

@@ -13603,6 +13603,28 @@ fn mensagens_cotas() -> Resultado {
         if lidos.contains(&id[0]) {
             return Err("a mensagem vencida foi entregue");
         }
+        // A consulta não espera o coletor: no instante em que o prazo passa,
+        // `message.status` já diz `expired`.
+        let r = pela_porta(
+            &mut c,
+            &mut sc,
+            "message.send",
+            r#"{"to":"teste-2","body":"curta","nonce":2,"ttl_ms":1000}"#,
+        )?;
+        let id = ids_de(&r);
+        let vence = crate::tempo::uptime_ms() + 1000;
+        esperar_ate(|| crate::tempo::uptime_ms() >= vence, 400)?;
+        let estado = pela_porta(
+            &mut c,
+            &mut sc,
+            "message.status",
+            &alloc::format!(r#"{{"id":"{}"}}"#, id[0]),
+        )?;
+        if !estado.contains(r#""state":"expired""#) || !transicao_gravada("message.expire", &id[0])
+        {
+            crate::log_error!("teste", "{}", estado);
+            return Err("a consulta depois do prazo nao disse expired, ou nao gravou");
+        }
         Ok(())
     })
 }
