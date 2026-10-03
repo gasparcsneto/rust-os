@@ -1514,6 +1514,15 @@ dos donos legítimos. O M e o N são da política, por operação — a linha
 `quorum admin.revoke 2 3` —, só da imagem: o `policy.write` não a muda, e o
 `xtask` não gera uma imagem cujo grupo não tenha o N que a política diz.
 
+**O quórum tem piso.** O de `admin.revoke` é invariante da política: pelo
+menos 2 credenciais e pelo menos dois terços do grupo — 2 de 3, 3 de 4 ou
+4 de 5 cabem; 2 de 4 ou 3 de 5, em que uma minoria revogaria as outras,
+não. O piso é conferido na validação de toda política, por qualquer
+caminho: a imagem que o violasse nem é gerada, o boot com uma política
+abaixo dele fica com a de emergência (que está no piso), e uma mudança que
+o baixasse é recusada — mesmo que o `policy.write` um dia aceitasse a
+linha `quorum`, o que hoje não acontece.
+
 O caminho é o de toda operação administrativa, com M credenciais no lugar
 de uma: `admin.challenge` com `{"for":"admin.revoke"}` dá um desafio de
 quórum — que diz a versão da política, M e N, e vale dois minutos, para as

@@ -14982,24 +14982,30 @@ fn admin_revoke_assinaturas() -> Resultado {
         {
             return Err("admin.revoke passou como comando de sessao");
         }
-        // Nem o quórum muda por `policy.write`, por um administrador só.
-        crate::identidade::registrar_administrador_de_teste(
-            sigilo::publica_de(&ADMIN_DE_TESTE),
-            "administrador",
-        );
-        let r = executar_admin_com(
-            0,
-            &ADMIN_DE_TESTE,
-            "policy.write",
-            r#"{"line":"quorum admin.revoke 1 3"}"#,
-            r#"{"line":"quorum admin.revoke 1 3"}"#,
-        )?;
-        if r.contains(r#""executed":true"#)
-            || crate::autorizacao::com_politica(|p| p.quorum("admin.revoke").map(|q| q.m))
-                != Some(2)
-        {
-            crate::log_error!("teste", "{}", r);
-            return Err("um policy.write mudou o quorum");
+        // Nem o quórum muda por `policy.write`, por um administrador só — um
+        // do próprio grupo, com prova e com `policy.write` no papel —: nem
+        // para 1 de 3, nem para 2 de 4, nem para 2 de 5. E logo depois, com
+        // a tentativa feita, uma assinatura só continua sem revogar nada: o
+        // caminho "baixar o quórum e usá-lo" fecha nas duas pontas.
+        for linha in [
+            "quorum admin.revoke 1 3",
+            "quorum admin.revoke 2 4",
+            "quorum admin.revoke 2 5",
+        ] {
+            let pedido = alloc::format!(r#"{{"line":"{linha}"}}"#);
+            let r = executar_admin_com(0, &GRUPO_DE_TESTE[0].0, "policy.write", &pedido, &pedido)?;
+            let quorum = crate::autorizacao::com_politica(|p| p.quorum("admin.revoke"));
+            if r.contains(r#""executed":true"#) || quorum.map(|q| (q.m, q.n)) != Some((2, 3)) {
+                crate::log_error!("teste", "{}: {}", linha, r);
+                return Err("um policy.write baixou o quorum do admin.revoke");
+            }
+            let d = desafio_de_quorum(0)?;
+            let r = revogar_com(&d, &assinaturas_de(&d, &[0], &params)?, &params)?;
+            if !quorum_recusado(&r, "DENY_POLICY", "quorum incompleto: 1 de 2") || !grupo_intacto()
+            {
+                crate::log_error!("teste", "{}", r);
+                return Err("depois de tentar baixar o quorum, uma assinatura so revogou");
+            }
         }
         Ok(())
     })?;
@@ -16385,6 +16391,25 @@ fn politica_o_boot_recusa_quem_alcanca_o_administrador() -> Resultado {
                 return Err("o boot aceitou uma politica que da o alcance ao administrador");
             }
         }
+    }
+    // O quórum de `admin.revoke` abaixo do piso: a política não vigora — vale
+    // a de emergência, que está no piso.
+    for fraco in ["quorum admin.revoke 2 4", "quorum admin.revoke 3 5"] {
+        let texto = padrao.replace("quorum admin.revoke 2 3", fraco);
+        match politica_que_vigora(texto.as_bytes()) {
+            Err(m) if m.contains("abaixo do piso") => {}
+            outro => {
+                crate::log_error!("teste", "{}: {:?}", fraco, outro.map(|_| ()));
+                return Err("o boot aceitou uma politica com o quorum abaixo do piso");
+            }
+        }
+    }
+    if politica::Politica::emergencia()
+        .quorum("admin.revoke")
+        .map(|q| (q.m, q.n))
+        != Some((2, 3))
+    {
+        return Err("a politica de emergencia nao tem o quorum 2 de 3");
     }
     // O papel de uma chave de administrador do registro também é protegido.
     let chefe = padrao.replace(alcance, &alloc::format!("{alcance} papel:chefe"))

@@ -88,6 +88,47 @@ pub const OPERACOES_DE_QUORUM: &[&str] = &["admin.revoke"];
 /// O maior grupo de credenciais de um quórum.
 pub const MAIOR_GRUPO: u8 = 16;
 
+/// O piso do quórum de uma operação crítica: o mínimo de credenciais e a
+/// fração mínima do grupo, `num/den`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Piso {
+    pub operacao: &'static str,
+    pub m_minimo: u8,
+    pub num: u8,
+    pub den: u8,
+}
+
+/// Os pisos das operações de quórum, invariantes da política.
+///
+/// `admin.revoke`: pelo menos 2 credenciais, e pelo menos dois terços do
+/// grupo — a proteção do 2 de 3. Um 3 de 4 ou um 4 de 5 cabem; um 2 de 4 ou
+/// um 3 de 5, não: neles, uma minoria do grupo revogaria as outras.
+///
+/// # Por que um invariante, e não só "o `policy.write` não escreve quórum"
+///
+/// Porque o `policy.write` recusar a linha `quorum` é uma regra de um
+/// caminho, e o piso é uma propriedade da política, por qualquer caminho:
+/// o arquivo da imagem, o do disco no boot, a de emergência e cada mudança
+/// em tempo de execução passam por [`Politica::ler`] ou pela validação de
+/// [`Politica::com_linha`], e a validação confere o piso. Uma política que o
+/// baixasse não vigora — no boot vale a de emergência, e o `xtask` nem gera
+/// a imagem —, e uma mudança que o baixasse é recusada, mesmo que um dia o
+/// `policy.write` passasse a aceitar a linha.
+pub const PISOS_DO_QUORUM: &[Piso] = &[Piso {
+    operacao: "admin.revoke",
+    m_minimo: 2,
+    num: 2,
+    den: 3,
+}];
+
+impl Piso {
+    /// Se o quórum `q` está no piso ou acima: M no mínimo, e M/N na fração
+    /// mínima, em inteiros — `M·den ≥ N·num`.
+    pub const fn cumprido_por(&self, q: Quorum) -> bool {
+        q.m >= self.m_minimo && (q.m as u16) * (self.den as u16) >= (q.n as u16) * (self.num as u16)
+    }
+}
+
 /// O quórum de uma operação: M credenciais distintas de um grupo de N.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Quorum {
@@ -200,6 +241,8 @@ pub enum ErroTipo {
     OperacaoSemQuorum(String),
     /// Duas linhas `quorum` para a mesma operação.
     QuorumRepetido(String),
+    /// Um quórum abaixo do piso da operação: (operação, M, N).
+    QuorumAbaixoDoPiso(String, u8, u8),
 }
 
 /// Um erro, com a linha onde está. Linha zero: a política como um todo.
@@ -239,6 +282,9 @@ impl Erro {
             ErroTipo::SemLocal => "falta a linha `local`".to_string(),
             ErroTipo::OperacaoSemQuorum(o) => format!("`{o}` nao e uma operacao de quorum"),
             ErroTipo::QuorumRepetido(o) => format!("quorum de `{o}` definido duas vezes"),
+            ErroTipo::QuorumAbaixoDoPiso(o, m, n) => {
+                format!("quorum {m} de {n} para `{o}` esta abaixo do piso da operacao")
+            }
         };
         if self.linha == 0 {
             o_que
@@ -597,6 +643,18 @@ impl Politica {
                         p.nome().to_string(),
                     )));
                 }
+            }
+        }
+        // O piso do quórum de cada operação crítica: ver `PISOS_DO_QUORUM`.
+        for piso in PISOS_DO_QUORUM {
+            if let Some(q) = self.quoruns.get(piso.operacao)
+                && !piso.cumprido_por(*q)
+            {
+                return Err(geral(ErroTipo::QuorumAbaixoDoPiso(
+                    piso.operacao.to_string(),
+                    q.m,
+                    q.n,
+                )));
             }
         }
         Ok(())
@@ -986,6 +1044,85 @@ mod testes {
             sem_quorum.com_linha("quorum admin.revoke 2 3", "administrador", &[]),
             Err(Recusa::Proibida(_))
         ));
+    }
+
+    /// O piso do quórum de `admin.revoke`: 2 de 3, em proporção. Abaixo
+    /// dele, nenhuma política vale — nem do arquivo, nem a que resultaria de
+    /// um `policy.write` —; no piso e acima, sim.
+    #[test]
+    fn o_piso_do_quorum() {
+        let sem = crate::PADRAO.replace("quorum admin.revoke 2 3\n", "");
+        let com = |linha: &str| Politica::ler(&alloc::format!("{sem}\n{linha}\n"));
+        for (m, n) in [(2, 4), (3, 5), (4, 7), (2, 5), (5, 8)] {
+            let linha = alloc::format!("quorum admin.revoke {m} {n}");
+            assert!(
+                matches!(
+                    com(&linha),
+                    Err(Erro {
+                        tipo: ErroTipo::QuorumAbaixoDoPiso(_, _, _),
+                        ..
+                    })
+                ),
+                "{linha} passou abaixo do piso"
+            );
+        }
+        for (m, n) in [(2, 3), (3, 3), (3, 4), (4, 5), (4, 6), (11, 16)] {
+            let linha = alloc::format!("quorum admin.revoke {m} {n}");
+            assert!(com(&linha).is_ok(), "{linha} no piso foi recusada");
+        }
+        // As duas embutidas estão no piso.
+        let piso = PISOS_DO_QUORUM[0];
+        for p in [
+            Politica::ler(crate::PADRAO).unwrap(),
+            Politica::emergencia(),
+        ] {
+            assert!(piso.cumprido_por(p.quorum("admin.revoke").unwrap()));
+        }
+    }
+
+    /// Nenhum `policy.write` mexe no quórum de `admin.revoke`: nem para
+    /// baixar — 1 de 3, 2 de 4, 2 de 5 —, nem para manter, nem para subir, e
+    /// nem numa política que ainda não tenha a linha. O quórum é da imagem.
+    #[test]
+    fn o_policy_write_nao_baixa_o_quorum() {
+        let p = Politica::ler(crate::PADRAO).unwrap();
+        let sem = Politica::ler(&crate::PADRAO.replace("quorum admin.revoke 2 3\n", "")).unwrap();
+        for linha in [
+            "quorum admin.revoke 1 3",
+            "quorum admin.revoke 2 4",
+            "quorum admin.revoke 2 5",
+            "quorum admin.revoke 1 1",
+            "quorum admin.revoke 2 3",
+            "quorum admin.revoke 3 3",
+        ] {
+            for alvo in [&p, &sem] {
+                assert!(
+                    matches!(
+                        alvo.com_linha(linha, "administrador", &[]),
+                        Err(Recusa::Proibida(_))
+                    ),
+                    "policy.write aceitou `{linha}`"
+                );
+            }
+        }
+        // E o quórum de antes continua o que era.
+        assert_eq!(p.quorum("admin.revoke"), Some(Quorum { m: 2, n: 3 }));
+        // Nem por uma linha que não é de quórum: nenhuma outra palavra muda
+        // o quórum de uma política válida.
+        for linha in [
+            "papel operador @observador ui.act",
+            "taxa operador 50 100",
+            "processos operador 4",
+            "mensagens operador 2 2",
+        ] {
+            if let Ok(nova) = p.com_linha(linha, "administrador", &[]) {
+                assert_eq!(
+                    nova.quorum("admin.revoke"),
+                    Some(Quorum { m: 2, n: 3 }),
+                    "{linha}"
+                );
+            }
+        }
     }
 
     /// As cotas de mensagens: as da linha, as padrão sem ela, cada uma do
