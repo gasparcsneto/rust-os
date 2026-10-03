@@ -95,6 +95,16 @@ pub fn aqui(p: Ponto) {
         return;
     }
     crate::arch::sem_interrupcoes(|| {
+        // Um pedido pela serial roda com a trava dela na mão — a resposta
+        // se escreve enquanto o handler executa. Quem a segura é este mesmo
+        // processador, que não volta daqui: soltá-la à força não corre o
+        // risco de ninguém. O `\n` do começo separa o aviso de uma resposta
+        // escrita pela metade.
+        //
+        // SAFETY: a máquina congela logo abaixo, com as interrupções
+        // desligadas e num processador só; nenhum dono da trava volta a
+        // usá-la.
+        unsafe { crate::serial::AGENT_LINK.force_unlock() };
         if let Some(mut guarda) = crate::serial::AGENT_LINK.try_lock()
             && let Some(porta) = guarda.as_mut()
         {
