@@ -411,10 +411,7 @@ fn gravar(tipo_do_registro: u16, dados: &[u8]) -> Result<(), &'static str> {
     resultado
 }
 
-fn gravar_sozinho(
-    tipo_do_registro: u16,
-    dados: &[u8],
-) -> Result<(), &'static str> {
+fn gravar_sozinho(tipo_do_registro: u16, dados: &[u8]) -> Result<(), &'static str> {
     let tempo = agora();
     let versao = crate::autorizacao::versao_da_politica();
     let n = nonce()?;

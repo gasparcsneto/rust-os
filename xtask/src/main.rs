@@ -929,12 +929,19 @@ fn firmware_uefi(arch: Arquitetura) -> Result<(PathBuf, PathBuf), String> {
     Ok((codigo, nossas))
 }
 
-/// Quanto o iniciador tem para relatar e desligar a máquina.
+/// Quanto o iniciador tem para relatar e chegar à primeira linha do kernel.
 ///
 /// Folgado: o firmware sozinho leva alguns segundos para inicializar o vídeo
 /// e varrer os barramentos, e o relatório em si é instantâneo. O teto não
 /// está aqui para medir desempenho — está para que um iniciador que trave
 /// vire um erro em vez de um job pendurado.
+///
+/// Quando o que se espera é o desligamento, o teto é outro: no ARM, quem
+/// desliga a máquina é a suíte inteira, rodando sobre o mapa da UEFI, e ela
+/// tem o teto dela — ver [`Desenlace::teto`]. Os 240 segundos daqui
+/// serviram para isso enquanto a suíte cabia neles; com a persistência, a
+/// mesma suíte em debug passou a levar de 320 a 340 segundos na CI pelo
+/// `-kernel`, e o passo do iniciador passou a estourar ao acaso.
 const TETO_DO_INICIADOR: Duration = Duration::from_secs(240);
 
 /// A linha com que o kernel anuncia o framebuffer que adotou.
@@ -1306,6 +1313,20 @@ enum Desenlace {
     Marca(&'static str),
 }
 
+impl Desenlace {
+    /// Quanto esperar por ele. O desligamento, no ARM, é o fim da suíte
+    /// inteira, e tem o teto da suíte; num kernel estragado é a recusa, que
+    /// chega em segundos e não precisa de teto menor para ser pega — o
+    /// relatório diz se o iniciador chegou ao fim. A marca é a primeira
+    /// linha do kernel, e tem o do iniciador.
+    fn teto(&self) -> Duration {
+        match self {
+            Desenlace::Desligamento => TETO_DOS_TESTES,
+            Desenlace::Marca(_) => TETO_DO_INICIADOR,
+        }
+    }
+}
+
 /// Sobe o QEMU com o firmware e devolve o desfecho e as linhas do iniciador.
 fn subir_no_firmware(
     arch: Arquitetura,
@@ -1356,8 +1377,8 @@ fn subir_no_firmware(
         .map_err(|e| format!("não foi possível iniciar o {}: {e}", arch.qemu()))?;
 
     let desfecho = match espera {
-        Desenlace::Desligamento => aguardar_com_teto(filho, TETO_DO_INICIADOR)?,
-        Desenlace::Marca(marca) => aguardar_a_marca(filho, &registro, marca, TETO_DO_INICIADOR)?,
+        Desenlace::Desligamento => aguardar_com_teto(filho, espera.teto())?,
+        Desenlace::Marca(marca) => aguardar_a_marca(filho, &registro, marca, espera.teto())?,
     };
 
     let bruto = std::fs::read(&registro)
@@ -1447,12 +1468,12 @@ fn conferir_desfecho(
         Desfecho::Estourou => Err(match espera {
             Desenlace::Desligamento => format!(
                 "a maquina nao desligou em {}s — o iniciador nao chegou ao fim",
-                TETO_DO_INICIADOR.as_secs()
+                espera.teto().as_secs()
             ),
             Desenlace::Marca(marca) => format!(
                 "o kernel nao disse `{marca}` em {}s — ou o salto nao chegou nele, ou ele \
                  parou antes dessa linha",
-                TETO_DO_INICIADOR.as_secs()
+                espera.teto().as_secs()
             ),
         }),
     }
