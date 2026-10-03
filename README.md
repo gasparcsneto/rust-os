@@ -157,7 +157,7 @@ $ cargo xtask agent --canal 2 agent.session
 | `agent.registry` | Quem pode entrar pelas portas: a chave do Duke e cada agente registrado, com a origem |
 | `person.registry` | Quem pode entrar pelos consoles: cada pessoa, com identificador, nome, papel, estado e sessões abertas — sem credencial |
 | `admin.challenge` | Um desafio de uso único para uma operação administrativa nesta sessão |
-| `admin.execute` | Uma operação administrativa com a prova de um administrador (`challenge`, `command`, `params`, `admin`, `proof`): `agent.register`, `agent.revoke`, `policy.assign`, `policy.write`, `person.register`, `person.revoke`, `credential.rotate`, `session.revoke`, `lease.revoke`, `message.send`, `message.read`, `message.ack`, `message.purge` |
+| `admin.execute` | Uma operação administrativa com a prova de um administrador (`challenge`, `command`, `params`, `admin`, `proof`): `agent.register`, `agent.revoke`, `policy.assign`, `policy.write`, `person.register`, `person.revoke`, `credential.rotate`, `session.revoke`, `lease.revoke`, `message.send`, `message.read`, `message.ack`, `message.purge`, `message.purge_mailbox` |
 | `audit.tail` | Os registros mais recentes da auditoria encadeada, com o que basta para refazer cada elo (`count`) |
 | `audit.head` | A cabeça da auditoria — o elo do último registro, para ancorar fora da máquina —, a âncora e quantos há |
 | `audit.verify` | Refaz a cadeia guardada a partir da âncora e diz se cada elo confere |
@@ -374,7 +374,6 @@ politica/src/        a política de autorização, a mesma no kernel e no hosped
 ├── taxa.rs          o balde de pedidos e a janela de apertos de mão
 ├── arrendamento.rs  a versão e o arrendamento de cada recurso compartilhado
 ├── mensagens.rs     as caixas, os estados, as cotas e os nonces das mensagens
-├── sigiloso.rs      o texto que sai da memória zerado: o corpo e a resposta que o leva
 ├── sigiloso.rs      o texto que sai da memória zerado: o corpo e a resposta que o leva
 └── auditoria.rs     os registros e a cadeia de elos BLAKE2s
 
@@ -1860,9 +1859,9 @@ Uma mensagem entre titulares — agente, pessoa, serial, administrador — é um
 cancelar e consultar são comandos do registro, e passam por
 `autorizacao::autorizar` → `decidir` como qualquer outro.
 
-**Quem pode.** `message.send`, `message.read` e `message.purge` são
-permissões sensíveis: não atravessam `@inclusão`, cada papel que as tem as
-escreve. `message.read` é sobre as próprias mensagens — ler e confirmar
+**Quem pode.** `message.send`, `message.read`, `message.purge` e
+`message.purge_mailbox` são permissões sensíveis: não atravessam
+`@inclusão`, cada papel que as tem as escreve. `message.read` é sobre as próprias mensagens — ler e confirmar
 a caixa, consultar o estado, cancelar a que mandou e ninguém leu. O recurso
 de `message.send` é o **papel do destinatário** —
 `papel:<nome>` —, e o alcance de cada papel é enumerado numa linha
@@ -1905,6 +1904,21 @@ o `administrador`, o sistema e o administrador a alcançam (`admin:<nome>`);
 a caixa dela se lê só pela prova. `message.purge` tira a mensagem de outro,
 também só com prova.
 
+**Esvaziar uma caixa inteira** é outra operação, com outra permissão:
+`message.purge_mailbox`, `{"mailbox": endereço}` — o endereço de um envio:
+`serial`, `pessoa:<id>`, `admin:<nome>` ou o nome de um agente. É
+destrutiva de outro tamanho — tudo o que alguém ia ler, de uma vez —, e
+quem pode tirar uma mensagem não esvazia a caixa por isso: a permissão é
+própria, sensível e administrativa, e o papel que a tem a escreve. O
+caminho é o de toda operação administrativa — credencial, desafio, prova,
+a decisão pelo papel do administrador, e só então a caixa —, sem atalho:
+não é comando de sessão, e nenhuma recusa toca a caixa. As vencidas saem
+como vencidas, antes. A auditoria grava cada mensagem tirada com o id, em
+nome do administrador, ligada ao desafio da operação; e o desfecho, com a
+caixa e quantas saíram, a permissão que valeu e o mesmo desafio. Um
+titular revogado não tem caixa: a revogação já anulou o que ele ia
+receber.
+
 **Estados.** Uma mensagem aceita é `pending`; a primeira leitura a faz
 `delivered`; o `ack` de quem recebeu a tira (`acked`). Ler **não consome**:
 uma resposta perdida se relê, com o mesmo id — entrega pelo menos uma vez,
@@ -1915,14 +1929,6 @@ versão, e `expect_version` diferente é `CONFLICT`. Ao sair, o corpo é
 zerado; fica uma lápide curta para o `message.status`, e a auditoria. O
 prazo vence na consulta: uma mensagem cujo prazo passou é `expired` no
 `message.status` na hora, e não quando o coletor passar.
-
-**O corpo sai da memória zerado** — o guardado na caixa e cada cópia
-dele: a que a leitura devolve, e o texto da resposta que a leva até o fio,
-montado num texto que zera cada bloco que larga ao crescer (um `String`
-comum devolveria o bloco antigo ao alocador com o corpo dentro). Zera o
-bloco inteiro, a capacidade e não só o comprimento, com escrita volátil
-— ver `politica::sigiloso`. Os testes no hospedeiro conferem com um
-alocador que olha cada bloco ao ser devolvido.
 
 **O corpo sai da memória zerado** — o guardado na caixa e cada cópia
 dele: a que a leitura devolve, e o texto da resposta que a leva até o fio,
@@ -1968,8 +1974,10 @@ alcance do operador, o administrador alcançado só pelo sistema e por ele
 mesmo, e o titular com papel administrador que recebe; o reenvio e o replay;
 a anulação pela revogação, de chave e de pessoa; o destinatário
 inexistente e revogado; ler sem consumir, o `ack` e o cancelamento; a
-ordem; as cotas e o prazo; o vazamento entre sessões; e o administrador
-por prova. A tabela pura tem os mesmos testes no hospedeiro, com as
+ordem; as cotas e o prazo; o vazamento entre sessões; o administrador
+por prova; e esvaziar a caixa — sem a permissão própria, com a credencial
+errada, com a prova de outra caixa ou de outra operação, a prova repetida,
+o alvo inexistente e o revogado, e o que a auditoria grava. A tabela pura tem os mesmos testes no hospedeiro, com as
 cotas de caixa e de total.
 
 ### Quem está agindo

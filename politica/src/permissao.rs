@@ -79,13 +79,21 @@ pub enum Permissao {
     /// mensagens, e cancelar as que mandou enquanto ninguém as leu. Nunca a
     /// caixa de outro: a caixa vem da sessão, e não de um parâmetro.
     MessageRead,
-    /// Tirar mensagens de outro titular, ou uma caixa inteira — só pela
+    /// Tirar uma mensagem viva de outro titular, pelo id — só pela
     /// operação administrativa, com prova.
     MessagePurge,
+    /// Esvaziar a caixa inteira de um titular — só pela operação
+    /// administrativa, com prova.
+    ///
+    /// Uma permissão própria, e não a de tirar uma mensagem: esvaziar uma
+    /// caixa é destrutivo de outro tamanho — tudo o que alguém ia ler, de
+    /// uma vez, sem olhar uma por uma —, e quem pode o menor não ganha o
+    /// maior por tabela. Um papel que tem uma não tem a outra sem escrevê-la.
+    MessagePurgeMailbox,
 }
 
 /// Todas, na ordem do relatório.
-pub const TODAS: [Permissao; 28] = [
+pub const TODAS: [Permissao; 29] = [
     Permissao::AgentRead,
     Permissao::SystemRead,
     Permissao::LogRead,
@@ -114,6 +122,7 @@ pub const TODAS: [Permissao; 28] = [
     Permissao::MessageSend,
     Permissao::MessageRead,
     Permissao::MessagePurge,
+    Permissao::MessagePurgeMailbox,
 ];
 
 impl Permissao {
@@ -148,6 +157,7 @@ impl Permissao {
             Permissao::MessageSend => "message.send",
             Permissao::MessageRead => "message.read",
             Permissao::MessagePurge => "message.purge",
+            Permissao::MessagePurgeMailbox => "message.purge_mailbox",
         }
     }
 
@@ -180,6 +190,7 @@ impl Permissao {
                 | Permissao::MessageSend
                 | Permissao::MessageRead
                 | Permissao::MessagePurge
+                | Permissao::MessagePurgeMailbox
         )
     }
 
@@ -197,6 +208,7 @@ impl Permissao {
                 | Permissao::SessionRevoke
                 | Permissao::LeaseRevoke
                 | Permissao::MessagePurge
+                | Permissao::MessagePurgeMailbox
         )
     }
 
@@ -262,7 +274,8 @@ impl Permissao {
             | Permissao::SessionRevoke
             | Permissao::LeaseRevoke
             | Permissao::MessageSend
-            | Permissao::MessagePurge => true,
+            | Permissao::MessagePurge
+            | Permissao::MessagePurgeMailbox => true,
         }
     }
 
@@ -365,5 +378,16 @@ mod testes {
         assert!(manda.recurso_e_destino() && !manda.recurso_e_caminho());
         assert!(!le.recurso_e_destino() && !purga.recurso_e_destino());
         assert!(TODAS.iter().filter(|p| p.recurso_e_destino()).count() == 1);
+    }
+
+    /// Esvaziar uma caixa é uma permissão própria, com nome próprio:
+    /// administrativa, sensível — não vem por inclusão —, e muda o estado.
+    #[test]
+    fn esvaziar_a_caixa_e_outra_permissao() {
+        let caixa = Permissao::de_nome("message.purge_mailbox").unwrap();
+        assert_eq!(caixa, Permissao::MessagePurgeMailbox);
+        assert_ne!(caixa, Permissao::MessagePurge);
+        assert!(caixa.administrativa() && caixa.sensivel() && caixa.muda_estado());
+        assert!(!caixa.tem_alcance());
     }
 }

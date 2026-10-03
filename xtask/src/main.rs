@@ -2479,8 +2479,13 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
         "autorizacao::destino_decidido(",
         &["kernel/src/agent/commands.rs"],
     ),
-    // Tirar a mensagem de outro, só com prova; anular, só a revogação.
+    // Tirar a mensagem de outro, ou esvaziar a caixa de outro, só com
+    // prova; anular, só a revogação.
     ("mensagens::purgar(", &["kernel/src/agent/administracao.rs"]),
+    (
+        "mensagens::purgar_caixa(",
+        &["kernel/src/agent/administracao.rs"],
+    ),
     (
         "mensagens::anular_titular(",
         &["kernel/src/identidade.rs", "kernel/src/pessoas.rs"],
@@ -2521,6 +2526,7 @@ const FUNCOES_DE_MENSAGEM: &[&str] = &[
     "ler_mensagens",
     "confirmar_mensagem",
     "purgar_mensagem",
+    "esvaziar_caixa",
 ];
 
 /// Confere que o remetente de uma mensagem nunca vem do pedido.

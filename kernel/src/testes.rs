@@ -10974,6 +10974,23 @@ fn executar_admin_de(
     prova_de: &str,
     parametros: &str,
 ) -> Result<alloc::string::String, &'static str> {
+    executar_admin_provado(
+        sessao, desafio, chave, comando, comando, prova_de, parametros,
+    )
+}
+
+/// Um `admin.execute` de `comando`, com a prova calculada para
+/// `comando_da_prova` e `prova_de` — para mandar uma prova feita para outra
+/// operação.
+fn executar_admin_provado(
+    sessao: u8,
+    desafio: (u64, [u8; 32], [u8; 32]),
+    chave: &[u8; 32],
+    comando_da_prova: &str,
+    comando: &str,
+    prova_de: &str,
+    parametros: &str,
+) -> Result<alloc::string::String, &'static str> {
     let (id, nonce, efemera) = desafio;
     let publica = sigilo::publica_de(chave);
     let contexto = sigilo::administracao::Contexto {
@@ -10981,7 +10998,7 @@ fn executar_admin_de(
         sessao,
         administrador: &publica,
         efemera: &efemera,
-        comando,
+        comando: comando_da_prova,
         parametros: prova_de,
     };
     let prova = sigilo::administracao::provar(chave, &contexto).map_err(|_| "sem prova")?;
@@ -13798,6 +13815,271 @@ fn mensagens_o_administrador_por_prova() -> Resultado {
         let admin = AgenteDeTeste::conectar(4, &mut sessao, &ADMIN_DE_TESTE)?;
         if admin.transporte.is_some() {
             return Err("a chave do administrador abriu uma sessao");
+        }
+        Ok(())
+    })
+}
+
+/// Os registros da auditoria, do mais velho ao mais novo, que `f` aceita.
+fn registros_com(
+    f: impl Fn(&politica::auditoria::Evento) -> bool,
+) -> alloc::vec::Vec<politica::auditoria::Evento> {
+    crate::autorizacao::com_auditoria(|c| {
+        c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+            .filter(|r| f(&r.evento))
+            .map(|r| r.evento.clone())
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// Esvaziar a caixa inteira de um titular é uma operação administrativa
+/// com permissão própria: a prova primeiro, depois a permissão
+/// `message.purge_mailbox` no papel do administrador, e só então a caixa.
+/// A de tirar uma mensagem não basta.
+///
+/// # O que este caso protege
+///
+/// O caminho inteiro — credencial, desafio, prova, decisão, execução,
+/// auditoria — para a operação mais destrutiva das mensagens: nenhuma
+/// recusa toca a caixa; a prova não vale duas vezes; e a auditoria diz quem
+/// esvaziou, qual caixa, com que permissão, quais mensagens saíram e por
+/// qual desafio — o bastante para reconstruir o que aconteceu.
+fn mensagens_esvaziar_a_caixa() -> Resultado {
+    com_mensagens(|| {
+        let admin = sigilo::publica_de(&ADMIN_DE_TESTE);
+        crate::identidade::registrar_administrador_de_teste(admin, "administrador");
+        let (mut a, mut sa) = conectado(1)?;
+        let (mut b, mut sb) = conectado(2)?;
+        let mut na_caixa = alloc::vec::Vec::new();
+        for n in 1..=3 {
+            na_caixa.extend(ids_de(&mandar(
+                &mut a,
+                &mut sa,
+                "teste-2",
+                "a esvaziar",
+                n,
+            )?));
+        }
+        let fica = ids_de(&mandar(&mut a, &mut sa, "teste-3", "fica", 4)?);
+        // O que o dono da caixa mandou é da caixa de quem vai ler: fica.
+        let dele = ids_de(&mandar(&mut b, &mut sb, "teste-3", "dele", 1)?);
+        if na_caixa.len() != 3 || fica.len() != 1 || dele.len() != 1 {
+            return Err("as mensagens do caso nao foram mandadas");
+        }
+        let dono = politica::mensagens::Dono::Agente(sigilo::publica_de(&chave_de_teste(2)));
+        let caixa = r#"{"mailbox":"teste-2"}"#;
+        let tirada = |id: &str| transicao_gravada("message.purge", id);
+        // Nenhuma recusa toca a caixa: as três continuam, e nenhuma foi
+        // gravada como tirada.
+        let intacta = |depois_de: &str| -> Resultado {
+            if crate::mensagens::na_caixa(dono) != 3 || na_caixa.iter().any(|id| tirada(id)) {
+                crate::log_error!("teste", "depois de: {}", depois_de);
+                return Err("uma recusa mexeu na caixa");
+            }
+            Ok(())
+        };
+
+        // Uma credencial que não é de administrador: recusada, gravada.
+        admin_espera(
+            1,
+            &[0x55; 32],
+            "message.purge_mailbox",
+            caixa,
+            Some("DENY_NOT_AUTHENTICATED"),
+        )?;
+        intacta("uma chave fora do registro")?;
+        // A chave certa, com a prova feita para outra caixa, ou para outra
+        // operação — a de tirar uma mensagem —: a prova não confere.
+        let r = executar_admin_com(
+            1,
+            &ADMIN_DE_TESTE,
+            "message.purge_mailbox",
+            r#"{"mailbox":"teste-3"}"#,
+            caixa,
+        )?;
+        let d = crate::agent::sessao::com_sessao(1, desafio)?;
+        let s = executar_admin_provado(
+            1,
+            d,
+            &ADMIN_DE_TESTE,
+            "message.purge",
+            "message.purge_mailbox",
+            caixa,
+            caixa,
+        )?;
+        if !r.contains("a prova nao confere") || !s.contains("a prova nao confere") {
+            crate::log_error!("teste", "{} {}", r, s);
+            return Err("uma prova de outra caixa, ou de outra operacao, foi aceita");
+        }
+        intacta("a prova de outra caixa ou de outra operacao")?;
+
+        // Sem a permissão própria: um papel com `message.purge` e sem
+        // `message.purge_mailbox` tira uma mensagem pelo id, e não esvazia a
+        // caixa — a recusa é da decisão.
+        let sem = politica::PADRAO.replace(" message.purge_mailbox", "");
+        let sem = politica::Politica::ler(&sem).map_err(|_| "a politica do caso nao vale")?;
+        crate::autorizacao::trocar_politica(sem);
+        admin_espera(
+            1,
+            &ADMIN_DE_TESTE,
+            "message.purge_mailbox",
+            caixa,
+            Some("DENY_PERMISSION"),
+        )?;
+        let negada = ultimo_com_metodo("message.purge_mailbox").is_some_and(|e| {
+            e.titular == politica::auditoria::Titular::Administrador
+                && e.chave == Some(admin)
+                && e.detalhe == "o papel do administrador nao tem a permissao"
+        });
+        if !negada {
+            return Err("a recusa sem a permissao nao veio da decisao, com o administrador");
+        }
+        intacta("um papel sem a permissao propria")?;
+        let avulsa = ids_de(&mandar(&mut a, &mut sa, "teste-3", "avulsa", 5)?);
+        admin_espera(
+            1,
+            &ADMIN_DE_TESTE,
+            "message.purge",
+            &alloc::format!(r#"{{"id":"{}"}}"#, avulsa[0]),
+            None,
+        )?;
+        crate::autorizacao::carregar();
+        // E não é um comando: pela sessão, nem com o papel de sistema.
+        if registry::encontrar("message.purge_mailbox").is_some()
+            || pela_porta(&mut a, &mut sa, "message.purge_mailbox", caixa)?.contains(r#""ok":true"#)
+        {
+            return Err("esvaziar a caixa passou como um comando comum");
+        }
+        intacta("o pedido como comando")?;
+        // Um alvo que não existe: recusado, e nada sai de nenhuma caixa.
+        admin_espera(
+            1,
+            &ADMIN_DE_TESTE,
+            "message.purge_mailbox",
+            r#"{"mailbox":"ninguem"}"#,
+            Some("INVALID_ARGUMENT"),
+        )?;
+        intacta("um alvo que nao existe")?;
+
+        // Com a prova e a permissão: as três saem, a de teste-3 fica.
+        let d = crate::agent::sessao::com_sessao(1, desafio)?;
+        let r = executar_admin_de(1, d, &ADMIN_DE_TESTE, "message.purge_mailbox", caixa, caixa)?;
+        let todas = na_caixa
+            .iter()
+            .all(|id| r.contains(&alloc::format!(r#""{id}""#)));
+        if !r.contains(r#""executed":true"#) || !r.contains(r#""removed":3"#) || !todas {
+            crate::log_error!("teste", "{}", r);
+            return Err("a caixa nao foi esvaziada, ou a resposta nao diz quais sairam");
+        }
+        if crate::mensagens::na_caixa(dono) != 0
+            || pela_porta(&mut b, &mut sb, "message.read", "{}")?.contains("a esvaziar")
+        {
+            return Err("sobrou mensagem na caixa esvaziada");
+        }
+        let c = politica::mensagens::Dono::Agente(sigilo::publica_de(&chave_de_teste(3)));
+        if crate::mensagens::na_caixa(c) != 2 || tirada(&dele[0]) {
+            return Err("esvaziar uma caixa mexeu em outra, ou no que o dono dela mandou");
+        }
+        let estado = pela_porta(
+            &mut a,
+            &mut sa,
+            "message.status",
+            &alloc::format!(r#"{{"id":"{}"}}"#, na_caixa[0]),
+        )?;
+        if !estado.contains(r#""state":"purged""#) {
+            crate::log_error!("teste", "{}", estado);
+            return Err("quem mandou nao ve a mensagem como tirada");
+        }
+
+        // A auditoria: cada mensagem com o id, em nome do administrador,
+        // ligada ao desafio; e o desfecho da operação, com a caixa, a
+        // permissão que valeu e o mesmo desafio.
+        let do_desafio = alloc::format!("desafio {}", d.0);
+        for id in &na_caixa {
+            let recurso = alloc::format!("msg:{id}");
+            let gravada = registros_com(|e| e.metodo == "message.purge" && e.recurso == recurso);
+            let certa = gravada.len() == 1
+                && gravada[0].titular == politica::auditoria::Titular::Administrador
+                && gravada[0].chave == Some(admin)
+                && gravada[0].codigo == politica::Codigo::Allow
+                && gravada[0].detalhe.contains("caixa inteira de teste-2")
+                && gravada[0].detalhe.contains(&do_desafio);
+            if !certa {
+                crate::log_error!("teste", "{:?}", gravada);
+                return Err("uma mensagem tirada nao foi gravada, ou nao como devia");
+            }
+        }
+        let fim = ultimo_com_metodo("message.purge_mailbox").ok_or("o desfecho nao foi gravado")?;
+        let certo = fim.metodo == "message.purge_mailbox"
+            && fim.codigo == politica::Codigo::Allow
+            && fim.titular == politica::auditoria::Titular::Administrador
+            && fim.agente == crate::identidade::ADMINISTRADOR_DE_TESTE
+            && fim.chave == Some(admin)
+            && fim.papel == "administrador"
+            && fim.recurso == "caixa:teste-2; 3 tiradas"
+            && fim.detalhe.contains("permissao message.purge_mailbox")
+            && fim.detalhe.contains(&do_desafio)
+            && fim.parametros == politica::auditoria::resumo_dos_parametros(caixa.as_bytes());
+        if !certo {
+            crate::log_error!("teste", "{:?}", fim);
+            return Err("o desfecho do esvaziamento nao foi gravado como devia");
+        }
+
+        // A mesma prova de novo: o desafio já foi, e a mensagem que chegou
+        // depois fica.
+        let nova = ids_de(&mandar(&mut a, &mut sa, "teste-2", "depois", 6)?);
+        let r = executar_admin_de(1, d, &ADMIN_DE_TESTE, "message.purge_mailbox", caixa, caixa)?;
+        if !r.contains("desafio desconhecido nesta sessao")
+            || crate::mensagens::na_caixa(dono) != 1
+            || tirada(&nova[0])
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("a prova valeu duas vezes");
+        }
+        // Uma caixa só com uma vencida: executada, e nada sai como tirada —
+        // a vencida sai como vencida, gravada.
+        let r = pela_porta(
+            &mut a,
+            &mut sa,
+            "message.send",
+            r#"{"to":"teste-4","body":"curta","nonce":7,"ttl_ms":1000}"#,
+        )?;
+        let curta = ids_de(&r);
+        let vence = crate::tempo::uptime_ms() + 1000;
+        esperar_ate(|| crate::tempo::uptime_ms() >= vence, 400)?;
+        let r = executar_admin_com(
+            1,
+            &ADMIN_DE_TESTE,
+            "message.purge_mailbox",
+            r#"{"mailbox":"teste-4"}"#,
+            r#"{"mailbox":"teste-4"}"#,
+        )?;
+        if curta.len() != 1
+            || !r.contains(r#""executed":true"#)
+            || !r.contains(r#""removed":0"#)
+            || !transicao_gravada("message.expire", &curta[0])
+            || tirada(&curta[0])
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("a vencida saiu como tirada, ou nao foi gravada");
+        }
+        // Um titular revogado não tem caixa: o que ele ia receber já foi
+        // anulado pela revogação, e esvaziar não acha a quem.
+        crate::identidade::revogar(&sigilo::publica_de(&chave_de_teste(3)))
+            .map_err(|_| "a revogacao falhou")?;
+        if !transicao_gravada("message.void", &fica[0]) {
+            return Err("a revogacao nao anulou o que o revogado ia receber");
+        }
+        admin_espera(
+            1,
+            &ADMIN_DE_TESTE,
+            "message.purge_mailbox",
+            r#"{"mailbox":"teste-3"}"#,
+            Some("INVALID_ARGUMENT"),
+        )?;
+        if tirada(&fica[0]) {
+            return Err("a mensagem anulada foi gravada como tirada");
         }
         Ok(())
     })
@@ -18259,6 +18541,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "mensagens: o administrador por prova",
         f: mensagens_o_administrador_por_prova,
+    },
+    Caso {
+        nome: "mensagens: esvaziar a caixa",
+        f: mensagens_esvaziar_a_caixa,
     },
     Caso {
         nome: "barra: nenhuma superficie a cobre",

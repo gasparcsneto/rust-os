@@ -599,9 +599,15 @@ impl Caixas {
         Some(self.tirar(i, Estado::Purgada))
     }
 
-    /// A operação administrativa: a caixa inteira de um titular.
-    pub fn purgar_caixa(&mut self, dono: Dono) -> Vec<Transicao> {
-        self.tirar_se(Estado::Purgada, |m| m.para == dono)
+    /// A operação administrativa: a caixa inteira de um titular — as vivas
+    /// que ele ia receber; as que ele mandou ficam nas caixas dos outros.
+    ///
+    /// Vence antes: uma mensagem cujo prazo passou é `Expirada`, e não
+    /// entra na conta do que o administrador tirou. Devolve as tiradas e as
+    /// que venceram, cada lista para a sua auditoria.
+    pub fn purgar_caixa(&mut self, dono: Dono, agora_ms: u64) -> (Vec<Transicao>, Vec<Transicao>) {
+        let vencidas = self.vencer(agora_ms);
+        (self.tirar_se(Estado::Purgada, |m| m.para == dono), vencidas)
     }
 
     /// As que venceram até `agora_ms`.
@@ -946,9 +952,20 @@ mod testes {
         manda(&mut t, PC, C, A, 1).unwrap();
         assert_eq!(t.purgar(um).unwrap().estado, Estado::Purgada);
         assert!(t.purgar(um).is_none());
-        assert_eq!(t.purgar_caixa(B).len(), 1);
+        let dois = manda(&mut t, PA, A, B, 3).unwrap().id;
+        // O que B mandou não é da caixa dele: fica na de quem vai ler.
+        manda(&mut t, Canal::Sessao(2), B, A, 1).unwrap();
+        let (tiradas, vencidas) = t.purgar_caixa(B, 0);
+        assert!(vencidas.is_empty());
+        assert_eq!(tiradas.len(), 2);
+        assert!(tiradas.iter().all(|x| x.estado == Estado::Purgada));
+        assert_eq!(tiradas[1].id, dois);
         assert_eq!(t.na_caixa(B), 0);
-        assert_eq!(t.na_caixa(A), 1);
+        // A caixa de outro fica, e a lápide diz o que aconteceu.
+        assert_eq!(t.na_caixa(A), 2);
+        assert_eq!(t.estado(A, dois).map(|(e, _)| e), Some(Estado::Purgada));
+        // Esvaziar uma caixa vazia não tira nada.
+        assert!(t.purgar_caixa(B, 0).0.is_empty());
     }
 
     /// O corpo guardado sai da memória zerado quando a mensagem sai da
@@ -970,6 +987,20 @@ mod testes {
             t.purgar(id).unwrap();
         });
         assert_eq!(veredito, 1);
+    }
+
+    /// Esvaziar vence antes: a vencida sai como vencida, e não como tirada
+    /// pelo administrador.
+    #[test]
+    fn esvaziar_vence_antes() {
+        let mut t = Caixas::nova();
+        let velha = manda(&mut t, PA, A, B, 1).unwrap().id;
+        let (tiradas, vencidas) = t.purgar_caixa(B, PRAZO_PADRAO_MS);
+        assert!(tiradas.is_empty());
+        assert_eq!(
+            (vencidas[0].id, vencidas[0].estado),
+            (velha, Estado::Expirada)
+        );
     }
 
     /// Os ids não voltam: o que saiu não é reusado.

@@ -75,6 +75,9 @@ struct Pedinte<'a> {
     /// O destinatário de um `message.send`, como a decisão o resolveu — com
     /// o papel do administrador.
     destino: Option<crate::mensagens::Destino>,
+    /// O número do desafio que a prova consumiu: identifica a operação na
+    /// auditoria, e liga a ela o que a operação grava por conta própria.
+    desafio: u64,
 }
 
 /// Por que uma operação não foi feita: o código da auditoria e o motivo.
@@ -189,6 +192,14 @@ static OPERACOES: &[Operacao] = &[
                  auditoria.",
         permissao: Permissao::MessagePurge,
         executar: purgar_mensagem,
+    },
+    Operacao {
+        nome: "message.purge_mailbox",
+        resumo: "Esvazia a caixa inteira de um titular: {\"mailbox\": endereco, como o \
+                 `to` do message.send}. Permissao propria: a de tirar uma mensagem nao \
+                 basta. Cada mensagem tirada vai para a auditoria com o id.",
+        permissao: Permissao::MessagePurgeMailbox,
+        executar: esvaziar_caixa,
     },
 ];
 
@@ -397,6 +408,7 @@ fn conferir_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) -> Result
         chave_da_sessao: crate::sessoes::identidade(sessao).map(|id| id.chave),
         administrador,
         destino,
+        desafio: id,
     };
 
     // A operação escreve os campos dela só se der certo; os de cima vêm
@@ -404,7 +416,14 @@ fn conferir_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) -> Result
     // o contrário na mesma resposta.
     match (operacao.executar)(&pedinte, Json(parametros.as_bytes()), w) {
         Ok(recurso) => {
-            gravar(Codigo::Allow, &recurso, "prova conferida; executada");
+            // A autorização que valeu, e a operação: a permissão que o papel
+            // tinha e o desafio que a prova consumiu.
+            let detalhe = format!(
+                "prova conferida; executada; permissao {}; desafio {}",
+                operacao.permissao.nome(),
+                id
+            );
+            gravar(Codigo::Allow, &recurso, &detalhe);
             autorizacao::contar_administracao(&nome, papel, operacao.nome, operacao.permissao);
             let _ = w.field_bool("executed", true);
             let _ = w.field_str("command", operacao.nome);
@@ -792,4 +811,25 @@ fn purgar_mensagem(pedinte: &Pedinte, params: Json, w: &mut JsonWriter) -> Resul
     let t = crate::mensagens::purgar(&remetente, id).map_err(falha_de_mensagem)?;
     let _ = w.field_str("state", t.estado.nome());
     Ok(format!("msg:{id}"))
+}
+
+/// A caixa inteira de um titular. A decisão — a prova, e a permissão
+/// própria no papel do administrador — já foi; aqui só se resolve o alvo e
+/// se esvazia. O recurso da auditoria diz a caixa e quantas saíram; cada
+/// uma foi gravada com o id por [`crate::mensagens::purgar_caixa`].
+fn esvaziar_caixa(pedinte: &Pedinte, params: Json, w: &mut JsonWriter) -> Result<String, Falha> {
+    let alvo = texto(params, "mailbox")?;
+    let (dono, _) =
+        crate::mensagens::titular(alvo).map_err(|m| falha(Codigo::InvalidArgument, m))?;
+    let remetente = crate::mensagens::Remetente::do_administrador(pedinte.administrador);
+    let tiradas = crate::mensagens::purgar_caixa(&remetente, dono, alvo, pedinte.desafio);
+    let _ = w.field_str("mailbox", alvo);
+    let _ = w.field_u64("removed", tiradas.len() as u64);
+    let _ = w.key("ids");
+    let _ = w.begin_array();
+    for id in &tiradas {
+        let _ = w.str_value(id);
+    }
+    let _ = w.end_array();
+    Ok(format!("caixa:{alvo}; {} tiradas", tiradas.len()))
 }

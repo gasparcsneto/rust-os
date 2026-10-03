@@ -835,7 +835,7 @@ mod testes {
     #[test]
     fn o_alcance_das_mensagens() {
         use Codigo::*;
-        use Permissao::{MessagePurge, MessageRead, MessageSend};
+        use Permissao::{MessagePurge, MessagePurgeMailbox, MessageRead, MessageSend};
         let p = Politica::ler(crate::PADRAO).unwrap();
         let manda = |papel: &str, alvo: &str| p.decidir(Some(papel), MessageSend, Some(alvo));
         for alvo in ["papel:observador", "papel:operador", "papel:sistema"] {
@@ -874,15 +874,46 @@ mod testes {
         for papel in ["observador", "operador", "sistema", "administrador"] {
             assert_eq!(p.decidir(Some(papel), MessageRead, None), Allow, "{papel}");
         }
-        // Tirar a mensagem de outro: só o administrador, e só com prova.
-        assert_eq!(p.decidir(Some("administrador"), MessagePurge, None), Allow);
-        for papel in ["observador", "operador", "sistema"] {
-            assert_eq!(
-                p.decidir(Some(papel), MessagePurge, None),
-                DenyPermission,
-                "{papel}"
-            );
+        // Tirar a mensagem de outro, e esvaziar a caixa de outro: só o
+        // administrador, e só com prova.
+        for purga in [MessagePurge, MessagePurgeMailbox] {
+            assert_eq!(p.decidir(Some("administrador"), purga, None), Allow);
+            for papel in ["observador", "operador", "sistema"] {
+                assert_eq!(
+                    p.decidir(Some(papel), purga, None),
+                    DenyPermission,
+                    "{papel} {}",
+                    purga.nome()
+                );
+            }
         }
+        // Uma não traz a outra: o papel que tira uma mensagem não esvazia a
+        // caixa, e o que esvazia não tira uma pelo id — cada uma escrita.
+        let separadas = alloc::format!(
+            "{}papel uma-so message.purge\npapel caixa-so message.purge_mailbox\n",
+            crate::PADRAO
+        );
+        let s = Politica::ler(&separadas).unwrap();
+        assert_eq!(s.decidir(Some("uma-so"), MessagePurge, None), Allow);
+        assert_eq!(
+            s.decidir(Some("uma-so"), MessagePurgeMailbox, None),
+            DenyPermission
+        );
+        assert_eq!(
+            s.decidir(Some("caixa-so"), MessagePurgeMailbox, None),
+            Allow
+        );
+        assert_eq!(
+            s.decidir(Some("caixa-so"), MessagePurge, None),
+            DenyPermission
+        );
+        // Nem por inclusão: é sensível.
+        let incluida = alloc::format!("{separadas}papel herdeiro @caixa-so\n");
+        let h = Politica::ler(&incluida).unwrap();
+        assert_eq!(
+            h.decidir(Some("herdeiro"), MessagePurgeMailbox, None),
+            DenyPermission
+        );
     }
 
     /// A linha de alcance de destino: só `papel:<nome>`, com nome na regra,

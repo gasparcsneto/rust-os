@@ -100,46 +100,55 @@ pub struct Destino {
 /// auditoria — a resposta a quem pede é a mesma para todos: o inexistente,
 /// o revogado e o sem papel são `DENY_RESOURCE`, sem dizer qual.
 ///
+/// O titular é o de [`titular`]; aqui ele precisa, além de existir, ter um
+/// papel — o recurso da decisão.
+pub fn resolver(texto: &str) -> Result<Destino, &'static str> {
+    let (dono, papel) = titular(texto)?;
+    let papel = papel.ok_or("destinatario sem papel")?;
+    Ok(Destino {
+        dono,
+        papel,
+        texto: texto.to_string(),
+    })
+}
+
+/// O titular de uma caixa, pelo endereço — o mesmo de um envio —, com o
+/// papel dele agora, se tem. O `Err` é o motivo exato.
+///
 /// - `serial`: a serial;
 /// - `pessoa:<16 hex>`: uma pessoa do registro, ativa;
 /// - `admin:<nome>`: a chave de um administrador, com o papel dela — que a
 ///   política da imagem deixa só o sistema e o próprio administrador
 ///   alcançarem; a chave lê a caixa só pela prova;
 /// - qualquer outro: o nome de um agente do registro.
-pub fn resolver(texto: &str) -> Result<Destino, &'static str> {
-    let destino = |dono, papel: Option<String>| {
-        papel
-            .map(|papel| Destino {
-                dono,
-                papel,
-                texto: texto.to_string(),
-            })
-            .ok_or("destinatario sem papel")
-    };
+///
+/// Um titular revogado não tem caixa: a revogação já anulou o que ele ia
+/// receber.
+pub fn titular(texto: &str) -> Result<(Dono, Option<String>), &'static str> {
     if texto == "serial" {
         let papel = crate::autorizacao::com_politica(|p| p.serial().to_string());
-        return destino(Dono::Serial, Some(papel));
+        return Ok((Dono::Serial, Some(papel)));
     }
     if let Some(nome) = texto.strip_prefix("admin:") {
         let (chave, papel) =
             crate::identidade::administrador_por_nome(nome).ok_or("destinatario inexistente")?;
-        return destino(Dono::Administrador(chave), papel);
+        return Ok((Dono::Administrador(chave), papel));
     }
     if texto.starts_with("pessoa:") {
         let id = sigilo::pessoas::IdPessoa::ler(texto).ok_or("destinatario inexistente")?;
         return match crate::pessoas::pessoa(id) {
             Some(p) if p.estado == sigilo::pessoas::Estado::Ativa => {
-                destino(Dono::Pessoa(id.0), Some(p.papel))
+                Ok((Dono::Pessoa(id.0), Some(p.papel)))
             }
             Some(_) => Err("destinatario revogado"),
             None => Err("destinatario inexistente"),
         };
     }
     let chave = crate::identidade::chave_do_agente(texto).ok_or("destinatario inexistente")?;
-    destino(
+    Ok((
         Dono::Agente(chave),
         crate::identidade::papel_do_agente(&chave),
-    )
+    ))
 }
 
 /// Quem age sobre as mensagens: o titular, o canal dos nonces dele, e como
@@ -393,6 +402,34 @@ pub fn purgar(r: &Remetente, id: &str) -> Result<Transicao, Recusa> {
     let t = t.ok_or(Recusa::Desconhecida)?;
     gravar_transicoes(&epoca, r.ator, &[t]);
     Ok(t)
+}
+
+/// `message.purge_mailbox`: esvazia a caixa de `dono`, endereçada como
+/// `alvo`. Só a operação administrativa, com prova e com a permissão
+/// própria, chama — e ela grava o desfecho dela, ligado a estas pelo
+/// `desafio`.
+///
+/// Cada mensagem tirada vai para a auditoria uma a uma, com o id: é o que
+/// diz **quais** saíram, e não só quantas. As que venceram antes saem como
+/// vencidas, em nome do kernel. Devolve os ids tirados, na ordem.
+pub fn purgar_caixa(r: &Remetente, dono: Dono, alvo: &str, desafio: u64) -> Vec<String> {
+    let agora = crate::tempo::uptime_ms();
+    let (epoca, (tiradas, vencidas)) =
+        com_tabela(|t| (t.epoca, t.caixas.purgar_caixa(dono, agora)));
+    gravar_transicoes(&epoca, AtorDeMensagem::Kernel, &vencidas);
+    for t in &tiradas {
+        crate::autorizacao::auditar_mensagem(
+            r.ator,
+            "message.purge",
+            &recurso(&epoca, t.id),
+            Codigo::Allow,
+            &format!(
+                "tirada com a caixa inteira de {alvo}, pelo desafio {desafio}; versao {}",
+                t.versao
+            ),
+        );
+    }
+    tiradas.iter().map(|t| id_texto(&epoca, t.id)).collect()
 }
 
 /// A sessão do canal acabou: os nonces dela também.
