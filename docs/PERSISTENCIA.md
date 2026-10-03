@@ -517,9 +517,38 @@ veio do disco.
   operação, mensagem ou auditoria. O coletor grava registros de auditoria
   quando quer, e a n-ésima gravação de qualquer tipo deixaria de ser a
   mesma de uma corrida para outra.
+- **O disco espera mais por uma descarga.** O teto de espera do
+  virtio-blk era de cinco milhões de voltas — uns vinte milissegundos no
+  ARM emulado em release, na CI. Com o journal gravando muito mais, uma
+  descarga lenta do hospedeiro passou disso, e o disco foi desligado no
+  meio da suíte. O teto passou a quatrocentos milhões; ainda é em voltas,
+  e não em tempo.
 - **O RTC do PC é lido com o índice e o valor juntos.** A auditoria lê o
   relógio a cada decisão, de qualquer fio, e um fio preemptado entre
   escolher o registrador do CMOS e lê-lo leria o valor de outro.
+
+### As mutações do 7.5
+
+| Mutação | Quem a mata |
+|---|---|
+| a reposição sem conferir a sequência, o tempo que volta ou o detalhe acima do teto | hospedeiro: *repor fora da regra é recusado* |
+| a lacuna fora de sequência, ao contrário, ausente, com o elo errado, ou sem recomeçar a janela | hospedeiro: *o anel que perde deixa uma lacuna* |
+| o tempo da cadeia sem piso; o boot sem continuar o que registrou | hospedeiro: *o tempo não volta*, *continuar com o que veio antes* |
+| a codificação sem um campo; a leitura aceitando sobra, marca inválida ou texto que não é UTF-8 | hospedeiro: *o registro vai e volta*, *o registro estragado não se lê* |
+| o percurso sem avançar o elo, ignorando a recusa, aceitando a sequência pulada; o escritor com a geração zero | hospedeiro: os casos do journal, *percorrer para no registro recusado* |
+| o registro sem a auditoria; a gravada que não anda | suíte: *a decisão vai no registro da operação* |
+| a decisão de uma credencial ou do quórum depois da gravação | suíte: *a decisão vai no registro da operação*, *dois de três*; bancada: *a queda em cada fronteira de uma operação* |
+| a decisão de mensagem do administrador depois de executar | suíte: *o que não muda estado vai depois* |
+| a decisão perdida no anel aceita; a lacuna fora do journal | suíte: *o que sai do anel é uma lacuna* |
+| sem decisão, só o zero exigido; a decisão num registro anterior; sem teto por registro | suíte: *a lacuna*, *a decisão nunca vai antes* |
+| o coletor sem gravar; gravar sem persistência; `durable` sempre verdadeiro | suíte: *o que não muda estado vai depois* |
+| o tempo desde o boot na auditoria | suíte: *a decisão vai no registro da operação* |
+| o boot ignorando a auditoria do journal, sem adotá-la, ou sem continuar o que registrou | bancada: *a auditoria sobrevive ao corte* |
+| o journal recusado adotando a auditoria; a recusa sem `persistence.open` | bancada: *o journal recusado* |
+
+Nenhuma sobreviveu. A do percurso que aceitava a sequência pulada
+sobreviveu na primeira rodada — o caso do cabeçalho autêntico só tinha a
+sequência repetida — e ganhou o caso que faltava.
 
 ## Decisões tomadas
 
