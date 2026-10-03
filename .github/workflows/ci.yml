@@ -150,7 +150,10 @@ jobs:
   testes:
     name: Testes (${{ matrix.arch }})
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # O dobro do pior medido: com as quedas nas fronteiras da persistência,
+    # o job do x86 passou a levar 34 minutos — 18 deles na bancada, que
+    # sobe a máquina pelo firmware a cada boot.
+    timeout-minutes: 70
     strategy:
       # Sem fail-fast: quando uma arquitetura quebra, queremos saber na mesma
       # rodada se a outra também quebrou. Saber se o bug é específico de uma

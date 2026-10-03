@@ -611,6 +611,10 @@ pub fn vencer_todos() {
     if crate::arch::sem_interrupcoes(|| TABELA.lock().is_none()) {
         return;
     }
+    #[cfg(feature = "modo-teste")]
+    if COLETOR_PAUSADO.load(Ordering::Relaxed) {
+        return;
+    }
     let vencidas = crate::persistencia::em_ordem(|| {
         let agora = crate::persistencia::agora_ms();
         let (epoca, vencidas) = com_tabela(|t| (t.epoca, t.caixas.vencer(agora)));
@@ -652,6 +656,17 @@ pub fn descrever(dono: Dono) -> (&'static str, Option<(&'static str, String)>) {
             )),
         ),
     }
+}
+
+/// Só para a suíte: o coletor deixa de vencer mensagens, para um caso
+/// conferir o vencimento que outro caminho — a consulta — faz sozinho.
+#[cfg(feature = "modo-teste")]
+static COLETOR_PAUSADO: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Só para a suíte: pausa ou solta o coletor de vencimentos.
+#[cfg(feature = "modo-teste")]
+pub fn pausar_o_coletor_de_teste(pausado: bool) {
+    COLETOR_PAUSADO.store(pausado, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// Esvazia a tabela, para a suíte: cada caso começa sem mensagens — e sem

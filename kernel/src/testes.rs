@@ -13888,18 +13888,41 @@ fn mensagens_cotas() -> Resultado {
         )?;
         let id = ids_de(&r);
         // O prazo é do tempo lógico, com a resolução do RTC: espera-se nele.
+        // O coletor fica parado: quem vence aqui é a consulta, sozinha.
+        crate::mensagens::pausar_o_coletor_de_teste(true);
         let vence = crate::persistencia::agora_ms() + 1000;
-        esperar_ate(|| crate::persistencia::agora_ms() >= vence, 400)?;
-        let estado = pela_porta(
-            &mut c,
-            &mut sc,
-            "message.status",
-            &alloc::format!(r#"{{"id":"{}"}}"#, id[0]),
-        )?;
+        let esperou = esperar_ate(|| crate::persistencia::agora_ms() >= vence, 400);
+        let estado = esperou.and_then(|()| {
+            pela_porta(
+                &mut c,
+                &mut sc,
+                "message.status",
+                &alloc::format!(r#"{{"id":"{}"}}"#, id[0]),
+            )
+        });
+        crate::mensagens::pausar_o_coletor_de_teste(false);
+        let estado = estado?;
         if !estado.contains(r#""state":"expired""#) || !transicao_gravada("message.expire", &id[0])
         {
             crate::log_error!("teste", "{}", estado);
             return Err("a consulta depois do prazo nao disse expired, ou nao gravou");
+        }
+        // E o vencimento que a consulta disse está no journal, antes da
+        // resposta: não volta a pendente num boot com o RTC atrasado.
+        let vencida = (
+            diario::estado::tipo::MENSAGEM_ESTADO,
+            alloc::vec![
+                numero_do_id(&id[0]).to_le_bytes().to_vec(),
+                alloc::vec![politica::mensagens::Estado::Expirada.codigo()],
+                2u64.to_le_bytes().to_vec(),
+            ],
+        );
+        let ultimo = registros_do_journal()?;
+        let ultimo = ultimo.last().ok_or("journal vazio")?;
+        if !entradas_de_mensagem(ultimo)?.contains(&vencida)
+            || !estado.contains(r#""durable":true"#)
+        {
+            return Err("a consulta disse expired e nao gravou o vencimento no journal");
         }
         Ok(())
     })
