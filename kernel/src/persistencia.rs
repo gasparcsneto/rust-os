@@ -32,6 +32,18 @@
 //! se fica mais fraco do que o pedido — e a persistência passa a
 //! indisponível, o que bloqueia as próximas.
 //!
+//! # A auditoria
+//!
+//! Todo registro gravado leva, no fim, os registros da cadeia da auditoria
+//! que ainda não estão no disco, na ordem da cadeia — ver
+//! [`politica::auditoria`]. A decisão que autorizou uma operação de
+//! autoridade é registrada **antes** da gravação, e a gravação exige que
+//! ela vá junto ([`concluir`]): a operação e a auditoria dela entram no
+//! journal no mesmo registro, ou nenhuma das duas. O que não muda estado —
+//! uma leitura, uma recusa — vai no próximo registro de qualquer tipo, ou
+//! num registro só de auditoria que o coletor grava de tempos em tempos
+//! ([`gravar_auditoria_se_preciso`]).
+//!
 //! # O boot
 //!
 //! [`abrir`] roda depois de o registro da imagem, a política e as pessoas
@@ -45,6 +57,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
+
+use politica::auditoria::Cadeia;
 
 use diario::estado::{self, tipo};
 use diario::{Conteudo, Escritor, Meio, Relogio, Veredito};
@@ -109,6 +123,8 @@ struct Persistencia {
     geracao: u64,
     /// Quantos registros o journal tem.
     registros: u64,
+    /// Quantos deles são só de auditoria.
+    registros_de_auditoria: u64,
     /// Quantos boots o journal contou, este incluído.
     boots: u64,
     relogio: Relogio,
@@ -121,10 +137,18 @@ static PERSISTENCIA: Mutex<Persistencia> = Mutex::new(Persistencia {
     aberta: None,
     geracao: 0,
     registros: 0,
+    registros_de_auditoria: 0,
     boots: 0,
     relogio: Relogio::novo(0),
     instalacao: None,
 });
+
+/// A última sequência da auditoria que está no journal.
+static AUDITORIA_GRAVADA: AtomicU64 = AtomicU64::new(0);
+
+/// A cadeia que o journal refaz no boot, enquanto ele é lido. Ela só vira
+/// a auditoria com o journal confirmado pela âncora — ver [`abrir`].
+static REPOSTA: Mutex<Option<Cadeia>> = Mutex::new(None);
 
 /// Quem tem a ordem das gravações: o fio, como `id + 1`, ou zero.
 ///
@@ -195,6 +219,17 @@ pub fn relatorio() -> (Estado, u64, Option<u64>, u64, u64) {
             p.boots,
         )
     })
+}
+
+/// Quantos registros do journal são só de auditoria.
+pub fn registros_de_auditoria() -> u64 {
+    com(|p| p.registros_de_auditoria)
+}
+
+/// A última sequência da auditoria que está no journal: escrita,
+/// descarregada e ancorada. As posteriores, por enquanto, só em memória.
+pub fn auditoria_gravada() -> u64 {
+    AUDITORIA_GRAVADA.load(Ordering::Acquire)
 }
 
 /// O tempo lógico: o RTC com o piso do journal — nunca volta.
@@ -402,6 +437,10 @@ pub fn abrir() {
         Err(motivo) => Estado::Indisponivel(motivo),
     };
     com(|p| p.estado = estado);
+    // A auditoria do journal, se não foi adotada, fica de fora pela mesma
+    // razão das mensagens, logo abaixo: a cadeia continua só em memória,
+    // do começo — ver [`abrir_de_fato`].
+    let _ = crate::arch::sem_interrupcoes(|| REPOSTA.lock().take());
     // As mensagens do journal valem só com ele confirmado pela âncora. Um
     // journal recusado é um disco antigo, ou estragado: as mensagens dele
     // trariam de volta como pendente o que já foi confirmado ou anulado.
@@ -418,6 +457,9 @@ pub fn abrir() {
     // A reaplicação das revogações anula mensagens, e anota; o journal já
     // tem essas anulações.
     let _ = tirar_pendentes();
+    // O desfecho vai para a auditoria — um journal recusado, e por quê,
+    // fica registrado como qualquer decisão. Disponível, o registro vai ao
+    // journal na próxima gravação: o coletor não espera para isso.
     match estado {
         Estado::Disponivel => {
             let (_, g, a, r, b) = relatorio();
@@ -429,13 +471,30 @@ pub fn abrir() {
                 a.unwrap_or(0),
                 b
             );
+            crate::autorizacao::auditar_do_kernel(
+                "persistence.open",
+                "",
+                politica::Codigo::Allow,
+                &alloc::format!(
+                    "available; registros {r}; geracao {g}; ancora {}; boot {b}",
+                    a.unwrap_or(0)
+                ),
+            );
         }
-        outro => crate::log_error!(
-            "persistencia",
-            "{}: {} — as operacoes que mudam autoridade ficam bloqueadas",
-            outro.como_str(),
-            outro.motivo()
-        ),
+        outro => {
+            crate::log_error!(
+                "persistencia",
+                "{}: {} — as operacoes que mudam autoridade ficam bloqueadas",
+                outro.como_str(),
+                outro.motivo()
+            );
+            crate::autorizacao::auditar_do_kernel(
+                "persistence.open",
+                "",
+                politica::Codigo::Error,
+                &alloc::format!("{}; {}", outro.como_str(), outro.motivo()),
+            );
+        }
     }
 }
 
@@ -449,7 +508,48 @@ fn abrir_de_fato() -> Result<Estado, &'static str> {
     // vale mesmo que a persistência acabe indisponível ou recusada: o que
     // ele diz é mais recente que a imagem, e uma lápide lida é uma
     // credencial a menos. Ler não precisa de descarga nem de TPM.
-    let lido = diario::ler(&mut meio, &chave)?;
+    //
+    // Um registro de cada vez: o journal pode ocupar a partição inteira, e
+    // o heap do kernel é bem menor que ela. Do caminho fica só o que o
+    // boot precisa — a instalação, o último boot, quantos de auditoria.
+    crate::arch::sem_interrupcoes(|| {
+        *REPOSTA.lock() = Some(Cadeia::nova(crate::autorizacao::CAPACIDADE_DA_AUDITORIA));
+    });
+    let mut instalacao = None;
+    let mut boots = 0u64;
+    let mut de_auditoria = 0u64;
+    let lido = diario::percorrer(&mut meio, &chave, |r| {
+        reaplicar(&r)?;
+        match r.tipo {
+            tipo::ABERTURA if r.sequencia == 0 => {
+                instalacao =
+                    primeiro_campo(&r.conteudo).and_then(|id| <[u8; 16]>::try_from(id).ok());
+            }
+            tipo::BOOT => {
+                boots = primeiro_campo(&r.conteudo)
+                    .and_then(|b| b.try_into().ok().map(u64::from_le_bytes))
+                    .unwrap_or(0);
+            }
+            tipo::AUDITORIA => de_auditoria += 1,
+            _ => {}
+        }
+        Ok::<(), &'static str>(())
+    });
+    let lido = match lido {
+        Ok(l) => l,
+        Err(diario::Interrompido::Meio(m)) => return Err(m),
+        Err(diario::Interrompido::Recusado { sequencia, motivo }) => {
+            crate::log_error!(
+                "persistencia",
+                "o registro {} nao se reaplica: {}",
+                sequencia,
+                motivo
+            );
+            return Ok(Estado::Recusada(
+                "um registro autentico do journal nao se reaplica",
+            ));
+        }
+    };
     if let diario::Parada::Ilegivel { setor, motivo } = lido.parada {
         crate::log_warn!(
             "persistencia",
@@ -458,43 +558,19 @@ fn abrir_de_fato() -> Result<Estado, &'static str> {
             motivo
         );
     }
-    for r in &lido.registros {
-        if let Err(motivo) = reaplicar(r) {
-            crate::log_error!(
-                "persistencia",
-                "o registro {} nao se reaplica: {}",
-                r.sequencia,
-                motivo
-            );
-            return Ok(Estado::Recusada(
-                "um registro autentico do journal nao se reaplica",
-            ));
-        }
-    }
-    if let Some(abertura) = lido.registros.first()
-        && abertura.tipo == tipo::ABERTURA
-        && let Ok([id]) = estado::exatamente::<1>(&abertura.conteudo)
-        && let Ok(id) = <[u8; 16]>::try_from(id)
-    {
+    if let Some(id) = instalacao {
         com(|p| p.instalacao = Some(id));
     }
-    if let Some(ultimo) = lido.registros.last() {
+    if let Some(ultimo) = lido.ultimo {
         crate::autorizacao::fixar_versao_da_politica(ultimo.versao_da_politica);
         com(|p| {
             p.geracao = ultimo.geracao;
             p.relogio = Relogio::novo(ultimo.tempo);
         });
     }
-    let boots = lido
-        .registros
-        .iter()
-        .rev()
-        .find(|r| r.tipo == tipo::BOOT)
-        .and_then(|r| estado::exatamente::<1>(&r.conteudo).ok())
-        .and_then(|[b]| b.try_into().ok().map(u64::from_le_bytes))
-        .unwrap_or(0);
     com(|p| {
-        p.registros = lido.registros.len() as u64;
+        p.registros = lido.quantos;
+        p.registros_de_auditoria = de_auditoria;
         p.boots = boots;
     });
 
@@ -512,7 +588,7 @@ fn abrir_de_fato() -> Result<Estado, &'static str> {
     };
 
     let total = meio.setores();
-    let (ancora, valor) = match (lido.registros.is_empty(), ancora, valor) {
+    let (ancora, valor) = match (lido.quantos == 0, ancora, valor) {
         // Um journal vazio diante de uma âncora presente. Se o contador
         // nunca passou do valor com que nasceu, nenhum registro foi
         // confirmado contra ele: a criação foi interrompida — entre criar a
@@ -595,8 +671,15 @@ fn abrir_de_fato() -> Result<Estado, &'static str> {
             }
         },
     };
-    let escritor = Escritor::continuar(&lido, valor, total);
-    let novo = escritor.ancora() == valor && lido.registros.is_empty();
+    let escritor = Escritor::depois_de(&lido, valor, total);
+    let novo = escritor.ancora() == valor && lido.quantos == 0;
+    // O journal está confirmado pela âncora: a cadeia que ele refez vira a
+    // auditoria, e o que este boot registrou até aqui continua depois
+    // dela — e vai no registro de boot, logo abaixo.
+    if let Some(reposta) = crate::arch::sem_interrupcoes(|| REPOSTA.lock().take()) {
+        AUDITORIA_GRAVADA.store(reposta.ultima_seq(), Ordering::Release);
+        crate::autorizacao::adotar_auditoria(reposta);
+    }
     com(|p| {
         p.aberta = Some(Aberta {
             escritor,
@@ -620,11 +703,24 @@ fn abrir_de_fato() -> Result<Estado, &'static str> {
 /// descarregar, avançar o contador, confirmar. A geração que ele leva quem
 /// dá é o journal, pelo tipo: um registro de operação sobe um.
 ///
+/// O registro leva também a auditoria que falta gravar — ver
+/// [`gravar_sozinho`].
+///
 /// Uma falha em qualquer passo deixa a persistência indisponível: o que
 /// está no disco e o que o TPM diz podem ter ficado a um passo um do outro,
 /// e só o próximo boot, pelo julgamento, sabe resolver isso com segurança.
 fn gravar(tipo_do_registro: u16, dados: &[u8]) -> Result<(), &'static str> {
-    let resultado = em_ordem(|| gravar_sozinho(tipo_do_registro, dados));
+    gravar_com_a_decisao(tipo_do_registro, dados, 0)
+}
+
+/// [`gravar`], exigindo que o registro `decisao` da auditoria vá junto —
+/// ou antes, num registro só de auditoria. Zero não exige nada.
+fn gravar_com_a_decisao(
+    tipo_do_registro: u16,
+    dados: &[u8],
+    decisao: u64,
+) -> Result<(), &'static str> {
+    let resultado = em_ordem(|| gravar_sozinho(tipo_do_registro, dados, decisao));
     if let Err(motivo) = resultado {
         com(|p| p.estado = Estado::Indisponivel("uma gravacao no journal falhou"));
         crate::log_error!("persistencia", "a gravacao falhou: {}", motivo);
@@ -632,9 +728,203 @@ fn gravar(tipo_do_registro: u16, dados: &[u8]) -> Result<(), &'static str> {
     resultado
 }
 
-fn gravar_sozinho(tipo_do_registro: u16, dados: &[u8]) -> Result<(), &'static str> {
+/// A auditoria que falta gravar, como campos de conteúdo de registro que
+/// cabem em `orcamento` bytes.
+struct DaAuditoria {
+    campos: Vec<u8>,
+    /// A última sequência que os campos levam; a já gravada, sem nenhum.
+    ate: u64,
+    /// As sequências que saíram do anel antes de chegar ao journal.
+    perdidas: Option<(u64, u64)>,
+}
+
+/// Só os registros de sequência menor que `antes_de` entram — a lacuna, se
+/// houver, sempre.
+fn auditoria_que_cabe(orcamento: usize, antes_de: u64) -> Result<DaAuditoria, &'static str> {
+    use politica::auditoria::codificar;
+    let gravada = auditoria_gravada();
+    let campo = |campos: &mut Vec<u8>, e: Vec<u8>| -> Result<bool, &'static str> {
+        if campos.len() + 2 + e.len() > orcamento {
+            return Ok(false);
+        }
+        campos.extend_from_slice(&estado::campos(&[&e])?);
+        Ok(true)
+    };
+    crate::autorizacao::com_auditoria(|c| {
+        let falta = c.a_gravar(gravada);
+        let mut d = DaAuditoria {
+            campos: Vec::new(),
+            ate: gravada,
+            perdidas: None,
+        };
+        if let Some(l) = falta.lacuna {
+            let e = entrada(
+                tipo::AUDITORIA_LACUNA,
+                &[&l.primeira.to_le_bytes(), &l.ultima.to_le_bytes(), &l.elo],
+            )?;
+            if !campo(&mut d.campos, e)? {
+                return Ok(d);
+            }
+            d.ate = l.ultima;
+            d.perdidas = Some((l.primeira, l.ultima));
+        }
+        for r in falta.registros.into_iter().take_while(|r| r.seq < antes_de) {
+            let e = entrada(tipo::AUDITORIA_EVENTO, &[&codificar(r.seq, &r.evento)])?;
+            if !campo(&mut d.campos, e)? {
+                break;
+            }
+            d.ate = r.seq;
+        }
+        Ok(d)
+    })
+    .unwrap_or(Ok(DaAuditoria {
+        campos: Vec::new(),
+        ate: gravada,
+        perdidas: None,
+    }))
+}
+
+/// Quanto da auditoria um registro leva, no máximo, em bytes. Um registro
+/// cabe inteiro no heap algumas vezes — montado, cifrado, lido de volta —,
+/// e o heap do kernel é pequeno: um registro de 64 KiB por causa da
+/// auditoria seria pedir demais a ele. O resto vai no registro seguinte,
+/// ou em registros só de auditoria antes deste.
+pub const MAIOR_AUDITORIA_POR_REGISTRO: usize = 16 * 1024;
+
+/// Grava um registro com a auditoria que falta gravar.
+///
+/// Tudo o que a auditoria registrou antes de a gravação começar vai neste
+/// registro, ou antes dele: se não couber junto com o conteúdo, os mais
+/// antigos vão antes, em registros só de auditoria. Assim o journal tem a
+/// auditoria na ordem da cadeia, e a decisão de uma operação nunca fica
+/// para depois dela.
+///
+/// A `decisao`, se há uma, vai **neste** registro, e nunca num anterior:
+/// a mudança e a decisão entram juntas, ou nenhuma entra. A gravação falha
+/// se ela não cabe junto com o conteúdo, ou se saiu do anel antes de
+/// chegar aqui — mais de um anel inteiro de registros entre ela e a
+/// gravação.
+fn gravar_sozinho(tipo_do_registro: u16, dados: &[u8], decisao: u64) -> Result<(), &'static str> {
+    // Sem decisão, tudo o que veio antes da gravação; com ela, até ela — o
+    // que outro fio registrou depois dela pode ir no registro seguinte.
+    let exigir = if decisao == 0 {
+        crate::autorizacao::com_auditoria(|c| c.ultima_seq()).unwrap_or(0)
+    } else {
+        decisao
+    };
+    let perdida = |a: &DaAuditoria| {
+        a.perdidas
+            .is_some_and(|(primeira, ultima)| (primeira..=ultima).contains(&decisao))
+    };
+    loop {
+        let junto = diario::MAIOR_CONTEUDO
+            .saturating_sub(dados.len())
+            .min(MAIOR_AUDITORIA_POR_REGISTRO);
+        let a = auditoria_que_cabe(junto, u64::MAX)?;
+        if perdida(&a) {
+            return Err("a decisao da operacao saiu da auditoria antes de chegar ao journal");
+        }
+        if a.ate >= exigir {
+            // Só auditoria, e nada dela pendente: não há o que gravar.
+            if tipo_do_registro == tipo::AUDITORIA && dados.is_empty() && a.campos.is_empty() {
+                return Ok(());
+            }
+            let mut conteudo = Vec::with_capacity(dados.len() + a.campos.len());
+            conteudo.extend_from_slice(dados);
+            conteudo.extend_from_slice(&a.campos);
+            let gravado = gravar_um(tipo_do_registro, &conteudo);
+            // O conteúdo pode ter o corpo de uma mensagem.
+            politica::sigiloso::zerar_bloco(&mut conteudo);
+            gravado?;
+            AUDITORIA_GRAVADA.store(a.ate, Ordering::Release);
+            return Ok(());
+        }
+        // Não cabe junto: os mais antigos vão antes, num registro só deles,
+        // com o teto inteiro — e sem a decisão, que é deste registro.
+        let limite = if decisao == 0 { u64::MAX } else { decisao };
+        let antes = auditoria_que_cabe(MAIOR_AUDITORIA_POR_REGISTRO, limite)?;
+        if perdida(&antes) {
+            return Err("a decisao da operacao saiu da auditoria antes de chegar ao journal");
+        }
+        if antes.campos.is_empty() {
+            return Err("a decisao da operacao nao cabe no registro dela");
+        }
+        gravar_um(tipo::AUDITORIA, &antes.campos)?;
+        AUDITORIA_GRAVADA.store(antes.ate, Ordering::Release);
+    }
+}
+
+/// Grava o que a auditoria registrou e ainda não está no journal, num
+/// registro só dela. Sem a persistência disponível, nada: a auditoria
+/// continua só em memória.
+pub fn gravar_auditoria() -> Result<(), &'static str> {
+    em_ordem(|| {
+        if estado() != Estado::Disponivel {
+            return Ok(());
+        }
+        let ultima = crate::autorizacao::com_auditoria(|c| c.ultima_seq()).unwrap_or(0);
+        if ultima <= auditoria_gravada() {
+            return Ok(());
+        }
+        gravar(tipo::AUDITORIA, &[])
+    })
+}
+
+/// De quanto em quanto tempo o coletor grava a auditoria pendente, em ms
+/// desde o boot. É a janela do que uma queda de energia pode levar: as
+/// leituras e as recusas dos últimos segundos. Uma mudança de estado leva
+/// a sua auditoria no próprio registro, e não espera.
+pub const INTERVALO_DA_AUDITORIA_MS: u64 = 2_000;
+
+/// Com tantos registros esperando, o coletor grava sem esperar o
+/// intervalo: metade do anel, para nenhum sair dele antes do disco.
+const AUDITORIA_QUE_NAO_ESPERA: u64 = crate::autorizacao::CAPACIDADE_DA_AUDITORIA as u64 / 2;
+
+/// Só na suíte: o coletor deixa de gravar a auditoria sozinho. A suíte
+/// conta registros, e um registro de auditoria no meio de um caso mudaria
+/// a conta; os casos que o querem pedem [`gravar_auditoria`].
+#[cfg(feature = "modo-teste")]
+static AUDITORIA_PAUSADA: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(true);
+
+/// Só para a suíte: pausa ou solta a gravação periódica da auditoria.
+#[cfg(feature = "modo-teste")]
+pub fn pausar_a_auditoria_de_teste(pausada: bool) {
+    AUDITORIA_PAUSADA.store(pausada, Ordering::Release);
+}
+
+/// Chamada pelo coletor: grava a auditoria pendente a cada
+/// [`INTERVALO_DA_AUDITORIA_MS`], ou antes, se ela já ocupa meio anel.
+pub fn gravar_auditoria_se_preciso() {
+    static ULTIMA: AtomicU64 = AtomicU64::new(0);
+    #[cfg(feature = "modo-teste")]
+    if AUDITORIA_PAUSADA.load(Ordering::Acquire) {
+        return;
+    }
+    if estado() != Estado::Disponivel {
+        return;
+    }
+    let agora = crate::tempo::uptime_ms();
+    let pendentes = crate::autorizacao::com_auditoria(|c| c.ultima_seq())
+        .unwrap_or(0)
+        .saturating_sub(auditoria_gravada());
+    if pendentes == 0 {
+        return;
+    }
+    if pendentes < AUDITORIA_QUE_NAO_ESPERA
+        && agora.saturating_sub(ULTIMA.load(Ordering::Relaxed)) < INTERVALO_DA_AUDITORIA_MS
+    {
+        return;
+    }
+    ULTIMA.store(agora, Ordering::Relaxed);
+    let _ = gravar_auditoria();
+}
+
+/// O protocolo de um registro: montar, escrever, descarregar, avançar o
+/// contador, confirmar.
+fn gravar_um(tipo_do_registro: u16, dados: &[u8]) -> Result<(), &'static str> {
     #[cfg(feature = "quedas")]
-    crate::quedas::gravacao_comecou();
+    crate::quedas::gravacao_comecou(tipo_do_registro);
     let tempo = agora();
     let versao = crate::autorizacao::versao_da_politica();
     let n = nonce()?;
@@ -688,6 +978,9 @@ fn gravar_sozinho(tipo_do_registro: u16, dados: &[u8]) -> Result<(), &'static st
             .confirmar(&montado, avancado)?;
         p.geracao = montado.geracao;
         p.registros += 1;
+        if tipo_do_registro == tipo::AUDITORIA {
+            p.registros_de_auditoria += 1;
+        }
         Ok(())
     })
 }
@@ -764,18 +1057,23 @@ impl Foto {
 /// agente registrado sai, a política volta — e o que ela **tirou** fica:
 /// uma revogação que não ficou gravada continua valendo até o boot, e a
 /// persistência indisponível impede que qualquer outra coisa mude até lá.
+///
+/// `decisao` é o registro da auditoria que autorizou a operação — feito
+/// antes desta chamada —, e vai no mesmo registro do journal: uma mudança
+/// de autoridade nunca fica no disco sem a decisão que a autorizou.
 pub fn concluir(
     foto: &Foto,
     nome: &str,
     recurso: &str,
     desfazer: bool,
+    decisao: u64,
 ) -> Result<(), &'static str> {
     let mut entradas = diferenca(foto, nome, recurso)?;
     // O que a operação fez às mensagens — a revogação de um titular anula
     // as dele — vai no mesmo registro: uma operação, um registro.
     entradas.extend(tirar_pendentes());
     let conteudo = estado::campos(&entradas.iter().map(Vec::as_slice).collect::<Vec<_>>())?;
-    match gravar(tipo::OPERACAO, &conteudo) {
+    match gravar_com_a_decisao(tipo::OPERACAO, &conteudo, decisao) {
         Ok(()) => Ok(()),
         Err(motivo) => {
             if desfazer {
@@ -862,16 +1160,41 @@ fn diferenca(foto: &Foto, nome: &str, recurso: &str) -> Result<Vec<Vec<u8>>, &'s
 
 /// Reaplica um registro lido do journal, no boot.
 fn reaplicar(r: &diario::Registro) -> Result<(), &'static str> {
+    for e in entradas(r)? {
+        reaplicar_entrada(e)?;
+    }
+    Ok(())
+}
+
+/// As entradas de um registro. A abertura e o boot têm um campo próprio
+/// primeiro; os outros tipos são só entradas. Em todos, a auditoria que o
+/// registro levou vem no fim, como entradas.
+fn entradas(r: &diario::Registro) -> Result<Vec<&[u8]>, &'static str> {
+    let campos = estado::ler_campos(&r.conteudo)?;
     match r.tipo {
-        tipo::ABERTURA | tipo::BOOT => Ok(()),
-        tipo::OPERACAO | tipo::MENSAGENS => {
-            for e in estado::ler_campos(&r.conteudo)? {
-                reaplicar_entrada(e)?;
-            }
-            Ok(())
-        }
+        tipo::ABERTURA | tipo::BOOT => match campos.split_first() {
+            Some((_, resto)) => Ok(resto.to_vec()),
+            None => Err("registro sem o campo do tipo"),
+        },
+        tipo::OPERACAO | tipo::MENSAGENS | tipo::AUDITORIA => Ok(campos),
         _ => Err("tipo de registro desconhecido"),
     }
+}
+
+/// O primeiro campo de um registro de abertura ou de boot.
+fn primeiro_campo(conteudo: &[u8]) -> Option<&[u8]> {
+    estado::ler_campos(conteudo).ok()?.first().copied()
+}
+
+/// Repõe uma entrada da auditoria na cadeia que o journal refaz. Fora do
+/// boot não há cadeia sendo refeita, e a entrada só é conferida.
+fn repor_na_auditoria(
+    f: impl FnOnce(&mut Cadeia) -> Result<(), &'static str>,
+) -> Result<(), &'static str> {
+    crate::arch::sem_interrupcoes(|| match REPOSTA.lock().as_mut() {
+        Some(c) => f(c),
+        None => Ok(()),
+    })
 }
 
 fn texto(b: &[u8]) -> Result<&str, &'static str> {
@@ -961,6 +1284,24 @@ pub(crate) fn reaplicar_entrada(e: &[u8]) -> Result<(), &'static str> {
             .ok_or("estado de mensagem invalido")?;
             crate::mensagens::aplicar(u64_de(id)?, estado, u64_de(versao)?)
         }
+        (tipo::AUDITORIA_EVENTO, [r]) => {
+            let (seq, evento) = politica::auditoria::decodificar(r)?;
+            repor_na_auditoria(|c| c.repor(seq, evento))
+        }
+        (tipo::AUDITORIA_LACUNA, [primeira, ultima, elo]) => {
+            let l = politica::auditoria::Lacuna {
+                primeira: u64_de(primeira)?,
+                ultima: u64_de(ultima)?,
+                elo: chave(elo)?,
+            };
+            crate::log_warn!(
+                "persistencia",
+                "a auditoria perdeu os registros {} a {} antes de grava-los",
+                l.primeira,
+                l.ultima
+            );
+            repor_na_auditoria(|c| c.pular(l))
+        }
         _ => Err("entrada de registro desconhecida, ou com campos errados"),
     }
 }
@@ -1034,13 +1375,81 @@ pub fn bytes_do_journal_de_teste(setores: u64) -> Result<Vec<u8>, &'static str> 
     Ok(v)
 }
 
-/// Só para a suíte: os registros do journal como estão no disco agora.
+/// Só para a suíte: a cadeia da auditoria refeita a partir dos registros
+/// do journal no disco agora, como o boot a refaria.
+#[cfg(feature = "modo-teste")]
+pub fn auditoria_do_journal_de_teste() -> Result<Cadeia, &'static str> {
+    let (chave, _) = segredos().ok_or("sem a chave do Duke")?;
+    let mut meio = janela()?;
+    let mut c = Cadeia::nova(crate::autorizacao::CAPACIDADE_DA_AUDITORIA);
+    diario::percorrer(&mut meio, &chave, |r| repor_de_teste(&mut c, &r)).map_err(|e| match e {
+        diario::Interrompido::Meio(m) | diario::Interrompido::Recusado { motivo: m, .. } => m,
+    })?;
+    Ok(c)
+}
+
+#[cfg(feature = "modo-teste")]
+fn repor_de_teste(c: &mut Cadeia, r: &diario::Registro) -> Result<(), &'static str> {
+    for e in entradas(r)? {
+        let campos = estado::ler_campos(e)?;
+        match campos.as_slice() {
+            [t, ev] if *t == tipo::AUDITORIA_EVENTO.to_le_bytes() => {
+                let (seq, evento) = politica::auditoria::decodificar(ev)?;
+                c.repor(seq, evento)?;
+            }
+            [t, primeira, ultima, elo] if *t == tipo::AUDITORIA_LACUNA.to_le_bytes() => {
+                c.pular(politica::auditoria::Lacuna {
+                    primeira: u64_de(primeira)?,
+                    ultima: u64_de(ultima)?,
+                    elo: chave(elo)?,
+                })?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Só para a suíte: grava um registro de `tipo` com `dados`, exigindo a
+/// `decisao` nele, pelo caminho de toda gravação.
+#[cfg(feature = "modo-teste")]
+pub fn gravar_de_teste(tipo: u16, dados: &[u8], decisao: u64) -> Result<(), &'static str> {
+    gravar_com_a_decisao(tipo, dados, decisao)
+}
+
+/// Só para a suíte: as entradas de um registro, como o boot as lê.
+#[cfg(feature = "modo-teste")]
+pub fn entradas_de_teste(r: &diario::Registro) -> Result<Vec<&[u8]>, &'static str> {
+    entradas(r)
+}
+
+/// Só para a suíte: os registros do journal como estão no disco agora —
+/// todos, mas o conteúdo só dos últimos [`CONTEUDOS_DE_TESTE`]: o journal
+/// da suíte passa do heap do kernel.
 #[cfg(feature = "modo-teste")]
 pub fn ler_de_teste() -> Result<Vec<diario::Registro>, &'static str> {
     let (chave, _) = segredos().ok_or("sem a chave do Duke")?;
     let mut meio = janela()?;
-    Ok(diario::ler(&mut meio, &chave)?.registros)
+    let mut v: Vec<diario::Registro> = Vec::new();
+    diario::percorrer(&mut meio, &chave, |r| {
+        if let Some(velho) = v
+            .len()
+            .checked_sub(CONTEUDOS_DE_TESTE)
+            .and_then(|i| v.get_mut(i))
+        {
+            politica::sigiloso::zerar_bloco(&mut velho.conteudo);
+            velho.conteudo = Vec::new();
+        }
+        v.push(r);
+        Ok::<(), ()>(())
+    })
+    .map_err(|_| "o journal nao se le")?;
+    Ok(v)
 }
+
+/// Quantos registros, do fim, [`ler_de_teste`] devolve com o conteúdo.
+#[cfg(feature = "modo-teste")]
+pub const CONTEUDOS_DE_TESTE: usize = 12;
 
 /// Destrava as trancas da persistência à força, para uso exclusivo do
 /// caminho de falha fatal.
@@ -1053,6 +1462,7 @@ pub unsafe fn destravar() {
     unsafe {
         PERSISTENCIA.force_unlock();
         PENDENTES.force_unlock();
+        REPOSTA.force_unlock();
     }
     DONO_DA_ORDEM.store(0, Ordering::Release);
 }

@@ -204,6 +204,10 @@ const CENARIOS: &[Cenario] = &[
         rodar: o_journal_recusado_ainda_tira,
     },
     Cenario {
+        nome: "a auditoria sobrevive ao corte: o que estava gravado volta igual, e a cadeia continua",
+        rodar: a_auditoria_sobrevive,
+    },
+    Cenario {
         nome: "as mensagens sobrevivem ao corte, nos mesmos ids, estados e versoes, e a epoca continua",
         rodar: as_mensagens_sobrevivem,
     },
@@ -242,6 +246,10 @@ const CENARIOS_DE_QUEDA: &[Cenario] = &[
     Cenario {
         nome: "a queda em cada fronteira de uma mensagem: ela existe se o registro esta no disco",
         rodar: as_quedas_numa_mensagem,
+    },
+    Cenario {
+        nome: "a queda em cada fronteira de um registro so de auditoria: ele vale se esta no disco, e a cadeia continua",
+        rodar: as_quedas_na_auditoria,
     },
     Cenario {
         nome: "a queda na criacao da ancora e retomada, e nunca recusada para sempre",
@@ -445,7 +453,12 @@ struct Persistencia {
     estado: String,
     motivo: String,
     geracao: u64,
+    /// Os registros do journal que não são só de auditoria: os de estado,
+    /// de boot e de abertura. Os de auditoria o coletor grava quando quer,
+    /// e a conta deles não é a de um cenário.
     registros: u64,
+    /// A última sequência da auditoria no journal.
+    auditoria_gravada: u64,
     boots: u64,
     relogio: u64,
     descargas: u64,
@@ -468,11 +481,89 @@ fn persistencia_de(maquina: &mut Ligada) -> Result<Persistencia, String> {
         estado: texto("state"),
         motivo: texto("reason"),
         geracao: numero("generation")?,
-        registros: numero("records")?,
+        registros: numero("records")? - numero("audit_records")?,
+        auditoria_gravada: numero("audit_durable_seq")?,
         boots: numero("boots")?,
         relogio: numero("clock")?,
         descargas: numero("disk_flushes")?,
     })
+}
+
+/// Um registro da auditoria como o `audit.tail` o mostra — o que a
+/// bancada confere dele.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Rastro {
+    seq: u64,
+    elo: String,
+    titular: String,
+    metodo: String,
+    recurso: String,
+    codigo: String,
+    duravel: bool,
+}
+
+/// A cauda da auditoria: os últimos 128 registros, pela serial.
+fn cauda_da_auditoria(maquina: &mut Ligada) -> Result<Vec<Rastro>, String> {
+    let r = maquina.pedir("audit.tail", r#"{"count":128}"#)?;
+    let mut v = Vec::new();
+    for pedaco in r.split(r#"{"seq":"#).skip(1) {
+        let pedaco = format!(r#"{{"seq":{pedaco}"#);
+        let campo = |n: &str| super::campo_simples(&pedaco, n).unwrap_or_default();
+        v.push(Rastro {
+            seq: campo("seq")
+                .parse()
+                .map_err(|_| format!("um registro da auditoria sem numero\n  {pedaco}"))?,
+            elo: campo("link"),
+            titular: campo("holder"),
+            metodo: campo("method"),
+            recurso: campo("resource"),
+            codigo: campo("code"),
+            duravel: campo("durable") == "true",
+        });
+    }
+    if v.is_empty() {
+        return Err(format!("o audit.tail nao trouxe registros\n  {r}"));
+    }
+    Ok(v)
+}
+
+/// A cadeia da auditoria se verifica, do começo da janela à cabeça.
+fn auditoria_verifica(maquina: &mut Ligada) -> Result<(), String> {
+    let r = maquina.pedir("audit.verify", "{}")?;
+    if r.contains(r#""ok":true"#) {
+        Ok(())
+    } else {
+        Err(format!("a cadeia da auditoria nao se verifica\n  {r}"))
+    }
+}
+
+/// A sequência do `policy.load` deste boot: o primeiro registro que um boot
+/// faz. Os anteriores a ela vieram do journal.
+fn comeco_do_boot(cauda: &[Rastro]) -> Result<u64, String> {
+    cauda
+        .iter()
+        .filter(|r| r.metodo == "policy.load" && r.titular == "kernel")
+        .map(|r| r.seq)
+        .max()
+        .ok_or_else(|| "a cauda da auditoria nao tem o policy.load deste boot".into())
+}
+
+/// Espera a auditoria inteira estar no journal — o coletor a grava de
+/// tempos em tempos —, e devolve a cauda.
+fn esperar_a_auditoria_gravada(maquina: &mut Ligada) -> Result<Vec<Rastro>, String> {
+    let limite = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let cauda = cauda_da_auditoria(maquina)?;
+        // O próprio `audit.tail` é registrado antes de responder, e ainda
+        // não está gravado: o que se espera é o que veio antes dele.
+        if cauda.iter().rev().skip(1).all(|r| r.duravel) {
+            return Ok(cauda);
+        }
+        if std::time::Instant::now() >= limite {
+            return Err("a auditoria nao foi ao journal em 20 s".into());
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
 }
 
 /// Uma operação administrativa provada pela credencial `privada`, pela
@@ -882,6 +973,14 @@ fn sem_tpm_nada_de_autoridade(arch: Arquitetura, artefato: &Artefato) -> Result<
             p.estado, p.motivo
         ));
     }
+    // A auditoria, só em memória: nada dela se diz gravado.
+    if p.auditoria_gravada != 0 {
+        m.cortar_a_energia()?;
+        return Err(format!(
+            "sem TPM, a auditoria se diz gravada ate {}",
+            p.auditoria_gravada
+        ));
+    }
     let r = administrar(
         &mut m,
         &chaves.administrador,
@@ -1060,7 +1159,23 @@ fn o_journal_recusado_ainda_tira(arch: Arquitetura, artefato: &Artefato) -> Resu
         super::AgenteNaPorta::conectar(arch, 1).and_then(|mut a| a.pedir("agent.ping", "{}"));
     let serial = m.pedir("agent.ping", "{}")?;
     let caixa = m.pedir("message.read", "{}")?;
+    let cauda = cauda_da_auditoria(&mut m);
     m.cortar_a_energia()?;
+    // A auditoria do journal recusado também não é adotada: a cadeia
+    // recomeça, só em memória, e diz por quê.
+    let cauda = cauda?;
+    if cauda.first().map(|r| r.seq) != Some(1)
+        || cauda
+            .iter()
+            .any(|r| r.duravel || r.metodo == "agent.revoke")
+        || !cauda
+            .iter()
+            .any(|r| r.metodo == "persistence.open" && r.codigo == "ERROR")
+    {
+        return Err(format!(
+            "com o journal recusado, a auditoria dele foi adotada, ou a recusa nao foi auditada\n  {cauda:?}"
+        ));
+    }
     if caixa.contains("antes da recusa") {
         return Err(format!(
             "com o journal recusado, a mensagem dele reapareceu\n  {caixa}"
@@ -1111,6 +1226,71 @@ fn estado_de(arch: Arquitetura, porta: u8, id: &str) -> Result<String, String> {
 fn estado_por(agente: &mut super::AgenteNaPorta, id: &str) -> Result<String, String> {
     let r = agente.pedir("message.status", &format!(r#"{{"id":"{id}"}}"#))?;
     super::campo_simples(&r, "state").ok_or_else(|| format!("sem estado\n  {r}"))
+}
+
+/// A auditoria gravada sobrevive a um corte de energia: cada registro que
+/// o `audit.tail` dizia `durable` volta igual — o mesmo número, o mesmo
+/// elo —, a decisão da operação de autoridade está lá, e a cadeia do boot
+/// seguinte continua dela e se verifica.
+fn a_auditoria_sobrevive(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    let chaves = super::chaves::Chaves::garantir()?;
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let r = administrar(
+        &mut m,
+        &chaves.administrador,
+        "agent.register",
+        &registro_de_agente(&[0x5A; 32], "auditado", "observador"),
+    )?;
+    if !executou(&r) {
+        m.cortar_a_energia()?;
+        return Err(format!("o registro do agente nao foi executado\n  {r}"));
+    }
+    // Uma recusa, que não muda estado: vai pelo coletor.
+    let _ = m.pedir("nao.existe", "{}")?;
+    let antes = esperar_a_auditoria_gravada(&mut m);
+    m.cortar_a_energia()?;
+    let antes: Vec<Rastro> = antes?.into_iter().filter(|r| r.duravel).collect();
+    let decisao = |c: &[Rastro]| {
+        c.iter()
+            .any(|r| r.metodo == "agent.register" && r.codigo == "ALLOW" && r.recurso == "auditado")
+    };
+    if !decisao(&antes) || !antes.iter().any(|r| r.metodo == "nao.existe") {
+        return Err("a decisao ou a recusa nao estavam na auditoria gravada".into());
+    }
+
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let depois = cauda_da_auditoria(&mut m);
+    let verifica = auditoria_verifica(&mut m);
+    m.cortar_a_energia()?;
+    let depois = depois?;
+    verifica?;
+    // Os de antes que a cauda de agora ainda alcança: os mais novos.
+    let alcance = depois.first().map_or(u64::MAX, |r| r.seq);
+    let mut conferidos = 0;
+    for r in antes.iter().filter(|r| r.seq >= alcance) {
+        match depois.iter().find(|d| d.seq == r.seq) {
+            Some(d) if d.elo == r.elo && d.metodo == r.metodo && d.duravel => conferidos += 1,
+            outro => {
+                return Err(format!(
+                    "o registro {} da auditoria gravada nao voltou igual: {r:?} / {outro:?}",
+                    r.seq
+                ));
+            }
+        }
+    }
+    if conferidos == 0 || !decisao(&depois) {
+        return Err("a auditoria gravada nao voltou no boot seguinte".into());
+    }
+    let comeco = comeco_do_boot(&depois)?;
+    let ultimo_de_antes = antes.iter().map(|r| r.seq).max().unwrap_or(0);
+    if comeco <= ultimo_de_antes {
+        return Err(format!(
+            "o boot seguinte recomecou a cadeia em {comeco}, antes de {ultimo_de_antes}"
+        ));
+    }
+    Ok(format!(
+        "{conferidos} registros gravados voltaram iguais, com a decisao; a cadeia continua em {comeco} e se verifica"
+    ))
 }
 
 /// As mensagens respondidas com `durable: true` sobrevivem a um corte de
@@ -1270,11 +1450,23 @@ fn escrever_setor_do_estado(disco: &Path, setor: u64, bytes: &[u8; 512]) -> Resu
 }
 
 /// O plano da queda: no último setor da partição, como o kernel o lê.
-fn plano_de_queda(disco: &Path, ponto: u8, gravacao: u32) -> Result<(), String> {
+/// Os tipos de registro do journal, para o plano de queda: a n-ésima
+/// gravação de um tipo. Ver `diario::estado::tipo`.
+mod tipo {
+    pub const ABERTURA: u16 = 1;
+    pub const OPERACAO: u16 = 3;
+    pub const MENSAGENS: u16 = 4;
+    pub const AUDITORIA: u16 = 5;
+}
+
+/// O plano: a energia cai no `ponto` da `gravacao`-ésima gravação de um
+/// registro do tipo `tipo` desde o boot.
+fn plano_de_queda(disco: &Path, ponto: u8, tipo: u16, gravacao: u32) -> Result<(), String> {
     let mut setor = [0u8; 512];
     setor[..8].copy_from_slice(b"DUKEQUED");
     setor[8] = ponto;
     setor[12..16].copy_from_slice(&gravacao.to_le_bytes());
+    setor[16..18].copy_from_slice(&tipo.to_le_bytes());
     escrever_setor_do_estado(disco, disco::ESTADO_SETORES - 1, &setor)
 }
 
@@ -1494,8 +1686,8 @@ fn as_quedas_numa_operacao(arch: Arquitetura, artefato: &Artefato) -> Result<Str
     let disco = disco_de_testes()?;
     for (i, (ponto, perder, vale, caso)) in QUEDAS_NA_GRAVACAO.into_iter().enumerate() {
         zerar_o_estado(arch)?;
-        // A abertura e o boot são as gravações 1 e 2; a operação, a 3.
-        plano_de_queda(&disco, ponto, 3)?;
+        // A primeira operação do boot.
+        plano_de_queda(&disco, ponto, tipo::OPERACAO, 1)?;
         let privada = [0x70 + i as u8; 32];
         let nome = format!("fronteira-{i}");
         let m = Ligada::subir(arch, artefato, None)?;
@@ -1522,6 +1714,20 @@ fn as_quedas_numa_operacao(arch: Arquitetura, artefato: &Artefato) -> Result<Str
             return Err(format!(
                 "{caso}: o agente {} depois da queda",
                 if vale { "nao entrou" } else { "entrou" }
+            ));
+        }
+        // A decisão que autorizou a operação está na auditoria exatamente
+        // quando a operação está no journal: as duas vão no mesmo registro.
+        let cauda = cauda_da_auditoria(&mut m)?;
+        let decidida = cauda.iter().any(|r| {
+            r.metodo == "agent.register" && r.codigo == "ALLOW" && r.recurso == nome && r.duravel
+        });
+        if decidida != vale {
+            m.cortar_a_energia()?;
+            return Err(format!(
+                "{caso}: a decisao da operacao {} na auditoria, e a operacao {}",
+                if decidida { "esta" } else { "nao esta" },
+                if vale { "vale" } else { "nao vale" }
             ));
         }
         let r = administrar(
@@ -1557,7 +1763,7 @@ fn as_quedas_numa_mensagem(arch: Arquitetura, artefato: &Artefato) -> Result<Str
     let para = super::chaves::nome_do_agente(3);
     for (i, (ponto, perder, vale, caso)) in QUEDAS_NA_GRAVACAO.into_iter().enumerate() {
         zerar_o_estado(arch)?;
-        plano_de_queda(&disco, ponto, 3)?;
+        plano_de_queda(&disco, ponto, tipo::MENSAGENS, 1)?;
         let m = Ligada::subir(arch, artefato, None)?;
         let corpo = format!("fronteira {i}");
         let pedido = format!(r#"{{"to":"{para}","body":"{corpo}","nonce":1}}"#);
@@ -1598,6 +1804,81 @@ fn as_quedas_numa_mensagem(arch: Arquitetura, artefato: &Artefato) -> Result<Str
     ))
 }
 
+/// A queda em cada fronteira de um registro só de auditoria: o primeiro
+/// que o coletor grava depois do boot, que leva o `persistence.open` do
+/// boot. O boot seguinte sobe com a persistência de pé; o registro vale
+/// exatamente quando está no disco — o `persistence.open` do boot que
+/// caiu está na cadeia, ou não está —; a cadeia continua do que foi
+/// gravado e se verifica; e a próxima operação grava a decisão dela.
+fn as_quedas_na_auditoria(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    let chaves = super::chaves::Chaves::garantir()?;
+    let disco = disco_de_testes()?;
+    for (i, (ponto, perder, vale, caso)) in QUEDAS_NA_GRAVACAO.into_iter().enumerate() {
+        zerar_o_estado(arch)?;
+        plano_de_queda(&disco, ponto, tipo::AUDITORIA, 1)?;
+        // Ninguém pede nada: o `persistence.open` está pendente desde o
+        // boot, e o coletor o grava sozinho.
+        let caiu = subir_ate_cair(arch, artefato)?;
+        if caiu != ponto {
+            return Err(format!("{caso}: caiu no ponto {caiu}, e nao no {ponto}"));
+        }
+        sem_plano(&disco)?;
+        if perder {
+            perder_o_ultimo_registro(&disco)?;
+        }
+
+        let mut m = Ligada::subir(arch, artefato, None)?;
+        let p = persistencia_de(&mut m)?;
+        // Abertura, o boot que caiu e o de agora; a auditoria não sobe a
+        // geração.
+        conferir_depois_da_queda(&p, caso, 3, 0)?;
+        let cauda = cauda_da_auditoria(&mut m)?;
+        let comeco = comeco_do_boot(&cauda)?;
+        let abertos = cauda
+            .iter()
+            .filter(|r| r.metodo == "persistence.open" && r.seq < comeco)
+            .count();
+        if (abertos == 1) != vale || abertos > 1 {
+            m.cortar_a_energia()?;
+            return Err(format!(
+                "{caso}: o boot que caiu tem {abertos} persistence.open na cadeia, e o registro {}",
+                if vale { "vale" } else { "nao vale" }
+            ));
+        }
+        auditoria_verifica(&mut m)?;
+        let nome = format!("auditoria-{i}");
+        let r = administrar(
+            &mut m,
+            &chaves.administrador,
+            "agent.register",
+            &registro_de_agente(&[0xC0 + i as u8; 32], &nome, "observador"),
+        )?;
+        m.cortar_a_energia()?;
+        if !executou(&r) {
+            return Err(format!(
+                "{caso}: a operacao seguinte nao foi executada\n  {r}"
+            ));
+        }
+        let mut m = Ligada::subir(arch, artefato, None)?;
+        let cauda = cauda_da_auditoria(&mut m);
+        let verifica = auditoria_verifica(&mut m);
+        m.cortar_a_energia()?;
+        verifica?;
+        if !cauda?
+            .iter()
+            .any(|r| r.metodo == "agent.register" && r.recurso == nome && r.duravel)
+        {
+            return Err(format!(
+                "{caso}: a decisao da operacao seguinte nao voltou do journal"
+            ));
+        }
+    }
+    Ok(format!(
+        "{} quedas: o registro de auditoria vale exatamente quando esta no disco, e a cadeia continua",
+        QUEDAS_NA_GRAVACAO.len()
+    ))
+}
+
 /// A queda na criação da âncora, no primeiro boot de todos: com o contador
 /// definido e nunca avançado, avançado e sem nascimento, com o nascimento e
 /// sem a abertura, e dentro da gravação da abertura. Nenhuma deixa o
@@ -1628,7 +1909,7 @@ fn as_quedas_na_criacao(arch: Arquitetura, artefato: &Artefato) -> Result<String
     ];
     for (ponto, caso) in casos {
         zerar_o_estado(arch)?;
-        plano_de_queda(&disco, ponto, 1)?;
+        plano_de_queda(&disco, ponto, tipo::ABERTURA, 1)?;
         let caiu = subir_ate_cair(arch, artefato)?;
         if caiu != ponto {
             return Err(format!("{caso}: caiu no ponto {caiu}, e nao no {ponto}"));
@@ -1678,10 +1959,10 @@ fn a_fotografia_da_fronteira_e_recusada(
     for na_criacao in [false, true] {
         zerar_o_estado(arch)?;
         if na_criacao {
-            plano_de_queda(&disco, ponto::NASCIMENTO_GUARDADO, 1)?;
+            plano_de_queda(&disco, ponto::NASCIMENTO_GUARDADO, tipo::ABERTURA, 1)?;
             subir_ate_cair(arch, artefato)?;
         } else {
-            plano_de_queda(&disco, ponto::DEPOIS_DA_DESCARGA, 3)?;
+            plano_de_queda(&disco, ponto::DEPOIS_DA_DESCARGA, tipo::OPERACAO, 1)?;
             let m = Ligada::subir(arch, artefato, None)?;
             administrar_ate_cair(
                 m,

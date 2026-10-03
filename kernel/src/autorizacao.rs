@@ -356,7 +356,13 @@ fn cortado(texto: &str, teto: usize) -> &str {
     &texto[..fim]
 }
 
-/// Grava uma decisão na cadeia.
+/// Grava uma decisão na cadeia, e devolve o número dela — zero antes de a
+/// cadeia existir.
+///
+/// O tempo é o lógico da persistência: o RTC com o piso do journal, que
+/// atravessa boots sem voltar. A cadeia vai ao journal — ver
+/// [`crate::persistencia`] —, e um registro com o tempo desde o boot diria
+/// pouco no boot seguinte.
 fn auditar(
     quem: &Quem,
     metodo: &str,
@@ -364,11 +370,11 @@ fn auditar(
     codigo: Codigo,
     parametros: &[u8],
     detalhe: &str,
-) {
+) -> u64 {
     let recurso = cortado(recurso, MAIOR_RECURSO);
     let metodo = cortado(metodo, MAIOR_RECURSO);
     let evento = Evento {
-        ts_ms: crate::tempo::uptime_ms(),
+        ts_ms: crate::persistencia::agora_ms(),
         titular: quem.titular,
         sessao: quem.sessao,
         sessao_de_pessoa: quem.sessao_de_pessoa,
@@ -381,16 +387,40 @@ fn auditar(
         parametros: resumo_dos_parametros(parametros),
         detalhe: detalhe.to_string(),
     };
-    crate::arch::sem_interrupcoes(|| {
-        if let Some(c) = AUDITORIA.lock().as_mut() {
-            c.anexar(evento);
-        }
-    });
+    crate::arch::sem_interrupcoes(|| AUDITORIA.lock().as_mut().map_or(0, |c| c.anexar(evento)))
 }
 
 /// Roda `f` com a cadeia da auditoria.
 pub fn com_auditoria<R>(f: impl FnOnce(&Cadeia) -> R) -> Option<R> {
     crate::arch::sem_interrupcoes(|| AUDITORIA.lock().as_ref().map(f))
+}
+
+/// Grava um feito do próprio kernel — o desfecho da abertura da
+/// persistência, no boot —, em nome dele.
+pub fn auditar_do_kernel(metodo: &str, recurso: &str, codigo: Codigo, detalhe: &str) -> u64 {
+    let quem = Quem {
+        titular: Titular::Kernel,
+        sessao: SESSAO_DA_PESSOA,
+        sessao_de_pessoa: None,
+        agente: "kernel".to_string(),
+        chave: None,
+        papel: None,
+    };
+    auditar(&quem, metodo, recurso, codigo, &[], detalhe)
+}
+
+/// Adota a cadeia que o journal refez, no boot: ela passa a ser a
+/// auditoria, e o que o boot registrou antes de ler o journal continua
+/// depois dela, com as sequências e os elos de lá. Ver
+/// [`politica::auditoria::Cadeia::continuar_com`].
+pub fn adotar_auditoria(mut do_journal: Cadeia) {
+    crate::arch::sem_interrupcoes(|| {
+        let mut a = AUDITORIA.lock();
+        if let Some(boot) = a.as_ref() {
+            do_journal.continuar_com(boot);
+        }
+        *a = Some(do_journal);
+    });
 }
 
 /// Quem está na sessão `sessao`. `Err` com o que se sabe, se a sessão não é
@@ -1169,7 +1199,7 @@ pub fn auditar_administracao(
     codigo: Codigo,
     parametros: &[u8],
     detalhe: &str,
-) {
+) -> u64 {
     // Sem administrador conhecido — a prova não conferiu —, ninguém ainda.
     let titular = if administrador.is_some() {
         Titular::Administrador
@@ -1184,7 +1214,7 @@ pub fn auditar_administracao(
         chave: administrador.map(|a| *a.1),
         papel: papel.map(ToString::to_string),
     };
-    auditar(&quem, metodo, recurso, codigo, parametros, detalhe);
+    auditar(&quem, metodo, recurso, codigo, parametros, detalhe)
 }
 
 /// Grava um desfecho de operação de quórum, em nome das credenciais que
@@ -1201,7 +1231,7 @@ pub fn auditar_quorum(
     codigo: Codigo,
     parametros: &[u8],
     detalhe: &str,
-) {
+) -> u64 {
     let titular = if assinantes.is_empty() {
         Titular::Anonimo
     } else {
@@ -1215,7 +1245,7 @@ pub fn auditar_quorum(
         chave: None,
         papel: papel.map(ToString::to_string),
     };
-    auditar(&quem, metodo, recurso, codigo, parametros, detalhe);
+    auditar(&quem, metodo, recurso, codigo, parametros, detalhe)
 }
 
 /// Grava um desfecho de sessão de pessoa: o login, a saída, uma tentativa

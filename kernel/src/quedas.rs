@@ -25,9 +25,15 @@
 //!   9  reservado
 //!  12  gravação u32 LE   a n-ésima gravação desde o boot (1 é a primeira),
 //!                        para os pontos de dentro de uma gravação
+//!  16  tipo u16 LE       se não zero, só contam as gravações de registros
+//!                        desse tipo
 //! ```
+//!
+//! O tipo existe por causa da auditoria: o coletor grava registros só de
+//! auditoria quando quer, e a n-ésima gravação de qualquer tipo deixaria
+//! de ser a mesma de uma corrida para outra. A n-ésima operação continua.
 
-use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, Ordering};
 
 /// A magia do setor do plano.
 const MAGIA: [u8; 8] = *b"DUKEQUED";
@@ -55,6 +61,7 @@ pub enum Ponto {
 
 static PONTO: AtomicU8 = AtomicU8::new(0);
 static GRAVACAO: AtomicU32 = AtomicU32::new(0);
+static TIPO: AtomicU16 = AtomicU16::new(0);
 static GRAVACOES: AtomicU32 = AtomicU32::new(0);
 
 /// Lê o plano do último setor da partição de estado, se houver um.
@@ -68,20 +75,34 @@ pub fn carregar<M: diario::Meio>(meio: &mut M) {
         return;
     }
     let gravacao = u32::from_le_bytes([setor[12], setor[13], setor[14], setor[15]]);
+    let tipo = u16::from_le_bytes([setor[16], setor[17]]);
     PONTO.store(setor[8], Ordering::Relaxed);
     GRAVACAO.store(gravacao, Ordering::Relaxed);
+    TIPO.store(tipo, Ordering::Relaxed);
     crate::log_warn!(
         "quedas",
-        "plano da bancada: a energia cai no ponto {} da gravacao {}",
+        "plano da bancada: a energia cai no ponto {} da gravacao {} (tipo {})",
         setor[8],
-        gravacao
+        gravacao,
+        tipo
     );
 }
 
-/// Uma gravação começou: conta, para os pontos de dentro dela.
-pub fn gravacao_comecou() {
-    GRAVACOES.fetch_add(1, Ordering::Relaxed);
+/// Uma gravação de um registro do `tipo` começou: conta, para os pontos
+/// de dentro dela. Com um tipo no plano, só as desse tipo contam; as
+/// outras não caem.
+pub fn gravacao_comecou(tipo: u16) {
+    let do_plano = TIPO.load(Ordering::Relaxed);
+    if do_plano == 0 || do_plano == tipo {
+        GRAVACOES.fetch_add(1, Ordering::Relaxed);
+        DA_CONTA.store(true, Ordering::Relaxed);
+    } else {
+        DA_CONTA.store(false, Ordering::Relaxed);
+    }
 }
+
+/// Se a gravação em curso é uma das que o plano conta.
+static DA_CONTA: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Se o plano manda a energia cair aqui, ela cai: o aviso sai pelo canal
 /// do agente, e a máquina congela com as interrupções desligadas. Nada
@@ -91,7 +112,10 @@ pub fn aqui(p: Ponto) {
         return;
     }
     let de_gravacao = p as u8 >= Ponto::AntesDaEscrita as u8;
-    if de_gravacao && GRAVACOES.load(Ordering::Relaxed) != GRAVACAO.load(Ordering::Relaxed) {
+    if de_gravacao
+        && (!DA_CONTA.load(Ordering::Relaxed)
+            || GRAVACOES.load(Ordering::Relaxed) != GRAVACAO.load(Ordering::Relaxed))
+    {
         return;
     }
     crate::arch::sem_interrupcoes(|| {

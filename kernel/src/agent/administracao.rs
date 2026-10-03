@@ -423,7 +423,7 @@ fn conferir_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) -> Result
         parametros,
     };
     // A partir daqui a auditoria grava o administrador pelo nome.
-    let gravar = |codigo: Codigo, recurso: &str, motivo: &str| {
+    let gravar = |codigo: Codigo, recurso: &str, motivo: &str| -> u64 {
         autorizacao::auditar_administracao(
             sessao,
             Some((&nome, &administrador)),
@@ -433,7 +433,7 @@ fn conferir_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) -> Result
             codigo,
             bytes,
             motivo,
-        );
+        )
     };
     if !conferir(&desafio.efemera, &contexto, &prova) {
         gravar(Codigo::DenyNotAuthenticated, "", "a prova nao confere");
@@ -522,16 +522,42 @@ fn conferir_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) -> Result
     // A foto, a operação e a gravação, com a ordem das gravações na mão:
     // nada que outro fio mude no meio — uma mensagem que vence — entra na
     // diferença desta operação, nem é gravado antes dela.
+    //
+    // A auditoria da autorização que valeu — a permissão que o papel tinha
+    // e o desafio que a prova consumiu — é registrada **antes** de a
+    // operação ir ao journal, e vai no registro dela: a mudança e a
+    // decisão entram juntas, ou nenhuma entra. Uma operação que não muda
+    // autoridade — as de mensagens gravam os próprios registros enquanto
+    // executam — tem a decisão registrada antes de executar, como a do
+    // ponto único de decisão para um agente.
+    let detalhe = |o: &str| {
+        format!(
+            "prova conferida; {o}; permissao {}; desafio {}",
+            operacao.permissao.nome(),
+            id
+        )
+    };
     let (feito, gravado) = crate::persistencia::em_ordem(|| {
         let foto = (operacao.efeito != Efeito::Nenhum).then(crate::persistencia::Foto::tirar);
+        if foto.is_none() {
+            gravar(Codigo::Allow, "", &detalhe("autorizada"));
+        }
         let feito = (operacao.executar)(&pedinte, Json(parametros.as_bytes()), w);
         let gravado = match (&feito, &foto) {
-            (Ok(recurso), Some(foto)) => crate::persistencia::concluir(
-                foto,
-                operacao.nome,
-                recurso,
-                operacao.efeito == Efeito::Concede,
-            ),
+            (Ok(recurso), Some(foto)) => {
+                let decisao = gravar(Codigo::Allow, recurso, &detalhe("executada"));
+                crate::persistencia::concluir(
+                    foto,
+                    operacao.nome,
+                    recurso,
+                    operacao.efeito == Efeito::Concede,
+                    decisao,
+                )
+            }
+            (Ok(recurso), None) => {
+                gravar(Codigo::Allow, recurso, &detalhe("executada"));
+                Ok(())
+            }
             _ => Ok(()),
         };
         (feito, gravado)
@@ -539,20 +565,13 @@ fn conferir_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) -> Result
     match feito {
         Ok(recurso) => {
             // Gravada antes de responder. Sem a gravação, o que foi
-            // concedido volta, e a resposta diz que não foi feita.
+            // concedido volta, e a resposta diz que não foi feita — e a
+            // auditoria, depois da decisão, diz isso também.
             if let Err(m) = gravado {
                 let motivo = format!("a operacao nao ficou gravada no journal: {m}");
                 gravar(Codigo::Error, &recurso, &motivo);
                 return Err(falha(Codigo::Error, motivo));
             }
-            // A autorização que valeu, e a operação: a permissão que o papel
-            // tinha e o desafio que a prova consumiu.
-            let detalhe = format!(
-                "prova conferida; executada; permissao {}; desafio {}",
-                operacao.permissao.nome(),
-                id
-            );
-            gravar(Codigo::Allow, &recurso, &detalhe);
             autorizacao::contar_administracao(&nome, papel, operacao.nome, operacao.permissao);
             let _ = w.field_bool("executed", true);
             let _ = w.field_str("command", operacao.nome);
@@ -635,11 +654,12 @@ fn conferir_quorum_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) ->
     let metodo = pedido.comando.unwrap_or("admin.execute");
     // Os nomes de quem já assinou e foi conferido: a auditoria grava em
     // nome deles. Antes disso, ninguém.
-    let gravar = |assinantes: &[&str], papel: Option<&str>, codigo, recurso: &str, motivo: &str| {
-        autorizacao::auditar_quorum(
-            sessao, assinantes, papel, metodo, recurso, codigo, bytes, motivo,
-        );
-    };
+    let gravar =
+        |assinantes: &[&str], papel: Option<&str>, codigo, recurso: &str, motivo: &str| -> u64 {
+            autorizacao::auditar_quorum(
+                sessao, assinantes, papel, metodo, recurso, codigo, bytes, motivo,
+            )
+        };
     let recusar = |assinantes: &[&str], codigo: Codigo, recurso: &str, motivo: &str| -> Falha {
         gravar(assinantes, None, codigo, recurso, motivo);
         falha(codigo, motivo)
@@ -856,8 +876,12 @@ fn conferir_quorum_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) ->
         let motivo = format!("persistencia indisponivel: {motivo}");
         return Err(recusar(&nomes, Codigo::Error, "", &motivo));
     }
+    let papeis: Vec<&str> = assinantes.iter().filter_map(|a| a.2.as_deref()).collect();
+    let papel = papeis.first().copied();
     // As restrições e a execução da operação, e a gravação, com a ordem
-    // das gravações na mão — como as de uma credencial.
+    // das gravações na mão — como as de uma credencial. O desfecho do
+    // quórum é registrado na auditoria antes da gravação, e vai no mesmo
+    // registro do journal que a lápide.
     let (feito, gravado) = crate::persistencia::em_ordem(|| {
         let foto = crate::persistencia::Foto::tirar();
         let feito = match operacao.nome {
@@ -865,18 +889,30 @@ fn conferir_quorum_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) ->
             _ => Err(falha(Codigo::Error, "operacao de quorum sem execucao")),
         };
         let gravado = match &feito {
-            Ok(f) => crate::persistencia::concluir(&foto, operacao.nome, &f.recurso, false),
+            Ok(f) => {
+                // O detalhe tem teto: o que identifica a operação primeiro,
+                // o motivo por último — é ele que se corta.
+                let detalhe = format!(
+                    "quorum {} de {}; desafio {}; politica v{}; descartados {}; {}",
+                    assinantes.len(),
+                    quorum.n,
+                    id,
+                    versao,
+                    f.descartados,
+                    f.detalhe
+                );
+                let decisao = gravar(&nomes, papel, Codigo::Allow, &f.recurso, &detalhe);
+                crate::persistencia::concluir(&foto, operacao.nome, &f.recurso, false, decisao)
+            }
             Err(_) => Ok(()),
         };
         (feito, gravado)
     });
-    let papeis: Vec<&str> = assinantes.iter().filter_map(|a| a.2.as_deref()).collect();
-    let papel = papeis.first().copied();
     match feito {
         Ok(Feito {
             recurso,
-            detalhe,
             descartados,
+            ..
         }) => {
             // Gravada antes de responder: a lápide no journal, a âncora
             // avançada. Se falhar, a revogação continua valendo em memória —
@@ -887,18 +923,6 @@ fn conferir_quorum_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) ->
                 gravar(&nomes, papel, Codigo::Error, &recurso, &motivo);
                 return Err((Codigo::Error, motivo));
             }
-            // O detalhe tem teto: o que identifica a operação primeiro, o
-            // motivo por último — é ele que se corta.
-            let detalhe = format!(
-                "quorum {} de {}; desafio {}; politica v{}; descartados {}; {}",
-                assinantes.len(),
-                quorum.n,
-                id,
-                versao,
-                descartados,
-                detalhe
-            );
-            gravar(&nomes, papel, Codigo::Allow, &recurso, &detalhe);
             for (nome, _, papel) in &assinantes {
                 autorizacao::contar_administracao(
                     nome,

@@ -833,7 +833,11 @@ fn audit_tail(params: Json, w: &mut JsonWriter) -> fmt::Result {
     let registros =
         crate::autorizacao::com_auditoria(|c| politica::auditoria::copiar(c.ultimos(n)))
             .unwrap_or_default();
+    // Até onde a cadeia está no journal: o que vem depois ainda é só da
+    // memória, e uma queda de energia o leva.
+    let gravada = crate::persistencia::auditoria_gravada();
     w.begin_object()?;
+    w.field_u64("durable_seq", gravada)?;
     w.key("records")?;
     w.begin_array()?;
     for r in &registros {
@@ -863,6 +867,7 @@ fn audit_tail(params: Json, w: &mut JsonWriter) -> fmt::Result {
         w.field_str("detail", &e.detalhe)?;
         w.field_str("prev", &sigilo::hex(&r.anterior))?;
         w.field_str("link", &sigilo::hex(&r.elo))?;
+        w.field_bool("durable", r.seq <= gravada)?;
         w.end_object()?;
     }
     w.end_array()?;
@@ -884,6 +889,7 @@ fn audit_head(_params: Json, w: &mut JsonWriter) -> fmt::Result {
                 "capacity",
                 crate::autorizacao::CAPACIDADE_DA_AUDITORIA as u64,
             )?;
+            w.field_u64("durable_seq", crate::persistencia::auditoria_gravada())?;
         }
         None => w.field_str("error", "a auditoria nao foi iniciada")?,
     }
@@ -1281,6 +1287,14 @@ fn system_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
         None => w.null_value()?,
     }
     w.field_u64("records", registros)?;
+    w.field_u64(
+        "audit_records",
+        crate::persistencia::registros_de_auditoria(),
+    )?;
+    w.field_u64(
+        "audit_durable_seq",
+        crate::persistencia::auditoria_gravada(),
+    )?;
     w.field_u64("boots", boots)?;
     w.field_u64("clock", crate::persistencia::agora())?;
     // O que o disco confirmou: escritas e descargas. É de fora que se vê

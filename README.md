@@ -161,7 +161,7 @@ $ cargo xtask agent --canal 2 agent.session
 | `person.registry` | Quem pode entrar pelos consoles: cada pessoa, com identificador, nome, papel, estado e sessões abertas — sem credencial |
 | `admin.challenge` | Um desafio de uso único para uma operação administrativa nesta sessão |
 | `admin.execute` | Uma operação administrativa com a prova de um administrador (`challenge`, `command`, `params`, `admin`, `proof`): `agent.register`, `agent.revoke`, `policy.assign`, `policy.write`, `person.register`, `person.revoke`, `credential.rotate`, `session.revoke`, `lease.revoke`, `message.send`, `message.read`, `message.ack`, `message.purge`, `message.purge_mailbox`; e, com as assinaturas de um quórum em `signatures`, `admin.revoke` |
-| `audit.tail` | Os registros mais recentes da auditoria encadeada, com o que basta para refazer cada elo (`count`) |
+| `audit.tail` | Os registros mais recentes da auditoria encadeada, com o que basta para refazer cada elo, e quais já estão no journal (`count`) |
 | `audit.head` | A cabeça da auditoria — o elo do último registro, para ancorar fora da máquina —, a âncora e quantos há |
 | `audit.verify` | Refaz a cadeia guardada a partir da âncora e diz se cada elo confere |
 | `policy.show` | A política em vigor: papéis, permissões, recursos, taxas, o papel da serial e se veio do disco |
@@ -1680,7 +1680,8 @@ reservado só é chamada pela identidade, e as duas cargas só pelo boot — o
 sistema, console, serial ou pseudo-terminal as alcança.
 
 **Tudo vai para a auditoria.** Permitido ou não, cada decisão vira um
-registro: número, milissegundos desde o boot, o tipo de titular (kernel,
+registro: número, o tempo lógico em milissegundos (o RTC com o piso do
+journal — ver [Persistência](#persistência)), o tipo de titular (kernel,
 sistema, serial, agente, pessoa, administrador ou ninguém ainda), sessão,
 sessão de pessoa, identificador, chave pública, papel, método, recurso,
 código e um BLAKE2s dos parâmetros. O titular e a sessão de pessoa entram no
@@ -1688,10 +1689,11 @@ elo: um registro de pessoa não vira um de agente trocando um texto. Os
 parâmetros não entram — podem trazer o que um agente escreveu, ou uma prova
 administrativa. Cada registro carrega o elo do anterior, e o seu é o
 BLAKE2s do anterior com a codificação dele; mudar, tirar ou reordenar um
-registro muda todos os elos dali para a frente. A cadeia mora num anel de
-mil e vinte e quatro registros; o que sai pela ponta deixa o elo como
-âncora. `audit.head` dá a cabeça para ancorar fora da máquina, e a fumaça
-refaz a cauda no hospedeiro com o mesmo pacote. Uma enxurrada recusada por
+registro muda todos os elos dali para a frente. Na memória, a cadeia mora
+num anel de mil e vinte e quatro registros; o que sai pela ponta deixa o elo
+como âncora. No disco, ela vai inteira para o journal, e atravessa o boot
+com os mesmos números e elos. `audit.head` dá a cabeça para ancorar fora da
+máquina, e a fumaça refaz a cauda no hospedeiro com o mesmo pacote. Uma enxurrada recusada por
 taxa grava o primeiro e soma os seguintes, para não empurrar para fora o
 que importa.
 
@@ -1771,7 +1773,7 @@ se confundem nem em texto nem na cadeia.
 `argon2id:m=4096,t=3,p=1:<sal>:<verificador>`. O custo vai escrito em cada
 uma, entre um mínimo (1 MiB, 2 passadas) e um máximo que o kernel aceita
 calcular (16 MiB, 10 passadas). A memória de trabalho sai do alocador de
-frames — o heap tem 1 MiB — e é zerada antes de voltar. A comparação é em
+frames — o heap tem 4 MiB — e é zerada antes de voltar. A comparação é em
 tempo constante, e um nome desconhecido paga o mesmo Argon2id, contra uma
 credencial que não confere com nada: o tempo da recusa não diz se o nome
 existe. A forma começa pelo tipo: uma credencial de dispositivo ou de chave
@@ -2177,6 +2179,15 @@ o pedido; o boot o reaplica por cima da imagem, antes de abrir as portas.
   só em memória, e a resposta diz `"durable": false` e por quê, em
   `memory_only`. Os prazos correm no tempo lógico, e os ids continuam os
   mesmos de um boot para o outro.
+- **A auditoria também.** Cada registro do journal leva os registros da
+  cadeia da auditoria que ainda não estão no disco, e a decisão que
+  autorizou uma mudança de autoridade vai no mesmo registro que a mudança:
+  as duas entram juntas, ou nenhuma. O que não muda estado — uma leitura,
+  uma recusa — vai no próximo registro, ou num só de auditoria que o
+  coletor grava a cada dois segundos. `audit.tail` diz `durable` em cada
+  registro; o boot refaz a cadeia do journal e continua dela. Com o journal
+  recusado, a cadeia recomeça só em memória, e a recusa é o primeiro
+  registro dela.
 - **O tempo lógico não volta.** O RTC, com um piso que é o tempo do último
   registro gravado.
 
@@ -2185,8 +2196,9 @@ o pedido; o boot o reaplica por cima da imagem, antes de abrir as portas.
 vezes, corta a energia, devolve fotografias antigas do disco, estraga o
 journal, limpa o TPM e volta o relógio — e, numa compilação própria do
 kernel, derruba a energia em cada fronteira entre o disco e o TPM: antes e
-depois da escrita, da descarga e do avanço do contador, e no meio da
-criação da âncora. O desenho, os requisitos e o que
+depois da escrita, da descarga e do avanço do contador — numa operação,
+numa mensagem e num registro só de auditoria —, e no meio da criação da
+âncora. O desenho, os requisitos e o que
 falta estão em [`docs/PERSISTENCIA.md`](docs/PERSISTENCIA.md).
 
 ## Barramento PCI

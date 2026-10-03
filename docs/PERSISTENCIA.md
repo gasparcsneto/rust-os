@@ -453,6 +453,74 @@ grava. A fotografia tirada na fronteira — o registro no disco e o
 contador ainda não avançado —, devolvida depois que o TPM andou, é
 recusada; a da criação interrompida também.
 
+## Como ficou (7.5)
+
+### A auditoria no journal
+
+A cadeia da auditoria — a mesma de antes, com os mesmos elos — vai ao
+journal. Cada registro do journal, de qualquer tipo, leva no fim os
+registros da cadeia que ainda não estão no disco, na ordem da cadeia. O
+boot refaz a cadeia a partir deles — a mesma sequência e o mesmo elo —, e
+ela continua de onde parou: o que o boot registrou antes de ler o journal
+(a política carregada, o desfecho da abertura) é encadeado depois do que
+veio do disco.
+
+- **A decisão vai no registro da operação.** Uma operação de autoridade
+  registra a decisão que a autorizou — o administrador, o recurso, a
+  permissão, o desafio; no quórum, quem assinou e o motivo — **antes** de
+  ir ao journal, e a gravação exige que ela vá no mesmo registro. A
+  mudança e a decisão entram juntas, ou nenhuma entra: depois de qualquer
+  queda, uma mudança de autoridade que está no journal tem a decisão dela
+  na cadeia. O que estava pendente antes da decisão e não cabe junto vai
+  antes, em registros só de auditoria; a decisão, nunca — se ela não cabe
+  com o conteúdo da operação, a gravação falha, e a operação também. Uma operação de mensagem de um agente tem a decisão do ponto
+  único antes do efeito, e ela vai no registro da mensagem; uma do
+  administrador registra a decisão antes de executar, pelo mesmo motivo.
+- **O que não muda estado vai depois.** Uma leitura, uma recusa: vão no
+  próximo registro de qualquer tipo, ou num registro só de auditoria
+  (`AUDITORIA`) que o coletor grava a cada dois segundos com algo
+  pendente — antes, se meio anel está esperando. É a janela do que uma
+  queda de energia leva: as decisões sem efeito dos últimos segundos.
+- **O que já está no disco se sabe.** `audit.tail` diz `durable` em cada
+  registro e `durable_seq` no todo; `system.info` diz quantos registros
+  são só de auditoria e até onde ela está gravada. Um registro dito
+  `durable` volta igual depois de um corte de energia.
+- **Sem persistência, só em memória.** Sem TPM, com o journal recusado,
+  depois de uma gravação que falhou: a cadeia continua em memória, e nada
+  dela se diz gravado. O journal recusado não tem a auditoria adotada,
+  pela mesma razão das mensagens — um disco antigo traria uma cadeia
+  antiga —, e o desfecho da abertura (`persistence.open`, com o motivo)
+  é o primeiro registro da cadeia nova.
+- **A lacuna.** O que sai do anel da memória antes de chegar ao disco —
+  mais de um anel inteiro entre duas gravações — não some em silêncio: o
+  próximo registro leva uma lacuna, com a primeira e a última sequência
+  perdidas e o elo da última. A cadeia refeita continua verificável depois
+  dela. Uma operação cuja decisão caiu numa lacuna não vai ao journal.
+- **O tempo é o lógico.** O tempo de um registro da auditoria passou a ser
+  o RTC com o piso do journal, e não o tempo desde o boot, e a cadeia não
+  deixa ele voltar: um registro feito antes de o piso ser lido sobe até o
+  anterior.
+
+### O que mudou por baixo
+
+- **O journal é lido em fluxo.** `diario::percorrer` entrega um registro
+  de cada vez e guarda só o último cabeçalho. Antes, o boot lia o journal
+  inteiro para a memória — e o heap do kernel era de 1 MiB, para uma
+  partição de 16 MiB. Com a auditoria indo ao disco, o journal cresce
+  depressa, e a suíte esgotou o heap.
+- **O heap do kernel tem 4 MiB.** O anel da auditoria cheio é perto de
+  meio MiB, e um registro de 64 KiB passa pelo heap algumas vezes; uma
+  falha de alocação no kernel é pânico.
+- **Cada registro leva no máximo 16 KiB de auditoria.** O resto vai em
+  registros só de auditoria antes dele, na ordem.
+- **O plano de queda da bancada diz o tipo do registro**: a n-ésima
+  operação, mensagem ou auditoria. O coletor grava registros de auditoria
+  quando quer, e a n-ésima gravação de qualquer tipo deixaria de ser a
+  mesma de uma corrida para outra.
+- **O RTC do PC é lido com o índice e o valor juntos.** A auditoria lê o
+  relógio a cada decisão, de qualquer fio, e um fio preemptado entre
+  escolher o registrador do CMOS e lê-lo leria o valor de outro.
+
 ## Decisões tomadas
 
 - **Âncora:** o TPM 2.0, com um contador monotônico de NV; o `swtpm` como
@@ -479,6 +547,6 @@ recusada; a da criação interrompida também.
 | 7.2 | O journal: registros autenticados, geração, âncora, piso do relógio | feita |
 | 7.3 | O estado administrativo durável (R1–R6) | feita |
 | 7.4 | Mensagens persistentes, e as fronteiras entre o disco e o TPM | feita |
-| 7.5 | Auditoria persistente | — |
+| 7.5 | Auditoria persistente | feita |
 | 7.6 | Compactação e disco cheio | — |
 | 7.7 | O que restar da âncora (TPM físico, sessão autenticada no barramento) | — |

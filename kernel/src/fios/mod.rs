@@ -370,6 +370,10 @@ extern "C" fn coletor(_argumento: u64) -> ! {
         crate::coordenacao::vencer_todos();
         // E as mensagens vencidas, também sem ninguém pedir.
         crate::mensagens::vencer_todos();
+        // E a auditoria que nenhum registro levou ainda vai ao journal, de
+        // tempos em tempos: as leituras e as recusas não mudam estado, e
+        // não têm registro próprio.
+        crate::persistencia::gravar_auditoria_se_preciso();
         crate::arch::esperar_interrupcao();
     }
 }

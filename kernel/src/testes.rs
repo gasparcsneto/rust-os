@@ -14876,8 +14876,19 @@ fn grupo_intacto() -> bool {
 /// revogada não prova mais nada, não recebe mensagem e não volta a assinar;
 /// que o histórico dela continua na auditoria; e que, revogada uma, nenhuma
 /// outra sai — o grupo não cai abaixo do quórum.
-/// Os registros do journal, do disco, agora.
+/// Os registros de estado do journal, do disco, agora — sem os só de
+/// auditoria. A auditoria pendente vai antes ao journal: a suíte não deixa
+/// o coletor gravá-la, e a primeira gravação de um caso a levaria junto,
+/// em registros só dela, mudando a conta do caso.
 fn registros_do_journal() -> Result<alloc::vec::Vec<diario::Registro>, &'static str> {
+    crate::persistencia::gravar_auditoria()?;
+    let mut v = crate::persistencia::ler_de_teste()?;
+    v.retain(|r| r.tipo != diario::estado::tipo::AUDITORIA);
+    Ok(v)
+}
+
+/// Todos os registros do journal, do disco, agora, sem gravar nada antes.
+fn todos_do_journal() -> Result<alloc::vec::Vec<diario::Registro>, &'static str> {
     crate::persistencia::ler_de_teste()
 }
 
@@ -14889,7 +14900,7 @@ fn persistencia_aberta_e_ancorada() -> Resultado {
         crate::log_error!("teste", "{:?}", crate::persistencia::estado());
         return Err("a persistencia nao esta disponivel na suite");
     }
-    let registros = registros_do_journal()?;
+    let registros = todos_do_journal()?;
     if registros.first().map(|r| r.tipo) != Some(diario::estado::tipo::ABERTURA) {
         return Err("o journal nao comeca pela abertura");
     }
@@ -15248,7 +15259,7 @@ fn persistencia_as_entradas_se_reaplicam() -> Resultado {
 fn persistencia_o_nascimento_e_o_primeiro_valor() -> Resultado {
     let nascimento = crate::persistencia::nascimento_de_teste()?
         .ok_or("o nascimento da ancora nao foi guardado")?;
-    let registros = registros_do_journal()?.len() as u64;
+    let registros = todos_do_journal()?.len() as u64;
     if crate::persistencia::ancora_no_tpm_de_teste()? != nascimento + registros {
         return Err("o contador nao e o nascimento mais um por registro");
     }
@@ -15317,6 +15328,431 @@ fn persistencia_o_journal_recusado_fecha_as_credenciais() -> Resultado {
         }
         Ok(())
     })
+}
+
+/// Os registros da auditoria que um registro do journal levou, já lidos.
+fn auditoria_do_registro(
+    r: &diario::Registro,
+) -> Result<alloc::vec::Vec<(u64, politica::auditoria::Evento)>, &'static str> {
+    let mut v = alloc::vec::Vec::new();
+    for e in crate::persistencia::entradas_de_teste(r)? {
+        let campos = diario::estado::ler_campos(e)?;
+        if let [t, ev] = campos.as_slice()
+            && *t == diario::estado::tipo::AUDITORIA_EVENTO.to_le_bytes()
+        {
+            v.push(politica::auditoria::decodificar(ev)?);
+        }
+    }
+    Ok(v)
+}
+
+/// O registro da auditoria de número `seq`, se ainda está no anel.
+fn registro_da_auditoria(seq: u64) -> Option<politica::auditoria::Registro> {
+    crate::autorizacao::com_auditoria(|c| {
+        c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+            .find(|r| r.seq == seq)
+            .cloned()
+    })
+    .flatten()
+}
+
+/// O journal refaz a cadeia da auditoria até onde ela está gravada: a
+/// mesma sequência e o mesmo elo que a cadeia em memória tem ali.
+fn a_cadeia_do_journal_confere() -> Resultado {
+    let gravada = crate::persistencia::auditoria_gravada();
+    let do_journal = crate::persistencia::auditoria_do_journal_de_teste()?;
+    if do_journal.ultima_seq() != gravada {
+        crate::log_error!("teste", "{} / {}", do_journal.ultima_seq(), gravada);
+        return Err("o journal nao tem a auditoria ate onde ela diz estar gravada");
+    }
+    let r = registro_da_auditoria(gravada).ok_or("o ultimo gravado saiu do anel")?;
+    if do_journal.cabeca() != r.elo {
+        return Err("o journal refaz outra cadeia");
+    }
+    if do_journal.verificar().is_err() {
+        return Err("a cadeia refeita do journal nao se verifica");
+    }
+    Ok(())
+}
+
+/// A decisão que autorizou uma operação de autoridade vai no registro da
+/// própria operação: a auditoria do `ALLOW`, com o administrador e o
+/// recurso, está entre as entradas do registro que muda o estado. A
+/// operação que não ficou gravada tem a decisão e a falha na cadeia, e
+/// nenhuma das duas no disco.
+fn auditoria_a_decisao_vai_no_registro_da_operacao() -> Resultado {
+    let novo = sigilo::publica_de(&[0x7D; 32]);
+    let parametros = alloc::format!(
+        r#"{{"key":"{}","name":"auditado","role":"observador"}}"#,
+        sigilo::hex(&novo)
+    );
+    let anterior = crate::persistencia::estado();
+    let resultado = (|| -> Resultado {
+        crate::identidade::registrar_administrador_de_teste(
+            sigilo::publica_de(&ADMIN_DE_TESTE),
+            "administrador",
+        );
+        let r = executar_admin_com(
+            0,
+            &ADMIN_DE_TESTE,
+            "agent.register",
+            &parametros,
+            &parametros,
+        )?;
+        if !r.contains(r#""executed":true"#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o registro do agente nao foi executado");
+        }
+        let decisao = ultimo_registro().ok_or("auditoria vazia")?;
+        if decisao.evento.metodo != "agent.register"
+            || decisao.evento.codigo != politica::Codigo::Allow
+            || !decisao.evento.detalhe.contains("executada")
+        {
+            crate::log_error!("teste", "{:?}", decisao.evento);
+            return Err("a decisao da operacao nao e o ultimo registro da auditoria");
+        }
+        // O tempo dela é o lógico — o RTC com o piso do journal —, que
+        // atravessa boots; e não o tempo desde o boot.
+        let agora = crate::persistencia::agora_ms();
+        if decisao.evento.ts_ms > agora || decisao.evento.ts_ms + 5_000 < agora {
+            crate::log_error!("teste", "{} / {}", decisao.evento.ts_ms, agora);
+            return Err("o tempo da auditoria nao e o tempo logico");
+        }
+        let ultimo = todos_do_journal()?.pop().ok_or("journal vazio")?;
+        if ultimo.tipo != diario::estado::tipo::OPERACAO {
+            return Err("o ultimo registro do journal nao e o da operacao");
+        }
+        let levados = auditoria_do_registro(&ultimo)?;
+        if !levados
+            .iter()
+            .any(|(seq, e)| *seq == decisao.seq && *e == decisao.evento)
+        {
+            crate::log_error!(
+                "teste",
+                "{} levados; decisao {}",
+                levados.len(),
+                decisao.seq
+            );
+            return Err("a decisao nao esta no registro da operacao");
+        }
+        if crate::persistencia::auditoria_gravada() < decisao.seq {
+            return Err("a decisao gravada nao conta como gravada");
+        }
+        a_cadeia_do_journal_confere()?;
+
+        // A gravação que falha: a decisão e a falha ficam na cadeia, só em
+        // memória — a gravada não anda.
+        let revogar = alloc::format!(r#"{{"key":"{}"}}"#, sigilo::hex(&novo));
+        let gravada = crate::persistencia::auditoria_gravada();
+        let registros = todos_do_journal()?.len();
+        crate::persistencia::falhar_a_proxima_gravacao_de_teste(true);
+        let r = executar_admin_com(0, &ADMIN_DE_TESTE, "agent.revoke", &revogar, &revogar)?;
+        crate::persistencia::falhar_a_proxima_gravacao_de_teste(false);
+        if !r.contains("nao ficou gravada no journal") {
+            crate::log_error!("teste", "{}", r);
+            return Err("a falha da gravacao nao foi dita");
+        }
+        let falha = ultimo_registro().ok_or("auditoria vazia")?;
+        let decidida = registro_da_auditoria(falha.seq - 1).ok_or("sem a decisao")?;
+        if falha.evento.codigo != politica::Codigo::Error
+            || decidida.evento.metodo != "agent.revoke"
+            || decidida.evento.codigo != politica::Codigo::Allow
+        {
+            crate::log_error!("teste", "{:?} / {:?}", decidida.evento, falha.evento);
+            return Err("a decisao e a falha nao estao na cadeia, nessa ordem");
+        }
+        if crate::persistencia::auditoria_gravada() != gravada
+            || todos_do_journal()?.len() != registros
+        {
+            return Err("a operacao que falhou deixou auditoria no journal");
+        }
+        Ok(())
+    })();
+    crate::persistencia::falhar_a_proxima_gravacao_de_teste(false);
+    crate::persistencia::forcar_estado_de_teste(anterior);
+    crate::identidade::esquecer_registrados();
+    resultado
+}
+
+/// O que não muda estado — uma recusa — fica só em memória até o próximo
+/// registro, e então vai: num registro só de auditoria, que o coletor
+/// grava sozinho, ou no de qualquer outra gravação. `audit.tail` diz o que
+/// já está no disco. Sem persistência, nada vai, e nada é dito gravado.
+fn auditoria_o_que_nao_muda_estado_vai_depois() -> Resultado {
+    let anterior = crate::persistencia::estado();
+    let resultado = com_mensagens(|| {
+        let (mut a, mut sa) = conectado(1)?;
+        // Uma recusa: o observador não lista `/bin`. O papel volta ao de
+        // teste logo depois.
+        let recusar = |a: &mut AgenteDeTeste,
+                       sa: &mut crate::agent::SessaoDeTeste|
+         -> Result<u64, &'static str> {
+            crate::identidade::atribuir(&nome_de_teste(1), "observador")
+                .map_err(|_| "a atribuicao falhou")?;
+            let r = pela_porta(a, sa, "fs.list", r#"{"path":"/bin"}"#);
+            crate::identidade::atribuir(&nome_de_teste(1), PAPEL_DE_TESTE)
+                .map_err(|_| "a atribuicao falhou")?;
+            let r = r?;
+            if !recusado_com(&r, "DENY_PERMISSION") {
+                crate::log_error!("teste", "{}", r);
+                return Err("o observador listou /bin");
+            }
+            ultimo_registro().map(|r| r.seq).ok_or("auditoria vazia")
+        };
+
+        // Sem persistência: a recusa fica na cadeia, e não vai a lugar
+        // nenhum.
+        crate::persistencia::forcar_estado_de_teste(crate::persistencia::Estado::Indisponivel(
+            "indisponivel pela suite",
+        ));
+        let registros = todos_do_journal()?.len();
+        let seq = recusar(&mut a, &mut sa)?;
+        crate::persistencia::gravar_auditoria()?;
+        if todos_do_journal()?.len() != registros || crate::persistencia::auditoria_gravada() >= seq
+        {
+            return Err("sem persistencia, a auditoria foi ao journal");
+        }
+        crate::persistencia::forcar_estado_de_teste(crate::persistencia::Estado::Disponivel);
+
+        // Com ela: a recusa não grava nada sozinha, e o `audit.tail` diz
+        // que ela ainda não está no disco.
+        let seq = recusar(&mut a, &mut sa)?;
+        if todos_do_journal()?.len() != registros {
+            return Err("uma recusa gravou um registro so dela, na hora");
+        }
+        let cauda = pela_porta(&mut a, &mut sa, "audit.tail", r#"{"count":16}"#)?;
+        let marca = alloc::format!(r#""seq":{seq},"#);
+        let depois = cauda
+            .split(&marca)
+            .nth(1)
+            .ok_or("a recusa nao esta no audit.tail")?;
+        if !depois
+            .split('}')
+            .next()
+            .is_some_and(|r| r.contains(r#""durable":false"#))
+        {
+            crate::log_error!("teste", "{}", cauda);
+            return Err("o audit.tail diz gravada uma recusa que nao esta no disco");
+        }
+
+        // O coletor a grava sozinho, num registro só de auditoria.
+        let de_auditoria = crate::persistencia::registros_de_auditoria();
+        crate::persistencia::pausar_a_auditoria_de_teste(false);
+        let limite =
+            crate::tempo::uptime_ms() + 2 * crate::persistencia::INTERVALO_DA_AUDITORIA_MS + 2_000;
+        while crate::persistencia::auditoria_gravada() < seq && crate::tempo::uptime_ms() < limite {
+            crate::fios::ceder();
+        }
+        crate::persistencia::pausar_a_auditoria_de_teste(true);
+        if crate::persistencia::auditoria_gravada() < seq {
+            return Err("o coletor nao gravou a auditoria pendente");
+        }
+        let ultimo = todos_do_journal()?.pop().ok_or("journal vazio")?;
+        if ultimo.tipo != diario::estado::tipo::AUDITORIA
+            || crate::persistencia::registros_de_auditoria() <= de_auditoria
+            || !auditoria_do_registro(&ultimo)?
+                .iter()
+                .any(|(s, _)| *s == seq)
+        {
+            return Err("a recusa nao foi num registro de auditoria");
+        }
+        a_cadeia_do_journal_confere()?;
+
+        // E a próxima recusa vai no registro de qualquer outra gravação.
+        let seq = recusar(&mut a, &mut sa)?;
+        let r = pela_porta(
+            &mut a,
+            &mut sa,
+            "message.send",
+            r#"{"to":"serial","body":"leva a auditoria","nonce":1}"#,
+        )?;
+        let ultimo = todos_do_journal()?.pop().ok_or("journal vazio")?;
+        if !r.contains(r#""durable":true"#)
+            || ultimo.tipo != diario::estado::tipo::MENSAGENS
+            || !auditoria_do_registro(&ultimo)?
+                .iter()
+                .any(|(s, _)| *s == seq)
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("a recusa nao foi no registro da mensagem seguinte");
+        }
+
+        // Uma mensagem do administrador: a decisão é registrada antes de a
+        // operação executar — e gravar a mensagem —, e vai no registro
+        // dela, como a do ponto único para um agente.
+        crate::identidade::registrar_administrador_de_teste(
+            sigilo::publica_de(&ADMIN_DE_TESTE),
+            "administrador",
+        );
+        let params = r#"{"to":"teste-2","body":"do administrador","nonce":7}"#;
+        let r = admin_pela_porta(&mut a, &mut sa, 1, "message.send", params, params)?;
+        let ultimo = todos_do_journal()?.pop().ok_or("journal vazio")?;
+        let decidida = auditoria_do_registro(&ultimo)?.iter().any(|(_, e)| {
+            e.metodo == "message.send"
+                && e.titular == politica::auditoria::Titular::Administrador
+                && e.detalhe.contains("autorizada")
+        });
+        if !r.contains(r#""executed":true"#)
+            || ultimo.tipo != diario::estado::tipo::MENSAGENS
+            || !decidida
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("a decisao do administrador nao foi no registro da mensagem");
+        }
+        a_cadeia_do_journal_confere()
+    });
+    crate::persistencia::pausar_a_auditoria_de_teste(true);
+    crate::persistencia::forcar_estado_de_teste(anterior);
+    resultado
+}
+
+/// A decisão vai no registro que ela autoriza, e nunca num anterior: com
+/// muito pendente antes dela, o que veio antes vai em registros só de
+/// auditoria, e ela fica para o registro da operação. Se ela não cabe junto
+/// com o conteúdo, a gravação falha — e a decisão não vai a lugar nenhum
+/// sozinha.
+fn auditoria_a_decisao_nunca_vai_antes() -> Resultado {
+    use diario::estado::tipo;
+    let anterior = crate::persistencia::estado();
+    let resultado = (|| -> Resultado {
+        let muitos = || {
+            for i in 0..200u64 {
+                crate::autorizacao::auditar_invalido(
+                    crate::autorizacao::Chamador::Sessao(0),
+                    "teste.antes",
+                    &i.to_le_bytes(),
+                    "um registro antes da decisao",
+                );
+            }
+        };
+        let decisao = || {
+            crate::autorizacao::auditar_invalido(
+                crate::autorizacao::Chamador::Sessao(0),
+                "teste.decisao",
+                &[],
+                "a decisao",
+            );
+            ultimo_registro().map_or(0, |r| r.seq)
+        };
+        let leva = |r: &diario::Registro, seq: u64| -> Result<bool, &'static str> {
+            Ok(auditoria_do_registro(r)?.iter().any(|(s, _)| *s == seq))
+        };
+        // Um registro pequeno: os anteriores vão antes, a decisão nele.
+        let operacao = |recurso: &[u8]| {
+            diario::estado::campos(&[&crate::persistencia::entrada_de_teste(
+                tipo::OPERACAO,
+                &[b"teste.decisao", recurso],
+            )])
+        };
+        crate::persistencia::gravar_auditoria()?;
+        let antes = todos_do_journal()?.len();
+        muitos();
+        let d = decisao();
+        muitos();
+        let pequeno = operacao(b"")?;
+        crate::persistencia::gravar_de_teste(tipo::MENSAGENS, &pequeno, d)?;
+        let novos = todos_do_journal()?.split_off(antes);
+        let (ultimo, anteriores) = novos.split_last().ok_or("nada gravado")?;
+        if anteriores.is_empty()
+            || anteriores.iter().any(|r| r.tipo != tipo::AUDITORIA)
+            || anteriores.iter().any(|r| leva(r, d).unwrap_or(true))
+            || ultimo.tipo != tipo::MENSAGENS
+            || !leva(ultimo, d)?
+            || crate::persistencia::auditoria_gravada() < d
+        {
+            return Err("a decisao nao foi no registro dela, ou foi antes dele");
+        }
+
+        // Um registro que quase não deixa lugar: os anteriores vão, a
+        // decisão não cabe, e a gravação falha sem ela em lugar nenhum.
+        crate::persistencia::gravar_auditoria()?;
+        let antes = todos_do_journal()?.len();
+        muitos();
+        let d = decisao();
+        let grande = alloc::vec![b'x'; diario::MAIOR_CONTEUDO - 120];
+        let grande = operacao(&grande)?;
+        if crate::persistencia::gravar_de_teste(tipo::MENSAGENS, &grande, d).is_ok() {
+            return Err("a decisao que nao cabe com o conteudo foi gravada assim mesmo");
+        }
+        let novos = todos_do_journal()?.split_off(antes);
+        if novos
+            .iter()
+            .any(|r| r.tipo != tipo::AUDITORIA || leva(r, d).unwrap_or(true))
+            || crate::persistencia::auditoria_gravada() != d - 1
+        {
+            return Err("a decisao foi a um registro sem a operacao dela");
+        }
+        crate::persistencia::forcar_estado_de_teste(crate::persistencia::Estado::Disponivel);
+        Ok(())
+    })();
+    crate::persistencia::forcar_estado_de_teste(anterior);
+    resultado
+}
+
+/// O que sai do anel antes de chegar ao disco vira uma lacuna no journal:
+/// a cadeia refeita dele continua verificável, e tem a mesma cabeça. Muito
+/// para um registro só vai em vários, na ordem. E uma operação cuja
+/// decisão saiu do anel não vai ao journal.
+fn auditoria_a_lacuna() -> Resultado {
+    let anterior = crate::persistencia::estado();
+    let resultado = (|| -> Resultado {
+        let capacidade = crate::autorizacao::CAPACIDADE_DA_AUDITORIA as u64;
+        crate::persistencia::gravar_auditoria()?;
+        let gravada = crate::persistencia::auditoria_gravada();
+        let primeira = gravada + 1;
+        let mut ultima = 0;
+        for i in 0..capacidade + 40 {
+            crate::autorizacao::auditar_invalido(
+                crate::autorizacao::Chamador::Sessao(0),
+                "teste.lacuna",
+                &i.to_le_bytes(),
+                "um registro de muitos",
+            );
+            ultima = ultimo_registro().map_or(0, |r| r.seq);
+        }
+        // A decisão de uma operação que saiu do anel: a operação não grava.
+        let foto = crate::persistencia::Foto::tirar();
+        let registros = todos_do_journal()?.len();
+        if crate::persistencia::concluir(&foto, "teste.lacuna", "", false, primeira).is_ok()
+            || todos_do_journal()?.len() != registros
+        {
+            return Err("uma operacao foi ao journal sem a decisao que a autorizou");
+        }
+        crate::persistencia::forcar_estado_de_teste(crate::persistencia::Estado::Disponivel);
+
+        let antes = todos_do_journal()?.len();
+        crate::persistencia::gravar_auditoria()?;
+        let novos = todos_do_journal()?.split_off(antes);
+        if novos.len() < 2
+            || novos
+                .iter()
+                .any(|r| r.tipo != diario::estado::tipo::AUDITORIA)
+        {
+            crate::log_error!("teste", "{} registros", novos.len());
+            return Err("o anel inteiro nao foi em varios registros so de auditoria");
+        }
+        if crate::persistencia::auditoria_gravada() < ultima {
+            return Err("a auditoria pendente nao foi toda");
+        }
+        // Cada um com a auditoria no teto: o registro inteiro cabe no heap.
+        if novos
+            .iter()
+            .any(|r| r.conteudo.len() > crate::persistencia::MAIOR_AUDITORIA_POR_REGISTRO)
+        {
+            return Err("um registro levou mais auditoria que o teto");
+        }
+        // A lacuna é a primeira entrada do primeiro registro.
+        let entradas = crate::persistencia::entradas_de_teste(&novos[0])?;
+        let lacuna = diario::estado::ler_campos(entradas.first().ok_or("sem entradas")?)?;
+        let tipo_da_lacuna = diario::estado::tipo::AUDITORIA_LACUNA.to_le_bytes();
+        match lacuna.as_slice() {
+            [t, p, _, _] if *t == tipo_da_lacuna && *p == primeira.to_le_bytes() => {}
+            _ => return Err("o primeiro registro nao comeca pela lacuna"),
+        }
+        a_cadeia_do_journal_confere()
+    })();
+    crate::persistencia::forcar_estado_de_teste(anterior);
+    resultado
 }
 
 /// Uma entrada de registro: o tipo e os campos.
@@ -15685,6 +16121,23 @@ fn admin_revoke_dois_de_tres() -> Resultado {
         if !certo {
             crate::log_error!("teste", "{:?}", fim);
             return Err("a revogacao nao foi gravada como devia");
+        }
+        // E o desfecho vai no registro do journal que tem a lápide: a
+        // revogação e a decisão do quórum entram juntas.
+        let lapide = todos_do_journal()?
+            .into_iter()
+            .rev()
+            .find(|r| r.tipo == diario::estado::tipo::OPERACAO)
+            .ok_or("a revogacao nao esta no journal")?;
+        let tem_lapide = crate::persistencia::entradas_de_teste(&lapide)?
+            .iter()
+            .any(|e| e.get(2..4) == Some(&diario::estado::tipo::LAPIDE.to_le_bytes()[..]));
+        if !tem_lapide
+            || !auditoria_do_registro(&lapide)?
+                .iter()
+                .any(|(_, e)| *e == fim)
+        {
+            return Err("o desfecho do quorum nao esta no registro da lapide");
         }
         // O histórico da credencial revogada continua lá.
         let ainda = registros_com(|e| e == &historico);
@@ -20842,6 +21295,22 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "persistencia: o journal recusado fecha as credenciais, e a serial continua",
         f: persistencia_o_journal_recusado_fecha_as_credenciais,
+    },
+    Caso {
+        nome: "auditoria: a decisao vai no registro da operacao que ela autorizou",
+        f: auditoria_a_decisao_vai_no_registro_da_operacao,
+    },
+    Caso {
+        nome: "auditoria: o que nao muda estado vai no registro seguinte, ou no do coletor",
+        f: auditoria_o_que_nao_muda_estado_vai_depois,
+    },
+    Caso {
+        nome: "auditoria: a decisao vai no registro dela, e nunca num anterior",
+        f: auditoria_a_decisao_nunca_vai_antes,
+    },
+    Caso {
+        nome: "auditoria: o que sai do anel antes do disco e uma lacuna",
+        f: auditoria_a_lacuna,
     },
     Caso {
         nome: "mensagens: cada transicao e um registro antes da resposta, e o corpo nao fica em claro",
