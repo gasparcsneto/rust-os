@@ -125,6 +125,10 @@ pub trait Meio {
 pub struct Registro {
     pub sequencia: u64,
     pub ancora: u64,
+    /// O nonce com que foi cifrado. Não é segredo — está em claro no
+    /// cabeçalho —, e está aqui para quem precisa conferir que nenhum se
+    /// repete.
+    pub nonce: [u8; TAM_NONCE],
     pub tipo: u16,
     /// A geração administrativa depois deste registro.
     pub geracao: u64,
@@ -294,6 +298,7 @@ pub fn ler<M: Meio>(meio: &mut M, chave: &[u8; 32]) -> Result<Lido, &'static str
         let registro = Registro {
             sequencia,
             ancora,
+            nonce,
             tipo: u16_em(&claro, 0),
             geracao: u64_em(&claro, 2),
             versao_da_politica: u64_em(&claro, 10),

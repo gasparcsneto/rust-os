@@ -14909,6 +14909,15 @@ fn persistencia_cada_operacao_um_registro() -> Resultado {
         if depois.len() != antes + 1 {
             return Err("uma operacao de autoridade nao foi exatamente um registro");
         }
+        // Cada registro com o seu nonce, sorteado: dois iguais, com a mesma
+        // chave, entregariam o XOR dos dois textos a quem lê o disco.
+        for (i, r) in depois.iter().enumerate() {
+            if r.nonce == [0; diario::TAM_NONCE]
+                || depois[..i].iter().any(|outro| outro.nonce == r.nonce)
+            {
+                return Err("um nonce do journal e zero, ou se repete");
+            }
+        }
         let ultimo = depois.last().ok_or("journal vazio")?;
         if ultimo.tipo != diario::estado::tipo::OPERACAO || ultimo.geracao != geracao + 1 {
             return Err("o registro nao e de operacao, ou a geracao nao subiu um");
