@@ -14294,7 +14294,12 @@ fn admin_pela_porta(
 /// O limite de cima, e que nada saiu da prova para caber: o resumo dos
 /// parâmetros na auditoria é o dos 1024 bytes que o administrador provou.
 fn admin_parametros_de_um_kib() -> Resultado {
-    use crate::agent::administracao::MAIORES_PARAMETROS;
+    // O requisito, e não a constante: 1 KiB cabe, um byte a mais não. Um
+    // caso que usasse a constante passaria com qualquer valor dela.
+    const UM_KIB: usize = 1024;
+    if crate::agent::administracao::MAIORES_PARAMETROS != UM_KIB {
+        return Err("o limite dos parametros nao e 1 KiB");
+    }
     com_mensagens(|| {
         crate::identidade::registrar_administrador_de_teste(
             sigilo::publica_de(&ADMIN_DE_TESTE),
@@ -14330,9 +14335,9 @@ fn admin_parametros_de_um_kib() -> Resultado {
         let aspas = "\"".repeat(480);
         let params = ate(
             &alloc::format!(r#"{{"to":"teste-2","body":"{}","nonce":2}}"#, como_string_json(&aspas)),
-            MAIORES_PARAMETROS,
+            UM_KIB,
         );
-        if params.len() != MAIORES_PARAMETROS {
+        if params.len() != UM_KIB {
             return Err("os parametros do caso nao tem 1024 bytes");
         }
         let r = admin_pela_porta(&mut a, &mut sa, 1, "message.send", &params, &params)?;
@@ -14354,10 +14359,10 @@ fn admin_parametros_de_um_kib() -> Resultado {
         // de a prova conferir.
         let longe = ate(
             &alloc::format!(r#"{{"line":"{}"}}"#, "é".repeat(506)),
-            MAIORES_PARAMETROS,
+            UM_KIB,
         );
         let r = admin_pela_porta(&mut a, &mut sa, 1, "policy.write", &longe, &longe)?;
-        if longe.len() != MAIORES_PARAMETROS
+        if longe.len() != UM_KIB
             || executada(&r)
             || !r.contains(r#""code":"DENY_POLICY""#)
         {
@@ -14374,7 +14379,7 @@ fn admin_parametros_de_um_kib() -> Resultado {
         }
 
         // Um byte a mais: recusado pelo tamanho, e nada chega.
-        let demais = ate(r#"{"to":"teste-2","body":"demais","nonce":4}"#, MAIORES_PARAMETROS + 1);
+        let demais = ate(r#"{"to":"teste-2","body":"demais","nonce":4}"#, UM_KIB + 1);
         let r = admin_pela_porta(&mut a, &mut sa, 1, "message.send", &demais, &demais)?;
         if executada(&r)
             || !r.contains("grandes demais")
@@ -14385,7 +14390,7 @@ fn admin_parametros_de_um_kib() -> Resultado {
         }
 
         // A prova dos 1024 bytes, com o último trocado: não confere.
-        let certo = ate(r#"{"to":"teste-2","body":"trocado","nonce":5}"#, MAIORES_PARAMETROS);
+        let certo = ate(r#"{"to":"teste-2","body":"trocado","nonce":5}"#, UM_KIB);
         let mut outro = certo.clone();
         outro.pop();
         outro.push('\t');
