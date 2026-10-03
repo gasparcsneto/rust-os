@@ -1,0 +1,25 @@
+[package]
+# A âncora da persistência: um contador monotônico num TPM 2.0, fora do
+# disco.
+#
+# Um pacote, e não um módulo do kernel, pela mesma razão do `sigilo` e da
+# `politica`: o que aqui dentro é lógica — montar um comando do TPM byte a
+# byte, ler a resposta, decidir o que um contador ausente ou estranho quer
+# dizer — se testa no hospedeiro, sem emulador, e conversa nos testes com um
+# TPM de verdade (o `swtpm`, uma implementação independente).
+#
+# O transporte não mora aqui. O kernel fala com o chip pelo TIS, a interface
+# de registradores dos TPMs discretos; este pacote só recebe uma função que
+# leva bytes de comando e traz bytes de resposta — ver [`Tpm`]. Um TPM físico
+# com outra interface é outro transporte, e nada daqui muda.
+#
+# `no_std`, sem `alloc`: os comandos cabem em buffers fixos.
+name = "ancora"
+version = "0.1.0"
+edition = "2024"
+description = "A âncora da persistência do Duke: um contador monotônico de NV num TPM 2.0"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Apagar a senha da âncora da memória quando ela sai de uso.
+zeroize = { version = "1.9.0", default-features = false }

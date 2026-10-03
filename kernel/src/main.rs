@@ -88,6 +88,7 @@ mod ponteiro;
 mod pseudoterminal;
 mod qemu;
 mod rede;
+mod relogio;
 mod serial;
 mod sessoes;
 mod superficies;
@@ -97,6 +98,7 @@ mod tela;
 mod tempo;
 #[cfg(feature = "modo-teste")]
 mod testes;
+mod tpm;
 mod traps;
 mod ui;
 mod usb;
@@ -356,6 +358,9 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     barra::iniciar();
 
     virtio::blk::init();
+    // O TPM e o relógio de parede: a âncora e o tempo da persistência.
+    tpm::init();
+    relogio::init();
     virtio::net::init();
     virtio::teclado::init();
     virtio::console::init();
@@ -395,18 +400,33 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     // programas embutidos com a raiz montada por cima, e montar nesta ordem é
     // o que exercita essa regra em toda execução.
     match particoes::varrer() {
-        Ok(tabela) => match tabela.primeira(particoes::Tipo::Dados) {
-            Some(particao) => match vfs::btrfs::Sistema::abrir(particao.primeiro) {
-                Ok(sistema) => match vfs::montar("btrfs", "/", alloc::boxed::Box::new(sistema)) {
-                    Ok(()) => log_info!("vfs", "/ montado do disco, em btrfs"),
-                    Err(motivo) => {
-                        log_error!("vfs", "a raiz nao montou: {}", motivo.motivo())
+        Ok(tabela) => {
+            // A janela de escrita, antes de qualquer outra coisa usar o
+            // disco: a partição de estado, e só ela — ver
+            // [`virtio::blk::fixar_janela_de_escrita`]. Sem a partição, o
+            // disco fica só de leitura, e a persistência diz que não há onde
+            // gravar.
+            match tabela.primeira(particoes::Tipo::Estado) {
+                Some(estado) => {
+                    match virtio::blk::fixar_janela_de_escrita(estado.primeiro, estado.setores) {
+                        Ok(()) => log_info!(
+                            "disco",
+                            "janela de escrita: setores {}..{} (particao de estado)",
+                            estado.primeiro,
+                            estado.primeiro + estado.setores
+                        ),
+                        Err(motivo) => {
+                            log_error!("disco", "a janela de escrita nao foi fixada: {}", motivo)
+                        }
                     }
-                },
-                Err(motivo) => log_warn!("vfs", "o btrfs do disco nao abriu: {}", motivo),
-            },
-            None => log_info!("vfs", "nao ha particao de dados para montar em /"),
-        },
+                }
+                None => log_warn!(
+                    "disco",
+                    "sem particao de estado: o disco fica so de leitura"
+                ),
+            }
+            montar_a_raiz(&tabela);
+        }
         Err(motivo) => log_warn!("vfs", "a tabela de particoes nao foi lida: {}", motivo),
     }
 
@@ -554,4 +574,20 @@ fn panic(info: &PanicInfo) -> ! {
 
     #[cfg(not(feature = "modo-teste"))]
     arch::halt_forever()
+}
+
+/// Monta a raiz, em Btrfs, da partição de dados do disco.
+fn montar_a_raiz(tabela: &particoes::Tabela) {
+    match tabela.primeira(particoes::Tipo::Dados) {
+        Some(particao) => match vfs::btrfs::Sistema::abrir(particao.primeiro) {
+            Ok(sistema) => match vfs::montar("btrfs", "/", alloc::boxed::Box::new(sistema)) {
+                Ok(()) => log_info!("vfs", "/ montado do disco, em btrfs"),
+                Err(motivo) => {
+                    log_error!("vfs", "a raiz nao montou: {}", motivo.motivo())
+                }
+            },
+            Err(motivo) => log_warn!("vfs", "o btrfs do disco nao abriu: {}", motivo),
+        },
+        None => log_info!("vfs", "nao ha particao de dados para montar em /"),
+    }
 }

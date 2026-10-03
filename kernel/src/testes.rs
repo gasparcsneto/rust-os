@@ -6530,6 +6530,207 @@ fn particoes_tabela_do_disco() -> Resultado {
     Ok(())
 }
 
+/// A janela de escrita que o boot fixou é exatamente a partição de estado
+/// que a tabela descreve — e o disco aceita descarga, sem o que a
+/// persistência não promete nada.
+fn disco_a_janela_e_a_particao_de_estado() -> Resultado {
+    let tabela = crate::particoes::varrer()?;
+    let estado = tabela
+        .primeira(crate::particoes::Tipo::Estado)
+        .ok_or("o disco nao tem particao de estado")?;
+    let (janela, duravel) =
+        crate::virtio::blk::com_o_disco(|d| (d.janela(), d.duravel())).ok_or("nao ha disco")?;
+    if janela != Some((estado.primeiro, estado.setores)) {
+        return Err("a janela de escrita nao e a particao de estado");
+    }
+    if !duravel {
+        return Err("o disco nao aceita descarga: nenhuma escrita seria duravel");
+    }
+    Ok(())
+}
+
+/// O último setor da janela de escrita: o lugar dos casos, longe do começo
+/// da partição, onde o journal mora.
+fn setor_de_teste() -> Result<u64, &'static str> {
+    let (primeiro, setores) = crate::virtio::blk::com_o_disco(|d| d.janela())
+        .flatten()
+        .ok_or("nao ha janela de escrita")?;
+    Ok(primeiro + setores - 2)
+}
+
+/// Escreve dois setores, descarrega, lê de volta, e devolve o que estava
+/// lá. Os contadores do driver contam a escrita e a descarga.
+fn disco_escreve_descarrega_e_le_de_volta() -> Resultado {
+    const B: usize = crate::virtio::blk::TAMANHO_DO_SETOR;
+    let setor = setor_de_teste()?;
+    let mut antes = [0u8; 2 * B];
+    let mut padrao = [0u8; 2 * B];
+    for (i, b) in padrao.iter_mut().enumerate() {
+        *b = (i as u8).wrapping_mul(13).wrapping_add(0x5A);
+    }
+    let resultado = crate::virtio::blk::com_o_disco(|d| -> Resultado {
+        d.ler(setor, &mut antes)?;
+        let (escritas, descargas) = d.contadores();
+        d.escrever(setor, &padrao)?;
+        d.descarregar()?;
+        if d.contadores() != (escritas + 1, descargas + 1) {
+            return Err("a escrita ou a descarga nao foi contada");
+        }
+        let mut lido = [0u8; 2 * B];
+        d.ler(setor, &mut lido)?;
+        if lido != padrao {
+            return Err("o que se leu nao e o que se escreveu");
+        }
+        // Devolve o que havia, para não deixar lixo onde o journal pode
+        // um dia chegar.
+        d.escrever(setor, &antes)?;
+        d.descarregar()
+    });
+    resultado.ok_or("nao ha disco")?
+}
+
+/// Fora da janela nada se escreve, de nenhum jeito: o setor logo antes
+/// (o último da raiz), o logo depois, uma escrita que começa dentro e
+/// termina fora, o MBR, a ESP e um setor absurdo. E o vizinho continua o
+/// que era.
+fn disco_recusa_escrita_fora_da_janela() -> Resultado {
+    const B: usize = crate::virtio::blk::TAMANHO_DO_SETOR;
+    let (primeiro, setores) = crate::virtio::blk::com_o_disco(|d| d.janela())
+        .flatten()
+        .ok_or("nao ha janela de escrita")?;
+    let lixo = [0xEEu8; 2 * B];
+    let tentativas: [(u64, usize); 6] = [
+        (primeiro - 1, 1),
+        (primeiro + setores, 1),
+        (primeiro + setores - 1, 2),
+        (0, 1),
+        (2048, 1),
+        (u64::MAX - 1, 1),
+    ];
+    let resultado = crate::virtio::blk::com_o_disco(|d| -> Resultado {
+        let mut antes = [0u8; B];
+        d.ler(primeiro - 1, &mut antes)?;
+        let (escritas, _) = d.contadores();
+        for (setor, quantos) in tentativas {
+            if d.escrever(setor, &lixo[..quantos * B]).is_ok() {
+                crate::log_error!("teste", "a escrita no setor {} passou", setor);
+                return Err("uma escrita fora da janela foi aceita");
+            }
+        }
+        if d.contadores().0 != escritas {
+            return Err("uma escrita recusada chegou ao dispositivo");
+        }
+        let mut depois = [0u8; B];
+        d.ler(primeiro - 1, &mut depois)?;
+        if antes != depois {
+            return Err("o setor vizinho da janela mudou");
+        }
+        Ok(())
+    });
+    resultado.ok_or("nao ha disco")?
+}
+
+/// A janela foi fixada no boot e não se fixa de novo — nem com a mesma
+/// faixa, nem com o disco inteiro.
+fn disco_a_janela_nao_se_redesenha() -> Resultado {
+    let janela = crate::virtio::blk::com_o_disco(|d| d.janela())
+        .flatten()
+        .ok_or("nao ha janela de escrita")?;
+    if crate::virtio::blk::fixar_janela_de_escrita(janela.0, janela.1).is_ok() {
+        return Err("a janela foi fixada de novo com a mesma faixa");
+    }
+    if crate::virtio::blk::fixar_janela_de_escrita(0, 1024).is_ok() {
+        return Err("a janela foi redesenhada sobre o comeco do disco");
+    }
+    let depois = crate::virtio::blk::com_o_disco(|d| d.janela()).flatten();
+    if depois != Some(janela) {
+        return Err("a janela mudou");
+    }
+    Ok(())
+}
+
+/// O contador de NV do TPM, pelo transporte TIS do kernel: criado, só
+/// cresce, de um em um; a senha errada não lê nem avança. Num índice de
+/// teste, apagado no fim — o da âncora é do journal.
+fn tpm_o_contador_so_cresce() -> Resultado {
+    const INDICE_DE_TESTE: u32 = 0x0180_D0EF;
+    const SENHA: [u8; 32] = [0x77; 32];
+    if !crate::tpm::presente() {
+        return Err("a maquina de testes nao tem TPM");
+    }
+    let resultado = crate::tpm::com_o_tpm(|tpm| -> Resultado {
+        // Um índice deixado por uma execução anterior desta mesma suíte
+        // (o TPM sobrevive dentro de um comando) sai antes.
+        let _ = ancora::apagar(tpm, INDICE_DE_TESTE, &[]);
+        let (a, primeiro) =
+            ancora::Ancora::criar(tpm, INDICE_DE_TESTE, &[], SENHA).map_err(|e| e.motivo())?;
+        let mut anterior = primeiro;
+        for _ in 0..3 {
+            let novo = a.avancar(tpm).map_err(|e| e.motivo())?;
+            if novo != anterior + 1 {
+                crate::log_error!("teste", "o contador foi de {} para {}", anterior, novo);
+                return Err("o contador nao avancou de um em um");
+            }
+            anterior = novo;
+        }
+        let errada = [0x88u8; 32];
+        if ancora::incrementar(tpm, INDICE_DE_TESTE, &errada).is_ok()
+            || ancora::ler_contador(tpm, INDICE_DE_TESTE, &errada).is_ok()
+        {
+            return Err("a senha errada foi aceita");
+        }
+        if a.ler(tpm).map_err(|e| e.motivo())? != anterior {
+            return Err("o contador andou sem a senha");
+        }
+        drop(a);
+        ancora::apagar(tpm, INDICE_DE_TESTE, &[]).map_err(|e| e.motivo())
+    });
+    resultado.ok_or("nao ha TPM")?
+}
+
+/// A conversão de data do calendário para segundos, em datas cujo valor se
+/// confere de fora (`date -u -d ... +%s`), e as que não existem.
+fn relogio_a_data_vira_segundos() -> Resultado {
+    use crate::relogio::{de_bcd, segundos_desde_1970 as s};
+    type Data = (u32, u32, u32, u32, u32, u32);
+    let casos: [(Data, Option<u64>); 9] = [
+        ((1970, 1, 1, 0, 0, 0), Some(0)),
+        ((2000, 3, 1, 0, 0, 0), Some(951_868_800)),
+        ((2024, 2, 29, 23, 59, 59), Some(1_709_251_199)),
+        ((2031, 5, 17, 12, 0, 0), Some(1_936_785_600)),
+        ((2000, 2, 29, 0, 0, 0), Some(951_782_400)),
+        // 2100 não é bissexto; 2023 também não.
+        ((2100, 2, 29, 0, 0, 0), None),
+        ((2023, 2, 29, 0, 0, 0), None),
+        ((1969, 12, 31, 23, 59, 59), None),
+        ((2026, 13, 1, 0, 0, 0), None),
+    ];
+    for ((a, me, d, h, mi, se), esperado) in casos {
+        if s(a, me, d, h, mi, se) != esperado {
+            crate::log_error!("teste", "{}-{}-{} {}:{}:{}", a, me, d, h, mi, se);
+            return Err("uma data virou o numero errado de segundos");
+        }
+    }
+    if de_bcd(0x59) != 59 || de_bcd(0x00) != 0 || de_bcd(0x12) != 12 {
+        return Err("o BCD do CMOS foi lido errado");
+    }
+    Ok(())
+}
+
+/// O RTC da máquina diz uma data depois de 2024: o relógio existe, e é lido
+/// como data, e não como contagem desde o boot.
+fn relogio_o_rtc_diz_uma_data_plausivel() -> Resultado {
+    const PRIMEIRO_DE_JANEIRO_DE_2024: u64 = 1_704_067_200;
+    match crate::relogio::agora() {
+        Some(s) if s >= PRIMEIRO_DE_JANEIRO_DE_2024 => Ok(()),
+        Some(s) => {
+            crate::log_error!("teste", "o RTC diz {} segundos desde 1970", s);
+            Err("o RTC diz uma data antes de 2024")
+        }
+        None => Err("nao ha RTC legivel"),
+    }
+}
+
 /// O superbloco lido do disco é o que o `mkfs.btrfs` escreveu.
 ///
 /// # Por que estes campos
@@ -20341,6 +20542,34 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "particoes: a tabela do disco e a que o disco tem",
         f: particoes_tabela_do_disco,
+    },
+    Caso {
+        nome: "disco: a janela de escrita e a particao de estado",
+        f: disco_a_janela_e_a_particao_de_estado,
+    },
+    Caso {
+        nome: "disco: escreve, descarrega e le de volta, dentro da janela",
+        f: disco_escreve_descarrega_e_le_de_volta,
+    },
+    Caso {
+        nome: "disco: recusa escrita fora da janela, e nao toca o vizinho",
+        f: disco_recusa_escrita_fora_da_janela,
+    },
+    Caso {
+        nome: "disco: a janela nao se redesenha depois do boot",
+        f: disco_a_janela_nao_se_redesenha,
+    },
+    Caso {
+        nome: "tpm: o contador da ancora so cresce, e so com a senha",
+        f: tpm_o_contador_so_cresce,
+    },
+    Caso {
+        nome: "relogio: a data do calendario vira segundos",
+        f: relogio_a_data_vira_segundos,
+    },
+    Caso {
+        nome: "relogio: o RTC diz uma data plausivel",
+        f: relogio_o_rtc_diz_uma_data_plausivel,
     },
     Caso {
         nome: "btrfs: o superbloco do disco confere",

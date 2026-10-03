@@ -2872,6 +2872,7 @@ fn conferir_arvore_do_readme() -> Result<ExitCode, String> {
         "toolkit/src",
         "sigilo/src",
         "politica/src",
+        "ancora/src",
         "programas/src",
         "xtask/src",
     ] {

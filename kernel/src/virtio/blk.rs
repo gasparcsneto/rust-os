@@ -59,6 +59,32 @@ pub const TAMANHO_DO_SETOR: usize = 512;
 
 /// Tipos de pedido.
 const LER: u32 = 0;
+const ESCREVER: u32 = 1;
+/// "Ponha no meio permanente tudo o que eu já escrevi." Sem dados: só o
+/// cabeçalho e o byte de estado.
+#[cfg_attr(
+    not(feature = "modo-teste"),
+    allow(
+        dead_code,
+        reason = "a persistencia (fase 7.3) e quem escreve fora da suite"
+    )
+)]
+const DESCARREGAR: u32 = 4;
+
+/// O dispositivo é só de leitura: toda escrita volta recusada.
+const RECURSO_SOMENTE_LEITURA: u64 = 1 << 5;
+
+/// O dispositivo aceita [`DESCARREGAR`].
+///
+/// # Por que ele é pedido, e por que sem ele não se escreve
+///
+/// Porque uma escrita respondida com `OK` não está no disco: está onde o
+/// dispositivo achar melhor — num cache dele, na memória do hospedeiro. É
+/// o pedido de descarga que transforma "recebi" em "está gravado", e a
+/// persistência confirma uma operação só depois dele. Um disco que não o
+/// oferece não tem como prometer isso, e este driver não finge: sem o
+/// recurso, a escrita é recusada inteira — ver [`Disco::escrever`].
+const RECURSO_DESCARGA: u64 = 1 << 9;
 
 /// Valores do byte de estado.
 const OK: u8 = 0;
@@ -132,6 +158,13 @@ const _: () = assert!(PAGINAS_DE_DADOS + 2 <= super::fila::DESCRITORES as usize)
 const VOLTAS_DE_ESPERA: u32 = 5_000_000;
 
 /// Um disco virtio pronto para uso.
+#[cfg_attr(
+    not(feature = "modo-teste"),
+    allow(
+        dead_code,
+        reason = "a persistencia (fase 7.3) e quem escreve fora da suite"
+    )
+)]
 pub struct Disco {
     transporte: Transporte,
     fila: Fila,
@@ -171,6 +204,30 @@ pub struct Disco {
     /// por acaso. Um defeito cujo sintoma muda a cada execucao e pior que um
     /// erro, e e por isso que o primeiro tempo esgotado encerra o assunto.
     vivo: bool,
+    /// Se o dispositivo aceita o pedido de descarga.
+    descarga: bool,
+    /// Se o dispositivo se declarou só de leitura.
+    somente_leitura: bool,
+    /// Os setores em que este kernel pode escrever: o primeiro e quantos.
+    ///
+    /// # Por que o driver guarda isto, e não quem escreve
+    ///
+    /// Porque o disco tem a ESP de onde a máquina boota e a raiz de onde os
+    /// programas saem, e uma escrita que caísse nelas por um setor errado
+    /// não teria volta. A regra de que só a partição de estado é gravável
+    /// poderia morar no journal, que é quem escreve — e valeria enquanto
+    /// ninguém mais escrevesse, nem o journal errasse uma conta. Aqui ela
+    /// vale para qualquer chamador, e vale contra o próprio journal.
+    ///
+    /// Fixada uma vez, no boot, pela tabela de partições — ver
+    /// [`fixar_janela_de_escrita`] —, e nunca mais mudada. Sem ela, nada se
+    /// escreve.
+    janela: Option<(u64, u64)>,
+    /// Quantas escritas e quantas descargas o dispositivo confirmou. Só
+    /// para os casos e para o relatório: é o que mostra de dentro que a
+    /// descarga aconteceu.
+    escritas: u64,
+    descargas: u64,
 }
 
 // SAFETY: o ponteiro é para um frame de propriedade exclusiva deste disco,
@@ -191,12 +248,13 @@ impl Disco {
     fn ligar(d: &Dispositivo) -> Result<Disco, &'static str> {
         let transporte = Transporte::descobrir(d)?;
 
-        // Nada além do virtio 1.0. Cada recurso extra é um contrato a mais a
-        // honrar — descritores indiretos mudam o formato da cadeia, o índice
-        // de eventos muda quando notificar — e nenhum deles compra algo que
-        // este driver precise.
-        let recursos = transporte.iniciar(VERSAO_1)?;
-        debug_assert_eq!(recursos, VERSAO_1);
+        // O virtio 1.0, a descarga e o aviso de só leitura. Cada recurso
+        // extra é um contrato a mais a honrar — descritores indiretos mudam o
+        // formato da cadeia, o índice de eventos muda quando notificar — e
+        // estes dois são os únicos que este driver precisa: um é o que torna
+        // uma escrita durável, o outro diz que não haverá escrita nenhuma.
+        // Nenhum dos dois muda o formato de nada.
+        let recursos = transporte.iniciar(VERSAO_1 | RECURSO_DESCARGA | RECURSO_SOMENTE_LEITURA)?;
 
         if transporte.filas() == 0 {
             transporte.abortar();
@@ -312,7 +370,50 @@ impl Disco {
             bases_de_dados,
             capacidade,
             vivo: true,
+            descarga: recursos & RECURSO_DESCARGA != 0,
+            somente_leitura: recursos & RECURSO_SOMENTE_LEITURA != 0,
+            janela: None,
+            escritas: 0,
+            descargas: 0,
         })
+    }
+
+    /// Se uma escrita durável é possível neste disco: ele aceita escrita e
+    /// aceita a descarga. É o que a persistência pergunta antes de se
+    /// declarar disponível.
+    #[cfg_attr(
+        not(feature = "modo-teste"),
+        allow(
+            dead_code,
+            reason = "a persistencia (fase 7.3) e quem escreve fora da suite"
+        )
+    )]
+    pub fn duravel(&self) -> bool {
+        self.vivo && self.descarga && !self.somente_leitura
+    }
+
+    /// A janela de escrita: o primeiro setor e quantos, se já foi fixada.
+    #[cfg_attr(
+        not(feature = "modo-teste"),
+        allow(
+            dead_code,
+            reason = "a persistencia (fase 7.3) e quem escreve fora da suite"
+        )
+    )]
+    pub fn janela(&self) -> Option<(u64, u64)> {
+        self.janela
+    }
+
+    /// Quantas escritas e quantas descargas o dispositivo confirmou.
+    #[cfg_attr(
+        not(feature = "modo-teste"),
+        allow(
+            dead_code,
+            reason = "a persistencia (fase 7.3) e quem escreve fora da suite"
+        )
+    )]
+    pub fn contadores(&self) -> (u64, u64) {
+        (self.escritas, self.descargas)
     }
 
     /// Quantos setores o disco tem.
@@ -352,30 +453,108 @@ impl Disco {
     /// ao disco, e quem monta um sistema de arquivos precisa saber disso para
     /// decidir o tamanho dos próprios blocos.
     pub fn ler(&mut self, setor: u64, destino: &mut [u8]) -> Result<(), &'static str> {
+        self.conferir_faixa(setor, destino.len())?;
+        self.pedir(LER, setor, destino.len())?;
+        self.copiar_dos_dados(destino);
+        Ok(())
+    }
+
+    /// Escreve setores consecutivos numa única ida ao dispositivo — e só
+    /// dentro da janela de escrita.
+    ///
+    /// Uma escrita respondida **não está gravada**: está aceita. Quem
+    /// precisa dela no disco chama [`Disco::descarregar`] depois, e só
+    /// então a considera feita. Separar as duas coisas é o que deixa o
+    /// journal juntar várias escritas sob uma descarga só, sem que isso
+    /// mude o que cada uma promete.
+    ///
+    /// Recusada inteira, sem tocar o dispositivo, se o disco não aceita
+    /// descarga: uma escrita que nunca pode ser tornada durável é uma
+    /// escrita que mente para quem a pediu.
+    #[cfg_attr(
+        not(feature = "modo-teste"),
+        allow(
+            dead_code,
+            reason = "a persistencia (fase 7.3) e quem escreve fora da suite"
+        )
+    )]
+    pub fn escrever(&mut self, setor: u64, origem: &[u8]) -> Result<(), &'static str> {
+        self.conferir_faixa(setor, origem.len())?;
+        if self.somente_leitura {
+            return Err("o disco e so de leitura");
+        }
+        if !self.descarga {
+            return Err("o disco nao aceita descarga, e uma escrita nao seria duravel");
+        }
+        let Some((primeiro, setores)) = self.janela else {
+            return Err("nenhuma janela de escrita foi fixada");
+        };
+        let quantos = (origem.len() / TAMANHO_DO_SETOR) as u64;
+        // As duas pontas: começar dentro e terminar dentro. Somas saturadas,
+        // pela mesma razão de [`Disco::conferir_faixa`]: um setor absurdo
+        // não pode dar a volta e cair dentro.
+        if setor < primeiro || setor.saturating_add(quantos) > primeiro.saturating_add(setores) {
+            return Err("escrita fora da janela de escrita");
+        }
+        self.copiar_para_os_dados(origem);
+        self.pedir(ESCREVER, setor, origem.len())?;
+        self.escritas += 1;
+        Ok(())
+    }
+
+    /// Pede ao dispositivo que ponha no meio permanente tudo o que ele já
+    /// confirmou como escrito.
+    #[cfg_attr(
+        not(feature = "modo-teste"),
+        allow(
+            dead_code,
+            reason = "a persistencia (fase 7.3) e quem escreve fora da suite"
+        )
+    )]
+    pub fn descarregar(&mut self) -> Result<(), &'static str> {
         if !self.vivo {
             return Err("o disco parou de responder e foi desligado");
         }
-        if destino.is_empty() || !destino.len().is_multiple_of(TAMANHO_DO_SETOR) {
+        if !self.descarga {
+            return Err("o disco nao aceita descarga");
+        }
+        self.pedir(DESCARREGAR, 0, 0)?;
+        self.descargas += 1;
+        Ok(())
+    }
+
+    /// As regras comuns a ler e escrever: disco vivo, múltiplo de setor,
+    /// cabe numa ida, cabe no disco.
+    fn conferir_faixa(&self, setor: u64, bytes: usize) -> Result<(), &'static str> {
+        if !self.vivo {
+            return Err("o disco parou de responder e foi desligado");
+        }
+        if bytes == 0 || !bytes.is_multiple_of(TAMANHO_DO_SETOR) {
             return Err("o destino precisa ser um multiplo de setor");
         }
-        if destino.len() > MAIOR_LEITURA {
+        if bytes > MAIOR_LEITURA {
             return Err("o pedido passa do maior que o driver monta");
         }
-
-        let setores = (destino.len() / TAMANHO_DO_SETOR) as u64;
+        let setores = (bytes / TAMANHO_DO_SETOR) as u64;
         // A soma satura para que um setor absurdo não dê a volta e caia dentro
         // da capacidade.
         if setor.saturating_add(setores) > self.capacidade {
             return Err("setor alem da capacidade do disco");
         }
+        Ok(())
+    }
 
+    /// Monta a cadeia de um pedido de `tipo`, a entrega e espera a
+    /// resposta. `bytes` é quanto das páginas de dados o pedido usa — zero
+    /// num pedido sem dados, como a descarga.
+    fn pedir(&mut self, tipo: u32, setor: u64, bytes: usize) -> Result<(), &'static str> {
         // SAFETY: o frame é deste disco, os dois deslocamentos vêm das
         // constantes de layout, e a asserção de compilação garante que cabem.
         unsafe {
             core::ptr::write_volatile(
                 self.base.add(CABECALHO_EM as usize) as *mut Cabecalho,
                 Cabecalho {
-                    tipo: LER.to_le(),
+                    tipo: tipo.to_le(),
                     reservado: 0,
                     setor: setor.to_le(),
                 },
@@ -388,8 +567,11 @@ impl Disco {
         }
 
         // A cadeia: o cabeçalho, uma entrada por página de dados que o pedido
-        // alcança, e o byte de estado. As do meio são escritas pelo
-        // dispositivo; as das pontas, não e sim, nessa ordem.
+        // alcança, e o byte de estado. O cabeçalho o dispositivo só lê; o
+        // estado ele só escreve; os dados ele escreve numa leitura e lê numa
+        // escrita — a direção é do descritor, e é o tipo do pedido que a
+        // decide.
+        let dispositivo_escreve_os_dados = tipo == LER;
         let mut cadeia = [(0u64, 0u32, false); PAGINAS_DE_DADOS + 2];
         let mut partes = 1;
         cadeia[0] = (
@@ -403,11 +585,15 @@ impl Disco {
         );
 
         let pagina = crate::arch::TAMANHO_PAGINA as usize;
-        let mut restante = destino.len();
+        let mut restante = bytes;
         let mut indice = 0;
         while restante > 0 {
             let quanto = restante.min(pagina);
-            cadeia[partes] = (self.dados[indice], quanto as u32, true);
+            cadeia[partes] = (
+                self.dados[indice],
+                quanto as u32,
+                dispositivo_escreve_os_dados,
+            );
             partes += 1;
             restante -= quanto;
             indice += 1;
@@ -432,10 +618,19 @@ impl Disco {
         // o acesso fica dentro do frame pela constante de layout.
         let estado = unsafe { core::ptr::read_volatile(self.base.add(ESTADO_EM as usize)) };
         if estado != OK {
-            return Err("o dispositivo recusou a leitura");
+            return Err(match tipo {
+                LER => "o dispositivo recusou a leitura",
+                ESCREVER => "o dispositivo recusou a escrita",
+                _ => "o dispositivo recusou a descarga",
+            });
         }
+        Ok(())
+    }
 
-        // E o conteúdo, página a página, para onde quem chamou pediu.
+    /// O que o dispositivo leu, página a página, para onde quem chamou
+    /// pediu.
+    fn copiar_dos_dados(&self, destino: &mut [u8]) {
+        let pagina = crate::arch::TAMANHO_PAGINA as usize;
         let mut copiados = 0;
         for origem in &self.bases_de_dados {
             if copiados == destino.len() {
@@ -452,8 +647,37 @@ impl Disco {
             }
             copiados += quanto;
         }
+    }
 
-        Ok(())
+    /// O que quem chamou quer escrito, para as páginas de dados que o
+    /// dispositivo vai ler.
+    #[cfg_attr(
+        not(feature = "modo-teste"),
+        allow(
+            dead_code,
+            reason = "a persistencia (fase 7.3) e quem escreve fora da suite"
+        )
+    )]
+    fn copiar_para_os_dados(&mut self, origem: &[u8]) {
+        let pagina = crate::arch::TAMANHO_PAGINA as usize;
+        let mut copiados = 0;
+        for destino in &self.bases_de_dados {
+            if copiados == origem.len() {
+                break;
+            }
+            let quanto = (origem.len() - copiados).min(pagina);
+            // SAFETY: o destino é uma das páginas de dados deste disco, com
+            // uma página inteira de espaço, e `quanto` não passa de uma
+            // página; a origem tem os bytes porque `copiados + quanto` é no
+            // máximo o comprimento dela; as regiões não se sobrepõem — as
+            // páginas são do kernel e `origem` é de quem chamou. Nenhum
+            // pedido está em voo: o disco é acessado sob a tranca, e o
+            // anterior já foi colhido.
+            unsafe {
+                core::ptr::copy_nonoverlapping(origem.as_ptr().add(copiados), *destino, quanto);
+            }
+            copiados += quanto;
+        }
     }
 
     fn esperar(&mut self) -> Result<(u16, u32), &'static str> {
@@ -515,6 +739,28 @@ pub fn init() {
         }
         Err(motivo) => crate::log_error!("virtio", "disco nao pode ser ligado: {}", motivo),
     }
+}
+
+/// Fixa a janela de escrita do disco: os únicos setores em que este kernel
+/// pode escrever, daqui até o fim.
+///
+/// Chamada uma vez, no boot, com a partição de estado que a tabela trouxe.
+/// Uma segunda chamada é recusada, mesmo que com a mesma faixa: a janela não
+/// é algo que um caminho de execução possa redesenhar depois que o sistema
+/// subiu, e uma função que aceitasse ser chamada de novo seria exatamente
+/// isso.
+pub fn fixar_janela_de_escrita(primeiro: u64, setores: u64) -> Result<(), &'static str> {
+    com_o_disco(|d| {
+        if d.janela.is_some() {
+            return Err("a janela de escrita ja foi fixada");
+        }
+        if setores == 0 || primeiro.saturating_add(setores) > d.capacidade {
+            return Err("janela de escrita fora do disco");
+        }
+        d.janela = Some((primeiro, setores));
+        Ok(())
+    })
+    .unwrap_or(Err("nao ha disco nesta maquina"))
 }
 
 /// Chama `f` com o disco da máquina, se houver um.

@@ -165,7 +165,7 @@ $ cargo xtask agent --canal 2 agent.session
 | `audit.head` | A cabeça da auditoria — o elo do último registro, para ancorar fora da máquina —, a âncora e quantos há |
 | `audit.verify` | Refaz a cadeia guardada a partir da âncora e diz se cada elo confere |
 | `policy.show` | A política em vigor: papéis, permissões, recursos, taxas, o papel da serial e se veio do disco |
-| `system.info` | Kernel, CPU, vídeo, uptime e mecanismo de guarda da pilha |
+| `system.info` | Kernel, CPU, vídeo, uptime, o RTC e mecanismo de guarda da pilha |
 | `system.uptime` | Ticks do timer e milissegundos desde o boot |
 | `memory.stats` | Totais agregados de memória física |
 | `memory.regions` | Regiões do mapa de memória (`limit`, `usable_only`) |
@@ -247,6 +247,8 @@ kernel/src/
 ├── traps.rs         contabilidade de exceções e modo post-mortem
 ├── irq.rs           contadores de interrupções de hardware
 ├── tempo.rs         contagem de tempo desde o boot
+├── relogio.rs       o relógio de parede: o RTC (CMOS no x86, PL031 no ARM)
+├── tpm.rs           o TPM 2.0 pela interface TIS: o transporte da âncora
 ├── qemu.rs          encerramento do emulador para testes
 ├── testes.rs        suíte de testes que roda dentro do emulador
 ├── tela/
@@ -380,6 +382,10 @@ politica/src/        a política de autorização, a mesma no kernel e no hosped
 ├── mensagens.rs     as caixas, os estados, as cotas e os nonces das mensagens
 ├── sigiloso.rs      o texto que sai da memória zerado: o corpo e a resposta que o leva
 └── auditoria.rs     os registros e a cadeia de elos BLAKE2s
+
+ancora/src/          a âncora da persistência: um contador monotônico num TPM 2.0
+├── lib.rs           os comandos do TPM byte a byte, e o que um contador ausente ou estranho quer dizer
+└── testes.rs        a âncora contra um TPM simulado; `tests/swtpm.rs`, contra o swtpm
 
 aparencia/src/       a linguagem visual, dos dois lados da fronteira
 └── lib.rs           a paleta, onde cada cor vai, as medidas e os estilos de texto pelo uso

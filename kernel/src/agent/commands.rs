@@ -1257,6 +1257,14 @@ fn system_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     }
 
     w.field_u64("uptime_ms", crate::tempo::uptime_ms())?;
+    // O relógio de parede, cru: o que o RTC diz, em segundos desde 1970.
+    // Cru de propósito — o tempo que vale para prazos é o lógico, que a
+    // persistência mantém e nunca volta; este é o que o hardware diz.
+    w.key("rtc")?;
+    match crate::relogio::agora() {
+        Some(s) => w.u64_value(s)?,
+        None => w.null_value()?,
+    }
     w.field_u64("log_records", crate::log::total_emitidos())?;
     // Bytes que a porta serial nao conseguiu enviar. Diferente de zero aqui
     // quer dizer que o que se le do log esta incompleto, e e a unica forma de

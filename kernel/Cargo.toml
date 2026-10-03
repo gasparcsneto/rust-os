@@ -73,6 +73,10 @@ sigilo = { path = "../sigilo" }
 # política na imagem e recalcula a cadeia de fora.
 politica = { path = "../politica" }
 
+# A âncora da persistência: os comandos do TPM e o contador monotônico —
+# ver `ancora/src/lib.rs`. O transporte até o chip é do kernel (`tpm.rs`).
+ancora = { path = "../ancora" }
+
 # --- x86_64 -----------------------------------------------------------------
 #
 # No x86 nos apoiamos em crates maduros porque a plataforma tem décadas de

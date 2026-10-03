@@ -225,7 +225,7 @@ anteriores:
 | Fase | O quê | Estado |
 |---|---|---|
 | 7.0 | A bancada: partição de estado, TPM em toda máquina, relógio, vários boots com corte de energia, fotografia e restauração da partição | feita |
-| 7.1 | Escrever no disco (só a partição de estado, com `FLUSH`), o TPM pelo TIS, o RTC | — |
+| 7.1 | Escrever no disco (só a partição de estado, com `FLUSH`), o TPM pelo TIS, o RTC | feita |
 | 7.2 | O journal: registros autenticados, geração, âncora, piso do relógio | — |
 | 7.3 | O estado administrativo durável (R1–R6) | — |
 | 7.4 | Mensagens persistentes | — |

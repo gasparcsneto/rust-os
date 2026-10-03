@@ -147,6 +147,10 @@ const CENARIOS: &[Cenario] = &[
         nome: "a maquina sobe duas vezes sobre o mesmo TPM, com o relogio onde se mandou",
         rodar: dois_boots_sobre_o_mesmo_tpm,
     },
+    Cenario {
+        nome: "o RTC que o kernel le e o que a maquina recebeu, para a frente e para tras",
+        rodar: o_rtc_e_o_que_se_mandou,
+    },
 ];
 
 /// `cargo xtask persistencia`: roda os cenários e diz quais passaram.
@@ -283,4 +287,36 @@ fn dois_boots_sobre_o_mesmo_tpm(arch: Arquitetura, artefato: &Artefato) -> Resul
     }
     maquina.cortar_a_energia()?;
     Ok("dois cortes de energia, o NV do TPM no disco do hospedeiro entre eles".into())
+}
+
+/// O RTC lido pelo kernel, pelo `system.info`.
+fn rtc_do_kernel(maquina: &mut Ligada) -> Result<u64, String> {
+    let r = maquina.pedir("system.info", "{}")?;
+    super::campo_simples(&r, "rtc")
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(|| format!("o system.info nao diz o rtc\n  {r}"))
+}
+
+/// A máquina sobe com o RTC numa data, e o kernel lê essa data — numa data
+/// à frente, e depois numa atrás dela. É o que os cenários do relógio
+/// lógico vão usar para fazer o tempo voltar entre dois boots.
+fn o_rtc_e_o_que_se_mandou(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    // 2031-05-17 12:00:00 e 2024-01-01 00:00:00 UTC.
+    let mut lidos = Vec::new();
+    for (data, esperado) in [
+        ("2031-05-17T12:00:00", 1_936_785_600u64),
+        ("2024-01-01T00:00:00", 1_704_067_200u64),
+    ] {
+        let mut maquina = Ligada::subir(arch, artefato, Some(data))?;
+        let rtc = rtc_do_kernel(&mut maquina)?;
+        maquina.cortar_a_energia()?;
+        // O boot leva segundos, e o relógio anda com a máquina.
+        if !(esperado..esperado + 300).contains(&rtc) {
+            return Err(format!(
+                "a maquina subiu em {data} ({esperado}) e o kernel leu {rtc}"
+            ));
+        }
+        lidos.push(rtc);
+    }
+    Ok(format!("{} e depois {}", lidos[0], lidos[1]))
 }

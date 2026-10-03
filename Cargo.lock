@@ -48,6 +48,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ancora"
+version = "0.1.0"
+dependencies = [
+ "zeroize",
+]
+
+[[package]]
 name = "aparencia"
 version = "0.1.0"
 dependencies = [

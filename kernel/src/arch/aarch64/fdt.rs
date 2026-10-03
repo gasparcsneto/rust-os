@@ -718,6 +718,158 @@ pub unsafe fn encontrar_barramento_pci(dtb: *const u8) -> Option<BarramentoPci> 
 }
 
 // ---------------------------------------------------------------------------
+// Dispositivos simples, pelo `compatible`
+// ---------------------------------------------------------------------------
+
+/// Até que profundidade a busca por `compatible` acompanha os pais.
+const MAIOR_PROFUNDIDADE: usize = 8;
+
+/// Acha o primeiro nó que se declara `compativel` e devolve o primeiro par
+/// do `reg` dele, traduzido para o endereço que a CPU usa.
+///
+/// # Por que traduzir
+///
+/// Porque o endereço num `reg` é do lado do **pai**, não da CPU. Um
+/// dispositivo filho direto da raiz o tem já no espaço da CPU — é o caso da
+/// PL031 da máquina `virt`. Um pendurado num barramento o tem no espaço do
+/// barramento, e é a `ranges` do barramento que diz onde isso cai: o TPM da
+/// `virt` mora no `platform-bus`, com `reg = <0 0x5000>`, e o zero dele é
+/// `0x0C00_0000` para a CPU. Ler o `reg` sem traduzir daria um TPM no
+/// endereço zero — plausível para o leitor, falso para a máquina.
+///
+/// Acompanha um nível de barramento, que é o que a `virt` usa. Um nó mais
+/// fundo é recusado com `None`, em vez de lido com as larguras erradas.
+///
+/// # Por que duas passadas
+///
+/// A mesma razão de [`encontrar_barramento_pci`]: a ordem das propriedades
+/// dentro de um nó não é garantida, e a do pai vem antes da dos filhos.
+/// A primeira passada acha o nó e quem é o pai; a segunda lê os dois.
+///
+/// # Safety
+///
+/// `dtb` precisa apontar para um device tree válido, ou ser nulo.
+pub unsafe fn encontrar_mmio(dtb: *const u8, compativel: &[u8]) -> Option<(u64, u64)> {
+    let mut alvo: Option<(u32, usize, u32)> = None;
+    let mut ultimo = [0u32; MAIOR_PROFUNDIDADE];
+    let mut procurar = |prop: &Propriedade| {
+        if prop.profundidade < MAIOR_PROFUNDIDADE {
+            ultimo[prop.profundidade] = prop.no_seq;
+        }
+        if alvo.is_some() || prop.nome != b"compatible" || prop.profundidade < FILHO_DA_RAIZ {
+            return;
+        }
+        // SAFETY: o percurso garantiu que a faixa está dentro do blob.
+        let lista = unsafe { core::slice::from_raw_parts(dtb.add(prop.dados), prop.tamanho) };
+        if lista.split(|&b| b == 0).any(|s| s == compativel)
+            && prop.profundidade < MAIOR_PROFUNDIDADE
+        {
+            // As propriedades do pai vêm antes das dos filhos: o último nó
+            // um nível acima que falou é ele.
+            alvo = Some((
+                prop.no_seq,
+                prop.profundidade,
+                ultimo[prop.profundidade - 1],
+            ));
+        }
+    };
+    // SAFETY: delegada ao chamador.
+    unsafe { percorrer_relatando(dtb, &mut procurar, "um dispositivo pelo compatible") };
+    let (no, profundidade, pai) = alvo?;
+    if profundidade > FILHO_DA_RAIZ + 1 {
+        crate::log_warn!(
+            "fdt",
+            "o dispositivo esta fundo demais na arvore para este leitor (profundidade {})",
+            profundidade
+        );
+        return None;
+    }
+
+    // Segunda passada: o `reg` do nó, e as larguras e a `ranges` do pai.
+    let mut reg: Option<(usize, usize)> = None;
+    let mut ranges: Option<(usize, usize)> = None;
+    let mut celulas_do_filho = (2u32, 1u32);
+    let mut da_raiz = (2u32, 2u32);
+    let mut ler = |prop: &Propriedade| {
+        da_raiz = (prop.address_cells, prop.size_cells);
+        if prop.no_seq == no && prop.nome == b"reg" {
+            reg = Some((prop.dados, prop.tamanho));
+        } else if profundidade > FILHO_DA_RAIZ && prop.no_seq == pai {
+            match prop.nome {
+                // SAFETY: `prop_cabe` conferiu que há uma célula inteira.
+                b"#address-cells" if prop_cabe(prop.tamanho) => {
+                    celulas_do_filho.0 = unsafe { be32(dtb, prop.dados) }
+                }
+                // SAFETY: idem.
+                b"#size-cells" if prop_cabe(prop.tamanho) => {
+                    celulas_do_filho.1 = unsafe { be32(dtb, prop.dados) }
+                }
+                // Vazia quer dizer "o barramento não traduz", e por isso o
+                // tamanho zero também vale.
+                b"ranges" => ranges = Some((prop.dados, prop.tamanho)),
+                _ => {}
+            }
+        }
+    };
+    // SAFETY: delegada ao chamador.
+    unsafe { percorrer_relatando(dtb, &mut ler, "o reg de um dispositivo") };
+
+    let (ac, sc) = if profundidade == FILHO_DA_RAIZ {
+        da_raiz
+    } else {
+        celulas_do_filho
+    };
+    if ac == 0 || ac > MAX_CELULAS || sc > MAX_CELULAS {
+        return None;
+    }
+    let (dados, tamanho) = reg?;
+    if tamanho < (ac + sc) as usize * 4 {
+        return None;
+    }
+    // SAFETY: o percurso garantiu a faixa, e o tamanho foi conferido acima.
+    let (endereco, extensao) = unsafe {
+        (
+            ler_celulas(dtb, dados, ac),
+            ler_celulas(dtb, dados + ac as usize * 4, sc),
+        )
+    };
+    if profundidade == FILHO_DA_RAIZ {
+        return Some((endereco, extensao));
+    }
+
+    // Traduzir pela `ranges` do pai. Sem `ranges`, o barramento não
+    // encaminha nada para a CPU, e o dispositivo não é alcançável; vazia,
+    // ele encaminha sem mudar o endereço.
+    let (inicio, tamanho) = ranges?;
+    if tamanho == 0 {
+        return Some((endereco, extensao));
+    }
+    let ac_pai = da_raiz.0;
+    if ac_pai == 0 || ac_pai > MAX_CELULAS {
+        return None;
+    }
+    let largura = (ac + ac_pai + sc) as usize * 4;
+    let mut desloc = 0usize;
+    while desloc + largura <= tamanho {
+        let entrada = inicio + desloc;
+        desloc += largura;
+        // SAFETY: o laço confere que a entrada inteira cabe na `ranges`,
+        // que o percurso garantiu estar dentro do blob.
+        let (filho, na_cpu, janela) = unsafe {
+            (
+                ler_celulas(dtb, entrada, ac),
+                ler_celulas(dtb, entrada + ac as usize * 4, ac_pai),
+                ler_celulas(dtb, entrada + (ac + ac_pai) as usize * 4, sc),
+            )
+        };
+        if endereco >= filho && endereco.checked_sub(filho)? < janela {
+            return na_cpu.checked_add(endereco - filho).map(|e| (e, extensao));
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
 // Roteamento de interrupção
 // ---------------------------------------------------------------------------
 

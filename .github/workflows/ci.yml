@@ -63,12 +63,22 @@ jobs:
       # kernel, e os testes dele junto. E o canal seguro: os vetores
       # publicados do Noise e a conversa com o `snow`, uma implementação
       # independente, nos dois papéis.
+      #
+      # E a âncora da persistência, que conversa nos testes com o `swtpm` —
+      # um TPM 2.0 de verdade, a implementação de referência — e por isso
+      # precisa dele instalado aqui também. Sem ele o teste falha, e não
+      # pula: um teste que passa quando o que ele testa não existe mente.
+      - name: O TPM dos testes do hospedeiro
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends swtpm
+
       - name: Testes no hospedeiro
-        run: cargo test -p xtask -p tipografia -p aparencia -p toolkit -p sigilo -p politica -p protocolo --features protocolo/alloc
+        run: cargo test -p xtask -p tipografia -p aparencia -p toolkit -p sigilo -p politica -p ancora -p protocolo --features protocolo/alloc
 
       - name: Lints
         run: |
-          cargo clippy -p xtask -p tipografia -p aparencia -p toolkit -p sigilo -p politica --all-targets -- -D warnings
+          cargo clippy -p xtask -p tipografia -p aparencia -p toolkit -p sigilo -p politica -p ancora --all-targets -- -D warnings
           cargo clippy -p protocolo --features alloc --all-targets -- -D warnings
           for alvo in x86_64-unknown-uefi aarch64-unknown-uefi; do
             (cd iniciador && cargo clippy --target "$alvo" -- -D warnings)
@@ -124,7 +134,7 @@ jobs:
         env:
           RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
         run: |
-          cargo doc --no-deps -p protocolo -p tipografia -p aparencia -p toolkit -p sigilo -p politica -p xtask --features protocolo/alloc
+          cargo doc --no-deps -p protocolo -p tipografia -p aparencia -p toolkit -p sigilo -p politica -p ancora -p xtask --features protocolo/alloc
           for alvo in x86_64-unknown-uefi aarch64-unknown-uefi; do
             (cd iniciador && cargo doc --no-deps --target "$alvo")
           done
