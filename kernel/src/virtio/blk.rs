@@ -143,12 +143,24 @@ const _: () = assert!(PAGINAS_DE_DADOS + 2 <= super::fila::DESCRITORES as usize)
 /// espera roda, então, o timer não conta e o escalonador não troca de fio.
 ///
 /// No caminho normal isso é irrelevante: a resposta vem em microssegundos. No
-/// caminho ruim seriam dezenas de milissegundos de kernel parado — e o que
-/// torna isso aceitável não é o número, é o campo `vivo`. Um tempo esgotado
-/// desliga o disco, então a espera longa acontece **no máximo uma vez** na
-/// vida do kernel. Sem aquele campo, cada leitura seguinte pagaria o mesmo
-/// preço, para sempre.
-const VOLTAS_DE_ESPERA: u32 = 5_000_000;
+/// caminho ruim seriam segundos de kernel parado — e o que torna isso
+/// aceitável não é o número, é o campo `vivo`. Um tempo esgotado desliga o
+/// disco, então a espera longa acontece **no máximo uma vez** na vida do
+/// kernel. Sem aquele campo, cada leitura seguinte pagaria o mesmo preço,
+/// para sempre.
+///
+/// # Por que quatrocentos milhões
+///
+/// Foram cinco milhões até o journal passar a gravar e descarregar a cada
+/// decisão auditada. Uma descarga é um `fsync` no arquivo do disco, no
+/// hospedeiro, e numa máquina compartilhada ela às vezes demora dezenas de
+/// milissegundos. Medido na CI, no ARM emulado em release: cinco milhões de
+/// voltas são uns vinte milissegundos — e uma descarga lenta passou disso, e
+/// o disco foi desligado com ela no meio. Quatrocentos milhões ali são perto
+/// de dois segundos; numa máquina de verdade, poucos segundos. Um teto em
+/// tempo seria melhor que um em voltas, e espera um relógio que se leia com
+/// as interrupções desligadas, nas duas arquiteturas.
+const VOLTAS_DE_ESPERA: u32 = 400_000_000;
 
 /// Um disco virtio pronto para uso.
 pub struct Disco {
