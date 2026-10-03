@@ -555,7 +555,7 @@ fn build(arch: Arquitetura, release: bool, modo_teste: bool) -> Result<Artefato,
             conferir_sem_simd(&elf)?;
             let efi = build_do_iniciador(arch, release)?;
             let disco = disco_de_testes()?;
-            instalar_iniciador(arch, &disco, &efi, &elf)?;
+            instalar_iniciador(arch, &disco, &efi, &kernel_para_a_esp(&elf)?)?;
             Ok(Artefato::Disco(disco))
         }
     }
@@ -844,24 +844,6 @@ fn instalar_iniciador(
         let _ = Command::new("mmd").args(["-i", &imagem, dir]).output();
     }
 
-    // O kernel vai para a ESP sem as seções de depuração. O iniciador lê o
-    // arquivo inteiro para a memória antes de carregar os segmentos, e o
-    // DWARF — mais da metade do arquivo, e nunca lido no boot — chegou a
-    // passar dos 32 MiB que ele aceita: o kernel de release com a suíte
-    // ficou com 33 MiB quando o Ed25519 entrou, e o boot parava antes do
-    // kernel. A simbolização é feita aqui no hospedeiro (`cargo xtask
-    // simbolo`, o gdb), com o ELF inteiro em `target/`, que não muda; a
-    // tabela de símbolos e tudo o que o iniciador usa ficam no da ESP.
-    let sem_depuracao = kernel.with_extension("esp.elf");
-    ferramenta(
-        &localizar_objcopy()?.display().to_string(),
-        &[
-            "--strip-debug",
-            &kernel.display().to_string(),
-            &sem_depuracao.display().to_string(),
-        ],
-    )?;
-    let kernel = sem_depuracao.as_path();
     for (origem, destino) in [(efi, caminho_na_esp(arch)), (kernel, KERNEL_NA_ESP)] {
         ferramenta(
             "mcopy",
@@ -875,6 +857,33 @@ fn instalar_iniciador(
         );
     }
     Ok(())
+}
+
+/// O kernel como ele vai para a ESP: sem as seções de depuração.
+///
+/// O iniciador lê o arquivo inteiro para a memória antes de carregar os
+/// segmentos, e o DWARF — mais da metade do arquivo, e nunca lido no boot —
+/// chegou a passar dos 32 MiB que ele aceita: o kernel de release com a
+/// suíte ficou com 33 MiB quando o Ed25519 entrou, e o boot parava antes do
+/// kernel. A simbolização é feita aqui no hospedeiro (`cargo xtask simbolo`,
+/// o gdb), com o ELF inteiro em `target/`, que não muda; a tabela de
+/// símbolos e tudo o que o iniciador usa ficam no da ESP.
+///
+/// É separado de [`instalar_iniciador`] porque nem todo arquivo que vai para
+/// a ESP é um ELF que o `objcopy` aceite: os kernels estragados de propósito
+/// da etapa `iniciador` são justamente os que ele recusaria, e precisam
+/// chegar ao iniciador byte a byte como foram adulterados.
+fn kernel_para_a_esp(kernel: &Path) -> Result<PathBuf, String> {
+    let sem_depuracao = kernel.with_extension("esp.elf");
+    ferramenta(
+        &localizar_objcopy()?.display().to_string(),
+        &[
+            "--strip-debug",
+            &kernel.display().to_string(),
+            &sem_depuracao.display().to_string(),
+        ],
+    )?;
+    Ok(sem_depuracao)
 }
 
 /// Acha o firmware UEFI e prepara uma cópia gravável das variáveis.
@@ -1023,7 +1032,11 @@ fn iniciador(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
     // boot; o que muda é ter para onde falar.
     let modo_teste = arch == Arquitetura::Aarch64;
     build(arch, release, modo_teste)?;
-    let kernel = caminho_elf(arch, release);
+    // Daqui em diante, `kernel` é o arquivo da ESP, e não o de `target/`: é
+    // ele que o iniciador lê, e é contra ele que o CRC, os segmentos e as
+    // relocações do relatório têm de bater. Os estragados também partem
+    // dele, para que a única diferença do bom seja o byte adulterado.
+    let kernel = kernel_para_a_esp(&caminho_elf(arch, release))?;
 
     let disco = disco_de_testes()?;
     let mut falhou = false;
