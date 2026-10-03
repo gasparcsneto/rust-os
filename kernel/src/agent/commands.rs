@@ -93,8 +93,8 @@ pub static COMANDOS: &[Command] = &[
     Command {
         nome: "admin.execute",
         resumo: "Executa uma operacao administrativa com a prova de um administrador sobre \
-                 o desafio, a sessao, o comando e o texto exato dos parametros. Operacoes: \
-                 agent.register, agent.revoke, policy.assign, policy.write.",
+                 o desafio, a sessao, o comando e o texto exato dos parametros, ate 1024 \
+                 bytes. As operacoes e o limite estao em agent.registry.",
         params: &[
             ParamSpec {
                 nome: "challenge",
@@ -1005,6 +1005,10 @@ fn agent_registry(_params: Json, w: &mut JsonWriter) -> fmt::Result {
         w.str_value(nome)?;
     }
     w.end_array()?;
+    w.field_u64(
+        "admin_max_params",
+        super::administracao::MAIORES_PARAMETROS as u64,
+    )?;
     w.end_object()
 }
 

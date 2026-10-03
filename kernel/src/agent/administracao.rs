@@ -225,8 +225,22 @@ pub(crate) fn desafiar(w: &mut JsonWriter) -> fmt::Result {
     w.end_object()
 }
 
-/// O maior texto de parâmetros de uma operação.
-pub const MAIORES_PARAMETROS: usize = 512;
+/// O maior texto de parâmetros de uma operação: 1 KiB, os bytes que a
+/// prova cobre, já desescapados.
+///
+/// # Por que 1 KiB
+///
+/// Porque o pedido administrativo maior que existe precisa caber inteiro:
+/// o `message.send` do administrador com o maior corpo, 512 bytes, mais o
+/// destinatário, o nonce e o prazo. Com 512, o corpo do administrador era
+/// menor que o de qualquer agente — o envelope comia o resto. Tudo continua
+/// sob a prova: o texto inteiro dos parâmetros entra no HMAC e na derivação
+/// da chave, byte a byte, e nada sai dele para caber.
+///
+/// O que limita por cima é a linha do pedido: os parâmetros vão como texto
+/// dentro do JSON de `admin.execute`, escapados mais uma vez — ver
+/// [`super::LINHA_MAX`], que é dimensionada a partir deste número.
+pub const MAIORES_PARAMETROS: usize = 1024;
 
 /// Um pedido de `admin.execute`, com os campos já tirados do JSON — pelo
 /// handler em [`super::commands`], que é onde os parâmetros de um comando

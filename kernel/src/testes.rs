@@ -207,6 +207,40 @@ fn json_string_com_aspa_escapada() -> Resultado {
     Ok(())
 }
 
+/// Desescapar: os escapes simples, o `\uXXXX` do plano básico, e o par de
+/// substitutos de um caractere fora dele — e as metades soltas, recusadas.
+fn json_desescapa_substitutos() -> Resultado {
+    let desescapar = |texto: &[u8]| {
+        let mut buffer = [0u8; 64];
+        Json(texto)
+            .member("s")
+            .and_then(|v| v.desescapar_em(&mut buffer).map(alloc::string::String::from))
+    };
+    let casos: [(&[u8], Option<&str>); 6] = [
+        (br#"{"s":"a\"b\\c\n"}"#, Some("a\"b\\c\n")),
+        (br#"{"s":"\u00e9\u00E9"}"#, Some("éé")),
+        (br#"{"s":"x\ud83d\ude00y"}"#, Some("x\u{1F600}y")),
+        // Um substituto alto sem o baixo, o baixo sozinho, e o alto seguido
+        // de outro alto: nenhum é caractere.
+        (br#"{"s":"\ud83dz"}"#, None),
+        (br#"{"s":"\ude00"}"#, None),
+        (br#"{"s":"\ud83d\ud83d"}"#, None),
+    ];
+    for (texto, esperado) in casos {
+        let obtido = desescapar(texto);
+        if obtido.as_deref() != esperado {
+            crate::log_error!(
+                "teste",
+                "{:?}: {:?}",
+                core::str::from_utf8(texto),
+                obtido
+            );
+            return Err("um escape foi desfeito errado");
+        }
+    }
+    Ok(())
+}
+
 fn json_tipos_escalares() -> Resultado {
     let j = Json(br#"{"n":42,"t":true,"f":false,"s":"txt","z":null}"#);
     if j.member("n").and_then(|v| v.as_u64()) != Some(42) {
@@ -14186,6 +14220,191 @@ fn mensagens_esvaziar_a_caixa() -> Resultado {
     })
 }
 
+/// Um texto como string JSON, com o que não é ASCII escrito `\uXXXX` — em
+/// par de substitutos fora do plano básico: o escape mais longo que um
+/// cliente pode escolher, três vezes o tamanho do texto.
+fn como_string_json(texto: &str) -> alloc::string::String {
+    use core::fmt::Write;
+    let mut s = alloc::string::String::new();
+    for c in texto.chars() {
+        match c {
+            '"' => s.push_str("\\\""),
+            '\\' => s.push_str("\\\\"),
+            c if (c as u32) < 0x20 || !c.is_ascii() => {
+                let mut unidades = [0u16; 2];
+                for u in c.encode_utf16(&mut unidades) {
+                    let _ = write!(s, "\\u{u:04x}");
+                }
+            }
+            c => s.push(c),
+        }
+    }
+    s
+}
+
+/// Um `admin.execute` pela porta de verdade — o desafio pedido nela, a
+/// prova calculada para a sessão dela —, com os parâmetros escapados pelo
+/// escape mais longo. Devolve a resposta inteira, com o envelope.
+fn admin_pela_porta(
+    agente: &mut AgenteDeTeste,
+    sessao: &mut crate::agent::SessaoDeTeste,
+    p: u8,
+    comando: &str,
+    prova_de: &str,
+    parametros: &str,
+) -> Result<alloc::string::String, &'static str> {
+    let r = pela_porta(agente, sessao, "admin.challenge", "{}")?;
+    let d = Json(r.as_bytes()).member("result").ok_or("o desafio nao veio")?;
+    let id = d.member("challenge").and_then(|v| v.as_u64()).ok_or("sem desafio")?;
+    let hex = |nome| {
+        d.member(nome)
+            .and_then(|v| v.as_str())
+            .and_then(sigilo::de_hex)
+            .ok_or("desafio incompleto")
+    };
+    let (nonce, efemera) = (hex("nonce")?, hex("ephemeral")?);
+    let publica = sigilo::publica_de(&ADMIN_DE_TESTE);
+    let contexto = sigilo::administracao::Contexto {
+        nonce: &nonce,
+        sessao: p,
+        administrador: &publica,
+        efemera: &efemera,
+        comando,
+        parametros: prova_de,
+    };
+    let prova = sigilo::administracao::provar(&ADMIN_DE_TESTE, &contexto).map_err(|_| "sem prova")?;
+    let pedido = alloc::format!(
+        r#"{{"challenge":{id},"command":"{comando}","params":"{}","admin":"{}","proof":"{}"}}"#,
+        como_string_json(parametros),
+        sigilo::hex(&publica),
+        sigilo::hex(&prova)
+    );
+    pela_porta(agente, sessao, "admin.execute", &pedido)
+}
+
+/// Os parâmetros de `admin.execute` chegam a 1 KiB, todos sob a prova, pela
+/// porta de verdade: o corpo cheio do administrador; parâmetros de 1024
+/// bytes cujo escape passa do dobro e do triplo; 1025 recusados antes de
+/// gastar o desafio; um byte mudado no fim derruba a prova; e uma linha
+/// além do quadro é recusada sem derrubar a sessão.
+///
+/// # O que este caso protege
+///
+/// O limite de cima, e que nada saiu da prova para caber: o resumo dos
+/// parâmetros na auditoria é o dos 1024 bytes que o administrador provou.
+fn admin_parametros_de_um_kib() -> Resultado {
+    use crate::agent::administracao::MAIORES_PARAMETROS;
+    com_mensagens(|| {
+        crate::identidade::registrar_administrador_de_teste(
+            sigilo::publica_de(&ADMIN_DE_TESTE),
+            "administrador",
+        );
+        let (mut a, mut sa) = conectado(1)?;
+        let (mut b, mut sb) = conectado(2)?;
+        // Os parâmetros com espaços no fim até `tamanho` bytes: o JSON os
+        // aceita, e a prova os cobre como qualquer outro byte.
+        let ate = |texto: &str, tamanho: usize| {
+            let mut t = alloc::string::String::from(texto);
+            while t.len() < tamanho {
+                t.push(' ');
+            }
+            t
+        };
+        let executada = |r: &str| r.contains(r#""executed":true"#);
+
+        // O corpo cheio, 512 bytes, como o de qualquer agente.
+        let cheio = "c".repeat(politica::mensagens::MAIOR_CORPO);
+        let params = alloc::format!(r#"{{"to":"teste-2","body":"{cheio}","nonce":1}}"#);
+        if params.len() <= 512 {
+            return Err("o caso nao passa do limite antigo");
+        }
+        let r = admin_pela_porta(&mut a, &mut sa, 1, "message.send", &params, &params)?;
+        if !executada(&r) || !pela_porta(&mut b, &mut sb, "message.read", "{}")?.contains(&cheio) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o corpo cheio do administrador nao chegou");
+        }
+
+        // 1024 bytes, com 480 aspas no corpo: cada uma vira duas no texto
+        // dos parâmetros, e quatro na linha — mais que o quadro antigo.
+        let aspas = "\"".repeat(480);
+        let params = ate(
+            &alloc::format!(r#"{{"to":"teste-2","body":"{}","nonce":2}}"#, como_string_json(&aspas)),
+            MAIORES_PARAMETROS,
+        );
+        if params.len() != MAIORES_PARAMETROS {
+            return Err("os parametros do caso nao tem 1024 bytes");
+        }
+        let r = admin_pela_porta(&mut a, &mut sa, 1, "message.send", &params, &params)?;
+        let lido = pela_porta(&mut b, &mut sb, "message.read", r#"{"max":8}"#)?;
+        if !executada(&r) || !lido.contains(&como_string_json(&aspas)) {
+            crate::log_error!("teste", "{}", r);
+            return Err("os 1024 bytes com aspas nao passaram inteiros");
+        }
+        let gravado = ultimo_com_metodo("message.send").is_some_and(|e| {
+            e.titular == politica::auditoria::Titular::Administrador
+                && e.parametros == politica::auditoria::resumo_dos_parametros(params.as_bytes())
+        });
+        if !gravado {
+            return Err("a auditoria nao tem o resumo dos 1024 bytes provados");
+        }
+
+        // 1024 bytes fora do ASCII: o escape triplica, e ainda cabe. A
+        // linha não é de política nenhuma — a recusa é da política, depois
+        // de a prova conferir.
+        let longe = ate(
+            &alloc::format!(r#"{{"line":"{}"}}"#, "é".repeat(506)),
+            MAIORES_PARAMETROS,
+        );
+        let r = admin_pela_porta(&mut a, &mut sa, 1, "policy.write", &longe, &longe)?;
+        if longe.len() != MAIORES_PARAMETROS
+            || executada(&r)
+            || !r.contains(r#""code":"DENY_POLICY""#)
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("os 1024 bytes fora do ASCII nao chegaram a decisao da operacao");
+        }
+
+        // Um emoji no corpo, escrito como par de substitutos.
+        let params = r#"{"to":"teste-2","body":"oi 😀","nonce":3}"#;
+        let r = admin_pela_porta(&mut a, &mut sa, 1, "message.send", params, params)?;
+        if !executada(&r) || !pela_porta(&mut b, &mut sb, "message.read", r#"{"max":8}"#)?.contains("oi 😀") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o par de substitutos nao foi desfeito no texto provado");
+        }
+
+        // Um byte a mais: recusado pelo tamanho, e nada chega.
+        let demais = ate(r#"{"to":"teste-2","body":"demais","nonce":4}"#, MAIORES_PARAMETROS + 1);
+        let r = admin_pela_porta(&mut a, &mut sa, 1, "message.send", &demais, &demais)?;
+        if executada(&r)
+            || !r.contains("grandes demais")
+            || pela_porta(&mut b, &mut sb, "message.read", r#"{"max":8}"#)?.contains("demais")
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("1025 bytes de parametros passaram");
+        }
+
+        // A prova dos 1024 bytes, com o último trocado: não confere.
+        let certo = ate(r#"{"to":"teste-2","body":"trocado","nonce":5}"#, MAIORES_PARAMETROS);
+        let mut outro = certo.clone();
+        outro.pop();
+        outro.push('\t');
+        let r = admin_pela_porta(&mut a, &mut sa, 1, "message.send", &certo, &outro)?;
+        if executada(&r) || !r.contains("a prova nao confere") {
+            crate::log_error!("teste", "{}", r);
+            return Err("a prova valeu com o ultimo byte trocado");
+        }
+
+        // Uma linha além do quadro: recusada, e a sessão continua.
+        let longa = alloc::format!(r#"{{"x":"{}"}}"#, "a".repeat(5000));
+        let r = pela_porta(&mut a, &mut sa, "agent.ping", &longa)?;
+        if !r.contains("-32000") || !pela_porta(&mut a, &mut sa, "agent.ping", "{}")?.contains("pong") {
+            crate::log_error!("teste", "{}", r);
+            return Err("a linha alem do quadro nao foi recusada, ou derrubou a sessao");
+        }
+        Ok(())
+    })
+}
+
 // ===========================================================================
 // Quatro agentes ao mesmo tempo
 // ===========================================================================
@@ -18240,6 +18459,10 @@ static CASOS: &[Caso] = &[
         f: compositor_o_console_e_a_camada_de_baixo,
     },
     Caso {
+        nome: "json: desescapa os substitutos",
+        f: json_desescapa_substitutos,
+    },
+    Caso {
         nome: "json: objeto simples",
         f: json_objeto_simples,
     },
@@ -18650,6 +18873,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "mensagens: esvaziar a caixa",
         f: mensagens_esvaziar_a_caixa,
+    },
+    Caso {
+        nome: "admin: parametros de 1 KiB, sob a prova",
+        f: admin_parametros_de_um_kib,
     },
     Caso {
         nome: "barra: nenhuma superficie a cobre",

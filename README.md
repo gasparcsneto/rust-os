@@ -1491,6 +1491,19 @@ comando, outra sessão ou outro desafio, e o desafio vale uma tentativa, por
 trinta segundos. Vale em qualquer sessão — inclusive na serial, que é aberta
 e por isso mesmo não pode registrar ninguém sem prova.
 
+Os parâmetros vão até **1 KiB**, e todos sob a prova: o texto inteiro entra
+na derivação e no HMAC, byte a byte — nada sai dele para caber. É o que o
+pedido maior precisa: o `message.send` do administrador com o corpo cheio,
+512 bytes, que com o teto antigo de 512 de parâmetros não cabia. Como o
+texto vai escapado dentro do JSON de `admin.execute`, a linha do pedido foi
+para 4 KiB: o pior escape de um texto válido, `\uXXXX` para o que não é
+ASCII, triplica o tamanho, e 3 KiB mais o envelope cabem. Um pedido com
+1025 bytes de parâmetros é recusado antes de gastar o desafio; uma linha
+além do quadro, com um erro, sem derrubar a sessão. O `agent.registry` diz
+o limite, `admin_max_params`. O texto desescapado aceita também o par de
+substitutos UTF-16 de um caractere fora do plano básico — um emoji escrito
+como `\ud83d\ude00` era recusado como parâmetro inválido.
+
 Medido: um aperto de mão leva, com os dois lados dentro da suíte em debug,
 de 30 a 70 ms — eram 210 antes de as primitivas serem compiladas otimizadas
 mesmo no build de depuração.

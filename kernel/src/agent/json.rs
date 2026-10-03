@@ -444,13 +444,26 @@ impl<'a> Json<'a> {
             match simples {
                 Some(b) => por(&[b], &mut n)?,
                 None => {
-                    let hex = bruto.get(i..i + 4)?;
-                    // `from_str_radix` aceita um `+` na frente; o JSON, não.
-                    if !hex.iter().all(u8::is_ascii_hexdigit) {
-                        return None;
-                    }
-                    let ponto = u32::from_str_radix(core::str::from_utf8(hex).ok()?, 16).ok()?;
+                    let mut ponto = quatro_hex(bruto.get(i..i + 4)?)?;
                     i += 4;
+                    // Fora do plano básico, o JSON escreve o caractere como
+                    // um par de substitutos UTF-16: `\ud83d\ude00`. Cada
+                    // metade sozinha não é caractere; as duas juntas são um.
+                    // Sem isto, um corpo com um emoji escrito assim pelo
+                    // cliente — o escape que todo serializador pode escolher
+                    // — era recusado como parâmetro inválido.
+                    if (0xD800..0xDC00).contains(&ponto) {
+                        if bruto.get(i..i + 2)? != b"\\u" {
+                            return None;
+                        }
+                        let baixo = quatro_hex(bruto.get(i + 2..i + 6)?)?;
+                        if !(0xDC00..0xE000).contains(&baixo) {
+                            return None;
+                        }
+                        i += 6;
+                        ponto = 0x10000 + ((ponto - 0xD800) << 10) + (baixo - 0xDC00);
+                    }
+                    // Um substituto baixo sozinho não é caractere: `None`.
                     let c = char::from_u32(ponto)?;
                     let mut utf8 = [0u8; 4];
                     por(c.encode_utf8(&mut utf8).as_bytes(), &mut n)?;
@@ -630,4 +643,13 @@ fn pular_container(b: &[u8], mut i: usize, abre: u8, fecha: u8) -> Option<usize>
         i += 1;
     }
     None
+}
+
+/// Quatro dígitos hexadecimais de um `\uXXXX`. `from_str_radix` aceita um
+/// `+` na frente; o JSON, não — por isso a conferência antes.
+fn quatro_hex(hex: &[u8]) -> Option<u32> {
+    if hex.len() != 4 || !hex.iter().all(u8::is_ascii_hexdigit) {
+        return None;
+    }
+    u32::from_str_radix(core::str::from_utf8(hex).ok()?, 16).ok()
 }

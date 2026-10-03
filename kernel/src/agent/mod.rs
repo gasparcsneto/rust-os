@@ -101,9 +101,10 @@ pub(crate) fn agendar_falha_fatal() {
 /// # Por que meio segundo, e não menos
 ///
 /// Porque o custo de errar para baixo é partir um quadro legítimo ao meio. A
-/// conta que limita: a maior requisição são 2048 bytes, que a 115200 bauds
-/// levam 180 ms para atravessar uma serial de verdade. Meio segundo é quase o
-/// triplo disso, e neste canal — um socket no hospedeiro — é cinco ordens de
+/// conta que limita: a maior requisição são 4096 bytes, que a 115200 bauds
+/// levam 356 ms para atravessar uma serial de verdade. Meio segundo ainda
+/// cobre — e a conta é de ociosidade, entre um byte e o seguinte —, e neste
+/// canal — um socket no hospedeiro — é cinco ordens de
 /// grandeza a mais do que uma requisição precisa.
 ///
 /// A conta é sobre **ociosidade**, e não sobre a idade do quadro, então um
@@ -144,7 +145,21 @@ pub const LIMPAR_AO_CONECTAR: &[u8] = b"\n";
 /// explícito em vez de silenciosamente truncadas — um agente precisa saber
 /// que seu pedido não coube, e não receber uma resposta a uma pergunta que
 /// não fez.
-const LINHA_MAX: usize = 2048;
+///
+/// # Por que 4 KiB
+///
+/// A maior requisição legítima é um `admin.execute` com os parâmetros no
+/// teto, [`administracao::MAIORES_PARAMETROS`] — 1 KiB —, que vão como
+/// texto dentro do JSON e são escapados de novo. O pior escape que um
+/// texto JSON válido pede é o de um caractere fora do ASCII escrito como
+/// `\uXXXX`: seis bytes por dois de UTF-8, três vezes o tamanho. Três vezes
+/// 1 KiB, mais o envelope — o desafio, o comando, a chave e a prova em hex
+/// —, cabe em 4 KiB com folga. Com 2 KiB, um corpo de mensagem cheio de
+/// aspas já não cabia, e o pedido era recusado por um limite de baixo,
+/// e não pelo da prova. O preço é o buffer: um por canal, e o do modo
+/// post-mortem na pilha.
+const LINHA_MAX: usize = 4096;
+const _: () = assert!(LINHA_MAX >= 3 * administracao::MAIORES_PARAMETROS + 512);
 
 /// Monta linhas a partir de um fluxo de bytes.
 ///
