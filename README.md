@@ -1561,7 +1561,11 @@ grava cada assinatura, com a chave inteira de quem assinou, e o desfecho,
 com o alvo, o desafio, a versão da política e o motivo. Nenhum papel — nem
 o `sistema`, nem a serial — substitui o quórum, e não há operação de
 recuperação que o contorne. A revogação vale até o próximo boot: o disco
-é só de leitura, e a credencial da imagem volta com ele.
+é só de leitura, e a credencial da imagem volta com ele. Isso é um buraco
+conhecido, e não uma escolha: a persistência (o ponto 7) tem como requisito
+que a revogação sobreviva ao reboot, com a geração que impede restaurar um
+estado anterior — o desenho está em
+[`docs/PERSISTENCIA.md`](docs/PERSISTENCIA.md), e ainda não foi feito.
 
 Medido: um aperto de mão leva, com os dois lados dentro da suíte em debug,
 de 30 a 70 ms — eram 210 antes de as primitivas serem compiladas otimizadas
