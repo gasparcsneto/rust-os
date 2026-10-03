@@ -41,10 +41,15 @@ use super::fila::Fila;
 
 /// Quantos bytes cabem esperando processamento.
 ///
-/// Uma requisição do agente cabe em 2 KiB (ver `agent::LINHA_MAX`); este
-/// tamanho dá folga para uma requisição inteira chegar em rajada enquanto a
-/// tarefa ainda processa a anterior.
-const CAPACIDADE: usize = 4096;
+/// O dobro da maior requisição do agente ([`crate::agent::LINHA_MAX`], 4
+/// KiB): folga para uma requisição inteira chegar em rajada enquanto a
+/// tarefa ainda processa a anterior. Quando a linha foi de 2 para 4 KiB, a
+/// fila ficou com os 4 KiB de antes — do tamanho de uma requisição, sem
+/// folga —, e na serial do ARM, que esvazia mais devagar, uma requisição do
+/// tamanho do teto perdia bytes e era descartada como danificada, em vez de
+/// atendida. A relação é conferida ao compilar.
+const CAPACIDADE: usize = 8192;
+const _: () = assert!(CAPACIDADE >= 2 * crate::agent::LINHA_MAX);
 
 static BYTES: Fila<u8, CAPACIDADE> = Fila::nova();
 

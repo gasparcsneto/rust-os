@@ -158,7 +158,7 @@ pub const LIMPAR_AO_CONECTAR: &[u8] = b"\n";
 /// aspas já não cabia, e o pedido era recusado por um limite de baixo,
 /// e não pelo da prova. O preço é o buffer: um por canal, e o do modo
 /// post-mortem na pilha.
-const LINHA_MAX: usize = 4096;
+pub(crate) const LINHA_MAX: usize = 4096;
 const _: () = assert!(LINHA_MAX >= 3 * administracao::MAIORES_PARAMETROS + 512);
 
 /// Monta linhas a partir de um fluxo de bytes.
