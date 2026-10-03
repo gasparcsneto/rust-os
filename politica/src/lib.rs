@@ -58,6 +58,8 @@ pub use permissao::Permissao;
 ///   abre sessão de agente —, e dizem só o que ele pode conceder. Escritas
 ///   uma a uma, sem incluir o operador: um papel incluído que muda muda o
 ///   do administrador, e o do administrador não muda em tempo de execução.
+/// - `quorum admin.revoke 2 3`: revogar a credencial de um administrador
+///   exige a prova de duas outras, de um grupo de três — o da imagem.
 macro_rules! papeis_de_sistema {
     () => {
         "\
@@ -68,12 +70,14 @@ recurso sistema message.send papel:observador papel:operador papel:sistema papel
 taxa sistema 400 800
 processos sistema 32
 
-papel administrador agent.read system.read log.read ui.read ui.act process.run net.send fs.read audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox
+papel administrador agent.read system.read log.read ui.read ui.act process.run net.send fs.read audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke
 recurso administrador fs.read /dados /bin /programas
 recurso administrador process.run /bin /programas
 recurso administrador message.send papel:operador papel:sistema papel:administrador
 taxa administrador 10 20
 processos administrador 8
+
+quorum admin.revoke 2 3
 "
     };
 }

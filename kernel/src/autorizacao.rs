@@ -210,10 +210,25 @@ pub fn com_politica<R>(f: impl FnOnce(&Politica) -> R) -> R {
     })
 }
 
+/// A versão da política em vigor: cresce a cada troca e a cada mudança.
+///
+/// Entra no conteúdo que as credenciais de um quórum provam — ver
+/// [`sigilo::quorum`]: uma prova feita sob uma política não vale sob outra,
+/// e uma mudança no meio de uma operação de quórum a derruba.
+static VERSAO_DA_POLITICA: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+
+/// A versão da política em vigor.
+pub fn versao_da_politica() -> u64 {
+    VERSAO_DA_POLITICA.load(Ordering::SeqCst)
+}
+
 /// Troca a política em vigor por outra, já validada. A troca é inteira: a
 /// decisão seguinte vê a nova, e a que estava em curso já tinha decidido.
 pub fn trocar_politica(nova: Politica) {
-    let velha = crate::arch::sem_interrupcoes(|| POLITICA.lock().replace(nova));
+    let velha = crate::arch::sem_interrupcoes(|| {
+        VERSAO_DA_POLITICA.fetch_add(1, Ordering::SeqCst);
+        POLITICA.lock().replace(nova)
+    });
     drop(velha);
 }
 
@@ -1125,6 +1140,37 @@ pub fn auditar_administracao(
     auditar(&quem, metodo, recurso, codigo, parametros, detalhe);
 }
 
+/// Grava um desfecho de operação de quórum, em nome das credenciais que
+/// assinaram — todas, pelo nome, `adm-1+adm-2`. Sem nenhuma conferida
+/// ainda, ninguém. As impressões das chaves vão no detalhe: o registro tem
+/// lugar para uma chave só.
+#[allow(clippy::too_many_arguments)]
+pub fn auditar_quorum(
+    sessao: u8,
+    assinantes: &[&str],
+    papel: Option<&str>,
+    metodo: &str,
+    recurso: &str,
+    codigo: Codigo,
+    parametros: &[u8],
+    detalhe: &str,
+) {
+    let titular = if assinantes.is_empty() {
+        Titular::Anonimo
+    } else {
+        Titular::Administrador
+    };
+    let quem = Quem {
+        titular,
+        sessao,
+        sessao_de_pessoa: None,
+        agente: assinantes.join("+"),
+        chave: None,
+        papel: papel.map(ToString::to_string),
+    };
+    auditar(&quem, metodo, recurso, codigo, parametros, detalhe);
+}
+
 /// Grava um desfecho de sessão de pessoa: o login, a saída, uma tentativa
 /// recusada por limite. Com a pessoa e a sessão, o titular é a pessoa; sem,
 /// é ninguém ainda — um console sem login.
@@ -1184,6 +1230,7 @@ pub fn mudar_politica<E>(f: impl FnOnce(&Politica) -> Result<Politica, E>) -> Re
             Some(p) => f(p),
             None => f(&Politica::emergencia()),
         }?;
+        VERSAO_DA_POLITICA.fetch_add(1, Ordering::SeqCst);
         Ok(guarda.replace(nova))
     })?;
     // A velha sai fora da seção: largar uma política é devolver memória.

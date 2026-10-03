@@ -84,8 +84,14 @@ pub static COMANDOS: &[Command] = &[
         nome: "admin.challenge",
         resumo: "Um desafio para uma operacao administrativa nesta sessao: numero, nonce e \
                  chave efemera. Vale uma tentativa, por pouco tempo; pedir outro descarta \
-                 o anterior.",
-        params: &[],
+                 o anterior. Com `for`, um desafio de quorum para aquela operacao, com a \
+                 versao da politica, M e N.",
+        params: &[ParamSpec {
+            nome: "for",
+            tipo: TipoParam::Texto,
+            obrigatorio: false,
+            descricao: "A operacao de quorum para que o desafio e pedido: admin.revoke",
+        }],
         acesso: Acesso::PorProva,
         recurso: None,
         handler: admin_challenge,
@@ -117,14 +123,21 @@ pub static COMANDOS: &[Command] = &[
             ParamSpec {
                 nome: "admin",
                 tipo: TipoParam::Texto,
-                obrigatorio: true,
+                obrigatorio: false,
                 descricao: "A chave publica do administrador, em hex",
             },
             ParamSpec {
                 nome: "proof",
                 tipo: TipoParam::Texto,
-                obrigatorio: true,
+                obrigatorio: false,
                 descricao: "A prova, em hex",
+            },
+            ParamSpec {
+                nome: "signatures",
+                tipo: TipoParam::Texto,
+                obrigatorio: false,
+                descricao: "Numa operacao de quorum, no lugar de admin e proof: \
+                            `chave:prova,chave:prova`, em hex, uma por credencial",
             },
         ],
         acesso: Acesso::PorProva,
@@ -947,8 +960,9 @@ fn policy_show(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.end_object()
 }
 
-fn admin_challenge(_params: Json, w: &mut JsonWriter) -> fmt::Result {
-    super::administracao::desafiar(w)
+fn admin_challenge(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let para = params.member("for").and_then(|v| v.as_str());
+    super::administracao::desafiar(para, w)
 }
 
 /// Os parâmetros são lidos aqui, como os de todo comando; quem confere a
@@ -969,6 +983,7 @@ fn admin_execute(params: Json, w: &mut JsonWriter) -> fmt::Result {
             .member("proof")
             .and_then(|v| v.as_str())
             .and_then(sigilo::de_hex),
+        assinaturas: params.member("signatures").and_then(|v| v.as_str()),
     };
     super::administracao::executar(pedido, w)
 }

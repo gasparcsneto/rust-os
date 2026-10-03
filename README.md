@@ -157,7 +157,7 @@ $ cargo xtask agent --canal 2 agent.session
 | `agent.registry` | Quem pode entrar pelas portas: a chave do Duke e cada agente registrado, com a origem |
 | `person.registry` | Quem pode entrar pelos consoles: cada pessoa, com identificador, nome, papel, estado e sessões abertas — sem credencial |
 | `admin.challenge` | Um desafio de uso único para uma operação administrativa nesta sessão |
-| `admin.execute` | Uma operação administrativa com a prova de um administrador (`challenge`, `command`, `params`, `admin`, `proof`): `agent.register`, `agent.revoke`, `policy.assign`, `policy.write`, `person.register`, `person.revoke`, `credential.rotate`, `session.revoke`, `lease.revoke`, `message.send`, `message.read`, `message.ack`, `message.purge`, `message.purge_mailbox` |
+| `admin.execute` | Uma operação administrativa com a prova de um administrador (`challenge`, `command`, `params`, `admin`, `proof`): `agent.register`, `agent.revoke`, `policy.assign`, `policy.write`, `person.register`, `person.revoke`, `credential.rotate`, `session.revoke`, `lease.revoke`, `message.send`, `message.read`, `message.ack`, `message.purge`, `message.purge_mailbox`; e, com as assinaturas de um quórum em `signatures`, `admin.revoke` |
 | `audit.tail` | Os registros mais recentes da auditoria encadeada, com o que basta para refazer cada elo (`count`) |
 | `audit.head` | A cabeça da auditoria — o elo do último registro, para ancorar fora da máquina —, a âncora e quantos há |
 | `audit.verify` | Refaz a cadeia guardada a partir da âncora e diz se cada elo confere |
@@ -359,6 +359,7 @@ sigilo/src/          o canal seguro, dos dois lados da conversa
 ├── cifra.rs         o estado de uma cifra: a chave e o contador
 ├── resumo.rs        o BLAKE2s, o HMAC e os dois HKDF
 ├── administracao.rs a prova de uma operação administrativa, presa ao contexto
+├── quorum.rs        M de N credenciais provando o mesmo conteúdo canônico
 ├── gerador.rs       ChaCha20 com apagamento rápido da chave
 ├── credencial.rs    o verificador Argon2id de uma senha, conferido em tempo constante
 ├── pessoas.rs       o identificador de uma pessoa e o formato do registro delas
@@ -1503,6 +1504,47 @@ além do quadro, com um erro, sem derrubar a sessão. O `agent.registry` diz
 o limite, `admin_max_params`. O texto desescapado aceita também o par de
 substitutos UTF-16 de um caractere fora do plano básico — um emoji escrito
 como `\ud83d\ude00` era recusado como parâmetro inválido.
+
+**Revogar um administrador exige quórum: 2 de 3.** O administrador de
+verdade é a credencial — a chave que prova —, e não um papel: um agente ou
+uma pessoa com o papel `administrador` é um titular de sessão comum. A
+imagem tem um grupo de três credenciais, e `admin.revoke` tira uma delas só
+com a prova de **duas outras**: uma chave roubada, sozinha, não revoga as
+dos donos legítimos. O M e o N são da política, por operação — a linha
+`quorum admin.revoke 2 3` —, só da imagem: o `policy.write` não a muda, e o
+`xtask` não gera uma imagem cujo grupo não tenha o N que a política diz.
+
+O caminho é o de toda operação administrativa, com M credenciais no lugar
+de uma: `admin.challenge` com `{"for":"admin.revoke"}` dá um desafio de
+quórum — que diz a versão da política, M e N, e vale dois minutos, para as
+provas serem juntadas —; cada credencial prova o **mesmo** conteúdo
+canônico (`sigilo::quorum::Conteudo`: a versão do formato, o número da
+operação, o nonce e a efêmera do desafio, a sessão, a versão da política,
+M, N, o comando, o alvo e o texto exato dos parâmetros, cada campo
+variável com o tamanho na frente); e `admin.execute` leva as assinaturas
+em `signatures`, `chave:prova,...`. A prova de cada credencial é a da
+prova administrativa — X25519 com a efêmera do desafio, HKDF, HMAC-BLAKE2s
+—, com rótulos próprios: só o Duke a confere, e ela não vale como prova
+comum, nem o contrário.
+
+O kernel confere, nesta ordem: o formato; o desafio, que sai de qualquer
+jeito e tem de ser de quórum para esta operação, sob a política de agora;
+cada assinatura sobre o conteúdo, de credencial do grupo, ativa, uma vez
+só — uma que não confere derruba o pedido inteiro —; M delas; o papel de
+cada uma com `admin.revoke`, pela mesma decisão de toda operação
+administrativa; o alvo existe, não está revogado e não assina a própria
+revogação; e restam ao menos M ativas — conferido e marcado numa seção
+só. A revogação vale na hora: a credencial não prova, não assina e não
+recebe mais nada, as mensagens vivas dela são anuladas, e **todos os
+desafios pendentes saem** — de qualquer sessão: um desafio não é de uma
+chave, e quem estava no meio pede outro, sobre o estado novo. É também a
+regra da concorrência: o pedido atendido primeiro decide, e o outro é
+recusado. O que a credencial fez antes fica na auditoria; a revogação
+grava cada assinatura, com a chave inteira de quem assinou, e o desfecho,
+com o alvo, o desafio, a versão da política e o motivo. Nenhum papel — nem
+o `sistema`, nem a serial — substitui o quórum, e não há operação de
+recuperação que o contorne. A revogação vale até o próximo boot: o disco
+é só de leitura, e a credencial da imagem volta com ele.
 
 Medido: um aperto de mão leva, com os dois lados dentro da suíte em debug,
 de 30 a 70 ms — eram 210 antes de as primitivas serem compiladas otimizadas

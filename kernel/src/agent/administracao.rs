@@ -208,17 +208,40 @@ pub fn operacoes() -> impl Iterator<Item = (&'static str, &'static str)> {
     OPERACOES.iter().map(|o| (o.nome, o.resumo))
 }
 
-/// Emite um desafio para a sessão do pedido: `admin.challenge`.
-pub(crate) fn desafiar(w: &mut JsonWriter) -> fmt::Result {
+/// Emite um desafio para a sessão do pedido: `admin.challenge`. Com `para`,
+/// um desafio de quórum para aquela operação — e a resposta diz o que as
+/// credenciais vão provar além dele: a versão da política, M e N.
+pub(crate) fn desafiar(para: Option<&str>, w: &mut JsonWriter) -> fmt::Result {
     let sessao = super::sessao::atual();
     w.begin_object()?;
-    match crate::identidade::desafiar(sessao) {
+    let quorum = match para {
+        None => None,
+        Some(nome) => match politica::arquivo::OPERACOES_DE_QUORUM
+            .iter()
+            .find(|o| **o == nome)
+        {
+            Some(o) => Some(*o),
+            None => {
+                w.field_str("error", "nao e uma operacao de quorum")?;
+                return w.end_object();
+            }
+        },
+    };
+    match crate::identidade::desafiar(sessao, quorum) {
         Ok(d) => {
             w.field_u64("challenge", d.id)?;
             w.field_str("nonce", &sigilo::hex(&d.nonce))?;
             w.field_str("ephemeral", &sigilo::hex(&d.efemera))?;
             w.field_u64("session", u64::from(sessao))?;
-            w.field_u64("valid_ms", crate::identidade::VALIDADE_DO_DESAFIO_MS)?;
+            w.field_u64("valid_ms", d.valido_ms)?;
+            if let Some(operacao) = quorum {
+                w.field_str("operation", operacao)?;
+                w.field_u64("policy_version", d.versao_da_politica)?;
+                if let Some(q) = autorizacao::com_politica(|p| p.quorum(operacao)) {
+                    w.field_u64("m", u64::from(q.m))?;
+                    w.field_u64("n", u64::from(q.n))?;
+                }
+            }
         }
         Err(_) => w.field_str("error", "sem entropia: nenhum desafio pode ser emitido")?,
     }
@@ -253,13 +276,22 @@ pub struct Pedido<'a> {
     pub parametros: Option<&'a str>,
     pub administrador: Option<[u8; sigilo::TAM_CHAVE]>,
     pub prova: Option<[u8; 32]>,
+    /// As assinaturas de um quórum, como vieram: `chave:prova,chave:prova`,
+    /// em hex. No lugar de `administrador` e `prova`, nunca junto.
+    pub assinaturas: Option<&'a str>,
 }
 
-/// Executa uma operação administrativa: `admin.execute`.
+/// Executa uma operação administrativa: `admin.execute`. Com assinaturas,
+/// uma operação de quórum — ver [`conferir_quorum_e_executar`].
 pub(crate) fn executar(pedido: Pedido, w: &mut JsonWriter) -> fmt::Result {
     let sessao = super::sessao::atual();
     w.begin_object()?;
-    if let Err((codigo, motivo)) = conferir_e_executar(sessao, pedido, w) {
+    let resultado = if pedido.assinaturas.is_some() {
+        conferir_quorum_e_executar(sessao, pedido, w)
+    } else {
+        conferir_e_executar(sessao, pedido, w)
+    };
+    if let Err((codigo, motivo)) = resultado {
         crate::log_warn!(
             "admin",
             "sessao {}: operacao administrativa recusada: {} ({})",
@@ -327,12 +359,22 @@ fn conferir_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) -> Result
         Ok(d) => d,
         Err(e) => return Err(recusar_anonimo(Codigo::DenyNotAuthenticated, e.motivo())),
     };
-
-    let Some((nome, papel)) = crate::identidade::papel_do_administrador(&administrador) else {
+    // Um desafio de quórum não serve a uma credencial só: ele vale mais
+    // tempo, e foi pedido para outra coisa.
+    if desafio.quorum.is_some() {
         return Err(recusar_anonimo(
             Codigo::DenyNotAuthenticated,
-            "chave fora do registro de administradores",
+            "um desafio de quorum nao serve a uma credencial so",
         ));
+    }
+
+    let Some((nome, papel)) = crate::identidade::papel_do_administrador(&administrador) else {
+        let motivo = if crate::identidade::administrador_revogado(&administrador) {
+            "credencial de administrador revogada"
+        } else {
+            "chave fora do registro de administradores"
+        };
+        return Err(recusar_anonimo(Codigo::DenyNotAuthenticated, motivo));
     };
 
     let efemera = sigilo::publica_de(&desafio.efemera);
@@ -457,6 +499,389 @@ fn conferir_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) -> Result
             Err((codigo, motivo))
         }
     }
+}
+
+/// As operações de quórum: M credenciais distintas provam o mesmo pedido.
+/// O M e o N são os da linha `quorum` da política; sem a linha, a operação
+/// não existe.
+struct OperacaoDeQuorum {
+    nome: &'static str,
+    /// A permissão que o papel de **cada** credencial que assina precisa ter.
+    permissao: Permissao,
+}
+
+static OPERACOES_DE_QUORUM: &[OperacaoDeQuorum] = &[OperacaoDeQuorum {
+    nome: "admin.revoke",
+    permissao: Permissao::AdminRevoke,
+}];
+
+/// Quantas assinaturas um pedido de quórum pode trazer: o maior grupo.
+const MAIS_ASSINATURAS: usize = politica::arquivo::MAIOR_GRUPO as usize;
+
+/// As assinaturas como vieram, `chave:prova,chave:prova`, em hex. `None`
+/// para qualquer coisa fora do formato — uma vazia, uma sem os dois lados,
+/// uma chave ou prova que não é hex de 32 bytes, ou mais que o maior grupo.
+fn ler_assinaturas(texto: &str) -> Option<Vec<([u8; 32], [u8; 32])>> {
+    let mut lidas = Vec::new();
+    for parte in texto.split(',') {
+        let (chave, prova) = parte.split_once(':')?;
+        lidas.push((sigilo::de_hex(chave)?, sigilo::de_hex(prova)?));
+        if lidas.len() > MAIS_ASSINATURAS {
+            return None;
+        }
+    }
+    Some(lidas)
+}
+
+/// Confere um pedido de quórum, decide e executa. Um `Err` é a recusa, já
+/// auditada.
+///
+/// # O caminho
+///
+/// O mesmo de uma operação de uma credencial só, com M credenciais no lugar
+/// de uma: as credenciais bem formadas; o desafio, que sai de qualquer
+/// jeito — e tem de ser de quórum, para esta operação, sob a política de
+/// agora —; cada assinatura conferida sobre o **mesmo** conteúdo canônico
+/// ([`sigilo::quorum::Conteudo`]); cada credencial no registro, ativa, uma
+/// vez só; o quórum, M delas; a política, que o papel de **cada** uma tenha
+/// a permissão — pela mesma [`autorizacao::decidir_administracao`] de toda
+/// operação administrativa —; as restrições da operação; e só então ela.
+/// Toda recusa vai para a auditoria com o motivo.
+///
+/// Uma assinatura que não confere derruba o pedido inteiro, mesmo que as
+/// outras bastassem: um pedido com uma assinatura forjada é um pedido de
+/// quem tentou forjá-la. Nenhum papel — nem o `sistema`, nem a sessão de
+/// onde o pedido vem — substitui uma assinatura.
+fn conferir_quorum_e_executar(
+    sessao: u8,
+    pedido: Pedido,
+    w: &mut JsonWriter,
+) -> Result<(), Falha> {
+    let bytes = pedido.parametros.unwrap_or("").as_bytes();
+    let metodo = pedido.comando.unwrap_or("admin.execute");
+    // Os nomes de quem já assinou e foi conferido: a auditoria grava em
+    // nome deles. Antes disso, ninguém.
+    let gravar = |assinantes: &[&str], papel: Option<&str>, codigo, recurso: &str, motivo: &str| {
+        autorizacao::auditar_quorum(
+            sessao, assinantes, papel, metodo, recurso, codigo, bytes, motivo,
+        );
+    };
+    let recusar = |assinantes: &[&str], codigo: Codigo, recurso: &str, motivo: &str| -> Falha {
+        gravar(assinantes, None, codigo, recurso, motivo);
+        falha(codigo, motivo)
+    };
+
+    // As credenciais, bem formadas, antes de gastar o desafio.
+    let Some(id) = pedido.desafio else {
+        return Err(recusar(&[], Codigo::InvalidArgument, "", "falta o desafio"));
+    };
+    let Some(comando) = pedido.comando else {
+        return Err(recusar(&[], Codigo::InvalidArgument, "", "falta o comando"));
+    };
+    let Some(parametros) = pedido.parametros else {
+        return Err(recusar(
+            &[],
+            Codigo::InvalidArgument,
+            "",
+            "parametros ausentes, invalidos ou grandes demais",
+        ));
+    };
+    if pedido.administrador.is_some() || pedido.prova.is_some() {
+        return Err(recusar(
+            &[],
+            Codigo::InvalidArgument,
+            "",
+            "assinaturas de quorum e prova de uma credencial no mesmo pedido",
+        ));
+    }
+    let Some(assinaturas) = pedido.assinaturas.and_then(ler_assinaturas) else {
+        return Err(recusar(
+            &[],
+            Codigo::InvalidArgument,
+            "",
+            "assinaturas fora do formato `chave:prova,...`",
+        ));
+    };
+
+    // O desafio sai primeiro, e sai de qualquer jeito.
+    let desafio = match crate::identidade::consumir(sessao, id) {
+        Ok(d) => d,
+        Err(e) => return Err(recusar(&[], Codigo::DenyNotAuthenticated, "", e.motivo())),
+    };
+    let Some(operacao) = OPERACOES_DE_QUORUM.iter().find(|o| o.nome == comando) else {
+        return Err(recusar(
+            &[],
+            Codigo::InvalidArgument,
+            "",
+            "nao e uma operacao de quorum",
+        ));
+    };
+    if desafio.quorum != Some(operacao.nome) {
+        return Err(recusar(
+            &[],
+            Codigo::DenyNotAuthenticated,
+            "",
+            "o desafio nao e de quorum para esta operacao",
+        ));
+    }
+    // A política de agora é a do desafio: as assinaturas provaram aquela
+    // versão, e com ela o M e o N.
+    let versao = autorizacao::versao_da_politica();
+    if desafio.versao_da_politica != versao {
+        return Err(recusar(
+            &[],
+            Codigo::DenyNotAuthenticated,
+            "",
+            "a politica mudou desde o desafio",
+        ));
+    }
+    let Some(quorum) = autorizacao::com_politica(|p| p.quorum(operacao.nome)) else {
+        return Err(recusar(
+            &[],
+            Codigo::DenyPolicy,
+            "",
+            "a politica nao define o quorum desta operacao",
+        ));
+    };
+    // O N é o grupo inteiro do registro, as revogadas também: o quórum é
+    // M de N, e um registro com outro N não é o grupo que a política diz.
+    let grupo = crate::identidade::grupo_de_administradores();
+    if grupo.len() != usize::from(quorum.n) {
+        return Err(recusar(
+            &[],
+            Codigo::DenyPolicy,
+            "",
+            "o grupo de administradores nao tem o N que a politica diz",
+        ));
+    }
+
+    // O alvo, dos parâmetros: entra no conteúdo, e uma assinatura feita
+    // para outro alvo não confere.
+    let alvo = Json(parametros.as_bytes())
+        .member("key")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let efemera = sigilo::publica_de(&desafio.efemera);
+    let conteudo = sigilo::quorum::Conteudo {
+        operacao: id,
+        nonce: &desafio.nonce,
+        sessao,
+        efemera: &efemera,
+        versao_da_politica: versao,
+        m: quorum.m,
+        n: quorum.n,
+        comando,
+        alvo,
+        parametros,
+    };
+
+    // Cada assinatura: uma vez cada credencial, do grupo, ativa, e a prova
+    // conferida sobre o conteúdo.
+    let mut assinantes: Vec<(String, [u8; 32], Option<String>)> = Vec::new();
+    for (chave, prova) in &assinaturas {
+        let nomes: Vec<&str> = assinantes.iter().map(|a| a.0.as_str()).collect();
+        if assinantes.iter().any(|a| a.1 == *chave) {
+            return Err(recusar(
+                &nomes,
+                Codigo::DenyPolicy,
+                "",
+                "a mesma credencial assinou duas vezes",
+            ));
+        }
+        let Some(membro) = grupo.iter().find(|a| a.chave == *chave) else {
+            return Err(recusar(
+                &nomes,
+                Codigo::DenyNotAuthenticated,
+                "",
+                "uma assinatura de credencial fora do registro de administradores",
+            ));
+        };
+        if membro.revogado {
+            return Err(recusar(
+                &nomes,
+                Codigo::DenyNotAuthenticated,
+                "",
+                "uma assinatura de credencial revogada",
+            ));
+        }
+        if !sigilo::quorum::conferir(&desafio.efemera, &conteudo, chave, prova) {
+            return Err(recusar(
+                &nomes,
+                Codigo::DenyNotAuthenticated,
+                "",
+                "uma assinatura nao confere com o conteudo",
+            ));
+        }
+        assinantes.push((membro.nome.clone(), *chave, membro.papel.clone()));
+    }
+    let nomes: Vec<&str> = assinantes.iter().map(|a| a.0.as_str()).collect();
+
+    // O quórum.
+    if assinantes.len() < usize::from(quorum.m) {
+        let motivo = format!(
+            "quorum incompleto: {} de {} assinaturas",
+            assinantes.len(),
+            quorum.m
+        );
+        return Err(recusar(&nomes, Codigo::DenyPolicy, "", &motivo));
+    }
+
+    // A política: o papel de cada uma tem a permissão, pela decisão central.
+    for (nome, _, papel) in &assinantes {
+        let codigo = autorizacao::decidir_administracao(papel.as_deref(), operacao.permissao);
+        if !codigo.permite() {
+            let motivo = format!("o papel de `{nome}` nao tem a permissao");
+            return Err(recusar(&nomes, codigo, "", &motivo));
+        }
+    }
+    // Cada assinatura conferida vai para a auditoria com a chave inteira de
+    // quem assinou — o registro do desfecho tem lugar para os nomes, e não
+    // para as chaves.
+    for (nome, chave, papel) in &assinantes {
+        autorizacao::auditar_administracao(
+            sessao,
+            Some((nome, chave)),
+            papel.as_deref(),
+            metodo,
+            alvo,
+            Codigo::Allow,
+            bytes,
+            &format!(
+                "assinatura conferida; permissao {}; desafio {id}",
+                operacao.permissao.nome()
+            ),
+        );
+    }
+
+    // As restrições e a execução da operação.
+    let feito = match operacao.nome {
+        "admin.revoke" => revogar_administrador(&assinantes, alvo, quorum.m, parametros),
+        _ => Err(falha(Codigo::Error, "operacao de quorum sem execucao")),
+    };
+    let papeis: Vec<&str> = assinantes.iter().filter_map(|a| a.2.as_deref()).collect();
+    let papel = papeis.first().copied();
+    match feito {
+        Ok(Feito {
+            recurso,
+            detalhe,
+            descartados,
+        }) => {
+            // O detalhe tem teto: o que identifica a operação primeiro, o
+            // motivo por último — é ele que se corta.
+            let detalhe = format!(
+                "quorum {} de {}; desafio {}; politica v{}; descartados {}; {}",
+                assinantes.len(),
+                quorum.n,
+                id,
+                versao,
+                descartados,
+                detalhe
+            );
+            gravar(&nomes, papel, Codigo::Allow, &recurso, &detalhe);
+            for (nome, _, papel) in &assinantes {
+                autorizacao::contar_administracao(
+                    nome,
+                    papel.as_deref().unwrap_or(""),
+                    operacao.nome,
+                    operacao.permissao,
+                );
+            }
+            let _ = w.field_bool("executed", true);
+            let _ = w.field_str("command", operacao.nome);
+            let _ = w.field_str("target", &recurso);
+            let _ = w.field_u64("challenges_discarded", descartados as u64);
+            let _ = w.key("signed_by");
+            let _ = w.begin_array();
+            for nome in &nomes {
+                let _ = w.str_value(nome);
+            }
+            let _ = w.end_array();
+            crate::log_info!(
+                "admin",
+                "sessao {}: {} por quorum ({}): {}",
+                sessao,
+                operacao.nome,
+                nomes.join("+"),
+                recurso
+            );
+            Ok(())
+        }
+        Err((codigo, motivo)) => {
+            gravar(&nomes, papel, codigo, "", &motivo);
+            Err((codigo, motivo))
+        }
+    }
+}
+
+/// O que uma operação de quórum fez: o recurso e o que ela acrescenta ao
+/// detalhe da auditoria.
+struct Feito {
+    recurso: String,
+    detalhe: String,
+    /// Quantos desafios pendentes a operação descartou.
+    descartados: usize,
+}
+
+/// `admin.revoke`: `{"key": chave pública em hex, "reason": texto}`.
+///
+/// - o alvo existe no grupo, e não está revogado;
+/// - o alvo não assina a própria revogação: o quórum vem das credenciais
+///   que vão continuar;
+/// - restam pelo menos M ativas depois — conferido e marcado numa seção
+///   só, em [`crate::identidade::revogar_administrador`];
+/// - a revogação vale na hora: os desafios pendentes de todas as sessões
+///   saem, as mensagens vivas da credencial são anuladas, e nada que ela
+///   provar depois confere. O que ela já fez fica na auditoria.
+fn revogar_administrador(
+    assinantes: &[(String, [u8; 32], Option<String>)],
+    alvo: &str,
+    m: u8,
+    parametros: &str,
+) -> Result<Feito, Falha> {
+    let chave = sigilo::de_hex(alvo).ok_or_else(|| {
+        falha(
+            Codigo::InvalidArgument,
+            "`key` nao e uma chave em hex",
+        )
+    })?;
+    let motivo = Json(parametros.as_bytes())
+        .member("reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if motivo.is_empty() {
+        return Err(falha(Codigo::InvalidArgument, "falta `reason`"));
+    }
+    if assinantes.iter().any(|a| a.1 == chave) {
+        return Err(falha(
+            Codigo::DenyPolicy,
+            "a credencial alvo nao assina a propria revogacao",
+        ));
+    }
+    use crate::identidade::RecusaDaRevogacao as R;
+    let nome = crate::identidade::revogar_administrador(&chave, m).map_err(|r| {
+        let codigo = match r {
+            R::Desconhecido => Codigo::InvalidArgument,
+            R::JaRevogado => Codigo::Conflict,
+            R::AbaixoDoQuorum => Codigo::DenyPolicy,
+        };
+        falha(codigo, r.motivo())
+    })?;
+    let descartados = crate::identidade::descartar_desafios();
+    // O motivo é de quem administra, e vai cortado: a auditoria não é lugar
+    // de texto longo.
+    let mut motivo = String::from(motivo);
+    if motivo.len() > 32 {
+        let mut fim = 32;
+        while !motivo.is_char_boundary(fim) {
+            fim -= 1;
+        }
+        motivo.truncate(fim);
+    }
+    Ok(Feito {
+        recurso: format!("admin:{nome} ({})", crate::identidade::impressao(&chave)),
+        detalhe: format!("motivo: {motivo}"),
+        descartados,
+    })
 }
 
 /// Um parâmetro de texto obrigatório.

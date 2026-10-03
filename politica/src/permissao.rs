@@ -90,10 +90,15 @@ pub enum Permissao {
     /// uma vez, sem olhar uma por uma —, e quem pode o menor não ganha o
     /// maior por tabela. Um papel que tem uma não tem a outra sem escrevê-la.
     MessagePurgeMailbox,
+    /// Revogar a credencial de um administrador — só pela operação de
+    /// quórum: M credenciais distintas provam o mesmo pedido, e o papel de
+    /// cada uma precisa ter esta permissão. Uma credencial só não revoga
+    /// outra.
+    AdminRevoke,
 }
 
 /// Todas, na ordem do relatório.
-pub const TODAS: [Permissao; 29] = [
+pub const TODAS: [Permissao; 30] = [
     Permissao::AgentRead,
     Permissao::SystemRead,
     Permissao::LogRead,
@@ -123,6 +128,7 @@ pub const TODAS: [Permissao; 29] = [
     Permissao::MessageRead,
     Permissao::MessagePurge,
     Permissao::MessagePurgeMailbox,
+    Permissao::AdminRevoke,
 ];
 
 impl Permissao {
@@ -158,6 +164,7 @@ impl Permissao {
             Permissao::MessageRead => "message.read",
             Permissao::MessagePurge => "message.purge",
             Permissao::MessagePurgeMailbox => "message.purge_mailbox",
+            Permissao::AdminRevoke => "admin.revoke",
         }
     }
 
@@ -191,6 +198,7 @@ impl Permissao {
                 | Permissao::MessageRead
                 | Permissao::MessagePurge
                 | Permissao::MessagePurgeMailbox
+                | Permissao::AdminRevoke
         )
     }
 
@@ -209,6 +217,7 @@ impl Permissao {
                 | Permissao::LeaseRevoke
                 | Permissao::MessagePurge
                 | Permissao::MessagePurgeMailbox
+                | Permissao::AdminRevoke
         )
     }
 
@@ -275,7 +284,8 @@ impl Permissao {
             | Permissao::LeaseRevoke
             | Permissao::MessageSend
             | Permissao::MessagePurge
-            | Permissao::MessagePurgeMailbox => true,
+            | Permissao::MessagePurgeMailbox
+            | Permissao::AdminRevoke => true,
         }
     }
 
@@ -389,5 +399,14 @@ mod testes {
         assert_ne!(caixa, Permissao::MessagePurge);
         assert!(caixa.administrativa() && caixa.sensivel() && caixa.muda_estado());
         assert!(!caixa.tem_alcance());
+    }
+
+    /// Revogar um administrador é administrativo e sensível: só com quórum,
+    /// e o papel que a tem a escreve.
+    #[test]
+    fn revogar_administrador() {
+        let p = Permissao::de_nome("admin.revoke").unwrap();
+        assert_eq!(p, Permissao::AdminRevoke);
+        assert!(p.administrativa() && p.sensivel() && p.muda_estado() && !p.tem_alcance());
     }
 }

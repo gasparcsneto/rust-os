@@ -88,6 +88,12 @@ pub struct Administrador {
     /// administrativas que pode. Só a imagem o define — não muda em tempo
     /// de execução.
     pub papel: Option<String>,
+    /// Revogada por `admin.revoke`, com quórum. A credencial fica no
+    /// registro — continua membro do grupo de N, e o nome dela continua
+    /// nomeando o que ela fez na auditoria —, mas não prova mais nada, não
+    /// assina quórum e não recebe mensagem. Vale até o próximo boot: o disco
+    /// é só de leitura.
+    pub revogado: bool,
 }
 
 struct Identidade {
@@ -139,7 +145,12 @@ pub fn carregar() {
         .collect();
     let administradores: Vec<Administrador> = ler_arquivo(CAMINHO_DOS_ADMINISTRADORES)
         .into_iter()
-        .map(|(chave, nome, papel)| Administrador { chave, nome, papel })
+        .map(|(chave, nome, papel)| Administrador {
+            chave,
+            nome,
+            papel,
+            revogado: false,
+        })
         .collect();
 
     if let Some(c) = &chave {
@@ -244,7 +255,7 @@ pub fn administrador_por_nome(nome: &str) -> Option<([u8; TAM_CHAVE], Option<Str
             .lock()
             .administradores
             .iter()
-            .find(|a| a.nome == nome)
+            .find(|a| a.nome == nome && !a.revogado)
             .map(|a| (a.chave, a.papel.clone()))
     })
 }
@@ -274,15 +285,93 @@ pub fn papel_do_agente(chave: &[u8; TAM_CHAVE]) -> Option<String> {
     })
 }
 
-/// O nome e o papel do administrador com esta chave.
+/// O nome e o papel do administrador com esta chave. `None` também para a
+/// credencial revogada: ela não prova mais nada — ver
+/// [`administrador_revogado`] para dizer por quê.
 pub fn papel_do_administrador(chave: &[u8; TAM_CHAVE]) -> Option<(String, Option<String>)> {
     crate::arch::sem_interrupcoes(|| {
         IDENTIDADE
             .lock()
             .administradores
             .iter()
-            .find(|a| a.chave == *chave)
+            .find(|a| a.chave == *chave && !a.revogado)
             .map(|a| (a.nome.clone(), a.papel.clone()))
+    })
+}
+
+/// Se esta chave é de um administrador revogado.
+pub fn administrador_revogado(chave: &[u8; TAM_CHAVE]) -> bool {
+    crate::arch::sem_interrupcoes(|| {
+        IDENTIDADE
+            .lock()
+            .administradores
+            .iter()
+            .any(|a| a.chave == *chave && a.revogado)
+    })
+}
+
+/// O grupo de administradores: todas as credenciais do registro, as
+/// revogadas também — o N de um quórum é o grupo da imagem, e uma
+/// revogação não o encolhe.
+pub fn grupo_de_administradores() -> Vec<Administrador> {
+    crate::arch::sem_interrupcoes(|| IDENTIDADE.lock().administradores.clone())
+}
+
+/// Por que uma credencial de administrador não pôde ser revogada.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecusaDaRevogacao {
+    /// Não há administrador com esta chave.
+    Desconhecido,
+    /// Já foi revogada.
+    JaRevogado,
+    /// Restariam menos credenciais ativas que o quórum: ninguém mais
+    /// conseguiria revogar, nem a próxima credencial perdida.
+    AbaixoDoQuorum,
+}
+
+impl RecusaDaRevogacao {
+    pub const fn motivo(self) -> &'static str {
+        match self {
+            RecusaDaRevogacao::Desconhecido => "administrador desconhecido",
+            RecusaDaRevogacao::JaRevogado => "a credencial ja foi revogada",
+            RecusaDaRevogacao::AbaixoDoQuorum => {
+                "restariam menos credenciais ativas que o quorum exige"
+            }
+        }
+    }
+}
+
+/// Revoga a credencial de administrador `chave`, se depois dela restarem
+/// pelo menos `m` ativas. Conferir e marcar acontecem na mesma seção, com
+/// o registro travado: duas revogações ao mesmo tempo não passam as duas
+/// pela conta do que resta. As mensagens vivas da credencial são anuladas,
+/// como as de um agente revogado. Devolve o nome.
+pub fn revogar_administrador(chave: &[u8; TAM_CHAVE], m: u8) -> Result<String, RecusaDaRevogacao> {
+    let nome = marcar_revogado(chave, m)?;
+    crate::mensagens::anular_titular(
+        politica::mensagens::Dono::Administrador(*chave),
+        "com a credencial revogada",
+    );
+    Ok(nome)
+}
+
+fn marcar_revogado(chave: &[u8; TAM_CHAVE], m: u8) -> Result<String, RecusaDaRevogacao> {
+    crate::arch::sem_interrupcoes(|| {
+        let mut id = IDENTIDADE.lock();
+        let ativas = id.administradores.iter().filter(|a| !a.revogado).count();
+        let alvo = id
+            .administradores
+            .iter_mut()
+            .find(|a| a.chave == *chave)
+            .ok_or(RecusaDaRevogacao::Desconhecido)?;
+        if alvo.revogado {
+            return Err(RecusaDaRevogacao::JaRevogado);
+        }
+        if ativas.saturating_sub(1) < usize::from(m) {
+            return Err(RecusaDaRevogacao::AbaixoDoQuorum);
+        }
+        alvo.revogado = true;
+        Ok(alvo.nome.clone())
     })
 }
 
@@ -436,9 +525,27 @@ pub fn registrar_administrador_de_teste(chave: [u8; TAM_CHAVE], papel: &str) {
                 chave,
                 nome: String::from(ADMINISTRADOR_DE_TESTE),
                 papel: Some(String::from(papel)),
+                revogado: false,
             });
         }
     });
+}
+
+/// Troca o grupo de administradores inteiro, para a suíte: o quórum é
+/// sobre o grupo, e a suíte precisa de um cujas chaves privadas ela tem.
+/// [`esquecer_registrados`] volta ao da imagem.
+#[cfg(feature = "modo-teste")]
+pub fn substituir_administradores_de_teste(grupo: &[([u8; TAM_CHAVE], &str, &str)]) {
+    let grupo: Vec<Administrador> = grupo
+        .iter()
+        .map(|(chave, nome, papel)| Administrador {
+            chave: *chave,
+            nome: String::from(*nome),
+            papel: Some(String::from(*papel)),
+            revogado: false,
+        })
+        .collect();
+    crate::arch::sem_interrupcoes(|| IDENTIDADE.lock().administradores = grupo);
 }
 
 /// Registra um agente direto, sem prova, para a suíte montar as sessões
@@ -468,6 +575,12 @@ pub fn esquecer_registrados() {
 /// conseguir a chave.
 pub const VALIDADE_DO_DESAFIO_MS: u64 = 30_000;
 
+/// Quanto tempo vale um desafio de quórum: mais que o de uma credencial só,
+/// porque as provas de M credenciais precisam ser juntadas — cada uma
+/// calculada por quem a tem — antes de o pedido sair. Ainda curto: o
+/// desafio é de uma operação, e não uma autorização guardada.
+pub const VALIDADE_DO_DESAFIO_DE_QUORUM_MS: u64 = 120_000;
+
 /// Um desafio pendente. Um por sessão: pedir outro descarta o anterior.
 struct Desafio {
     id: u64,
@@ -475,6 +588,11 @@ struct Desafio {
     efemera: [u8; TAM_CHAVE],
     nonce: [u8; 32],
     criado_ms: u64,
+    /// A operação de quórum para que foi pedido; `None`, o de uma
+    /// credencial só. Um não serve para o outro.
+    quorum: Option<&'static str>,
+    /// A versão da política quando foi emitido.
+    versao_da_politica: u64,
 }
 
 impl Drop for Desafio {
@@ -494,6 +612,8 @@ pub struct DesafioPublico {
     pub nonce: [u8; 32],
     /// A parte pública da efêmera.
     pub efemera: [u8; TAM_CHAVE],
+    pub versao_da_politica: u64,
+    pub valido_ms: u64,
 }
 
 /// O que sobra de um desafio para conferir a prova: a efêmera privada e o
@@ -501,6 +621,8 @@ pub struct DesafioPublico {
 pub struct DesafioConsumido {
     pub efemera: [u8; TAM_CHAVE],
     pub nonce: [u8; 32],
+    pub quorum: Option<&'static str>,
+    pub versao_da_politica: u64,
 }
 
 impl Drop for DesafioConsumido {
@@ -510,22 +632,31 @@ impl Drop for DesafioConsumido {
 }
 
 /// Um desafio novo para a sessão `sessao`, no lugar de qualquer anterior
-/// dela.
-pub fn desafiar(sessao: u8) -> Result<DesafioPublico, crate::aleatorio::SemEntropia> {
+/// dela — de uma credencial só, ou, com `quorum`, para aquela operação de
+/// quórum.
+pub fn desafiar(
+    sessao: u8,
+    quorum: Option<&'static str>,
+) -> Result<DesafioPublico, crate::aleatorio::SemEntropia> {
     let efemera = crate::aleatorio::chave()?;
     let nonce = crate::aleatorio::chave()?;
     let id = PROXIMO_DESAFIO.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let versao_da_politica = crate::autorizacao::versao_da_politica();
     let publico = DesafioPublico {
         id,
         nonce,
         efemera: sigilo::publica_de(&efemera),
+        versao_da_politica,
+        valido_ms: validade(quorum),
     };
     let desafio = Desafio {
         id,
         sessao,
         efemera,
         nonce,
-        criado_ms: crate::tempo::uptime_ms(),
+        criado_ms: agora_dos_desafios(),
+        quorum,
+        versao_da_politica,
     };
     let anterior = crate::arch::sem_interrupcoes(|| {
         let mut desafios = DESAFIOS.lock();
@@ -575,13 +706,55 @@ pub fn consumir(sessao: u8, id: u64) -> Result<DesafioConsumido, DesafioRecusado
             .map(|i| desafios.swap_remove(i))
     })
     .ok_or(DesafioRecusado::Desconhecido)?;
-    if crate::tempo::uptime_ms().saturating_sub(desafio.criado_ms) > VALIDADE_DO_DESAFIO_MS {
+    if agora_dos_desafios().saturating_sub(desafio.criado_ms) > validade(desafio.quorum) {
         return Err(DesafioRecusado::Vencido);
     }
     Ok(DesafioConsumido {
         efemera: desafio.efemera,
         nonce: desafio.nonce,
+        quorum: desafio.quorum,
+        versao_da_politica: desafio.versao_da_politica,
     })
+}
+
+fn validade(quorum: Option<&'static str>) -> u64 {
+    if quorum.is_some() {
+        VALIDADE_DO_DESAFIO_DE_QUORUM_MS
+    } else {
+        VALIDADE_DO_DESAFIO_MS
+    }
+}
+
+/// O relógio dos desafios: o do sistema — e, na suíte, adiantado pelo que
+/// [`envelhecer_desafios_de_teste`] pediu.
+fn agora_dos_desafios() -> u64 {
+    let agora = crate::tempo::uptime_ms();
+    #[cfg(feature = "modo-teste")]
+    let agora = agora + ADIANTO_DE_TESTE.load(core::sync::atomic::Ordering::SeqCst);
+    agora
+}
+
+/// Quanto a suíte adiantou o relógio dos desafios. Só cresce.
+#[cfg(feature = "modo-teste")]
+static ADIANTO_DE_TESTE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Adianta o relógio dos desafios em `ms`: os pendentes envelhecem, para a
+/// suíte conferir o vencimento sem esperar dois minutos. Subtrair da hora
+/// de criação não serviria: no começo da suíte o relógio tem segundos, e a
+/// conta pararia no zero.
+#[cfg(feature = "modo-teste")]
+pub fn envelhecer_desafios_de_teste(ms: u64) {
+    ADIANTO_DE_TESTE.fetch_add(ms, core::sync::atomic::Ordering::SeqCst);
+}
+
+/// Descarta todos os desafios pendentes, de todas as sessões. Uma
+/// revogação de administrador chama: os desafios não são de uma chave —
+/// qualquer um pendente podia estar com a credencial revogada, ou com uma
+/// operação de quórum calculada sobre o grupo de antes. Quem estava no
+/// meio pede outro, e calcula sobre o estado novo. Devolve quantos eram.
+pub fn descartar_desafios() -> usize {
+    let descartados = crate::arch::sem_interrupcoes(|| core::mem::take(&mut *DESAFIOS.lock()));
+    descartados.len()
 }
 
 /// Destrava o registro à força, para uso exclusivo do caminho de falha fatal.

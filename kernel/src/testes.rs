@@ -10929,8 +10929,9 @@ fn sigilo_a_chave_do_duke_nao_se_le() -> Resultado {
     if ler_segredo(crate::identidade::CAMINHO_DOS_AGENTES).is_ok() {
         return Err("ler_segredo leu fora do diretorio reservado");
     }
-    // E o registro da imagem chegou: os quatro agentes e o administrador.
-    if crate::identidade::agentes().len() != 4 || crate::identidade::quantos_administradores() != 1
+    // E o registro da imagem chegou: os quatro agentes e o grupo de três
+    // administradores — o N do quórum de `admin.revoke`.
+    if crate::identidade::agentes().len() != 4 || crate::identidade::quantos_administradores() != 3
     {
         return Err("o registro da imagem nao foi carregado");
     }
@@ -14403,6 +14404,724 @@ fn admin_parametros_de_um_kib() -> Resultado {
         }
         Ok(())
     })
+}
+
+// ===========================================================================
+// admin.revoke: o quórum de 2 de 3
+// ===========================================================================
+
+/// O grupo de administradores da suíte: três credenciais, como o da imagem,
+/// mas com as chaves privadas que a suíte tem.
+const GRUPO_DE_TESTE: [([u8; 32], &str); 3] = [
+    ([0xA1; 32], "adm-1"),
+    ([0xA2; 32], "adm-2"),
+    ([0xA3; 32], "adm-3"),
+];
+
+fn publica_do_grupo(i: usize) -> [u8; 32] {
+    sigilo::publica_de(&GRUPO_DE_TESTE[i].0)
+}
+
+/// Roda `f` com o grupo de teste no registro, cada um com o papel dado, e
+/// devolve o registro e a política ao da imagem.
+fn com_grupo(papeis: [&str; 3], f: impl FnOnce() -> Resultado) -> Resultado {
+    let grupo: alloc::vec::Vec<([u8; 32], &str, &str)> = (0..3)
+        .map(|i| (publica_do_grupo(i), GRUPO_DE_TESTE[i].1, papeis[i]))
+        .collect();
+    crate::mensagens::esquecer();
+    // Os desafios que outros casos deixaram pendentes não entram na conta
+    // dos que uma revogação descarta.
+    let _ = crate::identidade::descartar_desafios();
+    let resultado = com_agentes_de_teste(|| {
+        crate::identidade::substituir_administradores_de_teste(&grupo);
+        f()
+    });
+    crate::mensagens::esquecer();
+    crate::identidade::esquecer_registrados();
+    crate::autorizacao::carregar();
+    let _ = crate::identidade::descartar_desafios();
+    resultado
+}
+
+/// Um desafio de quórum, lido da resposta de `admin.challenge`.
+#[derive(Clone, Copy)]
+struct DesafioDeQuorum {
+    id: u64,
+    nonce: [u8; 32],
+    efemera: [u8; 32],
+    versao: u64,
+    m: u8,
+    n: u8,
+    sessao: u8,
+}
+
+fn ler_desafio_de_quorum(j: Json, sessao: u8) -> Result<DesafioDeQuorum, &'static str> {
+    let numero = |nome| j.member(nome).and_then(|v| v.as_u64()).ok_or("desafio de quorum incompleto");
+    let hex = |nome| {
+        j.member(nome)
+            .and_then(|v| v.as_str())
+            .and_then(sigilo::de_hex)
+            .ok_or("desafio de quorum incompleto")
+    };
+    if j.member("operation").and_then(|v| v.as_str()) != Some("admin.revoke") {
+        return Err("o desafio nao diz a operacao de quorum");
+    }
+    Ok(DesafioDeQuorum {
+        id: numero("challenge")?,
+        nonce: hex("nonce")?,
+        efemera: hex("ephemeral")?,
+        versao: numero("policy_version")?,
+        m: numero("m")? as u8,
+        n: numero("n")? as u8,
+        sessao,
+    })
+}
+
+/// Um desafio de quórum pedido na sessão `sessao`, pela chamada direta.
+fn desafio_de_quorum(sessao: u8) -> Result<DesafioDeQuorum, &'static str> {
+    let r = crate::agent::sessao::com_sessao(sessao, || {
+        chamar("admin.challenge", r#"{"for":"admin.revoke"}"#)
+    })?;
+    ler_desafio_de_quorum(Json(r.as_bytes()), sessao)
+}
+
+/// Os parâmetros de uma revogação do membro `alvo` do grupo.
+fn params_de_revogacao(alvo: usize, motivo: &str) -> alloc::string::String {
+    alloc::format!(
+        r#"{{"key":"{}","reason":"{motivo}"}}"#,
+        sigilo::hex(&publica_do_grupo(alvo))
+    )
+}
+
+/// A assinatura do membro `quem` sobre uma revogação: `chave:prova`, com o
+/// conteúdo feito de `alvo_hex` e `params`.
+fn assinatura_de(
+    d: &DesafioDeQuorum,
+    privada: &[u8; 32],
+    alvo_hex: &str,
+    params: &str,
+) -> Result<alloc::string::String, &'static str> {
+    let efemera = d.efemera;
+    let conteudo = sigilo::quorum::Conteudo {
+        operacao: d.id,
+        nonce: &d.nonce,
+        sessao: d.sessao,
+        efemera: &efemera,
+        versao_da_politica: d.versao,
+        m: d.m,
+        n: d.n,
+        comando: "admin.revoke",
+        alvo: alvo_hex,
+        parametros: params,
+    };
+    let prova = sigilo::quorum::provar(privada, &conteudo).map_err(|_| "sem assinatura")?;
+    Ok(alloc::format!(
+        "{}:{}",
+        sigilo::hex(&sigilo::publica_de(privada)),
+        sigilo::hex(&prova)
+    ))
+}
+
+/// As assinaturas dos membros `quem`, certas, sobre `params`.
+fn assinaturas_de(
+    d: &DesafioDeQuorum,
+    quem: &[usize],
+    params: &str,
+) -> Result<alloc::string::String, &'static str> {
+    let alvo = Json(params.as_bytes())
+        .member("key")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let mut todas = alloc::vec::Vec::new();
+    for &i in quem {
+        todas.push(assinatura_de(d, &GRUPO_DE_TESTE[i].0, alvo, params)?);
+    }
+    Ok(todas.join(","))
+}
+
+/// O `admin.execute` de uma revogação por quórum, como texto de parâmetros.
+fn pedido_de_quorum(d: &DesafioDeQuorum, assinaturas: &str, params: &str) -> alloc::string::String {
+    alloc::format!(
+        r#"{{"challenge":{},"command":"admin.revoke","params":"{}","signatures":"{assinaturas}"}}"#,
+        d.id,
+        como_string_json(params)
+    )
+}
+
+/// Manda uma revogação pela chamada direta, na sessão do desafio.
+fn revogar_com(
+    d: &DesafioDeQuorum,
+    assinaturas: &str,
+    params: &str,
+) -> Result<alloc::string::String, &'static str> {
+    let pedido = pedido_de_quorum(d, assinaturas, params);
+    crate::agent::sessao::com_sessao(d.sessao, || chamar("admin.execute", &pedido))
+}
+
+/// A resposta é a recusa com este código e um motivo que contém `trecho`.
+fn quorum_recusado(r: &str, codigo: &str, trecho: &str) -> bool {
+    r.contains(r#""executed":false"#)
+        && r.contains(&alloc::format!(r#""code":"{codigo}""#))
+        && r.contains(trecho)
+}
+
+/// Nenhum membro do grupo foi revogado.
+fn grupo_intacto() -> bool {
+    (0..3).all(|i| !crate::identidade::administrador_revogado(&publica_do_grupo(i)))
+}
+
+/// Dois de três revogam o terceiro — a credencial perdida —, e a revogação
+/// vale na hora, sem apagar nada do que ela fez.
+///
+/// # O que este caso protege
+///
+/// O caminho inteiro do quórum, do desafio à auditoria; que a credencial
+/// revogada não prova mais nada, não recebe mensagem e não volta a assinar;
+/// que o histórico dela continua na auditoria; e que, revogada uma, nenhuma
+/// outra sai — o grupo não cai abaixo do quórum.
+fn admin_revoke_dois_de_tres() -> Resultado {
+    com_grupo(["administrador"; 3], || {
+        let (mut a, mut sa) = conectado(1)?;
+        // Antes: a credencial 3 age — lê a caixa dela — e recebe uma
+        // mensagem do sistema.
+        let r = executar_admin_com(0, &GRUPO_DE_TESTE[2].0, "message.read", "{}", "{}")?;
+        if !r.contains(r#""executed":true"#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("a credencial 3 nao agiu antes da revogacao");
+        }
+        let historico = ultimo_com_metodo("message.read").ok_or("sem historico da credencial 3")?;
+        let msg = ids_de(&mandar(&mut a, &mut sa, "admin:adm-3", "para a 3", 1)?);
+        if msg.len() != 1 {
+            return Err("a mensagem para a credencial 3 nao foi aceita");
+        }
+
+        // O desafio de quórum diz o que se prova: a versão da política, 2 e 3.
+        let d = desafio_de_quorum(0)?;
+        if (d.m, d.n) != (2, 3) || d.versao != crate::autorizacao::versao_da_politica() {
+            return Err("o desafio de quorum nao diz o quorum ou a versao da politica");
+        }
+        let params = params_de_revogacao(2, "perdida");
+        let r = revogar_com(&d, &assinaturas_de(&d, &[0, 1], &params)?, &params)?;
+        if !r.contains(r#""executed":true"#)
+            || !r.contains(r#""signed_by":["adm-1","adm-2"]"#)
+            || !crate::identidade::administrador_revogado(&publica_do_grupo(2))
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("dois de tres nao revogaram o terceiro");
+        }
+        // A auditoria: cada assinatura, com a chave inteira de quem assinou
+        // e a permissão do papel dela; e o desfecho, com quem assinou, o
+        // alvo, o desafio, a versão da política e o motivo.
+        for i in [0, 1] {
+            let chave = publica_do_grupo(i);
+            let assinou = registros_com(|e| {
+                e.metodo == "admin.revoke"
+                    && e.chave == Some(chave)
+                    && e.agente == GRUPO_DE_TESTE[i].1
+                    && e.detalhe
+                        == alloc::format!(
+                            "assinatura conferida; permissao admin.revoke; desafio {}",
+                            d.id
+                        )
+            });
+            if assinou.len() != 1 {
+                return Err("uma assinatura do quorum nao foi gravada com a chave");
+            }
+        }
+        let fim = ultimo_com_metodo("admin.revoke").ok_or("a revogacao nao foi gravada")?;
+        let certo = fim.codigo == politica::Codigo::Allow
+            && fim.titular == politica::auditoria::Titular::Administrador
+            && fim.agente == "adm-1+adm-2"
+            && fim.recurso.starts_with("admin:adm-3")
+            && fim.detalhe.contains("quorum 2 de 3")
+            && fim.detalhe.contains(&alloc::format!("desafio {}", d.id))
+            && fim.detalhe.contains(&alloc::format!("politica v{}", d.versao))
+            && fim.detalhe.contains("motivo: perdida")
+            && fim.parametros == politica::auditoria::resumo_dos_parametros(params.as_bytes());
+        if !certo {
+            crate::log_error!("teste", "{:?}", fim);
+            return Err("a revogacao nao foi gravada como devia");
+        }
+        // O histórico da credencial revogada continua lá.
+        let ainda = registros_com(|e| e == &historico);
+        if ainda.len() != 1 {
+            return Err("a revogacao apagou o historico da credencial");
+        }
+        // Ela não prova mais nada, e a mensagem que ia receber foi anulada;
+        // ninguém mais a alcança.
+        let r = executar_admin_com(0, &GRUPO_DE_TESTE[2].0, "message.read", "{}", "{}")?;
+        if !r.contains("credencial de administrador revogada") {
+            crate::log_error!("teste", "{}", r);
+            return Err("a credencial revogada continuou provando");
+        }
+        if !transicao_gravada("message.void", &msg[0]) {
+            return Err("a mensagem da credencial revogada nao foi anulada");
+        }
+        if !recusado_com(
+            &mandar(&mut a, &mut sa, "admin:adm-3", "depois", 2)?,
+            "DENY_RESOURCE",
+        ) {
+            return Err("a credencial revogada continuou recebendo");
+        }
+        // Revogada uma, nenhuma outra: as duas que restam não fazem quórum
+        // sem a que sairia, e a que sairia não assina a própria saída.
+        let d = desafio_de_quorum(0)?;
+        let params = params_de_revogacao(1, "a segunda");
+        let r = revogar_com(&d, &assinaturas_de(&d, &[0], &params)?, &params)?;
+        if !quorum_recusado(&r, "DENY_POLICY", "quorum incompleto: 1 de 2") {
+            crate::log_error!("teste", "{}", r);
+            return Err("uma credencial so revogou outra");
+        }
+        let d = desafio_de_quorum(0)?;
+        let r = revogar_com(&d, &assinaturas_de(&d, &[0, 1], &params)?, &params)?;
+        if !quorum_recusado(&r, "DENY_POLICY", "a credencial alvo nao assina") {
+            crate::log_error!("teste", "{}", r);
+            return Err("a credencial alvo assinou a propria revogacao");
+        }
+        // Nem a revogada assina: ela fora, o quórum não fecha.
+        let d = desafio_de_quorum(0)?;
+        let r = revogar_com(&d, &assinaturas_de(&d, &[0, 2], &params)?, &params)?;
+        if !quorum_recusado(&r, "DENY_NOT_AUTHENTICATED", "credencial revogada") {
+            crate::log_error!("teste", "{}", r);
+            return Err("a credencial revogada assinou um quorum");
+        }
+        // A conta do que resta, na camada que a faz: com duas ativas, tirar
+        // uma deixaria menos que o quórum.
+        if crate::identidade::revogar_administrador(&publica_do_grupo(1), 2)
+            != Err(crate::identidade::RecusaDaRevogacao::AbaixoDoQuorum)
+            || crate::identidade::revogar_administrador(&publica_do_grupo(2), 2)
+                != Err(crate::identidade::RecusaDaRevogacao::JaRevogado)
+        {
+            return Err("a revogacao nao conferiu o que resta, ou a ja revogada");
+        }
+        Ok(())
+    })
+}
+
+/// Cada recusa do quórum, uma a uma — e nenhuma revoga nada.
+///
+/// # O que este caso protege
+///
+/// Que só M assinaturas distintas, de credenciais ativas do grupo, sobre o
+/// mesmo conteúdo, com o desafio de quórum certo e o papel que tem a
+/// permissão, revogam; e que nada — uma credencial só, a serial, o papel de
+/// sistema, um `policy.write` — substitui o quórum.
+fn admin_revoke_assinaturas() -> Resultado {
+    com_grupo(["administrador"; 3], || {
+        let params = params_de_revogacao(2, "perdida");
+        let tentar = |assinaturas: &dyn Fn(&DesafioDeQuorum) -> Result<alloc::string::String, &'static str>,
+                      codigo: &str,
+                      trecho: &str,
+                      o_que: &'static str|
+         -> Resultado {
+            let d = desafio_de_quorum(0)?;
+            let r = revogar_com(&d, &assinaturas(&d)?, &params)?;
+            if !quorum_recusado(&r, codigo, trecho) || !grupo_intacto() {
+                crate::log_error!("teste", "{}: {}", o_que, r);
+                return Err(o_que);
+            }
+            Ok(())
+        };
+        // Uma só: quórum incompleto.
+        tentar(
+            &|d| assinaturas_de(d, &[0], &params),
+            "DENY_POLICY",
+            "quorum incompleto: 1 de 2",
+            "uma assinatura so revogou",
+        )?;
+        // A mesma credencial duas vezes.
+        tentar(
+            &|d| assinaturas_de(d, &[0, 0], &params),
+            "DENY_POLICY",
+            "a mesma credencial assinou duas vezes",
+            "a mesma credencial contou duas vezes",
+        )?;
+        // Uma assinatura para outro motivo — outro texto de parâmetros.
+        tentar(
+            &|d| {
+                let outro = params_de_revogacao(2, "outro motivo");
+                Ok(alloc::format!(
+                    "{},{}",
+                    assinaturas_de(d, &[0], &params)?,
+                    assinaturas_de(d, &[1], &outro)?
+                ))
+            },
+            "DENY_NOT_AUTHENTICATED",
+            "nao confere",
+            "uma assinatura de outros parametros contou",
+        )?;
+        // Uma assinatura para outro alvo, com os mesmos parâmetros.
+        tentar(
+            &|d| {
+                let outro_alvo = sigilo::hex(&publica_do_grupo(0));
+                Ok(alloc::format!(
+                    "{},{}",
+                    assinaturas_de(d, &[0], &params)?,
+                    assinatura_de(d, &GRUPO_DE_TESTE[1].0, &outro_alvo, &params)?
+                ))
+            },
+            "DENY_NOT_AUTHENTICATED",
+            "nao confere",
+            "uma assinatura de outro alvo contou",
+        )?;
+        // Assinaturas sobre desafios diferentes.
+        tentar(
+            &|d| {
+                let outro = DesafioDeQuorum {
+                    id: d.id + 1,
+                    ..*d
+                };
+                Ok(alloc::format!(
+                    "{},{}",
+                    assinaturas_de(d, &[0], &params)?,
+                    assinaturas_de(&outro, &[1], &params)?
+                ))
+            },
+            "DENY_NOT_AUTHENTICATED",
+            "nao confere",
+            "uma assinatura de outro desafio contou",
+        )?;
+        // Uma credencial fora do grupo.
+        tentar(
+            &|d| {
+                let alvo = sigilo::hex(&publica_do_grupo(2));
+                Ok(alloc::format!(
+                    "{},{}",
+                    assinaturas_de(d, &[0], &params)?,
+                    assinatura_de(d, &[0x55; 32], &alvo, &params)?
+                ))
+            },
+            "DENY_NOT_AUTHENTICATED",
+            "fora do registro",
+            "uma credencial fora do grupo assinou",
+        )?;
+        // Uma assinatura que não é hex, ou sem prova.
+        for ruim in ["zz:yy", "abc", ""] {
+            let d = desafio_de_quorum(0)?;
+            let r = revogar_com(&d, ruim, &params)?;
+            if !quorum_recusado(&r, "INVALID_ARGUMENT", "fora do formato") || !grupo_intacto() {
+                crate::log_error!("teste", "{}", r);
+                return Err("assinaturas fora do formato foram lidas");
+            }
+        }
+
+        // O desafio: o de uma credencial só não serve ao quórum, nem o de
+        // quórum à credencial só; o vencido não serve; e o mesmo não vale
+        // duas vezes.
+        // Um desafio de quórum para ter o M, o N e a versão; o de uma
+        // credencial só, pedido depois, o substitui na sessão.
+        let d = desafio_de_quorum(0)?;
+        let comum = crate::agent::sessao::com_sessao(0, desafio)?;
+        let d_comum2 = DesafioDeQuorum {
+            id: comum.0,
+            nonce: comum.1,
+            efemera: comum.2,
+            ..d
+        };
+        let r = revogar_com(&d_comum2, &assinaturas_de(&d_comum2, &[0, 1], &params)?, &params)?;
+        if !quorum_recusado(&r, "DENY_NOT_AUTHENTICATED", "nao e de quorum") || !grupo_intacto() {
+            crate::log_error!("teste", "{}", r);
+            return Err("um desafio de uma credencial so serviu ao quorum");
+        }
+        let d = desafio_de_quorum(0)?;
+        let r = executar_admin_de(0, (d.id, d.nonce, d.efemera), &GRUPO_DE_TESTE[0].0, "message.read", "{}", "{}")?;
+        if !r.contains("um desafio de quorum nao serve a uma credencial so") {
+            crate::log_error!("teste", "{}", r);
+            return Err("um desafio de quorum serviu a uma credencial so");
+        }
+        let d = desafio_de_quorum(0)?;
+        crate::identidade::envelhecer_desafios_de_teste(
+            crate::identidade::VALIDADE_DO_DESAFIO_DE_QUORUM_MS + 1,
+        );
+        let r = revogar_com(&d, &assinaturas_de(&d, &[0, 1], &params)?, &params)?;
+        if !quorum_recusado(&r, "DENY_NOT_AUTHENTICATED", "desafio vencido") || !grupo_intacto() {
+            crate::log_error!("teste", "{}", r);
+            return Err("um desafio de quorum vencido serviu");
+        }
+        // Mas um de quórum vale mais que o de uma credencial só.
+        let d = desafio_de_quorum(0)?;
+        crate::identidade::envelhecer_desafios_de_teste(
+            crate::identidade::VALIDADE_DO_DESAFIO_MS + 1,
+        );
+        let assinaturas = assinaturas_de(&d, &[0, 1], &params)?;
+        // A política muda no meio: as assinaturas provaram a versão de antes.
+        let p = politica::Politica::ler(politica::PADRAO).map_err(|_| "a politica nao vale")?;
+        crate::autorizacao::trocar_politica(p);
+        let r = revogar_com(&d, &assinaturas, &params)?;
+        if !quorum_recusado(&r, "DENY_NOT_AUTHENTICATED", "a politica mudou") || !grupo_intacto() {
+            crate::log_error!("teste", "{}", r);
+            return Err("um quorum provado sob outra politica valeu");
+        }
+
+        // Sem bypass. Uma credencial só não chega à operação: ela não está
+        // entre as de uma credencial.
+        let r = executar_admin_com(0, &GRUPO_DE_TESTE[0].0, "admin.revoke", &params, &params)?;
+        if !r.contains("operacao administrativa desconhecida") || !grupo_intacto() {
+            crate::log_error!("teste", "{}", r);
+            return Err("uma credencial so chegou ao admin.revoke");
+        }
+        // Não é comando de sessão — nem da serial, nem de um agente de
+        // papel sistema.
+        let (mut a, mut sa) = conectado(1)?;
+        if registry::encontrar("admin.revoke").is_some()
+            || pela_porta(&mut a, &mut sa, "admin.revoke", &params)?.contains(r#""ok":true"#)
+        {
+            return Err("admin.revoke passou como comando de sessao");
+        }
+        // Nem o quórum muda por `policy.write`, por um administrador só.
+        crate::identidade::registrar_administrador_de_teste(
+            sigilo::publica_de(&ADMIN_DE_TESTE),
+            "administrador",
+        );
+        let r = executar_admin_com(
+            0,
+            &ADMIN_DE_TESTE,
+            "policy.write",
+            r#"{"line":"quorum admin.revoke 1 3"}"#,
+            r#"{"line":"quorum admin.revoke 1 3"}"#,
+        )?;
+        if r.contains(r#""executed":true"#)
+            || crate::autorizacao::com_politica(|p| p.quorum("admin.revoke").map(|q| q.m)) != Some(2)
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("um policy.write mudou o quorum");
+        }
+        Ok(())
+    })?;
+
+    // A política, membro a membro: um papel sem a permissão não assina.
+    com_grupo(["administrador", "operador", "administrador"], || {
+        let params = params_de_revogacao(2, "perdida");
+        let d = desafio_de_quorum(0)?;
+        let r = revogar_com(&d, &assinaturas_de(&d, &[0, 1], &params)?, &params)?;
+        if !quorum_recusado(&r, "DENY_PERMISSION", "o papel de `adm-2` nao tem a permissao")
+            || !grupo_intacto()
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("um papel sem admin.revoke assinou o quorum");
+        }
+        Ok(())
+    })?;
+
+    // O grupo que não é o da política: dois, e a política diz três.
+    crate::mensagens::esquecer();
+    let resultado = com_agentes_de_teste(|| {
+        crate::identidade::substituir_administradores_de_teste(&[
+            (publica_do_grupo(0), "adm-1", "administrador"),
+            (publica_do_grupo(1), "adm-2", "administrador"),
+        ]);
+        let params = params_de_revogacao(1, "perdida");
+        let d = desafio_de_quorum(0)?;
+        let r = revogar_com(&d, &assinaturas_de(&d, &[0], &params)?, &params)?;
+        if !quorum_recusado(&r, "DENY_POLICY", "nao tem o N") {
+            crate::log_error!("teste", "{}", r);
+            return Err("um grupo com outro N foi aceito");
+        }
+        Ok(())
+    });
+    crate::identidade::esquecer_registrados();
+    let _ = crate::identidade::descartar_desafios();
+    resultado
+}
+
+/// O antes e o depois da revogação: o desafio pedido antes e usado depois,
+/// a prova feita antes e mandada depois, e o pedido repetido.
+fn admin_revoke_antes_e_depois() -> Resultado {
+    com_grupo(["administrador"; 3], || {
+        // Antes: a credencial 3 pede um desafio na sessão 2 e faz a prova
+        // de uma operação dela.
+        let antes = crate::agent::sessao::com_sessao(2, desafio)?;
+        // E um quórum para revogar a 2 já assinado, na sessão 1.
+        let d_outra = desafio_de_quorum(1)?;
+        let params_outra = params_de_revogacao(1, "a segunda");
+        let assinaturas_outra = assinaturas_de(&d_outra, &[0, 2], &params_outra)?;
+
+        let d = desafio_de_quorum(0)?;
+        let params = params_de_revogacao(2, "perdida");
+        let pedido = assinaturas_de(&d, &[0, 1], &params)?;
+        let r = revogar_com(&d, &pedido, &params)?;
+        if !r.contains(r#""executed":true"#) || !r.contains(r#""challenges_discarded":2"#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("a revogacao nao descartou os desafios pendentes");
+        }
+        // Depois: o desafio de antes já não existe, e a prova feita sobre
+        // ele não vale.
+        let r = executar_admin_de(2, antes, &GRUPO_DE_TESTE[2].0, "message.read", "{}", "{}")?;
+        if !r.contains("desafio desconhecido nesta sessao") {
+            crate::log_error!("teste", "{}", r);
+            return Err("um desafio de antes da revogacao serviu depois");
+        }
+        // Com um desafio novo, a credencial revogada não prova.
+        let r = executar_admin_com(2, &GRUPO_DE_TESTE[2].0, "message.read", "{}", "{}")?;
+        if !r.contains("credencial de administrador revogada") {
+            return Err("a credencial revogada provou com um desafio novo");
+        }
+        // O quórum assinado antes, com a credencial agora revogada, não
+        // vale: o desafio dele foi descartado.
+        let r = revogar_com(&d_outra, &assinaturas_outra, &params_outra)?;
+        if !quorum_recusado(&r, "DENY_NOT_AUTHENTICATED", "desafio desconhecido")
+            || crate::identidade::administrador_revogado(&publica_do_grupo(1))
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("um quorum assinado antes da revogacao valeu depois");
+        }
+        // O mesmo pedido de novo: o desafio foi gasto.
+        let r = revogar_com(&d, &pedido, &params)?;
+        if !quorum_recusado(&r, "DENY_NOT_AUTHENTICATED", "desafio desconhecido") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o pedido de revogacao valeu duas vezes");
+        }
+        // Revogar a já revogada, com o quórum certo: recusado como conflito.
+        let d = desafio_de_quorum(0)?;
+        let r = revogar_com(&d, &assinaturas_de(&d, &[0, 1], &params)?, &params)?;
+        if !quorum_recusado(&r, "CONFLICT", "ja foi revogada") {
+            crate::log_error!("teste", "{}", r);
+            return Err("a credencial ja revogada foi revogada de novo");
+        }
+        // E uma que não existe.
+        let d = desafio_de_quorum(0)?;
+        let fantasma = alloc::format!(
+            r#"{{"key":"{}","reason":"nada"}}"#,
+            sigilo::hex(&sigilo::publica_de(&[0x77; 32]))
+        );
+        let r = revogar_com(&d, &assinaturas_de(&d, &[0, 1], &fantasma)?, &fantasma)?;
+        if !quorum_recusado(&r, "INVALID_ARGUMENT", "administrador desconhecido") {
+            crate::log_error!("teste", "{}", r);
+            return Err("uma credencial que nao existe foi revogada");
+        }
+        Ok(())
+    })
+}
+
+/// Execução e revogação ao mesmo tempo, e duas revogações ao mesmo tempo,
+/// pelas portas de verdade, nas duas ordens. A regra: o que for atendido
+/// primeiro decide; uma revogação descarta os desafios pendentes, e quem
+/// estava no meio é recusado e pede outro.
+fn admin_revoke_concorrencia() -> Resultado {
+    // Um desafio de quórum pela porta `p`.
+    fn pela_porta_de_quorum(
+        a: &mut AgenteDeTeste,
+        s: &mut crate::agent::SessaoDeTeste,
+        p: u8,
+    ) -> Result<DesafioDeQuorum, &'static str> {
+        let r = pela_porta(a, s, "admin.challenge", r#"{"for":"admin.revoke"}"#)?;
+        let j = Json(r.as_bytes()).member("result").ok_or("sem desafio")?;
+        ler_desafio_de_quorum(j, p)
+    }
+    // A prova de uma credencial só, para a porta `p`, de `message.read`.
+    fn execucao_pela_porta(
+        a: &mut AgenteDeTeste,
+        s: &mut crate::agent::SessaoDeTeste,
+        p: u8,
+        privada: &[u8; 32],
+    ) -> Result<alloc::string::String, &'static str> {
+        let r = pela_porta(a, s, "admin.challenge", "{}")?;
+        let d = Json(r.as_bytes()).member("result").ok_or("sem desafio")?;
+        let id = d.member("challenge").and_then(|v| v.as_u64()).ok_or("sem desafio")?;
+        let hex = |n| d.member(n).and_then(|v| v.as_str()).and_then(sigilo::de_hex).ok_or("desafio");
+        let (nonce, efemera) = (hex("nonce")?, hex("ephemeral")?);
+        let publica = sigilo::publica_de(privada);
+        let contexto = sigilo::administracao::Contexto {
+            nonce: &nonce,
+            sessao: p,
+            administrador: &publica,
+            efemera: &efemera,
+            comando: "message.read",
+            parametros: "{}",
+        };
+        let prova = sigilo::administracao::provar(privada, &contexto).map_err(|_| "sem prova")?;
+        Ok(alloc::format!(
+            r#"{{"challenge":{id},"command":"message.read","params":"{{}}","admin":"{}","proof":"{}"}}"#,
+            sigilo::hex(&publica),
+            sigilo::hex(&prova)
+        ))
+    }
+
+    for ordem in [[1u8, 2, 3, 4], [2, 1, 3, 4]] {
+        com_grupo(["administrador"; 3], || {
+            let mut agentes = alloc::vec::Vec::new();
+            let mut sessoes = alloc::vec::Vec::new();
+            for p in 1..=4 {
+                let (a, s) = conectado(p)?;
+                agentes.push(a);
+                sessoes.push(s);
+            }
+            // Porta 1: a credencial 3 executa. Porta 2: 1 e 2 revogam a 3.
+            let execucao = {
+                let (a, s) = (&mut agentes[0], &mut sessoes[0]);
+                execucao_pela_porta(a, s, 1, &GRUPO_DE_TESTE[2].0)?
+            };
+            let params = params_de_revogacao(2, "ao mesmo tempo");
+            let revogacao = {
+                let (a, s) = (&mut agentes[1], &mut sessoes[1]);
+                let d = pela_porta_de_quorum(a, s, 2)?;
+                pedido_de_quorum(&d, &assinaturas_de(&d, &[0, 1], &params)?, &params)
+            };
+            let respostas = todos_ao_mesmo_tempo(&mut agentes, &mut sessoes, ordem, |p| match p {
+                1 => Some(pedido_rpc("admin.execute", &execucao)),
+                2 => Some(pedido_rpc("admin.execute", &revogacao)),
+                _ => None,
+            })?;
+            let (exec, rev) = (
+                respostas[0].clone().unwrap_or_default(),
+                respostas[1].clone().unwrap_or_default(),
+            );
+            if !rev.contains(r#""executed":true"#) {
+                crate::log_error!("teste", "{}", rev);
+                return Err("a revogacao concorrente nao foi executada");
+            }
+            let executou = exec.contains(r#""executed":true"#);
+            let certo = if ordem[0] == 1 {
+                executou
+            } else {
+                !executou && exec.contains("desafio desconhecido")
+            };
+            if !certo {
+                crate::log_error!("teste", "ordem {:?}: {}", ordem, exec);
+                return Err("a execucao concorrente com a revogacao nao seguiu a ordem");
+            }
+            Ok(())
+        })?;
+    }
+
+    for ordem in [[1u8, 2, 3, 4], [2, 1, 3, 4]] {
+        com_grupo(["administrador"; 3], || {
+            let mut agentes = alloc::vec::Vec::new();
+            let mut sessoes = alloc::vec::Vec::new();
+            for p in 1..=4 {
+                let (a, s) = conectado(p)?;
+                agentes.push(a);
+                sessoes.push(s);
+            }
+            // Porta 1: 1 e 2 revogam a 3. Porta 2: 1 e 3 revogam a 2.
+            let mut pedidos = alloc::vec::Vec::new();
+            for (p, assinantes, alvo) in [(1u8, [0usize, 1], 2usize), (2, [0, 2], 1)] {
+                let i = usize::from(p) - 1;
+                let params = params_de_revogacao(alvo, "corrida");
+                let d = pela_porta_de_quorum(&mut agentes[i], &mut sessoes[i], p)?;
+                pedidos.push(pedido_de_quorum(&d, &assinaturas_de(&d, &assinantes, &params)?, &params));
+            }
+            let respostas = todos_ao_mesmo_tempo(&mut agentes, &mut sessoes, ordem, |p| match p {
+                1 | 2 => Some(pedido_rpc("admin.execute", &pedidos[usize::from(p) - 1])),
+                _ => None,
+            })?;
+            let executadas: alloc::vec::Vec<bool> = respostas
+                .iter()
+                .take(2)
+                .map(|r| r.as_deref().unwrap_or("").contains(r#""executed":true"#))
+                .collect();
+            let primeira = usize::from(ordem[0]) - 1;
+            let revogadas = (0..3)
+                .filter(|&i| crate::identidade::administrador_revogado(&publica_do_grupo(i)))
+                .count();
+            if !executadas[primeira] || executadas[1 - primeira] || revogadas != 1 {
+                crate::log_error!("teste", "ordem {:?}: {:?}", ordem, respostas);
+                return Err("duas revogacoes ao mesmo tempo passaram as duas, ou nenhuma");
+            }
+            Ok(())
+        })?;
+    }
+    Ok(())
 }
 
 // ===========================================================================
@@ -18877,6 +19596,22 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "admin: parametros de 1 KiB, sob a prova",
         f: admin_parametros_de_um_kib,
+    },
+    Caso {
+        nome: "admin.revoke: dois de tres",
+        f: admin_revoke_dois_de_tres,
+    },
+    Caso {
+        nome: "admin.revoke: cada recusa do quorum",
+        f: admin_revoke_assinaturas,
+    },
+    Caso {
+        nome: "admin.revoke: o antes e o depois",
+        f: admin_revoke_antes_e_depois,
+    },
+    Caso {
+        nome: "admin.revoke: ao mesmo tempo",
+        f: admin_revoke_concorrencia,
     },
     Caso {
         nome: "barra: nenhuma superficie a cobre",

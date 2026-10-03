@@ -32,6 +32,11 @@
 //!   todas as caixas, e quantas a caixa dele guarda. De 1 até os tetos da
 //!   tabela, 32 e 64; sem a linha, 8 e 32. O total de vivas, 128, é da
 //!   imagem — ver [`crate::mensagens`].
+//! - `quorum <operação> <M> <N>`: a operação exige que M credenciais de
+//!   administrador distintas, de um grupo de N, provem o mesmo pedido. De
+//!   2 até N, e N até [`MAIOR_GRUPO`]; só para as operações de
+//!   [`OPERACOES_DE_QUORUM`]. Só a imagem a escreve: um `policy.write` que
+//!   baixasse o M seria uma credencial só desfazendo o quórum.
 //! - `apertos <quantos> <janela em ms>`: apertos de mão por porta.
 //! - `serial <papel>`: o papel da sessão 0. Obrigatória.
 //! - `local <papel>`: o papel da autoridade local — os processos do
@@ -75,6 +80,20 @@ pub const PROCESSOS_PADRAO: u32 = 4;
 
 /// A maior cota de processos que a política aceita.
 pub const MAIS_PROCESSOS: u32 = 64;
+
+/// As operações que exigem quórum — e que só existem com a linha `quorum`
+/// delas na política.
+pub const OPERACOES_DE_QUORUM: &[&str] = &["admin.revoke"];
+
+/// O maior grupo de credenciais de um quórum.
+pub const MAIOR_GRUPO: u8 = 16;
+
+/// O quórum de uma operação: M credenciais distintas de um grupo de N.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Quorum {
+    pub m: u8,
+    pub n: u8,
+}
 
 /// O limite de apertos de mão por porta.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,6 +161,8 @@ pub struct Politica {
     serial: String,
     local: String,
     apertos: Apertos,
+    /// O quórum de cada operação que exige um.
+    quoruns: BTreeMap<String, Quorum>,
 }
 
 /// O que há de errado numa política.
@@ -175,6 +196,10 @@ pub enum ErroTipo {
     SemSerial,
     /// Falta a linha `local`.
     SemLocal,
+    /// Uma linha `quorum` para uma operação que não é de quórum.
+    OperacaoSemQuorum(String),
+    /// Duas linhas `quorum` para a mesma operação.
+    QuorumRepetido(String),
 }
 
 /// Um erro, com a linha onde está. Linha zero: a política como um todo.
@@ -212,6 +237,8 @@ impl Erro {
             }
             ErroTipo::SemSerial => "falta a linha `serial`".to_string(),
             ErroTipo::SemLocal => "falta a linha `local`".to_string(),
+            ErroTipo::OperacaoSemQuorum(o) => format!("`{o}` nao e uma operacao de quorum"),
+            ErroTipo::QuorumRepetido(o) => format!("quorum de `{o}` definido duas vezes"),
         };
         if self.linha == 0 {
             o_que
@@ -274,6 +301,7 @@ impl Politica {
             serial: String::new(),
             local: String::new(),
             apertos: APERTOS_PADRAO,
+            quoruns: BTreeMap::new(),
         };
         let mut recursos_e_taxas: Vec<(usize, &str)> = Vec::new();
         for (i, linha) in texto.lines().enumerate() {
@@ -352,6 +380,12 @@ impl Politica {
     /// O limite de apertos por porta.
     pub fn apertos(&self) -> Apertos {
         self.apertos
+    }
+
+    /// O quórum de `operacao`, se a política o define. Sem a linha, a
+    /// operação não existe: nada a substitui por uma credencial só.
+    pub fn quorum(&self, operacao: &str) -> Option<Quorum> {
+        self.quoruns.get(operacao).copied()
     }
 
     /// Aplica uma linha já sem comentário.
@@ -476,6 +510,26 @@ impl Politica {
                     por_remetente,
                     por_caixa,
                 };
+            }
+            "quorum" => {
+                let operacao = partes.next().ok_or(erro(ErroTipo::Sintaxe))?;
+                let m = numero(partes.next(), n)?;
+                let total = numero(partes.next(), n)?;
+                // Um quórum de um é a prova de uma credencial só, que já
+                // existe; o de zero não é quórum. E o grupo tem teto.
+                if partes.next().is_some() || m < 2 || m > total || total > u32::from(MAIOR_GRUPO) {
+                    return Err(erro(ErroTipo::Sintaxe));
+                }
+                if !OPERACOES_DE_QUORUM.contains(&operacao) {
+                    return Err(erro(ErroTipo::OperacaoSemQuorum(operacao.to_string())));
+                }
+                let quorum = Quorum {
+                    m: m as u8,
+                    n: total as u8,
+                };
+                if self.quoruns.insert(operacao.to_string(), quorum).is_some() {
+                    return Err(erro(ErroTipo::QuorumRepetido(operacao.to_string())));
+                }
             }
             "apertos" => {
                 let quantos = numero(partes.next(), n)?;
@@ -876,6 +930,62 @@ mod testes {
             .com_linha("processos observador 3", "administrador", &[])
             .unwrap();
         assert_eq!(nova.papel("observador").unwrap().processos, 3);
+    }
+
+    /// O quórum: a linha, as duas políticas embutidas com o 2 de 3 do
+    /// `admin.revoke`, a faixa, a operação que não é de quórum e a repetida
+    /// recusadas — e o `policy.write` não o muda: baixar o M seria uma
+    /// credencial só desfazendo o quórum.
+    #[test]
+    fn o_quorum() {
+        for p in [
+            Politica::ler(crate::PADRAO).unwrap(),
+            Politica::emergencia(),
+        ] {
+            assert_eq!(p.quorum("admin.revoke"), Some(Quorum { m: 2, n: 3 }));
+            assert_eq!(p.quorum("agent.revoke"), None);
+            assert_eq!(
+                p.decidir(Some("administrador"), Permissao::AdminRevoke, None),
+                Codigo::Allow
+            );
+            for papel in ["sistema", "operador", "observador"] {
+                assert_ne!(
+                    p.decidir(Some(papel), Permissao::AdminRevoke, None),
+                    Codigo::Allow,
+                    "{papel}"
+                );
+            }
+        }
+        let sem = crate::PADRAO.replace("quorum admin.revoke 2 3\n", "");
+        assert_eq!(Politica::ler(&sem).unwrap().quorum("admin.revoke"), None);
+        for ruim in [
+            "quorum admin.revoke 1 3",
+            "quorum admin.revoke 0 3",
+            "quorum admin.revoke 4 3",
+            "quorum admin.revoke 2 17",
+            "quorum admin.revoke 2",
+            "quorum admin.revoke 2 3 4",
+            "quorum agent.revoke 2 3",
+            "quorum admin.revoke 3 3",
+        ] {
+            let texto = alloc::format!("{sem}\n{ruim}\n");
+            let ok = ruim == "quorum admin.revoke 3 3";
+            assert_eq!(Politica::ler(&texto).is_ok(), ok, "{ruim}");
+        }
+        // Repetida, mesmo igual.
+        let dupla = alloc::format!("{}\nquorum admin.revoke 2 3\n", crate::PADRAO);
+        assert!(Politica::ler(&dupla).is_err());
+        let p = Politica::ler(crate::PADRAO).unwrap();
+        for linha in ["quorum admin.revoke 1 3", "quorum admin.revoke 3 3"] {
+            assert!(p.com_linha(linha, "administrador", &[]).is_err(), "{linha}");
+        }
+        // Nem a linha que valeria no arquivo: o `policy.write` não escreve
+        // quórum nenhum, nem numa política que não o tem.
+        let sem_quorum = Politica::ler(&sem).unwrap();
+        assert!(matches!(
+            sem_quorum.com_linha("quorum admin.revoke 2 3", "administrador", &[]),
+            Err(Recusa::Proibida(_))
+        ));
     }
 
     /// As cotas de mensagens: as da linha, as padrão sem ela, cada uma do

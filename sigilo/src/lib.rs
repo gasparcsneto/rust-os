@@ -42,6 +42,7 @@ pub mod credencial;
 pub mod gerador;
 pub mod pessoas;
 pub mod quadro;
+pub mod quorum;
 pub mod registro;
 pub mod resumo;
 

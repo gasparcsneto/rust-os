@@ -2479,6 +2479,16 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
         "autorizacao::destino_decidido(",
         &["kernel/src/agent/commands.rs"],
     ),
+    // Revogar a credencial de um administrador, e descartar os desafios
+    // pendentes, só pela operação de quórum.
+    (
+        "identidade::revogar_administrador(",
+        &["kernel/src/agent/administracao.rs"],
+    ),
+    (
+        "identidade::descartar_desafios(",
+        &["kernel/src/agent/administracao.rs"],
+    ),
     // Tirar a mensagem de outro, ou esvaziar a caixa de outro, só com
     // prova; anular, só a revogação.
     ("mensagens::purgar(", &["kernel/src/agent/administracao.rs"]),
@@ -3667,6 +3677,9 @@ mod chaves {
         pub duke: [u8; 32],
         pub agentes: Vec<[u8; 32]>,
         pub administrador: [u8; 32],
+        /// As outras credenciais do grupo de administradores: o quórum de
+        /// `admin.revoke` é 2 de 3, e o grupo da imagem tem as três.
+        pub outros_administradores: [[u8; 32]; 2],
         pub intruso: [u8; 32],
         /// O segredo da pessoa de desenvolvimento: o identificador, o sal e
         /// a senha saem dele — ver [`Chaves::pessoa_dev`].
@@ -3735,6 +3748,7 @@ mod chaves {
                     .map(|p| chave(&nome_do_agente(p)))
                     .collect::<Result<_, _>>()?,
                 administrador: chave("administrador")?,
+                outros_administradores: [chave("administrador-2")?, chave("administrador-3")?],
                 intruso: chave("intruso")?,
                 pessoa_dev: chave("pessoa-dev")?,
             })
@@ -3820,26 +3834,49 @@ mod chaves {
                     Some(papel_do_agente(p)),
                 ));
             }
-            let administradores = format!(
-                "# Quem pode provar uma operacao administrativa.\n{}",
-                sigilo::registro::linha(
-                    &sigilo::publica_de(&self.administrador),
-                    "administrador",
-                    Some("administrador"),
-                )
+            let mut administradores = String::from(
+                "# Quem pode provar uma operacao administrativa. O grupo inteiro: o\n\
+                 # quorum de admin.revoke e de M credenciais dele.\n",
             );
+            let grupo = [
+                ("administrador", &self.administrador),
+                ("administrador-2", &self.outros_administradores[0]),
+                ("administrador-3", &self.outros_administradores[1]),
+            ];
+            for (nome, chave) in grupo {
+                administradores.push_str(&sigilo::registro::linha(
+                    &sigilo::publica_de(chave),
+                    nome,
+                    Some("administrador"),
+                ));
+            }
             self.escrever_senha_dev()?;
             // A política só entra na imagem se cumpre o invariante que o
             // kernel confere no boot: só o sistema e o próprio
             // administrador alcançam o administrador. Uma imagem que o
             // violasse subiria com a política de emergência; aqui ela nem é
             // gerada, e o erro aparece antes de qualquer boot.
-            politica::Politica::ler(politica::PADRAO)
-                .map_err(|e| format!("a politica da imagem nao se le: {}", e.motivo()))?
+            let politica = politica::Politica::ler(politica::PADRAO)
+                .map_err(|e| format!("a politica da imagem nao se le: {}", e.motivo()))?;
+            politica
                 .conferir_alcance_aos_administradores(&["administrador"])
                 .map_err(|m| {
                     format!("a politica da imagem viola o alcance ao administrador: {m}")
                 })?;
+            // O N de cada quórum é o grupo da imagem: uma política que
+            // dissesse outro N deixaria a operação sem como acontecer — o
+            // kernel a recusa —, e o erro aparece aqui, antes do boot.
+            for operacao in politica::arquivo::OPERACOES_DE_QUORUM {
+                if let Some(q) = politica.quorum(operacao)
+                    && usize::from(q.n) != grupo.len()
+                {
+                    return Err(format!(
+                        "o quorum de {operacao} e de {} credenciais, e a imagem tem {}",
+                        q.n,
+                        grupo.len()
+                    ));
+                }
+            }
             Ok(vec![
                 (
                     "etc/duke/privado/chave".to_string(),
