@@ -910,6 +910,67 @@ impl Politica {
         }
     }
 
+    /// A política como texto que [`Politica::ler`] lê de volta igual.
+    ///
+    /// # Para que serve
+    ///
+    /// Para a persistência: uma política mudada em tempo de execução vai
+    /// inteira para o journal, e não como a linha que a mudou. Reaplicar a
+    /// linha no boot dependeria de a política da imagem continuar a mesma e
+    /// de as regras de quem pode mudar o quê darem o mesmo resultado — o
+    /// texto inteiro não depende de nada, e passa de novo pela validação
+    /// inteira ao ser lido, piso do quórum incluído.
+    ///
+    /// Uma linha por fato, na ordem em que o leitor os aceita: os papéis,
+    /// depois o que cada um diz dos papéis, e por fim o que é da política.
+    /// Tudo é escrito, mesmo o que tem o valor padrão: o texto descreve a
+    /// política sem depender de quais são os padrões de quem o ler.
+    pub fn texto(&self) -> String {
+        use core::fmt::Write;
+        let mut t = String::new();
+        for papel in &self.papeis {
+            let _ = write!(t, "papel {}", papel.nome);
+            for incluido in &papel.inclui {
+                let _ = write!(t, " @{incluido}");
+            }
+            for p in &papel.diretas {
+                let _ = write!(t, " {}", p.nome());
+            }
+            t.push('\n');
+        }
+        for papel in &self.papeis {
+            for (p, alcance) in &papel.recursos {
+                let _ = write!(t, "recurso {} {}", papel.nome, p.nome());
+                for a in alcance {
+                    let _ = write!(t, " {a}");
+                }
+                t.push('\n');
+            }
+            let _ = writeln!(
+                t,
+                "taxa {} {} {}",
+                papel.nome, papel.taxa.por_segundo, papel.taxa.rajada
+            );
+            let _ = writeln!(t, "processos {} {}", papel.nome, papel.processos);
+            let _ = writeln!(
+                t,
+                "mensagens {} {} {}",
+                papel.nome, papel.mensagens.por_remetente, papel.mensagens.por_caixa
+            );
+        }
+        let _ = writeln!(t, "serial {}", self.serial);
+        let _ = writeln!(t, "local {}", self.local);
+        let _ = writeln!(
+            t,
+            "apertos {} {}",
+            self.apertos.quantos, self.apertos.janela_ms
+        );
+        for (operacao, q) in &self.quoruns {
+            let _ = writeln!(t, "quorum {operacao} {} {}", q.m, q.n);
+        }
+        t
+    }
+
     /// A política com outro papel para a serial.
     pub fn com_serial(&self, papel: &str) -> Result<Politica, Recusa> {
         if self.papel(papel).is_none() {
@@ -959,6 +1020,44 @@ fn numero(texto: Option<&str>, n: usize) -> Result<u32, Erro> {
 #[cfg(test)]
 mod testes {
     use super::*;
+
+    /// O texto de uma política se lê de volta na mesma política: as duas
+    /// embutidas, e as que saem delas por cada tipo de mudança em tempo de
+    /// execução. É o que a persistência grava, e o que o boot relê.
+    #[test]
+    fn o_texto_volta_igual() {
+        let padrao = Politica::ler(crate::PADRAO).unwrap();
+        let mut politicas = alloc::vec![padrao.clone(), Politica::emergencia()];
+        for linha in [
+            "papel observador agent.read system.read",
+            "recurso operador fs.read /dados",
+            "taxa observador 7 21",
+            "processos observador 3",
+            "mensagens observador 3 9",
+        ] {
+            politicas.push(padrao.com_linha(linha, "administrador", &[]).unwrap());
+        }
+        politicas.push(padrao.com_serial("administrador").unwrap());
+        for p in politicas {
+            let texto = p.texto();
+            let relida =
+                Politica::ler(&texto).unwrap_or_else(|e| panic!("{}\n---\n{texto}", e.motivo()));
+            assert_eq!(relida, p, "\n{texto}");
+            // E o texto do texto é o mesmo texto: nada se perde nem se
+            // acrescenta numa segunda volta.
+            assert_eq!(relida.texto(), texto);
+        }
+    }
+
+    /// O texto passa pela validação inteira de novo: um quórum abaixo do
+    /// piso escrito à mão no texto gravado é recusado na leitura.
+    #[test]
+    fn o_texto_gravado_passa_pelo_piso() {
+        let texto = Politica::ler(crate::PADRAO).unwrap().texto();
+        assert!(texto.contains("quorum admin.revoke 2 3\n"));
+        let rebaixado = texto.replace("quorum admin.revoke 2 3", "quorum admin.revoke 2 4");
+        assert!(Politica::ler(&rebaixado).is_err());
+    }
 
     /// A cota de processos: a da linha, a padrão sem ela, e a linha fora da
     /// faixa recusada; e `policy.write` a muda.

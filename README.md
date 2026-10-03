@@ -375,13 +375,18 @@ politica/src/        a política de autorização, a mesma no kernel e no hosped
 ├── lib.rs           a cadeia de decisão, e a política padrão da imagem
 ├── permissao.rs     o vocabulário fechado de permissões, e quais são sensíveis
 ├── codigo.rs        os códigos de decisão: ALLOW, DENY_*, RATE_LIMIT, INVALID_ARGUMENT, ERROR
-├── arquivo.rs       o formato, a validação, a decisão e as regras de mudança
+├── arquivo.rs       o formato, a validação, a decisão, as regras de mudança e o texto que volta igual
 ├── caminho.rs       a forma normal dos caminhos, a mesma do VFS
 ├── taxa.rs          o balde de pedidos e a janela de apertos de mão
 ├── arrendamento.rs  a versão e o arrendamento de cada recurso compartilhado
 ├── mensagens.rs     as caixas, os estados, as cotas e os nonces das mensagens
 ├── sigiloso.rs      o texto que sai da memória zerado: o corpo e a resposta que o leva
 └── auditoria.rs     os registros e a cadeia de elos BLAKE2s
+
+diario/src/          o journal da persistência: registros cifrados, encadeados e ancorados
+├── lib.rs           o formato, a leitura que confere cada registro, o escritor, o julgamento contra a âncora e o relógio que não volta
+├── estado.rs        o que os registros do estado administrativo dizem: resultados, e não pedidos
+└── testes.rs        o journal cortado em cada setor, cada bit trocado, registros de outro journal e fora de ordem
 
 ancora/src/          a âncora da persistência: um contador monotônico num TPM 2.0
 ├── lib.rs           os comandos do TPM byte a byte, e o que um contador ausente ou estranho quer dizer

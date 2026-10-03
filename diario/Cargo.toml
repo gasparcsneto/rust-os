@@ -1,0 +1,26 @@
+[package]
+# O journal da persistência do Duke: registros cifrados e encadeados numa
+# partição, e as regras que decidem se o que está no disco vale.
+#
+# Um pacote, e não um módulo do kernel, pela mesma razão do `sigilo`, da
+# `politica` e da `ancora`: o formato e as regras são lógica pura, e se
+# testam no hospedeiro — cortando o journal em cada setor, trocando cada
+# bit, misturando registros de dois journals —, sem emulador e sem disco.
+#
+# O disco não mora aqui: o kernel entrega um [`Meio`] que lê, escreve e
+# descarrega setores da partição de estado. Nem a âncora: o kernel diz o
+# valor do contador do TPM, e [`julgar`] diz o que fazer com ele.
+#
+# `no_std` com `alloc`.
+name = "diario"
+version = "0.1.0"
+edition = "2024"
+description = "O journal da persistência do Duke: registros cifrados, encadeados e ancorados"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# As mesmas primitivas do canal seguro, nas mesmas versões: o XChaCha20 com
+# Poly1305 cifra e autentica cada registro; o BLAKE2s encadeia um ao outro.
+chacha20poly1305 = { version = "0.11.0", default-features = false }
+blake2 = { version = "0.11.0", default-features = false }
+zeroize = { version = "1.9.0", default-features = false, features = ["alloc"] }

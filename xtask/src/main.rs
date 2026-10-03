@@ -2873,6 +2873,7 @@ fn conferir_arvore_do_readme() -> Result<ExitCode, String> {
         "sigilo/src",
         "politica/src",
         "ancora/src",
+        "diario/src",
         "programas/src",
         "xtask/src",
     ] {

@@ -7,7 +7,7 @@
 # separamos os três — o `xtask` invoca os outros dois builds explicitamente.
 [workspace]
 resolver = "3"
-members = ["ancora", "aparencia", "politica", "protocolo", "sigilo", "tipografia", "toolkit", "xtask"]
+members = ["ancora", "aparencia", "diario", "politica", "protocolo", "sigilo", "tipografia", "toolkit", "xtask"]
 # O `kernel` compila para bare-metal e o `iniciador` para UEFI. Cada um é seu
 # próprio workspace; o `xtask` invoca os dois builds explicitamente.
 #
