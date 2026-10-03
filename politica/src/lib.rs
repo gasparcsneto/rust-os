@@ -36,6 +36,7 @@ pub mod caminho;
 pub mod codigo;
 pub mod mensagens;
 pub mod permissao;
+pub mod sigiloso;
 pub mod taxa;
 
 pub use arquivo::{Apertos, Papel, Politica, Recusa, Taxa};

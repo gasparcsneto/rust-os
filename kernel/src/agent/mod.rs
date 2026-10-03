@@ -594,16 +594,19 @@ fn com_saida(canal: Canal, f: impl FnOnce(&mut JsonWriter) -> fmt::Result) {
     let Canal::Porta(p) = canal else {
         return com_saida_serial(f);
     };
-    let mut texto = alloc::string::String::new();
+    // Num `Texto`, e não num `String`: a resposta pode levar o corpo de uma
+    // mensagem, e o texto apaga cada bloco que larga — ao crescer e ao
+    // sair, depois de cifrado. Ver `politica::sigiloso`.
+    let mut texto = politica::sigiloso::Texto::novo();
     {
         let mut w = JsonWriter::new(&mut texto);
         let _ = f(&mut w);
     }
-    texto.push('\n');
+    texto.acrescentar(b"\n");
     // Sem sessão estabelecida não há a quem: a resposta é descartada. Não
     // acontece por um pedido — um pedido só chega decifrado —, mas acontece
     // quando a sessão cai entre o pedido e a resposta.
-    seguro::enviar(p, texto.as_bytes());
+    seguro::enviar(p, texto.como_bytes());
 }
 
 /// Emite uma resposta completa na serial.

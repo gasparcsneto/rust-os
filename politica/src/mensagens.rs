@@ -150,12 +150,7 @@ impl Drop for Mensagem {
     /// O corpo sai da memória zerado: uma mensagem que acabou não deixa o
     /// texto no heap para o próximo dono do bloco.
     fn drop(&mut self) {
-        for b in self.corpo.iter_mut() {
-            // SAFETY: `b` é um `&mut u8` válido deste vetor; a escrita
-            // volátil só impede o compilador de apagar o zeramento de uma
-            // memória que vai ser liberada.
-            unsafe { core::ptr::write_volatile(b, 0) };
-        }
+        crate::sigiloso::zerar_bloco(&mut self.corpo);
     }
 }
 
@@ -164,7 +159,8 @@ impl Drop for Mensagem {
 pub struct Lida {
     pub id: u64,
     pub de: Dono,
-    pub corpo: alloc::string::String,
+    /// A cópia do corpo, que se apaga ao sair — ver [`crate::sigiloso`].
+    pub corpo: crate::sigiloso::Corpo,
     pub criada_ms: u64,
     pub expira_ms: u64,
     pub estado: Estado,
@@ -431,7 +427,7 @@ impl Caixas {
             lidas.push(Lida {
                 id: m.id,
                 de: m.de,
-                corpo: alloc::string::String::from(m.corpo()),
+                corpo: crate::sigiloso::Corpo::from(m.corpo()),
                 criada_ms: m.criada_ms,
                 expira_ms: m.expira_ms,
                 estado: m.estado,
@@ -677,7 +673,7 @@ mod testes {
         let (l2, tr2) = t.ler(B, 0, 10, 0);
         assert!(tr2.is_empty());
         assert_eq!(l1, l2);
-        assert_eq!(l1[0].corpo, "oi");
+        assert_eq!(&*l1[0].corpo, "oi");
         assert_eq!(l1[0].de, A);
         let v = l1[0].versao;
         assert_eq!(
@@ -929,6 +925,27 @@ mod testes {
         assert_eq!(t.purgar_caixa(B).len(), 1);
         assert_eq!(t.na_caixa(B), 0);
         assert_eq!(t.na_caixa(A), 1);
+    }
+
+    /// O corpo guardado sai da memória zerado quando a mensagem sai da
+    /// tabela — pelo vigia do alocador de [`crate::sigiloso`], que olha o
+    /// bloco ao ser devolvido.
+    #[test]
+    fn o_corpo_guardado_sai_zerado() {
+        let _vez = crate::sigiloso::testes::UM_DE_CADA_VEZ
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut t = Caixas::nova();
+        let id = t
+            .enviar(PA, A, B, "segredo guardado", 1, None, 0)
+            .0
+            .unwrap()
+            .id;
+        let p = t.vivas[0].corpo.as_ptr();
+        let veredito = crate::sigiloso::testes::ao_sair(p, || {
+            t.purgar(id).unwrap();
+        });
+        assert_eq!(veredito, 1);
     }
 
     /// Os ids não voltam: o que saiu não é reusado.
