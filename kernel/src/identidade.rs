@@ -20,9 +20,9 @@
 //! e mora aqui. A política, quando vier, consulta o mesmo.
 //!
 //! E, em tempo de execução, de `agent.register`: um agente registrado por um
-//! administrador. O disco é só de leitura, então esse registro vale até o
-//! próximo boot. Um armazenamento persistente de chaves é um passo seguinte,
-//! e entra por baixo desta mesma interface.
+//! administrador. A imagem é só de leitura; o que muda em tempo de execução
+//! vai para o journal da partição de estado, e o boot o reaplica por cima da
+//! imagem — ver [`crate::persistencia`].
 //!
 //! # O que o registro decide, e o que não
 //!
@@ -91,8 +91,8 @@ pub struct Administrador {
     /// Revogada por `admin.revoke`, com quórum. A credencial fica no
     /// registro — continua membro do grupo de N, e o nome dela continua
     /// nomeando o que ela fez na auditoria —, mas não prova mais nada, não
-    /// assina quórum e não recebe mensagem. Vale até o próximo boot: o disco
-    /// é só de leitura.
+    /// assina quórum e não recebe mensagem. A lápide vai para o journal, e
+    /// vence a imagem em todo boot — ver [`aplicar_lapide`].
     pub revogado: bool,
     /// A chave **pública** Ed25519 com que a credencial assina um quórum —
     /// ver [`sigilo::quorum`]. A privada fica com quem assina; o Duke só
@@ -107,12 +107,22 @@ struct Identidade {
     chave: Option<[u8; TAM_CHAVE]>,
     agentes: Vec<Agente>,
     administradores: Vec<Administrador>,
+    /// As lápides: as credenciais administrativas revogadas por quórum,
+    /// desta execução ou de antes dela, lidas do journal.
+    ///
+    /// Ficam aqui, e não só na marca de cada administrador, porque a marca
+    /// mora numa entrada que vem da imagem — e a imagem não sabe de
+    /// revogação nenhuma. Toda vez que o registro da imagem é lido, a
+    /// lápide é aplicada por cima dele: **a lápide vence a imagem**. Uma
+    /// imagem que traga de volta a chave revogada não a reabilita.
+    lapides: Vec<[u8; TAM_CHAVE]>,
 }
 
 static IDENTIDADE: Mutex<Identidade> = Mutex::new(Identidade {
     chave: None,
     agentes: Vec::new(),
     administradores: Vec::new(),
+    lapides: Vec::new(),
 });
 
 /// Lê as chaves do disco. No boot, depois de a raiz estar montada.
@@ -173,6 +183,83 @@ pub fn carregar() {
         id.chave = chave;
         id.agentes = agentes;
         id.administradores = administradores;
+        // A lápide vence a imagem: o que já foi revogado continua.
+        let lapides = id.lapides.clone();
+        for a in id.administradores.iter_mut() {
+            if lapides.contains(&a.chave) {
+                a.revogado = true;
+            }
+        }
+    });
+}
+
+/// Põe a lápide de uma credencial administrativa: ela fica revogada agora e
+/// em toda leitura futura do registro da imagem. É o que o journal reaplica
+/// no boot, e o que a persistência reafirma quando uma gravação falha.
+pub fn aplicar_lapide(chave: &[u8; TAM_CHAVE]) {
+    crate::arch::sem_interrupcoes(|| {
+        let mut id = IDENTIDADE.lock();
+        if !id.lapides.contains(chave) {
+            id.lapides.push(*chave);
+        }
+        for a in id.administradores.iter_mut() {
+            if a.chave == *chave {
+                a.revogado = true;
+            }
+        }
+    });
+    crate::mensagens::anular_titular(
+        politica::mensagens::Dono::Administrador(*chave),
+        "com a credencial revogada",
+    );
+}
+
+/// As credenciais administrativas revogadas: as marcadas no registro e as
+/// das lápides.
+pub fn administradores_revogados() -> Vec<[u8; TAM_CHAVE]> {
+    crate::arch::sem_interrupcoes(|| {
+        let id = IDENTIDADE.lock();
+        let mut v = id.lapides.clone();
+        for a in id.administradores.iter().filter(|a| a.revogado) {
+            if !v.contains(&a.chave) {
+                v.push(a.chave);
+            }
+        }
+        v
+    })
+}
+
+/// A chave pública Ed25519 de assinatura de um administrador, se houver.
+pub fn assinatura_do_administrador(chave: &[u8; TAM_CHAVE]) -> Option<[u8; TAM_CHAVE]> {
+    crate::arch::sem_interrupcoes(|| {
+        IDENTIDADE
+            .lock()
+            .administradores
+            .iter()
+            .find(|a| a.chave == *chave)
+            .and_then(|a| a.assinatura)
+    })
+}
+
+/// Troca o registro de agentes inteiro: o que a persistência faz para
+/// desfazer uma operação cuja gravação falhou.
+pub fn restaurar_agentes(agentes: &[Agente]) {
+    crate::arch::sem_interrupcoes(|| IDENTIDADE.lock().agentes = agentes.to_vec());
+    crate::barra::atualizar_indicador();
+}
+
+/// Põe de volta um agente que o journal registrou: substitui qualquer
+/// entrada com a mesma chave ou o mesmo nome.
+pub fn restaurar_agente(chave: [u8; TAM_CHAVE], nome: &str, papel: Option<&str>) {
+    crate::arch::sem_interrupcoes(|| {
+        let mut id = IDENTIDADE.lock();
+        id.agentes.retain(|a| a.chave != chave && a.nome != nome);
+        id.agentes.push(Agente {
+            chave,
+            nome: String::from(nome),
+            origem: Origem::Administracao,
+            papel: papel.map(String::from),
+        });
     });
 }
 
@@ -397,7 +484,11 @@ fn marcar_revogado(chave: &[u8; TAM_CHAVE], m: u8) -> Result<String, RecusaDaRev
             return Err(RecusaDaRevogacao::AbaixoDoQuorum);
         }
         alvo.revogado = true;
-        Ok(alvo.nome.clone())
+        let nome = alvo.nome.clone();
+        if !id.lapides.contains(chave) {
+            id.lapides.push(*chave);
+        }
+        Ok(nome)
     })
 }
 
@@ -589,6 +680,13 @@ pub fn registrar_agente_de_teste(chave: [u8; TAM_CHAVE], nome: &str, papel: &str
     let _ = registrar(chave, nome, papel);
 }
 
+/// Só para a suíte: esquece as lápides — a revogação por quórum de um
+/// caso não alcança o seguinte. Fora da suíte, uma lápide é para sempre.
+#[cfg(feature = "modo-teste")]
+pub fn esquecer_lapides_de_teste() {
+    crate::arch::sem_interrupcoes(|| IDENTIDADE.lock().lapides.clear());
+}
+
 /// Devolve o registro ao que a imagem diz: relê os arquivos. O que a suíte
 /// registrou, revogou ou mudou de papel volta ao que era. O caso seguinte
 /// encontra o registro da imagem.
@@ -627,6 +725,9 @@ struct Desafio {
     quorum: Option<&'static str>,
     /// A versão da política quando foi emitido.
     versao_da_politica: u64,
+    /// A geração administrativa quando foi emitido — ver
+    /// [`crate::persistencia::geracao`].
+    geracao: u64,
 }
 
 impl Drop for Desafio {
@@ -647,6 +748,7 @@ pub struct DesafioPublico {
     /// A parte pública da efêmera.
     pub efemera: [u8; TAM_CHAVE],
     pub versao_da_politica: u64,
+    pub geracao: u64,
     pub valido_ms: u64,
 }
 
@@ -657,6 +759,7 @@ pub struct DesafioConsumido {
     pub nonce: [u8; 32],
     pub quorum: Option<&'static str>,
     pub versao_da_politica: u64,
+    pub geracao: u64,
 }
 
 impl Drop for DesafioConsumido {
@@ -676,11 +779,13 @@ pub fn desafiar(
     let nonce = crate::aleatorio::chave()?;
     let id = PROXIMO_DESAFIO.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     let versao_da_politica = crate::autorizacao::versao_da_politica();
+    let geracao = crate::persistencia::geracao();
     let publico = DesafioPublico {
         id,
         nonce,
         efemera: sigilo::publica_de(&efemera),
         versao_da_politica,
+        geracao,
         valido_ms: validade(quorum),
     };
     let desafio = Desafio {
@@ -691,6 +796,7 @@ pub fn desafiar(
         criado_ms: agora_dos_desafios(),
         quorum,
         versao_da_politica,
+        geracao,
     };
     let anterior = crate::arch::sem_interrupcoes(|| {
         let mut desafios = DESAFIOS.lock();
@@ -748,6 +854,7 @@ pub fn consumir(sessao: u8, id: u64) -> Result<DesafioConsumido, DesafioRecusado
         nonce: desafio.nonce,
         quorum: desafio.quorum,
         versao_da_politica: desafio.versao_da_politica,
+        geracao: desafio.geracao,
     })
 }
 

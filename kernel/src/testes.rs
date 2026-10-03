@@ -6571,8 +6571,8 @@ fn disco_escreve_descarrega_e_le_de_volta() -> Resultado {
     let resultado = crate::virtio::blk::com_o_disco(|d| -> Resultado {
         d.ler(setor, &mut antes)?;
         let (escritas, descargas) = d.contadores();
-        d.escrever(setor, &padrao)?;
-        d.descarregar()?;
+        d.gravar_setores(setor, &padrao)?;
+        d.descarregar_disco()?;
         if d.contadores() != (escritas + 1, descargas + 1) {
             return Err("a escrita ou a descarga nao foi contada");
         }
@@ -6583,8 +6583,8 @@ fn disco_escreve_descarrega_e_le_de_volta() -> Resultado {
         }
         // Devolve o que havia, para não deixar lixo onde o journal pode
         // um dia chegar.
-        d.escrever(setor, &antes)?;
-        d.descarregar()
+        d.gravar_setores(setor, &antes)?;
+        d.descarregar_disco()
     });
     resultado.ok_or("nao ha disco")?
 }
@@ -6612,7 +6612,7 @@ fn disco_recusa_escrita_fora_da_janela() -> Resultado {
         d.ler(primeiro - 1, &mut antes)?;
         let (escritas, _) = d.contadores();
         for (setor, quantos) in tentativas {
-            if d.escrever(setor, &lixo[..quantos * B]).is_ok() {
+            if d.gravar_setores(setor, &lixo[..quantos * B]).is_ok() {
                 crate::log_error!("teste", "a escrita no setor {} passou", setor);
                 return Err("uma escrita fora da janela foi aceita");
             }
@@ -14691,6 +14691,7 @@ struct DesafioDeQuorum {
     nonce: [u8; 32],
     efemera: [u8; 32],
     versao: u64,
+    geracao: u64,
     m: u8,
     n: u8,
     sessao: u8,
@@ -14716,6 +14717,7 @@ fn ler_desafio_de_quorum(j: Json, sessao: u8) -> Result<DesafioDeQuorum, &'stati
         nonce: hex("nonce")?,
         efemera: hex("ephemeral")?,
         versao: numero("policy_version")?,
+        geracao: numero("generation")?,
         m: numero("m")? as u8,
         n: numero("n")? as u8,
         sessao,
@@ -14755,6 +14757,7 @@ fn assinatura_de(
         sessao: d.sessao,
         efemera: &efemera,
         versao_da_politica: d.versao,
+        geracao: d.geracao,
         m: d.m,
         n: d.n,
         comando: "admin.revoke",
@@ -14832,6 +14835,395 @@ fn grupo_intacto() -> bool {
 /// revogada não prova mais nada, não recebe mensagem e não volta a assinar;
 /// que o histórico dela continua na auditoria; e que, revogada uma, nenhuma
 /// outra sai — o grupo não cai abaixo do quórum.
+/// Os registros do journal, do disco, agora.
+fn registros_do_journal() -> Result<alloc::vec::Vec<diario::Registro>, &'static str> {
+    crate::persistencia::ler_de_teste()
+}
+
+/// A persistência abriu no boot da suíte: disponível, com a abertura e o
+/// boot gravados, e o último registro confirma exatamente o valor do
+/// contador do TPM.
+fn persistencia_aberta_e_ancorada() -> Resultado {
+    if crate::persistencia::estado() != crate::persistencia::Estado::Disponivel {
+        crate::log_error!("teste", "{:?}", crate::persistencia::estado());
+        return Err("a persistencia nao esta disponivel na suite");
+    }
+    let registros = registros_do_journal()?;
+    if registros.first().map(|r| r.tipo) != Some(diario::estado::tipo::ABERTURA) {
+        return Err("o journal nao comeca pela abertura");
+    }
+    if !registros
+        .iter()
+        .any(|r| r.tipo == diario::estado::tipo::BOOT)
+    {
+        return Err("o boot nao foi gravado");
+    }
+    let tpm = crate::persistencia::ancora_no_tpm_de_teste()?;
+    let ultima = registros.last().map(|r| r.ancora);
+    if diario::julgar(ultima, Some(tpm)) != diario::Veredito::Confere {
+        crate::log_error!("teste", "disco {:?}, tpm {}", ultima, tpm);
+        return Err("o journal nao confere com a ancora do TPM");
+    }
+    let (_, _, ancora, n, _) = crate::persistencia::relatorio();
+    if ancora != Some(tpm) || n != registros.len() as u64 {
+        return Err("o relatorio nao diz a ancora ou os registros do journal");
+    }
+    Ok(())
+}
+
+/// Uma operação de autoridade — o registro de um agente — é exatamente um
+/// registro novo no journal, do tipo operação, com a entrada do agente; a
+/// geração sobe um e a âncora acompanha. Uma operação que não muda
+/// autoridade não grava nada.
+fn persistencia_cada_operacao_um_registro() -> Resultado {
+    let novo = sigilo::publica_de(&[0x7A; 32]);
+    let parametros = alloc::format!(
+        r#"{{"key":"{}","name":"persistido","role":"observador"}}"#,
+        sigilo::hex(&novo)
+    );
+    let resultado = (|| -> Resultado {
+        crate::identidade::registrar_administrador_de_teste(
+            sigilo::publica_de(&ADMIN_DE_TESTE),
+            "administrador",
+        );
+        let antes = registros_do_journal()?.len();
+        let geracao = crate::persistencia::geracao();
+        let r = executar_admin_com(
+            0,
+            &ADMIN_DE_TESTE,
+            "agent.register",
+            &parametros,
+            &parametros,
+        )?;
+        if !r.contains(r#""executed":true"#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o registro do agente nao foi executado");
+        }
+        let depois = registros_do_journal()?;
+        if depois.len() != antes + 1 {
+            return Err("uma operacao de autoridade nao foi exatamente um registro");
+        }
+        let ultimo = depois.last().ok_or("journal vazio")?;
+        if ultimo.tipo != diario::estado::tipo::OPERACAO || ultimo.geracao != geracao + 1 {
+            return Err("o registro nao e de operacao, ou a geracao nao subiu um");
+        }
+        if crate::persistencia::geracao() != geracao + 1 {
+            return Err("a geracao em memoria nao acompanhou o journal");
+        }
+        let entradas = diario::estado::ler_campos(&ultimo.conteudo)?;
+        let linha = sigilo::registro::linha(&novo, "persistido", Some("observador"));
+        let esperada = crate::persistencia::entrada_de_teste(
+            diario::estado::tipo::AGENTE_REGISTRADO,
+            &[linha.as_bytes()],
+        );
+        if !entradas.contains(&esperada.as_slice()) {
+            return Err("o registro nao traz a linha do agente registrado");
+        }
+        if crate::persistencia::ancora_no_tpm_de_teste()? != ultimo.ancora {
+            return Err("a ancora do TPM nao foi para a do registro");
+        }
+        // Ler a caixa do administrador não muda autoridade: nada gravado.
+        let r = executar_admin_com(0, &ADMIN_DE_TESTE, "message.read", "{}", "{}")?;
+        if !r.contains(r#""executed":true"#) {
+            return Err("message.read do administrador nao foi executado");
+        }
+        if registros_do_journal()?.len() != antes + 1 {
+            return Err("uma operacao sem autoridade gravou no journal");
+        }
+        Ok(())
+    })();
+    crate::identidade::esquecer_registrados();
+    resultado
+}
+
+/// Sem persistência confiável, nenhuma credencial administrativa é aceita:
+/// nem para mudar autoridade, nem para ler a própria caixa — sem o journal
+/// confirmado, o kernel não sabe quais foram revogadas. Nem pela serial do
+/// sistema, nem pelo quórum. A recusa diz por quê, e nada muda. As sessões
+/// de agente continuam, e as mensagens delas também.
+fn persistencia_indisponivel_bloqueia() -> Resultado {
+    let novo = sigilo::publica_de(&[0x7B; 32]);
+    let parametros = alloc::format!(
+        r#"{{"key":"{}","name":"bloqueado","role":"observador"}}"#,
+        sigilo::hex(&novo)
+    );
+    let anterior = crate::persistencia::forcar_estado_de_teste(
+        crate::persistencia::Estado::Indisponivel("disco de teste sem descarga"),
+    );
+    let resultado = (|| -> Resultado {
+        crate::identidade::registrar_administrador_de_teste(
+            sigilo::publica_de(&ADMIN_DE_TESTE),
+            "administrador",
+        );
+        let antes = registros_do_journal()?.len();
+        // Pela serial — a sessão 0, o canal de emergência do sistema — e
+        // por uma porta: o mesmo portão.
+        for sessao in [0u8, 2] {
+            let r = executar_admin_com(
+                sessao,
+                &ADMIN_DE_TESTE,
+                "agent.register",
+                &parametros,
+                &parametros,
+            )?;
+            if !r.contains(r#""executed":false"#)
+                || !r.contains("persistencia indisponivel: disco de teste sem descarga")
+            {
+                crate::log_error!("teste", "{}", r);
+                return Err("uma operacao de autoridade passou sem persistencia");
+            }
+        }
+        if crate::identidade::agente(&novo).is_some() {
+            return Err("o agente entrou sem persistencia");
+        }
+        for comando in ["policy.write", "agent.revoke", "session.revoke"] {
+            let r = executar_admin_com(0, &ADMIN_DE_TESTE, comando, "{}", "{}")?;
+            if !r.contains("persistencia indisponivel") {
+                crate::log_error!("teste", "{}: {}", comando, r);
+                return Err("uma operacao de autoridade nao passou pelo portao da persistencia");
+            }
+        }
+        // Nem ler a própria caixa: a credencial pode estar revogada.
+        let r = executar_admin_com(0, &ADMIN_DE_TESTE, "message.read", "{}", "{}")?;
+        if !r.contains("persistencia indisponivel") {
+            crate::log_error!("teste", "{}", r);
+            return Err("sem persistencia, uma credencial administrativa leu a caixa");
+        }
+        // As sessões de agente continuam: um agente manda uma mensagem.
+        com_agentes_de_teste(|| {
+            let (mut a, mut sa) = conectado(1)?;
+            let r = mandar(&mut a, &mut sa, "papel:operador", "sem persistencia", 7001)?;
+            if !r.contains(r#""id":"#) {
+                crate::log_error!("teste", "{}", r);
+                return Err("sem persistencia, um agente nao conseguiu mandar mensagem");
+            }
+            Ok(())
+        })?;
+        // E o quórum.
+        com_grupo(["administrador"; 3], || {
+            let d = desafio_de_quorum(0)?;
+            let params = params_de_revogacao(2, "sem persistencia");
+            let r = revogar_com(&d, &assinaturas_de(&d, &[0, 1], &params)?, &params)?;
+            if !quorum_recusado(&r, "ERROR", "persistencia indisponivel")
+                || crate::identidade::administrador_revogado(&publica_do_grupo(2))
+            {
+                crate::log_error!("teste", "{}", r);
+                return Err("o quorum revogou sem persistencia");
+            }
+            Ok(())
+        })?;
+        if registros_do_journal()?.len() != antes {
+            return Err("algo foi gravado com a persistencia indisponivel");
+        }
+        Ok(())
+    })();
+    crate::persistencia::forcar_estado_de_teste(anterior);
+    crate::identidade::esquecer_registrados();
+    resultado
+}
+
+/// A gravação que falha depois de a operação acontecer: o que ela concedeu
+/// é desfeito — o agente registrado sai —, o que ela tirou fica — o agente
+/// revogado continua fora —, e a persistência passa a indisponível.
+fn persistencia_a_gravacao_que_falha() -> Resultado {
+    let novo = sigilo::publica_de(&[0x7C; 32]);
+    let parametros = alloc::format!(
+        r#"{{"key":"{}","name":"desfeito","role":"observador"}}"#,
+        sigilo::hex(&novo)
+    );
+    let anterior = crate::persistencia::estado();
+    let resultado = (|| -> Resultado {
+        crate::identidade::registrar_administrador_de_teste(
+            sigilo::publica_de(&ADMIN_DE_TESTE),
+            "administrador",
+        );
+        crate::persistencia::falhar_a_proxima_gravacao_de_teste(true);
+        let r = executar_admin_com(
+            0,
+            &ADMIN_DE_TESTE,
+            "agent.register",
+            &parametros,
+            &parametros,
+        )?;
+        crate::persistencia::falhar_a_proxima_gravacao_de_teste(false);
+        if !r.contains(r#""executed":false"#) || !r.contains("nao ficou gravada no journal") {
+            crate::log_error!("teste", "{}", r);
+            return Err("a falha da gravacao nao foi dita");
+        }
+        if crate::identidade::agente(&novo).is_some() {
+            return Err("a concessao nao gravada ficou valendo");
+        }
+        if crate::persistencia::estado() == crate::persistencia::Estado::Disponivel {
+            return Err("a persistencia continuou disponivel depois de uma gravacao falhar");
+        }
+
+        // A revogação: registrada com a persistência de pé, revogada com a
+        // gravação falhando — e continua revogada.
+        crate::persistencia::forcar_estado_de_teste(crate::persistencia::Estado::Disponivel);
+        let r = executar_admin_com(
+            0,
+            &ADMIN_DE_TESTE,
+            "agent.register",
+            &parametros,
+            &parametros,
+        )?;
+        if !r.contains(r#""executed":true"#) || crate::identidade::agente(&novo).is_none() {
+            crate::log_error!("teste", "{}", r);
+            return Err("o agente nao entrou com a persistencia de pe");
+        }
+        let revogar = alloc::format!(r#"{{"key":"{}"}}"#, sigilo::hex(&novo));
+        crate::persistencia::falhar_a_proxima_gravacao_de_teste(true);
+        let r = executar_admin_com(0, &ADMIN_DE_TESTE, "agent.revoke", &revogar, &revogar)?;
+        crate::persistencia::falhar_a_proxima_gravacao_de_teste(false);
+        if !r.contains("nao ficou gravada no journal") {
+            crate::log_error!("teste", "{}", r);
+            return Err("a falha da gravacao da revogacao nao foi dita");
+        }
+        if crate::identidade::agente(&novo).is_some() {
+            return Err("a revogacao nao gravada foi desfeita");
+        }
+        Ok(())
+    })();
+    crate::persistencia::falhar_a_proxima_gravacao_de_teste(false);
+    crate::persistencia::forcar_estado_de_teste(anterior);
+    crate::identidade::esquecer_registrados();
+    resultado
+}
+
+/// A lápide vence a imagem: a credencial administrativa da imagem que o
+/// journal diz revogada continua revogada quando o registro da imagem é
+/// lido de novo — como no boot seguinte.
+fn persistencia_a_lapide_vence_a_imagem() -> Resultado {
+    let resultado = (|| -> Resultado {
+        let grupo = crate::identidade::grupo_de_administradores();
+        let alvo = grupo
+            .last()
+            .ok_or("a imagem nao tem administradores")?
+            .chave;
+        if crate::identidade::administrador_revogado(&alvo) {
+            return Err("a credencial da imagem ja comecou revogada");
+        }
+        let entrada =
+            crate::persistencia::entrada_de_teste(diario::estado::tipo::LAPIDE, &[&alvo, &[]]);
+        crate::persistencia::reaplicar_entrada(&entrada)?;
+        if !crate::identidade::administrador_revogado(&alvo) {
+            return Err("a lapide reaplicada nao revogou");
+        }
+        // A imagem lida de novo traz a credencial: a lápide vence.
+        crate::identidade::esquecer_registrados();
+        if !crate::identidade::administrador_revogado(&alvo) {
+            return Err("a imagem relida trouxe de volta a credencial revogada");
+        }
+        Ok(())
+    })();
+    crate::identidade::esquecer_lapides_de_teste();
+    crate::identidade::esquecer_registrados();
+    resultado
+}
+
+/// Cada tipo de entrada se reaplica como o journal a gravou, e as erradas
+/// são recusadas: um campo a mais, uma linha que não se lê, uma política
+/// abaixo do piso do quórum.
+fn persistencia_as_entradas_se_reaplicam() -> Resultado {
+    use diario::estado::tipo;
+    let entrada = crate::persistencia::entrada_de_teste;
+    let resultado = (|| -> Resultado {
+        let chave = sigilo::publica_de(&[0x7D; 32]);
+        let linha = sigilo::registro::linha(&chave, "relido", Some("observador"));
+        crate::persistencia::reaplicar_entrada(&entrada(
+            tipo::AGENTE_REGISTRADO,
+            &[linha.as_bytes()],
+        ))?;
+        if crate::identidade::papel_do_agente(&chave).as_deref() != Some("observador") {
+            return Err("o agente gravado nao voltou ao registro");
+        }
+        crate::persistencia::reaplicar_entrada(&entrada(
+            tipo::PAPEL_ATRIBUIDO,
+            &[b"relido", b"operador"],
+        ))?;
+        if crate::identidade::papel_do_agente(&chave).as_deref() != Some("operador") {
+            return Err("o papel gravado nao voltou");
+        }
+        crate::persistencia::reaplicar_entrada(&entrada(tipo::AGENTE_REVOGADO, &[&chave]))?;
+        if crate::identidade::agente(&chave).is_some() {
+            return Err("a revogacao gravada nao tirou o agente");
+        }
+        // A política gravada passa pela validação inteira.
+        let texto = crate::autorizacao::com_politica(|p| p.texto());
+        let rebaixada = texto.replace("quorum admin.revoke 2 3", "quorum admin.revoke 2 4");
+        if rebaixada == texto {
+            return Err("a politica da suite nao tem o quorum do admin.revoke");
+        }
+        if crate::persistencia::reaplicar_entrada(&entrada(tipo::POLITICA, &[rebaixada.as_bytes()]))
+            .is_ok()
+        {
+            return Err("uma politica gravada abaixo do piso do quorum foi aceita");
+        }
+        // Erradas na forma.
+        for ruim in [
+            entrada(tipo::AGENTE_REVOGADO, &[&chave, b"sobra"]),
+            entrada(tipo::AGENTE_REGISTRADO, &[b"isto nao e uma linha"]),
+            entrada(tipo::LAPIDE, &[&chave[..31], &[]]),
+            entrada(999, &[b"x"]),
+            alloc::vec![1, 0],
+        ] {
+            if crate::persistencia::reaplicar_entrada(&ruim).is_ok() {
+                return Err("uma entrada errada foi reaplicada");
+            }
+        }
+        Ok(())
+    })();
+    crate::identidade::esquecer_registrados();
+    resultado
+}
+
+/// As assinaturas de um quórum valem para a geração do desafio: uma
+/// mudança de autoridade depois dele — um agente registrado — as derruba.
+fn persistencia_a_geracao_amarra_o_quorum() -> Resultado {
+    let novo = sigilo::publica_de(&[0x7E; 32]);
+    let parametros = alloc::format!(
+        r#"{{"key":"{}","name":"entre","role":"observador"}}"#,
+        sigilo::hex(&novo)
+    );
+    let resultado = com_grupo(["administrador"; 3], || {
+        crate::identidade::registrar_administrador_de_teste(
+            sigilo::publica_de(&ADMIN_DE_TESTE),
+            "administrador",
+        );
+        let d = desafio_de_quorum(0)?;
+        if d.geracao != crate::persistencia::geracao() {
+            return Err("o desafio de quorum nao diz a geracao em vigor");
+        }
+        let params = params_de_revogacao(2, "geracao");
+        let assinaturas = assinaturas_de(&d, &[0, 1], &params)?;
+        // Entre o desafio e o pedido, uma mudança de autoridade.
+        let r = executar_admin_com(
+            2,
+            &ADMIN_DE_TESTE,
+            "agent.register",
+            &parametros,
+            &parametros,
+        )?;
+        if !r.contains(r#""executed":true"#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o registro do meio nao foi executado");
+        }
+        let r = revogar_com(&d, &assinaturas, &params)?;
+        if !quorum_recusado(
+            &r,
+            "DENY_NOT_AUTHENTICATED",
+            "o estado de autoridade mudou desde o desafio",
+        ) || crate::identidade::administrador_revogado(&publica_do_grupo(2))
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("assinaturas de outra geracao revogaram");
+        }
+        Ok(())
+    });
+    crate::identidade::esquecer_registrados();
+    resultado
+}
+
 fn admin_revoke_dois_de_tres() -> Resultado {
     com_grupo(["administrador"; 3], || {
         let (mut a, mut sa) = conectado(1)?;
@@ -20013,6 +20405,34 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "admin.revoke: ao mesmo tempo",
         f: admin_revoke_concorrencia,
+    },
+    Caso {
+        nome: "persistencia: aberta no boot, e o journal confere com a ancora",
+        f: persistencia_aberta_e_ancorada,
+    },
+    Caso {
+        nome: "persistencia: cada operacao de autoridade e um registro, e a geracao sobe um",
+        f: persistencia_cada_operacao_um_registro,
+    },
+    Caso {
+        nome: "persistencia: sem ela nada de autoridade muda, nem pelo sistema",
+        f: persistencia_indisponivel_bloqueia,
+    },
+    Caso {
+        nome: "persistencia: a gravacao que falha desfaz a concessao e mantem a revogacao",
+        f: persistencia_a_gravacao_que_falha,
+    },
+    Caso {
+        nome: "persistencia: a lapide vence a imagem",
+        f: persistencia_a_lapide_vence_a_imagem,
+    },
+    Caso {
+        nome: "persistencia: as entradas do journal se reaplicam, e as erradas nao",
+        f: persistencia_as_entradas_se_reaplicam,
+    },
+    Caso {
+        nome: "persistencia: a geracao amarra as assinaturas do quorum",
+        f: persistencia_a_geracao_amarra_o_quorum,
     },
     Caso {
         nome: "barra: nenhuma superficie a cobre",

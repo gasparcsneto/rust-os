@@ -29,6 +29,15 @@ pub mod tipo {
     /// Um boot: `[quantos boots, u64 LE]`. Mantém o piso do relógio, e
     /// conta os boots.
     pub const BOOT: u16 = 2;
+    /// Uma operação de autoridade e o que ela mudou: uma lista de entradas,
+    /// cada uma com o tipo (dois bytes) e os campos dela — os tipos abaixo.
+    /// A primeira entrada é sempre esta mesma, `[operação, recurso]`: o que
+    /// foi pedido e sobre o quê, para o journal contar a operação mesmo
+    /// quando ela não deixa rastro no estado.
+    ///
+    /// Uma operação, um registro: as mudanças dela entram juntas ou não
+    /// entram.
+    pub const OPERACAO: u16 = 3;
 
     /// Um agente entrou no registro: `[a linha do arquivo de agentes]`.
     pub const AGENTE_REGISTRADO: u16 = 10;

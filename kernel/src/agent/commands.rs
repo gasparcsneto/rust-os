@@ -64,7 +64,7 @@ pub static COMANDOS: &[Command] = &[
         nome: "agent.registry",
         resumo: "Quem pode entrar pelas portas: a chave publica do Duke e cada agente \
                  registrado, com o nome, a chave e de onde veio (a imagem, ou um registro \
-                 administrativo, que vale ate o proximo boot).",
+                 administrativo, gravado no journal).",
         params: &[],
         acesso: Acesso::Exige(Permissao::AgentRead),
         recurso: None,
@@ -1265,6 +1265,31 @@ fn system_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
         Some(s) => w.u64_value(s)?,
         None => w.null_value()?,
     }
+    // A persistência: se as operações de autoridade podem acontecer agora,
+    // e por que não; a geração administrativa, que um signatário de quórum
+    // compara com a maior que já viu; a âncora do TPM; e o tempo lógico,
+    // que nunca volta.
+    w.key("persistence")?;
+    w.begin_object()?;
+    let (estado, geracao, ancora, registros, boots) = crate::persistencia::relatorio();
+    w.field_str("state", estado.como_str())?;
+    w.field_str("reason", estado.motivo())?;
+    w.field_u64("generation", geracao)?;
+    w.key("anchor")?;
+    match ancora {
+        Some(a) => w.u64_value(a)?,
+        None => w.null_value()?,
+    }
+    w.field_u64("records", registros)?;
+    w.field_u64("boots", boots)?;
+    w.field_u64("clock", crate::persistencia::agora())?;
+    // O que o disco confirmou: escritas e descargas. É de fora que se vê
+    // uma operação de autoridade terminar numa descarga.
+    let (escritas, descargas) =
+        crate::virtio::blk::com_o_disco(|d| d.contadores()).unwrap_or((0, 0));
+    w.field_u64("disk_writes", escritas)?;
+    w.field_u64("disk_flushes", descargas)?;
+    w.end_object()?;
     w.field_u64("log_records", crate::log::total_emitidos())?;
     // Bytes que a porta serial nao conseguiu enviar. Diferente de zero aqui
     // quer dizer que o que se le do log esta incompleto, e e a unica forma de

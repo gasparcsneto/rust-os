@@ -94,7 +94,28 @@ struct Operacao {
     nome: &'static str,
     resumo: &'static str,
     permissao: Permissao,
+    /// O que ela faz com o estado de autoridade — e com isso se precisa da
+    /// persistência para acontecer. Ver [`Efeito`].
+    efeito: Efeito,
     executar: fn(&Pedinte, Json, &mut JsonWriter) -> Result<String, Falha>,
+}
+
+/// O que uma operação faz com o estado de autoridade.
+///
+/// Toda operação que muda autoridade passa pela persistência: sem ela
+/// disponível, é recusada — não há exceção para o `sistema` nem para a
+/// serial —, e com ela, o que mudou é gravado no journal antes da
+/// resposta. A diferença entre conceder e tirar é o que acontece quando a
+/// gravação falha: o que foi concedido é desfeito; o que foi tirado fica.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Efeito {
+    /// Não muda autoridade: arrendamentos e mensagens.
+    Nenhum,
+    /// Dá a alguém o que ele não tinha: um registro, um papel, uma
+    /// política, uma credencial.
+    Concede,
+    /// Tira de alguém o que ele tinha: uma revogação.
+    Tira,
 }
 
 /// As operações que `admin.execute` aceita.
@@ -102,8 +123,9 @@ static OPERACOES: &[Operacao] = &[
     Operacao {
         nome: "agent.register",
         resumo: "Registra um agente: {\"key\": chave publica em hex, \"name\": nome, \"role\": \
-                 papel}. O papel cabe no do administrador. Vale ate o proximo boot.",
+                 papel}. O papel cabe no do administrador. Fica gravado no journal.",
         permissao: Permissao::AgentRegister,
+        efeito: Efeito::Concede,
         executar: registrar_agente,
     },
     Operacao {
@@ -111,6 +133,7 @@ static OPERACOES: &[Operacao] = &[
         resumo: "Revoga um agente: {\"key\": chave publica em hex}. As sessoes abertas com a \
                  chave sao encerradas na hora. Nao vale para a chave da propria sessao.",
         permissao: Permissao::AgentRevoke,
+        efeito: Efeito::Tira,
         executar: revogar_agente,
     },
     Operacao {
@@ -118,6 +141,7 @@ static OPERACOES: &[Operacao] = &[
         resumo: "Atribui um papel: {\"agent\": nome, ou \"serial\", \"role\": papel}. O papel \
                  novo e o de agora cabem no do administrador; nao vale para a propria sessao.",
         permissao: Permissao::PolicyAssign,
+        efeito: Efeito::Concede,
         executar: atribuir_papel,
     },
     Operacao {
@@ -126,6 +150,7 @@ static OPERACOES: &[Operacao] = &[
                  ou \"taxa ...\"}. Validada como o arquivo; vale na decisao seguinte; o disco \
                  nao muda.",
         permissao: Permissao::PolicyWrite,
+        efeito: Efeito::Concede,
         executar: escrever_politica,
     },
     Operacao {
@@ -133,8 +158,9 @@ static OPERACOES: &[Operacao] = &[
         resumo: "Registra uma pessoa: {\"name\": nome, \"role\": papel, \"credential\": \
                  \"argon2id:m=..,t=..,p=1:<sal>:<verificador>\"}. O verificador e calculado \
                  fora: a senha nunca vem. O papel cabe no do administrador. Devolve o \
-                 identificador. Vale ate o proximo boot.",
+                 identificador. Fica gravado no journal.",
         permissao: Permissao::PersonRegister,
+        efeito: Efeito::Concede,
         executar: registrar_pessoa,
     },
     Operacao {
@@ -142,6 +168,7 @@ static OPERACOES: &[Operacao] = &[
         resumo: "Revoga uma pessoa: {\"person\": \"pessoa:<16 hex>\"}. Ela nao entra mais, e \
                  as sessoes dela acabam na hora; o registro fica, com o estado revogada.",
         permissao: Permissao::PersonRevoke,
+        efeito: Efeito::Tira,
         executar: revogar_pessoa,
     },
     Operacao {
@@ -149,6 +176,7 @@ static OPERACOES: &[Operacao] = &[
         resumo: "Troca a credencial de uma pessoa: {\"person\": identificador, \"credential\": \
                  verificador como no registro}. A pessoa e a mesma; as sessoes continuam.",
         permissao: Permissao::CredentialRotate,
+        efeito: Efeito::Concede,
         executar: rotacionar_credencial,
     },
     Operacao {
@@ -156,6 +184,7 @@ static OPERACOES: &[Operacao] = &[
         resumo: "Encerra uma sessao de pessoa: {\"session\": 16 hex}. A pessoa continua \
                  registrada e pode entrar de novo.",
         permissao: Permissao::SessionRevoke,
+        efeito: Efeito::Tira,
         executar: revogar_sessao,
     },
     Operacao {
@@ -163,6 +192,7 @@ static OPERACOES: &[Operacao] = &[
         resumo: "Revoga o arrendamento de um campo, de quem for: {\"id\": o id do campo em \
                  ui.tree}. A unica forma de quebrar o arrendamento de outro.",
         permissao: Permissao::LeaseRevoke,
+        efeito: Efeito::Nenhum,
         executar: revogar_arrendamento,
     },
     Operacao {
@@ -171,12 +201,14 @@ static OPERACOES: &[Operacao] = &[
                  \"ttl_ms\"?}, como `message.send`. O alcance e o do papel do administrador; \
                  a chave dele nunca abre sessao.",
         permissao: Permissao::MessageSend,
+        efeito: Efeito::Nenhum,
         executar: mandar_mensagem,
     },
     Operacao {
         nome: "message.read",
         resumo: "Le a caixa do administrador: {\"after\"?, \"max\"?}, como `message.read`.",
         permissao: Permissao::MessageRead,
+        efeito: Efeito::Nenhum,
         executar: ler_mensagens,
     },
     Operacao {
@@ -184,6 +216,7 @@ static OPERACOES: &[Operacao] = &[
         resumo: "Confirma uma mensagem da caixa do administrador: {\"id\", \
                  \"expect_version\"?}.",
         permissao: Permissao::MessageRead,
+        efeito: Efeito::Nenhum,
         executar: confirmar_mensagem,
     },
     Operacao {
@@ -191,6 +224,7 @@ static OPERACOES: &[Operacao] = &[
         resumo: "Tira uma mensagem viva, de quem for: {\"id\"}. Fica a lapide, e a \
                  auditoria.",
         permissao: Permissao::MessagePurge,
+        efeito: Efeito::Nenhum,
         executar: purgar_mensagem,
     },
     Operacao {
@@ -199,6 +233,7 @@ static OPERACOES: &[Operacao] = &[
                  `to` do message.send}. Permissao propria: a de tirar uma mensagem nao \
                  basta. Cada mensagem tirada vai para a auditoria com o id.",
         permissao: Permissao::MessagePurgeMailbox,
+        efeito: Efeito::Nenhum,
         executar: esvaziar_caixa,
     },
 ];
@@ -237,6 +272,7 @@ pub(crate) fn desafiar(para: Option<&str>, w: &mut JsonWriter) -> fmt::Result {
             if let Some(operacao) = quorum {
                 w.field_str("operation", operacao)?;
                 w.field_u64("policy_version", d.versao_da_politica)?;
+                w.field_u64("generation", d.geracao)?;
                 if let Some(q) = autorizacao::com_politica(|p| p.quorum(operacao)) {
                     w.field_u64("m", u64::from(q.m))?;
                     w.field_u64("n", u64::from(q.n))?;
@@ -457,6 +493,20 @@ fn conferir_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) -> Result
         destino = resolvido;
     }
 
+    // A persistência, antes de qualquer coisa: sem ela confiável, nenhuma
+    // credencial administrativa é aceita — nem para o que não muda
+    // autoridade. Sem o journal confirmado pela âncora, o kernel não sabe
+    // quais credenciais foram revogadas: um disco restaurado, ou o registro
+    // da lápide estragado, deixaria uma credencial revogada lendo e
+    // mandando mensagens como administradora. O `sistema` e a serial
+    // passam por aqui como qualquer um.
+    if let Err(motivo) = crate::persistencia::exigir() {
+        let motivo = format!("persistencia indisponivel: {motivo}");
+        gravar(Codigo::Error, "", &motivo);
+        return Err(falha(Codigo::Error, motivo));
+    }
+    let foto = (operacao.efeito != Efeito::Nenhum).then(crate::persistencia::Foto::tirar);
+
     let pedinte = Pedinte {
         sessao,
         nome: &nome,
@@ -472,6 +522,20 @@ fn conferir_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) -> Result
     // o contrário na mesma resposta.
     match (operacao.executar)(&pedinte, Json(parametros.as_bytes()), w) {
         Ok(recurso) => {
+            // Gravada antes de responder. Sem a gravação, o que foi
+            // concedido volta, e a resposta diz que não foi feita.
+            if let Some(foto) = &foto
+                && let Err(m) = crate::persistencia::concluir(
+                    foto,
+                    operacao.nome,
+                    &recurso,
+                    operacao.efeito == Efeito::Concede,
+                )
+            {
+                let motivo = format!("a operacao nao ficou gravada no journal: {m}");
+                gravar(Codigo::Error, &recurso, &motivo);
+                return Err(falha(Codigo::Error, motivo));
+            }
             // A autorização que valeu, e a operação: a permissão que o papel
             // tinha e o desafio que a prova consumiu.
             let detalhe = format!(
@@ -636,6 +700,18 @@ fn conferir_quorum_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) ->
             "a politica mudou desde o desafio",
         ));
     }
+    // E o estado de autoridade: as assinaturas provaram aquela geração. Uma
+    // mudança de autoridade no meio — um agente registrado, uma pessoa
+    // revogada — faz delas assinaturas sobre um estado que já não existe.
+    let geracao = crate::persistencia::geracao();
+    if desafio.geracao != geracao {
+        return Err(recusar(
+            &[],
+            Codigo::DenyNotAuthenticated,
+            "",
+            "o estado de autoridade mudou desde o desafio",
+        ));
+    }
     let Some(quorum) = autorizacao::com_politica(|p| p.quorum(operacao.nome)) else {
         return Err(recusar(
             &[],
@@ -669,6 +745,7 @@ fn conferir_quorum_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) ->
         sessao,
         efemera: &efemera,
         versao_da_politica: versao,
+        geracao,
         m: quorum.m,
         n: quorum.n,
         comando,
@@ -763,6 +840,15 @@ fn conferir_quorum_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) ->
         );
     }
 
+    // A persistência, como para toda operação de autoridade: sem ela, a
+    // revogação não acontece — uma lápide que não fica gravada seria uma
+    // credencial que volta no próximo boot.
+    if let Err(motivo) = crate::persistencia::exigir() {
+        let motivo = format!("persistencia indisponivel: {motivo}");
+        return Err(recusar(&nomes, Codigo::Error, "", &motivo));
+    }
+    let foto = crate::persistencia::Foto::tirar();
+
     // As restrições e a execução da operação.
     let feito = match operacao.nome {
         "admin.revoke" => revogar_administrador(&assinantes, alvo, quorum.m, parametros),
@@ -776,6 +862,15 @@ fn conferir_quorum_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) ->
             detalhe,
             descartados,
         }) => {
+            // Gravada antes de responder: a lápide no journal, a âncora
+            // avançada. Se falhar, a revogação continua valendo em memória —
+            // o que se tira não volta — e a resposta diz que não ficou
+            // gravada; a persistência indisponível bloqueia o resto.
+            if let Err(m) = crate::persistencia::concluir(&foto, operacao.nome, &recurso, false) {
+                let motivo = format!("a revogacao vale, mas nao ficou gravada no journal: {m}");
+                gravar(&nomes, papel, Codigo::Error, &recurso, &motivo);
+                return Err((Codigo::Error, motivo));
+            }
             // O detalhe tem teto: o que identifica a operação primeiro, o
             // motivo por último — é ele que se corta.
             let detalhe = format!(

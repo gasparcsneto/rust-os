@@ -2447,6 +2447,18 @@ fn conferir_janelas_pelo_toolkit() -> Result<ExitCode, String> {
 const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
     // O handler de um comando: só a licença de `autorizacao::autorizar`.
     (".handler)(", &["kernel/src/autorizacao.rs"]),
+    // Escrever no disco: só o journal. A janela de escrita, só o boot (e a
+    // definição dela no driver). O driver confere a janela em toda escrita,
+    // contra qualquer chamador — isto confere que não há outro chamador. A
+    // suíte, que esta conferência não lê, exercita os três.
+    (".gravar_setores(", &["kernel/src/persistencia.rs"]),
+    (".descarregar_disco(", &["kernel/src/persistencia.rs"]),
+    (
+        "fixar_janela_de_escrita(",
+        &["kernel/src/virtio/blk.rs", "kernel/src/main.rs"],
+    ),
+    // E o journal se abre uma vez, no boot.
+    ("persistencia::abrir()", &["kernel/src/main.rs"]),
     // Uma operação administrativa: só depois da prova e da decisão.
     (
         "(operacao.executar)(",
@@ -4549,6 +4561,7 @@ fn diretorio_do_tpm(arch: Arquitetura) -> PathBuf {
 fn zerar_o_estado(arch: Arquitetura) -> Result<(), String> {
     let disco = disco_de_testes()?;
     escrever_no_estado(&disco, &vec![0u8; (disco::ESTADO_SETORES * 512) as usize])?;
+    let _ = std::fs::remove_dir_all(diretorio_do_signatario(arch));
     let tpm = diretorio_do_tpm(arch);
     let _ = std::fs::remove_dir_all(&tpm);
     std::fs::create_dir_all(tpm.join("estado"))
@@ -4608,8 +4621,9 @@ fn escrever_no_estado(disco: &Path, bytes: &[u8]) -> Result<(), String> {
 /// Sem nada, é a hora do hospedeiro; com uma data, é ela. É o que deixa a
 /// bancada fazer o relógio andar para trás entre dois boots.
 struct Ambiente {
-    tpm: Child,
-    socket_do_tpm: PathBuf,
+    /// O `swtpm` e o socket dele; `None` numa máquina sem TPM — a da
+    /// bancada que confere o que a persistência faz sem âncora.
+    tpm: Option<(Child, PathBuf)>,
     relogio: Option<String>,
 }
 
@@ -4651,14 +4665,15 @@ impl Ambiente {
             .spawn()
             .map_err(|e| format!("não foi possível iniciar o swtpm: {e}"))?;
         let mut ambiente = Ambiente {
-            tpm,
-            socket_do_tpm,
+            tpm: Some((tpm, socket_do_tpm.clone())),
             relogio: relogio.map(String::from),
         };
         // O QEMU recusa um chardev cujo socket ainda não existe.
         let limite = Instant::now() + Duration::from_secs(10);
-        while !ambiente.socket_do_tpm.exists() {
-            if let Ok(Some(saida)) = ambiente.tpm.try_wait() {
+        while !socket_do_tpm.exists() {
+            if let Some((tpm, _)) = ambiente.tpm.as_mut()
+                && let Ok(Some(saida)) = tpm.try_wait()
+            {
                 return Err(format!(
                     "o swtpm saiu antes de abrir o socket ({saida}); ver {}",
                     dir.join("swtpm.log").display()
@@ -4673,12 +4688,24 @@ impl Ambiente {
     }
 }
 
+impl Ambiente {
+    /// Uma máquina sem TPM.
+    fn sem_tpm(relogio: Option<&str>) -> Ambiente {
+        Ambiente {
+            tpm: None,
+            relogio: relogio.map(String::from),
+        }
+    }
+}
+
 impl Drop for Ambiente {
     /// O `swtpm` sai sozinho quando o QEMU sai com ordem; isto cobre o QEMU
     /// morto sem aviso, e o que nem chegou a conectar.
     fn drop(&mut self) {
-        let _ = self.tpm.kill();
-        let _ = self.tpm.wait();
+        if let Some((tpm, _)) = self.tpm.as_mut() {
+            let _ = tpm.kill();
+            let _ = tpm.wait();
+        }
     }
 }
 
@@ -4910,20 +4937,19 @@ fn comando_qemu(
     qemu.args(["-device", "virtio-rng-pci"]);
 
     // O TPM e o relógio — ver [`Ambiente`].
-    qemu.args([
-        "-chardev",
-        &format!(
-            "socket,id=tpm0chr,path={}",
-            ambiente.socket_do_tpm.display()
-        ),
-        "-tpmdev",
-        "emulator,id=tpm0,chardev=tpm0chr",
-        "-device",
-        match arch {
-            Arquitetura::X86_64 => "tpm-tis,tpmdev=tpm0",
-            Arquitetura::Aarch64 => "tpm-tis-device,tpmdev=tpm0",
-        },
-    ]);
+    if let Some((_, socket)) = &ambiente.tpm {
+        qemu.args([
+            "-chardev",
+            &format!("socket,id=tpm0chr,path={}", socket.display()),
+            "-tpmdev",
+            "emulator,id=tpm0,chardev=tpm0chr",
+            "-device",
+            match arch {
+                Arquitetura::X86_64 => "tpm-tis,tpmdev=tpm0",
+                Arquitetura::Aarch64 => "tpm-tis-device,tpmdev=tpm0",
+            },
+        ]);
+    }
     if let Some(data) = &ambiente.relogio {
         qemu.args(["-rtc", &format!("base={data},clock=vm")]);
     }
@@ -7398,7 +7424,7 @@ fn sob_administracao(
     }
     println!("  [admin] ok  o agente registrado pela serial entra pela porta 1");
     drop(agente);
-    revogar_por_quorum(escrita, leitor, &chaves, &mut id)
+    revogar_por_quorum(arch, escrita, leitor, &chaves, &mut id)
 }
 
 /// `admin.revoke` no kernel de produção, pela serial: as assinaturas Ed25519
@@ -7413,81 +7439,25 @@ fn sob_administracao(
 /// pedido não vale duas vezes; e que a assinatura confere fora do Duke, só
 /// com a chave pública.
 fn revogar_por_quorum(
+    arch: Arquitetura,
     escrita: &mut UnixStream,
     leitor: &mut BufReader<UnixStream>,
     chaves: &chaves::Chaves,
     id: &mut u32,
 ) -> Result<(), String> {
-    let alvo = sigilo::hex(&sigilo::publica_de(&chaves.outros_administradores[1]));
-    let parametros = format!(r#"{{"key":"{alvo}","reason":"fumaca"}}"#);
-    let credenciais = [
-        sigilo::publica_de(&chaves.administrador),
-        sigilo::publica_de(&chaves.outros_administradores[0]),
-    ];
-    let mut tentar = |assinantes: usize| -> Result<(String, String), String> {
-        let desafio = pedir_pela_serial(
-            escrita,
-            leitor,
-            id,
-            "admin.challenge",
-            r#"{"for":"admin.revoke"}"#,
-        )?;
-        let numero = |nome: &str| -> Result<u64, String> {
-            campo_simples(&desafio, nome)
-                .and_then(|v| v.parse().ok())
-                .ok_or_else(|| format!("quorum: o desafio nao diz `{nome}`\n  {desafio}"))
-        };
-        let hex = |nome: &str| -> Result<[u8; 32], String> {
-            campo_simples(&desafio, nome)
-                .and_then(|v| sigilo::de_hex(&v))
-                .ok_or_else(|| format!("quorum: o desafio nao diz `{nome}`\n  {desafio}"))
-        };
-        let (nonce, efemera) = (hex("nonce")?, hex("ephemeral")?);
-        let conteudo = sigilo::quorum::Conteudo {
-            operacao: numero("challenge")?,
-            nonce: &nonce,
-            sessao: 0,
-            efemera: &efemera,
-            versao_da_politica: numero("policy_version")?,
-            m: numero("m")? as u8,
-            n: numero("n")? as u8,
-            comando: "admin.revoke",
-            alvo: &alvo,
-            parametros: &parametros,
-        };
-        let mut assinaturas = Vec::new();
-        for (credencial, privada) in credenciais
-            .iter()
-            .zip(&chaves.assinaturas_dos_administradores)
-            .take(assinantes)
-        {
-            let assinatura = sigilo::quorum::assinar(privada, &conteudo);
-            // Confere aqui, fora do Duke, só com a pública.
-            let publica = sigilo::quorum::publica_de_assinatura(privada);
-            if !sigilo::quorum::conferir(&publica, &conteudo, &assinatura) {
-                return Err("quorum: a assinatura nao confere com a chave publica".to_string());
-            }
-            assinaturas.push(format!(
-                "{}:{}",
-                sigilo::hex(credencial),
-                sigilo::hex_de(&assinatura)
-            ));
-        }
-        let pedido = format!(
-            r#"{{"challenge":{},"command":"admin.revoke","params":"{}","signatures":"{}"}}"#,
-            conteudo.operacao,
-            parametros.replace('"', "\\\""),
-            assinaturas.join(",")
-        );
-        let resposta = pedir_pela_serial(escrita, leitor, id, "admin.execute", &pedido)?;
-        Ok((resposta, pedido))
-    };
-
-    let (r, _) = tentar(1)?;
+    let alvo = sigilo::publica_de(&chaves.outros_administradores[1]);
+    let (r, _) = revogacao_por_quorum(arch, (escrita, leitor, id), chaves, &alvo, &[0], "fumaca")?;
     if !r.contains("quorum incompleto: 1 de 2") {
         return Err(format!("quorum: uma assinatura so revogou\n  {r}"));
     }
-    let (r, pedido) = tentar(2)?;
+    let (r, pedido) = revogacao_por_quorum(
+        arch,
+        (escrita, leitor, id),
+        chaves,
+        &alvo,
+        &[0, 1],
+        "fumaca",
+    )?;
     if !r.contains(r#""executed":true"#)
         || !r.contains(r#""signed_by":["administrador","administrador-2"]"#)
     {
@@ -7503,6 +7473,130 @@ fn revogar_por_quorum(
         "  [admin] ok  admin.revoke: uma assinatura Ed25519 nao revoga; duas revogam, uma vez; a assinatura confere fora do Duke"
     );
     Ok(())
+}
+
+/// Os nomes das três credenciais administrativas da imagem, na ordem de
+/// [`credencial_administrativa`].
+const NOMES_DOS_ADMINISTRADORES: [&str; 3] =
+    ["administrador", "administrador-2", "administrador-3"];
+
+/// A credencial `i` da imagem: a chave X25519 que a identifica e a privada
+/// Ed25519 com que assina.
+fn credencial_administrativa(chaves: &chaves::Chaves, i: usize) -> ([u8; 32], [u8; 32]) {
+    let x25519 = match i {
+        0 => chaves.administrador,
+        n => chaves.outros_administradores[n - 1],
+    };
+    (
+        sigilo::publica_de(&x25519),
+        chaves.assinaturas_dos_administradores[i],
+    )
+}
+
+/// Onde o signatário de cada credencial guarda a maior geração que já
+/// assinou. Zerado com o estado da máquina: é a memória de quem administra
+/// **esta** instalação.
+fn diretorio_do_signatario(arch: Arquitetura) -> PathBuf {
+    raiz_do_projeto()
+        .join("target")
+        .join(format!("signatario-{}", arch.nome()))
+}
+
+/// O signatário confere a geração que vai assinar contra a maior que já
+/// assinou, e guarda a nova. Uma geração menor é um Duke mostrando um
+/// estado anterior ao que este signatário já viu — um disco restaurado, por
+/// exemplo —, e ele se recusa a assinar sobre isso.
+///
+/// É a âncora do lado de quem tem a chave privada. A do TPM é outra, e uma
+/// não substitui a outra: ver `docs/PERSISTENCIA.md`, R5 e R6.
+fn signatario_aceita(arch: Arquitetura, nome: &str, geracao: u64) -> Result<(), String> {
+    let dir = diretorio_do_signatario(arch);
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("não foi possível criar {}: {e}", dir.display()))?;
+    let arquivo = dir.join(format!("{nome}.geracao"));
+    let vista: u64 = std::fs::read_to_string(&arquivo)
+        .ok()
+        .and_then(|t| t.trim().parse().ok())
+        .unwrap_or(0);
+    if geracao < vista {
+        return Err(format!(
+            "o signatario de `{nome}` ja assinou na geracao {vista}, e recusa assinar sobre a {geracao}"
+        ));
+    }
+    std::fs::write(&arquivo, geracao.to_string())
+        .map_err(|e| format!("não foi possível gravar {}: {e}", arquivo.display()))
+}
+
+/// Pede a revogação de `alvo` por quórum, assinada pelas credenciais
+/// `quem` (índices de [`credencial_administrativa`]). Cada assinatura é
+/// conferida aqui, fora do Duke, só com a chave pública. Devolve a resposta
+/// e o pedido, para quem quiser repeti-lo.
+pub(crate) fn revogacao_por_quorum(
+    arch: Arquitetura,
+    (escrita, leitor, id): (&mut UnixStream, &mut BufReader<UnixStream>, &mut u32),
+    chaves: &chaves::Chaves,
+    alvo: &[u8; 32],
+    quem: &[usize],
+    motivo: &str,
+) -> Result<(String, String), String> {
+    let alvo = sigilo::hex(alvo);
+    let parametros = format!(r#"{{"key":"{alvo}","reason":"{motivo}"}}"#);
+    let desafio = pedir_pela_serial(
+        escrita,
+        leitor,
+        id,
+        "admin.challenge",
+        r#"{"for":"admin.revoke"}"#,
+    )?;
+    let numero = |nome: &str| -> Result<u64, String> {
+        campo_simples(&desafio, nome)
+            .and_then(|v| v.parse().ok())
+            .ok_or_else(|| format!("quorum: o desafio nao diz `{nome}`\n  {desafio}"))
+    };
+    let hex = |nome: &str| -> Result<[u8; 32], String> {
+        campo_simples(&desafio, nome)
+            .and_then(|v| sigilo::de_hex(&v))
+            .ok_or_else(|| format!("quorum: o desafio nao diz `{nome}`\n  {desafio}"))
+    };
+    let (nonce, efemera) = (hex("nonce")?, hex("ephemeral")?);
+    let geracao = numero("generation")?;
+    let conteudo = sigilo::quorum::Conteudo {
+        operacao: numero("challenge")?,
+        nonce: &nonce,
+        sessao: 0,
+        efemera: &efemera,
+        versao_da_politica: numero("policy_version")?,
+        geracao,
+        m: numero("m")? as u8,
+        n: numero("n")? as u8,
+        comando: "admin.revoke",
+        alvo: &alvo,
+        parametros: &parametros,
+    };
+    let mut assinaturas = Vec::new();
+    for &i in quem {
+        signatario_aceita(arch, NOMES_DOS_ADMINISTRADORES[i], geracao)?;
+        let (credencial, privada) = credencial_administrativa(chaves, i);
+        let assinatura = sigilo::quorum::assinar(&privada, &conteudo);
+        // Confere aqui, fora do Duke, só com a pública.
+        let publica = sigilo::quorum::publica_de_assinatura(&privada);
+        if !sigilo::quorum::conferir(&publica, &conteudo, &assinatura) {
+            return Err("quorum: a assinatura nao confere com a chave publica".to_string());
+        }
+        assinaturas.push(format!(
+            "{}:{}",
+            sigilo::hex(&credencial),
+            sigilo::hex_de(&assinatura)
+        ));
+    }
+    let pedido = format!(
+        r#"{{"challenge":{},"command":"admin.revoke","params":"{}","signatures":"{}"}}"#,
+        conteudo.operacao,
+        parametros.replace('"', "\\\""),
+        assinaturas.join(",")
+    );
+    let resposta = pedir_pela_serial(escrita, leitor, id, "admin.execute", &pedido)?;
+    Ok((resposta, pedido))
 }
 
 /// Pede pela serial, em claro, e devolve a resposta deste pedido.
@@ -7550,6 +7644,25 @@ fn pedido_administrativo(
     parametros: &str,
     prova_de: &str,
 ) -> Result<String, String> {
+    pedido_administrativo_de(
+        &chaves.administrador,
+        sessao,
+        desafio,
+        comando,
+        parametros,
+        prova_de,
+    )
+}
+
+/// Como [`pedido_administrativo`], com a prova da credencial `privada`.
+fn pedido_administrativo_de(
+    privada: &[u8; 32],
+    sessao: u8,
+    desafio: &str,
+    comando: &str,
+    parametros: &str,
+    prova_de: &str,
+) -> Result<String, String> {
     let numero: u64 = campo_simples(desafio, "challenge")
         .and_then(|v| v.parse().ok())
         .ok_or_else(|| format!("admin: sem desafio\n  {desafio}"))?;
@@ -7559,7 +7672,7 @@ fn pedido_administrativo(
     let efemera = campo_simples(desafio, "ephemeral")
         .and_then(|v| sigilo::de_hex(&v))
         .ok_or("admin: sem efemera")?;
-    let publica = sigilo::publica_de(&chaves.administrador);
+    let publica = sigilo::publica_de(privada);
     let contexto = sigilo::administracao::Contexto {
         nonce: &nonce,
         sessao,
@@ -7568,7 +7681,7 @@ fn pedido_administrativo(
         comando,
         parametros: prova_de,
     };
-    let prova = sigilo::administracao::provar(&chaves.administrador, &contexto)
+    let prova = sigilo::administracao::provar(privada, &contexto)
         .map_err(|e| format!("admin: sem prova: {}", e.motivo()))?;
     Ok(format!(
         r#"{{"challenge":{numero},"command":"{comando}","params":"{}","admin":"{}","proof":"{}"}}"#,

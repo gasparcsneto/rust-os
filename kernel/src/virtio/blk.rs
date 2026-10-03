@@ -62,13 +62,6 @@ const LER: u32 = 0;
 const ESCREVER: u32 = 1;
 /// "Ponha no meio permanente tudo o que eu já escrevi." Sem dados: só o
 /// cabeçalho e o byte de estado.
-#[cfg_attr(
-    not(feature = "modo-teste"),
-    allow(
-        dead_code,
-        reason = "a persistencia (fase 7.3) e quem escreve fora da suite"
-    )
-)]
 const DESCARREGAR: u32 = 4;
 
 /// O dispositivo é só de leitura: toda escrita volta recusada.
@@ -83,7 +76,7 @@ const RECURSO_SOMENTE_LEITURA: u64 = 1 << 5;
 /// o pedido de descarga que transforma "recebi" em "está gravado", e a
 /// persistência confirma uma operação só depois dele. Um disco que não o
 /// oferece não tem como prometer isso, e este driver não finge: sem o
-/// recurso, a escrita é recusada inteira — ver [`Disco::escrever`].
+/// recurso, a escrita é recusada inteira — ver [`Disco::gravar_setores`].
 const RECURSO_DESCARGA: u64 = 1 << 9;
 
 /// Valores do byte de estado.
@@ -158,13 +151,6 @@ const _: () = assert!(PAGINAS_DE_DADOS + 2 <= super::fila::DESCRITORES as usize)
 const VOLTAS_DE_ESPERA: u32 = 5_000_000;
 
 /// Um disco virtio pronto para uso.
-#[cfg_attr(
-    not(feature = "modo-teste"),
-    allow(
-        dead_code,
-        reason = "a persistencia (fase 7.3) e quem escreve fora da suite"
-    )
-)]
 pub struct Disco {
     transporte: Transporte,
     fila: Fila,
@@ -381,37 +367,16 @@ impl Disco {
     /// Se uma escrita durável é possível neste disco: ele aceita escrita e
     /// aceita a descarga. É o que a persistência pergunta antes de se
     /// declarar disponível.
-    #[cfg_attr(
-        not(feature = "modo-teste"),
-        allow(
-            dead_code,
-            reason = "a persistencia (fase 7.3) e quem escreve fora da suite"
-        )
-    )]
     pub fn duravel(&self) -> bool {
         self.vivo && self.descarga && !self.somente_leitura
     }
 
     /// A janela de escrita: o primeiro setor e quantos, se já foi fixada.
-    #[cfg_attr(
-        not(feature = "modo-teste"),
-        allow(
-            dead_code,
-            reason = "a persistencia (fase 7.3) e quem escreve fora da suite"
-        )
-    )]
     pub fn janela(&self) -> Option<(u64, u64)> {
         self.janela
     }
 
     /// Quantas escritas e quantas descargas o dispositivo confirmou.
-    #[cfg_attr(
-        not(feature = "modo-teste"),
-        allow(
-            dead_code,
-            reason = "a persistencia (fase 7.3) e quem escreve fora da suite"
-        )
-    )]
     pub fn contadores(&self) -> (u64, u64) {
         (self.escritas, self.descargas)
     }
@@ -463,7 +428,7 @@ impl Disco {
     /// dentro da janela de escrita.
     ///
     /// Uma escrita respondida **não está gravada**: está aceita. Quem
-    /// precisa dela no disco chama [`Disco::descarregar`] depois, e só
+    /// precisa dela no disco chama [`Disco::descarregar_disco`] depois, e só
     /// então a considera feita. Separar as duas coisas é o que deixa o
     /// journal juntar várias escritas sob uma descarga só, sem que isso
     /// mude o que cada uma promete.
@@ -471,14 +436,7 @@ impl Disco {
     /// Recusada inteira, sem tocar o dispositivo, se o disco não aceita
     /// descarga: uma escrita que nunca pode ser tornada durável é uma
     /// escrita que mente para quem a pediu.
-    #[cfg_attr(
-        not(feature = "modo-teste"),
-        allow(
-            dead_code,
-            reason = "a persistencia (fase 7.3) e quem escreve fora da suite"
-        )
-    )]
-    pub fn escrever(&mut self, setor: u64, origem: &[u8]) -> Result<(), &'static str> {
+    pub fn gravar_setores(&mut self, setor: u64, origem: &[u8]) -> Result<(), &'static str> {
         self.conferir_faixa(setor, origem.len())?;
         if self.somente_leitura {
             return Err("o disco e so de leitura");
@@ -504,14 +462,7 @@ impl Disco {
 
     /// Pede ao dispositivo que ponha no meio permanente tudo o que ele já
     /// confirmou como escrito.
-    #[cfg_attr(
-        not(feature = "modo-teste"),
-        allow(
-            dead_code,
-            reason = "a persistencia (fase 7.3) e quem escreve fora da suite"
-        )
-    )]
-    pub fn descarregar(&mut self) -> Result<(), &'static str> {
+    pub fn descarregar_disco(&mut self) -> Result<(), &'static str> {
         if !self.vivo {
             return Err("o disco parou de responder e foi desligado");
         }
@@ -651,13 +602,6 @@ impl Disco {
 
     /// O que quem chamou quer escrito, para as páginas de dados que o
     /// dispositivo vai ler.
-    #[cfg_attr(
-        not(feature = "modo-teste"),
-        allow(
-            dead_code,
-            reason = "a persistencia (fase 7.3) e quem escreve fora da suite"
-        )
-    )]
     fn copiar_para_os_dados(&mut self, origem: &[u8]) {
         let pagina = crate::arch::TAMANHO_PAGINA as usize;
         let mut copiados = 0;

@@ -191,6 +191,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "diario"
+version = "0.1.0"
+dependencies = [
+ "blake2",
+ "chacha20poly1305",
+ "zeroize",
+]
+
+[[package]]
 name = "digest"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -208,6 +217,7 @@ dependencies = [
  "aarch64-cpu",
  "ancora",
  "aparencia",
+ "diario",
  "pci_types",
  "politica",
  "protocolo",

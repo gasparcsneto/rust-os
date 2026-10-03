@@ -77,6 +77,11 @@ politica = { path = "../politica" }
 # ver `ancora/src/lib.rs`. O transporte até o chip é do kernel (`tpm.rs`).
 ancora = { path = "../ancora" }
 
+# O journal da persistência: o formato, a leitura que confere cada
+# registro e o julgamento contra a âncora — ver `diario/src/lib.rs`. O
+# disco é do kernel (`persistencia.rs`).
+diario = { path = "../diario" }
+
 # --- x86_64 -----------------------------------------------------------------
 #
 # No x86 nos apoiamos em crates maduros porque a plataforma tem décadas de

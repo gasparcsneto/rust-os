@@ -45,8 +45,9 @@
 //!   continuam — encerrá-las é a outra operação, de propósito separada.
 //!
 //! As três são operações administrativas, com prova — ver
-//! [`crate::agent::administracao`]. O disco é só leitura: o que elas mudam
-//! vale até o próximo boot, como o registro de agentes.
+//! [`crate::agent::administracao`]. O que elas mudam vai para o journal, e
+//! o boot o reaplica por cima do registro da imagem — ver
+//! [`crate::persistencia`].
 //!
 //! # A senha
 //!
@@ -686,6 +687,28 @@ pub fn revogar_sessao(id: IdSessao) -> Result<IdPessoa, Recusa> {
     crate::coordenacao::invalidar_pessoa(id, "a sessao foi revogada");
     crate::mensagens::canal_acabou(politica::mensagens::Canal::Pessoa(id.0));
     Ok(dona)
+}
+
+/// O registro de pessoas inteiro: o que a persistência compara antes e
+/// depois de uma operação.
+pub fn todas() -> Vec<Pessoa> {
+    com_tabela(|t| t.pessoas.clone())
+}
+
+/// Troca o registro de pessoas inteiro: o que a persistência faz para
+/// desfazer uma operação cuja gravação falhou. As sessões ficam.
+pub fn restaurar(pessoas: &[Pessoa]) {
+    com_tabela(|t| t.pessoas = pessoas.to_vec());
+}
+
+/// Põe de volta uma pessoa que o journal registrou, ou a credencial nova
+/// dela: substitui qualquer entrada com o mesmo identificador ou o mesmo
+/// nome.
+pub fn restaurar_pessoa(p: Pessoa) {
+    com_tabela(|t| {
+        t.pessoas.retain(|q| q.id != p.id && q.nome != p.nome);
+        t.pessoas.push(p);
+    });
 }
 
 /// A pessoa com este identificador.

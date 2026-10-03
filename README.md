@@ -228,6 +228,7 @@ kernel/src/
 ├── interpretador.rs operar o Duke digitando
 ├── identidade.rs    quem é quem: a chave do Duke, os agentes, os administradores e os desafios
 ├── pessoas.rs       quem entra pelos consoles: o registro, as credenciais e as sessões
+├── persistencia.rs  o journal na partição de estado, ancorado no TPM: o estado de autoridade que sobrevive ao boot
 ├── coordenacao.rs   versões e arrendamentos: quem edita cada campo agora
 ├── mensagens.rs     as mensagens entre titulares: um recurso, pelo mesmo ponto de decisão
 ├── atividade.rs     quem está agindo: os agentes conectados e quem agiu por último
@@ -1496,7 +1497,8 @@ de acesso dela é configurável na política — a linha `serial` —, e é o de
 `sistema` na imagem de desenvolvimento.
 
 **Operações administrativas têm autenticação própria.** Registrar um agente
-(`agent.register`, que vale até o próximo boot — o disco é só de leitura)
+(`agent.register`, gravado no journal da partição de estado — ver
+[`docs/PERSISTENCIA.md`](docs/PERSISTENCIA.md))
 não é um comando que se chame: vai embrulhado em `admin.execute`, com a
 prova de um administrador. O Duke dá um desafio — um nonce e uma chave
 efêmera —, o administrador faz o Diffie-Hellman da chave dele com a efêmera,
@@ -1575,12 +1577,13 @@ recusado. O que a credencial fez antes fica na auditoria; a revogação
 grava cada assinatura, com a chave inteira de quem assinou, e o desfecho,
 com o alvo, o desafio, a versão da política e o motivo. Nenhum papel — nem
 o `sistema`, nem a serial — substitui o quórum, e não há operação de
-recuperação que o contorne. A revogação vale até o próximo boot: o disco
-é só de leitura, e a credencial da imagem volta com ele. Isso é um buraco
-conhecido, e não uma escolha: a persistência (o ponto 7) tem como requisito
-que a revogação sobreviva ao reboot, com a geração que impede restaurar um
-estado anterior — o desenho está em
-[`docs/PERSISTENCIA.md`](docs/PERSISTENCIA.md), e ainda não foi feito.
+recuperação que o contorne. **A revogação sobrevive ao reboot**: a lápide
+vai para o journal da partição de estado antes de a resposta sair, ancorada
+num contador do TPM, e o boot a aplica por cima da imagem — uma imagem que
+traga de volta a credencial revogada não a reabilita. As assinaturas do
+quórum cobrem também a geração administrativa: uma mudança de autoridade
+entre o desafio e o pedido as derruba. Ver
+[`docs/PERSISTENCIA.md`](docs/PERSISTENCIA.md).
 
 Medido: um aperto de mão leva, com os dois lados dentro da suíte em debug,
 de 30 a 70 ms — eram 210 antes de as primitivas serem compiladas otimizadas
@@ -1799,7 +1802,7 @@ papel maior que o dele.
 - `session.revoke` acaba uma sessão, sem tocar na pessoa, que pode entrar de
   novo.
 
-O disco é só leitura: o que elas mudam vale até o próximo boot.
+O que elas mudam vai para o journal, e sobrevive ao reboot.
 
 **A pessoa de desenvolvimento.** A imagem de desenvolvimento e de testes
 traz uma pessoa, `dev`, para quem roda o Duke aqui ter com quem entrar — um
@@ -2141,6 +2144,36 @@ tenta pô-la sobre a do kernel — sem mover, e pedindo `y = -40`. Confere
 onde as duas pararam, que a barra continua acima delas na pilha, que a
 faixa mostra a barra; e, levando uma à força ao topo, que a barra ainda
 aparece por cima e o ponteiro ali ainda não vai à janela.
+
+### Persistência
+
+O que muda o estado de autoridade em tempo de execução sobrevive ao reboot:
+`agent.register`, `agent.revoke`, `policy.assign`, `policy.write`,
+`person.register`, `person.revoke`, `credential.rotate`, `session.revoke` e
+`admin.revoke`. Cada uma vira um registro num journal na partição de estado
+do disco — cifrado, encadeado ao anterior e **ancorado** num contador
+monotônico do TPM —, gravado e descarregado **antes** de a resposta sair. O
+registro guarda o resultado (o agente, a política inteira, a lápide), e não
+o pedido; o boot o reaplica por cima da imagem, antes de abrir as portas.
+
+- **A lápide vence a imagem.** Uma credencial administrativa revogada
+  continua revogada em todo boot, mesmo com a imagem trazendo a chave de
+  volta.
+- **Um disco antigo não passa.** O contador do TPM sabe quantos registros
+  têm de existir. Um disco devolvido a uma cópia anterior, um registro
+  confirmado estragado, um TPM limpo: o journal é recusado.
+- **Sem persistência confiável, nenhuma credencial administrativa é
+  aceita** — nem para o que não muda autoridade: sem o journal confirmado,
+  o kernel não sabe quais foram revogadas. Não há exceção para o `sistema`
+  nem para a serial. Os agentes e as pessoas continuam sendo atendidos.
+- **O tempo lógico não volta.** O RTC, com um piso que é o tempo do último
+  registro gravado.
+
+`system.info` diz o estado (`persistence`), a geração administrativa e a
+âncora. A bancada `cargo xtask persistencia` sobe a mesma máquina várias
+vezes, corta a energia, devolve fotografias antigas do disco, estraga o
+journal, limpa o TPM e volta o relógio. O desenho, os requisitos e o que
+falta estão em [`docs/PERSISTENCIA.md`](docs/PERSISTENCIA.md).
 
 ## Barramento PCI
 

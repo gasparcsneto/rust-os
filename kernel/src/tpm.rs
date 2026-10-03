@@ -299,13 +299,6 @@ fn endereco() -> Option<u64> {
 }
 
 /// Se há um TPM.
-#[cfg_attr(
-    not(feature = "modo-teste"),
-    allow(
-        dead_code,
-        reason = "a persistencia (fase 7.3) e quem escreve fora da suite"
-    )
-)]
 pub fn presente() -> bool {
     crate::arch::sem_interrupcoes(|| TPM.lock().is_some())
 }
@@ -313,13 +306,6 @@ pub fn presente() -> bool {
 /// Chama `f` com o TPM da máquina, se houver um. Um comando do TPM não é
 /// reentrante — a FIFO é uma só —, e a tranca é o que torna isso
 /// impossível em vez de improvável.
-#[cfg_attr(
-    not(feature = "modo-teste"),
-    allow(
-        dead_code,
-        reason = "a persistencia (fase 7.3) e quem escreve fora da suite"
-    )
-)]
 pub fn com_o_tpm<R>(f: impl FnOnce(&mut Tis) -> R) -> Option<R> {
     crate::arch::sem_interrupcoes(|| TPM.lock().as_mut().map(f))
 }

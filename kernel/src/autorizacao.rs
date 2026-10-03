@@ -222,6 +222,22 @@ pub fn versao_da_politica() -> u64 {
     VERSAO_DA_POLITICA.load(Ordering::SeqCst)
 }
 
+/// Fixa a versão da política na que o journal gravou por último: ela
+/// continua de onde parou, e o mesmo número nunca descreve duas políticas
+/// em boots diferentes. Só o boot chama, ao reaplicar o journal.
+pub fn fixar_versao_da_politica(versao: u64) {
+    VERSAO_DA_POLITICA.store(versao, Ordering::SeqCst);
+}
+
+/// Põe em vigor uma política que o journal gravou — ou a de antes de uma
+/// operação cuja gravação falhou. A versão não muda aqui: no boot quem a
+/// fixa é [`fixar_versao_da_politica`], e num desfazer ela já mudou e
+/// continua mudada, o que só derruba desafios.
+pub fn restaurar_politica(p: Politica) {
+    let velha = crate::arch::sem_interrupcoes(|| POLITICA.lock().replace(p));
+    drop(velha);
+}
+
 /// Troca a política em vigor por outra, já validada. A troca é inteira: a
 /// decisão seguinte vê a nova, e a que estava em curso já tinha decidido.
 pub fn trocar_politica(nova: Politica) {

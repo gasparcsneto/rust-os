@@ -523,7 +523,7 @@ pub struct Relogio {
 
 impl Relogio {
     /// Um relógio que nunca volta abaixo de `piso`.
-    pub fn novo(piso: u64) -> Relogio {
+    pub const fn novo(piso: u64) -> Relogio {
         Relogio { piso }
     }
 

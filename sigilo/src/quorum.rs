@@ -55,7 +55,9 @@ use crate::TAM_CHAVE;
 
 /// A versão do formato do conteúdo. Muda se a codificação mudar: um
 /// conteúdo de um formato nunca é lido como de outro.
-pub const VERSAO_DO_FORMATO: u8 = 1;
+///
+/// A 2 trouxe a geração administrativa — ver [`Conteudo::geracao`].
+pub const VERSAO_DO_FORMATO: u8 = 2;
 
 /// O tamanho de uma assinatura Ed25519.
 pub const TAM_ASSINATURA: usize = 64;
@@ -78,6 +80,16 @@ pub struct Conteudo<'a> {
     /// A versão da política em vigor quando o desafio foi emitido: uma
     /// mudança da política no meio do caminho derruba as assinaturas.
     pub versao_da_politica: u64,
+    /// A geração administrativa quando o desafio foi emitido: quantas
+    /// mudanças de autoridade o journal do Duke já registrou.
+    ///
+    /// Amarra a assinatura ao estado sob o qual foi dada. Uma mudança de
+    /// autoridade no meio do caminho — um agente registrado, uma pessoa
+    /// revogada — muda a geração e derruba as assinaturas, como a versão da
+    /// política faz com uma mudança de política. E é o número que o
+    /// signatário guarda para recusar assinar sobre um estado mais velho do
+    /// que o que ele já viu.
+    pub geracao: u64,
     /// Quantas credenciais a política exige, e de quantas.
     pub m: u8,
     pub n: u8,
@@ -99,6 +111,7 @@ impl Conteudo<'_> {
                 + 1
                 + TAM_CHAVE
                 + 8
+                + 8
                 + 2
                 + 12
                 + self.comando.len()
@@ -111,6 +124,7 @@ impl Conteudo<'_> {
         b.push(self.sessao);
         b.extend_from_slice(self.efemera);
         b.extend_from_slice(&self.versao_da_politica.to_le_bytes());
+        b.extend_from_slice(&self.geracao.to_le_bytes());
         b.push(self.m);
         b.push(self.n);
         for campo in [self.comando, self.alvo, self.parametros] {
@@ -177,6 +191,7 @@ mod testes {
             sessao: 1,
             efemera: ef,
             versao_da_politica: 3,
+            geracao: 11,
             m: 2,
             n: 3,
             comando: "admin.revoke",
@@ -252,6 +267,10 @@ mod testes {
             },
             Conteudo {
                 versao_da_politica: 4,
+                ..base
+            },
+            Conteudo {
+                geracao: 12,
                 ..base
             },
             Conteudo { m: 1, ..base },

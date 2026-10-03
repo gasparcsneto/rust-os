@@ -203,6 +203,105 @@ anteriores:
 
   Cada uma tem de ser morta por um caso nomeado.
 
+## Como ficou (7.0 a 7.3)
+
+### As peças
+
+- `kernel/src/virtio/blk.rs`: escrita e descarga (`VIRTIO_BLK_F_FLUSH`),
+  numa janela fixada uma vez no boot sobre a partição de estado. Sem
+  descarga, nenhuma escrita é aceita.
+- `ancora/` e `kernel/src/tpm.rs`: os comandos TPM 2.0 do contador de NV, e
+  o transporte TIS até o chip. O índice é `0x0180D0E0`, com senha derivada
+  da chave do Duke, sem política, sem bloqueio contra força bruta.
+- `diario/`: o formato do journal, a leitura que confere cada registro, o
+  escritor, o julgamento contra a âncora e o relógio que não volta.
+- `kernel/src/persistencia.rs`: o boot, a gravação, o portão das operações
+  administrativas e a diferença que vira registro. É o único módulo que
+  escreve no disco — o `cargo xtask invariantes` recusa outro.
+
+### O boot
+
+1. O registro da imagem, a política e as pessoas carregam.
+2. O journal é lido e cada registro autêntico é reaplicado — **antes** de
+   qualquer conferência de âncora, e mesmo que ela recuse: o que o journal
+   diz é mais recente que a imagem, e só pode tirar o que ela dá.
+3. Disco durável? TPM presente? Sem um deles, a persistência fica
+   *indisponível*.
+4. A âncora é aberta e julgada contra o último registro: *confere*;
+   *completar* (o último registro foi gravado e o contador não andou — ele
+   anda agora); *novo* (sem journal e sem âncora — ela é criada); ou
+   *recusado* (disco anterior à âncora, âncora anterior ao disco, âncora
+   ausente com journal, journal ausente com âncora).
+5. Disponível, um registro de boot é gravado.
+6. Só então as portas abrem.
+
+### O portão
+
+Toda operação administrativa — de uma credencial ou de quórum — exige a
+persistência *disponível*. Indisponível ou recusada, **nenhuma credencial
+administrativa é aceita**, nem para ler a própria caixa: sem o journal
+confirmado pela âncora, o kernel não sabe quais credenciais foram
+revogadas. É mais estrito do que o desenho inicial (que bloqueava só o que
+muda autoridade), e foi a bancada que mostrou a razão: com o registro da
+lápide estragado, a credencial revogada continuava lendo e mandando
+mensagens como administradora.
+
+Disponível, a operação acontece, e o que ela mudou — a diferença entre o
+estado antes e depois, com o nome da operação — vira **um** registro,
+escrito, descarregado e ancorado antes da resposta. Se a gravação falha, o
+que a operação concedeu é desfeito, o que ela tirou fica, e a persistência
+passa a indisponível.
+
+### A geração
+
+Cada registro de operação sobe a geração em um. Ela está em cada registro,
+no `system.info`, em cada desafio de quórum, e no conteúdo que as
+credenciais assinam (`sigilo::quorum`, formato 2): uma mudança de
+autoridade entre o desafio e o pedido derruba as assinaturas. O signatário
+do `xtask` guarda a maior geração que já assinou, e recusa uma menor.
+
+### O relógio
+
+O tempo lógico é o RTC com um piso: o tempo do último registro gravado.
+Ele nunca fica abaixo desse piso — nem num boot com o RTC atrasado. Uma
+leitura do relógio que não grava nada não sobe o piso; o que depende do
+tempo e precisa sobreviver (os prazos das mensagens, na 7.4) grava o tempo
+junto.
+
+### Os testes
+
+- **No hospedeiro:**
+  - o journal cortado em cada setor de uma gravação;
+  - cada bit de um journal trocado;
+  - registros de outro journal e fora de ordem;
+  - a chave errada;
+  - a partição cheia;
+  - o julgamento inteiro;
+  - a âncora contra um TPM simulado e contra o `swtpm`;
+  - o texto da política, que volta igual.
+- **Na suíte do kernel:**
+  - a escrita fora da janela;
+  - a janela que não se redesenha;
+  - o contador do TPM pelo TIS;
+  - o RTC;
+  - a persistência aberta e ancorada;
+  - uma operação, um registro;
+  - o portão sem persistência, pela serial e pelo quórum;
+  - a gravação que falha;
+  - a lápide que vence a imagem;
+  - as entradas reaplicadas e as erradas recusadas;
+  - a geração no quórum.
+- **Na bancada (`cargo xtask persistencia`):**
+  - a revogação que sobrevive ao corte;
+  - registro, papel, política, versão e geração que sobrevivem;
+  - a fotografia antiga recusada;
+  - o journal adulterado recusado sem que a credencial revogada volte;
+  - sete quedas no meio da gravação;
+  - o TPM limpo;
+  - a máquina sem TPM;
+  - o relógio que volta;
+  - o signatário.
+
 ## Decisões tomadas
 
 - **Âncora:** o TPM 2.0, com um contador monotônico de NV; o `swtpm` como
@@ -227,7 +326,7 @@ anteriores:
 | 7.0 | A bancada: partição de estado, TPM em toda máquina, relógio, vários boots com corte de energia, fotografia e restauração da partição | feita |
 | 7.1 | Escrever no disco (só a partição de estado, com `FLUSH`), o TPM pelo TIS, o RTC | feita |
 | 7.2 | O journal: registros autenticados, geração, âncora, piso do relógio | feita |
-| 7.3 | O estado administrativo durável (R1–R6) | — |
+| 7.3 | O estado administrativo durável (R1–R6) | feita |
 | 7.4 | Mensagens persistentes | — |
 | 7.5 | Auditoria persistente | — |
 | 7.6 | Compactação e disco cheio | — |

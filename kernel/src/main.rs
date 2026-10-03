@@ -83,6 +83,7 @@ mod mmio;
 mod paginacao;
 mod particoes;
 mod pci;
+mod persistencia;
 mod pessoas;
 mod ponteiro;
 mod pseudoterminal;
@@ -438,6 +439,11 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     autorizacao::carregar();
     // E as pessoas que podem entrar pelo console — ver [`pessoas`].
     pessoas::carregar();
+    // E o journal por cima dos três: o que mudou depois da imagem — as
+    // lápides, os registros, a política em vigor —, conferido contra a
+    // âncora do TPM. Antes das portas e do primeiro desafio: não há janela
+    // em que uma credencial revogada da imagem esteja ativa.
+    persistencia::abrir();
 
     // O servidor de janelas e o Terminal, agora que o disco onde eles moram
     // está montado. Na suíte, é o caso de cada um que o lança.
