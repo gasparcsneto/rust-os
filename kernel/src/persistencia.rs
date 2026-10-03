@@ -431,11 +431,14 @@ fn gravar_sozinho(tipo_do_registro: u16, dados: &[u8]) -> Result<(), &'static st
             },
         )
     })?;
+    let mut meio = particao()?;
+    // A falha provocada pela suíte é a do disco, no lugar da escrita: o
+    // caso confere que, quando a escrita não acontece, o contador também
+    // não andou.
     #[cfg(feature = "modo-teste")]
     if FALHAR_A_PROXIMA.swap(false, Ordering::AcqRel) {
         return Err("falha de gravacao provocada pela suite");
     }
-    let mut meio = particao()?;
     meio.escrever(montado.setor, &montado.bytes)?;
     meio.descarregar()?;
     // Só depois de descarregado o contador anda: um contador à frente do

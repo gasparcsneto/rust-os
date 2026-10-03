@@ -15052,6 +15052,7 @@ fn persistencia_a_gravacao_que_falha() -> Resultado {
             sigilo::publica_de(&ADMIN_DE_TESTE),
             "administrador",
         );
+        let contador = crate::persistencia::ancora_no_tpm_de_teste()?;
         crate::persistencia::falhar_a_proxima_gravacao_de_teste(true);
         let r = executar_admin_com(
             0,
@@ -15064,6 +15065,13 @@ fn persistencia_a_gravacao_que_falha() -> Resultado {
         if !r.contains(r#""executed":false"#) || !r.contains("nao ficou gravada no journal") {
             crate::log_error!("teste", "{}", r);
             return Err("a falha da gravacao nao foi dita");
+        }
+        // O disco falhou na escrita: o contador não pode ter andado. Um
+        // contador à frente do disco é um disco que parece restaurado no
+        // próximo boot — a administração inteira recusada por um disco que
+        // só perdeu uma escrita.
+        if crate::persistencia::ancora_no_tpm_de_teste()? != contador {
+            return Err("o contador do TPM andou sem a escrita no disco");
         }
         if crate::identidade::agente(&novo).is_some() {
             return Err("a concessao nao gravada ficou valendo");
