@@ -449,17 +449,16 @@ fn gravar_sozinho(
     })
     .ok_or("sem TPM")?
     .map_err(|e| e.motivo())?;
-    if avancado != montado.ancora {
-        return Err("o contador do TPM nao foi para a ancora do registro");
-    }
     com(|p| {
-        if let Some(a) = p.aberta.as_mut() {
-            a.escritor.confirmar(&montado);
-        }
+        p.aberta
+            .as_mut()
+            .ok_or("a persistencia nao esta aberta")?
+            .escritor
+            .confirmar(&montado, avancado)?;
         p.geracao = montado.geracao;
         p.registros += 1;
-    });
-    Ok(())
+        Ok(())
+    })
 }
 
 // ---------------------------------------------------------------------------

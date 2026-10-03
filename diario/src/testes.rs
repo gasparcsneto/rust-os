@@ -81,8 +81,7 @@ fn gravar(m: &mut Memoria, esc: &mut Escritor, tpm: &mut Contador, n: u64, dados
     m.escrever(montado.setor, &montado.bytes).unwrap();
     m.descarregar().unwrap();
     tpm.0 += 1;
-    assert_eq!(tpm.0, montado.ancora);
-    esc.confirmar(&montado);
+    esc.confirmar(&montado, tpm.0).unwrap();
 }
 
 /// Um journal novo, com `n` registros de tamanhos variados.
@@ -241,7 +240,7 @@ fn um_registro_de_outro_journal_nao_entra() {
             .montar(&CHAVE, nonce(i + 100), &conteudo(i as u16, &dados))
             .unwrap();
         b.escrever(montado.setor, &montado.bytes).unwrap();
-        esc_b.confirmar(&montado);
+        esc_b.confirmar(&montado, 1001 + i).unwrap();
     }
     assert_eq!(ler(&mut b, &CHAVE).unwrap().registros.len(), 3);
     // O segundo registro de B (um setor, logo depois do primeiro) no lugar
@@ -501,7 +500,7 @@ fn a_geracao_conta_as_operacoes() {
         esperadas.push(montado.geracao);
         m.escrever(montado.setor, &montado.bytes).unwrap();
         tpm.0 += 1;
-        esc.confirmar(&montado);
+        esc.confirmar(&montado, tpm.0).unwrap();
     }
     assert_eq!(esperadas, [0, 0, 1, 2, 2, 3]);
     let lido = ler(&mut m, &CHAVE).unwrap();
@@ -513,4 +512,25 @@ fn a_geracao_conta_as_operacoes() {
         .montar(&CHAVE, nonce(99), &conteudo(OPERACAO, b"y"))
         .unwrap();
     assert_eq!(proximo.geracao, 4);
+}
+
+/// Só a âncora do registro confirma a gravação. Um contador que voltou com
+/// outro valor — avançado por mais alguém, ou de outro TPM — não confirma
+/// nada: o escritor fica onde estava, e o próximo registro ainda é o mesmo.
+#[test]
+fn so_a_ancora_do_registro_confirma() {
+    let (mut m, mut esc, tpm) = journal(1);
+    let montado = esc.montar(&CHAVE, nonce(50), &conteudo(2, b"x")).unwrap();
+    m.escrever(montado.setor, &montado.bytes).unwrap();
+    for errado in [tpm.0, tpm.0 + 2, 0, u64::MAX] {
+        assert!(esc.confirmar(&montado, errado).is_err(), "{errado}");
+    }
+    let de_novo = esc.montar(&CHAVE, nonce(51), &conteudo(2, b"x")).unwrap();
+    assert_eq!(
+        (de_novo.setor, de_novo.ancora),
+        (montado.setor, montado.ancora),
+        "uma confirmacao recusada moveu o escritor"
+    );
+    esc.confirmar(&montado, tpm.0 + 1).unwrap();
+    assert_eq!(esc.ancora(), tpm.0 + 1);
 }

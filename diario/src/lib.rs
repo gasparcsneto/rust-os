@@ -440,14 +440,25 @@ impl Escritor {
         })
     }
 
-    /// O registro montado foi escrito, descarregado, e o contador avançou
-    /// para a âncora dele: o próximo vai depois.
-    pub fn confirmar(&mut self, montado: &Montado) {
+    /// O registro montado foi escrito e descarregado, e o contador avançou:
+    /// `contador` é o valor que o TPM devolveu, lido de volta. Só o valor
+    /// que o registro confirma — a âncora dele — fecha a gravação, e o
+    /// próximo vai depois.
+    ///
+    /// Outro valor é um contador que alguém mais avançou, ou um TPM que não
+    /// é este: o disco e o TPM se separaram, e nada é confirmado — o
+    /// escritor fica onde estava, e quem chama não grava mais nada até o
+    /// próximo boot julgar.
+    pub fn confirmar(&mut self, montado: &Montado, contador: u64) -> Result<(), &'static str> {
+        if contador != montado.ancora {
+            return Err("o contador do TPM nao foi para a ancora do registro");
+        }
         self.proximo_setor = montado.setor + montado.setores;
         self.proxima_sequencia += 1;
         self.elo = montado.elo;
         self.ancora = montado.ancora;
         self.geracao = montado.geracao;
+        Ok(())
     }
 
     /// O valor do contador que o journal confirmou por último.
