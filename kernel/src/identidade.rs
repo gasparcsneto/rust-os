@@ -94,6 +94,11 @@ pub struct Administrador {
     /// assina quórum e não recebe mensagem. Vale até o próximo boot: o disco
     /// é só de leitura.
     pub revogado: bool,
+    /// A chave **pública** Ed25519 com que a credencial assina um quórum —
+    /// ver [`sigilo::quorum`]. A privada fica com quem assina; o Duke só
+    /// confere. Sem ela, a credencial prova operações de uma credencial só e
+    /// não assina quórum.
+    pub assinatura: Option<[u8; TAM_CHAVE]>,
 }
 
 struct Identidade {
@@ -134,22 +139,23 @@ pub fn carregar() {
         }
     };
 
-    let agentes: Vec<Agente> = ler_arquivo(CAMINHO_DOS_AGENTES)
+    let agentes: Vec<Agente> = ler_arquivo(CAMINHO_DOS_AGENTES, false)
         .into_iter()
-        .map(|(chave, nome, papel)| Agente {
+        .map(|(chave, nome, papel, _)| Agente {
             chave,
             nome,
             origem: Origem::Imagem,
             papel,
         })
         .collect();
-    let administradores: Vec<Administrador> = ler_arquivo(CAMINHO_DOS_ADMINISTRADORES)
+    let administradores: Vec<Administrador> = ler_arquivo(CAMINHO_DOS_ADMINISTRADORES, true)
         .into_iter()
-        .map(|(chave, nome, papel)| Administrador {
+        .map(|(chave, nome, papel, assinatura)| Administrador {
             chave,
             nome,
             papel,
             revogado: false,
+            assinatura,
         })
         .collect();
 
@@ -170,13 +176,23 @@ pub fn carregar() {
     });
 }
 
-/// As entradas de um arquivo de chaves.
+/// Uma entrada de um arquivo de chaves: a chave, o nome, o papel e — só no
+/// dos administradores — a chave pública de assinatura.
+type Entrada = (
+    [u8; TAM_CHAVE],
+    String,
+    Option<String>,
+    Option<[u8; TAM_CHAVE]>,
+);
+
+/// As entradas de um arquivo de chaves; com `administradores`, no formato
+/// do arquivo dos administradores, com a chave de assinatura.
 ///
 /// Uma linha errada é pulada com um aviso dizendo qual e por quê, e as
 /// outras entram. Recusar o arquivo inteiro por uma linha deixaria todo
 /// agente de fora por um erro de digitação em outro — e um arquivo ausente é
 /// um registro vazio, e não um erro: é o estado de uma máquina sem agentes.
-fn ler_arquivo(caminho: &str) -> Vec<([u8; TAM_CHAVE], String, Option<String>)> {
+fn ler_arquivo(caminho: &str, administradores: bool) -> Vec<Entrada> {
     let Ok(bytes) = crate::vfs::ler_tudo(caminho) else {
         crate::log_info!("agent", "{} nao existe: nenhuma chave dali", caminho);
         return Vec::new();
@@ -185,19 +201,29 @@ fn ler_arquivo(caminho: &str) -> Vec<([u8; TAM_CHAVE], String, Option<String>)> 
         crate::log_error!("agent", "{} nao e texto", caminho);
         return Vec::new();
     };
-    let mut entradas = Vec::new();
+    let mut entradas: Vec<Entrada> = Vec::new();
     for (i, linha) in texto.lines().enumerate() {
-        match registro::ler_linha(linha) {
-            Ok(Some((chave, nome, papel))) => {
+        let lida = if administradores {
+            registro::ler_linha_de_administrador(linha)
+        } else {
+            registro::ler_linha(linha).map(|e| e.map(|(c, n, p)| (c, n, p, None)))
+        };
+        match lida {
+            Ok(Some((chave, nome, papel, assinatura))) => {
                 if entradas.len() >= MAIOR_REGISTRO {
                     crate::log_warn!("agent", "{}: mais de {} chaves", caminho, MAIOR_REGISTRO);
                     break;
                 }
-                if entradas.iter().any(|(c, _, _)| *c == chave) {
+                if entradas.iter().any(|e| e.0 == chave) {
                     crate::log_warn!("agent", "{}:{}: chave repetida, ignorada", caminho, i + 1);
                     continue;
                 }
-                entradas.push((chave, String::from(nome), papel.map(String::from)));
+                entradas.push((
+                    chave,
+                    String::from(nome),
+                    papel.map(String::from),
+                    assinatura,
+                ));
             }
             Ok(None) => {}
             Err(e) => avisar_linha(caminho, i + 1, e),
@@ -526,23 +552,31 @@ pub fn registrar_administrador_de_teste(chave: [u8; TAM_CHAVE], papel: &str) {
                 nome: String::from(ADMINISTRADOR_DE_TESTE),
                 papel: Some(String::from(papel)),
                 revogado: false,
+                assinatura: None,
             });
         }
     });
 }
 
-/// Troca o grupo de administradores inteiro, para a suíte: o quórum é
-/// sobre o grupo, e a suíte precisa de um cujas chaves privadas ela tem.
-/// [`esquecer_registrados`] volta ao da imagem.
+/// Um membro do grupo de teste: a credencial, o nome, o papel e a chave
+/// pública de assinatura.
 #[cfg(feature = "modo-teste")]
-pub fn substituir_administradores_de_teste(grupo: &[([u8; TAM_CHAVE], &str, &str)]) {
+pub type MembroDeTeste<'a> = ([u8; TAM_CHAVE], &'a str, &'a str, Option<[u8; TAM_CHAVE]>);
+
+/// Troca o grupo de administradores inteiro, para a suíte: o quórum é
+/// sobre o grupo, e a suíte precisa de um cujas chaves privadas ela tem —
+/// do lado de quem assina; o registro guarda só as públicas, como o da
+/// imagem. [`esquecer_registrados`] volta ao da imagem.
+#[cfg(feature = "modo-teste")]
+pub fn substituir_administradores_de_teste(grupo: &[MembroDeTeste]) {
     let grupo: Vec<Administrador> = grupo
         .iter()
-        .map(|(chave, nome, papel)| Administrador {
+        .map(|(chave, nome, papel, assinatura)| Administrador {
             chave: *chave,
             nome: String::from(*nome),
             papel: Some(String::from(*papel)),
             revogado: false,
+            assinatura: *assinatura,
         })
         .collect();
     crate::arch::sem_interrupcoes(|| IDENTIDADE.lock().administradores = grupo);

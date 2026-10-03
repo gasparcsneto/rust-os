@@ -10931,6 +10931,14 @@ fn sigilo_a_chave_do_duke_nao_se_le() -> Resultado {
     {
         return Err("o registro da imagem nao foi carregado");
     }
+    // Cada administrador da imagem tem a chave **pública** de assinatura: o
+    // kernel confere um quórum só com ela, e a privada não está na imagem.
+    if crate::identidade::grupo_de_administradores()
+        .iter()
+        .any(|a| a.assinatura.is_none())
+    {
+        return Err("um administrador da imagem sem chave publica de assinatura");
+    }
     Ok(())
 }
 
@@ -14426,21 +14434,38 @@ fn admin_parametros_de_um_kib() -> Resultado {
 
 /// O grupo de administradores da suíte: três credenciais, como o da imagem,
 /// mas com as chaves privadas que a suíte tem.
-const GRUPO_DE_TESTE: [([u8; 32], &str); 3] = [
-    ([0xA1; 32], "adm-1"),
-    ([0xA2; 32], "adm-2"),
-    ([0xA3; 32], "adm-3"),
+///
+/// Cada membro: a chave X25519 da credencial — a que a identifica no
+/// registro e prova as operações de uma credencial só —, a chave **privada**
+/// Ed25519 com que ela assina um quórum, e o nome. As privadas ficam aqui, do
+/// lado de quem assina; o registro do kernel recebe só as públicas.
+const GRUPO_DE_TESTE: [([u8; 32], [u8; 32], &str); 3] = [
+    ([0xA1; 32], [0xB1; 32], "adm-1"),
+    ([0xA2; 32], [0xB2; 32], "adm-2"),
+    ([0xA3; 32], [0xB3; 32], "adm-3"),
 ];
 
 fn publica_do_grupo(i: usize) -> [u8; 32] {
     sigilo::publica_de(&GRUPO_DE_TESTE[i].0)
 }
 
+/// A chave pública de assinatura do membro `i`: a que vai para o registro.
+fn assinatura_publica_do_grupo(i: usize) -> [u8; 32] {
+    sigilo::quorum::publica_de_assinatura(&GRUPO_DE_TESTE[i].1)
+}
+
 /// Roda `f` com o grupo de teste no registro, cada um com o papel dado, e
 /// devolve o registro e a política ao da imagem.
 fn com_grupo(papeis: [&str; 3], f: impl FnOnce() -> Resultado) -> Resultado {
-    let grupo: alloc::vec::Vec<([u8; 32], &str, &str)> = (0..3)
-        .map(|i| (publica_do_grupo(i), GRUPO_DE_TESTE[i].1, papeis[i]))
+    let grupo: alloc::vec::Vec<crate::identidade::MembroDeTeste> = (0..3)
+        .map(|i| {
+            (
+                publica_do_grupo(i),
+                GRUPO_DE_TESTE[i].2,
+                papeis[i],
+                Some(assinatura_publica_do_grupo(i)),
+            )
+        })
         .collect();
     crate::mensagens::esquecer();
     // Os desafios que outros casos deixaram pendentes não entram na conta
@@ -14511,11 +14536,13 @@ fn params_de_revogacao(alvo: usize, motivo: &str) -> alloc::string::String {
     )
 }
 
-/// A assinatura do membro `quem` sobre uma revogação: `chave:prova`, com o
-/// conteúdo feito de `alvo_hex` e `params`.
+/// A assinatura Ed25519 de `assinante` (a chave privada) em nome da
+/// `credencial` (a chave pública X25519 que a identifica no registro):
+/// `credencial:assinatura`, com o conteúdo feito de `alvo_hex` e `params`.
 fn assinatura_de(
     d: &DesafioDeQuorum,
-    privada: &[u8; 32],
+    credencial: &[u8; 32],
+    assinante: &[u8; 32],
     alvo_hex: &str,
     params: &str,
 ) -> Result<alloc::string::String, &'static str> {
@@ -14532,11 +14559,11 @@ fn assinatura_de(
         alvo: alvo_hex,
         parametros: params,
     };
-    let prova = sigilo::quorum::provar(privada, &conteudo).map_err(|_| "sem assinatura")?;
+    let assinatura = sigilo::quorum::assinar(assinante, &conteudo);
     Ok(alloc::format!(
         "{}:{}",
-        sigilo::hex(&sigilo::publica_de(privada)),
-        sigilo::hex(&prova)
+        sigilo::hex(credencial),
+        sigilo::hex_de(&assinatura)
     ))
 }
 
@@ -14552,7 +14579,13 @@ fn assinaturas_de(
         .unwrap_or("");
     let mut todas = alloc::vec::Vec::new();
     for &i in quem {
-        todas.push(assinatura_de(d, &GRUPO_DE_TESTE[i].0, alvo, params)?);
+        todas.push(assinatura_de(
+            d,
+            &publica_do_grupo(i),
+            &GRUPO_DE_TESTE[i].1,
+            alvo,
+            params,
+        )?);
     }
     Ok(todas.join(","))
 }
@@ -14635,10 +14668,10 @@ fn admin_revoke_dois_de_tres() -> Resultado {
             let assinou = registros_com(|e| {
                 e.metodo == "admin.revoke"
                     && e.chave == Some(chave)
-                    && e.agente == GRUPO_DE_TESTE[i].1
+                    && e.agente == GRUPO_DE_TESTE[i].2
                     && e.detalhe
                         == alloc::format!(
-                            "assinatura conferida; permissao admin.revoke; desafio {}",
+                            "assinatura ed25519 conferida; permissao admin.revoke; desafio {}",
                             d.id
                         )
             });
@@ -14780,7 +14813,13 @@ fn admin_revoke_assinaturas() -> Resultado {
                 Ok(alloc::format!(
                     "{},{}",
                     assinaturas_de(d, &[0], &params)?,
-                    assinatura_de(d, &GRUPO_DE_TESTE[1].0, &outro_alvo, &params)?
+                    assinatura_de(
+                        d,
+                        &publica_do_grupo(1),
+                        &GRUPO_DE_TESTE[1].1,
+                        &outro_alvo,
+                        &params
+                    )?
                 ))
             },
             "DENY_NOT_AUTHENTICATED",
@@ -14808,13 +14847,57 @@ fn admin_revoke_assinaturas() -> Resultado {
                 Ok(alloc::format!(
                     "{},{}",
                     assinaturas_de(d, &[0], &params)?,
-                    assinatura_de(d, &[0x55; 32], &alvo, &params)?
+                    assinatura_de(
+                        d,
+                        &sigilo::publica_de(&[0x55; 32]),
+                        &[0x56; 32],
+                        &alvo,
+                        &params
+                    )?
                 ))
             },
             "DENY_NOT_AUTHENTICATED",
             "fora do registro",
             "uma credencial fora do grupo assinou",
         )?;
+        // A credencial de um, com a assinatura feita pela chave de outro:
+        // a chave que confere é a do registro para a credencial, e não confere.
+        tentar(
+            &|d| {
+                let alvo = sigilo::hex(&publica_do_grupo(2));
+                Ok(alloc::format!(
+                    "{},{}",
+                    assinaturas_de(d, &[0], &params)?,
+                    assinatura_de(
+                        d,
+                        &publica_do_grupo(1),
+                        &GRUPO_DE_TESTE[0].1,
+                        &alvo,
+                        &params
+                    )?
+                ))
+            },
+            "DENY_NOT_AUTHENTICATED",
+            "nao confere",
+            "a assinatura de uma credencial passou como de outra",
+        )?;
+        // O material público não assina: nem a chave pública de assinatura
+        // usada como privada, nem a chave X25519 da credencial.
+        for falsa in [assinatura_publica_do_grupo(1), publica_do_grupo(1)] {
+            tentar(
+                &|d| {
+                    let alvo = sigilo::hex(&publica_do_grupo(2));
+                    Ok(alloc::format!(
+                        "{},{}",
+                        assinaturas_de(d, &[0], &params)?,
+                        assinatura_de(d, &publica_do_grupo(1), &falsa, &alvo, &params)?
+                    ))
+                },
+                "DENY_NOT_AUTHENTICATED",
+                "nao confere",
+                "uma assinatura feita com material publico passou",
+            )?;
+        }
         // Uma assinatura que não é hex, ou sem prova.
         for ruim in ["zz:yy", "abc", ""] {
             let d = desafio_de_quorum(0)?;
@@ -14938,12 +15021,56 @@ fn admin_revoke_assinaturas() -> Resultado {
         Ok(())
     })?;
 
+    // Uma credencial sem chave de assinatura no registro: prova operações
+    // de uma credencial só, e não assina quórum.
+    crate::mensagens::esquecer();
+    let resultado = com_agentes_de_teste(|| {
+        crate::identidade::substituir_administradores_de_teste(&[
+            (
+                publica_do_grupo(0),
+                "adm-1",
+                "administrador",
+                Some(assinatura_publica_do_grupo(0)),
+            ),
+            (publica_do_grupo(1), "adm-2", "administrador", None),
+            (
+                publica_do_grupo(2),
+                "adm-3",
+                "administrador",
+                Some(assinatura_publica_do_grupo(2)),
+            ),
+        ]);
+        let params = params_de_revogacao(2, "perdida");
+        let d = desafio_de_quorum(0)?;
+        let r = revogar_com(&d, &assinaturas_de(&d, &[0, 1], &params)?, &params)?;
+        if !quorum_recusado(&r, "DENY_NOT_AUTHENTICATED", "sem chave de assinatura")
+            || !grupo_intacto()
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("uma credencial sem chave de assinatura assinou o quorum");
+        }
+        Ok(())
+    });
+    crate::identidade::esquecer_registrados();
+    let _ = crate::identidade::descartar_desafios();
+    resultado?;
+
     // O grupo que não é o da política: dois, e a política diz três.
     crate::mensagens::esquecer();
     let resultado = com_agentes_de_teste(|| {
         crate::identidade::substituir_administradores_de_teste(&[
-            (publica_do_grupo(0), "adm-1", "administrador"),
-            (publica_do_grupo(1), "adm-2", "administrador"),
+            (
+                publica_do_grupo(0),
+                "adm-1",
+                "administrador",
+                Some(assinatura_publica_do_grupo(0)),
+            ),
+            (
+                publica_do_grupo(1),
+                "adm-2",
+                "administrador",
+                Some(assinatura_publica_do_grupo(1)),
+            ),
         ]);
         let params = params_de_revogacao(1, "perdida");
         let d = desafio_de_quorum(0)?;

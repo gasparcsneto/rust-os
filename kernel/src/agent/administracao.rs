@@ -518,14 +518,17 @@ static OPERACOES_DE_QUORUM: &[OperacaoDeQuorum] = &[OperacaoDeQuorum {
 /// Quantas assinaturas um pedido de quórum pode trazer: o maior grupo.
 const MAIS_ASSINATURAS: usize = politica::arquivo::MAIOR_GRUPO as usize;
 
-/// As assinaturas como vieram, `chave:prova,chave:prova`, em hex. `None`
-/// para qualquer coisa fora do formato — uma vazia, uma sem os dois lados,
-/// uma chave ou prova que não é hex de 32 bytes, ou mais que o maior grupo.
-fn ler_assinaturas(texto: &str) -> Option<Vec<([u8; 32], [u8; 32])>> {
+/// As assinaturas como vieram, `credencial:assinatura,...`, em hex: a chave
+/// da credencial — a que a identifica no registro — e a assinatura Ed25519,
+/// 64 bytes. A chave que confere a assinatura **não** vem do pedido: vem do
+/// registro, pela credencial. `None` para qualquer coisa fora do formato —
+/// uma vazia, uma sem os dois lados, hex do tamanho errado, ou mais que o
+/// maior grupo.
+fn ler_assinaturas(texto: &str) -> Option<Vec<([u8; 32], [u8; sigilo::quorum::TAM_ASSINATURA])>> {
     let mut lidas = Vec::new();
     for parte in texto.split(',') {
-        let (chave, prova) = parte.split_once(':')?;
-        lidas.push((sigilo::de_hex(chave)?, sigilo::de_hex(prova)?));
+        let (chave, assinatura) = parte.split_once(':')?;
+        lidas.push((sigilo::de_hex(chave)?, sigilo::de_hex_fixo(assinatura)?));
         if lidas.len() > MAIS_ASSINATURAS {
             return None;
         }
@@ -541,9 +544,11 @@ fn ler_assinaturas(texto: &str) -> Option<Vec<([u8; 32], [u8; 32])>> {
 /// O mesmo de uma operação de uma credencial só, com M credenciais no lugar
 /// de uma: as credenciais bem formadas; o desafio, que sai de qualquer
 /// jeito — e tem de ser de quórum, para esta operação, sob a política de
-/// agora —; cada assinatura conferida sobre o **mesmo** conteúdo canônico
-/// ([`sigilo::quorum::Conteudo`]); cada credencial no registro, ativa, uma
-/// vez só; o quórum, M delas; a política, que o papel de **cada** uma tenha
+/// agora —; cada assinatura Ed25519 conferida sobre o **mesmo** conteúdo
+/// canônico ([`sigilo::quorum::Conteudo`]), com a chave pública de
+/// assinatura que o registro tem para a credencial — o Duke não tem, nem
+/// precisa de, chave privada nenhuma para isso —; cada credencial no
+/// registro, ativa, uma vez só; o quórum, M delas; a política, que o papel de **cada** uma tenha
 /// a permissão — pela mesma [`autorizacao::decidir_administracao`] de toda
 /// operação administrativa —; as restrições da operação; e só então ela.
 /// Toda recusa vai para a auditoria com o motivo.
@@ -671,8 +676,9 @@ fn conferir_quorum_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) ->
         parametros,
     };
 
-    // Cada assinatura: uma vez cada credencial, do grupo, ativa, e a prova
-    // conferida sobre o conteúdo.
+    // Cada assinatura: uma vez cada credencial, do grupo, ativa, com chave
+    // de assinatura no registro, e a assinatura conferida sobre o conteúdo
+    // com essa chave pública.
     let mut assinantes: Vec<(String, [u8; 32], Option<String>)> = Vec::new();
     for (chave, prova) in &assinaturas {
         let nomes: Vec<&str> = assinantes.iter().map(|a| a.0.as_str()).collect();
@@ -700,7 +706,15 @@ fn conferir_quorum_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) ->
                 "uma assinatura de credencial revogada",
             ));
         }
-        if !sigilo::quorum::conferir(&desafio.efemera, &conteudo, chave, prova) {
+        let Some(publica) = membro.assinatura else {
+            return Err(recusar(
+                &nomes,
+                Codigo::DenyNotAuthenticated,
+                "",
+                "uma credencial sem chave de assinatura no registro",
+            ));
+        };
+        if !sigilo::quorum::conferir(&publica, &conteudo, prova) {
             return Err(recusar(
                 &nomes,
                 Codigo::DenyNotAuthenticated,
@@ -743,7 +757,7 @@ fn conferir_quorum_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) ->
             Codigo::Allow,
             bytes,
             &format!(
-                "assinatura conferida; permissao {}; desafio {id}",
+                "assinatura ed25519 conferida; permissao {}; desafio {id}",
                 operacao.permissao.nome()
             ),
         );

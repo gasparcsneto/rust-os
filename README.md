@@ -1517,15 +1517,23 @@ dos donos legítimos. O M e o N são da política, por operação — a linha
 O caminho é o de toda operação administrativa, com M credenciais no lugar
 de uma: `admin.challenge` com `{"for":"admin.revoke"}` dá um desafio de
 quórum — que diz a versão da política, M e N, e vale dois minutos, para as
-provas serem juntadas —; cada credencial prova o **mesmo** conteúdo
+assinaturas serem juntadas —; cada credencial assina o **mesmo** conteúdo
 canônico (`sigilo::quorum::Conteudo`: a versão do formato, o número da
 operação, o nonce e a efêmera do desafio, a sessão, a versão da política,
 M, N, o comando, o alvo e o texto exato dos parâmetros, cada campo
 variável com o tamanho na frente); e `admin.execute` leva as assinaturas
-em `signatures`, `chave:prova,...`. A prova de cada credencial é a da
-prova administrativa — X25519 com a efêmera do desafio, HKDF, HMAC-BLAKE2s
-—, com rótulos próprios: só o Duke a confere, e ela não vale como prova
-comum, nem o contrário.
+em `signatures`, `credencial:assinatura,...`. A assinatura é **Ed25519**
+(RFC 8032), sobre um rótulo próprio seguido dos bytes canônicos: cada
+credencial assina com a chave **privada** dela, que fica com quem assina —
+no desenvolvimento, em `target/chaves/`, fora do repositório e da imagem —,
+e o Duke confere com a **pública**, que está no registro de
+administradores (`ed25519:<hex>`, ao lado da chave X25519 da credencial). A
+chave que confere vem do registro, pela credencial, e nunca do pedido; o
+Duke não tem nem precisa de chave privada nenhuma para conferir, e nada do
+que ele tem produz uma assinatura. A conferência é a estrita: sem chave de
+ordem pequena, sem segunda grafia de uma assinatura válida. Qualquer um com
+a pública confere depois, fora do Duke — a fumaça confere as dela no
+hospedeiro antes de mandá-las.
 
 O kernel confere, nesta ordem: o formato; o desafio, que sai de qualquer
 jeito e tem de ser de quórum para esta operação, sob a política de agora;

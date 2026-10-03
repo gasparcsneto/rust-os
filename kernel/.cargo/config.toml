@@ -20,8 +20,10 @@ target = "x86_64-unknown-none"
 #
 # O alvo `x86_64-unknown-none` já proíbe o compilador de gerar SIMD por
 # conta própria, mas não alcança o código que pede SIMD explicitamente,
-# função a função, depois de perguntar ao processador. Estas três opções são
-# as que os próprios pacotes oferecem para desligar esse caminho.
+# função a função, depois de perguntar ao processador. Estas opções são as
+# que os próprios pacotes oferecem para desligar esse caminho. A do SHA-2
+# entrou com o Ed25519 das assinaturas de quórum: sem ela, o `sha2` não
+# compila para este alvo.
 #
 # Medido, tirando uma de cada vez: sem a do Poly1305, o LLVM não compila o
 # caminho AVX2 para este alvo ("Do not know how to split the result of this
@@ -40,6 +42,7 @@ rustflags = [
     "--cfg", 'chacha20_backend="soft"',
     "--cfg", 'poly1305_backend="soft"',
     "--cfg", 'curve25519_dalek_backend="serial"',
+    "--cfg", 'sha2_backend="soft"',
 ]
 
 [target.aarch64-unknown-none-softfloat]
@@ -60,4 +63,5 @@ rustflags = [
     "--cfg", 'chacha20_backend="soft"',
     "--cfg", 'poly1305_backend="soft"',
     "--cfg", 'curve25519_dalek_backend="serial"',
+    "--cfg", 'sha2_backend="soft"',
 ]

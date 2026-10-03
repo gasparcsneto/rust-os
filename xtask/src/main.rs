@@ -3680,6 +3680,11 @@ mod chaves {
         /// As outras credenciais do grupo de administradores: o quórum de
         /// `admin.revoke` é 2 de 3, e o grupo da imagem tem as três.
         pub outros_administradores: [[u8; 32]; 2],
+        /// As chaves **privadas** Ed25519 com que as três credenciais
+        /// assinam um quórum, na ordem do grupo. Ficam aqui, em
+        /// `target/chaves/`, do lado de quem assina; a imagem recebe só as
+        /// públicas.
+        pub assinaturas_dos_administradores: [[u8; 32]; 3],
         pub intruso: [u8; 32],
         /// O segredo da pessoa de desenvolvimento: o identificador, o sal e
         /// a senha saem dele — ver [`Chaves::pessoa_dev`].
@@ -3749,6 +3754,11 @@ mod chaves {
                     .collect::<Result<_, _>>()?,
                 administrador: chave("administrador")?,
                 outros_administradores: [chave("administrador-2")?, chave("administrador-3")?],
+                assinaturas_dos_administradores: [
+                    chave("administrador-assinatura")?,
+                    chave("administrador-2-assinatura")?,
+                    chave("administrador-3-assinatura")?,
+                ],
                 intruso: chave("intruso")?,
                 pessoa_dev: chave("pessoa-dev")?,
             })
@@ -3843,11 +3853,16 @@ mod chaves {
                 ("administrador-2", &self.outros_administradores[0]),
                 ("administrador-3", &self.outros_administradores[1]),
             ];
-            for (nome, chave) in grupo {
-                administradores.push_str(&sigilo::registro::linha(
+            // A chave X25519 da credencial e a **pública** Ed25519 com que
+            // ela assina um quórum. Nenhuma privada vai para a imagem.
+            for ((nome, chave), assinatura) in
+                grupo.iter().zip(&self.assinaturas_dos_administradores)
+            {
+                administradores.push_str(&sigilo::registro::linha_de_administrador(
                     &sigilo::publica_de(chave),
                     nome,
-                    Some("administrador"),
+                    "administrador",
+                    &sigilo::quorum::publica_de_assinatura(assinatura),
                 ));
             }
             self.escrever_senha_dev()?;
@@ -7105,6 +7120,111 @@ fn sob_administracao(
         ));
     }
     println!("  [admin] ok  o agente registrado pela serial entra pela porta 1");
+    drop(agente);
+    revogar_por_quorum(escrita, leitor, &chaves, &mut id)
+}
+
+/// `admin.revoke` no kernel de produção, pela serial: as assinaturas Ed25519
+/// feitas aqui, com as chaves privadas que só o hospedeiro tem, e conferidas
+/// lá com as públicas da imagem.
+///
+/// # O que esta sonda prova
+///
+/// Que o protocolo de quórum fecha com as ferramentas de verdade — a chave
+/// privada de cada credencial do lado de quem assina, a pública no registro
+/// da imagem —; que uma assinatura só não revoga; que duas revogam; que o
+/// pedido não vale duas vezes; e que a assinatura confere fora do Duke, só
+/// com a chave pública.
+fn revogar_por_quorum(
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+    chaves: &chaves::Chaves,
+    id: &mut u32,
+) -> Result<(), String> {
+    let alvo = sigilo::hex(&sigilo::publica_de(&chaves.outros_administradores[1]));
+    let parametros = format!(r#"{{"key":"{alvo}","reason":"fumaca"}}"#);
+    let credenciais = [
+        sigilo::publica_de(&chaves.administrador),
+        sigilo::publica_de(&chaves.outros_administradores[0]),
+    ];
+    let mut tentar = |assinantes: usize| -> Result<(String, String), String> {
+        let desafio = pedir_pela_serial(
+            escrita,
+            leitor,
+            id,
+            "admin.challenge",
+            r#"{"for":"admin.revoke"}"#,
+        )?;
+        let numero = |nome: &str| -> Result<u64, String> {
+            campo_simples(&desafio, nome)
+                .and_then(|v| v.parse().ok())
+                .ok_or_else(|| format!("quorum: o desafio nao diz `{nome}`\n  {desafio}"))
+        };
+        let hex = |nome: &str| -> Result<[u8; 32], String> {
+            campo_simples(&desafio, nome)
+                .and_then(|v| sigilo::de_hex(&v))
+                .ok_or_else(|| format!("quorum: o desafio nao diz `{nome}`\n  {desafio}"))
+        };
+        let (nonce, efemera) = (hex("nonce")?, hex("ephemeral")?);
+        let conteudo = sigilo::quorum::Conteudo {
+            operacao: numero("challenge")?,
+            nonce: &nonce,
+            sessao: 0,
+            efemera: &efemera,
+            versao_da_politica: numero("policy_version")?,
+            m: numero("m")? as u8,
+            n: numero("n")? as u8,
+            comando: "admin.revoke",
+            alvo: &alvo,
+            parametros: &parametros,
+        };
+        let mut assinaturas = Vec::new();
+        for (credencial, privada) in credenciais
+            .iter()
+            .zip(&chaves.assinaturas_dos_administradores)
+            .take(assinantes)
+        {
+            let assinatura = sigilo::quorum::assinar(privada, &conteudo);
+            // Confere aqui, fora do Duke, só com a pública.
+            let publica = sigilo::quorum::publica_de_assinatura(privada);
+            if !sigilo::quorum::conferir(&publica, &conteudo, &assinatura) {
+                return Err("quorum: a assinatura nao confere com a chave publica".to_string());
+            }
+            assinaturas.push(format!(
+                "{}:{}",
+                sigilo::hex(credencial),
+                sigilo::hex_de(&assinatura)
+            ));
+        }
+        let pedido = format!(
+            r#"{{"challenge":{},"command":"admin.revoke","params":"{}","signatures":"{}"}}"#,
+            conteudo.operacao,
+            parametros.replace('"', "\\\""),
+            assinaturas.join(",")
+        );
+        let resposta = pedir_pela_serial(escrita, leitor, id, "admin.execute", &pedido)?;
+        Ok((resposta, pedido))
+    };
+
+    let (r, _) = tentar(1)?;
+    if !r.contains("quorum incompleto: 1 de 2") {
+        return Err(format!("quorum: uma assinatura so revogou\n  {r}"));
+    }
+    let (r, pedido) = tentar(2)?;
+    if !r.contains(r#""executed":true"#)
+        || !r.contains(r#""signed_by":["administrador","administrador-2"]"#)
+    {
+        return Err(format!("quorum: duas assinaturas nao revogaram\n  {r}"));
+    }
+    let r = pedir_pela_serial(escrita, leitor, id, "admin.execute", &pedido)?;
+    if !r.contains("desafio desconhecido") {
+        return Err(format!(
+            "quorum: o pedido de revogacao valeu duas vezes\n  {r}"
+        ));
+    }
+    println!(
+        "  [admin] ok  admin.revoke: uma assinatura Ed25519 nao revoga; duas revogam, uma vez; a assinatura confere fora do Duke"
+    );
     Ok(())
 }
 
