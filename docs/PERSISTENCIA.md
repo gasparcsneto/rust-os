@@ -338,6 +338,7 @@ ganharam um caso, e o caso foi conferido contra a mesma mutação.
 | atributos da âncora sem conferência; o avanço sem reler | hospedeiro: `ancora` |
 | o texto da política sem quórum, processos ou inclusões | hospedeiro: *o texto volta igual* |
 | o relógio sem piso | hospedeiro: *o relógio nunca volta* |
+| o signatário aceitar uma geração menor, ou não guardar a que viu | bancada: *o signatário* |
 
 As que só a bancada mata só se veem entre dois boots, e é para isso que ela
 existe; ela roda na CI nas duas arquiteturas.
