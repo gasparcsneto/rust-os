@@ -133,8 +133,19 @@ fn lancar(
         ambiente,
     )?;
     // A saída humana do x86 (COM1) não interessa aqui, e um terminal cheio
-    // de log do firmware a cada boot esconderia o resultado.
-    qemu.stdout(std::process::Stdio::null());
+    // de log do firmware a cada boot esconderia o resultado. Para depurar
+    // um cenário, `DUKE_BANCADA_LOG` diz um arquivo onde acumulá-la.
+    let saida = std::env::var("DUKE_BANCADA_LOG")
+        .ok()
+        .and_then(|caminho| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(caminho)
+                .ok()
+        })
+        .map_or_else(std::process::Stdio::null, std::process::Stdio::from);
+    qemu.stdout(saida);
     let filho = qemu
         .spawn()
         .map_err(|e| format!("não foi possível iniciar o {}: {e}", arch.qemu()))?;
@@ -1089,10 +1100,16 @@ fn numero_de(id: &str) -> u64 {
         .unwrap_or(0)
 }
 
-/// O estado de uma mensagem para o agente da porta `porta`.
+/// O estado de uma mensagem para o agente da porta `porta`, numa conexão
+/// nova — que só se abre com a porta livre: o QEMU atende um cliente por
+/// socket, e um segundo fica esperando o aperto que o primeiro segura.
 fn estado_de(arch: Arquitetura, porta: u8, id: &str) -> Result<String, String> {
-    let r = super::AgenteNaPorta::conectar(arch, porta)?
-        .pedir("message.status", &format!(r#"{{"id":"{id}"}}"#))?;
+    estado_por(&mut super::AgenteNaPorta::conectar(arch, porta)?, id)
+}
+
+/// O estado de uma mensagem, pela conexão `agente`.
+fn estado_por(agente: &mut super::AgenteNaPorta, id: &str) -> Result<String, String> {
+    let r = agente.pedir("message.status", &format!(r#"{{"id":"{id}"}}"#))?;
     super::campo_simples(&r, "state").ok_or_else(|| format!("sem estado\n  {r}"))
 }
 
@@ -1185,7 +1202,7 @@ fn o_prazo_e_do_tempo_logico(arch: Arquitetura, artefato: &Artefato) -> Result<S
     // A curta vence em até dois segundos lógicos; a consulta a vence e grava.
     let limite = std::time::Instant::now() + Duration::from_secs(20);
     loop {
-        if estado_de(arch, 1, &ids[1])? == "expired" {
+        if estado_por(&mut um, &ids[1])? == "expired" {
             break;
         }
         if std::time::Instant::now() >= limite {
