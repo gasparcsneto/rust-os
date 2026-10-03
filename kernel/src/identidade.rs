@@ -726,7 +726,7 @@ fn validade(quorum: Option<&'static str>) -> u64 {
 }
 
 /// O relógio dos desafios: o do sistema — e, na suíte, adiantado pelo que
-/// [`envelhecer_desafios_de_teste`] pediu.
+/// `envelhecer_desafios_de_teste` pediu.
 fn agora_dos_desafios() -> u64 {
     let agora = crate::tempo::uptime_ms();
     #[cfg(feature = "modo-teste")]
