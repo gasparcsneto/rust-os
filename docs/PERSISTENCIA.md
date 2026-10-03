@@ -1,9 +1,8 @@
 # Persistência — desenho do ponto 7
 
-> **Estado: desenho, não implementado.** Nada neste documento existe no
-> código ainda. Ele registra o que a persistência terá de cumprir quando for
-> feita, para que os requisitos de segurança entrem no desenho antes da
-> primeira linha, e não depois. A implementação espera aprovação.
+> **Estado: em implementação, aprovada.** O ponto 7 entra em fases — ver
+> [Fases e estado](#fases-e-estado) no fim. Os requisitos abaixo foram
+> escritos antes da primeira linha, e cada fase diz quais deles já valem.
 
 Hoje o disco é só leitura. Tudo o que muda em tempo de execução — mensagens,
 `agent.register`, `policy.write`, `admin.revoke`, a revogação de pessoas e
@@ -150,19 +149,29 @@ do alcance de quem escreve no disco. O desenho prevê duas camadas:
    quórum depois dela, e nenhuma operação administrativa passa sobre o
    estado restaurado. `system.info` passa a publicar a geração e a cabeça do
    journal, para que qualquer agente compare.
-2. **Âncora de hardware (decisão em aberto).** Um contador monotônico fora
-   do disco — o NV de um TPM 2.0 (no QEMU, pelo `swtpm`), ou uma variável
-   autenticada da UEFI. O kernel grava nele a geração depois de cada lápide e
-   recusa, no boot, um journal com geração menor que a da âncora. É o que
-   detecta a restauração antes da primeira operação, e não durante ela.
+2. **Âncora de hardware (decidida).** Um contador monotônico no NV de um
+   TPM 2.0, fora do disco. Cada gravação do journal — e não só as
+   administrativas: a âncora protege o estado persistente **inteiro** —
+   avança o contador, e o journal guarda o valor a que corresponde. No
+   boot, antes de liberar qualquer operação administrativa, o kernel lê o
+   contador e recusa um journal anterior a ele. No QEMU, o TPM é o
+   `swtpm`; o driver fala TIS, a interface dos TPMs discretos, atrás de
+   uma camada de transporte, e a âncora é uma interface acima dos comandos
+   do TPM — um TPM físico entra sem mudar a lógica da persistência nem a
+   da autorização.
 
-Sem a segunda camada, a garantia é esta, e convém dizê-la exatamente:
-**quem consegue reescrever o disco inteiro consegue fazer o kernel subir
-com um estado anterior, mas não consegue fazer esse estado ser usado em
-nenhuma operação administrativa assinada por um signatário que já viu a
-geração mais nova.** A imagem, com a chave privada do Duke, também mora no
-disco, e esse atacante já está fora do modelo de ameaça que a imagem
-protege hoje.
+As duas camadas são mecanismos distintos, e não se substituem. A geração
+do R5 amarra cada assinatura ao estado administrativo sob o qual foi dada
+— protege a validade e a ordem das assinaturas. O contador da âncora
+amarra o disco inteiro ao TPM — protege contra a restauração de um disco
+antigo. A geração não sobe a cada mensagem; o contador sobe a cada
+gravação.
+
+O que fica de fora, e convém dizer exatamente: quem tem o TPM **e** o disco
+— limpa o TPM, ou o troca — faz a âncora sumir. O kernel não aceita isso
+como sistema novo: um journal que diz ter sido ancorado, num TPM sem o
+contador, é recusado como restauração (R4), e a administração sobe
+bloqueada.
 
 ### R7. Testes que o ponto 7 terá de ter
 
@@ -194,10 +203,32 @@ anteriores:
 
   Cada uma tem de ser morta por um caso nomeado.
 
-## Decisões que ficam para a aprovação do ponto 7
+## Decisões tomadas
 
-- A âncora de hardware do R6: TPM, variável UEFI, ou só a do signatário.
-- O formato e o tamanho da partição de dados, e a política de compactação
-  do journal (que preserva as lápides, sempre).
-- A ordem de entrega: o journal e as lápides primeiro, as mensagens por
-  cima; ou tudo junto.
+- **Âncora:** o TPM 2.0, com um contador monotônico de NV; o `swtpm` como
+  TPM de desenvolvimento no QEMU, nas duas arquiteturas.
+- **Relógio:** o RTC de hardware (CMOS no x86, PL031 no ARM), com um piso
+  gravado no journal: o tempo lógico nunca volta atrás do último valor
+  gravado. O tempo desde o boot não serve de relógio de validade.
+- **Dados:** uma partição dedicada no mesmo disco, com um tipo GUID do
+  Duke (`6d7a3c1e-5b2f-4e8a-9c41-d0a7e5c3f911`), de 16 MiB. A escrita do
+  kernel fica restrita a ela, e só o módulo do journal escreve. A ESP e a
+  raiz continuam intocáveis.
+- **Persistência indisponível:** as mensagens podem continuar só em
+  memória, dizendo isso; as operações que mudam o estado de autoridade
+  ficam bloqueadas. Não há exceção para o `sistema`.
+- **Ordem:** 7.0 → 7.1 → 7.2 → 7.3, um relatório, e então 7.4 → 7.5 →
+  7.6 → 7.7.
+
+## Fases e estado
+
+| Fase | O quê | Estado |
+|---|---|---|
+| 7.0 | A bancada: partição de estado, TPM em toda máquina, relógio, vários boots com corte de energia, fotografia e restauração da partição | feita |
+| 7.1 | Escrever no disco (só a partição de estado, com `FLUSH`), o TPM pelo TIS, o RTC | — |
+| 7.2 | O journal: registros autenticados, geração, âncora, piso do relógio | — |
+| 7.3 | O estado administrativo durável (R1–R6) | — |
+| 7.4 | Mensagens persistentes | — |
+| 7.5 | Auditoria persistente | — |
+| 7.6 | Compactação e disco cheio | — |
+| 7.7 | O que restar da âncora (TPM físico, sessão autenticada no barramento) | — |

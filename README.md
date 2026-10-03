@@ -79,8 +79,10 @@ próprio canal, lendo `log.tail`.
 
 ## Começando
 
-Requisitos: Rust nightly (instalado automaticamente pelo `rust-toolchain.toml`)
-e os pacotes do emulador para as arquiteturas desejadas.
+Requisitos: Rust nightly (instalado automaticamente pelo `rust-toolchain.toml`),
+os pacotes do emulador para as arquiteturas desejadas e o `swtpm`, que é o TPM
+2.0 das máquinas de teste — a âncora da persistência, ver
+[`docs/PERSISTENCIA.md`](docs/PERSISTENCIA.md).
 
 ```bash
 # x86_64 (padrão): compila e põe o iniciador e o kernel na ESP do disco
@@ -106,6 +108,7 @@ cargo xtask simbolo 0xffff8000...    # endereço -> arquivo, linha e função
 cargo xtask asm consumir_pilha       # o que o otimizador realmente gerou
 cargo xtask elf                      # confere os ELFs de usuário por fora
 cargo xtask invariantes              # regras de fonte: SAFETY, parâmetros do agente, README
+cargo xtask persistencia             # vários boots sobre o mesmo disco e o mesmo TPM
 ```
 
 Com o kernel rodando, converse com ele de outro terminal:
@@ -239,7 +242,7 @@ kernel/src/
 ├── ui.rs            a árvore semântica: o que está na tela, e o que se faz com cada coisa
 ├── teclado.rs       o que uma pessoa digita chega ao kernel
 ├── pci.rs           enumeração do barramento PCI
-├── particoes.rs     a tabela de partições GPT do disco
+├── particoes.rs     a tabela de partições GPT do disco: ESP, raiz e a de estado
 ├── rede.rs          o mínimo de protocolo acima do transporte de quadros
 ├── traps.rs         contabilidade de exceções e modo post-mortem
 ├── irq.rs           contadores de interrupções de hardware
@@ -416,7 +419,8 @@ programas/           os programas de usuário, compilados à parte do kernel
         └── terminal.rs   o Terminal: o interpretador numa janela, pelo pseudo-terminal
 
 xtask/src/
-└── main.rs          a ferramenta de build, teste e diagnóstico do projeto
+├── main.rs          a ferramenta de build, teste e diagnóstico do projeto
+└── persistencia.rs  a bancada de persistência: a mesma máquina em vários boots, com corte de energia
 ```
 
 **Como as duas arquiteturas convivem.** Cada backend em `arch/` traduz o que

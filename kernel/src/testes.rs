@@ -6505,6 +6505,7 @@ fn particoes_tabela_do_disco() -> Resultado {
         let esperado = match particao.tipo {
             crate::particoes::Tipo::Esp => (2048u64, 98304u64),
             crate::particoes::Tipo::Dados => (100352, 262144),
+            crate::particoes::Tipo::Estado => (362496, 32768),
             crate::particoes::Tipo::Outro => {
                 return Err("apareceu uma particao de tipo inesperado");
             }
@@ -6521,9 +6522,9 @@ fn particoes_tabela_do_disco() -> Resultado {
         }
     }
 
-    if vistas != 2 {
+    if vistas != 3 {
         crate::log_error!("teste", "a tabela trouxe {} particoes", vistas);
-        return Err("o disco tem duas particoes e a tabela disse outra coisa");
+        return Err("o disco tem tres particoes e a tabela disse outra coisa");
     }
 
     Ok(())

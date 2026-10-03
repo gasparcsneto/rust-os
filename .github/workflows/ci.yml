@@ -140,7 +140,7 @@ jobs:
   testes:
     name: Testes (${{ matrix.arch }})
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       # Sem fail-fast: quando uma arquitetura quebra, queremos saber na mesma
       # rodada se a outra também quebrou. Saber se o bug é específico de uma
@@ -175,7 +175,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             qemu-system-x86 qemu-system-arm \
-            gdisk dosfstools mtools btrfs-progs ovmf qemu-efi-aarch64
+            gdisk dosfstools mtools btrfs-progs ovmf qemu-efi-aarch64 \
+            swtpm
 
       - name: Suíte de testes
         run: cargo xtask test --arch ${{ matrix.arch }}
@@ -237,6 +238,15 @@ jobs:
       # por aqui.
       - name: Iniciador UEFI
         run: cargo xtask iniciador --arch ${{ matrix.arch }}
+
+      # A persistência só aparece entre boots: a mesma máquina, ligada de
+      # novo sobre o mesmo disco e o mesmo TPM, depois de um corte de
+      # energia — `SIGKILL` no emulador e no TPM, sem aviso. A bancada também
+      # fotografa a partição de estado e a devolve ao disco, que é como se
+      # simula um disco restaurado de uma cópia antiga. Ver
+      # `docs/PERSISTENCIA.md`.
+      - name: Persistência
+        run: cargo xtask persistencia --arch ${{ matrix.arch }}
 
       # E uma terceira, com teclado USB no lugar do nativo.
       #

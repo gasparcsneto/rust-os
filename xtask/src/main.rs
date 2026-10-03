@@ -13,6 +13,8 @@
 //!
 //! `A` é `x86_64` (padrão) ou `aarch64`. Aceita também `--release`.
 
+mod persistencia;
+
 use std::collections::BTreeMap;
 use std::{
     io::{BufRead, BufReader, Write},
@@ -232,6 +234,7 @@ fn main() -> ExitCode {
         "elf" => conferir_elfs(arch, release),
         "invariantes" => conferir_invariantes(),
         "iniciador" => iniciador(arch, release),
+        "persistencia" => persistencia::persistencia(arch, release),
         "help" | "-h" => {
             ajuda();
             Ok(ExitCode::SUCCESS)
@@ -315,6 +318,8 @@ COMANDOS:
     elf                       confere os programas de usuário embutidos
     invariantes               confere as regras de fonte dos dois lados
     iniciador                 sobe o iniciador UEFI no OVMF e confere o relatório
+    persistencia              a mesma máquina em vários boots: corte de energia,
+                              disco restaurado, relógio para trás
     help                      mostra esta mensagem
 
 EXEMPLOS:
@@ -1039,6 +1044,7 @@ fn iniciador(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
     let kernel = kernel_para_a_esp(&caminho_elf(arch, release))?;
 
     let disco = disco_de_testes()?;
+    zerar_o_estado(arch)?;
     let mut falhou = false;
 
     // A rodada que importa: o kernel de verdade, e o relatório inteiro.
@@ -1331,12 +1337,14 @@ fn subir_no_firmware(
     // dizendo que a máquina não tinha disco, nem vídeo, nem PCI. Nenhum
     // deles era defeito do kernel: era a segunda definição descrevendo
     // outro computador.
+    let ambiente = Ambiente::ligar(arch, None)?;
     let mut qemu = comando_qemu(
         arch,
         &Artefato::Disco(disco.to_path_buf()),
         None,
         Teclado::Nativo,
         Video::Linear,
+        &ambiente,
     )?;
     qemu.stdout(arquivo);
     // Sem rede: nada aqui precisa dela, e o firmware tentaria PXE antes do
@@ -3407,12 +3415,15 @@ fn depurar(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
     let elf = caminho_elf(arch, release);
     let socket = caminho_socket(arch);
 
+    zerar_o_estado(arch)?;
+    let ambiente = Ambiente::ligar(arch, None)?;
     let mut qemu = comando_qemu(
         arch,
         &artefato,
         Some(&socket),
         Teclado::Nativo,
         Video::Linear,
+        &ambiente,
     )?;
     // `-S` congela a CPU antes da primeira instrução; `-gdb` abre o servidor.
     // Sem o `-S`, o kernel bootaria inteiro antes de dar tempo de conectar, e
@@ -3952,8 +3963,8 @@ mod chaves {
 }
 
 mod disco {
-    /// O disco inteiro.
-    pub const SETORES: u64 = 192 * 1024 * 1024 / 512;
+    /// O disco inteiro: as três partições e a cópia da GPT no fim.
+    pub const SETORES: u64 = 200 * 1024 * 1024 / 512;
 
     /// Onde a ESP começa e quanto ocupa.
     ///
@@ -3966,6 +3977,17 @@ mod disco {
     /// E a raiz, logo depois.
     pub const RAIZ_EM: u64 = ESP_EM + ESP_SETORES;
     pub const RAIZ_SETORES: u64 = 128 * 1024 * 1024 / 512;
+
+    /// E a partição de estado, depois da raiz: a única área em que o kernel
+    /// escreve, onde mora o journal da persistência.
+    ///
+    /// Um tipo GUID próprio do Duke, e não o `8300` da raiz: a escrita do
+    /// kernel se restringe à partição **deste** tipo, e um tipo que qualquer
+    /// partição de dados também tem deixaria a raiz ao alcance dela. O mesmo
+    /// GUID está em `kernel/src/particoes.rs`, em bytes.
+    pub const ESTADO_EM: u64 = RAIZ_EM + RAIZ_SETORES;
+    pub const ESTADO_SETORES: u64 = 16 * 1024 * 1024 / 512;
+    pub const GUID_DO_ESTADO: &str = "6D7A3C1E-5B2F-4E8A-9C41-D0A7E5C3F911";
 
     /// A faixa que a GPT reserva e ninguém usa: do fim das entradas de
     /// partição até o começo da primeira.
@@ -4090,6 +4112,7 @@ mod disco {
 /// As ferramentas que montam o disco, e o pacote de cada uma.
 const FERRAMENTAS_DO_DISCO: &[(&str, &str)] = &[
     ("sgdisk", "gdisk"),
+    ("swtpm", "swtpm"),
     ("mkfs.vfat", "dosfstools"),
     ("mcopy", "mtools"),
     ("mkfs.btrfs", "btrfs-progs"),
@@ -4235,12 +4258,15 @@ fn receita_do_disco(programas: &[(String, Vec<u8>)]) -> String {
     // ficou no lugar, e os casos da descida reprovaram dizendo a verdade
     // sobre uma imagem que já não existia no código.
     let mut receita = format!(
-        "v6 setores={} esp={}+{} raiz={}+{} padrao={}..{}\n",
+        "v7 setores={} esp={}+{} raiz={}+{} estado={}+{}:{} padrao={}..{}\n",
         disco::SETORES,
         disco::ESP_EM,
         disco::ESP_SETORES,
         disco::RAIZ_EM,
         disco::RAIZ_SETORES,
+        disco::ESTADO_EM,
+        disco::ESTADO_SETORES,
+        disco::GUID_DO_ESTADO,
         disco::PADRAO_DE,
         disco::PADRAO_ATE,
     );
@@ -4380,6 +4406,25 @@ fn montar_disco(caminho: &Path, programas: &[(String, Vec<u8>)]) -> Result<(), S
             &imagem,
         ],
     )?;
+    // A partição de estado nasce zerada: o journal ainda não existe, e é o
+    // primeiro boot que o abre. Os zeros já estão lá — a imagem inteira
+    // começou assim.
+    ferramenta(
+        "sgdisk",
+        &[
+            "-n",
+            &format!(
+                "3:{}:+{}M",
+                disco::ESTADO_EM,
+                disco::ESTADO_SETORES * 512 / 1024 / 1024
+            ),
+            "-t",
+            &format!("3:{}", disco::GUID_DO_ESTADO),
+            "-c",
+            "3:duke-estado",
+            &imagem,
+        ],
+    )?;
 
     // A ESP, com os arquivos dentro. Ela é montada num arquivo próprio e
     // depositada na imagem depois: `mkfs.vfat` não sabe escrever a partir de
@@ -4478,6 +4523,163 @@ fn disco_de_testes() -> Result<PathBuf, String> {
     Ok(caminho)
 }
 
+/// Onde mora o estado do TPM de uma arquitetura: o diretório do `swtpm`.
+fn diretorio_do_tpm(arch: Arquitetura) -> PathBuf {
+    raiz_do_projeto()
+        .join("target")
+        .join(format!("tpm-{}", arch.nome()))
+}
+
+/// Zera o estado persistente da máquina: a partição de estado do disco e o
+/// TPM. É o que cada comando faz antes de subir a primeira máquina.
+///
+/// # Por que a cada comando
+///
+/// Porque o disco é um só e fica em cache entre execuções, e o estado é o
+/// que o kernel escreve nele. Uma suíte que herdasse o journal da fumaça
+/// anterior testaria o que outra execução deixou, e a mesma rodada passaria
+/// ou não conforme a ordem em que se rodou o resto. O TPM vai junto pela
+/// mesma razão, e por uma a mais: o journal e a âncora são um par, e zerar
+/// só um deles é exatamente o desacordo que o kernel trata como restauração.
+///
+/// Dentro de um comando o estado persiste: a bancada de persistência sobe a
+/// mesma máquina várias vezes sobre ele, e é isso que ela testa.
+fn zerar_o_estado(arch: Arquitetura) -> Result<(), String> {
+    let disco = disco_de_testes()?;
+    escrever_no_estado(&disco, &vec![0u8; (disco::ESTADO_SETORES * 512) as usize])?;
+    let tpm = diretorio_do_tpm(arch);
+    let _ = std::fs::remove_dir_all(&tpm);
+    std::fs::create_dir_all(tpm.join("estado"))
+        .map_err(|e| format!("não foi possível criar {}: {e}", tpm.display()))
+}
+
+/// Os bytes da partição de estado do disco, inteiros.
+fn ler_o_estado(disco: &Path) -> Result<Vec<u8>, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut arquivo = std::fs::File::open(disco)
+        .map_err(|e| format!("não foi possível abrir {}: {e}", disco.display()))?;
+    let mut bytes = vec![0u8; (disco::ESTADO_SETORES * 512) as usize];
+    arquivo
+        .seek(SeekFrom::Start(disco::ESTADO_EM * 512))
+        .and_then(|_| arquivo.read_exact(&mut bytes))
+        .map_err(|e| format!("não foi possível ler a partição de estado: {e}"))?;
+    Ok(bytes)
+}
+
+/// Escreve `bytes` no começo da partição de estado — e só nela.
+fn escrever_no_estado(disco: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::{Seek, SeekFrom};
+    if bytes.len() as u64 > disco::ESTADO_SETORES * 512 {
+        return Err("mais bytes que a partição de estado".into());
+    }
+    let mut arquivo = std::fs::OpenOptions::new()
+        .write(true)
+        .open(disco)
+        .map_err(|e| format!("não foi possível abrir {}: {e}", disco.display()))?;
+    arquivo
+        .seek(SeekFrom::Start(disco::ESTADO_EM * 512))
+        .and_then(|_| arquivo.write_all(bytes))
+        .and_then(|()| arquivo.sync_all())
+        .map_err(|e| format!("não foi possível escrever a partição de estado: {e}"))
+}
+
+/// O que uma máquina tem além do disco: o TPM e o relógio.
+///
+/// # O TPM
+///
+/// Um `swtpm` por boot, sobre o diretório de estado da arquitetura. Quando
+/// a máquina sai com ordem, o QEMU manda o desligamento e o `swtpm` sai
+/// sozinho; quando ela morre sem aviso, quem o desliga é este `Drop` — ou a
+/// bancada de persistência, que corta a energia dos dois. O estado fica no
+/// diretório, como o NV de um TPM de verdade fica no chip, e subir a
+/// máquina de novo é subir outro `swtpm` sobre o mesmo diretório.
+///
+/// O dispositivo é o TIS, a interface de registradores que a especificação
+/// de PC define e que os TPMs discretos implementam: `tpm-tis` no x86, no
+/// endereço fixo de sempre, e `tpm-tis-device` no ARM, que a máquina `virt`
+/// descreve no device tree. É o mesmo protocolo que um TPM físico fala, e
+/// por isso o driver do kernel não muda quando ele chegar.
+///
+/// # O relógio
+///
+/// O RTC da máquina — o CMOS do x86, a PL031 do ARM — começa onde se mandar.
+/// Sem nada, é a hora do hospedeiro; com uma data, é ela. É o que deixa a
+/// bancada fazer o relógio andar para trás entre dois boots.
+struct Ambiente {
+    tpm: Child,
+    socket_do_tpm: PathBuf,
+    relogio: Option<String>,
+}
+
+impl Ambiente {
+    /// Liga o TPM para um boot, e fixa o relógio em `relogio` (uma data
+    /// `AAAA-MM-DDTHH:MM:SS`), se houver.
+    fn ligar(arch: Arquitetura, relogio: Option<&str>) -> Result<Ambiente, String> {
+        let swtpm = which("swtpm").ok_or(
+            "o `swtpm` não foi encontrado no PATH. Instale o pacote swtpm: é o TPM da máquina",
+        )?;
+        let dir = diretorio_do_tpm(arch);
+        let estado = dir.join("estado");
+        std::fs::create_dir_all(&estado)
+            .map_err(|e| format!("não foi possível criar {}: {e}", estado.display()))?;
+        let socket_do_tpm = dir.join("controle.sock");
+        // Um socket Unix tem um teto de caminho (108 bytes no Linux, contando
+        // o zero), e passar dele não dá erro do lado de quem cria: o `swtpm`
+        // simplesmente sai, e a espera abaixo vencia dizendo só que o socket
+        // não apareceu. Medido numa cópia do projeto num diretório fundo.
+        if socket_do_tpm.as_os_str().len() >= 104 {
+            return Err(format!(
+                "o caminho do socket do TPM tem {} bytes, e um socket Unix aceita até 107: {}",
+                socket_do_tpm.as_os_str().len(),
+                socket_do_tpm.display()
+            ));
+        }
+        let _ = std::fs::remove_file(&socket_do_tpm);
+        let tpm = Command::new(swtpm)
+            .args([
+                "socket",
+                "--tpm2",
+                "--tpmstate",
+                &format!("dir={}", estado.display()),
+                "--ctrl",
+                &format!("type=unixio,path={}", socket_do_tpm.display()),
+                "--log",
+                &format!("file={},level=1", dir.join("swtpm.log").display()),
+            ])
+            .spawn()
+            .map_err(|e| format!("não foi possível iniciar o swtpm: {e}"))?;
+        let mut ambiente = Ambiente {
+            tpm,
+            socket_do_tpm,
+            relogio: relogio.map(String::from),
+        };
+        // O QEMU recusa um chardev cujo socket ainda não existe.
+        let limite = Instant::now() + Duration::from_secs(10);
+        while !ambiente.socket_do_tpm.exists() {
+            if let Ok(Some(saida)) = ambiente.tpm.try_wait() {
+                return Err(format!(
+                    "o swtpm saiu antes de abrir o socket ({saida}); ver {}",
+                    dir.join("swtpm.log").display()
+                ));
+            }
+            if Instant::now() >= limite {
+                return Err("o swtpm não abriu o socket em 10s".into());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Ok(ambiente)
+    }
+}
+
+impl Drop for Ambiente {
+    /// O `swtpm` sai sozinho quando o QEMU sai com ordem; isto cobre o QEMU
+    /// morto sem aviso, e o que nem chegou a conectar.
+    fn drop(&mut self) {
+        let _ = self.tpm.kill();
+        let _ = self.tpm.wait();
+    }
+}
+
 /// Monta a linha de comando do QEMU para a arquitetura em questão.
 fn comando_qemu(
     arch: Arquitetura,
@@ -4485,6 +4687,7 @@ fn comando_qemu(
     socket_agente: Option<&Path>,
     teclado: Teclado,
     video: Video,
+    ambiente: &Ambiente,
 ) -> Result<Command, String> {
     let mut qemu = Command::new(arch.qemu());
 
@@ -4704,6 +4907,25 @@ fn comando_qemu(
     // `virtio-rng`. Sem ela as portas de agente recusam o aperto de mão.
     qemu.args(["-device", "virtio-rng-pci"]);
 
+    // O TPM e o relógio — ver [`Ambiente`].
+    qemu.args([
+        "-chardev",
+        &format!(
+            "socket,id=tpm0chr,path={}",
+            ambiente.socket_do_tpm.display()
+        ),
+        "-tpmdev",
+        "emulator,id=tpm0,chardev=tpm0chr",
+        "-device",
+        match arch {
+            Arquitetura::X86_64 => "tpm-tis,tpmdev=tpm0",
+            Arquitetura::Aarch64 => "tpm-tis-device,tpmdev=tpm0",
+        },
+    ]);
+    if let Some(data) = &ambiente.relogio {
+        qemu.args(["-rtc", &format!("base={data},clock=vm")]);
+    }
+
     qemu.args(["-m", "128M"]);
 
     // O monitor acompanha o canal do agente: os dois existem quando alguém vai
@@ -4831,9 +5053,18 @@ fn run(arch: Arquitetura, release: bool, video: Video) -> Result<ExitCode, Strin
         );
     }
 
-    comando_qemu(arch, &artefato, Some(&socket), Teclado::Nativo, video)?
-        .status()
-        .map_err(|e| format!("não foi possível iniciar o {}: {e}", arch.qemu()))?;
+    zerar_o_estado(arch)?;
+    let ambiente = Ambiente::ligar(arch, None)?;
+    comando_qemu(
+        arch,
+        &artefato,
+        Some(&socket),
+        Teclado::Nativo,
+        video,
+        &ambiente,
+    )?
+    .status()
+    .map_err(|e| format!("não foi possível iniciar o {}: {e}", arch.qemu()))?;
 
     Ok(ExitCode::SUCCESS)
 }
@@ -5048,7 +5279,9 @@ fn fumaca(
         arch.nome()
     );
 
-    let mut filho = comando_qemu(arch, &artefato, Some(&socket), teclado, video)?
+    zerar_o_estado(arch)?;
+    let ambiente = Ambiente::ligar(arch, None)?;
+    let mut filho = comando_qemu(arch, &artefato, Some(&socket), teclado, video, &ambiente)?
         .spawn()
         .map_err(|e| format!("não foi possível iniciar o {}: {e}", arch.qemu()))?;
 
@@ -5090,17 +5323,13 @@ fn fumaca(
     }
 }
 
-/// Espera o canal subir e roda as sondas numa conexão só.
-fn conversar(
-    arch: Arquitetura,
-    socket: &Path,
-    monitor: &Path,
-    qmp: &Path,
-    teclado: Teclado,
-    tela_no_monitor: Option<&str>,
-    qemu: u32,
-) -> Result<(), String> {
-    let limite = std::time::Instant::now() + ESPERA_PELA_FUMACA;
+/// Espera o canal da serial atender, e devolve a conexão já limpa.
+///
+/// É o aperto de mão da fumaça, separado dela porque a bancada de
+/// persistência sobe a mesma máquina várias vezes, e cada boot precisa dele
+/// igual.
+fn canal_de_pe(socket: &Path, qemu: u32, espera: Duration) -> Result<UnixStream, String> {
+    let limite = std::time::Instant::now() + espera;
 
     // Conectar não é o mesmo que ser atendido. O QEMU aceita a conexão assim
     // que cria o chardev — muito antes de o kernel bootar —, e os bytes
@@ -5124,7 +5353,7 @@ fn conversar(
         if std::time::Instant::now() >= limite {
             return Err(format!(
                 "o canal não respondeu em {}s (qemu pid {qemu})",
-                ESPERA_PELA_FUMACA.as_secs()
+                espera.as_secs()
             ));
         }
 
@@ -5201,6 +5430,21 @@ fn conversar(
             }
         }
     }
+
+    Ok(fluxo)
+}
+
+/// Espera o canal subir e roda as sondas numa conexão só.
+fn conversar(
+    arch: Arquitetura,
+    socket: &Path,
+    monitor: &Path,
+    qmp: &Path,
+    teclado: Teclado,
+    tela_no_monitor: Option<&str>,
+    qemu: u32,
+) -> Result<(), String> {
+    let fluxo = canal_de_pe(socket, qemu, ESPERA_PELA_FUMACA)?;
 
     println!(
         "[xtask] fumaça: canal de pé; rodando {} sondas",
@@ -8970,7 +9214,9 @@ fn test(arch: Arquitetura, release: bool, video: Video) -> Result<ExitCode, Stri
         }
     );
 
-    let filho = comando_qemu(arch, &artefato, None, Teclado::Nativo, video)?
+    zerar_o_estado(arch)?;
+    let ambiente = Ambiente::ligar(arch, None)?;
+    let filho = comando_qemu(arch, &artefato, None, Teclado::Nativo, video, &ambiente)?
         .spawn()
         .map_err(|e| format!("não foi possível iniciar o {}: {e}", arch.qemu()))?;
 

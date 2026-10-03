@@ -83,6 +83,19 @@ const GUID_DADOS: [u8; 16] = [
     0xAF, 0x3D, 0xC6, 0x0F, 0x83, 0x84, 0x72, 0x47, 0x8E, 0x79, 0x3D, 0x69, 0xD8, 0x47, 0x7D, 0xE4,
 ];
 
+/// O GUID da partição de estado do Duke: a área gravável onde mora o
+/// journal da persistência.
+///
+/// Um tipo próprio, e não o de dados do Linux, por segurança: a escrita do
+/// kernel é restrita a uma partição, e identificá-la pelo tipo é o que
+/// impede que ela caia por engano sobre a raiz — que é `8300`, o mesmo GUID
+/// de qualquer partição de dados. Sorteado uma vez para este projeto
+/// (`6d7a3c1e-5b2f-4e8a-9c41-d0a7e5c3f911`), e escrito aqui na ordem em que
+/// a GPT o guarda: os três primeiros campos em little-endian.
+const GUID_ESTADO: [u8; 16] = [
+    0x1E, 0x3C, 0x7A, 0x6D, 0x2F, 0x5B, 0x8A, 0x4E, 0x9C, 0x41, 0xD0, 0xA7, 0xE5, 0xC3, 0xF9, 0x11,
+];
+
 /// Para que serve uma partição.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tipo {
@@ -90,6 +103,8 @@ pub enum Tipo {
     Esp,
     /// Dados: é onde a raiz mora.
     Dados,
+    /// O estado do Duke: a única área em que o kernel escreve.
+    Estado,
     /// Qualquer outro GUID.
     Outro,
 }
@@ -99,6 +114,7 @@ impl Tipo {
         match self {
             Tipo::Esp => "esp",
             Tipo::Dados => "dados",
+            Tipo::Estado => "estado",
             Tipo::Outro => "outro",
         }
     }
@@ -108,6 +124,8 @@ impl Tipo {
             Tipo::Esp
         } else if guid == GUID_DADOS {
             Tipo::Dados
+        } else if guid == GUID_ESTADO {
+            Tipo::Estado
         } else {
             Tipo::Outro
         }
