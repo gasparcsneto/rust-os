@@ -552,11 +552,7 @@ fn ler_assinaturas(texto: &str) -> Option<Vec<([u8; 32], [u8; 32])>> {
 /// outras bastassem: um pedido com uma assinatura forjada é um pedido de
 /// quem tentou forjá-la. Nenhum papel — nem o `sistema`, nem a sessão de
 /// onde o pedido vem — substitui uma assinatura.
-fn conferir_quorum_e_executar(
-    sessao: u8,
-    pedido: Pedido,
-    w: &mut JsonWriter,
-) -> Result<(), Falha> {
+fn conferir_quorum_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) -> Result<(), Falha> {
     let bytes = pedido.parametros.unwrap_or("").as_bytes();
     let metodo = pedido.comando.unwrap_or("admin.execute");
     // Os nomes de quem já assinou e foi conferido: a auditoria grava em
@@ -838,12 +834,8 @@ fn revogar_administrador(
     m: u8,
     parametros: &str,
 ) -> Result<Feito, Falha> {
-    let chave = sigilo::de_hex(alvo).ok_or_else(|| {
-        falha(
-            Codigo::InvalidArgument,
-            "`key` nao e uma chave em hex",
-        )
-    })?;
+    let chave = sigilo::de_hex(alvo)
+        .ok_or_else(|| falha(Codigo::InvalidArgument, "`key` nao e uma chave em hex"))?;
     let motivo = Json(parametros.as_bytes())
         .member("reason")
         .and_then(|v| v.as_str())

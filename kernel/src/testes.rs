@@ -212,9 +212,10 @@ fn json_string_com_aspa_escapada() -> Resultado {
 fn json_desescapa_substitutos() -> Resultado {
     let desescapar = |texto: &[u8]| {
         let mut buffer = [0u8; 64];
-        Json(texto)
-            .member("s")
-            .and_then(|v| v.desescapar_em(&mut buffer).map(alloc::string::String::from))
+        Json(texto).member("s").and_then(|v| {
+            v.desescapar_em(&mut buffer)
+                .map(alloc::string::String::from)
+        })
     };
     let casos: [(&[u8], Option<&str>); 6] = [
         (br#"{"s":"a\"b\\c\n"}"#, Some("a\"b\\c\n")),
@@ -229,12 +230,7 @@ fn json_desescapa_substitutos() -> Resultado {
     for (texto, esperado) in casos {
         let obtido = desescapar(texto);
         if obtido.as_deref() != esperado {
-            crate::log_error!(
-                "teste",
-                "{:?}: {:?}",
-                core::str::from_utf8(texto),
-                obtido
-            );
+            crate::log_error!("teste", "{:?}: {:?}", core::str::from_utf8(texto), obtido);
             return Err("um escape foi desfeito errado");
         }
     }
@@ -13742,7 +13738,10 @@ fn mensagens_cotas_da_politica() -> Resultado {
         {
             return Err("a cota nova da politica nao valeu");
         }
-        if !recusa_gravada(&mandar(&mut a, &mut sa, "teste-3", "x", 5)?, Recusa::RemetenteCheio) {
+        if !recusa_gravada(
+            &mandar(&mut a, &mut sa, "teste-3", "x", 5)?,
+            Recusa::RemetenteCheio,
+        ) {
             return Err("o operador passou da cota nova");
         }
         // Acima do teto da tabela: recusada, e a cota fica.
@@ -14255,8 +14254,13 @@ fn admin_pela_porta(
     parametros: &str,
 ) -> Result<alloc::string::String, &'static str> {
     let r = pela_porta(agente, sessao, "admin.challenge", "{}")?;
-    let d = Json(r.as_bytes()).member("result").ok_or("o desafio nao veio")?;
-    let id = d.member("challenge").and_then(|v| v.as_u64()).ok_or("sem desafio")?;
+    let d = Json(r.as_bytes())
+        .member("result")
+        .ok_or("o desafio nao veio")?;
+    let id = d
+        .member("challenge")
+        .and_then(|v| v.as_u64())
+        .ok_or("sem desafio")?;
     let hex = |nome| {
         d.member(nome)
             .and_then(|v| v.as_str())
@@ -14273,7 +14277,8 @@ fn admin_pela_porta(
         comando,
         parametros: prova_de,
     };
-    let prova = sigilo::administracao::provar(&ADMIN_DE_TESTE, &contexto).map_err(|_| "sem prova")?;
+    let prova =
+        sigilo::administracao::provar(&ADMIN_DE_TESTE, &contexto).map_err(|_| "sem prova")?;
     let pedido = alloc::format!(
         r#"{{"challenge":{id},"command":"{comando}","params":"{}","admin":"{}","proof":"{}"}}"#,
         como_string_json(parametros),
@@ -14334,7 +14339,10 @@ fn admin_parametros_de_um_kib() -> Resultado {
         // dos parâmetros, e quatro na linha — mais que o quadro antigo.
         let aspas = "\"".repeat(480);
         let params = ate(
-            &alloc::format!(r#"{{"to":"teste-2","body":"{}","nonce":2}}"#, como_string_json(&aspas)),
+            &alloc::format!(
+                r#"{{"to":"teste-2","body":"{}","nonce":2}}"#,
+                como_string_json(&aspas)
+            ),
             UM_KIB,
         );
         if params.len() != UM_KIB {
@@ -14362,10 +14370,7 @@ fn admin_parametros_de_um_kib() -> Resultado {
             UM_KIB,
         );
         let r = admin_pela_porta(&mut a, &mut sa, 1, "policy.write", &longe, &longe)?;
-        if longe.len() != UM_KIB
-            || executada(&r)
-            || !r.contains(r#""code":"DENY_POLICY""#)
-        {
+        if longe.len() != UM_KIB || executada(&r) || !r.contains(r#""code":"DENY_POLICY""#) {
             crate::log_error!("teste", "{}", r);
             return Err("os 1024 bytes fora do ASCII nao chegaram a decisao da operacao");
         }
@@ -14373,7 +14378,9 @@ fn admin_parametros_de_um_kib() -> Resultado {
         // Um emoji no corpo, escrito como par de substitutos.
         let params = r#"{"to":"teste-2","body":"oi 😀","nonce":3}"#;
         let r = admin_pela_porta(&mut a, &mut sa, 1, "message.send", params, params)?;
-        if !executada(&r) || !pela_porta(&mut b, &mut sb, "message.read", r#"{"max":8}"#)?.contains("oi 😀") {
+        if !executada(&r)
+            || !pela_porta(&mut b, &mut sb, "message.read", r#"{"max":8}"#)?.contains("oi 😀")
+        {
             crate::log_error!("teste", "{}", r);
             return Err("o par de substitutos nao foi desfeito no texto provado");
         }
@@ -14403,7 +14410,9 @@ fn admin_parametros_de_um_kib() -> Resultado {
         // Uma linha além do quadro: recusada, e a sessão continua.
         let longa = alloc::format!(r#"{{"x":"{}"}}"#, "a".repeat(5000));
         let r = pela_porta(&mut a, &mut sa, "agent.ping", &longa)?;
-        if !r.contains("-32000") || !pela_porta(&mut a, &mut sa, "agent.ping", "{}")?.contains("pong") {
+        if !r.contains("-32000")
+            || !pela_porta(&mut a, &mut sa, "agent.ping", "{}")?.contains("pong")
+        {
             crate::log_error!("teste", "{}", r);
             return Err("a linha alem do quadro nao foi recusada, ou derrubou a sessao");
         }
@@ -14461,7 +14470,11 @@ struct DesafioDeQuorum {
 }
 
 fn ler_desafio_de_quorum(j: Json, sessao: u8) -> Result<DesafioDeQuorum, &'static str> {
-    let numero = |nome| j.member(nome).and_then(|v| v.as_u64()).ok_or("desafio de quorum incompleto");
+    let numero = |nome| {
+        j.member(nome)
+            .and_then(|v| v.as_u64())
+            .ok_or("desafio de quorum incompleto")
+    };
     let hex = |nome| {
         j.member(nome)
             .and_then(|v| v.as_str())
@@ -14640,7 +14653,9 @@ fn admin_revoke_dois_de_tres() -> Resultado {
             && fim.recurso.starts_with("admin:adm-3")
             && fim.detalhe.contains("quorum 2 de 3")
             && fim.detalhe.contains(&alloc::format!("desafio {}", d.id))
-            && fim.detalhe.contains(&alloc::format!("politica v{}", d.versao))
+            && fim
+                .detalhe
+                .contains(&alloc::format!("politica v{}", d.versao))
             && fim.detalhe.contains("motivo: perdida")
             && fim.parametros == politica::auditoria::resumo_dos_parametros(params.as_bytes());
         if !certo {
@@ -14714,7 +14729,10 @@ fn admin_revoke_dois_de_tres() -> Resultado {
 fn admin_revoke_assinaturas() -> Resultado {
     com_grupo(["administrador"; 3], || {
         let params = params_de_revogacao(2, "perdida");
-        let tentar = |assinaturas: &dyn Fn(&DesafioDeQuorum) -> Result<alloc::string::String, &'static str>,
+        let tentar = |assinaturas: &dyn Fn(
+            &DesafioDeQuorum,
+        )
+            -> Result<alloc::string::String, &'static str>,
                       codigo: &str,
                       trecho: &str,
                       o_que: &'static str|
@@ -14772,10 +14790,7 @@ fn admin_revoke_assinaturas() -> Resultado {
         // Assinaturas sobre desafios diferentes.
         tentar(
             &|d| {
-                let outro = DesafioDeQuorum {
-                    id: d.id + 1,
-                    ..*d
-                };
+                let outro = DesafioDeQuorum { id: d.id + 1, ..*d };
                 Ok(alloc::format!(
                     "{},{}",
                     assinaturas_de(d, &[0], &params)?,
@@ -14823,13 +14838,24 @@ fn admin_revoke_assinaturas() -> Resultado {
             efemera: comum.2,
             ..d
         };
-        let r = revogar_com(&d_comum2, &assinaturas_de(&d_comum2, &[0, 1], &params)?, &params)?;
+        let r = revogar_com(
+            &d_comum2,
+            &assinaturas_de(&d_comum2, &[0, 1], &params)?,
+            &params,
+        )?;
         if !quorum_recusado(&r, "DENY_NOT_AUTHENTICATED", "nao e de quorum") || !grupo_intacto() {
             crate::log_error!("teste", "{}", r);
             return Err("um desafio de uma credencial so serviu ao quorum");
         }
         let d = desafio_de_quorum(0)?;
-        let r = executar_admin_de(0, (d.id, d.nonce, d.efemera), &GRUPO_DE_TESTE[0].0, "message.read", "{}", "{}")?;
+        let r = executar_admin_de(
+            0,
+            (d.id, d.nonce, d.efemera),
+            &GRUPO_DE_TESTE[0].0,
+            "message.read",
+            "{}",
+            "{}",
+        )?;
         if !r.contains("um desafio de quorum nao serve a uma credencial so") {
             crate::log_error!("teste", "{}", r);
             return Err("um desafio de quorum serviu a uma credencial so");
@@ -14886,7 +14912,8 @@ fn admin_revoke_assinaturas() -> Resultado {
             r#"{"line":"quorum admin.revoke 1 3"}"#,
         )?;
         if r.contains(r#""executed":true"#)
-            || crate::autorizacao::com_politica(|p| p.quorum("admin.revoke").map(|q| q.m)) != Some(2)
+            || crate::autorizacao::com_politica(|p| p.quorum("admin.revoke").map(|q| q.m))
+                != Some(2)
         {
             crate::log_error!("teste", "{}", r);
             return Err("um policy.write mudou o quorum");
@@ -14899,8 +14926,11 @@ fn admin_revoke_assinaturas() -> Resultado {
         let params = params_de_revogacao(2, "perdida");
         let d = desafio_de_quorum(0)?;
         let r = revogar_com(&d, &assinaturas_de(&d, &[0, 1], &params)?, &params)?;
-        if !quorum_recusado(&r, "DENY_PERMISSION", "o papel de `adm-2` nao tem a permissao")
-            || !grupo_intacto()
+        if !quorum_recusado(
+            &r,
+            "DENY_PERMISSION",
+            "o papel de `adm-2` nao tem a permissao",
+        ) || !grupo_intacto()
         {
             crate::log_error!("teste", "{}", r);
             return Err("um papel sem admin.revoke assinou o quorum");
@@ -15022,8 +15052,16 @@ fn admin_revoke_concorrencia() -> Resultado {
     ) -> Result<alloc::string::String, &'static str> {
         let r = pela_porta(a, s, "admin.challenge", "{}")?;
         let d = Json(r.as_bytes()).member("result").ok_or("sem desafio")?;
-        let id = d.member("challenge").and_then(|v| v.as_u64()).ok_or("sem desafio")?;
-        let hex = |n| d.member(n).and_then(|v| v.as_str()).and_then(sigilo::de_hex).ok_or("desafio");
+        let id = d
+            .member("challenge")
+            .and_then(|v| v.as_u64())
+            .ok_or("sem desafio")?;
+        let hex = |n| {
+            d.member(n)
+                .and_then(|v| v.as_str())
+                .and_then(sigilo::de_hex)
+                .ok_or("desafio")
+        };
         let (nonce, efemera) = (hex("nonce")?, hex("ephemeral")?);
         let publica = sigilo::publica_de(privada);
         let contexto = sigilo::administracao::Contexto {
@@ -15104,7 +15142,11 @@ fn admin_revoke_concorrencia() -> Resultado {
                 let i = usize::from(p) - 1;
                 let params = params_de_revogacao(alvo, "corrida");
                 let d = pela_porta_de_quorum(&mut agentes[i], &mut sessoes[i], p)?;
-                pedidos.push(pedido_de_quorum(&d, &assinaturas_de(&d, &assinantes, &params)?, &params));
+                pedidos.push(pedido_de_quorum(
+                    &d,
+                    &assinaturas_de(&d, &assinantes, &params)?,
+                    &params,
+                ));
             }
             let respostas = todos_ao_mesmo_tempo(&mut agentes, &mut sessoes, ordem, |p| match p {
                 1 | 2 => Some(pedido_rpc("admin.execute", &pedidos[usize::from(p) - 1])),
