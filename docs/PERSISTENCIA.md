@@ -310,6 +310,38 @@ junto.
   - o relógio que volta;
   - o signatário.
 
+### As mutações
+
+Cada conferência foi tirada ou invertida, uma de cada vez, e a suíte, a
+bancada ou um teste do hospedeiro tem de reprovar. As que sobreviveram
+ganharam um caso, e o caso foi conferido contra a mesma mutação.
+
+| Mutação | Quem a mata |
+|---|---|
+| repassar o journal depois de abrir as portas | `cargo xtask invariantes` (a ordem do boot) |
+| aplicar a imagem por cima das lápides | suíte: *a lápide vence a imagem* |
+| a lápide do journal ignorada | suíte: *a lápide vence a imagem* |
+| aceitar MAC errado, elo ignorado, AAD sem elo | hospedeiro: *lê de volta*, *fotografia antiga*, *cada bit trocado* |
+| aceitar um salto de geração; a geração que não sobe ou recomeça | hospedeiro: *registro autêntico com cabeçalho errado*, *a geração conta as operações* |
+| sequência, encadeamento da âncora ou reservados sem conferência | hospedeiro: *registro autêntico com cabeçalho errado* |
+| a escrita fora da janela; a janela fixada duas vezes | suíte: *disco* |
+| o portão só para quem muda; o portão aberto; o do quórum tirado | suíte: *sem ela nada de autoridade muda* |
+| a geração do desafio não conferida | suíte: *a geração amarra o quórum* |
+| a concessão não desfeita; a falha que não deixa indisponível | suíte: *a gravação que falha* |
+| responder sem descarga | suíte: *cada operação, um registro*; bancada |
+| o contador antes do disco | suíte: *a gravação que falha* |
+| o contador que volta com outro valor, aceito | hospedeiro: *só a âncora do registro confirma* |
+| o nonce fixo | suíte: *cada operação, um registro* |
+| o julgamento ignorado | bancada: *fotografia antiga*, *journal adulterado* |
+| o piso do relógio esquecido no boot | bancada: *o relógio lógico* |
+| a política do journal ignorada | bancada: *o estado sobrevive* |
+| atributos da âncora sem conferência; o avanço sem reler | hospedeiro: `ancora` |
+| o texto da política sem quórum, processos ou inclusões | hospedeiro: *o texto volta igual* |
+| o relógio sem piso | hospedeiro: *o relógio nunca volta* |
+
+As que só a bancada mata só se veem entre dois boots, e é para isso que ela
+existe; ela roda na CI nas duas arquiteturas.
+
 ## Decisões tomadas
 
 - **Âncora:** o TPM 2.0, com um contador monotônico de NV; o `swtpm` como
