@@ -480,10 +480,11 @@ const PEDACO_DA_LEITURA: usize = 64 * 1024;
 
 /// Maior kernel que o iniciador aceita ler.
 ///
-/// Trinta e dois mebibytes. O kernel de depuração, com símbolos, tem sete —
-/// e o teto existe porque o tamanho vem do disco: um número absurdo viraria
-/// um pedido de alocação absurdo, e o firmware o recusaria com uma mensagem
-/// que não diz o que aconteceu.
+/// Trinta e dois mebibytes. O `xtask` põe o kernel na ESP sem as seções de
+/// depuração — com elas, o de release com a suíte de testes passou dos 33 —,
+/// e sem elas ele tem poucos mebibytes. O teto existe porque o tamanho vem
+/// do disco: um número absurdo viraria um pedido de alocação absurdo, e o
+/// firmware o recusaria com uma mensagem que não diz o que aconteceu.
 const MAIOR_KERNEL: u64 = 32 * 1024 * 1024;
 
 /// Segue a corrente até o arquivo do kernel, lê, e descreve o que leu.

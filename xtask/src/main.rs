@@ -844,6 +844,24 @@ fn instalar_iniciador(
         let _ = Command::new("mmd").args(["-i", &imagem, dir]).output();
     }
 
+    // O kernel vai para a ESP sem as seções de depuração. O iniciador lê o
+    // arquivo inteiro para a memória antes de carregar os segmentos, e o
+    // DWARF — mais da metade do arquivo, e nunca lido no boot — chegou a
+    // passar dos 32 MiB que ele aceita: o kernel de release com a suíte
+    // ficou com 33 MiB quando o Ed25519 entrou, e o boot parava antes do
+    // kernel. A simbolização é feita aqui no hospedeiro (`cargo xtask
+    // simbolo`, o gdb), com o ELF inteiro em `target/`, que não muda; a
+    // tabela de símbolos e tudo o que o iniciador usa ficam no da ESP.
+    let sem_depuracao = kernel.with_extension("esp.elf");
+    ferramenta(
+        &localizar_objcopy()?.display().to_string(),
+        &[
+            "--strip-debug",
+            &kernel.display().to_string(),
+            &sem_depuracao.display().to_string(),
+        ],
+    )?;
+    let kernel = sem_depuracao.as_path();
     for (origem, destino) in [(efi, caminho_na_esp(arch)), (kernel, KERNEL_NA_ESP)] {
         ferramenta(
             "mcopy",
