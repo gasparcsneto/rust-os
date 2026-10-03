@@ -3514,7 +3514,7 @@ pub(crate) fn escrever_caixa(
 ) -> Result<(), (politica::Codigo, &'static str)> {
     let max = max
         .unwrap_or(8)
-        .clamp(1, politica::mensagens::MAIS_POR_CAIXA as u64) as usize;
+        .clamp(1, politica::mensagens::TETO_POR_CAIXA as u64) as usize;
     let (epoca, lidas) =
         crate::mensagens::ler(remetente, apos, max).map_err(|r| (r.codigo(), r.motivo()))?;
     let escrever = |w: &mut JsonWriter| -> fmt::Result {

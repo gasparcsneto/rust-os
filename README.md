@@ -1945,8 +1945,16 @@ id, nada criado —; um nonce velho, ou o mesmo com outro conteúdo, é
 `DENY_REPLAY`. Uma sessão nova conta do zero.
 
 **Ordem e cotas.** A caixa se lê em ordem de aceitação, com cursor
-`after`. Corpo até 512 bytes; até 32 pendentes por caixa, 8 por remetente,
-128 no total; prazo de 10 minutos, até 60. A recusa não gasta id nem nonce.
+`after`. Corpo até 512 bytes; prazo de 10 minutos, até 60. As cotas são da
+política, por papel — `mensagens <papel> <por remetente> <por caixa>`: a de
+remetente é a do papel de quem manda, somando todas as caixas; a de caixa,
+a do papel de quem recebe. De 1 até os tetos da tabela, 32 e 64; sem a
+linha, 8 e 32. Uma linha fora da faixa recusa a política inteira — no boot
+vale a de emergência, e o `xtask` nem gera a imagem —, e o `policy.write`
+as muda dentro dela, sem tocar num papel protegido. O total, 128 vivas, é
+da imagem: é a memória que as mensagens podem ocupar, e vale por cima de
+qualquer cota. Mandar vence os prazos antes de contar: uma vencida não
+ocupa vaga. A recusa não gasta id nem nonce.
 
 **Revogação.** A chave ou a pessoa revogada tem anuladas, na hora, as
 mensagens vivas que mandou e as que ia receber — cada anulação gravada. A
@@ -1974,8 +1982,8 @@ alcance do operador, o administrador alcançado só pelo sistema e por ele
 mesmo, e o titular com papel administrador que recebe; o reenvio e o replay;
 a anulação pela revogação, de chave e de pessoa; o destinatário
 inexistente e revogado; ler sem consumir, o `ack` e o cancelamento; a
-ordem; as cotas e o prazo; o vazamento entre sessões; o administrador
-por prova; e esvaziar a caixa — sem a permissão própria, com a credencial
+ordem; as cotas, as da política e o prazo; o vazamento entre sessões; o
+administrador por prova; e esvaziar a caixa — sem a permissão própria, com a credencial
 errada, com a prova de outra caixa ou de outra operação, a prova repetida,
 o alvo inexistente e o revogado, e o que a auditoria grava. A tabela pura tem os mesmos testes no hospedeiro, com as
 cotas de caixa e de total.

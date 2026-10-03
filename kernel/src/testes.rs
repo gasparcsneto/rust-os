@@ -13585,7 +13585,7 @@ fn mensagens_cotas() -> Resultado {
         if !recusa_de_mensagem(&r, "INVALID_ARGUMENT") {
             return Err("o prazo maior que uma hora foi aceito");
         }
-        for n in 0..politica::mensagens::MAIS_POR_REMETENTE as u64 {
+        for n in 0..politica::mensagens::COTAS_PADRAO.por_remetente as u64 {
             let r = mandar(&mut a, &mut sa, "teste-2", "x", 10 + n)?;
             if !r.contains(r#""ok":true"#) {
                 crate::log_error!("teste", "{}", r);
@@ -13641,6 +13641,107 @@ fn mensagens_cotas() -> Resultado {
         {
             crate::log_error!("teste", "{}", estado);
             return Err("a consulta depois do prazo nao disse expired, ou nao gravou");
+        }
+        Ok(())
+    })
+}
+
+/// As cotas de mensagens são da política: a de remetente do papel de
+/// quem manda, a de caixa do papel de quem recebe — e `policy.write` as
+/// muda dentro dos tetos, sem tocar num papel protegido.
+fn mensagens_cotas_da_politica() -> Resultado {
+    use politica::mensagens::Recusa;
+    com_mensagens(|| {
+        crate::identidade::registrar_administrador_de_teste(
+            sigilo::publica_de(&ADMIN_DE_TESTE),
+            "administrador",
+        );
+        let texto = alloc::format!("{}mensagens operador 2 1\n", politica::PADRAO);
+        let p = politica::Politica::ler(&texto).map_err(|_| "a politica do caso nao vale")?;
+        crate::autorizacao::trocar_politica(p);
+        for porta in [1, 2] {
+            crate::identidade::atribuir(&nome_de_teste(porta), "operador")
+                .map_err(|_| "a atribuicao falhou")?;
+        }
+        let (mut a, mut sa) = conectado(1)?;
+        let (mut c, mut sc) = conectado(3)?;
+        let (mut d, mut sd) = conectado(4)?;
+        let recusa_gravada = |r: &str, recusa: Recusa| {
+            recusa_de_mensagem(r, "DENY_POLICY")
+                && ultimo_com_metodo("message.send").is_some_and(|e| e.detalhe == recusa.motivo())
+        };
+
+        // O remetente operador: duas, e a terceira não — para uma caixa de
+        // sistema, que guardaria trinta e duas.
+        for n in 1..=2 {
+            if !mandar(&mut a, &mut sa, "teste-3", "x", n)?.contains(r#""ok":true"#) {
+                return Err("uma mensagem dentro da cota do operador foi recusada");
+            }
+        }
+        let r = mandar(&mut a, &mut sa, "teste-3", "x", 3)?;
+        if !recusa_gravada(&r, Recusa::RemetenteCheio) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o operador passou da cota de remetente da politica");
+        }
+        // A caixa do operador: uma, mandada por um sistema; a segunda, de
+        // outro sistema, não — a cota é a de quem recebe.
+        if !mandar(&mut c, &mut sc, "teste-2", "x", 1)?.contains(r#""ok":true"#) {
+            return Err("a primeira para a caixa do operador foi recusada");
+        }
+        let r = mandar(&mut d, &mut sd, "teste-2", "x", 1)?;
+        if !recusa_gravada(&r, Recusa::CaixaCheia) {
+            crate::log_error!("teste", "{}", r);
+            return Err("a caixa do operador passou da cota da politica");
+        }
+
+        // `policy.write` muda as cotas, e vale no envio seguinte.
+        admin_espera(
+            0,
+            &ADMIN_DE_TESTE,
+            "policy.write",
+            r#"{"line":"mensagens operador 3 2"}"#,
+            None,
+        )?;
+        if !mandar(&mut a, &mut sa, "teste-3", "x", 4)?.contains(r#""ok":true"#)
+            || !mandar(&mut d, &mut sd, "teste-2", "x", 2)?.contains(r#""ok":true"#)
+        {
+            return Err("a cota nova da politica nao valeu");
+        }
+        if !recusa_gravada(&mandar(&mut a, &mut sa, "teste-3", "x", 5)?, Recusa::RemetenteCheio) {
+            return Err("o operador passou da cota nova");
+        }
+        // Acima do teto da tabela: recusada, e a cota fica.
+        admin_espera(
+            0,
+            &ADMIN_DE_TESTE,
+            "policy.write",
+            r#"{"line":"mensagens operador 33 2"}"#,
+            Some("INVALID_ARGUMENT"),
+        )?;
+        // O papel da serial é protegido: as cotas dele não mudam por aqui.
+        admin_espera(
+            0,
+            &ADMIN_DE_TESTE,
+            "policy.write",
+            r#"{"line":"mensagens sistema 1 1"}"#,
+            Some("DENY_POLICY"),
+        )?;
+        let cotas = crate::autorizacao::com_politica(|p| {
+            (
+                p.papel("operador").map(|r| r.mensagens),
+                p.papel("sistema").map(|r| r.mensagens),
+            )
+        });
+        let esperadas = (
+            Some(politica::mensagens::Cotas {
+                por_remetente: 3,
+                por_caixa: 2,
+            }),
+            Some(politica::mensagens::COTAS_PADRAO),
+        );
+        if cotas != esperadas {
+            crate::log_error!("teste", "{:?}", cotas);
+            return Err("uma linha recusada mudou as cotas");
         }
         Ok(())
     })
@@ -18533,6 +18634,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "mensagens: cotas",
         f: mensagens_cotas,
+    },
+    Caso {
+        nome: "mensagens: cotas da politica",
+        f: mensagens_cotas_da_politica,
     },
     Caso {
         nome: "mensagens: sem vazamento",

@@ -42,12 +42,40 @@ use crate::codigo::Codigo;
 
 /// O maior corpo, em bytes.
 pub const MAIOR_CORPO: usize = 512;
-/// Quantas mensagens vivas uma caixa guarda.
-pub const MAIS_POR_CAIXA: usize = 32;
-/// Quantas mensagens vivas um remetente tem, somando todas as caixas.
-pub const MAIS_POR_REMETENTE: usize = 8;
-/// Quantas mensagens vivas há, no total.
+/// Quantas mensagens vivas há, no total — a memória que as mensagens podem
+/// ocupar. Da imagem, e não da política: não depende de papel.
 pub const MAIS_NO_TOTAL: usize = 128;
+/// O teto da cota de um remetente que a política aceita: um quarto do
+/// total, para que um papel não tome a tabela inteira.
+pub const TETO_POR_REMETENTE: usize = 32;
+/// O teto da cota de uma caixa que a política aceita: metade do total.
+pub const TETO_POR_CAIXA: usize = 64;
+
+/// As cotas de mensagens de um papel: quantas vivas um titular dele tem
+/// como remetente, somando todas as caixas, e quantas a caixa dele guarda.
+///
+/// Vêm da política — a linha `mensagens <papel> <por remetente> <por
+/// caixa>` —, de 1 até os tetos [`TETO_POR_REMETENTE`] e
+/// [`TETO_POR_CAIXA`]; sem a linha, [`COTAS_PADRAO`]. O total
+/// ([`MAIS_NO_TOTAL`]) vale por cima de qualquer cota.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Cotas {
+    pub por_remetente: usize,
+    pub por_caixa: usize,
+}
+
+/// As cotas de um papel que não declara as suas.
+pub const COTAS_PADRAO: Cotas = Cotas {
+    por_remetente: 8,
+    por_caixa: 32,
+};
+
+/// As cotas de quem não tem papel: nenhuma. Quem não tem papel não chega a
+/// mandar — a decisão o recusa antes —, e se chegasse, não guardaria nada.
+pub const SEM_COTA: Cotas = Cotas {
+    por_remetente: 0,
+    por_caixa: 0,
+};
 /// O prazo de uma mensagem que não diz o seu: dez minutos.
 pub const PRAZO_PADRAO_MS: u64 = 10 * 60 * 1000;
 /// O maior prazo: uma hora.
@@ -205,9 +233,9 @@ pub enum Recusa {
     Prazo,
     /// O nonce não é novo neste canal.
     Replay,
-    /// O remetente já tem [`MAIS_POR_REMETENTE`] vivas.
+    /// O remetente já tem as vivas que a cota do papel dele deixa.
     RemetenteCheio,
-    /// A caixa do destinatário já tem [`MAIS_POR_CAIXA`].
+    /// A caixa do destinatário já tem as que a cota do papel dele deixa.
     CaixaCheia,
     /// Já há [`MAIS_NO_TOTAL`] vivas.
     TotalCheio,
@@ -237,8 +265,8 @@ impl Recusa {
             Recusa::CorpoGrande => "o corpo passa de 512 bytes",
             Recusa::Prazo => "prazo zero, ou maior que uma hora",
             Recusa::Replay => "o nonce nao e novo nesta sessao",
-            Recusa::RemetenteCheio => "o remetente ja tem 8 mensagens pendentes",
-            Recusa::CaixaCheia => "a caixa do destinatario ja tem 32 mensagens",
+            Recusa::RemetenteCheio => "o remetente ja tem as pendentes que a cota do papel deixa",
+            Recusa::CaixaCheia => "a caixa do destinatario ja tem as que a cota do papel deixa",
             Recusa::TotalCheio => "ja ha 128 mensagens pendentes",
             Recusa::Desconhecida => "nao ha mensagem com este id para quem pede",
             Recusa::Estado(_) => "a mensagem nao esta num estado que aceite isto",
@@ -292,8 +320,12 @@ impl Caixas {
     }
 
     /// Manda `corpo` de `de` para `para`, pelo `canal`, com o `nonce` do
-    /// pedido. `prazo_ms` `None` é o padrão. Também devolve as que venceram
-    /// até agora, para a auditoria.
+    /// pedido. `prazo_ms` `None` é o padrão. As `cotas` são as da política:
+    /// a de remetente do papel de `de`, a de caixa do papel de `para` — ver
+    /// [`crate::Politica::cotas_de_mensagens`]. Também devolve as que
+    /// venceram até agora, para a auditoria.
+    ///
+    /// Vence antes de contar: uma vencida não ocupa a vaga de ninguém.
     #[allow(clippy::too_many_arguments)]
     pub fn enviar(
         &mut self,
@@ -304,10 +336,11 @@ impl Caixas {
         nonce: u64,
         prazo_ms: Option<u64>,
         agora_ms: u64,
+        cotas: Cotas,
     ) -> (Result<Enviada, Recusa>, Vec<Transicao>) {
         let vencidas = self.vencer(agora_ms);
         (
-            self.enviar_sem_vencer(canal, de, para, corpo, nonce, prazo_ms, agora_ms),
+            self.enviar_sem_vencer(canal, de, para, corpo, nonce, prazo_ms, agora_ms, cotas),
             vencidas,
         )
     }
@@ -322,6 +355,7 @@ impl Caixas {
         nonce: u64,
         prazo_ms: Option<u64>,
         agora_ms: u64,
+        cotas: Cotas,
     ) -> Result<Enviada, Recusa> {
         let resumo = resumir(para, corpo);
         // O nonce antes de tudo: o reenvio de um pedido que passou devolve
@@ -352,10 +386,14 @@ impl Caixas {
             Some(p) if p == 0 || p > MAIOR_PRAZO_MS => return Err(Recusa::Prazo),
             Some(p) => p,
         };
-        if self.vivas.iter().filter(|m| m.de == de).count() >= MAIS_POR_REMETENTE {
+        // As cotas nunca passam dos tetos, nem se quem chama as passasse:
+        // o teto é da tabela, e não de quem a usa.
+        let por_remetente = cotas.por_remetente.min(TETO_POR_REMETENTE);
+        let por_caixa = cotas.por_caixa.min(TETO_POR_CAIXA);
+        if self.vivas.iter().filter(|m| m.de == de).count() >= por_remetente {
             return Err(Recusa::RemetenteCheio);
         }
-        if self.vivas.iter().filter(|m| m.para == para).count() >= MAIS_POR_CAIXA {
+        if self.vivas.iter().filter(|m| m.para == para).count() >= por_caixa {
             return Err(Recusa::CaixaCheia);
         }
         if self.vivas.len() >= MAIS_NO_TOTAL {
@@ -659,7 +697,8 @@ mod testes {
         para: Dono,
         nonce: u64,
     ) -> Result<Enviada, Recusa> {
-        t.enviar(canal, de, para, "oi", nonce, None, 0).0
+        t.enviar(canal, de, para, "oi", nonce, None, 0, COTAS_PADRAO)
+            .0
     }
 
     fn ids(lidas: &[Lida]) -> Vec<u64> {
@@ -735,10 +774,13 @@ mod testes {
         assert_eq!((de_novo.id, de_novo.duplicata), (e.id, true));
         assert_eq!(t.vivas(), 1);
         assert_eq!(
-            t.enviar(PA, A, B, "outro", 5, None, 0).0,
+            t.enviar(PA, A, B, "outro", 5, None, 0, COTAS_PADRAO).0,
             Err(Recusa::Replay)
         );
-        assert_eq!(t.enviar(PA, A, C, "oi", 5, None, 0).0, Err(Recusa::Replay));
+        assert_eq!(
+            t.enviar(PA, A, C, "oi", 5, None, 0, COTAS_PADRAO).0,
+            Err(Recusa::Replay)
+        );
         assert_eq!(manda(&mut t, PA, A, B, 4), Err(Recusa::Replay));
         assert_eq!(manda(&mut t, PA, A, B, 0), Err(Recusa::Replay));
         assert_eq!(t.vivas(), 1);
@@ -766,20 +808,24 @@ mod testes {
         let mut t = Caixas::nova();
         let grande = "x".repeat(MAIOR_CORPO + 1);
         assert_eq!(
-            t.enviar(PA, A, B, &grande, 1, None, 0).0,
+            t.enviar(PA, A, B, &grande, 1, None, 0, COTAS_PADRAO).0,
             Err(Recusa::CorpoGrande)
         );
         let cabe = "x".repeat(MAIOR_CORPO);
-        let primeira = t.enviar(PA, A, B, &cabe, 1, None, 0).0.unwrap().id;
+        let primeira = t
+            .enviar(PA, A, B, &cabe, 1, None, 0, COTAS_PADRAO)
+            .0
+            .unwrap()
+            .id;
         assert_eq!(primeira, 1, "a recusa gastou um id");
         for prazo in [0, MAIOR_PRAZO_MS + 1] {
             assert_eq!(
-                t.enviar(PA, A, B, "oi", 2, Some(prazo), 0).0,
+                t.enviar(PA, A, B, "oi", 2, Some(prazo), 0, COTAS_PADRAO).0,
                 Err(Recusa::Prazo)
             );
         }
         assert!(
-            t.enviar(PA, A, B, "oi", 2, Some(MAIOR_PRAZO_MS), 0)
+            t.enviar(PA, A, B, "oi", 2, Some(MAIOR_PRAZO_MS), 0, COTAS_PADRAO)
                 .0
                 .is_ok()
         );
@@ -807,15 +853,25 @@ mod testes {
                     n,
                     None,
                     0,
+                    COTAS_PADRAO,
                 )
                 .0
                 .unwrap();
             }
         }
-        assert_eq!(t.na_caixa(alvo), MAIS_POR_CAIXA);
+        assert_eq!(t.na_caixa(alvo), COTAS_PADRAO.por_caixa);
         assert_eq!(
-            t.enviar(Canal::Sessao(9), Dono::Serial, alvo, "oi", 1, None, 0)
-                .0,
+            t.enviar(
+                Canal::Sessao(9),
+                Dono::Serial,
+                alvo,
+                "oi",
+                1,
+                None,
+                0,
+                COTAS_PADRAO
+            )
+            .0,
             Err(Recusa::CaixaCheia)
         );
 
@@ -832,6 +888,7 @@ mod testes {
                     n,
                     None,
                     0,
+                    COTAS_PADRAO,
                 )
                 .0
                 .unwrap();
@@ -846,7 +903,8 @@ mod testes {
                 "oi",
                 1,
                 None,
-                0
+                0,
+                COTAS_PADRAO
             )
             .0,
             Err(Recusa::TotalCheio)
@@ -923,7 +981,11 @@ mod testes {
     #[test]
     fn o_prazo_vence() {
         let mut t = Caixas::nova();
-        let id = t.enviar(PA, A, B, "oi", 1, Some(1_000), 0).0.unwrap().id;
+        let id = t
+            .enviar(PA, A, B, "oi", 1, Some(1_000), 0, COTAS_PADRAO)
+            .0
+            .unwrap()
+            .id;
         assert_eq!(t.ler(B, 0, 10, 999).0.len(), 1);
         let (lidas, transicoes) = t.ler(B, 0, 10, 1_000);
         assert!(lidas.is_empty());
@@ -978,7 +1040,7 @@ mod testes {
             .unwrap_or_else(|e| e.into_inner());
         let mut t = Caixas::nova();
         let id = t
-            .enviar(PA, A, B, "segredo guardado", 1, None, 0)
+            .enviar(PA, A, B, "segredo guardado", 1, None, 0, COTAS_PADRAO)
             .0
             .unwrap()
             .id;
@@ -1001,6 +1063,76 @@ mod testes {
             (vencidas[0].id, vencidas[0].estado),
             (velha, Estado::Expirada)
         );
+    }
+
+    /// As cotas vêm de quem chama — da política —, e o teto da tabela vale
+    /// por cima delas.
+    #[test]
+    fn as_cotas_de_quem_chama() {
+        let duas = Cotas {
+            por_remetente: 2,
+            por_caixa: 3,
+        };
+        let mut t = Caixas::nova();
+        let envia = |t: &mut Caixas, canal, de, para, nonce, cotas| {
+            t.enviar(canal, de, para, "oi", nonce, None, 0, cotas).0
+        };
+        // O remetente: duas, e a terceira não.
+        envia(&mut t, PA, A, B, 1, duas).unwrap();
+        envia(&mut t, PA, A, B, 2, duas).unwrap();
+        assert_eq!(
+            envia(&mut t, PA, A, C, 3, duas),
+            Err(Recusa::RemetenteCheio)
+        );
+        // A caixa: três, de remetentes diferentes, e a quarta não.
+        envia(&mut t, PC, C, B, 1, duas).unwrap();
+        assert_eq!(
+            envia(&mut t, Canal::Sessao(4), Dono::Serial, B, 1, duas),
+            Err(Recusa::CaixaCheia)
+        );
+        // Sem cota, nada.
+        assert_eq!(
+            envia(
+                &mut t,
+                Canal::Sessao(5),
+                Dono::Agente([5; 32]),
+                C,
+                1,
+                SEM_COTA
+            ),
+            Err(Recusa::RemetenteCheio)
+        );
+        // Uma cota além do teto vale o teto.
+        let demais = Cotas {
+            por_remetente: 1000,
+            por_caixa: 1000,
+        };
+        let mut t = Caixas::nova();
+        for n in 1..=TETO_POR_REMETENTE as u64 {
+            envia(&mut t, PA, A, B, n, demais).unwrap();
+        }
+        assert_eq!(
+            envia(&mut t, PA, A, C, 100, demais),
+            Err(Recusa::RemetenteCheio)
+        );
+    }
+
+    /// Mandar vence antes de contar: a vencida não ocupa a vaga de ninguém.
+    #[test]
+    fn a_vencida_nao_ocupa_a_cota() {
+        let uma = Cotas {
+            por_remetente: 1,
+            por_caixa: 1,
+        };
+        let mut t = Caixas::nova();
+        t.enviar(PA, A, B, "oi", 1, Some(10), 0, uma).0.unwrap();
+        assert_eq!(
+            t.enviar(PA, A, B, "oi", 2, None, 9, uma).0,
+            Err(Recusa::RemetenteCheio)
+        );
+        let (r, vencidas) = t.enviar(PA, A, B, "oi", 2, None, 10, uma);
+        assert!(r.is_ok());
+        assert_eq!(vencidas.len(), 1);
     }
 
     /// Os ids não voltam: o que saiu não é reusado.

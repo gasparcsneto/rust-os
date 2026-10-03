@@ -237,10 +237,20 @@ pub fn enviar(
     prazo_ms: Option<u64>,
 ) -> Result<(String, Enviada), Recusa> {
     let agora = crate::tempo::uptime_ms();
+    // As cotas são da política, e saem antes da trava da tabela: pedir a da
+    // política com esta na mão seria uma trava dentro da outra.
+    let cotas = crate::autorizacao::cotas_de_mensagens(r.ator, &destino.papel);
     let (epoca, resultado, vencidas) = com_tabela(|t| {
-        let (res, venc) =
-            t.caixas
-                .enviar(r.canal, r.dono, destino.dono, corpo, nonce, prazo_ms, agora);
+        let (res, venc) = t.caixas.enviar(
+            r.canal,
+            r.dono,
+            destino.dono,
+            corpo,
+            nonce,
+            prazo_ms,
+            agora,
+            cotas,
+        );
         (t.epoca, res, venc)
     });
     gravar_transicoes(&epoca, r.ator, &vencidas);

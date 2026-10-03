@@ -27,6 +27,11 @@
 //! - `processos <papel> <quantos>`: a cota de processos vivos de cada
 //!   titular do papel — uma sessão de agente, uma de pessoa, o sistema —,
 //!   de 1 a 64; sem a linha, 4.
+//! - `mensagens <papel> <por remetente> <por caixa>`: as cotas de mensagens
+//!   do papel — quantas vivas cada titular dele tem como remetente, somando
+//!   todas as caixas, e quantas a caixa dele guarda. De 1 até os tetos da
+//!   tabela, 32 e 64; sem a linha, 8 e 32. O total de vivas, 128, é da
+//!   imagem — ver [`crate::mensagens`].
 //! - `apertos <quantos> <janela em ms>`: apertos de mão por porta.
 //! - `serial <papel>`: o papel da sessão 0. Obrigatória.
 //! - `local <papel>`: o papel da autoridade local — os processos do
@@ -98,6 +103,8 @@ pub struct Papel {
     /// Quantos processos vivos cada titular do papel — uma sessão de agente,
     /// uma de pessoa, o sistema — pode ter ao mesmo tempo.
     pub processos: u32,
+    /// As cotas de mensagens de cada titular do papel.
+    pub mensagens: crate::mensagens::Cotas,
     /// As diretas mais as não sensíveis dos incluídos. Calculadas pela
     /// validação.
     permissoes: BTreeSet<Permissao>,
@@ -112,6 +119,7 @@ impl Papel {
             recursos: BTreeMap::new(),
             taxa: TAXA_PADRAO,
             processos: PROCESSOS_PADRAO,
+            mensagens: crate::mensagens::COTAS_PADRAO,
             permissoes: BTreeSet::new(),
         }
     }
@@ -447,6 +455,28 @@ impl Politica {
                     .ok_or(erro(ErroTipo::PapelDesconhecido(nome.to_string())))?;
                 papel.processos = quantos;
             }
+            "mensagens" => {
+                use crate::mensagens::{Cotas, TETO_POR_CAIXA, TETO_POR_REMETENTE};
+                let nome = partes.next().ok_or(erro(ErroTipo::Sintaxe))?;
+                let por_remetente = numero(partes.next(), n)? as usize;
+                let por_caixa = numero(partes.next(), n)? as usize;
+                // Zero não é cota: um papel que não deve mandar não tem
+                // `message.send`. E o teto é da tabela — a memória das
+                // mensagens —, que nenhuma política alarga.
+                if partes.next().is_some()
+                    || !(1..=TETO_POR_REMETENTE).contains(&por_remetente)
+                    || !(1..=TETO_POR_CAIXA).contains(&por_caixa)
+                {
+                    return Err(erro(ErroTipo::Sintaxe));
+                }
+                let papel = self
+                    .papel_mut(nome)
+                    .ok_or(erro(ErroTipo::PapelDesconhecido(nome.to_string())))?;
+                papel.mensagens = Cotas {
+                    por_remetente,
+                    por_caixa,
+                };
+            }
             "apertos" => {
                 let quantos = numero(partes.next(), n)?;
                 let janela = numero(partes.next(), n)?;
@@ -680,10 +710,13 @@ impl Politica {
     ) -> Result<Politica, Recusa> {
         let linha = linha.split('#').next().unwrap_or("").trim();
         let palavra = linha.split_ascii_whitespace().next().unwrap_or("");
-        if !matches!(palavra, "papel" | "recurso" | "taxa" | "processos") {
+        if !matches!(
+            palavra,
+            "papel" | "recurso" | "taxa" | "processos" | "mensagens"
+        ) {
             return Err(Recusa::Proibida(
-                "policy.write muda papel, recurso, taxa ou processos; a serial muda por \
-                 policy.assign, e o papel local e os apertos so pela imagem"
+                "policy.write muda papel, recurso, taxa, processos ou mensagens; a serial muda \
+                 por policy.assign, e o papel local e os apertos so pela imagem"
                     .to_string(),
             ));
         }
@@ -744,6 +777,25 @@ impl Politica {
             }
         }
         Ok(nova)
+    }
+
+    /// As cotas de um envio: a de remetente do papel de quem manda, e a de
+    /// caixa do papel de quem recebe. Um papel que a política não tem não
+    /// tem cota nenhuma — [`crate::mensagens::SEM_COTA`] —: quem não tem
+    /// papel não guarda mensagem.
+    pub fn cotas_de_mensagens(
+        &self,
+        remetente: Option<&str>,
+        destinatario: Option<&str>,
+    ) -> crate::mensagens::Cotas {
+        let cotas = |nome: Option<&str>| {
+            nome.and_then(|n| self.papel(n))
+                .map_or(crate::mensagens::SEM_COTA, |p| p.mensagens)
+        };
+        crate::mensagens::Cotas {
+            por_remetente: cotas(remetente).por_remetente,
+            por_caixa: cotas(destinatario).por_caixa,
+        }
     }
 
     /// A política com outro papel para a serial.
@@ -824,6 +876,75 @@ mod testes {
             .com_linha("processos observador 3", "administrador", &[])
             .unwrap();
         assert_eq!(nova.papel("observador").unwrap().processos, 3);
+    }
+
+    /// As cotas de mensagens: as da linha, as padrão sem ela, cada uma do
+    /// papel certo — a de remetente de quem manda, a de caixa de quem
+    /// recebe —, e nada para o papel que não existe. A linha fora da faixa
+    /// é recusada, no arquivo e no `policy.write`, que a aceita dentro dela.
+    #[test]
+    fn as_cotas_de_mensagens() {
+        use crate::mensagens::{COTAS_PADRAO, Cotas, SEM_COTA, TETO_POR_CAIXA, TETO_POR_REMETENTE};
+        let p = Politica::ler(crate::PADRAO).unwrap();
+        for papel in ["observador", "operador", "sistema", "administrador"] {
+            assert_eq!(p.papel(papel).unwrap().mensagens, COTAS_PADRAO, "{papel}");
+        }
+        let texto = alloc::format!(
+            "{}mensagens operador 2 5\nmensagens sistema {TETO_POR_REMETENTE} {TETO_POR_CAIXA}\n",
+            crate::PADRAO
+        );
+        let c = Politica::ler(&texto).unwrap();
+        assert_eq!(
+            c.papel("operador").unwrap().mensagens,
+            Cotas {
+                por_remetente: 2,
+                por_caixa: 5
+            }
+        );
+        // Do operador para o sistema: a de remetente do operador, a de caixa
+        // do sistema. E ao contrário, o contrário.
+        assert_eq!(
+            c.cotas_de_mensagens(Some("operador"), Some("sistema")),
+            Cotas {
+                por_remetente: 2,
+                por_caixa: TETO_POR_CAIXA
+            }
+        );
+        assert_eq!(
+            c.cotas_de_mensagens(Some("sistema"), Some("operador")),
+            Cotas {
+                por_remetente: TETO_POR_REMETENTE,
+                por_caixa: 5
+            }
+        );
+        // Sem papel, ou um que a política não tem: cota nenhuma.
+        assert_eq!(c.cotas_de_mensagens(None, Some("fantasma")), SEM_COTA);
+        for ruim in [
+            "mensagens operador 0 5",
+            "mensagens operador 2 0",
+            "mensagens operador 33 5",
+            "mensagens operador 2 65",
+            "mensagens operador 2",
+            "mensagens operador 2 5 9",
+            "mensagens operador -1 5",
+            "mensagens fantasma 2 5",
+        ] {
+            let texto = alloc::format!("{}\n{ruim}\n", crate::PADRAO);
+            assert!(Politica::ler(&texto).is_err(), "{ruim}");
+            assert!(
+                p.com_linha(ruim, "administrador", &[]).is_err(),
+                "policy.write {ruim}"
+            );
+        }
+        let nova = p
+            .com_linha("mensagens observador 1 3", "administrador", &[])
+            .unwrap();
+        assert_eq!(nova.papel("observador").unwrap().mensagens.por_caixa, 3);
+        // E o papel protegido não muda, nem as cotas dele.
+        assert!(
+            p.com_linha("mensagens administrador 1 1", "administrador", &[])
+                .is_err()
+        );
     }
 
     /// O alcance de `message.send`: papéis enumerados, `papel:<nome>`, sem

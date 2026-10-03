@@ -798,8 +798,24 @@ pub fn auditar_mensagem(
     codigo: Codigo,
     detalhe: &str,
 ) {
+    auditar(&quem_do_ator(ator), metodo, recurso, codigo, &[], detalhe);
+}
+
+/// As cotas de um envio, pela política em vigor: a de remetente do papel
+/// de quem manda — resolvido como a auditoria o resolve —, e a de caixa do
+/// papel do destinatário, o que a decisão resolveu.
+pub fn cotas_de_mensagens(
+    ator: AtorDeMensagem,
+    papel_do_destinatario: &str,
+) -> politica::mensagens::Cotas {
+    let remetente = quem_do_ator(ator).papel;
+    com_politica(|p| p.cotas_de_mensagens(remetente.as_deref(), Some(papel_do_destinatario)))
+}
+
+/// Quem é o ator de uma transição de mensagem, com o papel de agora.
+fn quem_do_ator(ator: AtorDeMensagem) -> Quem {
     use politica::mensagens::Dono;
-    let quem = match ator {
+    match ator {
         AtorDeMensagem::Autoridade(Autoridade::Sistema) => quem_local("sistema"),
         AtorDeMensagem::Autoridade(Autoridade::Sessao { sessao, chave }) => {
             quem_da_autoridade(sessao, chave)
@@ -841,8 +857,7 @@ pub fn auditar_mensagem(
             chave: None,
             papel: None,
         },
-    };
-    auditar(&quem, metodo, recurso, codigo, &[], detalhe);
+    }
 }
 
 /// Grava um evento de arrendamento — ver [`crate::coordenacao`] —, em nome
