@@ -534,3 +534,69 @@ fn so_a_ancora_do_registro_confirma() {
     esc.confirmar(&montado, tpm.0 + 1).unwrap();
     assert_eq!(esc.ancora(), tpm.0 + 1);
 }
+
+/// Percorrer entrega os mesmos registros que ler, na mesma ordem, e para
+/// no mesmo lugar — também num journal estragado no meio. O escritor que
+/// continua de um ou de outro é o mesmo.
+#[test]
+fn percorrer_e_ler_dao_o_mesmo() {
+    let (mut m, _, tpm) = journal(8);
+    // Estraga o quinto registro: os dois param nele.
+    let lido = ler(&mut m, &CHAVE).unwrap();
+    let mut setor = 0usize;
+    for r in &lido.registros[..5] {
+        let n = setores_para(TAM_PREFIXO + r.conteudo.len()) as usize;
+        if r.sequencia < 4 {
+            setor += n;
+        }
+    }
+    let mut estragado = Memoria::nova(256);
+    estragado.bytes.copy_from_slice(&m.bytes);
+    estragado.bytes[setor * TAM_SETOR + 200] ^= 1;
+    for meio in [&mut m, &mut estragado] {
+        let lido = ler(meio, &CHAVE).unwrap();
+        let mut vistos = Vec::new();
+        let p = percorrer(meio, &CHAVE, |r| {
+            vistos.push(r);
+            Ok::<(), ()>(())
+        })
+        .unwrap();
+        assert_eq!(vistos, lido.registros);
+        assert_eq!(p, lido.percorrido());
+        assert_eq!(p.ultima_ancora(), lido.ultima_ancora());
+        let a = Escritor::continuar(&lido, tpm.0, 256);
+        let b = Escritor::depois_de(&p, tpm.0, 256);
+        assert_eq!(
+            a.montar(&CHAVE, nonce(99), &conteudo(2, b"x"))
+                .unwrap()
+                .bytes,
+            b.montar(&CHAVE, nonce(99), &conteudo(2, b"x"))
+                .unwrap()
+                .bytes
+        );
+    }
+    assert_eq!(ler(&mut estragado, &CHAVE).unwrap().registros.len(), 4);
+}
+
+/// Quem recebe os registros pode recusar um: o percurso para ali, e diz
+/// qual. Os anteriores foram entregues; os seguintes, não.
+#[test]
+fn percorrer_para_no_registro_recusado() {
+    let (mut m, _, _) = journal(6);
+    let mut vistos = Vec::new();
+    let r = percorrer(&mut m, &CHAVE, |r| {
+        if r.sequencia == 3 {
+            return Err("nao se reaplica");
+        }
+        vistos.push(r.sequencia);
+        Ok(())
+    });
+    assert_eq!(
+        r,
+        Err(Interrompido::Recusado {
+            sequencia: 3,
+            motivo: "nao se reaplica"
+        })
+    );
+    assert_eq!(vistos, [0, 1, 2]);
+}

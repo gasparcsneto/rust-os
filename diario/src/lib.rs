@@ -175,6 +175,66 @@ impl Lido {
     pub fn ultima_ancora(&self) -> Option<u64> {
         self.registros.last().map(|r| r.ancora)
     }
+
+    /// O mesmo journal, sem os registros: o que [`percorrer`] devolve.
+    pub fn percorrido(&self) -> Percorrido {
+        Percorrido {
+            quantos: self.registros.len() as u64,
+            ultimo: self.registros.last().map(Ultimo::de),
+            parada: self.parada,
+            proximo_setor: self.proximo_setor,
+            elo: self.elo,
+        }
+    }
+}
+
+/// O que se guarda do último registro lido: o que o próximo precisa para
+/// se encadear, e o estado em que ele deixou o sistema.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ultimo {
+    pub ancora: u64,
+    pub geracao: u64,
+    pub versao_da_politica: u64,
+    pub tempo: u64,
+}
+
+impl Ultimo {
+    fn de(r: &Registro) -> Ultimo {
+        Ultimo {
+            ancora: r.ancora,
+            geracao: r.geracao,
+            versao_da_politica: r.versao_da_politica,
+            tempo: r.tempo,
+        }
+    }
+}
+
+/// O journal percorrido: quantos registros abriram, o último, e onde e por
+/// que a leitura parou. Os registros mesmos foram entregues, um a um, a
+/// quem percorreu — ver [`percorrer`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Percorrido {
+    pub quantos: u64,
+    pub ultimo: Option<Ultimo>,
+    pub parada: Parada,
+    pub proximo_setor: u64,
+    pub elo: [u8; 32],
+}
+
+impl Percorrido {
+    /// A âncora do último registro, ou `None` com o journal vazio.
+    pub fn ultima_ancora(&self) -> Option<u64> {
+        self.ultimo.map(|u| u.ancora)
+    }
+}
+
+/// Por que um percurso não terminou.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Interrompido<E> {
+    /// O meio não leu.
+    Meio(&'static str),
+    /// Quem recebia os registros recusou o de número `sequencia`.
+    Recusado { sequencia: u64, motivo: E },
 }
 
 /// A geração depois de um registro de `tipo`, sobre a geração `anterior`:
@@ -207,15 +267,48 @@ fn setores_para(tamanho: usize) -> u32 {
     (TAM_CABECALHO + tamanho + TAM_ETIQUETA).div_ceil(TAM_SETOR) as u32
 }
 
-/// Lê o journal inteiro de `meio`, abrindo cada registro com `chave`.
+/// Lê o journal inteiro de `meio`, abrindo cada registro com `chave`, e
+/// devolve todos na memória. Para o journal de uma máquina de verdade —
+/// até a partição inteira —, ver [`percorrer`], que guarda um de cada vez.
 ///
 /// Só devolve erro quando o meio não lê. Um registro que não abre não é
 /// erro daqui: é onde a leitura para, e o que isso significa depende da
 /// âncora — ver [`julgar`].
 pub fn ler<M: Meio>(meio: &mut M, chave: &[u8; 32]) -> Result<Lido, &'static str> {
+    let mut registros = Vec::new();
+    let p = percorrer(meio, chave, |r| {
+        registros.push(r);
+        Ok::<(), ()>(())
+    })
+    .map_err(|e| match e {
+        Interrompido::Meio(m) => m,
+        Interrompido::Recusado { .. } => "o percurso nao recusa nada aqui",
+    })?;
+    Ok(Lido {
+        registros,
+        parada: p.parada,
+        proximo_setor: p.proximo_setor,
+        elo: p.elo,
+    })
+}
+
+/// Percorre o journal de `meio`, abrindo cada registro com `chave` e
+/// entregando-o a `f`, na ordem. A memória que o percurso usa é a de um
+/// registro, e não a do journal: o kernel tem pouco heap, e o journal pode
+/// ocupar a partição inteira.
+///
+/// As conferências são as de [`ler`], e a leitura para no mesmo lugar. Um
+/// `Err` de `f` interrompe o percurso ali, e volta com o número do
+/// registro que ela recusou.
+pub fn percorrer<M: Meio, E>(
+    meio: &mut M,
+    chave: &[u8; 32],
+    mut f: impl FnMut(Registro) -> Result<(), E>,
+) -> Result<Percorrido, Interrompido<E>> {
     let total = meio.setores();
     let aead = XChaCha20Poly1305::new(&(*chave).into());
-    let mut registros = Vec::new();
+    let mut quantos = 0u64;
+    let mut ultimo: Option<Ultimo> = None;
     let mut setor = 0u64;
     let mut elo = elo_inicial();
     let mut cabecalho = [0u8; TAM_SETOR];
@@ -223,7 +316,8 @@ pub fn ler<M: Meio>(meio: &mut M, chave: &[u8; 32]) -> Result<Lido, &'static str
         if setor >= total {
             break Parada::Fim;
         }
-        meio.ler(setor, &mut cabecalho)?;
+        meio.ler(setor, &mut cabecalho)
+            .map_err(Interrompido::Meio)?;
         if cabecalho.iter().all(|&b| b == 0) {
             break Parada::Fim;
         }
@@ -251,11 +345,10 @@ pub fn ler<M: Meio>(meio: &mut M, chave: &[u8; 32]) -> Result<Lido, &'static str
         }
         let sequencia = u64_em(&cabecalho, 16);
         let ancora = u64_em(&cabecalho, 24);
-        let esperada = registros.len() as u64;
-        if sequencia != esperada {
+        if sequencia != quantos {
             break ilegivel("sequencia fora de ordem");
         }
-        if let Some(anterior) = registros.last().map(|r: &Registro| r.ancora)
+        if let Some(anterior) = ultimo.map(|u| u.ancora)
             && Some(ancora) != anterior.checked_add(1)
         {
             break ilegivel("a ancora nao segue a do registro anterior");
@@ -264,7 +357,8 @@ pub fn ler<M: Meio>(meio: &mut M, chave: &[u8; 32]) -> Result<Lido, &'static str
         let mut inteiro = alloc::vec![0u8; setores as usize * TAM_SETOR];
         inteiro[..TAM_SETOR].copy_from_slice(&cabecalho);
         if setores > 1 {
-            meio.ler(setor + 1, &mut inteiro[TAM_SETOR..])?;
+            meio.ler(setor + 1, &mut inteiro[TAM_SETOR..])
+                .map_err(Interrompido::Meio)?;
         }
         let fim_cifrado = TAM_CABECALHO + tamanho;
         if inteiro[fim_cifrado + TAM_ETIQUETA..]
@@ -280,43 +374,52 @@ pub fn ler<M: Meio>(meio: &mut M, chave: &[u8; 32]) -> Result<Lido, &'static str
         let etiqueta: [u8; TAM_ETIQUETA] = inteiro[fim_cifrado..fim_cifrado + TAM_ETIQUETA]
             .try_into()
             .unwrap();
-        let mut claro = inteiro[TAM_CABECALHO..fim_cifrado].to_vec();
+        // O elo é o resumo do registro como está no disco, cifrado: tirado
+        // antes de decifrar no lugar — um registro de cada vez, sem cópia —,
+        // e só vale se ele abrir.
+        let proximo_elo: [u8; 32] =
+            Blake2s256::digest(&inteiro[..fim_cifrado + TAM_ETIQUETA]).into();
         if aead
             .decrypt_inout_detached(
                 &nonce.into(),
                 &aad,
-                claro.as_mut_slice().into(),
+                inteiro[TAM_CABECALHO..fim_cifrado].as_mut().into(),
                 &etiqueta.into(),
             )
             .is_err()
         {
-            claro.zeroize();
+            inteiro.zeroize();
             break ilegivel("o registro nao abre com esta chave, neste lugar");
         }
-        let proximo_elo: [u8; 32] =
-            Blake2s256::digest(&inteiro[..fim_cifrado + TAM_ETIQUETA]).into();
+        let claro = &inteiro[TAM_CABECALHO..fim_cifrado];
         let registro = Registro {
             sequencia,
             ancora,
             nonce,
-            tipo: u16_em(&claro, 0),
-            geracao: u64_em(&claro, 2),
-            versao_da_politica: u64_em(&claro, 10),
-            tempo: u64_em(&claro, 18),
+            tipo: u16_em(claro, 0),
+            geracao: u64_em(claro, 2),
+            versao_da_politica: u64_em(claro, 10),
+            tempo: u64_em(claro, 18),
             conteudo: claro[TAM_PREFIXO..].to_vec(),
         };
-        claro.zeroize();
-        if let Some(anterior) = registros.last()
+        // O texto claro não fica no heap além do registro entregue.
+        inteiro.zeroize();
+        drop(inteiro);
+        if let Some(anterior) = ultimo
             && Some(registro.geracao) != geracao_depois(anterior.geracao, registro.tipo)
         {
             break ilegivel("geracao fora de sequencia");
         }
-        registros.push(registro);
+        let resumo = Ultimo::de(&registro);
+        f(registro).map_err(|motivo| Interrompido::Recusado { sequencia, motivo })?;
+        ultimo = Some(resumo);
+        quantos += 1;
         elo = proximo_elo;
         setor += setores as u64;
     };
-    Ok(Lido {
-        registros,
+    Ok(Percorrido {
+        quantos,
+        ultimo,
         parada,
         proximo_setor: setor,
         elo,
@@ -369,12 +472,17 @@ impl Escritor {
     /// registro vai logo depois do último que abriu — por cima de qualquer
     /// cauda de uma gravação interrompida.
     pub fn continuar(lido: &Lido, ancora: u64, total: u64) -> Escritor {
+        Escritor::depois_de(&lido.percorrido(), ancora, total)
+    }
+
+    /// O mesmo, a partir de um journal percorrido.
+    pub fn depois_de(p: &Percorrido, ancora: u64, total: u64) -> Escritor {
         Escritor {
-            proximo_setor: lido.proximo_setor,
-            proxima_sequencia: lido.registros.len() as u64,
-            elo: lido.elo,
+            proximo_setor: p.proximo_setor,
+            proxima_sequencia: p.quantos,
+            elo: p.elo,
             ancora,
-            geracao: lido.registros.last().map_or(0, |r| r.geracao),
+            geracao: p.ultimo.map_or(0, |u| u.geracao),
             total,
         }
     }

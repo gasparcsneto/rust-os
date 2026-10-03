@@ -42,6 +42,15 @@ pub mod tipo {
     /// [`MENSAGEM_CRIADA`] e [`MENSAGEM_ESTADO`], na ordem em que
     /// aconteceram. Não sobe a geração: uma mensagem não é autoridade.
     pub const MENSAGENS: u16 = 4;
+    /// Só auditoria: os registros da cadeia que nenhum outro registro
+    /// levou ainda — [`AUDITORIA_EVENTO`] e [`AUDITORIA_LACUNA`]. Não sobe a
+    /// geração.
+    ///
+    /// Todo registro do journal, de qualquer tipo, leva também, no fim, as
+    /// entradas da auditoria que ainda não estão no disco, na ordem da
+    /// cadeia: a decisão que autorizou uma operação vai no registro da
+    /// operação. Este tipo é para quando nada mais é gravado.
+    pub const AUDITORIA: u16 = 5;
 
     /// Um agente entrou no registro: `[a linha do arquivo de agentes]`.
     pub const AGENTE_REGISTRADO: u16 = 10;
@@ -81,6 +90,16 @@ pub mod tipo {
     /// (8)]`. Num estado final, o corpo some — dali em diante o journal
     /// só lembra que ela existiu.
     pub const MENSAGEM_ESTADO: u16 = 21;
+
+    /// Um registro da cadeia da auditoria: `[o registro codificado]`, como
+    /// `politica::auditoria::codificar` o escreve — a sequência e o evento;
+    /// o elo, quem lê refaz. Os parâmetros do pedido vão só como
+    /// resumo, como na memória.
+    pub const AUDITORIA_EVENTO: u16 = 22;
+    /// Registros da auditoria que saíram do anel da memória antes de chegar
+    /// ao disco: `[primeira sequência (8), última (8), elo da última
+    /// (32)]`. A cadeia continua desse elo, e a lacuna diz o que falta.
+    pub const AUDITORIA_LACUNA: u16 = 23;
 }
 
 /// Monta o conteúdo de um registro a partir dos campos.

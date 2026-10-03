@@ -33,11 +33,29 @@
 //! frente. A cabeça — o elo do último — é o que se ancora fora da máquina:
 //! quem guardou a cabeça de ontem confere que a cadeia de hoje a contém.
 //!
-//! # Memória, e não disco
+//! # A memória e o disco
 //!
-//! O disco é só leitura. A cadeia mora num anel de tamanho fixo; quando um
-//! registro sai pela ponta, o elo dele fica guardado como **âncora**, e a
-//! janela que sobra continua verificável a partir dela.
+//! A cadeia mora num anel de tamanho fixo; quando um registro sai pela
+//! ponta, o elo dele fica guardado como **âncora**, e a janela que sobra
+//! continua verificável a partir dela.
+//!
+//! Com a persistência, cada registro vai também para o journal — ver
+//! [`codificar`] e [`Cadeia::a_gravar`] —, e o boot refaz a cadeia a partir
+//! dele com [`Cadeia::repor`]: a mesma sequência, os mesmos elos, e a
+//! cadeia continua de onde parou. O que saiu do anel antes de chegar ao
+//! journal não some em silêncio: vira uma **lacuna**, com a primeira e a
+//! última sequência perdidas e o elo da última — ver [`Cadeia::pular`].
+//! A cadeia continua verificável depois dela, como depois da âncora do
+//! anel, e a lacuna diz exatamente o que falta.
+//!
+//! # O tempo não volta
+//!
+//! O tempo de um registro nunca é menor que o do anterior: o anel o sobe
+//! até lá, se for preciso. Com o tempo lógico da persistência — o RTC com o
+//! piso do journal — isso só acontece com os registros de um boot feitos
+//! antes de o journal ser lido, e garante que uma cadeia que atravessa
+//! boots nunca anda para trás no tempo. A reposição recusa um tempo que
+//! volte: ele não sai de um journal autêntico.
 
 use alloc::collections::VecDeque;
 use alloc::string::String;
@@ -147,6 +165,125 @@ pub fn resumo_dos_parametros(parametros: &[u8]) -> [u8; 32] {
     Blake2s256::digest(parametros).into()
 }
 
+/// Um registro como vai para o journal: a sequência e o evento, campo a
+/// campo, os variáveis com dois bytes de tamanho. O elo não vai: quem lê
+/// refaz a conta, e um elo gravado seria só mais um campo a conferir.
+pub fn codificar(seq: u64, e: &Evento) -> Vec<u8> {
+    // Os textos do kernel têm teto bem abaixo disso; o corte, se um dia
+    // acontecer, fica numa fronteira de caractere, para o registro
+    // continuar se lendo.
+    fn texto(v: &mut Vec<u8>, t: &str) {
+        let mut n = t.len().min(u16::MAX as usize);
+        while !t.is_char_boundary(n) {
+            n -= 1;
+        }
+        v.extend_from_slice(&(n as u16).to_le_bytes());
+        v.extend_from_slice(&t.as_bytes()[..n]);
+    }
+    let mut v = Vec::with_capacity(128);
+    v.extend_from_slice(&seq.to_le_bytes());
+    v.extend_from_slice(&e.ts_ms.to_le_bytes());
+    v.push(e.titular as u8);
+    v.push(e.sessao);
+    match &e.sessao_de_pessoa {
+        Some(s) => {
+            v.push(1);
+            v.extend_from_slice(s);
+        }
+        None => v.push(0),
+    }
+    match &e.chave {
+        Some(k) => {
+            v.push(1);
+            v.extend_from_slice(k);
+        }
+        None => v.push(0),
+    }
+    v.push(e.codigo as u8);
+    v.extend_from_slice(&e.parametros);
+    texto(&mut v, &e.agente);
+    texto(&mut v, &e.papel);
+    texto(&mut v, &e.metodo);
+    texto(&mut v, &e.recurso);
+    texto(&mut v, &e.detalhe);
+    v
+}
+
+/// O caminho de volta de [`codificar`]. Recusa o que não termina
+/// exatamente no fim, um titular ou um código que não existem, uma marca
+/// de presença que não é 0 nem 1, e texto que não é UTF-8.
+pub fn decodificar(b: &[u8]) -> Result<(u64, Evento), &'static str> {
+    struct Leitor<'a>(&'a [u8]);
+    impl<'a> Leitor<'a> {
+        fn bytes(&mut self, n: usize) -> Result<&'a [u8], &'static str> {
+            if self.0.len() < n {
+                return Err("registro da auditoria cortado");
+            }
+            let (a, b) = self.0.split_at(n);
+            self.0 = b;
+            Ok(a)
+        }
+        fn u8(&mut self) -> Result<u8, &'static str> {
+            Ok(self.bytes(1)?[0])
+        }
+        fn u64(&mut self) -> Result<u64, &'static str> {
+            let mut a = [0u8; 8];
+            a.copy_from_slice(self.bytes(8)?);
+            Ok(u64::from_le_bytes(a))
+        }
+        fn opcional<const N: usize>(&mut self) -> Result<Option<[u8; N]>, &'static str> {
+            match self.u8()? {
+                0 => Ok(None),
+                1 => {
+                    let mut a = [0u8; N];
+                    a.copy_from_slice(self.bytes(N)?);
+                    Ok(Some(a))
+                }
+                _ => Err("marca de presenca invalida no registro da auditoria"),
+            }
+        }
+        fn texto(&mut self) -> Result<String, &'static str> {
+            let n = self.bytes(2)?;
+            let n = u16::from_le_bytes([n[0], n[1]]) as usize;
+            let t = core::str::from_utf8(self.bytes(n)?)
+                .map_err(|_| "texto que nao e UTF-8 no registro da auditoria")?;
+            Ok(String::from(t))
+        }
+    }
+    let mut l = Leitor(b);
+    let seq = l.u64()?;
+    let ts_ms = l.u64()?;
+    let titular = *Titular::TODOS
+        .get(l.u8()? as usize)
+        .ok_or("titular desconhecido no registro da auditoria")?;
+    let sessao = l.u8()?;
+    let sessao_de_pessoa = l.opcional::<8>()?;
+    let chave = l.opcional::<32>()?;
+    let codigo = *Codigo::TODOS
+        .get(l.u8()? as usize)
+        .ok_or("codigo desconhecido no registro da auditoria")?;
+    let mut parametros = [0u8; 32];
+    parametros.copy_from_slice(l.bytes(32)?);
+    let evento = Evento {
+        ts_ms,
+        titular,
+        sessao,
+        sessao_de_pessoa,
+        agente: l.texto()?,
+        chave,
+        papel: l.texto()?,
+        metodo: l.texto()?,
+        recurso: l.texto()?,
+        codigo,
+        parametros,
+        detalhe: l.texto()?,
+    };
+    if !l.0.is_empty() {
+        return Err("bytes sobrando no registro da auditoria");
+    }
+    Ok((seq, evento))
+}
+
 fn campo(h: &mut Blake2s256, bytes: &[u8]) {
     h.update((bytes.len() as u32).to_le_bytes());
     h.update(bytes);
@@ -189,6 +326,22 @@ pub fn elo(anterior: &[u8; 32], seq: u64, e: &Evento) -> [u8; 32] {
     h.finalize().into()
 }
 
+/// Os registros que perderam o anel antes de chegar ao journal: da
+/// sequência `primeira` à `ultima`, e o elo da última.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Lacuna {
+    pub primeira: u64,
+    pub ultima: u64,
+    pub elo: [u8; 32],
+}
+
+/// O que falta gravar: a lacuna, se o anel perdeu algum registro antes de
+/// ele ser gravado, e os registros que ainda estão no anel, em ordem.
+pub struct AGravar<'a> {
+    pub lacuna: Option<Lacuna>,
+    pub registros: alloc::vec::Vec<&'a Registro>,
+}
+
 /// A cadeia, num anel.
 pub struct Cadeia {
     registros: VecDeque<Registro>,
@@ -196,6 +349,8 @@ pub struct Cadeia {
     /// O elo do último que saiu pela ponta; [`GENESE`] enquanto nenhum saiu.
     ancora: [u8; 32],
     proximo_seq: u64,
+    /// O tempo do último registro, mesmo que ele tenha saído do anel.
+    ultimo_ts: u64,
 }
 
 impl Cadeia {
@@ -206,6 +361,7 @@ impl Cadeia {
             capacidade: capacidade.max(1),
             ancora: GENESE,
             proximo_seq: 1,
+            ultimo_ts: 0,
         }
     }
 
@@ -234,6 +390,10 @@ impl Cadeia {
             }
             evento.detalhe.truncate(fim);
         }
+        // O tempo não volta: um registro feito antes de o piso do relógio
+        // ser conhecido sobe até o do anterior.
+        evento.ts_ms = evento.ts_ms.max(self.ultimo_ts);
+        self.ultimo_ts = evento.ts_ms;
         let anterior = self.cabeca();
         let seq = self.proximo_seq;
         let elo = elo(&anterior, seq, &evento);
@@ -250,6 +410,63 @@ impl Cadeia {
         });
         self.proximo_seq += 1;
         seq
+    }
+
+    /// Repõe um registro lido do journal, no boot: a sequência tem de ser a
+    /// seguinte, o tempo não pode voltar, e o detalhe cabe no teto. Um
+    /// journal autêntico nunca traz outra coisa — a cadeia foi gravada por
+    /// [`Cadeia::anexar`] —, e o que não confere é recusado, e não
+    /// consertado: consertar daria outro elo.
+    pub fn repor(&mut self, seq: u64, evento: Evento) -> Result<(), &'static str> {
+        if seq != self.proximo_seq {
+            return Err("registro da auditoria fora de sequencia");
+        }
+        if evento.ts_ms < self.ultimo_ts {
+            return Err("registro da auditoria com o tempo voltando");
+        }
+        if evento.detalhe.len() > MAIOR_DETALHE {
+            return Err("registro da auditoria com detalhe maior que o teto");
+        }
+        self.anexar(evento);
+        Ok(())
+    }
+
+    /// Repõe uma lacuna lida do journal: os registros de `l.primeira` a
+    /// `l.ultima` não foram gravados, e a cadeia continua do elo do último
+    /// deles. A janela recomeça ali, como depois da âncora do anel.
+    pub fn pular(&mut self, l: Lacuna) -> Result<(), &'static str> {
+        if l.primeira != self.proximo_seq || l.ultima < l.primeira {
+            return Err("lacuna da auditoria fora de sequencia");
+        }
+        self.registros.clear();
+        self.ancora = l.elo;
+        self.proximo_seq = l.ultima + 1;
+        Ok(())
+    }
+
+    /// O que falta gravar depois da sequência `gravada`: uma lacuna, se o
+    /// anel já perdeu registros posteriores a ela, e os que ele ainda tem.
+    pub fn a_gravar(&self, gravada: u64) -> AGravar<'_> {
+        let primeira_no_anel = self.registros.front().map_or(self.proximo_seq, |r| r.seq);
+        let lacuna = (gravada + 1 < primeira_no_anel).then_some(Lacuna {
+            primeira: gravada + 1,
+            ultima: primeira_no_anel - 1,
+            elo: self.ancora,
+        });
+        AGravar {
+            lacuna,
+            registros: self.registros.iter().filter(|r| r.seq > gravada).collect(),
+        }
+    }
+
+    /// Acrescenta, nesta cadeia, os eventos que a `outra` tem no anel, na
+    /// ordem: cada um ganha a sequência, o elo e o tempo daqui. É o boot
+    /// que continua a cadeia do journal com o que ele mesmo registrou antes
+    /// de ler o journal.
+    pub fn continuar_com(&mut self, outra: &Cadeia) {
+        for r in &outra.registros {
+            self.anexar(r.evento.clone());
+        }
     }
 
     /// Os últimos `n` registros, do mais antigo ao mais novo.
@@ -383,6 +600,195 @@ mod testes {
             assert_eq!(Titular::de_nome(t.nome()), Some(t));
         }
         assert_eq!(Titular::de_nome("pessoa"), None);
+    }
+
+    fn variado(i: u64) -> Evento {
+        let mut e = evento(i);
+        if i.is_multiple_of(2) {
+            e.titular = Titular::Pessoa;
+            e.sessao_de_pessoa = Some([i as u8; 8]);
+            e.chave = None;
+            e.agente = "pessoa:00112233aabbccdd".to_string();
+        }
+        if i.is_multiple_of(3) {
+            e.codigo = Codigo::TODOS[(i as usize) % Codigo::TODOS.len()];
+            e.detalhe = "ação recusada é".to_string();
+            e.recurso = String::new();
+        }
+        e
+    }
+
+    /// Um registro vai ao journal e volta igual, com cada campo opcional
+    /// presente e ausente, e texto que não é ASCII.
+    #[test]
+    fn o_registro_vai_e_volta() {
+        for i in 0..12 {
+            let e = variado(i);
+            let b = codificar(i + 40, &e);
+            assert_eq!(decodificar(&b), Ok((i + 40, e)), "registro {i}");
+        }
+    }
+
+    /// Cortado em qualquer ponto, ou com um byte a mais, não se lê. Um
+    /// titular, um código ou uma marca de presença que não existem, e
+    /// texto que não é UTF-8, também não.
+    #[test]
+    fn o_registro_estragado_nao_se_le() {
+        let e = variado(6);
+        let b = codificar(9, &e);
+        for n in 0..b.len() {
+            assert!(decodificar(&b[..n]).is_err(), "cortado em {n}");
+        }
+        let mut mais = b.clone();
+        mais.push(0);
+        assert!(decodificar(&mais).is_err());
+
+        // Os deslocamentos: seq 8, ts 8, titular, sessão, marca da sessão
+        // de pessoa.
+        let mut b2 = b.clone();
+        b2[16] = Titular::TODOS.len() as u8;
+        assert!(decodificar(&b2).is_err(), "titular");
+        let mut b2 = b.clone();
+        b2[18] = 2;
+        assert!(decodificar(&b2).is_err(), "marca");
+        // Sem sessão de pessoa e sem chave, o código vem logo depois das
+        // duas marcas.
+        let mut e3 = evento(1);
+        e3.chave = None;
+        let b3 = codificar(1, &e3);
+        let mut b4 = b3.clone();
+        b4[20] = Codigo::TODOS.len() as u8;
+        assert!(decodificar(&b4).is_err(), "codigo");
+        let mut b4 = b3.clone();
+        b4[19] = 7;
+        assert!(decodificar(&b4).is_err(), "marca da chave");
+        // O primeiro byte do nome do agente, trocado por um que não abre
+        // caractere UTF-8.
+        let mut b4 = b3.clone();
+        b4[21 + 32 + 2] = 0xFF;
+        assert!(decodificar(&b4).is_err(), "utf-8");
+        assert!(decodificar(&b3).is_ok());
+    }
+
+    /// O journal refaz a mesma cadeia: a mesma sequência, os mesmos elos,
+    /// e o registro seguinte ganha o mesmo elo dos dois lados.
+    #[test]
+    fn a_cadeia_reposta_e_a_mesma() {
+        let mut a = Cadeia::nova(100);
+        for i in 0..10 {
+            a.anexar(variado(i));
+        }
+        let gravado: Vec<Vec<u8>> = a.ultimos(10).map(|r| codificar(r.seq, &r.evento)).collect();
+        let mut b = Cadeia::nova(100);
+        for g in &gravado {
+            let (seq, e) = decodificar(g).unwrap();
+            b.repor(seq, e).unwrap();
+        }
+        assert_eq!(b.cabeca(), a.cabeca());
+        assert_eq!(b.ultima_seq(), a.ultima_seq());
+        assert_eq!(a.anexar(evento(99)), b.anexar(evento(99)));
+        assert_eq!(a.cabeca(), b.cabeca());
+    }
+
+    /// A reposição recusa o que um journal autêntico não traz: a sequência
+    /// pulada ou repetida, o tempo que volta, o detalhe acima do teto.
+    #[test]
+    fn repor_fora_da_regra_e_recusado() {
+        let mut c = Cadeia::nova(10);
+        c.repor(1, evento(5)).unwrap();
+        assert!(c.repor(1, evento(6)).is_err(), "repetida");
+        assert!(c.repor(3, evento(6)).is_err(), "pulada");
+        assert!(c.repor(2, evento(4)).is_err(), "tempo voltando");
+        let mut longo = evento(6);
+        longo.detalhe = "x".repeat(MAIOR_DETALHE + 1);
+        assert!(c.repor(2, longo).is_err(), "detalhe");
+        let mut no_teto = evento(6);
+        no_teto.detalhe = "x".repeat(MAIOR_DETALHE);
+        c.repor(2, no_teto).unwrap();
+        // O mesmo tempo do anterior vale.
+        c.repor(3, evento(6)).unwrap();
+        assert_eq!(c.ultima_seq(), 3);
+    }
+
+    /// O tempo de um registro nunca fica abaixo do anterior, nem depois de
+    /// o anterior sair do anel.
+    #[test]
+    fn o_tempo_nao_volta() {
+        let mut c = Cadeia::nova(1);
+        c.anexar(evento(10));
+        c.anexar(evento(3));
+        assert_eq!(c.ultimos(1).next().unwrap().evento.ts_ms, 100);
+        c.anexar(evento(20));
+        assert_eq!(c.ultimos(1).next().unwrap().evento.ts_ms, 200);
+    }
+
+    /// O que sai do anel antes de ser gravado vira uma lacuna, com o elo
+    /// do último perdido; o journal com a lacuna refaz a mesma cabeça.
+    #[test]
+    fn o_anel_que_perde_deixa_uma_lacuna() {
+        let mut a = Cadeia::nova(4);
+        for i in 0..10 {
+            a.anexar(variado(i));
+        }
+        // Gravados até a 2: a 3 a 6 saíram do anel sem chegar ao journal.
+        let falta = a.a_gravar(2);
+        let lacuna = falta.lacuna.unwrap();
+        assert_eq!((lacuna.primeira, lacuna.ultima), (3, 6));
+        assert_eq!(lacuna.elo, a.ancora());
+        let seqs: Vec<u64> = falta.registros.iter().map(|r| r.seq).collect();
+        assert_eq!(seqs, [7, 8, 9, 10]);
+
+        let mut b = Cadeia::nova(4);
+        for i in 0..2 {
+            b.repor(i + 1, variado(i)).unwrap();
+        }
+        assert!(
+            b.pular(Lacuna {
+                primeira: 4,
+                ..lacuna
+            })
+            .is_err(),
+            "fora de sequencia"
+        );
+        assert!(
+            b.pular(Lacuna {
+                ultima: 2,
+                ..lacuna
+            })
+            .is_err(),
+            "ao contrario"
+        );
+        b.pular(lacuna).unwrap();
+        for r in &falta.registros {
+            b.repor(r.seq, r.evento.clone()).unwrap();
+        }
+        assert_eq!(b.cabeca(), a.cabeca());
+        assert_eq!(b.verificar(), Ok(a.cabeca()));
+
+        // Sem nada perdido, não há lacuna; com tudo gravado, nada falta.
+        assert!(a.a_gravar(6).lacuna.is_none());
+        assert_eq!(a.a_gravar(6).registros.len(), 4);
+        assert!(a.a_gravar(10).registros.is_empty());
+        assert!(a.a_gravar(10).lacuna.is_none());
+    }
+
+    /// O boot continua a cadeia do journal com o que registrou antes de
+    /// lê-lo: as sequências seguem, e o tempo sobe ao do journal.
+    #[test]
+    fn continuar_com_o_que_veio_antes() {
+        let mut journal = Cadeia::nova(10);
+        for i in 0..3 {
+            journal.anexar(evento(i + 50));
+        }
+        let mut boot = Cadeia::nova(10);
+        boot.anexar(evento(1));
+        boot.anexar(evento(2));
+        journal.continuar_com(&boot);
+        assert_eq!(journal.ultima_seq(), 5);
+        let ultimos: Vec<&Registro> = journal.ultimos(2).collect();
+        assert_eq!(ultimos[0].evento.metodo, "fs.read");
+        assert!(ultimos.iter().all(|r| r.evento.ts_ms == 520));
+        assert_eq!(journal.verificar(), Ok(journal.cabeca()));
     }
 
     #[test]
