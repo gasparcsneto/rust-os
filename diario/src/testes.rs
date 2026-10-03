@@ -446,8 +446,10 @@ fn reselar(m: &mut Memoria, setor: usize, elo: [u8; 32], mexer: impl Fn(&mut [u8
 #[test]
 fn um_registro_autentico_com_cabecalho_errado_e_recusado() {
     type Mexida = fn(&mut [u8], &mut [u8]);
-    let casos: [(&str, Mexida); 6] = [
+    let casos: [(&str, Mexida); 7] = [
+        // A sequência repetida, e a pulada.
         ("sequencia fora de ordem", |c, _| c[16] ^= 1),
+        ("sequencia fora de ordem", |c, _| c[16] = 2),
         ("a ancora nao segue a do registro anterior", |c, _| {
             c[24] ^= 2
         }),
