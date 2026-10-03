@@ -340,6 +340,26 @@ ganharam um caso, e o caso foi conferido contra a mesma mutação.
 | o relógio sem piso | hospedeiro: *o relógio nunca volta* |
 | o signatário aceitar uma geração menor, ou não guardar a que viu | bancada: *o signatário* |
 
+As do 7.4:
+
+| Mutação | Quem a mata |
+|---|---|
+| o envio, a entrega ou a transição por id sem ir para o journal | suíte: *cada transição é um registro*, *o journal repõe a mesma tabela* |
+| sem persistência, a resposta dizer que gravou; `durable` sempre verdadeiro | suíte: *sem persistência, só em memória* |
+| a ordem das gravações sem exclusão | suíte: *a ordem das gravações* |
+| o journal recusado sem fechar as credenciais, ou deixando a chave de um agente | suíte: *o journal recusado fecha as credenciais* |
+| a revogação sem as anulações no registro dela; a anulação sem anotar | suíte: *a revogação e as anulações no mesmo registro* |
+| o coletor ou a consulta vencendo sem gravar | suíte: os casos do vencimento, com o journal conferido |
+| a reposição ignorando as mensagens | suíte: *o journal repõe a mesma tabela* |
+| a época da instalação ignorada | bancada: *as mensagens sobrevivem* |
+| o journal recusado repondo as mensagens dele | bancada: *o journal recusado* |
+| o prazo no tempo desde o boot | bancada: *o prazo é do tempo lógico* |
+| a criação interrompida recusada | bancada: *a queda na criação* |
+| qualquer nascimento aceito diante de um journal vazio | bancada: *a fotografia tirada na fronteira, ou na criação* |
+| a reposição aceitando versão pulada, id fora de ordem, entrega dupla, volta a pendente, corpo que não é texto | hospedeiro: *repor fora de ordem é recusado* |
+| os bytes de um titular ou de um estado trocados ou de tamanho errado | hospedeiro: *titulares e estados vão e voltam* |
+| o nascimento sem conferir o índice, não inicializado lido como zero, ou guardado errado | hospedeiro: os casos do nascimento, e o `swtpm` |
+
 As que só a bancada mata só se veem entre dois boots, e é para isso que ela
 existe; ela roda na CI nas duas arquiteturas.
 
