@@ -733,6 +733,22 @@ pub fn autorizar(
             }
         },
     };
+    // Um journal recusado: as revogações que ele perdeu não se sabem, e
+    // nenhuma credencial vale — ver `persistencia::revogacoes_desconhecidas`.
+    if credenciada(autoridade)
+        && let Some(motivo) = crate::persistencia::revogacoes_desconhecidas()
+    {
+        auditar(
+            &quem,
+            comando.nome,
+            "",
+            Codigo::DenyNotAuthenticated,
+            parametros,
+            "journal recusado: as revogacoes nao se sabem",
+        );
+        crate::log_warn!("autorizacao", "credencial recusada: {}", motivo);
+        return Err(Codigo::DenyNotAuthenticated);
+    }
     passar_pela_taxa(&quem, comando.nome, parametros)?;
 
     let recurso = recurso_do_pedido(comando, params);
@@ -805,9 +821,24 @@ pub fn autorizar_processo(permissao: Permissao, recurso: &str, metodo: &str) -> 
             Ok(q) | Err(q) => q,
         },
     };
-    let (codigo, detalhe) = decidir(quem.papel.as_deref(), permissao, recurso);
+    let (codigo, detalhe) = match crate::persistencia::revogacoes_desconhecidas() {
+        Some(_) if credenciada(crate::fios::autoridade_atual()) => (
+            Codigo::DenyNotAuthenticated,
+            "journal recusado: as revogacoes nao se sabem",
+        ),
+        _ => decidir(quem.papel.as_deref(), permissao, recurso),
+    };
     auditar(&quem, metodo, recurso, codigo, &[], detalhe);
     codigo
+}
+
+/// Se a autoridade vem de uma credencial que pode ter sido revogada: a
+/// chave de um agente, ou uma pessoa. A serial e o `sistema` não.
+fn credenciada(a: Autoridade) -> bool {
+    matches!(
+        a,
+        Autoridade::Sessao { chave: Some(_), .. } | Autoridade::Pessoa { .. }
+    )
 }
 
 /// Quem faz uma transição de mensagem, para a auditoria: a autoridade do

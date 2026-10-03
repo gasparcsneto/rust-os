@@ -858,11 +858,8 @@ pub fn adotar_espaco(espaco: crate::paginacao::Espaco) -> Option<crate::paginaca
     })
 }
 
-/// Cede a CPU voluntariamente.
-///
-/// Sem consumidor de produção hoje pelo mesmo motivo de [`criar`]: a preempção
-/// dá conta sozinha do único fio que existe.
-#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+/// Cede a CPU voluntariamente. Quem espera a ordem das gravações da
+/// persistência cede em vez de girar: quem a tem pode estar preemptado.
 pub fn ceder() {
     crate::arch::ceder_cpu();
 }

@@ -505,8 +505,6 @@ fn conferir_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) -> Result
         gravar(Codigo::Error, "", &motivo);
         return Err(falha(Codigo::Error, motivo));
     }
-    let foto = (operacao.efeito != Efeito::Nenhum).then(crate::persistencia::Foto::tirar);
-
     let pedinte = Pedinte {
         sessao,
         nome: &nome,
@@ -520,18 +518,29 @@ fn conferir_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) -> Result
     // A operação escreve os campos dela só se der certo; os de cima vêm
     // depois, para uma recusa da operação não deixar um `executed` dizendo
     // o contrário na mesma resposta.
-    match (operacao.executar)(&pedinte, Json(parametros.as_bytes()), w) {
+    //
+    // A foto, a operação e a gravação, com a ordem das gravações na mão:
+    // nada que outro fio mude no meio — uma mensagem que vence — entra na
+    // diferença desta operação, nem é gravado antes dela.
+    let (feito, gravado) = crate::persistencia::em_ordem(|| {
+        let foto = (operacao.efeito != Efeito::Nenhum).then(crate::persistencia::Foto::tirar);
+        let feito = (operacao.executar)(&pedinte, Json(parametros.as_bytes()), w);
+        let gravado = match (&feito, &foto) {
+            (Ok(recurso), Some(foto)) => crate::persistencia::concluir(
+                foto,
+                operacao.nome,
+                recurso,
+                operacao.efeito == Efeito::Concede,
+            ),
+            _ => Ok(()),
+        };
+        (feito, gravado)
+    });
+    match feito {
         Ok(recurso) => {
             // Gravada antes de responder. Sem a gravação, o que foi
             // concedido volta, e a resposta diz que não foi feita.
-            if let Some(foto) = &foto
-                && let Err(m) = crate::persistencia::concluir(
-                    foto,
-                    operacao.nome,
-                    &recurso,
-                    operacao.efeito == Efeito::Concede,
-                )
-            {
+            if let Err(m) = gravado {
                 let motivo = format!("a operacao nao ficou gravada no journal: {m}");
                 gravar(Codigo::Error, &recurso, &motivo);
                 return Err(falha(Codigo::Error, motivo));
@@ -847,13 +856,20 @@ fn conferir_quorum_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) ->
         let motivo = format!("persistencia indisponivel: {motivo}");
         return Err(recusar(&nomes, Codigo::Error, "", &motivo));
     }
-    let foto = crate::persistencia::Foto::tirar();
-
-    // As restrições e a execução da operação.
-    let feito = match operacao.nome {
-        "admin.revoke" => revogar_administrador(&assinantes, alvo, quorum.m, parametros),
-        _ => Err(falha(Codigo::Error, "operacao de quorum sem execucao")),
-    };
+    // As restrições e a execução da operação, e a gravação, com a ordem
+    // das gravações na mão — como as de uma credencial.
+    let (feito, gravado) = crate::persistencia::em_ordem(|| {
+        let foto = crate::persistencia::Foto::tirar();
+        let feito = match operacao.nome {
+            "admin.revoke" => revogar_administrador(&assinantes, alvo, quorum.m, parametros),
+            _ => Err(falha(Codigo::Error, "operacao de quorum sem execucao")),
+        };
+        let gravado = match &feito {
+            Ok(f) => crate::persistencia::concluir(&foto, operacao.nome, &f.recurso, false),
+            Err(_) => Ok(()),
+        };
+        (feito, gravado)
+    });
     let papeis: Vec<&str> = assinantes.iter().filter_map(|a| a.2.as_deref()).collect();
     let papel = papeis.first().copied();
     match feito {
@@ -866,7 +882,7 @@ fn conferir_quorum_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) ->
             // avançada. Se falhar, a revogação continua valendo em memória —
             // o que se tira não volta — e a resposta diz que não ficou
             // gravada; a persistência indisponível bloqueia o resto.
-            if let Err(m) = crate::persistencia::concluir(&foto, operacao.nome, &recurso, false) {
+            if let Err(m) = gravado {
                 let motivo = format!("a revogacao vale, mas nao ficou gravada no journal: {m}");
                 gravar(&nomes, papel, Codigo::Error, &recurso, &motivo);
                 return Err((Codigo::Error, motivo));
@@ -1316,10 +1332,11 @@ fn mandar_mensagem(pedinte: &Pedinte, params: Json, w: &mut JsonWriter) -> Resul
         .desescapar_em(&mut buffer)
         .ok_or_else(|| falha(Codigo::InvalidArgument, "o corpo nao e texto"))?;
     let remetente = crate::mensagens::Remetente::do_administrador(pedinte.administrador);
-    let (id, e) = crate::mensagens::enviar(&remetente, destino, corpo, nonce, prazo)
-        .map_err(falha_de_mensagem)?;
+    let (resultado, duravel) = crate::mensagens::enviar(&remetente, destino, corpo, nonce, prazo);
+    let (id, e) = resultado.map_err(falha_de_mensagem)?;
     let _ = w.field_str("id", &id);
     let _ = w.field_bool("duplicate", e.duplicata);
+    let _ = super::commands::escrever_duravel(w, duravel);
     Ok(format!("msg:{id}"))
 }
 
@@ -1340,16 +1357,20 @@ fn confirmar_mensagem(
     let id = texto(params, "id")?;
     let esperada = params.member("expect_version").and_then(|v| v.as_u64());
     let remetente = crate::mensagens::Remetente::do_administrador(pedinte.administrador);
-    let t = crate::mensagens::confirmar(&remetente, id, esperada).map_err(falha_de_mensagem)?;
+    let (t, duravel) = crate::mensagens::confirmar(&remetente, id, esperada);
+    let t = t.map_err(falha_de_mensagem)?;
     let _ = w.field_str("state", t.estado.nome());
+    let _ = super::commands::escrever_duravel(w, duravel);
     Ok(format!("msg:{id}"))
 }
 
 fn purgar_mensagem(pedinte: &Pedinte, params: Json, w: &mut JsonWriter) -> Result<String, Falha> {
     let id = texto(params, "id")?;
     let remetente = crate::mensagens::Remetente::do_administrador(pedinte.administrador);
-    let t = crate::mensagens::purgar(&remetente, id).map_err(falha_de_mensagem)?;
+    let (t, duravel) = crate::mensagens::purgar(&remetente, id);
+    let t = t.map_err(falha_de_mensagem)?;
     let _ = w.field_str("state", t.estado.nome());
+    let _ = super::commands::escrever_duravel(w, duravel);
     Ok(format!("msg:{id}"))
 }
 
@@ -1362,8 +1383,10 @@ fn esvaziar_caixa(pedinte: &Pedinte, params: Json, w: &mut JsonWriter) -> Result
     let (dono, _) =
         crate::mensagens::titular(alvo).map_err(|m| falha(Codigo::InvalidArgument, m))?;
     let remetente = crate::mensagens::Remetente::do_administrador(pedinte.administrador);
-    let tiradas = crate::mensagens::purgar_caixa(&remetente, dono, alvo, pedinte.desafio);
+    let (tiradas, duravel) =
+        crate::mensagens::purgar_caixa(&remetente, dono, alvo, pedinte.desafio);
     let _ = w.field_str("mailbox", alvo);
+    let _ = super::commands::escrever_duravel(w, duravel);
     let _ = w.field_u64("removed", tiradas.len() as u64);
     let _ = w.key("ids");
     let _ = w.begin_array();

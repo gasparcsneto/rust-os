@@ -38,6 +38,10 @@ pub mod tipo {
     /// Uma operação, um registro: as mudanças dela entram juntas ou não
     /// entram.
     pub const OPERACAO: u16 = 3;
+    /// O que uma operação de mensagem mudou: as entradas
+    /// [`MENSAGEM_CRIADA`] e [`MENSAGEM_ESTADO`], na ordem em que
+    /// aconteceram. Não sobe a geração: uma mensagem não é autoridade.
+    pub const MENSAGENS: u16 = 4;
 
     /// Um agente entrou no registro: `[a linha do arquivo de agentes]`.
     pub const AGENTE_REGISTRADO: u16 = 10;
@@ -65,6 +69,18 @@ pub mod tipo {
     /// nenhuma imagem a apaga. Quem revogou e por quê não está aqui: está
     /// na auditoria, que guarda a decisão do quórum.
     pub const LAPIDE: u16 = 18;
+
+    /// Uma mensagem aceita: `[id (8 bytes), remetente, destinatário, criada
+    /// em ms (8), vence em ms (8), corpo]`. Os titulares vão como um byte
+    /// de tipo e a chave ou o identificador. Nasce pendente, na versão 1.
+    ///
+    /// O corpo vai no registro como qualquer outro campo — cifrado com ele:
+    /// o disco não vê o texto de uma mensagem.
+    pub const MENSAGEM_CRIADA: u16 = 20;
+    /// Uma mensagem mudou de estado: `[id (8), estado (1 byte), versão
+    /// (8)]`. Num estado final, o corpo some — dali em diante o journal
+    /// só lembra que ela existiu.
+    pub const MENSAGEM_ESTADO: u16 = 21;
 }
 
 /// Monta o conteúdo de um registro a partir dos campos.

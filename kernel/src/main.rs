@@ -88,6 +88,8 @@ mod pessoas;
 mod ponteiro;
 mod pseudoterminal;
 mod qemu;
+#[cfg(feature = "quedas")]
+mod quedas;
 mod rede;
 mod relogio;
 mod serial;

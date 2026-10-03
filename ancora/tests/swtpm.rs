@@ -197,3 +197,25 @@ fn um_indice_de_outro_tipo_no_lugar_e_recusado() {
         Some(Erro::IndiceEstranho)
     );
 }
+
+/// O nascimento num TPM de verdade: o índice comum se define, se escreve e
+/// se lê como o pacote o monta, e guarda o primeiro valor enquanto o
+/// contador anda.
+#[test]
+fn o_nascimento_num_tpm_de_verdade() {
+    const NASCIMENTO: u32 = 0x0180_D0E1;
+    let mut tpm = Swtpm::novo("nascimento");
+    let (a, primeiro) = Ancora::criar(&mut tpm, INDICE, &[], SENHA).unwrap();
+    assert_eq!(a.nascimento(&mut tpm, NASCIMENTO).unwrap(), None);
+    assert_eq!(
+        a.registrar_nascimento(&mut tpm, NASCIMENTO, &[]).unwrap(),
+        primeiro
+    );
+    for _ in 0..3 {
+        a.avancar(&mut tpm).unwrap();
+    }
+    assert_eq!(a.nascimento(&mut tpm, NASCIMENTO).unwrap(), Some(primeiro));
+    // O contador não se escreve como um índice comum.
+    assert!(ancora::escrever(&mut tpm, INDICE, &SENHA, 1).is_err());
+    assert_eq!(a.ler(&mut tpm).unwrap(), primeiro + 3);
+}

@@ -172,6 +172,26 @@ impl Simulado {
                 self.indices.retain(|(i, _)| *i != n);
                 com_sessao(&[])
             }
+            comando::NV_WRITE => {
+                let a = l.u32();
+                let n = l.u32();
+                assert_eq!(a, n, "a autorizacao e a do proprio indice");
+                let senha = l.sessao();
+                let dados = l.tpm2b();
+                assert_eq!(l.u16(), 0, "escreve-se do inicio");
+                let Some(x) = self.indice(n) else {
+                    return erro(codigo::INDICE_INEXISTENTE);
+                };
+                if senha != x.senha {
+                    return erro(codigo::SENHA_ERRADA);
+                }
+                // Um contador não se escreve: TPM_RC_ATTRIBUTES no handle.
+                if x.atributos & atributo::MASCARA_DO_TIPO != 0 {
+                    return erro(0x182);
+                }
+                x.valor = Some(u64::from_be_bytes(dados[..].try_into().unwrap()));
+                com_sessao(&[])
+            }
             comando::NV_INCREMENT | comando::NV_READ => {
                 let a = l.u32();
                 let n = l.u32();
@@ -185,6 +205,10 @@ impl Simulado {
                     return erro(codigo::SENHA_ERRADA);
                 }
                 if codigo == comando::NV_INCREMENT {
+                    // Um índice comum não se incrementa.
+                    if x.atributos & atributo::MASCARA_DO_TIPO != atributo::TIPO_CONTADOR {
+                        return erro(0x182);
+                    }
                     let novo = x.valor.unwrap_or(maior) + 1;
                     x.valor = Some(novo);
                     self.maior = self.maior.max(novo);
@@ -391,4 +415,63 @@ fn o_tpm_nao_iniciado_nao_responde_valor() {
         Ancora::abrir(&mut tpm, INDICE, SENHA).unwrap(),
         Aberta::Ausente
     ));
+}
+
+const NASCIMENTO: u32 = 0x0180_D0E1;
+
+/// O nascimento: ausente até ser registrado, e então o valor do contador
+/// naquele momento — que continua o mesmo quando o contador anda.
+#[test]
+fn o_nascimento_guarda_o_primeiro_valor() {
+    let mut tpm = Simulado {
+        maior: 500,
+        ..Simulado::default()
+    };
+    let (ancora, v) = Ancora::criar(&mut tpm, INDICE, &[], SENHA).unwrap();
+    assert_eq!(ancora.nascimento(&mut tpm, NASCIMENTO).unwrap(), None);
+    assert_eq!(
+        ancora
+            .registrar_nascimento(&mut tpm, NASCIMENTO, &[])
+            .unwrap(),
+        v
+    );
+    assert_eq!(ancora.nascimento(&mut tpm, NASCIMENTO).unwrap(), Some(v));
+    ancora.avancar(&mut tpm).unwrap();
+    ancora.avancar(&mut tpm).unwrap();
+    assert_eq!(ancora.nascimento(&mut tpm, NASCIMENTO).unwrap(), Some(v));
+    assert_eq!(ancora.ler(&mut tpm).unwrap(), v + 2);
+}
+
+/// Definido e nunca escrito é o mesmo que ausente: a criação parou entre
+/// os dois comandos, e registrar de novo a completa.
+#[test]
+fn o_nascimento_definido_e_nunca_escrito_e_ausente() {
+    let mut tpm = Simulado::default();
+    let (ancora, v) = Ancora::criar(&mut tpm, INDICE, &[], SENHA).unwrap();
+    iniciar(&mut tpm).unwrap();
+    definir(&mut tpm, NASCIMENTO, &[], &SENHA, atributo::DO_NASCIMENTO).unwrap();
+    assert_eq!(ancora.nascimento(&mut tpm, NASCIMENTO).unwrap(), None);
+    assert_eq!(
+        ancora
+            .registrar_nascimento(&mut tpm, NASCIMENTO, &[])
+            .unwrap(),
+        v
+    );
+}
+
+/// Um índice no lugar do nascimento que não é o nosso — um contador, por
+/// exemplo — não é um nascimento.
+#[test]
+fn um_nascimento_que_nao_e_o_nosso_e_recusado() {
+    let mut tpm = Simulado::default();
+    let (ancora, _) = Ancora::criar(&mut tpm, INDICE, &[], SENHA).unwrap();
+    definir_contador(&mut tpm, NASCIMENTO, &[], &SENHA).unwrap();
+    assert_eq!(
+        ancora.nascimento(&mut tpm, NASCIMENTO),
+        Err(Erro::IndiceEstranho)
+    );
+    assert_eq!(
+        ancora.registrar_nascimento(&mut tpm, NASCIMENTO, &[]),
+        Err(Erro::IndiceEstranho)
+    );
 }

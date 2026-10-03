@@ -215,6 +215,88 @@ pub struct Transicao {
     pub versao: u64,
 }
 
+/// Uma mensagem como o journal a guarda ao ser criada.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Gravada<'a> {
+    pub id: u64,
+    pub de: Dono,
+    pub para: Dono,
+    pub corpo: &'a [u8],
+    pub criada_ms: u64,
+    pub expira_ms: u64,
+}
+
+impl Mensagem {
+    /// Como o journal a guarda.
+    pub fn gravada(&self) -> Gravada<'_> {
+        Gravada {
+            id: self.id,
+            de: self.de,
+            para: self.para,
+            corpo: &self.corpo,
+            criada_ms: self.criada_ms,
+            expira_ms: self.expira_ms,
+        }
+    }
+}
+
+impl Dono {
+    /// Os bytes do titular no journal: um byte de tipo e a chave ou o
+    /// identificador.
+    pub fn bytes(&self) -> Vec<u8> {
+        let (tipo, resto): (u8, &[u8]) = match self {
+            Dono::Serial => (0, &[]),
+            Dono::Agente(k) => (1, k),
+            Dono::Pessoa(p) => (2, p),
+            Dono::Administrador(k) => (3, k),
+        };
+        let mut v = Vec::with_capacity(1 + resto.len());
+        v.push(tipo);
+        v.extend_from_slice(resto);
+        v
+    }
+
+    /// O titular de volta, dos bytes de [`Dono::bytes`].
+    pub fn de_bytes(b: &[u8]) -> Option<Dono> {
+        match b {
+            [0] => Some(Dono::Serial),
+            [1, k @ ..] => Some(Dono::Agente(k.try_into().ok()?)),
+            [2, p @ ..] => Some(Dono::Pessoa(p.try_into().ok()?)),
+            [3, k @ ..] => Some(Dono::Administrador(k.try_into().ok()?)),
+            _ => None,
+        }
+    }
+}
+
+impl Estado {
+    /// O número do estado no journal.
+    pub const fn codigo(self) -> u8 {
+        match self {
+            Estado::Pendente => 0,
+            Estado::Entregue => 1,
+            Estado::Confirmada => 2,
+            Estado::Cancelada => 3,
+            Estado::Anulada => 4,
+            Estado::Expirada => 5,
+            Estado::Purgada => 6,
+        }
+    }
+
+    /// O estado de volta, do número de [`Estado::codigo`].
+    pub const fn de_codigo(c: u8) -> Option<Estado> {
+        Some(match c {
+            0 => Estado::Pendente,
+            1 => Estado::Entregue,
+            2 => Estado::Confirmada,
+            3 => Estado::Cancelada,
+            4 => Estado::Anulada,
+            5 => Estado::Expirada,
+            6 => Estado::Purgada,
+            _ => return None,
+        })
+    }
+}
+
 /// O desfecho de um envio aceito.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Enviada {
@@ -659,6 +741,77 @@ impl Caixas {
         self.janelas.remove(&canal);
     }
 
+    /// As vivas, em ordem de id.
+    pub fn todas(&self) -> impl Iterator<Item = &Mensagem> {
+        self.vivas.iter()
+    }
+
+    /// A viva `id`, se há — para quem grava o que acabou de ser criado.
+    pub fn mensagem(&self, id: u64) -> Option<&Mensagem> {
+        self.vivas.iter().find(|m| m.id == id)
+    }
+
+    /// Põe de volta uma mensagem criada, como o journal a gravou: pendente,
+    /// na versão 1. Os ids só crescem — um id que não passa do último já
+    /// visto é um registro fora de ordem, e é recusado.
+    ///
+    /// As cotas não se conferem de novo: valeram quando ela foi aceita, e
+    /// a política em vigor no boot pode ser outra.
+    pub fn restaurar(&mut self, gravada: Gravada<'_>) -> Result<(), &'static str> {
+        if gravada.id < self.proximo || gravada.id == u64::MAX {
+            return Err("id de mensagem fora de ordem");
+        }
+        if gravada.corpo.len() > MAIOR_CORPO || core::str::from_utf8(gravada.corpo).is_err() {
+            return Err("corpo de mensagem gravada invalido");
+        }
+        self.proximo = gravada.id + 1;
+        self.vivas.push(Mensagem {
+            id: gravada.id,
+            de: gravada.de,
+            para: gravada.para,
+            corpo: gravada.corpo.to_vec(),
+            criada_ms: gravada.criada_ms,
+            expira_ms: gravada.expira_ms,
+            estado: Estado::Pendente,
+            versao: 1,
+        });
+        Ok(())
+    }
+
+    /// Aplica uma transição como o journal a gravou: a viva `id` vai para
+    /// `estado` na `versao`, que tem de ser exatamente a seguinte.
+    ///
+    /// Uma transição para um estado final de uma mensagem que já não está
+    /// viva não muda nada e não é erro: a revogação de um titular, reposta
+    /// do mesmo journal antes, já a anulou — e o registro dela traz a
+    /// mesma anulação. Qualquer outra coisa sobre uma mensagem ausente é
+    /// um registro que não confere.
+    pub fn aplicar(&mut self, id: u64, estado: Estado, versao: u64) -> Result<(), &'static str> {
+        let Some(i) = self.vivas.iter().position(|m| m.id == id) else {
+            return if estado.final_() {
+                Ok(())
+            } else {
+                Err("transicao de mensagem que nao existe")
+            };
+        };
+        if versao != self.vivas[i].versao + 1 {
+            return Err("versao de mensagem fora de ordem");
+        }
+        match estado {
+            Estado::Pendente => Err("transicao de volta a pendente"),
+            Estado::Entregue if self.vivas[i].estado == Estado::Pendente => {
+                self.vivas[i].estado = Estado::Entregue;
+                self.vivas[i].versao = versao;
+                Ok(())
+            }
+            Estado::Entregue => Err("entrega de mensagem ja entregue"),
+            final_ => {
+                self.tirar(i, final_);
+                Ok(())
+            }
+        }
+    }
+
     /// Quantas vivas há.
     pub fn vivas(&self) -> usize {
         self.vivas.len()
@@ -683,6 +836,7 @@ impl Caixas {
 #[cfg(test)]
 mod testes {
     use super::*;
+    use alloc::string::String;
 
     const A: Dono = Dono::Agente([1; 32]);
     const B: Dono = Dono::Agente([2; 32]);
@@ -1144,5 +1298,190 @@ mod testes {
         let dois = manda(&mut t, PA, A, B, 2).unwrap().id;
         assert!(dois > um);
         assert!(t.coerente());
+    }
+
+    /// O que o journal guarda de uma tabela: as criadas e as transições, na
+    /// ordem em que aconteceram — como o kernel as grava.
+    #[derive(Default)]
+    struct Gravacao {
+        eventos: Vec<Evento>,
+    }
+
+    enum Evento {
+        Criada {
+            id: u64,
+            de: Dono,
+            para: Dono,
+            corpo: Vec<u8>,
+            criada_ms: u64,
+            expira_ms: u64,
+        },
+        Transicao(u64, Estado, u64),
+    }
+
+    impl Gravacao {
+        fn criada(&mut self, t: &Caixas, id: u64) {
+            let g = t.mensagem(id).unwrap().gravada();
+            self.eventos.push(Evento::Criada {
+                id: g.id,
+                de: g.de,
+                para: g.para,
+                corpo: g.corpo.to_vec(),
+                criada_ms: g.criada_ms,
+                expira_ms: g.expira_ms,
+            });
+        }
+        fn transicoes(&mut self, ts: &[Transicao]) {
+            for t in ts {
+                self.eventos
+                    .push(Evento::Transicao(t.id, t.estado, t.versao));
+            }
+        }
+        fn repor(&self) -> Result<Caixas, &'static str> {
+            let mut t = Caixas::nova();
+            for e in &self.eventos {
+                match e {
+                    Evento::Criada {
+                        id,
+                        de,
+                        para,
+                        corpo,
+                        criada_ms,
+                        expira_ms,
+                    } => t.restaurar(Gravada {
+                        id: *id,
+                        de: *de,
+                        para: *para,
+                        corpo,
+                        criada_ms: *criada_ms,
+                        expira_ms: *expira_ms,
+                    })?,
+                    Evento::Transicao(id, estado, versao) => t.aplicar(*id, *estado, *versao)?,
+                }
+            }
+            Ok(t)
+        }
+    }
+
+    /// Uma viva, campo a campo.
+    type Linha = (u64, Dono, Dono, String, u64, u64, Estado, u64);
+
+    /// O retrato de uma tabela, para comparar duas.
+    fn retrato(t: &Caixas) -> Vec<Linha> {
+        t.vivas
+            .iter()
+            .map(|m| {
+                (
+                    m.id,
+                    m.de,
+                    m.para,
+                    String::from(m.corpo()),
+                    m.criada_ms,
+                    m.expira_ms,
+                    m.estado,
+                    m.versao,
+                )
+            })
+            .collect()
+    }
+
+    /// Repor as criadas e as transições, na ordem, dá a mesma tabela: as
+    /// mesmas vivas, nos mesmos estados e versões, os mesmos prazos — e o
+    /// próximo id continua de onde parou.
+    #[test]
+    fn repor_o_que_foi_gravado_da_a_mesma_tabela() {
+        let mut t = Caixas::nova();
+        let mut g = Gravacao::default();
+        let mut agora = 1_000;
+        let mut ids = Vec::new();
+        for n in 1..=6 {
+            let (r, venc) = t.enviar(PA, A, B, "corpo", n, Some(5_000 * n), agora, COTAS_PADRAO);
+            g.transicoes(&venc);
+            let e = r.unwrap();
+            g.criada(&t, e.id);
+            ids.push(e.id);
+            agora += 100;
+        }
+        let (r, venc) = t.enviar(PC, C, A, "para A", 1, None, agora, COTAS_PADRAO);
+        g.transicoes(&venc);
+        g.criada(&t, r.unwrap().id);
+        // B lê: as pendentes viram entregues.
+        let (_, ts) = t.ler(B, 0, 3, agora);
+        g.transicoes(&ts);
+        // Confirma uma, cancela outra que ainda está pendente.
+        let (r, venc) = t.confirmar(B, ids[0], None, agora);
+        g.transicoes(&venc);
+        g.transicoes(&[r.unwrap()]);
+        let (r, venc) = t.cancelar(A, ids[4], None, agora);
+        g.transicoes(&venc);
+        g.transicoes(&[r.unwrap()]);
+        // Vence uma pelo prazo, purga outra, anula o que C mandou.
+        agora = 1_000 + 5_000 * 2 + 50;
+        g.transicoes(&t.vencer(agora));
+        g.transicoes(&[t.purgar(ids[2]).unwrap()]);
+        g.transicoes(&t.anular(C));
+
+        let reposta = g.repor().unwrap();
+        assert_eq!(retrato(&reposta), retrato(&t));
+        assert!(reposta.coerente());
+        for &id in &ids {
+            assert_eq!(reposta.estado(A, id), t.estado(A, id), "{id}");
+        }
+        let mut t2 = reposta;
+        let novo = t2
+            .enviar(PA, A, B, "depois", 99, None, agora, COTAS_PADRAO)
+            .0
+            .unwrap();
+        assert!(novo.id > *ids.iter().max().unwrap());
+    }
+
+    /// O que não confere com a ordem gravada é recusado: um id que volta,
+    /// uma versão pulada, uma entrega dupla, uma volta a pendente.
+    #[test]
+    fn repor_fora_de_ordem_e_recusado() {
+        let gravada = |id| Gravada {
+            id,
+            de: A,
+            para: B,
+            corpo: b"x",
+            criada_ms: 0,
+            expira_ms: 10,
+        };
+        let mut t = Caixas::nova();
+        t.restaurar(gravada(5)).unwrap();
+        assert!(t.restaurar(gravada(5)).is_err());
+        assert!(t.restaurar(gravada(3)).is_err());
+        assert!(t.aplicar(5, Estado::Entregue, 3).is_err());
+        assert!(t.aplicar(5, Estado::Pendente, 2).is_err());
+        t.aplicar(5, Estado::Entregue, 2).unwrap();
+        assert!(t.aplicar(5, Estado::Entregue, 3).is_err());
+        t.aplicar(5, Estado::Confirmada, 3).unwrap();
+        // Já final: a mesma anulação de novo, reposta por uma revogação, não
+        // é erro; uma entrega de quem não existe, é.
+        t.aplicar(5, Estado::Anulada, 4).unwrap();
+        assert!(t.aplicar(9, Estado::Entregue, 2).is_err());
+        let mut corpo_ruim = gravada(10);
+        corpo_ruim.corpo = &[0xFF, 0xFE];
+        assert!(t.restaurar(corpo_ruim).is_err());
+    }
+
+    /// Os bytes do journal vão e voltam: titulares e estados.
+    #[test]
+    fn titulares_e_estados_vao_e_voltam() {
+        for d in [
+            Dono::Serial,
+            A,
+            Dono::Pessoa([7; 8]),
+            Dono::Administrador([9; 32]),
+        ] {
+            assert_eq!(Dono::de_bytes(&d.bytes()), Some(d));
+        }
+        assert_eq!(Dono::de_bytes(&[]), None);
+        assert_eq!(Dono::de_bytes(&[1, 2, 3]), None);
+        assert_eq!(Dono::de_bytes(&[4]), None);
+        for c in 0..=6 {
+            assert_eq!(Estado::de_codigo(c).map(Estado::codigo), Some(c));
+        }
+        assert_eq!(Estado::de_codigo(7), None);
     }
 }

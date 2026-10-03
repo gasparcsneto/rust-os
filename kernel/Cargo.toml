@@ -20,6 +20,12 @@ license = "MIT OR Apache-2.0"
 # `std` e de um sistema operacional por baixo — coisas que não temos.
 modo-teste = []
 
+# Só para a bancada de persistência: quedas de energia em pontos exatos da
+# gravação, num plano lido do fim da partição de estado — ver
+# `src/quedas.rs`. Nenhuma outra compilação a pede, e o `cargo xtask
+# invariantes` confere.
+quedas = []
+
 [dependencies]
 # O contrato com o iniciador UEFI: o que ele entrega ao kernel e onde cada
 # coisa mora no espaço virtual. Declarado num pacote, e não nos dois lados,

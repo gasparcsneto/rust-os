@@ -13849,9 +13849,26 @@ fn mensagens_cotas() -> Resultado {
             r#"{"to":"teste-2","body":"curta","nonce":1,"ttl_ms":1000}"#,
         )?;
         let id = ids_de(&r);
-        // Ninguém lê nem manda: o coletor tira a vencida sozinho, e grava.
+        // Ninguém lê nem manda: o coletor tira a vencida sozinho, e grava —
+        // na auditoria e no journal, antes de alguém poder vê-la vencida.
         esperar_ate(|| transicao_gravada("message.expire", &id[0]), 400)
             .map_err(|_| "a mensagem vencida nao saiu sozinha, ou nao foi gravada")?;
+        let vencida = (
+            diario::estado::tipo::MENSAGEM_ESTADO,
+            alloc::vec![
+                numero_do_id(&id[0]).to_le_bytes().to_vec(),
+                alloc::vec![politica::mensagens::Estado::Expirada.codigo()],
+                2u64.to_le_bytes().to_vec(),
+            ],
+        );
+        let no_journal = registros_do_journal()?
+            .iter()
+            .rev()
+            .take(4)
+            .any(|r| entradas_de_mensagem(r).is_ok_and(|e| e.contains(&vencida)));
+        if !no_journal {
+            return Err("o coletor venceu a mensagem e nao gravou no journal");
+        }
         let lidos = ids_de(&pela_porta(
             &mut b,
             &mut sb,
@@ -13870,8 +13887,9 @@ fn mensagens_cotas() -> Resultado {
             r#"{"to":"teste-2","body":"curta","nonce":2,"ttl_ms":1000}"#,
         )?;
         let id = ids_de(&r);
-        let vence = crate::tempo::uptime_ms() + 1000;
-        esperar_ate(|| crate::tempo::uptime_ms() >= vence, 400)?;
+        // O prazo é do tempo lógico, com a resolução do RTC: espera-se nele.
+        let vence = crate::persistencia::agora_ms() + 1000;
+        esperar_ate(|| crate::persistencia::agora_ms() >= vence, 400)?;
         let estado = pela_porta(
             &mut c,
             &mut sc,
@@ -14391,8 +14409,8 @@ fn mensagens_esvaziar_a_caixa() -> Resultado {
             r#"{"to":"teste-4","body":"curta","nonce":7,"ttl_ms":1000}"#,
         )?;
         let curta = ids_de(&r);
-        let vence = crate::tempo::uptime_ms() + 1000;
-        esperar_ate(|| crate::tempo::uptime_ms() >= vence, 400)?;
+        let vence = crate::persistencia::agora_ms() + 1000;
+        esperar_ate(|| crate::persistencia::agora_ms() >= vence, 400)?;
         let r = executar_admin_com(
             1,
             &ADMIN_DE_TESTE,
@@ -15202,6 +15220,339 @@ fn persistencia_as_entradas_se_reaplicam() -> Resultado {
 
 /// As assinaturas de um quórum valem para a geração do desafio: uma
 /// mudança de autoridade depois dele — um agente registrado — as derruba.
+/// O nascimento guardado no TPM é o valor do contador antes do primeiro
+/// registro: o contador de agora é o nascimento mais um por registro.
+fn persistencia_o_nascimento_e_o_primeiro_valor() -> Resultado {
+    let nascimento = crate::persistencia::nascimento_de_teste()?
+        .ok_or("o nascimento da ancora nao foi guardado")?;
+    let registros = registros_do_journal()?.len() as u64;
+    if crate::persistencia::ancora_no_tpm_de_teste()? != nascimento + registros {
+        return Err("o contador nao e o nascimento mais um por registro");
+    }
+    Ok(())
+}
+
+/// A ordem das gravações: um fio que a pede enquanto outro a tem espera, e
+/// entra quando ela é solta; o mesmo fio entra de novo sem esperar por si.
+fn persistencia_a_ordem_das_gravacoes() -> Resultado {
+    use core::sync::atomic::{AtomicU8, Ordering};
+    static VEZ: AtomicU8 = AtomicU8::new(0);
+    extern "C" fn concorrente(_: u64) -> ! {
+        crate::persistencia::em_ordem(|| VEZ.store(2, Ordering::SeqCst));
+        crate::fios::terminar()
+    }
+    VEZ.store(0, Ordering::SeqCst);
+    let dentro = crate::persistencia::em_ordem(|| -> Resultado {
+        // Reentrante: o mesmo fio não espera por si.
+        crate::persistencia::em_ordem(|| VEZ.store(1, Ordering::SeqCst));
+        crate::fios::criar("teste-ordem", concorrente, 0)?;
+        for _ in 0..50 {
+            crate::fios::ceder();
+        }
+        let inicio = crate::tempo::uptime_ms();
+        while crate::tempo::uptime_ms() < inicio + 50 {
+            core::hint::spin_loop();
+        }
+        if VEZ.load(Ordering::SeqCst) != 1 {
+            return Err("o outro fio entrou na ordem enquanto este a tinha");
+        }
+        Ok(())
+    });
+    dentro?;
+    esperar_ate(|| VEZ.load(Ordering::SeqCst) == 2, 400)
+        .map_err(|_| "o outro fio nao entrou depois que a ordem foi solta")
+}
+
+/// Com o journal recusado, as revogações que ele perdeu não se sabem: a
+/// chave de um agente não vale — nem para um `ping` —, e a serial, que não
+/// tem credencial, continua. Com ele de volta, o agente volta.
+fn persistencia_o_journal_recusado_fecha_as_credenciais() -> Resultado {
+    com_agentes_de_teste(|| {
+        let (mut a, mut sa) = conectado(1)?;
+        let anterior = crate::persistencia::forcar_estado_de_teste(
+            crate::persistencia::Estado::Recusada("teste: um disco anterior a ancora"),
+        );
+        let recusado = pela_porta(&mut a, &mut sa, "agent.ping", "{}");
+        let comando = registry::encontrar("agent.ping").ok_or("agent.ping ausente")?;
+        let pela_serial = crate::autorizacao::autorizar(
+            crate::autorizacao::Chamador::Sessao(crate::agent::sessao::SERIAL),
+            comando,
+            Json(b"{}"),
+        );
+        crate::persistencia::forcar_estado_de_teste(anterior);
+        let recusado = recusado?;
+        if !recusado_com(&recusado, "DENY_NOT_AUTHENTICATED") {
+            crate::log_error!("teste", "{}", recusado);
+            return Err("com o journal recusado, a chave de um agente valeu");
+        }
+        if pela_serial.is_err() {
+            return Err("com o journal recusado, a serial foi recusada");
+        }
+        let de_volta = pela_porta(&mut a, &mut sa, "agent.ping", "{}")?;
+        if !de_volta.contains(r#""result""#) {
+            return Err("com o journal de volta, o agente nao voltou");
+        }
+        Ok(())
+    })
+}
+
+/// Uma entrada de registro: o tipo e os campos.
+type Entrada = (u16, alloc::vec::Vec<alloc::vec::Vec<u8>>);
+
+/// As entradas de mensagem de um registro.
+fn entradas_de_mensagem(r: &diario::Registro) -> Result<alloc::vec::Vec<Entrada>, &'static str> {
+    let mut v = alloc::vec::Vec::new();
+    for e in diario::estado::ler_campos(&r.conteudo)? {
+        let campos = diario::estado::ler_campos(e)?;
+        let (t, resto) = campos.split_first().ok_or("entrada vazia")?;
+        let t = u16::from_le_bytes((*t).try_into().map_err(|_| "tipo invalido")?);
+        v.push((t, resto.iter().map(|c| c.to_vec()).collect()));
+    }
+    Ok(v)
+}
+
+/// Cada mudança de uma mensagem é um registro, gravado antes da resposta,
+/// e a resposta diz `durable: true`: o envio leva a mensagem inteira, a
+/// primeira leitura a entrega, a confirmação a tira. Ler de novo o que já
+/// foi entregue não grava nada. A geração não sobe — mensagem não é
+/// autoridade —, e o corpo não aparece em claro no disco.
+fn mensagens_cada_transicao_e_um_registro() -> Resultado {
+    use diario::estado::tipo;
+    com_mensagens(|| {
+        const CORPO: &str = "segredo-no-disco-7f3a";
+        let (mut a, mut sa) = conectado(1)?;
+        let (mut b, mut sb) = conectado(2)?;
+        let geracao = crate::persistencia::geracao();
+        let antes = registros_do_journal()?.len();
+        let r = pela_porta(
+            &mut a,
+            &mut sa,
+            "message.send",
+            &alloc::format!(r#"{{"to":"teste-2","body":"{CORPO}","nonce":1}}"#),
+        )?;
+        let id = ids_de(&r).into_iter().next().ok_or("o envio nao deu id")?;
+        let n = numero_do_id(&id);
+        let depois = registros_do_journal()?;
+        let ultimo = depois.last().ok_or("journal vazio")?;
+        let criada = entradas_de_mensagem(ultimo)?;
+        if !r.contains(r#""durable":true"#)
+            || depois.len() != antes + 1
+            || ultimo.tipo != tipo::MENSAGENS
+            || ultimo.geracao != geracao
+            || !criada.iter().any(|(t, c)| {
+                *t == tipo::MENSAGEM_CRIADA
+                    && c.first().map(|v| v.as_slice()) == Some(&n.to_le_bytes()[..])
+                    && c.last().map(|v| v.as_slice()) == Some(CORPO.as_bytes())
+            })
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("o envio nao foi um registro de mensagem, duravel, com a mensagem inteira");
+        }
+        let setores: u64 = depois.iter().map(|_| 4).sum::<u64>() + 64;
+        let bruto = crate::persistencia::bytes_do_journal_de_teste(setores)?;
+        if bruto.windows(CORPO.len()).any(|j| j == CORPO.as_bytes()) {
+            return Err("o corpo da mensagem esta em claro no disco");
+        }
+
+        // A primeira leitura entrega: versão 2, gravada.
+        let r = pela_porta(&mut b, &mut sb, "message.read", "{}")?;
+        let depois = registros_do_journal()?;
+        let entregue = (
+            tipo::MENSAGEM_ESTADO,
+            alloc::vec![
+                n.to_le_bytes().to_vec(),
+                alloc::vec![politica::mensagens::Estado::Entregue.codigo()],
+                2u64.to_le_bytes().to_vec(),
+            ],
+        );
+        if !r.contains(r#""durable":true"#)
+            || depois.len() != antes + 2
+            || !entradas_de_mensagem(depois.last().ok_or("vazio")?)?.contains(&entregue)
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("a entrega nao foi gravada antes da resposta");
+        }
+        // De novo: nada muda, nada se grava.
+        let r = pela_porta(&mut b, &mut sb, "message.read", "{}")?;
+        if !r.contains(r#""durable":true"#) || registros_do_journal()?.len() != antes + 2 {
+            return Err("ler de novo o entregue gravou alguma coisa");
+        }
+        // A confirmação tira: versão 3, gravada.
+        let r = pela_porta(
+            &mut b,
+            &mut sb,
+            "message.ack",
+            &alloc::format!(r#"{{"id":"{id}"}}"#),
+        )?;
+        let depois = registros_do_journal()?;
+        let confirmada = (
+            tipo::MENSAGEM_ESTADO,
+            alloc::vec![
+                n.to_le_bytes().to_vec(),
+                alloc::vec![politica::mensagens::Estado::Confirmada.codigo()],
+                3u64.to_le_bytes().to_vec(),
+            ],
+        );
+        if !r.contains(r#""durable":true"#)
+            || depois.len() != antes + 3
+            || !entradas_de_mensagem(depois.last().ok_or("vazio")?)?.contains(&confirmada)
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("a confirmacao nao foi gravada antes da resposta");
+        }
+        if crate::persistencia::geracao() != geracao {
+            return Err("uma mensagem subiu a geracao");
+        }
+        Ok(())
+    })
+}
+
+/// Sem a persistência disponível, a mensagem vai — só em memória —, e a
+/// resposta diz isso, e por quê. Nada vai para o journal.
+fn mensagens_sem_persistencia_so_em_memoria() -> Resultado {
+    com_mensagens(|| {
+        let (mut a, mut sa) = conectado(1)?;
+        let (mut b, mut sb) = conectado(2)?;
+        let antes = registros_do_journal()?.len();
+        let anterior = crate::persistencia::forcar_estado_de_teste(
+            crate::persistencia::Estado::Indisponivel("teste: sem persistencia"),
+        );
+        let enviado = pela_porta(
+            &mut a,
+            &mut sa,
+            "message.send",
+            r#"{"to":"teste-2","body":"so em memoria","nonce":1}"#,
+        );
+        let lido = pela_porta(&mut b, &mut sb, "message.read", "{}");
+        crate::persistencia::forcar_estado_de_teste(anterior);
+        let (enviado, lido) = (enviado?, lido?);
+        if !enviado.contains(r#""ok":true"#)
+            || !enviado.contains(r#""durable":false"#)
+            || !enviado.contains(r#""memory_only":"teste: sem persistencia""#)
+        {
+            crate::log_error!("teste", "{}", enviado);
+            return Err("sem persistencia, o envio nao disse que vale so em memoria");
+        }
+        if !lido.contains("so em memoria") || !lido.contains(r#""durable":false"#) {
+            crate::log_error!("teste", "{}", lido);
+            return Err("sem persistencia, a mensagem nao foi lida, ou a leitura nao disse");
+        }
+        if registros_do_journal()?.len() != antes {
+            return Err("sem persistencia, alguma coisa foi para o journal");
+        }
+        Ok(())
+    })
+}
+
+/// O que o journal guardou das mensagens repõe a mesma tabela: as mesmas
+/// vivas, nos mesmos estados e versões, com os mesmos corpos e prazos.
+fn mensagens_o_journal_repoe_a_tabela() -> Resultado {
+    com_mensagens(|| {
+        let (mut a, mut sa) = conectado(1)?;
+        let (mut b, mut sb) = conectado(2)?;
+        let antes = registros_do_journal()?.len();
+        let mut ids = alloc::vec::Vec::new();
+        for (nonce, prazo) in [(1, 60_000), (2, 120_000), (3, 180_000), (4, 240_000)] {
+            let r = pela_porta(
+                &mut a,
+                &mut sa,
+                "message.send",
+                &alloc::format!(
+                    r#"{{"to":"teste-2","body":"corpo {nonce}","nonce":{nonce},"ttl_ms":{prazo}}}"#
+                ),
+            )?;
+            ids.push(ids_de(&r).into_iter().next().ok_or("sem id")?);
+        }
+        // B lê as duas primeiras e confirma a primeira; A cancela a última,
+        // que ninguém leu.
+        pela_porta(&mut b, &mut sb, "message.read", r#"{"max":2}"#)?;
+        pela_porta(
+            &mut b,
+            &mut sb,
+            "message.ack",
+            &alloc::format!(r#"{{"id":"{}"}}"#, ids[0]),
+        )?;
+        let r = pela_porta(
+            &mut a,
+            &mut sa,
+            "message.cancel",
+            &alloc::format!(r#"{{"id":"{}"}}"#, ids[3]),
+        )?;
+        if !r.contains(r#""state":"canceled""#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o cancelamento nao aconteceu");
+        }
+        let viva = crate::mensagens::retrato_de_teste();
+        let registros = registros_do_journal()?;
+        crate::mensagens::esquecer();
+        for r in &registros[antes..] {
+            crate::persistencia::reaplicar_de_teste(r)?;
+        }
+        let reposta = crate::mensagens::retrato_de_teste();
+        if viva.len() != 2 || reposta != viva {
+            crate::log_error!("teste", "{:?} / {:?}", viva, reposta);
+            return Err("o journal nao repos a mesma tabela");
+        }
+        Ok(())
+    })
+}
+
+/// A revogação de um titular anula as mensagens dele, e as anulações vão
+/// no registro da própria revogação: uma operação, um registro.
+fn mensagens_a_revogacao_anula_no_mesmo_registro() -> Resultado {
+    use diario::estado::tipo;
+    com_mensagens(|| {
+        crate::identidade::registrar_administrador_de_teste(
+            sigilo::publica_de(&ADMIN_DE_TESTE),
+            "administrador",
+        );
+        let (mut a, mut sa) = conectado(1)?;
+        let r = pela_porta(
+            &mut a,
+            &mut sa,
+            "message.send",
+            r#"{"to":"teste-2","body":"para quem sai","nonce":1}"#,
+        )?;
+        let n = numero_do_id(&ids_de(&r).into_iter().next().ok_or("sem id")?);
+        // Ninguém revoga quem alcança mais que si: o destinatário desce a um
+        // papel que o administrador alcança. A mensagem já foi aceita.
+        crate::identidade::atribuir(&nome_de_teste(2), "observador")
+            .map_err(|_| "o papel do destinatario nao mudou")?;
+        let antes = registros_do_journal()?.len();
+        let alvo = alloc::format!(
+            r#"{{"key":"{}"}}"#,
+            sigilo::hex(&sigilo::publica_de(&chave_de_teste(2)))
+        );
+        // Pela sessão da porta 1, como as outras operações administrativas
+        // da suíte: a serial é o `sistema`, que alcança mais que o
+        // administrador, e o não-autoprivilegiamento a recusa.
+        let r = executar_admin_com(1, &ADMIN_DE_TESTE, "agent.revoke", &alvo, &alvo)?;
+        if !r.contains(r#""executed":true"#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("a revogacao nao foi executada");
+        }
+        let depois = registros_do_journal()?;
+        let ultimo = depois.last().ok_or("vazio")?;
+        let entradas = entradas_de_mensagem(ultimo)?;
+        let anulada = (
+            tipo::MENSAGEM_ESTADO,
+            alloc::vec![
+                n.to_le_bytes().to_vec(),
+                alloc::vec![politica::mensagens::Estado::Anulada.codigo()],
+                2u64.to_le_bytes().to_vec(),
+            ],
+        );
+        if depois.len() != antes + 1
+            || ultimo.tipo != tipo::OPERACAO
+            || !entradas.iter().any(|(t, _)| *t == tipo::AGENTE_REVOGADO)
+            || !entradas.contains(&anulada)
+        {
+            return Err("a revogacao e a anulacao nao foram um registro so");
+        }
+        Ok(())
+    })
+}
+
 fn persistencia_a_geracao_amarra_o_quorum() -> Resultado {
     let novo = sigilo::publica_de(&[0x7E; 32]);
     let parametros = alloc::format!(
@@ -20456,6 +20807,34 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "persistencia: a geracao amarra as assinaturas do quorum",
         f: persistencia_a_geracao_amarra_o_quorum,
+    },
+    Caso {
+        nome: "persistencia: o nascimento da ancora e o primeiro valor do contador",
+        f: persistencia_o_nascimento_e_o_primeiro_valor,
+    },
+    Caso {
+        nome: "persistencia: a ordem das gravacoes espera quem a tem, e o mesmo fio entra de novo",
+        f: persistencia_a_ordem_das_gravacoes,
+    },
+    Caso {
+        nome: "persistencia: o journal recusado fecha as credenciais, e a serial continua",
+        f: persistencia_o_journal_recusado_fecha_as_credenciais,
+    },
+    Caso {
+        nome: "mensagens: cada transicao e um registro antes da resposta, e o corpo nao fica em claro",
+        f: mensagens_cada_transicao_e_um_registro,
+    },
+    Caso {
+        nome: "mensagens: sem persistencia, valem so em memoria e dizem isso",
+        f: mensagens_sem_persistencia_so_em_memoria,
+    },
+    Caso {
+        nome: "mensagens: o journal repoe a mesma tabela",
+        f: mensagens_o_journal_repoe_a_tabela,
+    },
+    Caso {
+        nome: "mensagens: a revogacao e as anulacoes vao no mesmo registro",
+        f: mensagens_a_revogacao_anula_no_mesmo_registro,
     },
     Caso {
         nome: "barra: nenhuma superficie a cobre",

@@ -57,21 +57,7 @@ impl Ligada {
         artefato: &Artefato,
         ambiente: Ambiente,
     ) -> Result<Ligada, String> {
-        let socket = caminho_socket(arch);
-        let mut qemu = comando_qemu(
-            arch,
-            artefato,
-            Some(&socket),
-            Teclado::Nativo,
-            Video::Linear,
-            &ambiente,
-        )?;
-        // A saída humana do x86 (COM1) não interessa aqui, e um terminal
-        // cheio de log do firmware a cada boot esconderia o resultado.
-        qemu.stdout(std::process::Stdio::null());
-        let mut filho = qemu
-            .spawn()
-            .map_err(|e| format!("não foi possível iniciar o {}: {e}", arch.qemu()))?;
+        let (mut filho, socket) = lancar(arch, artefato, &ambiente)?;
         let fluxo = match canal_de_pe(&socket, filho.id(), ESPERA_PELO_BOOT) {
             Ok(f) => f,
             Err(e) => {
@@ -130,6 +116,31 @@ impl Ligada {
     }
 }
 
+/// Liga o QEMU, sem esperar nada dele. Devolve o processo e o socket da
+/// serial do agente.
+fn lancar(
+    arch: Arquitetura,
+    artefato: &Artefato,
+    ambiente: &Ambiente,
+) -> Result<(Child, std::path::PathBuf), String> {
+    let socket = caminho_socket(arch);
+    let mut qemu = comando_qemu(
+        arch,
+        artefato,
+        Some(&socket),
+        Teclado::Nativo,
+        Video::Linear,
+        ambiente,
+    )?;
+    // A saída humana do x86 (COM1) não interessa aqui, e um terminal cheio
+    // de log do firmware a cada boot esconderia o resultado.
+    qemu.stdout(std::process::Stdio::null());
+    let filho = qemu
+        .spawn()
+        .map_err(|e| format!("não foi possível iniciar o {}: {e}", arch.qemu()))?;
+    Ok((filho, socket))
+}
+
 impl Drop for Ligada {
     fn drop(&mut self) {
         let _ = self.filho.kill();
@@ -178,8 +189,16 @@ const CENARIOS: &[Cenario] = &[
         rodar: o_journal_adulterado_e_recusado,
     },
     Cenario {
-        nome: "o que o journal diz vale mesmo recusado: o agente revogado nao volta",
+        nome: "o journal recusado: o agente revogado nele nao volta, nenhuma credencial vale, e a serial continua",
         rodar: o_journal_recusado_ainda_tira,
+    },
+    Cenario {
+        nome: "as mensagens sobrevivem ao corte, nos mesmos ids, estados e versoes, e a epoca continua",
+        rodar: as_mensagens_sobrevivem,
+    },
+    Cenario {
+        nome: "o prazo de uma mensagem e do tempo logico: nao volta com o RTC, e o vencido nao volta a pendente",
+        rodar: o_prazo_e_do_tempo_logico,
     },
     Cenario {
         nome: "a queda no meio da gravacao: o journal continua o atual, gravado ou nao",
@@ -203,24 +222,59 @@ const CENARIOS: &[Cenario] = &[
     },
 ];
 
+/// Os cenários que precisam do kernel da bancada, com os pontos de queda.
+const CENARIOS_DE_QUEDA: &[Cenario] = &[
+    Cenario {
+        nome: "a queda em cada fronteira de uma operacao: vale se o registro esta no disco, e nada fica recusado",
+        rodar: as_quedas_numa_operacao,
+    },
+    Cenario {
+        nome: "a queda em cada fronteira de uma mensagem: ela existe se o registro esta no disco",
+        rodar: as_quedas_numa_mensagem,
+    },
+    Cenario {
+        nome: "a queda na criacao da ancora e retomada, e nunca recusada para sempre",
+        rodar: as_quedas_na_criacao,
+    },
+    Cenario {
+        nome: "a fotografia tirada na fronteira, ou na criacao, e recusada depois que o TPM andou",
+        rodar: a_fotografia_da_fronteira_e_recusada,
+    },
+];
+
 /// `cargo xtask persistencia`: roda os cenários e diz quais passaram.
+///
+/// Os de queda vêm por último, sobre outra compilação do kernel — a de
+/// produção mais os pontos de queda —, que substitui a primeira no disco.
 pub(crate) fn persistencia(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
     let artefato = build(arch, release, false)?;
     println!(
         "[xtask] persistencia: {} cenarios, cada um sobre um estado zerado ({})",
-        CENARIOS.len(),
+        CENARIOS.len() + CENARIOS_DE_QUEDA.len(),
         arch.nome()
     );
     let mut falhas = 0;
-    for cenario in CENARIOS {
-        zerar_o_estado(arch)?;
-        match (cenario.rodar)(arch, &artefato) {
-            Ok(detalhe) => println!("  [persistencia] ok  {}: {detalhe}", cenario.nome),
-            Err(motivo) => {
-                falhas += 1;
-                println!("  [persistencia] FALHOU  {}: {motivo}", cenario.nome);
+    // Um filtro opcional pelo nome, para rodar só alguns — o que uma
+    // mutação dirigida precisa. Sem ele, todos.
+    let filtro = std::env::var("DUKE_CENARIOS").ok();
+    let escolhido = |c: &Cenario| filtro.as_deref().is_none_or(|f| c.nome.contains(f));
+    let mut rodar = |cenarios: &[Cenario], artefato: &Artefato| -> Result<(), String> {
+        for cenario in cenarios.iter().filter(|c| escolhido(c)) {
+            zerar_o_estado(arch)?;
+            match (cenario.rodar)(arch, artefato) {
+                Ok(detalhe) => println!("  [persistencia] ok  {}: {detalhe}", cenario.nome),
+                Err(motivo) => {
+                    falhas += 1;
+                    println!("  [persistencia] FALHOU  {}: {motivo}", cenario.nome);
+                }
             }
         }
+        Ok(())
+    };
+    rodar(CENARIOS, &artefato)?;
+    if CENARIOS_DE_QUEDA.iter().any(escolhido) {
+        let da_bancada = super::build_com(arch, release, &[FEATURE_DE_QUEDAS])?;
+        rodar(CENARIOS_DE_QUEDA, &da_bancada)?;
     }
     // O disco fica zerado para quem vier depois, como todo comando o deixa.
     zerar_o_estado(arch)?;
@@ -380,6 +434,7 @@ struct Persistencia {
     estado: String,
     motivo: String,
     geracao: u64,
+    registros: u64,
     boots: u64,
     relogio: u64,
     descargas: u64,
@@ -402,6 +457,7 @@ fn persistencia_de(maquina: &mut Ligada) -> Result<Persistencia, String> {
         estado: texto("state"),
         motivo: texto("reason"),
         geracao: numero("generation")?,
+        registros: numero("records")?,
         boots: numero("boots")?,
         relogio: numero("clock")?,
         descargas: numero("disk_flushes")?,
@@ -835,12 +891,30 @@ fn sem_tpm_nada_de_autoridade(arch: Arquitetura, artefato: &Artefato) -> Result<
     let atendido = super::AgenteNaPorta::conectar(arch, 1)
         .and_then(|mut a| a.pedir("agent.ping", "{}"))
         .is_ok_and(|r| r.contains(r#""result""#));
+    // E as mensagens continuam, só em memória, dizendo isso.
+    let enviada = super::AgenteNaPorta::conectar(arch, 1).and_then(|mut a| {
+        a.pedir(
+            "message.send",
+            &format!(
+                r#"{{"to":"{}","body":"sem tpm","nonce":1}}"#,
+                super::chaves::nome_do_agente(3)
+            ),
+        )
+    })?;
     m.cortar_a_energia()?;
     if !atendido {
         return Err("sem TPM, o agente da porta 1 nao foi atendido".into());
     }
+    if !enviada.contains(r#""ok":true"#)
+        || !enviada.contains(r#""durable":false"#)
+        || !enviada.contains(r#""memory_only""#)
+    {
+        return Err(format!(
+            "sem TPM, a mensagem nao foi, ou nao disse que vale so em memoria\n  {enviada}"
+        ));
+    }
     Ok(format!(
-        "{}; o agente da porta 1 continua atendido",
+        "{}; o agente da porta 1 continua atendido, e a mensagem vai so em memoria",
         p.motivo
     ))
 }
@@ -918,6 +992,16 @@ fn o_journal_recusado_ainda_tira(arch: Arquitetura, artefato: &Artefato) -> Resu
     let chaves = super::chaves::Chaves::garantir()?;
     let disco = disco_de_testes()?;
     let mut m = Ligada::subir(arch, artefato, None)?;
+    // Uma mensagem à serial, gravada antes do registro que vai se estragar:
+    // com o journal recusado, ela não pode reaparecer — o journal pode ser
+    // um disco antigo, e ela, uma já confirmada.
+    let r = super::AgenteNaPorta::conectar(arch, 1)?.pedir(
+        "message.send",
+        r#"{"to":"serial","body":"antes da recusa","nonce":1}"#,
+    )?;
+    if !r.contains(r#""durable":true"#) {
+        return Err(format!("a mensagem a serial nao foi duravel\n  {r}"));
+    }
     let revogado = sigilo::publica_de(&chaves.do_agente(2));
     let r = administrar(
         &mut m,
@@ -958,15 +1042,666 @@ fn o_journal_recusado_ainda_tira(arch: Arquitetura, artefato: &Artefato) -> Resu
     let revogado_entrou = super::AgenteNaPorta::conectar(arch, 2)
         .and_then(|mut a| a.pedir("agent.ping", "{}"))
         .is_ok_and(|r| r.contains(r#""result""#));
-    let outro_entrou = super::AgenteNaPorta::conectar(arch, 1)
-        .and_then(|mut a| a.pedir("agent.ping", "{}"))
-        .is_ok_and(|r| r.contains(r#""result""#));
+    // Nenhuma credencial vale com o journal recusado: o que ele perdeu
+    // pode ser a revogação de qualquer uma. A serial, sem credencial,
+    // continua — é por ela que se vê o que houve.
+    let outro =
+        super::AgenteNaPorta::conectar(arch, 1).and_then(|mut a| a.pedir("agent.ping", "{}"));
+    let serial = m.pedir("agent.ping", "{}")?;
+    let caixa = m.pedir("message.read", "{}")?;
     m.cortar_a_energia()?;
+    if caixa.contains("antes da recusa") {
+        return Err(format!(
+            "com o journal recusado, a mensagem dele reapareceu\n  {caixa}"
+        ));
+    }
     if revogado_entrou {
         return Err("com o journal recusado, o agente revogado nele voltou a entrar".into());
     }
-    if !outro_entrou {
-        return Err("com o journal recusado, o agente da porta 1 deixou de ser atendido".into());
+    if outro.as_ref().is_ok_and(|r| r.contains(r#""result""#)) {
+        return Err(format!(
+            "com o journal recusado, a chave do agente da porta 1 valeu\n  {outro:?}"
+        ));
     }
-    Ok("o agente revogado continua fora; o da porta 1, atendido".into())
+    if !serial.contains(r#""result""#) {
+        return Err(format!(
+            "com o journal recusado, a serial nao foi atendida\n  {serial}"
+        ));
+    }
+    Ok(
+        "o agente revogado continua fora, nenhuma chave vale, a serial atende, e a mensagem do journal recusado nao volta"
+            .into(),
+    )
+}
+
+/// O id de mensagem de uma resposta: o primeiro `"id":"..."` com texto.
+fn id_de_mensagem(r: &str) -> Option<String> {
+    let chave = r#""id":""#;
+    let resto = &r[r.find(chave)? + chave.len()..];
+    Some(resto[..resto.find('"')?].to_string())
+}
+
+/// O número de um id de mensagem — a parte depois da época.
+fn numero_de(id: &str) -> u64 {
+    id.rsplit(':')
+        .next()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0)
+}
+
+/// O estado de uma mensagem para o agente da porta `porta`.
+fn estado_de(arch: Arquitetura, porta: u8, id: &str) -> Result<String, String> {
+    let r = super::AgenteNaPorta::conectar(arch, porta)?
+        .pedir("message.status", &format!(r#"{{"id":"{id}"}}"#))?;
+    super::campo_simples(&r, "state").ok_or_else(|| format!("sem estado\n  {r}"))
+}
+
+/// As mensagens respondidas com `durable: true` sobrevivem a um corte de
+/// energia: a porta 1 manda três à porta 3, que lê duas e confirma uma.
+/// No boot seguinte a confirmada continua confirmada, a entregue continua
+/// entregue, a pendente continua lá, os ids são os mesmos — com a mesma
+/// época —, e o próximo id continua de onde parou.
+fn as_mensagens_sobrevivem(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    let para = super::chaves::nome_do_agente(3);
+    let m = Ligada::subir(arch, artefato, None)?;
+    let mut um = super::AgenteNaPorta::conectar(arch, 1)?;
+    let mut ids = Vec::new();
+    for n in 1..=3 {
+        let r = um.pedir(
+            "message.send",
+            &format!(r#"{{"to":"{para}","body":"sobrevive {n}","nonce":{n}}}"#),
+        )?;
+        if !r.contains(r#""durable":true"#) {
+            return Err(format!("o envio {n} nao foi duravel\n  {r}"));
+        }
+        ids.push(id_de_mensagem(&r).ok_or_else(|| format!("sem id\n  {r}"))?);
+    }
+    let mut tres = super::AgenteNaPorta::conectar(arch, 3)?;
+    let lida = tres.pedir("message.read", r#"{"max":2}"#)?;
+    let confirmada = tres.pedir("message.ack", &format!(r#"{{"id":"{}"}}"#, ids[0]))?;
+    if !lida.contains(r#""durable":true"#) || !confirmada.contains(r#""durable":true"#) {
+        return Err(format!(
+            "a leitura ou a confirmacao nao foi duravel\n  {lida}\n  {confirmada}"
+        ));
+    }
+    drop((um, tres));
+    m.cortar_a_energia()?;
+
+    let m = Ligada::subir(arch, artefato, None)?;
+    let estados = [
+        estado_de(arch, 1, &ids[0])?,
+        estado_de(arch, 1, &ids[1])?,
+        estado_de(arch, 1, &ids[2])?,
+    ];
+    let esperados = ["acked", "delivered", "pending"];
+    if estados != esperados {
+        m.cortar_a_energia()?;
+        return Err(format!(
+            "depois do corte, os estados sao {estados:?}, e nao {esperados:?}"
+        ));
+    }
+    let lida = super::AgenteNaPorta::conectar(arch, 3)?.pedir("message.read", "{}")?;
+    let r = super::AgenteNaPorta::conectar(arch, 1)?.pedir(
+        "message.send",
+        &format!(r#"{{"to":"{para}","body":"depois","nonce":1}}"#),
+    )?;
+    m.cortar_a_energia()?;
+    if !lida.contains(&ids[1]) || !lida.contains(&ids[2]) || lida.contains(&ids[0]) {
+        return Err(format!(
+            "a caixa depois do corte nao e a de antes\n  {lida}"
+        ));
+    }
+    let novo = id_de_mensagem(&r).ok_or_else(|| format!("sem id\n  {r}"))?;
+    let epoca = |id: &str| id.split(':').next().unwrap_or("").to_string();
+    if epoca(&novo) != epoca(&ids[0]) || numero_de(&novo) <= numero_de(&ids[2]) {
+        return Err(format!(
+            "o id depois do corte nao continua os de antes: {novo} depois de {}",
+            ids[2]
+        ));
+    }
+    Ok(format!(
+        "{} confirmada, {} entregue, {} pendente; o proximo e {novo}",
+        ids[0], ids[1], ids[2]
+    ))
+}
+
+/// O prazo de uma mensagem corre no tempo lógico. Num boot em 2031 a porta
+/// 1 manda duas: uma de um minuto e uma de um segundo, que vence e é
+/// gravada vencida. No boot seguinte, com o RTC em 2024, o tempo lógico
+/// está no piso de 2031: a de um minuto não venceu, e a vencida não voltou
+/// a pendente. No terceiro, em 2032, a de um minuto venceu.
+fn o_prazo_e_do_tempo_logico(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    let para = super::chaves::nome_do_agente(3);
+    let m = Ligada::subir(arch, artefato, Some("2031-05-17T12:00:00"))?;
+    let mut um = super::AgenteNaPorta::conectar(arch, 1)?;
+    let mut ids = Vec::new();
+    for (n, prazo) in [(1, 60_000), (2, 1_000)] {
+        let r = um.pedir(
+            "message.send",
+            &format!(r#"{{"to":"{para}","body":"prazo {n}","nonce":{n},"ttl_ms":{prazo}}}"#),
+        )?;
+        ids.push(id_de_mensagem(&r).ok_or_else(|| format!("sem id\n  {r}"))?);
+    }
+    // A curta vence em até dois segundos lógicos; a consulta a vence e grava.
+    let limite = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        if estado_de(arch, 1, &ids[1])? == "expired" {
+            break;
+        }
+        if std::time::Instant::now() >= limite {
+            return Err("a mensagem de um segundo nao venceu".into());
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    drop(um);
+    m.cortar_a_energia()?;
+
+    let m = Ligada::subir(arch, artefato, Some("2024-01-01T00:00:00"))?;
+    let em_2024 = [estado_de(arch, 1, &ids[0])?, estado_de(arch, 1, &ids[1])?];
+    m.cortar_a_energia()?;
+    if em_2024 != ["pending", "expired"] {
+        return Err(format!(
+            "com o RTC em 2024, os estados sao {em_2024:?}: o prazo andou para tras"
+        ));
+    }
+    let m = Ligada::subir(arch, artefato, Some("2032-05-17T12:00:00"))?;
+    let em_2032 = estado_de(arch, 1, &ids[0])?;
+    m.cortar_a_energia()?;
+    if em_2032 != "expired" {
+        return Err(format!("com o RTC em 2032, a de um minuto esta {em_2032}"));
+    }
+    Ok(
+        "em 2024 a de um minuto continua pendente e a vencida continua vencida; em 2032 venceu"
+            .into(),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// As quedas nas fronteiras entre o journal e a âncora
+// ---------------------------------------------------------------------------
+
+/// A feature do kernel com os pontos de queda — ver `kernel/src/quedas.rs`.
+/// Só esta bancada a pede.
+const FEATURE_DE_QUEDAS: &str = "quedas";
+
+/// Os pontos de queda, com os números de `kernel/src/quedas.rs`.
+mod ponto {
+    pub const ANCORA_DEFINIDA: u8 = 1;
+    pub const ANCORA_AVANCADA: u8 = 2;
+    pub const NASCIMENTO_GUARDADO: u8 = 3;
+    pub const ANTES_DA_ESCRITA: u8 = 10;
+    pub const DEPOIS_DA_ESCRITA: u8 = 11;
+    pub const DEPOIS_DA_DESCARGA: u8 = 12;
+    pub const DEPOIS_DO_CONTADOR: u8 = 13;
+}
+
+/// Quanto esperar o aviso da queda depois do pedido que a provoca.
+const ESPERA_PELA_QUEDA: Duration = Duration::from_secs(60);
+
+/// Escreve `bytes` (um setor) no setor `setor` da partição de estado.
+fn escrever_setor_do_estado(disco: &Path, setor: u64, bytes: &[u8; 512]) -> Result<(), String> {
+    use std::io::{Seek, SeekFrom, Write};
+    let mut arquivo = std::fs::OpenOptions::new()
+        .write(true)
+        .open(disco)
+        .map_err(|e| format!("não foi possível abrir {}: {e}", disco.display()))?;
+    arquivo
+        .seek(SeekFrom::Start((disco::ESTADO_EM + setor) * 512))
+        .and_then(|_| arquivo.write_all(bytes))
+        .and_then(|()| arquivo.sync_all())
+        .map_err(|e| format!("não foi possível escrever no estado: {e}"))
+}
+
+/// O plano da queda: no último setor da partição, como o kernel o lê.
+fn plano_de_queda(disco: &Path, ponto: u8, gravacao: u32) -> Result<(), String> {
+    let mut setor = [0u8; 512];
+    setor[..8].copy_from_slice(b"DUKEQUED");
+    setor[8] = ponto;
+    setor[12..16].copy_from_slice(&gravacao.to_le_bytes());
+    escrever_setor_do_estado(disco, disco::ESTADO_SETORES - 1, &setor)
+}
+
+fn sem_plano(disco: &Path) -> Result<(), String> {
+    escrever_setor_do_estado(disco, disco::ESTADO_SETORES - 1, &[0; 512])
+}
+
+/// Os registros do journal no disco, pelo cabeçalho em claro de cada um:
+/// onde começa e quantos setores tem. Para no primeiro setor que não é
+/// cabeçalho.
+fn registros_no_disco(disco: &Path) -> Result<Vec<(u64, u64)>, String> {
+    let estado = ler_o_estado(disco)?;
+    let mut v = Vec::new();
+    let mut setor = 0usize;
+    while let Some(c) = estado.get(setor * 512..setor * 512 + 64) {
+        if &c[..8] != b"DUKEDIA1" {
+            break;
+        }
+        let n = u32::from_le_bytes([c[12], c[13], c[14], c[15]]) as usize;
+        if n == 0 {
+            break;
+        }
+        v.push((setor as u64, n as u64));
+        setor += n;
+    }
+    Ok(v)
+}
+
+/// A escrita que não foi descarregada se perde: os setores do último
+/// registro voltam a zero, como num disco que não chegou a gravá-los.
+fn perder_o_ultimo_registro(disco: &Path) -> Result<(), String> {
+    let (inicio, n) = *registros_no_disco(disco)?
+        .last()
+        .ok_or("o journal esta vazio")?;
+    for s in inicio..inicio + n {
+        escrever_setor_do_estado(disco, s, &[0; 512])?;
+    }
+    Ok(())
+}
+
+/// O número do ponto num aviso de queda, se a linha é um.
+fn aviso_de_queda(linha: &str) -> Option<u8> {
+    let resto = linha.split(r#"{"queda":"#).nth(1)?;
+    resto.split('}').next()?.trim().parse().ok()
+}
+
+/// Lê linhas de `leitor` até o aviso da queda, ou até `espera` passar.
+fn esperar_o_aviso(leitor: &mut BufReader<UnixStream>, espera: Duration) -> Result<u8, String> {
+    use std::io::BufRead;
+    let limite = std::time::Instant::now() + espera;
+    let mut linha = String::new();
+    while std::time::Instant::now() < limite {
+        match leitor.read_line(&mut linha) {
+            Ok(0) => return Err("o canal fechou antes do aviso da queda".into()),
+            Ok(_) => {
+                if let Some(p) = aviso_de_queda(&linha) {
+                    return Ok(p);
+                }
+                linha.clear();
+            }
+            // Um tempo sem nada: o que veio pela metade continua em `linha`.
+            Err(_) => {}
+        }
+    }
+    Err(format!(
+        "a maquina nao avisou a queda em {}s",
+        espera.as_secs()
+    ))
+}
+
+impl Ligada {
+    /// Manda um pedido que o plano faz cair: espera o aviso, e corta a
+    /// energia. Devolve o ponto em que caiu.
+    fn pedir_ate_cair(mut self, metodo: &str, params: &str) -> Result<u8, String> {
+        use std::io::Write;
+        self.id += 1;
+        let linha = format!(
+            r#"{{"jsonrpc":"2.0","id":{},"method":"{metodo}","params":{params}}}"#,
+            self.id
+        );
+        self.escrita
+            .write_all(linha.as_bytes())
+            .and_then(|()| self.escrita.write_all(b"\n"))
+            .map_err(|e| format!("falha ao mandar o pedido: {e}"))?;
+        let caiu = esperar_o_aviso(&mut self.leitor, ESPERA_PELA_QUEDA);
+        self.cortar_a_energia()?;
+        caiu
+    }
+
+    /// Espera o aviso de uma queda que vem de outro lugar — um pedido numa
+    /// porta —, e corta a energia.
+    fn esperar_a_queda(mut self) -> Result<u8, String> {
+        let caiu = esperar_o_aviso(&mut self.leitor, ESPERA_PELA_QUEDA);
+        self.cortar_a_energia()?;
+        caiu
+    }
+}
+
+/// Liga a máquina com um plano que a faz cair no boot, antes de o canal
+/// atender: lê a serial desde o começo até o aviso, e corta a energia.
+fn subir_ate_cair(arch: Arquitetura, artefato: &Artefato) -> Result<u8, String> {
+    let mut ambiente = Ambiente::ligar(arch, None)?;
+    let (mut filho, socket) = lancar(arch, artefato, &ambiente)?;
+    let limite = std::time::Instant::now() + ESPERA_PELO_BOOT;
+    let conectado = loop {
+        if let Ok(f) = UnixStream::connect(&socket) {
+            break Ok(f);
+        }
+        if std::time::Instant::now() >= limite {
+            break Err("o socket da serial nao abriu".to_string());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let caiu = conectado.and_then(|f| {
+        f.set_read_timeout(Some(Duration::from_secs(1)))
+            .map_err(|e| e.to_string())?;
+        esperar_o_aviso(&mut BufReader::new(f), ESPERA_PELO_BOOT)
+    });
+    let _ = filho.kill();
+    let _ = filho.wait();
+    if let Some((tpm, _)) = ambiente.tpm.as_mut() {
+        let _ = tpm.kill();
+        let _ = tpm.wait();
+    }
+    caiu
+}
+
+/// Uma operação administrativa que o plano faz cair.
+fn administrar_ate_cair(
+    mut maquina: Ligada,
+    privada: &[u8; 32],
+    comando: &str,
+    params: &str,
+) -> Result<u8, String> {
+    let desafio = maquina.pedir("admin.challenge", "{}")?;
+    let pedido = super::pedido_administrativo_de(privada, 0, &desafio, comando, params, params)?;
+    maquina.pedir_ate_cair("admin.execute", &pedido)
+}
+
+/// Se o agente de chave `privada` entra, e é quem o registro diz.
+fn agente_entra(arch: Arquitetura, privada: &[u8; 32], nome: &str) -> Result<bool, String> {
+    let chaves = super::chaves::Chaves::garantir()?;
+    Ok(
+        super::AgenteNaPorta::conectar_com(arch, 1, privada, &chaves.duke)
+            .and_then(|mut a| a.pedir("agent.session", "{}"))
+            .is_ok_and(|r| r.contains(&format!(r#""agent":"{nome}""#))),
+    )
+}
+
+/// O caso de uma queda dentro de uma gravação: o ponto, se a escrita sem
+/// descarga se perde, se a operação vale depois, e como se lê.
+type Caso = (u8, bool, bool, &'static str);
+
+/// As quedas dentro de uma gravação, em cada fronteira. Valer ou não valer
+/// é o que o ponto decide; o que nunca pode acontecer é o boot seguinte
+/// recusar, ou o próximo registro não gravar.
+const QUEDAS_NA_GRAVACAO: [Caso; 5] = [
+    (ponto::ANTES_DA_ESCRITA, false, false, "antes da escrita"),
+    (
+        ponto::DEPOIS_DA_ESCRITA,
+        false,
+        true,
+        "depois da escrita, que chegou ao disco",
+    ),
+    (
+        ponto::DEPOIS_DA_ESCRITA,
+        true,
+        false,
+        "depois da escrita, que se perdeu sem a descarga",
+    ),
+    (
+        ponto::DEPOIS_DA_DESCARGA,
+        false,
+        true,
+        "depois da descarga, antes do contador",
+    ),
+    (
+        ponto::DEPOIS_DO_CONTADOR,
+        false,
+        true,
+        "depois do contador, antes da resposta",
+    ),
+];
+
+/// Depois de uma queda: a persistência de pé, com `registros` registros e
+/// a geração `geracao`.
+fn conferir_depois_da_queda(
+    p: &Persistencia,
+    caso: &str,
+    registros: u64,
+    geracao: u64,
+) -> Result<(), String> {
+    if p.estado != "available" {
+        return Err(format!(
+            "{caso}: o boot seguinte deixou a persistencia {} ({})",
+            p.estado, p.motivo
+        ));
+    }
+    if p.registros != registros || p.geracao != geracao {
+        return Err(format!(
+            "{caso}: {} registros e geracao {}, e nao {registros} e {geracao}",
+            p.registros, p.geracao
+        ));
+    }
+    Ok(())
+}
+
+/// A queda em cada fronteira de uma operação de autoridade — o registro de
+/// um agente —: antes de escrever, depois de escrever (a escrita chegou ao
+/// disco, ou se perdeu por não ter sido descarregada), depois de
+/// descarregar e antes do contador, depois do contador e antes da resposta.
+/// Em todos, o boot seguinte sobe com a persistência de pé, a operação vale
+/// exatamente quando o registro dela está no disco, e a próxima operação
+/// grava e sobrevive a mais um boot.
+fn as_quedas_numa_operacao(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    let chaves = super::chaves::Chaves::garantir()?;
+    let disco = disco_de_testes()?;
+    for (i, (ponto, perder, vale, caso)) in QUEDAS_NA_GRAVACAO.into_iter().enumerate() {
+        zerar_o_estado(arch)?;
+        // A abertura e o boot são as gravações 1 e 2; a operação, a 3.
+        plano_de_queda(&disco, ponto, 3)?;
+        let privada = [0x70 + i as u8; 32];
+        let nome = format!("fronteira-{i}");
+        let m = Ligada::subir(arch, artefato, None)?;
+        let caiu = administrar_ate_cair(
+            m,
+            &chaves.administrador,
+            "agent.register",
+            &registro_de_agente(&privada, &nome, "observador"),
+        )?;
+        if caiu != ponto {
+            return Err(format!("{caso}: caiu no ponto {caiu}, e nao no {ponto}"));
+        }
+        sem_plano(&disco)?;
+        if perder {
+            perder_o_ultimo_registro(&disco)?;
+        }
+
+        let mut m = Ligada::subir(arch, artefato, None)?;
+        let p = persistencia_de(&mut m)?;
+        // Valendo: abertura, boot, a operação e o boot de agora.
+        conferir_depois_da_queda(&p, caso, if vale { 4 } else { 3 }, u64::from(vale))?;
+        if agente_entra(arch, &privada, &nome)? != vale {
+            m.cortar_a_energia()?;
+            return Err(format!(
+                "{caso}: o agente {} depois da queda",
+                if vale { "nao entrou" } else { "entrou" }
+            ));
+        }
+        let r = administrar(
+            &mut m,
+            &chaves.administrador,
+            "agent.register",
+            &registro_de_agente(&[0x90 + i as u8; 32], &format!("depois-{i}"), "observador"),
+        )?;
+        m.cortar_a_energia()?;
+        if !executou(&r) {
+            return Err(format!(
+                "{caso}: a operacao seguinte nao foi executada\n  {r}"
+            ));
+        }
+        let mut m = Ligada::subir(arch, artefato, None)?;
+        let p = persistencia_de(&mut m)?;
+        m.cortar_a_energia()?;
+        conferir_depois_da_queda(&p, caso, if vale { 6 } else { 5 }, u64::from(vale) + 1)?;
+    }
+    Ok(format!(
+        "{} quedas: cada uma vale exatamente quando o registro esta no disco, e nenhuma deixa o estado recusado",
+        QUEDAS_NA_GRAVACAO.len()
+    ))
+}
+
+/// A mesma coisa para uma mensagem: a porta 1 manda à 3, e a energia cai
+/// em cada fronteira da gravação. A mensagem existe depois exatamente
+/// quando o registro dela está no disco — e uma que não foi respondida
+/// pode existir, mas uma respondida com `durable: true` nunca some (essa
+/// promessa é do cenário das mensagens que sobrevivem).
+fn as_quedas_numa_mensagem(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    let disco = disco_de_testes()?;
+    let para = super::chaves::nome_do_agente(3);
+    for (i, (ponto, perder, vale, caso)) in QUEDAS_NA_GRAVACAO.into_iter().enumerate() {
+        zerar_o_estado(arch)?;
+        plano_de_queda(&disco, ponto, 3)?;
+        let m = Ligada::subir(arch, artefato, None)?;
+        let corpo = format!("fronteira {i}");
+        let pedido = format!(r#"{{"to":"{para}","body":"{corpo}","nonce":1}}"#);
+        // O pedido na porta não volta: a máquina congela no meio dele. Ele
+        // vai num fio à parte, e o aviso vem pela serial.
+        let fio = std::thread::spawn(move || {
+            super::AgenteNaPorta::conectar(arch, 1)
+                .and_then(|mut a| a.pedir("message.send", &pedido))
+        });
+        let caiu = m.esperar_a_queda();
+        let _ = fio.join();
+        let caiu = caiu?;
+        if caiu != ponto {
+            return Err(format!("{caso}: caiu no ponto {caiu}, e nao no {ponto}"));
+        }
+        sem_plano(&disco)?;
+        if perder {
+            perder_o_ultimo_registro(&disco)?;
+        }
+
+        let mut m = Ligada::subir(arch, artefato, None)?;
+        let p = persistencia_de(&mut m)?;
+        // A mensagem não sobe a geração.
+        conferir_depois_da_queda(&p, caso, if vale { 4 } else { 3 }, 0)?;
+        let lida = super::AgenteNaPorta::conectar(arch, 3)
+            .and_then(|mut a| a.pedir("message.read", "{}"))?;
+        m.cortar_a_energia()?;
+        if lida.contains(&corpo) != vale {
+            return Err(format!(
+                "{caso}: a mensagem {} depois da queda\n  {lida}",
+                if vale { "sumiu" } else { "apareceu" }
+            ));
+        }
+    }
+    Ok(format!(
+        "{} quedas: a mensagem existe exatamente quando o registro esta no disco",
+        QUEDAS_NA_GRAVACAO.len()
+    ))
+}
+
+/// A queda na criação da âncora, no primeiro boot de todos: com o contador
+/// definido e nunca avançado, avançado e sem nascimento, com o nascimento e
+/// sem a abertura, e dentro da gravação da abertura. Nenhuma deixa o
+/// sistema recusado para sempre: o boot seguinte retoma a criação ou a
+/// completa, e o journal começa normalmente.
+fn as_quedas_na_criacao(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    let chaves = super::chaves::Chaves::garantir()?;
+    let disco = disco_de_testes()?;
+    let casos: [(u8, &str); 6] = [
+        (
+            ponto::ANCORA_DEFINIDA,
+            "o contador definido e nunca avancado",
+        ),
+        (
+            ponto::ANCORA_AVANCADA,
+            "o contador avancado, sem nascimento",
+        ),
+        (
+            ponto::NASCIMENTO_GUARDADO,
+            "o nascimento guardado, sem abertura",
+        ),
+        (ponto::ANTES_DA_ESCRITA, "a abertura montada e nao escrita"),
+        (
+            ponto::DEPOIS_DA_DESCARGA,
+            "a abertura descarregada, sem contador",
+        ),
+        (ponto::DEPOIS_DO_CONTADOR, "a abertura ancorada, sem o boot"),
+    ];
+    for (ponto, caso) in casos {
+        zerar_o_estado(arch)?;
+        plano_de_queda(&disco, ponto, 1)?;
+        let caiu = subir_ate_cair(arch, artefato)?;
+        if caiu != ponto {
+            return Err(format!("{caso}: caiu no ponto {caiu}, e nao no {ponto}"));
+        }
+        sem_plano(&disco)?;
+        let mut m = Ligada::subir(arch, artefato, None)?;
+        let p = persistencia_de(&mut m)?;
+        conferir_depois_da_queda(&p, caso, 2, 0)?;
+        let r = administrar(
+            &mut m,
+            &chaves.administrador,
+            "agent.register",
+            &registro_de_agente(
+                &[0xA0 + ponto; 32],
+                &format!("criacao-{ponto}"),
+                "observador",
+            ),
+        )?;
+        m.cortar_a_energia()?;
+        if !executou(&r) {
+            return Err(format!(
+                "{caso}: a primeira operacao nao foi executada\n  {r}"
+            ));
+        }
+        let mut m = Ligada::subir(arch, artefato, None)?;
+        let p = persistencia_de(&mut m)?;
+        m.cortar_a_energia()?;
+        conferir_depois_da_queda(&p, caso, 4, 1)?;
+    }
+    Ok("6 quedas na criacao: cada uma retomada ou completada no boot seguinte".into())
+}
+
+/// A fotografia tirada na fronteira não volta: com a energia caída depois
+/// da descarga e antes do contador, o disco tem um registro que o TPM ainda
+/// não viu. O boot seguinte completa o avanço, a vida segue — e devolver ao
+/// disco aquela fotografia é devolver um disco anterior ao que o TPM já
+/// confirmou: recusado. O mesmo com a fotografia da criação interrompida,
+/// com o journal ainda vazio: depois de o contador passar do nascimento,
+/// ela é um disco apagado.
+fn a_fotografia_da_fronteira_e_recusada(
+    arch: Arquitetura,
+    artefato: &Artefato,
+) -> Result<String, String> {
+    let chaves = super::chaves::Chaves::garantir()?;
+    let disco = disco_de_testes()?;
+    let mut motivos = Vec::new();
+    for na_criacao in [false, true] {
+        zerar_o_estado(arch)?;
+        if na_criacao {
+            plano_de_queda(&disco, ponto::NASCIMENTO_GUARDADO, 1)?;
+            subir_ate_cair(arch, artefato)?;
+        } else {
+            plano_de_queda(&disco, ponto::DEPOIS_DA_DESCARGA, 3)?;
+            let m = Ligada::subir(arch, artefato, None)?;
+            administrar_ate_cair(
+                m,
+                &chaves.administrador,
+                "agent.register",
+                &registro_de_agente(&[0xB0; 32], "fotografado", "observador"),
+            )?;
+        }
+        sem_plano(&disco)?;
+        let foto = ler_o_estado(&disco)?;
+        let mut m = Ligada::subir(arch, artefato, None)?;
+        let r = administrar(
+            &mut m,
+            &chaves.administrador,
+            "agent.register",
+            &registro_de_agente(&[0xB1; 32], "depois-da-foto", "observador"),
+        )?;
+        m.cortar_a_energia()?;
+        if !executou(&r) {
+            return Err(format!("a operacao depois da fotografia falhou\n  {r}"));
+        }
+        escrever_no_estado(&disco, &foto)?;
+        let mut m = Ligada::subir(arch, artefato, None)?;
+        let p = persistencia_de(&mut m)?;
+        m.cortar_a_energia()?;
+        if p.estado != "refused" {
+            return Err(format!(
+                "a fotografia {} voltou e foi aceita: {}",
+                if na_criacao {
+                    "da criacao"
+                } else {
+                    "da fronteira"
+                },
+                p.estado
+            ));
+        }
+        motivos.push(p.motivo);
+    }
+    Ok(motivos.join("; "))
 }

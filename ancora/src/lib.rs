@@ -42,6 +42,18 @@
 //! Quem não tem a senha só consegue o que não ajuda a ninguém: não lê, não
 //! avança. E mesmo que avançasse, o efeito seria o disco parecer velho — a
 //! administração bloqueada, e não uma credencial de volta.
+//!
+//! # O nascimento
+//!
+//! Ao lado do contador mora um segundo índice, comum, de oito bytes: o
+//! valor que o contador tinha quando nasceu. Ele responde a uma pergunta
+//! que o contador sozinho não responde. Um journal vazio diante de um
+//! contador presente é um disco apagado — a menos que o contador nunca
+//! tenha passado do valor com que nasceu, e então nenhum registro chegou a
+//! ser confirmado: a criação foi interrompida por uma queda, e retomá-la
+//! não perde nada. Sem o nascimento, as duas coisas são o mesmo par de
+//! números, e a segunda — uma queda na primeira instalação — viraria uma
+//! recusa para sempre.
 
 #![no_std]
 
@@ -123,6 +135,7 @@ mod comando {
     pub const NV_DEFINE_SPACE: u32 = 0x0000_012A;
     pub const NV_INCREMENT: u32 = 0x0000_0134;
     pub const NV_READ: u32 = 0x0000_014E;
+    pub const NV_WRITE: u32 = 0x0000_0137;
     pub const NV_READ_PUBLIC: u32 = 0x0000_0169;
 }
 
@@ -164,6 +177,9 @@ pub mod atributo {
 
     /// Os atributos com que a âncora é criada, e os únicos que ela pode ter.
     pub const DA_ANCORA: u32 = ESCRITA_COM_SENHA | TIPO_CONTADOR | LEITURA_COM_SENHA | SEM_BLOQUEIO;
+    /// Os do índice do nascimento: um índice comum (tipo 0), com a mesma
+    /// senha e as mesmas regras de leitura e escrita da âncora.
+    pub const DO_NASCIMENTO: u32 = ESCRITA_COM_SENHA | LEITURA_COM_SENHA | SEM_BLOQUEIO;
 }
 
 /// O tamanho de um contador: oito bytes, sempre.
@@ -405,6 +421,17 @@ pub fn definir_contador<T: Tpm>(
     senha_do_dono: &[u8],
     senha: &[u8],
 ) -> Result<(), Erro> {
+    definir(tpm, indice, senha_do_dono, senha, atributo::DA_ANCORA)
+}
+
+/// `TPM2_NV_DefineSpace` de um índice de oito bytes com estes `atributos`.
+fn definir<T: Tpm>(
+    tpm: &mut T,
+    indice: u32,
+    senha_do_dono: &[u8],
+    senha: &[u8],
+    atributos: u32,
+) -> Result<(), Erro> {
     let mut q = Quadro::novo(COM_SESSOES, comando::NV_DEFINE_SPACE);
     q.u32(DONO);
     q.sessao_de_senha(senha_do_dono);
@@ -414,7 +441,7 @@ pub fn definir_contador<T: Tpm>(
     q.u16(4 + 2 + 4 + 2 + 2);
     q.u32(indice);
     q.u16(SHA256);
-    q.u32(atributo::DA_ANCORA);
+    q.u32(atributos);
     q.tpm2b(&[]);
     q.u16(TAMANHO_DO_CONTADOR);
     sem_parametros(tpm, q.fechar())
@@ -438,7 +465,19 @@ pub fn incrementar<T: Tpm>(tpm: &mut T, indice: u32, senha: &[u8]) -> Result<(),
     sem_parametros(tpm, q.fechar())
 }
 
-/// `TPM2_NV_Read` dos oito bytes do contador.
+/// `TPM2_NV_Write` dos oito bytes de um índice comum, a partir do início.
+pub fn escrever<T: Tpm>(tpm: &mut T, indice: u32, senha: &[u8], valor: u64) -> Result<(), Erro> {
+    let mut q = Quadro::novo(COM_SESSOES, comando::NV_WRITE);
+    q.u32(indice);
+    q.u32(indice);
+    q.sessao_de_senha(senha);
+    q.tpm2b(&valor.to_be_bytes());
+    q.u16(0);
+    sem_parametros(tpm, q.fechar())
+}
+
+/// `TPM2_NV_Read` dos oito bytes do contador — ou de um índice comum do
+/// mesmo tamanho, como o do nascimento.
 pub fn ler_contador<T: Tpm>(tpm: &mut T, indice: u32, senha: &[u8]) -> Result<u64, Erro> {
     let mut q = Quadro::novo(COM_SESSOES, comando::NV_READ);
     q.u32(indice);
@@ -559,6 +598,63 @@ impl Ancora {
     /// O índice de NV.
     pub fn indice(&self) -> u32 {
         self.indice
+    }
+
+    /// O valor com que o contador nasceu, guardado no índice `indice`, ou
+    /// `None` se ainda não foi guardado — o índice não existe, ou existe e
+    /// nunca foi escrito.
+    ///
+    /// Um índice que existe e não é o que [`Ancora::registrar_nascimento`]
+    /// faz é [`Erro::IndiceEstranho`], pela mesma razão que o da âncora.
+    pub fn nascimento<T: Tpm>(&self, tpm: &mut T, indice: u32) -> Result<Option<u64>, Erro> {
+        let Some(publico) = ler_publico(tpm, indice)? else {
+            return Ok(None);
+        };
+        if publico.atributos & !atributo::ESCRITO != atributo::DO_NASCIMENTO
+            || publico.algoritmo_do_nome != SHA256
+            || publico.tem_politica
+            || publico.tamanho != TAMANHO_DO_CONTADOR
+        {
+            return Err(Erro::IndiceEstranho);
+        }
+        match ler_contador(tpm, indice, &self.senha) {
+            Err(Erro::Codigo(codigo::NV_NAO_INICIALIZADO)) => Ok(None),
+            outro => outro.map(Some),
+        }
+    }
+
+    /// Guarda no índice `indice` o valor do contador **agora**, como o do
+    /// nascimento, e o devolve. Define o índice se ele não existe.
+    ///
+    /// Quem chama garante que o contador ainda não passou do valor com que
+    /// nasceu — que nenhum registro foi confirmado contra ele. É o caso na
+    /// criação, e na retomada de uma criação interrompida com o journal
+    /// vazio.
+    pub fn registrar_nascimento<T: Tpm>(
+        &self,
+        tpm: &mut T,
+        indice: u32,
+        senha_do_dono: &[u8],
+    ) -> Result<u64, Erro> {
+        match definir(
+            tpm,
+            indice,
+            senha_do_dono,
+            &self.senha,
+            atributo::DO_NASCIMENTO,
+        ) {
+            Ok(()) | Err(Erro::Codigo(codigo::NV_JA_DEFINIDO)) => {}
+            Err(e) => return Err(e),
+        }
+        // Definido por outro alguém com outras regras não serve.
+        if let Some(p) = ler_publico(tpm, indice)?
+            && p.atributos & !atributo::ESCRITO != atributo::DO_NASCIMENTO
+        {
+            return Err(Erro::IndiceEstranho);
+        }
+        let valor = self.ler(tpm)?;
+        escrever(tpm, indice, &self.senha, valor)?;
+        Ok(valor)
     }
 }
 

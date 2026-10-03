@@ -3527,17 +3527,33 @@ fn message_send(params: Json, w: &mut JsonWriter) -> fmt::Result {
         );
         return recusa_de_mensagem(w, politica::Codigo::InvalidArgument, "o corpo nao e texto");
     };
-    match crate::mensagens::enviar(&remetente, &destino, corpo, nonce, prazo) {
+    let (resultado, duravel) = crate::mensagens::enviar(&remetente, &destino, corpo, nonce, prazo);
+    match resultado {
         Ok((id, e)) => {
             w.field_bool("ok", true)?;
             w.field_str("id", &id)?;
             w.field_u64("version", e.versao)?;
             w.field_bool("duplicate", e.duplicata)?;
             w.field_str("to", &destino.texto)?;
+            escrever_duravel(w, duravel)?;
             w.end_object()
         }
         Err(r) => recusa_de_mensagem(w, r.codigo(), r.motivo()),
     }
+}
+
+/// Se o que a operação mudou está no journal. `durable: true` é uma
+/// promessa: a mudança está escrita, descarregada e ancorada, e não volta
+/// atrás num reboot. `false` diz que ela vale só em memória, e por quê.
+pub(crate) fn escrever_duravel(
+    w: &mut JsonWriter,
+    duravel: crate::mensagens::Duravel,
+) -> fmt::Result {
+    w.field_bool("durable", duravel.is_ok())?;
+    if let Err(motivo) = duravel {
+        w.field_str("memory_only", motivo)?;
+    }
+    Ok(())
 }
 
 /// O remetente de uma mensagem, como a leitura o escreve: o tipo e quem.
@@ -3567,9 +3583,10 @@ pub(crate) fn escrever_caixa(
     let max = max
         .unwrap_or(8)
         .clamp(1, politica::mensagens::TETO_POR_CAIXA as u64) as usize;
-    let (epoca, lidas) =
-        crate::mensagens::ler(remetente, apos, max).map_err(|r| (r.codigo(), r.motivo()))?;
+    let (lidas, duravel) = crate::mensagens::ler(remetente, apos, max);
+    let (epoca, lidas) = lidas.map_err(|r| (r.codigo(), r.motivo()))?;
     let escrever = |w: &mut JsonWriter| -> fmt::Result {
+        escrever_duravel(w, duravel)?;
         w.field_str("epoch", &epoca)?;
         w.key("messages")?;
         w.begin_array()?;
@@ -3609,13 +3626,17 @@ fn message_read(params: Json, w: &mut JsonWriter) -> fmt::Result {
 /// Uma transição pedida por id, e a resposta: o estado novo, ou a recusa.
 fn responder_transicao(
     w: &mut JsonWriter,
-    r: Result<politica::mensagens::Transicao, politica::mensagens::Recusa>,
+    (r, duravel): (
+        Result<politica::mensagens::Transicao, politica::mensagens::Recusa>,
+        crate::mensagens::Duravel,
+    ),
 ) -> fmt::Result {
     match r {
         Ok(t) => {
             w.field_bool("ok", true)?;
             w.field_str("state", t.estado.nome())?;
             w.field_u64("version", t.versao)?;
+            escrever_duravel(w, duravel)?;
             w.end_object()
         }
         Err(r) => recusa_de_mensagem(w, r.codigo(), r.motivo()),
@@ -3651,11 +3672,13 @@ fn message_status(params: Json, w: &mut JsonWriter) -> fmt::Result {
         Err(r) => return r,
     };
     let id = params.member("id").and_then(|v| v.as_str()).unwrap_or("");
-    match crate::mensagens::estado(&remetente, id) {
+    let (resultado, duravel) = crate::mensagens::estado(&remetente, id);
+    match resultado {
         Ok((estado, versao)) => {
             w.field_bool("ok", true)?;
             w.field_str("state", estado.nome())?;
             w.field_u64("version", versao)?;
+            escrever_duravel(w, duravel)?;
             w.end_object()
         }
         Err(r) => recusa_de_mensagem(w, r.codigo(), r.motivo()),

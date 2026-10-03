@@ -343,6 +343,96 @@ ganharam um caso, e o caso foi conferido contra a mesma mutação.
 As que só a bancada mata só se veem entre dois boots, e é para isso que ela
 existe; ela roda na CI nas duas arquiteturas.
 
+## Como ficou (7.4)
+
+### As mensagens no journal
+
+Cada mudança de uma mensagem vai para o journal **antes** da resposta:
+
+- a mensagem aceita, inteira, com o corpo cifrado no registro;
+- a entrega da primeira leitura;
+- a confirmação, o cancelamento, o vencimento, a anulação, a purga.
+
+A operação muda a tabela e grava o registro do que mudou com a **ordem
+das gravações** na mão, e só então responde. A resposta diz
+`"durable": true` quando o registro está escrito, descarregado e
+ancorado: uma operação respondida assim não volta atrás num reboot. Sem a
+persistência — sem TPM, journal recusado, uma gravação que falhou —, a
+mensagem continua, só em memória, e a resposta diz `"durable": false` e,
+em `memory_only`, por quê.
+
+Um registro de mensagens (`MENSAGENS`) não sobe a geração: mensagem não é
+autoridade. A revogação de um titular anula as mensagens dele, e as
+anulações vão no registro da própria revogação — uma operação, um
+registro.
+
+O que o journal guarda são resultados: a mensagem criada e cada
+transição, com a versão. O boot os repõe na ordem, e a tabela reposta é a
+mesma — conferido no hospedeiro e na suíte. Ela só vale com o journal
+confirmado pela âncora: com ele recusado, ou sem âncora, a tabela começa
+vazia e só em memória, porque um disco antigo traria de volta como
+pendente o que já foi confirmado ou anulado.
+
+### O tempo e os ids
+
+- **Os prazos são do tempo lógico** — o RTC com o piso do journal —, com
+  a resolução do RTC, um segundo. Um prazo não volta a correr num boot com
+  o RTC atrasado. O tempo desde o boot só diz ao coletor de quanto em
+  quanto olhar.
+- **Um vencimento dito é gravado**: o coletor e a consulta que vencem uma
+  mensagem gravam o vencimento antes de dizê-lo. Uma vencida não volta a
+  pendente.
+- **A época dos ids é a da instalação** — os oito primeiros bytes do
+  identificador sorteado na abertura do journal. Um id continua o mesmo
+  depois de um boot, e o próximo continua de onde parou.
+- **As janelas de nonces não vão para o journal.** São de um canal — uma
+  sessão, ou os desafios de um administrador —, e nenhum canal atravessa
+  um boot: um quadro de uma sessão não se repete em outra, que tem outras
+  chaves, e uma operação administrativa precisa de um desafio deste boot.
+  O desenho previa que a janela sobrevivesse ao boot; o que ela protege —
+  nenhum pedido vale duas vezes — já não depende disso.
+
+### As fronteiras entre o disco e o TPM
+
+- **A ordem das gravações.** O coletor de vencimentos é um fio
+  preemptivo. Quem muda o estado que vai ao journal e grava o registro faz
+  as duas coisas com a ordem na mão — reentrante pelo mesmo fio, e quem
+  espera cede a CPU —, e o journal tem os registros na ordem em que as
+  mudanças aconteceram na memória.
+- **O nascimento da âncora.** Ao lado do contador, um índice comum do TPM
+  guarda o valor com que o contador nasceu. Um journal vazio diante de um
+  contador que nunca passou do nascimento é uma criação interrompida — e
+  é retomada; diante de um contador que passou, é um disco apagado — e é
+  recusado. Antes do 7.4, uma queda entre criar a âncora e gravar a
+  abertura deixava o sistema recusado para sempre.
+- **O journal recusado fecha as credenciais.** Um journal recusado perdeu
+  registros, e o que se perdeu pode ser a revogação de um agente da imagem
+  ou de uma pessoa: com ele recusado, o ponto único de decisão não aceita
+  chave de agente nem pessoa. A serial e o `sistema`, que não têm
+  credencial a revogar, continuam. A persistência só indisponível — sem
+  TPM, sem disco durável — não é isso, e as credenciais continuam.
+
+### As quedas, em cada ponto
+
+A bancada tem uma compilação do kernel com pontos de queda: um plano no
+último setor da partição diz em que ponto e em que gravação a energia cai,
+o kernel avisa pela serial e congela, e a bancada corta a energia. Os
+pontos:
+
+- antes de escrever;
+- depois de escrever — a escrita chegou ao disco, ou se perdeu por não ter
+  sido descarregada;
+- depois de descarregar e antes do contador;
+- depois do contador e antes da resposta;
+- e, na criação da âncora, com o contador definido e nunca avançado,
+  avançado sem nascimento, com o nascimento e sem a abertura.
+
+Em todos, o boot seguinte sobe com a persistência disponível, a operação
+vale exatamente quando o registro dela está no disco, e a próxima operação
+grava. A fotografia tirada na fronteira — o registro no disco e o
+contador ainda não avançado —, devolvida depois que o TPM andou, é
+recusada; a da criação interrompida também.
+
 ## Decisões tomadas
 
 - **Âncora:** o TPM 2.0, com um contador monotônico de NV; o `swtpm` como
@@ -368,7 +458,7 @@ existe; ela roda na CI nas duas arquiteturas.
 | 7.1 | Escrever no disco (só a partição de estado, com `FLUSH`), o TPM pelo TIS, o RTC | feita |
 | 7.2 | O journal: registros autenticados, geração, âncora, piso do relógio | feita |
 | 7.3 | O estado administrativo durável (R1–R6) | feita |
-| 7.4 | Mensagens persistentes | — |
+| 7.4 | Mensagens persistentes, e as fronteiras entre o disco e o TPM | feita |
 | 7.5 | Auditoria persistente | — |
 | 7.6 | Compactação e disco cheio | — |
 | 7.7 | O que restar da âncora (TPM físico, sessão autenticada no barramento) | — |

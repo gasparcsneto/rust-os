@@ -251,6 +251,7 @@ kernel/src/
 ├── relogio.rs       o relógio de parede: o RTC (CMOS no x86, PL031 no ARM)
 ├── tpm.rs           o TPM 2.0 pela interface TIS: o transporte da âncora
 ├── qemu.rs          encerramento do emulador para testes
+├── quedas.rs        quedas de energia em pontos exatos, só na compilação da bancada
 ├── testes.rs        suíte de testes que roda dentro do emulador
 ├── tela/
 │   ├── mod.rs       o framebuffer: desenhar na tela
@@ -2165,14 +2166,27 @@ o pedido; o boot o reaplica por cima da imagem, antes de abrir as portas.
 - **Sem persistência confiável, nenhuma credencial administrativa é
   aceita** — nem para o que não muda autoridade: sem o journal confirmado,
   o kernel não sabe quais foram revogadas. Não há exceção para o `sistema`
-  nem para a serial. Os agentes e as pessoas continuam sendo atendidos.
+  nem para a serial. Sem TPM, os agentes e as pessoas continuam sendo
+  atendidos.
+- **Com o journal recusado, nenhuma credencial vale.** Um disco antigo ou
+  estragado pode ter perdido a revogação de qualquer agente ou pessoa: só
+  a serial e o `sistema`, que não têm credencial, continuam.
+- **As mensagens também sobrevivem.** Cada mudança de uma mensagem — a
+  aceita, a entregue, a confirmada, a vencida — vai para o journal antes
+  da resposta, que diz `"durable": true`. Sem persistência, a mensagem vai
+  só em memória, e a resposta diz `"durable": false` e por quê, em
+  `memory_only`. Os prazos correm no tempo lógico, e os ids continuam os
+  mesmos de um boot para o outro.
 - **O tempo lógico não volta.** O RTC, com um piso que é o tempo do último
   registro gravado.
 
 `system.info` diz o estado (`persistence`), a geração administrativa e a
 âncora. A bancada `cargo xtask persistencia` sobe a mesma máquina várias
 vezes, corta a energia, devolve fotografias antigas do disco, estraga o
-journal, limpa o TPM e volta o relógio. O desenho, os requisitos e o que
+journal, limpa o TPM e volta o relógio — e, numa compilação própria do
+kernel, derruba a energia em cada fronteira entre o disco e o TPM: antes e
+depois da escrita, da descarga e do avanço do contador, e no meio da
+criação da âncora. O desenho, os requisitos e o que
 falta estão em [`docs/PERSISTENCIA.md`](docs/PERSISTENCIA.md).
 
 ## Barramento PCI

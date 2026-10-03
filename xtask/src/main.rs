@@ -478,6 +478,18 @@ const NOME_DO_BINARIO: &str = "duke";
 /// Com `modo_teste`, o kernel é compilado com a feature que troca o laço do
 /// agente pelo executor da suíte de testes.
 fn build(arch: Arquitetura, release: bool, modo_teste: bool) -> Result<Artefato, String> {
+    let features: &[&str] = if modo_teste { &["modo-teste"] } else { &[] };
+    build_com(arch, release, features)
+}
+
+/// [`build`] com estas features do kernel. A única além de `modo-teste` é a
+/// `quedas`, da bancada de persistência — e o `cargo xtask invariantes`
+/// confere que só ela a pede.
+pub(crate) fn build_com(
+    arch: Arquitetura,
+    release: bool,
+    features: &[&str],
+) -> Result<Artefato, String> {
     let raiz = raiz_do_projeto();
     let dir_kernel = raiz.join("kernel");
 
@@ -491,8 +503,8 @@ fn build(arch: Arquitetura, release: bool, modo_teste: bool) -> Result<Artefato,
     if release {
         cargo.arg("--release");
     }
-    if modo_teste {
-        cargo.args(["--features", "modo-teste"]);
+    if !features.is_empty() {
+        cargo.args(["--features", &features.join(",")]);
     }
 
     // O cargo exporta variáveis que descrevem o build *do xtask*. Se elas
@@ -2711,6 +2723,41 @@ fn conferir_remetente_da_sessao() -> Result<ExitCode, String> {
 /// A suíte (`testes.rs`) fica de fora: ela chama handlers para conferir as
 /// respostas deles, e não é caminho de produção — não é compilada sem
 /// `modo-teste`.
+/// A feature `quedas` só na bancada: o texto `"quedas"` aparece, no
+/// `xtask`, só em `xtask/src/persistencia.rs`. Devolve o que estiver fora.
+fn conferir_quedas_so_na_bancada(raiz: &Path) -> Result<Vec<String>, String> {
+    let mut fora = Vec::new();
+    let mut achou = false;
+    percorrer_fontes(&raiz.join("xtask/src"), &mut |caminho| {
+        let relativo = caminho
+            .strip_prefix(raiz)
+            .map_err(|_| format!("{} fora do projeto", caminho.display()))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let texto = std::fs::read_to_string(caminho)
+            .map_err(|e| format!("não foi possível ler {}: {e}", caminho.display()))?;
+        for (n, linha) in texto.lines().enumerate() {
+            // A própria conferência menciona a feature entre crases.
+            if linha.contains("\"quedas\"") && !linha.contains("`\"quedas\"`") {
+                if relativo == "xtask/src/persistencia.rs" {
+                    achou = true;
+                } else {
+                    fora.push(format!(
+                        "{relativo}:{}: a feature `quedas` fora da bancada: {}",
+                        n + 1,
+                        linha.trim()
+                    ));
+                }
+            }
+        }
+        Ok(())
+    })?;
+    if !achou {
+        fora.push("a bancada não pede a feature `quedas`: a conferência está cega".into());
+    }
+    Ok(fora)
+}
+
 /// A abertura da persistência antes de quem atende: devolve o que estiver
 /// fora de ordem no `kernel/src/main.rs`.
 fn conferir_a_ordem_do_boot(raiz: &Path) -> Result<Vec<String>, String> {
@@ -2779,6 +2826,10 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
         }
         Ok(())
     })?;
+    // A compilação com os pontos de queda é só da bancada: a feature não
+    // aparece em nenhum outro lugar do `xtask`, e nenhuma outra compilação
+    // a pede.
+    fora.extend(conferir_quedas_so_na_bancada(&raiz)?);
     // O journal se reaplica antes de alguém poder falar: no `main.rs`, a
     // abertura da persistência vem antes da primeira tarefa que atende um
     // agente e antes da suíte. Uma abertura depois disso seria uma janela
