@@ -14888,6 +14888,8 @@ fn persistencia_cada_operacao_um_registro() -> Resultado {
         );
         let antes = registros_do_journal()?.len();
         let geracao = crate::persistencia::geracao();
+        let disco = || crate::virtio::blk::com_o_disco(|d| d.contadores()).ok_or("sem disco");
+        let (escritas, descargas) = disco()?;
         let r = executar_admin_com(
             0,
             &ADMIN_DE_TESTE,
@@ -14898,6 +14900,10 @@ fn persistencia_cada_operacao_um_registro() -> Resultado {
         if !r.contains(r#""executed":true"#) {
             crate::log_error!("teste", "{}", r);
             return Err("o registro do agente nao foi executado");
+        }
+        // Respondida, ela já está no disco: uma escrita e uma descarga.
+        if disco()? != (escritas + 1, descargas + 1) {
+            return Err("a operacao respondeu sem exatamente uma escrita e uma descarga");
         }
         let depois = registros_do_journal()?;
         if depois.len() != antes + 1 {

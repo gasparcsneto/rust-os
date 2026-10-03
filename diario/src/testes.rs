@@ -66,7 +66,6 @@ fn nonce(n: u64) -> [u8; TAM_NONCE] {
 fn conteudo(tipo: u16, dados: &[u8]) -> Conteudo<'_> {
     Conteudo {
         tipo,
-        geracao: tipo as u64,
         versao_da_politica: 7,
         tempo: 1_900_000_000,
         dados,
@@ -111,7 +110,8 @@ fn le_de_volta_o_que_escreveu() {
         assert_eq!(r.sequencia, i as u64);
         assert_eq!(r.ancora, 1001 + i as u64);
         assert_eq!(r.tipo, i as u16);
-        assert_eq!(r.geracao, i as u64);
+        // Os tipos são 0, 1, 2…: só o 3 é uma operação, e sobe a geração.
+        assert_eq!(r.geracao, u64::from(i >= estado::tipo::OPERACAO as usize));
         assert_eq!(r.versao_da_politica, 7);
         assert_eq!(r.conteudo.len(), i * 300);
         assert!(r.conteudo.iter().enumerate().all(|(b, &v)| v == b as u8));
@@ -407,4 +407,110 @@ fn os_campos_vao_e_voltam() {
         );
     }
     assert!(estado::campos(&[&alloc::vec![0u8; 70_000]]).is_err());
+}
+
+/// Refaz a cifra de um registro depois de `mexer` no cabeçalho e no texto
+/// claro, como faria um escritor com a chave e um defeito: o registro
+/// continua autêntico, e o que precisa recusá-lo é a conferência, não a
+/// cifra.
+fn reselar(m: &mut Memoria, setor: usize, elo: [u8; 32], mexer: impl Fn(&mut [u8], &mut [u8])) {
+    let i = setor * TAM_SETOR;
+    let tamanho = u32_em(&m.bytes[i..], 32) as usize;
+    let fim = TAM_CABECALHO + tamanho;
+    let aead = XChaCha20Poly1305::new(&CHAVE.into());
+    let nonce: [u8; TAM_NONCE] = m.bytes[i + 40..i + 64].try_into().unwrap();
+    let mut aad = [0u8; TAM_CABECALHO + 32];
+    aad[..TAM_CABECALHO].copy_from_slice(&m.bytes[i..i + TAM_CABECALHO]);
+    aad[TAM_CABECALHO..].copy_from_slice(&elo);
+    let etiqueta: [u8; TAM_ETIQUETA] = m.bytes[i + fim..i + fim + TAM_ETIQUETA].try_into().unwrap();
+    let mut claro = m.bytes[i + TAM_CABECALHO..i + fim].to_vec();
+    aead.decrypt_inout_detached(
+        &nonce.into(),
+        &aad,
+        claro.as_mut_slice().into(),
+        &etiqueta.into(),
+    )
+    .unwrap();
+    mexer(&mut m.bytes[i..i + TAM_CABECALHO], &mut claro);
+    aad[..TAM_CABECALHO].copy_from_slice(&m.bytes[i..i + TAM_CABECALHO]);
+    let etiqueta = aead
+        .encrypt_inout_detached(&nonce.into(), &aad, claro.as_mut_slice().into())
+        .unwrap();
+    m.bytes[i + TAM_CABECALHO..i + fim].copy_from_slice(&claro);
+    m.bytes[i + fim..i + fim + TAM_ETIQUETA].copy_from_slice(&etiqueta);
+}
+
+/// O leitor não confia no escritor: um registro autêntico com a sequência
+/// errada, a âncora fora do passo, um reservado preenchido ou a geração
+/// fora da regra para a leitura ali, com o motivo certo. A cifra sozinha
+/// não pegaria nenhum deles — o escritor tinha a chave.
+#[test]
+fn um_registro_autentico_com_cabecalho_errado_e_recusado() {
+    type Mexida = fn(&mut [u8], &mut [u8]);
+    let casos: [(&str, Mexida); 6] = [
+        ("sequencia fora de ordem", |c, _| c[16] ^= 1),
+        ("a ancora nao segue a do registro anterior", |c, _| {
+            c[24] ^= 2
+        }),
+        ("reservado diferente de zero", |c, _| c[10] = 1),
+        ("reservado diferente de zero", |c, _| c[36] = 1),
+        // A geração do segundo é a do primeiro: um salto, e uma volta.
+        ("geracao fora de sequencia", |_, t| t[2] = 1),
+        ("geracao fora de sequencia", |_, t| {
+            t[2..10].copy_from_slice(&u64::MAX.to_le_bytes())
+        }),
+    ];
+    for (motivo_esperado, mexer) in casos {
+        let (mut m, _, _) = journal(0);
+        let mut esc = Escritor::continuar(&ler(&mut m, &CHAVE).unwrap(), 0, m.setores());
+        let mut tpm = Contador(0);
+        gravar(&mut m, &mut esc, &mut tpm, 0, b"primeiro");
+        let elo = esc.elo;
+        gravar(&mut m, &mut esc, &mut tpm, 1, b"segundo!");
+        reselar(&mut m, 1, elo, mexer);
+        let lido = ler(&mut m, &CHAVE).unwrap();
+        assert_eq!(lido.registros.len(), 1, "{motivo_esperado}");
+        match lido.parada {
+            Parada::Ilegivel { setor: 1, motivo } => assert_eq!(motivo, motivo_esperado),
+            outra => panic!("{motivo_esperado}: parou em {outra:?}"),
+        }
+    }
+}
+
+/// A geração é a do tipo, e não a de quem escreve: uma operação sobe um,
+/// o resto repete — e continua de onde o journal parou.
+#[test]
+fn a_geracao_conta_as_operacoes() {
+    use estado::tipo::{BOOT, OPERACAO};
+    let (mut m, _, _) = journal(0);
+    let mut esc = Escritor::continuar(&ler(&mut m, &CHAVE).unwrap(), 0, m.setores());
+    let mut tpm = Contador(0);
+    let tipos = [
+        estado::tipo::ABERTURA,
+        BOOT,
+        OPERACAO,
+        OPERACAO,
+        BOOT,
+        OPERACAO,
+    ];
+    let mut esperadas = Vec::new();
+    for (n, &t) in tipos.iter().enumerate() {
+        let montado = esc
+            .montar(&CHAVE, nonce(n as u64), &conteudo(t, b"x"))
+            .unwrap();
+        esperadas.push(montado.geracao);
+        m.escrever(montado.setor, &montado.bytes).unwrap();
+        tpm.0 += 1;
+        esc.confirmar(&montado);
+    }
+    assert_eq!(esperadas, [0, 0, 1, 2, 2, 3]);
+    let lido = ler(&mut m, &CHAVE).unwrap();
+    let lidas: Vec<u64> = lido.registros.iter().map(|r| r.geracao).collect();
+    assert_eq!(lidas, esperadas);
+    // Um escritor que continua o journal continua a contagem.
+    let esc = Escritor::continuar(&lido, tpm.0, m.setores());
+    let proximo = esc
+        .montar(&CHAVE, nonce(99), &conteudo(OPERACAO, b"y"))
+        .unwrap();
+    assert_eq!(proximo.geracao, 4);
 }

@@ -384,29 +384,25 @@ fn abrir_de_fato() -> Result<Estado, &'static str> {
     if novo {
         let mut instalacao = [0u8; 16];
         crate::aleatorio::preencher(&mut instalacao).map_err(|_| "sem entropia")?;
-        gravar(tipo::ABERTURA, &estado::campos(&[&instalacao])?, false)?;
+        gravar(tipo::ABERTURA, &estado::campos(&[&instalacao])?)?;
     }
-    gravar(
-        tipo::BOOT,
-        &estado::campos(&[&(boots + 1).to_le_bytes()])?,
-        false,
-    )?;
+    gravar(tipo::BOOT, &estado::campos(&[&(boots + 1).to_le_bytes()])?)?;
     com(|p| p.boots = boots + 1);
     Ok(Estado::Disponivel)
 }
 
 /// Grava um registro, pelo protocolo inteiro: montar, escrever,
-/// descarregar, avançar o contador, confirmar. `autoridade` diz se ele
-/// muda o estado de autoridade — e com isso a geração.
+/// descarregar, avançar o contador, confirmar. A geração que ele leva quem
+/// dá é o journal, pelo tipo: um registro de operação sobe um.
 ///
 /// Uma falha em qualquer passo deixa a persistência indisponível: o que
 /// está no disco e o que o TPM diz podem ter ficado a um passo um do outro,
 /// e só o próximo boot, pelo julgamento, sabe resolver isso com segurança.
-fn gravar(tipo_do_registro: u16, dados: &[u8], autoridade: bool) -> Result<(), &'static str> {
+fn gravar(tipo_do_registro: u16, dados: &[u8]) -> Result<(), &'static str> {
     if GRAVANDO.swap(true, Ordering::Acquire) {
         return Err("uma gravacao ja esta em curso");
     }
-    let resultado = gravar_sozinho(tipo_do_registro, dados, autoridade);
+    let resultado = gravar_sozinho(tipo_do_registro, dados);
     GRAVANDO.store(false, Ordering::Release);
     if let Err(motivo) = resultado {
         com(|p| p.estado = Estado::Indisponivel("uma gravacao no journal falhou"));
@@ -418,29 +414,25 @@ fn gravar(tipo_do_registro: u16, dados: &[u8], autoridade: bool) -> Result<(), &
 fn gravar_sozinho(
     tipo_do_registro: u16,
     dados: &[u8],
-    autoridade: bool,
 ) -> Result<(), &'static str> {
     let tempo = agora();
     let versao = crate::autorizacao::versao_da_politica();
     let n = nonce()?;
-    let (montado, geracao) = com(|p| {
+    let montado = com(|p| {
         if p.estado != Estado::Disponivel {
             return Err(p.estado.motivo());
         }
-        let geracao = p.geracao + u64::from(autoridade);
         let a = p.aberta.as_ref().ok_or("a persistencia nao esta aberta")?;
-        let m = a.escritor.montar(
+        a.escritor.montar(
             &a.chave,
             n,
             &Conteudo {
                 tipo: tipo_do_registro,
-                geracao,
                 versao_da_politica: versao,
                 tempo,
                 dados,
             },
-        )?;
-        Ok((m, geracao))
+        )
     })?;
     #[cfg(feature = "modo-teste")]
     if FALHAR_A_PROXIMA.swap(false, Ordering::AcqRel) {
@@ -464,7 +456,7 @@ fn gravar_sozinho(
         if let Some(a) = p.aberta.as_mut() {
             a.escritor.confirmar(&montado);
         }
-        p.geracao = geracao;
+        p.geracao = montado.geracao;
         p.registros += 1;
     });
     Ok(())
@@ -531,7 +523,7 @@ pub fn concluir(
 ) -> Result<(), &'static str> {
     let entradas = diferenca(foto, nome, recurso)?;
     let conteudo = estado::campos(&entradas.iter().map(Vec::as_slice).collect::<Vec<_>>())?;
-    match gravar(tipo::OPERACAO, &conteudo, true) {
+    match gravar(tipo::OPERACAO, &conteudo) {
         Ok(()) => Ok(()),
         Err(motivo) => {
             if desfazer {

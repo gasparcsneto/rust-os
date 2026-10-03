@@ -61,9 +61,9 @@ pub mod tipo {
     /// autoridade enquanto o sistema estava de pé, e a geração conta isso.
     pub const SESSAO_REVOGADA: u16 = 17;
     /// A lápide de uma credencial administrativa: `[a chave X25519, a
-    /// pública Ed25519 ou nada, o resumo do desafio do quórum (32 bytes),
-    /// o motivo]`. Permanente: nenhum registro a desfaz, nenhuma imagem a
-    /// apaga.
+    /// pública Ed25519 ou nada]`. Permanente: nenhum registro a desfaz,
+    /// nenhuma imagem a apaga. Quem revogou e por quê não está aqui: está
+    /// na auditoria, que guarda a decisão do quórum.
     pub const LAPIDE: u16 = 18;
 }
 

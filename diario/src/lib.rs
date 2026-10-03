@@ -47,6 +47,16 @@
 //! repetição não acontece por acaso — e é para isso que o XChaCha tem o
 //! nonce longo.
 //!
+//! # A geração
+//!
+//! Cada registro diz a geração administrativa em que deixa o sistema, e ela
+//! não é escolhida por quem escreve: um registro de operação
+//! ([`estado::tipo::OPERACAO`]) sobe um, qualquer outro repete a do
+//! anterior. O escritor a calcula, e o leitor confere a regra em cada
+//! registro depois do primeiro — a geração de um journal é, portanto, o
+//! número de operações de autoridade que ele contém desde o seu começo, e
+//! um salto ou uma volta param a leitura como qualquer outro defeito.
+//!
 //! # A âncora
 //!
 //! Cada registro confirma um valor do contador do TPM: o primeiro, um a
@@ -161,6 +171,12 @@ impl Lido {
     pub fn ultima_ancora(&self) -> Option<u64> {
         self.registros.last().map(|r| r.ancora)
     }
+}
+
+/// A geração depois de um registro de `tipo`, sobre a geração `anterior`:
+/// uma operação de autoridade sobe um; o resto não muda.
+fn geracao_depois(anterior: u64, tipo: u16) -> Option<u64> {
+    anterior.checked_add(u64::from(tipo == estado::tipo::OPERACAO))
 }
 
 /// O resumo com que o primeiro registro se encadeia.
@@ -285,6 +301,11 @@ pub fn ler<M: Meio>(meio: &mut M, chave: &[u8; 32]) -> Result<Lido, &'static str
             conteudo: claro[TAM_PREFIXO..].to_vec(),
         };
         claro.zeroize();
+        if let Some(anterior) = registros.last()
+            && Some(registro.geracao) != geracao_depois(anterior.geracao, registro.tipo)
+        {
+            break ilegivel("geracao fora de sequencia");
+        }
         registros.push(registro);
         elo = proximo_elo;
         setor += setores as u64;
@@ -306,6 +327,9 @@ pub struct Montado {
     /// O valor do contador do TPM que ele confirma: o que o contador tem de
     /// valer depois de avançado.
     pub ancora: u64,
+    /// A geração em que ele deixa o sistema: a do anterior, mais um se ele
+    /// é uma operação de autoridade.
+    pub geracao: u64,
     elo: [u8; 32],
     setores: u64,
 }
@@ -318,14 +342,16 @@ pub struct Escritor {
     /// O valor do contador do TPM hoje — o que o último registro confirmou,
     /// ou o que o contador tinha quando o journal nasceu.
     ancora: u64,
+    /// A geração do último registro, ou zero num journal vazio.
+    geracao: u64,
     total: u64,
 }
 
 /// O conteúdo de um registro: o que ele diz, e o estado em que deixa o
-/// sistema.
+/// sistema. A geração não está aqui: quem a dá é o tipo — ver
+/// [`Montado::geracao`].
 pub struct Conteudo<'a> {
     pub tipo: u16,
-    pub geracao: u64,
     pub versao_da_politica: u64,
     pub tempo: u64,
     pub dados: &'a [u8],
@@ -343,6 +369,7 @@ impl Escritor {
             proxima_sequencia: lido.registros.len() as u64,
             elo: lido.elo,
             ancora,
+            geracao: lido.registros.last().map_or(0, |r| r.geracao),
             total,
         }
     }
@@ -361,6 +388,7 @@ impl Escritor {
             .ancora
             .checked_add(1)
             .ok_or("o contador da ancora esgotou")?;
+        let geracao = geracao_depois(self.geracao, conteudo.tipo).ok_or("a geracao esgotou")?;
         let tamanho = TAM_PREFIXO + conteudo.dados.len();
         let setores = setores_para(tamanho) as u64;
         if self.proximo_setor + setores > self.total {
@@ -379,7 +407,7 @@ impl Escritor {
         {
             let claro = &mut bytes[TAM_CABECALHO..fim_cifrado];
             claro[0..2].copy_from_slice(&conteudo.tipo.to_le_bytes());
-            claro[2..10].copy_from_slice(&conteudo.geracao.to_le_bytes());
+            claro[2..10].copy_from_slice(&geracao.to_le_bytes());
             claro[10..18].copy_from_slice(&conteudo.versao_da_politica.to_le_bytes());
             claro[18..26].copy_from_slice(&conteudo.tempo.to_le_bytes());
             claro[TAM_PREFIXO..].copy_from_slice(conteudo.dados);
@@ -401,6 +429,7 @@ impl Escritor {
             setor: self.proximo_setor,
             bytes,
             ancora,
+            geracao,
             elo,
             setores,
         })
@@ -413,6 +442,7 @@ impl Escritor {
         self.proxima_sequencia += 1;
         self.elo = montado.elo;
         self.ancora = montado.ancora;
+        self.geracao = montado.geracao;
     }
 
     /// O valor do contador que o journal confirmou por último.

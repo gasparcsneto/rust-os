@@ -2690,6 +2690,44 @@ fn conferir_remetente_da_sessao() -> Result<ExitCode, String> {
 /// A suíte (`testes.rs`) fica de fora: ela chama handlers para conferir as
 /// respostas deles, e não é caminho de produção — não é compilada sem
 /// `modo-teste`.
+/// A abertura da persistência antes de quem atende: devolve o que estiver
+/// fora de ordem no `kernel/src/main.rs`.
+fn conferir_a_ordem_do_boot(raiz: &Path) -> Result<Vec<String>, String> {
+    const ABRIR: &str = "persistencia::abrir()";
+    const DEPOIS: [&str; 2] = ["agent::atender(", "testes::executar_todos()"];
+    let caminho = raiz.join("kernel/src/main.rs");
+    let texto = std::fs::read_to_string(&caminho)
+        .map_err(|e| format!("não foi possível ler {}: {e}", caminho.display()))?;
+    let linhas: Vec<&str> = texto.lines().collect();
+    let abrir: Vec<usize> = (0..linhas.len())
+        .filter(|&n| linhas[n].contains(ABRIR))
+        .collect();
+    let [abrir] = abrir[..] else {
+        return Ok(vec![format!(
+            "kernel/src/main.rs: `{ABRIR}` aparece {} vezes, e não uma",
+            abrir.len()
+        )]);
+    };
+    let mut fora = Vec::new();
+    for depois in DEPOIS {
+        let Some(primeira) = linhas.iter().position(|l| l.contains(depois)) else {
+            fora.push(format!(
+                "kernel/src/main.rs: `{depois}` não aparece: a conferência da ordem está cega"
+            ));
+            continue;
+        };
+        if primeira < abrir {
+            fora.push(format!(
+                "kernel/src/main.rs:{}: `{depois}` antes de `{ABRIR}` (linha {}): o journal \
+                 tem de se reaplicar antes de alguém ser atendido",
+                primeira + 1,
+                abrir + 1
+            ));
+        }
+    }
+    Ok(fora)
+}
+
 fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
     let raiz = raiz_do_projeto();
     let fonte = raiz.join("kernel/src");
@@ -2720,6 +2758,11 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
         }
         Ok(())
     })?;
+    // O journal se reaplica antes de alguém poder falar: no `main.rs`, a
+    // abertura da persistência vem antes da primeira tarefa que atende um
+    // agente e antes da suíte. Uma abertura depois disso seria uma janela
+    // em que a credencial revogada da imagem ainda está ativa.
+    fora.extend(conferir_a_ordem_do_boot(&raiz)?);
     // A chamada legítima tem de existir: uma busca que não acha nem ela
     // está procurando a coisa errada, e passaria por qualquer atalho.
     for ((chamada, donos), quantas) in CHAMADAS_PROTEGIDAS.iter().zip(&achadas) {

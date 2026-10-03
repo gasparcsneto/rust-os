@@ -254,7 +254,11 @@ passa a indisponível.
 
 ### A geração
 
-Cada registro de operação sobe a geração em um. Ela está em cada registro,
+Cada registro de operação sobe a geração em um, e só ele: quem a calcula é
+o escritor do journal, pelo tipo do registro, e não quem pede a gravação. O
+leitor confere a mesma regra em cada registro depois do primeiro — um
+registro autêntico com a geração saltada ou voltada para a leitura ali,
+como um elo quebrado. Ela está em cada registro,
 no `system.info`, em cada desafio de quórum, e no conteúdo que as
 credenciais assinam (`sigilo::quorum`, formato 2): uma mudança de
 autoridade entre o desafio e o pedido derruba as assinaturas. O signatário
@@ -274,6 +278,8 @@ junto.
   - o journal cortado em cada setor de uma gravação;
   - cada bit de um journal trocado;
   - registros de outro journal e fora de ordem;
+  - registros autênticos — escritos com a chave — com a sequência, a
+    âncora, um reservado ou a geração fora da regra;
   - a chave errada;
   - a partição cheia;
   - o julgamento inteiro;
@@ -296,6 +302,8 @@ junto.
   - registro, papel, política, versão e geração que sobrevivem;
   - a fotografia antiga recusada;
   - o journal adulterado recusado sem que a credencial revogada volte;
+  - o journal recusado que ainda tira: o agente revogado antes do registro
+    estragado continua fora;
   - sete quedas no meio da gravação;
   - o TPM limpo;
   - a máquina sem TPM;

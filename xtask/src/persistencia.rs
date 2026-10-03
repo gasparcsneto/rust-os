@@ -178,6 +178,10 @@ const CENARIOS: &[Cenario] = &[
         rodar: o_journal_adulterado_e_recusado,
     },
     Cenario {
+        nome: "o que o journal diz vale mesmo recusado: o agente revogado nao volta",
+        rodar: o_journal_recusado_ainda_tira,
+    },
+    Cenario {
         nome: "a queda no meio da gravacao: o journal continua o atual, gravado ou nao",
         rodar: a_queda_no_meio_da_gravacao,
     },
@@ -572,13 +576,9 @@ fn o_estado_sobrevive(arch: Arquitetura, artefato: &Artefato) -> Result<String, 
             "a versao da politica voltou: era {versao}, e depois do boot e {depois}"
         ));
     }
-    let r = m.pedir("policy.read", "{}")?;
-    if !r.contains("taxa observador 7 21") && !r.contains(r#""rate":{"per_second":7,"burst":21}"#) {
-        // O relatório da política pode descrever a taxa em JSON; o que
-        // importa é que a mudança voltou.
-        if !r.contains("7") {
-            return Err(format!("a linha de politica escrita nao voltou\n  {r}"));
-        }
+    let r = m.pedir("policy.show", "{}")?;
+    if !r.contains(r#""rate":{"per_second":7,"burst":21}"#) {
+        return Err(format!("a linha de politica escrita nao voltou\n  {r}"));
     }
     let mut agente = super::AgenteNaPorta::conectar_com(arch, 1, &chaves.intruso, &chaves.duke)?;
     let r = agente.pedir("agent.session", "{}")?;
@@ -906,4 +906,67 @@ fn o_signatario_recusa_geracao_menor(arch: Arquitetura, _: &Artefato) -> Result<
         Err(e) => Err(format!("recusou pelo motivo errado: {e}")),
         Ok(()) => Err("o signatario assinou uma geracao menor que a que ja viu".into()),
     }
+}
+
+/// Um agente da imagem é revogado, e depois uma política é escrita; o
+/// registro da política é estragado. O boot recusa o journal — e mesmo
+/// assim o registro da revogação, que abre, é reaplicado: o agente
+/// revogado não entra pela porta. As sessões de agente continuam sendo
+/// atendidas com o journal recusado, e é por isso que reaplicar antes de
+/// julgar importa também para elas.
+fn o_journal_recusado_ainda_tira(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    let chaves = super::chaves::Chaves::garantir()?;
+    let disco = disco_de_testes()?;
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let revogado = sigilo::publica_de(&chaves.do_agente(2));
+    let r = administrar(
+        &mut m,
+        &chaves.administrador,
+        "agent.revoke",
+        &format!(r#"{{"key":"{}"}}"#, sigilo::hex(&revogado)),
+    )?;
+    if !executou(&r) {
+        return Err(format!("a revogacao do agente nao foi executada\n  {r}"));
+    }
+    let r = administrar(
+        &mut m,
+        &chaves.administrador,
+        "policy.write",
+        r#"{"line":"taxa observador 6 18"}"#,
+    )?;
+    if !executou(&r) {
+        return Err(format!("o policy.write nao foi executado\n  {r}"));
+    }
+    m.cortar_a_energia()?;
+    let mut estado = ler_o_estado(&disco)?;
+    let ultimo = estado
+        .chunks(512)
+        .rposition(|s| s.iter().any(|&b| b != 0))
+        .ok_or("o journal esta vazio")?;
+    estado[ultimo * 512 + 100] ^= 0x40;
+    escrever_no_estado(&disco, &estado)?;
+
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let p = persistencia_de(&mut m)?;
+    if p.estado != "refused" {
+        m.cortar_a_energia()?;
+        return Err(format!(
+            "o journal estragado nao foi recusado: {}",
+            p.estado
+        ));
+    }
+    let revogado_entrou = super::AgenteNaPorta::conectar(arch, 2)
+        .and_then(|mut a| a.pedir("agent.ping", "{}"))
+        .is_ok_and(|r| r.contains(r#""result""#));
+    let outro_entrou = super::AgenteNaPorta::conectar(arch, 1)
+        .and_then(|mut a| a.pedir("agent.ping", "{}"))
+        .is_ok_and(|r| r.contains(r#""result""#));
+    m.cortar_a_energia()?;
+    if revogado_entrou {
+        return Err("com o journal recusado, o agente revogado nele voltou a entrar".into());
+    }
+    if !outro_entrou {
+        return Err("com o journal recusado, o agente da porta 1 deixou de ser atendido".into());
+    }
+    Ok("o agente revogado continua fora; o da porta 1, atendido".into())
 }
