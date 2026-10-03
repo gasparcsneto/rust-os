@@ -1476,9 +1476,19 @@ mod testes {
         ] {
             assert_eq!(Dono::de_bytes(&d.bytes()), Some(d));
         }
+        // Curto, comprido, ou de um tipo que não existe: nenhum titular.
         assert_eq!(Dono::de_bytes(&[]), None);
         assert_eq!(Dono::de_bytes(&[1, 2, 3]), None);
         assert_eq!(Dono::de_bytes(&[4]), None);
+        assert_eq!(Dono::de_bytes(&[0, 0]), None);
+        for tipo in 1u8..=3 {
+            let tamanho = if tipo == 2 { 8 } else { 32 };
+            let mut b = alloc::vec![tipo];
+            b.resize(1 + tamanho + 1, 7);
+            assert_eq!(Dono::de_bytes(&b), None, "tipo {tipo} com um byte a mais");
+            b.truncate(tamanho);
+            assert_eq!(Dono::de_bytes(&b), None, "tipo {tipo} com um byte a menos");
+        }
         for c in 0..=6 {
             assert_eq!(Estado::de_codigo(c).map(Estado::codigo), Some(c));
         }
