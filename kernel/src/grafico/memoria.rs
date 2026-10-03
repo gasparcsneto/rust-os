@@ -36,7 +36,7 @@
 //!
 //! # Por que uma tabela fixa de trechos
 //!
-//! Porque ela não pode depender do heap, que tem 1 MiB e que uma falha de
+//! Porque ela não pode depender do heap, que tem 4 MiB e que uma falha de
 //! alocação no meio de um `Drop` não teria como devolver. E porque o tamanho
 //! dela tem um teto que se calcula: cada trecho livre abaixo do topo tem uma
 //! superfície viva logo acima, então há no máximo tantos trechos quantas

@@ -91,7 +91,7 @@ pub const BASE_DAS_PILHAS: u64 = 0x0000_0020_0000_0000;
 
 /// Onde moram as superfícies gráficas. 256 GiB.
 ///
-/// A mesma razão do x86: o heap tem 1 MiB e uma tela inteira tem 4, então
+/// A mesma razão do x86: o heap tem 4 MiB e uma tela inteira tem 4, então
 /// o buffer de uma superfície sai direto do alocador de frames, aqui.
 pub const BASE_DAS_SUPERFICIES: u64 = 0x0000_0040_0000_0000;
 

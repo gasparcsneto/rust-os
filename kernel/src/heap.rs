@@ -54,9 +54,13 @@ use crate::arch::{Permissoes, TAMANHO_PAGINA};
 /// o mapa em `arch::x86_64` e `arch::aarch64`.
 pub const HEAP_INICIO: usize = crate::arch::BASE_DO_HEAP as usize;
 
-/// Tamanho do heap. 1 MiB é folgado para o que o kernel faz hoje e barato
-/// diante dos 128 MiB da máquina.
-pub const HEAP_TAMANHO: usize = 1024 * 1024;
+/// Tamanho do heap: 4 MiB, de 128 MiB da máquina.
+///
+/// Foi 1 MiB até a auditoria ir ao journal. O anel da auditoria, cheio, é
+/// perto de meio MiB; um registro do journal de 64 KiB passa pelo heap
+/// algumas vezes ao ser gravado ou lido; e um MiB deixava pouca folga entre
+/// isso e a falha de alocação — que no kernel é pânico, e não erro.
+pub const HEAP_TAMANHO: usize = 4 * 1024 * 1024;
 
 /// Um bloco livre.
 ///

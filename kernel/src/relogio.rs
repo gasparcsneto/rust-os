@@ -142,13 +142,18 @@ mod rtc {
     pub fn init() {}
 
     fn registrador(r: u8) -> u8 {
-        // SAFETY: as portas 0x70 e 0x71 são as do CMOS em todo PC; ler um
-        // registrador do relógio não tem efeito colateral. O bit 7 de 0x70
-        // (que mascara a NMI) fica como o número o deixa: zero.
-        unsafe {
-            Port::<u8>::new(0x70).write(r);
-            Port::<u8>::new(0x71).read()
-        }
+        // O índice e o valor sem nada no meio: um fio preemptado entre os
+        // dois, e outro que escolhesse outro registrador, leria o valor
+        // errado. A auditoria lê o relógio a cada decisão, de qualquer fio.
+        crate::arch::sem_interrupcoes(|| {
+            // SAFETY: as portas 0x70 e 0x71 são as do CMOS em todo PC; ler
+            // um registrador do relógio não tem efeito colateral. O bit 7 de
+            // 0x70 (que mascara a NMI) fica como o número o deixa: zero.
+            unsafe {
+                Port::<u8>::new(0x70).write(r);
+                Port::<u8>::new(0x71).read()
+            }
+        })
     }
 
     type Leitura = [u8; 7];
