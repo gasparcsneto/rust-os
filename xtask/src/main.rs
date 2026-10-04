@@ -54,7 +54,19 @@ use std::{
 /// preenchimento de tela, que não toca nada da política, foi de 746 para
 /// 873 ms por quadro: 17% mais lento. Cinco minutos passaram a reprovar a
 /// suíte saudável; dez são o dobro do pior medido.
-const TETO_DOS_TESTES: Duration = Duration::from_secs(600);
+///
+/// # Por que vinte
+///
+/// A mesma conta, uma terceira vez. Com a persistência ancorada no TPM —
+/// cada abertura da suíte conecta, cria a EK e salga uma sessão —, a suíte
+/// do x86 em debug no CI ficou entre 381 e 637 segundos de passo, com a
+/// compilação, em execuções seguidas com quase os mesmos casos: a
+/// variação é das máquinas do CI. A pior verde teve uns 505 segundos de
+/// suíte; a seguinte, com dois casos a mais, bateu nos dez minutos com o
+/// relógio do convidado andando até o corte — sem laço nenhum. Vinte são
+/// o dobro do pior medido, e o passo inteiro continua dentro dos 70
+/// minutos do job.
+const TETO_DOS_TESTES: Duration = Duration::from_secs(1200);
 
 /// As arquiteturas que o kernel suporta.
 ///
