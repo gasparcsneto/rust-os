@@ -760,7 +760,8 @@ especificação do TPM 2.0, capítulos 11, 19 e 21):
   uma repetida de antes foi feita para outro nonce; uma forjada não tem a
   chave. Nenhuma das três vira valor.
 - **A senha nova**, na definição do contador e do índice do nascimento,
-  vai cifrada em AES-128-CFB (`KDFa(…, "CFB", nonces)`).
+  vai cifrada em AES-128-CFB (`KDFa(…, "CFB", nonces)`). Ver abaixo por
+  que o CFB, que sozinho não tem integridade, está autenticado.
 - **Os nomes dos índices** são calculados pelo kernel a partir dos
   atributos que eles têm de ter — inclusive o bit que o TPM liga na
   primeira escrita —, e não tirados do TPM. Um índice trocado por outro no
@@ -774,6 +775,37 @@ hierarquia do dono continua com a senha vazia, como antes. A sessão é
 transporte: quem decide o que grava continua sendo o ponto de decisão, e
 nada do modelo de autorização mudou.
 
+### A senha nova cifrada, e autenticada
+
+O CFB é só confidencialidade: um bit trocado no texto cifrado troca o
+mesmo bit do que o TPM decifra. Sozinho, ele deixaria quem está no
+barramento mexer, às cegas, na senha que o contador guardaria. Ele nunca
+anda sozinho:
+
+- **Cifrar e depois autenticar.** A cifra é feita antes do `cpHash`, e o
+  `cpHash` é calculado sobre os parâmetros como vão no fio — o texto
+  cifrado inteiro, o tamanho dele e o resto dos parâmetros (a área pública
+  do índice). O HMAC do comando cobre o `cpHash` e o byte de atributos da
+  sessão, onde está o bit que diz que o primeiro parâmetro vai cifrado.
+  A chave do HMAC é a da sessão, salgada para a EK fixada: quem está no
+  barramento não a tem.
+- **O TPM confere antes de decifrar.** Um texto cifrado mexido, o bit da
+  cifra tirado ou um byte da área pública trocado: o TPM responde
+  `BAD_AUTH` na sessão — a falha do HMAC — e não define nada. Conferido
+  contra o `swtpm`, byte a byte, em quatro lugares do comando; e, com o
+  comando intacto, o mesmo TPM define e o contador funciona.
+- **Nenhum par de chave e vetor se repete.** Os dois saem do `KDFa` com o
+  `nonceCaller`, sorteado a cada comando, e o `nonceTPM`, que gira a cada
+  resposta.
+- **Um único caminho.** O módulo da cifra é privado do pacote `ancora`, e
+  o único chamador é a sessão, que cifra e em seguida calcula o `cpHash`.
+  Não há cifra de resposta em uso.
+- **Por que não um AEAD.** O TPM 2.0 só oferece XOR e CFB para os
+  parâmetros: AES-GCM ou ChaCha20-Poly1305 não são opção do protocolo. E
+  não fazem falta: a integridade já vem do HMAC da sessão, numa composição
+  que o próprio TPM impõe — com o HMAC sobre o texto às claras, o TPM
+  recusa o comando, e a mutação que fazia isso morreu assim.
+
 ### A chave do TPM, fixada no journal
 
 Salgar a sessão "com a EK" só protege se a EK for a do TPM certo. O
@@ -782,8 +814,16 @@ journal fixa a primeira que vê — na abertura, em todo registro de boot
 com a fixada **antes de qualquer comando ao contador**. Outra EK é
 recusada; um journal que fala de duas EKs, uma num registro e outra
 noutro, também. Um journal de antes do 7.7 não tem EK fixada: o primeiro
-boot do 7.7 a fixa. É confiança na primeira vez: não há cadeia de
-certificados da EK (ver abaixo).
+boot do 7.7 a fixa.
+
+**Isto não é identidade de hardware.** A fixação garante que o TPM é **o
+mesmo** de quando o journal foi criado — e nada diz sobre se aquele
+primeiro era um TPM genuíno. Nada confere a EK contra o certificado do
+fabricante. Quem estiver no barramento **já no primeiro boot** pode
+responder no lugar do TPM com uma chave sua, e ela fica fixada como se
+fosse a do chip. A primeira confiança depende, então, de provisionamento
+confiável: o primeiro boot numa máquina cujo barramento não foi mexido.
+Da segunda em diante, a fixação vale.
 
 ### O TPM físico
 
@@ -914,6 +954,7 @@ barramento):
 | o nascimento definido e nunca escrito lido como valor | *o nascimento definido e nunca escrito se completa* |
 | o incremento sem a incerteza do nome | *o primeiro avanço sem resposta não deixa o nome velho* |
 | o erro que não fecha a sessão | *a resposta adulterada*, *repetida* |
+| a cifra depois do HMAC (o HMAC sobre a senha às claras); o HMAC sem o bit da cifra; a cifra só de parte do parâmetro; a cifra com os nonces trocados; o `cpHash` sem os parâmetros | o TPM recusa: *a âncora num TPM de verdade* e todos os que definem o contador |
 
 No kernel (suíte e bancada):
 
@@ -926,6 +967,13 @@ No kernel (suíte e bancada):
 | a abertura sem a EK; o boot sem a EK; o fecho sem a EK | suíte: *aberta no boot*, *a EK trocada* — cada registro que fixa a EK a tem |
 | a guarda que não solta a EK e a sessão; a abertura velha que não sai do TPM | suíte: depois de poucas reaberturas, o TPM sem vagas recusa o comando |
 | a CRB nunca reconhecida | bancada: *o mesmo TPM pela CRB e pelo TIS* |
+
+As cinco da cifra mostram, contra o TPM de verdade, que o HMAC que ele
+confere é o do texto cifrado: não há como, deste lado, deixar o CFB sem
+autenticação e ainda definir o contador. O caso *a senha cifrada mexida no
+caminho é recusada* confere o outro lado — que o TPM recusa por
+`BAD_AUTH` o texto cifrado, o bit da cifra e a área pública mexidos, sem
+definir nada.
 
 Sobrou uma, **equivalente**: na releitura de conferência, o contador num
 valor que não é nem o esperado nem o anterior dado como avançado
@@ -966,10 +1014,12 @@ agora começa do zero, conferido).
   respondem ao `START`. Numa máquina assim, sem journal a persistência
   fica indisponível; com journal, recusada — falha fechada, e nunca um
   estado anterior.
-- **A EK é confiança na primeira vez.** O kernel não confere o
-  certificado da EK contra a cadeia do fabricante. Quem controlar o
-  barramento **antes do primeiro boot** pode se fazer passar pelo TPM e
-  ter a própria chave fixada. Depois disso, não.
+- **A EK é confiança na primeira vez, e não identidade de hardware.** O
+  kernel não confere o certificado da EK contra a cadeia do fabricante,
+  nem prende a âncora aos PCRs. Quem controlar o barramento **no primeiro
+  boot** pode se fazer passar pelo TPM e ter a própria chave fixada; a
+  primeira confiança depende de provisionamento confiável. Depois disso,
+  não. A cadeia de certificados e os PCRs ficam fora deste incremento.
 - **Quem controla o barramento ainda pode negar serviço.** Perder ou
   estragar respostas deixa a persistência indisponível ou o journal
   recusado: nunca um valor falso, nunca um estado anterior, mas parada.

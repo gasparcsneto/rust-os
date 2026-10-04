@@ -2210,7 +2210,13 @@ o pedido; o boot o reaplica por cima da imagem, antes de abrir as portas.
   o contador continua só um contador.
 - **O TPM é o mesmo.** A EK fica fixada no journal — na abertura, em cada
   boot e no fecho de cada base. Outro TPM, ou outro chip respondendo no
-  lugar deste, é recusado antes de qualquer comando ao contador.
+  lugar deste, é recusado antes de qualquer comando ao contador. Isto diz
+  que o TPM é o mesmo do primeiro boot, e não que ele é genuíno: a EK não
+  é conferida contra o certificado do fabricante, e a primeira confiança
+  depende de o primeiro boot acontecer com o barramento intacto.
+- **A senha nova vai cifrada, e autenticada.** O AES-128-CFB do parâmetro
+  é feito antes do `cpHash`, e o HMAC da sessão cobre o texto cifrado
+  inteiro: mexido no caminho, o TPM o recusa antes de decifrar.
 - **Sem o TPM, um journal não se confirma.** Um disco com journal numa
   máquina sem TPM — o TPM tirado, com uma cópia antiga do disco — é
   recusado, e não só indisponível: nada confirmaria que o disco é o

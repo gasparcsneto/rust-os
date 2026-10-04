@@ -47,11 +47,29 @@
 //! dono vazia — a que define o índice — expõe a senha nova, que vai
 //! cifrada no parâmetro, em AES-128-CFB.
 //!
+//! O CFB sozinho não tem integridade: um bit trocado no texto cifrado troca
+//! o mesmo bit da senha que o TPM guardaria. Aqui ele nunca anda sozinho. A
+//! cifra é feita **antes** do `cpHash`, e o HMAC do comando cobre o texto
+//! cifrado inteiro — com o tamanho dele, o resto dos parâmetros e o byte de
+//! atributos que diz que o primeiro parâmetro vai cifrado. É cifrar e depois
+//! autenticar: o TPM confere o HMAC antes de decifrar, e um texto cifrado
+//! alterado no caminho é recusado sem definir nada. A chave e o vetor da
+//! cifra saem do `nonceCaller`, sorteado a cada comando: nenhum par se
+//! repete. Um AEAD não entra porque o TPM 2.0 não o oferece para parâmetros
+//! — só XOR e CFB —, e não faz falta: a autenticação já é a do HMAC da
+//! sessão, com a chave que só o TPM da EK e este lado têm.
+//!
 //! Quem se põe no meio do barramento e troca a EK por uma sua leria o sal.
 //! Por isso a EK é uma chave **fixada**: quem usa este pacote guarda o
 //! ponto dela da primeira vez, e diz qual espera — uma EK diferente é
-//! [`Erro::ChaveDoTpmTrocada`]. A primeira vez é confiança na primeira
-//! vez; conferir a EK pelo certificado do fabricante fica para depois.
+//! [`Erro::ChaveDoTpmTrocada`].
+//!
+//! A fixação diz que o TPM é **o mesmo** de antes, e nada mais. Ela não
+//! prova que a primeira EK é de um TPM genuíno: quem estiver no barramento
+//! já no primeiro uso pode apresentar a própria chave, e ela fica fixada.
+//! A primeira confiança depende de o primeiro boot acontecer numa máquina
+//! provisionada em condições confiáveis. Conferir a EK pelo certificado do
+//! fabricante é outro passo, que este pacote não dá.
 //!
 //! Quem não tem a senha só consegue o que não ajuda a ninguém: não lê, não
 //! avança, e não fabrica resposta que passe. Pode, no barramento, derrubar
@@ -736,7 +754,8 @@ struct Pedido<'a> {
 ///   adulterada não tem o `rpHash`; uma repetida de antes foi feita para
 ///   outro `nonceCaller`. Nenhuma das três passa.
 /// - Com `cifrar_o_primeiro`, o primeiro parâmetro (um `TPM2B`) vai em
-///   AES-128-CFB com a chave do `KDFa(…, "CFB", nonceCaller, nonceTPM)`.
+///   AES-128-CFB com a chave do `KDFa(…, "CFB", nonceCaller, nonceTPM)` —
+///   cifrado antes do `cpHash`, e por isso coberto pelo HMAC do comando.
 ///
 /// Qualquer erro — do TPM ou da conferência — fecha a sessão: um erro não
 /// gira os nonces, e não há como saber em que pé ela ficou.
@@ -758,6 +777,9 @@ fn pela_sessao<T: Tpm>(
     sorteio.sortear(&mut nonce_caller)?;
     let chave = ChaveDeHmac::nova(&sessao.chave, senha);
     let mut atributos = CONTINUAR_SESSAO;
+    // A cifra vem antes do cpHash, e não depois: o HMAC abaixo cobre o
+    // texto cifrado inteiro e o atributo que o anuncia. O CFB não anda sem
+    // autenticação — ver o cabeçalho do pacote.
     if cifrar_o_primeiro {
         atributos |= DECIFRAR;
         let n = u16::from_be_bytes([parametros[0], parametros[1]]) as usize;

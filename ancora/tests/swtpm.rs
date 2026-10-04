@@ -117,13 +117,18 @@ impl Sorteio for DoSistema {
 /// respostas de antes, e mexe na de agora.
 type Mexer<'a> = Box<dyn FnMut(&[u8], &mut Vec<u8>, &[Vec<u8>]) + 'a>;
 
-/// Um interposto no barramento: guarda todo comando que passa e pode
-/// mexer em cada resposta antes de ela chegar.
+/// O que o interposto faz com um comando antes de ele chegar ao TPM.
+type MexerNoComando<'a> = Box<dyn FnMut(&mut Vec<u8>) + 'a>;
+
+/// Um interposto no barramento: guarda todo comando que passa, e pode
+/// mexer em cada comando antes de ele chegar ao TPM e em cada resposta
+/// antes de ela voltar.
 struct Interposto<'a> {
     tpm: &'a mut Swtpm,
     comandos: Vec<Vec<u8>>,
     respostas: Vec<Vec<u8>>,
     mexer: Option<Mexer<'a>>,
+    mexer_no_comando: Option<MexerNoComando<'a>>,
 }
 
 impl<'a> Interposto<'a> {
@@ -133,17 +138,22 @@ impl<'a> Interposto<'a> {
             comandos: Vec::new(),
             respostas: Vec::new(),
             mexer: None,
+            mexer_no_comando: None,
         }
     }
 }
 
 impl Tpm for Interposto<'_> {
     fn trocar(&mut self, comando: &[u8], resposta: &mut [u8; MAIOR_QUADRO]) -> Result<usize, Erro> {
-        self.comandos.push(comando.to_vec());
-        let n = self.tpm.trocar(comando, resposta)?;
+        let mut comando = comando.to_vec();
+        if let Some(m) = self.mexer_no_comando.as_mut() {
+            m(&mut comando);
+        }
+        self.comandos.push(comando.clone());
+        let n = self.tpm.trocar(&comando, resposta)?;
         let mut r = resposta[..n].to_vec();
         if let Some(m) = self.mexer.as_mut() {
-            m(comando, &mut r, &self.respostas);
+            m(&comando, &mut r, &self.respostas);
         }
         self.respostas.push(resposta[..n].to_vec());
         resposta[..r.len()].copy_from_slice(&r);
@@ -597,4 +607,71 @@ fn a_ek_fora_da_curva_e_recusada() {
             "a chave do TPM nao e um ponto de P-256"
         ))
     );
+}
+
+/// A senha nova do contador vai cifrada em AES-128-CFB — que, sozinho, não
+/// tem integridade: um bit trocado no texto cifrado trocaria o mesmo bit
+/// da senha que o TPM guardaria. O texto cifrado inteiro está dentro do
+/// `cpHash`, e o HMAC da sessão o cobre. Mexido no caminho — um byte do
+/// texto cifrado, o atributo que diz que ele vai cifrado, um byte do resto
+/// dos parâmetros —, o TPM recusa o comando antes de decifrar, e nada é
+/// definido. Intacto, o mesmo TPM define e o contador funciona.
+#[test]
+fn a_senha_cifrada_mexida_no_caminho_e_recusada() {
+    const NV_DEFINE_SPACE: u32 = 0x12A;
+    // O começo dos parâmetros: o cabeçalho (10), o handle do dono (4), o
+    // tamanho da área de autorização (4) e a área.
+    fn parametros(c: &[u8]) -> usize {
+        18 + u32::from_be_bytes(c[14..18].try_into().unwrap()) as usize
+    }
+    type Mexida = fn(&mut Vec<u8>);
+    let mexidas: [(&str, Mexida); 4] = [
+        ("o primeiro byte do texto cifrado", |c| {
+            let p = parametros(c);
+            c[p + 2] ^= 0x01;
+        }),
+        ("o ultimo byte do texto cifrado", |c| {
+            let p = parametros(c);
+            let n = u16::from_be_bytes([c[p], c[p + 1]]) as usize;
+            c[p + 1 + n] ^= 0x80;
+        }),
+        // A área de autorização: handle (4), nonce (2 + 32), atributos.
+        ("o atributo que diz que vai cifrado", |c| {
+            c[18 + 4 + 2 + 32] &= !0x20
+        }),
+        ("os atributos do indice, depois do texto cifrado", |c| {
+            let p = parametros(c);
+            let n = u16::from_be_bytes([c[p], c[p + 1]]) as usize;
+            // TPM2B_NV_PUBLIC: tamanho (2), índice (4), algoritmo (2), e os
+            // atributos.
+            c[p + 2 + n + 2 + 4 + 2 + 3] ^= 0x01;
+        }),
+    ];
+    for (i, (qual, mexida)) in mexidas.into_iter().enumerate() {
+        let mut tpm = Swtpm::novo(&format!("cifra-mexida-{i}"));
+        {
+            let mut p = Interposto::novo(&mut tpm);
+            p.mexer_no_comando = Some(Box::new(move |c| {
+                if codigo_do_comando(c) == NV_DEFINE_SPACE {
+                    mexida(c);
+                }
+            }));
+            let mut a = Ancora::conectar(&mut p, INDICE, SENHA, None).unwrap();
+            assert!(
+                // `BAD_AUTH` na sessão 1: o HMAC não confere — recusado
+                // pela autenticação, antes de decifrar, e não por outro motivo.
+                a.definir(&mut p, &[], &mut DoSistema) == Err(Erro::Codigo(codigo::SENHA_ERRADA)),
+                "{qual}: o TPM nao recusou o comando mexido pelo HMAC"
+            );
+            a.encerrar(&mut p);
+        }
+        let mut b = Ancora::conectar(&mut tpm, INDICE, SENHA, None).unwrap();
+        assert!(
+            !b.existe(&mut tpm).unwrap(),
+            "{qual}: o indice foi definido pelo comando mexido"
+        );
+        b.definir(&mut tpm, &[], &mut DoSistema).unwrap();
+        let v = b.valor(&mut tpm, &mut DoSistema).unwrap();
+        assert_eq!(b.avancar(&mut tpm, &mut DoSistema).unwrap(), v + 1);
+    }
 }

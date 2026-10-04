@@ -115,6 +115,10 @@ impl Drop for ChaveDeHmac {
 /// Cifra (ou decifra, com `decifrar`) em AES-128-CFB o primeiro parâmetro
 /// de um comando ou resposta (parte 1, 21.4): chave e vetor do
 /// `KDFa(chave do HMAC, "CFB", nonce mais novo, nonce mais velho)`.
+///
+/// Só confidencialidade: quem chama autentica o texto cifrado. O único
+/// chamador, a sessão, cifra antes de calcular o `cpHash` que o HMAC
+/// cobre.
 pub fn cfb(chave: &ChaveDeHmac, novo: &[u8], velho: &[u8], dados: &mut [u8], decifrar: bool) {
     let mut material = [0u8; 32];
     kdfa(chave.como_bytes(), b"CFB", novo, velho, &mut material);
