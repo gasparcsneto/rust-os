@@ -264,6 +264,10 @@ const CENARIOS_DE_QUEDA: &[Cenario] = &[
         rodar: a_fotografia_de_antes_da_compactacao,
     },
     Cenario {
+        nome: "a base sem fecho, sozinha no disco, e recusada: nunca vale pela metade",
+        rodar: a_base_sem_fecho_sozinha,
+    },
+    Cenario {
         nome: "a regiao cheia falha fechada, e o boot seguinte compacta e recupera",
         rodar: a_regiao_cheia_falha_fechada,
     },
@@ -485,20 +489,7 @@ struct Persistencia {
     descargas: u64,
 }
 
-/// A persistência que o `system.info` diz.
-///
-/// Com `DUKE_DEPURAR` no ambiente, imprime antes o log da persistência do
-/// kernel — a bancada não guarda a serial, e uma falha intermitente só se
-/// entende pelo que o boot disse da escolha da região e da âncora.
 fn persistencia_de(maquina: &mut Ligada) -> Result<Persistencia, String> {
-    if std::env::var("DUKE_DEPURAR").is_ok() {
-        let l = maquina.pedir("log.tail", r#"{"count":200}"#)?;
-        for parte in l.split("{\"") {
-            if parte.contains("persistencia") {
-                eprintln!("    LOG {}", &parte[..parte.len().min(300)]);
-            }
-        }
-    }
     let r = maquina.pedir("system.info", "{}")?;
     let p = r
         .split(r#""persistence":{"#)
@@ -2304,6 +2295,66 @@ fn a_fotografia_de_antes_da_compactacao(
     Ok(format!("recusada: {}", p.motivo))
 }
 
+/// A compactação cai depois da primeira parte, e a região antiga some do
+/// disco: sobra uma base sem fecho, autêntica e pela metade — o começo da
+/// história, talvez sem a revogação que veio depois. Ela nunca vale: o boot
+/// recusa o journal, nenhuma credencial passa, e o agente revogado não
+/// entra.
+fn a_base_sem_fecho_sozinha(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    let chaves = super::chaves::Chaves::garantir()?;
+    let disco = disco_de_testes()?;
+    preparar_a_compactacao(arch, artefato, &chaves, &disco)?;
+    plano(
+        &disco,
+        Plano {
+            ponto: ponto::DEPOIS_DA_PRIMEIRA_PARTE,
+            tipo: tipo::BASE_FIM,
+            gravacao: 1,
+            limite: Some(REGIAO_PEQUENA),
+            bandeiras: COLETOR_NAO_COMPACTA,
+        },
+    )?;
+    let caiu = subir_ate_cair(arch, artefato)?;
+    if caiu != ponto::DEPOIS_DA_PRIMEIRA_PARTE {
+        return Err(format!(
+            "caiu no ponto {caiu}, e nao depois da primeira parte"
+        ));
+    }
+    let mut estado = ler_o_estado(&disco)?;
+    estado[..(REGIAO_PEQUENA * 512) as usize].fill(0);
+    escrever_no_estado(&disco, &estado)?;
+    plano(
+        &disco,
+        Plano {
+            limite: Some(REGIAO_PEQUENA),
+            bandeiras: COLETOR_NAO_COMPACTA | BOOT_NAO_COMPACTA,
+            ..Plano::default()
+        },
+    )?;
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let p = persistencia_de(&mut m)?;
+    let r = administrar(
+        &mut m,
+        &chaves.administrador,
+        "agent.register",
+        &registro_de_agente(&[0xD9; 32], "metade", "observador"),
+    );
+    let sai = agente_entra(arch, &[0xD5; 32], "queda-sai")?;
+    m.cortar_a_energia()?;
+    if p.estado != "refused" || !p.motivo.contains("nenhuma regiao") {
+        return Err(format!(
+            "a base sem fecho nao foi recusada pelo que e: {} ({})",
+            p.estado, p.motivo
+        ));
+    }
+    if r.as_ref().is_ok_and(|r| executou(r)) || sai {
+        return Err(format!(
+            "com a base pela metade, a administracao passou ou o revogado entrou: {r:?}; {sai}"
+        ));
+    }
+    Ok(format!("recusada: {}", p.motivo))
+}
+
 /// A região enche sem compactação: a operação que não cabe falha fechada —
 /// não vale, e diz que não ficou gravada —, a persistência fica
 /// indisponível, e nenhuma credencial administrativa passa. O boot
@@ -2342,7 +2393,12 @@ fn a_regiao_cheia_falha_fechada(arch: Arquitetura, artefato: &Artefato) -> Resul
     m.cortar_a_energia()?;
     let (ops, falhou, depois) = r?;
     let p = p?;
-    if !falhou.contains("cheia") || p.estado != "unavailable" || executou(&depois) {
+    // A gravação que encontra a região cheia pode ser a da operação —
+    // que diz que a partição encheu — ou um registro só de auditoria do
+    // coletor, logo antes: aí a operação já encontra a persistência
+    // indisponível. Nos dois casos, ela não vale.
+    let cheia = falhou.contains("cheia") || falhou.contains("persistencia indisponivel");
+    if !cheia || p.estado != "unavailable" || executou(&depois) {
         return Err(format!(
             "a regiao cheia nao falhou fechada: {} ({})\n  {falhou}\n  {depois}",
             p.estado, p.motivo

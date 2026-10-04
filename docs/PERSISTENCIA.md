@@ -646,6 +646,23 @@ duas regiões.
   uma parte.
 - **O elo inicial de uma região vazia** é o do diário, e não zeros: o
   primeiro registro de uma região se encadeia a ele.
+- **A abertura do boot roda inteira com a ordem das gravações na mão.**
+  O coletor já roda no boot: com a persistência recém-disponível e a
+  abertura ainda por gravar, ele gravava um registro só de auditoria
+  antes dela — inofensivo até o 7.5, fatal com as regiões, porque uma
+  região que não começa pela abertura não é inteira, e o boot seguinte
+  recusava o journal. Pela mesma razão, o coletor podia compactar antes de
+  as mensagens do journal serem adotadas. A bancada pegou a corrida, de
+  forma intermitente, em quatro cenários.
+- **O handler da serial não roda mais mascarado.** A resposta da serial
+  era escrita no fio enquanto o handler executava, com a trava da serial
+  na mão e as interrupções mascaradas. Uma operação administrativa pela
+  serial que encontrasse a ordem das gravações com o coletor — no meio de
+  uma compactação — esperava mascarada, com uma trava na mão, e o núcleo
+  parava sem erro nenhum. A resposta agora é montada antes, como nas
+  portas, e só a escrita no fio é mascarada; o modo post-mortem, sem heap,
+  continua escrevendo direto. Esperar a ordem com as interrupções
+  mascaradas é um erro na compilação de depuração.
 - **`system.info` diz a região**, quanto dela está usado, de quantos
   setores, e quantas compactações houve.
 - **O plano de queda** ganhou o ponto *depois da primeira parte*, o

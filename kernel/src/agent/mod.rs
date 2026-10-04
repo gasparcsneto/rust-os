@@ -76,6 +76,10 @@ use sessao::Canal;
 /// dispara é [`processar`], depois que o quadro fechou.
 static FALHA_AGENDADA: AtomicBool = AtomicBool::new(false);
 
+/// O canal está no modo post-mortem — ver [`servir`]: sem heap confiável, a
+/// resposta da serial vai direto no fio, enquanto o handler executa.
+static DIRETO: AtomicBool = AtomicBool::new(false);
+
 /// Marca que a próxima resposta deve ser seguida de uma falha fatal.
 pub(crate) fn agendar_falha_fatal() {
     FALHA_AGENDADA.store(true, Ordering::SeqCst);
@@ -430,6 +434,7 @@ pub async fn atender(canal: Canal) {
 /// controlador ficou num estado estranho, um laço que dependesse delas não
 /// responderia nunca.
 pub fn servir() -> ! {
+    DIRETO.store(true, Ordering::SeqCst);
     crate::log_info!(
         "agent",
         "canal em modo direto, {} comandos registrados",
@@ -602,12 +607,36 @@ fn responder_erro(canal: Canal, id: Option<json::Json>, erro: RpcError, detalhe:
 
 /// Emite uma resposta completa pelo canal, seguida do delimitador de quadro.
 ///
-/// Na serial, direto no fio, com as interrupções mascaradas, como sempre.
-/// Numa porta do `virtio-console`, montada inteira antes, cifrada pela
-/// sessão da porta e entregue ao driver em quadros.
+/// A resposta é montada inteira antes, com o handler rodando com as
+/// interrupções ligadas, e só então vai ao canal: numa porta do
+/// `virtio-console`, cifrada pela sessão da porta e entregue ao driver em
+/// quadros; na serial, escrita no fio de uma vez, com a trava dela.
+///
+/// # Por que a serial não escreve enquanto o handler executa
+///
+/// A trava da serial é tomada com as interrupções mascaradas — o handler
+/// da interrupção de recepção também a toma. Um handler que rodasse com ela
+/// na mão rodaria mascarado, e um handler administrativo espera a ordem
+/// das gravações do journal: com a ordem na mão de outro fio — o coletor,
+/// no meio de uma compactação —, esperar mascarado com uma trava na mão é
+/// a receita de um núcleo parado, e foi o que a bancada do 7.6 encontrou.
+/// Só o modo post-mortem escreve direto, porque não pode contar com o heap.
 fn com_saida(canal: Canal, f: impl FnOnce(&mut JsonWriter) -> fmt::Result) {
     let Canal::Porta(p) = canal else {
-        return com_saida_serial(f);
+        if DIRETO.load(Ordering::SeqCst) {
+            return com_saida_serial(f);
+        }
+        let mut texto = politica::sigiloso::Texto::novo();
+        {
+            let mut w = JsonWriter::new(&mut texto);
+            let _ = f(&mut w);
+        }
+        texto.acrescentar(b"\n");
+        return crate::arch::sem_interrupcoes(|| {
+            if let Some(porta) = crate::serial::AGENT_LINK.lock().as_mut() {
+                porta.write_bytes(texto.como_bytes());
+            }
+        });
     };
     // Num `Texto`, e não num `String`: a resposta pode levar o corpo de uma
     // mensagem, e o texto apaga cada bloco que larga — ao crescer e ao
@@ -624,7 +653,8 @@ fn com_saida(canal: Canal, f: impl FnOnce(&mut JsonWriter) -> fmt::Result) {
     seguro::enviar(p, texto.como_bytes());
 }
 
-/// Emite uma resposta completa na serial.
+/// Emite uma resposta completa na serial, direto no fio, enquanto `f`
+/// executa — só no modo post-mortem.
 fn com_saida_serial(f: impl FnOnce(&mut JsonWriter) -> fmt::Result) {
     crate::arch::sem_interrupcoes(|| {
         let mut guarda = crate::serial::AGENT_LINK.lock();

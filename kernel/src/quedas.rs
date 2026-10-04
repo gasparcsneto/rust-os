@@ -154,9 +154,9 @@ pub fn aqui(p: Ponto) {
         return;
     }
     crate::arch::sem_interrupcoes(|| {
-        // Um pedido pela serial roda com a trava dela na mão — a resposta
-        // se escreve enquanto o handler executa. Quem a segura é este mesmo
-        // processador, que não volta daqui: soltá-la à força não corre o
+        // A trava da serial pode estar na mão deste mesmo processador — no
+        // modo post-mortem a resposta se escreve enquanto o handler
+        // executa —, e ele não volta daqui: soltá-la à força não corre o
         // risco de ninguém. O `\n` do começo separa o aviso de uma resposta
         // escrita pela metade.
         //

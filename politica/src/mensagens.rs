@@ -841,9 +841,11 @@ impl Caixas {
     }
 
     /// Fixa o próximo id, gravado pela compactação. Ele nunca volta: um
-    /// próximo menor que o de agora, ou que alguma viva, é recusado.
+    /// próximo menor que o de agora é recusado — e o de agora já está acima
+    /// de toda viva, porque enviar e restaurar o sobem, então o fixado
+    /// também fica.
     pub fn fixar_proximo(&mut self, proximo: u64) -> Result<(), &'static str> {
-        if proximo < self.proximo || self.vivas.iter().any(|m| m.id >= proximo) {
+        if proximo < self.proximo {
             return Err("proximo id de mensagem voltando");
         }
         self.proximo = proximo;
@@ -1476,6 +1478,24 @@ mod testes {
         c.restaurar(t.mensagem(ids[1]).unwrap().gravada()).unwrap();
         assert!(c.fixar_proximo(ids[1]).is_err(), "abaixo de uma viva");
         assert!(c.fixar_proximo(ids[1] + 1).is_ok());
+
+        // As lápides repostas guardam o mesmo teto do anel: passando dele,
+        // as mais antigas saem.
+        let mut anel = Caixas::nova();
+        for id in 1..=(LAPIDES as u64 + 3) {
+            anel.restaurar_lapide(Lapide {
+                id,
+                de: A,
+                para: B,
+                estado: Estado::Confirmada,
+                versao: 2,
+            })
+            .unwrap();
+        }
+        let ids: Vec<u64> = anel.lapides().map(|l| l.id).collect();
+        assert_eq!(ids.len(), LAPIDES);
+        assert_eq!(ids.first(), Some(&4));
+        assert_eq!(ids.last(), Some(&(LAPIDES as u64 + 3)));
     }
 
     /// próximo id continua de onde parou.

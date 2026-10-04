@@ -702,6 +702,14 @@ fn a_base_inteira_vale_e_continua() {
     ));
 }
 
+/// A região percorrida como o kernel a percorre, em fluxo — e o mesmo que
+/// a leitura inteira diz dela, inclusive se começa inteira.
+fn percorrido(m: &mut Memoria) -> Percorrido {
+    let p = percorrer(m, &CHAVE, |_| Ok::<(), ()>(())).unwrap();
+    assert_eq!(p, ler(m, &CHAVE).unwrap().percorrido());
+    p
+}
+
 /// A compactação cortada em qualquer setor — a queda no meio da escrita da
 /// base — deixa uma região que não vale: a velha continua a escolhida, e
 /// confere com o contador. Só a base inteira, com o fecho, troca de região.
@@ -715,7 +723,7 @@ fn a_base_cortada_em_cada_setor_nao_vale() {
     for corte in 0..=tamanho {
         let mut b = Memoria::nova(256);
         b.bytes[..corte * TAM_SETOR].copy_from_slice(&cheia.bytes[..corte * TAM_SETOR]);
-        let pb = ler(&mut b, &CHAVE).unwrap().percorrido();
+        let pb = percorrido(&mut b);
         let escolhida = escolher(&[pa, pb]);
         if corte == tamanho {
             assert_eq!(escolhida, Some(1), "inteira");
@@ -728,7 +736,7 @@ fn a_base_cortada_em_cada_setor_nao_vale() {
     // As partes sem fecho, todas inteiras, também não valem.
     let mut b = Memoria::nova(256);
     assert!(escrever_base(&mut b, &esc_a, 3, false).is_none());
-    let pb = ler(&mut b, &CHAVE).unwrap().percorrido();
+    let pb = percorrido(&mut b);
     assert!(!pb.inteiro());
     assert_eq!(escolher(&[pa, pb]), Some(0));
 }

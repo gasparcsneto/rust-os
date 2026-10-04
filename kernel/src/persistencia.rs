@@ -205,6 +205,13 @@ pub fn em_ordem<R>(f: impl FnOnce() -> R) -> R {
         .compare_exchange(0, eu, Ordering::Acquire, Ordering::Relaxed)
         .is_err()
     {
+        // Esperar mascarado é esperar com alguma trava na mão — a de quem
+        // mascarou —, e quem tem a ordem pode precisar dela: um núcleo
+        // parado, sem nenhum erro. Na compilação de depuração, o erro.
+        debug_assert!(
+            crate::arch::interrupcoes_habilitadas(),
+            "a ordem das gravacoes esperada com as interrupcoes mascaradas"
+        );
         crate::fios::ceder();
     }
     let r = f();
