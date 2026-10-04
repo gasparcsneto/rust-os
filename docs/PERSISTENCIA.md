@@ -683,19 +683,22 @@ duas regiões.
 | a base sem os eventos do anel | suíte: *a região nova repõe o mesmo estado* |
 | sem a descarga antes do contador | suíte: a compactação descarrega exatamente uma vez |
 | a região trocada sem conferir o contador; a falha da compactação sem fechar | suíte: *o contador trocado falha fechada* |
-| a base que não cabe tratada como falha | suíte: *a base que não cabe, a região que enche* |
+| a base que não cabe tratada como falha; a nova tentativa sem esperar depois de uma base que não coube | suíte: *a base que não cabe, a região que enche* |
 | o boot sem compactar | bancada: *a região cheia falha fechada* |
 | o coletor sem compactar; compactar só com a região cheia | suíte: *a região que enche, e o coletor* |
 | a operação na região cheia sem fechar a persistência | suíte: *a gravação que falha*, *a região que enche* |
 
-Uma sobreviveu: **a nova tentativa logo depois de uma base que não
-coube**, sem esperar mais 64 registros. Ela não quebra invariante
-nenhuma — o coletor tentaria de novo a cada volta, gastando, até a base
-caber ou a região encher —, e nenhum caso chega a uma região passando de
-três quartos com uma base que não cabe na outra, que só um histórico
-crescendo mais depressa que os próprios registros produziria. Uma, a do
-próximo id conferido contra as vivas, era equivalente — o próximo de
-agora já está acima de todas —, e a conferência saiu.
+Nenhuma sobreviveu. A última foi **a nova tentativa logo depois de uma
+base que não coube**, sem esperar mais 64 registros. O primeiro
+relatório a deu como inofensiva; não é equivalente: sem a espera, o
+coletor refaz a cada volta uma base que não cabe — regravando partes na
+outra região — e põe na auditoria um `persistence.compact` com erro a
+cada tentativa. Ganhou o caso: a suíte enche uma região até três
+quartos, faz uma base que não cabe, e confere que ninguém tenta de novo
+antes de mais registros, e que a compactação volta quando a base que não
+coube é esquecida. A do próximo id conferido contra as vivas era
+equivalente — o próximo de agora já está acima de todas, porque enviar e
+restaurar o sobem —, e a conferência saiu do código.
 
 Na primeira rodada sobreviveram nove: a abertura sem a ordem (a corrida
 só aparecia por acaso), a primeira política, a marca da auditoria e o
