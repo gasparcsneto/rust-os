@@ -16126,7 +16126,32 @@ fn compactacao_e_a_regiao_cheia() -> Resultado {
         r?;
         let politica_antes = crate::autorizacao::com_politica(|p| p.texto());
         let mut n = 0u32;
+        let mut esperou = false;
         let falhou = loop {
+            // Passando de três quartos, uma base que não cabe na outra
+            // região: nada muda, e ninguém tenta de novo antes de mais
+            // registros — o coletor não refaz a cada volta uma base que
+            // não cabe, regravando partes e enchendo a auditoria de erros.
+            let (_, _, usados, total) = crate::persistencia::regiao();
+            if !esperou && usados * 4 >= total * 3 {
+                esperou = true;
+                if !crate::persistencia::precisa_compactar_de_teste() {
+                    return Err("a regiao passou de tres quartos e nao pede compactacao");
+                }
+                crate::persistencia::fixar_limite_de_teste(Some(4));
+                let r = crate::persistencia::compactar_de_teste();
+                crate::persistencia::fixar_limite_de_teste(None);
+                if r != Err("a base nao cabe na outra regiao") {
+                    return Err("a base de quatro setores coube");
+                }
+                if crate::persistencia::precisa_compactar_de_teste() {
+                    return Err("a base que nao coube e tentada de novo logo em seguida");
+                }
+                crate::persistencia::esquecer_o_que_nao_coube_de_teste();
+                if !crate::persistencia::precisa_compactar_de_teste() {
+                    return Err("esquecida a base que nao coube, a compactacao nao volta");
+                }
+            }
             let p = alloc::format!(r#"{{"line":"taxa observador {} 18"}}"#, 5 + n % 4);
             let antes = crate::autorizacao::com_politica(|p| p.texto());
             let r = executar_admin_com(0, &ADMIN_DE_TESTE, "policy.write", &p, &p)?;
@@ -16139,6 +16164,9 @@ fn compactacao_e_a_regiao_cheia() -> Resultado {
             }
         };
         let _ = politica_antes;
+        if !esperou {
+            return Err("a regiao encheu sem passar de tres quartos");
+        }
         if !falhou.0.contains("cheia")
             || crate::autorizacao::com_politica(|p| p.texto()) != falhou.1
         {

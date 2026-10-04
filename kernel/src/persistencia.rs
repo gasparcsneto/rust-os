@@ -2194,6 +2194,12 @@ pub fn pausar_a_compactacao_de_teste(pausada: bool) {
 
 /// Só para a suíte: esquece a base que não coube, para o coletor tentar de
 /// novo já.
+/// Só na suíte: se o boot ou o coletor compactariam agora.
+#[cfg(feature = "modo-teste")]
+pub fn precisa_compactar_de_teste() -> bool {
+    precisa_compactar()
+}
+
 #[cfg(feature = "modo-teste")]
 pub fn esquecer_o_que_nao_coube_de_teste() {
     NAO_COUBE_EM.store(u64::MAX, Ordering::Release);
