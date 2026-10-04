@@ -127,6 +127,12 @@ pub mod tipo {
     /// Na base: o próximo id de mensagem — `[id (8)]`. Os ids não se
     /// repetem, nem depois de as mensagens que os usaram saírem.
     pub const MENSAGENS_PROXIMO: u16 = 27;
+    /// Na abertura e no registro de boot: o ponto público da chave de
+    /// endosso do TPM com que o journal fala — `[x ‖ y (64)]`. A EK que
+    /// um boot encontra tem de ser esta: outra é outro TPM, ou alguém no
+    /// barramento fingindo ser ele. O fecho de uma base leva o mesmo ponto
+    /// como quarto campo.
+    pub const CHAVE_DO_TPM: u16 = 28;
 }
 
 /// Monta o conteúdo de um registro a partir dos campos.

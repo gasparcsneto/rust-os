@@ -484,15 +484,69 @@ fn vazio() -> diario::Percorrido {
 
 /// Os campos do fecho de uma base: a instalação, os boots e as
 /// compactações.
-fn fecho(conteudo: &[u8]) -> Result<([u8; 16], u64, u64), &'static str> {
-    let [instalacao, boots, compactacoes] = estado::exatamente::<3>(conteudo)?;
-    Ok((
-        instalacao
+/// O fecho de uma base: a instalação, os boots, as compactações, e a EK.
+struct Fecho {
+    instalacao: [u8; 16],
+    boots: u64,
+    compactacoes: u64,
+    ponto: Option<[u8; 64]>,
+}
+
+fn fecho(conteudo: &[u8]) -> Result<Fecho, &'static str> {
+    let campos = estado::ler_campos(conteudo)?;
+    let (instalacao, boots, compactacoes, ponto) = match campos.as_slice() {
+        [i, b, c] => (i, b, c, None),
+        [i, b, c, p] => (i, b, c, Some(ponto_da_chave(p)?)),
+        _ => return Err("o fecho da base nao tem os campos dele"),
+    };
+    Ok(Fecho {
+        instalacao: (*instalacao)
             .try_into()
             .map_err(|_| "instalacao que nao tem 16 bytes")?,
-        u64_de(boots)?,
-        u64_de(compactacoes)?,
-    ))
+        boots: u64_de(boots)?,
+        compactacoes: u64_de(compactacoes)?,
+        ponto,
+    })
+}
+
+fn ponto_da_chave(b: &[u8]) -> Result<[u8; 64], &'static str> {
+    b.try_into()
+        .map_err(|_| "ponto da chave do TPM que nao tem 64 bytes")
+}
+
+/// O ponto da EK que o journal conhece, juntado enquanto ele é lido no
+/// boot: o da abertura, de um registro de boot, ou do fecho de uma base.
+static FIXADA: Mutex<Option<[u8; 64]>> = Mutex::new(None);
+
+/// O journal diz que a EK é `ponto`. Todo registro que diz isso tem de
+/// dizer a mesma: um journal que fala de duas EKs não se confirma.
+fn fixar(ponto: [u8; 64]) -> Result<(), &'static str> {
+    crate::arch::sem_interrupcoes(|| {
+        let mut f = FIXADA.lock();
+        match *f {
+            Some(antes) if antes != ponto => Err("o journal fala de duas chaves de TPM"),
+            _ => {
+                *f = Some(ponto);
+                Ok(())
+            }
+        }
+    })
+}
+
+/// A entrada que fixa a EK, para a abertura e o registro de boot.
+fn entrada_da_chave(ponto: &[u8; 64]) -> Result<Vec<u8>, &'static str> {
+    estado::campos(&[&entrada(tipo::CHAVE_DO_TPM, &[ponto])?])
+}
+
+/// O ponto da EK com que o journal fala, se a persistência está aberta.
+pub fn ponto_da_ek() -> Option<[u8; 64]> {
+    com(|p| p.aberta.as_ref().map(|a| a.ancora.ponto_do_tpm()))
+}
+
+/// O ponto da EK com que a persistência fala agora.
+fn ponto_atual() -> Result<[u8; 64], &'static str> {
+    com(|p| p.aberta.as_ref().map(|a| a.ancora.ponto_do_tpm()))
+        .ok_or("a persistencia nao esta aberta")
 }
 
 /// A chave do journal e a senha da âncora, derivadas da chave do Duke.
@@ -507,6 +561,29 @@ fn segredos() -> Option<([u8; 32], [u8; 32])> {
             sigilo::resumo::hkdf_rfc5869(sal, k, &[b"ancora: senha do contador"]),
         )
     })
+}
+
+/// A âncora recém-conectada no boot. Se o boot não chega a ficar com ela —
+/// uma recusa, um erro —, ela sai do TPM com a EK e a sessão: nenhuma
+/// saída deixa vaga ocupada no TPM.
+struct Conectada(Option<ancora::Ancora>);
+
+impl Drop for Conectada {
+    fn drop(&mut self) {
+        if let Some(a) = self.0.take() {
+            crate::tpm::com_o_tpm(|t| a.encerrar(t));
+        }
+    }
+}
+
+/// O gerador do kernel, para os nonces e o par efêmero da sessão com o
+/// TPM.
+pub(crate) struct Sorteio;
+
+impl ancora::Sorteio for Sorteio {
+    fn sortear(&mut self, destino: &mut [u8]) -> Result<(), ancora::Erro> {
+        crate::aleatorio::preencher(destino).map_err(|_| ancora::Erro::SemEntropia)
+    }
 }
 
 /// Um nonce sorteado para um registro.
@@ -651,6 +728,7 @@ fn abrir_de_fato() -> Result<Estado, &'static str> {
     let mut boots = 0u64;
     let mut compactacoes = 0u64;
     let mut de_auditoria = 0u64;
+    crate::arch::sem_interrupcoes(|| *FIXADA.lock() = None);
     let lido = match escolhida {
         None => Ok(vazio()),
         Some(i) => diario::percorrer(&mut regioes[i], &chave, |r| {
@@ -667,9 +745,12 @@ fn abrir_de_fato() -> Result<Estado, &'static str> {
                 }
                 tipo::BASE_FIM => {
                     let f = fecho(&r.conteudo)?;
-                    instalacao = Some(f.0);
-                    boots = f.1;
-                    compactacoes = f.2;
+                    instalacao = Some(f.instalacao);
+                    boots = f.boots;
+                    compactacoes = f.compactacoes;
+                    if let Some(p) = f.ponto {
+                        fixar(p)?;
+                    }
                 }
                 tipo::AUDITORIA => de_auditoria += 1,
                 _ => {}
@@ -724,61 +805,122 @@ fn abrir_de_fato() -> Result<Estado, &'static str> {
         p.regiao = regiao;
     });
 
+    let fixada = crate::arch::sem_interrupcoes(|| FIXADA.lock().take());
+    // Na suíte: o journal fixou outra EK — como diante de outro TPM.
+    #[cfg(feature = "modo-teste")]
+    let fixada = match fixada {
+        Some(mut f) if EK_TROCADA.swap(false, Ordering::AcqRel) => {
+            f[0] ^= 1;
+            Some(f)
+        }
+        f => f,
+    };
+
     // Agora, se dá para gravar: um disco durável e a âncora.
     duravel()?;
+    // Um journal que existe foi ancorado num TPM. Sem o TPM, ele não se
+    // confirma — e um disco devolvido a uma cópia antiga, com o TPM tirado
+    // da máquina, traria de volta um agente revogado. Recusado, como
+    // qualquer journal que a âncora não confirma. Sem journal e sem TPM é
+    // uma máquina sem TPM: a persistência fica só indisponível.
     if !crate::tpm::presente() {
+        if lido.quantos > 0 {
+            return Ok(Estado::Recusada(
+                "ha journal e nenhum TPM: nada confirma que o disco e o atual",
+            ));
+        }
         return Err("sem TPM: nao ha ancora contra um disco restaurado");
     }
-    let aberta = crate::tpm::com_o_tpm(|t| ancora::Ancora::abrir(t, INDICE_DA_ANCORA, senha))
-        .ok_or("sem TPM")?;
-    let (ancora, valor) = match aberta {
-        Ok(ancora::Aberta::Presente(a, v)) => (Some(a), Some(v)),
-        Ok(ancora::Aberta::Ausente) => (None, None),
-        Err(e) => return Ok(Estado::Recusada(e.motivo())),
+    // Daqui em diante, toda falha do TPM — a EK que não é a fixada, uma
+    // resposta que não confere com a sessão, um transporte que não
+    // responde — é um journal que não se confirma: recusado.
+    let recusa = |e: ancora::Erro| Ok(Estado::Recusada(e.motivo()));
+
+    // Uma âncora de uma abertura anterior — na suíte, que reabre — sai do
+    // TPM antes: a EK e a sessão dela ocupam vagas, e um TPM tem poucas.
+    if let Some(velha) = com(|p| p.aberta.take()) {
+        crate::tpm::com_o_tpm(|t| velha.ancora.encerrar(t));
+    }
+    // A autenticação: a EK do TPM, conferida com a fixada no journal. A
+    // sessão salgada com ela abre no primeiro comando ao contador.
+    let conectada = crate::tpm::com_o_tpm(|t| {
+        ancora::Ancora::conectar(t, INDICE_DA_ANCORA, senha, fixada.as_ref())
+    })
+    .ok_or("sem TPM")?;
+    let mut guarda = Conectada(Some(match conectada {
+        Ok(a) => a,
+        Err(e) => return recusa(e),
+    }));
+    let a = guarda.0.as_mut().expect("posta acima");
+    #[cfg(feature = "quedas")]
+    crate::quedas::aqui(crate::quedas::Ponto::DepoisDaChave);
+    // O contador: lido pela sessão, ou ausente.
+    let lido_do_tpm = crate::tpm::com_o_tpm(|t| -> Result<Option<u64>, ancora::Erro> {
+        if a.existe(t)? {
+            #[cfg(feature = "quedas")]
+            if crate::quedas::contador_de_fora() {
+                a.incrementar(t, &mut Sorteio)?;
+            }
+            a.valor(t, &mut Sorteio).map(Some)
+        } else {
+            Ok(None)
+        }
+    })
+    .ok_or("sem TPM")?;
+    let valor = match lido_do_tpm {
+        Ok(v) => v,
+        Err(e) => return recusa(e),
     };
 
     let total = regioes[regiao].setores();
-    let (ancora, valor) = match (lido.quantos == 0, ancora, valor) {
+    // A decisão.
+    let valor = match (lido.quantos == 0, valor) {
         // Um journal vazio diante de uma âncora presente. Se o contador
         // nunca passou do valor com que nasceu, nenhum registro foi
         // confirmado contra ele: a criação foi interrompida — entre criar a
         // âncora e gravar a abertura —, e retomá-la não perde nada. Se
         // passou, houve registros, e o disco que os tinha foi apagado.
-        (true, Some(a), Some(v)) => {
-            let nascimento = crate::tpm::com_o_tpm(|t| a.nascimento(t, INDICE_DO_NASCIMENTO))
-                .ok_or("sem TPM")?;
+        (true, Some(v)) => {
+            let nascimento =
+                crate::tpm::com_o_tpm(|t| a.nascimento(t, INDICE_DO_NASCIMENTO, &mut Sorteio))
+                    .ok_or("sem TPM")?;
             match nascimento {
                 Ok(Some(n)) if n == v => {}
                 // Sem nascimento guardado, a criação parou antes de
                 // guardá-lo — e ele só é guardado antes do primeiro
                 // registro, então nenhum registro existiu.
                 Ok(None) => {
-                    crate::tpm::com_o_tpm(|t| a.registrar_nascimento(t, INDICE_DO_NASCIMENTO, &[]))
-                        .ok_or("sem TPM")?
-                        .map_err(|e| e.motivo())?;
+                    if let Err(e) = crate::tpm::com_o_tpm(|t| {
+                        a.registrar_nascimento(t, INDICE_DO_NASCIMENTO, &[], &mut Sorteio)
+                    })
+                    .ok_or("sem TPM")?
+                    {
+                        return recusa(e);
+                    }
                 }
                 Ok(Some(_)) => {
                     return Ok(Estado::Recusada(
                         diario::Recusa::JournalApagado { ancora: v }.motivo(),
                     ));
                 }
-                Err(e) => return Ok(Estado::Recusada(e.motivo())),
+                Err(e) => return recusa(e),
             }
             crate::log_warn!(
                 "persistencia",
                 "a criacao da ancora foi interrompida antes da abertura: retomada em {}",
                 v
             );
-            (a, v)
+            v
         }
-        (_, ancora, valor) => match diario::julgar(lido.ultima_ancora(), valor) {
+        (_, valor) => match diario::julgar(lido.ultima_ancora(), valor) {
             Veredito::Recusado(r) => return Ok(Estado::Recusada(r.motivo())),
-            Veredito::Confere => (ancora.ok_or("ancora sumiu")?, valor.ok_or("ancora sumiu")?),
+            Veredito::Confere => valor.ok_or("ancora sumiu")?,
             Veredito::Completar => {
-                let a = ancora.ok_or("ancora sumiu")?;
-                let novo = crate::tpm::com_o_tpm(|t| a.avancar(t))
-                    .ok_or("sem TPM")?
-                    .map_err(|e| e.motivo())?;
+                let novo =
+                    match crate::tpm::com_o_tpm(|t| a.avancar(t, &mut Sorteio)).ok_or("sem TPM")? {
+                        Ok(v) => v,
+                        Err(e) => return recusa(e),
+                    };
                 if Some(novo) != lido.ultima_ancora() {
                     return Ok(Estado::Recusada(
                         "a ancora nao chegou ao ultimo registro ao completar o avanco",
@@ -788,39 +930,35 @@ fn abrir_de_fato() -> Result<Estado, &'static str> {
                     "persistencia",
                     "o ultimo registro estava gravado e a ancora nao: avanco completado"
                 );
-                (a, novo)
+                novo
             }
             Veredito::Novo => {
                 // Criar, e guardar o nascimento antes de qualquer registro.
                 // O primeiro avanço é o da abertura — o mesmo caminho que
                 // retoma um contador definido e nunca avançado.
-                let (a, v) = crate::tpm::com_o_tpm(|t| {
-                    ancora::iniciar(t)?;
-                    ancora::definir_contador(t, INDICE_DA_ANCORA, &[], &senha)?;
+                let criado = crate::tpm::com_o_tpm(|t| {
+                    a.definir(t, &[], &mut Sorteio)?;
                     #[cfg(feature = "quedas")]
                     crate::quedas::aqui(crate::quedas::Ponto::AncoraDefinida);
-                    let a = match ancora::Ancora::abrir(t, INDICE_DA_ANCORA, senha)? {
-                        ancora::Aberta::Presente(a, _) => a,
-                        ancora::Aberta::Ausente => {
-                            return Err(ancora::Erro::Transporte(
-                                "a ancora recem-definida nao aparece no TPM",
-                            ));
-                        }
-                    };
+                    a.valor(t, &mut Sorteio)?;
                     #[cfg(feature = "quedas")]
                     crate::quedas::aqui(crate::quedas::Ponto::AncoraAvancada);
-                    let v = a.registrar_nascimento(t, INDICE_DO_NASCIMENTO, &[])?;
+                    let v = a.registrar_nascimento(t, INDICE_DO_NASCIMENTO, &[], &mut Sorteio)?;
                     #[cfg(feature = "quedas")]
                     crate::quedas::aqui(crate::quedas::Ponto::NascimentoGuardado);
-                    Ok::<_, ancora::Erro>((a, v))
+                    Ok::<_, ancora::Erro>(v)
                 })
-                .ok_or("sem TPM")?
-                .map_err(|e| e.motivo())?;
+                .ok_or("sem TPM")?;
+                let v = match criado {
+                    Ok(v) => v,
+                    Err(e) => return recusa(e),
+                };
                 crate::log_info!("persistencia", "ancora criada no TPM, em {}", v);
-                (a, v)
+                v
             }
         },
     };
+    let ancora = guarda.0.take().expect("posta acima");
     let escritor = Escritor::depois_de(&lido, valor, total);
     let novo = escritor.ancora() == valor && lido.quantos == 0;
     // O journal está confirmado pela âncora: a cadeia que ele refez vira a
@@ -851,7 +989,9 @@ fn abrir_de_fato() -> Result<Estado, &'static str> {
         }
         let mut instalacao = [0u8; 16];
         crate::aleatorio::preencher(&mut instalacao).map_err(|_| "sem entropia")?;
-        gravar(tipo::ABERTURA, &estado::campos(&[&instalacao])?)?;
+        let mut dados = estado::campos(&[&instalacao])?;
+        dados.extend_from_slice(&entrada_da_chave(&ponto_atual()?)?);
+        gravar(tipo::ABERTURA, &dados)?;
         com(|p| p.instalacao = Some(instalacao));
     }
     // O boot é um ponto seguro: o que está em memória é o que o journal
@@ -866,7 +1006,11 @@ fn abrir_de_fato() -> Result<Estado, &'static str> {
     if compactar_no_boot && precisa_compactar() {
         let _ = compactar();
     }
-    gravar(tipo::BOOT, &estado::campos(&[&(boots + 1).to_le_bytes()])?)?;
+    // O registro de boot diz a EK com que este boot falou: a do journal, ou
+    // — num journal de antes do 7.7 — a primeira, fixada agora.
+    let mut dados = estado::campos(&[&(boots + 1).to_le_bytes()])?;
+    dados.extend_from_slice(&entrada_da_chave(&ponto_atual()?)?);
+    gravar(tipo::BOOT, &dados)?;
     com(|p| p.boots = boots + 1);
     Ok(Estado::Disponivel)
 }
@@ -1562,6 +1706,7 @@ fn compactar_sozinho() -> Result<(usize, u64, u64, u64), FalhaDaCompactacao> {
                 &instalacao,
                 &boots.to_le_bytes(),
                 &(compactacoes + 1).to_le_bytes(),
+                &ponto_atual()?,
             ])?,
         )
         .map_err(nao_cabe)?;
@@ -1573,12 +1718,13 @@ fn compactar_sozinho() -> Result<(usize, u64, u64, u64), FalhaDaCompactacao> {
     crate::quedas::aqui(crate::quedas::Ponto::DepoisDaDescarga);
     let ancora_da_base = fechada.ancora;
     // Só depois de a base inteira estar descarregada o contador anda.
-    let avancado = crate::tpm::com_o_tpm(|t| {
-        com(|p| p.aberta.as_ref().map(|a| a.ancora.avancar(t)))
-            .ok_or(ancora::Erro::Transporte("a persistencia nao esta aberta"))?
-    })
-    .ok_or("sem TPM")?
-    .map_err(|e| e.motivo())?;
+    // Se o TPM falhar e não tiver andado, a base fica na outra região sem
+    // âncora: o boot seguinte a completa — é o mesmo estado — ou a deixa,
+    // se o contador nunca chegar a ela. Nada se desfaz aqui.
+    let avancado = match avancar_a_ancora(ancora_da_base) {
+        Avanco::Feito(v) => v,
+        Avanco::NaoAndou(m) | Avanco::Incerto(m) => return Err(Falhou(m)),
+    };
     #[cfg(feature = "quedas")]
     crate::quedas::aqui(crate::quedas::Ponto::DepoisDoContador);
     // Na suíte: o contador devolve outro valor que o da base — como se
@@ -1603,8 +1749,60 @@ fn compactar_sozinho() -> Result<(usize, u64, u64, u64), FalhaDaCompactacao> {
     Ok((nova, partes + 1, ancora_da_base, compactacoes + 1))
 }
 
+/// O que aconteceu com um avanço do contador.
+enum Avanco {
+    /// Andou, e vale isto — lido de volta, pela sessão.
+    Feito(u64),
+    /// Não andou: uma leitura autenticada diz que ele está onde estava.
+    NaoAndou(&'static str),
+    /// Não se sabe: nem o avanço nem a leitura de conferência responderam.
+    Incerto(&'static str),
+}
+
+/// Avança o contador da âncora, que tem de chegar a `esperado`: o
+/// incremento e a leitura de volta, pela sessão autenticada.
+///
+/// Uma falha no meio não diz se o contador andou — o incremento pode ter
+/// acontecido e a resposta se perdido, ou chegado adulterada. Uma leitura
+/// autenticada, por uma sessão nova, diz: se ele está em `esperado`,
+/// andou; se está um antes, não andou. Um valor que o TPM mostra sem a
+/// sessão conferir não decide nada.
+fn avancar_a_ancora(esperado: u64) -> Avanco {
+    let avanco = com_a_ancora(|a, t| {
+        a.incrementar(t, &mut Sorteio)?;
+        #[cfg(feature = "quedas")]
+        crate::quedas::aqui(crate::quedas::Ponto::DepoisDoIncremento);
+        a.ler(t, &mut Sorteio)
+    });
+    let erro = match avanco {
+        Ok(v) => return Avanco::Feito(v),
+        Err(e) => e.motivo(),
+    };
+    crate::log_warn!(
+        "persistencia",
+        "o avanco do contador falhou ({}): conferindo pela leitura",
+        erro
+    );
+    match com_a_ancora(|a, t| a.ler(t, &mut Sorteio)) {
+        Ok(v) if v == esperado => Avanco::Feito(v),
+        Ok(v) if v.checked_add(1) == Some(esperado) => Avanco::NaoAndou(erro),
+        Ok(_) => Avanco::Incerto("o contador do TPM nao esta onde o journal espera"),
+        Err(e) => Avanco::Incerto(e.motivo()),
+    }
+}
+
+/// Chama `f` com a âncora aberta e o TPM.
+fn com_a_ancora<R>(
+    f: impl FnOnce(&mut ancora::Ancora, &mut crate::tpm::Interface) -> Result<R, ancora::Erro>,
+) -> Result<R, ancora::Erro> {
+    crate::tpm::com_o_tpm(|t| {
+        com(|p| p.aberta.as_mut().map(|a| f(&mut a.ancora, t)))
+            .ok_or(ancora::Erro::Transporte("a persistencia nao esta aberta"))?
+    })
+    .ok_or(ancora::Erro::Transporte("sem TPM"))?
+}
+
 /// O protocolo de um registro: montar, escrever, descarregar, avançar o
-/// contador, confirmar./// O protocolo de um registro: montar, escrever, descarregar, avançar o
 /// contador, confirmar.
 fn gravar_um(tipo_do_registro: u16, dados: &[u8]) -> Result<(), &'static str> {
     #[cfg(feature = "quedas")]
@@ -1646,12 +1844,30 @@ fn gravar_um(tipo_do_registro: u16, dados: &[u8]) -> Result<(), &'static str> {
     crate::quedas::aqui(crate::quedas::Ponto::DepoisDaDescarga);
     // Só depois de descarregado o contador anda: um contador à frente do
     // disco seria um disco que parece velho no próximo boot.
-    let avancado = crate::tpm::com_o_tpm(|t| {
-        com(|p| p.aberta.as_ref().map(|a| a.ancora.avancar(t)))
-            .ok_or(ancora::Erro::Transporte("a persistencia nao esta aberta"))?
-    })
-    .ok_or("sem TPM")?
-    .map_err(|e| e.motivo())?;
+    let avancado = match avancar_a_ancora(montado.ancora) {
+        Avanco::Feito(v) => v,
+        // O registro está no disco, e o contador, conferido por uma
+        // leitura autenticada, não andou: o TPM recusou — uma credencial
+        // inválida, por exemplo. Desfeito, o registro não existe, e a
+        // operação falhou de verdade: o próximo boot não a completa.
+        Avanco::NaoAndou(m) => {
+            crate::log_error!("persistencia", "o contador nao andou: {}", m);
+            let zero = [0u8; diario::TAM_SETOR];
+            return match meio
+                .escrever(montado.setor, &zero)
+                .and_then(|()| meio.descarregar())
+            {
+                Ok(()) => Err("o TPM nao avancou o contador, e o registro foi desfeito"),
+                Err(_) => Err(
+                    "o TPM nao avancou o contador, e o registro nao se desfez: o proximo boot decide",
+                ),
+            };
+        }
+        Avanco::Incerto(m) => {
+            crate::log_error!("persistencia", "o contador ficou incerto: {}", m);
+            return Err("o TPM nao confirmou o avanco do contador: o proximo boot decide");
+        }
+    };
     #[cfg(feature = "quedas")]
     crate::quedas::aqui(crate::quedas::Ponto::DepoisDoContador);
     com(|p| {
@@ -1909,6 +2125,7 @@ pub(crate) fn reaplicar_entrada(e: &[u8]) -> Result<(), &'static str> {
     let t: [u8; 2] = (*t).try_into().map_err(|_| "tipo de entrada invalido")?;
     match (u16::from_le_bytes(t), resto) {
         (tipo::OPERACAO, [_nome, _recurso]) => Ok(()),
+        (tipo::CHAVE_DO_TPM, [ponto]) => fixar(ponto_da_chave(ponto)?),
         (tipo::AGENTE_REGISTRADO, [linha]) => {
             let linha = texto(linha)?;
             let (k, nome, papel) = match sigilo::registro::ler_linha(linha) {
@@ -2033,12 +2250,7 @@ pub fn falhar_a_proxima_gravacao_de_teste(falhar: bool) {
 /// Só para a suíte: o valor do contador da âncora, lido do TPM agora.
 #[cfg(feature = "modo-teste")]
 pub fn ancora_no_tpm_de_teste() -> Result<u64, &'static str> {
-    crate::tpm::com_o_tpm(|t| {
-        com(|p| p.aberta.as_ref().map(|a| a.ancora.ler(t)))
-            .ok_or("a persistencia nao esta aberta")?
-            .map_err(|e| e.motivo())
-    })
-    .ok_or("sem TPM")?
+    com_a_ancora(|a, t| a.ler(t, &mut Sorteio)).map_err(|e| e.motivo())
 }
 
 /// Só para a suíte: uma entrada de registro de operação, como o journal a
@@ -2062,18 +2274,27 @@ pub fn esquecer_pendentes_de_teste() {
     }
 }
 
+/// Só para a suíte: a senha da âncora, para a escuta do barramento
+/// conferir que ela não passa.
+#[cfg(feature = "modo-teste")]
+pub fn senha_da_ancora_de_teste() -> Option<[u8; 32]> {
+    segredos().map(|(_, senha)| senha)
+}
+
+#[cfg(feature = "modo-teste")]
+static EK_TROCADA: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Só para a suíte: a próxima abertura encontra no journal outra EK
+/// fixada que a do TPM — o journal levado para outra máquina.
+#[cfg(feature = "modo-teste")]
+pub fn trocar_a_ek_fixada_de_teste(trocar: bool) {
+    EK_TROCADA.store(trocar, Ordering::Release);
+}
+
 /// Só para a suíte: o nascimento da âncora guardado no TPM.
 #[cfg(feature = "modo-teste")]
 pub fn nascimento_de_teste() -> Result<Option<u64>, &'static str> {
-    let (_, senha) = segredos().ok_or("sem a chave do Duke")?;
-    crate::tpm::com_o_tpm(
-        |t| match ancora::Ancora::abrir(t, INDICE_DA_ANCORA, senha)? {
-            ancora::Aberta::Presente(a, _) => a.nascimento(t, INDICE_DO_NASCIMENTO),
-            ancora::Aberta::Ausente => Ok(None),
-        },
-    )
-    .ok_or("sem TPM")?
-    .map_err(|e| e.motivo())
+    com_a_ancora(|a, t| a.nascimento(t, INDICE_DO_NASCIMENTO, &mut Sorteio)).map_err(|e| e.motivo())
 }
 
 /// Só para a suíte: os bytes dos primeiros `setores` setores da partição de
@@ -2086,8 +2307,6 @@ pub fn bytes_do_journal_de_teste(setores: u64) -> Result<Vec<u8>, &'static str> 
     Ok(v)
 }
 
-/// Só para a suíte: a cadeia da auditoria refeita a partir dos registros
-/// do journal no disco agora, como o boot a refaria.
 /// Só na suíte: a próxima compactação vê o contador do TPM num valor que
 /// não é o da base.
 #[cfg(feature = "modo-teste")]

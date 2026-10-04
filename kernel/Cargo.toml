@@ -149,6 +149,25 @@ opt-level = 3
 # segundos por um cálculo que é de propósito caro.
 [profile.dev.package.argon2]
 opt-level = 3
+# A sessão autenticada com o TPM: um ECDH em P-256 a cada conexão, e um
+# HMAC por comando. Sem otimização, a multiplicação escalar da curva vira
+# segundos na suíte — que conecta ao TPM a cada boot simulado.
+[profile.dev.package.p256]
+opt-level = 3
+[profile.dev.package.primeorder]
+opt-level = 3
+[profile.dev.package.elliptic-curve]
+opt-level = 3
+[profile.dev.package.crypto-bigint]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.hmac]
+opt-level = 3
+[profile.dev.package.aes]
+opt-level = 3
+[profile.dev.package.cfb-mode]
+opt-level = 3
 
 [profile.release]
 panic = "abort"

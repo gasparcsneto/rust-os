@@ -23,3 +23,13 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 # Apagar a senha da âncora da memória quando ela sai de uso.
 zeroize = { version = "1.9.0", default-features = false }
+# A sessão autenticada com o TPM (7.7): as primitivas que a especificação
+# do TPM 2.0 fixa — SHA-256 e HMAC para autorizar e conferir cada comando,
+# AES-128 em CFB para cifrar o parâmetro que leva a senha nova, e ECDH
+# sobre P-256 para salgar a sessão com a chave de endosso do TPM. Do
+# RustCrypto, e não escritas aqui, pela mesma razão do `sigilo`.
+sha2 = { version = "0.11.0", default-features = false }
+hmac = { version = "0.13.0", default-features = false }
+aes = { version = "0.9.0", default-features = false }
+cfb-mode = { version = "0.9.1", default-features = false }
+p256 = { version = "0.14.0", default-features = false, features = ["arithmetic", "ecdh"] }

@@ -6649,10 +6649,11 @@ fn disco_a_janela_nao_se_redesenha() -> Resultado {
     Ok(())
 }
 
-/// O contador de NV do TPM, pelo transporte TIS do kernel: criado, só
-/// cresce, de um em um; a senha errada não lê nem avança. Num índice de
-/// teste, apagado no fim — o da âncora é do journal.
+/// O contador de NV do TPM, pelo transporte do kernel e por uma sessão
+/// autenticada: criado, só cresce, de um em um; a senha errada não lê nem
+/// avança. Num índice de teste, apagado no fim — o da âncora é do journal.
 fn tpm_o_contador_so_cresce() -> Resultado {
+    use crate::persistencia::Sorteio;
     const INDICE_DE_TESTE: u32 = 0x0180_D0EF;
     const SENHA: [u8; 32] = [0x77; 32];
     if !crate::tpm::presente() {
@@ -6662,28 +6663,31 @@ fn tpm_o_contador_so_cresce() -> Resultado {
         // Um índice deixado por uma execução anterior desta mesma suíte
         // (o TPM sobrevive dentro de um comando) sai antes.
         let _ = ancora::apagar(tpm, INDICE_DE_TESTE, &[]);
-        let (a, primeiro) =
-            ancora::Ancora::criar(tpm, INDICE_DE_TESTE, &[], SENHA).map_err(|e| e.motivo())?;
+        let e = |e: ancora::Erro| e.motivo();
+        let mut a = ancora::Ancora::conectar(tpm, INDICE_DE_TESTE, SENHA, None).map_err(e)?;
+        a.definir(tpm, &[], &mut Sorteio).map_err(e)?;
+        let primeiro = a.valor(tpm, &mut Sorteio).map_err(e)?;
         let mut anterior = primeiro;
         for _ in 0..3 {
-            let novo = a.avancar(tpm).map_err(|e| e.motivo())?;
+            let novo = a.avancar(tpm, &mut Sorteio).map_err(e)?;
             if novo != anterior + 1 {
                 crate::log_error!("teste", "o contador foi de {} para {}", anterior, novo);
                 return Err("o contador nao avancou de um em um");
             }
             anterior = novo;
         }
-        let errada = [0x88u8; 32];
-        if ancora::incrementar(tpm, INDICE_DE_TESTE, &errada).is_ok()
-            || ancora::ler_contador(tpm, INDICE_DE_TESTE, &errada).is_ok()
-        {
+        let ponto = a.ponto_do_tpm();
+        let mut errada =
+            ancora::Ancora::conectar(tpm, INDICE_DE_TESTE, [0x88; 32], Some(&ponto)).map_err(e)?;
+        if errada.incrementar(tpm, &mut Sorteio).is_ok() || errada.ler(tpm, &mut Sorteio).is_ok() {
             return Err("a senha errada foi aceita");
         }
-        if a.ler(tpm).map_err(|e| e.motivo())? != anterior {
+        errada.encerrar(tpm);
+        if a.ler(tpm, &mut Sorteio).map_err(e)? != anterior {
             return Err("o contador andou sem a senha");
         }
-        drop(a);
-        ancora::apagar(tpm, INDICE_DE_TESTE, &[]).map_err(|e| e.motivo())
+        a.encerrar(tpm);
+        ancora::apagar(tpm, INDICE_DE_TESTE, &[]).map_err(e)
     });
     resultado.ok_or("nao ha TPM")?
 }
@@ -15165,6 +15169,326 @@ fn persistencia_a_gravacao_que_falha() -> Resultado {
     resultado
 }
 
+/// Os códigos de comando que a suíte faz falhar no barramento.
+const NV_INCREMENT: u32 = 0x134;
+const NV_READ: u32 = 0x14E;
+
+/// Um agente novo, pela operação administrativa, com `falha` armada para os
+/// próximos `vezes` comandos `codigo` do TPM. Devolve a resposta.
+fn registrar_com_o_tpm_falhando(
+    chave: &[u8; 32],
+    nome: &str,
+    codigo: u32,
+    falha: crate::tpm::falhas::Falha,
+    vezes: u32,
+) -> Result<alloc::string::String, &'static str> {
+    let p = alloc::format!(
+        r#"{{"key":"{}","name":"{nome}","role":"observador"}}"#,
+        sigilo::hex(&sigilo::publica_de(chave))
+    );
+    crate::tpm::falhas::armar(codigo, falha, vezes);
+    let r = executar_admin_com(0, &ADMIN_DE_TESTE, "agent.register", &p, &p);
+    let pendente = crate::tpm::falhas::pendente();
+    crate::tpm::falhas::desarmar();
+    let r = r?;
+    if pendente {
+        crate::log_error!("teste", "{}", r);
+        return Err("a falha armada no barramento nao aconteceu");
+    }
+    Ok(r)
+}
+
+/// Quantos registros a região atual tem no disco.
+fn registros_no_disco() -> Result<u64, &'static str> {
+    Ok(crate::persistencia::percorrida_de_teste(crate::persistencia::regiao().0)?.quantos)
+}
+
+/// A credencial inválida não grava estado administrativo: o incremento do
+/// contador vai com o HMAC estragado — para o TPM, uma senha que não é a
+/// do índice —, o TPM recusa, e uma leitura autenticada confere que o
+/// contador não andou. O registro, já no disco, é desfeito: a operação
+/// falha, e falha de verdade — o próximo boot não a completaria. A
+/// persistência fica indisponível; de pé de novo, a próxima operação grava
+/// no lugar do registro desfeito.
+fn tpm_a_credencial_invalida_nao_grava() -> Resultado {
+    use crate::tpm::falhas::Falha;
+    let anterior = crate::persistencia::estado();
+    let resultado = (|| -> Resultado {
+        crate::identidade::registrar_administrador_de_teste(
+            sigilo::publica_de(&ADMIN_DE_TESTE),
+            "administrador",
+        );
+        let contador = crate::persistencia::ancora_no_tpm_de_teste()?;
+        let antes = registros_no_disco()?;
+        let r = registrar_com_o_tpm_falhando(
+            &[0x7E; 32],
+            "credencial-invalida",
+            NV_INCREMENT,
+            Falha::ComandoAdulterado,
+            1,
+        )?;
+        if !r.contains(r#""executed":false"#) || !r.contains("registro foi desfeito") {
+            crate::log_error!("teste", "{}", r);
+            return Err("a operacao com a credencial invalida nao falhou desfeita");
+        }
+        if crate::persistencia::ancora_no_tpm_de_teste()? != contador {
+            return Err("o contador andou com a credencial invalida");
+        }
+        if registros_no_disco()? != antes {
+            return Err("o registro nao ancorado ficou no disco");
+        }
+        if crate::identidade::agente(&sigilo::publica_de(&[0x7E; 32])).is_some() {
+            return Err("a concessao com a credencial invalida ficou valendo");
+        }
+        if crate::persistencia::estado() == crate::persistencia::Estado::Disponivel {
+            return Err("a persistencia continuou disponivel");
+        }
+        crate::persistencia::forcar_estado_de_teste(crate::persistencia::Estado::Disponivel);
+        let p = alloc::format!(
+            r#"{{"key":"{}","name":"depois-da-invalida","role":"observador"}}"#,
+            sigilo::hex(&sigilo::publica_de(&[0x7F; 32]))
+        );
+        let r = executar_admin_com(0, &ADMIN_DE_TESTE, "agent.register", &p, &p)?;
+        if !r.contains(r#""executed":true"#)
+            || registros_no_disco()? != antes + 1
+            || crate::persistencia::ancora_no_tpm_de_teste()? != contador + 1
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("a operacao seguinte nao gravou no lugar do registro desfeito");
+        }
+        Ok(())
+    })();
+    crate::tpm::falhas::desarmar();
+    crate::persistencia::forcar_estado_de_teste(anterior);
+    crate::identidade::esquecer_registrados();
+    resultado
+}
+
+/// O contador anda, e o que volta pelo barramento não confere: o valor
+/// adulterado, uma resposta de antes repetida, a resposta perdida. Nenhum
+/// desses vira valor. Uma leitura autenticada, por uma sessão nova, diz
+/// onde o contador está — andou —, e a operação vale: gravada e ancorada.
+fn tpm_a_resposta_que_nao_confere_nao_vira_valor() -> Resultado {
+    use crate::tpm::falhas::Falha;
+    let anterior = crate::persistencia::estado();
+    let resultado = (|| -> Resultado {
+        crate::identidade::registrar_administrador_de_teste(
+            sigilo::publica_de(&ADMIN_DE_TESTE),
+            "administrador",
+        );
+        let casos = [
+            (NV_READ, Falha::RespostaAdulterada, 0x81u8),
+            (NV_READ, Falha::RespostaRepetida, 0x82),
+            (NV_INCREMENT, Falha::RespostaPerdida, 0x83),
+        ];
+        for (codigo, falha, k) in casos {
+            let contador = crate::persistencia::ancora_no_tpm_de_teste()?;
+            let antes = registros_no_disco()?;
+            let r = registrar_com_o_tpm_falhando(
+                &[k; 32],
+                &alloc::format!("resposta-{k}"),
+                codigo,
+                falha,
+                1,
+            )?;
+            if !r.contains(r#""executed":true"#)
+                || crate::identidade::agente(&sigilo::publica_de(&[k; 32])).is_none()
+            {
+                crate::log_error!("teste", "{:?}: {}", falha, r);
+                return Err("a operacao nao valeu depois da leitura autenticada");
+            }
+            if crate::persistencia::ancora_no_tpm_de_teste()? != contador + 1
+                || registros_no_disco()? != antes + 1
+                || crate::persistencia::estado() != crate::persistencia::Estado::Disponivel
+            {
+                return Err("o contador, o disco ou o estado nao ficaram onde deviam");
+            }
+        }
+        Ok(())
+    })();
+    crate::tpm::falhas::desarmar();
+    crate::persistencia::forcar_estado_de_teste(anterior);
+    crate::identidade::esquecer_registrados();
+    resultado
+}
+
+/// O contador anda, e nem a resposta nem a leitura de conferência
+/// conferem: incerto. A operação não se diz gravada, e a persistência fica
+/// indisponível — mas o registro está no disco e a âncora chegou a ele. O
+/// boot seguinte, pela âncora, o confirma: o mesmo que uma queda depois do
+/// contador. Nunca um valor que não conferiu decide nada.
+fn tpm_o_contador_incerto_o_boot_decide() -> Resultado {
+    use crate::tpm::falhas::Falha;
+    crate::persistencia::compactar_de_teste()?;
+    estado_do_journal()?;
+    let resultado = (|| -> Resultado {
+        crate::identidade::registrar_administrador_de_teste(
+            sigilo::publica_de(&ADMIN_DE_TESTE),
+            "administrador",
+        );
+        let contador = crate::persistencia::ancora_no_tpm_de_teste()?;
+        let r = registrar_com_o_tpm_falhando(
+            &[0x84; 32],
+            "incerto",
+            NV_READ,
+            Falha::RespostaAdulterada,
+            2,
+        )?;
+        if !r.contains(r#""executed":false"#) || !r.contains("o proximo boot decide") {
+            crate::log_error!("teste", "{}", r);
+            return Err("a operacao incerta nao se disse incerta");
+        }
+        if crate::persistencia::estado() == crate::persistencia::Estado::Disponivel {
+            return Err("a persistencia continuou disponivel com o contador incerto");
+        }
+        if crate::persistencia::ancora_no_tpm_de_teste()? != contador + 1 {
+            return Err("o contador nao andou");
+        }
+        // O boot seguinte.
+        de_volta_a_imagem();
+        crate::persistencia::abrir();
+        if crate::persistencia::estado() != crate::persistencia::Estado::Disponivel {
+            return Err("o boot seguinte nao abriu o journal ancorado");
+        }
+        if crate::identidade::agente(&sigilo::publica_de(&[0x84; 32])).is_none() {
+            return Err("o registro ancorado nao valeu no boot seguinte");
+        }
+        Ok(())
+    })();
+    crate::tpm::falhas::desarmar();
+    de_volta_a_imagem();
+    resultado
+}
+
+/// No boot, o contador que volta pelo barramento sem conferir com a
+/// sessão não é aceito: o journal é recusado. Com o barramento de volta,
+/// o boot seguinte abre.
+fn tpm_o_boot_recusa_o_contador_que_nao_confere() -> Resultado {
+    use crate::tpm::falhas::Falha;
+    crate::persistencia::compactar_de_teste()?;
+    estado_do_journal()?;
+    let resultado = (|| -> Resultado {
+        crate::tpm::falhas::armar(NV_READ, Falha::RespostaAdulterada, 1);
+        de_volta_a_imagem();
+        crate::persistencia::abrir();
+        crate::tpm::falhas::desarmar();
+        if !matches!(
+            crate::persistencia::estado(),
+            crate::persistencia::Estado::Recusada(_)
+        ) {
+            return Err("o boot aceitou um contador que nao conferiu");
+        }
+        de_volta_a_imagem();
+        crate::persistencia::abrir();
+        if crate::persistencia::estado() != crate::persistencia::Estado::Disponivel {
+            return Err("o boot seguinte, com o barramento de volta, nao abriu");
+        }
+        a_cadeia_do_journal_confere()
+    })();
+    crate::tpm::falhas::desarmar();
+    de_volta_a_imagem();
+    resultado
+}
+
+/// A senha do contador não passa pelo barramento — nem na abertura, nem
+/// numa gravação: a escuta a procura em todo comando e toda resposta.
+fn tpm_a_senha_nao_passa_pelo_barramento() -> Resultado {
+    crate::persistencia::compactar_de_teste()?;
+    estado_do_journal()?;
+    let senha = crate::persistencia::senha_da_ancora_de_teste().ok_or("sem a senha")?;
+    crate::tpm::falhas::escutar(Some(senha));
+    let resultado = (|| -> Resultado {
+        de_volta_a_imagem();
+        crate::persistencia::abrir();
+        crate::persistencia::gravar_auditoria()?;
+        if crate::persistencia::estado() != crate::persistencia::Estado::Disponivel {
+            return Err("a persistencia nao abriu");
+        }
+        Ok(())
+    })();
+    let vista = crate::tpm::falhas::visto();
+    crate::tpm::falhas::escutar(None);
+    de_volta_a_imagem();
+    resultado?;
+    if vista {
+        return Err("a senha do contador passou pelo barramento");
+    }
+    Ok(())
+}
+
+/// O journal fixou uma EK, e o TPM da máquina tem outra: o journal foi
+/// levado para outro TPM — ou outro chip responde no lugar deste. Recusado
+/// antes de qualquer comando ao contador. E o journal que fala de duas
+/// EKs, uma num registro e outra noutro, não se confirma. Com a EK de
+/// volta, o boot seguinte abre: nada foi mexido.
+fn tpm_a_chave_do_tpm_trocada_e_recusada() -> Resultado {
+    use diario::estado::tipo;
+    crate::persistencia::compactar_de_teste()?;
+    estado_do_journal()?;
+    let resultado = (|| -> Resultado {
+        let ek = crate::persistencia::ponto_da_ek().ok_or("sem a EK fixada")?;
+        crate::persistencia::trocar_a_ek_fixada_de_teste(true);
+        de_volta_a_imagem();
+        crate::persistencia::abrir();
+        crate::persistencia::trocar_a_ek_fixada_de_teste(false);
+        match crate::persistencia::estado() {
+            crate::persistencia::Estado::Recusada(m) if m.contains("chave de endosso") => {}
+            outro => {
+                crate::log_error!("teste", "{:?}", outro);
+                return Err("o journal de outra EK nao foi recusado pelo que e");
+            }
+        }
+        // Duas EKs no mesmo journal.
+        let mut outra = ek;
+        outra[63] ^= 1;
+        crate::persistencia::reaplicar_entrada(&crate::persistencia::entrada_de_teste(
+            tipo::CHAVE_DO_TPM,
+            &[&ek],
+        ))?;
+        if crate::persistencia::reaplicar_entrada(&crate::persistencia::entrada_de_teste(
+            tipo::CHAVE_DO_TPM,
+            &[&outra],
+        ))
+        .is_ok()
+        {
+            return Err("o journal que fala de duas EKs foi aceito");
+        }
+        de_volta_a_imagem();
+        crate::persistencia::abrir();
+        if crate::persistencia::estado() != crate::persistencia::Estado::Disponivel
+            || crate::persistencia::ponto_da_ek() != Some(ek)
+        {
+            return Err("com a EK de volta, o boot seguinte nao abriu");
+        }
+        // Cada registro que fixa a EK a fixa: a base, no fecho, e cada
+        // boot. Um que não fixasse deixaria um journal sem compactação
+        // aceitar qualquer TPM no boot seguinte.
+        let (mut bases, mut boots) = (0, 0);
+        for r in crate::persistencia::ler_de_teste()? {
+            let conta = match r.tipo {
+                tipo::BASE_FIM => &mut bases,
+                tipo::BOOT | tipo::ABERTURA => &mut boots,
+                _ => continue,
+            };
+            if r.conteudo.is_empty() {
+                continue;
+            }
+            if !r.conteudo.windows(ek.len()).any(|w| w == ek) {
+                crate::log_error!("teste", "registro {} do tipo {}", r.sequencia, r.tipo);
+                return Err("um registro que fixa a EK nao a fixou");
+            }
+            *conta += 1;
+        }
+        if bases == 0 || boots == 0 {
+            return Err("nem a base nem um boot para conferir a EK");
+        }
+        a_cadeia_do_journal_confere()
+    })();
+    crate::persistencia::trocar_a_ek_fixada_de_teste(false);
+    de_volta_a_imagem();
+    resultado
+}
+
 /// A lápide vence a imagem: a credencial administrativa da imagem que o
 /// journal diz revogada continua revogada quando o registro da imagem é
 /// lido de novo — como no boot seguinte.
@@ -21760,6 +22084,30 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "persistencia: o journal recusado fecha as credenciais, e a serial continua",
         f: persistencia_o_journal_recusado_fecha_as_credenciais,
+    },
+    Caso {
+        nome: "tpm: a credencial invalida nao grava, e o registro nao ancorado e desfeito",
+        f: tpm_a_credencial_invalida_nao_grava,
+    },
+    Caso {
+        nome: "tpm: a resposta adulterada, repetida ou perdida nao vira valor",
+        f: tpm_a_resposta_que_nao_confere_nao_vira_valor,
+    },
+    Caso {
+        nome: "tpm: o contador incerto nao se diz gravado, e o boot seguinte decide",
+        f: tpm_o_contador_incerto_o_boot_decide,
+    },
+    Caso {
+        nome: "tpm: o boot recusa o contador que nao confere com a sessao",
+        f: tpm_o_boot_recusa_o_contador_que_nao_confere,
+    },
+    Caso {
+        nome: "tpm: a senha do contador nao passa pelo barramento",
+        f: tpm_a_senha_nao_passa_pelo_barramento,
+    },
+    Caso {
+        nome: "tpm: a EK trocada e recusada, e o journal de duas EKs tambem",
+        f: tpm_a_chave_do_tpm_trocada_e_recusada,
     },
     Caso {
         nome: "compactacao: a regiao nova repoe o mesmo estado, e a velha nao confere mais",

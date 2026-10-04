@@ -31,7 +31,9 @@
 //!                        em setores — para encher uma depressa
 //!  26  bandeiras u8      bit 0: o coletor não compacta; bit 1: o boot
 //!                        não compacta; bit 2: a criação do journal
-//!                        espera, cedendo, antes de gravar a abertura
+//!                        espera, cedendo, antes de gravar a abertura;
+//!                        bit 3: o contador anda uma vez "de fora" no
+//!                        boot, antes de ser lido
 //! ```
 //!
 //! O limite e as bandeiras servem à compactação: a bancada enche uma
@@ -69,6 +71,11 @@ pub enum Ponto {
     DepoisDoContador = 13,
     /// Na compactação: a primeira parte da base escrita, e nada mais.
     DepoisDaPrimeiraParte = 14,
+    /// O incremento do contador respondido, e a leitura de volta ainda não
+    /// feita.
+    DepoisDoIncremento = 15,
+    /// No boot: a EK conferida com a fixada, e o contador ainda não lido.
+    DepoisDaChave = 16,
 }
 
 static PONTO: AtomicU8 = AtomicU8::new(0);
@@ -124,6 +131,12 @@ pub fn boot_nao_compacta() -> bool {
     BANDEIRAS.load(Ordering::Relaxed) & 2 != 0
 }
 
+/// Se o plano faz o contador andar uma vez "de fora" no boot, antes de
+/// ser lido: o que alguém com a senha do contador faria entre dois boots.
+pub fn contador_de_fora() -> bool {
+    BANDEIRAS.load(Ordering::Relaxed) & 8 != 0
+}
+
 /// Se o plano faz a criação do journal esperar antes da abertura, com a
 /// persistência já disponível: tempo para o coletor passar — e ele não
 /// pode gravar nada antes da abertura.
@@ -154,7 +167,15 @@ pub fn aqui(p: Ponto) {
     if PONTO.load(Ordering::Relaxed) != p as u8 {
         return;
     }
-    let de_gravacao = p as u8 >= Ponto::AntesDaEscrita as u8;
+    // Os pontos de dentro de uma gravação contam gravações; os do boot e
+    // os da criação, não.
+    let de_gravacao = !matches!(
+        p,
+        Ponto::AncoraDefinida
+            | Ponto::AncoraAvancada
+            | Ponto::NascimentoGuardado
+            | Ponto::DepoisDaChave
+    );
     if de_gravacao
         && (!DA_CONTA.load(Ordering::Relaxed)
             || GRAVACOES.load(Ordering::Relaxed) != GRAVACAO.load(Ordering::Relaxed))

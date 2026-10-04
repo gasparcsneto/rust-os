@@ -4740,6 +4740,9 @@ struct Ambiente {
     /// bancada que confere o que a persistência faz sem âncora.
     tpm: Option<(Child, PathBuf)>,
     relogio: Option<String>,
+    /// No x86, o TPM pela interface CRB — a dos TPMs de firmware — em vez
+    /// do TIS. O mesmo `swtpm` atrás das duas.
+    crb: bool,
 }
 
 impl Ambiente {
@@ -4782,6 +4785,7 @@ impl Ambiente {
         let mut ambiente = Ambiente {
             tpm: Some((tpm, socket_do_tpm.clone())),
             relogio: relogio.map(String::from),
+            crb: false,
         };
         // O QEMU recusa um chardev cujo socket ainda não existe.
         let limite = Instant::now() + Duration::from_secs(10);
@@ -4809,6 +4813,7 @@ impl Ambiente {
         Ambiente {
             tpm: None,
             relogio: relogio.map(String::from),
+            crb: false,
         }
     }
 }
@@ -5060,6 +5065,7 @@ fn comando_qemu(
             "emulator,id=tpm0,chardev=tpm0chr",
             "-device",
             match arch {
+                Arquitetura::X86_64 if ambiente.crb => "tpm-crb,tpmdev=tpm0",
                 Arquitetura::X86_64 => "tpm-tis,tpmdev=tpm0",
                 Arquitetura::Aarch64 => "tpm-tis-device,tpmdev=tpm0",
             },

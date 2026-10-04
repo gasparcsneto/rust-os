@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
-use ancora::{Aberta, Ancora, Erro, MAIOR_QUADRO, Tpm, codigo};
+use ancora::{Ancora, Erro, MAIOR_QUADRO, Sorteio, Tpm, codigo};
 
 const INDICE: u32 = 0x0180_D0E0;
 const SENHA: [u8; 32] = [0x3C; 32];
@@ -103,63 +103,236 @@ impl Tpm for Swtpm {
     }
 }
 
+/// Bytes sorteados pelo sistema, para os nonces e o par efêmero.
+struct DoSistema;
+impl Sorteio for DoSistema {
+    fn sortear(&mut self, destino: &mut [u8]) -> Result<(), Erro> {
+        std::fs::File::open("/dev/urandom")
+            .and_then(|mut f| f.read_exact(destino))
+            .map_err(|_| Erro::SemEntropia)
+    }
+}
+
+/// O que o interposto faz com uma resposta: vê o comando, a resposta e as
+/// respostas de antes, e mexe na de agora.
+type Mexer<'a> = Box<dyn FnMut(&[u8], &mut Vec<u8>, &[Vec<u8>]) + 'a>;
+
+/// Um interposto no barramento: guarda todo comando que passa e pode
+/// mexer em cada resposta antes de ela chegar.
+struct Interposto<'a> {
+    tpm: &'a mut Swtpm,
+    comandos: Vec<Vec<u8>>,
+    respostas: Vec<Vec<u8>>,
+    mexer: Option<Mexer<'a>>,
+}
+
+impl<'a> Interposto<'a> {
+    fn novo(tpm: &'a mut Swtpm) -> Interposto<'a> {
+        Interposto {
+            tpm,
+            comandos: Vec::new(),
+            respostas: Vec::new(),
+            mexer: None,
+        }
+    }
+}
+
+impl Tpm for Interposto<'_> {
+    fn trocar(&mut self, comando: &[u8], resposta: &mut [u8; MAIOR_QUADRO]) -> Result<usize, Erro> {
+        self.comandos.push(comando.to_vec());
+        let n = self.tpm.trocar(comando, resposta)?;
+        let mut r = resposta[..n].to_vec();
+        if let Some(m) = self.mexer.as_mut() {
+            m(comando, &mut r, &self.respostas);
+        }
+        self.respostas.push(resposta[..n].to_vec());
+        resposta[..r.len()].copy_from_slice(&r);
+        Ok(r.len())
+    }
+}
+
+fn codigo_do_comando(c: &[u8]) -> u32 {
+    u32::from_be_bytes(c[6..10].try_into().unwrap())
+}
+
+const NV_READ: u32 = 0x14E;
+
+/// Uma âncora nova, definida e avançada uma vez, num TPM novo.
+fn criada<T: Tpm>(tpm: &mut T) -> (Ancora, u64) {
+    let mut a = Ancora::conectar(tpm, INDICE, SENHA, None).unwrap();
+    assert!(!a.existe(tpm).unwrap());
+    a.definir(tpm, &[], &mut DoSistema).unwrap();
+    let v = a.valor(tpm, &mut DoSistema).unwrap();
+    (a, v)
+}
+
 #[test]
 fn a_ancora_num_tpm_de_verdade() {
     let mut tpm = Swtpm::novo("vida");
+    let (mut a, primeiro) = criada(&mut tpm);
+    let ponto = a.ponto_do_tpm();
 
-    // Um TPM novo não tem âncora.
-    assert!(matches!(
-        Ancora::abrir(&mut tpm, INDICE, SENHA).unwrap(),
-        Aberta::Ausente
-    ));
-
-    // Criada, ela tem um valor, e só cresce, de um em um.
-    let (a, primeiro) = Ancora::criar(&mut tpm, INDICE, &[], SENHA).unwrap();
+    // Só cresce, de um em um.
     let mut anterior = primeiro;
     for _ in 0..5 {
-        let novo = a.avancar(&mut tpm).unwrap();
+        let novo = a.avancar(&mut tpm, &mut DoSistema).unwrap();
         assert_eq!(novo, anterior + 1);
         anterior = novo;
     }
+    a.encerrar(&mut tpm);
 
-    // Aberta de novo, é a mesma, com o mesmo valor.
-    match Ancora::abrir(&mut tpm, INDICE, SENHA).unwrap() {
-        Aberta::Presente(_, v) => assert_eq!(v, anterior),
-        Aberta::Ausente => panic!("a ancora sumiu"),
-    }
+    // Conectada de novo, com a EK fixada: a mesma EK, o mesmo valor.
+    let mut b = Ancora::conectar(&mut tpm, INDICE, SENHA, Some(&ponto)).unwrap();
+    assert_eq!(b.ponto_do_tpm(), ponto, "a EK mudou de um boot para outro");
+    assert!(b.existe(&mut tpm).unwrap());
+    assert_eq!(b.valor(&mut tpm, &mut DoSistema).unwrap(), anterior);
+    b.encerrar(&mut tpm);
 
-    // A senha errada é recusada com o código que o pacote distingue — e o
-    // contador não anda.
-    let errada = [0xC3; 32];
+    // Outra EK fixada: recusada antes de qualquer comando ao contador.
+    let mut outra = ponto;
+    outra[5] ^= 1;
     assert_eq!(
-        ancora::ler_contador(&mut tpm, INDICE, &errada),
-        Err(Erro::Codigo(codigo::SENHA_ERRADA))
+        Ancora::conectar(&mut tpm, INDICE, SENHA, Some(&outra)).err(),
+        Some(Erro::ChaveDoTpmTrocada)
     );
-    assert_eq!(
-        ancora::incrementar(&mut tpm, INDICE, &errada),
-        Err(Erro::Codigo(codigo::SENHA_ERRADA))
-    );
-    assert_eq!(a.ler(&mut tpm).unwrap(), anterior);
 
     // Definir de novo no mesmo número é recusado.
+    let mut c = Ancora::conectar(&mut tpm, INDICE, SENHA, Some(&ponto)).unwrap();
     assert_eq!(
-        ancora::definir_contador(&mut tpm, INDICE, &[], &SENHA),
+        c.definir(&mut tpm, &[], &mut DoSistema),
         Err(Erro::Codigo(codigo::NV_JA_DEFINIDO))
     );
 
     // Apagar e recriar não faz voltar: o contador novo nasce no maior valor
-    // que o TPM já viu. É a propriedade que impede zerar a âncora com a
-    // senha do dono.
+    // que o TPM já viu.
     ancora::apagar(&mut tpm, INDICE, &[]).unwrap();
-    assert!(matches!(
-        Ancora::abrir(&mut tpm, INDICE, SENHA).unwrap(),
-        Aberta::Ausente
-    ));
-    let (_, renascido) = Ancora::criar(&mut tpm, INDICE, &[], SENHA).unwrap();
+    let mut d = Ancora::conectar(&mut tpm, INDICE, SENHA, Some(&ponto)).unwrap();
+    assert!(!d.existe(&mut tpm).unwrap());
+    d.definir(&mut tpm, &[], &mut DoSistema).unwrap();
+    let renascido = d.valor(&mut tpm, &mut DoSistema).unwrap();
     assert!(
         renascido >= anterior,
         "o contador recriado nasceu em {renascido}, abaixo de {anterior}"
     );
+}
+
+/// A senha do contador não passa pelo barramento: nem na definição, nem
+/// num avanço, nem numa leitura, nem no nascimento.
+#[test]
+fn a_senha_nao_passa_pelo_barramento() {
+    const NASCIMENTO: u32 = 0x0180_D0E1;
+    let mut tpm = Swtpm::novo("escuta");
+    let mut escuta = Interposto::novo(&mut tpm);
+    let (mut a, _) = criada(&mut escuta);
+    a.registrar_nascimento(&mut escuta, NASCIMENTO, &[], &mut DoSistema)
+        .unwrap();
+    a.avancar(&mut escuta, &mut DoSistema).unwrap();
+    a.nascimento(&mut escuta, NASCIMENTO, &mut DoSistema)
+        .unwrap();
+    assert!(escuta.comandos.len() > 8);
+    for c in escuta.comandos.iter().chain(&escuta.respostas) {
+        assert!(
+            !c.windows(8).any(|w| w == &SENHA[..8]),
+            "a senha passou pelo barramento"
+        );
+    }
+}
+
+/// Uma resposta adulterada no barramento não vira valor: a leitura falha,
+/// e a seguinte, por uma sessão nova, lê o valor verdadeiro.
+#[test]
+fn a_resposta_adulterada_e_recusada() {
+    let mut tpm = Swtpm::novo("adulterada");
+    let mut i = Interposto::novo(&mut tpm);
+    let (mut a, v) = criada(&mut i);
+    i.mexer = Some(Box::new(|c, r, _| {
+        if codigo_do_comando(c) == NV_READ {
+            // O último byte do valor: um contador uma unidade maior.
+            r[23] ^= 1;
+        }
+    }));
+    assert_eq!(
+        a.ler(&mut i, &mut DoSistema),
+        Err(Erro::RespostaNaoAutenticada)
+    );
+    i.mexer = None;
+    assert_eq!(a.ler(&mut i, &mut DoSistema).unwrap(), v);
+}
+
+/// Uma resposta de antes, repetida no barramento depois de o contador
+/// andar, não passa: ela foi feita para outro nonce.
+#[test]
+fn a_resposta_repetida_e_recusada() {
+    let mut tpm = Swtpm::novo("repetida");
+    let mut i = Interposto::novo(&mut tpm);
+    let (mut a, v) = criada(&mut i);
+    let antiga = i
+        .respostas
+        .iter()
+        .zip(&i.comandos)
+        .rev()
+        .find(|(_, c)| codigo_do_comando(c) == NV_READ)
+        .map(|(r, _)| r.clone())
+        .unwrap();
+    assert_eq!(a.avancar(&mut i, &mut DoSistema).unwrap(), v + 1);
+    i.mexer = Some(Box::new(move |c, r, _| {
+        if codigo_do_comando(c) == NV_READ {
+            *r = antiga.clone();
+        }
+    }));
+    assert_eq!(
+        a.ler(&mut i, &mut DoSistema),
+        Err(Erro::RespostaNaoAutenticada)
+    );
+    i.mexer = None;
+    assert_eq!(a.ler(&mut i, &mut DoSistema).unwrap(), v + 1);
+}
+
+/// Uma resposta forjada — bem formada, com o valor que o falsário quer e
+/// um HMAC qualquer — não passa.
+#[test]
+fn a_resposta_forjada_e_recusada() {
+    let mut tpm = Swtpm::novo("forjada");
+    let mut i = Interposto::novo(&mut tpm);
+    let (mut a, _) = criada(&mut i);
+    i.mexer = Some(Box::new(|c, r, _| {
+        if codigo_do_comando(c) == NV_READ {
+            // O valor zero, e o HMAC zerado: o formato certo, nada mais.
+            for b in &mut r[16..24] {
+                *b = 0;
+            }
+            let n = r.len();
+            for b in &mut r[n - 32..] {
+                *b = 0;
+            }
+        }
+    }));
+    assert_eq!(
+        a.ler(&mut i, &mut DoSistema),
+        Err(Erro::RespostaNaoAutenticada)
+    );
+}
+
+/// Com a senha errada, o TPM não lê nem avança — e o contador não anda.
+#[test]
+fn a_senha_errada_nao_le_nem_avanca() {
+    let mut tpm = Swtpm::novo("errada");
+    let (a, v) = criada(&mut tpm);
+    let ponto = a.ponto_do_tpm();
+    a.encerrar(&mut tpm);
+    let mut errada = Ancora::conectar(&mut tpm, INDICE, [0xC3; 32], Some(&ponto)).unwrap();
+    assert!(errada.existe(&mut tpm).unwrap());
+    assert_eq!(
+        errada.ler(&mut tpm, &mut DoSistema),
+        Err(Erro::Codigo(codigo::SENHA_ERRADA))
+    );
+    assert_eq!(
+        errada.incrementar(&mut tpm, &mut DoSistema),
+        Err(Erro::Codigo(codigo::SENHA_ERRADA))
+    );
+    errada.encerrar(&mut tpm);
+    let mut certa = Ancora::conectar(&mut tpm, INDICE, SENHA, Some(&ponto)).unwrap();
+    assert_eq!(certa.valor(&mut tpm, &mut DoSistema).unwrap(), v);
 }
 
 #[test]
@@ -192,30 +365,158 @@ fn um_indice_de_outro_tipo_no_lugar_e_recusado() {
     assert_eq!(&r[6..10], &[0, 0, 0, 0], "o swtpm recusou o indice comum");
     assert!(tam >= 10);
 
-    assert_eq!(
-        Ancora::abrir(&mut tpm, INDICE, SENHA).err(),
-        Some(Erro::IndiceEstranho)
-    );
+    let mut a = Ancora::conectar(&mut tpm, INDICE, SENHA, None).unwrap();
+    assert_eq!(a.existe(&mut tpm).err(), Some(Erro::IndiceEstranho));
 }
 
 /// O nascimento num TPM de verdade: o índice comum se define, se escreve e
-/// se lê como o pacote o monta, e guarda o primeiro valor enquanto o
-/// contador anda.
+/// se lê pela sessão, e guarda o primeiro valor enquanto o contador anda.
 #[test]
 fn o_nascimento_num_tpm_de_verdade() {
     const NASCIMENTO: u32 = 0x0180_D0E1;
     let mut tpm = Swtpm::novo("nascimento");
-    let (a, primeiro) = Ancora::criar(&mut tpm, INDICE, &[], SENHA).unwrap();
-    assert_eq!(a.nascimento(&mut tpm, NASCIMENTO).unwrap(), None);
+    let (mut a, primeiro) = criada(&mut tpm);
     assert_eq!(
-        a.registrar_nascimento(&mut tpm, NASCIMENTO, &[]).unwrap(),
+        a.nascimento(&mut tpm, NASCIMENTO, &mut DoSistema).unwrap(),
+        None
+    );
+    assert_eq!(
+        a.registrar_nascimento(&mut tpm, NASCIMENTO, &[], &mut DoSistema)
+            .unwrap(),
         primeiro
     );
     for _ in 0..3 {
-        a.avancar(&mut tpm).unwrap();
+        a.avancar(&mut tpm, &mut DoSistema).unwrap();
     }
-    assert_eq!(a.nascimento(&mut tpm, NASCIMENTO).unwrap(), Some(primeiro));
-    // O contador não se escreve como um índice comum.
-    assert!(ancora::escrever(&mut tpm, INDICE, &SENHA, 1).is_err());
-    assert_eq!(a.ler(&mut tpm).unwrap(), primeiro + 3);
+    assert_eq!(
+        a.nascimento(&mut tpm, NASCIMENTO, &mut DoSistema).unwrap(),
+        Some(primeiro)
+    );
+    assert_eq!(a.ler(&mut tpm, &mut DoSistema).unwrap(), primeiro + 3);
+}
+
+/// Dois TPMs têm duas EKs: a fixação distingue um do outro.
+#[test]
+fn cada_tpm_tem_a_sua_ek() {
+    let mut um = Swtpm::novo("ek-um");
+    let mut outro = Swtpm::novo("ek-outro");
+    let a = Ancora::conectar(&mut um, INDICE, SENHA, None).unwrap();
+    let b = Ancora::conectar(&mut outro, INDICE, SENHA, None).unwrap();
+    assert_ne!(a.ponto_do_tpm(), b.ponto_do_tpm());
+    assert_eq!(
+        Ancora::conectar(&mut outro, INDICE, SENHA, Some(&a.ponto_do_tpm())).err(),
+        Some(Erro::ChaveDoTpmTrocada)
+    );
+}
+
+/// Respostas quebradas no barramento viram erro, e não valor: o cabeçalho
+/// com outro tamanho, a resposta cortada, um byte a mais, a etiqueta
+/// trocada, o contador com sete bytes.
+#[test]
+fn respostas_quebradas_viram_erro_e_nao_valor() {
+    type Estrago = fn(&mut Vec<u8>);
+    let acertar = |r: &mut Vec<u8>| {
+        let n = (r.len() as u32).to_be_bytes();
+        r[2..6].copy_from_slice(&n);
+    };
+    let estragos: [Estrago; 5] = [
+        |r| r[5] = r[5].wrapping_add(1),
+        |r| {
+            r.truncate(r.len() - 1);
+        },
+        |r| r.push(0),
+        |r| r[1] ^= 0x03,
+        |r| {
+            r[15] = 7;
+            r.remove(16);
+        },
+    ];
+    for (i, estrago) in estragos.iter().enumerate() {
+        let mut tpm = Swtpm::novo(&format!("quebrada-{i}"));
+        let mut p = Interposto::novo(&mut tpm);
+        let (mut a, _) = criada(&mut p);
+        let e = *estrago;
+        p.mexer = Some(Box::new(move |c, r, _| {
+            if codigo_do_comando(c) == NV_READ {
+                e(r);
+                if i > 0 && i != 3 {
+                    acertar(r);
+                }
+            }
+        }));
+        assert!(
+            a.ler(&mut p, &mut DoSistema).is_err(),
+            "o estrago {i} foi lido como valor"
+        );
+    }
+}
+
+/// O nome que este pacote calcula para o índice — e põe no HMAC — é o
+/// que o TPM calcula: antes e depois da primeira escrita.
+#[test]
+fn o_nome_calculado_e_o_do_tpm() {
+    let mut tpm = Swtpm::novo("nome");
+    let mut a = Ancora::conectar(&mut tpm, INDICE, SENHA, None).unwrap();
+    a.definir(&mut tpm, &[], &mut DoSistema).unwrap();
+    let nome_do_tpm = |tpm: &mut Swtpm| {
+        let mut c = Vec::new();
+        c.extend_from_slice(&0x8001u16.to_be_bytes());
+        c.extend_from_slice(&14u32.to_be_bytes());
+        c.extend_from_slice(&0x169u32.to_be_bytes());
+        c.extend_from_slice(&INDICE.to_be_bytes());
+        let mut r = [0; MAIOR_QUADRO];
+        let n = tpm.trocar(&c, &mut r).unwrap();
+        let publico = u16::from_be_bytes([r[10], r[11]]) as usize;
+        let inicio = 12 + publico + 2;
+        r[inicio..n].to_vec()
+    };
+    assert_eq!(
+        nome_do_tpm(&mut tpm),
+        ancora::nome_do_indice(INDICE, ancora::atributo::DA_ANCORA)
+    );
+    a.valor(&mut tpm, &mut DoSistema).unwrap();
+    assert_eq!(
+        nome_do_tpm(&mut tpm),
+        ancora::nome_do_indice(
+            INDICE,
+            ancora::atributo::DA_ANCORA | ancora::atributo::ESCRITO
+        )
+    );
+}
+
+/// Uma senha que termina em zeros autoriza do mesmo jeito: o TPM tira os
+/// zeros do fim antes de pô-la na chave do HMAC, e quem não tirar erra o
+/// HMAC. A senha do kernel é sorteada — uma vez em 256 ela termina em zero.
+#[test]
+fn a_senha_com_zeros_no_fim_autoriza() {
+    let mut senha = [0x5A; 32];
+    senha[29..].fill(0);
+    let mut tpm = Swtpm::novo("zeros");
+    let mut a = Ancora::conectar(&mut tpm, INDICE, senha, None).unwrap();
+    a.definir(&mut tpm, &[], &mut DoSistema).unwrap();
+    let v = a.valor(&mut tpm, &mut DoSistema).unwrap();
+    assert_eq!(a.avancar(&mut tpm, &mut DoSistema).unwrap(), v + 1);
+    assert_eq!(a.ler(&mut tpm, &mut DoSistema).unwrap(), v + 1);
+}
+
+/// Uma chave de outro modelo no lugar da EK — outros atributos, como a de
+/// quem responde no lugar do TPM com uma chave que ele escolheu — é
+/// recusada antes de qualquer sessão: o sal iria para a chave errada.
+#[test]
+fn a_chave_de_outro_modelo_e_recusada() {
+    const CREATE_PRIMARY: u32 = 0x131;
+    let mut tpm = Swtpm::novo("outro-modelo");
+    let mut i = Interposto::novo(&mut tpm);
+    i.mexer = Some(Box::new(|c, r, _| {
+        if codigo_do_comando(c) == CREATE_PRIMARY {
+            // Cabeçalho (10), handle (4), tamanho dos parâmetros (4),
+            // tamanho da parte pública (2), tipo (2), algoritmo do nome
+            // (2): o último byte dos atributos.
+            r[27] ^= 0x10;
+        }
+    }));
+    assert!(matches!(
+        Ancora::conectar(&mut i, INDICE, SENHA, None).err(),
+        Some(Erro::RespostaMalformada(_))
+    ));
 }

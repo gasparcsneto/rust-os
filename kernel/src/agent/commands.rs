@@ -1302,6 +1302,21 @@ fn system_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.field_u64("region_used", usados)?;
     w.field_u64("region_sectors", setores)?;
     w.field_u64("compactions", compactacoes)?;
+    // O TPM: por qual interface, e a impressão da EK com que o journal
+    // fala — os oito primeiros bytes do ponto, para distinguir um TPM de
+    // outro sem expor nada que importe.
+    w.field_str("tpm_interface", crate::tpm::interface().unwrap_or("none"))?;
+    let mut impressao = [0u8; 16];
+    let ek = crate::persistencia::ponto_da_ek()
+        .map(|p| {
+            for (i, b) in p[..8].iter().enumerate() {
+                impressao[2 * i] = b"0123456789abcdef"[(b >> 4) as usize];
+                impressao[2 * i + 1] = b"0123456789abcdef"[(b & 0xF) as usize];
+            }
+            core::str::from_utf8(&impressao).unwrap_or("")
+        })
+        .unwrap_or("");
+    w.field_str("tpm_ek", ek)?;
     w.field_u64("boots", boots)?;
     w.field_u64("clock", crate::persistencia::agora())?;
     // O que o disco confirmou: escritas e descargas. É de fora que se vê

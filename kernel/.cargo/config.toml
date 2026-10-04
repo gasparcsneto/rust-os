@@ -23,7 +23,10 @@ target = "x86_64-unknown-none"
 # função a função, depois de perguntar ao processador. Estas opções são as
 # que os próprios pacotes oferecem para desligar esse caminho. A do SHA-2
 # entrou com o Ed25519 das assinaturas de quórum: sem ela, o `sha2` não
-# compila para este alvo.
+# compila para este alvo. A do AES entrou com a sessão autenticada com o
+# TPM (7.7), que cifra em AES-128-CFB o parâmetro que leva a senha nova:
+# sem ela, o LLVM não compila o caminho AES-NI para este alvo — a mesma
+# mensagem do Poly1305.
 #
 # Medido, tirando uma de cada vez: sem a do Poly1305, o LLVM não compila o
 # caminho AVX2 para este alvo ("Do not know how to split the result of this
@@ -43,6 +46,7 @@ rustflags = [
     "--cfg", 'poly1305_backend="soft"',
     "--cfg", 'curve25519_dalek_backend="serial"',
     "--cfg", 'sha2_backend="soft"',
+    "--cfg", 'aes_backend="soft"',
 ]
 
 [target.aarch64-unknown-none-softfloat]
@@ -64,4 +68,5 @@ rustflags = [
     "--cfg", 'poly1305_backend="soft"',
     "--cfg", 'curve25519_dalek_backend="serial"',
     "--cfg", 'sha2_backend="soft"',
+    "--cfg", 'aes_backend="soft"',
 ]

@@ -220,6 +220,18 @@ const CENARIOS: &[Cenario] = &[
         rodar: a_queda_no_meio_da_gravacao,
     },
     Cenario {
+        nome: "o TPM devolvido a um estado anterior e recusado, e o revogado nao volta",
+        rodar: o_tpm_devolvido_e_recusado,
+    },
+    Cenario {
+        nome: "o TPM tirado da maquina, com um disco antigo, e recusado, e o revogado nao volta",
+        rodar: o_tpm_tirado_e_recusado,
+    },
+    Cenario {
+        nome: "o mesmo TPM pela CRB e pelo TIS: a mesma EK, o mesmo journal",
+        rodar: o_tpm_pela_crb_e_pelo_tis,
+    },
+    Cenario {
         nome: "o TPM limpo entre dois boots e recusado",
         rodar: o_tpm_limpo_e_recusado,
     },
@@ -274,6 +286,14 @@ const CENARIOS_DE_QUEDA: &[Cenario] = &[
     Cenario {
         nome: "o coletor nao grava nada antes da abertura do journal",
         rodar: o_coletor_espera_a_abertura,
+    },
+    Cenario {
+        nome: "a queda no boot entre a chave do TPM e o contador nao muda nada",
+        rodar: a_queda_depois_da_chave,
+    },
+    Cenario {
+        nome: "o contador que anda de fora e recusado, e o estado do disco nao volta como atual",
+        rodar: o_contador_de_fora_e_recusado,
     },
     Cenario {
         nome: "a queda na criacao da ancora e retomada, e nunca recusada para sempre",
@@ -476,6 +496,9 @@ fn o_rtc_e_o_que_se_mandou(arch: Arquitetura, artefato: &Artefato) -> Result<Str
 struct Persistencia {
     estado: String,
     motivo: String,
+    /// A interface do TPM, e a impressão da EK com que o journal fala.
+    interface: String,
+    ek: String,
     geracao: u64,
     /// Os registros do journal que não são só de auditoria: os de estado,
     /// de boot e de abertura. Os de auditoria o coletor grava quando quer,
@@ -509,6 +532,8 @@ fn persistencia_de(maquina: &mut Ligada) -> Result<Persistencia, String> {
     Ok(Persistencia {
         estado: texto("state"),
         motivo: texto("reason"),
+        interface: texto("tpm_interface"),
+        ek: texto("tpm_ek"),
         geracao: numero("generation")?,
         registros: numero("records")? - numero("audit_records")?,
         auditoria_gravada: numero("audit_durable_seq")?,
@@ -969,6 +994,122 @@ fn a_queda_no_meio_da_gravacao(arch: Arquitetura, artefato: &Artefato) -> Result
     Ok(format!(
         "7 quedas: {gravados} depois da gravacao, {perdidos} antes dela, nenhuma recusada"
     ))
+}
+
+/// Copia os arquivos de um diretório para outro, que é recriado vazio.
+fn copiar_diretorio(de: &Path, para: &Path) -> Result<(), String> {
+    let _ = std::fs::remove_dir_all(para);
+    std::fs::create_dir_all(para).map_err(|e| e.to_string())?;
+    for e in std::fs::read_dir(de).map_err(|e| e.to_string())? {
+        let e = e.map_err(|e| e.to_string())?;
+        if e.file_type().map_err(|e| e.to_string())?.is_file() {
+            std::fs::copy(e.path(), para.join(e.file_name())).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// O TPM devolvido a um estado anterior — o NV dele restaurado de uma
+/// cópia, o que um TPM físico não deixa fazer e um emulado deixa —
+/// diante do disco atual: o contador fica atrás do journal. Recusado, e o
+/// agente revogado depois da cópia não volta.
+fn o_tpm_devolvido_e_recusado(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    let chaves = super::chaves::Chaves::garantir()?;
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let r = registrar(&mut m, &chaves, &[0xC1; 32], "tpm-antigo");
+    m.cortar_a_energia()?;
+    r?;
+    let estado = diretorio_do_tpm(arch).join("estado");
+    let copia = diretorio_do_tpm(arch).join("copia");
+    copiar_diretorio(&estado, &copia)?;
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let r = revogar_agente(&mut m, &chaves, &[0xC1; 32]);
+    m.cortar_a_energia()?;
+    r?;
+    copiar_diretorio(&copia, &estado)?;
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let p = persistencia_de(&mut m)?;
+    let voltou = agente_entra(arch, &[0xC1; 32], "tpm-antigo")?;
+    m.cortar_a_energia()?;
+    if p.estado != "refused" || !p.motivo.contains("passa da ancora") {
+        return Err(format!(
+            "o TPM devolvido nao foi recusado pelo que e: {} ({})",
+            p.estado, p.motivo
+        ));
+    }
+    if voltou {
+        return Err("com o TPM devolvido, o agente revogado voltou".into());
+    }
+    Ok(format!("recusado: {}", p.motivo))
+}
+
+/// O TPM tirado da máquina, e o disco devolvido a uma cópia de antes de
+/// uma revogação: sem o TPM, nada confirma que o disco é o atual. O journal
+/// é recusado — e com ele as credenciais: o agente revogado não volta.
+fn o_tpm_tirado_e_recusado(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    let chaves = super::chaves::Chaves::garantir()?;
+    let disco = disco_de_testes()?;
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let r = registrar(&mut m, &chaves, &[0xC2; 32], "sem-tpm-antigo");
+    m.cortar_a_energia()?;
+    r?;
+    let foto = ler_o_estado(&disco)?;
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let r = revogar_agente(&mut m, &chaves, &[0xC2; 32]);
+    m.cortar_a_energia()?;
+    r?;
+    escrever_no_estado(&disco, &foto)?;
+    let mut m = Ligada::subir_com(arch, artefato, Ambiente::sem_tpm(None))?;
+    let p = persistencia_de(&mut m)?;
+    let voltou = agente_entra(arch, &[0xC2; 32], "sem-tpm-antigo")?;
+    let r = administrar(&mut m, &chaves.administrador, "message.read", "{}")?;
+    m.cortar_a_energia()?;
+    if p.estado != "refused" || !p.motivo.contains("nenhum TPM") {
+        return Err(format!(
+            "o journal sem TPM nao foi recusado: {} ({})",
+            p.estado, p.motivo
+        ));
+    }
+    if voltou || executou(&r) {
+        return Err(format!(
+            "sem TPM, o revogado voltou ou uma credencial administrativa passou\n  {r}"
+        ));
+    }
+    Ok(format!("recusado: {}", p.motivo))
+}
+
+/// O mesmo TPM pelas duas interfaces: a CRB, a dos TPMs de firmware, e o
+/// TIS, a dos discretos. O journal criado por uma abre pela outra: a mesma
+/// EK, o mesmo contador. No ARM, a máquina `virt` só tem o TIS.
+fn o_tpm_pela_crb_e_pelo_tis(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    if arch == Arquitetura::Aarch64 {
+        return Ok("a maquina virt do ARM so oferece o TIS: nada a comparar".into());
+    }
+    let chaves = super::chaves::Chaves::garantir()?;
+    let mut ambiente = Ambiente::ligar(arch, None)?;
+    ambiente.crb = true;
+    let mut m = Ligada::subir_com(arch, artefato, ambiente)?;
+    let crb = persistencia_de(&mut m)?;
+    let r = registrar(&mut m, &chaves, &[0xC3; 32], "pela-crb");
+    m.cortar_a_energia()?;
+    r?;
+    if crb.estado != "available" || crb.interface != "CRB" {
+        return Err(format!(
+            "pela CRB: {} ({}), interface {}",
+            crb.estado, crb.motivo, crb.interface
+        ));
+    }
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let tis = persistencia_de(&mut m)?;
+    let entra = agente_entra(arch, &[0xC3; 32], "pela-crb")?;
+    m.cortar_a_energia()?;
+    if tis.estado != "available" || tis.interface != "TIS" || tis.ek != crb.ek || !entra {
+        return Err(format!(
+            "pelo TIS: {} ({}), interface {}, EK {} e nao {}, o agente entra: {entra}",
+            tis.estado, tis.motivo, tis.interface, tis.ek, crb.ek
+        ));
+    }
+    Ok(format!("EK {} pelas duas interfaces", crb.ek))
 }
 
 /// O TPM limpo entre dois boots — o estado dele apagado —: o journal diz
@@ -1463,6 +1604,8 @@ mod ponto {
     pub const DEPOIS_DA_DESCARGA: u8 = 12;
     pub const DEPOIS_DO_CONTADOR: u8 = 13;
     pub const DEPOIS_DA_PRIMEIRA_PARTE: u8 = 14;
+    pub const DEPOIS_DO_INCREMENTO: u8 = 15;
+    pub const DEPOIS_DA_CHAVE: u8 = 16;
 }
 
 /// Quanto esperar o aviso da queda depois do pedido que a provoca.
@@ -1522,6 +1665,8 @@ const COLETOR_NAO_COMPACTA: u8 = 1;
 const BOOT_NAO_COMPACTA: u8 = 2;
 /// A criação do journal espera, cedendo, antes de gravar a abertura.
 const ESPERAR_NA_ABERTURA: u8 = 4;
+/// O contador anda uma vez "de fora" no boot, antes de ser lido.
+const CONTADOR_DE_FORA: u8 = 8;
 
 fn plano(disco: &Path, p: Plano) -> Result<(), String> {
     let mut setor = [0u8; 512];
@@ -1699,7 +1844,7 @@ type Caso = (u8, bool, bool, &'static str);
 /// As quedas dentro de uma gravação, em cada fronteira. Valer ou não valer
 /// é o que o ponto decide; o que nunca pode acontecer é o boot seguinte
 /// recusar, ou o próximo registro não gravar.
-const QUEDAS_NA_GRAVACAO: [Caso; 5] = [
+const QUEDAS_NA_GRAVACAO: [Caso; 6] = [
     (ponto::ANTES_DA_ESCRITA, false, false, "antes da escrita"),
     (
         ponto::DEPOIS_DA_ESCRITA,
@@ -1718,6 +1863,12 @@ const QUEDAS_NA_GRAVACAO: [Caso; 5] = [
         false,
         true,
         "depois da descarga, antes do contador",
+    ),
+    (
+        ponto::DEPOIS_DO_INCREMENTO,
+        false,
+        true,
+        "depois do incremento, antes da leitura de volta",
     ),
     (
         ponto::DEPOIS_DO_CONTADOR,
@@ -1753,8 +1904,8 @@ fn conferir_depois_da_queda(
 /// A queda em cada fronteira de uma operação de autoridade — o registro de
 /// um agente —: antes de escrever, depois de escrever (a escrita chegou ao
 /// disco, ou se perdeu por não ter sido descarregada), depois de
-/// descarregar e antes do contador, depois do contador e antes da resposta.
-/// Em todos, o boot seguinte sobe com a persistência de pé, a operação vale
+/// descarregar e antes do contador, depois do incremento e antes da
+/// leitura de volta, depois do contador e antes da resposta. Em todos, o boot seguinte sobe com a persistência de pé, a operação vale
 /// exatamente quando o registro dela está no disco, e a próxima operação
 /// grava e sobrevive a mais um boot.
 fn as_quedas_numa_operacao(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
@@ -2134,14 +2285,15 @@ fn preparar_a_compactacao(
 /// A energia cai em cada fronteira da compactação, feita no boot: antes de
 /// escrever, depois da primeira parte, depois de escrever a base inteira
 /// (que chegou ao disco, ou se perdeu sem a descarga), depois da descarga
-/// e antes do contador, depois do contador. O boot seguinte sobe com a
+/// e antes do contador, depois do incremento e antes da leitura de volta,
+/// depois do contador. O boot seguinte sobe com a
 /// persistência de pé; a compactação vale exatamente quando o fecho está
 /// no disco; o estado é o mesmo — o agente que fica entra, o revogado não —
 /// e a geração também; e a próxima operação grava.
 fn as_quedas_na_compactacao(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
     let chaves = super::chaves::Chaves::garantir()?;
     let disco = disco_de_testes()?;
-    let casos: [Caso; 6] = [
+    let casos: [Caso; 7] = [
         (ponto::ANTES_DA_ESCRITA, false, false, "antes da escrita"),
         (
             ponto::DEPOIS_DA_PRIMEIRA_PARTE,
@@ -2166,6 +2318,12 @@ fn as_quedas_na_compactacao(arch: Arquitetura, artefato: &Artefato) -> Result<St
             false,
             true,
             "a base descarregada, antes do contador",
+        ),
+        (
+            ponto::DEPOIS_DO_INCREMENTO,
+            false,
+            true,
+            "o contador incrementado, antes da leitura de volta",
         ),
         (
             ponto::DEPOIS_DO_CONTADOR,
@@ -2474,6 +2632,84 @@ fn o_coletor_espera_a_abertura(arch: Arquitetura, artefato: &Artefato) -> Result
     ))
 }
 
+/// A queda no boot depois de a EK ser conferida e antes de o contador ser
+/// lido: nada mudou — nem disco, nem contador —, e o boot seguinte abre, com
+/// o que valia valendo.
+fn a_queda_depois_da_chave(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    let chaves = super::chaves::Chaves::garantir()?;
+    let disco = disco_de_testes()?;
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let r = registrar(&mut m, &chaves, &[0xC4; 32], "antes-da-chave");
+    let antes = persistencia_de(&mut m);
+    m.cortar_a_energia()?;
+    r?;
+    let antes = antes?;
+    plano_de_queda(&disco, ponto::DEPOIS_DA_CHAVE, 0, 0)?;
+    let caiu = subir_ate_cair(arch, artefato)?;
+    sem_plano(&disco)?;
+    if caiu != ponto::DEPOIS_DA_CHAVE {
+        return Err(format!("caiu no ponto {caiu}, e nao depois da chave"));
+    }
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let p = persistencia_de(&mut m)?;
+    let entra = agente_entra(arch, &[0xC4; 32], "antes-da-chave")?;
+    m.cortar_a_energia()?;
+    if p.estado != "available" || p.geracao != antes.geracao || !entra || p.ek != antes.ek {
+        return Err(format!(
+            "depois da queda: {} ({}), geracao {} e nao {}, o agente entra: {entra}",
+            p.estado, p.motivo, p.geracao, antes.geracao
+        ));
+    }
+    Ok(format!("geracao {} e a EK {} de pe", p.geracao, p.ek))
+}
+
+/// O contador anda "de fora" entre dois boots — o que só quem tem a senha
+/// dele faria —, e fica à frente do journal. Recusado: o journal não é o
+/// atual para o TPM, e o estado dele não volta como se fosse. E continua
+/// recusado no boot seguinte: o contador não volta.
+fn o_contador_de_fora_e_recusado(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    let chaves = super::chaves::Chaves::garantir()?;
+    let disco = disco_de_testes()?;
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let r = registrar(&mut m, &chaves, &[0xC5; 32], "contador-de-fora");
+    m.cortar_a_energia()?;
+    r?;
+    plano(
+        &disco,
+        Plano {
+            bandeiras: CONTADOR_DE_FORA,
+            ..Plano::default()
+        },
+    )?;
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let p = persistencia_de(&mut m)?;
+    let entra = agente_entra(arch, &[0xC5; 32], "contador-de-fora")?;
+    let r = administrar(&mut m, &chaves.administrador, "message.read", "{}")?;
+    m.cortar_a_energia()?;
+    sem_plano(&disco)?;
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let depois = persistencia_de(&mut m)?;
+    m.cortar_a_energia()?;
+    if p.estado != "refused" || !p.motivo.contains("anterior ao que a ancora") {
+        return Err(format!(
+            "o contador de fora nao foi recusado pelo que e: {} ({})",
+            p.estado, p.motivo
+        ));
+    }
+    if entra || executou(&r) {
+        return Err(format!(
+            "com o contador a frente, uma credencial passou\n  {r}"
+        ));
+    }
+    if depois.estado != "refused" {
+        return Err(format!(
+            "no boot seguinte, o journal atrasado foi aceito: {} ({})",
+            depois.estado, depois.motivo
+        ));
+    }
+    Ok(format!("recusado: {}", p.motivo))
+}
+
 /// A queda na criação da âncora, no primeiro boot de todos: com o contador
 /// definido e nunca avançado, avançado e sem nascimento, com o nascimento e
 /// sem a abertura, e dentro da gravação da abertura. Nenhuma deixa o
@@ -2482,7 +2718,11 @@ fn o_coletor_espera_a_abertura(arch: Arquitetura, artefato: &Artefato) -> Result
 fn as_quedas_na_criacao(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
     let chaves = super::chaves::Chaves::garantir()?;
     let disco = disco_de_testes()?;
-    let casos: [(u8, &str); 6] = [
+    let casos: [(u8, &str); 7] = [
+        (
+            ponto::DEPOIS_DA_CHAVE,
+            "a chave do TPM conferida, e nada definido",
+        ),
         (
             ponto::ANCORA_DEFINIDA,
             "o contador definido e nunca avancado",
@@ -2534,7 +2774,10 @@ fn as_quedas_na_criacao(arch: Arquitetura, artefato: &Artefato) -> Result<String
         m.cortar_a_energia()?;
         conferir_depois_da_queda(&p, caso, 4, 1)?;
     }
-    Ok("6 quedas na criacao: cada uma retomada ou completada no boot seguinte".into())
+    Ok(format!(
+        "{} quedas na criacao: cada uma retomada ou completada no boot seguinte",
+        casos.len()
+    ))
 }
 
 /// A fotografia tirada na fronteira não volta: com a energia caída depois

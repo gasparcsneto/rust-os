@@ -391,8 +391,9 @@ diario/src/          o journal da persistência: registros cifrados, encadeados 
 └── testes.rs        o journal cortado em cada setor, cada bit trocado, registros de outro journal e fora de ordem
 
 ancora/src/          a âncora da persistência: um contador monotônico num TPM 2.0
-├── lib.rs           os comandos do TPM byte a byte, e o que um contador ausente ou estranho quer dizer
-└── testes.rs        a âncora contra um TPM simulado; `tests/swtpm.rs`, contra o swtpm
+├── lib.rs           os comandos do TPM byte a byte, a sessão HMAC salgada pela EK, e o que um contador ausente ou estranho quer dizer
+├── cripto.rs        o KDFa, o KDFe, o sal por ECDH em P-256 e a cifra de parâmetro, como a especificação do TPM os compõe
+└── testes.rs        os bytes que a especificação fixa; `tests/swtpm.rs`, a sessão contra o swtpm, com um interposto no barramento
 
 aparencia/src/       a linguagem visual, dos dois lados da fronteira
 └── lib.rs           a paleta, onde cada cor vai, as medidas e os estilos de texto pelo uso
