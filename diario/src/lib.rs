@@ -517,6 +517,14 @@ pub fn percorrer<M: Meio, E>(
         {
             break ilegivel("geracao fora de sequencia");
         }
+        // Um registro só de auditoria pode sumir num rollback para a última
+        // âncora: um que carregue qualquer outra coisa não é entregue, e o
+        // estado protegido nunca sai de um registro que não avançou o
+        // contador.
+        if registro.tipo == estado::tipo::AUDITORIA && !estado::so_de_auditoria(&registro.conteudo)
+        {
+            break ilegivel("registro so de auditoria com estado protegido");
+        }
         // A base só no começo da região: a primeira parte é o primeiro
         // registro, e cada parte seguinte, e o fecho, vêm logo depois de
         // uma parte. Depois do fecho, nenhuma.
@@ -633,6 +641,9 @@ impl Escritor {
     ) -> Result<Montado, &'static str> {
         if matches!(conteudo.tipo, estado::tipo::BASE | estado::tipo::BASE_FIM) {
             return Err("a base se monta com Escritor::base");
+        }
+        if conteudo.tipo == estado::tipo::AUDITORIA && !estado::so_de_auditoria(conteudo.dados) {
+            return Err("um registro so de auditoria nao leva estado protegido");
         }
         // Só um registro que avança o contador confirma a âncora seguinte;
         // um só de auditoria repete a de agora.

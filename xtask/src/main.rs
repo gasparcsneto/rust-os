@@ -2276,6 +2276,7 @@ fn conferir_invariantes() -> Result<ExitCode, String> {
         conferir_janelas_pelo_toolkit()?,
         conferir_ponto_unico_de_decisao()?,
         conferir_remetente_da_sessao()?,
+        conferir_auditoria_so_relatada()?,
     ];
     if passos.iter().all(|p| *p == ExitCode::SUCCESS) {
         Ok(ExitCode::SUCCESS)
@@ -2634,6 +2635,93 @@ const FUNCOES_DE_MENSAGEM: &[&str] = &[
 ///
 /// `net.arp` tem um `from` legítimo — o endereço de origem —, e por isso a
 /// conferência é das funções de mensagem, e não de todo o kernel.
+/// Confere que a cadeia da auditoria só é lida por quem a guarda, por quem
+/// a grava e pelos relatórios.
+///
+/// # Por que isto virou conferência
+///
+/// Um registro só de auditoria não avança o contador do TPM, e os que vêm
+/// depois do último que avançou podem sumir num rollback do disco para essa
+/// âncora. Isso só é aceitável enquanto nenhuma decisão depender da
+/// auditoria: se o ponto de decisão, uma cota ou um arrendamento passasse a
+/// ler a cadeia, a perda do rabo dela mudaria uma decisão — e o rollback
+/// que o contador não vê passaria a restaurar comportamento.
+///
+/// # A regra
+///
+/// `com_auditoria(` só aparece em `autorizacao.rs`, que a guarda, em
+/// `persistencia.rs`, que a grava e a compacta, e — em `agent/commands.rs` —
+/// só dentro de `audit_tail`, `audit_head` e `audit_verify`, os relatórios.
+/// A suíte, que confere a cadeia, fica de fora.
+fn conferir_auditoria_so_relatada() -> Result<ExitCode, String> {
+    const RELATORIOS: [&str; 3] = ["audit_tail", "audit_head", "audit_verify"];
+    let raiz = raiz_do_projeto();
+    let fontes = raiz.join("kernel/src");
+    let mut fora = Vec::new();
+    let mut achadas = 0;
+    percorrer_fontes(&fontes, &mut |caminho| {
+        let relativo = caminho
+            .strip_prefix(&fontes)
+            .map_err(|_| format!("{} fora de kernel/src", caminho.display()))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        if matches!(
+            relativo.as_str(),
+            "autorizacao.rs" | "persistencia.rs" | "testes.rs"
+        ) {
+            return Ok(());
+        }
+        let texto = std::fs::read_to_string(caminho)
+            .map_err(|e| format!("não foi possível ler {}: {e}", caminho.display()))?;
+        let mut funcao = "";
+        for (n, linha) in texto.lines().enumerate() {
+            if let Some(resto) = linha
+                .trim_start()
+                .strip_prefix("fn ")
+                .or(linha.trim_start().strip_prefix("pub fn "))
+                .or(linha.trim_start().strip_prefix("pub(crate) fn "))
+            {
+                funcao = resto.split(['(', '<']).next().unwrap_or("");
+            }
+            if !linha.contains("com_auditoria(") {
+                continue;
+            }
+            achadas += 1;
+            if relativo == "agent/commands.rs" && RELATORIOS.contains(&funcao) {
+                continue;
+            }
+            fora.push(format!(
+                "kernel/src/{relativo}:{}: {funcao}: {}",
+                n + 1,
+                linha.trim()
+            ));
+        }
+        Ok(())
+    })?;
+    if achadas == 0 {
+        fora.push(
+            "nenhuma leitura da auditoria fora da persistência: a conferência está cega".into(),
+        );
+    }
+    if fora.is_empty() {
+        println!(
+            "[xtask] a cadeia da auditoria só é lida pela persistência e pelos relatórios: \
+             nenhuma decisão depende de um registro que um rollback pode levar"
+        );
+        Ok(ExitCode::SUCCESS)
+    } else {
+        println!("[xtask] a auditoria lida fora da persistência e dos relatórios:");
+        for f in &fora {
+            println!("  {f}");
+        }
+        println!(
+            "\nO rabo da auditoria não tem a proteção do contador do TPM: nenhuma decisão pode \
+             depender dele."
+        );
+        Ok(ExitCode::FAILURE)
+    }
+}
+
 fn conferir_remetente_da_sessao() -> Result<ExitCode, String> {
     let raiz = raiz_do_projeto();
     let mut fora = Vec::new();

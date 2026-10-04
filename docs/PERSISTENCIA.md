@@ -1118,6 +1118,48 @@ fica protegido até o tempo do último registro que avançou.
 protege o estado e não o rabo da auditoria* confere que a cópia de antes
 da auditoria é aceita e a de antes da operação é recusada.
 
+### A fronteira: o rabo da auditoria não traz estado
+
+A perda do rabo da auditoria é aceita. O que ela nunca pode fazer é
+permitir que um estado protegido anterior seja restaurado, aceito ou
+reconstruído. Conferido assim:
+
+| Propriedade | Por que vale | Quem confere |
+|---|---|---|
+| Nenhum estado protegido sai de um registro só de auditoria | Um registro `AUDITORIA` só leva eventos da cadeia e lacunas (`estado::so_de_auditoria`): o escritor não monta outro, e o leitor não o entrega — para nele. As mudanças pendentes de mensagens só saem em registros `MENSAGENS` | hospedeiro: *o registro de auditoria não carrega estado*; suíte: *um registro só de auditoria não carrega estado protegido* |
+| Nenhuma decisão depende de um registro que pode sumir | A cadeia da auditoria só é lida por quem a guarda, pela persistência e pelos relatórios (`audit.tail`, `audit.head`, `audit.verify`). O ponto de decisão, as cotas e os arrendamentos não a leem | `cargo xtask invariantes`: *a auditoria só é relatada* |
+| Nenhuma transição protegida se confirma por haver auditoria | Um registro que avança só se confirma com o contador na âncora dele — nem com o valor que a auditoria repete, nem sem contador | hospedeiro: *nenhuma transição se confirma pela auditoria*, *cada registro se confirma pelo seu tipo* |
+| A auditoria não é prova de que uma transição aconteceu | O julgamento usa a última âncora, que a auditoria só repete: com ou sem auditoria no fim, o mesmo veredito. Um registro só de auditoria depois de um protegido não confirmado vai **no lugar** dele | hospedeiro: *a auditoria não prova transição* |
+| O próximo registro protegido fecha o intervalo | Cada registro se encadeia ao anterior: depois de um que avançou, um disco devolvido a qualquer ponto do rabo antes dele é recusado | hospedeiro: *o próximo protegido fecha o rabo* |
+| Rollback para antes de uma transição protegida é recusado | O contador está à frente do journal devolvido | hospedeiro: *o contador protege o estado e não o rabo*; bancada: *o rabo da auditoria volta com o disco, e o estado protegido não* |
+| Repetir auditoria não avança nada | Um registro selado para um lugar e um elo não abre em outro: a leitura para nele, sem mudar âncora, geração ou estado; o contador só anda por registro que avança | hospedeiro: *a auditoria repetida não entra*; suíte: seis registros só de auditoria e o contador parado |
+
+A bancada mostra a fronteira inteira, entre boots: um agente registrado e
+revogado; a foto do disco logo depois da revogação, devolvida — aceita, o
+rabo da auditoria some (dezenove registros duráveis, na última corrida), e
+o agente **continua revogado**; a foto de antes da revogação, devolvida —
+recusada, e o agente não volta.
+
+**O relógio.** O piso do tempo lógico, no boot, é o tempo do último
+registro — que pode ser só de auditoria. Num rollback do rabo, ele volta ao
+do último registro que avançou: nunca abaixo do tempo de uma transição
+protegida. Nenhuma decisão de autorização usa o tempo lógico; os prazos das
+mensagens usam, e uma mensagem que vencesse no intervalo perdido, sem que o
+vencimento tivesse sido gravado — uma transição, que avança —, continuaria
+viva até o tempo passar de novo. É o mesmo rabo: nada que tenha sido
+gravado como estado volta.
+
+### Três propriedades, separadas
+
+1. **Integridade e monotonicidade do estado protegido** — garantia de
+   segurança, do TPM: nenhum estado protegido anterior volta.
+2. **Persistência do journal** — propriedade de persistência: o que foi
+   gravado e descarregado sobrevive a uma queda de energia, inclusive a
+   auditoria.
+3. **Monotonicidade do histórico da auditoria** — limitação assumida: o
+   rabo depois do último registro que avançou pode sumir num rollback do
+   disco para essa âncora. O TPM não volta a gastar escritas para cobri-lo.
+
 ### Os testes
 
 - **Hospedeiro (`diario`)**: *a auditoria não gasta o contador* (quarenta
@@ -1148,8 +1190,14 @@ da auditoria é aceita e a de antes da operação é recusada.
 | montar sempre na âncora seguinte | hospedeiro: *a auditoria não gasta o contador*, *lê de volta o que escreveu* |
 | confirmar com o contador um só de auditoria; confirmar sem ele um que avança | hospedeiro: *cada registro se confirma pelo seu tipo* |
 | o registro só de auditoria sem contar como auditoria, ou como registro | suíte: *o que não muda estado vai no registro seguinte*, *aberta no boot* |
+| o escritor montando, ou o leitor entregando, um registro só de auditoria com estado; qualquer entrada, ou um agente, cabendo nele; o conteúdo ilegível ou a entrada sem tipo passando por auditoria | hospedeiro: *o registro de auditoria não carrega estado* |
+| uma leitura da cadeia da auditoria fora da persistência e dos relatórios — em `mensagens.rs`, ou num handler que não é relatório | `cargo xtask invariantes` |
 
-Dezesseis, todas mortas; nenhuma equivalente.
+Vinte e quatro, todas mortas; nenhuma equivalente. A da entrada sem tipo
+sobreviveu na primeira rodada: o leitor entregava um registro só de
+auditoria com uma entrada vazia — que o kernel recusaria ao reaplicar, sem
+estado nenhum sair dele, mas a regra do leitor tem de ser exata. Ganhou o
+caso.
 
 
 ## Decisões tomadas

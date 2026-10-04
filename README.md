@@ -2191,7 +2191,10 @@ o pedido; o boot o reaplica por cima da imagem, antes de abrir as portas.
   cada operação de autoridade, cada mudança de mensagem e o fecho de cada
   compactação. O preço: os registros só de auditoria depois do último que
   avançou não têm a proteção do contador, e um disco devolvido a antes
-  deles passa — sem que nenhum estado protegido volte. `audit.tail` diz `durable` em cada
+  deles passa — sem que nenhum estado protegido volte: um registro só de
+  auditoria só leva auditoria (o journal não monta nem lê outro), e
+  nenhuma decisão lê a cadeia da auditoria — `cargo xtask invariantes`
+  confere. `audit.tail` diz `durable` em cada
   registro; o boot refaz a cadeia do journal e continua dela. Com o journal
   recusado, a cadeia recomeça só em memória, e a recusa é o primeiro
   registro dela.

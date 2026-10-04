@@ -85,12 +85,27 @@ fn tipo_de_teste(n: u64) -> u16 {
     }
 }
 
+/// Os dados de um registro de `tipo`: os próprios `dados`, ou — num
+/// registro só de auditoria, que só leva auditoria — os `dados` como um
+/// evento da cadeia.
+fn dados_do_tipo(tipo: u16, dados: &[u8]) -> Vec<u8> {
+    if tipo == estado::tipo::AUDITORIA {
+        let evento =
+            estado::campos(&[&estado::tipo::AUDITORIA_EVENTO.to_le_bytes(), dados]).unwrap();
+        estado::campos(&[&evento]).unwrap()
+    } else {
+        dados.to_vec()
+    }
+}
+
 /// O protocolo inteiro de uma gravação: montar, escrever, descarregar,
 /// avançar o contador, confirmar — ou, num registro só de auditoria,
 /// confirmar sem o contador.
 fn gravar(m: &mut Memoria, esc: &mut Escritor, tpm: &mut Contador, n: u64, dados: &[u8]) {
+    let tipo = tipo_de_teste(n);
+    let dados = dados_do_tipo(tipo, dados);
     let montado = esc
-        .montar(&CHAVE, nonce(n), &conteudo(tipo_de_teste(n), dados))
+        .montar(&CHAVE, nonce(n), &conteudo(tipo, &dados))
         .unwrap();
     m.escrever(montado.setor, &montado.bytes).unwrap();
     m.descarregar().unwrap();
@@ -133,8 +148,8 @@ fn le_de_volta_o_que_escreveu() {
         // Os tipos são 0, 1, 2…: só o 3 é uma operação, e sobe a geração.
         assert_eq!(r.geracao, u64::from(i >= estado::tipo::OPERACAO as usize));
         assert_eq!(r.versao_da_politica, 7);
-        assert_eq!(r.conteudo.len(), i * 300);
-        assert!(r.conteudo.iter().enumerate().all(|(b, &v)| v == b as u8));
+        let dados: Vec<u8> = (0..i * 300).map(|b| b as u8).collect();
+        assert_eq!(r.conteudo, dados_do_tipo(r.tipo, &dados));
     }
     assert_eq!(julgar(lido.ultima_ancora(), Some(tpm.0)), Veredito::Confere);
     assert_eq!(m.descargas, 8, "uma descarga por gravacao");
@@ -311,10 +326,18 @@ fn com_outra_chave_nada_abre() {
 fn o_nonce_e_o_sorteado() {
     let (_, esc, _) = journal(1);
     let a = esc
-        .montar(&CHAVE, nonce(1), &conteudo(5, b"igual"))
+        .montar(
+            &CHAVE,
+            nonce(1),
+            &conteudo(estado::tipo::MENSAGENS, b"igual"),
+        )
         .unwrap();
     let b = esc
-        .montar(&CHAVE, nonce(2), &conteudo(5, b"igual"))
+        .montar(
+            &CHAVE,
+            nonce(2),
+            &conteudo(estado::tipo::MENSAGENS, b"igual"),
+        )
         .unwrap();
     assert_ne!(a.bytes[TAM_CABECALHO..], b.bytes[TAM_CABECALHO..]);
     assert_eq!(&a.bytes[40..64], &nonce(1));
@@ -889,7 +912,10 @@ fn o_vazio_continua_do_comeco() {
 /// Grava um registro de `tipo` pelo protocolo inteiro, como o kernel:
 /// avançando o contador só se o registro o avança.
 fn gravar_tipo(m: &mut Memoria, esc: &mut Escritor, tpm: &mut Contador, n: u64, tipo: u16) {
-    let montado = esc.montar(&CHAVE, nonce(n), &conteudo(tipo, b"x")).unwrap();
+    let dados = dados_do_tipo(tipo, b"x");
+    let montado = esc
+        .montar(&CHAVE, nonce(n), &conteudo(tipo, &dados))
+        .unwrap();
     m.escrever(montado.setor, &montado.bytes).unwrap();
     m.descarregar().unwrap();
     if montado.avanca() {
@@ -958,7 +984,14 @@ fn cada_registro_se_confirma_pelo_seu_tipo() {
     assert!(esc.confirmar_sem_contador(&operacao).is_err());
 
     let auditoria = esc
-        .montar(&CHAVE, nonce(2), &conteudo(estado::tipo::AUDITORIA, b"au"))
+        .montar(
+            &CHAVE,
+            nonce(2),
+            &conteudo(
+                estado::tipo::AUDITORIA,
+                &dados_do_tipo(estado::tipo::AUDITORIA, b"au"),
+            ),
+        )
         .unwrap();
     assert!(!auditoria.avanca());
     assert_eq!(auditoria.ancora, tpm.0);
@@ -1057,4 +1090,207 @@ fn o_contador_protege_o_estado_e_nao_o_rabo_da_auditoria() {
         julgado(&antes_da_operacao),
         Veredito::Recusado(Recusa::DiscoAtrasado { .. })
     ));
+}
+
+/// Um registro só de auditoria só leva auditoria: os eventos da cadeia e a
+/// lacuna. Um agente, sozinho ou no meio de eventos, ou um conteúdo que não
+/// se lê como entradas, não é montado — e, montado à mão, não é lido: o
+/// estado protegido nunca sai de um registro que não avançou o contador.
+#[test]
+fn o_registro_de_auditoria_nao_carrega_estado() {
+    use estado::tipo::*;
+    let evento = estado::campos(&[&AUDITORIA_EVENTO.to_le_bytes(), b"ev"]).unwrap();
+    let lacuna = estado::campos(&[&AUDITORIA_LACUNA.to_le_bytes(), b"la"]).unwrap();
+    let agente = estado::campos(&[&AGENTE_REGISTRADO.to_le_bytes(), b"linha"]).unwrap();
+    let mensagem = estado::campos(&[&MENSAGEM_ESTADO.to_le_bytes(), b"m"]).unwrap();
+    assert!(estado::so_de_auditoria(
+        &estado::campos(&[&evento, &lacuna]).unwrap()
+    ));
+    let proibidos = [
+        estado::campos(&[&agente]).unwrap(),
+        estado::campos(&[&evento, &agente]).unwrap(),
+        estado::campos(&[&mensagem, &evento]).unwrap(),
+        alloc::vec![0xFF, 0xFF, 1],
+        // Uma entrada sem campo nenhum: sem tipo, não é de auditoria.
+        estado::campos(&[&estado::campos(&[]).unwrap()]).unwrap(),
+    ];
+    for (i, dados) in proibidos.iter().enumerate() {
+        assert!(!estado::so_de_auditoria(dados), "conteudo {i}");
+        let mut m = Memoria::nova(64);
+        let mut tpm = Contador(1000);
+        let lido = ler(&mut m, &CHAVE).unwrap();
+        let mut esc = Escritor::continuar(&lido, tpm.0, m.setores());
+        gravar_tipo(&mut m, &mut esc, &mut tpm, 0, ABERTURA);
+        assert!(
+            esc.montar(&CHAVE, nonce(1), &conteudo(AUDITORIA, dados))
+                .is_err(),
+            "conteudo {i}: montado"
+        );
+        // À mão, na âncora certa para um só de auditoria.
+        let (bytes, _, _) = selar(
+            &CHAVE,
+            nonce(1),
+            &Posicao {
+                setor: esc.proximo_setor,
+                sequencia: esc.proxima_sequencia,
+                ancora: esc.ancora,
+                elo: esc.elo,
+                total: esc.total,
+            },
+            &conteudo(AUDITORIA, dados),
+            esc.geracao,
+        )
+        .unwrap();
+        m.escrever(esc.proximo_setor, &bytes).unwrap();
+        let lido = ler(&mut m, &CHAVE).unwrap();
+        assert_eq!(lido.registros.len(), 1, "conteudo {i}: lido");
+        assert!(matches!(
+            lido.parada,
+            Parada::Ilegivel {
+                motivo: "registro so de auditoria com estado protegido",
+                ..
+            }
+        ));
+    }
+}
+
+/// A existência de registros só de auditoria nunca muda o julgamento: o
+/// mesmo journal, com e sem eles no fim, dá o mesmo veredito diante de
+/// qualquer contador. E um registro só de auditoria nunca fica depois de
+/// um protegido que não se confirmou: ele vai no lugar dele — a auditoria
+/// não é prova de que a transição aconteceu.
+#[test]
+fn a_auditoria_nao_prova_transicao() {
+    use estado::tipo::*;
+    let mut m = Memoria::nova(128);
+    let mut tpm = Contador(1000);
+    let lido = ler(&mut m, &CHAVE).unwrap();
+    let mut esc = Escritor::continuar(&lido, tpm.0, m.setores());
+    gravar_tipo(&mut m, &mut esc, &mut tpm, 0, ABERTURA);
+    gravar_tipo(&mut m, &mut esc, &mut tpm, 1, OPERACAO);
+    let sem = m.bytes.clone();
+    gravar_tipo(&mut m, &mut esc, &mut tpm, 2, AUDITORIA);
+    gravar_tipo(&mut m, &mut esc, &mut tpm, 3, AUDITORIA);
+    let com = m.bytes.clone();
+    let ultima = |bytes: &Vec<u8>| {
+        let mut c = Memoria::nova(128);
+        c.bytes = bytes.clone();
+        ler(&mut c, &CHAVE).unwrap().ultima_ancora()
+    };
+    for contador in [None, Some(1000), Some(1001), Some(1002), Some(1003)] {
+        assert_eq!(
+            julgar(ultima(&sem), contador),
+            julgar(ultima(&com), contador),
+            "contador {contador:?}"
+        );
+    }
+
+    // Uma operação escrita e não confirmada — o contador não andou —, e
+    // depois um registro só de auditoria: ele vai no lugar da operação.
+    let op = esc
+        .montar(&CHAVE, nonce(4), &conteudo(OPERACAO, b"op"))
+        .unwrap();
+    m.escrever(op.setor, &op.bytes).unwrap();
+    let au = esc
+        .montar(
+            &CHAVE,
+            nonce(5),
+            &conteudo(AUDITORIA, &dados_do_tipo(AUDITORIA, b"a")),
+        )
+        .unwrap();
+    assert_eq!(au.setor, op.setor);
+    assert_eq!(au.ancora, tpm.0);
+    m.escrever(au.setor, &au.bytes).unwrap();
+    esc.confirmar_sem_contador(&au).unwrap();
+    let lido = ler(&mut m, &CHAVE).unwrap();
+    assert!(
+        lido.registros
+            .iter()
+            .all(|r| r.tipo != OPERACAO || r.sequencia == 1)
+    );
+    assert_eq!(julgar(lido.ultima_ancora(), Some(tpm.0)), Veredito::Confere);
+}
+
+/// Nenhuma transição protegida se confirma por haver auditoria: depois de
+/// registros só de auditoria na âncora de agora, uma operação só se
+/// confirma com o contador na seguinte — nem com o valor que a auditoria
+/// leva, nem sem contador.
+#[test]
+fn nenhuma_transicao_se_confirma_pela_auditoria() {
+    use estado::tipo::*;
+    let mut m = Memoria::nova(64);
+    let mut tpm = Contador(1000);
+    let lido = ler(&mut m, &CHAVE).unwrap();
+    let mut esc = Escritor::continuar(&lido, tpm.0, m.setores());
+    gravar_tipo(&mut m, &mut esc, &mut tpm, 0, ABERTURA);
+    gravar_tipo(&mut m, &mut esc, &mut tpm, 1, AUDITORIA);
+    gravar_tipo(&mut m, &mut esc, &mut tpm, 2, AUDITORIA);
+    let op = esc
+        .montar(&CHAVE, nonce(3), &conteudo(OPERACAO, b"op"))
+        .unwrap();
+    assert!(esc.confirmar(&op, tpm.0).is_err());
+    assert!(esc.confirmar_sem_contador(&op).is_err());
+    assert!(esc.confirmar(&op, tpm.0 + 1).is_ok());
+}
+
+/// O próximo registro protegido fecha o intervalo: depois dele, um disco
+/// devolvido a qualquer ponto do rabo de auditoria que ficou antes dele é
+/// recusado — o encadeamento o prende ao registro que avançou.
+#[test]
+fn o_proximo_protegido_fecha_o_rabo() {
+    use estado::tipo::*;
+    let mut m = Memoria::nova(128);
+    let mut tpm = Contador(1000);
+    let lido = ler(&mut m, &CHAVE).unwrap();
+    let mut esc = Escritor::continuar(&lido, tpm.0, m.setores());
+    gravar_tipo(&mut m, &mut esc, &mut tpm, 0, ABERTURA);
+    let mut fotos = alloc::vec![m.bytes.clone()];
+    for n in 1..=3 {
+        gravar_tipo(&mut m, &mut esc, &mut tpm, n, AUDITORIA);
+        fotos.push(m.bytes.clone());
+    }
+    gravar_tipo(&mut m, &mut esc, &mut tpm, 4, OPERACAO);
+    for (i, foto) in fotos.iter().enumerate() {
+        let mut c = Memoria::nova(128);
+        c.bytes = foto.clone();
+        let lido = ler(&mut c, &CHAVE).unwrap();
+        assert!(
+            matches!(
+                julgar(lido.ultima_ancora(), Some(tpm.0)),
+                Veredito::Recusado(Recusa::DiscoAtrasado { .. })
+            ),
+            "a foto {i} do rabo passou depois da operacao"
+        );
+    }
+    let lido = ler(&mut m, &CHAVE).unwrap();
+    assert_eq!(julgar(lido.ultima_ancora(), Some(tpm.0)), Veredito::Confere);
+}
+
+/// Um registro só de auditoria repetido no disco — copiado para o lugar do
+/// próximo — não entra: ele foi selado para outro lugar e outro elo. A
+/// leitura para nele; a âncora, a geração e o que foi lido não mudam.
+#[test]
+fn a_auditoria_repetida_nao_entra() {
+    use estado::tipo::*;
+    let mut m = Memoria::nova(64);
+    let mut tpm = Contador(1000);
+    let lido = ler(&mut m, &CHAVE).unwrap();
+    let mut esc = Escritor::continuar(&lido, tpm.0, m.setores());
+    gravar_tipo(&mut m, &mut esc, &mut tpm, 0, ABERTURA);
+    let antes = esc.proximo_setor as usize;
+    gravar_tipo(&mut m, &mut esc, &mut tpm, 1, AUDITORIA);
+    let depois = esc.proximo_setor as usize;
+    let original = ler(&mut m, &CHAVE).unwrap();
+    let copia = m.bytes[antes * TAM_SETOR..depois * TAM_SETOR].to_vec();
+    m.escrever(depois as u64, &copia).unwrap();
+    let lido = ler(&mut m, &CHAVE).unwrap();
+    assert_eq!(lido.registros.len(), original.registros.len());
+    assert!(matches!(lido.parada, Parada::Ilegivel { .. }));
+    assert_eq!(lido.ultima_ancora(), original.ultima_ancora());
+    assert_eq!(
+        lido.registros.last().map(|r| r.geracao),
+        original.registros.last().map(|r| r.geracao)
+    );
+    assert_eq!(tpm.0, 1001);
+    assert_eq!(julgar(lido.ultima_ancora(), Some(tpm.0)), Veredito::Confere);
 }

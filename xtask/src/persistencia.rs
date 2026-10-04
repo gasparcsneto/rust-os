@@ -224,6 +224,10 @@ const CENARIOS: &[Cenario] = &[
         rodar: a_auditoria_nao_gasta_o_contador,
     },
     Cenario {
+        nome: "o rabo da auditoria volta com o disco, e o estado protegido nao",
+        rodar: o_rabo_da_auditoria_nao_traz_estado,
+    },
+    Cenario {
         nome: "o TPM devolvido a um estado anterior e recusado, e o revogado nao volta",
         rodar: o_tpm_devolvido_e_recusado,
     },
@@ -1090,6 +1094,113 @@ fn a_auditoria_nao_gasta_o_contador(
         depois.de_auditoria - antes.de_auditoria,
         ancora + 1,
         ancora + 2
+    ))
+}
+
+/// A fronteira da limitação assumida: os registros só de auditoria depois
+/// do último que avançou o contador podem sumir num rollback do disco — e
+/// isso nunca traz de volta estado protegido.
+///
+/// Um agente é registrado e revogado; a partição de estado é fotografada
+/// logo depois da revogação, e outra vez antes dela; e as leituras seguintes
+/// vão, pelo coletor, a registros só de auditoria. A foto de depois da
+/// revogação, devolvida ao disco, é aceita — o contador não protege o rabo —
+/// e os registros da auditoria que ela não tinha somem: nenhum deles, com a
+/// sequência e o elo de antes, está na cadeia do boot seguinte. Mas o agente
+/// continua revogado. A foto de antes da revogação é recusada, e o agente
+/// não volta.
+fn o_rabo_da_auditoria_nao_traz_estado(
+    arch: Arquitetura,
+    artefato: &Artefato,
+) -> Result<String, String> {
+    let chaves = super::chaves::Chaves::garantir()?;
+    let disco = disco_de_testes()?;
+    let privada = [0xC7; 32];
+    let nome = "rabo-da-auditoria";
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let r = (|| -> Result<_, String> {
+        registrar(&mut m, &chaves, &privada, nome)?;
+        let antes_da_revogacao = ler_o_estado(&disco)?;
+        revogar_agente(&mut m, &chaves, &privada)?;
+        // A foto antes do estado: o que o coletor gravar entre as duas
+        // leituras conta como dentro da foto, e não como rabo.
+        let foto = ler_o_estado(&disco)?;
+        let revogado = persistencia_de(&mut m)?;
+        let mut depois = persistencia_de(&mut m)?;
+        for _ in 0..240 {
+            if depois.de_auditoria >= revogado.de_auditoria + 2 {
+                break;
+            }
+            m.pedir("system.info", "{}")?;
+            std::thread::sleep(Duration::from_millis(250));
+            depois = persistencia_de(&mut m)?;
+        }
+        let rabo: Vec<Rastro> = cauda_da_auditoria(&mut m)?
+            .into_iter()
+            .filter(|r| r.duravel && r.seq > revogado.auditoria_gravada)
+            .collect();
+        Ok((antes_da_revogacao, revogado, foto, depois, rabo))
+    })();
+    m.cortar_a_energia()?;
+    let (antes_da_revogacao, revogado, foto, depois, rabo) = r?;
+    if depois.de_auditoria < revogado.de_auditoria + 2 || depois.ancora != revogado.ancora {
+        return Err(format!(
+            "o rabo: {} registros so de auditoria, e a ancora {:?} depois de {:?}",
+            depois.de_auditoria - revogado.de_auditoria,
+            depois.ancora,
+            revogado.ancora
+        ));
+    }
+    if rabo.is_empty() {
+        return Err("nenhum registro duravel da auditoria depois da revogacao".into());
+    }
+
+    // A foto de depois da revogação, sem o rabo.
+    escrever_no_estado(&disco, &foto)?;
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let p = persistencia_de(&mut m)?;
+    let cadeia = cauda_da_auditoria(&mut m);
+    let verifica = auditoria_verifica(&mut m);
+    let entra = agente_entra(arch, &privada, nome)?;
+    m.cortar_a_energia()?;
+    verifica?;
+    let cadeia = cadeia?;
+    if p.estado != "available" || p.ancora != revogado.ancora.map(|a| a + 1) {
+        return Err(format!(
+            "a foto de depois da revogacao: {} ({}), ancora {:?}",
+            p.estado, p.motivo, p.ancora
+        ));
+    }
+    if entra {
+        return Err("sem o rabo da auditoria, o agente revogado voltou".into());
+    }
+    if let Some(r) = rabo
+        .iter()
+        .find(|r| cadeia.iter().any(|c| c.seq == r.seq && c.elo == r.elo))
+    {
+        return Err(format!(
+            "o registro {} do rabo, que a foto nao tinha, esta na cadeia",
+            r.seq
+        ));
+    }
+
+    // A foto de antes da revogação.
+    escrever_no_estado(&disco, &antes_da_revogacao)?;
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let q = persistencia_de(&mut m)?;
+    let voltou = agente_entra(arch, &privada, nome)?;
+    m.cortar_a_energia()?;
+    if q.estado != "refused" || voltou {
+        return Err(format!(
+            "a foto de antes da revogacao: {} ({}), o revogado entra: {voltou}",
+            q.estado, q.motivo
+        ));
+    }
+    Ok(format!(
+        "{} registros duraveis da auditoria sumiram com o rabo; o agente continua revogado; \
+         a foto de antes da revogacao: {}",
+        rabo.len(),
+        q.motivo
     ))
 }
 

@@ -15510,6 +15510,51 @@ fn tpm_a_auditoria_nao_gasta_o_contador() -> Resultado {
     resultado
 }
 
+/// Um registro só de auditoria não carrega estado protegido: pelo caminho
+/// de toda gravação, um registro do tipo auditoria com um agente dentro não
+/// é montado. A gravação falha, nada vai ao disco, o contador não anda, e o
+/// agente não existe — nem agora, nem no boot seguinte.
+fn tpm_a_auditoria_nao_carrega_estado() -> Resultado {
+    use diario::estado::tipo;
+    let anterior = crate::persistencia::estado();
+    let chave = sigilo::publica_de(&[0x8B; 32]);
+    let resultado = (|| -> Resultado {
+        let contador = crate::persistencia::ancora_no_tpm_de_teste()?;
+        let registros = registros_no_disco()?;
+        let linha = sigilo::registro::linha(&chave, "na-auditoria", Some("observador"));
+        let agente =
+            crate::persistencia::entrada_de_teste(tipo::AGENTE_REGISTRADO, &[linha.as_bytes()]);
+        let dados = diario::estado::campos(&[&agente])?;
+        match crate::persistencia::gravar_de_teste(tipo::AUDITORIA, &dados, 0) {
+            Err(m) if m.contains("nao leva estado protegido") => {}
+            outro => {
+                crate::log_error!("teste", "{:?}", outro);
+                return Err("um registro so de auditoria com um agente foi gravado");
+            }
+        }
+        if registros_no_disco()? != registros
+            || crate::persistencia::ancora_no_tpm_de_teste()? != contador
+            || crate::identidade::agente(&chave).is_some()
+        {
+            return Err("o registro recusado deixou rastro no disco, no contador ou no estado");
+        }
+        Ok(())
+    })();
+    crate::persistencia::forcar_estado_de_teste(anterior);
+    resultado?;
+    de_volta_a_imagem();
+    crate::persistencia::abrir();
+    let depois = if crate::identidade::agente(&chave).is_some() {
+        Err("o agente do registro recusado apareceu no boot")
+    } else if crate::persistencia::estado() != crate::persistencia::Estado::Disponivel {
+        Err("o boot seguinte nao abriu")
+    } else {
+        Ok(())
+    };
+    de_volta_a_imagem();
+    depois
+}
+
 /// O journal fixou uma EK, e o TPM da máquina tem outra: o journal foi
 /// levado para outro TPM — ou outro chip responde no lugar deste. Recusado
 /// antes de qualquer comando ao contador. E o journal que fala de duas
@@ -22213,6 +22258,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "tpm: a auditoria nao gasta o contador; mensagem, operacao e boot gastam um cada",
         f: tpm_a_auditoria_nao_gasta_o_contador,
+    },
+    Caso {
+        nome: "tpm: um registro so de auditoria nao carrega estado protegido",
+        f: tpm_a_auditoria_nao_carrega_estado,
     },
     Caso {
         nome: "compactacao: a regiao nova repoe o mesmo estado, e a velha nao confere mais",

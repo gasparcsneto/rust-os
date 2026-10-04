@@ -156,6 +156,36 @@ pub mod tipo {
     pub const fn avanca_a_ancora(tipo: u16) -> bool {
         tipo != AUDITORIA
     }
+
+    /// Se uma entrada de tipo `entrada` pode ir num registro só de
+    /// auditoria: só os eventos da cadeia e a lacuna dela. Um registro só
+    /// de auditoria não avança o contador, e pode sumir num rollback para a
+    /// última âncora: nada de estado protegido — agente, papel, política,
+    /// pessoa, lápide, mensagem, chave do TPM — pode morar nele, nem como
+    /// cópia. Ver [`super::so_de_auditoria`].
+    pub const fn cabe_num_registro_de_auditoria(entrada: u16) -> bool {
+        matches!(entrada, AUDITORIA_EVENTO | AUDITORIA_LACUNA)
+    }
+}
+
+/// Se o `conteudo` de um registro é só de auditoria: uma lista de
+/// entradas, e cada uma de um tipo que cabe num registro só de auditoria —
+/// ver [`tipo::cabe_num_registro_de_auditoria`]. O escritor não monta, e o
+/// leitor não entrega, um registro do tipo [`tipo::AUDITORIA`] que não
+/// passe aqui: um registro que pode sumir num rollback nunca carrega estado
+/// protegido.
+pub fn so_de_auditoria(conteudo: &[u8]) -> bool {
+    let Ok(entradas) = ler_campos(conteudo) else {
+        return false;
+    };
+    entradas.iter().all(|e| {
+        ler_campos(e).is_ok_and(|campos| {
+            campos.first().is_some_and(|t| {
+                <[u8; 2]>::try_from(*t)
+                    .is_ok_and(|t| tipo::cabe_num_registro_de_auditoria(u16::from_le_bytes(t)))
+            })
+        })
+    })
 }
 
 /// Monta o conteúdo de um registro a partir dos campos.
