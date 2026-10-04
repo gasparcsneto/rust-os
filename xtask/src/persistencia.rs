@@ -318,9 +318,14 @@ pub(crate) fn persistencia(arch: Arquitetura, release: bool) -> Result<ExitCode,
     );
     let mut falhas = 0;
     // Um filtro opcional pelo nome, para rodar só alguns — o que uma
-    // mutação dirigida precisa. Sem ele, todos.
+    // mutação dirigida precisa: pedaços do nome separados por `|`, e vale
+    // o cenário que tiver qualquer um deles. Sem ele, todos.
     let filtro = std::env::var("DUKE_CENARIOS").ok();
-    let escolhido = |c: &Cenario| filtro.as_deref().is_none_or(|f| c.nome.contains(f));
+    let escolhido = |c: &Cenario| {
+        filtro
+            .as_deref()
+            .is_none_or(|f| f.split('|').any(|p| c.nome.contains(p)))
+    };
     let mut rodar = |cenarios: &[Cenario], artefato: &Artefato| -> Result<(), String> {
         for cenario in cenarios.iter().filter(|c| escolhido(c)) {
             zerar_o_estado(arch)?;

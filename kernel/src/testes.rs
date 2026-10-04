@@ -14924,6 +14924,18 @@ fn persistencia_aberta_e_ancorada() -> Resultado {
     if ancora != Some(tpm) || n != registros.len() as u64 {
         return Err("o relatorio nao diz a ancora ou os registros do journal");
     }
+    // A abertura e cada boot fixam a EK com que falaram: a do TPM.
+    let ek = crate::persistencia::ponto_da_ek().ok_or("sem a EK")?;
+    for r in &registros {
+        if matches!(
+            r.tipo,
+            diario::estado::tipo::ABERTURA | diario::estado::tipo::BOOT
+        ) && !r.conteudo.windows(ek.len()).any(|w| w == ek)
+        {
+            crate::log_error!("teste", "registro {} do tipo {}", r.sequencia, r.tipo);
+            return Err("a abertura ou um boot nao fixou a EK");
+        }
+    }
     Ok(())
 }
 

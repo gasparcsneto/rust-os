@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
-use ancora::{Ancora, Erro, MAIOR_QUADRO, Sorteio, Tpm, codigo};
+use ancora::{Ancora, Erro, MAIOR_QUADRO, Sorteio, Tpm, atributo, codigo};
 
 const INDICE: u32 = 0x0180_D0E0;
 const SENHA: [u8; 32] = [0x3C; 32];
@@ -335,12 +335,9 @@ fn a_senha_errada_nao_le_nem_avanca() {
     assert_eq!(certa.valor(&mut tpm, &mut DoSistema).unwrap(), v);
 }
 
-#[test]
-fn um_indice_de_outro_tipo_no_lugar_e_recusado() {
-    let mut tpm = Swtpm::novo("estranho");
-    ancora::iniciar(&mut tpm).unwrap();
-    // Um índice comum de oito bytes, e não um contador, no número da
-    // âncora. Montado à mão: este pacote só sabe criar o contador.
+/// Define à mão, pela hierarquia do dono e com uma sessão de senha, um
+/// índice de oito bytes com a senha da âncora e estes `atributos`.
+fn definir_a_mao(tpm: &mut Swtpm, indice: u32, atributos: u32) {
     let mut c = Vec::new();
     c.extend_from_slice(&0x8002u16.to_be_bytes());
     c.extend_from_slice(&0u32.to_be_bytes());
@@ -352,21 +349,52 @@ fn um_indice_de_outro_tipo_no_lugar_e_recusado() {
     c.extend_from_slice(&(SENHA.len() as u16).to_be_bytes());
     c.extend_from_slice(&SENHA);
     c.extend_from_slice(&14u16.to_be_bytes());
-    c.extend_from_slice(&INDICE.to_be_bytes());
+    c.extend_from_slice(&indice.to_be_bytes());
     c.extend_from_slice(&0x000Bu16.to_be_bytes());
-    // Escrita e leitura com senha, sem bloqueio, tipo comum (0).
-    c.extend_from_slice(&((1u32 << 2) | (1 << 18) | (1 << 25)).to_be_bytes());
+    c.extend_from_slice(&atributos.to_be_bytes());
     c.extend_from_slice(&[0, 0]);
     c.extend_from_slice(&8u16.to_be_bytes());
     let n = (c.len() as u32).to_be_bytes();
     c[2..6].copy_from_slice(&n);
     let mut r = [0; MAIOR_QUADRO];
     let tam = tpm.trocar(&c, &mut r).unwrap();
-    assert_eq!(&r[6..10], &[0, 0, 0, 0], "o swtpm recusou o indice comum");
+    assert_eq!(&r[6..10], &[0, 0, 0, 0], "o swtpm recusou o indice");
     assert!(tam >= 10);
+}
 
+#[test]
+fn um_indice_de_outro_tipo_no_lugar_e_recusado() {
+    let mut tpm = Swtpm::novo("estranho");
+    ancora::iniciar(&mut tpm).unwrap();
+    // Um índice comum de oito bytes, e não um contador, no número da
+    // âncora. Montado à mão: este pacote só sabe criar o contador.
+    definir_a_mao(&mut tpm, INDICE, atributo::DO_NASCIMENTO);
     let mut a = Ancora::conectar(&mut tpm, INDICE, SENHA, None).unwrap();
     assert_eq!(a.existe(&mut tpm).err(), Some(Erro::IndiceEstranho));
+}
+
+/// O nascimento definido e nunca escrito — a criação parou entre definir
+/// o índice e escrever nele — é `None`, e não erro: o boot seguinte o
+/// escreve e segue. Um erro aqui recusaria o journal para sempre.
+#[test]
+fn o_nascimento_definido_e_nunca_escrito_se_completa() {
+    const NASCIMENTO: u32 = 0x0180_D0E1;
+    let mut tpm = Swtpm::novo("nascimento-pela-metade");
+    let (mut a, primeiro) = criada(&mut tpm);
+    definir_a_mao(&mut tpm, NASCIMENTO, atributo::DO_NASCIMENTO);
+    assert_eq!(
+        a.nascimento(&mut tpm, NASCIMENTO, &mut DoSistema).unwrap(),
+        None
+    );
+    assert_eq!(
+        a.registrar_nascimento(&mut tpm, NASCIMENTO, &[], &mut DoSistema)
+            .unwrap(),
+        primeiro
+    );
+    assert_eq!(
+        a.nascimento(&mut tpm, NASCIMENTO, &mut DoSistema).unwrap(),
+        Some(primeiro)
+    );
 }
 
 /// O nascimento num TPM de verdade: o índice comum se define, se escreve e
@@ -519,4 +547,54 @@ fn a_chave_de_outro_modelo_e_recusada() {
         Ancora::conectar(&mut i, INDICE, SENHA, None).err(),
         Some(Erro::RespostaMalformada(_))
     ));
+}
+
+/// O primeiro avanço de um contador recém-definido, com a resposta
+/// adulterada: não se sabe se andou — e andou, e o nome do índice mudou
+/// com a primeira escrita. A leitura seguinte, por uma sessão nova, usa o
+/// nome que o TPM tem agora, e lê o valor.
+#[test]
+fn o_primeiro_avanco_sem_resposta_nao_deixa_o_nome_velho() {
+    const NV_INCREMENT: u32 = 0x134;
+    let mut tpm = Swtpm::novo("primeiro-avanco");
+    let mut i = Interposto::novo(&mut tpm);
+    let mut a = Ancora::conectar(&mut i, INDICE, SENHA, None).unwrap();
+    a.definir(&mut i, &[], &mut DoSistema).unwrap();
+    i.mexer = Some(Box::new(|c, r, _| {
+        if codigo_do_comando(c) == NV_INCREMENT {
+            let n = r.len();
+            r[n - 1] ^= 1;
+        }
+    }));
+    assert_eq!(
+        a.valor(&mut i, &mut DoSistema),
+        Err(Erro::RespostaNaoAutenticada)
+    );
+    i.mexer = None;
+    let v = a.ler(&mut i, &mut DoSistema).unwrap();
+    assert_eq!(a.avancar(&mut i, &mut DoSistema).unwrap(), v + 1);
+}
+
+/// Uma EK fora da curva — um ponto que não é de P-256 — é recusada ao
+/// conectar, antes de fixada: um journal nunca guarda um ponto que não é
+/// uma chave.
+#[test]
+fn a_ek_fora_da_curva_e_recusada() {
+    const CREATE_PRIMARY: u32 = 0x131;
+    let mut tpm = Swtpm::novo("fora-da-curva");
+    let mut i = Interposto::novo(&mut tpm);
+    i.mexer = Some(Box::new(|c, r, _| {
+        if codigo_do_comando(c) == CREATE_PRIMARY {
+            // Um byte do x da EK: depois do cabeçalho, do handle, dos
+            // tamanhos, dos atributos, da política, da cifra, do esquema,
+            // da curva, do kdf e do tamanho do x.
+            r[80] ^= 1;
+        }
+    }));
+    assert_eq!(
+        Ancora::conectar(&mut i, INDICE, SENHA, None).err(),
+        Some(Erro::RespostaMalformada(
+            "a chave do TPM nao e um ponto de P-256"
+        ))
+    );
 }

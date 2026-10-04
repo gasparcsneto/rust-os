@@ -2439,7 +2439,8 @@ pub fn entradas_de_teste(r: &diario::Registro) -> Result<Vec<&[u8]>, &'static st
 
 /// Só para a suíte: os registros do journal como estão no disco agora —
 /// todos, mas o conteúdo só dos últimos [`CONTEUDOS_DE_TESTE`]: o journal
-/// da suíte passa do heap do kernel.
+/// da suíte passa do heap do kernel. Os que fixam a EK — a abertura, os de
+/// boot, o fecho de uma base — ficam com o conteúdo, que é pequeno.
 #[cfg(feature = "modo-teste")]
 pub fn ler_de_teste() -> Result<Vec<diario::Registro>, &'static str> {
     let (chave, _) = segredos().ok_or("sem a chave do Duke")?;
@@ -2450,6 +2451,7 @@ pub fn ler_de_teste() -> Result<Vec<diario::Registro>, &'static str> {
             .len()
             .checked_sub(CONTEUDOS_DE_TESTE)
             .and_then(|i| v.get_mut(i))
+            .filter(|r| !matches!(r.tipo, tipo::ABERTURA | tipo::BOOT | tipo::BASE_FIM))
         {
             politica::sigiloso::zerar_bloco(&mut velho.conteudo);
             velho.conteudo = Vec::new();

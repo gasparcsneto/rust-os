@@ -818,8 +818,11 @@ fn pela_sessao<T: Tpm>(
         chave.como_bytes(),
         &[&rph, &nonce_novo, &nonce_caller, &[atributos_da_resposta]],
     );
-    if !cripto::iguais(&esperado, hmac_da_resposta) || atributos_da_resposta & CONTINUAR_SESSAO == 0
-    {
+    // Os atributos da resposta estão dentro do HMAC: só o TPM os escolhe.
+    // Um TPM que fechasse a sessão — sem `continueSession` na resposta —
+    // ainda teria respondido um valor autêntico; o comando seguinte, por
+    // uma sessão que ele já esqueceu, falharia, e a fecharia aqui também.
+    if !cripto::iguais(&esperado, hmac_da_resposta) {
         return Err(Erro::RespostaNaoAutenticada);
     }
     sessao.nonce_tpm = nonce_novo;
