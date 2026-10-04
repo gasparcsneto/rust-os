@@ -30,7 +30,8 @@
 //!  18  limite u64 LE     se não zero, o tamanho de cada região do journal,
 //!                        em setores — para encher uma depressa
 //!  26  bandeiras u8      bit 0: o coletor não compacta; bit 1: o boot
-//!                        não compacta
+//!                        não compacta; bit 2: a criação do journal
+//!                        espera, cedendo, antes de gravar a abertura
 //! ```
 //!
 //! O limite e as bandeiras servem à compactação: a bancada enche uma
@@ -121,6 +122,13 @@ pub fn coletor_nao_compacta() -> bool {
 /// Se o plano tira a compactação do boot.
 pub fn boot_nao_compacta() -> bool {
     BANDEIRAS.load(Ordering::Relaxed) & 2 != 0
+}
+
+/// Se o plano faz a criação do journal esperar antes da abertura, com a
+/// persistência já disponível: tempo para o coletor passar — e ele não
+/// pode gravar nada antes da abertura.
+pub fn esperar_na_abertura() -> bool {
+    BANDEIRAS.load(Ordering::Relaxed) & 4 != 0
 }
 
 /// Uma gravação de um registro do `tipo` começou: conta, para os pontos

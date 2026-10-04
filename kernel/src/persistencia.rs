@@ -839,6 +839,16 @@ fn abrir_de_fato() -> Result<Estado, &'static str> {
         p.estado = Estado::Disponivel;
     });
     if novo {
+        // Na bancada: duas voltas do coletor entre a persistência
+        // disponível e a abertura. Ele não grava nada antes dela, porque a
+        // ordem das gravações está com o boot — ver [`abrir`].
+        #[cfg(feature = "quedas")]
+        if crate::quedas::esperar_na_abertura() {
+            let ate = crate::tempo::uptime_ms() + 2 * INTERVALO_DA_AUDITORIA_MS;
+            while crate::tempo::uptime_ms() < ate {
+                crate::fios::ceder();
+            }
+        }
         let mut instalacao = [0u8; 16];
         crate::aleatorio::preencher(&mut instalacao).map_err(|_| "sem entropia")?;
         gravar(tipo::ABERTURA, &estado::campos(&[&instalacao])?)?;

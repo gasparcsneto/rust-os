@@ -272,6 +272,10 @@ const CENARIOS_DE_QUEDA: &[Cenario] = &[
         rodar: a_regiao_cheia_falha_fechada,
     },
     Cenario {
+        nome: "o coletor nao grava nada antes da abertura do journal",
+        rodar: o_coletor_espera_a_abertura,
+    },
+    Cenario {
         nome: "a queda na criacao da ancora e retomada, e nunca recusada para sempre",
         rodar: as_quedas_na_criacao,
     },
@@ -1516,6 +1520,8 @@ struct Plano {
 const COLETOR_NAO_COMPACTA: u8 = 1;
 /// O boot não compacta.
 const BOOT_NAO_COMPACTA: u8 = 2;
+/// A criação do journal espera, cedendo, antes de gravar a abertura.
+const ESPERAR_NA_ABERTURA: u8 = 4;
 
 fn plano(disco: &Path, p: Plano) -> Result<(), String> {
     let mut setor = [0u8; 512];
@@ -2432,6 +2438,39 @@ fn a_regiao_cheia_falha_fechada(arch: Arquitetura, artefato: &Artefato) -> Resul
     r?;
     Ok(format!(
         "{ops} operacoes ate encher; a seguinte falhou fechada, e o boot compactou e voltou"
+    ))
+}
+
+/// O primeiro boot espera, com a persistência já disponível e a abertura
+/// por gravar, duas voltas do coletor — que tem a auditoria do boot para
+/// gravar. Ele não grava nada antes da abertura: o boot tem a ordem das
+/// gravações. Se gravasse, a região não começaria pela abertura, e o boot
+/// seguinte recusaria o journal.
+fn o_coletor_espera_a_abertura(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    let disco = disco_de_testes()?;
+    plano(
+        &disco,
+        Plano {
+            bandeiras: ESPERAR_NA_ABERTURA,
+            ..Plano::default()
+        },
+    )?;
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let primeiro = persistencia_de(&mut m)?;
+    m.cortar_a_energia()?;
+    sem_plano(&disco)?;
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let p = persistencia_de(&mut m)?;
+    m.cortar_a_energia()?;
+    if primeiro.estado != "available" || p.estado != "available" || p.boots != 2 {
+        return Err(format!(
+            "depois da espera na abertura: {} e depois {} ({}), boot {}",
+            primeiro.estado, p.estado, p.motivo, p.boots
+        ));
+    }
+    Ok(format!(
+        "a abertura veio primeiro; o boot seguinte abriu {} registros",
+        p.registros
     ))
 }
 
