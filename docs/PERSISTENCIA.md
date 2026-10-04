@@ -902,7 +902,9 @@ A bancada derruba a energia, numa compilação própria do kernel:
 - **em cada registro** — uma operação, uma mensagem, um só de auditoria
   —: antes da escrita, depois da escrita (que chegou ao disco, ou se
   perdeu sem a descarga), depois da descarga, **depois do incremento e
-  antes da leitura de volta**, e depois do contador;
+  antes da leitura de volta**, e depois do contador. O registro só de
+  auditoria, desde que deixou de avançar o contador, não tem o ponto do
+  incremento — ver *A auditoria e o contador*;
 - **em cada compactação**, nas mesmas fronteiras, e depois da primeira
   parte.
 
@@ -1040,6 +1042,115 @@ agora começa do zero, conferido).
   política, e outra fase.
 - **A história da autoridade cresce sem fim**, como no 7.6: fora do
   escopo do 7.7.
+
+## A auditoria e o contador
+
+Até o 7.7, todo registro do journal avançava o contador do TPM — também
+os só de auditoria, que o coletor grava a cada dois segundos quando há
+atividade. Um TPM físico aguenta um número finito de escritas no NV, e
+uma máquina ativa gastava ali um avanço a cada dois segundos sem que
+nenhum estado de segurança tivesse mudado.
+
+A separação:
+
+```
+journal / auditoria = persistência e histórico
+contador do TPM     = monotonicidade do estado de segurança
+```
+
+### Quem avança o contador
+
+Quem decide é o **tipo do registro**, no pacote `diario`
+(`estado::tipo::avanca_a_ancora`), e não quem grava:
+
+| Registro | Avança | Por quê |
+|---|---|---|
+| `ABERTURA` | sim | cria o journal e a instalação; a âncora começa nela |
+| `BOOT` | sim | fixa a EK, conta os boots e carrega o piso do relógio |
+| `OPERACAO` | sim | toda mudança de autoridade, com a decisão que a autorizou |
+| `MENSAGENS` | sim | estado de mensagens: criada, entregue, confirmada, vencida, anulada — voltar atrás seria repetir ou ressuscitar uma mensagem |
+| `BASE` / `BASE_FIM` | sim, uma vez | o fecho troca a região que vale; a região antiga tem de ficar recusada |
+| `AUDITORIA` | **não** | leituras, recusas e o que mais o coletor grava: nenhum estado protegido muda |
+
+Os caminhos que avançam o contador no código são três: a gravação de um
+registro (`gravar_um`, agora só para os que avançam), o fecho de uma
+compactação, e o boot — completar um avanço interrompido, criar a âncora
+e dar o primeiro valor a um contador definido e nunca avançado. Os dois
+últimos não mudaram.
+
+**O caso ambíguo** foi o registro de boot. Ele não muda autoridade, e
+nenhuma decisão de segurança lê o número de boots — a época das
+mensagens vem da instalação, e não dele. Mas ele fixa a EK e carrega o
+piso do relógio, que protege os prazos das mensagens contra um RTC
+atrasado; e é um avanço por boot, e não um a cada dois segundos. Ficou
+avançando: é a escolha conservadora, e o desgaste dele é desprezível.
+
+### Como ficou garantido
+
+- **O escritor** monta o registro só de auditoria na âncora de agora, e
+  todo outro na seguinte. Um registro que avança só se confirma com o
+  valor do contador lido de volta; um só de auditoria, só sem contador.
+  Nenhum caminho do kernel consegue gravar uma transição protegida sem
+  avançar: a confirmação sem contador a recusa.
+- **O leitor** exige, depois de abrir o registro — o cabeçalho, com a
+  âncora, é autenticado junto —, a mesma âncora do anterior num registro
+  só de auditoria, e a seguinte em todo outro. Uma operação com a âncora
+  repetida não é lida: um disco devolvido a antes dela não passaria
+  despercebido por ela ter sido gravada sem o contador.
+- **O julgamento** no boot não mudou: a última âncora do journal contra o
+  contador. Os registros só de auditoria repetem a última âncora, e não
+  mudam a conta.
+
+### O que o contador não protege mais
+
+**O rabo da auditoria.** Os registros só de auditoria gravados depois do
+último registro que avançou o contador não têm a proteção dele: um disco
+devolvido a uma cópia de antes deles — e depois daquele registro —
+confere com o contador e é aceito. Perdem-se as leituras e recusas
+daquele intervalo; nenhum estado protegido volta, e a decisão de cada
+mudança de autoridade continua no registro da própria mudança, protegida.
+O intervalo acaba no próximo registro que avança: o encadeamento do
+journal faz cada registro novo comprometer os anteriores, e o registro
+de boot seguinte ao corte já o fecha. O piso do relógio, do mesmo modo,
+fica protegido até o tempo do último registro que avançou.
+
+É o que a separação pede, e está nos testes: no hospedeiro, *o contador
+protege o estado e não o rabo da auditoria* confere que a cópia de antes
+da auditoria é aceita e a de antes da operação é recusada.
+
+### Os testes
+
+- **Hospedeiro (`diario`)**: *a auditoria não gasta o contador* (quarenta
+  registros só de auditoria entre a abertura e uma operação, e o
+  contador anda duas vezes; e a classificação de cada tipo), *cada
+  registro se confirma pelo seu tipo*, *o leitor exige a âncora do tipo*
+  (uma operação, um boot ou uma mensagem com a âncora repetida não são
+  lidos; um só de auditoria com a seguinte também não), *o contador
+  protege o estado e não o rabo da auditoria*.
+- **Suíte**: seis leituras, gravadas em seis registros só de auditoria,
+  não mexem no contador; uma mensagem, uma operação de autoridade e o
+  boot seguinte avançam um cada; o journal com os registros só de
+  auditoria no meio abre, e a cadeia da auditoria confere.
+- **Bancada**: o coletor grava registros só de auditoria entre dois
+  cortes de energia, e a âncora não se move; o boot seguinte a avança
+  uma vez, e uma operação, outra. As quedas num registro só de auditoria
+  — antes e depois da escrita, depois da descarga, antes da confirmação —
+  continuam valendo exatamente quando o registro está no disco.
+
+### As mutações
+
+| Mutação | Quem a mata |
+|---|---|
+| nenhum registro avança o contador; a abertura, o boot, a operação ou a mensagem sem avançar | hospedeiro: *a auditoria não gasta o contador* (a classificação de cada tipo) e os casos do journal que conferem a âncora |
+| todo registro sem o contador, no kernel — a transição protegida confirmada sem avançar | suíte: a confirmação sem contador recusa, e as operações falham (dezenas de casos) |
+| a auditoria volta a avançar o contador (no tipo, ou no kernel) | hospedeiro: *a auditoria não gasta o contador*, *cada registro se confirma pelo seu tipo*; suíte: a gravação da auditoria falha na confirmação |
+| o leitor ignorando o tipo; aceitando a mesma âncora ou a seguinte; sem conferir a âncora | hospedeiro: *o leitor exige a âncora do tipo*, *a base fora do lugar é recusada* |
+| montar sempre na âncora seguinte | hospedeiro: *a auditoria não gasta o contador*, *lê de volta o que escreveu* |
+| confirmar com o contador um só de auditoria; confirmar sem ele um que avança | hospedeiro: *cada registro se confirma pelo seu tipo* |
+| o registro só de auditoria sem contar como auditoria, ou como registro | suíte: *o que não muda estado vai no registro seguinte*, *aberta no boot* |
+
+Dezesseis, todas mortas; nenhuma equivalente.
+
 
 ## Decisões tomadas
 

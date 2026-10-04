@@ -2185,7 +2185,13 @@ o pedido; o boot o reaplica por cima da imagem, antes de abrir as portas.
   autorizou uma mudança de autoridade vai no mesmo registro que a mudança:
   as duas entram juntas, ou nenhuma. O que não muda estado — uma leitura,
   uma recusa — vai no próximo registro, ou num só de auditoria que o
-  coletor grava a cada dois segundos. `audit.tail` diz `durable` em cada
+  coletor grava a cada dois segundos — e que **não avança o contador do
+  TPM**: o contador é a monotonicidade do estado de segurança, e um
+  registro só de auditoria não muda estado. Avançam a abertura, cada boot,
+  cada operação de autoridade, cada mudança de mensagem e o fecho de cada
+  compactação. O preço: os registros só de auditoria depois do último que
+  avançou não têm a proteção do contador, e um disco devolvido a antes
+  deles passa — sem que nenhum estado protegido volte. `audit.tail` diz `durable` em cada
   registro; o boot refaz a cadeia do journal e continua dela. Com o journal
   recusado, a cadeia recomeça só em memória, e a recusa é o primeiro
   registro dela.
