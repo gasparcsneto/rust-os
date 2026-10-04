@@ -15428,6 +15428,90 @@ fn tpm_a_senha_nao_passa_pelo_barramento() -> Resultado {
     Ok(())
 }
 
+/// O journal e a auditoria são persistência e histórico; o contador é a
+/// monotonicidade do estado protegido. Leituras e recusas, gravadas em
+/// registros só de auditoria, não gastam o contador — por mais registros
+/// que sejam. Uma mensagem, uma operação de autoridade e um boot gastam um
+/// cada. E o journal, com os registros só de auditoria entre os outros,
+/// abre no boot seguinte, com a auditoria inteira.
+fn tpm_a_auditoria_nao_gasta_o_contador() -> Resultado {
+    use diario::estado::tipo;
+    crate::persistencia::compactar_de_teste()?;
+    estado_do_journal()?;
+    let contador = crate::persistencia::ancora_no_tpm_de_teste()?;
+    let resultado = com_mensagens(|| {
+        let (mut a, mut sa) = conectado(1)?;
+        let (_b, _sb) = conectado(2)?;
+        crate::identidade::registrar_administrador_de_teste(
+            sigilo::publica_de(&ADMIN_DE_TESTE),
+            "administrador",
+        );
+        for _ in 0..6 {
+            let seq = ultimo_registro().map_or(0, |r| r.seq);
+            pela_porta(&mut a, &mut sa, "agent.session", "{}")?;
+            if ultimo_registro().map_or(0, |r| r.seq) <= seq {
+                return Err("a leitura nao foi para a auditoria");
+            }
+            let antes = todos_do_journal()?.len();
+            crate::persistencia::gravar_auditoria()?;
+            let depois = todos_do_journal()?;
+            if depois.len() != antes + 1
+                || depois.last().map(|r| r.tipo) != Some(tipo::AUDITORIA)
+            {
+                return Err("a auditoria nao foi num registro so dela");
+            }
+        }
+        if crate::persistencia::ancora_no_tpm_de_teste()? != contador {
+            return Err("um registro so de auditoria gastou o contador");
+        }
+        // Uma mensagem: uma transição protegida, um avanço.
+        let r = pela_porta(
+            &mut a,
+            &mut sa,
+            "message.send",
+            r#"{"to":"teste-2","body":"um avanco","nonce":1}"#,
+        )?;
+        if !r.contains(r#""durable":true"#)
+            || crate::persistencia::ancora_no_tpm_de_teste()? != contador + 1
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("a mensagem nao avancou o contador uma vez");
+        }
+        // Uma operação de autoridade: outro.
+        let p = alloc::format!(
+            r#"{{"key":"{}","name":"um-avanco","role":"observador"}}"#,
+            sigilo::hex(&sigilo::publica_de(&[0x8A; 32]))
+        );
+        let r = executar_admin_com(0, &ADMIN_DE_TESTE, "agent.register", &p, &p)?;
+        if !r.contains(r#""executed":true"#)
+            || crate::persistencia::ancora_no_tpm_de_teste()? != contador + 2
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("a operacao de autoridade nao avancou o contador uma vez");
+        }
+        Ok(())
+    });
+    resultado?;
+    // O boot seguinte: abre o journal com os registros só de auditoria no
+    // meio, grava o registro de boot — que avança —, e a cadeia continua.
+    de_volta_a_imagem();
+    crate::persistencia::abrir();
+    let resultado = (|| -> Resultado {
+        if crate::persistencia::estado() != crate::persistencia::Estado::Disponivel {
+            return Err("o journal com registros so de auditoria nao abriu");
+        }
+        if crate::persistencia::ancora_no_tpm_de_teste()? != contador + 3 {
+            return Err("o registro de boot nao avancou o contador uma vez");
+        }
+        if crate::identidade::agente(&sigilo::publica_de(&[0x8A; 32])).is_none() {
+            return Err("a operacao de autoridade nao voltou no boot");
+        }
+        a_cadeia_do_journal_confere()
+    })();
+    de_volta_a_imagem();
+    resultado
+}
+
 /// O journal fixou uma EK, e o TPM da máquina tem outra: o journal foi
 /// levado para outro TPM — ou outro chip responde no lugar deste. Recusado
 /// antes de qualquer comando ao contador. E o journal que fala de duas
@@ -15597,9 +15681,14 @@ fn persistencia_as_entradas_se_reaplicam() -> Resultado {
 fn persistencia_o_nascimento_e_o_primeiro_valor() -> Resultado {
     let nascimento = crate::persistencia::nascimento_de_teste()?
         .ok_or("o nascimento da ancora nao foi guardado")?;
-    let registros = todos_do_journal()?.len() as u64;
+    // Só os registros que avançam o contador contam: os só de auditoria
+    // repetem a âncora.
+    let registros = todos_do_journal()?
+        .iter()
+        .filter(|r| diario::estado::tipo::avanca_a_ancora(r.tipo))
+        .count() as u64;
     if crate::persistencia::ancora_no_tpm_de_teste()? != nascimento + registros {
-        return Err("o contador nao e o nascimento mais um por registro");
+        return Err("o contador nao e o nascimento mais um por registro que o avanca");
     }
     Ok(())
 }
@@ -22122,6 +22211,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "tpm: a EK trocada e recusada, e o journal de duas EKs tambem",
         f: tpm_a_chave_do_tpm_trocada_e_recusada,
+    },
+    Caso {
+        nome: "tpm: a auditoria nao gasta o contador; mensagem, operacao e boot gastam um cada",
+        f: tpm_a_auditoria_nao_gasta_o_contador,
     },
     Caso {
         nome: "compactacao: a regiao nova repoe o mesmo estado, e a velha nao confere mais",

@@ -50,6 +50,9 @@ pub mod tipo {
     /// entradas da auditoria que ainda não estão no disco, na ordem da
     /// cadeia: a decisão que autorizou uma operação vai no registro da
     /// operação. Este tipo é para quando nada mais é gravado.
+    ///
+    /// É o único tipo que **não avança** o contador do TPM — ver
+    /// [`avanca_a_ancora`]: ele leva a mesma âncora do registro anterior.
     pub const AUDITORIA: u16 = 5;
     /// Uma parte da base de uma região: uma lista de entradas, como as de
     /// [`OPERACAO`]. A base é o que uma compactação escreve no começo da
@@ -133,6 +136,26 @@ pub mod tipo {
     /// barramento fingindo ser ele. O fecho de uma base leva o mesmo ponto
     /// como quarto campo.
     pub const CHAVE_DO_TPM: u16 = 28;
+
+    /// Se um registro de tipo `tipo` avança o contador do TPM — se ele é uma
+    /// transição do estado que a âncora protege.
+    ///
+    /// O journal e a auditoria são persistência e histórico; o contador é
+    /// a monotonicidade do estado de segurança. Avançam o contador os
+    /// registros cuja volta a um estado anterior seria um rollback desse
+    /// estado: a abertura, cada boot, cada operação de autoridade, cada
+    /// mudança de mensagem — e a base, no fecho, que troca a região que
+    /// vale. Um registro só de auditoria — leituras, recusas, o que o
+    /// coletor grava de tempos em tempos — não muda estado protegido, e não
+    /// gasta o contador: um TPM físico aguenta um número finito de escritas
+    /// no NV.
+    ///
+    /// Quem decide é o tipo, e não quem grava: o leitor exige a mesma
+    /// âncora num registro só de auditoria e a seguinte em todo outro, e o
+    /// escritor só confirma sem o contador um registro que não o avança.
+    pub const fn avanca_a_ancora(tipo: u16) -> bool {
+        tipo != AUDITORIA
+    }
 }
 
 /// Monta o conteúdo de um registro a partir dos campos.

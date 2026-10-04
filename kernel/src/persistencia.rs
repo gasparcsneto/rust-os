@@ -1842,8 +1842,24 @@ fn gravar_um(tipo_do_registro: u16, dados: &[u8]) -> Result<(), &'static str> {
     meio.descarregar()?;
     #[cfg(feature = "quedas")]
     crate::quedas::aqui(crate::quedas::Ponto::DepoisDaDescarga);
-    // Só depois de descarregado o contador anda: um contador à frente do
-    // disco seria um disco que parece velho no próximo boot.
+    // Um registro só de auditoria não avança o contador: o tipo decide, no
+    // journal, e o escritor só o confirma sem contador. O resto avança —
+    // só depois de descarregado: um contador à frente do disco seria um
+    // disco que parece velho no próximo boot.
+    if !montado.avanca() {
+        #[cfg(feature = "quedas")]
+        crate::quedas::aqui(crate::quedas::Ponto::DepoisDoContador);
+        return com(|p| {
+            p.aberta
+                .as_mut()
+                .ok_or("a persistencia nao esta aberta")?
+                .escritor
+                .confirmar_sem_contador(&montado)?;
+            p.registros += 1;
+            p.registros_de_auditoria += 1;
+            Ok(())
+        });
+    }
     let avancado = match avancar_a_ancora(montado.ancora) {
         Avanco::Feito(v) => v,
         // O registro está no disco, e o contador, conferido por uma
@@ -1878,9 +1894,6 @@ fn gravar_um(tipo_do_registro: u16, dados: &[u8]) -> Result<(), &'static str> {
             .confirmar(&montado, avancado)?;
         p.geracao = montado.geracao;
         p.registros += 1;
-        if tipo_do_registro == tipo::AUDITORIA {
-            p.registros_de_auditoria += 1;
-        }
         Ok(())
     })
 }

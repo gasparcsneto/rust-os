@@ -86,15 +86,20 @@ fn tipo_de_teste(n: u64) -> u16 {
 }
 
 /// O protocolo inteiro de uma gravação: montar, escrever, descarregar,
-/// avançar o contador, confirmar.
+/// avançar o contador, confirmar — ou, num registro só de auditoria,
+/// confirmar sem o contador.
 fn gravar(m: &mut Memoria, esc: &mut Escritor, tpm: &mut Contador, n: u64, dados: &[u8]) {
     let montado = esc
         .montar(&CHAVE, nonce(n), &conteudo(tipo_de_teste(n), dados))
         .unwrap();
     m.escrever(montado.setor, &montado.bytes).unwrap();
     m.descarregar().unwrap();
-    tpm.0 += 1;
-    esc.confirmar(&montado, tpm.0).unwrap();
+    if montado.avanca() {
+        tpm.0 += 1;
+        esc.confirmar(&montado, tpm.0).unwrap();
+    } else {
+        esc.confirmar_sem_contador(&montado).unwrap();
+    }
 }
 
 /// Um journal novo, com `n` registros de tamanhos variados.
@@ -120,7 +125,10 @@ fn le_de_volta_o_que_escreveu() {
     assert_eq!(lido.parada, Parada::Fim);
     for (i, r) in lido.registros.iter().enumerate() {
         assert_eq!(r.sequencia, i as u64);
-        assert_eq!(r.ancora, 1001 + i as u64);
+        // O de número 5 é só de auditoria: repete a âncora do anterior, e
+        // os seguintes continuam de onde ela estava.
+        let auditoria = i as u64 >= estado::tipo::AUDITORIA as u64;
+        assert_eq!(r.ancora, 1001 + i as u64 - u64::from(auditoria));
         assert_eq!(r.tipo, tipo_de_teste(i as u64));
         // Os tipos são 0, 1, 2…: só o 3 é uma operação, e sobe a geração.
         assert_eq!(r.geracao, u64::from(i >= estado::tipo::OPERACAO as usize));
@@ -876,4 +884,177 @@ fn o_vazio_continua_do_comeco() {
     let mut tpm = Contador(0);
     gravar(&mut m, &mut esc, &mut tpm, 0, b"abertura");
     assert_eq!(ler(&mut m, &CHAVE).unwrap().registros.len(), 1);
+}
+
+/// Grava um registro de `tipo` pelo protocolo inteiro, como o kernel:
+/// avançando o contador só se o registro o avança.
+fn gravar_tipo(m: &mut Memoria, esc: &mut Escritor, tpm: &mut Contador, n: u64, tipo: u16) {
+    let montado = esc.montar(&CHAVE, nonce(n), &conteudo(tipo, b"x")).unwrap();
+    m.escrever(montado.setor, &montado.bytes).unwrap();
+    m.descarregar().unwrap();
+    if montado.avanca() {
+        tpm.0 += 1;
+        esc.confirmar(&montado, tpm.0).unwrap();
+    } else {
+        esc.confirmar_sem_contador(&montado).unwrap();
+    }
+}
+
+/// Só o registro só de auditoria deixa de avançar o contador: a abertura,
+/// o boot, a operação e a mensagem avançam. Com muitos registros de
+/// auditoria entre duas operações, o contador anda duas vezes — e o
+/// journal confere com ele.
+#[test]
+fn a_auditoria_nao_gasta_o_contador() {
+    use estado::tipo::*;
+    for t in [ABERTURA, BOOT, OPERACAO, MENSAGENS] {
+        assert!(
+            estado::tipo::avanca_a_ancora(t),
+            "o tipo {t} tem de avancar"
+        );
+    }
+    assert!(!estado::tipo::avanca_a_ancora(AUDITORIA));
+
+    let mut m = Memoria::nova(512);
+    let mut tpm = Contador(1000);
+    let lido = ler(&mut m, &CHAVE).unwrap();
+    let mut esc = Escritor::continuar(&lido, tpm.0, m.setores());
+    gravar_tipo(&mut m, &mut esc, &mut tpm, 0, ABERTURA);
+    for n in 1..=40 {
+        gravar_tipo(&mut m, &mut esc, &mut tpm, n, AUDITORIA);
+    }
+    gravar_tipo(&mut m, &mut esc, &mut tpm, 41, OPERACAO);
+    gravar_tipo(&mut m, &mut esc, &mut tpm, 42, AUDITORIA);
+    assert_eq!(tpm.0, 1002, "so a abertura e a operacao avancam o contador");
+
+    let lido = ler(&mut m, &CHAVE).unwrap();
+    assert_eq!(lido.registros.len(), 43);
+    assert_eq!(lido.parada, Parada::Fim);
+    for r in &lido.registros {
+        // A abertura e os quarenta de auditoria na 1001; a operação e o
+        // último de auditoria, na 1002.
+        let esperada = if r.sequencia <= 40 { 1001 } else { 1002 };
+        assert_eq!(r.ancora, esperada, "registro {}", r.sequencia);
+    }
+    assert_eq!(julgar(lido.ultima_ancora(), Some(tpm.0)), Veredito::Confere);
+}
+
+/// Um registro que avança o contador só se confirma com ele, e um só de
+/// auditoria só sem ele: nenhuma das duas trocas passa, e o escritor fica
+/// onde estava — o próximo registro vai no mesmo lugar.
+#[test]
+fn cada_registro_se_confirma_pelo_seu_tipo() {
+    let mut m = Memoria::nova(64);
+    let mut tpm = Contador(1000);
+    let lido = ler(&mut m, &CHAVE).unwrap();
+    let mut esc = Escritor::continuar(&lido, tpm.0, m.setores());
+    gravar_tipo(&mut m, &mut esc, &mut tpm, 0, estado::tipo::ABERTURA);
+
+    let operacao = esc
+        .montar(&CHAVE, nonce(1), &conteudo(estado::tipo::OPERACAO, b"op"))
+        .unwrap();
+    assert!(operacao.avanca());
+    assert_eq!(operacao.ancora, tpm.0 + 1);
+    assert!(esc.confirmar_sem_contador(&operacao).is_err());
+
+    let auditoria = esc
+        .montar(&CHAVE, nonce(2), &conteudo(estado::tipo::AUDITORIA, b"au"))
+        .unwrap();
+    assert!(!auditoria.avanca());
+    assert_eq!(auditoria.ancora, tpm.0);
+    assert!(esc.confirmar(&auditoria, tpm.0).is_err());
+
+    // Nada foi confirmado: o próximo vai onde a operação ia.
+    let de_novo = esc
+        .montar(&CHAVE, nonce(3), &conteudo(estado::tipo::OPERACAO, b"op"))
+        .unwrap();
+    assert_eq!(de_novo.setor, operacao.setor);
+    assert_eq!(de_novo.ancora, operacao.ancora);
+}
+
+/// O leitor exige a âncora que o tipo dá: um registro só de auditoria com a
+/// âncora seguinte não vale, e um que avança o contador com a mesma âncora
+/// do anterior também não — sem isso, uma transição protegida poderia ir
+/// ao disco sem gastar o contador, e um disco de antes dela passaria.
+#[test]
+fn o_leitor_exige_a_ancora_do_tipo() {
+    for (tipo, mesma) in [
+        (estado::tipo::AUDITORIA, false),
+        (estado::tipo::OPERACAO, true),
+        (estado::tipo::BOOT, true),
+        (estado::tipo::MENSAGENS, true),
+    ] {
+        let mut m = Memoria::nova(64);
+        let mut tpm = Contador(1000);
+        let lido = ler(&mut m, &CHAVE).unwrap();
+        let mut esc = Escritor::continuar(&lido, tpm.0, m.setores());
+        gravar_tipo(&mut m, &mut esc, &mut tpm, 0, estado::tipo::ABERTURA);
+        // Montado à mão, com a âncora errada para o tipo.
+        let ancora = if mesma { esc.ancora } else { esc.ancora + 1 };
+        let (bytes, _, _) = selar(
+            &CHAVE,
+            nonce(1),
+            &Posicao {
+                setor: esc.proximo_setor,
+                sequencia: esc.proxima_sequencia,
+                ancora,
+                elo: esc.elo,
+                total: esc.total,
+            },
+            &conteudo(tipo, b"x"),
+            geracao_depois(esc.geracao, tipo).unwrap(),
+        )
+        .unwrap();
+        m.escrever(esc.proximo_setor, &bytes).unwrap();
+        let lido = ler(&mut m, &CHAVE).unwrap();
+        assert_eq!(
+            lido.registros.len(),
+            1,
+            "tipo {tipo}: o registro errado foi lido"
+        );
+        assert!(
+            matches!(
+                lido.parada,
+                Parada::Ilegivel {
+                    motivo: "a ancora nao segue a do registro anterior",
+                    ..
+                }
+            ),
+            "tipo {tipo}: {:?}",
+            lido.parada
+        );
+    }
+}
+
+/// O que o contador protege e o que não protege. Um disco devolvido a
+/// antes de uma transição protegida é recusado, como sempre. Um disco
+/// devolvido a antes de registros só de auditoria — depois da última
+/// transição — confere com o contador: o rabo da auditoria não tem a
+/// proteção do contador, e o estado protegido não volta.
+#[test]
+fn o_contador_protege_o_estado_e_nao_o_rabo_da_auditoria() {
+    use estado::tipo::*;
+    let mut m = Memoria::nova(128);
+    let mut tpm = Contador(1000);
+    let lido = ler(&mut m, &CHAVE).unwrap();
+    let mut esc = Escritor::continuar(&lido, tpm.0, m.setores());
+    gravar_tipo(&mut m, &mut esc, &mut tpm, 0, ABERTURA);
+    let antes_da_operacao = m.bytes.clone();
+    gravar_tipo(&mut m, &mut esc, &mut tpm, 1, OPERACAO);
+    let antes_da_auditoria = m.bytes.clone();
+    gravar_tipo(&mut m, &mut esc, &mut tpm, 2, AUDITORIA);
+    gravar_tipo(&mut m, &mut esc, &mut tpm, 3, AUDITORIA);
+
+    let julgado = |bytes: &Vec<u8>| {
+        let mut copia = Memoria::nova(128);
+        copia.bytes = bytes.clone();
+        let lido = ler(&mut copia, &CHAVE).unwrap();
+        julgar(lido.ultima_ancora(), Some(tpm.0))
+    };
+    assert_eq!(julgado(&m.bytes), Veredito::Confere);
+    assert_eq!(julgado(&antes_da_auditoria), Veredito::Confere);
+    assert!(matches!(
+        julgado(&antes_da_operacao),
+        Veredito::Recusado(Recusa::DiscoAtrasado { .. })
+    ));
 }

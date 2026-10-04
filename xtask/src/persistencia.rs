@@ -220,6 +220,10 @@ const CENARIOS: &[Cenario] = &[
         rodar: a_queda_no_meio_da_gravacao,
     },
     Cenario {
+        nome: "a auditoria do coletor nao gasta o contador; o boot e a operacao gastam um cada",
+        rodar: a_auditoria_nao_gasta_o_contador,
+    },
+    Cenario {
         nome: "o TPM devolvido a um estado anterior e recusado, e o revogado nao volta",
         rodar: o_tpm_devolvido_e_recusado,
     },
@@ -509,6 +513,10 @@ struct Persistencia {
     /// de boot e de abertura. Os de auditoria o coletor grava quando quer,
     /// e a conta deles não é a de um cenário.
     registros: u64,
+    /// Os registros só de auditoria do journal.
+    de_auditoria: u64,
+    /// O valor do contador que o journal confirmou por último.
+    ancora: Option<u64>,
     /// A última sequência da auditoria no journal.
     auditoria_gravada: u64,
     /// Quantas compactações o journal já teve.
@@ -541,6 +549,8 @@ fn persistencia_de(maquina: &mut Ligada) -> Result<Persistencia, String> {
         ek: texto("tpm_ek"),
         geracao: numero("generation")?,
         registros: numero("records")? - numero("audit_records")?,
+        de_auditoria: numero("audit_records")?,
+        ancora: super::campo_simples(p, "anchor").and_then(|v| v.parse().ok()),
         auditoria_gravada: numero("audit_durable_seq")?,
         compactacoes: numero("compactions")?,
         usados: numero("region_used")?,
@@ -1012,6 +1022,75 @@ fn copiar_diretorio(de: &Path, para: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// O journal e a auditoria são persistência e histórico; o contador é a
+/// monotonicidade do estado protegido. Leituras pela serial vão à
+/// auditoria, e o coletor as grava em registros só de auditoria: vários,
+/// e a âncora não se move. Entre dois cortes de energia, o boot seguinte
+/// abre com a auditoria gravada inteira, e avança a âncora uma vez — pelo
+/// registro de boot —; uma operação de autoridade, outra.
+fn a_auditoria_nao_gasta_o_contador(
+    arch: Arquitetura,
+    artefato: &Artefato,
+) -> Result<String, String> {
+    let chaves = super::chaves::Chaves::garantir()?;
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let antes = persistencia_de(&mut m)?;
+    let ancora = antes.ancora.ok_or("a persistencia nao diz a ancora")?;
+    let mut depois = persistencia_de(&mut m)?;
+    for _ in 0..240 {
+        if depois.de_auditoria >= antes.de_auditoria + 3 {
+            break;
+        }
+        m.pedir("system.info", "{}")?;
+        std::thread::sleep(Duration::from_millis(250));
+        depois = persistencia_de(&mut m)?;
+    }
+    m.cortar_a_energia()?;
+    if depois.de_auditoria < antes.de_auditoria + 3 {
+        return Err(format!(
+            "o coletor gravou {} registros so de auditoria, e nao tres",
+            depois.de_auditoria - antes.de_auditoria
+        ));
+    }
+    if depois.ancora != Some(ancora) {
+        return Err(format!(
+            "{} registros so de auditoria levaram a ancora de {ancora} a {:?}",
+            depois.de_auditoria - antes.de_auditoria,
+            depois.ancora
+        ));
+    }
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let p = persistencia_de(&mut m)?;
+    let verifica = auditoria_verifica(&mut m);
+    let r = administrar(
+        &mut m,
+        &chaves.administrador,
+        "agent.register",
+        &registro_de_agente(&[0xC6; 32], "depois-da-auditoria", "observador"),
+    )?;
+    let q = persistencia_de(&mut m)?;
+    m.cortar_a_energia()?;
+    verifica?;
+    if p.estado != "available" || p.auditoria_gravada < depois.auditoria_gravada {
+        return Err(format!(
+            "o boot seguinte: {} ({}), auditoria gravada ate {} e nao {}",
+            p.estado, p.motivo, p.auditoria_gravada, depois.auditoria_gravada
+        ));
+    }
+    if p.ancora != Some(ancora + 1) || !executou(&r) || q.ancora != Some(ancora + 2) {
+        return Err(format!(
+            "a ancora era {ancora}: {:?} depois do boot, {:?} depois da operacao\n  {r}",
+            p.ancora, q.ancora
+        ));
+    }
+    Ok(format!(
+        "{} registros so de auditoria na ancora {ancora}; o boot a levou a {} e a operacao a {}",
+        depois.de_auditoria - antes.de_auditoria,
+        ancora + 1,
+        ancora + 2
+    ))
 }
 
 /// O TPM devolvido a um estado anterior — o NV dele restaurado de uma
@@ -1883,6 +1962,17 @@ const QUEDAS_NA_GRAVACAO: [Caso; 6] = [
     ),
 ];
 
+/// As quedas dentro de um registro só de auditoria: as mesmas, menos a do
+/// incremento — um registro só de auditoria não avança o contador, e não há
+/// incremento no meio dele.
+const QUEDAS_NA_AUDITORIA: [Caso; 5] = [
+    QUEDAS_NA_GRAVACAO[0],
+    QUEDAS_NA_GRAVACAO[1],
+    QUEDAS_NA_GRAVACAO[2],
+    QUEDAS_NA_GRAVACAO[3],
+    QUEDAS_NA_GRAVACAO[5],
+];
+
 /// Depois de uma queda: a persistência de pé, com `registros` registros e
 /// a geração `geracao`.
 fn conferir_depois_da_queda(
@@ -2045,7 +2135,7 @@ fn as_quedas_numa_mensagem(arch: Arquitetura, artefato: &Artefato) -> Result<Str
 fn as_quedas_na_auditoria(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
     let chaves = super::chaves::Chaves::garantir()?;
     let disco = disco_de_testes()?;
-    for (i, (ponto, perder, vale, caso)) in QUEDAS_NA_GRAVACAO.into_iter().enumerate() {
+    for (i, (ponto, perder, vale, caso)) in QUEDAS_NA_AUDITORIA.into_iter().enumerate() {
         zerar_o_estado(arch)?;
         plano_de_queda(&disco, ponto, tipo::AUDITORIA, 1)?;
         // Ninguém pede nada: o `persistence.open` está pendente desde o
@@ -2107,7 +2197,7 @@ fn as_quedas_na_auditoria(arch: Arquitetura, artefato: &Artefato) -> Result<Stri
     }
     Ok(format!(
         "{} quedas: o registro de auditoria vale exatamente quando esta no disco, e a cadeia continua",
-        QUEDAS_NA_GRAVACAO.len()
+        QUEDAS_NA_AUDITORIA.len()
     ))
 }
 

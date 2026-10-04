@@ -333,14 +333,15 @@ fn geracao_depois(anterior: u64, tipo: u16) -> Option<u64> {
     anterior.checked_add(u64::from(tipo == estado::tipo::OPERACAO))
 }
 
-/// A âncora do registro depois de um de âncora `anterior` e `tipo`: a
-/// mesma, depois de uma parte da base; a seguinte, depois de qualquer
-/// outro.
-fn ancora_depois(anterior: u64, tipo: u16) -> Option<u64> {
-    if tipo == estado::tipo::BASE {
-        Some(anterior)
+/// A âncora que um registro de `tipo` tem de ter, depois do `anterior`: a
+/// mesma, depois de uma parte da base — a base é uma gravação só — ou num
+/// registro só de auditoria, que não avança o contador; a seguinte, em
+/// todo outro. Ver [`estado::tipo::avanca_a_ancora`].
+fn ancora_esperada(anterior: &Ultimo, tipo: u16) -> Option<u64> {
+    if anterior.tipo == estado::tipo::BASE || !estado::tipo::avanca_a_ancora(tipo) {
+        Some(anterior.ancora)
     } else {
-        anterior.checked_add(1)
+        anterior.ancora.checked_add(1)
     }
 }
 
@@ -451,13 +452,6 @@ pub fn percorrer<M: Meio, E>(
         if sequencia != quantos {
             break ilegivel("sequencia fora de ordem");
         }
-        // Depois de uma parte da base, a mesma âncora: a base é uma
-        // gravação só. Depois de qualquer outro, a seguinte.
-        if let Some(anterior) = ultimo
-            && Some(ancora) != ancora_depois(anterior.ancora, anterior.tipo)
-        {
-            break ilegivel("a ancora nao segue a do registro anterior");
-        }
 
         let mut inteiro = alloc::vec![0u8; setores as usize * TAM_SETOR];
         inteiro[..TAM_SETOR].copy_from_slice(&cabecalho);
@@ -510,6 +504,14 @@ pub fn percorrer<M: Meio, E>(
         // O texto claro não fica no heap além do registro entregue.
         inteiro.zeroize();
         drop(inteiro);
+        // A âncora depende do tipo deste registro, que só se sabe aberto: o
+        // cabeçalho, com a âncora, é autenticado junto. Um registro só de
+        // auditoria leva a mesma do anterior; todo outro, a seguinte.
+        if let Some(anterior) = &ultimo
+            && Some(registro.ancora) != ancora_esperada(anterior, registro.tipo)
+        {
+            break ilegivel("a ancora nao segue a do registro anterior");
+        }
         if let Some(anterior) = ultimo
             && Some(registro.geracao) != geracao_depois(anterior.geracao, registro.tipo)
         {
@@ -561,8 +563,20 @@ pub struct Montado {
     /// A geração em que ele deixa o sistema: a do anterior, mais um se ele
     /// é uma operação de autoridade.
     pub geracao: u64,
+    /// Se ele avança o contador — se é uma transição do estado protegido.
+    /// Quem decide é o tipo: ver [`estado::tipo::avanca_a_ancora`].
+    avanca: bool,
     elo: [u8; 32],
     setores: u64,
+}
+
+impl Montado {
+    /// Se este registro avança o contador do TPM. Um que avança só se
+    /// confirma com o contador ([`Escritor::confirmar`]); um que não avança,
+    /// só sem ele ([`Escritor::confirmar_sem_contador`]).
+    pub fn avanca(&self) -> bool {
+        self.avanca
+    }
 }
 
 /// O que é preciso para escrever o próximo registro.
@@ -620,9 +634,12 @@ impl Escritor {
         if matches!(conteudo.tipo, estado::tipo::BASE | estado::tipo::BASE_FIM) {
             return Err("a base se monta com Escritor::base");
         }
+        // Só um registro que avança o contador confirma a âncora seguinte;
+        // um só de auditoria repete a de agora.
+        let avanca = estado::tipo::avanca_a_ancora(conteudo.tipo);
         let ancora = self
             .ancora
-            .checked_add(1)
+            .checked_add(u64::from(avanca))
             .ok_or("o contador da ancora esgotou")?;
         let geracao = geracao_depois(self.geracao, conteudo.tipo).ok_or("a geracao esgotou")?;
         let (bytes, elo, setores) = selar(
@@ -643,6 +660,7 @@ impl Escritor {
             bytes,
             ancora,
             geracao,
+            avanca,
             elo,
             setores,
         })
@@ -678,15 +696,35 @@ impl Escritor {
     /// escritor fica onde estava, e quem chama não grava mais nada até o
     /// próximo boot julgar.
     pub fn confirmar(&mut self, montado: &Montado, contador: u64) -> Result<(), &'static str> {
+        if !montado.avanca {
+            return Err("um registro so de auditoria nao se confirma com o contador");
+        }
         if contador != montado.ancora {
             return Err("o contador do TPM nao foi para a ancora do registro");
         }
+        self.avancar(montado);
+        Ok(())
+    }
+
+    /// O registro montado, só de auditoria, foi escrito e descarregado: ele
+    /// vale sem o contador, que não avança por ele. Um registro que avança
+    /// o contador — uma transição do estado protegido — nunca se confirma
+    /// assim: sem o contador, um disco devolvido a antes dele passaria.
+    pub fn confirmar_sem_contador(&mut self, montado: &Montado) -> Result<(), &'static str> {
+        if montado.avanca {
+            return Err("um registro que avanca a ancora so se confirma com o contador");
+        }
+        self.avancar(montado);
+        Ok(())
+    }
+
+    /// O escritor passa para depois de `montado`.
+    fn avancar(&mut self, montado: &Montado) {
         self.proximo_setor = montado.setor + montado.setores;
         self.proxima_sequencia += 1;
         self.elo = montado.elo;
         self.ancora = montado.ancora;
         self.geracao = montado.geracao;
-        Ok(())
     }
 
     /// O valor do contador que o journal confirmou por último.
