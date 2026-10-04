@@ -663,6 +663,67 @@ duas regiões.
   portas, e só a escrita no fio é mascarada; o modo post-mortem, sem heap,
   continua escrevendo direto. Esperar a ordem com as interrupções
   mascaradas é um erro na compilação de depuração.
+
+### As mutações do 7.6
+
+| Mutação | Quem a mata |
+|---|---|
+| a parte com a âncora seguinte; a base com a mesma âncora, ou subindo a geração; o fecho que confirma qualquer contador; montar aceitando a base | hospedeiro: *a base inteira vale e continua*, *a base não se monta como registro* |
+| a base sem fecho inteira; qualquer primeiro registro inteiro; o fecho que não fecha (no percurso em fluxo) | hospedeiro: *a base cortada em cada setor não vale* — e o percurso em fluxo conferido contra a leitura inteira |
+| a base fora do começo, ou um registro comum no meio dela | hospedeiro: *a base fora do lugar é recusada* |
+| o empate escolhendo uma; a âncora menor escolhida | hospedeiro: *a escolha da região* |
+| as regiões coladas, sem o limite, sem a reserva; o vazio com elo zero | hospedeiro: *as regiões dividem a partição*, *o vazio continua do começo* |
+| a lápide de mensagem viva ou repetida aceita; as lápides sem teto; o próximo id que volta | hospedeiro: *a base repõe a mesma tabela* |
+| a abertura sem a ordem das gravações | bancada: *o coletor não grava nada antes da abertura* |
+| nenhuma região inteira, com registros, sem recusa | bancada: *a base sem fecho, sozinha no disco* |
+| sempre a primeira região; o fecho sem contar a compactação | bancada: *a compactação do coletor sobrevive ao corte* |
+| compactar com mudança pendente | suíte: *só num ponto seguro* |
+| a base sem a decisão, sem a revogação de agente, com a primeira política, sem lápides, sem a entrega, sem o próximo id; a lápide ou o próximo id não repostos | suíte: *a região nova repõe o mesmo estado* |
+| a base sem a marca da auditoria; o elo gravado que não anda | suíte: *o anel da auditoria dá a volta* |
+| a base sem os eventos do anel | suíte: *a região nova repõe o mesmo estado* |
+| sem a descarga antes do contador | suíte: a compactação descarrega exatamente uma vez |
+| a região trocada sem conferir o contador; a falha da compactação sem fechar | suíte: *o contador trocado falha fechada* |
+| a base que não cabe tratada como falha | suíte: *a base que não cabe, a região que enche* |
+| o boot sem compactar | bancada: *a região cheia falha fechada* |
+| o coletor sem compactar; compactar só com a região cheia | suíte: *a região que enche, e o coletor* |
+| a operação na região cheia sem fechar a persistência | suíte: *a gravação que falha*, *a região que enche* |
+
+Uma sobreviveu: **a nova tentativa logo depois de uma base que não
+coube**, sem esperar mais 64 registros. Ela não quebra invariante
+nenhuma — o coletor tentaria de novo a cada volta, gastando, até a base
+caber ou a região encher —, e nenhum caso chega a uma região passando de
+três quartos com uma base que não cabe na outra, que só um histórico
+crescendo mais depressa que os próprios registros produziria. Uma, a do
+próximo id conferido contra as vivas, era equivalente — o próximo de
+agora já está acima de todas —, e a conferência saiu.
+
+Na primeira rodada sobreviveram nove: a abertura sem a ordem (a corrida
+só aparecia por acaso), a primeira política, a marca da auditoria e o
+elo gravado (o anel nunca dava a volta antes de uma compactação), a
+descarga, o contador não conferido e a falha sem fechar (nenhum caso
+separava o TPM do disco numa compactação), o fecho em fluxo e o teto das
+lápides repostas. Cada uma ganhou o caso que faltava.
+
+### O que fica para depois
+
+- **A história da autoridade cresce sem fim.** A base carrega todas as
+  mudanças de autoridade, com as decisões, desde a instalação — é assim
+  que nenhuma revogação se perde. Só a política é deduplicada. Uma
+  instalação com muitas operações acaba com uma base que não cabe na
+  outra região: aí a compactação não acontece, a região enche, e a
+  persistência fica indisponível — falhando fechada, mas parada. Com
+  regiões de 8 MiB, são dezenas de milhares de operações. Resumir a
+  história (o estado final de cada credencial, com a decisão que o fixou)
+  é uma mudança de formato, e fica para quando for preciso.
+- **A região cheia para tudo até o boot.** Uma operação que não cabe
+  deixa a persistência indisponível até o próximo boot compactar; não há
+  compactação em tempo de execução depois disso, porque a indisponível é
+  justamente o estado em que nada é gravado. É o desenho conservador: o
+  coletor compacta muito antes, a três quartos.
+- **O TPM físico, a sessão autenticada no barramento e a proteção da
+  credencial do contador** seguem para o 7.7. A compactação não mudou
+  nada disso: ela usa o mesmo contador, com o mesmo avanço.
+- **A deduplicação depois do boot** continua como no 7.5.
 - **`system.info` diz a região**, quanto dela está usado, de quantos
   setores, e quantas compactações houve.
 - **O plano de queda** ganhou o ponto *depois da primeira parte*, o
