@@ -15450,16 +15450,18 @@ fn tpm_a_chave_do_tpm_trocada_e_recusada() -> Resultado {
                 return Err("o journal de outra EK nao foi recusado pelo que e");
             }
         }
-        // Duas EKs no mesmo journal.
+        // Duas EKs no mesmo journal. A primeira lida fica fixada — e a
+        // abertura seguinte começa do zero: o que uma leitura anterior
+        // deixou não decide a próxima.
         let mut outra = ek;
         outra[63] ^= 1;
         crate::persistencia::reaplicar_entrada(&crate::persistencia::entrada_de_teste(
             tipo::CHAVE_DO_TPM,
-            &[&ek],
+            &[&outra],
         ))?;
         if crate::persistencia::reaplicar_entrada(&crate::persistencia::entrada_de_teste(
             tipo::CHAVE_DO_TPM,
-            &[&outra],
+            &[&ek],
         ))
         .is_ok()
         {

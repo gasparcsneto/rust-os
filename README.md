@@ -249,7 +249,7 @@ kernel/src/
 ├── irq.rs           contadores de interrupções de hardware
 ├── tempo.rs         contagem de tempo desde o boot
 ├── relogio.rs       o relógio de parede: o RTC (CMOS no x86, PL031 no ARM)
-├── tpm.rs           o TPM 2.0 pela interface TIS: o transporte da âncora
+├── tpm.rs           o TPM 2.0 pelas interfaces TIS e CRB: o transporte da âncora
 ├── qemu.rs          encerramento do emulador para testes
 ├── quedas.rs        quedas de energia em pontos exatos, só na compilação da bancada
 ├── testes.rs        suíte de testes que roda dentro do emulador
@@ -2169,8 +2169,8 @@ o pedido; o boot o reaplica por cima da imagem, antes de abrir as portas.
 - **Sem persistência confiável, nenhuma credencial administrativa é
   aceita** — nem para o que não muda autoridade: sem o journal confirmado,
   o kernel não sabe quais foram revogadas. Não há exceção para o `sistema`
-  nem para a serial. Sem TPM, os agentes e as pessoas continuam sendo
-  atendidos.
+  nem para a serial. Numa máquina sem TPM e sem journal, os agentes e as
+  pessoas continuam sendo atendidos.
 - **Com o journal recusado, nenhuma credencial vale.** Um disco antigo ou
   estragado pode ter perdido a revogação de qualquer agente ou pessoa: só
   a serial e o `sistema`, que não têm credencial, continuam.
@@ -2201,16 +2201,39 @@ o pedido; o boot o reaplica por cima da imagem, antes de abrir as portas.
   nova, inteira, e a antiga fica recusada assim que o contador anda. Uma
   revogação nunca sai da base. Uma operação que não cabe na região cheia
   falha fechada, e a persistência fica indisponível até o boot compactar.
+- **A senha do contador não passa pelo barramento.** Todo comando ao
+  contador vai por uma sessão HMAC salgada com a chave de endosso (EK) do
+  TPM: o comando prova a senha sem levá-la, a resposta tem de provar que
+  veio do TPM daquela sessão, e a senha nova, na criação, vai cifrada.
+  Uma resposta adulterada, repetida de antes ou forjada não vira valor.
+  Não há autoridade nova: a senha é a mesma, derivada da chave do Duke, e
+  o contador continua só um contador.
+- **O TPM é o mesmo.** A EK fica fixada no journal — na abertura, em cada
+  boot e no fecho de cada base. Outro TPM, ou outro chip respondendo no
+  lugar deste, é recusado antes de qualquer comando ao contador.
+- **Sem o TPM, um journal não se confirma.** Um disco com journal numa
+  máquina sem TPM — o TPM tirado, com uma cópia antiga do disco — é
+  recusado, e não só indisponível: nada confirmaria que o disco é o
+  atual. Qualquer falha do TPM no boot também é recusa.
+- **Um avanço que não se sabe se aconteceu** — a resposta perdida ou
+  adulterada — é decidido por uma leitura autenticada, por uma sessão
+  nova: andou, e a operação vale; não andou, e o registro é desfeito no
+  disco e a operação falha; não se sabe, e a persistência fica
+  indisponível até o boot seguinte decidir pela âncora.
 
 `system.info` diz o estado (`persistence`), a geração administrativa, a
-âncora, a região, quanto dela está usado e quantas compactações houve. A bancada `cargo xtask persistencia` sobe a mesma máquina várias
+âncora, a região, quanto dela está usado, quantas compactações houve, a
+interface do TPM (`tpm_interface`: TIS ou CRB) e o começo da EK
+(`tpm_ek`). A bancada `cargo xtask persistencia` sobe a mesma máquina várias
 vezes, corta a energia, devolve fotografias antigas do disco, estraga o
-journal, limpa o TPM e volta o relógio — e, numa compilação própria do
-kernel, derruba a energia em cada fronteira entre o disco e o TPM: antes e
-depois da escrita, da descarga e do avanço do contador — numa operação,
-numa mensagem e num registro só de auditoria —, no meio da criação da
-âncora, e em cada fronteira de uma compactação; e enche a região até a
-operação que não cabe. O desenho, os requisitos e o que
+journal, limpa o TPM, devolve o TPM a um estado anterior, tira o TPM da
+máquina, avança o contador por fora, troca a interface do TPM e volta o
+relógio — e, numa compilação própria do kernel, derruba a energia em cada
+fronteira entre o disco e o TPM: antes e depois da escrita, da descarga,
+do incremento do contador e da leitura de volta — numa operação, numa
+mensagem e num registro só de auditoria —, entre a chave do TPM e o
+contador no boot, no meio da criação da âncora, e em cada fronteira de uma
+compactação; e enche a região até a operação que não cabe. O desenho, os requisitos e o que
 falta estão em [`docs/PERSISTENCIA.md`](docs/PERSISTENCIA.md).
 
 ## Barramento PCI

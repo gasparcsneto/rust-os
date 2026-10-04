@@ -724,8 +724,9 @@ lápides repostas. Cada uma ganhou o caso que faltava.
   justamente o estado em que nada é gravado. É o desenho conservador: o
   coletor compacta muito antes, a três quartos.
 - **O TPM físico, a sessão autenticada no barramento e a proteção da
-  credencial do contador** seguem para o 7.7. A compactação não mudou
-  nada disso: ela usa o mesmo contador, com o mesmo avanço.
+  credencial do contador** seguiram para o 7.7 — ver abaixo. A
+  compactação não mudou nada disso: ela usa o mesmo contador, com o mesmo
+  avanço.
 - **A deduplicação depois do boot** continua como no 7.5.
 - **`system.info` diz a região**, quanto dela está usado, de quantos
   setores, e quantas compactações houve.
@@ -733,10 +734,271 @@ lápides repostas. Cada uma ganhou o caso que faltava.
   tamanho das regiões (para encher uma com poucas dezenas de operações) e
   duas bandeiras: o coletor não compacta, o boot não compacta.
 
+## Como ficou (7.7)
+
+### A sessão autenticada
+
+Até o 7.6, a senha do contador ia em claro no barramento, numa sessão de
+senha, a cada leitura e a cada avanço — e a resposta do TPM era aceita
+como veio. Quem escutasse o barramento LPC/SPI aprendia a senha; quem
+pudesse responder no lugar do TPM dizia o valor que quisesse. Agora todo
+comando ao contador vai por uma **sessão HMAC salgada** (parte 1 da
+especificação do TPM 2.0, capítulos 11, 19 e 21):
+
+- **A chave de endosso.** A cada boot, o kernel cria a EK — ECC P-256, o
+  modelo L-1 do TCG — na hierarquia de endosso. A área pública que volta é
+  conferida byte a byte contra o modelo, e o ponto tem de estar na curva.
+- **O sal.** Um par efêmero, um ECDH com a EK, e `KDFe(Z, "SECRET")`: só
+  o TPM que tem a parte privada da EK chega ao mesmo sal. A chave da
+  sessão é `KDFa(sal, "ATH", nonceTPM, nonceCaller)`.
+- **O comando** leva `HMAC(chave da sessão ‖ senha, cpHash ‖ nonceCaller ‖
+  nonceTPM ‖ atributos)`, com o `cpHash` sobre o código, os nomes das
+  entidades e os parâmetros. A senha entra na chave do HMAC — sem os zeros
+  do fim, como o TPM faz —, e nunca no fio.
+- **A resposta** tem de trazer o HMAC do `rpHash` com o nonce novo do TPM
+  e o `nonceCaller` deste comando. Uma resposta adulterada não confere;
+  uma repetida de antes foi feita para outro nonce; uma forjada não tem a
+  chave. Nenhuma das três vira valor.
+- **A senha nova**, na definição do contador e do índice do nascimento,
+  vai cifrada em AES-128-CFB (`KDFa(…, "CFB", nonces)`).
+- **Os nomes dos índices** são calculados pelo kernel a partir dos
+  atributos que eles têm de ter — inclusive o bit que o TPM liga na
+  primeira escrita —, e não tirados do TPM. Um índice trocado por outro no
+  mesmo número muda o nome, e o HMAC não confere.
+- **Um erro fecha a sessão.** Um erro não gira os nonces, e não há como
+  saber em que pé ela ficou: o comando seguinte abre outra.
+
+**Não há autoridade nova.** A senha é a mesma do 7.4 — derivada da chave
+do Duke, por um rótulo próprio —, o contador continua só um contador, e a
+hierarquia do dono continua com a senha vazia, como antes. A sessão é
+transporte: quem decide o que grava continua sendo o ponto de decisão, e
+nada do modelo de autorização mudou.
+
+### A chave do TPM, fixada no journal
+
+Salgar a sessão "com a EK" só protege se a EK for a do TPM certo. O
+journal fixa a primeira que vê — na abertura, em todo registro de boot
+(`CHAVE_DO_TPM`) e no fecho de cada base — e o boot confere a EK do TPM
+com a fixada **antes de qualquer comando ao contador**. Outra EK é
+recusada; um journal que fala de duas EKs, uma num registro e outra
+noutro, também. Um journal de antes do 7.7 não tem EK fixada: o primeiro
+boot do 7.7 a fixa. É confiança na primeira vez: não há cadeia de
+certificados da EK (ver abaixo).
+
+### O TPM físico
+
+- **TIS e CRB.** Além da FIFO do TIS — a dos TPMs discretos —, o kernel
+  fala a CRB (*Command Response Buffer*), a interface dos TPMs de firmware
+  (Intel PTT, AMD fTPM) e de muitos discretos novos: `cmdReady`, o
+  comando no buffer, `START`, a espera, a resposta, `goIdle`. A interface
+  sai do registro `INTERFACE_ID`, no mesmo endereço, `0xFED40000`. No ARM,
+  a máquina `virt` só oferece o TIS.
+- **`system.info`** diz a interface (`tpm_interface`) e o começo da EK
+  (`tpm_ek`).
+- **O que foi testado:** o `swtpm` (a `libtpms`, a implementação de
+  referência da IBM) pelo `tpm-tis` e pelo `tpm-crb` do QEMU, nas duas
+  arquiteturas; o mesmo journal criado por uma interface e aberto pela
+  outra. **Não houve silício.** Ver o que fica para depois.
+
+### O boot, passo a passo
+
+1. As duas regiões lidas; a escolhida reaplicada; a EK fixada juntada.
+2. Sem TPM: com journal, **recusado** — nada confirma que o disco é o
+   atual, e um disco antigo com o TPM tirado da máquina traria de volta um
+   agente revogado; sem journal, só indisponível, como antes.
+3. A EK criada e conferida com a fixada. *(queda: depois da chave)*
+4. O contador: o índice conferido, o valor lido pela sessão.
+5. A decisão — a mesma do 7.4: confere, completar um avanço, recusar,
+   criar.
+6. O registro de abertura ou de boot, com a EK, gravado pelo protocolo de
+   todo registro.
+
+Do passo 3 em diante, **qualquer falha do TPM é recusa**: a EK que não é
+a fixada, uma resposta que não confere, um transporte que não responde.
+Até o 7.6, algumas delas deixavam a persistência só indisponível.
+
+### O avanço que não se sabe se aconteceu
+
+Gravar é escrever, descarregar, **incrementar** e **ler de volta** —
+tudo pela sessão. Uma falha no meio não diz se o contador andou: a
+resposta do incremento pode ter se perdido ou chegado adulterada. Uma
+leitura autenticada, por uma sessão nova, decide:
+
+| O contador está | O que acontece |
+|---|---|
+| onde o registro precisa | andou: a operação vale |
+| um antes | não andou: o registro é **desfeito** no disco (o setor do cabeçalho zerado e descarregado), e a operação falha de verdade |
+| em outro lugar, ou a leitura também falha | incerto: a operação não se diz gravada, a persistência fica indisponível, e o boot seguinte decide pela âncora |
+
+Sem desfazer, uma operação recusada pelo TPM — uma credencial inválida —
+ficaria no disco, e o boot seguinte completaria o avanço com a senha
+certa: valeria uma operação respondida como falha.
+
+### Contador, rollback e replay
+
+| O que o boot encontra | O que acontece |
+|---|---|
+| o contador mais de um passo atrás do journal (o TPM devolvido a um estado anterior) | recusado |
+| o contador um passo atrás | o último registro escrito e não ancorado — uma queda entre a descarga e o incremento —: o avanço é completado pela sessão. O que vale é o registro mais novo do disco, nunca um anterior |
+| o contador à frente do journal (o disco devolvido a uma cópia, ou o contador avançado por fora) | recusado, e continua recusado nos boots seguintes |
+| o valor do contador que não confere com a sessão (adulterado, repetido, forjado) | recusado |
+| a credencial que o TPM recusa | nada anda, nada vale |
+| outra EK, ou duas no journal | recusado |
+| nenhum TPM, com journal | recusado |
+| o TPM limpo | recusado (como no 7.4) |
+
+Recusado, o journal fecha todas as credenciais — de pessoa e de agente,
+igualmente; só a serial e o `sistema`, que não têm credencial, continuam.
+
+### As quedas, em cada fronteira com o TPM
+
+A bancada derruba a energia, numa compilação própria do kernel:
+
+- **no boot**, depois de a EK conferida e antes do contador: nada mudou,
+  e o boot seguinte abre com a mesma geração e a mesma EK;
+- **na criação**, depois da EK, com o contador definido e nunca avançado,
+  avançado e sem nascimento, com o nascimento e sem a abertura, e dentro
+  da gravação da abertura: cada uma retomada ou completada;
+- **em cada registro** — uma operação, uma mensagem, um só de auditoria
+  —: antes da escrita, depois da escrita (que chegou ao disco, ou se
+  perdeu sem a descarga), depois da descarga, **depois do incremento e
+  antes da leitura de volta**, e depois do contador;
+- **em cada compactação**, nas mesmas fronteiras, e depois da primeira
+  parte.
+
+Em todas, a operação vale exatamente quando o registro dela está no disco,
+o boot seguinte abre, e nenhuma deixa valendo um estado anterior ao último
+confirmado.
+
+### Pessoa, agente e sistema
+
+A sessão fica abaixo do journal: toda gravação, venha de quem vier, passa
+pelo mesmo protocolo, pelo mesmo contador e pela mesma sessão. Nenhum
+caminho grava sem ela, e nenhum ator tem um caminho próprio.
+
+### O que mudou por baixo
+
+- **As primitivas** são do RustCrypto: `sha2`, `hmac`, `aes`,
+  `cfb-mode`, `p256`, todas sem `std` e sem os recursos padrão. O AES vai
+  no *backend* em software: o código com SSE/NEON não compila para os
+  alvos do kernel, que não usam registradores de ponto flutuante. Elas
+  são otimizadas mesmo no build de depuração, como as do canal seguro: o
+  ECDH de cada conexão levaria segundos.
+- **A EK e a sessão ocupam vagas no TPM**, e um TPM tem poucas — o
+  perfil do PC pede no mínimo três objetos e três sessões carregados. A suíte, que reabre a persistência muitas vezes,
+  achou o defeito: um boot recusado deixava a EK e a sessão carregadas, e
+  depois de poucas recusas toda conexão falhava. A âncora conectada no boot
+  agora sai do TPM em toda saída que não fica com ela, e a de uma abertura
+  anterior sai antes da nova.
+- **A senha que termina em zeros.** O TPM tira os zeros do fim da senha
+  antes de pô-la na chave do HMAC. A senha do contador é derivada da
+  chave do Duke: em uma instalação a cada 256 ela termina em zero, e sem
+  tirá-los nenhum comando ao contador passaria nela. Há um
+  caso contra o `swtpm` com uma senha assim.
+
+### As mutações do 7.7
+
+No hospedeiro (`ancora`, contra o `swtpm` com um interposto no
+barramento):
+
+| Mutação | Quem a mata |
+|---|---|
+| a resposta sem o HMAC conferido; a comparação que só olha o tamanho | *a resposta adulterada*, *repetida* e *forjada é recusada*; *a comparação confere tudo* |
+| o nonce do TPM que não gira; o `cpHash` sem os nomes; o `rpHash` sem o código do comando; o sal com o x trocado; a cifra sem o atributo que a anuncia | o TPM recusa o HMAC: *a âncora num TPM de verdade* e todos os que falam com ele |
+| o nome do índice sem o bit de escrito | *a âncora num TPM de verdade* |
+| a senha com os zeros do fim na chave do HMAC | *a senha entra no HMAC sem os zeros do fim*, *a senha com zeros no fim autoriza* |
+| a EK fixada não conferida | *a âncora num TPM de verdade*, *cada TPM tem a sua EK* |
+| a senha nova sem cifra | *a senha não passa pelo barramento* |
+| a EK de qualquer modelo; a EK fora da curva | *a chave de outro modelo é recusada*, *a EK fora da curva é recusada* |
+| o índice de qualquer tipo | *um índice de outro tipo no lugar é recusado* |
+| o nascimento definido e nunca escrito lido como valor | *o nascimento definido e nunca escrito se completa* |
+| o incremento sem a incerteza do nome | *o primeiro avanço sem resposta não deixa o nome velho* |
+| o erro que não fecha a sessão | *a resposta adulterada*, *repetida* |
+
+No kernel (suíte e bancada):
+
+| Mutação | Quem a mata |
+|---|---|
+| a releitura que confere não decide; o contador parado vira feito; a releitura que falha vira feito | suíte: *a resposta adulterada, repetida ou perdida não vira valor*, *a credencial inválida não grava*, *o contador incerto* |
+| o registro não ancorado fica no disco | suíte: *a credencial inválida não grava, e o registro não ancorado é desfeito* |
+| sem TPM, com journal, só indisponível | bancada: *o TPM tirado da máquina é recusado* |
+| a EK fixada não vai ao conectar; o journal de duas EKs aceito; o fecho que não fixa; a entrada que não fixa; a fixada que não zera no começo da leitura | suíte: *a EK trocada é recusada, e o journal de duas EKs também* |
+| a abertura sem a EK; o boot sem a EK; o fecho sem a EK | suíte: *aberta no boot*, *a EK trocada* — cada registro que fixa a EK a tem |
+| a guarda que não solta a EK e a sessão; a abertura velha que não sai do TPM | suíte: depois de poucas reaberturas, o TPM sem vagas recusa o comando |
+| a CRB nunca reconhecida | bancada: *o mesmo TPM pela CRB e pelo TIS* |
+
+Sobrou uma, **equivalente**: na releitura de conferência, o contador num
+valor que não é nem o esperado nem o anterior dado como avançado
+(`Incerto` trocado por `Feito(v)`). Um `Feito(v)` com `v` diferente da
+âncora do registro nunca confirma nada: o `confirmar` do escritor do
+journal — numa gravação e numa compactação — recusa qualquer contador
+que não seja o do registro, e a persistência fica indisponível, com o
+registro no disco e o boot seguinte decidindo pela âncora: o mesmo estado
+que o `Incerto` deixa. Só a mensagem muda — "o contador do TPM não foi
+para a âncora do registro" em vez de "o próximo boot decide". Não é
+lacuna de teste: a conferência que segura o comportamento é a do
+`confirmar`, e ela tem os seus casos no hospedeiro (*só a âncora do
+registro confirma*) e na suíte (*o contador trocado falha fechada*).
+
+Na primeira rodada sobreviveram mais seis. Do hospedeiro: a conferência
+do `continueSession` na resposta — equivalente, e saiu do código: os
+atributos da resposta estão dentro do HMAC, e uma resposta que fecha a
+sessão ainda traz um valor autêntico —, e três que ganharam caso: o
+nascimento definido e nunca escrito (um erro ali recusaria o journal
+para sempre depois de uma queda entre definir e escrever o índice), o
+primeiro avanço sem resposta (o nome velho travaria todo comando
+seguinte) e a EK fora da curva. Do kernel: a abertura sem a EK (a suíte
+só a conferia depois de uma compactação) e a fixada que não zera (em
+produção a abertura roda uma vez por boot; a reabertura no mesmo boot
+agora começa do zero, conferido).
+
+### O que fica para depois
+
+- **O TPM físico em silício não foi testado.** Tudo rodou contra o
+  `swtpm` — a implementação de referência —, pelo TIS e pela CRB do QEMU.
+  Um chip de verdade pode diferir em tempo de resposta, em localidades, em
+  quantas vagas tem; o código segue a especificação e os tempos dela, mas
+  isso é o que se diz de todo driver antes do primeiro chip.
+- **O endereço e o início do TPM.** O kernel procura o TPM no endereço de
+  sempre, `0xFED40000`, e não lê a tabela ACPI `TPM2`. A CRB com início
+  por registro é a única suportada: TPMs de firmware que pedem o início
+  pelo ACPI (`_DSM`, ou o *start method* de alguns AMD fTPM) não
+  respondem ao `START`. Numa máquina assim, sem journal a persistência
+  fica indisponível; com journal, recusada — falha fechada, e nunca um
+  estado anterior.
+- **A EK é confiança na primeira vez.** O kernel não confere o
+  certificado da EK contra a cadeia do fabricante. Quem controlar o
+  barramento **antes do primeiro boot** pode se fazer passar pelo TPM e
+  ter a própria chave fixada. Depois disso, não.
+- **Quem controla o barramento ainda pode negar serviço.** Perder ou
+  estragar respostas deixa a persistência indisponível ou o journal
+  recusado: nunca um valor falso, nunca um estado anterior, mas parada.
+- **O disco e o TPM devolvidos juntos.** Um TPM físico não deixa o NV
+  voltar; o emulado deixa. Uma cópia do disco e do NV do TPM do mesmo
+  instante, devolvidas juntas, é um estado coerente que nada distingue do
+  atual. A bancada devolve o TPM sozinho — e ele é recusado.
+- **O contador um passo atrás é completado**, e não recusado: é
+  exatamente o estado de uma queda entre a descarga e o incremento, e o
+  que vale é o último registro do disco — o mais novo, nunca um anterior.
+  Um TPM devolvido exatamente um avanço, com o disco atual, passa por esse
+  caminho e não restaura nada.
+- **A senha da hierarquia do dono** continua vazia: um TPM cujo dono
+  tenha senha não deixa definir o contador, e a criação é recusada como
+  qualquer falha do TPM no boot.
+- **Os PCRs não entram.** O contador está preso a uma senha, e não ao
+  estado medido do boot. Prender a âncora a um boot medido é outra
+  política, e outra fase.
+- **A história da autoridade cresce sem fim**, como no 7.6: fora do
+  escopo do 7.7.
+
 ## Decisões tomadas
 
 - **Âncora:** o TPM 2.0, com um contador monotônico de NV; o `swtpm` como
-  TPM de desenvolvimento no QEMU, nas duas arquiteturas.
+  TPM de desenvolvimento no QEMU, nas duas arquiteturas. Desde o 7.7,
+  falado por uma sessão HMAC salgada com a EK, e a EK fixada no journal.
+- **Sem TPM, com journal:** recusado (até o 7.6, só indisponível). Nada
+  confirma que o disco é o atual, e indisponível deixaria as credenciais
+  de um disco antigo valendo.
 - **Relógio:** o RTC de hardware (CMOS no x86, PL031 no ARM), com um piso
   gravado no journal: o tempo lógico nunca volta atrás do último valor
   gravado. O tempo desde o boot não serve de relógio de validade.
@@ -761,4 +1023,4 @@ lápides repostas. Cada uma ganhou o caso que faltava.
 | 7.4 | Mensagens persistentes, e as fronteiras entre o disco e o TPM | feita |
 | 7.5 | Auditoria persistente | feita |
 | 7.6 | Compactação e disco cheio | feita |
-| 7.7 | O que restar da âncora (TPM físico, sessão autenticada no barramento) | — |
+| 7.7 | O que restar da âncora (TPM físico, sessão autenticada no barramento) | feita |
