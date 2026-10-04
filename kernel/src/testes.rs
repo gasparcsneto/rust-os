@@ -15369,6 +15369,11 @@ fn a_cadeia_do_journal_confere() -> Resultado {
     if do_journal.cabeca() != r.elo {
         return Err("o journal refaz outra cadeia");
     }
+    // O elo que a persistência guarda do último gravado é o dele: é com ele
+    // que uma base continua a cadeia quando o anel já não tem o registro.
+    if crate::persistencia::elo_gravado_de_teste() != r.elo {
+        return Err("o elo guardado do ultimo gravado nao e o dele");
+    }
     if do_journal.verificar().is_err() {
         return Err("a cadeia refeita do journal nao se verifica");
     }
@@ -15858,6 +15863,16 @@ fn compactacao_preserva_o_estado() -> Resultado {
         if !r.contains(r#""executed":true"#) {
             return Err("a revogacao de um agente nao foi executada");
         }
+        // Duas políticas, uma depois da outra: a base leva a última, a que
+        // vigora — e nenhuma anterior.
+        for linha in ["taxa observador 6 18", "taxa observador 7 18"] {
+            let p = alloc::format!(r#"{{"line":"{linha}"}}"#);
+            let r = executar_admin_com(0, &ADMIN_DE_TESTE, "policy.write", &p, &p)?;
+            if !r.contains(r#""executed":true"#) {
+                crate::log_error!("teste", "{}", r);
+                return Err("uma linha de politica nao foi gravada");
+            }
+        }
         let (mut a, mut sa) = conectado(1)?;
         for n in 1..=3 {
             pela_porta(
@@ -15904,7 +15919,13 @@ fn compactacao_preserva_o_estado() -> Resultado {
         let geracao = crate::persistencia::geracao();
         let tpm = crate::persistencia::ancora_no_tpm_de_teste()?;
         let velha = crate::persistencia::percorrida_de_teste(regiao)?;
+        let descargas = || crate::virtio::blk::com_o_disco(|d| d.contadores().1).unwrap_or(0);
+        let antes_das_descargas = descargas();
         crate::persistencia::compactar_de_teste()?;
+        // Uma descarga, a da base inteira, antes do contador.
+        if descargas() != antes_das_descargas + 1 {
+            return Err("a compactacao nao descarregou a base exatamente uma vez");
+        }
         let (nova, compactacoes, _, _) = crate::persistencia::regiao();
         if nova == regiao || compactacoes == 0 {
             return Err("a compactacao nao trocou de regiao");
@@ -15982,6 +16003,61 @@ fn compactacao_preserva_o_estado() -> Resultado {
     });
     de_volta_a_imagem();
     resultado
+}
+
+/// O anel da auditoria dá a volta antes da compactação — mais registros
+/// do que ele guarda, todos gravados a tempo, sem lacuna. A base continua
+/// a cadeia de onde o anel começa, com a marca do que veio antes, e a
+/// cadeia refeita da região nova é a mesma, e se verifica.
+fn compactacao_com_o_anel_dado_a_volta() -> Resultado {
+    crate::persistencia::compactar_de_teste()?;
+    for i in 0..crate::autorizacao::CAPACIDADE_DA_AUDITORIA + 100 {
+        crate::autorizacao::auditar_do_kernel("teste.volta", "", politica::Codigo::Allow, "");
+        if i % 100 == 99 {
+            crate::persistencia::gravar_auditoria()?;
+        }
+    }
+    crate::persistencia::gravar_auditoria()?;
+    a_cadeia_do_journal_confere()?;
+    crate::persistencia::compactar_de_teste()?;
+    a_cadeia_do_journal_confere()
+}
+
+/// O contador do TPM, avançado pela compactação, devolve outro valor que o
+/// da base: o disco e o TPM se separaram. A compactação falha fechada — a
+/// região não troca, e a persistência fica indisponível. O boot seguinte,
+/// pelo mesmo caminho de sempre, escolhe a região inteira de última âncora
+/// maior: a base, que tem o fecho no disco e a âncora que o TPM tem.
+fn compactacao_com_o_contador_trocado() -> Resultado {
+    crate::persistencia::compactar_de_teste()?;
+    estado_do_journal()?;
+    let regiao = crate::persistencia::regiao().0;
+    let tpm = crate::persistencia::ancora_no_tpm_de_teste()?;
+    crate::persistencia::trocar_o_contador_da_proxima_compactacao_de_teste(true);
+    let r = crate::persistencia::compactar_de_teste();
+    crate::persistencia::trocar_o_contador_da_proxima_compactacao_de_teste(false);
+    if r.is_ok() {
+        return Err("a compactacao aceitou um contador que nao e o da base");
+    }
+    if crate::persistencia::estado() == crate::persistencia::Estado::Disponivel {
+        return Err("a compactacao que falhou deixou a persistencia disponivel");
+    }
+    if crate::persistencia::regiao().0 != regiao {
+        return Err("a compactacao que falhou trocou de regiao");
+    }
+    if crate::persistencia::ancora_no_tpm_de_teste()? != tpm + 1 {
+        return Err("o contador nao avancou uma vez");
+    }
+    // O boot seguinte.
+    de_volta_a_imagem();
+    crate::persistencia::abrir();
+    let (nova, _, _, _) = crate::persistencia::regiao();
+    if crate::persistencia::estado() != crate::persistencia::Estado::Disponivel || nova == regiao {
+        return Err("o boot seguinte nao adotou a base que o contador confirma");
+    }
+    a_cadeia_do_journal_confere()?;
+    estado_do_journal()?;
+    Ok(())
 }
 
 /// Só num ponto seguro: com uma mudança anotada e ainda não gravada, a
@@ -21660,6 +21736,14 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "compactacao: a regiao nova repoe o mesmo estado, e a velha nao confere mais",
         f: compactacao_preserva_o_estado,
+    },
+    Caso {
+        nome: "compactacao: o anel da auditoria da a volta, e a cadeia continua",
+        f: compactacao_com_o_anel_dado_a_volta,
+    },
+    Caso {
+        nome: "compactacao: o contador trocado falha fechada, e o boot seguinte adota a base",
+        f: compactacao_com_o_contador_trocado,
     },
     Caso {
         nome: "compactacao: so num ponto seguro",

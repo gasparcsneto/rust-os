@@ -1581,6 +1581,14 @@ fn compactar_sozinho() -> Result<(usize, u64, u64, u64), FalhaDaCompactacao> {
     .map_err(|e| e.motivo())?;
     #[cfg(feature = "quedas")]
     crate::quedas::aqui(crate::quedas::Ponto::DepoisDoContador);
+    // Na suíte: o contador devolve outro valor que o da base — como se
+    // alguém mais o tivesse avançado.
+    #[cfg(feature = "modo-teste")]
+    let avancado = if CONTADOR_TROCADO.swap(false, Ordering::AcqRel) {
+        avancado.wrapping_add(1)
+    } else {
+        avancado
+    };
     let escritor = fechada.confirmar(avancado)?;
     let nova = 1 - regiao;
     com(|p| {
@@ -2080,6 +2088,24 @@ pub fn bytes_do_journal_de_teste(setores: u64) -> Result<Vec<u8>, &'static str> 
 
 /// Só para a suíte: a cadeia da auditoria refeita a partir dos registros
 /// do journal no disco agora, como o boot a refaria.
+/// Só na suíte: a próxima compactação vê o contador do TPM num valor que
+/// não é o da base.
+#[cfg(feature = "modo-teste")]
+static CONTADOR_TROCADO: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+#[cfg(feature = "modo-teste")]
+pub fn trocar_o_contador_da_proxima_compactacao_de_teste(trocar: bool) {
+    CONTADOR_TROCADO.store(trocar, Ordering::Release);
+}
+
+/// Só na suíte: o elo que a persistência guarda do último registro da
+/// auditoria gravado.
+#[cfg(feature = "modo-teste")]
+pub fn elo_gravado_de_teste() -> [u8; 32] {
+    crate::arch::sem_interrupcoes(|| *ELO_GRAVADO.lock())
+}
+
 #[cfg(feature = "modo-teste")]
 pub fn auditoria_do_journal_de_teste() -> Result<Cadeia, &'static str> {
     let (chave, _) = segredos().ok_or("sem a chave do Duke")?;
