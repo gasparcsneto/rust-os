@@ -15755,6 +15755,367 @@ fn auditoria_a_lacuna() -> Resultado {
     resultado
 }
 
+/// O estado que o journal descreve, como a suíte o compara: os agentes, as
+/// credenciais administrativas revogadas, a política, as pessoas, e as
+/// mensagens — vivas, lápides e o próximo id.
+#[derive(Debug, PartialEq, Eq)]
+struct EstadoDoJournal {
+    agentes: alloc::vec::Vec<(
+        [u8; 32],
+        alloc::string::String,
+        &'static str,
+        Option<alloc::string::String>,
+    )>,
+    revogados: alloc::vec::Vec<[u8; 32]>,
+    politica: alloc::string::String,
+    pessoas: alloc::vec::Vec<alloc::string::String>,
+    mensagens: alloc::vec::Vec<crate::mensagens::Retrato>,
+    lapides: alloc::vec::Vec<politica::mensagens::Lapide>,
+    proximo: u64,
+}
+
+/// O registro, a política, as pessoas e as mensagens voltam ao que a imagem
+/// diz — sem nada do journal.
+fn de_volta_a_imagem() {
+    crate::identidade::esquecer_registrados();
+    crate::identidade::esquecer_lapides_de_teste();
+    crate::pessoas::esquecer_registradas();
+    crate::mensagens::esquecer();
+    crate::autorizacao::carregar();
+}
+
+/// O estado que a região atual do journal descreve: a imagem, e a região
+/// reaplicada por cima, como no boot.
+fn estado_do_journal() -> Result<EstadoDoJournal, &'static str> {
+    de_volta_a_imagem();
+    crate::persistencia::reaplicar_regiao_de_teste()?;
+    let mut agentes: alloc::vec::Vec<_> = crate::identidade::agentes()
+        .into_iter()
+        .map(|a| (a.chave, a.nome, a.origem.como_str(), a.papel))
+        .collect();
+    agentes.sort();
+    let mut revogados = crate::identidade::administradores_revogados();
+    revogados.sort();
+    // A pessoa de teste a suíte cria a cada volta à imagem, com um
+    // identificador novo: não é da imagem nem do journal.
+    let mut pessoas: alloc::vec::Vec<_> = crate::pessoas::todas()
+        .iter()
+        .filter(|p| p.nome != "pessoa-de-teste")
+        .map(sigilo::pessoas::linha)
+        .collect();
+    pessoas.sort();
+    let (lapides, proximo) =
+        crate::mensagens::com_as_caixas(|c| (c.lapides().copied().collect(), c.proximo()));
+    Ok(EstadoDoJournal {
+        agentes,
+        revogados,
+        politica: crate::autorizacao::com_politica(|p| p.texto()),
+        pessoas,
+        mensagens: crate::mensagens::retrato_de_teste(),
+        lapides,
+        proximo,
+    })
+}
+
+/// A compactação não muda o estado: a região nova, reaplicada sobre a
+/// imagem, dá exatamente o que a velha dava — os agentes registrados, os
+/// revogados que não voltam, os papéis, a política, as pessoas, as
+/// credenciais administrativas sob lápide, as mensagens vivas, as lápides
+/// delas e o próximo id. A âncora anda uma vez, a geração não anda, a
+/// cadeia da auditoria continua verificável, e a decisão de cada mudança de
+/// autoridade vai com ela na mesma parte da base. A região velha, depois,
+/// é anterior ao que o TPM viu.
+fn compactacao_preserva_o_estado() -> Resultado {
+    use diario::estado::tipo;
+    // A suíte zera a tabela de mensagens entre um caso e outro, e o journal
+    // dela tem ids que recomeçam: ele não se reaplica inteiro. Uma
+    // compactação primeiro, e a memória posta igual à região nova — como
+    // num boot —, e só então o caso.
+    crate::persistencia::compactar_de_teste()?;
+    estado_do_journal()?;
+    let resultado = com_agentes_de_teste(|| {
+        crate::identidade::registrar_administrador_de_teste(
+            sigilo::publica_de(&ADMIN_DE_TESTE),
+            "administrador",
+        );
+        // Mudanças de autoridade de verdade, gravadas: um agente que fica,
+        // um que entra e sai, uma mensagem viva, uma entregue, uma que saiu.
+        let fica = sigilo::publica_de(&[0x91; 32]);
+        let sai = sigilo::publica_de(&[0x92; 32]);
+        for (k, nome) in [(fica, "compactado-fica"), (sai, "compactado-sai")] {
+            let p = alloc::format!(
+                r#"{{"key":"{}","name":"{nome}","role":"observador"}}"#,
+                sigilo::hex(&k)
+            );
+            let r = executar_admin_com(0, &ADMIN_DE_TESTE, "agent.register", &p, &p)?;
+            if !r.contains(r#""executed":true"#) {
+                crate::log_error!("teste", "{}", r);
+                return Err("o registro de um agente nao foi executado");
+            }
+        }
+        let p = alloc::format!(r#"{{"key":"{}"}}"#, sigilo::hex(&sai));
+        let r = executar_admin_com(0, &ADMIN_DE_TESTE, "agent.revoke", &p, &p)?;
+        if !r.contains(r#""executed":true"#) {
+            return Err("a revogacao de um agente nao foi executada");
+        }
+        let (mut a, mut sa) = conectado(1)?;
+        for n in 1..=3 {
+            pela_porta(
+                &mut a,
+                &mut sa,
+                "message.send",
+                &alloc::format!(r#"{{"to":"serial","body":"compactada {n}","nonce":{n}}}"#),
+            )?;
+        }
+        pela_porta(
+            &mut a,
+            &mut sa,
+            "message.send",
+            r#"{"to":"teste-1","body":"para mim","nonce":4}"#,
+        )?;
+        let lida = pela_porta(&mut a, &mut sa, "message.read", r#"{"max":1}"#)?;
+        let id = ids_de(&lida).into_iter().next().ok_or("nada lido")?;
+        let _ = id;
+        let enviadas = pela_porta(
+            &mut a,
+            &mut sa,
+            "message.send",
+            r#"{"to":"serial","body":"cancelada","nonce":5}"#,
+        )?;
+        let cancelar = ids_de(&enviadas).into_iter().next().ok_or("sem id")?;
+        pela_porta(
+            &mut a,
+            &mut sa,
+            "message.cancel",
+            &alloc::format!(r#"{{"id":"{cancelar}"}}"#),
+        )?;
+        crate::persistencia::gravar_auditoria()?;
+
+        // A memória igual ao journal — como num ponto seguro —, e então a
+        // compactação.
+        let antes = estado_do_journal()?;
+        if antes.agentes.iter().all(|a| a.0 != fica) || antes.agentes.iter().any(|a| a.0 == sai) {
+            return Err("o journal nao tem o agente que fica, ou tem o que saiu");
+        }
+        if antes.mensagens.is_empty() || antes.lapides.is_empty() {
+            return Err("o journal nao tem mensagens vivas e lapides para a base levar");
+        }
+        let regiao = crate::persistencia::regiao().0;
+        let geracao = crate::persistencia::geracao();
+        let tpm = crate::persistencia::ancora_no_tpm_de_teste()?;
+        let velha = crate::persistencia::percorrida_de_teste(regiao)?;
+        crate::persistencia::compactar_de_teste()?;
+        let (nova, compactacoes, _, _) = crate::persistencia::regiao();
+        if nova == regiao || compactacoes == 0 {
+            return Err("a compactacao nao trocou de regiao");
+        }
+        if crate::persistencia::geracao() != geracao {
+            return Err("a compactacao mudou a geracao");
+        }
+        let agora = crate::persistencia::ancora_no_tpm_de_teste()?;
+        if agora != tpm + 1 {
+            return Err("a compactacao nao avancou o contador exatamente uma vez");
+        }
+        let percorrida = crate::persistencia::percorrida_de_teste(nova)?;
+        if !percorrida.inteiro()
+            || percorrida.ultima_ancora() != Some(agora)
+            || diario::escolher(&[
+                crate::persistencia::percorrida_de_teste(0)?,
+                crate::persistencia::percorrida_de_teste(1)?,
+            ]) != Some(nova)
+        {
+            return Err("a regiao nova nao e a escolhida, ou nao confere com o contador");
+        }
+        // A velha, sozinha, é um disco anterior ao que o TPM viu.
+        if !matches!(
+            diario::julgar(velha.ultima_ancora(), Some(agora)),
+            diario::Veredito::Recusado(_)
+        ) {
+            return Err("a regiao velha ainda confere com o contador");
+        }
+        a_cadeia_do_journal_confere()?;
+
+        // A decisão do registro do agente que fica vai na mesma parte da
+        // base que o registro dele.
+        let registros = todos_do_journal()?;
+        let parte = registros
+            .iter()
+            .filter(|r| r.tipo == tipo::BASE)
+            .find(|r| {
+                crate::persistencia::entradas_de_teste(r).is_ok_and(|es| {
+                    es.iter().any(|e| {
+                        diario::estado::ler_campos(e).is_ok_and(|c| {
+                            c.first() == Some(&&tipo::AGENTE_REGISTRADO.to_le_bytes()[..])
+                                && c.get(1).is_some_and(|l| {
+                                    core::str::from_utf8(l)
+                                        .is_ok_and(|l| l.contains("compactado-fica"))
+                                })
+                        })
+                    })
+                })
+            })
+            .ok_or("a base nao tem o registro do agente que fica")?;
+        let decidida = crate::persistencia::entradas_de_teste(parte)?
+            .iter()
+            .filter_map(|e| {
+                let c = diario::estado::ler_campos(e).ok()?;
+                (c.first() == Some(&&tipo::AUDITORIA_HISTORICA.to_le_bytes()[..]))
+                    .then(|| politica::auditoria::decodificar(c.get(1)?).ok())
+                    .flatten()
+            })
+            .any(|(_, ev)| {
+                ev.metodo == "agent.register"
+                    && ev.recurso == "compactado-fica"
+                    && ev.codigo == politica::Codigo::Allow
+            });
+        if !decidida {
+            return Err("a decisao do registro nao foi na parte da base que o leva");
+        }
+
+        // E o estado é o mesmo.
+        let depois = estado_do_journal()?;
+        if depois != antes {
+            crate::log_error!("teste", "{:?}\n/ {:?}", antes, depois);
+            return Err("a regiao compactada nao repoe o mesmo estado");
+        }
+        Ok(())
+    });
+    de_volta_a_imagem();
+    resultado
+}
+
+/// Só num ponto seguro: com uma mudança anotada e ainda não gravada, a
+/// compactação não acontece, e nada muda — nem a região, nem o contador.
+fn compactacao_so_em_ponto_seguro() -> Resultado {
+    let regiao = crate::persistencia::regiao().0;
+    let tpm = crate::persistencia::ancora_no_tpm_de_teste()?;
+    crate::persistencia::anotar(Ok(crate::persistencia::entrada_de_teste(
+        diario::estado::tipo::MENSAGENS_PROXIMO,
+        &[&1u64.to_le_bytes()],
+    )));
+    let r = crate::persistencia::compactar_de_teste();
+    crate::persistencia::esquecer_pendentes_de_teste();
+    if r.is_ok()
+        || crate::persistencia::regiao().0 != regiao
+        || crate::persistencia::ancora_no_tpm_de_teste()? != tpm
+        || crate::persistencia::estado() != crate::persistencia::Estado::Disponivel
+    {
+        return Err("a compactacao aconteceu com uma mudanca por gravar");
+    }
+    Ok(())
+}
+
+/// A partição cheia. Uma base que não cabe na outra região não muda nada —
+/// a região atual continua a do journal, ancorada, e a persistência de pé —
+/// e fica na auditoria. Uma região que enche no meio de uma operação falha
+/// fechada: a operação não vale, a concessão é desfeita, e nada de
+/// autoridade muda até a próxima compactação, no boot. E o coletor compacta
+/// sozinho quando a região passa de três quartos.
+fn compactacao_e_a_regiao_cheia() -> Resultado {
+    let anterior = crate::persistencia::estado();
+    let resultado = (|| -> Resultado {
+        crate::identidade::registrar_administrador_de_teste(
+            sigilo::publica_de(&ADMIN_DE_TESTE),
+            "administrador",
+        );
+        // A base não cabe.
+        let regiao = crate::persistencia::regiao().0;
+        let tpm = crate::persistencia::ancora_no_tpm_de_teste()?;
+        crate::persistencia::fixar_limite_de_teste(Some(4));
+        let r = crate::persistencia::compactar_de_teste();
+        crate::persistencia::fixar_limite_de_teste(None);
+        crate::persistencia::esquecer_o_que_nao_coube_de_teste();
+        if r != Err("a base nao cabe na outra regiao")
+            || crate::persistencia::regiao().0 != regiao
+            || crate::persistencia::ancora_no_tpm_de_teste()? != tpm
+            || crate::persistencia::estado() != crate::persistencia::Estado::Disponivel
+        {
+            crate::log_error!("teste", "{:?}", r);
+            return Err("a base que nao cabe mudou alguma coisa");
+        }
+        let ultimo = ultimo_registro().ok_or("auditoria vazia")?;
+        if ultimo.evento.metodo != "persistence.compact"
+            || ultimo.evento.codigo != politica::Codigo::Error
+        {
+            return Err("a base que nao cabe nao foi para a auditoria");
+        }
+
+        // Uma região do tamanho da base e um pouco mais: enche com
+        // registros de agentes, e a operação que não cabe falha fechada.
+        crate::persistencia::compactar_de_teste()?;
+        let (_, _, base, _) = crate::persistencia::regiao();
+        crate::persistencia::fixar_limite_de_teste(Some(base + 24));
+        let r = crate::persistencia::compactar_de_teste();
+        crate::persistencia::fixar_limite_de_teste(None);
+        r?;
+        let politica_antes = crate::autorizacao::com_politica(|p| p.texto());
+        let mut n = 0u32;
+        let falhou = loop {
+            let p = alloc::format!(r#"{{"line":"taxa observador {} 18"}}"#, 5 + n % 4);
+            let antes = crate::autorizacao::com_politica(|p| p.texto());
+            let r = executar_admin_com(0, &ADMIN_DE_TESTE, "policy.write", &p, &p)?;
+            if !r.contains(r#""executed":true"#) {
+                break (r, antes);
+            }
+            n += 1;
+            if n > 200 {
+                return Err("a regiao pequena nao encheu");
+            }
+        };
+        let _ = politica_antes;
+        if !falhou.0.contains("cheia")
+            || crate::autorizacao::com_politica(|p| p.texto()) != falhou.1
+        {
+            crate::log_error!("teste", "{}", falhou.0);
+            return Err("a operacao que nao coube nao falhou fechada");
+        }
+        if crate::persistencia::estado() == crate::persistencia::Estado::Disponivel {
+            return Err("a persistencia continuou disponivel com a regiao cheia");
+        }
+        let r = executar_admin_com(0, &ADMIN_DE_TESTE, "message.read", "{}", "{}")?;
+        if r.contains(r#""executed":true"#) {
+            return Err("com a regiao cheia, uma credencial administrativa foi aceita");
+        }
+
+        // De volta: a memória é a do journal — a concessão foi desfeita —,
+        // e a compactação devolve o espaço.
+        crate::persistencia::forcar_estado_de_teste(crate::persistencia::Estado::Disponivel);
+        crate::persistencia::compactar_de_teste()?;
+
+        // E o coletor compacta sozinho, passando de três quartos.
+        let (_, _, base, _) = crate::persistencia::regiao();
+        crate::persistencia::fixar_limite_de_teste(Some(base * 2 + 16));
+        crate::persistencia::compactar_de_teste()?;
+        crate::persistencia::fixar_limite_de_teste(None);
+        let (regiao, feitas, _, _) = crate::persistencia::regiao();
+        crate::persistencia::pausar_a_compactacao_de_teste(false);
+        let mut i = 0u8;
+        let limite = crate::tempo::uptime_ms() + 20_000;
+        while crate::persistencia::regiao().0 == regiao && crate::tempo::uptime_ms() < limite {
+            let p = alloc::format!(r#"{{"line":"taxa observador {} 18"}}"#, 5 + i % 3);
+            executar_admin_com(0, &ADMIN_DE_TESTE, "policy.write", &p, &p)?;
+            i = i.wrapping_add(1);
+            crate::fios::ceder();
+        }
+        crate::persistencia::pausar_a_compactacao_de_teste(true);
+        if crate::persistencia::regiao().1 <= feitas {
+            return Err("o coletor nao compactou a regiao que passou de tres quartos");
+        }
+        // De volta a uma região inteira.
+        crate::persistencia::compactar_de_teste()?;
+        Ok(())
+    })();
+    crate::persistencia::pausar_a_compactacao_de_teste(true);
+    crate::persistencia::fixar_limite_de_teste(None);
+    crate::persistencia::esquecer_o_que_nao_coube_de_teste();
+    if crate::persistencia::estado() != crate::persistencia::Estado::Disponivel {
+        crate::persistencia::forcar_estado_de_teste(anterior);
+    }
+    let _ = crate::persistencia::compactar_de_teste();
+    de_volta_a_imagem();
+    resultado
+}
+
 /// Uma entrada de registro: o tipo e os campos.
 type Entrada = (u16, alloc::vec::Vec<alloc::vec::Vec<u8>>);
 
@@ -21295,6 +21656,18 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "persistencia: o journal recusado fecha as credenciais, e a serial continua",
         f: persistencia_o_journal_recusado_fecha_as_credenciais,
+    },
+    Caso {
+        nome: "compactacao: a regiao nova repoe o mesmo estado, e a velha nao confere mais",
+        f: compactacao_preserva_o_estado,
+    },
+    Caso {
+        nome: "compactacao: so num ponto seguro",
+        f: compactacao_so_em_ponto_seguro,
+    },
+    Caso {
+        nome: "compactacao: a base que nao cabe, a regiao que enche, e o coletor",
+        f: compactacao_e_a_regiao_cheia,
     },
     Caso {
         nome: "auditoria: a decisao vai no registro da operacao que ela autorizou",

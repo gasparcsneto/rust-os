@@ -2190,15 +2190,26 @@ o pedido; o boot o reaplica por cima da imagem, antes de abrir as portas.
   registro dela.
 - **O tempo lógico não volta.** O RTC, com um piso que é o tempo do último
   registro gravado.
+- **O journal se compacta sem esquecer.** A partição tem duas regiões, e o
+  journal vive numa. Passados três quartos dela, o boot ou o coletor — só
+  num ponto seguro, sem gravação pendente — escrevem na outra uma base: a
+  história inteira da autoridade, com cada mudança ao lado da decisão que
+  a autorizou, as mensagens vivas e as lápides, e a cadeia da auditoria
+  continuando. A base só vale com o fecho no disco e um avanço do contador
+  do TPM: uma queda em qualquer ponto deixa valendo a região antiga ou a
+  nova, inteira, e a antiga fica recusada assim que o contador anda. Uma
+  revogação nunca sai da base. Uma operação que não cabe na região cheia
+  falha fechada, e a persistência fica indisponível até o boot compactar.
 
-`system.info` diz o estado (`persistence`), a geração administrativa e a
-âncora. A bancada `cargo xtask persistencia` sobe a mesma máquina várias
+`system.info` diz o estado (`persistence`), a geração administrativa, a
+âncora, a região, quanto dela está usado e quantas compactações houve. A bancada `cargo xtask persistencia` sobe a mesma máquina várias
 vezes, corta a energia, devolve fotografias antigas do disco, estraga o
 journal, limpa o TPM e volta o relógio — e, numa compilação própria do
 kernel, derruba a energia em cada fronteira entre o disco e o TPM: antes e
 depois da escrita, da descarga e do avanço do contador — numa operação,
-numa mensagem e num registro só de auditoria —, e no meio da criação da
-âncora. O desenho, os requisitos e o que
+numa mensagem e num registro só de auditoria —, no meio da criação da
+âncora, e em cada fronteira de uma compactação; e enche a região até a
+operação que não cabe. O desenho, os requisitos e o que
 falta estão em [`docs/PERSISTENCIA.md`](docs/PERSISTENCIA.md).
 
 ## Barramento PCI

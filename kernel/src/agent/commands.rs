@@ -1295,6 +1295,13 @@ fn system_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
         "audit_durable_seq",
         crate::persistencia::auditoria_gravada(),
     )?;
+    // A região do journal e quanto dela está ocupado: a compactação
+    // acontece com três quartos.
+    let (regiao, compactacoes, usados, setores) = crate::persistencia::regiao();
+    w.field_u64("region", regiao as u64)?;
+    w.field_u64("region_used", usados)?;
+    w.field_u64("region_sectors", setores)?;
+    w.field_u64("compactions", compactacoes)?;
     w.field_u64("boots", boots)?;
     w.field_u64("clock", crate::persistencia::agora())?;
     // O que o disco confirmou: escritas e descargas. É de fora que se vê

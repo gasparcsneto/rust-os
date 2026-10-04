@@ -252,6 +252,22 @@ const CENARIOS_DE_QUEDA: &[Cenario] = &[
         rodar: as_quedas_na_auditoria,
     },
     Cenario {
+        nome: "a compactacao do coletor sobrevive ao corte: o estado, a geracao e a auditoria continuam",
+        rodar: a_compactacao_sobrevive,
+    },
+    Cenario {
+        nome: "a queda em cada fronteira da compactacao: ela vale se o fecho esta no disco, e nada volta atras",
+        rodar: as_quedas_na_compactacao,
+    },
+    Cenario {
+        nome: "a fotografia de antes da compactacao, devolvida depois dela, e recusada",
+        rodar: a_fotografia_de_antes_da_compactacao,
+    },
+    Cenario {
+        nome: "a regiao cheia falha fechada, e o boot seguinte compacta e recupera",
+        rodar: a_regiao_cheia_falha_fechada,
+    },
+    Cenario {
         nome: "a queda na criacao da ancora e retomada, e nunca recusada para sempre",
         rodar: as_quedas_na_criacao,
     },
@@ -459,12 +475,30 @@ struct Persistencia {
     registros: u64,
     /// A última sequência da auditoria no journal.
     auditoria_gravada: u64,
+    /// Quantas compactações o journal já teve.
+    compactacoes: u64,
+    /// Quantos setores da região estão ocupados, e quantos ela tem.
+    usados: u64,
+    setores: u64,
     boots: u64,
     relogio: u64,
     descargas: u64,
 }
 
+/// A persistência que o `system.info` diz.
+///
+/// Com `DUKE_DEPURAR` no ambiente, imprime antes o log da persistência do
+/// kernel — a bancada não guarda a serial, e uma falha intermitente só se
+/// entende pelo que o boot disse da escolha da região e da âncora.
 fn persistencia_de(maquina: &mut Ligada) -> Result<Persistencia, String> {
+    if std::env::var("DUKE_DEPURAR").is_ok() {
+        let l = maquina.pedir("log.tail", r#"{"count":200}"#)?;
+        for parte in l.split("{\"") {
+            if parte.contains("persistencia") {
+                eprintln!("    LOG {}", &parte[..parte.len().min(300)]);
+            }
+        }
+    }
     let r = maquina.pedir("system.info", "{}")?;
     let p = r
         .split(r#""persistence":{"#)
@@ -483,6 +517,9 @@ fn persistencia_de(maquina: &mut Ligada) -> Result<Persistencia, String> {
         geracao: numero("generation")?,
         registros: numero("records")? - numero("audit_records")?,
         auditoria_gravada: numero("audit_durable_seq")?,
+        compactacoes: numero("compactions")?,
+        usados: numero("region_used")?,
+        setores: numero("region_sectors")?,
         boots: numero("boots")?,
         relogio: numero("clock")?,
         descargas: numero("disk_flushes")?,
@@ -1430,6 +1467,7 @@ mod ponto {
     pub const DEPOIS_DA_ESCRITA: u8 = 11;
     pub const DEPOIS_DA_DESCARGA: u8 = 12;
     pub const DEPOIS_DO_CONTADOR: u8 = 13;
+    pub const DEPOIS_DA_PRIMEIRA_PARTE: u8 = 14;
 }
 
 /// Quanto esperar o aviso da queda depois do pedido que a provoca.
@@ -1453,20 +1491,49 @@ fn escrever_setor_do_estado(disco: &Path, setor: u64, bytes: &[u8; 512]) -> Resu
 /// Os tipos de registro do journal, para o plano de queda: a n-ésima
 /// gravação de um tipo. Ver `diario::estado::tipo`.
 mod tipo {
-    pub const ABERTURA: u16 = 1;
-    pub const OPERACAO: u16 = 3;
-    pub const MENSAGENS: u16 = 4;
-    pub const AUDITORIA: u16 = 5;
+    pub use diario::estado::tipo::{ABERTURA, AUDITORIA, BASE_FIM, MENSAGENS, OPERACAO};
 }
 
 /// O plano: a energia cai no `ponto` da `gravacao`-ésima gravação de um
 /// registro do tipo `tipo` desde o boot.
 fn plano_de_queda(disco: &Path, ponto: u8, tipo: u16, gravacao: u32) -> Result<(), String> {
+    plano(
+        disco,
+        Plano {
+            ponto,
+            tipo,
+            gravacao,
+            ..Plano::default()
+        },
+    )
+}
+
+/// O plano inteiro da bancada — ver `kernel/src/quedas.rs`.
+#[derive(Clone, Copy, Default)]
+struct Plano {
+    /// Onde a energia cai; zero, em lugar nenhum.
+    ponto: u8,
+    tipo: u16,
+    gravacao: u32,
+    /// O tamanho de cada região do journal, em setores.
+    limite: Option<u64>,
+    /// Bit 0: o coletor não compacta; bit 1: o boot não compacta.
+    bandeiras: u8,
+}
+
+/// O coletor não compacta.
+const COLETOR_NAO_COMPACTA: u8 = 1;
+/// O boot não compacta.
+const BOOT_NAO_COMPACTA: u8 = 2;
+
+fn plano(disco: &Path, p: Plano) -> Result<(), String> {
     let mut setor = [0u8; 512];
     setor[..8].copy_from_slice(b"DUKEQUED");
-    setor[8] = ponto;
-    setor[12..16].copy_from_slice(&gravacao.to_le_bytes());
-    setor[16..18].copy_from_slice(&tipo.to_le_bytes());
+    setor[8] = p.ponto;
+    setor[12..16].copy_from_slice(&p.gravacao.to_le_bytes());
+    setor[16..18].copy_from_slice(&p.tipo.to_le_bytes());
+    setor[18..26].copy_from_slice(&p.limite.unwrap_or(0).to_le_bytes());
+    setor[26] = p.bandeiras;
     escrever_setor_do_estado(disco, disco::ESTADO_SETORES - 1, &setor)
 }
 
@@ -1474,32 +1541,44 @@ fn sem_plano(disco: &Path) -> Result<(), String> {
     escrever_setor_do_estado(disco, disco::ESTADO_SETORES - 1, &[0; 512])
 }
 
-/// Os registros do journal no disco, pelo cabeçalho em claro de cada um:
-/// onde começa e quantos setores tem. Para no primeiro setor que não é
-/// cabeçalho.
-fn registros_no_disco(disco: &Path) -> Result<Vec<(u64, u64)>, String> {
+/// Os registros do journal no disco, pelo cabeçalho em claro de cada um,
+/// nas duas regiões — com o tamanho delas que o plano da bancada diz:
+/// onde começa (na partição), quantos setores tem e a âncora. Em cada
+/// região, para no primeiro setor que não é cabeçalho.
+fn registros_no_disco(disco: &Path, limite: Option<u64>) -> Result<Vec<(u64, u64, u64)>, String> {
     let estado = ler_o_estado(disco)?;
     let mut v = Vec::new();
-    let mut setor = 0usize;
-    while let Some(c) = estado.get(setor * 512..setor * 512 + 64) {
-        if &c[..8] != b"DUKEDIA1" {
-            break;
+    for (inicio, tamanho) in diario::regioes(disco::ESTADO_SETORES, limite) {
+        let mut setor = inicio as usize;
+        let fim = (inicio + tamanho) as usize;
+        while setor < fim {
+            let Some(c) = estado.get(setor * 512..setor * 512 + 64) else {
+                break;
+            };
+            if &c[..8] != b"DUKEDIA1" {
+                break;
+            }
+            let n = u32::from_le_bytes([c[12], c[13], c[14], c[15]]) as usize;
+            if n == 0 {
+                break;
+            }
+            let mut ancora = [0u8; 8];
+            ancora.copy_from_slice(&c[24..32]);
+            v.push((setor as u64, n as u64, u64::from_le_bytes(ancora)));
+            setor += n;
         }
-        let n = u32::from_le_bytes([c[12], c[13], c[14], c[15]]) as usize;
-        if n == 0 {
-            break;
-        }
-        v.push((setor as u64, n as u64));
-        setor += n;
     }
     Ok(v)
 }
 
 /// A escrita que não foi descarregada se perde: os setores do último
-/// registro voltam a zero, como num disco que não chegou a gravá-los.
-fn perder_o_ultimo_registro(disco: &Path) -> Result<(), String> {
-    let (inicio, n) = *registros_no_disco(disco)?
-        .last()
+/// registro escrito — o de âncora maior, e entre esses o que está mais
+/// adiante, que numa base é o fecho — voltam a zero, como num disco que
+/// não chegou a gravá-los.
+fn perder_o_ultimo_registro(disco: &Path, limite: Option<u64>) -> Result<(), String> {
+    let (inicio, n, _) = registros_no_disco(disco, limite)?
+        .into_iter()
+        .max_by_key(|&(s, _, a)| (a, s))
         .ok_or("o journal esta vazio")?;
     for s in inicio..inicio + n {
         escrever_setor_do_estado(disco, s, &[0; 512])?;
@@ -1702,7 +1781,7 @@ fn as_quedas_numa_operacao(arch: Arquitetura, artefato: &Artefato) -> Result<Str
         }
         sem_plano(&disco)?;
         if perder {
-            perder_o_ultimo_registro(&disco)?;
+            perder_o_ultimo_registro(&disco, None)?;
         }
 
         let mut m = Ligada::subir(arch, artefato, None)?;
@@ -1781,7 +1860,7 @@ fn as_quedas_numa_mensagem(arch: Arquitetura, artefato: &Artefato) -> Result<Str
         }
         sem_plano(&disco)?;
         if perder {
-            perder_o_ultimo_registro(&disco)?;
+            perder_o_ultimo_registro(&disco, None)?;
         }
 
         let mut m = Ligada::subir(arch, artefato, None)?;
@@ -1824,7 +1903,7 @@ fn as_quedas_na_auditoria(arch: Arquitetura, artefato: &Artefato) -> Result<Stri
         }
         sem_plano(&disco)?;
         if perder {
-            perder_o_ultimo_registro(&disco)?;
+            perder_o_ultimo_registro(&disco, None)?;
         }
 
         let mut m = Ligada::subir(arch, artefato, None)?;
@@ -1876,6 +1955,427 @@ fn as_quedas_na_auditoria(arch: Arquitetura, artefato: &Artefato) -> Result<Stri
     Ok(format!(
         "{} quedas: o registro de auditoria vale exatamente quando esta no disco, e a cadeia continua",
         QUEDAS_NA_GRAVACAO.len()
+    ))
+}
+
+/// O tamanho das regiões nos cenários da compactação: 128 KiB cada, para
+/// encher uma com poucas dezenas de operações.
+const REGIAO_PEQUENA: u64 = 256;
+
+/// Escreve linhas de política até a região passar de três quartos — ou
+/// até `compactar` compactações acontecerem, se o coletor compacta. Devolve
+/// quantas operações foram.
+fn encher(
+    m: &mut Ligada,
+    chaves: &super::chaves::Chaves,
+    compactacoes: Option<u64>,
+) -> Result<u32, String> {
+    for i in 0..400u32 {
+        let p = persistencia_de(m)?;
+        let cheia = p.usados * 4 >= p.setores * 3;
+        match compactacoes {
+            Some(n) if p.compactacoes >= n => return Ok(i),
+            None if cheia => return Ok(i),
+            _ => {}
+        }
+        let linha = format!(r#"{{"line":"taxa observador {} 18"}}"#, 5 + i % 4);
+        let r = administrar(m, &chaves.administrador, "policy.write", &linha)?;
+        if !executou(&r) {
+            return Err(format!("uma linha de politica nao foi gravada\n  {r}"));
+        }
+    }
+    Err("a regiao nao encheu em 400 operacoes".into())
+}
+
+/// Registra um agente, e confere que foi.
+fn registrar(
+    m: &mut Ligada,
+    chaves: &super::chaves::Chaves,
+    privada: &[u8; 32],
+    nome: &str,
+) -> Result<(), String> {
+    let r = administrar(
+        m,
+        &chaves.administrador,
+        "agent.register",
+        &registro_de_agente(privada, nome, "observador"),
+    )?;
+    if executou(&r) {
+        Ok(())
+    } else {
+        Err(format!("o registro de `{nome}` nao foi executado\n  {r}"))
+    }
+}
+
+/// Revoga um agente, e confere que foi.
+fn revogar_agente(
+    m: &mut Ligada,
+    chaves: &super::chaves::Chaves,
+    privada: &[u8; 32],
+) -> Result<(), String> {
+    let r = administrar(
+        m,
+        &chaves.administrador,
+        "agent.revoke",
+        &format!(
+            r#"{{"key":"{}"}}"#,
+            sigilo::hex(&sigilo::publica_de(privada))
+        ),
+    )?;
+    if executou(&r) {
+        Ok(())
+    } else {
+        Err(format!("a revogacao nao foi executada\n  {r}"))
+    }
+}
+
+/// O coletor compacta a região que passou de três quartos, e tudo
+/// sobrevive ao corte depois disso: o agente registrado entra, o revogado
+/// não, a mensagem pendente continua, a geração é a mesma, a cadeia da
+/// auditoria se verifica, e a próxima operação grava e sobrevive a mais
+/// um boot.
+fn a_compactacao_sobrevive(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    let chaves = super::chaves::Chaves::garantir()?;
+    let disco = disco_de_testes()?;
+    let (fica, sai, depois) = ([0xD1u8; 32], [0xD2u8; 32], [0xD3u8; 32]);
+    plano(
+        &disco,
+        Plano {
+            limite: Some(REGIAO_PEQUENA),
+            ..Plano::default()
+        },
+    )?;
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    registrar(&mut m, &chaves, &fica, "compacta-fica")?;
+    registrar(&mut m, &chaves, &sai, "compacta-sai")?;
+    revogar_agente(&mut m, &chaves, &sai)?;
+    let r = super::AgenteNaPorta::conectar(arch, 1)?.pedir(
+        "message.send",
+        r#"{"to":"serial","body":"antes da compactacao","nonce":1}"#,
+    )?;
+    if !r.contains(r#""durable":true"#) {
+        m.cortar_a_energia()?;
+        return Err(format!("a mensagem nao foi duravel\n  {r}"));
+    }
+    let ops = encher(&mut m, &chaves, Some(1))?;
+    let antes = persistencia_de(&mut m)?;
+    m.cortar_a_energia()?;
+
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let p = persistencia_de(&mut m)?;
+    let caixa = m.pedir("message.read", "{}")?;
+    let verifica = auditoria_verifica(&mut m);
+    if p.estado != "available" || p.compactacoes < 1 || p.geracao != antes.geracao {
+        m.cortar_a_energia()?;
+        return Err(format!(
+            "depois do corte: {} ({}), {} compactacoes, geracao {} e nao {}",
+            p.estado, p.motivo, p.compactacoes, p.geracao, antes.geracao
+        ));
+    }
+    if !caixa.contains("antes da compactacao") {
+        m.cortar_a_energia()?;
+        return Err(format!(
+            "a mensagem pendente sumiu na compactacao\n  {caixa}"
+        ));
+    }
+    if !agente_entra(arch, &fica, "compacta-fica")? || agente_entra(arch, &sai, "compacta-sai")? {
+        m.cortar_a_energia()?;
+        return Err(
+            "o agente registrado nao entra, ou o revogado entra, depois da compactacao".into(),
+        );
+    }
+    if let Err(e) = verifica {
+        m.cortar_a_energia()?;
+        return Err(e);
+    }
+    registrar(&mut m, &chaves, &depois, "compacta-depois")?;
+    m.cortar_a_energia()?;
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let p = persistencia_de(&mut m)?;
+    let entra = agente_entra(arch, &depois, "compacta-depois")?;
+    m.cortar_a_energia()?;
+    if p.estado != "available" || !entra {
+        return Err(format!(
+            "a operacao depois da compactacao nao sobreviveu ao boot: {} ({})",
+            p.estado, p.motivo
+        ));
+    }
+    Ok(format!(
+        "{ops} operacoes ate a compactacao; depois do corte, o estado, a geracao {} e a auditoria continuam",
+        antes.geracao
+    ))
+}
+
+/// Enche a região sem compactar, com um agente que fica e um que sai, e
+/// devolve a geração.
+fn preparar_a_compactacao(
+    arch: Arquitetura,
+    artefato: &Artefato,
+    chaves: &super::chaves::Chaves,
+    disco: &Path,
+) -> Result<u64, String> {
+    plano(
+        disco,
+        Plano {
+            limite: Some(REGIAO_PEQUENA),
+            bandeiras: COLETOR_NAO_COMPACTA | BOOT_NAO_COMPACTA,
+            ..Plano::default()
+        },
+    )?;
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let r = (|| {
+        registrar(&mut m, chaves, &[0xD4; 32], "queda-fica")?;
+        registrar(&mut m, chaves, &[0xD5; 32], "queda-sai")?;
+        revogar_agente(&mut m, chaves, &[0xD5; 32])?;
+        encher(&mut m, chaves, None)?;
+        persistencia_de(&mut m)
+    })();
+    m.cortar_a_energia()?;
+    Ok(r?.geracao)
+}
+
+/// A energia cai em cada fronteira da compactação, feita no boot: antes de
+/// escrever, depois da primeira parte, depois de escrever a base inteira
+/// (que chegou ao disco, ou se perdeu sem a descarga), depois da descarga
+/// e antes do contador, depois do contador. O boot seguinte sobe com a
+/// persistência de pé; a compactação vale exatamente quando o fecho está
+/// no disco; o estado é o mesmo — o agente que fica entra, o revogado não —
+/// e a geração também; e a próxima operação grava.
+fn as_quedas_na_compactacao(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    let chaves = super::chaves::Chaves::garantir()?;
+    let disco = disco_de_testes()?;
+    let casos: [Caso; 6] = [
+        (ponto::ANTES_DA_ESCRITA, false, false, "antes da escrita"),
+        (
+            ponto::DEPOIS_DA_PRIMEIRA_PARTE,
+            false,
+            false,
+            "depois da primeira parte",
+        ),
+        (
+            ponto::DEPOIS_DA_ESCRITA,
+            false,
+            true,
+            "a base escrita, que chegou ao disco",
+        ),
+        (
+            ponto::DEPOIS_DA_ESCRITA,
+            true,
+            false,
+            "a base escrita, e o fecho perdido sem a descarga",
+        ),
+        (
+            ponto::DEPOIS_DA_DESCARGA,
+            false,
+            true,
+            "a base descarregada, antes do contador",
+        ),
+        (
+            ponto::DEPOIS_DO_CONTADOR,
+            false,
+            true,
+            "o contador avancado, antes de trocar de regiao",
+        ),
+    ];
+    for (i, (ponto, perder, vale, caso)) in casos.into_iter().enumerate() {
+        zerar_o_estado(arch)?;
+        let geracao = preparar_a_compactacao(arch, artefato, &chaves, &disco)?;
+        plano(
+            &disco,
+            Plano {
+                ponto,
+                tipo: tipo::BASE_FIM,
+                gravacao: 1,
+                limite: Some(REGIAO_PEQUENA),
+                bandeiras: COLETOR_NAO_COMPACTA,
+            },
+        )?;
+        let caiu = subir_ate_cair(arch, artefato)?;
+        if caiu != ponto {
+            return Err(format!("{caso}: caiu no ponto {caiu}, e nao no {ponto}"));
+        }
+        if perder {
+            perder_o_ultimo_registro(&disco, Some(REGIAO_PEQUENA))?;
+        }
+        plano(
+            &disco,
+            Plano {
+                limite: Some(REGIAO_PEQUENA),
+                bandeiras: COLETOR_NAO_COMPACTA | BOOT_NAO_COMPACTA,
+                ..Plano::default()
+            },
+        )?;
+        let mut m = Ligada::subir(arch, artefato, None)?;
+        let p = persistencia_de(&mut m)?;
+        let verifica = auditoria_verifica(&mut m);
+        let fica = agente_entra(arch, &[0xD4; 32], "queda-fica")?;
+        let sai = agente_entra(arch, &[0xD5; 32], "queda-sai")?;
+        m.cortar_a_energia()?;
+        if p.estado != "available" {
+            return Err(format!(
+                "{caso}: a persistencia ficou {} ({})",
+                p.estado, p.motivo
+            ));
+        }
+        if (p.compactacoes == 1) != vale || p.compactacoes > 1 {
+            return Err(format!(
+                "{caso}: {} compactacoes, e a compactacao {}",
+                p.compactacoes,
+                if vale { "vale" } else { "nao vale" }
+            ));
+        }
+        if p.geracao != geracao || !fica || sai {
+            return Err(format!(
+                "{caso}: geracao {} (era {geracao}); o que fica entra: {fica}; o revogado entra: {sai}",
+                p.geracao
+            ));
+        }
+        verifica.map_err(|e| format!("{caso}: {e}"))?;
+        plano(
+            &disco,
+            Plano {
+                limite: Some(REGIAO_PEQUENA),
+                ..Plano::default()
+            },
+        )?;
+        let mut m = Ligada::subir(arch, artefato, None)?;
+        let r = registrar(
+            &mut m,
+            &chaves,
+            &[0xE0 + i as u8; 32],
+            &format!("depois-{i}"),
+        );
+        m.cortar_a_energia()?;
+        r.map_err(|e| format!("{caso}: {e}"))?;
+    }
+    Ok(format!(
+        "{} quedas: a compactacao vale exatamente quando o fecho esta no disco, e nada volta atras",
+        casos.len()
+    ))
+}
+
+/// A fotografia do disco tirada antes da compactação, com um agente que
+/// depois foi revogado, devolvida depois da compactação e da revogação: um
+/// disco anterior ao que o TPM viu. Recusada, e o agente não volta.
+fn a_fotografia_de_antes_da_compactacao(
+    arch: Arquitetura,
+    artefato: &Artefato,
+) -> Result<String, String> {
+    let chaves = super::chaves::Chaves::garantir()?;
+    let disco = disco_de_testes()?;
+    preparar_a_compactacao(arch, artefato, &chaves, &disco)?;
+    // O agente que fica é o que vai ser revogado depois da compactação.
+    let foto = ler_o_estado(&disco)?;
+    plano(
+        &disco,
+        Plano {
+            limite: Some(REGIAO_PEQUENA),
+            bandeiras: COLETOR_NAO_COMPACTA,
+            ..Plano::default()
+        },
+    )?;
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let p = persistencia_de(&mut m)?;
+    let revogado = revogar_agente(&mut m, &chaves, &[0xD4; 32]);
+    m.cortar_a_energia()?;
+    if p.compactacoes != 1 {
+        return Err(format!(
+            "o boot nao compactou: {} compactacoes",
+            p.compactacoes
+        ));
+    }
+    revogado?;
+    escrever_no_estado(&disco, &foto)?;
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let p = persistencia_de(&mut m)?;
+    let voltou = agente_entra(arch, &[0xD4; 32], "queda-fica")?;
+    m.cortar_a_energia()?;
+    if p.estado != "refused" {
+        return Err(format!(
+            "a fotografia de antes da compactacao foi aceita: {} ({})",
+            p.estado, p.motivo
+        ));
+    }
+    if voltou {
+        return Err(
+            "com a fotografia antiga, o agente revogado depois da compactacao voltou".into(),
+        );
+    }
+    Ok(format!("recusada: {}", p.motivo))
+}
+
+/// A região enche sem compactação: a operação que não cabe falha fechada —
+/// não vale, e diz que não ficou gravada —, a persistência fica
+/// indisponível, e nenhuma credencial administrativa passa. O boot
+/// seguinte compacta e volta: o que valia continua valendo, o que falhou
+/// não aparece, e a próxima operação grava.
+fn a_regiao_cheia_falha_fechada(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    let chaves = super::chaves::Chaves::garantir()?;
+    let disco = disco_de_testes()?;
+    plano(
+        &disco,
+        Plano {
+            limite: Some(REGIAO_PEQUENA),
+            bandeiras: COLETOR_NAO_COMPACTA | BOOT_NAO_COMPACTA,
+            ..Plano::default()
+        },
+    )?;
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let r = (|| -> Result<(u32, String, String), String> {
+        registrar(&mut m, &chaves, &[0xD6; 32], "cheia-fica")?;
+        for i in 0..400u32 {
+            let linha = format!(r#"{{"line":"taxa observador {} 18"}}"#, 5 + i % 4);
+            let r = administrar(&mut m, &chaves.administrador, "policy.write", &linha)?;
+            if !executou(&r) {
+                let depois = administrar(
+                    &mut m,
+                    &chaves.administrador,
+                    "agent.register",
+                    &registro_de_agente(&[0xD7; 32], "cheia-depois", "observador"),
+                )?;
+                return Ok((i, r, depois));
+            }
+        }
+        Err("a regiao nao encheu em 400 operacoes".into())
+    })();
+    let p = persistencia_de(&mut m);
+    m.cortar_a_energia()?;
+    let (ops, falhou, depois) = r?;
+    let p = p?;
+    if !falhou.contains("cheia") || p.estado != "unavailable" || executou(&depois) {
+        return Err(format!(
+            "a regiao cheia nao falhou fechada: {} ({})\n  {falhou}\n  {depois}",
+            p.estado, p.motivo
+        ));
+    }
+    plano(
+        &disco,
+        Plano {
+            limite: Some(REGIAO_PEQUENA),
+            bandeiras: COLETOR_NAO_COMPACTA,
+            ..Plano::default()
+        },
+    )?;
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let p = persistencia_de(&mut m)?;
+    let fica = agente_entra(arch, &[0xD6; 32], "cheia-fica")?;
+    let veio = agente_entra(arch, &[0xD7; 32], "cheia-depois")?;
+    let r = registrar(&mut m, &chaves, &[0xD8; 32], "cheia-recuperada");
+    m.cortar_a_energia()?;
+    if p.estado != "available" || p.compactacoes != 1 {
+        return Err(format!(
+            "o boot nao recuperou a regiao cheia: {} ({}), {} compactacoes",
+            p.estado, p.motivo, p.compactacoes
+        ));
+    }
+    if !fica || veio {
+        return Err(format!(
+            "depois da recuperacao, o que valia entra: {fica}; o que falhou entra: {veio}"
+        ));
+    }
+    r?;
+    Ok(format!(
+        "{ops} operacoes ate encher; a seguinte falhou fechada, e o boot compactou e voltou"
     ))
 }
 

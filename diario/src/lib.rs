@@ -66,6 +66,25 @@
 //! contador. No boot, [`julgar`] compara o último registro com o contador
 //! e diz se o disco é o atual, se a última gravação ficou a um passo de
 //! terminar, ou se o disco é anterior ao que o TPM já viu.
+//!
+//! # As duas regiões, e a compactação
+//!
+//! A partição tem duas regiões do mesmo tamanho ([`regioes`]), e o journal
+//! mora numa delas. Quando ela enche, a compactação escreve na **outra** uma
+//! base — o estado inteiro, em uma ou mais partes ([`estado::tipo::BASE`])
+//! e um fecho ([`estado::tipo::BASE_FIM`]) — e só então avança o contador,
+//! uma vez. As partes e o fecho têm todos a mesma âncora: a base é uma
+//! gravação só, que o contador confirma inteira ou não confirma. A região
+//! velha não é apagada nem tocada: até o contador avançar, ela é a atual;
+//! depois, é um disco anterior ao que o TPM viu, e nunca mais é escolhida.
+//!
+//! No boot, as duas são lidas, e vale a de última âncora maior entre as
+//! que são inteiras — uma que começa pela abertura, ou por uma base
+//! fechada ([`escolher`]). Uma compactação interrompida deixa uma base sem
+//! fecho, que não vale, e a região velha continua a atual; uma interrompida
+//! depois da descarga e antes do contador deixa a base inteira com a
+//! âncora seguinte, e o boot completa o avanço, como o de qualquer
+//! registro.
 
 #![no_std]
 
@@ -184,6 +203,11 @@ impl Lido {
             parada: self.parada,
             proximo_setor: self.proximo_setor,
             elo: self.elo,
+            primeiro_tipo: self.registros.first().map(|r| r.tipo),
+            base_fechada: self
+                .registros
+                .iter()
+                .any(|r| r.tipo == estado::tipo::BASE_FIM),
         }
     }
 }
@@ -196,6 +220,7 @@ pub struct Ultimo {
     pub geracao: u64,
     pub versao_da_politica: u64,
     pub tempo: u64,
+    pub tipo: u16,
 }
 
 impl Ultimo {
@@ -205,6 +230,7 @@ impl Ultimo {
             geracao: r.geracao,
             versao_da_politica: r.versao_da_politica,
             tempo: r.tempo,
+            tipo: r.tipo,
         }
     }
 }
@@ -219,12 +245,76 @@ pub struct Percorrido {
     pub parada: Parada,
     pub proximo_setor: u64,
     pub elo: [u8; 32],
+    /// O tipo do primeiro registro: a abertura, ou uma parte da base.
+    pub primeiro_tipo: Option<u16>,
+    /// Se a base do começo da região foi fechada.
+    pub base_fechada: bool,
 }
 
 impl Percorrido {
+    /// Um journal vazio: o de uma região sem nada que valha. O próximo
+    /// registro é o primeiro, encadeado ao elo inicial.
+    pub fn vazio() -> Percorrido {
+        Percorrido {
+            quantos: 0,
+            ultimo: None,
+            parada: Parada::Fim,
+            proximo_setor: 0,
+            elo: elo_inicial(),
+            primeiro_tipo: None,
+            base_fechada: false,
+        }
+    }
+
     /// A âncora do último registro, ou `None` com o journal vazio.
     pub fn ultima_ancora(&self) -> Option<u64> {
         self.ultimo.map(|u| u.ancora)
+    }
+
+    /// Se a região é um journal inteiro: começa pela abertura, ou por uma
+    /// base que se fechou. Uma base sem fecho é uma compactação que não
+    /// terminou — nada dela vale.
+    pub fn inteiro(&self) -> bool {
+        match self.primeiro_tipo {
+            Some(estado::tipo::ABERTURA) => true,
+            Some(estado::tipo::BASE | estado::tipo::BASE_FIM) => self.base_fechada,
+            _ => false,
+        }
+    }
+}
+
+/// Os setores da partição que o journal não usa, no fim: a bancada põe ali
+/// o plano dela, e nenhuma região chega lá.
+pub const RESERVA_NO_FIM: u64 = 64;
+
+/// As duas regiões de uma partição de `setores` setores: o começo e o
+/// tamanho de cada uma. Cada uma tem a metade do que sobra da reserva, ou
+/// `limite` setores, se for menor — a suíte e a bancada encolhem as
+/// regiões para encher uma depressa. A primeira começa no setor zero: um
+/// journal de antes das regiões é o da primeira.
+pub fn regioes(setores: u64, limite: Option<u64>) -> [(u64, u64); 2] {
+    let metade = setores.saturating_sub(RESERVA_NO_FIM) / 2;
+    let tamanho = limite.map_or(metade, |l| l.min(metade));
+    [(0, tamanho), (metade, tamanho)]
+}
+
+/// Qual das duas regiões percorridas é o journal: a inteira de última
+/// âncora maior. `None` se nenhuma é inteira — ou se as duas dizem a mesma
+/// âncora, o que nenhuma sequência de gravações produz, e que não se
+/// resolve escolhendo uma.
+pub fn escolher(regioes: &[Percorrido; 2]) -> Option<usize> {
+    let ancora = |i: usize| {
+        regioes[i]
+            .inteiro()
+            .then(|| regioes[i].ultima_ancora())
+            .flatten()
+    };
+    match (ancora(0), ancora(1)) {
+        (Some(a), Some(b)) if a == b => None,
+        (Some(a), Some(b)) => Some(if a > b { 0 } else { 1 }),
+        (Some(_), None) => Some(0),
+        (None, Some(_)) => Some(1),
+        (None, None) => None,
     }
 }
 
@@ -241,6 +331,17 @@ pub enum Interrompido<E> {
 /// uma operação de autoridade sobe um; o resto não muda.
 fn geracao_depois(anterior: u64, tipo: u16) -> Option<u64> {
     anterior.checked_add(u64::from(tipo == estado::tipo::OPERACAO))
+}
+
+/// A âncora do registro depois de um de âncora `anterior` e `tipo`: a
+/// mesma, depois de uma parte da base; a seguinte, depois de qualquer
+/// outro.
+fn ancora_depois(anterior: u64, tipo: u16) -> Option<u64> {
+    if tipo == estado::tipo::BASE {
+        Some(anterior)
+    } else {
+        anterior.checked_add(1)
+    }
 }
 
 /// O resumo com que o primeiro registro se encadeia.
@@ -309,6 +410,8 @@ pub fn percorrer<M: Meio, E>(
     let aead = XChaCha20Poly1305::new(&(*chave).into());
     let mut quantos = 0u64;
     let mut ultimo: Option<Ultimo> = None;
+    let mut primeiro_tipo = None;
+    let mut base_fechada = false;
     let mut setor = 0u64;
     let mut elo = elo_inicial();
     let mut cabecalho = [0u8; TAM_SETOR];
@@ -348,8 +451,10 @@ pub fn percorrer<M: Meio, E>(
         if sequencia != quantos {
             break ilegivel("sequencia fora de ordem");
         }
-        if let Some(anterior) = ultimo.map(|u| u.ancora)
-            && Some(ancora) != anterior.checked_add(1)
+        // Depois de uma parte da base, a mesma âncora: a base é uma
+        // gravação só. Depois de qualquer outro, a seguinte.
+        if let Some(anterior) = ultimo
+            && Some(ancora) != ancora_depois(anterior.ancora, anterior.tipo)
         {
             break ilegivel("a ancora nao segue a do registro anterior");
         }
@@ -410,8 +515,24 @@ pub fn percorrer<M: Meio, E>(
         {
             break ilegivel("geracao fora de sequencia");
         }
+        // A base só no começo da região: a primeira parte é o primeiro
+        // registro, e cada parte seguinte, e o fecho, vêm logo depois de
+        // uma parte. Depois do fecho, nenhuma.
+        let e_da_base = matches!(registro.tipo, estado::tipo::BASE | estado::tipo::BASE_FIM);
+        let depois_de_parte = ultimo.is_some_and(|u| u.tipo == estado::tipo::BASE);
+        if e_da_base && quantos > 0 && !depois_de_parte {
+            break ilegivel("base fora do comeco da regiao");
+        }
+        if depois_de_parte && !e_da_base {
+            break ilegivel("base sem fecho");
+        }
+        let tipo_lido = registro.tipo;
         let resumo = Ultimo::de(&registro);
         f(registro).map_err(|motivo| Interrompido::Recusado { sequencia, motivo })?;
+        if quantos == 0 {
+            primeiro_tipo = Some(tipo_lido);
+        }
+        base_fechada |= tipo_lido == estado::tipo::BASE_FIM;
         ultimo = Some(resumo);
         quantos += 1;
         elo = proximo_elo;
@@ -423,6 +544,8 @@ pub fn percorrer<M: Meio, E>(
         parada,
         proximo_setor: setor,
         elo,
+        primeiro_tipo,
+        base_fechada,
     })
 }
 
@@ -494,50 +617,27 @@ impl Escritor {
         nonce: [u8; TAM_NONCE],
         conteudo: &Conteudo,
     ) -> Result<Montado, &'static str> {
-        if conteudo.dados.len() > MAIOR_CONTEUDO {
-            return Err("conteudo maior que um registro");
+        if matches!(conteudo.tipo, estado::tipo::BASE | estado::tipo::BASE_FIM) {
+            return Err("a base se monta com Escritor::base");
         }
         let ancora = self
             .ancora
             .checked_add(1)
             .ok_or("o contador da ancora esgotou")?;
         let geracao = geracao_depois(self.geracao, conteudo.tipo).ok_or("a geracao esgotou")?;
-        let tamanho = TAM_PREFIXO + conteudo.dados.len();
-        let setores = setores_para(tamanho) as u64;
-        if self.proximo_setor + setores > self.total {
-            return Err("a particao de estado esta cheia");
-        }
-        let mut bytes = alloc::vec![0u8; setores as usize * TAM_SETOR];
-        bytes[..8].copy_from_slice(&MAGIA);
-        bytes[8..10].copy_from_slice(&VERSAO.to_le_bytes());
-        bytes[12..16].copy_from_slice(&(setores as u32).to_le_bytes());
-        bytes[16..24].copy_from_slice(&self.proxima_sequencia.to_le_bytes());
-        bytes[24..32].copy_from_slice(&ancora.to_le_bytes());
-        bytes[32..36].copy_from_slice(&(tamanho as u32).to_le_bytes());
-        bytes[40..64].copy_from_slice(&nonce);
-
-        let fim_cifrado = TAM_CABECALHO + tamanho;
-        {
-            let claro = &mut bytes[TAM_CABECALHO..fim_cifrado];
-            claro[0..2].copy_from_slice(&conteudo.tipo.to_le_bytes());
-            claro[2..10].copy_from_slice(&geracao.to_le_bytes());
-            claro[10..18].copy_from_slice(&conteudo.versao_da_politica.to_le_bytes());
-            claro[18..26].copy_from_slice(&conteudo.tempo.to_le_bytes());
-            claro[TAM_PREFIXO..].copy_from_slice(conteudo.dados);
-        }
-        let mut aad = [0u8; TAM_CABECALHO + 32];
-        aad[..TAM_CABECALHO].copy_from_slice(&bytes[..TAM_CABECALHO]);
-        aad[TAM_CABECALHO..].copy_from_slice(&self.elo);
-        let aead = XChaCha20Poly1305::new(&(*chave).into());
-        let etiqueta = aead
-            .encrypt_inout_detached(
-                &nonce.into(),
-                &aad,
-                (&mut bytes[TAM_CABECALHO..fim_cifrado]).into(),
-            )
-            .map_err(|_| "a cifra recusou o registro")?;
-        bytes[fim_cifrado..fim_cifrado + TAM_ETIQUETA].copy_from_slice(&etiqueta);
-        let elo: [u8; 32] = Blake2s256::digest(&bytes[..fim_cifrado + TAM_ETIQUETA]).into();
+        let (bytes, elo, setores) = selar(
+            chave,
+            nonce,
+            &Posicao {
+                setor: self.proximo_setor,
+                sequencia: self.proxima_sequencia,
+                ancora,
+                elo: self.elo,
+                total: self.total,
+            },
+            conteudo,
+            geracao,
+        )?;
         Ok(Montado {
             setor: self.proximo_setor,
             bytes,
@@ -545,6 +645,26 @@ impl Escritor {
             geracao,
             elo,
             setores,
+        })
+    }
+
+    /// Começa a base de uma região nova, de `total` setores: a compactação.
+    /// A base confirma a âncora seguinte à deste journal, na geração dele —
+    /// a compactação não é uma operação de autoridade, e não sobe a
+    /// geração.
+    pub fn base(&self, total: u64) -> Result<Base, &'static str> {
+        Ok(Base {
+            posicao: Posicao {
+                setor: 0,
+                sequencia: 0,
+                ancora: self
+                    .ancora
+                    .checked_add(1)
+                    .ok_or("o contador da ancora esgotou")?,
+                elo: elo_inicial(),
+                total,
+            },
+            geracao: self.geracao,
         })
     }
 
@@ -574,9 +694,191 @@ impl Escritor {
         self.ancora
     }
 
+    /// A geração do último registro.
+    pub fn geracao(&self) -> u64 {
+        self.geracao
+    }
+
+    /// Quantos setores a região tem, e quantos já estão ocupados.
+    pub fn ocupacao(&self) -> (u64, u64) {
+        (self.proximo_setor, self.total)
+    }
+
     /// Quantos setores ainda cabem.
     pub fn livres(&self) -> u64 {
         self.total - self.proximo_setor
+    }
+}
+
+/// Onde um registro vai, e o que o encadeia.
+struct Posicao {
+    setor: u64,
+    sequencia: u64,
+    ancora: u64,
+    elo: [u8; 32],
+    total: u64,
+}
+
+/// Monta um registro na posição `p`: os bytes, o elo dele e quantos setores
+/// ocupa.
+fn selar(
+    chave: &[u8; 32],
+    nonce: [u8; TAM_NONCE],
+    p: &Posicao,
+    conteudo: &Conteudo,
+    geracao: u64,
+) -> Result<(Vec<u8>, [u8; 32], u64), &'static str> {
+    if conteudo.dados.len() > MAIOR_CONTEUDO {
+        return Err("conteudo maior que um registro");
+    }
+    let tamanho = TAM_PREFIXO + conteudo.dados.len();
+    let setores = setores_para(tamanho) as u64;
+    if p.setor + setores > p.total {
+        return Err("a particao de estado esta cheia");
+    }
+    let mut bytes = alloc::vec![0u8; setores as usize * TAM_SETOR];
+    bytes[..8].copy_from_slice(&MAGIA);
+    bytes[8..10].copy_from_slice(&VERSAO.to_le_bytes());
+    bytes[12..16].copy_from_slice(&(setores as u32).to_le_bytes());
+    bytes[16..24].copy_from_slice(&p.sequencia.to_le_bytes());
+    bytes[24..32].copy_from_slice(&p.ancora.to_le_bytes());
+    bytes[32..36].copy_from_slice(&(tamanho as u32).to_le_bytes());
+    bytes[40..64].copy_from_slice(&nonce);
+
+    let fim_cifrado = TAM_CABECALHO + tamanho;
+    {
+        let claro = &mut bytes[TAM_CABECALHO..fim_cifrado];
+        claro[0..2].copy_from_slice(&conteudo.tipo.to_le_bytes());
+        claro[2..10].copy_from_slice(&geracao.to_le_bytes());
+        claro[10..18].copy_from_slice(&conteudo.versao_da_politica.to_le_bytes());
+        claro[18..26].copy_from_slice(&conteudo.tempo.to_le_bytes());
+        claro[TAM_PREFIXO..].copy_from_slice(conteudo.dados);
+    }
+    let mut aad = [0u8; TAM_CABECALHO + 32];
+    aad[..TAM_CABECALHO].copy_from_slice(&bytes[..TAM_CABECALHO]);
+    aad[TAM_CABECALHO..].copy_from_slice(&p.elo);
+    let aead = XChaCha20Poly1305::new(&(*chave).into());
+    let etiqueta = aead
+        .encrypt_inout_detached(
+            &nonce.into(),
+            &aad,
+            (&mut bytes[TAM_CABECALHO..fim_cifrado]).into(),
+        )
+        .map_err(|_| "a cifra recusou o registro")?;
+    bytes[fim_cifrado..fim_cifrado + TAM_ETIQUETA].copy_from_slice(&etiqueta);
+    let elo: [u8; 32] = Blake2s256::digest(&bytes[..fim_cifrado + TAM_ETIQUETA]).into();
+    Ok((bytes, elo, setores))
+}
+
+/// A base de uma região nova, sendo montada: uma parte de cada vez, e o
+/// fecho. Ver [`Escritor::base`].
+///
+/// Cada parte sai pronta para ser escrita no lugar dela; nenhuma é
+/// confirmada sozinha. Só o fecho, depois de tudo escrito e descarregado e
+/// do contador avançado, vira o escritor da região nova — ver
+/// [`BaseFechada::confirmar`].
+pub struct Base {
+    posicao: Posicao,
+    geracao: u64,
+}
+
+/// Um registro da base, pronto para o disco: onde vai e os bytes.
+pub struct Parte {
+    pub setor: u64,
+    pub bytes: Vec<u8>,
+}
+
+/// A base fechada: o fecho, pronto para o disco, e o que ela confirma.
+pub struct BaseFechada {
+    pub setor: u64,
+    pub bytes: Vec<u8>,
+    /// O valor que o contador tem de ter depois de avançado.
+    pub ancora: u64,
+    escritor: Escritor,
+}
+
+impl Base {
+    fn registro(
+        &mut self,
+        chave: &[u8; 32],
+        nonce: [u8; TAM_NONCE],
+        conteudo: &Conteudo,
+    ) -> Result<Parte, &'static str> {
+        let (bytes, elo, setores) = selar(chave, nonce, &self.posicao, conteudo, self.geracao)?;
+        let setor = self.posicao.setor;
+        self.posicao.setor += setores;
+        self.posicao.sequencia += 1;
+        self.posicao.elo = elo;
+        Ok(Parte { setor, bytes })
+    }
+
+    /// Mais uma parte, com estas entradas.
+    pub fn parte(
+        &mut self,
+        chave: &[u8; 32],
+        nonce: [u8; TAM_NONCE],
+        versao_da_politica: u64,
+        tempo: u64,
+        dados: &[u8],
+    ) -> Result<Parte, &'static str> {
+        self.registro(
+            chave,
+            nonce,
+            &Conteudo {
+                tipo: estado::tipo::BASE,
+                versao_da_politica,
+                tempo,
+                dados,
+            },
+        )
+    }
+
+    /// O fecho, com os campos dele.
+    pub fn fechar(
+        mut self,
+        chave: &[u8; 32],
+        nonce: [u8; TAM_NONCE],
+        versao_da_politica: u64,
+        tempo: u64,
+        dados: &[u8],
+    ) -> Result<BaseFechada, &'static str> {
+        let fecho = self.registro(
+            chave,
+            nonce,
+            &Conteudo {
+                tipo: estado::tipo::BASE_FIM,
+                versao_da_politica,
+                tempo,
+                dados,
+            },
+        )?;
+        let p = &self.posicao;
+        Ok(BaseFechada {
+            setor: fecho.setor,
+            bytes: fecho.bytes,
+            ancora: p.ancora,
+            escritor: Escritor {
+                proximo_setor: p.setor,
+                proxima_sequencia: p.sequencia,
+                elo: p.elo,
+                ancora: p.ancora,
+                geracao: self.geracao,
+                total: p.total,
+            },
+        })
+    }
+}
+
+impl BaseFechada {
+    /// A base inteira foi escrita e descarregada, e o contador avançou para
+    /// `contador`. Só a âncora da base fecha a compactação: o escritor da
+    /// região nova continua depois do fecho. Outro valor é o disco e o TPM
+    /// separados, e nada é confirmado.
+    pub fn confirmar(self, contador: u64) -> Result<Escritor, &'static str> {
+        if contador != self.ancora {
+            return Err("o contador do TPM nao foi para a ancora da base");
+        }
+        Ok(self.escritor)
     }
 }
 

@@ -374,6 +374,9 @@ extern "C" fn coletor(_argumento: u64) -> ! {
         // tempos em tempos: as leituras e as recusas não mudam estado, e
         // não têm registro próprio.
         crate::persistencia::gravar_auditoria_se_preciso();
+        // E a região do journal que encheu é compactada aqui: o coletor
+        // não está no meio de operação nenhuma.
+        crate::persistencia::compactar_se_preciso();
         crate::arch::esperar_interrupcao();
     }
 }

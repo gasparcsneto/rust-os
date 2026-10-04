@@ -27,7 +27,16 @@
 //!                        para os pontos de dentro de uma gravação
 //!  16  tipo u16 LE       se não zero, só contam as gravações de registros
 //!                        desse tipo
+//!  18  limite u64 LE     se não zero, o tamanho de cada região do journal,
+//!                        em setores — para encher uma depressa
+//!  26  bandeiras u8      bit 0: o coletor não compacta; bit 1: o boot
+//!                        não compacta
 //! ```
+//!
+//! O limite e as bandeiras servem à compactação: a bancada enche uma
+//! região pequena, e escolhe onde a compactação acontece — no boot, para a
+//! queda nela ser certa, ou em lugar nenhum, para ver o que o boot
+//! seguinte encontra.
 //!
 //! O tipo existe por causa da auditoria: o coletor grava registros só de
 //! auditoria quando quer, e a n-ésima gravação de qualquer tipo deixaria
@@ -57,11 +66,15 @@ pub enum Ponto {
     /// O contador avançado, e a gravação ainda não confirmada — nem a
     /// operação respondida.
     DepoisDoContador = 13,
+    /// Na compactação: a primeira parte da base escrita, e nada mais.
+    DepoisDaPrimeiraParte = 14,
 }
 
 static PONTO: AtomicU8 = AtomicU8::new(0);
 static GRAVACAO: AtomicU32 = AtomicU32::new(0);
 static TIPO: AtomicU16 = AtomicU16::new(0);
+static LIMITE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static BANDEIRAS: AtomicU8 = AtomicU8::new(0);
 static GRAVACOES: AtomicU32 = AtomicU32::new(0);
 
 /// Lê o plano do último setor da partição de estado, se houver um.
@@ -76,6 +89,10 @@ pub fn carregar<M: diario::Meio>(meio: &mut M) {
     }
     let gravacao = u32::from_le_bytes([setor[12], setor[13], setor[14], setor[15]]);
     let tipo = u16::from_le_bytes([setor[16], setor[17]]);
+    let mut limite = [0u8; 8];
+    limite.copy_from_slice(&setor[18..26]);
+    LIMITE.store(u64::from_le_bytes(limite), Ordering::Relaxed);
+    BANDEIRAS.store(setor[26], Ordering::Relaxed);
     PONTO.store(setor[8], Ordering::Relaxed);
     GRAVACAO.store(gravacao, Ordering::Relaxed);
     TIPO.store(tipo, Ordering::Relaxed);
@@ -86,6 +103,24 @@ pub fn carregar<M: diario::Meio>(meio: &mut M) {
         gravacao,
         tipo
     );
+}
+
+/// O tamanho das regiões que o plano pede, se pede um.
+pub fn limite() -> Option<u64> {
+    match LIMITE.load(Ordering::Relaxed) {
+        0 => None,
+        l => Some(l),
+    }
+}
+
+/// Se o plano tira a compactação do coletor.
+pub fn coletor_nao_compacta() -> bool {
+    BANDEIRAS.load(Ordering::Relaxed) & 1 != 0
+}
+
+/// Se o plano tira a compactação do boot.
+pub fn boot_nao_compacta() -> bool {
+    BANDEIRAS.load(Ordering::Relaxed) & 2 != 0
 }
 
 /// Uma gravação de um registro do `tipo` começou: conta, para os pontos

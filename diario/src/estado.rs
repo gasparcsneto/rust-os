@@ -51,6 +51,15 @@ pub mod tipo {
     /// cadeia: a decisão que autorizou uma operação vai no registro da
     /// operação. Este tipo é para quando nada mais é gravado.
     pub const AUDITORIA: u16 = 5;
+    /// Uma parte da base de uma região: uma lista de entradas, como as de
+    /// [`OPERACAO`]. A base é o que uma compactação escreve no começo da
+    /// região nova — o estado inteiro, de uma vez — e tem uma ou mais
+    /// partes, todas com a mesma âncora, e um fecho. Ver [`BASE_FIM`].
+    pub const BASE: u16 = 6;
+    /// O fecho da base: `[instalação (16), quantos boots (8), quantas
+    /// compactações (8)]`. Uma região que começa por uma base só vale com o
+    /// fecho: sem ele, a compactação não terminou, e a região é ignorada.
+    pub const BASE_FIM: u16 = 7;
 
     /// Um agente entrou no registro: `[a linha do arquivo de agentes]`.
     pub const AGENTE_REGISTRADO: u16 = 10;
@@ -100,6 +109,24 @@ pub mod tipo {
     /// ao disco: `[primeira sequência (8), última (8), elo da última
     /// (32)]`. A cadeia continua desse elo, e a lacuna diz o que falta.
     pub const AUDITORIA_LACUNA: u16 = 23;
+    /// Na base de uma região: a cadeia da auditoria começa depois daqui —
+    /// `[primeira (8), última (8), elo da última (32)]`, como a lacuna. Os
+    /// registros de antes estavam no journal, e a compactação os deixou na
+    /// região velha; a cadeia continua verificável a partir do elo.
+    pub const AUDITORIA_COMPACTADA: u16 = 24;
+    /// Na base de uma região: a decisão que autorizou uma mudança de
+    /// autoridade que a base leva — `[o registro da auditoria codificado]`.
+    /// Ela vai na mesma parte que a mudança: uma mudança de autoridade não
+    /// fica no journal sem a decisão dela, nem depois de compactada. Não
+    /// volta para a cadeia — a cadeia continua de outro ponto —, e está ali
+    /// para quem lê o journal.
+    pub const AUDITORIA_HISTORICA: u16 = 25;
+    /// Na base: uma mensagem que já saiu, para o `message.status` — `[id
+    /// (8), remetente, destinatário, estado (1), versão (8)]`.
+    pub const MENSAGEM_LAPIDE: u16 = 26;
+    /// Na base: o próximo id de mensagem — `[id (8)]`. Os ids não se
+    /// repetem, nem depois de as mensagens que os usaram saírem.
+    pub const MENSAGENS_PROXIMO: u16 = 27;
 }
 
 /// Monta o conteúdo de um registro a partir dos campos.

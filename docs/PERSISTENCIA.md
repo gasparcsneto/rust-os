@@ -550,6 +550,108 @@ Nenhuma sobreviveu. A do percurso que aceitava a sequência pulada
 sobreviveu na primeira rodada — o caso do cabeçalho autêntico só tinha a
 sequência repetida — e ganhou o caso que faltava.
 
+## Como ficou (7.6)
+
+### As duas regiões
+
+A partição de estado tem duas regiões do mesmo tamanho e, no fim, 64
+setores de reserva (o plano de queda da bancada mora ali). O journal vive
+numa delas. A outra é o journal de antes da última compactação, uma
+compactação que não terminou, ou nada.
+
+- **Qual vale.** O boot percorre as duas sem reaplicar nada. Vale a
+  região **inteira** — a que começa com a abertura, ou com uma base que
+  tem o fecho — de **última âncora maior**. Uma base sem fecho não é
+  inteira, seja qual for o ponto em que parou. Duas inteiras com a mesma
+  âncora não têm vencedora, e o boot recusa o journal.
+- **A escolhida passa pela âncora como antes.** Escolher a região não
+  confirma nada: a última âncora dela diante do contador do TPM decide,
+  com as mesmas regras de sempre. A região antiga, com a âncora menor que
+  o contador, é um disco atrasado — e é recusada se for a única que
+  sobrou.
+- **Nenhuma inteira, e registros no disco, é recusa.** Só o journal vazio
+  em todas as regiões é um journal novo, ou uma criação a retomar.
+
+### A base
+
+A compactação escreve na outra região uma **base**: uma sequência de
+partes (`BASE`) e um fecho (`BASE_FIM`), encadeadas como qualquer
+registro, todas com a mesma âncora — a seguinte à do journal atual — e a
+mesma geração. A base contém:
+
+- **a história inteira da autoridade.** Cada registro de operação do
+  journal atual, e cada parte de uma base anterior, entra com as entradas
+  de autoridade dele — agentes, papéis, pessoas, credenciais, sessões,
+  lápides — **e, na mesma parte, as decisões que as autorizaram**, os
+  eventos da auditoria daquela operação, como `AUDITORIA_HISTORICA`. Uma
+  mudança de autoridade nunca fica numa parte sem a decisão dela. As
+  revogações nunca saem: são história, e a história é copiada inteira.
+  Só a política é deduplicada: vai a do último registro que tinha uma.
+- **as mensagens.** As lápides das mensagens que terminaram (o anel
+  delas, com o mesmo teto), as vivas — a criada e, se foi entregue, a
+  entrega —, e o próximo id. A tabela reposta da base é a mesma da
+  memória, conferido no hospedeiro e na suíte. O corpo de uma mensagem
+  copiado para a base é zerado depois de selado.
+- **a auditoria.** Uma marca (`AUDITORIA_COMPACTADA`) com a sequência e o
+  elo do último registro da cadeia antes dos que a base copia, e os
+  registros gravados que ainda estão no anel. A cadeia reposta da base
+  continua dali, com os mesmos elos, e se verifica.
+- **o fecho**, com a instalação, os boots e as compactações.
+
+### A ordem
+
+1. **Só num ponto seguro**: no boot, depois da abertura e antes do
+   registro de boot; ou no coletor. Nos dois, nenhuma operação está no
+   meio, nada está pendente para o journal, e a ordem das gravações está
+   na mão: o que está na memória é exatamente o que está no journal.
+2. A região passou de três quartos.
+3. As partes e o fecho são escritos na outra região, **uma descarga**, e
+   **um avanço do contador** do TPM — que agora aponta para a base.
+4. Só então a escrita passa para a região nova.
+
+Uma queda em qualquer fronteira deixa valendo uma região inteira: antes do
+fecho no disco, a antiga, ainda confirmada pelo contador; com o fecho no
+disco e o contador sem avançar, a nova, que o boot completa como qualquer
+registro escrito e não ancorado; com o contador avançado, a nova. Em
+nenhum caso a antiga volta depois de o contador andar, e em nenhum caso a
+geração muda.
+
+### A região cheia
+
+- **A base não cabe** na outra região: nada muda, a persistência continua
+  disponível, a auditoria registra `persistence.compact` com o erro, e
+  uma nova tentativa só depois de mais 64 registros.
+- **Uma operação não cabe** na região: a gravação falha, e a operação
+  também — ela não vale, a resposta diz que não ficou gravada, a
+  persistência fica indisponível e nenhuma credencial administrativa
+  passa. O boot seguinte, um ponto seguro, compacta, e volta. Não há
+  caminho de recuperação à parte: é a mesma abertura, com as mesmas
+  conferências.
+- **Uma falha do disco ou do TPM** na compactação deixa a persistência
+  indisponível, como numa gravação qualquer.
+
+### A criação interrompida, com as regiões
+
+A abertura vai na primeira região. Uma queda entre criar a âncora e o
+primeiro registro deixa as duas vazias — ou a primeira com a abertura
+cortada —, e o boot retoma a criação como no 7.4: o contador nunca passou
+do nascimento. As quedas da criação continuam na bancada, agora sobre as
+duas regiões.
+
+### O que mudou por baixo
+
+- **A âncora de uma base é a mesma em todas as partes.** O leitor confere
+  a âncora seguinte de cada registro, exceto depois de uma parte, e recusa
+  uma parte fora do começo da região ou um registro comum logo depois de
+  uma parte.
+- **O elo inicial de uma região vazia** é o do diário, e não zeros: o
+  primeiro registro de uma região se encadeia a ele.
+- **`system.info` diz a região**, quanto dela está usado, de quantos
+  setores, e quantas compactações houve.
+- **O plano de queda** ganhou o ponto *depois da primeira parte*, o
+  tamanho das regiões (para encher uma com poucas dezenas de operações) e
+  duas bandeiras: o coletor não compacta, o boot não compacta.
+
 ## Decisões tomadas
 
 - **Âncora:** o TPM 2.0, com um contador monotônico de NV; o `swtpm` como
@@ -577,5 +679,5 @@ sequência repetida — e ganhou o caso que faltava.
 | 7.3 | O estado administrativo durável (R1–R6) | feita |
 | 7.4 | Mensagens persistentes, e as fronteiras entre o disco e o TPM | feita |
 | 7.5 | Auditoria persistente | feita |
-| 7.6 | Compactação e disco cheio | — |
+| 7.6 | Compactação e disco cheio | feita |
 | 7.7 | O que restar da âncora (TPM físico, sessão autenticada no barramento) | — |

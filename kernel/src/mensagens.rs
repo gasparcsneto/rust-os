@@ -126,6 +126,22 @@ pub fn aplicar(id: u64, estado: Estado, versao: u64) -> Result<(), &'static str>
     com_tabela(|t| t.caixas.aplicar(id, estado, versao))
 }
 
+/// Repõe uma lápide, da base de uma compactação.
+pub fn restaurar_lapide(l: politica::mensagens::Lapide) -> Result<(), &'static str> {
+    com_tabela(|t| t.caixas.restaurar_lapide(l))
+}
+
+/// Repõe o próximo id, da base de uma compactação.
+pub fn fixar_proximo(proximo: u64) -> Result<(), &'static str> {
+    com_tabela(|t| t.caixas.fixar_proximo(proximo))
+}
+
+/// A tabela, para a base de uma compactação: quem chama a lê com a tranca
+/// na mão, e não guarda nada dela.
+pub fn com_as_caixas<R>(f: impl FnOnce(&Caixas) -> R) -> R {
+    com_tabela(|t| f(&t.caixas))
+}
+
 /// O journal foi confirmado: a tabela reposta vale, na época da instalação.
 pub fn adotar(epoca: [u8; 8]) {
     com_tabela(|t| t.epoca = epoca);

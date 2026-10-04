@@ -812,6 +812,44 @@ impl Caixas {
         }
     }
 
+    /// As lápides que a tabela guarda, da mais velha à mais nova: o que
+    /// uma compactação leva para o `message.status` continuar respondendo.
+    pub fn lapides(&self) -> impl Iterator<Item = &Lapide> {
+        self.lapides.iter()
+    }
+
+    /// O id da próxima mensagem.
+    pub fn proximo(&self) -> u64 {
+        self.proximo
+    }
+
+    /// Repõe uma lápide gravada pela compactação. Ela não pode ser de uma
+    /// viva, nem estar num estado que não é final; o anel continua com o
+    /// teto.
+    pub fn restaurar_lapide(&mut self, l: Lapide) -> Result<(), &'static str> {
+        if !l.estado.final_() {
+            return Err("lapide de mensagem que nao saiu");
+        }
+        if self.vivas.iter().any(|m| m.id == l.id) || self.lapides.iter().any(|x| x.id == l.id) {
+            return Err("lapide de mensagem repetida");
+        }
+        if self.lapides.len() >= LAPIDES {
+            self.lapides.pop_front();
+        }
+        self.lapides.push_back(l);
+        Ok(())
+    }
+
+    /// Fixa o próximo id, gravado pela compactação. Ele nunca volta: um
+    /// próximo menor que o de agora, ou que alguma viva, é recusado.
+    pub fn fixar_proximo(&mut self, proximo: u64) -> Result<(), &'static str> {
+        if proximo < self.proximo || self.vivas.iter().any(|m| m.id >= proximo) {
+            return Err("proximo id de mensagem voltando");
+        }
+        self.proximo = proximo;
+        Ok(())
+    }
+
     /// Quantas vivas há.
     pub fn vivas(&self) -> usize {
         self.vivas.len()
@@ -1387,6 +1425,59 @@ mod testes {
 
     /// Repor as criadas e as transições, na ordem, dá a mesma tabela: as
     /// mesmas vivas, nos mesmos estados e versões, os mesmos prazos — e o
+    /// A base de uma compactação repõe a mesma tabela: as lápides, as
+    /// vivas — pendentes ou entregues — e o próximo id. O `message.status`
+    /// de uma que saiu continua dizendo onde ela parou, e nenhum id se
+    /// repete depois.
+    #[test]
+    fn a_base_repoe_a_mesma_tabela() {
+        let mut t = Caixas::nova();
+        let mut ids = Vec::new();
+        for n in 1..=6 {
+            let e = t
+                .enviar(PA, A, B, "corpo", n, Some(5_000 * n), 1_000, COTAS_PADRAO)
+                .0
+                .unwrap();
+            ids.push(e.id);
+        }
+        t.ler(B, 0, 3, 1_000);
+        t.confirmar(B, ids[0], None, 1_000).0.unwrap();
+        t.cancelar(A, ids[4], None, 1_000).0.unwrap();
+        t.purgar(ids[5]).unwrap();
+
+        let mut base = Caixas::nova();
+        for l in t.lapides() {
+            base.restaurar_lapide(*l).unwrap();
+        }
+        for m in t.todas() {
+            base.restaurar(m.gravada()).unwrap();
+            if m.estado == Estado::Entregue {
+                base.aplicar(m.id, Estado::Entregue, m.versao).unwrap();
+            }
+        }
+        base.fixar_proximo(t.proximo()).unwrap();
+        assert_eq!(retrato(&base), retrato(&t));
+        assert!(base.coerente());
+        for &id in &ids {
+            assert_eq!(base.estado(A, id), t.estado(A, id), "{id}");
+        }
+        assert_eq!(base.proximo(), t.proximo());
+
+        // O que a base não aceita: uma lápide de estado que não é final,
+        // uma repetida, o próximo voltando, ou abaixo de uma viva.
+        let l = *t.lapides().next().unwrap();
+        assert!(base.restaurar_lapide(l).is_err(), "repetida");
+        let mut outra = l;
+        outra.id = 999;
+        outra.estado = Estado::Entregue;
+        assert!(base.restaurar_lapide(outra).is_err(), "nao final");
+        assert!(base.fixar_proximo(t.proximo() - 1).is_err(), "voltando");
+        let mut c = Caixas::nova();
+        c.restaurar(t.mensagem(ids[1]).unwrap().gravada()).unwrap();
+        assert!(c.fixar_proximo(ids[1]).is_err(), "abaixo de uma viva");
+        assert!(c.fixar_proximo(ids[1] + 1).is_ok());
+    }
+
     /// próximo id continua de onde parou.
     #[test]
     fn repor_o_que_foi_gravado_da_a_mesma_tabela() {

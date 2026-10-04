@@ -130,6 +130,10 @@ struct Persistencia {
     relogio: Relogio,
     /// O identificador da instalação, do registro de abertura.
     instalacao: Option<[u8; 16]>,
+    /// A região em que o journal mora: 0 ou 1.
+    regiao: usize,
+    /// Quantas compactações o journal já teve.
+    compactacoes: u64,
 }
 
 static PERSISTENCIA: Mutex<Persistencia> = Mutex::new(Persistencia {
@@ -141,10 +145,25 @@ static PERSISTENCIA: Mutex<Persistencia> = Mutex::new(Persistencia {
     boots: 0,
     relogio: Relogio::novo(0),
     instalacao: None,
+    regiao: 0,
+    compactacoes: 0,
 });
 
 /// A última sequência da auditoria que está no journal.
 static AUDITORIA_GRAVADA: AtomicU64 = AtomicU64::new(0);
+
+/// O elo do último registro da auditoria que está no journal: de onde a
+/// cadeia continua na base de uma compactação, mesmo que o anel da memória
+/// já não o tenha.
+static ELO_GRAVADO: Mutex<[u8; 32]> = Mutex::new([0; 32]);
+
+/// A auditoria está no journal até `ate`, cujo elo é `elo`.
+fn auditoria_foi_gravada(ate: u64, elo: [u8; 32]) {
+    crate::arch::sem_interrupcoes(|| {
+        *ELO_GRAVADO.lock() = elo;
+        AUDITORIA_GRAVADA.store(ate, Ordering::Release);
+    });
+}
 
 /// A cadeia que o journal refaz no boot, enquanto ele é lido. Ela só vira
 /// a auditoria com o journal confirmado pela âncora — ver [`abrir`].
@@ -218,6 +237,15 @@ pub fn relatorio() -> (Estado, u64, Option<u64>, u64, u64) {
             p.registros,
             p.boots,
         )
+    })
+}
+
+/// A região do journal, quantas compactações ele já teve, e quantos
+/// setores da região estão ocupados, de quantos.
+pub fn regiao() -> (usize, u64, u64, u64) {
+    com(|p| {
+        let (usados, total) = p.aberta.as_ref().map_or((0, 0), |a| a.escritor.ocupacao());
+        (p.regiao, p.compactacoes, usados, total)
     })
 }
 
@@ -403,10 +431,61 @@ fn duravel() -> Result<(), &'static str> {
     }
 }
 
-/// A partição de estado, para gravar: a janela, num disco durável.
-fn particao() -> Result<Particao, &'static str> {
+/// O tamanho das regiões, se alguém o encolheu: a suíte, para encher uma
+/// região depressa; a bancada, pelo plano dela. Zero é o tamanho inteiro.
+#[cfg(feature = "modo-teste")]
+static LIMITE_DE_TESTE: AtomicU64 = AtomicU64::new(0);
+
+fn limite() -> Option<u64> {
+    #[cfg(feature = "modo-teste")]
+    {
+        let l = LIMITE_DE_TESTE.load(Ordering::Acquire);
+        if l != 0 {
+            return Some(l);
+        }
+    }
+    #[cfg(feature = "quedas")]
+    if let Some(l) = crate::quedas::limite() {
+        return Some(l);
+    }
+    None
+}
+
+/// As duas regiões da partição de estado, como meios do journal — ver
+/// `diario::regioes`.
+fn regioes() -> Result<[Particao; 2], &'static str> {
+    let p = janela()?;
+    Ok(
+        diario::regioes(p.setores, limite()).map(|(inicio, setores)| Particao {
+            primeiro: p.primeiro + inicio,
+            setores,
+        }),
+    )
+}
+
+/// A região `i`, para gravar: num disco durável.
+fn particao(i: usize) -> Result<Particao, &'static str> {
     duravel()?;
-    janela()
+    let [a, b] = regioes()?;
+    Ok(if i == 0 { a } else { b })
+}
+
+/// Um journal percorrido e vazio: o de uma região que não vale.
+fn vazio() -> diario::Percorrido {
+    diario::Percorrido::vazio()
+}
+
+/// Os campos do fecho de uma base: a instalação, os boots e as
+/// compactações.
+fn fecho(conteudo: &[u8]) -> Result<([u8; 16], u64, u64), &'static str> {
+    let [instalacao, boots, compactacoes] = estado::exatamente::<3>(conteudo)?;
+    Ok((
+        instalacao
+            .try_into()
+            .map_err(|_| "instalacao que nao tem 16 bytes")?,
+        u64_de(boots)?,
+        u64_de(compactacoes)?,
+    ))
 }
 
 /// A chave do journal e a senha da âncora, derivadas da chave do Duke.
@@ -431,7 +510,18 @@ fn nonce() -> Result<[u8; diario::TAM_NONCE], &'static str> {
 }
 
 /// Abre a persistência, no boot. Ver o cabeçalho do módulo.
+///
+/// Inteira com a ordem das gravações na mão. O coletor já roda no boot, e
+/// grava a auditoria e compacta assim que a persistência fica disponível:
+/// sem a ordem, ele gravaria um registro só de auditoria antes da abertura
+/// — e uma região que não começa pela abertura não é um journal inteiro —,
+/// ou compactaria antes de as mensagens do journal serem adotadas, numa
+/// base sem elas.
 pub fn abrir() {
+    em_ordem(abrir_em_ordem);
+}
+
+fn abrir_em_ordem() {
     let estado = match abrir_de_fato() {
         Ok(e) => e,
         Err(motivo) => Estado::Indisponivel(motivo),
@@ -500,16 +590,51 @@ pub fn abrir() {
 
 fn abrir_de_fato() -> Result<Estado, &'static str> {
     let (chave, senha) = segredos().ok_or("sem a chave do Duke")?;
-    let mut meio = janela()?;
     #[cfg(feature = "quedas")]
-    crate::quedas::carregar(&mut meio);
+    crate::quedas::carregar(&mut janela()?);
+
+    // As duas regiões, lidas sem reaplicar nada: qual é o journal é a que
+    // está inteira com a última âncora maior — ver `diario::escolher`. A
+    // outra é uma compactação que não terminou, ou o journal de antes da
+    // última compactação: nenhuma das duas diz nada.
+    let mut regioes = regioes()?;
+    let mut percorridas = [None, None];
+    for (i, r) in regioes.iter_mut().enumerate() {
+        percorridas[i] = Some(
+            diario::percorrer(r, &chave, |_| Ok::<(), ()>(())).map_err(|e| match e {
+                diario::Interrompido::Meio(m) => m,
+                diario::Interrompido::Recusado { .. } => "o percurso nao recusa nada aqui",
+            })?,
+        );
+    }
+    let percorridas = percorridas.map(|p| p.unwrap_or_else(vazio));
+    let escolhida = diario::escolher(&percorridas);
+    // Nenhuma inteira, com registros autênticos no disco — só uma base sem
+    // fecho, ou duas inteiras com a mesma âncora —, não é um journal novo
+    // nem uma criação interrompida: nenhuma das duas chega aí sem que
+    // alguém mexa no disco. Recusado, sem escolher.
+    if escolhida.is_none() && percorridas.iter().any(|p| p.quantos > 0) {
+        return Ok(Estado::Recusada("nenhuma regiao do journal esta inteira"));
+    }
+    let regiao = escolhida.unwrap_or(0);
+    crate::log_info!(
+        "persistencia",
+        "regioes: {} e {} registros; vale a {}",
+        percorridas[0].quantos,
+        percorridas[1].quantos,
+        match escolhida {
+            Some(0) => "primeira",
+            Some(_) => "segunda",
+            None => "nenhuma",
+        }
+    );
 
     // O journal é lido e reaplicado antes de qualquer outra conferência, e
     // vale mesmo que a persistência acabe indisponível ou recusada: o que
     // ele diz é mais recente que a imagem, e uma lápide lida é uma
     // credencial a menos. Ler não precisa de descarga nem de TPM.
     //
-    // Um registro de cada vez: o journal pode ocupar a partição inteira, e
+    // Um registro de cada vez: o journal pode ocupar a região inteira, e
     // o heap do kernel é bem menor que ela. Do caminho fica só o que o
     // boot precisa — a instalação, o último boot, quantos de auditoria.
     crate::arch::sem_interrupcoes(|| {
@@ -517,24 +642,34 @@ fn abrir_de_fato() -> Result<Estado, &'static str> {
     });
     let mut instalacao = None;
     let mut boots = 0u64;
+    let mut compactacoes = 0u64;
     let mut de_auditoria = 0u64;
-    let lido = diario::percorrer(&mut meio, &chave, |r| {
-        reaplicar(&r)?;
-        match r.tipo {
-            tipo::ABERTURA if r.sequencia == 0 => {
-                instalacao =
-                    primeiro_campo(&r.conteudo).and_then(|id| <[u8; 16]>::try_from(id).ok());
+    let lido = match escolhida {
+        None => Ok(vazio()),
+        Some(i) => diario::percorrer(&mut regioes[i], &chave, |r| {
+            reaplicar(&r)?;
+            match r.tipo {
+                tipo::ABERTURA if r.sequencia == 0 => {
+                    instalacao =
+                        primeiro_campo(&r.conteudo).and_then(|id| <[u8; 16]>::try_from(id).ok());
+                }
+                tipo::BOOT => {
+                    boots = primeiro_campo(&r.conteudo)
+                        .and_then(|b| b.try_into().ok().map(u64::from_le_bytes))
+                        .unwrap_or(0);
+                }
+                tipo::BASE_FIM => {
+                    let f = fecho(&r.conteudo)?;
+                    instalacao = Some(f.0);
+                    boots = f.1;
+                    compactacoes = f.2;
+                }
+                tipo::AUDITORIA => de_auditoria += 1,
+                _ => {}
             }
-            tipo::BOOT => {
-                boots = primeiro_campo(&r.conteudo)
-                    .and_then(|b| b.try_into().ok().map(u64::from_le_bytes))
-                    .unwrap_or(0);
-            }
-            tipo::AUDITORIA => de_auditoria += 1,
-            _ => {}
-        }
-        Ok::<(), &'static str>(())
-    });
+            Ok::<(), &'static str>(())
+        }),
+    };
     let lido = match lido {
         Ok(l) => l,
         Err(diario::Interrompido::Meio(m)) => return Err(m),
@@ -550,10 +685,16 @@ fn abrir_de_fato() -> Result<Estado, &'static str> {
             ));
         }
     };
+    // As anulações que a reposição das revogações anotou já estão no
+    // journal: nada fica pendente — e a compactação do boot, logo abaixo,
+    // exige isso.
+    for mut e in tirar_pendentes() {
+        politica::sigiloso::zerar_bloco(&mut e);
+    }
     if let diario::Parada::Ilegivel { setor, motivo } = lido.parada {
         crate::log_warn!(
             "persistencia",
-            "a leitura parou no setor {} da particao: {}",
+            "a leitura parou no setor {} da regiao: {}",
             setor,
             motivo
         );
@@ -572,6 +713,8 @@ fn abrir_de_fato() -> Result<Estado, &'static str> {
         p.registros = lido.quantos;
         p.registros_de_auditoria = de_auditoria;
         p.boots = boots;
+        p.compactacoes = compactacoes;
+        p.regiao = regiao;
     });
 
     // Agora, se dá para gravar: um disco durável e a âncora.
@@ -587,7 +730,7 @@ fn abrir_de_fato() -> Result<Estado, &'static str> {
         Err(e) => return Ok(Estado::Recusada(e.motivo())),
     };
 
-    let total = meio.setores();
+    let total = regioes[regiao].setores();
     let (ancora, valor) = match (lido.quantos == 0, ancora, valor) {
         // Um journal vazio diante de uma âncora presente. Se o contador
         // nunca passou do valor com que nasceu, nenhum registro foi
@@ -677,7 +820,7 @@ fn abrir_de_fato() -> Result<Estado, &'static str> {
     // auditoria, e o que este boot registrou até aqui continua depois
     // dela — e vai no registro de boot, logo abaixo.
     if let Some(reposta) = crate::arch::sem_interrupcoes(|| REPOSTA.lock().take()) {
-        AUDITORIA_GRAVADA.store(reposta.ultima_seq(), Ordering::Release);
+        auditoria_foi_gravada(reposta.ultima_seq(), reposta.cabeca());
         crate::autorizacao::adotar_auditoria(reposta);
     }
     com(|p| {
@@ -693,6 +836,18 @@ fn abrir_de_fato() -> Result<Estado, &'static str> {
         crate::aleatorio::preencher(&mut instalacao).map_err(|_| "sem entropia")?;
         gravar(tipo::ABERTURA, &estado::campos(&[&instalacao])?)?;
         com(|p| p.instalacao = Some(instalacao));
+    }
+    // O boot é um ponto seguro: o que está em memória é o que o journal
+    // disse, e nada mais mudou. Uma região que passou do ponto — ou que
+    // encheu e deixou o boot anterior sem gravar — compacta aqui, antes do
+    // registro de boot. Se a base não couber, o boot tenta gravar assim
+    // mesmo, e uma região cheia deixa a persistência indisponível.
+    #[cfg(feature = "quedas")]
+    let compactar_no_boot = !crate::quedas::boot_nao_compacta();
+    #[cfg(not(feature = "quedas"))]
+    let compactar_no_boot = true;
+    if compactar_no_boot && precisa_compactar() {
+        let _ = compactar();
     }
     gravar(tipo::BOOT, &estado::campos(&[&(boots + 1).to_le_bytes()])?)?;
     com(|p| p.boots = boots + 1);
@@ -734,6 +889,8 @@ struct DaAuditoria {
     campos: Vec<u8>,
     /// A última sequência que os campos levam; a já gravada, sem nenhum.
     ate: u64,
+    /// O elo dela.
+    elo: [u8; 32],
     /// As sequências que saíram do anel antes de chegar ao journal.
     perdidas: Option<(u64, u64)>,
 }
@@ -743,6 +900,7 @@ struct DaAuditoria {
 fn auditoria_que_cabe(orcamento: usize, antes_de: u64) -> Result<DaAuditoria, &'static str> {
     use politica::auditoria::codificar;
     let gravada = auditoria_gravada();
+    let elo_gravado = crate::arch::sem_interrupcoes(|| *ELO_GRAVADO.lock());
     let campo = |campos: &mut Vec<u8>, e: Vec<u8>| -> Result<bool, &'static str> {
         if campos.len() + 2 + e.len() > orcamento {
             return Ok(false);
@@ -755,6 +913,7 @@ fn auditoria_que_cabe(orcamento: usize, antes_de: u64) -> Result<DaAuditoria, &'
         let mut d = DaAuditoria {
             campos: Vec::new(),
             ate: gravada,
+            elo: elo_gravado,
             perdidas: None,
         };
         if let Some(l) = falta.lacuna {
@@ -766,6 +925,7 @@ fn auditoria_que_cabe(orcamento: usize, antes_de: u64) -> Result<DaAuditoria, &'
                 return Ok(d);
             }
             d.ate = l.ultima;
+            d.elo = l.elo;
             d.perdidas = Some((l.primeira, l.ultima));
         }
         for r in falta.registros.into_iter().take_while(|r| r.seq < antes_de) {
@@ -774,12 +934,14 @@ fn auditoria_que_cabe(orcamento: usize, antes_de: u64) -> Result<DaAuditoria, &'
                 break;
             }
             d.ate = r.seq;
+            d.elo = r.elo;
         }
         Ok(d)
     })
     .unwrap_or(Ok(DaAuditoria {
         campos: Vec::new(),
         ate: gravada,
+        elo: elo_gravado,
         perdidas: None,
     }))
 }
@@ -836,7 +998,7 @@ fn gravar_sozinho(tipo_do_registro: u16, dados: &[u8], decisao: u64) -> Result<(
             // O conteúdo pode ter o corpo de uma mensagem.
             politica::sigiloso::zerar_bloco(&mut conteudo);
             gravado?;
-            AUDITORIA_GRAVADA.store(a.ate, Ordering::Release);
+            auditoria_foi_gravada(a.ate, a.elo);
             return Ok(());
         }
         // Não cabe junto: os mais antigos vão antes, num registro só deles,
@@ -850,7 +1012,7 @@ fn gravar_sozinho(tipo_do_registro: u16, dados: &[u8], decisao: u64) -> Result<(
             return Err("a decisao da operacao nao cabe no registro dela");
         }
         gravar_um(tipo::AUDITORIA, &antes.campos)?;
-        AUDITORIA_GRAVADA.store(antes.ate, Ordering::Release);
+        auditoria_foi_gravada(antes.ate, antes.elo);
     }
 }
 
@@ -920,7 +1082,504 @@ pub fn gravar_auditoria_se_preciso() {
     let _ = gravar_auditoria();
 }
 
+// ---------------------------------------------------------------------------
+// A compactação
+// ---------------------------------------------------------------------------
+
+/// Com a região ocupada daqui para cima, em quartos, o coletor e o boot
+/// compactam: o quarto que sobra é a folga de quem grava entre um olhar do
+/// coletor e o seguinte.
+const COMPACTAR_A_PARTIR_DE_QUARTOS: u64 = 3;
+
+/// Depois de uma base que não coube na outra região, quantos registros
+/// esperar antes de tentar de novo: o estado só diminui com operações, e
+/// tentar a cada olhar do coletor seria ler a região inteira à toa.
+const ESPERAR_DEPOIS_DE_NAO_CABER: u64 = 64;
+
+/// Os registros da região quando a última base não coube; `u64::MAX` sem
+/// nenhuma.
+static NAO_COUBE_EM: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// Só na suíte: o coletor não compacta sozinho. A suíte conta registros e
+/// lê a região; os casos que querem a compactação a pedem.
+#[cfg(feature = "modo-teste")]
+static COMPACTACAO_PAUSADA: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(true);
+
+/// Por que uma compactação não aconteceu.
+enum FalhaDaCompactacao {
+    /// Não era a hora — havia mudança por gravar —, e nada mudou.
+    Adiada(&'static str),
+    /// A base não cabe na outra região. A região atual continua a do
+    /// journal, inteira e ancorada.
+    NaoCabe,
+    /// O disco ou o TPM falharam no meio: como numa gravação, só o próximo
+    /// boot sabe resolver com segurança.
+    Falhou(&'static str),
+}
+
+impl From<&'static str> for FalhaDaCompactacao {
+    fn from(m: &'static str) -> Self {
+        FalhaDaCompactacao::Falhou(m)
+    }
+}
+
+/// Se a região passou do ponto de compactar.
+fn precisa_compactar() -> bool {
+    com(|p| {
+        let Some(a) = p.aberta.as_ref() else {
+            return false;
+        };
+        let (usados, total) = a.escritor.ocupacao();
+        let nao_coube = NAO_COUBE_EM.load(Ordering::Acquire);
+        p.estado == Estado::Disponivel
+            && usados * 4 >= total * COMPACTAR_A_PARTIR_DE_QUARTOS
+            && (nao_coube == u64::MAX || p.registros >= nao_coube + ESPERAR_DEPOIS_DE_NAO_CABER)
+    })
+}
+
+/// Chamada pelo coletor: compacta se a região passou do ponto.
+///
+/// O coletor é um ponto seguro: ele não está no meio de operação nenhuma,
+/// e com a ordem das gravações na mão nenhuma outra está — o que está em
+/// memória é exatamente o que está no journal.
+pub fn compactar_se_preciso() {
+    #[cfg(feature = "modo-teste")]
+    if COMPACTACAO_PAUSADA.load(Ordering::Acquire) {
+        return;
+    }
+    #[cfg(feature = "quedas")]
+    if crate::quedas::coletor_nao_compacta() {
+        return;
+    }
+    if !precisa_compactar() {
+        return;
+    }
+    em_ordem(|| {
+        if precisa_compactar() {
+            let _ = compactar();
+        }
+    });
+}
+
+/// Compacta, e diz o desfecho na auditoria. Uma falha do disco ou do TPM
+/// deixa a persistência indisponível, como a de qualquer gravação; uma base
+/// que não cabe, não — a região atual continua valendo, e o que não couber
+/// nela falha quando for gravado.
+fn compactar() -> Result<(), &'static str> {
+    let resultado = em_ordem(compactar_sozinho);
+    let (codigo, detalhe, r) = match resultado {
+        Ok((regiao, registros, ancora, n)) => {
+            NAO_COUBE_EM.store(u64::MAX, Ordering::Release);
+            crate::log_info!(
+                "persistencia",
+                "compactado na regiao {}: {} registros, ancora {}",
+                regiao,
+                registros,
+                ancora
+            );
+            (
+                politica::Codigo::Allow,
+                alloc::format!(
+                    "regiao {regiao}; {registros} registros; ancora {ancora}; compactacao {n}"
+                ),
+                Ok(()),
+            )
+        }
+        Err(FalhaDaCompactacao::Adiada(m)) => {
+            crate::log_info!("persistencia", "compactacao adiada: {}", m);
+            return Err(m);
+        }
+        Err(FalhaDaCompactacao::NaoCabe) => {
+            NAO_COUBE_EM.store(com(|p| p.registros), Ordering::Release);
+            crate::log_error!(
+                "persistencia",
+                "a compactacao nao cabe na outra regiao: o journal continua onde esta"
+            );
+            (
+                politica::Codigo::Error,
+                alloc::string::String::from("a base nao cabe na outra regiao"),
+                Err("a base nao cabe na outra regiao"),
+            )
+        }
+        Err(FalhaDaCompactacao::Falhou(m)) => {
+            com(|p| p.estado = Estado::Indisponivel("uma compactacao do journal falhou"));
+            crate::log_error!("persistencia", "a compactacao falhou: {}", m);
+            (
+                politica::Codigo::Error,
+                alloc::string::String::from(m),
+                Err(m),
+            )
+        }
+    };
+    crate::autorizacao::auditar_do_kernel("persistence.compact", "", codigo, &detalhe);
+    r
+}
+
+/// O tipo de uma entrada.
+fn tipo_da_entrada(e: &[u8]) -> Option<u16> {
+    let campos = estado::ler_campos(e).ok()?;
+    let t: [u8; 2] = (*campos.first()?).try_into().ok()?;
+    Some(u16::from_le_bytes(t))
+}
+
+/// As entradas que mudam o estado de autoridade, e o marcador da operação:
+/// o que a base carrega da região velha, na ordem em que aconteceu.
+fn e_de_autoridade(t: u16) -> bool {
+    matches!(
+        t,
+        tipo::OPERACAO
+            | tipo::AGENTE_REGISTRADO
+            | tipo::AGENTE_REVOGADO
+            | tipo::PAPEL_ATRIBUIDO
+            | tipo::POLITICA
+            | tipo::PESSOA_REGISTRADA
+            | tipo::PESSOA_REVOGADA
+            | tipo::CREDENCIAL_ROTACIONADA
+            | tipo::SESSAO_REVOGADA
+            | tipo::LAPIDE
+    )
+}
+
+/// O que a base leva de um registro da região velha, como um grupo — que
+/// vai inteiro numa parte só.
+///
+/// - De uma operação: as mudanças de autoridade, o marcador, e a decisão
+///   que a autorizou — os registros da auditoria com o método da operação,
+///   como [`tipo::AUDITORIA_HISTORICA`]. A mudança não fica no journal sem
+///   a decisão dela, nem depois de compactada.
+/// - De uma parte de uma base anterior: o que ela já carregava — as
+///   mudanças e as decisões delas, juntas como estavam.
+/// - Do resto — boots, auditoria, mensagens —, nada: o estado das
+///   mensagens e a cadeia da auditoria a base tira da memória.
+///
+/// A política vai só uma vez: a do último registro que a tem, que é a que
+/// vigora.
+fn grupo_da_base(
+    r: &diario::Registro,
+    ultima_politica: Option<u64>,
+) -> Result<Vec<Vec<u8>>, &'static str> {
+    let fica = |t: u16| t != tipo::POLITICA || ultima_politica == Some(r.sequencia);
+    let mut grupo = Vec::new();
+    match r.tipo {
+        tipo::BASE => {
+            for e in entradas(r)? {
+                let t = tipo_da_entrada(e).ok_or("entrada sem tipo")?;
+                if (e_de_autoridade(t) && fica(t)) || t == tipo::AUDITORIA_HISTORICA {
+                    grupo.push(e.to_vec());
+                }
+            }
+        }
+        tipo::OPERACAO => {
+            let todas = entradas(r)?;
+            let nome = todas
+                .first()
+                .and_then(|e| estado::ler_campos(e).ok())
+                .and_then(|c| c.get(1).copied())
+                .unwrap_or(&[]);
+            for e in &todas {
+                let t = tipo_da_entrada(e).ok_or("entrada sem tipo")?;
+                if e_de_autoridade(t) && fica(t) {
+                    grupo.push(e.to_vec());
+                } else if t == tipo::AUDITORIA_EVENTO {
+                    let campos = estado::ler_campos(e)?;
+                    let codificado = campos.get(1).ok_or("auditoria sem registro")?;
+                    let (_, ev) = politica::auditoria::decodificar(codificado)?;
+                    if ev.metodo.as_bytes() == nome {
+                        grupo.push(entrada(tipo::AUDITORIA_HISTORICA, &[codificado])?);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(grupo)
+}
+
+/// A base sendo escrita na outra região: os grupos vão juntando numa parte
+/// até ela encher, e cada parte cheia vai ao disco — sem descarga, que é
+/// uma só, no fim.
+struct EscritaDaBase<'a> {
+    base: diario::Base,
+    destino: &'a mut Particao,
+    chave: [u8; 32],
+    versao: u64,
+    tempo: u64,
+    parte: Vec<u8>,
+    partes: u64,
+}
+
+impl EscritaDaBase<'_> {
+    fn grupo(&mut self, grupo: &[Vec<u8>]) -> Result<(), FalhaDaCompactacao> {
+        let tamanho: usize = grupo.iter().map(|e| e.len() + 2).sum();
+        if tamanho > diario::MAIOR_CONTEUDO {
+            return Err(FalhaDaCompactacao::Falhou(
+                "um grupo da base nao cabe num registro",
+            ));
+        }
+        if self.parte.len() + tamanho > diario::MAIOR_CONTEUDO {
+            self.selar()?;
+        }
+        for e in grupo {
+            self.parte.extend_from_slice(&estado::campos(&[e])?);
+        }
+        Ok(())
+    }
+
+    fn selar(&mut self) -> Result<(), FalhaDaCompactacao> {
+        if self.parte.is_empty() {
+            return Ok(());
+        }
+        let n = nonce()?;
+        let parte = self
+            .base
+            .parte(&self.chave, n, self.versao, self.tempo, &self.parte)
+            .map_err(nao_cabe)?;
+        // A parte pode ter o corpo de uma mensagem.
+        politica::sigiloso::zerar_bloco(&mut self.parte);
+        self.parte.clear();
+        self.destino.escrever(parte.setor, &parte.bytes)?;
+        self.partes += 1;
+        #[cfg(feature = "quedas")]
+        if self.partes == 1 {
+            crate::quedas::aqui(crate::quedas::Ponto::DepoisDaPrimeiraParte);
+        }
+        Ok(())
+    }
+}
+
+/// A partição cheia, para a base, é a base que não cabe.
+fn nao_cabe(m: &'static str) -> FalhaDaCompactacao {
+    if m == "a particao de estado esta cheia" {
+        FalhaDaCompactacao::NaoCabe
+    } else {
+        FalhaDaCompactacao::Falhou(m)
+    }
+}
+
+/// A compactação, com a ordem das gravações na mão. Devolve a região nova,
+/// quantos registros a base tem, a âncora dela e quantas compactações o
+/// journal já teve.
+///
+/// # O protocolo
+///
+/// 1. A base inteira vai para a **outra** região: o histórico de autoridade
+///    da região atual com as decisões, o estado das mensagens e o ponto de
+///    onde a cadeia da auditoria continua — e o fecho. Tudo com a mesma
+///    âncora, a seguinte.
+/// 2. Uma descarga.
+/// 3. O contador avança, uma vez.
+/// 4. Só então o journal passa a ser o da região nova.
+///
+/// Até o passo 3, a região atual é a do journal — uma queda em qualquer
+/// ponto deixa a base sem fecho, ou com o fecho e sem o contador; no
+/// primeiro caso ela não vale, no segundo o boot completa o avanço, como o
+/// de qualquer registro. Depois do 3, a região velha é um disco anterior ao
+/// que o TPM viu: nunca mais é escolhida, e devolvida ao disco sozinha é
+/// recusada.
+///
+/// # Só num ponto seguro
+///
+/// O estado das mensagens vem da memória, e o da memória tem de ser o do
+/// journal: nenhuma operação no meio, nenhuma mudança anotada por gravar.
+/// O coletor e o boot chamam daqui; uma operação, nunca — a base levaria
+/// uma mudança sem a decisão dela.
+fn compactar_sozinho() -> Result<(usize, u64, u64, u64), FalhaDaCompactacao> {
+    use FalhaDaCompactacao::*;
+    if crate::arch::sem_interrupcoes(|| !PENDENTES.lock().is_empty()) {
+        return Err(Adiada("ha mudancas de mensagem por gravar"));
+    }
+    let (estado, regiao, instalacao, boots, compactacoes) =
+        com(|p| (p.estado, p.regiao, p.instalacao, p.boots, p.compactacoes));
+    if estado != Estado::Disponivel {
+        return Err(Adiada(estado.motivo()));
+    }
+    let instalacao = instalacao.ok_or(Falhou("o journal nao tem a instalacao"))?;
+    let (chave, _) = segredos().ok_or(Falhou("sem a chave do Duke"))?;
+    duravel()?;
+    let [a, b] = regioes()?;
+    let (mut origem, mut destino) = if regiao == 0 { (a, b) } else { (b, a) };
+    let base = com(|p| {
+        p.aberta
+            .as_ref()
+            .ok_or("a persistencia nao esta aberta")
+            .and_then(|a| a.escritor.base(destino.setores))
+    })?;
+    #[cfg(feature = "quedas")]
+    crate::quedas::gravacao_comecou(tipo::BASE_FIM);
+    #[cfg(feature = "quedas")]
+    crate::quedas::aqui(crate::quedas::Ponto::AntesDaEscrita);
+
+    let interrompido = |e: diario::Interrompido<FalhaDaCompactacao>| match e {
+        diario::Interrompido::Meio(m) => Falhou(m),
+        diario::Interrompido::Recusado { motivo, .. } => motivo,
+    };
+    // A primeira passada: de qual registro é a política que vigora.
+    let mut ultima_politica = None;
+    diario::percorrer(&mut origem, &chave, |r| {
+        let tem = entradas(&r)
+            .map_err(Falhou)?
+            .iter()
+            .any(|e| tipo_da_entrada(e) == Some(tipo::POLITICA));
+        if tem {
+            ultima_politica = Some(r.sequencia);
+        }
+        Ok(())
+    })
+    .map_err(interrompido)?;
+
+    let mut escrita = EscritaDaBase {
+        base,
+        destino: &mut destino,
+        chave,
+        versao: crate::autorizacao::versao_da_politica(),
+        tempo: agora(),
+        parte: Vec::new(),
+        partes: 0,
+    };
+    // A segunda: o histórico de autoridade, com as decisões.
+    diario::percorrer(&mut origem, &chave, |r| {
+        let grupo = grupo_da_base(&r, ultima_politica).map_err(Falhou)?;
+        if grupo.is_empty() {
+            Ok(())
+        } else {
+            escrita.grupo(&grupo)
+        }
+    })
+    .map_err(interrompido)?;
+
+    // As mensagens, da memória: as lápides, as vivas na ordem dos ids, e o
+    // próximo id.
+    let mut grupos = crate::mensagens::com_as_caixas(|c| -> Result<_, &'static str> {
+        let mut g: Vec<Vec<Vec<u8>>> = Vec::new();
+        for l in c.lapides() {
+            g.push(alloc::vec![entrada(
+                tipo::MENSAGEM_LAPIDE,
+                &[
+                    &l.id.to_le_bytes(),
+                    &l.de.bytes(),
+                    &l.para.bytes(),
+                    &[l.estado.codigo()],
+                    &l.versao.to_le_bytes(),
+                ],
+            )?]);
+        }
+        for m in c.todas() {
+            let mut viva = alloc::vec![entrada_criada(m.gravada())?];
+            if m.estado == politica::mensagens::Estado::Entregue {
+                viva.push(entrada(
+                    tipo::MENSAGEM_ESTADO,
+                    &[
+                        &m.id.to_le_bytes(),
+                        &[m.estado.codigo()],
+                        &m.versao.to_le_bytes(),
+                    ],
+                )?);
+            }
+            g.push(viva);
+        }
+        g.push(alloc::vec![entrada(
+            tipo::MENSAGENS_PROXIMO,
+            &[&c.proximo().to_le_bytes()]
+        )?]);
+        Ok(g)
+    })?;
+    let mut escritas = Ok(());
+    for g in &grupos {
+        escritas = escrita.grupo(g);
+        if escritas.is_err() {
+            break;
+        }
+    }
+    for g in grupos.iter_mut().flatten() {
+        politica::sigiloso::zerar_bloco(g);
+    }
+    escritas?;
+
+    // A auditoria: o que está no journal e o anel ainda tem vai inteiro; a
+    // cadeia continua do elo de antes do primeiro deles — ou do último
+    // gravado, se o anel já não tem nenhum.
+    let gravada = auditoria_gravada();
+    let elo_gravado = crate::arch::sem_interrupcoes(|| *ELO_GRAVADO.lock());
+    let auditoria = crate::autorizacao::com_auditoria(|c| -> Result<_, &'static str> {
+        let no_anel: Vec<&politica::auditoria::Registro> = c
+            .ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+            .filter(|r| r.seq <= gravada)
+            .collect();
+        let (antes, elo) = match no_anel.first() {
+            Some(f) => (f.seq - 1, f.anterior),
+            None => (gravada, elo_gravado),
+        };
+        let mut g = Vec::new();
+        if antes >= 1 {
+            g.push(alloc::vec![entrada(
+                tipo::AUDITORIA_COMPACTADA,
+                &[&1u64.to_le_bytes(), &antes.to_le_bytes(), &elo],
+            )?]);
+        }
+        for r in no_anel {
+            g.push(alloc::vec![entrada(
+                tipo::AUDITORIA_EVENTO,
+                &[&politica::auditoria::codificar(r.seq, &r.evento)],
+            )?]);
+        }
+        Ok(g)
+    })
+    .unwrap_or(Ok(Vec::new()))?;
+    for g in &auditoria {
+        escrita.grupo(g)?;
+    }
+    escrita.selar()?;
+
+    // O fecho.
+    let partes = escrita.partes;
+    let n = nonce()?;
+    let fechada = escrita
+        .base
+        .fechar(
+            &chave,
+            n,
+            escrita.versao,
+            escrita.tempo,
+            &estado::campos(&[
+                &instalacao,
+                &boots.to_le_bytes(),
+                &(compactacoes + 1).to_le_bytes(),
+            ])?,
+        )
+        .map_err(nao_cabe)?;
+    destino.escrever(fechada.setor, &fechada.bytes)?;
+    #[cfg(feature = "quedas")]
+    crate::quedas::aqui(crate::quedas::Ponto::DepoisDaEscrita);
+    destino.descarregar()?;
+    #[cfg(feature = "quedas")]
+    crate::quedas::aqui(crate::quedas::Ponto::DepoisDaDescarga);
+    let ancora_da_base = fechada.ancora;
+    // Só depois de a base inteira estar descarregada o contador anda.
+    let avancado = crate::tpm::com_o_tpm(|t| {
+        com(|p| p.aberta.as_ref().map(|a| a.ancora.avancar(t)))
+            .ok_or(ancora::Erro::Transporte("a persistencia nao esta aberta"))?
+    })
+    .ok_or("sem TPM")?
+    .map_err(|e| e.motivo())?;
+    #[cfg(feature = "quedas")]
+    crate::quedas::aqui(crate::quedas::Ponto::DepoisDoContador);
+    let escritor = fechada.confirmar(avancado)?;
+    let nova = 1 - regiao;
+    com(|p| {
+        if let Some(a) = p.aberta.as_mut() {
+            a.escritor = escritor;
+        }
+        p.regiao = nova;
+        p.registros = partes + 1;
+        p.registros_de_auditoria = 0;
+        p.compactacoes = compactacoes + 1;
+    });
+    Ok((nova, partes + 1, ancora_da_base, compactacoes + 1))
+}
+
 /// O protocolo de um registro: montar, escrever, descarregar, avançar o
+/// contador, confirmar./// O protocolo de um registro: montar, escrever, descarregar, avançar o
 /// contador, confirmar.
 fn gravar_um(tipo_do_registro: u16, dados: &[u8]) -> Result<(), &'static str> {
     #[cfg(feature = "quedas")]
@@ -944,7 +1603,7 @@ fn gravar_um(tipo_do_registro: u16, dados: &[u8]) -> Result<(), &'static str> {
             },
         )
     })?;
-    let mut meio = particao()?;
+    let mut meio = particao(com(|p| p.regiao))?;
     // A falha provocada pela suíte é a do disco, no lugar da escrita: o
     // caso confere que, quando a escrita não acontece, o contador também
     // não andou.
@@ -1167,7 +1826,8 @@ fn reaplicar(r: &diario::Registro) -> Result<(), &'static str> {
 }
 
 /// As entradas de um registro. A abertura e o boot têm um campo próprio
-/// primeiro; os outros tipos são só entradas. Em todos, a auditoria que o
+/// primeiro; o fecho de uma base, só os campos dele; os outros tipos são
+/// só entradas. Em todos os que não são da base, a auditoria que o
 /// registro levou vem no fim, como entradas.
 fn entradas(r: &diario::Registro) -> Result<Vec<&[u8]>, &'static str> {
     let campos = estado::ler_campos(&r.conteudo)?;
@@ -1176,7 +1836,9 @@ fn entradas(r: &diario::Registro) -> Result<Vec<&[u8]>, &'static str> {
             Some((_, resto)) => Ok(resto.to_vec()),
             None => Err("registro sem o campo do tipo"),
         },
-        tipo::OPERACAO | tipo::MENSAGENS | tipo::AUDITORIA => Ok(campos),
+        tipo::OPERACAO | tipo::MENSAGENS | tipo::AUDITORIA | tipo::BASE => Ok(campos),
+        // O fecho tem só os campos dele — ver [`fecho`].
+        tipo::BASE_FIM => fecho(&r.conteudo).map(|_| Vec::new()),
         _ => Err("tipo de registro desconhecido"),
     }
 }
@@ -1288,6 +1950,30 @@ pub(crate) fn reaplicar_entrada(e: &[u8]) -> Result<(), &'static str> {
             let (seq, evento) = politica::auditoria::decodificar(r)?;
             repor_na_auditoria(|c| c.repor(seq, evento))
         }
+        (tipo::AUDITORIA_COMPACTADA, [primeira, ultima, elo]) => {
+            let l = politica::auditoria::Lacuna {
+                primeira: u64_de(primeira)?,
+                ultima: u64_de(ultima)?,
+                elo: chave(elo)?,
+            };
+            repor_na_auditoria(|c| c.pular(l))
+        }
+        (tipo::AUDITORIA_HISTORICA, [r]) => politica::auditoria::decodificar(r).map(|_| ()),
+        (tipo::MENSAGEM_LAPIDE, [id, de, para, estado, versao]) => {
+            let estado = match estado {
+                [c] => politica::mensagens::Estado::de_codigo(*c),
+                _ => None,
+            }
+            .ok_or("estado de mensagem invalido")?;
+            crate::mensagens::restaurar_lapide(politica::mensagens::Lapide {
+                id: u64_de(id)?,
+                de: dono(de)?,
+                para: dono(para)?,
+                estado,
+                versao: u64_de(versao)?,
+            })
+        }
+        (tipo::MENSAGENS_PROXIMO, [n]) => crate::mensagens::fixar_proximo(u64_de(n)?),
         (tipo::AUDITORIA_LACUNA, [primeira, ultima, elo]) => {
             let l = politica::auditoria::Lacuna {
                 primeira: u64_de(primeira)?,
@@ -1369,7 +2055,7 @@ pub fn nascimento_de_teste() -> Result<Option<u64>, &'static str> {
 /// estado, como estão no disco — cifrados.
 #[cfg(feature = "modo-teste")]
 pub fn bytes_do_journal_de_teste(setores: u64) -> Result<Vec<u8>, &'static str> {
-    let mut meio = janela()?;
+    let mut meio = regiao_atual()?;
     let mut v = alloc::vec![0u8; setores as usize * 512];
     meio.ler(0, &mut v)?;
     Ok(v)
@@ -1380,7 +2066,7 @@ pub fn bytes_do_journal_de_teste(setores: u64) -> Result<Vec<u8>, &'static str> 
 #[cfg(feature = "modo-teste")]
 pub fn auditoria_do_journal_de_teste() -> Result<Cadeia, &'static str> {
     let (chave, _) = segredos().ok_or("sem a chave do Duke")?;
-    let mut meio = janela()?;
+    let mut meio = regiao_atual()?;
     let mut c = Cadeia::nova(crate::autorizacao::CAPACIDADE_DA_AUDITORIA);
     diario::percorrer(&mut meio, &chave, |r| repor_de_teste(&mut c, &r)).map_err(|e| match e {
         diario::Interrompido::Meio(m) | diario::Interrompido::Recusado { motivo: m, .. } => m,
@@ -1397,7 +2083,10 @@ fn repor_de_teste(c: &mut Cadeia, r: &diario::Registro) -> Result<(), &'static s
                 let (seq, evento) = politica::auditoria::decodificar(ev)?;
                 c.repor(seq, evento)?;
             }
-            [t, primeira, ultima, elo] if *t == tipo::AUDITORIA_LACUNA.to_le_bytes() => {
+            [t, primeira, ultima, elo]
+                if *t == tipo::AUDITORIA_LACUNA.to_le_bytes()
+                    || *t == tipo::AUDITORIA_COMPACTADA.to_le_bytes() =>
+            {
                 c.pular(politica::auditoria::Lacuna {
                     primeira: u64_de(primeira)?,
                     ultima: u64_de(ultima)?,
@@ -1408,6 +2097,63 @@ fn repor_de_teste(c: &mut Cadeia, r: &diario::Registro) -> Result<(), &'static s
         }
     }
     Ok(())
+}
+
+/// A região em que o journal mora, para ler.
+#[cfg(feature = "modo-teste")]
+fn regiao_atual() -> Result<Particao, &'static str> {
+    let [a, b] = regioes()?;
+    Ok(if com(|p| p.regiao) == 0 { a } else { b })
+}
+
+/// Só para a suíte: encolhe as regiões a `setores` (com `None`, o tamanho
+/// inteiro). Vale para a região que a próxima compactação criar; a de
+/// agora fica com o tamanho com que foi aberta.
+#[cfg(feature = "modo-teste")]
+pub fn fixar_limite_de_teste(setores: Option<u64>) {
+    LIMITE_DE_TESTE.store(setores.unwrap_or(0), Ordering::Release);
+}
+
+/// Só para a suíte: reaplica a região atual inteira, como o boot.
+#[cfg(feature = "modo-teste")]
+pub fn reaplicar_regiao_de_teste() -> Result<u64, &'static str> {
+    let (chave, _) = segredos().ok_or("sem a chave do Duke")?;
+    let mut meio = regiao_atual()?;
+    let p = diario::percorrer(&mut meio, &chave, |r| reaplicar(&r)).map_err(|e| match e {
+        diario::Interrompido::Meio(m) | diario::Interrompido::Recusado { motivo: m, .. } => m,
+    })?;
+    for mut e in tirar_pendentes() {
+        politica::sigiloso::zerar_bloco(&mut e);
+    }
+    Ok(p.quantos)
+}
+
+/// Só para a suíte: a região `i` percorrida, sem reaplicar nada.
+#[cfg(feature = "modo-teste")]
+pub fn percorrida_de_teste(i: usize) -> Result<diario::Percorrido, &'static str> {
+    let (chave, _) = segredos().ok_or("sem a chave do Duke")?;
+    let [a, b] = regioes()?;
+    let mut meio = if i == 0 { a } else { b };
+    diario::percorrer(&mut meio, &chave, |_| Ok::<(), ()>(())).map_err(|_| "a regiao nao se le")
+}
+
+/// Só para a suíte: compacta agora, como o coletor compactaria.
+#[cfg(feature = "modo-teste")]
+pub fn compactar_de_teste() -> Result<(), &'static str> {
+    em_ordem(compactar)
+}
+
+/// Só para a suíte: pausa ou solta a compactação do coletor.
+#[cfg(feature = "modo-teste")]
+pub fn pausar_a_compactacao_de_teste(pausada: bool) {
+    COMPACTACAO_PAUSADA.store(pausada, Ordering::Release);
+}
+
+/// Só para a suíte: esquece a base que não coube, para o coletor tentar de
+/// novo já.
+#[cfg(feature = "modo-teste")]
+pub fn esquecer_o_que_nao_coube_de_teste() {
+    NAO_COUBE_EM.store(u64::MAX, Ordering::Release);
 }
 
 /// Só para a suíte: grava um registro de `tipo` com `dados`, exigindo a
@@ -1429,7 +2175,7 @@ pub fn entradas_de_teste(r: &diario::Registro) -> Result<Vec<&[u8]>, &'static st
 #[cfg(feature = "modo-teste")]
 pub fn ler_de_teste() -> Result<Vec<diario::Registro>, &'static str> {
     let (chave, _) = segredos().ok_or("sem a chave do Duke")?;
-    let mut meio = janela()?;
+    let mut meio = regiao_atual()?;
     let mut v: Vec<diario::Registro> = Vec::new();
     diario::percorrer(&mut meio, &chave, |r| {
         if let Some(velho) = v
@@ -1463,6 +2209,7 @@ pub unsafe fn destravar() {
         PERSISTENCIA.force_unlock();
         PENDENTES.force_unlock();
         REPOSTA.force_unlock();
+        ELO_GRAVADO.force_unlock();
     }
     DONO_DA_ORDEM.store(0, Ordering::Release);
 }

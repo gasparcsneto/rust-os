@@ -72,11 +72,24 @@ fn conteudo(tipo: u16, dados: &[u8]) -> Conteudo<'_> {
     }
 }
 
+/// O tipo do registro de número `n` de um journal de teste: o próprio
+/// número, menos os da base, que só a base escreve; o primeiro é a
+/// abertura, como num journal de verdade.
+fn tipo_de_teste(n: u64) -> u16 {
+    if n == 0 {
+        estado::tipo::ABERTURA
+    } else if n >= estado::tipo::BASE as u64 {
+        n as u16 + 100
+    } else {
+        n as u16
+    }
+}
+
 /// O protocolo inteiro de uma gravação: montar, escrever, descarregar,
 /// avançar o contador, confirmar.
 fn gravar(m: &mut Memoria, esc: &mut Escritor, tpm: &mut Contador, n: u64, dados: &[u8]) {
     let montado = esc
-        .montar(&CHAVE, nonce(n), &conteudo(n as u16, dados))
+        .montar(&CHAVE, nonce(n), &conteudo(tipo_de_teste(n), dados))
         .unwrap();
     m.escrever(montado.setor, &montado.bytes).unwrap();
     m.descarregar().unwrap();
@@ -108,7 +121,7 @@ fn le_de_volta_o_que_escreveu() {
     for (i, r) in lido.registros.iter().enumerate() {
         assert_eq!(r.sequencia, i as u64);
         assert_eq!(r.ancora, 1001 + i as u64);
-        assert_eq!(r.tipo, i as u16);
+        assert_eq!(r.tipo, tipo_de_teste(i as u64));
         // Os tipos são 0, 1, 2…: só o 3 é uma operação, e sobe a geração.
         assert_eq!(r.geracao, u64::from(i >= estado::tipo::OPERACAO as usize));
         assert_eq!(r.versao_da_politica, 7);
@@ -601,4 +614,258 @@ fn percorrer_para_no_registro_recusado() {
         })
     );
     assert_eq!(vistos, [0, 1, 2]);
+}
+
+/// Escreve uma base de `partes` partes, e o fecho, numa região nova, a
+/// partir do escritor `esc`. Devolve a base fechada, ainda não confirmada.
+fn escrever_base(
+    destino: &mut Memoria,
+    esc: &Escritor,
+    partes: usize,
+    com_fecho: bool,
+) -> Option<BaseFechada> {
+    let mut base = esc.base(destino.setores()).unwrap();
+    for i in 0..partes {
+        let dados: Vec<u8> = (0..(700 + i * 300)).map(|b| b as u8).collect();
+        let p = base
+            .parte(&CHAVE, nonce(500 + i as u64), 7, 1_900_000_100, &dados)
+            .unwrap();
+        destino.escrever(p.setor, &p.bytes).unwrap();
+    }
+    if !com_fecho {
+        return None;
+    }
+    let f = base
+        .fechar(&CHAVE, nonce(600), 7, 1_900_000_100, b"fecho")
+        .unwrap();
+    destino.escrever(f.setor, &f.bytes).unwrap();
+    destino.descarregar().unwrap();
+    Some(f)
+}
+
+/// A base inteira vale: as partes e o fecho com a mesma âncora — a
+/// seguinte à do journal velho —, na mesma geração; o contador avança uma
+/// vez, e o journal continua na região nova. A região velha, depois disso,
+/// é anterior ao que o TPM viu, e não é escolhida.
+#[test]
+fn a_base_inteira_vale_e_continua() {
+    use estado::tipo::{BASE, BASE_FIM, OPERACAO};
+    let (mut a, esc_a, mut tpm) = journal(6);
+    let mut b = Memoria::nova(256);
+    let geracao = esc_a.geracao();
+    let fechada = escrever_base(&mut b, &esc_a, 3, true).unwrap();
+    let ancora = fechada.ancora;
+    assert_eq!(ancora, tpm.0 + 1);
+
+    // Descarregada e não confirmada: a base é a gravação que falta.
+    let pa = ler(&mut a, &CHAVE).unwrap().percorrido();
+    let lido_b = ler(&mut b, &CHAVE).unwrap();
+    let pb = lido_b.percorrido();
+    assert!(pa.inteiro() && pb.inteiro());
+    assert_eq!(escolher(&[pa, pb]), Some(1));
+    assert_eq!(julgar(pb.ultima_ancora(), Some(tpm.0)), Veredito::Completar);
+    assert_eq!(lido_b.registros.len(), 4);
+    for (i, r) in lido_b.registros.iter().enumerate() {
+        assert_eq!(r.ancora, ancora, "registro {i}");
+        assert_eq!(r.geracao, geracao);
+        assert_eq!(r.tipo, if i < 3 { BASE } else { BASE_FIM });
+    }
+
+    // Um contador que não é o da base não confirma.
+    assert!(
+        escrever_base(&mut Memoria::nova(256), &esc_a, 1, true)
+            .unwrap()
+            .confirmar(tpm.0)
+            .is_err()
+    );
+    tpm.0 += 1;
+    let mut esc_b = fechada.confirmar(tpm.0).unwrap();
+    gravar(
+        &mut b,
+        &mut esc_b,
+        &mut tpm,
+        OPERACAO as u64,
+        b"depois da base",
+    );
+    let lido_b = ler(&mut b, &CHAVE).unwrap();
+    assert_eq!(lido_b.registros.len(), 5);
+    let ultimo = lido_b.registros.last().unwrap();
+    assert_eq!(ultimo.ancora, ancora + 1);
+    assert_eq!(ultimo.geracao, geracao + 1);
+    let pb = lido_b.percorrido();
+    assert_eq!(escolher(&[pa, pb]), Some(1));
+    assert_eq!(julgar(pb.ultima_ancora(), Some(tpm.0)), Veredito::Confere);
+    // A velha, sozinha, é um disco atrasado.
+    assert!(matches!(
+        julgar(pa.ultima_ancora(), Some(tpm.0)),
+        Veredito::Recusado(Recusa::DiscoAtrasado { .. })
+    ));
+}
+
+/// A compactação cortada em qualquer setor — a queda no meio da escrita da
+/// base — deixa uma região que não vale: a velha continua a escolhida, e
+/// confere com o contador. Só a base inteira, com o fecho, troca de região.
+#[test]
+fn a_base_cortada_em_cada_setor_nao_vale() {
+    let (mut a, esc_a, tpm) = journal(4);
+    let mut cheia = Memoria::nova(256);
+    escrever_base(&mut cheia, &esc_a, 2, true).unwrap();
+    let tamanho = cheia.bytes.iter().rposition(|&b| b != 0).unwrap() / TAM_SETOR + 1;
+    let pa = ler(&mut a, &CHAVE).unwrap().percorrido();
+    for corte in 0..=tamanho {
+        let mut b = Memoria::nova(256);
+        b.bytes[..corte * TAM_SETOR].copy_from_slice(&cheia.bytes[..corte * TAM_SETOR]);
+        let pb = ler(&mut b, &CHAVE).unwrap().percorrido();
+        let escolhida = escolher(&[pa, pb]);
+        if corte == tamanho {
+            assert_eq!(escolhida, Some(1), "inteira");
+        } else {
+            assert!(!pb.inteiro(), "cortada em {corte}");
+            assert_eq!(escolhida, Some(0), "cortada em {corte}");
+            assert_eq!(julgar(pa.ultima_ancora(), Some(tpm.0)), Veredito::Confere);
+        }
+    }
+    // As partes sem fecho, todas inteiras, também não valem.
+    let mut b = Memoria::nova(256);
+    assert!(escrever_base(&mut b, &esc_a, 3, false).is_none());
+    let pb = ler(&mut b, &CHAVE).unwrap().percorrido();
+    assert!(!pb.inteiro());
+    assert_eq!(escolher(&[pa, pb]), Some(0));
+}
+
+/// O leitor não aceita a base fora do lugar: uma parte depois de um
+/// registro comum, um registro comum depois de uma parte, ou uma parte com
+/// a âncora seguinte em vez da mesma.
+#[test]
+fn a_base_fora_do_lugar_e_recusada() {
+    use estado::tipo::{BASE, BOOT};
+    // Uma parte depois de um registro comum.
+    let (mut m, mut esc, mut tpm) = journal(0);
+    gravar(&mut m, &mut esc, &mut tpm, BOOT as u64, b"primeiro");
+    let elo = esc.elo;
+    gravar(&mut m, &mut esc, &mut tpm, BOOT as u64, b"segundo!");
+    reselar(&mut m, 1, elo, |_, t| {
+        t[0..2].copy_from_slice(&BASE.to_le_bytes())
+    });
+    let lido = ler(&mut m, &CHAVE).unwrap();
+    assert_eq!(lido.registros.len(), 1);
+    assert_eq!(
+        lido.parada,
+        Parada::Ilegivel {
+            setor: 1,
+            motivo: "base fora do comeco da regiao"
+        }
+    );
+
+    // Uma base de duas partes, e o fecho trocado por um registro comum.
+    let (_, esc_a, _) = journal(2);
+    let mut b = Memoria::nova(256);
+    let setor_do_fecho = escrever_base(&mut b, &esc_a, 2, true).unwrap().setor as usize;
+    let lido = ler(&mut b, &CHAVE).unwrap();
+    let elo_da_segunda = {
+        let mut uma = Memoria::nova(256);
+        uma.bytes[..setor_do_fecho * TAM_SETOR]
+            .copy_from_slice(&b.bytes[..setor_do_fecho * TAM_SETOR]);
+        ler(&mut uma, &CHAVE).unwrap().elo
+    };
+    assert_eq!(lido.registros.len(), 3);
+    let mut trocado = Memoria::nova(256);
+    trocado.bytes.copy_from_slice(&b.bytes);
+    reselar(&mut trocado, setor_do_fecho, elo_da_segunda, |_, t| {
+        t[0..2].copy_from_slice(&BOOT.to_le_bytes())
+    });
+    let lido = ler(&mut trocado, &CHAVE).unwrap();
+    assert_eq!(lido.registros.len(), 2);
+    assert!(matches!(
+        lido.parada,
+        Parada::Ilegivel {
+            motivo: "base sem fecho",
+            ..
+        }
+    ));
+
+    // O fecho com a âncora seguinte, e não a mesma.
+    let mut adiante = Memoria::nova(256);
+    adiante.bytes.copy_from_slice(&b.bytes);
+    reselar(&mut adiante, setor_do_fecho, elo_da_segunda, |c, _| {
+        c[24] += 1
+    });
+    let lido = ler(&mut adiante, &CHAVE).unwrap();
+    assert_eq!(lido.registros.len(), 2);
+    assert!(matches!(
+        lido.parada,
+        Parada::Ilegivel {
+            motivo: "a ancora nao segue a do registro anterior",
+            ..
+        }
+    ));
+}
+
+/// As regiões: duas, do mesmo tamanho, a primeira no setor zero, sem se
+/// sobrepor e sem chegar à reserva do fim; o limite encolhe as duas sem
+/// mudar onde a segunda começa.
+#[test]
+fn as_regioes_dividem_a_particao() {
+    let total = 32_768;
+    let [(a, ta), (b, tb)] = regioes(total, None);
+    assert_eq!(a, 0);
+    assert_eq!(ta, tb);
+    assert_eq!(b, ta);
+    assert!(b + tb <= total - RESERVA_NO_FIM);
+    let [(a2, t2), (b2, u2)] = regioes(total, Some(100));
+    assert_eq!((a2, t2, b2, u2), (0, 100, b, 100));
+    assert_eq!(regioes(total, Some(total)), regioes(total, None));
+    assert_eq!(regioes(10, None), [(0, 0), (0, 0)]);
+}
+
+/// A escolha: só as inteiras contam, a de âncora maior vence, e duas com a
+/// mesma âncora não se resolvem escolhendo.
+#[test]
+fn a_escolha_da_regiao() {
+    let (mut a, esc_a, _) = journal(3);
+    let pa = ler(&mut a, &CHAVE).unwrap().percorrido();
+    let mut vazia = Memoria::nova(64);
+    let pv = ler(&mut vazia, &CHAVE).unwrap().percorrido();
+    assert!(!pv.inteiro());
+    assert_eq!(escolher(&[pa, pv]), Some(0));
+    assert_eq!(escolher(&[pv, pa]), Some(1));
+    assert_eq!(escolher(&[pv, pv]), None);
+    assert_eq!(escolher(&[pa, pa]), None);
+    // Um journal que começa por um registro que não é a abertura nem a
+    // base não é inteiro.
+    let mut m = Memoria::nova(64);
+    let lido = ler(&mut m, &CHAVE).unwrap();
+    let mut esc = Escritor::continuar(&lido, 0, m.setores());
+    let mut tpm = Contador(0);
+    gravar(
+        &mut m,
+        &mut esc,
+        &mut tpm,
+        estado::tipo::BOOT as u64,
+        b"sem abertura",
+    );
+    assert!(!ler(&mut m, &CHAVE).unwrap().percorrido().inteiro());
+    let _ = esc_a;
+}
+
+/// A base se monta pela base, e não pelo registro comum.
+#[test]
+fn a_base_nao_se_monta_como_registro() {
+    let (_, esc, _) = journal(1);
+    for t in [estado::tipo::BASE, estado::tipo::BASE_FIM] {
+        assert!(esc.montar(&CHAVE, nonce(1), &conteudo(t, b"x")).is_err());
+    }
+}
+
+/// O journal vazio continua do elo inicial: o primeiro registro escrito
+/// depois dele se lê, como o de um journal lido do disco vazio.
+#[test]
+fn o_vazio_continua_do_comeco() {
+    let mut m = Memoria::nova(64);
+    let lido = ler(&mut m, &CHAVE).unwrap();
+    assert_eq!(Percorrido::vazio(), lido.percorrido());
+    let mut esc = Escritor::depois_de(&Percorrido::vazio(), 0, m.setores());
+    let mut tpm = Contador(0);
+    gravar(&mut m, &mut esc, &mut tpm, 0, b"abertura");
+    assert_eq!(ler(&mut m, &CHAVE).unwrap().registros.len(), 1);
 }
