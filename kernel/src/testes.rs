@@ -15455,9 +15455,7 @@ fn tpm_a_auditoria_nao_gasta_o_contador() -> Resultado {
             let antes = todos_do_journal()?.len();
             crate::persistencia::gravar_auditoria()?;
             let depois = todos_do_journal()?;
-            if depois.len() != antes + 1
-                || depois.last().map(|r| r.tipo) != Some(tipo::AUDITORIA)
-            {
+            if depois.len() != antes + 1 || depois.last().map(|r| r.tipo) != Some(tipo::AUDITORIA) {
                 return Err("a auditoria nao foi num registro so dela");
             }
         }
