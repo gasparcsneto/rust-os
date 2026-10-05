@@ -33,9 +33,13 @@
 //! dá memória nova ao processo. São onze chamadas de sistema, listadas em
 //! [`numero`].
 //!
-//! O que não existe: vários núcleos, sinais, memória compartilhada entre
-//! processos e uma ABI que um programa de fora saiba falar — a fase 7 do
-//! roteiro é a compatibilidade com Linux.
+//! Os processos rodam em qualquer núcleo — um processo é um fio só, e o
+//! escalonador nunca põe o mesmo fio em dois núcleos ao mesmo tempo; ver
+//! [`crate::nucleos`].
+//!
+//! O que não existe: sinais, memória compartilhada entre processos e uma
+//! ABI que um programa de fora saiba falar — a fase 7 do roteiro é a
+//! compatibilidade com Linux.
 
 pub mod descritores;
 pub mod elf;
@@ -1153,12 +1157,11 @@ fn esperar(alvo: u64, ponteiro: u64) -> i64 {
 /// `quadro` precisa ser o quadro de usuário desta chamada.
 unsafe fn bifurcar(quadro: *mut core::ffi::c_void) -> i64 {
     // O filho herda a autoridade, e conta na cota do papel dela.
-    if !crate::autorizacao::permitir_processo(crate::fios::autoridade_atual(), "process.fork")
-        .permite()
-    {
+    let autoridade = crate::fios::autoridade_atual();
+    let Ok(cota) = crate::autorizacao::permitir_processo(autoridade, "process.fork") else {
         RECUSADAS.fetch_add(1, Ordering::Relaxed);
         return erro::NEGADO;
-    }
+    };
     let espaco = match crate::paginacao::Espaco::clonar_o_ativo(programa::ENTRADA_PRIVADA) {
         Ok(espaco) => espaco,
         Err(motivo) => {
@@ -1170,10 +1173,15 @@ unsafe fn bifurcar(quadro: *mut core::ffi::c_void) -> i64 {
 
     // SAFETY: o quadro é o desta chamada e o espaço é cópia do ativo, que é o
     // do fio que chamou — exatamente o que `bifurcar` exige.
-    match unsafe { crate::fios::bifurcar("usuario", quadro as *const _, espaco) } {
+    match unsafe { crate::fios::bifurcar("usuario", quadro as *const _, espaco, cota) } {
         Ok(id) => {
             BIFURCACOES.fetch_add(1, Ordering::Relaxed);
             id.numero() as i64
+        }
+        Err(crate::fios::COTA_ESGOTADA) => {
+            crate::autorizacao::recusar_pela_cota(autoridade, "process.fork", cota);
+            RECUSADAS.fetch_add(1, Ordering::Relaxed);
+            erro::NEGADO
         }
         Err(motivo) => {
             crate::log_warn!("usuario", "bifurcar falhou: {}", motivo);
@@ -1366,10 +1374,11 @@ pub fn lancar_como(
 
     limpar_ultima_saida();
 
-    // A cota de processos do papel de quem lança: contada antes de nascer.
-    if !crate::autorizacao::permitir_processo(autoridade, "process.run").permite() {
-        return Err("a cota de processos do papel de quem lanca esta esgotada");
-    }
+    // A cota de processos do papel de quem lança: contada antes de nascer,
+    // e de novo ao nascer — ver `fios::criar_processo`.
+    let Ok(cota) = crate::autorizacao::permitir_processo(autoridade, "process.run") else {
+        return Err(crate::fios::COTA_ESGOTADA);
+    };
 
     let argumento = match caminho {
         None => 0,
@@ -1378,9 +1387,12 @@ pub fn lancar_como(
         }
     };
 
-    match crate::fios::criar_como("usuario", hospedar, argumento, autoridade) {
+    match crate::fios::criar_processo("usuario", hospedar, argumento, autoridade, cota) {
         Ok(id) => Ok(id.numero()),
         Err(motivo) => {
+            if motivo == crate::fios::COTA_ESGOTADA {
+                crate::autorizacao::recusar_pela_cota(autoridade, "process.run", cota);
+            }
             // O fio não nasceu, então ninguém vai reconstruir a caixa. Largá-la
             // aqui é obrigatório: sem isto, cada lançamento recusado — e eles
             // acontecem, o escalonador tem dezesseis vagas — deixaria uma

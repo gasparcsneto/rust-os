@@ -87,6 +87,20 @@ pub fn reservar(vaga: usize) -> Result<Pilha, &'static str> {
     Ok(Pilha { vaga, topo })
 }
 
+/// Mapeia uma pilha que não é de fio: a de exceção de um núcleo secundário.
+///
+/// Mora na mesma área das pilhas de fio, depois das vagas deles, e com a
+/// mesma página de guarda. É o ARM quem precisa: lá cada núcleo tem uma
+/// pilha só para exceções (`SP_EL1`), e a do primeiro núcleo vem do linker
+/// script — que não tem como saber quantos núcleos a máquina terá.
+#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
+pub fn reservar_de_nucleo(nucleo: usize) -> Result<Pilha, &'static str> {
+    if nucleo >= crate::nucleos::MAX_NUCLEOS {
+        return Err("nucleo alem do teto");
+    }
+    reservar(super::MAX_FIOS + nucleo)
+}
+
 impl Drop for Pilha {
     fn drop(&mut self) {
         let primeira_pagina = BASE + self.vaga as u64 * TAMANHO_DA_VAGA + TAMANHO_PAGINA;

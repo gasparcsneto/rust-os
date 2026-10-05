@@ -53,6 +53,7 @@ pub fn init() {
         // depende do PIT estar rodando.
         idt[super::apic::VETOR_TIMER].set_handler_fn(timer_do_apic);
         idt[super::apic::VETOR_ESPURIO].set_handler_fn(espuria);
+        idt[super::apic::VETOR_CUTUCAO].set_handler_fn(cutucao);
 
         // SAFETY: `IST_DOUBLE_FAULT` é um índice válido da IST, e a pilha
         // correspondente foi preparada em `gdt::init`, que roda antes desta
@@ -63,10 +64,37 @@ pub fn init() {
                 .set_stack_index(super::gdt::IST_DOUBLE_FAULT);
         }
 
+        // A NMI, com pilha própria: ela chega em qualquer instrução,
+        // inclusive nas três da entrada de `syscall` em que `RSP` ainda é a
+        // pilha do usuário. Ver `gdt::IST_NMI`.
+        //
+        // SAFETY: `IST_NMI` é um índice válido da IST, preparado em
+        // `gdt::init` para todos os núcleos.
+        unsafe {
+            idt.non_maskable_interrupt
+                .set_handler_fn(nmi)
+                .set_stack_index(super::gdt::IST_NMI);
+        }
+
         idt
     });
 
     idt.load();
+}
+
+/// Carrega neste núcleo a IDT que o primeiro montou.
+///
+/// A IDT é uma só para todos: ela não guarda nada de um núcleo — as pilhas
+/// da IST que ela cita são índices, e cada núcleo os resolve no próprio TSS.
+pub fn carregar() {
+    if let Some(idt) = IDT.get() {
+        idt.load();
+    }
+}
+
+/// Interrupção não mascarável: o aviso de outro núcleo — ver `smp`.
+extern "x86-interrupt" fn nmi(_quadro: InterruptStackFrame) {
+    super::smp::atender_nmi();
 }
 
 /// Gera um handler por linha do PIC.
@@ -114,7 +142,14 @@ tratadores! {
 /// perguntar ao escalonador. O que muda é quem precisa ser avisado no fim —
 /// o APIC, não o PIC.
 extern "x86-interrupt" fn timer_do_apic(_quadro: InterruptStackFrame) {
-    crate::tempo::tick();
+    // Cada núcleo tem o seu timer, e cada um conta o próprio pulso. O
+    // relógio do sistema é um só, e só o primeiro o anda — com todos
+    // andando, ele correria tantas vezes mais rápido quantos fossem os
+    // núcleos. É também no primeiro que o tique recolhe os dispositivos.
+    crate::nucleos::tique_local();
+    if crate::nucleos::e_o_primeiro() {
+        crate::tempo::tick();
+    }
     let preemptar = crate::fios::tique();
 
     crate::irq::contabilizar(super::apic::VETOR_TIMER as usize);
@@ -127,6 +162,15 @@ extern "x86-interrupt" fn timer_do_apic(_quadro: InterruptStackFrame) {
     if preemptar {
         super::contexto::ceder_cpu();
     }
+}
+
+/// O cutucão de outro núcleo: só acorda este. Quem cutucou já mudou o que
+/// tinha de mudar — uma tarefa na fila, um fio pronto —, e este núcleo, ao
+/// voltar do `hlt`, confere por conta própria.
+extern "x86-interrupt" fn cutucao(_quadro: InterruptStackFrame) {
+    crate::irq::contabilizar(super::apic::VETOR_CUTUCAO as usize);
+    super::apic::fim_de_interrupcao();
+    crate::nucleos::ao_ser_cutucado();
 }
 
 /// Interrupção espúria do APIC.

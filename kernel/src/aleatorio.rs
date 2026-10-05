@@ -20,7 +20,7 @@
 //! isso —, é o que limita o estrago de um estado que vazou: dali a alguns
 //! pedidos, quem tem o estado antigo não sabe mais o novo.
 
-use spin::Mutex;
+use crate::trava::Mutex;
 
 /// A cada quantos pedidos o gerador recebe entropia nova.
 pub const PEDIDOS_POR_REALIMENTACAO: u32 = 64;

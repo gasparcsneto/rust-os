@@ -52,10 +52,10 @@ use alloc::string::{String, ToString};
 use core::fmt;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use crate::trava::Mutex;
 use politica::auditoria::{Cadeia, Evento, Titular, resumo_dos_parametros};
 use politica::taxa::{Balde, Janela};
 use politica::{Codigo, Permissao, Politica};
-use spin::Mutex;
 
 use crate::agent::json::{Json, JsonWriter};
 use crate::agent::registry::{Acesso, Command};
@@ -133,25 +133,83 @@ impl Autoridade {
     };
 }
 
-/// A autoridade de quem está executando um comando agora — ver
-/// [`Autorizado::executar`]. É o que `user.run` grava no processo que lança.
-static AUTORIDADE_ATUAL: Mutex<Autoridade> = Mutex::new(Autoridade::Sistema);
+/// O comando em execução: em que fio, com que autoridade, e — num
+/// `message.send` — para quem a decisão resolveu o destino.
+///
+/// # Por que o fio faz parte
+///
+/// Porque isto é uma variável do sistema inteiro, e a pergunta que ela
+/// responde — "com que autoridade o comando **deste** código está rodando?"
+/// — é de um fio só. Com um núcleo, e com todo comando executado pelo fio do
+/// executor, a diferença não aparecia: só havia um comando de cada vez, e só
+/// quem o executava perguntava. Com vários núcleos, qualquer outro fio que
+/// perguntasse durante um comando — um processo, um fio do kernel em outro
+/// núcleo — receberia a autoridade de **outro** principal: a do agente que
+/// pediu o comando, e não a dele.
+///
+/// Guardando quem executa, a resposta só vale para ele. Os outros recebem
+/// [`Autoridade::NENHUMA`], que papel nenhum tem — o lado seguro de uma
+/// pergunta feita no lugar errado.
+struct EmExecucao {
+    fio: u64,
+    autoridade: Autoridade,
+    destino: Option<crate::mensagens::Destino>,
+}
 
-/// A autoridade do comando em execução.
+static EM_EXECUCAO: Mutex<Option<EmExecucao>> = Mutex::new(None);
+
+/// A autoridade do comando que **este fio** está executando. Fora de um
+/// comando, ou em outro fio, [`Autoridade::NENHUMA`].
 pub fn autoridade_atual() -> Autoridade {
-    crate::arch::sem_interrupcoes(|| *AUTORIDADE_ATUAL.lock())
+    let eu = crate::fios::id_atual();
+    crate::arch::sem_interrupcoes(|| match EM_EXECUCAO.lock().as_ref() {
+        Some(c) if c.fio == eu => c.autoridade,
+        _ => Autoridade::NENHUMA,
+    })
 }
 
 /// O destinatário que a decisão de `message.send` resolveu e decidiu, para
-/// o handler do comando em execução — ver [`Autorizado::executar`]. O
-/// handler não resolve o destinatário de novo: usa este, que é o que a
-/// política viu.
-static DESTINO_ATUAL: Mutex<Option<crate::mensagens::Destino>> = Mutex::new(None);
-
-/// O destinatário decidido do comando em execução. `None` fora de um
-/// `message.send` autorizado.
+/// o handler do comando em execução neste fio — ver
+/// [`Autorizado::executar`]. O handler não resolve o destinatário de novo:
+/// usa este, que é o que a política viu. `None` fora de um `message.send`
+/// autorizado, e em outro fio.
 pub fn destino_decidido() -> Option<crate::mensagens::Destino> {
-    crate::arch::sem_interrupcoes(|| DESTINO_ATUAL.lock().clone())
+    let eu = crate::fios::id_atual();
+    crate::arch::sem_interrupcoes(|| match EM_EXECUCAO.lock().as_ref() {
+        Some(c) if c.fio == eu => c.destino.clone(),
+        _ => None,
+    })
+}
+
+/// Roda `f` como o comando de `autoridade`, neste fio.
+///
+/// Reentrante: o que estava em execução é guardado e volta no fim, para o
+/// caso de um comando executar outro.
+fn como_comando<R>(
+    autoridade: Autoridade,
+    destino: Option<crate::mensagens::Destino>,
+    f: impl FnOnce() -> R,
+) -> R {
+    let fio = crate::fios::id_atual();
+    let anterior = crate::arch::sem_interrupcoes(|| {
+        EM_EXECUCAO.lock().replace(EmExecucao {
+            fio,
+            autoridade,
+            destino,
+        })
+    });
+    let r = f();
+    let deste =
+        crate::arch::sem_interrupcoes(|| core::mem::replace(&mut *EM_EXECUCAO.lock(), anterior));
+    // O que sai é largado fora da trava: o destino pode ter memória no heap.
+    drop(deste);
+    r
+}
+
+/// Só para a suíte: roda `f` como se fosse o comando de `autoridade`.
+#[cfg(feature = "modo-teste")]
+pub fn como_comando_de_teste<R>(autoridade: Autoridade, f: impl FnOnce() -> R) -> R {
+    como_comando(autoridade, None, f)
 }
 
 /// Quem está numa decisão, como a auditoria o grava.
@@ -699,18 +757,8 @@ impl Autorizado {
     /// Executa o comando com a autoridade de quem pediu — que `user.run`,
     /// por exemplo, grava no processo que lança.
     pub fn executar(self, params: Json, w: &mut JsonWriter) -> fmt::Result {
-        let (anterior, destino_anterior) = crate::arch::sem_interrupcoes(|| {
-            (
-                core::mem::replace(&mut *AUTORIDADE_ATUAL.lock(), self.autoridade),
-                core::mem::replace(&mut *DESTINO_ATUAL.lock(), self.destino),
-            )
-        });
-        let r = (self.comando.handler)(params, w);
-        crate::arch::sem_interrupcoes(|| {
-            *AUTORIDADE_ATUAL.lock() = anterior;
-            *DESTINO_ATUAL.lock() = destino_anterior;
-        });
-        r
+        let handler = self.comando.handler;
+        como_comando(self.autoridade, self.destino, || handler(params, w))
     }
 }
 
@@ -1035,14 +1083,14 @@ pub fn autorizar_acao_da_pessoa(
 /// processos vivos do papel de quem é a autoridade — a linha `processos` da
 /// política —, contada por titular: uma sessão de agente, uma de pessoa, o
 /// sistema. Sem papel, nada nasce. Uma recusa vai para a auditoria.
-pub fn permitir_processo(autoridade: Autoridade, metodo: &str) -> Codigo {
-    let quem = match autoridade {
-        Autoridade::Sistema => quem_local("sistema"),
-        Autoridade::Sessao { sessao, chave } => quem_da_autoridade(sessao, chave),
-        Autoridade::Pessoa { sessao } => match quem_da_pessoa(sessao) {
-            Ok(q) | Err(q) => q,
-        },
-    };
+///
+/// Devolve a cota, que quem lança passa ao escalonador: a contagem daqui é
+/// a resposta rápida, e a que vale é a do nascimento, feita junto com a
+/// reserva da vaga — ver [`crate::fios::criar_processo`]. Quando aquela
+/// recusa, quem lança chama [`recusar_pela_cota`], e a recusa vai para a
+/// auditoria do mesmo jeito.
+pub fn permitir_processo(autoridade: Autoridade, metodo: &str) -> Result<usize, Codigo> {
+    let quem = quem_do_processo(autoridade);
     let cota = quem
         .papel
         .as_deref()
@@ -1056,21 +1104,45 @@ pub fn permitir_processo(autoridade: Autoridade, metodo: &str) -> Codigo {
             &[],
             "sem papel, nenhum processo",
         );
-        return Codigo::DenyRole;
+        return Err(Codigo::DenyRole);
     };
+    let cota = cota as usize;
     let vivos = crate::fios::processos_de(autoridade);
-    if vivos >= cota as usize {
-        auditar(
-            &quem,
-            metodo,
-            "",
-            Codigo::DenyPolicy,
-            &[],
-            &alloc::format!("cota de processos do papel: {vivos} de {cota}"),
-        );
-        return Codigo::DenyPolicy;
+    if vivos >= cota {
+        return Err(recusar_pela_cota_com(&quem, metodo, vivos, cota));
     }
-    Codigo::Allow
+    Ok(cota)
+}
+
+/// O escalonador recusou o nascimento porque a cota encheu entre a
+/// decisão e a reserva da vaga — outro processo do mesmo titular nasceu,
+/// em outro núcleo. Vai para a auditoria como a recusa de
+/// [`permitir_processo`].
+pub fn recusar_pela_cota(autoridade: Autoridade, metodo: &str, cota: usize) -> Codigo {
+    let quem = quem_do_processo(autoridade);
+    recusar_pela_cota_com(&quem, metodo, cota, cota)
+}
+
+fn recusar_pela_cota_com(quem: &Quem, metodo: &str, vivos: usize, cota: usize) -> Codigo {
+    auditar(
+        quem,
+        metodo,
+        "",
+        Codigo::DenyPolicy,
+        &[],
+        &alloc::format!("cota de processos do papel: {vivos} de {cota}"),
+    );
+    Codigo::DenyPolicy
+}
+
+fn quem_do_processo(autoridade: Autoridade) -> Quem {
+    match autoridade {
+        Autoridade::Sistema => quem_local("sistema"),
+        Autoridade::Sessao { sessao, chave } => quem_da_autoridade(sessao, chave),
+        Autoridade::Pessoa { sessao } => match quem_da_pessoa(sessao) {
+            Ok(q) | Err(q) => q,
+        },
+    }
 }
 
 /// Zera as janelas de apertos de todas as portas, para a suíte: cada caso
@@ -1327,6 +1399,6 @@ pub unsafe fn destravar() {
         POLITICA.force_unlock();
         AUDITORIA.force_unlock();
         TAXAS.force_unlock();
-        AUTORIDADE_ATUAL.force_unlock();
+        EM_EXECUCAO.force_unlock();
     }
 }

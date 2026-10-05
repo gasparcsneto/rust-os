@@ -35,7 +35,7 @@ use core::pin::Pin;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use core::task::{Context, Poll, Waker};
 
-use spin::Mutex;
+use crate::trava::Mutex;
 
 use super::fila::Fila;
 

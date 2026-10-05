@@ -31,7 +31,7 @@
 //! kernel parado — que é a diferença entre um bug diagnosticável e um boot que
 //! trava sem dizer nada.
 
-use spin::Mutex;
+use crate::trava::Mutex;
 
 use super::fila::Fila;
 use super::transporte::{FABRICANTE, Mmio, Transporte, VERSAO_1};

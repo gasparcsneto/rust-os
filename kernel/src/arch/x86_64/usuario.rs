@@ -25,57 +25,115 @@
 //! faz, portanto, é trocar de pilha — e para isso precisa guardar a do usuário
 //! em algum lugar que não seja a própria pilha.
 //!
-//! A solução canônica é `swapgs` com dados por núcleo. Com um núcleo só, duas
-//! variáveis globais alcançadas por endereçamento relativo ao `RIP` dão o
-//! mesmo resultado com muito menos maquinaria. Quando houver SMP, estas duas
-//! viram campos de uma estrutura por núcleo e o `swapgs` entra.
+//! A solução canônica é `swapgs` com dados por núcleo, e é a que este kernel
+//! usa desde que tem vários núcleos. Com um só, duas variáveis globais
+//! alcançadas por endereçamento relativo ao `RIP` bastavam; com dois, os dois
+//! núcleos guardariam a pilha do usuário **no mesmo lugar**, e o segundo
+//! `syscall` sobrescreveria a do primeiro antes de ele empilhá-la.
+//!
+//! # O `swapgs`, e por que ele dura três instruções
+//!
+//! `swapgs` troca a base do `GS` pelo valor guardado em `IA32_KERNEL_GS_BASE`
+//! — que aqui aponta para a [`PorNucleo`] deste núcleo. O ponto de entrada
+//! troca, guarda a pilha do usuário, adota a de kernel, empilha a do usuário
+//! e **troca de volta**. Fora dessas instruções o kernel nunca olha o `GS`.
+//!
+//! Isso é deliberado. Os kernels costumam deixar o `GS` trocado por todo o
+//! tempo em que estão no anel zero, e então precisam decidir, em cada
+//! interrupção, se ela veio do usuário (e precisa trocar) ou do kernel (e não
+//! pode). Errar essa decisão uma vez é dar a um handler o `GS` do processo.
+//! Aqui não há decisão: o `syscall` limpa `IF` (ver o `SFMask` em [`init`]),
+//! então nenhuma interrupção cai na janela, e a NMI — que cai — tem pilha
+//! própria e não usa `GS` — ver [`super::gdt::IST_NMI`]. Quem precisa saber
+//! em que núcleo está pergunta ao `TR`, que o processo não alcança — ver
+//! [`super::gdt::nucleo_atual`].
 
 use core::arch::global_asm;
+use core::cell::UnsafeCell;
 
 use x86_64::VirtAddr;
-use x86_64::registers::model_specific::{Efer, EferFlags, LStar, SFMask, Star};
+use x86_64::registers::model_specific::{Efer, EferFlags, KernelGsBase, LStar, SFMask, Star};
 use x86_64::registers::rflags::RFlags;
 
 use super::gdt;
+use crate::nucleos::MAX_NUCLEOS;
 
-/// Onde o ponto de entrada guarda a pilha do usuário durante a chamada.
+/// O que o ponto de entrada de `syscall` precisa, por núcleo.
 ///
-/// Um núcleo, um fio dentro do kernel por vez: enquanto esta chamada não
-/// retornar, nenhum outro código pode entrar por aqui. Com SMP isto vira um
-/// campo por núcleo.
-#[unsafe(no_mangle)]
-static mut PILHA_DE_USUARIO_SALVA: u64 = 0;
+/// A ordem dos campos é contrato com o assembly: ele os alcança como
+/// `gs:[0]` e `gs:[8]`.
+#[repr(C, align(64))]
+pub struct PorNucleo {
+    /// A pilha de kernel que o ponto de entrada adota — a do fio que este
+    /// núcleo está rodando. Atualizada junto com o `RSP0` do TSS a cada
+    /// troca de contexto: os dois precisam apontar para a pilha do mesmo
+    /// fio.
+    pilha_de_kernel: UnsafeCell<u64>,
+    /// Onde o ponto de entrada guarda a pilha do usuário durante as poucas
+    /// instruções em que ainda não há onde empilhá-la.
+    pilha_de_usuario: UnsafeCell<u64>,
+}
 
-/// A pilha de kernel que o ponto de entrada adota.
-///
-/// Atualizada junto com o `RSP0` do TSS a cada troca de contexto — os dois
-/// precisam apontar para a pilha do mesmo fio.
-#[unsafe(no_mangle)]
-static mut PILHA_DE_KERNEL_ATUAL: u64 = 0;
+/// Uma por núcleo, alinhadas a 64 bytes para que duas nunca dividam uma linha
+/// de cache — duas palavras escritas por núcleos diferentes na mesma linha a
+/// fariam ir e voltar entre eles a cada chamada de sistema.
+struct TabelaPorNucleo([PorNucleo; MAX_NUCLEOS]);
+
+// SAFETY: cada `PorNucleo` só é escrito pelo seu núcleo — pela troca de
+// contexto, com as interrupções mascaradas, e pelo ponto de entrada, com
+// `IF` limpo pelo `SFMask`. Nenhum núcleo alcança a de outro: o `GS` de cada
+// um aponta para a sua.
+unsafe impl Sync for TabelaPorNucleo {}
+
+static POR_NUCLEO: TabelaPorNucleo = TabelaPorNucleo(
+    [const {
+        PorNucleo {
+            pilha_de_kernel: UnsafeCell::new(0),
+            pilha_de_usuario: UnsafeCell::new(0),
+        }
+    }; MAX_NUCLEOS],
+);
 
 /// Informa a pilha de kernel do fio que vai rodar.
 ///
 /// Chamado pela troca de contexto. Atualiza os dois caminhos de entrada no
 /// kernel a partir do usuário: o `RSP0` do TSS, que a *interrupção* usa, e a
-/// global que a *chamada de sistema* usa.
+/// [`PorNucleo`] que a *chamada de sistema* usa — os dois **deste** núcleo.
 pub fn definir_pilha_de_kernel(topo: u64) {
     if topo == 0 {
         return;
     }
     gdt::definir_pilha_de_kernel(topo);
-    // SAFETY: escrita de uma palavra alinhada, com as interrupções mascaradas
-    // pelo chamador. Só o ponto de entrada de `syscall` a lê, e ele não pode
-    // estar executando agora — estamos em ring 0, e não há outro núcleo.
-    unsafe { PILHA_DE_KERNEL_ATUAL = topo };
+    // SAFETY: escrita de uma palavra alinhada na estrutura deste núcleo, com
+    // as interrupções mascaradas pelo chamador. Só o ponto de entrada de
+    // `syscall` **deste** núcleo a lê, e ele não pode estar executando agora
+    // — estamos em ring 0, no meio de uma troca de contexto.
+    unsafe { *POR_NUCLEO.0[gdt::nucleo_atual()].pilha_de_kernel.get() = topo };
 }
 
-/// Liga o mecanismo de chamadas de sistema.
+/// Liga o mecanismo de chamadas de sistema no primeiro núcleo.
 ///
 /// # Safety
 ///
 /// Exige a GDT já carregada: os seletores que vão para `STAR` vêm dela.
 pub unsafe fn init() {
+    // SAFETY: delegada ao chamador.
+    unsafe { ligar_neste_nucleo() };
+    crate::log_info!("usuario", "syscall/sysret habilitados");
+}
+
+/// Liga o mecanismo de chamadas de sistema **neste** núcleo.
+///
+/// Os registradores de modelo abaixo são do núcleo, não do sistema: cada
+/// núcleo que acorda precisa escrevê-los, ou o primeiro `syscall` que um
+/// processo fizer ali é `#UD`.
+///
+/// # Safety
+///
+/// Exige a GDT já carregada neste núcleo, com o TSS dele em `TR`.
+pub unsafe fn ligar_neste_nucleo() {
     let sel = gdt::seletores();
+    let por_nucleo = &POR_NUCLEO.0[gdt::nucleo_atual()] as *const PorNucleo as u64;
 
     // SAFETY: os quatro registradores abaixo são os que definem o mecanismo;
     // escrevê-los antes de habilitar `SCE` garante que nenhuma `syscall` possa
@@ -102,11 +160,13 @@ pub unsafe fn init() {
         // assumem contagem crescente, e o usuário pode tê-la invertido.
         SFMask::write(RFlags::INTERRUPT_FLAG | RFlags::DIRECTION_FLAG);
 
+        // Para onde o `swapgs` da entrada leva o `GS`: a estrutura deste
+        // núcleo. A base do `GS` em si fica zero, que é o que o processo vê.
+        KernelGsBase::write(VirtAddr::new(por_nucleo));
+
         // Só agora a instrução passa a existir para o processador.
         Efer::update(|flags| flags.insert(EferFlags::SYSTEM_CALL_EXTENSIONS));
     }
-
-    crate::log_info!("usuario", "syscall/sysret habilitados");
 }
 
 unsafe extern "C" {
@@ -165,14 +225,22 @@ global_asm!(
 .global ponto_de_entrada
 ponto_de_entrada:
     // Entramos em ring 0 com RSP ainda apontando para a pilha do *usuário*.
-    // Trocar é a primeira coisa, antes de empilhar qualquer byte.
-    mov [rip + PILHA_DE_USUARIO_SALVA], rsp
-    mov rsp, [rip + PILHA_DE_KERNEL_ATUAL]
+    // Trocar é a primeira coisa, antes de empilhar qualquer byte — e para
+    // trocar é preciso saber de que núcleo é a pilha de kernel, que é o que o
+    // `swapgs` responde: depois dele, `gs:` é a `PorNucleo` deste núcleo.
+    swapgs
+    mov gs:[8], rsp
+    mov rsp, gs:[0]
 
     // A partir daqui montamos o `QuadroDeUsuario` na pilha de kernel. A ordem
     // é o contrato: cada `push` corresponde a um campo da struct, do endereço
     // mais alto para o mais baixo.
-    push qword ptr [rip + PILHA_DE_USUARIO_SALVA]
+    push qword ptr gs:[8]
+
+    // E o `GS` volta a ser o do processo. A pilha do usuário já está no
+    // quadro, e nada mais precisa da estrutura por núcleo até a próxima
+    // entrada — ver o cabeçalho deste módulo sobre por que a janela é curta.
+    swapgs
     push rax
 
     // RCX e R11 não são escolha nossa: a instrução `syscall` os sobrescreve

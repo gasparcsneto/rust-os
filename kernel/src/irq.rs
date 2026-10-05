@@ -20,7 +20,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use spin::Mutex;
+use crate::trava::Mutex;
 
 /// Quantas linhas de interrupção conseguimos contabilizar.
 ///

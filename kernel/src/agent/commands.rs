@@ -689,16 +689,35 @@ pub static COMANDOS: &[Command] = &[
         nome: "debug.trigger",
         resumo: "Dispara uma excecao de proposito, para autoteste. \
                  `kind`: \"breakpoint\" e recuperavel; \"fatal\" mata o kernel \
-                 e o deixa em modo post-mortem.",
-        params: &[ParamSpec {
-            nome: "kind",
-            tipo: TipoParam::Texto,
-            obrigatorio: true,
-            descricao: "`breakpoint`: recuperavel, o kernel segue vivo. \
-                        `fatal`: provoca uma falha irrecuperavel de proposito; \
-                        o kernel entra em modo post-mortem e passa a responder \
-                        apenas o relatorio da falha.",
-        }],
+                 e o deixa em modo post-mortem; \"hang_core\" trava um nucleo \
+                 com as interrupcoes desligadas.",
+        params: &[
+            ParamSpec {
+                nome: "kind",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "`breakpoint`: recuperavel, o kernel segue vivo. \
+                            `fatal`: provoca uma falha irrecuperavel de proposito; \
+                            o kernel entra em modo post-mortem e passa a responder \
+                            apenas o relatorio da falha. \
+                            `hang_core`: trava o nucleo `core` com as interrupcoes \
+                            desligadas, por `ms` milissegundos (zero: para sempre).",
+            },
+            ParamSpec {
+                nome: "core",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "Para `hang_core`: o nucleo a travar. O primeiro, o \
+                            do canal, e recusado.",
+            },
+            ParamSpec {
+                nome: "ms",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "Para `hang_core`: por quanto tempo; zero ou ausente \
+                            trava para sempre. Teto de dez minutos.",
+            },
+        ],
         acesso: Acesso::Exige(Permissao::DebugTrigger),
         recurso: Some("kind"),
         handler: debug_trigger,
@@ -1247,6 +1266,52 @@ fn system_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
 
     let cpu = crate::arch::identificar_cpu();
     w.field_str("cpu_vendor", cpu.como_str())?;
+
+    // Os núcleos, e o pulso de cada um. É por aqui que um agente responde
+    // "um núcleo travou?" sem perguntar nada ao núcleo travado: um núcleo
+    // cujo `ticks` parou de crescer está com as interrupções desligadas há
+    // esse tempo todo. Tudo atômico, sem trava — ver `crate::nucleos`.
+    w.field_u64("cores_online", crate::nucleos::ligados() as u64)?;
+    w.field_u64("cores_beyond_limit", crate::nucleos::descartados() as u64)?;
+    // Quantas vezes um núcleo mandou os outros largarem uma tradução do
+    // kernel, e quantas vezes precisou reenviar o aviso a quem demorava a
+    // confirmar. No ARM são sempre zero: lá o hardware difunde a
+    // invalidação.
+    w.field_u64(
+        "remote_tlb_invalidations",
+        crate::arch::invalidacoes_remotas(),
+    )?;
+    w.field_u64("remote_tlb_resends", crate::arch::reavisos_remotos())?;
+    // Depois de uma falha fatal: quais núcleos pararam a pedido do caminho
+    // de falha, e quais não responderam — como máscaras de bits.
+    // Quantas vezes um núcleo acordou outro que dormia sem trabalho.
+    w.field_u64("core_wakeups_sent", crate::nucleos::cutucoes())?;
+    let (parados, sem_resposta) = crate::nucleos::parada_do_fim();
+    w.field_u64("fatal_stopped_mask", parados as u64)?;
+    w.field_u64("fatal_unanswered_mask", sem_resposta as u64)?;
+    w.key("cores")?;
+    w.begin_array()?;
+    let mut erro: Option<fmt::Error> = None;
+    crate::nucleos::com_nucleos(|n| {
+        if erro.is_some() {
+            return;
+        }
+        let resultado = (|| -> fmt::Result {
+            w.begin_object()?;
+            w.field_u64("index", n.indice as u64)?;
+            w.field_str("state", n.estado.nome())?;
+            w.field_u64("hardware_id", n.hardware)?;
+            w.field_u64("ticks", n.tiques)?;
+            w.end_object()
+        })();
+        if let Err(e) = resultado {
+            erro = Some(e);
+        }
+    });
+    if let Some(e) = erro {
+        return Err(e);
+    }
+    w.end_array()?;
 
     w.key("framebuffer")?;
     match crate::tela::tela_fisica() {
@@ -2626,6 +2691,10 @@ fn ui_act(params: Json, w: &mut JsonWriter) -> fmt::Result {
 }
 
 fn video_sample(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    // A amostra é do que o monitor mostra: o que outro núcleo compôs e o
+    // primeiro ainda não levou à tela vai antes — ver
+    // `grafico::apresentar_pendente`.
+    crate::grafico::apresentar_pendente();
     let colunas = params
         .member("columns")
         .and_then(|v| v.as_u64())
@@ -3133,6 +3202,17 @@ fn threads_list(_params: Json, w: &mut JsonWriter) -> fmt::Result {
             w.field_str("name", inscricao.nome)?;
             w.field_str("state", inscricao.estado)?;
             w.field_u64("scheduled", inscricao.escalonamentos)?;
+            // Em que núcleo ele está agora, e a qual está preso, se a algum.
+            w.key("core")?;
+            match inscricao.nucleo {
+                Some(n) => w.u64_value(n as u64)?,
+                None => w.null_value()?,
+            }
+            w.key("pinned")?;
+            match inscricao.fixo {
+                Some(n) => w.u64_value(n as u64)?,
+                None => w.null_value()?,
+            }
             w.end_object()
         })();
         if let Err(e) = resultado {
@@ -3341,11 +3421,33 @@ fn debug_trigger(params: Json, w: &mut JsonWriter) -> fmt::Result {
                 "o kernel falha logo apos esta resposta e entra em modo post-mortem",
             )?;
         }
+        "hang_core" => {
+            // Um núcleo travado de propósito, com as interrupções
+            // desligadas — ver `nucleos::travar`. Pela mesma permissão dos
+            // outros tipos, e com o tipo como recurso: uma política pode dar
+            // `breakpoint` sem dar isto.
+            let nucleo = params.member("core").and_then(|v| v.as_u64());
+            let ms = params.member("ms").and_then(|v| v.as_u64()).unwrap_or(0);
+            w.field_bool("survived", true)?;
+            match nucleo {
+                None => w.field_str("error", "hang_core exige `core`")?,
+                Some(n) => match crate::nucleos::travar(n as usize, ms) {
+                    Ok(fio) => {
+                        w.field_str("triggered", "hang_core")?;
+                        w.field_u64("core", n)?;
+                        w.field_u64("ms", ms)?;
+                        w.field_bool("forever", ms == 0)?;
+                        w.field_u64("thread", fio)?;
+                    }
+                    Err(motivo) => w.field_str("error", motivo)?,
+                },
+            }
+        }
         outro => {
             w.field_bool("survived", true)?;
             w.field_str("error", "tipo de excecao nao suportado")?;
             w.field_str("requested", outro)?;
-            w.field_str("supported", "breakpoint, fatal")?;
+            w.field_str("supported", "breakpoint, fatal, hang_core")?;
         }
     }
     w.end_object()

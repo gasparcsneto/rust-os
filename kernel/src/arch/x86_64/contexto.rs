@@ -116,6 +116,13 @@ trampolim_de_fio:
     // quadro inicial que `preparar_contexto` montou: r12 tem a função de
     // entrada e r13 o argumento.
     //
+    // Primeiro, ainda mascarado: avisar que a troca terminou. Quem chamou a
+    // troca faria isso ao voltar de `trocar_contexto` — mas não voltamos a
+    // ele, voltamos para cá. Sem este aviso, o fio que este núcleo largou
+    // ficaria preso a ele, e nenhum outro núcleo o escolheria. A pilha está
+    // alinhada em 16 aqui, que é o que o `call` pede.
+    call fios_troca_concluida
+
     // As interrupções foram mascaradas por quem chamou a troca, e ele as
     // religaria ao voltar — só que não voltamos a ele, voltamos para cá. Então
     // quem religa somos nós, e é aqui que este fio passa a ser preemptável.
@@ -189,6 +196,14 @@ extern "C" fn fios_terminar() -> ! {
     crate::fios::terminar()
 }
 
+/// Ponte para [`crate::fios::troca_concluida`] com nome estável para o
+/// assembly: os dois trampolins — o do fio novo e o do filho de `fork` — a
+/// chamam antes de qualquer outra coisa.
+#[unsafe(no_mangle)]
+extern "C" fn fios_troca_concluida() {
+    crate::fios::troca_concluida()
+}
+
 /// Cede a CPU ao próximo fio pronto.
 ///
 /// Serve tanto para a cessão voluntária quanto para a preempção: no x86 as
@@ -225,6 +240,11 @@ pub fn ceder_cpu() {
             // estamos executando o outro fio.
             super::usuario::definir_pilha_de_kernel((*troca.para).pilha_de_kernel);
             trocar_contexto(troca.de, troca.para);
+
+            // Estamos do outro lado: este já é o fio que entrou, voltando do
+            // `trocar_contexto` que ele mesmo chamou quando saiu. O contexto
+            // do que saiu está escrito, e outro núcleo já pode retomá-lo.
+            crate::fios::troca_concluida();
         }
     }
 
@@ -234,13 +254,29 @@ pub fn ceder_cpu() {
 }
 
 unsafe extern "C" {
-    /// O ponto do caminho de chamada de sistema que restaura o usuário.
+    /// A porta de entrada de um filho de `fork`.
     ///
-    /// Um filho de `fork` entra por aqui: o contexto dele é montado para que a
-    /// primeira troca de fio salte direto para este rótulo, com o quadro de
-    /// usuário pronto logo acima do ponteiro de pilha.
-    fn retorno_ao_usuario();
+    /// O contexto dele é montado para que a primeira troca de fio salte
+    /// direto para este rótulo, com o quadro de usuário pronto logo acima do
+    /// ponteiro de pilha. O rótulo avisa que a troca terminou e cai no
+    /// caminho que restaura o usuário.
+    fn retorno_de_fork();
 }
+
+global_asm!(
+    r#"
+.section .text
+.global retorno_de_fork
+retorno_de_fork:
+    // Como no trampolim de um fio novo: quem chamou a troca não vai voltar
+    // para avisar que ela terminou, então avisamos nós. O `rsp` aponta para
+    // o quadro de usuário, alinhado em 16 — o `call` não o desalinha, e os
+    // registradores que ele pode destruir são todos restaurados do quadro
+    // logo em seguida.
+    call fios_troca_concluida
+    jmp retorno_ao_usuario
+"#
+);
 
 /// Monta o contexto de um filho de `fork`.
 ///
@@ -303,7 +339,7 @@ pub unsafe fn preparar_contexto_de_fork(
 
         // E o quadro que `trocar_contexto` desempilha, com o retorno apontando
         // para a restauração do usuário.
-        let retorno: unsafe extern "C" fn() = retorno_ao_usuario;
+        let retorno: unsafe extern "C" fn() = retorno_de_fork;
         empilhar(retorno as *const () as u64);
         empilhar(0); // rbp
         empilhar(0); // rbx

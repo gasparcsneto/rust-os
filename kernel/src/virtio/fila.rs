@@ -583,11 +583,13 @@ impl Fila {
         // Removendo as três barreiras deste arquivo, a suíte inteira passa —
         // noventa e oito de noventa e oito. Não é descuido de quem escreveu os
         // casos: é que a reordenação contra a qual elas defendem não acontece
-        // aqui. O dispositivo do QEMU é coerente, o hóspede tem um núcleo só,
+        // aqui. O dispositivo do QEMU é coerente, o hóspede tinha um núcleo só
+        // quando isto foi medido (com vários, o pedido ao dispositivo ainda é
+        // feito por um núcleo de cada vez, sob a tranca do driver),
         // e nada neste ambiente produz a janela.
         //
-        // Ou seja: apagar esta linha não custa nada hoje e custa tudo no dia em
-        // que o kernel rodar em hardware de verdade ou em mais de um núcleo. É
+        // Ou seja: apagar esta linha não custa nada nesta bancada e custa tudo
+        // no dia em que o kernel rodar em hardware de verdade. É
         // a única garantia deste driver cuja ausência a suíte não denuncia, e
         // por isso ela está escrita aqui, onde quem for apagá-la vai ler.
         //

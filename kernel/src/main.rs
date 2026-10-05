@@ -80,6 +80,7 @@ mod log;
 mod machine;
 mod mensagens;
 mod mmio;
+mod nucleos;
 mod paginacao;
 mod particoes;
 mod pci;
@@ -103,6 +104,7 @@ mod tempo;
 mod testes;
 mod tpm;
 mod traps;
+mod trava;
 mod ui;
 mod usb;
 mod usuario;
@@ -232,6 +234,9 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     // relatório em vez de num reboot silencioso. Tudo que vem depois desta
     // linha é depurável.
     arch::init_excecoes();
+    // O primeiro núcleo é o que está rodando, e entra na tabela agora: os
+    // outros só são procurados bem mais tarde, com o escalonador no ar.
+    nucleos::registrar_o_primeiro(arch::hardware_deste_nucleo());
 
     // Com exceções instaladas, é seguro ligar as interrupções de hardware.
     // A partir daqui o kernel tem noção de tempo, e os registros de log
@@ -447,6 +452,12 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     // em que uma credencial revogada da imagem esteja ativa.
     persistencia::abrir();
 
+    // Os demais núcleos, com o boot inteiro feito. Ligá-los antes daria a
+    // eles fios para rodar no meio da inicialização dos dispositivos, que foi
+    // escrita — e medida — para um núcleo só. Daqui em diante tudo o que roda
+    // foi escrito para concorrer: os fios do kernel, os processos, o canal.
+    nucleos::ligar_os_demais();
+
     // O servidor de janelas e o Terminal, agora que o disco onde eles moram
     // está montado. Na suíte, é o caso de cada um que o lança.
     #[cfg(not(feature = "modo-teste"))]
@@ -556,8 +567,13 @@ fn panic(info: &PanicInfo) -> ! {
     // o pior possível: um kernel travado sem uma linha de explicação, que é o
     // oposto do que um handler de pânico existe para dar.
     //
-    // SAFETY: o kernel já está em falha irrecuperável, não há outro núcleo
-    // rodando, e a alternativa é o deadlock.
+    // Antes de destravar qualquer coisa, parar os outros núcleos — ver
+    // `nucleos::reivindicar_o_fim`. Um núcleo que também entre em pânico
+    // agora para aqui dentro, sem escrever por cima deste.
+    nucleos::reivindicar_o_fim();
+
+    // SAFETY: o kernel já está em falha irrecuperável, os outros núcleos
+    // foram parados, e a alternativa é o deadlock.
     unsafe { serial::destravar() };
 
     // E para o escalonador, também como no caminho de falha fatal: sem isto o

@@ -695,7 +695,7 @@ impl Xhci {
 }
 
 /// O controlador da máquina, se houver um.
-static XHCI: spin::Mutex<Option<Xhci>> = spin::Mutex::new(None);
+static XHCI: crate::trava::Mutex<Option<Xhci>> = crate::trava::Mutex::new(None);
 
 /// Procura o controlador, sobe-o e configura o que estiver nas portas.
 ///

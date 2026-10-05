@@ -47,12 +47,34 @@
 //! para sempre. Mascarar interrupções desliga a preempção junto, e é por isso
 //! que [`crate::frames`], [`crate::machine`], [`crate::heap`] e companhia
 //! fazem todos os seus acessos por dentro de `sem_interrupcoes`.
+//!
+//! # Vários núcleos
+//!
+//! Mascarar interrupções desliga a preempção **neste** núcleo, e mais nada.
+//! Com vários, a exclusão mútua passa a ser só da trava — e foi por isso que
+//! toda trava deste kernel já era um spinlock de verdade, e não um "desligar
+//! interrupções e pronto". O escalonador é uma tabela só, sob uma trava só,
+//! e cada núcleo tem nela o **seu** fio atual e o **seu** quantum.
+//!
+//! O que um núcleo único não precisava e vários precisam:
+//!
+//! - **Um fio não pode estar em dois núcleos.** O estado `Rodando` não basta
+//!   para isso, porque um fio que acabou de perder a vez volta a `Pronto`
+//!   antes de o contexto dele estar salvo: a troca acontece fora da trava, em
+//!   assembly. Ver [`Fio::na_cpu`].
+//! - **A vaga de quem roda em outro núcleo também não é livre.** A regra que
+//!   protegia "o fio atual" passa a proteger "todo fio que um núcleo está
+//!   usando" — o mesmo campo.
+//! - **Cada núcleo tem um fio ocioso.** Um núcleo sem trabalho precisa de
+//!   uma pilha onde dormir, e ela não pode ser a de um fio que outro núcleo
+//!   queira retomar. O ocioso é fixo no seu núcleo e só é escolhido quando
+//!   não há mais nada.
 
 pub mod pilha;
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use spin::Mutex;
+use crate::trava::Mutex;
 
 use crate::arch::Contexto;
 use pilha::Pilha;
@@ -62,7 +84,14 @@ use pilha::Pilha;
 /// Fixo para que o escalonador não aloque: ele roda dentro do handler do
 /// timer, onde pedir memória seria tomar a trava do heap num ponto arbitrário
 /// do programa.
-pub const MAX_FIOS: usize = 16;
+///
+/// Trinta e duas desde que há vários núcleos: cada núcleo além do primeiro
+/// ocupa uma vaga com o fio ocioso dele, e com quatro núcleos as dezesseis de
+/// antes perderiam três para fios que não fazem trabalho nenhum.
+pub const MAX_FIOS: usize = 32;
+
+/// Quantos núcleos o escalonador acompanha. É o teto de [`crate::nucleos`].
+pub const MAX_NUCLEOS: usize = crate::nucleos::MAX_NUCLEOS;
 
 /// Quantos tiques do timer um fio roda antes de ser preemptado.
 ///
@@ -213,6 +242,32 @@ struct Fio {
     /// que um agente lançou é tão desse agente quanto o pai. É `Copy`, sem
     /// nada no heap, porque é copiada com a trava do escalonador na mão.
     autoridade: crate::autorizacao::Autoridade,
+    /// O núcleo que está usando este fio, se algum está.
+    ///
+    /// # Por que o estado não basta
+    ///
+    /// Porque a troca de contexto acontece **fora** da trava. O escalonador
+    /// escolhe o próximo, marca o que sai como `Pronto` e solta a trava; só
+    /// depois o assembly guarda os registradores do que sai. Nesse
+    /// intervalo o fio está `Pronto` com um contexto que ainda não foi
+    /// escrito. Com um núcleo só ninguém olhava a tabela nesse intervalo;
+    /// com vários, outro núcleo podia escolhê-lo e retomar um contexto
+    /// velho — ou o mesmo fio rodaria em dois núcleos ao mesmo tempo, sobre
+    /// a mesma pilha.
+    ///
+    /// Então a posse vai além do estado: é posta quando o núcleo escolhe o
+    /// fio, e só sai quando o **próximo** fio daquele núcleo já está de pé —
+    /// ver [`troca_concluida`]. Enquanto houver dono, nenhum outro núcleo o
+    /// escolhe, e o coletor não recolhe a vaga dele.
+    na_cpu: Option<usize>,
+    /// O único núcleo em que este fio pode rodar, quando há um.
+    ///
+    /// Os ociosos são fixos no seu núcleo, e o fio do kernel — o do canal do
+    /// agente — no primeiro: é lá que as interrupções de dispositivo chegam
+    /// e o relógio anda, e é esse núcleo que o canal precisa ter.
+    fixo: Option<usize>,
+    /// É o fio ocioso de algum núcleo: só roda quando não há mais nada.
+    ocioso: bool,
 }
 
 impl Fio {
@@ -230,21 +285,54 @@ impl Fio {
 
 struct Escalonador {
     fios: [Option<Fio>; MAX_FIOS],
-    /// Índice do fio que está executando.
-    atual: usize,
-    /// Tiques restantes antes de preemptar o fio atual.
-    quantum: u32,
+    /// Índice do fio que está executando em cada núcleo.
+    ///
+    /// `None` num núcleo que ainda não ligou: ele não tem fio, e nada pode
+    /// ser escolhido em nome dele.
+    atual: [Option<usize>; MAX_NUCLEOS],
+    /// O fio que cada núcleo acabou de largar, enquanto a troca não termina.
+    ///
+    /// Ver [`Fio::na_cpu`]: é por aqui que o núcleo, já no fio novo, sabe de
+    /// quem soltar a posse.
+    anterior: [Option<usize>; MAX_NUCLEOS],
+    /// O fio ocioso de cada núcleo, quando ele tem um.
+    ociosos: [Option<usize>; MAX_NUCLEOS],
     ligado: bool,
 }
 
 static ESCALONADOR: Mutex<Escalonador> = Mutex::new(Escalonador {
     fios: [const { None }; MAX_FIOS],
-    atual: 0,
-    quantum: QUANTUM_EM_TIQUES,
+    atual: [None; MAX_NUCLEOS],
+    anterior: [None; MAX_NUCLEOS],
+    ociosos: [None; MAX_NUCLEOS],
     ligado: false,
 });
 
 static PROXIMO_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Tiques restantes antes de preemptar o fio atual de cada núcleo.
+///
+/// # Por que fora da trava do escalonador
+///
+/// Morava na tabela, e o timer o descontava com um `try_lock` da trava: um
+/// handler de interrupção não pode esperar por ela. Com um núcleo só a trava
+/// quase nunca estava tomada na hora do tique. Com vários, um fio que cede
+/// em laço num núcleo a toma e solta sem parar, o `try_lock` dos outros
+/// núcleos perde quase sempre, e o quantum deles para de andar: o fio que
+/// estivesse num deles nunca mais era preemptado. Medido na suíte: um
+/// lançador fixo num núcleo ficou **pronto** por segundos, com o núcleo
+/// vivo, até o fio que cedia em laço no outro sair.
+///
+/// O quantum de um núcleo só é tocado por ele mesmo — pelo timer dele e
+/// pela troca de contexto dele, as duas com as interrupções mascaradas —,
+/// então um atômico por núcleo basta, sem trava nenhuma. A troca, quando o
+/// quantum vence, continua sob a trava, que é justa, e espera a vez.
+static QUANTUM: [AtomicU32; MAX_NUCLEOS] =
+    [const { AtomicU32::new(QUANTUM_EM_TIQUES) }; MAX_NUCLEOS];
+
+/// O escalonador está ligado — o espelho de `Escalonador::ligado` que o
+/// timer lê sem a trava.
+static LIGADO: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Congela o escalonamento. Uma via só: quem congela não descongela.
 ///
@@ -285,6 +373,65 @@ fn com_escalonador<R>(f: impl FnOnce(&mut Escalonador) -> R) -> R {
     crate::arch::sem_interrupcoes(|| f(&mut ESCALONADOR.lock()))
 }
 
+/// Em que núcleo estamos.
+///
+/// Só tem sentido com as interrupções mascaradas: com elas ligadas o fio pode
+/// ser preemptado logo depois da leitura e retomado em outro núcleo, e o
+/// número lido descreveria onde ele **estava**. Todo uso neste módulo
+/// acontece dentro de [`com_escalonador`] ou de um handler.
+fn nucleo() -> usize {
+    crate::arch::nucleo_atual().min(MAX_NUCLEOS - 1)
+}
+
+impl Escalonador {
+    /// O índice do fio que roda neste núcleo.
+    fn atual_aqui(&self) -> Option<usize> {
+        self.atual[nucleo()]
+    }
+
+    /// O fio que roda neste núcleo.
+    fn fio_atual(&self) -> Option<&Fio> {
+        self.fios[self.atual_aqui()?].as_ref()
+    }
+
+    /// O fio que roda neste núcleo, para escrever.
+    fn fio_atual_mut(&mut self) -> Option<&mut Fio> {
+        let i = self.atual_aqui()?;
+        self.fios[i].as_mut()
+    }
+
+    /// Os núcleos que estão rodando o próprio ocioso agora — ou seja,
+    /// dormindo sem nada para fazer.
+    ///
+    /// É a quem vale cutucar quando um fio fica pronto: os outros já estão
+    /// trabalhando, e o timer deles os leva ao escalonador no próximo tique.
+    fn nucleos_ociosos(&self) -> u8 {
+        let mut mascara = 0u8;
+        for cpu in 0..MAX_NUCLEOS {
+            if self.ociosos[cpu].is_some() && self.atual[cpu] == self.ociosos[cpu] {
+                mascara |= 1 << cpu;
+            }
+        }
+        mascara
+    }
+
+    /// Solta a posse do fio que este núcleo largou na última troca.
+    ///
+    /// Qualquer código que rode neste núcleo depois da troca prova que ela
+    /// terminou — o contexto do que saiu já foi escrito, porque é ele que o
+    /// assembly escreve antes de adotar o novo. Por isso esta função pode
+    /// ser chamada de dois lugares: logo depois da troca, que é o caminho
+    /// normal, e no começo da próxima escolha, como rede de segurança.
+    fn concluir_troca(&mut self, cpu: usize) {
+        if let Some(anterior) = self.anterior[cpu].take()
+            && let Some(fio) = self.fios[anterior].as_mut()
+            && fio.na_cpu == Some(cpu)
+        {
+            fio.na_cpu = None;
+        }
+    }
+}
+
 /// Adota o contexto de execução atual como o primeiro fio.
 ///
 /// Precisa rodar antes de qualquer [`criar`]. O fio inicial é especial por um
@@ -295,6 +442,7 @@ pub fn init() {
         if e.ligado {
             return;
         }
+        let cpu = nucleo();
         e.fios[0] = Some(Fio {
             id: IdFio(PROXIMO_ID.fetch_add(1, Ordering::Relaxed)),
             nome: "kernel",
@@ -308,10 +456,19 @@ pub fn init() {
             saida: None,
             colhido: false,
             autoridade: crate::autorizacao::Autoridade::Sistema,
+            na_cpu: Some(cpu),
+            // O fio do canal do agente fica no núcleo que recebe as
+            // interrupções dos dispositivos e anda o relógio. Solto, ele
+            // poderia dormir num núcleo enquanto a interrupção que o
+            // acordaria chega em outro — e o canal ganharia a latência de um
+            // tique do timer a cada pedido.
+            fixo: Some(cpu),
+            ocioso: false,
         });
-        e.atual = 0;
-        e.quantum = QUANTUM_EM_TIQUES;
+        e.atual[cpu] = Some(0);
+        QUANTUM[cpu].store(QUANTUM_EM_TIQUES, Ordering::Relaxed);
         e.ligado = true;
+        LIGADO.store(true, Ordering::Release);
     });
 
     crate::log_info!(
@@ -364,7 +521,7 @@ extern "C" fn coletor(_argumento: u64) -> ! {
         }
         // O aviso de saída do pseudo-terminal é dado daqui, sem tranca na
         // mão — ver `pseudoterminal`, sobre por que o `_print` não o dá.
-        crate::pseudoterminal::avisar_se_preciso();
+        crate::pseudoterminal::passada_do_coletor();
         // E os arrendamentos vencidos saem daqui, e vão para a auditoria:
         // um prazo vence sem ninguém pedir nada.
         crate::coordenacao::vencer_todos();
@@ -448,11 +605,14 @@ pub fn recolher_terminados() -> usize {
 
     loop {
         let morto = com_escalonador(|e| {
-            let atual = e.atual;
+            // `na_cpu`, e não "diferente do atual": com vários núcleos há
+            // vários atuais, e há também o fio que um núcleo acabou de largar
+            // e ainda não terminou de sair de cima da pilha dele.
             let vaga = (0..MAX_FIOS).find(|&i| {
-                i != atual
-                    && matches!(&e.fios[i], Some(fio)
-                        if fio.estado == Estado::Terminado && !e.e_zumbi(i))
+                matches!(&e.fios[i], Some(fio)
+                        if fio.estado == Estado::Terminado
+                            && fio.na_cpu.is_none()
+                            && !e.e_zumbi(i))
             })?;
             e.fios[vaga].take()
         });
@@ -510,7 +670,75 @@ pub fn criar_como(
             entrada,
             argumento,
             autoridade,
+            fixo: None,
         },
+        None,
+    )
+}
+
+/// O que [`nascer`] devolve quando a cota de processos do titular já está
+/// cheia. Uma constante, e não um texto qualquer, porque quem lança precisa
+/// distinguir esta recusa — que é da política, e vai para a auditoria — de
+/// uma falta de vaga ou de memória.
+pub const COTA_ESGOTADA: &str = "a cota de processos do papel de quem lanca esta esgotada";
+
+/// [`criar_como`] um processo, contado na cota do titular da `autoridade`:
+/// nasce só se o titular tiver menos de `cota` processos vivos.
+///
+/// # Por que a cota é conferida aqui, e não só no gate
+///
+/// O gate ([`crate::autorizacao::permitir_processo`]) decide pela política
+/// e conta os vivos; a vaga do fio novo é reservada depois, aqui. Com um
+/// núcleo só, uma chamada de sistema rodava inteira com as interrupções
+/// mascaradas, e nada acontecia entre contar e reservar. Com vários, dois
+/// processos do mesmo titular bifurcam juntos, em núcleos diferentes, os
+/// dois contam um a menos que a cota, e os dois nascem: a cota passa a ser
+/// um teto que se ultrapassa por um a cada núcleo. Contar de novo **na
+/// mesma seção crítica que reserva a vaga** fecha a janela: o fio reservado
+/// já é contado, e quem conta depois o vê.
+pub fn criar_processo(
+    nome: &'static str,
+    entrada: extern "C" fn(u64) -> !,
+    argumento: u64,
+    autoridade: crate::autorizacao::Autoridade,
+    cota: usize,
+) -> Result<IdFio, &'static str> {
+    nascer(
+        nome,
+        Nascimento::Funcao {
+            entrada,
+            argumento,
+            autoridade,
+            fixo: None,
+        },
+        Some(cota),
+    )
+}
+
+/// Cria um fio do kernel que só roda no núcleo `cpu`.
+///
+/// Existe para quem precisa de um núcleo **determinado**: a suíte, que põe
+/// fios em núcleos diferentes para disputarem a mesma trava de verdade, e o
+/// pedido de diagnóstico que trava um núcleo de propósito. Um núcleo que
+/// ainda não ligou aceita o fio, que fica pronto até ele ligar.
+pub fn criar_no_nucleo(
+    nome: &'static str,
+    entrada: extern "C" fn(u64) -> !,
+    argumento: u64,
+    cpu: usize,
+) -> Result<IdFio, &'static str> {
+    if cpu >= MAX_NUCLEOS {
+        return Err("nucleo alem do teto do escalonador");
+    }
+    nascer(
+        nome,
+        Nascimento::Funcao {
+            entrada,
+            argumento,
+            autoridade: crate::autorizacao::Autoridade::Sistema,
+            fixo: Some(cpu),
+        },
+        None,
     )
 }
 
@@ -526,6 +754,8 @@ enum Nascimento {
         entrada: extern "C" fn(u64) -> !,
         argumento: u64,
         autoridade: crate::autorizacao::Autoridade,
+        /// O núcleo ao qual o fio fica preso, se algum.
+        fixo: Option<usize>,
     },
     /// Um filho de `fork`, que começa **retornando** da chamada de sistema que
     /// o pai fez, com o espaço de endereços que o pai lhe deu.
@@ -535,7 +765,9 @@ enum Nascimento {
     },
 }
 
-/// Cria um fio a partir de um quadro de usuário: o filho de um `fork`.
+/// Cria um fio a partir de um quadro de usuário: o filho de um `fork`,
+/// contado na cota do titular da autoridade que ele herda — ver
+/// [`criar_processo`].
 ///
 /// # Safety
 ///
@@ -545,11 +777,19 @@ pub unsafe fn bifurcar(
     nome: &'static str,
     quadro: *const core::ffi::c_void,
     espaco: crate::paginacao::Espaco,
+    cota: usize,
 ) -> Result<IdFio, &'static str> {
-    nascer(nome, Nascimento::Bifurcacao { quadro, espaco })
+    nascer(nome, Nascimento::Bifurcacao { quadro, espaco }, Some(cota))
 }
 
-fn nascer(nome: &'static str, nascimento: Nascimento) -> Result<IdFio, &'static str> {
+/// Faz nascer um fio. Com `cota`, ele é um processo, e nasce só se o
+/// titular da autoridade dele tiver menos que isso vivos — ver
+/// [`criar_processo`].
+fn nascer(
+    nome: &'static str,
+    nascimento: Nascimento,
+    cota: Option<usize>,
+) -> Result<IdFio, &'static str> {
     // Depois de uma falha fatal o escalonador está congelado, e um fio criado
     // aqui **nunca** roda: [`selecionar`] desiste antes de olhar a tabela.
     //
@@ -590,8 +830,7 @@ fn nascer(nome: &'static str, nascimento: Nascimento) -> Result<IdFio, &'static 
     //
     // Um fio do kernel não herda de ninguém — ele começa com a tabela
     // padrão, que é o que `criar` quer dizer.
-    let (vaga, ocupante_morto, herdada, pai, autoridade) = com_escalonador(|e| {
-        let vaga = e.vaga_livre()?;
+    let (vaga, ocupante_morto, herdada, pai, autoridade, fixo) = com_escalonador(|e| {
         // O parentesco sai da mesma seção crítica que a tabela de
         // descritores, e pelo mesmo motivo: as duas descrevem a relação com
         // quem está chamando, e lê-las em momentos diferentes seria lê-las
@@ -605,7 +844,7 @@ fn nascer(nome: &'static str, nascimento: Nascimento) -> Result<IdFio, &'static 
         // nasceu de `criar`; de uma bifurcação, sem pai não há o que herdar,
         // e a de sessão nenhuma — a serial sem chave — é a menor que há.
         let (herdada, pai, autoridade) = match nascimento {
-            Nascimento::Bifurcacao { .. } => match e.fios[e.atual].as_ref() {
+            Nascimento::Bifurcacao { .. } => match e.fio_atual() {
                 Some(pai) => (pai.descritores.clone(), Some(pai.id), pai.autoridade),
                 None => (
                     Default::default(),
@@ -619,6 +858,18 @@ fn nascer(nome: &'static str, nascimento: Nascimento) -> Result<IdFio, &'static 
                 autoridade,
             ),
         };
+        let fixo = match nascimento {
+            Nascimento::Funcao { fixo, .. } => fixo,
+            Nascimento::Bifurcacao { .. } => None,
+        };
+        // A cota, com a vaga ainda por reservar e a trava na mão: quem
+        // conferir depois de nós já nos conta — ver `criar_processo`.
+        if let Some(cota) = cota
+            && e.processos_de(autoridade) >= cota
+        {
+            return Err(COTA_ESGOTADA);
+        }
+        let vaga = e.vaga_livre()?;
         let anterior = e.fios[vaga].take();
         e.fios[vaga] = Some(Fio {
             id,
@@ -633,8 +884,11 @@ fn nascer(nome: &'static str, nascimento: Nascimento) -> Result<IdFio, &'static 
             saida: None,
             colhido: false,
             autoridade,
+            na_cpu: None,
+            fixo,
+            ocioso: false,
         });
-        Ok::<_, &'static str>((vaga, anterior, herdada, pai, autoridade))
+        Ok::<_, &'static str>((vaga, anterior, herdada, pai, autoridade, fixo))
     })?;
 
     // O fio morto que ocupava a vaga morre aqui fora: o `Drop` da pilha dele
@@ -691,8 +945,8 @@ fn nascer(nome: &'static str, nascimento: Nascimento) -> Result<IdFio, &'static 
 
     // Mesma regra da devolução acima: o marcador sai sob a trava e é largado
     // fora dela.
-    let marcador = com_escalonador(|e| {
-        e.fios[vaga].replace(Fio {
+    let (marcador, ociosos) = com_escalonador(|e| {
+        let marcador = e.fios[vaga].replace(Fio {
             id,
             nome,
             estado: Estado::Pronto,
@@ -705,14 +959,131 @@ fn nascer(nome: &'static str, nascimento: Nascimento) -> Result<IdFio, &'static 
             saida: None,
             colhido: false,
             autoridade,
-        })
+            na_cpu: None,
+            fixo,
+            ocioso: false,
+        });
+        (marcador, e.nucleos_ociosos())
     });
     drop(marcador);
+    // Um fio novo está pronto: um núcleo dormindo pode pegá-lo agora, em vez
+    // de no próximo tique dele.
+    crate::nucleos::cutucar(ociosos);
 
     Ok(id)
 }
 
+/// Prepara o fio ocioso do núcleo `cpu`: a vaga, a pilha, e o fio marcado
+/// como reservado até o núcleo o adotar.
+///
+/// Devolve a vaga e o topo da pilha, que é onde o núcleo vai acordar.
+///
+/// # Por que o ocioso nasce aqui, e não no próprio núcleo
+///
+/// Porque mapear a pilha toma as travas da paginação e dos frames, e o núcleo
+/// que acorda ainda não tem pilha nenhuma para chamar quem quer que seja. É
+/// a mesma razão do fio inicial: quem já está de pé prepara, e quem chega
+/// adota — ver [`adotar_ocioso`].
+pub fn preparar_ocioso(cpu: usize) -> Result<(usize, u64), &'static str> {
+    if cpu >= MAX_NUCLEOS {
+        return Err("nucleo alem do teto do escalonador");
+    }
+    let id = IdFio(PROXIMO_ID.fetch_add(1, Ordering::Relaxed));
+    let (vaga, ocupante_morto) = com_escalonador(|e| {
+        let vaga = e.vaga_livre()?;
+        let anterior = e.fios[vaga].take();
+        e.fios[vaga] = Some(Fio {
+            id,
+            nome: "ocioso",
+            estado: Estado::Reservado,
+            contexto: Contexto::vazio(),
+            _pilha: None,
+            espaco: None,
+            descritores: crate::usuario::descritores::Tabela::nova(),
+            escalonamentos: 0,
+            pai: None,
+            saida: None,
+            colhido: false,
+            autoridade: crate::autorizacao::Autoridade::Sistema,
+            na_cpu: None,
+            fixo: Some(cpu),
+            ocioso: true,
+        });
+        Ok::<_, &'static str>((vaga, anterior))
+    })?;
+    drop(ocupante_morto);
+
+    let pilha = match pilha::reservar(vaga) {
+        Ok(pilha) => pilha,
+        Err(motivo) => {
+            let marcador = com_escalonador(|e| e.fios[vaga].take());
+            drop(marcador);
+            return Err(motivo);
+        }
+    };
+    let topo = pilha.topo();
+    let mut contexto = Contexto::vazio();
+    contexto.pilha_de_kernel = topo & !0xF;
+    com_escalonador(|e| {
+        if let Some(fio) = e.fios[vaga].as_mut() {
+            fio._pilha = Some(pilha);
+            fio.contexto = contexto;
+        }
+    });
+    Ok((vaga, topo))
+}
+
+/// O núcleo que acabou de acordar adota o fio ocioso preparado para ele.
+///
+/// Chamada **no** núcleo novo, já sobre a pilha do ocioso, com as
+/// interrupções mascaradas: a partir daqui ele tem um fio atual, e o
+/// escalonador pode tirá-lo dali.
+pub fn adotar_ocioso(vaga: usize) {
+    com_escalonador(|e| {
+        let cpu = nucleo();
+        if let Some(fio) = e.fios[vaga].as_mut() {
+            fio.estado = Estado::Rodando;
+            fio.na_cpu = Some(cpu);
+            fio.escalonamentos = 1;
+        }
+        e.atual[cpu] = Some(vaga);
+        e.ociosos[cpu] = Some(vaga);
+        QUANTUM[cpu].store(QUANTUM_EM_TIQUES, Ordering::Relaxed);
+    });
+}
+
+/// Devolve a vaga de um ocioso que não chegou a ser adotado.
+///
+/// O núcleo pode não acordar — o hardware recusou a partida, ou ele não
+/// respondeu no prazo. A vaga e a pilha voltam.
+///
+/// # Safety
+///
+/// Quem chama garante que o núcleo **nunca** vai acordar sobre esta pilha:
+/// ou a partida não foi enviada, ou o núcleo foi dado como perdido e
+/// [`crate::nucleos`] o impede de adotar qualquer coisa. Devolver a pilha de
+/// um núcleo que ainda pode acordar seria entregar a ele memória de outro.
+pub unsafe fn desistir_do_ocioso(vaga: usize) {
+    let marcador = com_escalonador(|e| match &e.fios[vaga] {
+        Some(fio) if fio.ocioso && fio.estado == Estado::Reservado => e.fios[vaga].take(),
+        _ => None,
+    });
+    drop(marcador);
+}
+
 impl Escalonador {
+    /// Os processos vivos com a `autoridade` — reservados também: um fio
+    /// que está nascendo já conta. Ver [`processos_de`].
+    fn processos_de(&self, autoridade: crate::autorizacao::Autoridade) -> usize {
+        self.fios
+            .iter()
+            .flatten()
+            .filter(|f| {
+                f.nome == "usuario" && f.estado != Estado::Terminado && f.autoridade == autoridade
+            })
+            .count()
+    }
+
     /// Uma vaga livre, ou a de um fio já encerrado.
     ///
     /// A vaga do fio **atual** nunca entra na conta, mesmo que ele esteja
@@ -721,16 +1092,17 @@ impl Escalonador {
     /// outro fio a ocupasse nesse intervalo, a próxima troca salvaria o
     /// contexto do moribundo por cima do contexto do recém-criado, e o
     /// recém-criado passaria a retomar num ponto que nunca foi dele.
+    ///
+    /// Com vários núcleos, "o atual" vira "qualquer fio que um núcleo esteja
+    /// usando", e o campo que responde é [`Fio::na_cpu`]: ele cobre o atual
+    /// de cada núcleo e também o que um núcleo acabou de largar mas ainda
+    /// não terminou de salvar.
     fn vaga_livre(&self) -> Result<usize, &'static str> {
         self.fios
             .iter()
-            .enumerate()
-            .position(|(i, f)| {
-                i != self.atual
-                    && match f {
-                        None => true,
-                        Some(fio) => fio.estado == Estado::Terminado,
-                    }
+            .position(|f| match f {
+                None => true,
+                Some(fio) => fio.estado == Estado::Terminado && fio.na_cpu.is_none(),
             })
             .ok_or("nao ha vaga livre para outro fio")
     }
@@ -764,15 +1136,43 @@ impl Escalonador {
             .any(|candidato| candidato.id == pai && candidato.estado != Estado::Terminado)
     }
 
-    /// O próximo fio pronto, em rodízio a partir do atual.
+    /// O próximo fio que o núcleo `cpu` pode rodar, em rodízio a partir do
+    /// atual dele.
     ///
     /// Rodízio simples: varremos a tabela a partir da posição seguinte à
-    /// atual, dando a volta. É O(MAX_FIOS) no pior caso, o que com 16 vagas é
+    /// atual, dando a volta. É O(MAX_FIOS) no pior caso, o que com 32 vagas é
     /// barato o bastante para rodar dentro de um handler.
-    fn proximo_pronto(&self) -> Option<usize> {
-        (1..=MAX_FIOS)
-            .map(|passo| (self.atual + passo) % MAX_FIOS)
-            .find(|&i| matches!(&self.fios[i], Some(f) if f.estado == Estado::Pronto))
+    ///
+    /// Pode rodar aqui quem está `Pronto`, não está nas mãos de outro núcleo
+    /// e não é fixo em outro. O ocioso fica de fora da volta: ele só entra se
+    /// o fio atual não puder continuar e não houver mais ninguém — senão um
+    /// núcleo com trabalho gastaria fatias inteiras dormindo.
+    fn proximo_pronto(&self, cpu: usize) -> Option<usize> {
+        let de = self.atual[cpu].unwrap_or(0);
+        let elegivel = |f: &Fio| {
+            f.estado == Estado::Pronto
+                && f.na_cpu.is_none()
+                && f.fixo.is_none_or(|c| c == cpu)
+                && !f.ocioso
+        };
+        if let Some(i) = (1..=MAX_FIOS)
+            .map(|passo| (de + passo) % MAX_FIOS)
+            .find(|&i| matches!(&self.fios[i], Some(f) if elegivel(f)))
+        {
+            return Some(i);
+        }
+
+        // Ninguém mais. Se o atual ainda pode correr, ele continua; se não
+        // pode — terminou ou espera —, o ocioso deste núcleo o substitui.
+        let atual_segue = self.atual[cpu]
+            .and_then(|i| self.fios[i].as_ref())
+            .is_some_and(|f| f.estado == Estado::Rodando);
+        if atual_segue {
+            return None;
+        }
+        let ocioso = self.ociosos[cpu]?;
+        matches!(&self.fios[ocioso], Some(f) if f.estado == Estado::Pronto && f.na_cpu.is_none())
+            .then_some(ocioso)
     }
 }
 
@@ -816,16 +1216,23 @@ pub unsafe fn selecionar() -> Option<Troca> {
         return None;
     }
 
-    let proximo = e.proximo_pronto()?;
-    let atual = e.atual;
+    let cpu = nucleo();
+    // Rede de segurança: se a troca anterior deste núcleo ainda não soltou a
+    // posse do fio que ele largou, solta agora — estarmos aqui, neste núcleo,
+    // prova que ela terminou. Sem isto, sobrescrever `anterior` abaixo
+    // deixaria aquele fio preso a este núcleo para sempre.
+    e.concluir_troca(cpu);
+
+    let atual = e.atual[cpu]?;
+    let proximo = e.proximo_pronto(cpu)?;
     if proximo == atual {
         return None;
     }
 
     // A vaga do fio atual é sempre ocupada enquanto o escalonador está ligado:
-    // `init` preenche a zero e `vaga_livre` nunca entrega a vaga corrente. Se
-    // ainda assim estiver vazia, é bug nosso, e trocar sem ter onde salvar o
-    // contexto perderia o fio para sempre — recusar a troca é o desfecho
+    // `init` preenche a zero e `vaga_livre` nunca entrega uma vaga com dono.
+    // Se ainda assim estiver vazia, é bug nosso, e trocar sem ter onde salvar
+    // o contexto perderia o fio para sempre — recusar a troca é o desfecho
     // seguro.
     let fio_atual = e.fios[atual].as_mut()?;
     // O fio que sai volta para a fila, a menos que já tenha se encerrado.
@@ -838,17 +1245,36 @@ pub unsafe fn selecionar() -> Option<Troca> {
         let fio = e.fios[proximo].as_mut().expect("vaga conferida acima");
         fio.estado = Estado::Rodando;
         fio.escalonamentos += 1;
+        // A posse do que entra começa agora, sob a trava: nenhum outro
+        // núcleo o escolhe daqui em diante. A do que sai **continua** — ela
+        // só cai em `troca_concluida`, quando o contexto dele estiver
+        // escrito.
+        fio.na_cpu = Some(cpu);
         (&fio.contexto, fio.raiz())
     };
 
-    e.atual = proximo;
+    e.atual[cpu] = Some(proximo);
+    e.anterior[cpu] = Some(atual);
     // Quem entra recebe uma fatia inteira, mesmo que a troca tenha vindo de
     // uma cessão voluntária do anterior. Herdar o resto da fatia alheia faria
     // um fio que cede muito punir o seguinte.
-    e.quantum = QUANTUM_EM_TIQUES;
+    QUANTUM[cpu].store(QUANTUM_EM_TIQUES, Ordering::Relaxed);
     TROCAS.fetch_add(1, Ordering::Relaxed);
 
     Some(Troca { de, para, espaco })
+}
+
+/// Avisa que a troca deste núcleo terminou: o fio que ele largou já tem o
+/// contexto salvo e pode ser escolhido por qualquer um.
+///
+/// Chamada pelo fio que **entra**, no primeiro instante em que ele roda —
+/// depois do `trocar_contexto` no x86, no fim da troca de quadro no ARM, e
+/// nos trampolins dos fios que nunca rodaram. Ver [`Fio::na_cpu`].
+pub fn troca_concluida() {
+    com_escalonador(|e| {
+        let cpu = nucleo();
+        e.concluir_troca(cpu);
+    });
 }
 
 /// Entrega ao fio atual o espaço de endereços em que ele vai rodar.
@@ -859,10 +1285,7 @@ pub unsafe fn selecionar() -> Option<Troca> {
 /// resultado quando quiser.
 #[must_use = "o espaco anterior precisa ser largado fora da trava"]
 pub fn adotar_espaco(espaco: crate::paginacao::Espaco) -> Option<crate::paginacao::Espaco> {
-    com_escalonador(|e| {
-        let atual = e.atual;
-        e.fios[atual].as_mut()?.espaco.replace(espaco)
-    })
+    com_escalonador(|e| e.fio_atual_mut()?.espaco.replace(espaco))
 }
 
 /// Cede a CPU voluntariamente. Quem espera a ordem das gravações da
@@ -874,8 +1297,7 @@ pub fn ceder() {
 /// A autoridade do fio que está executando — ver [`Fio::autoridade`].
 pub fn autoridade_atual() -> crate::autorizacao::Autoridade {
     com_escalonador(|e| {
-        e.fios[e.atual]
-            .as_ref()
+        e.fio_atual()
             .map(|f| f.autoridade)
             .unwrap_or(crate::autorizacao::Autoridade::NENHUMA)
     })
@@ -883,7 +1305,7 @@ pub fn autoridade_atual() -> crate::autorizacao::Autoridade {
 
 /// O identificador do fio que está executando.
 pub fn id_atual() -> u64 {
-    com_escalonador(|e| e.fios[e.atual].as_ref().map(|f| f.id.numero()).unwrap_or(0))
+    com_escalonador(|e| e.fio_atual().map(|f| f.id.numero()).unwrap_or(0))
 }
 
 /// Dá acesso à tabela de descritores do fio que está executando.
@@ -905,7 +1327,7 @@ pub fn id_atual() -> u64 {
 pub fn com_descritores<R>(
     f: impl FnOnce(&mut crate::usuario::descritores::Tabela) -> R,
 ) -> Option<R> {
-    com_escalonador(|e| e.fios[e.atual].as_mut().map(|fio| f(&mut fio.descritores)))
+    com_escalonador(|e| e.fio_atual_mut().map(|fio| f(&mut fio.descritores)))
 }
 
 /// A pilha de kernel do fio que está executando.
@@ -915,8 +1337,7 @@ pub fn com_descritores<R>(
 #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub fn pilha_de_kernel_atual() -> u64 {
     com_escalonador(|e| {
-        e.fios[e.atual]
-            .as_ref()
+        e.fio_atual()
             .map(|f| f.contexto.pilha_de_kernel())
             .unwrap_or(0)
     })
@@ -971,7 +1392,7 @@ pub enum Colheita {
 /// cumpriu dentro do teto de tempo`: o pai dorme e não acorda mais.
 pub fn colher_filho(alvo: Option<u64>) -> Colheita {
     com_escalonador(|e| {
-        let Some(eu) = e.fios[e.atual].as_ref().map(|f| f.id) else {
+        let Some(eu) = e.fio_atual().map(|f| f.id) else {
             return Colheita::SemFilhos;
         };
 
@@ -996,8 +1417,7 @@ pub fn colher_filho(alvo: Option<u64>) -> Colheita {
         // saída que nunca vem.
         if e.fios.iter().flatten().any(|f| meus(f) && !f.colhido) {
             // Na mesma seção crítica: ver o cabeçalho.
-            let atual = e.atual;
-            if let Some(fio) = e.fios[atual].as_mut() {
+            if let Some(fio) = e.fio_atual_mut() {
                 fio.estado = Estado::Esperando;
             }
             Colheita::Aguardando
@@ -1023,11 +1443,7 @@ pub fn colheita() -> (u64, usize) {
 /// no x86 a chamada volta de dentro do despacho e a distinção não muda nada.
 #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
 pub fn atual_esperando() -> bool {
-    com_escalonador(|e| {
-        e.fios[e.atual]
-            .as_ref()
-            .is_some_and(|f| f.estado == Estado::Esperando)
-    })
+    com_escalonador(|e| e.fio_atual().is_some_and(|f| f.estado == Estado::Esperando))
 }
 
 /// Tira o fio atual de circulação até [`acordar`] o devolver.
@@ -1037,7 +1453,7 @@ pub fn atual_esperando() -> bool {
 /// backend de arquitetura vai reexecutá-la quando o fio voltar.
 pub fn estacionar_atual() {
     com_escalonador(|e| {
-        if let Some(fio) = e.fios[e.atual].as_mut() {
+        if let Some(fio) = e.fio_atual_mut() {
             fio.estado = Estado::Esperando;
         }
     });
@@ -1050,16 +1466,58 @@ pub fn estacionar_atual() {
 ///
 /// Devolve se ele ainda existe e não terminou — esperando ou não.
 pub fn acordar(id: u64) -> bool {
-    com_escalonador(|e| {
+    let (vivo, ociosos) = com_escalonador(|e| {
+        let mut acordou = false;
+        let mut vivo = false;
         for fio in e.fios.iter_mut().flatten() {
             if fio.id.numero() == id {
                 if fio.estado == Estado::Esperando {
                     fio.estado = Estado::Pronto;
+                    acordou = true;
                 }
-                return fio.estado != Estado::Terminado;
+                vivo = fio.estado != Estado::Terminado;
+                break;
+            }
+        }
+        (vivo, if acordou { e.nucleos_ociosos() } else { 0 })
+    });
+    crate::nucleos::cutucar(ociosos);
+    vivo
+}
+
+/// Só para a suíte: prende o fio `id` ao núcleo `cpu`, ou o solta com
+/// `None`. Devolve se o fio existe.
+///
+/// # Para que a suíte precisa
+///
+/// Alguns casos precisam de um processo **parado** por um instante — para
+/// encher uma fila que ele esvaziaria, e provar que ela tem teto. Com um
+/// núcleo só, mascarar as interrupções bastava: o processo não tinha onde
+/// rodar. Com vários, ele roda em outro núcleo enquanto a suíte mascara o
+/// seu. Prendê-lo ao núcleo da suíte devolve a propriedade sem fingir que
+/// ela existe: mascarado ali, ele não tem onde rodar de novo.
+#[cfg(feature = "modo-teste")]
+pub fn fixar(id: u64, cpu: Option<usize>) -> bool {
+    com_escalonador(|e| {
+        for fio in e.fios.iter_mut().flatten() {
+            if fio.id.numero() == id && !fio.ocioso {
+                fio.fixo = cpu;
+                return true;
             }
         }
         false
+    })
+}
+
+/// Só para a suíte: em que núcleo o fio `id` está agora, se em algum.
+#[cfg(feature = "modo-teste")]
+pub fn nucleo_de(id: u64) -> Option<usize> {
+    com_escalonador(|e| {
+        e.fios
+            .iter()
+            .flatten()
+            .find(|f| f.id.numero() == id)
+            .and_then(|f| f.na_cpu)
     })
 }
 
@@ -1068,15 +1526,7 @@ pub fn acordar(id: u64) -> bool {
 /// terminaram. É a conta da cota de processos do papel — ver
 /// [`crate::autorizacao::permitir_processo`].
 pub fn processos_de(autoridade: crate::autorizacao::Autoridade) -> usize {
-    com_escalonador(|e| {
-        e.fios
-            .iter()
-            .flatten()
-            .filter(|f| {
-                f.nome == "usuario" && f.estado != Estado::Terminado && f.autoridade == autoridade
-            })
-            .count()
-    })
+    com_escalonador(|e| e.processos_de(autoridade))
 }
 
 /// O fio `id` existe e não terminou?
@@ -1097,8 +1547,7 @@ pub fn vivo(id: u64) -> bool {
 /// ao mesmo lugar: parar de rodar. O que difere é se ele volta.
 pub fn atual_parado() -> bool {
     com_escalonador(|e| {
-        e.fios[e.atual]
-            .as_ref()
+        e.fio_atual()
             .is_some_and(|f| f.estado == Estado::Terminado || f.estado == Estado::Esperando)
     })
 }
@@ -1114,15 +1563,14 @@ pub fn atual_parado() -> bool {
 /// Então quem roda num handler marca aqui e deixa o próprio handler fazer a
 /// troca, sobre o quadro que ele já tem em mãos.
 pub fn marcar_terminado(saida: Option<i64>) {
-    com_escalonador(|e| {
-        let atual = e.atual;
-        let pai = match e.fios[atual].as_mut() {
+    let ociosos = com_escalonador(|e| {
+        let pai = match e.fio_atual_mut() {
             Some(fio) => {
                 fio.estado = Estado::Terminado;
                 fio.saida = saida;
                 fio.pai
             }
-            None => return,
+            None => return 0,
         };
 
         // Acordar o pai é a outra metade de terminar, e ela mora aqui pela
@@ -1139,14 +1587,16 @@ pub fn marcar_terminado(saida: Option<i64>) {
         // esperar. Uma volta perdida é mais barata que guardar em cada fio o
         // id que ele aguarda — um campo que só poderia divergir do que a
         // chamada de sistema realmente pediu.
-        let Some(pai) = pai else { return };
+        let Some(pai) = pai else { return 0 };
         for fio in e.fios.iter_mut().flatten() {
             if fio.id == pai && fio.estado == Estado::Esperando {
                 fio.estado = Estado::Pronto;
-                break;
+                return e.nucleos_ociosos();
             }
         }
+        0
     });
+    crate::nucleos::cutucar(ociosos);
 }
 
 /// Encerra o fio atual. Nunca retorna.
@@ -1196,29 +1646,24 @@ pub fn tique() -> bool {
         return false;
     }
 
-    let venceu = crate::arch::sem_interrupcoes(|| {
-        let Some(mut e) = ESCALONADOR.try_lock() else {
-            // A trava está com código que foi interrompido. Não insistimos:
-            // perder um tique de quantum é irrelevante, e girar aqui dentro do
-            // handler seria fatal.
-            return false;
-        };
-        if !e.ligado {
-            return false;
-        }
+    if !LIGADO.load(Ordering::Acquire) {
+        return false;
+    }
 
-        e.quantum = e.quantum.saturating_sub(1);
-        if e.quantum > 0 {
-            return false;
-        }
-
-        // Recarregamos aqui, e não só quando a troca acontece. Se deixássemos
-        // para lá, um quantum vencido sem outro fio pronto ficaria em zero
-        // para sempre: o timer pediria uma troca a cada tique, e o contador de
-        // vencimentos passaria a medir tiques, não fatias.
-        e.quantum = QUANTUM_EM_TIQUES;
-        true
-    });
+    // Sem a trava do escalonador — ver `QUANTUM`. Estamos no handler do timer
+    // deste núcleo, com as interrupções mascaradas: ninguém mais toca neste
+    // quantum agora.
+    let quantum = &QUANTUM[nucleo()];
+    let restante = quantum.load(Ordering::Relaxed).saturating_sub(1);
+    // Recarregamos aqui, e não só quando a troca acontece. Se deixássemos
+    // para lá, um quantum vencido sem outro fio pronto ficaria em zero para
+    // sempre: o timer pediria uma troca a cada tique, e o contador de
+    // vencimentos passaria a medir tiques, não fatias.
+    let venceu = restante == 0;
+    quantum.store(
+        if venceu { QUANTUM_EM_TIQUES } else { restante },
+        Ordering::Relaxed,
+    );
 
     if venceu {
         QUANTUNS_VENCIDOS.fetch_add(1, Ordering::Relaxed);
@@ -1237,6 +1682,10 @@ pub struct Inscricao {
     pub nome: &'static str,
     pub estado: &'static str,
     pub escalonamentos: u64,
+    /// O núcleo em que ele está agora, se algum.
+    pub nucleo: Option<usize>,
+    /// O único núcleo em que ele pode rodar, se é fixo.
+    pub fixo: Option<usize>,
 }
 
 pub fn com_inscricoes<F: FnMut(Inscricao)>(mut f: F) {
@@ -1264,6 +1713,8 @@ pub fn com_inscricoes<F: FnMut(Inscricao)>(mut f: F) {
                     Estado::Terminado => "done",
                 },
                 escalonamentos: fio.escalonamentos,
+                nucleo: fio.na_cpu,
+                fixo: fio.fixo,
             });
         }
         saida

@@ -47,7 +47,7 @@
 //! relógio do kernel conta interrupções, e quem fala com o TPM o faz com
 //! elas mascaradas.
 
-use spin::Mutex;
+use crate::trava::Mutex;
 
 use ancora::{Erro, MAIOR_QUADRO, Tpm};
 

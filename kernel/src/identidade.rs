@@ -34,9 +34,9 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use crate::trava::Mutex;
 use sigilo::TAM_CHAVE;
 use sigilo::registro::{self, ErroDeLinha};
-use spin::Mutex;
 
 /// Onde está a chave privada do Duke.
 pub const CAMINHO_DA_CHAVE: &str = "/etc/duke/privado/chave";

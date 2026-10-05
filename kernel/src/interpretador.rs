@@ -56,7 +56,7 @@
 // sobre eles pelo mesmo caminho que o agente e a pessoa usam em produção.
 use core::fmt;
 
-use spin::Mutex;
+use crate::trava::Mutex;
 
 use crate::agent::json::{Json, JsonWriter};
 use crate::agent::registry;
@@ -118,6 +118,10 @@ struct Estado {
     nome_tam: usize,
     /// A sessão de quem entrou.
     sessao: Option<IdSessao>,
+    /// Quantas vezes o console abriu ou fechou. O login guarda a de quando
+    /// a senha foi digitada, e só entra se ela não mudou — ver o modo
+    /// [`Modo::Senha`] em [`tratar`].
+    abertura: u64,
 }
 
 impl Estado {
@@ -131,6 +135,7 @@ impl Estado {
         nome: [0; NOME_MAX],
         nome_tam: 0,
         sessao: None,
+        abertura: 0,
     };
 
     fn texto(&self) -> &str {
@@ -233,20 +238,33 @@ pub async fn atender() {
 /// Abre um console: sem ninguém entrado, a linha vazia, e o convite para
 /// entrar. O físico abre quando o interpretador começa; um Terminal, quando
 /// o pseudo-terminal dele abre.
+///
+/// Uma sessão que tivesse ficado no console é **encerrada**, e não só
+/// esquecida: esquecê-la a deixaria viva no registro de pessoas, sem console
+/// nenhum que a feche. O pseudo-terminal fecha o console antes de reabri-lo,
+/// e então não sobra sessão; isto é a segunda linha, para a ordem que não
+/// devia acontecer — e que aconteceu, com vários núcleos, antes de a vaga do
+/// pseudo-terminal ganhar o estado em troca.
 pub fn abrir_console(console: Console) {
-    com_estado(console, |e| {
+    let sobra = com_estado(console, |e| {
+        let sobra = e.sessao.take();
         e.zerar();
         e.aberto = true;
+        e.abertura += 1;
         e.modo = Modo::Comando;
         e.nome_tam = 0;
-        e.sessao = None;
         saidaln!(
             console,
             "Duke, {}. Ninguem entrou: `login` para entrar, `ajuda` para saber mais.",
             console.texto()
         );
         prompt_em(console, e);
-    });
+        sobra
+    })
+    .flatten();
+    if let Some(id) = sobra {
+        crate::pessoas::encerrar_pelo_console(id, "o console reabriu");
+    }
     if console == Console::Fisico {
         crate::ui::mudou();
     }
@@ -260,6 +278,7 @@ pub fn fechar_console(console: Console, motivo: &str) {
         let sessao = e.sessao.take();
         e.zerar();
         e.aberto = false;
+        e.abertura += 1;
         e.inicio = None;
         e.modo = Modo::Comando;
         e.nome = [0; NOME_MAX];
@@ -786,7 +805,7 @@ fn entrar_passo(console: Console) {
             // apagados dos dois lugares.
             let mut senha = [0u8; LINHA_MAX];
             let mut nome = [0u8; NOME_MAX];
-            let (tam, nome_tam) = com_estado(console, |e| {
+            let (tam, nome_tam, abertura) = com_estado(console, |e| {
                 let tam = e.tam;
                 senha[..tam].copy_from_slice(&e.bytes[..tam]);
                 nome.copy_from_slice(&e.nome);
@@ -797,16 +816,33 @@ fn entrar_passo(console: Console) {
                 e.modo = Modo::Comando;
                 e.inicio = None;
                 saidaln!(console);
-                (tam, nome_tam)
+                (tam, nome_tam, e.abertura)
             })
-            .unwrap_or((0, 0));
+            .unwrap_or((0, 0, 0));
             crate::teclado::pedindo_senha(i, false);
             let nome_texto = core::str::from_utf8(&nome[..nome_tam]).unwrap_or("");
             let desfecho = crate::pessoas::autenticar(console, nome_texto, &senha[..tam]);
             sigilo::zeroize::Zeroize::zeroize(&mut senha);
             match desfecho {
                 Ok(id) => {
-                    let anterior = com_estado(console, |e| e.sessao.replace(id)).flatten();
+                    // A conferência da senha é longa e roda fora da tranca, e
+                    // no meio dela o console pode ter fechado — o Terminal
+                    // morreu — e até reaberto para **outro** Terminal, na
+                    // mesma vaga. Entrar mesmo assim poria a sessão desta
+                    // pessoa no console de outro processo, ou num console
+                    // fechado, viva e sem ninguém que a feche. Só entra o
+                    // console que ainda é o da senha; senão, a sessão que
+                    // acabou de nascer acaba.
+                    let Some(anterior) = com_estado(console, |e| {
+                        (e.aberto && e.abertura == abertura).then(|| e.sessao.replace(id))
+                    })
+                    .flatten() else {
+                        crate::pessoas::encerrar_pelo_console(
+                            id,
+                            "o console fechou durante o login",
+                        );
+                        return;
+                    };
                     if let Some(velha) = anterior {
                         crate::pessoas::sair(velha);
                     }
@@ -894,6 +930,20 @@ pub unsafe fn destravar() {
 pub fn ativar_para_teste() {
     abrir_console(Console::Fisico);
     entrar_para_teste(Console::Fisico, PESSOA_DE_TESTE, PAPEL_DA_PESSOA_DE_TESTE);
+}
+
+/// O console está aberto? Só para a suíte, que confere que o coletor de um
+/// pseudo-terminal não fecha o console do dono seguinte.
+#[cfg(feature = "modo-teste")]
+pub fn console_aberto(console: Console) -> bool {
+    com_estado(console, |e| e.aberto).unwrap_or(false)
+}
+
+/// O console está pedindo a senha? Só para a suíte, que precisa saber
+/// quando a senha já saiu da linha e a conferência começou.
+#[cfg(feature = "modo-teste")]
+pub fn pedindo_senha(console: Console) -> bool {
+    com_estado(console, |e| e.modo == Modo::Senha).unwrap_or(false)
 }
 
 /// A pessoa que a suíte põe no console, e o papel dela.

@@ -25,6 +25,24 @@ const PORTA_DE_DADOS: u16 = 0xCFC;
 #[derive(Clone, Copy)]
 pub struct Acesso;
 
+/// A vez no par de portas de configuração.
+///
+/// A máscara de interrupções impede um handler de trocar a seleção no meio
+/// de um acesso **neste** núcleo; com vários núcleos, outro núcleo faria o
+/// mesmo estrago, e só uma trava o exclui. É o mesmo defeito do par de
+/// portas do CMOS — ver `crate::relogio`.
+static CONFIGURACAO: crate::trava::Mutex<()> = crate::trava::Mutex::new(());
+
+/// Destrava o par de portas à força, para o caminho de falha fatal.
+///
+/// # Safety
+///
+/// Só pode ser chamada quando o kernel já está em falha irrecuperável e não
+/// há outro núcleo em execução. Ver [`crate::traps::fatal`].
+pub unsafe fn destravar() {
+    unsafe { CONFIGURACAO.force_unlock() };
+}
+
 /// Monta a palavra de seleção.
 ///
 /// O bit 31 é o que diz "isto é um acesso de configuração"; sem ele o par de
@@ -46,8 +64,10 @@ impl ConfigRegionAccess for Acesso {
         // O par de portas é **estado compartilhado do chipset**: entre escrever
         // o endereço e ler o dado, qualquer outro acesso de configuração
         // sobrescreve a seleção e devolvemos o registrador errado. Um handler
-        // que tocasse PCI no meio disto seria suficiente.
+        // que tocasse PCI no meio disto seria suficiente, e outro núcleo
+        // também — ver `CONFIGURACAO`.
         crate::arch::sem_interrupcoes(|| {
+            let _vez = CONFIGURACAO.lock();
             // SAFETY: as duas portas são as de configuração PCI, fixas na
             // arquitetura, e a seleção acabou de ser montada para elas.
             unsafe {
@@ -59,6 +79,7 @@ impl ConfigRegionAccess for Acesso {
 
     unsafe fn write(&self, endereco: PciAddress, deslocamento: u16, valor: u32) {
         crate::arch::sem_interrupcoes(|| {
+            let _vez = CONFIGURACAO.lock();
             // SAFETY: mesma justificativa da leitura.
             unsafe {
                 Port::<u32>::new(PORTA_DE_ENDERECO).write(selecionar(endereco, deslocamento));

@@ -98,6 +98,19 @@ pub fn agora() -> Option<u64> {
     rtc::ler()
 }
 
+/// Destrava o acesso ao relógio à força, para o caminho de falha fatal.
+///
+/// # Safety
+///
+/// Só pode ser chamada quando o kernel já está em falha irrecuperável e não
+/// há outro núcleo em execução. Ver [`crate::traps::fatal`].
+pub unsafe fn destravar() {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        rtc::CMOS.force_unlock()
+    };
+}
+
 /// Prepara o acesso ao RTC.
 pub fn init() {
     rtc::init();
@@ -141,11 +154,26 @@ mod rtc {
 
     pub fn init() {}
 
+    /// O par de portas do CMOS: quem escreve o índice e lê o valor.
+    ///
+    /// Era só `sem_interrupcoes`, que impedia um fio de ser preemptado entre
+    /// as duas portas — e com um núcleo só bastava. Com vários, dois núcleos
+    /// lendo o relógio ao mesmo tempo trocam o índice um do outro: um lê o
+    /// segundo, o outro escolhe o registrador A no meio, e o primeiro recebe
+    /// o estado no lugar do segundo. A auditoria lê o relógio a cada decisão
+    /// do gate, de qualquer núcleo, então isso não era raro. Medido na suíte:
+    /// lançamentos simultâneos em quatro núcleos paravam um lançador por mais
+    /// de três segundos — o bit de "atualizando" lido de outro registrador
+    /// fazia a espera girar a volta inteira. E uma leitura misturada que
+    /// passasse pela conferência dupla de [`ler`] levaria o piso do relógio
+    /// da persistência — que nunca volta — para uma data errada.
+    pub(super) static CMOS: crate::trava::Mutex<()> = crate::trava::Mutex::new(());
+
     fn registrador(r: u8) -> u8 {
-        // O índice e o valor sem nada no meio: um fio preemptado entre os
-        // dois, e outro que escolhesse outro registrador, leria o valor
-        // errado. A auditoria lê o relógio a cada decisão, de qualquer fio.
+        // O índice e o valor sem nada no meio: nem um fio preemptado entre os
+        // dois, nem outro núcleo escolhendo outro registrador — ver `CMOS`.
         crate::arch::sem_interrupcoes(|| {
+            let _vez = CMOS.lock();
             // SAFETY: as portas 0x70 e 0x71 são as do CMOS em todo PC; ler
             // um registrador do relógio não tem efeito colateral. O bit 7 de
             // 0x70 (que mascara a NMI) fica como o número o deixa: zero.

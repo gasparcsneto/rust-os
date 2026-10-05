@@ -42,7 +42,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use spin::Mutex;
+use crate::trava::Mutex;
 
 use crate::grafico::compositor::{Camada, Mistura};
 use crate::superficies::Destino;

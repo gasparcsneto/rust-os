@@ -22,6 +22,7 @@ pub(crate) mod fdt;
 pub mod gic;
 pub mod mmu;
 pub mod pci;
+pub mod smp;
 pub mod uart;
 pub mod usuario;
 pub mod vetores;
@@ -34,7 +35,7 @@ pub use usuario::{definir_pilha_de_kernel, entrar as entrar_em_usuario, init as 
 pub use uart::Uart;
 
 use aarch64_cpu::asm::{wfe, wfi};
-use aarch64_cpu::registers::{DAIF, MIDR_EL1};
+use aarch64_cpu::registers::{DAIF, MIDR_EL1, MPIDR_EL1};
 use core::arch::asm;
 use core::sync::atomic::{AtomicU64, Ordering};
 use tock_registers::interfaces::Readable;
@@ -158,6 +159,11 @@ _start:
     mrs     x1, mpidr_el1
     and     x1, x1, #0xFF
     cbnz    x1, .Lestacionar
+
+    // O índice deste núcleo no kernel, onde todo código o vai procurar — ver
+    // `nucleo_atual`. O valor de reset do registrador é indefinido, e o
+    // primeiro núcleo é o zero por definição.
+    msr     tpidr_el1, xzr
 
     // Duas pilhas, e a separação entre elas é o que torna um estouro
     // diagnosticável.
@@ -483,6 +489,66 @@ pub fn reservar_faixas(mut f: impl FnMut(u64, u64)) {
     if tamanho > 0 {
         f(dtb, dtb + tamanho);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Vários núcleos
+// ---------------------------------------------------------------------------
+
+/// Em que núcleo este código está rodando.
+///
+/// Pelo `TPIDR_EL1`, que cada núcleo recebe com o seu índice ao acordar — o
+/// primeiro, no código de boot. É o registrador que a arquitetura reserva
+/// para isto, e o processo não o alcança: em EL0 ele não existe.
+pub fn nucleo_atual() -> usize {
+    let indice: u64;
+    // SAFETY: leitura de um registrador de sistema de EL1, sem efeito.
+    unsafe { asm!("mrs {}, tpidr_el1", out(reg) indice, options(nomem, nostack, preserves_flags)) };
+    (indice as usize).min(crate::nucleos::MAX_NUCLEOS - 1)
+}
+
+/// O `MPIDR` deste núcleo, só com os campos de afinidade — é como o device
+/// tree e a PSCI o chamam.
+pub fn hardware_deste_nucleo() -> u64 {
+    MPIDR_EL1.get() & 0xFF_00FF_FFFF
+}
+
+/// Chama `f` com o `MPIDR` de cada núcleo que o device tree descreve.
+pub fn descobrir_nucleos(f: impl FnMut(u64)) {
+    smp::descobrir(f);
+}
+
+/// Acorda o núcleo de `MPIDR` `hardware` como o núcleo `indice`, na pilha
+/// `topo`.
+pub fn partir_nucleo(indice: usize, hardware: u64, topo: u64) -> Result<(), &'static str> {
+    smp::partir(indice, hardware, topo)
+}
+
+pub use smp::{parar_este_nucleo, parar_os_outros};
+
+/// Acorda os núcleos da máscara, se estiverem dormindo — ver
+/// [`crate::nucleos::cutucar`].
+pub fn cutucar(mascara: u8) {
+    gic::enviar_sgi(mascara, gic::SGI_CUTUCAO);
+}
+
+/// Zero, sempre: aqui não há pedido a outro núcleo para largar uma
+/// tradução — as invalidações são as da família `...is`, que o hardware
+/// difunde. Existe para o canal do agente perguntar a mesma coisa às duas
+/// arquiteturas.
+pub fn invalidacoes_remotas() -> u64 {
+    0
+}
+
+/// Sempre zero: sem descarte por aviso, não há o que reenviar.
+pub fn reavisos_remotos() -> u64 {
+    0
+}
+
+/// Liga as IRQs deste núcleo.
+pub fn ligar_interrupcoes() {
+    // SAFETY: há tabela de vetores instalada e um handler para toda classe.
+    unsafe { asm!("msr daifclr, #2", options(nomem, nostack)) };
 }
 
 /// Instala a tabela de vetores de exceção em `VBAR_EL1`.

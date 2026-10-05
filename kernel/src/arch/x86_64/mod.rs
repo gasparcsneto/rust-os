@@ -6,6 +6,7 @@
 //! [`protocolo::Entrega`] que ele deixou para as estruturas neutras de
 //! [`crate::machine`] e segue para o fluxo comum.
 
+pub mod acpi;
 pub mod apic;
 pub mod contexto;
 pub mod gdt;
@@ -14,6 +15,7 @@ pub mod mouse;
 pub mod paginacao;
 pub mod pci;
 pub mod pic;
+pub mod smp;
 pub mod uart;
 pub mod usuario;
 
@@ -118,6 +120,7 @@ pub unsafe extern "sysv64" fn _start(entrega: *const protocolo::Entrega) -> ! {
     let entrega = unsafe { conferir_a_entrega(entrega) };
 
     DESLOCAMENTO_FISICO.store(entrega.deslocamento_fisico, Ordering::Relaxed);
+    acpi::registrar_rsdp(entrega.acpi);
 
     for i in 0..entrega.quantas_regioes {
         // SAFETY: o ponteiro e a contagem vêm da entrega conferida, e as
@@ -430,12 +433,79 @@ pub const fn falha_de_estouro_de_pilha() -> &'static str {
 /// Informa faixas de memória física que o alocador de frames não pode
 /// entregar.
 ///
-/// No x86 não há nenhuma: o iniciador marca no mapa de memória tudo que
-/// ocupou — a imagem do kernel, as tabelas de página, a pilha inicial, a
+/// Do que o iniciador ocupou, nenhuma: ele marca no mapa de memória tudo que
+/// usou — a imagem do kernel, as tabelas de página, a pilha inicial, a
 /// própria entrega — como [`protocolo::tipo::DO_INICIADOR`], e nunca como
 /// utilizável. A tradução em [`_start`] preserva essa distinção, então o
 /// alocador já nasce sabendo o que evitar.
-pub fn reservar_faixas(_f: impl FnMut(u64, u64)) {}
+///
+/// O que sai daqui é do próprio kernel: duas páginas abaixo de 1 MiB, onde os
+/// outros núcleos acordam — ver [`smp`]. Elas precisam ser escolhidas antes
+/// de o alocador entregar qualquer frame, porque depois disso as páginas
+/// baixas podem já ter dono.
+pub fn reservar_faixas(f: impl FnMut(u64, u64)) {
+    smp::reservar_paginas_baixas(f);
+}
+
+// ---------------------------------------------------------------------------
+// Vários núcleos
+// ---------------------------------------------------------------------------
+
+/// Em que núcleo este código está rodando — ver [`gdt::nucleo_atual`].
+pub use gdt::nucleo_atual;
+
+/// O id de APIC deste núcleo, que é como o hardware o chama.
+pub fn hardware_deste_nucleo() -> u64 {
+    apic::id_inicial() as u64
+}
+
+/// Chama `f` com o id de APIC de cada núcleo que a ACPI descreve como
+/// habilitado — o primeiro incluído.
+pub fn descobrir_nucleos(mut f: impl FnMut(u64)) {
+    if let Err(motivo) = acpi::processadores(|id| f(id as u64)) {
+        crate::log_warn!(
+            "smp",
+            "a ACPI nao listou os nucleos ({}): segue com um so",
+            motivo
+        );
+    }
+}
+
+/// Acorda o núcleo de APIC `hardware` como o núcleo `indice`, na pilha `topo`.
+pub fn partir_nucleo(indice: usize, hardware: u64, topo: u64) -> Result<(), &'static str> {
+    smp::partir(indice, hardware, topo)
+}
+
+pub use smp::{parar_este_nucleo, parar_os_outros};
+
+/// Acorda os núcleos da máscara, se estiverem dormindo — ver
+/// [`crate::nucleos::cutucar`].
+pub fn cutucar(mascara: u8) {
+    for i in 0..crate::nucleos::MAX_NUCLEOS {
+        if mascara & (1 << i) != 0
+            && let Some(h) = crate::nucleos::hardware(i).and_then(|h| u32::try_from(h).ok())
+        {
+            let _ = apic::cutucar(h);
+        }
+    }
+}
+
+/// Quantas vezes este kernel pediu aos outros núcleos que largassem uma
+/// tradução — ver [`smp::descartar_nos_outros`].
+pub fn invalidacoes_remotas() -> u64 {
+    smp::descartes()
+}
+
+/// Quantos avisos de descarte foram reenviados a um núcleo que demorava —
+/// ver [`smp::descartar_nos_outros`].
+pub fn reavisos_remotos() -> u64 {
+    smp::reavisos()
+}
+
+/// Liga as interrupções deste núcleo.
+pub fn ligar_interrupcoes() {
+    x86_64::instructions::interrupts::enable();
+}
 
 /// Instala GDT, TSS e IDT.
 ///

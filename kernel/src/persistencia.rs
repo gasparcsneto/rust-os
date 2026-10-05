@@ -60,9 +60,9 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use politica::auditoria::Cadeia;
 
+use crate::trava::Mutex;
 use diario::estado::{self, tipo};
 use diario::{Conteudo, Escritor, Meio, Relogio, Veredito};
-use spin::Mutex;
 
 /// O índice de NV do contador da âncora, na faixa que a especificação do
 /// TCG reserva para o dono do TPM.

@@ -46,9 +46,9 @@ use core::arch::asm;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use crate::trava::Mutex;
 use aarch64_cpu::asm::barrier;
 use aarch64_cpu::registers::{ID_AA64MMFR0_EL1, MAIR_EL1, SCTLR_EL1, TCR_EL1, TTBR0_EL1};
-use spin::Mutex;
 use tock_registers::interfaces::{ReadWriteable, Readable, Writeable};
 
 use super::super::{Permissoes, TAMANHO_PAGINA, validar_alinhamento};

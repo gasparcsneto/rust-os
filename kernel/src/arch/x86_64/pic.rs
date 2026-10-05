@@ -11,7 +11,14 @@
 //!
 //! Então as linhas de dispositivo continuam passando por ele, e o PIT
 //! continua ligado no boot como o relógio de referência que calibra o APIC.
-//! Trocar o PIC pelo APIC de E/S é trabalho da fase de vários núcleos.
+//!
+//! Com vários núcleos, o PIC continua entregando tudo ao primeiro: as
+//! interrupções de dispositivo — teclado, disco, rede, o canal do agente —
+//! são do núcleo 0, e os outros têm só o timer do APIC deles e os avisos
+//! entre núcleos (ver [`crate::nucleos`]). Distribuí-las exigiria o APIC de
+//! E/S, e o ganho seria vazão de E/S, que esta bancada não mede; o custo é
+//! que um núcleo 0 travado com as interrupções mascaradas cala os
+//! dispositivos — uma limitação registrada no README.
 //!
 //! # A remapeação obrigatória
 //!

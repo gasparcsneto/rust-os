@@ -34,7 +34,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use spin::Mutex;
+use crate::trava::Mutex;
 use x86_64::structures::paging::mapper::CleanUp;
 use x86_64::structures::paging::mapper::{MapToError, TranslateResult, UnmapError};
 use x86_64::structures::paging::page_table::{FrameError, PageTableEntry};
@@ -281,6 +281,16 @@ pub fn desmapear(virtual_: u64) -> Result<u64, &'static str> {
         match mapeador.unmap(pagina) {
             Ok((frame, flush)) => {
                 flush.flush();
+
+                // E nos outros núcleos, se a página é do kernel. Antes de o
+                // frame sair daqui: quem o recebe do alocador não pode
+                // dividi-lo com uma tradução velha em outro núcleo — ver
+                // `smp`. Uma página do processo não precisa: o processo roda
+                // num núcleo só, e os outros por onde ele passou já trocaram
+                // de raiz, o que descarta as traduções dele.
+                if !crate::arch::e_privado(virtual_) {
+                    super::smp::descartar_nos_outros(virtual_);
+                }
 
                 // Recupera as tabelas que esta remoção possa ter esvaziado —
                 // mas **só** na entrada de topo privada deste espaço.
@@ -808,6 +818,18 @@ fn com_descritor_da_folha<R>(
             // não na máquina. É o modo de falhar mais caro que há: intermitente
             // e dependente de quanto tempo passou.
             x86_64::instructions::tlb::flush(VirtAddr::new(virtual_));
+
+            // E nos outros núcleos, quando a página não é do espaço privado.
+            // A do processo não precisa: o espaço ativo é deste núcleo — o
+            // processo tem um fio só, e um núcleo que o rodou antes já trocou
+            // de raiz, o que descarta as traduções dele. Uma página do kernel
+            // é traduzida por todo núcleo, e marcá-la sem avisá-los daria a
+            // cada um a permissão antiga até a TLB dele expirar. Nenhum
+            // chamador de hoje marca página do kernel; a obrigação é desta
+            // função, e não de quem a chama — ver o roteiro, fase 6.
+            if !crate::arch::e_privado(virtual_) {
+                super::smp::descartar_nos_outros(virtual_);
+            }
         }
         Ok(resultado)
     })

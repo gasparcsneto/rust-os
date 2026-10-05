@@ -35,9 +35,9 @@
 //! [`crate::arch::reservar_faixas`].
 
 // Só a injeção de falha da suíte usa atômicos aqui.
+use crate::trava::Mutex;
 #[cfg(feature = "modo-teste")]
 use core::sync::atomic::{AtomicUsize, Ordering};
-use spin::Mutex;
 
 // Toda tomada de `ALOCADOR` abaixo passa por `sem_interrupcoes`, e a partir da
 // fase 1 isso deixou de ser zelo e virou requisito. Com o escalonador
@@ -580,7 +580,7 @@ pub fn soltar(endereco: u64) -> bool {
         return false;
     }
 
-    let ultimo = com_alocador(|a| match a.indice_de(endereco) {
+    com_alocador(|a| match a.indice_de(endereco) {
         // Fora da janela rastreada não há contagem nem circulação, e
         // `liberar` também trata este caso como no-op. Responder "voltou"
         // seria inventar um retorno para uma operação que não aconteceu.
@@ -595,14 +595,16 @@ pub fn soltar(endereco: u64) -> bool {
             }
             false
         }
-        // Sem donos extras, soltar é liberar.
-        Some(_) => true,
-    });
-
-    if ultimo {
-        liberar(endereco);
-    }
-    ultimo
+        // Sem donos extras, soltar é liberar — **aqui**, na mesma seção
+        // crítica que viu a contagem em zero. Liberar depois, fora dela,
+        // deixava uma janela em que outro núcleo podia anotar um dono novo
+        // num frame que já estava a caminho do alocador.
+        Some(indice) => {
+            a.liberar_indice(indice);
+            a.dica = indice / 64;
+            true
+        }
+    })
 }
 
 /// Quantos donos este frame tem.

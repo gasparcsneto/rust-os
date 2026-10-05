@@ -69,7 +69,7 @@ pub mod virtio;
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use spin::Mutex;
+use crate::trava::Mutex;
 
 use compositor::Compositor;
 pub use dano::Dano;
@@ -221,6 +221,27 @@ pub fn compor(dano: Dano) -> bool {
         let _ = compositor.compor(dano);
         true
     })
+}
+
+/// Apresenta o que outros núcleos compuseram e deixaram pendente — ver
+/// [`Compositor::apresentar_pendente`]. Só faz alguma coisa no primeiro
+/// núcleo.
+///
+/// Por `try_lock`, pelo mesmo motivo de [`compor`]: quem chama é o tique do
+/// relógio e o cutucão, de dentro de uma interrupção, e o código
+/// interrompido pode estar com o compositor na mão. Se estiver, o pendente
+/// vai no próximo.
+pub fn apresentar_pendente() {
+    if DESLIGADO.load(Ordering::Acquire) || !crate::nucleos::e_o_primeiro() {
+        return;
+    }
+    crate::arch::sem_interrupcoes(|| {
+        if let Some(mut guarda) = ATIVO.try_lock()
+            && let Some(compositor) = guarda.as_mut()
+        {
+            compositor.apresentar_pendente();
+        }
+    });
 }
 
 /// As camadas da tela, de baixo para cima, começando pelo console. Nenhuma

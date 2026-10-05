@@ -41,7 +41,7 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::mem;
 use core::ptr;
 
-use spin::Mutex;
+use crate::trava::Mutex;
 
 use crate::arch::{Permissoes, TAMANHO_PAGINA};
 

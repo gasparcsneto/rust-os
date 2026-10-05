@@ -25,7 +25,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use spin::Mutex;
+use crate::trava::Mutex;
 
 /// Quantos tipos distintos de falha conseguimos contabilizar.
 const MAX_TIPOS: usize = 32;
@@ -232,6 +232,12 @@ pub fn com_trava_ocupada<R>(f: impl FnOnce() -> R) -> R {
 /// Chamado pelos handlers de exceção de cada arquitetura quando não há como
 /// retomar a execução normal.
 pub fn fatal(nome: &'static str, pc: u64, endereco: Option<u64>, codigo: u64) -> ! {
+    // Antes de destravar: só um núcleo pode conduzir o fim, e os outros
+    // precisam estar parados quando as travas forem abertas à força. Um
+    // núcleo que falhe junto para aqui dentro — ver
+    // `nucleos::reivindicar_o_fim`.
+    crate::nucleos::reivindicar_o_fim();
+
     // Antes de qualquer outra coisa, destravamos os locks que precisamos usar.
     //
     // Isto é inseguro no caso geral, e deliberado: a exceção pode ter
@@ -260,7 +266,8 @@ pub fn fatal(nome: &'static str, pc: u64, endereco: Option<u64>, codigo: u64) ->
     // de `agent::servir`, então aquele comando não derrubava só a si mesmo:
     // derrubava o canal inteiro, e com ele o resto da autópsia.
     //
-    // SAFETY: não há outro núcleo rodando, e a alternativa é o deadlock.
+    // SAFETY: os outros núcleos foram parados logo acima, e a alternativa é
+    // o deadlock.
     unsafe {
         ESTADO.force_unlock();
         ESPERADA.force_unlock();
@@ -274,6 +281,9 @@ pub fn fatal(nome: &'static str, pc: u64, endereco: Option<u64>, codigo: u64) ->
         crate::machine::destravar();
         crate::irq::destravar();
         crate::pci::destravar();
+        #[cfg(target_arch = "x86_64")]
+        crate::arch::pci::destravar();
+        crate::relogio::destravar();
         crate::fios::destravar();
         crate::tarefas::relogio::destravar();
         crate::tarefas::executor::destravar();

@@ -32,12 +32,16 @@
 //! disciplina que já protege o heap, o ring buffer de log e as tabelas de
 //! página.
 //!
-//! Quando houver múltiplos núcleos, mascarar interrupções deixa de bastar e
-//! esta é uma das estruturas que terão de virar atômicas de verdade.
+//! Com vários núcleos, a máscara continua necessária e passa a não bastar
+//! sozinha — e por isso a fila nunca dependeu só dela: o anel mora atrás de
+//! uma [trava](crate::trava::Mutex), e é a trava que exclui um núcleo do
+//! outro. A máscara exclui o handler **deste** núcleo; um handler em outro
+//! núcleo espera a vez na trava, sem deadlock, porque quem a tem não
+//! depende dele para soltá-la.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use spin::Mutex;
+use crate::trava::Mutex;
 
 /// Uma fila FIFO com capacidade `N`, escrevível de dentro de um handler.
 ///

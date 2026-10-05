@@ -116,7 +116,7 @@ pub struct Uart {
 }
 
 // SAFETY: a struct é só um endereço de MMIO. O acesso concorrente é impedido
-// pelo `spin::Mutex` que a envolve em `crate::serial`, não por esta impl —
+// pelo `crate::trava::Mutex` que a envolve em `crate::serial`, não por esta impl —
 // que existe apenas para permitir guardá-la num `static`.
 unsafe impl Send for Uart {}
 

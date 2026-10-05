@@ -67,7 +67,7 @@ struct Historia {
 
 // Tomada pelo tratador da interrupção — que já roda com as interrupções
 // mascaradas — e por `sem_interrupcoes` do resto. Solta no caminho fatal.
-static HISTORICO: spin::Mutex<Historia> = spin::Mutex::new(Historia {
+static HISTORICO: crate::trava::Mutex<Historia> = crate::trava::Mutex::new(Historia {
     teclas: ['\0'; HISTORIA],
     total: 0,
 });
@@ -76,8 +76,8 @@ static HISTORICO: spin::Mutex<Historia> = spin::Mutex::new(Historia {
 /// sessão da pessoa, o sistema — e o número da próxima tecla que ele não
 /// leu. Com teto: um leitor esquecido sai, e começa de novo do mais antigo
 /// que o anel guarda.
-static CURSORES: spin::Mutex<alloc::vec::Vec<(crate::autorizacao::Autoridade, u64)>> =
-    spin::Mutex::new(alloc::vec::Vec::new());
+static CURSORES: crate::trava::Mutex<alloc::vec::Vec<(crate::autorizacao::Autoridade, u64)>> =
+    crate::trava::Mutex::new(alloc::vec::Vec::new());
 
 /// Quantos leitores têm cursor ao mesmo tempo.
 const MAIS_LEITORES: usize = 32;
@@ -441,7 +441,7 @@ pub fn esvaziar() {
 /// diferença é o que acorda — lá um byte do agente, aqui uma tecla de uma
 /// pessoa — e as duas convivem no mesmo executor.
 #[cfg(not(feature = "modo-teste"))]
-static DESPERTADOR: spin::Mutex<Option<core::task::Waker>> = spin::Mutex::new(None);
+static DESPERTADOR: crate::trava::Mutex<Option<core::task::Waker>> = crate::trava::Mutex::new(None);
 
 #[cfg(not(feature = "modo-teste"))]
 fn despertar() {

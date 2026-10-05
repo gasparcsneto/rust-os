@@ -1078,3 +1078,152 @@ pub unsafe fn interrupcao_pci(dtb: *const u8, endereco_alto: u32, pino: u8) -> O
 
     None
 }
+
+/// Como chamar o firmware que liga e desliga núcleos — a interface PSCI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Conduto {
+    /// Pelo hipervisor: `hvc`. É o caso da `virt` do QEMU sem EL2 próprio.
+    Hvc,
+    /// Pelo monitor seguro: `smc`. É o caso de uma máquina com firmware de
+    /// EL3, como o Trusted Firmware.
+    Smc,
+}
+
+/// Quantos núcleos o leitor guarda. O dobro do teto do kernel: o que passar
+/// do teto ainda é contado, para o log dizer quantos ficaram de fora.
+const NUCLEOS_LIDOS: usize = 16;
+
+/// O que o device tree diz sobre os núcleos desta máquina.
+pub struct Nucleos {
+    /// O `reg` de cada núcleo — os campos de afinidade do `MPIDR_EL1`, que é
+    /// como o PSCI os endereça.
+    pub mpidr: [u64; NUCLEOS_LIDOS],
+    pub quantos: usize,
+    /// Quantos o blob descreve além dos que cabem em `mpidr`.
+    pub alem: usize,
+    /// Como pedir ao firmware que ligue um núcleo, se o blob diz.
+    pub psci: Option<Conduto>,
+}
+
+/// Lê `/cpus` e `/psci`.
+///
+/// # O que conta como núcleo
+///
+/// Um filho de `/cpus` chamado `cpu`, com `device_type = "cpu"` e sem
+/// `status = "disabled"`. O `cpu-map`, que também é filho de `/cpus`, descreve
+/// a topologia e não é núcleo — e tem outro nome, o que basta para separá-lo.
+///
+/// # Por que o `reg` é lido com as larguras de `/cpus`
+///
+/// Porque é `/cpus` quem as declara para os filhos dele — normalmente uma
+/// célula, às vezes duas, numa máquina com `Aff3`. As da raiz não servem:
+/// elas descrevem endereços de memória, não identificadores de núcleo.
+///
+/// # Safety
+///
+/// `dtb` precisa apontar para um device tree válido, ou ser nulo.
+pub unsafe fn encontrar_nucleos(dtb: *const u8) -> Nucleos {
+    #[derive(Clone, Copy)]
+    struct Candidato {
+        no: u32,
+        reg: Option<(usize, usize)>,
+        e_cpu: bool,
+        desligado: bool,
+    }
+    let vazio = Candidato {
+        no: 0,
+        reg: None,
+        e_cpu: false,
+        desligado: false,
+    };
+    let mut candidatos = [vazio; NUCLEOS_LIDOS];
+    let mut quantos = 0usize;
+    let mut alem_dos_lidos = 0usize;
+    let mut dentro_de_cpus = false;
+    let mut celulas_de_cpus = 1u32;
+    let mut psci: Option<Conduto> = None;
+    let mut ultimo_alem = u32::MAX;
+
+    let mut ler = |prop: &Propriedade| {
+        if prop.profundidade == FILHO_DA_RAIZ {
+            // As propriedades de um nó vêm antes dos filhos dele: a última
+            // propriedade de profundidade dois que passou diz de quem são as
+            // de profundidade três que vierem.
+            dentro_de_cpus = prop.no == b"cpus";
+            if dentro_de_cpus && prop.nome == b"#address-cells" && prop_cabe(prop.tamanho) {
+                // SAFETY: `prop_cabe` conferiu que há uma célula inteira.
+                let valor = unsafe { be32(dtb, prop.dados) };
+                if (1..=2).contains(&valor) {
+                    celulas_de_cpus = valor;
+                }
+            }
+            if prop.no == b"psci" && prop.nome == b"method" {
+                // SAFETY: o percurso garantiu que a faixa está dentro do blob.
+                let texto =
+                    unsafe { core::slice::from_raw_parts(dtb.add(prop.dados), prop.tamanho) };
+                psci = match texto.split(|&b| b == 0).next() {
+                    Some(b"hvc") => Some(Conduto::Hvc),
+                    Some(b"smc") => Some(Conduto::Smc),
+                    _ => None,
+                };
+            }
+            return;
+        }
+        if prop.profundidade != FILHO_DA_RAIZ + 1 || !dentro_de_cpus || prop.no != b"cpu" {
+            return;
+        }
+
+        let indice = match candidatos[..quantos]
+            .iter()
+            .position(|c| c.no == prop.no_seq)
+        {
+            Some(i) => i,
+            None if quantos < NUCLEOS_LIDOS => {
+                candidatos[quantos] = Candidato {
+                    no: prop.no_seq,
+                    ..vazio
+                };
+                quantos += 1;
+                quantos - 1
+            }
+            None => {
+                if ultimo_alem != prop.no_seq {
+                    ultimo_alem = prop.no_seq;
+                    alem_dos_lidos += 1;
+                }
+                return;
+            }
+        };
+        let candidato = &mut candidatos[indice];
+        // SAFETY: o percurso garantiu que a faixa está dentro do blob.
+        let texto = unsafe { core::slice::from_raw_parts(dtb.add(prop.dados), prop.tamanho) };
+        match prop.nome {
+            b"reg" => candidato.reg = Some((prop.dados, prop.tamanho)),
+            b"device_type" => candidato.e_cpu = texto.split(|&b| b == 0).next() == Some(b"cpu"),
+            b"status" => candidato.desligado = texto.split(|&b| b == 0).next() == Some(b"disabled"),
+            _ => {}
+        }
+    };
+    // SAFETY: delegada ao chamador.
+    unsafe { percorrer_relatando(dtb, &mut ler, "os nucleos em /cpus") };
+
+    let mut nucleos = Nucleos {
+        mpidr: [0; NUCLEOS_LIDOS],
+        quantos: 0,
+        alem: alem_dos_lidos,
+        psci,
+    };
+    for candidato in &candidatos[..quantos] {
+        let Some((dados, tamanho)) = candidato.reg else {
+            continue;
+        };
+        if !candidato.e_cpu || candidato.desligado || tamanho < celulas_de_cpus as usize * 4 {
+            continue;
+        }
+        // SAFETY: a faixa do `reg` está dentro do blob, e acabamos de
+        // conferir que ela tem as células que `/cpus` declarou.
+        nucleos.mpidr[nucleos.quantos] = unsafe { ler_celulas(dtb, dados, celulas_de_cpus) };
+        nucleos.quantos += 1;
+    }
+    nucleos
+}

@@ -36,9 +36,9 @@
 use alloc::format;
 use alloc::string::String;
 
+use crate::trava::Mutex;
 use politica::Codigo;
 use politica::arrendamento::{Arrendamento, Estado, Recusa, Tabela, Titular, Vencido};
-use spin::Mutex;
 
 use crate::pessoas::{Console, IdSessao};
 use crate::ui::Origem;

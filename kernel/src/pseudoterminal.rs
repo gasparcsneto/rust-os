@@ -48,7 +48,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use spin::Mutex;
+use crate::trava::Mutex;
 
 use crate::pessoas::Console;
 use crate::tarefas::fila::Fila;
@@ -114,11 +114,51 @@ struct Dono {
     canal: crate::eventos::Chave,
 }
 
-// Tomadas por `try_lock` de quem escreve — que pode rodar com as
-// interrupções mascaradas — e por `sem_interrupcoes` do resto. Soltas no
-// caminho fatal.
+/// O que uma instância é agora.
+///
+/// # Por que há um estado entre aberta e livre
+///
+/// Fechar e abrir o console mexem no interpretador — e fechar encerra a
+/// sessão de quem estava nele, o que passa pelo registro de pessoas e pela
+/// auditoria. Isso não cabe sob [`DONOS`], que é uma folha tomada com as
+/// interrupções mascaradas; é feito fora dela.
+///
+/// Com um núcleo só, fazer fora bastava. Com vários, o coletor de fios
+/// (que fecha o console de um dono morto) e um `abrir` em outro núcleo
+/// correm juntos, e a ordem antiga — largar a vaga sob a tranca, fechar o
+/// console depois — deixava uma janela: o `abrir` via a vaga livre, abria o
+/// console para o novo dono, e o fechamento atrasado do coletor fechava o
+/// console **do novo dono**, ou o `abrir` zerava o console antes do
+/// fechamento e a sessão de quem estava no Terminal morto ficava viva no
+/// registro, sem console. Os dois foram vistos na suíte, com quatro núcleos.
+///
+/// Então quem vai mexer no console marca a vaga [`Vaga::EmTroca`] sob a
+/// tranca, mexe fora dela, e só então a solta — livre, ou aberta para o
+/// novo dono. Uma vaga em troca não é de ninguém: não é tomada por outro
+/// `abrir`, não é colhida pelo coletor, e nenhuma chave a alcança. Só quem a
+/// marcou a desmarca, e quem a marcou é sempre o próprio fio, dentro do
+/// kernel, que não morre no meio — um fio só termina a si mesmo.
+#[derive(Clone, Copy)]
+enum Vaga {
+    Livre,
+    EmTroca,
+    Aberta(Dono),
+}
+
+impl Vaga {
+    fn dono(self) -> Option<Dono> {
+        match self {
+            Vaga::Aberta(d) => Some(d),
+            _ => None,
+        }
+    }
+}
+
+// Tomadas sempre por `sem_interrupcoes`, e cada seção sob elas é uma folha:
+// copia bytes, e não toma outra tranca — ver `saida`. Soltas no caminho
+// fatal.
 static SAIDAS: [Mutex<Anel>; TERMINAIS] = [const { Mutex::new(Anel::VAZIO) }; TERMINAIS];
-static DONOS: Mutex<[Option<Dono>; TERMINAIS]> = Mutex::new([None; TERMINAIS]);
+static DONOS: Mutex<[Vaga; TERMINAIS]> = Mutex::new([Vaga::Livre; TERMINAIS]);
 static ENTRADAS: [Fila<char, ENTRADA>; TERMINAIS] = [const { Fila::nova() }; TERMINAIS];
 
 /// Houve saída desde o último aviso, por instância.
@@ -151,16 +191,31 @@ impl Chave {
 /// O que o console da instância `indice` imprimiu. Chamada pelo
 /// interpretador.
 ///
-/// Uma tranca tomada perde o texto, em vez de esperar: quem imprime não pode
-/// esperar ninguém.
+/// # Esperar a tranca, e não perder o texto
+///
+/// A versão anterior tomava a tranca do anel por `try_lock` e, se ela
+/// estivesse tomada, **jogava o texto fora**: quem imprime não podia esperar
+/// ninguém. Com um núcleo só, ela nunca estava tomada nesse instante — toda
+/// outra mão nela mascarava as interrupções, e então nada rodava no meio.
+/// Com vários, o processo do Terminal lendo o anel num núcleo, ou quem
+/// abre a instância, segura a tranca enquanto o interpretador imprime em
+/// outro, e o prompt, o eco ou a resposta somem sem deixar rastro — nem na
+/// conta de perdidos, que é a do anel cheio.
+///
+/// Esperar é seguro porque toda seção sob esta tranca é uma **folha**: copia
+/// bytes para dentro ou para fora do anel, e não toma outra tranca nem
+/// imprime nada. Quem a segura sempre a solta, sem depender de ninguém. O
+/// que a espera precisa é ser mascarada, como a de todo o resto: sem isso,
+/// uma interrupção que imprimisse no mesmo console, neste núcleo, esperaria
+/// pela tranca que o código interrompido segura.
 pub fn saida(indice: u8, texto: &str) {
     let Some(anel) = SAIDAS.get(usize::from(indice)) else {
         return;
     };
-    if let Some(mut anel) = anel.try_lock() {
-        anel.pôr(texto.as_bytes());
-        PENDENTES[usize::from(indice)].store(true, Ordering::Relaxed);
-    }
+    crate::arch::sem_interrupcoes(|| {
+        anel.lock().pôr(texto.as_bytes());
+    });
+    PENDENTES[usize::from(indice)].store(true, Ordering::Relaxed);
 }
 
 /// O `core::fmt` do console de uma instância.
@@ -188,26 +243,29 @@ pub enum Recusa {
 /// O console da instância começa do zero — sem ninguém entrado, a linha
 /// vazia, o anel e a entrada vazios —, e o que ficou de uma abertura
 /// anterior é encerrado antes: a sessão de quem estava nele acaba.
+///
+/// A vaga fica [em troca](Vaga::EmTroca) enquanto o console é fechado e
+/// reaberto, e só vira do novo dono depois: ninguém a usa pela metade.
 pub fn abrir(fio: u64, canal: crate::eventos::Chave) -> Result<Chave, Recusa> {
     let (chave, anterior) = crate::arch::sem_interrupcoes(|| {
         let mut donos = DONOS.lock();
-        if donos
-            .iter()
-            .any(|d| d.is_some_and(|d| d.fio == fio && crate::fios::vivo(d.fio)))
-        {
+        if donos.iter().any(|d| {
+            d.dono()
+                .is_some_and(|d| d.fio == fio && crate::fios::vivo(d.fio))
+        }) {
             return Err(Recusa::Ocupado);
         }
         let indice = donos
             .iter()
-            .position(|d| d.is_none_or(|d| !crate::fios::vivo(d.fio)))
+            .position(|d| match d {
+                Vaga::Livre => true,
+                Vaga::EmTroca => false,
+                Vaga::Aberta(d) => !crate::fios::vivo(d.fio),
+            })
             .ok_or(Recusa::Ocupado)?;
-        let anterior = donos[indice].is_some();
+        let anterior = matches!(donos[indice], Vaga::Aberta(_));
         let geracao = PROXIMA_GERACAO.fetch_add(1, Ordering::Relaxed);
-        donos[indice] = Some(Dono {
-            fio,
-            geracao,
-            canal,
-        });
+        donos[indice] = Vaga::EmTroca;
         SAIDAS[indice].lock().esvaziar();
         while ENTRADAS[indice].desenfileirar().is_some() {}
         Ok((
@@ -222,6 +280,13 @@ pub fn abrir(fio: u64, canal: crate::eventos::Chave) -> Result<Chave, Recusa> {
         crate::interpretador::fechar_console(chave.console(), "o terminal anterior morreu");
     }
     crate::interpretador::abrir_console(chave.console());
+    crate::arch::sem_interrupcoes(|| {
+        DONOS.lock()[usize::from(chave.indice)] = Vaga::Aberta(Dono {
+            fio,
+            geracao: chave.geracao,
+            canal,
+        });
+    });
     PENDENTES[usize::from(chave.indice)].store(true, Ordering::Relaxed);
     Ok(chave)
 }
@@ -232,7 +297,10 @@ fn confere(chave: Chave, fio: u64) -> bool {
         DONOS
             .lock()
             .get(usize::from(chave.indice))
-            .is_some_and(|d| d.is_some_and(|d| d.geracao == chave.geracao && d.fio == fio))
+            .is_some_and(|d| {
+                d.dono()
+                    .is_some_and(|d| d.geracao == chave.geracao && d.fio == fio)
+            })
     })
 }
 
@@ -311,16 +379,26 @@ pub fn fechar(chave: Chave, fio: u64) {
     let fechou = crate::arch::sem_interrupcoes(|| {
         let mut donos = DONOS.lock();
         match donos.get_mut(usize::from(chave.indice)) {
-            Some(d) if d.is_some_and(|d| d.geracao == chave.geracao && d.fio == fio) => {
-                *d = None;
+            Some(d)
+                if d.dono()
+                    .is_some_and(|d| d.geracao == chave.geracao && d.fio == fio) =>
+            {
+                *d = Vaga::EmTroca;
                 true
             }
             _ => false,
         }
     });
     if fechou {
-        crate::interpretador::fechar_console(chave.console(), "o terminal fechou");
+        encerrar_e_soltar(usize::from(chave.indice), "o terminal fechou");
     }
+}
+
+/// Fecha o console da instância `i`, que quem chama marcou
+/// [em troca](Vaga::EmTroca), e só então a solta.
+fn encerrar_e_soltar(i: usize, motivo: &str) {
+    crate::interpretador::fechar_console(Console::Terminal(i as u16), motivo);
+    crate::arch::sem_interrupcoes(|| DONOS.lock()[i] = Vaga::Livre);
 }
 
 /// Avisa cada dono, no canal dele, que há saída nova; e fecha o console de
@@ -331,24 +409,21 @@ pub fn fechar(chave: Chave, fio: u64) {
 /// quando acordar.
 pub fn avisar_se_preciso() {
     for (i, pendente) in PENDENTES.iter().enumerate() {
-        let dono = crate::arch::sem_interrupcoes(|| DONOS.lock()[i]);
+        let dono = crate::arch::sem_interrupcoes(|| DONOS.lock()[i].dono());
         let Some(dono) = dono else {
             continue;
         };
         if !crate::fios::vivo(dono.fio) {
             let largou = crate::arch::sem_interrupcoes(|| {
                 let mut donos = DONOS.lock();
-                let mesmo = donos[i].is_some_and(|d| d.geracao == dono.geracao);
+                let mesmo = donos[i].dono().is_some_and(|d| d.geracao == dono.geracao);
                 if mesmo {
-                    donos[i] = None;
+                    donos[i] = Vaga::EmTroca;
                 }
                 mesmo
             });
             if largou {
-                crate::interpretador::fechar_console(
-                    Console::Terminal(i as u16),
-                    "o terminal morreu",
-                );
+                encerrar_e_soltar(i, "o terminal morreu");
             }
             continue;
         }
@@ -365,6 +440,49 @@ pub fn avisar_se_preciso() {
     }
 }
 
+/// A passada do coletor de fios: [`avisar_se_preciso`], a menos que a
+/// suíte a tenha pausado.
+pub fn passada_do_coletor() {
+    #[cfg(feature = "modo-teste")]
+    {
+        // A ordem é a de Dekker, com `SeqCst` nos dois lados: ou o coletor
+        // vê a pausa e não passa, ou a suíte o vê passando e espera.
+        PASSANDO.store(true, Ordering::SeqCst);
+        if COLETOR_PAUSADO.load(Ordering::SeqCst) {
+            PASSANDO.store(false, Ordering::SeqCst);
+            return;
+        }
+    }
+    avisar_se_preciso();
+    #[cfg(feature = "modo-teste")]
+    PASSANDO.store(false, Ordering::SeqCst);
+}
+
+/// Só na suíte: o coletor de fios deixa os pseudo-terminais em paz.
+///
+/// Os casos que fecham o console de um dono morto conduzem a passada eles
+/// mesmos, chamando [`avisar_se_preciso`]. Com um núcleo só, as interrupções
+/// mascaradas do caso bastavam para o coletor não rodar no meio; com vários,
+/// ele roda em outro núcleo, e podia fechar o console do dono morto antes de
+/// o caso pôr uma pessoa nele — a sessão dela nascia num console fechado,
+/// que ninguém mais fecharia.
+#[cfg(feature = "modo-teste")]
+static COLETOR_PAUSADO: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "modo-teste")]
+static PASSANDO: AtomicBool = AtomicBool::new(false);
+
+/// Pausa ou solta a passada do coletor. Pausar espera a passada em curso
+/// terminar: quando volta, nenhuma está no meio.
+#[cfg(feature = "modo-teste")]
+pub fn pausar_o_coletor_de_teste(pausado: bool) {
+    COLETOR_PAUSADO.store(pausado, Ordering::SeqCst);
+    if pausado {
+        while PASSANDO.load(Ordering::SeqCst) {
+            crate::fios::ceder();
+        }
+    }
+}
+
 /// `(bytes perdidos, avisos entregues, teclas digitadas)`.
 pub fn estatisticas() -> (u64, u64, u64) {
     (
@@ -376,7 +494,7 @@ pub fn estatisticas() -> (u64, u64, u64) {
 
 /// Os fios que têm um pseudo-terminal aberto, por instância.
 pub fn donos() -> [Option<u64>; TERMINAIS] {
-    crate::arch::sem_interrupcoes(|| DONOS.lock().map(|d| d.map(|d| d.fio)))
+    crate::arch::sem_interrupcoes(|| DONOS.lock().map(|d| d.dono().map(|d| d.fio)))
 }
 
 /// Destrava os anéis e os donos à força, para o caminho de falha fatal.

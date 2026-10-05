@@ -42,7 +42,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use spin::Mutex;
+use crate::trava::Mutex;
 
 /// O que um nó é.
 ///

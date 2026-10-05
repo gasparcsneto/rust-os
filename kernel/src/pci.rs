@@ -34,8 +34,8 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::trava::Mutex;
 use pci_types::{Bar, CommandRegister, ConfigRegionAccess, EndpointHeader, PciAddress, PciHeader};
-use spin::Mutex;
 
 /// Quantos dispositivos cabem no inventário.
 ///

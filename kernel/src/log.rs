@@ -26,7 +26,7 @@ use core::fmt::{self, Write as _};
 #[cfg(feature = "modo-teste")]
 use core::sync::atomic::Ordering;
 
-use spin::Mutex;
+use crate::trava::Mutex;
 
 /// Severidade de um registro.
 ///
@@ -185,7 +185,7 @@ pub fn registrar(nivel: Level, subsistema: &'static str, args: fmt::Arguments) -
     // um núcleo travado. Aqui só se conta; quem reprova é a suíte. Ver
     // [`SobTrava`].
     #[cfg(feature = "modo-teste")]
-    if PROFUNDIDADE.load(Ordering::Relaxed) > 0 {
+    if profundidade_aqui().load(Ordering::Relaxed) > 0 {
         REGISTROS_SOB_TRAVA.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -326,8 +326,29 @@ pub unsafe fn destravar() {
 /// de teste é zero: a guarda inteira some.
 pub struct SobTrava;
 
+/// A profundidade de escopos [`SobTrava`] abertos, **por núcleo**.
+///
+/// # Por que por núcleo
+///
+/// Porque a pergunta é "este código está dentro de um callback travado?", e
+/// só o núcleo que está rodando o código pode responder. Com um contador
+/// global, um registro perfeitamente legítimo num núcleo seria contado como
+/// infração só porque **outro** núcleo estava, naquele instante, dentro de
+/// um callback — e o caso que conta as infrações reprovaria por uma coisa
+/// que não aconteceu.
+///
+/// Ler o contador do núcleo atual é seguro mesmo com as interrupções
+/// ligadas: todo escopo `SobTrava` roda mascarado, então um fio dentro de um
+/// não pode ser levado a outro núcleo no meio dele. Se o contador deste
+/// núcleo diz zero, este fio não está em escopo nenhum.
 #[cfg(feature = "modo-teste")]
-static PROFUNDIDADE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static PROFUNDIDADE: [core::sync::atomic::AtomicUsize; crate::nucleos::MAX_NUCLEOS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; crate::nucleos::MAX_NUCLEOS];
+
+#[cfg(feature = "modo-teste")]
+fn profundidade_aqui() -> &'static core::sync::atomic::AtomicUsize {
+    &PROFUNDIDADE[crate::nucleos::atual().min(crate::nucleos::MAX_NUCLEOS - 1)]
+}
 #[cfg(feature = "modo-teste")]
 static REGISTROS_SOB_TRAVA: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
@@ -335,7 +356,7 @@ impl SobTrava {
     /// Abre o escopo. Fora do modo de teste não faz nada.
     pub fn nova() -> Self {
         #[cfg(feature = "modo-teste")]
-        PROFUNDIDADE.fetch_add(1, Ordering::Relaxed);
+        profundidade_aqui().fetch_add(1, Ordering::Relaxed);
         SobTrava
     }
 }
@@ -343,7 +364,7 @@ impl SobTrava {
 impl Drop for SobTrava {
     fn drop(&mut self) {
         #[cfg(feature = "modo-teste")]
-        PROFUNDIDADE.fetch_sub(1, Ordering::Relaxed);
+        profundidade_aqui().fetch_sub(1, Ordering::Relaxed);
     }
 }
 

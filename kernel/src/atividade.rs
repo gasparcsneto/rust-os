@@ -44,7 +44,7 @@
 
 use alloc::string::String;
 
-use spin::Mutex;
+use crate::trava::Mutex;
 
 use crate::sessoes::PORTAS;
 

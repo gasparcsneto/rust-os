@@ -54,7 +54,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use spin::Mutex;
+use crate::trava::Mutex;
 
 use crate::grafico::compositor::Camada;
 use crate::tela::console::desenhar_texto_em;

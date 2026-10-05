@@ -65,7 +65,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use spin::Mutex;
+use crate::trava::Mutex;
 
 use crate::arch::TAMANHO_PAGINA;
 use crate::grafico::compositor::{Camada, Mistura, NaoCriada};

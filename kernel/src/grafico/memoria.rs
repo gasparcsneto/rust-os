@@ -30,9 +30,12 @@
 //!
 //! Porque desmapear invalida a tradução no TLB, nas duas arquiteturas, antes
 //! de o frame voltar ao alocador. A superfície seguinte que cair no mesmo
-//! endereço não enxerga as páginas da anterior. Com um núcleo só, invalidar
-//! o TLB local basta; quando houver outros, cada um terá a própria cópia da
-//! tradução, e desmapear vai precisar avisá-los.
+//! endereço não enxerga as páginas da anterior — em **nenhum** núcleo: a
+//! faixa é memória do kernel, que todo núcleo traduz, e desmapear uma página
+//! do kernel avisa os outros antes de o frame voltar (no x86, por NMI; no
+//! ARM, a invalidação já é difundida pelo hardware — ver
+//! [`crate::arch`]). O caso "smp: desmapear do kernel vale em todo nucleo"
+//! confere.
 //!
 //! # Por que uma tabela fixa de trechos
 //!
@@ -50,7 +53,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use spin::Mutex;
+use crate::trava::Mutex;
 
 use crate::arch::{BASE_DAS_SUPERFICIES, COBERTURA_DA_ENTRADA_DE_TOPO, Permissoes, TAMANHO_PAGINA};
 

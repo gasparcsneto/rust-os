@@ -68,12 +68,12 @@ use alloc::collections::VecDeque;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use crate::trava::Mutex;
 use politica::Codigo;
 use politica::taxa::Janela;
 use sigilo::credencial::{self, Credencial, Custo, TAM_SAL, TAM_VERIFICADOR};
 use sigilo::pessoas::{Estado, IdPessoa, Pessoa};
 use sigilo::registro::nome_valido;
-use spin::Mutex;
 
 /// Onde mora o registro de pessoas. No diretório reservado: o verificador
 /// não é a senha, mas quem o tem pode testar palpites fora da máquina.

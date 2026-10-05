@@ -53,9 +53,9 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use crate::trava::Mutex;
 use politica::Codigo;
 use politica::mensagens::{Caixas, Canal, Dono, Enviada, Estado, Lida, Recusa, Transicao};
-use spin::Mutex;
 
 use crate::autorizacao::{AtorDeMensagem, Autoridade};
 

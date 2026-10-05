@@ -44,7 +44,7 @@ use alloc::collections::VecDeque;
 use core::sync::atomic::{AtomicU64, Ordering};
 use core::task::Waker;
 
-use spin::Mutex;
+use crate::trava::Mutex;
 
 use super::fila::Fila;
 use super::transporte::{FABRICANTE, Transporte, VERSAO_1};

@@ -212,15 +212,54 @@ static BASE_DO_CONSOLE: AtomicU64 = AtomicU64::new(0);
 
 /// O retângulo sujo desde a última descarga: `[x0, x1) × [y0, y1)`.
 ///
-/// Vazio quando `x0 >= x1`. Quatro atômicos que crescem por mínimo e máximo:
-/// quem escreve só alarga, e quem descarrega troca pelo vazio. Entre as duas
-/// coisas não há corrida de verdade — as escritas na tela acontecem com as
-/// interrupções mascaradas, num núcleo só —, e se um dia houver, o pior
-/// desfecho é descarregar um pouco a mais.
-static SUJO_X0: AtomicU32 = AtomicU32::new(u32::MAX);
-static SUJO_Y0: AtomicU32 = AtomicU32::new(u32::MAX);
-static SUJO_X1: AtomicU32 = AtomicU32::new(0);
-static SUJO_Y1: AtomicU32 = AtomicU32::new(0);
+/// Vazio quando `x0 >= x1`. Quem escreve só alarga, e quem descarrega troca
+/// pelo vazio.
+///
+/// # Por que uma trava, e não quatro atômicos
+///
+/// Eram quatro atômicos, um por coordenada, e o comentário dizia que entre
+/// alargar e descarregar "não há corrida de verdade — as escritas acontecem
+/// num núcleo só —, e se um dia houver, o pior desfecho é descarregar um
+/// pouco a mais". Com vários núcleos o dia chegou, e o desfecho é outro.
+///
+/// Quem descarrega lê as quatro coordenadas uma de cada vez. Se outro núcleo
+/// alarga o retângulo entre a leitura do canto de cima e a do canto de
+/// baixo, a descarga leva o canto de cima **antigo** com o de baixo **novo**:
+/// a parte da marca nova que fica à esquerda ou acima do retângulo antigo
+/// não é levada, e o canto de cima dela fica para trás, sozinho, num
+/// retângulo sem canto de baixo. O que ela pintou só aparece na tela quando
+/// alguém escrever de novo — é um descarregar a **menos**, e não a mais.
+///
+/// A saída não é uma trava — a tela precisa continuar alcançável do handler
+/// de falha, ver o topo do módulo —, e sim **uma** palavra: as quatro
+/// coordenadas, dezesseis bits cada, num `AtomicU64`. Alargar é um laço de
+/// comparar-e-trocar sobre a palavra inteira, e descarregar é uma troca só:
+/// o retângulo é lido e zerado de uma vez, por construção.
+///
+/// Dezesseis bits por coordenada são 65535 pixels de lado — oito vezes uma
+/// tela 8K. Uma coordenada maior seria cortada no teto, e a parte além dele
+/// deixaria de ser descarregada; o corte é explícito em [`empacotar`] para
+/// que isso seja um limite escrito, e não um transbordo.
+static SUJO: AtomicU64 = AtomicU64::new(SUJO_VAZIO);
+
+/// O retângulo vazio: canto de cima no teto, canto de baixo no zero.
+const SUJO_VAZIO: u64 = empacotar(0xFFFF, 0xFFFF, 0, 0);
+
+const fn empacotar(x0: u32, y0: u32, x1: u32, y1: u32) -> u64 {
+    const fn corte(v: u32) -> u64 {
+        if v > 0xFFFF { 0xFFFF } else { v as u64 }
+    }
+    corte(x0) | (corte(y0) << 16) | (corte(x1) << 32) | (corte(y1) << 48)
+}
+
+const fn desempacotar(palavra: u64) -> (u32, u32, u32, u32) {
+    (
+        (palavra & 0xFFFF) as u32,
+        ((palavra >> 16) & 0xFFFF) as u32,
+        ((palavra >> 32) & 0xFFFF) as u32,
+        ((palavra >> 48) & 0xFFFF) as u32,
+    )
+}
 
 /// Um framebuffer linear pronto para desenhar.
 #[derive(Clone, Copy, Debug)]
@@ -335,16 +374,14 @@ fn base_rastreada() -> u64 {
 /// Com o console numa camada, quem leva é o compositor; sem, e num
 /// `virtio-gpu`, o dispositivo; num framebuffer linear sem compositor, não
 /// há o que fazer. Se quem leva não pôde agora, o retângulo volta a ser
-/// sujo e vai junto com a próxima escrita — nada se perde, só atrasa.
+/// sujo e vai junto com a próxima escrita, ou no próximo tique do relógio
+/// ([`crate::tempo::tick`]) — nada se perde, só atrasa.
 pub fn descarregar() {
     let desviado = console_desviado();
     if !desviado && DESCARREGADOR.load(Ordering::Acquire) != DESCARREGADOR_VIRTIO {
         return;
     }
-    let x0 = SUJO_X0.swap(u32::MAX, Ordering::Relaxed);
-    let y0 = SUJO_Y0.swap(u32::MAX, Ordering::Relaxed);
-    let x1 = SUJO_X1.swap(0, Ordering::Relaxed);
-    let y1 = SUJO_Y1.swap(0, Ordering::Relaxed);
+    let (x0, y0, x1, y1) = desempacotar(SUJO.swap(SUJO_VAZIO, Ordering::AcqRel));
     if x0 >= x1 || y0 >= y1 {
         return;
     }
@@ -365,23 +402,16 @@ pub fn descarregar() {
 
 /// Alarga o retângulo sujo para cobrir `[x0, x1) × [y0, y1)`.
 fn sujar(x0: u32, y0: u32, x1: u32, y1: u32) {
-    SUJO_X0.fetch_min(x0, Ordering::Relaxed);
-    SUJO_Y0.fetch_min(y0, Ordering::Relaxed);
-    SUJO_X1.fetch_max(x1, Ordering::Relaxed);
-    SUJO_Y1.fetch_max(y1, Ordering::Relaxed);
+    let _ = SUJO.try_update(Ordering::AcqRel, Ordering::Acquire, |palavra| {
+        let (a0, b0, a1, b1) = desempacotar(palavra);
+        Some(empacotar(a0.min(x0), b0.min(y0), a1.max(x1), b1.max(y1)))
+    });
 }
 
 /// O retângulo sujo agora, sem tocá-lo. Para a suíte.
 #[cfg(feature = "modo-teste")]
 pub fn sujo() -> Option<(u32, u32, u32, u32)> {
-    let (x0, y0) = (
-        SUJO_X0.load(Ordering::Relaxed),
-        SUJO_Y0.load(Ordering::Relaxed),
-    );
-    let (x1, y1) = (
-        SUJO_X1.load(Ordering::Relaxed),
-        SUJO_Y1.load(Ordering::Relaxed),
-    );
+    let (x0, y0, x1, y1) = desempacotar(SUJO.load(Ordering::Acquire));
     (x0 < x1 && y0 < y1).then_some((x0, y0, x1, y1))
 }
 

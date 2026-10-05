@@ -35,6 +35,7 @@
 //! confusa no primeiro retorno de interrupção.
 
 use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicU16, Ordering};
 
 use spin::once::Once;
 use x86_64::VirtAddr;
@@ -43,14 +44,33 @@ use x86_64::instructions::tables::load_tss;
 use x86_64::structures::gdt::{Descriptor, GlobalDescriptorTable, SegmentSelector};
 use x86_64::structures::tss::TaskStateSegment;
 
+use crate::nucleos::MAX_NUCLEOS;
+
 /// Índice, dentro da IST, da pilha reservada ao double fault.
 pub const IST_DOUBLE_FAULT: u16 = 0;
+
+/// Índice, dentro da IST, da pilha reservada à NMI.
+///
+/// # Por que a NMI precisa de uma pilha própria
+///
+/// Porque ela chega em **qualquer** instrução — é essa a definição de "não
+/// mascarável". Inclusive nas três primeiras instruções do ponto de entrada
+/// de `syscall`, quando o `RSP` ainda é a pilha do **usuário**: o processador
+/// empilharia o quadro da NMI onde o processo mandou. Com uma pilha da IST, a
+/// troca é feita pelo hardware antes de qualquer escrita, não importa onde a
+/// NMI caia.
+///
+/// É por NMI que um núcleo avisa os outros de que uma tradução do kernel
+/// morreu, e de que o sistema parou — ver [`super::smp`]. As duas coisas
+/// precisam alcançar um núcleo que esteja girando com as interrupções
+/// desligadas, e só a NMI alcança.
+pub const IST_NMI: u16 = 1;
 
 /// 20 KiB. Não precisa ser grande: quem roda nela é um handler que só
 /// registra a falha e entra em post-mortem.
 const TAM_PILHA: usize = 4096 * 5;
 
-/// A pilha de emergência do double fault.
+/// Uma pilha da IST.
 ///
 /// O `UnsafeCell` não é decoração: um `static` sem mutabilidade interior vai
 /// para `.rodata`, que é somente leitura — e o processador precisa *escrever*
@@ -59,14 +79,21 @@ const TAM_PILHA: usize = 4096 * 5;
 #[repr(align(16))]
 struct PilhaEmergencia(UnsafeCell<[u8; TAM_PILHA]>);
 
-// SAFETY: quem escreve nesta região é o processador, ao entregar uma exceção,
-// e nunca dois núcleos ao mesmo tempo nesta fase (núcleo único). A impl existe
-// apenas para permitir guardá-la num `static`.
+// SAFETY: quem escreve em cada uma destas regiões é o processador, ao
+// entregar uma exceção ao núcleo **dono** dela — cada núcleo tem as suas, e
+// nenhum código Rust as lê ou escreve. A impl existe apenas para permitir
+// guardá-las num `static`.
 unsafe impl Sync for PilhaEmergencia {}
 
-static PILHA_DOUBLE_FAULT: PilhaEmergencia = PilhaEmergencia(UnsafeCell::new([0; TAM_PILHA]));
+/// As pilhas de double fault, uma por núcleo.
+static PILHAS_DOUBLE_FAULT: [PilhaEmergencia; MAX_NUCLEOS] =
+    [const { PilhaEmergencia(UnsafeCell::new([0; TAM_PILHA])) }; MAX_NUCLEOS];
 
-/// O TSS, num `UnsafeCell` porque `privilege_stack_table[0]` precisa mudar.
+/// As pilhas de NMI, uma por núcleo.
+static PILHAS_NMI: [PilhaEmergencia; MAX_NUCLEOS] =
+    [const { PilhaEmergencia(UnsafeCell::new([0; TAM_PILHA])) }; MAX_NUCLEOS];
+
+/// Um TSS, num `UnsafeCell` porque `privilege_stack_table[0]` precisa mudar.
 ///
 /// Esse campo é o `RSP0`: a pilha que o processador adota automaticamente
 /// quando uma interrupção chega enquanto o código do usuário está rodando.
@@ -74,11 +101,26 @@ static PILHA_DOUBLE_FAULT: PilhaEmergencia = PilhaEmergencia(UnsafeCell::new([0;
 /// acompanhar a troca de contexto — daí a mutabilidade.
 struct TssMutavel(UnsafeCell<TaskStateSegment>);
 
-// SAFETY: o único campo que muda é `RSP0`, escrito com as interrupções
-// mascaradas durante a troca de contexto. Fora isso, o processador apenas lê.
+// SAFETY: cada TSS é de um núcleo só. O único campo que muda depois do boot é
+// `RSP0`, escrito pelo próprio núcleo dono, com as interrupções mascaradas,
+// durante a troca de contexto; fora isso, o processador apenas lê.
 unsafe impl Sync for TssMutavel {}
 
-static TSS: Once<TssMutavel> = Once::new();
+/// Um TSS por núcleo.
+///
+/// # Por que um por núcleo, e não um só
+///
+/// Porque o TSS carrega duas coisas que são do núcleo e não do sistema: o
+/// `RSP0` — a pilha de kernel do fio que **este** núcleo está rodando — e as
+/// pilhas da IST. Dois núcleos com o mesmo `RSP0` empilhariam quadros de
+/// interrupção na mesma pilha ao mesmo tempo; com a mesma IST, um double
+/// fault em cada um escreveria por cima do outro.
+///
+/// E há um motivo de hardware também: `ltr` marca o descritor como
+/// **ocupado**, e carregar um descritor ocupado é `#GP`. O segundo núcleo
+/// nem conseguiria adotar o TSS do primeiro.
+static TSSS: [TssMutavel; MAX_NUCLEOS] =
+    [const { TssMutavel(UnsafeCell::new(TaskStateSegment::new())) }; MAX_NUCLEOS];
 
 /// Os seletores que a GDT publica.
 pub struct Seletores {
@@ -86,35 +128,80 @@ pub struct Seletores {
     pub dados_kernel: SegmentSelector,
     pub codigo_usuario: SegmentSelector,
     pub dados_usuario: SegmentSelector,
-    tss: SegmentSelector,
+    tss: [SegmentSelector; MAX_NUCLEOS],
 }
 
-static GDT: Once<(GlobalDescriptorTable, Seletores)> = Once::new();
+/// Quantos descritores cabem: os seis segmentos, e dois por TSS — um
+/// descritor de sistema em 64 bits ocupa duas entradas.
+const ENTRADAS_DA_GDT: usize = 6 + 2 * MAX_NUCLEOS;
+
+static GDT: Once<(GlobalDescriptorTable<ENTRADAS_DA_GDT>, Seletores)> = Once::new();
+
+/// O seletor do TSS do núcleo zero, ou zero antes de a GDT existir.
+///
+/// É a base da conta de [`nucleo_atual`]: os TSS são consecutivos na GDT,
+/// dezesseis bytes cada.
+static PRIMEIRO_TSS: AtomicU16 = AtomicU16::new(0);
 
 /// Os seletores da GDT. Só é válido depois de [`init`].
 pub fn seletores() -> &'static Seletores {
     &GDT.get().expect("a GDT precisa estar carregada").1
 }
 
-/// Monta e carrega a GDT e o TSS. Chame uma vez, antes da IDT.
+/// Em que núcleo este código está rodando.
+///
+/// # Como se responde, e por que assim
+///
+/// Pelo seletor que está em `TR` — o do TSS que este núcleo carregou. Cada
+/// núcleo carrega o seu, e eles são consecutivos na GDT: o índice sai de uma
+/// subtração e uma divisão.
+///
+/// As alternativas óbvias têm cada uma um defeito:
+///
+/// - **O `GS`**, que é o que os kernels costumam usar, é carregável pelo
+///   **usuário**. Um processo que zere o próprio seletor de `GS` faria todo
+///   handler de interrupção ler os dados por núcleo do endereço zero. É por
+///   isso que o `GS` deste kernel só é tocado na entrada de `syscall`, por
+///   `swapgs`, e nunca numa interrupção — ver [`super::usuario`].
+/// - **O id do APIC local** exige uma leitura de memória de dispositivo, e o
+///   id não é o índice: precisaria de uma tabela de tradução.
+/// - **`rdtscp`/`rdpid`** dependem de o processador oferecê-las.
+///
+/// `TR` só muda por `ltr`, que é privilegiada: o processo não alcança. E
+/// `str` existe em todo x86_64.
+pub fn nucleo_atual() -> usize {
+    let primeiro = PRIMEIRO_TSS.load(Ordering::Relaxed);
+    if primeiro == 0 {
+        return 0;
+    }
+    let tr: u16;
+    // SAFETY: `str` só lê o registrador de tarefa; não toca memória nem
+    // flags.
+    unsafe {
+        core::arch::asm!("str {0:x}", out(reg) tr, options(nomem, nostack, preserves_flags));
+    }
+    let indice = (tr.wrapping_sub(primeiro) / 16) as usize;
+    if tr < primeiro || indice >= MAX_NUCLEOS {
+        0
+    } else {
+        indice
+    }
+}
+
+/// O topo de uma pilha da IST.
+fn topo(pilha: &PilhaEmergencia) -> VirtAddr {
+    // A pilha do x86 cresce para baixo, então o ponteiro que entregamos é o
+    // **topo** da região, não o início.
+    VirtAddr::from_ptr(pilha.0.get()) + TAM_PILHA as u64
+}
+
+/// Monta e carrega a GDT e o TSS do núcleo zero. Chame uma vez, antes da IDT.
+///
+/// Monta já os TSS de **todos** os núcleos: a GDT é uma só, compartilhada, e
+/// não se acrescenta descritor a uma tabela que outros núcleos estão usando.
 pub fn init() {
-    let tss = TSS.call_once(|| {
-        let mut tss = TaskStateSegment::new();
-        tss.interrupt_stack_table[IST_DOUBLE_FAULT as usize] = {
-            let base = VirtAddr::from_ptr(PILHA_DOUBLE_FAULT.0.get());
-            // A pilha do x86 cresce para baixo, então o ponteiro que
-            // entregamos é o **topo** da região, não o início.
-            base + TAM_PILHA as u64
-        };
-        TssMutavel(UnsafeCell::new(tss))
-    });
-
-    // SAFETY: ainda estamos na inicialização, com um único fio e sem
-    // interrupções; ninguém mais olha para o TSS neste instante.
-    let tss_ref: &'static TaskStateSegment = unsafe { &*tss.0.get() };
-
     let (gdt, seletores) = GDT.call_once(|| {
-        let mut gdt = GlobalDescriptorTable::new();
+        let mut gdt = GlobalDescriptorTable::<ENTRADAS_DA_GDT>::empty();
         let codigo_kernel = gdt.append(Descriptor::kernel_code_segment());
         let dados_kernel = gdt.append(Descriptor::kernel_data_segment());
 
@@ -134,7 +221,21 @@ pub fn init() {
         let dados_usuario = gdt.append(Descriptor::user_data_segment());
         let codigo_usuario = gdt.append(Descriptor::user_code_segment());
 
-        let tss = gdt.append(Descriptor::tss_segment(tss_ref));
+        let mut tss = [SegmentSelector(0); MAX_NUCLEOS];
+        for (i, seletor) in tss.iter_mut().enumerate() {
+            // SAFETY: ainda estamos na inicialização, com um único núcleo e
+            // sem interrupções; ninguém mais olha para estes TSS agora. As
+            // pilhas da IST são escritas antes do descritor existir, e nunca
+            // mais mudam.
+            let referencia: &'static TaskStateSegment = unsafe {
+                let tss = &mut *TSSS[i].0.get();
+                tss.interrupt_stack_table[IST_DOUBLE_FAULT as usize] =
+                    topo(&PILHAS_DOUBLE_FAULT[i]);
+                tss.interrupt_stack_table[IST_NMI as usize] = topo(&PILHAS_NMI[i]);
+                &*TSSS[i].0.get()
+            };
+            *seletor = gdt.append(Descriptor::tss_segment(referencia));
+        }
 
         (
             gdt,
@@ -148,11 +249,36 @@ pub fn init() {
         )
     });
 
+    PRIMEIRO_TSS.store(seletores.tss[0].0, Ordering::Relaxed);
+    carregar(gdt, seletores, 0);
+}
+
+/// Carrega a GDT neste núcleo e o TSS do núcleo `indice`.
+///
+/// É o que um núcleo secundário faz logo que acorda: a GDT é a mesma de
+/// todos, e o TSS é o dele.
+///
+/// # Safety
+///
+/// [`init`] precisa já ter rodado no primeiro núcleo, e `indice` precisa ser
+/// o deste núcleo e de nenhum outro — o `ltr` de um TSS já carregado por
+/// outro núcleo é `#GP`, e o de um TSS alheio ainda livre faria dois núcleos
+/// dividirem `RSP0` e IST.
+pub unsafe fn init_secundario(indice: usize) {
+    let (gdt, seletores) = GDT.get().expect("a GDT precisa estar montada");
+    carregar(gdt, seletores, indice);
+}
+
+fn carregar(
+    gdt: &'static GlobalDescriptorTable<ENTRADAS_DA_GDT>,
+    seletores: &Seletores,
+    indice: usize,
+) {
     gdt.load();
     let (seletor_codigo, seletor_dados, seletor_tss) = (
         &seletores.codigo_kernel,
         &seletores.dados_kernel,
-        &seletores.tss,
+        &seletores.tss[indice],
     );
 
     // SAFETY: os seletores vêm da GDT que acabamos de carregar, então apontam
@@ -161,7 +287,8 @@ pub fn init() {
         // Recarregar CS é obrigatório: até aqui ele ainda referencia a GDT do
         // firmware, que deixa de valer quando a nossa entra. O iniciador
         // deste projeto não monta GDT nenhuma — ele salta com a que a UEFI
-        // deixou —, então quem herdamos é o EDK II.
+        // deixou —, então quem herdamos é o EDK II. Num núcleo secundário, é
+        // a GDT provisória da página de partida.
         CS::set_reg(*seletor_codigo);
 
         // Recarregar SS é igualmente obrigatório, por um motivo bem menos
@@ -208,16 +335,16 @@ pub fn init() {
 /// Um valor zero é ignorado, e é o caso do fio inicial — a pilha dele veio do
 /// boot e ele não executa código de usuário.
 pub fn definir_pilha_de_kernel(topo: u64) {
-    if topo == 0 {
+    if topo == 0 || GDT.get().is_none() {
         return;
     }
-    let Some(tss) = TSS.get() else {
-        return;
-    };
+    let tss = &TSSS[nucleo_atual()];
 
-    // SAFETY: escrevemos um único campo, com as interrupções mascaradas pelo
-    // chamador (a troca de contexto). O processador só lê este campo ao
-    // entregar uma interrupção, o que não pode acontecer aqui dentro.
+    // SAFETY: escrevemos um único campo do TSS **deste** núcleo, com as
+    // interrupções mascaradas pelo chamador (a troca de contexto). O
+    // processador só lê este campo ao entregar uma interrupção a este
+    // núcleo, o que não pode acontecer aqui dentro; e nenhum outro núcleo
+    // escreve no TSS de outro.
     unsafe {
         (*tss.0.get()).privilege_stack_table[0] = VirtAddr::new(topo);
     }

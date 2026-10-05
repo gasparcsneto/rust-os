@@ -292,7 +292,14 @@ impl Despertar {
             return;
         }
 
-        if self.prontas.enfileirar(self.id).is_err() {
+        if self.prontas.enfileirar(self.id).is_ok() {
+            // O executor roda no primeiro núcleo, e pode estar dormindo lá.
+            // Quem acordou a tarefa de outro núcleo — um fio, um processo —
+            // não tem como fazer a interrupção que o acordaria: cutuca. Do
+            // próprio primeiro núcleo não precisa, e `cutucar` não manda a
+            // si mesmo.
+            crate::nucleos::cutucar(1);
+        } else {
             // A tarefa não entrou: a marca precisa cair, ou ela nunca mais
             // seria enfileirada por despertar nenhum.
             self.enfileirada.store(false, Ordering::Release);
@@ -388,8 +395,8 @@ pub struct Inscricao {
 /// executor: ela não tem como pegar emprestado quem a está executando. Uma
 /// tabela estática de tamanho fixo resolve isso sem alocar e sem ciclo de
 /// empréstimo.
-static INVENTARIO: spin::Mutex<[Option<Inscricao>; MAX_INVENTARIO]> =
-    spin::Mutex::new([None; MAX_INVENTARIO]);
+static INVENTARIO: crate::trava::Mutex<[Option<Inscricao>; MAX_INVENTARIO]> =
+    crate::trava::Mutex::new([None; MAX_INVENTARIO]);
 
 fn inventario_registrar(id: IdTarefa, nome: &'static str) {
     crate::arch::sem_interrupcoes(|| {

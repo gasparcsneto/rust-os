@@ -33,7 +33,7 @@
 //! chegarem. É a camada sobre a qual uma pilha se constrói, e separá-la é o
 //! que permite testá-la sem ter uma.
 
-use spin::Mutex;
+use crate::trava::Mutex;
 
 use super::fila::Fila;
 use super::transporte::{FABRICANTE, Mmio, Transporte, VERSAO_1};

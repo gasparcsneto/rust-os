@@ -49,7 +49,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use spin::Mutex;
+use crate::trava::Mutex;
 
 use super::fila::Fila;
 use super::transporte::{FABRICANTE, Transporte, VERSAO_1};

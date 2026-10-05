@@ -512,6 +512,27 @@ pub fn resolver_copia_na_escrita(endereco: u64) -> bool {
     // devolveria a CPU a um processo cuja memória sumiu de baixo dele. E se o
     // fio que entrasse fosse o outro dono deste frame, ele resolveria a
     // própria falha sobre uma contagem de donos que estamos no meio de mudar.
+    //
+    // # O outro dono, em outro núcleo
+    //
+    // Com vários núcleos, a máscara não impede o caso de que ela protegia: o
+    // outro dono pode estar resolvendo a falha dele **ao mesmo tempo**, em
+    // outro núcleo. Isso continua certo, e não por sorte. Cada leitura e
+    // cada mudança da contagem é atômica sob a trava do alocador, e a ordem
+    // de cada lado é sempre a mesma: ler a contagem, copiar, trocar a própria
+    // tradução, e só então soltar `antigo`. Então:
+    //
+    // - os dois leem dois donos: os dois copiam de `antigo`, que ninguém
+    //   escreve — ele só fica gravável para quem o vê com um dono só —, e o
+    //   segundo a soltar o devolve;
+    // - um lê um dono só: o outro já soltou, e soltar vem depois de ele ter
+    //   deixado de traduzir para `antigo`. Ninguém mais o alcança, e quem
+    //   ficou pode torná-lo gravável sem copiar.
+    //
+    // A contagem só sobe por um `fork` de um dos donos, e quem bifurca é o
+    // fio do processo — um só por processo —, que não está, ao mesmo tempo,
+    // aqui. O caso da suíte "smp: copia na escrita em dois nucleos" faz os
+    // dois donos escreverem juntos.
     arch::sem_interrupcoes(|| {
         let Some((antigo, permissoes)) = arch::copia_na_escrita_em(pagina) else {
             return false;
@@ -568,9 +589,11 @@ pub fn resolver_copia_na_escrita(endereco: u64) -> bool {
         };
 
         // O frame que saiu tem de ser o mesmo que lemos do descritor. Entre
-        // as duas leituras não há janela — as interrupções estão mascaradas e
-        // há um núcleo só —, então divergir significa que a tabela mudou por
-        // baixo de nós, e que o conteúdo copiado acima não é o desta página.
+        // as duas leituras não há janela — as interrupções estão mascaradas,
+        // e as tabelas deste espaço só mudam pelo fio dele, que é este; outro
+        // núcleo não as escreve —, então divergir significa que a tabela
+        // mudou por baixo de nós, e que o conteúdo copiado acima não é o
+        // desta página.
         //
         // Seguir em frente aqui seria a pior variante do erro: escreveríamos
         // uma cópia do frame errado no endereço certo, e o processo passaria

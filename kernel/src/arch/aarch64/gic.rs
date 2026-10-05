@@ -17,7 +17,7 @@
 //!   frequência em `CNTFRQ_EL0`, então não precisamos de nenhuma constante
 //!   mágica de hardware.
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
 use aarch64_cpu::registers::{CNTFRQ_EL0, CNTP_CTL_EL0, CNTP_TVAL_EL0};
 use tock_registers::interfaces::{Readable, Writeable};
@@ -51,6 +51,10 @@ register_structs! {
         /// privadas de cada núcleo são entregues ao seu por construção.
         (0x800 => itargetsr: [ReadWrite<u8>; 1020]),
         (0xBFC => _reservado2),
+        /// Gera uma interrupção de software (SGI): os bits 23-16 são os
+        /// núcleos destino, e os quatro de baixo o número dela.
+        (0xF00 => sgir: WriteOnly<u32>),
+        (0xF04 => _reservado3),
         (0x1000 => @END),
     }
 }
@@ -104,6 +108,25 @@ pub const INTID_TIMER: u32 = 30;
 /// device tree que deu o endereço da porta.
 pub const INTID_UART: u32 = 33;
 
+/// A interrupção de software que manda um núcleo parar — ver
+/// [`super::smp::parar_os_outros`].
+///
+/// As dezesseis primeiras INTIDs são as SGIs: nascem de uma escrita de outro
+/// núcleo no distribuidor, e não de um dispositivo.
+pub const SGI_PARAR: u32 = 1;
+
+/// A interrupção de software que só acorda um núcleo — ver
+/// [`crate::nucleos::cutucar`].
+pub const SGI_CUTUCAO: u32 = 0;
+
+/// O número de interface de CPU de cada núcleo, como máscara de um bit.
+///
+/// É o que o GIC entende por "destino". Não se supõe que seja `1 << índice`:
+/// cada núcleo lê a própria no distribuidor, onde o primeiro registrador de
+/// destino é banqueado e devolve, a quem lê, o bit dele.
+static INTERFACES: [AtomicU8; crate::nucleos::MAX_NUCLEOS] =
+    [const { AtomicU8::new(0) }; crate::nucleos::MAX_NUCLEOS];
+
 /// INTID devolvido pelo GIC quando não há interrupção pendente de verdade.
 ///
 /// Reconhecer uma interrupção espúria é normal (pode acontecer quando outra
@@ -140,6 +163,78 @@ pub unsafe fn init() {
     gicc.ctlr.set(1);
 
     habilitar_linha(INTID_TIMER);
+    habilitar_linha(SGI_PARAR);
+    habilitar_linha(SGI_CUTUCAO);
+    registrar_interface();
+}
+
+/// A máscara de interface do primeiro núcleo, para onde vão as linhas
+/// compartilhadas — ver [`habilitar_spi`].
+///
+/// Lida do GIC, e não escrita como `0b1`: a interface 0 é o núcleo de boot no
+/// QEMU, mas a especificação não promete isso, e numa placa em que o boot
+/// fosse por outra interface, todas as interrupções de dispositivo iriam a
+/// um núcleo que não as trata — ou a nenhum, se ele estivesse desligado.
+/// Antes de o primeiro núcleo se registrar, a interface 0, que era o valor
+/// de sempre.
+fn interface_do_primeiro() -> u8 {
+    match INTERFACES[0].load(Ordering::Acquire) {
+        0 => 0b0000_0001,
+        m => m,
+    }
+}
+
+/// Anota a máscara de interface de CPU deste núcleo.
+fn registrar_interface() {
+    let indice = super::nucleo_atual().min(crate::nucleos::MAX_NUCLEOS - 1);
+    // O primeiro registrador de destino cobre as INTIDs privadas, e é
+    // banqueado: cada núcleo lê nele o próprio bit.
+    INTERFACES[indice].store(distribuidor().itargetsr[0].get(), Ordering::Release);
+}
+
+/// Liga a interface de CPU **deste** núcleo e o timer dele.
+///
+/// O distribuidor é um só e já está ligado; a interface de CPU é uma por
+/// núcleo, banqueada no mesmo endereço, e cada núcleo liga a sua. As linhas
+/// privadas — o timer e as SGIs — também são banqueadas: habilitá-las no
+/// primeiro núcleo não as habilita aqui.
+///
+/// # Safety
+///
+/// Precisa rodar no núcleo que acabou de acordar, com as interrupções
+/// mascaradas e a tabela de vetores dele instalada.
+pub unsafe fn ligar_neste_nucleo() {
+    let gicc = interface_de_cpu();
+    gicc.pmr.set(0xFF);
+    gicc.ctlr.set(1);
+    habilitar_linha(INTID_TIMER);
+    habilitar_linha(SGI_PARAR);
+    habilitar_linha(SGI_CUTUCAO);
+    registrar_interface();
+
+    let intervalo = INTERVALO.load(Ordering::Relaxed);
+    if intervalo != 0 {
+        armar(intervalo);
+        CNTP_CTL_EL0.write(CNTP_CTL_EL0::ENABLE::SET + CNTP_CTL_EL0::IMASK::CLEAR);
+    }
+}
+
+/// Manda a SGI `intid` aos núcleos da máscara `nucleos` (bit `i` = núcleo
+/// `i` do kernel).
+pub fn enviar_sgi(nucleos: u8, intid: u32) {
+    let mut destino = 0u32;
+    for (i, interface) in INTERFACES.iter().enumerate() {
+        if nucleos & (1 << i) != 0 {
+            destino |= interface.load(Ordering::Acquire) as u32;
+        }
+    }
+    if destino == 0 {
+        return;
+    }
+    // A barreira garante que o que o núcleo escreveu antes do aviso já está
+    // visível a quem o recebe.
+    aarch64_cpu::asm::barrier::dsb(aarch64_cpu::asm::barrier::ISH);
+    distribuidor().sgir.set((destino << 16) | (intid & 0xF));
 }
 
 /// Habilita uma linha de interrupção no distribuidor.
@@ -165,8 +260,9 @@ fn habilitar_linha(intid: u32) {
 ///
 /// Exige tabela de vetores instalada e [`init`] já executado.
 pub unsafe fn habilitar_uart() {
-    // Entrega ao núcleo 0. Um byte por INTID, um bit por núcleo dentro dele.
-    distribuidor().itargetsr[INTID_UART as usize].set(0b0000_0001);
+    // Entrega ao núcleo 0. Um byte por INTID, um bit por interface dentro
+    // dele.
+    distribuidor().itargetsr[INTID_UART as usize].set(interface_do_primeiro());
     habilitar_linha(INTID_UART);
 }
 
@@ -197,7 +293,8 @@ pub fn intid_de(tipo: u32, numero: u32) -> Option<u32> {
     (intid < 1020).then_some(intid)
 }
 
-/// Habilita uma linha compartilhada e a roteia para este núcleo.
+/// Habilita uma linha compartilhada e a roteia para o primeiro núcleo, que é
+/// o dos dispositivos — ver [`crate::nucleos`].
 ///
 /// Mesma armadilha que [`habilitar_uart`] documenta: o valor de reset do
 /// registrador de destino é zero, ou seja, "para ninguém". Sem a escrita a
@@ -212,23 +309,33 @@ pub unsafe fn habilitar_spi(intid: u32) {
     if indice >= 1020 {
         return;
     }
-    distribuidor().itargetsr[indice].set(0b0000_0001);
+    distribuidor().itargetsr[indice].set(interface_do_primeiro());
     habilitar_linha(intid);
 }
 
-/// Reconhece a interrupção pendente e devolve seu INTID.
+/// Reconhece a interrupção pendente e devolve o valor **inteiro** do
+/// registrador de reconhecimento.
+///
+/// A leitura tem efeito colateral — marca a interrupção como em atendimento
+/// —, e `ReadOnly` garante que seja volátil.
+///
+/// # Por que inteiro, e não só o INTID
+///
+/// Porque numa SGI os bits 12-10 dizem qual núcleo a mandou, e o fim de
+/// interrupção precisa deles de volta: o GIC v2 trata a mesma SGI vinda de
+/// núcleos diferentes como interrupções diferentes. Finalizar só com o
+/// INTID deixaria a de outro núcleo ativa para sempre. Com um núcleo só não
+/// havia SGI, e cortar os bits não custava nada.
 fn reconhecer() -> u32 {
-    // A leitura tem efeito colateral — marca a interrupção como em
-    // atendimento —, e `ReadOnly` garante que seja volátil.
-    interface_de_cpu().iar.get() & 0x3FF
+    interface_de_cpu().iar.get()
 }
 
-/// Sinaliza o fim do atendimento.
+/// Sinaliza o fim do atendimento, com o valor que [`reconhecer`] leu.
 ///
 /// Sem isto o GIC considera a interrupção ainda ativa e não entrega outra da
 /// mesma linha. O sintoma é o timer disparar uma única vez.
-fn finalizar(intid: u32) {
-    interface_de_cpu().eoir.set(intid);
+fn finalizar(reconhecido: u32) {
+    interface_de_cpu().eoir.set(reconhecido);
 }
 
 /// Frequência do timer genérico, em Hz, informada pelo próprio processador.
@@ -296,7 +403,8 @@ pub unsafe fn init_timer(hz_desejado: u32) -> u32 {
 /// handler, e não esta função, porque a troca precisa acontecer depois do fim
 /// de interrupção e com o quadro de exceção em mãos.
 pub fn tratar() -> bool {
-    let intid = reconhecer();
+    let reconhecido = reconhecer();
+    let intid = reconhecido & 0x3FF;
 
     // Espúria: nada a atender e, principalmente, nada a finalizar.
     if intid == INTID_ESPURIO {
@@ -305,8 +413,31 @@ pub fn tratar() -> bool {
 
     let mut preemptar = false;
 
+    if intid == SGI_PARAR {
+        // O sistema parou em outro núcleo. Finalizar antes de parar não é
+        // cortesia: sem o fim, a interface deste núcleo fica com a SGI
+        // ativa, e o relatório de falha que lê o GIC veria um estado falso.
+        finalizar(reconhecido);
+        super::smp::atender_parada();
+        return false;
+    }
+
+    if intid == SGI_CUTUCAO {
+        // Só acordar: quem cutucou já mudou o que tinha de mudar, e este
+        // núcleo confere ao voltar do `wfi`.
+        crate::irq::contabilizar(intid as usize);
+        finalizar(reconhecido);
+        crate::nucleos::ao_ser_cutucado();
+        return false;
+    }
+
     if intid == INTID_TIMER {
-        crate::tempo::tick();
+        // Cada núcleo conta o próprio pulso; o relógio do sistema, só o
+        // primeiro anda — ver `crate::nucleos`.
+        crate::nucleos::tique_local();
+        if crate::nucleos::e_o_primeiro() {
+            crate::tempo::tick();
+        }
         preemptar = crate::fios::tique();
 
         // O timer genérico é one-shot: sem rearmar aqui, esta seria a última
@@ -328,7 +459,7 @@ pub fn tratar() -> bool {
     }
 
     crate::irq::contabilizar(intid as usize);
-    finalizar(intid);
+    finalizar(reconhecido);
 
     preemptar
 }

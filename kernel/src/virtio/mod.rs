@@ -88,10 +88,14 @@ const RESERVADO: u32 = u32::MAX - 1;
 /// tranca do driver, o handler giraria para sempre esperando por alguém que
 /// só continua quando ele terminar — o deadlock clássico.
 ///
-/// Hoje o kernel tem um núcleo só e o acesso ao driver mascara interrupções,
-/// então a situação não ocorre. Depender disso seria depender de duas coisas
-/// que mudam: o número de núcleos e a disciplina de quem escrever o próximo
-/// driver.
+/// O acesso ao driver mascara interrupções, então a situação não ocorre no
+/// núcleo que segura a tranca. Com vários núcleos o driver é alcançado de
+/// qualquer um, e o handler — que roda no primeiro, onde caem as
+/// interrupções de dispositivo — pode encontrar a tranca na mão de outro
+/// núcleo. Isso não seria deadlock, porque o outro solta; seria um handler
+/// esperando um pedido inteiro ao dispositivo com as interrupções do núcleo
+/// dele paradas. E depender da máscara seria depender da disciplina de quem
+/// escrever o próximo driver.
 ///
 /// O que o handler faz com atômicos é tudo o que ele precisa: reconhecer a
 /// interrupção no dispositivo e contá-la.

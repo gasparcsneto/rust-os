@@ -521,22 +521,46 @@ fn registro_esta_completamente_descrito() -> Resultado {
 /// É o teste mais próximo de ponta a ponta que cabe aqui: exercita o
 /// serializador, o leitor e a introspecção da máquina de uma vez só.
 fn comando_system_info_responde_arquitetura_correta() -> Resultado {
-    let cmd = registry::encontrar("system.info").ok_or("system.info ausente")?;
-
-    let mut buffer = Buffer::novo();
-    {
-        let mut w = JsonWriter::new(&mut buffer);
-        escrita((cmd.handler)(Json(b"{}"), &mut w))?;
-    }
-
-    let resposta = Json(buffer.bytes());
+    // No heap, e não no buffer fixo de um kilobyte: a resposta cresceu com a
+    // lista de núcleos, e estourar o buffer daqui reprovaria o caso por um
+    // limite dele, e não do comando.
+    let texto = chamar("system.info", "{}")?;
+    let resposta = Json(texto.as_bytes());
     match resposta.member("arch").and_then(|v| v.as_str()) {
-        Some(arch) if arch == crate::arch::nome() => Ok(()),
+        Some(arch) if arch == crate::arch::nome() => {}
         _ => {
-            crate::log_error!("teste", "resposta: {}", buffer.como_str());
-            Err("system.info nao reporta a arquitetura correta")
+            crate::log_error!("teste", "resposta: {}", texto);
+            return Err("system.info nao reporta a arquitetura correta");
         }
     }
+
+    // Os núcleos: tantos quantos estão ligados, cada um com o seu pulso — é
+    // a resposta que diz a um agente, de fora, se um núcleo travou.
+    let ligados = resposta
+        .member("cores_online")
+        .and_then(|v| v.as_u64())
+        .ok_or("system.info nao diz quantos nucleos estao ligados")?;
+    if ligados != crate::nucleos::ligados() as u64 || ligados == 0 {
+        return Err("system.info conta os nucleos ligados errado");
+    }
+    let nucleos = resposta
+        .member("cores")
+        .ok_or("system.info nao lista os nucleos")?;
+    let mut online = 0;
+    let mut i = 0;
+    while let Some(n) = nucleos.item(i) {
+        if n.member("state").and_then(|v| v.as_str()) == Some("online") {
+            online += 1;
+            if n.member("ticks").and_then(|v| v.as_u64()).is_none() {
+                return Err("um nucleo ligado sem o pulso no system.info");
+            }
+        }
+        i += 1;
+    }
+    if online != ligados {
+        return Err("a lista de nucleos nao bate com a contagem de ligados");
+    }
+    Ok(())
 }
 
 // ===========================================================================
@@ -912,7 +936,7 @@ fn grafico_a_faixa_reaproveita_e_funde() -> Resultado {
     const BASE: u64 = 0x1000_0000;
     // A faixa inteira de mentira mora em `static`: são 4 KiB de trechos, e a
     // pilha de um fio não é lugar para eles.
-    static FAIXA: spin::Mutex<Faixa> = spin::Mutex::new(Faixa::nova(0, 0));
+    static FAIXA: crate::trava::Mutex<Faixa> = crate::trava::Mutex::new(Faixa::nova(0, 0));
 
     let mut f = FAIXA.lock();
     *f = Faixa::nova(BASE, BASE + 16 * P);
@@ -1042,6 +1066,10 @@ fn grafico_soltar_superficies_devolve_a_faixa() -> Resultado {
 
 /// O pixel que o monitor mostra em `(x, y)`.
 fn pixel_na_tela(x: u32, y: u32) -> Result<crate::tela::Cor, &'static str> {
+    // O que o monitor mostra: o que outro núcleo compôs e o primeiro ainda
+    // não levou à tela vai antes, como no `video.sample` — ver
+    // `grafico::apresentar_pendente`.
+    crate::grafico::apresentar_pendente();
     crate::tela::tela_fisica()
         .and_then(|t| t.ler_pixel(x, y))
         .ok_or("ponto fora da tela fisica")
@@ -3887,7 +3915,7 @@ fn eventos_canal_dorme_entrega_e_recusa() -> Resultado {
         return Err("publicar num canal sem ouvinte nao foi recusado");
     }
 
-    crate::usuario::lancar(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/eco")))?;
+    let ouvinte = crate::usuario::lancar(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/eco")))?;
     esperar_ate(|| visto("eco: escutando"), 600)?;
 
     // Dormindo: o canal sabe que o ouvinte espera, e a conta de chamadas de
@@ -3919,14 +3947,18 @@ fn eventos_canal_dorme_entrega_e_recusa() -> Resultado {
         return Err("os eventos nao chegaram na ordem em que foram publicados");
     }
 
-    // A rajada, com as interrupções mascaradas: o ouvinte não roda no meio,
-    // e a fila enche.
+    // A rajada, com as interrupções mascaradas e o ouvinte preso a este
+    // núcleo: ele não roda no meio, e a fila enche. Preso, porque mascarar
+    // aqui não o impede de rodar em outro núcleo — e ele esvaziaria a fila
+    // enquanto ela enche.
     let rajada = 70;
+    prender_no_nucleo_da_suite(ouvinte)?;
     let recusados = crate::arch::sem_interrupcoes(|| {
         (100..100 + rajada)
             .filter(|&n| eventos::publicar(CANAL, teste(n)) == Err(NaoPublicado::Cheio))
             .count()
     });
+    soltar_da_suite(ouvinte);
     if recusados != rajada as usize - CAPACIDADE {
         crate::log_error!("teste", "{} de {} recusados", recusados, rajada);
         return Err("a fila cheia nao recusou exatamente o que nao cabia");
@@ -4219,7 +4251,6 @@ fn janelas_o_servidor_abre_foca_arrasta_e_fecha() -> Resultado {
 
 fn janelas_operadas() -> Resultado {
     use crate::tela::Cor;
-    use crate::usuario::DIRETORIO_DOS_COMPILADOS;
     use alloc::format;
     use protocolo::usuario::evento::{CANAL_DAS_JANELAS, Evento, janela, tipo};
 
@@ -4295,7 +4326,7 @@ fn janelas_operadas() -> Resultado {
     crate::teclado::esvaziar();
     let eventos_antes = crate::ponteiro::para_as_janelas_contados();
 
-    crate::usuario::lancar(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/janelas")))?;
+    lancar_o_servidor_de_janelas_da_suite()?;
     esperar_linha("janelas: pronto")?;
 
     // Abrir: no centro, com o foco, a barra acesa.
@@ -4576,7 +4607,6 @@ fn janelas_a_arvore_atravessa_a_fronteira() -> Resultado {
 
 fn arvore_das_janelas() -> Resultado {
     use crate::ui::{Acao, Origem};
-    use crate::usuario::DIRETORIO_DOS_COMPILADOS;
     use alloc::format;
     use protocolo::usuario::evento::{CANAL_DAS_JANELAS, Evento, janela, tipo};
 
@@ -4612,7 +4642,7 @@ fn arvore_das_janelas() -> Resultado {
     };
     crate::teclado::esvaziar();
 
-    crate::usuario::lancar(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/janelas")))?;
+    lancar_o_servidor_de_janelas_da_suite()?;
     esperar_linha("janelas: pronto")?;
     publicar(tipo::ABRIR, janela::TESTE)?;
     let (x, y) = ((w - 320) / 2, (h - 160) / 2);
@@ -4789,12 +4819,28 @@ fn terminal_o_anel_a_fila_e_a_posse() -> Resultado {
     use crate::eventos::{self, Colheita};
     use crate::pessoas::{Encerramento, EstadoDaSessao};
     use crate::pseudoterminal::{self as pty, ANEL, ENTRADA, Recusa};
+    use core::sync::atomic::{AtomicBool, Ordering};
     use protocolo::usuario::evento::{Evento, tipo};
 
     const CANAL: &str = "teste-pty";
     // Um fio que não existe: o número é maior que qualquer um que o
     // escalonador dá numa suíte.
     const MORTO: u64 = u64::MAX - 7;
+
+    // O dono da segunda instância é um fio **vivo**, que só cede até ser
+    // solto. Era `MORTO - 1`; com um núcleo só, o coletor não rodava no meio
+    // do caso, e um dono morto segurava a instância até o fim. Com vários,
+    // o coletor roda em outro núcleo, vê o dono morto e fecha o console dele
+    // — o certo —, e o caso perguntava a um console fechado.
+    static SOLTAR: AtomicBool = AtomicBool::new(false);
+    static SAIU: AtomicBool = AtomicBool::new(false);
+    extern "C" fn outro_dono(_: u64) -> ! {
+        while !SOLTAR.load(Ordering::SeqCst) {
+            crate::fios::ceder();
+        }
+        SAIU.store(true, Ordering::SeqCst);
+        crate::fios::terminar()
+    }
 
     if pty::donos()
         .iter()
@@ -4803,15 +4849,35 @@ fn terminal_o_anel_a_fila_e_a_posse() -> Resultado {
         return Err("um pseudo-terminal ja tinha dono vivo antes do caso");
     }
     let eu = crate::fios::id_atual();
-    let canal = eventos::escutar(CANAL.as_bytes(), eu).map_err(|_| "o canal do caso nao abriu")?;
+    // O caso conduz a passada do coletor — ver `pausar_o_coletor_de_teste`.
+    pty::pausar_o_coletor_de_teste(true);
+    let canal = match eventos::escutar(CANAL.as_bytes(), eu) {
+        Ok(canal) => canal,
+        Err(_) => {
+            pty::pausar_o_coletor_de_teste(false);
+            return Err("o canal do caso nao abriu");
+        }
+    };
     let chave = match pty::abrir(eu, canal) {
         Ok(chave) => chave,
         Err(_) => {
             eventos::largar(canal, eu);
+            pty::pausar_o_coletor_de_teste(false);
             return Err("o pseudo-terminal livre recusou abrir");
         }
     };
     let console = chave.console();
+    SOLTAR.store(false, Ordering::SeqCst);
+    SAIU.store(false, Ordering::SeqCst);
+    let vivo = match crate::fios::criar("teste-pty-outro", outro_dono, 0) {
+        Ok(id) => id.numero(),
+        Err(_) => {
+            pty::fechar(chave, eu);
+            eventos::largar(canal, eu);
+            pty::pausar_o_coletor_de_teste(false);
+            return Err("o fio do segundo dono nao nasceu");
+        }
+    };
 
     let resultado = crate::arch::sem_interrupcoes(|| -> Resultado {
         let mut buffer = [0u8; 512];
@@ -4937,17 +5003,27 @@ fn terminal_o_anel_a_fila_e_a_posse() -> Resultado {
         }
 
         // Dois consoles: o que se digita num não aparece no outro.
-        let outra = pty::abrir(MORTO - 1, canal).map_err(|_| "a segunda instancia nao abriu")?;
-        let _ = ler_tudo(outra, MORTO - 1);
+        let outra = pty::abrir(vivo, canal).map_err(|_| "a segunda instancia nao abriu")?;
+        let _ = ler_tudo(outra, vivo);
         let _ = ler_tudo(chave, eu);
         for c in "ajuda\n".chars() {
             crate::interpretador::tratar(outra.console(), c);
         }
-        if outra.indice == chave.indice
-            || !ler_tudo(chave, eu).is_empty()
-            || !ler_tudo(outra, MORTO - 1).contains("login")
-        {
-            return Err("dois pseudo-terminais dividiram um console");
+        // Três perguntas, e uma resposta por pergunta: juntas numa mensagem
+        // só, uma reprovação não dizia qual das três tinha falhado.
+        if outra.indice == chave.indice {
+            return Err("dois pseudo-terminais dividiram um console: a mesma instancia");
+        }
+        let na_primeira = ler_tudo(chave, eu);
+        if !na_primeira.is_empty() {
+            crate::log_error!("teste", "a primeira recebeu {:?}", na_primeira);
+            return Err("dois pseudo-terminais dividiram um console: o texto da outra vazou");
+        }
+        let na_outra = ler_tudo(outra, vivo);
+        pty::fechar(outra, vivo);
+        if !na_outra.contains("login") {
+            crate::log_error!("teste", "a outra recebeu {:?}", na_outra);
+            return Err("dois pseudo-terminais dividiram um console: a outra nao respondeu");
         }
 
         // A chave é do dono: outro fio é recusado nos dois sentidos, e o
@@ -5021,10 +5097,14 @@ fn terminal_o_anel_a_fila_e_a_posse() -> Resultado {
 
     pty::fechar(chave, eu);
     eventos::largar(canal, eu);
+    pty::pausar_o_coletor_de_teste(false);
+    SOLTAR.store(true, Ordering::SeqCst);
+    let saiu = esperar_ate(|| SAIU.load(Ordering::SeqCst), 200);
     crate::teclado::esvaziar();
     while pty::proxima_entrada().is_some() {}
     crate::pessoas::esquecer_registradas();
-    resultado
+    resultado?;
+    saiu.map_err(|_| "o fio do segundo dono nao saiu")
 }
 
 /// O interpretador do outro lado do pseudo-terminal, visto de um processo.
@@ -5197,7 +5277,7 @@ fn entradas_separadas() -> Resultado {
     crate::teclado::esvaziar();
 
     // O servidor, com uma janela no centro e o foco nela.
-    crate::usuario::lancar(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/janelas")))?;
+    lancar_o_servidor_de_janelas_da_suite()?;
     esperar_vezes("janelas: pronto", 1)?;
     crate::eventos::publicar(
         CANAL_DAS_JANELAS,
@@ -5341,7 +5421,6 @@ fn terminal_digita_e_mostra_a_resposta() -> Resultado {
 fn terminal_operado() -> Resultado {
     use crate::tela::Cor;
     use crate::ui::{Acao, ID_DO_BOTAO_TERMINAL, Origem};
-    use crate::usuario::DIRETORIO_DOS_COMPILADOS;
     use alloc::format;
     use protocolo::usuario::evento::{CANAL_DAS_JANELAS, Evento, tipo};
     use tipografia::Estilo;
@@ -5407,7 +5486,7 @@ fn terminal_operado() -> Resultado {
     }
 
     // Com o servidor, o botão o faz lançar o Terminal.
-    crate::usuario::lancar(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/janelas")))?;
+    lancar_o_servidor_de_janelas_da_suite()?;
     esperar_vezes("janelas: pronto", 1)?;
     crate::ui::agir(
         ID_DO_BOTAO_TERMINAL,
@@ -5813,7 +5892,7 @@ fn formulario_preenchido() -> Resultado {
         })
     };
     crate::teclado::esvaziar();
-    crate::usuario::lancar(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/formulario")))?;
+    let processo = crate::usuario::lancar(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/formulario")))?;
     esperar("formulario: pronto")?;
 
     // Os elementos da janela, como a árvore os publica: a camada dela e o
@@ -5928,6 +6007,9 @@ fn formulario_preenchido() -> Resultado {
     .map_err(|_| "dois campos definidos em seguida trocaram de valor")?;
 
     // A fila tem teto: com o processo parado, o pedido além dele é recusado.
+    // Parado de verdade: preso a este núcleo, que está mascarado — ver
+    // `prender_no_nucleo_da_suite`.
+    prender_no_nucleo_da_suite(processo)?;
     let recusado = crate::arch::sem_interrupcoes(|| {
         for i in 0..MAIS_VALORES {
             let texto = format!("v{i}");
@@ -5937,6 +6019,7 @@ fn formulario_preenchido() -> Resultado {
         }
         crate::ui::agir(nome, Acao::DefinirValor, Some("demais"), Origem::Agente(0)).is_err()
     });
+    soltar_da_suite(processo);
     if !recusado {
         return Err("a fila de valores de um campo nao tem teto");
     }
@@ -6030,7 +6113,6 @@ fn formulario_preenchido() -> Resultado {
 
 fn sobre_o_duke() -> Resultado {
     use crate::ui::{Acao, ID_DO_BOTAO_SOBRE, Origem};
-    use crate::usuario::DIRETORIO_DOS_COMPILADOS;
     use alloc::format;
     use protocolo::usuario::evento::{CANAL_DAS_JANELAS, Evento, tipo};
 
@@ -6061,7 +6143,7 @@ fn sobre_o_duke() -> Resultado {
         return Err("o botao Sobre foi aceito sem servidor de janelas no ar");
     }
 
-    crate::usuario::lancar(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/janelas")))?;
+    lancar_o_servidor_de_janelas_da_suite()?;
     esperar_linha("janelas: pronto")?;
 
     // O botão está desenhado na barra — o fundo dele, na borda, fora do
@@ -9649,7 +9731,7 @@ fn tarefa_roda_ate_o_fim() -> Resultado {
 /// rodasse cada tarefa até o fim antes de olhar para a outra, a sequência
 /// gravada seria `aabb` em vez de `abab`.
 fn tarefas_se_intercalam() -> Resultado {
-    static SEQUENCIA: spin::Mutex<[u8; 8]> = spin::Mutex::new([0; 8]);
+    static SEQUENCIA: crate::trava::Mutex<[u8; 8]> = crate::trava::Mutex::new([0; 8]);
     static ESCRITOS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
     fn anotar(marca: u8) {
@@ -10308,7 +10390,14 @@ fn chamar(nome: &str, params: &str) -> Result<alloc::string::String, &'static st
     let mut saida = alloc::string::String::new();
     {
         let mut w = JsonWriter::new(&mut saida);
-        (cmd.handler)(Json(params.as_bytes()), &mut w).map_err(|_| "a resposta nao foi escrita")?;
+        // Com a autoridade do sistema, dita aqui: fora de um comando, a
+        // autoridade de comando é a de ninguém — ver
+        // `autorizacao::EmExecucao` —, e estes casos chamam o handler como
+        // o sistema chamaria.
+        crate::autorizacao::como_comando_de_teste(crate::autorizacao::Autoridade::Sistema, || {
+            (cmd.handler)(Json(params.as_bytes()), &mut w)
+        })
+        .map_err(|_| "a resposta nao foi escrita")?;
     }
     Ok(saida)
 }
@@ -19266,8 +19355,12 @@ fn fios_preemptam_sem_cooperacao() -> Resultado {
 
     let trocas_antes = crate::fios::estatisticas().1;
 
-    crate::fios::criar("teste-gira-a", girar, 0)?;
-    crate::fios::criar("teste-gira-b", girar, 1)?;
+    // Os dois no núcleo da suíte, que também não cede. Soltos, com vários
+    // núcleos, cada um ganhava um núcleo só seu e ninguém precisava ser
+    // preemptado: o caso media a folga da máquina, e não a preempção.
+    let aqui = crate::arch::sem_interrupcoes(crate::nucleos::atual);
+    crate::fios::criar_no_nucleo("teste-gira-a", girar, 0, aqui)?;
+    crate::fios::criar_no_nucleo("teste-gira-b", girar, 1, aqui)?;
 
     // Espera ativa de propósito: este fio também não cede: se ele avançar, foi
     // porque o timer o devolveu à CPU. Trinta tiques são seis quanta.
@@ -19348,7 +19441,7 @@ fn fios_preservam_contexto() -> Resultado {
 
 /// Ceder a vez de propósito precisa funcionar sem depender do timer.
 fn fios_cedem_voluntariamente() -> Resultado {
-    static ORDEM: spin::Mutex<[u8; 6]> = spin::Mutex::new([0; 6]);
+    static ORDEM: crate::trava::Mutex<[u8; 6]> = crate::trava::Mutex::new([0; 6]);
     static ESCRITOS: AtomicU64 = AtomicU64::new(0);
     static PRONTOS: AtomicU64 = AtomicU64::new(0);
 
@@ -19466,6 +19559,1359 @@ fn fios_criacao_concorrente_nao_colide() -> Resultado {
         return Err("nenhum fio foi criado; o teste nao exercitou nada");
     }
     Ok(())
+}
+
+// ===========================================================================
+// Vários núcleos
+// ===========================================================================
+//
+// Estes casos rodam com quantos núcleos a bancada der — quatro por padrão, e
+// um com `DUKE_NUCLEOS=1`. Os que só fazem sentido com mais de um conferem
+// isso e dizem no log que não tinham o que exercitar, em vez de reprovar:
+// rodar a suíte com um núcleo só continua sendo uma configuração válida, e
+// é ela que prova que esta fase não quebrou o caso de sempre.
+
+/// Os núcleos ligados, menos o primeiro, que é onde a suíte roda.
+fn nucleos_secundarios() -> impl Iterator<Item = usize> {
+    let mascara = crate::nucleos::mascara_dos_ligados();
+    (1..crate::nucleos::MAX_NUCLEOS).filter(move |i| mascara & (1 << i) != 0)
+}
+
+/// O pulso de um núcleo, em tiques do timer dele.
+fn tiques_do_nucleo(indice: usize) -> u64 {
+    let mut tiques = 0;
+    crate::nucleos::com_nucleos(|n| {
+        if n.indice == indice {
+            tiques = n.tiques;
+        }
+    });
+    tiques
+}
+
+/// Todo núcleo que o hardware descreveu ligou, e cada um tem pulso.
+///
+/// "Ligou" aqui quer dizer o que o kernel precisa que signifique: adotou um
+/// fio ocioso, programou o timer, e o timer está chegando. Um núcleo que
+/// acordou e não tem pulso está parado com as interrupções desligadas, e
+/// contá-lo como ligado seria mandar fios para um lugar de onde eles não
+/// voltam.
+fn smp_todos_os_nucleos_ligam() -> Resultado {
+    let mut descritos = 0;
+    let mut ligados = 0;
+    crate::nucleos::com_nucleos(|n| {
+        descritos += 1;
+        if n.estado == crate::nucleos::Estado::Ligado {
+            ligados += 1;
+        }
+    });
+    crate::log_info!("teste", "{} de {} nucleos ligados", ligados, descritos);
+    if ligados != descritos {
+        return Err("algum nucleo descrito pelo hardware nao ligou");
+    }
+    if ligados != crate::nucleos::ligados() {
+        return Err("a contagem de ligados nao bate com a tabela");
+    }
+
+    let antes: [u64; crate::nucleos::MAX_NUCLEOS] = core::array::from_fn(tiques_do_nucleo);
+    esperar_ticks(10);
+    for i in 0..crate::nucleos::MAX_NUCLEOS {
+        if crate::nucleos::mascara_dos_ligados() & (1 << i) != 0 && tiques_do_nucleo(i) <= antes[i]
+        {
+            crate::log_error!("teste", "o nucleo {} nao tem pulso", i);
+            return Err("um nucleo ligado nao recebe o proprio timer");
+        }
+    }
+    Ok(())
+}
+
+/// O relógio do sistema anda na frequência pedida, e não uma vez por núcleo.
+///
+/// # O defeito que este caso pega
+///
+/// O handler do timer chamava `tempo::tick` em todo disparo. Com um núcleo,
+/// um disparo é um tique; com quatro, cada tique do relógio viraria quatro,
+/// o tempo correria quatro vezes mais rápido, e todo prazo do kernel —
+/// arrendamentos, mensagens, o piso do relógio da persistência — venceria
+/// antes da hora. Nenhuma falha, só tudo adiantado.
+///
+/// Aqui o relógio é comparado com o pulso do primeiro núcleo, que é quem o
+/// anda: os dois precisam andar juntos. E cada núcleo precisa andar mais ou
+/// menos no mesmo passo — todos têm timer na mesma frequência.
+fn smp_o_relogio_anda_uma_vez_por_tique() -> Resultado {
+    let relogio_antes = crate::tempo::ticks();
+    let antes: [u64; crate::nucleos::MAX_NUCLEOS] = core::array::from_fn(tiques_do_nucleo);
+    esperar_ticks(50);
+    let relogio = crate::tempo::ticks() - relogio_antes;
+    let primeiro = tiques_do_nucleo(0) - antes[0];
+
+    crate::log_info!(
+        "teste",
+        "relogio andou {}, o primeiro nucleo contou {}",
+        relogio,
+        primeiro
+    );
+    // O PIT ainda pode estar contribuindo nos primeiros instantes do boot,
+    // mas a suíte roda muito depois: aqui os dois são o mesmo timer.
+    if relogio.abs_diff(primeiro) > relogio / 10 + 2 {
+        return Err("o relogio do sistema nao anda junto com o timer do primeiro nucleo");
+    }
+    for i in nucleos_secundarios() {
+        let andou = tiques_do_nucleo(i) - antes[i];
+        if andou < relogio / 2 || andou > relogio * 2 {
+            crate::log_error!(
+                "teste",
+                "o nucleo {} contou {} tiques em {} do relogio",
+                i,
+                andou,
+                relogio
+            );
+            return Err("um nucleo anda num passo muito diferente dos outros");
+        }
+    }
+    Ok(())
+}
+
+/// Um fio fixo num núcleo só roda nele.
+///
+/// O fio cede a vez várias vezes e pergunta, a cada volta, em que núcleo
+/// está. Se o escalonador o levasse para outro, a resposta mudaria.
+fn smp_fio_fixo_roda_no_seu_nucleo() -> Resultado {
+    const VOLTAS: u64 = 20;
+    static VISTO: [AtomicU64; crate::nucleos::MAX_NUCLEOS] =
+        [const { AtomicU64::new(u64::MAX) }; crate::nucleos::MAX_NUCLEOS];
+    static ERRADOS: AtomicU64 = AtomicU64::new(0);
+    static PRONTOS: AtomicU64 = AtomicU64::new(0);
+
+    extern "C" fn fixo(pedido: u64) -> ! {
+        for _ in 0..VOLTAS {
+            let aqui = crate::arch::sem_interrupcoes(crate::nucleos::atual) as u64;
+            VISTO[pedido as usize].store(aqui, SeqCst);
+            if aqui != pedido {
+                ERRADOS.fetch_add(1, SeqCst);
+            }
+            crate::fios::ceder();
+        }
+        PRONTOS.fetch_add(1, SeqCst);
+        crate::fios::terminar()
+    }
+
+    ERRADOS.store(0, SeqCst);
+    PRONTOS.store(0, SeqCst);
+    let mut criados = 0;
+    for i in 0..crate::nucleos::MAX_NUCLEOS {
+        if crate::nucleos::mascara_dos_ligados() & (1 << i) != 0 {
+            crate::fios::criar_no_nucleo("teste-fixo", fixo, i as u64, i)?;
+            criados += 1;
+        }
+    }
+    esperar_ate(|| PRONTOS.load(SeqCst) == criados, 400)?;
+    if ERRADOS.load(SeqCst) > 0 {
+        return Err("um fio fixo rodou em outro nucleo");
+    }
+    Ok(())
+}
+
+/// Nenhum fio roda em dois núcleos ao mesmo tempo.
+///
+/// # A janela que este caso força
+///
+/// A troca de contexto acontece fora da trava do escalonador: ele escolhe,
+/// marca o que sai como pronto, solta a trava, e só então o assembly guarda
+/// os registradores do que sai. Com um núcleo só ninguém olhava a tabela
+/// nesse intervalo. Com vários, outro núcleo podia escolher o que acabou de
+/// sair e retomá-lo de um contexto ainda não escrito — o mesmo fio, na mesma
+/// pilha, em dois núcleos.
+///
+/// Oito fios soltos cedem a vez o tempo todo, em quatro núcleos: cada cessão
+/// é uma troca, e cada troca é uma chance da janela. Cada fio marca que está
+/// dentro do próprio laço ao entrar e desmarca ao sair; encontrar a marca já
+/// posta é encontrar a si mesmo rodando em outro lugar. E cada um soma num
+/// contador só seu com leitura e escrita separadas — duas cópias do mesmo
+/// fio perderiam somas.
+fn smp_um_fio_nunca_roda_em_dois_nucleos() -> Resultado {
+    const FIOS: usize = 8;
+    const VOLTAS: u64 = 300;
+    static DENTRO: [AtomicU64; FIOS] = [const { AtomicU64::new(0) }; FIOS];
+    static SOMA: [AtomicU64; FIOS] = [const { AtomicU64::new(0) }; FIOS];
+    static DUPLOS: AtomicU64 = AtomicU64::new(0);
+    static NUCLEOS_VISTOS: AtomicU64 = AtomicU64::new(0);
+    static PRONTOS: AtomicU64 = AtomicU64::new(0);
+
+    extern "C" fn trabalhar(qual: u64) -> ! {
+        let i = qual as usize;
+        let mut minhas = 0u64;
+        for volta in 0..VOLTAS {
+            if DENTRO[i].fetch_add(1, SeqCst) != 0 {
+                DUPLOS.fetch_add(1, SeqCst);
+            }
+            let aqui = crate::arch::sem_interrupcoes(crate::nucleos::atual);
+            NUCLEOS_VISTOS.fetch_or(1 << aqui, SeqCst);
+            // Ler, girar um pouco, escrever: o intervalo é o que deixa duas
+            // cópias se atropelarem.
+            let v = SOMA[i].load(SeqCst);
+            for _ in 0..50 {
+                core::hint::spin_loop();
+            }
+            SOMA[i].store(v + 1, SeqCst);
+            minhas += 1;
+            DENTRO[i].fetch_sub(1, SeqCst);
+            if volta % 3 == 0 {
+                crate::fios::ceder();
+            }
+        }
+        if SOMA[i].load(SeqCst) != minhas {
+            DUPLOS.fetch_add(1, SeqCst);
+        }
+        PRONTOS.fetch_add(1, SeqCst);
+        crate::fios::terminar()
+    }
+
+    for i in 0..FIOS {
+        DENTRO[i].store(0, SeqCst);
+        SOMA[i].store(0, SeqCst);
+    }
+    DUPLOS.store(0, SeqCst);
+    NUCLEOS_VISTOS.store(0, SeqCst);
+    PRONTOS.store(0, SeqCst);
+
+    for i in 0..FIOS {
+        crate::fios::criar("teste-duplo", trabalhar, i as u64)?;
+    }
+    esperar_ate(|| PRONTOS.load(SeqCst) == FIOS as u64, 1500)?;
+
+    let vistos = NUCLEOS_VISTOS.load(SeqCst);
+    crate::log_info!("teste", "fios soltos passaram pelos nucleos {:#b}", vistos);
+    if DUPLOS.load(SeqCst) > 0 {
+        return Err("um fio rodou em dois nucleos ao mesmo tempo");
+    }
+    for i in 0..FIOS {
+        if SOMA[i].load(SeqCst) != VOLTAS {
+            return Err("um fio perdeu somas: duas copias dele se atropelaram");
+        }
+    }
+    // Com mais de um núcleo, fios soltos precisam se espalhar: se todos
+    // rodassem num só, o caso acima não teria exercitado nada.
+    if crate::nucleos::ligados() > 1 && vistos.count_ones() < 2 {
+        return Err("os fios soltos nunca sairam de um nucleo");
+    }
+    Ok(())
+}
+
+/// Fios que nascem e morrem em todos os núcleos ao mesmo tempo não perdem
+/// vaga, não são recolhidos com o núcleo ainda em cima deles, e não deixam
+/// resto.
+///
+/// # O que está em jogo
+///
+/// O coletor recolhia "todo terminado que não é o atual", e o atual era um
+/// só. Com vários núcleos há vários atuais — e há o fio que um núcleo acabou
+/// de largar e ainda está saindo de cima da própria pilha. Recolhê-lo ali
+/// seria desmapear a pilha debaixo do núcleo que ainda a usa: uma falha de
+/// página no kernel, num ponto que não tem nada a ver com a causa.
+fn smp_fios_efemeros_em_todos_os_nucleos() -> Resultado {
+    const POR_CRIADOR: u64 = 12;
+    static EFEMEROS: AtomicU64 = AtomicU64::new(0);
+    static CRIADORES: AtomicU64 = AtomicU64::new(0);
+    static FALHAS: AtomicU64 = AtomicU64::new(0);
+
+    extern "C" fn efemero(_argumento: u64) -> ! {
+        EFEMEROS.fetch_add(1, SeqCst);
+        crate::fios::terminar()
+    }
+
+    extern "C" fn criador(_nucleo: u64) -> ! {
+        for _ in 0..POR_CRIADOR {
+            let antes = EFEMEROS.load(SeqCst);
+            // Sem vaga é legítimo com todos criando ao mesmo tempo: tenta
+            // de novo depois de o coletor passar.
+            let mut criado = false;
+            for _ in 0..200 {
+                if crate::fios::criar("teste-efemero", efemero, 0).is_ok() {
+                    criado = true;
+                    break;
+                }
+                crate::fios::ceder();
+            }
+            if !criado {
+                FALHAS.fetch_add(1, SeqCst);
+                continue;
+            }
+            // Esperar este nascer e morrer antes do próximo: o que se quer é
+            // vagas sendo reaproveitadas, não a tabela cheia.
+            while EFEMEROS.load(SeqCst) == antes {
+                crate::fios::ceder();
+            }
+        }
+        CRIADORES.fetch_add(1, SeqCst);
+        crate::fios::terminar()
+    }
+
+    EFEMEROS.store(0, SeqCst);
+    CRIADORES.store(0, SeqCst);
+    FALHAS.store(0, SeqCst);
+    let vivos_antes = crate::fios::estatisticas().0;
+
+    let mut criadores = 0;
+    for i in 0..crate::nucleos::MAX_NUCLEOS {
+        if crate::nucleos::mascara_dos_ligados() & (1 << i) != 0 {
+            crate::fios::criar_no_nucleo("teste-criador", criador, i as u64, i)?;
+            criadores += 1;
+        }
+    }
+    esperar_ate(|| CRIADORES.load(SeqCst) == criadores, 3000)?;
+    if FALHAS.load(SeqCst) > 0 {
+        return Err("um criador nunca achou vaga");
+    }
+    // Todos os efêmeros contaram — e os que contaram mais de uma vez
+    // seriam um fio retomado depois de terminar.
+    let efemeros = EFEMEROS.load(SeqCst);
+    if efemeros != criadores * POR_CRIADOR {
+        crate::log_error!(
+            "teste",
+            "{} efemeros contaram, {} esperados",
+            efemeros,
+            criadores * POR_CRIADOR
+        );
+        return Err("a contagem de efemeros nao fecha");
+    }
+    // E a tabela volta ao que era: nenhum fio preso a um núcleo depois de
+    // terminar.
+    esperar_ate(|| crate::fios::estatisticas().0 <= vivos_antes, 300)
+        .map_err(|_| "sobraram fios vivos depois de todos terminarem")
+}
+
+/// Uma trava compartilhada exclui de verdade entre núcleos, e os
+/// alocadores de frames e do heap não entregam a mesma memória a dois.
+///
+/// # Por que testar o óbvio
+///
+/// Porque com um núcleo só "desligar interrupções" já excluía todo mundo, e
+/// uma trava que não exclui nada passaria na suíte inteira. Era o que este
+/// kernel não tinha como saber até agora: se cada caminho que se dizia
+/// protegido estava protegido pela trava ou só pela máscara.
+///
+/// Cada núcleo roda um fio fixo que soma num contador com leitura e escrita
+/// separadas, sob a trava, e aloca e devolve frames e blocos do heap
+/// marcando cada um com o próprio número. Somas perdidas ou uma marca
+/// alheia são duas coisas que só acontecem sem exclusão.
+fn smp_travas_excluem_entre_nucleos() -> Resultado {
+    const VOLTAS: u64 = 400;
+    static TRAVA: crate::trava::Mutex<u64> = crate::trava::Mutex::new(0);
+    static PRONTOS: AtomicU64 = AtomicU64::new(0);
+    static INVASOES: AtomicU64 = AtomicU64::new(0);
+
+    extern "C" fn disputar(meu: u64) -> ! {
+        let marca = 0xD0E5_0000_0000_0000 | meu;
+        for volta in 0..VOLTAS {
+            crate::arch::sem_interrupcoes(|| {
+                let mut g = TRAVA.lock();
+                let v = core::hint::black_box(*g);
+                for _ in 0..20 {
+                    core::hint::spin_loop();
+                }
+                *g = v + 1;
+            });
+
+            if volta % 8 == 0
+                && let Some(frame) = crate::frames::alocar()
+            {
+                let p = crate::arch::acesso_fisico(frame) as *mut u64;
+                // SAFETY: o frame acabou de sair do alocador e é só nosso —
+                // é exatamente isso que o caso confere.
+                unsafe {
+                    for k in 0..512 {
+                        p.add(k).write_volatile(marca);
+                    }
+                    for _ in 0..50 {
+                        core::hint::spin_loop();
+                    }
+                    for k in 0..512 {
+                        if p.add(k).read_volatile() != marca {
+                            INVASOES.fetch_add(1, SeqCst);
+                            break;
+                        }
+                    }
+                }
+                crate::frames::liberar(frame);
+            }
+
+            if volta % 4 == 0 {
+                let mut bloco = alloc::boxed::Box::new([0u64; 32]);
+                for k in bloco.iter_mut() {
+                    *k = marca;
+                }
+                for _ in 0..30 {
+                    core::hint::spin_loop();
+                }
+                if bloco.iter().any(|&k| k != marca) {
+                    INVASOES.fetch_add(1, SeqCst);
+                }
+                drop(bloco);
+            }
+        }
+        PRONTOS.fetch_add(1, SeqCst);
+        crate::fios::terminar()
+    }
+
+    crate::arch::sem_interrupcoes(|| *TRAVA.lock() = 0);
+    PRONTOS.store(0, SeqCst);
+    INVASOES.store(0, SeqCst);
+    let (livres_antes, _) = crate::frames::estatisticas();
+
+    let mut quantos = 0;
+    for i in 0..crate::nucleos::MAX_NUCLEOS {
+        if crate::nucleos::mascara_dos_ligados() & (1 << i) != 0 {
+            crate::fios::criar_no_nucleo("teste-trava", disputar, i as u64, i)?;
+            quantos += 1;
+        }
+    }
+    esperar_ate(|| PRONTOS.load(SeqCst) == quantos, 3000)?;
+
+    let total = crate::arch::sem_interrupcoes(|| *TRAVA.lock());
+    if total != quantos * VOLTAS {
+        crate::log_error!("teste", "{} somas, {} esperadas", total, quantos * VOLTAS);
+        return Err("a trava nao excluiu: somas se perderam entre nucleos");
+    }
+    if INVASOES.load(SeqCst) > 0 {
+        return Err("dois nucleos receberam a mesma memoria");
+    }
+    // As pilhas dos fios do caso ainda podem estar sendo recolhidas; o que
+    // não pode é sobrar frame preso depois que o coletor passar.
+    esperar_ate(|| crate::frames::estatisticas().0 >= livres_antes, 300)
+        .map_err(|_| "frames sumiram depois da disputa")
+}
+
+/// Desmapear uma página do kernel vale em **todo** núcleo, e não só no que
+/// desmapeou.
+///
+/// # O defeito que este caso pega
+///
+/// Cada núcleo guarda traduções na sua TLB, e apagar uma entrada da tabela
+/// não as apaga — nem na deste núcleo, que é por isso que existe o
+/// `invlpg`, nem na dos outros, que é por isso que existe este caso. No x86
+/// a invalidação local não atravessa núcleos: sem o aviso por NMI, um
+/// núcleo que tivesse lido a página continuaria lendo o frame **antigo**
+/// depois de ele voltar ao alocador e ser entregue a outro dono. No ARM as
+/// invalidações já são difundidas pelo hardware, e o caso confere que
+/// continuam sendo.
+///
+/// Um fio fixo num núcleo secundário lê a página até a tradução estar na
+/// TLB dele e para. O primeiro núcleo troca o frame por baixo da mesma
+/// página — o antigo fica guardado, com o conteúdo antigo — e o fio lê de
+/// novo. Ler o conteúdo antigo é ler por uma tradução que deveria ter
+/// morrido.
+fn smp_desmapear_do_kernel_vale_em_todos_os_nucleos() -> Resultado {
+    const ANTIGO: u64 = 0xAAAA_AAAA_AAAA_AAAA;
+    const NOVO: u64 = 0xBBBB_BBBB_BBBB_BBBB;
+    static FASE: AtomicU64 = AtomicU64::new(0);
+    static LIDO: AtomicU64 = AtomicU64::new(0);
+    // Uma página da área das pilhas bem além de todas as vagas: é memória do
+    // kernel, compartilhada por todos os espaços, que ninguém mais usa.
+    const PAGINA: u64 = crate::arch::BASE_DAS_PILHAS + 64 * 1024 * 1024;
+
+    extern "C" fn leitor(_argumento: u64) -> ! {
+        while FASE.load(SeqCst) != 1 {
+            crate::fios::ceder();
+        }
+        // SAFETY: a página está mapeada durante a fase 1 — o primeiro núcleo
+        // só a desmapeia depois de ver a fase 2, que só este fio põe.
+        let mut visto = 0;
+        for _ in 0..1000 {
+            visto = unsafe { (PAGINA as *const u64).read_volatile() };
+        }
+        LIDO.store(visto, SeqCst);
+        FASE.store(2, SeqCst);
+        // Espera sem tocar na página: entre a fase 2 e a 3 ela pode estar
+        // desmapeada, e lê-la seria uma falha de página no kernel.
+        while FASE.load(SeqCst) != 3 {
+            core::hint::spin_loop();
+        }
+        // SAFETY: a fase 3 só começa com a página mapeada de novo.
+        let depois = unsafe { (PAGINA as *const u64).read_volatile() };
+        LIDO.store(depois, SeqCst);
+        FASE.store(4, SeqCst);
+        crate::fios::terminar()
+    }
+
+    let Some(alvo) = nucleos_secundarios().next() else {
+        crate::log_info!("teste", "um nucleo so: nao ha outra TLB para conferir");
+        return Ok(());
+    };
+
+    FASE.store(0, SeqCst);
+    LIDO.store(0, SeqCst);
+    crate::paginacao::mapear_novo(PAGINA, crate::arch::Permissoes::DADOS)?;
+    // SAFETY: acabamos de mapear a página, e só este caso a usa.
+    unsafe { (PAGINA as *mut u64).write_volatile(ANTIGO) };
+
+    crate::fios::criar_no_nucleo("teste-tlb", leitor, 0, alvo)?;
+    FASE.store(1, SeqCst);
+    esperar_ate(|| FASE.load(SeqCst) == 2, 300)?;
+    if LIDO.load(SeqCst) != ANTIGO {
+        return Err("o leitor nao viu a pagina antes da troca");
+    }
+
+    // A troca: o frame antigo sai **sem** voltar ao alocador — fica com o
+    // conteúdo antigo, que é o que uma tradução velha mostraria.
+    let antigo = crate::arch::desmapear(PAGINA)?;
+    crate::paginacao::mapear_novo(PAGINA, crate::arch::Permissoes::DADOS)?;
+    // SAFETY: a página acabou de ser mapeada sobre um frame novo e zerado.
+    unsafe { (PAGINA as *mut u64).write_volatile(NOVO) };
+
+    FASE.store(3, SeqCst);
+    let resultado = esperar_ate(|| FASE.load(SeqCst) == 4, 300);
+    let depois = LIDO.load(SeqCst);
+
+    // Arrumar antes de julgar: a página e os dois frames voltam.
+    let _ = crate::paginacao::desmapear_e_liberar(PAGINA);
+    crate::frames::liberar(antigo);
+    resultado?;
+
+    crate::log_info!(
+        "teste",
+        "o nucleo {} leu {:#x} depois da troca",
+        alvo,
+        depois
+    );
+    if depois == ANTIGO {
+        return Err("um nucleo continuou lendo o frame antigo: a traducao nao morreu nele");
+    }
+    if depois != NOVO {
+        return Err("o leitor nao viu nem o conteudo novo nem o antigo");
+    }
+    Ok(())
+}
+
+/// Os dois donos de uma página de cópia na escrita escrevem nela ao mesmo
+/// tempo, cada um no seu núcleo.
+///
+/// # O que estava em jogo
+///
+/// A resolução da cópia na escrita lê quantos donos o frame tem, decide se
+/// copia, troca a tradução e só então solta o frame antigo. Com um núcleo
+/// só, as interrupções mascaradas bastavam para que o outro dono nunca
+/// estivesse no meio do mesmo caminho. Com vários, ele pode estar — e as
+/// decisões erradas possíveis são todas silenciosas: os dois acharem que
+/// são o último dono e escreverem no mesmo frame (um vê a escrita do
+/// outro), ou os dois soltarem o frame e ele voltar ao alocador duas vezes.
+///
+/// Aqui um pai e um filho recém-bifurcado escrevem marcas diferentes nas
+/// mesmas páginas, em ordem, os dois juntos, várias voltas. Cada um precisa
+/// ver só as próprias marcas, e no fim tudo o que foi compartilhado volta.
+fn smp_copia_na_escrita_em_dois_nucleos() -> Resultado {
+    use crate::arch::{self, Permissoes, TAMANHO_PAGINA};
+
+    const ALVO: u64 = crate::usuario::BASE;
+    const PAGINAS: u64 = 32;
+    const VOLTAS: usize = 8;
+    const DO_PAI: u64 = 0x9A19_9A19_9A19_9A19;
+    const DO_FILHO: u64 = 0xF117_0F11_70F1_170F;
+    static RAIZ_DO_FILHO: AtomicU64 = AtomicU64::new(0);
+    static PRONTO: AtomicBool = AtomicBool::new(false);
+    static JA: AtomicBool = AtomicBool::new(false);
+    static FEITO: AtomicBool = AtomicBool::new(false);
+
+    // SAFETY (das duas funções): a raiz vem de `clonar_o_ativo`, carrega as
+    // entradas de topo do kernel, e só é largada depois de o escritor voltar
+    // ao espaço do kernel.
+    unsafe fn escrever_em(raiz: u64, marca: u64) {
+        unsafe {
+            arch::trocar_espaco(raiz);
+            for i in 0..PAGINAS {
+                let p = (ALVO + i * TAMANHO_PAGINA) as *mut u64;
+                core::ptr::write_volatile(p, marca ^ i);
+            }
+            arch::trocar_espaco(arch::espaco_do_kernel());
+        }
+    }
+    unsafe fn conferir_em(raiz: u64, marca: u64) -> bool {
+        unsafe {
+            arch::trocar_espaco(raiz);
+            let certo = (0..PAGINAS).all(|i| {
+                core::ptr::read_volatile((ALVO + i * TAMANHO_PAGINA) as *const u64) == marca ^ i
+            });
+            arch::trocar_espaco(arch::espaco_do_kernel());
+            certo
+        }
+    }
+
+    extern "C" fn filho(_argumento: u64) -> ! {
+        PRONTO.store(true, SeqCst);
+        while !JA.load(SeqCst) {
+            core::hint::spin_loop();
+        }
+        let raiz = RAIZ_DO_FILHO.load(SeqCst);
+        // SAFETY: ver acima.
+        crate::arch::sem_interrupcoes(|| unsafe { escrever_em(raiz, DO_FILHO) });
+        FEITO.store(true, SeqCst);
+        crate::fios::terminar()
+    }
+
+    let Some(alvo) = nucleos_secundarios().next() else {
+        crate::log_info!("teste", "um nucleo so: nao ha outro dono escrevendo junto");
+        return Ok(());
+    };
+    let privada = arch::ENTRADA_PRIVADA as usize;
+    let compartilhados_antes = crate::frames::compartilhados();
+    let (_, _, copiadas_antes) = crate::paginacao::estatisticas_de_copia_na_escrita();
+
+    for volta in 0..VOLTAS {
+        PRONTO.store(false, SeqCst);
+        JA.store(false, SeqCst);
+        FEITO.store(false, SeqCst);
+
+        // O pai nasce com as páginas, e o filho é a cópia dele: daqui em
+        // diante cada página tem dois donos e está marcada nos dois.
+        let (pai, filho_) = arch::sem_interrupcoes(|| -> Result<_, &'static str> {
+            let pai = crate::paginacao::Espaco::novo(privada)?;
+            // SAFETY: ver acima; voltamos ao kernel antes de devolver.
+            unsafe {
+                arch::trocar_espaco(pai.raiz());
+                for i in 0..PAGINAS {
+                    let pagina = ALVO + i * TAMANHO_PAGINA;
+                    if let Err(e) = crate::paginacao::mapear_novo(pagina, Permissoes::DADOS_USUARIO)
+                    {
+                        arch::trocar_espaco(arch::espaco_do_kernel());
+                        crate::log_error!(
+                            "teste",
+                            "volta {}: a pagina {} ({:#x}) nao mapeou no espaco novo {:#x}",
+                            volta,
+                            i,
+                            pagina,
+                            pai.raiz()
+                        );
+                        return Err(e);
+                    }
+                    core::ptr::write_volatile(pagina as *mut u64, i);
+                }
+                let filho_ = crate::paginacao::Espaco::clonar_o_ativo(privada);
+                arch::trocar_espaco(arch::espaco_do_kernel());
+                if let Err(e) = &filho_ {
+                    crate::log_error!(
+                        "teste",
+                        "volta {}: o clone de {:#x} falhou: {}",
+                        volta,
+                        pai.raiz(),
+                        e
+                    );
+                }
+                Ok((pai, filho_?))
+            }
+        })?;
+        RAIZ_DO_FILHO.store(filho_.raiz(), SeqCst);
+
+        crate::fios::criar_no_nucleo("teste-cow", filho, 0, alvo)?;
+        let pronto = esperar_ate(|| PRONTO.load(SeqCst), 300);
+        if pronto.is_ok() {
+            JA.store(true, SeqCst);
+            // SAFETY: ver acima.
+            arch::sem_interrupcoes(|| unsafe { escrever_em(pai.raiz(), DO_PAI) });
+        } else {
+            JA.store(true, SeqCst);
+        }
+        let feito = esperar_ate(|| FEITO.load(SeqCst), 300);
+
+        // SAFETY: ver acima; o filho já voltou ao espaço do kernel.
+        let (no_pai, no_filho) = arch::sem_interrupcoes(|| unsafe {
+            (
+                conferir_em(pai.raiz(), DO_PAI),
+                conferir_em(filho_.raiz(), DO_FILHO),
+            )
+        });
+        drop(filho_);
+        drop(pai);
+        pronto.map_err(|_| "o escritor do filho nao comecou")?;
+        feito.map_err(|_| "o escritor do filho nao terminou")?;
+        if !no_pai || !no_filho {
+            crate::log_error!(
+                "teste",
+                "volta {}: pai {}, filho {}",
+                volta,
+                if no_pai { "certo" } else { "errado" },
+                if no_filho { "certo" } else { "errado" }
+            );
+            return Err("um dono viu a escrita do outro: os dois escreveram no mesmo frame");
+        }
+    }
+
+    let (_, _, copiadas) = crate::paginacao::estatisticas_de_copia_na_escrita();
+    crate::log_info!(
+        "teste",
+        "{} copias em {} voltas com o nucleo {}",
+        copiadas - copiadas_antes,
+        VOLTAS,
+        alvo
+    );
+    if crate::frames::compartilhados() != compartilhados_antes {
+        return Err("um frame compartilhado sobrou depois das duas mortes");
+    }
+    // Cada página precisa de uma cópia por volta, nem mais nem menos: quem
+    // escreve primeiro copia, e o segundo, já sozinho, só desmarca. Duas
+    // cópias são os dois tendo lido "dois donos" ao mesmo tempo — certo,
+    // também, e contado à parte; menos de uma é alguém que escreveu no
+    // frame dividido.
+    if copiadas - copiadas_antes < PAGINAS * VOLTAS as u64 {
+        return Err("houve menos copias do que paginas divididas");
+    }
+    Ok(())
+}
+
+/// A cota de processos de um titular vale com os lançamentos em núcleos
+/// diferentes, ao mesmo tempo.
+///
+/// # O que estava em jogo
+///
+/// O gate contava os processos vivos do titular e, se cabia mais um, o
+/// escalonador reservava a vaga depois, em outra seção crítica. Uma chamada
+/// de sistema roda com as interrupções mascaradas, e com um núcleo só nada
+/// cabia entre as duas. Com vários, dois processos da mesma pessoa
+/// bifurcando juntos contavam, os dois, um a menos que a cota — e os dois
+/// nasciam. Aqui um lançador por núcleo, todos com a autoridade da mesma
+/// pessoa, passam pelo gate e nascem juntos, com a cota em um: nasce um,
+/// e os outros são recusados e gravados.
+fn smp_a_cota_de_processos_vale_entre_nucleos() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use politica::Codigo;
+    const VOLTAS: usize = 6;
+    static AUTORIDADE: crate::trava::Mutex<Option<Autoridade>> = crate::trava::Mutex::new(None);
+    static PRONTOS: AtomicU64 = AtomicU64::new(0);
+    static LARGADA: AtomicBool = AtomicBool::new(false);
+    static NASCIDOS: AtomicU64 = AtomicU64::new(0);
+    static RECUSADOS: AtomicU64 = AtomicU64::new(0);
+    static FEITOS: AtomicU64 = AtomicU64::new(0);
+    static SOLTAR: AtomicBool = AtomicBool::new(false);
+
+    extern "C" fn processo(_argumento: u64) -> ! {
+        while !SOLTAR.load(SeqCst) {
+            crate::fios::ceder();
+        }
+        crate::fios::terminar()
+    }
+    fn lancar() {
+        let Some(autoridade) = crate::arch::sem_interrupcoes(|| *AUTORIDADE.lock()) else {
+            return;
+        };
+        PRONTOS.fetch_add(1, SeqCst);
+        while !LARGADA.load(SeqCst) {
+            core::hint::spin_loop();
+        }
+        // O mesmo caminho do `fork`: o gate, e o nascimento com a cota dele.
+        match crate::autorizacao::permitir_processo(autoridade, "process.fork") {
+            Ok(cota) => {
+                match crate::fios::criar_processo("usuario", processo, 0, autoridade, cota) {
+                    Ok(_) => {
+                        NASCIDOS.fetch_add(1, SeqCst);
+                    }
+                    Err(crate::fios::COTA_ESGOTADA) => {
+                        crate::autorizacao::recusar_pela_cota(autoridade, "process.fork", cota);
+                        RECUSADOS.fetch_add(1, SeqCst);
+                    }
+                    Err(_) => {}
+                }
+            }
+            Err(_) => {
+                RECUSADOS.fetch_add(1, SeqCst);
+            }
+        }
+        FEITOS.fetch_add(1, SeqCst);
+    }
+    extern "C" fn lancador(_argumento: u64) -> ! {
+        lancar();
+        crate::fios::terminar()
+    }
+
+    let secundarios: alloc::vec::Vec<usize> = nucleos_secundarios().collect();
+    if secundarios.is_empty() {
+        crate::log_info!("teste", "um nucleo so: nao ha lancamentos simultaneos");
+        return Ok(());
+    }
+    let texto = politica::PADRAO.replace("processos operador 8", "processos operador 1");
+    if texto == politica::PADRAO {
+        return Err("a politica padrao nao tem a cota do operador");
+    }
+    let apertada = politica::Politica::ler(&texto).map_err(|_| "a politica do caso nao vale")?;
+    let pessoa = crate::pessoas::sessao_de_teste(
+        crate::pessoas::Console::Terminal(0),
+        "pessoa-da-corrida",
+        "operador",
+    );
+    let autoridade = Autoridade::Pessoa { sessao: pessoa };
+    crate::arch::sem_interrupcoes(|| *AUTORIDADE.lock() = Some(autoridade));
+    crate::autorizacao::trocar_politica(apertada);
+
+    // Um lançador em cada núcleo secundário, e a suíte é mais um.
+    let lancadores = secundarios.len() as u64 + 1;
+    let mut resultado = Ok(());
+    for volta in 0..VOLTAS {
+        PRONTOS.store(0, SeqCst);
+        LARGADA.store(false, SeqCst);
+        NASCIDOS.store(0, SeqCst);
+        RECUSADOS.store(0, SeqCst);
+        FEITOS.store(0, SeqCst);
+        SOLTAR.store(false, SeqCst);
+        for &n in &secundarios {
+            if let Err(e) = crate::fios::criar_no_nucleo("teste-cota", lancador, 0, n) {
+                resultado = Err(e);
+            }
+        }
+        if resultado.is_err() {
+            break;
+        }
+        let todos = esperar_ate(|| PRONTOS.load(SeqCst) == lancadores - 1, 300)
+            .map_err(|_| "os lancadores nao ficaram prontos");
+        // A suíte larga e lança junto, sem esperar a vez de ninguém.
+        crate::arch::sem_interrupcoes(|| {
+            PRONTOS.fetch_add(1, SeqCst);
+            LARGADA.store(true, SeqCst);
+        });
+        lancar();
+        let feitos = esperar_ate(|| FEITOS.load(SeqCst) == lancadores, 300)
+            .map_err(|_| "os lancadores nao terminaram");
+        if feitos.is_err() {
+            // A fotografia antes de soltar os processos: quem está onde.
+            crate::fios::com_inscricoes(|i| {
+                if i.nome == "teste-cota" || i.nome == "usuario" || i.nucleo.is_some() {
+                    crate::log_error!(
+                        "teste",
+                        "fio {} {}: {}, nucleo {:?}, fixo {:?}, {} escalonamentos",
+                        i.id,
+                        i.nome,
+                        i.estado,
+                        i.nucleo,
+                        i.fixo,
+                        i.escalonamentos
+                    );
+                }
+            });
+            crate::nucleos::com_nucleos(|n| {
+                crate::log_error!("teste", "nucleo {}: {} tiques", n.indice, n.tiques);
+            });
+        }
+        let nascidos = NASCIDOS.load(SeqCst);
+        let vivos = crate::fios::processos_de(autoridade);
+        SOLTAR.store(true, SeqCst);
+        let sairam = esperar_ate(|| crate::fios::processos_de(autoridade) == 0, 300)
+            .map_err(|_| "os processos da volta nao sairam");
+        if let Err(e) = todos.and(feitos).and(sairam) {
+            crate::log_error!(
+                "teste",
+                "volta {}: {} prontos, {} feitos, {} nascidos, {} recusados, {} vivos",
+                volta,
+                PRONTOS.load(SeqCst),
+                FEITOS.load(SeqCst),
+                NASCIDOS.load(SeqCst),
+                RECUSADOS.load(SeqCst),
+                crate::fios::processos_de(autoridade)
+            );
+            resultado = Err(e);
+            break;
+        }
+        if nascidos != 1 || vivos != 1 {
+            crate::log_error!(
+                "teste",
+                "volta {}: {} nascidos, {} vivos, {} recusados",
+                volta,
+                nascidos,
+                vivos,
+                RECUSADOS.load(SeqCst)
+            );
+            resultado = Err("lancamentos em nucleos diferentes passaram juntos da cota");
+            break;
+        }
+        if RECUSADOS.load(SeqCst) != lancadores - 1 {
+            resultado = Err("um lancamento alem da cota nao foi recusado");
+            break;
+        }
+        let gravada = ultimo_com_metodo("process.fork").is_some_and(|e| {
+            e.codigo == Codigo::DenyPolicy && e.sessao_de_pessoa == Some(pessoa.0)
+        });
+        if !gravada {
+            resultado = Err("a recusa pela cota nao foi gravada");
+            break;
+        }
+    }
+
+    SOLTAR.store(true, SeqCst);
+    LARGADA.store(true, SeqCst);
+    let _ = esperar_ate(|| crate::fios::processos_de(autoridade) == 0, 300);
+    crate::arch::sem_interrupcoes(|| *AUTORIDADE.lock() = None);
+    crate::autorizacao::carregar();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// O coletor de um pseudo-terminal, num núcleo, e um `abrir`, em outro, ao
+/// mesmo tempo: o console do dono novo fica aberto, e a sessão de quem
+/// estava no console do dono morto acaba.
+///
+/// # O que estava em jogo
+///
+/// O coletor largava a vaga do dono morto sob a trava e fechava o console
+/// dele depois, fora dela. Um `abrir` no meio via a vaga livre, abria o
+/// console para o dono novo — e o fechamento atrasado o fechava. Ou o
+/// `abrir` zerava o console antes do fechamento, e a sessão da pessoa que
+/// estava no Terminal morto ficava viva no registro, sem console. Com um
+/// núcleo só o coletor e o `abrir` não corriam juntos. Aqui um fio, em outro
+/// núcleo, roda a passada do coletor no instante em que a suíte abre, muitas
+/// voltas, com uma pessoa entrada no console do dono morto em cada uma.
+fn smp_o_coletor_nao_fecha_o_console_do_dono_seguinte() -> Resultado {
+    use crate::pessoas::{Encerramento, EstadoDaSessao};
+    use crate::pseudoterminal as pty;
+    const VOLTAS: u64 = 200;
+    const CANAL: &str = "teste-pty-coletor";
+    // Fios que não existem, um por volta: maiores que qualquer um da suíte.
+    const MORTOS: u64 = u64::MAX - 1_000;
+    static RODADA: AtomicU64 = AtomicU64::new(0);
+    static PRONTA: AtomicU64 = AtomicU64::new(0);
+    static LARGADA: AtomicU64 = AtomicU64::new(0);
+    static FEITA: AtomicU64 = AtomicU64::new(0);
+
+    extern "C" fn coletor(_argumento: u64) -> ! {
+        let mut vista = 0;
+        loop {
+            let r = RODADA.load(SeqCst);
+            if r == u64::MAX {
+                break;
+            }
+            if r == vista {
+                core::hint::spin_loop();
+                continue;
+            }
+            vista = r;
+            PRONTA.store(r, SeqCst);
+            while LARGADA.load(SeqCst) != r {
+                core::hint::spin_loop();
+            }
+            pty::avisar_se_preciso();
+            FEITA.store(r, SeqCst);
+        }
+        crate::fios::terminar()
+    }
+
+    let Some(alvo) = nucleos_secundarios().next() else {
+        crate::log_info!(
+            "teste",
+            "um nucleo so: o coletor nao corre junto com quem abre"
+        );
+        return Ok(());
+    };
+    if pty::donos()
+        .iter()
+        .any(|d| d.is_some_and(crate::fios::vivo))
+    {
+        return Err("um pseudo-terminal ja tinha dono vivo antes do caso");
+    }
+    let eu = crate::fios::id_atual();
+    let canal =
+        crate::eventos::escutar(CANAL.as_bytes(), eu).map_err(|_| "o canal do caso nao abriu")?;
+    // A passada que corre com o `abrir` é a do fio do caso; a do coletor de
+    // verdade fecharia o console do dono morto antes de a pessoa entrar
+    // nele — ver `pausar_o_coletor_de_teste`.
+    pty::pausar_o_coletor_de_teste(true);
+    RODADA.store(0, SeqCst);
+    PRONTA.store(0, SeqCst);
+    LARGADA.store(0, SeqCst);
+    FEITA.store(0, SeqCst);
+    let criado = crate::fios::criar_no_nucleo("teste-coletor-pty", coletor, 0, alvo);
+
+    let mut resultado = criado.map(|_| ());
+    let mut fechados_pelo_abrir = 0;
+    for r in 1..=VOLTAS {
+        if resultado.is_err() {
+            break;
+        }
+        let morto = MORTOS - r;
+        let Ok(morta) = pty::abrir(morto, canal) else {
+            resultado = Err("a instancia do dono morto nao abriu");
+            break;
+        };
+        let sessao = crate::interpretador::entrar_para_teste(
+            morta.console(),
+            "pessoa-do-coletor",
+            "operador",
+        );
+        RODADA.store(r, SeqCst);
+        if esperar_ate(|| PRONTA.load(SeqCst) == r, 300).is_err() {
+            resultado = Err("o fio do coletor nao ficou pronto");
+            break;
+        }
+        LARGADA.store(r, SeqCst);
+        let nova = pty::abrir(eu, canal);
+        let coletou = esperar_ate(|| FEITA.load(SeqCst) == r, 300);
+        let aberto = nova.is_ok_and(|n| crate::interpretador::console_aberto(n.console()));
+        let mesma_vaga = nova.is_ok_and(|n| n.indice == morta.indice);
+        if let Ok(n) = nova {
+            pty::fechar(n, eu);
+        }
+        // Se a passada do coletor perdeu para o `abrir` no começo, a vaga
+        // velha ainda pode estar com o dono morto: a próxima passada a fecha.
+        pty::avisar_se_preciso();
+        let encerrada = crate::pessoas::sessao(sessao)
+            == EstadoDaSessao::Encerrada(Encerramento::ConsoleFechado);
+        if coletou.is_err() {
+            resultado = Err("a passada do coletor nao terminou");
+        } else if nova.is_err() {
+            resultado = Err("o abrir foi recusado com vagas livres");
+        } else if !aberto {
+            crate::log_error!(
+                "teste",
+                "volta {}: o console do dono novo estava fechado",
+                r
+            );
+            resultado = Err("o coletor fechou o console do dono seguinte");
+        } else if !encerrada {
+            crate::log_error!("teste", "volta {}: a sessao do dono morto sobreviveu", r);
+            resultado = Err("a sessao do console do dono morto ficou viva sem console");
+        }
+        fechados_pelo_abrir += mesma_vaga as u64;
+    }
+    RODADA.store(u64::MAX, SeqCst);
+    LARGADA.store(u64::MAX, SeqCst);
+    pty::pausar_o_coletor_de_teste(false);
+    crate::eventos::largar(canal, eu);
+    while pty::proxima_entrada().is_some() {}
+    crate::pessoas::esquecer_registradas();
+    crate::log_info!(
+        "teste",
+        "{} de {} voltas o abrir tomou a vaga do dono morto",
+        fechados_pelo_abrir,
+        VOLTAS
+    );
+    resultado
+}
+
+/// Um login que termina depois de o console fechar — e reabrir para outro
+/// Terminal, na mesma vaga — não entra no console novo, e a sessão que ele
+/// abriu acaba.
+///
+/// # O que estava em jogo
+///
+/// A senha sai do console, a conferência roda fora da tranca — é longa, um
+/// Argon2id —, e o resultado era posto no console sem perguntar se ele
+/// ainda era o mesmo. Se o Terminal morria no meio, o coletor fechava o
+/// console, um Terminal novo podia abrir a mesma vaga, e a sessão da pessoa
+/// aparecia no console do processo novo, já entrada. Aqui a senha é
+/// conferida num fio em outro núcleo, e a suíte fecha e reabre o console
+/// enquanto isso.
+fn smp_o_login_nao_entra_no_console_reaberto() -> Resultado {
+    use crate::pessoas::Console;
+    use sigilo::pessoas::Estado;
+    const CONSOLE: Console = Console::Terminal(2);
+    static COMECOU: AtomicBool = AtomicBool::new(false);
+    static TERMINOU: AtomicBool = AtomicBool::new(false);
+
+    extern "C" fn conferir(_argumento: u64) -> ! {
+        let senha = core::str::from_utf8(SENHA_DE_TESTE).unwrap_or("");
+        digitar_no_console(CONSOLE, senha);
+        COMECOU.store(true, SeqCst);
+        // O fim de linha é o que dispara a conferência, aqui, neste fio.
+        crate::interpretador::tratar(CONSOLE, '\n');
+        TERMINOU.store(true, SeqCst);
+        crate::fios::terminar()
+    }
+
+    let Some(alvo) = nucleos_secundarios().next() else {
+        crate::log_info!(
+            "teste",
+            "um nucleo so: o login nao corre junto com o fechamento"
+        );
+        return Ok(());
+    };
+    crate::pessoas::esquecer_registradas();
+    crate::pessoas::registrar_de_teste("ana", "operador", SENHA_DE_TESTE);
+    COMECOU.store(false, SeqCst);
+    TERMINOU.store(false, SeqCst);
+    crate::interpretador::abrir_console(CONSOLE);
+    digitar_no_console(CONSOLE, "login\nana\n");
+
+    let resultado = (|| -> Resultado {
+        crate::fios::criar_no_nucleo("teste-login", conferir, 0, alvo)?;
+        // O fim de linha tirou a senha do console e a conferência começou —
+        // e não só "a senha foi digitada": fechar antes do fim de linha
+        // zerava a linha, e não havia login nenhum para chegar atrasado.
+        esperar_ate(
+            || COMECOU.load(SeqCst) && !crate::interpretador::pedindo_senha(CONSOLE),
+            300,
+        )
+        .map_err(|_| "o login nao comecou")?;
+        // O Terminal morre, e outro abre na mesma vaga, com a conferência
+        // em curso.
+        crate::interpretador::fechar_console(CONSOLE, "o terminal do caso morreu");
+        crate::interpretador::abrir_console(CONSOLE);
+        let fechou_antes = !TERMINOU.load(SeqCst);
+        esperar_ate(|| TERMINOU.load(SeqCst), 3000).map_err(|_| "o login nao terminou")?;
+        if !fechou_antes {
+            return Err("a conferencia terminou antes do fechamento: o caso nao mediu nada");
+        }
+        // A senha conferiu: sem isto, um login recusado por outro motivo
+        // passaria por todas as perguntas abaixo sem que nada tivesse corrido.
+        let entrou =
+            ultimo_com_metodo("person.login").is_some_and(|e| e.codigo == politica::Codigo::Allow);
+        if !entrou {
+            if let Some(e) = ultimo_com_metodo("person.login") {
+                crate::log_error!("teste", "o login acabou em {:?}: {}", e.codigo, e.detalhe);
+            }
+            return Err("a senha do caso nao abriu sessao nenhuma");
+        }
+        if crate::interpretador::sessao_do_console(CONSOLE).is_some() {
+            return Err("o login entrou no console reaberto para outro terminal");
+        }
+        let abertas: usize = crate::pessoas::resumos()
+            .iter()
+            .filter(|r| r.nome == "ana" && r.estado == Estado::Ativa)
+            .map(|r| r.sessoes.len())
+            .sum();
+        if abertas != 0 {
+            return Err("a sessao do login atrasado ficou aberta sem console");
+        }
+        let gravado = ultimo_com_metodo("person.logout")
+            .is_some_and(|e| e.detalhe.contains("o console fechou durante o login"));
+        if !gravado {
+            return Err("o fim da sessao do login atrasado nao foi gravado");
+        }
+        Ok(())
+    })();
+    crate::interpretador::fechar_console(CONSOLE, "fim do caso");
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// O relógio de parede lido em todos os núcleos ao mesmo tempo dá a mesma
+/// hora em todos, sem leitura recusada.
+///
+/// # O que estava em jogo
+///
+/// No x86 o relógio é lido por um par de portas — o índice numa, o valor na
+/// outra — e só a máscara de interrupções separava um acesso do seguinte.
+/// Com vários núcleos, um escolhia o registrador e outro trocava a escolha
+/// antes da leitura. A auditoria lê o relógio a cada decisão, e o piso do
+/// relógio da persistência, que nunca volta, sai dele: uma leitura misturada
+/// que passasse pela conferência levaria o piso para uma data errada, de vez.
+/// No ARM o relógio é um registrador só, e o caso passa por construção.
+fn smp_o_relogio_de_parede_lido_em_todos_os_nucleos() -> Resultado {
+    const LEITURAS: u64 = 150;
+    static LARGADA: AtomicBool = AtomicBool::new(false);
+    static FEITOS: AtomicU64 = AtomicU64::new(0);
+    static RECUSADAS: AtomicU64 = AtomicU64::new(0);
+    static MENOR: AtomicU64 = AtomicU64::new(u64::MAX);
+    static MAIOR: AtomicU64 = AtomicU64::new(0);
+
+    fn ler_muitas() {
+        while !LARGADA.load(SeqCst) {
+            core::hint::spin_loop();
+        }
+        for _ in 0..LEITURAS {
+            match crate::relogio::agora() {
+                Some(s) => {
+                    MENOR.fetch_min(s, SeqCst);
+                    MAIOR.fetch_max(s, SeqCst);
+                }
+                None => {
+                    RECUSADAS.fetch_add(1, SeqCst);
+                }
+            }
+        }
+        FEITOS.fetch_add(1, SeqCst);
+    }
+    extern "C" fn leitor(_argumento: u64) -> ! {
+        ler_muitas();
+        crate::fios::terminar()
+    }
+
+    let secundarios: alloc::vec::Vec<usize> = nucleos_secundarios().collect();
+    if secundarios.is_empty() {
+        crate::log_info!("teste", "um nucleo so: ninguem le o relogio junto");
+        return Ok(());
+    }
+    if crate::relogio::agora().is_none() {
+        crate::log_info!("teste", "nenhum relogio de parede nesta maquina");
+        return Ok(());
+    }
+    LARGADA.store(false, SeqCst);
+    FEITOS.store(0, SeqCst);
+    RECUSADAS.store(0, SeqCst);
+    MENOR.store(u64::MAX, SeqCst);
+    MAIOR.store(0, SeqCst);
+    for &n in &secundarios {
+        crate::fios::criar_no_nucleo("teste-rtc", leitor, 0, n)?;
+    }
+    LARGADA.store(true, SeqCst);
+    ler_muitas();
+    let todos = secundarios.len() as u64 + 1;
+    esperar_ate(|| FEITOS.load(SeqCst) == todos, 1000)
+        .map_err(|_| "os leitores do relogio nao terminaram")?;
+    let (menor, maior, recusadas) = (
+        MENOR.load(SeqCst),
+        MAIOR.load(SeqCst),
+        RECUSADAS.load(SeqCst),
+    );
+    crate::log_info!(
+        "teste",
+        "{} leituras em {} nucleos: de {} a {}, {} recusadas",
+        LEITURAS * todos,
+        todos,
+        menor,
+        maior,
+        recusadas
+    );
+    if recusadas != 0 {
+        return Err("leituras do relogio foram recusadas com varios nucleos lendo");
+    }
+    // O caso inteiro leva poucos segundos; uma leitura misturada cai longe.
+    if maior - menor > 10 {
+        return Err("os nucleos leram horas diferentes do mesmo relogio");
+    }
+    Ok(())
+}
+
+/// A autoridade de um comando é de quem o executa, e de mais ninguém.
+///
+/// # O que estava em jogo
+///
+/// A autoridade do comando em execução morava numa variável do sistema
+/// inteiro, lida por quem precisava saber "em nome de quem estou agindo" —
+/// `user.run` para gravar no processo, as mensagens para saber o remetente.
+/// Com um núcleo, e com todo comando executado pelo fio do executor, só havia
+/// um comando de cada vez, e só quem o executava perguntava.
+///
+/// Com vários núcleos, um fio em outro núcleo que perguntasse durante um
+/// comando receberia a autoridade **do agente que pediu o comando**. Aqui um
+/// fio sonda, em outro núcleo, pergunta no meio de um comando de sessão
+/// autenticada, e precisa receber a de ninguém — enquanto o próprio comando
+/// continua vendo a sua.
+fn smp_autoridade_do_comando_nao_vaza_para_outro_fio() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    static VISTA: crate::trava::Mutex<Option<Autoridade>> = crate::trava::Mutex::new(None);
+    static PRONTA: AtomicBool = AtomicBool::new(false);
+
+    extern "C" fn sondar(_argumento: u64) -> ! {
+        let vista = crate::autorizacao::autoridade_atual();
+        crate::arch::sem_interrupcoes(|| *VISTA.lock() = Some(vista));
+        PRONTA.store(true, SeqCst);
+        crate::fios::terminar()
+    }
+
+    let do_comando = Autoridade::Sessao {
+        sessao: 2,
+        chave: Some([0x5A; 32]),
+    };
+    PRONTA.store(false, SeqCst);
+    crate::arch::sem_interrupcoes(|| *VISTA.lock() = None);
+    // Em outro núcleo quando há, e no mesmo quando não há: o fio é outro de
+    // qualquer jeito, e é o fio que importa.
+    let onde = nucleos_secundarios().next().unwrap_or(0);
+
+    let (dentro, sondagem) = crate::autorizacao::como_comando_de_teste(do_comando, || {
+        let dentro = crate::autorizacao::autoridade_atual();
+        let sondagem = crate::fios::criar_no_nucleo("teste-sonda", sondar, 0, onde)
+            .map_err(|_| "a sonda nao nasceu")
+            .and_then(|_| esperar_ate(|| PRONTA.load(SeqCst), 300));
+        (dentro, sondagem)
+    });
+    sondagem?;
+
+    if dentro != do_comando {
+        return Err("o proprio comando nao ve a autoridade dele");
+    }
+    let vista = crate::arch::sem_interrupcoes(|| *VISTA.lock());
+    if vista != Some(Autoridade::NENHUMA) {
+        crate::log_error!("teste", "a sonda viu {:?}", vista);
+        return Err("outro fio recebeu a autoridade do comando em execucao");
+    }
+    // E fora de qualquer comando, a de ninguém — e não a do sistema.
+    if crate::autorizacao::autoridade_atual() != Autoridade::NENHUMA {
+        return Err("fora de um comando, a autoridade de comando nao e a de ninguem");
+    }
+    Ok(())
+}
+
+/// Um núcleo travado com as interrupções desligadas não leva o resto junto.
+///
+/// # O que precisa continuar valendo
+///
+/// - os outros núcleos seguem com pulso, e o travado perde o dele — que é
+///   como um agente vê, de fora, que um núcleo travou;
+/// - o escalonador segue pondo fios para rodar nos outros;
+/// - desmapear uma página do kernel ainda termina. No x86 é o ponto mais
+///   delicado: quem desmapeia espera **todos** os núcleos confirmarem que
+///   largaram a tradução, e o travado não atende interrupção nenhuma. Só a
+///   NMI o alcança — se o aviso fosse uma interrupção comum, o desmapear
+///   esperaria para sempre, com a trava da paginação na mão, e o sistema
+///   inteiro pararia atrás dele;
+/// - o núcleo travado não é dado como perdido: ele responde à NMI.
+///
+/// No fim o travamento é solto, e o núcleo precisa voltar a ter pulso — a
+/// suíte segue com ele.
+fn smp_nucleo_travado_nao_para_os_outros() -> Resultado {
+    static RODOU: AtomicU64 = AtomicU64::new(0);
+
+    extern "C" fn sinal(_argumento: u64) -> ! {
+        RODOU.fetch_add(1, SeqCst);
+        crate::fios::terminar()
+    }
+
+    let secundarios: alloc::vec::Vec<usize> = nucleos_secundarios().collect();
+    let Some(&travado) = secundarios.last() else {
+        crate::log_info!("teste", "um nucleo so: nao ha outro para travar");
+        return Ok(());
+    };
+    let reavisos_antes = crate::arch::reavisos_remotos();
+
+    crate::nucleos::travar(travado, crate::nucleos::MAIOR_TRAVAMENTO_MS)?;
+    let resultado = (|| -> Resultado {
+        esperar_ate(|| crate::nucleos::travados() == 1, 300)
+            .map_err(|_| "o fio de travamento nao comecou")?;
+
+        let antes: [u64; crate::nucleos::MAX_NUCLEOS] = core::array::from_fn(tiques_do_nucleo);
+        esperar_ticks(30);
+        if tiques_do_nucleo(travado) > antes[travado] + 1 {
+            return Err("o nucleo travado continuou recebendo o timer");
+        }
+        if tiques_do_nucleo(0) <= antes[0] {
+            return Err("o primeiro nucleo perdeu o pulso junto");
+        }
+        for &i in &secundarios {
+            if i != travado && tiques_do_nucleo(i) <= antes[i] {
+                return Err("outro nucleo perdeu o pulso junto com o travado");
+            }
+        }
+
+        // O escalonador segue: um fio novo nasce, roda e termina.
+        RODOU.store(0, SeqCst);
+        crate::fios::criar("teste-sinal", sinal, 0)?;
+        esperar_ate(|| RODOU.load(SeqCst) == 1, 200)
+            .map_err(|_| "com um nucleo travado, um fio novo nao rodou")?;
+
+        // E desmapear do kernel termina, com o travado avisado.
+        const PAGINA: u64 = crate::arch::BASE_DAS_PILHAS + 65 * 1024 * 1024;
+        crate::paginacao::mapear_novo(PAGINA, crate::arch::Permissoes::DADOS)?;
+        let comeco = crate::tempo::ticks();
+        crate::paginacao::desmapear_e_liberar(PAGINA)?;
+        let levou = crate::tempo::ticks() - comeco;
+        crate::log_info!(
+            "teste",
+            "desmapear com o nucleo {} travado levou {} tique(s)",
+            travado,
+            levou
+        );
+        // A NMI atravessa a máscara: o travado confirmou da primeira vez, sem
+        // precisar de reaviso, e continua na conta dos ligados.
+        if crate::arch::reavisos_remotos() != reavisos_antes {
+            return Err("o aviso de descarte precisou ser reenviado ao nucleo travado");
+        }
+        if crate::nucleos::mascara_dos_ligados() & (1 << travado) == 0 {
+            return Err("o nucleo travado saiu da conta dos ligados");
+        }
+        Ok(())
+    })();
+
+    crate::nucleos::soltar_travamento();
+    esperar_ate(|| crate::nucleos::travados() == 0, 300)
+        .map_err(|_| "o nucleo travado nao voltou")?;
+    let depois = tiques_do_nucleo(travado);
+    esperar_ate(|| tiques_do_nucleo(travado) > depois, 100)
+        .map_err(|_| "o nucleo solto nao recuperou o pulso")?;
+    resultado
 }
 
 // ===========================================================================
@@ -19650,13 +21096,43 @@ fn fios_zumbi_espera_a_colheita_e_some_depois_dela() -> Resultado {
         return Err("a tabela ja tinha zumbi antes do caso comecar");
     }
 
-    let (_, _, saidas_antes) = crate::usuario::estatisticas_de_processo();
-    crate::fios::criar("teste-zumbi", hospedar, 0)?;
+    let (bifurcacoes_antes, _, saidas_antes) = crate::usuario::estatisticas_de_processo();
+    // O pai fica no núcleo da suíte. Com vários núcleos, um pai solto
+    // acordava em outro núcleo no instante em que o filho saía, e colhia em
+    // microssegundos: a janela do zumbi existia, e ninguém a via.
+    let aqui = crate::arch::sem_interrupcoes(crate::nucleos::atual);
+    crate::fios::criar_no_nucleo("teste-zumbi", hospedar, 0, aqui)?;
 
     // O filho sai primeiro e o pai fica esperando: existe uma janela em que a
     // tabela tem exatamente um zumbi. Ela é curta — o pai acorda no mesmo
     // instante —, então a sondagem tem de ser apertada.
-    let viu_zumbi = esperar_ate(|| crate::fios::colheita().1 > 0, 600).is_ok();
+    let viu_zumbi = match nucleos_secundarios().next() {
+        // Com outro núcleo, a janela é aberta de propósito: depois do
+        // `fork`, a suíte sonda com as interrupções mascaradas, e o pai, preso
+        // a este núcleo, não pode rodar até ela soltar. O filho roda e sai em
+        // outro núcleo. Só preso o pai não bastava: quando o filho saía neste
+        // mesmo núcleo, o rodízio podia escolher o pai antes da suíte —
+        // depende da vaga que cada um ganhou —, e ele colhia sem a janela ser
+        // vista. O prazo é contado no timer do outro núcleo, porque o
+        // relógio do sistema é deste, e está mascarado.
+        Some(outro) => {
+            esperar_ate(
+                || crate::usuario::estatisticas_de_processo().0 > bifurcacoes_antes,
+                600,
+            )?;
+            crate::arch::sem_interrupcoes(|| {
+                let limite = tiques_do_nucleo(outro) + 600;
+                while tiques_do_nucleo(outro) < limite {
+                    if crate::fios::colheita().1 > 0 {
+                        return true;
+                    }
+                    core::hint::spin_loop();
+                }
+                false
+            })
+        }
+        None => esperar_ate(|| crate::fios::colheita().1 > 0, 600).is_ok(),
+    };
 
     esperar_ate(
         || crate::usuario::estatisticas_de_processo().2 >= saidas_antes + 2,
@@ -21654,6 +23130,51 @@ fn contar_no_log(subsistema: &str, trecho: &str) -> usize {
     quantos
 }
 
+/// O servidor de janelas que o último caso lançou.
+static ULTIMO_SERVIDOR: AtomicU64 = AtomicU64::new(0);
+
+/// Lança o servidor de janelas para um caso — depois de o do caso anterior
+/// ter **saído**, e não só dito que ia sair.
+///
+/// # Por que esperar
+///
+/// Porque o canal das janelas tem um ouvinte só, e o kernel recusa o
+/// segundo enquanto o primeiro viver — que é o certo. Os casos esperavam a
+/// linha `janelas: encerrado`, que o servidor escreve logo **antes** de sair.
+/// Com um núcleo só, a saída vinha em seguida, no mesmo quantum, antes de o
+/// caso seguinte rodar. Com vários, o servidor novo nasce em outro núcleo
+/// enquanto o velho ainda está entre a linha e a saída, e a escuta dele é
+/// recusada com `OCUPADO`.
+fn lancar_o_servidor_de_janelas_da_suite() -> Resultado {
+    use crate::usuario::DIRETORIO_DOS_COMPILADOS;
+    let anterior = ULTIMO_SERVIDOR.load(SeqCst);
+    if anterior != 0 {
+        esperar_ate(|| !crate::fios::vivo(anterior), 600)
+            .map_err(|_| "o servidor de janelas anterior nao saiu")?;
+    }
+    let id = crate::usuario::lancar(Some(&alloc::format!("{DIRETORIO_DOS_COMPILADOS}/janelas")))?;
+    ULTIMO_SERVIDOR.store(id, SeqCst);
+    Ok(())
+}
+
+/// Prende o processo `id` ao núcleo da suíte, e espera ele sair de qualquer
+/// outro. A partir daí, mascarar as interrupções aqui o deixa parado — que é
+/// o que os casos de fila cheia precisam, e que com um núcleo só vinha de
+/// graça. Ver [`crate::fios::fixar`].
+fn prender_no_nucleo_da_suite(id: u64) -> Resultado {
+    let aqui = crate::arch::sem_interrupcoes(crate::nucleos::atual);
+    if !crate::fios::fixar(id, Some(aqui)) {
+        return Err("o processo a prender nao existe");
+    }
+    esperar_ate(|| crate::fios::nucleo_de(id).is_none_or(|c| c == aqui), 200)
+        .map_err(|_| "o processo nao saiu do outro nucleo")
+}
+
+/// Solta o processo que [`prender_no_nucleo_da_suite`] prendeu.
+fn soltar_da_suite(id: u64) {
+    crate::fios::fixar(id, None);
+}
+
 fn esperar_ate(mut condicao: impl FnMut() -> bool, teto_em_ticks: u64) -> Resultado {
     let limite = crate::tempo::ticks().saturating_add(teto_em_ticks);
     while crate::tempo::ticks() < limite {
@@ -22558,6 +24079,62 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "fios: criacao concorrente",
         f: fios_criacao_concorrente_nao_colide,
+    },
+    Caso {
+        nome: "smp: todos os nucleos ligam",
+        f: smp_todos_os_nucleos_ligam,
+    },
+    Caso {
+        nome: "smp: o relogio anda uma vez por tique",
+        f: smp_o_relogio_anda_uma_vez_por_tique,
+    },
+    Caso {
+        nome: "smp: fio fixo roda no seu nucleo",
+        f: smp_fio_fixo_roda_no_seu_nucleo,
+    },
+    Caso {
+        nome: "smp: um fio nunca roda em dois nucleos",
+        f: smp_um_fio_nunca_roda_em_dois_nucleos,
+    },
+    Caso {
+        nome: "smp: fios efemeros em todos os nucleos",
+        f: smp_fios_efemeros_em_todos_os_nucleos,
+    },
+    Caso {
+        nome: "smp: travas excluem entre nucleos",
+        f: smp_travas_excluem_entre_nucleos,
+    },
+    Caso {
+        nome: "smp: desmapear do kernel vale em todo nucleo",
+        f: smp_desmapear_do_kernel_vale_em_todos_os_nucleos,
+    },
+    Caso {
+        nome: "smp: copia na escrita em dois nucleos",
+        f: smp_copia_na_escrita_em_dois_nucleos,
+    },
+    Caso {
+        nome: "smp: a cota de processos vale entre nucleos",
+        f: smp_a_cota_de_processos_vale_entre_nucleos,
+    },
+    Caso {
+        nome: "smp: o coletor nao fecha o console do dono seguinte",
+        f: smp_o_coletor_nao_fecha_o_console_do_dono_seguinte,
+    },
+    Caso {
+        nome: "smp: o login nao entra no console reaberto",
+        f: smp_o_login_nao_entra_no_console_reaberto,
+    },
+    Caso {
+        nome: "smp: o relogio de parede lido em todos os nucleos",
+        f: smp_o_relogio_de_parede_lido_em_todos_os_nucleos,
+    },
+    Caso {
+        nome: "smp: a autoridade do comando nao vaza para outro fio",
+        f: smp_autoridade_do_comando_nao_vaza_para_outro_fio,
+    },
+    Caso {
+        nome: "smp: nucleo travado nao para os outros",
+        f: smp_nucleo_travado_nao_para_os_outros,
     },
     Caso {
         nome: "memoria: espacos isolam o mesmo endereco",

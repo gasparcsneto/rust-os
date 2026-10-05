@@ -39,8 +39,8 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use crate::trava::Mutex;
 use protocolo::usuario::evento::Evento;
-use spin::Mutex;
 
 /// Quantos canais podem existir ao mesmo tempo.
 pub const CANAIS: usize = 8;

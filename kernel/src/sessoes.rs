@@ -10,8 +10,8 @@
 use alloc::string::String;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use crate::trava::Mutex;
 use sigilo::{TAM_CHAVE, Transporte};
-use spin::Mutex;
 
 /// Quantas portas de agente há.
 pub const PORTAS: usize = crate::virtio::console::PORTAS as usize;

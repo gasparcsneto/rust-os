@@ -190,6 +190,14 @@ pub unsafe fn trocar_no_quadro(quadro: &mut Quadro) {
             super::mmu::trocar_espaco(troca.espaco);
         }
     }
+
+    // O quadro do que saiu já está guardado no contexto dele, e o do que
+    // entra já está no lugar: a troca terminou, e o que saiu pode ser
+    // retomado por outro núcleo. Aqui o aviso vem do próprio handler, e não
+    // de um trampolim como no x86, porque a troca inteira acontece dentro
+    // dele — um fio novo ou um filho de `fork` entram pelo `eret`, já
+    // depois desta linha.
+    crate::fios::troca_concluida();
 }
 
 /// Cede a CPU ao próximo fio pronto.

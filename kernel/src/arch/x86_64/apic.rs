@@ -59,6 +59,14 @@ register_structs! {
         /// Vetor espúrio e o bit que liga o APIC por software.
         (0x0F0 => svr: ReadWrite<u32>),
         (0x0F4 => _reservado5),
+        /// Comando de interrupção, metade baixa: o que mandar e como.
+        /// Escrever aqui **envia** — por isso a metade alta vem antes.
+        (0x300 => icr_baixo: ReadWrite<u32>),
+        (0x304 => _reservado_icr0),
+        /// Comando de interrupção, metade alta: para qual APIC, no byte de
+        /// cima.
+        (0x310 => icr_alto: ReadWrite<u32>),
+        (0x314 => _reservado_icr1),
         /// Como o timer interrompe: vetor, máscara e modo.
         (0x320 => lvt_timer: ReadWrite<u32>),
         (0x324 => _reservado6),
@@ -98,6 +106,11 @@ pub const VETOR_TIMER: u8 = 48;
 /// sequer sinalizar fim de interrupção.
 pub const VETOR_ESPURIO: u8 = 255;
 
+/// Vetor do cutucão: a interrupção que um núcleo manda a outro só para
+/// acordá-lo — ver [`crate::nucleos::cutucar`]. Não carrega pedido nenhum: o
+/// núcleo acordado volta do `hlt`, e é o código dele que confere o que mudou.
+pub const VETOR_CUTUCAO: u8 = 240;
+
 /// Bit que liga o APIC por software, no registrador de vetor espúrio.
 const SVR_HABILITADO: u32 = 1 << 8;
 
@@ -129,6 +142,15 @@ static BASE: AtomicU64 = AtomicU64::new(0);
 /// pedido, e um log dizendo "100 Hz" com toda a convicção, porque a conta
 /// `frequencia / contagem` é autoconsistente sobre a premissa errada.
 static FREQUENCIA_DO_CONTADOR: AtomicU32 = AtomicU32::new(0);
+
+/// A contagem inicial com que o timer foi programado no primeiro núcleo.
+///
+/// Os outros núcleos repetem esta, sem calibrar de novo: a calibração mede o
+/// contador contra o PIT, e o PIT é **um** só — calibrar em dois núcleos ao
+/// mesmo tempo seria disputar o mesmo relógio de referência, e calibrar
+/// depois que ele foi mascarado seria medir contra nada. Os contadores de
+/// todos os núcleos andam na frequência do mesmo barramento.
+static CONTAGEM: AtomicU32 = AtomicU32::new(0);
 
 /// Os registradores, se o APIC já foi mapeado.
 fn lapic() -> Option<&'static Lapic> {
@@ -423,6 +445,9 @@ pub unsafe fn init(hz: u32) -> Option<u32> {
         return None;
     }
 
+    // Só depois da conferência: um núcleo secundário repete esta contagem, e
+    // ela precisa ser uma que se provou certa.
+    CONTAGEM.store(contagem, Ordering::Release);
     Some(efetiva)
 }
 
@@ -454,4 +479,152 @@ pub fn frequencia_do_barramento() -> u64 {
 /// O identificador deste núcleo, se houver APIC.
 pub fn id_do_nucleo() -> Option<u32> {
     lapic().map(|lapic| lapic.id.get() >> 24)
+}
+
+/// O id de APIC deste núcleo, segundo o `cpuid`.
+///
+/// É o mesmo número que o registrador de id do APIC traz, mas não depende de
+/// o APIC já estar mapeado — serve ao primeiro núcleo no começo do boot,
+/// antes da paginação.
+pub fn id_inicial() -> u32 {
+    core::arch::x86_64::__cpuid(1).ebx >> 24
+}
+
+/// O APIC local está mapeado e o timer dele foi programado?
+///
+/// Sem ele não há como mandar sinal a outro núcleo, nem timer por núcleo —
+/// e então não há vários núcleos.
+pub fn pronto() -> bool {
+    lapic().is_some() && CONTAGEM.load(Ordering::Acquire) != 0
+}
+
+/// Modos de entrega do comando de interrupção, nos bits 8 a 10.
+const ENTREGA_NMI: u32 = 0b100 << 8;
+const ENTREGA_INIT: u32 = 0b101 << 8;
+const ENTREGA_PARTIDA: u32 = 0b110 << 8;
+/// O comando ainda está sendo entregue (somente leitura).
+const ENTREGA_PENDENTE: u32 = 1 << 12;
+/// Nível afirmado, e disparo por nível — o que o INIT pede.
+const NIVEL_AFIRMADO: u32 = 1 << 14;
+const DISPARO_POR_NIVEL: u32 = 1 << 15;
+
+/// Manda um comando de interrupção ao APIC de id `destino`, e espera o APIC
+/// local dizer que entregou.
+///
+/// # Por que esperar
+///
+/// Porque o registrador é um só, e escrever o próximo comando com o anterior
+/// ainda pendente o descarta sem aviso. A espera tem teto pelo mesmo motivo
+/// de toda espera por hardware neste kernel: um APIC que não entrega não pode
+/// travar quem pediu.
+///
+/// # Por que mascarado
+///
+/// Porque o comando é escrito em duas metades — o destino primeiro, o resto
+/// depois —, e as duas são registradores **deste** núcleo. Uma interrupção
+/// entre as duas escritas cujo handler também mandasse um comando (um
+/// despertar vindo do timer, por exemplo) escreveria o destino dela por cima
+/// do nosso, e a nossa segunda metade sairia para o núcleo errado. Com um
+/// núcleo só nada mandava comandos; agora tudo manda.
+fn comandar(destino: u32, comando: u32) -> Result<(), &'static str> {
+    const VOLTAS: u32 = 1_000_000;
+    let lapic = lapic().ok_or("sem APIC local")?;
+    crate::arch::sem_interrupcoes(|| {
+        lapic.icr_alto.set(destino << 24);
+        lapic.icr_baixo.set(comando);
+        for _ in 0..VOLTAS {
+            if lapic.icr_baixo.get() & ENTREGA_PENDENTE == 0 {
+                return Ok(());
+            }
+            core::hint::spin_loop();
+        }
+        Err("o APIC local nao entregou o comando")
+    })
+}
+
+/// Manda o cutucão ao núcleo de APIC `destino` — ver [`VETOR_CUTUCAO`].
+pub fn cutucar(destino: u32) -> Result<(), &'static str> {
+    comandar(destino, VETOR_CUTUCAO as u32)
+}
+
+/// Manda uma NMI ao núcleo de APIC `destino`.
+///
+/// A NMI chega mesmo a um núcleo com as interrupções desligadas — é o único
+/// sinal que chega. É por isso que ela serve para avisar de uma tradução que
+/// morreu e para parar todos no caminho de falha: o núcleo que precisa ouvir
+/// pode estar girando numa trava, mascarado.
+pub fn enviar_nmi(destino: u32) -> Result<(), &'static str> {
+    comandar(destino, ENTREGA_NMI)
+}
+
+/// Acorda o núcleo de APIC `destino` na página `pagina` abaixo de 1 MiB.
+///
+/// A sequência é a que a Intel especifica para acordar um processador de
+/// aplicação: um INIT, que o põe em espera, e dois SIPI — o sinal de partida,
+/// que carrega o número da página onde ele vai começar a executar, em modo
+/// real. O segundo SIPI existe porque o primeiro pode se perder num
+/// processador antigo; num que já acordou, ele é ignorado.
+///
+/// # Safety
+///
+/// `pagina` precisa ser uma página abaixo de 1 MiB com o código de partida
+/// já escrito, e o núcleo precisa ser um que ainda não acordou: um INIT
+/// manda o núcleo de volta ao começo, com o que estiver rodando nele.
+pub unsafe fn acordar(destino: u32, pagina: u64) -> Result<(), &'static str> {
+    if pagina >= 0x10_0000 || !pagina.is_multiple_of(4096) {
+        return Err("a pagina de partida precisa estar abaixo de 1 MiB e alinhada");
+    }
+    let vetor = (pagina >> 12) as u32;
+
+    comandar(destino, ENTREGA_INIT | NIVEL_AFIRMADO | DISPARO_POR_NIVEL)?;
+    esperar_tiques(1);
+    // A metade "desafirmar" do INIT. Processadores modernos a ignoram; os
+    // antigos, de APIC externo, precisam dela para soltar o núcleo.
+    comandar(destino, ENTREGA_INIT | DISPARO_POR_NIVEL)?;
+    esperar_tiques(1);
+
+    for _ in 0..2 {
+        comandar(destino, ENTREGA_PARTIDA | vetor)?;
+        esperar_tiques(1);
+    }
+    Ok(())
+}
+
+/// Espera o relógio andar `quantos` tiques, com as interrupções ligadas.
+///
+/// A especificação pede dez milissegundos depois do INIT e duzentos
+/// microssegundos entre os SIPI. O relógio deste kernel anda de dez em dez
+/// milissegundos, e esperar a mais aqui não custa nada que se perceba — é o
+/// boot, uma vez por núcleo.
+fn esperar_tiques(quantos: u64) {
+    let comeco = crate::tempo::ticks();
+    // O teto é em voltas, e não em tempo: se o relógio parou, a espera
+    // precisa terminar mesmo assim.
+    for _ in 0..100_000_000u64 {
+        if crate::tempo::ticks().wrapping_sub(comeco) > quantos {
+            return;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// Liga o APIC local **deste** núcleo, com o timer na mesma contagem do
+/// primeiro.
+///
+/// # Safety
+///
+/// Precisa rodar no núcleo que acabou de acordar, com as interrupções
+/// mascaradas e a IDT dele carregada: o timer começa a contar aqui.
+pub unsafe fn ligar_neste_nucleo() -> Result<(), &'static str> {
+    let lapic = lapic().ok_or("sem APIC local")?;
+    let contagem = CONTAGEM.load(Ordering::Acquire);
+    if contagem == 0 {
+        return Err("o timer do primeiro nucleo nao foi programado");
+    }
+    lapic.svr.set(SVR_HABILITADO | VETOR_ESPURIO as u32);
+    lapic.tpr.set(0);
+    lapic.divisor.set(DIVISOR_CODIFICADO);
+    lapic.lvt_timer.set(TIMER_PERIODICO | VETOR_TIMER as u32);
+    lapic.contagem_inicial.set(contagem);
+    Ok(())
 }

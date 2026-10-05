@@ -86,6 +86,18 @@ pub fn tick() {
     crate::virtio::teclado::colher();
     crate::virtio::console::colher();
     crate::usb::xhci::colher();
+
+    // E o retângulo do console que ficou sujo porque a trava do compositor
+    // estava na mão de outro: ele esperava a escrita seguinte no console, que
+    // pode não vir — a última linha de um log ficava fora da tela. Com um
+    // núcleo só a trava quase nunca estava tomada; com vários, outro núcleo
+    // compondo é o caso comum. Vazio, isto é uma leitura de atômico.
+    crate::tela::descarregar();
+
+    // E o que outros núcleos compuseram e deixaram para o primeiro levar à
+    // tela — ver `grafico::apresentar_pendente`. Normalmente o cutucão de
+    // quem compôs chega antes; aqui é a rede, para o cutucão que se perder.
+    crate::grafico::apresentar_pendente();
 }
 
 /// Quantas interrupções de timer ocorreram desde o boot.

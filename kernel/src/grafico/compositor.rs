@@ -298,6 +298,15 @@ impl Compositor {
                 ..
             } = &mut *self;
             compor_em(saida, console, camadas, largura, altura, dano);
+            // Compor é escrever no quadro de fundo, que é memória comum, e
+            // qualquer núcleo o faz. Apresentar é levar o quadro ao
+            // dispositivo — e o dispositivo é do primeiro núcleo, como as
+            // interrupções. Ver [`Compositor::apresentar_pendente`].
+            if !crate::nucleos::e_o_primeiro() {
+                self.pendente = dano;
+                crate::nucleos::cutucar(1);
+                return Ok(dano);
+            }
             saida.apresentar(dano)
         };
         match resultado {
@@ -309,6 +318,41 @@ impl Compositor {
                 self.pendente = dano;
                 Err(motivo)
             }
+        }
+    }
+
+    /// Leva ao dispositivo o que foi composto e ainda não foi apresentado.
+    ///
+    /// # Por que a apresentação é do primeiro núcleo
+    ///
+    /// Porque o quadro de fundo é memória comum e o framebuffer não é. Medido
+    /// nesta fase, no emulador da bancada: compor um quadro inteiro no fundo
+    /// custava os mesmos nove milhões de ciclos em qualquer núcleo, e
+    /// **apresentá-lo** custava cerca de um bilhão e duzentos milhões num
+    /// núcleo secundário — cem vezes o do primeiro. Um processo que escrevia
+    /// uma linha por evento num núcleo secundário passou de dez para
+    /// duzentos e oitenta milissegundos por linha, só por causa disso.
+    ///
+    /// A causa é do emulador, mas a decisão não é um remendo para ele: o
+    /// framebuffer é um dispositivo, e neste kernel os dispositivos são do
+    /// primeiro núcleo — as interrupções deles chegam lá, e os comandos do
+    /// `virtio-gpu` esperam resposta lá. Os outros núcleos compõem, que é o
+    /// trabalho de verdade, e deixam o dano pendente; o primeiro o leva,
+    /// cutucado por quem compôs, ou no tique dele se o cutucão se perder.
+    ///
+    /// Num núcleo que não é o primeiro, não faz nada.
+    pub fn apresentar_pendente(&mut self) {
+        if !crate::nucleos::e_o_primeiro() || self.pendente.vazio() {
+            return;
+        }
+        let dano = self.pendente.recortar(self.largura, self.altura);
+        match self.saida.apresentar(dano) {
+            Ok(apresentado) => {
+                self.pendente = Dano::novo(0, 0, 0, 0);
+                super::registrar_atualizacao(apresentado);
+            }
+            // Fica pendente, e vai com a próxima.
+            Err(_) => {}
         }
     }
 

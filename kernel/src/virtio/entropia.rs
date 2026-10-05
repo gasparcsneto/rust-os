@@ -29,7 +29,7 @@
 //! [`crate::aleatorio`], que pede 32 bytes daqui de tempos em tempos e
 //! produz o resto.
 
-use spin::Mutex;
+use crate::trava::Mutex;
 
 use super::fila::Fila;
 use super::transporte::{FABRICANTE, Transporte, VERSAO_1};

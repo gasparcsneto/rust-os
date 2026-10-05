@@ -28,13 +28,13 @@
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use spin::Mutex;
+use crate::trava::Mutex;
 
 use crate::arch::{self, Uart};
 
 /// Saída de texto legível por humanos, quando a plataforma tem uma.
 ///
-/// Usamos [`spin::Mutex`] e não `std::sync::Mutex` por um motivo fundamental:
+/// Usamos [`crate::trava::Mutex`] e não `std::sync::Mutex` por um motivo fundamental:
 /// um mutex normal *bloqueia a thread* quando está travado, e bloquear exige
 /// um scheduler para escolher outra thread. Aqui nós *somos* o scheduler — não
 /// existe para quem ceder. Então giramos em busy-wait até o lock liberar.

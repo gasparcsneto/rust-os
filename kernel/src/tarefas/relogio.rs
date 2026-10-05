@@ -24,7 +24,7 @@ use core::pin::Pin;
 use core::sync::atomic::{AtomicU64, Ordering};
 use core::task::{Context, Poll, Waker};
 
-use spin::Mutex;
+use crate::trava::Mutex;
 
 /// Quantas tarefas podem esperar tempo ao mesmo tempo.
 const MAX_DORMENTES: usize = 16;

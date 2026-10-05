@@ -61,9 +61,9 @@ tipografia = { path = "../tipografia", default-features = false }
 # 24 pixels, como a tipografia.
 aparencia = { path = "../aparencia", default-features = false }
 
-# Primitivas de sincronização baseadas em spinlock. Num kernel não existe
-# scheduler para bloquear uma thread, então `std::sync::Mutex` não se aplica.
-spin = "0.12.3"
+# A exclusão mútua do kernel é a trava própria dele, justa entre núcleos —
+# ver `src/trava.rs` sobre por que não a do `spin`. Do `spin` sobra só o
+# `Once` do backend x86, e por isso ele é dependência só de lá.
 
 # O canal seguro das portas de agente: o Noise, a prova administrativa e o
 # gerador de números aleatórios. Um pacote compartilhado com o cliente, pela
@@ -97,6 +97,8 @@ diario = { path = "../diario" }
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 # Abstrações seguras sobre instruções e estruturas do x86_64.
 x86_64 = "0.15.5"
+# Inicialização única da GDT e da IDT (`spin::once::Once`).
+spin = "0.12.3"
 
 # Driver da UART 16550, acessada por portas de I/O (PIO).
 uart_16550 = "0.8.1"

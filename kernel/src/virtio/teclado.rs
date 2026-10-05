@@ -25,7 +25,7 @@
 //! Também não usa a fila de status, por onde se acenderiam os LEDs de
 //! `caps lock` e companhia. Não há o que acender.
 
-use spin::Mutex;
+use crate::trava::Mutex;
 
 use super::fila::Fila;
 use super::transporte::{FABRICANTE, Transporte, VERSAO_1};

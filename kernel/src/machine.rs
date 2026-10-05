@@ -31,7 +31,7 @@
 //! exceção fatal — que é justamente onde alguém pode estar segurando aquela
 //! trava. A geometria acompanhou os pixels para não haver duas cópias dela.
 
-use spin::Mutex;
+use crate::trava::Mutex;
 
 /// Quantas regiões de memória o kernel consegue registrar.
 ///
