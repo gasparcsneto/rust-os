@@ -1736,9 +1736,25 @@ ponto de não retorno do `executar` (um ilegível recusa a imagem, não vale
 como vazio), e troca junto com o espaço de endereços: a imagem nova nunca
 roda com o manifesto da anterior.
 
-**O que as mutações mostraram.** Cada invariante da interface tem um caso
-que o derruba quando é tirado — ver a tabela em
-[Testes](#testes), "Interface nativa".
+**O que a releitura e as mutações mostraram.** Dezoito mutações dirigidas
+à interface — tirar a recusa do que é de um canal, ignorar o manifesto no
+`pedir` e nas chamadas de sistema, dar tudo a quem não tem manifesto, fazer
+o processo nascer como fio do kernel, não herdar o manifesto no `fork`, não
+trocá-lo no `executar`, dar origem de pessoa ao processo, gastar os nonces
+do agente, um balde só, perder a resposta que não cabe, tratar a
+reexecução como pedido novo, não achar a nota, aceitar o manifesto
+ilegível, não esquecer a janela de nonces, tirar a taxa do programa de uma
+pessoa, deixar a resposta atravessar o `executar`, tirar a taxa do pedido
+quebrado —, e as dezoito reprovadas. Duas só depois de um caso novo: a da
+reexecução passava pela suíte inteira, porque nenhum caso acordava um fio
+no meio de um pedido; e a da recusa de `debug.trigger` derrubava o kernel
+em vez de reprovar o caso, porque o caso pedia a falha `fatal`. A releitura
+achou três defeitos de verdade, corrigidos com o caso que os reprova: a
+resposta não buscada atravessava o `executar` — a imagem nova lia o que só
+a anterior podia pedir —; o programa de uma pessoa pedia sem taxa; e o
+pedido quebrado ia para a auditoria sem passar por balde nenhum. A fumaça
+roda `contido` e `anonimo` no kernel de produção, pela tarefa `programas`
+do executor de verdade — que a suíte não tem —, nas duas arquiteturas.
 
 ## Vários agentes
 
@@ -3880,7 +3896,7 @@ padronizado.
       arquiteturas. O estado global foi auditado com vários núcleos, e o que
       só aparece com eles está em [Vários núcleos](#vários-núcleos).
       **Fase 6 completa.**
-- [ ] **Fase 7 — Interface nativa.** Os programas do Duke são do Duke: não
+- [x] **Fase 7 — Interface nativa.** Os programas do Duke são do Duke: não
       há ABI do Linux, nem camada que imite outro sistema por baixo. Um
       programa fala a língua do sistema — o registro de comandos, o mesmo
       que a pessoa fala pelo interpretador e o agente pelo canal —, pelo
@@ -3888,11 +3904,15 @@ padronizado.
       chamadas de mecanismo (memória, processo, descritores, eventos,
       superfícies) ficam pequenas e binárias; o resto do sistema —
       mensagens, arrendamentos, auditoria, árvore semântica, estado — chega
-      ao programa por uma chamada só, `pedir`. E cada programa declara, no
-      próprio executável, o que pretende fazer: a permissão efetiva é a do
-      papel de quem o lançou **interseção** a do manifesto — um programa
-      nunca tem mais que quem o lançou, e pode ter menos. O desenho está em
-      [`docs/INTERFACE.md`](docs/INTERFACE.md).
+      ao programa por `pedir` e `resposta`, atendido pela tarefa `programas`
+      do executor. Antes de abrir o registro, o comando passou a saber quem
+      o pediu em qualquer fio (a sessão global saiu, a taxa é do principal,
+      a prova administrativa é do canal). E cada programa declara, numa nota
+      do próprio executável, o que pretende fazer: a permissão efetiva é a
+      do papel de quem o lançou **interseção** a do manifesto — um programa
+      nunca tem mais que quem o lançou, e pode ter menos; sem manifesto,
+      nada. Ver [Interface nativa](#interface-nativa) e
+      [`docs/INTERFACE.md`](docs/INTERFACE.md). **Fase 7 completa.**
 - [ ] **Fase 8 — Armazenamento nativo.** Um sistema de arquivos
       log-estruturado próprio, com journaling e `fsync` honesto — exposto
       como capacidades do registro, sob `fs.write` e o alcance de caminho

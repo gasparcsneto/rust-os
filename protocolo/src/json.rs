@@ -522,7 +522,7 @@ impl<'a> Json<'a> {
     /// Este valor é um número JSON bem formado?
     ///
     /// Vale a pergunta porque a varredura não sabe responder: para qualquer
-    /// coisa que não comece com `"`, `{` ou `[`, [`pular_valor`] só anda até
+    /// coisa que não comece com `"`, `{` ou `[`, `pular_valor` só anda até
     /// o próximo delimitador e devolve o que houver antes. `abc`, `@#$` e
     /// `1e` chegam de lá com a mesma cara de um número.
     ///

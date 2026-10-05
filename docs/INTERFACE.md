@@ -284,4 +284,4 @@ manifesto da 7 já é.
 | 7.1 | contexto do comando por fio; principal derivado da autoridade; fim da sessão global | feito |
 | 7.2 | `pedir`/`resposta`, `Chamador::Processo`, taxa por principal, runtime e programa nativo; o JSON em `protocolo::json`, um só para o kernel e os programas; o Terminal só confirma com o Enter da pessoa ou de um agente | feito |
 | 7.3 | manifesto e identidade de programa (nota ELF, `programas::manifesto!`, `politica::manifesto`); permissão efetiva por interseção em `autorizar` e `autorizar_processo`; o programa na auditoria; `xtask elf` exige o manifesto | feito |
-| 7.4 | mutações, matriz, fumaça, documentação | — |
+| 7.4 | o que a releitura achou (a resposta que passava pelo `executar`, a taxa do programa de uma pessoa, o pedido quebrado sem taxa, o fio acordado no meio de um pedido), mutações, fumaça pelo executor de verdade, documentação | feito |
