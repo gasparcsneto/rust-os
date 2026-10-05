@@ -20125,6 +20125,7 @@ fn smp_copia_na_escrita_em_dois_nucleos() -> Resultado {
         }
     }
     unsafe fn conferir_em(raiz: u64, marca: u64) -> bool {
+        // SAFETY: a mesma de `escrever_em`, acima.
         unsafe {
             arch::trocar_espaco(raiz);
             let certo = (0..PAGINAS).all(|i| {

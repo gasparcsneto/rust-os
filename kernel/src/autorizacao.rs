@@ -757,8 +757,8 @@ impl Autorizado {
     /// Executa o comando com a autoridade de quem pediu — que `user.run`,
     /// por exemplo, grava no processo que lança.
     pub fn executar(self, params: Json, w: &mut JsonWriter) -> fmt::Result {
-        let handler = self.comando.handler;
-        como_comando(self.autoridade, self.destino, || handler(params, w))
+        let (autoridade, destino) = (self.autoridade, self.destino);
+        como_comando(autoridade, destino, || (self.comando.handler)(params, w))
     }
 }
 

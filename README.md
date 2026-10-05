@@ -246,6 +246,8 @@ kernel/src/
 ├── particoes.rs     a tabela de partições GPT do disco: ESP, raiz e a de estado
 ├── rede.rs          o mínimo de protocolo acima do transporte de quadros
 ├── traps.rs         contabilidade de exceções e modo post-mortem
+├── nucleos.rs       os vários núcleos: quem ligou, o pulso de cada um, o aviso e o travamento de propósito
+├── trava.rs         a trava justa, por senha, que todo o kernel usa
 ├── irq.rs           contadores de interrupções de hardware
 ├── tempo.rs         contagem de tempo desde o boot
 ├── relogio.rs       o relógio de parede: o RTC (CMOS no x86, PL031 no ARM)
@@ -316,7 +318,9 @@ kernel/src/
     ├── mod.rs        seleção da arquitetura em tempo de compilação
     ├── x86_64/
     │   ├── mod.rs    entrada pelo iniciador UEFI, CPUID, portas de I/O
-    │   ├── gdt.rs    GDT, TSS e pilha dedicada ao double fault
+    │   ├── gdt.rs    GDT, um TSS por núcleo e as pilhas de emergência
+    │   ├── acpi.rs   as tabelas da ACPI: a MADT, que lista os núcleos
+    │   ├── smp.rs    a partida dos outros núcleos, o descarte de tradução e a parada, por NMI
     │   ├── idt.rs    IDT e handlers de exceção e interrupção
     │   ├── mouse.rs  o mouse PS/2, pela porta auxiliar do 8042
     │   ├── pic.rs    controlador 8259 e timer PIT
@@ -329,7 +333,8 @@ kernel/src/
     └── aarch64/
         ├── mod.rs      boot em assembly, cabeçalho de imagem arm64, MIDR_EL1
         ├── vetores.rs  tabela de vetores de exceção (VBAR_EL1)
-        ├── gic.rs      GIC v2 e timer genérico do ARM
+        ├── gic.rs      GIC v2, timer genérico e os avisos entre núcleos (SGI)
+        ├── smp.rs      a partida dos outros núcleos pelo PSCI, e a parada
         ├── mmu.rs      tabelas de tradução e ativação da MMU
         ├── contexto.rs troca de contexto
         ├── usuario.rs  entrada em EL0 e chamadas de sistema
