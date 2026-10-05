@@ -443,6 +443,7 @@ programas/           os programas de usuário, compilados à parte do kernel
         ├── nativo.rs     um programa nativo: confere de dentro o que a interface nativa promete
         ├── contido.rs    declara só `system.read`, e confere que o manifesto limita o resto
         ├── anonimo.rs    o único sem manifesto: não exerce nada, nem lançado pelo sistema
+        ├── legado.rs     pede, não busca a resposta e troca de imagem: a nova não a encontra
         └── terminal.rs   o Terminal: o interpretador numa janela, pelo pseudo-terminal
 
 xtask/src/
@@ -911,9 +912,11 @@ $ cargo xtask agent log.tail '{"count":3}'
 ... info  "usuario" "processo encerrou com codigo 42"
 ```
 
-As chamadas de sistema são dezesseis: `sair`, `escrever`, `id`, `ceder`,
+As chamadas de sistema são dezenove: `sair`, `escrever`, `id`, `ceder`,
 `bifurcar`, `executar`, `abrir`, `ler`, `fechar`, `esperar`, `mapear`,
-`escutar`, `superficie`, `controlar`, `descrever` e `terminal`. Os
+`escutar`, `superficie`, `controlar`, `descrever`, `terminal`, `valor` — e
+`pedir` e `resposta`, que abrem o resto do sistema ao programa (ver
+[Interface nativa](#interface-nativa)). Os
 números, os erros e o mapa do espaço do usuário moram em
 `protocolo::usuario`, que o kernel e os programas incluem — uma declaração
 só, pelo motivo de sempre: duas iguais são duas que podem divergir, e um
@@ -1673,6 +1676,69 @@ falha, ou sendo arrancado quando a vaga dele é reaproveitada — e o caminho
 que se esquece de chamar `destruir` vaza tabelas até a memória acabar. Há um
 caso de teste que dá dez voltas de criar-mapear-destruir e exige que o
 alocador de frames volte ao número exato de antes.
+
+## Interface nativa
+
+O Duke não imita outro sistema. Um programa do Duke fala a língua do
+sistema — o registro de comandos, o mesmo que a pessoa fala pelo
+interpretador e o agente pelo canal —, pelo mesmo ponto de decisão, com a
+autoridade de quem o lançou, na mesma auditoria. Não há números de chamada
+do Linux, nem `errno`, nem `/proc`, nem tradutor. O desenho inteiro, com o
+que a análise encontrou no caminho, está em
+[`docs/INTERFACE.md`](docs/INTERFACE.md).
+
+**Duas camadas.** As chamadas de mecanismo — memória, processo,
+descritores, eventos, superfícies — continuam pequenas e binárias. O resto —
+mensagens, arrendamentos, auditoria, árvore semântica, estado — chega por
+uma chamada só: `pedir` leva um pedido JSON-RPC ao registro, e `resposta`
+busca o envelope, que é o do canal, com o mesmo código de recusa. O JSON é
+um só, em `protocolo::json`, para o kernel e para os programas; o cliente
+tipado é `programas::nativo`:
+
+```rust
+let r = programas::nativo::pedir("message.send", |w| {
+    w.field_str("to", "serial")?;
+    w.field_str("body", "oi")?;
+    w.field_u64("nonce", 1)
+})?;
+```
+
+**O comando não roda na chamada de sistema.** A chamada roda com as
+interrupções mascaradas — e, no ARM, na pilha de exceção do núcleo —, e um
+handler do registro pode ir ao disco e ao TPM. Então `pedir` deixa o pedido
+no fio e o põe a esperar; a tarefa `programas` do executor o atende, onde os
+comandos sempre rodaram, e acorda o fio com a resposta. A resposta fica no
+fio até ser buscada: o comando já teve efeito, e ela pode não caber no
+buffer do programa.
+
+**Quem pediu e por quem.** O gate decide um pedido de processo como
+`Chamador::Processo`: a autoridade é a de quem o lançou, procurada a cada
+decisão (uma pessoa que sai leva o processo junto), e a auditoria diz
+"pelo processo N (nome resumo)". O que é de um canal — a prova
+administrativa e `debug.trigger` — é recusado a um processo. Um processo não
+age na interface (`ui.act`): a origem de uma ação diz ao dono do campo quem
+agiu, e um processo com a origem de quem o lançou confirmaria em nome dele
+uma linha que ele não viu. As mensagens de um processo saem da caixa de quem
+o lançou, mas contam os nonces na janela do processo. A taxa é do principal
+— a chave do agente —, e não da vaga da sessão.
+
+**O manifesto.** Cada executável declara, numa nota ELF, quem é e o que
+pretende exercer:
+
+```rust
+programas::manifesto!("visualizador", "fs.read", "system.read");
+```
+
+A permissão efetiva do processo é o papel de quem o lançou **interseção** o
+manifesto: um programa nunca tem mais que quem o lançou, e pode ter menos.
+Sem manifesto, nada — nem lançado pelo sistema. O manifesto é lido antes do
+ponto de não retorno do `executar` (um ilegível recusa a imagem, não vale
+como vazio), e troca junto com o espaço de endereços: a imagem nova nunca
+roda com o manifesto da anterior.
+
+**O que as mutações mostraram.** Cada invariante da interface tem um caso
+que o derruba quando é tirado — ver a tabela em
+[Testes](#testes), "Interface nativa".
 
 ## Vários agentes
 

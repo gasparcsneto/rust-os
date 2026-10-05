@@ -5807,6 +5807,7 @@ fn conversar(
     sob_mouse(qmp, teclado, &mut escrita, &mut leitor)?;
     sob_janelas(qmp, &mut escrita, &mut leitor)?;
     sob_formulario(arch, monitor, qmp, &mut escrita, &mut leitor)?;
+    sob_interface_nativa(arch, &mut escrita, &mut leitor)?;
     sob_agentes(arch)?;
     sob_sigilo(arch)?;
     sob_administracao(arch, &mut escrita, &mut leitor)?;
@@ -8725,6 +8726,87 @@ fn sob_formulario(
         "o clique na caixa de fechar nao fechou o formulario",
     )?;
     println!("  [formulario] ok  fechado pela caixa, pelo mouse");
+    Ok(())
+}
+
+/// A interface nativa no kernel de produção: o pedido de um programa vai à
+/// tarefa `programas` do executor — que a suíte não tem: lá quem espera um
+/// processo o atende —, e a tarefa acorda o processo com a resposta.
+///
+/// `contido` declara só `system.read` e confere de dentro que o resto é
+/// recusado; `anonimo`, sem manifesto, que nada passa. Lançados pela serial,
+/// que é do papel `sistema`: o que os recusa é o manifesto, e não o papel.
+fn sob_interface_nativa(
+    arch: Arquitetura,
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+) -> Result<(), String> {
+    println!("[xtask] fumaça: a interface nativa, pelo executor de verdade");
+    let mut id = 8700;
+    let mut pedir = |metodo: &str, params: &str| -> Result<String, String> {
+        id += 1;
+        escrita
+            .write_all(
+                format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"{metodo}","params":{params}}}"#)
+                    .as_bytes(),
+            )
+            .and_then(|()| escrita.write_all(b"\n"))
+            .and_then(|()| escrita.flush())
+            .map_err(|e| format!("nativo: falha ao pedir `{metodo}`: {e}"))?;
+        let resposta = ler_resposta(leitor).map_err(|e| format!("nativo: {e}"))?;
+        if !e_a_resposta(&resposta, id) {
+            return Err(format!(
+                "nativo: veio a resposta de outro pedido\n  {resposta}"
+            ));
+        }
+        Ok(resposta)
+    };
+    let pedidos = |r: &str| -> u64 {
+        r.split(r#""native_requests":"#)
+            .nth(1)
+            .and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next())
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0)
+    };
+    let antes = pedidos(&pedir("user.stats", "{}")?);
+    for (programa, codigo) in [("contido", 75), ("anonimo", 76)] {
+        let lancado = pedir(
+            "user.run",
+            &format!(r#"{{"path":"/programas/{}/{programa}"}}"#, arch.nome()),
+        )?;
+        if !lancado.contains(r#""launched":true"#) {
+            return Err(format!(
+                "nativo: o user.run nao lancou {programa}\n  {lancado}"
+            ));
+        }
+        let procurada = format!("processo encerrou com codigo {codigo}");
+        let limite = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let log = pedir("log.tail", r#"{"count":32}"#)?;
+            if log.contains(&procurada) {
+                break;
+            }
+            if std::time::Instant::now() >= limite {
+                return Err(format!(
+                    "nativo: {programa} nao saiu com {codigo} — o executor nao atendeu, ou o manifesto nao valeu\n  {log}"
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(150));
+        }
+        println!("  [nativo] ok  {programa} saiu com {codigo}");
+    }
+    let depois = pedidos(&pedir("user.stats", "{}")?);
+    // `contido`: system.info e message.send; `anonimo`: system.info.
+    if depois < antes + 3 {
+        return Err(format!(
+            "nativo: o executor atendeu {} pedidos dos programas, e eram 3",
+            depois - antes
+        ));
+    }
+    println!(
+        "  [nativo] ok  {} pedidos atendidos pela tarefa `programas`",
+        depois - antes
+    );
     Ok(())
 }
 

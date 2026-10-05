@@ -255,7 +255,8 @@ pub fn carregar(imagem: &[u8]) -> Result<Programa, Falha> {
     let raiz = espaco.raiz();
     // O espaço e o programa trocam juntos: a imagem nova nunca roda com o
     // manifesto da anterior, nem a anterior com o da nova.
-    let anterior = crate::fios::adotar_imagem(espaco, programa);
+    let (anterior, resposta_da_anterior) = crate::fios::adotar_imagem(espaco, programa);
+    drop(resposta_da_anterior);
 
     // SAFETY: a raiz saiu de `Espaco::novo`, que copia as entradas de topo do
     // kernel — então o código que executa esta linha e a pilha deste fio

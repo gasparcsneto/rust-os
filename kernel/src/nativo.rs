@@ -281,3 +281,33 @@ pub fn responder_de_teste(chamador: Chamador, linha: &str) -> alloc::string::Str
 pub fn enfileirar_de_teste(id: u64) -> bool {
     FILA.enfileirar(id).is_ok()
 }
+
+/// Quantos fios estão na fila — para a suíte conferir que um pedido não
+/// entra duas vezes.
+#[cfg(feature = "modo-teste")]
+pub fn pendentes_de_teste() -> usize {
+    FILA.ocupacao()
+}
+
+/// Toma o próximo pedido da fila como o executor tomaria, sem atendê-lo: o
+/// fio, o texto e o chamador. O pedido fica em curso até
+/// [`responder_tomado_de_teste`].
+#[cfg(feature = "modo-teste")]
+pub fn tomar_de_teste() -> Option<(u64, Texto, Chamador)> {
+    let id = FILA.desenfileirar()?;
+    let (texto, autoridade, programa) = crate::fios::tomar_pedido(id)?;
+    let chamador = Chamador::Processo {
+        fio: id,
+        autoridade,
+        programa,
+    };
+    Some((id, texto, chamador))
+}
+
+/// Atende o pedido tomado por [`tomar_de_teste`] e entrega a resposta.
+/// Falso se o fio não a recebeu — não estava mais esperando por ela.
+#[cfg(feature = "modo-teste")]
+pub fn responder_tomado_de_teste(id: u64, texto: &Texto, chamador: Chamador) -> bool {
+    let resposta = responder_como(chamador, texto.como_bytes());
+    crate::fios::responder_pedido(id, resposta).is_none()
+}

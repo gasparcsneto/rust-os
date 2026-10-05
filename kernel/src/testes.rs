@@ -16315,8 +16315,7 @@ fn auditoria_a_decisao_nunca_vai_antes() -> Resultado {
     let resultado = (|| -> Resultado {
         let muitos = || {
             for i in 0..200u64 {
-                crate::autorizacao::auditar_invalido(
-                    crate::autorizacao::Chamador::Sessao(0),
+                crate::autorizacao::auditar_enchimento_de_teste(
                     "teste.antes",
                     &i.to_le_bytes(),
                     "um registro antes da decisao",
@@ -16324,12 +16323,7 @@ fn auditoria_a_decisao_nunca_vai_antes() -> Resultado {
             }
         };
         let decisao = || {
-            crate::autorizacao::auditar_invalido(
-                crate::autorizacao::Chamador::Sessao(0),
-                "teste.decisao",
-                &[],
-                "a decisao",
-            );
+            crate::autorizacao::auditar_enchimento_de_teste("teste.decisao", &[], "a decisao");
             ultimo_registro().map_or(0, |r| r.seq)
         };
         let leva = |r: &diario::Registro, seq: u64| -> Result<bool, &'static str> {
@@ -16400,8 +16394,7 @@ fn auditoria_a_lacuna() -> Resultado {
         let primeira = gravada + 1;
         let mut ultima = 0;
         for i in 0..capacidade + 40 {
-            crate::autorizacao::auditar_invalido(
-                crate::autorizacao::Chamador::Sessao(0),
+            crate::autorizacao::auditar_enchimento_de_teste(
                 "teste.lacuna",
                 &i.to_le_bytes(),
                 "um registro de muitos",
@@ -23728,8 +23721,11 @@ fn nativo_o_processo_decide_como_quem_o_lancou() -> Resultado {
             autoridade: Autoridade::Sistema,
             programa: Programa::Kernel,
         };
+        // `breakpoint`, e não `fatal`: se a recusa sumir, o caso reprova aqui,
+        // em vez de o kernel inteiro morrer no pedido seguinte — medido, a
+        // mutação que tira a recusa com `fatal` parou a suíte em post-mortem.
         for (metodo, params) in [
-            ("debug.trigger", r#"{"kind":"fatal"}"#),
+            ("debug.trigger", r#"{"kind":"breakpoint"}"#),
             ("admin.challenge", "{}"),
             (
                 "admin.execute",
@@ -23750,12 +23746,6 @@ fn nativo_o_processo_decide_como_quem_o_lancou() -> Resultado {
                 return Err("a recusa de canal nao foi gravada como do processo");
             }
         }
-        // Nada ficou armado: um `debug.trigger` aceito agendaria a falha
-        // para o próximo pedido de um agente.
-        if crate::agent::falha_agendada_de_teste() {
-            return Err("o debug.trigger do processo armou uma falha");
-        }
-
         // A pessoa saiu: o processo dela não pede mais nada.
         crate::pessoas::revogar_sessao(sessao).map_err(|_| "a revogacao falhou")?;
         let r = crate::nativo::responder_de_teste(pelo_processo, &pedido_rpc("system.info", "{}"));
@@ -23783,6 +23773,7 @@ fn nativo_a_taxa_e_de_quem_pede() -> Resultado {
     use crate::autorizacao::{Autoridade, Chamador, Programa};
     let texto = politica::PADRAO.replace("taxa observador 20 40", "taxa observador 1 3");
     let apertada = politica::Politica::ler(&texto).map_err(|_| "a politica do caso nao vale")?;
+    crate::pessoas::esquecer_registradas();
     let resultado = com_agentes_de_teste(|| {
         let (mut agente, mut sessao) = conectado(1)?;
         for p in [1, 2] {
@@ -23828,8 +23819,47 @@ fn nativo_a_taxa_e_de_quem_pede() -> Resultado {
             crate::log_error!("teste", "{}", r);
             return Err("outro principal na vaga encheu o balde do primeiro");
         }
+
+        // Uma pessoa não tem taxa no que pede por si; o programa dela, sim:
+        // pede na velocidade de uma máquina, e cada pedido vai à auditoria.
+        let sessao =
+            crate::pessoas::sessao_de_teste(crate::pessoas::Console::Fisico, "dora", "observador");
+        let pela_pessoa = Chamador::Pessoa(sessao);
+        let do_programa_dela = Chamador::Processo {
+            fio: 7_000_004,
+            autoridade: Autoridade::Pessoa { sessao },
+            programa: Programa::Kernel,
+        };
+        for _ in 0..5 {
+            let r = crate::nativo::responder_de_teste(pela_pessoa, &ping);
+            if decisao_do_envelope(&r) != "ALLOW" {
+                crate::log_error!("teste", "{}", r);
+                return Err("a pessoa ganhou uma taxa no que pede por si");
+            }
+        }
+        let decisoes: alloc::vec::Vec<_> = (0..4)
+            .map(|_| {
+                decisao_do_envelope(&crate::nativo::responder_de_teste(do_programa_dela, &ping))
+            })
+            .collect();
+        if decisoes[..3].iter().any(|d| d != "ALLOW") || decisoes[3] != "RATE_LIMIT" {
+            crate::log_error!("teste", "{:?}", decisoes);
+            return Err("o programa de uma pessoa pediu sem taxa");
+        }
+        // E o pedido quebrado também passa pela taxa: com o balde vazio, o
+        // lixo não vai para a auditoria — a recusa por taxa já foi gravada.
+        let ultimo =
+            || crate::autorizacao::com_auditoria(|c| c.ultimos(1).next().map(|r| r.seq)).flatten();
+        let antes = ultimo();
+        for _ in 0..8 {
+            crate::nativo::responder_de_teste(do_programa_dela, "isto nao e json");
+        }
+        if ultimo() != antes {
+            return Err("o lixo de um programa foi para a auditoria sem taxa");
+        }
         Ok(())
     });
+    crate::pessoas::esquecer_registradas();
     crate::autorizacao::carregar();
     resultado
 }
@@ -24140,6 +24170,11 @@ fn manifesto_o_programa_e_contido() -> Resultado {
     rodar_programa("anonimo", None, 76)
         .map(drop)
         .map_err(|_| "o programa sem manifesto exerceu algo")?;
+    // A resposta que uma imagem não buscou não passa para a seguinte: o
+    // `legado` pede e executa o `anonimo`, que confere que nada o espera.
+    rodar_programa("legado", None, 76)
+        .map(drop)
+        .map_err(|_| "a imagem nova encontrou a resposta da anterior")?;
     Ok(())
 }
 
@@ -24230,6 +24265,67 @@ fn manifesto_adulterado_recusa_a_carga() -> Resultado {
         return Err("a imagem com o manifesto adulterado foi carregada");
     }
     Ok(())
+}
+
+/// Um fio acordado à toa, com o pedido dele em curso, volta a esperar o
+/// **mesmo** pedido: não pede de novo, e a resposta do que estava em curso
+/// chega a ele.
+///
+/// # O que este caso protege
+///
+/// O fio que pede espera como qualquer outro, e qualquer um pode acordá-lo
+/// — um evento num canal que ele escuta, um filho que sai. Acordado, ele
+/// reexecuta `pedir`, e é `fios::retomar_pedido` que diz que o pedido está
+/// em curso. Se ela tratasse a reexecução como pedido novo, o fio poria o
+/// pedido de novo na fila por cima do que o executor está atendendo: a
+/// resposta do primeiro se perderia, e o comando rodaria duas vezes.
+/// Nenhum outro caso acorda um fio no meio de um pedido — medido: a
+/// mutação que faz isso passava pela suíte inteira.
+fn nativo_o_fio_acordado_espera_o_mesmo_pedido() -> Resultado {
+    // Espera sem atender: aqui é o caso que faz o papel do executor.
+    let ate = |condicao: &dyn Fn() -> bool, teto: u64| -> Resultado {
+        let limite = crate::tempo::ticks().saturating_add(teto);
+        while !condicao() {
+            if crate::tempo::ticks() >= limite {
+                return Err("a condicao nao se cumpriu dentro do teto de tempo");
+            }
+            core::hint::spin_loop();
+        }
+        Ok(())
+    };
+    let dir = crate::usuario::DIRETORIO_DOS_COMPILADOS;
+    let procurada = "processo encerrou com codigo 75";
+    let desde = crate::log::total_emitidos();
+    let id = crate::usuario::lancar(Some(&alloc::format!("{dir}/contido")))?;
+    // O primeiro pedido dele na fila, e tomado como o executor o toma.
+    ate(&|| crate::nativo::pendentes_de_teste() > 0, 600).map_err(|_| "o programa nao pediu")?;
+    let (fio, texto, chamador) =
+        crate::nativo::tomar_de_teste().ok_or("o pedido nao estava na fila")?;
+    if fio != id {
+        return Err("o pedido na fila era de outro fio");
+    }
+    // Acordado à toa, com o comando em curso: volta a esperar.
+    crate::fios::acordar(fio);
+    ate(&|| crate::fios::esperando_de_teste(fio), 300)
+        .map_err(|_| "o fio acordado nao voltou a esperar")?;
+    if crate::nativo::pendentes_de_teste() != 0 {
+        return Err("o fio acordado pediu de novo o que estava em curso");
+    }
+    if !crate::nativo::responder_tomado_de_teste(fio, &texto, chamador) {
+        return Err("a resposta do pedido em curso nao chegou ao fio");
+    }
+    // O resto, como sempre.
+    esperar_ate(
+        || {
+            let mut achou = false;
+            crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+                achou |= r.seq >= desde && r.subsistema == "usuario" && r.mensagem() == procurada;
+            });
+            achou
+        },
+        600,
+    )
+    .map_err(|_| "o programa nao terminou como devia depois de acordado")
 }
 
 fn esperar_ate(mut condicao: impl FnMut() -> bool, teto_em_ticks: u64) -> Resultado {
@@ -25227,6 +25323,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "nativo: a fila larga o fio que se foi",
         f: nativo_a_fila_larga_o_fio_que_se_foi,
+    },
+    Caso {
+        nome: "nativo: o fio acordado espera o mesmo pedido",
+        f: nativo_o_fio_acordado_espera_o_mesmo_pedido,
     },
     Caso {
         nome: "nativo: o programa pede pelo mesmo gate",

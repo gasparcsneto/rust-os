@@ -77,7 +77,9 @@ fn principal() -> i64 {
     for (metodo, falha) in [("admin.challenge", 3), ("debug.trigger", 4)] {
         let Ok(r) = nativo::pedir(metodo, |w| {
             if metodo == "debug.trigger" {
-                w.field_str("kind", "fatal")?;
+                // `breakpoint`: se a recusa sumir, o programa reprova, e o
+                // kernel continua de pé para dizer.
+                w.field_str("kind", "breakpoint")?;
             }
             Ok(())
         }) else {

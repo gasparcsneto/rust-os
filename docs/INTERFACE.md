@@ -162,8 +162,22 @@ O balde deixa de ser da vaga de sessão e passa a ser de quem responde pelo
 pedido: a chave do agente, a serial. Um agente e os processos que ele
 lançou gastam do mesmo balde — lançar um processo não multiplica a taxa —,
 e um processo de um agente que desconectou não esvazia nem enche o balde
-de quem está agora naquela porta. Pessoas e o sistema continuam sem taxa,
-como hoje.
+de quem está agora naquela porta.
+
+Uma pessoa e o sistema continuam sem taxa no que pedem **por si**: ninguém
+digita na velocidade de uma máquina. Mas o programa de uma pessoa pede
+nessa velocidade, e cada decisão vai para a auditoria e para o journal —
+então os processos de uma pessoa gastam o balde da sessão dela, e os do
+sistema, o do sistema, com a taxa do papel. Encontrado relendo a 7.2:
+como estava, um programa lançado por uma pessoa enchia a auditoria sem
+limite.
+
+O pedido quebrado — JSON inválido, método desconhecido, parâmetro errado —
+passa pela mesma taxa antes de ir para a auditoria: custa o mesmo trabalho
+e o mesmo registro. Antes ele ia direto, e um programa mandando lixo na
+velocidade de uma máquina enchia a auditoria e o journal sem passar por
+balde nenhum. Vale também para o canal do agente, onde o mesmo buraco
+existia, mais estreito.
 
 ### O contexto do comando é do fio
 
@@ -212,7 +226,9 @@ texto em `politica::manifesto`, lido e testado no hospedeiro.
   processo nunca as exerce, e declará-las recusa o manifesto.
 - `bifurcar` herda o programa; `executar` troca pelo da imagem nova — e a
   interseção com o papel de quem lançou continua valendo, então trocar de
-  imagem nunca passa do papel.
+  imagem nunca passa do papel. A resposta de um pedido que a imagem
+  anterior não buscou sai na troca: era dela, com o manifesto dela.
+  Encontrado relendo a 7.3 — como estava, a imagem nova a buscava.
 - A auditoria grava o programa em cada decisão de processo: "pelo processo
   N (nome resumo): …", com os quatro primeiros bytes do resumo — o nome é o
   que o programa diz ser, o resumo é o que ele é.

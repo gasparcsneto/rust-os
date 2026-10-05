@@ -97,8 +97,7 @@ const BALDES: usize = 16;
 /// qualquer porta, continua com o que tinha.
 #[derive(Clone, Copy)]
 struct BaldeDe {
-    /// A chave do agente, ou `None` para a serial.
-    dono: Option<[u8; 32]>,
+    dono: DonoDaTaxa,
     balde: Balde,
     /// Pedidos recusados por taxa desde o último registro de taxa: a
     /// auditoria grava o primeiro e soma os seguintes, para uma enxurrada
@@ -106,6 +105,23 @@ struct BaldeDe {
     suprimidos: u64,
     /// Quando foi usado pela última vez — para saber quem sai.
     uso_ms: u64,
+}
+
+/// De quem é um balde: o principal que pede.
+///
+/// Uma pessoa e o sistema não têm taxa no que pedem por si — ninguém digita
+/// na velocidade de uma máquina, e o sistema não pede pelo canal. Mas um
+/// **programa** por eles pede na velocidade de uma máquina, e cada decisão
+/// vai para a auditoria e para o journal: o processo de uma pessoa gasta o
+/// balde da sessão dela, e o do sistema, o do sistema.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DonoDaTaxa {
+    /// A chave do agente, ou `None` para a serial.
+    Chave(Option<[u8; 32]>),
+    /// Os processos lançados na sessão desta pessoa.
+    Pessoa([u8; 8]),
+    /// Os processos lançados pelo sistema.
+    Sistema,
 }
 
 struct Taxas {
@@ -815,12 +831,19 @@ fn passar_pela_taxa(quem: &Quem, metodo: &str, parametros: &[u8]) -> Result<(), 
     let Some(taxa) = taxa else {
         return Ok(());
     };
-    // A pessoa e o sistema não têm taxa — a vaga deles não é de sessão do
-    // canal. O principal de quem tem é a chave do agente, ou a serial.
-    if usize::from(quem.sessao) >= SESSOES {
+    // O principal: a chave do agente, ou a serial. A pessoa e o sistema não
+    // têm taxa no que pedem por si — só no que os programas deles pedem.
+    // Ver [`DonoDaTaxa`].
+    let dono = if usize::from(quem.sessao) < SESSOES {
+        DonoDaTaxa::Chave(quem.chave)
+    } else if quem.processo.is_some() {
+        match quem.sessao_de_pessoa {
+            Some(sessao) => DonoDaTaxa::Pessoa(sessao),
+            None => DonoDaTaxa::Sistema,
+        }
+    } else {
         return Ok(());
-    }
-    let dono = quem.chave;
+    };
     let agora = crate::tempo::uptime_ms();
     let (passou, suprimidos_antes, primeiro_recusado) = crate::arch::sem_interrupcoes(|| {
         let mut t = TAXAS.lock();
@@ -1155,6 +1178,12 @@ pub fn autorizar(
 
 /// Grava um pedido que não chegou a ser um comando: JSON quebrado, método
 /// desconhecido, parâmetros recusados. `INVALID_ARGUMENT`.
+///
+/// Pela taxa de quem pediu, como um pedido válido: um pedido quebrado custa
+/// o mesmo trabalho e o mesmo registro. Sem ela, um programa — que pede na
+/// velocidade de uma máquina — enchia a auditoria e o journal de lixo, e a
+/// enxurrada empurrava para fora do anel o que importa. Passada a rajada,
+/// a taxa grava a primeira recusa e conta as seguintes.
 pub fn auditar_invalido(chamador: Chamador, metodo: &str, parametros: &[u8], detalhe: &str) {
     let quem = match chamador {
         Chamador::Pessoa(id) => match quem_da_pessoa(id) {
@@ -1172,6 +1201,27 @@ pub fn auditar_invalido(chamador: Chamador, metodo: &str, parametros: &[u8], det
             q.processo = Some(pelo_processo(fio, &programa));
             q
         }
+    };
+    if passar_pela_taxa(&quem, metodo, parametros).is_err() {
+        return;
+    }
+    auditar(
+        &quem,
+        metodo,
+        "",
+        Codigo::InvalidArgument,
+        parametros,
+        detalhe,
+    );
+}
+
+/// Grava um registro de enchimento, como a serial e sem passar pela taxa:
+/// para os casos da auditoria do journal, que precisam de muitos registros
+/// — transbordar o anel, empurrar uma decisão — e não de pedidos.
+#[cfg(feature = "modo-teste")]
+pub fn auditar_enchimento_de_teste(metodo: &str, parametros: &[u8], detalhe: &str) {
+    let quem = match quem_da_sessao(crate::agent::sessao::SERIAL) {
+        Ok(q) | Err(q) => q,
     };
     auditar(
         &quem,

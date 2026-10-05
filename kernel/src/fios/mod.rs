@@ -1423,16 +1423,22 @@ pub fn troca_concluida() {
 /// resultado quando quiser.
 ///
 /// O programa troca na mesma seção crítica: daqui em diante o fio executa a
-/// imagem nova, e é com o manifesto dela que o gate o decide.
-#[must_use = "o espaco anterior precisa ser largado fora da trava"]
+/// imagem nova, e é com o manifesto dela que o gate o decide. E a resposta
+/// de um pedido que a imagem anterior não buscou sai junto: era dela, com o
+/// manifesto dela — buscada pela nova, seria a imagem nova lendo o que só a
+/// anterior podia pedir. Devolvida, com o espaço, para largar fora da trava.
+#[must_use = "o espaco anterior e a resposta precisam ser largados fora da trava"]
 pub fn adotar_imagem(
     espaco: crate::paginacao::Espaco,
     programa: crate::autorizacao::Programa,
-) -> Option<crate::paginacao::Espaco> {
-    com_escalonador(|e| {
-        let fio = e.fio_atual_mut()?;
-        fio.programa = programa;
-        fio.espaco.replace(espaco)
+) -> (Option<crate::paginacao::Espaco>, EstadoDoPedido) {
+    com_escalonador(|e| match e.fio_atual_mut() {
+        Some(fio) => {
+            fio.programa = programa;
+            let pedido = core::mem::take(&mut fio.pedido);
+            (fio.espaco.replace(espaco), pedido)
+        }
+        None => (Some(espaco), EstadoDoPedido::Livre),
     })
 }
 
@@ -1814,6 +1820,17 @@ pub fn acordar(id: u64) -> bool {
     });
     crate::nucleos::cutucar(ociosos);
     vivo
+}
+
+/// Só para a suíte: se o fio `id` está esperando.
+#[cfg(feature = "modo-teste")]
+pub fn esperando_de_teste(id: u64) -> bool {
+    com_escalonador(|e| {
+        e.fios
+            .iter()
+            .flatten()
+            .any(|f| f.id.numero() == id && f.estado == Estado::Esperando)
+    })
 }
 
 /// Só para a suíte: prende o fio `id` ao núcleo `cpu`, ou o solta com
