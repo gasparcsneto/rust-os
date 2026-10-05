@@ -163,8 +163,16 @@ fn relatorio(
         em => relatar!("device tree em {:#x}, pela tabela de configuracao", em),
     }
     conferir_a_serial(dispositivos);
+    // E a ACPI, pelo mesmo caminho: no PC é ela que lista os núcleos. No ARM
+    // da `virt` não há — subimos com `acpi=off`, e os núcleos estão no
+    // device tree.
+    let acpi = achar_a_acpi(sistema);
+    match acpi {
+        0 => relatar!("acpi: nenhuma RSDP na tabela de configuracao"),
+        em => relatar!("acpi: RSDP em {:#x}, pela tabela de configuracao", em),
+    }
 
-    carregar_o_kernel(imagem, boot, dispositivos, fim_da_ram, video)
+    carregar_o_kernel(imagem, boot, dispositivos, acpi, fim_da_ram, video)
 }
 
 /// Confere assinatura, tamanho e CRC-32 de um cabeçalho de tabela.
@@ -503,6 +511,7 @@ fn carregar_o_kernel(
     handle: efi::Handle,
     boot: &efi::ServicosDeBoot,
     dispositivos: u64,
+    acpi: u64,
     fim_da_ram: u64,
     video: Option<efi::Tela>,
 ) -> Result<core::convert::Infallible, &'static str> {
@@ -589,7 +598,7 @@ fn carregar_o_kernel(
         na_memoria / 1024
     );
 
-    carregar_e_saltar(handle, boot, dispositivos, imagem, fim_da_ram, video)
+    carregar_e_saltar(handle, boot, dispositivos, acpi, imagem, fim_da_ram, video)
 }
 
 /// Confronta o endereço de serial escrito no código com o que a placa diz.
@@ -707,6 +716,48 @@ fn achar_o_device_tree(sistema: &efi::Sistema) -> u64 {
     0
 }
 
+/// Procura a RSDP da ACPI na tabela de configuração do firmware.
+///
+/// Devolve zero quando não há. A da ACPI 2.0 tem preferência: é a que traz a
+/// XSDT, com ponteiros de 64 bits; a da 1.0 só é aceita quando a outra não
+/// existe.
+///
+/// A assinatura é conferida pelo mesmo motivo da magia do device tree: o
+/// GUID diz o que a entrada **afirma** ser, e a assinatura diz o que ela
+/// **é**. O kernel confere de novo — com a soma de verificação — antes de
+/// acreditar em qualquer campo.
+fn achar_a_acpi(sistema: &efi::Sistema) -> u64 {
+    if sistema.configuracoes.is_null() {
+        return 0;
+    }
+    let procurar = |guid: &efi::Guid| -> u64 {
+        for i in 0..sistema.quantas_configuracoes {
+            // SAFETY: o firmware declarou o vetor e quantas entradas ele
+            // tem, e a tabela do sistema já passou pelo CRC.
+            let entrada = unsafe { &*sistema.configuracoes.add(i) };
+            if entrada.guid != *guid || entrada.em.is_null() {
+                continue;
+            }
+            // SAFETY: a entrada existe e não é nula; oito bytes são o mínimo
+            // de qualquer RSDP, e a UEFI mapeia tudo por identidade aqui.
+            let assinatura = unsafe { core::ptr::read_unaligned(entrada.em as *const [u8; 8]) };
+            if assinatura != efi::ASSINATURA_DA_RSDP {
+                relatar!(
+                    "ERRO a entrada de ACPI em {:#x} nao comeca com a assinatura da RSDP",
+                    entrada.em as u64
+                );
+                return 0;
+            }
+            return entrada.em as u64;
+        }
+        0
+    };
+    match procurar(&efi::GUID_DA_ACPI_2) {
+        0 => procurar(&efi::GUID_DA_ACPI_1),
+        em => em,
+    }
+}
+
 /// O fim do caminho: copiar, mapear, sair dos serviços de boot e saltar.
 ///
 /// Só existe no x86 por enquanto. A separação está aqui, e não espalhada em
@@ -721,6 +772,7 @@ fn carregar_e_saltar(
     // assinatura — o que mantém o ponto de bifurcação sendo só o `cfg`, e
     // não também a forma da chamada.
     _dispositivos: u64,
+    acpi: u64,
     imagem: elf::Imagem,
     fim_da_ram: u64,
     video: Option<efi::Tela>,
@@ -760,6 +812,7 @@ fn carregar_e_saltar(
         // tudo que o kernel precisa, e é por isso que este campo é zero em
         // vez de ausente. Ver `protocolo::Entrega::dispositivos`.
         dispositivos: 0,
+        acpi,
     };
 
     let raiz = carga.tabelas.raiz();
@@ -813,6 +866,10 @@ fn carregar_e_saltar(
     handle: efi::Handle,
     boot: &efi::ServicosDeBoot,
     dispositivos: u64,
+    // Na `virt` sobe-se com `acpi=off`, e o kernel do ARM acha os núcleos no
+    // device tree. Se houver uma RSDP ela vai adiante assim mesmo: a entrega
+    // descreve o que o firmware publicou, e quem decide se usa é o kernel.
+    acpi: u64,
     imagem: elf::Imagem,
     // A RAM não precisa ser medida aqui: o kernel do ARM descobre a memória
     // pelo device tree, como sempre fez, e as regiões da entrega dizem o
@@ -866,6 +923,7 @@ fn carregar_e_saltar(
         tela_fisica: video.map_or(0, |t| t.fisico),
         tela_bytes: video.map_or(0, |t| t.bytes),
         dispositivos,
+        acpi,
     };
 
     // SAFETY: a imagem foi copiada para o endereço em que ela é ligada e

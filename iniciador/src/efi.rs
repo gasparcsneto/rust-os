@@ -123,6 +123,28 @@ pub struct Configuracao {
     pub em: *const c_void,
 }
 
+/// `EFI_ACPI_20_TABLE_GUID`: a RSDP da ACPI 2.0 ou posterior.
+///
+/// É a que traz o ponteiro de 64 bits para a XSDT. Toda máquina UEFI de
+/// x86 publica esta; a da ACPI 1.0, logo abaixo, fica como reserva.
+pub const GUID_DA_ACPI_2: Guid = Guid {
+    a: 0x8868_e871,
+    b: 0xe4f1,
+    c: 0x11d3,
+    d: [0xbc, 0x22, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81],
+};
+
+/// `ACPI_TABLE_GUID`: a RSDP da ACPI 1.0, só com a RSDT de 32 bits.
+pub const GUID_DA_ACPI_1: Guid = Guid {
+    a: 0xeb9d_2d30,
+    b: 0x2d88,
+    c: 0x11d3,
+    d: [0x9a, 0x16, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d],
+};
+
+/// O que uma RSDP traz nos oito primeiros bytes: `"RSD PTR "`.
+pub const ASSINATURA_DA_RSDP: [u8; 8] = *b"RSD PTR ";
+
 /// `EFI_DTB_TABLE_GUID`: o device tree que a placa descreve.
 ///
 /// Só existe em máquinas que têm um — na `virt` do QEMU tem, num PC não. A

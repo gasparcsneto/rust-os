@@ -99,6 +99,26 @@ pub struct Entrega {
     /// espaço que montou para o kernel; o device tree não é dele, é da
     /// placa.
     pub dispositivos: u64,
+    /// Onde a RSDP da ACPI está, em endereço **físico**, ou zero quando não
+    /// há.
+    ///
+    /// # Por que ela vem aqui
+    ///
+    /// Pelo mesmo motivo do device tree, do outro lado: é uma entrada da
+    /// tabela de configuração da UEFI, e depois do `ExitBootServices` o
+    /// kernel não teria onde procurá-la. Num PC é a ACPI que diz quantos
+    /// núcleos a máquina tem — a tabela MADT lista um APIC local por
+    /// processador —, e sem ela o kernel não saberia a quem mandar o sinal
+    /// de partida.
+    ///
+    /// No ARM é zero: lá os núcleos estão no device tree, em `/cpus`.
+    ///
+    /// # Por que acrescentar não subiu a versão
+    ///
+    /// Porque o significado de nenhum campo anterior mudou. O tamanho é o que
+    /// denuncia a diferença — ver [`VERSAO`] —, e o kernel recusa uma
+    /// entrega menor do que a que ele lê.
+    pub acpi: u64,
 }
 
 /// Quantas regiões de memória uma entrega pode carregar, no máximo.
@@ -183,7 +203,7 @@ pub mod tipo {
 // impede a mudança — ela obriga quem a fizer a passar por aqui e subir a
 // versão se o significado mudou.
 const _: () = {
-    assert!(size_of::<Entrega>() == 88);
+    assert!(size_of::<Entrega>() == 96);
     assert!(size_of::<Video>() == 40);
     assert!(size_of::<Regiao>() == 24);
 };

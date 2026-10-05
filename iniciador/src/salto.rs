@@ -79,6 +79,8 @@ pub struct Destino {
     pub tela_bytes: u64,
     /// O device tree, em endereço físico, ou zero quando não há.
     pub dispositivos: u64,
+    /// A RSDP da ACPI, em endereço físico, ou zero quando não há.
+    pub acpi: u64,
 }
 
 /// Tudo que precisa estar pronto antes de o mapa de memória ser pedido.
@@ -127,6 +129,7 @@ pub unsafe fn saltar(
         quantas_regioes: quantas as u64,
         video: destino.video,
         dispositivos: destino.dispositivos,
+        acpi: destino.acpi,
     };
     // SAFETY: a página veio do firmware, está alinhada, e ninguém mais a tem.
     unsafe { reservado.entrega.write(entrega) };
