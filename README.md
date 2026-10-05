@@ -608,6 +608,190 @@ acesso a estado compartilhado neste kernel passa por `sem_interrupcoes`, que
 desliga a preempção junto — `frames`, `machine`, `heap` e o próprio
 escalonador.
 
+## Vários núcleos
+
+O kernel liga todos os núcleos que a máquina descreve, até oito, e a bancada
+roda com quatro (`-smp 4`; `DUKE_NUCLEOS=1` volta a um só, e a suíte passa
+dos dois jeitos). No x86 a lista vem da tabela MADT da ACPI — o iniciador
+entrega o endereço da RSDP junto com o mapa da memória — e cada núcleo
+acorda por INIT-SIPI-SIPI num trampolim de modo real abaixo de 1 MiB. No ARM
+ela vem do device tree, e cada núcleo acorda pelo `CPU_ON` do PSCI. Os dois
+caminhos terminam no mesmo lugar: um fio ocioso próprio, o timer do núcleo
+ligado com a contagem que o primeiro mediu, e o escalonador.
+
+```
+[   41]  2450ms info  smp  4 nucleo(s) descrito(s) pelo hardware
+[   42]  2590ms info  smp  nucleo 1 ligado (hardware 0x1), fio ocioso na vaga 2
+[   45]  2780ms info  smp  4 de 4 nucleo(s) ligado(s)
+```
+
+**O que é de cada núcleo.** O fio atual, o quantum e o ocioso, no
+escalonador; a pilha de interrupção e as pilhas de emergência (falha dupla e
+NMI), num TSS por núcleo no x86; a pilha de kernel da chamada de sistema,
+alcançada pelo `GS` só nas quatro instruções da entrada. Quem precisa saber
+em que núcleo está pergunta a um registrador que o processo não alcança — o
+`TR` no x86, o `TPIDR_EL1` no ARM.
+
+**Um fio nunca roda em dois núcleos.** O escalonador marca o núcleo que
+pegou o fio, e só solta a marca depois de a troca de contexto ter saído da
+pilha dele — no fim da troca, e não no começo: até ali o núcleo antigo ainda
+está usando aquela pilha. É a propriedade de que todo o resto depende, e o
+caso `smp: um fio nunca roda em dois nucleos` a confere com fios soltos
+passando por todos os núcleos.
+
+**O relógio anda uma vez por tique.** Cada núcleo tem o timer dele, que
+preempta os fios dele; só o primeiro avança o relógio do sistema. Com
+quatro núcleos avançando, o tempo correria quatro vezes mais depressa — e
+os prazos das mensagens e o piso do relógio da persistência com ele.
+
+**Avisos entre núcleos.** Três: acordar um núcleo ocioso quando um fio fica
+pronto; derrubar uma tradução do kernel em todos os núcleos antes de o frame
+voltar ao alocador; e parar todos no caminho da falha fatal, para o
+relatório sair de um núcleo só. No x86 os dois últimos vão por NMI, que
+atravessa a máscara — um núcleo girando com as interrupções desligadas
+ainda é parado. No ARM a invalidação da TLB é difundida pelo próprio
+hardware (`tlbi …is`), e a parada vai por SGI, que **não** atravessa a
+máscara: um núcleo mascarado fica de fora, e o relatório o lista em
+`fatal_unanswered_mask`.
+
+**As travas são justas.** O `spin::Mutex` é um teste-e-troca: ganha quem
+chegar primeiro naquele instante, e um núcleo que solta e pede de novo ganha
+quase sempre. Medido: um processo num núcleo secundário escrevendo no log,
+contra a suíte no primeiro lendo o mesmo anel em laço, levava um quarto de
+segundo por linha. A trava do kernel ([`kernel/src/trava.rs`](kernel/src/trava.rs))
+é por senha, FIFO; e o destravamento de emergência do caminho fatal abandona
+a fila em vez de entregar a vez a um núcleo que já foi parado.
+
+**Os dispositivos são do primeiro núcleo.** As interrupções de dispositivo —
+teclado, disco, rede, o canal do agente — continuam no PIC (no x86) e no
+GIC com o destino do primeiro, e a tela também: um núcleo secundário compõe
+no buffer de fundo e pede ao primeiro que apresente. Medido no emulador: a
+cópia para a memória de vídeo saindo de um núcleo secundário custava 1,2
+bilhão de ciclos por quadro cheio, contra 9 milhões para compor — cem vezes
+mais lenta. O eco do Terminal passou de 280 ms por linha a menos de 20.
+
+### O canal com um núcleo travado
+
+É a exigência que o roteiro pôs na fase: o canal continua respondendo
+quando **um** núcleo trava. O `debug.trigger` com `kind:"hang_core"` trava
+um núcleo de propósito — um fio fixo nele girando com as interrupções
+desligadas, até um prazo ou para sempre —, pelo mesmo gate, com a mesma
+permissão dos outros gatilhos, e recusa o primeiro núcleo, que é o do canal.
+A fumaça trava o último núcleo para sempre e confere, pelo canal: vinte
+`ping` respondidos; o pulso do núcleo travado parado e o dos outros
+andando; o fio `travado` no `threads.list`, no núcleo dele; e trocas de
+contexto continuando. Depois, a sonda de falha fatal confere que o núcleo
+travado foi parado (x86, por NMI) ou listado como sem resposta (ARM).
+
+### O que só aparece com vários núcleos
+
+Uma estrutura que estava certa com um núcleo não está certa com vários só
+por compilar. O que esta fase encontrou, e corrigiu na camada responsável:
+
+- **A autoridade do comando era do sistema inteiro.** Uma variável global
+  dizia em nome de quem o comando em curso agia; fora de um comando, ela
+  dizia `sistema`. Com vários núcleos, um fio em outro núcleo que
+  perguntasse durante um comando recebia a autoridade do agente que o pediu
+  — e, fora dele, a máxima. Agora ela é do fio que executa o comando, e
+  qualquer outro recebe a de ninguém.
+- **A cota de processos se ultrapassava por um a cada núcleo.** O gate
+  contava os processos vivos do titular e o escalonador reservava a vaga
+  depois, em outra seção crítica; uma chamada de sistema roda com as
+  interrupções mascaradas, e com um núcleo nada cabia entre as duas. Agora a
+  cota é conferida de novo na mesma seção crítica que reserva a vaga, e a
+  recusa vai para a auditoria do mesmo jeito.
+- **O coletor fechava o console do dono seguinte.** O pseudo-terminal
+  largava a vaga de um dono morto sob a trava e fechava o console dele
+  depois; um `abrir` em outro núcleo, no meio, abria o console para o dono
+  novo, e o fechamento atrasado o fechava — ou zerava o console antes do
+  fechamento, e a sessão da pessoa do Terminal morto ficava viva, sem
+  console. A vaga agora tem um estado *em troca*, que ninguém toma nem usa,
+  e reabrir um console encerra a sessão que tivesse sobrado.
+- **O login entrava no console de outro Terminal.** A senha sai do
+  console, a conferência — um Argon2id — roda fora da trava, e o resultado
+  era posto no console sem perguntar se ele ainda era o mesmo. Se o
+  Terminal morria no meio, o coletor fechava o console, um Terminal novo
+  abria a mesma vaga, e a sessão da pessoa aparecia no console do processo
+  novo, já entrada. A janela existia com um núcleo — o coletor também
+  preempta o executor —, mas era estreita; com vários, ela é a conferência
+  inteira. Agora o console conta as aberturas, o login entra só na que lhe
+  deu a senha, e a sessão de um login atrasado acaba, gravada.
+- **Um núcleo lento era dado como perdido, e seguia rodando.** A derrubada
+  de uma tradução do kernel esperava a confirmação dos outros núcleos até
+  um teto, e depois desistia: o núcleo que não confirmou saía da conta dos
+  ligados, e quem pediu devolvia o frame ao alocador. A premissa — quem
+  não responde a uma NMI não está rodando nada — não vale para um núcleo
+  só lento, como uma CPU virtual sem CPU do hospedeiro por um tempo: ele
+  voltava, seguia rodando fios com a tradução velha, escrevia num frame
+  que já era de outro e, fora da conta, não recebia mais descarte nenhum.
+  Agora a espera reenvia o aviso e, passado um prazo muito maior que o de
+  qualquer resposta, para o sistema pelo caminho da falha fatal. Um núcleo
+  travado com as interrupções mascaradas continua respondendo — a NMI
+  atravessa a máscara —, então isso não custa o requisito do núcleo
+  travado.
+- **A preempção dependia de ganhar um `try_lock`.** O timer descontava o
+  quantum de cada núcleo dentro da tabela do escalonador, por `try_lock` —
+  um handler não pode esperar pela trava. Com vários núcleos, um fio que
+  cede em laço num núcleo toma e solta a trava sem parar, o `try_lock` dos
+  outros perde quase sempre, e o quantum deles não anda: o fio que ocupava
+  um deles nunca mais era preemptado. Visto na suíte como um lançador fixo
+  num núcleo, **pronto**, por segundos, com o núcleo vivo. O quantum agora
+  é um atômico de cada núcleo, que só ele toca, fora da trava.
+- **O relógio de parede era lido por duas portas sem trava.** No x86, o RTC
+  é um par índice/valor, e só a máscara de interrupções separava um acesso
+  do outro. A auditoria lê o relógio a cada decisão do gate, de qualquer
+  núcleo; dois núcleos decidindo juntos trocavam o índice um do outro. O
+  sintoma medido foi um lançamento parado por mais de três segundos — o
+  bit de "atualizando" lido de outro registrador —, e o risco era pior: uma
+  leitura misturada que passasse pela conferência levaria o piso do relógio
+  da persistência, que nunca volta, para uma data errada. O par de portas
+  da configuração PCI tinha o mesmo defeito. Os dois têm trava agora.
+- **O retângulo sujo da tela era quatro atômicos.** Quem descarregava lia
+  as quatro coordenadas uma a uma, e outro núcleo alargando no meio deixava
+  parte de uma escrita fora da tela até a escrita seguinte. Agora é uma
+  palavra só.
+- **A profundidade do log sob trava era global.** Ela conta quantas travas o
+  fio segura ao registrar, para recusar o que poderia travar em si mesmo; um
+  contador do sistema inteiro contava as travas dos outros núcleos.
+- **O comando do APIC tem duas metades.** Escrever o destino e o comando são
+  duas escritas; uma interrupção no meio que mandasse outro aviso trocava o
+  destino do primeiro. Agora a dupla é escrita com as interrupções
+  mascaradas.
+- **As linhas de dispositivo do ARM iam à interface 0 do GIC.** Escrita como
+  `0b1`, e não como a interface que o núcleo de boot lê no distribuidor: no
+  QEMU elas coincidem, numa placa que bootasse por outra interface as
+  interrupções iriam a um núcleo que não as trata.
+- **O pseudo-terminal perdia texto disputado.** A saída tomava o anel por
+  `try_lock`, e com um núcleo só ele nunca estava tomado; com vários estava,
+  e o texto sumia.
+
+E o que foi conferido e está certo, com o caso que o prova: a cópia na
+escrita com os dois donos escrevendo juntos (`smp: copia na escrita em dois
+nucleos` — 498 cópias para 256 páginas divididas em oito voltas: muitas
+vezes os dois leram "dois donos" ao mesmo tempo, e cada um viu só as
+próprias escritas); a gravação no journal, que já era serializada por fio
+dono e não pela máscara; a tradução de um processo, que nenhum outro núcleo
+guarda depois de trocar de raiz.
+
+### O que fica de fora
+
+- O núcleo 0 é especial: os dispositivos e o canal moram nele, e um núcleo
+  0 travado com as interrupções mascaradas cala o canal. Os outros podem
+  travar.
+- No ARM, a parada no caminho fatal não alcança um núcleo mascarado (GICv2
+  sem FIQ nem NMI); ele é relatado, não parado.
+- Uma decisão do gate vale para a ação que ela autorizou mesmo que uma
+  revogação chegue no meio — a regra de antes ("a decisão seguinte vê a
+  nova, e a que estava em curso já tinha decidido"). Com vários núcleos,
+  "em curso" inclui uma chamada de sistema de outro núcleo; nenhuma das que
+  decidem bloqueia, então a janela é a de uma chamada.
+- Oito núcleos no máximo, e no x86 só os de identificador até 255.
+- Um núcleo que não responde à partida é dado como falho e fica de fora, e
+  a vaga do fio ocioso que lhe tinha sido preparada fica presa até o
+  próximo boot: ele ainda pode acordar tarde, e acorda na pilha dela antes
+  de ver que foi dado como falho e se recolher — devolvê-la seria dar a
+  outro fio uma pilha que um núcleo ainda usa.
+
 ## Userspace
 
 Até a multitarefa preemptiva, todo código do kernel era igualmente poderoso:
