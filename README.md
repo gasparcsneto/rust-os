@@ -803,6 +803,15 @@ por compilar. O que esta fase encontrou, e corrigiu na camada responsável:
   ocupado: "o APIC disparou 14 vezes onde 20 eram esperadas". A
   conferência existe para pegar erro de unidade, que se repete; agora são
   três medidas antes de desistir.
+- **O coletor devolvia a vaga antes de desmontar o morto.** A pilha de
+  kernel de cada vaga mora num endereço fixo dela, e quem a desmapeia é o
+  morto ao ser largado — fora da trava. O coletor deixava a vaga vazia
+  nesse intervalo, e uma criação em outro núcleo a escolhia e ia mapear a
+  pilha nova por cima da velha: "endereço virtual já mapeado". Era a falha
+  intermitente da cópia na escrita em dois núcleos, que ficou sem
+  explicação até uma campanha de mutações a reproduzir no caso da criação
+  concorrente. Agora a vaga fica reservada até o morto sair, e o caso
+  `fios: o coletor segura a vaga ate desmontar` abre a janela de propósito.
 
 E o que foi conferido e está certo, com o caso que o prova: a cópia na
 escrita com os dois donos escrevendo juntos (`smp: copia na escrita em dois

@@ -355,6 +355,22 @@ pub fn congelar() {
     CONGELADO.store(true, Ordering::SeqCst);
 }
 
+/// Segura em [`recolher_terminados`] o primeiro fio morto tirado da tabela,
+/// antes de largá-lo — com a pilha dele ainda mapeada.
+///
+/// Existe só para a suíte, pelo mesmo motivo de [`CEDER_AO_ESCOLHER_VAGA`]:
+/// a janela entre o coletor tirar o morto e terminar de desmontá-lo é a de
+/// desmapear uma pilha, e uma criação em outro núcleo só cai nela por
+/// acaso. Armada ([`PAUSA_ARMADA`]), o primeiro coletor que passa a toma
+/// ([`PAUSA_SEGURANDO`]) e gira até a suíte a devolver a zero.
+#[cfg(feature = "modo-teste")]
+pub static PAUSAR_NA_DESMONTAGEM: core::sync::atomic::AtomicU8 =
+    core::sync::atomic::AtomicU8::new(0);
+#[cfg(feature = "modo-teste")]
+pub const PAUSA_ARMADA: u8 = 1;
+#[cfg(feature = "modo-teste")]
+pub const PAUSA_SEGURANDO: u8 = 2;
+
 /// Faz [`criar`] ceder a vez logo depois de escolher a vaga.
 ///
 /// Existe só para a suíte de testes, e testa algo que de outra forma não teria
@@ -619,11 +635,67 @@ pub fn recolher_terminados() -> usize {
                             && fio.na_cpu.is_none()
                             && !e.e_zumbi(i))
             })?;
-            e.fios[vaga].take()
+            let morto = e.fios[vaga].take()?;
+            // A vaga fica reservada enquanto o morto é desmontado lá fora.
+            // A pilha de kernel de uma vaga mora num endereço fixo dela, e
+            // largar o morto é o que a desmapeia: com a vaga vazia nesse
+            // intervalo, uma criação em outro núcleo a escolhia e ia mapear a
+            // pilha nova por cima da velha — "endereço virtual já mapeado".
+            // Medido: uma criação recusada assim no caso da criação
+            // concorrente, e o mesmo erro no da cópia na escrita em dois
+            // núcleos, que bifurca. Com um núcleo só, a janela existia só se
+            // o timer caísse dentro dela.
+            //
+            // O marcador tem um id próprio, que nenhum fio teve: com o do
+            // morto, ele pareceria vivo a quem procura por id — `vivo`, e o
+            // pai de um zumbi — durante a desmontagem.
+            e.fios[vaga] = Some(Fio {
+                id: IdFio(PROXIMO_ID.fetch_add(1, Ordering::Relaxed)),
+                nome: "recolhendo",
+                estado: Estado::Reservado,
+                contexto: Contexto::vazio(),
+                _pilha: None,
+                espaco: None,
+                descritores: crate::usuario::descritores::Tabela::nova(),
+                escalonamentos: 0,
+                pai: None,
+                saida: None,
+                colhido: true,
+                autoridade: crate::autorizacao::Autoridade::NENHUMA,
+                na_cpu: None,
+                fixo: None,
+                ocioso: false,
+                reexecutar: false,
+            });
+            let id = e.fios[vaga].as_ref().map(|f| f.id)?;
+            Some((vaga, id, morto))
         });
 
-        let Some(morto) = morto else { break };
+        let Some((vaga, id, morto)) = morto else {
+            break;
+        };
+        #[cfg(feature = "modo-teste")]
+        if PAUSAR_NA_DESMONTAGEM
+            .compare_exchange(
+                PAUSA_ARMADA,
+                PAUSA_SEGURANDO,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_ok()
+        {
+            while PAUSAR_NA_DESMONTAGEM.load(Ordering::SeqCst) == PAUSA_SEGURANDO {
+                core::hint::spin_loop();
+            }
+        }
         drop(morto);
+        // Só agora a vaga volta a ser escolhível. O marcador sai sob a trava
+        // e é largado fora dela, como todo fio deste módulo.
+        let marcador = com_escalonador(|e| match &e.fios[vaga] {
+            Some(f) if f.id == id && f.estado == Estado::Reservado => e.fios[vaga].take(),
+            _ => None,
+        });
+        drop(marcador);
         quantos += 1;
     }
 

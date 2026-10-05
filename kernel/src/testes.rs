@@ -19580,6 +19580,90 @@ fn fios_criacao_concorrente_nao_colide() -> Resultado {
     Ok(())
 }
 
+/// O coletor não devolve a vaga de um morto antes de desmontá-lo.
+///
+/// A pilha de kernel de cada vaga mora num endereço fixo dela, e quem a
+/// desmapeia é o `Drop` do morto, que o coletor larga fora da trava do
+/// escalonador. O coletor tirava o morto deixando a vaga **vazia**: no
+/// intervalo, uma criação em outro núcleo a escolhia e ia mapear a pilha nova
+/// por cima da velha, que ainda estava lá. Medido assim: uma criação
+/// recusada com "endereço virtual já mapeado" no caso da criação
+/// concorrente, e o mesmo erro, uma vez, no da cópia na escrita em dois
+/// núcleos.
+///
+/// Aqui o intervalo é aberto de propósito: o coletor é segurado com o morto
+/// na mão e a pilha dele mapeada, e a suíte enche a tabela. O certo é a
+/// tabela acabar em "sem vaga", com a vaga do morto ainda reservada; se uma
+/// criação cair nela, a recusa é outra, e o caso a acusa.
+fn fios_coletor_segura_a_vaga_ate_desmontar() -> Resultado {
+    use crate::fios::{PAUSA_ARMADA, PAUSA_SEGURANDO, PAUSAR_NA_DESMONTAGEM};
+    static SOLTAR: AtomicBool = AtomicBool::new(false);
+
+    extern "C" fn morto(_argumento: u64) -> ! {
+        crate::fios::terminar()
+    }
+    extern "C" fn ocupante(_argumento: u64) -> ! {
+        while !SOLTAR.load(SeqCst) {
+            crate::arch::esperar_interrupcao();
+        }
+        crate::fios::terminar()
+    }
+
+    SOLTAR.store(false, SeqCst);
+    let recolhidos_antes = crate::fios::recolhidos();
+    PAUSAR_NA_DESMONTAGEM.store(PAUSA_ARMADA, SeqCst);
+    let preparo = crate::fios::criar("teste-morto", morto, 0)
+        .map_err(|_| "o fio a recolher nao nasceu")
+        .and_then(|_| {
+            esperar_ate(
+                || PAUSAR_NA_DESMONTAGEM.load(SeqCst) == PAUSA_SEGURANDO,
+                300,
+            )
+            .map_err(|_| "o coletor nao chegou a desmontar um morto")
+        });
+    if let Err(motivo) = preparo {
+        PAUSAR_NA_DESMONTAGEM.store(0, SeqCst);
+        return Err(motivo);
+    }
+
+    let mut ocupantes = 0u64;
+    let mut colisao = None;
+    for _ in 0..crate::fios::MAX_FIOS {
+        match crate::fios::criar("teste-ocupante", ocupante, 0) {
+            Ok(_) => ocupantes += 1,
+            Err(motivo) if motivo.contains("vaga") => break,
+            Err(motivo) => {
+                colisao = Some(motivo);
+                break;
+            }
+        }
+    }
+
+    // O coletor segue, e os ocupantes saem. Antes de qualquer conclusão,
+    // para o caso não deixar a tabela cheia para o seguinte.
+    PAUSAR_NA_DESMONTAGEM.store(0, SeqCst);
+    SOLTAR.store(true, SeqCst);
+    crate::log_info!(
+        "teste",
+        "{} ocupante(s) ate a tabela encher; a ultima recusa: {}",
+        ocupantes,
+        colisao.unwrap_or("sem vaga")
+    );
+    esperar_ate(
+        || crate::fios::recolhidos() > recolhidos_antes + ocupantes,
+        600,
+    )
+    .map_err(|_| "os ocupantes nao foram recolhidos depois do caso")?;
+
+    if colisao.is_some() {
+        return Err("uma criacao caiu na vaga que o coletor ainda desmontava");
+    }
+    if ocupantes == 0 {
+        return Err("nenhum ocupante nasceu; o caso nao encheu a tabela");
+    }
+    Ok(())
+}
+
 // ===========================================================================
 // Vários núcleos
 // ===========================================================================
@@ -24144,6 +24228,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "fios: criacao concorrente",
         f: fios_criacao_concorrente_nao_colide,
+    },
+    Caso {
+        nome: "fios: o coletor segura a vaga ate desmontar",
+        f: fios_coletor_segura_a_vaga_ate_desmontar,
     },
     Caso {
         nome: "smp: todos os nucleos ligam",
