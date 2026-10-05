@@ -37,9 +37,9 @@
 //! escalonador nunca põe o mesmo fio em dois núcleos ao mesmo tempo; ver
 //! [`crate::nucleos`].
 //!
-//! O que não existe: sinais, memória compartilhada entre processos e uma
-//! ABI que um programa de fora saiba falar — a fase 7 do roteiro é a
-//! compatibilidade com Linux.
+//! O que não existe: sinais e memória compartilhada entre processos. E não
+//! existirá uma ABI de outro sistema: os programas do Duke falam a língua
+//! dele — ver `docs/INTERFACE.md`, a fase 7 do roteiro.
 
 pub mod descritores;
 pub mod elf;

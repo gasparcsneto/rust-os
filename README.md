@@ -3806,24 +3806,36 @@ padronizado.
       arquiteturas. O estado global foi auditado com vários núcleos, e o que
       só aparece com eles está em [Vários núcleos](#vários-núcleos).
       **Fase 6 completa.**
-- [ ] **Fase 7 — ABI compatível com Linux.** Não é preferência, é o que decide
-      o projeto: ninguém porta um navegador para uma ABI nova, e sem navegador
-      não há desktop. Um subconjunto compatível herda o software que já
-      existe. E traz junto uma fronteira que é melhor dizer agora do que
-      descobrir depois: um binário de Linux fala `syscall` direto e **não**
-      passa pelo registro. O registro governa o sistema; o programa é um
-      convidado dentro dele. O que o agente enxerga de um convidado é o que o
-      sistema sabe sobre ele — não o que ele está pensando.
-- [ ] **Fase 8 — Escrita em disco.** Um sistema de arquivos log-estruturado
-      próprio, com journaling e `fsync` honesto. O Btrfs fica somente leitura,
-      para imagens: escrever nele é uma B-tree com cópia na escrita, somas de
-      verificação e transações — dos sistemas de arquivos mais difíceis que
-      existem, por um ganho que um log-estruturado entrega por um décimo do
-      trabalho.
-- [ ] **Fase 9 — Rede e TLS.** IP, UDP, TCP, DHCP e TLS. Com `smoltcp` em vez
-      de escrever a pilha: escrever TCP do zero é um a dois anos-pessoa e não
-      diferencia o Duke em nada. O ARP que existe hoje era a prova de ponta a
-      ponta mais barata possível, e cumpriu o papel dela.
+- [ ] **Fase 7 — Interface nativa.** Os programas do Duke são do Duke: não
+      há ABI do Linux, nem camada que imite outro sistema por baixo. Um
+      programa fala a língua do sistema — o registro de comandos, o mesmo
+      que a pessoa fala pelo interpretador e o agente pelo canal —, pelo
+      mesmo gate, com a autoridade de quem o lançou, na mesma auditoria. As
+      chamadas de mecanismo (memória, processo, descritores, eventos,
+      superfícies) ficam pequenas e binárias; o resto do sistema —
+      mensagens, arrendamentos, auditoria, árvore semântica, estado — chega
+      ao programa por uma chamada só, `pedir`. E cada programa declara, no
+      próprio executável, o que pretende fazer: a permissão efetiva é a do
+      papel de quem o lançou **interseção** a do manifesto — um programa
+      nunca tem mais que quem o lançou, e pode ter menos. O desenho está em
+      [`docs/INTERFACE.md`](docs/INTERFACE.md).
+- [ ] **Fase 8 — Armazenamento nativo.** Um sistema de arquivos
+      log-estruturado próprio, com journaling e `fsync` honesto — exposto
+      como capacidades do registro, sob `fs.write` e o alcance de caminho
+      da política, com versão por objeto, arrendamento para quem edita, e
+      cada gravação confirmada só depois de persistida. O Btrfs fica
+      somente leitura, para imagens: escrever nele é uma B-tree com cópia
+      na escrita, somas de verificação e transações — dos sistemas de
+      arquivos mais difíceis que existem, por um ganho que um
+      log-estruturado entrega por um décimo do trabalho.
+- [ ] **Fase 9 — Rede nativa.** IP, UDP, TCP, DHCP e TLS. Com `smoltcp` em
+      vez de escrever a pilha: escrever TCP do zero é um a dois anos-pessoa
+      e não diferencia o Duke em nada. O que diferencia é o lado de cima: um
+      programa não abre um socket do Unix, pede uma conexão ao registro,
+      com o destino como recurso da política, e cada conexão vai para a
+      auditoria. O canal do agente por TCP vira mais um transporte de
+      sessão. O ARP que existe hoje era a prova de ponta a ponta mais
+      barata possível, e cumpriu o papel dela.
 - [x] **Fase 10 — GPU, composição e a árvore semântica.** Começou antes da
       6, pela parte que não depende de vários núcleos. Feito: a pilha gráfica
       no desenho do Redox — um trait de adaptador que o compositor usa sem
@@ -3891,8 +3903,8 @@ padronizado.
       o de um desktop comum, e não mais fraco. Três coisas: quem pediu — a
       pessoa na frente da máquina ou o agente pelo canal —, o que foi feito, e
       um registro que a pessoa possa ler depois e desfazer. Junto com o resto
-      do que um desktop precisa: assinatura de código, sandbox por aplicativo,
-      cadeia de boot confiável.
+      do que um desktop precisa: assinatura de código e cadeia de boot
+      confiável. O sandbox por aplicativo é o manifesto da fase 7.
 - [ ] **Fase 13 — Hardware real e distribuição.** Instalador, atualização A/B
       com rollback, imagens assinadas, ACPI de verdade, NVMe, placa de rede
       real, watchdog. É onde projetos assim costumam morrer, e é por isso que
