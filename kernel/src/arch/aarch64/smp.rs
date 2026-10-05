@@ -36,9 +36,11 @@
 //! hardware difunde a todos os núcleos do domínio compartilhável — ver
 //! `mmu::invalidar`. O x86 precisa de NMI para a mesma coisa.
 
+use aarch64_cpu::registers::{CNTFRQ_EL0, CNTPCT_EL0};
 use core::arch::asm;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use tock_registers::interfaces::Readable;
 
 use crate::nucleos::MAX_NUCLEOS;
 
@@ -320,13 +322,32 @@ static PARADOS: AtomicU8 = AtomicU8::new(0);
 /// não ouve a SGI, e fica de fora — o que este backend não tem como evitar
 /// com o GIC v2 em modo não seguro. O prazo é o que impede que um núcleo
 /// assim cale o relatório.
+///
+/// # Prazo em tempo, não em voltas
+///
+/// O prazo era de cem milhões de voltas, e com um núcleo mascarado ele é
+/// esperado inteiro, sempre. Quanto isso dura depende de quem executa: no
+/// kernel de depuração sob o QEMU sem aceleração, passava de cinco
+/// segundos, e a tela de falha chegava ao monitor depois de a fumaça
+/// desistir de esperá-la — medido, com o núcleo travado da sonda anterior.
+/// O contador do timer genérico anda com as IRQs mascaradas e não depende
+/// de nada que o caminho de falha destrava, então o prazo é medido nele.
 pub fn parar_os_outros() -> u8 {
     PARANDO.store(true, Ordering::Release);
     let eu = super::nucleo_atual();
     let outros = crate::nucleos::mascara_dos_ligados() & !(1u8 << eu);
     super::gic::enviar_sgi(outros, super::gic::SGI_PARAR);
+    // Um quarto de segundo: um núcleo que ouve a SGI para em microssegundos.
+    // As voltas ficam como teto de reserva, para um contador que não ande —
+    // o firmware que deixa `CNTFRQ_EL0` em zero é o mesmo que o boot já
+    // relata como "sem timer".
+    let prazo = (CNTFRQ_EL0.get() / 4).max(1);
+    let inicio = CNTPCT_EL0.get();
     const VOLTAS: u64 = 100_000_000;
     for _ in 0..VOLTAS {
+        if CNTPCT_EL0.get().wrapping_sub(inicio) >= prazo {
+            break;
+        }
         if PARADOS.load(Ordering::Acquire) & outros == outros {
             break;
         }

@@ -788,6 +788,13 @@ por compilar. O que esta fase encontrou, e corrigiu na camada responsável:
 - **O pseudo-terminal perdia texto disputado.** A saída tomava o anel por
   `try_lock`, e com um núcleo só ele nunca estava tomado; com vários estava,
   e o texto sumia.
+- **No ARM, a tela de falha esperava o núcleo mascarado.** A parada dava a
+  quem não responde à SGI um prazo de cem milhões de voltas, e um núcleo
+  mascarado nunca responde: o prazo corria inteiro, sempre. No kernel de
+  depuração sob o QEMU sem aceleração, mais de cinco segundos — a fumaça
+  desistia antes de a tela de falha chegar ao monitor. O prazo agora é um
+  quarto de segundo no contador do timer genérico, que anda com as IRQs
+  mascaradas.
 
 E o que foi conferido e está certo, com o caso que o prova: a cópia na
 escrita com os dois donos escrevendo juntos (`smp: copia na escrita em dois
