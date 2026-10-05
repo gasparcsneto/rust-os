@@ -587,10 +587,8 @@ fn processar(canal: Canal, linha: &[u8]) {
         }
     };
 
-    sessao::com_sessao(canal.sessao(), || {
-        com_saida(canal, |w| {
-            protocol::envelope_ok(w, requisicao.id, |w| licenca.executar(requisicao.params, w))
-        })
+    com_saida(canal, |w| {
+        protocol::envelope_ok(w, requisicao.id, |w| licenca.executar(requisicao.params, w))
     });
 
     // Com a resposta inteira no fio, é seguro morrer. Daqui não se volta: o

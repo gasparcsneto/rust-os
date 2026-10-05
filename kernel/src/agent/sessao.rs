@@ -19,8 +19,6 @@
 //! por onde os bytes vieram: pergunta ao [`Canal`]. Um transporte novo — o
 //! TCP, quando houver rede — é mais um caso aqui, e nada muda em cima.
 
-use core::sync::atomic::{AtomicU8, Ordering};
-
 /// O número de uma sessão.
 pub type Sessao = u8;
 
@@ -105,24 +103,4 @@ impl Canal {
             Canal::Porta(p) => crate::virtio::console::proximo_byte(p).await,
         }
     }
-}
-
-/// A sessão cujo pedido está sendo atendido agora.
-///
-/// Um núcleo, e um comando por vez: o executor não troca de tarefa no meio
-/// de um comando, que não tem `.await`. Então a sessão atual é um número só,
-/// posto antes do despacho e tirado depois — ver [`com_sessao`].
-static ATUAL: AtomicU8 = AtomicU8::new(SERIAL);
-
-/// A sessão do pedido que está sendo atendido: quem está agindo.
-pub fn atual() -> Sessao {
-    ATUAL.load(Ordering::Relaxed)
-}
-
-/// Roda `f` como a sessão `sessao`, e volta à anterior.
-pub fn com_sessao<R>(sessao: Sessao, f: impl FnOnce() -> R) -> R {
-    let anterior = ATUAL.swap(sessao, Ordering::Relaxed);
-    let r = f();
-    ATUAL.store(anterior, Ordering::Relaxed);
-    r
 }

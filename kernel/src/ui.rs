@@ -459,19 +459,25 @@ pub enum Efeito {
 /// na linha ou que uma pessoa não conseguiria digitar. Recusar antes de
 /// mexer em qualquer coisa: uma ação recusada não deixa rastro na tela.
 pub fn agir(id: u32, acao: Acao, valor: Option<&str>, origem: Origem) -> Result<Efeito, Recusada> {
-    agir_com_versao(id, acao, valor, origem, None)
+    // Sem comando por trás — a tecla de função, o clique na barra —, quem
+    // age é a origem: o agente da sessão, ou a pessoa no console físico.
+    let titular = crate::coordenacao::titular(origem, crate::pessoas::Console::Fisico);
+    agir_com_versao(id, acao, valor, origem, titular, None)
 }
 
-/// [`agir`], com a versão que quem pede leu: o `expect_version` do
-/// `ui.act`. Se não é a de agora, `CONFLICT`, e nada muda.
+/// [`agir`], pelo `ui.act`: com o titular que o gate decidiu — o de quem o
+/// comando age por, e não o da origem —, e com a versão que quem pede leu,
+/// o `expect_version`. Se a versão não é a de agora, `CONFLICT`, e nada
+/// muda.
 pub fn agir_com_versao(
     id: u32,
     acao: Acao,
     valor: Option<&str>,
     origem: Origem,
+    titular: Option<politica::arrendamento::Titular>,
     esperada: Option<u64>,
 ) -> Result<Efeito, Recusada> {
-    let desfecho = executar(id, acao, valor, origem, esperada);
+    let desfecho = executar(id, acao, valor, origem, titular, esperada);
     // Registrado **depois**, com o desfecho. Antes da ação, uma recusa por
     // valor inválido ficava no log como ação feita — e isto é o começo de uma
     // trilha de auditoria, onde afirmar o que não aconteceu é pior que calar.
@@ -494,6 +500,7 @@ fn executar(
     acao: Acao,
     valor: Option<&str>,
     origem: Origem,
+    titular: Option<politica::arrendamento::Titular>,
     esperada: Option<u64>,
 ) -> Result<Efeito, Recusada> {
     // No post-mortem a interface não age. Toda ação muda a tela — limpar o
@@ -513,16 +520,15 @@ fn executar(
     }
     // Um campo — a linha de comando, ou um campo de janela — é um recurso
     // compartilhado: editar o arrenda para quem editou, confirmar pede o
-    // arrendamento, e a versão esperada é conferida. Quem age é o agente
-    // da sessão, ou a pessoa no console físico. Ver [`crate::coordenacao`].
+    // arrendamento, e a versão esperada é conferida. Quem age é o titular
+    // que quem chamou deu — ver [`agir`] e [`agir_com_versao`] — e
+    // [`crate::coordenacao`].
     let recurso = crate::coordenacao::recurso(id);
-    let titular = || crate::coordenacao::titular(origem, crate::pessoas::Console::Fisico);
     let editar = || {
-        crate::coordenacao::editar(&recurso, titular(), esperada, "ui.act").map_err(da_coordenacao)
+        crate::coordenacao::editar(&recurso, titular, esperada, "ui.act").map_err(da_coordenacao)
     };
     let confirmar = || {
-        crate::coordenacao::confirmar(&recurso, titular(), esperada, "ui.act")
-            .map_err(da_coordenacao)
+        crate::coordenacao::confirmar(&recurso, titular, esperada, "ui.act").map_err(da_coordenacao)
     };
     // Um campo de uma janela de processo: o pedido vai ao dono dela.
     if id != ID_DA_LINHA_DE_COMANDO

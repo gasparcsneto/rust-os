@@ -133,39 +133,70 @@ impl Autoridade {
     };
 }
 
-/// O comando em execução: em que fio, com que autoridade, e — num
-/// `message.send` — para quem a decisão resolveu o destino.
+/// O comando em execução num fio: com que autoridade, por que canal foi
+/// pedido, e — num `message.send` — para quem a decisão resolveu o
+/// destino.
 ///
 /// # Por que o fio faz parte
 ///
-/// Porque isto é uma variável do sistema inteiro, e a pergunta que ela
-/// responde — "com que autoridade o comando **deste** código está rodando?"
-/// — é de um fio só. Com um núcleo, e com todo comando executado pelo fio do
-/// executor, a diferença não aparecia: só havia um comando de cada vez, e só
-/// quem o executava perguntava. Com vários núcleos, qualquer outro fio que
-/// perguntasse durante um comando — um processo, um fio do kernel em outro
-/// núcleo — receberia a autoridade de **outro** principal: a do agente que
-/// pediu o comando, e não a dele.
+/// Porque a pergunta que isto responde — "com que autoridade o comando
+/// **deste** código está rodando?" — é de um fio só. Com todo comando
+/// executado pelo fio do executor, a diferença não aparecia: só havia um
+/// comando de cada vez, e só quem o executava perguntava. Com vários
+/// núcleos, qualquer outro fio que perguntasse durante um comando — um
+/// processo, um fio do kernel em outro núcleo — receberia a autoridade de
+/// **outro** principal. A resposta só vale para quem executa; os outros
+/// recebem [`Autoridade::NENHUMA`], que papel nenhum tem — o lado seguro de
+/// uma pergunta feita no lugar errado.
 ///
-/// Guardando quem executa, a resposta só vale para ele. Os outros recebem
-/// [`Autoridade::NENHUMA`], que papel nenhum tem — o lado seguro de uma
-/// pergunta feita no lugar errado.
+/// # Por que uma vaga por fio, e não uma só
+///
+/// Era uma só, trocada e reposta por [`como_comando`], e funcionava porque
+/// todo comando rodava no fio do executor. Um processo que pede um comando
+/// pelo próprio fio — a interface nativa, `docs/INTERFACE.md` — roda em
+/// qualquer núcleo, ao mesmo tempo que o executor: com uma vaga só, um
+/// tomaria a do outro, e o primeiro perderia a autoridade no meio do
+/// comando. Cada fio tem a sua, e um fio que executa um comando dentro de
+/// outro guarda a anterior e a devolve no fim.
 struct EmExecucao {
     fio: u64,
     autoridade: Autoridade,
+    /// A sessão do canal que pediu — a serial ou uma porta —, se foi uma.
+    /// É o que um comando sobre o próprio canal (`agent.session`, a prova
+    /// administrativa) pergunta, e o que nenhum outro chamador tem.
+    canal: Option<u8>,
     destino: Option<crate::mensagens::Destino>,
 }
 
-static EM_EXECUCAO: Mutex<Option<EmExecucao>> = Mutex::new(None);
+/// Uma vaga por fio que está executando um comando agora — no máximo um
+/// comando por fio de cada vez, porque o aninhado guarda o anterior.
+static EM_EXECUCAO: Mutex<[Option<EmExecucao>; crate::fios::MAX_FIOS]> =
+    Mutex::new([const { None }; crate::fios::MAX_FIOS]);
+
+/// Lê, da vaga deste fio, o que `f` tira dela. Fora de um comando, `None`.
+fn do_comando_deste_fio<R>(f: impl FnOnce(&EmExecucao) -> R) -> Option<R> {
+    let eu = crate::fios::id_atual();
+    crate::arch::sem_interrupcoes(|| {
+        EM_EXECUCAO
+            .lock()
+            .iter()
+            .flatten()
+            .find(|c| c.fio == eu)
+            .map(f)
+    })
+}
 
 /// A autoridade do comando que **este fio** está executando. Fora de um
 /// comando, ou em outro fio, [`Autoridade::NENHUMA`].
 pub fn autoridade_atual() -> Autoridade {
-    let eu = crate::fios::id_atual();
-    crate::arch::sem_interrupcoes(|| match EM_EXECUCAO.lock().as_ref() {
-        Some(c) if c.fio == eu => c.autoridade,
-        _ => Autoridade::NENHUMA,
-    })
+    do_comando_deste_fio(|c| c.autoridade).unwrap_or(Autoridade::NENHUMA)
+}
+
+/// A sessão do canal que pediu o comando que este fio executa — a serial
+/// ou uma porta. `None` para o pedido de uma pessoa, de um processo, e fora
+/// de um comando: nenhum deles fala por um canal.
+pub fn sessao_do_canal() -> Option<u8> {
+    do_comando_deste_fio(|c| c.canal).flatten()
 }
 
 /// O destinatário que a decisão de `message.send` resolveu e decidiu, para
@@ -174,42 +205,67 @@ pub fn autoridade_atual() -> Autoridade {
 /// usa este, que é o que a política viu. `None` fora de um `message.send`
 /// autorizado, e em outro fio.
 pub fn destino_decidido() -> Option<crate::mensagens::Destino> {
-    let eu = crate::fios::id_atual();
-    crate::arch::sem_interrupcoes(|| match EM_EXECUCAO.lock().as_ref() {
-        Some(c) if c.fio == eu => c.destino.clone(),
-        _ => None,
-    })
+    do_comando_deste_fio(|c| c.destino.clone()).flatten()
 }
 
-/// Roda `f` como o comando de `autoridade`, neste fio.
+/// Roda `f` como o comando de `autoridade`, pedido por `canal`, neste fio.
 ///
-/// Reentrante: o que estava em execução é guardado e volta no fim, para o
-/// caso de um comando executar outro.
+/// Reentrante: o que este fio estava executando é guardado e volta no fim,
+/// para o caso de um comando executar outro.
 fn como_comando<R>(
     autoridade: Autoridade,
+    canal: Option<u8>,
     destino: Option<crate::mensagens::Destino>,
     f: impl FnOnce() -> R,
 ) -> R {
     let fio = crate::fios::id_atual();
-    let anterior = crate::arch::sem_interrupcoes(|| {
-        EM_EXECUCAO.lock().replace(EmExecucao {
-            fio,
-            autoridade,
-            destino,
-        })
+    let novo = EmExecucao {
+        fio,
+        autoridade,
+        canal,
+        destino,
+    };
+    // A vaga deste fio, se ele já executava um comando; senão, uma livre.
+    // Não falta vaga: há uma por fio, e um fio ocupa no máximo uma.
+    let (vaga, anterior) = crate::arch::sem_interrupcoes(|| {
+        let mut vagas = EM_EXECUCAO.lock();
+        let vaga = vagas
+            .iter()
+            .position(|c| c.as_ref().is_some_and(|c| c.fio == fio))
+            .or_else(|| vagas.iter().position(Option::is_none));
+        match vaga {
+            Some(v) => (Some(v), vagas[v].replace(novo)),
+            None => (None, None),
+        }
     });
+    let Some(vaga) = vaga else {
+        // Não acontece — ver acima. Se acontecesse, o comando rodaria sem
+        // vaga, e toda pergunta dele ouviria `NENHUMA`: recusa, e não a
+        // autoridade de outro.
+        crate::log_error!("autorizacao", "sem vaga para o comando do fio {}", fio);
+        return f();
+    };
     let r = f();
-    let deste =
-        crate::arch::sem_interrupcoes(|| core::mem::replace(&mut *EM_EXECUCAO.lock(), anterior));
+    let deste = crate::arch::sem_interrupcoes(|| {
+        core::mem::replace(&mut EM_EXECUCAO.lock()[vaga], anterior)
+    });
     // O que sai é largado fora da trava: o destino pode ter memória no heap.
     drop(deste);
     r
 }
 
-/// Só para a suíte: roda `f` como se fosse o comando de `autoridade`.
+/// Só para a suíte: roda `f` como se fosse o comando de `autoridade`, fora
+/// de qualquer canal.
 #[cfg(feature = "modo-teste")]
 pub fn como_comando_de_teste<R>(autoridade: Autoridade, f: impl FnOnce() -> R) -> R {
-    como_comando(autoridade, None, f)
+    como_comando(autoridade, None, None, f)
+}
+
+/// Só para a suíte: roda `f` como o comando de `autoridade` pedido pela
+/// sessão `canal` — o que o despachante do canal faz.
+#[cfg(feature = "modo-teste")]
+pub fn como_canal_de_teste<R>(canal: u8, autoridade: Autoridade, f: impl FnOnce() -> R) -> R {
+    como_comando(autoridade, Some(canal), None, f)
 }
 
 /// Quem está numa decisão, como a auditoria o grava.
@@ -749,6 +805,8 @@ pub enum Chamador {
 pub struct Autorizado {
     comando: &'static Command,
     autoridade: Autoridade,
+    /// A sessão do canal que pediu, se foi um canal.
+    canal: Option<u8>,
     /// O destinatário de um `message.send`, como a decisão o resolveu.
     destino: Option<crate::mensagens::Destino>,
 }
@@ -757,8 +815,10 @@ impl Autorizado {
     /// Executa o comando com a autoridade de quem pediu — que `user.run`,
     /// por exemplo, grava no processo que lança.
     pub fn executar(self, params: Json, w: &mut JsonWriter) -> fmt::Result {
-        let (autoridade, destino) = (self.autoridade, self.destino);
-        como_comando(autoridade, destino, || (self.comando.handler)(params, w))
+        let (autoridade, canal, destino) = (self.autoridade, self.canal, self.destino);
+        como_comando(autoridade, canal, destino, || {
+            (self.comando.handler)(params, w)
+        })
     }
 }
 
@@ -853,9 +913,14 @@ pub fn autorizar(
         Acesso::PorProva => None,
     };
     contar(&quem, comando.nome, permissao);
+    let canal = match chamador {
+        Chamador::Sessao(s) => Some(s),
+        Chamador::Pessoa(_) => None,
+    };
     Ok(Autorizado {
         comando,
         autoridade,
+        canal,
         destino,
     })
 }

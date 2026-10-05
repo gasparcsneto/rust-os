@@ -793,7 +793,15 @@ pub static COMANDOS: &[Command] = &[
 // ---------------------------------------------------------------------------
 
 fn agent_session(_params: Json, w: &mut JsonWriter) -> fmt::Result {
-    let sessao = super::sessao::atual();
+    // A sessão do canal que pediu. Uma pessoa no interpretador e um
+    // processo não falam por canal: não têm sessão a descrever.
+    let Some(sessao) = crate::autorizacao::sessao_do_canal() else {
+        w.begin_object()?;
+        w.key("session")?;
+        w.null_value()?;
+        w.field_str("error", "quem pediu nao fala por um canal do agente")?;
+        return w.end_object();
+    };
     let canal = if sessao == super::sessao::SERIAL {
         super::sessao::Canal::Serial
     } else {
@@ -1081,7 +1089,11 @@ fn person_registry(_params: Json, w: &mut JsonWriter) -> fmt::Result {
 fn agent_sessions(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     use crate::virtio::console;
     w.begin_object()?;
-    w.field_u64("current", super::sessao::atual() as u64)?;
+    w.key("current")?;
+    match crate::autorizacao::sessao_do_canal() {
+        Some(s) => w.u64_value(s as u64)?,
+        None => w.null_value()?,
+    }
     w.key("sessions")?;
     w.begin_array()?;
     w.begin_object()?;
@@ -2614,6 +2626,22 @@ fn escrever_camada(w: &mut JsonWriter, c: crate::grafico::compositor::InfoCamada
 /// ação que ele não aceita, é uma resposta legítima a um pedido bem formado —
 /// a árvore que o agente leu pode ter mudado desde então. `-32602` fica para
 /// o pedido que o registro recusa.
+/// De onde vem uma ação pedida por `ui.act`, para o log e para o programa
+/// que a recebe: o agente do canal que pediu, ou a pessoa que pediu no
+/// interpretador. `None` para quem não é nenhum dos dois — a autoridade
+/// local —: a origem de uma ação é um agente ou uma pessoa, e uma origem
+/// inventada viraria, no Terminal, o Enter de alguém.
+fn origem_do_comando() -> Option<crate::ui::Origem> {
+    use crate::autorizacao::Autoridade;
+    match crate::autorizacao::sessao_do_canal() {
+        Some(s) => Some(crate::ui::Origem::Agente(s)),
+        None => match crate::autorizacao::autoridade_atual() {
+            Autoridade::Pessoa { .. } => Some(crate::ui::Origem::Pessoa),
+            _ => None,
+        },
+    }
+}
+
 fn ui_act(params: Json, w: &mut JsonWriter) -> fmt::Result {
     let id = params.member("id").and_then(|v| v.as_u64()).unwrap_or(0);
     let nome = params
@@ -2656,11 +2684,20 @@ fn ui_act(params: Json, w: &mut JsonWriter) -> fmt::Result {
 
     let id = u32::try_from(id).unwrap_or(0);
     let esperada = params.member("expect_version").and_then(|v| v.as_u64());
+    let Some(origem) = origem_do_comando() else {
+        w.field_bool("ok", false)?;
+        w.field_str(
+            "error",
+            "a acao na interface e de um agente ou de uma pessoa, e quem pediu nao e nenhum dos dois",
+        )?;
+        return w.end_object();
+    };
     match crate::ui::agir_com_versao(
         id,
         acao,
         valor,
-        crate::ui::Origem::Agente(super::sessao::atual()),
+        origem,
+        crate::coordenacao::titular_da_autoridade(crate::autorizacao::autoridade_atual()),
         esperada,
     ) {
         Ok(efeito) => {
@@ -3549,10 +3586,12 @@ fn ui_claim(params: Json, w: &mut JsonWriter) -> fmt::Result {
             .field_str("error", "nao ha campo com este id")
             .and_then(|()| w.end_object());
     };
-    let Some(titular) = crate::coordenacao::titular_do_agente(super::sessao::atual()) else {
+    let Some(titular) =
+        crate::coordenacao::titular_da_autoridade(crate::autorizacao::autoridade_atual())
+    else {
         w.field_bool("ok", false)?;
         return w
-            .field_str("error", "sessao sem aperto")
+            .field_str("error", "quem pediu nao tem titular de arrendamento")
             .and_then(|()| w.end_object());
     };
     let prazo = params
@@ -3588,10 +3627,12 @@ fn ui_release(params: Json, w: &mut JsonWriter) -> fmt::Result {
             .field_str("error", "nao ha campo com este id")
             .and_then(|()| w.end_object());
     };
-    let Some(titular) = crate::coordenacao::titular_do_agente(super::sessao::atual()) else {
+    let Some(titular) =
+        crate::coordenacao::titular_da_autoridade(crate::autorizacao::autoridade_atual())
+    else {
         w.field_bool("ok", false)?;
         return w
-            .field_str("error", "sessao sem aperto")
+            .field_str("error", "quem pediu nao tem titular de arrendamento")
             .and_then(|()| w.end_object());
     };
     match crate::coordenacao::soltar(&crate::coordenacao::recurso(id), titular) {

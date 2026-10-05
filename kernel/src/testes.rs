@@ -10401,6 +10401,19 @@ fn video_recusa_do_dispositivo_e_erro() -> Resultado {
 ///
 /// Num `String` do heap, e não no `Buffer` de tamanho fixo: a árvore carrega
 /// o texto do console, que passa fácil de um kilobyte.
+/// A sessão do canal pela qual [`chamar`] pede: a serial, a menos que o
+/// caso diga outra.
+static SESSAO_DE_TESTE: core::sync::atomic::AtomicU8 =
+    core::sync::atomic::AtomicU8::new(crate::agent::sessao::SERIAL);
+
+/// Roda `f` com [`chamar`] pedindo pela sessão `sessao`, e volta à anterior.
+fn com_sessao_de_teste<R>(sessao: u8, f: impl FnOnce() -> R) -> R {
+    let anterior = SESSAO_DE_TESTE.swap(sessao, SeqCst);
+    let r = f();
+    SESSAO_DE_TESTE.store(anterior, SeqCst);
+    r
+}
+
 fn chamar(nome: &str, params: &str) -> Result<alloc::string::String, &'static str> {
     let cmd = registry::encontrar(nome).ok_or("comando ausente do registro")?;
     if registry::validar(cmd, Json(params.as_bytes())).is_err() {
@@ -10412,10 +10425,14 @@ fn chamar(nome: &str, params: &str) -> Result<alloc::string::String, &'static st
         // Com a autoridade do sistema, dita aqui: fora de um comando, a
         // autoridade de comando é a de ninguém — ver
         // `autorizacao::EmExecucao` —, e estes casos chamam o handler como
-        // o sistema chamaria.
-        crate::autorizacao::como_comando_de_teste(crate::autorizacao::Autoridade::Sistema, || {
-            (cmd.handler)(Json(params.as_bytes()), &mut w)
-        })
+        // o sistema chamaria. Pelo canal da sessão do caso — a serial, a
+        // menos que o caso diga outra com [`com_sessao_de_teste`]: o que é
+        // do próprio canal, como a prova administrativa, é da sessão dele.
+        crate::autorizacao::como_canal_de_teste(
+            SESSAO_DE_TESTE.load(SeqCst),
+            crate::autorizacao::Autoridade::Sistema,
+            || (cmd.handler)(Json(params.as_bytes()), &mut w),
+        )
         .map_err(|_| "a resposta nao foi escrita")?;
     }
     Ok(saida)
@@ -11367,7 +11384,7 @@ fn executar_admin_provado(
         sigilo::hex(&publica),
         sigilo::hex(&prova)
     );
-    crate::agent::sessao::com_sessao(sessao, || chamar("admin.execute", &pedido))
+    com_sessao_de_teste(sessao, || chamar("admin.execute", &pedido))
 }
 
 /// O registro de um agente exige a prova de um administrador — e a prova
@@ -11700,7 +11717,7 @@ fn executar_admin_com(
     prova_de: &str,
     parametros: &str,
 ) -> Result<alloc::string::String, &'static str> {
-    let d = crate::agent::sessao::com_sessao(sessao, desafio)?;
+    let d = com_sessao_de_teste(sessao, desafio)?;
     executar_admin_de(sessao, d, chave, comando, prova_de, parametros)
 }
 
@@ -12562,6 +12579,104 @@ fn consoles_pessoas_e_consoles_nao_se_confundem() -> Resultado {
     crate::interpretador::fechar_console(terminal, "fim do caso");
     crate::interpretador::desativar_para_teste();
     crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// O que uma pessoa pede no interpretador é dela, e não da serial.
+///
+/// # O que estava em jogo
+///
+/// Os handlers de `ui.claim`, `ui.release`, `ui.act` e `agent.session`
+/// perguntavam a sessão do comando a uma variável global, que o despachante
+/// do canal punha e o interpretador não. Uma pessoa que pedia `ui.claim`
+/// no console arrendava o campo **como a serial** — e o `ui.act` dela
+/// chegava aos programas como o agente 0. Aqui ela pede pelo caminho de
+/// verdade, digitando, e o arrendamento tem de ser dela; e com a
+/// autoridade dela, sem canal, a sessão do canal não existe, a ação é da
+/// pessoa e a prova administrativa é recusada.
+fn consoles_o_pedido_da_pessoa_e_dela() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    use politica::arrendamento::Titular;
+    if crate::tela::tela().is_none() {
+        return Ok(());
+    }
+    let linha = crate::ui::ID_DA_LINHA_DE_COMANDO;
+    let recurso = crate::coordenacao::recurso(linha);
+    crate::interpretador::ativar_para_teste();
+    let resultado = (|| -> Resultado {
+        let sessao = crate::interpretador::sessao_do_console(Console::Fisico)
+            .ok_or("ninguem entrado no console")?;
+        let pessoa = match crate::pessoas::sessao(sessao) {
+            crate::pessoas::EstadoDaSessao::Ativa { pessoa, .. } => pessoa,
+            _ => return Err("a sessao de teste nao esta ativa"),
+        };
+        // Com a autoridade dela e sem canal — como o interpretador chama:
+        // `Chamador::Pessoa` não tem canal. A linha do console tem de estar
+        // de pé, e ela só está entre um comando e outro: por isso o pedido
+        // vai direto ao handler, e não digitado nela.
+        let como_ela = |nome: &str, params: &str| {
+            let cmd = registry::encontrar(nome).ok_or("comando ausente")?;
+            let mut saida = alloc::string::String::new();
+            {
+                let mut w = JsonWriter::new(&mut saida);
+                crate::autorizacao::como_comando_de_teste(Autoridade::Pessoa { sessao }, || {
+                    (cmd.handler)(Json(params.as_bytes()), &mut w)
+                })
+                .map_err(|_| "a resposta nao foi escrita")?;
+            }
+            Ok::<_, &'static str>(saida)
+        };
+        let r = como_ela("ui.claim", &alloc::format!(r#"{{"id":{linha}}}"#))?;
+        let titular = crate::coordenacao::estado(&recurso)
+            .arrendamento
+            .map(|a| a.titular);
+        if titular
+            != Some(Titular::Pessoa {
+                sessao: sessao.0,
+                pessoa: pessoa.0,
+            })
+        {
+            crate::log_error!("teste", "ui.claim: {} — ficou com {:?}", r, titular);
+            return Err("o ui.claim da pessoa nao arrendou o campo para ela");
+        }
+        let r = como_ela("ui.release", &alloc::format!(r#"{{"id":{linha}}}"#))?;
+        if crate::coordenacao::estado(&recurso).arrendamento.is_some() {
+            crate::log_error!("teste", "ui.release: {}", r);
+            return Err("o ui.release da pessoa nao soltou o que era dela");
+        }
+        let r = como_ela("agent.session", "{}")?;
+        if !r.contains(r#""session":null"#) {
+            crate::log_error!("teste", "agent.session: {}", r);
+            return Err("a pessoa recebeu a sessao de um canal");
+        }
+        let r = como_ela("admin.challenge", "{}")?;
+        if !r.contains("DENY_NOT_AUTHENTICATED") || r.contains("nonce") {
+            crate::log_error!("teste", "admin.challenge: {}", r);
+            return Err("a pessoa recebeu um desafio administrativo, sem canal");
+        }
+        // E o sistema, sem canal e sem titular, não age pelo `ui.act`: a
+        // origem de uma ação é um agente ou uma pessoa.
+        let mut saida = alloc::string::String::new();
+        {
+            let mut w = JsonWriter::new(&mut saida);
+            let cmd = registry::encontrar("ui.act").ok_or("comando ausente")?;
+            let params = alloc::format!(r#"{{"id":{linha},"action":"set_value","value":"x"}}"#);
+            crate::autorizacao::como_comando_de_teste(Autoridade::Sistema, || {
+                (cmd.handler)(Json(params.as_bytes()), &mut w)
+            })
+            .map_err(|_| "a resposta nao foi escrita")?;
+        }
+        if !saida.contains(r#""ok":false"#) || crate::interpretador::com_valor(|v| v == "x") {
+            crate::log_error!("teste", "ui.act do sistema: {}", saida);
+            return Err("o sistema agiu na interface sem origem");
+        }
+        Ok(())
+    })();
+    if let Some(a) = crate::coordenacao::estado(&recurso).arrendamento {
+        let _ = crate::coordenacao::soltar(&recurso, a.titular);
+    }
+    crate::interpretador::desativar_para_teste();
     resultado
 }
 
@@ -14396,7 +14511,7 @@ fn mensagens_esvaziar_a_caixa() -> Resultado {
             r#"{"mailbox":"teste-3"}"#,
             caixa,
         )?;
-        let d = crate::agent::sessao::com_sessao(1, desafio)?;
+        let d = com_sessao_de_teste(1, desafio)?;
         let s = executar_admin_provado(
             1,
             d,
@@ -14461,7 +14576,7 @@ fn mensagens_esvaziar_a_caixa() -> Resultado {
         intacta("um alvo que nao existe")?;
 
         // Com a prova e a permissão: as três saem, a de teste-3 fica.
-        let d = crate::agent::sessao::com_sessao(1, desafio)?;
+        let d = com_sessao_de_teste(1, desafio)?;
         let r = executar_admin_de(1, d, &ADMIN_DE_TESTE, "message.purge_mailbox", caixa, caixa)?;
         let todas = na_caixa
             .iter()
@@ -14879,7 +14994,7 @@ fn ler_desafio_de_quorum(j: Json, sessao: u8) -> Result<DesafioDeQuorum, &'stati
 
 /// Um desafio de quórum pedido na sessão `sessao`, pela chamada direta.
 fn desafio_de_quorum(sessao: u8) -> Result<DesafioDeQuorum, &'static str> {
-    let r = crate::agent::sessao::com_sessao(sessao, || {
+    let r = com_sessao_de_teste(sessao, || {
         chamar("admin.challenge", r#"{"for":"admin.revoke"}"#)
     })?;
     ler_desafio_de_quorum(Json(r.as_bytes()), sessao)
@@ -14964,7 +15079,7 @@ fn revogar_com(
     params: &str,
 ) -> Result<alloc::string::String, &'static str> {
     let pedido = pedido_de_quorum(d, assinaturas, params);
-    crate::agent::sessao::com_sessao(d.sessao, || chamar("admin.execute", &pedido))
+    com_sessao_de_teste(d.sessao, || chamar("admin.execute", &pedido))
 }
 
 /// A resposta é a recusa com este código e um motivo que contém `trecho`.
@@ -17401,7 +17516,7 @@ fn admin_revoke_assinaturas() -> Resultado {
         // Um desafio de quórum para ter o M, o N e a versão; o de uma
         // credencial só, pedido depois, o substitui na sessão.
         let d = desafio_de_quorum(0)?;
-        let comum = crate::agent::sessao::com_sessao(0, desafio)?;
+        let comum = com_sessao_de_teste(0, desafio)?;
         let d_comum2 = DesafioDeQuorum {
             id: comum.0,
             nonce: comum.1,
@@ -17585,7 +17700,7 @@ fn admin_revoke_antes_e_depois() -> Resultado {
     com_grupo(["administrador"; 3], || {
         // Antes: a credencial 3 pede um desafio na sessão 2 e faz a prova
         // de uma operação dela.
-        let antes = crate::agent::sessao::com_sessao(2, desafio)?;
+        let antes = com_sessao_de_teste(2, desafio)?;
         // E um quórum para revogar a 2 já assinado, na sessão 1.
         let d_outra = desafio_de_quorum(1)?;
         let params_outra = params_de_revogacao(1, "a segunda");
@@ -21062,6 +21177,107 @@ fn smp_autoridade_do_comando_nao_vaza_para_outro_fio() -> Resultado {
     Ok(())
 }
 
+/// Comandos ao mesmo tempo, em fios diferentes, cada um com a autoridade
+/// dele do começo ao fim — e o aninhado devolvendo a do de fora.
+///
+/// # O que estava em jogo
+///
+/// O contexto do comando era uma vaga só, trocada na entrada e reposta na
+/// saída. Funcionava porque todo comando rodava no fio do executor. Com
+/// comandos em vários fios — os de um processo, pela interface nativa —,
+/// o segundo a entrar tomava a vaga do primeiro, o primeiro passava a ver
+/// a autoridade de ninguém no meio do comando, e a reposição do primeiro
+/// apagava a do segundo. Aqui quatro fios, em núcleos diferentes quando há,
+/// executam comandos em laço, cada um com uma autoridade, aninham outro
+/// comando no meio, e conferem a todo instante que veem a sua.
+fn smp_comandos_simultaneos_cada_um_com_a_sua_autoridade() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    const FIOS: u64 = 4;
+    const VOLTAS: u64 = 400;
+    static ERROS: AtomicU64 = AtomicU64::new(0);
+    static PRONTOS: AtomicU64 = AtomicU64::new(0);
+    static LARGADA: AtomicBool = AtomicBool::new(false);
+
+    fn de(i: u64) -> Autoridade {
+        Autoridade::Sessao {
+            sessao: 1 + i as u8,
+            chave: Some([0x30 + i as u8; 32]),
+        }
+    }
+
+    extern "C" fn comandar(i: u64) -> ! {
+        while !LARGADA.load(SeqCst) {
+            core::hint::spin_loop();
+        }
+        let minha = de(i);
+        let aninhada = Autoridade::Sessao {
+            sessao: 9,
+            chave: Some([0x90 + i as u8; 32]),
+        };
+        for _ in 0..VOLTAS {
+            crate::autorizacao::como_canal_de_teste(minha_sessao(i), minha, || {
+                let confere = |esperada| {
+                    if crate::autorizacao::autoridade_atual() != esperada
+                        || crate::autorizacao::sessao_do_canal() != Some(minha_sessao(i))
+                    {
+                        ERROS.fetch_add(1, SeqCst);
+                    }
+                };
+                confere(minha);
+                for _ in 0..50 {
+                    core::hint::spin_loop();
+                }
+                confere(minha);
+                // Um comando dentro do comando: vê a dele, sem canal, e o
+                // de fora volta a ver a sua.
+                crate::autorizacao::como_comando_de_teste(aninhada, || {
+                    if crate::autorizacao::autoridade_atual() != aninhada
+                        || crate::autorizacao::sessao_do_canal().is_some()
+                    {
+                        ERROS.fetch_add(1, SeqCst);
+                    }
+                });
+                confere(minha);
+            });
+            crate::fios::ceder();
+        }
+        PRONTOS.fetch_add(1, SeqCst);
+        crate::fios::terminar()
+    }
+
+    fn minha_sessao(i: u64) -> u8 {
+        1 + i as u8
+    }
+
+    ERROS.store(0, SeqCst);
+    PRONTOS.store(0, SeqCst);
+    LARGADA.store(false, SeqCst);
+    let nucleos: alloc::vec::Vec<usize> =
+        nucleos_secundarios().chain(core::iter::once(0)).collect();
+    for i in 0..FIOS {
+        let onde = nucleos[i as usize % nucleos.len()];
+        crate::fios::criar_no_nucleo("teste-comando", comandar, i, onde)?;
+    }
+    LARGADA.store(true, SeqCst);
+    esperar_ate(|| PRONTOS.load(SeqCst) == FIOS, 3000)
+        .map_err(|_| "os fios dos comandos nao terminaram")?;
+    let erros = ERROS.load(SeqCst);
+    crate::log_info!(
+        "teste",
+        "{} comandos simultaneos, {} vezes a autoridade errada",
+        FIOS * VOLTAS,
+        erros
+    );
+    if erros > 0 {
+        return Err("um comando viu a autoridade de outro, ou a de ninguem");
+    }
+    // E fora de qualquer comando, a de ninguém: as vagas foram devolvidas.
+    if crate::autorizacao::autoridade_atual() != Autoridade::NENHUMA {
+        return Err("a vaga de um comando nao foi devolvida");
+    }
+    Ok(())
+}
+
 /// Um núcleo travado com as interrupções desligadas não leva o resto junto.
 ///
 /// # O que precisa continuar valendo
@@ -23879,6 +24095,10 @@ static CASOS: &[Caso] = &[
         f: consoles_sessao_revogada_e_processo_da_pessoa,
     },
     Caso {
+        nome: "consoles: o pedido da pessoa e dela",
+        f: consoles_o_pedido_da_pessoa_e_dela,
+    },
+    Caso {
         nome: "coordenacao: concorrencia entre agentes",
         f: coordenacao_concorrencia_entre_agentes,
     },
@@ -24401,6 +24621,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "smp: a autoridade do comando nao vaza para outro fio",
         f: smp_autoridade_do_comando_nao_vaza_para_outro_fio,
+    },
+    Caso {
+        nome: "smp: comandos simultaneos, cada um com a sua autoridade",
+        f: smp_comandos_simultaneos_cada_um_com_a_sua_autoridade,
     },
     Caso {
         nome: "smp: nucleo travado nao para os outros",

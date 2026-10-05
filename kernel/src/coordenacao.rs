@@ -75,6 +75,44 @@ pub fn titular_do_agente(sessao: u8) -> Option<Titular> {
     })
 }
 
+/// O titular de quem um comando age por: a autoridade que o gate decidiu,
+/// e não o canal por onde o pedido chegou.
+///
+/// - um agente, pela chave que ele provou — a mesma chave, e não quem
+///   estiver hoje na porta: o processo de um agente que desconectou não
+///   arrenda como o agente que entrou depois na mesma porta;
+/// - a serial;
+/// - uma pessoa, pela sessão dela, se ainda vale;
+/// - o sistema não tem titular: a autoridade local não arrenda.
+///
+/// # Por que não pelo canal
+///
+/// Era pelo canal — `titular_do_agente(sessao::atual())` —, e a sessão do
+/// canal é a do despachante: uma pessoa que pedia `ui.claim` no
+/// interpretador, onde ninguém a punha, arrendava o campo como a serial.
+pub fn titular_da_autoridade(autoridade: crate::autorizacao::Autoridade) -> Option<Titular> {
+    use crate::autorizacao::Autoridade;
+    match autoridade {
+        Autoridade::Sistema => None,
+        Autoridade::Sessao {
+            sessao: crate::agent::sessao::SERIAL,
+            chave: None,
+        } => Some(Titular::Agente {
+            sessao: crate::agent::sessao::SERIAL,
+            chave: None,
+        }),
+        Autoridade::Sessao { chave: None, .. } => None,
+        Autoridade::Sessao {
+            sessao,
+            chave: Some(k),
+        } => Some(Titular::Agente {
+            sessao,
+            chave: Some(k),
+        }),
+        Autoridade::Pessoa { sessao } => titular_da_pessoa(sessao),
+    }
+}
+
 /// O titular de uma sessão de pessoa, se ela ainda vale.
 pub fn titular_da_pessoa(sessao: IdSessao) -> Option<Titular> {
     match crate::pessoas::sessao(sessao) {

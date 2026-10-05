@@ -247,7 +247,20 @@ pub fn operacoes() -> impl Iterator<Item = (&'static str, &'static str)> {
 /// um desafio de quórum para aquela operação — e a resposta diz o que as
 /// credenciais vão provar além dele: a versão da política, M e N.
 pub(crate) fn desafiar(para: Option<&str>, w: &mut JsonWriter) -> fmt::Result {
-    let sessao = super::sessao::atual();
+    // A prova é de um desafio guardado na sessão do canal que pediu. Quem
+    // não fala por um canal — uma pessoa no interpretador, um processo —
+    // não tem onde guardá-lo: a sessão global que se lia aqui era a da
+    // serial, e a pessoa guardaria o desafio na vaga dela.
+    let Some(sessao) = crate::autorizacao::sessao_do_canal() else {
+        w.begin_object()?;
+        w.field_bool("ok", false)?;
+        w.field_str("code", politica::Codigo::DenyNotAuthenticated.nome())?;
+        w.field_str(
+            "error",
+            "a prova administrativa e da sessao de um canal do agente",
+        )?;
+        return w.end_object();
+    };
     w.begin_object()?;
     let quorum = match para {
         None => None,
@@ -320,7 +333,20 @@ pub struct Pedido<'a> {
 /// Executa uma operação administrativa: `admin.execute`. Com assinaturas,
 /// uma operação de quórum — ver [`conferir_quorum_e_executar`].
 pub(crate) fn executar(pedido: Pedido, w: &mut JsonWriter) -> fmt::Result {
-    let sessao = super::sessao::atual();
+    // A prova é de um desafio guardado na sessão do canal que pediu. Quem
+    // não fala por um canal — uma pessoa no interpretador, um processo —
+    // não tem onde guardá-lo: a sessão global que se lia aqui era a da
+    // serial, e a pessoa guardaria o desafio na vaga dela.
+    let Some(sessao) = crate::autorizacao::sessao_do_canal() else {
+        w.begin_object()?;
+        w.field_bool("ok", false)?;
+        w.field_str("code", politica::Codigo::DenyNotAuthenticated.nome())?;
+        w.field_str(
+            "error",
+            "a prova administrativa e da sessao de um canal do agente",
+        )?;
+        return w.end_object();
+    };
     w.begin_object()?;
     let resultado = if pedido.assinaturas.is_some() {
         conferir_quorum_e_executar(sessao, pedido, w)
