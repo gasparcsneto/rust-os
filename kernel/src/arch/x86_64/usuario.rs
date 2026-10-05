@@ -348,16 +348,25 @@ extern "C" fn despachar_chamada(quadro: *mut QuadroDeUsuario) -> i64 {
             crate::usuario::despachar(numero, a0, a1, a2, quadro as *mut core::ffi::c_void)
         };
 
-        // O fio continua de pé? Então a chamada acabou e o valor é dela.
-        if !crate::fios::atual_parado() {
+        // A chamada pediu para ser reexecutada? A pergunta é à chamada, e não
+        // ao estado do fio: com vários núcleos, o filho pode ter acordado o
+        // pai entre a chamada estacionar e esta linha, e o pai pronto parecia
+        // uma chamada que acabou — o zero dela chegava ao processo como
+        // resposta. Ver `crate::fios::tirar_reexecucao`.
+        let reexecutar = crate::fios::tirar_reexecucao();
+
+        // O fio continua de pé, e a chamada não pediu outra volta? Então ela
+        // acabou e o valor é dela.
+        if !reexecutar && !crate::fios::atual_parado() {
             return resultado;
         }
 
         // Não continua. Ou ele terminou — e aí `estacionar` nunca volta, que
         // é exatamente o desejado: o `sysretq` lá embaixo devolveria o
-        // controle a um processo que já não existe — ou está esperando um
-        // filho, e volta quando o filho sair. Nesse caso o `resultado` acima
-        // é descartado e a chamada roda de novo, agora com o que colher.
+        // controle a um processo que já não existe — ou está esperando, e
+        // volta quando o acordarem (ou na hora, se já o acordaram). Nesse
+        // caso o `resultado` acima é descartado e a chamada roda de novo,
+        // agora com o que colher.
         estacionar();
     }
 }

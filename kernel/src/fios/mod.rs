@@ -268,6 +268,10 @@ struct Fio {
     fixo: Option<usize>,
     /// É o fio ocioso de algum núcleo: só roda quando não há mais nada.
     ocioso: bool,
+    /// A chamada de sistema em curso pediu para ser reexecutada — ver
+    /// [`tirar_reexecucao`]. Posto junto com [`Estado::Esperando`], na mesma
+    /// seção crítica, e só por quem põe o fio nesse estado.
+    reexecutar: bool,
 }
 
 impl Fio {
@@ -464,6 +468,7 @@ pub fn init() {
             // tique do timer a cada pedido.
             fixo: Some(cpu),
             ocioso: false,
+            reexecutar: false,
         });
         e.atual[cpu] = Some(0);
         QUANTUM[cpu].store(QUANTUM_EM_TIQUES, Ordering::Relaxed);
@@ -887,6 +892,7 @@ fn nascer(
             na_cpu: None,
             fixo,
             ocioso: false,
+            reexecutar: false,
         });
         Ok::<_, &'static str>((vaga, anterior, herdada, pai, autoridade, fixo))
     })?;
@@ -962,6 +968,7 @@ fn nascer(
             na_cpu: None,
             fixo,
             ocioso: false,
+            reexecutar: false,
         });
         (marcador, e.nucleos_ociosos())
     });
@@ -1008,6 +1015,7 @@ pub fn preparar_ocioso(cpu: usize) -> Result<(usize, u64), &'static str> {
             na_cpu: None,
             fixo: Some(cpu),
             ocioso: true,
+            reexecutar: false,
         });
         Ok::<_, &'static str>((vaga, anterior))
     })?;
@@ -1419,6 +1427,7 @@ pub fn colher_filho(alvo: Option<u64>) -> Colheita {
             // Na mesma seção crítica: ver o cabeçalho.
             if let Some(fio) = e.fio_atual_mut() {
                 fio.estado = Estado::Esperando;
+                fio.reexecutar = true;
             }
             Colheita::Aguardando
         } else {
@@ -1436,14 +1445,30 @@ pub fn colheita() -> (u64, usize) {
     (COLHIDOS.load(Ordering::Relaxed), zumbis)
 }
 
-/// O fio atual está à espera de um filho?
+/// A chamada de sistema que acabou de rodar pediu para ser reexecutada?
+/// Responde uma vez: a pergunta apaga o pedido.
 ///
-/// Só o ARM pergunta. Lá a chamada de sistema precisa distinguir "o fio saiu"
-/// de "o fio espera" para decidir se recua o `ELR_EL1` e reexecuta o `svc`;
-/// no x86 a chamada volta de dentro do despacho e a distinção não muda nada.
-#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
-pub fn atual_esperando() -> bool {
-    com_escalonador(|e| e.fio_atual().is_some_and(|f| f.estado == Estado::Esperando))
+/// # Por que perguntar à chamada, e não ao estado do fio
+///
+/// O backend de arquitetura perguntava se o fio estava esperando — e, se
+/// estava, reexecutava a chamada em vez de devolver o resultado, que nesse
+/// caminho é um zero sem sentido. Com um núcleo só, entre a chamada pôr o
+/// fio em espera e o backend perguntar, nada o acordava: a chamada roda com
+/// as interrupções mascaradas. Com vários, o filho sai em outro núcleo
+/// exatamente nessa janela e acorda o pai; o backend o encontrava pronto,
+/// concluía que a chamada tinha acabado, e o zero chegava ao processo como
+/// resposta — `esperar` dizendo que colheu o filho 0, sem código. Medido na
+/// suíte do ARM em release: o programa `ponteiros` recebeu `Ok((0, None))`.
+///
+/// O pedido é posto pela própria chamada, junto com o estado de espera e
+/// sob a mesma trava, e ninguém mais o mexe: quem acorda muda o estado, não
+/// o pedido. Acordado antes ou depois, o fio reexecuta a chamada — e acordar
+/// a mais é inofensivo, ver [`Estado::Esperando`].
+pub fn tirar_reexecucao() -> bool {
+    com_escalonador(|e| {
+        e.fio_atual_mut()
+            .is_some_and(|f| core::mem::take(&mut f.reexecutar))
+    })
 }
 
 /// Tira o fio atual de circulação até [`acordar`] o devolver.
@@ -1455,6 +1480,7 @@ pub fn estacionar_atual() {
     com_escalonador(|e| {
         if let Some(fio) = e.fio_atual_mut() {
             fio.estado = Estado::Esperando;
+            fio.reexecutar = true;
         }
     });
 }

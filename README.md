@@ -734,6 +734,15 @@ por compilar. O que esta fase encontrou, e corrigiu na camada responsável:
   travado com as interrupções mascaradas continua respondendo — a NMI
   atravessa a máscara —, então isso não custa o requisito do núcleo
   travado.
+- **`esperar` devolvia o zero de "ainda não" como resposta.** Sem filho
+  para colher, a chamada põe o pai em espera e o backend a reexecuta quando
+  ele acorda — e o backend decidia isso perguntando se o fio **ainda**
+  estava esperando. Com um núcleo, nada o acordava entre as duas coisas;
+  com vários, o filho sai em outro núcleo exatamente ali, o pai já está
+  pronto, e o zero chegava ao processo: `esperar` dizendo que colheu o
+  filho 0, sem código (visto na suíte do ARM em release). Agora a chamada
+  pede a reexecução, junto com a espera e sob a mesma trava, e o backend
+  pergunta isso a ela. Vale também para a leitura de um canal vazio.
 - **A preempção dependia de ganhar um `try_lock`.** O timer descontava o
   quantum de cada núcleo dentro da tabela do escalonador, por `try_lock` —
   um handler não pode esperar pela trava. Com vários núcleos, um fio que

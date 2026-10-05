@@ -3978,6 +3978,12 @@ fn eventos_canal_dorme_entrega_e_recusa() -> Resultado {
     let fim = format!("eco: fim, {} eventos, soma {}", 5 + CAPACIDADE, soma);
     esperar_ate(|| visto(&fim), 600).map_err(|_| "o ouvinte nao disse o fim esperado")?;
     esperar_ate(|| visto("processo encerrou com codigo 63"), 600)?;
+    // A linha do log sai antes de o fio se dar por terminado. Com um núcleo
+    // só, o processo terminava antes de a suíte voltar a rodar; com vários,
+    // a suíte lê a linha em outro núcleo e chegava aqui com o ouvinte ainda
+    // vivo — o canal, certo, aceitava.
+    esperar_ate(|| !crate::fios::vivo(ouvinte), 600)
+        .map_err(|_| "o ouvinte disse que saiu e continuou vivo")?;
 
     // O ouvinte saiu sem fechar o descritor: o canal volta a ser de ninguém
     // na primeira vez que alguém o procura.

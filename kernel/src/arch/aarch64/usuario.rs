@@ -91,7 +91,12 @@ pub fn atender_chamada(quadro: &mut Quadro) {
     // estilo: lá a chamada roda sobre uma cadeia de chamadas comum, o fio
     // pode ser estacionado sem abandonar a pilha de kernel, e ele volta de
     // dentro do despacho. Ver `arch::x86_64::usuario::despachar_chamada`.
-    if crate::fios::atual_esperando() {
+    //
+    // A pergunta é à chamada, e não ao estado do fio: com vários núcleos, o
+    // filho pode ter acordado o pai entre a chamada estacionar e esta linha —
+    // ver [`crate::fios::tirar_reexecucao`]. Acordado antes, o fio não para
+    // no handler, e o `eret` já o põe no `svc` de novo.
+    if crate::fios::tirar_reexecucao() {
         quadro.elr -= 4;
         return;
     }
