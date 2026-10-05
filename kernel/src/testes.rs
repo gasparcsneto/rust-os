@@ -21144,57 +21144,74 @@ fn fios_zumbi_espera_a_colheita_e_some_depois_dela() -> Resultado {
         return Err("a tabela ja tinha zumbi antes do caso comecar");
     }
 
-    let (bifurcacoes_antes, _, saidas_antes) = crate::usuario::estatisticas_de_processo();
-    // O pai fica no núcleo da suíte. Com vários núcleos, um pai solto
-    // acordava em outro núcleo no instante em que o filho saía, e colhia em
-    // microssegundos: a janela do zumbi existia, e ninguém a via.
-    let aqui = crate::arch::sem_interrupcoes(crate::nucleos::atual);
-    crate::fios::criar_no_nucleo("teste-zumbi", hospedar, 0, aqui)?;
+    // Algumas tentativas, e basta ver o zumbi numa delas. A janela não é
+    // garantida: o pai bifurca e pergunta no mesmo quantum, e se o filho
+    // sair em outro núcleo antes de o pai chegar a `esperar`, o pai colhe
+    // sem nunca bloquear — o zumbi existe por microssegundos, com a suíte
+    // fora do núcleo. Medido: uma vez numa campanha de mutações, com a
+    // mutação em outro lugar do kernel. Um kernel que nunca deixa o zumbi na
+    // tabela continua reprovado em todas as tentativas, e a outra metade da
+    // regra — sumir depois da colheita — é conferida em cada uma.
+    const TENTATIVAS: usize = 8;
+    let mut viu_zumbi = false;
+    for _ in 0..TENTATIVAS {
+        let (bifurcacoes_antes, _, saidas_antes) = crate::usuario::estatisticas_de_processo();
+        // O pai fica no núcleo da suíte. Com vários núcleos, um pai solto
+        // acordava em outro núcleo no instante em que o filho saía, e colhia em
+        // microssegundos: a janela do zumbi existia, e ninguém a via.
+        let aqui = crate::arch::sem_interrupcoes(crate::nucleos::atual);
+        crate::fios::criar_no_nucleo("teste-zumbi", hospedar, 0, aqui)?;
 
-    // O filho sai primeiro e o pai fica esperando: existe uma janela em que a
-    // tabela tem exatamente um zumbi. Ela é curta — o pai acorda no mesmo
-    // instante —, então a sondagem tem de ser apertada.
-    let viu_zumbi = match nucleos_secundarios().next() {
-        // Com outro núcleo, a janela é aberta de propósito: depois do
-        // `fork`, a suíte sonda com as interrupções mascaradas, e o pai, preso
-        // a este núcleo, não pode rodar até ela soltar. O filho roda e sai em
-        // outro núcleo. Só preso o pai não bastava: quando o filho saía neste
-        // mesmo núcleo, o rodízio podia escolher o pai antes da suíte —
-        // depende da vaga que cada um ganhou —, e ele colhia sem a janela ser
-        // vista. O prazo é contado no timer do outro núcleo, porque o
-        // relógio do sistema é deste, e está mascarado.
-        Some(outro) => {
-            esperar_ate(
-                || crate::usuario::estatisticas_de_processo().0 > bifurcacoes_antes,
-                600,
-            )?;
-            crate::arch::sem_interrupcoes(|| {
-                let limite = tiques_do_nucleo(outro) + 600;
-                while tiques_do_nucleo(outro) < limite {
-                    if crate::fios::colheita().1 > 0 {
-                        return true;
+        // O filho sai primeiro e o pai fica esperando: existe uma janela em que a
+        // tabela tem exatamente um zumbi. Ela é curta — o pai acorda no mesmo
+        // instante —, então a sondagem tem de ser apertada.
+        let viu = match nucleos_secundarios().next() {
+            // Com outro núcleo, a janela é aberta de propósito: depois do
+            // `fork`, a suíte sonda com as interrupções mascaradas, e o pai, preso
+            // a este núcleo, não pode rodar até ela soltar. O filho roda e sai em
+            // outro núcleo. Só preso o pai não bastava: quando o filho saía neste
+            // mesmo núcleo, o rodízio podia escolher o pai antes da suíte —
+            // depende da vaga que cada um ganhou —, e ele colhia sem a janela ser
+            // vista. O prazo é contado no timer do outro núcleo, porque o
+            // relógio do sistema é deste, e está mascarado.
+            Some(outro) => {
+                esperar_ate(
+                    || crate::usuario::estatisticas_de_processo().0 > bifurcacoes_antes,
+                    600,
+                )?;
+                crate::arch::sem_interrupcoes(|| {
+                    let limite = tiques_do_nucleo(outro) + 600;
+                    while tiques_do_nucleo(outro) < limite {
+                        if crate::fios::colheita().1 > 0 {
+                            return true;
+                        }
+                        core::hint::spin_loop();
                     }
-                    core::hint::spin_loop();
-                }
-                false
-            })
-        }
-        None => esperar_ate(|| crate::fios::colheita().1 > 0, 600).is_ok(),
-    };
+                    false
+                })
+            }
+            None => esperar_ate(|| crate::fios::colheita().1 > 0, 600).is_ok(),
+        };
 
-    esperar_ate(
-        || crate::usuario::estatisticas_de_processo().2 >= saidas_antes + 2,
-        600,
-    )?;
+        esperar_ate(
+            || crate::usuario::estatisticas_de_processo().2 >= saidas_antes + 2,
+            600,
+        )?;
+
+        // E depois da colheita ele some. O coletor roda a cada tique, então
+        // damos alguns a ele — o que não pode é o zumbi ficar.
+        esperar_ate(|| crate::fios::colheita().1 == 0, 600)
+            .map_err(|_| "o zumbi continuou na tabela depois de colhido")?;
+        if viu {
+            viu_zumbi = true;
+            break;
+        }
+    }
 
     if !viu_zumbi {
         return Err("o filho morto nunca apareceu como zumbi");
     }
-
-    // E depois da colheita ele some. O coletor roda a cada tique, então damos
-    // alguns a ele — o que não pode é o zumbi ficar.
-    esperar_ate(|| crate::fios::colheita().1 == 0, 600)
-        .map_err(|_| "o zumbi continuou na tabela depois de colhido")
+    Ok(())
 }
 
 /// A travessia completa, do kernel ao anel sem privilégio e de volta — agora
