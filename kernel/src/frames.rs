@@ -481,6 +481,8 @@ pub fn alocar() -> Option<u64> {
 // de verdade — quando a paginação chegar, ela some.
 #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub fn liberar(endereco: u64) {
+    #[cfg(feature = "modo-teste")]
+    pausa_de_teste::talvez_pausar(endereco);
     // O frame do endereço zero fica fora de circulação para sempre, e não só
     // desde a inicialização. Zero é sentinela em vários lugares — "nenhum
     // frame", ponteiro nulo —, e devolvê-lo à lista o transforma num endereço
@@ -561,6 +563,52 @@ pub fn compartilhar(endereco: u64) -> bool {
         a.compartilhamentos[indice] = agora;
         true
     })
+}
+
+/// Só para a suíte: uma pausa na entrada de [`liberar`], para um frame
+/// só. Abre a janela entre decidir liberar e liberar, para o caso
+/// "frames: soltar libera na mesma secao" ver se ela existe. Fora da suíte
+/// não existe.
+#[cfg(feature = "modo-teste")]
+pub mod pausa_de_teste {
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    static FRAME: AtomicU64 = AtomicU64::new(0);
+    static PARADA: AtomicBool = AtomicBool::new(false);
+    static SOLTA: AtomicBool = AtomicBool::new(false);
+
+    /// A próxima liberação de `frame` para na entrada.
+    pub fn armar(frame: u64) {
+        SOLTA.store(false, Ordering::Release);
+        PARADA.store(false, Ordering::Release);
+        FRAME.store(frame, Ordering::Release);
+    }
+
+    pub fn parada() -> bool {
+        PARADA.load(Ordering::Acquire)
+    }
+
+    /// Solta quem parou, e desarma.
+    pub fn soltar() {
+        FRAME.store(0, Ordering::Release);
+        SOLTA.store(true, Ordering::Release);
+    }
+
+    pub(super) fn talvez_pausar(endereco: u64) {
+        if endereco == 0
+            || FRAME
+                .compare_exchange(endereco, 0, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
+            return;
+        }
+        PARADA.store(true, Ordering::Release);
+        let mut voltas = 0u64;
+        while !SOLTA.load(Ordering::Acquire) && voltas < 4_000_000_000 {
+            core::hint::spin_loop();
+            voltas += 1;
+        }
+    }
 }
 
 /// Retira um dono do frame, devolvendo-o ao alocador se era o último.

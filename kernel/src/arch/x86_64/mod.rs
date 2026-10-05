@@ -408,6 +408,9 @@ fn exigir_protecao_de_escrita() {
     );
 }
 
+/// Só para a suíte: tira a marca de compartilhada de uma página.
+#[cfg(feature = "modo-teste")]
+pub use paginacao::desmarcar_compartilhada_de_teste;
 /// Só para a suíte: o par de conversões de permissão deste backend.
 #[cfg(feature = "modo-teste")]
 pub use paginacao::permissoes_ida_e_volta;

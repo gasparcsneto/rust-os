@@ -53,26 +53,32 @@ pub use permissao::Permissao;
 ///   — `/` é a árvore inteira, menos o diretório reservado do kernel, que não
 ///   é recurso de papel nenhum. Não inclui outro papel: o que ele pode está
 ///   todo nesta linha. As administrativas não estão nela: são do
-///   `administrador`, com a prova.
+///   `administrador`, com a prova. A escrita (`fs.write`) alcança só o
+///   armazém, `/armazem` — ver `docs/ARMAZENAMENTO.md` —: é a única árvore
+///   gravável, e a linha a concede por escrito, como qualquer outra.
 /// - `administrador` é o **teto** do que um administrador delega: as
 ///   permissões comuns dele não se exercem — uma chave de administrador não
 ///   abre sessão de agente —, e dizem só o que ele pode conceder. Escritas
 ///   uma a uma, sem incluir o operador: um papel incluído que muda muda o
 ///   do administrador, e o do administrador não muda em tempo de execução.
+///   O `fs.write` dele é o do operador, `/armazem/compartilhado`: o teto
+///   tem de conter o que o operador recebe, para o operador ser delegável.
 /// - `quorum admin.revoke 2 3`: revogar a credencial de um administrador
 ///   exige a prova de duas outras, de um grupo de três — o da imagem.
 macro_rules! papeis_de_sistema {
     () => {
         "\
-papel sistema agent.read system.read log.read ui.read ui.act process.run net.send fs.read fs.raw_read keyboard.read debug.trigger terminal.attach audit.read policy.read message.send message.read
+papel sistema agent.read system.read log.read ui.read ui.act process.run net.send fs.read fs.write fs.raw_read keyboard.read debug.trigger terminal.attach audit.read policy.read message.send message.read
 recurso sistema fs.read /
+recurso sistema fs.write /armazem
 recurso sistema process.run /
 recurso sistema message.send papel:observador papel:operador papel:sistema papel:administrador
 taxa sistema 400 800
 processos sistema 32
 
-papel administrador agent.read system.read log.read ui.read ui.act process.run net.send fs.read audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke
-recurso administrador fs.read /dados /bin /programas
+papel administrador agent.read system.read log.read ui.read ui.act process.run net.send fs.read fs.write audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke
+recurso administrador fs.read /dados /bin /programas /armazem/compartilhado
+recurso administrador fs.write /armazem/compartilhado
 recurso administrador process.run /bin /programas
 recurso administrador message.send papel:operador papel:sistema papel:administrador
 taxa administrador 10 20
@@ -90,7 +96,8 @@ quorum admin.revoke 2 3
 ///
 /// - `observador` observa o estado do sistema e a tela; não lê arquivos;
 /// - `operador` observa e age: a tela, programas de `/bin` e
-///   `/programas`, arquivos de `/dados`, `/bin` e `/programas`;
+///   `/programas`, arquivos de `/dados`, `/bin` e `/programas`; lê e
+///   escreve no armazém compartilhado, `/armazem/compartilhado`;
 /// - `sistema` e `administrador`: ver `papeis_de_sistema`.
 pub const PADRAO: &str = concat!(
     "\
@@ -109,8 +116,9 @@ papel observador agent.read system.read log.read ui.read message.read
 taxa observador 20 40
 processos observador 2
 
-papel operador @observador ui.act process.run net.send fs.read message.send message.read
-recurso operador fs.read /dados /bin /programas
+papel operador @observador ui.act process.run net.send fs.read fs.write message.send message.read
+recurso operador fs.read /dados /bin /programas /armazem/compartilhado
+recurso operador fs.write /armazem/compartilhado
 recurso operador process.run /bin /programas
 recurso operador message.send papel:operador papel:sistema
 taxa operador 50 100
@@ -195,12 +203,49 @@ mod testes {
             assert_eq!(d("administrador", perm, None), Codigo::Allow);
             assert_eq!(d("sistema", perm, None), Codigo::DenyPermission);
         }
-        // Ninguém tem as de escrita: não há operação para elas.
-        for perm in [FsWrite, FsRawWrite] {
-            for papel in ["observador", "operador", "administrador", "sistema"] {
-                assert_eq!(d(papel, perm, Some("/dados")), Codigo::DenyPermission);
-            }
+        // A escrita bruta, ninguém: não há operação para ela.
+        for papel in ["observador", "operador", "administrador", "sistema"] {
+            assert_eq!(d(papel, FsRawWrite, Some("/dados")), Codigo::DenyPermission);
         }
+        // fs.write: só no armazém, e cada papel no alcance que a linha dele
+        // escreve. O observador, nada.
+        assert_eq!(
+            d("observador", FsWrite, Some("/armazem/compartilhado/x")),
+            Codigo::DenyPermission
+        );
+        for papel in ["operador", "administrador"] {
+            assert_eq!(
+                d(papel, FsWrite, Some("/armazem/compartilhado/x")),
+                Codigo::Allow
+            );
+            for fora in [
+                "/armazem/x",
+                "/armazem",
+                "/armazem/compartilhadox",
+                "/dados/x",
+            ] {
+                assert_eq!(
+                    d(papel, FsWrite, Some(fora)),
+                    Codigo::DenyResource,
+                    "{papel} {fora}"
+                );
+            }
+            assert_eq!(
+                d(papel, FsRead, Some("/armazem/compartilhado/x")),
+                Codigo::Allow
+            );
+            assert_eq!(d(papel, FsRead, Some("/armazem/x")), Codigo::DenyResource);
+        }
+        assert_eq!(d("sistema", FsWrite, Some("/armazem/x/y")), Codigo::Allow);
+        assert_eq!(d("sistema", FsWrite, Some("/armazem")), Codigo::Allow);
+        for fora in ["/dados/x", "/", "/armazemx", "/etc/duke/politica"] {
+            assert_eq!(
+                d("sistema", FsWrite, Some(fora)),
+                Codigo::DenyResource,
+                "{fora}"
+            );
+        }
+        assert_eq!(d("sistema", FsWrite, None), Codigo::DenyResource);
         assert_eq!(p.decidir(None, AgentRead, None), Codigo::DenyRole);
         assert_eq!(
             p.decidir(Some("fantasma"), AgentRead, None),
@@ -211,16 +256,16 @@ mod testes {
     }
 
     /// O sistema é a autoridade máxima, e enumerada: tem cada permissão que
-    /// não é administrativa nem de escrita — sem incluir papel nenhum, sem
-    /// curinga —, e cada uma de caminho com o alcance escrito.
+    /// não é administrativa nem a escrita bruta — sem incluir papel nenhum,
+    /// sem curinga —, e cada uma de caminho com o alcance escrito: `/` para
+    /// ler e executar, e só o armazém para escrever.
     #[test]
     fn o_sistema_e_maximo_e_enumerado() {
         let p = padrao();
         let sistema = p.papel("sistema").unwrap();
         assert!(sistema.inclui.is_empty(), "o sistema inclui outro papel");
         for perm in permissao::TODAS {
-            let esperado = !perm.administrativa()
-                && !matches!(perm, Permissao::FsWrite | Permissao::FsRawWrite);
+            let esperado = !perm.administrativa() && perm != Permissao::FsRawWrite;
             assert_eq!(sistema.tem(perm), esperado, "{}", perm.nome());
             assert_eq!(
                 sistema.diretas.contains(&perm),
@@ -229,7 +274,12 @@ mod testes {
                 perm.nome()
             );
             if esperado && perm.recurso_e_caminho() {
-                assert_eq!(sistema.recursos.get(&perm).unwrap(), &["/".to_string()]);
+                let alcance = if perm == Permissao::FsWrite {
+                    "/armazem"
+                } else {
+                    "/"
+                };
+                assert_eq!(sistema.recursos.get(&perm).unwrap(), &[alcance.to_string()]);
             }
         }
         // Nenhum outro papel da padrão alcança mais que ele.
@@ -361,13 +411,13 @@ mod testes {
         ));
         // Dar ao operador o que o administrador tem: vale.
         let nova =
-            mudar("papel operador @observador ui.act process.run net.send fs.read message.send message.read audit.read")
+            mudar("papel operador @observador ui.act process.run net.send fs.read fs.write message.send message.read audit.read")
                 .unwrap();
         assert!(nova.papel("operador").unwrap().tem(Permissao::AuditRead));
         // O que ele não tem: não.
         assert!(matches!(
             mudar(
-                "papel operador @observador ui.act process.run net.send fs.read message.send message.read keyboard.read"
+                "papel operador @observador ui.act process.run net.send fs.read fs.write message.send message.read keyboard.read"
             ),
             Err(Recusa::Proibida(_))
         ));

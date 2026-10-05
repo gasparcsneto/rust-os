@@ -1444,6 +1444,75 @@ pub fn adotar_imagem(
 
 /// O identificador do fio que está executando e o programa dele — ver
 /// [`crate::autorizacao::Programa`]. Fora de um fio, o kernel.
+/// Só para a suíte: os núcleos parados no fio ocioso agora — os que um
+/// fio novo precisa cutucar. Ver o caso "smp: o fio novo acorda o ocioso".
+#[cfg(feature = "modo-teste")]
+pub fn ociosos_de_teste() -> u8 {
+    com_escalonador(|e| e.nucleos_ociosos())
+}
+
+/// Só para a suíte: uma pausa no ponto exato em que o backend pergunta se a
+/// chamada pede para ser reexecutada — depois de a chamada voltar, antes da
+/// pergunta. É a janela em que outro núcleo pode acordar o fio, e o caso
+/// "fios: a reexecucao e da chamada" a abre de propósito, uma vez, para um
+/// programa só. Fora da suíte não existe.
+#[cfg(feature = "modo-teste")]
+pub mod pausa_de_teste {
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    static ARMADA: AtomicBool = AtomicBool::new(false);
+    static PARADA: AtomicBool = AtomicBool::new(false);
+    static SOLTA: AtomicBool = AtomicBool::new(false);
+    static PROGRAMA: crate::trava::Mutex<&'static str> = crate::trava::Mutex::new("");
+
+    /// A próxima chamada que pedir reexecução, de um processo do programa
+    /// `nome`, para antes da pergunta.
+    pub fn armar(nome: &'static str) {
+        crate::arch::sem_interrupcoes(|| *PROGRAMA.lock() = nome);
+        SOLTA.store(false, Ordering::Release);
+        PARADA.store(false, Ordering::Release);
+        ARMADA.store(true, Ordering::Release);
+    }
+
+    /// O fio chegou à pausa.
+    pub fn parada() -> bool {
+        PARADA.load(Ordering::Acquire)
+    }
+
+    /// Solta o fio parado, e desarma.
+    pub fn soltar() {
+        ARMADA.store(false, Ordering::Release);
+        SOLTA.store(true, Ordering::Release);
+    }
+
+    /// Chamada pelos dois backends logo antes de `tirar_reexecucao`. Gira,
+    /// e não dorme: as interrupções podem estar mascaradas aqui. Um teto de
+    /// voltas, para um caso que não soltasse não travar o núcleo para
+    /// sempre.
+    pub fn talvez_pausar() {
+        if !ARMADA.load(Ordering::Acquire) {
+            return;
+        }
+        let pede = super::com_escalonador(|e| e.fio_atual().is_some_and(|f| f.reexecutar));
+        let nome = crate::arch::sem_interrupcoes(|| *PROGRAMA.lock());
+        let deste = match super::programa_atual().1 {
+            crate::autorizacao::Programa::Imagem {
+                manifesto: Some(m), ..
+            } => m.nome() == nome,
+            _ => false,
+        };
+        if !pede || !deste || !ARMADA.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        PARADA.store(true, Ordering::Release);
+        let mut voltas = 0u64;
+        while !SOLTA.load(Ordering::Acquire) && voltas < 4_000_000_000 {
+            core::hint::spin_loop();
+            voltas += 1;
+        }
+    }
+}
+
 pub fn programa_atual() -> (u64, crate::autorizacao::Programa) {
     com_escalonador(|e| {
         e.fio_atual()

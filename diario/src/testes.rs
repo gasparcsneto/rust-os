@@ -933,7 +933,7 @@ fn gravar_tipo(m: &mut Memoria, esc: &mut Escritor, tpm: &mut Contador, n: u64, 
 #[test]
 fn a_auditoria_nao_gasta_o_contador() {
     use estado::tipo::*;
-    for t in [ABERTURA, BOOT, OPERACAO, MENSAGENS] {
+    for t in [ABERTURA, BOOT, OPERACAO, MENSAGENS, ARMAZEM] {
         assert!(
             estado::tipo::avanca_a_ancora(t),
             "o tipo {t} tem de avancar"
@@ -1016,6 +1016,7 @@ fn o_leitor_exige_a_ancora_do_tipo() {
         (estado::tipo::OPERACAO, true),
         (estado::tipo::BOOT, true),
         (estado::tipo::MENSAGENS, true),
+        (estado::tipo::ARMAZEM, true),
     ] {
         let mut m = Memoria::nova(64);
         let mut tpm = Contador(1000);
@@ -1103,6 +1104,7 @@ fn o_registro_de_auditoria_nao_carrega_estado() {
     let lacuna = estado::campos(&[&AUDITORIA_LACUNA.to_le_bytes(), b"la"]).unwrap();
     let agente = estado::campos(&[&AGENTE_REGISTRADO.to_le_bytes(), b"linha"]).unwrap();
     let mensagem = estado::campos(&[&MENSAGEM_ESTADO.to_le_bytes(), b"m"]).unwrap();
+    let arquivo = estado::campos(&[&ARQUIVO_GRAVADO.to_le_bytes(), b"a", b"v", b"c"]).unwrap();
     assert!(estado::so_de_auditoria(
         &estado::campos(&[&evento, &lacuna]).unwrap()
     ));
@@ -1110,6 +1112,7 @@ fn o_registro_de_auditoria_nao_carrega_estado() {
         estado::campos(&[&agente]).unwrap(),
         estado::campos(&[&evento, &agente]).unwrap(),
         estado::campos(&[&mensagem, &evento]).unwrap(),
+        estado::campos(&[&evento, &arquivo]).unwrap(),
         alloc::vec![0xFF, 0xFF, 1],
         // Uma entrada sem campo nenhum: sem tipo, não é de auditoria.
         estado::campos(&[&estado::campos(&[]).unwrap()]).unwrap(),

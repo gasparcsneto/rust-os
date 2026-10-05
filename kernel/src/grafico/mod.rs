@@ -268,6 +268,16 @@ pub fn camadas(mut f: impl FnMut(compositor::InfoCamada)) {
     }
 }
 
+/// Só para a suíte: roda `f` com a trava do compositor na mão — como outro
+/// núcleo compondo. Ver o caso "tela: o tique leva o que ficou".
+#[cfg(feature = "modo-teste")]
+pub fn com_o_compositor_preso_de_teste<R>(f: impl FnOnce() -> R) -> R {
+    crate::arch::sem_interrupcoes(|| {
+        let _vez = ATIVO.lock();
+        f()
+    })
+}
+
 /// Só para a suíte: a trava do compositor está livre para quem a pedir
 /// agora? Tenta algumas vezes — outro núcleo pode estar compondo.
 #[cfg(feature = "modo-teste")]

@@ -649,7 +649,10 @@ fn ler(descritor: u64, ponteiro: u64, tamanho: u64) -> i64 {
         Err(motivo) => {
             crate::log_warn!("usuario", "ler falhou: {}", motivo.motivo());
             RECUSADAS.fetch_add(1, Ordering::Relaxed);
-            return erro::ENDERECO_INVALIDO;
+            return match motivo {
+                crate::vfs::Erro::Mudou => erro::MUDOU,
+                _ => erro::ENDERECO_INVALIDO,
+            };
         }
     };
 

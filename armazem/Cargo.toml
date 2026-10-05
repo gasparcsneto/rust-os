@@ -1,0 +1,16 @@
+[package]
+# O armazém do Duke: a árvore de arquivos gravável, com versão por objeto,
+# como conta pura — sem disco, sem relógio, sem autorização.
+#
+# Um pacote, e não um módulo do kernel, pela razão de sempre: a regra se
+# testa no hospedeiro. O kernel dá o caminho já decidido pelo gate, grava a
+# mudança no journal e só então a aplica — ver `docs/ARMAZENAMENTO.md`.
+#
+# `no_std` com `alloc`.
+name = "armazem"
+version = "0.1.0"
+edition = "2024"
+description = "O armazém do Duke: arquivos com versão, como conta pura"
+license = "MIT OR Apache-2.0"
+
+[dependencies]

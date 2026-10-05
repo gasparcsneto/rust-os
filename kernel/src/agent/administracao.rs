@@ -189,8 +189,9 @@ static OPERACOES: &[Operacao] = &[
     },
     Operacao {
         nome: "lease.revoke",
-        resumo: "Revoga o arrendamento de um campo, de quem for: {\"id\": o id do campo em \
-                 ui.tree}. A unica forma de quebrar o arrendamento de outro.",
+        resumo: "Revoga o arrendamento de um campo ou de um arquivo do armazem, de quem for: \
+                 {\"id\": o id do campo em ui.tree} ou {\"path\": o caminho, abaixo de \
+                 /armazem}. A unica forma de quebrar o arrendamento de outro.",
         permissao: Permissao::LeaseRevoke,
         efeito: Efeito::Nenhum,
         executar: revogar_arrendamento,
@@ -1335,7 +1336,8 @@ fn revogar_sessao(pedinte: &Pedinte, params: Json, w: &mut JsonWriter) -> Result
 // Arrendamentos
 // ---------------------------------------------------------------------------
 
-/// `lease.revoke`: tira o arrendamento de um campo, de quem for.
+/// `lease.revoke`: tira o arrendamento de um campo, ou de um arquivo do
+/// armazém, de quem for.
 ///
 /// Sem preempção, esta é a única forma de quebrar o arrendamento de outro:
 /// com a prova, com a permissão no papel do administrador, e gravada — o
@@ -1347,14 +1349,36 @@ fn revogar_arrendamento(
     params: Json,
     w: &mut JsonWriter,
 ) -> Result<String, Falha> {
-    let id = params
-        .member("id")
-        .and_then(|v| v.as_u64())
-        .and_then(|id| u32::try_from(id).ok())
-        .ok_or_else(|| falha(Codigo::InvalidArgument, "falta `id`"))?;
-    let recurso = crate::coordenacao::recurso(id);
+    // Um dos dois, e não os dois: o pedido diz exatamente o que revoga.
+    let recurso = match (params.member("id"), params.member("path")) {
+        (Some(id), None) => {
+            let id = id
+                .as_u64()
+                .and_then(|id| u32::try_from(id).ok())
+                .ok_or_else(|| falha(Codigo::InvalidArgument, "`id` invalido"))?;
+            crate::coordenacao::recurso(id)
+        }
+        (None, Some(caminho)) => {
+            let (normal, _) = caminho
+                .as_str()
+                .and_then(crate::armazem::relativo)
+                .ok_or_else(|| {
+                    falha(
+                        Codigo::InvalidArgument,
+                        "`path` nao e um caminho do armazem",
+                    )
+                })?;
+            crate::coordenacao::recurso_do_caminho(&normal)
+        }
+        _ => {
+            return Err(falha(
+                Codigo::InvalidArgument,
+                "diga `id` (um campo) ou `path` (um arquivo do armazem)",
+            ));
+        }
+    };
     let saiu = crate::coordenacao::revogar(&recurso)
-        .ok_or_else(|| falha(Codigo::InvalidArgument, "o campo nao esta arrendado"))?;
+        .ok_or_else(|| falha(Codigo::InvalidArgument, "o recurso nao esta arrendado"))?;
     let (tipo, quem) = crate::coordenacao::descrever(&saiu.titular);
     let _ = w.field_str("resource", &recurso);
     let _ = w.field_str("holder", tipo);

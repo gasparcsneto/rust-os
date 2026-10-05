@@ -190,6 +190,12 @@ $ cargo xtask agent --canal 2 agent.session
 | `fs.mounts` | O que está montado na árvore de arquivos, e de que tipo |
 | `fs.list` | Lista um diretório da árvore (`path`) |
 | `fs.read` | Lê um arquivo da árvore e devolve o conteúdo (`path`, `offset`, `max`) |
+| `fs.stat` | O que um caminho do armazém é agora: o tipo, a versão, o tamanho e o arrendamento (`path`) |
+| `fs.write` | Grava um arquivo de texto no armazém contra a versão lida (`path`, `content`, `expect_version`: 0 cria); confirmado só depois de gravado no journal |
+| `fs.append` | Acrescenta ao fim de um arquivo do armazém, contra a versão de agora (`path`, `content`, `expect_version`) |
+| `fs.delete` | Apaga um arquivo do armazém, contra a versão de agora (`path`, `expect_version`) |
+| `fs.claim` | Arrenda um arquivo do armazém para esta sessão (`path`, `ttl_ms`); sem preempção |
+| `fs.release` | Solta o arrendamento desta sessão num arquivo do armazém (`path`) |
 | `net.info` | Endereço e contadores da placa de rede, se houver uma |
 | `net.arp` | Pergunta quem atende por um IPv4 e espera a resposta (`ip`, `from`) |
 | `video.sample` | Amostra a tela numa grade de cores (`columns`, `rows`) |
@@ -231,6 +237,7 @@ kernel/src/
 ├── persistencia.rs  o journal na partição de estado, ancorado no TPM: o estado de autoridade que sobrevive ao boot
 ├── coordenacao.rs   versões e arrendamentos: quem edita cada campo agora
 ├── mensagens.rs     as mensagens entre titulares: um recurso, pelo mesmo ponto de decisão
+├── armazem.rs       o armazém montado em /armazem: arrendamento, versão, persistência e auditoria de cada mudança, cada um no seu lugar
 ├── nativo.rs        a interface nativa: o registro como API dos programas, pelo mesmo gate
 ├── atividade.rs     quem está agindo: os agentes conectados e quem agiu por último
 ├── autorizacao.rs   o ponto único de decisão: papel, permissão, recurso, taxa e auditoria
@@ -393,6 +400,10 @@ politica/src/        a política de autorização, a mesma no kernel e no hosped
 ├── sigiloso.rs      o texto que sai da memória zerado: o corpo e a resposta que o leva
 └── auditoria.rs     os registros e a cadeia de elos BLAKE2s
 
+armazem/src/         o armazém como conta pura: caminhos, versões, tetos; preparar e aplicar
+├── lib.rs           a árvore de arquivos de texto, a versão do armazém inteiro e os diretórios implícitos
+└── testes.rs        criar, substituir, os conflitos de versão, os tetos, os diretórios e a reposição do boot
+
 diario/src/          o journal da persistência: registros cifrados, encadeados e ancorados
 ├── lib.rs           o formato, a leitura que confere cada registro, o escritor, o julgamento contra a âncora e o relógio que não volta
 ├── estado.rs        o que os registros do estado administrativo dizem: resultados, e não pedidos
@@ -443,6 +454,7 @@ programas/           os programas de usuário, compilados à parte do kernel
         ├── nativo.rs     um programa nativo: confere de dentro o que a interface nativa promete
         ├── contido.rs    declara só `system.read`, e confere que o manifesto limita o resto
         ├── anonimo.rs    o único sem manifesto: não exerce nada, nem lançado pelo sistema
+        ├── guardar.rs    guarda no armazém pelo `pedir`: a versão, o conflito, a leitura pelo descritor e o `MUDOU`
         ├── legado.rs     pede, não busca a resposta e troca de imagem: a nova não a encontra
         └── terminal.rs   o Terminal: o interpretador numa janela, pelo pseudo-terminal
 
@@ -1755,6 +1767,58 @@ a anterior podia pedir —; o programa de uma pessoa pedia sem taxa; e o
 pedido quebrado ia para a auditoria sem passar por balde nenhum. A fumaça
 roda `contido` e `anonimo` no kernel de produção, pela tarefa `programas`
 do executor de verdade — que a suíte não tem —, nas duas arquiteturas.
+
+## Armazenamento nativo
+
+Os programas, os agentes e as pessoas guardam dados no **armazém**: uma
+árvore de arquivos de texto montada em `/armazem`, gravável, com versão por
+objeto e arrendamento para quem edita. O desenho inteiro, com o porquê de
+cada escolha, está em [`docs/ARMAZENAMENTO.md`](docs/ARMAZENAMENTO.md).
+
+Não há um segundo sistema de autorização, nem uma segunda API. Escrever é
+pedir um comando do registro — pelo canal, pelo interpretador ou pelo
+`pedir` de um programa —, e o comando passa pelo mesmo gate e vai para a
+mesma auditoria. Seis conceitos, cada um num lugar só, com a sua recusa:
+
+| Conceito | Onde | Recusa |
+|---|---|---|
+| Autorização | o gate: `fs.write` no papel ∩ manifesto do programa | `DENY_PERMISSION` |
+| Alcance de caminho | o gate: a linha `recurso <papel> fs.write …` | `DENY_RESOURCE` |
+| Arrendamento | a coordenação, recurso `fs:<caminho>` — só o arrendamento | `CONFLICT` (`lease`) |
+| Versão | o armazém: a da última mudança, de um contador do armazém inteiro | `CONFLICT` (`version`) |
+| Persistência | um registro `ARMAZEM` do journal, estrito | `ERROR`, e nada muda |
+| Auditoria | a decisão, e o que o comando fez, no mesmo registro que a mudança | — |
+
+```text
+$ cargo xtask agent fs.write '{"path":"/armazem/compartilhado/notas.txt","content":"um","expect_version":0}'
+{"ok":true,"path":"/armazem/compartilhado/notas.txt","version":1,"size":2,"durable":true}
+$ cargo xtask agent fs.write '{"path":"/armazem/compartilhado/notas.txt","content":"dois","expect_version":0}'
+{"ok":false,"code":"CONFLICT","conflict":"version","current_version":1,"error":"a versao esperada nao e a de agora"}
+```
+
+**A política dá, e só ela.** A padrão escreve `fs.write` para o `sistema`
+em `/armazem` e para o `operador` em `/armazem/compartilhado`; o observador
+não escreve. O teto do administrador ganha o alcance do operador — para o
+operador continuar delegável — e um administrador não exerce o que o teto
+dele diz. O `sistema` não arrenda (a autoridade local não tem titular, como
+na interface): o arrendamento de uma pessoa vale contra ele, e só o
+`lease.revoke` de um administrador, com a prova, o quebra (`{"path": …}`).
+
+**Confirmado só no disco.** A mutação é preparada com a ordem das gravações
+na mão, gravada, e só então vale em memória; sem a persistência disponível,
+recusada antes de mudar qualquer coisa. O boot repõe o armazém do journal,
+e a compactação leva os arquivos na ordem das versões e a próxima versão —
+uma versão já dada não volta, nem a de um arquivo apagado.
+
+**A leitura é a de sempre.** `fs.read`, `fs.list` e o `abrir` dos processos,
+pelo VFS, sob `fs.read`. O nó de um arquivo é a versão dele: um descritor
+aberto antes de uma mudança recebe `MUDOU` (-17), e nunca metade de um
+conteúdo e metade de outro.
+
+O programa [`guardar`](programas/src/bin/guardar.rs) faz o caminho inteiro
+de dentro: declara `fs.read` e `fs.write` no manifesto, grava, ouve o
+conflito de versão, lê pelo descritor, vê o `MUDOU`, e é recusado fora do
+alcance de quem o lançou.
 
 ## Vários agentes
 
@@ -3913,15 +3977,25 @@ padronizado.
       nunca tem mais que quem o lançou, e pode ter menos; sem manifesto,
       nada. Ver [Interface nativa](#interface-nativa) e
       [`docs/INTERFACE.md`](docs/INTERFACE.md). **Fase 7 completa.**
-- [ ] **Fase 8 — Armazenamento nativo.** Um sistema de arquivos
-      log-estruturado próprio, com journaling e `fsync` honesto — exposto
-      como capacidades do registro, sob `fs.write` e o alcance de caminho
-      da política, com versão por objeto, arrendamento para quem edita, e
-      cada gravação confirmada só depois de persistida. O Btrfs fica
-      somente leitura, para imagens: escrever nele é uma B-tree com cópia
-      na escrita, somas de verificação e transações — dos sistemas de
-      arquivos mais difíceis que existem, por um ganho que um
-      log-estruturado entrega por um décimo do trabalho.
+- [x] **Fase 8 — Armazenamento nativo.** Um armazém log-estruturado
+      próprio, com journaling e `fsync` honesto — o journal da persistência,
+      cifrado, encadeado e ancorado no TPM, compactado em duas regiões —,
+      montado em `/armazem` e exposto como capacidades do registro
+      (`fs.write`, `fs.append`, `fs.delete`, `fs.claim`, `fs.release`,
+      `fs.stat`), sob `fs.write` e o alcance de caminho da política, com
+      versão por objeto, arrendamento para quem edita, e cada gravação
+      confirmada só depois de escrita, descarregada e ancorada. Sem
+      autorização paralela: o mesmo `pedir`, o mesmo gate, a mesma cadeia da
+      auditoria — e a decisão no mesmo registro do journal que a mudança. A
+      capacidade nova é concedida por linhas escritas da política, a
+      ninguém por código. O Btrfs fica somente leitura, para imagens:
+      escrever nele é uma B-tree com cópia na escrita, somas de verificação
+      e transações — dos sistemas de arquivos mais difíceis que existem, por
+      um ganho que um log-estruturado entrega por um décimo do trabalho. O
+      armazém tem tetos (16 KiB por arquivo, 256 arquivos, 512 KiB): é para
+      os dados de programas e agentes, e divide a partição com o estado de
+      autoridade. Ver [Armazenamento nativo](#armazenamento-nativo) e
+      [`docs/ARMAZENAMENTO.md`](docs/ARMAZENAMENTO.md). **Fase 8 completa.**
 - [ ] **Fase 9 — Rede nativa.** IP, UDP, TCP, DHCP e TLS. Com `smoltcp` em
       vez de escrever a pilha: escrever TCP do zero é um a dois anos-pessoa
       e não diferencia o Duke em nada. O que diferencia é o lado de cima: um

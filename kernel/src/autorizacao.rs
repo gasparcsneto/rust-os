@@ -263,6 +263,21 @@ struct EmExecucao {
     /// Quem pediu o comando — ver [`Pedinte`].
     pedinte: Pedinte,
     destino: Option<crate::mensagens::Destino>,
+    /// A decisão do gate que autorizou o comando — ver [`Decidido`]. `None`
+    /// para o kernel chamando um handler direto, na suíte.
+    decidido: Option<Decidido>,
+}
+
+/// A decisão que o gate tomou para o comando em execução: quem, como a
+/// auditoria o gravou, o método e o número da decisão na cadeia.
+///
+/// Com ela o handler registra o que **fez** em nome do mesmo principal que
+/// foi autorizado — ver [`auditar_execucao`] —, sem montar de novo quem
+/// pediu: a autoridade não muda entre a decisão e a execução.
+struct Decidido {
+    quem: Quem,
+    metodo: &'static str,
+    decisao: u64,
 }
 
 /// Quem pediu o comando em execução: a autoridade diz **por quem** ele
@@ -343,6 +358,7 @@ fn como_comando<R>(
     autoridade: Autoridade,
     pedinte: Pedinte,
     destino: Option<crate::mensagens::Destino>,
+    decidido: Option<Decidido>,
     f: impl FnOnce() -> R,
 ) -> R {
     let fio = crate::fios::id_atual();
@@ -351,6 +367,7 @@ fn como_comando<R>(
         autoridade,
         pedinte,
         destino,
+        decidido,
     };
     // A vaga deste fio, se ele já executava um comando; senão, uma livre.
     // Não falta vaga: há uma por fio, e um fio ocupa no máximo uma.
@@ -391,17 +408,18 @@ pub fn como_comando_de_teste<R>(autoridade: Autoridade, f: impl FnOnce() -> R) -
         Autoridade::Pessoa { .. } => Pedinte::Pessoa,
         _ => Pedinte::Kernel,
     };
-    como_comando(autoridade, pedinte, None, f)
+    como_comando(autoridade, pedinte, None, None, f)
 }
 
 /// Só para a suíte: roda `f` como o comando de `autoridade` pedido pela
 /// sessão `canal` — o que o despachante do canal faz.
 #[cfg(feature = "modo-teste")]
 pub fn como_canal_de_teste<R>(canal: u8, autoridade: Autoridade, f: impl FnOnce() -> R) -> R {
-    como_comando(autoridade, Pedinte::Canal(canal), None, f)
+    como_comando(autoridade, Pedinte::Canal(canal), None, None, f)
 }
 
 /// Quem está numa decisão, como a auditoria o grava.
+#[derive(Clone)]
 struct Quem {
     titular: Titular,
     sessao: u8,
@@ -1009,17 +1027,48 @@ pub struct Autorizado {
     pedinte: Pedinte,
     /// O destinatário de um `message.send`, como a decisão o resolveu.
     destino: Option<crate::mensagens::Destino>,
+    /// A decisão, para o handler registrar o que fez em nome dela.
+    decidido: Decidido,
 }
 
 impl Autorizado {
     /// Executa o comando com a autoridade de quem pediu — que `user.run`,
     /// por exemplo, grava no processo que lança.
     pub fn executar(self, params: Json, w: &mut JsonWriter) -> fmt::Result {
-        let (autoridade, pedinte, destino) = (self.autoridade, self.pedinte, self.destino);
-        como_comando(autoridade, pedinte, destino, || {
-            (self.comando.handler)(params, w)
+        let Autorizado {
+            comando,
+            autoridade,
+            pedinte,
+            destino,
+            decidido,
+        } = self;
+        como_comando(autoridade, pedinte, destino, Some(decidido), || {
+            (comando.handler)(params, w)
         })
     }
+}
+
+/// Registra o que o comando em execução neste fio **fez** — ou por que não
+/// fez depois de autorizado: o conflito de versão, o arrendamento de outro,
+/// a persistência que falta —, em nome do mesmo principal que o gate
+/// autorizou, com o método do comando e o número da decisão no detalhe.
+/// Devolve o número do registro.
+///
+/// Não decide nada: a decisão foi a do gate, e esta é a execução dela. Fora
+/// de um comando autorizado não registra nada e devolve zero — quem chama
+/// trata zero como recusa: uma mudança sem o registro do que foi feito não
+/// acontece.
+pub fn auditar_execucao(recurso: &str, codigo: Codigo, detalhe: &str) -> u64 {
+    let Some((quem, metodo, decisao)) = do_comando_deste_fio(|c| {
+        c.decidido
+            .as_ref()
+            .map(|d| (d.quem.clone(), d.metodo, d.decisao))
+    })
+    .flatten() else {
+        return 0;
+    };
+    let detalhe = alloc::format!("{detalhe}; decisao {decisao}");
+    auditar(&quem, metodo, recurso, codigo, &[], &detalhe)
 }
 
 /// Decide um comando. `Ok` com a licença para executá-lo; `Err` com o código
@@ -1153,7 +1202,7 @@ pub fn autorizar(
         }
         Acesso::Exige(permissao) => decidir(quem.papel.as_deref(), permissao, &recurso),
     };
-    auditar(&quem, comando.nome, &recurso, codigo, parametros, detalhe);
+    let decisao = auditar(&quem, comando.nome, &recurso, codigo, parametros, detalhe);
     if !codigo.permite() {
         return Err(codigo);
     }
@@ -1173,6 +1222,11 @@ pub fn autorizar(
         autoridade,
         pedinte,
         destino,
+        decidido: Decidido {
+            quem,
+            metodo: comando.nome,
+            decisao,
+        },
     })
 }
 

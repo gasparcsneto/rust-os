@@ -264,6 +264,38 @@ impl Tabela {
         (r, vencido)
     }
 
+    /// Confere só o arrendamento de um recurso, para uma mudança feita em
+    /// nome de `titular` — sem a versão desta tabela, que não muda: a
+    /// versão do recurso é de quem o guarda (o armazém tem a dele).
+    ///
+    /// - Com o arrendamento de outro, válido: `Ocupado`.
+    /// - Com o de `titular`: passa, e a atividade o renova pelo prazo dele.
+    /// - Livre: passa, e continua livre — o arrendamento é opcional.
+    ///
+    /// Sem titular (`None`) — uma autoridade que não arrenda — só passa
+    /// num recurso livre: ela não tem como ser a dona do arrendamento.
+    pub fn conferir(
+        &mut self,
+        recurso: &str,
+        titular: Option<Titular>,
+        agora_ms: u64,
+    ) -> (Result<(), Recusa>, Option<Vencido>) {
+        let vencido = self.vencer(recurso, agora_ms);
+        let r = match self
+            .recursos
+            .get_mut(recurso)
+            .and_then(|e| e.arrendamento.as_mut())
+        {
+            None => Ok(()),
+            Some(a) if Some(a.titular) == titular => {
+                a.expira_ms = a.expira_ms.max(agora_ms.saturating_add(a.prazo_ms));
+                Ok(())
+            }
+            Some(a) => Err(Recusa::Ocupado(a.titular)),
+        };
+        (r, vencido)
+    }
+
     /// Revoga o arrendamento de um recurso, de quem for. A operação
     /// administrativa — quem chama já conferiu a prova e a permissão.
     pub fn revogar(&mut self, recurso: &str) -> Option<Arrendamento> {
@@ -363,6 +395,35 @@ mod testes {
         );
         assert_eq!(r.unwrap_err().codigo(), crate::Codigo::Conflict);
         assert_eq!(t.estado(LINHA, 0).versao, 11);
+    }
+
+    /// `conferir` olha só o arrendamento: livre passa e continua livre; o
+    /// do titular passa e é renovado; o de outro é `Ocupado` — também para
+    /// quem não arrenda. A versão da tabela não anda em nenhum caso.
+    #[test]
+    fn conferir_so_o_arrendamento() {
+        let mut t = na_versao(3);
+        assert_eq!(t.conferir(LINHA, Some(A), 0).0, Ok(()));
+        assert_eq!(t.conferir(LINHA, None, 0).0, Ok(()));
+        assert_eq!(t.estado(LINHA, 0).arrendamento, None);
+        t.tomar(LINHA, A, 0, 1_000).0.unwrap();
+        assert_eq!(t.conferir(LINHA, Some(B), 1).0, Err(Recusa::Ocupado(A)));
+        assert_eq!(t.conferir(LINHA, None, 1).0, Err(Recusa::Ocupado(A)));
+        assert_eq!(
+            t.conferir(LINHA, Some(B), 1).0.unwrap_err().codigo(),
+            crate::Codigo::Conflict
+        );
+        // A atividade do titular renova.
+        assert_eq!(t.conferir(LINHA, Some(A), 900).0, Ok(()));
+        assert_eq!(
+            t.estado(LINHA, 1_500).arrendamento.map(|a| a.titular),
+            Some(A)
+        );
+        // Vencido, passa para quem vier, e diz qual venceu.
+        let (r, vencido) = t.conferir(LINHA, Some(B), 5_000);
+        assert_eq!(r, Ok(()));
+        assert_eq!(vencido.map(|v| v.0.titular), Some(A));
+        assert_eq!(t.estado(LINHA, 5_000).versao, 3);
     }
 
     /// A toma, B tenta → CONFLICT; A solta, B toma → ALLOW.

@@ -96,6 +96,8 @@ pub fn atender_chamada(quadro: &mut Quadro) {
     // filho pode ter acordado o pai entre a chamada estacionar e esta linha —
     // ver [`crate::fios::tirar_reexecucao`]. Acordado antes, o fio não para
     // no handler, e o `eret` já o põe no `svc` de novo.
+    #[cfg(feature = "modo-teste")]
+    crate::fios::pausa_de_teste::talvez_pausar();
     if crate::fios::tirar_reexecucao() {
         quadro.elr -= 4;
         return;

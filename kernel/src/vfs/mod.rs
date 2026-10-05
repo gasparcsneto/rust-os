@@ -21,8 +21,12 @@
 //!
 //! # O que não está aqui
 //!
-//! Escrita. `abrir` e `fechar` existem agora, mas **não** como métodos do
-//! trait: um sistema de arquivos somente leitura não tem nada a fazer quando
+//! Escrita pelo VFS. O único sistema de arquivos gravável é o armazém
+//! (`/armazem`, ver [`crate::armazem`]), e ele é escrito pelos comandos
+//! `fs.write`, `fs.append` e `fs.delete` — que passam pelo gate, pela
+//! coordenação e pela persistência —, e não por um `escrever` daqui: o
+//! trait é o de quem lê. `abrir` e `fechar` existem agora, mas **não** como
+//! métodos do trait: um sistema de arquivos somente leitura não tem nada a fazer quando
 //! um descritor abre ou fecha, e o estado que essas duas operações criam — a
 //! posição de leitura — é do processo, não do arquivo. Ele mora na tabela de
 //! descritores, em [`crate::usuario::descritores`], e o que esta camada
@@ -78,6 +82,10 @@ pub enum Erro {
     DoDispositivo,
     /// O caminho é de um segredo do kernel — ver [`DIRETORIO_RESERVADO`].
     Reservado,
+    /// O arquivo mudou depois de resolvido: o nó que quem lê guardou é de
+    /// um conteúdo que não existe mais — ver [`crate::armazem`]. Ler de
+    /// novo pelo caminho dá o de agora.
+    Mudou,
 }
 
 impl Erro {
@@ -93,6 +101,7 @@ impl Erro {
             Erro::GrandeDemais => "o arquivo nao cabe no teto de leitura",
             Erro::DoDispositivo => "o dispositivo recusou ou devolveu algo sem sentido",
             Erro::Reservado => "reservado ao kernel",
+            Erro::Mudou => "o arquivo mudou depois de aberto",
         }
     }
 }

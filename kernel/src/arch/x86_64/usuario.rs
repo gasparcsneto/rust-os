@@ -353,6 +353,8 @@ extern "C" fn despachar_chamada(quadro: *mut QuadroDeUsuario) -> i64 {
         // pai entre a chamada estacionar e esta linha, e o pai pronto parecia
         // uma chamada que acabou — o zero dela chegava ao processo como
         // resposta. Ver `crate::fios::tirar_reexecucao`.
+        #[cfg(feature = "modo-teste")]
+        crate::fios::pausa_de_teste::talvez_pausar();
         let reexecutar = crate::fios::tirar_reexecucao();
 
         // O fio continua de pé, e a chamada não pediu outra volta? Então ela

@@ -2596,6 +2596,19 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
         "autorizacao::destino_decidido(",
         &["kernel/src/agent/commands.rs"],
     ),
+    // O armazém: uma mutação, um arrendamento ou a soltura dele só pelos
+    // handlers dos comandos `fs.*` — depois da decisão do gate; a gravação
+    // no journal e a conferência só do arrendamento, só pelo módulo do
+    // armazém, na ordem dele; e a reposição, só pelo boot, da persistência.
+    ("armazem::mudar(", &["kernel/src/agent/commands.rs"]),
+    ("armazem::arrendar(", &["kernel/src/agent/commands.rs"]),
+    ("armazem::soltar(", &["kernel/src/agent/commands.rs"]),
+    ("persistencia::gravar_armazem(", &["kernel/src/armazem.rs"]),
+    ("coordenacao::conferir(", &["kernel/src/armazem.rs"]),
+    ("coordenacao::tomar_por(", &["kernel/src/armazem.rs"]),
+    ("coordenacao::soltar_por(", &["kernel/src/armazem.rs"]),
+    ("armazem::restaurar(", &["kernel/src/persistencia.rs"]),
+    ("armazem::fixar_proxima(", &["kernel/src/persistencia.rs"]),
     // Revogar a credencial de um administrador, e descartar os desafios
     // pendentes, só pela operação de quórum.
     (
@@ -2968,7 +2981,8 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
         println!(
             "[xtask] o handler de um comando, a operação administrativa e as ações na interface \
              só passam pelo ponto de decisão; o arrendamento de outro só cai com prova; as \
-             mensagens só pelos handlers, pela prova e pela revogação; quem agiu só se conta \
+             mensagens só pelos handlers, pela prova e pela revogação; o armazém só pelos \
+             comandos fs.*, pela gravação dele e pela reposição do boot; quem agiu só se conta \
              na decisão; nenhuma camada sobe acima da barra; e as cargas do boot só pelo boot"
         );
         Ok(ExitCode::SUCCESS)
@@ -3121,6 +3135,7 @@ fn conferir_arvore_do_readme() -> Result<ExitCode, String> {
         "politica/src",
         "ancora/src",
         "diario/src",
+        "armazem/src",
         "programas/src",
         "xtask/src",
     ] {
@@ -5808,6 +5823,7 @@ fn conversar(
     sob_janelas(qmp, &mut escrita, &mut leitor)?;
     sob_formulario(arch, monitor, qmp, &mut escrita, &mut leitor)?;
     sob_interface_nativa(arch, &mut escrita, &mut leitor)?;
+    sob_o_armazem(arch, &mut escrita, &mut leitor)?;
     sob_agentes(arch)?;
     sob_sigilo(arch)?;
     sob_administracao(arch, &mut escrita, &mut leitor)?;
@@ -8807,6 +8823,100 @@ fn sob_interface_nativa(
         "  [nativo] ok  {} pedidos atendidos pela tarefa `programas`",
         depois - antes
     );
+    Ok(())
+}
+
+/// O armazém no kernel de produção — ver `docs/ARMAZENAMENTO.md`: pela
+/// serial, que é do papel `sistema`, uma gravação confirmada no journal, o
+/// conflito de versão da gravação velha e a leitura pelo VFS; e o programa
+/// `guardar`, que faz o mesmo de dentro, pelo `pedir` e pelo descritor.
+fn sob_o_armazem(
+    arch: Arquitetura,
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+) -> Result<(), String> {
+    println!("[xtask] fumaça: o armazém, gravado no journal");
+    let mut id = 8800;
+    let mut pedir = |metodo: &str, params: &str| -> Result<String, String> {
+        id += 1;
+        escrita
+            .write_all(
+                format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"{metodo}","params":{params}}}"#)
+                    .as_bytes(),
+            )
+            .and_then(|()| escrita.write_all(b"\n"))
+            .and_then(|()| escrita.flush())
+            .map_err(|e| format!("armazem: falha ao pedir `{metodo}`: {e}"))?;
+        let resposta = ler_resposta(leitor).map_err(|e| format!("armazem: {e}"))?;
+        if !e_a_resposta(&resposta, id) {
+            return Err(format!(
+                "armazem: veio a resposta de outro pedido\n  {resposta}"
+            ));
+        }
+        Ok(resposta)
+    };
+    let versao = |r: &str, campo: &str| -> Option<u64> {
+        r.split(&format!(r#""{campo}":"#))
+            .nth(1)
+            .and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next())
+            .and_then(|n| n.parse().ok())
+    };
+    const C: &str = "/armazem/compartilhado/fumaca.txt";
+    let estado = pedir("fs.stat", &format!(r#"{{"path":"{C}"}}"#))?;
+    let antes = versao(&estado, "version")
+        .ok_or_else(|| format!("armazem: fs.stat sem versao\n  {estado}"))?;
+    let gravado = pedir(
+        "fs.write",
+        &format!(r#"{{"path":"{C}","content":"da fumaca","expect_version":{antes}}}"#),
+    )?;
+    if !gravado.contains(r#""ok":true"#) || !gravado.contains(r#""durable":true"#) {
+        return Err(format!(
+            "armazem: a gravacao nao foi confirmada\n  {gravado}"
+        ));
+    }
+    let velha = pedir(
+        "fs.write",
+        &format!(r#"{{"path":"{C}","content":"de quem leu antes","expect_version":{antes}}}"#),
+    )?;
+    if !velha.contains(r#""conflict":"version""#)
+        || versao(&velha, "current_version") != versao(&gravado, "version")
+    {
+        return Err(format!(
+            "armazem: a gravacao contra a versao velha nao foi conflito\n  {velha}"
+        ));
+    }
+    let lido = pedir("fs.read", &format!(r#"{{"path":"{C}"}}"#))?;
+    if !lido.contains(r#""content":"da fumaca""#) {
+        return Err(format!(
+            "armazem: o VFS nao leu o que foi gravado\n  {lido}"
+        ));
+    }
+    println!("  [armazem] ok  gravado, conflito de versao, lido pelo VFS");
+
+    let lancado = pedir(
+        "user.run",
+        &format!(r#"{{"path":"/programas/{}/guardar"}}"#, arch.nome()),
+    )?;
+    if !lancado.contains(r#""launched":true"#) {
+        return Err(format!(
+            "armazem: o user.run nao lancou guardar\n  {lancado}"
+        ));
+    }
+    let procurada = "processo encerrou com codigo 77";
+    let limite = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let log = pedir("log.tail", r#"{"count":32}"#)?;
+        if log.contains(procurada) {
+            break;
+        }
+        if std::time::Instant::now() >= limite {
+            return Err(format!(
+                "armazem: guardar nao saiu com 77 — o armazem nao respondeu de dentro\n  {log}"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    println!("  [armazem] ok  guardar saiu com 77");
     Ok(())
 }
 

@@ -63,6 +63,13 @@ pub mod tipo {
     /// compactações (8)]`. Uma região que começa por uma base só vale com o
     /// fecho: sem ele, a compactação não terminou, e a região é ignorada.
     pub const BASE_FIM: u16 = 7;
+    /// O que uma mutação do armazém mudou: uma entrada,
+    /// [`ARQUIVO_GRAVADO`] ou [`ARQUIVO_APAGADO`]. Não sobe a geração — um
+    /// arquivo não é autoridade —, mas avança o contador do TPM: voltar o
+    /// disco a antes dela seria um rollback do que o armazém confirmou. A
+    /// decisão do gate que a autorizou vai no mesmo registro, como em todo
+    /// registro.
+    pub const ARMAZEM: u16 = 8;
 
     /// Um agente entrou no registro: `[a linha do arquivo de agentes]`.
     pub const AGENTE_REGISTRADO: u16 = 10;
@@ -136,6 +143,16 @@ pub mod tipo {
     /// barramento fingindo ser ele. O fecho de uma base leva o mesmo ponto
     /// como quarto campo.
     pub const CHAVE_DO_TPM: u16 = 28;
+    /// Um arquivo do armazém passou a ter um conteúdo: `[caminho, versão
+    /// (8), o conteúdo inteiro]`. O caminho é relativo à raiz do armazém, e
+    /// a versão é a do contador do armazém inteiro. O conteúdo vai cifrado
+    /// com o registro, como o corpo de uma mensagem.
+    pub const ARQUIVO_GRAVADO: u16 = 29;
+    /// Um arquivo do armazém foi apagado: `[caminho, versão (8)]`.
+    pub const ARQUIVO_APAGADO: u16 = 30;
+    /// Na base: a versão da próxima mudança do armazém — `[versão (8)]`. As
+    /// versões não se repetem, nem as de arquivos que já saíram.
+    pub const ARMAZEM_PROXIMO: u16 = 31;
 
     /// Se um registro de tipo `tipo` avança o contador do TPM — se ele é uma
     /// transição do estado que a âncora protege.
@@ -144,7 +161,7 @@ pub mod tipo {
     /// a monotonicidade do estado de segurança. Avançam o contador os
     /// registros cuja volta a um estado anterior seria um rollback desse
     /// estado: a abertura, cada boot, cada operação de autoridade, cada
-    /// mudança de mensagem — e a base, no fecho, que troca a região que
+    /// mudança de mensagem, cada mudança do armazém — e a base, no fecho, que troca a região que
     /// vale. Um registro só de auditoria — leituras, recusas, o que o
     /// coletor grava de tempos em tempos — não muda estado protegido, e não
     /// gasta o contador: um TPM físico aguenta um número finito de escritas
@@ -161,7 +178,7 @@ pub mod tipo {
     /// auditoria: só os eventos da cadeia e a lacuna dela. Um registro só
     /// de auditoria não avança o contador, e pode sumir num rollback para a
     /// última âncora: nada de estado protegido — agente, papel, política,
-    /// pessoa, lápide, mensagem, chave do TPM — pode morar nele, nem como
+    /// pessoa, lápide, mensagem, arquivo, chave do TPM — pode morar nele, nem como
     /// cópia. Ver [`super::so_de_auditoria`].
     pub const fn cabe_num_registro_de_auditoria(entrada: u16) -> bool {
         matches!(entrada, AUDITORIA_EVENTO | AUDITORIA_LACUNA)

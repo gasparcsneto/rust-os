@@ -208,6 +208,11 @@ pub mod erro {
     /// lançou, e o papel dele não alcança este arquivo, este programa ou
     /// esta chamada. Distinto de [`NAO_ENCONTRADO`]: o caminho pode existir.
     pub const NEGADO: i64 = -16;
+    /// O arquivo mudou depois de aberto: o descritor é de um conteúdo que
+    /// não existe mais — um arquivo do armazém, gravado por outro. Abrir de
+    /// novo dá o de agora. Distinto de [`ENDERECO_INVALIDO`]: o buffer está
+    /// certo, e não há metade de um conteúdo e metade de outro para ler.
+    pub const MUDOU: i64 = -17;
 }
 
 /// As superfícies do compositor, como um processo as vê.

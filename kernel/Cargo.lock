@@ -65,6 +65,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "armazem"
+version = "0.1.0"
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -293,6 +297,7 @@ dependencies = [
  "aarch64-cpu",
  "ancora",
  "aparencia",
+ "armazem",
  "diario",
  "pci_types",
  "politica",

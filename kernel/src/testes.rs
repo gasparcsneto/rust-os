@@ -16447,8 +16447,9 @@ fn auditoria_a_lacuna() -> Resultado {
 }
 
 /// O estado que o journal descreve, como a suíte o compara: os agentes, as
-/// credenciais administrativas revogadas, a política, as pessoas, e as
-/// mensagens — vivas, lápides e o próximo id.
+/// credenciais administrativas revogadas, a política, as pessoas, as
+/// mensagens — vivas, lápides e o próximo id — e o armazém: cada arquivo
+/// com a versão e o conteúdo, e a próxima versão.
 #[derive(Debug, PartialEq, Eq)]
 struct EstadoDoJournal {
     agentes: alloc::vec::Vec<(
@@ -16463,15 +16464,41 @@ struct EstadoDoJournal {
     mensagens: alloc::vec::Vec<crate::mensagens::Retrato>,
     lapides: alloc::vec::Vec<politica::mensagens::Lapide>,
     proximo: u64,
+    armazem: RetratoDoArmazem,
 }
 
-/// O registro, a política, as pessoas e as mensagens voltam ao que a imagem
-/// diz — sem nada do journal.
+/// O armazém como a suíte o compara: cada arquivo — caminho, versão,
+/// conteúdo — e a próxima versão.
+type RetratoDoArmazem = (
+    alloc::vec::Vec<(alloc::string::String, u64, alloc::vec::Vec<u8>)>,
+    u64,
+);
+
+fn retrato_do_armazem() -> RetratoDoArmazem {
+    crate::armazem::com_o_armazem(|a| {
+        (
+            a.todos()
+                .map(|(c, o)| {
+                    (
+                        alloc::string::String::from(c),
+                        o.versao(),
+                        o.dados().to_vec(),
+                    )
+                })
+                .collect(),
+            a.proxima(),
+        )
+    })
+}
+
+/// O registro, a política, as pessoas, as mensagens e o armazém voltam ao
+/// que a imagem diz — sem nada do journal.
 fn de_volta_a_imagem() {
     crate::identidade::esquecer_registrados();
     crate::identidade::esquecer_lapides_de_teste();
     crate::pessoas::esquecer_registradas();
     crate::mensagens::esquecer();
+    crate::armazem::trocar_de_teste(::armazem::Armazem::novo());
     crate::autorizacao::carregar();
 }
 
@@ -16505,6 +16532,7 @@ fn estado_do_journal() -> Result<EstadoDoJournal, &'static str> {
         mensagens: crate::mensagens::retrato_de_teste(),
         lapides,
         proximo,
+        armazem: retrato_do_armazem(),
     })
 }
 
@@ -24423,6 +24451,1445 @@ fn aparencia_a_tela_tem_a_linguagem_visual() -> Resultado {
     contorno
 }
 
+// ---------------------------------------------------------------------------
+// armazem: o armazenamento nativo — docs/ARMAZENAMENTO.md
+// ---------------------------------------------------------------------------
+
+/// Um pedido completo — gate, handler, auditoria — em nome de `quem`.
+fn fs_pedir(
+    quem: crate::autorizacao::Chamador,
+    metodo: &str,
+    params: &str,
+) -> alloc::string::String {
+    crate::nativo::responder_de_teste(quem, &pedido_rpc(metodo, params))
+}
+
+/// Um campo numérico do resultado de um envelope.
+fn fs_numero(envelope: &str, campo: &str) -> Option<u64> {
+    Json(envelope.as_bytes())
+        .member("result")?
+        .member(campo)?
+        .as_u64()
+}
+
+/// Um campo de texto do resultado de um envelope.
+fn fs_texto(envelope: &str, campo: &str) -> Option<alloc::string::String> {
+    Json(envelope.as_bytes())
+        .member("result")?
+        .member(campo)?
+        .as_str()
+        .map(alloc::string::String::from)
+}
+
+/// O comando rodou e disse que fez.
+fn fs_ok(envelope: &str) -> bool {
+    Json(envelope.as_bytes())
+        .member("result")
+        .and_then(|r| r.member("ok"))
+        .and_then(|v| v.as_bool())
+        == Some(true)
+}
+
+/// `fs.write` de `texto` em `caminho`, contra a versão `v`.
+fn fs_gravar(
+    quem: crate::autorizacao::Chamador,
+    caminho: &str,
+    v: u64,
+    texto: &str,
+) -> alloc::string::String {
+    fs_pedir(
+        quem,
+        "fs.write",
+        &alloc::format!(r#"{{"path":"{caminho}","content":"{texto}","expect_version":{v}}}"#),
+    )
+}
+
+/// O que o armazém tem em `caminho` agora: a versão e o conteúdo.
+fn fs_no_armazem(caminho: &str) -> (u64, Option<alloc::vec::Vec<u8>>) {
+    let (_, relativo) = crate::armazem::relativo(caminho).unwrap_or_default();
+    crate::armazem::com_o_armazem(|a| {
+        (
+            a.versao(&relativo),
+            a.objeto(&relativo).map(|o| o.dados().to_vec()),
+        )
+    })
+}
+
+/// Os seis conceitos, cada um com a sua recusa, sem se misturar:
+///
+/// - **autorização**: o observador não tem `fs.write` — `DENY_PERMISSION`,
+///   pelo gate;
+/// - **alcance**: o operador escreve em `/armazem/compartilhado` e não fora
+///   — `DENY_RESOURCE`, pelo gate;
+/// - **versão**: criar o que existe, ou gravar contra a versão velha —
+///   `CONFLICT` com `"conflict":"version"` e a versão de agora;
+/// - **arrendamento**: o de outro titular recusa quem tem a versão certa —
+///   `CONFLICT` com `"conflict":"lease"`, e a versão não anda; a saída do
+///   titular o solta;
+/// - **persistência**: indisponível, nada muda — nem o armazém nem o
+///   journal —, e a resposta é `ERROR`;
+/// - **auditoria**: cada recusa depois do gate é gravada como o resultado
+///   do comando autorizado.
+fn armazem_os_conceitos_separados() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use crate::pessoas::Console;
+    use politica::Codigo;
+    const C: &str = "/armazem/compartilhado/conceitos/notas.txt";
+    crate::pessoas::esquecer_registradas();
+    let resultado = (|| -> Resultado {
+        let ana = Chamador::Pessoa(crate::pessoas::sessao_de_teste(
+            Console::Fisico,
+            "ana-fs",
+            "operador",
+        ));
+        let sessao_da_bia =
+            crate::pessoas::sessao_de_teste(Console::Terminal(41), "bia-fs", "operador");
+        let bia = Chamador::Pessoa(sessao_da_bia);
+        let olho = Chamador::Pessoa(crate::pessoas::sessao_de_teste(
+            Console::Terminal(42),
+            "olho-fs",
+            "observador",
+        ));
+
+        // Autorização: pelo gate, antes de qualquer outra coisa.
+        let r = fs_gravar(olho, C, 0, "x");
+        if decisao_do_envelope(&r) != "DENY_PERMISSION" {
+            crate::log_error!("teste", "{}", r);
+            return Err("o observador escreveu sem fs.write");
+        }
+        // Alcance: pelo gate, sobre o caminho do pedido.
+        for fora in [
+            "/armazem/fora.txt",
+            "/armazem/compartilhadox/a",
+            "/armazem/compartilhado/../fora.txt",
+            "/dados/x",
+        ] {
+            let r = fs_gravar(ana, fora, 0, "x");
+            if decisao_do_envelope(&r) == "ALLOW" {
+                crate::log_error!("teste", "{}: {}", fora, r);
+                return Err("o operador escreveu fora do alcance do papel");
+            }
+        }
+        if fs_no_armazem("/armazem/fora.txt").1.is_some() {
+            return Err("uma recusa do gate mudou o armazem");
+        }
+
+        // Criar.
+        let r = fs_gravar(ana, C, 0, "um");
+        let v1 = fs_numero(&r, "version").ok_or("a criacao nao disse a versao")?;
+        if !fs_ok(&r) || !r.contains(r#""durable":true"#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("a criacao foi recusada");
+        }
+        // Versão: criar de novo, e gravar contra a velha.
+        for (v, quem) in [(0, bia), (v1 + 7, ana)] {
+            let r = fs_gravar(quem, C, v, "dois");
+            if decisao_do_envelope(&r) != "ALLOW"
+                || fs_ok(&r)
+                || fs_texto(&r, "code").as_deref() != Some("CONFLICT")
+                || fs_texto(&r, "conflict").as_deref() != Some("version")
+                || fs_numero(&r, "current_version") != Some(v1)
+            {
+                crate::log_error!("teste", "{}", r);
+                return Err("a versao velha nao foi conflito de versao com a de agora");
+            }
+        }
+        // Arrendamento: a bia toma; a ana, com a versão certa, ouve o
+        // conflito de arrendamento — e nada anda.
+        let r = fs_pedir(bia, "fs.claim", &alloc::format!(r#"{{"path":"{C}"}}"#));
+        if !fs_ok(&r) {
+            crate::log_error!("teste", "{}", r);
+            return Err("a bia nao arrendou o arquivo livre");
+        }
+        let r = fs_gravar(ana, C, v1, "tres");
+        if fs_ok(&r)
+            || fs_texto(&r, "code").as_deref() != Some("CONFLICT")
+            || fs_texto(&r, "conflict").as_deref() != Some("lease")
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("o arrendamento de outro titular nao recusou");
+        }
+        if fs_no_armazem(C) != (v1, Some(b"um".to_vec())) {
+            return Err("o conflito de arrendamento mudou o arquivo");
+        }
+        // Tomar o de outro também é conflito: sem preempção.
+        let r = fs_pedir(ana, "fs.claim", &alloc::format!(r#"{{"path":"{C}"}}"#));
+        if fs_ok(&r) || fs_texto(&r, "conflict").as_deref() != Some("lease") {
+            crate::log_error!("teste", "{}", r);
+            return Err("a ana tomou o arrendamento da bia");
+        }
+        // A titular muda — e a versão continua exigida dela.
+        let r = fs_gravar(bia, C, v1 + 1, "dois");
+        if fs_texto(&r, "conflict").as_deref() != Some("version") {
+            return Err("a titular do arrendamento mudou sem a versao certa");
+        }
+        let r = fs_gravar(bia, C, v1, "dois");
+        let v2 = fs_numero(&r, "version").filter(|v| *v > v1);
+        let Some(v2) = v2.filter(|_| fs_ok(&r)) else {
+            crate::log_error!("teste", "{}", r);
+            return Err("a titular nao mudou o arquivo arrendado");
+        };
+        // A saída da titular leva o arrendamento.
+        crate::pessoas::sair(sessao_da_bia);
+        let r = fs_gravar(ana, C, v2, "tres");
+        let Some(v3) = fs_numero(&r, "version").filter(|_| fs_ok(&r)) else {
+            crate::log_error!("teste", "{}", r);
+            return Err("o arrendamento ficou depois de a titular sair");
+        };
+
+        // Persistência: indisponível, nada muda — nem o journal, nem a
+        // auditoria anuncia uma mudança a gravar.
+        let desde = crate::autorizacao::com_auditoria(|c| c.ultima_seq()).unwrap_or(0);
+        let anunciadas = || {
+            crate::autorizacao::com_auditoria(|c| {
+                c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+                    .filter(|r| r.seq > desde && r.evento.detalhe.contains("mudanca a gravar"))
+                    .count()
+            })
+            .unwrap_or(0)
+        };
+        let registros = todos_do_journal()?.len();
+        let anterior = crate::persistencia::forcar_estado_de_teste(
+            crate::persistencia::Estado::Indisponivel("caso do armazem"),
+        );
+        let r = fs_gravar(ana, C, v3, "quatro");
+        crate::persistencia::forcar_estado_de_teste(anterior);
+        if fs_ok(&r) || fs_texto(&r, "code").as_deref() != Some("ERROR") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o armazem mudou sem a persistencia");
+        }
+        if fs_no_armazem(C) != (v3, Some(b"tres".to_vec())) {
+            return Err("a mudanca sem persistencia valeu em memoria");
+        }
+        if todos_do_journal()?.len() != registros {
+            return Err("a recusa por persistencia gravou no journal");
+        }
+        if anunciadas() != 0 {
+            return Err("sem persistencia, a auditoria anunciou uma mudanca a gravar");
+        }
+        // Um diretório não se arrenda: o arrendamento é de um objeto.
+        let r = fs_pedir(
+            ana,
+            "fs.claim",
+            r#"{"path":"/armazem/compartilhado/conceitos"}"#,
+        );
+        if fs_ok(&r) || fs_texto(&r, "code").as_deref() != Some("INVALID_ARGUMENT") {
+            crate::log_error!("teste", "{}", r);
+            return Err("um diretorio foi arrendado");
+        }
+
+        // A auditoria: cada recusa depois do gate é o resultado do comando,
+        // com o número da decisão que o autorizou.
+        let gravada = |codigo: Codigo, trecho: &str| {
+            ultimo_que(|e| {
+                e.metodo == "fs.write"
+                    && e.recurso == C
+                    && e.codigo == codigo
+                    && e.detalhe.contains(trecho)
+                    && e.detalhe.contains("; decisao ")
+            })
+            .is_some()
+        };
+        if !gravada(Codigo::Conflict, "versao atual")
+            || !gravada(Codigo::Conflict, "outro titular tem o arrendamento")
+            || !gravada(Codigo::Error, "caso do armazem")
+            || !gravada(Codigo::Allow, "mudanca a gravar")
+        {
+            return Err("um resultado do fs.write nao foi gravado na auditoria");
+        }
+        Ok(())
+    })();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// A mudança vai ao journal num registro `ARMAZEM` que leva o que o
+/// comando fez — com o número da decisão do gate —, e a decisão está nele
+/// ou num registro anterior, nunca depois. O registro avança a âncora e
+/// não sobe a geração: um arquivo não é autoridade.
+fn armazem_a_decisao_vai_com_a_mudanca() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
+    use diario::estado::{ler_campos, tipo};
+    const C: &str = "/armazem/sistema/registro.txt";
+    let sistema = Chamador::Processo {
+        fio: 7_200_001,
+        autoridade: Autoridade::Sistema,
+        programa: Programa::Kernel,
+    };
+    let (v0, _) = fs_no_armazem(C);
+    let geracao = crate::persistencia::geracao();
+    let contador = crate::persistencia::ancora_no_tpm_de_teste()?;
+    let r = fs_gravar(sistema, C, v0, "conteudo do registro");
+    let v = fs_numero(&r, "version")
+        .filter(|_| fs_ok(&r))
+        .ok_or("o sistema nao gravou no armazem")?;
+    if crate::persistencia::geracao() != geracao {
+        return Err("uma mudanca do armazem subiu a geracao administrativa");
+    }
+    if crate::persistencia::ancora_no_tpm_de_teste()? <= contador {
+        return Err("a mudanca do armazem nao avancou a ancora");
+    }
+
+    let registros = todos_do_journal()?;
+    let (i, registro) = registros
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, r)| r.tipo == tipo::ARMAZEM)
+        .ok_or("nao ha registro ARMAZEM no journal")?;
+    let entradas = crate::persistencia::entradas_de_teste(registro)?;
+    let tipo_de = |e: &[u8]| {
+        ler_campos(e)
+            .ok()
+            .and_then(|c| c.first().and_then(|t| <[u8; 2]>::try_from(*t).ok()))
+            .map(u16::from_le_bytes)
+    };
+    // A mudança, como resultado: o caminho relativo, a versão, o conteúdo.
+    let mudanca = ler_campos(entradas.first().ok_or("registro vazio")?)?;
+    if mudanca.len() != 4
+        || tipo_de(entradas[0]) != Some(tipo::ARQUIVO_GRAVADO)
+        || mudanca[1] != b"sistema/registro.txt"
+        || mudanca[2] != v.to_le_bytes()
+        || mudanca[3] != b"conteudo do registro"
+    {
+        return Err("o registro nao leva a mudanca como resultado");
+    }
+    // O que o comando fez, neste registro, com o número da decisão.
+    let eventos_de = |r: &diario::Registro| -> alloc::vec::Vec<(u64, politica::auditoria::Evento)> {
+        crate::persistencia::entradas_de_teste(r)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| tipo_de(e) == Some(tipo::AUDITORIA_EVENTO))
+            .filter_map(|e| {
+                let c = ler_campos(e).ok()?;
+                politica::auditoria::decodificar(c.get(1)?).ok()
+            })
+            .collect()
+    };
+    // O detalhe de um processo começa por quem ele é — "pelo processo …:".
+    let feito = alloc::format!("mudanca a gravar: versao {v}; decisao ");
+    let (_, execucao) = eventos_de(registro)
+        .into_iter()
+        .find(|(_, e)| e.metodo == "fs.write" && e.detalhe.contains(&feito))
+        .ok_or("o que o comando fez nao esta no registro da mudanca")?;
+    let decisao: u64 = execucao
+        .detalhe
+        .rsplit("; decisao ")
+        .next()
+        .and_then(|n| n.parse().ok())
+        .ok_or("o detalhe nao diz o numero da decisao")?;
+    // A decisão: neste registro ou antes, e é o ALLOW do gate.
+    let onde = registros[..=i]
+        .iter()
+        .position(|r| {
+            eventos_de(r).iter().any(|(seq, e)| {
+                *seq == decisao
+                    && e.metodo == "fs.write"
+                    && e.recurso == C
+                    && e.codigo == politica::Codigo::Allow
+            })
+        })
+        .ok_or("a decisao do gate nao esta no journal antes da mudanca")?;
+    if onde > i {
+        return Err("a decisao ficou para depois da mudanca");
+    }
+    Ok(())
+}
+
+/// Uma gravação que falha no meio não muda nada em memória, e deixa a
+/// persistência indisponível, como qualquer outra.
+fn armazem_a_gravacao_que_falha_nao_vale() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
+    const C: &str = "/armazem/sistema/falha.txt";
+    let sistema = Chamador::Processo {
+        fio: 7_200_002,
+        autoridade: Autoridade::Sistema,
+        programa: Programa::Kernel,
+    };
+    let (v0, _) = fs_no_armazem(C);
+    let r = fs_gravar(sistema, C, v0, "antes");
+    let v = fs_numero(&r, "version")
+        .filter(|_| fs_ok(&r))
+        .ok_or("o sistema nao gravou no armazem")?;
+    crate::persistencia::falhar_a_proxima_gravacao_de_teste(true);
+    let r = fs_gravar(sistema, C, v, "depois");
+    crate::persistencia::falhar_a_proxima_gravacao_de_teste(false);
+    let indisponivel = crate::persistencia::estado() != crate::persistencia::Estado::Disponivel;
+    crate::persistencia::forcar_estado_de_teste(crate::persistencia::Estado::Disponivel);
+    if fs_ok(&r) || fs_texto(&r, "code").as_deref() != Some("ERROR") {
+        crate::log_error!("teste", "{}", r);
+        return Err("a gravacao que falhou foi confirmada");
+    }
+    if fs_no_armazem(C) != (v, Some(b"antes".to_vec())) {
+        return Err("a mudanca que nao foi gravada valeu em memoria");
+    }
+    if !indisponivel {
+        return Err("a persistencia continuou disponivel depois de uma gravacao falhar");
+    }
+    Ok(())
+}
+
+/// O journal repõe o armazém: reaplicado sobre um armazém vazio, como no
+/// boot, dá os mesmos arquivos, versões e conteúdos, e a mesma próxima
+/// versão; compactado, também — a base leva os arquivos na ordem das
+/// versões e a próxima versão, e uma versão de um arquivo apagado não
+/// volta.
+fn armazem_o_journal_repoe_o_armazem() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
+    let sistema = Chamador::Processo {
+        fio: 7_200_003,
+        autoridade: Autoridade::Sistema,
+        programa: Programa::Kernel,
+    };
+    let base = "/armazem/sistema/repor";
+    // A região começa por uma base tirada da memória. Os casos de mensagens
+    // da suíte esvaziam a tabela em memória e recomeçam os ids, e o journal
+    // de antes de uma compactação não se reaplica sobre uma imagem limpa
+    // depois deles — ver README, "Dívida técnica". O que este caso confere
+    // é o armazém: a base dele, e os registros depois dela.
+    crate::persistencia::compactar_de_teste()?;
+    let passo = |metodo: &str, nome: &str, conteudo: Option<&str>| -> Resultado {
+        let caminho = alloc::format!("{base}/{nome}");
+        let (v, _) = fs_no_armazem(&caminho);
+        let params = match conteudo {
+            Some(t) => {
+                alloc::format!(r#"{{"path":"{caminho}","content":"{t}","expect_version":{v}}}"#)
+            }
+            None => alloc::format!(r#"{{"path":"{caminho}","expect_version":{v}}}"#),
+        };
+        let r = fs_pedir(sistema, metodo, &params);
+        if !fs_ok(&r) {
+            crate::log_error!("teste", "{} {}: {}", metodo, caminho, r);
+            return Err("um passo do caso foi recusado");
+        }
+        Ok(())
+    };
+    passo("fs.write", "a.txt", Some("um"))?;
+    passo("fs.write", "d/b.txt", Some("dois"))?;
+    passo("fs.append", "a.txt", Some(" e mais"))?;
+    passo("fs.delete", "d/b.txt", None)?;
+    // O diretório sumiu: o nome serve a um arquivo.
+    passo("fs.write", "d", Some("agora arquivo"))?;
+    passo("fs.write", "c.txt", Some("tres"))?;
+    // Uma versão mais nova num caminho que vem antes na ordem dos nomes: a
+    // base tem de levar os arquivos na ordem das versões.
+    passo("fs.write", "0.txt", Some("por ultimo, primeiro no nome"))?;
+    // O último passo apaga o de versão mais alta: a próxima versão só a
+    // base diz.
+    passo("fs.delete", "c.txt", None)?;
+
+    let antes = retrato_do_armazem();
+    let reposto = estado_do_journal()?.armazem;
+    if reposto != antes {
+        crate::log_error!("teste", "{:?} != {:?}", reposto.1, antes.1);
+        return Err("o journal nao repos o armazem");
+    }
+    crate::persistencia::compactar_de_teste()?;
+    let compactado = estado_do_journal()?.armazem;
+    if compactado != antes {
+        crate::log_error!("teste", "{:?} != {:?}", compactado.1, antes.1);
+        return Err("a compactacao nao preservou o armazem");
+    }
+    // A versão seguinte é a que a base disse, e não uma já dada.
+    let caminho = alloc::format!("{base}/novo.txt");
+    let r = fs_gravar(sistema, &caminho, 0, "novo");
+    if fs_numero(&r, "version") != Some(antes.1) {
+        crate::log_error!("teste", "{}", r);
+        return Err("depois da compactacao, uma versao ja dada voltou");
+    }
+    if !crate::armazem::com_o_armazem(|a| a.coerente()) {
+        return Err("o armazem ficou incoerente");
+    }
+    Ok(())
+}
+
+/// Pessoa, agente e processo pelo mesmo caminho: a mesma sequência de
+/// pedidos dá as mesmas decisões e os mesmos resultados — pelo papel de
+/// cada um, sem atalho para nenhum. E o manifesto atenua: um programa que
+/// não declara `fs.write` não escreve, qualquer que seja o papel.
+fn armazem_igual_para_pessoa_agente_processo() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
+    use crate::pessoas::Console;
+    let chave = sigilo::publica_de(&[0x5A; 32]);
+    crate::pessoas::esquecer_registradas();
+    crate::identidade::registrar_agente_de_teste(chave, "agente-fs", "operador");
+    let resultado = (|| -> Resultado {
+        let sessao = crate::pessoas::sessao_de_teste(Console::Fisico, "pessoa-fs", "operador");
+        let quem = [
+            ("pessoa", Chamador::Pessoa(sessao)),
+            (
+                "processo-da-pessoa",
+                Chamador::Processo {
+                    fio: 7_200_010,
+                    autoridade: Autoridade::Pessoa { sessao },
+                    programa: Programa::Kernel,
+                },
+            ),
+            (
+                "processo-do-agente",
+                Chamador::Processo {
+                    fio: 7_200_011,
+                    autoridade: Autoridade::Sessao {
+                        sessao: 3,
+                        chave: Some(chave),
+                    },
+                    programa: Programa::Kernel,
+                },
+            ),
+        ];
+        let mut primeiro: Option<alloc::vec::Vec<alloc::string::String>> = None;
+        for (nome, chamador) in quem {
+            let c = alloc::format!("/armazem/compartilhado/igual/{nome}.txt");
+            let pedidos = [
+                (
+                    "fs.write",
+                    r#"{"path":"/armazem/fora.txt","content":"x","expect_version":0}"#.into(),
+                ),
+                (
+                    "fs.write",
+                    alloc::format!(r#"{{"path":"{c}","content":"x","expect_version":0}}"#),
+                ),
+                (
+                    "fs.write",
+                    alloc::format!(r#"{{"path":"{c}","content":"y","expect_version":0}}"#),
+                ),
+                ("fs.claim", alloc::format!(r#"{{"path":"{c}"}}"#)),
+                ("fs.stat", alloc::format!(r#"{{"path":"{c}"}}"#)),
+                ("fs.release", alloc::format!(r#"{{"path":"{c}"}}"#)),
+                ("fs.release", alloc::format!(r#"{{"path":"{c}"}}"#)),
+                ("fs.read", alloc::format!(r#"{{"path":"{c}"}}"#)),
+                ("fs.stat", r#"{"path":"/armazem/sistema"}"#.into()),
+            ];
+            let mut vistos = alloc::vec::Vec::new();
+            for (metodo, params) in &pedidos {
+                let r = fs_pedir(chamador, metodo, params);
+                vistos.push(alloc::format!(
+                    "{metodo}: {} {} {:?} {:?}",
+                    decisao_do_envelope(&r),
+                    fs_ok(&r),
+                    fs_texto(&r, "code"),
+                    fs_texto(&r, "conflict")
+                ));
+            }
+            match &primeiro {
+                None => primeiro = Some(vistos),
+                Some(p) if *p != vistos => {
+                    crate::log_error!("teste", "{}: {:?} != {:?}", nome, vistos, p);
+                    return Err("pessoa, agente e processo nao decidiram igual no armazem");
+                }
+                Some(_) => {}
+            }
+        }
+        let vistos = primeiro.unwrap_or_default();
+        let esperados = [
+            "fs.write: DENY_RESOURCE false None None",
+            "fs.write: ALLOW true None None",
+            "fs.write: ALLOW false Some(\"CONFLICT\") Some(\"version\")",
+            "fs.claim: ALLOW true None None",
+            "fs.stat: ALLOW true None None",
+            "fs.release: ALLOW true None None",
+            "fs.release: ALLOW false Some(\"DENY_LEASE\") None",
+            "fs.read: ALLOW false None None",
+            "fs.stat: DENY_RESOURCE false None None",
+        ];
+        if vistos
+            .iter()
+            .map(alloc::string::String::as_str)
+            .ne(esperados)
+        {
+            crate::log_error!("teste", "{:?}", vistos);
+            return Err("a sequencia do armazem nao deu o esperado");
+        }
+
+        // O manifesto: sem fs.write declarado, nem o sistema escreve.
+        for (permite, esperado) in [("fs.read", "DENY_PERMISSION"), ("fs.write", "ALLOW")] {
+            let processo = Chamador::Processo {
+                fio: 7_200_012,
+                autoridade: Autoridade::Sistema,
+                programa: Programa::Imagem {
+                    manifesto: Some(manifesto_de_teste("caso-fs", permite)),
+                    resumo: [0xcd; 32],
+                },
+            };
+            let c = "/armazem/sistema/manifesto.txt";
+            let (v, _) = fs_no_armazem(c);
+            let r = fs_gravar(processo, c, v, "x");
+            if decisao_do_envelope(&r) != esperado {
+                crate::log_error!("teste", "{}: {}", permite, r);
+                return Err("o manifesto nao atenuou o fs.write");
+            }
+        }
+        Ok(())
+    })();
+    crate::identidade::esquecer_registrados();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// O `sistema` não tem atalho: alcança só `/armazem` para escrever, não
+/// arrenda — a autoridade local não tem titular —, e o arrendamento de
+/// uma pessoa vale contra ele; só o `lease.revoke` de um administrador,
+/// com a prova, o quebra.
+fn armazem_o_sistema_nao_tem_atalho() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
+    use crate::pessoas::Console;
+    const C: &str = "/armazem/compartilhado/sistema/x.txt";
+    let sistema = Chamador::Processo {
+        fio: 7_200_020,
+        autoridade: Autoridade::Sistema,
+        programa: Programa::Kernel,
+    };
+    crate::pessoas::esquecer_registradas();
+    crate::identidade::registrar_administrador_de_teste(
+        sigilo::publica_de(&ADMIN_DE_TESTE),
+        "administrador",
+    );
+    let resultado = (|| -> Resultado {
+        for fora in [
+            "/dados/x",
+            "/etc/duke/politica",
+            "/armazemx",
+            "/etc/duke/privado/chave",
+        ] {
+            let r = fs_gravar(sistema, fora, 0, "x");
+            if decisao_do_envelope(&r) != "DENY_RESOURCE" {
+                crate::log_error!("teste", "{}: {}", fora, r);
+                return Err("o sistema escreveu fora do armazem");
+            }
+        }
+        let (v0, _) = fs_no_armazem(C);
+        let r = fs_gravar(sistema, C, v0, "do sistema");
+        let v = fs_numero(&r, "version")
+            .filter(|_| fs_ok(&r))
+            .ok_or("o sistema nao escreveu no armazem")?;
+        let r = fs_pedir(sistema, "fs.claim", &alloc::format!(r#"{{"path":"{C}"}}"#));
+        if fs_ok(&r) || fs_texto(&r, "code").as_deref() != Some("DENY_LEASE") {
+            crate::log_error!("teste", "{}", r);
+            return Err("a autoridade local arrendou");
+        }
+        let pessoa = Chamador::Pessoa(crate::pessoas::sessao_de_teste(
+            Console::Fisico,
+            "dona-fs",
+            "operador",
+        ));
+        if !fs_ok(&fs_pedir(
+            pessoa,
+            "fs.claim",
+            &alloc::format!(r#"{{"path":"{C}"}}"#),
+        )) {
+            return Err("a pessoa nao arrendou");
+        }
+        let r = fs_gravar(sistema, C, v, "por cima");
+        if fs_texto(&r, "conflict").as_deref() != Some("lease") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o sistema passou por cima do arrendamento de uma pessoa");
+        }
+        // Só com a prova de um administrador.
+        admin_espera(
+            0,
+            &ADMIN_DE_TESTE,
+            "lease.revoke",
+            &alloc::format!(r#"{{"path":"{C}"}}"#),
+            None,
+        )?;
+        let r = fs_gravar(sistema, C, v, "depois da revogacao");
+        if !fs_ok(&r) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o lease.revoke nao soltou o arquivo");
+        }
+        Ok(())
+    })();
+    crate::identidade::esquecer_registrados();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// A leitura pelo VFS: `fs.read`, `fs.list` e o vnode de um processo veem o
+/// que foi gravado; um vnode resolvido antes de uma mudança recebe `Mudou`,
+/// e nunca o conteúdo novo pelo nó velho.
+fn armazem_o_vfs_le_o_que_foi_gravado() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
+    let sistema = Chamador::Processo {
+        fio: 7_200_030,
+        autoridade: Autoridade::Sistema,
+        programa: Programa::Kernel,
+    };
+    let dir = "/armazem/compartilhado/vfs";
+    let a = alloc::format!("{dir}/a.txt");
+    let b = alloc::format!("{dir}/sub/b.txt");
+    for (c, t) in [(&a, "um"), (&b, "dois")] {
+        let (v, _) = fs_no_armazem(c);
+        if !fs_ok(&fs_gravar(sistema, c, v, t)) {
+            return Err("o caso nao gravou os arquivos");
+        }
+    }
+    let r = fs_pedir(sistema, "fs.read", &alloc::format!(r#"{{"path":"{a}"}}"#));
+    if fs_texto(&r, "content").as_deref() != Some("um") {
+        crate::log_error!("teste", "{}", r);
+        return Err("fs.read nao leu o que foi gravado");
+    }
+    let mut nomes = alloc::vec::Vec::new();
+    crate::vfs::listar(dir, |e| nomes.push((e.nome.clone(), e.tipo))).map_err(|e| e.motivo())?;
+    if nomes
+        != [
+            ("a.txt".into(), crate::vfs::Tipo::Arquivo),
+            ("sub".into(), crate::vfs::Tipo::Diretorio),
+        ]
+    {
+        return Err("a listagem do armazem nao e a que foi gravada");
+    }
+    let velho = crate::vfs::resolver(&a).map_err(|e| e.motivo())?;
+    let mut buffer = [0u8; 16];
+    if crate::vfs::ler_em(&velho, 0, &mut buffer) != Ok(2) || &buffer[..2] != b"um" {
+        return Err("o vnode nao leu o conteudo");
+    }
+    let (v, _) = fs_no_armazem(&a);
+    if !fs_ok(&fs_gravar(sistema, &a, v, "outro")) {
+        return Err("o caso nao mudou o arquivo");
+    }
+    if crate::vfs::ler_em(&velho, 0, &mut buffer) != Err(crate::vfs::Erro::Mudou) {
+        return Err("o vnode velho leu depois de o arquivo mudar");
+    }
+    let novo = crate::vfs::resolver(&a).map_err(|e| e.motivo())?;
+    if crate::vfs::ler_em(&novo, 0, &mut buffer) != Ok(5) || &buffer[..5] != b"outro" {
+        return Err("resolvido de novo, o arquivo nao deu o conteudo novo");
+    }
+    if crate::vfs::ler_tudo(dir).err() != Some(crate::vfs::Erro::NaoEhArquivo)
+        || crate::vfs::resolver("/armazem/compartilhado/vfs/nada").err()
+            != Some(crate::vfs::Erro::NaoEncontrado)
+    {
+        return Err("o armazem respondeu errado a um diretorio ou a um nome que nao existe");
+    }
+    Ok(())
+}
+
+/// Os tetos e os lugares, pelo comando: o arquivo que passaria de 16 KiB,
+/// o nome de um diretório, o arquivo abaixo de um arquivo e o caminho que
+/// não é do armazém são `INVALID_ARGUMENT`, e não mudam nada.
+fn armazem_tetos_e_lugares() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
+    let sistema = Chamador::Processo {
+        fio: 7_200_040,
+        autoridade: Autoridade::Sistema,
+        programa: Programa::Kernel,
+    };
+    let c = "/armazem/sistema/tetos/grande.txt";
+    let (mut v, _) = fs_no_armazem(c);
+    if v != 0 {
+        let r = fs_pedir(
+            sistema,
+            "fs.delete",
+            &alloc::format!(r#"{{"path":"{c}","expect_version":{v}}}"#),
+        );
+        if !fs_ok(&r) {
+            return Err("o caso nao apagou o arquivo de antes");
+        }
+    }
+    // Em pedaços que cabem num pedido: a linha do canal tem 4 KiB.
+    let pedaco = "x".repeat(::armazem::MAIOR_ARQUIVO / 8);
+    let r = fs_gravar(sistema, c, 0, &pedaco);
+    v = fs_numero(&r, "version")
+        .filter(|_| fs_ok(&r))
+        .ok_or("a criacao foi recusada")?;
+    for _ in 0..7 {
+        let r = fs_pedir(
+            sistema,
+            "fs.append",
+            &alloc::format!(r#"{{"path":"{c}","content":"{pedaco}","expect_version":{v}}}"#),
+        );
+        v = fs_numero(&r, "version")
+            .filter(|_| fs_ok(&r))
+            .ok_or("um acrescimo foi recusado")?;
+    }
+    let r = fs_pedir(
+        sistema,
+        "fs.append",
+        &alloc::format!(r#"{{"path":"{c}","content":"y","expect_version":{v}}}"#),
+    );
+    if fs_ok(&r) || fs_texto(&r, "code").as_deref() != Some("INVALID_ARGUMENT") {
+        crate::log_error!("teste", "{}", r);
+        return Err("o arquivo passou do teto");
+    }
+    if fs_no_armazem(c).0 != v {
+        return Err("a recusa pelo teto mudou o arquivo");
+    }
+    for (caminho, motivo) in [
+        ("/armazem/sistema/tetos", "o caminho e um diretorio"),
+        (
+            "/armazem/sistema/tetos/grande.txt/x",
+            "um componente do caminho e um arquivo",
+        ),
+        (
+            "/armazem/sistema/tetos/a b",
+            "o caminho nao e um caminho do armazem",
+        ),
+        ("/armazem", "o caminho nao e de um arquivo do armazem"),
+    ] {
+        let r = fs_gravar(sistema, caminho, 0, "x");
+        if fs_texto(&r, "code").as_deref() != Some("INVALID_ARGUMENT")
+            || fs_texto(&r, "error").as_deref() != Some(motivo)
+        {
+            crate::log_error!("teste", "{}: {}", caminho, r);
+            return Err("um lugar que nao pode ser arquivo foi aceito, ou pelo motivo errado");
+        }
+    }
+    if !crate::armazem::com_o_armazem(|a| a.coerente()) {
+        return Err("o armazem ficou incoerente");
+    }
+    Ok(())
+}
+
+/// Vários núcleos ao mesmo tempo no mesmo arquivo: a criação disputada tem
+/// um vencedor, e os acréscimos que releem a versão no conflito entram
+/// todos — nenhum se perde, nenhum entra duas vezes, e as versões só
+/// crescem.
+fn armazem_varios_nucleos_no_mesmo_arquivo() -> Resultado {
+    use core::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    const C: &str = "/armazem/sistema/nucleos/contador.txt";
+    const VOLTAS: usize = 6;
+    static PRONTOS: AtomicUsize = AtomicUsize::new(0);
+    static CRIARAM: AtomicUsize = AtomicUsize::new(0);
+    static FALHAS: AtomicUsize = AtomicUsize::new(0);
+    extern "C" fn acrescentar(i: u64) -> ! {
+        use crate::autorizacao::{Autoridade, Chamador, Programa};
+        let quem = Chamador::Processo {
+            fio: 7_300_000 + i,
+            autoridade: Autoridade::Sistema,
+            programa: Programa::Kernel,
+        };
+        let r = fs_gravar(quem, C, 0, "");
+        if fs_ok(&r) {
+            CRIARAM.fetch_add(1, SeqCst);
+        } else if fs_texto(&r, "conflict").as_deref() != Some("version") {
+            FALHAS.fetch_add(1, SeqCst);
+        }
+        let mut feitas = 0;
+        let mut tentativas = 0;
+        while feitas < VOLTAS && tentativas < 400 {
+            tentativas += 1;
+            let estado = fs_pedir(quem, "fs.stat", &alloc::format!(r#"{{"path":"{C}"}}"#));
+            let v = fs_numero(&estado, "version").unwrap_or(0);
+            let r = fs_pedir(
+                quem,
+                "fs.append",
+                &alloc::format!(r#"{{"path":"{C}","content":"n{i}\n","expect_version":{v}}}"#),
+            );
+            if fs_ok(&r) {
+                feitas += 1;
+            } else if fs_texto(&r, "conflict").as_deref() != Some("version") {
+                crate::log_error!("teste", "{}", r);
+                FALHAS.fetch_add(1, SeqCst);
+                break;
+            }
+        }
+        if feitas < VOLTAS {
+            FALHAS.fetch_add(1, SeqCst);
+        }
+        PRONTOS.fetch_add(1, SeqCst);
+        crate::fios::terminar()
+    }
+    // Um arquivo novo a cada volta da suíte: apaga o de antes.
+    let (v, _) = fs_no_armazem(C);
+    if v != 0 {
+        use crate::autorizacao::{Autoridade, Chamador, Programa};
+        let quem = Chamador::Processo {
+            fio: 7_300_100,
+            autoridade: Autoridade::Sistema,
+            programa: Programa::Kernel,
+        };
+        let r = fs_pedir(
+            quem,
+            "fs.delete",
+            &alloc::format!(r#"{{"path":"{C}","expect_version":{v}}}"#),
+        );
+        if !fs_ok(&r) {
+            return Err("o caso nao apagou o arquivo de antes");
+        }
+    }
+    PRONTOS.store(0, SeqCst);
+    CRIARAM.store(0, SeqCst);
+    FALHAS.store(0, SeqCst);
+    let mut quantos = 0;
+    for i in 0..crate::nucleos::MAX_NUCLEOS {
+        if crate::nucleos::mascara_dos_ligados() & (1 << i) != 0 {
+            crate::fios::criar_no_nucleo("teste-armazem", acrescentar, i as u64, i)?;
+            quantos += 1;
+        }
+    }
+    esperar_ate(|| PRONTOS.load(SeqCst) == quantos, 30_000)?;
+    if CRIARAM.load(SeqCst) != 1 {
+        return Err("a criacao disputada nao teve exatamente um vencedor");
+    }
+    if FALHAS.load(SeqCst) != 0 {
+        return Err("um nucleo ouviu outra coisa que o conflito de versao, ou nao terminou");
+    }
+    let (_, dados) = fs_no_armazem(C);
+    let dados = dados.ok_or("o arquivo sumiu")?;
+    let texto = core::str::from_utf8(&dados).map_err(|_| "o arquivo nao e texto")?;
+    for i in 0..crate::nucleos::MAX_NUCLEOS {
+        if crate::nucleos::mascara_dos_ligados() & (1 << i) == 0 {
+            continue;
+        }
+        let linha = alloc::format!("n{i}");
+        if texto.lines().filter(|l| *l == linha).count() != VOLTAS {
+            crate::log_error!("teste", "{:?}", texto);
+            return Err("um acrescimo se perdeu ou entrou duas vezes");
+        }
+    }
+    if texto.lines().count() != quantos * VOLTAS {
+        return Err("o arquivo tem linhas que ninguem acrescentou");
+    }
+    if !crate::armazem::com_o_armazem(|a| a.coerente()) {
+        return Err("o armazem ficou incoerente");
+    }
+    Ok(())
+}
+
+/// Quatro agentes de verdade, pelas portas, ao mesmo tempo: um arrenda, os
+/// outros ouvem `CONFLICT`; os quatro criam o mesmo arquivo e só o dono do
+/// arrendamento cria; a chave dele é revogada, o arrendamento sai junto, e
+/// dos três que sobram um cria o próximo — os outros ouvem o conflito de
+/// versão.
+fn armazem_quatro_agentes_disputam() -> Resultado {
+    use crate::agent::SessaoDeTeste;
+    crate::coordenacao::esquecer();
+    let resultado = com_agentes_de_teste(|| {
+        let mut sessoes = alloc::vec::Vec::new();
+        let mut agentes = alloc::vec::Vec::new();
+        for p in 1..=4u8 {
+            let mut s = SessaoDeTeste::porta(p);
+            let a = AgenteDeTeste::conectar(p, &mut s, &chave_de_teste(p))?;
+            if a.transporte.is_none() {
+                return Err("um dos quatro agentes nao completou o aperto");
+            }
+            sessoes.push(s);
+            agentes.push(a);
+        }
+        let ok = |r: &Option<alloc::string::String>| r.as_deref().is_some_and(fs_ok_na_linha);
+        let conflito = |r: &Option<alloc::string::String>, qual: &str| {
+            r.as_deref().is_some_and(|r| {
+                r.contains(r#""code":"CONFLICT""#)
+                    && r.contains(&alloc::format!(r#""conflict":"{qual}""#))
+            })
+        };
+        let unico = crate::tempo::uptime_ms();
+        let c1 = alloc::format!("/armazem/agentes/{unico}/disputa.txt");
+        let c2 = alloc::format!("/armazem/agentes/{unico}/depois.txt");
+
+        let r = todos_ao_mesmo_tempo(&mut agentes, &mut sessoes, [2, 4, 1, 3], |_| {
+            Some(pedido_rpc(
+                "fs.claim",
+                &alloc::format!(r#"{{"path":"{c1}"}}"#),
+            ))
+        })?;
+        if !ok(&r[1]) || ![0, 2, 3].iter().all(|&i| conflito(&r[i], "lease")) {
+            crate::log_error!("teste", "{:?}", r);
+            return Err("na disputa pelo arquivo, nao foi um so que o arrendou");
+        }
+        let r = todos_ao_mesmo_tempo(&mut agentes, &mut sessoes, [1, 3, 4, 2], |p| {
+            Some(pedido_rpc(
+                "fs.write",
+                &alloc::format!(r#"{{"path":"{c1}","content":"de {p}","expect_version":0}}"#),
+            ))
+        })?;
+        if !ok(&r[1]) || ![0, 2, 3].iter().all(|&i| conflito(&r[i], "lease")) {
+            crate::log_error!("teste", "{:?}", r);
+            return Err("outro agente criou o arquivo arrendado");
+        }
+        if fs_no_armazem(&c1).1.as_deref() != Some(b"de 2") {
+            return Err("o arquivo nao tem o conteudo do dono do arrendamento");
+        }
+        // A chave do dono é revogada: o arrendamento sai na hora.
+        crate::identidade::revogar(&sigilo::publica_de(&chave_de_teste(2)))
+            .map_err(|_| "a revogacao falhou")?;
+        let recurso = crate::coordenacao::recurso_do_caminho(&c1);
+        if crate::coordenacao::estado(&recurso).arrendamento.is_some() {
+            return Err("o arrendamento ficou com a chave revogada");
+        }
+        let r = todos_ao_mesmo_tempo(&mut agentes, &mut sessoes, [3, 1, 4, 2], |p| {
+            (p != 2).then(|| {
+                pedido_rpc(
+                    "fs.write",
+                    &alloc::format!(r#"{{"path":"{c2}","content":"de {p}","expect_version":0}}"#),
+                )
+            })
+        })?;
+        if !ok(&r[2]) || ![0, 3].iter().all(|&i| conflito(&r[i], "version")) {
+            crate::log_error!("teste", "{:?}", r);
+            return Err("a criacao disputada nao teve um vencedor so");
+        }
+        if !crate::coordenacao::um_por_recurso() || !crate::armazem::com_o_armazem(|a| a.coerente())
+        {
+            return Err("a tabela de arrendamentos ou o armazem ficaram incoerentes");
+        }
+        Ok(())
+    });
+    crate::coordenacao::esquecer();
+    resultado
+}
+
+/// `"ok":true` numa linha de resposta do canal.
+fn fs_ok_na_linha(linha: &str) -> bool {
+    linha.contains(r#""ok":true"#)
+}
+
+/// O programa `guardar`, de verdade: lançado por uma pessoa operadora,
+/// escreve, lê, vê o conflito e o `MUDOU` de dentro; lançado por uma
+/// observadora, o gate recusa a escrita — o manifesto declara `fs.write`,
+/// e o papel não tem.
+fn armazem_o_programa_guarda_pelo_gate() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    crate::pessoas::esquecer_registradas();
+    let resultado = (|| -> Resultado {
+        let operadora =
+            crate::pessoas::sessao_de_teste(Console::Terminal(43), "guarda-op", "operador");
+        rodar_programa(
+            "guardar",
+            Some(Autoridade::Pessoa { sessao: operadora }),
+            77,
+        )
+        .map_err(|_| "o programa guardar nao conferiu o armazem")?;
+        // A decisão e o que o comando fez: os dois em nome da pessoa, pelo
+        // processo.
+        for trecho in ["", "mudanca a gravar"] {
+            let e = ultimo_que(|e| {
+                e.metodo == "fs.write"
+                    && e.detalhe.starts_with("pelo processo ")
+                    && e.detalhe.contains(trecho)
+            })
+            .ok_or("a escrita do programa nao foi gravada como do processo")?;
+            if e.titular != politica::auditoria::Titular::Pessoa {
+                crate::log_error!("teste", "{:?}", e);
+                return Err("a escrita do programa nao saiu em nome da pessoa");
+            }
+        }
+        let observadora =
+            crate::pessoas::sessao_de_teste(Console::Terminal(44), "guarda-ob", "observador");
+        rodar_programa(
+            "guardar",
+            Some(Autoridade::Pessoa {
+                sessao: observadora,
+            }),
+            70,
+        )
+        .map_err(|_| "o programa guardar escreveu sem fs.write no papel")?;
+        Ok(())
+    })();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+// ---------------------------------------------------------------------------
+// as sobreviventes da fase 6: um caso determinístico para cada contrato que
+// nenhum caso exercitava — ver README, "Mutações"
+// ---------------------------------------------------------------------------
+
+/// Um núcleo ligado que não é este, se há.
+fn outro_nucleo() -> Option<usize> {
+    let eu = crate::nucleos::atual();
+    (0..crate::nucleos::MAX_NUCLEOS)
+        .find(|&i| i != eu && crate::nucleos::mascara_dos_ligados() & (1 << i) != 0)
+}
+
+/// Espera `condicao` girando um número de voltas, e não pelo relógio: o
+/// relógio só anda com o primeiro núcleo atendendo interrupções, e os casos
+/// abaixo seguram núcleos com elas mascaradas de propósito.
+fn girar_ate(mut condicao: impl FnMut() -> bool, voltas: u64) -> bool {
+    for _ in 0..voltas {
+        if condicao() {
+            return true;
+        }
+        core::hint::spin_loop();
+    }
+    condicao()
+}
+
+/// S12 — reabrir um console com alguém entrado encerra a sessão de quem
+/// estava: ela não fica ativa sem console nenhum que a mostre.
+fn consoles_reabrir_encerra_a_sessao() -> Resultado {
+    use crate::pessoas::{Console, Encerramento, EstadoDaSessao};
+    crate::interpretador::abrir_console(Console::Fisico);
+    let id = crate::interpretador::entrar_para_teste(Console::Fisico, "reaberta", "operador");
+    let antes = crate::pessoas::sessao(id);
+    crate::interpretador::abrir_console(Console::Fisico);
+    let depois = crate::pessoas::sessao(id);
+    let no_console = crate::interpretador::sessao_do_console(Console::Fisico);
+    crate::interpretador::desativar_para_teste();
+    if !matches!(antes, EstadoDaSessao::Ativa { .. }) {
+        return Err("a sessao de teste nao abriu");
+    }
+    if depois != EstadoDaSessao::Encerrada(Encerramento::ConsoleFechado) {
+        crate::log_error!("teste", "{:?}", depois);
+        return Err("reabrir o console deixou a sessao de quem estava ativa");
+    }
+    if no_console.is_some() {
+        return Err("o console reaberto continuou com a sessao antiga");
+    }
+    Ok(())
+}
+
+/// S14 — a saída de um console de Terminal espera o anel, e não joga o
+/// texto fora quando outro núcleo está com ele na mão (o processo do
+/// Terminal lendo). Um fio fixo noutro núcleo segura a tranca; este
+/// imprime; quando o outro solta, o texto está no anel.
+fn pty_a_saida_espera_o_anel() -> Resultado {
+    use core::sync::atomic::{AtomicBool, Ordering::SeqCst};
+    const INDICE: u8 = (crate::pseudoterminal::TERMINAIS - 1) as u8;
+    static SEGURANDO: AtomicBool = AtomicBool::new(false);
+    static SOLTOU: AtomicBool = AtomicBool::new(false);
+    extern "C" fn segurar(_: u64) -> ! {
+        crate::pseudoterminal::com_o_anel_preso_de_teste(INDICE, || {
+            SEGURANDO.store(true, SeqCst);
+            // Tempo em voltas: o relógio pode estar parado no núcleo que
+            // espera esta tranca.
+            for _ in 0..20_000_000u64 {
+                core::hint::spin_loop();
+            }
+        });
+        SOLTOU.store(true, SeqCst);
+        crate::fios::terminar()
+    }
+    let Some(outro) = outro_nucleo() else {
+        crate::log_info!(
+            "teste",
+            "um nucleo so: o caso precisa de outro segurando o anel"
+        );
+        return Ok(());
+    };
+    let _ = crate::pseudoterminal::tirar_de_teste(INDICE);
+    SEGURANDO.store(false, SeqCst);
+    SOLTOU.store(false, SeqCst);
+    crate::fios::criar_no_nucleo("teste-anel", segurar, 0, outro)?;
+    if !girar_ate(|| SEGURANDO.load(SeqCst), 2_000_000_000) {
+        return Err("o outro nucleo nao tomou o anel");
+    }
+    // O outro ainda gira com o anel na mão: a saída disputa a tranca. Com
+    // a espera certa, ela só volta depois de ele soltar.
+    let segurava = !SOLTOU.load(SeqCst);
+    crate::pseudoterminal::saida(INDICE, "texto que nao se perde");
+    esperar_ate(|| SOLTOU.load(SeqCst), 500)?;
+    let veio = crate::pseudoterminal::tirar_de_teste(INDICE);
+    if !segurava {
+        return Err("o outro nucleo soltou o anel antes da saida: o caso nao disputou nada");
+    }
+    if veio != b"texto que nao se perde" {
+        crate::log_error!(
+            "teste",
+            "{:?}",
+            alloc::string::String::from_utf8_lossy(&veio)
+        );
+        return Err("a saida com o anel tomado se perdeu");
+    }
+    Ok(())
+}
+
+/// S7 — a trava é justa: quem pediu antes entra antes. O caso segura uma
+/// trava; um fio em cada outro núcleo a pede, um depois do outro; soltada,
+/// eles entram na ordem em que pediram — em todas as voltas. Uma trava que
+/// só tenta (`try_lock` em laço) deixa entrar quem chegar primeiro à
+/// memória, e a ordem sai embaralhada.
+fn trava_e_justa_entre_nucleos() -> Resultado {
+    use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering::SeqCst};
+    const VOLTAS: usize = 24;
+    static TRAVA: crate::trava::Mutex<()> = crate::trava::Mutex::new(());
+    static PEDIU: [AtomicU64; crate::nucleos::MAX_NUCLEOS] =
+        [const { AtomicU64::new(0) }; crate::nucleos::MAX_NUCLEOS];
+    static ORDEM: [AtomicUsize; crate::nucleos::MAX_NUCLEOS] =
+        [const { AtomicUsize::new(usize::MAX) }; crate::nucleos::MAX_NUCLEOS];
+    static ENTRARAM: AtomicUsize = AtomicUsize::new(0);
+    static PRONTOS: AtomicUsize = AtomicUsize::new(0);
+    static VOLTA: AtomicU64 = AtomicU64::new(0);
+    // O argumento: a posição deste fio na fila, e o núcleo dele.
+    extern "C" fn pedir(arg: u64) -> ! {
+        let posicao = (arg & 0xFF) as usize;
+        let volta = VOLTA.load(SeqCst);
+        // Espera o anterior pedir, e mais um pouco — o pedido dele é o
+        // passo seguinte ao aviso.
+        if posicao > 0 {
+            while PEDIU[posicao - 1].load(SeqCst) != volta {
+                core::hint::spin_loop();
+            }
+            for _ in 0..200_000u32 {
+                core::hint::spin_loop();
+            }
+        }
+        PEDIU[posicao].store(volta, SeqCst);
+        let guarda = TRAVA.lock();
+        let i = ENTRARAM.fetch_add(1, SeqCst);
+        ORDEM[i].store(posicao, SeqCst);
+        drop(guarda);
+        PRONTOS.fetch_add(1, SeqCst);
+        crate::fios::terminar()
+    }
+    let eu = crate::nucleos::atual();
+    let outros: alloc::vec::Vec<usize> = (0..crate::nucleos::MAX_NUCLEOS)
+        .filter(|&i| i != eu && crate::nucleos::mascara_dos_ligados() & (1 << i) != 0)
+        .collect();
+    if outros.len() < 2 {
+        crate::log_info!("teste", "menos de tres nucleos: nao ha fila para ordenar");
+        return Ok(());
+    }
+    for volta in 1..=VOLTAS as u64 {
+        VOLTA.store(volta, SeqCst);
+        ENTRARAM.store(0, SeqCst);
+        PRONTOS.store(0, SeqCst);
+        let guarda = TRAVA.lock();
+        for (posicao, &nucleo) in outros.iter().enumerate() {
+            crate::fios::criar_no_nucleo("teste-fila", pedir, posicao as u64, nucleo)?;
+        }
+        let ultimo = outros.len() - 1;
+        if !girar_ate(|| PEDIU[ultimo].load(SeqCst) == volta, 2_000_000_000) {
+            drop(guarda);
+            return Err("os fios da fila nao pediram a trava");
+        }
+        for _ in 0..200_000u32 {
+            core::hint::spin_loop();
+        }
+        drop(guarda);
+        esperar_ate(|| PRONTOS.load(SeqCst) == outros.len(), 500)?;
+        for (i, ordem) in ORDEM.iter().enumerate().take(outros.len()) {
+            if ordem.load(SeqCst) != i {
+                crate::log_error!(
+                    "teste",
+                    "volta {}: o {}o a entrar pediu em {}",
+                    volta,
+                    i,
+                    ordem.load(SeqCst)
+                );
+                return Err("a trava deixou entrar fora da ordem em que pediram");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// S15 — um fio novo acorda o núcleo ocioso em que pode rodar: ele começa
+/// antes do próximo tique daquele núcleo, e não no tique. Medido em tiques
+/// do próprio núcleo, em várias tentativas: o cutucão leva microssegundos e
+/// o tique vem a cada dez milissegundos, então quase sempre o fio roda no
+/// mesmo tique em que nasceu — sem o cutucão, nunca.
+fn smp_o_fio_novo_acorda_o_ocioso() -> Resultado {
+    use core::sync::atomic::{AtomicU64, Ordering::SeqCst};
+    const TENTATIVAS: usize = 8;
+    static VISTO: AtomicU64 = AtomicU64::new(u64::MAX);
+    fn tiques_de(nucleo: usize) -> u64 {
+        let mut t = 0;
+        crate::nucleos::com_nucleos(|r| {
+            if r.indice == nucleo {
+                t = r.tiques;
+            }
+        });
+        t
+    }
+    extern "C" fn anotar(nucleo: u64) -> ! {
+        VISTO.store(tiques_de(nucleo as usize), SeqCst);
+        crate::fios::terminar()
+    }
+    if outro_nucleo().is_none() {
+        crate::log_info!("teste", "um nucleo so: nao ha outro para acordar");
+        return Ok(());
+    }
+    let eu = crate::nucleos::atual();
+    let mut no_mesmo_tique = 0;
+    let mut feitas = 0;
+    for _ in 0..TENTATIVAS * 4 {
+        if feitas == TENTATIVAS {
+            break;
+        }
+        // Um núcleo que está ocioso agora: é nele que o cutucão faz falta.
+        let ociosos = crate::fios::ociosos_de_teste() & !(1u8 << eu);
+        let Some(nucleo) = (0..crate::nucleos::MAX_NUCLEOS).find(|&i| ociosos & (1 << i) != 0)
+        else {
+            crate::fios::ceder();
+            continue;
+        };
+        VISTO.store(u64::MAX, SeqCst);
+        let antes = tiques_de(nucleo);
+        crate::fios::criar_no_nucleo("teste-acorda", anotar, nucleo as u64, nucleo)?;
+        esperar_ate(|| VISTO.load(SeqCst) != u64::MAX, 100)?;
+        feitas += 1;
+        if VISTO.load(SeqCst) == antes {
+            no_mesmo_tique += 1;
+        }
+    }
+    if feitas < TENTATIVAS / 2 {
+        return Err("nao houve nucleo ocioso para o caso medir");
+    }
+    // A maioria: um tique pode cair no meio de um cutucão, raramente.
+    if no_mesmo_tique * 4 < feitas * 3 {
+        crate::log_error!("teste", "{} de {} no mesmo tique", no_mesmo_tique, feitas);
+        return Err("o fio novo esperou o tique do nucleo ocioso, e nao o cutucao");
+    }
+    Ok(())
+}
+
+/// S16 — o que o console escreveu enquanto o compositor estava ocupado
+/// chega à tela no próximo tique, sem esperar outra escrita. O caso segura o
+/// compositor, escreve, solta, e espera dois tiques sem escrever nada: o
+/// retângulo sujo tem de ter saído.
+fn tela_o_tique_leva_o_que_ficou() -> Resultado {
+    for volta in 0..3 {
+        let sujo_com_ele_preso = crate::grafico::com_o_compositor_preso_de_teste(|| {
+            crate::serial_println!("tela: escrito com o compositor ocupado ({})", volta);
+            crate::tela::sujo()
+        });
+        if sujo_com_ele_preso.is_none() {
+            // Sem compositor e sem dispositivo a descarregar, a escrita já
+            // é a tela: não há o que levar.
+            crate::log_info!(
+                "teste",
+                "o console nao passa por quem descarregue: nada a levar"
+            );
+            return Ok(());
+        }
+        let inicio = crate::tempo::ticks();
+        let levou = (|| {
+            while crate::tempo::ticks() < inicio + 3 {
+                if crate::tela::sujo().is_none() {
+                    return true;
+                }
+                core::hint::spin_loop();
+            }
+            crate::tela::sujo().is_none()
+        })();
+        if !levou {
+            return Err("o que ficou sujo com o compositor ocupado nao foi levado pelo tique");
+        }
+    }
+    Ok(())
+}
+
+/// S20 — a reexecução é da chamada, e não do estado do fio: um processo
+/// acordado entre a chamada estacionar e a pergunta — que é o que outro
+/// núcleo faz quando atende o pedido nessa hora — ainda refaz a chamada, e
+/// recebe a resposta; não o zero da primeira volta. O caso para o processo
+/// `contido` exatamente nessa janela, atende o pedido dele, e solta.
+fn fios_a_reexecucao_e_da_chamada() -> Resultado {
+    use crate::fios::pausa_de_teste;
+    if outro_nucleo().is_none() {
+        crate::log_info!("teste", "um nucleo so: a janela precisa de outro nucleo");
+        return Ok(());
+    }
+    let programa = alloc::format!("{}/contido", crate::usuario::DIRETORIO_DOS_COMPILADOS);
+    let procurada = "processo encerrou com codigo 75";
+    let desde = crate::log::total_emitidos();
+    pausa_de_teste::armar("contido");
+    let lancado = crate::usuario::lancar(Some(&programa));
+    let parou = lancado.is_ok() && girar_ate(pausa_de_teste::parada, 4_000_000_000);
+    // Parado depois da chamada e antes da pergunta: atender agora o acorda
+    // nessa janela.
+    let atendido = parou && girar_ate(|| crate::nativo::atender_pendentes() > 0, 400_000_000);
+    pausa_de_teste::soltar();
+    lancado?;
+    if !parou || !atendido {
+        return Err("o processo nao parou na janela da reexecucao, ou o pedido nao veio");
+    }
+    let visto = || {
+        let mut achou = false;
+        crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+            achou |= r.seq >= desde && r.subsistema == "usuario" && r.mensagem() == procurada;
+        });
+        achou
+    };
+    esperar_ate(visto, 600)
+        .map_err(|_| "acordado na janela, o processo recebeu outra coisa que a resposta")
+}
+
+/// S21 — soltar o último dono de um frame o devolve ao alocador na mesma
+/// seção crítica que viu a contagem em zero. Um caso abre a janela entre
+/// decidir e liberar, se ela existir — uma pausa na entrada de `liberar`,
+/// para este frame —, e outro núcleo pede para compartilhar o frame nessa
+/// hora: se o pedido for aceito, o frame que ele acha ter um dono a mais é
+/// o mesmo que o alocador vai entregar a outro.
+fn frames_soltar_libera_na_mesma_secao() -> Resultado {
+    use crate::frames::pausa_de_teste;
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
+    static FRAME: AtomicU64 = AtomicU64::new(0);
+    static VOLTOU: AtomicBool = AtomicBool::new(false);
+    static PRONTO: AtomicBool = AtomicBool::new(false);
+    extern "C" fn soltar(_: u64) -> ! {
+        VOLTOU.store(crate::frames::soltar(FRAME.load(SeqCst)), SeqCst);
+        PRONTO.store(true, SeqCst);
+        crate::fios::terminar()
+    }
+    let Some(outro) = outro_nucleo() else {
+        crate::log_info!("teste", "um nucleo so: a janela precisa de outro nucleo");
+        return Ok(());
+    };
+    let frame = crate::frames::alocar().ok_or("sem frame para o caso")?;
+    FRAME.store(frame, SeqCst);
+    PRONTO.store(false, SeqCst);
+    pausa_de_teste::armar(frame);
+    crate::fios::criar_no_nucleo("teste-soltar", soltar, 0, outro)?;
+    // Ou ele para na entrada de `liberar` — a janela existe —, ou termina
+    // sem passar por ela.
+    girar_ate(
+        || pausa_de_teste::parada() || PRONTO.load(SeqCst),
+        4_000_000_000,
+    );
+    let na_janela = pausa_de_teste::parada();
+    let aceito = crate::frames::compartilhar(frame);
+    let donos = crate::frames::donos(frame);
+    pausa_de_teste::soltar();
+    esperar_ate(|| PRONTO.load(SeqCst), 500)?;
+    let donos_depois = crate::frames::donos(frame);
+    if aceito && donos_depois > 0 {
+        // Quem compartilhou é dono: devolve.
+        let _ = crate::frames::soltar(frame);
+    }
+    if !VOLTOU.load(SeqCst) {
+        return Err("soltar o unico dono nao devolveu o frame");
+    }
+    if aceito && donos_depois == 0 {
+        crate::log_error!(
+            "teste",
+            "na janela: {}, donos antes de soltar: {}",
+            na_janela,
+            donos
+        );
+        return Err("um frame compartilhado depois de soltar voltou ao alocador com o novo dono");
+    }
+    if na_janela {
+        return Err("soltar liberou o frame fora da secao que viu a contagem em zero");
+    }
+    Ok(())
+}
+
+/// S4 — marcar uma página do kernel avisa os outros núcleos, e não só este:
+/// a página é traduzida por todos, e uma marca que só este visse seria uma
+/// proteção na tabela que a máquina não tem. Nenhum chamador de hoje marca
+/// página do kernel; o contrato é da função, e o caso o exercita sobre uma
+/// página do heap — a marca de compartilhada não muda permissão nenhuma.
+#[cfg(target_arch = "x86_64")]
+fn paginacao_marcar_pagina_do_kernel_avisa_todos() -> Resultado {
+    #[repr(align(4096))]
+    struct Pagina([u8; 4096]);
+    if outro_nucleo().is_none() {
+        crate::log_info!("teste", "um nucleo so: nao ha a quem avisar");
+        return Ok(());
+    }
+    let pagina = alloc::boxed::Box::new(Pagina([0; 4096]));
+    let virtual_ = &*pagina as *const Pagina as u64;
+    if crate::arch::e_privado(virtual_) {
+        return Err("a pagina do heap caiu no espaco privado");
+    }
+    let antes = crate::arch::x86_64::smp::descartes();
+    crate::arch::marcar_compartilhada(virtual_)?;
+    let marcada = crate::arch::x86_64::smp::descartes();
+    crate::arch::x86_64::desmarcar_compartilhada_de_teste(virtual_)?;
+    let desmarcada = crate::arch::x86_64::smp::descartes();
+    // A página continua a mesma memória, e legível, depois da marca.
+    if pagina.0.iter().any(|&b| b != 0) {
+        return Err("a marca mudou o conteudo da pagina");
+    }
+    drop(pagina);
+    if marcada <= antes || desmarcada <= marcada {
+        return Err("mudar o descritor de uma pagina do kernel nao avisou os outros nucleos");
+    }
+    Ok(())
+}
+
 static CASOS: &[Caso] = &[
     // Primeiro, e não junto dos outros do compositor: ele confere que a
     // camada do console adotou o que o boot desenhou, e os casos de console
@@ -25331,6 +26798,83 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "nativo: o programa pede pelo mesmo gate",
         f: nativo_o_programa_pede_pelo_mesmo_gate,
+    },
+    Caso {
+        nome: "armazem: os conceitos separados",
+        f: armazem_os_conceitos_separados,
+    },
+    Caso {
+        nome: "armazem: a decisao vai com a mudanca",
+        f: armazem_a_decisao_vai_com_a_mudanca,
+    },
+    Caso {
+        nome: "armazem: gravacao que falha nao vale",
+        f: armazem_a_gravacao_que_falha_nao_vale,
+    },
+    Caso {
+        nome: "armazem: o journal repoe o armazem",
+        f: armazem_o_journal_repoe_o_armazem,
+    },
+    Caso {
+        nome: "armazem: pessoa, agente e processo",
+        f: armazem_igual_para_pessoa_agente_processo,
+    },
+    Caso {
+        nome: "armazem: o sistema nao tem atalho",
+        f: armazem_o_sistema_nao_tem_atalho,
+    },
+    Caso {
+        nome: "armazem: o vfs le o que foi gravado",
+        f: armazem_o_vfs_le_o_que_foi_gravado,
+    },
+    Caso {
+        nome: "armazem: tetos e lugares",
+        f: armazem_tetos_e_lugares,
+    },
+    Caso {
+        nome: "armazem: varios nucleos no mesmo arquivo",
+        f: armazem_varios_nucleos_no_mesmo_arquivo,
+    },
+    Caso {
+        nome: "armazem: quatro agentes disputam",
+        f: armazem_quatro_agentes_disputam,
+    },
+    Caso {
+        nome: "armazem: o programa guarda pelo gate",
+        f: armazem_o_programa_guarda_pelo_gate,
+    },
+    Caso {
+        nome: "consoles: reabrir encerra a sessao",
+        f: consoles_reabrir_encerra_a_sessao,
+    },
+    Caso {
+        nome: "pty: a saida espera o anel",
+        f: pty_a_saida_espera_o_anel,
+    },
+    Caso {
+        nome: "trava: justa entre nucleos",
+        f: trava_e_justa_entre_nucleos,
+    },
+    Caso {
+        nome: "smp: o fio novo acorda o ocioso",
+        f: smp_o_fio_novo_acorda_o_ocioso,
+    },
+    Caso {
+        nome: "tela: o tique leva o que ficou",
+        f: tela_o_tique_leva_o_que_ficou,
+    },
+    Caso {
+        nome: "fios: a reexecucao e da chamada",
+        f: fios_a_reexecucao_e_da_chamada,
+    },
+    Caso {
+        nome: "frames: soltar libera na mesma secao",
+        f: frames_soltar_libera_na_mesma_secao,
+    },
+    #[cfg(target_arch = "x86_64")]
+    Caso {
+        nome: "paginacao: marcar no kernel avisa todos",
+        f: paginacao_marcar_pagina_do_kernel_avisa_todos,
     },
     Caso {
         nome: "manifesto: a permissao e a intersecao",

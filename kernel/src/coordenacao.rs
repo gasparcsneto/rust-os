@@ -60,6 +60,13 @@ pub fn recurso(elemento: u32) -> String {
     format!("ui:{elemento}")
 }
 
+/// O nome do recurso de um arquivo do armazém, pelo caminho inteiro na
+/// forma normal: `fs:/armazem/compartilhado/notas.txt`. Ver
+/// [`crate::armazem`].
+pub fn recurso_do_caminho(caminho: &str) -> String {
+    format!("fs:{caminho}")
+}
+
 /// O titular de uma sessão do canal: a chave que provou o aperto, ou a
 /// serial, sem chave. `None` para uma porta sem aperto.
 pub fn titular_do_agente(sessao: u8) -> Option<Titular> {
@@ -189,6 +196,16 @@ pub fn estado(recurso: &str) -> Estado {
 /// `ui.claim`: toma o arrendamento por `prazo_ms`. Do mesmo titular,
 /// renova. Grava o desfecho.
 pub fn tomar(recurso: &str, titular: Titular, prazo_ms: u64) -> Result<Arrendamento, Codigo> {
+    tomar_por(recurso, titular, prazo_ms, "ui.claim")
+}
+
+/// [`tomar`], gravado com o método que pediu — `ui.claim`, `fs.claim`.
+pub fn tomar_por(
+    recurso: &str,
+    titular: Titular,
+    prazo_ms: u64,
+    metodo: &str,
+) -> Result<Arrendamento, Codigo> {
     let agora = crate::tempo::uptime_ms();
     let (r, vencido) = com_tabela(|t| t.tomar(recurso, titular, agora, prazo_ms));
     gravar_vencido(recurso, vencido);
@@ -196,7 +213,7 @@ pub fn tomar(recurso: &str, titular: Titular, prazo_ms: u64) -> Result<Arrendame
         Ok(a) => {
             gravar(
                 Some(&titular),
-                "ui.claim",
+                metodo,
                 recurso,
                 Codigo::Allow,
                 "arrendamento tomado",
@@ -206,7 +223,7 @@ pub fn tomar(recurso: &str, titular: Titular, prazo_ms: u64) -> Result<Arrendame
         Err(recusa) => {
             gravar(
                 Some(&titular),
-                "ui.claim",
+                metodo,
                 recurso,
                 recusa.codigo(),
                 recusa.motivo(),
@@ -218,6 +235,11 @@ pub fn tomar(recurso: &str, titular: Titular, prazo_ms: u64) -> Result<Arrendame
 
 /// `ui.release`: solta o arrendamento, se for de `titular`. Grava.
 pub fn soltar(recurso: &str, titular: Titular) -> Result<(), Codigo> {
+    soltar_por(recurso, titular, "ui.release")
+}
+
+/// [`soltar`], gravado com o método que pediu — `ui.release`, `fs.release`.
+pub fn soltar_por(recurso: &str, titular: Titular, metodo: &str) -> Result<(), Codigo> {
     let agora = crate::tempo::uptime_ms();
     let (r, vencido) = com_tabela(|t| t.soltar(recurso, titular, agora));
     gravar_vencido(recurso, vencido);
@@ -225,7 +247,7 @@ pub fn soltar(recurso: &str, titular: Titular) -> Result<(), Codigo> {
         Ok(_) => {
             gravar(
                 Some(&titular),
-                "ui.release",
+                metodo,
                 recurso,
                 Codigo::Allow,
                 "arrendamento solto",
@@ -235,7 +257,7 @@ pub fn soltar(recurso: &str, titular: Titular) -> Result<(), Codigo> {
         Err(recusa) => {
             gravar(
                 Some(&titular),
-                "ui.release",
+                metodo,
                 recurso,
                 recusa.codigo(),
                 recusa.motivo(),
@@ -243,6 +265,21 @@ pub fn soltar(recurso: &str, titular: Titular) -> Result<(), Codigo> {
             Err(recusa.codigo())
         }
     }
+}
+
+/// Confere só o arrendamento de `recurso` para uma mudança em nome de
+/// `titular` — ou de uma autoridade que não arrenda, `None` —, sem tocar
+/// na versão desta tabela: o recurso tem a versão dele em outro lugar (o
+/// armazém). O arrendamento do titular é renovado pela atividade; o de
+/// outro recusa, com o titular dele.
+///
+/// Só grava o arrendamento que venceu no caminho: a recusa é gravada por
+/// quem chama, como o resultado do comando que ela recusou.
+pub fn conferir(recurso: &str, titular: Option<Titular>) -> Result<(), Recusa> {
+    let agora = crate::tempo::uptime_ms();
+    let (r, vencido) = com_tabela(|t| t.conferir(recurso, titular, agora));
+    gravar_vencido(recurso, vencido);
+    r
 }
 
 /// Uma edição — uma tecla, um `set_value`, um `cancel` — em nome de

@@ -694,6 +694,16 @@ pub fn marcar_compartilhada(virtual_: u64) -> Result<(), &'static str> {
     })
 }
 
+/// Só para a suíte: tira a marca de [`marcar_compartilhada`], pelo mesmo
+/// caminho — com a invalidação aqui e nos outros núcleos.
+#[cfg(feature = "modo-teste")]
+pub fn desmarcar_compartilhada_de_teste(virtual_: u64) -> Result<(), &'static str> {
+    com_descritor_da_folha(virtual_, |descritor| {
+        descritor.set_flags(descritor.flags() - COMPARTILHADA);
+        Ok(((), true))
+    })
+}
+
 /// O processo pode escrever nesta página?
 ///
 /// Pelo bit de escrita **ou** pela marca de cópia na escrita — a mesma

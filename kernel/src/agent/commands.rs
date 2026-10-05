@@ -657,6 +657,136 @@ pub static COMANDOS: &[Command] = &[
         handler: fs_list,
     },
     Command {
+        nome: "fs.stat",
+        resumo: "O que um caminho do armazem e agora: o tipo, a versao, o tamanho e o \
+                 arrendamento.",
+        params: &[ParamSpec {
+            nome: "path",
+            tipo: TipoParam::Texto,
+            obrigatorio: true,
+            descricao: "Caminho absoluto, abaixo de /armazem.",
+        }],
+        acesso: Acesso::Exige(Permissao::FsRead),
+        recurso: Some("path"),
+        handler: fs_stat,
+    },
+    Command {
+        nome: "fs.write",
+        resumo: "Grava um arquivo de texto no armazem, contra a versao que voce leu: 0 cria (e \
+                 recusa se ja existe), N substitui (e recusa se a versao nao e N). Confirmado \
+                 so depois de gravado no journal. CONFLICT diz se foi a versao ou o \
+                 arrendamento de outro titular.",
+        params: &[
+            ParamSpec {
+                nome: "path",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "Caminho absoluto do arquivo, abaixo de /armazem.",
+            },
+            ParamSpec {
+                nome: "content",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "O conteudo inteiro, em texto (ate 16 KiB).",
+            },
+            ParamSpec {
+                nome: "expect_version",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: true,
+                descricao: "A versao que voce leu; 0 para criar.",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::FsWrite),
+        recurso: Some("path"),
+        handler: fs_write,
+    },
+    Command {
+        nome: "fs.append",
+        resumo: "Acrescenta texto ao fim de um arquivo do armazem que existe, contra a versao \
+                 de agora.",
+        params: &[
+            ParamSpec {
+                nome: "path",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "Caminho absoluto do arquivo, abaixo de /armazem.",
+            },
+            ParamSpec {
+                nome: "content",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "O texto a acrescentar.",
+            },
+            ParamSpec {
+                nome: "expect_version",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: true,
+                descricao: "A versao de agora do arquivo.",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::FsWrite),
+        recurso: Some("path"),
+        handler: fs_append,
+    },
+    Command {
+        nome: "fs.delete",
+        resumo: "Apaga um arquivo do armazem, contra a versao de agora.",
+        params: &[
+            ParamSpec {
+                nome: "path",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "Caminho absoluto do arquivo, abaixo de /armazem.",
+            },
+            ParamSpec {
+                nome: "expect_version",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: true,
+                descricao: "A versao de agora do arquivo.",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::FsWrite),
+        recurso: Some("path"),
+        handler: fs_delete,
+    },
+    Command {
+        nome: "fs.claim",
+        resumo: "Arrenda um arquivo do armazem para a sua sessao: ninguem mais o muda ate voce \
+                 soltar, o prazo vencer ou a sua sessao acabar. Opcional; a versao continua \
+                 sendo exigida. Sem preempcao: o de outro e CONFLICT.",
+        params: &[
+            ParamSpec {
+                nome: "path",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "Caminho absoluto do arquivo, abaixo de /armazem (pode nao existir \
+                            ainda).",
+            },
+            ParamSpec {
+                nome: "ttl_ms",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "O prazo, de 1000 a 300000 ms; 30000 se ausente. A atividade o renova.",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::FsWrite),
+        recurso: Some("path"),
+        handler: fs_claim,
+    },
+    Command {
+        nome: "fs.release",
+        resumo: "Solta o arrendamento de um arquivo do armazem, se for seu.",
+        params: &[ParamSpec {
+            nome: "path",
+            tipo: TipoParam::Texto,
+            obrigatorio: true,
+            descricao: "Caminho absoluto do arquivo, abaixo de /armazem.",
+        }],
+        acesso: Acesso::Exige(Permissao::FsWrite),
+        recurso: Some("path"),
+        handler: fs_release,
+    },
+    Command {
         nome: "keyboard.read",
         resumo: "O que foi digitado no teclado da maquina, e os contadores dele. Tira da fila o que devolve.",
         params: &[ParamSpec {
@@ -2063,6 +2193,194 @@ fn fs_list(params: Json, w: &mut JsonWriter) -> fmt::Result {
         }
     }
 
+    w.end_object()
+}
+
+// ---------------------------------------------------------------------------
+// O armazém: ver crate::armazem e docs/ARMAZENAMENTO.md. O gate já decidiu
+// `fs.write` (ou `fs.read`) e o alcance do caminho; os handlers não decidem
+// de novo — dizem o arrendamento, a versão, a persistência e o resultado.
+// ---------------------------------------------------------------------------
+
+/// Escreve a recusa de uma mutação do armazém: o código, qual conflito e o
+/// que o explica — a versão de agora, ou quem tem o arrendamento.
+fn recusa_do_armazem(w: &mut JsonWriter, caminho: &str, f: crate::armazem::Falha) -> fmt::Result {
+    use crate::armazem::Falha;
+    w.field_bool("ok", false)?;
+    w.field_str("code", f.codigo().nome())?;
+    if let Some(c) = f.conflito() {
+        w.field_str("conflict", c)?;
+    }
+    match f {
+        Falha::Versao { atual } => w.field_u64("current_version", atual)?,
+        Falha::Arrendamento(_) => {
+            if let Some((_, s)) = crate::armazem::situacao(caminho)
+                && let Some(a) = s.arrendamento
+            {
+                w.key("lease")?;
+                escrever_arrendamento(w, &a)?;
+            }
+        }
+        _ => {}
+    }
+    w.field_str("error", f.motivo())?;
+    w.end_object()
+}
+
+/// O texto de um parâmetro, desescapado num buffer de quem chama — que o
+/// zera depois: o conteúdo de um arquivo não fica no heap. O desescapado
+/// nunca é maior que o escrito.
+fn buffer_do_texto(valor: Option<Json>) -> alloc::vec::Vec<u8> {
+    alloc::vec![0u8; valor.map_or(0, |b| b.0.len())]
+}
+
+/// Faz a mutação e escreve a resposta. `conteudo` é `None` quando o pedido
+/// tinha um conteúdo que não é texto.
+fn mutar(
+    w: &mut JsonWriter,
+    caminho: &str,
+    esperada: u64,
+    operacao: Option<crate::armazem::Operacao>,
+) -> fmt::Result {
+    let resultado = match operacao {
+        Some(op) => crate::armazem::mudar(caminho, esperada, op),
+        None => {
+            let f = crate::armazem::Falha::Caminho("o conteudo nao e texto");
+            crate::autorizacao::auditar_execucao(caminho, f.codigo(), f.motivo());
+            Err(f)
+        }
+    };
+    match resultado {
+        Ok(feita) => {
+            w.field_bool("ok", true)?;
+            w.field_str("path", caminho)?;
+            w.field_u64("version", feita.versao)?;
+            w.field_u64("size", feita.tamanho as u64)?;
+            // Só há sucesso gravado: o armazém não muda só em memória.
+            w.field_bool("durable", true)?;
+            w.end_object()
+        }
+        Err(f) => recusa_do_armazem(w, caminho, f),
+    }
+}
+
+/// A versão esperada do pedido. Ausente, nenhuma versão confere — mas o
+/// registro já recusou: o parâmetro é obrigatório.
+fn versao_esperada(valor: Option<Json>) -> u64 {
+    valor.and_then(|v| v.as_u64()).unwrap_or(u64::MAX)
+}
+
+fn fs_write(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let caminho = params.member("path").and_then(|v| v.as_str()).unwrap_or("");
+    let esperada = versao_esperada(params.member("expect_version"));
+    let bruto = params.member("content");
+    let mut buffer = buffer_do_texto(bruto);
+    let conteudo = bruto.and_then(|b| b.desescapar_em(&mut buffer));
+    let feito = mutar(
+        w,
+        caminho,
+        esperada,
+        conteudo.map(|c| crate::armazem::Operacao::Gravar(c.as_bytes())),
+    );
+    politica::sigiloso::zerar_bloco(&mut buffer);
+    feito
+}
+
+fn fs_append(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let caminho = params.member("path").and_then(|v| v.as_str()).unwrap_or("");
+    let esperada = versao_esperada(params.member("expect_version"));
+    let bruto = params.member("content");
+    let mut buffer = buffer_do_texto(bruto);
+    let conteudo = bruto.and_then(|b| b.desescapar_em(&mut buffer));
+    let feito = mutar(
+        w,
+        caminho,
+        esperada,
+        conteudo.map(|c| crate::armazem::Operacao::Acrescentar(c.as_bytes())),
+    );
+    politica::sigiloso::zerar_bloco(&mut buffer);
+    feito
+}
+
+fn fs_delete(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let caminho = params.member("path").and_then(|v| v.as_str()).unwrap_or("");
+    let esperada = versao_esperada(params.member("expect_version"));
+    mutar(w, caminho, esperada, Some(crate::armazem::Operacao::Apagar))
+}
+
+fn fs_stat(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let caminho = params.member("path").and_then(|v| v.as_str()).unwrap_or("");
+    let Some((normal, s)) = crate::armazem::situacao(caminho) else {
+        w.field_bool("ok", false)?;
+        w.field_str("code", politica::Codigo::InvalidArgument.nome())?;
+        w.field_str("error", "o caminho nao e do armazem")?;
+        return w.end_object();
+    };
+    w.field_bool("ok", true)?;
+    w.field_str("path", &normal)?;
+    w.field_str(
+        "type",
+        match s.tipo {
+            Some(::armazem::Tipo::Arquivo) => "file",
+            Some(::armazem::Tipo::Diretorio) => "dir",
+            None => "none",
+        },
+    )?;
+    w.field_u64("version", s.versao)?;
+    w.field_u64("size", s.tamanho as u64)?;
+    if let Some(a) = s.arrendamento {
+        w.key("lease")?;
+        escrever_arrendamento(w, &a)?;
+    }
+    w.end_object()
+}
+
+fn fs_claim(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let caminho = params.member("path").and_then(|v| v.as_str()).unwrap_or("");
+    let prazo = params
+        .member("ttl_ms")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(crate::coordenacao::PRAZO_PADRAO_MS);
+    match crate::armazem::arrendar(caminho, prazo) {
+        Ok(a) => {
+            w.field_bool("ok", true)?;
+            w.key("lease")?;
+            escrever_arrendamento(w, &a)?;
+        }
+        Err((codigo, motivo)) => {
+            w.field_bool("ok", false)?;
+            w.field_str("code", codigo.nome())?;
+            if codigo == politica::Codigo::Conflict {
+                w.field_str("conflict", "lease")?;
+                if let Some((_, s)) = crate::armazem::situacao(caminho)
+                    && let Some(a) = s.arrendamento
+                {
+                    w.key("lease")?;
+                    escrever_arrendamento(w, &a)?;
+                }
+            }
+            w.field_str("error", motivo)?;
+        }
+    }
+    w.end_object()
+}
+
+fn fs_release(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let caminho = params.member("path").and_then(|v| v.as_str()).unwrap_or("");
+    match crate::armazem::soltar(caminho) {
+        Ok(()) => w.field_bool("ok", true)?,
+        Err((codigo, motivo)) => {
+            w.field_bool("ok", false)?;
+            w.field_str("code", codigo.nome())?;
+            w.field_str("error", motivo)?;
+        }
+    }
     w.end_object()
 }
 

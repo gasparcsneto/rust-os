@@ -212,6 +212,10 @@ const CENARIOS: &[Cenario] = &[
         rodar: as_mensagens_sobrevivem,
     },
     Cenario {
+        nome: "o armazem sobrevive ao corte: os mesmos arquivos e versoes, e uma versao dada nao volta",
+        rodar: o_armazem_sobrevive,
+    },
+    Cenario {
         nome: "o prazo de uma mensagem e do tempo logico: nao volta com o RTC, e o vencido nao volta a pendente",
         rodar: o_prazo_e_do_tempo_logico,
     },
@@ -1730,6 +1734,78 @@ fn as_mensagens_sobrevivem(arch: Arquitetura, artefato: &Artefato) -> Result<Str
     ))
 }
 
+/// A versão de um caminho do armazém, pelo `fs.stat` — 0 sem arquivo.
+fn versao_no_armazem(m: &mut Ligada, caminho: &str) -> Result<u64, String> {
+    let r = m.pedir("fs.stat", &format!(r#"{{"path":"{caminho}"}}"#))?;
+    r.split(r#""version":"#)
+        .nth(1)
+        .and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|n| n.parse().ok())
+        .ok_or_else(|| format!("fs.stat sem versao\n  {r}"))
+}
+
+/// O armazém sobrevive ao corte de energia: cada gravação confirmada está
+/// no journal, e o boot a repõe — o mesmo conteúdo, a mesma versão; o
+/// apagado continua apagado, e a próxima versão não volta a uma já dada.
+/// Pela serial, que é do papel `sistema`.
+fn o_armazem_sobrevive(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    const A: &str = "/armazem/sistema/bancada/a.txt";
+    const B: &str = "/armazem/sistema/bancada/b.txt";
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let gravar = |m: &mut Ligada, metodo: &str, caminho: &str, conteudo: Option<&str>| {
+        let v = versao_no_armazem(m, caminho)?;
+        let params = match conteudo {
+            Some(t) => format!(r#"{{"path":"{caminho}","content":"{t}","expect_version":{v}}}"#),
+            None => format!(r#"{{"path":"{caminho}","expect_version":{v}}}"#),
+        };
+        let r = m.pedir(metodo, &params)?;
+        if !r.contains(r#""ok":true"#) || !r.contains(r#""durable":true"#) {
+            return Err(format!("{metodo} {caminho} nao foi confirmado\n  {r}"));
+        }
+        Ok::<(), String>(())
+    };
+    gravar(&mut m, "fs.write", A, Some("um"))?;
+    gravar(&mut m, "fs.write", B, Some("dois"))?;
+    gravar(&mut m, "fs.append", A, Some(" e mais"))?;
+    gravar(&mut m, "fs.delete", B, None)?;
+    let va = versao_no_armazem(&mut m, A)?;
+    m.cortar_a_energia()?;
+
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let lido = m.pedir("fs.read", &format!(r#"{{"path":"{A}"}}"#))?;
+    let depois_a = versao_no_armazem(&mut m, A)?;
+    let depois_b = versao_no_armazem(&mut m, B)?;
+    let novo = m.pedir(
+        "fs.write",
+        &format!(r#"{{"path":"{B}","content":"de novo","expect_version":0}}"#),
+    )?;
+    m.cortar_a_energia()?;
+    if !lido.contains(r#""content":"um e mais""#) || depois_a != va {
+        return Err(format!(
+            "o arquivo nao voltou igual: versao {depois_a} e nao {va}\n  {lido}"
+        ));
+    }
+    if depois_b != 0 {
+        return Err(format!("o arquivo apagado voltou, na versao {depois_b}"));
+    }
+    let vn = novo
+        .split(r#""version":"#)
+        .nth(1)
+        .and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|n| n.parse::<u64>().ok())
+        .ok_or_else(|| format!("a gravacao depois do corte foi recusada\n  {novo}"))?;
+    // A remoção de B levou uma versão depois da de A: a próxima passa das
+    // duas.
+    if vn <= va + 1 {
+        return Err(format!(
+            "depois do corte, a versao {vn} nao passa das ja dadas (a ultima de A e {va})"
+        ));
+    }
+    Ok(format!(
+        "{A} na versao {va}, igual depois do corte; o apagado nao voltou; a seguinte foi {vn}"
+    ))
+}
+
 /// O prazo de uma mensagem corre no tempo lógico. Num boot em 2031 a porta
 /// 1 manda duas: uma de um minuto e uma de um segundo, que vence e é
 /// gravada vencida. No boot seguinte, com o RTC em 2024, o tempo lógico
@@ -2411,6 +2487,19 @@ fn a_compactacao_sobrevive(arch: Arquitetura, artefato: &Artefato) -> Result<Str
         m.cortar_a_energia()?;
         return Err(format!("a mensagem nao foi duravel\n  {r}"));
     }
+    const ARQUIVO: &str = "/armazem/sistema/compacta.txt";
+    let v0 = versao_no_armazem(&mut m, ARQUIVO)?;
+    let r = m.pedir(
+        "fs.write",
+        &format!(
+            r#"{{"path":"{ARQUIVO}","content":"antes da compactacao","expect_version":{v0}}}"#
+        ),
+    )?;
+    if !r.contains(r#""durable":true"#) {
+        m.cortar_a_energia()?;
+        return Err(format!("a gravacao no armazem nao foi duravel\n  {r}"));
+    }
+    let v_arquivo = versao_no_armazem(&mut m, ARQUIVO)?;
     let ops = encher(&mut m, &chaves, Some(1))?;
     let antes = persistencia_de(&mut m)?;
     m.cortar_a_energia()?;
@@ -2418,6 +2507,15 @@ fn a_compactacao_sobrevive(arch: Arquitetura, artefato: &Artefato) -> Result<Str
     let mut m = Ligada::subir(arch, artefato, None)?;
     let p = persistencia_de(&mut m)?;
     let caixa = m.pedir("message.read", "{}")?;
+    let arquivo = m.pedir("fs.read", &format!(r#"{{"path":"{ARQUIVO}"}}"#))?;
+    if !arquivo.contains(r#""content":"antes da compactacao""#)
+        || versao_no_armazem(&mut m, ARQUIVO)? != v_arquivo
+    {
+        m.cortar_a_energia()?;
+        return Err(format!(
+            "o arquivo do armazem nao atravessou a compactacao igual\n  {arquivo}"
+        ));
+    }
     let verifica = auditoria_verifica(&mut m);
     if p.estado != "available" || p.compactacoes < 1 || p.geracao != antes.geracao {
         m.cortar_a_energia()?;

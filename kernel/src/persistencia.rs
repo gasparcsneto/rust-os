@@ -377,6 +377,56 @@ pub fn gravar_mensagens() -> Result<(), &'static str> {
     })
 }
 
+/// A entrada de uma mudança do armazém — ver [`tipo::ARQUIVO_GRAVADO`] e
+/// [`tipo::ARQUIVO_APAGADO`].
+fn entrada_do_armazem(m: &::armazem::Mudanca) -> Result<Vec<u8>, &'static str> {
+    match m {
+        ::armazem::Mudanca::Gravado {
+            caminho,
+            versao,
+            dados,
+        } => entrada(
+            tipo::ARQUIVO_GRAVADO,
+            &[caminho.as_bytes(), &versao.to_le_bytes(), dados],
+        ),
+        ::armazem::Mudanca::Apagado { caminho, versao } => entrada(
+            tipo::ARQUIVO_APAGADO,
+            &[caminho.as_bytes(), &versao.to_le_bytes()],
+        ),
+    }
+}
+
+/// Grava uma mudança do armazém, num registro [`tipo::ARMAZEM`] que leva
+/// também o registro `execucao` da auditoria — o que o comando fez, depois
+/// da decisão do gate que o autorizou — e, como todo registro, o que as
+/// mensagens mudaram e ainda não foi gravado.
+///
+/// **Estrita**: sem a persistência disponível, `Err` antes de gravar
+/// qualquer coisa — o armazém não muda só em memória, nunca. `Ok` é o que
+/// está no disco: escrito, descarregado e ancorado. Quem chama aplica a
+/// mudança em memória **só** depois de `Ok`, com a ordem das gravações
+/// ainda na mão. Uma gravação que falha deixa a persistência indisponível,
+/// como qualquer outra.
+pub fn gravar_armazem(m: &::armazem::Mudanca, execucao: u64) -> Result<(), &'static str> {
+    em_ordem(|| {
+        exigir()?;
+        if execucao == 0 {
+            return Err("uma mudanca do armazem sem o registro da auditoria");
+        }
+        let mut entradas = alloc::vec![entrada_do_armazem(m)?];
+        entradas.extend(tirar_pendentes());
+        let montado = estado::campos(&entradas.iter().map(Vec::as_slice).collect::<Vec<_>>());
+        // O conteúdo de um arquivo não fica no heap depois de cifrado.
+        for e in &mut entradas {
+            politica::sigiloso::zerar_bloco(e);
+        }
+        let mut conteudo = montado?;
+        let gravado = gravar_com_a_decisao(tipo::ARMAZEM, &conteudo, execucao);
+        politica::sigiloso::zerar_bloco(&mut conteudo);
+        gravado
+    })
+}
+
 /// A partição de estado como meio do journal: setores relativos ao começo
 /// dela, em pedidos que cabem numa ida ao disco.
 struct Particao {
@@ -1645,6 +1695,27 @@ fn compactar_sozinho() -> Result<(usize, u64, u64, u64), FalhaDaCompactacao> {
         )?]);
         Ok(g)
     })?;
+    // O armazém, da memória: cada arquivo, na ordem das versões — a ordem
+    // em que o boot os aplica, que só aceita versões crescentes —, e a
+    // próxima versão, para as já dadas não voltarem.
+    grupos.extend(crate::armazem::com_o_armazem(
+        |a| -> Result<_, &'static str> {
+            let mut arquivos: Vec<(&str, &::armazem::Objeto)> = a.todos().collect();
+            arquivos.sort_unstable_by_key(|(_, o)| o.versao());
+            let mut g: Vec<Vec<Vec<u8>>> = Vec::new();
+            for (caminho, o) in arquivos {
+                g.push(alloc::vec![entrada(
+                    tipo::ARQUIVO_GRAVADO,
+                    &[caminho.as_bytes(), &o.versao().to_le_bytes(), o.dados()],
+                )?]);
+            }
+            g.push(alloc::vec![entrada(
+                tipo::ARMAZEM_PROXIMO,
+                &[&a.proxima().to_le_bytes()]
+            )?]);
+            Ok(g)
+        },
+    )?);
     let mut escritas = Ok(());
     for g in &grupos {
         escritas = escrita.grupo(g);
@@ -2090,7 +2161,9 @@ fn entradas(r: &diario::Registro) -> Result<Vec<&[u8]>, &'static str> {
             Some((_, resto)) => Ok(resto.to_vec()),
             None => Err("registro sem o campo do tipo"),
         },
-        tipo::OPERACAO | tipo::MENSAGENS | tipo::AUDITORIA | tipo::BASE => Ok(campos),
+        tipo::OPERACAO | tipo::MENSAGENS | tipo::ARMAZEM | tipo::AUDITORIA | tipo::BASE => {
+            Ok(campos)
+        }
         // O fecho tem só os campos dele — ver [`fecho`].
         tipo::BASE_FIM => fecho(&r.conteudo).map(|_| Vec::new()),
         _ => Err("tipo de registro desconhecido"),
@@ -2229,6 +2302,23 @@ pub(crate) fn reaplicar_entrada(e: &[u8]) -> Result<(), &'static str> {
             })
         }
         (tipo::MENSAGENS_PROXIMO, [n]) => crate::mensagens::fixar_proximo(u64_de(n)?),
+        (tipo::ARQUIVO_GRAVADO, [caminho, versao, dados]) => {
+            crate::armazem::restaurar(&::armazem::Mudanca::Gravado {
+                caminho: String::from(texto(caminho)?),
+                versao: u64_de(versao)?,
+                dados: dados.to_vec(),
+            })
+        }
+        (tipo::ARQUIVO_APAGADO, [caminho, versao]) => {
+            crate::armazem::restaurar(&::armazem::Mudanca::Apagado {
+                caminho: String::from(texto(caminho)?),
+                versao: u64_de(versao)?,
+            })
+        }
+        (tipo::ARMAZEM_PROXIMO, [n]) => {
+            crate::armazem::fixar_proxima(u64_de(n)?);
+            Ok(())
+        }
         (tipo::AUDITORIA_LACUNA, [primeira, ultima, elo]) => {
             let l = politica::auditoria::Lacuna {
                 primeira: u64_de(primeira)?,

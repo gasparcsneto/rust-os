@@ -218,6 +218,26 @@ pub fn saida(indice: u8, texto: &str) {
     PENDENTES[usize::from(indice)].store(true, Ordering::Relaxed);
 }
 
+/// Só para a suíte: roda `f` com a tranca do anel da instância `indice` na
+/// mão — o que o processo do Terminal faz enquanto lê. Ver o caso
+/// "pty: a saida espera o anel".
+#[cfg(feature = "modo-teste")]
+pub fn com_o_anel_preso_de_teste<R>(indice: u8, f: impl FnOnce() -> R) -> R {
+    crate::arch::sem_interrupcoes(|| {
+        let _vez = SAIDAS[usize::from(indice)].lock();
+        f()
+    })
+}
+
+/// Só para a suíte: tira tudo o que o anel da instância `indice` guarda.
+#[cfg(feature = "modo-teste")]
+pub fn tirar_de_teste(indice: u8) -> alloc::vec::Vec<u8> {
+    let mut v = alloc::vec![0u8; ANEL];
+    let n = crate::arch::sem_interrupcoes(|| SAIDAS[usize::from(indice)].lock().tirar(&mut v));
+    v.truncate(n);
+    v
+}
+
 /// O `core::fmt` do console de uma instância.
 pub struct Saida(pub u8);
 

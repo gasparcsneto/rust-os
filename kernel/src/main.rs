@@ -64,6 +64,7 @@ extern crate alloc;
 mod agent;
 mod aleatorio;
 mod arch;
+mod armazem;
 mod atividade;
 mod autorizacao;
 mod barra;
@@ -125,7 +126,7 @@ use core::panic::PanicInfo;
 /// Completa, e não "em andamento": o trabalho às vezes adianta uma fase — a
 /// pilha gráfica da fase 10 começou antes da 6 —, e um número que dissesse
 /// "10" prometeria vários núcleos que o kernel não tem.
-pub const FASE: &str = "7";
+pub const FASE: &str = "8";
 
 /// Para o boot quando falta uma base sobre a qual tudo o que vem depois se
 /// apoia, e continua respondendo pelo caminho que não depende dela.
@@ -402,6 +403,16 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
             vfs::DIRETORIO_DOS_PROGRAMAS
         ),
         Err(motivo) => log_error!("vfs", "nao foi possivel montar: {}", motivo.motivo()),
+    }
+    // E o armazém, a árvore gravável — vazio até a persistência repô-lo do
+    // journal, mais abaixo. Ver [`armazem`].
+    match armazem::montar() {
+        Ok(()) => log_info!("vfs", "{} montado com o armazem", armazem::RAIZ),
+        Err(motivo) => log_error!(
+            "vfs",
+            "nao foi possivel montar o armazem: {}",
+            motivo.motivo()
+        ),
     }
 
     // E a raiz, do disco. Vem depois de `/bin` de propósito: a regra da
