@@ -1823,6 +1823,22 @@ pub fn com_inscricoes<F: FnMut(Inscricao)>(mut f: F) {
     }
 }
 
+/// Quantos quanta já venceram, sem a trava do escalonador: é o que a suíte
+/// lê enquanto ela mesma segura a trava — ver
+/// [`com_a_trava_do_escalonador_de_teste`].
+#[cfg(feature = "modo-teste")]
+pub fn quantuns_vencidos() -> u64 {
+    QUANTUNS_VENCIDOS.load(Ordering::Relaxed)
+}
+
+/// Roda `f` segurando a trava do escalonador, com as interrupções
+/// mascaradas. Só para a suíte: é como ela prova que o tique não depende
+/// dessa trava.
+#[cfg(feature = "modo-teste")]
+pub fn com_a_trava_do_escalonador_de_teste<R>(f: impl FnOnce() -> R) -> R {
+    com_escalonador(|_| f())
+}
+
 /// `(fios vivos, trocas de contexto, quanta vencidos)`.
 pub fn estatisticas() -> (usize, u64, u64) {
     let vivos = com_escalonador(|e| {

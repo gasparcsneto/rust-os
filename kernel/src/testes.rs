@@ -20543,6 +20543,37 @@ fn smp_a_cota_de_processos_vale_entre_nucleos() -> Resultado {
     resultado
 }
 
+/// O quantum anda com a trava do escalonador ocupada.
+///
+/// O tique tomava a trava do escalonador por `try_lock` para contar o
+/// quantum, e desistia do tique quando ela estava ocupada. Com um núcleo só
+/// ela nunca estava — o tique roda com as interrupções mascaradas, e quem a
+/// segura também. Com vários, um núcleo que a disputava em laço fazia o
+/// quantum de outro parar de andar: um fio que gira sem ceder não era mais
+/// preemptado, e o fio pronto ao lado dele esperava indefinidamente. Medido
+/// assim nesta fase, com o lançador pronto e o núcleo vivo.
+///
+/// Aqui a suíte segura a trava e chama o tique ela mesma, como o handler do
+/// timer chamaria — com as interrupções mascaradas —, um quantum inteiro de
+/// vezes: o último tique tem de dizer que o quantum venceu. Esperar o tique
+/// dos outros núcleos não serviria: com a trava presa, cada um deles para
+/// nela em microssegundos, com as interrupções mascaradas, e não conta mais
+/// tique nenhum.
+fn fios_o_quantum_anda_com_a_trava_ocupada() -> Resultado {
+    let antes = crate::fios::quantuns_vencidos();
+    let venceu = crate::fios::com_a_trava_do_escalonador_de_teste(|| {
+        let mut venceu = false;
+        for _ in 0..crate::fios::QUANTUM_EM_TIQUES {
+            venceu |= crate::fios::tique();
+        }
+        venceu
+    });
+    if !venceu || crate::fios::quantuns_vencidos() == antes {
+        return Err("com a trava do escalonador ocupada, o quantum nao venceu");
+    }
+    Ok(())
+}
+
 /// O coletor de um pseudo-terminal, num núcleo, e um `abrir`, em outro, ao
 /// mesmo tempo: o console do dono novo fica aberto, e a sessão de quem
 /// estava no console do dono morto acaba.
@@ -24342,6 +24373,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "smp: a cota de processos vale entre nucleos",
         f: smp_a_cota_de_processos_vale_entre_nucleos,
+    },
+    Caso {
+        nome: "fios: o quantum anda com a trava ocupada",
+        f: fios_o_quantum_anda_com_a_trava_ocupada,
     },
     Caso {
         nome: "smp: o coletor nao fecha o console do dono seguinte",
