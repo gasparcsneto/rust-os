@@ -6045,7 +6045,9 @@ fn formulario_preenchido() -> Resultado {
     // O aviso que não chega leva o texto junto. Com o canal do programa
     // cheio — e o programa parado —, o `set_value` é recusado; se o texto
     // ficasse na fila sem o aviso dele, o próximo aviso traria esse texto,
-    // e não o seu.
+    // e não o seu. Parado de verdade, de novo: em outro núcleo, o programa
+    // esvaziava o canal enquanto a suíte o enchia.
+    prender_no_nucleo_da_suite(processo)?;
     let recusado = crate::arch::sem_interrupcoes(|| {
         for _ in 0..crate::eventos::CAPACIDADE {
             let _ = crate::eventos::publicar(
@@ -6058,6 +6060,7 @@ fn formulario_preenchido() -> Resultado {
         }
         crate::ui::agir(nome, Acao::DefinirValor, Some("perdido"), Origem::Agente(0)).is_err()
     });
+    soltar_da_suite(processo);
     if !recusado {
         return Err("o set_value com o canal do programa cheio foi aceito");
     }
