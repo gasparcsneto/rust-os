@@ -79,22 +79,43 @@ static POLITICA: Mutex<Option<Politica>> = Mutex::new(None);
 static DO_DISCO: AtomicBool = AtomicBool::new(false);
 static AUDITORIA: Mutex<Option<Cadeia>> = Mutex::new(None);
 
-struct Taxas {
-    /// O balde de cada sessão, e de que chave ele é: uma chave nova na
-    /// mesma porta começa com um balde novo, e a mesma chave que reconecta
-    /// continua com o que tinha — reconectar não enche o balde.
-    baldes: [Option<(Option<[u8; 32]>, Balde)>; SESSOES],
+/// Quantos principais têm balde ao mesmo tempo. Os agentes do registro e a
+/// serial cabem com folga; passando disso, sai o balde usado há mais tempo.
+const BALDES: usize = 16;
+
+/// O balde de um principal.
+///
+/// # Por que do principal, e não da vaga de sessão
+///
+/// Era um por vaga de sessão, com a chave de quem o ocupava: uma chave nova
+/// na porta ganhava um balde novo, cheio. Com programas pedindo pela
+/// interface nativa, isso virava uma bomba de encher baldes: o processo de
+/// um agente que já desconectou pede com a chave dele, pela vaga onde agora
+/// está outro agente, e cada pedido trocava o dono — e enchia o balde — dos
+/// dois. Do principal, um agente e os processos que ele lançou gastam do
+/// mesmo balde, onde quer que estejam; e a mesma chave que reconecta, em
+/// qualquer porta, continua com o que tinha.
+#[derive(Clone, Copy)]
+struct BaldeDe {
+    /// A chave do agente, ou `None` para a serial.
+    dono: Option<[u8; 32]>,
+    balde: Balde,
     /// Pedidos recusados por taxa desde o último registro de taxa: a
     /// auditoria grava o primeiro e soma os seguintes, para uma enxurrada
     /// não empurrar para fora do anel o que importa.
-    suprimidos: [u64; SESSOES],
+    suprimidos: u64,
+    /// Quando foi usado pela última vez — para saber quem sai.
+    uso_ms: u64,
+}
+
+struct Taxas {
+    baldes: [Option<BaldeDe>; BALDES],
     janelas: [Janela; crate::sessoes::PORTAS],
     apertos_suprimidos: [u64; crate::sessoes::PORTAS],
 }
 
 static TAXAS: Mutex<Taxas> = Mutex::new(Taxas {
-    baldes: [None; SESSOES],
-    suprimidos: [0; SESSOES],
+    baldes: [None; BALDES],
     janelas: [Janela::NOVA; crate::sessoes::PORTAS],
     apertos_suprimidos: [0; crate::sessoes::PORTAS],
 });
@@ -161,11 +182,30 @@ impl Autoridade {
 struct EmExecucao {
     fio: u64,
     autoridade: Autoridade,
-    /// A sessão do canal que pediu — a serial ou uma porta —, se foi uma.
-    /// É o que um comando sobre o próprio canal (`agent.session`, a prova
-    /// administrativa) pergunta, e o que nenhum outro chamador tem.
-    canal: Option<u8>,
+    /// Quem pediu o comando — ver [`Pedinte`].
+    pedinte: Pedinte,
     destino: Option<crate::mensagens::Destino>,
+}
+
+/// Quem pediu o comando em execução: a autoridade diz **por quem** ele
+/// age; isto diz **por onde** o pedido veio.
+///
+/// Os dois não se confundem. Um processo lançado por um agente age com a
+/// autoridade do agente — mas não é o agente: não fala pelo canal dele, não
+/// guarda desafio administrativo na sessão dele, não gasta os nonces dele, e
+/// não aperta o Enter no Terminal como ele.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pedinte {
+    /// Uma sessão do canal: a serial ou uma porta.
+    Canal(u8),
+    /// Uma pessoa, no interpretador.
+    Pessoa,
+    /// Um processo, pela interface nativa — o identificador do fio.
+    Processo(u64),
+    /// O próprio kernel, chamando um handler com uma autoridade dita —
+    /// só a suíte faz isso.
+    #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+    Kernel,
 }
 
 /// Uma vaga por fio que está executando um comando agora — no máximo um
@@ -196,7 +236,15 @@ pub fn autoridade_atual() -> Autoridade {
 /// ou uma porta. `None` para o pedido de uma pessoa, de um processo, e fora
 /// de um comando: nenhum deles fala por um canal.
 pub fn sessao_do_canal() -> Option<u8> {
-    do_comando_deste_fio(|c| c.canal).flatten()
+    match pedinte() {
+        Some(Pedinte::Canal(s)) => Some(s),
+        _ => None,
+    }
+}
+
+/// Quem pediu o comando que este fio executa. `None` fora de um comando.
+pub fn pedinte() -> Option<Pedinte> {
+    do_comando_deste_fio(|c| c.pedinte)
 }
 
 /// O destinatário que a decisão de `message.send` resolveu e decidiu, para
@@ -208,13 +256,14 @@ pub fn destino_decidido() -> Option<crate::mensagens::Destino> {
     do_comando_deste_fio(|c| c.destino.clone()).flatten()
 }
 
-/// Roda `f` como o comando de `autoridade`, pedido por `canal`, neste fio.
+/// Roda `f` como o comando de `autoridade`, pedido por `pedinte`, neste
+/// fio.
 ///
 /// Reentrante: o que este fio estava executando é guardado e volta no fim,
 /// para o caso de um comando executar outro.
 fn como_comando<R>(
     autoridade: Autoridade,
-    canal: Option<u8>,
+    pedinte: Pedinte,
     destino: Option<crate::mensagens::Destino>,
     f: impl FnOnce() -> R,
 ) -> R {
@@ -222,7 +271,7 @@ fn como_comando<R>(
     let novo = EmExecucao {
         fio,
         autoridade,
-        canal,
+        pedinte,
         destino,
     };
     // A vaga deste fio, se ele já executava um comando; senão, uma livre.
@@ -258,14 +307,20 @@ fn como_comando<R>(
 /// de qualquer canal.
 #[cfg(feature = "modo-teste")]
 pub fn como_comando_de_teste<R>(autoridade: Autoridade, f: impl FnOnce() -> R) -> R {
-    como_comando(autoridade, None, None, f)
+    // A autoridade de uma pessoa chega a um comando pelo interpretador; as
+    // outras, sem canal, são o kernel chamando o handler.
+    let pedinte = match autoridade {
+        Autoridade::Pessoa { .. } => Pedinte::Pessoa,
+        _ => Pedinte::Kernel,
+    };
+    como_comando(autoridade, pedinte, None, f)
 }
 
 /// Só para a suíte: roda `f` como o comando de `autoridade` pedido pela
 /// sessão `canal` — o que o despachante do canal faz.
 #[cfg(feature = "modo-teste")]
 pub fn como_canal_de_teste<R>(canal: u8, autoridade: Autoridade, f: impl FnOnce() -> R) -> R {
-    como_comando(autoridade, Some(canal), None, f)
+    como_comando(autoridade, Pedinte::Canal(canal), None, f)
 }
 
 /// Quem está numa decisão, como a auditoria o grava.
@@ -276,6 +331,10 @@ struct Quem {
     agente: String,
     chave: Option<[u8; 32]>,
     papel: Option<String>,
+    /// O fio do processo que pediu, quando foi um processo pela interface
+    /// nativa: quem responde por ele é o titular acima — quem o lançou —, e
+    /// a auditoria diz também que foi um programa a pedir.
+    processo: Option<u64>,
 }
 
 /// Quem está numa decisão, como a barra o mostra — ver [`crate::atividade`].
@@ -382,6 +441,7 @@ pub fn carregar() {
         agente: "kernel".to_string(),
         chave: None,
         papel: None,
+        processo: None,
     };
     let (politica, codigo, detalhe, resumo) = match crate::vfs::ler_tudo(CAMINHO_DA_POLITICA) {
         Ok(bytes) => {
@@ -499,7 +559,14 @@ fn auditar(
         recurso: recurso.to_string(),
         codigo,
         parametros: resumo_dos_parametros(parametros),
-        detalhe: detalhe.to_string(),
+        detalhe: match quem.processo {
+            // O programa que pediu vai no detalhe: o titular é quem responde
+            // por ele, e o formato do registro — que o journal grava — não
+            // muda por isso.
+            Some(fio) if detalhe.is_empty() => alloc::format!("pelo processo {fio}"),
+            Some(fio) => alloc::format!("pelo processo {fio}: {detalhe}"),
+            None => detalhe.to_string(),
+        },
     };
     crate::arch::sem_interrupcoes(|| AUDITORIA.lock().as_mut().map_or(0, |c| c.anexar(evento)))
 }
@@ -519,6 +586,7 @@ pub fn auditar_do_kernel(metodo: &str, recurso: &str, codigo: Codigo, detalhe: &
         agente: "kernel".to_string(),
         chave: None,
         papel: None,
+        processo: None,
     };
     auditar(&quem, metodo, recurso, codigo, &[], detalhe)
 }
@@ -548,6 +616,7 @@ fn quem_da_sessao(sessao: u8) -> Result<Quem, Quem> {
             agente: "serial".to_string(),
             chave: None,
             papel: Some(com_politica(|p| p.serial().to_string())),
+            processo: None,
         });
     }
     match crate::sessoes::identidade(sessao) {
@@ -560,6 +629,7 @@ fn quem_da_sessao(sessao: u8) -> Result<Quem, Quem> {
             agente: id.nome,
             chave: Some(id.chave),
             papel: None,
+            processo: None,
         }),
         Some(id) => Ok(Quem {
             titular: Titular::Agente,
@@ -568,6 +638,7 @@ fn quem_da_sessao(sessao: u8) -> Result<Quem, Quem> {
             papel: crate::identidade::papel_do_agente(&id.chave),
             agente: id.nome,
             chave: Some(id.chave),
+            processo: None,
         }),
         None => Err(Quem {
             titular: Titular::Anonimo,
@@ -576,6 +647,7 @@ fn quem_da_sessao(sessao: u8) -> Result<Quem, Quem> {
             agente: String::new(),
             chave: None,
             papel: None,
+            processo: None,
         }),
     }
 }
@@ -591,6 +663,7 @@ fn quem_da_pessoa(id: crate::pessoas::IdSessao) -> Result<Quem, Quem> {
             agente: pessoa.texto(),
             chave: None,
             papel: Some(papel),
+            processo: None,
         }),
         _ => Err(Quem {
             titular: Titular::Anonimo,
@@ -601,6 +674,7 @@ fn quem_da_pessoa(id: crate::pessoas::IdSessao) -> Result<Quem, Quem> {
                 .unwrap_or_default(),
             chave: None,
             papel: None,
+            processo: None,
         }),
     }
 }
@@ -614,6 +688,7 @@ fn quem_sem_login() -> Quem {
         agente: String::new(),
         chave: None,
         papel: None,
+        processo: None,
     }
 }
 
@@ -627,6 +702,7 @@ fn quem_local(agente: &str) -> Quem {
         agente: agente.to_string(),
         chave: None,
         papel: Some(com_politica(|p| p.local().to_string())),
+        processo: None,
     }
 }
 
@@ -642,6 +718,7 @@ fn quem_da_autoridade(sessao: u8, chave: Option<[u8; 32]>) -> Quem {
             agente: "serial".to_string(),
             chave: None,
             papel: Some(com_politica(|p| p.serial().to_string())),
+            processo: None,
         },
         (_, Some(k)) => Quem {
             titular: Titular::Agente,
@@ -650,6 +727,7 @@ fn quem_da_autoridade(sessao: u8, chave: Option<[u8; 32]>) -> Quem {
             agente: crate::identidade::agente(&k).unwrap_or_else(|| "(revogado)".to_string()),
             chave: Some(k),
             papel: crate::identidade::papel_do_agente(&k),
+            processo: None,
         },
         (_, None) => Quem {
             titular: Titular::Anonimo,
@@ -658,6 +736,7 @@ fn quem_da_autoridade(sessao: u8, chave: Option<[u8; 32]>) -> Quem {
             agente: String::new(),
             chave: None,
             papel: None,
+            processo: None,
         },
     }
 }
@@ -673,27 +752,45 @@ fn passar_pela_taxa(quem: &Quem, metodo: &str, parametros: &[u8]) -> Result<(), 
     let Some(taxa) = taxa else {
         return Ok(());
     };
-    let i = usize::from(quem.sessao);
-    if i >= SESSOES {
+    // A pessoa e o sistema não têm taxa — a vaga deles não é de sessão do
+    // canal. O principal de quem tem é a chave do agente, ou a serial.
+    if usize::from(quem.sessao) >= SESSOES {
         return Ok(());
     }
+    let dono = quem.chave;
     let agora = crate::tempo::uptime_ms();
     let (passou, suprimidos_antes, primeiro_recusado) = crate::arch::sem_interrupcoes(|| {
         let mut t = TAXAS.lock();
-        let (dono, balde) =
-            t.baldes[i].get_or_insert_with(|| (quem.chave, Balde::novo(taxa, agora)));
-        // Outra chave na porta, ou o papel mudou de taxa: um balde novo,
-        // cheio, com a taxa de agora.
-        if *dono != quem.chave || balde.taxa() != taxa {
-            *dono = quem.chave;
-            *balde = Balde::novo(taxa, agora);
+        let vaga = t
+            .baldes
+            .iter()
+            .position(|b| b.is_some_and(|b| b.dono == dono))
+            .or_else(|| t.baldes.iter().position(Option::is_none))
+            .unwrap_or_else(|| {
+                // Todas ocupadas por outros: sai a usada há mais tempo.
+                (0..BALDES)
+                    .min_by_key(|&i| t.baldes[i].map_or(0, |b| b.uso_ms))
+                    .unwrap_or(0)
+            });
+        let b = match &mut t.baldes[vaga] {
+            Some(b) if b.dono == dono => b,
+            outro => outro.insert(BaldeDe {
+                dono,
+                balde: Balde::novo(taxa, agora),
+                suprimidos: 0,
+                uso_ms: agora,
+            }),
+        };
+        b.uso_ms = agora;
+        // O papel mudou de taxa: um balde novo, cheio, com a de agora.
+        if b.balde.taxa() != taxa {
+            b.balde = Balde::novo(taxa, agora);
         }
-        if balde.tentar(agora) {
-            let s = core::mem::take(&mut t.suprimidos[i]);
-            (true, s, false)
+        if b.balde.tentar(agora) {
+            (true, core::mem::take(&mut b.suprimidos), false)
         } else {
-            t.suprimidos[i] += 1;
-            (false, 0, t.suprimidos[i] == 1)
+            b.suprimidos += 1;
+            (false, 0, b.suprimidos == 1)
         }
     });
     if passou {
@@ -798,6 +895,18 @@ pub enum Chamador {
     Sessao(u8),
     /// Uma pessoa, pela sessão que ela abriu num console.
     Pessoa(crate::pessoas::IdSessao),
+    /// Um processo, pela interface nativa: o fio que pediu, e a autoridade
+    /// dele — a de quem o lançou —, lida do fio quando o pedido foi feito.
+    Processo { fio: u64, autoridade: Autoridade },
+}
+
+/// Os comandos que só um canal do agente pede: os que respondem pelo
+/// próprio canal. As operações por prova guardam o desafio na sessão do
+/// canal; `debug.trigger` agenda a falha fatal para depois de a resposta
+/// sair pelo canal — num processo, ela ficaria agendada para o próximo
+/// pedido de um agente, que morreria sem saber por quê.
+fn so_do_canal(comando: &Command) -> bool {
+    matches!(comando.acesso, Acesso::PorProva) || comando.nome == "debug.trigger"
 }
 
 /// A licença para executar um comando: só [`autorizar`] a cria, e só ela
@@ -805,8 +914,8 @@ pub enum Chamador {
 pub struct Autorizado {
     comando: &'static Command,
     autoridade: Autoridade,
-    /// A sessão do canal que pediu, se foi um canal.
-    canal: Option<u8>,
+    /// Quem pediu.
+    pedinte: Pedinte,
     /// O destinatário de um `message.send`, como a decisão o resolveu.
     destino: Option<crate::mensagens::Destino>,
 }
@@ -815,8 +924,8 @@ impl Autorizado {
     /// Executa o comando com a autoridade de quem pediu — que `user.run`,
     /// por exemplo, grava no processo que lança.
     pub fn executar(self, params: Json, w: &mut JsonWriter) -> fmt::Result {
-        let (autoridade, canal, destino) = (self.autoridade, self.canal, self.destino);
-        como_comando(autoridade, canal, destino, || {
+        let (autoridade, pedinte, destino) = (self.autoridade, self.pedinte, self.destino);
+        como_comando(autoridade, pedinte, destino, || {
             (self.comando.handler)(params, w)
         })
     }
@@ -848,6 +957,37 @@ pub fn autorizar(
                 return Err(Codigo::DenyNotAuthenticated);
             }
         },
+        Chamador::Processo { fio, autoridade } => {
+            let mut q = quem_do_processo(autoridade);
+            q.processo = Some(fio);
+            // Uma pessoa que saiu, ou uma chave revogada, não deixa o
+            // processo dela pedir nada — como recusaria o pedido dela.
+            if let Autoridade::Pessoa { sessao } = autoridade
+                && quem_da_pessoa(sessao).is_err()
+            {
+                auditar(
+                    &q,
+                    comando.nome,
+                    "",
+                    Codigo::DenyNotAuthenticated,
+                    parametros,
+                    "sessao de pessoa que acabou",
+                );
+                return Err(Codigo::DenyNotAuthenticated);
+            }
+            if so_do_canal(comando) {
+                auditar(
+                    &q,
+                    comando.nome,
+                    "",
+                    Codigo::DenyPermission,
+                    parametros,
+                    "so um canal do agente pede este comando",
+                );
+                return Err(Codigo::DenyPermission);
+            }
+            (q, autoridade)
+        }
         Chamador::Sessao(sessao) => match quem_da_sessao(sessao) {
             Ok(q) => {
                 let chave = q.chave;
@@ -913,14 +1053,15 @@ pub fn autorizar(
         Acesso::PorProva => None,
     };
     contar(&quem, comando.nome, permissao);
-    let canal = match chamador {
-        Chamador::Sessao(s) => Some(s),
-        Chamador::Pessoa(_) => None,
+    let pedinte = match chamador {
+        Chamador::Sessao(s) => Pedinte::Canal(s),
+        Chamador::Pessoa(_) => Pedinte::Pessoa,
+        Chamador::Processo { fio, .. } => Pedinte::Processo(fio),
     };
     Ok(Autorizado {
         comando,
         autoridade,
-        canal,
+        pedinte,
         destino,
     })
 }
@@ -935,6 +1076,11 @@ pub fn auditar_invalido(chamador: Chamador, metodo: &str, parametros: &[u8], det
         Chamador::Sessao(s) => match quem_da_sessao(s) {
             Ok(q) | Err(q) => q,
         },
+        Chamador::Processo { fio, autoridade } => {
+            let mut q = quem_do_processo(autoridade);
+            q.processo = Some(fio);
+            q
+        }
     };
     auditar(
         &quem,
@@ -1041,6 +1187,7 @@ fn quem_do_ator(ator: AtorDeMensagem) -> Quem {
                 agente: id.texto(),
                 chave: None,
                 papel: crate::pessoas::pessoa(id).map(|p| p.papel),
+                processo: None,
             }
         }
         AtorDeMensagem::Dono(Dono::Administrador(k)) => {
@@ -1052,6 +1199,7 @@ fn quem_do_ator(ator: AtorDeMensagem) -> Quem {
                 agente: papel.as_ref().map(|(n, _)| n.clone()).unwrap_or_default(),
                 chave: Some(k),
                 papel: papel.and_then(|(_, p)| p),
+                processo: None,
             }
         }
         AtorDeMensagem::Kernel => Quem {
@@ -1061,6 +1209,7 @@ fn quem_do_ator(ator: AtorDeMensagem) -> Quem {
             agente: "kernel".to_string(),
             chave: None,
             papel: None,
+            processo: None,
         },
     }
 }
@@ -1252,6 +1401,7 @@ pub fn permitir_aperto(p: u8) -> bool {
             agente: String::new(),
             chave: None,
             papel: None,
+            processo: None,
         };
         auditar(
             &quem,
@@ -1285,6 +1435,7 @@ pub fn auditar_aperto(p: u8, chave: Option<[u8; 32]>, nome: &str, codigo: Codigo
         agente: nome.to_string(),
         chave,
         papel,
+        processo: None,
     };
     auditar(&quem, "session.open", "", codigo, &[], detalhe);
 }
@@ -1320,6 +1471,7 @@ pub fn contar_administracao(nome: &str, papel: &str, metodo: &'static str, permi
         agente: nome.to_string(),
         chave: None,
         papel: Some(papel.to_string()),
+        processo: None,
     };
     contar(&quem, metodo, Some(permissao));
 }
@@ -1350,6 +1502,7 @@ pub fn auditar_administracao(
         agente: administrador.map(|a| a.0.to_string()).unwrap_or_default(),
         chave: administrador.map(|a| *a.1),
         papel: papel.map(ToString::to_string),
+        processo: None,
     };
     auditar(&quem, metodo, recurso, codigo, parametros, detalhe)
 }
@@ -1381,6 +1534,7 @@ pub fn auditar_quorum(
         agente: assinantes.join("+"),
         chave: None,
         papel: papel.map(ToString::to_string),
+        processo: None,
     };
     auditar(&quem, metodo, recurso, codigo, parametros, detalhe)
 }
@@ -1407,6 +1561,7 @@ pub fn auditar_pessoa(
         agente: pessoa.map(|p| p.0.to_string()).unwrap_or_default(),
         chave: None,
         papel: papel.map(ToString::to_string),
+        processo: None,
     };
     auditar(&quem, metodo, recurso, codigo, &[], detalhe);
 }
@@ -1423,6 +1578,7 @@ pub fn auditar_pessoa_recusada(alvo: Option<&str>, metodo: &str, recurso: &str, 
         agente: alvo.unwrap_or_default().to_string(),
         chave: None,
         papel: None,
+        processo: None,
     };
     auditar(
         &quem,

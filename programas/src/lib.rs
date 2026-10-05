@@ -49,6 +49,7 @@ extern crate alloc;
 pub mod desenho;
 pub mod janela;
 pub mod monte;
+pub mod nativo;
 pub mod saida;
 pub mod sistema;
 pub mod superficie;

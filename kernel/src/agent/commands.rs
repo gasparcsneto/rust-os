@@ -1275,6 +1275,12 @@ fn system_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     // A última fase completa do roteiro. Era um "0" escrito aqui à mão, e
     // continuou dizendo isso por cinco fases — ver [`crate::FASE`].
     w.field_str("phase", crate::FASE)?;
+    // A versão da interface nativa — o que um programa do Duke pode pedir
+    // pelo registro, e como. Ver `docs/INTERFACE.md`.
+    w.field_u64(
+        "native_interface",
+        protocolo::usuario::nativo::VERSAO as u64,
+    )?;
 
     let cpu = crate::arch::identificar_cpu();
     w.field_str("cpu_vendor", cpu.como_str())?;
@@ -2631,14 +2637,19 @@ fn escrever_camada(w: &mut JsonWriter, c: crate::grafico::compositor::InfoCamada
 /// interpretador. `None` para quem não é nenhum dos dois — a autoridade
 /// local —: a origem de uma ação é um agente ou uma pessoa, e uma origem
 /// inventada viraria, no Terminal, o Enter de alguém.
+///
+/// Um processo não tem origem: a origem diz ao programa dono do campo **quem**
+/// agiu — o Terminal confirma a linha de uma pessoa ou de um agente pela
+/// origem —, e um processo que agisse com a origem de quem o lançou
+/// confirmaria em nome dele uma linha que ele não viu. Até haver uma origem
+/// de programa, com o dono do campo sabendo o que fazer com ela, a ação na
+/// interface não é da interface nativa. Ver `docs/INTERFACE.md`.
 fn origem_do_comando() -> Option<crate::ui::Origem> {
-    use crate::autorizacao::Autoridade;
-    match crate::autorizacao::sessao_do_canal() {
-        Some(s) => Some(crate::ui::Origem::Agente(s)),
-        None => match crate::autorizacao::autoridade_atual() {
-            Autoridade::Pessoa { .. } => Some(crate::ui::Origem::Pessoa),
-            _ => None,
-        },
+    use crate::autorizacao::Pedinte;
+    match crate::autorizacao::pedinte()? {
+        Pedinte::Canal(s) => Some(crate::ui::Origem::Agente(s)),
+        Pedinte::Pessoa => Some(crate::ui::Origem::Pessoa),
+        Pedinte::Processo(_) | Pedinte::Kernel => None,
     }
 }
 
@@ -3147,6 +3158,11 @@ fn user_stats(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     // sobe sozinho denuncia um processo tentando alcancar o que nao e dele.
     w.field_u64("rejected", recusadas)?;
     w.field_u64("bytes_written", bytes)?;
+    // A interface nativa: pedidos ao registro atendidos, e os que nem
+    // chegaram a um comando — JSON quebrado, método ou parâmetro errado.
+    let (pedidos, invalidos) = crate::nativo::estatisticas();
+    w.field_u64("native_requests", pedidos)?;
+    w.field_u64("native_invalid", invalidos)?;
     // Arquivos: quantos descritores foram abertos, quantas leituras
     // aconteceram por eles e quantos bytes vieram. `opens` sem `reads` e um
     // programa que abriu e desistiu; `reads` sem `bytes_read` e um arquivo

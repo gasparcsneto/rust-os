@@ -22,7 +22,7 @@ bench = false
 [dependencies]
 # Os números das chamadas de sistema, os erros e o mapa do espaço do
 # usuário: a mesma declaração que o kernel inclui.
-protocolo = { path = "../protocolo" }
+protocolo = { path = "../protocolo", features = ["arrays"] }
 
 # A fonte e o desenho de texto: os mesmos do kernel — ver
 # `tipografia/src/lib.rs`.

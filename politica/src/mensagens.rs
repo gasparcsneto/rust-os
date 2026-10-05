@@ -111,6 +111,11 @@ pub enum Canal {
     Pessoa([u8; 8]),
     /// As operações administrativas de um administrador.
     Administrador([u8; 32]),
+    /// Um processo, pelo identificador do fio — que nunca se repete. Os
+    /// pedidos de um programa não contam na janela do agente que o lançou:
+    /// um processo que gastasse nonces da porta do agente recusaria os
+    /// envios dele, ou os do agente que entrasse depois naquela porta.
+    Processo(u64),
 }
 
 /// Onde uma mensagem está.

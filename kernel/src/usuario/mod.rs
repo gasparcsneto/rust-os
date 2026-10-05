@@ -301,6 +301,8 @@ pub unsafe fn despachar(
         numero::DESCREVER => descrever(a0, a1, a2),
         numero::TERMINAL => terminal(a0),
         numero::VALOR => valor(a0, a1, a2),
+        numero::PEDIR => crate::nativo::pedir(a0, a1),
+        numero::RESPOSTA => crate::nativo::resposta(a0, a1),
         // SAFETY: o quadro é o desta chamada, garantido por quem nos chamou.
         numero::BIFURCAR => unsafe { bifurcar(quadro) },
         numero::EXECUTAR => unsafe { executar(quadro, a0, a1) },

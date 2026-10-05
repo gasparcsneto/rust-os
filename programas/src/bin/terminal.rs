@@ -134,14 +134,29 @@ impl Terminal {
             Some(Gesto::Fechar) => true,
             Some(Gesto::Acionado(DIGITAR)) => {
                 // O widget pede o Enter "de um agente"; quem recebeu a ação
-                // sabe qual, e é ele que o diz ao interpretador.
-                let enter = origem::sessao(quem).map_or('\n', confirmar_pelo_agente);
+                // sabe qual, e é ele que o diz ao interpretador. Só a pessoa
+                // confirma com o Enter dela: uma origem que este programa não
+                // conhece não confirma nada — o texto vai, a linha fica
+                // aberta. Confirmar por ela em nome da pessoa faria do
+                // Terminal o deputado de quem quer que o kernel um dia
+                // passe a pôr aqui.
+                let enter = if quem == origem::PESSOA {
+                    Some('\n')
+                } else {
+                    origem::sessao(quem).map(confirmar_pelo_agente)
+                };
                 let pedido: String = self
                     .janela
                     .com_widget::<LinhaDeComando, _>(LINHA, |l| l.tirar_pedido())
                     .unwrap_or_default()
                     .chars()
-                    .map(|c| if c == CONFIRMAR_PELO_AGENTE { enter } else { c })
+                    .filter_map(|c| {
+                        if c == CONFIRMAR_PELO_AGENTE {
+                            enter
+                        } else {
+                            Some(c)
+                        }
+                    })
                     .collect();
                 self.digitar(&pedido);
                 escreverln!(

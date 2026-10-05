@@ -85,6 +85,13 @@ pub(crate) fn agendar_falha_fatal() {
     FALHA_AGENDADA.store(true, Ordering::SeqCst);
 }
 
+/// Se há falha agendada — para a suíte conferir que um pedido recusado não
+/// a armou.
+#[cfg(feature = "modo-teste")]
+pub(crate) fn falha_agendada_de_teste() -> bool {
+    FALHA_AGENDADA.load(Ordering::SeqCst)
+}
+
 /// Quanto um quadro pode ficar parado antes de ser dado por abandonado.
 ///
 /// Meio segundo a 100 Hz. Era de dois segundos, e a diferença tem uma medição

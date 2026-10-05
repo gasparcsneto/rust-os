@@ -120,6 +120,43 @@ pub mod numero {
     /// sem texto esperando; [`TAMANHO_INVALIDO`](super::erro::TAMANHO_INVALIDO)
     /// se o texto não cabe no buffer — e então ele continua na fila.
     pub const VALOR: u64 = 16;
+    /// `pedir(ptr, tamanho)`: pede ao sistema um comando do registro — o
+    /// mesmo que um agente pede pelo canal e uma pessoa pelo
+    /// interpretador —, e devolve o tamanho da resposta.
+    ///
+    /// O pedido é um objeto JSON-RPC 2.0 (`jsonrpc`, `id`, `method`,
+    /// `params`), e a resposta é o envelope do canal, com `result` ou
+    /// `error`. Ele passa pelo mesmo gate, com a autoridade do processo — a
+    /// de quem o lançou —, e vai para a auditoria. Ver
+    /// [`nativo`](super::nativo) e `docs/INTERFACE.md`.
+    ///
+    /// **Bloqueia** enquanto o comando executa, como `esperar`: o fio sai do
+    /// escalonador e volta quando a resposta está pronta. A resposta fica no
+    /// kernel até [`RESPOSTA`] a buscar — ela pode não caber no buffer que o
+    /// programa tem, e o comando já teve efeito.
+    pub const PEDIR: u64 = 17;
+    /// `resposta(ptr, capacidade)`: a resposta do último [`PEDIR`].
+    ///
+    /// Devolve o tamanho dela. Se ele cabe em `capacidade`, os bytes vão
+    /// para `ptr` e a resposta sai do kernel; se não cabe, nada é escrito e
+    /// ela continua lá — o programa aloca o tamanho devolvido e pede de
+    /// novo. [`NAO_ENCONTRADO`](super::erro::NAO_ENCONTRADO) sem resposta
+    /// esperando. O próximo `pedir` descarta a que não foi buscada.
+    pub const RESPOSTA: u64 = 18;
+}
+
+/// A interface nativa: o registro de comandos como API dos programas — ver
+/// [`numero::PEDIR`].
+pub mod nativo {
+    /// O maior pedido, em bytes: o mesmo teto da linha do canal do agente.
+    /// Um pedido que não caberia lá também não cabe aqui — o vocabulário é
+    /// um só, e os tetos também.
+    pub const MAIOR_PEDIDO: usize = 4096;
+
+    /// A versão da interface nativa, que `system.info` publica. Cresce
+    /// quando uma chamada de mecanismo é acrescentada ou o envelope muda;
+    /// os comandos do registro se descrevem sozinhos, por `agent.describe`.
+    pub const VERSAO: u32 = 1;
 }
 
 /// Erros devolvidos ao usuário, sempre negativos.

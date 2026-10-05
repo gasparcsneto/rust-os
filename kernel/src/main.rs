@@ -80,6 +80,7 @@ mod log;
 mod machine;
 mod mensagens;
 mod mmio;
+mod nativo;
 mod nucleos;
 mod paginacao;
 mod particoes;
@@ -500,6 +501,8 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
             }
         }
         executor.lancar(tarefas::Tarefa::nova("pulso", pulso()));
+        // Os pedidos dos programas ao registro — ver `nativo`.
+        executor.lancar(tarefas::Tarefa::nova("programas", nativo::servir()));
         // E o interpretador, que atende quem estiver na frente da máquina.
         executor.lancar(tarefas::Tarefa::nova("console", interpretador::atender()));
         // E o relógio da barra superior, que se redesenha a cada segundo.

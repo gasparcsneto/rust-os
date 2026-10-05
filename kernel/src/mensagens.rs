@@ -268,6 +268,12 @@ impl Remetente {
                 _ => return None,
             },
         };
+        // Um programa age como quem o lançou, mas conta os nonces dele na
+        // própria janela — ver [`Canal::Processo`].
+        let canal = match crate::autorizacao::pedinte() {
+            Some(crate::autorizacao::Pedinte::Processo(fio)) => Canal::Processo(fio),
+            _ => canal,
+        };
         Some(Remetente {
             dono,
             canal,

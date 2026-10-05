@@ -23645,12 +23645,318 @@ fn soltar_da_suite(id: u64) {
     crate::fios::fixar(id, None);
 }
 
+// ---------------------------------------------------------------------------
+// nativo: a interface nativa — o registro como API dos programas
+// ---------------------------------------------------------------------------
+
+/// O código da decisão num envelope: o `data` do erro, ou `ALLOW`.
+fn decisao_do_envelope(envelope: &str) -> alloc::string::String {
+    let raiz = Json(envelope.as_bytes());
+    if raiz.member("result").is_some() {
+        return alloc::string::String::from("ALLOW");
+    }
+    raiz.member("error")
+        .and_then(|e| e.member("data"))
+        .and_then(|d| d.as_str())
+        .unwrap_or("?")
+        .into()
+}
+
+/// Um processo decide como quem o lançou: pela mesma função, com o mesmo
+/// pedido, o processo de uma pessoa ouve o que ela ouve — e a auditoria diz
+/// que foi pelo processo. O que é de um canal é recusado a ele, mesmo com a
+/// permissão; e a pessoa que saiu leva o processo junto.
+///
+/// # O que este caso protege
+///
+/// Que o ramo do processo no gate não é um gate à parte: a mesma tabela de
+/// decisão, a mesma taxa, a mesma auditoria. Um ramo que decidisse por
+/// conta — um papel de processo, um atalho para o sistema — divergiria
+/// aqui da pessoa, pedido por pedido.
+fn nativo_o_processo_decide_como_quem_o_lancou() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador};
+    use crate::pessoas::Console;
+    const FIO: u64 = 7_000_001;
+    crate::pessoas::esquecer_registradas();
+    let resultado = (|| -> Resultado {
+        let sessao = crate::pessoas::sessao_de_teste(Console::Fisico, "bia", "operador");
+        let pela_pessoa = Chamador::Pessoa(sessao);
+        let pelo_processo = Chamador::Processo {
+            fio: FIO,
+            autoridade: Autoridade::Pessoa { sessao },
+        };
+        let pedidos = [
+            ("system.info", "{}"),
+            ("fs.list", r#"{"path":"/bin"}"#),
+            ("fs.list", r#"{"path":"/"}"#),
+            ("policy.show", "{}"),
+            ("audit.tail", r#"{"count":1}"#),
+            ("message.read", "{}"),
+        ];
+        let mut vistos = alloc::vec::Vec::new();
+        for (metodo, params) in pedidos {
+            let linha = pedido_rpc(metodo, params);
+            let dela = decisao_do_envelope(&crate::nativo::responder_de_teste(pela_pessoa, &linha));
+            let dele =
+                decisao_do_envelope(&crate::nativo::responder_de_teste(pelo_processo, &linha));
+            if dela != dele {
+                crate::log_error!("teste", "{}: pessoa {}, processo {}", metodo, dela, dele);
+                return Err("o processo nao decidiu como a pessoa que o lancou");
+            }
+            vistos.push(dela);
+        }
+        // O caso só vale se a lista tem dos dois.
+        if !vistos.iter().any(|c| c == "ALLOW") || !vistos.iter().any(|c| c != "ALLOW") {
+            crate::log_error!("teste", "{:?}", vistos);
+            return Err("os pedidos do caso nao tem permissao e recusa");
+        }
+        let e = ultimo_que(|e| e.metodo == "policy.show").ok_or("a recusa nao foi gravada")?;
+        if !e
+            .detalhe
+            .starts_with(&alloc::format!("pelo processo {FIO}: "))
+            || e.codigo != politica::Codigo::DenyPermission
+        {
+            crate::log_error!("teste", "{:?}", e);
+            return Err("a auditoria nao disse que foi pelo processo");
+        }
+
+        // O que é de um canal: recusado ao processo, mesmo do sistema, que
+        // tem `debug.trigger` no papel.
+        let do_sistema = Chamador::Processo {
+            fio: FIO,
+            autoridade: Autoridade::Sistema,
+        };
+        for (metodo, params) in [
+            ("debug.trigger", r#"{"kind":"fatal"}"#),
+            ("admin.challenge", "{}"),
+            (
+                "admin.execute",
+                r#"{"challenge":1,"command":"agent.revoke","params":"{}","proof":"00"}"#,
+            ),
+        ] {
+            let r = crate::nativo::responder_de_teste(do_sistema, &pedido_rpc(metodo, params));
+            if decisao_do_envelope(&r) != "DENY_PERMISSION" {
+                crate::log_error!("teste", "{}: {}", metodo, r);
+                return Err("um comando de canal passou para um processo");
+            }
+            let e = ultimo_que(|e| e.metodo == metodo).ok_or("a recusa nao foi gravada")?;
+            if !e
+                .detalhe
+                .starts_with(&alloc::format!("pelo processo {FIO}: so um canal"))
+            {
+                crate::log_error!("teste", "{:?}", e);
+                return Err("a recusa de canal nao foi gravada como do processo");
+            }
+        }
+        // Nada ficou armado: um `debug.trigger` aceito agendaria a falha
+        // para o próximo pedido de um agente.
+        if crate::agent::falha_agendada_de_teste() {
+            return Err("o debug.trigger do processo armou uma falha");
+        }
+
+        // A pessoa saiu: o processo dela não pede mais nada.
+        crate::pessoas::revogar_sessao(sessao).map_err(|_| "a revogacao falhou")?;
+        let r = crate::nativo::responder_de_teste(pelo_processo, &pedido_rpc("system.info", "{}"));
+        if decisao_do_envelope(&r) != "DENY_NOT_AUTHENTICATED" {
+            crate::log_error!("teste", "{}", r);
+            return Err("o processo de quem saiu continuou pedindo");
+        }
+        Ok(())
+    })();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// A taxa é de quem pede, e não da vaga: o processo de um agente gasta o
+/// balde do agente, e outro principal na mesma sessão tem o seu — sem
+/// encher o do primeiro.
+///
+/// # O que este caso protege
+///
+/// O balde era por vaga de sessão, com o dono trocando quando outro
+/// principal chegava — e a troca enchia o balde. Com processos agindo pela
+/// sessão de um agente que já saiu, dois principais na mesma vaga deixaram
+/// de ser raros: alternar entre eles renovava a rajada de cada um.
+fn nativo_a_taxa_e_de_quem_pede() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador};
+    let texto = politica::PADRAO.replace("taxa observador 20 40", "taxa observador 1 3");
+    let apertada = politica::Politica::ler(&texto).map_err(|_| "a politica do caso nao vale")?;
+    let resultado = com_agentes_de_teste(|| {
+        let (mut agente, mut sessao) = conectado(1)?;
+        for p in [1, 2] {
+            crate::identidade::atribuir(&nome_de_teste(p), "observador")
+                .map_err(|_| "a atribuicao falhou")?;
+        }
+        crate::autorizacao::trocar_politica(apertada);
+        let processo_de = |p: u8| Chamador::Processo {
+            fio: 7_000_002,
+            autoridade: Autoridade::Sessao {
+                sessao: 1,
+                chave: Some(sigilo::publica_de(&chave_de_teste(p))),
+            },
+        };
+        let ping = pedido_rpc("agent.ping", "{}");
+        // A rajada é de três: um pelo canal, dois pelo processo.
+        let r = pela_porta(&mut agente, &mut sessao, "agent.ping", "{}")?;
+        if !r.contains(r#""result":"#) {
+            return Err("o primeiro pedido do agente nao passou");
+        }
+        for _ in 0..2 {
+            let r = crate::nativo::responder_de_teste(processo_de(1), &ping);
+            if decisao_do_envelope(&r) != "ALLOW" {
+                crate::log_error!("teste", "{}", r);
+                return Err("a rajada do agente nao valeu para o processo dele");
+            }
+        }
+        let r = crate::nativo::responder_de_teste(processo_de(1), &ping);
+        if decisao_do_envelope(&r) != "RATE_LIMIT" {
+            crate::log_error!("teste", "{}", r);
+            return Err("o processo nao gastou o balde do agente");
+        }
+        // Outro principal na mesma vaga: o balde dele, cheio.
+        let r = crate::nativo::responder_de_teste(processo_de(2), &ping);
+        if decisao_do_envelope(&r) != "ALLOW" {
+            crate::log_error!("teste", "{}", r);
+            return Err("outro agente na mesma vaga ficou sem balde");
+        }
+        // E a passagem dele não encheu o do primeiro.
+        let r = crate::nativo::responder_de_teste(processo_de(1), &ping);
+        if decisao_do_envelope(&r) != "RATE_LIMIT" {
+            crate::log_error!("teste", "{}", r);
+            return Err("outro principal na vaga encheu o balde do primeiro");
+        }
+        Ok(())
+    });
+    crate::autorizacao::carregar();
+    resultado
+}
+
+/// A fila larga o fio que não está mais lá: nada é decidido, nada é
+/// gravado, e a fila fica vazia.
+fn nativo_a_fila_larga_o_fio_que_se_foi() -> Resultado {
+    let antes = crate::autorizacao::com_auditoria(|c| c.ultimos(1).next().map(|r| r.seq)).flatten();
+    let (atendidos, _) = crate::nativo::estatisticas();
+    if !crate::nativo::enfileirar_de_teste(u64::MAX - 7) {
+        return Err("a fila recusou o fio");
+    }
+    if crate::nativo::atender_pendentes() != 0 {
+        return Err("a fila atendeu um fio que nao existe");
+    }
+    let depois =
+        crate::autorizacao::com_auditoria(|c| c.ultimos(1).next().map(|r| r.seq)).flatten();
+    if antes != depois || crate::nativo::estatisticas().0 != atendidos {
+        return Err("o pedido de um fio que nao existe chegou ao gate");
+    }
+    Ok(())
+}
+
+/// Roda o programa `nome` com `autoridade` — ou a do sistema — e espera que
+/// ele saia com `codigo`.
+fn rodar_programa(
+    nome: &str,
+    autoridade: Option<crate::autorizacao::Autoridade>,
+    codigo: i64,
+) -> Resultado {
+    let dir = crate::usuario::DIRETORIO_DOS_COMPILADOS;
+    let programa = alloc::format!("{dir}/{nome}");
+    let procurada = alloc::format!("processo encerrou com codigo {codigo}");
+    let desde = crate::log::total_emitidos();
+    let visto = || {
+        let mut achou = false;
+        crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+            achou |= r.seq >= desde && r.subsistema == "usuario" && r.mensagem() == procurada;
+        });
+        achou
+    };
+    match autoridade {
+        Some(a) => crate::usuario::lancar_como(Some(&programa), a)?,
+        None => crate::usuario::lancar(Some(&programa))?,
+    };
+    esperar_ate(visto, 600)
+}
+
+/// Um programa nativo, de verdade, pela chamada de sistema: o programa
+/// `nativo` confere de dentro o que a interface promete — ver
+/// `programas/src/bin/nativo.rs` —, e aqui se confere o outro lado: a
+/// auditoria diz que foi o processo, as mensagens saíram da caixa do agente
+/// sem gastar os nonces dele, e lançado pelo sistema o mesmo programa ouve
+/// o que o sistema ouviria.
+fn nativo_o_programa_pede_pelo_mesmo_gate() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    com_mensagens(|| {
+        let (mut agente, mut sessao) = conectado(1)?;
+        crate::identidade::atribuir(&nome_de_teste(1), "operador")
+            .map_err(|_| "a atribuicao falhou")?;
+        // O agente manda antes, com um nonce maior que o do programa: se a
+        // janela fosse a mesma, o envio do programa seria replay.
+        let r = pela_porta(
+            &mut agente,
+            &mut sessao,
+            "message.send",
+            r#"{"to":"serial","body":"do agente","nonce":10}"#,
+        )?;
+        if !r.contains(r#""ok":true"#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o envio do agente foi recusado");
+        }
+        let chave = sigilo::publica_de(&chave_de_teste(1));
+        let autoridade = Autoridade::Sessao {
+            sessao: 1,
+            chave: Some(chave),
+        };
+        let (pedidos_antes, _) = crate::nativo::estatisticas();
+        rodar_programa("nativo", Some(autoridade), 74)
+            .map_err(|_| "o programa nativo nao conferiu a interface")?;
+        // Treze pedidos chegaram ao executor — o grande demais não chega.
+        if crate::nativo::estatisticas().0 < pedidos_antes + 10 {
+            return Err("os pedidos do programa nao passaram pela fila");
+        }
+        // A auditoria: quem é o agente, e foi pelo processo.
+        for metodo in ["admin.challenge", "debug.trigger"] {
+            let e = ultimo_que(|e| e.metodo == metodo).ok_or("a recusa nao foi gravada")?;
+            if e.codigo != politica::Codigo::DenyPermission
+                || !e.detalhe.starts_with("pelo processo ")
+                || e.chave != Some(chave)
+            {
+                crate::log_error!("teste", "{:?}", e);
+                return Err("a recusa do programa nao foi gravada como do processo do agente");
+            }
+        }
+        let e =
+            ultimo_que(|e| e.metodo == "message.send" && e.detalhe.starts_with("pelo processo"))
+                .ok_or("o envio do programa nao foi gravado como do processo")?;
+        if e.chave != Some(chave) {
+            crate::log_error!("teste", "{:?}", e);
+            return Err("o envio do programa nao saiu como o agente");
+        }
+        // A janela do agente continua dele: o nonce seguinte passa.
+        let r = pela_porta(
+            &mut agente,
+            &mut sessao,
+            "message.send",
+            r#"{"to":"serial","body":"do agente de novo","nonce":11}"#,
+        )?;
+        if !r.contains(r#""ok":true"#) || !r.contains(r#""duplicate":false"#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o programa gastou a janela de nonces do agente");
+        }
+        // Lançado pelo sistema: a prova e debug.trigger recusados do mesmo
+        // jeito, e o envio de mensagem recusado — o sistema não tem caixa.
+        rodar_programa("nativo", None, 12)
+            .map_err(|_| "lancado pelo sistema, o programa nao ouviu o que o sistema ouve")?;
+        Ok(())
+    })
+}
+
 fn esperar_ate(mut condicao: impl FnMut() -> bool, teto_em_ticks: u64) -> Resultado {
     let limite = crate::tempo::ticks().saturating_add(teto_em_ticks);
     while crate::tempo::ticks() < limite {
         if condicao() {
             return Ok(());
         }
+        // Na suíte não há executor: quem espera um processo atende os
+        // pedidos dele ao registro, como a tarefa `programas` atenderia.
+        crate::nativo::atender_pendentes();
         core::hint::spin_loop();
     }
     Err("a condicao nao se cumpriu dentro do teto de tempo")
@@ -24625,6 +24931,22 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "smp: comandos simultaneos, cada um com a sua autoridade",
         f: smp_comandos_simultaneos_cada_um_com_a_sua_autoridade,
+    },
+    Caso {
+        nome: "nativo: o processo decide como quem o lancou",
+        f: nativo_o_processo_decide_como_quem_o_lancou,
+    },
+    Caso {
+        nome: "nativo: a taxa e de quem pede",
+        f: nativo_a_taxa_e_de_quem_pede,
+    },
+    Caso {
+        nome: "nativo: a fila larga o fio que se foi",
+        f: nativo_a_fila_larga_o_fio_que_se_foi,
+    },
+    Caso {
+        nome: "nativo: o programa pede pelo mesmo gate",
+        f: nativo_o_programa_pede_pelo_mesmo_gate,
     },
     Caso {
         nome: "smp: nucleo travado nao para os outros",

@@ -18,7 +18,7 @@ license = "MIT OR Apache-2.0"
 # emulador e o encerra com um código de saída. É assim que a suíte roda em
 # CI: o kernel é seu próprio test harness, porque `cargo test` depende da
 # `std` e de um sistema operacional por baixo — coisas que não temos.
-modo-teste = []
+modo-teste = ["protocolo/arrays"]
 
 # Só para a bancada de persistência: quedas de energia em pontos exatos da
 # gravação, num plano lido do fim da partição de estado — ver

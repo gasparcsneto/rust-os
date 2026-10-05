@@ -231,6 +231,7 @@ kernel/src/
 ├── persistencia.rs  o journal na partição de estado, ancorado no TPM: o estado de autoridade que sobrevive ao boot
 ├── coordenacao.rs   versões e arrendamentos: quem edita cada campo agora
 ├── mensagens.rs     as mensagens entre titulares: um recurso, pelo mesmo ponto de decisão
+├── nativo.rs        a interface nativa: o registro como API dos programas, pelo mesmo gate
 ├── atividade.rs     quem está agindo: os agentes conectados e quem agiu por último
 ├── autorizacao.rs   o ponto único de decisão: papel, permissão, recurso, taxa e auditoria
 ├── sessoes.rs       quem está em cada porta, e as chaves do transporte cifrado dela
@@ -307,7 +308,7 @@ kernel/src/
 │   └── hid.rs       os relatórios de um teclado e de um mouse USB, traduzidos
 ├── agent/
 │   ├── mod.rs       laço de atendimento e despacho
-│   ├── json.rs      JSON sem alocação (streaming + varredura)
+│   ├── json.rs      o JSON do canal: o de `protocolo::json`, o mesmo dos programas
 │   ├── protocol.rs  envelope JSON-RPC 2.0
 │   ├── registry.rs  registro de comandos auto-descritivo
 │   ├── sessao.rs    as sessões: um agente por canal, e quem está agindo
@@ -359,6 +360,7 @@ iniciador/src/       a aplicação UEFI que o firmware carrega da ESP
 
 protocolo/src/       as ABIs: do iniciador com o kernel, e do kernel com os programas
 ├── lib.rs           o que é entregue ao kernel, com mágica e versão
+├── json.rs          JSON sem alocação (streaming + varredura), do kernel e dos programas
 ├── mapa.rs          onde cada coisa mora no espaço virtual
 └── usuario.rs       as chamadas de sistema, os erros e o mapa do espaço do usuário
 
@@ -417,6 +419,7 @@ programas/           os programas de usuário, compilados à parte do kernel
 └── src/
     ├── lib.rs       o runtime: a entrada, o pânico e o contrato do `principal`
     ├── sistema.rs   as chamadas de sistema, uma função por chamada
+    ├── nativo.rs    a interface nativa: pedir ao sistema um comando do registro
     ├── monte.rs     o monte do processo, sobre `mapear`
     ├── saida.rs     uma linha formatada por chamada de `escrever`
     ├── desenho.rs   retângulos e texto, com a fonte do console
@@ -435,6 +438,7 @@ programas/           os programas de usuário, compilados à parte do kernel
         ├── pseudo.rs     digita no interpretador pelo pseudo-terminal, e lê a resposta
         ├── entrada.rs    uma janela fora do servidor, com o canal de entrada dela
         ├── formulario.rs dois campos e dois botões do toolkit, que o agente preenche
+        ├── nativo.rs     um programa nativo: confere de dentro o que a interface nativa promete
         └── terminal.rs   o Terminal: o interpretador numa janela, pelo pseudo-terminal
 
 xtask/src/

@@ -35,6 +35,7 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
+pub mod json;
 pub mod mapa;
 pub mod usuario;
 

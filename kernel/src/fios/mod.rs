@@ -127,14 +127,17 @@ pub enum Estado {
     /// quem acorda o pai é o mesmo que tem o número que o pai foi esperar —,
     /// ou [`acordar`], chamada por quem publica um evento.
     ///
-    /// E quem **põe** aqui são duas funções, e nenhuma outra:
+    /// E quem **põe** aqui são quatro funções, e nenhuma outra:
     /// [`colher_filho`] e [`estacionar_atual`], esta chamada só pela leitura
-    /// de um canal de eventos vazio. Isso não é arrumação: o backend de
+    /// de um canal de eventos vazio; e [`enfileirar_pedido`] e
+    /// [`retomar_pedido`], de `pedir`. Isso não é arrumação: o backend de
     /// arquitetura reexecuta a chamada de sistema quando encontra o fio
-    /// neste estado, e reexecutar só é seguro para uma chamada que não teve
-    /// efeito — as duas conferem que não havia o que colher antes de
-    /// estacionar. Com duas escritas, "quais chamadas podem parar aqui" tem
-    /// uma resposta que se lê, em vez de uma que se procura.
+    /// neste estado, e reexecutar só é seguro para uma chamada cuja segunda
+    /// vez não repete o efeito da primeira. As duas primeiras conferem que
+    /// não havia o que colher antes de estacionar; `pedir` guarda no fio
+    /// onde o pedido está, e a reexecução continua de lá em vez de pedir de
+    /// novo. Com essas escritas, "quais chamadas podem parar aqui" tem uma
+    /// resposta que se lê, em vez de uma que se procura.
     ///
     /// # Acordar a mais é inofensivo
     ///
@@ -272,6 +275,32 @@ struct Fio {
     /// [`tirar_reexecucao`]. Posto junto com [`Estado::Esperando`], na mesma
     /// seção crítica, e só por quem põe o fio nesse estado.
     reexecutar: bool,
+    /// O pedido do processo pela interface nativa — ver [`crate::nativo`].
+    pedido: EstadoDoPedido,
+}
+
+/// Onde está o pedido que um processo fez pela interface nativa.
+///
+/// Mora no fio, e não numa tabela à parte, por dois motivos. O primeiro é
+/// a corrida de acordar: o processo estaciona e o executor o acorda, e as
+/// duas coisas acontecem sob a trava do escalonador — o executor não acha
+/// o fio "ainda não esperando" e desiste. O segundo é a vida: o pedido e a
+/// resposta morrem com o fio, sem uma tabela que alguém esqueça de limpar.
+/// Os textos são `sigiloso::Texto`, que se apaga ao sair: um pedido pode
+/// levar o corpo de uma mensagem, e uma resposta também.
+#[derive(Default)]
+pub enum EstadoDoPedido {
+    #[default]
+    Livre,
+    /// Na fila do executor, com o texto do pedido.
+    Enfileirado(politica::sigiloso::Texto),
+    /// O executor tomou o pedido e está executando o comando.
+    EmCurso,
+    /// A resposta pronta, e o processo ainda não voltou para vê-la.
+    Pronto(politica::sigiloso::Texto),
+    /// O processo viu o tamanho — `pedir` o devolveu —, e a resposta espera
+    /// `resposta` a buscar.
+    Pendente(politica::sigiloso::Texto),
 }
 
 impl Fio {
@@ -485,6 +514,7 @@ pub fn init() {
             fixo: Some(cpu),
             ocioso: false,
             reexecutar: false,
+            pedido: EstadoDoPedido::Livre,
         });
         e.atual[cpu] = Some(0);
         QUANTUM[cpu].store(QUANTUM_EM_TIQUES, Ordering::Relaxed);
@@ -666,6 +696,7 @@ pub fn recolher_terminados() -> usize {
                 fixo: None,
                 ocioso: false,
                 reexecutar: false,
+                pedido: EstadoDoPedido::Livre,
             });
             let id = e.fios[vaga].as_ref().map(|f| f.id)?;
             Some((vaga, id, morto))
@@ -688,7 +719,12 @@ pub fn recolher_terminados() -> usize {
                 core::hint::spin_loop();
             }
         }
+        let canal = politica::mensagens::Canal::Processo(morto.id.numero());
         drop(morto);
+        // A janela de nonces do processo, se ele mandou mensagens pela
+        // interface nativa: o id não se repete, e a janela não serviria a
+        // mais ninguém. Fora da trava, como tudo que este laço larga.
+        crate::mensagens::canal_acabou(canal);
         // Só agora a vaga volta a ser escolhível. O marcador sai sob a trava
         // e é largado fora dela, como todo fio deste módulo.
         let marcador = com_escalonador(|e| match &e.fios[vaga] {
@@ -965,6 +1001,7 @@ fn nascer(
             fixo,
             ocioso: false,
             reexecutar: false,
+            pedido: EstadoDoPedido::Livre,
         });
         Ok::<_, &'static str>((vaga, anterior, herdada, pai, autoridade, fixo))
     })?;
@@ -1041,6 +1078,7 @@ fn nascer(
             fixo,
             ocioso: false,
             reexecutar: false,
+            pedido: EstadoDoPedido::Livre,
         });
         (marcador, e.nucleos_ociosos())
     });
@@ -1088,6 +1126,7 @@ pub fn preparar_ocioso(cpu: usize) -> Result<(usize, u64), &'static str> {
             fixo: Some(cpu),
             ocioso: true,
             reexecutar: false,
+            pedido: EstadoDoPedido::Livre,
         });
         Ok::<_, &'static str>((vaga, anterior))
     })?;
@@ -1553,6 +1592,156 @@ pub fn estacionar_atual() {
         if let Some(fio) = e.fio_atual_mut() {
             fio.estado = Estado::Esperando;
             fio.reexecutar = true;
+        }
+    });
+}
+
+/// O que `pedir` encontra no fio atual — ver [`crate::nativo`].
+pub enum Retomada {
+    /// Nada em andamento: o pedido é novo.
+    Novo,
+    /// O pedido ainda não tem resposta: o fio volta a esperar.
+    Esperando,
+    /// A resposta está pronta, com este tamanho; ela passa a esperar
+    /// `resposta` a buscar.
+    Pronto(usize),
+}
+
+/// O primeiro passo de `pedir`: um pedido em andamento continua — o fio
+/// volta a esperar se a resposta não chegou, ou recebe o tamanho dela se
+/// chegou.
+///
+/// É o que torna `pedir` segura de reexecutar: ela é chamada de novo depois
+/// de acordar, com os mesmos argumentos, e aqui a chamada reexecutada não é
+/// um pedido novo. Um pedido novo só começa com o fio sem nada em andamento
+/// — e o processo tem um fio só: enquanto ele espera, não há outro para
+/// pedir.
+pub fn retomar_pedido() -> Retomada {
+    com_escalonador(|e| {
+        let Some(fio) = e.fio_atual_mut() else {
+            return Retomada::Novo;
+        };
+        match core::mem::take(&mut fio.pedido) {
+            EstadoDoPedido::Pronto(t) => {
+                let n = t.len();
+                fio.pedido = EstadoDoPedido::Pendente(t);
+                Retomada::Pronto(n)
+            }
+            andamento @ (EstadoDoPedido::Enfileirado(_) | EstadoDoPedido::EmCurso) => {
+                fio.pedido = andamento;
+                fio.estado = Estado::Esperando;
+                fio.reexecutar = true;
+                Retomada::Esperando
+            }
+            // A resposta que não foi buscada fica onde estava: só um pedido
+            // novo a descarta, e ele começa em [`enfileirar_pedido`].
+            parado => {
+                fio.pedido = parado;
+                Retomada::Novo
+            }
+        }
+    })
+}
+
+/// Põe o pedido `texto` no fio atual e o fio a esperar a resposta. Devolve
+/// o que havia — a resposta anterior que não foi buscada —, para quem chama
+/// largar fora da trava.
+pub fn enfileirar_pedido(texto: politica::sigiloso::Texto) -> EstadoDoPedido {
+    com_escalonador(|e| match e.fio_atual_mut() {
+        Some(fio) => {
+            fio.estado = Estado::Esperando;
+            fio.reexecutar = true;
+            core::mem::replace(&mut fio.pedido, EstadoDoPedido::Enfileirado(texto))
+        }
+        None => EstadoDoPedido::Enfileirado(texto),
+    })
+}
+
+/// Desfaz [`enfileirar_pedido`] quando o pedido não chegou à fila: o fio
+/// volta a rodar sem nada em andamento. Devolve o texto para largar fora.
+pub fn desfazer_pedido() -> EstadoDoPedido {
+    com_escalonador(|e| match e.fio_atual_mut() {
+        Some(fio) => {
+            fio.estado = Estado::Rodando;
+            fio.reexecutar = false;
+            core::mem::take(&mut fio.pedido)
+        }
+        None => EstadoDoPedido::Livre,
+    })
+}
+
+/// O executor toma o pedido do fio `id`: o texto, e a autoridade do fio —
+/// com que o comando será decidido. `None` se o fio não existe mais, já
+/// terminou, ou não tem pedido na fila.
+pub fn tomar_pedido(
+    id: u64,
+) -> Option<(politica::sigiloso::Texto, crate::autorizacao::Autoridade)> {
+    com_escalonador(|e| {
+        let fio = e
+            .fios
+            .iter_mut()
+            .flatten()
+            .find(|f| f.id.numero() == id && f.estado != Estado::Terminado)?;
+        match core::mem::replace(&mut fio.pedido, EstadoDoPedido::EmCurso) {
+            EstadoDoPedido::Enfileirado(t) => Some((t, fio.autoridade)),
+            outro => {
+                fio.pedido = outro;
+                None
+            }
+        }
+    })
+}
+
+/// O executor entrega a resposta ao fio `id`, e o acorda se ele espera.
+/// Devolve a resposta se o fio não está mais lá para recebê-la — morreu
+/// enquanto o comando executava —, para quem chama largar fora da trava.
+pub fn responder_pedido(
+    id: u64,
+    resposta: politica::sigiloso::Texto,
+) -> Option<politica::sigiloso::Texto> {
+    let (sobra, ociosos) = com_escalonador(|e| {
+        let Some(fio) = e
+            .fios
+            .iter_mut()
+            .flatten()
+            .find(|f| f.id.numero() == id && f.estado != Estado::Terminado)
+        else {
+            return (Some(resposta), 0);
+        };
+        if !matches!(fio.pedido, EstadoDoPedido::EmCurso) {
+            return (Some(resposta), 0);
+        }
+        fio.pedido = EstadoDoPedido::Pronto(resposta);
+        if fio.estado == Estado::Esperando {
+            fio.estado = Estado::Pronto;
+            (None, e.nucleos_ociosos())
+        } else {
+            (None, 0)
+        }
+    });
+    crate::nucleos::cutucar(ociosos);
+    sobra
+}
+
+/// `resposta`: tira do fio atual a resposta que espera ser buscada.
+pub fn tirar_resposta() -> Option<politica::sigiloso::Texto> {
+    com_escalonador(|e| {
+        let fio = e.fio_atual_mut()?;
+        match core::mem::take(&mut fio.pedido) {
+            EstadoDoPedido::Pendente(t) => Some(t),
+            outro => {
+                fio.pedido = outro;
+                None
+            }
+        }
+    })
+}
+
+/// Devolve ao fio atual a resposta que não coube onde o processo pediu.
+pub fn devolver_resposta(t: politica::sigiloso::Texto) {
+    com_escalonador(|e| {
+        if let Some(fio) = e.fio_atual_mut() {
+            fio.pedido = EstadoDoPedido::Pendente(t);
         }
     });
 }

@@ -292,3 +292,37 @@ pub unsafe fn esperar_cru(id: u64, ponteiro: u64) -> i64 {
     // SAFETY: o contrato é de quem chama.
     unsafe { chamar(numero::ESPERAR, id, ponteiro, 0) }
 }
+
+/// Pede ao sistema um comando do registro — ver [`numero::PEDIR`]. O
+/// tamanho da resposta, que fica no kernel até [`resposta`] a buscar; ou um
+/// erro. Bloqueia enquanto o comando executa.
+///
+/// Quem monta o pedido e lê a resposta é [`crate::nativo`]; esta é só a
+/// chamada.
+pub fn pedir(pedido: &[u8]) -> i64 {
+    // SAFETY: a fatia é deste processo e tem o tamanho dito; o kernel a
+    // copia antes de voltar.
+    unsafe {
+        chamar(
+            numero::PEDIR,
+            pedido.as_ptr() as u64,
+            pedido.len() as u64,
+            0,
+        )
+    }
+}
+
+/// A resposta do último [`pedir`] — ver [`numero::RESPOSTA`]. O tamanho
+/// dela: os bytes estão em `destino` se ele couber, e continuam no kernel se
+/// não couber. `NAO_ENCONTRADO` sem resposta esperando.
+pub fn resposta(destino: &mut [u8]) -> i64 {
+    // SAFETY: a fatia é deste processo, gravável, e tem o tamanho dito.
+    unsafe {
+        chamar(
+            numero::RESPOSTA,
+            destino.as_mut_ptr() as u64,
+            destino.len() as u64,
+            0,
+        )
+    }
+}

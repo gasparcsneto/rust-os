@@ -16,3 +16,7 @@ license = "MIT OR Apache-2.0"
 # `usuario::descricao`. Pedem alocação, e ficam de fora para quem não tem
 # alocador: o iniciador UEFI inclui este pacote e não aloca nada.
 alloc = []
+
+# `json::Json::item`: ler arrays. O kernel liga só na suíte — nenhum comando
+# lê array de entrada —, e os programas ligam para ler as respostas.
+arrays = []
