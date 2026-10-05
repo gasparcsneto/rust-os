@@ -4929,6 +4929,30 @@ impl Drop for Ambiente {
     }
 }
 
+/// Quantos núcleos a máquina da bancada tem.
+const NUCLEOS_DA_BANCADA: u32 = 4;
+
+/// Os núcleos pedidos por `DUKE_NUCLEOS`, ou [`NUCLEOS_DA_BANCADA`].
+///
+/// Um valor fora de 1 a 8 é recusado em voz alta, e não trocado em silêncio
+/// pelo padrão: quem pediu `-smp 16` e recebeu 4 sem aviso concluiria coisas
+/// erradas sobre o kernel.
+fn nucleos_da_bancada() -> u32 {
+    match std::env::var("DUKE_NUCLEOS") {
+        Err(_) => NUCLEOS_DA_BANCADA,
+        Ok(texto) => match texto.trim().parse::<u32>() {
+            Ok(n) if (1..=8).contains(&n) => n,
+            _ => {
+                eprintln!(
+                    "DUKE_NUCLEOS={} nao e um numero de 1 a 8; usando {}",
+                    texto, NUCLEOS_DA_BANCADA
+                );
+                NUCLEOS_DA_BANCADA
+            }
+        },
+    }
+}
+
 /// Monta a linha de comando do QEMU para a arquitetura em questão.
 fn comando_qemu(
     arch: Arquitetura,
@@ -5026,6 +5050,16 @@ fn comando_qemu(
         }
         _ => return Err("artefato incompatível com a arquitetura".into()),
     }
+
+    // Vários núcleos, nas duas arquiteturas e nos dois caminhos de boot.
+    //
+    // Quatro por padrão: o bastante para que dois fios fixos em núcleos
+    // diferentes disputem a mesma trava de verdade, com folga para um núcleo
+    // travado de propósito sem tirar a concorrência dos outros. O teto do
+    // kernel é oito (o GIC v2 do ARM não endereça mais), e `DUKE_NUCLEOS`
+    // escolhe outro número — `1` é o que roda a suíte como ela rodava antes
+    // desta fase, e é como se confere que um núcleo só continua funcionando.
+    qemu.args(["-smp", &nucleos_da_bancada().to_string()]);
 
     // Um disco virtio, nas duas arquiteturas. `if=none` mais `-device` em vez
     // de `if=virtio` porque só assim o dispositivo aparece no barramento PCI
@@ -5759,9 +5793,233 @@ fn conversar(
     sob_politica(arch, &mut escrita, &mut leitor)?;
     sob_tela(monitor, tela_no_monitor, &mut escrita, &mut leitor)?;
     sob_fragmento(&mut escrita, &mut leitor)?;
+    // Um núcleo travado de propósito, **para sempre**: ele fica travado até
+    // o fim, e a sonda da falha, a seguir, confere que a parada do caminho
+    // fatal o alcança — ou diz que não o alcançou.
+    let travado = sob_nucleo_travado(arch, &mut escrita, &mut leitor)?;
     // Por último, porque não há volta: depois dela o kernel só responde o
     // relatório da falha.
-    sob_falha(monitor, tela_no_monitor, &mut escrita, &mut leitor)
+    sob_falha(monitor, tela_no_monitor, &mut escrita, &mut leitor)?;
+    sob_falha_para_os_nucleos(arch, travado, &mut escrita, &mut leitor)
+}
+
+/// Os núcleos de um `system.info`: índice, estado e pulso de cada um.
+fn nucleos_do_relatorio(resposta: &str) -> Vec<(u64, String, u64)> {
+    let numero = |trecho: &str, chave: &str| -> Option<u64> {
+        let de = trecho.find(&format!("\"{chave}\":"))? + chave.len() + 3;
+        let fim = trecho[de..]
+            .find(|c: char| !c.is_ascii_digit())
+            .map_or(trecho.len(), |f| de + f);
+        trecho[de..fim].parse().ok()
+    };
+    let texto = |trecho: &str, chave: &str| -> Option<String> {
+        let de = trecho.find(&format!("\"{chave}\":\""))? + chave.len() + 4;
+        let fim = de + trecho[de..].find('"')?;
+        Some(trecho[de..fim].to_string())
+    };
+    resposta
+        .split("{\"index\":")
+        .skip(1)
+        .filter_map(|pedaco| {
+            let pedaco = format!("{{\"index\":{pedaco}");
+            let fim = pedaco.find('}')?;
+            let objeto = &pedaco[..fim];
+            Some((
+                numero(objeto, "index")?,
+                texto(objeto, "state")?,
+                numero(objeto, "ticks")?,
+            ))
+        })
+        .collect()
+}
+
+/// O canal do agente continua respondendo com um núcleo travado.
+///
+/// # O que esta sonda prova, de fora
+///
+/// Pelo canal de verdade, e não por dentro do kernel: o último núcleo é
+/// travado **para sempre** com as interrupções desligadas — o pior
+/// travamento que não é uma falha —, e então:
+///
+/// - o canal segue respondendo, pedido após pedido;
+/// - o pulso do travado para, e o dos outros anda — que é como um agente
+///   enxerga, sem perguntar nada ao núcleo travado, que ele travou;
+/// - o escalonador segue: as trocas de contexto continuam subindo;
+/// - o fio do travamento aparece em `threads.list`, no núcleo que ele travou.
+///
+/// Devolve o índice do núcleo travado, que fica travado até o fim.
+fn sob_nucleo_travado(
+    arch: Arquitetura,
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+) -> Result<u64, String> {
+    println!("[xtask] fumaça: um núcleo travado não cala o canal");
+    let mut id = 8800;
+    let info = pedir_pela_serial(escrita, leitor, &mut id, "system.info", "{}")?;
+    let nucleos = nucleos_do_relatorio(&info);
+    let ligados: Vec<u64> = nucleos
+        .iter()
+        .filter(|(_, estado, _)| estado == "online")
+        .map(|(i, _, _)| *i)
+        .collect();
+    if ligados.len() < 2 {
+        return Err(format!(
+            "nucleos: a bancada tem {} nucleo(s) ligado(s), e esta sonda precisa de dois\n  {info}",
+            ligados.len()
+        ));
+    }
+    let alvo = *ligados.last().expect("conferido acima");
+
+    // Pedir para travar o primeiro é recusado: é o núcleo do canal.
+    let recusa = pedir_pela_serial(
+        escrita,
+        leitor,
+        &mut id,
+        "debug.trigger",
+        r#"{"kind":"hang_core","core":0}"#,
+    )?;
+    if !recusa.contains(r#""error":"#) {
+        return Err(format!(
+            "nucleos: travar o nucleo do canal nao foi recusado\n  {recusa}"
+        ));
+    }
+
+    let trocas = |r: &str| -> Option<u64> {
+        let de = r.find(r#""context_switches":"#)? + 19;
+        let fim = de + r[de..].find(|c: char| !c.is_ascii_digit())?;
+        r[de..fim].parse().ok()
+    };
+    let antes_das_trocas = trocas(&pedir_pela_serial(
+        escrita,
+        leitor,
+        &mut id,
+        "threads.stats",
+        "{}",
+    )?)
+    .ok_or("nucleos: threads.stats sem context_switches")?;
+
+    let travou = pedir_pela_serial(
+        escrita,
+        leitor,
+        &mut id,
+        "debug.trigger",
+        &format!(r#"{{"kind":"hang_core","core":{alvo},"ms":0}}"#),
+    )?;
+    if !travou.contains(r#""triggered":"hang_core""#) {
+        return Err(format!("nucleos: o travamento nao foi aceito\n  {travou}"));
+    }
+
+    // O fio do travamento leva um instante para ser escolhido.
+    std::thread::sleep(Duration::from_millis(500));
+    let primeira = nucleos_do_relatorio(&pedir_pela_serial(
+        escrita,
+        leitor,
+        &mut id,
+        "system.info",
+        "{}",
+    )?);
+    // Muitos pedidos seguidos, com o núcleo travado: todos precisam voltar.
+    for _ in 0..20 {
+        pedir_pela_serial(escrita, leitor, &mut id, "agent.ping", "{}")?;
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let segunda = nucleos_do_relatorio(&pedir_pela_serial(
+        escrita,
+        leitor,
+        &mut id,
+        "system.info",
+        "{}",
+    )?);
+
+    let pulso = |amostra: &[(u64, String, u64)], i: u64| {
+        amostra.iter().find(|(n, _, _)| *n == i).map(|(_, _, t)| *t)
+    };
+    for &i in &ligados {
+        let (Some(a), Some(b)) = (pulso(&primeira, i), pulso(&segunda, i)) else {
+            return Err(format!("nucleos: o nucleo {i} sumiu do system.info"));
+        };
+        if i == alvo && b > a + 1 {
+            return Err(format!(
+                "nucleos: o nucleo travado {i} continuou com pulso ({a} -> {b})"
+            ));
+        }
+        if i != alvo && b <= a {
+            return Err(format!(
+                "nucleos: o nucleo {i} perdeu o pulso junto com o travado ({a} -> {b})"
+            ));
+        }
+    }
+
+    let fios = pedir_pela_serial(escrita, leitor, &mut id, "threads.list", "{}")?;
+    if !fios.contains(&format!(
+        r#""name":"travado","state":"running","scheduled":"#
+    )) || !fios.contains(&format!(r#""core":{alvo},"pinned":{alvo}"#))
+    {
+        return Err(format!(
+            "nucleos: o fio do travamento nao aparece rodando no nucleo {alvo}\n  {fios}"
+        ));
+    }
+    let depois_das_trocas = trocas(&pedir_pela_serial(
+        escrita,
+        leitor,
+        &mut id,
+        "threads.stats",
+        "{}",
+    )?)
+    .ok_or("nucleos: threads.stats sem context_switches")?;
+    if depois_das_trocas <= antes_das_trocas {
+        return Err("nucleos: o escalonador parou junto com o nucleo travado".into());
+    }
+
+    println!(
+        "  [nucleos] ok  nucleo {alvo} travado para sempre; o canal respondeu {} pedidos, o pulso dele parou e o dos outros {} andou ({})",
+        24,
+        ligados.len() - 1,
+        arch.nome()
+    );
+    Ok(alvo)
+}
+
+/// Depois da falha, o relatório diz se a parada alcançou o núcleo travado.
+///
+/// # O que muda de uma arquitetura para a outra, e por quê
+///
+/// No x86 a parada vai por NMI, que atravessa a máscara de interrupções: o
+/// núcleo travado **para**, e aparece na máscara dos parados. No ARM ela vai
+/// por uma SGI do GIC v2, que um núcleo mascarado não ouve: ele aparece na
+/// dos que **não responderam** — e o relatório segue sem ele, em vez de
+/// esperá-lo para sempre. As duas respostas são verdadeiras; a sonda exige a
+/// de cada uma.
+fn sob_falha_para_os_nucleos(
+    arch: Arquitetura,
+    travado: u64,
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+) -> Result<(), String> {
+    let mut id = 8950;
+    let info = pedir_pela_serial(escrita, leitor, &mut id, "system.info", "{}")?;
+    let mascara = |chave: &str| -> Option<u64> {
+        let de = info.find(&format!("\"{chave}\":"))? + chave.len() + 3;
+        let fim = de + info[de..].find(|c: char| !c.is_ascii_digit())?;
+        info[de..fim].parse().ok()
+    };
+    let parados = mascara("fatal_stopped_mask").ok_or("falha: sem fatal_stopped_mask")?;
+    let sem_resposta =
+        mascara("fatal_unanswered_mask").ok_or("falha: sem fatal_unanswered_mask")?;
+    let bit = 1u64 << travado;
+    let (esperada, nome) = match arch {
+        Arquitetura::X86_64 => (parados, "parado por NMI"),
+        Arquitetura::Aarch64 => (sem_resposta, "sem resposta (SGI mascarada)"),
+    };
+    if esperada & bit == 0 {
+        return Err(format!(
+            "falha: o nucleo travado {travado} nao esta na mascara esperada ({nome}): parados {parados:#b}, sem resposta {sem_resposta:#b}"
+        ));
+    }
+    println!(
+        "  [falha] ok  o nucleo travado {travado} esta {nome}; parados {parados:#b}, sem resposta {sem_resposta:#b}"
+    );
+    Ok(())
 }
 
 /// A cor que a tela de falha pinta — `Cor::FALHA` do kernel.
