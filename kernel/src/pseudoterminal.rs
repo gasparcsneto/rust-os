@@ -423,6 +423,8 @@ pub fn avisar_se_preciso() {
                 mesmo
             });
             if largou {
+                #[cfg(feature = "modo-teste")]
+                segurar_se_armado();
                 encerrar_e_soltar(i, "o terminal morreu");
             }
             continue;
@@ -470,6 +472,40 @@ pub fn passada_do_coletor() {
 static COLETOR_PAUSADO: AtomicBool = AtomicBool::new(false);
 #[cfg(feature = "modo-teste")]
 static PASSANDO: AtomicBool = AtomicBool::new(false);
+
+/// Só na suíte: segura a passada que acabou de tomar a vaga de um dono
+/// morto, antes de ela fechar o console dele.
+///
+/// É a janela em que um `abrir` em outro núcleo poderia tomar a mesma vaga
+/// e ter o console fechado por baixo — e ela dura o tempo de fechar um
+/// console, que um `abrir` só acerta por acaso: medido, o caso que corre os
+/// dois em núcleos diferentes deixava passar a vaga largada como livre.
+/// Armada ([`PAUSA_ARMADA`]), a primeira passada que larga uma vaga a toma
+/// ([`PAUSA_SEGURANDO`]) e gira até a suíte a devolver a zero.
+#[cfg(feature = "modo-teste")]
+pub static PAUSAR_ANTES_DE_FECHAR: core::sync::atomic::AtomicU8 =
+    core::sync::atomic::AtomicU8::new(0);
+#[cfg(feature = "modo-teste")]
+pub const PAUSA_ARMADA: u8 = 1;
+#[cfg(feature = "modo-teste")]
+pub const PAUSA_SEGURANDO: u8 = 2;
+
+#[cfg(feature = "modo-teste")]
+fn segurar_se_armado() {
+    if PAUSAR_ANTES_DE_FECHAR
+        .compare_exchange(
+            PAUSA_ARMADA,
+            PAUSA_SEGURANDO,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        )
+        .is_ok()
+    {
+        while PAUSAR_ANTES_DE_FECHAR.load(Ordering::SeqCst) == PAUSA_SEGURANDO {
+            core::hint::spin_loop();
+        }
+    }
+}
 
 /// Pausa ou solta a passada do coletor. Pausar espera a passada em curso
 /// terminar: quando volta, nenhuma está no meio.

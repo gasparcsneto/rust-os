@@ -20683,6 +20683,80 @@ fn smp_o_coletor_nao_fecha_o_console_do_dono_seguinte() -> Resultado {
     resultado
 }
 
+/// O `abrir` não toma a vaga que o coletor largou e ainda está fechando.
+///
+/// O caso de cima corre o coletor e o `abrir` em núcleos diferentes, e o
+/// `abrir` quase sempre chega antes — medido, 199 de 200 voltas —, então a
+/// janela que importa, entre o coletor largar a vaga e fechar o console,
+/// quase nunca é acertada: a mutação que larga a vaga como livre em vez de
+/// em troca passava por ele. Aqui a janela é aberta de propósito: a passada
+/// é segurada com a vaga largada e o console ainda aberto, e o `abrir`
+/// acontece nesse instante. Certo é o `abrir` ir para outra vaga e o console
+/// dele continuar aberto depois que a passada termina.
+fn pty_o_abrir_nao_toma_a_vaga_que_o_coletor_fecha() -> Resultado {
+    use crate::pseudoterminal as pty;
+    use pty::{PAUSA_ARMADA, PAUSA_SEGURANDO, PAUSAR_ANTES_DE_FECHAR};
+    const CANAL: &str = "teste-pty-janela";
+    // Um fio que não existe: maior que qualquer um da suíte.
+    const MORTO: u64 = u64::MAX - 7;
+    static FEITA: AtomicBool = AtomicBool::new(false);
+
+    extern "C" fn passada(_argumento: u64) -> ! {
+        pty::avisar_se_preciso();
+        FEITA.store(true, SeqCst);
+        crate::fios::terminar()
+    }
+
+    if pty::donos()
+        .iter()
+        .any(|d| d.is_some_and(crate::fios::vivo))
+    {
+        return Err("um pseudo-terminal ja tinha dono vivo antes do caso");
+    }
+    let eu = crate::fios::id_atual();
+    let canal =
+        crate::eventos::escutar(CANAL.as_bytes(), eu).map_err(|_| "o canal do caso nao abriu")?;
+    pty::pausar_o_coletor_de_teste(true);
+    FEITA.store(false, SeqCst);
+
+    let resultado = (|| {
+        let morta = pty::abrir(MORTO, canal).map_err(|_| "a instancia do dono morto nao abriu")?;
+        PAUSAR_ANTES_DE_FECHAR.store(PAUSA_ARMADA, SeqCst);
+        crate::fios::criar("teste-passada-pty", passada, 0)?;
+        esperar_ate(
+            || PAUSAR_ANTES_DE_FECHAR.load(SeqCst) == PAUSA_SEGURANDO,
+            300,
+        )
+        .map_err(|_| "a passada nao largou a vaga do dono morto")?;
+
+        let nova = pty::abrir(eu, canal);
+        PAUSAR_ANTES_DE_FECHAR.store(0, SeqCst);
+        esperar_ate(|| FEITA.load(SeqCst), 300).map_err(|_| "a passada nao terminou")?;
+
+        let nova = nova.map_err(|_| "o abrir foi recusado com vagas livres")?;
+        let aberto = crate::interpretador::console_aberto(nova.console());
+        let mesma = nova.indice == morta.indice;
+        pty::fechar(nova, eu);
+        if mesma {
+            crate::log_error!("teste", "o abrir tomou a vaga {} em troca", morta.indice);
+        }
+        if !aberto {
+            return Err("a passada atrasada fechou o console do dono novo");
+        }
+        if mesma {
+            return Err("o abrir tomou a vaga que a passada ainda fechava");
+        }
+        Ok(())
+    })();
+
+    PAUSAR_ANTES_DE_FECHAR.store(0, SeqCst);
+    pty::avisar_se_preciso();
+    pty::pausar_o_coletor_de_teste(false);
+    crate::eventos::largar(canal, eu);
+    while pty::proxima_entrada().is_some() {}
+    resultado
+}
+
 /// Um login que termina depois de o console fechar — e reabrir para outro
 /// Terminal, na mesma vaga — não entra no console novo, e a sessão que ele
 /// abriu acaba.
@@ -24272,6 +24346,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "smp: o coletor nao fecha o console do dono seguinte",
         f: smp_o_coletor_nao_fecha_o_console_do_dono_seguinte,
+    },
+    Caso {
+        nome: "pty: o abrir nao toma a vaga que o coletor fecha",
+        f: pty_o_abrir_nao_toma_a_vaga_que_o_coletor_fecha,
     },
     Caso {
         nome: "smp: o login nao entra no console reaberto",
