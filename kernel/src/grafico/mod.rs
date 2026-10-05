@@ -246,8 +246,33 @@ pub fn apresentar_pendente() {
 
 /// As camadas da tela, de baixo para cima, começando pelo console. Nenhuma
 /// sem compositor.
-pub fn camadas(f: impl FnMut(compositor::InfoCamada)) {
-    com_compositor(|c| c.camadas(f));
+///
+/// # `f` roda sem a trava do compositor
+///
+/// As camadas são copiadas sob a trava, e `f` é chamada depois, com ela
+/// solta. Antes, `f` rodava dentro dela — e o `ui.tree`, para cada janela,
+/// pedia a descrição dela às superfícies, tomando a trava delas: a ordem
+/// compositor → superfícies. Uma superfície que se pinta ou se move faz o
+/// contrário, superfícies → compositor. Com um núcleo só as duas nunca se
+/// cruzavam, porque as duas rodam com as interrupções mascaradas; com
+/// vários, o executor no primeiro núcleo pedindo a árvore e o Terminal em
+/// outro redesenhando a linha que o agente acabou de digitar seguravam uma
+/// cada um e esperavam a outra para sempre — com as interrupções do
+/// primeiro núcleo desligadas, e com elas o canal. Visto na fumaça do x86 em
+/// release, na bancada de integração contínua.
+pub fn camadas(mut f: impl FnMut(compositor::InfoCamada)) {
+    let mut copia: alloc::vec::Vec<compositor::InfoCamada> = alloc::vec::Vec::with_capacity(64);
+    com_compositor(|c| c.camadas(|info| copia.push(info)));
+    for info in copia {
+        f(info);
+    }
+}
+
+/// Só para a suíte: a trava do compositor está livre para quem a pedir
+/// agora? Tenta algumas vezes — outro núcleo pode estar compondo.
+#[cfg(feature = "modo-teste")]
+pub fn compositor_alcancavel_de_teste() -> bool {
+    (0..10_000).any(|_| crate::arch::sem_interrupcoes(|| ATIVO.try_lock().is_some()))
 }
 
 /// A camada de cima em `(x, y)`, sem o cursor nem as invisíveis — ver

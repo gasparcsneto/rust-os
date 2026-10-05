@@ -734,6 +734,16 @@ por compilar. O que esta fase encontrou, e corrigiu na camada responsável:
   travado com as interrupções mascaradas continua respondendo — a NMI
   atravessa a máscara —, então isso não custa o requisito do núcleo
   travado.
+- **O `ui.tree` e uma janela se redesenhando travavam um ao outro.** O
+  percurso das camadas chamava quem pediu com a trava do compositor na
+  mão, e o `ui.tree` pedia ali a descrição de cada janela às superfícies —
+  compositor, depois superfícies. Uma superfície que se pinta faz o
+  contrário. Com um núcleo, as duas ordens nunca se cruzavam; com vários, o
+  executor e o Terminal redesenhando a linha que o agente acabara de
+  digitar seguravam uma cada um e esperavam a outra para sempre, com as
+  interrupções do primeiro núcleo mascaradas — e o canal morria. Visto na
+  fumaça do x86 em release, na integração contínua. O percurso agora copia
+  as camadas e chama quem pediu com a trava solta.
 - **`esperar` devolvia o zero de "ainda não" como resposta.** Sem filho
   para colher, a chamada põe o pai em espera e o backend a reexecuta quando
   ele acorda — e o backend decidia isso perguntando se o fio **ainda**
@@ -799,6 +809,10 @@ guarda depois de trocar de raiz.
   nova, e a que estava em curso já tinha decidido"). Com vários núcleos,
   "em curso" inclui uma chamada de sistema de outro núcleo; nenhuma das que
   decidem bloqueia, então a janela é a de uma chamada.
+- Não há conferência automática da ordem das travas (um *lockdep*). Os
+  ciclos achados foram corrigidos onde moram, e os outros pontos em que um
+  callback roda com uma trava na mão foram relidos — mas uma ordem nova,
+  escrita depois, só aparece quando dois núcleos a cruzarem.
 - Oito núcleos no máximo, e no x86 só os de identificador até 255.
 - Um núcleo que não responde à partida é dado como falho e fica de fora, e
   a vaga do fio ocioso que lhe tinha sido preparada fica presa até o

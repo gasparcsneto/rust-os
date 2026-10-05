@@ -5192,6 +5192,15 @@ fn terminal_o_interpretador_do_outro_lado() -> Resultado {
 /// que deixa o servidor saindo faz o seguinte ver um servidor no ar.
 fn esperar_sem_servidor_de_janelas() -> Resultado {
     use protocolo::usuario::evento::{CANAL_DAS_JANELAS, CANAL_DO_TERMINAL};
+    // O fio do último servidor que a suíte lançou, primeiro: a linha
+    // "encerrado" do log sai antes de ele se dar por terminado, e com vários
+    // núcleos a suíte chegava aqui com ele ainda vivo — o canal dele, certo,
+    // continuava dele.
+    let ultimo = ULTIMO_SERVIDOR.load(SeqCst);
+    if ultimo != 0 {
+        esperar_ate(|| !crate::fios::vivo(ultimo), 600)
+            .map_err(|_| "o servidor de janelas anterior nao saiu")?;
+    }
     esperar_ate(
         || {
             crate::eventos::estado(CANAL_DAS_JANELAS).is_none()
@@ -6145,6 +6154,7 @@ fn sobre_o_duke() -> Resultado {
     };
 
     // Sem servidor, o botão diz por que não fez nada.
+    esperar_sem_servidor_de_janelas()?;
     if crate::ui::agir(ID_DO_BOTAO_SOBRE, Acao::Pressionar, None, Origem::Agente(0)).is_ok() {
         return Err("o botao Sobre foi aceito sem servidor de janelas no ar");
     }
@@ -20770,6 +20780,35 @@ fn smp_o_relogio_de_parede_lido_em_todos_os_nucleos() -> Resultado {
     Ok(())
 }
 
+/// O percurso das camadas chama quem pediu com a trava do compositor
+/// **solta**.
+///
+/// # O que estava em jogo
+///
+/// O `ui.tree` percorria as camadas e, para cada janela, pedia a descrição
+/// dela às superfícies — com a trava do compositor na mão. Uma superfície
+/// que se pinta ou se move toma as duas na ordem contrária. Com vários
+/// núcleos, o executor pedindo a árvore e um processo redesenhando a janela
+/// ficavam presos um ao outro, com as interrupções do primeiro núcleo
+/// mascaradas — e o canal do agente morria. Visto na fumaça do x86 em
+/// release. Aqui, de dentro do percurso, a trava tem de estar alcançável.
+fn grafico_o_percurso_das_camadas_solta_o_compositor() -> Resultado {
+    let mut chamadas = 0;
+    let mut presa = false;
+    crate::grafico::camadas(|_| {
+        chamadas += 1;
+        presa |= !crate::grafico::compositor_alcancavel_de_teste();
+    });
+    if chamadas == 0 {
+        crate::log_info!("teste", "sem compositor: nada a percorrer");
+        return Ok(());
+    }
+    if presa {
+        return Err("o percurso das camadas chamou quem pediu com o compositor preso");
+    }
+    Ok(())
+}
+
 /// A autoridade de um comando é de quem o executa, e de mais ninguém.
 ///
 /// # O que estava em jogo
@@ -24133,6 +24172,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "smp: o relogio de parede lido em todos os nucleos",
         f: smp_o_relogio_de_parede_lido_em_todos_os_nucleos,
+    },
+    Caso {
+        nome: "grafico: o percurso das camadas solta o compositor",
+        f: grafico_o_percurso_das_camadas_solta_o_compositor,
     },
     Caso {
         nome: "smp: a autoridade do comando nao vaza para outro fio",
