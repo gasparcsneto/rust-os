@@ -1,6 +1,6 @@
 //! O manifesto do programa: quem ele diz ser, e o que pretende fazer.
 //!
-//! Cada programa declara o seu com [`manifesto!`](crate::manifesto), uma
+//! Cada programa declara o seu com [`manifesto!`](macro@crate::manifesto), uma
 //! vez, no arquivo dele:
 //!
 //! ```ignore
@@ -20,7 +20,7 @@
 pub struct Nota<const N: usize>(pub [u8; N]);
 
 /// Declara o manifesto do programa: o nome e as permissões que ele
-/// pretende exercer. Ver [`crate::manifesto`].
+/// pretende exercer. Ver [`crate::manifesto`](mod@crate::manifesto).
 #[macro_export]
 macro_rules! manifesto {
     ($nome:literal $(, $permissao:literal)* $(,)?) => {

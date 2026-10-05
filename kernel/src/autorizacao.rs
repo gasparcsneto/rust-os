@@ -839,7 +839,7 @@ fn quem_da_autoridade(sessao: u8, chave: Option<[u8; 32]>) -> Quem {
 }
 
 /// Gasta uma ficha do balde da sessão. `Err` se não havia. Na volta de uma
-/// sequência recusada, grava quantas foram — ver [`Taxas::suprimidos`].
+/// sequência recusada, grava quantas foram — ver [`BaldeDe::suprimidos`].
 fn passar_pela_taxa(quem: &Quem, metodo: &str, parametros: &[u8]) -> Result<(), Codigo> {
     let Some(papel) = quem.papel.as_deref() else {
         // Sem papel não há taxa a aplicar: a decisão vai recusar.
