@@ -16,6 +16,8 @@
 #![no_std]
 #![no_main]
 
+programas::manifesto!("ponteiros", "fs.read");
+
 use programas::escreverln;
 use programas::sistema::{self, erro};
 

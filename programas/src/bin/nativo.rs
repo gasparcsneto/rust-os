@@ -20,6 +20,8 @@
 #![no_std]
 #![no_main]
 
+programas::manifesto!("nativo", "system.read", "message.send", "ui.act");
+
 use programas::escreverln;
 use programas::nativo::{self, Recusa};
 use programas::sistema::{self, erro};

@@ -23674,7 +23674,7 @@ fn decisao_do_envelope(envelope: &str) -> alloc::string::String {
 /// conta — um papel de processo, um atalho para o sistema — divergiria
 /// aqui da pessoa, pedido por pedido.
 fn nativo_o_processo_decide_como_quem_o_lancou() -> Resultado {
-    use crate::autorizacao::{Autoridade, Chamador};
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
     use crate::pessoas::Console;
     const FIO: u64 = 7_000_001;
     crate::pessoas::esquecer_registradas();
@@ -23684,6 +23684,7 @@ fn nativo_o_processo_decide_como_quem_o_lancou() -> Resultado {
         let pelo_processo = Chamador::Processo {
             fio: FIO,
             autoridade: Autoridade::Pessoa { sessao },
+            programa: Programa::Kernel,
         };
         let pedidos = [
             ("system.info", "{}"),
@@ -23713,7 +23714,7 @@ fn nativo_o_processo_decide_como_quem_o_lancou() -> Resultado {
         let e = ultimo_que(|e| e.metodo == "policy.show").ok_or("a recusa nao foi gravada")?;
         if !e
             .detalhe
-            .starts_with(&alloc::format!("pelo processo {FIO}: "))
+            .starts_with(&alloc::format!("pelo processo {FIO} (kernel): "))
             || e.codigo != politica::Codigo::DenyPermission
         {
             crate::log_error!("teste", "{:?}", e);
@@ -23725,6 +23726,7 @@ fn nativo_o_processo_decide_como_quem_o_lancou() -> Resultado {
         let do_sistema = Chamador::Processo {
             fio: FIO,
             autoridade: Autoridade::Sistema,
+            programa: Programa::Kernel,
         };
         for (metodo, params) in [
             ("debug.trigger", r#"{"kind":"fatal"}"#),
@@ -23742,7 +23744,7 @@ fn nativo_o_processo_decide_como_quem_o_lancou() -> Resultado {
             let e = ultimo_que(|e| e.metodo == metodo).ok_or("a recusa nao foi gravada")?;
             if !e
                 .detalhe
-                .starts_with(&alloc::format!("pelo processo {FIO}: so um canal"))
+                .starts_with(&alloc::format!("pelo processo {FIO} (kernel): so um canal"))
             {
                 crate::log_error!("teste", "{:?}", e);
                 return Err("a recusa de canal nao foi gravada como do processo");
@@ -23778,7 +23780,7 @@ fn nativo_o_processo_decide_como_quem_o_lancou() -> Resultado {
 /// sessão de um agente que já saiu, dois principais na mesma vaga deixaram
 /// de ser raros: alternar entre eles renovava a rajada de cada um.
 fn nativo_a_taxa_e_de_quem_pede() -> Resultado {
-    use crate::autorizacao::{Autoridade, Chamador};
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
     let texto = politica::PADRAO.replace("taxa observador 20 40", "taxa observador 1 3");
     let apertada = politica::Politica::ler(&texto).map_err(|_| "a politica do caso nao vale")?;
     let resultado = com_agentes_de_teste(|| {
@@ -23794,6 +23796,7 @@ fn nativo_a_taxa_e_de_quem_pede() -> Resultado {
                 sessao: 1,
                 chave: Some(sigilo::publica_de(&chave_de_teste(p))),
             },
+            programa: Programa::Kernel,
         };
         let ping = pedido_rpc("agent.ping", "{}");
         // A rajada é de três: um pelo canal, dois pelo processo.
@@ -23856,7 +23859,7 @@ fn rodar_programa(
     nome: &str,
     autoridade: Option<crate::autorizacao::Autoridade>,
     codigo: i64,
-) -> Resultado {
+) -> Result<u64, &'static str> {
     let dir = crate::usuario::DIRETORIO_DOS_COMPILADOS;
     let programa = alloc::format!("{dir}/{nome}");
     let procurada = alloc::format!("processo encerrou com codigo {codigo}");
@@ -23868,11 +23871,12 @@ fn rodar_programa(
         });
         achou
     };
-    match autoridade {
+    let id = match autoridade {
         Some(a) => crate::usuario::lancar_como(Some(&programa), a)?,
         None => crate::usuario::lancar(Some(&programa))?,
     };
-    esperar_ate(visto, 600)
+    esperar_ate(visto, 600)?;
+    Ok(id)
 }
 
 /// Um programa nativo, de verdade, pela chamada de sistema: o programa
@@ -23905,7 +23909,7 @@ fn nativo_o_programa_pede_pelo_mesmo_gate() -> Resultado {
             chave: Some(chave),
         };
         let (pedidos_antes, _) = crate::nativo::estatisticas();
-        rodar_programa("nativo", Some(autoridade), 74)
+        let fio = rodar_programa("nativo", Some(autoridade), 74)
             .map_err(|_| "o programa nativo nao conferiu a interface")?;
         // Treze pedidos chegaram ao executor — o grande demais não chega.
         if crate::nativo::estatisticas().0 < pedidos_antes + 10 {
@@ -23940,12 +23944,292 @@ fn nativo_o_programa_pede_pelo_mesmo_gate() -> Resultado {
             crate::log_error!("teste", "{}", r);
             return Err("o programa gastou a janela de nonces do agente");
         }
+        // A janela de nonces do processo some quando ele é recolhido: o id
+        // não se repete, e ela não serviria a mais ninguém.
+        esperar_ate(
+            || !crate::mensagens::tem_janela_de_teste(politica::mensagens::Canal::Processo(fio)),
+            300,
+        )
+        .map_err(|_| "a janela de nonces do processo ficou depois dele")?;
         // Lançado pelo sistema: a prova e debug.trigger recusados do mesmo
         // jeito, e o envio de mensagem recusado — o sistema não tem caixa.
         rodar_programa("nativo", None, 12)
+            .map(drop)
             .map_err(|_| "lancado pelo sistema, o programa nao ouviu o que o sistema ouve")?;
         Ok(())
     })
+}
+
+// ---------------------------------------------------------------------------
+// manifesto: o programa exerce a interseção do papel com o que declarou
+// ---------------------------------------------------------------------------
+
+/// Um manifesto que declara `permite`, com o nome `nome`.
+fn manifesto_de_teste(nome: &str, permite: &str) -> politica::manifesto::Manifesto {
+    let texto = alloc::format!("duke-manifesto 1\nnome {nome}\npermite {permite}\n");
+    politica::manifesto::ler(texto.as_bytes()).expect("o manifesto do caso vale")
+}
+
+/// A permissão efetiva é a interseção: o manifesto tira o que não declara
+/// até do sistema, e não dá a um operador o que o papel dele não tem. Sem
+/// manifesto, e antes de haver imagem, nada.
+///
+/// # O que este caso protege
+///
+/// As duas metades da regra, cada uma contra o seu erro: um gate que só
+/// olhasse o manifesto daria a um programa o que ele declarasse; um que só
+/// olhasse o papel faria do manifesto enfeite.
+fn manifesto_a_permissao_e_a_intersecao() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
+    use crate::pessoas::Console;
+    const FIO: u64 = 7_000_003;
+    let imagem = |permite: &str| Programa::Imagem {
+        manifesto: Some(manifesto_de_teste("caso", permite)),
+        resumo: [0xab; 32],
+    };
+    let decide = |autoridade, programa, metodo: &str, params: &str| {
+        let chamador = Chamador::Processo {
+            fio: FIO,
+            autoridade,
+            programa,
+        };
+        decisao_do_envelope(&crate::nativo::responder_de_teste(
+            chamador,
+            &pedido_rpc(metodo, params),
+        ))
+    };
+    crate::pessoas::esquecer_registradas();
+    let resultado = (|| -> Resultado {
+        let sistema = Autoridade::Sistema;
+        // Do sistema, com só `system.read` declarado.
+        let so_leitura = imagem("system.read");
+        if decide(sistema, so_leitura, "system.info", "{}") != "ALLOW" {
+            return Err("o declarado foi recusado");
+        }
+        if decide(sistema, so_leitura, "fs.list", r#"{"path":"/bin"}"#) != "DENY_PERMISSION" {
+            return Err("o sistema exerceu pelo programa o que ele nao declarou");
+        }
+        let e = ultimo_que(|e| e.metodo == "fs.list").ok_or("a recusa nao foi gravada")?;
+        if e.detalhe
+            != alloc::format!(
+                "pelo processo {FIO} (caso abababab): o manifesto nao declara fs.read"
+            )
+        {
+            crate::log_error!("teste", "{:?}", e);
+            return Err("a auditoria nao disse o programa e o que ele nao declarou");
+        }
+        // Sem manifesto, e sem imagem: nada, nem do sistema.
+        let sem_manifesto = Programa::Imagem {
+            manifesto: None,
+            resumo: [0xcd; 32],
+        };
+        for programa in [sem_manifesto, Programa::SemImagem] {
+            if decide(sistema, programa, "system.info", "{}") != "DENY_PERMISSION" {
+                return Err("um processo sem manifesto exerceu uma permissao");
+            }
+        }
+        // De uma pessoa operadora: declarar não dá o que o papel não tem.
+        let sessao = crate::pessoas::sessao_de_teste(Console::Fisico, "cris", "operador");
+        let pessoa = Autoridade::Pessoa { sessao };
+        let tudo = imagem("system.read policy.read fs.read");
+        if decide(pessoa, tudo, "policy.show", "{}") != "DENY_PERMISSION" {
+            return Err("o manifesto deu ao processo o que o papel nao tem");
+        }
+        let e = ultimo_que(|e| e.metodo == "policy.show").ok_or("a recusa nao foi gravada")?;
+        if !e.detalhe.ends_with("o papel nao tem a permissao") {
+            crate::log_error!("teste", "{:?}", e);
+            return Err("a recusa pelo papel nao veio do papel");
+        }
+        if decide(pessoa, tudo, "fs.list", r#"{"path":"/bin"}"#) != "ALLOW" {
+            return Err("declarado e no papel, o pedido foi recusado");
+        }
+
+        // E pelas chamadas de sistema de um fio: o que o fio executa é o
+        // que limita. Um fio do kernel não tem imagem a atenuar.
+        let (_, programa) = crate::fios::programa_atual();
+        if programa != Programa::Kernel {
+            return Err("o fio da suite nao e do kernel");
+        }
+        Ok(())
+    })();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// O executável diz quem é: o manifesto que o pacote `programas` põe na
+/// nota é o que o kernel acha e lê; o programa sem `manifesto!` não tem
+/// nota; e um manifesto adulterado recusa a imagem, em vez de valer como
+/// vazio.
+fn manifesto_o_executavel_diz_quem_e() -> Resultado {
+    use politica::Permissao;
+    let dir = crate::usuario::DIRETORIO_DOS_COMPILADOS;
+    let ler = |nome: &str| {
+        crate::vfs::ler_tudo(&alloc::format!("{dir}/{nome}"))
+            .map_err(|_| "o programa nao esta no disco")
+    };
+    let nativo = ler("nativo")?;
+    let elf = crate::usuario::elf::validar(&nativo)?;
+    let texto = elf
+        .manifesto()
+        .ok_or("o programa nativo nao tem manifesto")?;
+    let m = politica::manifesto::ler(texto).map_err(|e| e.motivo())?;
+    let declaradas: alloc::vec::Vec<Permissao> = m.permite.iter().collect();
+    if m.nome() != "nativo"
+        || declaradas
+            != [
+                Permissao::SystemRead,
+                Permissao::UiAct,
+                Permissao::MessageSend,
+            ]
+    {
+        crate::log_error!("teste", "{} {:?}", m.nome(), declaradas);
+        return Err("o manifesto lido nao e o que o programa declarou");
+    }
+    let anonimo = ler("anonimo")?;
+    if crate::usuario::elf::validar(&anonimo)?
+        .manifesto()
+        .is_some()
+    {
+        return Err("um programa sem manifesto! tem manifesto");
+    }
+
+    // Adulterado: o texto não se lê, e a imagem é recusada antes de trocar.
+    let mut adulterado = nativo.clone();
+    let i = adulterado
+        .windows(7)
+        .position(|w| w == b"permite")
+        .ok_or("o texto do manifesto nao esta na imagem")?;
+    adulterado[i..i + 7].copy_from_slice(b"concede");
+    let elf = crate::usuario::elf::validar(&adulterado)?;
+    if politica::manifesto::ler(elf.manifesto().unwrap_or(&[])).is_ok() {
+        return Err("um manifesto adulterado foi lido");
+    }
+    // E a nota com o tamanho errado recusa o ELF inteiro.
+    let j = adulterado
+        .windows(5)
+        .position(|w| w == b"Duke\0")
+        .ok_or("a nota nao esta na imagem")?;
+    adulterado[j - 8..j - 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    if crate::usuario::elf::validar(&adulterado).is_ok() {
+        return Err("uma nota que passa do fim foi aceita");
+    }
+    Ok(())
+}
+
+/// Os programas de verdade: `contido`, lançado pelo sistema, exerce só o
+/// que declarou — e o filho dele também —; `anonimo`, sem manifesto, nada.
+/// A auditoria diz qual programa foi recusado, e por quê.
+fn manifesto_o_programa_e_contido() -> Resultado {
+    rodar_programa("contido", None, 75)
+        .map(drop)
+        .map_err(|_| "o programa contido nao foi contido")?;
+    let e = ultimo_que(|e| e.metodo == "fs.open" && e.detalhe.contains("(contido "))
+        .ok_or("a recusa do programa contido nao foi gravada")?;
+    if e.codigo != politica::Codigo::DenyPermission
+        || !e.detalhe.starts_with("pelo processo ")
+        || !e.detalhe.ends_with("o manifesto nao declara fs.read")
+    {
+        crate::log_error!("teste", "{:?}", e);
+        return Err("a auditoria nao disse o programa e o que ele nao declarou");
+    }
+    let e = ultimo_que(|e| e.metodo == "process.exec" && e.detalhe.contains("(contido "))
+        .ok_or("o executar do programa contido nao foi gravado")?;
+    if e.codigo != politica::Codigo::DenyPermission {
+        return Err("o programa contido executou sem declarar");
+    }
+    rodar_programa("anonimo", None, 76)
+        .map(drop)
+        .map_err(|_| "o programa sem manifesto exerceu algo")?;
+    Ok(())
+}
+
+/// O que [`programa_do_fio`] viu, e o desfecho da carga em
+/// [`carregar_adulterado`]: 0 ainda nada, 1 SemImagem, 2 Kernel, 3 outro;
+/// 10 recusou, 11 carregou.
+static VISTO_PELO_FIO: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+extern "C" fn programa_do_fio(_: u64) -> ! {
+    use crate::autorizacao::Programa;
+    use core::sync::atomic::Ordering;
+    let visto = match crate::fios::programa_atual().1 {
+        Programa::SemImagem => 1,
+        Programa::Kernel => 2,
+        Programa::Imagem { .. } => 3,
+    };
+    VISTO_PELO_FIO.store(visto, Ordering::SeqCst);
+    crate::fios::terminar()
+}
+
+extern "C" fn carregar_adulterado(argumento: u64) -> ! {
+    use core::sync::atomic::Ordering;
+    // SAFETY: o ponteiro veio do `Box::into_raw` do caso, este fio é o único
+    // que o recebeu, e o reconstrói uma vez só.
+    let imagem = unsafe { alloc::boxed::Box::from_raw(argumento as *mut alloc::vec::Vec<u8>) };
+    let visto = match crate::usuario::programa::carregar(&imagem) {
+        Err(crate::usuario::programa::Falha::ProcessoIntacto(_)) => 10,
+        // Carregou: o fio larga o espaço novo ao terminar, sem entrar nele.
+        _ => 11,
+    };
+    drop(imagem);
+    VISTO_PELO_FIO.store(visto, Ordering::SeqCst);
+    crate::fios::terminar()
+}
+
+/// Um processo nasce sem imagem — e sem permissão nenhuma — até carregar a
+/// dele; um fio do kernel nasce do kernel. O intervalo entre nascer e
+/// carregar é curto, mas é do processo: se ele nascesse como fio do kernel,
+/// o que rodasse ali não teria manifesto a limitá-lo.
+fn manifesto_o_processo_nasce_sem_imagem() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use core::sync::atomic::Ordering;
+    let sondar = |processo: bool| -> Result<u8, &'static str> {
+        VISTO_PELO_FIO.store(0, Ordering::SeqCst);
+        if processo {
+            let cota = crate::autorizacao::permitir_processo(Autoridade::Sistema, "process.run")
+                .map_err(|_| "a cota recusou o processo do caso")?;
+            crate::fios::criar_processo("sonda", programa_do_fio, 0, Autoridade::Sistema, cota)?;
+        } else {
+            crate::fios::criar("sonda", programa_do_fio, 0)?;
+        }
+        esperar_ate(|| VISTO_PELO_FIO.load(Ordering::SeqCst) != 0, 200)
+            .map_err(|_| "a sonda nao respondeu")?;
+        Ok(VISTO_PELO_FIO.load(Ordering::SeqCst))
+    };
+    if sondar(true)? != 1 {
+        return Err("o processo nasceu com um programa antes de carregar a imagem");
+    }
+    if sondar(false)? != 2 {
+        return Err("um fio do kernel nasceu como processo");
+    }
+    Ok(())
+}
+
+/// Um manifesto adulterado recusa a **carga**, e não só a leitura: o
+/// carregador não troca de imagem — o processo que pediu continua o que
+/// era — em vez de rodar o programa como se ele não tivesse declarado nada.
+fn manifesto_adulterado_recusa_a_carga() -> Resultado {
+    use core::sync::atomic::Ordering;
+    let dir = crate::usuario::DIRETORIO_DOS_COMPILADOS;
+    let mut imagem = crate::vfs::ler_tudo(&alloc::format!("{dir}/nativo"))
+        .map_err(|_| "o programa nao esta no disco")?;
+    let i = imagem
+        .windows(7)
+        .position(|w| w == b"permite")
+        .ok_or("o texto do manifesto nao esta na imagem")?;
+    imagem[i..i + 7].copy_from_slice(b"concede");
+    VISTO_PELO_FIO.store(0, Ordering::SeqCst);
+    let argumento = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(imagem)) as u64;
+    if let Err(e) = crate::fios::criar("carga", carregar_adulterado, argumento) {
+        // SAFETY: o fio não nasceu; a caixa é nossa de novo.
+        drop(unsafe { alloc::boxed::Box::from_raw(argumento as *mut alloc::vec::Vec<u8>) });
+        return Err(e);
+    }
+    esperar_ate(|| VISTO_PELO_FIO.load(Ordering::SeqCst) != 0, 300)
+        .map_err(|_| "a carga nao respondeu")?;
+    if VISTO_PELO_FIO.load(Ordering::SeqCst) != 10 {
+        return Err("a imagem com o manifesto adulterado foi carregada");
+    }
+    Ok(())
 }
 
 fn esperar_ate(mut condicao: impl FnMut() -> bool, teto_em_ticks: u64) -> Resultado {
@@ -24947,6 +25231,26 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "nativo: o programa pede pelo mesmo gate",
         f: nativo_o_programa_pede_pelo_mesmo_gate,
+    },
+    Caso {
+        nome: "manifesto: a permissao e a intersecao",
+        f: manifesto_a_permissao_e_a_intersecao,
+    },
+    Caso {
+        nome: "manifesto: o executavel diz quem e",
+        f: manifesto_o_executavel_diz_quem_e,
+    },
+    Caso {
+        nome: "manifesto: o processo nasce sem imagem",
+        f: manifesto_o_processo_nasce_sem_imagem,
+    },
+    Caso {
+        nome: "manifesto: adulterado recusa a carga",
+        f: manifesto_adulterado_recusa_a_carga,
+    },
+    Caso {
+        nome: "manifesto: o programa e contido",
+        f: manifesto_o_programa_e_contido,
     },
     Caso {
         nome: "smp: nucleo travado nao para os outros",

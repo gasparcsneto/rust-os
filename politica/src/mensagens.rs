@@ -740,6 +740,12 @@ impl Caixas {
         self.tirar_se(Estado::Expirada, |m| m.expira_ms <= agora_ms)
     }
 
+    /// Se o canal tem uma janela de nonces — se já mandou e ainda não foi
+    /// esquecido.
+    pub fn tem_janela(&self, canal: Canal) -> bool {
+        self.janelas.contains_key(&canal)
+    }
+
     /// A sessão do canal acabou: a janela de nonces dela também. A próxima
     /// sessão nesse canal começa a contar do zero.
     pub fn esquecer_canal(&mut self, canal: Canal) {

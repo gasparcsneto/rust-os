@@ -21,6 +21,8 @@
 #![no_std]
 #![no_main]
 
+programas::manifesto!("pseudo", "terminal.attach");
+
 use programas::escreverln;
 use programas::sistema::{self, erro};
 use protocolo::usuario::evento::{Evento, tipo};

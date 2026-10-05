@@ -21,6 +21,8 @@
 #![no_std]
 #![no_main]
 
+programas::manifesto!("cobrir");
+
 use programas::escreverln;
 use programas::sistema;
 use programas::superficie::Superficie;

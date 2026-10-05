@@ -45,6 +45,8 @@
 #![no_std]
 #![no_main]
 
+programas::manifesto!("terminal", "terminal.attach");
+
 extern crate alloc;
 
 use alloc::string::String;

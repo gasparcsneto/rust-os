@@ -42,7 +42,7 @@ use politica::sigiloso::Texto;
 use crate::agent::json::JsonWriter;
 use crate::agent::protocol::{self, Requisicao, RpcError};
 use crate::agent::registry;
-use crate::autorizacao::{self, Autoridade, Chamador};
+use crate::autorizacao::{self, Chamador};
 use crate::tarefas::fila::Fila;
 use crate::trava::Mutex;
 use protocolo::usuario::erro;
@@ -139,10 +139,15 @@ pub fn atender_pendentes() -> usize {
     let mut atendidos = 0;
     while let Some(id) = FILA.desenfileirar() {
         // O fio morreu com o pedido na fila, ou já foi atendido: nada a fazer.
-        let Some((pedido, autoridade)) = crate::fios::tomar_pedido(id) else {
+        let Some((pedido, autoridade, programa)) = crate::fios::tomar_pedido(id) else {
             continue;
         };
-        let resposta = atender(id, autoridade, pedido.como_bytes());
+        let chamador = Chamador::Processo {
+            fio: id,
+            autoridade,
+            programa,
+        };
+        let resposta = responder_como(chamador, pedido.como_bytes());
         drop(pedido);
         // O fio morreu enquanto o comando executava: a resposta se apaga, e
         // a janela de nonces que o comando possa ter aberto também — o
@@ -157,12 +162,8 @@ pub fn atender_pendentes() -> usize {
     atendidos
 }
 
-/// Decodifica um pedido, decide e executa o comando como o processo `fio`,
-/// e monta a resposta — os mesmos passos do canal, na mesma ordem.
-fn atender(fio: u64, autoridade: Autoridade, linha: &[u8]) -> Texto {
-    responder_como(Chamador::Processo { fio, autoridade }, linha)
-}
-
+/// Decodifica um pedido, decide e executa o comando como `chamador`, e
+/// monta a resposta — os mesmos passos do canal, na mesma ordem.
 fn responder_como(chamador: Chamador, linha: &[u8]) -> Texto {
     let linha = crate::agent::limpar_quadro(linha);
     let mut texto = Texto::novo();

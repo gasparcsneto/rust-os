@@ -12,6 +12,8 @@
 #![no_std]
 #![no_main]
 
+programas::manifesto!("eco");
+
 use programas::escreverln;
 use programas::sistema::{self, erro};
 use protocolo::usuario::evento::{Evento, tipo};

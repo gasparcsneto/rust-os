@@ -48,11 +48,16 @@ extern crate alloc;
 
 pub mod desenho;
 pub mod janela;
+pub mod manifesto;
 pub mod monte;
 pub mod nativo;
 pub mod saida;
 pub mod sistema;
 pub mod superficie;
+
+// Para a macro `manifesto!`, que monta a nota com o envelope do protocolo.
+#[doc(hidden)]
+pub use protocolo as __protocolo;
 
 // A função que cada programa define. O nome é o contrato — ver o cabeçalho.
 unsafe extern "Rust" {

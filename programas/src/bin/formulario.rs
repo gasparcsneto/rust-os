@@ -17,6 +17,8 @@
 #![no_std]
 #![no_main]
 
+programas::manifesto!("formulario");
+
 use programas::escreverln;
 use programas::janela::{Gesto, Janela};
 use programas::sistema::{self, erro};

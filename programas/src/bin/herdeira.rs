@@ -18,6 +18,8 @@
 #![no_std]
 #![no_main]
 
+programas::manifesto!("herdeira");
+
 use programas::monte::FIM_DO_MONTE;
 use programas::sistema;
 use programas::superficie::Superficie;

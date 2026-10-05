@@ -10,6 +10,8 @@
 #![no_std]
 #![no_main]
 
+programas::manifesto!("ola");
+
 extern crate alloc;
 
 use alloc::string::String;

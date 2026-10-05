@@ -120,6 +120,68 @@ static TAXAS: Mutex<Taxas> = Mutex::new(Taxas {
     apertos_suprimidos: [0; crate::sessoes::PORTAS],
 });
 
+/// O que roda num fio, para o gate: código do kernel, ou a imagem de um
+/// programa com o manifesto dela — ver `politica::manifesto`.
+///
+/// A autoridade diz **por quem** um processo age; o programa diz **o que**
+/// ele pode exercer dessa autoridade. A permissão efetiva de um processo é a
+/// interseção do papel de quem o lançou com o manifesto: as duas perguntas
+/// são feitas no mesmo ponto de decisão, e uma recusa de qualquer uma é
+/// recusa.
+///
+/// `Copy`, como a autoridade, e pelo mesmo motivo: vai dentro de cada fio.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Programa {
+    /// Um fio do kernel: não há imagem a atenuar, e quem decide é só a
+    /// autoridade.
+    Kernel,
+    /// Um processo que ainda não carregou a imagem — o fio que
+    /// `usuario::lancar` cria, antes de ler o executável. Não exerce nada.
+    SemImagem,
+    /// A imagem que o processo executa: o manifesto dela, se tem um — sem
+    /// manifesto, não exerce nada —, e o resumo BLAKE2s do executável.
+    Imagem {
+        manifesto: Option<politica::manifesto::Manifesto>,
+        resumo: [u8; 32],
+    },
+}
+
+/// Como a auditoria diz que foi um processo: o fio e o programa.
+fn pelo_processo(fio: u64, programa: &Programa) -> String {
+    alloc::format!("pelo processo {fio} ({})", programa.descricao())
+}
+
+impl Programa {
+    /// Se o programa declara `p`. Para um fio do kernel, sempre: o que o
+    /// limita é a autoridade.
+    pub fn permite(&self, p: Permissao) -> bool {
+        match self {
+            Programa::Kernel => true,
+            Programa::SemImagem => false,
+            Programa::Imagem { manifesto, .. } => manifesto.is_some_and(|m| m.permite.contem(p)),
+        }
+    }
+
+    /// Como a auditoria o nomeia: o nome declarado e o começo do resumo da
+    /// imagem — o nome é o que o programa diz ser, e o resumo é o que ele é.
+    pub fn descricao(&self) -> String {
+        match self {
+            Programa::Kernel => String::from("kernel"),
+            Programa::SemImagem => String::from("sem imagem"),
+            Programa::Imagem { manifesto, resumo } => {
+                let nome = manifesto.as_ref().map_or("sem manifesto", |m| m.nome());
+                alloc::format!(
+                    "{nome} {:02x}{:02x}{:02x}{:02x}",
+                    resumo[0],
+                    resumo[1],
+                    resumo[2],
+                    resumo[3]
+                )
+            }
+        }
+    }
+}
+
 /// Com que autoridade algo roda.
 ///
 /// `Copy`, sem nada no heap: ela vai dentro de cada fio, e é copiada com a
@@ -331,10 +393,11 @@ struct Quem {
     agente: String,
     chave: Option<[u8; 32]>,
     papel: Option<String>,
-    /// O fio do processo que pediu, quando foi um processo pela interface
-    /// nativa: quem responde por ele é o titular acima — quem o lançou —, e
-    /// a auditoria diz também que foi um programa a pedir.
-    processo: Option<u64>,
+    /// O processo que pediu, quando foi um processo — o fio e o programa
+    /// que ele executa, como a auditoria os escreve (ver [`pelo_processo`]):
+    /// quem responde por ele é o titular acima — quem o lançou —, e a
+    /// auditoria diz também qual programa pediu.
+    processo: Option<String>,
 }
 
 /// Quem está numa decisão, como a barra o mostra — ver [`crate::atividade`].
@@ -559,12 +622,12 @@ fn auditar(
         recurso: recurso.to_string(),
         codigo,
         parametros: resumo_dos_parametros(parametros),
-        detalhe: match quem.processo {
+        detalhe: match &quem.processo {
             // O programa que pediu vai no detalhe: o titular é quem responde
             // por ele, e o formato do registro — que o journal grava — não
             // muda por isso.
-            Some(fio) if detalhe.is_empty() => alloc::format!("pelo processo {fio}"),
-            Some(fio) => alloc::format!("pelo processo {fio}: {detalhe}"),
+            Some(pelo) if detalhe.is_empty() => pelo.clone(),
+            Some(pelo) => alloc::format!("{pelo}: {detalhe}"),
             None => detalhe.to_string(),
         },
     };
@@ -895,9 +958,14 @@ pub enum Chamador {
     Sessao(u8),
     /// Uma pessoa, pela sessão que ela abriu num console.
     Pessoa(crate::pessoas::IdSessao),
-    /// Um processo, pela interface nativa: o fio que pediu, e a autoridade
-    /// dele — a de quem o lançou —, lida do fio quando o pedido foi feito.
-    Processo { fio: u64, autoridade: Autoridade },
+    /// Um processo, pela interface nativa: o fio que pediu, a autoridade
+    /// dele — a de quem o lançou — e o programa que ele executa, lidos do
+    /// fio quando o pedido foi feito.
+    Processo {
+        fio: u64,
+        autoridade: Autoridade,
+        programa: Programa,
+    },
 }
 
 /// Os comandos que só um canal do agente pede: os que respondem pelo
@@ -957,9 +1025,13 @@ pub fn autorizar(
                 return Err(Codigo::DenyNotAuthenticated);
             }
         },
-        Chamador::Processo { fio, autoridade } => {
+        Chamador::Processo {
+            fio,
+            autoridade,
+            programa,
+        } => {
             let mut q = quem_do_processo(autoridade);
-            q.processo = Some(fio);
+            q.processo = Some(pelo_processo(fio, &programa));
             // Uma pessoa que saiu, ou uma chave revogada, não deixa o
             // processo dela pedir nada — como recusaria o pedido dela.
             if let Autoridade::Pessoa { sessao } = autoridade
@@ -983,6 +1055,21 @@ pub fn autorizar(
                     Codigo::DenyPermission,
                     parametros,
                     "so um canal do agente pede este comando",
+                );
+                return Err(Codigo::DenyPermission);
+            }
+            // O manifesto: o que o programa não declarou ele não exerce,
+            // qualquer que seja o papel de quem o lançou.
+            if let Acesso::Exige(p) = comando.acesso
+                && !programa.permite(p)
+            {
+                auditar(
+                    &q,
+                    comando.nome,
+                    "",
+                    Codigo::DenyPermission,
+                    parametros,
+                    &alloc::format!("o manifesto nao declara {}", p.nome()),
                 );
                 return Err(Codigo::DenyPermission);
             }
@@ -1076,9 +1163,13 @@ pub fn auditar_invalido(chamador: Chamador, metodo: &str, parametros: &[u8], det
         Chamador::Sessao(s) => match quem_da_sessao(s) {
             Ok(q) | Err(q) => q,
         },
-        Chamador::Processo { fio, autoridade } => {
+        Chamador::Processo {
+            fio,
+            autoridade,
+            programa,
+        } => {
             let mut q = quem_do_processo(autoridade);
-            q.processo = Some(fio);
+            q.processo = Some(pelo_processo(fio, &programa));
             q
         }
     };
@@ -1102,7 +1193,7 @@ pub fn auditar_invalido(chamador: Chamador, metodo: &str, parametros: &[u8], det
 /// enumera, e não um passe livre. O de um agente decide pelo papel do
 /// agente, procurado agora.
 pub fn autorizar_processo(permissao: Permissao, recurso: &str, metodo: &str) -> Codigo {
-    let quem = match crate::fios::autoridade_atual() {
+    let mut quem = match crate::fios::autoridade_atual() {
         Autoridade::Sistema => quem_local("sistema"),
         Autoridade::Sessao { sessao, chave } => quem_da_autoridade(sessao, chave),
         // Uma sessão que acabou não tem papel, e o papel vazio recusa.
@@ -1110,11 +1201,23 @@ pub fn autorizar_processo(permissao: Permissao, recurso: &str, metodo: &str) -> 
             Ok(q) | Err(q) => q,
         },
     };
+    // O programa do fio: um processo é gravado como tal, e o manifesto dele
+    // limita o que a autoridade alcançaria. Um fio do kernel não tem
+    // imagem a atenuar.
+    let (id, programa) = crate::fios::programa_atual();
+    if programa != Programa::Kernel {
+        quem.processo = Some(pelo_processo(id, &programa));
+    }
+    let nao_declarada;
     let (codigo, detalhe) = match crate::persistencia::revogacoes_desconhecidas() {
         Some(_) if credenciada(crate::fios::autoridade_atual()) => (
             Codigo::DenyNotAuthenticated,
             "journal recusado: as revogacoes nao se sabem",
         ),
+        _ if !programa.permite(permissao) => {
+            nao_declarada = alloc::format!("o manifesto nao declara {}", permissao.nome());
+            (Codigo::DenyPermission, nao_declarada.as_str())
+        }
         _ => decidir(quem.papel.as_deref(), permissao, recurso),
     };
     auditar(&quem, metodo, recurso, codigo, &[], detalhe);

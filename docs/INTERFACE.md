@@ -175,18 +175,49 @@ autoridade decidida: `autorizacao::sessao_do_comando()` e
 
 ### Identidade de programa e manifesto
 
-Cada executável do Duke leva uma seção `.duke.manifesto`, gerada pelo
-pacote `programas` a partir de uma declaração no próprio programa: o nome
-dele e as permissões que pretende exercer. O kernel a lê no `executar`, e
-guarda no processo o nome, o resumo BLAKE2s da imagem e o manifesto.
+Cada executável do Duke leva uma nota ELF de dono `Duke` e tipo 1, num
+segmento `PT_NOTE`, com o manifesto em texto:
 
-- Permissão efetiva de um processo = papel de quem o lançou ∩ manifesto.
-- Um executável sem manifesto não tem permissão nenhuma: é recusado em
-  tudo que exige uma. O padrão é o menor.
-- `bifurcar` herda o manifesto; `executar` troca pelo da imagem nova — e a
+```text
+duke-manifesto 1
+nome visualizador
+permite fs.read system.read
+```
+
+O programa o declara com `programas::manifesto!("visualizador", "fs.read",
+"system.read")`, que monta a nota em tempo de compilação; o script de
+ligação a põe no segmento de notas. O envelope da nota está em
+`protocolo::usuario::manifesto` (o mesmo para quem monta e quem acha), e o
+texto em `politica::manifesto`, lido e testado no hospedeiro.
+
+- O kernel acha a nota em `elf::validar` e lê o manifesto em
+  `programa::carregar`, antes do ponto de não retorno: um manifesto que não
+  se lê — cabeçalho de outra versão, permissão fora do vocabulário, dois
+  manifestos, nota que passa do fim — recusa a imagem, e o processo que
+  pediu o `executar` continua intacto. Um manifesto ilegível não é um
+  manifesto vazio.
+- O processo guarda o programa (`autorizacao::Programa`): o manifesto e o
+  resumo BLAKE2s da imagem. Ele troca junto com o espaço de endereços
+  (`fios::adotar_imagem`), na mesma seção crítica: a imagem nova nunca roda
+  com o manifesto da anterior.
+- Permissão efetiva de um processo = papel de quem o lançou ∩ manifesto,
+  decidida no mesmo ponto: `autorizar` (para `pedir`) e
+  `autorizar_processo` (para `abrir`, `executar`, `terminal`). A recusa
+  pelo manifesto é `DENY_PERMISSION`, com "o manifesto nao declara X" no
+  detalhe.
+- Um executável sem manifesto não tem permissão nenhuma — nem lançado pelo
+  sistema. O fio de um processo que ainda não carregou a imagem também não
+  (`Programa::SemImagem`). Um fio do kernel não tem imagem a atenuar.
+- As permissões administrativas e `debug.trigger` não se declaram: um
+  processo nunca as exerce, e declará-las recusa o manifesto.
+- `bifurcar` herda o programa; `executar` troca pelo da imagem nova — e a
   interseção com o papel de quem lançou continua valendo, então trocar de
-  imagem nunca escala.
-- A auditoria grava o programa no detalhe de cada decisão de processo.
+  imagem nunca passa do papel.
+- A auditoria grava o programa em cada decisão de processo: "pelo processo
+  N (nome resumo): …", com os quatro primeiros bytes do resumo — o nome é o
+  que o programa diz ser, o resumo é o que ele é.
+- `cargo xtask elf` confere que todo programa do disco declara um
+  manifesto, menos `anonimo`, que existe para provar o padrão.
 
 ### Erros
 
@@ -236,5 +267,5 @@ manifesto da 7 já é.
 |---|---|---|
 | 7.1 | contexto do comando por fio; principal derivado da autoridade; fim da sessão global | feito |
 | 7.2 | `pedir`/`resposta`, `Chamador::Processo`, taxa por principal, runtime e programa nativo; o JSON em `protocolo::json`, um só para o kernel e os programas; o Terminal só confirma com o Enter da pessoa ou de um agente | feito |
-| 7.3 | manifesto e identidade de programa; permissão efetiva por interseção | — |
+| 7.3 | manifesto e identidade de programa (nota ELF, `programas::manifesto!`, `politica::manifesto`); permissão efetiva por interseção em `autorizar` e `autorizar_processo`; o programa na auditoria; `xtask elf` exige o manifesto | feito |
 | 7.4 | mutações, matriz, fumaça, documentação | — |

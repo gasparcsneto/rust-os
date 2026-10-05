@@ -1165,3 +1165,165 @@ pub const MAPEAVEL: (u64, u64) = (BASE + 0x0400_0000, TETO - 0x0100_0000);
 const _: () = assert!(MAPEAVEL.0 < MAPEAVEL.1);
 const _: () = assert!(MAPEAVEL.1 <= TETO - (PAGINAS_DA_PILHA + 1) * PAGINA);
 const _: () = assert!(MAPEAVEL.0.is_multiple_of(PAGINA) && MAPEAVEL.1.is_multiple_of(PAGINA));
+
+/// O manifesto de um programa, como ele viaja no executável: o conteúdo de
+/// uma nota ELF de dono `Duke` e tipo [`TIPO`](manifesto::TIPO), num
+/// segmento `PT_NOTE`. O texto é o de `politica::manifesto`; aqui fica só o
+/// envelope, que os dois lados — o pacote `programas`, que monta a nota, e
+/// o kernel, que a acha — precisam ler igual.
+///
+/// # O formato de uma nota
+///
+/// ```text
+///   u32 tamanho do dono   u32 tamanho do conteúdo   u32 tipo
+///   dono, completado com zeros até múltiplo de 4
+///   conteúdo, completado com zeros até múltiplo de 4
+/// ```
+///
+/// O de qualquer ELF: um executável do Duke continua legível por um
+/// `readelf -n`.
+pub mod manifesto {
+    /// O dono das notas do Duke, com o zero final que o formato conta.
+    pub const DONO: &[u8; 5] = b"Duke\0";
+    /// O tipo da nota do manifesto.
+    pub const TIPO: u32 = 1;
+    /// O maior manifesto, em bytes. Um manifesto é uma dúzia de linhas; o
+    /// teto existe porque o tamanho vem do arquivo.
+    pub const MAIOR: usize = 1024;
+    /// `PT_NOTE`, o tipo do segmento que leva as notas.
+    pub const SEGMENTO_DE_NOTAS: u32 = 4;
+
+    const fn alinhar(n: usize) -> usize {
+        (n + 3) & !3
+    }
+
+    /// O tamanho da nota que leva `texto`.
+    pub const fn tamanho_da_nota(texto: &str) -> usize {
+        12 + alinhar(DONO.len()) + alinhar(texto.len())
+    }
+
+    /// A nota que leva `texto`, com `N` = [`tamanho_da_nota`]. Em tempo de
+    /// compilação: é assim que o pacote `programas` a põe no executável.
+    pub const fn nota<const N: usize>(texto: &str) -> [u8; N] {
+        assert!(N == tamanho_da_nota(texto), "tamanho de nota errado");
+        assert!(texto.len() <= MAIOR, "manifesto grande demais");
+        let mut nota = [0u8; N];
+        let dono = (DONO.len() as u32).to_le_bytes();
+        let conteudo = (texto.len() as u32).to_le_bytes();
+        let tipo = TIPO.to_le_bytes();
+        let mut i = 0;
+        while i < 4 {
+            nota[i] = dono[i];
+            nota[4 + i] = conteudo[i];
+            nota[8 + i] = tipo[i];
+            i += 1;
+        }
+        let mut i = 0;
+        while i < DONO.len() {
+            nota[12 + i] = DONO[i];
+            i += 1;
+        }
+        let inicio = 12 + alinhar(DONO.len());
+        let bytes = texto.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            nota[inicio + i] = bytes[i];
+            i += 1;
+        }
+        nota
+    }
+
+    /// O manifesto entre as notas de um segmento `PT_NOTE`: `Ok(None)` se
+    /// nenhuma é do Duke com o tipo do manifesto.
+    ///
+    /// Recusa o segmento malformado — um tamanho que passa do fim, um
+    /// manifesto maior que [`MAIOR`] — e o que tem **dois** manifestos: o
+    /// kernel não escolhe um, porque escolher é o que um executável
+    /// adulterado gostaria que ele fizesse.
+    pub fn achar(notas: &[u8]) -> Result<Option<&[u8]>, &'static str> {
+        let u32_em = |i: usize| -> Option<usize> {
+            let b = notas.get(i..i.checked_add(4)?)?;
+            Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
+        };
+        let mut achado = None;
+        let mut i = 0;
+        while i < notas.len() {
+            let (Some(dono), Some(conteudo), Some(tipo)) =
+                (u32_em(i), u32_em(i + 4), u32_em(i + 8))
+            else {
+                return Err("nota truncada");
+            };
+            let inicio_do_dono = i + 12;
+            let inicio_do_conteudo = inicio_do_dono
+                .checked_add(alinhar(dono.min(MAIOR + 1)))
+                .ok_or("nota absurda")?;
+            if dono > MAIOR || conteudo > usize::MAX / 2 {
+                return Err("nota absurda");
+            }
+            let fim = inicio_do_conteudo
+                .checked_add(alinhar(conteudo))
+                .ok_or("nota absurda")?;
+            if fim > notas.len() {
+                return Err("nota passa do fim do segmento");
+            }
+            let e_do_duke = &notas[inicio_do_dono..inicio_do_dono + dono] == DONO.as_slice();
+            if e_do_duke && tipo as u32 == TIPO {
+                if conteudo > MAIOR {
+                    return Err("manifesto grande demais");
+                }
+                if achado.is_some() {
+                    return Err("dois manifestos");
+                }
+                achado = Some(&notas[inicio_do_conteudo..inicio_do_conteudo + conteudo]);
+            }
+            i = fim;
+        }
+        Ok(achado)
+    }
+
+    #[cfg(test)]
+    mod testes {
+        use super::*;
+
+        const TEXTO: &str = "duke-manifesto 1\nnome a\n";
+        const N: usize = tamanho_da_nota(TEXTO);
+        const NOTA: [u8; N] = nota::<N>(TEXTO);
+
+        #[test]
+        fn a_nota_montada_e_achada() {
+            assert_eq!(N % 4, 0);
+            assert_eq!(achar(&NOTA), Ok(Some(TEXTO.as_bytes())));
+        }
+
+        #[test]
+        fn outras_notas_passam_e_dois_manifestos_nao() {
+            // Uma nota GNU antes: ignorada.
+            let mut gnu = std::vec![4, 0, 0, 0, 4, 0, 0, 0, 3, 0, 0, 0];
+            gnu.extend_from_slice(b"GNU\0abcd");
+            let mut ambas = gnu.clone();
+            ambas.extend_from_slice(&NOTA);
+            assert_eq!(achar(&ambas), Ok(Some(TEXTO.as_bytes())));
+            assert_eq!(achar(&gnu), Ok(None));
+            assert_eq!(achar(&[]), Ok(None));
+            let mut duas = NOTA.to_vec();
+            duas.extend_from_slice(&NOTA);
+            assert_eq!(achar(&duas), Err("dois manifestos"));
+        }
+
+        #[test]
+        fn tamanhos_do_arquivo_sao_conferidos() {
+            assert!(achar(&NOTA[..N - 1]).is_err());
+            assert!(achar(&NOTA[..5]).is_err());
+            let mut grande = NOTA;
+            grande[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+            assert!(achar(&grande).is_err());
+            let mut dono = NOTA;
+            dono[0..4].copy_from_slice(&u32::MAX.to_le_bytes());
+            assert!(achar(&dono).is_err());
+            // Outro tipo do mesmo dono não é o manifesto.
+            let mut outro = NOTA;
+            outro[8] = 2;
+            assert_eq!(achar(&outro), Ok(None));
+        }
+    }
+}

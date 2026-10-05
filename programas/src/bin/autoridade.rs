@@ -18,6 +18,8 @@
 #![no_std]
 #![no_main]
 
+programas::manifesto!("autoridade", "fs.read", "process.run");
+
 use programas::escreverln;
 use programas::sistema::{self, erro};
 

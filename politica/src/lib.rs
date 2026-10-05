@@ -34,6 +34,7 @@ pub mod arrendamento;
 pub mod auditoria;
 pub mod caminho;
 pub mod codigo;
+pub mod manifesto;
 pub mod mensagens;
 pub mod permissao;
 pub mod sigiloso;

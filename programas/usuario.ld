@@ -18,6 +18,7 @@ PHDRS
     codigo  PT_LOAD FLAGS(5);   /* leitura e execução */
     leitura PT_LOAD FLAGS(4);   /* só leitura */
     dados   PT_LOAD FLAGS(6);   /* leitura e escrita */
+    notas   PT_NOTE FLAGS(4);   /* o manifesto — ver `programas::manifesto` */
 }
 
 SECTIONS
@@ -33,6 +34,13 @@ SECTIONS
     .rodata : {
         *(.rodata .rodata.* .lrodata .lrodata.*)
     } :leitura
+
+    /* O manifesto: no segmento de leitura, e também no `PT_NOTE`, que é
+     * onde o kernel o procura. Antes do descarte abaixo, que leva as outras
+     * notas: a primeira regra que casa é a que vale. */
+    .note.duke : {
+        KEEP(*(.note.duke.manifesto))
+    } :leitura :notas
 
     . = ALIGN(4096);
     .data : {

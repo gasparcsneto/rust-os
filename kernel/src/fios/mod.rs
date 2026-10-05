@@ -277,6 +277,10 @@ struct Fio {
     reexecutar: bool,
     /// O pedido do processo pela interface nativa — ver [`crate::nativo`].
     pedido: EstadoDoPedido,
+    /// O programa que o fio executa — ver [`crate::autorizacao::Programa`].
+    /// Trocado junto com o espaço de endereços, em [`adotar_imagem`]: a
+    /// imagem nova nunca roda com o manifesto da anterior.
+    programa: crate::autorizacao::Programa,
 }
 
 /// Onde está o pedido que um processo fez pela interface nativa.
@@ -515,6 +519,7 @@ pub fn init() {
             ocioso: false,
             reexecutar: false,
             pedido: EstadoDoPedido::Livre,
+            programa: crate::autorizacao::Programa::Kernel,
         });
         e.atual[cpu] = Some(0);
         QUANTUM[cpu].store(QUANTUM_EM_TIQUES, Ordering::Relaxed);
@@ -697,6 +702,7 @@ pub fn recolher_terminados() -> usize {
                 ocioso: false,
                 reexecutar: false,
                 pedido: EstadoDoPedido::Livre,
+                programa: crate::autorizacao::Programa::Kernel,
             });
             let id = e.fios[vaga].as_ref().map(|f| f.id)?;
             Some((vaga, id, morto))
@@ -943,7 +949,7 @@ fn nascer(
     //
     // Um fio do kernel não herda de ninguém — ele começa com a tabela
     // padrão, que é o que `criar` quer dizer.
-    let (vaga, ocupante_morto, herdada, pai, autoridade, fixo) = com_escalonador(|e| {
+    let (vaga, ocupante_morto, herdada, pai, autoridade, fixo, programa) = com_escalonador(|e| {
         // O parentesco sai da mesma seção crítica que a tabela de
         // descritores, e pelo mesmo motivo: as duas descrevem a relação com
         // quem está chamando, e lê-las em momentos diferentes seria lê-las
@@ -970,6 +976,16 @@ fn nascer(
                 None,
                 autoridade,
             ),
+        };
+        // O programa: o do pai numa bifurcação — o filho executa a mesma
+        // imagem —; nenhum num processo que ainda vai carregar a dele; e o
+        // kernel num fio do kernel. Um filho sem pai legível não exerce nada.
+        let programa = match nascimento {
+            Nascimento::Bifurcacao { .. } => e
+                .fio_atual()
+                .map_or(crate::autorizacao::Programa::SemImagem, |pai| pai.programa),
+            Nascimento::Funcao { .. } if cota.is_some() => crate::autorizacao::Programa::SemImagem,
+            Nascimento::Funcao { .. } => crate::autorizacao::Programa::Kernel,
         };
         let fixo = match nascimento {
             Nascimento::Funcao { fixo, .. } => fixo,
@@ -1002,8 +1018,9 @@ fn nascer(
             ocioso: false,
             reexecutar: false,
             pedido: EstadoDoPedido::Livre,
+            programa,
         });
-        Ok::<_, &'static str>((vaga, anterior, herdada, pai, autoridade, fixo))
+        Ok::<_, &'static str>((vaga, anterior, herdada, pai, autoridade, fixo, programa))
     })?;
 
     // O fio morto que ocupava a vaga morre aqui fora: o `Drop` da pilha dele
@@ -1079,6 +1096,7 @@ fn nascer(
             ocioso: false,
             reexecutar: false,
             pedido: EstadoDoPedido::Livre,
+            programa,
         });
         (marcador, e.nucleos_ociosos())
     });
@@ -1127,6 +1145,7 @@ pub fn preparar_ocioso(cpu: usize) -> Result<(usize, u64), &'static str> {
             ocioso: true,
             reexecutar: false,
             pedido: EstadoDoPedido::Livre,
+            programa: crate::autorizacao::Programa::Kernel,
         });
         Ok::<_, &'static str>((vaga, anterior))
     })?;
@@ -1402,9 +1421,30 @@ pub fn troca_concluida() {
 /// o `Drop` dele desmapear páginas com a trava do escalonador na mão, e o
 /// módulo inteiro evita aninhar travas por princípio. Quem chama larga o
 /// resultado quando quiser.
+///
+/// O programa troca na mesma seção crítica: daqui em diante o fio executa a
+/// imagem nova, e é com o manifesto dela que o gate o decide.
 #[must_use = "o espaco anterior precisa ser largado fora da trava"]
-pub fn adotar_espaco(espaco: crate::paginacao::Espaco) -> Option<crate::paginacao::Espaco> {
-    com_escalonador(|e| e.fio_atual_mut()?.espaco.replace(espaco))
+pub fn adotar_imagem(
+    espaco: crate::paginacao::Espaco,
+    programa: crate::autorizacao::Programa,
+) -> Option<crate::paginacao::Espaco> {
+    com_escalonador(|e| {
+        let fio = e.fio_atual_mut()?;
+        fio.programa = programa;
+        fio.espaco.replace(espaco)
+    })
+}
+
+/// O identificador do fio que está executando e o programa dele — ver
+/// [`crate::autorizacao::Programa`]. Fora de um fio, o kernel.
+pub fn programa_atual() -> (u64, crate::autorizacao::Programa) {
+    com_escalonador(|e| {
+        e.fio_atual()
+            .map_or((0, crate::autorizacao::Programa::Kernel), |f| {
+                (f.id.numero(), f.programa)
+            })
+    })
 }
 
 /// Cede a CPU voluntariamente. Quem espera a ordem das gravações da
@@ -1670,12 +1710,16 @@ pub fn desfazer_pedido() -> EstadoDoPedido {
     })
 }
 
-/// O executor toma o pedido do fio `id`: o texto, e a autoridade do fio —
-/// com que o comando será decidido. `None` se o fio não existe mais, já
+/// O executor toma o pedido do fio `id`: o texto, a autoridade do fio e o
+/// programa dele — com que o comando será decidido. `None` se o fio não existe mais, já
 /// terminou, ou não tem pedido na fila.
 pub fn tomar_pedido(
     id: u64,
-) -> Option<(politica::sigiloso::Texto, crate::autorizacao::Autoridade)> {
+) -> Option<(
+    politica::sigiloso::Texto,
+    crate::autorizacao::Autoridade,
+    crate::autorizacao::Programa,
+)> {
     com_escalonador(|e| {
         let fio = e
             .fios
@@ -1683,7 +1727,7 @@ pub fn tomar_pedido(
             .flatten()
             .find(|f| f.id.numero() == id && f.estado != Estado::Terminado)?;
         match core::mem::replace(&mut fio.pedido, EstadoDoPedido::EmCurso) {
-            EstadoDoPedido::Enfileirado(t) => Some((t, fio.autoridade)),
+            EstadoDoPedido::Enfileirado(t) => Some((t, fio.autoridade, fio.programa)),
             outro => {
                 fio.pedido = outro;
                 None

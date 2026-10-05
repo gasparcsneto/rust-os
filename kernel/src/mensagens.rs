@@ -612,6 +612,13 @@ fn purgar_caixa_em_ordem(r: &Remetente, dono: Dono, alvo: &str, desafio: u64) ->
     tiradas.iter().map(|t| id_texto(&epoca, t.id)).collect()
 }
 
+/// Se o canal tem uma janela de nonces — para a suíte conferir que a de um
+/// processo some com ele.
+#[cfg(feature = "modo-teste")]
+pub fn tem_janela_de_teste(canal: Canal) -> bool {
+    com_tabela(|t| t.caixas.tem_janela(canal))
+}
+
 /// A sessão do canal acabou: os nonces dela também.
 pub fn canal_acabou(canal: Canal) {
     com_tabela(|t| t.caixas.esquecer_canal(canal));

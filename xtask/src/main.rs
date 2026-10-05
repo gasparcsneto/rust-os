@@ -2206,6 +2206,26 @@ fn conferir_programas_compilados(
         if segmentos == 0 {
             return Err(erro("nenhum segmento carregável"));
         }
+        // O manifesto: todo programa do disco declara o que exerce, e o
+        // segmento de notas é onde o kernel o procura. Só o `anonimo` não
+        // declara — é o caso que confere que sem manifesto não há nada.
+        // O script de ligação declara o segmento sempre; vazio, é de quem
+        // não declarou nada. NOTE <offset> <vaddr> <paddr> <filesz> ...
+        let tem_notas = texto.lines().any(|l| {
+            let campos: Vec<&str> = l.split_whitespace().collect();
+            campos.first() == Some(&"NOTE")
+                && campos
+                    .get(4)
+                    .and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok())
+                    .is_some_and(|n| n > 0)
+        });
+        if tem_notas != (curto != "anonimo") {
+            return Err(erro(if tem_notas {
+                "o programa sem manifesto tem um segmento de notas"
+            } else {
+                "o programa não declara manifesto: falta `programas::manifesto!`"
+            }));
+        }
         if !texto.contains("There are no relocations in this file") {
             return Err(erro(
                 "o executável tem relocações, que o carregador não faz",

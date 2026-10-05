@@ -236,12 +236,26 @@ pub fn carregar(imagem: &[u8]) -> Result<Programa, Falha> {
     // os mapeamentos precisam cair. Entregá-lo ao fio antes de instalá-lo é o
     // que garante que ele seja devolvido mesmo que algo abaixo falhe: a partir
     // daqui quem o destrói é a morte do fio, não um caminho de erro.
-    // O último passo recuperável. Depois de `adotar_espaco` o fio já é dono do
+    // O último passo recuperável. Depois de `adotar_imagem` o fio já é dono do
     // espaço novo, e o antigo só pode ser largado do outro lado da troca — não
     // há mais como voltar atrás sem largar um espaço ativo.
+    // O programa que a imagem é: o manifesto que ela declara — lido aqui,
+    // onde recusar ainda deixa o processo intacto — e o resumo dela. Um
+    // manifesto que não se lê recusa a imagem: não é um manifesto vazio.
+    let manifesto = match elf.manifesto() {
+        Some(texto) => Some(politica::manifesto::ler(texto).map_err(|e| antes(e.motivo()))?),
+        None => None,
+    };
+    let programa = crate::autorizacao::Programa::Imagem {
+        manifesto,
+        resumo: politica::manifesto::resumo_da_imagem(imagem),
+    };
+
     let espaco = crate::paginacao::Espaco::novo(ENTRADA_PRIVADA).map_err(antes)?;
     let raiz = espaco.raiz();
-    let anterior = crate::fios::adotar_espaco(espaco);
+    // O espaço e o programa trocam juntos: a imagem nova nunca roda com o
+    // manifesto da anterior, nem a anterior com o da nova.
+    let anterior = crate::fios::adotar_imagem(espaco, programa);
 
     // SAFETY: a raiz saiu de `Espaco::novo`, que copia as entradas de topo do
     // kernel — então o código que executa esta linha e a pilha deste fio

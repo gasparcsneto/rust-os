@@ -42,9 +42,10 @@ const TIPO_EXECUTAVEL: u16 = 2;
 
 /// `PT_LOAD`: o único tipo de segmento que este carregador entende.
 ///
-/// Os outros (`PT_DYNAMIC`, `PT_INTERP`, `PT_NOTE`, ...) são ignorados de
-/// propósito: não carregá-los é correto, e recusar o arquivo por causa deles
-/// recusaria executáveis perfeitamente válidos.
+/// Os outros (`PT_DYNAMIC`, `PT_INTERP`, ...) são ignorados de propósito:
+/// não carregá-los é correto, e recusar o arquivo por causa deles recusaria
+/// executáveis perfeitamente válidos. `PT_NOTE` não se carrega, mas é lido:
+/// é onde mora o manifesto.
 const SEGMENTO_CARREGAVEL: u32 = 1;
 
 /// Máquina esperada, segundo a arquitetura em que este kernel foi compilado.
@@ -95,6 +96,8 @@ pub struct Imagem<'a> {
     entrada: u64,
     segmentos: [Segmento; MAX_SEGMENTOS],
     total: usize,
+    /// Onde está o texto do manifesto, se a imagem tem um.
+    manifesto: Option<(usize, usize)>,
 }
 
 impl<'a> Imagem<'a> {
@@ -106,6 +109,14 @@ impl<'a> Imagem<'a> {
     /// Os segmentos carregáveis, na ordem em que aparecem no arquivo.
     pub fn segmentos(&self) -> &[Segmento] {
         &self.segmentos[..self.total]
+    }
+
+    /// O texto do manifesto, se a imagem tem um — ver
+    /// `politica::manifesto`. Achado e conferido em [`validar`]: a nota é
+    /// bem formada, e é a única do manifesto.
+    pub fn manifesto(&self) -> Option<&'a [u8]> {
+        let (inicio, tamanho) = self.manifesto?;
+        self.bytes.get(inicio..inicio + tamanho)
     }
 
     /// O conteúdo de um segmento, já conferido contra o tamanho da imagem.
@@ -185,13 +196,37 @@ pub fn validar(bytes: &[u8]) -> Result<Imagem<'_>, &'static str> {
         executavel: false,
     }; MAX_SEGMENTOS];
     let mut total = 0;
+    let mut manifesto = None;
 
     for i in 0..quantos {
         let base = tabela
             .checked_add(i.checked_mul(TAMANHO_DO_SEGMENTO).ok_or("tabela absurda")?)
             .ok_or("tabela de segmentos fora da imagem")?;
 
-        if u32_em(bytes, base).ok_or("tabela de segmentos fora da imagem")? != SEGMENTO_CARREGAVEL {
+        let tipo = u32_em(bytes, base).ok_or("tabela de segmentos fora da imagem")?;
+        if tipo == protocolo::usuario::manifesto::SEGMENTO_DE_NOTAS {
+            // As notas não se carregam; o manifesto se procura nelas. Um
+            // segmento de notas malformado recusa a imagem: é nele que o
+            // executável diz o que pode exercer, e um manifesto que não se
+            // lê não é um manifesto vazio.
+            let deslocamento = u64_em(bytes, base + 8).ok_or("segmento truncado")?;
+            let no_arquivo = u64_em(bytes, base + 32).ok_or("segmento truncado")?;
+            let fim = deslocamento
+                .checked_add(no_arquivo)
+                .filter(|&fim| fim <= bytes.len() as u64)
+                .ok_or("segmento de notas fora da imagem")?;
+            let notas = &bytes[deslocamento as usize..fim as usize];
+            if let Some(achado) = protocolo::usuario::manifesto::achar(notas)? {
+                if manifesto.is_some() {
+                    return Err("dois manifestos");
+                }
+                // A posição dele na imagem: `achado` é uma fatia de `bytes`.
+                let inicio = achado.as_ptr() as usize - bytes.as_ptr() as usize;
+                manifesto = Some((inicio, achado.len()));
+            }
+            continue;
+        }
+        if tipo != SEGMENTO_CARREGAVEL {
             continue;
         }
         if total == MAX_SEGMENTOS {
@@ -254,5 +289,6 @@ pub fn validar(bytes: &[u8]) -> Result<Imagem<'_>, &'static str> {
         entrada,
         segmentos,
         total,
+        manifesto,
     })
 }

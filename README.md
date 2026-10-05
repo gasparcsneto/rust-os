@@ -389,6 +389,7 @@ politica/src/        a política de autorização, a mesma no kernel e no hosped
 ├── taxa.rs          o balde de pedidos e a janela de apertos de mão
 ├── arrendamento.rs  a versão e o arrendamento de cada recurso compartilhado
 ├── mensagens.rs     as caixas, os estados, as cotas e os nonces das mensagens
+├── manifesto.rs     o manifesto de um programa: o nome, o que ele exerce, e o resumo da imagem
 ├── sigiloso.rs      o texto que sai da memória zerado: o corpo e a resposta que o leva
 └── auditoria.rs     os registros e a cadeia de elos BLAKE2s
 
@@ -415,11 +416,12 @@ toolkit/src/         os widgets: desenho e árvore semântica do mesmo estado
 └── testes.rs        o layout, o desenho e a descrição, conferidos no hospedeiro
 
 programas/           os programas de usuário, compilados à parte do kernel
-├── usuario.ld       o mapa de um programa: três segmentos a partir de BASE
+├── usuario.ld       o mapa de um programa: três segmentos a partir de BASE, e a nota do manifesto
 └── src/
     ├── lib.rs       o runtime: a entrada, o pânico e o contrato do `principal`
     ├── sistema.rs   as chamadas de sistema, uma função por chamada
     ├── nativo.rs    a interface nativa: pedir ao sistema um comando do registro
+    ├── manifesto.rs `manifesto!`: o que o programa declara, numa nota do executável
     ├── monte.rs     o monte do processo, sobre `mapear`
     ├── saida.rs     uma linha formatada por chamada de `escrever`
     ├── desenho.rs   retângulos e texto, com a fonte do console
@@ -439,6 +441,8 @@ programas/           os programas de usuário, compilados à parte do kernel
         ├── entrada.rs    uma janela fora do servidor, com o canal de entrada dela
         ├── formulario.rs dois campos e dois botões do toolkit, que o agente preenche
         ├── nativo.rs     um programa nativo: confere de dentro o que a interface nativa promete
+        ├── contido.rs    declara só `system.read`, e confere que o manifesto limita o resto
+        ├── anonimo.rs    o único sem manifesto: não exerce nada, nem lançado pelo sistema
         └── terminal.rs   o Terminal: o interpretador numa janela, pelo pseudo-terminal
 
 xtask/src/

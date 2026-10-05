@@ -17,6 +17,8 @@
 #![no_std]
 #![no_main]
 
+programas::manifesto!("entrada");
+
 use programas::escreverln;
 use programas::sistema::{self, erro};
 use programas::superficie::Superficie;

@@ -11,6 +11,8 @@
 #![no_std]
 #![no_main]
 
+programas::manifesto!("memoria");
+
 extern crate alloc;
 
 use alloc::boxed::Box;

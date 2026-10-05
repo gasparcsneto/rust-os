@@ -342,7 +342,7 @@ programa_exemplo_inicio:
     .long   0                        // e_flags
     .short  64                       // e_ehsize
     .short  56                       // e_phentsize
-    .short  2                 // e_phnum
+    .short  3                 // e_phnum
     .short  0                        // e_shentsize
     .short  0                        // e_shnum
     .short  0                        // e_shstrndx
@@ -368,6 +368,16 @@ programa_exemplo_inicio:
     .quad   DADOS_NO_ARQUIVO                   // p_filesz
     .quad   DADOS_NA_MEMORIA                   // p_memsz
     .quad   4096                               // p_align
+
+    // o manifesto: uma nota, que nao se carrega — o kernel a le da imagem
+    .long   4                                   // PT_NOTE
+    .long   4                                   // PF_R
+    .quad   .Lnota_ex - .Lelf_ex              // p_offset
+    .quad   0                                   // p_vaddr: nao se carrega
+    .quad   0                                   // p_paddr
+    .quad   .Lfim_nota_ex - .Lnota_ex         // p_filesz
+    .quad   .Lfim_nota_ex - .Lnota_ex         // p_memsz
+    .quad   4                                   // p_align
 
 .Lcodigo_ex:
     // escrever(SAIDA, mensagem, tamanho)
@@ -430,6 +440,21 @@ programa_exemplo_inicio:
     .ascii  "filho"
     .space  DADOS_NO_ARQUIVO - OFF_NOME - TAM_NOME
 .Lfim_dados_ex:
+
+// O manifesto, no formato de `protocolo::usuario::manifesto`: o que este
+// programa exerce, e nada mais.
+.balign 4
+.Lnota_ex:
+    .long   5                                   // tamanho do dono
+    .long   .Lfim_texto_ex - .Ltexto_ex       // tamanho do conteudo
+    .long   1                                   // o tipo do manifesto
+    .ascii  "Duke\0"
+    .balign 4
+.Ltexto_ex:
+    .ascii  "duke-manifesto 1\nnome exemplo\npermite process.run\n"
+.Lfim_texto_ex:
+    .balign 4
+.Lfim_nota_ex:
 
 .global programa_exemplo_fim
 programa_exemplo_fim:
@@ -522,7 +547,7 @@ programa_leitor_inicio:
     .long   0                        // e_flags
     .short  64                       // e_ehsize
     .short  56                       // e_phentsize
-    .short  2                        // e_phnum
+    .short  3                        // e_phnum
     .short  0                        // e_shentsize
     .short  0                        // e_shnum
     .short  0                        // e_shstrndx
@@ -547,6 +572,16 @@ programa_leitor_inicio:
     .quad   DADOS_LE_NO_ARQUIVO                 // p_filesz
     .quad   DADOS_LE_NA_MEMORIA                 // p_memsz
     .quad   4096                                // p_align
+
+    // o manifesto: uma nota, que nao se carrega — o kernel a le da imagem
+    .long   4                                   // PT_NOTE
+    .long   4                                   // PF_R
+    .quad   .Lnota_le - .Lelf_le              // p_offset
+    .quad   0                                   // p_vaddr: nao se carrega
+    .quad   0                                   // p_paddr
+    .quad   .Lfim_nota_le - .Lnota_le         // p_filesz
+    .quad   .Lfim_nota_le - .Lnota_le         // p_memsz
+    .quad   4                                   // p_align
 
 .Lcodigo_le:
     // abrir(caminho, tamanho) -> descritor, ou negativo
@@ -675,6 +710,21 @@ programa_leitor_inicio:
     .ascii  "/dados"
     .space  DADOS_LE_NO_ARQUIVO - OFF_DIRETORIO_LE - TAM_DIRETORIO_LE
 .Lfim_dados_le:
+
+// O manifesto, no formato de `protocolo::usuario::manifesto`: o que este
+// programa exerce, e nada mais.
+.balign 4
+.Lnota_le:
+    .long   5                                   // tamanho do dono
+    .long   .Lfim_texto_le - .Ltexto_le       // tamanho do conteudo
+    .long   1                                   // o tipo do manifesto
+    .ascii  "Duke\0"
+    .balign 4
+.Ltexto_le:
+    .ascii  "duke-manifesto 1\nnome leitor\npermite fs.read\n"
+.Lfim_texto_le:
+    .balign 4
+.Lfim_nota_le:
 
 .global programa_leitor_fim
 programa_leitor_fim:
@@ -1017,7 +1067,7 @@ programa_exemplo_inicio:
     .long   0                        // e_flags
     .short  64                       // e_ehsize
     .short  56                       // e_phentsize
-    .short  2                 // e_phnum
+    .short  3                 // e_phnum
     .short  0                        // e_shentsize
     .short  0                        // e_shnum
     .short  0                        // e_shstrndx
@@ -1043,6 +1093,16 @@ programa_exemplo_inicio:
     .quad   DADOS_NO_ARQUIVO                   // p_filesz
     .quad   DADOS_NA_MEMORIA                   // p_memsz
     .quad   4096                               // p_align
+
+    // o manifesto: uma nota, que nao se carrega — o kernel a le da imagem
+    .long   4                                   // PT_NOTE
+    .long   4                                   // PF_R
+    .quad   .Lnota_ex - .Lelf_ex              // p_offset
+    .quad   0                                   // p_vaddr: nao se carrega
+    .quad   0                                   // p_paddr
+    .quad   .Lfim_nota_ex - .Lnota_ex         // p_filesz
+    .quad   .Lfim_nota_ex - .Lnota_ex         // p_memsz
+    .quad   4                                   // p_align
 
 .Lcodigo_ex:
     // escrever(SAIDA, mensagem, tamanho)
@@ -1110,6 +1170,21 @@ programa_exemplo_inicio:
     .ascii  "filho"
     .space  DADOS_NO_ARQUIVO - OFF_NOME - TAM_NOME
 .Lfim_dados_ex:
+
+// O manifesto, no formato de `protocolo::usuario::manifesto`: o que este
+// programa exerce, e nada mais.
+.balign 4
+.Lnota_ex:
+    .long   5                                   // tamanho do dono
+    .long   .Lfim_texto_ex - .Ltexto_ex       // tamanho do conteudo
+    .long   1                                   // o tipo do manifesto
+    .ascii  "Duke\0"
+    .balign 4
+.Ltexto_ex:
+    .ascii  "duke-manifesto 1\nnome exemplo\npermite process.run\n"
+.Lfim_texto_ex:
+    .balign 4
+.Lfim_nota_ex:
 
 .global programa_exemplo_fim
 programa_exemplo_fim:
@@ -1204,7 +1279,7 @@ programa_leitor_inicio:
     .long   0                        // e_flags
     .short  64                       // e_ehsize
     .short  56                       // e_phentsize
-    .short  2                        // e_phnum
+    .short  3                        // e_phnum
     .short  0                        // e_shentsize
     .short  0                        // e_shnum
     .short  0                        // e_shstrndx
@@ -1229,6 +1304,16 @@ programa_leitor_inicio:
     .quad   DADOS_LE_NO_ARQUIVO                 // p_filesz
     .quad   DADOS_LE_NA_MEMORIA                 // p_memsz
     .quad   4096                                // p_align
+
+    // o manifesto: uma nota, que nao se carrega — o kernel a le da imagem
+    .long   4                                   // PT_NOTE
+    .long   4                                   // PF_R
+    .quad   .Lnota_le - .Lelf_le              // p_offset
+    .quad   0                                   // p_vaddr: nao se carrega
+    .quad   0                                   // p_paddr
+    .quad   .Lfim_nota_le - .Lnota_le         // p_filesz
+    .quad   .Lfim_nota_le - .Lnota_le         // p_memsz
+    .quad   4                                   // p_align
 
 .Lcodigo_le:
     // abrir(caminho, tamanho) -> descritor, ou negativo
@@ -1367,6 +1452,21 @@ programa_leitor_inicio:
     .ascii  "/dados"
     .space  DADOS_LE_NO_ARQUIVO - OFF_DIRETORIO_LE - TAM_DIRETORIO_LE
 .Lfim_dados_le:
+
+// O manifesto, no formato de `protocolo::usuario::manifesto`: o que este
+// programa exerce, e nada mais.
+.balign 4
+.Lnota_le:
+    .long   5                                   // tamanho do dono
+    .long   .Lfim_texto_le - .Ltexto_le       // tamanho do conteudo
+    .long   1                                   // o tipo do manifesto
+    .ascii  "Duke\0"
+    .balign 4
+.Ltexto_le:
+    .ascii  "duke-manifesto 1\nnome leitor\npermite fs.read\n"
+.Lfim_texto_le:
+    .balign 4
+.Lfim_nota_le:
 
 .global programa_leitor_fim
 programa_leitor_fim:

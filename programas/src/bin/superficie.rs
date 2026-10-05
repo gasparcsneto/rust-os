@@ -12,6 +12,8 @@
 #![no_std]
 #![no_main]
 
+programas::manifesto!("superficie", "process.run");
+
 use programas::escreverln;
 use programas::monte::FIM_DO_MONTE;
 use programas::sistema::{self, erro};

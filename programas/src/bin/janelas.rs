@@ -51,6 +51,8 @@
 #![no_std]
 #![no_main]
 
+programas::manifesto!("janelas", "process.run");
+
 extern crate alloc;
 
 use alloc::string::String;
