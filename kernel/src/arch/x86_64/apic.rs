@@ -427,28 +427,40 @@ pub unsafe fn init(hz: u32) -> Option<u32> {
     // zero, e escrevê-lo é dizer que a escolha foi feita.
     lapic.tpr.set(0);
 
-    let frequencia = calibrar(lapic)?;
-    FREQUENCIA_DO_CONTADOR.store(frequencia, Ordering::Release);
+    // Mais de uma tentativa, porque calibrar e conferir são medidas, e uma
+    // medida pode ser estragada por quem executa a máquina: medido, no QEMU
+    // sem aceleração com o hospedeiro ocupado, "o APIC disparou 14 vezes onde
+    // 20 eram esperadas". Com um núcleo só, isso custava o timer do APIC e o
+    // PIT seguia. Com vários custa os outros núcleos inteiros — sem APIC não
+    // há como acordá-los —, então um boot ruim por acaso virava uma máquina
+    // de um núcleo. O erro que a conferência existe para pegar é de unidade,
+    // um fator de dezesseis ou de mil, e esse se repete em toda tentativa.
+    const TENTATIVAS: u32 = 3;
+    for _ in 0..TENTATIVAS {
+        let frequencia = calibrar(lapic)?;
+        FREQUENCIA_DO_CONTADOR.store(frequencia, Ordering::Release);
 
-    let contagem = (frequencia / hz.max(1)).max(1);
-    lapic.divisor.set(DIVISOR_CODIFICADO);
-    lapic.lvt_timer.set(TIMER_PERIODICO | VETOR_TIMER as u32);
-    lapic.contagem_inicial.set(contagem);
+        let contagem = (frequencia / hz.max(1)).max(1);
+        lapic.divisor.set(DIVISOR_CODIFICADO);
+        lapic.lvt_timer.set(TIMER_PERIODICO | VETOR_TIMER as u32);
+        lapic.contagem_inicial.set(contagem);
 
-    let efetiva = frequencia / contagem;
+        let efetiva = frequencia / contagem;
 
-    if !conferir_contra_o_pit(efetiva) {
-        // Desarmar antes de desistir: um timer disparando na taxa errada num
-        // vetor que ninguém mais espera é pior que timer nenhum.
+        if conferir_contra_o_pit(efetiva) {
+            // Só depois da conferência: um núcleo secundário repete esta
+            // contagem, e ela precisa ser uma que se provou certa.
+            CONTAGEM.store(contagem, Ordering::Release);
+            return Some(efetiva);
+        }
+
+        // Desarmar antes de medir de novo, ou de desistir: um timer
+        // disparando na taxa errada num vetor que ninguém mais espera é pior
+        // que timer nenhum.
         lapic.lvt_timer.set(TIMER_MASCARADO);
         lapic.contagem_inicial.set(0);
-        return None;
     }
-
-    // Só depois da conferência: um núcleo secundário repete esta contagem, e
-    // ela precisa ser uma que se provou certa.
-    CONTAGEM.store(contagem, Ordering::Release);
-    Some(efetiva)
+    None
 }
 
 /// Sinaliza o fim de uma interrupção entregue pelo APIC.

@@ -795,6 +795,14 @@ por compilar. O que esta fase encontrou, e corrigiu na camada responsável:
   desistia antes de a tela de falha chegar ao monitor. O prazo agora é um
   quarto de segundo no contador do timer genérico, que anda com as IRQs
   mascaradas.
+- **Uma medida ruim do APIC custava os outros núcleos.** A calibração do
+  timer do APIC é conferida contra o PIT, e uma conferência reprovada
+  deixava o PIT como relógio — com um núcleo só, um timer pior e mais nada.
+  Com vários, sem APIC não há como acordar os outros, e a máquina de quatro
+  núcleos subia com um. Medido numa campanha de mutações, com o hospedeiro
+  ocupado: "o APIC disparou 14 vezes onde 20 eram esperadas". A
+  conferência existe para pegar erro de unidade, que se repete; agora são
+  três medidas antes de desistir.
 
 E o que foi conferido e está certo, com o caso que o prova: a cópia na
 escrita com os dois donos escrevendo juntos (`smp: copia na escrita em dois
