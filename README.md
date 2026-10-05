@@ -821,6 +821,45 @@ próprias escritas); a gravação no journal, que já era serializada por fio
 dono e não pela máscara; a tradução de um processo, que nenhum outro núcleo
 guarda depois de trocar de raiz.
 
+### Mutações
+
+Vinte e quatro mutações dirigidas à sincronização desta fase, cada uma
+contra a suíte inteira com quatro núcleos (uma, a do prazo da parada no
+ARM, contra a fumaça do ARM): **dezesseis reprovadas, oito sobreviventes**.
+Três das reprovadas só reprovam porque a campanha mostrou que passavam, e
+ganharam caso determinístico — com um gancho só de teste que abre a janela
+de propósito, em vez de esperar o acaso acertá-la: o coletor do
+pseudo-terminal largando a vaga como livre, o `abrir` aceitando a vaga em
+troca, e o quantum que só anda com a trava do escalonador livre. A campanha
+achou também dois defeitos de verdade (o coletor de fios devolvendo a vaga
+antes de desmontar o morto, e a calibração do APIC derrubando os outros
+núcleos) e um caso que falhava por acaso (o do zumbi).
+
+As oito que passam, e por quê:
+
+- **Marcar um descritor do kernel sem avisar os outros núcleos.** Nenhum
+  chamador de hoje marca página do kernel por ali; a obrigação está na
+  função para o dia em que houver.
+- **A trava sem fila.** A inanição que ela causa é estatística: numa das
+  rodadas ela derrubou o caso do relógio (um núcleo contou 104 tiques em
+  50), na seguinte não.
+- **Reabrir o console esquecendo a sessão que sobrou.** Nenhum caso reabre
+  um console com uma sessão ainda presa nele.
+- **A saída do pseudo-terminal por `try_lock`.** Perde texto só quando dois
+  núcleos escrevem no mesmo anel no mesmo instante, e nenhum caso escreve
+  assim.
+- **Criar um fio sem acordar os núcleos ociosos.** Custa latência — o
+  ocioso acorda no tique seguinte —, não correção.
+- **O tique sem descarregar o console.** Custa latência de eco, que a
+  fumaça mediu (de 280 ms para menos de 20 ms), mas que nenhum caso
+  confere.
+- **A reexecução decidida pelo estado do fio** (no backend do x86). A
+  corrida só foi vista no ARM em release; no x86 de depuração, a janela
+  não é acertada.
+- **O `soltar` liberando o frame fora da trava.** A janela é entre conferir
+  os donos e liberar, e nenhum caso solta o mesmo frame em dois núcleos ao
+  mesmo tempo.
+
 ### O que fica de fora
 
 - O núcleo 0 é especial: os dispositivos e o canal moram nele, e um núcleo
@@ -837,6 +876,9 @@ guarda depois de trocar de raiz.
   ciclos achados foram corrigidos onde moram, e os outros pontos em que um
   callback roda com uma trava na mão foram relidos — mas uma ordem nova,
   escrita depois, só aparece quando dois núcleos a cruzarem.
+- Oito mutações de sincronização passam pela suíte — ver
+  [Mutações](#mutações). As travas e ordens que elas tiram estão no código
+  pelos motivos escritos lá; o que falta é o caso que as prove.
 - Oito núcleos no máximo, e no x86 só os de identificador até 255.
 - Um núcleo que não responde à partida é dado como falho e fica de fora, e
   a vaga do fio ocioso que lhe tinha sido preparada fica presa até o
@@ -3389,9 +3431,9 @@ $ cargo xtask iniciador
   [iniciador] a maquina e do Duke; saltando para 0xffff8000000d75b0
 
   =============================================
-    Duke :: agent-native :: x86_64 :: fase 5
+    Duke :: agent-native :: x86_64 :: fase 6
   =============================================
-  [    0]     0ms info boot  Duke iniciado em x86_64, fase 5
+  [    0]     0ms info boot  Duke iniciado em x86_64, fase 6
 
   [conferido] 7058448 bytes com crc 0x53f802c7, entrada 0x863a0,
               4 segmentos e 3703 relocacoes
@@ -3751,14 +3793,19 @@ padronizado.
       magia em `x0`, e o `-kernel` continua funcionando.
       **Fase 5 completa.**
 
-- [ ] **Fase 6 — Vários núcleos.** Primeiro, e não no meio: fazer SMP depois
-      da pilha gráfica significa reescrever o travamento dela inteiro. Partida
-      dos APs, dados por CPU, IPI, e *TLB shootdown* — que é onde a
-      invalidação hoje inofensiva de `com_descritor_da_folha` deixa de ser
-      propriedade do chamador e vira obrigação da função. `threads.list` passa
-      a dizer em que núcleo cada fio está, e a exigência que não pode ser
-      negociada é esta: o canal continua respondendo quando **um** núcleo
-      trava, porque é exatamente aí que alguém precisa dele.
+- [x] **Fase 6 — Vários núcleos.** Primeiro, e não no meio: fazer SMP depois
+      da pilha gráfica significaria reescrever o travamento dela inteiro.
+      Partida dos núcleos pela MADT (INIT-SIPI-SIPI) e pela árvore de
+      dispositivos (PSCI), dados por CPU, timers por núcleo, um escalonador
+      com posse do fio por núcleo e afinidade; avisos entre núcleos para
+      acordar, derrubar traduções (`com_descritor_da_folha` passou a avisar os
+      outros núcleos ela mesma) e parar todos no caminho fatal; travas justas
+      por senha. `threads.list` diz em que núcleo cada fio está. E a
+      exigência que não se negociava: com **um** núcleo travado para sempre,
+      o canal continua respondendo — provado pela fumaça nas duas
+      arquiteturas. O estado global foi auditado com vários núcleos, e o que
+      só aparece com eles está em [Vários núcleos](#vários-núcleos).
+      **Fase 6 completa.**
 - [ ] **Fase 7 — ABI compatível com Linux.** Não é preferência, é o que decide
       o projeto: ninguém porta um navegador para uma ABI nova, e sem navegador
       não há desktop. Um subconjunto compatível herda o software que já
