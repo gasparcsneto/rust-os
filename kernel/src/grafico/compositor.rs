@@ -346,13 +346,10 @@ impl Compositor {
             return;
         }
         let dano = self.pendente.recortar(self.largura, self.altura);
-        match self.saida.apresentar(dano) {
-            Ok(apresentado) => {
-                self.pendente = Dano::novo(0, 0, 0, 0);
-                super::registrar_atualizacao(apresentado);
-            }
-            // Fica pendente, e vai com a próxima.
-            Err(_) => {}
+        // Recusada, fica pendente, e vai com a próxima.
+        if let Ok(apresentado) = self.saida.apresentar(dano) {
+            self.pendente = Dano::novo(0, 0, 0, 0);
+            super::registrar_atualizacao(apresentado);
         }
     }
 

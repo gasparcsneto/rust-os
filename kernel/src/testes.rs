@@ -19614,9 +19614,8 @@ fn smp_todos_os_nucleos_ligam() -> Resultado {
 
     let antes: [u64; crate::nucleos::MAX_NUCLEOS] = core::array::from_fn(tiques_do_nucleo);
     esperar_ticks(10);
-    for i in 0..crate::nucleos::MAX_NUCLEOS {
-        if crate::nucleos::mascara_dos_ligados() & (1 << i) != 0 && tiques_do_nucleo(i) <= antes[i]
-        {
+    for (i, &antes) in antes.iter().enumerate() {
+        if crate::nucleos::mascara_dos_ligados() & (1 << i) != 0 && tiques_do_nucleo(i) <= antes {
             crate::log_error!("teste", "o nucleo {} nao tem pulso", i);
             return Err("um nucleo ligado nao recebe o proprio timer");
         }
@@ -19784,8 +19783,8 @@ fn smp_um_fio_nunca_roda_em_dois_nucleos() -> Resultado {
     if DUPLOS.load(SeqCst) > 0 {
         return Err("um fio rodou em dois nucleos ao mesmo tempo");
     }
-    for i in 0..FIOS {
-        if SOMA[i].load(SeqCst) != VOLTAS {
+    for soma in &SOMA {
+        if soma.load(SeqCst) != VOLTAS {
             return Err("um fio perdeu somas: duas copias dele se atropelaram");
         }
     }

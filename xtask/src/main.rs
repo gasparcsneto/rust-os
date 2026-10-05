@@ -5951,9 +5951,8 @@ fn sob_nucleo_travado(
     }
 
     let fios = pedir_pela_serial(escrita, leitor, &mut id, "threads.list", "{}")?;
-    if !fios.contains(&format!(
-        r#""name":"travado","state":"running","scheduled":"#
-    )) || !fios.contains(&format!(r#""core":{alvo},"pinned":{alvo}"#))
+    if !fios.contains(r#""name":"travado","state":"running","scheduled":"#)
+        || !fios.contains(&format!(r#""core":{alvo},"pinned":{alvo}"#))
     {
         return Err(format!(
             "nucleos: o fio do travamento nao aparece rodando no nucleo {alvo}\n  {fios}"
