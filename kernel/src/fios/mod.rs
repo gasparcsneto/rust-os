@@ -85,10 +85,13 @@ use pilha::Pilha;
 /// timer, onde pedir memória seria tomar a trava do heap num ponto arbitrário
 /// do programa.
 ///
-/// Trinta e duas desde que há vários núcleos: cada núcleo além do primeiro
-/// ocupa uma vaga com o fio ocioso dele, e com quatro núcleos as dezesseis de
-/// antes perderiam três para fios que não fazem trabalho nenhum.
-pub const MAX_FIOS: usize = 32;
+/// As vagas de trabalho, mais uma para o fio ocioso de cada núcleo que pode
+/// existir além do primeiro — o do primeiro é o fio do boot. Eram trinta e
+/// duas no total, e cada núcleo ligado tirava uma do trabalho: o número de
+/// núcleos e o de fios não estavam ligados, e com o teto de núcleos maior
+/// os ociosos comeriam as vagas todas.
+pub const VAGAS_DE_TRABALHO: usize = 32;
+pub const MAX_FIOS: usize = VAGAS_DE_TRABALHO + crate::nucleos::MAX_NUCLEOS - 1;
 
 /// Quantos núcleos o escalonador acompanha. É o teto de [`crate::nucleos`].
 pub const MAX_NUCLEOS: usize = crate::nucleos::MAX_NUCLEOS;
@@ -458,8 +461,8 @@ impl Escalonador {
     ///
     /// É a quem vale cutucar quando um fio fica pronto: os outros já estão
     /// trabalhando, e o timer deles os leva ao escalonador no próximo tique.
-    fn nucleos_ociosos(&self) -> u8 {
-        let mut mascara = 0u8;
+    fn nucleos_ociosos(&self) -> crate::nucleos::Mascara {
+        let mut mascara: crate::nucleos::Mascara = 0;
         for cpu in 0..MAX_NUCLEOS {
             if self.ociosos[cpu].is_some() && self.atual[cpu] == self.ociosos[cpu] {
                 mascara |= 1 << cpu;
@@ -1278,7 +1281,7 @@ impl Escalonador {
     /// atual dele.
     ///
     /// Rodízio simples: varremos a tabela a partir da posição seguinte à
-    /// atual, dando a volta. É O(MAX_FIOS) no pior caso, o que com 32 vagas é
+    /// atual, dando a volta. É O(MAX_FIOS) no pior caso, o que com 95 vagas é
     /// barato o bastante para rodar dentro de um handler.
     ///
     /// Pode rodar aqui quem está `Pronto`, não está nas mãos de outro núcleo
@@ -1447,7 +1450,7 @@ pub fn adotar_imagem(
 /// Só para a suíte: os núcleos parados no fio ocioso agora — os que um
 /// fio novo precisa cutucar. Ver o caso "smp: o fio novo acorda o ocioso".
 #[cfg(feature = "modo-teste")]
-pub fn ociosos_de_teste() -> u8 {
+pub fn ociosos_de_teste() -> crate::nucleos::Mascara {
     com_escalonador(|e| e.nucleos_ociosos())
 }
 

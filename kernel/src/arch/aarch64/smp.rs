@@ -39,7 +39,7 @@
 use aarch64_cpu::registers::{CNTFRQ_EL0, CNTPCT_EL0};
 use core::arch::asm;
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use tock_registers::interfaces::Readable;
 
 use crate::nucleos::MAX_NUCLEOS;
@@ -314,7 +314,7 @@ extern "C" fn entrada_secundaria(indice: u64) -> ! {
 /// O sistema parou, e todo núcleo que receber a SGI de parada deve parar.
 static PARANDO: AtomicBool = AtomicBool::new(false);
 /// Quem já parou: um bit por núcleo.
-static PARADOS: AtomicU8 = AtomicU8::new(0);
+static PARADOS: AtomicU64 = AtomicU64::new(0);
 
 /// Para todos os outros núcleos, para sempre. Chamada pelo caminho de falha.
 ///
@@ -332,10 +332,10 @@ static PARADOS: AtomicU8 = AtomicU8::new(0);
 /// desistir de esperá-la — medido, com o núcleo travado da sonda anterior.
 /// O contador do timer genérico anda com as IRQs mascaradas e não depende
 /// de nada que o caminho de falha destrava, então o prazo é medido nele.
-pub fn parar_os_outros() -> u8 {
+pub fn parar_os_outros() -> crate::nucleos::Mascara {
     PARANDO.store(true, Ordering::Release);
     let eu = super::nucleo_atual();
-    let outros = crate::nucleos::mascara_dos_ligados() & !(1u8 << eu);
+    let outros = crate::nucleos::mascara_dos_ligados() & !crate::nucleos::bit(eu);
     super::gic::enviar_sgi(outros, super::gic::SGI_PARAR);
     // Um quarto de segundo: um núcleo que ouve a SGI para em microssegundos.
     // As voltas ficam como teto de reserva, para um contador que não ande —
@@ -361,7 +361,7 @@ pub fn atender_parada() {
     if !PARANDO.load(Ordering::Acquire) {
         return;
     }
-    PARADOS.fetch_or(1u8 << super::nucleo_atual(), Ordering::AcqRel);
+    PARADOS.fetch_or(crate::nucleos::bit(super::nucleo_atual()), Ordering::AcqRel);
     parar_este_nucleo()
 }
 

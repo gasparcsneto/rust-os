@@ -518,6 +518,17 @@ pub fn descobrir_nucleos(f: impl FnMut(u64)) {
     smp::descobrir(f);
 }
 
+/// O GIC alcança o núcleo `indice`? O GICv2 endereça no máximo
+/// [`gic::MAIS_INTERFACES`] interfaces de CPU — uma por núcleo, e as SGIs e
+/// as linhas compartilhadas só chegam a elas. O limite é deste
+/// controlador, e mora aqui.
+pub fn nucleo_enderecavel(indice: usize, _hardware: u64) -> Result<(), &'static str> {
+    if indice >= gic::MAIS_INTERFACES {
+        return Err("o GICv2 endereca no maximo oito interfaces de CPU");
+    }
+    Ok(())
+}
+
 /// Acorda o núcleo de `MPIDR` `hardware` como o núcleo `indice`, na pilha
 /// `topo`.
 pub fn partir_nucleo(indice: usize, hardware: u64, topo: u64) -> Result<(), &'static str> {
@@ -528,7 +539,7 @@ pub use smp::{parar_este_nucleo, parar_os_outros};
 
 /// Acorda os núcleos da máscara, se estiverem dormindo — ver
 /// [`crate::nucleos::cutucar`].
-pub fn cutucar(mascara: u8) {
+pub fn cutucar(mascara: crate::nucleos::Mascara) {
     gic::enviar_sgi(mascara, gic::SGI_CUTUCAO);
 }
 

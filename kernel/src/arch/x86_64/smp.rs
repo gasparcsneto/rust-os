@@ -50,7 +50,7 @@
 //! trocaram de `CR3` ao largá-lo, e trocar de `CR3` descarta as traduções do
 //! usuário. Ver [`super::paginacao::desmapear`].
 
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::trava::Mutex;
 use x86_64::structures::paging::PageTable;
@@ -419,14 +419,14 @@ extern "sysv64" fn entrada_secundaria(indice: u64) -> ! {
 /// O endereço cuja tradução os outros núcleos precisam descartar.
 static ALVO: AtomicU64 = AtomicU64::new(0);
 /// Quem ainda não confirmou o descarte: um bit por núcleo.
-static FALTAM: AtomicU8 = AtomicU8::new(0);
+static FALTAM: AtomicU64 = AtomicU64::new(0);
 /// Um pedido de descarte por vez.
 static TRAVA_DO_DESCARTE: Mutex<()> = Mutex::new(());
 
 /// O sistema parou, e todo núcleo que receber uma NMI deve parar também.
 static PARANDO: AtomicBool = AtomicBool::new(false);
 /// Quem já parou: um bit por núcleo.
-static PARADOS: AtomicU8 = AtomicU8::new(0);
+static PARADOS: AtomicU64 = AtomicU64::new(0);
 
 /// Quantas vezes um núcleo esperou outro confirmar, no total.
 static DESCARTES: AtomicU64 = AtomicU64::new(0);
@@ -450,7 +450,7 @@ pub fn descartar_nos_outros(virtual_: u64) {
         return;
     }
     let eu = gdt::nucleo_atual();
-    let outros = crate::nucleos::mascara_dos_ligados() & !(1u8 << eu);
+    let outros = crate::nucleos::mascara_dos_ligados() & !crate::nucleos::bit(eu);
     if outros == 0 {
         return;
     }
@@ -497,7 +497,7 @@ pub fn descartar_nos_outros(virtual_: u64) {
             avisar(FALTAM.load(Ordering::Acquire));
         }
         panic!(
-            "os nucleos {:#010b} nao confirmaram o descarte da traducao {:#x}",
+            "os nucleos {:#x} nao confirmaram o descarte da traducao {:#x}",
             FALTAM.load(Ordering::Acquire),
             virtual_
         );
@@ -505,7 +505,7 @@ pub fn descartar_nos_outros(virtual_: u64) {
 }
 
 /// Manda a NMI de descarte a cada núcleo da máscara.
-fn avisar(mascara: u8) {
+fn avisar(mascara: crate::nucleos::Mascara) {
     for i in 0..MAX_NUCLEOS {
         if mascara & (1 << i) == 0 {
             continue;
@@ -531,10 +531,10 @@ pub fn reavisos() -> u64 {
 /// Devolve a máscara dos que confirmaram. Os que não confirmaram no prazo
 /// não estão executando código do kernel — nem uma NMI os alcança —, e o
 /// relatório segue sem eles.
-pub fn parar_os_outros() -> u8 {
+pub fn parar_os_outros() -> crate::nucleos::Mascara {
     PARANDO.store(true, Ordering::Release);
     let eu = gdt::nucleo_atual();
-    let outros = crate::nucleos::mascara_dos_ligados() & !(1u8 << eu);
+    let outros = crate::nucleos::mascara_dos_ligados() & !crate::nucleos::bit(eu);
     for i in 0..MAX_NUCLEOS {
         if outros & (1 << i) != 0
             && let Some(h) = crate::nucleos::hardware(i).and_then(|h| u32::try_from(h).ok())
@@ -558,7 +558,7 @@ pub fn parar_os_outros() -> u8 {
 /// qualquer uma, e tomar uma trava aqui seria esperar por si mesmo.
 pub fn atender_nmi() {
     let eu = gdt::nucleo_atual();
-    let bit = 1u8 << eu;
+    let bit = crate::nucleos::bit(eu);
 
     if PARANDO.load(Ordering::Acquire) {
         PARADOS.fetch_or(bit, Ordering::AcqRel);

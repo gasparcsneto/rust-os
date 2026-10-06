@@ -647,8 +647,10 @@ escalonador.
 
 ## Vários núcleos
 
-O kernel liga todos os núcleos que a máquina descreve, até oito, e a bancada
-roda com quatro (`-smp 4`; `DUKE_NUCLEOS=1` volta a um só, e a suíte passa
+O kernel liga todos os núcleos que a máquina descreve e que o controlador de
+interrupções dela alcança — até sessenta e quatro, um por bit de uma
+máscara; o GICv2 do ARM endereça oito, e o xAPIC do x86 identificadores até
+254, e cada limite mora no driver do controlador —, e a bancada roda com quatro (`-smp 4`; `DUKE_NUCLEOS=1` volta a um só, e a suíte passa
 dos dois jeitos). No x86 a lista vem da tabela MADT da ACPI — o iniciador
 entrega o endereço da RSDP junto com o mapa da memória — e cada núcleo
 acorda por INIT-SIPI-SIPI num trampolim de modo real abaixo de 1 MiB. No ARM
@@ -676,10 +678,22 @@ está usando aquela pilha. É a propriedade de que todo o resto depende, e o
 caso `smp: um fio nunca roda em dois nucleos` a confere com fios soltos
 passando por todos os núcleos.
 
-**O relógio anda uma vez por tique.** Cada núcleo tem o timer dele, que
-preempta os fios dele; só o primeiro avança o relógio do sistema. Com
-quatro núcleos avançando, o tempo correria quatro vezes mais depressa — e
-os prazos das mensagens e o piso do relógio da persistência com ele.
+**O relógio anda uma vez por tique, por qualquer núcleo vivo.** Cada núcleo
+tem o timer dele, que preempta os fios dele, e todo tique é oferecido ao
+relógio: ele anda pelo núcleo que não viu ninguém andar desde o próprio
+tique anterior. Com quatro núcleos avançando todos, o tempo correria quatro
+vezes mais depressa; com só um, pararia junto com ele — e os prazos das
+mensagens, dos arrendamentos e o piso do relógio da persistência com ele.
+O caso `smp: o relogio anda sem o nucleo dos dispositivos` trava o núcleo
+dos dispositivos de interrupções mascaradas e mede, de outro núcleo, o
+relógio andando.
+
+**O núcleo dos dispositivos.** As interrupções dos dispositivos chegam a
+um núcleo só, o de boot (`NUCLEO_DOS_DISPOSITIVOS`): é nele que o tique
+recolhe o que eles deixaram e que a tela é apresentada — o framebuffer é
+um dispositivo, e apresentar de outro núcleo custava cem vezes mais no
+emulador. Não é uma autoridade: nada do gate, da política ou da auditoria
+pergunta em que núcleo está.
 
 **Avisos entre núcleos.** Três: acordar um núcleo ocioso quando um fio fica
 pronto; derrubar uma tradução do kernel em todos os núcleos antes de o frame
@@ -912,17 +926,22 @@ tabela, pilha além da altura, trava solta fora do núcleo que a tinha).
 
 ### O que fica de fora
 
-- O núcleo 0 é especial: os dispositivos e o canal moram nele, e um núcleo
-  0 travado com as interrupções mascaradas cala o canal. Os outros podem
-  travar.
+- Os dispositivos e o executor do canal moram no núcleo dos dispositivos,
+  e ele travado com as interrupções mascaradas cala o canal — o relógio, não.
+  Levar as linhas de interrupção para outro núcleo quando ele para pede
+  reprogramar o IOAPIC e o distribuidor do GIC em pleno voo, e um executor
+  que migre de núcleo; nenhum dos dois existe.
 - No ARM, a parada no caminho fatal não alcança um núcleo mascarado (GICv2
   sem FIQ nem NMI); ele é relatado, não parado.
 - Uma decisão do gate vale para a ação que ela autorizou mesmo que uma
-  revogação chegue no meio — a regra de antes ("a decisão seguinte vê a
-  nova, e a que estava em curso já tinha decidido"). Com vários núcleos,
-  "em curso" inclui uma chamada de sistema de outro núcleo; nenhuma das que
-  decidem bloqueia, então a janela é a de uma chamada.
-- Oito núcleos no máximo, e no x86 só os de identificador até 255.
+  revogação chegue no meio — salvo onde a ação tem um ponto de commit: lá,
+  como no armazém, a autoridade é decidida de novo com a ordem das
+  gravações na mão, e a revogação que chegou antes vale. As operações sem
+  commit (uma linha na interface, uma mensagem) continuam com a janela de
+  uma chamada.
+- Sessenta e quatro núcleos no máximo — um por bit da máscara —; oito no
+  ARM, pelo GICv2; e no x86 só os de identificador de APIC até 254, sem
+  x2APIC.
 - Um núcleo que não responde à partida é dado como falho e fica de fora, e
   a vaga do fio ocioso que lhe tinha sido preparada fica presa até o
   próximo boot: ele ainda pode acordar tarde, e acorda na pilha dela antes

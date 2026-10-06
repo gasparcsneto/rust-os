@@ -124,8 +124,11 @@ pub const SGI_CUTUCAO: u32 = 0;
 /// É o que o GIC entende por "destino". Não se supõe que seja `1 << índice`:
 /// cada núcleo lê a própria no distribuidor, onde o primeiro registrador de
 /// destino é banqueado e devolve, a quem lê, o bit dele.
-static INTERFACES: [AtomicU8; crate::nucleos::MAX_NUCLEOS] =
-    [const { AtomicU8::new(0) }; crate::nucleos::MAX_NUCLEOS];
+static INTERFACES: [AtomicU8; MAIS_INTERFACES] = [const { AtomicU8::new(0) }; MAIS_INTERFACES];
+
+/// Quantas interfaces de CPU o GICv2 endereça: a lista de destino de uma
+/// SGI e o `ITARGETSR` de uma linha têm um bit por interface, oito.
+pub const MAIS_INTERFACES: usize = 8;
 
 /// INTID devolvido pelo GIC quando não há interrupção pendente de verdade.
 ///
@@ -186,7 +189,12 @@ fn interface_do_primeiro() -> u8 {
 
 /// Anota a máscara de interface de CPU deste núcleo.
 fn registrar_interface() {
-    let indice = super::nucleo_atual().min(crate::nucleos::MAX_NUCLEOS - 1);
+    let indice = super::nucleo_atual();
+    if indice >= MAIS_INTERFACES {
+        // Não acontece: a descoberta não liga um núcleo que o GIC não
+        // alcança — ver `nucleo_enderecavel`.
+        return;
+    }
     // O primeiro registrador de destino cobre as INTIDs privadas, e é
     // banqueado: cada núcleo lê nele o próprio bit.
     INTERFACES[indice].store(distribuidor().itargetsr[0].get(), Ordering::Release);
@@ -221,7 +229,7 @@ pub unsafe fn ligar_neste_nucleo() {
 
 /// Manda a SGI `intid` aos núcleos da máscara `nucleos` (bit `i` = núcleo
 /// `i` do kernel).
-pub fn enviar_sgi(nucleos: u8, intid: u32) {
+pub fn enviar_sgi(nucleos: crate::nucleos::Mascara, intid: u32) {
     let mut destino = 0u32;
     for (i, interface) in INTERFACES.iter().enumerate() {
         if nucleos & (1 << i) != 0 {
@@ -432,12 +440,10 @@ pub fn tratar() -> bool {
     }
 
     if intid == INTID_TIMER {
-        // Cada núcleo conta o próprio pulso; o relógio do sistema, só o
-        // primeiro anda — ver `crate::nucleos`.
+        // Cada núcleo conta o próprio pulso e o oferece ao relógio, que anda
+        // uma vez por período por qualquer núcleo vivo — ver `tempo::tick`.
         crate::nucleos::tique_local();
-        if crate::nucleos::e_o_primeiro() {
-            crate::tempo::tick();
-        }
+        crate::tempo::tick();
         preemptar = crate::fios::tique();
 
         // O timer genérico é one-shot: sem rearmar aqui, esta seria a última

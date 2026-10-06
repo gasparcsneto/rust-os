@@ -474,6 +474,17 @@ pub fn descobrir_nucleos(mut f: impl FnMut(u64)) {
     }
 }
 
+/// O APIC alcança o núcleo de identificador `hardware`? O xAPIC endereça
+/// identificadores de 8 bits, e o 255 é o de difusão: acima de 254 só o
+/// x2APIC, que este kernel não programa. O limite é deste controlador, e
+/// mora aqui — o resto do kernel conta até [`crate::nucleos::MAX_NUCLEOS`].
+pub fn nucleo_enderecavel(_indice: usize, hardware: u64) -> Result<(), &'static str> {
+    if hardware > 254 {
+        return Err("o xAPIC nao endereca identificadores acima de 254 (x2APIC nao suportado)");
+    }
+    Ok(())
+}
+
 /// Acorda o núcleo de APIC `hardware` como o núcleo `indice`, na pilha `topo`.
 pub fn partir_nucleo(indice: usize, hardware: u64, topo: u64) -> Result<(), &'static str> {
     smp::partir(indice, hardware, topo)
@@ -483,7 +494,7 @@ pub use smp::{parar_este_nucleo, parar_os_outros};
 
 /// Acorda os núcleos da máscara, se estiverem dormindo — ver
 /// [`crate::nucleos::cutucar`].
-pub fn cutucar(mascara: u8) {
+pub fn cutucar(mascara: crate::nucleos::Mascara) {
     for i in 0..crate::nucleos::MAX_NUCLEOS {
         if mascara & (1 << i) != 0
             && let Some(h) = crate::nucleos::hardware(i).and_then(|h| u32::try_from(h).ok())

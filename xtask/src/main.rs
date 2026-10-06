@@ -5062,18 +5062,24 @@ const NUCLEOS_DA_BANCADA: u32 = 4;
 
 /// Os núcleos pedidos por `DUKE_NUCLEOS`, ou [`NUCLEOS_DA_BANCADA`].
 ///
-/// Um valor fora de 1 a 8 é recusado em voz alta, e não trocado em silêncio
-/// pelo padrão: quem pediu `-smp 16` e recebeu 4 sem aviso concluiria coisas
-/// erradas sobre o kernel.
-fn nucleos_da_bancada() -> u32 {
+/// Um valor fora do que a máquina de `arch` liga é recusado em voz alta, e
+/// não trocado em silêncio pelo padrão: quem pediu `-smp 16` e recebeu 4 sem
+/// aviso concluiria coisas erradas sobre o kernel. O teto é o da máquina, e
+/// não um do kernel inteiro: o GICv2 do ARM endereça oito núcleos; no x86, o
+/// teto é o do kernel — um núcleo por bit de uma máscara, sessenta e quatro.
+fn nucleos_da_bancada(arch: Arquitetura) -> u32 {
+    let teto = match arch {
+        Arquitetura::X86_64 => 64,
+        Arquitetura::Aarch64 => 8,
+    };
     match std::env::var("DUKE_NUCLEOS") {
         Err(_) => NUCLEOS_DA_BANCADA,
         Ok(texto) => match texto.trim().parse::<u32>() {
-            Ok(n) if (1..=8).contains(&n) => n,
+            Ok(n) if (1..=teto).contains(&n) => n,
             _ => {
                 eprintln!(
-                    "DUKE_NUCLEOS={} nao e um numero de 1 a 8; usando {}",
-                    texto, NUCLEOS_DA_BANCADA
+                    "DUKE_NUCLEOS={} nao e um numero de 1 a {}; usando {}",
+                    texto, teto, NUCLEOS_DA_BANCADA
                 );
                 NUCLEOS_DA_BANCADA
             }
@@ -5183,11 +5189,12 @@ fn comando_qemu(
     //
     // Quatro por padrão: o bastante para que dois fios fixos em núcleos
     // diferentes disputem a mesma trava de verdade, com folga para um núcleo
-    // travado de propósito sem tirar a concorrência dos outros. O teto do
-    // kernel é oito (o GIC v2 do ARM não endereça mais), e `DUKE_NUCLEOS`
-    // escolhe outro número — `1` é o que roda a suíte como ela rodava antes
-    // desta fase, e é como se confere que um núcleo só continua funcionando.
-    qemu.args(["-smp", &nucleos_da_bancada().to_string()]);
+    // travado de propósito sem tirar a concorrência dos outros. O teto é o
+    // de cada máquina (oito no ARM, pelo GICv2; sessenta e quatro no x86,
+    // pelo kernel), e `DUKE_NUCLEOS` escolhe outro número — `1` é o que roda
+    // a suíte como ela rodava antes desta fase, e é como se confere que um
+    // núcleo só continua funcionando.
+    qemu.args(["-smp", &nucleos_da_bancada(arch).to_string()]);
 
     // Um disco virtio, nas duas arquiteturas. `if=none` mais `-device` em vez
     // de `if=virtio` porque só assim o dispositivo aparece no barramento PCI

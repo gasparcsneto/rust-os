@@ -44,7 +44,7 @@
 //! - `encerrar_emulador()`: termina o QEMU comunicando sucesso ou falha.
 //! - `nome()`: o nome da arquitetura, para o protocolo do agente.
 //! - `nucleo_atual()`, `hardware_deste_nucleo()`, `descobrir_nucleos()`,
-//!   `partir_nucleo()`, `ligar_interrupcoes()`, `parar_os_outros()`,
+//!   `partir_nucleo()`, `nucleo_enderecavel()`, `ligar_interrupcoes()`, `parar_os_outros()`,
 //!   `parar_este_nucleo()`: vários núcleos — ver [`crate::nucleos`].
 //! - O ponto de entrada de boot, que preenche [`crate::machine`] e chama
 //!   [`crate::inicio_comum`].
@@ -84,7 +84,8 @@ pub use atual::{
 /// núcleos existem, como acordar um, e como parar todos.
 pub use atual::{
     cutucar, descobrir_nucleos, hardware_deste_nucleo, invalidacoes_remotas, ligar_interrupcoes,
-    nucleo_atual, parar_este_nucleo, parar_os_outros, partir_nucleo, reavisos_remotos,
+    nucleo_atual, nucleo_enderecavel, parar_este_nucleo, parar_os_outros, partir_nucleo,
+    reavisos_remotos,
 };
 
 /// Só para a suíte: o par de conversões de permissão de cada backend.

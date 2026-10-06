@@ -1650,8 +1650,8 @@ fn system_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     // Quantas vezes um núcleo acordou outro que dormia sem trabalho.
     w.field_u64("core_wakeups_sent", crate::nucleos::cutucoes())?;
     let (parados, sem_resposta) = crate::nucleos::parada_do_fim();
-    w.field_u64("fatal_stopped_mask", parados as u64)?;
-    w.field_u64("fatal_unanswered_mask", sem_resposta as u64)?;
+    w.field_u64("fatal_stopped_mask", parados)?;
+    w.field_u64("fatal_unanswered_mask", sem_resposta)?;
     w.key("cores")?;
     w.begin_array()?;
     let mut erro: Option<fmt::Error> = None;

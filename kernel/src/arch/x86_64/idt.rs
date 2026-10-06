@@ -142,14 +142,11 @@ tratadores! {
 /// perguntar ao escalonador. O que muda é quem precisa ser avisado no fim —
 /// o APIC, não o PIC.
 extern "x86-interrupt" fn timer_do_apic(_quadro: InterruptStackFrame) {
-    // Cada núcleo tem o seu timer, e cada um conta o próprio pulso. O
-    // relógio do sistema é um só, e só o primeiro o anda — com todos
-    // andando, ele correria tantas vezes mais rápido quantos fossem os
-    // núcleos. É também no primeiro que o tique recolhe os dispositivos.
+    // Cada núcleo tem o seu timer, e cada um conta o próprio pulso e o
+    // oferece ao relógio, que anda uma vez por período por qualquer núcleo
+    // vivo — ver `tempo::tick`. Os dispositivos, só no núcleo deles.
     crate::nucleos::tique_local();
-    if crate::nucleos::e_o_primeiro() {
-        crate::tempo::tick();
-    }
+    crate::tempo::tick();
     let preemptar = crate::fios::tique();
 
     crate::irq::contabilizar(super::apic::VETOR_TIMER as usize);

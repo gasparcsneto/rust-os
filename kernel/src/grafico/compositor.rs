@@ -300,11 +300,13 @@ impl Compositor {
             compor_em(saida, console, camadas, largura, altura, dano);
             // Compor é escrever no quadro de fundo, que é memória comum, e
             // qualquer núcleo o faz. Apresentar é levar o quadro ao
-            // dispositivo — e o dispositivo é do primeiro núcleo, como as
+            // dispositivo — e o dispositivo é do núcleo dos dispositivos, como as
             // interrupções. Ver [`Compositor::apresentar_pendente`].
-            if !crate::nucleos::e_o_primeiro() {
+            if !crate::nucleos::e_o_dos_dispositivos() {
                 self.pendente = dano;
-                crate::nucleos::cutucar(1);
+                crate::nucleos::cutucar(crate::nucleos::bit(
+                    crate::nucleos::NUCLEO_DOS_DISPOSITIVOS,
+                ));
                 return Ok(dano);
             }
             saida.apresentar(dano)
@@ -323,7 +325,7 @@ impl Compositor {
 
     /// Leva ao dispositivo o que foi composto e ainda não foi apresentado.
     ///
-    /// # Por que a apresentação é do primeiro núcleo
+    /// # Por que a apresentação é do núcleo dos dispositivos
     ///
     /// Porque o quadro de fundo é memória comum e o framebuffer não é. Medido
     /// nesta fase, no emulador da bancada: compor um quadro inteiro no fundo
@@ -335,14 +337,15 @@ impl Compositor {
     ///
     /// A causa é do emulador, mas a decisão não é um remendo para ele: o
     /// framebuffer é um dispositivo, e neste kernel os dispositivos são do
-    /// primeiro núcleo — as interrupções deles chegam lá, e os comandos do
+    /// núcleo dos dispositivos — as interrupções deles chegam lá, e os comandos do
     /// `virtio-gpu` esperam resposta lá. Os outros núcleos compõem, que é o
-    /// trabalho de verdade, e deixam o dano pendente; o primeiro o leva,
-    /// cutucado por quem compôs, ou no tique dele se o cutucão se perder.
+    /// trabalho de verdade, e deixam o dano pendente; o dos dispositivos o
+    /// leva, cutucado por quem compôs, ou no tique dele se o cutucão se
+    /// perder.
     ///
-    /// Num núcleo que não é o primeiro, não faz nada.
+    /// Num núcleo que não é o dos dispositivos, não faz nada.
     pub fn apresentar_pendente(&mut self) {
-        if !crate::nucleos::e_o_primeiro() || self.pendente.vazio() {
+        if !crate::nucleos::e_o_dos_dispositivos() || self.pendente.vazio() {
             return;
         }
         let dano = self.pendente.recortar(self.largura, self.altura);

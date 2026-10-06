@@ -19,12 +19,21 @@
 //! preparado para ele, diz que ligou, liga as interrupções e passa a ser um
 //! lugar onde o escalonador pode pôr fios — ver [`entrar_secundario`].
 //!
-//! # O que fica no primeiro núcleo
+//! # O núcleo dos dispositivos, e o relógio de todos
 //!
-//! As interrupções dos dispositivos e o relógio do sistema. Os outros núcleos
-//! têm timer próprio, e ele só serve para o escalonador deles: o relógio é
-//! um só, e quem o anda é o primeiro. Com todos andando, ele andaria tantas
-//! vezes mais rápido quantos fossem os núcleos.
+//! As interrupções dos dispositivos chegam a um núcleo só — o **núcleo dos
+//! dispositivos**, [`NUCLEO_DOS_DISPOSITIVOS`] —, e é nele que o tique
+//! recolhe o que eles deixaram e que a tela é apresentada. Não é uma
+//! autoridade: nada do gate, da política ou da auditoria pergunta em que
+//! núcleo está. É onde o hardware entrega, e onde os comandos do
+//! `virtio-gpu` esperam resposta.
+//!
+//! O relógio do sistema não é dele. Todo núcleo tem timer, e todo núcleo o
+//! oferece ao relógio ([`crate::tempo::tick`]): o relógio anda uma vez por
+//! período, pelo núcleo que não viu ninguém andar desde o próprio tique
+//! anterior. Com todos de pé, um deles anda e os outros veem; com o dos
+//! dispositivos parado de interrupções mascaradas, outro anda no lugar —
+//! e os prazos do kernel continuam correndo.
 //!
 //! # Por que um pulso por núcleo
 //!
@@ -36,13 +45,31 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
-/// Quantos núcleos o kernel acompanha.
+const _: () = assert!(MAX_NUCLEOS <= Mascara::BITS as usize);
+
+/// Uma máscara de núcleos: o bit `i` é o núcleo `i`.
+pub type Mascara = u64;
+
+/// O bit do núcleo `i` numa [`Mascara`].
+pub const fn bit(i: usize) -> Mascara {
+    1 << i
+}
+
+/// Quantos núcleos o kernel acompanha: um por bit de uma [`Mascara`].
 ///
-/// Oito porque é o teto do controlador de interrupções do ARM desta máquina
-/// — o GICv2 endereça no máximo oito interfaces de CPU — e porque um bitmap
-/// de oito cabe num byte em toda máscara que o kernel precisar montar. Um
-/// núcleo além do teto não é ligado, e o log diz quantos ficaram de fora.
-pub const MAX_NUCLEOS: usize = 8;
+/// Era oito, o teto do GICv2 do ARM, e a máscara era um byte — um limite de
+/// um controlador de interrupções vazado para o kernel inteiro. Agora o
+/// limite de cada controlador mora no driver dele e é perguntado na
+/// descoberta ([`crate::arch::nucleo_enderecavel`]): o GICv2 endereça oito
+/// interfaces de CPU; o xAPIC, identificadores até 254. Um núcleo que o
+/// controlador não alcança não é ligado, e o log diz por quê.
+pub const MAX_NUCLEOS: usize = Mascara::BITS as usize;
+
+/// O núcleo a que chegam as interrupções dos dispositivos — ver o
+/// cabeçalho do módulo. É o primeiro, o de boot: é nele que os
+/// controladores são programados, e as linhas de cada dispositivo apontam
+/// para ele.
+pub const NUCLEO_DOS_DISPOSITIVOS: usize = 0;
 
 /// Quanto o primeiro núcleo espera, em tiques do relógio, por um núcleo que
 /// mandou acordar.
@@ -127,7 +154,8 @@ static NUCLEOS: [Nucleo; MAX_NUCLEOS] = [const {
     }
 }; MAX_NUCLEOS];
 
-/// Quantos núcleos o hardware descreveu além do teto.
+/// Quantos núcleos o hardware descreveu além do teto, ou fora do alcance do
+/// controlador de interrupções.
 static DESCARTADOS: AtomicUsize = AtomicUsize::new(0);
 
 /// Já houve uma rodada de partida? Uma só por boot.
@@ -151,9 +179,9 @@ pub fn tique_local() {
     }
 }
 
-/// Este é o núcleo que anda o relógio e atende os dispositivos?
-pub fn e_o_primeiro() -> bool {
-    atual() == 0
+/// Este é o núcleo dos dispositivos — ver [`NUCLEO_DOS_DISPOSITIVOS`]?
+pub fn e_o_dos_dispositivos() -> bool {
+    atual() == NUCLEO_DOS_DISPOSITIVOS
 }
 
 /// Quantos núcleos estão ligados — o primeiro incluído.
@@ -165,8 +193,8 @@ pub fn ligados() -> usize {
 }
 
 /// Os núcleos ligados, como máscara de bits: o bit `i` é o núcleo `i`.
-pub fn mascara_dos_ligados() -> u8 {
-    let mut mascara = 0u8;
+pub fn mascara_dos_ligados() -> Mascara {
+    let mut mascara: Mascara = 0;
     for (i, n) in NUCLEOS.iter().enumerate() {
         if Estado::de(n.estado.load(Ordering::Acquire)) == Estado::Ligado {
             mascara |= 1 << i;
@@ -231,7 +259,7 @@ pub fn reivindicar_o_fim() {
     let eu = atual();
     match DONO_DO_FIM.compare_exchange(usize::MAX, eu, Ordering::AcqRel, Ordering::Acquire) {
         Ok(_) => {
-            let outros = mascara_dos_ligados() & !(1u8 << eu.min(MAX_NUCLEOS - 1));
+            let outros = mascara_dos_ligados() & !bit(eu.min(MAX_NUCLEOS - 1));
             if outros != 0 {
                 let parados = crate::arch::parar_os_outros();
                 FIM_PARADOS.store(parados & outros, Ordering::Release);
@@ -244,12 +272,12 @@ pub fn reivindicar_o_fim() {
 }
 
 /// Quais núcleos pararam a pedido do caminho de falha.
-static FIM_PARADOS: AtomicU8 = AtomicU8::new(0);
+static FIM_PARADOS: AtomicU64 = AtomicU64::new(0);
 /// Quais não confirmaram a parada no prazo.
-static FIM_SEM_RESPOSTA: AtomicU8 = AtomicU8::new(0);
+static FIM_SEM_RESPOSTA: AtomicU64 = AtomicU64::new(0);
 
 /// `(parados, sem resposta)`, como máscaras, do caminho de falha.
-pub fn parada_do_fim() -> (u8, u8) {
+pub fn parada_do_fim() -> (Mascara, Mascara) {
     (
         FIM_PARADOS.load(Ordering::Acquire),
         FIM_SEM_RESPOSTA.load(Ordering::Acquire),
@@ -269,9 +297,9 @@ pub fn parada_do_fim() -> (u8, u8) {
 /// Perder um cutucão não é perder trabalho: o timer acordaria o núcleo do
 /// mesmo jeito, um tique depois. É por isso que ele pode ser mandado sem
 /// trava e sem confirmação.
-pub fn cutucar(mascara: u8) {
+pub fn cutucar(mascara: Mascara) {
     let eu = atual().min(MAX_NUCLEOS - 1);
-    let alvo = mascara & mascara_dos_ligados() & !(1u8 << eu);
+    let alvo = mascara & mascara_dos_ligados() & !bit(eu);
     if alvo != 0 {
         CUTUCOES.fetch_add(alvo.count_ones() as u64, Ordering::Relaxed);
         for (i, n) in NUCLEOS.iter().enumerate() {
@@ -299,8 +327,8 @@ pub fn cutucoes_de(i: usize) -> (u64, u64) {
 
 /// O que um núcleo faz ao ser cutucado, além de acordar.
 ///
-/// Chamada pelo handler do cutucão de cada arquitetura. Hoje, no primeiro
-/// núcleo, é levar à tela o que outro núcleo compôs — ver
+/// Chamada pelo handler do cutucão de cada arquitetura. Hoje, no núcleo dos
+/// dispositivos, é levar à tela o que outro núcleo compôs — ver
 /// [`crate::grafico::apresentar_pendente`]. Nos outros, nada: acordar já é
 /// tudo.
 pub fn ao_ser_cutucado() {
@@ -356,6 +384,16 @@ pub fn ligar_os_demais() {
         }
         if proximo >= MAX_NUCLEOS {
             DESCARTADOS.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        if let Err(motivo) = crate::arch::nucleo_enderecavel(proximo, hardware) {
+            DESCARTADOS.fetch_add(1, Ordering::Relaxed);
+            crate::log_warn!(
+                "smp",
+                "o nucleo de hardware {:#x} fica desligado: {}",
+                hardware,
+                motivo
+            );
             return;
         }
         NUCLEOS[proximo].hardware.store(hardware, Ordering::Release);
@@ -533,13 +571,28 @@ pub const MAIOR_TRAVAMENTO_MS: u64 = 600_000;
 ///
 /// # O que é recusado
 ///
-/// O primeiro núcleo, porque é nele que o canal do agente, o relógio e os
+/// O núcleo dos dispositivos, porque é nele que o canal do agente e os
 /// dispositivos moram: travá-lo é derrubar o canal que está pedindo, e isso
 /// não é um teste, é um desligamento. E um núcleo que não está ligado.
 pub fn travar(indice: usize, ms: u64) -> Result<u64, &'static str> {
-    if indice == 0 {
-        return Err("o primeiro nucleo e o do canal e do relogio, e nao e travado por aqui");
+    if indice == NUCLEO_DOS_DISPOSITIVOS {
+        return Err("o nucleo dos dispositivos e o do canal, e nao e travado por aqui");
     }
+    travar_em(indice, ms)
+}
+
+/// Só para a suíte: trava o núcleo dos dispositivos, com prazo — para
+/// provar que o relógio anda sem ele. O canal fica mudo pelo prazo, e a
+/// suíte não depende dele enquanto isso.
+#[cfg(feature = "modo-teste")]
+pub fn travar_o_dos_dispositivos_de_teste(ms: u64) -> Result<u64, &'static str> {
+    if ms == 0 {
+        return Err("o nucleo dos dispositivos so se trava com prazo");
+    }
+    travar_em(NUCLEO_DOS_DISPOSITIVOS, ms)
+}
+
+fn travar_em(indice: usize, ms: u64) -> Result<u64, &'static str> {
     let Some(n) = NUCLEOS.get(indice) else {
         return Err("nucleo alem do teto");
     };

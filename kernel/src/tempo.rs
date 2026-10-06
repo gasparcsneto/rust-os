@@ -21,7 +21,12 @@
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
+use crate::nucleos::MAX_NUCLEOS;
+
 static TICKS: AtomicU64 = AtomicU64::new(0);
+
+/// O relógio que cada núcleo viu no próprio tique anterior.
+static VISTO: [AtomicU64; MAX_NUCLEOS] = [const { AtomicU64::new(u64::MAX) }; MAX_NUCLEOS];
 static FREQUENCIA_HZ: AtomicU32 = AtomicU32::new(0);
 
 /// Informa a frequência com que o timer foi programado.
@@ -32,14 +37,55 @@ pub fn registrar_frequencia(hz: u32) {
     FREQUENCIA_HZ.store(hz, Ordering::Relaxed);
 }
 
-/// Incrementa o contador. Chamado pelo handler do timer.
+/// Um tique do timer deste núcleo. Chamado pelo handler do timer de
+/// **todo** núcleo.
 ///
-/// `Relaxed` basta: não estamos sincronizando acesso a nenhum outro dado,
-/// apenas contando. Uma ordenação mais forte custaria barreiras sem nos dar
-/// garantia nenhuma que importe.
+/// O relógio anda aqui, e o trabalho dos dispositivos se faz aqui — mas só
+/// no núcleo dos dispositivos ([`crate::nucleos::NUCLEO_DOS_DISPOSITIVOS`]).
 pub fn tick() {
-    TICKS.fetch_add(1, Ordering::Relaxed);
+    avancar();
+    if crate::nucleos::e_o_dos_dispositivos() {
+        trabalho_dos_dispositivos();
+    }
+}
 
+/// Oferece o tique deste núcleo ao relógio.
+///
+/// # Uma vez por período, por qualquer núcleo vivo
+///
+/// O relógio é um só, e cada núcleo tem timer, todos na mesma frequência.
+/// Se todos o andassem, ele correria tantas vezes mais rápido quantos
+/// fossem os núcleos; se só um o andasse, ele pararia com esse núcleo — e
+/// com ele todo prazo do kernel: arrendamentos, mensagens, o piso do
+/// relógio da persistência. A regra: um núcleo anda o relógio se ninguém o
+/// andou desde o tique anterior **dele**. Em regime, um núcleo anda e os
+/// outros, no tique seguinte deles, veem que andou; se o que anda para —
+/// interrupções mascaradas, um laço preso —, o próximo a tiquear não vê
+/// nada mudar e passa a andar no lugar, um período depois.
+///
+/// Dois núcleos nunca andam o mesmo período: o que anda o faz por troca
+/// atômica do valor que viu, e quem viu o mesmo valor e perdeu a troca vê,
+/// no próximo tique, que andou. A frequência é a do timer de quem anda —
+/// todos programados na mesma.
+fn avancar() {
+    let n = crate::nucleos::atual().min(MAX_NUCLEOS - 1);
+    let agora = TICKS.load(Ordering::Acquire);
+    let antes = VISTO[n].load(Ordering::Relaxed);
+    // O primeiro tique de um núcleo só olha: `u64::MAX` nunca é o relógio.
+    let visto = if agora == antes
+        && TICKS
+            .compare_exchange(agora, agora + 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    {
+        agora + 1
+    } else {
+        TICKS.load(Ordering::Acquire)
+    };
+    VISTO[n].store(visto, Ordering::Relaxed);
+}
+
+/// O que o tique faz no núcleo dos dispositivos, além de andar o relógio.
+fn trabalho_dos_dispositivos() {
     // Acorda quem pediu para ser avisado quando o tempo passasse. Fica aqui,
     // e não nos handlers de cada arquitetura, porque a contagem do tempo já é
     // o ponto neutro por onde as duas passam.
@@ -94,7 +140,7 @@ pub fn tick() {
     // compondo é o caso comum. Vazio, isto é uma leitura de atômico.
     crate::tela::descarregar();
 
-    // E o que outros núcleos compuseram e deixaram para o primeiro levar à
+    // E o que outros núcleos compuseram e deixaram para o núcleo dos dispositivos levar à
     // tela — ver `grafico::apresentar_pendente`. Normalmente o cutucão de
     // quem compôs chega antes; aqui é a rede, para o cutucão que se perder.
     crate::grafico::apresentar_pendente();

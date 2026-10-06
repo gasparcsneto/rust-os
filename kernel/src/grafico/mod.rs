@@ -232,7 +232,7 @@ pub fn compor(dano: Dano) -> bool {
 /// interrompido pode estar com o compositor na mão. Se estiver, o pendente
 /// vai no próximo.
 pub fn apresentar_pendente() {
-    if DESLIGADO.load(Ordering::Acquire) || !crate::nucleos::e_o_primeiro() {
+    if DESLIGADO.load(Ordering::Acquire) || !crate::nucleos::e_o_dos_dispositivos() {
         return;
     }
     crate::arch::sem_interrupcoes(|| {

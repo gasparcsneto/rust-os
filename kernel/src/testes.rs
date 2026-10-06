@@ -19491,17 +19491,22 @@ fn politica_o_sistema_decide_pela_politica() -> Resultado {
 
 /// O aperto de mão vai para a auditoria, e tem limite por janela.
 fn politica_aperto_auditado_e_limitado() -> Resultado {
-    // Um aperto a cada 250 ms: a janela tem de ser maior que o próprio
-    // aperto, que em debug leva dezenas de milissegundos — e curta, porque
-    // cada espera dela é tempo da suíte.
-    let texto = politica::PADRAO.replace("apertos 10 10000", "apertos 1 250");
+    // Um aperto a cada dois segundos: a janela tem de ser maior que o
+    // próprio aperto com folga — em debug, sob o emulador sem aceleração,
+    // ele leva centenas de milissegundos de relógio. Com 250 ms o caso só
+    // passava porque o relógio atrasava: andado só pelo primeiro núcleo,
+    // ele perdia os tiques que chegavam com as interrupções dele
+    // mascaradas, e andava a menos da metade do tempo de verdade. Com o
+    // relógio andado por qualquer núcleo, o aperto passou a cruzar a
+    // janela. O custo é a espera da janela nova, no começo.
+    let texto = politica::PADRAO.replace("apertos 10 10000", "apertos 1 2000");
     let apertada = politica::Politica::ler(&texto).map_err(|_| "a politica do caso nao vale")?;
     let resultado = com_agentes_de_teste(|| {
         crate::autorizacao::trocar_politica(apertada);
         // Uma janela nova nas duas portas do caso: passado o tamanho dela,
         // a contagem recomeça.
         let agora = crate::tempo::uptime_ms();
-        let _ = esperar_ate(|| crate::tempo::uptime_ms() > agora + 260, 100);
+        let _ = esperar_ate(|| crate::tempo::uptime_ms() > agora + 2010, 300);
         let mut sessao = crate::agent::SessaoDeTeste::porta(3);
         let um = AgenteDeTeste::conectar(3, &mut sessao, &chave_de_teste(3))?;
         if um.transporte.is_none() {
@@ -20170,8 +20175,9 @@ fn smp_todos_os_nucleos_ligam() -> Resultado {
 /// arrendamentos, mensagens, o piso do relógio da persistência — venceria
 /// antes da hora. Nenhuma falha, só tudo adiantado.
 ///
-/// Aqui o relógio é comparado com o pulso do primeiro núcleo, que é quem o
-/// anda: os dois precisam andar juntos. E cada núcleo precisa andar mais ou
+/// Aqui o relógio é comparado com o pulso do primeiro núcleo — em regime,
+/// um núcleo anda o relógio por período, e todos têm o mesmo período: os
+/// dois precisam andar juntos. E cada núcleo precisa andar mais ou
 /// menos no mesmo passo — todos têm timer na mesma frequência.
 fn smp_o_relogio_anda_uma_vez_por_tique() -> Resultado {
     let relogio_antes = crate::tempo::ticks();
@@ -20203,6 +20209,65 @@ fn smp_o_relogio_anda_uma_vez_por_tique() -> Resultado {
             );
             return Err("um nucleo anda num passo muito diferente dos outros");
         }
+    }
+    Ok(())
+}
+
+/// O relógio anda sem o núcleo dos dispositivos: travado de interrupções
+/// mascaradas, com prazo, o timer dele não chega — e o relógio do sistema
+/// continua, andado por outro núcleo. Os prazos do kernel — arrendamentos,
+/// mensagens, o piso do relógio da persistência — não param com ele.
+///
+/// Quem mede é um fio em outro núcleo, girando um número de voltas, e não
+/// pelo relógio: se o relógio parasse, a espera por ele não acabaria. E o
+/// mesmo fio solta o travamento, para o núcleo voltar mesmo sem relógio.
+fn smp_o_relogio_anda_sem_o_nucleo_dos_dispositivos() -> Resultado {
+    use core::sync::atomic::{AtomicU64, Ordering::SeqCst};
+    static RELOGIO: AtomicU64 = AtomicU64::new(0);
+    static DO_TRAVADO: AtomicU64 = AtomicU64::new(0);
+    static PRONTO: AtomicU64 = AtomicU64::new(0);
+    extern "C" fn medir(_: u64) -> ! {
+        let dispositivos = crate::nucleos::NUCLEO_DOS_DISPOSITIVOS;
+        if girar_ate(|| crate::nucleos::travados() == 1, 4_000_000_000) {
+            let relogio = crate::tempo::ticks();
+            let do_travado = tiques_do_nucleo(dispositivos);
+            girar_ate(|| crate::tempo::ticks() >= relogio + 20, 2_000_000_000);
+            RELOGIO.store(crate::tempo::ticks() - relogio, SeqCst);
+            DO_TRAVADO.store(tiques_do_nucleo(dispositivos) - do_travado, SeqCst);
+        }
+        crate::nucleos::soltar_travamento();
+        PRONTO.store(1, SeqCst);
+        crate::fios::terminar()
+    }
+    let Some(outro) = nucleos_secundarios().next() else {
+        crate::log_info!("teste", "um nucleo so: nao ha outro para andar o relogio");
+        return Ok(());
+    };
+    RELOGIO.store(0, SeqCst);
+    DO_TRAVADO.store(u64::MAX, SeqCst);
+    PRONTO.store(0, SeqCst);
+    crate::fios::criar_no_nucleo("teste-relogio", medir, 0, outro)?;
+    crate::nucleos::travar_o_dos_dispositivos_de_teste(5_000)?;
+    // Daqui o fio da suíte só volta a rodar, se mora no núcleo travado,
+    // quando o travamento acabar.
+    if !girar_ate(|| PRONTO.load(SeqCst) == 1, 8_000_000_000) {
+        crate::nucleos::soltar_travamento();
+        return Err("o fio que mede nao terminou");
+    }
+    esperar_ate(|| crate::nucleos::travados() == 0, 300)
+        .map_err(|_| "o nucleo dos dispositivos nao voltou")?;
+    let (relogio, do_travado) = (RELOGIO.load(SeqCst), DO_TRAVADO.load(SeqCst));
+    crate::log_info!(
+        "teste",
+        "com o nucleo dos dispositivos travado: o relogio andou {}, o timer dele {}",
+        relogio,
+        do_travado
+    );
+    if do_travado > 1 {
+        return Err("o nucleo dos dispositivos nao ficou travado: o caso nao mediu nada");
+    }
+    if relogio < 20 {
+        return Err("o relogio parou com o nucleo dos dispositivos");
     }
     Ok(())
 }
@@ -28655,6 +28720,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "smp: nucleo travado nao para os outros",
         f: smp_nucleo_travado_nao_para_os_outros,
+    },
+    Caso {
+        nome: "smp: o relogio anda sem o nucleo dos dispositivos",
+        f: smp_o_relogio_anda_sem_o_nucleo_dos_dispositivos,
     },
     Caso {
         nome: "memoria: espacos isolam o mesmo endereco",
