@@ -4184,6 +4184,18 @@ mod chaves {
                 .map_err(|m| {
                     format!("a politica da imagem viola o alcance ao administrador: {m}")
                 })?;
+            // O teto não é posse: nem a serial, nem a autoridade local, nem
+            // um agente da imagem decide pelo papel de um administrador — o
+            // kernel recusaria, e a imagem nem é gerada.
+            politica
+                .conferir_tetos(&["administrador"])
+                .map_err(|m| format!("a politica da imagem exerce um teto: {m}"))?;
+            if let Some(p) = (1..=AGENTES).find(|&p| papel_do_agente(p) == "administrador") {
+                return Err(format!(
+                    "o agente {} da imagem tem o papel administrador, que e um teto: delega, nao se exerce",
+                    nome_do_agente(p)
+                ));
+            }
             // O N de cada quórum é o grupo da imagem: uma política que
             // dissesse outro N deixaria a operação sem como acontecer — o
             // kernel a recusa —, e o erro aparece aqui, antes do boot.

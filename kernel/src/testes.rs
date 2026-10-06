@@ -11750,6 +11750,156 @@ fn admin_espera(
     Ok(())
 }
 
+/// O teto não é posse — `autorizacao::e_papel_de_teto`. A cadeia é
+/// `teto → permissões possíveis → política → gate → operação`:
+///
+/// - o teto do administrador contém `fs.write` em `/armazem/compartilhado`,
+///   e por isso ele **delega** o operador, que o tem;
+/// - quem recebe é o papel do operador, por uma linha da política: tirada a
+///   linha, o operador delegado não escreve — e o teto continua o mesmo;
+/// - o teto mesmo não se dá a ninguém: nem a um agente, nem a uma pessoa,
+///   nem à serial — cada operação de atribuição recusa;
+/// - e uma sessão que o tenha assim mesmo — da imagem, ou de antes desta
+///   regra — não exerce nada dele: o gate recusa com `DENY_ROLE`, inclusive
+///   o `fs.write` em `/armazem/compartilhado` que o teto contém.
+fn teto_o_administrador_delega_e_nao_exerce() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
+    use politica::Codigo;
+    let resultado = com_agentes_de_teste(|| {
+        crate::identidade::registrar_administrador_de_teste(
+            sigilo::publica_de(&ADMIN_DE_TESTE),
+            "administrador",
+        );
+        let delegado = sigilo::publica_de(&[0xA7; 32]);
+        let p = alloc::format!(
+            r#"{{"key":"{}","name":"delegado","role":"operador"}}"#,
+            sigilo::hex(&delegado)
+        );
+        admin_espera(0, &ADMIN_DE_TESTE, "agent.register", &p, None)?;
+
+        // O teto, a ninguém.
+        let outro = sigilo::publica_de(&[0xA8; 32]);
+        let p = alloc::format!(
+            r#"{{"key":"{}","name":"tetado","role":"administrador"}}"#,
+            sigilo::hex(&outro)
+        );
+        admin_espera(
+            0,
+            &ADMIN_DE_TESTE,
+            "agent.register",
+            &p,
+            Some("DENY_POLICY"),
+        )?;
+        if crate::identidade::agente(&outro).is_some() {
+            return Err("um agente foi registrado com o teto como papel");
+        }
+        admin_espera(
+            0,
+            &ADMIN_DE_TESTE,
+            "policy.assign",
+            r#"{"agent":"delegado","role":"administrador"}"#,
+            Some("DENY_POLICY"),
+        )?;
+        if crate::identidade::papel_do_agente(&delegado).as_deref() != Some("operador") {
+            return Err("o papel do delegado mudou para o teto");
+        }
+        let serial_antes =
+            crate::autorizacao::com_politica(|p| alloc::string::String::from(p.serial()));
+        admin_espera(
+            1,
+            &ADMIN_DE_TESTE,
+            "policy.assign",
+            r#"{"agent":"serial","role":"administrador"}"#,
+            Some("DENY_POLICY"),
+        )?;
+        if crate::autorizacao::com_politica(|p| alloc::string::String::from(p.serial()))
+            != serial_antes
+        {
+            return Err("a serial recebeu o teto");
+        }
+        let credencial = crate::pessoas::credencial_de_teste(SENHA_DE_TESTE).escrever();
+        admin_espera(
+            0,
+            &ADMIN_DE_TESTE,
+            "person.register",
+            &alloc::format!(
+                r#"{{"name":"teta","role":"administrador","credential":"{credencial}"}}"#
+            ),
+            Some("DENY_POLICY"),
+        )?;
+
+        // O delegado escreve pelo papel dele, no alcance que a linha dá.
+        let pelo_delegado = Chamador::Processo {
+            fio: 7_300_001,
+            autoridade: Autoridade::Sessao {
+                sessao: 3,
+                chave: Some(delegado),
+            },
+            programa: Programa::Kernel,
+        };
+        let caminho = "/armazem/compartilhado/teto/delegado.txt";
+        let (v, _) = fs_no_armazem(caminho);
+        if !fs_ok(&fs_gravar(pelo_delegado, caminho, v, "pelo papel")) {
+            return Err("o operador delegado nao escreveu no alcance dele");
+        }
+
+        // Um titular com o teto como papel: nada, nem o que o teto contém.
+        crate::identidade::atribuir("delegado", "administrador")
+            .map_err(|_| "a atribuicao falhou")?;
+        let (v, _) = fs_no_armazem(caminho);
+        let r = fs_gravar(pelo_delegado, caminho, v, "pelo teto");
+        if !r.contains("DENY_ROLE") {
+            crate::log_error!("teste", "{}", r);
+            return Err("uma sessao exerceu o teto do administrador");
+        }
+        let e = ultimo_com_metodo("fs.write").ok_or("a recusa nao foi gravada")?;
+        if e.codigo != Codigo::DenyRole || !e.detalhe.contains("teto") {
+            crate::log_error!("teste", "{:?}", e);
+            return Err("a recusa do teto nao diz o motivo");
+        }
+        crate::identidade::atribuir("delegado", "operador").map_err(|_| "a atribuicao falhou")?;
+
+        // A posse é a linha: sem ela, o operador não escreve — e o teto,
+        // que ainda contém o alcance, não muda nada.
+        // (Trocada só em memória e posta de volta igual: o journal não
+        // precisa saber de uma política que não durou.)
+        let antes = crate::autorizacao::com_politica(|p| p.clone());
+        let sem: alloc::string::String = antes
+            .texto()
+            .lines()
+            .filter(|l| !l.starts_with("recurso operador fs.write"))
+            .map(|l| {
+                if l.starts_with("papel operador ") {
+                    l.replace(" fs.write", "")
+                } else {
+                    l.into()
+                }
+            })
+            .collect::<alloc::vec::Vec<_>>()
+            .join("\n");
+        let sem = politica::Politica::ler(&sem).map_err(|_| "a politica sem a linha nao se le")?;
+        crate::autorizacao::restaurar_politica(sem);
+        let teto_tem = crate::autorizacao::com_politica(|p| {
+            p.papel("administrador")
+                .is_some_and(|a| a.tem(politica::Permissao::FsWrite))
+        });
+        let (v, _) = fs_no_armazem(caminho);
+        let r = fs_gravar(pelo_delegado, caminho, v, "sem a linha");
+        crate::autorizacao::restaurar_politica(antes);
+        if !teto_tem {
+            return Err("o teto perdeu o fs.write com a mudanca do operador");
+        }
+        if !r.contains("DENY_PERMISSION") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o operador escreveu sem a linha que da o fs.write");
+        }
+        Ok(())
+    });
+    crate::identidade::esquecer_registrados();
+    let _ = crate::identidade::descartar_desafios();
+    resultado
+}
+
 /// Revogar derruba as sessões vivas da chave, na hora, com a recusa — e
 /// ninguém revoga a chave da própria sessão, nem quem pode mais do que ele.
 fn politica_revogar_derruba_a_sessao() -> Resultado {
@@ -13613,10 +13763,10 @@ fn transicao_gravada(metodo: &str, id: &str) -> bool {
 
 /// Roda `f` com a tabela de mensagens vazia, e a deixa vazia e coerente.
 fn com_mensagens(f: impl FnOnce() -> Resultado) -> Resultado {
-    crate::mensagens::esquecer();
+    crate::mensagens::esvaziar_de_teste();
     let resultado = com_agentes_de_teste(f);
     let coerente = crate::mensagens::coerente();
-    crate::mensagens::esquecer();
+    crate::mensagens::esvaziar_de_teste();
     crate::interpretador::desativar_para_teste();
     crate::identidade::esquecer_registrados();
     crate::pessoas::esquecer_registradas();
@@ -13770,39 +13920,29 @@ fn mensagens_sem_atalho_na_autorizacao() -> Resultado {
         if !mandar(&mut b, &mut sb, "chefe", "do sistema", 9)?.contains(r#""ok":true"#) {
             return Err("o sistema nao alcancou o administrador");
         }
-        // Um titular de sessão com o papel administrador é um titular comum:
-        // manda — ao administrador, também —, recebe, lê e confirma pelas
-        // mesmas regras.
+        // Um titular de sessão com o papel administrador não é um titular
+        // comum: o papel é um teto — delega, não se exerce. O gate recusa
+        // cada pedido dele, com o papel no motivo, e nada chega a caixa
+        // nenhuma. (A atribuição direta é da suíte: as operações
+        // administrativas recusam dar um teto — ver
+        // `teto_o_administrador_delega_e_nao_exerce`.)
         crate::identidade::atribuir(&nome_de_teste(3), "administrador")
             .map_err(|_| "a atribuicao falhou")?;
-        if !mandar(&mut c, &mut sc, "chefe", "do administrador", 10)?.contains(r#""ok":true"#) {
-            return Err("o administrador nao alcancou o administrador");
-        }
-        if crate::mensagens::na_caixa(chefe) != 2 {
-            return Err("a caixa do administrador nao recebeu do sistema e do administrador");
-        }
-        let r = mandar(&mut c, &mut sc, "teste-4", "ao observador", 11)?;
-        if !recusado_com(&r, "DENY_RESOURCE") {
+        let r = mandar(&mut c, &mut sc, "chefe", "do administrador", 10)?;
+        if !recusado_com(&r, "DENY_ROLE") || !gravou(Codigo::DenyRole) {
             crate::log_error!("teste", "{}", r);
-            return Err("o administrador alcancou o observador");
+            return Err("uma sessao com o papel de teto mandou uma mensagem");
         }
-        mandar(&mut b, &mut sb, "teste-3", "ao administrador de sessao", 10)?;
-        let lida = pela_porta(&mut c, &mut sc, "message.read", "{}")?;
-        let id = ids_de(&lida);
-        if id.len() != 1 || !lida.contains("ao administrador de sessao") {
-            crate::log_error!("teste", "{}", lida);
-            return Err("o titular com papel administrador nao recebeu");
+        if crate::mensagens::na_caixa(chefe) != 1 {
+            return Err("a caixa do administrador recebeu de uma sessao com o papel de teto");
         }
-        let r = pela_porta(
-            &mut c,
-            &mut sc,
-            "message.ack",
-            &alloc::format!(r#"{{"id":"{}"}}"#, id[0]),
-        )?;
-        if !r.contains(r#""state":"acked""#) {
+        let r = pela_porta(&mut c, &mut sc, "message.read", "{}")?;
+        if !recusado_com(&r, "DENY_ROLE") {
             crate::log_error!("teste", "{}", r);
-            return Err("o titular com papel administrador nao confirmou");
+            return Err("uma sessao com o papel de teto leu a caixa");
         }
+        crate::identidade::atribuir(&nome_de_teste(3), "observador")
+            .map_err(|_| "a atribuicao falhou")?;
         Ok(())
     })
 }
@@ -14937,7 +15077,7 @@ fn com_grupo(papeis: [&str; 3], f: impl FnOnce() -> Resultado) -> Resultado {
             )
         })
         .collect();
-    crate::mensagens::esquecer();
+    crate::mensagens::esvaziar_de_teste();
     // Os desafios que outros casos deixaram pendentes não entram na conta
     // dos que uma revogação descarta.
     let _ = crate::identidade::descartar_desafios();
@@ -14945,7 +15085,7 @@ fn com_grupo(papeis: [&str; 3], f: impl FnOnce() -> Resultado) -> Resultado {
         crate::identidade::substituir_administradores_de_teste(&grupo);
         f()
     });
-    crate::mensagens::esquecer();
+    crate::mensagens::esvaziar_de_teste();
     crate::identidade::esquecer_registrados();
     crate::autorizacao::carregar();
     let _ = crate::identidade::descartar_desafios();
@@ -15713,6 +15853,10 @@ fn tpm_a_auditoria_nao_gasta_o_contador() -> Resultado {
         Ok(())
     });
     resultado?;
+    // O fim do caso de mensagens purgou o que ficou vivo — uma transição
+    // protegida, gravada como qualquer outra —: o boot conta a partir de
+    // agora.
+    let antes_do_boot = crate::persistencia::ancora_no_tpm_de_teste()?;
     // O boot seguinte: abre o journal com os registros só de auditoria no
     // meio, grava o registro de boot — que avança —, e a cadeia continua.
     de_volta_a_imagem();
@@ -15721,7 +15865,7 @@ fn tpm_a_auditoria_nao_gasta_o_contador() -> Resultado {
         if crate::persistencia::estado() != crate::persistencia::Estado::Disponivel {
             return Err("o journal com registros so de auditoria nao abriu");
         }
-        if crate::persistencia::ancora_no_tpm_de_teste()? != contador + 3 {
+        if crate::persistencia::ancora_no_tpm_de_teste()? != antes_do_boot + 1 {
             return Err("o registro de boot nao avancou o contador uma vez");
         }
         if crate::identidade::agente(&sigilo::publica_de(&[0x8A; 32])).is_none() {
@@ -16497,7 +16641,7 @@ fn de_volta_a_imagem() {
     crate::identidade::esquecer_registrados();
     crate::identidade::esquecer_lapides_de_teste();
     crate::pessoas::esquecer_registradas();
-    crate::mensagens::esquecer();
+    crate::mensagens::como_na_imagem_de_teste();
     crate::armazem::trocar_de_teste(::armazem::Armazem::novo());
     crate::autorizacao::carregar();
 }
@@ -16507,6 +16651,12 @@ fn de_volta_a_imagem() {
 fn estado_do_journal() -> Result<EstadoDoJournal, &'static str> {
     de_volta_a_imagem();
     crate::persistencia::reaplicar_regiao_de_teste()?;
+    Ok(estado_em_memoria())
+}
+
+/// O estado que a memória tem agora, nos mesmos campos de
+/// [`estado_do_journal`].
+fn estado_em_memoria() -> EstadoDoJournal {
     let mut agentes: alloc::vec::Vec<_> = crate::identidade::agentes()
         .into_iter()
         .map(|a| (a.chave, a.nome, a.origem.como_str(), a.papel))
@@ -16524,7 +16674,7 @@ fn estado_do_journal() -> Result<EstadoDoJournal, &'static str> {
     pessoas.sort();
     let (lapides, proximo) =
         crate::mensagens::com_as_caixas(|c| (c.lapides().copied().collect(), c.proximo()));
-    Ok(EstadoDoJournal {
+    EstadoDoJournal {
         agentes,
         revogados,
         politica: crate::autorizacao::com_politica(|p| p.texto()),
@@ -16533,7 +16683,91 @@ fn estado_do_journal() -> Result<EstadoDoJournal, &'static str> {
         lapides,
         proximo,
         armazem: retrato_do_armazem(),
-    })
+    }
+}
+
+/// A reconstrução é uma propriedade do sistema, e não um caminho de teste:
+/// uma imagem limpa, o journal inteiro da região reaplicado por cima, e o
+/// estado que sai é o mesmo — o que a suíte inteira gravou até aqui, sem
+/// compactar antes.
+///
+/// - reaplicar duas vezes sobre a imagem dá o mesmo estado: nada se
+///   duplica, nada depende de quantas vezes se repôs;
+/// - cada prefixo do journal se repõe — o estado de uma queda logo depois
+///   de qualquer registro é um estado que o boot sabe montar;
+/// - um byte estragado num registro para a leitura ali, e um registro
+///   confirmado que não abre é recusado pelo julgamento contra o TPM;
+/// - depois da reconstrução o sistema continua: uma mudança nova grava, e
+///   a reposição seguinte a inclui.
+fn reconstrucao_imagem_limpa_e_journal_inteiro() -> Resultado {
+    let primeira = estado_do_journal()?;
+    let segunda = estado_do_journal()?;
+    if primeira != segunda {
+        return Err("duas reposicoes do mesmo journal deram estados diferentes");
+    }
+    // E a memória, depois da reposição, é exatamente o que ela diz.
+    if estado_em_memoria() != primeira {
+        return Err("a memoria depois da reposicao nao e o estado reposto");
+    }
+
+    // Cada prefixo: o começo, o meio, quase tudo.
+    let quantos = crate::persistencia::percorrida_atual_de_teste()?.quantos;
+    for k in [1, quantos / 3, (2 * quantos) / 3, quantos.saturating_sub(1)] {
+        de_volta_a_imagem();
+        let feitos = crate::persistencia::reaplicar_prefixo_de_teste(k)?;
+        if feitos != k.min(quantos) {
+            crate::log_error!("teste", "prefixo {}: {} de {}", k, feitos, quantos);
+            return Err("um prefixo do journal nao se repos inteiro");
+        }
+    }
+    estado_do_journal()?;
+
+    // Estragado no primeiro setor: nada abre, e o TPM diz que havia.
+    let tpm = crate::persistencia::ancora_no_tpm_de_teste()?;
+    let p = crate::persistencia::percorrer_estragado_de_teste(0)?;
+    if p.quantos != 0 {
+        return Err("o primeiro registro estragado abriu");
+    }
+    if !matches!(
+        diario::julgar(p.ultima_ancora(), Some(tpm)),
+        diario::Veredito::Recusado(_)
+    ) {
+        return Err("um journal sem o primeiro registro passou pelo julgamento");
+    }
+    // Estragado no meio: a leitura para antes do fim.
+    let inteiro = crate::persistencia::percorrida_atual_de_teste()?;
+    let meio = inteiro.proximo_setor / 2;
+    let p = crate::persistencia::percorrer_estragado_de_teste(meio)?;
+    if p.quantos >= inteiro.quantos || p.proximo_setor > meio {
+        crate::log_error!(
+            "teste",
+            "estragado no setor {}: {} de {} registros, parou em {}",
+            meio,
+            p.quantos,
+            inteiro.quantos,
+            p.proximo_setor
+        );
+        return Err("o registro estragado no meio do journal foi lido");
+    }
+
+    // E continua: uma mudança nova, gravada, e a reposição a inclui.
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
+    let sistema = Chamador::Processo {
+        fio: 7_200_009,
+        autoridade: Autoridade::Sistema,
+        programa: Programa::Kernel,
+    };
+    let caminho = "/armazem/sistema/reconstrucao.txt";
+    let (v, _) = fs_no_armazem(caminho);
+    if !fs_ok(&fs_gravar(sistema, caminho, v, "depois da reconstrucao")) {
+        return Err("a gravacao depois da reconstrucao foi recusada");
+    }
+    let depois = retrato_do_armazem();
+    let reposto = estado_do_journal()?;
+    if reposto.armazem != depois || reposto.agentes != primeira.agentes {
+        return Err("a reposicao seguinte nao incluiu a mudanca nova");
+    }
+    Ok(())
 }
 
 /// A compactação não muda o estado: a região nova, reaplicada sobre a
@@ -16546,11 +16780,8 @@ fn estado_do_journal() -> Result<EstadoDoJournal, &'static str> {
 /// é anterior ao que o TPM viu.
 fn compactacao_preserva_o_estado() -> Resultado {
     use diario::estado::tipo;
-    // A suíte zera a tabela de mensagens entre um caso e outro, e o journal
-    // dela tem ids que recomeçam: ele não se reaplica inteiro. Uma
-    // compactação primeiro, e a memória posta igual à região nova — como
-    // num boot —, e só então o caso.
-    crate::persistencia::compactar_de_teste()?;
+    // A memória posta igual à região — a imagem e o journal inteiro
+    // reaplicado, como num boot —, e só então o caso.
     estado_do_journal()?;
     let resultado = com_agentes_de_teste(|| {
         crate::identidade::registrar_administrador_de_teste(
@@ -17122,7 +17353,7 @@ fn mensagens_o_journal_repoe_a_tabela() -> Resultado {
         }
         let viva = crate::mensagens::retrato_de_teste();
         let registros = registros_do_journal()?;
-        crate::mensagens::esquecer();
+        crate::mensagens::como_na_imagem_de_teste();
         for r in &registros[antes..] {
             crate::persistencia::reaplicar_de_teste(r)?;
         }
@@ -17652,7 +17883,7 @@ fn admin_revoke_assinaturas() -> Resultado {
 
     // Uma credencial sem chave de assinatura no registro: prova operações
     // de uma credencial só, e não assina quórum.
-    crate::mensagens::esquecer();
+    crate::mensagens::esvaziar_de_teste();
     let resultado = com_agentes_de_teste(|| {
         crate::identidade::substituir_administradores_de_teste(&[
             (
@@ -17685,7 +17916,7 @@ fn admin_revoke_assinaturas() -> Resultado {
     resultado?;
 
     // O grupo que não é o da política: dois, e a política diz três.
-    crate::mensagens::esquecer();
+    crate::mensagens::esvaziar_de_teste();
     let resultado = com_agentes_de_teste(|| {
         crate::identidade::substituir_administradores_de_teste(&[
             (
@@ -24862,12 +25093,6 @@ fn armazem_o_journal_repoe_o_armazem() -> Resultado {
         programa: Programa::Kernel,
     };
     let base = "/armazem/sistema/repor";
-    // A região começa por uma base tirada da memória. Os casos de mensagens
-    // da suíte esvaziam a tabela em memória e recomeçam os ids, e o journal
-    // de antes de uma compactação não se reaplica sobre uma imagem limpa
-    // depois deles — ver README, "Dívida técnica". O que este caso confere
-    // é o armazém: a base dele, e os registros depois dela.
-    crate::persistencia::compactar_de_teste()?;
     let passo = |metodo: &str, nome: &str, conteudo: Option<&str>| -> Resultado {
         let caminho = alloc::format!("{base}/{nome}");
         let (v, _) = fs_no_armazem(&caminho);
@@ -25606,6 +25831,137 @@ fn pty_a_saida_espera_o_anel() -> Resultado {
     Ok(())
 }
 
+/// A conferência da ordem das travas vê uma inversão: `A` e depois `B`
+/// num lugar, `B` e depois `A` noutro — com um núcleo só, sem impasse
+/// nenhum acontecer. E um ciclo mais longo, `X → Y → Z → X`; e a ordem das
+/// gravações do journal, que é do fio, contra uma trava comum. O `try_lock`
+/// não conta: ele não espera.
+///
+/// Não reproduz a implementação: o que ele exige é o efeito — a inversão
+/// contada — de sequências de travas que qualquer conferência correta tem
+/// de reprovar, e de uma que nenhuma pode reprovar.
+fn travas_a_conferencia_ve_a_inversao() -> Resultado {
+    use crate::trava::Mutex;
+    static A: Mutex<u8> = Mutex::new(0);
+    static B: Mutex<u8> = Mutex::new(0);
+    static X: Mutex<u8> = Mutex::new(0);
+    static Y: Mutex<u8> = Mutex::new(0);
+    static Z: Mutex<u8> = Mutex::new(0);
+    static P: Mutex<u8> = Mutex::new(0);
+    static Q: Mutex<u8> = Mutex::new(0);
+    static R: Mutex<u8> = Mutex::new(0);
+
+    // A ordem certa, repetida: nada.
+    let certas = crate::ordem_das_travas::com_inversoes_esperadas(|| {
+        for _ in 0..3 {
+            let _a = A.lock();
+            let _b = B.lock();
+        }
+    });
+    if certas != 0 {
+        return Err("a mesma ordem repetida foi contada como inversao");
+    }
+    let duas = crate::ordem_das_travas::com_inversoes_esperadas(|| {
+        let b = B.lock();
+        let _a = A.lock();
+        drop(b);
+    });
+    if duas != 1 {
+        crate::log_error!("teste", "A->B e B->A: {} inversoes", duas);
+        return Err("A depois de B, com A->B ja visto, nao foi uma inversao");
+    }
+    let tres = crate::ordem_das_travas::com_inversoes_esperadas(|| {
+        {
+            let _x = X.lock();
+            let _y = Y.lock();
+        }
+        {
+            let _y = Y.lock();
+            let _z = Z.lock();
+        }
+        let _z = Z.lock();
+        let _x = X.lock();
+    });
+    if tres != 1 {
+        crate::log_error!("teste", "X->Y->Z->X: {} inversoes", tres);
+        return Err("o ciclo de tres travas nao foi visto");
+    }
+    // O `try_lock` não espera: tomar `Q` sem espera com `P` na mão não é
+    // aresta, e `Q` depois `P` com espera não é inversão.
+    let sem_espera = crate::ordem_das_travas::com_inversoes_esperadas(|| {
+        {
+            let _p = P.lock();
+            let _q = Q.try_lock();
+        }
+        let _q = Q.lock();
+        let _p = P.lock();
+    });
+    if sem_espera != 0 {
+        return Err("um try_lock foi contado como espera");
+    }
+    // A ordem das gravações: tomada antes de `R` num lugar, e pedida com
+    // `R` na mão noutro.
+    let ordem = crate::ordem_das_travas::com_inversoes_esperadas(|| {
+        crate::persistencia::em_ordem(|| {
+            let _r = R.lock();
+        });
+        let _r = R.lock();
+        crate::persistencia::em_ordem(|| {});
+    });
+    if ordem != 1 {
+        crate::log_error!("teste", "ordem->R e R->ordem: {} inversoes", ordem);
+        return Err("a ordem das gravacoes pedida com uma trava na mao nao foi vista");
+    }
+    Ok(())
+}
+
+/// O último caso: em toda a suíte, nenhuma trava foi tomada nas duas
+/// ordens — ver `crate::ordem_das_travas`. Os casos antes deste exercitam
+/// os caminhos do kernel, em um ou vários núcleos; a conferência acompanhou
+/// cada `lock` deles.
+fn travas_nenhuma_inversao_de_ordem() -> Resultado {
+    let (classes, arestas) = crate::ordem_das_travas::tamanho();
+    let (fora_da_tabela, fora_da_pilha, soltas_de_fora) = crate::ordem_das_travas::pontos_cegos();
+    crate::log_info!(
+        "teste",
+        "ordem das travas: {} classes, {} arestas; cegos: {} fora da tabela, {} fora da pilha, {} soltas fora do nucleo",
+        classes,
+        arestas,
+        fora_da_tabela,
+        fora_da_pilha,
+        soltas_de_fora
+    );
+    if classes < 20 || arestas < 20 {
+        return Err("a conferencia da ordem quase nao viu travas");
+    }
+    if fora_da_tabela != 0 || fora_da_pilha != 0 {
+        return Err("a conferencia da ordem deixou travas de fora");
+    }
+    if soltas_de_fora != 0 {
+        return Err(
+            "uma trava foi solta num nucleo que nao a tinha: levada atraves de uma troca de fio",
+        );
+    }
+    match crate::ordem_das_travas::inversoes() {
+        (0, _) => Ok(()),
+        (n, Some(i)) => {
+            crate::log_error!(
+                "teste",
+                "{} inversoes; a primeira: a trava de {}:{} depois da de {}:{}, fechando o ciclo em {}:{}",
+                n,
+                i.para.file(),
+                i.para.line(),
+                i.de.file(),
+                i.de.line(),
+                i.onde.file(),
+                i.onde.line()
+            );
+            Err("travas tomadas nas duas ordens")
+        }
+        (_, None) => Err("travas tomadas nas duas ordens"),
+    }
+}
+
 /// S7 — a trava é justa: quem pediu antes entra antes. O caso segura uma
 /// trava; um fio em cada outro núcleo a pede, um depois do outro; soltada,
 /// eles entram na ordem em que pediram — em todas as voltas. Uma trava que
@@ -25687,10 +26043,17 @@ fn trava_e_justa_entre_nucleos() -> Resultado {
 }
 
 /// S15 — um fio novo acorda o núcleo ocioso em que pode rodar: ele começa
-/// antes do próximo tique daquele núcleo, e não no tique. Medido em tiques
-/// do próprio núcleo, em várias tentativas: o cutucão leva microssegundos e
-/// o tique vem a cada dez milissegundos, então quase sempre o fio roda no
-/// mesmo tique em que nasceu — sem o cutucão, nunca.
+/// no mesmo tique daquele núcleo em que o cutucão saiu, e não no tique
+/// seguinte. O cutucão leva microssegundos e o tique vem a cada dez
+/// milissegundos, então quase sempre o fio roda no tique do cutucão — sem o
+/// cutucão, nunca.
+///
+/// Medido a partir do cutucão, e não do começo da criação: criar um fio
+/// toma dezenas de travas — a pilha, as páginas, os quadros —, e o quanto
+/// isso dura depende do kernel e do emulador, não do que este caso protege.
+/// Com a conferência da ordem das travas ligada na suíte, a criação passou
+/// a cruzar o tique do alvo em metade das vezes, e o caso — que media da
+/// criação — acusava um despertar que não tinha mudado.
 fn smp_o_fio_novo_acorda_o_ocioso() -> Resultado {
     use core::sync::atomic::{AtomicU64, Ordering::SeqCst};
     const TENTATIVAS: usize = 8;
@@ -25714,35 +26077,61 @@ fn smp_o_fio_novo_acorda_o_ocioso() -> Resultado {
     }
     let eu = crate::nucleos::atual();
     let mut no_mesmo_tique = 0;
+    let mut sem_cutucao = 0;
     let mut feitas = 0;
+    let mut criacao_em_tiques = 0u64;
     for _ in 0..TENTATIVAS * 4 {
         if feitas == TENTATIVAS {
             break;
         }
         // Um núcleo que está ocioso agora: é nele que o cutucão faz falta.
-        let ociosos = crate::fios::ociosos_de_teste() & !(1u8 << eu);
+        let ociosos = crate::fios::ociosos_de_teste() & !(1 << eu);
         let Some(nucleo) = (0..crate::nucleos::MAX_NUCLEOS).find(|&i| ociosos & (1 << i) != 0)
         else {
             crate::fios::ceder();
             continue;
         };
         VISTO.store(u64::MAX, SeqCst);
+        let (cutucoes_antes, _) = crate::nucleos::cutucoes_de(nucleo);
         let antes = tiques_de(nucleo);
         crate::fios::criar_no_nucleo("teste-acorda", anotar, nucleo as u64, nucleo)?;
+        criacao_em_tiques = criacao_em_tiques.max(tiques_de(nucleo).saturating_sub(antes));
         esperar_ate(|| VISTO.load(SeqCst) != u64::MAX, 100)?;
+        let (cutucoes, no_tique) = crate::nucleos::cutucoes_de(nucleo);
         feitas += 1;
-        if VISTO.load(SeqCst) == antes {
+        if cutucoes == cutucoes_antes {
+            sem_cutucao += 1;
+        } else if VISTO.load(SeqCst) == no_tique {
             no_mesmo_tique += 1;
         }
     }
     if feitas < TENTATIVAS / 2 {
         return Err("nao houve nucleo ocioso para o caso medir");
     }
-    // A maioria: um tique pode cair no meio de um cutucão, raramente.
+    // A maioria: um tique pode cair no meio de um cutucão, raramente; e o
+    // alvo pode ter deixado de estar ocioso entre a escolha e a criação.
+    if sem_cutucao * 2 > feitas {
+        crate::log_error!("teste", "{} de {} sem cutucao", sem_cutucao, feitas);
+        return Err("o fio novo nao cutucou o nucleo ocioso");
+    }
     if no_mesmo_tique * 4 < feitas * 3 {
-        crate::log_error!("teste", "{} de {} no mesmo tique", no_mesmo_tique, feitas);
+        crate::log_error!(
+            "teste",
+            "{} de {} no tique do cutucao ({} sem cutucao; a criacao cruzou ate {} tique(s))",
+            no_mesmo_tique,
+            feitas,
+            sem_cutucao,
+            criacao_em_tiques
+        );
         return Err("o fio novo esperou o tique do nucleo ocioso, e nao o cutucao");
     }
+    crate::log_info!(
+        "teste",
+        "{} de {} no tique do cutucao; a criacao cruzou ate {} tique(s) do alvo",
+        no_mesmo_tique,
+        feitas,
+        criacao_em_tiques
+    );
     Ok(())
 }
 
@@ -26878,6 +27267,10 @@ static CASOS: &[Caso] = &[
         f: trava_e_justa_entre_nucleos,
     },
     Caso {
+        nome: "travas: a conferencia ve a inversao",
+        f: travas_a_conferencia_ve_a_inversao,
+    },
+    Caso {
         nome: "smp: o fio novo acorda o ocioso",
         f: smp_o_fio_novo_acorda_o_ocioso,
     },
@@ -27378,6 +27771,20 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "aparencia: a tela tem a linguagem visual",
         f: aparencia_a_tela_tem_a_linguagem_visual,
+    },
+    Caso {
+        nome: "teto: o administrador delega e nao exerce",
+        f: teto_o_administrador_delega_e_nao_exerce,
+    },
+    // Perto do fim: a reposição cobre o que a suíte inteira gravou.
+    Caso {
+        nome: "reconstrucao: imagem limpa e journal inteiro",
+        f: reconstrucao_imagem_limpa_e_journal_inteiro,
+    },
+    // Sempre o último: confere a ordem das travas de todos os anteriores.
+    Caso {
+        nome: "travas: nenhuma inversao de ordem",
+        f: travas_nenhuma_inversao_de_ordem,
     },
 ];
 

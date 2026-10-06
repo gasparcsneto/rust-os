@@ -772,6 +772,24 @@ impl Politica {
         Ok(())
     }
 
+    /// Nenhum teto é exercido pela serial nem pela autoridade local.
+    ///
+    /// Um teto — o papel de um administrador — diz o que se delega, e não o
+    /// que se exerce: a serial e a autoridade local decidem pelo papel delas
+    /// em cada pedido, e um teto ali seria exercido sem linha nenhuma o
+    /// conceder. O kernel confere no boot, o `xtask` antes de pôr a política
+    /// na imagem. `tetos` são os papéis dos administradores.
+    pub fn conferir_tetos(&self, tetos: &[&str]) -> Result<(), String> {
+        for (linha, papel) in [("serial", &self.serial), ("local", &self.local)] {
+            if tetos.contains(&papel.as_str()) {
+                return Err(format!(
+                    "a linha `{linha}` da o papel `{papel}`, que e o teto de um administrador: um teto delega, nao se exerce"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// O papel `papel` cabe inteiro no papel `teto`: cada permissão dele o
     /// teto tem, e com recurso no mínimo tão limitado quanto o do teto.
     ///

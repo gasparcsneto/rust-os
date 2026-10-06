@@ -83,6 +83,8 @@ mod mensagens;
 mod mmio;
 mod nativo;
 mod nucleos;
+#[cfg(feature = "modo-teste")]
+mod ordem_das_travas;
 mod paginacao;
 mod particoes;
 mod pci;

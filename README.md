@@ -256,6 +256,7 @@ kernel/src/
 ├── traps.rs         contabilidade de exceções e modo post-mortem
 ├── nucleos.rs       os vários núcleos: quem ligou, o pulso de cada um, o aviso e o travamento de propósito
 ├── trava.rs         a trava justa, por senha, que todo o kernel usa
+├── ordem_das_travas.rs  só na suíte: a ordem das travas, conferida a cada `lock` — nenhum par em duas ordens
 ├── irq.rs           contadores de interrupções de hardware
 ├── tempo.rs         contagem de tempo desde o boot
 ├── relogio.rs       o relógio de parede: o RTC (CMOS no x86, PL031 no ARM)
@@ -870,7 +871,7 @@ deles muda o caminho de produção nem trata um núcleo de um jeito especial.
 | A trava sem fila (`try_lock` em laço) | caso não determinístico: a inanição era estatística | `trava: justa entre nucleos` — um fio em cada outro núcleo pede a trava em ordem conhecida; soltada, entram na ordem em que pediram, em 24 voltas |
 | Reabrir o console esquecendo a sessão | caso faltando | `consoles: reabrir encerra a sessao` |
 | A saída do pseudo-terminal por `try_lock` | caso faltando: precisava de dois núcleos no mesmo anel | `pty: a saida espera o anel` — outro núcleo segura o anel enquanto este imprime; o texto tem de estar lá |
-| Criar um fio sem acordar os núcleos ociosos | caso faltando: o efeito é latência | `smp: o fio novo acorda o ocioso` — medido em tiques do próprio núcleo, em oito tentativas: com o cutucão o fio roda no mesmo tique, sem ele no seguinte |
+| Criar um fio sem acordar os núcleos ociosos | caso faltando: o efeito é latência | `smp: o fio novo acorda o ocioso` — medido em tiques do próprio núcleo, em oito tentativas, a partir do tique em que o cutucão saiu: com ele o fio roda no mesmo tique, sem ele no seguinte. Medido antes desde o começo da criação, o caso passou a falhar quando a conferência da ordem das travas entrou na suíte — criar um fio toma dezenas de travas, e a criação cruzava o tique do alvo —, sem que o despertar tivesse mudado |
 | O tique sem descarregar o console | caso faltando: o efeito é latência | `tela: o tique leva o que ficou` — escreve com o compositor ocupado, solta, e espera dois tiques sem escrever |
 | A reexecução decidida pelo estado do fio (x86) | caso não determinístico: a janela não era acertada | `fios: a reexecucao e da chamada` — o processo `contido` para entre a chamada voltar e a pergunta; o pedido é atendido nessa hora; ele tem de receber a resposta |
 | O `soltar` liberando o frame fora da trava | caso faltando | `frames: soltar libera na mesma secao` — uma pausa na entrada de `liberar`, para um frame só; outro núcleo compartilha o frame nessa hora |
@@ -878,6 +879,26 @@ deles muda o caminho de produção nem trata um núcleo de um jeito especial.
 As limitações que ficam — o núcleo 0 especial, o teto de núcleos, a janela
 de uma decisão em curso — são de desenho, e estão abaixo; nenhum dos casos
 novos as contorna.
+
+### A ordem das travas, conferida
+
+Duas ordens de travas são um impasse esperando dois núcleos chegarem ao
+mesmo tempo — e a suíte, num emulador com poucos núcleos, quase nunca os faz
+chegar. Por isso a ordem não depende de revisão nem de sorte: na compilação
+da suíte, cada `lock` passa por uma conferência
+([`ordem_das_travas`](kernel/src/ordem_das_travas.rs)). Cada trava é uma
+classe; cada núcleo guarda a pilha das que tem na mão; pedir `B` com `A` na
+mão acrescenta a aresta `A → B` a um grafo, e uma aresta que fecharia um
+ciclo — `B → A`, ou `B → C → A` — é registrada como inversão, com onde cada
+uma foi pedida pela primeira vez e onde o ciclo se fechou. A ordem das
+gravações do journal, que é do fio e não do núcleo, entra no grafo como
+uma classe também. O último caso da suíte, `travas: nenhuma inversao de
+ordem`, falha com a primeira inversão de qualquer caso anterior, em
+qualquer arquitetura e número de núcleos; `travas: a conferencia ve a
+inversao` confere o conferidor, com duas, três travas e a ordem das
+gravações. Na suíte do x86 com quatro núcleos: cem classes, perto de cento
+e setenta arestas, nenhuma inversão, e nenhum ponto cego (classe fora da
+tabela, pilha além da altura, trava solta fora do núcleo que a tinha).
 
 ### O que fica de fora
 
@@ -891,10 +912,6 @@ novos as contorna.
   nova, e a que estava em curso já tinha decidido"). Com vários núcleos,
   "em curso" inclui uma chamada de sistema de outro núcleo; nenhuma das que
   decidem bloqueia, então a janela é a de uma chamada.
-- Não há conferência automática da ordem das travas (um *lockdep*). Os
-  ciclos achados foram corrigidos onde moram, e os outros pontos em que um
-  callback roda com uma trava na mão foram relidos — mas uma ordem nova,
-  escrita depois, só aparece quando dois núcleos a cruzarem.
 - Oito núcleos no máximo, e no x86 só os de identificador até 255.
 - Um núcleo que não responde à partida é dado como falho e fica de fora, e
   a vaga do fio ocioso que lhe tinha sido preparada fica presa até o
@@ -1989,8 +2006,9 @@ substitutos UTF-16 de um caractere fora do plano básico — um emoji escrito
 como `\ud83d\ude00` era recusado como parâmetro inválido.
 
 **Revogar um administrador exige quórum: 2 de 3.** O administrador de
-verdade é a credencial — a chave que prova —, e não um papel: um agente ou
-uma pessoa com o papel `administrador` é um titular de sessão comum. A
+verdade é a credencial — a chave que prova —, e não um papel: o papel
+`administrador` é o teto do que ela delega, e nenhuma sessão — de agente
+ou de pessoa — o exerce (`DENY_ROLE`); ver [O teto não é posse](#o-teto-não-é-posse). A
 imagem tem um grupo de três credenciais, e `admin.revoke` tira uma delas só
 com a prova de **duas outras**: uma chave roubada, sozinha, não revoga as
 dos donos legítimos. O M e o N são da política, por operação — a linha
@@ -2446,9 +2464,38 @@ administradores. O `xtask` confere o mesmo antes de pôr a política na
 imagem, e uma imagem que o viole nem é gerada. O `sistema` não tem
 passe: lê só a própria caixa, e decide pelo alcance que enumera.
 
-Um agente ou uma pessoa com o papel `administrador` é um titular de sessão
-como os outros: manda, recebe, lê e confirma pelas mesmas regras — a
-decisão, o alcance enumerado, a revogação, as cotas e a auditoria.
+O alcance ao `administrador` é o de um destino: uma sessão não exerce o
+papel `administrador` — é um teto, e não uma posse; ver
+[O teto não é posse](#o-teto-não-é-posse).
+
+### O teto não é posse
+
+O papel `administrador`, e o de cada credencial do registro de
+administradores, é um **teto**: o conjunto do que um administrador pode
+delegar (`Politica::cabe_em`). Ele existe na política para que a delegação
+seja representável — o operador tem de caber nele para ser atribuível,
+e por isso o teto tem, por exemplo, o alcance de `/armazem/compartilhado`.
+Ter o teto não é exercê-lo. A cadeia é
+
+```text
+teto → permissões possíveis → política → gate → operação
+```
+
+e o teto só entra no primeiro elo:
+
+- **nenhuma sessão o exerce.** O gate recusa, com `DENY_ROLE`, toda decisão
+  de uma sessão — de agente ou de pessoa — cujo papel é um teto, antes de
+  olhar a permissão; o mesmo para os processos que ela lança e para o
+  `ui.act`;
+- **ninguém o atribui.** `agent.register`, `policy.assign` e
+  `person.register` recusam um papel de teto, com a prova e tudo;
+- **nem a serial nem a autoridade local o têm.** Uma política em que
+  `serial` ou `local` é um papel de teto não vigora — o boot usa a de
+  emergência e audita o motivo —, e o `xtask` não gera uma imagem assim,
+  nem uma em que um agente da imagem tenha o papel `administrador`.
+
+O que um administrador faz, faz pela prova da credencial, nas operações
+administrativas — e nada além delas.
 
 **Quem manda é a sessão.** O remetente nunca vem dos parâmetros: o kernel o
 deriva da sessão autenticada — a chave do aperto, a sessão de pessoa, a

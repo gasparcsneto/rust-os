@@ -266,6 +266,10 @@ pub fn fatal(nome: &'static str, pc: u64, endereco: Option<u64>, codigo: u64) ->
     // de `agent::servir`, então aquele comando não derrubava só a si mesmo:
     // derrubava o canal inteiro, e com ele o resto da autópsia.
     //
+    // A conferência da ordem das travas para aqui: depois do destravamento à
+    // força, ela não sabe mais quem tem o quê.
+    #[cfg(feature = "modo-teste")]
+    crate::ordem_das_travas::desligar();
     // SAFETY: os outros núcleos foram parados logo acima, e a alternativa é
     // o deadlock.
     unsafe {

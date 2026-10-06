@@ -698,11 +698,37 @@ pub fn pausar_o_coletor_de_teste(pausado: bool) {
     COLETOR_PAUSADO.store(pausado, core::sync::atomic::Ordering::Relaxed);
 }
 
-/// Esvazia a tabela, para a suíte: cada caso começa sem mensagens — e sem
-/// transições anotadas e ainda não gravadas, que iriam no registro de outro
-/// caso.
+/// Esvazia a tabela, para a suíte: cada caso começa sem mensagens vivas.
+///
+/// Como uma operação de verdade, e não apagando a memória: cada viva sai
+/// purgada, e a transição vai para o journal, com o que estava anotado e
+/// ainda não gravado. Os ids continuam de onde estavam e a época não muda —
+/// o journal da suíte inteira continua se reaplicando numa imagem limpa,
+/// sem um id repetido que a reposição recusaria. As janelas de nonce são da
+/// sessão, e não do estado: saem como sairiam com o fim das sessões.
+///
+/// Sem a persistência disponível, a purga vale só em memória, como qualquer
+/// mudança de mensagem nesse estado.
 #[cfg(feature = "modo-teste")]
-pub fn esquecer() {
+pub fn esvaziar_de_teste() {
+    crate::persistencia::em_ordem(|| {
+        let tiradas = com_tabela(|t| {
+            let ids: Vec<u64> = t.caixas.todas().map(|m| m.id).collect();
+            t.caixas.esquecer_janelas();
+            ids.into_iter()
+                .filter_map(|id| t.caixas.purgar(id))
+                .collect::<Vec<_>>()
+        });
+        anotar(&tiradas);
+        let _ = crate::persistencia::gravar_mensagens();
+    });
+}
+
+/// A tabela como uma imagem limpa a tem, antes de o journal ser reposto:
+/// vazia, sem ids nem época. Só para a suíte, logo antes de reaplicar o
+/// journal — fora disso, a memória e o journal deixariam de dizer o mesmo.
+#[cfg(feature = "modo-teste")]
+pub fn como_na_imagem_de_teste() {
     crate::arch::sem_interrupcoes(|| *TABELA.lock() = None);
     crate::persistencia::esquecer_pendentes_de_teste();
 }

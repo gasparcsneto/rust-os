@@ -484,4 +484,74 @@ mod testes {
         );
         let _ = "x".to_string();
     }
+
+    /// O `fs.write` do sistema é a linha da política, e só ela: na padrão e
+    /// na de emergência as decisões são as mesmas, caminho a caminho; sem a
+    /// linha, o sistema não escreve — nada no código a supre.
+    #[test]
+    fn o_fs_write_do_sistema_e_so_a_linha() {
+        let p = padrao();
+        let e = Politica::emergencia();
+        for caminho in [
+            "/armazem",
+            "/armazem/x",
+            "/armazem/compartilhado/y",
+            "/armazemx",
+            "/dados/x",
+            "/",
+            "/etc/duke/privado/x",
+        ] {
+            assert_eq!(
+                e.decidir(Some("sistema"), Permissao::FsWrite, Some(caminho)),
+                p.decidir(Some("sistema"), Permissao::FsWrite, Some(caminho)),
+                "{caminho}"
+            );
+        }
+        assert_eq!(
+            p.decidir(Some("sistema"), Permissao::FsWrite, Some("/armazem/x")),
+            Codigo::Allow
+        );
+        assert_eq!(
+            p.decidir(Some("sistema"), Permissao::FsWrite, Some("/dados/x")),
+            Codigo::DenyResource
+        );
+        // A mesma política sem a permissão e sem a linha de alcance dela.
+        let sem: alloc::string::String = PADRAO
+            .lines()
+            .filter(|l| !l.starts_with("recurso sistema fs.write"))
+            .map(|l| {
+                if l.starts_with("papel sistema ") {
+                    l.replace(" fs.write ", " ")
+                } else {
+                    l.to_string()
+                }
+            })
+            .collect::<alloc::vec::Vec<_>>()
+            .join("\n");
+        let sem = Politica::ler(&sem).expect("a politica sem fs.write vale");
+        assert_eq!(
+            sem.decidir(Some("sistema"), Permissao::FsWrite, Some("/armazem/x")),
+            Codigo::DenyPermission
+        );
+        // E o teto não muda por isso: o administrador continua o mesmo.
+        assert_eq!(sem.papel("administrador"), p.papel("administrador"));
+    }
+
+    /// O teto não é posse: a padrão e a de emergência não dão o papel de
+    /// administrador à serial nem à autoridade local, e uma que desse não
+    /// passa pela conferência.
+    #[test]
+    fn nenhum_teto_e_exercido() {
+        for p in [padrao(), Politica::emergencia()] {
+            assert_eq!(p.conferir_tetos(&["administrador"]), Ok(()));
+        }
+        let serial = PADRAO.replace("serial sistema", "serial administrador");
+        let serial = Politica::ler(&serial).expect("le");
+        assert!(serial.conferir_tetos(&["administrador"]).is_err());
+        let local = PADRAO.replace("local sistema", "local administrador");
+        let local = Politica::ler(&local).expect("le");
+        assert!(local.conferir_tetos(&["administrador"]).is_err());
+        // Outro papel de administrador, do registro, é teto também.
+        assert!(padrao().conferir_tetos(&["sistema"]).is_err());
+    }
 }

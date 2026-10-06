@@ -603,12 +603,57 @@ pub(crate) fn politica_que_vigora(bytes: &[u8]) -> Result<Politica, String> {
     }
     let nomes: alloc::vec::Vec<&str> = protegidos.iter().map(String::as_str).collect();
     politica.conferir_alcance_aos_administradores(&nomes)?;
+    // A serial e a autoridade local exercem o papel delas: nenhum dos dois
+    // pode ser um teto — ver [`e_papel_de_teto`].
+    politica.conferir_tetos(&nomes)?;
     Ok(politica)
 }
 
 /// O papel de administrador que todo boot protege, mesmo sem chave de
-/// administrador no registro: um agente ou uma pessoa podem tê-lo.
+/// administrador no registro.
 const PAPEL_DE_ADMINISTRADOR: &str = "administrador";
+
+/// Se `papel` é um **teto**: o `administrador`, ou o papel de uma chave de
+/// administrador do registro.
+///
+/// # O teto não é posse
+///
+/// O papel de um administrador diz o que ele pode **delegar** — o que
+/// `cabe_em` confere numa atribuição — e as operações administrativas que
+/// ele pode provar. Ele não é um papel que se exerce: nenhuma sessão, de
+/// agente ou de pessoa, nem a serial nem a autoridade local, decide por
+/// ele. A cadeia é sempre
+///
+/// ```text
+/// teto → permissões possíveis → política → gate → operação
+/// ```
+///
+/// — o teto contém `fs.write` em `/armazem/compartilhado` para que o
+/// operador o possa receber; quem recebe é o papel do operador, por uma
+/// linha da política, e é a decisão do gate sobre aquele papel que deixa
+/// a operação acontecer. Um titular que tivesse o próprio teto como papel
+/// exerceria tudo o que ele representa sem linha nenhuma o conceder.
+///
+/// Por isso: o gate recusa a sessão cujo papel é um teto (`DENY_ROLE`), as
+/// operações de atribuição recusam dar um teto a alguém, e uma política em
+/// que a serial ou a autoridade local tenham um teto não vigora.
+pub fn e_papel_de_teto(papel: &str) -> bool {
+    papel == PAPEL_DE_ADMINISTRADOR
+        || crate::identidade::papeis_dos_administradores()
+            .iter()
+            .any(|p| p == papel)
+}
+
+/// Se quem pede decidiria por um teto — ver [`e_papel_de_teto`].
+fn papel_de_teto(quem: &Quem) -> bool {
+    quem.papel.as_deref().is_some_and(e_papel_de_teto)
+}
+
+/// A decisão sobre uma sessão cujo papel é um teto.
+const TETO_NAO_SE_EXERCE: (Codigo, &str) = (
+    Codigo::DenyRole,
+    "o papel e o teto de um administrador: delega, nao se exerce",
+);
 
 /// O maior recurso que a auditoria grava, em bytes. O recurso vem do pedido
 /// — um caminho, um número —, e um pedido hostil poderia mandar um caminho
@@ -1194,6 +1239,7 @@ pub fn autorizar(
         // A prova é conferida dentro da operação, e a decisão dela é
         // gravada lá, com o papel do administrador.
         Acesso::PorProva => (Codigo::Allow, "a autorizacao e a prova"),
+        Acesso::Exige(_) if papel_de_teto(&quem) => TETO_NAO_SE_EXERCE,
         Acesso::Exige(permissao) if permissao.recurso_e_destino() => {
             let (codigo, detalhe, resolvido) =
                 decidir_destino(quem.papel.as_deref(), permissao, &recurso);
@@ -1322,6 +1368,7 @@ pub fn autorizar_processo(permissao: Permissao, recurso: &str, metodo: &str) -> 
             nao_declarada = alloc::format!("o manifesto nao declara {}", permissao.nome());
             (Codigo::DenyPermission, nao_declarada.as_str())
         }
+        _ if papel_de_teto(&quem) => TETO_NAO_SE_EXERCE,
         _ => decidir(quem.papel.as_deref(), permissao, recurso),
     };
     auditar(&quem, metodo, recurso, codigo, &[], detalhe);
@@ -1492,7 +1539,11 @@ pub fn autorizar_acao_da_pessoa(
             return Codigo::DenyNotAuthenticated;
         }
     };
-    let (codigo, detalhe) = decidir(quem.papel.as_deref(), Permissao::UiAct, "");
+    let (codigo, detalhe) = if papel_de_teto(&quem) {
+        TETO_NAO_SE_EXERCE
+    } else {
+        decidir(quem.papel.as_deref(), Permissao::UiAct, "")
+    };
     auditar(&quem, "ui.act", &recurso, codigo, &[], detalhe);
     if codigo.permite() {
         contar(&quem, "ui.act", Some(Permissao::UiAct));

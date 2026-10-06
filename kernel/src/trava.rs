@@ -41,6 +41,12 @@
 //! parada —, a senha dele ficou para trás e ele nunca entra na trava junto
 //! com o relatório. Com o teste-e-troca, entrava.
 //!
+//! # A ordem entre travas
+//!
+//! Na suíte, cada trava tomada passa pela conferência da ordem
+//! (`ordem_das_travas.rs`, só na suíte): duas travas tomadas nas duas ordens, em
+//! qualquer lugar do kernel, reprovam a suíte.
+//!
 //! # A disciplina de uso não muda
 //!
 //! Toda trava continua sendo tomada com as interrupções mascaradas, pelo
@@ -58,6 +64,9 @@ pub struct Mutex<T: ?Sized> {
     proxima: AtomicU64,
     /// A senha que está sendo atendida.
     painel: AtomicU64,
+    /// A classe desta trava na conferência da ordem, depois de conhecida.
+    #[cfg(feature = "modo-teste")]
+    classe: core::sync::atomic::AtomicU16,
     dado: UnsafeCell<T>,
 }
 
@@ -78,14 +87,27 @@ impl<T> Mutex<T> {
         Self {
             proxima: AtomicU64::new(0),
             painel: AtomicU64::new(0),
+            #[cfg(feature = "modo-teste")]
+            classe: core::sync::atomic::AtomicU16::new(u16::MAX),
             dado: UnsafeCell::new(dado),
         }
     }
 }
 
 impl<T: ?Sized> Mutex<T> {
+    /// O nome da trava para a conferência da ordem: o endereço.
+    #[cfg(feature = "modo-teste")]
+    fn endereco(&self) -> usize {
+        self as *const Self as *const u8 as usize
+    }
+
     /// Tira uma senha e espera a vez.
+    #[track_caller]
     pub fn lock(&self) -> Guarda<'_, T> {
+        // Antes de esperar: uma ordem invertida é registrada mesmo quando o
+        // impasse acontece de verdade, e não só quando não acontece.
+        #[cfg(feature = "modo-teste")]
+        crate::ordem_das_travas::ao_pedir(self.endereco(), &self.classe);
         // `Relaxed` basta para tirar a senha: o que ordena o acesso ao dado é
         // a leitura do painel, com `Acquire`, que casa com o `Release` de quem
         // soltou.
@@ -93,16 +115,26 @@ impl<T: ?Sized> Mutex<T> {
         while self.painel.load(Ordering::Acquire) != senha {
             core::hint::spin_loop();
         }
+        #[cfg(feature = "modo-teste")]
+        crate::ordem_das_travas::ao_tomar(self.endereco(), &self.classe);
         Guarda { trava: self }
     }
 
     /// Pega a vez só se não houver ninguém com ela nem na fila.
+    #[track_caller]
     pub fn try_lock(&self) -> Option<Guarda<'_, T>> {
         let painel = self.painel.load(Ordering::Acquire);
-        self.proxima
+        let guarda = self
+            .proxima
             .compare_exchange(painel, painel + 1, Ordering::Acquire, Ordering::Relaxed)
             .ok()
-            .map(|_| Guarda { trava: self })
+            .map(|_| Guarda { trava: self });
+        // Sem espera, sem aresta: só a pilha de quem tem a trava na mão.
+        #[cfg(feature = "modo-teste")]
+        if guarda.is_some() {
+            crate::ordem_das_travas::ao_tomar(self.endereco(), &self.classe);
+        }
+        guarda
     }
 
     /// Alguém tem a vez, ou está na fila?
@@ -146,6 +178,8 @@ impl<T: ?Sized> Drop for Guarda<'_, T> {
         // um": depois de um destravamento de emergência não há guarda velha
         // viva para soltar — quem a tinha foi parado —, e somar é o que
         // mantém a conta certa no caso normal.
+        #[cfg(feature = "modo-teste")]
+        crate::ordem_das_travas::ao_soltar(&self.trava.classe);
         self.trava.painel.fetch_add(1, Ordering::Release);
     }
 }

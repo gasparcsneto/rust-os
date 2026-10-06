@@ -752,6 +752,11 @@ impl Caixas {
         self.janelas.remove(&canal);
     }
 
+    /// Todas as sessões acabaram: nenhuma janela de nonces fica.
+    pub fn esquecer_janelas(&mut self) {
+        self.janelas.clear();
+    }
+
     /// As vivas, em ordem de id.
     pub fn todas(&self) -> impl Iterator<Item = &Mensagem> {
         self.vivas.iter()

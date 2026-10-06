@@ -196,11 +196,16 @@ static FALHAR_A_PROXIMA: core::sync::atomic::AtomicBool =
 /// dela, e o que ela chama pode querer gravar —, e quem espera cede a CPU
 /// em vez de girar: quem tem a ordem pode estar preemptado, e só volta se
 /// alguém lhe der o processador. Nunca com as interrupções desligadas.
+#[track_caller]
 pub fn em_ordem<R>(f: impl FnOnce() -> R) -> R {
     let eu = crate::fios::id_atual() + 1;
     if DONO_DA_ORDEM.load(Ordering::Acquire) == eu {
         return f();
     }
+    // A ordem é uma trava também, do fio: pedida com outra na mão, é a
+    // aresta que a conferência da ordem precisa ver.
+    #[cfg(feature = "modo-teste")]
+    crate::ordem_das_travas::ao_pedir_a_ordem();
     while DONO_DA_ORDEM
         .compare_exchange(0, eu, Ordering::Acquire, Ordering::Relaxed)
         .is_err()
@@ -217,6 +222,15 @@ pub fn em_ordem<R>(f: impl FnOnce() -> R) -> R {
     let r = f();
     DONO_DA_ORDEM.store(0, Ordering::Release);
     r
+}
+
+/// Se o fio deste núcleo tem a ordem das gravações, sem tomar trava
+/// nenhuma: a conferência da ordem das travas pergunta de dentro de cada
+/// `lock`.
+#[cfg(feature = "modo-teste")]
+pub fn ordem_na_mao_sem_trava() -> bool {
+    let eu = crate::fios::id_atual_sem_trava() + 1;
+    DONO_DA_ORDEM.load(Ordering::Acquire) == eu
 }
 
 fn com<R>(f: impl FnOnce(&mut Persistencia) -> R) -> R {
@@ -2491,6 +2505,79 @@ pub fn reaplicar_regiao_de_teste() -> Result<u64, &'static str> {
         politica::sigiloso::zerar_bloco(&mut e);
     }
     Ok(p.quantos)
+}
+
+/// Só para a suíte: reaplica só os primeiros `k` registros da região atual
+/// — o que um boot reporia se o journal acabasse logo depois do registro
+/// `k`, numa queda. Devolve quantos reaplicou.
+#[cfg(feature = "modo-teste")]
+pub fn reaplicar_prefixo_de_teste(k: u64) -> Result<u64, &'static str> {
+    let (chave, _) = segredos().ok_or("sem a chave do Duke")?;
+    let mut meio = regiao_atual()?;
+    let mut feitos = 0u64;
+    let r = diario::percorrer(&mut meio, &chave, |r| {
+        if feitos >= k {
+            return Err(None);
+        }
+        reaplicar(&r).map_err(Some)?;
+        feitos += 1;
+        Ok(())
+    });
+    for mut e in tirar_pendentes() {
+        politica::sigiloso::zerar_bloco(&mut e);
+    }
+    match r {
+        Ok(_) | Err(diario::Interrompido::Recusado { motivo: None, .. }) => Ok(feitos),
+        Err(diario::Interrompido::Recusado {
+            motivo: Some(m), ..
+        })
+        | Err(diario::Interrompido::Meio(m)) => Err(m),
+    }
+}
+
+/// Só para a suíte: a região atual percorrida com um byte trocado no setor
+/// `alvo`, como um disco que estragou ali. Nada é reaplicado; devolve o
+/// percurso — quantos registros abriram, e onde parou.
+#[cfg(feature = "modo-teste")]
+pub fn percorrer_estragado_de_teste(alvo: u64) -> Result<diario::Percorrido, &'static str> {
+    struct Estragado {
+        dentro: Particao,
+        alvo: u64,
+    }
+    impl Meio for Estragado {
+        fn setores(&self) -> u64 {
+            self.dentro.setores()
+        }
+        fn ler(&mut self, setor: u64, destino: &mut [u8]) -> Result<(), &'static str> {
+            self.dentro.ler(setor, destino)?;
+            let fim = setor + (destino.len() / diario::TAM_SETOR) as u64;
+            if (setor..fim).contains(&self.alvo) {
+                let i = (self.alvo - setor) as usize * diario::TAM_SETOR + 100;
+                destino[i] ^= 0x5A;
+            }
+            Ok(())
+        }
+        fn escrever(&mut self, _: u64, _: &[u8]) -> Result<(), &'static str> {
+            Err("so leitura")
+        }
+        fn descarregar(&mut self) -> Result<(), &'static str> {
+            Err("so leitura")
+        }
+    }
+    let (chave, _) = segredos().ok_or("sem a chave do Duke")?;
+    let mut meio = Estragado {
+        dentro: regiao_atual()?,
+        alvo,
+    };
+    diario::percorrer(&mut meio, &chave, |_| Ok::<(), ()>(())).map_err(|_| "a regiao nao se le")
+}
+
+/// Só para a suíte: a região atual percorrida, sem reaplicar nada.
+#[cfg(feature = "modo-teste")]
+pub fn percorrida_atual_de_teste() -> Result<diario::Percorrido, &'static str> {
+    let (chave, _) = segredos().ok_or("sem a chave do Duke")?;
+    let mut meio = regiao_atual()?;
+    diario::percorrer(&mut meio, &chave, |_| Ok::<(), ()>(())).map_err(|_| "a regiao nao se le")
 }
 
 /// Só para a suíte: a região `i` percorrida, sem reaplicar nada.

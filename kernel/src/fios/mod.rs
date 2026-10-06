@@ -521,7 +521,7 @@ pub fn init() {
             pedido: EstadoDoPedido::Livre,
             programa: crate::autorizacao::Programa::Kernel,
         });
-        e.atual[cpu] = Some(0);
+        e.por_atual(cpu, 0);
         QUANTUM[cpu].store(QUANTUM_EM_TIQUES, Ordering::Relaxed);
         e.ligado = true;
         LIGADO.store(true, Ordering::Release);
@@ -1184,7 +1184,7 @@ pub fn adotar_ocioso(vaga: usize) {
             fio.na_cpu = Some(cpu);
             fio.escalonamentos = 1;
         }
-        e.atual[cpu] = Some(vaga);
+        e.por_atual(cpu, vaga);
         e.ociosos[cpu] = Some(vaga);
         QUANTUM[cpu].store(QUANTUM_EM_TIQUES, Ordering::Relaxed);
     });
@@ -1391,7 +1391,7 @@ pub unsafe fn selecionar() -> Option<Troca> {
         (&fio.contexto, fio.raiz())
     };
 
-    e.atual[cpu] = Some(proximo);
+    e.por_atual(cpu, proximo);
     e.anterior[cpu] = Some(atual);
     // Quem entra recebe uma fatia inteira, mesmo que a troca tenha vindo de
     // uma cessão voluntária do anterior. Herdar o resto da fatia alheia faria
@@ -1540,6 +1540,31 @@ pub fn autoridade_atual() -> crate::autorizacao::Autoridade {
 /// O identificador do fio que está executando.
 pub fn id_atual() -> u64 {
     com_escalonador(|e| e.fio_atual().map(|f| f.id.numero()).unwrap_or(0))
+}
+
+/// O identificador do fio atual deste núcleo, como [`id_atual`], sem a
+/// trava do escalonador: para quem não pode tomá-la — a conferência da
+/// ordem das travas, que roda dentro de cada `lock`.
+///
+/// O valor é escrito com a trava na mão, nos mesmos pontos em que o
+/// escalonador troca o fio atual do núcleo: lido do próprio núcleo, é o
+/// mesmo que [`id_atual`] daria.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub fn id_atual_sem_trava() -> u64 {
+    ID_NO_NUCLEO[nucleo()].load(Ordering::Acquire)
+}
+
+/// O identificador do fio atual de cada núcleo — ver [`id_atual_sem_trava`].
+static ID_NO_NUCLEO: [AtomicU64; MAX_NUCLEOS] = [const { AtomicU64::new(0) }; MAX_NUCLEOS];
+
+impl Escalonador {
+    /// Põe `vaga` como o fio atual de `cpu`, e o identificador dela onde se
+    /// lê sem a trava.
+    fn por_atual(&mut self, cpu: usize, vaga: usize) {
+        self.atual[cpu] = Some(vaga);
+        let id = self.fios[vaga].as_ref().map_or(0, |f| f.id.numero());
+        ID_NO_NUCLEO[cpu].store(id, Ordering::Release);
+    }
 }
 
 /// Dá acesso à tabela de descritores do fio que está executando.

@@ -1070,6 +1070,20 @@ fn chave(params: Json, nome: &str) -> Result<[u8; sigilo::TAM_CHAVE], Falha> {
     })
 }
 
+/// O papel `papel` pode ser **dado** a alguém: cabe no do administrador, e
+/// não é um teto — ver [`autorizacao::e_papel_de_teto`]. Um teto dado a um
+/// agente, a uma pessoa ou à serial seria o titular exercendo o que o teto
+/// só diz que se pode delegar.
+fn atribuivel(pedinte: &Pedinte, papel: &str) -> Result<(), Falha> {
+    if autorizacao::e_papel_de_teto(papel) {
+        return Err(falha(
+            Codigo::DenyPolicy,
+            format!("`{papel}` e o teto de um administrador: delega, nao se atribui"),
+        ));
+    }
+    cabe(pedinte, papel)
+}
+
 /// O papel `papel` cabe no do administrador. A recusa é da política.
 fn cabe(pedinte: &Pedinte, papel: &str) -> Result<(), Falha> {
     autorizacao::com_politica(|p| p.cabe_em(papel, pedinte.papel))
@@ -1098,7 +1112,7 @@ fn registrar_agente(pedinte: &Pedinte, params: Json, w: &mut JsonWriter) -> Resu
             "uma chave de administrador nao se registra como agente",
         ));
     }
-    cabe(pedinte, papel)?;
+    atribuivel(pedinte, papel)?;
     crate::identidade::registrar(chave, nome, papel).map_err(recusa_do_registro)?;
     crate::log_info!(
         "admin",
@@ -1160,7 +1174,7 @@ const ALVO_SERIAL: &str = "serial";
 fn atribuir_papel(pedinte: &Pedinte, params: Json, w: &mut JsonWriter) -> Result<String, Falha> {
     let alvo = texto(params, "agent")?;
     let papel = texto(params, "role")?;
-    cabe(pedinte, papel)?;
+    atribuivel(pedinte, papel)?;
 
     if alvo == ALVO_SERIAL {
         if pedinte.sessao == super::sessao::SERIAL {
@@ -1269,7 +1283,7 @@ fn registrar_pessoa(pedinte: &Pedinte, params: Json, w: &mut JsonWriter) -> Resu
     let nome = texto(params, "name")?;
     let papel = texto(params, "role")?;
     let credencial = credencial(params)?;
-    cabe(pedinte, papel)?;
+    atribuivel(pedinte, papel)?;
     let id = crate::pessoas::registrar(nome, papel, credencial).map_err(recusa_de_pessoas)?;
     crate::log_info!(
         "admin",

@@ -107,6 +107,11 @@ struct Nucleo {
     hardware: AtomicU64,
     /// Quantos tiques do timer **deste** núcleo já chegaram.
     tiques: AtomicU64,
+    /// Quantos cutucões foram mandados a ele, e em que tique dele saiu o
+    /// último — para medir o que o cutucão promete: acordar já, e não no
+    /// tique seguinte.
+    cutucoes: AtomicU64,
+    cutucado_no_tique: AtomicU64,
     /// A vaga do fio ocioso preparado para ele.
     ocioso: AtomicUsize,
 }
@@ -116,6 +121,8 @@ static NUCLEOS: [Nucleo; MAX_NUCLEOS] = [const {
         estado: AtomicU8::new(Estado::Ausente as u8),
         hardware: AtomicU64::new(0),
         tiques: AtomicU64::new(0),
+        cutucoes: AtomicU64::new(0),
+        cutucado_no_tique: AtomicU64::new(0),
         ocioso: AtomicUsize::new(usize::MAX),
     }
 }; MAX_NUCLEOS];
@@ -267,8 +274,27 @@ pub fn cutucar(mascara: u8) {
     let alvo = mascara & mascara_dos_ligados() & !(1u8 << eu);
     if alvo != 0 {
         CUTUCOES.fetch_add(alvo.count_ones() as u64, Ordering::Relaxed);
+        for (i, n) in NUCLEOS.iter().enumerate() {
+            if alvo & (1 << i) != 0 {
+                n.cutucado_no_tique
+                    .store(n.tiques.load(Ordering::Relaxed), Ordering::Relaxed);
+                n.cutucoes.fetch_add(1, Ordering::Release);
+            }
+        }
         crate::arch::cutucar(alvo);
     }
+}
+
+/// Quantos cutucões o núcleo `i` recebeu, e em que tique dele saiu o
+/// último. O tique é anotado antes de o cutucão sair.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub fn cutucoes_de(i: usize) -> (u64, u64) {
+    NUCLEOS.get(i).map_or((0, 0), |n| {
+        (
+            n.cutucoes.load(Ordering::Acquire),
+            n.cutucado_no_tique.load(Ordering::Relaxed),
+        )
+    })
 }
 
 /// O que um núcleo faz ao ser cutucado, além de acordar.
