@@ -1828,11 +1828,12 @@ versões ou sem a próxima versão, o nó velho lendo o conteúdo novo, o
 resultado auditado em nome do kernel, o diretório arrendado, o sistema
 escrevendo na árvore inteira, o handler que não audita o que fez, a
 gravação sem o conteúdo, o `lease.revoke` que não acha o caminho e os
-filhos fora da ordem dos nomes. Três delas só reprovaram depois de a
-campanha mostrar que os casos não as viam, e os casos ganharam a
+filhos fora da ordem dos nomes. Três delas os casos não viam — achado ao
+escrever a campanha, antes de rodá-la —, e os casos ganharam a
 conferência: nenhum anúncio de mudança na auditoria sem persistência, um
 arquivo de versão nova num nome que vem antes, e o que o comando fez em
-nome da pessoa, pelo processo.
+nome da pessoa, pelo processo. Uma (a mutação fora da ordem das gravações)
+só a pega o caso de vários núcleos, e é reprovada com quatro.
 
 ### Dívida técnica
 
