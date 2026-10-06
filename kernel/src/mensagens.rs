@@ -22,6 +22,11 @@
 //!   chamado só por [`crate::agent::administracao`].
 //! - **A revogação** de uma chave ou de uma pessoa anula, na hora, as
 //!   mensagens vivas que ela mandou e as que ia receber.
+//! - **A decisão em curso.** O gate decide antes de a ordem das gravações
+//!   estar na mão; cada operação de uma sessão que muda a tabela decide de
+//!   novo com ela na mão ([`Remetente`]), antes de mudar qualquer coisa — a
+//!   revogação grava com a mesma ordem, e nenhuma mensagem de um titular
+//!   revogado nasce depois das anulações.
 //! - **O corpo não é interpretado.** Vai para a caixa e volta para quem lê;
 //!   a auditoria grava o resumo dos parâmetros do pedido, nunca o texto.
 //!
@@ -281,6 +286,28 @@ impl Remetente {
         })
     }
 
+    /// A decisão em curso: o gate decidiu este comando antes de a ordem das
+    /// gravações estar na mão, e uma revogação — que anula as mensagens
+    /// vivas do titular — ou uma política nova pode ter passado no meio.
+    /// Com a ordem na mão, a autoridade é decidida de novo, pela política
+    /// de agora: ou esta operação vê a revogação e é recusada, ou a
+    /// revogação vem depois dela inteira — e a anula, se for o caso. Sem
+    /// isso, uma mensagem decidida antes da revogação seria criada depois
+    /// das anulações, de um titular que não existe mais.
+    ///
+    /// Só para quem age por uma sessão: o administrador age pela prova, que
+    /// é conferida na operação administrativa.
+    fn reconfirmar(&self) -> Result<(), Recusa> {
+        #[cfg(feature = "modo-teste")]
+        crate::autorizacao::gancho_da_reconfirmacao();
+        match self.ator {
+            AtorDeMensagem::Autoridade(_) => {
+                crate::autorizacao::reconfirmar().map_err(|(c, m)| Recusa::Reconfirmacao(c, m))
+            }
+            AtorDeMensagem::Dono(_) | AtorDeMensagem::Kernel => Ok(()),
+        }
+    }
+
     /// O administrador de uma operação administrativa, com a prova já
     /// conferida. Só [`crate::agent::administracao`] chama — o `xtask
     /// invariantes` confere.
@@ -339,6 +366,16 @@ fn enviar_em_ordem(
     nonce: u64,
     prazo_ms: Option<u64>,
 ) -> Result<(String, Enviada), Recusa> {
+    if let Err(recusa) = r.reconfirmar() {
+        crate::autorizacao::auditar_mensagem(
+            r.ator,
+            "message.send",
+            &destino.texto,
+            recusa.codigo(),
+            recusa.motivo(),
+        );
+        return Err(recusa);
+    }
     let agora = crate::persistencia::agora_ms();
     // As cotas são da política, e saem antes da trava da tabela: pedir a da
     // política com esta na mão seria uma trava dentro da outra.
@@ -410,6 +447,17 @@ pub fn ler(r: &Remetente, apos: Option<&str>, max: usize) -> (Result<Leitura, Re
 }
 
 fn ler_em_ordem(r: &Remetente, apos: Option<&str>, max: usize) -> Result<Leitura, Recusa> {
+    // Ler entrega: a primeira leitura é uma transição gravada.
+    if let Err(recusa) = r.reconfirmar() {
+        crate::autorizacao::auditar_mensagem(
+            r.ator,
+            "message.read",
+            "caixa",
+            recusa.codigo(),
+            recusa.motivo(),
+        );
+        return Err(recusa);
+    }
     let agora = crate::persistencia::agora_ms();
     let (epoca, res) = com_tabela(|t| {
         let apos = match apos {
@@ -452,6 +500,16 @@ fn sobre_uma_em_ordem(
     metodo: &str,
     f: impl FnOnce(&mut Caixas, u64, u64) -> (Result<Transicao, Recusa>, Vec<Transicao>),
 ) -> Result<Transicao, Recusa> {
+    if let Err(recusa) = r.reconfirmar() {
+        crate::autorizacao::auditar_mensagem(
+            r.ator,
+            metodo,
+            &format!("msg:{id}"),
+            recusa.codigo(),
+            recusa.motivo(),
+        );
+        return Err(recusa);
+    }
     let agora = crate::persistencia::agora_ms();
     let (epoca, res) = com_tabela(|t| {
         let res = match ler_id(&t.epoca, id) {

@@ -14088,6 +14088,183 @@ fn mensagens_revogacao_anula() -> Resultado {
     })
 }
 
+/// A política de agora sem `permissao` em papel nenhum — nas linhas dos
+/// papéis e nas do alcance dela —, para que o teto de quem delega continue
+/// contendo o que cada papel recebe.
+fn politica_sem(permissao: &str) {
+    let texto = crate::autorizacao::com_politica(|p| p.texto());
+    let alcance = alloc::format!(" {permissao} ");
+    let sem: alloc::string::String = texto
+        .lines()
+        .filter(|l| !(l.starts_with("recurso ") && l.contains(&alcance)))
+        .map(|l| {
+            if l.starts_with("papel ") {
+                alloc::format!("{l} ")
+                    .replace(&alcance, " ")
+                    .trim_end()
+                    .into()
+            } else {
+                alloc::string::String::from(l)
+            }
+        })
+        .collect::<alloc::vec::Vec<_>>()
+        .join("\n");
+    if let Ok(p) = politica::Politica::ler(&sem) {
+        crate::autorizacao::restaurar_politica(p);
+    }
+}
+
+/// A decisão em curso, nas mensagens: o gate decide, e entre a decisão e a
+/// mudança na tabela — com a ordem das gravações na mão — a política tira
+/// a permissão do papel, ou a chave de quem pede é revogada. A operação é
+/// decidida de novo ali, e recusada: a mensagem não é criada (e não
+/// sobrevive às anulações da revogação, que vieram antes dela), a leitura
+/// não entrega, e a recusa vai para a auditoria como o resultado do
+/// comando que o gate autorizou.
+fn mensagens_revogacao_no_meio_da_operacao() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
+    const REMETENTE: [u8; 32] = [0x6F; 32];
+    let remetente = sigilo::publica_de(&REMETENTE);
+    let destino = sigilo::publica_de(&[0x70; 32]);
+    let como = |chave: [u8; 32], fio: u64| Chamador::Processo {
+        fio,
+        autoridade: Autoridade::Sessao {
+            sessao: 3,
+            chave: Some(chave),
+        },
+        programa: Programa::Kernel,
+    };
+    let mandar = |nonce: u64| {
+        fs_pedir(
+            como(remetente, 7_270_001),
+            "message.send",
+            &alloc::format!(r#"{{"to":"msg-destino","body":"no meio","nonce":{nonce}}}"#),
+        )
+    };
+    let ler = || fs_pedir(como(destino, 7_270_002), "message.read", "{}");
+    let antes = crate::autorizacao::com_politica(|p| p.clone());
+    let resultado = com_mensagens(|| {
+        crate::identidade::registrar_agente_de_teste(remetente, "msg-meio", "operador");
+        crate::identidade::registrar_agente_de_teste(destino, "msg-destino", "operador");
+        let caixa = || crate::mensagens::na_caixa(politica::mensagens::Dono::Agente(destino));
+
+        // A política tira `message.send` no meio do envio.
+        fn sem_send() {
+            politica_sem("message.send");
+        }
+        crate::autorizacao::antes_da_reconfirmacao_de_teste(Some(sem_send));
+        let r = mandar(1);
+        crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+        crate::autorizacao::restaurar_politica(antes.clone());
+        if decisao_do_envelope(&r) != "ALLOW" || !recusa_de_mensagem(&r, "DENY_PERMISSION") {
+            crate::log_error!("teste", "{}", r);
+            return Err("a politica mudada no meio nao recusou o envio");
+        }
+        if caixa() != 0 {
+            return Err("o envio decidido com a politica velha criou a mensagem");
+        }
+        // Sem nada no meio, o mesmo envio passa.
+        let id = ids_de(&mandar(2))
+            .pop()
+            .ok_or("o envio sem nada no meio falhou")?;
+        if caixa() != 1 {
+            return Err("o envio sem nada no meio nao chegou");
+        }
+
+        // A política tira `message.read` no meio da leitura: nada entregue.
+        fn sem_read() {
+            politica_sem("message.read");
+        }
+        crate::autorizacao::antes_da_reconfirmacao_de_teste(Some(sem_read));
+        let r = ler();
+        crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+        crate::autorizacao::restaurar_politica(antes.clone());
+        if decisao_do_envelope(&r) != "ALLOW"
+            || !recusa_de_mensagem(&r, "DENY_PERMISSION")
+            || !ids_de(&r).is_empty()
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("a politica mudada no meio nao recusou a leitura");
+        }
+        if transicao_gravada("message.deliver", &id) {
+            return Err("a leitura recusada no meio entregou a mensagem");
+        }
+        if ids_de(&ler()) != [id.clone()] || !transicao_gravada("message.deliver", &id) {
+            return Err("a leitura sem nada no meio nao entregou");
+        }
+
+        // A chave de quem manda é revogada no meio do envio: a revogação
+        // anula o que ela tinha mandado, e o envio decidido antes dela não
+        // cria uma mensagem nova depois das anulações.
+        fn revogar() {
+            let _ = crate::identidade::revogar(&sigilo::publica_de(&REMETENTE));
+        }
+        crate::autorizacao::antes_da_reconfirmacao_de_teste(Some(revogar));
+        let r = mandar(3);
+        crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+        if decisao_do_envelope(&r) != "ALLOW" || !r.contains(r#""ok":false"#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("a chave revogada no meio mandou");
+        }
+        if caixa() != 0 {
+            return Err("a mensagem de uma chave revogada ficou na caixa");
+        }
+        let e = ultimo_com_metodo("message.send").ok_or("a recusa nao foi gravada")?;
+        if e.codigo == politica::Codigo::Allow {
+            crate::log_error!("teste", "{:?}", e);
+            return Err("a recusa no meio nao foi gravada como o resultado do comando");
+        }
+        Ok(())
+    });
+    crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+    crate::autorizacao::restaurar_politica(antes);
+    resultado
+}
+
+/// A decisão em curso, nas operações administrativas: a prova e o papel são
+/// conferidos, e entre isso e a operação — com a ordem das gravações na
+/// mão — a política tira a permissão, ou a credencial é revogada. A
+/// operação é decidida de novo ali, e recusada sem executar; a recusa vai
+/// para a auditoria com o administrador e o código.
+fn admin_revogacao_no_meio_da_operacao() -> Resultado {
+    let antes = crate::autorizacao::com_politica(|p| p.clone());
+    let resultado = com_grupo(["administrador"; 3], || {
+        let (um, tres) = (&GRUPO_DE_TESTE[0].0, &GRUPO_DE_TESTE[2].0);
+        // Sem nada no meio, a operação executa.
+        admin_espera(0, um, "message.read", "{}", None)?;
+        // A política tira `message.read` no meio.
+        fn sem_read() {
+            politica_sem("message.read");
+        }
+        crate::autorizacao::antes_da_reconfirmacao_de_teste(Some(sem_read));
+        let r = admin_espera(0, um, "message.read", "{}", Some("DENY_PERMISSION"));
+        crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+        crate::autorizacao::restaurar_politica(antes.clone());
+        r.map_err(|_| "a politica mudada no meio nao recusou a operacao administrativa")?;
+        // A credencial 3 é revogada no meio da operação dela.
+        fn revogar_a_tres() {
+            let _ = crate::identidade::revogar_administrador(&sigilo::publica_de(&[0xA3; 32]), 2);
+        }
+        crate::autorizacao::antes_da_reconfirmacao_de_teste(Some(revogar_a_tres));
+        let r = admin_espera(
+            0,
+            tres,
+            "message.read",
+            "{}",
+            Some("DENY_NOT_AUTHENTICATED"),
+        );
+        crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+        r.map_err(|_| "a credencial revogada no meio executou a operacao")?;
+        if !crate::identidade::administrador_revogado(&publica_do_grupo(2)) {
+            return Err("a revogacao do meio nao aconteceu");
+        }
+        Ok(())
+    });
+    crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+    crate::autorizacao::restaurar_politica(antes);
+    resultado
+}
+
 /// Destinatário inexistente: recusado pela decisão, `DENY_RESOURCE`, com a
 /// mesma resposta do revogado e do fora de alcance — e a auditoria grava o
 /// motivo exato. Nenhum id é gasto.
@@ -28243,6 +28420,14 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "mensagens: a revogacao e as anulacoes vao no mesmo registro",
         f: mensagens_a_revogacao_anula_no_mesmo_registro,
+    },
+    Caso {
+        nome: "mensagens: revogacao no meio da operacao",
+        f: mensagens_revogacao_no_meio_da_operacao,
+    },
+    Caso {
+        nome: "admin: revogacao no meio da operacao",
+        f: admin_revogacao_no_meio_da_operacao,
     },
     Caso {
         nome: "barra: nenhuma superficie a cobre",

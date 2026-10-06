@@ -87,6 +87,43 @@ fn falha(codigo: Codigo, motivo: impl Into<String>) -> Falha {
     (codigo, motivo.into())
 }
 
+/// A decisão de uma operação administrativa, de novo, com a ordem das
+/// gravações na mão — ver o ponto em que [`executar`] a chama. A mesma conta
+/// de antes: a credencial ativa, com o papel com que foi decidida, e a
+/// permissão (e o destinatário) que a política de agora dá a esse papel.
+fn reconfirmar(
+    administrador: &[u8; 32],
+    papel: &str,
+    permissao: Permissao,
+    alvo: Option<&str>,
+) -> Result<(), Falha> {
+    #[cfg(feature = "modo-teste")]
+    autorizacao::gancho_da_reconfirmacao();
+    let Some((_, agora)) = crate::identidade::papel_do_administrador(administrador) else {
+        return Err(falha(
+            Codigo::DenyNotAuthenticated,
+            "credencial de administrador revogada no meio da operacao",
+        ));
+    };
+    if agora.as_deref() != Some(papel) {
+        return Err(falha(
+            Codigo::DenyRole,
+            "o papel do administrador mudou no meio da operacao",
+        ));
+    }
+    let codigo = match alvo {
+        Some(alvo) => autorizacao::decidir_destino(Some(papel), permissao, alvo).0,
+        None => autorizacao::decidir_administracao(Some(papel), permissao),
+    };
+    if !codigo.permite() {
+        return Err(falha(
+            codigo,
+            "a politica de agora nao da a permissao ao papel do administrador",
+        ));
+    }
+    Ok(())
+}
+
 /// Uma operação administrativa: o nome, a permissão que o papel do
 /// administrador precisa ter, e o que ela faz com os parâmetros. Devolve o
 /// recurso, para a auditoria.
@@ -506,11 +543,13 @@ fn conferir_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) -> Result
     // O destinatário, pelo mesmo `decidir_destino` da sessão, com o papel do
     // administrador: o alcance dele, enumerado como o de todos.
     let mut destino = None;
+    let mut alvo_decidido = None;
     if operacao.permissao.recurso_e_destino() {
         let alvo = Json(parametros.as_bytes())
             .member("to")
             .and_then(|v| v.as_str())
             .unwrap_or("");
+        alvo_decidido = Some(alvo);
         let (codigo, motivo, resolvido) =
             autorizacao::decidir_destino(Some(papel), operacao.permissao, alvo);
         if !codigo.permite() {
@@ -565,6 +604,16 @@ fn conferir_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) -> Result
         )
     };
     let (feito, gravado) = crate::persistencia::em_ordem(|| {
+        // A decisão em curso: a credencial e o papel foram conferidos antes
+        // de a ordem estar na mão, e uma revogação — o quórum de
+        // `admin.revoke` —, uma troca de papel ou uma política nova podem ter
+        // passado no meio; todas gravam com esta mesma ordem. Aqui, antes de
+        // a operação tocar em qualquer coisa, a decisão é feita de novo, pelo
+        // registro e pela política de agora: ou ela vê a mudança e é
+        // recusada, ou a mudança vem depois dela inteira.
+        if let Err(f) = reconfirmar(&administrador, papel, operacao.permissao, alvo_decidido) {
+            return (Err(f), Ok(()));
+        }
         let foto = (operacao.efeito != Efeito::Nenhum).then(crate::persistencia::Foto::tirar);
         if foto.is_none() {
             gravar(Codigo::Allow, "", &detalhe("autorizada"));

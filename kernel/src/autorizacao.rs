@@ -1298,13 +1298,42 @@ pub fn reconfirmar() -> Result<(), (Codigo, &'static str)> {
     if papel_de_teto(&quem) {
         return Err(TETO_NAO_SE_EXERCE);
     }
+    // A mesma conta do gate: o destinatário de uma permissão de destino é
+    // resolvido de novo — o papel dele agora, e se ele ainda existe —, e um
+    // caminho é decidido como caminho.
     for r in &recursos {
-        let (c, d) = decidir(quem.papel.as_deref(), permissao, r);
+        let (c, d) = if permissao.recurso_e_destino() {
+            let (c, d, _) = decidir_destino(quem.papel.as_deref(), permissao, r);
+            (c, d)
+        } else {
+            decidir(quem.papel.as_deref(), permissao, r)
+        };
         if !c.permite() {
             return Err((c, d));
         }
     }
     Ok(())
+}
+
+/// Só para a suíte: o que roda no ponto de commit de uma mensagem ou de uma
+/// operação administrativa — com a ordem das gravações na mão — antes de a
+/// decisão ser feita de novo. É onde um caso põe a revogação ou a política
+/// nova "no meio" da operação.
+#[cfg(feature = "modo-teste")]
+static ANTES_DA_RECONFIRMACAO: Mutex<Option<fn()>> = Mutex::new(None);
+
+/// Só para a suíte: põe (ou tira) o que roda antes da reconfirmação.
+#[cfg(feature = "modo-teste")]
+pub fn antes_da_reconfirmacao_de_teste(f: Option<fn()>) {
+    crate::arch::sem_interrupcoes(|| *ANTES_DA_RECONFIRMACAO.lock() = f);
+}
+
+/// Só para a suíte: roda o que [`antes_da_reconfirmacao_de_teste`] pôs.
+#[cfg(feature = "modo-teste")]
+pub fn gancho_da_reconfirmacao() {
+    if let Some(f) = crate::arch::sem_interrupcoes(|| *ANTES_DA_RECONFIRMACAO.lock()) {
+        f();
+    }
 }
 
 /// O dono, no armazém, de quem o comando em execução neste fio age por: a
@@ -2144,5 +2173,7 @@ pub unsafe fn destravar() {
         AUDITORIA.force_unlock();
         TAXAS.force_unlock();
         EM_EXECUCAO.force_unlock();
+        #[cfg(feature = "modo-teste")]
+        ANTES_DA_RECONFIRMACAO.force_unlock();
     }
 }

@@ -332,6 +332,10 @@ pub enum Recusa {
     Estado(Estado),
     /// A versão esperada não é a de agora.
     Versao { esperada: u64, atual: u64 },
+    /// A autoridade que o gate decidiu não vale mais no ponto de commit —
+    /// uma revogação, uma política nova chegou no meio —: o código e o
+    /// motivo da decisão de agora.
+    Reconfirmacao(Codigo, &'static str),
 }
 
 impl Recusa {
@@ -343,6 +347,7 @@ impl Recusa {
             Recusa::RemetenteCheio | Recusa::CaixaCheia | Recusa::TotalCheio => Codigo::DenyPolicy,
             Recusa::Desconhecida => Codigo::DenyResource,
             Recusa::Estado(_) | Recusa::Versao { .. } => Codigo::Conflict,
+            Recusa::Reconfirmacao(c, _) => c,
         }
     }
 
@@ -358,6 +363,7 @@ impl Recusa {
             Recusa::Desconhecida => "nao ha mensagem com este id para quem pede",
             Recusa::Estado(_) => "a mensagem nao esta num estado que aceite isto",
             Recusa::Versao { .. } => "a versao esperada nao e a de agora",
+            Recusa::Reconfirmacao(_, m) => m,
         }
     }
 }

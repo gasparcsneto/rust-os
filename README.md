@@ -900,9 +900,9 @@ deles muda o caminho de produção nem trata um núcleo de um jeito especial.
 | A reexecução decidida pelo estado do fio (x86) | caso não determinístico: a janela não era acertada | `fios: a reexecucao e da chamada` — o processo `contido` para entre a chamada voltar e a pergunta; o pedido é atendido nessa hora; ele tem de receber a resposta |
 | O `soltar` liberando o frame fora da trava | caso faltando | `frames: soltar libera na mesma secao` — uma pausa na entrada de `liberar`, para um frame só; outro núcleo compartilha o frame nessa hora |
 
-As limitações que ficam — o núcleo 0 especial, o teto de núcleos, a janela
-de uma decisão em curso — são de desenho, e estão abaixo; nenhum dos casos
-novos as contorna.
+O que fica de fora — o núcleo dos dispositivos, os tetos dos controladores
+de interrupção, a decisão de uma ação sem commit — está abaixo, com a razão
+de cada um; nenhum dos casos novos o contorna.
 
 ### A ordem das travas, conferida
 
@@ -933,12 +933,17 @@ tabela, pilha além da altura, trava solta fora do núcleo que a tinha).
   que migre de núcleo; nenhum dos dois existe.
 - No ARM, a parada no caminho fatal não alcança um núcleo mascarado (GICv2
   sem FIQ nem NMI); ele é relatado, não parado.
-- Uma decisão do gate vale para a ação que ela autorizou mesmo que uma
-  revogação chegue no meio — salvo onde a ação tem um ponto de commit: lá,
-  como no armazém, a autoridade é decidida de novo com a ordem das
-  gravações na mão, e a revogação que chegou antes vale. As operações sem
-  commit (uma linha na interface, uma mensagem) continuam com a janela de
-  uma chamada.
+- Toda operação que muda estado durável tem um ponto de commit — o
+  registro dela no journal, com a ordem das gravações na mão —, e lá a
+  autoridade é decidida de novo, pela política e pelo registro de agora: o
+  lote do armazém, e o envio, a leitura (que entrega), a confirmação e o
+  cancelamento de uma mensagem. As revogações gravam com a mesma ordem, e
+  por isso a operação ou as vê e é recusada, ou vem antes delas inteira
+  (`armazem: revogacao no meio da operacao`, `mensagens: revogacao no meio
+  da operacao`). Uma ação sem estado a confirmar — um clique na interface,
+  a leitura de uma tecla — vale como decidida no gate: ela acontece numa
+  chamada, e uma revogação que chega durante ela vale como chegada logo
+  depois.
 - Sessenta e quatro núcleos no máximo — um por bit da máscara —; oito no
   ARM, pelo GICv2; e no x86 só os de identificador de APIC até 254, sem
   x2APIC.
@@ -2098,7 +2103,12 @@ recebe mais nada, as mensagens vivas dela são anuladas, e **todos os
 desafios pendentes saem** — de qualquer sessão: um desafio não é de uma
 chave, e quem estava no meio pede outro, sobre o estado novo. É também a
 regra da concorrência: o pedido atendido primeiro decide, e o outro é
-recusado. O que a credencial fez antes fica na auditoria; a revogação
+recusado. Uma operação da credencial que já estava em curso — a prova
+conferida, a operação ainda não feita — é decidida de novo antes de tocar
+em qualquer coisa, com a ordem das gravações na mão: ela vê a revogação e
+é recusada (`DENY_NOT_AUTHENTICATED`), ou vem antes dela inteira; o mesmo
+vale para uma política nova que tire a permissão do papel. O que a
+credencial fez antes fica na auditoria; a revogação
 grava cada assinatura, com a chave inteira de quem assinou, e o desfecho,
 com o alvo, o desafio, a versão da política e o motivo. Nenhum papel — nem
 o `sistema`, nem a serial — substitui o quórum, e não há operação de
@@ -2609,7 +2619,12 @@ ocupa vaga. A recusa não gasta id nem nonce.
 **Revogação.** A chave ou a pessoa revogada tem anuladas, na hora, as
 mensagens vivas que mandou e as que ia receber — cada anulação gravada. A
 mesma chave de volta ao registro encontra a caixa vazia. O fim de uma
-sessão não anula nada: a caixa é da identidade.
+sessão não anula nada: a caixa é da identidade. Um envio, uma leitura, um
+`ack` ou um cancelamento que o gate decidiu antes da revogação é decidido
+de novo quando muda a tabela, com a ordem das gravações na mão — a mesma
+da revogação —: ou ele vem antes dela inteiro, e é anulado com o resto, ou
+a vê e é recusado. Nenhuma mensagem de um titular revogado nasce depois
+das anulações.
 
 **Destinatário inexistente**, revogado ou sem papel: `DENY_RESOURCE`, a
 mesma resposta de um destinatário fora do alcance; a auditoria grava o
