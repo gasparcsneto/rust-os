@@ -17,56 +17,54 @@ mod persistencia;
 
 use std::collections::BTreeMap;
 use std::{
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
-    process::{Child, Command, ExitCode},
+    process::{Child, ChildStdout, Command, ExitCode, Stdio},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
-/// Teto de tempo para a suíte de testes.
+/// Quanto a suíte pode ficar sem terminar caso nenhum antes de o emulador
+/// ser encerrado.
 ///
 /// Um kernel tem formas demais de travar para que esperar indefinidamente seja
 /// aceitável: o bootloader pode falhar e reiniciar em laço, uma exceção não
 /// tratada pode causar triple fault e reboot, um teste pode entrar num laço
-/// sem saída. Sem teto, qualquer um desses casos vira um job de CI pendurado
-/// que não diz nada — o pior modo de falhar.
+/// sem saída. Sem limite, qualquer um desses casos vira um job de CI
+/// pendurado que não diz nada — o pior modo de falhar.
 ///
-/// # Por que cinco minutos
+/// # Por que o limite é do andamento, e não da suíte inteira
 ///
-/// Porque dois deixaram de ser folga. Este comentário dizia que a suíte leva
-/// "poucos segundos"; com duzentos casos, a do x86 em debug leva cem, e o
-/// teto de dois minutos passou a reprovar suítes saudáveis. Medido nesta
-/// bancada, a mesma suíte levou de 102 a 137 segundos conforme **onde os
-/// dados do kernel caem na memória**: o commit que acrescentou duas
-/// variáveis atômicas ficou 28% mais lento em casos que não as tocam, e um
-/// quilobyte de dado inerte no fim da `.data` o devolveu aos 102. É o
-/// emulador — o TCG é sensível ao endereço dos dados quentes —, e não custo
-/// do código. Um teto que cabe dentro dessa variação é um teto que falha ao
-/// acaso; o dobro do pior medido não cabe.
+/// O limite era um teto da suíte inteira, e foi subido três vezes — de dois
+/// minutos a cinco, a dez e a vinte —, cada uma pela mesma conta: a suíte
+/// cresceu, a máquina variou, e o teto passou a reprovar uma suíte saudável;
+/// o novo era o dobro do pior medido. Um teto do total cresce com cada caso
+/// novo, e a quarta vez chegou: com a conferência da ordem das travas e os
+/// casos do armazém, a suíte do x86 num núcleo só passou dos vinte minutos
+/// — andando, sem laço nenhum.
 ///
-/// # Por que dez
+/// O que se quer pegar não é uma suíte longa, é uma suíte **parada**. Todas
+/// as formas de travar de cima param de terminar casos: o laço sem saída
+/// não termina o dele; o reboot em laço nunca chega a terminar um; um laço
+/// que só escreve log também não. Então o limite é o tempo sem um caso
+/// terminado — `ok` ou `FALHOU` —, contado desde o último, ou desde a
+/// partida para o primeiro (o boot entra nele). Ele depende do caso mais
+/// lento, e não de quantos casos há.
 ///
-/// Pela mesma conta, de novo. Com a política de autorização a suíte do x86
-/// em debug foi de 243 para 302 segundos, medidos na mesma bancada no mesmo
-/// dia: uns 30 são dos casos novos — apertos de mão, programas lançados
-/// como um agente, a janela de apertos —, e o resto é o efeito de cima. O
-/// preenchimento de tela, que não toca nada da política, foi de 746 para
-/// 873 ms por quadro: 17% mais lento. Cinco minutos passaram a reprovar a
-/// suíte saudável; dez são o dobro do pior medido.
+/// # Por que dez minutos
 ///
-/// # Por que vinte
-///
-/// A mesma conta, uma terceira vez. Com a persistência ancorada no TPM —
-/// cada abertura da suíte conecta, cria a EK e salga uma sessão —, a suíte
-/// do x86 em debug no CI ficou entre 381 e 637 segundos de passo, com a
-/// compilação, em execuções seguidas com quase os mesmos casos: a
-/// variação é das máquinas do CI. A pior verde teve uns 505 segundos de
-/// suíte; a seguinte, com dois casos a mais, bateu nos dez minutos com o
-/// relógio do convidado andando até o corte — sem laço nenhum. Vinte são
-/// o dobro do pior medido, e o passo inteiro continua dentro dos 70
-/// minutos do job.
-const TETO_DOS_TESTES: Duration = Duration::from_secs(1200);
+/// O caso mais lento medido é o do contador do TPM, que abre a persistência
+/// várias vezes: 47 segundos de relógio do convidado no x86 com um núcleo,
+/// uns 85 de parede nesta bancada. O ARM no emulador é mais lento, e as
+/// máquinas da CI variaram de 1 a 1,7 vez entre execuções seguidas; o pior
+/// esperado fica abaixo de cinco minutos, e dez são o dobro. Cada execução
+/// diz o maior intervalo que mediu entre dois casos, para que esta conta
+/// seja refeita com o número da CI, e não com uma estimativa.
+const JANELA_SEM_PROGRESSO: Duration = Duration::from_secs(600);
 
 /// As arquiteturas que o kernel suporta.
 ///
@@ -962,7 +960,7 @@ fn firmware_uefi(arch: Arquitetura) -> Result<(PathBuf, PathBuf), String> {
 ///
 /// Quando o que se espera é o desligamento, o teto é outro: no ARM, quem
 /// desliga a máquina é a suíte inteira, rodando sobre o mapa da UEFI, e ela
-/// tem o teto dela — ver [`Desenlace::teto`]. Os 240 segundos daqui
+/// espera pelo andamento dela — ver [`JANELA_SEM_PROGRESSO`]. Os 240 segundos daqui
 /// serviram para isso enquanto a suíte cabia neles; com a persistência, a
 /// mesma suíte em debug passou a levar de 320 a 340 segundos na CI pelo
 /// `-kernel`, e o passo do iniciador passou a estourar ao acaso.
@@ -1337,20 +1335,6 @@ enum Desenlace {
     Marca(&'static str),
 }
 
-impl Desenlace {
-    /// Quanto esperar por ele. O desligamento, no ARM, é o fim da suíte
-    /// inteira, e tem o teto da suíte; num kernel estragado é a recusa, que
-    /// chega em segundos e não precisa de teto menor para ser pega — o
-    /// relatório diz se o iniciador chegou ao fim. A marca é a primeira
-    /// linha do kernel, e tem o do iniciador.
-    fn teto(&self) -> Duration {
-        match self {
-            Desenlace::Desligamento => TETO_DOS_TESTES,
-            Desenlace::Marca(_) => TETO_DO_INICIADOR,
-        }
-    }
-}
-
 /// Sobe o QEMU com o firmware e devolve o desfecho e as linhas do iniciador.
 fn subir_no_firmware(
     arch: Arquitetura,
@@ -1391,18 +1375,27 @@ fn subir_no_firmware(
         Video::Linear,
         &ambiente,
     )?;
-    qemu.stdout(arquivo);
+    qemu.stdout(Stdio::piped());
     // Sem rede: nada aqui precisa dela, e o firmware tentaria PXE antes do
     // disco se ela existisse.
     qemu.args(["-net", "none"]);
 
-    let filho = qemu
+    let mut filho = qemu
         .spawn()
         .map_err(|e| format!("não foi possível iniciar o {}: {e}", arch.qemu()))?;
+    let andamento = acompanhar(&mut filho, arquivo)?;
 
+    // O desligamento, no ARM, é o fim da suíte inteira, e espera como a
+    // suíte espera: pelo andamento. Num kernel estragado é a recusa, que
+    // chega em segundos — o relatório diz se o iniciador chegou ao fim. A
+    // marca é a primeira linha do kernel, e tem o teto do iniciador.
     let desfecho = match espera {
-        Desenlace::Desligamento => aguardar_com_teto(filho, espera.teto())?,
-        Desenlace::Marca(marca) => aguardar_a_marca(filho, &registro, marca, espera.teto())?,
+        Desenlace::Desligamento => aguardar_com_andamento(filho, andamento, JANELA_SEM_PROGRESSO)?,
+        Desenlace::Marca(marca) => {
+            let desfecho = aguardar_a_marca(filho, &registro, marca, TETO_DO_INICIADOR)?;
+            let _ = andamento.leitor.join();
+            desfecho
+        }
     };
 
     let bruto = std::fs::read(&registro)
@@ -1491,13 +1484,14 @@ fn conferir_desfecho(
         // não aconteceu.
         Desfecho::Estourou => Err(match espera {
             Desenlace::Desligamento => format!(
-                "a maquina nao desligou em {}s — o iniciador nao chegou ao fim",
-                espera.teto().as_secs()
+                "a maquina ficou {}s sem terminar um caso e sem desligar — o iniciador nao \
+                 chegou ao fim",
+                JANELA_SEM_PROGRESSO.as_secs()
             ),
             Desenlace::Marca(marca) => format!(
                 "o kernel nao disse `{marca}` em {}s — ou o salto nao chegou nele, ou ele \
                  parou antes dessa linha",
-                espera.teto().as_secs()
+                TETO_DO_INICIADOR.as_secs()
             ),
         }),
     }
@@ -10202,11 +10196,13 @@ fn test(arch: Arquitetura, release: bool, video: Video) -> Result<ExitCode, Stri
 
     zerar_o_estado(arch)?;
     let ambiente = Ambiente::ligar(arch, None)?;
-    let filho = comando_qemu(arch, &artefato, None, Teclado::Nativo, video, &ambiente)?
+    let mut filho = comando_qemu(arch, &artefato, None, Teclado::Nativo, video, &ambiente)?
+        .stdout(Stdio::piped())
         .spawn()
         .map_err(|e| format!("não foi possível iniciar o {}: {e}", arch.qemu()))?;
+    let andamento = acompanhar(&mut filho, std::io::stdout())?;
 
-    match aguardar_com_teto(filho, TETO_DOS_TESTES)? {
+    match aguardar_com_andamento(filho, andamento, JANELA_SEM_PROGRESSO)? {
         Desfecho::Codigo(code) if code == arch.codigo_de_sucesso() => {
             println!("\n[xtask] todos os testes passaram");
             Ok(ExitCode::SUCCESS)
@@ -10217,10 +10213,10 @@ fn test(arch: Arquitetura, release: bool, video: Video) -> Result<ExitCode, Stri
         }
         Desfecho::Sinal => Err("o emulador foi terminado por um sinal".into()),
         Desfecho::Estourou => Err(format!(
-            "os testes nao terminaram em {}s e o emulador foi encerrado\n\
+            "nenhum caso terminou em {}s e o emulador foi encerrado\n\
              causas tipicas: laco sem saida num teste, triple fault reiniciando \
              a maquina, ou o dispositivo de saida do emulador sem funcionar",
-            TETO_DOS_TESTES.as_secs()
+            JANELA_SEM_PROGRESSO.as_secs()
         )),
     }
 }
@@ -10232,35 +10228,111 @@ enum Desfecho {
     Estourou,
 }
 
-/// Aguarda o processo, matando-o se passar do teto.
-fn aguardar_com_teto(mut filho: Child, teto: Duration) -> Result<Desfecho, String> {
-    let inicio = Instant::now();
+/// O andamento da suíte, lido da saída do emulador a caminho do destino
+/// dela: quantos casos terminaram até agora.
+struct Andamento {
+    casos: Arc<AtomicU64>,
+    leitor: std::thread::JoinHandle<()>,
+}
 
-    loop {
+/// Toma a saída do emulador — que tem de ter sido pedida em cano —,
+/// repassa cada byte a `destino` assim que chega, e conta os casos que
+/// terminam nela.
+///
+/// O repasse é byte a byte, e não por linha: o que o kernel escreve aparece
+/// na hora, como aparecia com a saída herdada.
+fn acompanhar(
+    filho: &mut Child,
+    mut destino: impl Write + Send + 'static,
+) -> Result<Andamento, String> {
+    let mut saida: ChildStdout = filho
+        .stdout
+        .take()
+        .ok_or("a saida do emulador nao veio em cano")?;
+    let casos = Arc::new(AtomicU64::new(0));
+    let contados = Arc::clone(&casos);
+    let leitor = std::thread::spawn(move || {
+        let mut bloco = [0u8; 4096];
+        let mut linha = Vec::new();
+        loop {
+            let n = match saida.read(&mut bloco) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            let _ = destino.write_all(&bloco[..n]);
+            let _ = destino.flush();
+            for &b in &bloco[..n] {
+                if b == b'\n' {
+                    if termina_um_caso(&linha) {
+                        contados.fetch_add(1, Ordering::Release);
+                    }
+                    linha.clear();
+                } else if linha.len() < 1024 {
+                    linha.push(b);
+                }
+            }
+        }
+    });
+    Ok(Andamento { casos, leitor })
+}
+
+/// Se a linha é a de um caso terminado: `  <nome>  ok`, ou
+/// `  <nome>  FALHOU -- <motivo>`, como `testes::executar` as escreve.
+fn termina_um_caso(linha: &[u8]) -> bool {
+    let texto = String::from_utf8_lossy(linha);
+    let texto = texto.trim_end_matches('\r');
+    texto.starts_with("  ") && (texto.ends_with(" ok") || texto.contains(" FALHOU -- "))
+}
+
+/// Aguarda o processo, matando-o se passar `janela` —
+/// [`JANELA_SEM_PROGRESSO`] na suíte — sem terminar um caso — ver lá por que o limite é do andamento. No fim, diz
+/// quantos casos contou e o maior intervalo entre dois.
+fn aguardar_com_andamento(
+    mut filho: Child,
+    andamento: Andamento,
+    janela: Duration,
+) -> Result<Desfecho, String> {
+    let mut ultimo = Instant::now();
+    let mut vistos = 0;
+    let mut maior = Duration::ZERO;
+    let desfecho = loop {
+        let casos = andamento.casos.load(Ordering::Acquire);
+        if casos != vistos {
+            vistos = casos;
+            maior = maior.max(ultimo.elapsed());
+            ultimo = Instant::now();
+        }
         match filho
             .try_wait()
             .map_err(|e| format!("falha ao aguardar o emulador: {e}"))?
         {
             Some(status) => {
-                return Ok(match status.code() {
+                break match status.code() {
                     Some(code) => Desfecho::Codigo(code),
                     None => Desfecho::Sinal,
-                });
+                };
             }
-            None => {
-                if inicio.elapsed() >= teto {
-                    // Melhor um processo morto e um diagnóstico claro que um
-                    // job de CI pendurado sem explicação.
-                    let _ = filho.kill();
-                    let _ = filho.wait();
-                    return Ok(Desfecho::Estourou);
-                }
-                // 50 ms mantém a espera barata sem atrasar perceptivelmente o
-                // fim de uma suíte que leva segundos.
-                std::thread::sleep(Duration::from_millis(50));
+            None if ultimo.elapsed() >= janela => {
+                // Melhor um processo morto e um diagnóstico claro que um
+                // job de CI pendurado sem explicação.
+                let _ = filho.kill();
+                let _ = filho.wait();
+                break Desfecho::Estourou;
             }
+            // 50 ms mantém a espera barata sem atrasar perceptivelmente o
+            // fim de uma suíte que leva segundos.
+            None => std::thread::sleep(Duration::from_millis(50)),
         }
+    };
+    // O emulador saiu e o cano fechou: o leitor termina com o que restou.
+    let _ = andamento.leitor.join();
+    if vistos > 0 {
+        println!(
+            "[xtask] {vistos} caso(s) terminado(s); o maior intervalo sem terminar um foi de {}s",
+            maior.as_secs()
+        );
     }
+    Ok(desfecho)
 }
 
 /// Cliente do canal do agente.
@@ -10434,6 +10506,56 @@ const ESPERA_PELO_CANAL: Duration = Duration::from_secs(30);
 
 #[cfg(test)]
 mod testes {
+    /// O andamento conta o que a suíte escreve ao fim de cada caso, e não
+    /// o log que um caso escreve no meio — nem o de um laço que só escreve.
+    #[test]
+    fn o_andamento_conta_so_casos_terminados() {
+        use super::termina_um_caso as termina;
+        assert!(termina(b"  rede: ARP vai e volta                      ok"));
+        assert!(termina(
+            b"  rede: ARP vai e volta                      ok\r"
+        ));
+        assert!(termina(
+            b"  armazem: o lote e inteiro                  FALHOU -- o lote valeu pela metade"
+        ));
+        for log in [
+            &b"[ 1375]   681810ms error virtio   a placa devolveu a cadeia 0; desligada"[..],
+            b"[ 1374]   681780ms info  teste    10.0.2.2 responde: ok",
+            b"  suite de testes :: x86_64 :: 379 casos",
+            b"  378 de 379 passaram",
+            b"",
+        ] {
+            assert!(!termina(log), "{}", String::from_utf8_lossy(log));
+        }
+    }
+
+    /// Um processo de verdade, com a janela curta: o que para de terminar
+    /// casos é encerrado, e o que continua terminando passa da janela sem
+    /// ser — o limite é do andamento, e não do total.
+    #[test]
+    fn a_janela_e_do_andamento_e_nao_do_total() {
+        use super::*;
+        let correr = |roteiro: &str| {
+            let mut filho = Command::new("sh")
+                .args(["-c", roteiro])
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let andamento = acompanhar(&mut filho, std::io::sink()).unwrap();
+            let inicio = Instant::now();
+            let desfecho =
+                aguardar_com_andamento(filho, andamento, Duration::from_secs(1)).unwrap();
+            (desfecho, inicio.elapsed())
+        };
+        // Parado depois do primeiro caso, escrevendo log: encerrado.
+        let (d, t) =
+            correr("echo '  um  ok'; while true; do echo '[ 1] 1ms info log'; sleep 0.1; done");
+        assert!(matches!(d, Desfecho::Estourou) && t < Duration::from_secs(5));
+        // Um caso a cada 0,4 s por 2,4 s — mais que a janela no total: sai sozinho.
+        let (d, t) = correr("for i in 1 2 3 4 5 6; do sleep 0.4; echo \"  caso $i  ok\"; done");
+        assert!(matches!(d, Desfecho::Codigo(0)) && t > Duration::from_secs(2));
+    }
+
     #[test]
     fn a_janela_a_mao_e_achada_fora_dos_comentarios() {
         use super::linha_a_mao as linha_que_descreve;
