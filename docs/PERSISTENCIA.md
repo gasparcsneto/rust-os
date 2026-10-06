@@ -1221,6 +1221,39 @@ caso.
 - **Ordem:** 7.0 → 7.1 → 7.2 → 7.3, um relatório, e então 7.4 → 7.5 →
   7.6 → 7.7.
 
+## O armazém e o journal de estado
+
+O armazém (ver [`ARMAZENAMENTO.md`](ARMAZENAMENTO.md)) morou no journal de
+estado na fase 8, com os arquivos inteiros nos registros. Agora ele tem
+uma partição própria, com um journal de metadados do mesmo pacote
+`diario`, e o journal de estado guarda dele uma entrada só, de tamanho
+fixo:
+
+```text
+ARMAZEM_CONFIRMADO [id do volume, setores, setores do journal dele, âncora, elo]
+```
+
+— qual registro do journal do armazém vale. Ela vai num registro do tipo
+`ARMAZEM`, que avança o contador do TPM e leva junto a auditoria da
+execução do comando: **é o ponto de commit** de um lote do armazém. A
+base de uma compactação do estado leva essa entrada e mais nada do
+armazém; as entradas de antes (`ARQUIVO_GRAVADO` e as outras da fase 8)
+são recusadas como de um formato anterior.
+
+Uma escrita que não é do journal de estado não chega à janela dele: o
+driver tem uma janela por partição, fixadas no boot pela GPT, e o
+`xtask` confere que só a persistência usa a de estado e só o volume a do
+armazém.
+
+A bancada ganhou um ponto de queda, `LoteNoVolume` (17): o lote inteiro
+no volume — blocos e registro, descarregados — e a confirmação ainda não
+começada. O cenário que cai ali confere que o boot seguinte não confirma
+o lote, que os blocos voltam livres e que o próximo lote grava; o que cai
+em cada fronteira da gravação de estado confere que o lote vale inteiro
+exatamente quando o registro de estado está no disco; e o do volume
+devolvido a uma fotografia anterior confere que ele é recusado sem
+derrubar o estado de autoridade.
+
 ## Fases e estado
 
 | Fase | O quê | Estado |

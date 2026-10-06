@@ -1,418 +1,999 @@
-use super::*;
+//! Os testes do armazém, no hospedeiro.
+
+use alloc::string::String;
 use alloc::vec;
+use alloc::vec::Vec;
+
+use crate::bloco::{self, CARGA, TAM_BLOCO};
+use crate::mapa::Mapa;
+use crate::registro::{self, Entrada, Volume};
+use crate::*;
+
+const ATOR: &str = "agente:aa";
+const OUTRO: &str = "agente:bb";
+const LIVRE: Cota = Cota {
+    bytes: u64::MAX / 4,
+    objetos: u64::MAX / 4,
+};
+const TETO: usize = usize::MAX / 4;
+
+fn s(t: &str) -> String {
+    String::from(t)
+}
+
+/// Um conteúdo de `tamanho` bytes, em blocos a partir de `bloco`, numa
+/// extensão só.
+fn conteudo(tamanho: u64, bloco: u64, id: u8) -> Conteudo {
+    let n = tamanho.div_ceil(CARGA as u64);
+    Conteudo {
+        tamanho,
+        extensoes: if n == 0 {
+            vec![]
+        } else {
+            vec![Extensao {
+                bloco,
+                quantos: n as u32,
+                id: [id; 16],
+                indice: 0,
+            }]
+        },
+    }
+}
+
+fn gravar(c: &str, esperada: u64, conteudo: Conteudo) -> Op {
+    Op::Gravar {
+        caminho: s(c),
+        esperada,
+        conteudo,
+    }
+}
+
+fn mkdir(c: &str) -> Op {
+    Op::CriarDiretorio { caminho: s(c) }
+}
+
+fn mv(de: &str, para: &str, esperada: u64) -> Op {
+    Op::Renomear {
+        de: s(de),
+        para: s(para),
+        esperada,
+    }
+}
 
 /// Prepara e aplica, como o kernel faz depois de gravar.
-fn gravar(a: &mut Armazem, c: &str, esperada: u64, dados: &[u8]) -> Result<u64, Recusa> {
-    let m = a.preparar_gravacao(c, esperada, dados)?;
-    a.aplicar(&m)?;
-    Ok(m.versao())
+fn fazer(a: &mut Armazem, ator: &str, ops: &[Op]) -> Result<Faixas, (usize, Recusa)> {
+    let lote = a.preparar(ops, ator, LIVRE, 0, TETO)?;
+    let saidas = a.aplicar(&lote).expect("o lote preparado se aplica");
+    assert!(a.coerente(), "{a:?}");
+    Ok(saidas)
 }
 
-fn apagar(a: &mut Armazem, c: &str, esperada: u64) -> Result<u64, Recusa> {
-    let m = a.preparar_remocao(c, esperada)?;
-    a.aplicar(&m)?;
-    Ok(m.versao())
-}
-
-#[test]
-fn criar_exige_versao_zero_e_substituir_a_de_agora() {
-    let mut a = Armazem::novo();
-    assert_eq!(gravar(&mut a, "notas.txt", 0, b"um"), Ok(1));
-    assert_eq!(a.versao("notas.txt"), 1);
-    // Criar de novo: já existe.
-    assert_eq!(
-        gravar(&mut a, "notas.txt", 0, b"outro"),
-        Err(Recusa::Versao { atual: 1 })
-    );
-    // Substituir contra uma versão que não é a de agora.
-    assert_eq!(
-        gravar(&mut a, "notas.txt", 7, b"outro"),
-        Err(Recusa::Versao { atual: 1 })
-    );
-    assert_eq!(gravar(&mut a, "notas.txt", 1, b"dois"), Ok(2));
-    assert_eq!(a.objeto("notas.txt").unwrap().dados(), b"dois");
-    // Substituir o que não existe: a versão de agora é 0.
-    assert_eq!(
-        gravar(&mut a, "outro.txt", 1, b"x"),
-        Err(Recusa::Versao { atual: 0 })
-    );
+/// O mesmo armazém refeito do zero pelo journal: cada lote codificado,
+/// lido de volta e aplicado num armazém vazio.
+fn reposto(lotes: &[Lote]) -> Armazem {
+    let mut b = Armazem::novo();
+    for l in lotes {
+        let bytes = registro::lote(&l.mudancas).expect("codifica");
+        let mudancas = registro::entradas(&bytes)
+            .expect("decodifica")
+            .into_iter()
+            .map(|e| match e {
+                Entrada::Mudanca(m) => m,
+                outra => panic!("{outra:?}"),
+            })
+            .collect();
+        b.aplicar(&Lote {
+            mudancas,
+            proxima: 0,
+        })
+        .expect("o journal se reaplica");
+    }
+    b
 }
 
 #[test]
-fn a_recusa_nao_muda_nada() {
-    let mut a = Armazem::novo();
-    gravar(&mut a, "a", 0, b"um").unwrap();
-    let antes = (a.proxima(), a.ocupacao(), a.versao("a"));
-    let _ = gravar(&mut a, "a", 0, b"x");
-    let _ = gravar(&mut a, "a/b", 0, b"x");
-    let _ = gravar(&mut a, "../a", 0, b"x");
-    let _ = apagar(&mut a, "a", 9);
-    let _ = a.preparar_acrescimo("a", 9, b"x");
-    assert_eq!(antes, (a.proxima(), a.ocupacao(), a.versao("a")));
-    assert_eq!(a.objeto("a").unwrap().dados(), b"um");
+fn caminhos() {
+    assert!(caminho_valido("a"));
+    assert!(caminho_valido("a/b-c/d.txt"));
+    for ruim in ["", "/a", "a/", "a//b", ".", "..", "a/../b", "a b", "a/./b"] {
+        assert!(!caminho_valido(ruim), "{ruim}");
+    }
+    let fundo = ["x"; MAIS_NIVEIS].join("/");
+    assert!(caminho_valido(&fundo));
+    assert!(!caminho_valido(&alloc::format!("{fundo}/y")));
+    assert!(!componente_valido(&"a".repeat(MAIOR_COMPONENTE + 1)));
+    assert_eq!(pai("a/b/c"), "a/b");
+    assert_eq!(pai("a"), "");
+    assert!(abaixo_de("a/b", "a"));
+    assert!(!abaixo_de("ab", "a"));
+    assert!(!abaixo_de("a", "a"));
+    assert!(abaixo_de("a", ""));
 }
 
 #[test]
-fn preparar_nao_aplica() {
+fn nada_nasce_sem_o_pai() {
     let mut a = Armazem::novo();
-    let m = a.preparar_gravacao("a", 0, b"um").unwrap();
-    assert_eq!(a.tipo("a"), None);
-    assert_eq!(a.proxima(), 1);
-    // Duas preparações seguidas levam a mesma versão: só uma aplica.
-    let n = a.preparar_gravacao("b", 0, b"dois").unwrap();
-    assert_eq!(m.versao(), n.versao());
-    a.aplicar(&m).unwrap();
-    assert_eq!(a.aplicar(&n), Err(Recusa::ForaDeOrdem));
-    assert_eq!(a.tipo("b"), None);
-}
-
-#[test]
-fn a_versao_e_do_armazem_e_so_cresce() {
-    let mut a = Armazem::novo();
-    assert_eq!(gravar(&mut a, "a", 0, b"1"), Ok(1));
-    assert_eq!(gravar(&mut a, "b", 0, b"1"), Ok(2));
-    assert_eq!(gravar(&mut a, "a", 1, b"2"), Ok(3));
-    assert_eq!(apagar(&mut a, "a", 3), Ok(4));
-    assert_eq!(a.versao("a"), 0);
-    // Criado de novo, não volta a uma versão já vista.
-    assert_eq!(gravar(&mut a, "a", 0, b"novo"), Ok(5));
     assert_eq!(
-        gravar(&mut a, "a", 3, b"de quem leu o antigo"),
-        Err(Recusa::Versao { atual: 5 })
+        fazer(&mut a, ATOR, &[gravar("d/x", 0, Conteudo::vazio())]),
+        Err((0, Recusa::PaiNaoExiste))
     );
-}
-
-#[test]
-fn acrescimo_e_remocao_exigem_a_versao_de_agora() {
-    let mut a = Armazem::novo();
-    assert_eq!(a.preparar_acrescimo("log", 0, b"x"), Err(Recusa::NaoExiste));
-    assert_eq!(a.preparar_remocao("log", 0), Err(Recusa::NaoExiste));
-    gravar(&mut a, "log", 0, b"um\n").unwrap();
     assert_eq!(
-        a.preparar_acrescimo("log", 0, b"x"),
-        Err(Recusa::Versao { atual: 1 })
+        fazer(&mut a, ATOR, &[mkdir("d/e")]),
+        Err((0, Recusa::PaiNaoExiste))
     );
-    let m = a.preparar_acrescimo("log", 1, b"dois\n").unwrap();
-    a.aplicar(&m).unwrap();
-    assert_eq!(a.objeto("log").unwrap().dados(), b"um\ndois\n");
-    assert_eq!(a.versao("log"), 2);
-    assert_eq!(
-        a.preparar_remocao("log", 1),
-        Err(Recusa::Versao { atual: 2 })
-    );
-    assert_eq!(apagar(&mut a, "log", 2), Ok(3));
-    assert_eq!(a.ocupacao(), (0, 0));
-}
-
-#[test]
-fn diretorios_sao_implicitos() {
-    let mut a = Armazem::novo();
-    assert_eq!(a.tipo(""), Some(Tipo::Diretorio));
-    assert_eq!(a.tipo("d"), None);
-    gravar(&mut a, "d/e/f.txt", 0, b"x").unwrap();
+    fazer(&mut a, ATOR, &[mkdir("d")]).unwrap();
+    fazer(&mut a, ATOR, &[gravar("d/x", 0, Conteudo::vazio())]).unwrap();
     assert_eq!(a.tipo("d"), Some(Tipo::Diretorio));
-    assert_eq!(a.tipo("d/e"), Some(Tipo::Diretorio));
-    assert_eq!(a.tipo("d/e/f.txt"), Some(Tipo::Arquivo));
-    // Um prefixo do nome não é diretório.
-    assert_eq!(a.tipo("d/e/f"), None);
-    gravar(&mut a, "d-irma", 0, b"x").unwrap();
-    assert_eq!(a.tipo("d-irma"), Some(Tipo::Arquivo));
-    // Um arquivo não toma o nome de um diretório, nem fica abaixo de um
-    // arquivo.
-    assert_eq!(gravar(&mut a, "d/e", 0, b"x"), Err(Recusa::EhDiretorio));
-    assert_eq!(gravar(&mut a, "d", 0, b"x"), Err(Recusa::EhDiretorio));
+    // Um arquivo não é pai.
     assert_eq!(
-        gravar(&mut a, "d/e/f.txt/g", 0, b"x"),
-        Err(Recusa::PaiEhArquivo)
+        fazer(&mut a, ATOR, &[gravar("d/x/y", 0, Conteudo::vazio())]),
+        Err((0, Recusa::NaoEhDiretorio))
     );
     assert_eq!(
-        gravar(&mut a, "d-irma/g", 0, b"x"),
-        Err(Recusa::PaiEhArquivo)
+        fazer(&mut a, ATOR, &[gravar("d", 0, Conteudo::vazio())]),
+        Err((0, Recusa::EhDiretorio))
     );
-    // Apagado o único arquivo, os diretórios somem.
-    apagar(&mut a, "d/e/f.txt", 1).unwrap();
-    assert_eq!(a.tipo("d"), None);
-    assert_eq!(gravar(&mut a, "d", 0, b"agora pode"), Ok(4));
+}
+
+#[test]
+fn versoes_nunca_voltam() {
+    let mut a = Armazem::novo();
+    fazer(&mut a, ATOR, &[gravar("x", 0, conteudo(10, 0, 1))]).unwrap();
+    let v1 = a.versao("x");
+    assert_eq!(
+        fazer(&mut a, ATOR, &[gravar("x", 0, conteudo(10, 1, 2))]),
+        Err((0, Recusa::Versao { atual: v1 }))
+    );
+    fazer(&mut a, ATOR, &[gravar("x", v1, conteudo(20, 1, 2))]).unwrap();
+    let v2 = a.versao("x");
+    assert!(v2 > v1);
+    assert!(a.por_versao(v1).is_none());
+    assert_eq!(a.por_versao(v2).map(|(c, _)| c), Some("x"));
+    fazer(
+        &mut a,
+        ATOR,
+        &[Op::Apagar {
+            caminho: s("x"),
+            esperada: v2,
+        }],
+    )
+    .unwrap();
+    assert_eq!(a.versao("x"), 0);
+    fazer(&mut a, ATOR, &[gravar("x", 0, Conteudo::vazio())]).unwrap();
+    assert!(a.versao("x") > v2 + 1, "a remocao gastou uma versao");
+    assert_eq!(
+        fazer(
+            &mut a,
+            ATOR,
+            &[Op::Apagar {
+                caminho: s("y"),
+                esperada: 0
+            }]
+        ),
+        Err((0, Recusa::NaoExiste))
+    );
+}
+
+#[test]
+fn diretorios_explicitos() {
+    let mut a = Armazem::novo();
+    fazer(&mut a, ATOR, &[mkdir("d"), mkdir("d/e")]).unwrap();
+    assert_eq!(fazer(&mut a, ATOR, &[mkdir("d")]), Err((0, Recusa::Existe)));
+    let vd = a.versao("d");
+    let rmdir = |c: &str, esperada| Op::RemoverDiretorio {
+        caminho: s(c),
+        esperada,
+    };
+    assert_eq!(
+        fazer(&mut a, ATOR, &[rmdir("d", vd)]),
+        Err((0, Recusa::NaoVazio))
+    );
+    let ve = a.versao("d/e");
+    assert_eq!(
+        fazer(&mut a, ATOR, &[rmdir("d/e", ve + 1)]),
+        Err((0, Recusa::Versao { atual: ve }))
+    );
+    // Vazio, existe e se lista; depois sai.
+    assert_eq!(a.filhos("d"), vec![(s("e"), Tipo::Diretorio)]);
+    fazer(&mut a, ATOR, &[rmdir("d/e", ve), rmdir("d", vd)]).unwrap();
+    assert_eq!(a.quantos(), 0);
+    assert_eq!(
+        fazer(&mut a, ATOR, &[rmdir("z", 0)]),
+        Err((0, Recusa::NaoExiste))
+    );
+    fazer(&mut a, ATOR, &[gravar("f", 0, Conteudo::vazio())]).unwrap();
+    let vf = a.versao("f");
+    assert_eq!(
+        fazer(&mut a, ATOR, &[rmdir("f", vf)]),
+        Err((0, Recusa::NaoEhDiretorio))
+    );
 }
 
 #[test]
 fn filhos_em_ordem_de_nome() {
     let mut a = Armazem::novo();
-    for c in ["b/x", "b/y/z", "a", "c", "b-c", "b/y/w"] {
-        gravar(&mut a, c, 0, b"1").unwrap();
-    }
-    let nomes = |d: &str| -> Vec<(String, Tipo)> { a.filhos(d) };
-    assert_eq!(
-        nomes(""),
-        vec![
-            ("a".into(), Tipo::Arquivo),
-            ("b".into(), Tipo::Diretorio),
-            ("b-c".into(), Tipo::Arquivo),
-            ("c".into(), Tipo::Arquivo),
-        ]
-    );
-    assert_eq!(
-        nomes("b"),
-        vec![("x".into(), Tipo::Arquivo), ("y".into(), Tipo::Diretorio)]
-    );
-    assert_eq!(
-        nomes("b/y"),
-        vec![("w".into(), Tipo::Arquivo), ("z".into(), Tipo::Arquivo)]
-    );
-    assert!(nomes("a").is_empty());
-    assert!(nomes("nada").is_empty());
+    fazer(
+        &mut a,
+        ATOR,
+        &[
+            mkdir("b"),
+            mkdir("b/x"),
+            gravar("b-c", 0, Conteudo::vazio()),
+            gravar("b.d", 0, Conteudo::vazio()),
+            gravar("b/x/y", 0, Conteudo::vazio()),
+            gravar("a", 0, Conteudo::vazio()),
+        ],
+    )
+    .unwrap();
+    let nomes: Vec<String> = a.filhos("").into_iter().map(|(n, _)| n).collect();
+    assert_eq!(nomes, vec![s("a"), s("b"), s("b-c"), s("b.d")]);
+    assert_eq!(a.filhos("b"), vec![(s("x"), Tipo::Diretorio)]);
+    assert!(a.filhos("a").is_empty());
 }
 
 #[test]
-fn caminhos_invalidos() {
+fn renomear_um_arquivo() {
     let mut a = Armazem::novo();
-    let longo = "x".repeat(MAIOR_COMPONENTE + 1);
-    let fundo = ["d"; MAIS_NIVEIS + 1].join("/");
-    let raso = ["d"; MAIS_NIVEIS].join("/");
-    for c in [
-        "",
-        "/a",
-        "a/",
-        "a//b",
-        ".",
-        "..",
-        "a/../b",
-        "a/./b",
-        "a b",
-        "á",
-        "a\0",
-        "a\\b",
-        longo.as_str(),
-        fundo.as_str(),
+    fazer(
+        &mut a,
+        ATOR,
+        &[mkdir("d"), gravar("x", 0, conteudo(5, 0, 1))],
+    )
+    .unwrap();
+    let v = a.versao("x");
+    let antes = a.no("x").cloned().unwrap();
+    fazer(&mut a, ATOR, &[mv("x", "d/y", v)]).unwrap();
+    assert!(a.no("x").is_none());
+    let depois = a.no("d/y").unwrap();
+    assert_eq!(depois.conteudo(), antes.conteudo());
+    assert!(depois.versao() > v);
+    assert!(
+        a.por_versao(v).is_none(),
+        "a versao velha nao acha o movido"
+    );
+}
+
+#[test]
+fn renomear_recusa_o_que_escaparia() {
+    let mut a = Armazem::novo();
+    fazer(
+        &mut a,
+        ATOR,
+        &[mkdir("a"), mkdir("a/b"), gravar("c", 0, Conteudo::vazio())],
+    )
+    .unwrap();
+    let va = a.versao("a");
+    assert_eq!(
+        fazer(&mut a, ATOR, &[mv("a", "a/b/z", va)]),
+        Err((0, Recusa::DentroDeSi))
+    );
+    assert_eq!(
+        fazer(&mut a, ATOR, &[mv("a", "a", va)]),
+        Err((0, Recusa::DentroDeSi))
+    );
+    assert_eq!(
+        fazer(&mut a, ATOR, &[mv("a", "c", va)]),
+        Err((0, Recusa::Existe))
+    );
+    assert_eq!(
+        fazer(&mut a, ATOR, &[mv("a", "q/z", va)]),
+        Err((0, Recusa::PaiNaoExiste))
+    );
+    assert_eq!(
+        fazer(&mut a, ATOR, &[mv("a", "c/z", va)]),
+        Err((0, Recusa::NaoEhDiretorio))
+    );
+    assert_eq!(
+        fazer(&mut a, ATOR, &[mv("a", "../z", va)]),
+        Err((0, Recusa::CaminhoInvalido))
+    );
+    assert_eq!(
+        fazer(&mut a, ATOR, &[mv("a", "z", va + 99)]),
+        Err((0, Recusa::Versao { atual: va }))
+    );
+    assert_eq!(
+        fazer(&mut a, ATOR, &[mv("nada", "z", 0)]),
+        Err((0, Recusa::NaoExiste))
+    );
+    // Fundo demais depois do movimento: recusado antes de mover.
+    let mut ops = Vec::new();
+    let mut c = String::from("f");
+    ops.push(mkdir("f"));
+    for _ in 1..MAIS_NIVEIS {
+        c.push_str("/f");
+        ops.push(mkdir(&c));
+    }
+    fazer(&mut a, ATOR, &ops).unwrap();
+    let vf = a.versao("f");
+    assert_eq!(
+        fazer(&mut a, ATOR, &[mv("f", "a/b/f", vf)]),
+        Err((0, Recusa::CaminhoInvalido))
+    );
+    assert!(a.no(&c).is_some());
+}
+
+#[test]
+fn renomear_um_diretorio_leva_tudo_com_versoes_novas() {
+    let mut a = Armazem::novo();
+    fazer(
+        &mut a,
+        ATOR,
+        &[
+            mkdir("a"),
+            mkdir("a/b"),
+            gravar("a/b/x", 0, conteudo(5000, 0, 1)),
+            gravar("a/y", 0, conteudo(1, 2, 2)),
+            gravar("ab", 0, Conteudo::vazio()),
+            mkdir("z"),
+        ],
+    )
+    .unwrap();
+    let antigas: Vec<u64> = ["a", "a/b", "a/b/x", "a/y"]
+        .iter()
+        .map(|c| a.versao(c))
+        .collect();
+    let proxima = a.proxima();
+    let l = a
+        .preparar(&[mv("a", "z/n", antigas[0])], ATOR, LIVRE, 0, TETO)
+        .unwrap();
+    assert_eq!(
+        l.mudancas,
+        vec![Mudanca::Movido {
+            de: s("a"),
+            para: s("z/n"),
+            versao: proxima
+        }]
+    );
+    let saidas = a.aplicar(&l).unwrap();
+    assert!(saidas.is_empty(), "mover nao solta bloco nenhum");
+    // A irmã de nome parecido fica.
+    assert!(a.no("ab").is_some());
+    for (i, c) in ["z/n", "z/n/b", "z/n/b/x", "z/n/y"].iter().enumerate() {
+        assert_eq!(a.versao(c), proxima + i as u64, "{c}");
+    }
+    for v in antigas {
+        assert!(a.por_versao(v).is_none());
+    }
+    assert!(a.coerente());
+    assert_eq!(a.proxima(), proxima + 4);
+}
+
+#[test]
+fn o_lote_e_inteiro_ou_nada() {
+    let mut a = Armazem::novo();
+    fazer(
+        &mut a,
+        ATOR,
+        &[mkdir("d"), gravar("d/x", 0, conteudo(1, 0, 1))],
+    )
+    .unwrap();
+    let antes = a.clone();
+    // A terceira recusa: nada das duas primeiras vale.
+    let r = fazer(
+        &mut a,
+        ATOR,
+        &[
+            mkdir("e"),
+            gravar("e/y", 0, conteudo(1, 1, 2)),
+            Op::Apagar {
+                caminho: s("d/x"),
+                esperada: 999,
+            },
+        ],
+    );
+    assert_eq!(
+        r,
+        Err((
+            2,
+            Recusa::Versao {
+                atual: antes.versao("d/x")
+            }
+        ))
+    );
+    assert_eq!(a, antes);
+    // Cada operação vê as anteriores: criar e já escrever dentro; trocar
+    // dois nomes por um terceiro, num lote só.
+    fazer(
+        &mut a,
+        ATOR,
+        &[mkdir("p"), gravar("p/um", 0, conteudo(1, 3, 3)), mkdir("q")],
+    )
+    .unwrap();
+    let (vp, vq) = (a.versao("p"), a.versao("q"));
+    fazer(&mut a, ATOR, &[mv("p", "t", vp), mv("q", "p", vq)]).unwrap();
+    let vt = a.versao("t");
+    fazer(&mut a, ATOR, &[mv("t", "q", vt)]).unwrap();
+    assert!(a.no("q/um").is_some());
+    assert_eq!(a.tipo("p"), Some(Tipo::Diretorio));
+    assert!(a.filhos("p").is_empty());
+}
+
+#[test]
+fn a_cota_e_do_lote_e_de_quem_pede() {
+    let mut a = Armazem::novo();
+    let cota = Cota {
+        bytes: 10_000,
+        objetos: 3,
+    };
+    let preparar =
+        |a: &Armazem, ops: &[Op], reservado| a.preparar(ops, ATOR, cota, reservado, TETO);
+    let l = preparar(&a, &[mkdir("d"), gravar("d/x", 0, conteudo(6000, 0, 1))], 0).unwrap();
+    a.aplicar(&l).unwrap();
+    assert_eq!(
+        a.uso(ATOR),
+        Uso {
+            bytes: 6000,
+            objetos: 2
+        }
+    );
+    // Passaria dos bytes com o que ele tem reservado fora.
+    assert_eq!(
+        preparar(&a, &[gravar("d/y", 0, conteudo(3000, 2, 2))], 2000),
+        Err((0, Recusa::Cota))
+    );
+    // Passaria dos objetos.
+    let l = preparar(&a, &[gravar("d/y", 0, conteudo(10, 2, 2))], 0).unwrap();
+    a.aplicar(&l).unwrap();
+    assert_eq!(preparar(&a, &[mkdir("e")], 0), Err((0, Recusa::Cota)));
+    // Trocar um pelo outro no mesmo lote passa: a conta é do lote.
+    let v = a.versao("d/y");
+    assert!(
+        preparar(
+            &a,
+            &[
+                Op::Apagar {
+                    caminho: s("d/y"),
+                    esperada: v
+                },
+                mkdir("e")
+            ],
+            0
+        )
+        .is_ok()
+    );
+    // A cota baixou abaixo do uso: o que diminui passa, o que aumenta não.
+    let baixa = Cota {
+        bytes: 100,
+        objetos: 1,
+    };
+    let vx = a.versao("d/x");
+    assert!(
+        a.preparar(
+            &[gravar("d/x", vx, conteudo(50, 3, 3))],
+            ATOR,
+            baixa,
+            0,
+            TETO
+        )
+        .is_ok()
+    );
+    assert_eq!(
+        a.preparar(
+            &[gravar("d/x", vx, conteudo(7000, 3, 3))],
+            ATOR,
+            baixa,
+            0,
+            TETO
+        ),
+        Err((0, Recusa::Cota))
+    );
+    // Outro dono que sobrescreve paga o que gravou; o de antes deixa de
+    // pagar.
+    let l = a
+        .preparar(
+            &[gravar("d/x", vx, conteudo(100, 5, 4))],
+            OUTRO,
+            LIVRE,
+            0,
+            TETO,
+        )
+        .unwrap();
+    a.aplicar(&l).unwrap();
+    assert_eq!(
+        a.uso(OUTRO),
+        Uso {
+            bytes: 100,
+            objetos: 1
+        }
+    );
+    assert_eq!(
+        a.uso(ATOR),
+        Uso {
+            bytes: 10,
+            objetos: 2
+        }
+    );
+    // Sem linha, sem cota.
+    assert_eq!(
+        a.preparar(&[mkdir("w")], "pessoa:x", Cota::NENHUMA, 0, TETO),
+        Err((0, Recusa::Cota))
+    );
+}
+
+#[test]
+fn duas_vezes_seguidas_nao_passam_da_cota() {
+    // O kernel prepara e aplica um lote de cada vez: o segundo vê o
+    // primeiro, e os dois juntos não passam.
+    let mut a = Armazem::novo();
+    fazer(&mut a, ATOR, &[mkdir("d")]).unwrap();
+    let cota = Cota {
+        bytes: 100,
+        objetos: 100,
+    };
+    let um = a
+        .preparar(
+            &[gravar("d/a", 0, conteudo(60, 0, 1))],
+            OUTRO,
+            cota,
+            0,
+            TETO,
+        )
+        .unwrap();
+    a.aplicar(&um).unwrap();
+    assert_eq!(
+        a.preparar(
+            &[gravar("d/b", 0, conteudo(60, 1, 2))],
+            OUTRO,
+            cota,
+            0,
+            TETO
+        ),
+        Err((0, Recusa::Cota))
+    );
+}
+
+#[test]
+fn o_teto_dos_metadados() {
+    let a = Armazem::novo();
+    let teto = CUSTO_DE_NO + 1 + ATOR.len();
+    assert!(a.preparar(&[mkdir("d")], ATOR, LIVRE, 0, teto).is_ok());
+    assert_eq!(
+        a.preparar(&[mkdir("d"), mkdir("e")], ATOR, LIVRE, 0, teto),
+        Err((1, Recusa::Cheio))
+    );
+}
+
+#[test]
+fn os_blocos_que_saem() {
+    let carga = CARGA as u64;
+    let mut a = Armazem::novo();
+    fazer(&mut a, ATOR, &[gravar("x", 0, conteudo(3 * carga, 10, 1))]).unwrap();
+    // Substituir solta o conteúdo velho inteiro.
+    let v = a.versao("x");
+    let saidas = fazer(&mut a, ATOR, &[gravar("x", v, conteudo(10, 20, 2))]).unwrap();
+    assert_eq!(saidas, vec![(10, 13)]);
+    // Um conteúdo de dois blocos e meio, e o acréscimo que o completa: os
+    // blocos cheios ficam, o último é reescrito noutro lugar.
+    let v = a.versao("x");
+    let base = conteudo(2 * carga + 7, 30, 3);
+    let saidas = fazer(&mut a, ATOR, &[gravar("x", v, base.clone())]).unwrap();
+    assert_eq!(saidas, vec![(20, 21)]);
+    let mut acrescido = base.clone();
+    acrescido.tamanho = 3 * carga;
+    acrescido.extensoes[0].quantos = 2;
+    acrescido.extensoes.push(Extensao {
+        bloco: 40,
+        quantos: 1,
+        id: [4; 16],
+        indice: 2,
+    });
+    let v = a.versao("x");
+    let saidas = fazer(&mut a, ATOR, &[gravar("x", v, acrescido)]).unwrap();
+    assert_eq!(saidas, vec![(32, 33)]);
+    // Escrito duas vezes no mesmo lote: o primeiro conteúdo sai também.
+    let v = a.versao("x");
+    let saidas = fazer(
+        &mut a,
+        ATOR,
+        &[
+            gravar("x", v, conteudo(1, 50, 5)),
+            gravar("x", v + 1, conteudo(1, 51, 6)),
+        ],
+    )
+    .unwrap();
+    assert_eq!(saidas, vec![(30, 32), (40, 41), (50, 51)]);
+    // Apagar solta tudo.
+    let v = a.versao("x");
+    let saidas = fazer(
+        &mut a,
+        ATOR,
+        &[Op::Apagar {
+            caminho: s("x"),
+            esperada: v,
+        }],
+    )
+    .unwrap();
+    assert_eq!(saidas, vec![(51, 52)]);
+    assert!(a.blocos_em_uso().is_empty());
+}
+
+#[test]
+fn conteudo_incoerente_e_recusado() {
+    let carga = CARGA as u64;
+    let a = Armazem::novo();
+    let mut c = conteudo(2 * carga, 0, 1);
+    c.tamanho += 1;
+    assert_eq!(
+        a.preparar(&[gravar("x", 0, c)], ATOR, LIVRE, 0, TETO),
+        Err((0, Recusa::ConteudoIncoerente))
+    );
+    let mut c = conteudo(2 * carga, 0, 1);
+    c.extensoes[0].indice = 1;
+    assert!(!c.valido());
+    let buraco = Conteudo {
+        tamanho: 3 * carga,
+        extensoes: vec![
+            Extensao {
+                bloco: 0,
+                quantos: 1,
+                id: [1; 16],
+                indice: 0,
+            },
+            Extensao {
+                bloco: 5,
+                quantos: 1,
+                id: [1; 16],
+                indice: 2,
+            },
+        ],
+    };
+    assert!(!buraco.valido());
+    let certo = Conteudo {
+        tamanho: 3 * carga,
+        extensoes: vec![
+            Extensao {
+                bloco: 9,
+                quantos: 2,
+                id: [1; 16],
+                indice: 0,
+            },
+            Extensao {
+                bloco: 4,
+                quantos: 1,
+                id: [2; 16],
+                indice: 2,
+            },
+        ],
+    };
+    assert!(certo.valido());
+    assert_eq!(certo.onde(0), Some((9, [1; 16])));
+    assert_eq!(certo.onde(1), Some((10, [1; 16])));
+    assert_eq!(certo.onde(2), Some((4, [2; 16])));
+    assert_eq!(certo.onde(3), None);
+}
+
+#[test]
+fn o_journal_repoe_e_a_base_tambem() {
+    let mut a = Armazem::novo();
+    let mut lotes = Vec::new();
+    let mut lote = |a: &mut Armazem, ator: &str, ops: &[Op]| {
+        let l = a.preparar(ops, ator, LIVRE, 0, TETO).unwrap();
+        a.aplicar(&l).unwrap();
+        lotes.push(l);
+    };
+    lote(
+        &mut a,
+        ATOR,
+        &[mkdir("d"), gravar("d/x", 0, conteudo(9000, 0, 1))],
+    );
+    lote(
+        &mut a,
+        OUTRO,
+        &[mkdir("d/e"), gravar("0", 0, Conteudo::vazio())],
+    );
+    let vx = a.versao("d/x");
+    lote(&mut a, ATOR, &[mv("d/x", "d/e/x", vx)]);
+    let v0 = a.versao("0");
+    lote(
+        &mut a,
+        OUTRO,
+        &[Op::Apagar {
+            caminho: s("0"),
+            esperada: v0,
+        }],
+    );
+    assert_eq!(reposto(&lotes), a);
+    assert!(reposto(&lotes).coerente());
+    // A base: os nós em ordem de caminho, e a próxima.
+    let mut b = Armazem::novo();
+    for (c, n) in a.todos() {
+        let no = match registro::decodificar(&registro::codificar_no(c, n).unwrap()).unwrap() {
+            Entrada::Mudanca(Mudanca::Arquivo {
+                versao,
+                conteudo,
+                dono,
+                ..
+            }) => No::Arquivo {
+                versao,
+                conteudo,
+                dono,
+            },
+            Entrada::Mudanca(Mudanca::Diretorio { versao, dono, .. }) => {
+                No::Diretorio { versao, dono }
+            }
+            outra => panic!("{outra:?}"),
+        };
+        b.restaurar(c, no).unwrap();
+    }
+    b.fixar_proxima(a.proxima()).unwrap();
+    assert_eq!(b, a);
+    assert!(b.coerente());
+    assert_eq!(b.uso(ATOR), a.uso(ATOR));
+    // A próxima da base não volta nem fica abaixo de uma versão reposta.
+    assert!(b.fixar_proxima(1).is_err());
+    // Um nó repetido, ou sem pai, não se repõe.
+    assert_eq!(
+        b.restaurar(
+            "d",
+            No::Diretorio {
+                versao: 999,
+                dono: s(ATOR)
+            }
+        ),
+        Err(Recusa::Existe)
+    );
+    assert_eq!(
+        b.restaurar(
+            "q/r",
+            No::Diretorio {
+                versao: 998,
+                dono: s(ATOR)
+            }
+        ),
+        Err(Recusa::PaiNaoExiste)
+    );
+}
+
+#[test]
+fn o_journal_fora_de_ordem_nao_se_aplica() {
+    let mut a = Armazem::novo();
+    let l = a.preparar(&[mkdir("d")], ATOR, LIVRE, 0, TETO).unwrap();
+    a.aplicar(&l).unwrap();
+    // O mesmo lote outra vez: a versão já foi vista.
+    assert_eq!(a.aplicar(&l), Err(Recusa::ForaDeOrdem));
+    let mut b = Armazem::novo();
+    assert_eq!(
+        b.aplicar(&Lote {
+            mudancas: vec![Mudanca::Removido {
+                caminho: s("x"),
+                versao: 5
+            }],
+            proxima: 0
+        }),
+        Err(Recusa::NaoExiste)
+    );
+}
+
+#[test]
+fn o_registro_se_le_e_recusa_o_que_nao_se_le() {
+    let ms = vec![
+        Mudanca::Arquivo {
+            caminho: s("a/b"),
+            versao: 7,
+            conteudo: Conteudo {
+                tamanho: 2 * CARGA as u64,
+                extensoes: vec![Extensao {
+                    bloco: 3,
+                    quantos: 2,
+                    id: [9; 16],
+                    indice: 0,
+                }],
+            },
+            dono: s(ATOR),
+        },
+        Mudanca::Diretorio {
+            caminho: s("a"),
+            versao: 8,
+            dono: s(OUTRO),
+        },
+        Mudanca::Removido {
+            caminho: s("z"),
+            versao: 9,
+        },
+        Mudanca::Movido {
+            de: s("p"),
+            para: s("q/r"),
+            versao: 10,
+        },
+    ];
+    let bytes = registro::lote(&ms).unwrap();
+    let lidas: Vec<Mudanca> = registro::entradas(&bytes)
+        .unwrap()
+        .into_iter()
+        .map(|e| match e {
+            Entrada::Mudanca(m) => m,
+            _ => panic!(),
+        })
+        .collect();
+    assert_eq!(lidas, ms);
+    let v = Volume {
+        id: [3; 16],
+        setores: 1 << 20,
+        setores_do_diario: 4096,
+    };
+    assert_eq!(
+        registro::decodificar(&registro::volume(&v).unwrap()),
+        Ok(Entrada::Volume(v))
+    );
+    assert_eq!(
+        registro::decodificar(&registro::proxima(42).unwrap()),
+        Ok(Entrada::Proxima(42))
+    );
+    // Cortada em qualquer ponto, não se lê.
+    let uma = registro::codificar(&ms[0]).unwrap();
+    for n in 0..uma.len() {
+        assert!(registro::decodificar(&uma[..n]).is_err(), "{n}");
+    }
+    // Um tipo desconhecido, ou os campos de outro tipo.
+    let estranha = diario::estado::campos(&[&99u16.to_le_bytes(), b"x"]).unwrap();
+    assert!(registro::decodificar(&estranha).is_err());
+    let trocada = diario::estado::campos(&[&registro::tipo::REMOVIDO.to_le_bytes(), b"x"]).unwrap();
+    assert!(registro::decodificar(&trocada).is_err());
+}
+
+#[test]
+fn o_mapa_dos_blocos() {
+    let mut m = Mapa::novo(100);
+    assert_eq!(m.reservar(10, 4).unwrap(), vec![(0, 10)]);
+    assert_eq!(m.reservar(20, 4).unwrap(), vec![(10, 30)]);
+    assert_eq!(m.livres(), 70);
+    m.soltar(0, 10).unwrap();
+    // Contígua, do cursor em volta.
+    assert_eq!(m.reservar(70, 4).unwrap(), vec![(30, 100)]);
+    // Em pedaços, quando não há uma faixa inteira — e no máximo `mais`.
+    m.soltar(40, 45).unwrap();
+    assert_eq!(m.reservar(15, 1), None);
+    assert_eq!(m.reservar(15, 2).unwrap(), vec![(0, 10), (40, 45)]);
+    assert_eq!(m.livres(), 0);
+    assert_eq!(m.reservar(1, 4), None);
+    // Marcar o que está em uso, soltar o que está livre: erro, e nada muda.
+    assert!(m.marcar(5, 6).is_err());
+    m.soltar(0, 10).unwrap();
+    assert!(m.soltar(0, 1).is_err());
+    assert!(m.marcar(95, 101).is_err());
+    assert_eq!(m.livres(), 10);
+    assert_eq!(m.contar_usados(), 90);
+    assert_eq!(m.reservar(0, 0), Some(vec![]));
+}
+
+#[test]
+fn os_blocos_cifrados() {
+    let chave = [7u8; 32];
+    let volume = [1u8; 16];
+    let id = [2u8; 16];
+    let mut b = [0u8; TAM_BLOCO];
+    bloco::selar(&chave, &volume, &id, 5, b"conteudo secreto", &mut b).unwrap();
+    assert!(
+        !b.windows(8).any(|w| w == b"conteudo"),
+        "o claro foi para o disco"
+    );
+    let mut c = b;
+    assert_eq!(
+        &bloco::abrir(&chave, &volume, &id, 5, &mut c).unwrap()[..16],
+        b"conteudo secreto"
+    );
+    // Outro índice, outra escrita, outro volume, outra chave: não abre.
+    for (k, v, i, n) in [
+        ([7u8; 32], [1u8; 16], [2u8; 16], 6u64),
+        ([7u8; 32], [1u8; 16], [3u8; 16], 5),
+        ([7u8; 32], [9u8; 16], [2u8; 16], 5),
+        ([8u8; 32], [1u8; 16], [2u8; 16], 5),
     ] {
-        assert!(!caminho_valido(c), "{c:?}");
-        assert_eq!(
-            gravar(&mut a, c, 0, b"x"),
-            Err(Recusa::CaminhoInvalido),
-            "{c:?}"
+        let mut c = b;
+        assert!(bloco::abrir(&k, &v, &i, n, &mut c).is_err());
+    }
+    // Um bit trocado em qualquer lugar: não abre.
+    for pos in [0, 100, CARGA - 1, CARGA, TAM_BLOCO - 1] {
+        let mut c = b;
+        c[pos] ^= 1;
+        assert!(
+            bloco::abrir(&chave, &volume, &id, 5, &mut c).is_err(),
+            "{pos}"
         );
-        assert_eq!(a.preparar_remocao(c, 0), Err(Recusa::CaminhoInvalido));
+    }
+    assert!(bloco::selar(&chave, &volume, &id, 0, &[0; CARGA + 1], &mut b).is_err());
+}
+
+#[test]
+fn faixas() {
+    assert_eq!(
+        normalizar(vec![(5, 7), (0, 2), (1, 3), (7, 9), (4, 4)]),
+        vec![(0, 3), (5, 9)]
+    );
+    assert_eq!(
+        subtrair(&[(0, 10)], &[(2, 3), (5, 7)]),
+        vec![(0, 2), (3, 5), (7, 10)]
+    );
+    assert_eq!(subtrair(&[(0, 10), (20, 30)], &[(0, 30)]), vec![]);
+    assert_eq!(subtrair(&[(0, 10)], &[]), vec![(0, 10)]);
+    assert_eq!(subtrair(&[(5, 10)], &[(0, 6), (9, 12)]), vec![(6, 9)]);
+}
+
+/// Uma sequência longa de lotes sorteados — com recusas no meio —, e depois
+/// de cada um: a conta coerente, o lote recusado sem efeito, e o journal
+/// repondo exatamente o mesmo armazém. O mapa de blocos acompanha como o
+/// kernel o acompanha: nenhum bloco de dois arquivos, nenhum que se perde.
+#[test]
+fn sequencias_sorteadas() {
+    let mut semente = 0x9E37_79B9_7F4A_7C15u64;
+    let mut sorteio = move |n: u64| {
+        semente ^= semente << 13;
+        semente ^= semente >> 7;
+        semente ^= semente << 17;
+        semente % n
+    };
+    let nomes = ["a", "b", "a/c", "a/d", "b/e", "a/c/f", "g"];
+    let mut a = Armazem::novo();
+    let mut mapa = Mapa::novo(4096);
+    let mut lotes = Vec::new();
+    let mut id = 0u8;
+    let mut aceitos = 0;
+    for _ in 0..3000 {
+        let mut ops = Vec::new();
+        let mut reservadas: Faixas = Vec::new();
+        for _ in 0..1 + sorteio(3) {
+            let c = s(nomes[sorteio(nomes.len() as u64) as usize]);
+            let atual = a.versao(&c);
+            let esperada = if sorteio(5) == 0 { atual + 1 } else { atual };
+            ops.push(match sorteio(6) {
+                0 => mkdir(&c),
+                1 => Op::RemoverDiretorio {
+                    caminho: c,
+                    esperada,
+                },
+                2 => Op::Apagar {
+                    caminho: c,
+                    esperada,
+                },
+                3 => mv(&c, nomes[sorteio(nomes.len() as u64) as usize], esperada),
+                _ => {
+                    let tamanho = sorteio(3 * CARGA as u64);
+                    let n = tamanho.div_ceil(CARGA as u64);
+                    let faixas = mapa.reservar(n, 4).expect("cabe");
+                    reservadas.extend(faixas.iter().copied());
+                    id = id.wrapping_add(1);
+                    let mut indice = 0;
+                    let extensoes = faixas
+                        .iter()
+                        .map(|&(de, ate)| {
+                            let e = Extensao {
+                                bloco: de,
+                                quantos: (ate - de) as u32,
+                                id: [id; 16],
+                                indice,
+                            };
+                            indice += ate - de;
+                            e
+                        })
+                        .collect();
+                    gravar(&c, esperada, Conteudo { tamanho, extensoes })
+                }
+            });
+        }
+        let antes = a.clone();
+        match a.preparar(&ops, ATOR, LIVRE, 0, TETO) {
+            Ok(l) => {
+                let saidas = a.aplicar(&l).unwrap();
+                mapa.soltar_faixas(&saidas).unwrap();
+                // O que foi reservado e nenhum arquivo levou sai também.
+                let sobra = subtrair(&normalizar(reservadas), &a.blocos_em_uso());
+                mapa.soltar_faixas(&sobra).unwrap();
+                lotes.push(l);
+                aceitos += 1;
+            }
+            Err(_) => {
+                assert_eq!(a, antes);
+                mapa.soltar_faixas(&normalizar(reservadas)).unwrap();
+            }
+        }
+        assert!(a.coerente());
+        let usados: u64 = a.blocos_em_uso().iter().map(|(x, y)| y - x).sum();
         assert_eq!(
-            a.preparar_acrescimo(c, 0, b"x"),
-            Err(Recusa::CaminhoInvalido)
+            mapa.contar_usados(),
+            usados,
+            "o mapa e os metadados divergiram"
         );
     }
-    let no_teto = "x".repeat(MAIOR_COMPONENTE);
-    for c in ["a", "A.b_c-9", "...", no_teto.as_str(), raso.as_str()] {
-        assert!(caminho_valido(c), "{c:?}");
-    }
-    assert_eq!(gravar(&mut a, &raso, 0, b"x"), Ok(1));
-}
-
-#[test]
-fn teto_de_um_arquivo() {
-    let mut a = Armazem::novo();
-    let cheio = vec![b'x'; MAIOR_ARQUIVO];
-    assert_eq!(gravar(&mut a, "a", 0, &cheio), Ok(1));
-    assert_eq!(a.preparar_acrescimo("a", 1, b"y"), Err(Recusa::Grande));
-    assert_eq!(
-        gravar(&mut a, "b", 0, &vec![b'x'; MAIOR_ARQUIVO + 1]),
-        Err(Recusa::Grande)
-    );
-    // Substituir por algo menor libera.
-    assert_eq!(gravar(&mut a, "a", 1, b"pouco"), Ok(2));
-    assert_eq!(a.ocupacao(), (1, 5));
-}
-
-#[test]
-fn teto_de_arquivos() {
-    let mut a = Armazem::novo();
-    for i in 0..MAIS_ARQUIVOS {
-        gravar(&mut a, &alloc::format!("f{i}"), 0, b"").unwrap();
-    }
-    assert_eq!(gravar(&mut a, "mais", 0, b""), Err(Recusa::Cheio));
-    // Substituir um que existe não conta como mais um, mesmo vazio.
-    let v = a.versao("f0");
-    assert!(gravar(&mut a, "f0", v, b"agora tem").is_ok());
-    let v = a.versao("f1");
-    assert!(gravar(&mut a, "f1", v, b"").is_ok());
-    // Apagar um abre lugar.
-    let v = a.versao("f2");
-    apagar(&mut a, "f2", v).unwrap();
-    assert!(gravar(&mut a, "mais", 0, b"").is_ok());
-}
-
-#[test]
-fn teto_de_bytes() {
-    let mut a = Armazem::novo();
-    let cheio = vec![b'x'; MAIOR_ARQUIVO];
-    let quantos = MAIOR_ARMAZEM / MAIOR_ARQUIVO;
-    for i in 0..quantos {
-        gravar(&mut a, &alloc::format!("f{i}"), 0, &cheio).unwrap();
-    }
-    assert_eq!(a.ocupacao(), (quantos, MAIOR_ARMAZEM));
-    assert_eq!(gravar(&mut a, "mais", 0, b"x"), Err(Recusa::Cheio));
-    // Trocar um pelo mesmo tamanho cabe: os bytes antigos saem da conta.
-    let v = a.versao("f0");
-    assert!(gravar(&mut a, "f0", v, &cheio).is_ok());
-    let v = a.versao("f1");
-    assert!(gravar(&mut a, "f1", v, b"menos").is_ok());
-    assert!(gravar(&mut a, "mais", 0, b"x").is_ok());
-}
-
-#[test]
-fn aplicar_e_a_reposicao_do_boot() {
-    // O que o kernel grava, na ordem.
-    let mut a = Armazem::novo();
-    let mut gravadas = Vec::new();
-    for (c, dados) in [("a", &b"1"[..]), ("d/b", b"2"), ("a", b"3")] {
-        let v = a.versao(c);
-        let m = a.preparar_gravacao(c, v, dados).unwrap();
-        a.aplicar(&m).unwrap();
-        gravadas.push(m);
-    }
-    let m = a.preparar_remocao("d/b", 2).unwrap();
-    a.aplicar(&m).unwrap();
-    gravadas.push(m);
-
-    // O boot repõe o mesmo estado, sem preparar nada.
-    let mut b = Armazem::novo();
-    for m in &gravadas {
-        b.aplicar(m).unwrap();
-    }
-    assert_eq!(b.proxima(), a.proxima());
-    assert_eq!(b.ocupacao(), a.ocupacao());
-    assert_eq!(b.objeto("a").unwrap().dados(), b"3");
-    assert_eq!(b.versao("a"), 3);
-    assert_eq!(b.tipo("d"), None);
-
-    // Repetida, ou fora de ordem, uma mudança é recusada.
-    assert_eq!(b.aplicar(&gravadas[0]), Err(Recusa::ForaDeOrdem));
-    assert_eq!(b.aplicar(&gravadas[3]), Err(Recusa::ForaDeOrdem));
-    // Uma remoção do que não existe também.
-    let nada = Mudanca::Apagado {
-        caminho: "nada".into(),
-        versao: 99,
-    };
-    assert_eq!(b.aplicar(&nada), Err(Recusa::NaoExiste));
-    assert_eq!(b.proxima(), a.proxima());
-    // E uma gravação que o lugar ou os tetos não aceitam.
-    let ruim = Mudanca::Gravado {
-        caminho: "a/x".into(),
-        versao: 99,
-        dados: vec![],
-    };
-    assert_eq!(b.aplicar(&ruim), Err(Recusa::PaiEhArquivo));
-    let grande = Mudanca::Gravado {
-        caminho: "g".into(),
-        versao: 99,
-        dados: vec![0; MAIOR_ARQUIVO + 1],
-    };
-    assert_eq!(b.aplicar(&grande), Err(Recusa::Grande));
-    assert_eq!(b.proxima(), a.proxima());
-}
-
-#[test]
-fn a_base_repoe_a_proxima_versao() {
-    // Depois de uma compactação, a base diz a próxima versão: as que já
-    // foram dadas a objetos apagados não voltam.
-    let mut a = Armazem::novo();
-    gravar(&mut a, "a", 0, b"1").unwrap();
-    apagar(&mut a, "a", 1).unwrap();
-    let mut b = Armazem::novo();
-    b.fixar_proxima(a.proxima());
-    assert_eq!(b.proxima(), 3);
-    b.fixar_proxima(1);
-    assert_eq!(b.proxima(), 3);
-    assert_eq!(gravar(&mut b, "a", 0, b"novo"), Ok(3));
-}
-
-#[test]
-fn a_versao_reencontra_um_conteudo_so() {
-    let mut a = Armazem::novo();
-    gravar(&mut a, "a", 0, b"1").unwrap();
-    assert_eq!(
-        a.por_versao(1).map(|(c, o)| (c, o.dados())),
-        Some(("a", &b"1"[..]))
-    );
-    // Mudado, a versão antiga não acha mais nada: quem a guardou não lê
-    // metade de um conteúdo e metade de outro.
-    gravar(&mut a, "a", 1, b"2").unwrap();
-    assert!(a.por_versao(1).is_none());
-    assert_eq!(a.por_versao(2).map(|(c, _)| c), Some("a"));
-    apagar(&mut a, "a", 2).unwrap();
-    assert!(a.por_versao(2).is_none());
-    assert!(a.coerente());
-}
-
-#[test]
-fn diretorios_tem_numero_enquanto_existem() {
-    let mut a = Armazem::novo();
-    assert_eq!(a.id_do_diretorio(""), Some(0));
-    assert_eq!(a.diretorio(0), Some(""));
-    gravar(&mut a, "d/e/f", 0, b"x").unwrap();
-    gravar(&mut a, "d/g", 0, b"x").unwrap();
-    let d = a.id_do_diretorio("d").unwrap();
-    let e = a.id_do_diretorio("d/e").unwrap();
-    assert_ne!(d, e);
-    assert_ne!(d, 0);
-    assert_eq!(a.diretorio(d), Some("d"));
-    assert_eq!(a.diretorio(e), Some("d/e"));
-    // Mudar um arquivo não muda o número do diretório.
-    gravar(&mut a, "d/e/f", 1, b"y").unwrap();
-    assert_eq!(a.id_do_diretorio("d/e"), Some(e));
-    // Vazio, ele sai; o de cima continua, com o mesmo número.
-    apagar(&mut a, "d/e/f", 3).unwrap();
-    assert_eq!(a.id_do_diretorio("d/e"), None);
-    assert_eq!(a.diretorio(e), None);
-    assert_eq!(a.id_do_diretorio("d"), Some(d));
-    assert!(a.coerente());
-    // De volta, é outro número: o de antes não aponta para o novo.
-    gravar(&mut a, "d/e/h", 0, b"x").unwrap();
-    assert_ne!(a.id_do_diretorio("d/e"), Some(e));
-    assert_eq!(a.diretorio(e), None);
-    assert!(a.coerente());
-}
-
-#[test]
-fn as_contas_ficam_coerentes() {
-    let mut a = Armazem::novo();
-    let caminhos = ["a/b/c", "a/b/d", "a/e", "f", "g/h/i/j"];
-    for (n, c) in caminhos.iter().enumerate() {
-        gravar(&mut a, c, 0, &alloc::vec![b'x'; n]).unwrap();
-        assert!(a.coerente());
-    }
-    for c in caminhos.iter().rev() {
-        let v = a.versao(c);
-        let m = a.preparar_acrescimo(c, v, b"mais").unwrap();
-        a.aplicar(&m).unwrap();
-        assert!(a.coerente());
-    }
-    for c in caminhos {
-        let v = a.versao(c);
-        apagar(&mut a, c, v).unwrap();
-        assert!(a.coerente());
-    }
-    assert_eq!(a.ocupacao(), (0, 0));
-    assert!(a.filhos("").is_empty());
-}
-
-#[test]
-fn a_versao_tem_teto() {
-    let mut a = Armazem::novo();
-    gravar(&mut a, "a", 0, b"1").unwrap();
-    a.fixar_proxima(MAIOR_VERSAO);
-    assert_eq!(gravar(&mut a, "b", 0, b"1"), Ok(MAIOR_VERSAO));
-    assert_eq!(gravar(&mut a, "c", 0, b"1"), Err(Recusa::Cheio));
-    assert_eq!(a.preparar_remocao("a", 1), Err(Recusa::Cheio));
-    let alem = Mudanca::Apagado {
-        caminho: "a".into(),
-        versao: MAIOR_VERSAO + 1,
-    };
-    assert_eq!(a.aplicar(&alem), Err(Recusa::Cheio));
-}
-
-#[test]
-fn todos_em_ordem() {
-    let mut a = Armazem::novo();
-    for c in ["z", "a/b", "m"] {
-        gravar(&mut a, c, 0, c.as_bytes()).unwrap();
-    }
-    let v: Vec<&str> = a.todos().map(|(c, _)| c).collect();
-    assert_eq!(v, ["a/b", "m", "z"]);
+    assert!(aceitos > 150, "{aceitos} lotes aceitos");
+    assert_eq!(reposto(&lotes), a);
 }

@@ -64,8 +64,25 @@ static DESPERTADOR: Mutex<Option<Waker>> = Mutex::new(None);
 static ATENDIDOS: AtomicU64 = AtomicU64::new(0);
 static INVALIDOS: AtomicU64 = AtomicU64::new(0);
 
+/// O separador entre o pedido e o anexo, no texto que espera na fila: um
+/// byte que uma linha JSON nunca tem — um controle cru não é JSON.
+const SEPARADOR_DO_ANEXO: u8 = 0;
+
+// O teto do anexo é o do gate: o vocabulário é um só.
+const _: () = assert!(protocolo::usuario::nativo::MAIOR_ANEXO == crate::autorizacao::MAIOR_ANEXO);
+
 /// `pedir(ptr, tamanho)` — ver `protocolo::usuario::numero::PEDIR`.
 pub fn pedir(ponteiro: u64, tamanho: u64) -> i64 {
+    pedir_com(ponteiro, tamanho, None)
+}
+
+/// `pedir_com_anexo(ptr, tamanho, anexo)` — ver
+/// `protocolo::usuario::numero::PEDIR_COM_ANEXO`.
+pub fn pedir_com_anexo(ponteiro: u64, tamanho: u64, descritor: u64) -> i64 {
+    pedir_com(ponteiro, tamanho, Some(descritor))
+}
+
+fn pedir_com(ponteiro: u64, tamanho: u64, anexo: Option<u64>) -> i64 {
     use crate::fios::Retomada;
     match crate::fios::retomar_pedido() {
         Retomada::Pronto(n) => return n as i64,
@@ -83,9 +100,41 @@ pub fn pedir(ponteiro: u64, tamanho: u64) -> i64 {
     let mut texto = Texto::novo();
     // SAFETY: `validar_faixa` confirmou que a faixa está no espaço do usuário
     // e mapeada, e ainda estamos no espaço de endereços em que ela vale.
-    texto.acrescentar(unsafe {
-        core::slice::from_raw_parts(ponteiro as *const u8, tamanho as usize)
-    });
+    let linha = unsafe { core::slice::from_raw_parts(ponteiro as *const u8, tamanho as usize) };
+    if linha.contains(&SEPARADOR_DO_ANEXO) {
+        return erro::TAMANHO_INVALIDO;
+    }
+    texto.acrescentar(linha);
+    // O anexo: o descritor dele — endereço e tamanho —, e os bytes, copiados
+    // agora, no espaço do processo: o comando roda no executor, que não o
+    // vê.
+    if let Some(descritor) = anexo {
+        if let Err(e) = crate::usuario::validar_faixa(descritor, 16) {
+            return e;
+        }
+        // SAFETY: os 16 bytes estão no espaço do usuário, mapeados; lidos
+        // sem alinhamento suposto.
+        let (onde, quantos) = unsafe {
+            let p = descritor as *const [u8; 8];
+            (
+                u64::from_le_bytes(core::ptr::read_unaligned(p)),
+                u64::from_le_bytes(core::ptr::read_unaligned(p.add(1))),
+            )
+        };
+        if quantos as usize > protocolo::usuario::nativo::MAIOR_ANEXO {
+            return erro::TAMANHO_INVALIDO;
+        }
+        if quantos > 0 {
+            if let Err(e) = crate::usuario::validar_faixa(onde, quantos) {
+                return e;
+            }
+            texto.acrescentar(&[SEPARADOR_DO_ANEXO]);
+            // SAFETY: idem, para a faixa do anexo.
+            texto.acrescentar(unsafe {
+                core::slice::from_raw_parts(onde as *const u8, quantos as usize)
+            });
+        }
+    }
     let id = crate::fios::id_atual();
     // O estado vai para o fio antes de o fio ir para a fila: o executor pode
     // tomar o pedido no instante seguinte, em outro núcleo.
@@ -164,17 +213,27 @@ pub fn atender_pendentes() -> usize {
 
 /// Decodifica um pedido, decide e executa o comando como `chamador`, e
 /// monta a resposta — os mesmos passos do canal, na mesma ordem.
-fn responder_como(chamador: Chamador, linha: &[u8]) -> Texto {
+fn responder_como(chamador: Chamador, pedido: &[u8]) -> Texto {
+    // O pedido e o anexo, se veio um.
+    let (linha, anexo) = match pedido.iter().position(|&b| b == SEPARADOR_DO_ANEXO) {
+        Some(i) => (&pedido[..i], pedido[i + 1..].to_vec()),
+        None => (pedido, alloc::vec::Vec::new()),
+    };
     let linha = crate::agent::limpar_quadro(linha);
     let mut texto = Texto::novo();
     {
         let mut w = JsonWriter::new(&mut texto);
-        let _ = responder(chamador, linha, &mut w);
+        let _ = responder(chamador, linha, anexo, &mut w);
     }
     texto
 }
 
-fn responder(chamador: Chamador, linha: &[u8], w: &mut JsonWriter) -> core::fmt::Result {
+fn responder(
+    chamador: Chamador,
+    linha: &[u8],
+    mut anexo: alloc::vec::Vec<u8>,
+    w: &mut JsonWriter,
+) -> core::fmt::Result {
     let requisicao = match Requisicao::parse(linha) {
         Ok(r) => r,
         Err((id, erro)) => {
@@ -209,7 +268,12 @@ fn responder(chamador: Chamador, linha: &[u8], w: &mut JsonWriter) -> core::fmt:
             );
         }
     };
-    protocol::envelope_ok(w, requisicao.id, |w| licenca.executar(requisicao.params, w))
+    let r = protocol::envelope_ok(w, requisicao.id, |w| {
+        licenca.executar_com_anexo(requisicao.params, core::mem::take(&mut anexo), w)
+    });
+    // Um anexo que o pedido não chegou a usar — recusado antes — sai zerado.
+    politica::sigiloso::zerar_bloco(&mut anexo);
+    r
 }
 
 /// A tarefa do executor que atende os pedidos dos processos. Na suíte não
@@ -272,6 +336,23 @@ pub unsafe fn destravar() {
 #[cfg(feature = "modo-teste")]
 pub fn responder_de_teste(chamador: Chamador, linha: &str) -> alloc::string::String {
     let texto = responder_como(chamador, linha.as_bytes());
+    alloc::string::String::from_utf8_lossy(texto.como_bytes()).into_owned()
+}
+
+/// Só para a suíte: [`responder_de_teste`], com um anexo — como chega pela
+/// chamada de sistema.
+#[cfg(feature = "modo-teste")]
+pub fn responder_com_anexo_de_teste(
+    chamador: Chamador,
+    linha: &str,
+    anexo: &[u8],
+) -> alloc::string::String {
+    let mut pedido = alloc::vec::Vec::from(linha.as_bytes());
+    if !anexo.is_empty() {
+        pedido.push(SEPARADOR_DO_ANEXO);
+        pedido.extend_from_slice(anexo);
+    }
+    let texto = responder_como(chamador, &pedido);
     alloc::string::String::from_utf8_lossy(texto.como_bytes()).into_owned()
 }
 

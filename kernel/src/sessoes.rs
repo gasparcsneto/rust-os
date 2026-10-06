@@ -8,6 +8,7 @@
 //! `unsafe`.
 
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::trava::Mutex;
@@ -76,10 +77,96 @@ pub fn devolver(p: u8, transporte: Transporte) {
     crate::arch::sem_interrupcoes(|| TRANSPORTES.lock()[i] = Some(transporte));
 }
 
+/// O anexo de uma porta, ainda sem pedido: os bytes dos quadros de anexo
+/// que chegaram depois do último pedido. `estourou` quando passaram de
+/// [`crate::autorizacao::MAIOR_ANEXO`] — os bytes já saíram, e o pedido que
+/// o reivindicar é recusado.
+struct Pendente {
+    bytes: Vec<u8>,
+    estourou: bool,
+}
+
+impl Pendente {
+    const fn novo() -> Self {
+        Self {
+            bytes: Vec::new(),
+            estourou: false,
+        }
+    }
+}
+
+static ANEXOS: Mutex<[Pendente; PORTAS]> = Mutex::new([const { Pendente::novo() }; PORTAS]);
+
+/// O anexo de um pedido, tirado da porta: zerado quando sai de cena, seja
+/// entregue ao comando ou recusado.
+pub struct AnexoDaPorta(Vec<u8>);
+
+impl AnexoDaPorta {
+    /// O anexo de um canal que não tem anexos: vazio, sem alocar.
+    pub const fn nenhum() -> Self {
+        Self(Vec::new())
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Os bytes, para o comando — que os zera depois de usar.
+    pub fn entregar(mut self) -> Vec<u8> {
+        core::mem::take(&mut self.0)
+    }
+}
+
+impl Drop for AnexoDaPorta {
+    fn drop(&mut self) {
+        politica::sigiloso::zerar_bloco(&mut self.0);
+    }
+}
+
+/// Acrescenta `bytes` ao anexo pendente da porta `p`. Passando do teto, o
+/// que havia é zerado e o anexo fica marcado como estourado.
+pub fn acrescentar_anexo(p: u8, bytes: &[u8]) {
+    let Some(i) = indice(p) else {
+        return;
+    };
+    // Fora da trava: crescer o vetor é alocar, e não precisa das
+    // interrupções desligadas. Uma porta é atendida por uma tarefa só.
+    let mut pendente = crate::arch::sem_interrupcoes(|| {
+        core::mem::replace(&mut ANEXOS.lock()[i], Pendente::novo())
+    });
+    if pendente.estourou || pendente.bytes.len() + bytes.len() > crate::autorizacao::MAIOR_ANEXO {
+        politica::sigiloso::zerar_bloco(&mut pendente.bytes);
+        pendente.bytes = Vec::new();
+        pendente.estourou = true;
+    } else {
+        pendente.bytes.extend_from_slice(bytes);
+    }
+    let velho =
+        crate::arch::sem_interrupcoes(|| core::mem::replace(&mut ANEXOS.lock()[i], pendente));
+    drop(AnexoDaPorta(velho.bytes));
+}
+
+/// Tira o anexo pendente da porta `p`, para o pedido que acabou de fechar
+/// — todo pedido o tira, reivindicando ou não: um anexo nunca sobra para o
+/// pedido seguinte. `Err` se ele estourou o teto.
+pub fn tirar_anexo(p: u8) -> Result<AnexoDaPorta, ()> {
+    let Some(i) = indice(p) else {
+        return Ok(AnexoDaPorta(Vec::new()));
+    };
+    let pendente = crate::arch::sem_interrupcoes(|| {
+        core::mem::replace(&mut ANEXOS.lock()[i], Pendente::novo())
+    });
+    let estourou = pendente.estourou;
+    let anexo = AnexoDaPorta(pendente.bytes);
+    if estourou { Err(()) } else { Ok(anexo) }
+}
+
 /// Esquece a sessão da porta `p`: a identidade e as chaves. Devolve quem
 /// estava nela.
 pub fn esquecer(p: u8) -> Option<Identificada> {
     let i = indice(p)?;
+    // O anexo pela metade era da sessão que acabou.
+    drop(tirar_anexo(p));
     // O transporte sai da trava e é destruído fora dela; o `Drop` da cifra
     // apaga as chaves.
     let (identidade, transporte) = crate::arch::sem_interrupcoes(|| {
@@ -149,5 +236,6 @@ pub unsafe fn destravar() {
     unsafe {
         TRANSPORTES.force_unlock();
         IDENTIDADES.force_unlock();
+        ANEXOS.force_unlock();
     }
 }

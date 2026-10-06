@@ -87,8 +87,28 @@ const TAMANHO_DA_PORTA: usize = 512;
 const SLOTS_DE_CONTROLE_TX: usize = 32;
 
 /// O que cabe esperando na entrada de uma porta, antes de o excedente ser
-/// contado como perdido. O dobro da maior requisição do canal.
-const MAIOR_ENTRADA: usize = 16 * 1024;
+/// contado como perdido: a maior requisição do canal, e folga para a
+/// seguinte. A maior requisição é o anexo inteiro e a linha que o
+/// reivindica, nos quadros cifrados — o driver não segura o dispositivo
+/// quando a entrada enche, e um anexo que não coubesse se perderia no meio.
+///
+/// Derivado, e não escolhido: o anexo, a linha duas vezes (esta e a
+/// seguinte, já a caminho) e o enquadramento — cabeçalho, etiqueta e o byte
+/// que marca o anexo, a cada quadro de pelo menos [`MENOR_QUADRO_DE_ANEXO`]
+/// bytes, como o cliente manda.
+const MAIOR_ENTRADA: usize = crate::autorizacao::MAIOR_ANEXO
+    + 4 * crate::agent::LINHA_MAX
+    + (crate::autorizacao::MAIOR_ANEXO / MENOR_QUADRO_DE_ANEXO + 1) * ENQUADRAMENTO;
+
+/// O menor quadro de anexo que o cliente manda — o último pode ser menor.
+/// Quadros menores ainda funcionam, mas gastam mais enquadramento do que
+/// [`MAIOR_ENTRADA`] reserva, e um anexo grande neles pode se perder.
+pub const MENOR_QUADRO_DE_ANEXO: usize = 1024;
+
+/// O que um quadro de dados acrescenta ao claro: o cabeçalho do quadro, a
+/// etiqueta da cifra e o byte de anexo.
+const ENQUADRAMENTO: usize =
+    sigilo::quadro::CABECALHO + (sigilo::MAIOR_MENSAGEM - sigilo::Transporte::MAIOR_CLARO) + 1;
 
 /// O que cabe esperando para sair por uma porta. Um cliente que não lê não
 /// faz o kernel guardar resposta sem fim: o excedente é descartado e

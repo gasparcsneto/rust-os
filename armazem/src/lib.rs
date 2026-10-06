@@ -2,65 +2,77 @@
 //!
 //! # O que é
 //!
-//! Uma árvore de arquivos de texto, cada um com uma **versão** — a da última
-//! mudança nele —, sob tetos que não deixam o armazém tomar o lugar do
-//! estado de autoridade no journal. É só a conta: quem pode mexer, em que
-//! caminho, quem tem o arrendamento, e se a mudança está no disco são
-//! perguntas de outros lugares (o gate, a coordenação, a persistência), e
-//! não chegam aqui. O desenho inteiro está em `docs/ARMAZENAMENTO.md`.
+//! Uma árvore de arquivos e diretórios, cada nó com uma **versão** — a da
+//! última mudança nele — e um **dono**, que paga a cota do que o nó ocupa.
+//! O conteúdo dos arquivos não mora aqui, nem na memória do kernel: mora em
+//! blocos cifrados de uma partição própria ([`bloco`]), e o que esta conta
+//! guarda de cada arquivo é onde ele está ([`Conteudo`]). É só a conta: quem
+//! pode mexer, em que caminho, quem tem o arrendamento, e se a mudança está
+//! no disco são perguntas de outros lugares (o gate, a coordenação, a
+//! persistência), e não chegam aqui. O desenho inteiro está em
+//! `docs/ARMAZENAMENTO.md`.
 //!
-//! # Preparar e aplicar
+//! # Preparar e aplicar, em lote
 //!
-//! Uma mutação é feita em dois passos. [`Armazem::preparar_gravacao`] (e as
-//! irmãs) confere tudo e devolve a [`Mudanca`] — sem mudar nada. O kernel
-//! grava a mudança no journal e, **só se a gravação deu certo**,
-//! [`Armazem::aplicar`] a põe em vigor. Assim uma mudança nunca vale em
-//! memória sem estar no disco; e a mesma `aplicar` é a que o boot usa para
-//! repor o que o journal diz.
+//! Uma mutação é um **lote** de operações ([`Op`]), aplicado inteiro ou
+//! nada. [`Armazem::preparar`] confere todas, uma depois da outra, cada uma
+//! vendo o efeito das anteriores — sem mudar nada —, e devolve o [`Lote`]: o
+//! **resultado**, mudança por mudança ([`Mudanca`]). O kernel grava o lote
+//! e, **só se a gravação deu certo**, [`Armazem::aplicar`] o põe em vigor.
+//! Assim nada vale em memória sem estar no disco, nada de um lote vale sem
+//! o resto; e a mesma `aplicar` é a que o boot usa para repor o que o
+//! journal diz.
 //!
 //! # A versão
 //!
-//! Vem de um contador do armazém inteiro, que só cresce: cada mutação leva
-//! o próximo número. A versão de um objeto que não existe é 0. Por isso um
-//! objeto apagado e criado de novo nunca volta a uma versão já vista — quem
-//! guardou a versão 3 do antigo não escreve no novo achando que é o mesmo.
+//! Vem de um contador do armazém inteiro, que só cresce: cada mudança leva
+//! o próximo número — um lote, um número por mudança. A versão de um caminho
+//! sem nó é 0. Por isso um objeto apagado e criado de novo nunca volta a uma
+//! versão já vista — quem guardou a versão 3 do antigo não escreve no novo
+//! achando que é o mesmo. Um diretório movido leva versões novas, ele e cada
+//! nó abaixo: o que estava em `a/x` agora está em `b/x`, e quem guardou a
+//! versão de `a/x` não acha mais nada lá.
 //!
-//! # Caminhos
+//! # Caminhos e diretórios
 //!
 //! Relativos à raiz do armazém, sem barra no começo nem no fim:
-//! `compartilhado/notas.txt`. A raiz é o caminho vazio. Cada componente tem
-//! de 1 a [`MAIOR_COMPONENTE`] bytes de `[A-Za-z0-9._-]`, e não é `.` nem
-//! `..`; até [`MAIS_NIVEIS`] componentes. Os diretórios são implícitos:
-//! existem enquanto há arquivo abaixo deles.
+//! `compartilhado/notas.txt`. A raiz é o caminho vazio, e existe sempre. Cada
+//! componente tem de 1 a [`MAIOR_COMPONENTE`] bytes de `[A-Za-z0-9._-]`, e
+//! não é `.` nem `..`; até [`MAIS_NIVEIS`] componentes.
 //!
-//! # Como quem lê reencontra um objeto
+//! Os diretórios são **explícitos**: nascem por [`Op::CriarDiretorio`],
+//! existem vazios, e saem por [`Op::RemoverDiretorio`] — só vazios. Um nó só
+//! nasce num diretório que existe: nada cria o pai de passagem, e por isso
+//! nada existe num caminho que o gate não decidiu.
 //!
-//! Pela versão. Ela é única no armazém inteiro e nomeia exatamente um
-//! conteúdo de um arquivo — o resultado da mudança daquele número —, então
-//! quem guardou a versão de um arquivo para lê-lo aos pedaços nunca recebe
-//! um pedaço de um conteúdo e o seguinte de outro: depois de uma mudança, a
-//! versão guardada não acha mais nada ([`Armazem::por_versao`]). Os
-//! diretórios têm um número próprio, estável enquanto o diretório existe
-//! ([`Armazem::id_do_diretorio`]).
+//! # A cota
+//!
+//! Cada nó é de um dono — quem o gravou por último, ou criou o diretório —,
+//! e conta para ele: um objeto, e os bytes do conteúdo. Um lote de `ator`
+//! que aumentaria o uso dele além da [`Cota`] é recusado inteiro; um que o
+//! diminui passa sempre, mesmo acima dela. A conta é feita com o lote
+//! inteiro, sobre o estado de agora: o kernel prepara um lote de cada vez,
+//! e dois lotes não somam acima da cota por terem sido conferidos ao mesmo
+//! tempo.
+//!
+//! # Os metadados
+//!
+//! O que a memória do kernel paga por nó — o caminho, o dono, as extensões
+//! — é contado ([`Armazem::metadados`]), e o lote que passaria do teto que o
+//! kernel dá é recusado. O conteúdo não conta: não está na memória.
 
 #![no_std]
 
 extern crate alloc;
 
+pub mod bloco;
+pub mod mapa;
+pub mod registro;
+
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-/// O maior arquivo, em bytes.
-pub const MAIOR_ARQUIVO: usize = 16 * 1024;
-/// Quantos arquivos o armazém guarda, no máximo.
-pub const MAIS_ARQUIVOS: usize = 256;
-/// Quanto o armazém inteiro guarda, em bytes de conteúdo.
-///
-/// O armazém mora no heap do kernel, que tem 4 MiB e é de todos: um
-/// armazém cheio não pode deixar sem memória uma operação de segurança.
-/// Um oitavo do heap.
-pub const MAIOR_ARMAZEM: usize = 512 * 1024;
 /// O maior componente de um caminho.
 pub const MAIOR_COMPONENTE: usize = 64;
 /// Quantos componentes um caminho tem, no máximo.
@@ -70,6 +82,18 @@ pub const MAIS_NIVEIS: usize = 8;
 /// contador não chega lá — uma mudança por microssegundo levaria
 /// trezentos mil anos —, e se chegasse o armazém diria que está cheio.
 pub const MAIOR_VERSAO: u64 = (1 << 63) - 1;
+/// O maior nome de dono: `agente:` e uma chave em hex cabem com folga.
+pub const MAIOR_DONO: usize = 96;
+/// Quantas extensões um arquivo tem, no máximo: o registro de uma mudança
+/// leva todas num campo, e o campo cabe em 64 KiB.
+pub const MAIS_EXTENSOES: usize = 1024;
+/// O que a memória paga por nó, além do caminho, do dono e das extensões.
+pub const CUSTO_DE_NO: usize = 64;
+/// O que a memória paga por extensão.
+pub const CUSTO_DE_EXTENSAO: usize = 40;
+
+/// Quantos bytes de conteúdo um bloco leva — ver [`bloco::CARGA`].
+pub const CARGA: u64 = bloco::CARGA as u64;
 
 /// O que um caminho é.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,99 +102,276 @@ pub enum Tipo {
     Diretorio,
 }
 
-/// Um arquivo.
-#[derive(Debug)]
-pub struct Objeto {
-    versao: u64,
-    dados: Vec<u8>,
+/// Uma faixa de blocos do conteúdo de um arquivo: `quantos` blocos a partir
+/// do bloco `bloco` da área de dados, que guardam os blocos lógicos
+/// `indice..indice + quantos` do arquivo, cifrados com o `id` da escrita que
+/// os fez — ver [`bloco`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Extensao {
+    pub bloco: u64,
+    pub quantos: u32,
+    pub id: [u8; 16],
+    pub indice: u64,
 }
 
-impl Objeto {
-    /// A versão da última mudança.
-    pub fn versao(&self) -> u64 {
-        self.versao
-    }
-
-    /// O conteúdo.
-    pub fn dados(&self) -> &[u8] {
-        &self.dados
-    }
-}
-
-impl Drop for Objeto {
-    fn drop(&mut self) {
-        zerar(&mut self.dados);
-    }
-}
-
-/// Zera os bytes antes de devolvê-los ao alocador: o conteúdo de um
-/// arquivo pode ser de alguém, e o heap reaproveita a memória.
-fn zerar(v: &mut [u8]) {
-    for b in v.iter_mut() {
-        // SAFETY: o byte é desta fatia, vivo e alinhado.
-        unsafe { core::ptr::write_volatile(b, 0) };
-    }
-}
-
-/// Uma mudança preparada, a gravar e a aplicar.
+/// Onde está o conteúdo de um arquivo, e quanto ele tem.
 ///
-/// É o **resultado** da operação, e não o pedido: o conteúdo inteiro que o
-/// arquivo passa a ter, com a versão que ele passa a ter. O boot a aplica
-/// sem precisar saber o que havia antes nem o que foi pedido.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Mudanca {
-    Gravado {
-        caminho: String,
-        versao: u64,
-        dados: Vec<u8>,
-    },
-    Apagado {
-        caminho: String,
-        versao: u64,
-    },
+/// As extensões cobrem os blocos lógicos `0..blocos()` em ordem, sem
+/// buraco e sem sobra: o bloco lógico `k` tem os bytes `k * CARGA ..`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Conteudo {
+    pub tamanho: u64,
+    pub extensoes: Vec<Extensao>,
 }
 
-impl Mudanca {
-    /// O caminho que ela muda.
-    pub fn caminho(&self) -> &str {
-        match self {
-            Mudanca::Gravado { caminho, .. } | Mudanca::Apagado { caminho, .. } => caminho,
+impl Conteudo {
+    /// Um arquivo vazio: nenhum bloco.
+    pub const fn vazio() -> Conteudo {
+        Conteudo {
+            tamanho: 0,
+            extensoes: Vec::new(),
         }
     }
 
-    /// A versão que ela leva.
+    /// Quantos blocos o tamanho pede.
+    pub fn blocos(&self) -> u64 {
+        self.tamanho.div_ceil(CARGA)
+    }
+
+    /// As extensões cobrem exatamente os blocos lógicos do tamanho, em
+    /// ordem, sem buraco, sem sobra, e sem passar do teto de extensões.
+    pub fn valido(&self) -> bool {
+        if self.extensoes.len() > MAIS_EXTENSOES {
+            return false;
+        }
+        let mut proximo = 0u64;
+        for e in &self.extensoes {
+            if e.quantos == 0 || e.indice != proximo {
+                return false;
+            }
+            let Some(p) = proximo.checked_add(u64::from(e.quantos)) else {
+                return false;
+            };
+            if e.bloco.checked_add(u64::from(e.quantos)).is_none() {
+                return false;
+            }
+            proximo = p;
+        }
+        proximo == self.blocos()
+    }
+
+    /// Onde está o bloco lógico `k`: o bloco da área de dados, e o `id` da
+    /// escrita que o cifrou.
+    pub fn onde(&self, k: u64) -> Option<(u64, [u8; 16])> {
+        let i = self
+            .extensoes
+            .partition_point(|e| e.indice + u64::from(e.quantos) <= k);
+        let e = self.extensoes.get(i)?;
+        (k >= e.indice).then(|| (e.bloco + (k - e.indice), e.id))
+    }
+
+    /// As faixas de blocos da área de dados que o conteúdo ocupa.
+    pub fn faixas(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.extensoes
+            .iter()
+            .map(|e| (e.bloco, e.bloco + u64::from(e.quantos)))
+    }
+}
+
+/// Um nó da árvore.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum No {
+    Arquivo {
+        versao: u64,
+        conteudo: Conteudo,
+        dono: String,
+    },
+    Diretorio {
+        versao: u64,
+        dono: String,
+    },
+}
+
+impl No {
     pub fn versao(&self) -> u64 {
         match self {
-            Mudanca::Gravado { versao, .. } | Mudanca::Apagado { versao, .. } => *versao,
+            No::Arquivo { versao, .. } | No::Diretorio { versao, .. } => *versao,
         }
+    }
+
+    pub fn dono(&self) -> &str {
+        match self {
+            No::Arquivo { dono, .. } | No::Diretorio { dono, .. } => dono,
+        }
+    }
+
+    pub fn tipo(&self) -> Tipo {
+        match self {
+            No::Arquivo { .. } => Tipo::Arquivo,
+            No::Diretorio { .. } => Tipo::Diretorio,
+        }
+    }
+
+    /// Os bytes de conteúdo que o nó tem — zero num diretório.
+    pub fn tamanho(&self) -> u64 {
+        match self {
+            No::Arquivo { conteudo, .. } => conteudo.tamanho,
+            No::Diretorio { .. } => 0,
+        }
+    }
+
+    /// O conteúdo, num arquivo.
+    pub fn conteudo(&self) -> Option<&Conteudo> {
+        match self {
+            No::Arquivo { conteudo, .. } => Some(conteudo),
+            No::Diretorio { .. } => None,
+        }
+    }
+
+    fn com_versao(&self, v: u64) -> No {
+        let mut n = self.clone();
+        match &mut n {
+            No::Arquivo { versao, .. } | No::Diretorio { versao, .. } => *versao = v,
+        }
+        n
+    }
+
+    /// O que a memória paga por este nó em `caminho`.
+    fn custo(&self, caminho: &str) -> usize {
+        let extensoes = self.conteudo().map_or(0, |c| c.extensoes.len());
+        CUSTO_DE_NO + caminho.len() + self.dono().len() + CUSTO_DE_EXTENSAO * extensoes
     }
 }
 
-impl Drop for Mudanca {
-    fn drop(&mut self) {
-        if let Mudanca::Gravado { dados, .. } = self {
-            zerar(dados);
-        }
+/// O que um dono ocupa: objetos e bytes de conteúdo.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Uso {
+    pub bytes: u64,
+    pub objetos: u64,
+}
+
+/// O que um dono pode ocupar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Cota {
+    pub bytes: u64,
+    pub objetos: u64,
+}
+
+impl Cota {
+    /// Cota nenhuma: quem não tem linha na política não ocupa nada.
+    pub const NENHUMA: Cota = Cota {
+        bytes: 0,
+        objetos: 0,
+    };
+}
+
+/// Uma operação pedida, já decidida pelo gate, a conferir.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Op {
+    /// O arquivo passa a ter `conteudo` — cujos blocos o kernel já escreveu
+    /// —, contra a versão `esperada`: 0 cria, e recusa se já existe; outra
+    /// substitui, e recusa se não é a de agora. Um acréscimo é isto, com o
+    /// conteúdo de antes e o que se acrescenta.
+    Gravar {
+        caminho: String,
+        esperada: u64,
+        conteudo: Conteudo,
+    },
+    /// Apaga o arquivo, que tem de estar na versão `esperada`.
+    Apagar { caminho: String, esperada: u64 },
+    /// Cria o diretório, que não pode existir, num pai que existe.
+    CriarDiretorio { caminho: String },
+    /// Remove o diretório, vazio, na versão `esperada`.
+    RemoverDiretorio { caminho: String, esperada: u64 },
+    /// Move o nó em `de` — com tudo abaixo dele, se é diretório —, na
+    /// versão `esperada`, para `para`, que não pode existir, num pai que
+    /// existe, e não pode estar abaixo de `de`.
+    Renomear {
+        de: String,
+        para: String,
+        esperada: u64,
+    },
+}
+
+impl Op {
+    /// Os caminhos que a operação muda — os que o gate tem de ter decidido
+    /// e cujo arrendamento conta.
+    pub fn caminhos(&self) -> impl Iterator<Item = &str> {
+        let (a, b) = match self {
+            Op::Gravar { caminho, .. }
+            | Op::Apagar { caminho, .. }
+            | Op::CriarDiretorio { caminho }
+            | Op::RemoverDiretorio { caminho, .. } => (caminho.as_str(), None),
+            Op::Renomear { de, para, .. } => (de.as_str(), Some(para.as_str())),
+        };
+        core::iter::once(a).chain(b)
     }
+}
+
+/// Uma mudança, como o journal a guarda e o boot a repõe: o **resultado**.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Mudanca {
+    /// O arquivo em `caminho` passou a ter este conteúdo, nesta versão, de
+    /// `dono`.
+    Arquivo {
+        caminho: String,
+        versao: u64,
+        conteudo: Conteudo,
+        dono: String,
+    },
+    /// O diretório nasceu.
+    Diretorio {
+        caminho: String,
+        versao: u64,
+        dono: String,
+    },
+    /// O nó — um arquivo, ou um diretório vazio — saiu. A versão é a que a
+    /// remoção gastou do contador.
+    Removido { caminho: String, versao: u64 },
+    /// O nó em `de`, e tudo abaixo dele, foi para `para`. Cada nó movido
+    /// leva uma versão nova, a partir de `versao`, na ordem dos caminhos de
+    /// origem — o nó de cima primeiro.
+    Movido {
+        de: String,
+        para: String,
+        versao: u64,
+    },
+}
+
+/// Um lote preparado: as mudanças, em ordem, e a versão seguinte.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Lote {
+    pub mudancas: Vec<Mudanca>,
+    pub proxima: u64,
 }
 
 /// Por que uma conta recusou.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Recusa {
-    /// O caminho não é um caminho do armazém.
+    /// O caminho não é um caminho do armazém, ou ficaria fundo demais.
     CaminhoInvalido,
-    /// Não há arquivo nesse caminho.
+    /// Não há nó nesse caminho.
     NaoExiste,
+    /// Já há um nó nesse caminho.
+    Existe,
     /// A versão esperada não é a de agora — que vai junto.
     Versao { atual: u64 },
-    /// O caminho é um diretório: há arquivos abaixo dele.
+    /// O caminho é um diretório.
     EhDiretorio,
-    /// Um componente do meio do caminho é um arquivo.
-    PaiEhArquivo,
-    /// O arquivo passaria do teto de um arquivo.
-    Grande,
-    /// O armazém passaria de um teto dele: arquivos ou bytes.
+    /// O caminho, ou o pai dele, é um arquivo.
+    NaoEhDiretorio,
+    /// O pai do caminho não existe.
+    PaiNaoExiste,
+    /// O diretório tem nós abaixo dele.
+    NaoVazio,
+    /// O destino de um movimento estaria abaixo da origem.
+    DentroDeSi,
+    /// O lote passaria da cota de quem pede.
+    Cota,
+    /// O armazém passaria do teto dele: os metadados, ou as versões.
     Cheio,
+    /// Um conteúdo cujas extensões não cobrem o tamanho.
+    ConteudoIncoerente,
     /// Uma mudança a aplicar com versão que não é posterior às já vistas —
     /// só o boot a encontra, num journal fora de ordem.
     ForaDeOrdem,
@@ -181,12 +382,17 @@ impl Recusa {
     pub const fn motivo(self) -> &'static str {
         match self {
             Recusa::CaminhoInvalido => "o caminho nao e um caminho do armazem",
-            Recusa::NaoExiste => "nao ha arquivo nesse caminho",
+            Recusa::NaoExiste => "nao ha nada nesse caminho",
+            Recusa::Existe => "ja ha algo nesse caminho",
             Recusa::Versao { .. } => "a versao esperada nao e a de agora",
             Recusa::EhDiretorio => "o caminho e um diretorio",
-            Recusa::PaiEhArquivo => "um componente do caminho e um arquivo",
-            Recusa::Grande => "o arquivo passaria do teto de um arquivo",
+            Recusa::NaoEhDiretorio => "o caminho, ou o pai dele, e um arquivo",
+            Recusa::PaiNaoExiste => "o diretorio pai nao existe",
+            Recusa::NaoVazio => "o diretorio nao esta vazio",
+            Recusa::DentroDeSi => "o destino estaria abaixo da origem",
+            Recusa::Cota => "a cota de quem pede nao comporta",
             Recusa::Cheio => "o armazem passaria do teto dele",
+            Recusa::ConteudoIncoerente => "o conteudo nao cobre o tamanho",
             Recusa::ForaDeOrdem => "mudanca com versao fora de ordem",
         }
     }
@@ -202,37 +408,88 @@ pub fn componente_valido(c: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
 }
 
-/// Um caminho de arquivo aceitável: não vazio, sem barras sobrando, cada
+/// Um caminho de nó aceitável: não vazio, sem barras sobrando, cada
 /// componente aceitável, até [`MAIS_NIVEIS`] deles.
 pub fn caminho_valido(c: &str) -> bool {
     !c.is_empty() && c.split('/').count() <= MAIS_NIVEIS && c.split('/').all(componente_valido)
 }
 
-/// Um diretório que existe: o número dele, e quantos arquivos há abaixo.
-#[derive(Debug)]
-struct Diretorio {
-    id: u64,
-    arquivos: usize,
+/// O pai de `c`: `a/b/c` dá `a/b`; `a` dá a raiz, `""`.
+pub fn pai(c: &str) -> &str {
+    c.rfind('/').map_or("", |i| &c[..i])
 }
 
-/// O armazém.
-#[derive(Debug)]
+/// `c` está abaixo de `dir` (e não é ele)?
+pub fn abaixo_de(c: &str, dir: &str) -> bool {
+    dir.is_empty() || (c.len() > dir.len() && c.starts_with(dir) && c.as_bytes()[dir.len()] == b'/')
+}
+
+/// As chaves de um mapa por caminho que estão abaixo de `dir`: a faixa
+/// `dir/` até `dir0` — `0` é o byte seguinte a `/`. A raiz é tudo.
+fn abaixo<'a, V>(
+    m: &'a BTreeMap<String, V>,
+    dir: &str,
+) -> alloc::collections::btree_map::Range<'a, String, V> {
+    if dir.is_empty() {
+        return m.range::<String, _>(..);
+    }
+    let mut de = String::from(dir);
+    de.push('/');
+    let mut ate = String::from(dir);
+    ate.push('0');
+    m.range(de..ate)
+}
+
+/// Faixas de blocos, `[início, fim)`, em ordem e sem sobreposição.
+pub type Faixas = Vec<(u64, u64)>;
+
+/// Ordena e funde faixas.
+pub fn normalizar(mut v: Faixas) -> Faixas {
+    v.retain(|(a, b)| a < b);
+    v.sort_unstable();
+    let mut r: Faixas = Vec::with_capacity(v.len());
+    for (a, b) in v {
+        match r.last_mut() {
+            Some((_, fim)) if a <= *fim => *fim = (*fim).max(b),
+            _ => r.push((a, b)),
+        }
+    }
+    r
+}
+
+/// `a` menos `b`, as duas normalizadas.
+pub fn subtrair(a: &[(u64, u64)], b: &[(u64, u64)]) -> Faixas {
+    let mut r = Vec::new();
+    let mut j = 0;
+    for &(mut ini, fim) in a {
+        while j < b.len() && b[j].1 <= ini {
+            j += 1;
+        }
+        let mut k = j;
+        while k < b.len() && b[k].0 < fim {
+            if b[k].0 > ini {
+                r.push((ini, b[k].0));
+            }
+            ini = ini.max(b[k].1);
+            k += 1;
+        }
+        if ini < fim {
+            r.push((ini, fim));
+        }
+    }
+    r
+}
+
+/// O armazém: os nós, o uso de cada dono, e o contador das versões.
+#[derive(Clone, Debug)]
 pub struct Armazem {
-    objetos: BTreeMap<String, Objeto>,
-    /// Os caminhos pela versão de agora de cada arquivo.
+    nos: BTreeMap<String, No>,
+    /// Os caminhos pela versão de agora de cada nó.
     por_versao: BTreeMap<u64, String>,
-    /// Os diretórios que existem — os que têm arquivo abaixo —, menos a
-    /// raiz, que existe sempre e é o número 0.
-    diretorios: BTreeMap<String, Diretorio>,
-    /// Os diretórios pelo número.
-    por_diretorio: BTreeMap<u64, String>,
+    uso: BTreeMap<String, Uso>,
+    metadados: usize,
     /// A versão da próxima mudança.
     proxima: u64,
-    /// O número do próximo diretório: nunca reaproveitado em memória. Não
-    /// vai para o disco.
-    proximo_diretorio: u64,
-    /// Os bytes de conteúdo guardados.
-    bytes: usize,
 }
 
 impl Default for Armazem {
@@ -241,17 +498,21 @@ impl Default for Armazem {
     }
 }
 
+impl PartialEq for Armazem {
+    fn eq(&self, outro: &Armazem) -> bool {
+        self.nos == outro.nos && self.proxima == outro.proxima
+    }
+}
+
 impl Armazem {
     /// Um armazém vazio.
     pub const fn novo() -> Armazem {
         Armazem {
-            objetos: BTreeMap::new(),
+            nos: BTreeMap::new(),
             por_versao: BTreeMap::new(),
-            diretorios: BTreeMap::new(),
-            por_diretorio: BTreeMap::new(),
+            uso: BTreeMap::new(),
+            metadados: 0,
             proxima: 1,
-            proximo_diretorio: 1,
-            bytes: 0,
         }
     }
 
@@ -260,14 +521,24 @@ impl Armazem {
         self.proxima
     }
 
-    /// Repõe a próxima versão, da base de uma compactação. Só cresce.
-    pub fn fixar_proxima(&mut self, n: u64) {
-        self.proxima = self.proxima.max(n);
+    /// Quantos nós há.
+    pub fn quantos(&self) -> usize {
+        self.nos.len()
     }
 
-    /// Quantos arquivos, e quantos bytes de conteúdo.
-    pub fn ocupacao(&self) -> (usize, usize) {
-        (self.objetos.len(), self.bytes)
+    /// O que a memória paga pelos metadados de todos os nós.
+    pub fn metadados(&self) -> usize {
+        self.metadados
+    }
+
+    /// O uso de um dono.
+    pub fn uso(&self, dono: &str) -> Uso {
+        self.uso.get(dono).copied().unwrap_or_default()
+    }
+
+    /// O nó em `c`.
+    pub fn no(&self, c: &str) -> Option<&No> {
+        self.nos.get(c)
     }
 
     /// O que `c` é — a raiz, `""`, é sempre um diretório.
@@ -275,289 +546,599 @@ impl Armazem {
         if c.is_empty() {
             return Some(Tipo::Diretorio);
         }
-        if self.objetos.contains_key(c) {
-            return Some(Tipo::Arquivo);
-        }
-        self.diretorios.contains_key(c).then_some(Tipo::Diretorio)
+        self.nos.get(c).map(No::tipo)
     }
 
-    /// O número do diretório `c` — 0 para a raiz, `""` —, enquanto ele
-    /// existe.
-    pub fn id_do_diretorio(&self, c: &str) -> Option<u64> {
-        if c.is_empty() {
-            return Some(0);
-        }
-        self.diretorios.get(c).map(|d| d.id)
-    }
-
-    /// O diretório de número `id`, se ele ainda existe.
-    pub fn diretorio(&self, id: u64) -> Option<&str> {
-        if id == 0 {
-            return Some("");
-        }
-        self.por_diretorio.get(&id).map(String::as_str)
-    }
-
-    /// Os diretórios acima do arquivo `c`, do mais alto ao mais baixo:
-    /// `a/b/c` dá `a` e `a/b`.
-    fn acima(c: &str) -> impl Iterator<Item = &str> {
-        c.match_indices('/').map(move |(i, _)| &c[..i])
-    }
-
-    /// A versão de `c`: a da última mudança, ou 0 se não há arquivo lá.
+    /// A versão de `c`: a da última mudança, ou 0 se não há nó lá. A raiz
+    /// é 0.
     pub fn versao(&self, c: &str) -> u64 {
-        self.objetos.get(c).map_or(0, |o| o.versao)
+        self.nos.get(c).map_or(0, No::versao)
     }
 
-    /// O arquivo em `c`.
-    pub fn objeto(&self, c: &str) -> Option<&Objeto> {
-        self.objetos.get(c)
-    }
-
-    /// O arquivo cuja versão de agora é `versao`, com o caminho dele. Uma
-    /// versão que o arquivo já deixou para trás não acha nada.
-    pub fn por_versao(&self, versao: u64) -> Option<(&str, &Objeto)> {
+    /// O nó cuja versão de agora é `versao`, com o caminho dele. Uma versão
+    /// que o nó já deixou para trás não acha nada.
+    pub fn por_versao(&self, versao: u64) -> Option<(&str, &No)> {
         let c = self.por_versao.get(&versao)?;
-        self.objetos.get(c).map(|o| (c.as_str(), o))
+        self.nos.get(c).map(|n| (c.as_str(), n))
     }
 
     /// Os filhos imediatos do diretório `dir`, em ordem de nome, cada um
     /// com o tipo. Vazio se `dir` não é diretório.
     pub fn filhos(&self, dir: &str) -> Vec<(String, Tipo)> {
-        let mut prefixo = String::from(dir);
-        if !dir.is_empty() {
-            prefixo.push('/');
+        if self.tipo(dir) != Some(Tipo::Diretorio) {
+            return Vec::new();
         }
-        let mut v: Vec<(String, Tipo)> = Vec::new();
-        for (k, _) in self.objetos.range(prefixo.clone()..) {
-            let Some(resto) = k.strip_prefix(prefixo.as_str()) else {
-                break;
-            };
-            let (nome, tipo) = match resto.split_once('/') {
-                Some((nome, _)) => (nome, Tipo::Diretorio),
-                None => (resto, Tipo::Arquivo),
-            };
-            // Os caminhos abaixo de um mesmo diretório são vizinhos na
-            // ordem das chaves: basta olhar o último.
-            if v.last().is_none_or(|(n, _)| n != nome) {
-                v.push((String::from(nome), tipo));
+        let corte = if dir.is_empty() { 0 } else { dir.len() + 1 };
+        // Na ordem das chaves os filhos imediatos ficam na ordem dos nomes:
+        // todos têm o mesmo prefixo, e o que vem depois dele é o nome.
+        abaixo(&self.nos, dir)
+            .filter(|(c, _)| !c[corte..].contains('/'))
+            .map(|(c, n)| (String::from(&c[corte..]), n.tipo()))
+            .collect()
+    }
+
+    /// Todos os nós, em ordem de caminho — cada diretório antes do que está
+    /// abaixo dele. É a ordem da base de uma compactação.
+    pub fn todos(&self) -> impl Iterator<Item = (&str, &No)> {
+        self.nos.iter().map(|(c, n)| (c.as_str(), n))
+    }
+
+    /// As faixas de blocos que os arquivos ocupam, normalizadas: o que o
+    /// mapa de blocos tem de marcar depois de repor o armazém.
+    pub fn blocos_em_uso(&self) -> Faixas {
+        normalizar(
+            self.nos
+                .values()
+                .filter_map(No::conteudo)
+                .flat_map(Conteudo::faixas)
+                .collect(),
+        )
+    }
+
+    /// Confere um lote de `ator`, operação por operação, cada uma sobre o
+    /// efeito das anteriores, e o prepara — sem mudar nada.
+    ///
+    /// `cota` é a de `ator`, e `reservado` o que ele já ocupa fora do
+    /// armazém (rascunhos ainda não gravados); `teto_de_metadados` é o que
+    /// a memória do kernel dá aos metadados. Na recusa, devolve qual
+    /// operação recusou — a última, para a cota e o teto, que são do lote.
+    pub fn preparar(
+        &self,
+        ops: &[Op],
+        ator: &str,
+        cota: Cota,
+        reservado: u64,
+        teto_de_metadados: usize,
+    ) -> Result<Lote, (usize, Recusa)> {
+        if ator.is_empty() || ator.len() > MAIOR_DONO {
+            return Err((0, Recusa::Cota));
+        }
+        let mut v = Vista::sobre(self);
+        for (i, op) in ops.iter().enumerate() {
+            v.operar(op, ator).map_err(|r| (i, r))?;
+        }
+        let ultimo = ops.len().saturating_sub(1);
+        // A cota: só o que o lote **aumenta** se confere.
+        let antes = self.uso(ator);
+        let (db, dobj) = v.uso.get(ator).copied().unwrap_or((0, 0));
+        let depois_bytes = i128::from(antes.bytes) + db;
+        let depois_objetos = i128::from(antes.objetos) + dobj;
+        if (db > 0 && depois_bytes + i128::from(reservado) > i128::from(cota.bytes))
+            || (dobj > 0 && depois_objetos > i128::from(cota.objetos))
+        {
+            return Err((ultimo, Recusa::Cota));
+        }
+        if v.metadados > 0 && self.metadados as i128 + v.metadados > teto_de_metadados as i128 {
+            return Err((ultimo, Recusa::Cheio));
+        }
+        Ok(Lote {
+            mudancas: v.mudancas,
+            proxima: v.proxima,
+        })
+    }
+
+    /// Põe um lote em vigor: o que acabou de ser gravado, ou o que o boot
+    /// leu do journal. Devolve as faixas de blocos que deixaram de ser
+    /// usadas — o conteúdo que saiu, e o que nenhum arquivo leva mais.
+    ///
+    /// Confere de novo o que não depende de quem pediu — o lugar, o tipo, e
+    /// que cada versão é posterior às já vistas —, porque o boot não passou
+    /// pela preparação. Uma recusa no meio deixa o armazém pela metade: só o
+    /// boot a encontra, e um journal que não se reaplica não vale inteiro.
+    pub fn aplicar(&mut self, lote: &Lote) -> Result<Faixas, Recusa> {
+        let mut saidas: Faixas = Vec::new();
+        let mut tocados: Vec<String> = Vec::new();
+        for m in &lote.mudancas {
+            self.aplicar_uma(m, &mut saidas, &mut tocados)?;
+        }
+        // A preparação diz a próxima; o boot, que lê só as mudanças, deixa
+        // a que elas mesmas deram.
+        self.proxima = self.proxima.max(lote.proxima);
+        let ficam = normalizar(
+            tocados
+                .iter()
+                .filter_map(|c| self.nos.get(c))
+                .filter_map(No::conteudo)
+                .flat_map(Conteudo::faixas)
+                .collect(),
+        );
+        Ok(subtrair(&normalizar(saidas), &ficam))
+    }
+
+    fn proxima_versao(&self, v: u64) -> Result<(), Recusa> {
+        if v < self.proxima {
+            return Err(Recusa::ForaDeOrdem);
+        }
+        if v > MAIOR_VERSAO {
+            return Err(Recusa::Cheio);
+        }
+        Ok(())
+    }
+
+    fn conferir_pai(&self, c: &str) -> Result<(), Recusa> {
+        match self.tipo(pai(c)) {
+            Some(Tipo::Diretorio) => Ok(()),
+            Some(Tipo::Arquivo) => Err(Recusa::NaoEhDiretorio),
+            None => Err(Recusa::PaiNaoExiste),
+        }
+    }
+
+    fn aplicar_uma(
+        &mut self,
+        m: &Mudanca,
+        saidas: &mut Faixas,
+        tocados: &mut Vec<String>,
+    ) -> Result<(), Recusa> {
+        match m {
+            Mudanca::Arquivo {
+                caminho,
+                versao,
+                conteudo,
+                dono,
+            } => {
+                self.proxima_versao(*versao)?;
+                if !caminho_valido(caminho) || dono.is_empty() || dono.len() > MAIOR_DONO {
+                    return Err(Recusa::CaminhoInvalido);
+                }
+                if !conteudo.valido() {
+                    return Err(Recusa::ConteudoIncoerente);
+                }
+                self.conferir_pai(caminho)?;
+                match self.nos.get(caminho.as_str()) {
+                    Some(No::Diretorio { .. }) => return Err(Recusa::EhDiretorio),
+                    Some(No::Arquivo { conteudo, .. }) => saidas.extend(conteudo.faixas()),
+                    None => {}
+                }
+                self.por(
+                    caminho,
+                    Some(No::Arquivo {
+                        versao: *versao,
+                        conteudo: conteudo.clone(),
+                        dono: dono.clone(),
+                    }),
+                );
+                self.proxima = versao + 1;
+                tocados.push(caminho.clone());
+            }
+            Mudanca::Diretorio {
+                caminho,
+                versao,
+                dono,
+            } => {
+                self.proxima_versao(*versao)?;
+                if !caminho_valido(caminho) || dono.is_empty() || dono.len() > MAIOR_DONO {
+                    return Err(Recusa::CaminhoInvalido);
+                }
+                self.conferir_pai(caminho)?;
+                if self.nos.contains_key(caminho.as_str()) {
+                    return Err(Recusa::Existe);
+                }
+                self.por(
+                    caminho,
+                    Some(No::Diretorio {
+                        versao: *versao,
+                        dono: dono.clone(),
+                    }),
+                );
+                self.proxima = versao + 1;
+            }
+            Mudanca::Removido { caminho, versao } => {
+                self.proxima_versao(*versao)?;
+                match self.nos.get(caminho.as_str()) {
+                    None => return Err(Recusa::NaoExiste),
+                    Some(No::Arquivo { conteudo, .. }) => saidas.extend(conteudo.faixas()),
+                    Some(No::Diretorio { .. }) => {
+                        if abaixo(&self.nos, caminho).next().is_some() {
+                            return Err(Recusa::NaoVazio);
+                        }
+                    }
+                }
+                self.por(caminho, None);
+                self.proxima = versao + 1;
+            }
+            Mudanca::Movido { de, para, versao } => {
+                self.proxima_versao(*versao)?;
+                if !caminho_valido(de) || !caminho_valido(para) {
+                    return Err(Recusa::CaminhoInvalido);
+                }
+                if de == para || abaixo_de(para, de) {
+                    return Err(Recusa::DentroDeSi);
+                }
+                if !self.nos.contains_key(de.as_str()) {
+                    return Err(Recusa::NaoExiste);
+                }
+                if self.nos.contains_key(para.as_str()) {
+                    return Err(Recusa::Existe);
+                }
+                self.conferir_pai(para)?;
+                let sub = self.subarvore(de);
+                let mut v = *versao;
+                for (c, _) in &sub {
+                    if !caminho_valido(&renomeado(c, de, para)) {
+                        return Err(Recusa::CaminhoInvalido);
+                    }
+                }
+                for (c, _) in &sub {
+                    self.por(c, None);
+                }
+                for (c, n) in sub {
+                    if v > MAIOR_VERSAO {
+                        return Err(Recusa::Cheio);
+                    }
+                    let novo = renomeado(&c, de, para);
+                    self.por(&novo, Some(n.com_versao(v)));
+                    tocados.push(novo);
+                    v += 1;
+                }
+                self.proxima = v;
             }
         }
-        // A ordem das chaves não é a dos nomes: `b-c` vem antes de `b/x`.
-        v.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        Ok(())
+    }
+
+    /// O nó em `raiz` e todos abaixo dele, em ordem de caminho.
+    fn subarvore(&self, raiz: &str) -> Vec<(String, No)> {
+        let mut v: Vec<(String, No)> = Vec::new();
+        if let Some(n) = self.nos.get(raiz) {
+            v.push((String::from(raiz), n.clone()));
+            v.extend(abaixo(&self.nos, raiz).map(|(c, n)| (c.clone(), n.clone())));
+        }
         v
     }
 
-    /// Todos os arquivos, em ordem de caminho — para a base de uma
-    /// compactação.
-    pub fn todos(&self) -> impl Iterator<Item = (&str, &Objeto)> {
-        self.objetos.iter().map(|(c, o)| (c.as_str(), o))
+    /// Põe `novo` em `c` (ou tira o que há, com `None`), mantendo o índice
+    /// das versões, o uso dos donos e o custo dos metadados.
+    fn por(&mut self, c: &str, novo: Option<No>) {
+        if let Some(velho) = self.nos.remove(c) {
+            self.por_versao.remove(&velho.versao());
+            self.metadados -= velho.custo(c);
+            let u = self.uso.entry(String::from(velho.dono())).or_default();
+            u.bytes -= velho.tamanho();
+            u.objetos -= 1;
+            if *u == Uso::default() {
+                self.uso.remove(velho.dono());
+            }
+        }
+        if let Some(n) = novo {
+            self.por_versao.insert(n.versao(), String::from(c));
+            self.metadados += n.custo(c);
+            let u = self.uso.entry(String::from(n.dono())).or_default();
+            u.bytes += n.tamanho();
+            u.objetos += 1;
+            self.nos.insert(String::from(c), n);
+        }
     }
 
-    /// Confere que `c` pode ser um arquivo: caminho válido, não é um
-    /// diretório, e nenhum componente do meio é um arquivo.
-    fn conferir_lugar(&self, c: &str) -> Result<(), Recusa> {
-        if !caminho_valido(c) {
+    /// Repõe um nó da base de uma compactação. A base leva os nós em ordem
+    /// de caminho — o pai antes —, e cada um com a versão que tinha: as
+    /// versões não vêm em ordem, e quem fecha a conta é
+    /// [`Armazem::fixar_proxima`], com a próxima que a base diz.
+    pub fn restaurar(&mut self, c: &str, no: No) -> Result<(), Recusa> {
+        if !caminho_valido(c) || no.dono().is_empty() || no.dono().len() > MAIOR_DONO {
             return Err(Recusa::CaminhoInvalido);
         }
-        if self.diretorios.contains_key(c) {
-            return Err(Recusa::EhDiretorio);
-        }
-        if Self::acima(c).any(|d| self.objetos.contains_key(d)) {
-            return Err(Recusa::PaiEhArquivo);
-        }
-        Ok(())
-    }
-
-    /// Confere os tetos para `c` passar a ter `novos` bytes.
-    fn conferir_tetos(&self, c: &str, novos: usize) -> Result<(), Recusa> {
-        if novos > MAIOR_ARQUIVO {
-            return Err(Recusa::Grande);
-        }
-        let antigos = self.objetos.get(c).map_or(0, |o| o.dados.len());
-        let quantos = self.objetos.len() + usize::from(!self.objetos.contains_key(c));
-        if quantos > MAIS_ARQUIVOS
-            || self.bytes - antigos + novos > MAIOR_ARMAZEM
-            || self.proxima > MAIOR_VERSAO
-        {
-            return Err(Recusa::Cheio);
-        }
-        Ok(())
-    }
-
-    /// Prepara a gravação de `dados` em `c`, contra a versão `esperada`:
-    /// 0 cria — e recusa se já existe —; outra substitui — e recusa se não
-    /// é a de agora.
-    pub fn preparar_gravacao(
-        &self,
-        c: &str,
-        esperada: u64,
-        dados: &[u8],
-    ) -> Result<Mudanca, Recusa> {
-        self.conferir_lugar(c)?;
-        let atual = self.versao(c);
-        if esperada != atual {
-            return Err(Recusa::Versao { atual });
-        }
-        self.conferir_tetos(c, dados.len())?;
-        Ok(Mudanca::Gravado {
-            caminho: String::from(c),
-            versao: self.proxima,
-            dados: dados.to_vec(),
-        })
-    }
-
-    /// Prepara o acréscimo de `mais` ao fim do arquivo `c`, que tem de
-    /// existir e estar na versão `esperada`.
-    pub fn preparar_acrescimo(
-        &self,
-        c: &str,
-        esperada: u64,
-        mais: &[u8],
-    ) -> Result<Mudanca, Recusa> {
-        self.conferir_lugar(c)?;
-        let o = self.objetos.get(c).ok_or(Recusa::NaoExiste)?;
-        if esperada != o.versao {
-            return Err(Recusa::Versao { atual: o.versao });
-        }
-        let total = o
-            .dados
-            .len()
-            .checked_add(mais.len())
-            .ok_or(Recusa::Grande)?;
-        self.conferir_tetos(c, total)?;
-        let mut dados = Vec::with_capacity(total);
-        dados.extend_from_slice(&o.dados);
-        dados.extend_from_slice(mais);
-        Ok(Mudanca::Gravado {
-            caminho: String::from(c),
-            versao: self.proxima,
-            dados,
-        })
-    }
-
-    /// Prepara a remoção do arquivo `c`, que tem de existir e estar na
-    /// versão `esperada`.
-    pub fn preparar_remocao(&self, c: &str, esperada: u64) -> Result<Mudanca, Recusa> {
-        if !caminho_valido(c) {
-            return Err(Recusa::CaminhoInvalido);
-        }
-        if self.proxima > MAIOR_VERSAO {
-            return Err(Recusa::Cheio);
-        }
-        let o = self.objetos.get(c).ok_or(Recusa::NaoExiste)?;
-        if esperada != o.versao {
-            return Err(Recusa::Versao { atual: o.versao });
-        }
-        Ok(Mudanca::Apagado {
-            caminho: String::from(c),
-            versao: self.proxima,
-        })
-    }
-
-    /// Põe uma mudança em vigor: a que acabou de ser gravada, ou a que o
-    /// boot leu do journal.
-    ///
-    /// Confere de novo o que não depende de quem pediu — o lugar, os tetos,
-    /// e que a versão é posterior a todas as já vistas —, porque o boot não
-    /// passou pela preparação. Na recusa, nada muda.
-    pub fn aplicar(&mut self, m: &Mudanca) -> Result<(), Recusa> {
-        if m.versao() < self.proxima {
+        if no.versao() == 0 || no.versao() > MAIOR_VERSAO {
             return Err(Recusa::ForaDeOrdem);
         }
-        if m.versao() > MAIOR_VERSAO {
-            return Err(Recusa::Cheio);
+        if no.conteudo().is_some_and(|c| !c.valido()) {
+            return Err(Recusa::ConteudoIncoerente);
         }
-        match m {
-            Mudanca::Gravado { caminho, dados, .. } => {
-                self.conferir_lugar(caminho)?;
-                self.conferir_tetos(caminho, dados.len())?;
-                let novo = Objeto {
-                    versao: m.versao(),
-                    dados: dados.clone(),
-                };
-                match self.objetos.insert(caminho.clone(), novo) {
-                    Some(antigo) => {
-                        self.por_versao.remove(&antigo.versao);
-                        self.bytes -= antigo.dados.len();
-                    }
-                    None => self.entrar_nos_diretorios(caminho),
-                }
-                self.por_versao.insert(m.versao(), caminho.clone());
-                self.bytes += dados.len();
-            }
-            Mudanca::Apagado { caminho, .. } => {
-                let o = self
-                    .objetos
-                    .remove(caminho.as_str())
-                    .ok_or(Recusa::NaoExiste)?;
-                self.por_versao.remove(&o.versao);
-                self.bytes -= o.dados.len();
-                self.sair_dos_diretorios(caminho);
-            }
+        self.conferir_pai(c)?;
+        if self.nos.contains_key(c) {
+            return Err(Recusa::Existe);
         }
-        self.proxima = m.versao() + 1;
+        if self.por_versao.contains_key(&no.versao()) {
+            return Err(Recusa::ForaDeOrdem);
+        }
+        self.por(c, Some(no));
         Ok(())
     }
 
-    /// Um arquivo novo em `c`: cada diretório acima dele passa a ter mais
-    /// um, e o que não existia nasce com um número novo.
-    fn entrar_nos_diretorios(&mut self, c: &str) {
-        for d in Self::acima(c) {
-            match self.diretorios.get_mut(d) {
-                Some(dir) => dir.arquivos += 1,
-                None => {
-                    let id = self.proximo_diretorio;
-                    self.proximo_diretorio += 1;
-                    self.diretorios
-                        .insert(String::from(d), Diretorio { id, arquivos: 1 });
-                    self.por_diretorio.insert(id, String::from(d));
-                }
-            }
+    /// Repõe a próxima versão, da base: tem de passar de todas as versões
+    /// repostas, e só cresce.
+    pub fn fixar_proxima(&mut self, n: u64) -> Result<(), Recusa> {
+        let maior = self.por_versao.keys().next_back().copied().unwrap_or(0);
+        if n <= maior || n < self.proxima || n > MAIOR_VERSAO + 1 {
+            return Err(Recusa::ForaDeOrdem);
         }
+        self.proxima = n;
+        Ok(())
     }
 
-    /// O arquivo em `c` saiu: cada diretório acima tem um a menos, e o que
-    /// fica vazio deixa de existir.
-    fn sair_dos_diretorios(&mut self, c: &str) {
-        for d in Self::acima(c) {
-            let vazio = match self.diretorios.get_mut(d) {
-                Some(dir) => {
-                    dir.arquivos -= 1;
-                    dir.arquivos == 0
-                }
-                None => false,
-            };
-            if vazio && let Some(dir) = self.diretorios.remove(d) {
-                self.por_diretorio.remove(&dir.id);
-            }
-        }
-    }
-
-    /// Para os testes: as contas de dentro conferem com os arquivos — cada
-    /// diretório conta os arquivos abaixo dele, cada versão aponta para o
-    /// arquivo que a tem, e os bytes somam o conteúdo.
+    /// Para os testes e para o boot: as contas de dentro conferem com os
+    /// nós — cada versão aponta para o nó que a tem, o uso de cada dono e o
+    /// custo dos metadados somam o que os nós dizem, todo nó tem o pai
+    /// diretório, e nenhuma versão passa da próxima.
     pub fn coerente(&self) -> bool {
-        let bytes: usize = self.objetos.values().map(|o| o.dados.len()).sum();
-        let versoes = self.por_versao.len() == self.objetos.len()
-            && self
-                .objetos
-                .iter()
-                .all(|(c, o)| self.por_versao.get(&o.versao) == Some(c));
-        let mut contados: BTreeMap<&str, usize> = BTreeMap::new();
-        for c in self.objetos.keys() {
-            for d in Self::acima(c) {
-                *contados.entry(d).or_default() += 1;
+        let versoes = self.por_versao.len() == self.nos.len()
+            && self.nos.iter().all(|(c, n)| {
+                self.por_versao.get(&n.versao()) == Some(c) && n.versao() < self.proxima
+            });
+        let mut uso: BTreeMap<&str, Uso> = BTreeMap::new();
+        let mut metadados = 0usize;
+        for (c, n) in &self.nos {
+            let u = uso.entry(n.dono()).or_default();
+            u.bytes += n.tamanho();
+            u.objetos += 1;
+            metadados += n.custo(c);
+        }
+        let usos =
+            uso.len() == self.uso.len() && uso.iter().all(|(d, u)| self.uso.get(*d) == Some(u));
+        let pais = self
+            .nos
+            .keys()
+            .all(|c| self.tipo(pai(c)) == Some(Tipo::Diretorio));
+        let conteudos = self
+            .nos
+            .values()
+            .filter_map(No::conteudo)
+            .all(Conteudo::valido);
+        // Nenhum bloco é de dois arquivos.
+        let mut faixas: Faixas = self
+            .nos
+            .values()
+            .filter_map(No::conteudo)
+            .flat_map(Conteudo::faixas)
+            .collect();
+        faixas.sort_unstable();
+        let disjuntas = faixas.windows(2).all(|w| w[0].1 <= w[1].0);
+        versoes && usos && metadados == self.metadados && pais && conteudos && disjuntas
+    }
+}
+
+/// `c`, que está em `de` ou abaixo dele, levado para `para`.
+fn renomeado(c: &str, de: &str, para: &str) -> String {
+    let mut s = String::from(para);
+    s.push_str(&c[de.len()..]);
+    s
+}
+
+/// O armazém visto através das mudanças de um lote ainda não aplicado.
+struct Vista<'a> {
+    base: &'a Armazem,
+    mudado: BTreeMap<String, Option<No>>,
+    proxima: u64,
+    /// O que o lote soma ao uso de cada dono: bytes e objetos.
+    uso: BTreeMap<String, (i128, i128)>,
+    /// O que o lote soma ao custo dos metadados.
+    metadados: i128,
+    mudancas: Vec<Mudanca>,
+}
+
+impl<'a> Vista<'a> {
+    fn sobre(base: &'a Armazem) -> Vista<'a> {
+        Vista {
+            base,
+            mudado: BTreeMap::new(),
+            proxima: base.proxima,
+            uso: BTreeMap::new(),
+            metadados: 0,
+            mudancas: Vec::new(),
+        }
+    }
+
+    fn no(&self, c: &str) -> Option<&No> {
+        match self.mudado.get(c) {
+            Some(n) => n.as_ref(),
+            None => self.base.nos.get(c),
+        }
+    }
+
+    fn tipo(&self, c: &str) -> Option<Tipo> {
+        if c.is_empty() {
+            return Some(Tipo::Diretorio);
+        }
+        self.no(c).map(No::tipo)
+    }
+
+    fn conferir_pai(&self, c: &str) -> Result<(), Recusa> {
+        match self.tipo(pai(c)) {
+            Some(Tipo::Diretorio) => Ok(()),
+            Some(Tipo::Arquivo) => Err(Recusa::NaoEhDiretorio),
+            None => Err(Recusa::PaiNaoExiste),
+        }
+    }
+
+    /// O nó em `raiz` e todos os que existem abaixo dele, na vista, em
+    /// ordem de caminho.
+    fn subarvore(&self, raiz: &str) -> Vec<(String, No)> {
+        let mut todos: BTreeMap<String, No> = BTreeMap::new();
+        for (c, n) in abaixo(&self.base.nos, raiz) {
+            if !self.mudado.contains_key(c) {
+                todos.insert(c.clone(), n.clone());
             }
         }
-        let diretorios = contados.len() == self.diretorios.len()
-            && contados.iter().all(|(d, n)| {
-                self.diretorios
-                    .get(*d)
-                    .is_some_and(|dir| dir.arquivos == *n && self.diretorio(dir.id) == Some(d))
-            })
-            && self.por_diretorio.len() == self.diretorios.len();
-        bytes == self.bytes && versoes && diretorios
+        for (c, n) in abaixo(&self.mudado, raiz) {
+            if let Some(n) = n {
+                todos.insert(c.clone(), n.clone());
+            }
+        }
+        let mut v: Vec<(String, No)> = Vec::new();
+        if let Some(n) = self.no(raiz) {
+            v.push((String::from(raiz), n.clone()));
+        }
+        v.extend(todos);
+        v
+    }
+
+    fn tem_filhos(&self, dir: &str) -> bool {
+        abaixo(&self.base.nos, dir).any(|(c, _)| !self.mudado.contains_key(c))
+            || abaixo(&self.mudado, dir).any(|(_, n)| n.is_some())
+    }
+
+    fn versao_nova(&mut self) -> Result<u64, Recusa> {
+        let v = self.proxima;
+        if v > MAIOR_VERSAO {
+            return Err(Recusa::Cheio);
+        }
+        self.proxima += 1;
+        Ok(v)
+    }
+
+    fn por(&mut self, c: &str, novo: Option<No>) {
+        if let Some(velho) = self.no(c).cloned() {
+            let d = self.uso.entry(String::from(velho.dono())).or_default();
+            d.0 -= i128::from(velho.tamanho());
+            d.1 -= 1;
+            self.metadados -= velho.custo(c) as i128;
+        }
+        if let Some(n) = &novo {
+            let d = self.uso.entry(String::from(n.dono())).or_default();
+            d.0 += i128::from(n.tamanho());
+            d.1 += 1;
+            self.metadados += n.custo(c) as i128;
+        }
+        self.mudado.insert(String::from(c), novo);
+    }
+
+    fn operar(&mut self, op: &Op, ator: &str) -> Result<(), Recusa> {
+        for c in op.caminhos() {
+            if !caminho_valido(c) {
+                return Err(Recusa::CaminhoInvalido);
+            }
+        }
+        match op {
+            Op::Gravar {
+                caminho,
+                esperada,
+                conteudo,
+            } => {
+                if !conteudo.valido() {
+                    return Err(Recusa::ConteudoIncoerente);
+                }
+                self.conferir_pai(caminho)?;
+                let atual = match self.no(caminho) {
+                    Some(No::Diretorio { .. }) => return Err(Recusa::EhDiretorio),
+                    Some(n) => n.versao(),
+                    None => 0,
+                };
+                if *esperada != atual {
+                    return Err(Recusa::Versao { atual });
+                }
+                let versao = self.versao_nova()?;
+                self.por(
+                    caminho,
+                    Some(No::Arquivo {
+                        versao,
+                        conteudo: conteudo.clone(),
+                        dono: String::from(ator),
+                    }),
+                );
+                self.mudancas.push(Mudanca::Arquivo {
+                    caminho: caminho.clone(),
+                    versao,
+                    conteudo: conteudo.clone(),
+                    dono: String::from(ator),
+                });
+            }
+            Op::Apagar { caminho, esperada } => {
+                let atual = match self.no(caminho) {
+                    None => return Err(Recusa::NaoExiste),
+                    Some(No::Diretorio { .. }) => return Err(Recusa::EhDiretorio),
+                    Some(n) => n.versao(),
+                };
+                if *esperada != atual {
+                    return Err(Recusa::Versao { atual });
+                }
+                let versao = self.versao_nova()?;
+                self.por(caminho, None);
+                self.mudancas.push(Mudanca::Removido {
+                    caminho: caminho.clone(),
+                    versao,
+                });
+            }
+            Op::CriarDiretorio { caminho } => {
+                self.conferir_pai(caminho)?;
+                if self.no(caminho).is_some() {
+                    return Err(Recusa::Existe);
+                }
+                let versao = self.versao_nova()?;
+                self.por(
+                    caminho,
+                    Some(No::Diretorio {
+                        versao,
+                        dono: String::from(ator),
+                    }),
+                );
+                self.mudancas.push(Mudanca::Diretorio {
+                    caminho: caminho.clone(),
+                    versao,
+                    dono: String::from(ator),
+                });
+            }
+            Op::RemoverDiretorio { caminho, esperada } => {
+                let atual = match self.no(caminho) {
+                    None => return Err(Recusa::NaoExiste),
+                    Some(No::Arquivo { .. }) => return Err(Recusa::NaoEhDiretorio),
+                    Some(n) => n.versao(),
+                };
+                if *esperada != atual {
+                    return Err(Recusa::Versao { atual });
+                }
+                if self.tem_filhos(caminho) {
+                    return Err(Recusa::NaoVazio);
+                }
+                let versao = self.versao_nova()?;
+                self.por(caminho, None);
+                self.mudancas.push(Mudanca::Removido {
+                    caminho: caminho.clone(),
+                    versao,
+                });
+            }
+            Op::Renomear { de, para, esperada } => {
+                let atual = self.no(de).map(No::versao).ok_or(Recusa::NaoExiste)?;
+                if *esperada != atual {
+                    return Err(Recusa::Versao { atual });
+                }
+                if de == para || abaixo_de(para, de) {
+                    return Err(Recusa::DentroDeSi);
+                }
+                if self.no(para).is_some() {
+                    return Err(Recusa::Existe);
+                }
+                self.conferir_pai(para)?;
+                let sub = self.subarvore(de);
+                for (c, _) in &sub {
+                    if !caminho_valido(&renomeado(c, de, para)) {
+                        return Err(Recusa::CaminhoInvalido);
+                    }
+                }
+                let primeira = self.proxima;
+                for (c, _) in &sub {
+                    self.por(c, None);
+                }
+                for (c, n) in sub {
+                    let v = self.versao_nova()?;
+                    self.por(&renomeado(&c, de, para), Some(n.com_versao(v)));
+                }
+                self.mudancas.push(Mudanca::Movido {
+                    de: de.clone(),
+                    para: para.clone(),
+                    versao: primeira,
+                });
+            }
+        }
+        Ok(())
     }
 }
 

@@ -28,6 +28,8 @@ pub enum TipoParam {
     Inteiro,
     Texto,
     Booleano,
+    /// Uma lista JSON — as operações de um lote.
+    Lista,
 }
 
 impl TipoParam {
@@ -37,6 +39,7 @@ impl TipoParam {
             TipoParam::Inteiro => "integer",
             TipoParam::Texto => "string",
             TipoParam::Booleano => "boolean",
+            TipoParam::Lista => "array",
         }
     }
 }
@@ -91,7 +94,23 @@ pub struct Command {
     /// elemento. Vai para a auditoria, e é o que a política limita nas
     /// permissões de caminho.
     pub recurso: Option<&'static str>,
+    /// Os outros caminhos que o comando muda, além do de `recurso` — ver
+    /// [`Mais`]. O gate decide **cada um**, pela mesma permissão, e o
+    /// handler só muda o que o gate decidiu.
+    pub mais: Mais,
     pub handler: Handler,
+}
+
+/// Os recursos de um comando além do primeiro.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mais {
+    /// Nenhum: só o de `recurso`.
+    Nada,
+    /// O valor de mais um parâmetro — o destino de um `fs.rename`.
+    Parametro(&'static str),
+    /// Os caminhos de uma lista de operações — o `ops` de um `fs.batch`:
+    /// em cada uma, os campos `path` e `to`.
+    Lote(&'static str),
 }
 
 /// Todos os comandos, na ordem em que foram declarados.
@@ -151,6 +170,7 @@ pub fn validar<'a>(cmd: &Command, params: Json<'a>) -> Result<(), &'a str> {
                     TipoParam::Inteiro => valor.as_u64().is_some(),
                     TipoParam::Texto => valor.as_str().is_some(),
                     TipoParam::Booleano => valor.as_bool().is_some(),
+                    TipoParam::Lista => valor.0.first() == Some(&b'['),
                 };
                 if !tipo_confere {
                     return Err(spec.nome);

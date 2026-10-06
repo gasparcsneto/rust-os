@@ -175,6 +175,9 @@ pub enum Parada {
     /// gravação interrompida, ou um defeito — quem decide é [`julgar`],
     /// com a âncora.
     Ilegivel { setor: u64, motivo: &'static str },
+    /// O registro no `setor` confirma uma âncora além do limite do percurso
+    /// — ver [`percorrer_ate`]: ele existe, e não foi lido.
+    Alem { setor: u64 },
 }
 
 /// O journal inteiro, como foi lido.
@@ -405,6 +408,29 @@ pub fn ler<M: Meio>(meio: &mut M, chave: &[u8; 32]) -> Result<Lido, &'static str
 pub fn percorrer<M: Meio, E>(
     meio: &mut M,
     chave: &[u8; 32],
+    f: impl FnMut(Registro) -> Result<(), E>,
+) -> Result<Percorrido, Interrompido<E>> {
+    percorrer_ate(meio, chave, u64::MAX, f)
+}
+
+/// Como [`percorrer`], parando antes do primeiro registro cuja âncora passa
+/// de `ancora`: o que está depois é uma gravação que quem confirma as
+/// âncoras ainda não confirmou.
+///
+/// # Para que serve
+///
+/// Para um journal cujo contador não é o TPM, e sim **outro journal**: o
+/// do armazém, cujas âncoras o journal de estado confirma — ver o pacote
+/// `armazem` e `docs/ARMAZENAMENTO.md`. Uma gravação do armazém escreve o
+/// registro dele e só então o registro de estado que o confirma; uma queda
+/// entre os dois deixa no armazém um registro além da âncora confirmada,
+/// que não vale e é sobrescrito pelo seguinte. A parada é
+/// [`Parada::Alem`], e o percurso devolvido é o de até ali — o escritor
+/// continua dele.
+pub fn percorrer_ate<M: Meio, E>(
+    meio: &mut M,
+    chave: &[u8; 32],
+    ancora_maxima: u64,
     mut f: impl FnMut(Registro) -> Result<(), E>,
 ) -> Result<Percorrido, Interrompido<E>> {
     let total = meio.setores();
@@ -451,6 +477,12 @@ pub fn percorrer<M: Meio, E>(
         let ancora = u64_em(&cabecalho, 24);
         if sequencia != quantos {
             break ilegivel("sequencia fora de ordem");
+        }
+        // A âncora do cabeçalho é autenticada com o registro: uma forjada
+        // não abriria. Além do limite, o registro não é aberto — nem
+        // conferido: ele ainda não vale.
+        if ancora > ancora_maxima {
+            break Parada::Alem { setor };
         }
 
         let mut inteiro = alloc::vec![0u8; setores as usize * TAM_SETOR];
@@ -584,6 +616,14 @@ impl Montado {
     /// só sem ele ([`Escritor::confirmar_sem_contador`]).
     pub fn avanca(&self) -> bool {
         self.avanca
+    }
+
+    /// O resumo deste registro, como o seguinte se encadeia nele. Quem
+    /// confirma um journal por fora — o journal de estado confirmando o do
+    /// armazém — guarda a âncora **e** o elo: os dois juntos nomeiam
+    /// exatamente este registro.
+    pub fn elo(&self) -> [u8; 32] {
+        self.elo
     }
 }
 
@@ -919,6 +959,12 @@ impl Base {
 }
 
 impl BaseFechada {
+    /// O resumo do fecho: o elo do último registro da base — ver
+    /// [`Montado::elo`].
+    pub fn elo(&self) -> [u8; 32] {
+        self.escritor.elo
+    }
+
     /// A base inteira foi escrita e descarregada, e o contador avançou para
     /// `contador`. Só a âncora da base fecha a compactação: o escritor da
     /// região nova continua depois do fecho. Outro valor é o disco e o TPM

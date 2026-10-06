@@ -1,6 +1,7 @@
 [package]
-# O armazém do Duke: a árvore de arquivos gravável, com versão por objeto,
-# como conta pura — sem disco, sem relógio, sem autorização.
+# O armazém do Duke: a árvore de arquivos e diretórios gravável, com versão
+# e dono por nó, cota por dono, lotes atômicos, o mapa dos blocos e a cifra
+# do conteúdo — como conta pura: sem disco, sem relógio, sem autorização.
 #
 # Um pacote, e não um módulo do kernel, pela razão de sempre: a regra se
 # testa no hospedeiro. O kernel dá o caminho já decidido pelo gate, grava a
@@ -10,7 +11,11 @@
 name = "armazem"
 version = "0.1.0"
 edition = "2024"
-description = "O armazém do Duke: arquivos com versão, como conta pura"
+description = "O armazém do Duke: árvore com versão, cota e lotes, e os blocos cifrados, como conta pura"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+# O formato das entradas, o do journal: campos com o tamanho na frente.
+diario = { path = "../diario" }
+# A cifra dos blocos de conteúdo: a mesma do journal.
+chacha20poly1305 = { version = "0.11.0", default-features = false }

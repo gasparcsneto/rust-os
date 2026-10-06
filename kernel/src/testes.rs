@@ -6607,6 +6607,7 @@ fn particoes_tabela_do_disco() -> Resultado {
             crate::particoes::Tipo::Esp => (2048u64, 98304u64),
             crate::particoes::Tipo::Dados => (100352, 262144),
             crate::particoes::Tipo::Estado => (362496, 32768),
+            crate::particoes::Tipo::Armazem => (395264, 131072),
             crate::particoes::Tipo::Outro => {
                 return Err("apareceu uma particao de tipo inesperado");
             }
@@ -6623,9 +6624,9 @@ fn particoes_tabela_do_disco() -> Resultado {
         }
     }
 
-    if vistas != 3 {
+    if vistas != 4 {
         crate::log_error!("teste", "a tabela trouxe {} particoes", vistas);
-        return Err("o disco tem tres particoes e a tabela disse outra coisa");
+        return Err("o disco tem quatro particoes e a tabela disse outra coisa");
     }
 
     Ok(())
@@ -6639,8 +6640,10 @@ fn disco_a_janela_e_a_particao_de_estado() -> Resultado {
     let estado = tabela
         .primeira(crate::particoes::Tipo::Estado)
         .ok_or("o disco nao tem particao de estado")?;
-    let (janela, duravel) =
-        crate::virtio::blk::com_o_disco(|d| (d.janela(), d.duravel())).ok_or("nao ha disco")?;
+    let (janela, duravel) = crate::virtio::blk::com_o_disco(|d| {
+        (d.janela(crate::virtio::blk::Janela::Estado), d.duravel())
+    })
+    .ok_or("nao ha disco")?;
     if janela != Some((estado.primeiro, estado.setores)) {
         return Err("a janela de escrita nao e a particao de estado");
     }
@@ -6653,9 +6656,10 @@ fn disco_a_janela_e_a_particao_de_estado() -> Resultado {
 /// O último setor da janela de escrita: o lugar dos casos, longe do começo
 /// da partição, onde o journal mora.
 fn setor_de_teste() -> Result<u64, &'static str> {
-    let (primeiro, setores) = crate::virtio::blk::com_o_disco(|d| d.janela())
-        .flatten()
-        .ok_or("nao ha janela de escrita")?;
+    let (primeiro, setores) =
+        crate::virtio::blk::com_o_disco(|d| d.janela(crate::virtio::blk::Janela::Estado))
+            .flatten()
+            .ok_or("nao ha janela de escrita")?;
     Ok(primeiro + setores - 2)
 }
 
@@ -6672,7 +6676,7 @@ fn disco_escreve_descarrega_e_le_de_volta() -> Resultado {
     let resultado = crate::virtio::blk::com_o_disco(|d| -> Resultado {
         d.ler(setor, &mut antes)?;
         let (escritas, descargas) = d.contadores();
-        d.gravar_setores(setor, &padrao)?;
+        d.gravar_setores(crate::virtio::blk::Janela::Estado, setor, &padrao)?;
         d.descarregar_disco()?;
         if d.contadores() != (escritas + 1, descargas + 1) {
             return Err("a escrita ou a descarga nao foi contada");
@@ -6684,7 +6688,7 @@ fn disco_escreve_descarrega_e_le_de_volta() -> Resultado {
         }
         // Devolve o que havia, para não deixar lixo onde o journal pode
         // um dia chegar.
-        d.gravar_setores(setor, &antes)?;
+        d.gravar_setores(crate::virtio::blk::Janela::Estado, setor, &antes)?;
         d.descarregar_disco()
     });
     resultado.ok_or("nao ha disco")?
@@ -6695,8 +6699,17 @@ fn disco_escreve_descarrega_e_le_de_volta() -> Resultado {
 /// termina fora, o MBR, a ESP e um setor absurdo. E o vizinho continua o
 /// que era.
 fn disco_recusa_escrita_fora_da_janela() -> Resultado {
+    use crate::virtio::blk::Janela;
+    for qual in [Janela::Estado, Janela::Armazem] {
+        recusa_fora_da_janela(qual)?;
+    }
+    Ok(())
+}
+
+/// Fora de uma janela, pelo nome dela, nada se escreve.
+fn recusa_fora_da_janela(qual: crate::virtio::blk::Janela) -> Resultado {
     const B: usize = crate::virtio::blk::TAMANHO_DO_SETOR;
-    let (primeiro, setores) = crate::virtio::blk::com_o_disco(|d| d.janela())
+    let (primeiro, setores) = crate::virtio::blk::com_o_disco(|d| d.janela(qual))
         .flatten()
         .ok_or("nao ha janela de escrita")?;
     let lixo = [0xEEu8; 2 * B];
@@ -6713,7 +6726,7 @@ fn disco_recusa_escrita_fora_da_janela() -> Resultado {
         d.ler(primeiro - 1, &mut antes)?;
         let (escritas, _) = d.contadores();
         for (setor, quantos) in tentativas {
-            if d.gravar_setores(setor, &lixo[..quantos * B]).is_ok() {
+            if d.gravar_setores(qual, setor, &lixo[..quantos * B]).is_ok() {
                 crate::log_error!("teste", "a escrita no setor {} passou", setor);
                 return Err("uma escrita fora da janela foi aceita");
             }
@@ -6734,17 +6747,25 @@ fn disco_recusa_escrita_fora_da_janela() -> Resultado {
 /// A janela foi fixada no boot e não se fixa de novo — nem com a mesma
 /// faixa, nem com o disco inteiro.
 fn disco_a_janela_nao_se_redesenha() -> Resultado {
-    let janela = crate::virtio::blk::com_o_disco(|d| d.janela())
-        .flatten()
-        .ok_or("nao ha janela de escrita")?;
-    if crate::virtio::blk::fixar_janela_de_escrita(janela.0, janela.1).is_ok() {
-        return Err("a janela foi fixada de novo com a mesma faixa");
+    use crate::virtio::blk::{Janela, fixar_janela_de_escrita};
+    let janelas =
+        crate::virtio::blk::com_o_disco(|d| (d.janela(Janela::Estado), d.janela(Janela::Armazem)))
+            .ok_or("nao ha disco")?;
+    let (Some(estado), Some(armazem)) = janelas else {
+        return Err("falta uma janela de escrita");
+    };
+    for (qual, janela) in [(Janela::Estado, estado), (Janela::Armazem, armazem)] {
+        if fixar_janela_de_escrita(qual, janela.0, janela.1).is_ok() {
+            return Err("a janela foi fixada de novo com a mesma faixa");
+        }
+        if fixar_janela_de_escrita(qual, 0, 1024).is_ok() {
+            return Err("a janela foi redesenhada sobre o comeco do disco");
+        }
     }
-    if crate::virtio::blk::fixar_janela_de_escrita(0, 1024).is_ok() {
-        return Err("a janela foi redesenhada sobre o comeco do disco");
-    }
-    let depois = crate::virtio::blk::com_o_disco(|d| d.janela()).flatten();
-    if depois != Some(janela) {
+    let depois =
+        crate::virtio::blk::com_o_disco(|d| (d.janela(Janela::Estado), d.janela(Janela::Armazem)))
+            .ok_or("nao ha disco")?;
+    if depois != (Some(estado), Some(armazem)) {
         return Err("a janela mudou");
     }
     Ok(())
@@ -10856,6 +10877,27 @@ impl AgenteDeTeste {
         Ok(sigilo::quadro::montar(sigilo::quadro::Tipo::Dados, &cifrado[..n]).unwrap())
     }
 
+    /// Manda `bytes` como anexo — em quadros cujo claro começa com zero —,
+    /// sem pedido ainda, e deixa a porta atender.
+    fn anexar(
+        &mut self,
+        sessao: &mut crate::agent::SessaoDeTeste,
+        bytes: &[u8],
+    ) -> Result<(), &'static str> {
+        let t = self.transporte.as_mut().ok_or("sem sessao")?;
+        for pedaco in bytes.chunks(4 * crate::virtio::console::MENOR_QUADRO_DE_ANEXO) {
+            let mut claro = alloc::vec![0u8];
+            claro.extend_from_slice(pedaco);
+            let mut cifrado = alloc::vec![0u8; claro.len() + 16];
+            let n = t.cifrar(&claro, &mut cifrado).map_err(|_| "nao cifrou")?;
+            let q = sigilo::quadro::montar(sigilo::quadro::Tipo::Dados, &cifrado[..n])
+                .map_err(|_| "quadro grande demais")?;
+            crate::virtio::console::simular(self.p, &q);
+            sessao.atender();
+        }
+        Ok(())
+    }
+
     /// Manda um pedido — uma linha — e deixa a porta atender.
     fn pedir(
         &mut self,
@@ -11838,6 +11880,7 @@ fn teto_o_administrador_delega_e_nao_exerce() -> Resultado {
             programa: Programa::Kernel,
         };
         let caminho = "/armazem/compartilhado/teto/delegado.txt";
+        diretorios_acima(caminho)?;
         let (v, _) = fs_no_armazem(caminho);
         if !fs_ok(&fs_gravar(pelo_delegado, caminho, v, "pelo papel")) {
             return Err("o operador delegado nao escreveu no alcance dele");
@@ -16611,28 +16654,47 @@ struct EstadoDoJournal {
     armazem: RetratoDoArmazem,
 }
 
-/// O armazém como a suíte o compara: cada arquivo — caminho, versão,
-/// conteúdo — e a próxima versão.
+/// O armazém como a suíte o compara: cada nó — caminho, versão, dono e,
+/// num arquivo, o conteúdo lido do volume — e a próxima versão.
 type RetratoDoArmazem = (
-    alloc::vec::Vec<(alloc::string::String, u64, alloc::vec::Vec<u8>)>,
+    alloc::vec::Vec<(
+        alloc::string::String,
+        u64,
+        alloc::string::String,
+        Option<alloc::vec::Vec<u8>>,
+    )>,
     u64,
 );
 
 fn retrato_do_armazem() -> RetratoDoArmazem {
-    crate::armazem::com_o_armazem(|a| {
+    let (nos, proxima) = crate::armazem::com_o_armazem(|a| {
         (
             a.todos()
                 .map(|(c, o)| {
                     (
                         alloc::string::String::from(c),
                         o.versao(),
-                        o.dados().to_vec(),
+                        alloc::string::String::from(o.dono()),
+                        o.tipo() == ::armazem::Tipo::Arquivo,
                     )
                 })
-                .collect(),
+                .collect::<alloc::vec::Vec<_>>(),
             a.proxima(),
         )
-    })
+    });
+    // O conteúdo, fora da trava do armazém: ler é ir ao disco.
+    let nos = nos
+        .into_iter()
+        .map(|(c, v, d, arquivo)| {
+            let conteudo = if arquivo {
+                Some(crate::armazem::conteudo_de_teste(&c).unwrap_or_default())
+            } else {
+                None
+            };
+            (c, v, d, conteudo)
+        })
+        .collect();
+    (nos, proxima)
 }
 
 /// O registro, a política, as pessoas, as mensagens e o armazém voltam ao
@@ -16651,6 +16713,11 @@ fn de_volta_a_imagem() {
 fn estado_do_journal() -> Result<EstadoDoJournal, &'static str> {
     de_volta_a_imagem();
     crate::persistencia::reaplicar_regiao_de_teste()?;
+    // E o volume, como no boot: reposto do journal dele até o registro que
+    // o journal de estado confirma.
+    let lido = crate::persistencia::armazem_lido_de_teste();
+    crate::persistencia::em_ordem(|| crate::volume::abrir(lido));
+    crate::volume::exigir()?;
     Ok(estado_em_memoria())
 }
 
@@ -24755,15 +24822,48 @@ fn fs_gravar(
     )
 }
 
-/// O que o armazém tem em `caminho` agora: a versão e o conteúdo.
+/// O que o armazém tem em `caminho` agora: a versão e o conteúdo — lido do
+/// volume, pelo mesmo caminho do VFS.
 fn fs_no_armazem(caminho: &str) -> (u64, Option<alloc::vec::Vec<u8>>) {
     let (_, relativo) = crate::armazem::relativo(caminho).unwrap_or_default();
-    crate::armazem::com_o_armazem(|a| {
-        (
-            a.versao(&relativo),
-            a.objeto(&relativo).map(|o| o.dados().to_vec()),
-        )
-    })
+    (
+        crate::armazem::com_o_armazem(|a| a.versao(&relativo)),
+        crate::armazem::conteudo_de_teste(&relativo),
+    )
+}
+
+/// O sistema, como um processo do kernel.
+fn sistema_no_armazem(fio: u64) -> crate::autorizacao::Chamador {
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
+    Chamador::Processo {
+        fio,
+        autoridade: Autoridade::Sistema,
+        programa: Programa::Kernel,
+    }
+}
+
+/// Os diretórios acima de `caminho`, criados pelo sistema onde faltam — o
+/// armazém não cria pai de passagem —, pelo mesmo `fs.mkdir` de todos.
+fn diretorios_acima(caminho: &str) -> Resultado {
+    let quem = sistema_no_armazem(7_199_999);
+    let resto = caminho
+        .strip_prefix("/armazem/")
+        .ok_or("o caminho do caso nao e do armazem")?;
+    let componentes: alloc::vec::Vec<&str> = resto.split('/').collect();
+    let mut atual = alloc::string::String::from(crate::armazem::RAIZ);
+    for c in &componentes[..componentes.len().saturating_sub(1)] {
+        atual.push('/');
+        atual.push_str(c);
+        let existe = crate::armazem::situacao(&atual).is_some_and(|(_, s)| s.tipo.is_some());
+        if !existe {
+            let r = fs_pedir(quem, "fs.mkdir", &alloc::format!(r#"{{"path":"{atual}"}}"#));
+            if !fs_ok(&r) {
+                crate::log_error!("teste", "{}: {}", atual, r);
+                return Err("um diretorio do caso nao foi criado");
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Os seis conceitos, cada um com a sua recusa, sem se misturar:
@@ -24787,6 +24887,7 @@ fn armazem_os_conceitos_separados() -> Resultado {
     use politica::Codigo;
     const C: &str = "/armazem/compartilhado/conceitos/notas.txt";
     crate::pessoas::esquecer_registradas();
+    diretorios_acima(C)?;
     let resultado = (|| -> Resultado {
         let ana = Chamador::Pessoa(crate::pessoas::sessao_de_teste(
             Console::Fisico,
@@ -24894,7 +24995,7 @@ fn armazem_os_conceitos_separados() -> Resultado {
         let anunciadas = || {
             crate::autorizacao::com_auditoria(|c| {
                 c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
-                    .filter(|r| r.seq > desde && r.evento.detalhe.contains("mudanca a gravar"))
+                    .filter(|r| r.seq > desde && r.evento.detalhe.contains("lote a gravar"))
                     .count()
             })
             .unwrap_or(0)
@@ -24905,6 +25006,16 @@ fn armazem_os_conceitos_separados() -> Resultado {
         );
         let r = fs_gravar(ana, C, v3, "quatro");
         crate::persistencia::forcar_estado_de_teste(anterior);
+        // E o volume indisponível sozinho, com o estado disponível: o mesmo.
+        let anterior = crate::volume::forcar_estado_de_teste(crate::volume::Estado::Indisponivel(
+            "caso do volume",
+        ));
+        let r2 = fs_gravar(ana, C, v3, "quatro");
+        crate::volume::forcar_estado_de_teste(anterior);
+        if fs_ok(&r2) || fs_texto(&r2, "code").as_deref() != Some("ERROR") {
+            crate::log_error!("teste", "{}", r2);
+            return Err("o armazem mudou sem o volume");
+        }
         if fs_ok(&r) || fs_texto(&r, "code").as_deref() != Some("ERROR") {
             crate::log_error!("teste", "{}", r);
             return Err("o armazem mudou sem a persistencia");
@@ -24944,7 +25055,7 @@ fn armazem_os_conceitos_separados() -> Resultado {
         if !gravada(Codigo::Conflict, "versao atual")
             || !gravada(Codigo::Conflict, "outro titular tem o arrendamento")
             || !gravada(Codigo::Error, "caso do armazem")
-            || !gravada(Codigo::Allow, "mudanca a gravar")
+            || !gravada(Codigo::Allow, "lote a gravar")
         {
             return Err("um resultado do fs.write nao foi gravado na auditoria");
         }
@@ -24954,31 +25065,31 @@ fn armazem_os_conceitos_separados() -> Resultado {
     resultado
 }
 
-/// A mudança vai ao journal num registro `ARMAZEM` que leva o que o
-/// comando fez — com o número da decisão do gate —, e a decisão está nele
-/// ou num registro anterior, nunca depois. O registro avança a âncora e
-/// não sobe a geração: um arquivo não é autoridade.
+/// O ponto de commit: o lote vai para o journal do armazém, no volume, e o
+/// journal de estado grava, num registro `ARMAZEM`, só **qual** registro do
+/// armazém vale — a âncora e o elo dele —, junto com o que o comando fez e
+/// o número da decisão do gate; a decisão está nele ou num registro
+/// anterior, nunca depois. O conteúdo não está no journal de estado. O
+/// registro avança a âncora do TPM uma vez, e não sobe a geração: um
+/// arquivo não é autoridade.
 fn armazem_a_decisao_vai_com_a_mudanca() -> Resultado {
-    use crate::autorizacao::{Autoridade, Chamador, Programa};
     use diario::estado::{ler_campos, tipo};
     const C: &str = "/armazem/sistema/registro.txt";
-    let sistema = Chamador::Processo {
-        fio: 7_200_001,
-        autoridade: Autoridade::Sistema,
-        programa: Programa::Kernel,
-    };
+    const MARCA: &str = "conteudo-do-registro-que-nao-mora-no-estado";
+    let sistema = sistema_no_armazem(7_200_001);
+    diretorios_acima(C)?;
     let (v0, _) = fs_no_armazem(C);
     let geracao = crate::persistencia::geracao();
     let contador = crate::persistencia::ancora_no_tpm_de_teste()?;
-    let r = fs_gravar(sistema, C, v0, "conteudo do registro");
+    let r = fs_gravar(sistema, C, v0, MARCA);
     let v = fs_numero(&r, "version")
         .filter(|_| fs_ok(&r))
         .ok_or("o sistema nao gravou no armazem")?;
     if crate::persistencia::geracao() != geracao {
         return Err("uma mudanca do armazem subiu a geracao administrativa");
     }
-    if crate::persistencia::ancora_no_tpm_de_teste()? <= contador {
-        return Err("a mudanca do armazem nao avancou a ancora");
+    if crate::persistencia::ancora_no_tpm_de_teste()? != contador + 1 {
+        return Err("a mudanca do armazem nao avancou a ancora exatamente uma vez");
     }
 
     let registros = todos_do_journal()?;
@@ -24995,15 +25106,22 @@ fn armazem_a_decisao_vai_com_a_mudanca() -> Resultado {
             .and_then(|c| c.first().and_then(|t| <[u8; 2]>::try_from(*t).ok()))
             .map(u16::from_le_bytes)
     };
-    // A mudança, como resultado: o caminho relativo, a versão, o conteúdo.
-    let mudanca = ler_campos(entradas.first().ok_or("registro vazio")?)?;
-    if mudanca.len() != 4
-        || tipo_de(entradas[0]) != Some(tipo::ARQUIVO_GRAVADO)
-        || mudanca[1] != b"sistema/registro.txt"
-        || mudanca[2] != v.to_le_bytes()
-        || mudanca[3] != b"conteudo do registro"
+    // A confirmação: a âncora e o elo do registro do armazém que vale agora.
+    let confirmado = crate::volume::confirmado().ok_or("o volume nao tem confirmacao")?;
+    let campos = ler_campos(entradas.first().ok_or("registro vazio")?)?;
+    if tipo_de(entradas[0]) != Some(tipo::ARMAZEM_CONFIRMADO)
+        || campos.len() != 6
+        || campos[4] != confirmado.ancora.to_le_bytes()
+        || campos[5] != confirmado.elo
     {
-        return Err("o registro nao leva a mudanca como resultado");
+        return Err("o registro de estado nao confirma o registro do armazem que vale");
+    }
+    // O conteúdo não mora no journal de estado: em nenhuma entrada.
+    if entradas
+        .iter()
+        .any(|e| e.windows(MARCA.len()).any(|w| w == MARCA.as_bytes()))
+    {
+        return Err("o conteudo do arquivo foi para o journal de estado");
     }
     // O que o comando fez, neste registro, com o número da decisão.
     let eventos_de = |r: &diario::Registro| -> alloc::vec::Vec<(u64, politica::auditoria::Evento)> {
@@ -25017,19 +25135,21 @@ fn armazem_a_decisao_vai_com_a_mudanca() -> Resultado {
             })
             .collect()
     };
-    // O detalhe de um processo começa por quem ele é — "pelo processo …:".
-    let feito = alloc::format!("mudanca a gravar: versao {v}; decisao ");
+    let feito = alloc::format!("versoes {v}..{}", v + 1);
     let (_, execucao) = eventos_de(registro)
         .into_iter()
-        .find(|(_, e)| e.metodo == "fs.write" && e.detalhe.contains(&feito))
-        .ok_or("o que o comando fez nao esta no registro da mudanca")?;
+        .find(|(_, e)| {
+            e.metodo == "fs.write"
+                && e.detalhe.contains("lote a gravar")
+                && e.detalhe.contains(&feito)
+        })
+        .ok_or("o que o comando fez nao esta no registro da confirmacao")?;
     let decisao: u64 = execucao
         .detalhe
         .rsplit("; decisao ")
         .next()
         .and_then(|n| n.parse().ok())
         .ok_or("o detalhe nao diz o numero da decisao")?;
-    // A decisão: neste registro ou antes, e é o ALLOW do gate.
     let onde = registros[..=i]
         .iter()
         .position(|r| {
@@ -25040,9 +25160,12 @@ fn armazem_a_decisao_vai_com_a_mudanca() -> Resultado {
                     && e.codigo == politica::Codigo::Allow
             })
         })
-        .ok_or("a decisao do gate nao esta no journal antes da mudanca")?;
+        .ok_or("a decisao do gate nao esta no journal antes da confirmacao")?;
     if onde > i {
-        return Err("a decisao ficou para depois da mudanca");
+        return Err("a decisao ficou para depois da confirmacao");
+    }
+    if fs_no_armazem(C) != (v, Some(MARCA.as_bytes().to_vec())) {
+        return Err("o volume nao tem o conteudo gravado");
     }
     Ok(())
 }
@@ -25057,6 +25180,7 @@ fn armazem_a_gravacao_que_falha_nao_vale() -> Resultado {
         autoridade: Autoridade::Sistema,
         programa: Programa::Kernel,
     };
+    diretorios_acima(C)?;
     let (v0, _) = fs_no_armazem(C);
     let r = fs_gravar(sistema, C, v0, "antes");
     let v = fs_numero(&r, "version")
@@ -25066,7 +25190,13 @@ fn armazem_a_gravacao_que_falha_nao_vale() -> Resultado {
     let r = fs_gravar(sistema, C, v, "depois");
     crate::persistencia::falhar_a_proxima_gravacao_de_teste(false);
     let indisponivel = crate::persistencia::estado() != crate::persistencia::Estado::Disponivel;
+    let volume_parou = crate::volume::estado() != crate::volume::Estado::Disponivel;
     crate::persistencia::forcar_estado_de_teste(crate::persistencia::Estado::Disponivel);
+    // O volume, como num boot: pelo que o journal de estado confirmou.
+    crate::volume::reabrir_de_teste()?;
+    if !volume_parou {
+        return Err("o volume continuou gravando depois de uma confirmacao falhar");
+    }
     if fs_ok(&r) || fs_texto(&r, "code").as_deref() != Some("ERROR") {
         crate::log_error!("teste", "{}", r);
         return Err("a gravacao que falhou foi confirmada");
@@ -25077,31 +25207,32 @@ fn armazem_a_gravacao_que_falha_nao_vale() -> Resultado {
     if !indisponivel {
         return Err("a persistencia continuou disponivel depois de uma gravacao falhar");
     }
+    // E continua: a próxima gravação vai por cima do registro que não vale.
+    let r = fs_gravar(sistema, C, v, "de novo");
+    if !fs_ok(&r) || fs_no_armazem(C).1.as_deref() != Some(b"de novo") {
+        crate::log_error!("teste", "{}", r);
+        return Err("depois da falha, o armazem nao voltou a gravar");
+    }
+    crate::volume::reabrir_de_teste()?;
+    if fs_no_armazem(C).1.as_deref() != Some(b"de novo") {
+        return Err("o volume reaberto nao tem a gravacao depois da falha");
+    }
     Ok(())
 }
 
-/// O journal repõe o armazém: reaplicado sobre um armazém vazio, como no
-/// boot, dá os mesmos arquivos, versões e conteúdos, e a mesma próxima
-/// versão; compactado, também — a base leva os arquivos na ordem das
-/// versões e a próxima versão, e uma versão de um arquivo apagado não
-/// volta.
+/// O journal repõe o armazém: a imagem limpa, o journal de estado
+/// reaplicado e o volume reaberto pelo que ele confirma dão os mesmos nós,
+/// versões, donos e conteúdos, e a mesma próxima versão; compactados — o
+/// journal de estado, o do armazém, os dois —, também. Uma versão já dada
+/// não volta.
 fn armazem_o_journal_repoe_o_armazem() -> Resultado {
-    use crate::autorizacao::{Autoridade, Chamador, Programa};
-    let sistema = Chamador::Processo {
-        fio: 7_200_003,
-        autoridade: Autoridade::Sistema,
-        programa: Programa::Kernel,
-    };
+    let sistema = sistema_no_armazem(7_200_003);
     let base = "/armazem/sistema/repor";
-    let passo = |metodo: &str, nome: &str, conteudo: Option<&str>| -> Resultado {
+    diretorios_acima(&alloc::format!("{base}/x"))?;
+    let passo = |metodo: &str, nome: &str, extra: &str| -> Resultado {
         let caminho = alloc::format!("{base}/{nome}");
         let (v, _) = fs_no_armazem(&caminho);
-        let params = match conteudo {
-            Some(t) => {
-                alloc::format!(r#"{{"path":"{caminho}","content":"{t}","expect_version":{v}}}"#)
-            }
-            None => alloc::format!(r#"{{"path":"{caminho}","expect_version":{v}}}"#),
-        };
+        let params = alloc::format!(r#"{{"path":"{caminho}"{extra},"expect_version":{v}}}"#);
         let r = fs_pedir(sistema, metodo, &params);
         if !fs_ok(&r) {
             crate::log_error!("teste", "{} {}: {}", metodo, caminho, r);
@@ -25109,31 +25240,56 @@ fn armazem_o_journal_repoe_o_armazem() -> Resultado {
         }
         Ok(())
     };
-    passo("fs.write", "a.txt", Some("um"))?;
-    passo("fs.write", "d/b.txt", Some("dois"))?;
-    passo("fs.append", "a.txt", Some(" e mais"))?;
-    passo("fs.delete", "d/b.txt", None)?;
-    // O diretório sumiu: o nome serve a um arquivo.
-    passo("fs.write", "d", Some("agora arquivo"))?;
-    passo("fs.write", "c.txt", Some("tres"))?;
-    // Uma versão mais nova num caminho que vem antes na ordem dos nomes: a
-    // base tem de levar os arquivos na ordem das versões.
-    passo("fs.write", "0.txt", Some("por ultimo, primeiro no nome"))?;
-    // O último passo apaga o de versão mais alta: a próxima versão só a
-    // base diz.
-    passo("fs.delete", "c.txt", None)?;
+    passo("fs.write", "a.txt", r#","content":"um""#)?;
+    let r = fs_pedir(
+        sistema,
+        "fs.mkdir",
+        &alloc::format!(r#"{{"path":"{base}/d"}}"#),
+    );
+    if !fs_ok(&r) {
+        return Err("o diretorio do caso nao foi criado");
+    }
+    passo("fs.write", "d/b.txt", r#","content":"dois""#)?;
+    passo("fs.append", "a.txt", r#","content":" e mais""#)?;
+    passo("fs.delete", "d/b.txt", "")?;
+    // O diretório vazio continua — e só sai pelo rmdir.
+    passo("fs.rmdir", "d", "")?;
+    passo("fs.write", "d", r#","content":"agora arquivo""#)?;
+    passo("fs.write", "c.txt", r#","content":"tres""#)?;
+    passo(
+        "fs.rename",
+        "c.txt",
+        &alloc::format!(r#","to":"{base}/c2.txt""#),
+    )?;
+    passo(
+        "fs.write",
+        "0.txt",
+        r#","content":"por ultimo, primeiro no nome""#,
+    )?;
+    passo("fs.delete", "c2.txt", "")?;
 
     let antes = retrato_do_armazem();
     let reposto = estado_do_journal()?.armazem;
     if reposto != antes {
-        crate::log_error!("teste", "{:?} != {:?}", reposto.1, antes.1);
+        crate::log_error!("teste", "{:?} != {:?}", reposto, antes);
         return Err("o journal nao repos o armazem");
     }
     crate::persistencia::compactar_de_teste()?;
-    let compactado = estado_do_journal()?.armazem;
-    if compactado != antes {
-        crate::log_error!("teste", "{:?} != {:?}", compactado.1, antes.1);
-        return Err("a compactacao nao preservou o armazem");
+    if estado_do_journal()?.armazem != antes {
+        return Err("a compactacao do journal de estado nao preservou o armazem");
+    }
+    let (regiao, _, _) = crate::volume::regiao_de_teste();
+    crate::volume::compactar_de_teste()?;
+    if crate::volume::regiao_de_teste().0 == regiao {
+        return Err("a compactacao do journal do armazem nao mudou de regiao");
+    }
+    if estado_do_journal()?.armazem != antes {
+        return Err("a compactacao do journal do armazem nao preservou o armazem");
+    }
+    crate::persistencia::compactar_de_teste()?;
+    crate::volume::compactar_de_teste()?;
+    if estado_do_journal()?.armazem != antes {
+        return Err("as duas compactacoes, uma depois da outra, nao preservaram o armazem");
     }
     // A versão seguinte é a que a base disse, e não uma já dada.
     let caminho = alloc::format!("{base}/novo.txt");
@@ -25182,6 +25338,8 @@ fn armazem_igual_para_pessoa_agente_processo() -> Resultado {
                 },
             ),
         ];
+        diretorios_acima("/armazem/compartilhado/igual/x")?;
+        diretorios_acima("/armazem/sistema/x")?;
         let mut primeiro: Option<alloc::vec::Vec<alloc::string::String>> = None;
         for (nome, chamador) in quem {
             let c = alloc::format!("/armazem/compartilhado/igual/{nome}.txt");
@@ -25289,6 +25447,7 @@ fn armazem_o_sistema_nao_tem_atalho() -> Resultado {
         sigilo::publica_de(&ADMIN_DE_TESTE),
         "administrador",
     );
+    diretorios_acima(C)?;
     let resultado = (|| -> Resultado {
         for fora in [
             "/dados/x",
@@ -25362,6 +25521,7 @@ fn armazem_o_vfs_le_o_que_foi_gravado() -> Resultado {
     let dir = "/armazem/compartilhado/vfs";
     let a = alloc::format!("{dir}/a.txt");
     let b = alloc::format!("{dir}/sub/b.txt");
+    diretorios_acima(&b)?;
     for (c, t) in [(&a, "um"), (&b, "dois")] {
         let (v, _) = fs_no_armazem(c);
         if !fs_ok(&fs_gravar(sistema, c, v, t)) {
@@ -25408,17 +25568,15 @@ fn armazem_o_vfs_le_o_que_foi_gravado() -> Resultado {
     Ok(())
 }
 
-/// Os tetos e os lugares, pelo comando: o arquivo que passaria de 16 KiB,
-/// o nome de um diretório, o arquivo abaixo de um arquivo e o caminho que
-/// não é do armazém são `INVALID_ARGUMENT`, e não mudam nada.
+/// Os lugares e os limites, pelo comando: um arquivo grande, em pedaços,
+/// passa de 16 KiB — o teto de antes não existe mais —; o nome de um
+/// diretório, o arquivo abaixo de um arquivo, o pai que não existe, o
+/// caminho fundo demais e o que não é do armazém são `INVALID_ARGUMENT`, e
+/// não mudam nada.
 fn armazem_tetos_e_lugares() -> Resultado {
-    use crate::autorizacao::{Autoridade, Chamador, Programa};
-    let sistema = Chamador::Processo {
-        fio: 7_200_040,
-        autoridade: Autoridade::Sistema,
-        programa: Programa::Kernel,
-    };
+    let sistema = sistema_no_armazem(7_200_040);
     let c = "/armazem/sistema/tetos/grande.txt";
+    diretorios_acima(c)?;
     let (mut v, _) = fs_no_armazem(c);
     if v != 0 {
         let r = fs_pedir(
@@ -25431,12 +25589,12 @@ fn armazem_tetos_e_lugares() -> Resultado {
         }
     }
     // Em pedaços que cabem num pedido: a linha do canal tem 4 KiB.
-    let pedaco = "x".repeat(::armazem::MAIOR_ARQUIVO / 8);
+    let pedaco = "x".repeat(2048);
     let r = fs_gravar(sistema, c, 0, &pedaco);
     v = fs_numero(&r, "version")
         .filter(|_| fs_ok(&r))
         .ok_or("a criacao foi recusada")?;
-    for _ in 0..7 {
+    for _ in 0..15 {
         let r = fs_pedir(
             sistema,
             "fs.append",
@@ -25446,29 +25604,38 @@ fn armazem_tetos_e_lugares() -> Resultado {
             .filter(|_| fs_ok(&r))
             .ok_or("um acrescimo foi recusado")?;
     }
+    let (_, dados) = fs_no_armazem(c);
+    if dados.as_deref().map(<[u8]>::len) != Some(16 * 2048)
+        || dados != Some(pedaco.repeat(16).into_bytes())
+    {
+        return Err("o arquivo em pedacos nao tem o que se acrescentou");
+    }
     let r = fs_pedir(
         sistema,
         "fs.append",
         &alloc::format!(r#"{{"path":"{c}","content":"y","expect_version":{v}}}"#),
     );
-    if fs_ok(&r) || fs_texto(&r, "code").as_deref() != Some("INVALID_ARGUMENT") {
+    if !fs_ok(&r) || fs_numero(&r, "size") != Some(16 * 2048 + 1) {
         crate::log_error!("teste", "{}", r);
-        return Err("o arquivo passou do teto");
+        return Err("o arquivo nao passou de 32 KiB");
     }
-    if fs_no_armazem(c).0 != v {
-        return Err("a recusa pelo teto mudou o arquivo");
-    }
+    let fundo = alloc::format!("/armazem/sistema/tetos/{}", ["f"; 8].join("/"));
     for (caminho, motivo) in [
         ("/armazem/sistema/tetos", "o caminho e um diretorio"),
         (
             "/armazem/sistema/tetos/grande.txt/x",
-            "um componente do caminho e um arquivo",
+            "o caminho, ou o pai dele, e um arquivo",
+        ),
+        (
+            "/armazem/sistema/tetos/nao/existe",
+            "o diretorio pai nao existe",
         ),
         (
             "/armazem/sistema/tetos/a b",
             "o caminho nao e um caminho do armazem",
         ),
-        ("/armazem", "o caminho nao e de um arquivo do armazem"),
+        (fundo.as_str(), "o caminho nao e um caminho do armazem"),
+        ("/armazem", "o caminho nao e de um no do armazem"),
     ] {
         let r = fs_gravar(sistema, caminho, 0, "x");
         if fs_texto(&r, "code").as_deref() != Some("INVALID_ARGUMENT")
@@ -25477,6 +25644,10 @@ fn armazem_tetos_e_lugares() -> Resultado {
             crate::log_error!("teste", "{}: {}", caminho, r);
             return Err("um lugar que nao pode ser arquivo foi aceito, ou pelo motivo errado");
         }
+    }
+    if crate::armazem::situacao("/armazem/sistema/tetos/nao").is_some_and(|(_, s)| s.tipo.is_some())
+    {
+        return Err("um pai foi criado de passagem");
     }
     if !crate::armazem::com_o_armazem(|a| a.coerente()) {
         return Err("o armazem ficou incoerente");
@@ -25533,6 +25704,7 @@ fn armazem_varios_nucleos_no_mesmo_arquivo() -> Resultado {
         PRONTOS.fetch_add(1, SeqCst);
         crate::fios::terminar()
     }
+    diretorios_acima(C)?;
     // Um arquivo novo a cada volta da suíte: apaga o de antes.
     let (v, _) = fs_no_armazem(C);
     if v != 0 {
@@ -25620,6 +25792,7 @@ fn armazem_quatro_agentes_disputam() -> Resultado {
         let unico = crate::tempo::uptime_ms();
         let c1 = alloc::format!("/armazem/agentes/{unico}/disputa.txt");
         let c2 = alloc::format!("/armazem/agentes/{unico}/depois.txt");
+        diretorios_acima(&c1)?;
 
         let r = todos_ao_mesmo_tempo(&mut agentes, &mut sessoes, [2, 4, 1, 3], |_| {
             Some(pedido_rpc(
@@ -25686,6 +25859,7 @@ fn armazem_o_programa_guarda_pelo_gate() -> Resultado {
     use crate::autorizacao::Autoridade;
     use crate::pessoas::Console;
     crate::pessoas::esquecer_registradas();
+    diretorios_acima("/armazem/compartilhado/x")?;
     let resultado = (|| -> Resultado {
         let operadora =
             crate::pessoas::sessao_de_teste(Console::Terminal(43), "guarda-op", "operador");
@@ -25697,7 +25871,7 @@ fn armazem_o_programa_guarda_pelo_gate() -> Resultado {
         .map_err(|_| "o programa guardar nao conferiu o armazem")?;
         // A decisão e o que o comando fez: os dois em nome da pessoa, pelo
         // processo.
-        for trecho in ["", "mudanca a gravar"] {
+        for trecho in ["", "lote a gravar"] {
             let e = ultimo_que(|e| {
                 e.metodo == "fs.write"
                     && e.detalhe.starts_with("pelo processo ")
@@ -25723,6 +25897,1137 @@ fn armazem_o_programa_guarda_pelo_gate() -> Resultado {
     })();
     crate::pessoas::esquecer_registradas();
     resultado
+}
+
+/// O binário de um agente vai fora do JSON, nos quadros de anexo da sessão
+/// cifrada, e o pedido seguinte o declara em `attachment`:
+///
+/// - todos os bytes — o zero e o `\n` incluídos — chegam ao arquivo, e o
+///   montador de linhas nunca os vê: o anexo não fecha nem quebra pedido;
+/// - o anexo é do pedido seguinte e só dele: um pedido que não o declara é
+///   recusado, e ele não sobra para o depois;
+/// - um tamanho que não confere, ou um anexo acima do teto, é recusado sem
+///   chegar ao gate, e o arquivo fica como estava;
+/// - um rascunho também se escreve pelo anexo, e grava inteiro.
+fn armazem_o_agente_manda_binario_no_anexo() -> Resultado {
+    use crate::agent::SessaoDeTeste;
+    let c = "/armazem/sistema/agente/binario.bin";
+    diretorios_acima(c)?;
+    com_agentes_de_teste(|| {
+        let mut sessao = SessaoDeTeste::porta(1);
+        let mut agente = AgenteDeTeste::conectar(1, &mut sessao, &chave_de_teste(1))?;
+        let pedir = |agente: &mut AgenteDeTeste,
+                     sessao: &mut SessaoDeTeste,
+                     anexo: Option<&[u8]>,
+                     metodo: &str,
+                     params: alloc::string::String|
+         -> Result<alloc::string::String, &'static str> {
+            if let Some(a) = anexo {
+                agente.anexar(sessao, a)?;
+            }
+            agente.pedir(sessao, &pedido_rpc(metodo, &params))?;
+            let mut r = agente.respostas();
+            if r.len() != 1 {
+                crate::log_error!("teste", "{:?}", r);
+                return Err("o pedido nao teve exatamente uma resposta");
+            }
+            Ok(r.remove(0))
+        };
+        let recusado_pelo_anexo = |r: &str| {
+            r.contains(r#""error""#) && r.contains("attachment") && !r.contains(r#""ok":true"#)
+        };
+
+        // Todos os bytes, várias vezes: o zero e o fim de linha no meio.
+        let bytes: alloc::vec::Vec<u8> = (0..5000u32).map(|i| (i % 256) as u8).collect();
+        let v = fs_no_armazem(c).0;
+        let r = pedir(
+            &mut agente,
+            &mut sessao,
+            Some(&bytes),
+            "fs.write",
+            alloc::format!(
+                r#"{{"path":"{c}","expect_version":{v},"attachment":{}}}"#,
+                bytes.len()
+            ),
+        )?;
+        if !r.contains(r#""ok":true"#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o anexo do agente nao foi gravado");
+        }
+        let (v1, conteudo) = fs_no_armazem(c);
+        if conteudo.as_deref() != Some(&bytes[..]) {
+            return Err("o binario do agente nao chegou igual");
+        }
+
+        // O tamanho que não confere: nada muda.
+        let r = pedir(
+            &mut agente,
+            &mut sessao,
+            Some(b"dez bytes!"),
+            "fs.write",
+            alloc::format!(r#"{{"path":"{c}","expect_version":{v1},"attachment":11}}"#),
+        )?;
+        if !recusado_pelo_anexo(&r) || fs_no_armazem(c).0 != v1 {
+            crate::log_error!("teste", "{}", r);
+            return Err("um anexo de tamanho errado passou");
+        }
+
+        // Um anexo que o pedido não declara é recusado, e não sobra.
+        let r = pedir(
+            &mut agente,
+            &mut sessao,
+            Some(b"sobra"),
+            "agent.ping",
+            alloc::string::String::from("{}"),
+        )?;
+        if !recusado_pelo_anexo(&r) {
+            crate::log_error!("teste", "{}", r);
+            return Err("um anexo sem declaracao passou");
+        }
+        let r = pedir(
+            &mut agente,
+            &mut sessao,
+            None,
+            "fs.write",
+            alloc::format!(r#"{{"path":"{c}","expect_version":{v1},"attachment":5}}"#),
+        )?;
+        if !recusado_pelo_anexo(&r) || fs_no_armazem(c).0 != v1 {
+            crate::log_error!("teste", "{}", r);
+            return Err("o anexo de um pedido sobrou para o seguinte");
+        }
+        // E o pedido sem anexo segue normal depois.
+        let r = pedir(&mut agente, &mut sessao, None, "agent.ping", "{}".into())?;
+        if r.contains(r#""error""#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("a sessao nao voltou ao normal depois de uma recusa do anexo");
+        }
+
+        // Acima do teto: recusado, mesmo declarado.
+        let grande = alloc::vec![7u8; crate::autorizacao::MAIOR_ANEXO + 1];
+        let r = pedir(
+            &mut agente,
+            &mut sessao,
+            Some(&grande),
+            "fs.write",
+            alloc::format!(
+                r#"{{"path":"{c}","expect_version":{v1},"attachment":{}}}"#,
+                grande.len()
+            ),
+        )?;
+        if !recusado_pelo_anexo(&r) || fs_no_armazem(c).0 != v1 {
+            crate::log_error!("teste", "{}", r);
+            return Err("um anexo acima do teto passou");
+        }
+
+        // Um rascunho pelo anexo, em dois pedaços, gravado inteiro.
+        let r = pedir(
+            &mut agente,
+            &mut sessao,
+            Some(&bytes[..3000]),
+            "fs.draft",
+            alloc::format!(r#"{{"path":"{c}","attachment":3000}}"#),
+        )?;
+        let numero = Json(r.as_bytes())
+            .member("result")
+            .and_then(|v| v.member("draft"))
+            .and_then(|v| v.as_u64())
+            .ok_or("o rascunho nao foi criado pelo anexo")?;
+        let r = pedir(
+            &mut agente,
+            &mut sessao,
+            Some(&bytes[3000..]),
+            "fs.draft",
+            alloc::format!(r#"{{"path":"{c}","draft":{numero},"attachment":2000}}"#),
+        )?;
+        if !r.contains(r#""ok":true"#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o rascunho nao continuou pelo anexo");
+        }
+        let r = pedir(
+            &mut agente,
+            &mut sessao,
+            None,
+            "fs.write",
+            alloc::format!(r#"{{"path":"{c}","expect_version":{v1},"draft":{numero}}}"#),
+        )?;
+        let (v2, conteudo) = fs_no_armazem(c);
+        if !r.contains(r#""ok":true"#) || v2 <= v1 || conteudo.as_deref() != Some(&bytes[..]) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o rascunho do anexo nao gravou inteiro");
+        }
+        Ok(())
+    })
+}
+
+/// O volume é da partição própria: a janela de escrita do armazém é a
+/// partição do armazém da GPT, a do estado é a de estado, as duas não se
+/// cruzam, e nenhuma escreve na outra pelo nome errado. O conteúdo de um
+/// arquivo não aparece em claro nem no volume nem na partição de estado.
+fn armazem_o_volume_e_da_particao_propria() -> Resultado {
+    use crate::virtio::blk::Janela;
+    const MARCA: &[u8] = b"marca-do-volume-que-nao-aparece-em-claro";
+    let tabela = crate::particoes::varrer()?;
+    let estado = tabela
+        .primeira(crate::particoes::Tipo::Estado)
+        .ok_or("sem particao de estado")?;
+    let volume = tabela
+        .primeira(crate::particoes::Tipo::Armazem)
+        .ok_or("sem particao do armazem")?;
+    let (je, ja) =
+        crate::virtio::blk::com_o_disco(|d| (d.janela(Janela::Estado), d.janela(Janela::Armazem)))
+            .ok_or("nao ha disco")?;
+    if je != Some((estado.primeiro, estado.setores))
+        || ja != Some((volume.primeiro, volume.setores))
+    {
+        return Err("as janelas de escrita nao sao as particoes da tabela");
+    }
+    if estado.primeiro < volume.primeiro + volume.setores
+        && volume.primeiro < estado.primeiro + estado.setores
+    {
+        return Err("as particoes de estado e do armazem se cruzam");
+    }
+    // Pelo nome errado, nada se escreve — nem um setor.
+    const B: usize = crate::virtio::blk::TAMANHO_DO_SETOR;
+    let lixo = [0xEEu8; B];
+    let recusas = crate::virtio::blk::com_o_disco(|d| {
+        let (escritas, _) = d.contadores();
+        let a = d
+            .gravar_setores(Janela::Armazem, estado.primeiro + 1, &lixo)
+            .is_err();
+        let b = d
+            .gravar_setores(Janela::Estado, volume.primeiro + 1, &lixo)
+            .is_err();
+        a && b && d.contadores().0 == escritas
+    })
+    .ok_or("nao ha disco")?;
+    if !recusas {
+        return Err("uma janela escreveu na particao da outra");
+    }
+    if crate::virtio::blk::fixar_janela_de_escrita(Janela::Armazem, estado.primeiro, estado.setores)
+        .is_ok()
+    {
+        return Err("a janela do armazem foi redesenhada sobre o estado");
+    }
+    // O conteúdo, cifrado nos dois lugares.
+    let c = "/armazem/sistema/volume/marca.bin";
+    diretorios_acima(c)?;
+    let (v, _) = fs_no_armazem(c);
+    let r = crate::nativo::responder_com_anexo_de_teste(
+        sistema_no_armazem(7_210_001),
+        &pedido_rpc(
+            "fs.write",
+            &alloc::format!(r#"{{"path":"{c}","expect_version":{v}}}"#),
+        ),
+        &MARCA.repeat(4),
+    );
+    if !fs_ok(&r) {
+        crate::log_error!("teste", "{}", r);
+        return Err("o anexo nao foi gravado");
+    }
+    let tem_marca = |primeiro: u64, setores: u64| -> Result<bool, &'static str> {
+        let mut buf = alloc::vec![0u8; 64 * 1024];
+        let mut s = 0u64;
+        while s < setores {
+            let n = (setores - s).min((crate::virtio::blk::MAIOR_LEITURA / B) as u64);
+            let fatia = &mut buf[..n as usize * B];
+            crate::virtio::blk::com_o_disco(|d| d.ler(primeiro + s, fatia))
+                .ok_or("nao ha disco")??;
+            if fatia.windows(MARCA.len()).any(|w| w == MARCA) {
+                return Ok(true);
+            }
+            s += n;
+        }
+        Ok(false)
+    };
+    if tem_marca(estado.primeiro, estado.setores.min(8192))? {
+        return Err("o conteudo de um arquivo foi para a particao de estado");
+    }
+    if tem_marca(volume.primeiro, volume.setores.min(32768))? {
+        return Err("o conteudo de um arquivo esta em claro no volume");
+    }
+    if fs_no_armazem(c).1 != Some(MARCA.repeat(4)) {
+        return Err("o conteudo binario nao voltou igual");
+    }
+    Ok(())
+}
+
+/// Diretórios explícitos e renomear, pelo gate, sem escapar do alcance:
+///
+/// - `fs.mkdir` só num pai que existe; o diretório existe vazio, e
+///   `fs.rmdir` só o tira vazio, na versão de agora;
+/// - `fs.rename` precisa do `fs.write` nos **dois** caminhos: o operador
+///   não move nada para fora de `/armazem/compartilhado` — nem para cima,
+///   nem por `..`, nem para outra árvore —, e não traz nada de fora para
+///   dentro;
+/// - o destino que existe, o pai que falta e o destino abaixo da origem são
+///   recusados; mover leva tudo abaixo, com versões novas;
+/// - o arrendamento de outro titular em qualquer nó abaixo da origem — ou
+///   num caminho abaixo do destino — impede o movimento;
+/// - dois renames ao mesmo tempo, em núcleos diferentes, sobre os mesmos
+///   nomes: cada um vê o outro inteiro, e o armazém fica coerente.
+fn armazem_diretorios_e_renomear() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use crate::pessoas::Console;
+    let base = "/armazem/compartilhado/mover";
+    diretorios_acima(&alloc::format!("{base}/x"))?;
+    crate::pessoas::esquecer_registradas();
+    let resultado = (|| -> Resultado {
+        let op = Chamador::Pessoa(crate::pessoas::sessao_de_teste(
+            Console::Fisico,
+            "mover-op",
+            "operador",
+        ));
+        let outra_sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(45), "mover-outra", "operador");
+        let outra = Chamador::Pessoa(outra_sessao);
+        let unico = crate::tempo::uptime_ms();
+        let d = alloc::format!("{base}/d{unico}");
+        let pedir =
+            |quem, metodo: &str, params: alloc::string::String| fs_pedir(quem, metodo, &params);
+        // mkdir: o pai tem de existir.
+        let r = pedir(op, "fs.mkdir", alloc::format!(r#"{{"path":"{d}/a/b"}}"#));
+        if fs_texto(&r, "error").as_deref() != Some("o diretorio pai nao existe") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o mkdir criou um pai de passagem");
+        }
+        for c in [
+            d.clone(),
+            alloc::format!("{d}/a"),
+            alloc::format!("{d}/a/b"),
+        ] {
+            if !fs_ok(&pedir(
+                op,
+                "fs.mkdir",
+                alloc::format!(r#"{{"path":"{c}"}}"#),
+            )) {
+                return Err("um mkdir foi recusado");
+            }
+        }
+        let r = pedir(op, "fs.mkdir", alloc::format!(r#"{{"path":"{d}/a"}}"#));
+        if fs_ok(&r) {
+            return Err("o mkdir de um diretorio que existe passou");
+        }
+        let f = alloc::format!("{d}/a/b/f.txt");
+        if !fs_ok(&fs_gravar(op, &f, 0, "conteudo")) {
+            return Err("o arquivo dentro do diretorio nao foi gravado");
+        }
+        // Um nome que existe fora da origem: o destino ocupado.
+        if !fs_ok(&fs_gravar(
+            op,
+            &alloc::format!("{d}/outro.txt"),
+            0,
+            "ocupado",
+        )) {
+            return Err("o arquivo ao lado nao foi gravado");
+        }
+        // rmdir: só vazio.
+        let va = fs_no_armazem(&alloc::format!("{d}/a")).0;
+        let r = pedir(
+            op,
+            "fs.rmdir",
+            alloc::format!(r#"{{"path":"{d}/a","expect_version":{va}}}"#),
+        );
+        if fs_texto(&r, "error").as_deref() != Some("o diretorio nao esta vazio") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o rmdir de um diretorio cheio passou");
+        }
+        // Escapar do alcance: o gate decide os dois caminhos.
+        for para in [
+            "/armazem/fora",
+            "/armazem/compartilhado/../sistema/roubado",
+            "/armazem/compartilhadox",
+            "/dados/x",
+            "/etc/duke/privado/x",
+        ] {
+            let r = pedir(
+                op,
+                "fs.rename",
+                alloc::format!(r#"{{"path":"{d}/a","to":"{para}","expect_version":{va}}}"#),
+            );
+            if decisao_do_envelope(&r) != "DENY_RESOURCE" {
+                crate::log_error!("teste", "{}: {}", para, r);
+                return Err("um rename escapou do alcance do papel");
+            }
+        }
+        // Trazer de fora para dentro também é decidido.
+        let r = pedir(
+            op,
+            "fs.rename",
+            alloc::format!(r#"{{"path":"/armazem/sistema","to":"{d}/sis","expect_version":1}}"#),
+        );
+        if decisao_do_envelope(&r) != "DENY_RESOURCE" {
+            crate::log_error!("teste", "{}", r);
+            return Err("um rename trouxe para dentro o que estava fora do alcance");
+        }
+        if fs_no_armazem(&f).1.as_deref() != Some(b"conteudo") {
+            return Err("uma recusa mexeu na arvore");
+        }
+        // As recusas do armazém.
+        for (para, motivo) in [
+            (
+                alloc::format!("{d}/a/b/dentro"),
+                "o destino estaria abaixo da origem",
+            ),
+            (
+                alloc::format!("{d}/a"),
+                "o destino estaria abaixo da origem",
+            ),
+            (
+                alloc::format!("{d}/nao/existe"),
+                "o diretorio pai nao existe",
+            ),
+            (alloc::format!("{d}/outro.txt"), "ja ha algo nesse caminho"),
+        ] {
+            let r = pedir(
+                op,
+                "fs.rename",
+                alloc::format!(r#"{{"path":"{d}/a","to":"{para}","expect_version":{va}}}"#),
+            );
+            if fs_ok(&r) || fs_texto(&r, "error").as_deref() != Some(motivo) {
+                crate::log_error!("teste", "{}: {}", para, r);
+                return Err("um rename impossivel passou, ou pelo motivo errado");
+            }
+        }
+        // O arrendamento de outra titular num nó abaixo: o movimento para.
+        if !fs_ok(&pedir(
+            outra,
+            "fs.claim",
+            alloc::format!(r#"{{"path":"{f}"}}"#),
+        )) {
+            return Err("a outra titular nao arrendou o arquivo");
+        }
+        let r = pedir(
+            op,
+            "fs.rename",
+            alloc::format!(r#"{{"path":"{d}/a","to":"{d}/z","expect_version":{va}}}"#),
+        );
+        if fs_texto(&r, "conflict").as_deref() != Some("lease") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o rename passou por cima do arrendamento de um no abaixo da origem");
+        }
+        // E num caminho abaixo do destino, que passaria a existir.
+        if !fs_ok(&pedir(
+            outra,
+            "fs.release",
+            alloc::format!(r#"{{"path":"{f}"}}"#),
+        )) {
+            return Err("a outra titular nao soltou");
+        }
+        if !fs_ok(&pedir(
+            outra,
+            "fs.claim",
+            alloc::format!(r#"{{"path":"{d}/z/b/f.txt"}}"#),
+        )) {
+            return Err("a outra titular nao arrendou o destino");
+        }
+        let r = pedir(
+            op,
+            "fs.rename",
+            alloc::format!(r#"{{"path":"{d}/a","to":"{d}/z","expect_version":{va}}}"#),
+        );
+        if fs_texto(&r, "conflict").as_deref() != Some("lease") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o rename passou por cima do arrendamento de um caminho do destino");
+        }
+        crate::pessoas::sair(outra_sessao);
+        // Agora move, com tudo abaixo, com versões novas.
+        let vf = fs_no_armazem(&f).0;
+        let r = pedir(
+            op,
+            "fs.rename",
+            alloc::format!(r#"{{"path":"{d}/a","to":"{d}/z","expect_version":{va}}}"#),
+        );
+        if !fs_ok(&r) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o rename foi recusado");
+        }
+        let novo = alloc::format!("{d}/z/b/f.txt");
+        let (vn, conteudo) = fs_no_armazem(&novo);
+        if conteudo.as_deref() != Some(b"conteudo") || vn <= vf || fs_no_armazem(&f).0 != 0 {
+            return Err("o rename nao levou o arquivo com versao nova");
+        }
+        // Dois renames ao mesmo tempo, nos mesmos nomes.
+        use core::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        static PRONTOS: AtomicUsize = AtomicUsize::new(0);
+        static PASSARAM: AtomicUsize = AtomicUsize::new(0);
+        static NOMES: crate::trava::Mutex<Option<(alloc::string::String, alloc::string::String)>> =
+            crate::trava::Mutex::new(None);
+        extern "C" fn trocar(i: u64) -> ! {
+            let (x, y) = crate::arch::sem_interrupcoes(|| NOMES.lock().clone()).unwrap_or_default();
+            let (de, para) = if i.is_multiple_of(2) { (x, y) } else { (y, x) };
+            let quem = sistema_no_armazem(7_210_100 + i);
+            for _ in 0..4 {
+                let v = fs_no_armazem(&de).0;
+                let r = fs_pedir(
+                    quem,
+                    "fs.rename",
+                    &alloc::format!(r#"{{"path":"{de}","to":"{para}","expect_version":{v}}}"#),
+                );
+                if fs_ok(&r) {
+                    PASSARAM.fetch_add(1, SeqCst);
+                }
+            }
+            PRONTOS.fetch_add(1, SeqCst);
+            crate::fios::terminar()
+        }
+        let x = alloc::format!("{d}/x");
+        let y = alloc::format!("{d}/y");
+        if !fs_ok(&pedir(
+            op,
+            "fs.mkdir",
+            alloc::format!(r#"{{"path":"{x}"}}"#),
+        )) {
+            return Err("o diretorio da disputa nao foi criado");
+        }
+        crate::arch::sem_interrupcoes(|| *NOMES.lock() = Some((x.clone(), y.clone())));
+        PRONTOS.store(0, SeqCst);
+        PASSARAM.store(0, SeqCst);
+        let mut quantos = 0;
+        for i in 0..crate::nucleos::MAX_NUCLEOS {
+            if crate::nucleos::mascara_dos_ligados() & (1 << i) != 0 && quantos < 2 {
+                crate::fios::criar_no_nucleo("teste-renomear", trocar, quantos as u64, i)?;
+                quantos += 1;
+            }
+        }
+        if quantos == 1 {
+            crate::fios::criar_no_nucleo("teste-renomear", trocar, 1, crate::nucleos::atual())?;
+            quantos = 2;
+        }
+        esperar_ate(|| PRONTOS.load(SeqCst) == quantos, 30_000)?;
+        let existe = |c: &str| crate::armazem::situacao(c).is_some_and(|(_, s)| s.tipo.is_some());
+        if existe(&x) == existe(&y) || PASSARAM.load(SeqCst) == 0 {
+            return Err("os renames concorrentes deixaram os dois nomes, ou nenhum");
+        }
+        if !crate::armazem::com_o_armazem(|a| a.coerente()) {
+            return Err("os renames concorrentes deixaram o armazem incoerente");
+        }
+        Ok(())
+    })();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// O lote é inteiro ou nada, e é um registro e uma confirmação só:
+///
+/// - um `fs.batch` de várias operações avança a âncora do TPM **uma** vez,
+///   e grava um registro `ARMAZEM` no journal de estado;
+/// - cada operação vê as anteriores: criar o diretório e escrever dentro,
+///   e trocar dois nomes por um terceiro;
+/// - a operação que recusa recusa o lote: nada das anteriores vale, e a
+///   resposta diz qual foi;
+/// - o conteúdo vem de pedaços do anexo, fora do JSON;
+/// - um lote com um caminho fora do alcance é recusado inteiro pelo gate.
+fn armazem_o_lote_e_inteiro() -> Resultado {
+    let sistema = sistema_no_armazem(7_220_001);
+    let unico = crate::tempo::uptime_ms();
+    let d = alloc::format!("/armazem/sistema/lote{unico}");
+    // Os de cima, e não ele: o lote o cria.
+    diretorios_acima(&d)?;
+    let contador = crate::persistencia::ancora_no_tpm_de_teste()?;
+    let registros = todos_do_journal()?.len();
+    let anexo: alloc::vec::Vec<u8> = (0u8..=255).cycle().take(9000).collect();
+    let ops = alloc::format!(
+        r#"{{"ops":[{{"op":"mkdir","path":"{d}"}},{{"op":"write","path":"{d}/a.bin","expect_version":0,"offset":0,"length":5000}},{{"op":"write","path":"{d}/b.txt","expect_version":0,"content":"texto"}},{{"op":"mkdir","path":"{d}/p"}},{{"op":"write","path":"{d}/p/c.bin","expect_version":0,"offset":5000,"length":4000}}]}}"#
+    );
+    let r =
+        crate::nativo::responder_com_anexo_de_teste(sistema, &pedido_rpc("fs.batch", &ops), &anexo);
+    if !fs_ok(&r) {
+        crate::log_error!("teste", "{}", r);
+        return Err("o lote foi recusado");
+    }
+    if crate::persistencia::ancora_no_tpm_de_teste()? != contador + 1 {
+        return Err("o lote nao avancou a ancora exatamente uma vez");
+    }
+    if todos_do_journal()?.len() != registros + 1 {
+        return Err("o lote nao foi um registro so no journal de estado");
+    }
+    if fs_no_armazem(&alloc::format!("{d}/a.bin")).1.as_deref() != Some(&anexo[..5000])
+        || fs_no_armazem(&alloc::format!("{d}/p/c.bin")).1.as_deref() != Some(&anexo[5000..])
+        || fs_no_armazem(&alloc::format!("{d}/b.txt")).1.as_deref() != Some(b"texto")
+    {
+        return Err("o lote nao gravou o que cada operacao pediu");
+    }
+    // A terceira recusa: nada das duas primeiras vale.
+    let antes = retrato_do_armazem();
+    let va = fs_no_armazem(&alloc::format!("{d}/a.bin")).0;
+    let ops = alloc::format!(
+        r#"{{"ops":[{{"op":"mkdir","path":"{d}/q"}},{{"op":"rename","path":"{d}/b.txt","to":"{d}/q/b.txt","expect_version":{}}},{{"op":"delete","path":"{d}/a.bin","expect_version":{}}}]}}"#,
+        fs_no_armazem(&alloc::format!("{d}/b.txt")).0,
+        va + 1000
+    );
+    let r = fs_pedir(sistema, "fs.batch", &ops);
+    if fs_ok(&r)
+        || fs_numero(&r, "op") != Some(2)
+        || fs_texto(&r, "conflict").as_deref() != Some("version")
+    {
+        crate::log_error!("teste", "{}", r);
+        return Err("o lote com uma operacao recusada nao disse qual");
+    }
+    if retrato_do_armazem() != antes {
+        return Err("o lote recusado deixou parte dele valendo");
+    }
+    // Trocar dois nomes num lote: cada operação vê as anteriores.
+    let ops = alloc::format!(
+        r#"{{"ops":[{{"op":"rename","path":"{d}/a.bin","to":"{d}/t","expect_version":{va}}},{{"op":"rename","path":"{d}/p/c.bin","to":"{d}/a.bin","expect_version":{}}}]}}"#,
+        fs_no_armazem(&alloc::format!("{d}/p/c.bin")).0
+    );
+    let r = fs_pedir(sistema, "fs.batch", &ops);
+    if !fs_ok(&r)
+        || fs_no_armazem(&alloc::format!("{d}/a.bin")).1.as_deref() != Some(&anexo[5000..])
+    {
+        crate::log_error!("teste", "{}", r);
+        return Err("a troca de nomes num lote nao se fez");
+    }
+    // Um caminho fora do alcance: o gate recusa o lote inteiro.
+    let ops = alloc::format!(
+        r#"{{"ops":[{{"op":"mkdir","path":"{d}/r"}},{{"op":"mkdir","path":"/dados/r"}}]}}"#
+    );
+    let r = fs_pedir(sistema, "fs.batch", &ops);
+    if decisao_do_envelope(&r) != "DENY_RESOURCE" || fs_no_armazem(&alloc::format!("{d}/r")).0 != 0
+    {
+        crate::log_error!("teste", "{}", r);
+        return Err("um lote com um caminho fora do alcance passou pelo gate");
+    }
+    // Um lote grande demais, ou vazio.
+    let muitas: alloc::vec::Vec<alloc::string::String> = (0..33)
+        .map(|i| alloc::format!(r#"{{"op":"mkdir","path":"{d}/m{i}"}}"#))
+        .collect();
+    for ops in [
+        alloc::format!(r#"{{"ops":[{}]}}"#, muitas.join(",")),
+        r#"{"ops":[]}"#.into(),
+    ] {
+        let r = fs_pedir(sistema, "fs.batch", &ops);
+        if fs_ok(&r) {
+            return Err("um lote vazio ou grande demais passou");
+        }
+    }
+    Ok(())
+}
+
+/// A cota é de cada dono, pela linha `armazem` do papel dele, e se confere
+/// com o lote inteiro, um lote de cada vez:
+///
+/// - uma pessoa e um agente do mesmo papel têm cada um a sua — pelo mesmo
+///   mecanismo, e com a mesma recusa, `DENY_QUOTA`;
+/// - quatro núcleos gravando ao mesmo tempo pelo mesmo agente não passam
+///   juntos da cota: entram exatamente os que cabem;
+/// - apagar devolve a cota, e um papel sem a linha não guarda nada.
+fn armazem_a_cota_e_de_cada_dono() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
+    use crate::pessoas::Console;
+    use core::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    let chave = sigilo::publica_de(&[0x6C; 32]);
+    crate::pessoas::esquecer_registradas();
+    crate::identidade::registrar_agente_de_teste(chave, "agente-cota", "operador");
+    let antes = crate::autorizacao::com_politica(|p| p.clone());
+    let unico = crate::tempo::uptime_ms();
+    let d = alloc::format!("/armazem/compartilhado/cota{unico}");
+    diretorios_acima(&alloc::format!("{d}/x"))?;
+    let resultado = (|| -> Resultado {
+        // Uma cota pequena, só em memória: 10 000 bytes, 100 objetos.
+        let pequena = politica::Politica::ler(&antes.texto().replace(
+            "armazem operador 16777216 4096",
+            "armazem operador 10000 100",
+        ))
+        .map_err(|_| "a politica da cota pequena nao se le")?;
+        crate::autorizacao::restaurar_politica(pequena);
+        let pessoa = Chamador::Pessoa(crate::pessoas::sessao_de_teste(
+            Console::Fisico,
+            "cota-pessoa",
+            "operador",
+        ));
+        let agente = Chamador::Processo {
+            fio: 7_230_001,
+            autoridade: Autoridade::Sessao {
+                sessao: 3,
+                chave: Some(chave),
+            },
+            programa: Programa::Kernel,
+        };
+        let tres_mil = "y".repeat(3000);
+        for (quem, nome) in [(pessoa, "pessoa"), (agente, "agente")] {
+            for i in 0..3 {
+                let r = fs_gravar(quem, &alloc::format!("{d}/{nome}-{i}"), 0, &tres_mil);
+                if !fs_ok(&r) {
+                    crate::log_error!("teste", "{}", r);
+                    return Err("a gravacao dentro da cota foi recusada");
+                }
+            }
+            let r = fs_gravar(quem, &alloc::format!("{d}/{nome}-3"), 0, &tres_mil);
+            if fs_texto(&r, "code").as_deref() != Some("DENY_QUOTA") {
+                crate::log_error!("teste", "{}: {}", nome, r);
+                return Err("a gravacao alem da cota passou, ou com outra recusa");
+            }
+        }
+        let e = ultimo_com_metodo("fs.write").ok_or("a recusa da cota nao foi gravada")?;
+        if e.codigo != politica::Codigo::DenyQuota {
+            return Err("a recusa da cota nao foi gravada como DENY_QUOTA");
+        }
+        // Apagar devolve.
+        let c = alloc::format!("{d}/pessoa-0");
+        let v = fs_no_armazem(&c).0;
+        if !fs_ok(&fs_pedir(
+            pessoa,
+            "fs.delete",
+            &alloc::format!(r#"{{"path":"{c}","expect_version":{v}}}"#),
+        )) {
+            return Err("a pessoa nao apagou");
+        }
+        if !fs_ok(&fs_gravar(
+            pessoa,
+            &alloc::format!("{d}/pessoa-3"),
+            0,
+            &tres_mil,
+        )) {
+            return Err("apagar nao devolveu a cota");
+        }
+        // Quatro núcleos, o mesmo agente, ao mesmo tempo: entram os que cabem.
+        static PRONTOS: AtomicUsize = AtomicUsize::new(0);
+        static ENTRARAM: AtomicUsize = AtomicUsize::new(0);
+        static OUTRAS: AtomicUsize = AtomicUsize::new(0);
+        static DIR: crate::trava::Mutex<alloc::string::String> =
+            crate::trava::Mutex::new(alloc::string::String::new());
+        static CHAVE: crate::trava::Mutex<[u8; 32]> = crate::trava::Mutex::new([0; 32]);
+        extern "C" fn gravar(i: u64) -> ! {
+            let d = crate::arch::sem_interrupcoes(|| DIR.lock().clone());
+            let k = crate::arch::sem_interrupcoes(|| *CHAVE.lock());
+            let quem = crate::autorizacao::Chamador::Processo {
+                fio: 7_230_100 + i,
+                autoridade: crate::autorizacao::Autoridade::Sessao {
+                    sessao: 3,
+                    chave: Some(k),
+                },
+                programa: crate::autorizacao::Programa::Kernel,
+            };
+            for j in 0..3 {
+                let r = fs_gravar(quem, &alloc::format!("{d}/n{i}-{j}"), 0, &"z".repeat(2000));
+                if fs_ok(&r) {
+                    ENTRARAM.fetch_add(1, SeqCst);
+                } else if fs_texto(&r, "code").as_deref() != Some("DENY_QUOTA") {
+                    crate::log_error!("teste", "{}", r);
+                    OUTRAS.fetch_add(1, SeqCst);
+                }
+            }
+            PRONTOS.fetch_add(1, SeqCst);
+            crate::fios::terminar()
+        }
+        // O agente tem 9 000 dos 10 000: apagado tudo, sobram 10 000 — cinco
+        // de 2 000.
+        for i in 0..3 {
+            let c = alloc::format!("{d}/agente-{i}");
+            let v = fs_no_armazem(&c).0;
+            if !fs_ok(&fs_pedir(
+                agente,
+                "fs.delete",
+                &alloc::format!(r#"{{"path":"{c}","expect_version":{v}}}"#),
+            )) {
+                return Err("o agente nao apagou");
+            }
+        }
+        crate::arch::sem_interrupcoes(|| {
+            *DIR.lock() = d.clone();
+            *CHAVE.lock() = chave;
+        });
+        PRONTOS.store(0, SeqCst);
+        ENTRARAM.store(0, SeqCst);
+        OUTRAS.store(0, SeqCst);
+        let mut quantos = 0;
+        for i in 0..crate::nucleos::MAX_NUCLEOS {
+            if crate::nucleos::mascara_dos_ligados() & (1 << i) != 0 {
+                crate::fios::criar_no_nucleo("teste-cota", gravar, quantos as u64, i)?;
+                quantos += 1;
+            }
+        }
+        while quantos < 4 {
+            crate::fios::criar_no_nucleo(
+                "teste-cota",
+                gravar,
+                quantos as u64,
+                crate::nucleos::atual(),
+            )?;
+            quantos += 1;
+        }
+        esperar_ate(|| PRONTOS.load(SeqCst) == quantos, 30_000)?;
+        if ENTRARAM.load(SeqCst) != 5 || OUTRAS.load(SeqCst) != 0 {
+            crate::log_error!(
+                "teste",
+                "{} entraram, {} outras",
+                ENTRARAM.load(SeqCst),
+                OUTRAS.load(SeqCst)
+            );
+            return Err("a disputa pela cota nao deixou entrar exatamente os que cabem");
+        }
+        let dono = alloc::format!("agente:{}", sigilo::hex(&chave));
+        if crate::armazem::com_o_armazem(|a| a.uso(&dono)).bytes != 10_000 {
+            return Err("o uso do agente nao e a soma do que entrou");
+        }
+        // Sem a linha, nada.
+        let olho = Chamador::Pessoa(crate::pessoas::sessao_de_teste(
+            Console::Terminal(46),
+            "cota-olho",
+            "observador",
+        ));
+        let r = fs_gravar(olho, &alloc::format!("{d}/olho"), 0, "x");
+        if fs_ok(&r) {
+            return Err("um papel sem cota guardou algo");
+        }
+        Ok(())
+    })();
+    crate::autorizacao::restaurar_politica(antes);
+    crate::identidade::esquecer_registrados();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// Conteúdo grande e binário, fora do JSON: um rascunho recebe o anexo em
+/// pedaços — os blocos vão para o volume na hora —, e `fs.write` com o
+/// `draft` o grava inteiro, num lote. O que volta pelo VFS é byte a byte o
+/// que foi, com zeros e bytes que não são texto. O rascunho é do dono e do
+/// caminho: outro dono, outro caminho, ou depois de vencido, não. Ele
+/// conta na cota enquanto existe, e o descartado solta os blocos.
+fn armazem_rascunho_grande_e_binario() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
+    let sistema = sistema_no_armazem(7_240_001);
+    let chave = sigilo::publica_de(&[0x6D; 32]);
+    crate::identidade::registrar_agente_de_teste(chave, "agente-rascunho", "operador");
+    let unico = crate::tempo::uptime_ms();
+    let c = alloc::format!("/armazem/compartilhado/rascunho{unico}/grande.bin");
+    diretorios_acima(&c)?;
+    let resultado = (|| -> Resultado {
+        let agente = Chamador::Processo {
+            fio: 7_240_002,
+            autoridade: Autoridade::Sessao {
+                sessao: 3,
+                chave: Some(chave),
+            },
+            programa: Programa::Kernel,
+        };
+        let total = 4 * crate::autorizacao::MAIOR_ANEXO + 1234;
+        let tudo: alloc::vec::Vec<u8> = (0..total).map(|i| (i * 7 % 256) as u8).collect();
+        let usados = crate::volume::usados_de_teste();
+        let mut numero: Option<u64> = None;
+        for pedaco in tudo.chunks(crate::autorizacao::MAIOR_ANEXO) {
+            let params = match numero {
+                Some(n) => alloc::format!(r#"{{"path":"{c}","draft":{n}}}"#),
+                None => alloc::format!(r#"{{"path":"{c}"}}"#),
+            };
+            let r = crate::nativo::responder_com_anexo_de_teste(
+                agente,
+                &pedido_rpc("fs.draft", &params),
+                pedaco,
+            );
+            numero = fs_numero(&r, "draft").filter(|_| fs_ok(&r));
+            if numero.is_none() {
+                crate::log_error!("teste", "{}", r);
+                return Err("um pedaco do rascunho foi recusado");
+            }
+        }
+        let n = numero.ok_or("sem rascunho")?;
+        if crate::volume::usados_de_teste() < usados + (total / ::armazem::bloco::CARGA) as u64 {
+            return Err("os blocos do rascunho nao foram para o volume");
+        }
+        // A cota conta o rascunho.
+        let r = fs_pedir(agente, "fs.stat", &alloc::format!(r#"{{"path":"{c}"}}"#));
+        if !r.contains(&alloc::format!(r#""draft_bytes":{total}"#)) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o rascunho nao conta na cota de quem escreve");
+        }
+        // Outro dono, outro caminho: não.
+        let r = fs_pedir(
+            sistema,
+            "fs.write",
+            &alloc::format!(r#"{{"path":"{c}","draft":{n},"expect_version":0}}"#),
+        );
+        if fs_ok(&r) || fs_texto(&r, "error").as_deref() != Some("o rascunho e de outro dono") {
+            crate::log_error!("teste", "{}", r);
+            return Err("outro dono gravou o rascunho");
+        }
+        let outro = alloc::format!("{c}.outro");
+        let r = fs_pedir(
+            agente,
+            "fs.write",
+            &alloc::format!(r#"{{"path":"{outro}","draft":{n},"expect_version":0}}"#),
+        );
+        if fs_ok(&r) || fs_texto(&r, "error").as_deref() != Some("o rascunho e de outro caminho") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o rascunho foi gravado noutro caminho");
+        }
+        // Gravado inteiro, num lote, e lido igual.
+        let contador = crate::persistencia::ancora_no_tpm_de_teste()?;
+        let r = fs_pedir(
+            agente,
+            "fs.write",
+            &alloc::format!(r#"{{"path":"{c}","draft":{n},"expect_version":0}}"#),
+        );
+        if !fs_ok(&r) || fs_numero(&r, "size") != Some(total as u64) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o rascunho nao foi gravado");
+        }
+        if crate::persistencia::ancora_no_tpm_de_teste()? != contador + 1 {
+            return Err("o rascunho inteiro nao foi uma confirmacao so");
+        }
+        if fs_no_armazem(&c).1.as_deref() != Some(&tudo[..]) {
+            return Err("o conteudo binario gravado nao voltou igual");
+        }
+        let mut lido = alloc::vec![0u8; 3000];
+        let no = crate::vfs::resolver(&c).map_err(|e| e.motivo())?;
+        let meio = 2 * ::armazem::bloco::CARGA as u64 - 1000;
+        if crate::vfs::ler_em(&no, meio, &mut lido) != Ok(3000)
+            || lido[..] != tudo[meio as usize..meio as usize + 3000]
+        {
+            return Err("a leitura no meio, atravessando blocos, nao deu o conteudo");
+        }
+        let r = fs_pedir(
+            agente,
+            "fs.write",
+            &alloc::format!(r#"{{"path":"{c}","draft":{n},"expect_version":0}}"#),
+        );
+        if fs_ok(&r) {
+            return Err("o rascunho gravado ainda existia");
+        }
+        // Acrescentar binário pelo anexo.
+        let v = fs_no_armazem(&c).0;
+        let mais = [0u8, 255, 0, 1, 2];
+        let r = crate::nativo::responder_com_anexo_de_teste(
+            agente,
+            &pedido_rpc(
+                "fs.append",
+                &alloc::format!(r#"{{"path":"{c}","expect_version":{v}}}"#),
+            ),
+            &mais,
+        );
+        let mut esperado = tudo.clone();
+        esperado.extend_from_slice(&mais);
+        if !fs_ok(&r) || fs_no_armazem(&c).1.as_deref() != Some(&esperado[..]) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o acrescimo binario nao entrou");
+        }
+        // Descartado, ou vencido: os blocos voltam.
+        let livres = crate::volume::usados_de_teste();
+        let r = crate::nativo::responder_com_anexo_de_teste(
+            agente,
+            &pedido_rpc("fs.draft", &alloc::format!(r#"{{"path":"{outro}"}}"#)),
+            &tudo[..crate::autorizacao::MAIOR_ANEXO],
+        );
+        let n2 = fs_numero(&r, "draft").ok_or("o segundo rascunho nao abriu")?;
+        let r = fs_pedir(
+            agente,
+            "fs.discard",
+            &alloc::format!(r#"{{"path":"{outro}","draft":{n2}}}"#),
+        );
+        if !fs_ok(&r) || crate::volume::usados_de_teste() != livres {
+            crate::log_error!("teste", "{}", r);
+            return Err("o rascunho descartado nao soltou os blocos");
+        }
+        let r = crate::nativo::responder_com_anexo_de_teste(
+            agente,
+            &pedido_rpc("fs.draft", &alloc::format!(r#"{{"path":"{outro}"}}"#)),
+            &tudo[..crate::autorizacao::MAIOR_ANEXO],
+        );
+        let n3 = fs_numero(&r, "draft").ok_or("o terceiro rascunho nao abriu")?;
+        crate::armazem::vencer_rascunhos_de_teste();
+        if crate::volume::usados_de_teste() != livres || crate::armazem::rascunhos_de_teste() != 0 {
+            return Err("o rascunho vencido nao soltou os blocos");
+        }
+        let r = fs_pedir(
+            agente,
+            "fs.write",
+            &alloc::format!(r#"{{"path":"{outro}","draft":{n3},"expect_version":0}}"#),
+        );
+        if fs_ok(&r) {
+            return Err("o rascunho vencido foi gravado");
+        }
+        Ok(())
+    })();
+    crate::identidade::esquecer_registrados();
+    resultado
+}
+
+/// A decisão em curso: o gate decide, e entre a decisão e o commit — com a
+/// ordem das gravações na mão — a chave do agente é revogada, ou a política
+/// tira o `fs.write` do papel. O lote é decidido de novo no ponto de
+/// commit, e recusado: nada muda, e a recusa vai para a auditoria como o
+/// resultado do comando autorizado.
+fn armazem_revogacao_no_meio_da_operacao() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
+    let chave = sigilo::publica_de(&[0x6E; 32]);
+    crate::identidade::registrar_agente_de_teste(chave, "agente-meio", "operador");
+    let unico = crate::tempo::uptime_ms();
+    let c = alloc::format!("/armazem/compartilhado/meio{unico}/f.txt");
+    diretorios_acima(&c)?;
+    let antes = crate::autorizacao::com_politica(|p| p.clone());
+    let resultado = (|| -> Resultado {
+        let agente = Chamador::Processo {
+            fio: 7_250_001,
+            autoridade: Autoridade::Sessao {
+                sessao: 3,
+                chave: Some(chave),
+            },
+            programa: Programa::Kernel,
+        };
+        // A política muda no meio.
+        fn sem_fs_write() {
+            let texto = crate::autorizacao::com_politica(|p| p.texto());
+            let sem: alloc::string::String = texto
+                .lines()
+                .filter(|l| !l.starts_with("recurso operador fs.write"))
+                .map(|l| {
+                    if l.starts_with("papel operador ") {
+                        l.replace(" fs.write", "")
+                    } else {
+                        l.into()
+                    }
+                })
+                .collect::<alloc::vec::Vec<_>>()
+                .join("\n");
+            if let Ok(p) = politica::Politica::ler(&sem) {
+                crate::autorizacao::restaurar_politica(p);
+            }
+        }
+        crate::armazem::antes_do_commit_de_teste(Some(sem_fs_write));
+        let r = fs_gravar(agente, &c, 0, "x");
+        crate::armazem::antes_do_commit_de_teste(None);
+        crate::autorizacao::restaurar_politica(antes.clone());
+        if decisao_do_envelope(&r) != "ALLOW"
+            || fs_texto(&r, "code").as_deref() != Some("DENY_PERMISSION")
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("a politica mudada no meio nao recusou o lote no commit");
+        }
+        if fs_no_armazem(&c).0 != 0 {
+            return Err("o lote decidido com a politica velha mudou o armazem");
+        }
+        // A chave é revogada no meio.
+        fn revogar() {
+            let _ = crate::identidade::revogar(&sigilo::publica_de(&[0x6E; 32]));
+        }
+        crate::armazem::antes_do_commit_de_teste(Some(revogar));
+        let r = fs_gravar(agente, &c, 0, "x");
+        crate::armazem::antes_do_commit_de_teste(None);
+        if decisao_do_envelope(&r) != "ALLOW" || fs_ok(&r) {
+            crate::log_error!("teste", "{}", r);
+            return Err("a chave revogada no meio gravou");
+        }
+        if fs_no_armazem(&c).0 != 0 {
+            return Err("o lote de uma chave revogada mudou o armazem");
+        }
+        let e = ultimo_com_metodo("fs.write").ok_or("a recusa nao foi gravada")?;
+        if e.codigo == politica::Codigo::Allow || !e.detalhe.contains("; decisao ") {
+            crate::log_error!("teste", "{:?}", e);
+            return Err("a recusa no commit nao foi gravada como o resultado do comando");
+        }
+        Ok(())
+    })();
+    crate::armazem::antes_do_commit_de_teste(None);
+    crate::autorizacao::restaurar_politica(antes);
+    crate::identidade::esquecer_registrados();
+    resultado
+}
+
+/// Uma queda no meio do lote: o registro do armazém foi escrito e
+/// descarregado, e a confirmação no journal de estado não — como a energia
+/// caindo entre os dois. O volume reaberto pelo que o journal de estado
+/// confirma não tem nada do lote: o registro além da âncora confirmada não
+/// vale, e os blocos que ele usaria estão livres. O próximo lote vai por
+/// cima, e vale.
+fn armazem_queda_no_meio_do_lote() -> Resultado {
+    let sistema = sistema_no_armazem(7_260_001);
+    let unico = crate::tempo::uptime_ms();
+    let d = alloc::format!("/armazem/sistema/queda{unico}");
+    // Os de cima, e não ele: o lote o cria.
+    diretorios_acima(&d)?;
+    // Reabrir o volume descarta os rascunhos — os blocos deles são
+    // reservas do mapa de antes —: a conta dos blocos é sem eles.
+    crate::armazem::vencer_rascunhos_de_teste();
+    let antes = retrato_do_armazem();
+    let confirmado = crate::volume::confirmado().ok_or("sem volume confirmado")?;
+    let usados = crate::volume::usados_de_teste();
+    let ops = alloc::format!(
+        r#"{{"ops":[{{"op":"mkdir","path":"{d}"}},{{"op":"write","path":"{d}/a","expect_version":0,"content":"{}"}}]}}"#,
+        "q".repeat(3000)
+    );
+    crate::persistencia::falhar_a_proxima_gravacao_de_teste(true);
+    let r = fs_pedir(sistema, "fs.batch", &ops);
+    crate::persistencia::falhar_a_proxima_gravacao_de_teste(false);
+    crate::persistencia::forcar_estado_de_teste(crate::persistencia::Estado::Disponivel);
+    if fs_ok(&r) {
+        return Err("o lote sem confirmacao foi dado como feito");
+    }
+    if crate::volume::confirmado() != Some(confirmado) {
+        return Err("o volume passou a confirmar um lote que o estado nao confirmou");
+    }
+    if retrato_do_armazem() != antes {
+        return Err("o lote sem confirmacao valeu em memoria");
+    }
+    // O boot: o volume reaberto pelo que o journal de estado confirma.
+    crate::volume::reabrir_de_teste()?;
+    if retrato_do_armazem() != antes || crate::volume::usados_de_teste() != usados {
+        return Err("o volume reaberto tem algo do lote que nao foi confirmado");
+    }
+    // E o próximo vai por cima, e vale.
+    let r = fs_pedir(sistema, "fs.batch", &ops);
+    if !fs_ok(&r) {
+        crate::log_error!("teste", "{}", r);
+        return Err("depois da queda, o lote seguinte foi recusado");
+    }
+    let depois = retrato_do_armazem();
+    crate::volume::reabrir_de_teste()?;
+    if retrato_do_armazem() != depois {
+        return Err("o lote depois da queda nao se repos do volume");
+    }
+    Ok(())
+}
+
+/// O volume só vale chegando exatamente ao que o journal de estado
+/// confirma: uma âncora além do que o journal do armazém tem — um volume
+/// restaurado de uma cópia anterior —, um elo de outro registro, ou uma
+/// partição de outro tamanho deixam o armazém indisponível, vazio, e o
+/// estado de autoridade intacto. Com a confirmação certa, ele volta.
+fn armazem_o_volume_so_vale_confirmado() -> Resultado {
+    let c = crate::volume::confirmado().ok_or("sem volume confirmado")?;
+    let antes = retrato_do_armazem();
+    let falsos = [
+        crate::volume::Confirmado {
+            ancora: c.ancora + 3,
+            ..c
+        },
+        crate::volume::Confirmado {
+            elo: [0x42; 32],
+            ..c
+        },
+        crate::volume::Confirmado {
+            geometria: ::armazem::registro::Volume {
+                setores: c.geometria.setores + 8,
+                ..c.geometria
+            },
+            ..c
+        },
+        crate::volume::Confirmado {
+            geometria: ::armazem::registro::Volume {
+                id: [0x11; 16],
+                ..c.geometria
+            },
+            ..c
+        },
+    ];
+    for (i, f) in falsos.into_iter().enumerate() {
+        crate::persistencia::em_ordem(|| crate::volume::abrir(Some(f)));
+        let estado = crate::volume::estado();
+        let vazio = crate::armazem::com_o_armazem(|a| a.quantos()) == 0;
+        if estado == crate::volume::Estado::Disponivel || !vazio {
+            crate::log_error!("teste", "falso {}: {:?}", i, estado);
+            return Err("um volume que nao e o confirmado foi aberto");
+        }
+        if crate::persistencia::estado() != crate::persistencia::Estado::Disponivel {
+            return Err("o volume recusado levou junto o estado de autoridade");
+        }
+    }
+    crate::persistencia::em_ordem(|| crate::volume::abrir(Some(c)));
+    if crate::volume::estado() != crate::volume::Estado::Disponivel || retrato_do_armazem() != antes
+    {
+        return Err("com a confirmacao certa, o volume nao voltou igual");
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -27253,6 +28558,42 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "armazem: o programa guarda pelo gate",
         f: armazem_o_programa_guarda_pelo_gate,
+    },
+    Caso {
+        nome: "armazem: o volume e da particao propria",
+        f: armazem_o_volume_e_da_particao_propria,
+    },
+    Caso {
+        nome: "armazem: diretorios e renomear",
+        f: armazem_diretorios_e_renomear,
+    },
+    Caso {
+        nome: "armazem: o lote e inteiro",
+        f: armazem_o_lote_e_inteiro,
+    },
+    Caso {
+        nome: "armazem: a cota e de cada dono",
+        f: armazem_a_cota_e_de_cada_dono,
+    },
+    Caso {
+        nome: "armazem: rascunho grande e binario",
+        f: armazem_rascunho_grande_e_binario,
+    },
+    Caso {
+        nome: "armazem: o agente manda binario no anexo",
+        f: armazem_o_agente_manda_binario_no_anexo,
+    },
+    Caso {
+        nome: "armazem: revogacao no meio da operacao",
+        f: armazem_revogacao_no_meio_da_operacao,
+    },
+    Caso {
+        nome: "armazem: queda no meio do lote",
+        f: armazem_queda_no_meio_do_lote,
+    },
+    Caso {
+        nome: "armazem: o volume so vale confirmado",
+        f: armazem_o_volume_so_vale_confirmado,
     },
     Caso {
         nome: "consoles: reabrir encerra a sessao",

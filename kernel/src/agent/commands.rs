@@ -16,7 +16,7 @@
 use core::fmt;
 
 use super::json::{Json, JsonWriter};
-use super::registry::{Acesso, Command, ParamSpec, TipoParam};
+use super::registry::{Acesso, Command, Mais, ParamSpec, TipoParam};
 use politica::Permissao;
 
 /// A tabela de comandos do kernel.
@@ -27,6 +27,7 @@ pub static COMANDOS: &[Command] = &[
         params: &[],
         acesso: Acesso::Exige(Permissao::AgentRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: ping,
     },
     Command {
@@ -36,6 +37,7 @@ pub static COMANDOS: &[Command] = &[
         params: &[],
         acesso: Acesso::Exige(Permissao::AgentRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: agent_session,
     },
     Command {
@@ -46,6 +48,7 @@ pub static COMANDOS: &[Command] = &[
         params: &[],
         acesso: Acesso::Exige(Permissao::AgentRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: agent_sessions,
     },
     Command {
@@ -58,6 +61,7 @@ pub static COMANDOS: &[Command] = &[
         params: &[],
         acesso: Acesso::Exige(Permissao::AgentRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: agent_list,
     },
     Command {
@@ -68,6 +72,7 @@ pub static COMANDOS: &[Command] = &[
         params: &[],
         acesso: Acesso::Exige(Permissao::AgentRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: agent_registry,
     },
     Command {
@@ -78,6 +83,7 @@ pub static COMANDOS: &[Command] = &[
         params: &[],
         acesso: Acesso::Exige(Permissao::AgentRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: person_registry,
     },
     Command {
@@ -94,6 +100,7 @@ pub static COMANDOS: &[Command] = &[
         }],
         acesso: Acesso::PorProva,
         recurso: None,
+        mais: Mais::Nada,
         handler: admin_challenge,
     },
     Command {
@@ -142,6 +149,7 @@ pub static COMANDOS: &[Command] = &[
         ],
         acesso: Acesso::PorProva,
         recurso: Some("command"),
+        mais: Mais::Nada,
         handler: admin_execute,
     },
     Command {
@@ -151,6 +159,7 @@ pub static COMANDOS: &[Command] = &[
         params: &[],
         acesso: Acesso::Exige(Permissao::AgentRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: describe,
     },
     Command {
@@ -159,6 +168,7 @@ pub static COMANDOS: &[Command] = &[
         params: &[],
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: system_info,
     },
     Command {
@@ -167,6 +177,7 @@ pub static COMANDOS: &[Command] = &[
         params: &[],
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: memory_stats,
     },
     Command {
@@ -188,6 +199,7 @@ pub static COMANDOS: &[Command] = &[
         ],
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: memory_regions,
     },
     Command {
@@ -196,6 +208,7 @@ pub static COMANDOS: &[Command] = &[
         params: &[],
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: memory_frames,
     },
     Command {
@@ -204,6 +217,7 @@ pub static COMANDOS: &[Command] = &[
         params: &[],
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: heap_stats,
     },
     Command {
@@ -217,6 +231,7 @@ pub static COMANDOS: &[Command] = &[
         }],
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: Some("address"),
+        mais: Mais::Nada,
         handler: paging_translate,
     },
     Command {
@@ -225,6 +240,7 @@ pub static COMANDOS: &[Command] = &[
         params: &[],
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: system_uptime,
     },
     Command {
@@ -233,6 +249,7 @@ pub static COMANDOS: &[Command] = &[
         params: &[],
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: tasks_stats,
     },
     Command {
@@ -241,6 +258,7 @@ pub static COMANDOS: &[Command] = &[
         params: &[],
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: tasks_list,
     },
     Command {
@@ -249,6 +267,7 @@ pub static COMANDOS: &[Command] = &[
         params: &[],
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: threads_stats,
     },
     Command {
@@ -257,6 +276,7 @@ pub static COMANDOS: &[Command] = &[
         params: &[],
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: threads_list,
     },
     Command {
@@ -273,6 +293,7 @@ pub static COMANDOS: &[Command] = &[
         }],
         acesso: Acesso::Exige(Permissao::ProcessRun),
         recurso: Some("path"),
+        mais: Mais::Nada,
         handler: user_run,
     },
     Command {
@@ -282,6 +303,7 @@ pub static COMANDOS: &[Command] = &[
         params: &[],
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: user_stats,
     },
     Command {
@@ -291,6 +313,7 @@ pub static COMANDOS: &[Command] = &[
         params: &[],
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: pci_list,
     },
     Command {
@@ -299,6 +322,7 @@ pub static COMANDOS: &[Command] = &[
         params: &[],
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: disk_info,
     },
     Command {
@@ -320,6 +344,7 @@ pub static COMANDOS: &[Command] = &[
         ],
         acesso: Acesso::Exige(Permissao::FsRawRead),
         recurso: Some("sector"),
+        mais: Mais::Nada,
         handler: disk_read,
     },
     Command {
@@ -328,6 +353,7 @@ pub static COMANDOS: &[Command] = &[
         params: &[],
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: net_info,
     },
     Command {
@@ -349,6 +375,7 @@ pub static COMANDOS: &[Command] = &[
         ],
         acesso: Acesso::Exige(Permissao::NetSend),
         recurso: Some("ip"),
+        mais: Mais::Nada,
         handler: net_arp,
     },
     Command {
@@ -370,6 +397,7 @@ pub static COMANDOS: &[Command] = &[
         ],
         acesso: Acesso::Exige(Permissao::UiRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: video_sample,
     },
     Command {
@@ -381,6 +409,7 @@ pub static COMANDOS: &[Command] = &[
         params: &[],
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: display_info,
     },
     Command {
@@ -390,6 +419,7 @@ pub static COMANDOS: &[Command] = &[
         params: &[],
         acesso: Acesso::Exige(Permissao::UiRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: ui_tree,
     },
     Command {
@@ -425,6 +455,7 @@ pub static COMANDOS: &[Command] = &[
         ],
         acesso: Acesso::Exige(Permissao::UiAct),
         recurso: Some("id"),
+        mais: Mais::Nada,
         handler: ui_act,
     },
     Command {
@@ -449,6 +480,7 @@ pub static COMANDOS: &[Command] = &[
         ],
         acesso: Acesso::Exige(Permissao::UiAct),
         recurso: Some("id"),
+        mais: Mais::Nada,
         handler: ui_claim,
     },
     Command {
@@ -462,6 +494,7 @@ pub static COMANDOS: &[Command] = &[
         }],
         acesso: Acesso::Exige(Permissao::UiAct),
         recurso: Some("id"),
+        mais: Mais::Nada,
         handler: ui_release,
     },
     Command {
@@ -501,6 +534,7 @@ pub static COMANDOS: &[Command] = &[
         ],
         acesso: Acesso::Exige(Permissao::MessageSend),
         recurso: Some("to"),
+        mais: Mais::Nada,
         handler: message_send,
     },
     Command {
@@ -523,6 +557,7 @@ pub static COMANDOS: &[Command] = &[
         ],
         acesso: Acesso::Exige(Permissao::MessageRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: message_read,
     },
     Command {
@@ -544,6 +579,7 @@ pub static COMANDOS: &[Command] = &[
         ],
         acesso: Acesso::Exige(Permissao::MessageRead),
         recurso: Some("id"),
+        mais: Mais::Nada,
         handler: message_ack,
     },
     Command {
@@ -569,6 +605,7 @@ pub static COMANDOS: &[Command] = &[
         // primeira leitura.
         acesso: Acesso::Exige(Permissao::MessageRead),
         recurso: Some("id"),
+        mais: Mais::Nada,
         handler: message_cancel,
     },
     Command {
@@ -582,6 +619,7 @@ pub static COMANDOS: &[Command] = &[
         }],
         acesso: Acesso::Exige(Permissao::MessageRead),
         recurso: Some("id"),
+        mais: Mais::Nada,
         handler: message_status,
     },
     Command {
@@ -590,6 +628,7 @@ pub static COMANDOS: &[Command] = &[
         params: &[],
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: disk_partitions,
     },
     Command {
@@ -598,6 +637,7 @@ pub static COMANDOS: &[Command] = &[
         params: &[],
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: btrfs_chunks,
     },
     Command {
@@ -606,6 +646,7 @@ pub static COMANDOS: &[Command] = &[
         params: &[],
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: btrfs_info,
     },
     Command {
@@ -614,6 +655,7 @@ pub static COMANDOS: &[Command] = &[
         params: &[],
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: fs_mounts,
     },
     Command {
@@ -641,6 +683,7 @@ pub static COMANDOS: &[Command] = &[
         ],
         acesso: Acesso::Exige(Permissao::FsRead),
         recurso: Some("path"),
+        mais: Mais::Nada,
         handler: fs_read,
     },
     Command {
@@ -654,6 +697,7 @@ pub static COMANDOS: &[Command] = &[
         }],
         acesso: Acesso::Exige(Permissao::FsRead),
         recurso: Some("path"),
+        mais: Mais::Nada,
         handler: fs_list,
     },
     Command {
@@ -668,26 +712,30 @@ pub static COMANDOS: &[Command] = &[
         }],
         acesso: Acesso::Exige(Permissao::FsRead),
         recurso: Some("path"),
+        mais: Mais::Nada,
         handler: fs_stat,
     },
     Command {
         nome: "fs.write",
-        resumo: "Grava um arquivo de texto no armazem, contra a versao que voce leu: 0 cria (e \
-                 recusa se ja existe), N substitui (e recusa se a versao nao e N). Confirmado \
-                 so depois de gravado no journal. CONFLICT diz se foi a versao ou o \
-                 arrendamento de outro titular.",
+        resumo: "Grava um arquivo no armazem, contra a versao que voce leu: 0 cria (e recusa se ja existe), N substitui (e recusa se a versao nao e N). O conteudo vem de `content` (texto), de `draft` (um rascunho de fs.draft) ou do anexo do pedido (binario, ate 60 KiB). O pai tem de existir. Confirmado so depois de gravado. CONFLICT diz se foi a versao ou o arrendamento de outro titular.",
         params: &[
             ParamSpec {
                 nome: "path",
                 tipo: TipoParam::Texto,
                 obrigatorio: true,
-                descricao: "Caminho absoluto do arquivo, abaixo de /armazem.",
+                descricao: "Caminho absoluto, abaixo de /armazem.",
             },
             ParamSpec {
                 nome: "content",
                 tipo: TipoParam::Texto,
-                obrigatorio: true,
-                descricao: "O conteudo inteiro, em texto (ate 16 KiB).",
+                obrigatorio: false,
+                descricao: "O conteudo inteiro, em texto.",
+            },
+            ParamSpec {
+                nome: "draft",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "O rascunho a gravar inteiro, de fs.draft.",
             },
             ParamSpec {
                 nome: "expect_version",
@@ -695,37 +743,50 @@ pub static COMANDOS: &[Command] = &[
                 obrigatorio: true,
                 descricao: "A versao que voce leu; 0 para criar.",
             },
+            ParamSpec {
+                nome: "attachment",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "Numa porta de agente: quantos bytes de anexo vieram nos quadros de anexo antes deste pedido. Um processo manda o anexo pela chamada PEDIR_COM_ANEXO, sem este campo.",
+            },
         ],
         acesso: Acesso::Exige(Permissao::FsWrite),
         recurso: Some("path"),
+        mais: Mais::Nada,
         handler: fs_write,
     },
     Command {
         nome: "fs.append",
-        resumo: "Acrescenta texto ao fim de um arquivo do armazem que existe, contra a versao \
-                 de agora.",
+        resumo: "Acrescenta ao fim de um arquivo do armazem que existe, contra a versao de agora. O que se acrescenta vem de `content` (texto) ou do anexo do pedido (binario).",
         params: &[
             ParamSpec {
                 nome: "path",
                 tipo: TipoParam::Texto,
                 obrigatorio: true,
-                descricao: "Caminho absoluto do arquivo, abaixo de /armazem.",
+                descricao: "Caminho absoluto, abaixo de /armazem.",
             },
             ParamSpec {
                 nome: "content",
                 tipo: TipoParam::Texto,
-                obrigatorio: true,
+                obrigatorio: false,
                 descricao: "O texto a acrescentar.",
             },
             ParamSpec {
                 nome: "expect_version",
                 tipo: TipoParam::Inteiro,
                 obrigatorio: true,
-                descricao: "A versao de agora do arquivo.",
+                descricao: "A versao de agora.",
+            },
+            ParamSpec {
+                nome: "attachment",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "Numa porta de agente: quantos bytes de anexo vieram nos quadros de anexo antes deste pedido. Um processo manda o anexo pela chamada PEDIR_COM_ANEXO, sem este campo.",
             },
         ],
         acesso: Acesso::Exige(Permissao::FsWrite),
         recurso: Some("path"),
+        mais: Mais::Nada,
         handler: fs_append,
     },
     Command {
@@ -736,18 +797,161 @@ pub static COMANDOS: &[Command] = &[
                 nome: "path",
                 tipo: TipoParam::Texto,
                 obrigatorio: true,
-                descricao: "Caminho absoluto do arquivo, abaixo de /armazem.",
+                descricao: "Caminho absoluto, abaixo de /armazem.",
             },
             ParamSpec {
                 nome: "expect_version",
                 tipo: TipoParam::Inteiro,
                 obrigatorio: true,
-                descricao: "A versao de agora do arquivo.",
+                descricao: "A versao de agora.",
             },
         ],
         acesso: Acesso::Exige(Permissao::FsWrite),
         recurso: Some("path"),
+        mais: Mais::Nada,
         handler: fs_delete,
+    },
+    Command {
+        nome: "fs.mkdir",
+        resumo: "Cria um diretorio no armazem. O pai tem de existir; nada e criado de passagem.",
+        params: &[ParamSpec {
+            nome: "path",
+            tipo: TipoParam::Texto,
+            obrigatorio: true,
+            descricao: "Caminho absoluto, abaixo de /armazem.",
+        }],
+        acesso: Acesso::Exige(Permissao::FsWrite),
+        recurso: Some("path"),
+        mais: Mais::Nada,
+        handler: fs_mkdir,
+    },
+    Command {
+        nome: "fs.rmdir",
+        resumo: "Remove um diretorio vazio do armazem, contra a versao de agora.",
+        params: &[
+            ParamSpec {
+                nome: "path",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "Caminho absoluto, abaixo de /armazem.",
+            },
+            ParamSpec {
+                nome: "expect_version",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: true,
+                descricao: "A versao de agora.",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::FsWrite),
+        recurso: Some("path"),
+        mais: Mais::Nada,
+        handler: fs_rmdir,
+    },
+    Command {
+        nome: "fs.rename",
+        resumo: "Move um arquivo ou diretorio do armazem (com tudo abaixo) para `to`, que nao pode existir, num pai que existe, e nao pode estar abaixo da origem. O gate decide `fs.write` nos dois caminhos; os arrendamentos de tudo abaixo de cada um contam. Cada no movido ganha versao nova.",
+        params: &[
+            ParamSpec {
+                nome: "path",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "Caminho absoluto, abaixo de /armazem.",
+            },
+            ParamSpec {
+                nome: "to",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "O caminho de destino, abaixo de /armazem.",
+            },
+            ParamSpec {
+                nome: "expect_version",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: true,
+                descricao: "A versao de agora.",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::FsWrite),
+        recurso: Some("path"),
+        mais: Mais::Parametro("to"),
+        handler: fs_rename,
+    },
+    Command {
+        nome: "fs.batch",
+        resumo: "Um lote de mutacoes do armazem, tudo ou nada, num registro e numa confirmacao: `ops` e uma lista de objetos com `op` (write, append, delete, mkdir, rmdir, rename), `path`, `to` (rename), `expect_version`, e o conteudo em `content` (texto), `draft`, ou `offset`/`length` no anexo do pedido. Cada operacao ve as anteriores. O gate decide `fs.write` em todos os caminhos. Ate 32 operacoes.",
+        params: &[
+            ParamSpec {
+                nome: "ops",
+                tipo: TipoParam::Lista,
+                obrigatorio: true,
+                descricao: "As operacoes, em ordem.",
+            },
+            ParamSpec {
+                nome: "attachment",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "Numa porta de agente: quantos bytes de anexo vieram nos quadros de anexo antes deste pedido. Um processo manda o anexo pela chamada PEDIR_COM_ANEXO, sem este campo.",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::FsWrite),
+        recurso: None,
+        mais: Mais::Lote("ops"),
+        handler: fs_batch,
+    },
+    Command {
+        nome: "fs.draft",
+        resumo: "Acrescenta o anexo do pedido (ou `content`) a um rascunho para `path` — cria um sem `draft`. Os blocos vao para o volume ja, e contam na sua cota; fs.write com `draft` grava o rascunho inteiro num lote so. Um rascunho sem uso some em 5 minutos.",
+        params: &[
+            ParamSpec {
+                nome: "path",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "Caminho absoluto, abaixo de /armazem.",
+            },
+            ParamSpec {
+                nome: "draft",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "O rascunho a continuar; sem ele, um novo.",
+            },
+            ParamSpec {
+                nome: "content",
+                tipo: TipoParam::Texto,
+                obrigatorio: false,
+                descricao: "Texto, em vez do anexo.",
+            },
+            ParamSpec {
+                nome: "attachment",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "Numa porta de agente: quantos bytes de anexo vieram nos quadros de anexo antes deste pedido. Um processo manda o anexo pela chamada PEDIR_COM_ANEXO, sem este campo.",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::FsWrite),
+        recurso: Some("path"),
+        mais: Mais::Nada,
+        handler: fs_draft,
+    },
+    Command {
+        nome: "fs.discard",
+        resumo: "Descarta um rascunho seu, com os blocos dele.",
+        params: &[
+            ParamSpec {
+                nome: "path",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "Caminho absoluto, abaixo de /armazem.",
+            },
+            ParamSpec {
+                nome: "draft",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: true,
+                descricao: "O rascunho.",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::FsWrite),
+        recurso: Some("path"),
+        mais: Mais::Nada,
+        handler: fs_discard,
     },
     Command {
         nome: "fs.claim",
@@ -771,6 +975,7 @@ pub static COMANDOS: &[Command] = &[
         ],
         acesso: Acesso::Exige(Permissao::FsWrite),
         recurso: Some("path"),
+        mais: Mais::Nada,
         handler: fs_claim,
     },
     Command {
@@ -784,6 +989,7 @@ pub static COMANDOS: &[Command] = &[
         }],
         acesso: Acesso::Exige(Permissao::FsWrite),
         recurso: Some("path"),
+        mais: Mais::Nada,
         handler: fs_release,
     },
     Command {
@@ -797,6 +1003,7 @@ pub static COMANDOS: &[Command] = &[
         }],
         acesso: Acesso::Exige(Permissao::KeyboardRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: keyboard_read,
     },
     Command {
@@ -805,6 +1012,7 @@ pub static COMANDOS: &[Command] = &[
         params: &[],
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: irq_stats,
     },
     Command {
@@ -813,6 +1021,7 @@ pub static COMANDOS: &[Command] = &[
         params: &[],
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: traps_stats,
     },
     Command {
@@ -850,6 +1059,7 @@ pub static COMANDOS: &[Command] = &[
         ],
         acesso: Acesso::Exige(Permissao::DebugTrigger),
         recurso: Some("kind"),
+        mais: Mais::Nada,
         handler: debug_trigger,
     },
     Command {
@@ -871,6 +1081,7 @@ pub static COMANDOS: &[Command] = &[
         ],
         acesso: Acesso::Exige(Permissao::LogRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: log_tail,
     },
     Command {
@@ -886,6 +1097,7 @@ pub static COMANDOS: &[Command] = &[
         }],
         acesso: Acesso::Exige(Permissao::AuditRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: audit_tail,
     },
     Command {
@@ -895,6 +1107,7 @@ pub static COMANDOS: &[Command] = &[
         params: &[],
         acesso: Acesso::Exige(Permissao::AuditRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: audit_head,
     },
     Command {
@@ -904,6 +1117,7 @@ pub static COMANDOS: &[Command] = &[
         params: &[],
         acesso: Acesso::Exige(Permissao::AuditRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: audit_verify,
     },
     Command {
@@ -914,6 +1128,7 @@ pub static COMANDOS: &[Command] = &[
         params: &[],
         acesso: Acesso::Exige(Permissao::PolicyRead),
         recurso: None,
+        mais: Mais::Nada,
         handler: policy_show,
     },
 ];
@@ -2234,34 +2449,51 @@ fn buffer_do_texto(valor: Option<Json>) -> alloc::vec::Vec<u8> {
     alloc::vec![0u8; valor.map_or(0, |b| b.0.len())]
 }
 
-/// Faz a mutação e escreve a resposta. `conteudo` é `None` quando o pedido
-/// tinha um conteúdo que não é texto.
-fn mutar(
-    w: &mut JsonWriter,
-    caminho: &str,
-    esperada: u64,
-    operacao: Option<crate::armazem::Operacao>,
-) -> fmt::Result {
-    let resultado = match operacao {
-        Some(op) => crate::armazem::mudar(caminho, esperada, op),
-        None => {
-            let f = crate::armazem::Falha::Caminho("o conteudo nao e texto");
-            crate::autorizacao::auditar_execucao(caminho, f.codigo(), f.motivo());
-            Err(f)
+/// Escreve a resposta de um lote feito: cada operação com o caminho, a
+/// versão e o tamanho do destino.
+fn feito(w: &mut JsonWriter, caminhos: &[&str], feitas: &[crate::armazem::Feita]) -> fmt::Result {
+    w.field_bool("ok", true)?;
+    if let ([caminho], [f]) = (caminhos, feitas) {
+        w.field_str("path", caminho)?;
+        w.field_u64("version", f.versao)?;
+        w.field_u64("size", f.tamanho)?;
+    } else {
+        w.key("results")?;
+        w.begin_array()?;
+        for (c, f) in caminhos.iter().zip(feitas) {
+            w.begin_object()?;
+            w.field_str("path", c)?;
+            w.field_u64("version", f.versao)?;
+            w.field_u64("size", f.tamanho)?;
+            w.end_object()?;
         }
-    };
-    match resultado {
-        Ok(feita) => {
-            w.field_bool("ok", true)?;
-            w.field_str("path", caminho)?;
-            w.field_u64("version", feita.versao)?;
-            w.field_u64("size", feita.tamanho as u64)?;
-            // Só há sucesso gravado: o armazém não muda só em memória.
-            w.field_bool("durable", true)?;
-            w.end_object()
-        }
-        Err(f) => recusa_do_armazem(w, caminho, f),
+        w.end_array()?;
     }
+    // Só há sucesso confirmado: o armazém não muda só em memória.
+    w.field_bool("durable", true)?;
+    w.end_object()
+}
+
+/// Faz um lote e escreve a resposta. `caminhos` é o destino de cada
+/// operação, para a resposta e para a recusa.
+fn mutar(w: &mut JsonWriter, pedidos: &[crate::armazem::Pedido], caminhos: &[&str]) -> fmt::Result {
+    match crate::armazem::mudar(pedidos) {
+        Ok(feitas) => feito(w, caminhos, &feitas),
+        Err((i, f)) => {
+            if pedidos.len() > 1 {
+                w.field_u64("op", i as u64)?;
+            }
+            recusa_do_armazem(w, caminhos.get(i).copied().unwrap_or(""), f)
+        }
+    }
+}
+
+/// Uma recusa de um pedido que não chegou ao armazém: o conteúdo que não se
+/// entende, um lote malformado — gravada como o resultado do comando.
+fn invalido(w: &mut JsonWriter, caminho: &str, motivo: &'static str) -> fmt::Result {
+    let f = crate::armazem::Falha::Caminho(motivo);
+    crate::autorizacao::auditar_execucao(caminho, f.codigo(), f.motivo());
+    recusa_do_armazem(w, caminho, f)
 }
 
 /// A versão esperada do pedido. Ausente, nenhuma versão confere — mas o
@@ -2270,45 +2502,337 @@ fn versao_esperada(valor: Option<Json>) -> u64 {
     valor.and_then(|v| v.as_u64()).unwrap_or(u64::MAX)
 }
 
+/// O conteúdo de uma gravação: `content` (texto, desescapado em `buffer`),
+/// `draft` (um rascunho), ou o anexo — exatamente um. `Err` com o motivo.
+fn fonte<'b>(
+    texto: Option<Json<'b>>,
+    rascunho: Option<Json>,
+    buffer: &'b mut alloc::vec::Vec<u8>,
+    anexo: &'b [u8],
+) -> Result<crate::armazem::Fonte<'b>, &'static str> {
+    use crate::armazem::Fonte;
+    let quantos = usize::from(texto.is_some())
+        + usize::from(rascunho.is_some())
+        + usize::from(!anexo.is_empty());
+    if quantos != 1 {
+        return Err("o conteudo vem de exatamente um: content, draft ou o anexo");
+    }
+    if let Some(t) = texto {
+        *buffer = buffer_do_texto(Some(t));
+        return t
+            .desescapar_em(buffer)
+            .map(|c| Fonte::Bytes(c.as_bytes()))
+            .ok_or("o conteudo nao e texto");
+    }
+    if let Some(r) = rascunho {
+        return r
+            .as_u64()
+            .map(Fonte::Rascunho)
+            .ok_or("o rascunho nao e um numero");
+    }
+    Ok(Fonte::Bytes(anexo))
+}
+
 fn fs_write(params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.begin_object()?;
     let caminho = params.member("path").and_then(|v| v.as_str()).unwrap_or("");
     let esperada = versao_esperada(params.member("expect_version"));
-    let bruto = params.member("content");
-    let mut buffer = buffer_do_texto(bruto);
-    let conteudo = bruto.and_then(|b| b.desescapar_em(&mut buffer));
-    let feito = mutar(
-        w,
-        caminho,
-        esperada,
-        conteudo.map(|c| crate::armazem::Operacao::Gravar(c.as_bytes())),
-    );
+    let mut anexo = crate::autorizacao::tirar_anexo();
+    let mut buffer = alloc::vec::Vec::new();
+    let fonte = anexo_declarado(params.member("attachment"), &anexo).and_then(|()| {
+        fonte(
+            params.member("content"),
+            params.member("draft"),
+            &mut buffer,
+            &anexo,
+        )
+    });
+    let r = match fonte {
+        Ok(fonte) => mutar(
+            w,
+            &[crate::armazem::Pedido::Gravar {
+                caminho,
+                esperada,
+                fonte,
+            }],
+            &[caminho],
+        ),
+        Err(m) => invalido(w, caminho, m),
+    };
     politica::sigiloso::zerar_bloco(&mut buffer);
-    feito
+    politica::sigiloso::zerar_bloco(&mut anexo);
+    r
 }
 
 fn fs_append(params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.begin_object()?;
     let caminho = params.member("path").and_then(|v| v.as_str()).unwrap_or("");
     let esperada = versao_esperada(params.member("expect_version"));
-    let bruto = params.member("content");
-    let mut buffer = buffer_do_texto(bruto);
-    let conteudo = bruto.and_then(|b| b.desescapar_em(&mut buffer));
-    let feito = mutar(
-        w,
-        caminho,
-        esperada,
-        conteudo.map(|c| crate::armazem::Operacao::Acrescentar(c.as_bytes())),
-    );
+    let mut anexo = crate::autorizacao::tirar_anexo();
+    let mut buffer = alloc::vec::Vec::new();
+    let fonte = anexo_declarado(params.member("attachment"), &anexo)
+        .and_then(|()| fonte(params.member("content"), None, &mut buffer, &anexo));
+    let r = match fonte {
+        Ok(crate::armazem::Fonte::Bytes(mais)) => mutar(
+            w,
+            &[crate::armazem::Pedido::Acrescentar {
+                caminho,
+                esperada,
+                mais,
+            }],
+            &[caminho],
+        ),
+        Ok(_) => invalido(w, caminho, "um acrescimo nao vem de um rascunho"),
+        Err(m) => invalido(w, caminho, m),
+    };
     politica::sigiloso::zerar_bloco(&mut buffer);
-    feito
+    politica::sigiloso::zerar_bloco(&mut anexo);
+    r
 }
 
 fn fs_delete(params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.begin_object()?;
     let caminho = params.member("path").and_then(|v| v.as_str()).unwrap_or("");
     let esperada = versao_esperada(params.member("expect_version"));
-    mutar(w, caminho, esperada, Some(crate::armazem::Operacao::Apagar))
+    mutar(
+        w,
+        &[crate::armazem::Pedido::Apagar { caminho, esperada }],
+        &[caminho],
+    )
+}
+
+fn fs_mkdir(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let caminho = params.member("path").and_then(|v| v.as_str()).unwrap_or("");
+    mutar(
+        w,
+        &[crate::armazem::Pedido::CriarDiretorio { caminho }],
+        &[caminho],
+    )
+}
+
+fn fs_rmdir(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let caminho = params.member("path").and_then(|v| v.as_str()).unwrap_or("");
+    let esperada = versao_esperada(params.member("expect_version"));
+    mutar(
+        w,
+        &[crate::armazem::Pedido::RemoverDiretorio { caminho, esperada }],
+        &[caminho],
+    )
+}
+
+fn fs_rename(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let de = params.member("path").and_then(|v| v.as_str()).unwrap_or("");
+    let para = params.member("to").and_then(|v| v.as_str()).unwrap_or("");
+    let esperada = versao_esperada(params.member("expect_version"));
+    mutar(
+        w,
+        &[crate::armazem::Pedido::Renomear { de, para, esperada }],
+        &[para],
+    )
+}
+
+/// O conteúdo de uma operação de um lote: o texto (desescapado em
+/// `buffer`), o rascunho, ou um pedaço do anexo.
+fn fonte_do_item<'a>(
+    o: &Json,
+    buffer: &'a mut [u8],
+    anexo: &'a [u8],
+) -> Result<crate::armazem::Fonte<'a>, &'static str> {
+    use crate::armazem::Fonte;
+    if let Some(t) = o.member("content") {
+        return t
+            .desescapar_em(buffer)
+            .map(|c| Fonte::Bytes(c.as_bytes()))
+            .ok_or("o conteudo nao e texto");
+    }
+    if let Some(r) = o.member("draft") {
+        return r
+            .as_u64()
+            .map(Fonte::Rascunho)
+            .ok_or("o rascunho nao e numero");
+    }
+    let de = o.member("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let n = o.member("length").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    de.checked_add(n)
+        .and_then(|ate| anexo.get(de..ate))
+        .map(Fonte::Bytes)
+        .ok_or("o pedaco do anexo nao esta no anexo")
+}
+
+/// `fs.batch`: as operações de `ops`, num lote só. O conteúdo de cada
+/// gravação vem de `content`, de `draft`, ou de `offset`/`length` no anexo
+/// do pedido.
+fn fs_batch(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let mut anexo = crate::autorizacao::tirar_anexo();
+    let lista: alloc::vec::Vec<Json> = params
+        .member("ops")
+        .map(|l| {
+            (0..=crate::autorizacao::MAIS_OPS_POR_LOTE)
+                .map_while(|i| l.item(i))
+                .collect()
+        })
+        .unwrap_or_default();
+    let primeiro = lista.first().map_or("", caminho_do_item);
+    let declarado = anexo_declarado(params.member("attachment"), &anexo);
+    if lista.is_empty() || lista.len() > crate::autorizacao::MAIS_OPS_POR_LOTE {
+        politica::sigiloso::zerar_bloco(&mut anexo);
+        return invalido(w, primeiro, "um lote tem de 1 a 32 operacoes");
+    }
+    if let Err(m) = declarado {
+        politica::sigiloso::zerar_bloco(&mut anexo);
+        return invalido(w, primeiro, m);
+    }
+    // Os textos desescapados, cada um no seu buffer — zerados no fim.
+    let mut buffers: alloc::vec::Vec<alloc::vec::Vec<u8>> =
+        lista.iter().map(buffer_do_item).collect();
+    let mut caminhos: alloc::vec::Vec<&str> = alloc::vec::Vec::with_capacity(lista.len());
+    let mut pedidos: alloc::vec::Vec<crate::armazem::Pedido> =
+        alloc::vec::Vec::with_capacity(lista.len());
+    let mut motivo: Option<&'static str> = None;
+    for (o, buffer) in lista.iter().zip(buffers.iter_mut()) {
+        match pedido_do_item(o, buffer, &anexo) {
+            Ok((p, destino)) => {
+                caminhos.push(destino);
+                pedidos.push(p);
+            }
+            Err(m) => {
+                motivo = Some(m);
+                break;
+            }
+        }
+    }
+    let r = match motivo {
+        Some(m) => {
+            w.field_u64("op", pedidos.len() as u64)?;
+            invalido(w, primeiro, m)
+        }
+        None => mutar(w, &pedidos, &caminhos),
+    };
+    drop(pedidos);
+    for b in &mut buffers {
+        politica::sigiloso::zerar_bloco(b);
+    }
+    politica::sigiloso::zerar_bloco(&mut anexo);
+    r
+}
+
+/// O caminho de uma operação de um lote — os campos de cada operação são
+/// dela, e não do pedido: o lote declara só `ops` e `attachment`.
+fn caminho_do_item<'a>(o: &Json<'a>) -> &'a str {
+    o.member("path").and_then(|v| v.as_str()).unwrap_or("")
+}
+
+/// O buffer onde o texto de uma operação de um lote é desescapado.
+fn buffer_do_item(o: &Json) -> alloc::vec::Vec<u8> {
+    buffer_do_texto(o.member("content"))
+}
+
+/// Uma operação de um lote, e o caminho de destino dela — o de um rename
+/// é o `to`.
+fn pedido_do_item<'a>(
+    o: &Json<'a>,
+    buffer: &'a mut [u8],
+    anexo: &'a [u8],
+) -> Result<(crate::armazem::Pedido<'a>, &'a str), &'static str> {
+    use crate::armazem::{Fonte, Pedido};
+    let caminho = caminho_do_item(o);
+    let para = o.member("to").and_then(|v| v.as_str()).unwrap_or("");
+    let esperada = versao_esperada(o.member("expect_version"));
+    let op = o.member("op").and_then(|v| v.as_str()).unwrap_or("");
+    let pedido = match op {
+        "write" => Pedido::Gravar {
+            caminho,
+            esperada,
+            fonte: fonte_do_item(o, buffer, anexo)?,
+        },
+        "append" => match fonte_do_item(o, buffer, anexo)? {
+            Fonte::Bytes(mais) => Pedido::Acrescentar {
+                caminho,
+                esperada,
+                mais,
+            },
+            Fonte::Rascunho(_) => return Err("um acrescimo nao vem de um rascunho"),
+        },
+        "delete" => Pedido::Apagar { caminho, esperada },
+        "mkdir" => Pedido::CriarDiretorio { caminho },
+        "rmdir" => Pedido::RemoverDiretorio { caminho, esperada },
+        "rename" => {
+            return Ok((
+                Pedido::Renomear {
+                    de: caminho,
+                    para,
+                    esperada,
+                },
+                para,
+            ));
+        }
+        _ => return Err("operacao desconhecida num lote"),
+    };
+    Ok((pedido, caminho))
+}
+
+/// O `attachment` que o pedido declara confere com o anexo que chegou. No
+/// canal do agente a sessão já conferiu antes do gate; aqui é a mesma regra
+/// do lado de quem usa o anexo — e um processo, que manda o anexo pela
+/// chamada de sistema, não o declara.
+fn anexo_declarado(declarado: Option<Json>, anexo: &[u8]) -> Result<(), &'static str> {
+    match declarado.map(|v| v.as_u64()) {
+        None => Ok(()),
+        Some(Some(n)) if n == anexo.len() as u64 => Ok(()),
+        Some(_) => Err("o anexo nao confere com attachment"),
+    }
+}
+
+/// `fs.draft`: o anexo — ou `content` — vai para um rascunho do caminho.
+fn fs_draft(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let caminho = params.member("path").and_then(|v| v.as_str()).unwrap_or("");
+    let numero = params.member("draft").and_then(|v| v.as_u64());
+    let mut anexo = crate::autorizacao::tirar_anexo();
+    let mut buffer = buffer_do_texto(params.member("content"));
+    let dados: Result<&[u8], &'static str> = match params.member("content") {
+        _ if anexo_declarado(params.member("attachment"), &anexo).is_err() => {
+            Err("o anexo nao confere com attachment")
+        }
+        Some(_) if !anexo.is_empty() => Err("o conteudo vem do anexo ou de content, nao dos dois"),
+        Some(t) => t
+            .desescapar_em(&mut buffer)
+            .map(str::as_bytes)
+            .ok_or("o conteudo nao e texto"),
+        None => Ok(&anexo),
+    };
+    let r = match dados {
+        Err(m) => invalido(w, caminho, m),
+        Ok(d) => match crate::armazem::rascunho(caminho, numero, d) {
+            Ok((n, tamanho)) => {
+                w.field_bool("ok", true)?;
+                w.field_u64("draft", n)?;
+                w.field_u64("size", tamanho)?;
+                w.end_object()
+            }
+            Err(f) => recusa_do_armazem(w, caminho, f),
+        },
+    };
+    politica::sigiloso::zerar_bloco(&mut buffer);
+    politica::sigiloso::zerar_bloco(&mut anexo);
+    r
+}
+
+fn fs_discard(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let caminho = params.member("path").and_then(|v| v.as_str()).unwrap_or("");
+    let numero = params.member("draft").and_then(|v| v.as_u64()).unwrap_or(0);
+    match crate::armazem::descartar(numero) {
+        Ok(()) => {
+            w.field_bool("ok", true)?;
+            w.end_object()
+        }
+        Err(f) => recusa_do_armazem(w, caminho, f),
+    }
 }
 
 fn fs_stat(params: Json, w: &mut JsonWriter) -> fmt::Result {
@@ -2331,10 +2855,28 @@ fn fs_stat(params: Json, w: &mut JsonWriter) -> fmt::Result {
         },
     )?;
     w.field_u64("version", s.versao)?;
-    w.field_u64("size", s.tamanho as u64)?;
+    w.field_u64("size", s.tamanho)?;
+    if let Some(d) = &s.dono {
+        w.field_str("owner", d)?;
+    }
     if let Some(a) = s.arrendamento {
         w.key("lease")?;
         escrever_arrendamento(w, &a)?;
+    }
+    // O que é de quem pergunta: o uso e a cota dele no armazém.
+    if let Some((uso, cota, rascunhos)) = crate::armazem::uso_de_quem_pede() {
+        w.key("quota")?;
+        w.begin_object()?;
+        w.field_u64("used_bytes", uso.bytes)?;
+        w.field_u64("used_objects", uso.objetos)?;
+        w.field_u64("draft_bytes", rascunhos)?;
+        w.field_u64("max_bytes", cota.bytes)?;
+        w.field_u64("max_objects", cota.objetos)?;
+        w.end_object()?;
+    }
+    if let Some((total, livres)) = crate::volume::ocupacao() {
+        w.field_u64("volume_free_blocks", livres)?;
+        w.field_u64("volume_blocks", total)?;
     }
     w.end_object()
 }

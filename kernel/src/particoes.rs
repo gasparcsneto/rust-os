@@ -96,6 +96,21 @@ const GUID_ESTADO: [u8; 16] = [
     0x1E, 0x3C, 0x7A, 0x6D, 0x2F, 0x5B, 0x8A, 0x4E, 0x9C, 0x41, 0xD0, 0xA7, 0xE5, 0xC3, 0xF9, 0x11,
 ];
 
+/// O GUID da partição do armazém: o volume onde mora o conteúdo dos
+/// arquivos do armazém e o journal dos metadados dele — ver
+/// `docs/ARMAZENAMENTO.md`.
+///
+/// Um tipo próprio, separado do estado, para o armazém não disputar espaço
+/// com o estado de autoridade: um volume cheio não impede uma revogação de
+/// ser gravada. A escrita do kernel aqui é restrita a esta partição por uma
+/// janela própria do driver, e a do estado à dele: um erro de conta num
+/// lado não alcança o outro. Sorteado uma vez para este projeto
+/// (`4a1f7c3b-92d6-4e5a-8b07-c3e91d6f2a58`), na ordem em que a GPT o
+/// guarda.
+const GUID_ARMAZEM: [u8; 16] = [
+    0x3B, 0x7C, 0x1F, 0x4A, 0xD6, 0x92, 0x5A, 0x4E, 0x8B, 0x07, 0xC3, 0xE9, 0x1D, 0x6F, 0x2A, 0x58,
+];
+
 /// Para que serve uma partição.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tipo {
@@ -103,8 +118,10 @@ pub enum Tipo {
     Esp,
     /// Dados: é onde a raiz mora.
     Dados,
-    /// O estado do Duke: a única área em que o kernel escreve.
+    /// O estado do Duke: o journal da persistência.
     Estado,
+    /// O volume do armazém: o conteúdo dos arquivos e o journal deles.
+    Armazem,
     /// Qualquer outro GUID.
     Outro,
 }
@@ -115,6 +132,7 @@ impl Tipo {
             Tipo::Esp => "esp",
             Tipo::Dados => "dados",
             Tipo::Estado => "estado",
+            Tipo::Armazem => "armazem",
             Tipo::Outro => "outro",
         }
     }
@@ -126,6 +144,8 @@ impl Tipo {
             Tipo::Dados
         } else if guid == GUID_ESTADO {
             Tipo::Estado
+        } else if guid == GUID_ARMAZEM {
+            Tipo::Armazem
         } else {
             Tipo::Outro
         }

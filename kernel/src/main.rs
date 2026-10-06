@@ -114,6 +114,7 @@ mod usb;
 mod usuario;
 mod vfs;
 mod virtio;
+mod volume;
 
 use core::panic::PanicInfo;
 
@@ -423,29 +424,40 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     // o que exercita essa regra em toda execução.
     match particoes::varrer() {
         Ok(tabela) => {
-            // A janela de escrita, antes de qualquer outra coisa usar o
-            // disco: a partição de estado, e só ela — ver
-            // [`virtio::blk::fixar_janela_de_escrita`]. Sem a partição, o
-            // disco fica só de leitura, e a persistência diz que não há onde
-            // gravar.
-            match tabela.primeira(particoes::Tipo::Estado) {
-                Some(estado) => {
-                    match virtio::blk::fixar_janela_de_escrita(estado.primeiro, estado.setores) {
-                        Ok(()) => log_info!(
-                            "disco",
-                            "janela de escrita: setores {}..{} (particao de estado)",
-                            estado.primeiro,
-                            estado.primeiro + estado.setores
-                        ),
-                        Err(motivo) => {
-                            log_error!("disco", "a janela de escrita nao foi fixada: {}", motivo)
-                        }
-                    }
+            // As janelas de escrita, antes de qualquer outra coisa usar o
+            // disco: a partição de estado, para o journal, e a do armazém,
+            // para o volume dele — e só elas, cada uma pelo nome, e sem se
+            // cruzar. Ver [`virtio::blk::fixar_janela_de_escrita`]. Sem a de
+            // estado, o disco fica só de leitura, e a persistência diz que
+            // não há onde gravar; sem a do armazém, o armazém fica
+            // indisponível, e o estado não muda por isso.
+            for (tipo, janela) in [
+                (particoes::Tipo::Estado, virtio::blk::Janela::Estado),
+                (particoes::Tipo::Armazem, virtio::blk::Janela::Armazem),
+            ] {
+                let Some(p) = tabela.primeira(tipo) else {
+                    log_warn!(
+                        "disco",
+                        "sem particao {}: nada se grava nela",
+                        tipo.como_str()
+                    );
+                    continue;
+                };
+                match virtio::blk::fixar_janela_de_escrita(janela, p.primeiro, p.setores) {
+                    Ok(()) => log_info!(
+                        "disco",
+                        "janela de escrita: setores {}..{} (particao {})",
+                        p.primeiro,
+                        p.primeiro + p.setores,
+                        tipo.como_str()
+                    ),
+                    Err(motivo) => log_error!(
+                        "disco",
+                        "a janela da particao {} nao foi fixada: {}",
+                        tipo.como_str(),
+                        motivo
+                    ),
                 }
-                None => log_warn!(
-                    "disco",
-                    "sem particao de estado: o disco fica so de leitura"
-                ),
             }
             montar_a_raiz(&tabela);
         }

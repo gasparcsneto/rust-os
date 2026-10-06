@@ -71,6 +71,7 @@ macro_rules! papeis_de_sistema {
 papel sistema agent.read system.read log.read ui.read ui.act process.run net.send fs.read fs.write fs.raw_read keyboard.read debug.trigger terminal.attach audit.read policy.read message.send message.read
 recurso sistema fs.read /
 recurso sistema fs.write /armazem
+armazem sistema 268435456 65536
 recurso sistema process.run /
 recurso sistema message.send papel:observador papel:operador papel:sistema papel:administrador
 taxa sistema 400 800
@@ -79,6 +80,7 @@ processos sistema 32
 papel administrador agent.read system.read log.read ui.read ui.act process.run net.send fs.read fs.write audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke
 recurso administrador fs.read /dados /bin /programas /armazem/compartilhado
 recurso administrador fs.write /armazem/compartilhado
+armazem administrador 67108864 16384
 recurso administrador process.run /bin /programas
 recurso administrador message.send papel:operador papel:sistema papel:administrador
 taxa administrador 10 20
@@ -119,6 +121,7 @@ processos observador 2
 papel operador @observador ui.act process.run net.send fs.read fs.write message.send message.read
 recurso operador fs.read /dados /bin /programas /armazem/compartilhado
 recurso operador fs.write /armazem/compartilhado
+armazem operador 16777216 4096
 recurso operador process.run /bin /programas
 recurso operador message.send papel:operador papel:sistema
 taxa operador 50 100

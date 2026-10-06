@@ -190,10 +190,16 @@ $ cargo xtask agent --canal 2 agent.session
 | `fs.mounts` | O que está montado na árvore de arquivos, e de que tipo |
 | `fs.list` | Lista um diretório da árvore (`path`) |
 | `fs.read` | Lê um arquivo da árvore e devolve o conteúdo (`path`, `offset`, `max`) |
-| `fs.stat` | O que um caminho do armazém é agora: o tipo, a versão, o tamanho e o arrendamento (`path`) |
-| `fs.write` | Grava um arquivo de texto no armazém contra a versão lida (`path`, `content`, `expect_version`: 0 cria); confirmado só depois de gravado no journal |
-| `fs.append` | Acrescenta ao fim de um arquivo do armazém, contra a versão de agora (`path`, `content`, `expect_version`) |
+| `fs.stat` | O que um caminho do armazém é agora: o tipo, a versão, o tamanho, o dono e o arrendamento; e o uso e a cota de quem pede, e a ocupação do volume (`path`) |
+| `fs.write` | Grava um arquivo no armazém contra a versão lida (`path`, `expect_version`: 0 cria), com o conteúdo de exatamente um: `content` (texto), `draft` (um rascunho) ou o anexo (binário, declarado em `attachment` no canal); confirmado só depois do commit |
+| `fs.append` | Acrescenta ao fim de um arquivo do armazém, contra a versão de agora (`path`, `content` ou o anexo, `attachment`, `expect_version`) |
 | `fs.delete` | Apaga um arquivo do armazém, contra a versão de agora (`path`, `expect_version`) |
+| `fs.mkdir` | Cria um diretório no armazém, num pai que existe (`path`) |
+| `fs.rmdir` | Remove um diretório vazio do armazém, contra a versão de agora (`path`, `expect_version`) |
+| `fs.rename` | Move um arquivo ou uma árvore do armazém; o gate decide os dois caminhos, e cada nó movido ganha versão nova (`path`, `to`, `expect_version`) |
+| `fs.batch` | Até 32 operações num lote só — tudo ou nada, um commit (`ops`: `op`, `path`, `to`, `expect_version`, `content`, `draft`, `offset`/`length` no anexo; `attachment`) |
+| `fs.draft` | Acrescenta o anexo (ou `content`) a um rascunho de um caminho, para um arquivo maior que um anexo (`path`, `draft`, `content`, `attachment`) |
+| `fs.discard` | Descarta um rascunho seu, com os blocos dele (`path`, `draft`) |
 | `fs.claim` | Arrenda um arquivo do armazém para esta sessão (`path`, `ttl_ms`); sem preempção |
 | `fs.release` | Solta o arrendamento desta sessão num arquivo do armazém (`path`) |
 | `net.info` | Endereço e contadores da placa de rede, se houver uma |
@@ -237,7 +243,8 @@ kernel/src/
 ├── persistencia.rs  o journal na partição de estado, ancorado no TPM: o estado de autoridade que sobrevive ao boot
 ├── coordenacao.rs   versões e arrendamentos: quem edita cada campo agora
 ├── mensagens.rs     as mensagens entre titulares: um recurso, pelo mesmo ponto de decisão
-├── armazem.rs       o armazém montado em /armazem: arrendamento, versão, persistência e auditoria de cada mudança, cada um no seu lugar
+├── armazem.rs       o armazém montado em /armazem: o lote, do gate ao commit — reconfirmação, arrendamento, cota, rascunhos, cada um no seu lugar
+├── volume.rs        o volume do armazém na partição própria: blocos cifrados, o journal dos metadados, o ponto de commit no de estado
 ├── nativo.rs        a interface nativa: o registro como API dos programas, pelo mesmo gate
 ├── atividade.rs     quem está agindo: os agentes conectados e quem agiu por último
 ├── autorizacao.rs   o ponto único de decisão: papel, permissão, recurso, taxa e auditoria
@@ -401,9 +408,12 @@ politica/src/        a política de autorização, a mesma no kernel e no hosped
 ├── sigiloso.rs      o texto que sai da memória zerado: o corpo e a resposta que o leva
 └── auditoria.rs     os registros e a cadeia de elos BLAKE2s
 
-armazem/src/         o armazém como conta pura: caminhos, versões, tetos; preparar e aplicar
-├── lib.rs           a árvore de arquivos de texto, a versão do armazém inteiro e os diretórios implícitos
-└── testes.rs        criar, substituir, os conflitos de versão, os tetos, os diretórios e a reposição do boot
+armazem/src/         o armazém como conta pura: caminhos, diretórios, versões, donos e cotas; preparar e aplicar um lote
+├── lib.rs           a árvore de arquivos e diretórios, a versão do armazém inteiro, o lote inteiro ou nada
+├── bloco.rs         o bloco de 4 KiB do volume: XChaCha20-Poly1305 com o id do conteúdo e o índice no nonce
+├── mapa.rs          os blocos em uso, refeitos dos metadados no boot; reservar e soltar faixas
+├── registro.rs      as entradas do journal dos metadados: nós, extensões, movimentos, a geometria do volume
+└── testes.rs        criar, substituir, renomear, os diretórios, as cotas, os lotes sorteados e a reposição
 
 diario/src/          o journal da persistência: registros cifrados, encadeados e ancorados
 ├── lib.rs           o formato, a leitura que confere cada registro, o escritor, o julgamento contra a âncora e o relógio que não volta
@@ -1783,58 +1793,75 @@ do executor de verdade — que a suíte não tem —, nas duas arquiteturas.
 ## Armazenamento nativo
 
 Os programas, os agentes e as pessoas guardam dados no **armazém**: uma
-árvore de arquivos de texto montada em `/armazem`, gravável, com versão por
-objeto e arrendamento para quem edita. O desenho inteiro, com o porquê de
-cada escolha, está em [`docs/ARMAZENAMENTO.md`](docs/ARMAZENAMENTO.md).
+árvore de arquivos e diretórios montada em `/armazem`, gravável, com versão
+por objeto, arrendamento para quem edita e cota por dono, numa **partição
+própria** do disco. O desenho inteiro, com o porquê de cada escolha, está
+em [`docs/ARMAZENAMENTO.md`](docs/ARMAZENAMENTO.md).
 
 Não há um segundo sistema de autorização, nem uma segunda API. Escrever é
 pedir um comando do registro — pelo canal, pelo interpretador ou pelo
 `pedir` de um programa —, e o comando passa pelo mesmo gate e vai para a
-mesma auditoria. Seis conceitos, cada um num lugar só, com a sua recusa:
+mesma auditoria. Cada conceito num lugar só, com a sua recusa:
 
 | Conceito | Onde | Recusa |
 |---|---|---|
 | Autorização | o gate: `fs.write` no papel ∩ manifesto do programa | `DENY_PERMISSION` |
-| Alcance de caminho | o gate: a linha `recurso <papel> fs.write …` | `DENY_RESOURCE` |
+| Alcance de caminho | o gate, sobre **cada** caminho do pedido: os dois de um rename, todos os de um lote | `DENY_RESOURCE` |
+| Reconfirmação | no ponto de commit: a sessão, o papel e a política de agora ainda dão a autoridade? | a recusa de agora |
 | Arrendamento | a coordenação, recurso `fs:<caminho>` — só o arrendamento | `CONFLICT` (`lease`) |
 | Versão | o armazém: a da última mudança, de um contador do armazém inteiro | `CONFLICT` (`version`) |
-| Persistência | um registro `ARMAZEM` do journal, estrito | `ERROR`, e nada muda |
-| Auditoria | a decisão, e o que o comando fez, no mesmo registro que a mudança | — |
+| Cota | o armazém, com a linha `armazem <papel> <bytes> <objetos>` da política, por dono | `DENY_QUOTA` |
+| Persistência | o volume do armazém, confirmado por um registro do journal de estado | `ERROR`, e nada muda |
+| Auditoria | a decisão, e o que o comando fez, no mesmo registro que o commit | — |
 
 ```text
-$ cargo xtask agent fs.write '{"path":"/armazem/compartilhado/notas.txt","content":"um","expect_version":0}'
-{"ok":true,"path":"/armazem/compartilhado/notas.txt","version":1,"size":2,"durable":true}
-$ cargo xtask agent fs.write '{"path":"/armazem/compartilhado/notas.txt","content":"dois","expect_version":0}'
-{"ok":false,"code":"CONFLICT","conflict":"version","current_version":1,"error":"a versao esperada nao e a de agora"}
+$ cargo xtask agent fs.mkdir '{"path":"/armazem/compartilhado/notas"}'
+{"ok":true,"path":"/armazem/compartilhado/notas","version":1,"size":0,"durable":true}
+$ cargo xtask agent fs.write '{"path":"/armazem/compartilhado/notas/a.txt","content":"um","expect_version":0}'
+{"ok":true,"path":"/armazem/compartilhado/notas/a.txt","version":2,"size":2,"durable":true}
+$ cargo xtask agent fs.write '{"path":"/armazem/compartilhado/notas/a.txt","content":"dois","expect_version":0}'
+{"ok":false,"code":"CONFLICT","conflict":"version","current_version":2,"error":"a versao esperada nao e a de agora"}
 ```
 
-**A política dá, e só ela.** A padrão escreve `fs.write` para o `sistema`
-em `/armazem` e para o `operador` em `/armazem/compartilhado`; o observador
-não escreve. O teto do administrador ganha o alcance do operador — para o
-operador continuar delegável — e um administrador não exerce o que o teto
-dele diz. O `sistema` não arrenda (a autoridade local não tem titular, como
-na interface): o arrendamento de uma pessoa vale contra ele, e só o
-`lease.revoke` de um administrador, com a prova, o quebra (`{"path": …}`).
+**A partição própria.** O conteúdo vai em blocos cifrados de 4 KiB numa
+partição GPT só do armazém (`duke-armazem`), com um journal de metadados
+próprio; o driver do disco tem duas janelas de escrita, e o `xtask` confere
+que só a persistência escreve na de estado e só o volume na do armazém.
+Encher o volume não enche o journal das credenciais. O journal de estado
+guarda, do armazém, uma entrada só: qual registro do journal do armazém
+vale — e esse registro, ancorado no TPM, é o **ponto de commit**. Uma queda
+antes dele deixa blocos e um registro que o boot não confirma, e que ficam
+livres; nada de um lote pela metade parece confirmado.
 
-**Confirmado só no disco.** A mutação é preparada com a ordem das gravações
-na mão, gravada, e só então vale em memória; sem a persistência disponível,
-recusada antes de mudar qualquer coisa. O boot repõe o armazém do journal,
-e a compactação leva os arquivos na ordem das versões e a próxima versão —
-uma versão já dada não volta, nem a de um arquivo apagado.
+**Diretórios, renomear, lotes, binário.** Diretórios são explícitos
+(`fs.mkdir`, `fs.rmdir` vazio); `fs.rename` move um arquivo ou uma árvore,
+com o gate decidindo os dois caminhos e cada nó movido recebendo versão
+nova; `fs.batch` faz até 32 operações num lote só — tudo ou nada, um
+registro e um avanço do contador do TPM. O conteúdo binário vai fora do
+JSON, num **anexo** — pela chamada `PEDIR_COM_ANEXO` de um processo, ou em
+quadros de anexo da sessão cifrada de um agente, declarados em
+`"attachment"` —, e o que passa de 60 KiB vai por um rascunho (`fs.draft`).
+
+**A política dá, e só ela.** A padrão escreve `fs.write` para o `sistema`
+em `/armazem` e para o `operador` em `/armazem/compartilhado`, e a cota de
+cada um; o observador não escreve. O papel do administrador é um teto — o
+que ele pode delegar — e nenhuma sessão o exerce. O `sistema` não arrenda:
+o arrendamento de uma pessoa vale contra ele, e só o `lease.revoke` de um
+administrador, com a prova, o quebra.
 
 **A leitura é a de sempre.** `fs.read`, `fs.list` e o `abrir` dos processos,
-pelo VFS, sob `fs.read`. O nó de um arquivo é a versão dele: um descritor
-aberto antes de uma mudança recebe `MUDOU` (-17), e nunca metade de um
-conteúdo e metade de outro.
+pelo VFS, sob `fs.read`, com o conteúdo lido do volume bloco a bloco. O nó
+de um arquivo é a versão dele: um descritor aberto antes de uma mudança
+recebe `MUDOU` (-17), e nunca metade de um conteúdo e metade de outro.
 
 O programa [`guardar`](programas/src/bin/guardar.rs) faz o caminho inteiro
-de dentro: declara `fs.read` e `fs.write` no manifesto, grava, ouve o
-conflito de versão, lê pelo descritor, vê o `MUDOU`, e é recusado fora do
-alcance de quem o lançou.
+de dentro: declara `fs.read` e `fs.write` no manifesto, cria o diretório
+dele, grava, ouve o conflito de versão, lê pelo descritor, vê o `MUDOU`, é
+recusado fora do alcance de quem o lançou, e manda binário pelo anexo.
 
 ### O que as mutações mostraram
 
-Dezesseis mutações dirigidas ao armazém, cada uma contra a suíte inteira
+Na fase 8, com o armazém ainda no journal de estado: dezesseis mutações dirigidas ao armazém, cada uma contra a suíte inteira
 com quatro núcleos (as da conta pura e da política, contra os testes do
 hospedeiro antes): **dezesseis reprovadas**, cada uma pelo caso do conceito
 que ela tira — o arrendamento que não confere, a persistência que não é
@@ -1852,22 +1879,17 @@ arquivo de versão nova num nome que vem antes, e o que o comando fez em
 nome da pessoa, pelo processo. Uma (a mutação fora da ordem das gravações)
 só a pega o caso de vários núcleos, e é reprovada com quatro.
 
-### Dívida técnica
+### O que mudou desde a fase 8
 
-- O armazém mora no journal da partição de estado: os tetos (16 KiB, 256
-  arquivos, 512 KiB) são os de um armazém de dados de programas e agentes.
-  Um volume grande pede uma partição própria, com o mesmo formato de
-  registro e o mesmo caminho de autorização.
-- Texto só: o conteúdo vai no JSON do pedido. Binário pede uma chamada de
-  mecanismo que não passe pelo JSON.
-- Sem renomear, sem diretório explícito, sem cota por papel ou titular.
-- Cada mutação é um registro e um avanço do contador do TPM: uma gravação
-  em lote seria um registro só, com um arrendamento sobre vários objetos.
-- Os casos de mensagens da suíte esvaziam a tabela em memória e recomeçam
-  os ids; o journal de antes deles não se reaplica sobre uma imagem limpa
-  depois. Não é do kernel de produção — nada esvazia a tabela fora da
-  suíte —, mas o caso da reposição do armazém compacta antes de conferir
-  por causa disso.
+A dívida que a fase 8 deixou — o armazém no journal de estado com tetos de
+16 KiB, 256 arquivos e 512 KiB; só texto; sem renomear nem diretórios
+explícitos; sem cota por titular; uma mutação por registro e por avanço do
+TPM; e o caso da reposição que compactava antes de conferir — foi resolvida
+na arquitetura, e não com números maiores: partição própria com o commit
+ancorado no journal de estado, anexo binário e rascunhos, diretórios e
+rename decididos nos dois caminhos, cotas por dono na política, lotes, e
+uma reposição que reconstrói a imagem limpa com o journal inteiro. O que
+ficou, e por quê, está no fim de [`docs/ARMAZENAMENTO.md`](docs/ARMAZENAMENTO.md).
 
 ## Vários agentes
 

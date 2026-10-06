@@ -143,6 +143,15 @@ pub mod numero {
     /// novo. [`NAO_ENCONTRADO`](super::erro::NAO_ENCONTRADO) sem resposta
     /// esperando. O próximo `pedir` descarta a que não foi buscada.
     pub const RESPOSTA: u64 = 18;
+    /// `pedir_com_anexo(ptr, tamanho, anexo)`: [`PEDIR`] com um anexo —
+    /// bytes que vão junto do pedido, **fora** do JSON: o conteúdo binário
+    /// de um arquivo do armazém. `anexo` aponta para dois `u64` do processo,
+    /// o endereço e o tamanho do anexo, até
+    /// [`MAIOR_ANEXO`](super::nativo::MAIOR_ANEXO).
+    ///
+    /// O pedido passa pelo mesmo gate; o anexo não é decidido — o comando
+    /// que o usa decide o que fazer com ele, e um que não usa o descarta.
+    pub const PEDIR_COM_ANEXO: u64 = 19;
 }
 
 /// A interface nativa: o registro de comandos como API dos programas — ver
@@ -152,6 +161,11 @@ pub mod nativo {
     /// Um pedido que não caberia lá também não cabe aqui — o vocabulário é
     /// um só, e os tetos também.
     pub const MAIOR_PEDIDO: usize = 4096;
+
+    /// O maior anexo de um pedido — ver
+    /// [`PEDIR_COM_ANEXO`](super::numero::PEDIR_COM_ANEXO). O que passa
+    /// disso vai em pedaços, por um rascunho do armazém (`fs.draft`).
+    pub const MAIOR_ANEXO: usize = 60 * 1024;
 
     /// A versão da interface nativa, que `system.info` publica. Cresce
     /// quando uma chamada de mecanismo é acrescentada ou o envelope muda;

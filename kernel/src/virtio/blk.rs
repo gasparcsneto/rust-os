@@ -220,7 +220,13 @@ pub struct Disco {
     /// Fixada uma vez, no boot, pela tabela de partições — ver
     /// [`fixar_janela_de_escrita`] —, e nunca mais mudada. Sem ela, nada se
     /// escreve.
-    janela: Option<(u64, u64)>,
+    ///
+    /// São duas, e cada uma tem um nome ([`Janela`]): a do estado, onde
+    /// mora o journal da persistência, e a do armazém, onde mora o volume
+    /// dele. Quem escreve diz em qual, e o setor é conferido contra **aquela**
+    /// janela: o volume do armazém não alcança o estado por uma conta
+    /// errada, e o journal não alcança o volume.
+    janelas: [Option<(u64, u64)>; 2],
     /// Quantas escritas e quantas descargas o dispositivo confirmou. Só
     /// para os casos e para o relatório: é o que mostra de dentro que a
     /// descarga aconteceu.
@@ -370,7 +376,7 @@ impl Disco {
             vivo: true,
             descarga: recursos & RECURSO_DESCARGA != 0,
             somente_leitura: recursos & RECURSO_SOMENTE_LEITURA != 0,
-            janela: None,
+            janelas: [None, None],
             escritas: 0,
             descargas: 0,
         })
@@ -383,9 +389,9 @@ impl Disco {
         self.vivo && self.descarga && !self.somente_leitura
     }
 
-    /// A janela de escrita: o primeiro setor e quantos, se já foi fixada.
-    pub fn janela(&self) -> Option<(u64, u64)> {
-        self.janela
+    /// Uma janela de escrita: o primeiro setor e quantos, se já foi fixada.
+    pub fn janela(&self, qual: Janela) -> Option<(u64, u64)> {
+        self.janelas[qual as usize]
     }
 
     /// Quantas escritas e quantas descargas o dispositivo confirmou.
@@ -448,7 +454,12 @@ impl Disco {
     /// Recusada inteira, sem tocar o dispositivo, se o disco não aceita
     /// descarga: uma escrita que nunca pode ser tornada durável é uma
     /// escrita que mente para quem a pediu.
-    pub fn gravar_setores(&mut self, setor: u64, origem: &[u8]) -> Result<(), &'static str> {
+    pub fn gravar_setores(
+        &mut self,
+        qual: Janela,
+        setor: u64,
+        origem: &[u8],
+    ) -> Result<(), &'static str> {
         self.conferir_faixa(setor, origem.len())?;
         if self.somente_leitura {
             return Err("o disco e so de leitura");
@@ -456,8 +467,8 @@ impl Disco {
         if !self.descarga {
             return Err("o disco nao aceita descarga, e uma escrita nao seria duravel");
         }
-        let Some((primeiro, setores)) = self.janela else {
-            return Err("nenhuma janela de escrita foi fixada");
+        let Some((primeiro, setores)) = self.janelas[qual as usize] else {
+            return Err("essa janela de escrita nao foi fixada");
         };
         let quantos = (origem.len() / TAMANHO_DO_SETOR) as u64;
         // As duas pontas: começar dentro e terminar dentro. Somas saturadas,
@@ -697,23 +708,45 @@ pub fn init() {
     }
 }
 
-/// Fixa a janela de escrita do disco: os únicos setores em que este kernel
-/// pode escrever, daqui até o fim.
+/// As janelas de escrita, pelo nome — ver [`Disco::gravar_setores`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Janela {
+    /// A partição de estado: o journal da persistência.
+    Estado = 0,
+    /// A partição do armazém: o volume dele.
+    Armazem = 1,
+}
+
+/// Fixa uma janela de escrita do disco: setores em que este kernel pode
+/// escrever, daqui até o fim, só por quem diz o nome dela.
 ///
-/// Chamada uma vez, no boot, com a partição de estado que a tabela trouxe.
-/// Uma segunda chamada é recusada, mesmo que com a mesma faixa: a janela não
-/// é algo que um caminho de execução possa redesenhar depois que o sistema
-/// subiu, e uma função que aceitasse ser chamada de novo seria exatamente
-/// isso.
-pub fn fixar_janela_de_escrita(primeiro: u64, setores: u64) -> Result<(), &'static str> {
+/// Chamada uma vez por janela, no boot, com a partição que a tabela trouxe.
+/// Uma segunda chamada para a mesma janela é recusada, mesmo que com a
+/// mesma faixa: a janela não é algo que um caminho de execução possa
+/// redesenhar depois que o sistema subiu, e uma função que aceitasse ser
+/// chamada de novo seria exatamente isso. Uma janela que cruze a outra
+/// também: o estado e o armazém nunca dividem um setor.
+pub fn fixar_janela_de_escrita(
+    qual: Janela,
+    primeiro: u64,
+    setores: u64,
+) -> Result<(), &'static str> {
     com_o_disco(|d| {
-        if d.janela.is_some() {
+        if d.janelas[qual as usize].is_some() {
             return Err("a janela de escrita ja foi fixada");
         }
         if setores == 0 || primeiro.saturating_add(setores) > d.capacidade {
             return Err("janela de escrita fora do disco");
         }
-        d.janela = Some((primeiro, setores));
+        let fim = primeiro + setores;
+        if d.janelas
+            .iter()
+            .flatten()
+            .any(|&(p, n)| primeiro < p + n && p < fim)
+        {
+            return Err("a janela de escrita cruza a outra");
+        }
+        d.janelas[qual as usize] = Some((primeiro, setores));
         Ok(())
     })
     .unwrap_or(Err("nao ha disco nesta maquina"))

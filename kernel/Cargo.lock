@@ -67,6 +67,10 @@ dependencies = [
 [[package]]
 name = "armazem"
 version = "0.1.0"
+dependencies = [
+ "chacha20poly1305",
+ "diario",
+]
 
 [[package]]
 name = "autocfg"

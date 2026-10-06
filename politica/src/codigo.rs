@@ -33,6 +33,9 @@ pub enum Codigo {
     /// O pedido repete um que já passou: o `nonce` não é novo nesta sessão
     /// — menor que o último, ou o mesmo com outro conteúdo. Nada mudou.
     DenyReplay = 11,
+    /// O pedido passaria de uma cota do dono de quem pede — a de armazém.
+    /// Nada mudou.
+    DenyQuota = 12,
 }
 
 impl Codigo {
@@ -51,11 +54,12 @@ impl Codigo {
             Codigo::Conflict => "CONFLICT",
             Codigo::DenyLease => "DENY_LEASE",
             Codigo::DenyReplay => "DENY_REPLAY",
+            Codigo::DenyQuota => "DENY_QUOTA",
         }
     }
 
     /// Todos, na ordem do número.
-    pub const TODOS: [Codigo; 12] = [
+    pub const TODOS: [Codigo; 13] = [
         Codigo::Allow,
         Codigo::DenyNotAuthenticated,
         Codigo::DenyRole,
@@ -68,6 +72,7 @@ impl Codigo {
         Codigo::Conflict,
         Codigo::DenyLease,
         Codigo::DenyReplay,
+        Codigo::DenyQuota,
     ];
 
     /// O código de um nome, como [`Codigo::nome`] o escreve: o caminho de

@@ -267,6 +267,24 @@ pub fn soltar_por(recurso: &str, titular: Titular, metodo: &str) -> Result<(), C
     }
 }
 
+/// Os recursos arrendados agora cujo caminho está abaixo de `caminho` — na
+/// forma normal. Um rename leva tudo abaixo da origem, e o que está abaixo
+/// do destino passa a existir: o arrendamento de cada um conta.
+pub fn arrendados_abaixo(caminho: &str) -> alloc::vec::Vec<String> {
+    let agora = crate::tempo::uptime_ms();
+    let prefixo = recurso_do_caminho(caminho);
+    com_tabela(|t| {
+        t.arrendados(agora)
+            .filter(|(r, _)| {
+                r.len() > prefixo.len()
+                    && r.starts_with(prefixo.as_str())
+                    && r.as_bytes()[prefixo.len()] == b'/'
+            })
+            .map(|(r, _)| String::from(r))
+            .collect()
+    })
+}
+
 /// Confere só o arrendamento de `recurso` para uma mudança em nome de
 /// `titular` — ou de uma autoridade que não arrenda, `None` —, sem tocar
 /// na versão desta tabela: o recurso tem a versão dele em outro lugar (o

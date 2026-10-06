@@ -32,6 +32,12 @@
 //!   todas as caixas, e quantas a caixa dele guarda. De 1 até os tetos da
 //!   tabela, 32 e 64; sem a linha, 8 e 32. O total de vivas, 128, é da
 //!   imagem — ver [`crate::mensagens`].
+//! - `armazem <papel> <bytes> <objetos>`: a cota de armazém de cada dono
+//!   do papel — cada identidade —: os bytes de conteúdo e os objetos
+//!   (arquivos e diretórios) que ele ocupa. De 1 até 1 TiB e 2^24; sem a
+//!   linha, nenhuma — quem não tem cota não guarda nada, tenha ou não
+//!   `fs.write`. Um `policy.write` que a aumente cabe no teto de quem
+//!   delega.
 //! - `quorum <operação> <M> <N>`: a operação exige que M credenciais de
 //!   administrador distintas, de um grupo de N, provem o mesmo pedido. De
 //!   2 até N, e N até [`MAIOR_GRUPO`]; só para as operações de
@@ -149,6 +155,33 @@ pub const APERTOS_PADRAO: Apertos = Apertos {
     janela_ms: 10_000,
 };
 
+/// A cota de armazém de um dono: bytes de conteúdo e objetos — arquivos e
+/// diretórios. Ver o pacote `armazem`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CotaDoArmazem {
+    pub bytes: u64,
+    pub objetos: u64,
+}
+
+impl CotaDoArmazem {
+    /// Nenhuma: o que um papel tem sem a linha `armazem`.
+    pub const NENHUMA: CotaDoArmazem = CotaDoArmazem {
+        bytes: 0,
+        objetos: 0,
+    };
+
+    /// Esta cota cabe em `teto`, nas duas medidas.
+    pub fn cabe_em(&self, teto: &CotaDoArmazem) -> bool {
+        self.bytes <= teto.bytes && self.objetos <= teto.objetos
+    }
+}
+
+/// O maior número de bytes que uma linha `armazem` dá: 1 TiB. O volume é o
+/// limite de verdade; este só impede uma conta absurda.
+pub const TETO_DE_BYTES_DO_ARMAZEM: u64 = 1 << 40;
+/// O maior número de objetos que uma linha `armazem` dá.
+pub const TETO_DE_OBJETOS_DO_ARMAZEM: u64 = 1 << 24;
+
 /// Um papel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Papel {
@@ -165,6 +198,10 @@ pub struct Papel {
     pub processos: u32,
     /// As cotas de mensagens de cada titular do papel.
     pub mensagens: crate::mensagens::Cotas,
+    /// A cota de armazém de cada dono do papel — cada identidade: um
+    /// agente, uma pessoa, o sistema. Sem linha, nenhuma: quem não tem cota
+    /// não ocupa nada, mesmo com `fs.write`.
+    pub armazem: CotaDoArmazem,
     /// As diretas mais as não sensíveis dos incluídos. Calculadas pela
     /// validação.
     permissoes: BTreeSet<Permissao>,
@@ -180,6 +217,7 @@ impl Papel {
             taxa: TAXA_PADRAO,
             processos: PROCESSOS_PADRAO,
             mensagens: crate::mensagens::COTAS_PADRAO,
+            armazem: CotaDoArmazem::NENHUMA,
             permissoes: BTreeSet::new(),
         }
     }
@@ -557,6 +595,24 @@ impl Politica {
                     por_caixa,
                 };
             }
+            "armazem" => {
+                let nome = partes.next().ok_or(erro(ErroTipo::Sintaxe))?;
+                let bytes = numero_grande(partes.next(), n)?;
+                let objetos = numero_grande(partes.next(), n)?;
+                // Zero não é cota: um papel que não deve guardar nada fica
+                // sem a linha. E o teto é desta política, que nenhuma linha
+                // alarga.
+                if partes.next().is_some()
+                    || !(1..=TETO_DE_BYTES_DO_ARMAZEM).contains(&bytes)
+                    || !(1..=TETO_DE_OBJETOS_DO_ARMAZEM).contains(&objetos)
+                {
+                    return Err(erro(ErroTipo::Sintaxe));
+                }
+                let papel = self
+                    .papel_mut(nome)
+                    .ok_or(erro(ErroTipo::PapelDesconhecido(nome.to_string())))?;
+                papel.armazem = CotaDoArmazem { bytes, objetos };
+            }
             "quorum" => {
                 let operacao = partes.next().ok_or(erro(ErroTipo::Sintaxe))?;
                 let m = numero(partes.next(), n)?;
@@ -802,6 +858,11 @@ impl Politica {
                 "papel `{papel}` ou `{teto}` nao existe"
             )));
         };
+        if !a.armazem.cabe_em(&t.armazem) {
+            return Err(Recusa::Proibida(format!(
+                "`{papel}` tem uma cota de armazem maior que a do administrador"
+            )));
+        }
         for p in a.permissoes() {
             if !t.tem(p) {
                 return Err(Recusa::Proibida(format!(
@@ -842,11 +903,11 @@ impl Politica {
         let palavra = linha.split_ascii_whitespace().next().unwrap_or("");
         if !matches!(
             palavra,
-            "papel" | "recurso" | "taxa" | "processos" | "mensagens"
+            "papel" | "recurso" | "taxa" | "processos" | "mensagens" | "armazem"
         ) {
             return Err(Recusa::Proibida(
-                "policy.write muda papel, recurso, taxa, processos ou mensagens; a serial muda \
-                 por policy.assign, e o papel local e os apertos so pela imagem"
+                "policy.write muda papel, recurso, taxa, processos, mensagens ou armazem; a serial \
+                 muda por policy.assign, e o papel local e os apertos so pela imagem"
                     .to_string(),
             ));
         }
@@ -880,6 +941,15 @@ impl Politica {
             if depois.nome == teto || protegidos.contains(&depois.nome.as_str()) {
                 return Err(Recusa::Proibida(format!(
                     "a mudanca alteraria o papel `{}`, que e protegido",
+                    depois.nome
+                )));
+            }
+            // A cota de armazém que cresce cabe na do teto: ninguém concede
+            // mais espaço do que o dele.
+            let cresceu = antes.is_none_or(|a| !depois.armazem.cabe_em(&a.armazem));
+            if cresceu && !depois.armazem.cabe_em(&t.armazem) {
+                return Err(Recusa::Proibida(format!(
+                    "a mudanca daria a `{}` uma cota de armazem maior que a do administrador",
                     depois.nome
                 )));
             }
@@ -975,6 +1045,13 @@ impl Politica {
                 "mensagens {} {} {}",
                 papel.nome, papel.mensagens.por_remetente, papel.mensagens.por_caixa
             );
+            if papel.armazem != CotaDoArmazem::NENHUMA {
+                let _ = writeln!(
+                    t,
+                    "armazem {} {} {}",
+                    papel.nome, papel.armazem.bytes, papel.armazem.objetos
+                );
+            }
         }
         let _ = writeln!(t, "serial {}", self.serial);
         let _ = writeln!(t, "local {}", self.local);
@@ -1023,6 +1100,14 @@ fn recurso_contido(p: Permissao, a: Option<&Vec<String>>, b: Option<&Vec<String>
 /// Como um destino se escreve no alcance de `message.send`, e como a
 /// decisão o recebe: o papel do destinatário.
 pub const PREFIXO_DE_DESTINO: &str = "papel:";
+
+/// Um número de 64 bits, para as cotas de armazém.
+fn numero_grande(texto: Option<&str>, n: usize) -> Result<u64, Erro> {
+    texto.and_then(|t| t.parse::<u64>().ok()).ok_or(Erro {
+        linha: n,
+        tipo: ErroTipo::Sintaxe,
+    })
+}
 
 fn numero(texto: Option<&str>, n: usize) -> Result<u32, Erro> {
     let texto = texto.ok_or(Erro {
@@ -1200,6 +1285,74 @@ mod testes {
     /// Nenhum `policy.write` mexe no quórum de `admin.revoke`: nem para
     /// baixar — 1 de 3, 2 de 4, 2 de 5 —, nem para manter, nem para subir, e
     /// nem numa política que ainda não tenha a linha. O quórum é da imagem.
+    /// A cota de armazém: lida, escrita de volta igual, com tetos, e sem
+    /// linha é nenhuma. Um `policy.write` que a aumenta cabe no teto de
+    /// quem delega; uma atribuição de papel também.
+    #[test]
+    fn a_cota_do_armazem() {
+        let p = Politica::ler(crate::PADRAO).unwrap();
+        assert_eq!(
+            p.papel("operador").unwrap().armazem,
+            CotaDoArmazem {
+                bytes: 16 * 1024 * 1024,
+                objetos: 4096
+            }
+        );
+        assert_eq!(
+            p.papel("observador").unwrap().armazem,
+            CotaDoArmazem::NENHUMA
+        );
+        assert_eq!(Politica::ler(&p.texto()).unwrap(), p);
+        for ruim in [
+            "armazem operador 0 5",
+            "armazem operador 5 0",
+            "armazem operador 1099511627777 5",
+            "armazem operador 5 16777217",
+            "armazem operador 5",
+            "armazem operador 5 5 5",
+            "armazem operador -1 5",
+            "armazem fantasma 5 5",
+        ] {
+            assert!(p.com_linha(ruim, "administrador", &[]).is_err(), "{ruim}");
+        }
+        // Dentro do teto do administrador: muda.
+        let nova = p
+            .com_linha("armazem operador 1000 10", "administrador", &[])
+            .unwrap();
+        assert_eq!(
+            nova.papel("operador").unwrap().armazem,
+            CotaDoArmazem {
+                bytes: 1000,
+                objetos: 10
+            }
+        );
+        // Além do teto: não — nem pelos bytes, nem pelos objetos.
+        assert!(matches!(
+            p.com_linha("armazem operador 67108865 10", "administrador", &[]),
+            Err(Recusa::Proibida(_))
+        ));
+        assert!(matches!(
+            p.com_linha("armazem operador 10 16385", "administrador", &[]),
+            Err(Recusa::Proibida(_))
+        ));
+        // Diminuir passa sempre que o papel não é protegido.
+        assert!(
+            p.com_linha("armazem operador 1 1", "administrador", &[])
+                .is_ok()
+        );
+        // Um papel com cota maior que o teto não se atribui por ele.
+        let grande = p
+            .com_linha("armazem observador 1 1", "administrador", &[])
+            .unwrap();
+        assert!(grande.cabe_em("observador", "administrador").is_ok());
+        let alem = Politica::ler(&alloc::format!(
+            "{}armazem observador 67108865 1\n",
+            crate::PADRAO
+        ))
+        .unwrap();
+        assert!(alem.cabe_em("observador", "administrador").is_err());
+    }
+
     #[test]
     fn o_policy_write_nao_baixa_o_quorum() {
         let p = Politica::ler(crate::PADRAO).unwrap();

@@ -391,54 +391,55 @@ pub fn gravar_mensagens() -> Result<(), &'static str> {
     })
 }
 
-/// A entrada de uma mudança do armazém — ver [`tipo::ARQUIVO_GRAVADO`] e
-/// [`tipo::ARQUIVO_APAGADO`].
-fn entrada_do_armazem(m: &::armazem::Mudanca) -> Result<Vec<u8>, &'static str> {
-    match m {
-        ::armazem::Mudanca::Gravado {
-            caminho,
-            versao,
-            dados,
-        } => entrada(
-            tipo::ARQUIVO_GRAVADO,
-            &[caminho.as_bytes(), &versao.to_le_bytes(), dados],
-        ),
-        ::armazem::Mudanca::Apagado { caminho, versao } => entrada(
-            tipo::ARQUIVO_APAGADO,
-            &[caminho.as_bytes(), &versao.to_le_bytes()],
-        ),
-    }
+/// A entrada que confirma o volume do armazém — ver
+/// [`tipo::ARMAZEM_CONFIRMADO`] e [`crate::volume`].
+fn entrada_do_armazem(c: &crate::volume::Confirmado) -> Result<Vec<u8>, &'static str> {
+    entrada(
+        tipo::ARMAZEM_CONFIRMADO,
+        &[
+            &c.geometria.id,
+            &c.geometria.setores.to_le_bytes(),
+            &c.geometria.setores_do_diario.to_le_bytes(),
+            &c.ancora.to_le_bytes(),
+            &c.elo,
+        ],
+    )
 }
 
-/// Grava uma mudança do armazém, num registro [`tipo::ARMAZEM`] que leva
-/// também o registro `execucao` da auditoria — o que o comando fez, depois
-/// da decisão do gate que o autorizou — e, como todo registro, o que as
-/// mensagens mudaram e ainda não foi gravado.
+/// O último [`tipo::ARMAZEM_CONFIRMADO`] lido do journal: o que o boot
+/// entrega ao volume.
+static ARMAZEM_LIDO: Mutex<Option<crate::volume::Confirmado>> = Mutex::new(None);
+
+/// Confirma um registro do journal do armazém, num registro
+/// [`tipo::ARMAZEM`] deste journal — com o registro `execucao` da
+/// auditoria, quando é o lote de um comando, e, como todo registro, o que
+/// as mensagens mudaram e ainda não foi gravado.
 ///
-/// **Estrita**: sem a persistência disponível, `Err` antes de gravar
-/// qualquer coisa — o armazém não muda só em memória, nunca. `Ok` é o que
-/// está no disco: escrito, descarregado e ancorado. Quem chama aplica a
-/// mudança em memória **só** depois de `Ok`, com a ordem das gravações
-/// ainda na mão. Uma gravação que falha deixa a persistência indisponível,
-/// como qualquer outra.
-pub fn gravar_armazem(m: &::armazem::Mudanca, execucao: u64) -> Result<(), &'static str> {
+/// **É o ponto de commit do armazém**: `Ok` é este registro escrito,
+/// descarregado e ancorado no TPM, e só então o lote vale — ver
+/// [`crate::volume`]. **Estrita**: sem a persistência disponível, `Err`
+/// antes de gravar qualquer coisa. Uma gravação que falha deixa a
+/// persistência indisponível, como qualquer outra; o lote não vale em
+/// memória, e o boot seguinte decide pelo que o disco tem.
+pub fn confirmar_armazem(c: &crate::volume::Confirmado, execucao: u64) -> Result<(), &'static str> {
     em_ordem(|| {
         exigir()?;
-        if execucao == 0 {
-            return Err("uma mudanca do armazem sem o registro da auditoria");
-        }
-        let mut entradas = alloc::vec![entrada_do_armazem(m)?];
+        let mut entradas = alloc::vec![entrada_do_armazem(c)?];
         entradas.extend(tirar_pendentes());
-        let montado = estado::campos(&entradas.iter().map(Vec::as_slice).collect::<Vec<_>>());
-        // O conteúdo de um arquivo não fica no heap depois de cifrado.
+        let mut conteudo = estado::campos(&entradas.iter().map(Vec::as_slice).collect::<Vec<_>>())?;
         for e in &mut entradas {
             politica::sigiloso::zerar_bloco(e);
         }
-        let mut conteudo = montado?;
         let gravado = gravar_com_a_decisao(tipo::ARMAZEM, &conteudo, execucao);
         politica::sigiloso::zerar_bloco(&mut conteudo);
         gravado
     })
+}
+
+/// Só para a suíte: o que a última reaplicação do journal disse do volume.
+#[cfg(feature = "modo-teste")]
+pub fn armazem_lido_de_teste() -> Option<crate::volume::Confirmado> {
+    crate::arch::sem_interrupcoes(|| *ARMAZEM_LIDO.lock())
 }
 
 /// A partição de estado como meio do journal: setores relativos ao começo
@@ -470,8 +471,14 @@ impl Meio for Particao {
         while feito < origem.len() {
             let n = (origem.len() - feito).min(crate::virtio::blk::MAIOR_LEITURA);
             let s = self.primeiro + setor + (feito / diario::TAM_SETOR) as u64;
-            crate::virtio::blk::com_o_disco(|d| d.gravar_setores(s, &origem[feito..feito + n]))
-                .ok_or("nao ha disco")??;
+            crate::virtio::blk::com_o_disco(|d| {
+                d.gravar_setores(
+                    crate::virtio::blk::Janela::Estado,
+                    s,
+                    &origem[feito..feito + n],
+                )
+            })
+            .ok_or("nao ha disco")??;
             feito += n;
         }
         Ok(())
@@ -485,8 +492,11 @@ impl Meio for Particao {
 /// A partição de estado: a janela de escrita que o boot fixou. Para ler
 /// basta ela; para gravar, ver [`particao`].
 fn janela() -> Result<Particao, &'static str> {
-    let (primeiro, setores) =
-        crate::virtio::blk::com_o_disco(|d| d.janela().unwrap_or((0, 0))).ok_or("nao ha disco")?;
+    let (primeiro, setores) = crate::virtio::blk::com_o_disco(|d| {
+        d.janela(crate::virtio::blk::Janela::Estado)
+            .unwrap_or((0, 0))
+    })
+    .ok_or("nao ha disco")?;
     if setores == 0 {
         return Err("nao ha particao de estado");
     }
@@ -675,6 +685,15 @@ fn abrir_em_ordem() {
         Err(motivo) => Estado::Indisponivel(motivo),
     };
     com(|p| p.estado = estado);
+    // O volume do armazém, com o que o journal confirmou dele — só com o
+    // journal confirmado: um disco anterior ao que o TPM viu diria que vale
+    // um volume que já mudou.
+    let lido = crate::arch::sem_interrupcoes(|| ARMAZEM_LIDO.lock().take());
+    if estado == Estado::Disponivel {
+        crate::volume::abrir(lido);
+    } else {
+        crate::volume::sem_persistencia(estado.motivo());
+    }
     // A auditoria do journal, se não foi adotada, fica de fora pela mesma
     // razão das mensagens, logo abaixo: a cadeia continua só em memória,
     // do começo — ver [`abrir_de_fato`].
@@ -793,6 +812,7 @@ fn abrir_de_fato() -> Result<Estado, &'static str> {
     let mut compactacoes = 0u64;
     let mut de_auditoria = 0u64;
     crate::arch::sem_interrupcoes(|| *FIXADA.lock() = None);
+    crate::arch::sem_interrupcoes(|| *ARMAZEM_LIDO.lock() = None);
     let lido = match escolhida {
         None => Ok(vazio()),
         Some(i) => diario::percorrer(&mut regioes[i], &chave, |r| {
@@ -1709,27 +1729,12 @@ fn compactar_sozinho() -> Result<(usize, u64, u64, u64), FalhaDaCompactacao> {
         )?]);
         Ok(g)
     })?;
-    // O armazém, da memória: cada arquivo, na ordem das versões — a ordem
-    // em que o boot os aplica, que só aceita versões crescentes —, e a
-    // próxima versão, para as já dadas não voltarem.
-    grupos.extend(crate::armazem::com_o_armazem(
-        |a| -> Result<_, &'static str> {
-            let mut arquivos: Vec<(&str, &::armazem::Objeto)> = a.todos().collect();
-            arquivos.sort_unstable_by_key(|(_, o)| o.versao());
-            let mut g: Vec<Vec<Vec<u8>>> = Vec::new();
-            for (caminho, o) in arquivos {
-                g.push(alloc::vec![entrada(
-                    tipo::ARQUIVO_GRAVADO,
-                    &[caminho.as_bytes(), &o.versao().to_le_bytes(), o.dados()],
-                )?]);
-            }
-            g.push(alloc::vec![entrada(
-                tipo::ARMAZEM_PROXIMO,
-                &[&a.proxima().to_le_bytes()]
-            )?]);
-            Ok(g)
-        },
-    )?);
+    // O armazém: só qual registro do journal dele vale. O conteúdo e os
+    // metadados moram no volume — ver [`crate::volume`] —, e a base deste
+    // journal não cresce com eles.
+    if let Some(c) = crate::volume::confirmado() {
+        grupos.push(alloc::vec![entrada_do_armazem(&c)?]);
+    }
     let mut escritas = Ok(());
     for g in &grupos {
         escritas = escrita.grupo(g);
@@ -2316,22 +2321,25 @@ pub(crate) fn reaplicar_entrada(e: &[u8]) -> Result<(), &'static str> {
             })
         }
         (tipo::MENSAGENS_PROXIMO, [n]) => crate::mensagens::fixar_proximo(u64_de(n)?),
-        (tipo::ARQUIVO_GRAVADO, [caminho, versao, dados]) => {
-            crate::armazem::restaurar(&::armazem::Mudanca::Gravado {
-                caminho: String::from(texto(caminho)?),
-                versao: u64_de(versao)?,
-                dados: dados.to_vec(),
-            })
-        }
-        (tipo::ARQUIVO_APAGADO, [caminho, versao]) => {
-            crate::armazem::restaurar(&::armazem::Mudanca::Apagado {
-                caminho: String::from(texto(caminho)?),
-                versao: u64_de(versao)?,
-            })
-        }
-        (tipo::ARMAZEM_PROXIMO, [n]) => {
-            crate::armazem::fixar_proxima(u64_de(n)?);
+        (tipo::ARMAZEM_CONFIRMADO, [id, setores, do_diario, ancora, elo]) => {
+            let c = crate::volume::Confirmado {
+                geometria: ::armazem::registro::Volume {
+                    id: (*id)
+                        .try_into()
+                        .map_err(|_| "id de volume que nao tem 16 bytes")?,
+                    setores: u64_de(setores)?,
+                    setores_do_diario: u64_de(do_diario)?,
+                },
+                ancora: u64_de(ancora)?,
+                elo: chave(elo)?,
+            };
+            crate::arch::sem_interrupcoes(|| *ARMAZEM_LIDO.lock() = Some(c));
             Ok(())
+        }
+        // O formato em que o conteúdo do armazém morava neste journal: não
+        // se escreve mais, e um journal que o tenha é de antes do volume.
+        (tipo::ARQUIVO_GRAVADO | tipo::ARQUIVO_APAGADO | tipo::ARMAZEM_PROXIMO, _) => {
+            Err("entrada do armazem no formato de antes do volume")
         }
         (tipo::AUDITORIA_LACUNA, [primeira, ultima, elo]) => {
             let l = politica::auditoria::Lacuna {
@@ -2670,6 +2678,7 @@ pub unsafe fn destravar() {
         PENDENTES.force_unlock();
         REPOSTA.force_unlock();
         ELO_GRAVADO.force_unlock();
+        ARMAZEM_LIDO.force_unlock();
     }
     DONO_DA_ORDEM.store(0, Ordering::Release);
 }

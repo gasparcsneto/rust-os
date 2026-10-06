@@ -35,7 +35,10 @@ quedas = []
 # Vale para as duas arquiteturas desde que o iniciador passou a subir no ARM
 # também. Lá ele convive com o protocolo de imagem crua do arm64: o kernel
 # distingue os dois pela magia que cada um põe em `x0`.
-protocolo = { path = "../protocolo", features = ["alloc"] }
+# `arrays`: um lote do armazém (`fs.batch`) chega como lista — entrada
+# hostil, lida pelo mesmo leitor que pula strings e contêineres aninhados,
+# e com teto de itens.
+protocolo = { path = "../protocolo", features = ["alloc", "arrays"] }
 
 pci_types = "0.10.1"
 

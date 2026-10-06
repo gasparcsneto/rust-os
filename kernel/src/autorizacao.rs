@@ -58,7 +58,9 @@ use politica::taxa::{Balde, Janela};
 use politica::{Codigo, Permissao, Politica};
 
 use crate::agent::json::{Json, JsonWriter};
-use crate::agent::registry::{Acesso, Command};
+use alloc::vec::Vec;
+
+use crate::agent::registry::{Acesso, Command, Mais};
 
 /// Onde a política mora no disco.
 pub const CAMINHO_DA_POLITICA: &str = "/etc/duke/politica";
@@ -266,7 +268,19 @@ struct EmExecucao {
     /// A decisão do gate que autorizou o comando — ver [`Decidido`]. `None`
     /// para o kernel chamando um handler direto, na suíte.
     decidido: Option<Decidido>,
+    /// O anexo do pedido: bytes que vieram fora do JSON — ver
+    /// [`MAIOR_ANEXO`]. O handler que o usa o tira daqui.
+    anexo: Vec<u8>,
 }
+
+/// Quantas operações um lote do armazém leva, no máximo.
+pub const MAIS_OPS_POR_LOTE: usize = 32;
+
+/// O maior anexo de um pedido: o conteúdo binário que vai junto do JSON,
+/// fora dele — de um processo pela chamada de sistema, de um agente pelo
+/// canal. O que passa disso vai em pedaços, por um rascunho do armazém. O
+/// mesmo número que os programas veem: um só, no protocolo.
+pub const MAIOR_ANEXO: usize = protocolo::usuario::nativo::MAIOR_ANEXO;
 
 /// A decisão que o gate tomou para o comando em execução: quem, como a
 /// auditoria o gravou, o método e o número da decisão na cadeia.
@@ -278,6 +292,15 @@ struct Decidido {
     quem: Quem,
     metodo: &'static str,
     decisao: u64,
+    /// A permissão decidida — `None` numa operação por prova.
+    permissao: Option<Permissao>,
+    /// Os recursos decididos, crus, como o pedido os trouxe: o handler só
+    /// muda o que está aqui — ver [`recurso_decidido`] —, e a reconfirmação
+    /// decide de novo sobre eles — ver [`reconfirmar`].
+    recursos: Vec<String>,
+    /// O programa de quem pediu, se é um processo: o manifesto dele limita
+    /// a reconfirmação como limitou a decisão.
+    programa: Option<Programa>,
 }
 
 /// Quem pediu o comando em execução: a autoridade diz **por quem** ele
@@ -368,6 +391,7 @@ fn como_comando<R>(
         pedinte,
         destino,
         decidido,
+        anexo: Vec::new(),
     };
     // A vaga deste fio, se ele já executava um comando; senão, uma livre.
     // Não falta vaga: há uma por fio, e um fio ocupa no máximo uma.
@@ -990,6 +1014,51 @@ fn recurso_do_pedido(comando: &Command, params: Json) -> String {
     }
 }
 
+/// Os recursos de um pedido além do primeiro — ver [`Mais`]: crus, como
+/// [`recurso_do_pedido`]. Um parâmetro de recurso que não é texto, ou uma
+/// lista que não é lista, dá um recurso vazio — que nenhuma permissão de
+/// caminho alcança.
+fn mais_recursos(comando: &Command, params: Json) -> Vec<String> {
+    let texto = |v: Option<Json>| match v.and_then(|v| v.as_str()) {
+        Some(t) => t.to_string(),
+        None => String::new(),
+    };
+    match comando.mais {
+        Mais::Nada => Vec::new(),
+        Mais::Parametro(nome) => alloc::vec![texto(params.member(nome))],
+        Mais::Lote(campo) => {
+            let Some(ops) = params.member(campo) else {
+                return alloc::vec![String::new()];
+            };
+            // Até uma operação além do teto do lote: o handler recusa o lote
+            // grande demais, e o gate não varre uma lista sem fim.
+            let mut v = Vec::new();
+            for op in (0..=MAIS_OPS_POR_LOTE).map_while(|i| ops.item(i)) {
+                v.push(texto(op.member("path")));
+                if op.member("to").is_some() {
+                    v.push(texto(op.member("to")));
+                }
+            }
+            if v.is_empty() {
+                v.push(String::new());
+            }
+            v
+        }
+    }
+}
+
+/// Os recursos que o gate decide: o do parâmetro `recurso`, quando o
+/// comando declara um, e os de [`Mais`]. Um comando sem nenhum decide o
+/// recurso vazio — que nenhuma permissão de caminho alcança.
+fn todos_os_recursos<'r>(
+    comando: &Command,
+    recurso: &'r str,
+    mais: &'r [String],
+) -> impl Iterator<Item = &'r str> {
+    let primeiro = (comando.recurso.is_some() || mais.is_empty()).then_some(recurso);
+    primeiro.into_iter().chain(mais.iter().map(String::as_str))
+}
+
 /// A decisão sobre uma permissão e um recurso, com a regra que vale para
 /// todo papel: o diretório reservado do kernel não é recurso de ninguém.
 fn decidir(papel: Option<&str>, permissao: Permissao, recurso: &str) -> (Codigo, &'static str) {
@@ -1080,6 +1149,17 @@ impl Autorizado {
     /// Executa o comando com a autoridade de quem pediu — que `user.run`,
     /// por exemplo, grava no processo que lança.
     pub fn executar(self, params: Json, w: &mut JsonWriter) -> fmt::Result {
+        self.executar_com_anexo(params, Vec::new(), w)
+    }
+
+    /// [`Autorizado::executar`], com o anexo do pedido — ver
+    /// [`MAIOR_ANEXO`] e [`tirar_anexo`].
+    pub fn executar_com_anexo(
+        self,
+        params: Json,
+        anexo: Vec<u8>,
+        w: &mut JsonWriter,
+    ) -> fmt::Result {
         let Autorizado {
             comando,
             autoridade,
@@ -1088,6 +1168,9 @@ impl Autorizado {
             decidido,
         } = self;
         como_comando(autoridade, pedinte, destino, Some(decidido), || {
+            if !anexo.is_empty() {
+                por_anexo(anexo);
+            }
             (comando.handler)(params, w)
         })
     }
@@ -1114,6 +1197,160 @@ pub fn auditar_execucao(recurso: &str, codigo: Codigo, detalhe: &str) -> u64 {
     };
     let detalhe = alloc::format!("{detalhe}; decisao {decisao}");
     auditar(&quem, metodo, recurso, codigo, &[], &detalhe)
+}
+
+/// Põe o anexo na vaga do comando deste fio.
+fn por_anexo(anexo: Vec<u8>) {
+    let eu = crate::fios::id_atual();
+    crate::arch::sem_interrupcoes(|| {
+        if let Some(c) = EM_EXECUCAO
+            .lock()
+            .iter_mut()
+            .flatten()
+            .find(|c| c.fio == eu)
+        {
+            c.anexo = anexo;
+        }
+    });
+}
+
+/// O anexo do pedido do comando em execução neste fio — tirado: um comando
+/// o lê uma vez. Vazio fora de um comando, ou num pedido sem anexo.
+pub fn tirar_anexo() -> Vec<u8> {
+    let eu = crate::fios::id_atual();
+    crate::arch::sem_interrupcoes(|| {
+        EM_EXECUCAO
+            .lock()
+            .iter_mut()
+            .flatten()
+            .find(|c| c.fio == eu)
+            .map(|c| core::mem::take(&mut c.anexo))
+            .unwrap_or_default()
+    })
+}
+
+/// Se `caminho` — na forma normal — é um dos recursos que o gate decidiu
+/// para o comando em execução neste fio. O handler de uma mutação confere
+/// cada caminho que vai mudar: nenhuma mudança alcança um caminho que a
+/// decisão não viu, por mais que o handler o tenha montado certo.
+pub fn recurso_decidido(caminho: &str) -> bool {
+    do_comando_deste_fio(|c| {
+        c.decidido.as_ref().is_some_and(|d| {
+            d.recursos
+                .iter()
+                .any(|r| politica::caminho::normalizar(r).as_deref() == Some(caminho))
+        })
+    })
+    .unwrap_or(false)
+}
+
+/// Decide de novo, agora, o comando em execução neste fio — a mesma conta
+/// do gate, sobre a mesma autoridade, a mesma permissão e os mesmos
+/// recursos, com o registro e a política **de agora**.
+///
+/// # A decisão em curso
+///
+/// O gate decide antes de a operação começar; entre os dois, uma
+/// revogação, uma troca de papel ou uma política nova podem passar. Uma
+/// operação que muda estado chama isto no ponto de commit, com a ordem das
+/// gravações na mão: as revogações e as mudanças de política gravam com a
+/// mesma ordem, então a operação ou as vê — e recusa —, ou vem antes delas
+/// inteira. Uma sessão de pessoa que acaba sem passar pela ordem (o
+/// `logout`) acaba no instante em que sai do registro: a operação a vê se
+/// chegar aqui depois disso.
+///
+/// Não grava nada: a recusa é o resultado da execução do comando que o
+/// gate autorizou, e quem chama a grava assim.
+pub fn reconfirmar() -> Result<(), (Codigo, &'static str)> {
+    let Some((autoridade, permissao, recursos, programa)) = do_comando_deste_fio(|c| {
+        c.decidido
+            .as_ref()
+            .map(|d| (c.autoridade, d.permissao, d.recursos.clone(), d.programa))
+    })
+    .flatten() else {
+        return Err((Codigo::Error, "fora de um comando autorizado"));
+    };
+    let Some(permissao) = permissao else {
+        return Ok(());
+    };
+    let quem = match autoridade {
+        Autoridade::Sistema => quem_local("sistema"),
+        Autoridade::Sessao { sessao, chave } => quem_da_autoridade(sessao, chave),
+        Autoridade::Pessoa { sessao } => match quem_da_pessoa(sessao) {
+            Ok(q) => q,
+            Err(_) => {
+                return Err((Codigo::DenyNotAuthenticated, "sessao de pessoa que acabou"));
+            }
+        },
+    };
+    if credenciada(autoridade) && crate::persistencia::revogacoes_desconhecidas().is_some() {
+        return Err((
+            Codigo::DenyNotAuthenticated,
+            "journal recusado: as revogacoes nao se sabem",
+        ));
+    }
+    if programa.is_some_and(|p| !p.permite(permissao)) {
+        return Err((
+            Codigo::DenyPermission,
+            "o manifesto nao declara a permissao",
+        ));
+    }
+    if papel_de_teto(&quem) {
+        return Err(TETO_NAO_SE_EXERCE);
+    }
+    for r in &recursos {
+        let (c, d) = decidir(quem.papel.as_deref(), permissao, r);
+        if !c.permite() {
+            return Err((c, d));
+        }
+    }
+    Ok(())
+}
+
+/// O dono, no armazém, de quem o comando em execução neste fio age por: a
+/// identidade, e não a sessão — um agente pela chave, uma pessoa pelo
+/// identificador dela, o sistema e a serial pelo nome. É quem paga a cota
+/// do que grava. `None` para quem não é ninguém.
+pub fn dono_no_armazem() -> Option<String> {
+    match autoridade_atual() {
+        Autoridade::Sistema => Some("sistema".to_string()),
+        Autoridade::Sessao {
+            sessao: crate::agent::sessao::SERIAL,
+            chave: None,
+        } => Some("serial".to_string()),
+        Autoridade::Sessao { chave: Some(k), .. } => {
+            Some(alloc::format!("agente:{}", sigilo::hex(&k)))
+        }
+        Autoridade::Sessao { chave: None, .. } => None,
+        Autoridade::Pessoa { sessao } => {
+            crate::pessoas::dona_da_sessao(sessao).map(|id| alloc::format!("pessoa:{}", id.texto()))
+        }
+    }
+}
+
+/// A cota de armazém de quem o comando em execução neste fio age por: a
+/// linha `armazem` do papel dele, na política de agora. Sem papel, ou sem
+/// a linha, nenhuma.
+pub fn cota_no_armazem() -> ::armazem::Cota {
+    let quem = match autoridade_atual() {
+        Autoridade::Sistema => quem_local("sistema"),
+        Autoridade::Sessao { sessao, chave } => quem_da_autoridade(sessao, chave),
+        Autoridade::Pessoa { sessao } => match quem_da_pessoa(sessao) {
+            Ok(q) | Err(q) => q,
+        },
+    };
+    if papel_de_teto(&quem) {
+        return ::armazem::Cota::NENHUMA;
+    }
+    com_politica(|p| {
+        quem.papel
+            .as_deref()
+            .and_then(|n| p.papel(n))
+            .map_or(::armazem::Cota::NENHUMA, |r| ::armazem::Cota {
+                bytes: r.armazem.bytes,
+                objetos: r.armazem.objetos,
+            })
+    })
 }
 
 /// Decide um comando. `Ok` com a licença para executá-lo; `Err` com o código
@@ -1234,6 +1471,10 @@ pub fn autorizar(
     passar_pela_taxa(&quem, comando.nome, parametros)?;
 
     let recurso = recurso_do_pedido(comando, params);
+    // Os outros recursos do pedido — o destino de um rename, os caminhos
+    // de um lote —: cada um decidido pela mesma conta, e o primeiro que
+    // recusa recusa o pedido inteiro.
+    let mais = mais_recursos(comando, params);
     let mut destino = None;
     let (codigo, detalhe) = match comando.acesso {
         // A prova é conferida dentro da operação, e a decisão dela é
@@ -1246,9 +1487,27 @@ pub fn autorizar(
             destino = resolvido;
             (codigo, detalhe)
         }
-        Acesso::Exige(permissao) => decidir(quem.papel.as_deref(), permissao, &recurso),
+        Acesso::Exige(permissao) => todos_os_recursos(comando, &recurso, &mais)
+            .map(|r| decidir(quem.papel.as_deref(), permissao, r))
+            .find(|(c, _)| !c.permite())
+            .unwrap_or((Codigo::Allow, "")),
     };
-    let decisao = auditar(&quem, comando.nome, &recurso, codigo, parametros, detalhe);
+    // O recurso da auditoria: todos, em ordem.
+    let mut recurso_gravado = String::new();
+    for r in todos_os_recursos(comando, &recurso, &mais) {
+        if !recurso_gravado.is_empty() {
+            recurso_gravado.push_str(" ; ");
+        }
+        recurso_gravado.push_str(r);
+    }
+    let decisao = auditar(
+        &quem,
+        comando.nome,
+        &recurso_gravado,
+        codigo,
+        parametros,
+        detalhe,
+    );
     if !codigo.permite() {
         return Err(codigo);
     }
@@ -1258,11 +1517,14 @@ pub fn autorizar(
         Acesso::PorProva => None,
     };
     contar(&quem, comando.nome, permissao);
-    let pedinte = match chamador {
-        Chamador::Sessao(s) => Pedinte::Canal(s),
-        Chamador::Pessoa(_) => Pedinte::Pessoa,
-        Chamador::Processo { fio, .. } => Pedinte::Processo(fio),
+    let (pedinte, programa) = match chamador {
+        Chamador::Sessao(s) => (Pedinte::Canal(s), None),
+        Chamador::Pessoa(_) => (Pedinte::Pessoa, None),
+        Chamador::Processo { fio, programa, .. } => (Pedinte::Processo(fio), Some(programa)),
     };
+    let recursos: Vec<String> = todos_os_recursos(comando, &recurso, &mais)
+        .map(String::from)
+        .collect();
     Ok(Autorizado {
         comando,
         autoridade,
@@ -1272,6 +1534,9 @@ pub fn autorizar(
             quem,
             metodo: comando.nome,
             decisao,
+            permissao,
+            recursos,
+            programa,
         },
     })
 }

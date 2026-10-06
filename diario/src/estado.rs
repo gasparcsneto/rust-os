@@ -143,8 +143,9 @@ pub mod tipo {
     /// barramento fingindo ser ele. O fecho de uma base leva o mesmo ponto
     /// como quarto campo.
     pub const CHAVE_DO_TPM: u16 = 28;
-    /// Um arquivo do armazém passou a ter um conteúdo: `[caminho, versão
-    /// (8), o conteúdo inteiro]`. O caminho é relativo à raiz do armazém, e
+    /// Do formato antigo, em que o conteúdo morava neste journal — ver
+    /// [`ARMAZEM_CONFIRMADO`]. Um arquivo do armazém passou a ter um
+    /// conteúdo: `[caminho, versão (8), o conteúdo inteiro]`. O caminho é relativo à raiz do armazém, e
     /// a versão é a do contador do armazém inteiro. O conteúdo vai cifrado
     /// com o registro, como o corpo de uma mensagem.
     pub const ARQUIVO_GRAVADO: u16 = 29;
@@ -153,6 +154,16 @@ pub mod tipo {
     /// Na base: a versão da próxima mudança do armazém — `[versão (8)]`. As
     /// versões não se repetem, nem as de arquivos que já saíram.
     pub const ARMAZEM_PROXIMO: u16 = 31;
+    /// O armazém confirmado: `[id do volume (16), setores (8), setores do
+    /// journal (8), âncora (8), elo (32)]`. O conteúdo e os metadados dos
+    /// arquivos moram no volume do armazém, numa partição própria, com um
+    /// journal próprio; este journal guarda só **qual** registro daquele
+    /// vale — a âncora e o elo dele —, e é por isso que um volume devolvido
+    /// a uma cópia anterior não passa: a âncora do TPM protege este journal,
+    /// e este journal diz até onde o do armazém tem de chegar. Os três tipos
+    /// anteriores (`ARQUIVO_GRAVADO`, `ARQUIVO_APAGADO`, `ARMAZEM_PROXIMO`)
+    /// são do formato em que o conteúdo morava aqui, e não se escrevem mais.
+    pub const ARMAZEM_CONFIRMADO: u16 = 32;
 
     /// Se um registro de tipo `tipo` avança o contador do TPM — se ele é uma
     /// transição do estado que a âncora protege.

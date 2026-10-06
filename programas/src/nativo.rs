@@ -149,10 +149,45 @@ pub fn pedir(
     pedir_cru(linha.as_bytes())
 }
 
+/// [`pedir`], com um anexo: bytes que vão junto, fora do JSON — o conteúdo
+/// binário de um arquivo do armazém. Ver
+/// `protocolo::usuario::numero::PEDIR_COM_ANEXO`.
+pub fn pedir_com_anexo(
+    metodo: &str,
+    params: impl FnOnce(&mut JsonWriter) -> fmt::Result,
+    anexo: &[u8],
+) -> Result<Resposta, i64> {
+    let mut linha = String::new();
+    let id = PROXIMO_ID.fetch_add(1, Ordering::Relaxed);
+    let montado = (|| {
+        let mut w = JsonWriter::new(&mut linha);
+        w.begin_object()?;
+        w.field_str("jsonrpc", "2.0")?;
+        w.key("id")?;
+        w.u64_value(id)?;
+        w.field_str("method", metodo)?;
+        w.key("params")?;
+        w.begin_object()?;
+        params(&mut w)?;
+        w.end_object()?;
+        w.end_object()
+    })();
+    if montado.is_err() {
+        return Err(sistema::erro::TAMANHO_INVALIDO);
+    }
+    let tamanho = sistema::pedir_com_anexo(linha.as_bytes(), anexo);
+    receber(tamanho)
+}
+
 /// Pede com a linha já montada — para quem quer mandar o JSON como está,
 /// inclusive quebrado. A resposta, ou o erro da chamada de sistema.
 pub fn pedir_cru(linha: &[u8]) -> Result<Resposta, i64> {
     let tamanho = sistema::pedir(linha);
+    receber(tamanho)
+}
+
+/// A resposta de um pedido que devolveu `tamanho`.
+fn receber(tamanho: i64) -> Result<Resposta, i64> {
     if tamanho < 0 {
         return Err(tamanho);
     }

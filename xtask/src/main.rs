@@ -2513,12 +2513,36 @@ fn conferir_janelas_pelo_toolkit() -> Result<ExitCode, String> {
 const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
     // O handler de um comando: só a licença de `autorizacao::autorizar`.
     (".handler)(", &["kernel/src/autorizacao.rs"]),
-    // Escrever no disco: só o journal. A janela de escrita, só o boot (e a
-    // definição dela no driver). O driver confere a janela em toda escrita,
-    // contra qualquer chamador — isto confere que não há outro chamador. A
-    // suíte, que esta conferência não lê, exercita os três.
-    (".gravar_setores(", &["kernel/src/persistencia.rs"]),
-    (".descarregar_disco(", &["kernel/src/persistencia.rs"]),
+    // Escrever no disco: só o journal de estado e o volume do armazém, cada
+    // um pela sua janela — o journal na de estado, o volume na dele. As
+    // janelas, só o boot (e a definição delas no driver). O driver confere
+    // a janela em toda escrita, contra qualquer chamador — isto confere que
+    // não há outro chamador, e que nenhum dos dois escreve pela janela do
+    // outro. A suíte, que esta conferência não lê, exercita os três.
+    (
+        ".gravar_setores(",
+        &["kernel/src/persistencia.rs", "kernel/src/volume.rs"],
+    ),
+    (
+        ".descarregar_disco(",
+        &["kernel/src/persistencia.rs", "kernel/src/volume.rs"],
+    ),
+    (
+        "Janela::Estado",
+        &[
+            "kernel/src/persistencia.rs",
+            "kernel/src/virtio/blk.rs",
+            "kernel/src/main.rs",
+        ],
+    ),
+    (
+        "Janela::Armazem",
+        &[
+            "kernel/src/volume.rs",
+            "kernel/src/virtio/blk.rs",
+            "kernel/src/main.rs",
+        ],
+    ),
     (
         "fixar_janela_de_escrita(",
         &["kernel/src/virtio/blk.rs", "kernel/src/main.rs"],
@@ -2596,19 +2620,30 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
         "autorizacao::destino_decidido(",
         &["kernel/src/agent/commands.rs"],
     ),
-    // O armazém: uma mutação, um arrendamento ou a soltura dele só pelos
-    // handlers dos comandos `fs.*` — depois da decisão do gate; a gravação
-    // no journal e a conferência só do arrendamento, só pelo módulo do
-    // armazém, na ordem dele; e a reposição, só pelo boot, da persistência.
+    // O armazém: uma mutação, um rascunho, um arrendamento ou a soltura
+    // dele só pelos handlers dos comandos `fs.*` — depois da decisão do
+    // gate. O lote vai ao volume e é confirmado no journal de estado só
+    // pelo módulo do armazém, na ordem dele; a confirmação também pelo
+    // volume, ao criá-lo e ao compactar o journal dele. O volume se abre
+    // só pela persistência, no boot, com o que o journal de estado
+    // confirmou, e só o volume troca o armazém em memória pelo reposto.
     ("armazem::mudar(", &["kernel/src/agent/commands.rs"]),
+    ("armazem::rascunho(", &["kernel/src/agent/commands.rs"]),
+    ("armazem::descartar(", &["kernel/src/agent/commands.rs"]),
     ("armazem::arrendar(", &["kernel/src/agent/commands.rs"]),
     ("armazem::soltar(", &["kernel/src/agent/commands.rs"]),
-    ("persistencia::gravar_armazem(", &["kernel/src/armazem.rs"]),
+    (
+        "persistencia::confirmar_armazem(",
+        &["kernel/src/armazem.rs", "kernel/src/volume.rs"],
+    ),
+    ("volume::escrever_lote(", &["kernel/src/armazem.rs"]),
+    ("volume::confirmar(", &["kernel/src/armazem.rs"]),
+    ("volume::abrir(", &["kernel/src/persistencia.rs"]),
+    ("volume::sem_persistencia(", &["kernel/src/persistencia.rs"]),
+    ("armazem::trocar(", &["kernel/src/volume.rs"]),
     ("coordenacao::conferir(", &["kernel/src/armazem.rs"]),
     ("coordenacao::tomar_por(", &["kernel/src/armazem.rs"]),
     ("coordenacao::soltar_por(", &["kernel/src/armazem.rs"]),
-    ("armazem::restaurar(", &["kernel/src/persistencia.rs"]),
-    ("armazem::fixar_proxima(", &["kernel/src/persistencia.rs"]),
     // Revogar a credencial de um administrador, e descartar os desafios
     // pendentes, só pela operação de quórum.
     (
@@ -4239,8 +4274,8 @@ mod chaves {
 }
 
 mod disco {
-    /// O disco inteiro: as três partições e a cópia da GPT no fim.
-    pub const SETORES: u64 = 200 * 1024 * 1024 / 512;
+    /// O disco inteiro: as quatro partições e a cópia da GPT no fim.
+    pub const SETORES: u64 = 272 * 1024 * 1024 / 512;
 
     /// Onde a ESP começa e quanto ocupa.
     ///
@@ -4264,6 +4299,15 @@ mod disco {
     pub const ESTADO_EM: u64 = RAIZ_EM + RAIZ_SETORES;
     pub const ESTADO_SETORES: u64 = 16 * 1024 * 1024 / 512;
     pub const GUID_DO_ESTADO: &str = "6D7A3C1E-5B2F-4E8A-9C41-D0A7E5C3F911";
+
+    /// E o volume do armazém, depois do estado: a outra área em que o
+    /// kernel escreve, por uma janela própria do driver — o conteúdo dos
+    /// arquivos e o journal dos metadados deles. O estado de autoridade não
+    /// divide partição com ele: encher o volume não enche o journal das
+    /// credenciais. O mesmo GUID está em `kernel/src/particoes.rs`.
+    pub const ARMAZEM_EM: u64 = ESTADO_EM + ESTADO_SETORES;
+    pub const ARMAZEM_SETORES: u64 = 64 * 1024 * 1024 / 512;
+    pub const GUID_DO_ARMAZEM: &str = "4A1F7C3B-92D6-4E5A-8B07-C3E91D6F2A58";
 
     /// A faixa que a GPT reserva e ninguém usa: do fim das entradas de
     /// partição até o começo da primeira.
@@ -4534,7 +4578,7 @@ fn receita_do_disco(programas: &[(String, Vec<u8>)]) -> String {
     // ficou no lugar, e os casos da descida reprovaram dizendo a verdade
     // sobre uma imagem que já não existia no código.
     let mut receita = format!(
-        "v7 setores={} esp={}+{} raiz={}+{} estado={}+{}:{} padrao={}..{}\n",
+        "v8 setores={} esp={}+{} raiz={}+{} estado={}+{}:{} armazem={}+{}:{} padrao={}..{}\n",
         disco::SETORES,
         disco::ESP_EM,
         disco::ESP_SETORES,
@@ -4543,6 +4587,9 @@ fn receita_do_disco(programas: &[(String, Vec<u8>)]) -> String {
         disco::ESTADO_EM,
         disco::ESTADO_SETORES,
         disco::GUID_DO_ESTADO,
+        disco::ARMAZEM_EM,
+        disco::ARMAZEM_SETORES,
+        disco::GUID_DO_ARMAZEM,
         disco::PADRAO_DE,
         disco::PADRAO_ATE,
     );
@@ -4701,6 +4748,24 @@ fn montar_disco(caminho: &Path, programas: &[(String, Vec<u8>)]) -> Result<(), S
             &imagem,
         ],
     )?;
+    // O volume do armazém nasce zerado também: é o primeiro boot que o
+    // formata, e a criação é confirmada no journal de estado.
+    ferramenta(
+        "sgdisk",
+        &[
+            "-n",
+            &format!(
+                "4:{}:+{}M",
+                disco::ARMAZEM_EM,
+                disco::ARMAZEM_SETORES * 512 / 1024 / 1024
+            ),
+            "-t",
+            &format!("4:{}", disco::GUID_DO_ARMAZEM),
+            "-c",
+            "4:duke-armazem",
+            &imagem,
+        ],
+    )?;
 
     // A ESP, com os arquivos dentro. Ela é montada num arquivo próprio e
     // depositada na imagem depois: `mkfs.vfat` não sabe escrever a partir de
@@ -4823,11 +4888,27 @@ fn diretorio_do_tpm(arch: Arquitetura) -> PathBuf {
 fn zerar_o_estado(arch: Arquitetura) -> Result<(), String> {
     let disco = disco_de_testes()?;
     escrever_no_estado(&disco, &vec![0u8; (disco::ESTADO_SETORES * 512) as usize])?;
+    zerar_o_armazem(&disco)?;
     let _ = std::fs::remove_dir_all(diretorio_do_signatario(arch));
     let tpm = diretorio_do_tpm(arch);
     let _ = std::fs::remove_dir_all(&tpm);
     std::fs::create_dir_all(tpm.join("estado"))
         .map_err(|e| format!("não foi possível criar {}: {e}", tpm.display()))
+}
+
+/// Zera o volume do armazém: um volume que sobra de um estado apagado não
+/// tem confirmação que o explique, e o boot o recusaria.
+fn zerar_o_armazem(disco: &Path) -> Result<(), String> {
+    use std::io::{Seek, SeekFrom};
+    let mut arquivo = std::fs::OpenOptions::new()
+        .write(true)
+        .open(disco)
+        .map_err(|e| format!("não foi possível abrir {}: {e}", disco.display()))?;
+    arquivo
+        .seek(SeekFrom::Start(disco::ARMAZEM_EM * 512))
+        .and_then(|_| arquivo.write_all(&vec![0u8; (disco::ARMAZEM_SETORES * 512) as usize]))
+        .and_then(|()| arquivo.sync_all())
+        .map_err(|e| format!("não foi possível zerar o volume do armazém: {e}"))
 }
 
 /// Os bytes da partição de estado do disco, inteiros.
@@ -7419,6 +7500,46 @@ impl AgenteNaPorta {
         }
     }
 
+    /// Um pedido com anexo: os bytes vão antes, em quadros cujo claro
+    /// começa com zero, e o pedido os declara em `attachment` — que
+    /// `params` não traz; ele é acrescentado aqui.
+    fn pedir_com_anexo(
+        &mut self,
+        metodo: &str,
+        params: &str,
+        anexo: &[u8],
+    ) -> Result<String, String> {
+        // Quadros de 4 KiB: bem acima do menor que o kernel reserva para o
+        // enquadramento, e pequenos o bastante para nenhum ficar preso.
+        let mut cifrado = vec![0u8; sigilo::MAIOR_MENSAGEM];
+        let mut quadros = Vec::new();
+        for pedaco in anexo.chunks(4096) {
+            let mut claro = Vec::with_capacity(pedaco.len() + 1);
+            claro.push(0u8);
+            claro.extend_from_slice(pedaco);
+            let n = self
+                .transporte
+                .cifrar(&claro, &mut cifrado)
+                .map_err(|e| format!("agentes: o anexo nao cifrou: {}", e.motivo()))?;
+            quadros.extend(
+                sigilo::quadro::montar(sigilo::quadro::Tipo::Dados, &cifrado[..n])
+                    .map_err(|e| e.motivo().to_string())?,
+            );
+        }
+        self.mandar(&quadros)?;
+        let corpo = params
+            .trim_end()
+            .strip_suffix('}')
+            .ok_or("agentes: os parametros nao sao um objeto")?;
+        let separador = if corpo.trim_end().ends_with('{') {
+            ""
+        } else {
+            ","
+        };
+        let params = format!(r#"{corpo}{separador}"attachment":{}}}"#, anexo.len());
+        self.pedir(metodo, &params)
+    }
+
     fn pedir(&mut self, metodo: &str, params: &str) -> Result<String, String> {
         let (id, quadro) = self.quadro_do_pedido(metodo, params)?;
         self.mandar(&quadro)?;
@@ -8873,6 +8994,15 @@ fn sob_o_armazem(
             .and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next())
             .and_then(|n| n.parse().ok())
     };
+    // Os diretórios são explícitos: o volume nasce vazio, e o compartilhado
+    // é criado pelo sistema — que já existir, de uma volta anterior, não é
+    // erro.
+    let criado = pedir("fs.mkdir", r#"{"path":"/armazem/compartilhado"}"#)?;
+    if !criado.contains(r#""ok":true"#) && !criado.contains("ja ha algo nesse caminho") {
+        return Err(format!(
+            "armazem: o mkdir do compartilhado falhou\n  {criado}"
+        ));
+    }
     const C: &str = "/armazem/compartilhado/fumaca.txt";
     let estado = pedir("fs.stat", &format!(r#"{{"path":"{C}"}}"#))?;
     let antes = versao(&estado, "version")
@@ -8929,6 +9059,38 @@ fn sob_o_armazem(
         std::thread::sleep(Duration::from_millis(150));
     }
     println!("  [armazem] ok  guardar saiu com 77");
+
+    // Um agente de verdade, numa porta, manda binário fora do JSON: todos
+    // os bytes, o zero e o fim de linha incluídos, em quadros de anexo da
+    // sessão cifrada — e o kernel grava exatamente aquele tamanho.
+    let mut agente = AgenteNaPorta::conectar(arch, 1)?;
+    const B: &str = "/armazem/compartilhado/fumaca.bin";
+    let estado = agente.pedir("fs.stat", &format!(r#"{{"path":"{B}"}}"#))?;
+    let antes = versao(&estado, "version")
+        .ok_or_else(|| format!("armazem: fs.stat do binario sem versao\n  {estado}"))?;
+    let bytes: Vec<u8> = (0..20_000u32).map(|i| (i % 256) as u8).collect();
+    let gravado = agente.pedir_com_anexo(
+        "fs.write",
+        &format!(r#"{{"path":"{B}","expect_version":{antes}}}"#),
+        &bytes,
+    )?;
+    if !gravado.contains(r#""ok":true"#) || versao(&gravado, "size") != Some(bytes.len() as u64) {
+        return Err(format!(
+            "armazem: o anexo do agente nao foi gravado inteiro\n  {gravado}"
+        ));
+    }
+    // E um anexo que o pedido não declara não chega a lugar nenhum.
+    let sem = agente.pedir_com_anexo("agent.ping", "{}", b"sobra")?;
+    if !sem.contains(r#""error""#) {
+        return Err(format!(
+            "armazem: um anexo num comando que nao o aceita passou\n  {sem}"
+        ));
+    }
+    drop(agente);
+    println!(
+        "  [armazem] ok  binario de um agente pelo anexo, {} bytes",
+        bytes.len()
+    );
     Ok(())
 }
 

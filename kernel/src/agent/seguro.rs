@@ -321,9 +321,18 @@ impl Porta {
         match transporte.decifrar(mensagem, &mut claro) {
             Ok(n) => {
                 sessoes::devolver(self.p, transporte);
-                for &b in &claro[..n] {
-                    texto(b);
+                // Um quadro cujo claro começa com zero é anexo — bytes
+                // fora do JSON, para o pedido seguinte, que os declara
+                // em `attachment`. O texto JSON nunca tem um zero.
+                match claro[..n].split_first() {
+                    Some((0, anexo)) => sessoes::acrescentar_anexo(self.p, anexo),
+                    _ => {
+                        for &b in &claro[..n] {
+                            texto(b);
+                        }
+                    }
                 }
+                politica::sigiloso::zerar(&mut claro);
             }
             Err(e) => {
                 drop(transporte);

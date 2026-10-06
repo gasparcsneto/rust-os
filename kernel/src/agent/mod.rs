@@ -542,6 +542,14 @@ fn processar(canal: Canal, linha: &[u8]) {
     // comando fica gravado, com o que se pôde ler dele.
     let chamador = Chamador::Sessao(canal.sessao());
 
+    // O anexo que chegou antes desta linha é dela, e só dela: tirado agora,
+    // reivindicado ou não, e zerado se o pedido não o leva. A serial não
+    // tem quadros, nem anexo.
+    let anexo = match canal {
+        Canal::Porta(p) => crate::sessoes::tirar_anexo(p),
+        Canal::Serial => Ok(crate::sessoes::AnexoDaPorta::nenhum()),
+    };
+
     let requisicao = match Requisicao::parse(linha) {
         Ok(r) => r,
         Err((id, erro)) => {
@@ -573,6 +581,28 @@ fn processar(canal: Canal, linha: &[u8]) {
         );
     }
 
+    // O anexo confere com o que o pedido declara, byte a byte em número:
+    // um anexo sem declaração, uma declaração sem anexo, ou um tamanho que
+    // não confere é um pedido malformado — nada chega ao gate.
+    let declarado = requisicao
+        .params
+        .member("attachment")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let anexo = match anexo {
+        Ok(a) if a.len() as u64 == declarado => a,
+        Ok(_) | Err(()) => {
+            let motivo = "o anexo nao confere com attachment, ou passou do teto";
+            autorizacao::auditar_invalido(chamador, comando.nome, requisicao.params.0, motivo);
+            return responder_erro(
+                canal,
+                requisicao.id,
+                RpcError::PARAMS_INVALIDOS,
+                Some("attachment"),
+            );
+        }
+    };
+
     // A decisão: identidade, sessão, papel, permissão. Só a licença que ela
     // devolve chama o handler — ver [`autorizacao`].
     let licenca = match autorizacao::autorizar(chamador, comando, requisicao.params) {
@@ -588,7 +618,9 @@ fn processar(canal: Canal, linha: &[u8]) {
     };
 
     com_saida(canal, |w| {
-        protocol::envelope_ok(w, requisicao.id, |w| licenca.executar(requisicao.params, w))
+        protocol::envelope_ok(w, requisicao.id, |w| {
+            licenca.executar_com_anexo(requisicao.params, anexo.entregar(), w)
+        })
     });
 
     // Com a resposta inteira no fio, é seguro morrer. Daqui não se volta: o

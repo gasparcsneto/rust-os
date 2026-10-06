@@ -212,8 +212,16 @@ const CENARIOS: &[Cenario] = &[
         rodar: as_mensagens_sobrevivem,
     },
     Cenario {
-        nome: "o armazem sobrevive ao corte: os mesmos arquivos e versoes, e uma versao dada nao volta",
+        nome: "o disco tem a particao do armazem, no tipo e no lugar declarados, depois da de estado",
+        rodar: a_particao_do_armazem,
+    },
+    Cenario {
+        nome: "o armazem sobrevive ao corte: os mesmos nos, conteudos, donos e versoes, e uma versao dada nao volta",
         rodar: o_armazem_sobrevive,
+    },
+    Cenario {
+        nome: "o volume do armazem devolvido a uma fotografia anterior e recusado, e a autoridade segue",
+        rodar: o_volume_antigo_e_recusado,
     },
     Cenario {
         nome: "o prazo de uma mensagem e do tempo logico: nao volta com o RTC, e o vencido nao volta a pendente",
@@ -274,6 +282,14 @@ const CENARIOS_DE_QUEDA: &[Cenario] = &[
     Cenario {
         nome: "a queda em cada fronteira de um registro so de auditoria: ele vale se esta no disco, e a cadeia continua",
         rodar: as_quedas_na_auditoria,
+    },
+    Cenario {
+        nome: "a queda entre o lote no volume e a confirmacao: o lote nao vale, e o volume segue",
+        rodar: a_queda_entre_o_volume_e_a_confirmacao,
+    },
+    Cenario {
+        nome: "a queda em cada fronteira da confirmacao de um lote: ele vale inteiro exatamente quando o registro de estado esta no disco",
+        rodar: as_quedas_num_lote,
     },
     Cenario {
         nome: "a compactacao do coletor sobrevive ao corte: o estado, a geracao e a auditoria continuam",
@@ -1744,37 +1760,96 @@ fn versao_no_armazem(m: &mut Ligada, caminho: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("fs.stat sem versao\n  {r}"))
 }
 
-/// O armazém sobrevive ao corte de energia: cada gravação confirmada está
-/// no journal, e o boot a repõe — o mesmo conteúdo, a mesma versão; o
-/// apagado continua apagado, e a próxima versão não volta a uma já dada.
-/// Pela serial, que é do papel `sistema`.
+/// Um pedido ao armazém pela serial, que tem de ser confirmado.
+fn no_armazem(m: &mut Ligada, metodo: &str, params: &str) -> Result<String, String> {
+    let r = m.pedir(metodo, params)?;
+    if !r.contains(r#""ok":true"#) || !r.contains(r#""durable":true"#) {
+        return Err(format!("{metodo} {params} nao foi confirmado\n  {r}"));
+    }
+    Ok(r)
+}
+
+/// A GPT diz onde o volume do armazém mora: a quarta partição, do tipo do
+/// Duke para o armazém, logo depois da de estado — conferido pelo
+/// `sgdisk`, de fora. As duas não se cruzam.
+fn a_particao_do_armazem(_: Arquitetura, _: &Artefato) -> Result<String, String> {
+    let disco = disco_de_testes()?;
+    let saida = Command::new("sgdisk")
+        .args(["-i", "4", &disco.display().to_string()])
+        .output()
+        .map_err(|e| format!("não foi possível rodar o sgdisk: {e}"))?;
+    let texto = String::from_utf8_lossy(&saida.stdout);
+    let ultimo = disco::ARMAZEM_EM + disco::ARMAZEM_SETORES - 1;
+    for esperado in [
+        format!("Partition GUID code: {}", disco::GUID_DO_ARMAZEM),
+        format!("First sector: {} ", disco::ARMAZEM_EM),
+        format!("Last sector: {ultimo} "),
+        "Partition name: 'duke-armazem'".to_string(),
+    ] {
+        if !texto.contains(&esperado) {
+            return Err(format!("o sgdisk não diz `{esperado}`:\n{texto}"));
+        }
+    }
+    if disco::ARMAZEM_EM < disco::ESTADO_EM + disco::ESTADO_SETORES {
+        return Err("a partição do armazém cruza a de estado".into());
+    }
+    Ok(format!(
+        "setores {}..={ultimo}, tipo {}",
+        disco::ARMAZEM_EM,
+        disco::GUID_DO_ARMAZEM
+    ))
+}
+
+/// O armazém sobrevive ao corte de energia: cada lote confirmado está no
+/// volume e confirmado no journal de estado, e o boot o repõe — os mesmos
+/// diretórios e arquivos, o mesmo conteúdo, a mesma versão; o apagado
+/// continua apagado, o renomeado continua no lugar novo, e a próxima
+/// versão não volta a uma já dada. Pela serial, que é do papel `sistema`.
 fn o_armazem_sobrevive(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    const D: &str = "/armazem/sistema/bancada";
     const A: &str = "/armazem/sistema/bancada/a.txt";
     const B: &str = "/armazem/sistema/bancada/b.txt";
+    const C: &str = "/armazem/sistema/bancada/c.txt";
     let mut m = Ligada::subir(arch, artefato, None)?;
+    no_armazem(&mut m, "fs.mkdir", r#"{"path":"/armazem/sistema"}"#)?;
+    no_armazem(&mut m, "fs.mkdir", &format!(r#"{{"path":"{D}"}}"#))?;
     let gravar = |m: &mut Ligada, metodo: &str, caminho: &str, conteudo: Option<&str>| {
         let v = versao_no_armazem(m, caminho)?;
         let params = match conteudo {
             Some(t) => format!(r#"{{"path":"{caminho}","content":"{t}","expect_version":{v}}}"#),
             None => format!(r#"{{"path":"{caminho}","expect_version":{v}}}"#),
         };
-        let r = m.pedir(metodo, &params)?;
-        if !r.contains(r#""ok":true"#) || !r.contains(r#""durable":true"#) {
-            return Err(format!("{metodo} {caminho} nao foi confirmado\n  {r}"));
-        }
-        Ok::<(), String>(())
+        no_armazem(m, metodo, &params).map(|_| ())
     };
     gravar(&mut m, "fs.write", A, Some("um"))?;
     gravar(&mut m, "fs.write", B, Some("dois"))?;
     gravar(&mut m, "fs.append", A, Some(" e mais"))?;
     gravar(&mut m, "fs.delete", B, None)?;
+    // Um lote: dois arquivos num registro só; e o rename de um deles.
+    const E: &str = "/armazem/sistema/bancada/e.txt";
+    no_armazem(
+        &mut m,
+        "fs.batch",
+        &format!(
+            r#"{{"ops":[{{"op":"write","path":"{B}","content":"de lote","expect_version":0}},{{"op":"write","path":"{E}","content":"tambem","expect_version":0}}]}}"#
+        ),
+    )?;
+    let vb = versao_no_armazem(&mut m, B)?;
+    no_armazem(
+        &mut m,
+        "fs.rename",
+        &format!(r#"{{"path":"{B}","to":"{C}","expect_version":{vb}}}"#),
+    )?;
     let va = versao_no_armazem(&mut m, A)?;
+    let vc = versao_no_armazem(&mut m, C)?;
     m.cortar_a_energia()?;
 
     let mut m = Ligada::subir(arch, artefato, None)?;
     let lido = m.pedir("fs.read", &format!(r#"{{"path":"{A}"}}"#))?;
+    let lido_c = m.pedir("fs.read", &format!(r#"{{"path":"{C}"}}"#))?;
     let depois_a = versao_no_armazem(&mut m, A)?;
     let depois_b = versao_no_armazem(&mut m, B)?;
+    let depois_c = versao_no_armazem(&mut m, C)?;
     let novo = m.pedir(
         "fs.write",
         &format!(r#"{{"path":"{B}","content":"de novo","expect_version":0}}"#),
@@ -1785,8 +1860,13 @@ fn o_armazem_sobrevive(arch: Arquitetura, artefato: &Artefato) -> Result<String,
             "o arquivo nao voltou igual: versao {depois_a} e nao {va}\n  {lido}"
         ));
     }
+    if !lido_c.contains(r#""content":"de lote""#) || depois_c != vc {
+        return Err(format!(
+            "o renomeado nao voltou no lugar novo: versao {depois_c} e nao {vc}\n  {lido_c}"
+        ));
+    }
     if depois_b != 0 {
-        return Err(format!("o arquivo apagado voltou, na versao {depois_b}"));
+        return Err(format!("um nome que saiu voltou, na versao {depois_b}"));
     }
     let vn = novo
         .split(r#""version":"#)
@@ -1794,15 +1874,101 @@ fn o_armazem_sobrevive(arch: Arquitetura, artefato: &Artefato) -> Result<String,
         .and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next())
         .and_then(|n| n.parse::<u64>().ok())
         .ok_or_else(|| format!("a gravacao depois do corte foi recusada\n  {novo}"))?;
-    // A remoção de B levou uma versão depois da de A: a próxima passa das
-    // duas.
-    if vn <= va + 1 {
+    if vn <= va.max(vc) {
         return Err(format!(
-            "depois do corte, a versao {vn} nao passa das ja dadas (a ultima de A e {va})"
+            "depois do corte, a versao {vn} nao passa das ja dadas ({va}, {vc})"
         ));
     }
     Ok(format!(
-        "{A} na versao {va}, igual depois do corte; o apagado nao voltou; a seguinte foi {vn}"
+        "{A} na versao {va} e {C} na {vc}, iguais depois do corte; o que saiu nao voltou; a seguinte foi {vn}"
+    ))
+}
+
+/// Os bytes do volume do armazém, inteiros.
+fn ler_o_armazem(disco: &Path) -> Result<Vec<u8>, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut arquivo = std::fs::File::open(disco)
+        .map_err(|e| format!("não foi possível abrir {}: {e}", disco.display()))?;
+    let mut bytes = vec![0u8; (disco::ARMAZEM_SETORES * 512) as usize];
+    arquivo
+        .seek(SeekFrom::Start(disco::ARMAZEM_EM * 512))
+        .and_then(|_| arquivo.read_exact(&mut bytes))
+        .map_err(|e| format!("não foi possível ler o volume do armazém: {e}"))?;
+    Ok(bytes)
+}
+
+/// Devolve o volume do armazém a uma fotografia.
+fn escrever_no_armazem(disco: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::{Seek, SeekFrom, Write};
+    let mut arquivo = std::fs::OpenOptions::new()
+        .write(true)
+        .open(disco)
+        .map_err(|e| format!("não foi possível abrir {}: {e}", disco.display()))?;
+    arquivo
+        .seek(SeekFrom::Start(disco::ARMAZEM_EM * 512))
+        .and_then(|_| arquivo.write_all(bytes))
+        .and_then(|()| arquivo.sync_all())
+        .map_err(|e| format!("não foi possível escrever no volume do armazém: {e}"))
+}
+
+/// O volume devolvido a uma fotografia anterior: o journal de estado diz
+/// que o último lote é um que o volume não tem — o volume não chega à
+/// âncora confirmada, e o armazém fica indisponível, com o motivo. O
+/// estado de autoridade não é do volume: a persistência segue disponível,
+/// e uma operação que não é do armazém continua gravando.
+fn o_volume_antigo_e_recusado(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    const A: &str = "/armazem/sistema/a.txt";
+    let disco = disco_de_testes()?;
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    no_armazem(&mut m, "fs.mkdir", r#"{"path":"/armazem/sistema"}"#)?;
+    no_armazem(
+        &mut m,
+        "fs.write",
+        &format!(r#"{{"path":"{A}","content":"um","expect_version":0}}"#),
+    )?;
+    let v1 = versao_no_armazem(&mut m, A)?;
+    m.cortar_a_energia()?;
+    let foto = ler_o_armazem(&disco)?;
+
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    no_armazem(
+        &mut m,
+        "fs.write",
+        &format!(r#"{{"path":"{A}","content":"dois","expect_version":{v1}}}"#),
+    )?;
+    m.cortar_a_energia()?;
+    escrever_no_armazem(&disco, &foto)?;
+
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let estado = m.pedir("fs.stat", &format!(r#"{{"path":"{A}"}}"#))?;
+    let gravar = m.pedir(
+        "fs.write",
+        &format!(r#"{{"path":"{A}","content":"tres","expect_version":{v1}}}"#),
+    )?;
+    let p = persistencia_de(&mut m)?;
+    m.cortar_a_energia()?;
+    if gravar.contains(r#""ok":true"#) {
+        return Err(format!(
+            "o volume antigo aceitou uma gravacao por cima do que o journal de estado confirmou\n  {gravar}"
+        ));
+    }
+    if estado.contains(r#""content":"um""#) {
+        return Err(format!("o volume antigo foi lido como atual\n  {estado}"));
+    }
+    if p.estado != "available" {
+        return Err(format!(
+            "o volume antigo derrubou o estado de autoridade: a persistencia esta {}",
+            p.estado
+        ));
+    }
+    Ok(format!(
+        "a gravacao foi recusada ({}), e a persistencia segue {}",
+        gravar
+            .split(r#""error":""#)
+            .nth(1)
+            .and_then(|r| r.split('"').next())
+            .unwrap_or("?"),
+        p.estado
     ))
 }
 
@@ -1877,6 +2043,7 @@ mod ponto {
     pub const DEPOIS_DA_PRIMEIRA_PARTE: u8 = 14;
     pub const DEPOIS_DO_INCREMENTO: u8 = 15;
     pub const DEPOIS_DA_CHAVE: u8 = 16;
+    pub const LOTE_NO_VOLUME: u8 = 17;
 }
 
 /// Quanto esperar o aviso da queda depois do pedido que a provoca.
@@ -1900,7 +2067,7 @@ fn escrever_setor_do_estado(disco: &Path, setor: u64, bytes: &[u8; 512]) -> Resu
 /// Os tipos de registro do journal, para o plano de queda: a n-ésima
 /// gravação de um tipo. Ver `diario::estado::tipo`.
 mod tipo {
-    pub use diario::estado::tipo::{ABERTURA, AUDITORIA, BASE_FIM, MENSAGENS, OPERACAO};
+    pub use diario::estado::tipo::{ABERTURA, ARMAZEM, AUDITORIA, BASE_FIM, MENSAGENS, OPERACAO};
 }
 
 /// O plano: a energia cai no `ponto` da `gravacao`-ésima gravação de um
@@ -2385,6 +2552,183 @@ fn as_quedas_na_auditoria(arch: Arquitetura, artefato: &Artefato) -> Result<Stri
     Ok(format!(
         "{} quedas: o registro de auditoria vale exatamente quando esta no disco, e a cadeia continua",
         QUEDAS_NA_AUDITORIA.len()
+    ))
+}
+
+/// Os blocos livres do volume, pelo `fs.stat`.
+fn livres_no_volume(m: &mut Ligada) -> Result<u64, String> {
+    let r = m.pedir("fs.stat", r#"{"path":"/armazem"}"#)?;
+    r.split(r#""volume_free_blocks":"#)
+        .nth(1)
+        .and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|n| n.parse().ok())
+        .ok_or_else(|| format!("fs.stat sem volume_free_blocks\n  {r}"))
+}
+
+/// O conteúdo de um arquivo do armazém pelo `fs.read`, ou `None`.
+fn conteudo_no_armazem(m: &mut Ligada, caminho: &str) -> Result<Option<String>, String> {
+    let r = m.pedir("fs.read", &format!(r#"{{"path":"{caminho}"}}"#))?;
+    Ok(r.split(r#""content":""#)
+        .nth(1)
+        .and_then(|r| r.split('"').next())
+        .map(String::from))
+}
+
+/// A energia cai depois de o lote estar inteiro no volume — os blocos e o
+/// registro do journal do armazém, descarregados —, e antes de a
+/// confirmação começar no journal de estado. O boot seguinte não confirma
+/// o que o journal de estado não confirmou: o arquivo é o de antes, na
+/// versão de antes, os blocos do lote voltam a ser livres, e o volume
+/// segue — o próximo lote grava por cima do registro que não valeu.
+fn a_queda_entre_o_volume_e_a_confirmacao(
+    arch: Arquitetura,
+    artefato: &Artefato,
+) -> Result<String, String> {
+    const A: &str = "/armazem/sistema/a.txt";
+    let disco = disco_de_testes()?;
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    no_armazem(&mut m, "fs.mkdir", r#"{"path":"/armazem/sistema"}"#)?;
+    no_armazem(
+        &mut m,
+        "fs.write",
+        &format!(r#"{{"path":"{A}","content":"um","expect_version":0}}"#),
+    )?;
+    let v1 = versao_no_armazem(&mut m, A)?;
+    let livres = livres_no_volume(&mut m)?;
+    m.cortar_a_energia()?;
+
+    plano_de_queda(&disco, ponto::LOTE_NO_VOLUME, tipo::ARMAZEM, 1)?;
+    let m = Ligada::subir(arch, artefato, None)?;
+    let grande = "x".repeat(3000);
+    let caiu = m.pedir_ate_cair(
+        "fs.write",
+        &format!(r#"{{"path":"{A}","content":"{grande}","expect_version":{v1}}}"#),
+    )?;
+    sem_plano(&disco)?;
+    if caiu != ponto::LOTE_NO_VOLUME {
+        return Err(format!(
+            "caiu no ponto {caiu}, e nao entre o volume e a confirmacao"
+        ));
+    }
+
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let depois = conteudo_no_armazem(&mut m, A)?;
+    let vd = versao_no_armazem(&mut m, A)?;
+    let livres_depois = livres_no_volume(&mut m)?;
+    let r = no_armazem(
+        &mut m,
+        "fs.write",
+        &format!(r#"{{"path":"{A}","content":"tres","expect_version":{v1}}}"#),
+    );
+    m.cortar_a_energia()?;
+    if depois.as_deref() != Some("um") || vd != v1 {
+        return Err(format!(
+            "o lote que o journal de estado nao confirmou valeu: {depois:?} na versao {vd}"
+        ));
+    }
+    if livres_depois != livres {
+        return Err(format!(
+            "os blocos do lote nao confirmado nao voltaram: {livres_depois} livres, e nao {livres}"
+        ));
+    }
+    r?;
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let fim = conteudo_no_armazem(&mut m, A)?;
+    m.cortar_a_energia()?;
+    if fim.as_deref() != Some("tres") {
+        return Err(format!(
+            "o lote depois da queda nao sobreviveu a mais um boot: {fim:?}"
+        ));
+    }
+    Ok(format!(
+        "o lote no volume sem confirmacao nao valeu, {livres} blocos livres de novo, e o seguinte gravou"
+    ))
+}
+
+/// A queda em cada fronteira da gravação do registro de estado que
+/// confirma um lote de duas operações — o ponto de commit. O lote vale
+/// **inteiro** exatamente quando o registro de estado está no disco, e
+/// nunca uma operação sem a outra; o boot seguinte sobe com a persistência
+/// e o volume de pé, e o próximo lote grava.
+fn as_quedas_num_lote(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    const A: &str = "/armazem/sistema/a.txt";
+    const B: &str = "/armazem/sistema/b.txt";
+    let disco = disco_de_testes()?;
+    for (ponto, perder, vale, caso) in QUEDAS_NA_GRAVACAO {
+        zerar_o_estado(arch)?;
+        let mut m = Ligada::subir(arch, artefato, None)?;
+        no_armazem(&mut m, "fs.mkdir", r#"{"path":"/armazem/sistema"}"#)?;
+        no_armazem(
+            &mut m,
+            "fs.write",
+            &format!(r#"{{"path":"{A}","content":"um","expect_version":0}}"#),
+        )?;
+        let v1 = versao_no_armazem(&mut m, A)?;
+        m.cortar_a_energia()?;
+
+        plano_de_queda(&disco, ponto, tipo::ARMAZEM, 1)?;
+        let m = Ligada::subir(arch, artefato, None)?;
+        let caiu = m.pedir_ate_cair(
+            "fs.batch",
+            &format!(
+                r#"{{"ops":[{{"op":"write","path":"{A}","content":"dois","expect_version":{v1}}},{{"op":"write","path":"{B}","content":"novo","expect_version":0}}]}}"#
+            ),
+        )?;
+        sem_plano(&disco)?;
+        if caiu != ponto {
+            return Err(format!("{caso}: caiu no ponto {caiu}, e nao no {ponto}"));
+        }
+        if perder {
+            perder_o_ultimo_registro(&disco, None)?;
+        }
+
+        let mut m = Ligada::subir(arch, artefato, None)?;
+        let p = persistencia_de(&mut m)?;
+        let a = conteudo_no_armazem(&mut m, A)?;
+        let b = conteudo_no_armazem(&mut m, B)?;
+        let esperado = if vale {
+            (Some("dois"), Some("novo"))
+        } else {
+            (Some("um"), None)
+        };
+        if (a.as_deref(), b.as_deref()) != esperado {
+            m.cortar_a_energia()?;
+            return Err(format!(
+                "{caso}: depois da queda A={a:?} e B={b:?}, e nao {esperado:?} — o lote {}",
+                if vale {
+                    "devia valer inteiro"
+                } else {
+                    "nao devia valer"
+                }
+            ));
+        }
+        if p.estado != "available" {
+            m.cortar_a_energia()?;
+            return Err(format!(
+                "{caso}: o boot seguinte deixou a persistencia {} ({})",
+                p.estado, p.motivo
+            ));
+        }
+        let va = versao_no_armazem(&mut m, A)?;
+        let r = no_armazem(
+            &mut m,
+            "fs.write",
+            &format!(r#"{{"path":"{A}","content":"tres","expect_version":{va}}}"#),
+        );
+        m.cortar_a_energia()?;
+        r.map_err(|e| format!("{caso}: o lote seguinte nao gravou: {e}"))?;
+        let mut m = Ligada::subir(arch, artefato, None)?;
+        let fim = conteudo_no_armazem(&mut m, A)?;
+        m.cortar_a_energia()?;
+        if fim.as_deref() != Some("tres") {
+            return Err(format!(
+                "{caso}: o lote seguinte nao sobreviveu ao boot: {fim:?}"
+            ));
+        }
+    }
+    Ok(format!(
+        "{} quedas: o lote vale inteiro exatamente quando o registro de estado esta no disco",
+        QUEDAS_NA_GRAVACAO.len()
     ))
 }
 

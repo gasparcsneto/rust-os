@@ -299,6 +299,21 @@ pub unsafe fn esperar_cru(id: u64, ponteiro: u64) -> i64 {
 ///
 /// Quem monta o pedido e lê a resposta é [`crate::nativo`]; esta é só a
 /// chamada.
+pub fn pedir_com_anexo(pedido: &[u8], anexo: &[u8]) -> i64 {
+    let descritor: [u64; 2] = [anexo.as_ptr() as u64, anexo.len() as u64];
+    // SAFETY: as fatias e o descritor são deste processo, com os tamanhos
+    // ditos; o kernel copia tudo antes de voltar.
+    unsafe {
+        chamar(
+            numero::PEDIR_COM_ANEXO,
+            pedido.as_ptr() as u64,
+            pedido.len() as u64,
+            descritor.as_ptr() as u64,
+        )
+    }
+}
+
+/// `pedir(ptr, tamanho)`: ver `protocolo::usuario::numero::PEDIR`.
 pub fn pedir(pedido: &[u8]) -> i64 {
     // SAFETY: a fatia é deste processo e tem o tamanho dito; o kernel a
     // copia antes de voltar.

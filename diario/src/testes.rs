@@ -1297,3 +1297,67 @@ fn a_auditoria_repetida_nao_entra() {
     assert_eq!(tpm.0, 1001);
     assert_eq!(julgar(lido.ultima_ancora(), Some(tpm.0)), Veredito::Confere);
 }
+
+/// O percurso até uma âncora: o journal de um armazém, cujo contador é o
+/// journal de estado. O registro além da âncora confirmada não é lido nem
+/// entregue; o percurso para nele com [`Parada::Alem`], o elo é o do último
+/// confirmado, e o escritor que continua dali escreve por cima dele — e o
+/// journal que resulta se lê inteiro, com o registro novo no lugar.
+#[test]
+fn o_percurso_para_na_ancora_confirmada() {
+    let mut m = Memoria::nova(256);
+    let mut esc = Escritor::depois_de(&Percorrido::vazio(), 0, 256);
+    let mut tpm = Contador(0);
+    for n in 0..3 {
+        gravar(&mut m, &mut esc, &mut tpm, n, &[n as u8; 300]);
+    }
+    let inteiro = percorrer(&mut m, &CHAVE, |_| Ok::<(), ()>(())).unwrap();
+    assert_eq!(inteiro.quantos, 3);
+    // Confirmada até a âncora 2: o terceiro não vale.
+    let mut entregues = Vec::new();
+    let ate = percorrer_ate(&mut m, &CHAVE, 2, |r| {
+        entregues.push(r.ancora);
+        Ok::<(), ()>(())
+    })
+    .unwrap();
+    assert_eq!(entregues, [1, 2]);
+    assert_eq!(ate.quantos, 2);
+    assert_eq!(ate.ultima_ancora(), Some(2));
+    let Parada::Alem { setor } = ate.parada else {
+        panic!("{:?}", ate.parada)
+    };
+    assert_eq!(setor, ate.proximo_setor);
+    let dois = percorrer(
+        &mut Memoria {
+            bytes: m.bytes[..setor as usize * TAM_SETOR].to_vec(),
+            descargas: 0,
+            cortar: None,
+        },
+        &CHAVE,
+        |_| Ok::<(), ()>(()),
+    );
+    assert_eq!(dois.unwrap().elo, ate.elo);
+    // Quem continua dali escreve por cima do que não valia.
+    let mut esc = Escritor::depois_de(&ate, 2, 256);
+    let mut tpm = Contador(2);
+    gravar(&mut m, &mut esc, &mut tpm, 7, &[0xEE; 40]);
+    let mut lidos = Vec::new();
+    let p = percorrer(&mut m, &CHAVE, |r| {
+        lidos.push((r.ancora, r.tipo));
+        Ok::<(), ()>(())
+    })
+    .unwrap();
+    assert_eq!(
+        lidos,
+        [
+            (1, tipo_de_teste(0)),
+            (2, tipo_de_teste(1)),
+            (3, tipo_de_teste(7))
+        ]
+    );
+    assert_eq!(p.parada, Parada::Fim);
+    // Até uma âncora antes da primeira: nada.
+    let nada = percorrer_ate(&mut m, &CHAVE, 0, |_| Ok::<(), ()>(())).unwrap();
+    assert_eq!(nada.quantos, 0);
+    assert_eq!(nada.parada, Parada::Alem { setor: 0 });
+}

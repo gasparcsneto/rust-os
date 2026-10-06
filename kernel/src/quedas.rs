@@ -76,6 +76,11 @@ pub enum Ponto {
     DepoisDoIncremento = 15,
     /// No boot: a EK conferida com a fixada, e o contador ainda não lido.
     DepoisDaChave = 16,
+    /// Um lote do armazém inteiro no volume — os blocos e o registro do
+    /// journal dele, descarregados —, e a confirmação ainda não começada no
+    /// journal de estado. Conta como da gravação de estado que viria a
+    /// seguir: a n-ésima do tipo do plano.
+    LoteNoVolume = 17,
 }
 
 static PONTO: AtomicU8 = AtomicU8::new(0);
@@ -176,7 +181,16 @@ pub fn aqui(p: Ponto) {
             | Ponto::NascimentoGuardado
             | Ponto::DepoisDaChave
     );
-    if de_gravacao
+    if p == Ponto::LoteNoVolume {
+        // A gravação de estado que confirmaria o lote ainda não começou: a
+        // conta é a dela, a próxima.
+        let tipo = TIPO.load(Ordering::Relaxed);
+        if (tipo != 0 && tipo != diario::estado::tipo::ARMAZEM)
+            || GRAVACOES.load(Ordering::Relaxed) + 1 != GRAVACAO.load(Ordering::Relaxed)
+        {
+            return;
+        }
+    } else if de_gravacao
         && (!DA_CONTA.load(Ordering::Relaxed)
             || GRAVACOES.load(Ordering::Relaxed) != GRAVACAO.load(Ordering::Relaxed))
     {
