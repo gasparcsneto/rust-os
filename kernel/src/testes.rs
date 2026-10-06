@@ -25543,7 +25543,7 @@ fn pty_a_saida_espera_o_anel() -> Resultado {
             SEGURANDO.store(true, SeqCst);
             // Tempo em voltas: o relógio pode estar parado no núcleo que
             // espera esta tranca.
-            for _ in 0..20_000_000u64 {
+            for _ in 0..5_000_000u64 {
                 core::hint::spin_loop();
             }
         });
@@ -25568,7 +25568,9 @@ fn pty_a_saida_espera_o_anel() -> Resultado {
     // a espera certa, ela só volta depois de ele soltar.
     let segurava = !SOLTOU.load(SeqCst);
     crate::pseudoterminal::saida(INDICE, "texto que nao se perde");
-    esperar_ate(|| SOLTOU.load(SeqCst), 500)?;
+    // O teto é largo: girar no emulador é lento, e o que decide o caso é
+    // o texto no anel, e não o tempo.
+    esperar_ate(|| SOLTOU.load(SeqCst), 6_000)?;
     let veio = crate::pseudoterminal::tirar_de_teste(INDICE);
     if !segurava {
         return Err("o outro nucleo soltou o anel antes da saida: o caso nao disputou nada");
