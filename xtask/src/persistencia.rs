@@ -2275,6 +2275,12 @@ fn agente_entra(arch: Arquitetura, privada: &[u8; 32], nome: &str) -> Result<boo
     )
 }
 
+/// O registro de estado que confirma a criação do volume do armazém: um, no
+/// primeiro boot que abre o journal sobre um disco zerado — o volume nasce
+/// confirmado pelo journal de estado, como cada lote depois dele. Os
+/// cenários que contam registros contam este também.
+const CRIACAO_DO_VOLUME: u64 = 1;
+
 /// O caso de uma queda dentro de uma gravação: o ponto, se a escrita sem
 /// descarga se perde, se a operação vale depois, e como se lê.
 type Caso = (u8, bool, bool, &'static str);
@@ -2383,8 +2389,14 @@ fn as_quedas_numa_operacao(arch: Arquitetura, artefato: &Artefato) -> Result<Str
 
         let mut m = Ligada::subir(arch, artefato, None)?;
         let p = persistencia_de(&mut m)?;
-        // Valendo: abertura, boot, a operação e o boot de agora.
-        conferir_depois_da_queda(&p, caso, if vale { 4 } else { 3 }, u64::from(vale))?;
+        // Valendo: abertura, a criação do volume, boot, a operação e o boot
+        // de agora.
+        conferir_depois_da_queda(
+            &p,
+            caso,
+            CRIACAO_DO_VOLUME + if vale { 4 } else { 3 },
+            u64::from(vale),
+        )?;
         if agente_entra(arch, &privada, &nome)? != vale {
             m.cortar_a_energia()?;
             return Err(format!(
@@ -2421,7 +2433,12 @@ fn as_quedas_numa_operacao(arch: Arquitetura, artefato: &Artefato) -> Result<Str
         let mut m = Ligada::subir(arch, artefato, None)?;
         let p = persistencia_de(&mut m)?;
         m.cortar_a_energia()?;
-        conferir_depois_da_queda(&p, caso, if vale { 6 } else { 5 }, u64::from(vale) + 1)?;
+        conferir_depois_da_queda(
+            &p,
+            caso,
+            CRIACAO_DO_VOLUME + if vale { 6 } else { 5 },
+            u64::from(vale) + 1,
+        )?;
     }
     Ok(format!(
         "{} quedas: cada uma vale exatamente quando o registro esta no disco, e nenhuma deixa o estado recusado",
@@ -2463,7 +2480,7 @@ fn as_quedas_numa_mensagem(arch: Arquitetura, artefato: &Artefato) -> Result<Str
         let mut m = Ligada::subir(arch, artefato, None)?;
         let p = persistencia_de(&mut m)?;
         // A mensagem não sobe a geração.
-        conferir_depois_da_queda(&p, caso, if vale { 4 } else { 3 }, 0)?;
+        conferir_depois_da_queda(&p, caso, CRIACAO_DO_VOLUME + if vale { 4 } else { 3 }, 0)?;
         let lida = super::AgenteNaPorta::conectar(arch, 3)
             .and_then(|mut a| a.pedir("message.read", "{}"))?;
         m.cortar_a_energia()?;
@@ -2505,9 +2522,9 @@ fn as_quedas_na_auditoria(arch: Arquitetura, artefato: &Artefato) -> Result<Stri
 
         let mut m = Ligada::subir(arch, artefato, None)?;
         let p = persistencia_de(&mut m)?;
-        // Abertura, o boot que caiu e o de agora; a auditoria não sobe a
-        // geração.
-        conferir_depois_da_queda(&p, caso, 3, 0)?;
+        // Abertura, a criação do volume, o boot que caiu e o de agora; a
+        // auditoria não sobe a geração.
+        conferir_depois_da_queda(&p, caso, CRIACAO_DO_VOLUME + 3, 0)?;
         let cauda = cauda_da_auditoria(&mut m)?;
         let comeco = comeco_do_boot(&cauda)?;
         let abertos = cauda
@@ -2832,6 +2849,8 @@ fn a_compactacao_sobrevive(arch: Arquitetura, artefato: &Artefato) -> Result<Str
         return Err(format!("a mensagem nao foi duravel\n  {r}"));
     }
     const ARQUIVO: &str = "/armazem/sistema/compacta.txt";
+    // Os diretórios são explícitos: o do sistema nasce aqui.
+    no_armazem(&mut m, "fs.mkdir", r#"{"path":"/armazem/sistema"}"#)?;
     let v0 = versao_no_armazem(&mut m, ARQUIVO)?;
     let r = m.pedir(
         "fs.write",
@@ -3400,7 +3419,7 @@ fn as_quedas_na_criacao(arch: Arquitetura, artefato: &Artefato) -> Result<String
         sem_plano(&disco)?;
         let mut m = Ligada::subir(arch, artefato, None)?;
         let p = persistencia_de(&mut m)?;
-        conferir_depois_da_queda(&p, caso, 2, 0)?;
+        conferir_depois_da_queda(&p, caso, CRIACAO_DO_VOLUME + 2, 0)?;
         let r = administrar(
             &mut m,
             &chaves.administrador,
@@ -3420,7 +3439,7 @@ fn as_quedas_na_criacao(arch: Arquitetura, artefato: &Artefato) -> Result<String
         let mut m = Ligada::subir(arch, artefato, None)?;
         let p = persistencia_de(&mut m)?;
         m.cortar_a_energia()?;
-        conferir_depois_da_queda(&p, caso, 4, 1)?;
+        conferir_depois_da_queda(&p, caso, CRIACAO_DO_VOLUME + 4, 1)?;
     }
     Ok(format!(
         "{} quedas na criacao: cada uma retomada ou completada no boot seguinte",
