@@ -21280,7 +21280,11 @@ fn smp_comandos_simultaneos_cada_um_com_a_sua_autoridade() -> Resultado {
         crate::fios::criar_no_nucleo("teste-comando", comandar, i, onde)?;
     }
     LARGADA.store(true, SeqCst);
-    esperar_ate(|| PRONTOS.load(SeqCst) == FIOS, 3000)
+    // Cedendo, e não girando: com um núcleo só, os quatro fios estão no
+    // mesmo núcleo que este, e quem gira esperando por eles toma a CPU de
+    // que eles precisam — cada `ceder` deles devolvia a vez a quem esperava,
+    // por um quantum inteiro, e o caso passava do teto sem nada de errado.
+    esperar_cedendo(|| PRONTOS.load(SeqCst) == FIOS, 3000)
         .map_err(|_| "os fios dos comandos nao terminaram")?;
     let erros = ERROS.load(SeqCst);
     crate::log_info!(
@@ -24366,6 +24370,22 @@ fn esperar_ate(mut condicao: impl FnMut() -> bool, teto_em_ticks: u64) -> Result
         // pedidos dele ao registro, como a tarefa `programas` atenderia.
         crate::nativo::atender_pendentes();
         core::hint::spin_loop();
+    }
+    Err("a condicao nao se cumpriu dentro do teto de tempo")
+}
+
+/// [`esperar_ate`], cedendo a CPU a cada volta: para esperar fios que
+/// podem estar no mesmo núcleo que quem espera.
+fn esperar_cedendo(mut condicao: impl FnMut() -> bool, teto_em_ticks: u64) -> Resultado {
+    let limite = crate::tempo::ticks().saturating_add(teto_em_ticks);
+    while crate::tempo::ticks() < limite {
+        if condicao() {
+            return Ok(());
+        }
+        crate::fios::ceder();
+    }
+    if condicao() {
+        return Ok(());
     }
     Err("a condicao nao se cumpriu dentro do teto de tempo")
 }

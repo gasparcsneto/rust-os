@@ -856,30 +856,28 @@ achou também dois defeitos de verdade (o coletor de fios devolvendo a vaga
 antes de desmontar o morto, e a calibração do APIC derrubando os outros
 núcleos) e um caso que falhava por acaso (o do zumbi).
 
-As oito que passam, e por quê:
+As oito que passavam foram investigadas uma a uma, na fase 8: cada uma
+reproduzida, classificada por um caso, e mutada de novo. **Nenhuma era
+defeito do código; as oito eram caso faltando**, e as oito agora reprovam
+— cada uma só pelo caso dela (364 de 365 na suíte mutada). Os casos são
+determinísticos: um gancho só da suíte (`#[cfg(feature = "modo-teste")]`)
+abre a janela de propósito, em vez de esperar o acaso acertá-la, e nenhum
+deles muda o caminho de produção nem trata um núcleo de um jeito especial.
 
-- **Marcar um descritor do kernel sem avisar os outros núcleos.** Nenhum
-  chamador de hoje marca página do kernel por ali; a obrigação está na
-  função para o dia em que houver.
-- **A trava sem fila.** A inanição que ela causa é estatística: numa das
-  rodadas ela derrubou o caso do relógio (um núcleo contou 104 tiques em
-  50), na seguinte não.
-- **Reabrir o console esquecendo a sessão que sobrou.** Nenhum caso reabre
-  um console com uma sessão ainda presa nele.
-- **A saída do pseudo-terminal por `try_lock`.** Perde texto só quando dois
-  núcleos escrevem no mesmo anel no mesmo instante, e nenhum caso escreve
-  assim.
-- **Criar um fio sem acordar os núcleos ociosos.** Custa latência — o
-  ocioso acorda no tique seguinte —, não correção.
-- **O tique sem descarregar o console.** Custa latência de eco, que a
-  fumaça mediu (de 280 ms para menos de 20 ms), mas que nenhum caso
-  confere.
-- **A reexecução decidida pelo estado do fio** (no backend do x86). A
-  corrida só foi vista no ARM em release; no x86 de depuração, a janela
-  não é acertada.
-- **O `soltar` liberando o frame fora da trava.** A janela é entre conferir
-  os donos e liberar, e nenhum caso solta o mesmo frame em dois núcleos ao
-  mesmo tempo.
+| Mutação | Era | O caso que a reprova |
+|---|---|---|
+| Marcar um descritor do kernel sem avisar os outros núcleos | contrato sem chamador: nenhum código de hoje marca página do kernel | `paginacao: marcar no kernel avisa todos` — marca uma página do heap como compartilhada (a marca não muda permissão) e confere que o pedido de descarte chegou aos outros núcleos (só x86: no ARM a invalidação é difundida pelo hardware) |
+| A trava sem fila (`try_lock` em laço) | caso não determinístico: a inanição era estatística | `trava: justa entre nucleos` — um fio em cada outro núcleo pede a trava em ordem conhecida; soltada, entram na ordem em que pediram, em 24 voltas |
+| Reabrir o console esquecendo a sessão | caso faltando | `consoles: reabrir encerra a sessao` |
+| A saída do pseudo-terminal por `try_lock` | caso faltando: precisava de dois núcleos no mesmo anel | `pty: a saida espera o anel` — outro núcleo segura o anel enquanto este imprime; o texto tem de estar lá |
+| Criar um fio sem acordar os núcleos ociosos | caso faltando: o efeito é latência | `smp: o fio novo acorda o ocioso` — medido em tiques do próprio núcleo, em oito tentativas: com o cutucão o fio roda no mesmo tique, sem ele no seguinte |
+| O tique sem descarregar o console | caso faltando: o efeito é latência | `tela: o tique leva o que ficou` — escreve com o compositor ocupado, solta, e espera dois tiques sem escrever |
+| A reexecução decidida pelo estado do fio (x86) | caso não determinístico: a janela não era acertada | `fios: a reexecucao e da chamada` — o processo `contido` para entre a chamada voltar e a pergunta; o pedido é atendido nessa hora; ele tem de receber a resposta |
+| O `soltar` liberando o frame fora da trava | caso faltando | `frames: soltar libera na mesma secao` — uma pausa na entrada de `liberar`, para um frame só; outro núcleo compartilha o frame nessa hora |
+
+As limitações que ficam — o núcleo 0 especial, o teto de núcleos, a janela
+de uma decisão em curso — são de desenho, e estão abaixo; nenhum dos casos
+novos as contorna.
 
 ### O que fica de fora
 
@@ -897,9 +895,6 @@ As oito que passam, e por quê:
   ciclos achados foram corrigidos onde moram, e os outros pontos em que um
   callback roda com uma trava na mão foram relidos — mas uma ordem nova,
   escrita depois, só aparece quando dois núcleos a cruzarem.
-- Oito mutações de sincronização passam pela suíte — ver
-  [Mutações](#mutações). As travas e ordens que elas tiram estão no código
-  pelos motivos escritos lá; o que falta é o caso que as prove.
 - Oito núcleos no máximo, e no x86 só os de identificador até 255.
 - Um núcleo que não responde à partida é dado como falho e fica de fora, e
   a vaga do fio ocioso que lhe tinha sido preparada fica presa até o
@@ -1819,6 +1814,42 @@ O programa [`guardar`](programas/src/bin/guardar.rs) faz o caminho inteiro
 de dentro: declara `fs.read` e `fs.write` no manifesto, grava, ouve o
 conflito de versão, lê pelo descritor, vê o `MUDOU`, e é recusado fora do
 alcance de quem o lançou.
+
+### O que as mutações mostraram
+
+Dezesseis mutações dirigidas ao armazém, cada uma contra a suíte inteira
+com quatro núcleos (as da conta pura e da política, contra os testes do
+hospedeiro antes): **dezesseis reprovadas**, cada uma pelo caso do conceito
+que ela tira — o arrendamento que não confere, a persistência que não é
+exigida antes, aplicar antes de gravar, a mutação fora da ordem das
+gravações (reprovada pelo caso de vários núcleos no mesmo arquivo), o
+titular de qualquer um, a versão que não confere, a base fora da ordem das
+versões ou sem a próxima versão, o nó velho lendo o conteúdo novo, o
+resultado auditado em nome do kernel, o diretório arrendado, o sistema
+escrevendo na árvore inteira, o handler que não audita o que fez, a
+gravação sem o conteúdo, o `lease.revoke` que não acha o caminho e os
+filhos fora da ordem dos nomes. Três delas só reprovaram depois de a
+campanha mostrar que os casos não as viam, e os casos ganharam a
+conferência: nenhum anúncio de mudança na auditoria sem persistência, um
+arquivo de versão nova num nome que vem antes, e o que o comando fez em
+nome da pessoa, pelo processo.
+
+### Dívida técnica
+
+- O armazém mora no journal da partição de estado: os tetos (16 KiB, 256
+  arquivos, 512 KiB) são os de um armazém de dados de programas e agentes.
+  Um volume grande pede uma partição própria, com o mesmo formato de
+  registro e o mesmo caminho de autorização.
+- Texto só: o conteúdo vai no JSON do pedido. Binário pede uma chamada de
+  mecanismo que não passe pelo JSON.
+- Sem renomear, sem diretório explícito, sem cota por papel ou titular.
+- Cada mutação é um registro e um avanço do contador do TPM: uma gravação
+  em lote seria um registro só, com um arrendamento sobre vários objetos.
+- Os casos de mensagens da suíte esvaziam a tabela em memória e recomeçam
+  os ids; o journal de antes deles não se reaplica sobre uma imagem limpa
+  depois. Não é do kernel de produção — nada esvazia a tabela fora da
+  suíte —, mas o caso da reposição do armazém compacta antes de conferir
+  por causa disso.
 
 ## Vários agentes
 
