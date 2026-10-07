@@ -28,6 +28,11 @@
 //! `ORDEM → trava`; quem a pede com uma trava na mão acrescenta
 //! `trava → ORDEM`, e as duas juntas são o ciclo.
 //!
+//! E cada classe guarda com que interrupções foi tomada: o impasse de uma
+//! trava só — um handler, ou um fio mascarado, pedindo a trava que o fio
+//! interrompido tem — não aparece como ordem, e aparece como uma classe
+//! tomada nos dois modos.
+//!
 //! O `try_lock` não acrescenta aresta: ele não espera, e não há impasse sem
 //! espera. Mas a trava que ele toma vai para a pilha, e o que se pedir com
 //! ela na mão acrescenta as arestas dela.
@@ -89,6 +94,23 @@ static PRIMEIRA_ONDE: AtomicPtr<Location<'static>> = AtomicPtr::new(core::ptr::n
 static FORA_DA_TABELA: AtomicU64 = AtomicU64::new(0);
 static FORA_DA_PILHA: AtomicU64 = AtomicU64::new(0);
 static SOLTAS_DE_FORA: AtomicU64 = AtomicU64::new(0);
+
+/// Onde cada classe foi tomada — ou segurada — com as interrupções ligadas
+/// pela primeira vez; nulo se nunca foi.
+///
+/// A ordem entre travas não vê o outro impasse: o de uma trava só. Uma
+/// classe tomada com as interrupções ligadas num lugar e mascaradas noutro
+/// é ele esperando acontecer: quem a tem com elas ligadas pode ser
+/// interrompido no meio — por um handler que a pede, ou pela preempção, que
+/// põe no núcleo um fio que a pede mascarado —, e quem pede mascarado gira
+/// para sempre, porque quem a tem só volta pelo núcleo que ele não solta.
+/// Uma classe só de fios, sempre com elas ligadas, não tem o problema: quem
+/// a espera pode ser interrompido também, e quem a tem volta.
+static LIGADA_ONDE: [AtomicPtr<Location<'static>>; CLASSES] =
+    [const { AtomicPtr::new(core::ptr::null_mut()) }; CLASSES];
+/// `MASCARADA[c]`: a classe `c` já foi tomada com as interrupções
+/// mascaradas.
+static MASCARADA: [AtomicBool; CLASSES] = [const { AtomicBool::new(false) }; CLASSES];
 
 /// Depois do caminho fatal, que destrava tudo à força, a conferência não
 /// sabe mais quem tem o quê.
@@ -256,10 +278,12 @@ pub fn ao_tomar(endereco: usize, guardada: &AtomicU16) {
         return;
     }
     let onde = Location::caller();
+    let ligadas = crate::arch::interrupcoes_habilitadas();
     mascarado(|| {
         let Some(c) = classe_em(endereco, guardada, onde) else {
             return;
         };
+        anotar_o_modo(c, ligadas, onde);
         let n = crate::nucleos::atual();
         let altura = ALTURA[n].load(Ordering::Relaxed);
         if altura < PROFUNDIDADE {
@@ -271,10 +295,52 @@ pub fn ao_tomar(endereco: usize, guardada: &AtomicU16) {
     });
 }
 
+/// Anota com que interrupções a classe `c` foi tomada (ou segurada), em
+/// `onde`.
+fn anotar_o_modo(c: usize, ligadas: bool, onde: &'static Location<'static>) {
+    if ligadas {
+        let _ = LIGADA_ONDE[c].compare_exchange(
+            core::ptr::null_mut(),
+            onde as *const _ as *mut _,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    } else {
+        MASCARADA[c].store(true, Ordering::Release);
+    }
+}
+
+/// As classes tomadas nos dois modos — com as interrupções ligadas e
+/// mascaradas: onde a classe foi pedida pela primeira vez, e onde foi
+/// tomada (ou segurada) com elas ligadas.
+pub fn tomadas_nos_dois_modos(
+    mut f: impl FnMut(&'static Location<'static>, &'static Location<'static>),
+) -> u64 {
+    let mut n = 0;
+    for c in 0..CLASSES {
+        let ligada = LIGADA_ONDE[c].load(Ordering::Acquire);
+        if !ligada.is_null() && MASCARADA[c].load(Ordering::Acquire) {
+            n += 1;
+            // SAFETY: só se guardam aqui referências `'static` de
+            // `Location::caller`.
+            f(onde_de(c), unsafe { &*ligada });
+        }
+    }
+    n
+}
+
 /// A trava foi solta: sai da pilha deste núcleo.
 pub fn ao_soltar(guardada: &AtomicU16) {
     if DESLIGADA.load(Ordering::Relaxed) {
         return;
+    }
+    // Tomada mascarada e solta com as interrupções ligadas: ela foi
+    // segurada com elas ligadas, e conta como tal — onde, o da classe.
+    if crate::arch::interrupcoes_habilitadas() {
+        let c = guardada.load(Ordering::Relaxed);
+        if c != NENHUMA {
+            anotar_o_modo(c as usize, true, onde_de(c as usize));
+        }
     }
     mascarado(|| {
         let n = crate::nucleos::atual();
@@ -397,16 +463,33 @@ pub fn tamanho() -> (usize, u32) {
 /// fez — sem que contem para o caso final. Só a suíte, para provar que a
 /// conferência vê.
 pub fn com_inversoes_esperadas(f: impl FnOnce()) -> u64 {
+    com_o_que_se_espera(f).0
+}
+
+/// Roda `f`, que erra de propósito, e devolve quantas inversões e quantas
+/// classes tomadas nos dois modos ela fez — sem que contem para o caso
+/// final.
+pub fn com_o_que_se_espera(f: impl FnOnce()) -> (u64, u64) {
     let antes = INVERSOES.swap(0, Ordering::AcqRel);
     let (de, para, onde) = (
         PRIMEIRA_DE.load(Ordering::Acquire),
         PRIMEIRA_PARA.load(Ordering::Acquire),
         PRIMEIRA_ONDE.load(Ordering::Acquire),
     );
+    let ligadas: [*mut Location<'static>; CLASSES] =
+        core::array::from_fn(|c| LIGADA_ONDE[c].load(Ordering::Acquire));
+    let mascaradas: [bool; CLASSES] =
+        core::array::from_fn(|c| MASCARADA[c].load(Ordering::Acquire));
+    let misturadas_antes = tomadas_nos_dois_modos(|_, _| {});
     f();
+    let misturadas = tomadas_nos_dois_modos(|_, _| {}) - misturadas_antes;
     let feitas = INVERSOES.swap(antes, Ordering::AcqRel);
     PRIMEIRA_DE.store(de, Ordering::Release);
     PRIMEIRA_PARA.store(para, Ordering::Release);
     PRIMEIRA_ONDE.store(onde, Ordering::Release);
-    feitas
+    for c in 0..CLASSES {
+        LIGADA_ONDE[c].store(ligadas[c], Ordering::Release);
+        MASCARADA[c].store(mascaradas[c], Ordering::Release);
+    }
+    (feitas, misturadas)
 }

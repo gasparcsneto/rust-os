@@ -660,7 +660,9 @@ pub static COMANDOS: &[Command] = &[
     },
     Command {
         nome: "fs.read",
-        resumo: "Le um arquivo da arvore e devolve o conteudo como texto.",
+        resumo: "Le um arquivo da arvore. `encoding` diz como o conteudo \
+                 vem: `utf-8` quando o arquivo inteiro e texto, `base64` \
+                 quando nao e.",
         params: &[
             ParamSpec {
                 nome: "path",
@@ -678,7 +680,10 @@ pub static COMANDOS: &[Command] = &[
                 nome: "max",
                 tipo: TipoParam::Inteiro,
                 obrigatorio: false,
-                descricao: "Quantos bytes devolver (padrao: 256, maximo: 4096).",
+                descricao: "Quantos bytes devolver (padrao: 256, maximo: 4096). \
+                            Num texto, o corte recua ate o fim de um caractere: \
+                            `returned` diz quantos bytes vieram, e a leitura \
+                            seguinte comeca em `offset + returned`.",
             },
         ],
         acesso: Acesso::Exige(Permissao::FsRead),
@@ -1028,8 +1033,9 @@ pub static COMANDOS: &[Command] = &[
         nome: "debug.trigger",
         resumo: "Dispara uma excecao de proposito, para autoteste. \
                  `kind`: \"breakpoint\" e recuperavel; \"fatal\" mata o kernel \
-                 e o deixa em modo post-mortem; \"hang_core\" trava um nucleo \
-                 com as interrupcoes desligadas.",
+                 e o deixa em modo post-mortem; \"stack_overflow\" estoura a \
+                 pilha de um handler de excecao, com o mesmo desfecho; \
+                 \"hang_core\" trava um nucleo com as interrupcoes desligadas.",
         params: &[
             ParamSpec {
                 nome: "kind",
@@ -1039,6 +1045,10 @@ pub static COMANDOS: &[Command] = &[
                             `fatal`: provoca uma falha irrecuperavel de proposito; \
                             o kernel entra em modo post-mortem e passa a responder \
                             apenas o relatorio da falha. \
+                            `stack_overflow`: estoura a pilha em que um handler \
+                            de excecao roda; o relatorio diz estouro. \
+                            `stack_overflow_edge` (so no ARM): o mesmo, com o \
+                            `sp` na borda de baixo da guarda. \
                             `hang_core`: trava o nucleo `core` com as interrupcoes \
                             desligadas, por `ms` milissegundos (zero: para sempre).",
             },
@@ -2329,24 +2339,80 @@ fn fs_read(params: Json, w: &mut JsonWriter) -> fmt::Result {
             // resposta certa para quem está lendo em partes e chegou ao fim.
             let de = de.min(conteudo.len());
             let quanto = max.min(conteudo.len() - de);
-            w.field_u64("offset", de as u64)?;
-            w.field_u64("returned", quanto as u64)?;
-            w.key("content")?;
-            w.begin_str()?;
-            // Um arquivo pode não ser texto — os programas embutidos em
-            // `/bin` são ELF. Dizer isso é melhor que despejar bytes que o
-            // JSON não sabe carregar, e melhor que recusar a leitura: quem
-            // perguntou fica sabendo o tamanho e que o conteúdo é binário.
-            match core::str::from_utf8(&conteudo[de..de + quanto]) {
-                Ok(texto) => w.push_str(texto)?,
-                Err(_) => w.push_str("<bytes que nao sao utf-8>")?,
+            // Texto ou não é o arquivo **inteiro** que diz, e não o pedaço:
+            // um pedaço de texto cortado no meio de um caractere de dois
+            // bytes não é UTF-8, e saía como binário — quem lia em partes um
+            // texto com acento recebia, no lugar de um pedaço, a frase que
+            // dizia "não é texto". E a frase era o conteúdo, no mesmo campo:
+            // um arquivo cujo texto fosse ela não se distinguia de um
+            // binário, e um binário, que o agente grava pelo anexo, não se
+            // lia de volta de jeito nenhum.
+            match core::str::from_utf8(&conteudo) {
+                Ok(texto) => {
+                    if !texto.is_char_boundary(de) {
+                        w.field_str("error", "o offset cai no meio de um caractere")?;
+                        return w.end_object();
+                    }
+                    let fim = fim_de_pedaco(texto, de, de + quanto);
+                    w.field_u64("offset", de as u64)?;
+                    w.field_u64("returned", (fim - de) as u64)?;
+                    w.field_str("encoding", "utf-8")?;
+                    w.field_str("content", &texto[de..fim])?;
+                }
+                Err(_) => {
+                    w.field_u64("offset", de as u64)?;
+                    w.field_u64("returned", quanto as u64)?;
+                    w.field_str("encoding", "base64")?;
+                    w.key("content")?;
+                    w.begin_str()?;
+                    em_base64(&conteudo[de..de + quanto], |c| w.push_str(c))?;
+                    w.end_str()?;
+                }
             }
-            w.end_str()?;
         }
         Err(motivo) => w.field_str("error", motivo.motivo())?,
     }
 
     w.end_object()
+}
+
+/// Onde termina o pedaço de `texto` que começa em `de` e iria até `ate`:
+/// recuado até o fim de um caractere. Se nem um caractere cabe — `max`
+/// menor que ele —, o caractere inteiro: um pedaço vazio no meio do arquivo
+/// faria quem lê em partes ler para sempre no mesmo lugar.
+fn fim_de_pedaco(texto: &str, de: usize, ate: usize) -> usize {
+    let ate = ate.min(texto.len());
+    let mut fim = ate;
+    while !texto.is_char_boundary(fim) {
+        fim -= 1;
+    }
+    if fim == de && ate > de {
+        fim = ate;
+        while !texto.is_char_boundary(fim) {
+            fim += 1;
+        }
+    }
+    fim
+}
+
+/// `bytes` em base64 (RFC 4648, com `=`), entregues a `f` em pedaços.
+fn em_base64(bytes: &[u8], mut f: impl FnMut(&str) -> fmt::Result) -> fmt::Result {
+    const ALFABETO: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    for trio in bytes.chunks(3) {
+        let b = [
+            trio[0],
+            trio.get(1).copied().unwrap_or(0),
+            trio.get(2).copied().unwrap_or(0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        let mut quatro = [b'='; 4];
+        for (i, q) in quatro.iter_mut().enumerate().take(trio.len() + 1) {
+            *q = ALFABETO[((n >> (18 - 6 * i)) & 0x3F) as usize];
+        }
+        // O alfabeto e o `=` são ASCII: a conversão não falha.
+        f(core::str::from_utf8(&quatro).map_err(|_| fmt::Error)?)?;
+    }
+    Ok(())
 }
 
 /// Lista um diretório.
@@ -4325,13 +4391,48 @@ fn debug_trigger(params: Json, w: &mut JsonWriter) -> fmt::Result {
             // quadro ainda nao saiu. Falhar agora deixaria o cliente esperando
             // para sempre por uma linha que nunca se completa. O laco dispara
             // a falha depois de a resposta estar inteira no fio.
-            super::agendar_falha_fatal();
+            super::agendar_falha(super::Falha::Fatal);
 
             w.field_str("scheduled", "fatal")?;
             w.field_bool("survived", false)?;
             w.field_str(
                 "warning",
                 "o kernel falha logo apos esta resposta e entra em modo post-mortem",
+            )?;
+        }
+        "stack_overflow" => {
+            // Um estouro *de verdade* da pilha em que um handler de exceção
+            // roda — no ARM, a pilha de exceção do núcleo; no x86, a de
+            // kernel do fio, com a falha dupla na IST. Agendado como o
+            // `fatal`, e pelo mesmo motivo.
+            //
+            // Existe porque o desfecho de um estouro é o que só se vê
+            // estourando: no ARM, sem a conferência da entrada dos vetores,
+            // o quadro descia pela guarda até a pilha de exceção de outro
+            // núcleo antes de qualquer relatório.
+            super::agendar_falha(super::Falha::Estouro);
+
+            w.field_str("scheduled", "stack_overflow")?;
+            w.field_bool("survived", false)?;
+            w.field_str(
+                "warning",
+                "o kernel estoura a pilha de excecao logo apos esta resposta e entra em modo post-mortem",
+            )?;
+        }
+        #[cfg(target_arch = "aarch64")]
+        "stack_overflow_edge" => {
+            // O mesmo estouro, na borda da guarda: o `sp` nos 272 bytes de
+            // baixo dela, onde o quadro do aninhamento seguinte começaria na
+            // vaga vizinha. A recursão do `stack_overflow` chega à guarda
+            // pelo alto e não passa por aqui. Só no ARM, que é onde a entrada
+            // dos vetores empilha o quadro.
+            super::agendar_falha(super::Falha::EstouroNaBorda);
+
+            w.field_str("scheduled", "stack_overflow_edge")?;
+            w.field_bool("survived", false)?;
+            w.field_str(
+                "warning",
+                "o kernel estoura a pilha de excecao logo apos esta resposta e entra em modo post-mortem",
             )?;
         }
         "hang_core" => {
@@ -4360,7 +4461,11 @@ fn debug_trigger(params: Json, w: &mut JsonWriter) -> fmt::Result {
             w.field_bool("survived", true)?;
             w.field_str("error", "tipo de excecao nao suportado")?;
             w.field_str("requested", outro)?;
-            w.field_str("supported", "breakpoint, fatal, hang_core")?;
+            #[cfg(target_arch = "aarch64")]
+            let suportados = "breakpoint, fatal, stack_overflow, stack_overflow_edge, hang_core";
+            #[cfg(not(target_arch = "aarch64"))]
+            let suportados = "breakpoint, fatal, stack_overflow, hang_core";
+            w.field_str("supported", suportados)?;
         }
     }
     w.end_object()

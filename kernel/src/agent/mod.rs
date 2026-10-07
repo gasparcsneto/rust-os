@@ -62,7 +62,7 @@ pub mod seguro;
 pub mod sessao;
 
 use core::fmt;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use crate::autorizacao::{self, Chamador};
 use json::JsonWriter;
@@ -73,16 +73,30 @@ use sessao::Canal;
 ///
 /// A falha não pode acontecer dentro do handler: a serialização é em
 /// streaming, e naquele ponto a resposta ainda está aberta no fio. Quem
-/// dispara é [`processar`], depois que o quadro fechou.
-static FALHA_AGENDADA: AtomicBool = AtomicBool::new(false);
+/// dispara é [`processar`], depois que o quadro fechou. Zero é nenhuma; as
+/// outras são [`Falha`].
+static FALHA_AGENDADA: AtomicU8 = AtomicU8::new(0);
+
+/// A falha de propósito que `debug.trigger` agenda.
+#[derive(Clone, Copy)]
+#[repr(u8)]
+pub(crate) enum Falha {
+    /// Uma escrita num endereço que não existe.
+    Fatal = 1,
+    /// Um estouro da pilha em que um handler de exceção roda.
+    Estouro = 2,
+    /// O mesmo, na borda da guarda — só no ARM.
+    #[cfg(target_arch = "aarch64")]
+    EstouroNaBorda = 3,
+}
 
 /// O canal está no modo post-mortem — ver [`servir`]: sem heap confiável, a
 /// resposta da serial vai direto no fio, enquanto o handler executa.
 static DIRETO: AtomicBool = AtomicBool::new(false);
 
-/// Marca que a próxima resposta deve ser seguida de uma falha fatal.
-pub(crate) fn agendar_falha_fatal() {
-    FALHA_AGENDADA.store(true, Ordering::SeqCst);
+/// Marca que a próxima resposta deve ser seguida desta falha.
+pub(crate) fn agendar_falha(falha: Falha) {
+    FALHA_AGENDADA.store(falha as u8, Ordering::SeqCst);
 }
 
 /// Quanto um quadro pode ficar parado antes de ser dado por abandonado.
@@ -626,8 +640,12 @@ fn processar(canal: Canal, linha: &[u8]) {
     // Com a resposta inteira no fio, é seguro morrer. Daqui não se volta: o
     // handler da exceção entra em modo post-mortem, que reentra neste mesmo
     // módulo por [`servir`].
-    if FALHA_AGENDADA.swap(false, Ordering::SeqCst) {
-        crate::arch::disparar_falha_fatal();
+    match FALHA_AGENDADA.swap(0, Ordering::SeqCst) {
+        0 => {}
+        2 => crate::arch::disparar_estouro_em_excecao(),
+        #[cfg(target_arch = "aarch64")]
+        3 => crate::arch::aarch64::disparar_estouro_na_borda(),
+        _ => crate::arch::disparar_falha_fatal(),
     }
 }
 

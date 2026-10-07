@@ -114,6 +114,45 @@ core::arch::global_asm!(
     add     sp, sp, #272
 .endm
 
+// Confere, antes de empilhar o quadro, que ele cabe na pilha de exceção.
+//
+// Toda pilha de exceção é uma vaga de 64 KiB alinhada em 64 KiB cuja
+// primeira página é a guarda (ver `fios::pilha`; a do boot é montada igual
+// no linker script). Um endereço da vaga está na guarda exatamente quando
+// os bits 12 a 15 dele são zero. O quadro vai para [sp - 272, sp), e não
+// cabe quando o primeiro byte dele, `sp - 272`, está na guarda — ou quando
+// o último, `sp - 1`, está: uma função com quadro de quase 4 KiB pode
+// deixar `sp` nos 272 bytes de baixo da guarda, e aí `sp - 272` já é o topo
+// da vaga de baixo, onde os bits dizem "não é guarda". O último byte, e não
+// `sp`: no repouso `sp` é o topo da vaga, que é o começo da seguinte, e os
+// bits dele são zero.
+//
+// Sem esta conferência, um estouro de verdade não parava na guarda: o
+// `stp` do `SALVAR` falhava nela, a falha entrava de novo aqui, descia mais
+// 272 bytes e falhava de novo — umas quinze vezes, até `sp` sair por baixo
+// da guarda e o quadro ser escrito no topo da vaga vizinha, que é a pilha
+// de exceção de outro núcleo, viva. O relatório vinha depois disso, e
+// apontava para o próprio `stp`.
+//
+// Nenhum registrador está livre aqui, então a conferência troca `sp` e `x0`
+// por aritmética, sem tocar a memória, e desfaz a troca antes de desviar:
+// `add`/`sub` sem `s` não mexem nas flags que o `tst` deixou.
+.macro CONFERIR_A_PILHA
+    sub     sp, sp, #272
+    add     sp, sp, x0          // sp = S + x0, com S = sp - 272
+    sub     x0, sp, x0          // x0 = S
+    tst     x0, #0xF000         // S na guarda?
+    b.eq    9f
+    add     x0, x0, #271
+    tst     x0, #0xF000         // ou o último byte dele, sp - 1?
+    sub     x0, x0, #271
+9:
+    sub     x0, sp, x0          // x0 = x0 de volta
+    sub     sp, sp, x0          // sp = S
+    add     sp, sp, #272
+    b.eq    .Lestouro
+.endm
+
 // Cada entrada da tabela tem exatamente 128 bytes (.align 7). Só cabe um
 // desvio, então o trabalho real fica nos rótulos comuns mais abaixo.
 .macro ENTRADA rotulo
@@ -153,6 +192,7 @@ tabela_vetores_el1:
     ENTRADA .Ltrap_serror
 
 .Ltrap_sync:
+    CONFERIR_A_PILHA
     SALVAR
     mov     x0, sp
     bl      {sync}
@@ -160,6 +200,7 @@ tabela_vetores_el1:
     eret
 
 .Ltrap_irq:
+    CONFERIR_A_PILHA
     SALVAR
     mov     x0, sp
     bl      {irq}
@@ -167,6 +208,7 @@ tabela_vetores_el1:
     eret
 
 .Ltrap_fiq:
+    CONFERIR_A_PILHA
     SALVAR
     mov     x0, sp
     bl      {fiq}
@@ -174,16 +216,36 @@ tabela_vetores_el1:
     eret
 
 .Ltrap_serror:
+    CONFERIR_A_PILHA
     SALVAR
     mov     x0, sp
     bl      {serror}
     RESTAURAR
     eret
+
+// A pilha de exceção estourou: o que está nela é a cadeia que estourou, e
+// não há volta para ela. O handler recomeça no topo da **própria** vaga —
+// `sp` com os 16 bits baixos ligados, mais um —, e nada fora dela é
+// tocado. `SP_EL0` serve de rascunho para `x0`: o fio interrompido não
+// continua, e o relatório não precisa dele.
+.Lestouro:
+    msr     sp_el0, x0
+    mov     x0, sp
+    orr     x0, x0, #0xFFFF
+    add     x0, x0, #1
+    mov     sp, x0
+    mrs     x0, sp_el0
+    SALVAR
+    mov     x0, sp
+    bl      {estouro}
+.Lestouro_sem_volta:
+    b       .Lestouro_sem_volta
 "#,
     sync = sym tratar_sync,
     irq = sym tratar_irq,
     fiq = sym tratar_fiq,
     serror = sym tratar_serror,
+    estouro = sym tratar_estouro,
 );
 
 /// O registrador de síndrome da exceção (`ESR_EL1`), cru.
@@ -259,8 +321,18 @@ extern "C" fn tratar_sync(quadro: &mut Quadro) {
             // contexto nos dois casos é este handler, sobre o quadro que ele
             // já tem. Ver `fios::marcar_terminado` para o porquê de não ser a
             // própria chamada a ceder.
+            //
+            // E pelo mesmo motivo a chamada `ceder` só pede a vez: dada
+            // aqui, sobre o quadro de fora, o fio volta em EL0 pelo quadro
+            // dele, em qualquer núcleo. Ver `fios::pedir_cessao`.
+            let ceder = crate::fios::tirar_cessao();
             if crate::fios::atual_parado() {
                 parar_o_fio_atual(quadro);
+            } else if ceder {
+                // SAFETY: estamos dentro de um handler de exceção, com as
+                // interrupções mascaradas pela própria entrada da exceção, e
+                // o quadro é o de fora — o do usuário.
+                unsafe { super::contexto::trocar_no_quadro(quadro) };
             }
             return;
         }
@@ -271,6 +343,19 @@ extern "C" fn tratar_sync(quadro: &mut Quadro) {
         // mascaradas pela própria entrada da exceção.
         unsafe { super::contexto::trocar_no_quadro(quadro) };
         return;
+    }
+
+    // O `brk` do estouro de propósito — ver
+    // [`super::disparar_estouro_em_excecao`]. Afunda daqui, na pilha de
+    // exceção, até a guarda.
+    if ec == 0x3C && esr & 0xFFFF == IMEDIATO_DO_ESTOURO as u64 {
+        crate::traps::afundar_de_proposito();
+    }
+    // E o da borda: `sp` a 16 bytes da base da guarda, onde o quadro do
+    // próximo aninhamento começaria na vaga de baixo — ver
+    // [`super::disparar_estouro_na_borda`].
+    if ec == 0x3C && esr & 0xFFFF == IMEDIATO_DO_ESTOURO_NA_BORDA as u64 {
+        pisar_no_fundo_da_guarda();
     }
 
     // `BRK` é a única outra classe que sabemos retomar hoje.
@@ -334,6 +419,57 @@ extern "C" fn tratar_sync(quadro: &mut Quadro) {
     }
 
     crate::traps::fatal(nome, quadro.elr, endereco, esr)
+}
+
+/// O imediato do `brk` que pede um estouro da pilha de exceção, de
+/// propósito: `debug.trigger` com `kind: "stack_overflow"`.
+pub(super) const IMEDIATO_DO_ESTOURO: u16 = 0xE5;
+
+/// O do estouro na borda: `kind: "stack_overflow_edge"`.
+pub(super) const IMEDIATO_DO_ESTOURO_NA_BORDA: u16 = 0xE6;
+
+/// Põe `sp` a 16 bytes da base da guarda da vaga em uso e escreve ali.
+///
+/// A escrita falha na guarda, e a exceção entra com `sp - 272` já na vaga
+/// de baixo — onde os bits de `sp - 272` dizem "não é guarda". É a borda
+/// que só a segunda metade da conferência da entrada pega (o último byte do
+/// quadro, `sp - 1`); sem ela, o quadro seria escrito no topo da vaga
+/// vizinha. A recursão de [`crate::traps::afundar_de_proposito`] chega à
+/// guarda pelo alto, e não a alcança.
+///
+/// Fora de linha: o relatório do estouro nomeia esta função pelo `pc`.
+#[inline(never)]
+fn pisar_no_fundo_da_guarda() -> ! {
+    // SAFETY: nenhuma; é o ponto. Não há volta: a escrita falha, e a
+    // falha é um estouro relatado.
+    unsafe {
+        core::arch::asm!(
+            "mov x9, sp",
+            "and x9, x9, #0xFFFFFFFFFFFF0000",
+            "add x9, x9, #16",
+            "mov sp, x9",
+            "str xzr, [sp]",
+            "2: b 2b",
+            options(noreturn)
+        )
+    }
+}
+
+/// A pilha de exceção estourou — a conferência da entrada dos vetores viu o
+/// quadro cair na guarda. Roda no topo da própria vaga, recomeçada.
+///
+/// O `pc` é o da instrução que tocou a guarda: a função que estourou, que
+/// `cargo xtask simbolo` traduz. O endereço acusado, quando a exceção é um
+/// aborto, é o da guarda.
+extern "C" fn tratar_estouro(quadro: &mut Quadro) -> ! {
+    let ec = classe_da_excecao();
+    let endereco = matches!(ec, 0x20 | 0x21 | 0x24 | 0x25).then(ler_far);
+    crate::traps::fatal(
+        "estouro_da_pilha_de_excecao",
+        quadro.elr,
+        endereco,
+        ler_esr(),
+    )
 }
 
 /// O aborto de dado descrito por `esr` foi uma **escrita** barrada pelas

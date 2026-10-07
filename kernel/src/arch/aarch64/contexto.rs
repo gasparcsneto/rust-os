@@ -206,10 +206,38 @@ pub unsafe fn trocar_no_quadro(quadro: &mut Quadro) {
 /// chamando [`trocar_no_quadro`]. O retorno desta função acontece do outro
 /// lado da troca — possivelmente muito tempo depois, e só quando este fio for
 /// escalonado de novo.
+///
+/// # Só fora de um handler
+///
+/// O `svc` só é uma cessão quando quem o executa está num fio, em `SP_EL0`.
+/// De dentro de um handler — uma chamada de sistema, uma IRQ —, `sp` é a
+/// pilha de exceção **do núcleo**, e o `svc` aninhado salvaria o fio com os
+/// quadros do handler nela: retomado noutro núcleo, ou depois de outro fio
+/// ter feito igual, ele voltaria pelos quadros que estão lá, e não pelos
+/// dele. Foi o que a chamada `ceder` fazia (ver `fios::pedir_cessao`).
+///
+/// Então aqui a pergunta é ao processador — `SPSel` diz qual pilha está em
+/// uso —, e a resposta errada é um pânico que diz quem chamou, em vez de uma
+/// corrupção que aparece longe, noutro núcleo e noutro caso.
+#[track_caller]
 pub fn ceder_cpu() {
+    if em_handler() {
+        panic!("ceder_cpu de dentro de um handler de excecao (SPSel=1)");
+    }
     // SAFETY: `svc` é uma chamada de sistema; o handler de exceções síncronas
     // reconhece o imediato 0 como pedido de cessão e retorna normalmente.
     unsafe { asm!("svc #0", options(nomem, nostack)) };
+}
+
+/// O código corrente está num handler de exceção — usando `SP_EL1`?
+///
+/// O kernel roda os fios em `SP_EL0` (EL1t) e só as exceções em `SP_EL1`
+/// (EL1h): a entrada de uma exceção liga o `SPSel`, e o `eret` o devolve.
+fn em_handler() -> bool {
+    let spsel: u64;
+    // SAFETY: ler o `SPSel` não tem efeito colateral.
+    unsafe { asm!("mrs {}, spsel", out(reg) spsel, options(nomem, nostack)) };
+    spsel & 1 == 1
 }
 
 /// Monta o contexto de um filho de `fork`.

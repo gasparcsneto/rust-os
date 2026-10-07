@@ -241,6 +241,12 @@ com o alcance). O conteúdo vem do volume bloco a bloco, sem passar inteiro
 pela memória. `fs.stat` diz o tipo, a versão, o tamanho, o dono, o
 arrendamento, o uso e a cota de quem pede, e a ocupação do volume.
 
+`fs.read` diz como o conteúdo vem, em `encoding`: `utf-8` quando o
+arquivo **inteiro** é texto, `base64` quando não. O que o agente grava pelo
+anexo, ele lê de volta. Num texto, o corte de `max` recua até o fim de um
+caractere — `returned` diz quantos bytes vieram, e a parte seguinte começa
+em `offset + returned` —, e um `offset` no meio de um caractere é recusado.
+
 O nó de um arquivo, para o VFS, é a **versão** dele. Um descritor aberto
 antes de uma mudança não lê o conteúdo novo pelo nó velho, nem metade de
 cada um: recebe `Erro::Mudou` (no processo, `MUDOU`), e abrir de novo dá o
@@ -284,8 +290,11 @@ dele declara `fs.write`.
 
 - Links, permissões por arquivo e listas de acesso: o alcance é o da
   política, por prefixo de caminho.
-- Leitura parcial pelo agente: `fs.read` devolve o arquivo em texto; o
-  binário se lê pelo descritor de um processo.
 - Desfragmentação: o mapa procura uma faixa contígua e, se não há, até 64
   faixas por escrita; um volume muito fragmentado recusa (`ERROR`) uma
-  escrita que precisaria de mais.
+  escrita que precisaria de mais. No pior caso — blocos livres alternados —
+  uma escrita ainda leva 64 blocos (≈ 255 KiB). A recusa é limpa: nada é
+  escrito, a cota e o mapa ficam como estavam, e o volume segue; mover
+  blocos com o volume vivo pediria um registro de mudança com queda no
+  meio, sem nenhuma propriedade de segurança, consistência ou recuperação
+  a ganhar.

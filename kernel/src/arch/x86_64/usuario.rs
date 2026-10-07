@@ -356,10 +356,16 @@ extern "C" fn despachar_chamada(quadro: *mut QuadroDeUsuario) -> i64 {
         #[cfg(feature = "modo-teste")]
         crate::fios::pausa_de_teste::talvez_pausar();
         let reexecutar = crate::fios::tirar_reexecucao();
+        let ceder = crate::fios::tirar_cessao();
 
         // O fio continua de pé, e a chamada não pediu outra volta? Então ela
-        // acabou e o valor é dela.
+        // acabou e o valor é dela — depois de dar a vez, se ela pediu. Aqui
+        // ceder é seguro, na pilha de kernel do fio; o pedido passa por
+        // `fios::pedir_cessao` porque no ARM não é, e a chamada é uma só.
         if !reexecutar && !crate::fios::atual_parado() {
+            if ceder {
+                crate::arch::ceder_cpu();
+            }
             return resultado;
         }
 

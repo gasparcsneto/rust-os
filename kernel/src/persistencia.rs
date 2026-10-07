@@ -219,6 +219,9 @@ pub fn em_ordem<R>(f: impl FnOnce() -> R) -> R {
         );
         crate::fios::ceder();
     }
+    // Quem toma a ordem de fora está num ponto seguro — ver
+    // [`compactar_na_vez`].
+    compactar_na_vez();
     let r = f();
     DONO_DA_ORDEM.store(0, Ordering::Release);
     r
@@ -1383,28 +1386,83 @@ fn precisa_compactar() -> bool {
     })
 }
 
-/// Chamada pelo coletor: compacta se a região passou do ponto.
-///
-/// O coletor é um ponto seguro: ele não está no meio de operação nenhuma,
-/// e com a ordem das gravações na mão nenhuma outra está — o que está em
-/// memória é exatamente o que está no journal.
-pub fn compactar_se_preciso() {
+/// A compactação está solta? Na suíte e na bancada, quem a solta é o caso.
+fn compactacao_solta() -> bool {
     #[cfg(feature = "modo-teste")]
     if COMPACTACAO_PAUSADA.load(Ordering::Acquire) {
-        return;
+        return false;
     }
     #[cfg(feature = "quedas")]
     if crate::quedas::coletor_nao_compacta() {
+        return false;
+    }
+    true
+}
+
+/// Compacta, se a região passou do ponto, quem acabou de tomar a ordem das
+/// gravações **de fora** — sem outra operação dele em curso.
+///
+/// # Por que não só o coletor
+///
+/// Porque o coletor também precisa ganhar a ordem, e ela não tem fila: é um
+/// `compare_exchange` com cessão, e quem a solta pode tomá-la de novo antes
+/// de o coletor tentar. Com escritas seguidas — lotes do armazém, mensagens
+/// —, nada garantia que ele a ganhasse antes de o quarto que sobra acabar, e
+/// a região cheia deixa a persistência indisponível até o boot: dali em
+/// diante nenhuma operação de autoridade grava, uma revogação inclusive.
+/// Compactar não pode depender de quem perde a corrida.
+///
+/// # Por que aqui é um ponto seguro
+///
+/// É o mesmo do coletor: com a ordem na mão nenhuma operação está no meio,
+/// e o que está em memória é o que está no journal. Toda mudança que a base
+/// levaria acontece dentro da ordem — a de autoridade, a das mensagens, a
+/// confirmação do armazém —, ou deixa entradas pendentes, e com pendentes a
+/// compactação é adiada. Quem toma a ordem de fora ainda não mudou nada.
+fn compactar_na_vez() {
+    #[cfg(feature = "modo-teste")]
+    if QUEM_TOMA_A_ORDEM_NAO_COMPACTA.load(Ordering::Acquire) {
         return;
     }
-    if !precisa_compactar() {
+    if compactacao_solta() && precisa_compactar() {
+        let _ = compactar();
+    }
+}
+
+/// Chamada pelo coletor: compacta se a região passou do ponto, com a ordem
+/// das gravações na mão — o mesmo ponto seguro de [`compactar_na_vez`].
+pub fn compactar_se_preciso() {
+    #[cfg(feature = "modo-teste")]
+    if COLETOR_NAO_COMPACTA.load(Ordering::Acquire) {
         return;
     }
-    em_ordem(|| {
-        if precisa_compactar() {
-            let _ = compactar();
-        }
-    });
+    if compactacao_solta() && precisa_compactar() {
+        em_ordem(|| {
+            if precisa_compactar() {
+                let _ = compactar();
+            }
+        });
+    }
+}
+
+/// Só na suíte: o coletor não compacta, com a compactação solta — o caso
+/// que confere que quem toma a ordem compacta sem esperar por ele.
+#[cfg(feature = "modo-teste")]
+static COLETOR_NAO_COMPACTA: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Só na suíte: quem toma a ordem não compacta — o caso que confere que o
+/// coletor, sozinho, compacta.
+#[cfg(feature = "modo-teste")]
+static QUEM_TOMA_A_ORDEM_NAO_COMPACTA: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Só para a suíte: quem compacta quando a compactação está solta — o
+/// coletor, quem toma a ordem, ou os dois.
+#[cfg(feature = "modo-teste")]
+pub fn quem_compacta_de_teste(coletor: bool, quem_toma_a_ordem: bool) {
+    COLETOR_NAO_COMPACTA.store(!coletor, Ordering::Release);
+    QUEM_TOMA_A_ORDEM_NAO_COMPACTA.store(!quem_toma_a_ordem, Ordering::Release);
 }
 
 /// Compacta, e diz o desfecho na auditoria. Uma falha do disco ou do TPM

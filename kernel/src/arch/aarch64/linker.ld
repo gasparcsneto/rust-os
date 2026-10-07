@@ -62,9 +62,20 @@ SECTIONS
          * novo, em laço. É o análogo da Interrupt Stack Table do x86, e no ARM
          * o hardware faz a troca sozinho — ver o comentário sobre SPSel no
          * código de boot. */
-        . = ALIGN(4096);
+        /* Com a forma de uma vaga da área de pilhas: 64 KiB alinhados em
+         * 64 KiB, a primeira página reservada como guarda e 60 KiB de
+         * pilha. A página não fica desmapeada (o mapa do kernel é de blocos
+         * grandes), mas a conferência da entrada dos vetores trata uma
+         * pilha de exceção pela forma: um quadro que caísse na primeira
+         * página de 4 KiB de uma região de 64 KiB é um estouro. Com 4 KiB de
+         * alinhamento, como era, a página de baixo de qualquer outra região
+         * de 64 KiB por onde a pilha passasse pareceria guarda. É a pilha
+         * só até o primeiro núcleo trocar para a vaga dele. */
+        . = ALIGN(65536);
+        __exc_stack_guard = .;
+        . += 0x1000;
         __exc_stack_bottom = .;
-        . += 0x8000;           /* 32 KiB */
+        . += 0xF000;           /* 60 KiB */
         __exc_stack_top = .;
 
         . = ALIGN(16);

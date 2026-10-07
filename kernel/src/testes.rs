@@ -3802,6 +3802,73 @@ fn usb_relatorio_hid_vira_teclas() -> Resultado {
 /// kernel que ninguém largava, porque `executar` não volta. Cinco
 /// lançamentos seguidos custariam cinco imagens; o caso confere que custam
 /// menos que uma.
+/// Várias cópias do `cedente` ao mesmo tempo, em todos os núcleos: cada
+/// uma cede duas mil vezes pela chamada de sistema e confere que voltou
+/// inteira.
+///
+/// # O que este caso protege
+///
+/// No ARM a chamada de sistema roda na pilha de exceção do núcleo. A chamada
+/// `ceder` cedia de dentro dela — um `svc` de EL1 no meio do handler —, e o
+/// fio ficava salvo com os quadros dele naquela pilha. Retomado noutro
+/// núcleo, voltava pela pilha de exceção **deste**, acima do topo; retomado
+/// no mesmo depois de outro fio ter cedido igual, voltava pelos quadros do
+/// outro e devolvia ao processo errado o quadro de usuário dele. O CI viu
+/// isso uma vez como "estouro" (a leitura logo acima do topo da pilha do
+/// núcleo 1, que é a guarda da vaga seguinte).
+///
+/// Com a cessão feita sobre o quadro de fora — o do usuário —, como a
+/// preempção faz, cada cópia volta pelo próprio quadro, em qualquer núcleo.
+fn usuario_ceder_de_varios_processos_em_varios_nucleos() -> Resultado {
+    use crate::usuario::DIRETORIO_DOS_COMPILADOS;
+
+    // Duas cópias por núcleo, e no mínimo quatro: com um núcleo só, a
+    // sobreposição que importa é a de dois fios cedendo no mesmo núcleo.
+    let copias = (crate::nucleos::ligados() * 2).max(4);
+    let caminho = alloc::format!("{DIRETORIO_DOS_COMPILADOS}/cedente");
+    let saida = "processo encerrou com codigo 78";
+    let desde = crate::log::total_emitidos();
+    let contar = |procurada: &str| {
+        let mut n = 0usize;
+        crate::log::ultimos(256, crate::log::Level::Trace, |r| {
+            if r.seq >= desde && r.subsistema == "usuario" && r.mensagem().starts_with(procurada) {
+                n += 1;
+            }
+        });
+        n
+    };
+    let trocas_antes = crate::fios::estatisticas().1;
+    for _ in 0..copias {
+        crate::usuario::lancar(Some(&caminho))?;
+    }
+    let _ = esperar_ate(
+        || contar(saida) >= copias || contar("processo morto por") > 0,
+        3000,
+    );
+    let trocas = crate::fios::estatisticas().1 - trocas_antes;
+    if contar("processo morto por") > 0 {
+        return Err("uma copia do cedente morreu por uma falha");
+    }
+    let (sairam, todas) = (contar("processo encerrou com codigo "), contar(saida));
+    if sairam != todas {
+        crate::log_error!("teste", "cedente: {} sairam, {} com 78", sairam, todas);
+        return Err("uma copia do cedente voltou de ceder com o estado de outra");
+    }
+    if todas < copias {
+        crate::log_error!("teste", "cedente: {} de {} sairam", todas, copias);
+        return Err("nem toda copia do cedente terminou");
+    }
+    // E ceder dá a vez: com duas cópias por núcleo prontas, quase toda
+    // cessão é uma troca. Sem ela, as trocas seriam só as do timer — umas
+    // dezenas no tempo que as cópias levam.
+    const VOLTAS_DO_CEDENTE: u64 = 2_000; // as do programa
+    if trocas < copias as u64 * VOLTAS_DO_CEDENTE / 4 {
+        crate::log_error!("teste", "cedente: {} trocas para {} copias", trocas, copias);
+        return Err("a chamada ceder nao deu a vez");
+    }
+    Ok(())
+}
+
 fn usuario_programas_compilados_rodam() -> Resultado {
     use crate::usuario::DIRETORIO_DOS_COMPILADOS;
     use alloc::format;
@@ -9832,7 +9899,7 @@ fn tarefas_se_intercalam() -> Resultado {
     fn anotar(marca: u8) {
         let i = ESCRITOS.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
         if i < 8 {
-            SEQUENCIA.lock()[i] = marca;
+            crate::arch::sem_interrupcoes(|| SEQUENCIA.lock()[i] = marca);
         }
     }
 
@@ -9844,14 +9911,14 @@ fn tarefas_se_intercalam() -> Resultado {
     }
 
     ESCRITOS.store(0, core::sync::atomic::Ordering::SeqCst);
-    *SEQUENCIA.lock() = [0; 8];
+    crate::arch::sem_interrupcoes(|| *SEQUENCIA.lock() = [0; 8]);
 
     let mut executor = crate::tarefas::executor::Executor::novo();
     executor.lancar(crate::tarefas::Tarefa::nova("teste-a", corpo(b'a')));
     executor.lancar(crate::tarefas::Tarefa::nova("teste-b", corpo(b'b')));
     executor.rodar_ate_esvaziar(16)?;
 
-    let sequencia = *SEQUENCIA.lock();
+    let sequencia = crate::arch::sem_interrupcoes(|| *SEQUENCIA.lock());
     if &sequencia[..4] != b"abab" {
         crate::log_error!(
             "teste",
@@ -17414,8 +17481,10 @@ fn compactacao_so_em_ponto_seguro() -> Resultado {
 /// a região atual continua a do journal, ancorada, e a persistência de pé —
 /// e fica na auditoria. Uma região que enche no meio de uma operação falha
 /// fechada: a operação não vale, a concessão é desfeita, e nada de
-/// autoridade muda até a próxima compactação, no boot. E o coletor compacta
-/// sozinho quando a região passa de três quartos.
+/// autoridade muda até a próxima compactação, no boot. E a região que passa
+/// de três quartos é compactada pelo coletor sozinho, e por quem toma a
+/// ordem para gravar sozinho — sem o coletor, que pode perder a corrida
+/// pela ordem para quem grava sem parar.
 fn compactacao_e_a_regiao_cheia() -> Resultado {
     let anterior = crate::persistencia::estado();
     let resultado = (|| -> Resultado {
@@ -17515,30 +17584,61 @@ fn compactacao_e_a_regiao_cheia() -> Resultado {
         crate::persistencia::forcar_estado_de_teste(crate::persistencia::Estado::Disponivel);
         crate::persistencia::compactar_de_teste()?;
 
-        // E o coletor compacta sozinho, passando de três quartos.
-        let (_, _, base, _) = crate::persistencia::regiao();
-        crate::persistencia::fixar_limite_de_teste(Some(base * 2 + 16));
-        crate::persistencia::compactar_de_teste()?;
-        crate::persistencia::fixar_limite_de_teste(None);
-        let (regiao, feitas, _, _) = crate::persistencia::regiao();
-        crate::persistencia::pausar_a_compactacao_de_teste(false);
-        let mut i = 0u8;
-        let limite = crate::tempo::uptime_ms() + 20_000;
-        while crate::persistencia::regiao().0 == regiao && crate::tempo::uptime_ms() < limite {
-            let p = alloc::format!(r#"{{"line":"taxa observador {} 18"}}"#, 5 + i % 3);
-            executar_admin_com(0, &ADMIN_DE_TESTE, "policy.write", &p, &p)?;
-            i = i.wrapping_add(1);
-            crate::fios::ceder();
-        }
-        crate::persistencia::pausar_a_compactacao_de_teste(true);
-        if crate::persistencia::regiao().1 <= feitas {
-            return Err("o coletor nao compactou a regiao que passou de tres quartos");
+        // E a região que passa de três quartos é compactada por qualquer um
+        // dos dois, sozinho: o coletor, e quem toma a ordem para gravar.
+        for (coletor, quem_grava) in [(true, false), (false, true)] {
+            let (_, _, base, _) = crate::persistencia::regiao();
+            crate::persistencia::fixar_limite_de_teste(Some(base * 2 + 16));
+            crate::persistencia::compactar_de_teste()?;
+            crate::persistencia::fixar_limite_de_teste(None);
+            let (regiao, feitas, _, _) = crate::persistencia::regiao();
+            crate::persistencia::quem_compacta_de_teste(coletor, quem_grava);
+            crate::persistencia::pausar_a_compactacao_de_teste(false);
+            let mut i = 0u8;
+            let limite = crate::tempo::uptime_ms() + 20_000;
+            let mut recusada = None;
+            while crate::persistencia::regiao().0 == regiao && crate::tempo::uptime_ms() < limite {
+                let p = alloc::format!(r#"{{"line":"taxa observador {} 18"}}"#, 5 + i % 3);
+                let r = executar_admin_com(0, &ADMIN_DE_TESTE, "policy.write", &p, &p)?;
+                if !r.contains(r#""executed":true"#) {
+                    recusada = Some(r);
+                    break;
+                }
+                i = i.wrapping_add(1);
+                // Sem ceder quando é quem grava que compacta: o coletor não
+                // está na corrida, e o caso é justamente o de quem grava sem
+                // parar.
+                if coletor {
+                    crate::fios::ceder();
+                }
+            }
+            crate::persistencia::pausar_a_compactacao_de_teste(true);
+            crate::persistencia::quem_compacta_de_teste(true, true);
+            if let Some(r) = recusada {
+                crate::log_error!("teste", "{}", r);
+                return Err(if coletor {
+                    "a regiao encheu esperando o coletor compactar"
+                } else {
+                    "a regiao encheu com quem grava sem compactar: a compactacao dependia do coletor"
+                });
+            }
+            if crate::persistencia::regiao().1 <= feitas {
+                return Err(if coletor {
+                    "o coletor nao compactou a regiao que passou de tres quartos"
+                } else {
+                    "quem tomou a ordem nao compactou a regiao que passou de tres quartos"
+                });
+            }
+            if crate::persistencia::estado() != crate::persistencia::Estado::Disponivel {
+                return Err("a compactacao deixou a persistencia indisponivel");
+            }
         }
         // De volta a uma região inteira.
         crate::persistencia::compactar_de_teste()?;
         Ok(())
     })();
     crate::persistencia::pausar_a_compactacao_de_teste(true);
+    crate::persistencia::quem_compacta_de_teste(true, true);
     crate::persistencia::fixar_limite_de_teste(None);
     crate::persistencia::esquecer_o_que_nao_coube_de_teste();
     if crate::persistencia::estado() != crate::persistencia::Estado::Disponivel {
@@ -26298,6 +26398,190 @@ fn armazem_o_programa_guarda_pelo_gate() -> Resultado {
     resultado
 }
 
+/// `fs.read` devolve o que está no arquivo, em qualquer arquivo e em
+/// qualquer pedaço — e diz como:
+///
+/// - um texto com acentos, lido em pedaços de um e de dois bytes, volta
+///   inteiro e igual: o corte recua até o fim de um caractere (ou o inclui
+///   inteiro, quando nem um cabe), e `returned` diz onde continuar;
+/// - um `offset` no meio de um caractere é recusado, e não vira binário;
+/// - um texto que é exatamente a frase que antes marcava o binário volta
+///   como texto, em `utf-8`;
+/// - um binário — que o agente grava pelo anexo — volta em `base64`, em
+///   partes, igual ao gravado. Antes ele não se lia de volta de jeito
+///   nenhum: o conteúdo era a frase.
+fn armazem_fs_read_devolve_o_que_esta_no_arquivo() -> Resultado {
+    let sistema = sistema_no_armazem(7_240_101);
+    let unico = crate::tempo::uptime_ms();
+    let dir = alloc::format!("/armazem/compartilhado/leitura{unico}");
+    let texto = alloc::format!("{dir}/acentos.txt");
+    let frase = alloc::format!("{dir}/frase.txt");
+    let binario = alloc::format!("{dir}/dados.bin");
+    diretorios_acima(&texto)?;
+
+    // Lê o arquivo inteiro em pedaços de `max`, e devolve os bytes e as
+    // codificações que vieram.
+    let ler_em_partes = |c: &str,
+                         max: usize|
+     -> Result<
+        (alloc::vec::Vec<u8>, alloc::vec::Vec<alloc::string::String>),
+        &'static str,
+    > {
+        let mut bytes = alloc::vec::Vec::new();
+        let mut codificacoes = alloc::vec::Vec::new();
+        let mut de = 0u64;
+        for _ in 0..10_000 {
+            let r = fs_pedir(
+                sistema,
+                "fs.read",
+                &alloc::format!(r#"{{"path":"{c}","offset":{de},"max":{max}}}"#),
+            );
+            let n = fs_numero(&r, "returned").ok_or("fs.read sem returned")?;
+            if n == 0 {
+                return Ok((bytes, codificacoes));
+            }
+            let cod = fs_texto(&r, "encoding").ok_or("fs.read sem encoding")?;
+            let conteudo = fs_texto(&r, "content").ok_or("fs.read sem content")?;
+            match cod.as_str() {
+                "utf-8" => {
+                    if conteudo.len() as u64 != n {
+                        crate::log_error!("teste", "{}", r);
+                        return Err("o pedaco de texto nao tem o tamanho de returned");
+                    }
+                    bytes.extend_from_slice(conteudo.as_bytes());
+                }
+                "base64" => {
+                    let b = de_base64(&conteudo).ok_or("o pedaco binario nao e base64")?;
+                    if b.len() as u64 != n {
+                        return Err("o pedaco binario nao tem o tamanho de returned");
+                    }
+                    bytes.extend_from_slice(&b);
+                }
+                _ => return Err("fs.read com uma codificacao desconhecida"),
+            }
+            if !codificacoes.contains(&cod) {
+                codificacoes.push(cod);
+            }
+            de += n;
+        }
+        Err("a leitura em partes nao terminou")
+    };
+
+    // O texto com acentos — dois bytes cada —, em pedaços que cortariam
+    // no meio de quase todos.
+    // Em escapes do JSON: o pedido os traduz para UTF-8 ao gravar.
+    let acentuado = r"acao, agua e mae: a\u00e7\u00e3o, \u00e1gua e m\u00e3e";
+    let r = fs_gravar(sistema, &texto, fs_no_armazem(&texto).0, acentuado);
+    if !fs_ok(&r) {
+        crate::log_error!("teste", "{}", r);
+        return Err("o caso nao gravou o texto");
+    }
+    let esperado = fs_no_armazem(&texto).1.ok_or("o texto nao foi gravado")?;
+    if core::str::from_utf8(&esperado).map(|t| t.contains('\u{e7}')) != Ok(true) {
+        return Err("o texto gravado nao tem os acentos que o caso quer");
+    }
+    for max in [1usize, 2, 3, 7] {
+        let (lido, cods) = ler_em_partes(&texto, max)?;
+        if lido != esperado || cods != ["utf-8"] {
+            crate::log_error!(
+                "teste",
+                "max {}: {:?} {:?}",
+                max,
+                core::str::from_utf8(&lido),
+                cods
+            );
+            return Err("o texto lido em partes nao voltou inteiro, como texto");
+        }
+    }
+    let r = fs_pedir(
+        sistema,
+        "fs.read",
+        &alloc::format!(
+            r#"{{"path":"{texto}","offset":{},"max":4}}"#,
+            esperado.iter().position(|&b| b >= 0x80).unwrap_or(0) + 1
+        ),
+    );
+    if fs_texto(&r, "error").as_deref() != Some("o offset cai no meio de um caractere") {
+        crate::log_error!("teste", "{}", r);
+        return Err("um offset no meio de um caractere nao foi recusado");
+    }
+
+    // A frase que marcava o binário, como texto: volta como texto.
+    let marca = "<bytes que nao sao utf-8>";
+    let r = fs_gravar(sistema, &frase, fs_no_armazem(&frase).0, marca);
+    if !fs_ok(&r) {
+        return Err("o caso nao gravou a frase");
+    }
+    let (lido, cods) = ler_em_partes(&frase, 4096)?;
+    if lido != marca.as_bytes() || cods != ["utf-8"] {
+        return Err("a frase gravada como texto nao voltou como texto");
+    }
+
+    // O binário, pelo anexo, e lido de volta em partes.
+    let bytes: alloc::vec::Vec<u8> = (0..9000u32).map(|i| (i * 37 % 256) as u8).collect();
+    let r = crate::nativo::responder_com_anexo_de_teste(
+        sistema,
+        &pedido_rpc(
+            "fs.write",
+            &alloc::format!(
+                r#"{{"path":"{binario}","expect_version":{},"attachment":{}}}"#,
+                fs_no_armazem(&binario).0,
+                bytes.len()
+            ),
+        ),
+        &bytes,
+    );
+    if !fs_ok(&r) {
+        crate::log_error!("teste", "{}", r);
+        return Err("o caso nao gravou o binario");
+    }
+    // Pedaços de 999, 1000 e 1001 bytes: os três restos de uma divisão
+    // por três — sem `=`, com dois e com um no fim de cada pedaço.
+    for max in [4096usize, 999, 1000, 1001] {
+        let (lido, cods) = ler_em_partes(&binario, max)?;
+        if lido != bytes || cods != ["base64"] {
+            crate::log_error!("teste", "max {}: {} bytes, {:?}", max, lido.len(), cods);
+            return Err("o binario lido de volta nao e o gravado");
+        }
+    }
+    Ok(())
+}
+
+/// Base64 (RFC 4648, com `=`) de volta a bytes. Escrito aqui, e não
+/// chamado do kernel: o caso confere a codificação de `fs.read` contra uma
+/// decodificação que não é a dela.
+fn de_base64(texto: &str) -> Option<alloc::vec::Vec<u8>> {
+    let valor = |c: u8| -> Option<u32> {
+        Some(match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        } as u32)
+    };
+    let b = texto.as_bytes();
+    if b.len() % 4 != 0 {
+        return None;
+    }
+    let mut saida = alloc::vec::Vec::with_capacity(b.len() / 4 * 3);
+    for quatro in b.chunks(4) {
+        let iguais = quatro.iter().rev().take_while(|&&c| c == b'=').count();
+        if iguais > 2 {
+            return None;
+        }
+        let mut n = 0u32;
+        for &c in &quatro[..4 - iguais] {
+            n = (n << 6) | valor(c)?;
+        }
+        n <<= 6 * iguais as u32;
+        let tres = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
+        saida.extend_from_slice(&tres[..3 - iguais]);
+    }
+    Some(saida)
+}
+
 /// O binário de um agente vai fora do JSON, nos quadros de anexo da sessão
 /// cifrada, e o pedido seguinte o declara em `attachment`:
 ///
@@ -27616,6 +27900,41 @@ fn travas_a_conferencia_ve_a_inversao() -> Resultado {
         crate::log_error!("teste", "ordem->R e R->ordem: {} inversoes", ordem);
         return Err("a ordem das gravacoes pedida com uma trava na mao nao foi vista");
     }
+    // Uma trava tomada nos dois modos — com as interrupções mascaradas e
+    // ligadas — é vista; uma tomada sempre ligada, só por fios, não.
+    if !crate::arch::interrupcoes_habilitadas() {
+        return Err("o caso roda com as interrupcoes mascaradas, e nao confere os modos");
+    }
+    let (_, so_ligada) = crate::ordem_das_travas::com_o_que_se_espera(|| {
+        for _ in 0..2 {
+            let _p = P.lock();
+        }
+    });
+    if so_ligada != 0 {
+        return Err("uma trava tomada sempre com as interrupcoes ligadas foi contada");
+    }
+    let (_, misturada) = crate::ordem_das_travas::com_o_que_se_espera(|| {
+        crate::arch::sem_interrupcoes(|| {
+            let _q = Q.lock();
+        });
+        let _q = Q.lock();
+    });
+    if misturada != 1 {
+        crate::log_error!("teste", "{} travas nos dois modos", misturada);
+        return Err("uma trava tomada com as interrupcoes ligadas e mascaradas nao foi vista");
+    }
+    // Tomada mascarada e solta com elas ligadas: segurada ligada.
+    let (_, segurada) = crate::ordem_das_travas::com_o_que_se_espera(|| {
+        crate::arch::sem_interrupcoes(|| {
+            let _r = R.lock();
+        });
+        let guarda = crate::arch::sem_interrupcoes(|| R.lock());
+        drop(guarda);
+    });
+    if segurada != 1 {
+        crate::log_error!("teste", "{} travas seguradas ligadas", segurada);
+        return Err("uma trava segurada com as interrupcoes ligadas nao foi vista");
+    }
     Ok(())
 }
 
@@ -27645,6 +27964,19 @@ fn travas_nenhuma_inversao_de_ordem() -> Resultado {
         return Err(
             "uma trava foi solta num nucleo que nao a tinha: levada atraves de uma troca de fio",
         );
+    }
+    let misturadas = crate::ordem_das_travas::tomadas_nos_dois_modos(|classe, ligada| {
+        crate::log_error!(
+            "teste",
+            "a trava de {}:{} foi tomada com as interrupcoes ligadas em {}:{}, e mascaradas noutro lugar",
+            classe.file(),
+            classe.line(),
+            ligada.file(),
+            ligada.line()
+        );
+    });
+    if misturadas != 0 {
+        return Err("uma trava foi tomada com as interrupcoes ligadas e mascaradas");
     }
     match crate::ordem_das_travas::inversoes() {
         (0, _) => Ok(()),
@@ -28201,6 +28533,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "usuario: programas compilados rodam",
         f: usuario_programas_compilados_rodam,
+    },
+    Caso {
+        nome: "usuario: varios processos cedem em varios nucleos",
+        f: usuario_ceder_de_varios_processos_em_varios_nucleos,
     },
     Caso {
         nome: "eventos: o canal dorme, entrega e recusa",
@@ -28989,6 +29325,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "armazem: o agente manda binario no anexo",
         f: armazem_o_agente_manda_binario_no_anexo,
+    },
+    Caso {
+        nome: "armazem: fs.read devolve o que esta no arquivo",
+        f: armazem_fs_read_devolve_o_que_esta_no_arquivo,
     },
     Caso {
         nome: "armazem: revogacao no meio da operacao",

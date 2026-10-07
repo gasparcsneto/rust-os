@@ -637,7 +637,7 @@ pub fn init() {
         fabricante & 0xFFFF,
         fabricante >> 16
     );
-    *TPM.lock() = Some(Interface::Tis(tis));
+    crate::arch::sem_interrupcoes(|| *TPM.lock() = Some(Interface::Tis(tis)));
 }
 
 /// A interface do TPM da máquina, se houver um: `"TIS"` ou `"CRB"`.

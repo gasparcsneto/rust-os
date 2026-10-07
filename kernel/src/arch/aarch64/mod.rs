@@ -874,6 +874,39 @@ pub fn disparar_breakpoint() {
     unsafe { asm!("brk #0", options(nomem, nostack)) };
 }
 
+/// Estoura a pilha de exceção deste núcleo de propósito. Nunca retorna.
+///
+/// Serve ao `debug.trigger` com `kind: "stack_overflow"`: um `brk` com o
+/// imediato que o handler reconhece, e de lá uma recursão na pilha de
+/// exceção até a guarda. O que a fumaça confere é o desfecho — a falha
+/// relatada como estouro, com o `pc` de quem estourou, e o post-mortem de
+/// pé —, porque sem a conferência da entrada dos vetores o quadro descia
+/// pela guarda até a vaga vizinha.
+pub fn disparar_estouro_em_excecao() -> ! {
+    // SAFETY: nenhuma; é o ponto. O handler do `brk` não volta.
+    unsafe {
+        asm!(
+            "brk #{imediato}",
+            imediato = const vetores::IMEDIATO_DO_ESTOURO,
+            options(nomem, nostack, noreturn)
+        )
+    }
+}
+
+/// Estoura a pilha de exceção na borda da guarda, de propósito. Nunca
+/// retorna. Serve ao `debug.trigger` com `kind: "stack_overflow_edge"` —
+/// ver `vetores::pisar_no_fundo_da_guarda`.
+pub fn disparar_estouro_na_borda() -> ! {
+    // SAFETY: nenhuma; é o ponto. O handler do `brk` não volta.
+    unsafe {
+        asm!(
+            "brk #{imediato}",
+            imediato = const vetores::IMEDIATO_DO_ESTOURO_NA_BORDA,
+            options(nomem, nostack, noreturn)
+        )
+    }
+}
+
 /// Endereço garantidamente não mapeado, para provocar uma falha de propósito.
 ///
 /// O mapa de identidade cobre o bloco de dispositivos (o primeiro GiB) e os

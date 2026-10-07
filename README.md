@@ -180,7 +180,7 @@ $ cargo xtask agent --canal 2 agent.session
 | `tasks.list` | Tarefas lançadas, com id, nome e se estão vivas |
 | `irq.stats` | Contadores de interrupções de hardware por linha |
 | `traps.stats` | Contadores de exceções e detalhes da última falha |
-| `debug.trigger` | Dispara uma exceção de propósito (`kind`: `breakpoint` ou `fatal`) |
+| `debug.trigger` | Dispara uma exceção de propósito (`kind`: `breakpoint`, `fatal`, `stack_overflow`, `hang_core`; no ARM também `stack_overflow_edge`) |
 | `pci.list` | Dispositivos do barramento PCI, com fabricante, modelo e função |
 | `disk.info` | Capacidade e estado do disco virtio, se houver um |
 | `disk.read` | Lê um setor de 512 bytes e o devolve em hexadecimal (`sector`, `length`) |
@@ -189,7 +189,7 @@ $ cargo xtask agent --canal 2 agent.session
 | `btrfs.chunks` | O mapa de pedaços e a raiz da árvore de pedaços |
 | `fs.mounts` | O que está montado na árvore de arquivos, e de que tipo |
 | `fs.list` | Lista um diretório da árvore (`path`) |
-| `fs.read` | Lê um arquivo da árvore e devolve o conteúdo (`path`, `offset`, `max`) |
+| `fs.read` | Lê um arquivo da árvore e devolve o conteúdo (`path`, `offset`, `max`): em `utf-8` quando o arquivo inteiro é texto — o corte recua até o fim de um caractere —, em `base64` quando não |
 | `fs.stat` | O que um caminho do armazém é agora: o tipo, a versão, o tamanho, o dono e o arrendamento; e o uso e a cota de quem pede, e a ocupação do volume (`path`) |
 | `fs.write` | Grava um arquivo no armazém contra a versão lida (`path`, `expect_version`: 0 cria), com o conteúdo de exatamente um: `content` (texto), `draft` (um rascunho) ou o anexo (binário, declarado em `attachment` no canal); confirmado só depois do commit |
 | `fs.append` | Acrescenta ao fim de um arquivo do armazém, contra a versão de agora (`path`, `content` ou o anexo, `attachment`, `expect_version`) |
@@ -455,6 +455,7 @@ programas/           os programas de usuário, compilados à parte do kernel
         ├── ponteiros.rs  pede ao kernel que escreva no código, e confere a recusa
         ├── autoridade.rs confere de dentro que o processo age com o papel de quem o lançou
         ├── eco.rs        escuta um canal de eventos e diz o que chega
+        ├── cedente.rs    cede a vez duas mil vezes, em várias cópias, e confere que voltou inteiro
         ├── janelas.rs    o servidor de janelas: moldura, foco, arrasto, ordem e fechar
         ├── superficie.rs desenha numa superfície, bifurca, fecha e sai sem fechar
         ├── herdeira.rs   depois de um `exec`, fecha a superfície herdada sem perder a sua
@@ -639,6 +640,21 @@ e trocar de fio é trocar o quadro. Ceder de propósito passa por `svc`
 justamente para cair nesse mesmo caminho, e é a instrução que as chamadas de
 sistema vão usar na etapa seguinte.
 
+A consequência no ARM é uma regra: **nada troca de fio de dentro de um
+handler**. Lá a pilha de exceção é do núcleo, e um `svc` de dentro de uma
+chamada de sistema salvaria o fio com os quadros do handler nela; retomado
+noutro núcleo, ele voltaria pela pilha de exceção daquele, acima do topo, e
+no mesmo núcleo, depois de outro fio ter feito igual, pelos quadros do
+outro — devolvendo ao processo o quadro de usuário alheio. A chamada
+`ceder` fazia exatamente isso: foi o "estouro" que o CI viu uma vez (a
+leitura logo acima do topo da pilha do núcleo 1, que é a guarda da vaga
+seguinte), reproduzido em 150 ms com várias cópias de um programa que
+cede em laço (`usuario: varios processos cedem em varios nucleos`). Agora
+uma chamada que quer dar a vez só pede (`fios::pedir_cessao`), e o handler
+troca sobre o quadro de fora, como a preempção; e `ceder_cpu` com `SPSel=1`
+— de dentro de um handler — é um pânico que diz quem chamou, e não uma
+corrupção que aparece longe.
+
 **Preempção muda a regra das travas.** Um spinlock não é reentrante: um fio
 preemptado segurando uma trava faz o próximo girar para sempre. Por isso todo
 acesso a estado compartilhado neste kernel passa por `sem_interrupcoes`, que
@@ -671,12 +687,23 @@ alcançada pelo `GS` só nas quatro instruções da entrada. No ARM toda exceç�
 a interrupção, a falha e a chamada de sistema, com o comando inteiro que um
 processo pede — roda na pilha de exceção do núcleo (`SP_EL1`): 60 KiB da
 área de pilhas, com uma página de guarda embaixo, em todos os núcleos. O
-primeiro também: a do linker script (32 KiB, sem guarda, logo acima da
-pilha do boot) só serve ao boot, e ele troca para a da área de pilhas antes
-de os outros ligarem — uma exceção mais funda que ela escreveria em
-silêncio por cima da pilha do boot. A suíte mede a marca d'água de cada uma
-e diz qual caso desceu mais (`pilhas: a de excecao de cada nucleo tem
-folga`). Quem precisa saber
+primeiro também: a do linker script só serve ao boot, e ele troca para a
+da área de pilhas antes de os outros ligarem. A entrada dos vetores confere,
+antes de empilhar o quadro, que ele cabe — que nem o primeiro nem o último
+byte dele caem na página de guarda —, e um estouro recomeça o handler no
+topo da **própria** vaga e relata `estouro_da_pilha_de_excecao` com o `pc`
+de quem estourou. Sem isso o `stp` da entrada falhava na guarda, a falha
+entrava de novo 272 bytes abaixo, umas quinze vezes, até o quadro ser
+escrito no topo da vaga vizinha — a pilha de exceção de outro núcleo,
+viva. A fumaça estoura uma de propósito (`debug.trigger` com
+`stack_overflow`) nas duas arquiteturas: no ARM o endereço acusado é a
+guarda da vaga do núcleo do canal, e o `pc` é o da função que afunda; no
+x86 quem relata é a falha dupla, na pilha da IST. No ARM, num segundo boot,
+também a borda (`stack_overflow_edge`): `sp` a 16 bytes da base da guarda,
+onde só a metade da conferência que olha o último byte do quadro pega o
+estouro. A suíte mede a marca
+d'água de cada pilha de exceção e diz qual caso desceu mais (`pilhas: a de
+excecao de cada nucleo tem folga`). Quem precisa saber
 em que núcleo está pergunta a um registrador que o processo não alcança — o
 `TR` no x86, o `TPIDR_EL1` no ARM.
 
@@ -932,6 +959,21 @@ inversao` confere o conferidor, com duas, três travas e a ordem das
 gravações. Na suíte do x86 com quatro núcleos: cem classes, perto de cento
 e setenta arestas, nenhuma inversão, e nenhum ponto cego (classe fora da
 tabela, pilha além da altura, trava solta fora do núcleo que a tinha).
+
+A ordem não vê o impasse de uma trava só: uma classe tomada com as
+interrupções ligadas num lugar e mascaradas noutro. Quem a tem com elas
+ligadas pode ser interrompido no meio — por um handler que a pede, ou pela
+preempção, que põe no núcleo um fio que a pede mascarado —, e quem pede
+mascarado gira para sempre, porque quem a tem só volta pelo núcleo que ele
+não solta. A mesma conferência guarda com que interrupções cada classe foi
+tomada (e com quais foi solta), e uma classe nos dois modos reprova o
+último caso, com onde. Uma classe só de fios, sempre com elas ligadas, não
+tem o problema e não reprova. A primeira rodada achou quatro, todas reais:
+a ligação do disco, do TPM e da placa de rede (`*X.lock() = Some(..)` no
+boot, com elas ligadas, contra o resto do driver, mascarado) e o ajudante
+da suíte que segura a trava de `traps`. E nenhuma trava escapa da
+conferência: do pacote `spin` o kernel só tem o `Once`; uma `spin::Mutex`
+não compila.
 
 ### O que fica de fora
 
@@ -2828,8 +2870,13 @@ o pedido; o boot o reaplica por cima da imagem, antes de abrir as portas.
   continuando. A base só vale com o fecho no disco e um avanço do contador
   do TPM: uma queda em qualquer ponto deixa valendo a região antiga ou a
   nova, inteira, e a antiga fica recusada assim que o contador anda. Uma
-  revogação nunca sai da base. Uma operação que não cabe na região cheia
-  falha fechada, e a persistência fica indisponível até o boot compactar.
+  revogação nunca sai da base. Quem compacta é quem toma a ordem das
+  gravações num ponto seguro — o coletor, e também qualquer operação que a
+  tome de fora: a ordem não tem fila, e o coletor podia perdê-la para quem
+  grava sem parar até a região encher (`compactacao e a regiao cheia`
+  confere os dois, cada um sozinho). Uma operação que não cabe na região
+  cheia — a base que não cabe na outra — falha fechada, e a persistência
+  fica indisponível até o boot compactar.
 - **A senha do contador não passa pelo barramento.** Todo comando ao
   contador vai por uma sessão HMAC salgada com a chave de endosso (EK) do
   TPM: o comando prova a senha sem levá-la, a resposta tem de provar que

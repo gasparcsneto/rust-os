@@ -702,7 +702,7 @@ pub fn init() {
                 alvo.funcao,
                 disco.capacidade() * TAMANHO_DO_SETOR as u64 / 1024
             );
-            *DISCO.lock() = Some(disco);
+            crate::arch::sem_interrupcoes(|| *DISCO.lock() = Some(disco));
         }
         Err(motivo) => crate::log_error!("virtio", "disco nao pode ser ligado: {}", motivo),
     }

@@ -106,7 +106,13 @@ armazem = { path = "../armazem" }
 # Abstrações seguras sobre instruções e estruturas do x86_64.
 x86_64 = "0.15.5"
 # Inicialização única da GDT e da IDT (`spin::once::Once`).
-spin = "0.12.3"
+#
+# Só o `Once`: sem as travas do pacote (`Mutex`, `RwLock`, `lock_api`).
+# Toda trava do kernel é a `trava::Mutex`, que passa pela conferência da
+# ordem das travas na suíte e pelo destravamento do caminho fatal; uma
+# `spin::Mutex` escaparia das duas sem que nada reclamasse. Assim ela não
+# compila.
+spin = { version = "0.12.3", default-features = false, features = ["once"] }
 
 # Driver da UART 16550, acessada por portas de I/O (PIO).
 uart_16550 = "0.8.1"

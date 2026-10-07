@@ -286,8 +286,10 @@ pub unsafe fn despachar(
         numero::SAIR => sair(a0 as i64),
         numero::ESCREVER => escrever(a0, a1, a2),
         numero::ID => crate::fios::id_atual() as i64,
+        // A vez é dada ao voltar, pelo backend — ver
+        // [`crate::fios::pedir_cessao`] para por que não daqui.
         numero::CEDER => {
-            crate::fios::ceder();
+            crate::fios::pedir_cessao();
             0
         }
         numero::ABRIR => abrir(a0, a1),

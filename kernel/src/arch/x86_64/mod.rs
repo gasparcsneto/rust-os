@@ -830,6 +830,21 @@ pub fn disparar_falha_fatal() -> ! {
     halt_forever()
 }
 
+/// Estoura de propósito a pilha em que um handler de exceção roda. Nunca
+/// retorna.
+///
+/// Serve ao `debug.trigger` com `kind: "stack_overflow"`, o mesmo das duas
+/// arquiteturas: o `int3` cai em [`idt`], que vê o pedido e afunda dali. No
+/// x86 o handler roda na pilha de kernel do fio; a recursão chega à guarda,
+/// a falha de página não tem onde empilhar o quadro, e quem relata é a falha
+/// dupla, na pilha da IST.
+pub fn disparar_estouro_em_excecao() -> ! {
+    idt::AFUNDAR_NO_PONTO_DE_PARADA.store(true, core::sync::atomic::Ordering::SeqCst);
+    x86_64::instructions::interrupts::int3();
+    // Inalcançável: o handler não volta quando o pedido está de pé.
+    halt_forever()
+}
+
 /// Executa `f` com as interrupções mascaradas, restaurando o estado ao sair.
 pub fn sem_interrupcoes<R>(f: impl FnOnce() -> R) -> R {
     x86_64::instructions::interrupts::without_interrupts(f)

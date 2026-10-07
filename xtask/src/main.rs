@@ -5723,6 +5723,18 @@ fn fumaca(
     let _ = filho.wait();
     let _ = std::fs::remove_file(&socket);
 
+    // O estouro de propósito precisa de um boot só dele: depois de uma
+    // falha, o kernel só responde o relatório.
+    let resultado = resultado.and_then(|()| {
+        let tipos: &[&str] = match arch {
+            Arquitetura::Aarch64 => &["stack_overflow", "stack_overflow_edge"],
+            Arquitetura::X86_64 => &["stack_overflow"],
+        };
+        tipos.iter().try_for_each(|tipo| {
+            sob_estouro(arch, release, &artefato, teclado, video, &socket, tipo)
+        })
+    });
+
     match resultado {
         Ok(()) => {
             println!("\n[xtask] fumaça: o canal do agente respondeu a tudo");
@@ -5733,6 +5745,144 @@ fn fumaca(
             Ok(ExitCode::FAILURE)
         }
     }
+}
+
+/// Um estouro de verdade da pilha em que um handler de exceção roda vira uma
+/// falha relatada como estouro, com o `pc` de quem estourou, e o post-mortem
+/// segue de pé.
+///
+/// # Por que esta sonda existe
+///
+/// No ARM, a entrada dos vetores empilhava o quadro sem olhar onde: num
+/// estouro, o `stp` falhava na guarda, a falha entrava de novo, descia mais
+/// 272 bytes, e assim umas quinze vezes, até o quadro ser escrito no topo
+/// da vaga vizinha — a pilha de exceção de outro núcleo, viva. O relatório
+/// vinha depois disso e apontava para o próprio `stp`. A conferência da
+/// entrada dos vetores troca isso por uma falha limpa, na própria vaga.
+///
+/// No x86 o desfecho já era o certo — a falha de página não tem onde
+/// empilhar, e a falha dupla relata da pilha da IST —, e a sonda confere que
+/// continua sendo.
+///
+/// # O que conta como passar
+///
+/// - o nome da falha: `estouro_da_pilha_de_excecao` no ARM, `double_fault`
+///   no x86;
+/// - no ARM, o endereço acusado na página de guarda de uma vaga da área de
+///   pilhas, e o `pc` dentro da função que afunda — o relatório diz **quem**
+///   estourou, e não a entrada dos vetores;
+/// - o canal respondendo depois, que é o post-mortem de pé.
+///
+/// No ARM, dois estouros, um por boot: o da recursão (`stack_overflow`),
+/// que chega à guarda pelo alto, e o da borda (`stack_overflow_edge`), que
+/// põe `sp` nos 272 bytes de baixo dela — onde o quadro seguinte começaria
+/// na vaga vizinha, e só a metade da conferência que olha o último byte do
+/// quadro o pega. O endereço acusado da borda é a base da guarda mais 16, e
+/// o `pc` é o da função que pisa lá.
+fn sob_estouro(
+    arch: Arquitetura,
+    release: bool,
+    artefato: &Artefato,
+    teclado: Teclado,
+    video: Video,
+    socket: &Path,
+    tipo: &str,
+) -> Result<(), String> {
+    println!("[xtask] fumaça: um estouro da pilha de excecao ({tipo}), num boot proprio");
+    zerar_o_estado(arch)?;
+    let ambiente = Ambiente::ligar(arch, None)?;
+    let mut filho = comando_qemu(arch, artefato, Some(socket), teclado, video, &ambiente)?
+        .spawn()
+        .map_err(|e| format!("não foi possível iniciar o {}: {e}", arch.qemu()))?;
+    let resultado = (|| -> Result<String, String> {
+        let fluxo = canal_de_pe(socket, filho.id(), ESPERA_PELA_FUMACA)?;
+        fluxo
+            .set_read_timeout(Some(Duration::from_secs(15)))
+            .map_err(|e| format!("não foi possível configurar o timeout: {e}"))?;
+        let mut escrita = fluxo
+            .try_clone()
+            .map_err(|e| format!("não foi possível duplicar o fluxo: {e}"))?;
+        let mut leitor = BufReader::new(fluxo);
+        let mut id = 8800;
+        let pedido = pedir_pela_serial(
+            &mut escrita,
+            &mut leitor,
+            &mut id,
+            "debug.trigger",
+            &format!(r#"{{"kind":"{tipo}"}}"#),
+        )?;
+        if !pedido.contains(&format!(r#""scheduled":"{tipo}""#)) {
+            return Err(format!("falha: o estouro nao foi agendado\n  {pedido}"));
+        }
+        // O post-mortem sobe o canal de novo, em modo direto, e o que
+        // estiver em trânsito nessa passagem se perde. Então a conversa
+        // recomeça como a de um cliente novo: o mesmo aperto de mão do boot.
+        drop((escrita, leitor));
+        std::thread::sleep(Duration::from_secs(2));
+        let fluxo = canal_de_pe(socket, filho.id(), Duration::from_secs(30))?;
+        fluxo
+            .set_read_timeout(Some(Duration::from_secs(15)))
+            .map_err(|e| format!("não foi possível configurar o timeout: {e}"))?;
+        let mut escrita = fluxo
+            .try_clone()
+            .map_err(|e| format!("não foi possível duplicar o fluxo: {e}"))?;
+        let mut leitor = BufReader::new(fluxo);
+        pedir_pela_serial(&mut escrita, &mut leitor, &mut id, "traps.stats", "{}")
+    })();
+    let _ = filho.kill();
+    let _ = filho.wait();
+    let _ = std::fs::remove_file(socket);
+    let stats = resultado?;
+
+    let ultima = apos(&stats, r#""last":"#).unwrap_or("");
+    let nome = campo_simples(ultima, "name").unwrap_or_default();
+    let esperado = match arch {
+        Arquitetura::Aarch64 => "estouro_da_pilha_de_excecao",
+        Arquitetura::X86_64 => "double_fault",
+    };
+    if nome != esperado {
+        return Err(format!(
+            "falha: o estouro foi relatado como `{nome}`, e nao como `{esperado}`\n  {stats}"
+        ));
+    }
+    if arch == Arquitetura::Aarch64 {
+        let endereco = campo_simples(ultima, "address")
+            .and_then(|a| a.parse::<u64>().ok())
+            .ok_or_else(|| format!("falha: o estouro nao acusou endereco\n  {stats}"))?;
+        // A área de pilhas começa em 0x20_0000_0000, em vagas de 64 KiB cuja
+        // primeira página é a guarda.
+        let na_guarda = endereco >= 0x20_0000_0000 && endereco & 0xF000 == 0;
+        let na_borda = endereco & 0xFFFF == 16;
+        if !na_guarda || (tipo == "stack_overflow_edge" && !na_borda) {
+            return Err(format!(
+                "falha: o endereco acusado {endereco:#x} nao e o da guarda que o estouro ({tipo}) tocou"
+            ));
+        }
+        let pc = campo_simples(ultima, "pc")
+            .and_then(|a| a.parse::<u64>().ok())
+            .ok_or_else(|| format!("falha: o estouro nao trouxe pc\n  {stats}"))?;
+        let simbolos = simbolos_do_kernel(&caminho_elf(arch, release))?;
+        let dono = simbolos
+            .iter()
+            .filter(|(_, a)| *a <= pc)
+            .max_by_key(|(_, a)| *a)
+            .map(|(n, _)| n.as_str())
+            .unwrap_or("");
+        let quem = if tipo == "stack_overflow_edge" {
+            "pisar_no_fundo_da_guarda"
+        } else {
+            "afundar"
+        };
+        if !dono.contains(quem) {
+            return Err(format!(
+                "falha: o pc {pc:#x} do estouro e de `{dono}`, e nao de `{quem}`"
+            ));
+        }
+        println!("  [estouro] ok  {nome} na guarda {endereco:#x}, pc em {dono}");
+    } else {
+        println!("  [estouro] ok  {nome}, relatado pela pilha da IST");
+    }
+    Ok(())
 }
 
 /// Espera o canal da serial atender, e devolve a conexão já limpa.

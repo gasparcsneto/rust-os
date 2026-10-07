@@ -223,8 +223,32 @@ pub fn tipos_perdidos() -> u64 {
 /// o que travaria o kernel no pior momento possível.
 #[cfg(feature = "modo-teste")]
 pub fn com_trava_ocupada<R>(f: impl FnOnce() -> R) -> R {
-    let _guarda = ESTADO.lock();
-    f()
+    crate::arch::sem_interrupcoes(|| {
+        let _guarda = ESTADO.lock();
+        f()
+    })
+}
+
+/// Recursão sem fundo, de propósito, na pilha de quem chama — um handler de
+/// exceção, pelo `debug.trigger` de estouro. Nunca volta.
+pub fn afundar_de_proposito() -> ! {
+    afundar(0);
+    // Inalcançável: `afundar` só termina na guarda.
+    crate::arch::halt_forever()
+}
+
+/// Cada nível prende meio KiB que o compilador não pode dispensar, e usa o
+/// bloco **depois** da chamada: sem isso a recursão é de cauda, e o release a
+/// transformaria num laço que nunca chega à guarda.
+#[inline(never)]
+fn afundar(nivel: u64) -> u64 {
+    let mut bloco = [0u8; 512];
+    core::hint::black_box(&mut bloco);
+    if core::hint::black_box(nivel) == u64::MAX {
+        return 0;
+    }
+    let abaixo = afundar(nivel + 1);
+    abaixo.wrapping_add(core::hint::black_box(&bloco)[(nivel % 512) as usize] as u64)
 }
 
 /// Trata uma falha não recuperável: registra, reporta e entra em post-mortem.

@@ -278,6 +278,10 @@ struct Fio {
     /// [`tirar_reexecucao`]. Posto junto com [`Estado::Esperando`], na mesma
     /// seção crítica, e só por quem põe o fio nesse estado.
     reexecutar: bool,
+    /// A chamada de sistema em curso pediu a vez para outro fio ao voltar —
+    /// ver [`pedir_cessao`]. Posto e tirado pelo próprio fio, dentro da
+    /// mesma chamada.
+    ceder_ao_voltar: bool,
     /// O pedido do processo pela interface nativa — ver [`crate::nativo`].
     pedido: EstadoDoPedido,
     /// O programa que o fio executa — ver [`crate::autorizacao::Programa`].
@@ -521,6 +525,7 @@ pub fn init() {
             fixo: Some(cpu),
             ocioso: false,
             reexecutar: false,
+            ceder_ao_voltar: false,
             pedido: EstadoDoPedido::Livre,
             programa: crate::autorizacao::Programa::Kernel,
         });
@@ -704,6 +709,7 @@ pub fn recolher_terminados() -> usize {
                 fixo: None,
                 ocioso: false,
                 reexecutar: false,
+                ceder_ao_voltar: false,
                 pedido: EstadoDoPedido::Livre,
                 programa: crate::autorizacao::Programa::Kernel,
             });
@@ -1020,6 +1026,7 @@ fn nascer(
             fixo,
             ocioso: false,
             reexecutar: false,
+            ceder_ao_voltar: false,
             pedido: EstadoDoPedido::Livre,
             programa,
         });
@@ -1098,6 +1105,7 @@ fn nascer(
             fixo,
             ocioso: false,
             reexecutar: false,
+            ceder_ao_voltar: false,
             pedido: EstadoDoPedido::Livre,
             programa,
         });
@@ -1147,6 +1155,7 @@ pub fn preparar_ocioso(cpu: usize) -> Result<(usize, u64), &'static str> {
             fixo: Some(cpu),
             ocioso: true,
             reexecutar: false,
+            ceder_ao_voltar: false,
             pedido: EstadoDoPedido::Livre,
             programa: crate::autorizacao::Programa::Kernel,
         });
@@ -1527,6 +1536,7 @@ pub fn programa_atual() -> (u64, crate::autorizacao::Programa) {
 
 /// Cede a CPU voluntariamente. Quem espera a ordem das gravações da
 /// persistência cede em vez de girar: quem a tem pode estar preemptado.
+#[track_caller]
 pub fn ceder() {
     crate::arch::ceder_cpu();
 }
@@ -1722,6 +1732,42 @@ pub fn tirar_reexecucao() -> bool {
     com_escalonador(|e| {
         e.fio_atual_mut()
             .is_some_and(|f| core::mem::take(&mut f.reexecutar))
+    })
+}
+
+/// A chamada de sistema `ceder`: o fio dá a vez **ao voltar** da chamada,
+/// e não de dentro dela.
+///
+/// # Por que não ceder aqui mesmo
+///
+/// No x86 daria certo: a chamada roda numa cadeia comum sobre a pilha de
+/// kernel do fio, e o fio voltaria aqui. No ARM não: a chamada roda dentro
+/// do handler de exceção, na pilha de exceção **do núcleo**, e ceder daqui
+/// é um `svc` aninhado que salva o fio no meio do handler, com os quadros
+/// dele naquela pilha. Retomado noutro núcleo, ele voltava pela pilha de
+/// exceção deste — o CI viu a leitura logo acima do topo da do núcleo 1 —,
+/// e no mesmo núcleo, depois de outro fio ter feito igual, pelos quadros do
+/// outro, devolvendo ao processo o quadro de usuário alheio.
+///
+/// Então a chamada só pede, e quem atende é o backend, onde ele já troca de
+/// fio: no ARM sobre o quadro de fora — o do usuário —, como a preempção;
+/// no x86 cedendo de `despachar_chamada`, que roda na pilha do fio. Ver
+/// [`tirar_cessao`], e `arch::aarch64::contexto::ceder_cpu`, que recusa ser
+/// chamada de dentro de um handler.
+pub fn pedir_cessao() {
+    com_escalonador(|e| {
+        if let Some(fio) = e.fio_atual_mut() {
+            fio.ceder_ao_voltar = true;
+        }
+    });
+}
+
+/// A chamada de sistema que acabou de rodar pediu para dar a vez? Responde
+/// uma vez: a pergunta apaga o pedido. Ver [`pedir_cessao`].
+pub fn tirar_cessao() -> bool {
+    com_escalonador(|e| {
+        e.fio_atual_mut()
+            .is_some_and(|f| core::mem::take(&mut f.ceder_ao_voltar))
     })
 }
 

@@ -631,7 +631,7 @@ pub fn init() {
                     alvo.funcao
                 ),
             }
-            *PLACA.lock() = Some(placa);
+            crate::arch::sem_interrupcoes(|| *PLACA.lock() = Some(placa));
         }
         Err(motivo) => crate::log_error!("virtio", "rede nao pode ser ligada: {}", motivo),
     }

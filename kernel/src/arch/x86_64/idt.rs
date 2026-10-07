@@ -242,12 +242,21 @@ fn atender(linha: u8) -> bool {
     preemptar
 }
 
+/// O próximo `int3` afunda a pilha em vez de voltar — ver
+/// [`super::disparar_estouro_em_excecao`].
+pub(super) static AFUNDAR_NO_PONTO_DE_PARADA: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
 /// `int3` — o ponto de parada dos depuradores.
 ///
 /// É a única exceção aqui que **retorna**: o processador já avançou o RIP para
 /// depois da instrução, então basta voltar. Serve de prova viva de que os
 /// handlers funcionam, e é o que o comando `debug.trigger` usa.
 extern "x86-interrupt" fn ponto_de_parada(quadro: InterruptStackFrame) {
+    // O estouro de propósito — ver `disparar_estouro_em_excecao`.
+    if AFUNDAR_NO_PONTO_DE_PARADA.swap(false, core::sync::atomic::Ordering::SeqCst) {
+        crate::traps::afundar_de_proposito();
+    }
     let pc = quadro.instruction_pointer.as_u64();
     let seq = crate::traps::registrar("breakpoint", pc, None, 0);
     crate::log_info!("traps", "breakpoint #{} em pc={:#x}", seq, pc);
