@@ -97,10 +97,12 @@ impl Canal {
     }
 
     /// O próximo byte, quando houver.
-    pub async fn proximo_byte(self) -> u8 {
+    /// O próximo byte, e se ele chegou depois de um silêncio — o que só a
+    /// serial sabe dizer; numa porta, o fim de um cliente é a geração dela.
+    pub async fn proximo_byte(self) -> (u8, bool) {
         match self {
             Canal::Serial => crate::tarefas::entrada::proximo_byte().await,
-            Canal::Porta(p) => crate::virtio::console::proximo_byte(p).await,
+            Canal::Porta(p) => (crate::virtio::console::proximo_byte(p).await, false),
         }
     }
 }

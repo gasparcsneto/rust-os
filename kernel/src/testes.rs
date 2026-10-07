@@ -9941,7 +9941,7 @@ fn waker_acorda_tarefa_bloqueada() -> Resultado {
     static RECEBIDO: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
     async fn corpo() {
-        let byte = crate::tarefas::entrada::proximo_byte().await;
+        let (byte, _) = crate::tarefas::entrada::proximo_byte().await;
         RECEBIDO.store(byte as u64 + 1, core::sync::atomic::Ordering::SeqCst);
     }
 
@@ -26582,6 +26582,46 @@ fn de_base64(texto: &str) -> Option<alloc::vec::Vec<u8>> {
     Some(saida)
 }
 
+/// O silêncio que separa dois quadros na serial é medido na **chegada** dos
+/// bytes, e não quando o canal os consome:
+///
+/// - um pedido que chegou inteiro, consumido com o laço do canal parado mais
+///   de meio segundo no meio, continua um pedido só — era o que a fumaça do
+///   x86 via no CI: o resto do pedido respondido com `JSON malformado`;
+/// - o byte que chega depois de um silêncio recomeça o quadro, e o pedaço do
+///   cliente que parou fica para trás;
+/// - a marca é posta por quem recebe: mais de meio segundo entre duas
+///   chegadas, e nunca no primeiro byte.
+fn agente_o_silencio_e_medido_na_chegada() -> Resultado {
+    use crate::tarefas::entrada::{DEPOIS_DE_SILENCIO, SILENCIO_EM_TIQUES, marca_entre};
+    let mut q = crate::agent::QuadroDaSerialDeTeste::novo();
+    let comeco = br#"{"jsonrpc":"2.0","#;
+    let resto = br#""id":1,"method":"agent.ping""#;
+    q.alimentar(comeco, false);
+    // O canal parado: mais que o teto, entre um byte e o seguinte.
+    let ate = crate::tempo::ticks() + SILENCIO_EM_TIQUES + 10;
+    while crate::tempo::ticks() < ate {
+        core::hint::spin_loop();
+    }
+    q.alimentar(resto, false);
+    if q.tamanho() != comeco.len() + resto.len() {
+        crate::log_error!("teste", "quadro com {} bytes", q.tamanho());
+        return Err("um pedido chegado inteiro foi partido pela demora de quem o consome");
+    }
+    q.alimentar(b"{\"id\"", true);
+    if q.tamanho() != 5 {
+        crate::log_error!("teste", "quadro com {} bytes", q.tamanho());
+        return Err("o byte depois de um silencio nao recomecou o quadro");
+    }
+    if marca_entre(100, 100 + SILENCIO_EM_TIQUES + 1) != DEPOIS_DE_SILENCIO
+        || marca_entre(100, 100 + SILENCIO_EM_TIQUES) != 0
+        || marca_entre(0, 1_000_000) != 0
+    {
+        return Err("a marca de silencio nao e a de mais de meio segundo entre duas chegadas");
+    }
+    Ok(())
+}
+
 /// O binário de um agente vai fora do JSON, nos quadros de anexo da sessão
 /// cifrada, e o pedido seguinte o declara em `attachment`:
 ///
@@ -29321,6 +29361,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "armazem: rascunho grande e binario",
         f: armazem_rascunho_grande_e_binario,
+    },
+    Caso {
+        nome: "agente: o silencio e medido na chegada",
+        f: agente_o_silencio_e_medido_na_chegada,
     },
     Caso {
         nome: "armazem: o agente manda binario no anexo",

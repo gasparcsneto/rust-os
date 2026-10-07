@@ -135,7 +135,17 @@ pub(crate) fn agendar_falha(falha: Falha) {
 /// intrínseco a um fluxo de bytes sem fronteira de conexão, e a saída não é
 /// um teto menor — é o cliente anunciar a fronteira que só ele conhece. Ver
 /// [`LIMPAR_AO_CONECTAR`].
-const TETO_DO_QUADRO_EM_TIQUES: u64 = 50;
+///
+/// # Onde se mede
+///
+/// Na chegada de cada byte, por quem o recebe — ver
+/// [`crate::tarefas::entrada::DEPOIS_DE_SILENCIO`]. Medido aqui, no
+/// enquadrador, o relógio era o de quando o byte era **consumido**, e um
+/// laço do canal ocupado mais de meio segundo no meio de um pedido partia ao
+/// meio um pedido que tinha chegado inteiro: o resto voltava como `JSON
+/// malformado`. Foi o que a fumaça do x86 viu no CI, logo depois do `press`
+/// da pessoa na barra.
+pub(crate) const TETO_DO_QUADRO_EM_TIQUES: u64 = 50;
 
 /// O que um cliente deve enviar ao conectar: uma linha vazia.
 ///
@@ -205,24 +215,6 @@ struct Montador {
     /// e o erro que voltava era atribuído a ele. Em nenhum dos dois havia como
     /// o agente saber que o que chegou não era o que ele mandou.
     perdas_ao_abrir: u64,
-    /// Quando chegou o último byte deste quadro, em tiques.
-    ///
-    /// Um quadro parado tempo demais não é um cliente lento: é um cliente que
-    /// morreu no meio de uma requisição. O kernel não enxerga a desconexão —
-    /// não há linha de modem entre ele e o socket —, mas enxerga o relógio.
-    ///
-    /// Sem isto, o fragmento do cliente morto ficava pendurado e colava na
-    /// primeira requisição de quem conectasse depois. Medido: um cliente
-    /// enviou `{"jsonrpc":"2.0","id":2,"method":"agent.pi` e caiu; o cliente
-    /// seguinte pediu um `agent.ping` com `id` 99 e recebeu
-    ///
-    ///     {"id":2,"error":{"code":-32601,"message":"metodo nao encontrado"}}
-    ///
-    /// — o pedido dele engolido, e uma resposta com o `id` de outra pessoa
-    /// para um método que ele não chamou. Com um fragmento mais infeliz, o
-    /// quadro colado vira uma requisição válida que ninguém fez, e o kernel a
-    /// executa.
-    ultimo_byte_em: u64,
     /// Este quadro já foi dado por perdido, e o cliente já foi avisado.
     ///
     /// Separado de `estourou` porque a causa é outra e o desfecho também: ali
@@ -243,7 +235,6 @@ impl Montador {
             buffer: [0; LINHA_MAX],
             tam: 0,
             perdas_ao_abrir: 0,
-            ultimo_byte_em: 0,
             danificado: false,
             estourou: false,
         }
@@ -254,7 +245,7 @@ impl Montador {
     /// Devolve `true` quando este byte fechou uma linha — o chamador usa isso
     /// para saber que acabou de gastar um tempo indeterminado executando um
     /// comando, e que é uma boa hora de dar a vez a outra tarefa.
-    fn alimentar(&mut self, byte: u8) -> bool {
+    fn alimentar(&mut self, byte: u8, depois_de_silencio: bool) -> bool {
         // Ociosidade primeiro: um quadro parado tempo demais é abandonado em
         // silêncio, e este byte passa a ser o primeiro de um quadro novo.
         //
@@ -274,14 +265,16 @@ impl Montador {
             self.abrir_quadro();
         }
 
-        let agora = crate::tempo::ticks();
-        if self.tam > 0 && agora.saturating_sub(self.ultimo_byte_em) > TETO_DO_QUADRO_EM_TIQUES {
+        // Um byte que chegou depois de um silêncio começa outro quadro: o
+        // que estava pela metade era de um cliente que parou, ou sumiu. Quem
+        // diz é quem recebeu o byte, pelo relógio da chegada — ver
+        // [`TETO_DO_QUADRO_EM_TIQUES`].
+        if self.tam > 0 && depois_de_silencio {
             self.tam = 0;
             self.estourou = false;
             self.danificado = false;
             self.abrir_quadro();
         }
-        self.ultimo_byte_em = agora;
 
         // A perda é conferida a cada byte, e não ao fechar o quadro, para que
         // o cliente saiba enquanto ainda está mandando. O quadro fecha de
@@ -415,14 +408,16 @@ pub async fn atender(canal: Canal) {
         Canal::Serial => None,
     };
     loop {
-        let byte = canal.proximo_byte().await;
+        let (byte, depois_de_silencio) = canal.proximo_byte().await;
         let fechou = match porta.as_mut() {
+            // Numa porta o fim de um cliente é a geração da porta, e o texto
+            // decifrado não tem relógio de chegada.
             Some(porta) => {
                 let mut fechou = false;
-                porta.receber(byte, |b| fechou |= montador.alimentar(b));
+                porta.receber(byte, |b| fechou |= montador.alimentar(b, false));
                 fechou
             }
-            None => montador.alimentar(byte),
+            None => montador.alimentar(byte, depois_de_silencio),
         };
         if fechou {
             // Acabamos de executar um comando, o que pode ter custado um
@@ -468,8 +463,8 @@ pub fn servir() -> ! {
         crate::tarefas::entrada::coletar();
 
         let mut atendeu = false;
-        while let Some(byte) = crate::tarefas::entrada::retirar() {
-            let _ = montador.alimentar(byte);
+        while let Some((byte, depois_de_silencio)) = crate::tarefas::entrada::retirar() {
+            let _ = montador.alimentar(byte, depois_de_silencio);
             atendeu = true;
         }
 
@@ -481,6 +476,34 @@ pub fn servir() -> ! {
             // sempre.
             crate::arch::esperar_interrupcao();
         }
+    }
+}
+
+/// Em modo de teste: o enquadrador da serial, alimentado à mão, sem
+/// responder — a suíte não manda o `\n`.
+#[cfg(feature = "modo-teste")]
+pub struct QuadroDaSerialDeTeste(Montador);
+
+#[cfg(feature = "modo-teste")]
+impl QuadroDaSerialDeTeste {
+    pub fn novo() -> QuadroDaSerialDeTeste {
+        let mut montador = Montador::novo(Canal::Serial);
+        montador.geracao = Canal::Serial.geracao();
+        montador.abrir_quadro();
+        QuadroDaSerialDeTeste(montador)
+    }
+
+    /// Alimenta `bytes`, o primeiro com a marca de silêncio dada.
+    pub fn alimentar(&mut self, bytes: &[u8], o_primeiro_depois_de_silencio: bool) {
+        for (i, &b) in bytes.iter().enumerate() {
+            debug_assert!(b != b'\n', "o quadro de teste nao fecha");
+            self.0.alimentar(b, i == 0 && o_primeiro_depois_de_silencio);
+        }
+    }
+
+    /// Quantos bytes o quadro em montagem tem.
+    pub fn tamanho(&self) -> usize {
+        self.0.tam
     }
 }
 
@@ -515,7 +538,7 @@ impl SessaoDeTeste {
         while let Some(byte) = crate::virtio::console::retirar(p) {
             let montador = &mut self.montador;
             self.porta.receber(byte, |b| {
-                montador.alimentar(b);
+                montador.alimentar(b, false);
             });
         }
     }

@@ -51,7 +51,47 @@ use super::fila::Fila;
 const CAPACIDADE: usize = 8192;
 const _: () = assert!(CAPACIDADE >= 2 * crate::agent::LINHA_MAX);
 
-static BYTES: Fila<u8, CAPACIDADE> = Fila::nova();
+/// Cada byte, com a marca [`DEPOIS_DE_SILENCIO`] no bit 8 quando chegou
+/// depois de um silêncio.
+static BYTES: Fila<u16, CAPACIDADE> = Fila::nova();
+
+/// A marca de um byte que chegou depois de [`SILENCIO_EM_TIQUES`] sem
+/// nenhum outro: o cliente de antes parou — ou sumiu —, e um quadro pela
+/// metade é dele.
+///
+/// # Por que na chegada, e não em quem consome
+///
+/// O enquadrador media o silêncio pelo relógio de quando **consumia** cada
+/// byte. Com o laço do canal ocupado mais de meio segundo no meio de um
+/// pedido — o `press` da pessoa redesenhando a tela, no CI do x86 —, os
+/// bytes que já estavam na fila, chegados juntos com os primeiros, pareciam
+/// ter vindo depois de um silêncio: o pedido era partido ao meio e o resto
+/// respondido com `JSON malformado`. Só quem recebe o byte sabe quando ele
+/// chegou, e é aqui que o silêncio se mede.
+pub const DEPOIS_DE_SILENCIO: u16 = 1 << 8;
+
+/// Quanto tempo sem bytes faz do seguinte o começo de outro quadro — ver
+/// [`crate::agent::TETO_DO_QUADRO_EM_TIQUES`] sobre o porquê do valor.
+pub const SILENCIO_EM_TIQUES: u64 = crate::agent::TETO_DO_QUADRO_EM_TIQUES;
+
+/// O tique em que o último byte chegou da UART; zero antes do primeiro.
+static ULTIMA_CHEGADA: AtomicU64 = AtomicU64::new(0);
+
+/// A marca do byte que chega agora, e a chegada anotada.
+fn marca_da_chegada() -> u16 {
+    let agora = crate::tempo::ticks();
+    marca_entre(ULTIMA_CHEGADA.swap(agora, Ordering::Relaxed), agora)
+}
+
+/// A marca de um byte que chegou em `agora`, tendo o anterior chegado em
+/// `antes` (zero: nenhum antes).
+pub fn marca_entre(antes: u64, agora: u64) -> u16 {
+    if antes != 0 && agora.saturating_sub(antes) > SILENCIO_EM_TIQUES {
+        DEPOIS_DE_SILENCIO
+    } else {
+        0
+    }
+}
 
 /// Waker da tarefa que espera bytes.
 ///
@@ -165,8 +205,8 @@ pub fn descartar_pendentes() -> usize {
 /// microssegundos e a janela deixa de existir.
 pub fn descartar_ate_nova_linha() -> bool {
     crate::arch::sem_interrupcoes(|| {
-        while let Some(byte) = BYTES.desenfileirar() {
-            if byte == b'\n' {
+        while let Some(item) = BYTES.desenfileirar() {
+            if item as u8 == b'\n' {
                 return true;
             }
         }
@@ -240,6 +280,7 @@ pub fn coletar() {
                 break;
             };
             chegou = true;
+            let marca = marca_da_chegada();
 
             if descartando {
                 if byte == b'\n' {
@@ -252,12 +293,15 @@ pub fn coletar() {
                     // fila, o quadro seguinte colava no atropelado, que é
                     // exatamente o que o marcador existe para impedir. Se não
                     // coube, seguimos descartando e tentamos no próximo.
-                    descartando = BYTES.enfileirar(byte).is_err();
+                    descartando = BYTES.enfileirar(u16::from(byte)).is_err();
                 }
                 continue;
             }
 
-            if BYTES.enfileirar_com_reserva(byte, 1).is_err() {
+            if BYTES
+                .enfileirar_com_reserva(u16::from(byte) | marca, 1)
+                .is_err()
+            {
                 descartando = true;
             }
         }
@@ -289,13 +333,14 @@ pub fn proximo_byte() -> ProximoByte {
 pub struct ProximoByte;
 
 impl Future for ProximoByte {
-    type Output = u8;
+    /// O byte, e se ele chegou depois de um silêncio.
+    type Output = (u8, bool);
 
-    fn poll(self: Pin<&mut Self>, contexto: &mut Context) -> Poll<u8> {
+    fn poll(self: Pin<&mut Self>, contexto: &mut Context) -> Poll<(u8, bool)> {
         // Caminho rápido: com a fila cheia de bytes — o caso comum no meio de
         // uma requisição — nem chegamos a tocar no waker.
-        if let Some(byte) = BYTES.desenfileirar() {
-            return Poll::Ready(byte);
+        if let Some(item) = BYTES.desenfileirar() {
+            return Poll::Ready(separar(item));
         }
 
         registrar(contexto.waker());
@@ -303,13 +348,18 @@ impl Future for ProximoByte {
         // Segunda consulta, agora com o waker no lugar. Ver a explicação da
         // corrida no cabeçalho do módulo.
         match BYTES.desenfileirar() {
-            Some(byte) => {
+            Some(item) => {
                 limpar();
-                Poll::Ready(byte)
+                Poll::Ready(separar(item))
             }
             None => Poll::Pending,
         }
     }
+}
+
+/// O byte e a marca de silêncio de um item da fila.
+fn separar(item: u16) -> (u8, bool) {
+    (item as u8, item & DEPOIS_DE_SILENCIO != 0)
 }
 
 fn registrar(waker: &Waker) {
@@ -353,8 +403,8 @@ pub unsafe fn destravar() {
 /// nem do heap nem do escalonador — os dois podem ser justamente o que
 /// quebrou. Ele bombeia [`coletar`] e consome daqui, no mesmo laço síncrono
 /// que o kernel usava antes de haver tarefas.
-pub fn retirar() -> Option<u8> {
-    BYTES.desenfileirar()
+pub fn retirar() -> Option<(u8, bool)> {
+    BYTES.desenfileirar().map(separar)
 }
 
 /// Injeta um byte como se tivesse vindo da serial.
@@ -363,7 +413,7 @@ pub fn retirar() -> Option<u8> {
 /// sem depender de um cliente conectado do lado de fora do emulador.
 #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub fn injetar(byte: u8) -> Result<(), u8> {
-    let r = BYTES.enfileirar(byte);
+    let r = BYTES.enfileirar(u16::from(byte)).map_err(|_| byte);
     if r.is_ok() {
         despertar();
     }
