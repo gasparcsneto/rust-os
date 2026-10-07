@@ -22,7 +22,11 @@
 //!   permissão cujo recurso é um caminho. **Obrigatório** para cada papel
 //!   que tem uma delas: sem a linha, o papel não seria limitado — e "sem
 //!   limite" seria um curinga escrito pela ausência. O alcance inteiro se
-//!   escreve: `recurso sistema fs.read /`.
+//!   escreve: `recurso sistema fs.read /`. A mesma linha diz o alcance de
+//!   `message.send` — os papéis destinatários, `papel:<nome>` — e o de
+//!   `net.connect` — os destinos de rede, cada um inteiro e na forma
+//!   normal, `tcp:<ipv4>:<porta>` ([`crate::endereco`]). Nos dois, uma
+//!   lista enumerada: o que não está escrito não é alcançado.
 //! - `taxa <papel> <por segundo> <rajada>`: o balde de pedidos do papel.
 //! - `processos <papel> <quantos>`: a cota de processos vivos de cada
 //!   titular do papel — uma sessão de agente, uma de pessoa, o sistema —,
@@ -271,6 +275,9 @@ pub enum ErroTipo {
     CaminhoInvalido(String),
     /// Um destino que não é `papel:<nome>`, com o nome na regra.
     DestinoInvalido(String),
+    /// Um destino de rede que não é `tcp:<ipv4>:<porta>` na forma normal —
+    /// ver [`crate::endereco`].
+    EnderecoInvalido(String),
     /// Falta a linha `serial`.
     SemSerial,
     /// Falta a linha `local`.
@@ -307,7 +314,7 @@ impl Erro {
                 format!("recurso para `{p}`, que o papel nao tem")
             }
             ErroTipo::RecursoNaoECaminho(p) => {
-                format!("`{p}` nao tem alcance: nem caminho, nem destino")
+                format!("`{p}` nao tem alcance: nem caminho, nem destinatario, nem destino de rede")
             }
             ErroTipo::RecursoFaltando(papel, p) => {
                 format!("`{papel}` tem `{p}` sem a linha `recurso` que diz o alcance")
@@ -316,6 +323,9 @@ impl Erro {
             ErroTipo::DestinoInvalido(d) => {
                 format!("destino invalido `{d}`: so `papel:<nome>`, sem curinga")
             }
+            ErroTipo::EnderecoInvalido(d) => format!(
+                "destino de rede invalido `{d}`: so `tcp:<ipv4>:<porta>`, na forma normal, sem curinga"
+            ),
             ErroTipo::SemSerial => "falta a linha `serial`".to_string(),
             ErroTipo::SemLocal => "falta a linha `local`".to_string(),
             ErroTipo::OperacaoSemQuorum(o) => format!("`{o}` nao e uma operacao de quorum"),
@@ -533,6 +543,16 @@ impl Politica {
                             .filter(|n| nome_valido(n))
                             .ok_or(erro(ErroTipo::DestinoInvalido(c.to_string())))?;
                         prefixos.push(alloc::format!("{PREFIXO_DE_DESTINO}{nome}"));
+                    } else if p.recurso_e_endereco() {
+                        // Um destino inteiro, na forma normal — e só ela:
+                        // a linha que escreve `tcp:010.0.2.1:7` é recusada,
+                        // e não lida como outra coisa.
+                        let normal = crate::endereco::normalizar(c)
+                            .filter(|n| n == c)
+                            .ok_or(erro(ErroTipo::EnderecoInvalido(c.to_string())))?;
+                        if !prefixos.contains(&normal) {
+                            prefixos.push(normal);
+                        }
                     } else {
                         let normal = caminho::normalizar(c)
                             .ok_or(erro(ErroTipo::CaminhoInvalido(c.to_string())))?;
@@ -784,6 +804,19 @@ impl Politica {
                 .strip_prefix(PREFIXO_DE_DESTINO)
                 .is_some_and(|nome| self.papel(nome).is_some());
             if !existe || !alcance.iter().any(|a| a == alvo) {
+                return Codigo::DenyResource;
+            }
+        }
+        if p.recurso_e_endereco() {
+            // O destino de rede, na forma normal, igual a um dos
+            // enumerados. Sem destino, ou um que não se lê: fechado.
+            let Some(alcance) = papel.recursos.get(&p) else {
+                return Codigo::DenyResource;
+            };
+            let Some(normal) = recurso.and_then(crate::endereco::normalizar) else {
+                return Codigo::DenyResource;
+            };
+            if !alcance.contains(&normal) {
                 return Codigo::DenyResource;
             }
         }
@@ -1084,13 +1117,16 @@ impl Politica {
 /// uma permissão que não é de caminho, ou o de um papel sem a permissão: está
 /// contido em qualquer um, e não contém nada além de outro `None`.
 ///
-/// Um caminho está contido no prefixo que o contém; um destino, só no mesmo
-/// destino — papéis não têm hierarquia de nome.
+/// Um caminho está contido no prefixo que o contém; um destinatário, só no
+/// mesmo destinatário — papéis não têm hierarquia de nome —; e um destino
+/// de rede, só no mesmo destino: não há faixa que contenha outra.
 fn recurso_contido(p: Permissao, a: Option<&Vec<String>>, b: Option<&Vec<String>>) -> bool {
     match (a, b) {
         (None, _) => true,
         (Some(_), None) => false,
-        (Some(a), Some(b)) if p.recurso_e_destino() => a.iter().all(|pa| b.contains(pa)),
+        (Some(a), Some(b)) if p.recurso_e_destino() || p.recurso_e_endereco() => {
+            a.iter().all(|pa| b.contains(pa))
+        }
         (Some(a), Some(b)) => a
             .iter()
             .all(|pa| b.iter().any(|pb| caminho::dentro_de(pa, pb))),
@@ -1550,6 +1586,74 @@ mod testes {
         let h = Politica::ler(&incluida).unwrap();
         assert_eq!(
             h.decidir(Some("herdeiro"), MessagePurgeMailbox, None),
+            DenyPermission
+        );
+    }
+
+    /// A linha de alcance de rede: só destinos inteiros na forma normal,
+    /// obrigatória para quem tem `net.connect`, e sensível — não vem por
+    /// inclusão. Uma linha com um destino ambíguo recusa a política inteira.
+    #[test]
+    fn a_linha_de_destino_de_rede() {
+        use Codigo::*;
+        use Permissao::NetConnect;
+        for ruim in [
+            "recurso operador net.connect tcp:*:7",
+            "recurso operador net.connect *",
+            "recurso operador net.connect tcp:10.0.2.100:07",
+            "recurso operador net.connect tcp:10.0.2.100",
+            "recurso operador net.connect 10.0.2.100:7",
+            "recurso operador net.connect /dados",
+            "recurso operador net.connect papel:operador",
+            "recurso operador net.connect",
+        ] {
+            let texto = alloc::format!("{}{ruim}\n", crate::PADRAO);
+            let erro = Politica::ler(&texto).unwrap_err();
+            assert!(
+                matches!(
+                    erro.tipo,
+                    ErroTipo::EnderecoInvalido(_) | ErroTipo::Sintaxe | ErroTipo::Curinga
+                ),
+                "{ruim}: {erro:?}"
+            );
+        }
+        // Sem a linha: recusada, não "qualquer destino".
+        let sem = crate::PADRAO
+            .lines()
+            .filter(|l| !l.starts_with("recurso operador net.connect"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(matches!(
+            Politica::ler(&sem).unwrap_err().tipo,
+            ErroTipo::RecursoFaltando(_, _)
+        ));
+        // Mais de um destino, e repetido: lidos, sem duplicar.
+        let dois = alloc::format!(
+            "{}recurso operador net.connect tcp:10.0.2.100:7 tcp:10.0.2.2:80 tcp:10.0.2.100:7\n",
+            crate::PADRAO
+        );
+        let p = Politica::ler(&dois).unwrap();
+        assert_eq!(
+            p.papel("operador")
+                .unwrap()
+                .recursos
+                .get(&NetConnect)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            p.decidir(Some("operador"), NetConnect, Some("tcp:10.0.2.2:80")),
+            Allow
+        );
+        // Sensível: por inclusão não vem.
+        let incluida = alloc::format!(
+            "{}papel conector net.connect\nrecurso conector net.connect tcp:10.0.2.100:7\npapel herdeiro @conector\n",
+            crate::PADRAO
+        );
+        let h = Politica::ler(&incluida).unwrap();
+        assert_eq!(
+            h.decidir(Some("herdeiro"), NetConnect, Some("tcp:10.0.2.100:7")),
             DenyPermission
         );
     }

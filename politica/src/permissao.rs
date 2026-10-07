@@ -40,6 +40,10 @@ pub enum Permissao {
     ProcessRun,
     /// Mandar um pacote pela rede.
     NetSend,
+    /// Abrir uma conexão de saída e usá-la — mandar, receber, fechar. O
+    /// recurso é o destino, `tcp:<ipv4>:<porta>`, e o alcance de cada papel
+    /// é enumerado: cada destino escrito por inteiro.
+    NetConnect,
     /// Ler o que a pessoa digitou.
     KeyboardRead,
     /// Provocar uma falha fatal de propósito.
@@ -98,7 +102,7 @@ pub enum Permissao {
 }
 
 /// Todas, na ordem do relatório.
-pub const TODAS: [Permissao; 30] = [
+pub const TODAS: [Permissao; 31] = [
     Permissao::AgentRead,
     Permissao::SystemRead,
     Permissao::LogRead,
@@ -110,6 +114,7 @@ pub const TODAS: [Permissao; 30] = [
     Permissao::FsRawWrite,
     Permissao::ProcessRun,
     Permissao::NetSend,
+    Permissao::NetConnect,
     Permissao::KeyboardRead,
     Permissao::DebugTrigger,
     Permissao::TerminalAttach,
@@ -146,6 +151,7 @@ impl Permissao {
             Permissao::FsRawWrite => "fs.raw_write",
             Permissao::ProcessRun => "process.run",
             Permissao::NetSend => "net.send",
+            Permissao::NetConnect => "net.connect",
             Permissao::KeyboardRead => "keyboard.read",
             Permissao::DebugTrigger => "debug.trigger",
             Permissao::TerminalAttach => "terminal.attach",
@@ -181,6 +187,7 @@ impl Permissao {
                 | Permissao::FsWrite
                 | Permissao::FsRawRead
                 | Permissao::FsRawWrite
+                | Permissao::NetConnect
                 | Permissao::KeyboardRead
                 | Permissao::DebugTrigger
                 | Permissao::TerminalAttach
@@ -237,6 +244,14 @@ impl Permissao {
         matches!(self, Permissao::MessageSend)
     }
 
+    /// O recurso desta permissão é um destino de rede —
+    /// `tcp:<ipv4>:<porta>` —, e um papel o limita a uma lista enumerada de
+    /// destinos, cada um escrito por inteiro. Sem curinga, sem faixa: ver
+    /// [`crate::endereco`].
+    pub const fn recurso_e_endereco(self) -> bool {
+        matches!(self, Permissao::NetConnect)
+    }
+
     /// Exercê-la muda alguma coisa na máquina — o que a pessoa vê, um
     /// arquivo, um processo, o registro, a caixa de outro —, em vez de só
     /// ler. É o que a barra conta como **agir**: quem a exerceu por último é
@@ -271,6 +286,7 @@ impl Permissao {
             | Permissao::FsRawWrite
             | Permissao::ProcessRun
             | Permissao::NetSend
+            | Permissao::NetConnect
             | Permissao::DebugTrigger
             | Permissao::TerminalAttach
             | Permissao::AgentRegister
@@ -290,9 +306,10 @@ impl Permissao {
     }
 
     /// O papel limita o recurso desta permissão por uma linha `recurso`: de
-    /// caminho ou de destino. A linha é obrigatória para quem a tem.
+    /// caminho, de destinatário ou de destino de rede. A linha é obrigatória
+    /// para quem a tem.
     pub const fn tem_alcance(self) -> bool {
-        self.recurso_e_caminho() || self.recurso_e_destino()
+        self.recurso_e_caminho() || self.recurso_e_destino() || self.recurso_e_endereco()
     }
 }
 
@@ -388,6 +405,21 @@ mod testes {
         assert!(manda.recurso_e_destino() && !manda.recurso_e_caminho());
         assert!(!le.recurso_e_destino() && !purga.recurso_e_destino());
         assert!(TODAS.iter().filter(|p| p.recurso_e_destino()).count() == 1);
+    }
+
+    /// Conectar é sensível — não vem por inclusão: cada papel que disca
+    /// escreve a permissão e os destinos —, não é administrativa, muda o
+    /// estado, e é a única com o destino de rede como recurso.
+    #[test]
+    fn conectar() {
+        let c = Permissao::de_nome("net.connect").unwrap();
+        assert_eq!(c, Permissao::NetConnect);
+        assert!(c.sensivel() && !c.administrativa() && c.muda_estado());
+        assert!(c.recurso_e_endereco() && c.tem_alcance());
+        assert!(!c.recurso_e_caminho() && !c.recurso_e_destino());
+        assert_eq!(TODAS.iter().filter(|p| p.recurso_e_endereco()).count(), 1);
+        // O `net.send` de antes continua o que era: sem alcance.
+        assert!(!Permissao::NetSend.tem_alcance());
     }
 
     /// Esvaziar uma caixa é uma permissão própria, com nome próprio:

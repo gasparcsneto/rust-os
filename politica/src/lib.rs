@@ -24,6 +24,8 @@
 //! - [`arrendamento`]: a versão e o arrendamento de cada recurso
 //!   compartilhado — quem está mexendo nele agora;
 //! - [`caminho`]: a forma normal dos caminhos, a mesma do VFS do kernel.
+//! - [`endereco`]: a forma normal dos destinos de rede, a mesma que o
+//!   kernel disca.
 
 #![no_std]
 
@@ -34,6 +36,7 @@ pub mod arrendamento;
 pub mod auditoria;
 pub mod caminho;
 pub mod codigo;
+pub mod endereco;
 pub mod manifesto;
 pub mod mensagens;
 pub mod permissao;
@@ -63,23 +66,29 @@ pub use permissao::Permissao;
 ///   do administrador, e o do administrador não muda em tempo de execução.
 ///   O `fs.write` dele é o do operador, `/armazem/compartilhado`: o teto
 ///   tem de conter o que o operador recebe, para o operador ser delegável.
+/// - `net.connect`, nos dois, alcança um destino só: o eco que a bancada põe
+///   em `10.0.2.100:7` (um `guestfwd` do emulador). Enumerado, como todo
+///   destino: a imagem de desenvolvimento não disca nada que não esteja
+///   escrito, nem o sistema.
 /// - `quorum admin.revoke 2 3`: revogar a credencial de um administrador
 ///   exige a prova de duas outras, de um grupo de três — o da imagem.
 macro_rules! papeis_de_sistema {
     () => {
         "\
-papel sistema agent.read system.read log.read ui.read ui.act process.run net.send fs.read fs.write fs.raw_read keyboard.read debug.trigger terminal.attach audit.read policy.read message.send message.read
+papel sistema agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.raw_read keyboard.read debug.trigger terminal.attach audit.read policy.read message.send message.read
 recurso sistema fs.read /
 recurso sistema fs.write /armazem
+recurso sistema net.connect tcp:10.0.2.100:7
 armazem sistema 268435456 65536
 recurso sistema process.run /
 recurso sistema message.send papel:observador papel:operador papel:sistema papel:administrador
 taxa sistema 400 800
 processos sistema 32
 
-papel administrador agent.read system.read log.read ui.read ui.act process.run net.send fs.read fs.write audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke
+papel administrador agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke
 recurso administrador fs.read /dados /bin /programas /armazem/compartilhado
 recurso administrador fs.write /armazem/compartilhado
+recurso administrador net.connect tcp:10.0.2.100:7
 armazem administrador 67108864 16384
 recurso administrador process.run /bin /programas
 recurso administrador message.send papel:operador papel:sistema papel:administrador
@@ -105,22 +114,25 @@ pub const PADRAO: &str = concat!(
     "\
 # A politica do Duke: papeis, permissoes, recursos e taxas.
 #
-# Uma permissao sensivel (fs.*, keyboard.read, debug.trigger, terminal.attach,
-# policy.*, agent.register, agent.revoke, person.*, credential.rotate,
-# session.revoke, lease.revoke, message.*) nao atravessa a inclusao de
-# outro papel: cada papel que a tem a escreve. Toda permissao de caminho, e
-# o message.send, tem o alcance escrito numa linha `recurso` — o de
-# message.send e o papel do destinatario, `papel:<nome>`, enumerado. Nao ha
-# curinga. So o sistema e o proprio administrador alcancam o administrador:
+# Uma permissao sensivel (fs.*, net.connect, keyboard.read, debug.trigger,
+# terminal.attach, policy.*, agent.register, agent.revoke, person.*,
+# credential.rotate, session.revoke, lease.revoke, message.*) nao atravessa
+# a inclusao de outro papel: cada papel que a tem a escreve. Toda permissao
+# de caminho, o message.send e o net.connect tem o alcance escrito numa
+# linha `recurso` — o de message.send e o papel do destinatario,
+# `papel:<nome>`, e o de net.connect cada destino inteiro,
+# `tcp:<ipv4>:<porta>`, os dois enumerados. Nao ha curinga. O unico destino
+# desta imagem e o eco da bancada, 10.0.2.100:7. So o sistema e o proprio administrador alcancam o administrador:
 # nenhum policy.write da esse alcance a outro papel.
 
 papel observador agent.read system.read log.read ui.read message.read
 taxa observador 20 40
 processos observador 2
 
-papel operador @observador ui.act process.run net.send fs.read fs.write message.send message.read
+papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read
 recurso operador fs.read /dados /bin /programas /armazem/compartilhado
 recurso operador fs.write /armazem/compartilhado
+recurso operador net.connect tcp:10.0.2.100:7
 armazem operador 16777216 4096
 recurso operador process.run /bin /programas
 recurso operador message.send papel:operador papel:sistema
@@ -249,6 +261,37 @@ mod testes {
             );
         }
         assert_eq!(d("sistema", FsWrite, None), Codigo::DenyResource);
+        // net.connect: o observador não; os outros, só o destino escrito —
+        // inteiro, na forma normal. Nem outra porta, nem outro endereço,
+        // nem a mesma coisa escrita de outro jeito.
+        assert_eq!(
+            d("observador", NetConnect, Some("tcp:10.0.2.100:7")),
+            Codigo::DenyPermission
+        );
+        for papel in ["operador", "administrador", "sistema"] {
+            assert_eq!(
+                d(papel, NetConnect, Some("tcp:10.0.2.100:7")),
+                Codigo::Allow,
+                "{papel}"
+            );
+            for fora in [
+                "tcp:10.0.2.100:8",
+                "tcp:10.0.2.101:7",
+                "tcp:10.0.2.2:7",
+                "tcp:010.0.2.100:7",
+                "tcp:10.0.2.100:07",
+                "udp:10.0.2.100:7",
+                "tcp:10.0.2.100",
+                "",
+            ] {
+                assert_eq!(
+                    d(papel, NetConnect, Some(fora)),
+                    Codigo::DenyResource,
+                    "{papel} {fora}"
+                );
+            }
+            assert_eq!(d(papel, NetConnect, None), Codigo::DenyResource);
+        }
         assert_eq!(p.decidir(None, AgentRead, None), Codigo::DenyRole);
         assert_eq!(
             p.decidir(Some("fantasma"), AgentRead, None),
@@ -276,6 +319,12 @@ mod testes {
                 "{} nao esta escrita",
                 perm.nome()
             );
+            if esperado && perm.recurso_e_endereco() {
+                assert_eq!(
+                    sistema.recursos.get(&perm).unwrap(),
+                    &["tcp:10.0.2.100:7".to_string()]
+                );
+            }
             if esperado && perm.recurso_e_caminho() {
                 let alcance = if perm == Permissao::FsWrite {
                     "/armazem"
@@ -414,15 +463,35 @@ mod testes {
         ));
         // Dar ao operador o que o administrador tem: vale.
         let nova =
-            mudar("papel operador @observador ui.act process.run net.send fs.read fs.write message.send message.read audit.read")
+            mudar("papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read audit.read")
                 .unwrap();
         assert!(nova.papel("operador").unwrap().tem(Permissao::AuditRead));
         // O que ele não tem: não.
         assert!(matches!(
             mudar(
-                "papel operador @observador ui.act process.run net.send fs.read fs.write message.send message.read keyboard.read"
+                "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read keyboard.read"
             ),
             Err(Recusa::Proibida(_))
+        ));
+        // Tirar net.connect e deixar a linha do alcance dela: a política
+        // que resultaria não vale — um alcance para o que o papel não tem.
+        assert!(matches!(
+            mudar(
+                "papel operador @observador ui.act process.run net.send fs.read fs.write message.send message.read"
+            ),
+            Err(Recusa::Invalida(_))
+        ));
+        // Um destino que o administrador não alcança: não. Nem outra porta.
+        for fora in [
+            "recurso operador net.connect tcp:10.0.2.100:7 tcp:10.0.2.2:80",
+            "recurso operador net.connect tcp:10.0.2.100:8",
+        ] {
+            assert!(matches!(mudar(fora), Err(Recusa::Proibida(_))), "{fora}");
+        }
+        // Um destino fora da forma normal: a linha não se lê.
+        assert!(matches!(
+            mudar("recurso operador net.connect tcp:10.0.2.100:07"),
+            Err(Recusa::Invalida(_))
         ));
         // Alargar o recurso do operador além do alcance do administrador:
         // não.
