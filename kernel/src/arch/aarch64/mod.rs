@@ -529,6 +529,12 @@ pub fn nucleo_enderecavel(indice: usize, _hardware: u64) -> Result<(), &'static 
     Ok(())
 }
 
+/// A pilha de exceção do primeiro núcleo, como a dos outros — ver
+/// [`smp::trocar_a_pilha_de_excecao_do_primeiro`].
+pub fn preparar_o_primeiro_nucleo() -> Result<(), &'static str> {
+    smp::trocar_a_pilha_de_excecao_do_primeiro()
+}
+
 /// Acorda o núcleo de `MPIDR` `hardware` como o núcleo `indice`, na pilha
 /// `topo`.
 pub fn partir_nucleo(indice: usize, hardware: u64, topo: u64) -> Result<(), &'static str> {

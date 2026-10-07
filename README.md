@@ -667,7 +667,16 @@ ligado com a contagem que o primeiro mediu, e o escalonador.
 **O que é de cada núcleo.** O fio atual, o quantum e o ocioso, no
 escalonador; a pilha de interrupção e as pilhas de emergência (falha dupla e
 NMI), num TSS por núcleo no x86; a pilha de kernel da chamada de sistema,
-alcançada pelo `GS` só nas quatro instruções da entrada. Quem precisa saber
+alcançada pelo `GS` só nas quatro instruções da entrada. No ARM toda exceção —
+a interrupção, a falha e a chamada de sistema, com o comando inteiro que um
+processo pede — roda na pilha de exceção do núcleo (`SP_EL1`): 60 KiB da
+área de pilhas, com uma página de guarda embaixo, em todos os núcleos. O
+primeiro também: a do linker script (32 KiB, sem guarda, logo acima da
+pilha do boot) só serve ao boot, e ele troca para a da área de pilhas antes
+de os outros ligarem — uma exceção mais funda que ela escreveria em
+silêncio por cima da pilha do boot. A suíte mede a marca d'água de cada uma
+e diz qual caso desceu mais (`pilhas: a de excecao de cada nucleo tem
+folga`). Quem precisa saber
 em que núcleo está pergunta a um registrador que o processo não alcança — o
 `TR` no x86, o `TPIDR_EL1` no ARM.
 

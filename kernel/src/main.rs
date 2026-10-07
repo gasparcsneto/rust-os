@@ -482,6 +482,13 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     // eles fios para rodar no meio da inicialização dos dispositivos, que foi
     // escrita — e medida — para um núcleo só. Daqui em diante tudo o que roda
     // foi escrito para concorrer: os fios do kernel, os processos, o canal.
+    if let Err(motivo) = arch::preparar_o_primeiro_nucleo() {
+        log_error!(
+            "smp",
+            "o primeiro nucleo ficou na pilha de excecao do boot: {}",
+            motivo
+        );
+    }
     nucleos::ligar_os_demais();
 
     // O servidor de janelas e o Terminal, agora que o disco onde eles moram

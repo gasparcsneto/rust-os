@@ -235,6 +235,45 @@ fn limpar_ate_a_ram(inicio: u64, bytes: u64) {
     unsafe { asm!("dsb sy", options(nostack)) };
 }
 
+/// O primeiro núcleo passa a atender exceções numa pilha como a dos
+/// outros: da área de pilhas, na vaga dele, com página de guarda embaixo e
+/// do mesmo tamanho.
+///
+/// # Por que trocar
+///
+/// A pilha de exceção do linker script tem 32 KiB e nenhuma página de guarda
+/// embaixo: logo abaixo dela está o topo da pilha do boot. Neste kernel
+/// toda exceção roda em `SP_EL1` — a chamada de sistema também —, e uma que
+/// fosse mais funda que ela escreveria, em silêncio, por cima da pilha de
+/// outro código. A dos outros núcleos tem 60 KiB e a guarda, e o estouro
+/// vira uma falha com o endereço. O primeiro núcleo não é especial aqui
+/// também: a do linker script serve só ao boot, antes de haver frames e
+/// paginação para esta.
+pub fn trocar_a_pilha_de_excecao_do_primeiro() -> Result<(), &'static str> {
+    let excecao = crate::fios::pilha::reservar_de_nucleo(0)?;
+    let topo = excecao.topo() & !0xF;
+    // Nunca devolvida, como a dos outros núcleos.
+    core::mem::forget(excecao);
+    crate::arch::sem_interrupcoes(|| {
+        // SAFETY: chamada do fluxo normal do boot, em `SP_EL0` — nenhuma
+        // exceção está em curso neste núcleo, e com as interrupções
+        // mascaradas nenhuma chega entre as três instruções. Com `SPSel=1`,
+        // `sp` é `SP_EL1`, que passa a apontar para o topo da pilha nova,
+        // mapeada logo acima; `SPSel=0` devolve `sp` à pilha de onde viemos,
+        // intacta.
+        unsafe {
+            asm!(
+                "msr spsel, #1",
+                "mov sp, {topo}",
+                "msr spsel, #0",
+                topo = in(reg) topo,
+                options(nostack),
+            );
+        }
+    });
+    Ok(())
+}
+
 /// Acorda o núcleo de `MPIDR` `hardware` como o núcleo `indice`, na pilha
 /// `topo`.
 pub fn partir(indice: usize, hardware: u64, topo: u64) -> Result<(), &'static str> {
@@ -247,8 +286,9 @@ pub fn partir(indice: usize, hardware: u64, topo: u64) -> Result<(), &'static st
         return Err("nucleo alem do teto");
     }
 
-    // A pilha de exceção, que no primeiro núcleo é a do linker script. Esta
-    // vem da área de pilhas, com página de guarda, e nunca é devolvida: o
+    // A pilha de exceção vem da área de pilhas, com página de guarda — a do
+    // primeiro núcleo também, depois do boot (ver
+    // `trocar_a_pilha_de_excecao_do_primeiro`) —, e nunca é devolvida: o
     // núcleo vive enquanto o sistema viver.
     let excecao = crate::fios::pilha::reservar_de_nucleo(indice)?;
 

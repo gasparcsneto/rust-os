@@ -485,6 +485,13 @@ pub fn nucleo_enderecavel(_indice: usize, hardware: u64) -> Result<(), &'static 
     Ok(())
 }
 
+/// Nada a preparar no primeiro núcleo: a chamada de sistema roda na pilha de
+/// kernel do fio, com guarda, e as pilhas de emergência do TSS são as de
+/// cada núcleo do mesmo jeito.
+pub fn preparar_o_primeiro_nucleo() -> Result<(), &'static str> {
+    Ok(())
+}
+
 /// Acorda o núcleo de APIC `hardware` como o núcleo `indice`, na pilha `topo`.
 pub fn partir_nucleo(indice: usize, hardware: u64, topo: u64) -> Result<(), &'static str> {
     smp::partir(indice, hardware, topo)

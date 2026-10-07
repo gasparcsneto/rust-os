@@ -14265,6 +14265,91 @@ fn admin_revogacao_no_meio_da_operacao() -> Resultado {
     resultado
 }
 
+/// O mais fundo que a pilha de exceção de algum núcleo já foi, e o caso
+/// em que ficou assim — o índice dele em [`CASOS`].
+#[cfg(target_arch = "aarch64")]
+static MAIS_FUNDO: (
+    core::sync::atomic::AtomicU64,
+    core::sync::atomic::AtomicUsize,
+) = (
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicUsize::new(usize::MAX),
+);
+
+/// O mais fundo que a pilha de exceção de cada núcleo ligado já foi.
+#[cfg(target_arch = "aarch64")]
+fn usado_das_excecoes() -> alloc::vec::Vec<(usize, u64)> {
+    let ligados = crate::nucleos::mascara_dos_ligados();
+    (0..crate::nucleos::MAX_NUCLEOS)
+        .filter(|&i| ligados & crate::nucleos::bit(i) != 0)
+        .map(|i| (i, crate::fios::pilha::usado_da_pilha_de_nucleo(i)))
+        .collect()
+}
+
+/// Depois de cada caso: se alguma pilha de exceção desceu mais que antes,
+/// guarda o caso — para que um estouro, quando vier, diga de onde.
+#[cfg(target_arch = "aarch64")]
+fn anotar_o_fundo_das_excecoes(caso: &'static str) {
+    use core::sync::atomic::Ordering;
+    let fundo = usado_das_excecoes()
+        .into_iter()
+        .map(|(_, u)| u)
+        .max()
+        .unwrap_or(0);
+    if fundo > MAIS_FUNDO.0.load(Ordering::Relaxed) {
+        MAIS_FUNDO.0.store(fundo, Ordering::Relaxed);
+        let indice = CASOS
+            .iter()
+            .position(|c| c.nome == caso)
+            .unwrap_or(usize::MAX);
+        MAIS_FUNDO.1.store(indice, Ordering::Relaxed);
+    }
+}
+
+/// A pilha de exceção de cada núcleo tem folga depois da suíte inteira.
+///
+/// No ARM toda exceção roda nela — a interrupção, a falha e a chamada de
+/// sistema, com tudo o que um comando pedido por um processo faz —, e ela
+/// tem tamanho fixo. Um estouro bate na página de guarda e vira uma falha
+/// fatal; antes disso, este caso confere que nenhum núcleo passou de três
+/// quartos dela, que todos a usaram (a do primeiro inclusive: ele atende
+/// exceções na da área de pilhas, e não mais na do boot), e diz qual caso
+/// desceu mais. No x86 a chamada de sistema roda na pilha de kernel do fio,
+/// com guarda, e não há uma pilha de exceção comum a medir.
+fn pilhas_a_de_excecao_tem_folga() -> Resultado {
+    #[cfg(target_arch = "aarch64")]
+    {
+        use core::sync::atomic::Ordering;
+        let teto = crate::fios::pilha::TAMANHO_DA_PILHA;
+        let usados = usado_das_excecoes();
+        for &(i, usado) in &usados {
+            crate::log_info!(
+                "teste",
+                "pilha de excecao do nucleo {}: {} de {} bytes",
+                i,
+                usado,
+                teto
+            );
+        }
+        let caso = CASOS
+            .get(MAIS_FUNDO.1.load(Ordering::Relaxed))
+            .map_or("o boot", |c| c.nome);
+        crate::log_info!(
+            "teste",
+            "o caso que mais desceu numa pilha de excecao: `{}`, {} bytes",
+            caso,
+            MAIS_FUNDO.0.load(Ordering::Relaxed)
+        );
+        if usados.iter().any(|&(_, u)| u == 0) {
+            return Err("um nucleo ligado nao usou a pilha de excecao da area de pilhas");
+        }
+        if usados.iter().any(|&(_, u)| u * 4 > teto * 3) {
+            return Err("a pilha de excecao de um nucleo passou de tres quartos");
+        }
+    }
+    Ok(())
+}
+
 /// Destinatário inexistente: recusado pela decisão, `DENY_RESOURCE`, com a
 /// mesma resposta do revogado e do fora de alcance — e a auditoria grava o
 /// motivo exato. Nenhum id é gasto.
@@ -20642,13 +20727,20 @@ fn smp_fios_efemeros_em_todos_os_nucleos() -> Resultado {
     }
     // Todos os efêmeros contaram — e os que contaram mais de uma vez
     // seriam um fio retomado depois de terminar.
+    //
+    // Esperando, e não lendo na hora: cada criador espera a contagem
+    // **mudar**, e o efêmero de outro criador pode mudá-la antes do dele.
+    // O último criador sai, então, com o próprio efêmero ainda por rodar —
+    // medido no ARM, 47 de 48 no instante em que todos tinham saído.
+    let esperados = criadores * POR_CRIADOR;
+    let _ = esperar_ate(|| EFEMEROS.load(SeqCst) >= esperados, 300);
     let efemeros = EFEMEROS.load(SeqCst);
-    if efemeros != criadores * POR_CRIADOR {
+    if efemeros != esperados {
         crate::log_error!(
             "teste",
             "{} efemeros contaram, {} esperados",
             efemeros,
-            criadores * POR_CRIADOR
+            esperados
         );
         return Err("a contagem de efemeros nao fecha");
     }
@@ -29376,6 +29468,11 @@ static CASOS: &[Caso] = &[
         nome: "reconstrucao: imagem limpa e journal inteiro",
         f: reconstrucao_imagem_limpa_e_journal_inteiro,
     },
+    // Depois de todos os outros: a marca d'água é a da suíte inteira.
+    Caso {
+        nome: "pilhas: a de excecao de cada nucleo tem folga",
+        f: pilhas_a_de_excecao_tem_folga,
+    },
     // Sempre o último: confere a ordem das travas de todos os anteriores.
     Caso {
         nome: "travas: nenhuma inversao de ordem",
@@ -29983,6 +30080,8 @@ pub fn executar_todos() -> ! {
         // relatório pela metade. Assim cada linha do relatório fica íntegra e
         // os logs do teste aparecem logo acima dela, que é onde ajudam.
         let resultado = (caso.f)();
+        #[cfg(target_arch = "aarch64")]
+        anotar_o_fundo_das_excecoes(caso.nome);
         match resultado {
             Ok(()) => crate::serial_println!("  {:<42} ok", caso.nome),
             Err(motivo) => {

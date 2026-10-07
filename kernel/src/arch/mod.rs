@@ -85,7 +85,7 @@ pub use atual::{
 pub use atual::{
     cutucar, descobrir_nucleos, hardware_deste_nucleo, invalidacoes_remotas, ligar_interrupcoes,
     nucleo_atual, nucleo_enderecavel, parar_este_nucleo, parar_os_outros, partir_nucleo,
-    reavisos_remotos,
+    preparar_o_primeiro_nucleo, reavisos_remotos,
 };
 
 /// Só para a suíte: o par de conversões de permissão de cada backend.

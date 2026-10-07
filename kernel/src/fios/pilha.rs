@@ -101,6 +101,33 @@ pub fn reservar_de_nucleo(nucleo: usize) -> Result<Pilha, &'static str> {
     reservar(super::MAX_FIOS + nucleo)
 }
 
+/// Só para a suíte: quantos bytes da pilha de exceção do núcleo `nucleo`
+/// já foram usados desde o boot — do topo até a palavra mais funda que não é
+/// zero.
+///
+/// A pilha nasce zerada (os frames novos são zerados ao mapear) e nunca é
+/// devolvida, então o fundo intocado continua zero: a conta é a marca d'água
+/// dela. Uma palavra zero escrita no ponto mais fundo a subestimaria em
+/// alguns bytes, nunca em uma página. Só no ARM, onde toda exceção — a
+/// chamada de sistema inclusive — roda nesta pilha.
+#[cfg(all(feature = "modo-teste", target_arch = "aarch64"))]
+pub fn usado_da_pilha_de_nucleo(nucleo: usize) -> u64 {
+    let inicio = BASE + (super::MAX_FIOS + nucleo) as u64 * TAMANHO_DA_VAGA + TAMANHO_PAGINA;
+    let fim = inicio + TAMANHO_DA_PILHA;
+    let mut fundo = inicio;
+    while fundo < fim {
+        // SAFETY: `[inicio, fim)` é a pilha de exceção de um núcleo ligado —
+        // quem chama só pergunta por esses —, mapeada e nunca devolvida; a
+        // leitura é de uma palavra alinhada, e volátil porque outro núcleo a
+        // escreve.
+        if unsafe { core::ptr::read_volatile(fundo as *const u64) } != 0 {
+            break;
+        }
+        fundo += 8;
+    }
+    fim - fundo
+}
+
 impl Drop for Pilha {
     fn drop(&mut self) {
         let primeira_pagina = BASE + self.vaga as u64 * TAMANHO_DA_VAGA + TAMANHO_PAGINA;
