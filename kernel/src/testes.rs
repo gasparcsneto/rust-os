@@ -20537,7 +20537,17 @@ fn smp_o_relogio_anda_sem_o_nucleo_dos_dispositivos() -> Resultado {
         if girar_ate(|| crate::nucleos::travados() == 1, 4_000_000_000) {
             let relogio = crate::tempo::ticks();
             let do_travado = tiques_do_nucleo(dispositivos);
-            girar_ate(|| crate::tempo::ticks() >= relogio + 20, 2_000_000_000);
+            // O prazo é o timer **deste** núcleo, e não o relógio: se o
+            // relógio parou com o núcleo dos dispositivos — o defeito que o
+            // caso procura —, esperar por ele seria esperar para sempre, e o
+            // núcleo travado, que se solta pelo relógio, com ele. Quarenta
+            // tiques daqui são o dobro dos vinte que o relógio tem de andar.
+            let eu = crate::nucleos::atual();
+            let meus = tiques_do_nucleo(eu);
+            girar_ate(
+                || crate::tempo::ticks() >= relogio + 20 || tiques_do_nucleo(eu) >= meus + 40,
+                u64::MAX,
+            );
             RELOGIO.store(crate::tempo::ticks() - relogio, SeqCst);
             DO_TRAVADO.store(tiques_do_nucleo(dispositivos) - do_travado, SeqCst);
         }
