@@ -659,6 +659,14 @@ impl Tela {
         Some((self.base + dentro) as *mut u8)
     }
 
+    /// Só para a suíte: marca a tela inteira como suja, como um
+    /// [`Tela::preencher`] marcaria — para uma escrita de referência dar à
+    /// apresentação o mesmo trabalho.
+    #[cfg(feature = "modo-teste")]
+    pub fn sujar_tudo_de_teste(&self) {
+        self.sujar(0, 0, self.largura, self.altura);
+    }
+
     /// Só para a suíte: o endereço virtual do framebuffer, para medir uma
     /// escrita de referência sobre os mesmos bytes que [`Tela::preencher`]
     /// escreve.

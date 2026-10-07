@@ -2494,10 +2494,14 @@ fn tela_desenhar_nao_regrediu_em_ordem_de_grandeza() -> Resultado {
         return Ok(());
     };
 
-    // Em release, voltas bastantes para que o tique de 10 ms não pese na
+    // Em blocos alternados — dez preenchimentos, dez voltas da referência —,
+    // para que o que muda na máquina durante a medida pese nos dois lados.
+    // Em release, blocos bastantes para que o tique de 10 ms não pese na
     // referência do ARM, que leva 3 ms por volta; em debug, que não é
-    // julgado, as de sempre.
-    const VOLTAS: u64 = if cfg!(debug_assertions) { 20 } else { 60 };
+    // julgado, dois.
+    const POR_BLOCO: u64 = 10;
+    const BLOCOS: u64 = if cfg!(debug_assertions) { 2 } else { 6 };
+    const VOLTAS: u64 = POR_BLOCO * BLOCOS;
     let preto = crate::tela::Cor { r: 0, g: 0, b: 0 };
     let branco = crate::tela::Cor {
         r: 255,
@@ -2508,23 +2512,18 @@ fn tela_desenhar_nao_regrediu_em_ordem_de_grandeza() -> Resultado {
     // Uma passada fora da conta: a primeira paga o que as seguintes não pagam.
     tela.preencher(branco);
 
-    let antes = crate::tempo::uptime_ms();
-    for volta in 0..VOLTAS {
-        tela.preencher(if volta % 2 == 0 { branco } else { preto });
-    }
-    let total = crate::tempo::uptime_ms() - antes;
-    let por_tela = total * 1000 / VOLTAS;
-
     // A referência: os mesmos pixels, no mesmo framebuffer, por um laço reto
-    // de escritas voláteis — três por pixel, como as do preenchimento — o trabalho que o preenchimento
-    // tem de fazer, sem nada do caminho dele. Medida logo depois, na mesma
-    // máquina e na mesma rodada.
+    // de escritas voláteis — três por pixel, como as do preenchimento —,
+    // sem nada do caminho dele. E ela suja a tela como o preenchimento suja:
+    // a apresentação copia o que está sujo para a tela de verdade, em outro
+    // núcleo ou no tique deste, e essa cópia disputa a máquina com quem
+    // mede — medido no CI, o preenchimento limpo a 1157% de uma referência
+    // que não sujava, e a 500% nesta bancada. Sujando as duas, a cópia pesa
+    // igual nos dois lados.
     let base = tela.base_de_teste();
     let passo = u64::from(tela.bytes_por_pixel);
     let linha = u64::from(tela.stride) * passo;
-    let antes = crate::tempo::uptime_ms();
-    for volta in 0..VOLTAS {
-        let valor = if volta % 2 == 0 { 0xFF } else { 0 };
+    let referencia_uma_volta = |valor: u8| {
         for y in 0..u64::from(tela.altura) {
             let mut ponteiro = (base + y * linha) as *mut u8;
             for _ in 0..tela.largura {
@@ -2542,8 +2541,24 @@ fn tela_desenhar_nao_regrediu_em_ordem_de_grandeza() -> Resultado {
                 }
             }
         }
+        tela.sujar_tudo_de_teste();
+    };
+
+    let (mut total, mut referencia) = (0, 0);
+    for _ in 0..BLOCOS {
+        let antes = crate::tempo::uptime_ms();
+        for volta in 0..POR_BLOCO {
+            tela.preencher(if volta % 2 == 0 { branco } else { preto });
+        }
+        total += crate::tempo::uptime_ms() - antes;
+        let antes = crate::tempo::uptime_ms();
+        for volta in 0..POR_BLOCO {
+            referencia_uma_volta(if volta % 2 == 0 { 0xFF } else { 0 });
+        }
+        referencia += crate::tempo::uptime_ms() - antes;
     }
-    let referencia = (crate::tempo::uptime_ms() - antes).max(1);
+    let por_tela = total * 1000 / VOLTAS;
+    let referencia = referencia.max(1);
     // Em centésimos: 100 é o preenchimento tão rápido quanto o laço reto.
     let razao = total * 100 / referencia;
 
@@ -2561,22 +2576,22 @@ fn tela_desenhar_nao_regrediu_em_ordem_de_grandeza() -> Resultado {
     //
     // O teto era de 30 ms em release, "quatro vezes o pior medido" — medido
     // com o relógio que perdia tiques e andava a 0,42 do tempo real. Com o
-    // relógio certo, na mesma bancada:
+    // relógio certo, na mesma bancada, o preenchimento limpo leva 18–22 ms
+    // no x86 e o com a regressão semeada (uma chamada por pixel), 60–67 ms;
+    // numa máquina do CI o limpo chegou a 40 e 54 ms. Nenhum número absoluto
+    // separa os dois em toda máquina.
     //
-    // | release | x86, por preenchimento | x86, do laço reto | ARM, do laço reto |
-    // |---|---|---|---|
-    // | limpo | 18,5–22,5 ms | 500% | 150% |
-    // | uma chamada por pixel (semeada) | 60–63 ms | 2520% | 833% |
-    // | limpo, numa máquina do CI | 40 ms | — | — |
+    // A razão contra o laço reto, medida na mesma rodada, separa — a máquina
+    // entra nos dois lados da conta e sai dela:
     //
-    // Em milissegundos a regressão é 3 vezes o limpo — e o limpo numa
-    // máquina lenta já passa de 30 ms e chega perto dos 60 da regressão numa
-    // rápida. Nenhum número absoluto separa os dois em todas as máquinas. A
-    // razão contra um laço reto medido na mesma rodada separa por cinco
-    // vezes: a máquina entra nos dois lados da conta e sai dela. O teto é
-    // de cada arquitetura porque o emulador traduz os dois laços de um jeito
-    // em cada uma — o preenchimento limpo do x86 já é 5 vezes o laço reto,
-    // e o do ARM, 1,5.
+    // | release | limpo | uma chamada por pixel |
+    // |---|---|---|
+    // | x86 | 98% | 370% |
+    // | ARM | 92% | 556% |
+    //
+    // Antes de a referência sujar a tela, o limpo do x86 dava 500% aqui e
+    // 1157% no CI: o que pesava era a cópia da apresentação, e não o
+    // desenho.
     //
     // Só vale em release. Em debug o custo por pixel é dominado pela falta
     // de inline e pelas conferências de limite, e a chamada a mais move o
@@ -2584,13 +2599,9 @@ fn tela_desenhar_nao_regrediu_em_ordem_de_grandeza() -> Resultado {
     // asserção que não pode falhar pelo motivo que a justifica não é uma
     // asserção: em debug a razão é registrada e não julgada.
     if !cfg!(debug_assertions) {
-        // O dobro do limpo medido em cada uma, e mais de duas vezes abaixo
-        // da regressão.
-        const TETO_PERCENTUAL: u64 = if cfg!(target_arch = "x86_64") {
-            1000
-        } else {
-            350
-        };
+        // O dobro do laço reto: o limpo fica perto de 100% nas duas
+        // arquiteturas, e a chamada por pixel passa de 350%.
+        const TETO_PERCENTUAL: u64 = 200;
         if razao > TETO_PERCENTUAL {
             crate::log_error!(
                 "teste",

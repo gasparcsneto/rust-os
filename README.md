@@ -1924,6 +1924,50 @@ rename decididos nos dois caminhos, cotas por dono na política, lotes, e
 uma reposição que reconstrói a imagem limpa com o journal inteiro. O que
 ficou, e por quê, está no fim de [`docs/ARMAZENAMENTO.md`](docs/ARMAZENAMENTO.md).
 
+### As mutações das limitações resolvidas
+
+Vinte e cinco mutações, uma por propriedade que a resolução das
+limitações criou ou passou a depender, cada uma contra os testes do
+hospedeiro do pacote dela e então contra a suíte inteira com quatro
+núcleos: **vinte e cinco reprovadas**, cada uma pelo caso — ou teste do
+hospedeiro — da propriedade que ela tira.
+
+| Mutação | Reprovada por |
+|---|---|
+| a inversão de duas travas não é registrada | `travas: a conferencia ve a inversao` |
+| a ordem das gravações fora do grafo | `travas: a conferencia ve a inversao` |
+| a suíte esvazia as mensagens sem o journal | `reconstrucao: imagem limpa e journal inteiro` |
+| a sessão exerce o teto | `mensagens: sem atalho na autorizacao` |
+| o teto é atribuível | `teto: o administrador delega e nao exerce` |
+| a serial pode ter o teto | `politica`: `nenhum_teto_e_exercido` |
+| o sistema decide sem a política (curinga) | `politica`: `caminho_sem_alcance_nao_e_tudo_na_decisao` |
+| sem a linha da política, o sistema ainda escreve no armazém | `politica`: `a_matriz_aprovada` |
+| o driver escreve fora da janela | `armazem: o volume e da particao propria`, `disco: recusa escrita fora da janela` |
+| o volume repõe além da âncora confirmada | `armazem: gravacao que falha nao vale` e as reposições |
+| o volume não confere o elo confirmado | `armazem: o volume so vale confirmado` |
+| o lote vale sem o commit | `armazem: gravacao que falha nao vale` |
+| sem reconfirmação no commit do lote | `armazem: revogacao no meio da operacao` |
+| o gate decide só o primeiro caminho | `armazem: diretorios e renomear` (o rename escapa do alcance) |
+| o movido guarda a versão velha | `armazem`: `renomear_um_arquivo` |
+| a cota não é conferida | `armazem`: `a_cota_e_do_lote_e_de_quem_pede` |
+| todos os agentes são um dono só | `armazem: a cota e de cada dono` (a disputa) |
+| o lote passa por cima da operação recusada | `armazem`: `conteudo_incoerente_e_recusado` |
+| o canal não confere o anexo declarado | `armazem: o agente manda binario no anexo` |
+| o commit do armazém não avança o contador do TPM | `diario`: `a_auditoria_nao_gasta_o_contador` |
+| a mensagem não reconfirma no commit | `mensagens: revogacao no meio da operacao` |
+| a operação administrativa não reconfirma | `admin: revogacao no meio da operacao` |
+| a reconfirmação decide o destinatário como caminho | `mensagens: o remetente vem da sessao` |
+| só o núcleo dos dispositivos anda o relógio | `smp: o relogio anda sem o nucleo dos dispositivos` |
+| todo núcleo anda o relógio | `smp: o relogio anda uma vez por tique` |
+
+Duas mudaram a suíte antes de reprovar como deviam. Só o núcleo dos
+dispositivos andando o relógio era pega pelo limite de andamento, dez
+minutos depois, e não pelo caso: o fio que mede esperava o relógio parado;
+agora o prazo dele é o timer do próprio núcleo. E a da suíte que esvazia as
+mensagens sem o journal, numa primeira rodada com a bancada carregada,
+reprovou por um caso de coordenação; refeita sem carga, só o da
+reconstrução.
+
 ## Vários agentes
 
 O Duke atende vários agentes ao mesmo tempo, cada um numa **sessão**: um
