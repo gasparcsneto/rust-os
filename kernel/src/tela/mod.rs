@@ -659,6 +659,14 @@ impl Tela {
         Some((self.base + dentro) as *mut u8)
     }
 
+    /// Só para a suíte: o endereço virtual do framebuffer, para medir uma
+    /// escrita de referência sobre os mesmos bytes que [`Tela::preencher`]
+    /// escreve.
+    #[cfg(feature = "modo-teste")]
+    pub fn base_de_teste(&self) -> u64 {
+        self.base
+    }
+
     /// Lê a cor de um pixel.
     ///
     /// Existe para que a tela seja **verificável**. Uma superfície de

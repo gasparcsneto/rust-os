@@ -2494,7 +2494,10 @@ fn tela_desenhar_nao_regrediu_em_ordem_de_grandeza() -> Resultado {
         return Ok(());
     };
 
-    const VOLTAS: u64 = 20;
+    // Em release, voltas bastantes para que o tique de 10 ms não pese na
+    // referência do ARM, que leva 3 ms por volta; em debug, que não é
+    // julgado, as de sempre.
+    const VOLTAS: u64 = if cfg!(debug_assertions) { 20 } else { 60 };
     let preto = crate::tela::Cor { r: 0, g: 0, b: 0 };
     let branco = crate::tela::Cor {
         r: 255,
@@ -2512,47 +2515,88 @@ fn tela_desenhar_nao_regrediu_em_ordem_de_grandeza() -> Resultado {
     let total = crate::tempo::uptime_ms() - antes;
     let por_tela = total * 1000 / VOLTAS;
 
+    // A referência: os mesmos pixels, no mesmo framebuffer, por um laço reto
+    // de escritas voláteis — três por pixel, como as do preenchimento — o trabalho que o preenchimento
+    // tem de fazer, sem nada do caminho dele. Medida logo depois, na mesma
+    // máquina e na mesma rodada.
+    let base = tela.base_de_teste();
+    let passo = u64::from(tela.bytes_por_pixel);
+    let linha = u64::from(tela.stride) * passo;
+    let antes = crate::tempo::uptime_ms();
+    for volta in 0..VOLTAS {
+        let valor = if volta % 2 == 0 { 0xFF } else { 0 };
+        for y in 0..u64::from(tela.altura) {
+            let mut ponteiro = (base + y * linha) as *mut u8;
+            for _ in 0..tela.largura {
+                // SAFETY: a tela registrada cobre `stride * altura *
+                // bytes_por_pixel` bytes mapeados e graváveis a partir de
+                // `base`, e o ponteiro anda dentro de cada linha visível.
+                // Num framebuffer de menos de três bytes por pixel, uma só.
+                unsafe {
+                    core::ptr::write_volatile(ponteiro, valor);
+                    if passo >= 3 {
+                        core::ptr::write_volatile(ponteiro.add(1), valor);
+                        core::ptr::write_volatile(ponteiro.add(2), valor);
+                    }
+                    ponteiro = ponteiro.add(passo as usize);
+                }
+            }
+        }
+    }
+    let referencia = (crate::tempo::uptime_ms() - antes).max(1);
+    // Em centésimos: 100 é o preenchimento tão rápido quanto o laço reto.
+    let razao = total * 100 / referencia;
+
     crate::log_info!(
         "tela",
-        "{}x{} com {} bytes/pixel: {} us por preenchimento",
+        "{}x{} com {} bytes/pixel: {} us por preenchimento, {}% do laco reto",
         tela.largura,
         tela.altura,
         tela.bytes_por_pixel,
-        por_tela
+        por_tela,
+        razao
     );
 
-    // O teto só vale em release, e o motivo está medido.
+    // # Por que uma razão, e não um teto em microssegundos
     //
-    // A regressão que este caso existe para recusar é voltar a desenhar por
-    // chamada de função em vez de por laço. Semeada, ela move os números
-    // assim:
+    // O teto era de 30 ms em release, "quatro vezes o pior medido" — medido
+    // com o relógio que perdia tiques e andava a 0,42 do tempo real. Com o
+    // relógio certo, na mesma bancada:
     //
-    // | | limpo | com a regressão | razão |
+    // | release | x86, por preenchimento | x86, do laço reto | ARM, do laço reto |
     // |---|---|---|---|
-    // | release | 6–8 ms | 59 ms | ~9x |
-    // | debug | 637 ms | 755 ms | 1,19x |
+    // | limpo | 18,5–22,5 ms | 500% | 150% |
+    // | uma chamada por pixel (semeada) | 60–63 ms | 2520% | 833% |
+    // | limpo, numa máquina do CI | 40 ms | — | — |
     //
-    // Em debug o custo por pixel já é dominado pela falta de inline e pelas
-    // conferências de limite, e a chamada a mais quase não aparece. Um teto
-    // que pegasse 755 ms teria de ficar abaixo de 700, que é dentro do ruído
-    // de uma rodada limpa — reprovaria máquina lenta e não reprovaria a
-    // regressão. Seria decoração, e este caso já teve uma: o primeiro teto
-    // que escrevi aqui era de 100 ms em release, e a mutação passou por baixo
-    // dele.
+    // Em milissegundos a regressão é 3 vezes o limpo — e o limpo numa
+    // máquina lenta já passa de 30 ms e chega perto dos 60 da regressão numa
+    // rápida. Nenhum número absoluto separa os dois em todas as máquinas. A
+    // razão contra um laço reto medido na mesma rodada separa por cinco
+    // vezes: a máquina entra nos dois lados da conta e sai dela. O teto é
+    // de cada arquitetura porque o emulador traduz os dois laços de um jeito
+    // em cada uma — o preenchimento limpo do x86 já é 5 vezes o laço reto,
+    // e o do ARM, 1,5.
     //
-    // Então em debug o número é registrado e não julgado. Uma asserção que
-    // não pode falhar pelo motivo que a justifica não é uma asserção.
+    // Só vale em release. Em debug o custo por pixel é dominado pela falta
+    // de inline e pelas conferências de limite, e a chamada a mais move o
+    // preenchimento 1,19 vez — dentro do ruído de uma rodada limpa. Uma
+    // asserção que não pode falhar pelo motivo que a justifica não é uma
+    // asserção: em debug a razão é registrada e não julgada.
     if !cfg!(debug_assertions) {
-        // Quatro vezes o pior medido em release nas duas arquiteturas: absorve
-        // uma máquina bem mais lenta que esta e ainda reprova a chamada por
-        // pixel, que chega a 59 ms.
-        const TETO_US: u64 = 30_000;
-        if por_tela > TETO_US {
+        // O dobro do limpo medido em cada uma, e mais de duas vezes abaixo
+        // da regressão.
+        const TETO_PERCENTUAL: u64 = if cfg!(target_arch = "x86_64") {
+            1000
+        } else {
+            350
+        };
+        if razao > TETO_PERCENTUAL {
             crate::log_error!(
                 "teste",
-                "preenchimento a {} us, teto {} us",
-                por_tela,
-                TETO_US
+                "preenchimento a {}% do laco reto, teto {}%",
+                razao,
+                TETO_PERCENTUAL
             );
             return Err("desenhar na tela ficou uma ordem de grandeza mais lento");
         }
