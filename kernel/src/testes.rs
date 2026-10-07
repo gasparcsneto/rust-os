@@ -26562,7 +26562,7 @@ fn de_base64(texto: &str) -> Option<alloc::vec::Vec<u8>> {
         } as u32)
     };
     let b = texto.as_bytes();
-    if b.len() % 4 != 0 {
+    if !b.len().is_multiple_of(4) {
         return None;
     }
     let mut saida = alloc::vec::Vec::with_capacity(b.len() / 4 * 3);

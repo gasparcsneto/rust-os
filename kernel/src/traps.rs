@@ -240,15 +240,23 @@ pub fn afundar_de_proposito() -> ! {
 /// Cada nível prende meio KiB que o compilador não pode dispensar, e usa o
 /// bloco **depois** da chamada: sem isso a recursão é de cauda, e o release a
 /// transformaria num laço que nunca chega à guarda.
+///
+/// O bloco não é zerado: zerado, o release o preenche com uma chamada a
+/// `memset`, e é ela que toca a guarda — o relatório apontaria o `memset`, e
+/// não quem afundou. Sem zerar, quem toca a guarda é o prólogo daqui.
 #[inline(never)]
 fn afundar(nivel: u64) -> u64 {
-    let mut bloco = [0u8; 512];
+    let mut bloco = core::mem::MaybeUninit::<[u8; 512]>::uninit();
+    let primeiro = bloco.as_mut_ptr().cast::<u8>();
+    // SAFETY: `primeiro` é o primeiro byte do bloco, que é deste quadro.
+    unsafe { core::ptr::write_volatile(primeiro, nivel as u8) };
     core::hint::black_box(&mut bloco);
     if core::hint::black_box(nivel) == u64::MAX {
         return 0;
     }
     let abaixo = afundar(nivel + 1);
-    abaixo.wrapping_add(core::hint::black_box(&bloco)[(nivel % 512) as usize] as u64)
+    // SAFETY: o mesmo byte, escrito acima, ainda no quadro deste nível.
+    abaixo.wrapping_add(u64::from(unsafe { core::ptr::read_volatile(primeiro) }))
 }
 
 /// Trata uma falha não recuperável: registra, reporta e entra em post-mortem.

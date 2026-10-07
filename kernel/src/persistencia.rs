@@ -1389,14 +1389,12 @@ fn precisa_compactar() -> bool {
 /// A compactação está solta? Na suíte e na bancada, quem a solta é o caso.
 fn compactacao_solta() -> bool {
     #[cfg(feature = "modo-teste")]
-    if COMPACTACAO_PAUSADA.load(Ordering::Acquire) {
-        return false;
-    }
+    let solta = !COMPACTACAO_PAUSADA.load(Ordering::Acquire);
+    #[cfg(not(feature = "modo-teste"))]
+    let solta = true;
     #[cfg(feature = "quedas")]
-    if crate::quedas::coletor_nao_compacta() {
-        return false;
-    }
-    true
+    let solta = solta && !crate::quedas::coletor_nao_compacta();
+    solta
 }
 
 /// Compacta, se a região passou do ponto, quem acabou de tomar a ordem das
