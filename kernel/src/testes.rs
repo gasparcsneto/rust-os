@@ -26608,10 +26608,13 @@ fn de_base64(texto: &str) -> Option<alloc::vec::Vec<u8>> {
 ///   x86 via no CI: o resto do pedido respondido com `JSON malformado`;
 /// - o byte que chega depois de um silêncio recomeça o quadro, e o pedaço do
 ///   cliente que parou fica para trás;
-/// - a marca é posta por quem recebe: mais de meio segundo entre duas
-///   chegadas, e nunca no primeiro byte.
+/// - a marca é posta por quem recebe, e silêncio é a linha **vista** vazia
+///   por mais de meio segundo depois do último byte — nunca no primeiro
+///   byte, e nunca só porque a coleta seguinte demorou: o núcleo que coleta
+///   mascarado, com o resto de um pedido esperando na FIFO, era o segundo
+///   jeito de partir o pedido, e a fumaça do x86 o pegou depois do primeiro.
 fn agente_o_silencio_e_medido_na_chegada() -> Resultado {
-    use crate::tarefas::entrada::{DEPOIS_DE_SILENCIO, SILENCIO_EM_TIQUES, marca_entre};
+    use crate::tarefas::entrada::{DEPOIS_DE_SILENCIO, Linha, SILENCIO_EM_TIQUES};
     let mut q = crate::agent::QuadroDaSerialDeTeste::novo();
     let comeco = br#"{"jsonrpc":"2.0","#;
     let resto = br#""id":1,"method":"agent.ping""#;
@@ -26631,11 +26634,40 @@ fn agente_o_silencio_e_medido_na_chegada() -> Resultado {
         crate::log_error!("teste", "quadro com {} bytes", q.tamanho());
         return Err("o byte depois de um silencio nao recomecou o quadro");
     }
-    if marca_entre(100, 100 + SILENCIO_EM_TIQUES + 1) != DEPOIS_DE_SILENCIO
-        || marca_entre(100, 100 + SILENCIO_EM_TIQUES) != 0
-        || marca_entre(0, 1_000_000) != 0
-    {
-        return Err("a marca de silencio nao e a de mais de meio segundo entre duas chegadas");
+
+    const S: u64 = SILENCIO_EM_TIQUES;
+    // O primeiro byte, mesmo depois de muito tempo vista vazia.
+    let mut l = Linha::default();
+    l.vazia(1_000_000);
+    if l.chegou(1_000_000) != 0 {
+        return Err("o primeiro byte da linha veio marcado");
+    }
+    // Vista vazia por mais que o teto: o byte seguinte recomeça; pelo teto
+    // exato, não.
+    let mut l = Linha::default();
+    let _ = l.chegou(100);
+    l.vazia(100 + S + 1);
+    if l.chegou(100 + S + 2) != DEPOIS_DE_SILENCIO {
+        return Err("a linha vista vazia mais que o teto nao marcou o byte seguinte");
+    }
+    let mut l = Linha::default();
+    let _ = l.chegou(100);
+    l.vazia(100 + S);
+    if l.chegou(100 + S + 1) != 0 {
+        return Err("a linha vista vazia pelo teto exato marcou o byte seguinte");
+    }
+    // O núcleo que coleta mascarado: a linha foi vista vazia logo depois do
+    // último byte, ninguém olhou mais, e o resto do pedido é coletado muito
+    // depois. A demora é do kernel: não é silêncio.
+    let mut l = Linha::default();
+    let _ = l.chegou(100);
+    l.vazia(100);
+    if l.chegou(100 + 10 * S) != 0 {
+        return Err("a coleta atrasada pareceu silencio: o pedido seria partido");
+    }
+    // E os bytes que chegam juntos, na mesma coleta, nunca se separam.
+    if l.chegou(100 + 10 * S) != 0 {
+        return Err("dois bytes da mesma coleta foram separados");
     }
     Ok(())
 }

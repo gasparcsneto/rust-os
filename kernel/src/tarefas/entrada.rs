@@ -67,31 +67,67 @@ static BYTES: Fila<u16, CAPACIDADE> = Fila::nova();
 /// bytes que já estavam na fila, chegados juntos com os primeiros, pareciam
 /// ter vindo depois de um silêncio: o pedido era partido ao meio e o resto
 /// respondido com `JSON malformado`. Só quem recebe o byte sabe quando ele
-/// chegou, e é aqui que o silêncio se mede.
+/// chegou, e é aqui que o silêncio se mede — ver [`Linha`] sobre o que
+/// "chegou" quer dizer.
 pub const DEPOIS_DE_SILENCIO: u16 = 1 << 8;
 
 /// Quanto tempo sem bytes faz do seguinte o começo de outro quadro — ver
 /// [`crate::agent::TETO_DO_QUADRO_EM_TIQUES`] sobre o porquê do valor.
 pub const SILENCIO_EM_TIQUES: u64 = crate::agent::TETO_DO_QUADRO_EM_TIQUES;
 
-/// O tique em que o último byte chegou da UART; zero antes do primeiro.
-static ULTIMA_CHEGADA: AtomicU64 = AtomicU64::new(0);
-
-/// A marca do byte que chega agora, e a chegada anotada.
-fn marca_da_chegada() -> u16 {
-    let agora = crate::tempo::ticks();
-    marca_entre(ULTIMA_CHEGADA.swap(agora, Ordering::Relaxed), agora)
+/// O que a coleta sabe da linha: quando chegou o último byte, e quando a
+/// FIFO foi vista vazia pela última vez.
+///
+/// # Silêncio é a linha vista vazia, não a demora entre duas coletas
+///
+/// Medir de uma chegada à seguinte ainda deixava passar um caso, e a
+/// fumaça do x86 o pegou de novo, no mesmo `press` da pessoa: o núcleo que
+/// coleta a UART redesenha a tela com as interrupções mascaradas. Os bytes
+/// de um pedido que já estava chegando esperam na FIFO — e no emulador, que
+/// segura o resto enquanto ela está cheia —, e são coletados juntos quando
+/// o núcleo volta. Entre o último byte coletado antes e o primeiro depois
+/// passava mais de meio segundo, e ninguém tinha olhado a linha nesse meio:
+/// a demora era do kernel, não do cliente, e o pedido saía partido.
+///
+/// O que o kernel sabe de verdade é quando **viu** a FIFO vazia — toda
+/// coleta que termina por falta de byte, e o núcleo dos dispositivos coleta
+/// a cada tique. Silêncio é isso: depois do último byte, a linha vista
+/// vazia por mais de [`SILENCIO_EM_TIQUES`]. Um cliente que parou é visto
+/// vazio a cada tique, e o quadro dele é abandonado como antes; um núcleo
+/// mascarado não vê nada, e o tempo dele não conta.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Linha {
+    /// O tique em que o último byte chegou; zero antes do primeiro.
+    pub ultima_chegada: u64,
+    /// O último tique em que a FIFO foi vista vazia.
+    pub vista_vazia: u64,
 }
 
-/// A marca de um byte que chegou em `agora`, tendo o anterior chegado em
-/// `antes` (zero: nenhum antes).
-pub fn marca_entre(antes: u64, agora: u64) -> u16 {
-    if antes != 0 && agora.saturating_sub(antes) > SILENCIO_EM_TIQUES {
-        DEPOIS_DE_SILENCIO
-    } else {
-        0
+impl Linha {
+    /// A FIFO foi vista vazia no tique `agora`.
+    pub fn vazia(&mut self, agora: u64) {
+        self.vista_vazia = agora;
+    }
+
+    /// Um byte chegou no tique `agora`: a marca dele, e a chegada anotada.
+    /// O primeiro byte nunca é marcado: não há quadro antes dele.
+    pub fn chegou(&mut self, agora: u64) -> u16 {
+        let calada = self.vista_vazia.saturating_sub(self.ultima_chegada);
+        let marca = if self.ultima_chegada != 0 && calada > SILENCIO_EM_TIQUES {
+            DEPOIS_DE_SILENCIO
+        } else {
+            0
+        };
+        self.ultima_chegada = agora;
+        marca
     }
 }
+
+/// A [`Linha`] da UART do agente. Só [`coletar`] a lê e escreve, com a trava
+/// da porta na mão — as duas metades nunca são vistas por dois ao mesmo
+/// tempo, e por isso bastam dois atômicos soltos.
+static ULTIMA_CHEGADA: AtomicU64 = AtomicU64::new(0);
+static VISTA_VAZIA: AtomicU64 = AtomicU64::new(0);
 
 /// Waker da tarefa que espera bytes.
 ///
@@ -274,13 +310,20 @@ pub fn coletar() {
         // A vaga para o `\n` está sempre livre porque os bytes comuns param
         // uma antes do fim. Ver [`Fila::enfileirar_com_reserva`].
         let mut descartando = DESCARTANDO_ATE_O_FIM_DO_QUADRO.load(Ordering::Relaxed);
+        let mut linha = Linha {
+            ultima_chegada: ULTIMA_CHEGADA.load(Ordering::Relaxed),
+            vista_vazia: VISTA_VAZIA.load(Ordering::Relaxed),
+        };
+        let agora = crate::tempo::ticks();
 
         for _ in 0..CAPACIDADE {
             let Some(byte) = porta.read_byte() else {
+                // Vazia, e vista: é a única prova de silêncio que há.
+                linha.vazia(agora);
                 break;
             };
             chegou = true;
-            let marca = marca_da_chegada();
+            let marca = linha.chegou(agora);
 
             if descartando {
                 if byte == b'\n' {
@@ -307,6 +350,8 @@ pub fn coletar() {
         }
 
         DESCARTANDO_ATE_O_FIM_DO_QUADRO.store(descartando, Ordering::Relaxed);
+        ULTIMA_CHEGADA.store(linha.ultima_chegada, Ordering::Relaxed);
+        VISTA_VAZIA.store(linha.vista_vazia, Ordering::Relaxed);
     });
 
     if chegou {
