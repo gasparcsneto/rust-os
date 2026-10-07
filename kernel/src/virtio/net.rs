@@ -525,8 +525,9 @@ impl Placa {
         self.recepcao.notificar(&self.transporte);
     }
 
-    /// A placa ainda está no ar?
-    #[cfg(feature = "modo-teste")]
+    /// A placa ainda está no ar? O ARP do diagnóstico pergunta para não
+    /// esperar dois segundos por uma resposta que uma placa desligada não
+    /// colhe.
     pub fn vivo(&self) -> bool {
         self.vivo
     }

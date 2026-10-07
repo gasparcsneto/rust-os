@@ -620,6 +620,9 @@ fn passada_do_coletor() {
     // E a região do journal que encheu é compactada aqui: o coletor
     // não está no meio de operação nenhuma.
     crate::persistencia::compactar_se_preciso();
+    // E as conexões de rede de quem acabou — o processo, a sessão —, como
+    // as camadas de um processo morto.
+    crate::rede::conexoes::recolher_orfas();
 }
 
 /// Há outro fio que este núcleo poderia rodar agora?

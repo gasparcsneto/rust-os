@@ -1244,6 +1244,20 @@ pub fn recurso_decidido(caminho: &str) -> bool {
     .unwrap_or(false)
 }
 
+/// O destino de rede `destino`, na forma normal, é um dos recursos que o
+/// gate decidiu para o comando em execução neste fio. O handler de um
+/// comando de rede só disca, manda ou lê no destino que foi decidido.
+pub fn endereco_decidido(destino: &str) -> bool {
+    do_comando_deste_fio(|c| {
+        c.decidido.as_ref().is_some_and(|d| {
+            d.recursos
+                .iter()
+                .any(|r| politica::endereco::normalizar(r).as_deref() == Some(destino))
+        })
+    })
+    .unwrap_or(false)
+}
+
 /// Decide de novo, agora, o comando em execução neste fio — a mesma conta
 /// do gate, sobre a mesma autoridade, a mesma permissão e os mesmos
 /// recursos, com o registro e a política **de agora**.
@@ -1499,7 +1513,26 @@ pub fn autorizar(
     }
     passar_pela_taxa(&quem, comando.nome, parametros)?;
 
-    let recurso = recurso_do_pedido(comando, params);
+    // Um comando sobre uma conexão aberta — `net.send`, `net.recv`,
+    // `net.close` — nomeia a conexão pelo número, e o recurso é o destino
+    // dela, resolvido para quem pede: o número de outro titular, ou um que
+    // não existe, não resolve. Ver `rede::conexoes`.
+    let mut sem_conexao = None;
+    let recurso = if comando.recurso == Some(crate::rede::conexoes::PARAMETRO) {
+        let dono = crate::rede::conexoes::Dono::do_chamador(chamador, quem.chave);
+        let numero = params
+            .member(crate::rede::conexoes::PARAMETRO)
+            .and_then(|v| v.as_u64());
+        match crate::rede::conexoes::destino_para(numero, &dono) {
+            Ok(destino) => destino.texto(),
+            Err(motivo) => {
+                sem_conexao = Some(motivo);
+                recurso_do_pedido(comando, params)
+            }
+        }
+    } else {
+        recurso_do_pedido(comando, params)
+    };
     // Os outros recursos do pedido — o destino de um rename, os caminhos
     // de um lote —: cada um decidido pela mesma conta, e o primeiro que
     // recusa recusa o pedido inteiro.
@@ -1510,6 +1543,16 @@ pub fn autorizar(
         // gravada lá, com o papel do administrador.
         Acesso::PorProva => (Codigo::Allow, "a autorizacao e a prova"),
         Acesso::Exige(_) if papel_de_teto(&quem) => TETO_NAO_SE_EXERCE,
+        // A conexão que não resolveu: a permissão vem antes da existência,
+        // como num destinatário — quem não tem `net.connect` ouve
+        // `DENY_PERMISSION` e não descobre se o número existe; quem tem
+        // ouve `DENY_RESOURCE`, e a auditoria grava o motivo.
+        Acesso::Exige(permissao) if let Some(motivo) = sem_conexao => {
+            match decidir(quem.papel.as_deref(), permissao, "") {
+                (Codigo::DenyResource, _) => (Codigo::DenyResource, motivo),
+                outra => outra,
+            }
+        }
         Acesso::Exige(permissao) if permissao.recurso_e_destino() => {
             let (codigo, detalhe, resolvido) =
                 decidir_destino(quem.papel.as_deref(), permissao, &recurso);

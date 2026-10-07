@@ -381,6 +381,9 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     // que sorteiam uma chave efêmera a cada aperto de mão.
     virtio::entropia::init();
     aleatorio::init();
+    // A pilha IP, sobre a placa e com a semente do gerador. O fio dela pede
+    // o endereço ao DHCP enquanto o resto do boot segue.
+    rede::pilha::iniciar();
     // O mouse de fábrica do x86. No ARM o ponteiro vem de um tablet virtio,
     // ligado junto com o teclado logo acima.
     if arch::iniciar_mouse() {

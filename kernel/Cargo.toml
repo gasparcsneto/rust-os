@@ -96,6 +96,21 @@ diario = { path = "../diario" }
 # e a auditoria são do kernel (`armazem.rs`), cada um no lugar dele.
 armazem = { path = "../armazem" }
 
+# A pilha IP: Ethernet, ARP, IPv4, DHCP e TCP sobre a placa virtio — ver
+# `src/rede/pilha.rs`. Escrever TCP do zero é um a dois anos-pessoa e não
+# diferencia o Duke em nada; o que diferencia é o lado de cima, a conexão
+# como capacidade do registro, sob o gate — e esse é do kernel
+# (`src/rede/conexoes.rs`). Só o que este kernel usa: sem `std`, sem log,
+# sem IPv6, sem UDP e DNS por enquanto, sem os dispositivos de exemplo.
+smoltcp = { version = "0.14.0", default-features = false, features = [
+    "alloc",
+    "medium-ethernet",
+    "proto-ipv4",
+    "proto-dhcpv4",
+    "socket-tcp",
+    "socket-dhcpv4",
+] }
+
 # --- x86_64 -----------------------------------------------------------------
 #
 # No x86 nos apoiamos em crates maduros porque a plataforma tem décadas de

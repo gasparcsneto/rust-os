@@ -379,6 +379,84 @@ pub static COMANDOS: &[Command] = &[
         handler: net_arp,
     },
     Command {
+        nome: "net.connect",
+        resumo: "Abre uma conexao TCP de saida para `to`, `tcp:<ipv4>:<porta>`, se o destino esta no alcance do seu papel. Devolve o numero da conexao e o estado (quase sempre `connecting`: acompanhe por net.recv). A conexao e sua: so voce a usa, e ela acaba com a sua sessao ou o seu processo.",
+        params: &[ParamSpec {
+            nome: "to",
+            tipo: TipoParam::Texto,
+            obrigatorio: true,
+            descricao: "O destino inteiro, na forma normal: `tcp:10.0.2.100:7`.",
+        }],
+        acesso: Acesso::Exige(Permissao::NetConnect),
+        recurso: Some("to"),
+        mais: Mais::Nada,
+        handler: net_connect,
+    },
+    Command {
+        nome: "net.send",
+        resumo: "Manda bytes por uma conexao sua: o texto de `content`, ou o anexo do pedido (binario). Devolve quantos a conexao aceitou — menos que todos com o buffer de saida cheio — e o estado.",
+        params: &[
+            ParamSpec {
+                nome: "connection",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: true,
+                descricao: "O numero que net.connect devolveu.",
+            },
+            ParamSpec {
+                nome: "content",
+                tipo: TipoParam::Texto,
+                obrigatorio: false,
+                descricao: "O que mandar, em texto.",
+            },
+            ParamSpec {
+                nome: "attachment",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "Numa porta de agente: quantos bytes de anexo vieram antes deste pedido. Um processo manda o anexo pela chamada PEDIR_COM_ANEXO.",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::NetConnect),
+        recurso: Some("connection"),
+        mais: Mais::Nada,
+        handler: net_send,
+    },
+    Command {
+        nome: "net.recv",
+        resumo: "O que chegou numa conexao sua, ate `max` bytes (padrao e teto: 4096), e o estado dela. Nao espera: sem nada chegado, devolve vazio. `encoding` diz `utf-8` (cortado no fim de um caractere; o resto fica para o proximo) ou `base64`.",
+        params: &[
+            ParamSpec {
+                nome: "connection",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: true,
+                descricao: "O numero que net.connect devolveu.",
+            },
+            ParamSpec {
+                nome: "max",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "Quantos bytes, no maximo.",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::NetConnect),
+        recurso: Some("connection"),
+        mais: Mais::Nada,
+        handler: net_recv,
+    },
+    Command {
+        nome: "net.close",
+        resumo: "Fecha uma conexao sua. O numero deixa de valer na hora.",
+        params: &[ParamSpec {
+            nome: "connection",
+            tipo: TipoParam::Inteiro,
+            obrigatorio: true,
+            descricao: "O numero que net.connect devolveu.",
+        }],
+        acesso: Acesso::Exige(Permissao::NetConnect),
+        recurso: Some("connection"),
+        mais: Mais::Nada,
+        handler: net_close,
+    },
+    Command {
         nome: "video.sample",
         resumo: "Amostra a tela numa grade de cores, para o agente conferir o que foi desenhado.",
         params: &[
@@ -1925,10 +2003,217 @@ fn net_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
             w.field_u64("frames_sent", transmitidos)?;
             w.field_u64("frames_received", recebidos)?;
             w.field_u64("max_frame", crate::virtio::net::MAIOR_QUADRO as u64)?;
+            // A pilha IP: o endereço que o DHCP deu, e as conexões.
+            match crate::rede::pilha::resumo() {
+                Some(r) => {
+                    w.field_bool("stack", true)?;
+                    w.key("address")?;
+                    match r.endereco {
+                        Some(([a, b, c, d], prefixo)) => {
+                            w.str_value(&alloc::format!("{a}.{b}.{c}.{d}/{prefixo}"))?
+                        }
+                        None => w.null_value()?,
+                    }
+                    w.key("gateway")?;
+                    match r.roteador {
+                        Some([a, b, c, d]) => w.str_value(&alloc::format!("{a}.{b}.{c}.{d}"))?,
+                        None => w.null_value()?,
+                    }
+                    w.field_u64("connections", r.conexoes as u64)?;
+                    w.field_u64("connections_opened", r.abertas)?;
+                }
+                None => w.field_bool("stack", false)?,
+            }
         }
         None => w.field_bool("present", false)?,
     }
 
+    w.end_object()
+}
+
+/// O dono do comando e o número da conexão do pedido — a mesma conexão
+/// que o gate resolveu, ou a recusa escrita.
+fn conexao_do_pedido(
+    numero: Option<u64>,
+    w: &mut JsonWriter,
+) -> Result<Option<(crate::rede::conexoes::Dono, u64)>, fmt::Error> {
+    let Some(dono) = crate::rede::conexoes::Dono::do_comando() else {
+        w.field_str(
+            "error",
+            "este pedido nao vem de ninguem que possa ter conexao",
+        )?;
+        return Ok(None);
+    };
+    let Some(numero) = numero else {
+        w.field_str("error", "falta o numero da conexao")?;
+        return Ok(None);
+    };
+    // O handler só age sobre o destino que o gate decidiu: a conexão é a
+    // mesma, de quem pediu — o número não volta a ser de outra.
+    match crate::rede::pilha::destino_de(numero, &dono) {
+        Ok(d) if crate::autorizacao::endereco_decidido(&d.texto()) => Ok(Some((dono, numero))),
+        Ok(_) => {
+            w.field_str("error", "a conexao nao e a que foi decidida")?;
+            Ok(None)
+        }
+        Err(motivo) => {
+            w.field_str("error", motivo)?;
+            Ok(None)
+        }
+    }
+}
+
+fn net_connect(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let texto = params.member("to").and_then(|v| v.as_str()).unwrap_or("");
+    let Some(destino) = politica::endereco::ler(texto) else {
+        w.field_str(
+            "error",
+            "destino invalido: so `tcp:<ipv4>:<porta>`, na forma normal",
+        )?;
+        return w.end_object();
+    };
+    if !crate::autorizacao::endereco_decidido(&destino.texto()) {
+        w.field_str("error", "o destino nao e o que foi decidido")?;
+        return w.end_object();
+    }
+    let Some(dono) = crate::rede::conexoes::Dono::do_comando() else {
+        w.field_str(
+            "error",
+            "este pedido nao vem de ninguem que possa ter conexao",
+        )?;
+        return w.end_object();
+    };
+    match crate::rede::pilha::abrir(dono, destino) {
+        Ok((numero, estado)) => {
+            w.field_u64("connection", numero)?;
+            w.field_str("to", &destino.texto())?;
+            w.field_str("state", estado.nome())?;
+        }
+        Err(motivo) => w.field_str("error", motivo)?,
+    }
+    w.end_object()
+}
+
+fn net_send(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let mut anexo = crate::autorizacao::tirar_anexo();
+    let mut buffer = buffer_do_texto(params.member("content"));
+    let numero = params.member("connection").and_then(|v| v.as_u64());
+    let declarado = anexo_declarado(params.member("attachment"), &anexo);
+    let r = net_send_com(params, numero, declarado, w, &anexo, &mut buffer);
+    politica::sigiloso::zerar_bloco(&mut buffer);
+    politica::sigiloso::zerar_bloco(&mut anexo);
+    r?;
+    w.end_object()
+}
+
+fn net_send_com(
+    params: Json,
+    numero: Option<u64>,
+    declarado: Result<(), &'static str>,
+    w: &mut JsonWriter,
+    anexo: &[u8],
+    buffer: &mut [u8],
+) -> fmt::Result {
+    let Some((dono, numero)) = conexao_do_pedido(numero, w)? else {
+        return Ok(());
+    };
+    let dados: Result<&[u8], &'static str> = match params.member("content") {
+        _ if declarado.is_err() => Err("o anexo nao confere com attachment"),
+        Some(_) if !anexo.is_empty() => Err("os dados vem do anexo ou de content, nao dos dois"),
+        Some(t) => t
+            .desescapar_em(buffer)
+            .map(str::as_bytes)
+            .ok_or("o conteudo nao e texto"),
+        None => Ok(anexo),
+    };
+    let dados = match dados {
+        Ok(d) if d.len() > crate::rede::pilha::BUFFER_DA_CONEXAO => {
+            return w.field_str("error", "mais que 4096 bytes num envio");
+        }
+        Ok(d) => d,
+        Err(m) => return w.field_str("error", m),
+    };
+    match crate::rede::pilha::mandar(numero, &dono, dados) {
+        Ok((aceitos, estado)) => {
+            w.field_u64("connection", numero)?;
+            w.field_u64("sent", aceitos as u64)?;
+            w.field_str("state", estado.nome())
+        }
+        Err(motivo) => w.field_str("error", motivo),
+    }
+}
+
+fn net_recv(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let numero = params.member("connection").and_then(|v| v.as_u64());
+    let Some((dono, numero)) = conexao_do_pedido(numero, w)? else {
+        return w.end_object();
+    };
+    let maximo = params
+        .member("max")
+        .and_then(|v| v.as_u64())
+        .map_or(crate::rede::pilha::BUFFER_DA_CONEXAO, |m| {
+            (m as usize).min(crate::rede::pilha::BUFFER_DA_CONEXAO)
+        });
+    let (dados, estado) = match crate::rede::pilha::espiar(numero, &dono, maximo) {
+        Ok(r) => r,
+        Err(motivo) => {
+            w.field_str("error", motivo)?;
+            return w.end_object();
+        }
+    };
+    // Texto quando é texto, cortado no fim de um caractere — o pedaço do
+    // seguinte fica na conexão para a próxima leitura —; base64 quando não
+    // é. E base64 também quando **só** há o começo de um caractere: esperar
+    // o resto prenderia esses bytes para sempre se o resto não viesse — o
+    // outro lado fechou, ou mandou lixo —, e cada leitura devolveria nada.
+    let (tirar, texto) = match core::str::from_utf8(&dados) {
+        Ok(t) => (dados.len(), Some(t)),
+        Err(e) if e.error_len().is_none() && e.valid_up_to() > 0 => {
+            let n = e.valid_up_to();
+            (n, core::str::from_utf8(&dados[..n]).ok())
+        }
+        Err(_) => (dados.len(), None),
+    };
+    w.field_u64("connection", numero)?;
+    w.field_str("state", estado.nome())?;
+    w.field_u64("returned", tirar as u64)?;
+    match texto {
+        Some(t) => {
+            w.field_str("encoding", "utf-8")?;
+            w.field_str("content", t)?;
+        }
+        None => {
+            w.field_str("encoding", "base64")?;
+            w.key("content")?;
+            w.begin_str()?;
+            em_base64(&dados[..tirar], |c| w.push_str(c))?;
+            w.end_str()?;
+        }
+    }
+    if tirar > 0
+        && let Err(motivo) = crate::rede::pilha::consumir(numero, &dono, tirar)
+    {
+        w.field_str("error", motivo)?;
+    }
+    w.end_object()
+}
+
+fn net_close(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let numero = params.member("connection").and_then(|v| v.as_u64());
+    let Some((dono, numero)) = conexao_do_pedido(numero, w)? else {
+        return w.end_object();
+    };
+    match crate::rede::pilha::fechar(numero, &dono) {
+        Ok(()) => {
+            w.field_u64("connection", numero)?;
+            w.field_bool("closed", true)?;
+        }
+        Err(motivo) => w.field_str("error", motivo)?,
+    }
     w.end_object()
 }
 

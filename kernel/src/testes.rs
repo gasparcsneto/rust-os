@@ -29989,6 +29989,58 @@ static CASOS: &[Caso] = &[
         f: rede_um_descritor_por_buffer,
     },
     Caso {
+        nome: "rede: a pilha tem endereco pelo DHCP",
+        f: rede_a_pilha_tem_endereco_pelo_dhcp,
+    },
+    Caso {
+        nome: "rede: o eco vai e volta",
+        f: rede_o_eco_vai_e_volta,
+    },
+    Caso {
+        nome: "rede: a conexao e de quem a abriu",
+        f: rede_a_conexao_e_de_quem_a_abriu,
+    },
+    Caso {
+        nome: "rede: o destino e o recurso",
+        f: rede_o_destino_e_o_recurso,
+    },
+    Caso {
+        nome: "rede: a politica nova vale para a conexao aberta",
+        f: rede_a_politica_nova_vale_para_a_conexao_aberta,
+    },
+    Caso {
+        nome: "rede: a conexao de quem acabou e derrubada",
+        f: rede_a_conexao_de_quem_acabou_e_derrubada,
+    },
+    Caso {
+        nome: "rede: o teto de conexoes e por titular",
+        f: rede_o_teto_de_conexoes_e_por_titular,
+    },
+    Caso {
+        nome: "rede: o caractere partido nao prende a leitura",
+        f: rede_o_caractere_partido_nao_prende_a_leitura,
+    },
+    Caso {
+        nome: "rede: o agente que sai perde as conexoes",
+        f: rede_o_agente_que_sai_perde_as_conexoes,
+    },
+    Caso {
+        nome: "rede: o handler so age no que foi decidido",
+        f: rede_o_handler_so_age_no_que_foi_decidido,
+    },
+    Caso {
+        nome: "rede: quem fecha ainda ocupa a sua vaga",
+        f: rede_quem_fecha_ainda_ocupa_a_sua_vaga,
+    },
+    Caso {
+        nome: "rede: varios fios conversam ao mesmo tempo",
+        f: rede_varios_fios_conversam_ao_mesmo_tempo,
+    },
+    Caso {
+        nome: "rede: o programa disca pelo gate",
+        f: rede_o_programa_disca_pelo_gate,
+    },
+    Caso {
         nome: "irq: o virtio interrompe de verdade",
         f: irq_o_virtio_interrompe_de_verdade,
     },
@@ -30491,6 +30543,806 @@ fn rede_um_descritor_por_buffer() -> Resultado {
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// A pilha IP e as conexões
+// ---------------------------------------------------------------------------
+
+/// O eco da bancada: o único destino que a política de desenvolvimento
+/// enumera para `net.connect`.
+const ECO: &str = "tcp:10.0.2.100:7";
+
+/// O sistema, como um processo deste fio: um dono vivo enquanto o caso
+/// roda, e que o coletor não confunde com um processo morto.
+fn sistema_aqui() -> crate::autorizacao::Chamador {
+    sistema_no_armazem(crate::fios::id_atual())
+}
+
+/// Um titular novo, sem conexão nenhuma — nem as que ainda terminam o
+/// fecho: uma pessoa operadora numa sessão aberta agora, no console
+/// `console`. Os fechos pendentes contam no teto de quem fechou, e um caso
+/// que confere o teto não herda os dos casos anteriores.
+fn titular_novo_na_rede(console: u16, nome: &str) -> crate::autorizacao::Chamador {
+    let sessao = crate::pessoas::sessao_de_teste(
+        crate::pessoas::Console::Terminal(console),
+        nome,
+        "operador",
+    );
+    crate::autorizacao::Chamador::Pessoa(sessao)
+}
+
+/// O número da conexão que um `net.connect` abriu.
+fn conexao_aberta(r: &str) -> Result<u64, &'static str> {
+    fs_numero(r, "connection").ok_or_else(|| {
+        crate::log_error!("teste", "net.connect: {}", r);
+        "net.connect nao abriu a conexao"
+    })
+}
+
+/// Espera a conexão sair de `connecting`, e devolve o estado em que ela
+/// ficou — pelo `net.recv` de quem a abriu, sem ler nada que tenha chegado.
+fn estado_depois_do_aperto(
+    quem: crate::autorizacao::Chamador,
+    conexao: u64,
+) -> Result<alloc::string::String, &'static str> {
+    let mut estado = alloc::string::String::new();
+    esperar_cedendo(
+        || {
+            let r = fs_pedir(
+                quem,
+                "net.recv",
+                &alloc::format!(r#"{{"connection":{conexao},"max":0}}"#),
+            );
+            estado = fs_texto(&r, "state").unwrap_or_default();
+            estado != "connecting"
+        },
+        300,
+    )?;
+    Ok(estado)
+}
+
+/// Lê da conexão até ter `quantos` bytes, ou o prazo vencer.
+fn ler_da_conexao(
+    quem: crate::autorizacao::Chamador,
+    conexao: u64,
+    quantos: usize,
+) -> Result<alloc::vec::Vec<u8>, &'static str> {
+    let mut lidos = alloc::vec::Vec::new();
+    let mut falha = None;
+    let _ = esperar_cedendo(
+        || {
+            let r = fs_pedir(
+                quem,
+                "net.recv",
+                &alloc::format!(r#"{{"connection":{conexao}}}"#),
+            );
+            match (
+                fs_texto(&r, "encoding").as_deref(),
+                Json(r.as_bytes()).member("result"),
+            ) {
+                (Some("utf-8"), Some(res)) => {
+                    let mut claro = alloc::vec![0u8; 8192];
+                    match res
+                        .member("content")
+                        .and_then(|c| c.desescapar_em(&mut claro))
+                    {
+                        Some(t) => lidos.extend_from_slice(t.as_bytes()),
+                        None => falha = Some("o texto lido nao se desescapa"),
+                    }
+                }
+                (Some("base64"), Some(_)) => {
+                    let t = fs_texto(&r, "content").unwrap_or_default();
+                    match de_base64(&t) {
+                        Some(b) => lidos.extend_from_slice(&b),
+                        None => falha = Some("o base64 lido nao se decodifica"),
+                    }
+                }
+                _ => {
+                    crate::log_error!("teste", "net.recv: {}", r);
+                    falha = Some("net.recv nao devolveu o conteudo");
+                }
+            }
+            falha.is_some() || lidos.len() >= quantos
+        },
+        600,
+    );
+    if let Some(f) = falha {
+        return Err(f);
+    }
+    Ok(lidos)
+}
+
+/// A pilha pede o endereço ao DHCP do emulador, e o recebe: o endereço que
+/// a rede em modo usuário dá ao hóspede, e o roteador dela.
+fn rede_a_pilha_tem_endereco_pelo_dhcp() -> Resultado {
+    esperar_cedendo(
+        || crate::rede::pilha::resumo().is_some_and(|r| r.endereco.is_some()),
+        500,
+    )
+    .map_err(|_| "o DHCP nao deu endereco a pilha")?;
+    let r = crate::rede::pilha::resumo().ok_or("a pilha nao esta no ar")?;
+    if r.endereco != Some((NOSSO_IP, 24)) || r.roteador != Some(IP_DO_ROTEADOR) {
+        crate::log_error!("teste", "{:?}", r);
+        return Err("o endereco ou o roteador nao sao os da rede do emulador");
+    }
+    Ok(())
+}
+
+/// Uma conexão ao eco: abre, o aperto termina, o texto vai e volta igual —
+/// com acentos e bytes de controle —, fecha, e o número deixa de valer. E
+/// a auditoria tem o destino de cada uso decidido.
+fn rede_o_eco_vai_e_volta() -> Resultado {
+    let quem = sistema_aqui();
+    let r = fs_pedir(quem, "net.connect", &alloc::format!(r#"{{"to":"{ECO}"}}"#));
+    let conexao = conexao_aberta(&r)?;
+    let estado = estado_depois_do_aperto(quem, conexao)?;
+    if estado != "established" {
+        crate::log_error!("teste", "estado {}", estado);
+        return Err("a conexao ao eco nao se estabeleceu");
+    }
+    let frase = "ola, rede do Duke: ação, coração\\u0001\\t fim";
+    let esperado = "ola, rede do Duke: ação, coração\u{1}\t fim".as_bytes();
+    let r = fs_pedir(
+        quem,
+        "net.send",
+        &alloc::format!(r#"{{"connection":{conexao},"content":"{frase}"}}"#),
+    );
+    if fs_numero(&r, "sent") != Some(esperado.len() as u64) {
+        crate::log_error!("teste", "net.send: {}", r);
+        return Err("o envio ao eco nao aceitou o texto inteiro");
+    }
+    let voltou = ler_da_conexao(quem, conexao, esperado.len())?;
+    if voltou != esperado {
+        crate::log_error!("teste", "voltou {:?}", voltou);
+        return Err("o eco nao devolveu o que foi mandado");
+    }
+    let usou = ultimo_que(|e| e.metodo == "net.recv" && e.recurso == ECO)
+        .ok_or("o uso da conexao nao foi gravado com o destino")?;
+    if usou.codigo != politica::Codigo::Allow {
+        return Err("o uso da conexao foi gravado com outro codigo");
+    }
+    let r = fs_pedir(
+        quem,
+        "net.close",
+        &alloc::format!(r#"{{"connection":{conexao}}}"#),
+    );
+    if decisao_do_envelope(&r) != "ALLOW" {
+        return Err("fechar a propria conexao foi recusado");
+    }
+    let r = fs_pedir(
+        quem,
+        "net.recv",
+        &alloc::format!(r#"{{"connection":{conexao}}}"#),
+    );
+    if decisao_do_envelope(&r) != "DENY_RESOURCE" {
+        crate::log_error!("teste", "{}", r);
+        return Err("a conexao fechada ainda respondeu");
+    }
+    Ok(())
+}
+
+/// A conexão é de quem a abriu, pelo caminho por onde o pedido veio: outro
+/// titular — ainda que com a mesma autoridade — não lê, não manda e não
+/// fecha, e ouve o mesmo `DENY_RESOURCE` de um número que não existe; a
+/// auditoria grava o motivo. O dono continua usando a dele.
+fn rede_a_conexao_e_de_quem_a_abriu() -> Resultado {
+    use crate::autorizacao::Chamador;
+    let dono = Chamador::Sessao(crate::agent::sessao::SERIAL);
+    let outro = sistema_aqui();
+    let r = fs_pedir(dono, "net.connect", &alloc::format!(r#"{{"to":"{ECO}"}}"#));
+    let conexao = conexao_aberta(&r)?;
+    for (metodo, params) in [
+        ("net.recv", alloc::format!(r#"{{"connection":{conexao}}}"#)),
+        (
+            "net.send",
+            alloc::format!(r#"{{"connection":{conexao},"content":"intruso"}}"#),
+        ),
+        ("net.close", alloc::format!(r#"{{"connection":{conexao}}}"#)),
+        ("net.recv", r#"{"connection":999999}"#.into()),
+    ] {
+        let r = fs_pedir(outro, metodo, &params);
+        if decisao_do_envelope(&r) != "DENY_RESOURCE" {
+            crate::log_error!("teste", "{} de outro: {}", metodo, r);
+            return Err("outro titular usou uma conexao que nao e dele");
+        }
+    }
+    let motivo = ultimo_que(|e| e.metodo == "net.close")
+        .ok_or("a recusa do fechamento alheio nao foi gravada")?;
+    if motivo.codigo != politica::Codigo::DenyResource
+        || !motivo.detalhe.contains("de outro titular")
+    {
+        crate::log_error!("teste", "{:?}", motivo);
+        return Err("a recusa nao gravou o motivo");
+    }
+    // A do dono continua dele, e inteira: o "intruso" não entrou nela.
+    if estado_depois_do_aperto(dono, conexao)? != "established" {
+        return Err("a conexao do dono nao se estabeleceu");
+    }
+    let r = fs_pedir(
+        dono,
+        "net.send",
+        &alloc::format!(r#"{{"connection":{conexao},"content":"do dono"}}"#),
+    );
+    if fs_numero(&r, "sent") != Some(7) {
+        return Err("o dono nao mandou pela propria conexao");
+    }
+    if ler_da_conexao(dono, conexao, 7)? != b"do dono" {
+        return Err("o eco do dono veio misturado com outra coisa");
+    }
+    let r = fs_pedir(
+        dono,
+        "net.close",
+        &alloc::format!(r#"{{"connection":{conexao}}}"#),
+    );
+    if decisao_do_envelope(&r) != "ALLOW" {
+        return Err("o dono nao fechou a propria conexao");
+    }
+    Ok(())
+}
+
+/// O destino é o recurso, decidido pela política de cada um: a porta ao
+/// lado, outro endereço ou a mesma coisa escrita de outro jeito ficam fora
+/// do alcance de todos; uma pessoa observadora não tem a permissão; uma
+/// operadora alcança o eco; e um programa cujo manifesto não declara
+/// `net.connect` não disca nada, qualquer que seja o papel de quem o lançou.
+fn rede_o_destino_e_o_recurso() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
+    use crate::pessoas::Console;
+    crate::pessoas::esquecer_registradas();
+    let resultado = (|| -> Resultado {
+        let sistema = sistema_aqui();
+        for fora in [
+            "tcp:10.0.2.100:8",
+            "tcp:10.0.2.2:7",
+            "tcp:010.0.2.100:7",
+            "tcp:10.0.2.100:07",
+            "udp:10.0.2.100:7",
+            "10.0.2.100:7",
+        ] {
+            let r = fs_pedir(
+                sistema,
+                "net.connect",
+                &alloc::format!(r#"{{"to":"{fora}"}}"#),
+            );
+            if decisao_do_envelope(&r) != "DENY_RESOURCE" {
+                crate::log_error!("teste", "{}: {}", fora, r);
+                return Err("um destino fora do alcance foi discado");
+            }
+        }
+        let observadora =
+            crate::pessoas::sessao_de_teste(Console::Terminal(45), "rede-ob", "observador");
+        let r = fs_pedir(
+            Chamador::Pessoa(observadora),
+            "net.connect",
+            &alloc::format!(r#"{{"to":"{ECO}"}}"#),
+        );
+        if decisao_do_envelope(&r) != "DENY_PERMISSION" {
+            crate::log_error!("teste", "{}", r);
+            return Err("um papel sem net.connect discou");
+        }
+        // A permissão vem antes da existência: quem não tem `net.connect`
+        // ouve `DENY_PERMISSION` sobre qualquer número, e não descobre se
+        // ele existe.
+        let r = fs_pedir(
+            Chamador::Pessoa(observadora),
+            "net.recv",
+            r#"{"connection":999999}"#,
+        );
+        if decisao_do_envelope(&r) != "DENY_PERMISSION" {
+            crate::log_error!("teste", "{}", r);
+            return Err("quem nao tem net.connect soube que a conexao nao existe");
+        }
+        let operadora =
+            crate::pessoas::sessao_de_teste(Console::Terminal(46), "rede-op", "operador");
+        let pessoa = Chamador::Pessoa(operadora);
+        let r = fs_pedir(
+            pessoa,
+            "net.connect",
+            &alloc::format!(r#"{{"to":"{ECO}"}}"#),
+        );
+        let conexao = conexao_aberta(&r)?;
+        let r = fs_pedir(
+            pessoa,
+            "net.close",
+            &alloc::format!(r#"{{"connection":{conexao}}}"#),
+        );
+        if decisao_do_envelope(&r) != "ALLOW" {
+            return Err("a operadora nao fechou a propria conexao");
+        }
+        let sem_manifesto = Chamador::Processo {
+            fio: crate::fios::id_atual(),
+            autoridade: Autoridade::Sistema,
+            programa: Programa::SemImagem,
+        };
+        let r = fs_pedir(
+            sem_manifesto,
+            "net.connect",
+            &alloc::format!(r#"{{"to":"{ECO}"}}"#),
+        );
+        if decisao_do_envelope(&r) != "DENY_PERMISSION" {
+            crate::log_error!("teste", "{}", r);
+            return Err("um programa sem net.connect no manifesto discou");
+        }
+        Ok(())
+    })();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// Uma política nova vale para a conexão já aberta: tirado o destino do
+/// alcance, o pedido seguinte sobre ela é recusado — e com a política de
+/// volta, ela volta a servir. Nada é guardado na conexão além do destino.
+fn rede_a_politica_nova_vale_para_a_conexao_aberta() -> Resultado {
+    let quem = sistema_aqui();
+    let r = fs_pedir(quem, "net.connect", &alloc::format!(r#"{{"to":"{ECO}"}}"#));
+    let conexao = conexao_aberta(&r)?;
+    let antes = crate::autorizacao::com_politica(|p| p.clone());
+    let sem_o_eco = politica::PADRAO.replace(
+        &alloc::format!("recurso sistema net.connect {ECO}"),
+        "recurso sistema net.connect tcp:10.0.2.100:9",
+    );
+    let nova = politica::Politica::ler(&sem_o_eco).map_err(|_| "a politica do caso nao se le")?;
+    crate::autorizacao::restaurar_politica(nova);
+    let recusado = fs_pedir(
+        quem,
+        "net.send",
+        &alloc::format!(r#"{{"connection":{conexao},"content":"x"}}"#),
+    );
+    crate::autorizacao::restaurar_politica(antes);
+    if decisao_do_envelope(&recusado) != "DENY_RESOURCE" {
+        crate::log_error!("teste", "{}", recusado);
+        return Err("a conexao aberta continuou servindo um destino que saiu do alcance");
+    }
+    let r = fs_pedir(
+        quem,
+        "net.close",
+        &alloc::format!(r#"{{"connection":{conexao}}}"#),
+    );
+    if decisao_do_envelope(&r) != "ALLOW" {
+        return Err("com a politica de volta, a conexao nao fechou");
+    }
+    Ok(())
+}
+
+/// O coletor derruba a conexão de quem acabou: um processo que morreu, e
+/// uma pessoa cuja sessão terminou. Cada uma vai para a auditoria.
+fn rede_a_conexao_de_quem_acabou_e_derrubada() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
+    use crate::pessoas::Console;
+    use core::sync::atomic::{AtomicBool, Ordering::SeqCst};
+    static SOLTAR: AtomicBool = AtomicBool::new(false);
+    extern "C" fn processo(_argumento: u64) -> ! {
+        while !SOLTAR.load(SeqCst) {
+            crate::fios::descansar_ate_a_interrupcao();
+        }
+        crate::fios::terminar()
+    }
+    let viva = |c: u64| {
+        crate::rede::pilha::donos()
+            .iter()
+            .any(|(id, _, _)| *id == c)
+    };
+    SOLTAR.store(false, SeqCst);
+    let fio = crate::fios::criar("rede-dono", processo, 0)?.numero();
+    let dele = Chamador::Processo {
+        fio,
+        autoridade: Autoridade::Sistema,
+        programa: Programa::Kernel,
+    };
+    let r = fs_pedir(dele, "net.connect", &alloc::format!(r#"{{"to":"{ECO}"}}"#));
+    let conexao = match conexao_aberta(&r) {
+        Ok(c) => c,
+        Err(e) => {
+            SOLTAR.store(true, SeqCst);
+            return Err(e);
+        }
+    };
+    // Vivo o processo, a conexão fica — o coletor passa e não a toca.
+    let _ = esperar_cedendo(|| false, 10);
+    if !viva(conexao) {
+        SOLTAR.store(true, SeqCst);
+        return Err("a conexao de um processo vivo foi derrubada");
+    }
+    SOLTAR.store(true, SeqCst);
+    esperar_cedendo(|| !viva(conexao), 300)
+        .map_err(|_| "a conexao do processo morto ficou na tabela")?;
+    // O coletor tira a conexão da tabela e grava em seguida: a gravação
+    // pode vir um instante depois de a tabela mudar.
+    let mut gravada = None;
+    esperar_cedendo(
+        || {
+            gravada = ultimo_que(|e| {
+                e.metodo == "net.close"
+                    && e.detalhe.contains("o dono acabou")
+                    && e.detalhe.contains(&alloc::format!("conexao {conexao} "))
+            });
+            gravada.is_some()
+        },
+        300,
+    )
+    .map_err(|_| "a conexao derrubada nao foi gravada")?;
+    let gravada = gravada.ok_or("a conexao derrubada nao foi gravada")?;
+    if gravada.recurso != ECO {
+        return Err("a conexao derrubada foi gravada sem o destino");
+    }
+
+    // E a da pessoa que saiu.
+    crate::pessoas::esquecer_registradas();
+    let resultado = (|| -> Resultado {
+        let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(47), "rede-sai", "operador");
+        let r = fs_pedir(
+            Chamador::Pessoa(sessao),
+            "net.connect",
+            &alloc::format!(r#"{{"to":"{ECO}"}}"#),
+        );
+        let conexao = conexao_aberta(&r)?;
+        crate::pessoas::encerrar_pelo_console(sessao, "o caso encerrou a sessao");
+        esperar_cedendo(|| !viva(conexao), 300)
+            .map_err(|_| "a conexao da pessoa que saiu ficou na tabela")
+    })();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// Cada titular tem um teto de conexões vivas, e o teto é por titular: a
+/// pessoa que encheu o dela não impede outra de abrir a sua. Fechar devolve
+/// a vaga quando o fecho termina — ver "quem fecha ainda ocupa a sua vaga".
+fn rede_o_teto_de_conexoes_e_por_titular() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use crate::rede::pilha::CONEXOES_POR_DONO;
+    crate::pessoas::esquecer_registradas();
+    let quem = titular_novo_na_rede(50, "rede-teto");
+    let abrir = |c: Chamador| fs_pedir(c, "net.connect", &alloc::format!(r#"{{"to":"{ECO}"}}"#));
+    let mut abertas = alloc::vec::Vec::new();
+    let resultado = (|| -> Resultado {
+        for _ in 0..CONEXOES_POR_DONO {
+            abertas.push(conexao_aberta(&abrir(quem))?);
+        }
+        let r = abrir(quem);
+        if fs_numero(&r, "connection").is_some()
+            || !fs_texto(&r, "error").is_some_and(|e| e.contains("maximo"))
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("um titular passou do teto de conexoes");
+        }
+        let outro = titular_novo_na_rede(51, "rede-teto-outro");
+        let do_outro = conexao_aberta(&abrir(outro))?;
+        let _ = fs_pedir(
+            outro,
+            "net.close",
+            &alloc::format!(r#"{{"connection":{do_outro}}}"#),
+        );
+        Ok(())
+    })();
+    for c in abertas {
+        let _ = fs_pedir(
+            quem,
+            "net.close",
+            &alloc::format!(r#"{{"connection":{c}}}"#),
+        );
+    }
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// O começo de um caractere que não termina não fica preso na conexão: o
+/// eco devolve um `0xE2` sozinho — o primeiro byte de um caractere de três
+/// —, e a leitura o entrega em `base64` em vez de esperar para sempre um
+/// resto que não vem. E um caractere inteiro, partido entre dois envios,
+/// volta inteiro.
+fn rede_o_caractere_partido_nao_prende_a_leitura() -> Resultado {
+    crate::pessoas::esquecer_registradas();
+    let quem = titular_novo_na_rede(52, "rede-partido");
+    let r = fs_pedir(quem, "net.connect", &alloc::format!(r#"{{"to":"{ECO}"}}"#));
+    let conexao = match conexao_aberta(&r) {
+        Ok(c) => c,
+        Err(e) => {
+            crate::pessoas::esquecer_registradas();
+            return Err(e);
+        }
+    };
+    let resultado = (|| -> Resultado {
+        if estado_depois_do_aperto(quem, conexao)? != "established" {
+            return Err("a conexao ao eco nao se estabeleceu");
+        }
+        let mandar = |bytes: &[u8]| {
+            crate::nativo::responder_com_anexo_de_teste(
+                quem,
+                &pedido_rpc("net.send", &alloc::format!(r#"{{"connection":{conexao}}}"#)),
+                bytes,
+            )
+        };
+        let r = mandar(&[0xE2]);
+        if fs_numero(&r, "sent") != Some(1) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o byte sozinho nao foi mandado");
+        }
+        if ler_da_conexao(quem, conexao, 1)? != [0xE2] {
+            return Err("o comeco de um caractere ficou preso na conexao");
+        }
+        // O euro, `E2 82 AC`, em dois envios: os bytes voltam todos, em
+        // qualquer codificação que a leitura escolha.
+        let _ = mandar(&[0xE2, 0x82]);
+        let _ = mandar(&[0xAC]);
+        if ler_da_conexao(quem, conexao, 3)? != "€".as_bytes() {
+            return Err("o caractere partido nao voltou inteiro");
+        }
+        Ok(())
+    })();
+    let _ = fs_pedir(
+        quem,
+        "net.close",
+        &alloc::format!(r#"{{"connection":{conexao}}}"#),
+    );
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// O agente que desconecta perde as conexões dele: a porta reabre — uma
+/// geração nova —, e a conexão aberta pela sessão anterior é derrubada na
+/// passada seguinte do coletor, ainda que a chave seja a mesma.
+fn rede_o_agente_que_sai_perde_as_conexoes() -> Resultado {
+    com_agentes_de_teste(|| {
+        let (mut agente, mut sessao) = conectado(1)?;
+        let r = pela_porta(
+            &mut agente,
+            &mut sessao,
+            "net.connect",
+            &alloc::format!(r#"{{"to":"{ECO}"}}"#),
+        )?;
+        let conexao = conexao_aberta(&r)?;
+        let viva = |c: u64| {
+            crate::rede::pilha::donos()
+                .iter()
+                .any(|(id, _, _)| *id == c)
+        };
+        let _ = esperar_cedendo(|| false, 10);
+        if !viva(conexao) {
+            return Err("a conexao de um agente conectado foi derrubada");
+        }
+        crate::virtio::console::simular_conexao(1, true);
+        esperar_cedendo(|| !viva(conexao), 300)
+            .map_err(|_| "a conexao do agente que saiu ficou na tabela")
+    })
+}
+
+/// O handler só disca, manda ou lê no destino que o gate decidiu: chamado
+/// sem decisão nenhuma — o kernel chamando-o direto —, ele recusa, e a
+/// tabela não ganha conexão.
+fn rede_o_handler_so_age_no_que_foi_decidido() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador};
+    let serial = crate::agent::sessao::SERIAL;
+    let autoridade = Autoridade::Sessao {
+        sessao: serial,
+        chave: None,
+    };
+    let direto = |metodo: &str, params: &str| -> Result<alloc::string::String, &'static str> {
+        let cmd = registry::encontrar(metodo).ok_or("o comando sumiu do registro")?;
+        let mut saida = alloc::string::String::new();
+        crate::autorizacao::como_canal_de_teste(serial, autoridade, || {
+            let mut w = JsonWriter::new(&mut saida);
+            let _ = (cmd.handler)(Json(params.as_bytes()), &mut w);
+        });
+        Ok(saida)
+    };
+    let antes = crate::rede::pilha::resumo()
+        .ok_or("a pilha nao esta no ar")?
+        .abertas;
+    let r = direto("net.connect", &alloc::format!(r#"{{"to":"{ECO}"}}"#))?;
+    if crate::rede::pilha::resumo().map(|r| r.abertas) != Some(antes)
+        || !r.contains("nao e o que foi decidido")
+    {
+        crate::log_error!("teste", "{}", r);
+        return Err("o handler discou sem a decisao do gate");
+    }
+    // E uma conexão de verdade, da serial, não recebe nada de um handler
+    // chamado sem decisão.
+    let pelo_gate = Chamador::Sessao(serial);
+    let r = fs_pedir(
+        pelo_gate,
+        "net.connect",
+        &alloc::format!(r#"{{"to":"{ECO}"}}"#),
+    );
+    let conexao = conexao_aberta(&r)?;
+    let r = direto(
+        "net.send",
+        &alloc::format!(r#"{{"connection":{conexao},"content":"sem decisao"}}"#),
+    )?;
+    let _ = fs_pedir(
+        pelo_gate,
+        "net.close",
+        &alloc::format!(r#"{{"connection":{conexao}}}"#),
+    );
+    if !r.contains("nao e a que foi decidida") {
+        crate::log_error!("teste", "{}", r);
+        return Err("o handler mandou por uma conexao sem a decisao do gate");
+    }
+    Ok(())
+}
+
+/// Quem fecha ainda ocupa a vaga enquanto o fecho termina: o socket
+/// fechado espera o outro lado, e conta no teto de quem o fechou. Sem isso,
+/// um titular cujo outro lado não fecha — o `sleep` da bancada — enchia a
+/// tabela da máquina com fechos pendentes que não eram de ninguém, e os
+/// outros ouviam "tabela cheia".
+fn rede_quem_fecha_ainda_ocupa_a_sua_vaga() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use crate::rede::pilha::CONEXOES_POR_DONO;
+    // O outro lado que não fecha: a bancada põe um `sleep` em
+    // `10.0.2.100:9`. Nenhuma política o enumera; esta o dá ao operador,
+    // além do eco.
+    const MUDO: &str = "tcp:10.0.2.100:9";
+    let antes = crate::autorizacao::com_politica(|p| p.clone());
+    let com_o_mudo = politica::PADRAO.replace(
+        &alloc::format!("recurso operador net.connect {ECO}"),
+        &alloc::format!("recurso operador net.connect {ECO} {MUDO}"),
+    );
+    let nova = politica::Politica::ler(&com_o_mudo).map_err(|_| "a politica do caso nao se le")?;
+    crate::pessoas::esquecer_registradas();
+    crate::autorizacao::restaurar_politica(nova);
+    let resultado = (|| -> Resultado {
+        let quem = titular_novo_na_rede(53, "rede-fecha");
+        let abrir = |c: Chamador, para: &str| {
+            fs_pedir(c, "net.connect", &alloc::format!(r#"{{"to":"{para}"}}"#))
+        };
+        // Abrir e fechar no mudo, mais vezes do que cabe no teto do
+        // titular: cada fecho fica esperando o outro lado.
+        let mut abertas = 0;
+        let mut recusadas = 0;
+        for _ in 0..CONEXOES_POR_DONO + 3 {
+            let r = abrir(quem, MUDO);
+            match fs_numero(&r, "connection") {
+                Some(c) => {
+                    abertas += 1;
+                    let _ = estado_depois_do_aperto(quem, c);
+                    let _ = fs_pedir(
+                        quem,
+                        "net.close",
+                        &alloc::format!(r#"{{"connection":{c}}}"#),
+                    );
+                }
+                None if fs_texto(&r, "error").is_some_and(|e| e.contains("maximo")) => {
+                    recusadas += 1
+                }
+                None => {
+                    crate::log_error!("teste", "{}", r);
+                    return Err("o mudo recusou por outro motivo");
+                }
+            }
+        }
+        // O titular cujos fechos não terminam esbarra no teto **dele**...
+        if abertas != CONEXOES_POR_DONO || recusadas == 0 {
+            crate::log_error!("teste", "{} abertas, {} recusadas", abertas, recusadas);
+            return Err("os fechos pendentes de um titular nao contaram no teto dele");
+        }
+        // ...e outro titular abre a sua.
+        let outro = titular_novo_na_rede(54, "rede-fecha-outro");
+        let r = abrir(outro, ECO);
+        let Some(c) = fs_numero(&r, "connection") else {
+            crate::log_error!("teste", "{}", r);
+            return Err("os fechos de um titular tomaram a tabela dos outros");
+        };
+        let _ = fs_pedir(
+            outro,
+            "net.close",
+            &alloc::format!(r#"{{"connection":{c}}}"#),
+        );
+        Ok(())
+    })();
+    crate::autorizacao::restaurar_politica(antes);
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// Vários fios, em vários núcleos ao mesmo tempo, cada um com a sua
+/// conexão ao eco: cada um recebe de volta exatamente o que mandou — nada
+/// do vizinho —, e a tabela termina vazia.
+fn rede_varios_fios_conversam_ao_mesmo_tempo() -> Resultado {
+    use core::sync::atomic::{AtomicU64, Ordering::SeqCst};
+    const FIOS: u64 = 4;
+    static CERTOS: AtomicU64 = AtomicU64::new(0);
+    static ERRADOS: AtomicU64 = AtomicU64::new(0);
+    extern "C" fn conversar(indice: u64) -> ! {
+        let quem = sistema_no_armazem(crate::fios::id_atual());
+        let ok = (|| -> Result<(), &'static str> {
+            let r = fs_pedir(quem, "net.connect", &alloc::format!(r#"{{"to":"{ECO}"}}"#));
+            let c = conexao_aberta(&r)?;
+            if estado_depois_do_aperto(quem, c)? != "established" {
+                return Err("nao se estabeleceu");
+            }
+            let mut texto = alloc::string::String::new();
+            while texto.len() < 1500 {
+                texto.push_str(&alloc::format!(
+                    "fio {indice} manda a linha {}; ",
+                    texto.len()
+                ));
+            }
+            let mut mandados = 0;
+            while mandados < texto.len() {
+                let pedaco = &texto[mandados..texto.len().min(mandados + 500)];
+                let r = fs_pedir(
+                    quem,
+                    "net.send",
+                    &alloc::format!(r#"{{"connection":{c},"content":"{pedaco}"}}"#),
+                );
+                mandados += fs_numero(&r, "sent").ok_or("o envio falhou")? as usize;
+            }
+            let voltou = ler_da_conexao(quem, c, texto.len())?;
+            let _ = fs_pedir(
+                quem,
+                "net.close",
+                &alloc::format!(r#"{{"connection":{c}}}"#),
+            );
+            if voltou != texto.as_bytes() {
+                return Err("voltou outra coisa");
+            }
+            Ok(())
+        })();
+        match ok {
+            Ok(()) => CERTOS.fetch_add(1, SeqCst),
+            Err(e) => {
+                crate::log_error!("teste", "fio {} da rede: {}", indice, e);
+                ERRADOS.fetch_add(1, SeqCst)
+            }
+        };
+        crate::fios::terminar()
+    }
+    CERTOS.store(0, SeqCst);
+    ERRADOS.store(0, SeqCst);
+    let nucleos = crate::nucleos::ligados() as u64;
+    for i in 0..FIOS {
+        crate::fios::criar_no_nucleo("rede-fio", conversar, i, (i % nucleos) as usize)?;
+    }
+    esperar_cedendo(|| CERTOS.load(SeqCst) + ERRADOS.load(SeqCst) == FIOS, 3000)
+        .map_err(|_| "os fios da rede nao terminaram")?;
+    if ERRADOS.load(SeqCst) != 0 {
+        return Err("um fio recebeu do eco outra coisa que o que mandou");
+    }
+    esperar_cedendo(|| crate::rede::pilha::donos().is_empty(), 300)
+        .map_err(|_| "a tabela de conexoes nao esvaziou")?;
+    Ok(())
+}
+
+/// O programa `discador`, de verdade: lançado por uma pessoa operadora,
+/// conversa com o eco — os 256 valores de um byte pelo anexo, de volta em
+/// texto e em base64 — e ouve as recusas de dentro; lançado por uma
+/// observadora, o gate recusa a conexão — o manifesto declara
+/// `net.connect`, e o papel não tem.
+fn rede_o_programa_disca_pelo_gate() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    crate::pessoas::esquecer_registradas();
+    let resultado = (|| -> Resultado {
+        let operadora =
+            crate::pessoas::sessao_de_teste(Console::Terminal(48), "disca-op", "operador");
+        let fio = rodar_programa(
+            "discador",
+            Some(Autoridade::Pessoa { sessao: operadora }),
+            79,
+        )
+        .map_err(|_| "o programa discador nao conversou com o eco")?;
+        let e = ultimo_que(|e| e.metodo == "net.send" && e.detalhe.starts_with("pelo processo "))
+            .ok_or("o envio do programa nao foi gravado como do processo")?;
+        if e.titular != politica::auditoria::Titular::Pessoa || e.recurso != ECO {
+            crate::log_error!("teste", "{:?}", e);
+            return Err("o envio do programa nao saiu em nome da pessoa, com o destino");
+        }
+        let _ = fio;
+        let observadora =
+            crate::pessoas::sessao_de_teste(Console::Terminal(49), "disca-ob", "observador");
+        rodar_programa(
+            "discador",
+            Some(Autoridade::Pessoa {
+                sessao: observadora,
+            }),
+            71,
+        )
+        .map_err(|_| "o programa discador discou sem net.connect no papel")?;
+        Ok(())
+    })();
+    crate::pessoas::esquecer_registradas();
+    resultado
 }
 
 // ---------------------------------------------------------------------------

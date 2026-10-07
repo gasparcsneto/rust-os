@@ -5312,7 +5312,20 @@ fn comando_qemu(
         }
     }
 
-    qemu.args(["-netdev", "user,id=rede0"]);
+    // A rede em modo usuário, com dois destinos de bancada, sem servidor
+    // no hospedeiro e sem porta aberta nele:
+    //
+    // - `10.0.2.100:7`, um eco: cada conexão roda um `cat` ligado a ela, e o
+    //   que chega volta. É o destino que a política de desenvolvimento
+    //   enumera para `net.connect`;
+    // - `10.0.2.100:9`, um outro lado que não fecha: cada conexão roda um
+    //   `sleep`, que não lê nem fecha por trinta segundos. Nenhuma política
+    //   o enumera; a suíte o põe numa política dela para provar que o fecho
+    //   que não termina conta no teto de quem fechou.
+    qemu.args([
+        "-netdev",
+        "user,id=rede0,guestfwd=tcp:10.0.2.100:7-cmd:cat,guestfwd=tcp:10.0.2.100:9-cmd:sleep 30",
+    ]);
     qemu.args(["-device", "virtio-net-pci,netdev=rede0"]);
 
     // A fonte de entropia do kernel: o `/dev/urandom` do hospedeiro, pelo
@@ -6068,6 +6081,7 @@ fn conversar(
     sob_formulario(arch, monitor, qmp, &mut escrita, &mut leitor)?;
     sob_interface_nativa(arch, &mut escrita, &mut leitor)?;
     sob_o_armazem(arch, &mut escrita, &mut leitor)?;
+    sob_a_rede(&mut escrita, &mut leitor)?;
     sob_agentes(arch)?;
     sob_sigilo(arch)?;
     sob_administracao(arch, &mut escrita, &mut leitor)?;
@@ -9107,6 +9121,101 @@ fn sob_interface_nativa(
         "  [nativo] ok  {} pedidos atendidos pela tarefa `programas`",
         depois - antes
     );
+    Ok(())
+}
+
+/// A rede no kernel de produção — ver "Rede nativa" no README: pela
+/// serial, que é do papel `sistema`, o endereço que o DHCP deu, uma conexão
+/// ao eco da bancada com o texto indo e voltando, a recusa de um destino
+/// fora do alcance, e a conexão fechada que deixa de responder. Pelo
+/// executor de verdade, que é quem atende o canal fora da suíte.
+fn sob_a_rede(escrita: &mut UnixStream, leitor: &mut BufReader<UnixStream>) -> Result<(), String> {
+    println!("[xtask] fumaça: a rede, pelo gate");
+    let mut id = 8500;
+    let mut pedir = |metodo: &str, params: &str| -> Result<String, String> {
+        id += 1;
+        escrita
+            .write_all(
+                format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"{metodo}","params":{params}}}"#)
+                    .as_bytes(),
+            )
+            .and_then(|()| escrita.write_all(b"\n"))
+            .and_then(|()| escrita.flush())
+            .map_err(|e| format!("rede: falha ao pedir `{metodo}`: {e}"))?;
+        let resposta = ler_resposta(leitor).map_err(|e| format!("rede: {e}"))?;
+        if !e_a_resposta(&resposta, id) {
+            return Err(format!(
+                "rede: veio a resposta de outro pedido\n  {resposta}"
+            ));
+        }
+        Ok(resposta)
+    };
+    let limite = std::time::Instant::now() + Duration::from_secs(20);
+    let info = loop {
+        let info = pedir("net.info", "{}")?;
+        if info.contains(r#""address":"10.0.2.15/24""#) {
+            break info;
+        }
+        if std::time::Instant::now() > limite {
+            return Err(format!("rede: o DHCP nao deu endereco\n  {info}"));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    if !info.contains(r#""gateway":"10.0.2.2""#) {
+        return Err(format!("rede: o roteador nao e o do emulador\n  {info}"));
+    }
+    println!("  [rede] ok  10.0.2.15/24 pelo DHCP, roteador 10.0.2.2");
+
+    let fora = pedir("net.connect", r#"{"to":"tcp:10.0.2.100:8"}"#)?;
+    if !fora.contains("DENY_RESOURCE") {
+        return Err(format!(
+            "rede: um destino fora do alcance foi discado\n  {fora}"
+        ));
+    }
+    let aberta = pedir("net.connect", r#"{"to":"tcp:10.0.2.100:7"}"#)?;
+    let conexao: u64 = aberta
+        .split(r#""connection":"#)
+        .nth(1)
+        .and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|n| n.parse().ok())
+        .ok_or_else(|| format!("rede: o eco nao abriu\n  {aberta}"))?;
+    let frase = "ola, rede do Duke";
+    let mut mandado = false;
+    let mut voltou = String::new();
+    let limite = std::time::Instant::now() + Duration::from_secs(20);
+    while !voltou.contains(frase) {
+        if !mandado {
+            let r = pedir(
+                "net.send",
+                &format!(r#"{{"connection":{conexao},"content":"{frase}"}}"#),
+            )?;
+            mandado = r.contains(&format!(r#""sent":{}"#, frase.len()));
+        }
+        let r = pedir("net.recv", &format!(r#"{{"connection":{conexao}}}"#))?;
+        if let Some(conteudo) = r.split(r#""content":""#).nth(1) {
+            voltou.push_str(conteudo.split('"').next().unwrap_or(""));
+        }
+        if std::time::Instant::now() > limite {
+            return Err(format!(
+                "rede: o eco nao devolveu a frase (mandada: {mandado})\n  {r}"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    println!(
+        "  [rede] ok  conexao {conexao} ao eco: a frase foi e voltou; a porta ao lado, DENY_RESOURCE"
+    );
+    let fechada = pedir("net.close", &format!(r#"{{"connection":{conexao}}}"#))?;
+    if !fechada.contains(r#""closed":true"#) {
+        return Err(format!("rede: a conexao nao fechou\n  {fechada}"));
+    }
+    let depois = pedir("net.recv", &format!(r#"{{"connection":{conexao}}}"#))?;
+    if !depois.contains("DENY_RESOURCE") {
+        return Err(format!(
+            "rede: a conexao fechada ainda respondeu\n  {depois}"
+        ));
+    }
+    println!("  [rede] ok  fechada, o numero deixou de valer");
     Ok(())
 }
 

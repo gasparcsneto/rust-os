@@ -202,8 +202,12 @@ $ cargo xtask agent --canal 2 agent.session
 | `fs.discard` | Descarta um rascunho seu, com os blocos dele (`path`, `draft`) |
 | `fs.claim` | Arrenda um arquivo do armazém para esta sessão (`path`, `ttl_ms`); sem preempção |
 | `fs.release` | Solta o arrendamento desta sessão num arquivo do armazém (`path`) |
-| `net.info` | Endereço e contadores da placa de rede, se houver uma |
+| `net.info` | A placa de rede e a pilha IP: endereço físico, contadores, o endereço e o roteador que o DHCP deu, e as conexões |
 | `net.arp` | Pergunta quem atende por um IPv4 e espera a resposta (`ip`, `from`) |
+| `net.connect` | Abre uma conexão TCP de saída para um destino no alcance do papel (`to`: `tcp:<ipv4>:<porta>`) |
+| `net.send` | Manda bytes por uma conexão sua — texto em `content` ou o anexo (`connection`, `content`, `attachment`) |
+| `net.recv` | O que chegou numa conexão sua, sem esperar, e o estado dela; texto em `utf-8` ou `base64` (`connection`, `max`) |
+| `net.close` | Fecha uma conexão sua (`connection`) |
 | `video.sample` | Amostra a tela numa grade de cores (`columns`, `rows`) |
 | `display.info` | A pilha gráfica: adaptador ativo, telas, as camadas do compositor, memória das superfícies, o último retângulo que chegou à tela e, no virtio-gpu, o que atravessou para o dispositivo |
 | `ui.tree` | A árvore semântica do que está na tela: papel, rótulo, valor, moldura e ações de cada elemento; de cada campo, a versão e o arrendamento |
@@ -259,7 +263,10 @@ kernel/src/
 ├── teclado.rs       o que uma pessoa digita chega ao kernel
 ├── pci.rs           enumeração do barramento PCI
 ├── particoes.rs     a tabela de partições GPT do disco: ESP, raiz e a de estado
-├── rede.rs          o mínimo de protocolo acima do transporte de quadros
+├── rede/
+│   ├── mod.rs       o ARP do diagnóstico, e o observador que o deixa conviver com a pilha
+│   ├── pilha.rs     a pilha IP — o smoltcp sobre a placa —, o DHCP, a tabela de conexões e o fio que a faz andar
+│   └── conexoes.rs  a conexão como capacidade do registro: de quem ela é, e como o gate a decide
 ├── traps.rs         contabilidade de exceções e modo post-mortem
 ├── nucleos.rs       os vários núcleos: quem ligou, o pulso de cada um, o aviso e o travamento de propósito
 ├── trava.rs         a trava justa, por senha, que todo o kernel usa
@@ -401,6 +408,7 @@ politica/src/        a política de autorização, a mesma no kernel e no hosped
 ├── codigo.rs        os códigos de decisão: ALLOW, DENY_*, RATE_LIMIT, INVALID_ARGUMENT, ERROR
 ├── arquivo.rs       o formato, a validação, a decisão, as regras de mudança e o texto que volta igual
 ├── caminho.rs       a forma normal dos caminhos, a mesma do VFS
+├── endereco.rs      a forma normal dos destinos de rede, `tcp:<ipv4>:<porta>`, a mesma que o kernel disca
 ├── taxa.rs          o balde de pedidos e a janela de apertos de mão
 ├── arrendamento.rs  a versão e o arrendamento de cada recurso compartilhado
 ├── mensagens.rs     as caixas, os estados, as cotas e os nonces das mensagens
@@ -467,6 +475,7 @@ programas/           os programas de usuário, compilados à parte do kernel
         ├── contido.rs    declara só `system.read`, e confere que o manifesto limita o resto
         ├── anonimo.rs    o único sem manifesto: não exerce nada, nem lançado pelo sistema
         ├── guardar.rs    guarda no armazém pelo `pedir`: a versão, o conflito, a leitura pelo descritor e o `MUDOU`
+        ├── discador.rs   conversa com o eco da bancada pelo `pedir`: os 256 bytes de ida e volta, e as recusas
         ├── legado.rs     pede, não busca a resposta e troca de imagem: a nova não a encontra
         └── terminal.rs   o Terminal: o interpretador numa janela, pelo pseudo-terminal
 
@@ -2055,6 +2064,92 @@ agora o prazo dele é o timer do próprio núcleo. E a da suíte que esvazia as
 mensagens sem o journal, numa primeira rodada com a bancada carregada,
 reprovou por um caso de coordenação; refeita sem carga, só o da
 reconstrução.
+
+## Rede nativa
+
+Um programa do Duke não abre um socket do Unix: pede uma conexão ao
+registro — `net.connect`, com o destino inteiro, `tcp:<ipv4>:<porta>` —,
+pelo mesmo gate de todo comando, e o destino é o **recurso** que a
+política decide. O protocolo é do [`smoltcp`](https://github.com/smoltcp-rs/smoltcp)
+(Ethernet, ARP, IPv4, DHCP, TCP): escrever TCP do zero é um a dois
+anos-pessoa e não diferencia o sistema em nada. O que diferencia é o lado
+de cima, e esse é do kernel.
+
+```
+$ cargo xtask agent net.connect '{"to":"tcp:10.0.2.100:7"}'
+{"connection":1,"to":"tcp:10.0.2.100:7","state":"connecting"}
+$ cargo xtask agent net.send '{"connection":1,"content":"ola, rede do Duke\n"}'
+{"connection":1,"sent":18,"state":"established"}
+$ cargo xtask agent net.recv '{"connection":1}'
+{"connection":1,"state":"established","returned":18,"encoding":"utf-8","content":"ola, rede do Duke\n"}
+$ cargo xtask agent net.connect '{"to":"tcp:10.0.2.100:8"}'
+{"error":{"code":-32010,"message":"operacao negada pela politica","data":"DENY_RESOURCE"}}
+```
+
+**O alcance é enumerado.** A permissão `net.connect` é sensível — não vem
+por inclusão de outro papel — e cada papel que a tem escreve, numa linha
+`recurso`, os destinos que alcança, cada um inteiro e na forma normal
+(`politica::endereco`): `recurso operador net.connect tcp:10.0.2.100:7`.
+Sem curinga, sem faixa, sem "qualquer porta" — nem para o sistema. A
+forma normal recusa o ambíguo em vez de adivinhar: `tcp:010.0.2.100:7`
+não é lido como outra coisa, é uma linha que não vale. O teto do
+`policy.write` vale como para os caminhos: ninguém concede um destino que
+o administrador não alcança. A imagem de desenvolvimento enumera um
+destino só, o eco que a bancada põe em `10.0.2.100:7` — um `guestfwd` do
+emulador que roda `cat` a cada conexão, sem servidor nem porta aberta no
+hospedeiro.
+
+**Usar a conexão também é decidido.** `net.send`, `net.recv` e
+`net.close` nomeiam a conexão pelo número, e o gate resolve o número no
+destino dela, **para quem pede**, antes de decidir — a mesma conta de
+`message.send`, que resolve o destinatário. Uma revogação, uma troca de
+papel ou uma política nova valem no pedido seguinte, para a conexão já
+aberta. Cada pedido vai para a auditoria com o destino; a recusa, com o
+motivo.
+
+**A conexão é de quem a abriu**, pelo caminho por onde o pedido veio: uma
+sessão do canal (a porta, a chave e a geração da porta — o agente que
+desconecta perde as dele, e o seguinte na mesma porta não as herda), uma
+pessoa (a sessão dela), um processo (o fio dele — e não a autoridade de
+quem o lançou: o agente não lê a conexão do programa que lançou, nem o
+programa a do agente). O número de outro titular e um que não existe têm a
+mesma resposta, `DENY_RESOURCE`: quem pergunta não descobre o que é dos
+outros. Quando o dono acaba — o processo morre, a porta reabre, a pessoa
+sai —, o coletor de fios derruba a conexão na passada seguinte e a grava
+na auditoria, como faz com as camadas de um processo morto.
+
+**Tetos.** Dezesseis conexões na máquina, quatro por titular, quatro KiB
+em cada sentido de cada uma. São tetos de recurso, e não autorização: a
+decisão é a da política, e o teto só impede um titular de tomar a tabela
+dos outros. Por isso a conexão que o dono fechou e que ainda espera o
+outro lado terminar o fecho conta no teto **dele**: sem isso, um titular
+cujo outro lado não fecha enchia a tabela da máquina com fechos que não
+eram de ninguém — a suíte o mostrou, com o segundo destino da bancada, um
+`sleep` em `10.0.2.100:9` que não fecha por trinta segundos. E o fecho
+termina ao chegar ao `TIME_WAIT`, e não dez segundos depois, como o
+`smoltcp` o guardaria: cada conexão nova pega a porta local seguinte numa
+faixa de milhares, e guardar os fechos já terminados fazia titulares novos
+ouvirem "tabela cheia" sem conexão viva de ninguém.
+
+**Quem faz a pilha andar** é um fio do kernel, `rede`, que sonda a pilha
+e descansa até a próxima interrupção — dando a vez a quem estiver pronto.
+Quem pede sonda na hora, dentro do comando: o SYN de um `net.connect` sai
+no próprio pedido. A pilha é a **única** que colhe quadros da placa: o
+ARP do diagnóstico (`net.arp`) continua, e lê a resposta dele num
+observador por onde a pilha passa cada quadro antes de processá-lo — dois
+consumidores da mesma fila perderiam cada um os quadros do outro.
+
+O programa [`discador`](programas/src/bin/discador.rs) faz o caminho
+inteiro de dentro de um processo, pelo `pedir`, com o manifesto
+declarando `net.connect`: os 256 valores de um byte vão pelo anexo do
+pedido e voltam, em texto quando são texto e em `base64` quando não são; a
+porta ao lado do eco é `DENY_RESOURCE`; lançado por uma pessoa
+observadora, `DENY_PERMISSION`.
+
+O que ainda não há: UDP, DNS e TLS; esperar dados sem perguntar (`net.recv`
+devolve o que chegou e não bloqueia — quem espera pergunta de novo, e cada
+pergunta passa pelo gate e vai para a auditoria); e o canal do agente por
+TCP. São os incrementos seguintes da fase 9.
 
 ## Vários agentes
 
@@ -4283,8 +4378,14 @@ padronizado.
       programa não abre um socket do Unix, pede uma conexão ao registro,
       com o destino como recurso da política, e cada conexão vai para a
       auditoria. O canal do agente por TCP vira mais um transporte de
-      sessão. O ARP que existe hoje era a prova de ponta a ponta mais
-      barata possível, e cumpriu o papel dela.
+      sessão. Feito: a pilha IP sobre a placa virtio, com o endereço pelo
+      DHCP, e a conexão TCP de saída como capacidade do registro —
+      `net.connect`, `net.send`, `net.recv`, `net.close` —, com o destino
+      enumerado na política, decidida a cada uso, de quem a abriu e
+      derrubada quando o dono acaba; e o programa `discador`, que conversa
+      com o eco da bancada de dentro de um processo. Ver
+      [Rede nativa](#rede-nativa). Faltam UDP, DNS, TLS, a espera sem
+      pergunta e o canal do agente por TCP.
 - [x] **Fase 10 — GPU, composição e a árvore semântica.** Começou antes da
       6, pela parte que não depende de vários núcleos. Feito: a pilha gráfica
       no desenho do Redox — um trait de adaptador que o compositor usa sem
