@@ -202,7 +202,14 @@ impl Executor {
     pub fn rodar(&mut self) -> ! {
         loop {
             self.rodar_prontas();
-            self.dormir_se_ocioso();
+            // Sem tarefa, e com outro fio pronto neste núcleo, a vez é dele:
+            // dormir aqui seguraria o núcleo até o quantum vencer — ver
+            // `fios::descansar_ate_a_interrupcao`.
+            if self.prontas.vazia() && crate::fios::ha_outro_pronto() {
+                crate::fios::ceder();
+            } else {
+                self.dormir_se_ocioso();
+            }
         }
     }
 

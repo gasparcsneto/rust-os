@@ -577,27 +577,84 @@ static RECOLHIDOS: AtomicU64 = AtomicU64::new(0);
 /// Esperar a interrupção põe o processador para dormir até o próximo tique
 /// do timer, que já ia acontecer de qualquer forma. A latência máxima entre
 /// um fio morrer e o espaço dele voltar ao alocador passa a ser um tique.
+///
+/// Mas dormir **só** quando não há mais ninguém — ver
+/// [`descansar_ate_a_interrupcao`]. Um coletor que dormia de vez com outros
+/// fios prontos no mesmo núcleo continuava dono dele: cada tique o acordava
+/// sem vencer o quantum, e ele voltava a dormir até o quinto. Com um núcleo
+/// só, eram cinquenta milissegundos parados a cada volta do rodízio.
+///
+/// E uma passada por tique, no máximo: cedendo, ele volta a cada volta do
+/// rodízio, e com fios que cedem muito isso seria muitas passadas por tique
+/// — mais do que dormindo, que é o ritmo para o qual elas foram escritas.
 extern "C" fn coletor(_argumento: u64) -> ! {
+    let mut ultima_passada = None;
     loop {
-        let quantos = recolher_terminados();
-        if quantos > 0 {
-            crate::log_debug!("fios", "coletor recolheu {} fio(s)", quantos);
+        let agora = crate::tempo::ticks();
+        if ultima_passada != Some(agora) {
+            ultima_passada = Some(agora);
+            passada_do_coletor();
         }
-        // O aviso de saída do pseudo-terminal é dado daqui, sem tranca na
-        // mão — ver `pseudoterminal`, sobre por que o `_print` não o dá.
-        crate::pseudoterminal::passada_do_coletor();
-        // E os arrendamentos vencidos saem daqui, e vão para a auditoria:
-        // um prazo vence sem ninguém pedir nada.
-        crate::coordenacao::vencer_todos();
-        // E as mensagens vencidas, também sem ninguém pedir.
-        crate::mensagens::vencer_todos();
-        // E a auditoria que nenhum registro levou ainda vai ao journal, de
-        // tempos em tempos: as leituras e as recusas não mudam estado, e
-        // não têm registro próprio.
-        crate::persistencia::gravar_auditoria_se_preciso();
-        // E a região do journal que encheu é compactada aqui: o coletor
-        // não está no meio de operação nenhuma.
-        crate::persistencia::compactar_se_preciso();
+        descansar_ate_a_interrupcao();
+    }
+}
+
+/// O que o coletor faz a cada tique.
+fn passada_do_coletor() {
+    let quantos = recolher_terminados();
+    if quantos > 0 {
+        crate::log_debug!("fios", "coletor recolheu {} fio(s)", quantos);
+    }
+    // O aviso de saída do pseudo-terminal é dado daqui, sem tranca na
+    // mão — ver `pseudoterminal`, sobre por que o `_print` não o dá.
+    crate::pseudoterminal::passada_do_coletor();
+    // E os arrendamentos vencidos saem daqui, e vão para a auditoria:
+    // um prazo vence sem ninguém pedir nada.
+    crate::coordenacao::vencer_todos();
+    // E as mensagens vencidas, também sem ninguém pedir.
+    crate::mensagens::vencer_todos();
+    // E a auditoria que nenhum registro levou ainda vai ao journal, de
+    // tempos em tempos: as leituras e as recusas não mudam estado, e
+    // não têm registro próprio.
+    crate::persistencia::gravar_auditoria_se_preciso();
+    // E a região do journal que encheu é compactada aqui: o coletor
+    // não está no meio de operação nenhuma.
+    crate::persistencia::compactar_se_preciso();
+}
+
+/// Há outro fio que este núcleo poderia rodar agora?
+///
+/// A mesma escolha de [`selecionar`], sem trocar: é a pergunta de quem não
+/// tem o que fazer até a próxima interrupção — ver
+/// [`descansar_ate_a_interrupcao`].
+pub fn ha_outro_pronto() -> bool {
+    com_escalonador(|e| {
+        e.ligado && e.atual[nucleo()].is_some() && e.proximo_pronto(nucleo()).is_some()
+    })
+}
+
+/// Para um fio sem o que fazer até a próxima interrupção: dá a vez a quem
+/// estiver pronto neste núcleo, e só dorme se não houver ninguém.
+///
+/// # Por que não basta dormir
+///
+/// Porque quem dorme com `esperar_interrupcao` continua sendo o fio atual.
+/// O tique o acorda, desconta um do quantum e devolve a ele — e ele dorme de
+/// novo, até o quantum vencer. Um fio ocioso no rodízio segurava o núcleo
+/// por uma fatia inteira com outros esperando; com um núcleo só, o caso
+/// "usuario: varios processos cedem em varios nucleos" levava cinquenta
+/// milissegundos por volta, e o executor e o coletor faziam o mesmo a
+/// qualquer processo de usuário. Com vários núcleos os outros escondiam.
+///
+/// # A janela entre a pergunta e o sono
+///
+/// Um fio que fica pronto depois da pergunta espera o próximo tique — a
+/// mesma latência que dormir sempre tinha. O [`acordar`] só cutuca núcleos
+/// no ocioso, e este não está.
+pub fn descansar_ate_a_interrupcao() {
+    if ha_outro_pronto() {
+        ceder();
+    } else {
         crate::arch::esperar_interrupcao();
     }
 }

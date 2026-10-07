@@ -1746,6 +1746,21 @@ do que a memória que recupera. Esperando a interrupção, ele acorda no tique
 do timer que já ia acontecer, e a latência entre um fio morrer e o espaço
 dele voltar ao alocador fica em um tique.
 
+Mas dormir não é sair da vez. Quem espera a interrupção continua sendo o
+fio atual: o tique o acorda, desconta um do quantum e o devolve a ele, que
+volta a dormir — até o quinto. Com outros fios prontos no mesmo núcleo, o
+coletor segurava o núcleo parado por uma fatia inteira a cada volta do
+rodízio, e o laço do executor, com a fila vazia, fazia o mesmo a qualquer
+processo de usuário. Com um núcleo só, cinquenta milissegundos parados por
+volta: as cópias do `cedente` levavam minutos. Com vários, os outros
+núcleos escondiam. Os dois agora passam por
+`fios::descansar_ate_a_interrupcao` (o executor, pela mesma pergunta, ao
+lado do teste atômico da fila dele): havendo outro fio pronto neste
+núcleo, cedem; só dormem quando não há ninguém — o que mantém o motivo
+acima. O coletor faz uma passada por tique, no máximo, como fazia
+dormindo. `fios: quem nao tem o que fazer da a vez` prende o coletor e um
+fio que cede no mesmo núcleo, em qualquer número de núcleos, e mede.
+
 É um fio, e não uma tarefa do executor cooperativo, por um motivo de teste: o
 executor não existe em modo de teste — lá o kernel roda a suíte e encerra. Um
 coletor que só existisse em produção nunca seria exercitado, e a primeira
@@ -2001,6 +2016,35 @@ hospedeiro — da propriedade que ela tira.
 | a reconfirmação decide o destinatário como caminho | `mensagens: o remetente vem da sessao` |
 | só o núcleo dos dispositivos anda o relógio | `smp: o relogio anda sem o nucleo dos dispositivos` |
 | todo núcleo anda o relógio | `smp: o relogio anda uma vez por tique` |
+
+### As mutações da auditoria seguinte
+
+Dezessete mutações contra o que a auditoria do estado depois das
+limitações corrigiu — a cessão de dentro do handler, o estouro na guarda,
+a compactação sem fila, as travas nos dois modos, o `fs.read`, o
+silêncio do canal e o fio ocioso que segurava o núcleo —, cada uma contra
+a suíte de quatro núcleos ou a fumaça da arquitetura dela: **dezessete
+reprovadas**.
+
+| Mutação | Reprovada por |
+|---|---|
+| a chamada `ceder` cede de dentro do handler (ARM) | o pânico de `ceder_cpu`, que aponta `usuario/mod.rs` |
+| o mesmo, sem a guarda de `ceder_cpu` (ARM) | `usuario: varios processos cedem em varios nucleos` — a falha `0x96000007` do CI |
+| a cessão pedida nunca é dada (ARM) | `usuario: varios processos cedem em varios nucleos` (as trocas) |
+| a cessão pedida nunca é dada (x86) | o mesmo caso |
+| a entrada dos vetores sem a conferência da pilha | a fumaça do ARM: relatado como `data_abort` |
+| a conferência sem o último byte do quadro | a fumaça do ARM, no estouro da borda: o post-mortem não responde |
+| quem toma a ordem não compacta | `compactacao: a base que nao cabe, a regiao que enche, e o coletor` |
+| o coletor não compacta | o mesmo caso |
+| a trava tomada com as interrupções ligadas não é anotada | `travas: a conferencia ve a inversao` |
+| a trava segurada com elas ligadas não é anotada | o mesmo caso |
+| o disco ligado com as interrupções ligadas | `travas: nenhuma inversao de ordem` |
+| `fs.read` decide texto pelo pedaço | `armazem: fs.read devolve o que esta no arquivo` |
+| o pedaço de texto sem o caractere inteiro | o mesmo caso |
+| o base64 sem o preenchimento | o mesmo caso |
+| o silêncio do canal nunca marcado | `agente: o silencio e medido na chegada` |
+| o coletor dorme com outros prontos (x86) | `fios: quem nao tem o que fazer da a vez` — cem cessões em 500 tiques |
+| `ha_outro_pronto` sempre falso (ARM) | o mesmo caso, os mesmos 500 tiques |
 
 Duas mudaram a suíte antes de reprovar como deviam. Só o núcleo dos
 dispositivos andando o relógio era pega pelo limite de andamento, dez

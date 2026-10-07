@@ -3841,7 +3841,12 @@ fn usuario_ceder_de_varios_processos_em_varios_nucleos() -> Resultado {
     for _ in 0..copias {
         crate::usuario::lancar(Some(&caminho))?;
     }
-    let _ = esperar_ate(
+    // Cedendo: com um núcleo só, quem espera girando é um fio ocupado no
+    // rodízio, e fica com um quantum inteiro a cada volta das cópias — cem
+    // segundos para as duas mil voltas. (Os três minutos que este caso
+    // mediu primeiro eram isso e o coletor dormindo com a vez; ver
+    // `fios: quem nao tem o que fazer da a vez`.)
+    let _ = esperar_cedendo(
         || contar(saida) >= copias || contar("processo morto por") > 0,
         3000,
     );
@@ -3856,6 +3861,19 @@ fn usuario_ceder_de_varios_processos_em_varios_nucleos() -> Resultado {
     }
     if todas < copias {
         crate::log_error!("teste", "cedente: {} de {} sairam", todas, copias);
+        let (_, t, q) = crate::fios::estatisticas();
+        crate::log_error!("teste", "cedente: {} trocas, {} quanta vencidos", t, q);
+        crate::fios::com_inscricoes(|i| {
+            crate::log_error!(
+                "teste",
+                "cedente: fio {} {} {} esc={} cpu={:?}",
+                i.id,
+                i.nome,
+                i.estado,
+                i.escalonamentos,
+                i.nucleo
+            );
+        });
         return Err("nem toda copia do cedente terminou");
     }
     // E ceder dá a vez: com duas cópias por núcleo prontas, quase toda
@@ -28130,6 +28148,76 @@ fn trava_e_justa_entre_nucleos() -> Resultado {
 /// Com a conferência da ordem das travas ligada na suíte, a criação passou
 /// a cruzar o tique do alvo em metade das vezes, e o caso — que media da
 /// criação — acusava um despertar que não tinha mudado.
+/// Quem não tem o que fazer dá a vez, em vez de segurar o núcleo dormindo.
+///
+/// # Por que este caso existe
+///
+/// Porque o coletor dormia com `esperar_interrupcao` mesmo com outros fios
+/// prontos no núcleo dele, e dormir não é sair da vez: o tique o acordava,
+/// descontava um do quantum, e ele dormia de novo até o quinto. Com um
+/// núcleo só, cada volta do rodízio custava cinquenta milissegundos parados,
+/// e as cópias do `cedente` levavam minutos. Com vários núcleos o caso delas
+/// passava, porque os outros núcleos rodavam as cópias — e é por isso que
+/// este caso não depende de quantos há: prende o coletor e um fio que cede
+/// no mesmo núcleo, e mede.
+///
+/// Cem cessões entre dois fios são microssegundos. Com o coletor segurando
+/// a vez, são cem quanta — quinhentos tiques.
+fn fios_quem_nao_tem_o_que_fazer_da_a_vez() -> Resultado {
+    use core::sync::atomic::{AtomicU64, Ordering::SeqCst};
+    const CESSOES: u64 = 100;
+    /// Bem acima do que as cessões custam, mesmo com a emulação lenta, e bem
+    /// abaixo do quantum por volta que o coletor dormindo cobrava.
+    const TETO_EM_TIQUES: u64 = 50;
+    /// A duração mais um; zero enquanto o fio não terminou.
+    static DURACAO: AtomicU64 = AtomicU64::new(0);
+    extern "C" fn cedente(_argumento: u64) -> ! {
+        let inicio = crate::tempo::ticks();
+        for _ in 0..CESSOES {
+            crate::fios::ceder();
+        }
+        DURACAO.store(crate::tempo::ticks() - inicio + 1, SeqCst);
+        crate::fios::terminar()
+    }
+
+    let mut coletor = None;
+    crate::fios::com_inscricoes(|i| {
+        if i.nome == "coletor" {
+            coletor = Some(i.id);
+        }
+    });
+    let coletor = coletor.ok_or("o coletor nao esta na tabela")?;
+    let nucleo = crate::nucleos::ligados() - 1;
+    DURACAO.store(0, SeqCst);
+    if !crate::fios::fixar(coletor, Some(nucleo)) {
+        return Err("o coletor nao pode ser preso a um nucleo");
+    }
+    let criado = crate::fios::criar_no_nucleo("teste-cede", cedente, 0, nucleo);
+    // Esperando o bastante para o fio terminar mesmo com o defeito: a medida
+    // é a duração que ele anota, não o estouro desta espera.
+    let esperou = criado
+        .map_err(|_| "o fio que cede nao nasceu")
+        .and_then(|_| {
+            esperar_cedendo(
+                || DURACAO.load(SeqCst) != 0,
+                CESSOES * crate::fios::QUANTUM_EM_TIQUES as u64 * 2,
+            )
+        });
+    crate::fios::fixar(coletor, None);
+    esperou?;
+    let tiques = DURACAO.load(SeqCst) - 1;
+    if tiques > TETO_EM_TIQUES {
+        crate::log_error!(
+            "teste",
+            "{} cessoes com o coletor no mesmo nucleo levaram {} tiques",
+            CESSOES,
+            tiques
+        );
+        return Err("um fio sem o que fazer segurou o nucleo com outro pronto");
+    }
+    Ok(())
+}
+
 fn smp_o_fio_novo_acorda_o_ocioso() -> Resultado {
     use core::sync::atomic::{AtomicU64, Ordering::SeqCst};
     const TENTATIVAS: usize = 8;
@@ -29405,6 +29493,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "smp: o fio novo acorda o ocioso",
         f: smp_o_fio_novo_acorda_o_ocioso,
+    },
+    Caso {
+        nome: "fios: quem nao tem o que fazer da a vez",
+        f: fios_quem_nao_tem_o_que_fazer_da_a_vez,
     },
     Caso {
         nome: "tela: o tique leva o que ficou",
