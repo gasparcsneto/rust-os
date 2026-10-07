@@ -2019,11 +2019,11 @@ hospedeiro — da propriedade que ela tira.
 
 ### As mutações da auditoria seguinte
 
-Dezessete mutações contra o que a auditoria do estado depois das
+Dezenove mutações contra o que a auditoria do estado depois das
 limitações corrigiu — a cessão de dentro do handler, o estouro na guarda,
 a compactação sem fila, as travas nos dois modos, o `fs.read`, o
 silêncio do canal e o fio ocioso que segurava o núcleo —, cada uma contra
-a suíte de quatro núcleos ou a fumaça da arquitetura dela: **dezessete
+a suíte de quatro núcleos ou a fumaça da arquitetura dela: **dezenove
 reprovadas**.
 
 | Mutação | Reprovada por |
@@ -2043,6 +2043,8 @@ reprovadas**.
 | o pedaço de texto sem o caractere inteiro | o mesmo caso |
 | o base64 sem o preenchimento | o mesmo caso |
 | o silêncio do canal nunca marcado | `agente: o silencio e medido na chegada` |
+| a coleta atrasada conta como silêncio (o relógio da drenagem no lugar da linha vista vazia) | o mesmo caso |
+| a coleta nunca anota a linha vista vazia | a fumaça do x86: `fragmento: o pedido colou no pedaço abandonado` |
 | o coletor dorme com outros prontos (x86) | `fios: quem nao tem o que fazer da a vez` — cem cessões em 500 tiques |
 | `ha_outro_pronto` sempre falso (ARM) | o mesmo caso, os mesmos 500 tiques |
 
