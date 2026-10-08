@@ -2245,6 +2245,61 @@ A mutação do ARP rodou primeiro com outras duas máquinas na bancada, que
 tem quatro processadores, e reprovou também cinco casos de tela com prazo;
 repetida sozinha, só os dois do ARP.
 
+### As mutações da espera
+
+Vinte e sete mutações contra o que a leitura que espera promete — quem
+acorda, quando acaba, quem pode suspender, a decisão de novo na entrega,
+uma espera por conexão, a ordem do canal, o console que segura a entrada,
+e as três tarefas que esperam de verdade —, contra os casos da rede da
+suíte de quatro núcleos, no x86, e contra a fumaça as que só o kernel de
+produção alcança: **vinte e seis reprovadas, e uma equivalente**.
+
+| Mutação | Reprovada por |
+|---|---|
+| a reexecução no canal pode suspender de novo | `rede: o canal espera sem perder a ordem` — depois do prazo a sessão não respondeu |
+| a reexecução do processo pode suspender de novo | `rede: o programa disca pelo gate` — o programa ficou sem resposta |
+| a reexecução no console pode suspender de novo | `rede: o console espera e segura a entrada` — depois do prazo o console não mostrou a leitura |
+| o contexto do comando permite suspender sempre | `rede: a espera vence no prazo` — a leitura sem permissão de esperar suspendeu |
+| largar a espera não a desarma | o mesmo caso — a conexão ficou presa à espera largada |
+| duas esperas na mesma conexão | `rede: uma espera por conexao` |
+| o waker não fica no socket | `rede: a espera acorda pelo evento da pilha`, e mais dois casos |
+| o dado não acaba com a espera | `rede: a espera acorda pelo evento da pilha` — acordada, a espera não viu o dado |
+| a mudança de estado não acaba com a espera | `rede: a espera acaba com a conexao` — a derrubada pelo outro lado |
+| o prazo não acaba com a espera | `rede: a espera vence no prazo` |
+| o canal não adia o que veio atrás do pedido suspenso | `rede: o canal espera sem perder a ordem` — a sessão respondeu enquanto o pedido esperava |
+| a geração não confere antes da reexecução | o mesmo caso — o pedido de quem saiu foi respondido ao seguinte |
+| o console confirma outra linha enquanto espera | `rede: o console espera e segura a entrada` |
+| o console que fecha não larga o comando | o mesmo caso |
+| o Terminal que espera lê a entrada | o mesmo caso |
+| o físico que espera lê o teclado | o mesmo caso |
+| a entrega do processo decidida com outra autoridade | `rede: o programa disca pelo gate` — a entrega não saiu em nome de quem lançou o programa |
+| o envelope do pedido suspenso sai | `rede: o canal espera sem perder a ordem` |
+| suspende com o dado já na conexão | `rede: a espera acorda pelo evento da pilha` |
+| suspende numa conexão fechada | `rede: a espera acaba com a conexao` |
+| espera o que já mudou, sem o estado dito ao dono | `rede: a espera e pelo que ainda nao se sabe` — o aperto já terminado esperou |
+| a tarefa da sessão do canal não deixa o waker no socket | `rede: as tarefas acordam pelo evento` |
+| a tarefa dos programas não deixa o waker no socket | o mesmo caso |
+| a tarefa da sessão do canal sem o relógio (fumaça) | a leitura da serial no silêncio não voltou |
+| o interpretador sem o relógio (fumaça) | o console não voltou da leitura no prazo |
+| o interpretador não deixa o waker no socket (fumaça) | o console só voltou no prazo, e não pelo eco |
+
+Três delas sobreviveram na primeira rodada, e cada uma mostrou um caso que
+não olhava o que devia. A da geração: o caso fechava a porta antes de
+reabrir, e o fecho já apaga a sessão — a resposta não tinha por onde sair;
+o caso passou a reabrir sem o aviso do fecho, como o kernel vê quando os
+dois chegam juntos, e com a sessão de quem saiu ainda na tabela só a
+geração separa os dois clientes. As duas das tarefas que esperam: na
+fumaça o eco quase sempre chega antes de a leitura armar, e nenhuma
+espera precisava do evento; na suíte, sem executor, quem atende confere a
+cada volta. O caso `rede: as tarefas acordam pelo evento` faz o papel do
+executor: consulta os futuros das duas tarefas com um waker que conta, e
+confere que é o eco que os acorda — e só ele.
+
+A equivalente: tirar só a conferência de `suspender` não muda nada,
+porque o handler pergunta `pode_suspender` antes de armar. A que quebra a
+permissão na origem — o contexto que permite sempre — é a quarta da
+tabela.
+
 ## Vários agentes
 
 O Duke atende vários agentes ao mesmo tempo, cada um numa **sessão**: um
