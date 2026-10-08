@@ -2151,6 +2151,48 @@ devolve o que chegou e não bloqueia — quem espera pergunta de novo, e cada
 pergunta passa pelo gate e vai para a auditoria); e o canal do agente por
 TCP. São os incrementos seguintes da fase 9.
 
+### As mutações da rede
+
+Quinze mutações contra o que este incremento promete — a posse, a
+permissão antes da existência, o alcance enumerado, quem acabou, os tetos,
+o caractere partido, a decisão antes do uso, o observador do ARP e o fio
+que faz a pilha andar —, cada uma contra a suíte de quatro núcleos (no x86,
+e no ARM onde o caminho é dele) ou, a da forma normal, contra os testes da
+política no hospedeiro: **quinze reprovadas**.
+
+| Mutação | Reprovada por |
+|---|---|
+| a posse ignorada: o número basta para achar a conexão | `rede: a conexao e de quem a abriu` — outro titular usou uma conexão que não é dele |
+| a existência antes da permissão | `rede: o destino e o recurso` — quem não tem `net.connect` soube que a conexão não existe |
+| o alcance não confere: qualquer destino é discado | o mesmo caso, `rede: a politica nova vale para a conexao aberta` e `rede: o programa disca pelo gate` |
+| o coletor não varre as conexões (ARM) | `rede: a conexao de quem acabou e derrubada` |
+| a geração da porta ignorada no dono | `rede: o agente que sai perde as conexoes` |
+| a pessoa que saiu continua viva | `rede: a conexao de quem acabou e derrubada` |
+| o processo morto continua vivo | o mesmo caso |
+| os fechos não contam no teto de quem fechou | `rede: quem fecha ainda ocupa a sua vaga` |
+| o começo de um caractere fica preso | `rede: o caractere partido nao prende a leitura` |
+| `net.connect` sem conferir a decisão | `rede: o handler so age no que foi decidido` — discou sem a decisão do gate |
+| o uso da conexão sem conferir a decisão | o mesmo caso — mandou por uma conexão sem a decisão |
+| o ARP sem o observador | `rede: ARP vai e volta` — nenhuma resposta chegou |
+| sem teto por titular | `rede: o teto de conexoes e por titular` |
+| sem o fio da rede | `rede: a pilha tem endereco pelo DHCP`, e os doze casos seguintes |
+| o zero à esquerda aceito no destino | `endereco::testes::o_ambiguo_e_recusado` |
+
+E cinco contra o que a matriz e o CI deste incremento corrigiram — **cinco
+reprovadas**:
+
+| Mutação | Reprovada por |
+|---|---|
+| o driver não confere a geração ao enfileirar | `agentes: o quadro de uma conexao nao sai na seguinte` — a resposta ao aperto de uma conexão que caiu saiu na seguinte |
+| a resposta do aperto sem a geração | o mesmo caso, pelo mesmo motivo |
+| a recusa do aperto sem a geração | o mesmo caso — a recusa da conexão que caiu saiu na seguinte |
+| a volta à imagem e a reposição da suíte sem a ordem das gravações | a conferência de `reaplicar`, na primeira reposição: "reposicao do journal sem a ordem das gravacoes" |
+| o teto da espera de transmissão de volta a cem mil voltas (ARM, release) | seis casos da rede, a placa desligada logo depois do DHCP — é a reprodução da falha do CI |
+
+A mutação do ARP rodou primeiro com outras duas máquinas na bancada, que
+tem quatro processadores, e reprovou também cinco casos de tela com prazo;
+repetida sozinha, só os dois do ARP.
+
 ## Vários agentes
 
 O Duke atende vários agentes ao mesmo tempo, cada um numa **sessão**: um
@@ -2208,8 +2250,10 @@ o aperto de toda reconexão rápida. Medido com uma sonda que abandonava o
 aperto e reconectava na hora: nas quatro rodadas, uma das duas primeiras
 voltas (0 ou 10 ms entre o aperto e o fecho) caiu assim, e a rodada com o
 driver instrumentado mostrou os dois apertos entregues juntos, na geração
-do segundo. A bancada não reconecta na mesma porta em seguida (ver as
-fumaças dos quatro agentes e da persistência).
+do segundo. A bancada não reconecta na mesma porta em seguida, e espera o
+aperto inteiro em vez de desistir dele: com dois segundos de paciência, o
+kernel de depuração — centenas de milissegundos por aperto, as portas uma
+de cada vez — fez o CI encadear reconexões até cair nesse limite.
 
 **Acima do transporte.** O enquadramento, o JSON-RPC e os comandos não
 sabem por onde os bytes vieram: perguntam ao canal da sessão. É o que deixa
