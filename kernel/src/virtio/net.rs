@@ -569,11 +569,23 @@ impl Placa {
 
 /// Quantas voltas esperar pela confirmação de uma transmissão.
 ///
-/// Muito menor que o teto do disco, e por um motivo: aqui a espera é pela
-/// confirmação de que o dispositivo **leu** o buffer, não por dados vindos de
-/// fora. Um dispositivo emulado consome um buffer de transmissão
-/// imediatamente; se não consumiu em cem mil voltas, não vai consumir.
-const VOLTAS_DE_ESPERA: u32 = 100_000;
+/// Não é um tempo, pela razão do disco (ver `blk::VOLTAS_DE_ESPERA`): a
+/// espera roda com as interrupções mascaradas, e não há relógio que se leia
+/// assim nas duas arquiteturas. O teto só precisa distinguir "lento" de
+/// "morto", e um tempo esgotado desliga a placa — a espera longa acontece no
+/// máximo uma vez.
+///
+/// # Por que quatrocentos milhões
+///
+/// Foram cem mil, pela conta de que um dispositivo emulado lê o buffer de
+/// transmissão na hora. Enquanto a placa servia a uns poucos ARPs, a conta
+/// fechava. Com a pilha IP, cada segmento TCP passa por aqui, e o CI mostrou
+/// o que ela não via: no ARM emulado em release, cem mil voltas são uma
+/// fração de milissegundo — o disco mediu cinco milhões em uns vinte —, e o
+/// emulador, ocupado, demorou mais que isso a ler um buffer. A placa foi
+/// desligada logo depois do DHCP, e a rede da suíte caiu inteira com ela. O
+/// teto do disco, então: perto de dois segundos ali.
+const VOLTAS_DE_ESPERA: u32 = 400_000_000;
 
 /// Lê o endereço MAC da configuração do dispositivo.
 ///
