@@ -7555,8 +7555,17 @@ impl AgenteNaPorta {
         use sigilo::quadro::{Tipo, montar};
         let mut fluxo = UnixStream::connect(caminho_canal(arch, porta))
             .map_err(|e| FalhaDoAperto::Outra(format!("a porta nao aceitou conexao: {e}")))?;
+        // A espera é pelo aperto inteiro, e não só pelo primeiro sinal de
+        // vida: desistir e reconectar é o que faz aparecer o limite do
+        // transporte — a resposta ao aperto abandonado chega à conexão
+        // seguinte (ver "Vários agentes", no README). O kernel de depuração
+        // gasta centenas de milissegundos em cada aperto e atende as portas
+        // uma de cada vez; com as quatro juntas, dois segundos ficavam no
+        // limite: o CI já reconectava uma porta, e numa rodada um pouco mais
+        // lenta encadeou reconexões até um cliente ouvir a resposta do
+        // aperto anterior.
         fluxo
-            .set_read_timeout(Some(Duration::from_secs(2)))
+            .set_read_timeout(Some(Duration::from_secs(10)))
             .map_err(|e| FalhaDoAperto::Outra(e.to_string()))?;
 
         let efemera = aleatorios().map_err(FalhaDoAperto::Outra)?;
