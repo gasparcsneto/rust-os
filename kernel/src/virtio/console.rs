@@ -714,6 +714,22 @@ impl core::future::Future for ProximoByte {
 /// Manda `bytes` pela porta `p`. Sem ninguém do outro lado, não há a quem:
 /// são descartados, e contados. Devolve se foram aceitos.
 pub fn enviar(p: u8, bytes: &[u8]) -> bool {
+    enviar_se(p, None, bytes)
+}
+
+/// Manda `bytes` pela porta `p` só se ela ainda está na conexão `geracao`
+/// — ver [`geracao`]. Para o que foi feito para uma conexão, e não serve a
+/// outra: a resposta a um aperto, a recusa dele. A conferência é na mesma
+/// trava que põe os bytes na fila, e não antes: entre olhar a geração e
+/// mandar, a porta pode fechar e reabrir.
+///
+/// O que não sai por isso não é contado como perdido: não havia, na conexão
+/// de agora, quem o esperasse.
+pub fn enviar_na_conexao(p: u8, geracao: u64, bytes: &[u8]) -> bool {
+    enviar_se(p, Some(geracao), bytes)
+}
+
+fn enviar_se(p: u8, geracao: Option<u64>, bytes: &[u8]) -> bool {
     // Três desfechos: na captura da suíte, na fila da porta, ou descartado.
     // O descarte é de tudo ou nada — nunca metade dos bytes —, e quem manda
     // fica sabendo: o canal cifrado depende disso, porque um quadro que não
@@ -721,6 +737,9 @@ pub fn enviar(p: u8, bytes: &[u8]) -> bool {
     let desfecho = fluxo(p, |f| {
         #[cfg(feature = "modo-teste")]
         if f.recusar {
+            return None;
+        }
+        if geracao.is_some_and(|g| g != f.geracao) {
             return None;
         }
         #[cfg(feature = "modo-teste")]

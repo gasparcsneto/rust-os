@@ -2181,6 +2181,36 @@ dispositivo avisa cada abertura, e o quadro que estava pela metade fica com
 quem saiu. Uma resposta para uma porta sem ninguém do outro lado é
 descartada e contada, e uma que ninguém lê não cresce sem fim.
 
+**O que é de uma conexão não sai na seguinte.** A resposta a um aperto de
+mão e a recusa dele são de uma conexão, e a porta as manda com a geração em
+que o aperto chegou: a conferência é na trava que enfileira os bytes, e o
+que não confere não sai. O CI mostrou por quê: o cliente da porta 1 esperou
+dois segundos pela resposta — o kernel estava ocupado com quatro apertos —,
+desistiu e reconectou; o kernel terminou o aperto da conexão que já tinha
+caído, a resposta não saiu, e a recusa por ela não ter saído foi para a
+conexão nova, que ouviu "a resposta do aperto nao saiu" no lugar da dela. O
+caso `agentes: o quadro de uma conexao nao sai na seguinte` põe a troca de
+conexão no meio do aperto, por um gancho da suíte.
+
+O que a conferência não alcança é um limite do transporte: o dispositivo
+avisa cada abertura pela fila de controle e entrega os bytes pela fila da
+porta, e o driver colhe as duas a cada tique, o controle primeiro. Se,
+dentro de um mesmo tique, um cliente abre, manda o aperto e fecha, e outro
+abre e manda o dele, os bytes dos dois chegam juntos depois dos avisos, e
+nada no fluxo diz de quem é cada um — o `virtio-console` não marca a
+fronteira entre conexões. O kernel responde ao primeiro aperto, e a resposta
+vai para quem está conectado, o segundo, que não a abre (o Noise a amarra ao
+aperto de quem a pediu); a sessão cai, e quem reconecta num tique seguinte
+entra. Fechar isso é coisa do protocolo do canal — um início de aperto que
+recomeça a porta, e uma recusa que diga a que aperto responde —, e não do
+driver, que só poderia jogar fora os bytes de todo tique ambíguo, e com eles
+o aperto de toda reconexão rápida. Medido com uma sonda que abandonava o
+aperto e reconectava na hora: nas quatro rodadas, uma das duas primeiras
+voltas (0 ou 10 ms entre o aperto e o fecho) caiu assim, e a rodada com o
+driver instrumentado mostrou os dois apertos entregues juntos, na geração
+do segundo. A bancada não reconecta na mesma porta em seguida (ver as
+fumaças dos quatro agentes e da persistência).
+
 **Acima do transporte.** O enquadramento, o JSON-RPC e os comandos não
 sabem por onde os bytes vieram: perguntam ao canal da sessão. É o que deixa
 o próximo transporte — o TCP, quando houver rede, e o vsock, para as máquinas

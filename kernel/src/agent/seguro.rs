@@ -59,6 +59,21 @@ fn mandar_quadro(p: u8, tipo: Tipo, corpo: &[u8]) -> bool {
     }
 }
 
+/// Manda um quadro cru pela porta só se ela ainda está na conexão
+/// `geracao`. O aperto e a recusa são de uma conexão: calculados enquanto
+/// o cliente desistia e outro chegava, iam para o novo — que ouvia a
+/// resposta de um aperto que não mandou, ou a recusa dele.
+///
+/// A geração separa o que o kernel já viu trocar. A troca e os bytes dos
+/// dois clientes num mesmo tique chegam juntos, e nada no fluxo os separa:
+/// é um limite do transporte — ver "Vários agentes", no README.
+fn mandar_quadro_na_conexao(p: u8, geracao: u64, tipo: Tipo, corpo: &[u8]) -> bool {
+    match quadro::montar(tipo, corpo) {
+        Ok(q) => console::enviar_na_conexao(p, geracao, &q),
+        Err(_) => false,
+    }
+}
+
 /// Cifra e manda uma resposta pela porta `p`. Falso se não havia sessão, ou
 /// se algum quadro não saiu — e nesse caso a sessão acabou: o contador do
 /// lado de cá andou e o de lá não, e as próximas mensagens não abririam.
@@ -213,7 +228,7 @@ impl Porta {
         crate::log_warn!("agent", "porta {}: {}; sessao encerrada", self.p, motivo);
         let _ = sessoes::esquecer(self.p);
         self.estado = Estado::Encerrada;
-        mandar_quadro(self.p, Tipo::Recusa, motivo.as_bytes());
+        mandar_quadro_na_conexao(self.p, self.geracao, Tipo::Recusa, motivo.as_bytes());
     }
 
     /// Recusa o aperto: grava na auditoria e encerra.
@@ -283,7 +298,9 @@ impl Porta {
                 Ok(par) => par,
                 Err(e) => return self.encerrar(e.motivo()),
             };
-        if !mandar_quadro(self.p, Tipo::Resposta, &resposta[..n]) {
+        #[cfg(feature = "modo-teste")]
+        sessoes::gancho_do_aperto();
+        if !mandar_quadro_na_conexao(self.p, self.geracao, Tipo::Resposta, &resposta[..n]) {
             return self.recusar_aperto(
                 Some(chave),
                 Codigo::Error,

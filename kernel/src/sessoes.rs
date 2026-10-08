@@ -226,6 +226,26 @@ pub fn contadores() -> (u64, u64) {
     )
 }
 
+/// Só para a suíte: o que roda no meio do próximo aperto de mão — lido o
+/// início e calculada a resposta, antes de ela sair. É onde um caso põe o
+/// cliente que desiste e o outro que chega à mesma porta.
+#[cfg(feature = "modo-teste")]
+static NO_MEIO_DO_APERTO: Mutex<Option<fn()>> = Mutex::new(None);
+
+/// Só para a suíte: põe (ou tira) o que roda no meio do aperto.
+#[cfg(feature = "modo-teste")]
+pub fn no_meio_do_aperto_de_teste(f: Option<fn()>) {
+    crate::arch::sem_interrupcoes(|| *NO_MEIO_DO_APERTO.lock() = f);
+}
+
+/// Só para a suíte: roda o que [`no_meio_do_aperto_de_teste`] pôs.
+#[cfg(feature = "modo-teste")]
+pub fn gancho_do_aperto() {
+    if let Some(f) = crate::arch::sem_interrupcoes(|| *NO_MEIO_DO_APERTO.lock()) {
+        f();
+    }
+}
+
 /// Destrava as sessões à força, para uso exclusivo do caminho de falha fatal.
 ///
 /// # Safety
@@ -237,5 +257,7 @@ pub unsafe fn destravar() {
         TRANSPORTES.force_unlock();
         IDENTIDADES.force_unlock();
         ANEXOS.force_unlock();
+        #[cfg(feature = "modo-teste")]
+        NO_MEIO_DO_APERTO.force_unlock();
     }
 }

@@ -11242,6 +11242,57 @@ fn agentes_uma_conexao_nova_recomeca_o_quadro() -> Resultado {
     })
 }
 
+/// O que foi feito para uma conexão não sai na seguinte.
+///
+/// # O que este caso protege
+///
+/// O CI viu: o cliente da porta 1 esperou dois segundos pela resposta do
+/// aperto — o kernel estava ocupado —, desistiu e reconectou. Enquanto
+/// isso, o kernel terminou o aperto da conexão que já tinha caído: a
+/// resposta não saiu, com a porta fechada, e a recusa por ela não ter saído
+/// saiu na conexão nova, que ouviu "a resposta do aperto nao saiu" no lugar
+/// da resposta ao aperto dela.
+///
+/// O caso põe a troca de conexão no meio do aperto, pelo gancho da suíte:
+/// nem a resposta nem a recusa da conexão que caiu saem na que chegou — a
+/// porta as manda com a geração em que o aperto chegou —, e o aperto de
+/// quem chegou funciona.
+fn agentes_o_quadro_de_uma_conexao_nao_sai_na_seguinte() -> Resultado {
+    use crate::agent::SessaoDeTeste;
+    use crate::virtio::console;
+    fn trocar_de_conexao() {
+        console::simular_conexao(2, false);
+        console::simular_conexao(2, true);
+    }
+    com_agentes_de_teste(|| {
+        let mut sessao = SessaoDeTeste::porta(2);
+        crate::sessoes::no_meio_do_aperto_de_teste(Some(trocar_de_conexao));
+        let abandonado = AgenteDeTeste::conectar(2, &mut sessao, &chave_de_teste(2));
+        crate::sessoes::no_meio_do_aperto_de_teste(None);
+        let abandonado = abandonado?;
+        if abandonado.transporte.is_some() {
+            return Err("a resposta ao aperto de uma conexao que caiu saiu na seguinte");
+        }
+        if let Some(recusa) = &abandonado.recusa {
+            crate::log_error!("teste", "a conexao nova ouviu: {}", recusa);
+            return Err("a recusa do aperto de uma conexao que caiu saiu na seguinte");
+        }
+
+        let mut novo = AgenteDeTeste::conectar(2, &mut sessao, &chave_de_teste(2))?;
+        if novo.transporte.is_none() {
+            crate::log_error!("teste", "recusa: {:?}", novo.recusa);
+            return Err("o aperto de quem chegou nao funcionou");
+        }
+        novo.pedir(&mut sessao, &pedido_de_sessao(5))?;
+        let respostas = novo.respostas();
+        if respostas.len() != 1 || !respostas[0].contains(r#""id":5,"result""#) {
+            crate::log_error!("teste", "{:?} {:?}", respostas, novo.recusa);
+            return Err("a sessao de quem chegou nao respondeu");
+        }
+        Ok(())
+    })
+}
+
 /// O log diz qual agente agiu: o número da sessão por onde o pedido
 /// chegou.
 ///
@@ -28753,6 +28804,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "agentes: uma conexao nova recomeca o quadro",
         f: agentes_uma_conexao_nova_recomeca_o_quadro,
+    },
+    Caso {
+        nome: "agentes: o quadro de uma conexao nao sai na seguinte",
+        f: agentes_o_quadro_de_uma_conexao_nao_sai_na_seguinte,
     },
     Caso {
         nome: "agentes: o log diz qual agente",
