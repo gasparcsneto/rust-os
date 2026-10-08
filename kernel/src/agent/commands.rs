@@ -380,7 +380,7 @@ pub static COMANDOS: &[Command] = &[
     },
     Command {
         nome: "net.connect",
-        resumo: "Abre uma conexao TCP de saida para `to`, `tcp:<ipv4>:<porta>`, se o destino esta no alcance do seu papel. Devolve o numero da conexao e o estado (quase sempre `connecting`: acompanhe por net.recv). A conexao e sua: so voce a usa, e ela acaba com a sua sessao ou o seu processo.",
+        resumo: "Abre uma conexao TCP de saida para `to`, `tcp:<ipv4>:<porta>`, se o destino esta no alcance do seu papel. Devolve o numero da conexao e o estado (quase sempre `connecting`: um net.recv com `wait` espera o aperto terminar). A conexao e sua: so voce a usa, e ela acaba com a sua sessao ou o seu processo.",
         params: &[ParamSpec {
             nome: "to",
             tipo: TipoParam::Texto,
@@ -422,7 +422,7 @@ pub static COMANDOS: &[Command] = &[
     },
     Command {
         nome: "net.recv",
-        resumo: "O que chegou numa conexao sua, ate `max` bytes (padrao e teto: 4096), e o estado dela. Nao espera: sem nada chegado, devolve vazio. `encoding` diz `utf-8` (cortado no fim de um caractere; o resto fica para o proximo) ou `base64`.",
+        resumo: "O que chegou numa conexao sua, ate `max` bytes (padrao e teto: 4096), e o estado dela. Sem `wait`, nao espera: sem nada chegado, devolve vazio. Com `wait`, sem nada chegado e com a conexao ainda abrindo ou aberta, espera ate chegar dado, o estado mudar, a conexao acabar ou o prazo vencer — e o pedido e decidido de novo antes de responder. `encoding` diz `utf-8` (cortado no fim de um caractere; o resto fica para o proximo) ou `base64`.",
         params: &[
             ParamSpec {
                 nome: "connection",
@@ -435,6 +435,12 @@ pub static COMANDOS: &[Command] = &[
                 tipo: TipoParam::Inteiro,
                 obrigatorio: false,
                 descricao: "Quantos bytes, no maximo.",
+            },
+            ParamSpec {
+                nome: "wait",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "Quantos milissegundos esperar, se nada chegou (padrao: 0, nao espera; teto: 10000). Uma espera por conexao.",
             },
         ],
         acesso: Acesso::Exige(Permissao::NetConnect),
@@ -2151,11 +2157,27 @@ fn net_send_com(
 }
 
 fn net_recv(params: Json, w: &mut JsonWriter) -> fmt::Result {
-    w.begin_object()?;
     let numero = params.member("connection").and_then(|v| v.as_u64());
+    // A espera antes de qualquer escrita: o comando que suspende não
+    // responde agora — ver `rede::espera`.
+    let espera_recusada = match params.member("wait").and_then(|v| v.as_u64()) {
+        Some(ms) if ms > 0 && crate::autorizacao::pode_suspender() => {
+            match suspender_na_conexao(numero, ms) {
+                Ok(true) => return Ok(()),
+                Ok(false) => None,
+                Err(motivo) => Some(motivo),
+            }
+        }
+        _ => None,
+    };
+    w.begin_object()?;
     let Some((dono, numero)) = conexao_do_pedido(numero, w)? else {
         return w.end_object();
     };
+    if let Some(motivo) = espera_recusada {
+        w.field_str("error", motivo)?;
+        return w.end_object();
+    }
     let maximo = params
         .member("max")
         .and_then(|v| v.as_u64())
@@ -2204,6 +2226,27 @@ fn net_recv(params: Json, w: &mut JsonWriter) -> fmt::Result {
         w.field_str("error", motivo)?;
     }
     w.end_object()
+}
+
+/// Arma a espera de um `net.recv` na conexão `numero` e suspende o comando
+/// — ver `rede::espera`. `Ok(true)` suspenso; `Ok(false)` quando há o que
+/// dizer agora, ou a conexão não é a que foi decidida para quem pede — e a
+/// resposta de sempre diz o quê. `Err` com o motivo de não esperar.
+fn suspender_na_conexao(numero: Option<u64>, ms: u64) -> Result<bool, &'static str> {
+    let (Some(dono), Some(numero)) = (crate::rede::conexoes::Dono::do_comando(), numero) else {
+        return Ok(false);
+    };
+    // A mesma conferência de [`conexao_do_pedido`]: só se espera na
+    // conexão que o gate decidiu.
+    match crate::rede::pilha::destino_de(numero, &dono) {
+        Ok(d) if crate::autorizacao::endereco_decidido(&d.texto()) => {}
+        _ => return Ok(false),
+    }
+    let Some(espera) = crate::rede::espera::Espera::armar(numero, dono, ms)? else {
+        return Ok(false);
+    };
+    // Não pode suspender afinal: a espera volta, e largá-la a desarma.
+    Ok(crate::autorizacao::suspender(espera).is_ok())
 }
 
 fn net_close(params: Json, w: &mut JsonWriter) -> fmt::Result {

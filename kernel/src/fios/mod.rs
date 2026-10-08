@@ -1945,6 +1945,23 @@ pub fn tomar_pedido(
     })
 }
 
+/// A autoridade e o programa do fio `id`, se ele ainda espera a resposta
+/// do pedido que o executor tomou — o pedido suspenso, que vai ser
+/// executado de novo com o que o fio tem agora. `None` se o fio acabou, ou
+/// não tem pedido em curso.
+pub fn pedido_em_curso(
+    id: u64,
+) -> Option<(crate::autorizacao::Autoridade, crate::autorizacao::Programa)> {
+    com_escalonador(|e| {
+        let fio = e
+            .fios
+            .iter()
+            .flatten()
+            .find(|f| f.id.numero() == id && f.estado != Estado::Terminado)?;
+        matches!(fio.pedido, EstadoDoPedido::EmCurso).then_some((fio.autoridade, fio.programa))
+    })
+}
+
 /// O executor entrega a resposta ao fio `id`, e o acorda se ele espera.
 /// Devolve a resposta se o fio não está mais lá para recebê-la — morreu
 /// enquanto o comando executava —, para quem chama largar fora da trava.

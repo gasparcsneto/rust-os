@@ -10,6 +10,7 @@
 //!   `smoltcp` —, que é a **única** que colhe quadros da placa;
 //! - [`conexoes`]: a conexão TCP de saída como capacidade do registro: de
 //!   quem ela é, e como o gate a decide;
+//! - [`espera`]: o `net.recv` que dorme até a pilha ter o que dizer;
 //! - este arquivo: o ARP do diagnóstico — `net.arp`, a pergunta "quem
 //!   atende por este endereço?" —, que não abre conexão nenhuma.
 //!
@@ -29,6 +30,7 @@
 //! faz a pilha andar, e procura a resposta entre as observadas.
 
 pub mod conexoes;
+pub mod espera;
 pub mod pilha;
 
 use crate::trava::Mutex;

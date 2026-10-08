@@ -101,9 +101,13 @@ armazem = { path = "../armazem" }
 # diferencia o Duke em nada; o que diferencia é o lado de cima, a conexão
 # como capacidade do registro, sob o gate — e esse é do kernel
 # (`src/rede/conexoes.rs`). Só o que este kernel usa: sem `std`, sem log,
-# sem IPv6, sem UDP e DNS por enquanto, sem os dispositivos de exemplo.
+# sem IPv6, sem UDP e DNS por enquanto, sem os dispositivos de exemplo. E
+# com `async`: o socket guarda o waker de quem espera a leitura e o aciona
+# quando o dado chega ou o estado muda — é o evento por que um `net.recv`
+# espera (`src/rede/espera.rs`).
 smoltcp = { version = "0.14.0", default-features = false, features = [
     "alloc",
+    "async",
     "medium-ethernet",
     "proto-ipv4",
     "proto-dhcpv4",

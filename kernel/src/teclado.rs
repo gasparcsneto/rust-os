@@ -465,7 +465,6 @@ pub fn ler_para_janela() -> Option<char> {
 }
 
 /// O que chega à tarefa do interpretador.
-#[cfg(not(feature = "modo-teste"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Entrada {
     /// Um caractere para um console: do teclado da máquina para o físico,
@@ -477,26 +476,53 @@ pub enum Entrada {
 
 /// A próxima entrada: uma tecla para uma janela, uma do teclado da máquina
 /// para o console físico, ou um caractere digitado num pseudo-terminal.
-#[cfg(not(feature = "modo-teste"))]
-fn proxima() -> Option<Entrada> {
+///
+/// `ocupados` diz, pela posição na tabela do interpretador — o físico no
+/// bit 0, o Terminal `i` no bit `1 + i` —, os consoles que esperam um
+/// comando suspenso: a entrada deles fica na fila até ele responder.
+fn proxima(ocupados: u32) -> Option<Entrada> {
     ler_para_janela()
         .map(Entrada::Janela)
-        .or_else(|| ler().map(|c| Entrada::Console(crate::pessoas::Console::Fisico, c)))
-        .or_else(|| crate::pseudoterminal::proxima_entrada().map(|(c, ch)| Entrada::Console(c, ch)))
+        .or_else(|| {
+            (ocupados & 1 == 0)
+                .then(ler)
+                .flatten()
+                .map(|c| Entrada::Console(crate::pessoas::Console::Fisico, c))
+        })
+        .or_else(|| {
+            crate::pseudoterminal::proxima_entrada(|i| ocupados & (1 << (1 + i)) != 0)
+                .map(|(c, ch)| Entrada::Console(c, ch))
+        })
 }
 
-/// A próxima entrada de algum console, quando houver uma.
+/// Só para a suíte: [`proxima`], sem a tarefa do interpretador.
+#[cfg(feature = "modo-teste")]
+pub fn proxima_de_teste(ocupados: u32) -> Option<Entrada> {
+    proxima(ocupados)
+}
+
+/// Só para a suíte: uma tecla na fila do console físico, como o handler a
+/// poria sem janela com o foco.
+#[cfg(feature = "modo-teste")]
+pub fn enfileirar_de_teste(c: char) {
+    let _ = TECLADO.enfileirar(c);
+}
+
+/// A próxima entrada de algum console que não está em `ocupados`, quando
+/// houver uma — ver [`proxima`].
 #[cfg(not(feature = "modo-teste"))]
-pub fn proxima_entrada() -> ProximaEntrada {
-    ProximaEntrada
+pub fn proxima_entrada(ocupados: u32) -> ProximaEntrada {
+    ProximaEntrada { ocupados }
 }
 
 /// O futuro devolvido por [`proxima_entrada`].
 ///
-/// Sem estado: tudo de que precisa está nos `static` do módulo e das filas
-/// dos pseudo-terminais.
+/// Só com os consoles ocupados: o resto de que precisa está nos `static` do
+/// módulo e das filas dos pseudo-terminais.
 #[cfg(not(feature = "modo-teste"))]
-pub struct ProximaEntrada;
+pub struct ProximaEntrada {
+    ocupados: u32,
+}
 
 #[cfg(not(feature = "modo-teste"))]
 impl core::future::Future for ProximaEntrada {
@@ -506,8 +532,9 @@ impl core::future::Future for ProximaEntrada {
         self: core::pin::Pin<&mut Self>,
         contexto: &mut core::task::Context,
     ) -> core::task::Poll<Self::Output> {
+        let ocupados = self.ocupados;
         // Caminho rápido: com entrada na fila, nem tocamos no waker.
-        if let Some(e) = proxima() {
+        if let Some(e) = proxima(ocupados) {
             return core::task::Poll::Ready(e);
         }
 
@@ -528,7 +555,7 @@ impl core::future::Future for ProximaEntrada {
         // chegasse entre a primeira consulta e o registro acordaria um waker
         // que ainda não existia, e o aviso se perderia — a tarefa dormiria
         // para sempre com a tecla na fila.
-        match proxima() {
+        match proxima(ocupados) {
             Some(e) => core::task::Poll::Ready(e),
             None => core::task::Poll::Pending,
         }

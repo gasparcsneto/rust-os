@@ -11,6 +11,10 @@
 //! - os bytes vão e voltam inteiros: os 256 valores de um byte, pelo anexo
 //!   do pedido, e de volta em texto quando são texto e em base64 quando
 //!   não são;
+//! - o programa não pergunta de novo a cada volta: cada `net.recv` leva
+//!   `wait`, e o fio dorme até a pilha ter o que dizer — o aperto terminar,
+//!   o eco devolver. Os 256 bytes voltam em poucas leituras, e uma leitura
+//!   no silêncio acaba pelo prazo, vazia, com a conexão ainda aberta;
 //! - fechada, a conexão deixa de existir para o programa também:
 //!   `DENY_RESOURCE`, a mesma resposta de um número que nunca existiu.
 //!
@@ -28,7 +32,6 @@ programas::manifesto!("discador", "net.connect");
 use alloc::vec::Vec;
 use programas::escreverln;
 use programas::nativo::{self, Recusa};
-use programas::sistema;
 
 /// O código de saída quando tudo conferiu. A suíte do kernel o procura.
 const CODIGO: i64 = 79;
@@ -39,8 +42,18 @@ const SEM_REDE: i64 = 71;
 /// O eco da bancada — ver a política de desenvolvimento.
 const ECO: &str = "tcp:10.0.2.100:7";
 
-/// Quantas voltas esperar o eco, cedendo entre uma e outra.
-const VOLTAS: usize = 20_000;
+/// Quanto cada leitura espera, em milissegundos: o eco responde em bem
+/// menos, e a espera acaba quando o dado chega.
+const ESPERA_MS: u64 = 5_000;
+
+/// Quanto dura a leitura no silêncio: a suíte vê o fio dormir nela, e
+/// confere que ela acaba pelo prazo.
+const SILENCIO_MS: u64 = 1_500;
+
+/// Quantas leituras os 256 bytes podem custar. Cada uma espera o dado, e o
+/// eco os devolve em poucos segmentos; perguntando de novo a cada volta,
+/// como antes da espera, eram centenas.
+const LEITURAS: usize = 16;
 
 fn codigo_de(r: &nativo::Resposta) -> Option<&str> {
     match r.resultado() {
@@ -119,31 +132,52 @@ fn principal() -> i64 {
         return 3;
     };
 
+    // O aperto: uma leitura de nada, que espera o estado sair de
+    // `connecting`.
+    let Ok(r) = nativo::pedir("net.recv", |w| {
+        w.field_u64("connection", conexao)?;
+        w.field_u64("max", 0)?;
+        w.field_u64("wait", ESPERA_MS)
+    }) else {
+        return 11;
+    };
+    if texto(&r, "state") != Some("established") {
+        escreverln!(
+            "discador: o aperto acabou em {:?} {:?}",
+            texto(&r, "state"),
+            codigo_de(&r)
+        );
+        return 11;
+    }
+
     // Os 256 valores de um byte, pelo anexo: metade não é texto.
     let enviado: Vec<u8> = (0..=255u8).collect();
     let mut mandados = 0usize;
-    let mut voltou = Vec::new();
-    for _ in 0..VOLTAS {
-        if mandados < enviado.len() {
-            let resto = &enviado[mandados..];
-            let Ok(r) =
-                nativo::pedir_com_anexo("net.send", |w| w.field_u64("connection", conexao), resto)
-            else {
+    while mandados < enviado.len() {
+        let resto = &enviado[mandados..];
+        let Ok(r) =
+            nativo::pedir_com_anexo("net.send", |w| w.field_u64("connection", conexao), resto)
+        else {
+            return 4;
+        };
+        match numero(&r, "sent") {
+            Some(n) if n > 0 => mandados += n as usize,
+            _ => {
+                escreverln!(
+                    "discador: net.send deu {:?} {:?}",
+                    codigo_de(&r),
+                    texto(&r, "error")
+                );
                 return 4;
-            };
-            match numero(&r, "sent") {
-                Some(n) => mandados += n as usize,
-                None => {
-                    escreverln!(
-                        "discador: net.send deu {:?} {:?}",
-                        codigo_de(&r),
-                        texto(&r, "error")
-                    );
-                    return 4;
-                }
             }
         }
-        let Ok(r) = nativo::pedir("net.recv", |w| w.field_u64("connection", conexao)) else {
+    }
+    let mut voltou = Vec::new();
+    for _ in 0..LEITURAS {
+        let Ok(r) = nativo::pedir("net.recv", |w| {
+            w.field_u64("connection", conexao)?;
+            w.field_u64("wait", ESPERA_MS)
+        }) else {
             return 5;
         };
         let (Some(codificacao), Some(conteudo)) = (texto(&r, "encoding"), texto(&r, "content"))
@@ -188,7 +222,15 @@ fn principal() -> i64 {
             );
             return 7;
         }
-        sistema::ceder();
+    }
+    if voltou.len() < enviado.len() {
+        escreverln!(
+            "discador: {} leituras trouxeram {} de {} bytes",
+            LEITURAS,
+            voltou.len(),
+            enviado.len()
+        );
+        return 12;
     }
     if voltou != enviado {
         escreverln!(
@@ -196,6 +238,25 @@ fn principal() -> i64 {
             voltou.len()
         );
         return 8;
+    }
+
+    // No silêncio: nada vem, e a leitura acaba pelo prazo — vazia, com a
+    // conexão ainda aberta. Enquanto isso o fio dorme.
+    escreverln!("discador: esperando no silencio");
+    let Ok(r) = nativo::pedir("net.recv", |w| {
+        w.field_u64("connection", conexao)?;
+        w.field_u64("wait", SILENCIO_MS)
+    }) else {
+        return 13;
+    };
+    if numero(&r, "returned") != Some(0) || texto(&r, "state") != Some("established") {
+        escreverln!(
+            "discador: o silencio deu {:?} {:?} {:?}",
+            numero(&r, "returned"),
+            texto(&r, "state"),
+            codigo_de(&r)
+        );
+        return 13;
     }
 
     let Ok(r) = nativo::pedir("net.close", |w| w.field_u64("connection", conexao)) else {

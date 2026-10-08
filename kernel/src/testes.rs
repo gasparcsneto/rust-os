@@ -5109,14 +5109,14 @@ fn terminal_o_anel_a_fila_e_a_posse() -> Resultado {
         // Escrever é digitar no console da instância: a tecla de função é
         // aceita e engolida, e nada vai para o teclado da máquina.
         crate::teclado::esvaziar();
-        while pty::proxima_entrada().is_some() {}
+        while pty::proxima_entrada(|_| false).is_some() {}
         let digitados = pty::estatisticas().2;
         let linha = "\u{F704}ab\n";
         if pty::escrever(chave, eu, linha) != Some(linha.len()) {
             return Err("a escrita no pseudo-terminal nao aceitou a linha inteira");
         }
         let mut fila = alloc::string::String::new();
-        while let Some((de, c)) = pty::proxima_entrada() {
+        while let Some((de, c)) = pty::proxima_entrada(|_| false) {
             if de != console {
                 return Err("a entrada chegou a outro console");
             }
@@ -5140,7 +5140,7 @@ fn terminal_o_anel_a_fila_e_a_posse() -> Resultado {
         longa.push('\u{F704}');
         let aceitos = pty::escrever(chave, eu, &longa);
         let mut na_fila = 0;
-        while pty::proxima_entrada().is_some() {
+        while pty::proxima_entrada(|_| false).is_some() {
             na_fila += 1;
         }
         if aceitos != Some(na_fila) || na_fila == 0 || na_fila > ENTRADA {
@@ -5247,7 +5247,7 @@ fn terminal_o_anel_a_fila_e_a_posse() -> Resultado {
     SOLTAR.store(true, Ordering::SeqCst);
     let saiu = esperar_ate(|| SAIU.load(Ordering::SeqCst), 200);
     crate::teclado::esvaziar();
-    while pty::proxima_entrada().is_some() {}
+    while pty::proxima_entrada(|_| false).is_some() {}
     crate::pessoas::esquecer_registradas();
     resultado?;
     saiu.map_err(|_| "o fio do segundo dono nao saiu")
@@ -5283,7 +5283,7 @@ fn terminal_o_interpretador_do_outro_lado() -> Resultado {
     crate::usuario::lancar(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/pseudo")))?;
     let _ = esperar_ate(
         || {
-            while let Some((console, c)) = pty::proxima_entrada() {
+            while let Some((console, c)) = pty::proxima_entrada(|_| false) {
                 crate::interpretador::tratar(console, c);
             }
             visto("processo encerrou com codigo 68") || visto("processo morto por")
@@ -12644,7 +12644,7 @@ fn atender_consoles() {
     while let Some(c) = crate::teclado::ler() {
         crate::interpretador::tratar_tecla(c);
     }
-    while let Some((console, c)) = crate::pseudoterminal::proxima_entrada() {
+    while let Some((console, c)) = crate::pseudoterminal::proxima_entrada(|_| false) {
         crate::interpretador::tratar(console, c);
     }
 }
@@ -21718,7 +21718,7 @@ fn smp_o_coletor_nao_fecha_o_console_do_dono_seguinte() -> Resultado {
     LARGADA.store(u64::MAX, SeqCst);
     pty::pausar_o_coletor_de_teste(false);
     crate::eventos::largar(canal, eu);
-    while pty::proxima_entrada().is_some() {}
+    while pty::proxima_entrada(|_| false).is_some() {}
     crate::pessoas::esquecer_registradas();
     crate::log_info!(
         "teste",
@@ -21799,7 +21799,7 @@ fn pty_o_abrir_nao_toma_a_vaga_que_o_coletor_fecha() -> Resultado {
     pty::avisar_se_preciso();
     pty::pausar_o_coletor_de_teste(false);
     crate::eventos::largar(canal, eu);
-    while pty::proxima_entrada().is_some() {}
+    while pty::proxima_entrada(|_| false).is_some() {}
     resultado
 }
 
@@ -30105,6 +30105,42 @@ static CASOS: &[Caso] = &[
         f: rede_varios_fios_conversam_ao_mesmo_tempo,
     },
     Caso {
+        nome: "rede: a espera acorda pelo evento da pilha",
+        f: rede_a_espera_acorda_pelo_evento_da_pilha,
+    },
+    Caso {
+        nome: "rede: as tarefas acordam pelo evento",
+        f: rede_as_tarefas_acordam_pelo_evento,
+    },
+    Caso {
+        nome: "rede: a espera e pelo que ainda nao se sabe",
+        f: rede_a_espera_e_pelo_que_ainda_nao_se_sabe,
+    },
+    Caso {
+        nome: "rede: a espera vence no prazo",
+        f: rede_a_espera_vence_no_prazo,
+    },
+    Caso {
+        nome: "rede: a espera acaba com a conexao",
+        f: rede_a_espera_acaba_com_a_conexao,
+    },
+    Caso {
+        nome: "rede: a entrega depois da espera e decidida",
+        f: rede_a_entrega_depois_da_espera_e_decidida,
+    },
+    Caso {
+        nome: "rede: uma espera por conexao",
+        f: rede_uma_espera_por_conexao,
+    },
+    Caso {
+        nome: "rede: o canal espera sem perder a ordem",
+        f: rede_o_canal_espera_sem_perder_a_ordem,
+    },
+    Caso {
+        nome: "rede: o console espera e segura a entrada",
+        f: rede_o_console_espera_e_segura_a_entrada,
+    },
+    Caso {
         nome: "rede: o programa disca pelo gate",
         f: rede_o_programa_disca_pelo_gate,
     },
@@ -31375,11 +31411,808 @@ fn rede_varios_fios_conversam_ao_mesmo_tempo() -> Resultado {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// A espera do `net.recv`
+// ---------------------------------------------------------------------------
+
+/// Um waker que conta quantas vezes foi acionado: o da suíte, para ver quem
+/// acorda uma espera, e quando.
+struct Acordado(core::sync::atomic::AtomicU64);
+
+impl alloc::task::Wake for Acordado {
+    fn wake(self: alloc::sync::Arc<Self>) {
+        self.0.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn wake_by_ref(self: &alloc::sync::Arc<Self>) {
+        self.0.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl Acordado {
+    fn novo() -> (alloc::sync::Arc<Acordado>, core::task::Waker) {
+        let a = alloc::sync::Arc::new(Acordado(core::sync::atomic::AtomicU64::new(0)));
+        let w = core::task::Waker::from(a.clone());
+        (a, w)
+    }
+
+    fn vezes(&self) -> u64 {
+        self.0.load(core::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// O número do último registro da auditoria.
+fn seq_da_auditoria() -> u64 {
+    crate::autorizacao::com_auditoria(|c| c.ultimos(1).next().map(|r| r.seq))
+        .flatten()
+        .unwrap_or(0)
+}
+
+/// Quantos `net.recv` no eco foram decididos depois do registro `desde`.
+fn leituras_decididas_desde(desde: u64) -> usize {
+    crate::autorizacao::com_auditoria(|c| {
+        c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+            .filter(|r| r.seq > desde && r.evento.metodo == "net.recv" && r.evento.recurso == ECO)
+            .count()
+    })
+    .unwrap_or(0)
+}
+
+/// Uma conexão de `quem` ao eco, com o aperto terminado.
+fn eco_estabelecido(quem: crate::autorizacao::Chamador) -> Result<u64, &'static str> {
+    let r = fs_pedir(quem, "net.connect", &alloc::format!(r#"{{"to":"{ECO}"}}"#));
+    let conexao = conexao_aberta(&r)?;
+    if estado_depois_do_aperto(quem, conexao)? != "established" {
+        return Err("a conexao ao eco nao se estabeleceu");
+    }
+    Ok(conexao)
+}
+
+/// Um `net.recv` com `wait` que suspendeu — como na primeira execução de um
+/// pedido, por qualquer despachante. A resposta, se ele não suspendeu.
+fn leitura_suspensa(
+    quem: crate::autorizacao::Chamador,
+    conexao: u64,
+    ms: u64,
+) -> Result<crate::rede::espera::Espera, alloc::string::String> {
+    match crate::nativo::responder_suspensivel_de_teste(
+        quem,
+        &pedido_rpc(
+            "net.recv",
+            &alloc::format!(r#"{{"connection":{conexao},"wait":{ms}}}"#),
+        ),
+    ) {
+        Err(espera) => Ok(espera),
+        Ok(resposta) => Err(resposta),
+    }
+}
+
+/// Fecha a conexão de `quem`, para o caso não deixar a sua na tabela.
+fn fechar_conexao(quem: crate::autorizacao::Chamador, conexao: u64) {
+    let _ = fs_pedir(
+        quem,
+        "net.close",
+        &alloc::format!(r#"{{"connection":{conexao}}}"#),
+    );
+}
+
+/// A espera acorda pelo evento da pilha, e não por consulta.
+///
+/// Armada, ela não acorda ninguém enquanto nada chega — por mais voltas que
+/// o fio `rede` dê na pilha —; o dado que o eco devolve aciona o waker de
+/// quem espera, uma vez; e a leitura inteira custa duas decisões do gate,
+/// a que suspendeu e a da entrega, e não uma por volta.
+fn rede_a_espera_acorda_pelo_evento_da_pilha() -> Resultado {
+    use crate::rede::espera::Desfecho;
+    let quem = sistema_aqui();
+    let conexao = eco_estabelecido(quem)?;
+    let desde = seq_da_auditoria();
+    let espera = leitura_suspensa(quem, conexao, 5_000).map_err(|r| {
+        crate::log_error!("teste", "{}", r);
+        "a leitura com espera nao suspendeu, sem nada chegado"
+    })?;
+    let (acordado, waker) = Acordado::novo();
+    if espera.conferir(Some(&waker)).is_some() {
+        return Err("a espera acabou sem nada chegar");
+    }
+    // Trinta tiques de pilha andando, e nada para esta conexão.
+    let _ = esperar_cedendo(|| false, 30);
+    if acordado.vezes() != 0 {
+        return Err("a espera foi acordada sem evento nenhum");
+    }
+    if espera.conferir(None).is_some() {
+        return Err("a espera acabou sem evento nenhum");
+    }
+    let frase = "acorda pela pilha";
+    let r = fs_pedir(
+        quem,
+        "net.send",
+        &alloc::format!(r#"{{"connection":{conexao},"content":"{frase}"}}"#),
+    );
+    if fs_numero(&r, "sent") != Some(frase.len() as u64) {
+        crate::log_error!("teste", "{}", r);
+        return Err("o envio ao eco nao saiu inteiro");
+    }
+    esperar_cedendo(|| acordado.vezes() > 0, 300)
+        .map_err(|_| "o eco devolveu e a espera nao foi acordada")?;
+    if espera.conferir(None) != Some(Desfecho::Chegou) {
+        return Err("acordada, a espera nao viu o dado");
+    }
+    if acordado.vezes() != 1 {
+        crate::log_error!("teste", "{} vezes", acordado.vezes());
+        return Err("o evento acordou a espera mais de uma vez");
+    }
+    drop(espera);
+    // A entrega é o pedido de novo, decidido de novo — e com o dado na
+    // conexão ele não suspende, mesmo podendo.
+    let r = match leitura_suspensa(quem, conexao, 5_000) {
+        Err(r) => r,
+        Ok(_) => return Err("com o dado na conexao, a leitura suspendeu"),
+    };
+    if fs_texto(&r, "content").as_deref() != Some(frase) {
+        crate::log_error!("teste", "{}", r);
+        return Err("a entrega depois da espera nao trouxe o que o eco devolveu");
+    }
+    let decididas = leituras_decididas_desde(desde);
+    fechar_conexao(quem, conexao);
+    if decididas != 2 {
+        crate::log_error!("teste", "{} decisoes", decididas);
+        return Err("a leitura que esperou nao custou exatamente duas decisoes");
+    }
+    Ok(())
+}
+
+/// Quem espera de verdade acorda pelo evento: os futuros das tarefas — o
+/// da sessão do canal e o da tarefa dos programas —, consultados como o
+/// executor os consultaria, deixam o waker deles no socket, e o eco que
+/// chega depois os acorda; nada os acorda antes.
+///
+/// # O que este caso protege
+///
+/// O que a suíte, sem executor, não alcança por outro caminho: nela quem
+/// atende os pedidos suspensos confere a espera a cada volta do laço do
+/// caso, e o canal de teste também — um futuro que esquecesse o waker só
+/// acordaria no prazo, e os outros casos passariam do mesmo jeito.
+fn rede_as_tarefas_acordam_pelo_evento() -> Resultado {
+    use crate::rede::espera::{Aguardar, Desfecho};
+    use core::future::Future;
+    use core::pin::Pin;
+    use core::task::{Context, Poll};
+    let quem = sistema_aqui();
+    let conexao = eco_estabelecido(quem)?;
+    let mandar = |frase: &str| -> Resultado {
+        let r = fs_pedir(
+            quem,
+            "net.send",
+            &alloc::format!(r#"{{"connection":{conexao},"content":"{frase}"}}"#),
+        );
+        (fs_numero(&r, "sent") == Some(frase.len() as u64))
+            .then_some(())
+            .ok_or("o envio ao eco nao saiu inteiro")
+    };
+    let resultado = (|| -> Resultado {
+        // A tarefa da sessão do canal.
+        let espera = leitura_suspensa(quem, conexao, 10_000)
+            .map_err(|_| "a leitura do canal nao suspendeu")?;
+        let (acordado, waker) = Acordado::novo();
+        let mut cx = Context::from_waker(&waker);
+        let mut aguardar = Aguardar::nova(&espera);
+        if Pin::new(&mut aguardar).poll(&mut cx).is_ready() {
+            return Err("a espera do canal acabou sem nada chegar");
+        }
+        let _ = esperar_cedendo(|| false, 20);
+        if acordado.vezes() != 0 {
+            return Err("a tarefa do canal foi acordada sem evento");
+        }
+        mandar("pelo canal")?;
+        esperar_cedendo(|| acordado.vezes() > 0, 300)
+            .map_err(|_| "o eco chegou e a tarefa do canal nao foi acordada")?;
+        if Pin::new(&mut aguardar).poll(&mut cx) != Poll::Ready(Desfecho::Chegou) {
+            return Err("acordada, a tarefa do canal nao viu o dado");
+        }
+        drop(aguardar);
+        drop(espera);
+        let _ = fs_pedir(
+            quem,
+            "net.recv",
+            &alloc::format!(r#"{{"connection":{conexao}}}"#),
+        );
+
+        // A tarefa dos programas, com um pedido suspenso de um fio que não
+        // existe — que ela larga, sem executar, quando a espera acaba.
+        // A fila de pedidos vazia, para a tarefa só ter o suspenso.
+        crate::nativo::atender_pendentes();
+        let espera = leitura_suspensa(quem, conexao, 10_000)
+            .map_err(|_| "a leitura do processo nao suspendeu")?;
+        crate::nativo::suspender_de_teste(7_299_999, "{}", espera);
+        let (acordado, waker) = Acordado::novo();
+        if crate::nativo::consultar_de_teste(&waker) {
+            return Err("a tarefa dos programas ficou pronta sem nada chegar");
+        }
+        let _ = esperar_cedendo(|| false, 20);
+        if acordado.vezes() != 0 {
+            return Err("a tarefa dos programas foi acordada sem evento");
+        }
+        mandar("pelo processo")?;
+        esperar_cedendo(|| acordado.vezes() > 0, 300)
+            .map_err(|_| "o eco chegou e a tarefa dos programas nao foi acordada")?;
+        if !crate::nativo::consultar_de_teste(&waker) {
+            return Err("acordada, a tarefa dos programas nao ficou pronta");
+        }
+        crate::nativo::atender_pendentes();
+        if crate::nativo::suspensos_de_teste() != 0 {
+            return Err("o pedido suspenso de um fio que nao existe ficou");
+        }
+        Ok(())
+    })();
+    fechar_conexao(quem, conexao);
+    resultado
+}
+
+/// A espera é pelo que quem pede ainda não sabe: o aperto que termina entre
+/// a resposta do `net.connect` — `connecting` — e o `net.recv` seguinte já
+/// é novidade, e a leitura responde na hora, sem esperar um dado; e a que
+/// pede de novo, já sabendo, espera.
+fn rede_a_espera_e_pelo_que_ainda_nao_se_sabe() -> Resultado {
+    use crate::rede::pilha::{self, Estado};
+    let quem = sistema_aqui();
+    let r = fs_pedir(quem, "net.connect", &alloc::format!(r#"{{"to":"{ECO}"}}"#));
+    let conexao = conexao_aberta(&r)?;
+    let resultado = (|| -> Resultado {
+        if fs_texto(&r, "state").as_deref() != Some("connecting") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o net.connect nao disse connecting");
+        }
+        // O aperto termina sem que ninguém conte ao dono.
+        esperar_cedendo(
+            || pilha::estado_de_teste(conexao) == Some(Estado::Estabelecida),
+            300,
+        )
+        .map_err(|_| "o aperto com o eco nao terminou")?;
+        let pedido = pedido_rpc(
+            "net.recv",
+            &alloc::format!(r#"{{"connection":{conexao},"max":0,"wait":5000}}"#),
+        );
+        match crate::nativo::responder_suspensivel_de_teste(quem, &pedido) {
+            Ok(r) if fs_texto(&r, "state").as_deref() == Some("established") => {}
+            Ok(r) => {
+                crate::log_error!("teste", "{}", r);
+                return Err("a leitura depois do aperto nao disse established");
+            }
+            Err(_) => return Err("o aperto ja terminado nao respondeu na hora: a leitura esperou"),
+        }
+        // Já sabendo, quem pede de novo espera.
+        match crate::nativo::responder_suspensivel_de_teste(quem, &pedido) {
+            Err(espera) => drop(espera),
+            Ok(r) => {
+                crate::log_error!("teste", "{}", r);
+                return Err("com o estado ja dito, a leitura nao esperou");
+            }
+        }
+        Ok(())
+    })();
+    fechar_conexao(quem, conexao);
+    resultado
+}
+
+/// A espera vence no prazo, sem evento: o relógio acaba com ela, e não a
+/// pilha. Sem `wait`, ou com zero, ninguém suspende; e pedir mais que o
+/// teto é esperar o teto.
+fn rede_a_espera_vence_no_prazo() -> Resultado {
+    use crate::rede::espera::{Desfecho, PRAZO_MAXIMO_MS};
+    let quem = sistema_aqui();
+    let conexao = eco_estabelecido(quem)?;
+    let resultado = (|| -> Resultado {
+        for params in [
+            alloc::format!(r#"{{"connection":{conexao}}}"#),
+            alloc::format!(r#"{{"connection":{conexao},"wait":0}}"#),
+        ] {
+            match crate::nativo::responder_suspensivel_de_teste(
+                quem,
+                &pedido_rpc("net.recv", &params),
+            ) {
+                Ok(r) if fs_numero(&r, "returned") == Some(0) => {}
+                Ok(r) => {
+                    crate::log_error!("teste", "{}", r);
+                    return Err("a leitura sem espera nao respondeu vazio");
+                }
+                Err(_) => return Err("uma leitura sem espera suspendeu"),
+            }
+        }
+        let hz = crate::tempo::frequencia_hz() as u64;
+        let teto = (PRAZO_MAXIMO_MS * hz).div_ceil(1000);
+        let antes = crate::tempo::ticks();
+        let espera = leitura_suspensa(quem, conexao, 3_600_000)
+            .map_err(|_| "a leitura de uma hora nao suspendeu")?;
+        let depois = crate::tempo::ticks();
+        if espera.prazo() < antes + teto || espera.prazo() > depois + teto {
+            crate::log_error!(
+                "teste",
+                "prazo {} entre {} e {}",
+                espera.prazo(),
+                antes + teto,
+                depois + teto
+            );
+            return Err("a espera de uma hora nao ficou no teto");
+        }
+        drop(espera);
+        let espera = leitura_suspensa(quem, conexao, 300)
+            .map_err(|_| "a leitura de 300 ms nao suspendeu")?;
+        let (acordado, waker) = Acordado::novo();
+        if espera.conferir(Some(&waker)).is_some() {
+            return Err("a espera de 300 ms acabou na hora");
+        }
+        let prazo = espera.prazo();
+        esperar_cedendo(|| crate::tempo::ticks() >= prazo, 200)?;
+        if espera.conferir(None) != Some(Desfecho::Venceu) {
+            return Err("vencido o prazo, a espera nao acabou por ele");
+        }
+        if acordado.vezes() != 0 {
+            return Err("o prazo chegou como evento da pilha");
+        }
+        drop(espera);
+        let r = fs_pedir(
+            quem,
+            "net.recv",
+            &alloc::format!(r#"{{"connection":{conexao},"wait":300}}"#),
+        );
+        if fs_numero(&r, "returned") != Some(0)
+            || fs_texto(&r, "state").as_deref() != Some("established")
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("depois do prazo a leitura nao veio vazia, com a conexao aberta");
+        }
+        Ok(())
+    })();
+    fechar_conexao(quem, conexao);
+    resultado
+}
+
+/// A espera acaba com a conexão: fechada por outro caminho do mesmo dono,
+/// o fecho acorda quem espera e a conexão sumiu — a entrega, decidida de
+/// novo, é `DENY_RESOURCE` —; e quando o dono acaba, o coletor a derruba e
+/// a derrubada acorda.
+fn rede_a_espera_acaba_com_a_conexao() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
+    use crate::rede::espera::Desfecho;
+    use core::sync::atomic::{AtomicBool, Ordering::SeqCst};
+    let quem = sistema_aqui();
+    let conexao = eco_estabelecido(quem)?;
+    let espera =
+        leitura_suspensa(quem, conexao, 5_000).map_err(|_| "a leitura com espera nao suspendeu")?;
+    let (acordado, waker) = Acordado::novo();
+    if espera.conferir(Some(&waker)).is_some() {
+        return Err("a espera acabou antes do fecho");
+    }
+    let r = fs_pedir(
+        quem,
+        "net.close",
+        &alloc::format!(r#"{{"connection":{conexao}}}"#),
+    );
+    if decisao_do_envelope(&r) != "ALLOW" {
+        return Err("fechar a conexao que tinha espera foi recusado");
+    }
+    if acordado.vezes() == 0 {
+        return Err("o fecho nao acordou a espera");
+    }
+    if espera.conferir(None) != Some(Desfecho::Sumiu) {
+        return Err("depois do fecho, a espera nao viu a conexao sumir");
+    }
+    drop(espera);
+    let r = fs_pedir(
+        quem,
+        "net.recv",
+        &alloc::format!(r#"{{"connection":{conexao},"wait":5000}}"#),
+    );
+    if decisao_do_envelope(&r) != "DENY_RESOURCE" {
+        crate::log_error!("teste", "{}", r);
+        return Err("a entrega depois do fecho nao foi DENY_RESOURCE");
+    }
+
+    // O dono que acaba no meio da espera.
+    static SOLTAR: AtomicBool = AtomicBool::new(false);
+    extern "C" fn processo(_argumento: u64) -> ! {
+        while !SOLTAR.load(SeqCst) {
+            crate::fios::descansar_ate_a_interrupcao();
+        }
+        crate::fios::terminar()
+    }
+    SOLTAR.store(false, SeqCst);
+    let fio = crate::fios::criar("rede-espera", processo, 0)?.numero();
+    let dele = Chamador::Processo {
+        fio,
+        autoridade: Autoridade::Sistema,
+        programa: Programa::Kernel,
+    };
+    let resultado = (|| -> Resultado {
+        let conexao = eco_estabelecido(dele)?;
+        let espera = leitura_suspensa(dele, conexao, 5_000)
+            .map_err(|_| "a leitura do processo nao suspendeu")?;
+        let (acordado, waker) = Acordado::novo();
+        if espera.conferir(Some(&waker)).is_some() {
+            return Err("a espera do processo acabou antes de ele acabar");
+        }
+        SOLTAR.store(true, SeqCst);
+        esperar_cedendo(|| acordado.vezes() > 0, 300)
+            .map_err(|_| "o dono acabou e a espera nao foi acordada")?;
+        if espera.conferir(None) != Some(Desfecho::Sumiu) {
+            return Err("a espera do dono que acabou nao viu a conexao sumir");
+        }
+        Ok(())
+    })();
+    SOLTAR.store(true, SeqCst);
+    resultado?;
+
+    // O outro lado derruba: a conexão fica na tabela, e o estado muda.
+    let conexao = eco_estabelecido(quem)?;
+    let resultado = (|| -> Resultado {
+        let espera = leitura_suspensa(quem, conexao, 5_000)
+            .map_err(|_| "a leitura antes da derrubada nao suspendeu")?;
+        let (acordado, waker) = Acordado::novo();
+        if espera.conferir(Some(&waker)).is_some() {
+            return Err("a espera acabou antes da derrubada");
+        }
+        crate::rede::pilha::abortar_de_teste(conexao);
+        if acordado.vezes() == 0 {
+            return Err("a derrubada nao acordou a espera");
+        }
+        if espera.conferir(None) != Some(Desfecho::Mudou) {
+            return Err("a espera nao viu o estado mudar");
+        }
+        drop(espera);
+        // Fechada, nada mais vem: a leitura com espera responde na hora — e
+        // de novo, já sabendo que fechou.
+        for _ in 0..2 {
+            match leitura_suspensa(quem, conexao, 5_000) {
+                Err(r) if fs_texto(&r, "state").as_deref() == Some("closed") => {}
+                Err(r) => {
+                    crate::log_error!("teste", "{}", r);
+                    return Err("a leitura da conexao derrubada nao disse que ela fechou");
+                }
+                Ok(_) => return Err("a leitura de uma conexao fechada suspendeu"),
+            }
+        }
+        Ok(())
+    })();
+    fechar_conexao(quem, conexao);
+    resultado
+}
+
+/// A entrega depois da espera é decidida de novo: a política que tira o
+/// destino do alcance no meio da espera recusa a entrega, e o dado fica na
+/// conexão — volta a política, e ele é lido.
+fn rede_a_entrega_depois_da_espera_e_decidida() -> Resultado {
+    use crate::rede::espera::Desfecho;
+    let quem = sistema_aqui();
+    let conexao = eco_estabelecido(quem)?;
+    let espera =
+        leitura_suspensa(quem, conexao, 5_000).map_err(|_| "a leitura com espera nao suspendeu")?;
+    let (acordado, waker) = Acordado::novo();
+    if espera.conferir(Some(&waker)).is_some() {
+        return Err("a espera acabou sem nada chegar");
+    }
+    let frase = "decidida de novo";
+    let r = fs_pedir(
+        quem,
+        "net.send",
+        &alloc::format!(r#"{{"connection":{conexao},"content":"{frase}"}}"#),
+    );
+    if fs_numero(&r, "sent") != Some(frase.len() as u64) {
+        return Err("o envio ao eco nao saiu inteiro");
+    }
+    let antes = crate::autorizacao::com_politica(|p| p.clone());
+    let sem_o_eco = politica::PADRAO.replace(
+        &alloc::format!("recurso sistema net.connect {ECO}"),
+        "recurso sistema net.connect tcp:10.0.2.100:9",
+    );
+    let nova = politica::Politica::ler(&sem_o_eco).map_err(|_| "a politica do caso nao se le")?;
+    crate::autorizacao::restaurar_politica(nova);
+    let entregue = (|| -> Result<alloc::string::String, &'static str> {
+        esperar_cedendo(|| acordado.vezes() > 0, 300)
+            .map_err(|_| "o eco devolveu e a espera nao foi acordada")?;
+        if espera.conferir(None) != Some(Desfecho::Chegou) {
+            return Err("acordada, a espera nao viu o dado");
+        }
+        Ok(fs_pedir(
+            quem,
+            "net.recv",
+            &alloc::format!(r#"{{"connection":{conexao},"wait":5000}}"#),
+        ))
+    })();
+    crate::autorizacao::restaurar_politica(antes);
+    drop(espera);
+    let entregue = entregue?;
+    if decisao_do_envelope(&entregue) != "DENY_RESOURCE" {
+        crate::log_error!("teste", "{}", entregue);
+        fechar_conexao(quem, conexao);
+        return Err("a entrega depois da espera passou com o destino fora do alcance");
+    }
+    let r = fs_pedir(
+        quem,
+        "net.recv",
+        &alloc::format!(r#"{{"connection":{conexao}}}"#),
+    );
+    fechar_conexao(quem, conexao);
+    if fs_texto(&r, "content").as_deref() != Some(frase) {
+        crate::log_error!("teste", "{}", r);
+        return Err("o dado da entrega recusada nao ficou na conexao");
+    }
+    Ok(())
+}
+
+/// Uma espera por conexão: o socket guarda um waker só, e a segunda espera
+/// apagaria a primeira. Ela é recusada com o motivo; largada a primeira, a
+/// conexão volta a aceitar uma.
+fn rede_uma_espera_por_conexao() -> Resultado {
+    let quem = sistema_aqui();
+    let conexao = eco_estabelecido(quem)?;
+    let resultado = (|| -> Resultado {
+        let primeira = leitura_suspensa(quem, conexao, 5_000)
+            .map_err(|_| "a primeira leitura com espera nao suspendeu")?;
+        match leitura_suspensa(quem, conexao, 5_000) {
+            Err(r) if r.contains("ja tem um net.recv esperando") => {}
+            Err(r) => {
+                crate::log_error!("teste", "{}", r);
+                return Err("a segunda espera na conexao nao foi recusada com o motivo");
+            }
+            Ok(_) => return Err("a conexao aceitou duas esperas"),
+        }
+        drop(primeira);
+        let segunda = leitura_suspensa(quem, conexao, 5_000)
+            .map_err(|_| "largada a primeira espera, a conexao nao aceitou outra")?;
+        drop(segunda);
+        Ok(())
+    })();
+    fechar_conexao(quem, conexao);
+    resultado
+}
+
+/// O canal do agente espera pelo pedido suspenso sem perder a ordem: a
+/// sessão não responde nada enquanto ele espera — nem o pedido que veio
+/// atrás, no mesmo quadro —, a outra sessão segue respondendo, e acordada
+/// pela pilha a sessão responde a leitura e depois o que esperava atrás.
+/// O cliente que sai durante a espera não recebe nada, e o seguinte na
+/// mesma porta não herda a resposta.
+fn rede_o_canal_espera_sem_perder_a_ordem() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use crate::rede::conexoes::Dono;
+    use crate::rede::espera::Desfecho;
+    use crate::rede::pilha::{self, Estado};
+    com_agentes_de_teste(|| {
+        let (mut agente, mut sessao) = conectado(1)?;
+        let (mut outro, mut sessao2) = conectado(2)?;
+        let r = pela_porta(
+            &mut agente,
+            &mut sessao,
+            "net.connect",
+            &alloc::format!(r#"{{"to":"{ECO}"}}"#),
+        )?;
+        let conexao = conexao_aberta(&r)?;
+        let dono = Dono::do_chamador(
+            Chamador::Sessao(1),
+            Some(sigilo::publica_de(&chave_de_teste(1))),
+        );
+        esperar_cedendo(
+            || {
+                matches!(
+                    pilha::espiar(conexao, &dono, 0),
+                    Ok((_, Estado::Estabelecida))
+                )
+            },
+            300,
+        )
+        .map_err(|_| "a conexao do agente nao se estabeleceu")?;
+        let leitura = alloc::format!(
+            r#"{{"jsonrpc":"2.0","id":41,"method":"net.recv","params":{{"connection":{conexao},"wait":5000}}}}"#
+        );
+        let atras = r#"{"jsonrpc":"2.0","id":42,"method":"agent.ping","params":{}}"#;
+        agente.pedir(&mut sessao, &alloc::format!("{leitura}\n{atras}"))?;
+        if !sessao.suspensa() {
+            return Err("a leitura com espera nao suspendeu a sessao");
+        }
+        if !agente.respostas().is_empty() {
+            return Err("a sessao respondeu enquanto o pedido esperava");
+        }
+        let r = pela_porta(&mut outro, &mut sessao2, "agent.ping", "{}")?;
+        if !r.contains(r#""result""#) {
+            return Err("a outra sessao nao respondeu enquanto esta esperava");
+        }
+        let (acordado, waker) = Acordado::novo();
+        if sessao
+            .espera()
+            .is_none_or(|e| e.conferir(Some(&waker)).is_some())
+        {
+            return Err("a espera da sessao acabou sem nada chegar");
+        }
+        pilha::mandar(conexao, &dono, b"pela porta").map_err(|_| "o eco nao recebeu")?;
+        esperar_cedendo(|| acordado.vezes() > 0, 300)
+            .map_err(|_| "o eco devolveu e a sessao nao foi acordada")?;
+        if sessao.retomar() != Some(Desfecho::Chegou) {
+            return Err("acordada, a sessao nao retomou pelo dado");
+        }
+        let respostas = agente.respostas();
+        if respostas.len() != 2
+            || !respostas[0].contains(r#""id":41"#)
+            || !respostas[0].contains(r#""content":"pela porta""#)
+            || !respostas[1].contains(r#""id":42"#)
+        {
+            crate::log_error!("teste", "{:?}", respostas);
+            return Err("a leitura e o pedido de tras nao responderam na ordem");
+        }
+
+        // No prazo: a reexecução responde vazio, e não suspende de novo.
+        let curta = alloc::format!(
+            r#"{{"jsonrpc":"2.0","id":43,"method":"net.recv","params":{{"connection":{conexao},"wait":200}}}}"#
+        );
+        agente.pedir(&mut sessao, &curta)?;
+        if !sessao.suspensa() {
+            return Err("a leitura de 200 ms nao suspendeu a sessao");
+        }
+        esperar_cedendo(|| sessao.retomar().is_some(), 200)
+            .map_err(|_| "o prazo venceu e a sessao nao retomou")?;
+        let respostas = agente.respostas();
+        if sessao.suspensa()
+            || respostas.len() != 1
+            || !respostas[0].contains(r#""id":43"#)
+            || !respostas[0].contains(r#""returned":0"#)
+        {
+            crate::log_error!("teste", "{:?}", respostas);
+            return Err("depois do prazo a sessao nao respondeu a leitura vazia");
+        }
+
+        // O cliente que sai no meio da espera, e outro chega. Sem o aviso
+        // do fecho — o que o kernel vê quando os dois avisos chegam juntos
+        // —, a sessão do que saiu ainda está na tabela, com as chaves: só a
+        // geração separa os dois clientes.
+        agente.pedir(&mut sessao, &leitura)?;
+        if !sessao.suspensa() {
+            return Err("a segunda leitura com espera nao suspendeu a sessao");
+        }
+        crate::virtio::console::simular_conexao(1, true);
+        esperar_cedendo(|| sessao.retomar().is_some(), 300)
+            .map_err(|_| "o cliente saiu e a espera da sessao nao acabou")?;
+        if !agente.respostas().is_empty() {
+            return Err("o pedido suspenso de quem saiu foi respondido");
+        }
+        if sessao.suspensa() {
+            return Err("a sessao continuou suspensa depois de o cliente sair");
+        }
+        Ok(())
+    })
+}
+
+/// O console espera pelo comando suspenso: não confirma outra linha, não
+/// lê a entrada dele — que fica na fila, enquanto a dos outros consoles
+/// passa —, e acordado pela pilha mostra a resposta e o prompt. No prazo,
+/// a resposta vazia; fechado no meio da espera, o comando é largado e a
+/// conexão volta a aceitar espera.
+fn rede_o_console_espera_e_segura_a_entrada() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use crate::pessoas::Console;
+    use crate::rede::conexoes::Dono;
+    use crate::rede::pilha;
+    const T: u16 = 3;
+    let console = Console::Terminal(T);
+    crate::pessoas::esquecer_registradas();
+    crate::interpretador::abrir_console(console);
+    let resultado = (|| -> Resultado {
+        let _ = crate::pessoas::sessao_de_teste(Console::Terminal(46), "rede-console", "operador");
+        let sessao = entrar_no_console(console, "rede-console", "senha de teste")?;
+        let quem = Chamador::Pessoa(sessao);
+        let dono = Dono::Pessoa(sessao);
+        let conexao = eco_estabelecido(quem)?;
+        let _ = crate::pseudoterminal::tirar_de_teste(T as u8);
+        digitar_no_console(
+            console,
+            &alloc::format!("net.recv {{\"connection\":{conexao},\"wait\":5000}}\n"),
+        );
+        if !crate::interpretador::ocupado(console) {
+            return Err("a leitura com espera nao deixou o console esperando");
+        }
+        let ate_aqui =
+            alloc::string::String::from_utf8_lossy(&crate::pseudoterminal::tirar_de_teste(T as u8))
+                .into_owned();
+        if ate_aqui.contains("returned") {
+            return Err("o console mostrou resposta enquanto o comando esperava");
+        }
+        // A entrada do console que espera fica na fila; a dos outros passa.
+        crate::pseudoterminal::digitar_de_teste(T as u8, "x");
+        crate::pseudoterminal::digitar_de_teste(T as u8 - 1, "y");
+        let ocupados = 1 << (1 + T);
+        let passou = crate::pseudoterminal::proxima_entrada(|i| ocupados & (1 << (1 + i)) != 0);
+        if passou != Some((Console::Terminal(T - 1), 'y')) {
+            crate::log_error!("teste", "{:?}", passou);
+            return Err("a entrada de outro console nao passou pelo que espera");
+        }
+        if crate::pseudoterminal::proxima_entrada(|i| ocupados & (1 << (1 + i)) != 0).is_some() {
+            return Err("a entrada do console que espera nao ficou na fila");
+        }
+        if crate::pseudoterminal::proxima_entrada(|_| false) != Some((console, 'x')) {
+            return Err("a entrada que ficou na fila se perdeu");
+        }
+        // E o teclado da máquina, se quem esperasse fosse o físico.
+        {
+            use crate::teclado::Entrada;
+            crate::teclado::enfileirar_de_teste('z');
+            if crate::teclado::proxima_de_teste(1)
+                .is_some_and(|e| matches!(e, Entrada::Console(Console::Fisico, _)))
+            {
+                return Err("com o fisico esperando, a tecla dele passou");
+            }
+            if crate::teclado::proxima_de_teste(0) != Some(Entrada::Console(Console::Fisico, 'z')) {
+                return Err("a tecla do fisico que ficou na fila se perdeu");
+            }
+        }
+        // Outra linha não é confirmada enquanto este espera.
+        if !crate::interpretador::confirmar_de_teste(console, "agent.ping").is_empty() {
+            return Err("o console confirmou outra linha enquanto um comando esperava");
+        }
+        pilha::mandar(conexao, &dono, b"eco do console").map_err(|_| "o eco nao recebeu")?;
+        esperar_cedendo(|| crate::interpretador::retomar_suspensos() > 0, 300)
+            .map_err(|_| "o eco devolveu e o console nao retomou")?;
+        let saida =
+            alloc::string::String::from_utf8_lossy(&crate::pseudoterminal::tirar_de_teste(T as u8))
+                .into_owned();
+        if !saida.contains("eco do console")
+            || !saida.ends_with(protocolo::usuario::terminal::PROMPT)
+        {
+            crate::log_error!("teste", "{:?}", saida);
+            return Err("o console nao mostrou a leitura e o prompt depois da espera");
+        }
+        if crate::interpretador::ocupado(console) {
+            return Err("o console continuou esperando depois de responder");
+        }
+        // No prazo: a resposta vazia.
+        digitar_no_console(
+            console,
+            &alloc::format!("net.recv {{\"connection\":{conexao},\"wait\":200}}\n"),
+        );
+        if !crate::interpretador::ocupado(console) {
+            return Err("a leitura de 200 ms nao deixou o console esperando");
+        }
+        esperar_cedendo(|| crate::interpretador::retomar_suspensos() > 0, 200)
+            .map_err(|_| "o prazo venceu e o console nao retomou")?;
+        let saida =
+            alloc::string::String::from_utf8_lossy(&crate::pseudoterminal::tirar_de_teste(T as u8))
+                .into_owned();
+        if !saida.contains(r#""returned": 0"#) {
+            crate::log_error!("teste", "{:?}", saida);
+            return Err("depois do prazo o console nao mostrou a leitura vazia");
+        }
+        // Fechado no meio da espera: o comando é largado na hora.
+        digitar_no_console(
+            console,
+            &alloc::format!("net.recv {{\"connection\":{conexao},\"wait\":5000}}\n"),
+        );
+        if !crate::interpretador::ocupado(console) {
+            return Err("a terceira leitura nao deixou o console esperando");
+        }
+        crate::interpretador::fechar_console(console, "o caso fechou o console");
+        if crate::interpretador::ocupado(console) {
+            return Err("fechado o console, o comando que esperava ficou");
+        }
+        if pilha::espera_armada_de_teste(conexao) {
+            return Err("fechado o console, a espera continuou armada na conexao");
+        }
+        Ok(())
+    })();
+    crate::interpretador::fechar_console(console, "o caso acabou");
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
 /// O programa `discador`, de verdade: lançado por uma pessoa operadora,
 /// conversa com o eco — os 256 valores de um byte pelo anexo, de volta em
 /// texto e em base64 — e ouve as recusas de dentro; lançado por uma
 /// observadora, o gate recusa a conexão — o manifesto declara
 /// `net.connect`, e o papel não tem.
+///
+/// E espera em vez de perguntar: cada leitura leva `wait`, e o pedido
+/// suspenso fica com a tarefa dos programas enquanto o fio dorme. Na
+/// leitura do silêncio o caso o vê dormindo — o pedido suspenso, o fio
+/// esperando, a conta de chamadas de sistema parada — até o prazo; e a
+/// conversa inteira custa poucas decisões de `net.recv`, e não uma por
+/// volta de um laço.
 fn rede_o_programa_disca_pelo_gate() -> Resultado {
     use crate::autorizacao::Autoridade;
     use crate::pessoas::Console;
@@ -31387,12 +32220,61 @@ fn rede_o_programa_disca_pelo_gate() -> Resultado {
     let resultado = (|| -> Resultado {
         let operadora =
             crate::pessoas::sessao_de_teste(Console::Terminal(48), "disca-op", "operador");
-        let fio = rodar_programa(
-            "discador",
-            Some(Autoridade::Pessoa { sessao: operadora }),
-            79,
+        let desde = seq_da_auditoria();
+        let log_desde = crate::log::total_emitidos();
+        let visto = |procurada: &str| {
+            let mut achou = false;
+            crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+                achou |=
+                    r.seq >= log_desde && r.subsistema == "usuario" && r.mensagem() == procurada;
+            });
+            achou
+        };
+        let dir = crate::usuario::DIRETORIO_DOS_COMPILADOS;
+        let fio = crate::usuario::lancar_como(
+            Some(&alloc::format!("{dir}/discador")),
+            Autoridade::Pessoa { sessao: operadora },
+        )?;
+        esperar_ate(
+            || visto("discador: esperando no silencio") && crate::nativo::suspensos_de_teste() == 1,
+            600,
         )
-        .map_err(|_| "o programa discador nao conversou com o eco")?;
+        .map_err(|_| "o discador nao chegou a esperar no silencio")?;
+        let comeco = crate::tempo::ticks();
+        if !crate::fios::esperando_de_teste(fio) {
+            return Err("com o pedido suspenso, o fio do programa nao dormia");
+        }
+        let chamadas = crate::usuario::estatisticas().0;
+        let _ = esperar_ate(|| false, 20);
+        if crate::usuario::estatisticas().0 != chamadas {
+            return Err("o programa fez chamadas de sistema enquanto o pedido esperava");
+        }
+        esperar_ate(|| crate::nativo::suspensos_de_teste() == 0, 600)
+            .map_err(|_| "a espera no silencio nao acabou")?;
+        let durou = crate::tempo::ticks() - comeco;
+        if durou * 1000 < crate::tempo::frequencia_hz() as u64 * 1000 {
+            crate::log_error!("teste", "{} tiques", durou);
+            return Err("a espera no silencio acabou antes do prazo");
+        }
+        // A entrega foi decidida de novo, em nome de quem lançou o programa
+        // — a autoridade do fio, lida de novo, e não outra.
+        let entrega = ultimo_que(|e| {
+            e.metodo == "net.recv" && e.recurso == ECO && e.detalhe.starts_with("pelo processo ")
+        })
+        .ok_or("a entrega depois da espera nao foi gravada como do processo")?;
+        if entrega.titular != politica::auditoria::Titular::Pessoa {
+            crate::log_error!("teste", "{:?}", entrega);
+            return Err(
+                "a entrega depois da espera nao foi decidida em nome de quem lancou o programa",
+            );
+        }
+        esperar_ate(|| visto("processo encerrou com codigo 79"), 600)
+            .map_err(|_| "o programa discador nao conversou com o eco")?;
+        let leituras = leituras_decididas_desde(desde);
+        if leituras > 16 {
+            crate::log_error!("teste", "{} decisoes de net.recv", leituras);
+            return Err("o programa perguntou de novo em vez de esperar");
+        }
         let e = ultimo_que(|e| e.metodo == "net.send" && e.detalhe.starts_with("pelo processo "))
             .ok_or("o envio do programa nao foi gravado como do processo")?;
         if e.titular != politica::auditoria::Titular::Pessoa || e.recurso != ECO {

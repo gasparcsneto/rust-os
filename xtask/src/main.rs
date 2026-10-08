@@ -6081,7 +6081,7 @@ fn conversar(
     sob_formulario(arch, monitor, qmp, &mut escrita, &mut leitor)?;
     sob_interface_nativa(arch, &mut escrita, &mut leitor)?;
     sob_o_armazem(arch, &mut escrita, &mut leitor)?;
-    sob_a_rede(&mut escrita, &mut leitor)?;
+    sob_a_rede(arch, &mut escrita, &mut leitor)?;
     sob_agentes(arch)?;
     sob_sigilo(arch)?;
     sob_administracao(arch, &mut escrita, &mut leitor)?;
@@ -9138,30 +9138,62 @@ fn sob_interface_nativa(
 /// ao eco da bancada com o texto indo e voltando, a recusa de um destino
 /// fora do alcance, e a conexão fechada que deixa de responder. Pelo
 /// executor de verdade, que é quem atende o canal fora da suíte.
-fn sob_a_rede(escrita: &mut UnixStream, leitor: &mut BufReader<UnixStream>) -> Result<(), String> {
+///
+/// E sem perguntar de novo: o aperto e a volta do eco são esperados com
+/// `wait`, uma leitura cada. A espera no silêncio é a prova de que o
+/// executor não fica preso a ela: enquanto a serial espera, um agente numa
+/// porta pede e é respondido; e a serial só responde no prazo.
+fn sob_a_rede(
+    arch: Arquitetura,
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+) -> Result<(), String> {
     println!("[xtask] fumaça: a rede, pelo gate");
-    let mut id = 8500;
-    let mut pedir = |metodo: &str, params: &str| -> Result<String, String> {
-        id += 1;
-        escrita
-            .write_all(
-                format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"{metodo}","params":{params}}}"#)
+    /// A serial, com os pedidos numerados: mandar e receber separados, para
+    /// a leitura no silêncio ficar pendente enquanto outro canal pede.
+    struct Serial<'a> {
+        escrita: &'a mut UnixStream,
+        leitor: &'a mut BufReader<UnixStream>,
+        id: u32,
+    }
+    impl Serial<'_> {
+        fn mandar(&mut self, metodo: &str, params: &str) -> Result<u32, String> {
+            self.id += 1;
+            let id = self.id;
+            self.escrita
+                .write_all(
+                    format!(
+                        r#"{{"jsonrpc":"2.0","id":{id},"method":"{metodo}","params":{params}}}"#
+                    )
                     .as_bytes(),
-            )
-            .and_then(|()| escrita.write_all(b"\n"))
-            .and_then(|()| escrita.flush())
-            .map_err(|e| format!("rede: falha ao pedir `{metodo}`: {e}"))?;
-        let resposta = ler_resposta(leitor).map_err(|e| format!("rede: {e}"))?;
-        if !e_a_resposta(&resposta, id) {
-            return Err(format!(
-                "rede: veio a resposta de outro pedido\n  {resposta}"
-            ));
+                )
+                .and_then(|()| self.escrita.write_all(b"\n"))
+                .and_then(|()| self.escrita.flush())
+                .map_err(|e| format!("rede: falha ao pedir `{metodo}`: {e}"))?;
+            Ok(id)
         }
-        Ok(resposta)
+        fn receber(&mut self, id: u32) -> Result<String, String> {
+            let resposta = ler_resposta(self.leitor).map_err(|e| format!("rede: {e}"))?;
+            if !e_a_resposta(&resposta, id) {
+                return Err(format!(
+                    "rede: veio a resposta de outro pedido\n  {resposta}"
+                ));
+            }
+            Ok(resposta)
+        }
+        fn pedir(&mut self, metodo: &str, params: &str) -> Result<String, String> {
+            let id = self.mandar(metodo, params)?;
+            self.receber(id)
+        }
+    }
+    let mut serial = Serial {
+        escrita,
+        leitor,
+        id: 8500,
     };
     let limite = std::time::Instant::now() + Duration::from_secs(20);
     let info = loop {
-        let info = pedir("net.info", "{}")?;
+        let info = serial.pedir("net.info", "{}")?;
         if info.contains(r#""address":"10.0.2.15/24""#) {
             break info;
         }
@@ -9175,50 +9207,261 @@ fn sob_a_rede(escrita: &mut UnixStream, leitor: &mut BufReader<UnixStream>) -> R
     }
     println!("  [rede] ok  10.0.2.15/24 pelo DHCP, roteador 10.0.2.2");
 
-    let fora = pedir("net.connect", r#"{"to":"tcp:10.0.2.100:8"}"#)?;
+    let fora = serial.pedir("net.connect", r#"{"to":"tcp:10.0.2.100:8"}"#)?;
     if !fora.contains("DENY_RESOURCE") {
         return Err(format!(
             "rede: um destino fora do alcance foi discado\n  {fora}"
         ));
     }
-    let aberta = pedir("net.connect", r#"{"to":"tcp:10.0.2.100:7"}"#)?;
+    let aberta = serial.pedir("net.connect", r#"{"to":"tcp:10.0.2.100:7"}"#)?;
     let conexao: u64 = aberta
         .split(r#""connection":"#)
         .nth(1)
         .and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next())
         .and_then(|n| n.parse().ok())
         .ok_or_else(|| format!("rede: o eco nao abriu\n  {aberta}"))?;
+    // O aperto, esperado: uma leitura de nada que acaba quando o estado
+    // sai de `connecting`.
+    let aperto = serial.pedir(
+        "net.recv",
+        &format!(r#"{{"connection":{conexao},"max":0,"wait":5000}}"#),
+    )?;
+    if !aperto.contains(r#""state":"established""#) {
+        return Err(format!("rede: o aperto com o eco nao terminou\n  {aperto}"));
+    }
     let frase = "ola, rede do Duke";
-    let mut mandado = false;
+    let r = serial.pedir(
+        "net.send",
+        &format!(r#"{{"connection":{conexao},"content":"{frase}"}}"#),
+    )?;
+    if !r.contains(&format!(r#""sent":{}"#, frase.len())) {
+        return Err(format!("rede: a frase nao saiu inteira\n  {r}"));
+    }
     let mut voltou = String::new();
-    let limite = std::time::Instant::now() + Duration::from_secs(20);
+    let mut leituras = 0;
+    let comeco = std::time::Instant::now();
     while !voltou.contains(frase) {
-        if !mandado {
-            let r = pedir(
-                "net.send",
-                &format!(r#"{{"connection":{conexao},"content":"{frase}"}}"#),
-            )?;
-            mandado = r.contains(&format!(r#""sent":{}"#, frase.len()));
+        leituras += 1;
+        if leituras > 4 {
+            return Err(format!(
+                "rede: quatro leituras com espera e o eco nao devolveu a frase\n  {voltou}"
+            ));
         }
-        let r = pedir("net.recv", &format!(r#"{{"connection":{conexao}}}"#))?;
+        let r = serial.pedir(
+            "net.recv",
+            &format!(r#"{{"connection":{conexao},"wait":5000}}"#),
+        )?;
         if let Some(conteudo) = r.split(r#""content":""#).nth(1) {
             voltou.push_str(conteudo.split('"').next().unwrap_or(""));
         }
-        if std::time::Instant::now() > limite {
-            return Err(format!(
-                "rede: o eco nao devolveu a frase (mandada: {mandado})\n  {r}"
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(50));
+    }
+    // O eco responde em milissegundos: a espera acaba pelo dado, e não
+    // pelo prazo de cinco segundos.
+    let eco = comeco.elapsed();
+    if eco >= Duration::from_millis(4000) {
+        return Err(format!(
+            "rede: a frase voltou em {} ms — a espera acabou pelo prazo, e nao pelo dado",
+            eco.as_millis()
+        ));
     }
     println!(
-        "  [rede] ok  conexao {conexao} ao eco: a frase foi e voltou; a porta ao lado, DENY_RESOURCE"
+        "  [rede] ok  conexao {conexao} ao eco: o aperto e a frase esperados, {leituras} leitura(s) em {} ms; a porta ao lado, DENY_RESOURCE",
+        eco.as_millis()
     );
-    let fechada = pedir("net.close", &format!(r#"{{"connection":{conexao}}}"#))?;
+
+    // No silêncio a serial espera, e o executor não: um agente numa porta é
+    // respondido enquanto isso.
+    const SILENCIO_MS: u64 = 1500;
+    // A porta conecta antes: o aperto do kernel de depuração leva centenas
+    // de milissegundos, e o que se mede é o pedido.
+    let mut agente = AgenteNaPorta::conectar(arch, 2)?;
+    let comeco = std::time::Instant::now();
+    let silencio_id = serial.mandar(
+        "net.recv",
+        &format!(r#"{{"connection":{conexao},"wait":{SILENCIO_MS}}}"#),
+    )?;
+    let ping = agente.pedir("agent.ping", "{}")?;
+    let respondido = comeco.elapsed();
+    if !ping.contains(r#""result""#) {
+        return Err(format!(
+            "rede: o agente na porta nao foi respondido\n  {ping}"
+        ));
+    }
+    let silencio = serial.receber(silencio_id)?;
+    let durou = comeco.elapsed();
+    if !silencio.contains(r#""returned":0"#) || !silencio.contains(r#""state":"established""#) {
+        return Err(format!(
+            "rede: a leitura no silencio nao veio vazia\n  {silencio}"
+        ));
+    }
+    if respondido >= Duration::from_millis(SILENCIO_MS) {
+        return Err(format!(
+            "rede: o agente na porta so foi respondido depois da espera da serial ({} ms)",
+            respondido.as_millis()
+        ));
+    }
+    if durou < Duration::from_millis(SILENCIO_MS - 100) {
+        return Err(format!(
+            "rede: a leitura no silencio voltou antes do prazo ({} ms)",
+            durou.as_millis()
+        ));
+    }
+    println!(
+        "  [rede] ok  a serial esperou {} ms no silencio; a porta 2 foi atendida em {} ms",
+        durou.as_millis(),
+        respondido.as_millis()
+    );
+
+    // O console espera também, e quem confirmou a linha não: o agente da
+    // serial põe a leitura na linha do console físico e confirma — o
+    // `confirm` volta na hora, o console não aceita outra linha enquanto
+    // espera, e no prazo desenha a resposta e volta ao prompt.
+    let linha = format!(r#"net.recv {{\"connection\":{conexao},\"wait\":{SILENCIO_MS}}}"#);
+    let r = serial.pedir(
+        "ui.act",
+        &format!(r#"{{"id":3,"action":"set_value","value":"{linha}"}}"#),
+    )?;
+    if !r.contains(r#""ok":true"#) {
+        return Err(format!(
+            "rede: a linha do console nao aceitou a leitura\n  {r}"
+        ));
+    }
+    let comeco = std::time::Instant::now();
+    let r = serial.pedir("ui.act", r#"{"id":3,"action":"confirm"}"#)?;
+    if !r.contains(r#""executed":"net.recv""#) {
+        return Err(format!("rede: o console nao executou a leitura\n  {r}"));
+    }
+    let confirmado = comeco.elapsed();
+    let r = serial.pedir("ui.act", r#"{"id":3,"action":"confirm"}"#)?;
+    if r.contains(r#""executed""#) {
+        return Err(format!(
+            "rede: o console confirmou outra linha enquanto esperava\n  {r}"
+        ));
+    }
+    let limite = std::time::Instant::now() + Duration::from_secs(10);
+    let livre = loop {
+        let r = serial.pedir(
+            "ui.act",
+            r#"{"id":3,"action":"set_value","value":"agent.ping"}"#,
+        )?;
+        if r.contains(r#""ok":true"#) {
+            break comeco.elapsed();
+        }
+        if std::time::Instant::now() > limite {
+            return Err(format!("rede: o console nao voltou da espera\n  {r}"));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    // O confirm não esperou a leitura: logo depois dele o console ainda a
+    // esperava, e recusou outra linha. O que se mede é que o console voltou
+    // no prazo, e não antes dele.
+    if livre < Duration::from_millis(SILENCIO_MS - 100) {
+        return Err(format!(
+            "rede: o console voltou da leitura em {} ms, antes do prazo de {SILENCIO_MS}",
+            livre.as_millis()
+        ));
+    }
+    let arvore = serial.pedir("ui.tree", "{}")?;
+    if !arvore.contains("returned") {
+        return Err(format!(
+            "rede: a resposta da leitura nao apareceu no console\n  {arvore}"
+        ));
+    }
+    // E pelo evento: a leitura no console espera até cinco segundos, e o
+    // eco do que a serial manda pela mesma conexão a acorda antes.
+    let linha = format!(r#"net.recv {{\"connection\":{conexao},\"wait\":5000}}"#);
+    let r = serial.pedir(
+        "ui.act",
+        &format!(r#"{{"id":3,"action":"set_value","value":"{linha}"}}"#),
+    )?;
+    if !r.contains(r#""ok":true"#) {
+        return Err(format!(
+            "rede: a linha do console nao aceitou a leitura\n  {r}"
+        ));
+    }
+    let comeco = std::time::Instant::now();
+    let r = serial.pedir("ui.act", r#"{"id":3,"action":"confirm"}"#)?;
+    if !r.contains(r#""executed":"net.recv""#) {
+        return Err(format!("rede: o console nao executou a leitura\n  {r}"));
+    }
+    let r = serial.pedir(
+        "net.send",
+        &format!(r#"{{"connection":{conexao},"content":"pelo console"}}"#),
+    )?;
+    if !r.contains(r#""sent":12"#) {
+        return Err(format!("rede: o envio para o console nao saiu\n  {r}"));
+    }
+    let limite = std::time::Instant::now() + Duration::from_secs(10);
+    let acordado = loop {
+        let r = serial.pedir(
+            "ui.act",
+            r#"{"id":3,"action":"set_value","value":"agent.ping"}"#,
+        )?;
+        if r.contains(r#""ok":true"#) {
+            break comeco.elapsed();
+        }
+        if std::time::Instant::now() > limite {
+            return Err(format!("rede: o console nao voltou da espera\n  {r}"));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let arvore = serial.pedir("ui.tree", "{}")?;
+    if acordado >= Duration::from_millis(4000) || !arvore.contains("pelo console") {
+        return Err(format!(
+            "rede: o console voltou em {} ms, sem o eco ou pelo prazo\n  {arvore}",
+            acordado.as_millis()
+        ));
+    }
+    let _ = serial.pedir("ui.act", r#"{"id":3,"action":"set_value","value":""}"#)?;
+    println!(
+        "  [rede] ok  o console esperou: o confirm voltou em {} ms, a linha no prazo em {} ms, pelo eco em {} ms",
+        confirmado.as_millis(),
+        livre.as_millis(),
+        acordado.as_millis()
+    );
+
+    // Um processo espera também: o `discador` lê com `wait`, e a tarefa dos
+    // programas guarda o pedido suspenso enquanto o fio dorme.
+    let lancado = serial.pedir(
+        "user.run",
+        &format!(r#"{{"path":"/programas/{}/discador"}}"#, arch.nome()),
+    )?;
+    if !lancado.contains(r#""launched":true"#) {
+        return Err(format!(
+            "rede: o user.run nao lancou o discador\n  {lancado}"
+        ));
+    }
+    let comeco = std::time::Instant::now();
+    let limite = comeco + Duration::from_secs(30);
+    loop {
+        let log = serial.pedir("log.tail", r#"{"count":32}"#)?;
+        if log.contains("processo encerrou com codigo 79") {
+            break;
+        }
+        if std::time::Instant::now() > limite {
+            return Err(format!("rede: o discador nao conversou com o eco\n  {log}"));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    // O silêncio dele é um segundo e meio; o aperto e o eco acabam pelo
+    // evento. Pelo prazo, seriam cinco segundos cada.
+    let discou = comeco.elapsed();
+    if discou >= Duration::from_secs(8) {
+        return Err(format!(
+            "rede: o discador levou {} ms — as esperas dele acabaram pelo prazo, e nao pelo evento",
+            discou.as_millis()
+        ));
+    }
+    println!(
+        "  [rede] ok  o discador esperou o eco e o silencio, e saiu com 79 em {} ms",
+        discou.as_millis()
+    );
+
+    let fechada = serial.pedir("net.close", &format!(r#"{{"connection":{conexao}}}"#))?;
     if !fechada.contains(r#""closed":true"#) {
         return Err(format!("rede: a conexao nao fechou\n  {fechada}"));
     }
-    let depois = pedir("net.recv", &format!(r#"{{"connection":{conexao}}}"#))?;
+    let depois = serial.pedir("net.recv", &format!(r#"{{"connection":{conexao}}}"#))?;
     if !depois.contains("DENY_RESOURCE") {
         return Err(format!(
             "rede: a conexao fechada ainda respondeu\n  {depois}"
@@ -9227,7 +9470,7 @@ fn sob_a_rede(escrita: &mut UnixStream, leitor: &mut BufReader<UnixStream>) -> R
     println!("  [rede] ok  fechada, o numero deixou de valer");
     // A medida que o teto da espera de transmissão pede: até onde o
     // emulador chegou, nesta rodada, antes de confirmar um quadro.
-    let info = pedir("net.info", "{}")?;
+    let info = serial.pedir("net.info", "{}")?;
     let espera = campo_simples(&info, "tx_wait_max_spins")
         .ok_or_else(|| format!("rede: net.info sem a maior espera\n  {info}"))?;
     let enviados = campo_simples(&info, "frames_sent").unwrap_or_default();

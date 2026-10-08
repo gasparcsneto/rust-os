@@ -84,6 +84,12 @@ pub fn por_ticks(ticks: u64) -> Dormir {
     }
 }
 
+/// Dorme até o contador de tiques alcançar `alvo` — um prazo que já foi
+/// marcado, e não uma duração a partir de agora.
+pub fn ate_o_tique(alvo: u64) -> Dormir {
+    Dormir { alvo, vaga: None }
+}
+
 /// Dorme por aproximadamente `ms` milissegundos.
 ///
 /// A resolução é a do timer: a 100 Hz, um tique são 10 ms, e qualquer espera
@@ -110,6 +116,12 @@ pub fn por_ms(ms: u64) -> Dormir {
 }
 
 impl Dormir {
+    /// O tique em que este sono acaba.
+    #[cfg_attr(feature = "modo-teste", allow(dead_code))]
+    pub fn alvo(&self) -> u64 {
+        self.alvo
+    }
+
     /// Guarda o waker numa vaga, reaproveitando a que já tivermos.
     ///
     /// Devolve `false` quando a tabela está cheia.

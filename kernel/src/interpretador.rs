@@ -169,6 +169,25 @@ impl Estado {
 // separar os dois vai ler.
 static ESTADOS: Mutex<[Estado; CONSOLES]> = Mutex::new([const { Estado::NOVO }; CONSOLES]);
 
+/// Um comando de console que suspendeu — ver [`crate::rede::espera`]: a
+/// linha, executada de novo quando a espera acabar; quem a confirmou; a
+/// abertura do console quando ela foi confirmada — reaberto ou fechado, o
+/// console não espera mais por ela —; e a espera.
+struct Suspenso {
+    abertura: u64,
+    linha: politica::sigiloso::Texto,
+    origem: Origem,
+    espera: crate::rede::espera::Espera,
+}
+
+/// O comando suspenso de cada console. Enquanto há um, o console espera
+/// por ele: não lê a entrada dele — o que se digita fica na fila — e não
+/// confirma outra linha. Os outros consoles e as janelas seguem atendidos.
+///
+/// Nunca tomada junto com [`ESTADOS`]: a abertura é lida antes, numa tomada
+/// à parte.
+static SUSPENSOS: Mutex<[Option<Suspenso>; CONSOLES]> = Mutex::new([const { None }; CONSOLES]);
+
 /// A posição de um console na tabela.
 fn indice(console: Console) -> Option<usize> {
     match console {
@@ -178,6 +197,19 @@ fn indice(console: Console) -> Option<usize> {
             (i < crate::pseudoterminal::TERMINAIS).then_some(1 + i)
         }
     }
+}
+
+/// O console da posição `i` da tabela — o inverso de [`indice`].
+fn console_na(i: usize) -> Console {
+    match i {
+        0 => Console::Fisico,
+        i => Console::Terminal((i - 1) as u16),
+    }
+}
+
+/// O console espera um comando que suspendeu?
+pub fn ocupado(console: Console) -> bool {
+    indice(console).is_some_and(|i| crate::arch::sem_interrupcoes(|| SUSPENSOS.lock()[i].is_some()))
 }
 
 fn com_estado<R>(console: Console, f: impl FnOnce(&mut Estado) -> R) -> Option<R> {
@@ -228,11 +260,129 @@ pub async fn atender() {
     abrir_console(Console::Fisico);
 
     loop {
-        match crate::teclado::proxima_entrada().await {
-            crate::teclado::Entrada::Console(console, c) => tratar(console, c),
-            crate::teclado::Entrada::Janela(c) => tratar_tecla_de_janela(c),
+        match (Proximo { relogio: None }).await {
+            Evento::Entrada(crate::teclado::Entrada::Console(console, c)) => tratar(console, c),
+            Evento::Entrada(crate::teclado::Entrada::Janela(c)) => tratar_tecla_de_janela(c),
+            Evento::Retomar => {
+                retomar_suspensos();
+            }
         }
     }
+}
+
+/// O que acorda o interpretador.
+#[cfg(not(feature = "modo-teste"))]
+enum Evento {
+    /// Uma entrada de um console que não espera comando, ou de uma janela.
+    Entrada(crate::teclado::Entrada),
+    /// A espera de um comando suspenso acabou.
+    Retomar,
+}
+
+/// O próximo [`Evento`]: a entrada de um console livre ou de uma janela; o
+/// evento da conexão por que um comando suspenso espera — a pilha acorda a
+/// tarefa —; ou o prazo mais próximo, pelo relógio.
+#[cfg(not(feature = "modo-teste"))]
+struct Proximo {
+    relogio: Option<crate::tarefas::relogio::Dormir>,
+}
+
+#[cfg(not(feature = "modo-teste"))]
+impl core::future::Future for Proximo {
+    type Output = Evento;
+
+    fn poll(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context,
+    ) -> core::task::Poll<Evento> {
+        use core::task::Poll;
+        let este = self.get_mut();
+        // Cada conferência deixa o waker desta tarefa no socket da conexão.
+        let (acabou, prazo, ocupados) = crate::arch::sem_interrupcoes(|| {
+            let tabela = SUSPENSOS.lock();
+            let acabou = tabela
+                .iter()
+                .flatten()
+                .any(|s| s.espera.conferir(Some(cx.waker())).is_some());
+            let prazo = tabela.iter().flatten().map(|s| s.espera.prazo()).min();
+            let ocupados = tabela
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| s.is_some())
+                .fold(0u32, |m, (i, _)| m | (1 << i));
+            (acabou, prazo, ocupados)
+        });
+        if acabou {
+            return Poll::Ready(Evento::Retomar);
+        }
+        let entrada = core::pin::Pin::new(&mut crate::teclado::proxima_entrada(ocupados)).poll(cx);
+        if let Poll::Ready(e) = entrada {
+            return Poll::Ready(Evento::Entrada(e));
+        }
+        let Some(prazo) = prazo else {
+            este.relogio = None;
+            return Poll::Pending;
+        };
+        if este.relogio.as_ref().is_none_or(|r| r.alvo() != prazo) {
+            este.relogio = Some(crate::tarefas::relogio::ate_o_tique(prazo));
+        }
+        match este
+            .relogio
+            .as_mut()
+            .map(|r| core::pin::Pin::new(r).poll(cx))
+        {
+            Some(Poll::Ready(())) => Poll::Ready(Evento::Retomar),
+            _ => Poll::Pending,
+        }
+    }
+}
+
+/// Executa de novo os comandos suspensos cuja espera acabou — conferida sem
+/// registrar waker nenhum —, cada um no console dele, e devolve quantos.
+///
+/// Pelo mesmo caminho da primeira vez: a mesma linha, o mesmo gate, com a
+/// sessão de quem está no console agora. Um console que reabriu ou fechou
+/// durante a espera não recebe nada.
+pub fn retomar_suspensos() -> usize {
+    let prontos: alloc::vec::Vec<(Console, Suspenso, crate::rede::espera::Desfecho)> =
+        crate::arch::sem_interrupcoes(|| {
+            let mut tabela = SUSPENSOS.lock();
+            let mut prontos = alloc::vec::Vec::new();
+            for (i, vaga) in tabela.iter_mut().enumerate() {
+                if let Some(d) = vaga.as_ref().and_then(|s| s.espera.conferir(None))
+                    && let Some(s) = vaga.take()
+                {
+                    prontos.push((console_na(i), s, d));
+                }
+            }
+            prontos
+        });
+    let mut retomados = 0;
+    for (console, suspenso, desfecho) in prontos {
+        let Suspenso {
+            abertura,
+            linha,
+            origem,
+            espera,
+        } = suspenso;
+        drop(espera);
+        if com_estado(console, |e| e.abertura) != Some(abertura) {
+            crate::log_info!(
+                "console",
+                "{}: o console mudou durante a espera ({:?}); nada a mostrar",
+                console.texto(),
+                desfecho
+            );
+            continue;
+        }
+        let texto = core::str::from_utf8(linha.como_bytes()).unwrap_or("");
+        // A espera acabou: a reexecução responde, e não suspende de novo.
+        let (_, espera) = executar(console, texto, origem, false);
+        drop(espera);
+        mostrar_prompt(console);
+        retomados += 1;
+    }
+    retomados
 }
 
 /// Abre um console: sem ninguém entrado, a linha vazia, e o convite para
@@ -262,12 +412,31 @@ pub fn abrir_console(console: Console) {
         sobra
     })
     .flatten();
+    largar_suspenso(console);
     if let Some(id) = sobra {
         crate::pessoas::encerrar_pelo_console(id, "o console reabriu");
     }
     if console == Console::Fisico {
         crate::ui::mudou();
     }
+}
+
+/// Larga o comando suspenso do console, se há um: o console reabriu ou
+/// fechou, e quem confirmou a linha não está mais nele. A espera desarma, e
+/// a entrada do console volta a ser lida. Fora das duas travas.
+fn largar_suspenso(console: Console) {
+    let Some(i) = indice(console) else {
+        return;
+    };
+    let suspenso = crate::arch::sem_interrupcoes(|| SUSPENSOS.lock()[i].take());
+    if suspenso.is_some() {
+        crate::log_info!(
+            "console",
+            "{}: o comando que esperava foi largado; o console mudou",
+            console.texto()
+        );
+    }
+    drop(suspenso);
 }
 
 /// Fecha um console: a sessão de quem estava nele acaba, e o que ele
@@ -288,6 +457,7 @@ pub fn fechar_console(console: Console, motivo: &str) {
     .zip(indice(console)) else {
         return;
     };
+    largar_suspenso(console);
     crate::teclado::pedindo_senha(i, false);
     if let Some(id) = sessao {
         crate::pessoas::encerrar_pelo_console(id, motivo);
@@ -718,6 +888,9 @@ pub fn pode_confirmar(origem: Origem) -> Result<(), &'static str> {
     {
         return Err("a linha esta pedindo o login de uma pessoa; so se confirma pelo teclado");
     }
+    if ocupado(Console::Fisico) {
+        return Err("o console espera um comando que ainda nao respondeu");
+    }
     Ok(())
 }
 
@@ -733,6 +906,15 @@ fn confirmar_em(console: Console, origem: Origem) -> alloc::string::String {
     let Some(modo) = com_estado(console, |e| e.modo) else {
         return alloc::string::String::new();
     };
+    // Um comando de cada vez: o seguinte só depois que o suspenso responder.
+    if ocupado(console) {
+        crate::log_warn!(
+            "console",
+            "{}: a linha nao foi confirmada; um comando ainda espera",
+            console.texto()
+        );
+        return alloc::string::String::new();
+    }
     if modo != Modo::Comando {
         if let Origem::Agente(_) = origem {
             return alloc::string::String::new();
@@ -755,8 +937,51 @@ fn confirmar_em(console: Console, origem: Origem) -> alloc::string::String {
         return alloc::string::String::new();
     };
     let linha = core::str::from_utf8(&copia[..tam]).unwrap_or("");
-    let nome = executar(console, linha, origem);
-    mostrar_prompt(console);
+    match executar(console, linha, origem, true) {
+        // O comando suspendeu: o console espera por ele, sem prompt, e o
+        // interpretador o executa de novo quando a espera acabar.
+        (nome, Some(espera)) => {
+            suspender(console, linha, origem, espera);
+            nome
+        }
+        (nome, None) => {
+            mostrar_prompt(console);
+            nome
+        }
+    }
+}
+
+/// Guarda o comando que suspendeu no console, e acorda o interpretador:
+/// quem confirmou pode ter sido outra tarefa — um agente, pela árvore —, e
+/// é a tarefa do interpretador que espera pela conexão.
+fn suspender(console: Console, linha: &str, origem: Origem, espera: crate::rede::espera::Espera) {
+    let (Some(i), Some(abertura)) = (indice(console), com_estado(console, |e| e.abertura)) else {
+        return;
+    };
+    let mut texto = politica::sigiloso::Texto::novo();
+    texto.acrescentar(linha.as_bytes());
+    let anterior = crate::arch::sem_interrupcoes(|| {
+        SUSPENSOS.lock()[i].replace(Suspenso {
+            abertura,
+            linha: texto,
+            origem,
+            espera,
+        })
+    });
+    // Não há: um console ocupado não confirma outra linha. Se houvesse, a
+    // espera dele é desarmada aqui, fora da trava.
+    drop(anterior);
+    crate::teclado::despertar_o_interpretador();
+}
+
+/// Só para a suíte: põe `linha` na linha do console e a confirma, como a
+/// pessoa no Enter; devolve o nome do comando executado — vazio se nada
+/// foi —, e deixa a linha vazia.
+#[cfg(feature = "modo-teste")]
+pub fn confirmar_de_teste(console: Console, linha: &str) -> alloc::string::String {
+    let _ = definir_em(console, linha);
+    let nome = confirmar_em(console, Origem::Pessoa);
+    let _ = definir_em(console, "");
     nome
 }
 
@@ -1013,27 +1238,43 @@ pub fn separar(linha: &str) -> (&str, &str) {
     }
 }
 
-/// Executa uma linha, e devolve o nome do comando que ela pedia.
-fn executar(console: Console, linha: &str, origem: Origem) -> alloc::string::String {
+/// Executa uma linha, e devolve o nome do comando que ela pedia — e a
+/// espera, se ele suspendeu: só com `permitir`. Ver [`suspender`].
+fn executar(
+    console: Console,
+    linha: &str,
+    origem: Origem,
+    permitir: bool,
+) -> (alloc::string::String, Option<crate::rede::espera::Espera>) {
     let linha = linha.trim();
     if linha.is_empty() {
-        return alloc::string::String::new();
+        return (alloc::string::String::new(), None);
     }
 
     let (nome, params) = separar(linha);
 
-    match (nome, origem) {
-        ("ajuda", _) => ajuda(console, origem),
+    let espera = match (nome, origem) {
+        ("ajuda", _) => {
+            ajuda(console, origem);
+            None
+        }
         // O login e a saída são da pessoa no console. Um agente que os
         // confirmasse estaria entrando por alguém, ou tirando alguém dali.
         ("login" | "logout", Origem::Agente(_)) => {
             saidaln!(console, "`{}` e da pessoa no console, pelo teclado", nome);
+            None
         }
-        ("login", Origem::Pessoa) => comecar_login(console, params),
-        ("logout", Origem::Pessoa) => sair(console),
-        _ => despachar(console, nome, params, origem),
-    }
-    alloc::string::String::from(nome)
+        ("login", Origem::Pessoa) => {
+            comecar_login(console, params);
+            None
+        }
+        ("logout", Origem::Pessoa) => {
+            sair(console);
+            None
+        }
+        _ => despachar(console, nome, params, origem, permitir),
+    };
+    (alloc::string::String::from(nome), espera)
 }
 
 /// `login`: pede o nome, ou — com o nome junto, `login maria` — a senha.
@@ -1066,8 +1307,15 @@ fn sair(console: Console) {
     }
 }
 
-/// Manda o comando ao registro do agente e desenha a resposta.
-fn despachar(console: Console, nome: &str, params: &str, origem: Origem) {
+/// Manda o comando ao registro do agente e desenha a resposta — ou, se ele
+/// suspendeu, não desenha nada e devolve a espera.
+fn despachar(
+    console: Console,
+    nome: &str,
+    params: &str,
+    origem: Origem,
+    permitir: bool,
+) -> Option<crate::rede::espera::Espera> {
     // Quem pede: o agente que confirmou, como a sessão dele; ou a pessoa do
     // console, pela sessão dela. Sem ninguém entrado, nada: o pedido é
     // recusado antes de se saber se o comando existe, e gravado.
@@ -1081,7 +1329,7 @@ fn despachar(console: Console, nome: &str, params: &str, origem: Origem) {
                     console,
                     "negado: DENY_NOT_AUTHENTICATED; `login` para entrar"
                 );
-                return;
+                return None;
             }
         },
     };
@@ -1093,7 +1341,7 @@ fn despachar(console: Console, nome: &str, params: &str, origem: Origem) {
             "`ajuda` lista os {} que existem",
             registry::todos().len()
         );
-        return;
+        return None;
     };
 
     // No log, e não só na tela, porque é o que torna o interpretador
@@ -1115,7 +1363,7 @@ fn despachar(console: Console, nome: &str, params: &str, origem: Origem) {
     if let Err(campo) = registry::validar(comando, params) {
         autorizacao::auditar_invalido(chamador, comando.nome, params.0, campo);
         saidaln!(console, "parametro invalido: {}", campo);
-        return;
+        return None;
     }
     let licenca = match autorizacao::autorizar(chamador, comando, params) {
         Ok(l) => l,
@@ -1126,18 +1374,24 @@ fn despachar(console: Console, nome: &str, params: &str, origem: Origem) {
             if let Chamador::Pessoa(_) = chamador {
                 let _ = sessao_valida(console);
             }
-            return;
+            return None;
         }
     };
 
     let mut saida = SaidaHumana::nova(console);
     let mut escritor = JsonWriter::new(&mut saida);
-    let escreveu = licenca.executar(params, &mut escritor);
+    let (escreveu, espera) =
+        licenca.executar_suspensivel(params, alloc::vec::Vec::new(), permitir, &mut escritor);
+    // Suspenso: o handler não escreveu nada, e não há o que descarregar.
+    if espera.is_some() {
+        return espera;
+    }
     saida.descarregar();
     if escreveu.is_err() {
         saidaln!(console, "a resposta nao coube");
     }
     saidaln!(console);
+    None
 }
 
 /// Lista o que se pode fazer neste console.

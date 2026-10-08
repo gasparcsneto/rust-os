@@ -33,6 +33,16 @@
 //! no buffer do programa. Descartá-la seria perder de vista o efeito. Ela
 //! fica no fio até `resposta` a buscar; o pedido seguinte descarta a que não
 //! foi buscada.
+//!
+//! # O pedido suspenso
+//!
+//! Um comando que espera — o `net.recv` com `wait` — não prende o executor:
+//! suspende, e o pedido fica aqui, em [`SUSPENSOS`], com a espera que ele
+//! armou, enquanto a tarefa atende os outros processos. O fio segue
+//! esperando a resposta, como em qualquer pedido. A pilha acorda a tarefa
+//! no evento da conexão, o relógio no prazo, e o pedido é executado de
+//! novo, inteiro, pelo gate — com a autoridade e o programa do fio de
+//! agora —, e a resposta vai ao fio. Ver [`crate::rede::espera`].
 
 use core::sync::atomic::{AtomicU64, Ordering};
 use core::task::Waker;
@@ -58,6 +68,18 @@ static FILA: Fila<u64, { 2 * crate::fios::MAX_FIOS }> = Fila::nova();
 
 /// Quem acordar quando um pedido chega: a tarefa do executor.
 static DESPERTADOR: Mutex<Option<Waker>> = Mutex::new(None);
+
+/// Um pedido de processo que suspendeu: o fio que espera a resposta, o
+/// texto do pedido — executado de novo quando a espera acabar — e a espera.
+struct Suspenso {
+    fio: u64,
+    pedido: Texto,
+    espera: crate::rede::espera::Espera,
+}
+
+/// Os pedidos suspensos dos processos. No máximo um por fio — um fio tem um
+/// pedido de cada vez —, e um por conexão: a espera armada é única nela.
+static SUSPENSOS: Mutex<alloc::vec::Vec<Suspenso>> = Mutex::new(alloc::vec::Vec::new());
 
 /// Quantos pedidos de processo foram atendidos, e quantos recusados antes de
 /// chegar a um comando — JSON quebrado, método desconhecido, parâmetro errado.
@@ -196,24 +218,102 @@ pub fn atender_pendentes() -> usize {
             autoridade,
             programa,
         };
-        let resposta = responder_como(chamador, pedido.como_bytes());
-        drop(pedido);
-        // O fio morreu enquanto o comando executava: a resposta se apaga, e
-        // a janela de nonces que o comando possa ter aberto também — o
-        // coletor pode tê-la esquecido antes de o comando terminar.
-        if let Some(sobra) = crate::fios::responder_pedido(id, resposta) {
-            drop(sobra);
-            crate::mensagens::canal_acabou(politica::mensagens::Canal::Processo(id));
+        match responder_como(chamador, pedido.como_bytes(), true) {
+            Ok(resposta) => {
+                drop(pedido);
+                entregar(id, resposta);
+            }
+            // Suspenso: o fio segue esperando, e o pedido fica para depois.
+            Err(espera) => crate::arch::sem_interrupcoes(|| {
+                SUSPENSOS.lock().push(Suspenso {
+                    fio: id,
+                    pedido,
+                    espera,
+                })
+            }),
         }
-        ATENDIDOS.fetch_add(1, Ordering::Relaxed);
         atendidos += 1;
     }
-    atendidos
+    atendidos + retomar_suspensos()
+}
+
+/// A resposta de um pedido vai ao fio `id`.
+fn entregar(id: u64, resposta: Texto) {
+    // O fio morreu enquanto o comando executava: a resposta se apaga, e
+    // a janela de nonces que o comando possa ter aberto também — o
+    // coletor pode tê-la esquecido antes de o comando terminar.
+    if let Some(sobra) = crate::fios::responder_pedido(id, resposta) {
+        drop(sobra);
+        crate::mensagens::canal_acabou(politica::mensagens::Canal::Processo(id));
+    }
+    ATENDIDOS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Executa de novo os pedidos suspensos cuja espera acabou, e entrega cada
+/// resposta ao fio que espera por ela. Devolve quantos.
+///
+/// A conferência não registra waker nenhum: quem espera é a tarefa, em
+/// [`ProximoPedido`], e um waker daqui apagaria o dela no socket.
+fn retomar_suspensos() -> usize {
+    let prontos: alloc::vec::Vec<(Suspenso, crate::rede::espera::Desfecho)> =
+        crate::arch::sem_interrupcoes(|| {
+            let mut lista = SUSPENSOS.lock();
+            let mut prontos = alloc::vec::Vec::new();
+            let mut i = 0;
+            while i < lista.len() {
+                match lista[i].espera.conferir(None) {
+                    Some(d) => prontos.push((lista.remove(i), d)),
+                    None => i += 1,
+                }
+            }
+            prontos
+        });
+    let mut retomados = 0;
+    for (suspenso, desfecho) in prontos {
+        let Suspenso {
+            fio,
+            pedido,
+            espera,
+        } = suspenso;
+        // Desarmada antes da reexecução, fora da trava da lista.
+        drop(espera);
+        // O fio ainda espera por este pedido? Com a autoridade e o programa
+        // que ele tem agora. Morto, não há a quem responder, e o pedido
+        // não é executado em nome de ninguém.
+        let Some((autoridade, programa)) = crate::fios::pedido_em_curso(fio) else {
+            crate::log_debug!(
+                "nativo",
+                "o fio {} acabou com o pedido suspenso ({:?})",
+                fio,
+                desfecho
+            );
+            continue;
+        };
+        let chamador = Chamador::Processo {
+            fio,
+            autoridade,
+            programa,
+        };
+        // A espera acabou: a reexecução responde com o que houver, e não
+        // suspende de novo.
+        if let Ok(resposta) = responder_como(chamador, pedido.como_bytes(), false) {
+            drop(pedido);
+            entregar(fio, resposta);
+            retomados += 1;
+        }
+    }
+    retomados
 }
 
 /// Decodifica um pedido, decide e executa o comando como `chamador`, e
-/// monta a resposta — os mesmos passos do canal, na mesma ordem.
-fn responder_como(chamador: Chamador, pedido: &[u8]) -> Texto {
+/// monta a resposta — os mesmos passos do canal, na mesma ordem. `Err` com
+/// a espera, se o comando suspendeu — só com `permitir`: então o envelope
+/// começado se apaga, e o pedido é executado de novo quando ela acabar.
+fn responder_como(
+    chamador: Chamador,
+    pedido: &[u8],
+    permitir: bool,
+) -> Result<Texto, crate::rede::espera::Espera> {
     // O pedido e o anexo, se veio um.
     let (linha, anexo) = match pedido.iter().position(|&b| b == SEPARADOR_DO_ANEXO) {
         Some(i) => (&pedido[..i], pedido[i + 1..].to_vec()),
@@ -221,17 +321,23 @@ fn responder_como(chamador: Chamador, pedido: &[u8]) -> Texto {
     };
     let linha = crate::agent::limpar_quadro(linha);
     let mut texto = Texto::novo();
+    let mut espera = None;
     {
         let mut w = JsonWriter::new(&mut texto);
-        let _ = responder(chamador, linha, anexo, &mut w);
+        let _ = responder(chamador, linha, anexo, permitir, &mut espera, &mut w);
     }
-    texto
+    match espera {
+        Some(e) => Err(e),
+        None => Ok(texto),
+    }
 }
 
 fn responder(
     chamador: Chamador,
     linha: &[u8],
     mut anexo: alloc::vec::Vec<u8>,
+    permitir: bool,
+    espera: &mut Option<crate::rede::espera::Espera>,
     w: &mut JsonWriter,
 ) -> core::fmt::Result {
     let requisicao = match Requisicao::parse(linha) {
@@ -269,7 +375,14 @@ fn responder(
         }
     };
     let r = protocol::envelope_ok(w, requisicao.id, |w| {
-        licenca.executar_com_anexo(requisicao.params, core::mem::take(&mut anexo), w)
+        let (r, e) = licenca.executar_suspensivel(
+            requisicao.params,
+            core::mem::take(&mut anexo),
+            permitir,
+            w,
+        );
+        *espera = e;
+        r
     });
     // Um anexo que o pedido não chegou a usar — recusado antes — sai zerado.
     politica::sigiloso::zerar_bloco(&mut anexo);
@@ -281,31 +394,65 @@ fn responder(
 #[cfg(not(feature = "modo-teste"))]
 pub async fn servir() {
     loop {
-        ProximoPedido.await;
+        ProximoPedido { relogio: None }.await;
         atender_pendentes();
     }
 }
 
-/// Fica pronto quando há pedido na fila.
-#[cfg(not(feature = "modo-teste"))]
-struct ProximoPedido;
+/// Fica pronto quando há pedido na fila, ou quando a espera de um pedido
+/// suspenso acabou: a pilha acorda a tarefa no evento da conexão, e o
+/// relógio no prazo mais próximo. Na suíte, que não tem a tarefa, um caso
+/// o consulta com o waker dele — ver `consultar_de_teste`, que só existe
+/// no `modo-teste`.
+struct ProximoPedido {
+    relogio: Option<crate::tarefas::relogio::Dormir>,
+}
 
-#[cfg(not(feature = "modo-teste"))]
 impl core::future::Future for ProximoPedido {
     type Output = ();
 
     fn poll(self: core::pin::Pin<&mut Self>, cx: &mut core::task::Context) -> core::task::Poll<()> {
+        use core::task::Poll;
+        let este = self.get_mut();
         if !FILA.vazia() {
-            return core::task::Poll::Ready(());
+            return Poll::Ready(());
         }
         let waker = cx.waker().clone();
         crate::arch::sem_interrupcoes(|| *DESPERTADOR.lock() = Some(waker));
         // De novo, com o despertador no lugar: um pedido que chegou entre a
         // primeira olhada e o registro não pode ficar esperando o próximo.
-        if FILA.vazia() {
-            core::task::Poll::Pending
-        } else {
-            core::task::Poll::Ready(())
+        if !FILA.vazia() {
+            return Poll::Ready(());
+        }
+        // Os suspensos: cada conferência deixa o waker desta tarefa no
+        // socket da conexão, e o prazo mais próximo fica com o relógio.
+        let (acabou, prazo) = crate::arch::sem_interrupcoes(|| {
+            let lista = SUSPENSOS.lock();
+            let acabou = lista
+                .iter()
+                .any(|s| s.espera.conferir(Some(cx.waker())).is_some());
+            (acabou, lista.iter().map(|s| s.espera.prazo()).min())
+        });
+        if acabou {
+            return Poll::Ready(());
+        }
+        match prazo {
+            Some(prazo) => {
+                let relogio = este
+                    .relogio
+                    .get_or_insert_with(|| crate::tarefas::relogio::ate_o_tique(prazo));
+                if relogio.alvo() != prazo {
+                    *relogio = crate::tarefas::relogio::ate_o_tique(prazo);
+                }
+                match core::pin::Pin::new(relogio).poll(cx) {
+                    Poll::Ready(()) => Poll::Ready(()),
+                    Poll::Pending => Poll::Pending,
+                }
+            }
+            None => {
+                este.relogio = None;
+                Poll::Pending
+            }
         }
     }
 }
@@ -327,6 +474,7 @@ pub unsafe fn destravar() {
     unsafe {
         FILA.destravar();
         DESPERTADOR.force_unlock();
+        SUSPENSOS.force_unlock();
     }
 }
 
@@ -335,8 +483,55 @@ pub unsafe fn destravar() {
 /// processo com a de quem o lançou, pela mesma função.
 #[cfg(feature = "modo-teste")]
 pub fn responder_de_teste(chamador: Chamador, linha: &str) -> alloc::string::String {
-    let texto = responder_como(chamador, linha.as_bytes());
+    // Sem suspensão: um `wait` responde na hora, como no modo post-mortem.
+    let texto = responder_como(chamador, linha.as_bytes(), false).unwrap_or_default();
     alloc::string::String::from_utf8_lossy(texto.como_bytes()).into_owned()
+}
+
+/// Só para a suíte: [`responder_de_teste`], com o comando podendo
+/// suspender, como na primeira execução de um pedido. `Err` com a espera:
+/// a suíte confere o desfecho e executa de novo pelo
+/// [`responder_de_teste`], como a tarefa faria.
+#[cfg(feature = "modo-teste")]
+pub fn responder_suspensivel_de_teste(
+    chamador: Chamador,
+    linha: &str,
+) -> Result<alloc::string::String, crate::rede::espera::Espera> {
+    let texto = responder_como(chamador, linha.as_bytes(), true)?;
+    Ok(alloc::string::String::from_utf8_lossy(texto.como_bytes()).into_owned())
+}
+
+/// Só para a suíte: guarda como suspenso o pedido `linha` do fio `fio`,
+/// com a espera dele — o que [`atender_pendentes`] faz quando um comando
+/// suspende.
+#[cfg(feature = "modo-teste")]
+pub fn suspender_de_teste(fio: u64, linha: &str, espera: crate::rede::espera::Espera) {
+    let mut pedido = Texto::novo();
+    pedido.acrescentar(linha.as_bytes());
+    crate::arch::sem_interrupcoes(|| {
+        SUSPENSOS.lock().push(Suspenso {
+            fio,
+            pedido,
+            espera,
+        })
+    });
+}
+
+/// Só para a suíte: consulta uma vez o futuro da tarefa `programas` com
+/// `waker`, como o executor faria — e com isso o deixa nos sockets das
+/// esperas suspensas. Verdadeiro se ele estava pronto.
+#[cfg(feature = "modo-teste")]
+pub fn consultar_de_teste(waker: &Waker) -> bool {
+    use core::future::Future;
+    let mut proximo = ProximoPedido { relogio: None };
+    let mut cx = core::task::Context::from_waker(waker);
+    core::pin::Pin::new(&mut proximo).poll(&mut cx).is_ready()
+}
+
+/// Só para a suíte: quantos pedidos de processo estão suspensos.
+#[cfg(feature = "modo-teste")]
+pub fn suspensos_de_teste() -> usize {
+    crate::arch::sem_interrupcoes(|| SUSPENSOS.lock().len())
 }
 
 /// Só para a suíte: [`responder_de_teste`], com um anexo — como chega pela
@@ -352,7 +547,7 @@ pub fn responder_com_anexo_de_teste(
         pedido.push(SEPARADOR_DO_ANEXO);
         pedido.extend_from_slice(anexo);
     }
-    let texto = responder_como(chamador, &pedido);
+    let texto = responder_como(chamador, &pedido, false).unwrap_or_default();
     alloc::string::String::from_utf8_lossy(texto.como_bytes()).into_owned()
 }
 
@@ -389,6 +584,6 @@ pub fn tomar_de_teste() -> Option<(u64, Texto, Chamador)> {
 /// Falso se o fio não a recebeu — não estava mais esperando por ela.
 #[cfg(feature = "modo-teste")]
 pub fn responder_tomado_de_teste(id: u64, texto: &Texto, chamador: Chamador) -> bool {
-    let resposta = responder_como(chamador, texto.como_bytes());
+    let resposta = responder_como(chamador, texto.como_bytes(), false).unwrap_or_default();
     crate::fios::responder_pedido(id, resposta).is_none()
 }

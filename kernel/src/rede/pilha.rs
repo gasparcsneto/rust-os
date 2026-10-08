@@ -10,7 +10,8 @@
 //!   pilha é a **única** que colhe da placa, ver [`super`];
 //! - o endereço, pelo DHCP do emulador, e o que `net.info` diz dele;
 //! - a tabela das conexões, com o dono de cada uma — ver [`super::conexoes`]
-//!   para a regra, que é de lá;
+//!   para a regra, que é de lá —, e a espera armada em cada uma — ver
+//!   [`super::espera`];
 //! - o fio `rede`, que faz a pilha andar.
 //!
 //! # Quem faz a pilha andar
@@ -35,6 +36,7 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
+use core::task::Waker;
 
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
@@ -47,6 +49,7 @@ use crate::virtio::net::MAIOR_QUADRO;
 use politica::endereco::Destino;
 
 use super::conexoes::Dono;
+use super::espera::Desfecho;
 
 /// Quantas conexões vivas a máquina toda tem, no máximo.
 pub const MAIS_CONEXOES: usize = 16;
@@ -107,6 +110,18 @@ struct Conexao {
     socket: SocketHandle,
     enviados: u64,
     recebidos: u64,
+    /// O número da espera armada nesta conexão, se há uma — no máximo uma,
+    /// ver [`super::espera`].
+    espera: Option<u64>,
+    /// O último estado que uma resposta disse ao dono — a de `net.connect`,
+    /// `net.send` ou `net.recv`. Uma espera só arma se o estado ainda é
+    /// este: o que mudou desde a última resposta é novidade para quem pede,
+    /// e a resposta a dá na hora. Sem isto, o `net.recv` que espera o
+    /// aperto chegava depois de ele terminar — entre a resposta do
+    /// `net.connect` e o pedido seguinte — e esperava um dado que o eco só
+    /// manda quando recebe, até o prazo: medido na bancada, cinco segundos
+    /// de um aperto que levou milissegundos.
+    relatado: Estado,
 }
 
 /// O que `net.info` diz da pilha.
@@ -144,6 +159,9 @@ struct Pilha {
     proximo_id: u64,
     proxima_porta: u16,
     abertas: u64,
+    /// O número da próxima espera armada. Cresce sem voltar, como o das
+    /// conexões: uma espera que acabou não desarma a seguinte.
+    proxima_espera: u64,
 }
 
 static PILHA: Mutex<Option<Pilha>> = Mutex::new(None);
@@ -269,6 +287,7 @@ pub fn iniciar() {
             proximo_id: 1,
             proxima_porta: porta_inicial,
             abertas: 0,
+            proxima_espera: 1,
         });
     });
     match crate::fios::criar("rede", laco, 0) {
@@ -407,6 +426,9 @@ pub fn abrir(dono: Dono, destino: Destino) -> Result<(u64, Estado), &'static str
         let id = p.proximo_id;
         p.proximo_id += 1;
         p.abertas += 1;
+        // O SYN sai já, e não no próximo tique.
+        let _ = p.sondar();
+        let estado = Estado::de(p.sockets.get::<tcp::Socket>(socket).state());
         p.conexoes.push(Conexao {
             id,
             dono,
@@ -414,10 +436,9 @@ pub fn abrir(dono: Dono, destino: Destino) -> Result<(u64, Estado), &'static str
             socket,
             enviados: 0,
             recebidos: 0,
+            espera: None,
+            relatado: estado,
         });
-        // O SYN sai já, e não no próximo tique.
-        let _ = p.sondar();
-        let estado = Estado::de(p.sockets.get::<tcp::Socket>(socket).state());
         Ok((id, estado))
     });
     r.unwrap_or(Err("a pilha de rede nao esta no ar"))
@@ -433,7 +454,9 @@ pub fn mandar(id: u64, dono: &Dono, dados: &[u8]) -> Result<(usize, Estado), &'s
         let h = p.conexoes[i].socket;
         let socket = p.sockets.get_mut::<tcp::Socket>(h);
         if !socket.may_send() {
-            return Ok((0, Estado::de(socket.state())));
+            let estado = Estado::de(socket.state());
+            p.conexoes[i].relatado = estado;
+            return Ok((0, estado));
         }
         let aceitos = socket
             .send_slice(dados)
@@ -441,6 +464,7 @@ pub fn mandar(id: u64, dono: &Dono, dados: &[u8]) -> Result<(usize, Estado), &'s
         p.conexoes[i].enviados += aceitos as u64;
         let _ = p.sondar();
         let estado = Estado::de(p.sockets.get::<tcp::Socket>(h).state());
+        p.conexoes[i].relatado = estado;
         Ok((aceitos, estado))
     });
     r.unwrap_or(Err("a pilha de rede nao esta no ar"))
@@ -460,7 +484,9 @@ pub fn espiar(id: u64, dono: &Dono, maximo: usize) -> Result<(Vec<u8>, Estado), 
             0
         };
         dados.truncate(n);
-        Ok((dados, Estado::de(socket.state())))
+        let estado = Estado::de(socket.state());
+        p.conexoes[i].relatado = estado;
+        Ok((dados, estado))
     });
     r.unwrap_or(Err("a pilha de rede nao esta no ar"))
 }
@@ -479,6 +505,117 @@ pub fn consumir(id: u64, dono: &Dono, quantos: usize) -> Result<(), &'static str
         Ok(())
     });
     r.unwrap_or(Err("a pilha de rede nao esta no ar"))
+}
+
+/// Arma a espera de um `net.recv` na conexão `id` de `dono`, se não há o
+/// que dizer agora. Devolve o número da espera e o estado que ela viu;
+/// `None` quando já chegou dado, quando o estado não é mais o que a última
+/// resposta disse ao dono — ver [`Conexao::relatado`] —, ou quando a
+/// conexão está num estado de que nada mais vem — fechando ou fechada. A
+/// segunda espera na mesma conexão é recusada: ver [`super::espera`].
+pub fn armar(id: u64, dono: &Dono) -> Result<Option<(u64, Estado)>, &'static str> {
+    let r = com_pilha(|p| {
+        // O que chegou até agora conta: a espera é pelo que ainda não veio.
+        let _ = p.sondar();
+        let i = p.achar(id, dono)?;
+        let socket = p.sockets.get::<tcp::Socket>(p.conexoes[i].socket);
+        let estado = Estado::de(socket.state());
+        if socket.can_recv()
+            || estado != p.conexoes[i].relatado
+            || !matches!(estado, Estado::Conectando | Estado::Estabelecida)
+        {
+            return Ok(None);
+        }
+        if p.conexoes[i].espera.is_some() {
+            return Err("a conexao ja tem um net.recv esperando");
+        }
+        let numero = p.proxima_espera;
+        p.proxima_espera += 1;
+        p.conexoes[i].espera = Some(numero);
+        Ok(Some((numero, estado)))
+    });
+    r.unwrap_or(Err("a pilha de rede nao esta no ar"))
+}
+
+/// A espera `numero`, armada na conexão `id` de `dono` com o estado
+/// `estado`, acabou? `None` se não — e então `waker`, se veio um, fica no
+/// socket: o `smoltcp` o aciona no próximo dado que entrar, na próxima
+/// mudança de estado, e no fecho ou na derrubada.
+///
+/// Só confere: não sonda a pilha. Quem a faz andar é o fio `rede` e quem
+/// pede algo a ela, e é na volta deles que o evento acontece — e acorda.
+pub fn conferir_espera(
+    id: u64,
+    dono: &Dono,
+    numero: u64,
+    estado: Estado,
+    waker: Option<&Waker>,
+) -> Option<Desfecho> {
+    com_pilha(|p| {
+        let Ok(i) = p.achar(id, dono) else {
+            return Some(Desfecho::Sumiu);
+        };
+        if p.conexoes[i].espera != Some(numero) {
+            return Some(Desfecho::Sumiu);
+        }
+        let socket = p.sockets.get_mut::<tcp::Socket>(p.conexoes[i].socket);
+        if socket.can_recv() {
+            return Some(Desfecho::Chegou);
+        }
+        if Estado::de(socket.state()) != estado {
+            return Some(Desfecho::Mudou);
+        }
+        if let Some(w) = waker {
+            socket.register_recv_waker(w);
+        }
+        None
+    })
+    .unwrap_or(Some(Desfecho::Sumiu))
+}
+
+/// Só para a suíte: derruba o socket da conexão `id` como um `RST` do outro
+/// lado o derrubaria — a conexão fica na tabela, fechada, até o dono a
+/// fechar.
+#[cfg(feature = "modo-teste")]
+pub fn abortar_de_teste(id: u64) {
+    let _ = com_pilha(|p| {
+        if let Some(c) = p.conexoes.iter().find(|c| c.id == id) {
+            p.sockets.get_mut::<tcp::Socket>(c.socket).abort();
+        }
+        let _ = p.sondar();
+    });
+}
+
+/// Só para a suíte: o estado da conexão `id`, de quem for, sem que conte
+/// como dito ao dono — ver [`Conexao::relatado`].
+#[cfg(feature = "modo-teste")]
+pub fn estado_de_teste(id: u64) -> Option<Estado> {
+    com_pilha(|p| {
+        let _ = p.sondar();
+        p.conexoes
+            .iter()
+            .find(|c| c.id == id)
+            .map(|c| Estado::de(p.sockets.get::<tcp::Socket>(c.socket).state()))
+    })
+    .flatten()
+}
+
+/// Só para a suíte: a conexão `id`, de quem for, tem uma espera armada?
+#[cfg(feature = "modo-teste")]
+pub fn espera_armada_de_teste(id: u64) -> bool {
+    com_pilha(|p| p.conexoes.iter().any(|c| c.id == id && c.espera.is_some())).unwrap_or(false)
+}
+
+/// Desarma a espera `numero` da conexão `id` de `dono`, se ainda é ela a
+/// armada.
+pub fn desarmar(id: u64, dono: &Dono, numero: u64) {
+    let _ = com_pilha(|p| {
+        if let Ok(i) = p.achar(id, dono)
+            && p.conexoes[i].espera == Some(numero)
+        {
+            p.conexoes[i].espera = None;
+        }
+    });
 }
 
 /// Fecha a conexão: o número deixa de valer na hora, e o fecho com o outro

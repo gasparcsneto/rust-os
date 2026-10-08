@@ -206,7 +206,7 @@ $ cargo xtask agent --canal 2 agent.session
 | `net.arp` | Pergunta quem atende por um IPv4 e espera a resposta (`ip`, `from`) |
 | `net.connect` | Abre uma conexão TCP de saída para um destino no alcance do papel (`to`: `tcp:<ipv4>:<porta>`) |
 | `net.send` | Manda bytes por uma conexão sua — texto em `content` ou o anexo (`connection`, `content`, `attachment`) |
-| `net.recv` | O que chegou numa conexão sua, sem esperar, e o estado dela; texto em `utf-8` ou `base64` (`connection`, `max`) |
+| `net.recv` | O que chegou numa conexão sua, e o estado dela; com `wait`, sem nada chegado, espera a pilha ter o que dizer — o dado, o estado, o fim da conexão — até o prazo; texto em `utf-8` ou `base64` (`connection`, `max`, `wait`) |
 | `net.close` | Fecha uma conexão sua (`connection`) |
 | `video.sample` | Amostra a tela numa grade de cores (`columns`, `rows`) |
 | `display.info` | A pilha gráfica: adaptador ativo, telas, as camadas do compositor, memória das superfícies, o último retângulo que chegou à tela e, no virtio-gpu, o que atravessou para o dispositivo |
@@ -266,7 +266,8 @@ kernel/src/
 ├── rede/
 │   ├── mod.rs       o ARP do diagnóstico, e o observador que o deixa conviver com a pilha
 │   ├── pilha.rs     a pilha IP — o smoltcp sobre a placa —, o DHCP, a tabela de conexões e o fio que a faz andar
-│   └── conexoes.rs  a conexão como capacidade do registro: de quem ela é, e como o gate a decide
+│   ├── conexoes.rs  a conexão como capacidade do registro: de quem ela é, e como o gate a decide
+│   └── espera.rs    a leitura que espera: armada na conexão, acordada pela pilha ou pelo prazo, decidida de novo na entrega
 ├── traps.rs         contabilidade de exceções e modo post-mortem
 ├── nucleos.rs       os vários núcleos: quem ligou, o pulso de cada um, o aviso e o travamento de propósito
 ├── trava.rs         a trava justa, por senha, que todo o kernel usa
@@ -2144,12 +2145,63 @@ inteiro de dentro de um processo, pelo `pedir`, com o manifesto
 declarando `net.connect`: os 256 valores de um byte vão pelo anexo do
 pedido e voltam, em texto quando são texto e em `base64` quando não são; a
 porta ao lado do eco é `DENY_RESOURCE`; lançado por uma pessoa
-observadora, `DENY_PERMISSION`.
+observadora, `DENY_PERMISSION`. E ele não pergunta de novo a cada volta:
+cada leitura espera — ver a seguir.
 
-O que ainda não há: UDP, DNS e TLS; esperar dados sem perguntar (`net.recv`
-devolve o que chegou e não bloqueia — quem espera pergunta de novo, e cada
-pergunta passa pelo gate e vai para a auditoria); e o canal do agente por
-TCP. São os incrementos seguintes da fase 9.
+**A leitura que espera.** `net.recv` com `wait` — em milissegundos, até
+dez segundos — não responde vazio quando nada chegou: o pedido dorme até
+a pilha ter o que dizer — chegou dado; o estado mudou, porque o aperto
+terminou, o outro lado fechou ou a conexão caiu; a conexão acabou — ou
+até o prazo vencer. Quem acorda é a pilha: o socket do `smoltcp` guarda o
+waker de quem espera e o aciona na volta em que processa o evento, no fio
+`rede` ou no comando que a sondou. Quem espera não pergunta nada enquanto
+isso, e o prazo é o do relógio das tarefas, acordado pelo tique.
+
+```
+$ cargo xtask agent net.recv '{"connection":1,"max":0,"wait":5000}'
+{"connection":1,"state":"established","returned":0,"encoding":"utf-8","content":""}
+```
+
+O handler não espera: rodaria no executor, e prenderia atrás dele todos
+os canais, os consoles e os processos. Ele **suspende** — arma a espera
+na conexão e volta sem resposta —, e quem despachou o pedido espera por
+ele sem prender os outros: a tarefa da sessão do canal, que só atende
+aquele agente, e em que o que veio atrás do pedido, no mesmo quadro,
+espera a vez na ordem; a tarefa `programas`, que guarda os pedidos
+suspensos dos processos e segue atendendo os outros, com o fio do
+processo dormindo como em qualquer pedido; e o interpretador, que guarda
+o suspenso de cada console — a entrada daquele console fica na fila — e
+segue atendendo os outros consoles e as janelas.
+
+**A entrega é decidida de novo.** Acordado, o pedido é executado outra
+vez, inteiro, pelo mesmo gate: uma decisão nova, com a política, o
+registro e a sessão de agora, gravada na auditoria. A decisão de antes da
+espera não vale para depois dela, como a de um pedido não vale para o
+seguinte: a política que tira o destino do alcance no meio da espera
+recusa a entrega, e o dado fica na conexão. Uma leitura que espera custa
+duas decisões — a que suspendeu e a da entrega —, e não uma por volta de
+um laço. O cliente que sai durante a espera não recebe nada, e o seguinte
+na mesma porta não herda a resposta; o console que fecha ou reabre larga
+o comando que esperava.
+
+**A espera é pelo que quem pede ainda não sabe.** A conexão guarda o
+último estado que uma resposta disse ao dono — a de `net.connect`,
+`net.send` ou `net.recv` —, e a espera só arma se nada mudou desde então.
+O aperto que termina entre a resposta do `net.connect`, que disse
+`connecting`, e o `net.recv` seguinte já é novidade: a leitura responde
+`established` na hora. Armada pelo estado de agora, ela esperava um dado
+que o eco só manda quando recebe — a fumaça mediu cinco segundos de
+espera, até o prazo, por um aperto que tinha levado milissegundos.
+
+**Uma espera por conexão.** O socket guarda um waker só: a segunda espera
+na mesma conexão — o mesmo dono pedindo pelo canal e pelo Terminal em que
+confirma uma linha — apagaria a primeira, que passaria a acordar só no
+prazo. Ela é recusada, com o motivo.
+
+O que ainda não há: UDP, DNS e TLS; esperar espaço para mandar
+(`net.send` devolve quanto coube, e não espera o buffer de saída
+esvaziar); e o canal do agente por TCP. São os incrementos seguintes da
+fase 9.
 
 ### As mutações da rede
 
@@ -4467,9 +4519,11 @@ padronizado.
       `net.connect`, `net.send`, `net.recv`, `net.close` —, com o destino
       enumerado na política, decidida a cada uso, de quem a abriu e
       derrubada quando o dono acaba; e o programa `discador`, que conversa
-      com o eco da bancada de dentro de um processo. Ver
-      [Rede nativa](#rede-nativa). Faltam UDP, DNS, TLS, a espera sem
-      pergunta e o canal do agente por TCP.
+      com o eco da bancada de dentro de um processo; e a leitura que
+      espera o evento da pilha — `net.recv` com `wait` —, suspensa sem
+      prender o executor e decidida de novo na entrega. Ver
+      [Rede nativa](#rede-nativa). Faltam UDP, DNS, TLS e o canal do
+      agente por TCP.
 - [x] **Fase 10 — GPU, composição e a árvore semântica.** Começou antes da
       6, pela parte que não depende de vários núcleos. Feito: a pilha gráfica
       no desenho do Redox — um trait de adaptador que o compositor usa sem

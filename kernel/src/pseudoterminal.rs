@@ -229,6 +229,15 @@ pub fn com_o_anel_preso_de_teste<R>(indice: u8, f: impl FnOnce() -> R) -> R {
     })
 }
 
+/// Só para a suíte: digita `texto` na fila de entrada da instância
+/// `indice`, como o programa do Terminal digitaria.
+#[cfg(feature = "modo-teste")]
+pub fn digitar_de_teste(indice: u8, texto: &str) {
+    for c in texto.chars() {
+        let _ = ENTRADAS[usize::from(indice)].enfileirar(c);
+    }
+}
+
 /// Só para a suíte: tira tudo o que o anel da instância `indice` guarda.
 #[cfg(feature = "modo-teste")]
 pub fn tirar_de_teste(indice: u8) -> alloc::vec::Vec<u8> {
@@ -379,12 +388,17 @@ fn e_digitavel(c: char) -> bool {
 
 /// O próximo caractere digitado em algum pseudo-terminal, com o console de
 /// onde veio. Uma volta pelas instâncias, a partir da seguinte à da última
-/// vez: um Terminal que digita muito não deixa os outros esperando.
-pub fn proxima_entrada() -> Option<(Console, char)> {
+/// vez: um Terminal que digita muito não deixa os outros esperando. As
+/// instâncias que `pular` diz — o console delas espera um comando — ficam
+/// com a entrada na fila.
+pub fn proxima_entrada(pular: impl Fn(usize) -> bool) -> Option<(Console, char)> {
     static VEZ: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
     let comeco = VEZ.load(Ordering::Relaxed);
     for passo in 0..TERMINAIS {
         let i = (comeco + passo) % TERMINAIS;
+        if pular(i) {
+            continue;
+        }
         if let Some(c) = ENTRADAS[i].desenfileirar() {
             VEZ.store(i + 1, Ordering::Relaxed);
             return Some((Console::Terminal(i as u16), c));

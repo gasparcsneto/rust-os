@@ -271,6 +271,26 @@ struct EmExecucao {
     /// O anexo do pedido: bytes que vieram fora do JSON — ver
     /// [`MAIOR_ANEXO`]. O handler que o usa o tira daqui.
     anexo: Vec<u8>,
+    /// Se o comando pode suspender em vez de responder, e a espera que ele
+    /// armou se suspendeu — ver [`suspender`].
+    suspensao: Suspensao,
+}
+
+/// O que o comando em execução neste fio pode fazer em vez de responder.
+///
+/// Um comando suspenso não responde agora: quem despachou o pedido espera o
+/// desfecho e o executa de novo, inteiro, pelo gate — ver
+/// [`crate::rede::espera`]. Só o despachante sabe esperar sem prender os
+/// outros, e por isso é ele quem permite: na primeira execução de um
+/// pedido, e nunca na reexecução — a espera acabou, e o pedido responde com
+/// o que houver. Um comando dentro de outro também não suspende.
+enum Suspensao {
+    /// O comando responde.
+    Proibida,
+    /// O comando pode suspender.
+    Permitida,
+    /// O comando suspendeu, com esta espera armada.
+    Pedida(crate::rede::espera::Espera),
 }
 
 /// Quantas operações um lote do armazém leva, no máximo.
@@ -365,7 +385,7 @@ pub fn pedinte() -> Option<Pedinte> {
 
 /// O destinatário que a decisão de `message.send` resolveu e decidiu, para
 /// o handler do comando em execução neste fio — ver
-/// [`Autorizado::executar`]. O handler não resolve o destinatário de novo:
+/// [`Autorizado::executar_com_anexo`]. O handler não resolve o destinatário de novo:
 /// usa este, que é o que a política viu. `None` fora de um `message.send`
 /// autorizado, e em outro fio.
 pub fn destino_decidido() -> Option<crate::mensagens::Destino> {
@@ -377,6 +397,7 @@ pub fn destino_decidido() -> Option<crate::mensagens::Destino> {
 ///
 /// Reentrante: o que este fio estava executando é guardado e volta no fim,
 /// para o caso de um comando executar outro.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 fn como_comando<R>(
     autoridade: Autoridade,
     pedinte: Pedinte,
@@ -384,6 +405,19 @@ fn como_comando<R>(
     decidido: Option<Decidido>,
     f: impl FnOnce() -> R,
 ) -> R {
+    como_comando_suspensivel(autoridade, pedinte, destino, decidido, false, f).0
+}
+
+/// [`como_comando`], com o comando podendo suspender se `permitir` — e a
+/// espera que ele armou, se suspendeu. Ver [`Suspensao`].
+fn como_comando_suspensivel<R>(
+    autoridade: Autoridade,
+    pedinte: Pedinte,
+    destino: Option<crate::mensagens::Destino>,
+    decidido: Option<Decidido>,
+    permitir: bool,
+    f: impl FnOnce() -> R,
+) -> (R, Option<crate::rede::espera::Espera>) {
     let fio = crate::fios::id_atual();
     let novo = EmExecucao {
         fio,
@@ -392,6 +426,11 @@ fn como_comando<R>(
         destino,
         decidido,
         anexo: Vec::new(),
+        suspensao: if permitir {
+            Suspensao::Permitida
+        } else {
+            Suspensao::Proibida
+        },
     };
     // A vaga deste fio, se ele já executava um comando; senão, uma livre.
     // Não falta vaga: há uma por fio, e um fio ocupa no máximo uma.
@@ -411,15 +450,47 @@ fn como_comando<R>(
         // vaga, e toda pergunta dele ouviria `NENHUMA`: recusa, e não a
         // autoridade de outro.
         crate::log_error!("autorizacao", "sem vaga para o comando do fio {}", fio);
-        return f();
+        return (f(), None);
     };
     let r = f();
     let deste = crate::arch::sem_interrupcoes(|| {
         core::mem::replace(&mut EM_EXECUCAO.lock()[vaga], anterior)
     });
-    // O que sai é largado fora da trava: o destino pode ter memória no heap.
-    drop(deste);
-    r
+    // O que sai é largado fora da trava: o destino pode ter memória no heap,
+    // e a espera, se não for de quem chamou, desarma na pilha.
+    let espera = deste.and_then(|c| match c.suspensao {
+        Suspensao::Pedida(e) => Some(e),
+        _ => None,
+    });
+    (r, espera)
+}
+
+/// O comando em execução neste fio pode suspender? Ver [`suspender`].
+pub fn pode_suspender() -> bool {
+    do_comando_deste_fio(|c| matches!(c.suspensao, Suspensao::Permitida)).unwrap_or(false)
+}
+
+/// Suspende o comando em execução neste fio, com a espera que ele armou: o
+/// comando não responde agora, e quem despachou o pedido o executa de novo
+/// quando a espera acabar — ver [`crate::rede::espera`].
+///
+/// O handler chama antes de escrever qualquer coisa, e volta sem escrever:
+/// o despachante joga fora o envelope começado. `Err` com a espera de volta
+/// se o comando não pode suspender — fora de um comando, numa reexecução,
+/// num despachante que não espera —, para quem chamou a largar e
+/// responder.
+pub fn suspender(espera: crate::rede::espera::Espera) -> Result<(), crate::rede::espera::Espera> {
+    let eu = crate::fios::id_atual();
+    crate::arch::sem_interrupcoes(|| {
+        let mut vagas = EM_EXECUCAO.lock();
+        match vagas.iter_mut().flatten().find(|c| c.fio == eu) {
+            Some(c) if matches!(c.suspensao, Suspensao::Permitida) => {
+                c.suspensao = Suspensao::Pedida(espera);
+                Ok(())
+            }
+            _ => Err(espera),
+        }
+    })
 }
 
 /// Só para a suíte: roda `f` como se fosse o comando de `autoridade`, fora
@@ -1147,19 +1218,28 @@ pub struct Autorizado {
 
 impl Autorizado {
     /// Executa o comando com a autoridade de quem pediu — que `user.run`,
-    /// por exemplo, grava no processo que lança.
-    pub fn executar(self, params: Json, w: &mut JsonWriter) -> fmt::Result {
-        self.executar_com_anexo(params, Vec::new(), w)
-    }
-
-    /// [`Autorizado::executar`], com o anexo do pedido — ver
-    /// [`MAIOR_ANEXO`] e [`tirar_anexo`].
+    /// por exemplo, grava no processo que lança —, com o anexo do pedido —
+    /// ver [`MAIOR_ANEXO`] e [`tirar_anexo`].
     pub fn executar_com_anexo(
         self,
         params: Json,
         anexo: Vec<u8>,
         w: &mut JsonWriter,
     ) -> fmt::Result {
+        self.executar_suspensivel(params, anexo, false, w).0
+    }
+
+    /// [`Autorizado::executar_com_anexo`], com o comando podendo suspender
+    /// se `permitir` — e a espera que ele armou, se suspendeu: então nada
+    /// do que foi escrito em `w` é resposta, e quem chamou espera o
+    /// desfecho e executa o pedido de novo, pelo gate. Ver [`suspender`].
+    pub fn executar_suspensivel(
+        self,
+        params: Json,
+        anexo: Vec<u8>,
+        permitir: bool,
+        w: &mut JsonWriter,
+    ) -> (fmt::Result, Option<crate::rede::espera::Espera>) {
         let Autorizado {
             comando,
             autoridade,
@@ -1167,12 +1247,19 @@ impl Autorizado {
             destino,
             decidido,
         } = self;
-        como_comando(autoridade, pedinte, destino, Some(decidido), || {
-            if !anexo.is_empty() {
-                por_anexo(anexo);
-            }
-            (comando.handler)(params, w)
-        })
+        como_comando_suspensivel(
+            autoridade,
+            pedinte,
+            destino,
+            Some(decidido),
+            permitir,
+            || {
+                if !anexo.is_empty() {
+                    por_anexo(anexo);
+                }
+                (comando.handler)(params, w)
+            },
+        )
     }
 }
 

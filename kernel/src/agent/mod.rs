@@ -225,6 +225,26 @@ struct Montador {
     /// Ligado quando a linha atual estourou o buffer: descartamos tudo até o
     /// próximo `\n` para voltar a um ponto de sincronia conhecido do stream.
     estourou: bool,
+    /// O pedido que suspendeu e ainda não foi retomado — ver
+    /// [`crate::rede::espera`]. Enquanto houver um, a sessão não atende
+    /// outro: a tarefa espera por ele.
+    suspenso: Option<Suspenso>,
+    /// O texto que chegou atrás do pedido suspenso, no mesmo quadro
+    /// decifrado: é dos pedidos seguintes, e volta ao montador depois da
+    /// retomada, na ordem em que veio. Numa porta, um quadro de dados pode
+    /// trazer várias linhas; a serial entrega um byte por vez, e a tarefa
+    /// não lê o próximo enquanto espera.
+    adiados: politica::sigiloso::Texto,
+}
+
+/// Um pedido do canal que suspendeu: a espera armada, a linha que será
+/// executada de novo, e a conexão do cliente que a mandou — a geração do
+/// canal. Um cliente que saiu durante a espera não recebe nada, e o que o
+/// seguinte mandar não é retomado no lugar dele.
+struct Suspenso {
+    espera: crate::rede::espera::Espera,
+    linha: politica::sigiloso::Texto,
+    geracao: u64,
 }
 
 impl Montador {
@@ -237,6 +257,8 @@ impl Montador {
             perdas_ao_abrir: 0,
             danificado: false,
             estourou: false,
+            suspenso: None,
+            adiados: politica::sigiloso::Texto::novo(),
         }
     }
 
@@ -246,6 +268,13 @@ impl Montador {
     /// para saber que acabou de gastar um tempo indeterminado executando um
     /// comando, e que é uma boa hora de dar a vez a outra tarefa.
     fn alimentar(&mut self, byte: u8, depois_de_silencio: bool) -> bool {
+        // Com um pedido suspenso, o que vem atrás dele espera a vez — ver
+        // [`Montador::adiados`].
+        if self.suspenso.is_some() {
+            self.adiados.acrescentar(&[byte]);
+            return false;
+        }
+
         // Ociosidade primeiro: um quadro parado tempo demais é abandonado em
         // silêncio, e este byte passa a ser o primeiro de um quadro novo.
         //
@@ -323,8 +352,16 @@ impl Montador {
                     // nada a responder
                 } else if self.estourou {
                     responder_erro(self.canal, None, RpcError::LINHA_MUITO_LONGA, None);
-                } else if self.tam > 0 {
-                    processar(self.canal, &self.buffer[..self.tam]);
+                } else if self.tam > 0
+                    && let Some(espera) = processar(self.canal, &self.buffer[..self.tam], true)
+                {
+                    let mut linha = politica::sigiloso::Texto::novo();
+                    linha.acrescentar(&self.buffer[..self.tam]);
+                    self.suspenso = Some(Suspenso {
+                        espera,
+                        linha,
+                        geracao: self.geracao,
+                    });
                 }
 
                 self.danificado = false;
@@ -419,6 +456,18 @@ pub async fn atender(canal: Canal) {
             }
             None => montador.alimentar(byte, depois_de_silencio),
         };
+        // Um pedido suspenso: a sessão espera por ele antes de qualquer
+        // outro — ver [`crate::rede::espera`]. O que veio atrás dele no
+        // mesmo quadro volta ao montador depois, e pode suspender também.
+        while let Some(suspenso) = montador.suspenso.take() {
+            let adiados = core::mem::take(&mut montador.adiados);
+            if retomar(canal, suspenso).await {
+                for &b in adiados.como_bytes() {
+                    montador.alimentar(b, false);
+                }
+            }
+            crate::tarefas::ceder().await;
+        }
         if fechou {
             // Acabamos de executar um comando, o que pode ter custado um
             // tempo arbitrário. Um cliente que envie várias requisições
@@ -429,6 +478,47 @@ pub async fn atender(canal: Canal) {
             crate::tarefas::ceder().await;
         }
     }
+}
+
+/// Espera o desfecho de um pedido suspenso e o executa de novo, inteiro,
+/// pelo gate — com a suspensão proibida: a espera acabou, e ele responde
+/// com o que houver. Falso se o cliente que o mandou saiu durante a espera:
+/// então nada é executado nem respondido, e o que vinha atrás dele era do
+/// mesmo cliente.
+///
+/// A tarefa só volta a rodar quando a pilha acorda — o dado chegou, o
+/// estado mudou, a conexão acabou — ou o relógio, no prazo.
+#[cfg_attr(feature = "modo-teste", allow(dead_code))]
+async fn retomar(canal: Canal, suspenso: Suspenso) -> bool {
+    let Suspenso {
+        espera,
+        linha,
+        geracao,
+    } = suspenso;
+    let desfecho = crate::rede::espera::Aguardar::nova(&espera).await;
+    drop(espera);
+    reexecutar(canal, &linha, geracao, desfecho)
+}
+
+/// A reexecução de um pedido cuja espera acabou com `desfecho`: só na
+/// mesma conexão do cliente que o mandou.
+fn reexecutar(
+    canal: Canal,
+    linha: &politica::sigiloso::Texto,
+    geracao: u64,
+    desfecho: crate::rede::espera::Desfecho,
+) -> bool {
+    if canal.geracao() != geracao {
+        crate::log_info!(
+            "agent",
+            "sessao {}: o cliente do pedido suspenso saiu ({:?}); nada a responder",
+            canal.sessao(),
+            desfecho
+        );
+        return false;
+    }
+    let _ = processar(canal, linha.como_bytes(), false);
+    true
 }
 
 /// Atende o canal sem tarefas, sem heap e sem escalonador. Nunca retorna.
@@ -530,17 +620,52 @@ impl SessaoDeTeste {
     }
 
     /// Consome o que estiver na entrada da porta, respondendo cada quadro
-    /// que fechar.
+    /// que fechar — até um pedido suspender: aí, como a tarefa, para de
+    /// ler, e o resto fica na entrada até [`SessaoDeTeste::retomar`].
     pub fn atender(&mut self) {
         let Canal::Porta(p) = self.montador.canal else {
             return;
         };
-        while let Some(byte) = crate::virtio::console::retirar(p) {
+        while self.montador.suspenso.is_none()
+            && let Some(byte) = crate::virtio::console::retirar(p)
+        {
             let montador = &mut self.montador;
             self.porta.receber(byte, |b| {
                 montador.alimentar(b, false);
             });
         }
+    }
+
+    /// Se há um pedido suspenso nesta sessão.
+    pub fn suspensa(&self) -> bool {
+        self.montador.suspenso.is_some()
+    }
+
+    /// A espera do pedido suspenso, para a suíte acompanhar com o waker
+    /// dela: `None` se não há pedido suspenso.
+    pub fn espera(&self) -> Option<&crate::rede::espera::Espera> {
+        self.montador.suspenso.as_ref().map(|s| &s.espera)
+    }
+
+    /// Retoma o pedido suspenso, se a espera dele acabou — conferida sem
+    /// registrar waker nenhum —, como a tarefa faria ao acordar: executa de
+    /// novo pelo gate, responde, e atende o que tinha ficado atrás dele.
+    /// Devolve o desfecho, ou `None` se ainda espera.
+    pub fn retomar(&mut self) -> Option<crate::rede::espera::Desfecho> {
+        let desfecho = self.montador.suspenso.as_ref()?.espera.conferir(None)?;
+        let Suspenso {
+            espera,
+            linha,
+            geracao,
+        } = self.montador.suspenso.take()?;
+        drop(espera);
+        let adiados = core::mem::take(&mut self.montador.adiados);
+        if reexecutar(self.montador.canal, &linha, geracao, desfecho) {
+            for &b in adiados.como_bytes() {
+                self.montador.alimentar(b, false);
+            }
+        }
+        Some(desfecho)
     }
 }
 
@@ -568,11 +693,14 @@ pub(crate) fn limpar_quadro(linha: &[u8]) -> &[u8] {
 }
 
 /// Decodifica uma linha, despacha o comando como a sessão do canal, e
-/// responde pelo mesmo canal.
-fn processar(canal: Canal, linha: &[u8]) {
+/// responde pelo mesmo canal — ou, se o comando suspendeu, não responde e
+/// devolve a espera que ele armou: quem chamou espera o desfecho e chama de
+/// novo com a mesma linha, sem `permitir` — ver [`crate::rede::espera`].
+/// No modo post-mortem nada suspende: não há executor para esperar.
+fn processar(canal: Canal, linha: &[u8], permitir: bool) -> Option<crate::rede::espera::Espera> {
     let linha = limpar_quadro(linha);
     if linha.is_empty() {
-        return;
+        return None;
     }
 
     // Quem pede, para a auditoria: até um pedido que não chega a ser
@@ -591,7 +719,8 @@ fn processar(canal: Canal, linha: &[u8]) {
         Ok(r) => r,
         Err((id, erro)) => {
             autorizacao::auditar_invalido(chamador, "", linha, erro.mensagem);
-            return responder_erro(canal, id, erro, None);
+            responder_erro(canal, id, erro, None);
+            return None;
         }
     };
 
@@ -602,7 +731,8 @@ fn processar(canal: Canal, linha: &[u8]) {
             requisicao.params.0,
             "metodo nao encontrado",
         );
-        return responder_erro(canal, requisicao.id, RpcError::METODO_NAO_ENCONTRADO, None);
+        responder_erro(canal, requisicao.id, RpcError::METODO_NAO_ENCONTRADO, None);
+        return None;
     };
 
     // Validar antes de escrever qualquer coisa é obrigatório: a serialização
@@ -610,12 +740,13 @@ fn processar(canal: Canal, linha: &[u8]) {
     // atrás e transformar a resposta num erro.
     if let Err(campo) = registry::validar(comando, requisicao.params) {
         autorizacao::auditar_invalido(chamador, comando.nome, requisicao.params.0, campo);
-        return responder_erro(
+        responder_erro(
             canal,
             requisicao.id,
             RpcError::PARAMS_INVALIDOS,
             Some(campo),
         );
+        return None;
     }
 
     // O anexo confere com o que o pedido declara, byte a byte em número:
@@ -631,12 +762,13 @@ fn processar(canal: Canal, linha: &[u8]) {
         Ok(_) | Err(()) => {
             let motivo = "o anexo nao confere com attachment, ou passou do teto";
             autorizacao::auditar_invalido(chamador, comando.nome, requisicao.params.0, motivo);
-            return responder_erro(
+            responder_erro(
                 canal,
                 requisicao.id,
                 RpcError::PARAMS_INVALIDOS,
                 Some("attachment"),
             );
+            return None;
         }
     };
 
@@ -645,20 +777,42 @@ fn processar(canal: Canal, linha: &[u8]) {
     let licenca = match autorizacao::autorizar(chamador, comando, requisicao.params) {
         Ok(l) => l,
         Err(codigo) => {
-            return responder_erro(
+            responder_erro(
                 canal,
                 requisicao.id,
                 RpcError::da_recusa(codigo),
                 Some(codigo.nome()),
             );
+            return None;
         }
     };
 
-    com_saida(canal, |w| {
-        protocol::envelope_ok(w, requisicao.id, |w| {
-            licenca.executar_com_anexo(requisicao.params, anexo.entregar(), w)
-        })
-    });
+    if DIRETO.load(Ordering::SeqCst) {
+        com_saida(canal, |w| {
+            protocol::envelope_ok(w, requisicao.id, |w| {
+                licenca.executar_com_anexo(requisicao.params, anexo.entregar(), w)
+            })
+        });
+    } else {
+        // A resposta é montada à parte e só sai se o comando não
+        // suspendeu: suspenso, o envelope começado é jogado fora — e se
+        // apaga, como todo `Texto`.
+        let mut espera = None;
+        let mut texto = politica::sigiloso::Texto::novo();
+        {
+            let mut w = JsonWriter::new(&mut texto);
+            let _ = protocol::envelope_ok(&mut w, requisicao.id, |w| {
+                let (r, e) =
+                    licenca.executar_suspensivel(requisicao.params, anexo.entregar(), permitir, w);
+                espera = e;
+                r
+            });
+        }
+        if espera.is_some() {
+            return espera;
+        }
+        entregar(canal, texto);
+    }
 
     // Com a resposta inteira no fio, é seguro morrer. Daqui não se volta: o
     // handler da exceção entra em modo post-mortem, que reentra neste mesmo
@@ -670,6 +824,7 @@ fn processar(canal: Canal, linha: &[u8]) {
         3 => crate::arch::aarch64::disparar_estouro_na_borda(),
         _ => crate::arch::disparar_falha_fatal(),
     }
+    None
 }
 
 fn responder_erro(canal: Canal, id: Option<json::Json>, erro: RpcError, detalhe: Option<&str>) {
@@ -693,22 +848,9 @@ fn responder_erro(canal: Canal, id: Option<json::Json>, erro: RpcError, detalhe:
 /// a receita de um núcleo parado, e foi o que a bancada do 7.6 encontrou.
 /// Só o modo post-mortem escreve direto, porque não pode contar com o heap.
 fn com_saida(canal: Canal, f: impl FnOnce(&mut JsonWriter) -> fmt::Result) {
-    let Canal::Porta(p) = canal else {
-        if DIRETO.load(Ordering::SeqCst) {
-            return com_saida_serial(f);
-        }
-        let mut texto = politica::sigiloso::Texto::novo();
-        {
-            let mut w = JsonWriter::new(&mut texto);
-            let _ = f(&mut w);
-        }
-        texto.acrescentar(b"\n");
-        return crate::arch::sem_interrupcoes(|| {
-            if let Some(porta) = crate::serial::AGENT_LINK.lock().as_mut() {
-                porta.write_bytes(texto.como_bytes());
-            }
-        });
-    };
+    if canal == Canal::Serial && DIRETO.load(Ordering::SeqCst) {
+        return com_saida_serial(f);
+    }
     // Num `Texto`, e não num `String`: a resposta pode levar o corpo de uma
     // mensagem, e o texto apaga cada bloco que larga — ao crescer e ao
     // sair, depois de cifrado. Ver `politica::sigiloso`.
@@ -717,11 +859,25 @@ fn com_saida(canal: Canal, f: impl FnOnce(&mut JsonWriter) -> fmt::Result) {
         let mut w = JsonWriter::new(&mut texto);
         let _ = f(&mut w);
     }
+    entregar(canal, texto);
+}
+
+/// Entrega pelo canal uma resposta montada, com o delimitador de quadro.
+fn entregar(canal: Canal, mut texto: politica::sigiloso::Texto) {
     texto.acrescentar(b"\n");
-    // Sem sessão estabelecida não há a quem: a resposta é descartada. Não
-    // acontece por um pedido — um pedido só chega decifrado —, mas acontece
-    // quando a sessão cai entre o pedido e a resposta.
-    seguro::enviar(p, texto.como_bytes());
+    match canal {
+        Canal::Serial => crate::arch::sem_interrupcoes(|| {
+            if let Some(porta) = crate::serial::AGENT_LINK.lock().as_mut() {
+                porta.write_bytes(texto.como_bytes());
+            }
+        }),
+        // Sem sessão estabelecida não há a quem: a resposta é descartada.
+        // Não acontece por um pedido — um pedido só chega decifrado —, mas
+        // acontece quando a sessão cai entre o pedido e a resposta.
+        Canal::Porta(p) => {
+            seguro::enviar(p, texto.como_bytes());
+        }
+    }
 }
 
 /// Emite uma resposta completa na serial, direto no fio, enquanto `f`
