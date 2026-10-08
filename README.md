@@ -3048,6 +3048,16 @@ o pedido; o boot o reaplica por cima da imagem, antes de abrir as portas.
   confere os dois, cada um sozinho). Uma operação que não cabe na região
   cheia — a base que não cabe na outra — falha fechada, e a persistência
   fica indisponível até o boot compactar.
+- **A reposição tem a ordem das gravações.** O boot reaplica o journal com
+  a ordem na mão, e o coletor de vencimentos — um fio preemptivo, que
+  vence as mensagens com a ordem — espera. A suíte repõe o journal muitas
+  vezes, para conferir que ele diz o que a memória diz, e repunha sem a
+  ordem: numa rodada, o coletor venceu no meio da reposição uma mensagem
+  recém-reposta, a entrega seguinte dela no journal já não a achou
+  (`transicao de mensagem que nao existe`), e cinco casos do armazém caíram
+  em cascata. Agora a suíte volta à imagem e repõe numa seção só, com a
+  ordem, e a reposição confere a ordem ao entrar: sem ela, a suíte para na
+  primeira vez, e não numa rodada em muitas.
 - **A senha do contador não passa pelo barramento.** Todo comando ao
   contador vai por uma sessão HMAC salgada com a chave de endosso (EK) do
   TPM: o comando prova a senha sem levá-la, a resposta tem de provar que

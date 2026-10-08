@@ -2218,7 +2218,18 @@ fn diferenca(foto: &Foto, nome: &str, recurso: &str) -> Result<Vec<Vec<u8>>, &'s
 }
 
 /// Reaplica um registro lido do journal, no boot.
+///
+/// Com a ordem das gravações na mão, sempre: repor é mudar o estado que vai
+/// ao journal, e o coletor de vencimentos muda as mensagens com a ordem —
+/// sem ela, ele entraria no meio da reposição e venceria numa tabela pela
+/// metade. O boot a tem ([`abrir`]); a suíte também precisa tê-la, e a
+/// conferência abaixo o diz na hora, em vez de uma vez em muitas rodadas.
 fn reaplicar(r: &diario::Registro) -> Result<(), &'static str> {
+    #[cfg(feature = "modo-teste")]
+    assert!(
+        ordem_na_mao_sem_trava(),
+        "reposicao do journal sem a ordem das gravacoes"
+    );
     for e in entradas(r)? {
         reaplicar_entrada(e)?;
     }

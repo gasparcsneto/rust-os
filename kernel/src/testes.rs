@@ -16216,8 +16216,7 @@ fn tpm_o_contador_incerto_o_boot_decide() -> Resultado {
             return Err("o contador nao andou");
         }
         // O boot seguinte.
-        de_volta_a_imagem();
-        crate::persistencia::abrir();
+        reposto_da_imagem(crate::persistencia::abrir);
         if crate::persistencia::estado() != crate::persistencia::Estado::Disponivel {
             return Err("o boot seguinte nao abriu o journal ancorado");
         }
@@ -16240,8 +16239,7 @@ fn tpm_o_boot_recusa_o_contador_que_nao_confere() -> Resultado {
     estado_do_journal()?;
     let resultado = (|| -> Resultado {
         crate::tpm::falhas::armar(NV_READ, Falha::RespostaAdulterada, 1);
-        de_volta_a_imagem();
-        crate::persistencia::abrir();
+        reposto_da_imagem(crate::persistencia::abrir);
         crate::tpm::falhas::desarmar();
         if !matches!(
             crate::persistencia::estado(),
@@ -16249,8 +16247,7 @@ fn tpm_o_boot_recusa_o_contador_que_nao_confere() -> Resultado {
         ) {
             return Err("o boot aceitou um contador que nao conferiu");
         }
-        de_volta_a_imagem();
-        crate::persistencia::abrir();
+        reposto_da_imagem(crate::persistencia::abrir);
         if crate::persistencia::estado() != crate::persistencia::Estado::Disponivel {
             return Err("o boot seguinte, com o barramento de volta, nao abriu");
         }
@@ -16269,8 +16266,7 @@ fn tpm_a_senha_nao_passa_pelo_barramento() -> Resultado {
     let senha = crate::persistencia::senha_da_ancora_de_teste().ok_or("sem a senha")?;
     crate::tpm::falhas::escutar(Some(senha));
     let resultado = (|| -> Resultado {
-        de_volta_a_imagem();
-        crate::persistencia::abrir();
+        reposto_da_imagem(crate::persistencia::abrir);
         crate::persistencia::gravar_auditoria()?;
         if crate::persistencia::estado() != crate::persistencia::Estado::Disponivel {
             return Err("a persistencia nao abriu");
@@ -16355,8 +16351,7 @@ fn tpm_a_auditoria_nao_gasta_o_contador() -> Resultado {
     let antes_do_boot = crate::persistencia::ancora_no_tpm_de_teste()?;
     // O boot seguinte: abre o journal com os registros só de auditoria no
     // meio, grava o registro de boot — que avança —, e a cadeia continua.
-    de_volta_a_imagem();
-    crate::persistencia::abrir();
+    reposto_da_imagem(crate::persistencia::abrir);
     let resultado = (|| -> Resultado {
         if crate::persistencia::estado() != crate::persistencia::Estado::Disponivel {
             return Err("o journal com registros so de auditoria nao abriu");
@@ -16405,8 +16400,7 @@ fn tpm_a_auditoria_nao_carrega_estado() -> Resultado {
     })();
     crate::persistencia::forcar_estado_de_teste(anterior);
     resultado?;
-    de_volta_a_imagem();
-    crate::persistencia::abrir();
+    reposto_da_imagem(crate::persistencia::abrir);
     let depois = if crate::identidade::agente(&chave).is_some() {
         Err("o agente do registro recusado apareceu no boot")
     } else if crate::persistencia::estado() != crate::persistencia::Estado::Disponivel {
@@ -16430,8 +16424,7 @@ fn tpm_a_chave_do_tpm_trocada_e_recusada() -> Resultado {
     let resultado = (|| -> Resultado {
         let ek = crate::persistencia::ponto_da_ek().ok_or("sem a EK fixada")?;
         crate::persistencia::trocar_a_ek_fixada_de_teste(true);
-        de_volta_a_imagem();
-        crate::persistencia::abrir();
+        reposto_da_imagem(crate::persistencia::abrir);
         crate::persistencia::trocar_a_ek_fixada_de_teste(false);
         match crate::persistencia::estado() {
             crate::persistencia::Estado::Recusada(m) if m.contains("chave de endosso") => {}
@@ -16457,8 +16450,7 @@ fn tpm_a_chave_do_tpm_trocada_e_recusada() -> Resultado {
         {
             return Err("o journal que fala de duas EKs foi aceito");
         }
-        de_volta_a_imagem();
-        crate::persistencia::abrir();
+        reposto_da_imagem(crate::persistencia::abrir);
         if crate::persistencia::estado() != crate::persistencia::Estado::Disponivel
             || crate::persistencia::ponto_da_ek() != Some(ek)
         {
@@ -17161,11 +17153,30 @@ fn de_volta_a_imagem() {
     crate::autorizacao::carregar();
 }
 
+/// A volta à imagem e a reposição por cima dela, como o boot as faz: de
+/// uma vez, com a ordem das gravações na mão.
+///
+/// # Por quê
+///
+/// Repor é mudar as mensagens, e quem muda uma mensagem tem a ordem na mão
+/// — ver [`crate::persistencia::em_ordem`]. O coletor de vencimentos é um
+/// fio preemptivo e vence com a ordem; sem ela, a reposição o deixava
+/// entrar no meio, vencer na tabela pela metade uma mensagem recém-reposta,
+/// e a transição seguinte dela no journal — a entrega — já não a achava. A
+/// suíte o viu uma vez: "transicao de mensagem que nao existe", e os casos
+/// do armazém seguintes em cascata. A volta à imagem vai junto pela mesma
+/// razão: entre ela e a reposição, o coletor montaria uma tabela nova.
+fn reposto_da_imagem<R>(repor: impl FnOnce() -> R) -> R {
+    crate::persistencia::em_ordem(|| {
+        de_volta_a_imagem();
+        repor()
+    })
+}
+
 /// O estado que a região atual do journal descreve: a imagem, e a região
 /// reaplicada por cima, como no boot.
 fn estado_do_journal() -> Result<EstadoDoJournal, &'static str> {
-    de_volta_a_imagem();
-    crate::persistencia::reaplicar_regiao_de_teste()?;
+    reposto_da_imagem(crate::persistencia::reaplicar_regiao_de_teste)?;
     // E o volume, como no boot: reposto do journal dele até o registro que
     // o journal de estado confirma.
     let lido = crate::persistencia::armazem_lido_de_teste();
@@ -17233,8 +17244,7 @@ fn reconstrucao_imagem_limpa_e_journal_inteiro() -> Resultado {
     // Cada prefixo: o começo, o meio, quase tudo.
     let quantos = crate::persistencia::percorrida_atual_de_teste()?.quantos;
     for k in [1, quantos / 3, (2 * quantos) / 3, quantos.saturating_sub(1)] {
-        de_volta_a_imagem();
-        let feitos = crate::persistencia::reaplicar_prefixo_de_teste(k)?;
+        let feitos = reposto_da_imagem(|| crate::persistencia::reaplicar_prefixo_de_teste(k))?;
         if feitos != k.min(quantos) {
             crate::log_error!("teste", "prefixo {}: {} de {}", k, feitos, quantos);
             return Err("um prefixo do journal nao se repos inteiro");
@@ -17514,8 +17524,7 @@ fn compactacao_com_o_contador_trocado() -> Resultado {
         return Err("o contador nao avancou uma vez");
     }
     // O boot seguinte.
-    de_volta_a_imagem();
-    crate::persistencia::abrir();
+    reposto_da_imagem(crate::persistencia::abrir);
     let (nova, _, _, _) = crate::persistencia::regiao();
     if crate::persistencia::estado() != crate::persistencia::Estado::Disponivel || nova == regiao {
         return Err("o boot seguinte nao adotou a base que o contador confirma");
@@ -17906,10 +17915,14 @@ fn mensagens_o_journal_repoe_a_tabela() -> Resultado {
         }
         let viva = crate::mensagens::retrato_de_teste();
         let registros = registros_do_journal()?;
-        crate::mensagens::como_na_imagem_de_teste();
-        for r in &registros[antes..] {
-            crate::persistencia::reaplicar_de_teste(r)?;
-        }
+        // Com a ordem na mão — ver [`reposto_da_imagem`].
+        crate::persistencia::em_ordem(|| -> Resultado {
+            crate::mensagens::como_na_imagem_de_teste();
+            for r in &registros[antes..] {
+                crate::persistencia::reaplicar_de_teste(r)?;
+            }
+            Ok(())
+        })?;
         let reposta = crate::mensagens::retrato_de_teste();
         if viva.len() != 2 || reposta != viva {
             crate::log_error!("teste", "{:?} / {:?}", viva, reposta);
