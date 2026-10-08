@@ -20838,19 +20838,43 @@ fn smp_fio_fixo_roda_no_seu_nucleo() -> Resultado {
 /// posta é encontrar a si mesmo rodando em outro lugar. E cada um soma num
 /// contador só seu com leitura e escrita separadas — duas cópias do mesmo
 /// fio perderiam somas.
+///
+/// # Até dois núcleos os verem
+///
+/// O caso só exercita alguma coisa se os fios passarem por mais de um
+/// núcleo, e isso ele confere. Mas, com as voltas contadas, ele esperava que
+/// acontecesse: no kernel de release o trabalho inteiro cabe em menos de um
+/// tique, e o CI do ARM viu duas vezes (no 9.1 e no 9.2) os oito fios
+/// terminarem no núcleo que os pegou primeiro (`0b100`), antes de outro
+/// núcleo acordado chegar a eles. Agora, depois das voltas, os fios seguem
+/// trabalhando enquanto um núcleo só os viu, até um prazo — o espalhamento
+/// que o caso exige continua conferido, com tempo para acontecer. O
+/// escalonador não mudou.
 fn smp_um_fio_nunca_roda_em_dois_nucleos() -> Resultado {
     const FIOS: usize = 8;
     const VOLTAS: u64 = 300;
+    /// Quanto os fios seguem trabalhando, depois das voltas, enquanto um
+    /// núcleo só os viu: cinco segundos, em tiques. Um núcleo ocioso é
+    /// cutucado quando um fio nasce, e o ocupado vai ao escalonador no
+    /// próximo tique dele — o prazo é para o caso não girar para sempre.
+    const PRAZO_PARA_ESPALHAR: u64 = 500;
     static DENTRO: [AtomicU64; FIOS] = [const { AtomicU64::new(0) }; FIOS];
     static SOMA: [AtomicU64; FIOS] = [const { AtomicU64::new(0) }; FIOS];
+    static FEITAS: [AtomicU64; FIOS] = [const { AtomicU64::new(0) }; FIOS];
     static DUPLOS: AtomicU64 = AtomicU64::new(0);
     static NUCLEOS_VISTOS: AtomicU64 = AtomicU64::new(0);
     static PRONTOS: AtomicU64 = AtomicU64::new(0);
+    static PRAZO: AtomicU64 = AtomicU64::new(0);
+
+    fn espalhados() -> bool {
+        crate::nucleos::ligados() < 2 || NUCLEOS_VISTOS.load(SeqCst).count_ones() >= 2
+    }
 
     extern "C" fn trabalhar(qual: u64) -> ! {
         let i = qual as usize;
         let mut minhas = 0u64;
-        for volta in 0..VOLTAS {
+        let mut volta = 0u64;
+        while volta < VOLTAS || (!espalhados() && crate::tempo::ticks() < PRAZO.load(SeqCst)) {
             if DENTRO[i].fetch_add(1, SeqCst) != 0 {
                 DUPLOS.fetch_add(1, SeqCst);
             }
@@ -20865,10 +20889,12 @@ fn smp_um_fio_nunca_roda_em_dois_nucleos() -> Resultado {
             SOMA[i].store(v + 1, SeqCst);
             minhas += 1;
             DENTRO[i].fetch_sub(1, SeqCst);
-            if volta % 3 == 0 {
+            if volta.is_multiple_of(3) {
                 crate::fios::ceder();
             }
+            volta += 1;
         }
+        FEITAS[i].store(minhas, SeqCst);
         if SOMA[i].load(SeqCst) != minhas {
             DUPLOS.fetch_add(1, SeqCst);
         }
@@ -20879,10 +20905,12 @@ fn smp_um_fio_nunca_roda_em_dois_nucleos() -> Resultado {
     for i in 0..FIOS {
         DENTRO[i].store(0, SeqCst);
         SOMA[i].store(0, SeqCst);
+        FEITAS[i].store(0, SeqCst);
     }
     DUPLOS.store(0, SeqCst);
     NUCLEOS_VISTOS.store(0, SeqCst);
     PRONTOS.store(0, SeqCst);
+    PRAZO.store(crate::tempo::ticks() + PRAZO_PARA_ESPALHAR, SeqCst);
 
     for i in 0..FIOS {
         crate::fios::criar("teste-duplo", trabalhar, i as u64)?;
@@ -20890,12 +20918,23 @@ fn smp_um_fio_nunca_roda_em_dois_nucleos() -> Resultado {
     esperar_ate(|| PRONTOS.load(SeqCst) == FIOS as u64, 1500)?;
 
     let vistos = NUCLEOS_VISTOS.load(SeqCst);
-    crate::log_info!("teste", "fios soltos passaram pelos nucleos {:#b}", vistos);
+    let a_mais = FEITAS
+        .iter()
+        .map(|f| f.load(SeqCst).saturating_sub(VOLTAS))
+        .max();
+    crate::log_info!(
+        "teste",
+        "fios soltos passaram pelos nucleos {:#b}; voltas alem das {}: ate {}",
+        vistos,
+        VOLTAS,
+        a_mais.unwrap_or(0)
+    );
     if DUPLOS.load(SeqCst) > 0 {
         return Err("um fio rodou em dois nucleos ao mesmo tempo");
     }
-    for soma in &SOMA {
-        if soma.load(SeqCst) != VOLTAS {
+    for (soma, feitas) in SOMA.iter().zip(&FEITAS) {
+        let feitas = feitas.load(SeqCst);
+        if feitas < VOLTAS || soma.load(SeqCst) != feitas {
             return Err("um fio perdeu somas: duas copias dele se atropelaram");
         }
     }

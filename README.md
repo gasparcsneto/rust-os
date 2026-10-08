@@ -722,7 +722,12 @@ pegou o fio, e só solta a marca depois de a troca de contexto ter saído da
 pilha dele — no fim da troca, e não no começo: até ali o núcleo antigo ainda
 está usando aquela pilha. É a propriedade de que todo o resto depende, e o
 caso `smp: um fio nunca roda em dois nucleos` a confere com fios soltos
-passando por todos os núcleos.
+passando pelos núcleos. Ele exige que passem por pelo menos dois, e dá
+tempo para isso: no kernel de release o trabalho inteiro cabia em menos
+de um tique, e o CI do ARM viu duas vezes os oito fios acabarem no núcleo
+que os pegou primeiro. Agora eles seguem trabalhando enquanto um núcleo
+só os viu, até um prazo. Repetido quarenta vezes num boot do ARM release,
+o caso antigo falhou em cinco rodadas, e o novo em nenhuma.
 
 **O relógio anda uma vez por tique, por qualquer núcleo vivo.** Cada núcleo
 tem o timer dele, que preempta os fios dele, e todo tique é oferecido ao
