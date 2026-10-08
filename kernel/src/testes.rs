@@ -31364,8 +31364,11 @@ fn rede_varios_fios_conversam_ao_mesmo_tempo() -> Resultado {
     }
     esperar_cedendo(|| CERTOS.load(SeqCst) + ERRADOS.load(SeqCst) == FIOS, 3000)
         .map_err(|_| "os fios da rede nao terminaram")?;
+    // O motivo de cada fio está no log, um por linha: a conexão que não
+    // abriu, a que não se estabeleceu, o envio que falhou, o eco que voltou
+    // outro. Dizer aqui um deles seria dizer o errado nos outros casos.
     if ERRADOS.load(SeqCst) != 0 {
-        return Err("um fio recebeu do eco outra coisa que o que mandou");
+        return Err("um fio nao conversou com o eco (o motivo de cada um esta no log)");
     }
     esperar_cedendo(|| crate::rede::pilha::donos().is_empty(), 300)
         .map_err(|_| "a tabela de conexoes nao esvaziou")?;
