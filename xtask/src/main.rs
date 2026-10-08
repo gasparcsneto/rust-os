@@ -9225,6 +9225,15 @@ fn sob_a_rede(escrita: &mut UnixStream, leitor: &mut BufReader<UnixStream>) -> R
         ));
     }
     println!("  [rede] ok  fechada, o numero deixou de valer");
+    // A medida que o teto da espera de transmissão pede: até onde o
+    // emulador chegou, nesta rodada, antes de confirmar um quadro.
+    let info = pedir("net.info", "{}")?;
+    let espera = campo_simples(&info, "tx_wait_max_spins")
+        .ok_or_else(|| format!("rede: net.info sem a maior espera\n  {info}"))?;
+    let enviados = campo_simples(&info, "frames_sent").unwrap_or_default();
+    println!(
+        "  [rede] medido  a maior espera por uma transmissao: {espera} voltas, em {enviados} quadros"
+    );
     Ok(())
 }
 

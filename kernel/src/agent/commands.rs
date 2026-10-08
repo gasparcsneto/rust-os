@@ -1985,10 +1985,12 @@ fn paging_translate(params: Json, w: &mut JsonWriter) -> fmt::Result {
 fn net_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.begin_object()?;
 
-    let dados = crate::virtio::net::com_a_placa(|placa| (placa.mac(), placa.contadores()));
+    let dados = crate::virtio::net::com_a_placa(|placa| {
+        (placa.mac(), placa.contadores(), placa.maior_espera())
+    });
 
     match dados {
-        Some((mac, (transmitidos, recebidos))) => {
+        Some((mac, (transmitidos, recebidos), maior_espera)) => {
             w.field_bool("present", true)?;
 
             // O endereco vai como texto no formato em que se le um MAC, e nao
@@ -2003,6 +2005,9 @@ fn net_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
             w.field_u64("frames_sent", transmitidos)?;
             w.field_u64("frames_received", recebidos)?;
             w.field_u64("max_frame", crate::virtio::net::MAIOR_QUADRO as u64)?;
+            // A maior espera por uma confirmação de transmissão, em voltas:
+            // quão perto do teto que desliga a placa o emulador já chegou.
+            w.field_u64("tx_wait_max_spins", u64::from(maior_espera))?;
             // A pilha IP: o endereço que o DHCP deu, e as conexões.
             match crate::rede::pilha::resumo() {
                 Some(r) => {

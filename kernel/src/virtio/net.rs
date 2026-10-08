@@ -119,6 +119,11 @@ pub struct Placa {
     /// Quantos quadros saíram e quantos entraram, para o relatório do agente.
     transmitidos: u64,
     recebidos: u64,
+    /// A maior espera por uma confirmação de transmissão, em voltas. O teto
+    /// ([`VOLTAS_DE_ESPERA`]) separa o lento do morto; este número diz até
+    /// onde o lento chegou — medido, e não suposto, que foi o erro do teto
+    /// antigo.
+    maior_espera: u32,
     /// Se a placa ainda pode ser usada.
     ///
     /// Pelo mesmo motivo do disco, e o motivo vale repetir porque o buffer de
@@ -243,6 +248,7 @@ impl Placa {
             mac,
             transmitidos: 0,
             recebidos: 0,
+            maior_espera: 0,
             vivo: true,
         };
 
@@ -336,6 +342,11 @@ impl Placa {
     /// Quantos quadros saíram e quantos entraram.
     pub fn contadores(&self) -> (u64, u64) {
         (self.transmitidos, self.recebidos)
+    }
+
+    /// A maior espera por uma confirmação de transmissão, em voltas.
+    pub fn maior_espera(&self) -> u32 {
+        self.maior_espera
     }
 
     /// Transmite um quadro Ethernet.
@@ -557,8 +568,9 @@ impl Placa {
     /// pior que ausência de código: ele parece uma opção disponível. A espera
     /// pela recepção, se um dia fizer sentido, é `receber` em laço — não esta.
     fn esperar_transmissao(&mut self) -> Option<u16> {
-        for _ in 0..VOLTAS_DE_ESPERA {
+        for volta in 0..VOLTAS_DE_ESPERA {
             if let Some((cabeca, _)) = self.transmissao.colher() {
+                self.maior_espera = self.maior_espera.max(volta);
                 return Some(cabeca);
             }
             core::hint::spin_loop();
