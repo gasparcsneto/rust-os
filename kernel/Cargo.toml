@@ -95,6 +95,10 @@ diario = { path = "../diario" }
 # — ver `armazem/src/lib.rs`. A autorização, o arrendamento, a persistência
 # e a auditoria são do kernel (`armazem.rs`), cada um no lugar dele.
 armazem = { path = "../armazem" }
+# O tecido nativo de segurança: as contas do NSF e do firewall — ver
+# `docs/SEGURANCA.md`. O kernel põe o fio, as leituras pelo gate e os
+# pedidos; nada do pacote decide acesso.
+seguranca = { path = "../seguranca" }
 
 # A pilha IP: Ethernet, ARP, IPv4, DHCP, TCP e UDP sobre a placa virtio —
 # ver `src/rede/pilha.rs`. Escrever TCP do zero é um a dois anos-pessoa e

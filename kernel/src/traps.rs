@@ -329,6 +329,10 @@ pub fn fatal(nome: &'static str, pc: u64, endereco: Option<u64>, codigo: u64) ->
         crate::virtio::net::destravar();
         crate::rede::destravar();
         crate::rede::pilha::destravar();
+        crate::rede::captura::destravar();
+        #[cfg(feature = "modo-teste")]
+        crate::rede::bancada_dns::destravar();
+        crate::seguranca::destravar();
         crate::virtio::teclado::destravar();
         crate::virtio::console::destravar();
         crate::virtio::entropia::destravar();

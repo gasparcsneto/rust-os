@@ -19736,19 +19736,27 @@ fn politica_processo_age_como_o_agente() -> Resultado {
         crate::usuario::lancar_como(Some(&programa), autoridade)?;
         esperar_ate(|| visto("processo encerrou com codigo 72"), 600)
             .map_err(|_| "o programa do agente nao foi recusado como o papel manda")?;
+        // A abertura do pai, o `fork` — gravado em nome do pai, como o
+        // agente, antes de o filho poder rodar —, e as duas recusas do
+        // filho.
         let mut metodos = alloc::vec::Vec::new();
         crate::autorizacao::com_auditoria(|c| {
-            for r in c.ultimos(3) {
-                metodos.push((r.evento.metodo.clone(), r.evento.codigo));
+            for r in c.ultimos(4) {
+                metodos.push((
+                    r.evento.metodo.clone(),
+                    r.evento.codigo,
+                    r.evento.titular,
+                    r.evento.detalhe.contains(": filho "),
+                ));
             }
         });
+        let s = alloc::string::String::from;
+        let agente = politica::auditoria::Titular::Agente;
         let esperados = [
-            (alloc::string::String::from("fs.open"), Codigo::DenyResource),
-            (alloc::string::String::from("fs.open"), Codigo::DenyResource),
-            (
-                alloc::string::String::from("process.exec"),
-                Codigo::DenyResource,
-            ),
+            (s("fs.open"), Codigo::DenyResource, agente, false),
+            (s("process.fork"), Codigo::Allow, agente, true),
+            (s("fs.open"), Codigo::DenyResource, agente, false),
+            (s("process.exec"), Codigo::DenyResource, agente, false),
         ];
         if metodos != esperados {
             crate::log_error!("teste", "{:?}", metodos);
@@ -21455,7 +21463,8 @@ fn smp_a_cota_de_processos_vale_entre_nucleos() -> Resultado {
         // O mesmo caminho do `fork`: o gate, e o nascimento com a cota dele.
         match crate::autorizacao::permitir_processo(autoridade, "process.fork") {
             Ok(cota) => {
-                match crate::fios::criar_processo("usuario", processo, 0, autoridade, cota) {
+                match crate::fios::criar_processo("usuario", processo, 0, autoridade, cota, &|_| {})
+                {
                     Ok(_) => {
                         NASCIDOS.fetch_add(1, SeqCst);
                     }
@@ -25172,7 +25181,14 @@ fn manifesto_o_processo_nasce_sem_imagem() -> Resultado {
         if processo {
             let cota = crate::autorizacao::permitir_processo(Autoridade::Sistema, "process.run")
                 .map_err(|_| "a cota recusou o processo do caso")?;
-            crate::fios::criar_processo("sonda", programa_do_fio, 0, Autoridade::Sistema, cota)?;
+            crate::fios::criar_processo(
+                "sonda",
+                programa_do_fio,
+                0,
+                Autoridade::Sistema,
+                cota,
+                &|_| {},
+            )?;
         } else {
             crate::fios::criar("sonda", programa_do_fio, 0)?;
         }
@@ -30216,6 +30232,54 @@ static CASOS: &[Caso] = &[
         f: rede_o_programa_disca_pelo_gate,
     },
     Caso {
+        nome: "nsf: le pelo gate com o papel dele",
+        f: nsf_le_pelo_gate_com_o_papel_dele,
+    },
+    Caso {
+        nome: "nsf: nao e o sistema",
+        f: nsf_nao_e_o_sistema,
+    },
+    Caso {
+        nome: "nsf: contem agente e pessoa pelo mesmo caminho",
+        f: nsf_contem_o_agente_e_a_pessoa_pelo_mesmo_caminho,
+    },
+    Caso {
+        nome: "nsf: a recusa encerra o objetivo",
+        f: nsf_a_recusa_encerra_o_objetivo,
+    },
+    Caso {
+        nome: "nsf: proveniencia pelo lancamento e pela bifurcacao",
+        f: nsf_a_proveniencia_pelo_lancamento_e_pela_bifurcacao,
+    },
+    Caso {
+        nome: "nsf: a credencial revogada",
+        f: nsf_a_credencial_revogada,
+    },
+    Caso {
+        nome: "nsf: le junto com quem pede",
+        f: nsf_le_junto_com_quem_pede,
+    },
+    Caso {
+        nome: "nsf: ve a lacuna da auditoria",
+        f: nsf_ve_a_lacuna_da_auditoria,
+    },
+    Caso {
+        nome: "firewall: so restringe, depois do gate",
+        f: firewall_so_restringe_depois_do_gate,
+    },
+    Caso {
+        nome: "firewall: descarta o quadro sem fluxo",
+        f: firewall_descarta_o_quadro_sem_fluxo,
+    },
+    Caso {
+        nome: "dns: o resolvedor pela bancada",
+        f: dns_o_resolvedor_pela_bancada,
+    },
+    Caso {
+        nome: "dns: a resposta nao da acesso",
+        f: dns_a_resposta_nao_da_acesso,
+    },
+    Caso {
         nome: "irq: o virtio interrompe de verdade",
         f: irq_o_virtio_interrompe_de_verdade,
     },
@@ -33218,6 +33282,1366 @@ fn rede_o_programa_disca_pelo_gate() -> Resultado {
     })();
     crate::pessoas::esquecer_registradas();
     resultado
+}
+
+// ---------------------------------------------------------------------------
+// O tecido de segurança (NSF), o firewall e o DNS — docs/SEGURANCA.md
+// ---------------------------------------------------------------------------
+
+/// O NSF, como o gate o vê: um pedido com a autoridade do serviço — e só
+/// ela. A suíte o monta para conferir o que o papel dele não dá.
+fn como_o_nsf() -> crate::autorizacao::Chamador {
+    use crate::autorizacao::{Autoridade, Chamador, Programa, Servico};
+    Chamador::Processo {
+        fio: crate::fios::id_atual(),
+        autoridade: Autoridade::Servico(Servico::Nsf),
+        programa: Programa::Kernel,
+    }
+}
+
+/// A política padrão com cada troca feita. `Err` se um trecho não está
+/// lá: o caso não acha onde mexer.
+fn politica_trocada(trocas: &[(&str, &str)]) -> Result<politica::Politica, &'static str> {
+    let mut texto = alloc::string::String::from(politica::PADRAO);
+    for (de, para) in trocas {
+        if !texto.contains(de) {
+            crate::log_error!("teste", "a politica nao tem `{}`", de);
+            return Err("a politica mudou: o caso nao acha o trecho que troca");
+        }
+        texto = texto.replace(de, para);
+    }
+    politica::Politica::ler(&texto).map_err(|_| "a politica do caso nao se le")
+}
+
+/// Roda `f` com a política `nova` em vigor, e põe de volta a de antes —
+/// também quando `f` falha.
+fn com_a_politica<T>(
+    nova: politica::Politica,
+    f: impl FnOnce() -> Result<T, &'static str>,
+) -> Result<T, &'static str> {
+    let antes = crate::autorizacao::com_politica(|p| p.clone());
+    crate::autorizacao::restaurar_politica(nova);
+    let r = f();
+    crate::autorizacao::restaurar_politica(antes);
+    r
+}
+
+/// Roda `f` com o NSF começando agora — sem história, e sem o fio: cada
+/// volta é o caso que dá —, e o desliga depois, sem as regras do firewall
+/// que o caso deixou.
+fn com_o_nsf<T>(f: impl FnOnce() -> Result<T, &'static str>) -> Result<T, &'static str> {
+    crate::seguranca::reiniciar_de_teste();
+    let r = f();
+    crate::seguranca::desligar_de_teste();
+    crate::rede::pilha::esquecer_regras_de_teste();
+    r
+}
+
+/// O último registro da auditoria que `f` aceita, com o número.
+fn registro_que(
+    f: impl Fn(&politica::auditoria::Evento) -> bool,
+) -> Option<(u64, politica::auditoria::Evento)> {
+    crate::autorizacao::com_auditoria(|c| {
+        c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+            .filter(|r| f(&r.evento))
+            .last()
+            .map(|r| (r.seq, r.evento.clone()))
+    })
+    .flatten()
+}
+
+/// O registro de número `seq`, se ainda está no anel.
+fn registro_numero(seq: u64) -> Option<politica::auditoria::Evento> {
+    crate::autorizacao::com_auditoria(|c| {
+        c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+            .find(|r| r.seq == seq)
+            .map(|r| r.evento.clone())
+    })
+    .flatten()
+}
+
+/// A decisão que um registro de execução diz ter executado: o número
+/// depois de `; decisao `.
+fn decisao_executada(detalhe: &str) -> Option<u64> {
+    detalhe.rsplit_once("; decisao ")?.1.parse().ok()
+}
+
+/// O que o NSF responde a uma consulta `security.*`, pedida pelo sistema
+/// — um papel que tem `security.read`.
+fn consulta_de_seguranca(metodo: &str, params: &str) -> alloc::string::String {
+    fs_pedir(sistema_aqui(), metodo, params)
+}
+
+/// O NSF lê pelo gate, com a identidade e o papel dele: cada leitura é um
+/// registro da cadeia — `service`, `nsf`, `seguranca` —, e a leitura
+/// inclui o próprio registro, o que deixa a auditoria quieta quando nada
+/// acontece. Sem `audit.read` no papel, o NSF fica cego, a recusa fica
+/// gravada, e a espera dobra a cada recusa; sem a linha `servico`, ele não
+/// tem papel nenhum — e não herda o do sistema. Com a política de volta,
+/// ele volta a ler de onde parou, sem perder nada.
+fn nsf_le_pelo_gate_com_o_papel_dele() -> Resultado {
+    use politica::Codigo;
+    use politica::auditoria::Titular;
+    com_o_nsf(|| {
+        let quem = sistema_aqui();
+        let _ = fs_pedir(quem, "system.info", "{}");
+        let v = crate::seguranca::passo();
+        if v.leituras == 0 || v.recusadas != 0 || v.registros == 0 {
+            crate::log_error!("teste", "{:?}", v);
+            return Err("o NSF nao leu a auditoria pelo gate");
+        }
+        let (leitura, e) = registro_que(|e| e.metodo == "audit.tail" && e.agente == "nsf")
+            .ok_or("a leitura do NSF nao foi gravada")?;
+        if e.titular != Titular::Servico || e.papel != "seguranca" || e.codigo != Codigo::Allow {
+            crate::log_error!("teste", "{:?}", e);
+            return Err("a leitura do NSF nao foi decidida como o servico, pelo papel dele");
+        }
+        if !crate::seguranca::com_motor_de_teste(|m| m.lido() >= leitura).unwrap_or(false) {
+            return Err("a leitura do NSF nao trouxe o proprio registro");
+        }
+
+        // Sem `audit.read`: cego, e gravado; a espera dobra.
+        let sem_leitura = politica_trocada(&[(
+            "papel seguranca audit.read net.observe net.block",
+            "papel seguranca net.observe net.block",
+        )])?;
+        let lido = crate::seguranca::com_motor_de_teste(|m| m.lido());
+        com_a_politica(sem_leitura, || {
+            let _ = fs_pedir(quem, "system.info", "{}");
+            let v = crate::seguranca::passo();
+            if v.recusadas != 1 || v.registros != 0 {
+                crate::log_error!("teste", "{:?}", v);
+                return Err("sem audit.read, o NSF leu mesmo assim");
+            }
+            let (_, r) = registro_que(|e| e.metodo == "audit.tail" && e.agente == "nsf")
+                .ok_or("a recusa nao foi gravada")?;
+            if r.titular != Titular::Servico || r.codigo != Codigo::DenyPermission {
+                crate::log_error!("teste", "{:?}", r);
+                return Err("a leitura recusada do NSF nao foi gravada como DENY_PERMISSION");
+            }
+            if crate::seguranca::com_motor_de_teste(|m| m.lido()) != lido {
+                return Err("recusada a leitura, o motor avancou mesmo assim");
+            }
+            let primeira = crate::seguranca::espera_de_teste();
+            let _ = crate::seguranca::passo();
+            let segunda = crate::seguranca::espera_de_teste();
+            if primeira != crate::seguranca::INTERVALO_MS || segunda != 2 * primeira {
+                crate::log_error!("teste", "esperas {} e {}", primeira, segunda);
+                return Err("a espera depois da recusa nao dobrou");
+            }
+            Ok(())
+        })?;
+
+        // Sem a linha `servico`: sem papel — e não o do sistema.
+        let sem_servico = politica_trocada(&[("servico nsf seguranca\n", "")])?;
+        com_a_politica(sem_servico, || {
+            let _ = fs_pedir(quem, "system.info", "{}");
+            let v = crate::seguranca::passo();
+            let (_, r) = registro_que(|e| e.metodo == "audit.tail" && e.agente == "nsf")
+                .ok_or("a recusa nao foi gravada")?;
+            if v.recusadas != 1 || r.codigo != Codigo::DenyRole || r.titular != Titular::Servico {
+                crate::log_error!("teste", "{:?} {:?}", v, r);
+                return Err("sem a linha servico, o NSF nao foi recusado por papel");
+            }
+            Ok(())
+        })?;
+
+        // A política de volta: lê de onde parou, e a espera zera.
+        let v = crate::seguranca::passo();
+        if v.recusadas != 0 || v.registros == 0 || crate::seguranca::espera_de_teste() != 0 {
+            crate::log_error!("teste", "{:?}", v);
+            return Err("com a politica de volta, o NSF nao voltou a ler");
+        }
+        let (perdidos, recusadas) = crate::seguranca::com_motor_de_teste(|m| {
+            (m.contadores.perdidos, m.contadores.leituras_recusadas)
+        })
+        .unwrap_or((u64::MAX, 0));
+        if perdidos != 0 || recusadas != 3 {
+            crate::log_error!("teste", "{} perdidos, {} recusadas", perdidos, recusadas);
+            return Err("o NSF perdeu registros enquanto estava cego, ou contou errado");
+        }
+        Ok(())
+    })
+}
+
+/// O NSF não é o sistema, nem um root novo: o papel dele enumera o que ele
+/// pode, e o resto é recusado como seria para qualquer um — ler um
+/// arquivo, conectar, lançar um programa, ler a política, até consultar o
+/// próprio estado (`security.read` não é dele). Um `net.block` ou um
+/// `net.observe` fora do alcance dele é `DENY_RESOURCE`, e nenhuma regra
+/// fica. Cada recusa é gravada como do serviço, pelo papel dele.
+fn nsf_nao_e_o_sistema() -> Resultado {
+    let nsf = como_o_nsf();
+    let casos: &[(&str, &str, &str)] = &[
+        (
+            "fs.read",
+            r#"{"path":"/dados/leia-me.txt"}"#,
+            "DENY_PERMISSION",
+        ),
+        (
+            "net.connect",
+            r#"{"to":"tcp:10.0.2.100:7"}"#,
+            "DENY_PERMISSION",
+        ),
+        ("user.run", r#"{"path":"/bin/ola"}"#, "DENY_PERMISSION"),
+        ("policy.show", "{}", "DENY_PERMISSION"),
+        ("security.status", "{}", "DENY_PERMISSION"),
+        (
+            "net.block",
+            r#"{"to":"tcp:10.0.2.99:7","owner":"serial"}"#,
+            "DENY_RESOURCE",
+        ),
+        (
+            "net.observe",
+            r#"{"to":"udp:10.0.2.2:69"}"#,
+            "DENY_RESOURCE",
+        ),
+    ];
+    for (metodo, params, codigo) in casos {
+        let r = fs_pedir(nsf, metodo, params);
+        if !recusado_com(&r, codigo) {
+            crate::log_error!("teste", "{}: {}", metodo, r);
+            return Err("o NSF fez o que o papel dele nao enumera");
+        }
+        let (_, e) =
+            registro_que(|e| e.metodo == *metodo).ok_or("a recusa do NSF nao foi gravada")?;
+        if e.titular != politica::auditoria::Titular::Servico || e.papel != "seguranca" {
+            crate::log_error!("teste", "{:?}", e);
+            return Err("a recusa do NSF nao foi gravada como do servico, pelo papel dele");
+        }
+    }
+    if !crate::rede::pilha::regras().is_empty() {
+        return Err("um bloqueio recusado deixou regra");
+    }
+    Ok(())
+}
+
+/// A sondagem e a saída de quem `pedir` pede — um agente pela porta, uma
+/// pessoa pelo console —, e a contenção que o NSF pede ao gate.
+///
+/// Três métodos sem a permissão abrem o incidente, sem pedido nenhum: a
+/// detecção não age por si. A conexão ao eco que vem depois o gate deixa
+/// — o risco não muda a decisão de ninguém —, e é ela que leva o NSF a
+/// pedir `net.block` ao gate, com a identidade dele, só para o fluxo de
+/// quem sondou e só para o eco. A conexão viva cai; a seguinte o gate
+/// decide, e deixa, e o firewall barra depois, gravando a regra; o
+/// sistema continua conectando. O NSF casa o próprio registro com o
+/// pedido: o incidente diz a decisão do gate e quem autorizou — o próprio
+/// NSF, pelo papel dele.
+///
+/// Devolve as regras e as severidades do incidente de quem sondou.
+fn nsf_conter(
+    pedir: &mut dyn FnMut(&str, &str) -> Result<alloc::string::String, &'static str>,
+    dono: &str,
+) -> Result<alloc::vec::Vec<(&'static str, &'static str)>, &'static str> {
+    use politica::Codigo;
+    use politica::auditoria::Titular;
+    use seguranca::regras::Regra;
+    use seguranca::resposta::{Estado, Nivel};
+    for metodo in ["audit.tail", "policy.show", "security.status"] {
+        let r = pedir(metodo, "{}")?;
+        if !recusado_com(&r, "DENY_PERMISSION") {
+            crate::log_error!("teste", "{}: {}", metodo, r);
+            return Err("quem sondou fez o que o papel nao da");
+        }
+    }
+    let v = crate::seguranca::passo();
+    let sondou = crate::seguranca::com_motor_de_teste(|m| {
+        m.incidentes.todos().any(|i| {
+            i.deteccoes
+                .iter()
+                .any(|d| d.regra == Regra::SondagemDePrivilegio)
+        })
+    });
+    if sondou != Some(true) || v.pedidos != 0 {
+        crate::log_error!("teste", "{:?}", v);
+        return Err("a sondagem nao abriu incidente, ou o NSF pediu algo so por ela");
+    }
+
+    // A saída: o gate deixa, e o resto do papel continua o mesmo.
+    let conexao = conexao_aberta(&pedir(
+        "net.connect",
+        &alloc::format!(r#"{{"to":"{ECO}"}}"#),
+    )?)?;
+    if !pedir("system.info", "{}")?.contains(r#""result""#) {
+        return Err("com o risco alto, o gate recusou o que o papel da");
+    }
+    let v = crate::seguranca::passo();
+    if v.pedidos != 1 {
+        crate::log_error!("teste", "{:?}", v);
+        return Err("a saida depois da sondagem nao levou o NSF a pedir a contencao");
+    }
+    let (decisao, e) = registro_que(|e| {
+        e.metodo == "net.block" && e.agente == "nsf" && decisao_executada(&e.detalhe).is_none()
+    })
+    .ok_or("o pedido de contencao nao foi gravado")?;
+    if e.titular != Titular::Servico
+        || e.papel != "seguranca"
+        || e.codigo != Codigo::Allow
+        || e.recurso != ECO
+    {
+        crate::log_error!("teste", "{:?}", e);
+        return Err("a contencao nao foi decidida pelo gate como o NSF, sobre o eco");
+    }
+    let regras = crate::rede::pilha::regras();
+    let regra = match regras.as_slice() {
+        [r] if r.destino.texto() == ECO && r.escopo.texto() == dono && r.decisao == decisao => r.id,
+        _ => {
+            crate::log_error!("teste", "{:?}", regras);
+            return Err("a regra nao e so do fluxo de quem sondou, para o eco, pela decisao");
+        }
+    };
+    let caiu = alloc::format!("conexao {conexao} derrubada pelo bloqueio; decisao {decisao}");
+    if registro_que(|e| e.detalhe.ends_with(&caiu)).is_none() {
+        return Err("a conexao viva nao caiu com o bloqueio, em nome da decisao");
+    }
+    let r = pedir(
+        "net.recv",
+        &alloc::format!(r#"{{"connection":{conexao},"max":0}}"#),
+    )?;
+    if fs_texto(&r, "state").is_some() {
+        crate::log_error!("teste", "{}", r);
+        return Err("a conexao derrubada ainda respondia");
+    }
+
+    // A seguinte: o gate decide — e deixa —, e o firewall barra depois.
+    let r = pedir("net.connect", &alloc::format!(r#"{{"to":"{ECO}"}}"#))?;
+    if fs_texto(&r, "error").as_deref() != Some(crate::rede::pilha::BARRADO)
+        || fs_numero(&r, "rule") != Some(regra)
+    {
+        crate::log_error!("teste", "{}", r);
+        return Err("a conexao seguinte nao foi barrada pelo firewall, com a regra");
+    }
+    let prefixo = alloc::format!("bloqueado pelo firewall, regra {regra}; decisao ");
+    let (_, barrada) =
+        registro_que(|e| e.codigo == Codigo::DenyPolicy && e.detalhe.contains(&prefixo))
+            .ok_or("a recusa do firewall nao foi gravada")?;
+    let pedida = decisao_executada(&barrada.detalhe)
+        .and_then(registro_numero)
+        .ok_or("a recusa do firewall nao aponta a decisao do gate")?;
+    if pedida.metodo != "net.connect"
+        || pedida.codigo != Codigo::Allow
+        || pedida.titular != barrada.titular
+    {
+        crate::log_error!("teste", "{:?} / {:?}", pedida, barrada);
+        return Err("a recusa do firewall nao executa uma decisao ALLOW de quem pediu");
+    }
+    // O sistema, de outro fluxo, conecta.
+    let quem = sistema_aqui();
+    let outra = conexao_aberta(&fs_pedir(
+        quem,
+        "net.connect",
+        &alloc::format!(r#"{{"to":"{ECO}"}}"#),
+    ))?;
+    fechar_conexao(quem, outra);
+
+    // O NSF lê o próprio registro e o casa com o pedido.
+    let _ = crate::seguranca::passo();
+    let (id, acao, sem_plano, regras_do_incidente) = crate::seguranca::com_motor_de_teste(|m| {
+        let i = m.incidentes.todos().find(|i| {
+            i.deteccoes
+                .iter()
+                .any(|d| d.regra == Regra::SondagemDePrivilegio)
+        })?;
+        let acao = i.acoes.iter().find(|a| a.metodo == "net.block")?.clone();
+        let sem_plano = m
+            .incidentes
+            .todos()
+            .any(|i| i.deteccoes.iter().any(|d| d.regra == Regra::AcaoSemPlano));
+        let regras: alloc::vec::Vec<(&'static str, &'static str)> = i
+            .deteccoes
+            .iter()
+            .filter(|d| {
+                matches!(
+                    d.regra,
+                    Regra::SondagemDePrivilegio | Regra::SaidaDepoisDeSondagem
+                )
+            })
+            .map(|d| (d.regra.nome(), d.severidade.nome()))
+            .collect();
+        Some((i.id, acao, sem_plano, regras))
+    })
+    .flatten()
+    .ok_or("o incidente de quem sondou nao tem a contencao")?;
+    if acao.decisao != Some(decisao)
+        || acao.estado != Estado::Permitida
+        || acao.nivel != Nivel::Contencao
+        || acao.autorizado_por != "service:nsf"
+        || sem_plano
+    {
+        crate::log_error!("teste", "{:?} sem plano: {}", acao, sem_plano);
+        return Err("o incidente nao diz a decisao do gate e quem autorizou a contencao");
+    }
+    let r = consulta_de_seguranca("security.incidents", &alloc::format!(r#"{{"id":{id}}}"#));
+    if !r.contains(&alloc::format!(r#""decision":{decisao}"#))
+        || !r.contains(r#""authorized_by":"service:nsf""#)
+        || !r.contains(r#""state":"allowed""#)
+    {
+        crate::log_error!("teste", "{}", r);
+        return Err("a consulta do incidente nao diz a decisao e quem autorizou");
+    }
+
+    // Tirada a regra por quem tem `net.block`, o gate decide como antes.
+    let r = fs_pedir(
+        quem,
+        "net.unblock",
+        &alloc::format!(r#"{{"to":"{ECO}","owner":"{dono}"}}"#),
+    );
+    if fs_numero(&r, "rule") != Some(regra) {
+        crate::log_error!("teste", "{}", r);
+        return Err("o sistema nao tirou a regra");
+    }
+    let de_novo = conexao_aberta(&pedir(
+        "net.connect",
+        &alloc::format!(r#"{{"to":"{ECO}"}}"#),
+    )?)?;
+    let _ = pedir(
+        "net.close",
+        &alloc::format!(r#"{{"connection":{de_novo}}}"#),
+    )?;
+    Ok(regras_do_incidente)
+}
+
+/// Um agente de IA e uma pessoa, com o mesmo papel, fazendo a mesma coisa:
+/// as mesmas regras, com as mesmas severidades, e a mesma contenção pelo
+/// gate — nenhuma exceção para nenhum dos dois, e nenhuma para o agente
+/// por ser um agente.
+fn nsf_contem_o_agente_e_a_pessoa_pelo_mesmo_caminho() -> Resultado {
+    use crate::autorizacao::Chamador;
+    crate::pessoas::esquecer_registradas();
+    let mut do_agente = alloc::vec::Vec::new();
+    com_agentes_de_teste(|| {
+        let (mut agente, mut sessao) = conectado(1)?;
+        crate::identidade::atribuir(&nome_de_teste(1), "operador")
+            .map_err(|_| "a atribuicao falhou")?;
+        let dono = alloc::format!(
+            "agent:{}",
+            sigilo::hex(&sigilo::publica_de(&chave_de_teste(1)))
+        );
+        do_agente = com_o_nsf(|| {
+            let mut pedir = |m: &str, p: &str| pela_porta(&mut agente, &mut sessao, m, p);
+            nsf_conter(&mut pedir, &dono)
+        })?;
+        Ok(())
+    })?;
+    let resultado = (|| -> Resultado {
+        let sessao = crate::pessoas::sessao_de_teste(
+            crate::pessoas::Console::Terminal(51),
+            "nsf-pessoa",
+            "operador",
+        );
+        let dono = alloc::format!("person:{}", sessao.texto());
+        let da_pessoa = com_o_nsf(|| {
+            let mut pedir = |m: &str, p: &str| Ok(fs_pedir(Chamador::Pessoa(sessao), m, p));
+            nsf_conter(&mut pedir, &dono)
+        })?;
+        if do_agente != da_pessoa || do_agente.len() != 2 {
+            crate::log_error!("teste", "agente {:?} / pessoa {:?}", do_agente, da_pessoa);
+            return Err("o agente e a pessoa nao passaram pelas mesmas regras");
+        }
+        Ok(())
+    })();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// Uma contenção que o gate recusa encerra o objetivo. Sem o eco no
+/// alcance de `net.block` do papel do NSF, o pedido dele é
+/// `DENY_RESOURCE`: nenhuma regra, a conexão continua, e o NSF não procura
+/// outro caminho — nem outro comando, nem outro alvo, nem o mesmo de
+/// novo. Uma saída seguinte, até para um destino que ele alcançaria, vira
+/// só recomendação para quem tem a autoridade; depois da recusa, tudo o
+/// que o NSF pede ao gate são leituras.
+fn nsf_a_recusa_encerra_o_objetivo() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use politica::Codigo;
+    use seguranca::resposta::Estado;
+    crate::pessoas::esquecer_registradas();
+    let sem_o_eco = politica_trocada(&[(
+        "recurso seguranca net.block tcp:10.0.2.100:7 udp:10.0.2.2:69 udp:10.0.2.3:53",
+        "recurso seguranca net.block udp:10.0.2.2:69 udp:10.0.2.3:53",
+    )])?;
+    let resultado = com_a_politica(sem_o_eco, || {
+        com_o_nsf(|| {
+            let sessao = crate::pessoas::sessao_de_teste(
+                crate::pessoas::Console::Terminal(52),
+                "nsf-negada",
+                "operador",
+            );
+            let pessoa = Chamador::Pessoa(sessao);
+            for metodo in ["audit.tail", "policy.show", "security.status"] {
+                let _ = fs_pedir(pessoa, metodo, "{}");
+            }
+            let _ = crate::seguranca::passo();
+            let eco = conexao_aberta(&fs_pedir(
+                pessoa,
+                "net.connect",
+                &alloc::format!(r#"{{"to":"{ECO}"}}"#),
+            ))?;
+            let r = (|| -> Resultado {
+                let v = crate::seguranca::passo();
+                if v.pedidos != 1 {
+                    crate::log_error!("teste", "{:?}", v);
+                    return Err("a saida depois da sondagem nao levou o NSF a pedir");
+                }
+                let (negada, e) = registro_que(|e| {
+                    e.metodo == "net.block"
+                        && e.agente == "nsf"
+                        && decisao_executada(&e.detalhe).is_none()
+                })
+                .ok_or("o pedido de contencao nao foi gravado")?;
+                if e.codigo != Codigo::DenyResource {
+                    crate::log_error!("teste", "{:?}", e);
+                    return Err("o gate deixou uma contencao fora do alcance do NSF");
+                }
+                if !crate::rede::pilha::regras().is_empty() {
+                    return Err("a contencao recusada deixou regra");
+                }
+                let r = fs_pedir(
+                    pessoa,
+                    "net.recv",
+                    &alloc::format!(r#"{{"connection":{eco},"max":0}}"#),
+                );
+                if fs_texto(&r, "state").is_none() {
+                    crate::log_error!("teste", "{}", r);
+                    return Err("sem a contencao, a conexao caiu mesmo assim");
+                }
+                // De novo, e para um destino que o NSF alcançaria.
+                let tftp = conexao_aberta(&fs_pedir(
+                    pessoa,
+                    "net.connect",
+                    &alloc::format!(r#"{{"to":"{TFTP}"}}"#),
+                ))?;
+                let v = crate::seguranca::passo();
+                let w = crate::seguranca::passo();
+                fechar_conexao(pessoa, tftp);
+                if v.pedidos + w.pedidos != 0 {
+                    crate::log_error!("teste", "{:?} {:?}", v, w);
+                    return Err("depois da recusa, o NSF pediu de novo");
+                }
+                let (negou, recomendou) = crate::seguranca::com_motor_de_teste(|m| {
+                    let i = m.incidentes.todos().find(|i| i.contencao_negada);
+                    let negou = i.is_some_and(|i| {
+                        i.acoes.iter().any(|a| {
+                            a.decisao == Some(negada)
+                                && a.estado
+                                    == Estado::Negada {
+                                        codigo: alloc::string::String::from("DENY_RESOURCE"),
+                                    }
+                        })
+                    });
+                    let recomendou = i.is_some_and(|i| {
+                        i.acoes
+                            .iter()
+                            .any(|a| a.estado == Estado::Recomendada && a.recurso == TFTP)
+                    });
+                    (negou, recomendou)
+                })
+                .unwrap_or((false, false));
+                if !negou || !recomendou {
+                    return Err("o incidente nao diz a recusa, ou nao recomendou a quem pode");
+                }
+                let so_leu = crate::autorizacao::com_auditoria(|c| {
+                    c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+                        .filter(|r| r.seq > negada && r.evento.agente == "nsf")
+                        .all(|r| matches!(r.evento.metodo.as_str(), "audit.tail" | "net.observe"))
+                })
+                .unwrap_or(false);
+                if !so_leu {
+                    return Err("depois da recusa, o NSF pediu outra coisa que nao leitura");
+                }
+                Ok(())
+            })();
+            fechar_conexao(pessoa, eco);
+            r
+        })
+    });
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// A proveniência pela auditoria. Uma pessoa lança o programa
+/// `autoridade` pelo `user.run`; ele bifurca, e o filho pede o que o papel
+/// não dá. O nascimento do filho está na auditoria antes do primeiro
+/// pedido dele — gravado antes de ele poder rodar. O NSF refaz a cadeia —
+/// o filho, bifurcado do pai, lançado pela decisão da pessoa —, a raiz é
+/// a pessoa, e cada pedido dos dois processos tem a correlação dela.
+fn nsf_a_proveniencia_pelo_lancamento_e_pela_bifurcacao() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use seguranca::evento::Tipo;
+    crate::pessoas::esquecer_registradas();
+    let resultado = com_o_nsf(|| {
+        let sessao = crate::pessoas::sessao_de_teste(
+            crate::pessoas::Console::Terminal(53),
+            "nsf-prov",
+            "operador",
+        );
+        let dir = crate::usuario::DIRETORIO_DOS_COMPILADOS;
+        let desde = crate::log::total_emitidos();
+        // Quem cria espera logo depois de pôr o filho para rodar, e o filho
+        // corre noutro núcleo: um nascimento gravado depois disso seria
+        // passado por ele.
+        crate::fios::ESPERAR_DEPOIS_DE_NASCER.store(5, core::sync::atomic::Ordering::Relaxed);
+        let r = fs_pedir(
+            Chamador::Pessoa(sessao),
+            "user.run",
+            &alloc::format!(r#"{{"path":"{dir}/autoridade"}}"#),
+        );
+        let pai = fs_numero(&r, "thread_id");
+        let terminou = esperar_ate(
+            || {
+                let mut achou = false;
+                crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+                    achou |= r.seq >= desde
+                        && r.subsistema == "usuario"
+                        && r.mensagem() == "processo encerrou com codigo 72";
+                });
+                achou
+            },
+            600,
+        )
+        .map_err(|_| "o programa nao foi recusado como o papel manda");
+        crate::fios::ESPERAR_DEPOIS_DE_NASCER.store(0, core::sync::atomic::Ordering::Relaxed);
+        let pai = pai.ok_or("o user.run nao lancou")?;
+        terminou?;
+        let (bifurcou, e) = registro_que(|e| {
+            e.metodo == "process.fork"
+                && e.detalhe
+                    .starts_with(&alloc::format!("pelo processo {pai} ("))
+                && e.titular == politica::auditoria::Titular::Pessoa
+        })
+        .ok_or("a bifurcacao nao foi gravada em nome do pai")?;
+        let filho: u64 = e
+            .detalhe
+            .rsplit_once(": filho ")
+            .and_then(|(_, f)| f.parse().ok())
+            .ok_or("o filho da bifurcacao nao se le")?;
+        let do_filho = alloc::format!("pelo processo {filho} (");
+        let (primeiro, _) = crate::autorizacao::com_auditoria(|c| {
+            c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+                .find(|r| r.evento.detalhe.starts_with(&do_filho))
+                .map(|r| (r.seq, ()))
+        })
+        .flatten()
+        .ok_or("o filho nao pediu nada")?;
+        if primeiro <= bifurcou {
+            return Err("o filho pediu antes do registro do nascimento dele");
+        }
+
+        let _ = crate::seguranca::passo();
+        let _ = crate::seguranca::passo();
+        let r = consulta_de_seguranca(
+            "security.provenance",
+            &alloc::format!(r#"{{"process":{filho}}}"#),
+        );
+        if !r.contains(r#""complete":true"#)
+            || !r.contains(r#""via":"forked""#)
+            || !r.contains(r#""via":"launched""#)
+            || !r.contains(r#""root":"person:"#)
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("a cadeia do filho nao chega a pessoa pelo lancamento e pela bifurcacao");
+        }
+        let mesma = crate::seguranca::com_motor_de_teste(|m| {
+            let raiz = m
+                .eventos()
+                .find(|e| e.metodo == "user.run" && e.tipo == Tipo::Decisao)?
+                .correlacao;
+            let dos_processos: alloc::vec::Vec<u64> = m
+                .eventos()
+                .filter(|e| {
+                    e.processo
+                        .as_ref()
+                        .is_some_and(|(f, _)| *f == filho || *f == pai)
+                })
+                .map(|e| e.correlacao)
+                .collect();
+            Some(dos_processos.len() >= 4 && dos_processos.iter().all(|c| *c == raiz))
+        })
+        .flatten();
+        if mesma != Some(true) {
+            return Err("os pedidos dos processos nao tem a correlacao de quem os lancou");
+        }
+        Ok(())
+    });
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// A credencial revogada: o agente que continua pedindo pela sessão de
+/// antes é recusado como não autenticado — a chave na auditoria, e o
+/// motivo —, e o NSF vê o uso da credencial revogada. Nada no NSF revoga:
+/// revogar é do administrador, com prova; ele não pede nada aqui.
+fn nsf_a_credencial_revogada() -> Resultado {
+    use seguranca::regras::Regra;
+    com_agentes_de_teste(|| {
+        let (mut agente, mut sessao) = conectado(1)?;
+        let chave = sigilo::publica_de(&chave_de_teste(1));
+        crate::identidade::atribuir(&nome_de_teste(1), "operador")
+            .map_err(|_| "a atribuicao falhou")?;
+        com_o_nsf(|| {
+            if !pela_porta(&mut agente, &mut sessao, "system.info", "{}")?.contains(r#""result""#) {
+                return Err("o agente nao pediu antes da revogacao");
+            }
+            crate::identidade::revogar(&chave).map_err(|_| "a revogacao de teste falhou")?;
+            let r = pela_porta(&mut agente, &mut sessao, "system.info", "{}")?;
+            if !recusado_com(&r, "DENY_NOT_AUTHENTICATED") {
+                crate::log_error!("teste", "{}", r);
+                return Err("a sessao do agente revogado continuou pedindo");
+            }
+            let (_, e) = registro_que(|e| e.detalhe == "chave revogada")
+                .ok_or("a recusa da chave revogada nao foi gravada")?;
+            if e.chave != Some(chave) {
+                return Err("a recusa nao gravou a chave revogada");
+            }
+            let v = crate::seguranca::passo();
+            if v.pedidos != 0 {
+                return Err("o NSF pediu algo pela revogacao");
+            }
+            let viu = crate::seguranca::com_motor_de_teste(|m| {
+                m.incidentes.todos().any(|i| {
+                    i.deteccoes.iter().any(|d| {
+                        d.regra == Regra::AbusoDeCredencial && d.explicacao.contains("revogada")
+                    })
+                })
+            });
+            if viu != Some(true) {
+                return Err("o NSF nao viu o uso da credencial revogada");
+            }
+            Ok(())
+        })
+    })
+}
+
+/// O firewall só restringe, e só depois do gate.
+///
+/// Uma regra para todos barra o sistema também — ele não é exceção —, e
+/// cada pedido barrado é a execução de uma decisão ALLOW do gate, gravada
+/// com a regra. Fora do alcance, a recusa é do gate, e o firewall nem é
+/// perguntado. Nenhuma regra dá acesso: bloquear um destino fora do
+/// alcance é recusado, não há comando que libere, e tirar a regra devolve
+/// a decisão ao gate — a pessoa continua sem o que o papel não dá. Uma
+/// regra de um dono só barra só o fluxo dele; e quem não tem `net.block`
+/// não põe nem tira regra.
+fn firewall_so_restringe_depois_do_gate() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use politica::Codigo;
+    const FORA: &str = "tcp:10.0.2.99:7";
+    crate::pessoas::esquecer_registradas();
+    let resultado = (|| -> Resultado {
+        let quem = sistema_aqui();
+        let sessao = crate::pessoas::sessao_de_teste(
+            crate::pessoas::Console::Terminal(54),
+            "fw-op",
+            "operador",
+        );
+        let pessoa = Chamador::Pessoa(sessao);
+        let para = |destino: &str| alloc::format!(r#"{{"to":"{destino}"}}"#);
+
+        let r = fs_pedir(quem, "net.block", &para(ECO));
+        let regra = fs_numero(&r, "rule").ok_or("o sistema nao pos a regra")?;
+        for chamador in [quem, pessoa] {
+            let r = fs_pedir(chamador, "net.connect", &para(ECO));
+            if fs_texto(&r, "error").as_deref() != Some(crate::rede::pilha::BARRADO)
+                || fs_numero(&r, "rule") != Some(regra)
+            {
+                crate::log_error!("teste", "{}", r);
+                return Err("com a regra para todos, uma conexao passou");
+            }
+            let prefixo = alloc::format!("bloqueado pelo firewall, regra {regra}; decisao ");
+            let (_, barrada) =
+                registro_que(|e| e.codigo == Codigo::DenyPolicy && e.detalhe.contains(&prefixo))
+                    .ok_or("a recusa do firewall nao foi gravada")?;
+            let decidida = decisao_executada(&barrada.detalhe)
+                .and_then(registro_numero)
+                .ok_or("a recusa do firewall nao aponta a decisao")?;
+            if decidida.metodo != "net.connect" || decidida.codigo != Codigo::Allow {
+                return Err("a recusa do firewall nao executa uma decisao ALLOW do gate");
+            }
+        }
+        // O gate primeiro: o firewall nem é perguntado.
+        let antes = seq_da_auditoria();
+        let r = fs_pedir(pessoa, "net.connect", &para(FORA));
+        if !recusado_com(&r, "DENY_RESOURCE")
+            || registro_que(|e| e.codigo == Codigo::DenyPolicy).is_some_and(|(s, _)| s > antes)
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("fora do alcance, a recusa nao foi do gate, so dele");
+        }
+        // Nenhuma regra dá acesso.
+        if !recusado_com(&fs_pedir(quem, "net.block", &para(FORA)), "DENY_RESOURCE") {
+            return Err("o sistema bloqueou um destino fora do alcance");
+        }
+        if !fs_pedir(quem, "net.allow", &para(FORA)).contains("-32601") {
+            return Err("existe um comando que libera trafego");
+        }
+        let r = fs_pedir(quem, "net.unblock", &para(ECO));
+        if fs_numero(&r, "rule") != Some(regra) || !crate::rede::pilha::regras().is_empty() {
+            crate::log_error!("teste", "{}", r);
+            return Err("o sistema nao tirou a regra");
+        }
+        let c = conexao_aberta(&fs_pedir(pessoa, "net.connect", &para(ECO)))?;
+        fechar_conexao(pessoa, c);
+        if !recusado_com(
+            &fs_pedir(pessoa, "net.connect", &para(FORA)),
+            "DENY_RESOURCE",
+        ) {
+            return Err("tirada a regra, a pessoa passou do alcance do papel");
+        }
+        // Só o fluxo de um dono.
+        let dono = alloc::format!("person:{}", sessao.texto());
+        let so_dela = alloc::format!(r#"{{"to":"{ECO}","owner":"{dono}"}}"#);
+        let r = fs_pedir(quem, "net.block", &so_dela);
+        fs_numero(&r, "rule").ok_or("o sistema nao pos a regra da pessoa")?;
+        if fs_texto(&fs_pedir(pessoa, "net.connect", &para(ECO)), "error").as_deref()
+            != Some(crate::rede::pilha::BARRADO)
+        {
+            return Err("a regra da pessoa nao barrou a pessoa");
+        }
+        let c = conexao_aberta(&fs_pedir(quem, "net.connect", &para(ECO)))?;
+        fechar_conexao(quem, c);
+        // Quem não tem `net.block` não põe nem tira.
+        for metodo in ["net.block", "net.unblock"] {
+            if !recusado_com(&fs_pedir(pessoa, metodo, &so_dela), "DENY_PERMISSION") {
+                return Err("quem nao tem net.block mexeu numa regra");
+            }
+        }
+        if crate::rede::pilha::regras().len() != 1 {
+            return Err("as regras mudaram sem quem tem a permissao");
+        }
+        Ok(())
+    })();
+    crate::rede::pilha::esquecer_regras_de_teste();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// Um quadro Ethernet com um eco ICMP de `origem` para este hóspede.
+fn quadro_icmp_eco(origem: [u8; 4]) -> alloc::vec::Vec<u8> {
+    use smoltcp::phy::ChecksumCapabilities;
+    use smoltcp::wire::{
+        EthernetAddress, EthernetFrame, EthernetProtocol, EthernetRepr, Icmpv4Packet, Icmpv4Repr,
+        IpProtocol, Ipv4Address, Ipv4Packet, Ipv4Repr,
+    };
+    let mac = crate::virtio::net::com_a_placa(|placa| placa.mac())
+        .flatten()
+        .unwrap_or([0; 6]);
+    let icmp = Icmpv4Repr::EchoRequest {
+        ident: 0x44,
+        seq_no: 1,
+        data: b"eco?",
+    };
+    let ip = Ipv4Repr {
+        src_addr: Ipv4Address::from(origem),
+        dst_addr: Ipv4Address::from(NOSSO_IP),
+        next_header: IpProtocol::Icmp,
+        payload_len: icmp.buffer_len(),
+        hop_limit: 64,
+    };
+    let eth = EthernetRepr {
+        src_addr: EthernetAddress([0x02, 0, 0, 0, 0, 0x63]),
+        dst_addr: EthernetAddress(mac),
+        ethertype: EthernetProtocol::Ipv4,
+    };
+    let mut quadro = alloc::vec![0u8; eth.buffer_len() + ip.buffer_len() + icmp.buffer_len()];
+    let mut frame = EthernetFrame::new_unchecked(&mut quadro[..]);
+    eth.emit(&mut frame);
+    let mut pacote = Ipv4Packet::new_unchecked(frame.payload_mut());
+    ip.emit(&mut pacote, &ChecksumCapabilities::default());
+    icmp.emit(
+        &mut Icmpv4Packet::new_unchecked(pacote.payload_mut()),
+        &ChecksumCapabilities::default(),
+    );
+    quadro
+}
+
+/// O firewall nos quadros: o que não é de fluxo nenhum não entra. Um
+/// datagrama UDP para uma porta que nenhuma associação abriu é descartado
+/// na entrada, antes da pilha; um eco ICMP também — e a pilha não chega a
+/// responder: nada sai. Uma conexão TCP viva que uma regra alcança cai, e
+/// nem o aviso dela sai: o fluxo está barrado.
+fn firewall_descarta_o_quadro_sem_fluxo() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use crate::rede::pilha;
+    crate::pessoas::esquecer_registradas();
+    let resultado = (|| -> Resultado {
+        let antes = pilha::descartes();
+        pilha::injetar_de_teste(&quadro_udp(IP_DO_ROTEADOR, 69, 40_999, b"ninguem pediu"));
+        let depois = pilha::descartes();
+        if depois.entrada_sem_fluxo != antes.entrada_sem_fluxo + 1 {
+            crate::log_error!("teste", "{:?} -> {:?}", antes, depois);
+            return Err("o datagrama sem associacao entrou");
+        }
+        pilha::injetar_de_teste(&quadro_icmp_eco(IP_DO_ROTEADOR));
+        let icmp = pilha::descartes();
+        if icmp.entrada_protocolo <= depois.entrada_protocolo
+            || icmp.saida_protocolo != depois.saida_protocolo
+        {
+            crate::log_error!("teste", "{:?} -> {:?}", depois, icmp);
+            return Err("o eco ICMP entrou, ou a pilha respondeu");
+        }
+        // A conexão viva que a regra alcança cai, sem mandar o aviso.
+        let sessao = crate::pessoas::sessao_de_teste(
+            crate::pessoas::Console::Terminal(56),
+            "fw-quadro",
+            "operador",
+        );
+        let pessoa = Chamador::Pessoa(sessao);
+        let conexao = eco_estabelecido(pessoa)?;
+        let antes = pilha::descartes();
+        let r = fs_pedir(
+            sistema_aqui(),
+            "net.block",
+            &alloc::format!(r#"{{"to":"{ECO}","owner":"person:{}"}}"#, sessao.texto()),
+        );
+        if fs_numero(&r, "dropped") != Some(1) {
+            crate::log_error!("teste", "{}", r);
+            return Err("a regra nao derrubou a conexao viva da pessoa");
+        }
+        let depois = pilha::descartes();
+        if depois.saida_barrada <= antes.saida_barrada {
+            crate::log_error!("teste", "{:?} -> {:?}", antes, depois);
+            return Err("o aviso da conexao derrubada saiu pelo fluxo barrado");
+        }
+        let _ = conexao;
+        Ok(())
+    })();
+    crate::rede::pilha::esquecer_regras_de_teste();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// O servidor de DNS da bancada.
+const SERVIDOR_DNS: &str = "udp:10.0.2.53:53";
+
+/// A política com o servidor da bancada no alcance do operador e do NSF.
+fn politica_com_a_bancada_de_dns() -> Result<politica::Politica, &'static str> {
+    politica_trocada(&[
+        (
+            "recurso operador net.connect tcp:10.0.2.100:7 udp:10.0.2.2:69 udp:10.0.2.3:53",
+            "recurso operador net.connect tcp:10.0.2.100:7 udp:10.0.2.2:69 udp:10.0.2.3:53 udp:10.0.2.53:53",
+        ),
+        (
+            "recurso seguranca net.observe udp:10.0.2.3:53",
+            "recurso seguranca net.observe udp:10.0.2.3:53 udp:10.0.2.53:53",
+        ),
+    ])
+}
+
+/// O DNS da 9.4, de verdade: o programa `resolvedor`, lançado por uma
+/// pessoa operadora, resolve pela associação UDP com o servidor da bancada
+/// — o gate decide a associação, o kernel não resolve nada — e confere de
+/// dentro que a resposta não abre nada: o nome permitido leva a um
+/// endereço do alcance, e a conexão passa; o proibido, a um que não está,
+/// e o gate o recusa como recusaria o número digitado; o inexistente não
+/// existe. O NSF observa a conversa pelo gate (`net.observe`, com o papel
+/// dele), e liga cada conexão à resolução que a precedeu — dizendo que o
+/// endereço passou de novo pelo gate, e o que o gate decidiu.
+fn dns_o_resolvedor_pela_bancada() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::rede::bancada_dns::{self, Modo};
+    use politica::Codigo;
+    use politica::auditoria::Titular;
+    crate::pessoas::esquecer_registradas();
+    let politica = politica_com_a_bancada_de_dns()?;
+    bancada_dns::por_de_teste(
+        &[
+            ("permitido.duke", &[[10, 0, 2, 100]]),
+            ("proibido.duke", &[[10, 0, 2, 99]]),
+        ],
+        Modo::Normal,
+    );
+    let resultado = com_a_politica(politica, || {
+        com_o_nsf(|| {
+            let sessao = crate::pessoas::sessao_de_teste(
+                crate::pessoas::Console::Terminal(55),
+                "dns-op",
+                "operador",
+            );
+            let perguntas = bancada_dns::perguntas_de_teste();
+            let fio = rodar_programa("resolvedor", Some(Autoridade::Pessoa { sessao }), 83)
+                .map_err(|_| "o resolvedor nao conferiu que a resposta do DNS nao da acesso")?;
+            if bancada_dns::perguntas_de_teste() != perguntas + 3 {
+                return Err("o servidor da bancada nao ouviu as tres perguntas");
+            }
+            let do_processo = alloc::format!("pelo processo {fio} (");
+            let conexao_a = |destino: &str| {
+                registro_que(|e| {
+                    e.metodo == "net.connect"
+                        && e.recurso == destino
+                        && e.detalhe.starts_with(&do_processo)
+                })
+            };
+            let (_, associacao) =
+                conexao_a(SERVIDOR_DNS).ok_or("a associacao com o servidor nao foi decidida")?;
+            let (permitida, p) = conexao_a(ECO).ok_or("a conexao ao permitido nao foi decidida")?;
+            let (recusada, q) =
+                conexao_a("tcp:10.0.2.99:7").ok_or("a conexao ao proibido nao foi decidida")?;
+            if associacao.codigo != Codigo::Allow
+                || p.codigo != Codigo::Allow
+                || q.codigo != Codigo::DenyResource
+                || [&associacao, &p, &q]
+                    .iter()
+                    .any(|e| e.titular != Titular::Pessoa)
+            {
+                crate::log_error!("teste", "{:?} / {:?} / {:?}", associacao, p, q);
+                return Err("o gate nao decidiu cada destino em nome da pessoa");
+            }
+
+            let _ = crate::seguranca::passo();
+            let _ = crate::seguranca::passo();
+            let (_, obs) = registro_que(|e| e.metodo == "net.observe" && e.agente == "nsf")
+                .ok_or("o NSF nao observou o servidor pelo gate")?;
+            if obs.recurso != SERVIDOR_DNS
+                || obs.codigo != Codigo::Allow
+                || obs.titular != Titular::Servico
+            {
+                crate::log_error!("teste", "{:?}", obs);
+                return Err("a observacao do NSF nao foi decidida pelo gate, pelo papel dele");
+            }
+            let r = consulta_de_seguranca(
+                "security.explain",
+                &alloc::format!(r#"{{"seq":{recusada}}}"#),
+            );
+            if !r.contains(r#""name":"proibido.duke""#)
+                || !r.contains(r#""address_decided_by_gate":true"#)
+                || !r.contains(r#""gate_code":"DENY_RESOURCE""#)
+            {
+                crate::log_error!("teste", "{}", r);
+                return Err("a explicacao da recusa nao diz o nome nem a decisao do gate");
+            }
+            let r = consulta_de_seguranca(
+                "security.explain",
+                &alloc::format!(r#"{{"seq":{permitida}}}"#),
+            );
+            if !r.contains(r#""name":"permitido.duke""#) || !r.contains(r#""gate_code":"ALLOW""#) {
+                crate::log_error!("teste", "{}", r);
+                return Err("a explicacao da conexao permitida nao diz o nome");
+            }
+            let ligou = crate::seguranca::com_motor_de_teste(|m| {
+                m.incidentes.todos().any(|i| {
+                    i.deteccoes.iter().any(|d| {
+                        d.regra == seguranca::regras::Regra::DnsContraAPolitica
+                            && d.registros.contains(&recusada)
+                    })
+                })
+            });
+            if ligou != Some(true) {
+                return Err("o NSF nao ligou o DNS a conexao recusada");
+            }
+            let r = consulta_de_seguranca(
+                "security.provenance",
+                &alloc::format!(r#"{{"process":{fio}}}"#),
+            );
+            if !r.contains(r#""name":"proibido.duke""#) || !r.contains(r#""code":"DENY_RESOURCE""#)
+            {
+                crate::log_error!("teste", "{}", r);
+                return Err("a proveniencia do processo nao mostra a rede dele com o DNS");
+            }
+            Ok(())
+        })
+    });
+    bancada_dns::por_de_teste(&[], Modo::Normal);
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// Uma pergunta de DNS como o texto de um `content`: cada byte escapado.
+fn pergunta_de_dns(id: u16, nome: &str) -> Result<alloc::string::String, &'static str> {
+    let nome = protocolo::dns::Nome::de_texto(nome).map_err(|_| "o nome da pergunta nao se le")?;
+    let mut b = [0u8; protocolo::dns::MAIOR_MENSAGEM];
+    let n = protocolo::dns::pergunta(id, &nome, &mut b).map_err(|_| "a pergunta nao se escreve")?;
+    if b[..n].iter().any(|&x| x >= 0x80) {
+        return Err("a pergunta tem um byte que o texto do JSON nao leva como e");
+    }
+    Ok(b[..n]
+        .iter()
+        .map(|x| alloc::format!("\\u{x:04x}"))
+        .collect())
+}
+
+/// Nada chegou à associação `conexao` de `quem`, depois de esperar um
+/// pouco.
+fn nada_chegou(quem: crate::autorizacao::Chamador, conexao: u64) -> bool {
+    let _ = esperar_ate(|| false, 30);
+    let r = fs_pedir(
+        quem,
+        "net.recv",
+        &alloc::format!(r#"{{"connection":{conexao}}}"#),
+    );
+    fs_numero(&r, "datagram").is_none()
+}
+
+/// A resposta de DNS não dá acesso, nem mentindo. Pelos comandos, uma
+/// pessoa operadora conversa com o servidor da bancada: o nome que dá o
+/// eco leva a uma conexão que o gate deixa; o mesmo nome, religado para
+/// um endereço fora do alcance, leva a um `DENY_RESOURCE` — o gate decide
+/// o endereço, e não o nome. A resposta forjada, de outra origem, não
+/// chega a quem perguntou; a muda não chega; a malformada chega e não se
+/// lê. Um servidor fora do alcance nem é falado. E o NSF vê a religação
+/// contra a política, e conta a malformada.
+fn dns_a_resposta_nao_da_acesso() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use crate::rede::bancada_dns::{self, Modo};
+    crate::pessoas::esquecer_registradas();
+    let politica = politica_com_a_bancada_de_dns()?;
+    let resultado = com_a_politica(politica, || {
+        com_o_nsf(|| {
+            let sessao = crate::pessoas::sessao_de_teste(
+                crate::pessoas::Console::Terminal(57),
+                "dns-mentira",
+                "operador",
+            );
+            let pessoa = Chamador::Pessoa(sessao);
+            if !recusado_com(
+                &fs_pedir(pessoa, "net.connect", r#"{"to":"udp:10.0.2.54:53"}"#),
+                "DENY_RESOURCE",
+            ) {
+                return Err("um servidor de DNS fora do alcance foi aberto");
+            }
+            let conexao = conexao_aberta(&fs_pedir(
+                pessoa,
+                "net.connect",
+                &alloc::format!(r#"{{"to":"{SERVIDOR_DNS}"}}"#),
+            ))?;
+            let perguntar = |id: u16| -> Result<alloc::vec::Vec<[u8; 4]>, &'static str> {
+                let r = mandar_datagrama(pessoa, conexao, &pergunta_de_dns(id, "permitido.duke")?);
+                if fs_numero(&r, "sent").is_none() {
+                    crate::log_error!("teste", "{}", r);
+                    return Err("a pergunta nao saiu");
+                }
+                let bytes = datagrama_de(pessoa, conexao)?;
+                let m = protocolo::dns::ler(&bytes).map_err(|_| "a resposta nao se le")?;
+                if m.id != id {
+                    return Err("a resposta e de outra pergunta");
+                }
+                Ok(m.enderecos().to_vec())
+            };
+            let r = (|| -> Resultado {
+                bancada_dns::por_de_teste(&[("permitido.duke", &[[10, 0, 2, 100]])], Modo::Normal);
+                if perguntar(0x1101)? != [[10, 0, 2, 100]] {
+                    return Err("o nome nao deu o eco");
+                }
+                let c = conexao_aberta(&fs_pedir(
+                    pessoa,
+                    "net.connect",
+                    &alloc::format!(r#"{{"to":"{ECO}"}}"#),
+                ))?;
+                fechar_conexao(pessoa, c);
+                // A religação: o mesmo nome, para fora do alcance.
+                bancada_dns::por_de_teste(&[("permitido.duke", &[[10, 0, 2, 99]])], Modo::Normal);
+                if perguntar(0x1102)? != [[10, 0, 2, 99]] {
+                    return Err("o nome nao foi religado");
+                }
+                if !recusado_com(
+                    &fs_pedir(pessoa, "net.connect", r#"{"to":"tcp:10.0.2.99:7"}"#),
+                    "DENY_RESOURCE",
+                ) {
+                    return Err("o nome religado abriu um destino fora do alcance");
+                }
+                // A forjada e a muda não chegam.
+                for modo in [Modo::Forjada, Modo::Muda] {
+                    bancada_dns::por_de_teste(&[("permitido.duke", &[[10, 0, 2, 100]])], modo);
+                    let antes = bancada_dns::perguntas_de_teste();
+                    let r = mandar_datagrama(
+                        pessoa,
+                        conexao,
+                        &pergunta_de_dns(0x1103, "permitido.duke")?,
+                    );
+                    if fs_numero(&r, "sent").is_none()
+                        || bancada_dns::perguntas_de_teste() != antes + 1
+                    {
+                        return Err("a pergunta nao chegou a bancada");
+                    }
+                    if !nada_chegou(pessoa, conexao) {
+                        crate::log_error!("teste", "{:?}", modo);
+                        return Err("uma resposta forjada ou inexistente chegou");
+                    }
+                }
+                // A malformada chega, e não se lê.
+                bancada_dns::por_de_teste(
+                    &[("permitido.duke", &[[10, 0, 2, 100]])],
+                    Modo::Malformada,
+                );
+                let _ =
+                    mandar_datagrama(pessoa, conexao, &pergunta_de_dns(0x1104, "permitido.duke")?);
+                if protocolo::dns::ler(&datagrama_de(pessoa, conexao)?).is_ok() {
+                    return Err("a resposta malformada se leu");
+                }
+                let _ = crate::seguranca::passo();
+                let _ = crate::seguranca::passo();
+                let (religou, malformadas) = crate::seguranca::com_motor_de_teste(|m| {
+                    let religou = m.incidentes.todos().any(|i| {
+                        i.deteccoes.iter().any(|d| {
+                            d.regra == seguranca::regras::Regra::DnsContraAPolitica
+                                && d.explicacao.contains("permitido.duke")
+                        })
+                    });
+                    (religou, m.dns.malformados)
+                })
+                .unwrap_or((false, 0));
+                if !religou || malformadas == 0 {
+                    crate::log_error!("teste", "{} {}", religou, malformadas);
+                    return Err("o NSF nao viu a religacao, ou nao contou a malformada");
+                }
+                Ok(())
+            })();
+            fechar_conexao(pessoa, conexao);
+            r
+        })
+    });
+    bancada_dns::por_de_teste(&[], Modo::Normal);
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// O NSF de verdade, num fio dele, junto com quem pede: um fio com a
+/// autoridade do serviço dá voltas enquanto quatro fios pedem ao mesmo
+/// tempo — e o NSF lê tudo, na ordem, sem lacuna nem elo que não confere,
+/// e sem pedir nada que ninguém tenha provocado.
+fn nsf_le_junto_com_quem_pede() -> Resultado {
+    use crate::autorizacao::{Autoridade, Servico};
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    static PARAR: AtomicBool = AtomicBool::new(false);
+    static VOLTAS: AtomicUsize = AtomicUsize::new(0);
+    static PEDIDOS: AtomicUsize = AtomicUsize::new(0);
+    static PRONTOS: AtomicUsize = AtomicUsize::new(0);
+    extern "C" fn nsf(_: u64) -> ! {
+        while !PARAR.load(Ordering::Acquire) {
+            let v = crate::seguranca::passo();
+            PEDIDOS.fetch_add(v.pedidos, Ordering::AcqRel);
+            VOLTAS.fetch_add(1, Ordering::AcqRel);
+            // A cadência de verdade é de uma volta por segundo; aqui, uma a
+            // cada vinte tiques — dentro da taxa do papel do NSF.
+            let ate = crate::tempo::ticks() + 20;
+            while crate::tempo::ticks() < ate && !PARAR.load(Ordering::Acquire) {
+                crate::fios::ceder();
+            }
+        }
+        PRONTOS.fetch_add(1, Ordering::AcqRel);
+        crate::fios::terminar()
+    }
+    extern "C" fn quem_pede(n: u64) -> ! {
+        let quem = sistema_no_armazem(crate::fios::id_atual());
+        for _ in 0..40 {
+            let _ = fs_pedir(quem, "system.info", "{}");
+            if n.is_multiple_of(2) {
+                let _ = fs_pedir(quem, "fs.list", r#"{"path":"/dados"}"#);
+            }
+        }
+        PRONTOS.fetch_add(1, Ordering::AcqRel);
+        crate::fios::terminar()
+    }
+    com_o_nsf(|| {
+        PARAR.store(false, Ordering::Release);
+        VOLTAS.store(0, Ordering::Release);
+        PEDIDOS.store(0, Ordering::Release);
+        PRONTOS.store(0, Ordering::Release);
+        crate::fios::criar_como("nsf-teste", nsf, 0, Autoridade::Servico(Servico::Nsf))?;
+        for n in 0..4 {
+            crate::fios::criar("pede", quem_pede, n)?;
+        }
+        let pediram = esperar_cedendo(|| PRONTOS.load(Ordering::Acquire) == 4, 3000);
+        PARAR.store(true, Ordering::Release);
+        esperar_cedendo(|| PRONTOS.load(Ordering::Acquire) == 5, 600)
+            .map_err(|_| "o fio do NSF nao parou")?;
+        pediram.map_err(|_| "os fios que pedem nao terminaram")?;
+        // A última volta, com tudo parado: o NSF alcança a cabeça.
+        let _ = crate::seguranca::passo();
+        let cabeca = seq_da_auditoria();
+        let (lido, perdidos, adulterados, incidentes) = crate::seguranca::com_motor_de_teste(|m| {
+            (
+                m.lido(),
+                m.contadores.perdidos,
+                m.contadores.adulterados,
+                m.incidentes.todos().count(),
+            )
+        })
+        .ok_or("o NSF saiu do ar")?;
+        if VOLTAS.load(Ordering::Acquire) < 2 || lido + 1 < cabeca {
+            crate::log_error!(
+                "teste",
+                "{} voltas, lido {} de {}",
+                VOLTAS.load(Ordering::Acquire),
+                lido,
+                cabeca
+            );
+            return Err("o fio do NSF nao acompanhou a auditoria");
+        }
+        if perdidos != 0 || adulterados != 0 {
+            crate::log_error!(
+                "teste",
+                "{} perdidos, {} adulterados",
+                perdidos,
+                adulterados
+            );
+            return Err("lendo junto com quem pede, o NSF viu lacuna ou elo que nao confere");
+        }
+        if PEDIDOS.load(Ordering::Acquire) != 0 || incidentes != 0 {
+            crate::seguranca::com_motor_de_teste(|m| {
+                for i in m.incidentes.todos() {
+                    for d in &i.deteccoes {
+                        crate::log_error!(
+                            "teste",
+                            "{} {}: {}",
+                            i.principal,
+                            d.regra.nome(),
+                            d.explicacao
+                        );
+                    }
+                }
+            });
+            return Err("sem nada de errado, o NSF abriu incidente ou pediu algo");
+        }
+        let r = consulta_de_seguranca("security.verify", "{}");
+        if !r.contains(r#""ok":true"#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("a verificacao do NSF nao confere");
+        }
+        Ok(())
+    })
+}
+
+/// A auditoria que dá a volta no anel antes da leitura: o NSF vê a
+/// lacuna, conta o que perdeu, e abre o incidente de quem lê — o de
+/// `audit`, sem pedir nada: perder registro não é motivo para conter
+/// ninguém. E volta a ler de onde o anel começa.
+fn nsf_ve_a_lacuna_da_auditoria() -> Resultado {
+    use seguranca::regras::Regra;
+    com_o_nsf(|| {
+        let _ = fs_pedir(sistema_aqui(), "system.info", "{}");
+        let _ = crate::seguranca::passo();
+        let capacidade = crate::autorizacao::CAPACIDADE_DA_AUDITORIA as u64;
+        for i in 0..capacidade + 8 {
+            crate::autorizacao::auditar_enchimento_de_teste(
+                "teste.nsf",
+                &i.to_le_bytes(),
+                "um registro de muitos",
+            );
+            // O journal acompanha: a lacuna é só a de quem lê o anel.
+            if i % 100 == 99 {
+                crate::persistencia::gravar_auditoria()?;
+            }
+        }
+        let v = crate::seguranca::passo();
+        let (perdidos, lacuna) = crate::seguranca::com_motor_de_teste(|m| {
+            (
+                m.contadores.perdidos,
+                m.incidentes.todos().any(|i| {
+                    i.deteccoes
+                        .iter()
+                        .any(|d| d.regra == Regra::LacunaNaLeitura)
+                }),
+            )
+        })
+        .unwrap_or((0, false));
+        if perdidos == 0 || !lacuna || v.pedidos != 0 || v.registros == 0 {
+            crate::log_error!("teste", "{:?}, {} perdidos", v, perdidos);
+            return Err("o NSF nao viu a lacuna, ou pediu algo por ela");
+        }
+        crate::persistencia::gravar_auditoria()?;
+        Ok(())
+    })
 }
 
 // ---------------------------------------------------------------------------

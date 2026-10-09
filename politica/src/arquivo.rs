@@ -54,6 +54,13 @@
 //!   sistema. Obrigatória. A pessoa num console não é a autoridade local:
 //!   decide pelo papel dela no registro de pessoas. Ela não é exceção à política:
 //!   decide pela mesma conta, com as permissões que o papel enumera.
+//! - `servico <nome> <papel>`: o papel de um serviço do sistema com
+//!   identidade própria — hoje só o tecido de segurança, `nsf` (ver
+//!   [`SERVICOS`] e `docs/SEGURANCA.md`). Opcional: sem a linha, o serviço
+//!   não tem papel, e o gate recusa tudo o que ele pede. O papel não pode
+//!   ser o da serial nem o da autoridade local — o serviço não herda o
+//!   `sistema` —, e o kernel e o `xtask` conferem que também não é o teto
+//!   de um administrador. Só a imagem a escreve.
 //!
 //! # Validar antes de valer
 //!
@@ -187,6 +194,11 @@ pub const TETO_DE_BYTES_DO_ARMAZEM: u64 = 1 << 40;
 /// O maior número de objetos que uma linha `armazem` dá.
 pub const TETO_DE_OBJETOS_DO_ARMAZEM: u64 = 1 << 24;
 
+/// Os serviços que uma linha `servico` nomeia: um vocabulário fechado, como
+/// o das permissões. Um nome fora dele recusa a política. Ver
+/// `docs/SEGURANCA.md`.
+pub const SERVICOS: &[&str] = &["nsf"];
+
 /// Um papel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Papel {
@@ -247,6 +259,8 @@ pub struct Politica {
     apertos: Apertos,
     /// O quórum de cada operação que exige um.
     quoruns: BTreeMap<String, Quorum>,
+    /// O papel de cada serviço que a política nomeia — ver [`SERVICOS`].
+    servicos: BTreeMap<String, String>,
 }
 
 /// O que há de errado numa política.
@@ -289,6 +303,13 @@ pub enum ErroTipo {
     QuorumRepetido(String),
     /// Um quórum abaixo do piso da operação: (operação, M, N).
     QuorumAbaixoDoPiso(String, u8, u8),
+    /// Uma linha `servico` com um nome fora de [`SERVICOS`].
+    ServicoDesconhecido(String),
+    /// Duas linhas `servico` para o mesmo serviço.
+    ServicoRepetido(String),
+    /// Um serviço com o papel da serial ou da autoridade local: (serviço,
+    /// papel).
+    ServicoComPapelDoSistema(String, String),
 }
 
 /// Um erro, com a linha onde está. Linha zero: a política como um todo.
@@ -334,6 +355,11 @@ impl Erro {
             ErroTipo::QuorumAbaixoDoPiso(o, m, n) => {
                 format!("quorum {m} de {n} para `{o}` esta abaixo do piso da operacao")
             }
+            ErroTipo::ServicoDesconhecido(n) => format!("servico desconhecido `{n}`"),
+            ErroTipo::ServicoRepetido(n) => format!("servico `{n}` definido duas vezes"),
+            ErroTipo::ServicoComPapelDoSistema(n, papel) => format!(
+                "o servico `{n}` teria o papel `{papel}`, da serial ou da autoridade local: um servico nao herda o sistema"
+            ),
         };
         if self.linha == 0 {
             o_que
@@ -397,6 +423,7 @@ impl Politica {
             local: String::new(),
             apertos: APERTOS_PADRAO,
             quoruns: BTreeMap::new(),
+            servicos: BTreeMap::new(),
         };
         let mut recursos_e_taxas: Vec<(usize, &str)> = Vec::new();
         for (i, linha) in texto.lines().enumerate() {
@@ -481,6 +508,30 @@ impl Politica {
     /// operação não existe: nada a substitui por uma credencial só.
     pub fn quorum(&self, operacao: &str) -> Option<Quorum> {
         self.quoruns.get(operacao).copied()
+    }
+
+    /// Se algum papel tem `destino` — na forma normal — no alcance de
+    /// `net.observe`: só o conteúdo trocado com um destino assim é guardado
+    /// para alguém observar. Quem pode ler o que foi guardado é o gate que
+    /// decide, pedido a pedido; isto diz só o que se guarda.
+    pub fn observavel(&self, destino: &str) -> bool {
+        self.papeis.iter().any(|p| {
+            p.tem(Permissao::NetObserve)
+                && p.recursos
+                    .get(&Permissao::NetObserve)
+                    .is_some_and(|a| a.iter().any(|d| d == destino))
+        })
+    }
+
+    /// O papel do serviço `nome`, se a política lhe dá um. Sem a linha, o
+    /// serviço não tem papel — e a decisão sem papel é `DENY_ROLE`.
+    pub fn servico(&self, nome: &str) -> Option<&str> {
+        self.servicos.get(nome).map(String::as_str)
+    }
+
+    /// Os serviços e os papéis deles, em ordem de nome.
+    pub fn servicos(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.servicos.iter().map(|(n, p)| (n.as_str(), p.as_str()))
     }
 
     /// Aplica uma linha já sem comentário.
@@ -676,6 +727,26 @@ impl Politica {
                     self.local = nome.to_string();
                 }
             }
+            "servico" => {
+                let nome = partes.next().ok_or(erro(ErroTipo::Sintaxe))?;
+                let papel = partes.next().ok_or(erro(ErroTipo::Sintaxe))?;
+                if partes.next().is_some() {
+                    return Err(erro(ErroTipo::Sintaxe));
+                }
+                if !SERVICOS.contains(&nome) {
+                    return Err(erro(ErroTipo::ServicoDesconhecido(nome.to_string())));
+                }
+                if !nome_valido(papel) {
+                    return Err(erro(ErroTipo::NomeInvalido(papel.to_string())));
+                }
+                if self
+                    .servicos
+                    .insert(nome.to_string(), papel.to_string())
+                    .is_some()
+                {
+                    return Err(erro(ErroTipo::ServicoRepetido(nome.to_string())));
+                }
+            }
             _ => return Err(erro(ErroTipo::LinhaDesconhecida)),
         }
         Ok(())
@@ -689,6 +760,7 @@ impl Politica {
                 return Err(geral(ErroTipo::PapelDesconhecido(papel.clone())));
             }
         }
+        self.conferir_servicos()?;
         for papel in &self.papeis {
             for incluido in &papel.inclui {
                 if self.papel(incluido).is_none() {
@@ -731,6 +803,27 @@ impl Politica {
                     piso.operacao.to_string(),
                     q.m,
                     q.n,
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// O papel de cada serviço existe, e não é o da serial nem o da
+    /// autoridade local: um serviço tem identidade própria e decide pelo
+    /// papel que a linha dele dá — não herda o `sistema`, que a serial e a
+    /// autoridade local exercem. Vale para a política lida e para a que
+    /// uma troca da serial produziria.
+    fn conferir_servicos(&self) -> Result<(), Erro> {
+        let geral = |tipo| Erro { linha: 0, tipo };
+        for (servico, papel) in &self.servicos {
+            if self.papel(papel).is_none() {
+                return Err(geral(ErroTipo::PapelDesconhecido(papel.clone())));
+            }
+            if *papel == self.serial || *papel == self.local {
+                return Err(geral(ErroTipo::ServicoComPapelDoSistema(
+                    servico.clone(),
+                    papel.clone(),
                 )));
             }
         }
@@ -870,7 +963,11 @@ impl Politica {
     /// conceder. O kernel confere no boot, o `xtask` antes de pôr a política
     /// na imagem. `tetos` são os papéis dos administradores.
     pub fn conferir_tetos(&self, tetos: &[&str]) -> Result<(), String> {
-        for (linha, papel) in [("serial", &self.serial), ("local", &self.local)] {
+        let servicos = self.servicos.values().map(|p| ("servico", p));
+        for (linha, papel) in [("serial", &self.serial), ("local", &self.local)]
+            .into_iter()
+            .chain(servicos)
+        {
             if tetos.contains(&papel.as_str()) {
                 return Err(format!(
                     "a linha `{linha}` da o papel `{papel}`, que e o teto de um administrador: um teto delega, nao se exerce"
@@ -941,7 +1038,7 @@ impl Politica {
         ) {
             return Err(Recusa::Proibida(
                 "policy.write muda papel, recurso, taxa, processos, mensagens ou armazem; a serial \
-                 muda por policy.assign, e o papel local e os apertos so pela imagem"
+                 muda por policy.assign, e o papel local, o dos servicos e os apertos so pela imagem"
                     .to_string(),
             ));
         }
@@ -1089,6 +1186,9 @@ impl Politica {
         }
         let _ = writeln!(t, "serial {}", self.serial);
         let _ = writeln!(t, "local {}", self.local);
+        for (servico, papel) in &self.servicos {
+            let _ = writeln!(t, "servico {servico} {papel}");
+        }
         let _ = writeln!(
             t,
             "apertos {} {}",
@@ -1110,6 +1210,9 @@ impl Politica {
         }
         let mut nova = self.clone();
         nova.serial = papel.to_string();
+        // A serial não passa a exercer o papel de um serviço: o serviço
+        // continuaria com ele, e os dois decidiriam pela mesma linha.
+        nova.conferir_servicos().map_err(Recusa::Invalida)?;
         Ok(nova)
     }
 }

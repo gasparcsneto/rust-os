@@ -758,6 +758,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "seguranca"
+version = "0.1.0"
+dependencies = [
+ "blake2 0.11.0",
+ "politica",
+ "protocolo",
+]
+
+[[package]]
 name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -650,9 +650,21 @@ fn esperar_a_auditoria_gravada(maquina: &mut Ligada) -> Result<Vec<Rastro>, Stri
     let limite = std::time::Instant::now() + Duration::from_secs(20);
     loop {
         let cauda = cauda_da_auditoria(maquina)?;
-        // O próprio `audit.tail` é registrado antes de responder, e ainda
-        // não está gravado: o que se espera é o que veio antes dele.
-        if cauda.iter().rev().skip(1).all(|r| r.duravel) {
+        // As leituras não são o que se espera: o `audit.tail` desta espera
+        // — registrado antes de responder, e ainda não gravado — e os das
+        // voltas de antes, e as do tecido de segurança, que lê a auditoria
+        // pelo gate a cada registro novo e grava a leitura. O que se espera
+        // é o último registro que não é leitura no journal: ele leva os de
+        // antes, que o journal grava em ordem.
+        let leitura = |r: &Rastro| {
+            (r.metodo == "audit.tail" && r.titular == "serial") || r.titular == "service"
+        };
+        if cauda
+            .iter()
+            .rev()
+            .find(|r| !leitura(r))
+            .is_some_and(|r| r.duravel)
+        {
             return Ok(cauda);
         }
         if std::time::Instant::now() >= limite {

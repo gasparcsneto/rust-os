@@ -29,6 +29,9 @@
 //! quadro que colhe a [`observar`] antes de processá-lo; o ARP pergunta,
 //! faz a pilha andar, e procura a resposta entre as observadas.
 
+#[cfg(feature = "modo-teste")]
+pub mod bancada_dns;
+pub mod captura;
 pub mod conexoes;
 pub mod espera;
 pub mod pilha;

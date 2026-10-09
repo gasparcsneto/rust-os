@@ -66,30 +66,45 @@ pub use permissao::Permissao;
 ///   do administrador, e o do administrador não muda em tempo de execução.
 ///   O `fs.write` dele é o do operador, `/armazem/compartilhado`: o teto
 ///   tem de conter o que o operador recebe, para o operador ser delegável.
-/// - `net.connect`, nos dois, alcança os dois destinos da bancada, os dois
+/// - `net.connect`, nos dois, alcança os três destinos da bancada, os três
 ///   servidos pelo próprio emulador, sem servidor no hospedeiro: o eco TCP,
-///   em `10.0.2.100:7` (um `guestfwd`), e o TFTP do emulador, em
-///   `10.0.2.2:69` (UDP). Enumerados, como todo destino: a imagem de
-///   desenvolvimento não disca nada que não esteja escrito, nem o sistema.
+///   em `10.0.2.100:7` (um `guestfwd`), o TFTP do emulador, em
+///   `10.0.2.2:69` (UDP), e o DNS do emulador, em `10.0.2.3:53` (UDP).
+///   Enumerados, como todo destino: a imagem de desenvolvimento não disca
+///   nada que não esteja escrito, nem o sistema.
 /// - `quorum admin.revoke 2 3`: revogar a credencial de um administrador
 ///   exige a prova de duas outras, de um grupo de três — o da imagem.
+/// - `seguranca` é o papel do tecido de segurança — o serviço `nsf`, pela
+///   linha `servico` (ver `docs/SEGURANCA.md`): lê a auditoria, observa o
+///   DNS da bancada e barra os destinos da bancada. Nada além: não conecta,
+///   não lança, não lê arquivo, não muda a política, e não é o `sistema`.
+///   Está nas duas políticas: sem política no disco, o tecido continua
+///   vendo — e continua só com isto. O `sistema` e o `administrador` têm
+///   `security.read`, `net.observe` e `net.block` escritas nas linhas
+///   deles, com o alcance enumerado: o `sistema` porque é o máximo
+///   enumerado, e o `administrador` para que as três do papel `seguranca`
+///   caibam no teto de quem as delega.
 macro_rules! papeis_de_sistema {
     () => {
         "\
-papel sistema agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.raw_read keyboard.read debug.trigger terminal.attach audit.read policy.read message.send message.read
+papel sistema agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.raw_read keyboard.read debug.trigger terminal.attach audit.read policy.read message.send message.read security.read net.observe net.block
 recurso sistema fs.read /
 recurso sistema fs.write /armazem
-recurso sistema net.connect tcp:10.0.2.100:7 udp:10.0.2.2:69
+recurso sistema net.connect tcp:10.0.2.100:7 udp:10.0.2.2:69 udp:10.0.2.3:53
+recurso sistema net.observe udp:10.0.2.3:53
+recurso sistema net.block tcp:10.0.2.100:7 udp:10.0.2.2:69 udp:10.0.2.3:53
 armazem sistema 268435456 65536
 recurso sistema process.run /
 recurso sistema message.send papel:observador papel:operador papel:sistema papel:administrador
 taxa sistema 400 800
 processos sistema 32
 
-papel administrador agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke
+papel administrador agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke security.read net.observe net.block
 recurso administrador fs.read /dados /bin /programas /armazem/compartilhado
 recurso administrador fs.write /armazem/compartilhado
-recurso administrador net.connect tcp:10.0.2.100:7 udp:10.0.2.2:69
+recurso administrador net.connect tcp:10.0.2.100:7 udp:10.0.2.2:69 udp:10.0.2.3:53
+recurso administrador net.observe udp:10.0.2.3:53
+recurso administrador net.block tcp:10.0.2.100:7 udp:10.0.2.2:69 udp:10.0.2.3:53
 armazem administrador 67108864 16384
 recurso administrador process.run /bin /programas
 recurso administrador message.send papel:operador papel:sistema papel:administrador
@@ -97,6 +112,12 @@ taxa administrador 10 20
 processos administrador 8
 
 quorum admin.revoke 2 3
+
+papel seguranca audit.read net.observe net.block
+recurso seguranca net.observe udp:10.0.2.3:53
+recurso seguranca net.block tcp:10.0.2.100:7 udp:10.0.2.2:69 udp:10.0.2.3:53
+taxa seguranca 10 20
+servico nsf seguranca
 "
     };
 }
@@ -124,8 +145,11 @@ pub const PADRAO: &str = concat!(
 # `papel:<nome>`, e o de net.connect cada destino inteiro,
 # `tcp:<ipv4>:<porta>` ou `udp:<ipv4>:<porta>`, os dois enumerados. Nao ha
 # curinga. Os unicos destinos desta imagem sao os da bancada: o eco TCP em
-# 10.0.2.100:7 e o TFTP do emulador, UDP, em 10.0.2.2:69. So o sistema e o proprio administrador alcancam o administrador:
-# nenhum policy.write da esse alcance a outro papel.
+# 10.0.2.100:7, o TFTP do emulador, UDP, em 10.0.2.2:69, e o DNS do
+# emulador, UDP, em 10.0.2.3:53. So o sistema e o proprio administrador
+# alcancam o administrador: nenhum policy.write da esse alcance a outro
+# papel. O tecido de seguranca (servico nsf) decide pelo papel seguranca, e
+# so pelo que ele enumera.
 
 papel observador agent.read system.read log.read ui.read message.read
 taxa observador 20 40
@@ -134,7 +158,7 @@ processos observador 2
 papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read
 recurso operador fs.read /dados /bin /programas /armazem/compartilhado
 recurso operador fs.write /armazem/compartilhado
-recurso operador net.connect tcp:10.0.2.100:7 udp:10.0.2.2:69
+recurso operador net.connect tcp:10.0.2.100:7 udp:10.0.2.2:69 udp:10.0.2.3:53
 armazem operador 16777216 4096
 recurso operador process.run /bin /programas
 recurso operador message.send papel:operador papel:sistema
@@ -271,7 +295,7 @@ mod testes {
             Codigo::DenyPermission
         );
         for papel in ["operador", "administrador", "sistema"] {
-            for dentro in ["tcp:10.0.2.100:7", "udp:10.0.2.2:69"] {
+            for dentro in ["tcp:10.0.2.100:7", "udp:10.0.2.2:69", "udp:10.0.2.3:53"] {
                 assert_eq!(
                     d(papel, NetConnect, Some(dentro)),
                     Codigo::Allow,
@@ -289,7 +313,8 @@ mod testes {
                 "udp:10.0.2.100:7",
                 "tcp:10.0.2.2:69",
                 "udp:10.0.2.2:70",
-                "udp:10.0.2.3:53",
+                "tcp:10.0.2.3:53",
+                "udp:10.0.2.3:5353",
                 "udp:10.0.2.2:069",
                 "UDP:10.0.2.2:69",
                 "tcp:10.0.2.100",
@@ -331,12 +356,18 @@ mod testes {
                 perm.nome()
             );
             if esperado && perm.recurso_e_endereco() {
+                // Os destinos da bancada, cada um escrito; observar, só o
+                // DNS — o único que alguém observa.
+                let alcance: &[&str] = if perm == Permissao::NetObserve {
+                    &["udp:10.0.2.3:53"]
+                } else {
+                    &["tcp:10.0.2.100:7", "udp:10.0.2.2:69", "udp:10.0.2.3:53"]
+                };
                 assert_eq!(
                     sistema.recursos.get(&perm).unwrap(),
-                    &[
-                        "tcp:10.0.2.100:7".to_string(),
-                        "udp:10.0.2.2:69".to_string()
-                    ]
+                    alcance,
+                    "{}",
+                    perm.nome()
                 );
             }
             if esperado && perm.recurso_e_caminho() {
@@ -639,5 +670,158 @@ mod testes {
         assert!(local.conferir_tetos(&["administrador"]).is_err());
         // Outro papel de administrador, do registro, é teto também.
         assert!(padrao().conferir_tetos(&["sistema"]).is_err());
+    }
+
+    /// O tecido de segurança é um principal como os outros: o serviço `nsf`
+    /// decide pelo papel `seguranca`, que enumera três permissões e o
+    /// alcance de cada uma — nas duas políticas embutidas. Nada além: nem
+    /// conectar, nem ler arquivo, nem lançar, nem ler o que ele mesmo viu.
+    #[test]
+    fn o_servico_decide_pelo_papel_dele() {
+        use Permissao::*;
+        for p in [padrao(), Politica::emergencia()] {
+            assert_eq!(p.servico("nsf"), Some("seguranca"));
+            assert_eq!(p.servico("outro"), None);
+            let papel = p.papel("seguranca").unwrap();
+            let todas: alloc::vec::Vec<_> = papel.permissoes().map(|x| x.nome()).collect();
+            assert_eq!(todas, ["audit.read", "net.observe", "net.block"]);
+            let d = |perm, rec| p.decidir(Some("seguranca"), perm, rec);
+            assert_eq!(d(AuditRead, None), Codigo::Allow);
+            assert_eq!(d(NetObserve, Some("udp:10.0.2.3:53")), Codigo::Allow);
+            assert_eq!(d(NetObserve, Some("udp:10.0.2.2:69")), Codigo::DenyResource);
+            for dentro in ["tcp:10.0.2.100:7", "udp:10.0.2.2:69", "udp:10.0.2.3:53"] {
+                assert_eq!(d(NetBlock, Some(dentro)), Codigo::Allow, "{dentro}");
+            }
+            for fora in ["tcp:10.0.2.100:8", "udp:10.0.2.99:53", ""] {
+                assert_eq!(d(NetBlock, Some(fora)), Codigo::DenyResource, "{fora}");
+            }
+            for perm in [
+                NetConnect,
+                FsRead,
+                FsWrite,
+                ProcessRun,
+                SecurityRead,
+                PolicyRead,
+                MessageSend,
+                AgentRevoke,
+                TerminalAttach,
+            ] {
+                assert_eq!(
+                    d(perm, Some("tcp:10.0.2.100:7")),
+                    Codigo::DenyPermission,
+                    "{}",
+                    perm.nome()
+                );
+            }
+            // E o papel dele cabe no teto: um administrador pode mudá-lo
+            // por policy.write, dentro do que ele mesmo tem.
+            assert_eq!(p.cabe_em("seguranca", "administrador"), Ok(()));
+            // O serviço não exerce teto.
+            assert_eq!(p.conferir_tetos(&["administrador"]), Ok(()));
+        }
+    }
+
+    /// O serviço não herda o sistema: uma política que lhe dê o papel da
+    /// serial ou o da autoridade local não vigora, e uma troca da serial
+    /// para o papel dele é recusada. Nem o teto de um administrador.
+    #[test]
+    fn o_servico_nao_herda_o_sistema() {
+        let erro = |t: &str| Politica::ler(t).unwrap_err().tipo;
+        assert!(matches!(
+            erro("papel a ui.read\nserial a\nlocal a\nservico nsf a\n"),
+            arquivo::ErroTipo::ServicoComPapelDoSistema(s, p) if s == "nsf" && p == "a"
+        ));
+        assert!(matches!(
+            erro("papel a ui.read\npapel b ui.read\nserial a\nlocal b\nservico nsf b\n"),
+            arquivo::ErroTipo::ServicoComPapelDoSistema(_, _)
+        ));
+        let p = padrao();
+        assert!(matches!(
+            p.com_serial("seguranca"),
+            Err(Recusa::Invalida(arquivo::Erro {
+                tipo: arquivo::ErroTipo::ServicoComPapelDoSistema(_, _),
+                ..
+            }))
+        ));
+        assert!(p.com_serial("operador").is_ok());
+        let teto = PADRAO.replace("servico nsf seguranca", "servico nsf administrador");
+        let teto = Politica::ler(&teto).expect("le");
+        assert!(teto.conferir_tetos(&["administrador"]).is_err());
+    }
+
+    /// Só o DNS da bancada é observável — o único destino que um papel tem
+    /// em `net.observe` —, e só enquanto um papel o tiver.
+    #[test]
+    fn o_que_se_observa() {
+        let p = padrao();
+        assert!(p.observavel("udp:10.0.2.3:53"));
+        for d in [
+            "udp:10.0.2.2:69",
+            "tcp:10.0.2.100:7",
+            "udp:10.0.2.3:5353",
+            "",
+        ] {
+            assert!(!p.observavel(d), "{d}");
+        }
+        // Sem a permissão em papel nenhum — a linha do alcance e o nome.
+        let sem: alloc::string::String = PADRAO
+            .lines()
+            .filter(|l| !(l.starts_with("recurso") && l.contains("net.observe")))
+            .map(|l| alloc::format!("{}\n", l.replace(" net.observe", "")))
+            .collect();
+        let sem = Politica::ler(&sem).expect("le sem net.observe");
+        assert!(!sem.observavel("udp:10.0.2.3:53"));
+    }
+
+    /// A linha `servico`: um nome do vocabulário fechado, uma vez, com um
+    /// papel que existe — e só pela imagem: `policy.write` a recusa.
+    #[test]
+    fn a_linha_servico() {
+        let erro = |corpo: &str| com(corpo).unwrap_err().tipo;
+        assert!(matches!(
+            erro("papel a ui.read\npapel b ui.read\nservico outro b"),
+            arquivo::ErroTipo::ServicoDesconhecido(n) if n == "outro"
+        ));
+        assert!(matches!(
+            erro("papel a ui.read\npapel b ui.read\nservico nsf b\nservico nsf b"),
+            arquivo::ErroTipo::ServicoRepetido(_)
+        ));
+        assert!(matches!(
+            erro("papel a ui.read\npapel b ui.read\nservico nsf fantasma"),
+            arquivo::ErroTipo::PapelDesconhecido(n) if n == "fantasma"
+        ));
+        assert_eq!(
+            erro("papel a ui.read\npapel b ui.read\nservico nsf"),
+            arquivo::ErroTipo::Sintaxe
+        );
+        assert_eq!(
+            erro("papel a ui.read\npapel b ui.read\nservico nsf b c"),
+            arquivo::ErroTipo::Sintaxe
+        );
+        assert!(matches!(
+            erro("papel a ui.read\npapel b ui.read\nservico nsf B"),
+            arquivo::ErroTipo::NomeInvalido(_)
+        ));
+        let p = com("papel a ui.read\npapel b ui.read\nservico nsf b").unwrap();
+        assert_eq!(p.servico("nsf"), Some("b"));
+        // Sem a linha, o serviço não tem papel — e a decisão sem papel é
+        // DENY_ROLE.
+        let sem = com("papel a ui.read\npapel b ui.read").unwrap();
+        assert_eq!(sem.servico("nsf"), None);
+        assert_eq!(
+            sem.decidir(sem.servico("nsf"), Permissao::AuditRead, None),
+            Codigo::DenyRole
+        );
+        // O texto a leva, e a leitura a devolve.
+        let padrao = padrao();
+        assert_eq!(Politica::ler(&padrao.texto()).unwrap(), padrao);
+        assert!(padrao.texto().contains("servico nsf seguranca\n"));
+        // policy.write não a escreve, nem para tirar o papel do sistema.
+        for linha in ["servico nsf operador", "servico nsf seguranca"] {
+            assert!(matches!(
+                padrao.com_linha(linha, "administrador", &[]),
+                Err(Recusa::Proibida(_))
+            ));
+        }
     }
 }

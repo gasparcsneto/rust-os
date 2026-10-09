@@ -420,6 +420,23 @@ pub const PAUSA_SEGURANDO: u8 = 2;
 #[cfg(feature = "modo-teste")]
 pub static CEDER_AO_ESCOLHER_VAGA: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
+
+/// Faz quem criou um processo esperar esse tanto de tiques logo depois de
+/// pô-lo para rodar.
+///
+/// Existe só para a suíte, pelo mesmo motivo de [`CEDER_AO_ESCOLHER_VAGA`]:
+/// o nascimento vai para a auditoria antes de o filho poder rodar — ver
+/// `nasceu` em [`criar_processo`] —, e um nascimento gravado depois seria
+/// passado pelo primeiro pedido do filho só se o filho corresse antes de
+/// quem o criou terminar a chamada, o que quase nunca acontece sozinho.
+/// Com a espera, o filho corre noutro núcleo — e a ordem certa tem quem a
+/// confira.
+///
+/// Uma espera ocupada, e não uma cessão: quem cria pode estar numa chamada
+/// de sistema — o `fork` —, e no ARM uma chamada de sistema é um handler de
+/// exceção, de onde não se cede (ver `arch::aarch64::contexto::ceder_cpu`).
+#[cfg(feature = "modo-teste")]
+pub static ESPERAR_DEPOIS_DE_NASCER: AtomicU64 = AtomicU64::new(0);
 static TROCAS: AtomicU64 = AtomicU64::new(0);
 
 /// Quantas vezes o quantum de um fio se esgotou.
@@ -861,6 +878,7 @@ pub fn criar_como(
             fixo: None,
         },
         None,
+        &|_| {},
     )
 }
 
@@ -884,12 +902,18 @@ pub const COTA_ESGOTADA: &str = "a cota de processos do papel de quem lanca esta
 /// um teto que se ultrapassa por um a cada núcleo. Contar de novo **na
 /// mesma seção crítica que reserva a vaga** fecha a janela: o fio reservado
 /// já é contado, e quem conta depois o vê.
+///
+/// `nasceu` é chamada com o fio já certo de nascer e antes de ele poder
+/// rodar, fora de qualquer trava — o lugar de gravar o nascimento na
+/// auditoria: o primeiro pedido do processo nunca chega antes do registro
+/// que diz quem o lançou.
 pub fn criar_processo(
     nome: &'static str,
     entrada: extern "C" fn(u64) -> !,
     argumento: u64,
     autoridade: crate::autorizacao::Autoridade,
     cota: usize,
+    nasceu: &dyn Fn(IdFio),
 ) -> Result<IdFio, &'static str> {
     nascer(
         nome,
@@ -900,6 +924,7 @@ pub fn criar_processo(
             fixo: None,
         },
         Some(cota),
+        nasceu,
     )
 }
 
@@ -927,6 +952,7 @@ pub fn criar_no_nucleo(
             fixo: Some(cpu),
         },
         None,
+        &|_| {},
     )
 }
 
@@ -955,7 +981,7 @@ enum Nascimento {
 
 /// Cria um fio a partir de um quadro de usuário: o filho de um `fork`,
 /// contado na cota do titular da autoridade que ele herda — ver
-/// [`criar_processo`].
+/// [`criar_processo`], também para `nasceu`.
 ///
 /// # Safety
 ///
@@ -966,17 +992,24 @@ pub unsafe fn bifurcar(
     quadro: *const core::ffi::c_void,
     espaco: crate::paginacao::Espaco,
     cota: usize,
+    nasceu: &dyn Fn(IdFio),
 ) -> Result<IdFio, &'static str> {
-    nascer(nome, Nascimento::Bifurcacao { quadro, espaco }, Some(cota))
+    nascer(
+        nome,
+        Nascimento::Bifurcacao { quadro, espaco },
+        Some(cota),
+        nasceu,
+    )
 }
 
 /// Faz nascer um fio. Com `cota`, ele é um processo, e nasce só se o
 /// titular da autoridade dele tiver menos que isso vivos — ver
-/// [`criar_processo`].
+/// [`criar_processo`], também para `nasceu`.
 fn nascer(
     nome: &'static str,
     nascimento: Nascimento,
     cota: Option<usize>,
+    nasceu: &dyn Fn(IdFio),
 ) -> Result<IdFio, &'static str> {
     // Depois de uma falha fatal o escalonador está congelado, e um fio criado
     // aqui **nunca** roda: [`selecionar`] desiste antes de olhar a tabela.
@@ -1145,6 +1178,11 @@ fn nascer(
         }
     };
 
+    // Daqui em diante o fio nasce — nada mais falha —, e ainda não pode
+    // rodar: a vaga está reservada. É o momento de quem lançou dizer que
+    // ele nasceu, fora de qualquer trava.
+    nasceu(id);
+
     // Mesma regra da devolução acima: o marcador sai sob a trava e é largado
     // fora dela.
     let (marcador, ociosos) = com_escalonador(|e| {
@@ -1175,6 +1213,22 @@ fn nascer(
     // Um fio novo está pronto: um núcleo dormindo pode pegá-lo agora, em vez
     // de no próximo tique dele.
     crate::nucleos::cutucar(ociosos);
+
+    // Ponto de espera só para testes: o filho corre noutro núcleo antes de
+    // quem o criou voltar — ver `ESPERAR_DEPOIS_DE_NASCER`. O teto de voltas
+    // é para um núcleo só, em que o relógio pode não andar.
+    #[cfg(feature = "modo-teste")]
+    if cota.is_some() {
+        let tiques = ESPERAR_DEPOIS_DE_NASCER.load(Ordering::Relaxed);
+        if tiques > 0 {
+            let ate = crate::tempo::ticks().saturating_add(tiques);
+            let mut voltas = 0u64;
+            while crate::tempo::ticks() < ate && voltas < 20_000_000 {
+                core::hint::spin_loop();
+                voltas += 1;
+            }
+        }
+    }
 
     Ok(id)
 }

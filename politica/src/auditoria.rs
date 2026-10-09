@@ -94,11 +94,16 @@ pub enum Titular {
     Administrador = 5,
     /// Ninguém ainda: uma porta sem aperto, um console sem login.
     Anonimo = 6,
+    /// Um serviço do sistema com identidade própria — o tecido de
+    /// segurança, `nsf` —, pelo papel que a linha `servico` da política
+    /// lhe dá. Entrou depois dos outros, no fim: o número de cada um é o
+    /// que já está nos journals.
+    Servico = 7,
 }
 
 impl Titular {
     /// Todos, na ordem do número.
-    pub const TODOS: [Titular; 7] = [
+    pub const TODOS: [Titular; 8] = [
         Titular::Kernel,
         Titular::Sistema,
         Titular::Serial,
@@ -106,6 +111,7 @@ impl Titular {
         Titular::Pessoa,
         Titular::Administrador,
         Titular::Anonimo,
+        Titular::Servico,
     ];
 
     /// O nome, como `audit.tail` o escreve.
@@ -118,6 +124,7 @@ impl Titular {
             Titular::Pessoa => "person",
             Titular::Administrador => "admin",
             Titular::Anonimo => "anonymous",
+            Titular::Servico => "service",
         }
     }
 

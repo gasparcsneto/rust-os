@@ -349,6 +349,7 @@ dependencies = [
  "pci_types",
  "politica",
  "protocolo",
+ "seguranca",
  "sigilo",
  "smoltcp",
  "spin",
@@ -648,6 +649,15 @@ dependencies = [
  "hybrid-array",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "seguranca"
+version = "0.1.0"
+dependencies = [
+ "blake2",
+ "politica",
+ "protocolo",
 ]
 
 [[package]]

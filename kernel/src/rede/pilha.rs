@@ -49,6 +49,24 @@
 //! - não há aperto nem fecho com o outro lado: o estado é `open` do começo
 //!   ao fim, e fechar tira o socket da pilha na hora, e com ele a porta.
 //!
+//! # O firewall
+//!
+//! Depois do gate, antes da rede (ver `docs/SEGURANCA.md`): só restringe.
+//!
+//! - Cada quadro que a pilha manda pertence a um fluxo da tabela — uma
+//!   conexão que o gate decidiu, ou uma que ainda termina o fecho — ou ao
+//!   DHCP da placa; cada quadro que chega vai a um deles. O resto não passa:
+//!   nem eco ICMP, nem RST para uma porta sem conexão, nem IPv6. O ARP passa.
+//! - As regras de `net.block` barram um destino, para todos ou para um dono;
+//!   o fluxo barrado não manda nem recebe, `net.connect` e `net.send` sobre
+//!   ele são recusados com o número da regra, e as conexões vivas que a
+//!   regra alcança caem quando ela entra.
+//!
+//! As regras moram aqui, ao lado dos fluxos que controlam, e a conta é a do
+//! pacote `seguranca` (`seguranca::firewall`). A cada volta, a pilha tira
+//! uma fotografia dos fluxos — com a regra que barra cada um — e o
+//! adaptador da placa classifica cada quadro contra ela.
+//!
 //! # A trava
 //!
 //! Uma só, [`PILHA`], tomada com as interrupções mascaradas — como as dos
@@ -68,9 +86,12 @@ use smoltcp::wire::{
     EthernetAddress, HardwareAddress, IpAddress, IpCidr, IpEndpoint, Ipv4Address, Ipv4Cidr,
 };
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use crate::trava::Mutex;
 use crate::virtio::net::MAIOR_QUADRO;
 use politica::endereco::{Destino, Protocolo};
+use seguranca::firewall::{self, DonoDoFluxo, Escopo, Fluxo, Motivo, Regra, Regras, Veredito};
 
 use super::conexoes::Dono;
 use super::espera::Desfecho;
@@ -166,6 +187,11 @@ struct Conexao {
     id: u64,
     dono: Dono,
     destino: Destino,
+    /// A porta local: a do fluxo, para o firewall.
+    porta: u16,
+    /// De quem é o fluxo, para as regras do firewall — fixado na abertura,
+    /// com a autoridade que o gate decidiu.
+    fluxo: DonoDoFluxo,
     socket: SocketHandle,
     enviados: u64,
     recebidos: u64,
@@ -217,7 +243,7 @@ struct Pilha {
     /// milhares. Guardá-los enchia a tabela da máquina com fechos já
     /// terminados — medido na suíte: titulares novos ouviam "tabela cheia"
     /// com nenhuma conexão viva de ninguém.
-    fechando: Vec<(SocketHandle, Dono)>,
+    fechando: Vec<EmFecho>,
     proximo_id: u64,
     proxima_porta: u16,
     abertas: u64,
@@ -226,9 +252,72 @@ struct Pilha {
     proxima_espera: u64,
     /// Ver [`Resumo::datagramas_alheios`].
     datagramas_alheios: u64,
+    /// As regras do firewall — ver o cabeçalho.
+    regras: Regras,
+    /// A fotografia dos fluxos, refeita a cada volta: o que o adaptador
+    /// classifica. Guardada para não alocar uma por volta.
+    fluxos: Vec<Fluxo>,
+}
+
+/// Um socket que o dono fechou, ou que caiu, e ainda termina o fecho com o
+/// outro lado — com o fluxo dele, que o firewall ainda deixa passar.
+struct EmFecho {
+    socket: SocketHandle,
+    dono: Dono,
+    destino: Destino,
+    porta: u16,
+    fluxo: DonoDoFluxo,
 }
 
 static PILHA: Mutex<Option<Pilha>> = Mutex::new(None);
+
+/// O que o firewall descartou — ver [`Descartes`].
+static DESCARTES: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
+
+/// O que o firewall descartou, desde o boot, em cada sentido: os quadros
+/// sem fluxo, os de um fluxo barrado, e os de protocolo que não passa
+/// (ICMP, IPv6, fragmento, quadro cortado). O sentido diz o que a pilha
+/// fez: um eco ICMP que entrasse teria a resposta dela descartada na
+/// saída.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Descartes {
+    pub saida_sem_fluxo: u64,
+    pub entrada_sem_fluxo: u64,
+    pub saida_barrada: u64,
+    pub entrada_barrada: u64,
+    pub saida_protocolo: u64,
+    pub entrada_protocolo: u64,
+}
+
+/// Conta um quadro descartado.
+fn descartar(saida: bool, motivo: Motivo) {
+    let i = match (saida, motivo) {
+        (true, Motivo::SemFluxo) => 0,
+        (false, Motivo::SemFluxo) => 1,
+        (true, Motivo::Regra(_)) => 2,
+        (false, Motivo::Regra(_)) => 3,
+        (true, Motivo::Protocolo) => 4,
+        (false, Motivo::Protocolo) => 5,
+    };
+    DESCARTES[i].fetch_add(1, Ordering::Relaxed);
+}
+
+/// O que o firewall descartou até agora.
+pub fn descartes() -> Descartes {
+    let n = |i: usize| DESCARTES[i].load(Ordering::Relaxed);
+    Descartes {
+        saida_sem_fluxo: n(0),
+        entrada_sem_fluxo: n(1),
+        saida_barrada: n(2),
+        entrada_barrada: n(3),
+        saida_protocolo: n(4),
+        entrada_protocolo: n(5),
+    }
+}
+
+/// O motivo de `net.connect` e `net.send` recusados pelo firewall: o
+/// handler o reconhece, procura a regra e grava a recusa.
+pub const BARRADO: &str = "barrado pelo firewall";
 
 /// Só para a suíte: quadros que a placa "recebeu", entregues à pilha antes
 /// dos que ela colheu — ver [`injetar_de_teste`]. Tomada dentro de
@@ -244,8 +333,11 @@ fn agora() -> Instant {
     Instant::from_millis(crate::tempo::uptime_ms() as i64)
 }
 
-/// A placa, vista pelo `smoltcp`.
-struct Adaptador;
+/// A placa, vista pelo `smoltcp`, com a fotografia dos fluxos que o
+/// firewall confere.
+struct Adaptador<'a> {
+    fluxos: &'a [Fluxo],
+}
 
 /// Um quadro colhido, à espera de a pilha consumi-lo.
 struct Recebido {
@@ -253,8 +345,10 @@ struct Recebido {
     tamanho: usize,
 }
 
-/// A licença de transmitir um quadro.
-struct Envio;
+/// A licença de transmitir um quadro — se o firewall deixar.
+struct Envio<'a> {
+    fluxos: &'a [Fluxo],
+}
 
 impl RxToken for Recebido {
     fn consume<R, F>(self, f: F) -> R
@@ -265,7 +359,7 @@ impl RxToken for Recebido {
     }
 }
 
-impl TxToken for Envio {
+impl TxToken for Envio<'_> {
     fn consume<R, F>(self, len: usize, f: F) -> R
     where
         F: FnOnce(&mut [u8]) -> R,
@@ -275,6 +369,18 @@ impl TxToken for Envio {
         // escrito fora do buffer.
         let mut quadro = vec![0u8; len];
         let r = f(&mut quadro);
+        // O firewall: o quadro de um fluxo que o gate decidiu, e que
+        // nenhuma regra barra — ou não sai.
+        if let Veredito::Descarta(motivo) = firewall::saida(&quadro, self.fluxos) {
+            descartar(true, motivo);
+            return r;
+        }
+        // Na suíte, o que vai para a bancada de DNS fica nela: não chega à
+        // rede do emulador, que não tem esses endereços.
+        #[cfg(feature = "modo-teste")]
+        if super::bancada_dns::observar_saida(&quadro) {
+            return r;
+        }
         match crate::virtio::net::com_a_placa(|placa| placa.transmitir(&quadro)) {
             Some(Ok(())) | None => {}
             Some(Err(motivo)) => crate::log_warn!("rede", "quadro nao saiu: {}", motivo),
@@ -283,11 +389,10 @@ impl TxToken for Envio {
     }
 }
 
-impl Device for Adaptador {
-    type RxToken<'a> = Recebido;
-    type TxToken<'a> = Envio;
-
-    fn receive(&mut self, _agora: Instant) -> Option<(Recebido, Envio)> {
+impl Adaptador<'_> {
+    /// O próximo quadro colhido — o injetado pela suíte primeiro —, sem
+    /// olhar o firewall.
+    fn colher(&mut self) -> Option<Recebido> {
         let mut quadro = [0u8; MAIOR_QUADRO];
         #[cfg(feature = "modo-teste")]
         {
@@ -298,7 +403,7 @@ impl Device for Adaptador {
             if let Some(injetado) = injetado {
                 let tamanho = injetado.len().min(MAIOR_QUADRO);
                 quadro[..tamanho].copy_from_slice(&injetado[..tamanho]);
-                return Some((Recebido { quadro, tamanho }, Envio));
+                return Some(Recebido { quadro, tamanho });
             }
         }
         let tamanho = crate::virtio::net::com_a_placa(|placa| placa.receber(&mut quadro))??;
@@ -307,11 +412,44 @@ impl Device for Adaptador {
         }
         // O ARP do diagnóstico olha antes — ver `super`.
         super::observar(&quadro[..tamanho]);
-        Some((Recebido { quadro, tamanho }, Envio))
+        Some(Recebido { quadro, tamanho })
+    }
+}
+
+impl Device for Adaptador<'_> {
+    type RxToken<'a>
+        = Recebido
+    where
+        Self: 'a;
+    type TxToken<'a>
+        = Envio<'a>
+    where
+        Self: 'a;
+
+    fn receive(&mut self, _agora: Instant) -> Option<(Recebido, Envio<'_>)> {
+        // O firewall: o quadro que não vai a fluxo nenhum — ou vem do
+        // destino de um fluxo barrado — sai antes de a pilha o ver, e o
+        // próximo vem no lugar dele.
+        loop {
+            let recebido = self.colher()?;
+            match firewall::entrada(&recebido.quadro[..recebido.tamanho], self.fluxos) {
+                Veredito::Passa => {
+                    return Some((
+                        recebido,
+                        Envio {
+                            fluxos: self.fluxos,
+                        },
+                    ));
+                }
+                Veredito::Descarta(motivo) => descartar(false, motivo),
+            }
+        }
     }
 
-    fn transmit(&mut self, _agora: Instant) -> Option<Envio> {
-        Some(Envio)
+    fn transmit(&mut self, _agora: Instant) -> Option<Envio<'_>> {
+        Some(Envio {
+            fluxos: self.fluxos,
+        })
     }
 
     fn capabilities(&self) -> DeviceCapabilities {
@@ -353,7 +491,7 @@ pub fn iniciar() {
     }
     let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress(mac)));
     config.random_seed = u64::from_le_bytes(semente);
-    let iface = Interface::new(config, &mut Adaptador, agora());
+    let iface = Interface::new(config, &mut Adaptador { fluxos: &[] }, agora());
     let mut sockets = SocketSet::new(Vec::new());
     let dhcp = sockets.add(dhcpv4::Socket::new());
     let porta_inicial = PRIMEIRA_PORTA + (u16::from_le_bytes([semente[0], semente[1]]) % 4096);
@@ -371,6 +509,8 @@ pub fn iniciar() {
             abertas: 0,
             proxima_espera: 1,
             datagramas_alheios: 0,
+            regras: Regras::nova(),
+            fluxos: Vec::new(),
         });
     });
     match crate::fios::criar("rede", laco, 0) {
@@ -413,17 +553,50 @@ impl Pilha {
     /// Uma volta. Devolve a mudança de endereço, se houve: `Some(Some(..))`
     /// configurado, `Some(None)` retirado.
     fn sondar(&mut self) -> Option<Option<([u8; 4], u8)>> {
-        let _ = self.iface.poll(agora(), &mut Adaptador, &mut self.sockets);
+        // A fotografia dos fluxos que o firewall confere nesta volta: as
+        // conexões, as que terminam o fecho, e a regra que barra cada uma.
+        let mut fluxos = core::mem::take(&mut self.fluxos);
+        fluxos.clear();
+        let regras = self.regras.todas();
+        fluxos.extend(firewall::fluxos(
+            self.conexoes.iter().map(|c| (c.destino, c.porta, c.fluxo)),
+            regras,
+        ));
+        fluxos.extend(firewall::fluxos(
+            self.fechando.iter().map(|f| (f.destino, f.porta, f.fluxo)),
+            regras,
+        ));
+        let _ = self.iface.poll(
+            agora(),
+            &mut Adaptador { fluxos: &fluxos },
+            &mut self.sockets,
+        );
+        // Na suíte, a bancada de DNS responde ao que saiu nesta volta — o
+        // ARP, e depois a pergunta: a resposta entra na mesma volta, como
+        // se a placa a tivesse recebido logo depois. O `smoltcp` só colhe
+        // no começo de cada `poll`; poucas voltas bastam a uma conversa.
+        #[cfg(feature = "modo-teste")]
+        for _ in 0..4 {
+            if INJETADOS.lock().is_empty() {
+                break;
+            }
+            let _ = self.iface.poll(
+                agora(),
+                &mut Adaptador { fluxos: &fluxos },
+                &mut self.sockets,
+            );
+        }
+        self.fluxos = fluxos;
         // Os que o dono fechou e já terminaram saem do conjunto — ver
         // `fechando` sobre o `TIME_WAIT`.
         let sockets = &mut self.sockets;
-        self.fechando.retain(|&(h, _)| {
+        self.fechando.retain(|f| {
             let acabou = matches!(
-                sockets.get::<tcp::Socket>(h).state(),
+                sockets.get::<tcp::Socket>(f.socket).state(),
                 tcp::State::Closed | tcp::State::TimeWait
             );
             if acabou {
-                sockets.remove(h);
+                sockets.remove(f.socket);
             }
             !acabou
         });
@@ -580,16 +753,25 @@ pub fn destino_de(id: u64, dono: &Dono) -> Result<Destino, &'static str> {
 /// estado — numa conexão TCP, quase sempre `connecting`: o aperto de mão
 /// segue no fio da rede, e quem abriu acompanha por `net.recv`; numa
 /// associação UDP, `open`.
-pub fn abrir(dono: Dono, destino: Destino) -> Result<(u64, Estado), &'static str> {
+pub fn abrir(
+    dono: Dono,
+    destino: Destino,
+    fluxo: DonoDoFluxo,
+) -> Result<(u64, Estado), &'static str> {
     let r = com_pilha(|p| {
         if p.endereco.is_none() {
             return Err("a rede ainda nao tem endereco (o DHCP nao respondeu)");
+        }
+        // Depois do gate, o firewall: um destino barrado para este dono não
+        // abre — ver [`BARRADO`].
+        if firewall::barrado(p.regras.todas(), &destino, &fluxo).is_some() {
+            return Err(BARRADO);
         }
         if p.conexoes.len() + p.fechando.len() >= MAIS_CONEXOES {
             return Err("a tabela de conexoes esta cheia");
         }
         let do_dono = p.conexoes.iter().filter(|c| c.dono == dono).count()
-            + p.fechando.iter().filter(|(_, d)| *d == dono).count();
+            + p.fechando.iter().filter(|f| f.dono == dono).count();
         if do_dono >= CONEXOES_POR_DONO {
             return Err("este titular ja tem o maximo de conexoes abertas");
         }
@@ -623,22 +805,29 @@ pub fn abrir(dono: Dono, destino: Destino) -> Result<(u64, Estado), &'static str
         let id = p.proximo_id;
         p.proximo_id += 1;
         p.abertas += 1;
+        // Na tabela antes da volta que manda o SYN: o firewall só deixa
+        // sair o quadro de um fluxo que está nela.
+        p.conexoes.push(Conexao {
+            id,
+            dono,
+            destino,
+            porta,
+            fluxo,
+            socket,
+            enviados: 0,
+            recebidos: 0,
+            espera: None,
+            relatado: Estado::Conectando,
+        });
         // O SYN sai já, e não no próximo tique.
         let _ = p.sondar();
         let estado = match destino.protocolo {
             Protocolo::Tcp => Estado::de(p.sockets.get::<tcp::Socket>(socket).state()),
             Protocolo::Udp => Estado::do_udp(p.sockets.get::<udp::Socket>(socket)),
         };
-        p.conexoes.push(Conexao {
-            id,
-            dono,
-            destino,
-            socket,
-            enviados: 0,
-            recebidos: 0,
-            espera: None,
-            relatado: estado,
-        });
+        if let Some(c) = p.conexoes.iter_mut().find(|c| c.id == id) {
+            c.relatado = estado;
+        }
         Ok((id, estado))
     });
     r.unwrap_or(Err("a pilha de rede nao esta no ar"))
@@ -652,6 +841,11 @@ pub fn mandar(id: u64, dono: &Dono, dados: &[u8]) -> Result<(usize, Estado), &'s
     let r = com_pilha(|p| {
         let _ = p.sondar();
         let i = p.achar(id, dono)?;
+        // Um fluxo barrado depois de aberto: nada entra na fila de saída.
+        let c = &p.conexoes[i];
+        if firewall::barrado(p.regras.todas(), &c.destino, &c.fluxo).is_some() {
+            return Err(BARRADO);
+        }
         let h = p.conexoes[i].socket;
         if p.conexoes[i].destino.protocolo == Protocolo::Udp {
             if dados.len() > MAIOR_DATAGRAMA {
@@ -898,8 +1092,17 @@ pub fn estado_de_teste(id: u64) -> Option<Estado> {
 /// origem que a bancada não tem — outra porta, outro endereço.
 #[cfg(feature = "modo-teste")]
 pub fn injetar_de_teste(quadro: &[u8]) {
-    crate::arch::sem_interrupcoes(|| INJETADOS.lock().push(quadro.to_vec()));
+    enfileirar_de_teste(quadro);
     sondar();
+}
+
+/// Só para a suíte: põe um quadro na fila do que a placa recebeu, sem
+/// fazer a pilha andar — para quem já está dentro dela: a bancada de DNS
+/// responde no caminho de saída, com [`PILHA`] tomada. A volta em curso o
+/// colhe — ver [`Pilha::sondar`].
+#[cfg(feature = "modo-teste")]
+pub(super) fn enfileirar_de_teste(quadro: &[u8]) {
+    crate::arch::sem_interrupcoes(|| INJETADOS.lock().push(quadro.to_vec()));
 }
 
 /// Só para a suíte: a porta local da conexão `id`, de quem for.
@@ -945,7 +1148,7 @@ pub fn sockets_soltos_de_teste() -> usize {
             .filter(|(h, _)| {
                 *h != p.dhcp
                     && !p.conexoes.iter().any(|c| c.socket == *h)
-                    && !p.fechando.iter().any(|(f, _)| f == h)
+                    && !p.fechando.iter().any(|f| f.socket == *h)
             })
             .count()
     })
@@ -974,7 +1177,13 @@ pub fn fechar(id: u64, dono: &Dono) -> Result<(), &'static str> {
         match c.destino.protocolo {
             Protocolo::Tcp => {
                 p.sockets.get_mut::<tcp::Socket>(c.socket).close();
-                p.fechando.push((c.socket, c.dono));
+                p.fechando.push(EmFecho {
+                    socket: c.socket,
+                    dono: c.dono,
+                    destino: c.destino,
+                    porta: c.porta,
+                    fluxo: c.fluxo,
+                });
             }
             // Sem fecho com o outro lado: a porta se solta na hora.
             Protocolo::Udp => {
@@ -1008,7 +1217,13 @@ pub fn derrubar(ids: &[u64]) -> usize {
                 match c.destino.protocolo {
                     Protocolo::Tcp => {
                         p.sockets.get_mut::<tcp::Socket>(c.socket).abort();
-                        p.fechando.push((c.socket, c.dono));
+                        p.fechando.push(EmFecho {
+                            socket: c.socket,
+                            dono: c.dono,
+                            destino: c.destino,
+                            porta: c.porta,
+                            fluxo: c.fluxo,
+                        });
                     }
                     Protocolo::Udp => {
                         p.sockets.remove(c.socket);
@@ -1024,6 +1239,86 @@ pub fn derrubar(ids: &[u64]) -> usize {
         n
     })
     .unwrap_or(0)
+}
+
+/// O que um bloqueio fez.
+pub struct Bloqueio {
+    /// O número da regra.
+    pub regra: u64,
+    /// Se a regra é nova — a mesma (destino, escopo) não se repete.
+    pub nova: bool,
+    /// As conexões vivas que ela alcançou e derrubou: o número e o destino.
+    pub derrubadas: Vec<(u64, Destino)>,
+}
+
+/// Põe a regra que barra `destino` para `escopo` — o `net.block` que o
+/// gate decidiu (`decisao`, por `autor`) — e derruba as conexões vivas que
+/// ela alcança, para o handler gravar cada uma.
+pub fn bloquear(
+    destino: Destino,
+    escopo: Escopo,
+    decisao: u64,
+    autor: &str,
+) -> Result<Bloqueio, &'static str> {
+    let r = com_pilha(|p| {
+        let (regra, nova) = p.regras.por(destino, escopo, decisao, autor)?;
+        let alcancadas: Vec<(u64, Destino)> = p
+            .conexoes
+            .iter()
+            .filter(|c| c.destino == destino && escopo.alcanca(&c.fluxo))
+            .map(|c| (c.id, c.destino))
+            .collect();
+        Ok((regra, nova, alcancadas))
+    })
+    .unwrap_or(Err("a pilha de rede nao esta no ar"));
+    let (regra, nova, alcancadas) = r?;
+    // Fora da trava de cima, e pela mesma derrubada de quando o dono acaba:
+    // a regra já está na tabela, e uma conexão aberta no meio é recusada.
+    let ids: Vec<u64> = alcancadas.iter().map(|(id, _)| *id).collect();
+    derrubar(&ids);
+    Ok(Bloqueio {
+        regra,
+        nova,
+        derrubadas: alcancadas,
+    })
+}
+
+/// Tira a regra (destino, escopo). O número dela, se havia.
+pub fn desbloquear(destino: &Destino, escopo: &Escopo) -> Option<u64> {
+    com_pilha(|p| p.regras.tirar(destino, escopo)).flatten()
+}
+
+/// A regra que barra `destino` para `fluxo`, se alguma — para o handler
+/// gravar qual foi.
+pub fn barrado(destino: &Destino, fluxo: &DonoDoFluxo) -> Option<u64> {
+    com_pilha(|p| firewall::barrado(p.regras.todas(), destino, fluxo)).flatten()
+}
+
+/// O fluxo da conexão `id` de `dono`.
+pub fn fluxo_de(id: u64, dono: &Dono) -> Option<(Destino, DonoDoFluxo)> {
+    com_pilha(|p| {
+        p.achar(id, dono)
+            .ok()
+            .map(|i| (p.conexoes[i].destino, p.conexoes[i].fluxo))
+    })
+    .flatten()
+}
+
+/// As regras do firewall, na ordem em que entraram.
+pub fn regras() -> Vec<Regra> {
+    com_pilha(|p| p.regras.todas().to_vec()).unwrap_or_default()
+}
+
+/// Só para a suíte: tira todas as regras — o caso seguinte começa sem as
+/// que um caso que falhou deixou. Os números continuam de onde estavam.
+#[cfg(feature = "modo-teste")]
+pub fn esquecer_regras_de_teste() {
+    let _ = com_pilha(|p| {
+        let todas: Vec<Regra> = p.regras.todas().to_vec();
+        for r in todas {
+            p.regras.tirar(&r.destino, &r.escopo);
+        }
+    });
 }
 
 /// O que `net.info` diz da pilha. `None` se ela não está no ar.

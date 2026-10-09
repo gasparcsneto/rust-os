@@ -97,6 +97,7 @@ mod qemu;
 mod quedas;
 mod rede;
 mod relogio;
+mod seguranca;
 mod serial;
 mod sessoes;
 mod superficies;
@@ -480,6 +481,11 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     // âncora do TPM. Antes das portas e do primeiro desafio: não há janela
     // em que uma credencial revogada da imagem esteja ativa.
     persistencia::abrir();
+    // O tecido de segurança, com a auditoria que o journal repôs como
+    // história: ele lê pelo gate, com o papel do serviço `nsf` — ver
+    // `docs/SEGURANCA.md`. Na suíte, cada caso faz as voltas dele.
+    #[cfg(not(feature = "modo-teste"))]
+    seguranca::iniciar();
 
     // Os demais núcleos, com o boot inteiro feito. Ligá-los antes daria a
     // eles fios para rodar no meio da inicialização dos dispositivos, que foi

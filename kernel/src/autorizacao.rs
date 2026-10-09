@@ -50,7 +50,7 @@
 
 use alloc::string::{String, ToString};
 use core::fmt;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::trava::Mutex;
 use politica::auditoria::{Cadeia, Evento, Titular, resumo_dos_parametros};
@@ -80,6 +80,17 @@ static POLITICA: Mutex<Option<Politica>> = Mutex::new(None);
 /// Se a política em vigor veio do disco, ou é a de emergência.
 static DO_DISCO: AtomicBool = AtomicBool::new(false);
 static AUDITORIA: Mutex<Option<Cadeia>> = Mutex::new(None);
+
+/// O número do último registro da cadeia — ver [`ultimo_registro`].
+static ULTIMO_REGISTRO: AtomicU64 = AtomicU64::new(0);
+
+/// O número do último registro da cadeia, para quem só precisa saber se
+/// ela cresceu: o despertador do tecido de segurança, que só lê — pelo
+/// gate, com `audit.tail` — quando a cabeça passou da última leitura dele.
+/// Um número, sem conteúdo nenhum, e que não decide nada.
+pub fn ultimo_registro() -> u64 {
+    ULTIMO_REGISTRO.load(Ordering::Acquire)
+}
 
 /// Quantos principais têm balde ao mesmo tempo. Os agentes do registro e a
 /// serial cabem com folga; passando disso, sai o balde usado há mais tempo.
@@ -124,6 +135,9 @@ enum DonoDaTaxa {
     Pessoa([u8; 8]),
     /// Os processos lançados pelo sistema.
     Sistema,
+    /// Um serviço — o tecido de segurança: o balde é dele, e não o do
+    /// sistema.
+    Servico,
 }
 
 struct Taxas {
@@ -222,6 +236,30 @@ pub enum Autoridade {
     /// sessão que acaba — a pessoa sai, é revogada, o console fecha — leva
     /// junto a autoridade dos processos que ela lançou.
     Pessoa { sessao: crate::pessoas::IdSessao },
+    /// Um serviço do sistema com identidade própria — o tecido de segurança
+    /// (ver `docs/SEGURANCA.md`). Decide pelo papel que a linha `servico`
+    /// da política lhe dá, procurado a cada decisão, e por nada mais: não é
+    /// o `sistema`, não tem credencial, não tem prova, e sem a linha não
+    /// tem papel. Só o fio do serviço age com ela — o `xtask` confere quem
+    /// a escreve.
+    Servico(Servico),
+}
+
+/// Um serviço do sistema com identidade própria: um nome do vocabulário
+/// fechado da política — ver `politica::arquivo::SERVICOS`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Servico {
+    /// O tecido nativo de segurança.
+    Nsf,
+}
+
+impl Servico {
+    /// O nome, como a linha `servico` e a auditoria o escrevem.
+    pub const fn nome(self) -> &'static str {
+        match self {
+            Servico::Nsf => "nsf",
+        }
+    }
 }
 
 impl Autoridade {
@@ -552,7 +590,7 @@ fn ator(quem: &Quem) -> Option<crate::atividade::Ator> {
         Titular::Administrador => Some(Ator::Administrador {
             nome: quem.agente.clone(),
         }),
-        Titular::Kernel | Titular::Sistema | Titular::Anonimo => None,
+        Titular::Kernel | Titular::Sistema | Titular::Anonimo | Titular::Servico => None,
     }
 }
 
@@ -805,7 +843,10 @@ fn auditar(
             None => detalhe.to_string(),
         },
     };
-    crate::arch::sem_interrupcoes(|| AUDITORIA.lock().as_mut().map_or(0, |c| c.anexar(evento)))
+    let seq =
+        crate::arch::sem_interrupcoes(|| AUDITORIA.lock().as_mut().map_or(0, |c| c.anexar(evento)));
+    ULTIMO_REGISTRO.fetch_max(seq, Ordering::AcqRel);
+    seq
 }
 
 /// Roda `f` com a cadeia da auditoria.
@@ -838,6 +879,7 @@ pub fn adotar_auditoria(mut do_journal: Cadeia) {
         if let Some(boot) = a.as_ref() {
             do_journal.continuar_com(boot);
         }
+        ULTIMO_REGISTRO.store(do_journal.ultima_seq(), Ordering::Release);
         *a = Some(do_journal);
     });
 }
@@ -943,6 +985,20 @@ fn quem_local(agente: &str) -> Quem {
     }
 }
 
+/// Um serviço, com o papel que a política dá a ele agora — a linha
+/// `servico`. Sem a linha, sem papel, e a decisão sem papel recusa.
+fn quem_do_servico(s: Servico) -> Quem {
+    Quem {
+        titular: Titular::Servico,
+        sessao: SESSAO_DA_PESSOA,
+        sessao_de_pessoa: None,
+        agente: s.nome().to_string(),
+        chave: None,
+        papel: com_politica(|p| p.servico(s.nome()).map(ToString::to_string)),
+        processo: None,
+    }
+}
+
 /// Quem é uma autoridade de sessão, procurado agora: o nome e o papel do
 /// registro de hoje. Uma chave revogada não tem nenhum dos dois, e o papel
 /// vazio recusa.
@@ -992,7 +1048,9 @@ fn passar_pela_taxa(quem: &Quem, metodo: &str, parametros: &[u8]) -> Result<(), 
     // O principal: a chave do agente, ou a serial. A pessoa e o sistema não
     // têm taxa no que pedem por si — só no que os programas deles pedem.
     // Ver [`DonoDaTaxa`].
-    let dono = if usize::from(quem.sessao) < SESSOES {
+    let dono = if quem.titular == Titular::Servico {
+        DonoDaTaxa::Servico
+    } else if usize::from(quem.sessao) < SESSOES {
         DonoDaTaxa::Chave(quem.chave)
     } else if quem.processo.is_some() {
         match quem.sessao_de_pessoa {
@@ -1286,6 +1344,25 @@ pub fn auditar_execucao(recurso: &str, codigo: Codigo, detalhe: &str) -> u64 {
     auditar(&quem, metodo, recurso, codigo, &[], &detalhe)
 }
 
+/// O número, na auditoria, da decisão do gate que autorizou o comando em
+/// execução neste fio. `None` fora de um comando autorizado.
+pub fn decisao_atual() -> Option<u64> {
+    do_comando_deste_fio(|c| c.decidido.as_ref().map(|d| d.decisao)).flatten()
+}
+
+/// Quem o gate decidiu para o comando em execução neste fio, como a
+/// auditoria o nomeia: o titular e o identificador — `service nsf`,
+/// `agent explorador`, `serial serial`. `None` fora de um comando
+/// autorizado.
+pub fn quem_decidiu() -> Option<String> {
+    do_comando_deste_fio(|c| {
+        c.decidido
+            .as_ref()
+            .map(|d| alloc::format!("{} {}", d.quem.titular.nome(), d.quem.agente))
+    })
+    .flatten()
+}
+
 /// Põe o anexo na vaga do comando deste fio.
 fn por_anexo(anexo: Vec<u8>) {
     let eu = crate::fios::id_atual();
@@ -1383,6 +1460,7 @@ pub fn reconfirmar() -> Result<(), (Codigo, &'static str)> {
                 return Err((Codigo::DenyNotAuthenticated, "sessao de pessoa que acabou"));
             }
         },
+        Autoridade::Servico(s) => quem_do_servico(s),
     };
     if credenciada(autoridade) && crate::persistencia::revogacoes_desconhecidas().is_some() {
         return Err((
@@ -1455,6 +1533,7 @@ pub fn dono_no_armazem() -> Option<String> {
         Autoridade::Pessoa { sessao } => {
             crate::pessoas::dona_da_sessao(sessao).map(|id| alloc::format!("pessoa:{}", id.texto()))
         }
+        Autoridade::Servico(s) => Some(alloc::format!("servico:{}", s.nome())),
     }
 }
 
@@ -1462,13 +1541,7 @@ pub fn dono_no_armazem() -> Option<String> {
 /// linha `armazem` do papel dele, na política de agora. Sem papel, ou sem
 /// a linha, nenhuma.
 pub fn cota_no_armazem() -> ::armazem::Cota {
-    let quem = match autoridade_atual() {
-        Autoridade::Sistema => quem_local("sistema"),
-        Autoridade::Sessao { sessao, chave } => quem_da_autoridade(sessao, chave),
-        Autoridade::Pessoa { sessao } => match quem_da_pessoa(sessao) {
-            Ok(q) | Err(q) => q,
-        },
-    };
+    let quem = quem_do_processo(autoridade_atual());
     if papel_de_teto(&quem) {
         return ::armazem::Cota::NENHUMA;
     }
@@ -1767,14 +1840,9 @@ pub fn auditar_enchimento_de_teste(metodo: &str, parametros: &[u8], detalhe: &st
 /// enumera, e não um passe livre. O de um agente decide pelo papel do
 /// agente, procurado agora.
 pub fn autorizar_processo(permissao: Permissao, recurso: &str, metodo: &str) -> Codigo {
-    let mut quem = match crate::fios::autoridade_atual() {
-        Autoridade::Sistema => quem_local("sistema"),
-        Autoridade::Sessao { sessao, chave } => quem_da_autoridade(sessao, chave),
-        // Uma sessão que acabou não tem papel, e o papel vazio recusa.
-        Autoridade::Pessoa { sessao } => match quem_da_pessoa(sessao) {
-            Ok(q) | Err(q) => q,
-        },
-    };
+    // Uma sessão de pessoa que acabou não tem papel, e o papel vazio
+    // recusa.
+    let mut quem = quem_do_processo(crate::fios::autoridade_atual());
     // O programa do fio: um processo é gravado como tal, e o manifesto dele
     // limita o que a autoridade alcançaria. Um fio do kernel não tem
     // imagem a atenuar.
@@ -1852,6 +1920,7 @@ fn quem_do_ator(ator: AtorDeMensagem) -> Quem {
         AtorDeMensagem::Autoridade(Autoridade::Pessoa { sessao }) => match quem_da_pessoa(sessao) {
             Ok(q) | Err(q) => q,
         },
+        AtorDeMensagem::Autoridade(Autoridade::Servico(s)) => quem_do_servico(s),
         AtorDeMensagem::Dono(Dono::Serial) => {
             quem_da_autoridade(crate::agent::sessao::SERIAL, None)
         }
@@ -2038,7 +2107,36 @@ fn quem_do_processo(autoridade: Autoridade) -> Quem {
         Autoridade::Pessoa { sessao } => match quem_da_pessoa(sessao) {
             Ok(q) | Err(q) => q,
         },
+        Autoridade::Servico(s) => quem_do_servico(s),
     }
+}
+
+/// Grava o nascimento de um processo: como execução do comando que o
+/// lançou — o `user.run`, com o número da decisão —, ou, fora de um
+/// comando, em nome do kernel (o servidor de janelas e o Terminal no
+/// boot). É a proveniência que o tecido de segurança lê: quem lançou o fio
+/// `filho`, pela auditoria, e não por um canal à parte.
+pub fn auditar_nascimento(recurso: &str, filho: u64) {
+    let detalhe = alloc::format!("processo {filho} lancado");
+    if auditar_execucao(recurso, Codigo::Allow, &detalhe) == 0 {
+        auditar_do_kernel("process.run", recurso, Codigo::Allow, &detalhe);
+    }
+}
+
+/// Grava uma bifurcação, em nome do processo que bifurcou — a autoridade e
+/// o programa do fio que chama —, com o fio do filho.
+pub fn auditar_bifurcacao(filho: u64) {
+    let mut quem = quem_do_processo(crate::fios::autoridade_atual());
+    let (id, programa) = crate::fios::programa_atual();
+    quem.processo = Some(pelo_processo(id, &programa));
+    auditar(
+        &quem,
+        "process.fork",
+        "",
+        Codigo::Allow,
+        &[],
+        &alloc::format!("filho {filho}"),
+    );
 }
 
 /// Zera as janelas de apertos de todas as portas, para a suíte: cada caso

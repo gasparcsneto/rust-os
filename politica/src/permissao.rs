@@ -100,10 +100,26 @@ pub enum Permissao {
     /// cada uma precisa ter esta permissão. Uma credencial só não revoga
     /// outra.
     AdminRevoke,
+    /// Ler o que o tecido de segurança observou: os eventos, os
+    /// incidentes, a proveniência, o risco, a evidência e as regras do
+    /// firewall. Sensível: diz o que os outros fizeram. Ver
+    /// `docs/SEGURANCA.md`.
+    SecurityRead,
+    /// Ler o conteúdo dos datagramas trocados com um destino observado —
+    /// de associações de qualquer titular. O recurso é o destino, como o
+    /// de `net.connect`, e o alcance de cada papel é enumerado: só o que
+    /// está escrito se observa, e só destinos que algum papel observa são
+    /// guardados para isso.
+    NetObserve,
+    /// Barrar o tráfego para um destino, e tirar a barreira. Só restringe:
+    /// nenhuma regra do firewall deixa passar o que o gate não decidiu. O
+    /// recurso é o destino, e o alcance de cada papel é enumerado.
+    NetBlock,
 }
 
-/// Todas, na ordem do relatório.
-pub const TODAS: [Permissao; 31] = [
+/// Todas, na ordem do relatório. As novas entram no fim: a posição é o bit
+/// do manifesto — ver [`crate::manifesto::Permissoes`].
+pub const TODAS: [Permissao; 34] = [
     Permissao::AgentRead,
     Permissao::SystemRead,
     Permissao::LogRead,
@@ -135,6 +151,9 @@ pub const TODAS: [Permissao; 31] = [
     Permissao::MessagePurge,
     Permissao::MessagePurgeMailbox,
     Permissao::AdminRevoke,
+    Permissao::SecurityRead,
+    Permissao::NetObserve,
+    Permissao::NetBlock,
 ];
 
 impl Permissao {
@@ -172,6 +191,9 @@ impl Permissao {
             Permissao::MessagePurge => "message.purge",
             Permissao::MessagePurgeMailbox => "message.purge_mailbox",
             Permissao::AdminRevoke => "admin.revoke",
+            Permissao::SecurityRead => "security.read",
+            Permissao::NetObserve => "net.observe",
+            Permissao::NetBlock => "net.block",
         }
     }
 
@@ -207,6 +229,9 @@ impl Permissao {
                 | Permissao::MessagePurge
                 | Permissao::MessagePurgeMailbox
                 | Permissao::AdminRevoke
+                | Permissao::SecurityRead
+                | Permissao::NetObserve
+                | Permissao::NetBlock
         )
     }
 
@@ -248,9 +273,14 @@ impl Permissao {
     /// O recurso desta permissão é um destino de rede —
     /// `tcp:<ipv4>:<porta>` ou `udp:<ipv4>:<porta>` —, e um papel o limita a
     /// uma lista enumerada de destinos, cada um escrito por inteiro, com o
-    /// protocolo. Sem curinga, sem faixa: ver [`crate::endereco`].
+    /// protocolo. Sem curinga, sem faixa: ver [`crate::endereco`]. Conectar,
+    /// observar e barrar: as três falam do mesmo destino, e cada papel
+    /// enumera o seu alcance de cada uma.
     pub const fn recurso_e_endereco(self) -> bool {
-        matches!(self, Permissao::NetConnect)
+        matches!(
+            self,
+            Permissao::NetConnect | Permissao::NetObserve | Permissao::NetBlock
+        )
     }
 
     /// Exercê-la muda alguma coisa na máquina — o que a pessoa vê, um
@@ -281,7 +311,9 @@ impl Permissao {
             | Permissao::KeyboardRead
             | Permissao::AuditRead
             | Permissao::PolicyRead
-            | Permissao::MessageRead => false,
+            | Permissao::MessageRead
+            | Permissao::SecurityRead
+            | Permissao::NetObserve => false,
             Permissao::UiAct
             | Permissao::FsWrite
             | Permissao::FsRawWrite
@@ -302,7 +334,8 @@ impl Permissao {
             | Permissao::MessageSend
             | Permissao::MessagePurge
             | Permissao::MessagePurgeMailbox
-            | Permissao::AdminRevoke => true,
+            | Permissao::AdminRevoke
+            | Permissao::NetBlock => true,
         }
     }
 
@@ -332,6 +365,8 @@ mod testes {
             "audit.read",
             "policy.read",
             "message.read",
+            "security.read",
+            "net.observe",
         ];
         for p in TODAS {
             assert_eq!(
@@ -418,9 +453,30 @@ mod testes {
         assert!(c.sensivel() && !c.administrativa() && c.muda_estado());
         assert!(c.recurso_e_endereco() && c.tem_alcance());
         assert!(!c.recurso_e_caminho() && !c.recurso_e_destino());
-        assert_eq!(TODAS.iter().filter(|p| p.recurso_e_endereco()).count(), 1);
         // O `net.send` de antes continua o que era: sem alcance.
         assert!(!Permissao::NetSend.tem_alcance());
+    }
+
+    /// As três do destino de rede: conectar, observar e barrar. Todas
+    /// sensíveis — cada papel as escreve, com os destinos —, nenhuma
+    /// administrativa: o tecido de segurança as exerce pelo gate, sem
+    /// prova. Só barrar muda o estado; observar é leitura, e ler o que o
+    /// tecido viu também.
+    #[test]
+    fn as_do_destino_de_rede() {
+        let destino: alloc::vec::Vec<_> = TODAS
+            .iter()
+            .filter(|p| p.recurso_e_endereco())
+            .map(|p| p.nome())
+            .collect();
+        assert_eq!(destino, ["net.connect", "net.observe", "net.block"]);
+        for nome in ["net.observe", "net.block", "security.read"] {
+            let p = Permissao::de_nome(nome).unwrap();
+            assert!(p.sensivel() && !p.administrativa(), "{nome}");
+        }
+        assert!(Permissao::NetBlock.muda_estado());
+        assert!(!Permissao::NetObserve.muda_estado());
+        assert!(!Permissao::SecurityRead.muda_estado() && !Permissao::SecurityRead.tem_alcance());
     }
 
     /// Esvaziar uma caixa é uma permissão própria, com nome próprio:

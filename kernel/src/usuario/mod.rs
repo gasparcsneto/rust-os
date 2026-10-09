@@ -1181,7 +1181,10 @@ unsafe fn bifurcar(quadro: *mut core::ffi::c_void) -> i64 {
 
     // SAFETY: o quadro é o desta chamada e o espaço é cópia do ativo, que é o
     // do fio que chamou — exatamente o que `bifurcar` exige.
-    match unsafe { crate::fios::bifurcar("usuario", quadro as *const _, espaco, cota) } {
+    // O filho, na auditoria, em nome do pai — antes de ele poder rodar: o
+    // primeiro pedido do filho vem depois do registro que diz quem o criou.
+    let nasceu = |id: crate::fios::IdFio| crate::autorizacao::auditar_bifurcacao(id.numero());
+    match unsafe { crate::fios::bifurcar("usuario", quadro as *const _, espaco, cota, &nasceu) } {
         Ok(id) => {
             BIFURCACOES.fetch_add(1, Ordering::Relaxed);
             id.numero() as i64
@@ -1395,7 +1398,12 @@ pub fn lancar_como(
         }
     };
 
-    match crate::fios::criar_processo("usuario", hospedar, argumento, autoridade, cota) {
+    // Quem lançou o fio novo, na auditoria — é a proveniência dele —, antes
+    // de ele poder rodar.
+    let nasceu = |id: crate::fios::IdFio| {
+        crate::autorizacao::auditar_nascimento(caminho.unwrap_or("<exemplo embutido>"), id.numero())
+    };
+    match crate::fios::criar_processo("usuario", hospedar, argumento, autoridade, cota, &nasceu) {
         Ok(id) => Ok(id.numero()),
         Err(motivo) => {
             if motivo == crate::fios::COTA_ESGOTADA {

@@ -74,11 +74,11 @@ jobs:
           sudo apt-get install -y --no-install-recommends swtpm
 
       - name: Testes no hospedeiro
-        run: cargo test -p xtask -p tipografia -p aparencia -p toolkit -p sigilo -p politica -p ancora -p diario -p armazem -p protocolo --features protocolo/alloc
+        run: cargo test -p xtask -p tipografia -p aparencia -p toolkit -p sigilo -p politica -p ancora -p diario -p armazem -p seguranca -p protocolo --features protocolo/alloc
 
       - name: Lints
         run: |
-          cargo clippy -p xtask -p tipografia -p aparencia -p toolkit -p sigilo -p politica -p ancora -p diario -p armazem --all-targets -- -D warnings
+          cargo clippy -p xtask -p tipografia -p aparencia -p toolkit -p sigilo -p politica -p ancora -p diario -p armazem -p seguranca --all-targets -- -D warnings
           cargo clippy -p protocolo --features alloc --all-targets -- -D warnings
           for alvo in x86_64-unknown-uefi aarch64-unknown-uefi; do
             (cd iniciador && cargo clippy --target "$alvo" -- -D warnings)
@@ -134,7 +134,7 @@ jobs:
         env:
           RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
         run: |
-          cargo doc --no-deps -p protocolo -p tipografia -p aparencia -p toolkit -p sigilo -p politica -p ancora -p diario -p armazem -p xtask --features protocolo/alloc
+          cargo doc --no-deps -p protocolo -p tipografia -p aparencia -p toolkit -p sigilo -p politica -p ancora -p diario -p armazem -p seguranca -p xtask --features protocolo/alloc
           for alvo in x86_64-unknown-uefi aarch64-unknown-uefi; do
             (cd iniciador && cargo doc --no-deps --target "$alvo")
           done

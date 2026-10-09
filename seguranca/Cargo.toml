@@ -1,0 +1,30 @@
+[package]
+# O tecido nativo de segurança do Duke (NSF): o modelo de evento, a
+# correlação, o grafo causal, o perfil de comportamento, o risco, as regras,
+# o monitor de invariantes, o incidente, o cofre de evidências, o
+# planejamento das respostas e as contas do firewall. Ver
+# `docs/SEGURANCA.md`.
+#
+# Um pacote, e não um módulo do kernel, pelo mesmo motivo do `politica`:
+# são contas sobre entrada hostil — a auditoria que o NSF lê, os
+# datagramas que ele vê, os quadros que o firewall classifica —, e se
+# conferem melhor no hospedeiro, sem emulador. O kernel põe o fio, as
+# leituras pelo gate e os pedidos; tudo o que se decide aqui é o que o NSF
+# **pede**, nunca o que alguém pode.
+#
+# `no_std` com `alloc`. Sem relógio: o tempo vem dos registros, e a mesma
+# sequência de eventos dá sempre o mesmo estado.
+name = "seguranca"
+version = "0.1.0"
+edition = "2024"
+description = "O tecido nativo de segurança do Duke: observação, correlação, detecção, incidente, evidência e resposta"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# O vocabulário: o titular, o código, o elo da auditoria, o destino de rede.
+politica = { path = "../politica" }
+# O JSON das leituras e das respostas, e o DNS que o NSF entende.
+protocolo = { path = "../protocolo", features = ["arrays"] }
+# O elo do cofre de evidências e o resumo dos datagramas: o mesmo BLAKE2s da
+# auditoria.
+blake2 = { version = "0.11.0", default-features = false }

@@ -161,10 +161,17 @@ $ cargo xtask agent --canal 2 agent.session
 | `person.registry` | Quem pode entrar pelos consoles: cada pessoa, com identificador, nome, papel, estado e sessões abertas — sem credencial |
 | `admin.challenge` | Um desafio de uso único para uma operação administrativa nesta sessão |
 | `admin.execute` | Uma operação administrativa com a prova de um administrador (`challenge`, `command`, `params`, `admin`, `proof`): `agent.register`, `agent.revoke`, `policy.assign`, `policy.write`, `person.register`, `person.revoke`, `credential.rotate`, `session.revoke`, `lease.revoke`, `message.send`, `message.read`, `message.ack`, `message.purge`, `message.purge_mailbox`; e, com as assinaturas de um quórum em `signatures`, `admin.revoke` |
-| `audit.tail` | Os registros mais recentes da auditoria encadeada, com o que basta para refazer cada elo, e quais já estão no journal (`count`) |
+| `audit.tail` | Os registros mais recentes da auditoria encadeada, com o que basta para refazer cada elo, e quais já estão no journal; com `after`, os seguintes a um número, do mais velho ao mais novo — a leitura de quem acompanha a cadeia (`count`, `after`) |
 | `audit.head` | A cabeça da auditoria — o elo do último registro, para ancorar fora da máquina —, a âncora e quantos há |
 | `audit.verify` | Refaz a cadeia guardada a partir da âncora e diz se cada elo confere |
 | `policy.show` | A política em vigor: papéis, permissões, recursos, taxas, o papel da serial e se veio do disco |
+| `security.status` | O tecido de segurança: o papel com que o gate decide as leituras dele, até onde leu, o que perdeu, o que pediu e os incidentes |
+| `security.incidents` | Os incidentes; com `id`, um inteiro: atores, detecções, registros, recursos, evidência, risco, estado e ações — cada ação com o pedido, o nível, a decisão do gate e quem a autorizou (`id`) |
+| `security.events` | A linha do tempo de segurança, de uma identidade, de um incidente ou toda (`principal`, `incident`, `max`) |
+| `security.explain` | A interpretação de uma decisão gravada — o que o código quer dizer, a cadeia, o DNS que precedeu uma conexão —, nunca uma segunda decisão (`seq`) |
+| `security.provenance` | A cadeia de um processo até a identidade que a começou, os filhos, e a rede dele: cada conexão, a decisão do gate, o DNS e a regra do firewall (`process`, `boot`) |
+| `security.risk` | O risco de uma identidade, com os fatores; o perfil de comportamento; e o raio do que ela já tocou (`principal`) |
+| `security.verify` | Refaz a cadeia do cofre de evidências |
 | `system.info` | Kernel, CPU, vídeo, uptime, o RTC e mecanismo de guarda da pilha |
 | `system.uptime` | Ticks do timer e milissegundos desde o boot |
 | `memory.stats` | Totais agregados de memória física |
@@ -208,6 +215,10 @@ $ cargo xtask agent --canal 2 agent.session
 | `net.send` | Manda bytes por uma conexão sua — texto em `content` ou o anexo; numa UDP, um datagrama inteiro de até 1472 bytes, ou nada e o motivo (`connection`, `content`, `attachment`) |
 | `net.recv` | O que chegou numa conexão sua, e o estado dela; numa UDP, um datagrama inteiro, com o tamanho em `datagram`, e o que não cabe em `max` fica; com `wait`, sem nada chegado, espera a pilha ter o que dizer — o dado, o estado, o fim da conexão — até o prazo; texto em `utf-8` ou `base64` (`connection`, `max`, `wait`) |
 | `net.close` | Fecha uma conexão sua (`connection`) |
+| `net.observe` | Os datagramas trocados com um destino observado — o conteúdo, em base64, com o dono, o sentido e o último registro da auditoria quando foi guardado (`after_record`, a ordem dele entre as decisões do gate) —, de associações de qualquer titular; só de um destino que um papel tem em `net.observe` (`to`, `after`, `max`) |
+| `net.block` | Barra o tráfego para um destino, para todos ou para um dono — e derruba as conexões vivas que a regra alcança. Só restringe (`to`, `owner`) |
+| `net.unblock` | Tira a regra de um destino e um dono; o gate continua decidindo cada pedido (`to`, `owner`) |
+| `net.rules` | As regras do firewall — o destino, o dono, a decisão que pôs cada uma e quem pediu — e os quadros descartados, em cada sentido: sem fluxo, de fluxo barrado, de protocolo que não passa |
 | `video.sample` | Amostra a tela numa grade de cores (`columns`, `rows`) |
 | `display.info` | A pilha gráfica: adaptador ativo, telas, as camadas do compositor, memória das superfícies, o último retângulo que chegou à tela e, no virtio-gpu, o que atravessou para o dispositivo |
 | `ui.tree` | A árvore semântica do que está na tela: papel, rótulo, valor, moldura e ações de cada elemento; de cada campo, a versão e o arrendamento |
@@ -252,6 +263,7 @@ kernel/src/
 ├── nativo.rs        a interface nativa: o registro como API dos programas, pelo mesmo gate
 ├── atividade.rs     quem está agindo: os agentes conectados e quem agiu por último
 ├── autorizacao.rs   o ponto único de decisão: papel, permissão, recurso, taxa e auditoria
+├── seguranca.rs     o tecido de segurança: o fio do NSF, que lê e pede pelo gate como qualquer principal
 ├── sessoes.rs       quem está em cada porta, e as chaves do transporte cifrado dela
 ├── aleatorio.rs     o gerador de números aleatórios, semeado pelo virtio-rng
 ├── barra.rs         a barra superior: o nome, os botões, quem está agindo e o tempo ligado
@@ -267,6 +279,8 @@ kernel/src/
 │   ├── mod.rs       o ARP do diagnóstico, e o observador que o deixa conviver com a pilha
 │   ├── pilha.rs     a pilha IP — o smoltcp sobre a placa —, o DHCP, a tabela de conexões e o fio que a faz andar
 │   ├── conexoes.rs  a conexão como capacidade do registro: de quem ela é, e como o gate a decide
+│   ├── captura.rs   os datagramas trocados com um destino observado, para quem tem `net.observe` sobre ele
+│   ├── bancada_dns.rs  só na suíte: o servidor de DNS da bancada, determinístico, de dentro da máquina
 │   └── espera.rs    a leitura que espera: armada na conexão, acordada pela pilha ou pelo prazo, decidida de novo na entrega
 ├── traps.rs         contabilidade de exceções e modo post-mortem
 ├── nucleos.rs       os vários núcleos: quem ligou, o pulso de cada um, o aviso e o travamento de propósito
@@ -384,6 +398,7 @@ iniciador/src/       a aplicação UEFI que o firmware carrega da ESP
 protocolo/src/       as ABIs: do iniciador com o kernel, e do kernel com os programas
 ├── lib.rs           o que é entregue ao kernel, com mágica e versão
 ├── json.rs          JSON sem alocação (streaming + varredura), do kernel e dos programas
+├── dns.rs           a pergunta e a resposta do DNS, sem alocar: do programa que resolve, do NSF e da bancada
 ├── mapa.rs          onde cada coisa mora no espaço virtual
 └── usuario.rs       as chamadas de sistema, os erros e o mapa do espaço do usuário
 
@@ -416,6 +431,23 @@ politica/src/        a política de autorização, a mesma no kernel e no hosped
 ├── manifesto.rs     o manifesto de um programa: o nome, o que ele exerce, e o resumo da imagem
 ├── sigiloso.rs      o texto que sai da memória zerado: o corpo e a resposta que o leva
 └── auditoria.rs     os registros e a cadeia de elos BLAKE2s
+
+seguranca/src/       o tecido de segurança (NSF) como conta pura: o que ele vê, liga, detecta e pede — nunca o que alguém pode
+├── lib.rs           o que mora aqui, e o que nada aqui faz: decidir
+├── evento.rs        o registro da auditoria lido e refeito elo a elo, e o evento de segurança que ele vira
+├── grafo.rs         a cadeia causal: quem lançou quem, quem pediu o quê, que nome levou a que endereço
+├── ueba.rs          o perfil de comportamento de cada identidade, em conta inteira
+├── risco.rs         o risco explicável: cada fator com o motivo
+├── regras.rs        as detecções, com nome, severidade e os registros que as dispararam
+├── invariantes.rs   a segunda camada: a cadeia que se refaz, a lacuna, o tempo que não volta
+├── incidente.rs     o incidente: atores, eventos, evidência, risco, detecções, estado e ações
+├── evidencia.rs     o cofre de evidências, com cadeia de resumos própria amarrada à da auditoria
+├── resposta.rs      o que o NSF pede e o que recomenda; uma recusa encerra o objetivo
+├── dns.rs           o que o NSF vê do DNS pela captura: o nome, o endereço, a pergunta casada
+├── firewall.rs      as regras, quem elas alcançam, e o que cada quadro é — só restringe
+├── motor.rs         o caminho inteiro: da leitura ao pedido, e o desfecho de volta
+├── relatorio.rs     o JSON das consultas `security.*`
+└── util.rs          hexadecimal, base64, o texto de uma string JSON e um resumo curto
 
 armazem/src/         o armazém como conta pura: caminhos, diretórios, versões, donos e cotas; preparar e aplicar um lote
 ├── lib.rs           a árvore de arquivos e diretórios, a versão do armazém inteiro, o lote inteiro ou nada
@@ -456,6 +488,7 @@ programas/           os programas de usuário, compilados à parte do kernel
     ├── monte.rs     o monte do processo, sobre `mapear`
     ├── saida.rs     uma linha formatada por chamada de `escrever`
     ├── desenho.rs   retângulos e texto, com a fonte do console
+    ├── dns.rs       resolver um nome como programa: a associação com o servidor, que o gate decide, a pergunta e a resposta
     ├── superficie.rs uma camada do compositor com os pixels no processo
     ├── janela.rs    a moldura, o arrasto e a caixa de fechar, e a interface dentro dela
     └── bin/
@@ -477,6 +510,7 @@ programas/           os programas de usuário, compilados à parte do kernel
         ├── anonimo.rs    o único sem manifesto: não exerce nada, nem lançado pelo sistema
         ├── guardar.rs    guarda no armazém pelo `pedir`: a versão, o conflito, a leitura pelo descritor e o `MUDOU`
         ├── discador.rs   conversa com o eco da bancada pelo `pedir`: os 256 bytes de ida e volta, e as recusas
+        ├── resolvedor.rs resolve nomes pelo DNS da bancada, e confere que a resposta não dá acesso: o gate decide o endereço
         ├── legado.rs     pede, não busca a resposta e troca de imagem: a nova não a encontra
         └── terminal.rs   o Terminal: o interpretador numa janela, pelo pseudo-terminal
 
@@ -2428,6 +2462,68 @@ rodada de lado — as trinta da tabela rodaram sobre o código corrigido:
   caso nenhum. A fila cheia agora é: um destino do enlace que não responde
   ao ARP segura tudo nela. A origem também: o alheio que chegou atrás de
   um datagrama do destino fica na frente quando aquele sai.
+
+## O tecido de segurança
+
+O NSF observa, correlaciona, interpreta, detecta, avalia o risco, abre
+incidentes e **pede** respostas — e não é uma autoridade: é um principal
+como os outros, `service nsf`, com o papel que a linha `servico` da
+política dá a ele (`seguranca`, que enumera `audit.read`, `net.observe` e
+`net.block`, cada um com o alcance escrito). Lê a auditoria e a captura
+pelo gate; cada leitura e cada pedido dele é um registro da cadeia; uma
+contenção que o gate recusa encerra o objetivo. O firewall nativo só
+restringe, depois do gate; o DNS é um programa sobre o UDP do 9.3, e uma
+resposta de DNS não dá acesso a nada — o gate decide o endereço como
+decidiria o número digitado. O desenho, os contratos e o que cada consulta
+`security.*` responde estão em [`docs/SEGURANCA.md`](docs/SEGURANCA.md).
+
+### O que o exercício encontrou
+
+- **A resolução e a conexão na mesma volta não se ligavam.** O NSF lia a
+  captura antes da auditoria, e o servidor de DNS só entra em observação
+  quando a auditoria mostra alguém o usando: um programa que abre a
+  associação, resolve e conecta antes de uma volta do NSF — o caso de todo
+  dia — tinha a resposta pulada. Agora a auditoria vem primeiro, a regra
+  liga as duas nas duas ordens, e a captura só se dá por vista quando a
+  leitura da auditoria alcançou a cabeça de antes dela.
+- **"Precedeu" no relógio de um segundo.** A auditoria e a captura usam o
+  relógio lógico, que anda de segundo em segundo: uma resolução do mesmo
+  segundo, depois da conexão, contava como a que a precedeu. Agora cada
+  datagrama guardado leva o número do último registro da auditoria
+  (`after_record`), e a ordem é a dos registros.
+- **O perfil via rajada onde só havia resolução.** Os primeiros pedidos de
+  uma identidade, todos no mesmo segundo, faziam a taxa da linha de base
+  em pedidos por milissegundo, e qualquer rajada depois era "quatro vezes
+  a base". Agora uma duração ganha a resolução do relógio, e a taxa da
+  linha de base espera trinta segundos de história.
+- **O nascimento podia vir depois do primeiro pedido do filho.** O
+  `user.run` e o `fork` gravavam o filho depois de ele poder rodar: o
+  primeiro pedido dele chegava, às vezes, antes do registro que diz quem o
+  criou. Agora o registro é gravado com o fio reservado, antes de ele ficar
+  pronto — e, na suíte, quem cria espera logo depois, com o filho correndo
+  noutro núcleo, para que a ordem certa tenha quem a confira. A primeira
+  forma dessa espera cedia a vez, e o ARM a recusou: lá o `fork` é um
+  handler de exceção, de onde não se cede; agora é uma espera ocupada.
+- **A bancada de DNS travaria a pilha.** O servidor da bancada responde de
+  dentro do caminho de saída, com a pilha travada, e injetava a resposta
+  fazendo a pilha andar de novo — a mesma trava. Agora ele só põe a
+  resposta na fila, a mesma volta da pilha a colhe, e o que é para a
+  bancada não sai pela placa.
+- **O programa contido fazia de quem o lançou um sondador.** Na fumaça,
+  com o fio do NSF de verdade, a serial foi contida no meio da perna da
+  rede: o programa `contido`, que confere de dentro a atenuação do
+  manifesto, teve três pedidos recusados pelo manifesto — gravados em
+  nome da serial, que é quem responde por ele —, e a regra da sondagem os
+  contou como a serial sondando o próprio papel; a conexão seguinte da
+  serial ao eco foi contida. Mas o papel tinha as permissões: quem não as
+  declarou foi o programa. Agora a recusa do manifesto é a regra dela,
+  `outside-manifest`, média — um sinal do programa —, e a sondagem conta
+  só as recusas do papel.
+- **A bancada de persistência esperava a própria leitura ser a última.**
+  Com o NSF lendo a auditoria a cada registro novo, há quase sempre uma
+  leitura dele, ainda não gravada, antes da espera. Agora a bancada espera
+  o último registro que não é leitura — o journal grava em ordem, e ele
+  leva os de antes.
 
 ## Vários agentes
 

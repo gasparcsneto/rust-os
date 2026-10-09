@@ -2680,6 +2680,38 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
         &["kernel/src/superficies.rs"],
     ),
     ("mover_sem_limite(", &["kernel/src/superficies.rs"]),
+    // O tecido de segurança (ver `docs/SEGURANCA.md`): só o módulo dele
+    // fala como o serviço, e só pelo caminho dos processos — a validação, o
+    // gate, a auditoria; só o fio dele (e a suíte) faz uma volta; o boot o
+    // liga. O firewall muda só pelos handlers de `net.block` e
+    // `net.unblock`, depois do gate; a captura se lê só pelo de
+    // `net.observe`. E nada do pacote `seguranca`, nem do módulo do kernel,
+    // é lido pelo ponto de decisão — `autorizacao.rs` não está na lista:
+    // detectar não é autorizar, e o gate não sabe que o NSF existe.
+    (
+        "Servico::Nsf",
+        &["kernel/src/autorizacao.rs", "kernel/src/seguranca.rs"],
+    ),
+    (
+        "nativo::responder_pelo_kernel(",
+        &["kernel/src/seguranca.rs"],
+    ),
+    ("seguranca::passo(", &[]),
+    ("seguranca::iniciar()", &["kernel/src/main.rs"]),
+    ("pilha::bloquear(", &["kernel/src/agent/commands.rs"]),
+    ("pilha::desbloquear(", &["kernel/src/agent/commands.rs"]),
+    ("captura::depois_de(", &["kernel/src/agent/commands.rs"]),
+    (
+        "seguranca::",
+        &[
+            "kernel/src/agent/commands.rs",
+            "kernel/src/rede/pilha.rs",
+            "kernel/src/rede/conexoes.rs",
+            "kernel/src/seguranca.rs",
+            "kernel/src/traps.rs",
+            "kernel/src/main.rs",
+        ],
+    ),
 ];
 
 /// As funções que tratam um pedido de mensagem: os handlers da sessão e as
@@ -3012,7 +3044,8 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
              só passam pelo ponto de decisão; o arrendamento de outro só cai com prova; as \
              mensagens só pelos handlers, pela prova e pela revogação; o armazém só pelos \
              comandos fs.*, pela gravação dele e pela reposição do boot; quem agiu só se conta \
-             na decisão; nenhuma camada sobe acima da barra; e as cargas do boot só pelo boot"
+             na decisão; nenhuma camada sobe acima da barra; as cargas do boot só pelo boot; \
+             e o tecido de segurança só fala como ele mesmo, pelo gate, sem que o gate o leia"
         );
         Ok(ExitCode::SUCCESS)
     } else {
@@ -3165,6 +3198,7 @@ fn conferir_arvore_do_readme() -> Result<ExitCode, String> {
         "ancora/src",
         "diario/src",
         "armazem/src",
+        "seguranca/src",
         "programas/src",
         "xtask/src",
     ] {
@@ -6136,6 +6170,9 @@ fn conversar(
     sob_politica(arch, &mut escrita, &mut leitor)?;
     sob_tela(monitor, tela_no_monitor, &mut escrita, &mut leitor)?;
     sob_fragmento(&mut escrita, &mut leitor)?;
+    // Depois das sondas que usam os agentes: o incidente que esta abre
+    // fica aberto, e não alcança mais ninguém.
+    sob_o_tecido(arch, &mut escrita, &mut leitor)?;
     // Um núcleo travado de propósito, **para sempre**: ele fica travado até
     // o fim, e a sonda da falha, a seguir, confere que a parada do caminho
     // fatal o alcança — ou diz que não o alcançou.
@@ -10274,6 +10311,195 @@ fn sob_terminal_pelo_agente(
         std::thread::sleep(Duration::from_millis(150));
     }
     println!("  [terminal] ok  `system.uptime` pelo agente, na linha de comando do Terminal");
+    Ok(())
+}
+
+/// O tecido de segurança no kernel de produção, com o fio do NSF de verdade
+/// — ver `docs/SEGURANCA.md`. O NSF lê a auditoria pelo gate, com o papel
+/// dele; um agente operador pede três métodos que o papel não dá, e o NSF
+/// abre o incidente sem pedir nada; o agente conecta ao eco, o gate deixa,
+/// e o NSF pede `net.block` ao gate — só para o fluxo do agente, só para o
+/// eco. A conexão seguinte do agente o gate deixa e o firewall barra; a da
+/// serial passa. O incidente diz a decisão do gate e quem a autorizou: o
+/// próprio NSF. E, parado o movimento, a auditoria fica quieta: o NSF não
+/// lê a própria leitura.
+fn sob_o_tecido(
+    arch: Arquitetura,
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+) -> Result<(), String> {
+    println!("[xtask] fumaça: o tecido de segurança, pelo gate");
+    let mut id = 8800;
+    let mut pedir =
+        |metodo: &str, params: &str| pedir_pela_serial(escrita, leitor, &mut id, metodo, params);
+    let esperar = |pedir: &mut dyn FnMut(&str, &str) -> Result<String, String>,
+                   metodo: &str,
+                   params: &str,
+                   segundos: u64,
+                   pronto: &dyn Fn(&str) -> bool|
+     -> Result<String, String> {
+        let limite = std::time::Instant::now() + Duration::from_secs(segundos);
+        loop {
+            let r = pedir(metodo, params)?;
+            if pronto(&r) {
+                return Ok(r);
+            }
+            if std::time::Instant::now() >= limite {
+                return Err(r);
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+    };
+
+    let status = esperar(&mut pedir, "security.status", "{}", 15, &|r| {
+        r.contains(r#""role":"seguranca""#)
+    })
+    .map_err(|r| format!("tecido: o NSF nao leu a auditoria pelo gate\n  {r}"))?;
+    if !status.contains(r#""reads_denied":0"#) {
+        return Err(format!(
+            "tecido: o gate recusou leituras ao NSF\n  {status}"
+        ));
+    }
+    let cauda = pedir("audit.tail", r#"{"count":64}"#)?;
+    let leituras = objetos_planos(apos(&cauda, r#""records":["#).unwrap_or(""))?
+        .iter()
+        .filter(|campos| {
+            let campo = |nome: &str| {
+                campos
+                    .iter()
+                    .find(|(n, _)| n == nome)
+                    .and_then(|(_, v)| v.clone())
+                    .unwrap_or_default()
+            };
+            campo("holder") == "service"
+                && campo("agent") == "nsf"
+                && campo("role") == "seguranca"
+                && campo("method") == "audit.tail"
+                && campo("code") == "ALLOW"
+        })
+        .count();
+    if leituras == 0 {
+        return Err(format!(
+            "tecido: nenhuma leitura do NSF gravada como do servico\n  {cauda}"
+        ));
+    }
+    println!("  [tecido] ok  o NSF le pelo gate, como `service nsf`, pelo papel `seguranca`");
+
+    let mut operador = AgenteNaPorta::conectar(arch, 2)?;
+    for metodo in ["audit.tail", "policy.show", "security.status"] {
+        let r = operador.pedir(metodo, "{}")?;
+        if !recusado_com(&r, "DENY_PERMISSION") {
+            return Err(format!("tecido: o operador fez {metodo}\n  {r}"));
+        }
+    }
+    esperar(&mut pedir, "security.incidents", "{}", 10, &|r| {
+        r.contains("privilege-probing")
+    })
+    .map_err(|r| format!("tecido: a sondagem nao abriu incidente\n  {r}"))?;
+    let r = pedir("net.rules", "{}")?;
+    if r.contains(r#""by":"service nsf""#) {
+        return Err(format!("tecido: o NSF agiu so pela sondagem\n  {r}"));
+    }
+    println!("  [tecido] ok  a sondagem abriu o incidente, sem acao nenhuma");
+
+    let aberta = operador.pedir("net.connect", r#"{"to":"tcp:10.0.2.100:7"}"#)?;
+    if !aberta.contains(r#""connection":"#) {
+        return Err(format!(
+            "tecido: o gate nao deixou o operador conectar\n  {aberta}"
+        ));
+    }
+    let regras = esperar(&mut pedir, "net.rules", "{}", 10, &|r| {
+        r.contains(r#""by":"service nsf""#)
+    })
+    .map_err(|r| format!("tecido: a saida depois da sondagem nao foi contida\n  {r}"))?;
+    // A regra que o NSF pôs: o objeto da lista que diz quem a pediu.
+    let regra = regras
+        .split(r#"{"id":"#)
+        .skip(1)
+        .find(|objeto| objeto.contains(r#""by":"service nsf""#))
+        .unwrap_or_default();
+    let dono = campo_simples(regra, "owner").unwrap_or_default();
+    let decisao = campo_simples(regra, "decision").unwrap_or_default();
+    if !dono.starts_with("agent:")
+        || !regra.contains(r#""to":"tcp:10.0.2.100:7""#)
+        || decisao.is_empty()
+    {
+        return Err(format!(
+            "tecido: a regra nao e so do fluxo do operador, para o eco\n  {regras}"
+        ));
+    }
+    let barrada = operador.pedir("net.connect", r#"{"to":"tcp:10.0.2.100:7"}"#)?;
+    if !barrada.contains("barrado pelo firewall") {
+        return Err(format!(
+            "tecido: o firewall nao barrou a conexao seguinte\n  {barrada}"
+        ));
+    }
+    let da_serial = pedir("net.connect", r#"{"to":"tcp:10.0.2.100:7"}"#)?;
+    let conexao = campo_simples(&da_serial, "connection")
+        .ok_or_else(|| format!("tecido: a regra do operador barrou a serial\n  {da_serial}"))?;
+    let _ = pedir("net.close", &format!(r#"{{"connection":{conexao}}}"#))?;
+    let incidentes = esperar(&mut pedir, "security.incidents", "{}", 10, &|r| {
+        r.contains("egress-after-probing")
+    })
+    .map_err(|r| format!("tecido: o incidente nao tem a saida\n  {r}"))?;
+    // O incidente do operador: o objeto da lista que tem a saída — o `id`
+    // dele, e não o do envelope do pedido.
+    let incidente = incidentes
+        .split(r#"{"id":"#)
+        .skip(1)
+        .find(|objeto| objeto.contains("egress-after-probing"))
+        .and_then(|objeto| objeto.split(|c: char| !c.is_ascii_digit()).next())
+        .unwrap_or_default()
+        .to_string();
+    let detalhe = esperar(
+        &mut pedir,
+        "security.incidents",
+        &format!(r#"{{"id":{incidente}}}"#),
+        10,
+        &|r| r.contains(&format!(r#""decision":{decisao}"#)),
+    )
+    .map_err(|r| format!("tecido: o incidente nao diz a decisao do gate\n  {r}"))?;
+    if !detalhe.contains(r#""authorized_by":"service:nsf""#)
+        || !detalhe.contains(r#""state":"allowed""#)
+        || !detalhe.contains(r#""level":"containment""#)
+    {
+        return Err(format!(
+            "tecido: o incidente nao diz quem autorizou a contencao\n  {detalhe}"
+        ));
+    }
+    println!(
+        "  [tecido] ok  a saida foi contida pelo gate (decisao {decisao}), o firewall barrou so o operador"
+    );
+
+    let r = pedir(
+        "net.unblock",
+        &format!(r#"{{"to":"tcp:10.0.2.100:7","owner":"{dono}"}}"#),
+    )?;
+    if campo_simples(&r, "rule").is_none() {
+        return Err(format!("tecido: a serial nao tirou a regra\n  {r}"));
+    }
+    drop(operador);
+
+    // Quieta: sem ninguém pedir, a cabeça só anda pela leitura do NSF do
+    // último pedido — e pelos pedidos desta conta.
+    std::thread::sleep(Duration::from_secs(2));
+    let antes: u64 = campo_simples(&pedir("audit.head", "{}")?, "seq")
+        .and_then(|n| n.parse().ok())
+        .ok_or("tecido: audit.head sem seq")?;
+    std::thread::sleep(Duration::from_secs(5));
+    let depois: u64 = campo_simples(&pedir("audit.head", "{}")?, "seq")
+        .and_then(|n| n.parse().ok())
+        .ok_or("tecido: audit.head sem seq")?;
+    if depois > antes + 3 {
+        return Err(format!(
+            "tecido: parado o movimento, a auditoria andou {} registros em 5 s",
+            depois - antes
+        ));
+    }
+    println!(
+        "  [tecido] ok  parado o movimento, a auditoria andou {} registro(s) em 5 s",
+        depois - antes
+    );
     Ok(())
 }
 

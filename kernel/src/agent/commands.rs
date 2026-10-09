@@ -463,6 +463,87 @@ pub static COMANDOS: &[Command] = &[
         handler: net_close,
     },
     Command {
+        nome: "net.observe",
+        resumo: "Os datagramas trocados com o destino `to` por associacoes de qualquer titular, depois de `after`: o conteudo, em base64, com o dono, a conexao e o sentido. So de um destino que um papel tem em `net.observe` - o que nao e observado nao e guardado.",
+        params: &[
+            ParamSpec {
+                nome: "to",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "O destino observado, na forma normal: `udp:10.0.2.3:53`.",
+            },
+            ParamSpec {
+                nome: "after",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "So os datagramas depois deste numero (padrao: 0).",
+            },
+            ParamSpec {
+                nome: "max",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "Quantos, no maximo (padrao: 8, teto: 16).",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::NetObserve),
+        recurso: Some("to"),
+        mais: Mais::Nada,
+        handler: net_observe,
+    },
+    Command {
+        nome: "net.block",
+        resumo: "Barra o trafego para o destino `to`, para todos ou so para `owner`: o firewall nao deixa passar quadro de fluxo barrado, recusa net.connect e net.send sobre ele, e derruba as conexoes vivas que a regra alcanca. So restringe: nenhuma regra deixa passar o que o gate nao decidiu.",
+        params: &[
+            ParamSpec {
+                nome: "to",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "O destino, na forma normal: `tcp:10.0.2.100:7`.",
+            },
+            ParamSpec {
+                nome: "owner",
+                tipo: TipoParam::Texto,
+                obrigatorio: false,
+                descricao: "So os fluxos de `agent:<chave>`, `person:<sessao>`, `process:<fio>` ou `serial` (padrao: todos).",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::NetBlock),
+        recurso: Some("to"),
+        mais: Mais::Nada,
+        handler: net_block,
+    },
+    Command {
+        nome: "net.unblock",
+        resumo: "Tira a regra que barra `to` para `owner`. O gate continua decidindo cada pedido, como antes dela.",
+        params: &[
+            ParamSpec {
+                nome: "to",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "O destino da regra.",
+            },
+            ParamSpec {
+                nome: "owner",
+                tipo: TipoParam::Texto,
+                obrigatorio: false,
+                descricao: "O dono da regra, como em net.block (padrao: todos).",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::NetBlock),
+        recurso: Some("to"),
+        mais: Mais::Nada,
+        handler: net_unblock,
+    },
+    Command {
+        nome: "net.rules",
+        resumo: "As regras do firewall - o destino, o dono, a decisao do gate que pos cada uma e quem pediu - e os quadros que o firewall descartou.",
+        params: &[],
+        acesso: Acesso::Exige(Permissao::SecurityRead),
+        recurso: None,
+        mais: Mais::Nada,
+        handler: net_rules,
+    },
+    Command {
         nome: "video.sample",
         resumo: "Amostra a tela numa grade de cores, para o agente conferir o que foi desenhado.",
         params: &[
@@ -1183,12 +1264,20 @@ pub static COMANDOS: &[Command] = &[
         resumo: "Os registros mais recentes da auditoria encadeada, com tudo o que entra no \
                  elo: quem, o que, o codigo, o BLAKE2s dos parametros, o elo anterior e o \
                  proprio. Basta para refazer a cadeia fora da maquina.",
-        params: &[ParamSpec {
-            nome: "count",
-            tipo: TipoParam::Inteiro,
-            obrigatorio: false,
-            descricao: "Quantos registros, do mais recente para tras (padrao: 32, teto: 128).",
-        }],
+        params: &[
+            ParamSpec {
+                nome: "count",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "Quantos registros, do mais recente para tras (padrao: 32, teto: 128).",
+            },
+            ParamSpec {
+                nome: "after",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "So os registros depois deste numero, do mais velho para o mais novo, ate `count`: a leitura de quem acompanha a cadeia.",
+            },
+        ],
         acesso: Acesso::Exige(Permissao::AuditRead),
         recurso: None,
         mais: Mais::Nada,
@@ -1224,6 +1313,116 @@ pub static COMANDOS: &[Command] = &[
         recurso: None,
         mais: Mais::Nada,
         handler: policy_show,
+    },
+    Command {
+        nome: "security.status",
+        resumo: "O tecido de seguranca: o papel com que o gate decide as leituras dele, ate onde leu a auditoria, o que perdeu, o que pediu e quantos incidentes ha.",
+        params: &[],
+        acesso: Acesso::Exige(Permissao::SecurityRead),
+        recurso: None,
+        mais: Mais::Nada,
+        handler: security_status,
+    },
+    Command {
+        nome: "security.incidents",
+        resumo: "Os incidentes; com `id`, um inteiro: atores, deteccoes, registros, recursos, evidencia, risco, estado e acoes - cada acao com o pedido, o nivel, a decisao do gate e quem a autorizou.",
+        params: &[ParamSpec {
+            nome: "id",
+            tipo: TipoParam::Inteiro,
+            obrigatorio: false,
+            descricao: "O incidente.",
+        }],
+        acesso: Acesso::Exige(Permissao::SecurityRead),
+        recurso: None,
+        mais: Mais::Nada,
+        handler: security_incidents,
+    },
+    Command {
+        nome: "security.events",
+        resumo: "A linha do tempo de seguranca: os eventos que o tecido leu, de um ator, de um incidente, ou todos - cada um com o processo, a decisao, a correlacao e a severidade.",
+        params: &[
+            ParamSpec {
+                nome: "principal",
+                tipo: TipoParam::Texto,
+                obrigatorio: false,
+                descricao: "So os de uma identidade: `agent:<chave>`, `person:<id>`, `serial`, `system`, `service:nsf`.",
+            },
+            ParamSpec {
+                nome: "incident",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "So os de um incidente.",
+            },
+            ParamSpec {
+                nome: "max",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "Quantos, dos mais novos (padrao: 32, teto: 128).",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::SecurityRead),
+        recurso: None,
+        mais: Mais::Nada,
+        handler: security_events,
+    },
+    Command {
+        nome: "security.explain",
+        resumo: "A interpretacao de uma decisao gravada: o que o codigo quer dizer, os eventos da mesma cadeia, e - numa conexao - a resolucao de DNS que a precedeu. Nunca uma segunda decisao: quem decide e o gate.",
+        params: &[ParamSpec {
+            nome: "seq",
+            tipo: TipoParam::Inteiro,
+            obrigatorio: true,
+            descricao: "O numero do registro na auditoria.",
+        }],
+        acesso: Acesso::Exige(Permissao::SecurityRead),
+        recurso: None,
+        mais: Mais::Nada,
+        handler: security_explain,
+    },
+    Command {
+        nome: "security.provenance",
+        resumo: "A cadeia de um processo ate a identidade que a comecou - cada criador, o programa e a autoridade -, os filhos, e a rede dele: cada conexao pedida, a decisao do gate, o DNS que a precedeu e a regra do firewall.",
+        params: &[
+            ParamSpec {
+                nome: "process",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: true,
+                descricao: "O fio do processo.",
+            },
+            ParamSpec {
+                nome: "boot",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "O boot, pela contagem do tecido (padrao: o de agora).",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::SecurityRead),
+        recurso: None,
+        mais: Mais::Nada,
+        handler: security_provenance,
+    },
+    Command {
+        nome: "security.risk",
+        resumo: "O risco de uma identidade, com os fatores; o perfil de comportamento dela; e o raio do que ela ja tocou. Contexto, nunca autorizacao.",
+        params: &[ParamSpec {
+            nome: "principal",
+            tipo: TipoParam::Texto,
+            obrigatorio: true,
+            descricao: "A identidade: `agent:<chave>`, `person:<id>`, `serial`, `system`.",
+        }],
+        acesso: Acesso::Exige(Permissao::SecurityRead),
+        recurso: None,
+        mais: Mais::Nada,
+        handler: security_risk,
+    },
+    Command {
+        nome: "security.verify",
+        resumo: "Refaz a cadeia do cofre de evidencias a partir da ancora e diz se cada elo confere.",
+        params: &[],
+        acesso: Acesso::Exige(Permissao::SecurityRead),
+        recurso: None,
+        mais: Mais::Nada,
+        handler: security_verify,
     },
 ];
 
@@ -1294,11 +1493,19 @@ fn audit_tail(params: Json, w: &mut JsonWriter) -> fmt::Result {
         .and_then(|v| v.as_u64())
         .unwrap_or(32)
         .min(MAIOR_CAUDA_DA_AUDITORIA) as usize;
+    let depois = params.member("after").and_then(|v| v.as_u64());
     // Copiados, e a trava solta antes de escrever: a escrita vai ao canal,
-    // e o canal não é lugar de segurar a trava da auditoria.
-    let registros =
-        crate::autorizacao::com_auditoria(|c| politica::auditoria::copiar(c.ultimos(n)))
-            .unwrap_or_default();
+    // e o canal não é lugar de segurar a trava da auditoria. Com `after`,
+    // os primeiros `n` depois dele; sem, os últimos `n`.
+    let registros = crate::autorizacao::com_auditoria(|c| match depois {
+        Some(depois) => politica::auditoria::copiar(
+            c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+                .filter(|r| r.seq > depois)
+                .take(n),
+        ),
+        None => politica::auditoria::copiar(c.ultimos(n)),
+    })
+    .unwrap_or_default();
     // Até onde a cadeia está no journal: o que vem depois ainda é só da
     // memória, e uma queda de energia o leva.
     let gravada = crate::persistencia::auditoria_gravada();
@@ -2105,15 +2312,35 @@ fn net_connect(params: Json, w: &mut JsonWriter) -> fmt::Result {
         )?;
         return w.end_object();
     };
-    match crate::rede::pilha::abrir(dono, destino) {
+    let fluxo = dono.fluxo_do_comando();
+    match crate::rede::pilha::abrir(dono, destino, fluxo) {
         Ok((numero, estado)) => {
             w.field_u64("connection", numero)?;
             w.field_str("to", &destino.texto())?;
             w.field_str("state", estado.nome())?;
         }
+        Err(crate::rede::pilha::BARRADO) => barrado(w, &destino, &fluxo)?,
         Err(motivo) => w.field_str("error", motivo)?,
     }
     w.end_object()
+}
+
+/// O firewall recusou o pedido de rede que o gate tinha permitido: a
+/// recusa vai para a auditoria como execução da decisão, com a regra, e
+/// para quem pediu.
+fn barrado(
+    w: &mut JsonWriter,
+    destino: &politica::endereco::Destino,
+    fluxo: &seguranca::firewall::DonoDoFluxo,
+) -> fmt::Result {
+    let regra = crate::rede::pilha::barrado(destino, fluxo).unwrap_or(0);
+    crate::autorizacao::auditar_execucao(
+        &destino.texto(),
+        politica::Codigo::DenyPolicy,
+        &alloc::format!("bloqueado pelo firewall, regra {regra}"),
+    );
+    w.field_str("error", crate::rede::pilha::BARRADO)?;
+    w.field_u64("rule", regra)
 }
 
 fn net_send(params: Json, w: &mut JsonWriter) -> fmt::Result {
@@ -2137,7 +2364,7 @@ fn net_send_com(
     anexo: &[u8],
     buffer: &mut [u8],
 ) -> fmt::Result {
-    let Some((dono, numero, _)) = conexao_do_pedido(numero, w)? else {
+    let Some((dono, numero, destino)) = conexao_do_pedido(numero, w)? else {
         return Ok(());
     };
     let dados: Result<&[u8], &'static str> = match params.member("content") {
@@ -2158,9 +2385,19 @@ fn net_send_com(
     };
     match crate::rede::pilha::mandar(numero, &dono, dados) {
         Ok((aceitos, estado)) => {
+            // Um datagrama para um destino observado fica na captura.
+            if aceitos > 0 {
+                crate::rede::captura::guardar(numero, &dono, &destino, true, &dados[..aceitos]);
+            }
             w.field_u64("connection", numero)?;
             w.field_u64("sent", aceitos as u64)?;
             w.field_str("state", estado.nome())
+        }
+        Err(crate::rede::pilha::BARRADO) => {
+            let fluxo = crate::rede::pilha::fluxo_de(numero, &dono)
+                .map(|(_, f)| f)
+                .unwrap_or_default();
+            barrado(w, &destino, &fluxo)
         }
         Err(motivo) => w.field_str("error", motivo),
     }
@@ -2292,9 +2529,16 @@ fn net_recv_datagrama(
             w.end_str()?;
         }
     }
-    if chegou && let Err(motivo) = crate::rede::pilha::consumir_datagrama(numero, dono, dados.len())
-    {
-        w.field_str("error", motivo)?;
+    if chegou {
+        match crate::rede::pilha::consumir_datagrama(numero, dono, dados.len()) {
+            Ok(()) => {
+                // O datagrama de um destino observado fica na captura.
+                if let Ok(destino) = crate::rede::pilha::destino_de(numero, dono) {
+                    crate::rede::captura::guardar(numero, dono, &destino, false, &dados);
+                }
+            }
+            Err(motivo) => w.field_str("error", motivo)?,
+        }
     }
     w.end_object()
 }
@@ -5247,4 +5491,258 @@ fn message_status(params: Json, w: &mut JsonWriter) -> fmt::Result {
         }
         Err(r) => recusa_de_mensagem(w, r.codigo(), r.motivo()),
     }
+}
+
+// ---------------------------------------------------------------------------
+// net.observe, net.block, net.unblock, net.rules
+// ---------------------------------------------------------------------------
+
+/// O destino `texto`, na forma normal, se é o que o gate decidiu.
+fn destino_decidido(
+    texto: Option<&str>,
+    w: &mut JsonWriter,
+) -> Result<Option<politica::endereco::Destino>, fmt::Error> {
+    let Some(destino) = politica::endereco::ler(texto.unwrap_or("")) else {
+        w.field_str(
+            "error",
+            "destino invalido: so `tcp:<ipv4>:<porta>` ou `udp:<ipv4>:<porta>`, na forma normal",
+        )?;
+        return Ok(None);
+    };
+    if !crate::autorizacao::endereco_decidido(&destino.texto()) {
+        w.field_str("error", "o destino nao e o que foi decidido")?;
+        return Ok(None);
+    }
+    Ok(Some(destino))
+}
+
+fn net_observe(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let to = params.member("to").and_then(|v| v.as_str());
+    let Some(destino) = destino_decidido(to, w)? else {
+        return w.end_object();
+    };
+    let depois = params.member("after").and_then(|v| v.as_u64()).unwrap_or(0);
+    let max = params
+        .member("max")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(8)
+        .min(16) as usize;
+    let datagramas = crate::rede::captura::depois_de(&destino, depois, max);
+    w.key("records")?;
+    w.begin_array()?;
+    for d in &datagramas {
+        w.begin_object()?;
+        w.field_u64("seq", d.seq)?;
+        w.field_u64("ts_ms", d.ts_ms)?;
+        w.field_u64("after_record", d.registro)?;
+        w.field_u64("connection", d.conexao)?;
+        w.field_str("owner", &d.dono)?;
+        w.field_str("to", &d.destino.texto())?;
+        w.field_str("direction", if d.saida { "out" } else { "in" })?;
+        w.field_u64("size", d.dados.len() as u64)?;
+        w.key("data")?;
+        w.begin_str()?;
+        em_base64(&d.dados, |c| w.push_str(c))?;
+        w.end_str()?;
+        w.end_object()?;
+    }
+    w.end_array()?;
+    w.field_u64("last", crate::rede::captura::ultimo())?;
+    w.end_object()
+}
+
+/// O escopo de `owner`, ou o erro.
+fn escopo_do_pedido(
+    owner: Option<&str>,
+    w: &mut JsonWriter,
+) -> Result<Option<seguranca::firewall::Escopo>, fmt::Error> {
+    match seguranca::firewall::Escopo::ler(owner) {
+        Some(e) => Ok(Some(e)),
+        None => {
+            w.field_str(
+                "error",
+                "owner invalido: `agent:<chave>`, `person:<sessao>`, `process:<fio>` ou `serial`",
+            )?;
+            Ok(None)
+        }
+    }
+}
+
+fn net_block(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let to = params.member("to").and_then(|v| v.as_str());
+    let owner = params.member("owner").and_then(|v| v.as_str());
+    let Some(destino) = destino_decidido(to, w)? else {
+        return w.end_object();
+    };
+    let Some(escopo) = escopo_do_pedido(owner, w)? else {
+        return w.end_object();
+    };
+    let (Some(decisao), Some(autor)) = (
+        crate::autorizacao::decisao_atual(),
+        crate::autorizacao::quem_decidiu(),
+    ) else {
+        w.field_str("error", "fora de um comando autorizado")?;
+        return w.end_object();
+    };
+    match crate::rede::pilha::bloquear(destino, escopo, decisao, &autor) {
+        Ok(crate::rede::pilha::Bloqueio {
+            regra,
+            nova,
+            derrubadas,
+        }) => {
+            // Cada conexão que a regra derrubou, em nome de quem a pôs.
+            for (id, d) in &derrubadas {
+                crate::autorizacao::auditar_execucao(
+                    &d.texto(),
+                    politica::Codigo::Allow,
+                    &alloc::format!("conexao {id} derrubada pelo bloqueio"),
+                );
+            }
+            if nova {
+                crate::autorizacao::auditar_execucao(
+                    &destino.texto(),
+                    politica::Codigo::Allow,
+                    &alloc::format!("regra {regra} posta"),
+                );
+            }
+            w.field_u64("rule", regra)?;
+            w.field_bool("new", nova)?;
+            w.field_str("to", &destino.texto())?;
+            w.field_str("owner", &escopo.texto())?;
+            w.field_u64("dropped", derrubadas.len() as u64)?;
+        }
+        Err(motivo) => w.field_str("error", motivo)?,
+    }
+    w.end_object()
+}
+
+fn net_unblock(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let to = params.member("to").and_then(|v| v.as_str());
+    let owner = params.member("owner").and_then(|v| v.as_str());
+    let Some(destino) = destino_decidido(to, w)? else {
+        return w.end_object();
+    };
+    let Some(escopo) = escopo_do_pedido(owner, w)? else {
+        return w.end_object();
+    };
+    match crate::rede::pilha::desbloquear(&destino, &escopo) {
+        Some(regra) => {
+            crate::autorizacao::auditar_execucao(
+                &destino.texto(),
+                politica::Codigo::Allow,
+                &alloc::format!("regra {regra} tirada"),
+            );
+            w.field_u64("rule", regra)?;
+            w.field_str("to", &destino.texto())?;
+            w.field_str("owner", &escopo.texto())?;
+        }
+        None => w.field_str("error", "nenhuma regra para este destino e este dono")?,
+    }
+    w.end_object()
+}
+
+fn net_rules(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let regras = crate::rede::pilha::regras();
+    let d = crate::rede::pilha::descartes();
+    w.begin_object()?;
+    w.key("rules")?;
+    w.begin_array()?;
+    for r in &regras {
+        w.begin_object()?;
+        w.field_u64("id", r.id)?;
+        w.field_str("to", &r.destino.texto())?;
+        w.field_str("owner", &r.escopo.texto())?;
+        w.field_u64("decision", r.decisao)?;
+        w.field_str("by", &r.autor)?;
+        w.end_object()?;
+    }
+    w.end_array()?;
+    w.key("dropped")?;
+    w.begin_object()?;
+    w.field_u64("out_without_flow", d.saida_sem_fluxo)?;
+    w.field_u64("in_without_flow", d.entrada_sem_fluxo)?;
+    w.field_u64("out_blocked", d.saida_barrada)?;
+    w.field_u64("in_blocked", d.entrada_barrada)?;
+    w.field_u64("out_protocol", d.saida_protocolo)?;
+    w.field_u64("in_protocol", d.entrada_protocolo)?;
+    w.end_object()?;
+    w.end_object()
+}
+
+// ---------------------------------------------------------------------------
+// security.*
+// ---------------------------------------------------------------------------
+
+/// Escreve o que o tecido de segurança responde: o texto é montado com o
+/// motor travado, e escrito aqui, com a trava solta.
+fn consulta(
+    w: &mut JsonWriter,
+    f: impl FnOnce(&seguranca::Motor, &mut JsonWriter) -> fmt::Result,
+) -> fmt::Result {
+    match crate::seguranca::consultar(f) {
+        Ok(texto) => w.raw_value(&texto),
+        Err(motivo) => {
+            w.begin_object()?;
+            w.field_str("error", motivo)?;
+            w.end_object()
+        }
+    }
+}
+
+fn security_status(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    consulta(w, seguranca::relatorio::status)
+}
+
+fn security_incidents(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    match params.member("id").and_then(|v| v.as_u64()) {
+        Some(id) => consulta(w, |m, w| seguranca::relatorio::incidente(m, id, w)),
+        None => consulta(w, seguranca::relatorio::incidentes),
+    }
+}
+
+fn security_events(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let principal = params.member("principal").and_then(|v| v.as_str());
+    let incidente = params.member("incident").and_then(|v| v.as_u64());
+    let max = params
+        .member("max")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(32)
+        .min(128) as usize;
+    consulta(w, |m, w| {
+        seguranca::relatorio::eventos(m, principal, incidente, max, w)
+    })
+}
+
+fn security_explain(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let seq = params.member("seq").and_then(|v| v.as_u64()).unwrap_or(0);
+    consulta(w, |m, w| seguranca::relatorio::explicar(m, seq, w))
+}
+
+fn security_provenance(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let fio = params
+        .member("process")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let boot = params
+        .member("boot")
+        .and_then(|v| v.as_u64())
+        .and_then(|b| u32::try_from(b).ok());
+    consulta(w, |m, w| {
+        seguranca::relatorio::proveniencia(m, boot.unwrap_or(m.epoca), fio, w)
+    })
+}
+
+fn security_risk(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let principal = params
+        .member("principal")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    consulta(w, |m, w| seguranca::relatorio::risco(m, principal, w))
+}
+
+fn security_verify(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    consulta(w, seguranca::relatorio::verificar)
 }

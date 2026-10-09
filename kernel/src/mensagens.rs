@@ -272,6 +272,8 @@ impl Remetente {
                 }
                 _ => return None,
             },
+            // Um serviço não tem caixa.
+            Autoridade::Servico(_) => return None,
         };
         // Um programa age como quem o lançou, mas conta os nonces dele na
         // própria janela — ver [`Canal::Processo`].

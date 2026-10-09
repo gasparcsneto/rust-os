@@ -110,6 +110,44 @@ impl Dono {
         }
     }
 
+    /// De quem é o fluxo, para as regras do firewall: o processo, se o dono
+    /// é um, e por quem ele age — a autoridade que o gate decidiu para o
+    /// comando em execução. Ver `seguranca::firewall::DonoDoFluxo`.
+    pub fn fluxo_do_comando(&self) -> seguranca::firewall::DonoDoFluxo {
+        use crate::autorizacao::Autoridade;
+        let mut f = seguranca::firewall::DonoDoFluxo::default();
+        if let Dono::Processo(fio) = self {
+            f.processo = Some(*fio);
+        }
+        match crate::autorizacao::autoridade_atual() {
+            Autoridade::Sessao { chave: Some(k), .. } => f.agente = Some(k),
+            Autoridade::Sessao {
+                sessao: crate::agent::sessao::SERIAL,
+                chave: None,
+            } => f.serial = true,
+            Autoridade::Pessoa { sessao } => f.pessoa = Some(sessao.0),
+            Autoridade::Sistema | Autoridade::Sessao { .. } | Autoridade::Servico(_) => {}
+        }
+        f
+    }
+
+    /// Como a captura, o tecido de segurança e o escopo de uma regra do
+    /// firewall o escrevem: o processo pelo fio, o agente pela chave, a
+    /// pessoa pela sessão, a serial — ver `seguranca::firewall::Escopo`.
+    pub fn texto(&self) -> alloc::string::String {
+        match self {
+            Dono::Processo(fio) => alloc::format!("process:{fio}"),
+            Dono::Canal { chave: Some(k), .. } => alloc::format!("agent:{}", sigilo::hex(k)),
+            Dono::Canal {
+                sessao: crate::agent::sessao::SERIAL,
+                chave: None,
+                ..
+            } => alloc::string::String::from("serial"),
+            Dono::Canal { sessao, .. } => alloc::format!("channel:{sessao}"),
+            Dono::Pessoa(id) => alloc::format!("person:{}", sigilo::hex_de(&id.0)),
+        }
+    }
+
     /// O dono ainda existe? Um processo vivo, a mesma sessão na mesma porta
     /// com a mesma chave, uma sessão de pessoa ativa.
     fn vivo(&self) -> bool {
