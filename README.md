@@ -2525,6 +2525,48 @@ decidiria o número digitado. O desenho, os contratos e o que cada consulta
   o último registro que não é leitura — o journal grava em ordem, e ele
   leva os de antes.
 
+### As mutações do tecido de segurança
+
+Trinta mutações contra o que o NSF, o firewall e o DNS prometem — quinze
+contra os casos da suíte de quatro núcleos, no x86, e dezesseis contra os
+testes do pacote `seguranca` no hospedeiro, uma delas a mesma nos dois
+lados: **trinta reprovadas**. Duas do hospedeiro sobreviveram na
+primeira rodada e ganharam o teste que faltava; uma da suíte sobreviveu
+até a suíte forçar a corrida que ela abre.
+
+| Mutação | Reprovada por |
+|---|---|
+| a resolução não olha para trás | `dns: o resolvedor pela bancada` e `dns: a resposta nao da acesso` — o NSF não ligou o DNS à conexão recusada |
+| o nascimento gravado depois de o filho poder rodar | `nsf: proveniencia pelo lancamento e pela bifurcacao` — o filho pediu antes do registro do nascimento dele (sobreviveu até a suíte esperar o filho correr noutro núcleo) |
+| a saída deixa passar o fluxo barrado | `firewall: descarta o quadro sem fluxo` — o aviso da conexão derrubada saiu |
+| o ICMP entra | o mesmo caso — o eco entrou, e a pilha respondeu |
+| abrir não confere a regra | `nsf: contem agente e pessoa pelo mesmo caminho` e `firewall: so restringe, depois do gate` |
+| o bloqueio não derruba | os mesmos dois casos — a conexão derrubada ainda respondia |
+| o NSF com o papel da serial | `nsf: le pelo gate com o papel dele` e `nsf: nao e o sistema` |
+| o `fork` sem registro | `politica: o processo age como o agente` e a proveniência |
+| a bancada forja do próprio servidor | `dns: a resposta nao da acesso` — uma resposta forjada chegou |
+| a espera depois da recusa não dobra | `nsf: le pelo gate com o papel dele` |
+| o NSF não casa a própria ação | `nsf: contem agente e pessoa pelo mesmo caminho` — o incidente não dizia a decisão do gate |
+| depois da recusa, planeja de novo | `nsf: a recusa encerra o objetivo` — o NSF pediu de novo |
+| a leitura não avança | `nsf: le junto com quem pede` |
+| a taxa da linha de base sem a história | `ueba::testes::a_rajada_de_quem_chegou_nao_e_taxa`, no hospedeiro; na suíte, a outra metade da correção — a resolução na duração da janela — a mascara |
+| o NSF pede como o sistema | `nsf: le pelo gate com o papel dele` — a leitura não foi gravada como do serviço |
+| a sondagem pede quatro métodos | `regras::testes::a_sondagem`, `janela_e_recarga` |
+| a história pede contenção | `resposta::testes::a_contencao_so_ao_vivo_e_sem_recusa` |
+| a recusa não encerra o objetivo | o mesmo teste |
+| a cadeia do cofre não se confere | `evidencia::testes::adulterar_aparece` |
+| o monitor não vê a lacuna | `invariantes::testes::a_lacuna_e_o_tempo` |
+| o monitor não refaz o elo | `invariantes::testes::adulterado_e_desencadeado` |
+| o monitor não confere o encadeamento | o mesmo teste |
+| a ação sem plano passa | `a_acao_sem_plano`, `a_recusa_encerra_o_objetivo`, `da_sondagem_a_contencao_pelo_gate` |
+| a resolução da mesma decisão a precede | `dns::testes::a_pergunta_e_a_resposta_casam` |
+| a resolução de outro dono | o mesmo teste |
+| a taxa da janela sem a resolução do relógio | `ueba::testes::a_rajada_no_mesmo_segundo_e_o_ritmo_de_sempre` (sobreviveu até o teste existir) |
+| a saída contida sem incidente alto | `so_o_incidente_alto_leva_a_contencao` (sobreviveu até o teste existir) |
+| a contenção para todos | `resposta::testes::a_contencao_so_ao_vivo_e_sem_recusa` |
+| a regra de um agente alcança qualquer agente | `firewall::testes::o_escopo` |
+| a recusa do manifesto conta como sondagem | `regras::testes::a_recusa_do_manifesto_nao_e_sondagem` |
+
 ## Vários agentes
 
 O Duke atende vários agentes ao mesmo tempo, cada um numa **sessão**: um
