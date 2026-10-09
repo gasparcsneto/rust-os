@@ -1830,6 +1830,22 @@ pub fn auditar_enchimento_de_teste(metodo: &str, parametros: &[u8], detalhe: &st
     );
 }
 
+/// Só para a suíte: o balde do serviço sai, e o pedido seguinte dele começa
+/// um cheio. Os casos do tecido fazem as voltas do NSF uma atrás da outra,
+/// sem a cadência do fio, e o balde é um só para todos eles: sem isto, o
+/// que um caso gastou faltava ao seguinte, conforme a velocidade da
+/// máquina.
+#[cfg(feature = "modo-teste")]
+pub fn encher_a_taxa_do_servico_de_teste() {
+    crate::arch::sem_interrupcoes(|| {
+        for b in TAXAS.lock().baldes.iter_mut() {
+            if b.is_some_and(|b| b.dono == DonoDaTaxa::Servico) {
+                *b = None;
+            }
+        }
+    });
+}
+
 /// Decide uma chamada de sistema de um processo: abrir um arquivo, executar
 /// um programa, prender-se ao pseudo-terminal. Com a autoridade do processo,
 /// que é a de quem o lançou.

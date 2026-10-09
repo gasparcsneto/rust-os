@@ -33326,10 +33326,11 @@ fn com_a_politica<T>(
     r
 }
 
-/// Roda `f` com o NSF começando agora — sem história, e sem o fio: cada
-/// volta é o caso que dá —, e o desliga depois, sem as regras do firewall
-/// que o caso deixou.
+/// Roda `f` com o NSF começando agora — sem história, com a taxa do papel
+/// cheia, e sem o fio: cada volta é o caso que dá —, e o desliga depois,
+/// sem as regras do firewall que o caso deixou.
 fn com_o_nsf<T>(f: impl FnOnce() -> Result<T, &'static str>) -> Result<T, &'static str> {
+    crate::autorizacao::encher_a_taxa_do_servico_de_teste();
     crate::seguranca::reiniciar_de_teste();
     let r = f();
     crate::seguranca::desligar_de_teste();
@@ -33471,6 +33472,7 @@ fn nsf_le_pelo_gate_com_o_papel_dele() -> Resultado {
 /// `net.observe` fora do alcance dele é `DENY_RESOURCE`, e nenhuma regra
 /// fica. Cada recusa é gravada como do serviço, pelo papel dele.
 fn nsf_nao_e_o_sistema() -> Resultado {
+    crate::autorizacao::encher_a_taxa_do_servico_de_teste();
     let nsf = como_o_nsf();
     let casos: &[(&str, &str, &str)] = &[
         (
@@ -34497,7 +34499,8 @@ fn dns_a_resposta_nao_da_acesso() -> Resultado {
 
 /// O NSF de verdade, num fio dele, junto com quem pede: um fio com a
 /// autoridade do serviço dá voltas enquanto quatro fios pedem ao mesmo
-/// tempo — e o NSF lê tudo, na ordem, sem lacuna nem elo que não confere,
+/// tempo — e eles pedem, uma vez por volta dele, até o NSF dar três voltas
+/// com eles. O NSF lê tudo, na ordem, sem lacuna nem elo que não confere,
 /// e sem pedir nada que ninguém tenha provocado.
 fn nsf_le_junto_com_quem_pede() -> Resultado {
     use crate::autorizacao::{Autoridade, Servico};
@@ -34529,6 +34532,20 @@ fn nsf_le_junto_com_quem_pede() -> Resultado {
                 let _ = fs_pedir(quem, "fs.list", r#"{"path":"/dados"}"#);
             }
         }
+        // Num kernel rápido, o que vem acima cabe numa volta só do NSF — e
+        // ele não leu junto com ninguém. Os fios seguem pedindo, um pedido
+        // por volta dele, até ele dar três voltas com eles — ou o prazo. Pelo
+        // passo do NSF, e não do relógio: num kernel lento, uma volta leva
+        // segundos, e pedir pelo relógio deixaria mais do que ele lê.
+        let prazo = crate::tempo::ticks() + 2000;
+        let mut vista = VOLTAS.load(Ordering::Acquire);
+        while vista < 3 && crate::tempo::ticks() < prazo {
+            let _ = fs_pedir(quem, "system.info", "{}");
+            while VOLTAS.load(Ordering::Acquire) == vista && crate::tempo::ticks() < prazo {
+                crate::fios::ceder();
+            }
+            vista = VOLTAS.load(Ordering::Acquire);
+        }
         PRONTOS.fetch_add(1, Ordering::AcqRel);
         crate::fios::terminar()
     }
@@ -34558,7 +34575,7 @@ fn nsf_le_junto_com_quem_pede() -> Resultado {
             )
         })
         .ok_or("o NSF saiu do ar")?;
-        if VOLTAS.load(Ordering::Acquire) < 2 || lido + 1 < cabeca {
+        if VOLTAS.load(Ordering::Acquire) < 3 || lido + 1 < cabeca {
             crate::log_error!(
                 "teste",
                 "{} voltas, lido {} de {}",

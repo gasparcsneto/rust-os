@@ -391,6 +391,12 @@ contido pelo despertador.
   `net.observe`.
 - **Lê a cada segundo, no máximo.** A latência entre o evento e a
   contenção é a do despertador.
+- **A taxa do papel vale para o NSF.** Uma volta lê até oito lotes de 64
+  registros, e o papel `seguranca` tem dez pedidos por segundo, com rajada
+  de vinte: sob uma carga que passe disso por muito tempo, a leitura fica
+  para trás, uma recusa por taxa faz o NSF recuar (até um minuto), e o
+  que sair do anel de 1024 registros antes da leitura vira a detecção da
+  lacuna. O NSF não ganha taxa por ser de segurança.
 - **O relógio dos registros é de um segundo.** As janelas e as taxas das
   regras e do perfil contam com essa resolução; a ordem entre a captura e
   a auditoria é a dos números dos registros, que é exata.
@@ -405,16 +411,19 @@ contido pelo despertador.
   lacuna, a proveniência, o DNS nas duas ordens, pessoa e agente pela
   mesma conta, e só o incidente alto levando à contenção.
 - **Na suíte**, com o motor de verdade e sem o fio — cada volta é o caso
-  que dá: o NSF lendo pelo gate com o papel dele, cego sem `audit.read` e
-  sem papel sem a linha `servico`; o NSF não sendo o sistema; a contenção
-  de um agente e de uma pessoa pelo mesmo caminho; a recusa que encerra o
-  objetivo; a proveniência pelo `user.run` e pelo `fork`, com o
-  nascimento antes do primeiro pedido do filho; a credencial revogada; o
-  NSF num fio dele lendo junto com quatro fios que pedem; a lacuna do anel;
-  o firewall só restringindo, depois do gate; os quadros sem fluxo, o ICMP
-  e o aviso da conexão derrubada; o `resolvedor` contra a bancada; e a
-  resposta que não dá acesso — religada, forjada, muda, malformada, de um
-  servidor fora do alcance.
+  que dá, e cada caso começa com o NSF sem história, sem espera e com o
+  balde da taxa do papel cheio, porque as voltas vêm uma atrás da outra,
+  sem a cadência do fio: o NSF lendo pelo gate com o papel dele, cego sem
+  `audit.read` e sem papel sem a linha `servico`; o NSF não sendo o
+  sistema; a contenção de um agente e de uma pessoa pelo mesmo caminho; a
+  recusa que encerra o objetivo; a proveniência pelo `user.run` e pelo
+  `fork`, com o nascimento antes do primeiro pedido do filho; a credencial
+  revogada; o NSF num fio dele lendo junto com quatro fios que pedem — até
+  ele dar três voltas com eles; a lacuna do anel; o firewall só
+  restringindo, depois do gate; os quadros sem fluxo, o ICMP e o aviso da
+  conexão derrubada; o `resolvedor` contra a bancada; e a resposta que não
+  dá acesso — religada, forjada, muda, malformada, de um servidor fora do
+  alcance.
 - **Na fumaça**, o kernel de produção com o fio do NSF de verdade: a
   leitura pelo gate, a sondagem que abre o incidente sem ação, a saída
   contida pelo gate em poucos segundos, o firewall barrando só o operador,

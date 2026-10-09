@@ -2524,6 +2524,16 @@ decidiria o número digitado. O desenho, os contratos e o que cada consulta
   leitura dele, ainda não gravada, antes da espera. Agora a bancada espera
   o último registro que não é leitura — o journal grava em ordem, e ele
   leva os de antes.
+- **O CI do ARM viu dois casos dependerem da velocidade da máquina.** Os
+  casos do tecido fazem as voltas do NSF uma atrás da outra, sem a
+  cadência do fio, e o balde da taxa do serviço é um só para todos: no
+  kernel de release do CI, os casos de antes gastaram a rajada, e o caso
+  da recusa teve as duas voltas seguintes recusadas por taxa — o NSF não
+  leu nem o próprio pedido recusado. E os quatro fios que pedem junto com
+  o NSF terminavam antes da segunda volta dele. Os dois se reproduzem
+  aqui — o balde em três fichas antes do caso, menos pedidos por fio —;
+  agora cada caso do tecido começa com o balde cheio, e os fios pedem até
+  o NSF dar três voltas com eles.
 
 ### As mutações do tecido de segurança
 
