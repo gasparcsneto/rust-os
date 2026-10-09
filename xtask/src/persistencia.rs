@@ -919,7 +919,8 @@ fn a_fotografia_antiga_e_recusada(
     Ok(format!("{}: {}", p.estado, p.motivo))
 }
 
-/// Um byte trocado no meio do último registro confirmado: o boot lê até o
+/// Um byte trocado no meio do último registro confirmado — o da lápide, e
+/// não o último no disco, que pode ser uma leitura do NSF: o boot lê até o
 /// anterior, a âncora sabe que falta um, e o journal é recusado.
 fn o_journal_adulterado_e_recusado(
     arch: Arquitetura,
@@ -933,16 +934,7 @@ fn o_journal_adulterado_e_recusado(
         return Err(format!("o quorum nao revogou\n  {r}"));
     }
     m.cortar_a_energia()?;
-    let mut estado = ler_o_estado(&disco)?;
-    // O último setor com conteúdo é o fim do último registro; um byte do
-    // meio dele, antes da etiqueta e dos zeros.
-    let ultimo = estado
-        .chunks(512)
-        .rposition(|s| s.iter().any(|&b| b != 0))
-        .ok_or("o journal esta vazio")?;
-    let alvo = ultimo * 512 + 100;
-    estado[alvo] ^= 0x40;
-    escrever_no_estado(&disco, &estado)?;
+    estragar_o_registro(&disco, ultimo_confirmado(&disco)?)?;
 
     let mut m = Ligada::subir(arch, artefato, None)?;
     let p = persistencia_de(&mut m)?;
@@ -1532,13 +1524,8 @@ fn o_journal_recusado_ainda_tira(arch: Arquitetura, artefato: &Artefato) -> Resu
         return Err(format!("o policy.write nao foi executado\n  {r}"));
     }
     m.cortar_a_energia()?;
-    let mut estado = ler_o_estado(&disco)?;
-    let ultimo = estado
-        .chunks(512)
-        .rposition(|s| s.iter().any(|&b| b != 0))
-        .ok_or("o journal esta vazio")?;
-    estado[ultimo * 512 + 100] ^= 0x40;
-    escrever_no_estado(&disco, &estado)?;
+    // O registro da política: o último confirmado, e não o último no disco.
+    estragar_o_registro(&disco, ultimo_confirmado(&disco)?)?;
 
     let mut m = Ligada::subir(arch, artefato, None)?;
     let p = persistencia_de(&mut m)?;
@@ -2161,6 +2148,51 @@ fn registros_no_disco(disco: &Path, limite: Option<u64>) -> Result<Vec<(u64, u64
         }
     }
     Ok(v)
+}
+
+/// O primeiro setor do último registro confirmado pelo contador do TPM: o
+/// primeiro, na sequência, dos de âncora maior. Não é sempre o último no
+/// disco: um registro só de auditoria não avança a âncora — as leituras do
+/// NSF depois de uma operação, por exemplo —, e o contador não protege o
+/// rabo que eles fazem; estragar um deles é só perder o rabo.
+fn ultimo_confirmado(disco: &Path) -> Result<u64, String> {
+    let estado = ler_o_estado(disco)?;
+    let registros = registros_no_disco(disco, None)?;
+    let maior = registros
+        .iter()
+        .map(|&(_, _, a)| a)
+        .max()
+        .ok_or("o journal esta vazio")?;
+    let sequencia = |setor: u64| {
+        let c = setor as usize * 512;
+        estado
+            .get(c + 16..c + 24)
+            .and_then(|b| b.try_into().ok())
+            .map_or(u64::MAX, u64::from_le_bytes)
+    };
+    registros
+        .into_iter()
+        .filter(|&(_, _, a)| a == maior)
+        .min_by_key(|&(s, _, _)| sequencia(s))
+        .map(|(s, _, _)| s)
+        .ok_or_else(|| "o journal esta vazio".to_string())
+}
+
+/// Troca um bit no meio do texto cifrado do registro que começa no setor
+/// `inicio`: a etiqueta não confere, e o registro não abre.
+fn estragar_o_registro(disco: &Path, inicio: u64) -> Result<(), String> {
+    let mut estado = ler_o_estado(disco)?;
+    let c = inicio as usize * 512;
+    let tamanho = estado
+        .get(c + 32..c + 36)
+        .and_then(|b| b.try_into().ok())
+        .map_or(0, u32::from_le_bytes) as usize;
+    let byte = (tamanho > 0)
+        .then(|| estado.get_mut(c + 64 + tamanho / 2))
+        .flatten()
+        .ok_or_else(|| format!("o registro do setor {inicio} nao tem texto cifrado"))?;
+    *byte ^= 0x40;
+    escrever_no_estado(disco, &estado)
 }
 
 /// A escrita que não foi descarregada se perde: os setores do último

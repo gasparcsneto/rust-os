@@ -2534,6 +2534,16 @@ decidiria o número digitado. O desenho, os contratos e o que cada consulta
   aqui — o balde em três fichas antes do caso, menos pedidos por fio —;
   agora cada caso do tecido começa com o balde cheio, e os fios pedem até
   o NSF dar três voltas com eles.
+- **A bancada de persistência estragava o último setor, e não o último
+  registro confirmado.** Dois cenários trocam um byte no registro que a
+  âncora do TPM confirmou por último — a lápide de uma revogação, a
+  escrita de uma política — e esperam o journal recusado. Eles achavam
+  esse registro pelo último setor com conteúdo; com o NSF lendo, a
+  leitura dele depois da operação é um registro só de auditoria, que não
+  avança a âncora, e o byte trocado caía nela — o rabo que o contador não
+  protege, e o journal, com razão, abria. O CI do ARM viu um deles; aqui,
+  uma espera de três segundos antes do corte reprova os dois. Agora a
+  bancada estraga o registro que avançou a âncora por último.
 
 ### As mutações do tecido de segurança
 
