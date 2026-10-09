@@ -2,7 +2,7 @@
 //!
 //! # O que é do `smoltcp` e o que é daqui
 //!
-//! O protocolo é dele: Ethernet, ARP, IPv4, DHCP, TCP — as somas, os
+//! O protocolo é dele: Ethernet, ARP, IPv4, DHCP, TCP, UDP — as somas, os
 //! estados, as retransmissões. Daqui é o que o liga ao Duke:
 //!
 //! - o adaptador da placa ([`Adaptador`]), que entrega cada quadro colhido
@@ -12,6 +12,7 @@
 //! - a tabela das conexões, com o dono de cada uma — ver [`super::conexoes`]
 //!   para a regra, que é de lá —, e a espera armada em cada uma — ver
 //!   [`super::espera`];
+//! - a associação UDP, que entra na mesma tabela — ver abaixo;
 //! - o fio `rede`, que faz a pilha andar.
 //!
 //! # Quem faz a pilha andar
@@ -27,6 +28,27 @@
 //! interrupção. E não o coletor: a passada dele grava a auditoria e
 //! compacta o journal, e um disco lento não pode atrasar um ACK.
 //!
+//! # A associação UDP
+//!
+//! Um destino `udp:` abre uma associação: um socket UDP do `smoltcp` numa
+//! porta local da mesma faixa das conexões, que só conversa com o destino
+//! decidido. Ela entra na mesma tabela, com o mesmo número, o mesmo dono,
+//! o mesmo teto e a mesma espera; o que muda é a unidade:
+//!
+//! - `net.send` manda **um** datagrama, inteiro ou nada, de no máximo
+//!   [`MAIOR_DATAGRAMA`] bytes: sem fragmentação, que a pilha não faz;
+//! - `net.recv` devolve **um** datagrama inteiro, ou nenhum. O que não cabe
+//!   no `max` de quem lê fica onde está, e a resposta diz o tamanho: um
+//!   datagrama não se corta, e cortá-lo seria perder o resto;
+//! - o socket UDP recebe de qualquer origem na porta dele. O que não veio
+//!   do destino da associação sai na volta da pilha em que chega à frente
+//!   da fila — antes de qualquer leitura ou espera, e sem esperar por uma —,
+//!   e é contado em [`Resumo::datagramas_alheios`]: a associação é uma
+//!   conversa com o destino que o gate decidiu, e nada de outro chega a quem
+//!   a abriu, nem fica ocupando a fila dela;
+//! - não há aperto nem fecho com o outro lado: o estado é `open` do começo
+//!   ao fim, e fechar tira o socket da pilha na hora, e com ele a porta.
+//!
 //! # A trava
 //!
 //! Uma só, [`PILHA`], tomada com as interrupções mascaradas — como as dos
@@ -40,13 +62,15 @@ use core::task::Waker;
 
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
-use smoltcp::socket::{dhcpv4, tcp};
+use smoltcp::socket::{dhcpv4, tcp, udp};
 use smoltcp::time::Instant;
-use smoltcp::wire::{EthernetAddress, HardwareAddress, IpCidr, Ipv4Address, Ipv4Cidr};
+use smoltcp::wire::{
+    EthernetAddress, HardwareAddress, IpAddress, IpCidr, IpEndpoint, Ipv4Address, Ipv4Cidr,
+};
 
 use crate::trava::Mutex;
 use crate::virtio::net::MAIOR_QUADRO;
-use politica::endereco::Destino;
+use politica::endereco::{Destino, Protocolo};
 
 use super::conexoes::Dono;
 use super::espera::Desfecho;
@@ -66,6 +90,16 @@ pub const BUFFER_DA_CONEXAO: usize = 4096;
 /// dinâmica. Cada conexão nova pega a seguinte, dando a volta no fim.
 const PRIMEIRA_PORTA: u16 = 49152;
 
+/// O maior datagrama de uma associação UDP: o quadro inteiro menos os
+/// cabeçalhos Ethernet (14 bytes), IPv4 (20) e UDP (8). A pilha não
+/// fragmenta, e um datagrama maior não sairia: é recusado no `net.send`,
+/// com o motivo, em vez de cortado ou perdido.
+pub const MAIOR_DATAGRAMA: usize = MAIOR_QUADRO - 14 - 20 - 8;
+
+/// Quantos datagramas esperam em cada sentido de uma associação UDP. O
+/// espaço deles é o mesmo [`BUFFER_DA_CONEXAO`] de uma conexão TCP.
+const DATAGRAMAS_DA_ASSOCIACAO: usize = 8;
+
 /// O estado de uma conexão, como o agente e o programa o leem.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Estado {
@@ -77,6 +111,9 @@ pub enum Estado {
     Fechando,
     /// Acabou: recusada, derrubada ou fechada dos dois lados.
     Fechada,
+    /// Uma associação UDP pronta: manda e recebe datagramas. Sem aperto e
+    /// sem fecho com o outro lado, é o estado dela do começo ao fim.
+    Aberta,
 }
 
 impl Estado {
@@ -86,6 +123,7 @@ impl Estado {
             Estado::Estabelecida => "established",
             Estado::Fechando => "closing",
             Estado::Fechada => "closed",
+            Estado::Aberta => "open",
         }
     }
 
@@ -97,6 +135,27 @@ impl Estado {
             _ => Estado::Fechando,
         }
     }
+
+    fn do_udp(s: &udp::Socket) -> Estado {
+        if s.is_open() {
+            Estado::Aberta
+        } else {
+            Estado::Fechada
+        }
+    }
+}
+
+/// O próximo datagrama de uma associação UDP, para quem o lê — ver
+/// [`espiar_datagrama`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Datagrama {
+    /// Nenhum chegou.
+    Nenhum,
+    /// O datagrama inteiro, que coube no máximo de quem lê.
+    Inteiro(Vec<u8>),
+    /// O datagrama não cabe no máximo de quem lê: o tamanho dele. Ele fica
+    /// na associação.
+    Grande(usize),
 }
 
 /// Uma conexão da tabela.
@@ -133,6 +192,9 @@ pub struct Resumo {
     pub conexoes: usize,
     /// Quantas conexões já foram abertas desde o boot.
     pub abertas: u64,
+    /// Quantos datagramas chegaram a uma associação UDP de outra origem que
+    /// não o destino dela, e foram descartados sem ninguém os ler.
+    pub datagramas_alheios: u64,
 }
 
 struct Pilha {
@@ -162,9 +224,17 @@ struct Pilha {
     /// O número da próxima espera armada. Cresce sem voltar, como o das
     /// conexões: uma espera que acabou não desarma a seguinte.
     proxima_espera: u64,
+    /// Ver [`Resumo::datagramas_alheios`].
+    datagramas_alheios: u64,
 }
 
 static PILHA: Mutex<Option<Pilha>> = Mutex::new(None);
+
+/// Só para a suíte: quadros que a placa "recebeu", entregues à pilha antes
+/// dos que ela colheu — ver [`injetar_de_teste`]. Tomada dentro de
+/// [`PILHA`], quando a pilha colhe; nunca o contrário.
+#[cfg(feature = "modo-teste")]
+static INJETADOS: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
 
 fn com_pilha<R>(f: impl FnOnce(&mut Pilha) -> R) -> Option<R> {
     crate::arch::sem_interrupcoes(|| PILHA.lock().as_mut().map(f))
@@ -219,6 +289,18 @@ impl Device for Adaptador {
 
     fn receive(&mut self, _agora: Instant) -> Option<(Recebido, Envio)> {
         let mut quadro = [0u8; MAIOR_QUADRO];
+        #[cfg(feature = "modo-teste")]
+        {
+            let injetado = {
+                let mut fila = INJETADOS.lock();
+                (!fila.is_empty()).then(|| fila.remove(0))
+            };
+            if let Some(injetado) = injetado {
+                let tamanho = injetado.len().min(MAIOR_QUADRO);
+                quadro[..tamanho].copy_from_slice(&injetado[..tamanho]);
+                return Some((Recebido { quadro, tamanho }, Envio));
+            }
+        }
         let tamanho = crate::virtio::net::com_a_placa(|placa| placa.receber(&mut quadro))??;
         if tamanho == 0 {
             return None;
@@ -288,6 +370,7 @@ pub fn iniciar() {
             proxima_porta: porta_inicial,
             abertas: 0,
             proxima_espera: 1,
+            datagramas_alheios: 0,
         });
     });
     match crate::fios::criar("rede", laco, 0) {
@@ -344,6 +427,12 @@ impl Pilha {
             }
             !acabou
         });
+        // O datagrama de outra origem sai na volta em que chegou, antes de a
+        // trava soltar: não espera uma leitura para sair, e não ocupa a fila
+        // que é do destino — ver `descartar_alheios`.
+        for i in 0..self.conexoes.len() {
+            self.descartar_alheios(i);
+        }
         let evento = self.sockets.get_mut::<dhcpv4::Socket>(self.dhcp).poll()?;
         match evento {
             dhcpv4::Event::Configured(c) => {
@@ -375,6 +464,93 @@ impl Pilha {
         }
     }
 
+    /// O estado da conexão `i`, pelo socket do protocolo dela.
+    fn estado(&self, i: usize) -> Estado {
+        let c = &self.conexoes[i];
+        match c.destino.protocolo {
+            Protocolo::Tcp => Estado::de(self.sockets.get::<tcp::Socket>(c.socket).state()),
+            Protocolo::Udp => Estado::do_udp(self.sockets.get::<udp::Socket>(c.socket)),
+        }
+    }
+
+    /// Descarta da frente da associação UDP `i` os datagramas que não
+    /// vieram do destino dela, e os conta. Numa conexão TCP, nada: o TCP só
+    /// aceita segmentos dos quatro números da conexão.
+    ///
+    /// Roda em toda volta da pilha, logo depois de ela receber — ver
+    /// [`Pilha::sondar`] —, e um datagrama só entra num socket dentro de uma
+    /// volta: quem lê ou espera vê a frente que a última volta deixou, e o
+    /// alheio não passa dela na fila. Descartado só na leitura, ele ficava
+    /// enquanto ninguém lia, e oito deles — a fila inteira, que o socket
+    /// recebe de qualquer origem — faziam o `smoltcp` jogar fora o
+    /// datagrama seguinte do destino. Só o que chegou atrás de um datagrama
+    /// do destino que ninguém leu ainda espera a vez: a fila só se tira pela
+    /// frente, e ele sai na volta em que chega a ela.
+    fn descartar_alheios(&mut self, i: usize) {
+        let c = &self.conexoes[i];
+        if c.destino.protocolo != Protocolo::Udp {
+            return;
+        }
+        let remoto = endpoint(&c.destino);
+        let socket = self.sockets.get_mut::<udp::Socket>(c.socket);
+        while let Ok((_, meta)) = socket.peek() {
+            if meta.endpoint == remoto {
+                break;
+            }
+            let _ = socket.recv();
+            self.datagramas_alheios += 1;
+        }
+    }
+
+    /// A conexão `i` tem o que ler: bytes, numa conexão TCP; um datagrama
+    /// do destino, numa associação UDP — o alheio da frente saiu na última
+    /// volta, ver [`Pilha::descartar_alheios`].
+    fn tem_o_que_ler(&self, i: usize) -> bool {
+        let c = &self.conexoes[i];
+        match c.destino.protocolo {
+            Protocolo::Tcp => self.sockets.get::<tcp::Socket>(c.socket).can_recv(),
+            Protocolo::Udp => self.sockets.get::<udp::Socket>(c.socket).can_recv(),
+        }
+    }
+
+    /// Deixa `waker` no socket da conexão `i`: o `smoltcp` o aciona no
+    /// próximo evento de leitura dela.
+    fn registrar_leitura(&mut self, i: usize, waker: &Waker) {
+        let c = &self.conexoes[i];
+        match c.destino.protocolo {
+            Protocolo::Tcp => self
+                .sockets
+                .get_mut::<tcp::Socket>(c.socket)
+                .register_recv_waker(waker),
+            Protocolo::Udp => self
+                .sockets
+                .get_mut::<udp::Socket>(c.socket)
+                .register_recv_waker(waker),
+        }
+    }
+
+    /// A próxima porta local da faixa, dando a volta no fim. Uma associação
+    /// UDP não divide a porta com outra viva: o socket UDP recebe pela
+    /// porta, e a segunda nunca ouviria nada.
+    fn porta_livre(&mut self, protocolo: Protocolo) -> u16 {
+        loop {
+            let porta = self.proxima_porta;
+            self.proxima_porta = if porta == u16::MAX {
+                PRIMEIRA_PORTA
+            } else {
+                porta + 1
+            };
+            let ocupada = protocolo == Protocolo::Udp
+                && self.conexoes.iter().any(|c| {
+                    c.destino.protocolo == Protocolo::Udp
+                        && self.sockets.get::<udp::Socket>(c.socket).endpoint().port == porta
+                });
+            if !ocupada {
+                return porta;
+            }
+        }
+    }
+
     fn achar(&self, id: u64, dono: &Dono) -> Result<usize, &'static str> {
         // Uma conexão de outro titular e uma que não existe respondem o
         // mesmo: quem pergunta não descobre o que é dos outros.
@@ -385,6 +561,14 @@ impl Pilha {
     }
 }
 
+/// O destino como o `smoltcp` o escreve.
+fn endpoint(destino: &Destino) -> IpEndpoint {
+    IpEndpoint::new(
+        IpAddress::Ipv4(Ipv4Address::from(destino.ip)),
+        destino.porta,
+    )
+}
+
 /// O destino da conexão `id`, se ela é de `dono`. É o que o gate decide
 /// num `net.send`, `net.recv` ou `net.close`.
 pub fn destino_de(id: u64, dono: &Dono) -> Result<Destino, &'static str> {
@@ -393,8 +577,9 @@ pub fn destino_de(id: u64, dono: &Dono) -> Result<Destino, &'static str> {
 }
 
 /// Abre uma conexão de `dono` para `destino`. Devolve o número dela e o
-/// estado — quase sempre `connecting`: o aperto de mão segue no fio da
-/// rede, e quem abriu acompanha por `net.recv`.
+/// estado — numa conexão TCP, quase sempre `connecting`: o aperto de mão
+/// segue no fio da rede, e quem abriu acompanha por `net.recv`; numa
+/// associação UDP, `open`.
 pub fn abrir(dono: Dono, destino: Destino) -> Result<(u64, Estado), &'static str> {
     let r = com_pilha(|p| {
         if p.endereco.is_none() {
@@ -408,27 +593,42 @@ pub fn abrir(dono: Dono, destino: Destino) -> Result<(u64, Estado), &'static str
         if do_dono >= CONEXOES_POR_DONO {
             return Err("este titular ja tem o maximo de conexoes abertas");
         }
-        let mut socket = tcp::Socket::new(
-            tcp::SocketBuffer::new(vec![0u8; BUFFER_DA_CONEXAO]),
-            tcp::SocketBuffer::new(vec![0u8; BUFFER_DA_CONEXAO]),
-        );
-        let porta = p.proxima_porta;
-        p.proxima_porta = if porta == u16::MAX {
-            PRIMEIRA_PORTA
-        } else {
-            porta + 1
+        let porta = p.porta_livre(destino.protocolo);
+        let socket = match destino.protocolo {
+            Protocolo::Tcp => {
+                let mut socket = tcp::Socket::new(
+                    tcp::SocketBuffer::new(vec![0u8; BUFFER_DA_CONEXAO]),
+                    tcp::SocketBuffer::new(vec![0u8; BUFFER_DA_CONEXAO]),
+                );
+                let remoto = (Ipv4Address::from(destino.ip), destino.porta);
+                socket
+                    .connect(p.iface.context(), remoto, porta)
+                    .map_err(|_| "o destino nao se disca")?;
+                p.sockets.add(socket)
+            }
+            Protocolo::Udp => {
+                let buffer = || {
+                    udp::PacketBuffer::new(
+                        vec![udp::PacketMetadata::EMPTY; DATAGRAMAS_DA_ASSOCIACAO],
+                        vec![0u8; BUFFER_DA_CONEXAO],
+                    )
+                };
+                let mut socket = udp::Socket::new(buffer(), buffer());
+                socket
+                    .bind(porta)
+                    .map_err(|_| "a porta local nao se liga")?;
+                p.sockets.add(socket)
+            }
         };
-        let remoto = (Ipv4Address::from(destino.ip), destino.porta);
-        socket
-            .connect(p.iface.context(), remoto, porta)
-            .map_err(|_| "o destino nao se disca")?;
-        let socket = p.sockets.add(socket);
         let id = p.proximo_id;
         p.proximo_id += 1;
         p.abertas += 1;
         // O SYN sai já, e não no próximo tique.
         let _ = p.sondar();
-        let estado = Estado::de(p.sockets.get::<tcp::Socket>(socket).state());
+        let estado = match destino.protocolo {
+            Protocolo::Tcp => Estado::de(p.sockets.get::<tcp::Socket>(socket).state()),
+            Protocolo::Udp => Estado::do_udp(p.sockets.get::<udp::Socket>(socket)),
+        };
         p.conexoes.push(Conexao {
             id,
             dono,
@@ -446,12 +646,35 @@ pub fn abrir(dono: Dono, destino: Destino) -> Result<(u64, Estado), &'static str
 
 /// Manda o que couber de `dados` na conexão. Devolve quantos bytes a
 /// conexão aceitou — menos que todos quando o buffer de saída está cheio —
-/// e o estado.
+/// e o estado. Numa associação UDP, `dados` é um datagrama: sai inteiro, ou
+/// não sai, com o motivo.
 pub fn mandar(id: u64, dono: &Dono, dados: &[u8]) -> Result<(usize, Estado), &'static str> {
     let r = com_pilha(|p| {
         let _ = p.sondar();
         let i = p.achar(id, dono)?;
         let h = p.conexoes[i].socket;
+        if p.conexoes[i].destino.protocolo == Protocolo::Udp {
+            if dados.len() > MAIOR_DATAGRAMA {
+                return Err("um datagrama tem no maximo 1472 bytes");
+            }
+            let remoto = endpoint(&p.conexoes[i].destino);
+            match p
+                .sockets
+                .get_mut::<udp::Socket>(h)
+                .send_slice(dados, remoto)
+            {
+                Ok(()) => {}
+                Err(udp::SendError::BufferFull) => {
+                    return Err("os datagramas de saida da associacao estao cheios");
+                }
+                Err(udp::SendError::Unaddressable) => return Err("o destino nao se alcanca"),
+            }
+            p.conexoes[i].enviados += dados.len() as u64;
+            let _ = p.sondar();
+            let estado = p.estado(i);
+            p.conexoes[i].relatado = estado;
+            return Ok((dados.len(), estado));
+        }
         let socket = p.sockets.get_mut::<tcp::Socket>(h);
         if !socket.may_send() {
             let estado = Estado::de(socket.state());
@@ -470,12 +693,16 @@ pub fn mandar(id: u64, dono: &Dono, dados: &[u8]) -> Result<(usize, Estado), &'s
     r.unwrap_or(Err("a pilha de rede nao esta no ar"))
 }
 
-/// O que chegou na conexão, até `maximo` bytes, sem tirá-lo dela: a
-/// decisão de quanto tirar é de quem lê — ver [`consumir`].
+/// O que chegou na conexão TCP, até `maximo` bytes, sem tirá-lo dela: a
+/// decisão de quanto tirar é de quem lê — ver [`consumir`]. Uma associação
+/// UDP se lê por [`espiar_datagrama`].
 pub fn espiar(id: u64, dono: &Dono, maximo: usize) -> Result<(Vec<u8>, Estado), &'static str> {
     let r = com_pilha(|p| {
         let _ = p.sondar();
         let i = p.achar(id, dono)?;
+        if p.conexoes[i].destino.protocolo != Protocolo::Tcp {
+            return Err("a conexao nao e TCP");
+        }
         let socket = p.sockets.get_mut::<tcp::Socket>(p.conexoes[i].socket);
         let mut dados = vec![0u8; maximo.min(BUFFER_DA_CONEXAO)];
         let n = if socket.can_recv() {
@@ -496,12 +723,68 @@ pub fn espiar(id: u64, dono: &Dono, maximo: usize) -> Result<(Vec<u8>, Estado), 
 pub fn consumir(id: u64, dono: &Dono, quantos: usize) -> Result<(), &'static str> {
     let r = com_pilha(|p| {
         let i = p.achar(id, dono)?;
+        if p.conexoes[i].destino.protocolo != Protocolo::Tcp {
+            return Err("a conexao nao e TCP");
+        }
         let socket = p.sockets.get_mut::<tcp::Socket>(p.conexoes[i].socket);
         let mut lixo = vec![0u8; quantos];
         let tirados = socket.recv_slice(&mut lixo).unwrap_or(0);
         p.conexoes[i].recebidos += tirados as u64;
         // A janela que abriu vai para o outro lado já.
         let _ = p.sondar();
+        Ok(())
+    });
+    r.unwrap_or(Err("a pilha de rede nao esta no ar"))
+}
+
+/// O próximo datagrama da associação UDP `id` de `dono`, sem tirá-lo dela
+/// — o de outra origem sai na volta que esta leitura dá antes: ver
+/// [`Pilha::descartar_alheios`]. Quem lê o entrega e então o tira, por
+/// [`consumir_datagrama`].
+pub fn espiar_datagrama(
+    id: u64,
+    dono: &Dono,
+    maximo: usize,
+) -> Result<(Datagrama, Estado), &'static str> {
+    let r = com_pilha(|p| {
+        let _ = p.sondar();
+        let i = p.achar(id, dono)?;
+        if p.conexoes[i].destino.protocolo != Protocolo::Udp {
+            return Err("a conexao nao e UDP");
+        }
+        let socket = p.sockets.get_mut::<udp::Socket>(p.conexoes[i].socket);
+        let datagrama = match socket.peek() {
+            Ok((dados, _)) if dados.len() <= maximo => Datagrama::Inteiro(dados.to_vec()),
+            Ok((dados, _)) => Datagrama::Grande(dados.len()),
+            Err(_) => Datagrama::Nenhum,
+        };
+        let estado = p.estado(i);
+        p.conexoes[i].relatado = estado;
+        Ok((datagrama, estado))
+    });
+    r.unwrap_or(Err("a pilha de rede nao esta no ar"))
+}
+
+/// Tira da associação UDP o datagrama que [`espiar_datagrama`] mostrou e
+/// quem leu entregou — se é ele ainda na frente: do destino, com
+/// `tamanho` bytes. Se não é, nada sai. A origem conta: o alheio que chegou
+/// atrás de um datagrama do destino fica na frente quando este sai, até a
+/// volta seguinte da pilha — ver [`Pilha::descartar_alheios`].
+pub fn consumir_datagrama(id: u64, dono: &Dono, tamanho: usize) -> Result<(), &'static str> {
+    let r = com_pilha(|p| {
+        let i = p.achar(id, dono)?;
+        if p.conexoes[i].destino.protocolo != Protocolo::Udp {
+            return Err("a conexao nao e UDP");
+        }
+        let remoto = endpoint(&p.conexoes[i].destino);
+        let socket = p.sockets.get_mut::<udp::Socket>(p.conexoes[i].socket);
+        match socket.peek() {
+            Ok((dados, meta)) if dados.len() == tamanho && meta.endpoint == remoto => {
+                let _ = socket.recv();
+            }
+            _ => return Err("o datagrama entregue nao e mais o primeiro da associacao"),
+        }
+        p.conexoes[i].recebidos += tamanho as u64;
         Ok(())
     });
     r.unwrap_or(Err("a pilha de rede nao esta no ar"))
@@ -518,11 +801,13 @@ pub fn armar(id: u64, dono: &Dono) -> Result<Option<(u64, Estado)>, &'static str
         // O que chegou até agora conta: a espera é pelo que ainda não veio.
         let _ = p.sondar();
         let i = p.achar(id, dono)?;
-        let socket = p.sockets.get::<tcp::Socket>(p.conexoes[i].socket);
-        let estado = Estado::de(socket.state());
-        if socket.can_recv()
+        let estado = p.estado(i);
+        if p.tem_o_que_ler(i)
             || estado != p.conexoes[i].relatado
-            || !matches!(estado, Estado::Conectando | Estado::Estabelecida)
+            || !matches!(
+                estado,
+                Estado::Conectando | Estado::Estabelecida | Estado::Aberta
+            )
         {
             return Ok(None);
         }
@@ -540,7 +825,9 @@ pub fn armar(id: u64, dono: &Dono) -> Result<Option<(u64, Estado)>, &'static str
 /// A espera `numero`, armada na conexão `id` de `dono` com o estado
 /// `estado`, acabou? `None` se não — e então `waker`, se veio um, fica no
 /// socket: o `smoltcp` o aciona no próximo dado que entrar, na próxima
-/// mudança de estado, e no fecho ou na derrubada.
+/// mudança de estado, e no fecho ou na derrubada. Numa associação UDP, no
+/// próximo datagrama — de qualquer origem: o de outra sai na volta em que
+/// chegou, a conferência não acha nada, e a espera continua.
 ///
 /// Só confere: não sonda a pilha. Quem a faz andar é o fio `rede` e quem
 /// pede algo a ela, e é na volta deles que o evento acontece — e acorda.
@@ -558,15 +845,18 @@ pub fn conferir_espera(
         if p.conexoes[i].espera != Some(numero) {
             return Some(Desfecho::Sumiu);
         }
-        let socket = p.sockets.get_mut::<tcp::Socket>(p.conexoes[i].socket);
-        if socket.can_recv() {
+        // Um datagrama de outra origem acorda o waker e não acaba a espera:
+        // a volta em que ele chegou já o tirou da fila, e o waker volta ao
+        // socket. A fila estava vazia quando a espera armou, e só uma volta
+        // a muda enquanto ela dura: a frente que se vê aqui é do destino.
+        if p.tem_o_que_ler(i) {
             return Some(Desfecho::Chegou);
         }
-        if Estado::de(socket.state()) != estado {
+        if p.estado(i) != estado {
             return Some(Desfecho::Mudou);
         }
         if let Some(w) = waker {
-            socket.register_recv_waker(w);
+            p.registrar_leitura(i, w);
         }
         None
     })
@@ -575,12 +865,15 @@ pub fn conferir_espera(
 
 /// Só para a suíte: derruba o socket da conexão `id` como um `RST` do outro
 /// lado o derrubaria — a conexão fica na tabela, fechada, até o dono a
-/// fechar.
+/// fechar. Numa associação UDP, desliga o socket da porta.
 #[cfg(feature = "modo-teste")]
 pub fn abortar_de_teste(id: u64) {
     let _ = com_pilha(|p| {
         if let Some(c) = p.conexoes.iter().find(|c| c.id == id) {
-            p.sockets.get_mut::<tcp::Socket>(c.socket).abort();
+            match c.destino.protocolo {
+                Protocolo::Tcp => p.sockets.get_mut::<tcp::Socket>(c.socket).abort(),
+                Protocolo::Udp => p.sockets.get_mut::<udp::Socket>(c.socket).close(),
+            }
         }
         let _ = p.sondar();
     });
@@ -594,16 +887,69 @@ pub fn estado_de_teste(id: u64) -> Option<Estado> {
         let _ = p.sondar();
         p.conexoes
             .iter()
-            .find(|c| c.id == id)
-            .map(|c| Estado::de(p.sockets.get::<tcp::Socket>(c.socket).state()))
+            .position(|c| c.id == id)
+            .map(|i| p.estado(i))
     })
     .flatten()
+}
+
+/// Só para a suíte: entrega `quadro` à pilha como se a placa o tivesse
+/// recebido, e a faz andar. É como a suíte faz chegar um datagrama de uma
+/// origem que a bancada não tem — outra porta, outro endereço.
+#[cfg(feature = "modo-teste")]
+pub fn injetar_de_teste(quadro: &[u8]) {
+    crate::arch::sem_interrupcoes(|| INJETADOS.lock().push(quadro.to_vec()));
+    sondar();
+}
+
+/// Só para a suíte: a porta local da conexão `id`, de quem for.
+#[cfg(feature = "modo-teste")]
+pub fn porta_local_de_teste(id: u64) -> Option<u16> {
+    com_pilha(|p| {
+        let c = p.conexoes.iter().find(|c| c.id == id)?;
+        Some(match c.destino.protocolo {
+            Protocolo::Tcp => {
+                p.sockets
+                    .get::<tcp::Socket>(c.socket)
+                    .local_endpoint()?
+                    .port
+            }
+            Protocolo::Udp => p.sockets.get::<udp::Socket>(c.socket).endpoint().port,
+        })
+    })
+    .flatten()
+}
+
+/// Só para a suíte: a próxima porta local que uma conexão nova pede.
+#[cfg(feature = "modo-teste")]
+pub fn proxima_porta_de_teste(porta: u16) {
+    let _ = com_pilha(|p| p.proxima_porta = porta);
 }
 
 /// Só para a suíte: a conexão `id`, de quem for, tem uma espera armada?
 #[cfg(feature = "modo-teste")]
 pub fn espera_armada_de_teste(id: u64) -> bool {
     com_pilha(|p| p.conexoes.iter().any(|c| c.id == id && c.espera.is_some())).unwrap_or(false)
+}
+
+/// Só para a suíte: quantos sockets a pilha guarda sem que sejam de ninguém
+/// — nem o do DHCP, nem o de uma conexão da tabela, nem o de um fecho que
+/// ainda termina. Um socket que sobra é memória que não volta e, num socket
+/// UDP, uma porta que continua ouvindo: o `smoltcp` entrega o datagrama ao
+/// primeiro socket ligado à porta, e esse pode ser o que sobrou.
+#[cfg(feature = "modo-teste")]
+pub fn sockets_soltos_de_teste() -> usize {
+    com_pilha(|p| {
+        p.sockets
+            .iter()
+            .filter(|(h, _)| {
+                *h != p.dhcp
+                    && !p.conexoes.iter().any(|c| c.socket == *h)
+                    && !p.fechando.iter().any(|(f, _)| f == h)
+            })
+            .count()
+    })
+    .unwrap_or(0)
 }
 
 /// Desarma a espera `numero` da conexão `id` de `dono`, se ainda é ela a
@@ -619,13 +965,22 @@ pub fn desarmar(id: u64, dono: &Dono, numero: u64) {
 }
 
 /// Fecha a conexão: o número deixa de valer na hora, e o fecho com o outro
-/// lado termina no fio da rede.
+/// lado termina no fio da rede. Uma associação UDP não tem fecho: o socket
+/// sai na hora.
 pub fn fechar(id: u64, dono: &Dono) -> Result<(), &'static str> {
     let r = com_pilha(|p| {
         let i = p.achar(id, dono)?;
         let c = p.conexoes.remove(i);
-        p.sockets.get_mut::<tcp::Socket>(c.socket).close();
-        p.fechando.push((c.socket, c.dono));
+        match c.destino.protocolo {
+            Protocolo::Tcp => {
+                p.sockets.get_mut::<tcp::Socket>(c.socket).close();
+                p.fechando.push((c.socket, c.dono));
+            }
+            // Sem fecho com o outro lado: a porta se solta na hora.
+            Protocolo::Udp => {
+                p.sockets.remove(c.socket);
+            }
+        }
         let _ = p.sondar();
         Ok(())
     });
@@ -650,8 +1005,15 @@ pub fn derrubar(ids: &[u64]) -> usize {
         let mut n = 0;
         p.conexoes.retain(|c| {
             if ids.contains(&c.id) {
-                p.sockets.get_mut::<tcp::Socket>(c.socket).abort();
-                p.fechando.push((c.socket, c.dono));
+                match c.destino.protocolo {
+                    Protocolo::Tcp => {
+                        p.sockets.get_mut::<tcp::Socket>(c.socket).abort();
+                        p.fechando.push((c.socket, c.dono));
+                    }
+                    Protocolo::Udp => {
+                        p.sockets.remove(c.socket);
+                    }
+                }
                 n += 1;
                 false
             } else {
@@ -671,6 +1033,7 @@ pub fn resumo() -> Option<Resumo> {
         roteador: p.roteador.map(|r| r.octets()),
         conexoes: p.conexoes.len(),
         abertas: p.abertas,
+        datagramas_alheios: p.datagramas_alheios,
     })
 }
 
@@ -683,4 +1046,10 @@ pub fn resumo() -> Option<Resumo> {
 /// há outro núcleo em execução. Ver [`crate::traps::fatal`].
 pub unsafe fn destravar() {
     unsafe { PILHA.force_unlock() };
+    #[cfg(feature = "modo-teste")]
+    // SAFETY: a mesma de cima — o kernel está em falha e nenhum outro
+    // núcleo roda.
+    unsafe {
+        INJETADOS.force_unlock()
+    };
 }

@@ -3,10 +3,13 @@
 //! # A regra
 //!
 //! Um programa não abre um socket: pede uma conexão ao registro —
-//! `net.connect`, com o destino `tcp:<ipv4>:<porta>` —, pelo mesmo gate,
-//! e o destino é o recurso que a política decide. O alcance de cada papel
-//! é uma lista enumerada de destinos (ver `politica::endereco`); nada de
-//! curinga, nem para o sistema.
+//! `net.connect`, com o destino `tcp:<ipv4>:<porta>` ou
+//! `udp:<ipv4>:<porta>` —, pelo mesmo gate, e o destino é o recurso que a
+//! política decide. O alcance de cada papel é uma lista enumerada de
+//! destinos (ver `politica::endereco`); nada de curinga, nem para o
+//! sistema. Uma associação UDP é uma conexão como as outras para tudo o que
+//! este módulo diz — dono, decisão a cada uso, derrubada quando o dono
+//! acaba —; o que muda é a unidade, o datagrama (ver `super::pilha`).
 //!
 //! Usar a conexão — `net.send`, `net.recv`, `net.close` — **também** passa
 //! pelo gate, com a mesma permissão e o mesmo destino como recurso: o gate

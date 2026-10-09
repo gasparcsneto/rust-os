@@ -41,8 +41,9 @@ pub enum Permissao {
     /// Mandar um pacote pela rede.
     NetSend,
     /// Abrir uma conexão de saída e usá-la — mandar, receber, fechar. O
-    /// recurso é o destino, `tcp:<ipv4>:<porta>`, e o alcance de cada papel
-    /// é enumerado: cada destino escrito por inteiro.
+    /// recurso é o destino, `tcp:<ipv4>:<porta>` ou `udp:<ipv4>:<porta>`, e
+    /// o alcance de cada papel é enumerado: cada destino escrito por
+    /// inteiro, com o protocolo.
     NetConnect,
     /// Ler o que a pessoa digitou.
     KeyboardRead,
@@ -245,9 +246,9 @@ impl Permissao {
     }
 
     /// O recurso desta permissão é um destino de rede —
-    /// `tcp:<ipv4>:<porta>` —, e um papel o limita a uma lista enumerada de
-    /// destinos, cada um escrito por inteiro. Sem curinga, sem faixa: ver
-    /// [`crate::endereco`].
+    /// `tcp:<ipv4>:<porta>` ou `udp:<ipv4>:<porta>` —, e um papel o limita a
+    /// uma lista enumerada de destinos, cada um escrito por inteiro, com o
+    /// protocolo. Sem curinga, sem faixa: ver [`crate::endereco`].
     pub const fn recurso_e_endereco(self) -> bool {
         matches!(self, Permissao::NetConnect)
     }

@@ -30180,6 +30180,38 @@ static CASOS: &[Caso] = &[
         f: rede_o_console_espera_e_segura_a_entrada,
     },
     Caso {
+        nome: "rede: o datagrama vai e volta inteiro",
+        f: rede_o_datagrama_vai_e_volta_inteiro,
+    },
+    Caso {
+        nome: "rede: o datagrama nao se corta",
+        f: rede_o_datagrama_nao_se_corta,
+    },
+    Caso {
+        nome: "rede: o datagrama de outra origem nao chega",
+        f: rede_o_datagrama_de_outra_origem_nao_chega,
+    },
+    Caso {
+        nome: "rede: a associacao tem a sua porta",
+        f: rede_a_associacao_tem_a_sua_porta,
+    },
+    Caso {
+        nome: "rede: o teto conta as associacoes",
+        f: rede_o_teto_conta_as_associacoes,
+    },
+    Caso {
+        nome: "rede: a associacao de quem acabou e derrubada",
+        f: rede_a_associacao_de_quem_acabou_e_derrubada,
+    },
+    Caso {
+        nome: "rede: varios fios trocam datagramas ao mesmo tempo",
+        f: rede_varios_fios_trocam_datagramas_ao_mesmo_tempo,
+    },
+    Caso {
+        nome: "rede: a fila cheia recusa o datagrama",
+        f: rede_a_fila_cheia_recusa_o_datagrama,
+    },
+    Caso {
         nome: "rede: o programa disca pelo gate",
         f: rede_o_programa_disca_pelo_gate,
     },
@@ -30935,6 +30967,9 @@ fn rede_o_destino_e_o_recurso() -> Resultado {
     crate::pessoas::esquecer_registradas();
     let resultado = (|| -> Resultado {
         let sistema = sistema_aqui();
+        // O protocolo é parte do destino: o TFTP, que é UDP, não se disca
+        // como TCP; nem outra porta, nem outro endereço, nem a mesma coisa
+        // escrita de outro jeito.
         for fora in [
             "tcp:10.0.2.100:8",
             "tcp:10.0.2.2:7",
@@ -30942,6 +30977,11 @@ fn rede_o_destino_e_o_recurso() -> Resultado {
             "tcp:10.0.2.100:07",
             "udp:10.0.2.100:7",
             "10.0.2.100:7",
+            "tcp:10.0.2.2:69",
+            "udp:10.0.2.2:70",
+            "udp:10.0.2.99:69",
+            "udp:10.0.2.2:069",
+            "UDP:10.0.2.2:69",
         ] {
             let r = fs_pedir(
                 sistema,
@@ -32240,6 +32280,829 @@ fn rede_o_console_espera_e_segura_a_entrada() -> Resultado {
     resultado
 }
 
+// ---------------------------------------------------------------------------
+// O datagrama: a associação UDP
+// ---------------------------------------------------------------------------
+
+/// O TFTP do próprio emulador: o destino UDP da bancada, que a política de
+/// desenvolvimento enumera — ver `diretorio_do_tftp`, no `xtask`.
+const TFTP: &str = "udp:10.0.2.2:69";
+
+/// O arquivo que o TFTP da bancada serve, como o `xtask` o escreve:
+/// quarenta linhas de dezesseis bytes — 512 no primeiro bloco, 128 no
+/// segundo.
+fn arquivo_do_tftp() -> alloc::vec::Vec<u8> {
+    (0..40)
+        .flat_map(|i| alloc::format!("bancada udp {i:03}\n").into_bytes())
+        .collect()
+}
+
+/// Um pedido de leitura TFTP de `arquivo`, no modo binário, como o texto
+/// de um `content`: o código 1, o nome e o modo, cada um terminado em zero.
+fn pedido_de_leitura(arquivo: &str) -> alloc::string::String {
+    alloc::format!("\\u0000\\u0001{arquivo}\\u0000octet\\u0000")
+}
+
+/// A confirmação TFTP do bloco `bloco`: o código 4 e o número.
+fn confirmacao(bloco: u16) -> alloc::string::String {
+    let [a, b] = bloco.to_be_bytes();
+    alloc::format!("\\u0000\\u0004\\u{a:04x}\\u{b:04x}")
+}
+
+/// Manda `conteudo` — texto de JSON, com escapes — como um datagrama da
+/// associação `conexao` de `quem`. Devolve a resposta.
+fn mandar_datagrama(
+    quem: crate::autorizacao::Chamador,
+    conexao: u64,
+    conteudo: &str,
+) -> alloc::string::String {
+    fs_pedir(
+        quem,
+        "net.send",
+        &alloc::format!(r#"{{"connection":{conexao},"content":"{conteudo}"}}"#),
+    )
+}
+
+/// Os bytes do conteúdo de uma resposta de `net.recv`, em texto ou em
+/// base64.
+fn conteudo_lido(r: &str) -> Option<alloc::vec::Vec<u8>> {
+    match fs_texto(r, "encoding").as_deref()? {
+        "utf-8" => {
+            let mut claro = alloc::vec![0u8; 8192];
+            let t = Json(r.as_bytes())
+                .member("result")?
+                .member("content")?
+                .desescapar_em(&mut claro)?;
+            Some(t.as_bytes().to_vec())
+        }
+        "base64" => de_base64(&fs_texto(r, "content")?),
+        _ => None,
+    }
+}
+
+/// O próximo datagrama da associação `conexao` de `quem`, esperado até
+/// chegar: os bytes dele — conferido que a resposta diz o tamanho em
+/// `datagram` e o entregou inteiro.
+fn datagrama_de(
+    quem: crate::autorizacao::Chamador,
+    conexao: u64,
+) -> Result<alloc::vec::Vec<u8>, &'static str> {
+    let mut lido = None;
+    esperar_cedendo(
+        || {
+            let r = fs_pedir(
+                quem,
+                "net.recv",
+                &alloc::format!(r#"{{"connection":{conexao}}}"#),
+            );
+            let Some(tamanho) = fs_numero(&r, "datagram") else {
+                return false;
+            };
+            lido = Some(match conteudo_lido(&r) {
+                Some(b)
+                    if b.len() as u64 == tamanho && fs_numero(&r, "returned") == Some(tamanho) =>
+                {
+                    Ok(b)
+                }
+                _ => {
+                    crate::log_error!("teste", "net.recv: {}", r);
+                    Err("o datagrama nao veio inteiro, ou veio com outro tamanho")
+                }
+            });
+            true
+        },
+        600,
+    )
+    .map_err(|_| "nenhum datagrama chegou")?;
+    lido.unwrap_or(Err("nenhum datagrama chegou"))
+}
+
+/// Um quadro Ethernet com um datagrama UDP de `origem:porta_de_origem` para
+/// a porta `porta` deste hóspede — o que a suíte injeta na pilha para fazer
+/// chegar o que a bancada não manda. O endereço de placa de origem é
+/// inventado: a pilha só aprende vizinhos pelo ARP.
+fn quadro_udp(
+    origem: [u8; 4],
+    porta_de_origem: u16,
+    porta: u16,
+    dados: &[u8],
+) -> alloc::vec::Vec<u8> {
+    use smoltcp::phy::ChecksumCapabilities;
+    use smoltcp::wire::{
+        EthernetAddress, EthernetFrame, EthernetProtocol, EthernetRepr, IpAddress, IpProtocol,
+        Ipv4Address, Ipv4Packet, Ipv4Repr, UdpPacket, UdpRepr,
+    };
+    let mac = crate::virtio::net::com_a_placa(|placa| placa.mac())
+        .flatten()
+        .unwrap_or([0; 6]);
+    let udp = UdpRepr {
+        src_port: porta_de_origem,
+        dst_port: porta,
+    };
+    let ip = Ipv4Repr {
+        src_addr: Ipv4Address::from(origem),
+        dst_addr: Ipv4Address::from(NOSSO_IP),
+        next_header: IpProtocol::Udp,
+        payload_len: udp.header_len() + dados.len(),
+        hop_limit: 64,
+    };
+    let eth = EthernetRepr {
+        src_addr: EthernetAddress([0x02, 0, 0, 0, 0, 0x63]),
+        dst_addr: EthernetAddress(mac),
+        ethertype: EthernetProtocol::Ipv4,
+    };
+    let mut quadro = alloc::vec![0u8; eth.buffer_len() + ip.buffer_len() + ip.payload_len];
+    let mut frame = EthernetFrame::new_unchecked(&mut quadro[..]);
+    eth.emit(&mut frame);
+    let mut pacote = Ipv4Packet::new_unchecked(frame.payload_mut());
+    ip.emit(&mut pacote, &ChecksumCapabilities::default());
+    let mut segmento = UdpPacket::new_unchecked(pacote.payload_mut());
+    udp.emit(
+        &mut segmento,
+        &IpAddress::Ipv4(ip.src_addr),
+        &IpAddress::Ipv4(ip.dst_addr),
+        dados.len(),
+        |b| b.copy_from_slice(dados),
+        &ChecksumCapabilities::default(),
+    );
+    quadro
+}
+
+/// Quantos `net.recv` em `destino` foram decididos depois do registro
+/// `desde`.
+fn leituras_de_desde(destino: &str, desde: u64) -> usize {
+    crate::autorizacao::com_auditoria(|c| {
+        c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+            .filter(|r| {
+                r.seq > desde && r.evento.metodo == "net.recv" && r.evento.recurso == destino
+            })
+            .count()
+    })
+    .unwrap_or(0)
+}
+
+/// Uma associação UDP com o TFTP do emulador: abre em `open`, o pedido de
+/// leitura sai inteiro, e cada bloco volta num datagrama inteiro — o
+/// primeiro com os 512 bytes do começo do arquivo, o segundo com o resto
+/// —, só para quem a abriu. Cada uso vai para a auditoria com o destino
+/// UDP; fechada, o número deixa de valer.
+fn rede_o_datagrama_vai_e_volta_inteiro() -> Resultado {
+    crate::pessoas::esquecer_registradas();
+    let quem = sistema_aqui();
+    let aberta = fs_pedir(quem, "net.connect", &alloc::format!(r#"{{"to":"{TFTP}"}}"#));
+    let conexao = conexao_aberta(&aberta)?;
+    let resultado = (|| -> Resultado {
+        if fs_texto(&aberta, "state").as_deref() != Some("open") {
+            crate::log_error!("teste", "{}", aberta);
+            return Err("a associacao UDP nao abriu em open");
+        }
+        let r = mandar_datagrama(quem, conexao, &pedido_de_leitura("bancada.txt"));
+        if fs_numero(&r, "sent") != Some(20) {
+            crate::log_error!("teste", "net.send: {}", r);
+            return Err("o pedido de leitura nao saiu inteiro");
+        }
+        let arquivo = arquivo_do_tftp();
+        let um = datagrama_de(quem, conexao)?;
+        if um.len() != 516 || um[..4] != [0, 3, 0, 1] || um[4..] != arquivo[..512] {
+            crate::log_error!(
+                "teste",
+                "bloco 1: {} bytes, {:?}",
+                um.len(),
+                &um[..um.len().min(8)]
+            );
+            return Err("o primeiro bloco nao veio inteiro num datagrama");
+        }
+        // Outro titular não lê a associação: o mesmo `DENY_RESOURCE` de um
+        // número que não existe.
+        let outra = titular_novo_na_rede(60, "rede-udp-outra");
+        let r = fs_pedir(
+            outra,
+            "net.recv",
+            &alloc::format!(r#"{{"connection":{conexao}}}"#),
+        );
+        if decisao_do_envelope(&r) != "DENY_RESOURCE" {
+            crate::log_error!("teste", "{}", r);
+            return Err("outro titular leu a associacao");
+        }
+        let r = mandar_datagrama(quem, conexao, &confirmacao(1));
+        if fs_numero(&r, "sent") != Some(4) {
+            crate::log_error!("teste", "net.send: {}", r);
+            return Err("a confirmacao do primeiro bloco nao saiu");
+        }
+        let dois = datagrama_de(quem, conexao)?;
+        if dois.len() != 132 || dois[..4] != [0, 3, 0, 2] || dois[4..] != arquivo[512..] {
+            crate::log_error!("teste", "bloco 2: {} bytes", dois.len());
+            return Err("o segundo bloco nao veio inteiro num datagrama");
+        }
+        let _ = mandar_datagrama(quem, conexao, &confirmacao(2));
+        let usou = ultimo_que(|e| e.metodo == "net.recv" && e.recurso == TFTP)
+            .ok_or("o uso da associacao nao foi gravado com o destino")?;
+        if usou.codigo != politica::Codigo::Allow {
+            return Err("o uso da associacao foi gravado com outro codigo");
+        }
+        Ok(())
+    })();
+    fechar_conexao(quem, conexao);
+    crate::pessoas::esquecer_registradas();
+    resultado?;
+    let r = fs_pedir(
+        quem,
+        "net.recv",
+        &alloc::format!(r#"{{"connection":{conexao}}}"#),
+    );
+    if decisao_do_envelope(&r) != "DENY_RESOURCE" {
+        crate::log_error!("teste", "{}", r);
+        return Err("a associacao fechada ainda respondeu");
+    }
+    Ok(())
+}
+
+/// Um datagrama não se corta, nem se junta a outro: o maior que cabe num
+/// quadro sai inteiro, um byte a mais é recusado com o motivo; o que não
+/// cabe no `max` de quem lê fica, com o tamanho dito; e dois que chegaram
+/// juntos saem um de cada vez.
+fn rede_o_datagrama_nao_se_corta() -> Resultado {
+    let quem = sistema_aqui();
+    let conexao = conexao_aberta(&fs_pedir(
+        quem,
+        "net.connect",
+        &alloc::format!(r#"{{"to":"{TFTP}"}}"#),
+    ))?;
+    let resultado = (|| -> Resultado {
+        // O teto escrito aqui, e não a constante da pilha: o quadro de 1514
+        // bytes menos 14 da Ethernet, 20 do IPv4 e 8 do UDP. Uma constante
+        // errada passaria por um caso que a lesse.
+        const TETO: usize = 1472;
+        let grande = "x".repeat(TETO + 1);
+        let r = mandar_datagrama(quem, conexao, &grande);
+        if fs_numero(&r, "sent").is_some() || !r.contains("1472") {
+            crate::log_error!("teste", "net.send: {}", r);
+            return Err("um datagrama maior que o teto saiu, ou foi recusado sem o motivo");
+        }
+        // No teto, sai inteiro, e a resposta prova: um pedido de leitura
+        // completado até o teto com uma opção que o TFTP não conhece — e
+        // ignora —, terminada em zero. Cortado, perderia o zero do fim, e o
+        // TFTP o recusaria; perdido, não teria resposta.
+        let pedido = pedido_de_leitura("bancada.txt");
+        let enchimento = TETO - 20 - "x\0".len() - 1;
+        let r = mandar_datagrama(
+            quem,
+            conexao,
+            &alloc::format!("{pedido}x\\u0000{}\\u0000", "a".repeat(enchimento)),
+        );
+        if fs_numero(&r, "sent") != Some(TETO as u64) {
+            crate::log_error!("teste", "net.send: {}", r);
+            return Err("o maior datagrama nao saiu inteiro");
+        }
+        let bloco = datagrama_de(quem, conexao)?;
+        if bloco.len() != 516 || bloco[..4] != [0, 3, 0, 1] {
+            crate::log_error!(
+                "teste",
+                "resposta ao maior: {} bytes, {:?}",
+                bloco.len(),
+                &bloco[..bloco.len().min(8)]
+            );
+            return Err("o maior datagrama nao chegou inteiro ao TFTP");
+        }
+        // Dois pedidos de leitura: dois primeiros blocos, dois datagramas.
+        for _ in 0..2 {
+            let r = mandar_datagrama(quem, conexao, &pedido_de_leitura("bancada.txt"));
+            if fs_numero(&r, "sent") != Some(20) {
+                crate::log_error!("teste", "net.send: {}", r);
+                return Err("um pedido de leitura nao saiu");
+            }
+        }
+        // O que não cabe em `max` não se corta: a resposta diz o tamanho e
+        // o deixa onde está.
+        let mut pequeno = alloc::string::String::new();
+        esperar_cedendo(
+            || {
+                pequeno = fs_pedir(
+                    quem,
+                    "net.recv",
+                    &alloc::format!(r#"{{"connection":{conexao},"max":100}}"#),
+                );
+                fs_numero(&pequeno, "datagram").is_some()
+            },
+            600,
+        )
+        .map_err(|_| "o bloco pedido nao chegou")?;
+        if fs_numero(&pequeno, "datagram") != Some(516)
+            || fs_numero(&pequeno, "returned") != Some(0)
+            || fs_texto(&pequeno, "error").is_none()
+        {
+            crate::log_error!("teste", "net.recv max 100: {}", pequeno);
+            return Err("o datagrama maior que max foi cortado, ou nao disse o tamanho");
+        }
+        // Quem tira só tira o datagrama que foi entregue: com outro tamanho,
+        // nada sai.
+        let dono = crate::rede::conexoes::Dono::Processo(crate::fios::id_atual());
+        if crate::rede::pilha::consumir_datagrama(conexao, &dono, 515).is_ok() {
+            return Err("tirou da associacao um datagrama que nao foi o entregue");
+        }
+        // Espera o segundo chegar, para os dois estarem lá juntos.
+        let _ = esperar_cedendo(|| false, 30);
+        let um = datagrama_de(quem, conexao)?;
+        let dois = datagrama_de(quem, conexao)?;
+        if um.len() != 516
+            || dois.len() != 516
+            || um[..4] != [0, 3, 0, 1]
+            || dois[..4] != [0, 3, 0, 1]
+        {
+            crate::log_error!("teste", "{} e {} bytes", um.len(), dois.len());
+            return Err("dois datagramas sairam juntos, ou cortados");
+        }
+        Ok(())
+    })();
+    fechar_conexao(quem, conexao);
+    resultado
+}
+
+/// A associação só conversa com o destino decidido: um datagrama de outra
+/// porta do mesmo endereço, ou de outro endereço na mesma porta, não chega a
+/// quem lê nem acaba a espera dele — é descartado e contado —, e o do
+/// destino acaba. A entrega é decidida de novo, como a de uma conexão TCP.
+/// O alheio sai na volta da pilha em que chega à frente, e não ocupa a fila
+/// do destino até alguém ler; o que chegou atrás de um datagrama do destino
+/// não lido espera a vez, e não é tirado como se fosse ele. E o bloco que o
+/// TFTP de verdade manda acorda a espera pelo evento.
+fn rede_o_datagrama_de_outra_origem_nao_chega() -> Resultado {
+    use crate::rede::espera::Desfecho;
+    let quem = sistema_aqui();
+    let conexao = conexao_aberta(&fs_pedir(
+        quem,
+        "net.connect",
+        &alloc::format!(r#"{{"to":"{TFTP}"}}"#),
+    ))?;
+    let alheios = || crate::rede::pilha::resumo().map_or(0, |r| r.datagramas_alheios);
+    let resultado = (|| -> Resultado {
+        let porta = crate::rede::pilha::porta_local_de_teste(conexao)
+            .ok_or("a associacao nao tem porta local")?;
+        let antes = alheios();
+        let desde = seq_da_auditoria();
+        let espera = leitura_suspensa(quem, conexao, 5000).map_err(|r| {
+            crate::log_error!("teste", "{}", r);
+            "a leitura da associacao vazia nao suspendeu"
+        })?;
+        let (acordado, waker) = Acordado::novo();
+        if espera.conferir(Some(&waker)).is_some() {
+            return Err("a espera acabou sem nada chegar");
+        }
+        crate::rede::pilha::injetar_de_teste(&quadro_udp(
+            IP_DO_ROTEADOR,
+            70,
+            porta,
+            b"de outra porta",
+        ));
+        crate::rede::pilha::injetar_de_teste(&quadro_udp(
+            [10, 0, 2, 99],
+            69,
+            porta,
+            b"de outro endereco",
+        ));
+        // O socket não sabe de origem: o alheio aciona o waker, e a
+        // conferência o descarta — a espera continua.
+        if acordado.vezes() == 0 {
+            return Err("o datagrama injetado nem chegou ao socket");
+        }
+        if espera.conferir(Some(&waker)).is_some() {
+            return Err("um datagrama de outra origem acabou a espera");
+        }
+        if alheios() != antes + 2 {
+            crate::log_error!("teste", "alheios: {} -> {}", antes, alheios());
+            return Err("os datagramas de outra origem nao foram descartados e contados");
+        }
+        crate::rede::pilha::injetar_de_teste(&quadro_udp(IP_DO_ROTEADOR, 69, porta, b"do destino"));
+        if espera.conferir(None) != Some(Desfecho::Chegou) {
+            return Err("o datagrama do destino nao acabou a espera");
+        }
+        drop(espera);
+        if datagrama_de(quem, conexao)? != b"do destino" {
+            return Err("chegou a quem le outra coisa que o datagrama do destino");
+        }
+        if leituras_de_desde(TFTP, desde) != 2 {
+            crate::log_error!("teste", "{} leituras", leituras_de_desde(TFTP, desde));
+            return Err("a leitura que esperou nao custou a decisao que suspendeu e a da entrega");
+        }
+        // Com um datagrama do destino já na associação, a leitura não
+        // espera: entrega.
+        crate::rede::pilha::injetar_de_teste(&quadro_udp(IP_DO_ROTEADOR, 69, porta, b"ja chegou"));
+        match leitura_suspensa(quem, conexao, 5000) {
+            Ok(_) => return Err("a leitura suspendeu com um datagrama ja na associacao"),
+            Err(r) if !r.contains("ja chegou") => {
+                crate::log_error!("teste", "{}", r);
+                return Err("a leitura com o datagrama ja chegado nao o entregou");
+            }
+            Err(_) => {}
+        }
+        // Sem espera, o alheio também não chega a quem lê; e sai da fila na
+        // volta da pilha em que chegou, sem esperar uma leitura.
+        crate::rede::pilha::injetar_de_teste(&quadro_udp(IP_DO_ROTEADOR, 70, porta, b"de novo"));
+        if alheios() != antes + 3 {
+            return Err("o datagrama de outra origem ficou na fila esperando uma leitura");
+        }
+        let r = fs_pedir(
+            quem,
+            "net.recv",
+            &alloc::format!(r#"{{"connection":{conexao}}}"#),
+        );
+        if fs_numero(&r, "datagram").is_some() || fs_numero(&r, "returned") != Some(0) {
+            crate::log_error!("teste", "{}", r);
+            return Err("um datagrama de outra origem chegou a quem le");
+        }
+        // A fila não é dos alheios: oito deles — a fila inteira — chegam sem
+        // ninguém lendo, e o bloco que o TFTP manda em seguida ainda cabe.
+        for _ in 0..8 {
+            crate::rede::pilha::injetar_de_teste(&quadro_udp(
+                [10, 0, 2, 99],
+                69,
+                porta,
+                b"enchimento",
+            ));
+        }
+        let r = mandar_datagrama(quem, conexao, &pedido_de_leitura("bancada.txt"));
+        if fs_numero(&r, "sent") != Some(20) {
+            crate::log_error!("teste", "net.send: {}", r);
+            return Err("o pedido de leitura depois dos alheios nao saiu");
+        }
+        // O bloco chega, e a pilha o processa, antes de alguém ler.
+        let _ = esperar_cedendo(|| false, 30);
+        let bloco = datagrama_de(quem, conexao)
+            .map_err(|_| "com a fila cheia de alheios, o bloco do destino se perdeu")?;
+        if bloco.len() != 516 || bloco[..4] != [0, 3, 0, 1] {
+            return Err("depois dos alheios, chegou outra coisa que o bloco do destino");
+        }
+        if alheios() != antes + 11 {
+            crate::log_error!("teste", "alheios: {} -> {}", antes, alheios());
+            return Err("os alheios da fila inteira nao foram descartados e contados");
+        }
+        // Atrás de um datagrama do destino que ninguém leu ainda, o alheio
+        // espera a vez — a fila só se tira pela frente. Quem tira só tira o
+        // datagrama do destino que entregou: o alheio, na frente quando
+        // aquele sai, não é ele, e a volta seguinte o tira.
+        crate::rede::pilha::injetar_de_teste(&quadro_udp(IP_DO_ROTEADOR, 69, porta, b"da frente"));
+        crate::rede::pilha::injetar_de_teste(&quadro_udp(IP_DO_ROTEADOR, 70, porta, b"de tras"));
+        let dono = crate::rede::conexoes::Dono::Processo(crate::fios::id_atual());
+        crate::rede::pilha::consumir_datagrama(conexao, &dono, b"da frente".len())
+            .map_err(|_| "o datagrama do destino na frente da fila nao saiu")?;
+        if crate::rede::pilha::consumir_datagrama(conexao, &dono, b"de tras".len()).is_ok() {
+            return Err("tirou da associacao um datagrama de outra origem");
+        }
+        let r = fs_pedir(
+            quem,
+            "net.recv",
+            &alloc::format!(r#"{{"connection":{conexao}}}"#),
+        );
+        if fs_numero(&r, "datagram").is_some() || alheios() != antes + 12 {
+            crate::log_error!("teste", "{} (alheios: {} -> {})", r, antes, alheios());
+            return Err("o alheio que esperava atras nao saiu ao chegar a frente");
+        }
+        // E o de verdade: armada a espera, o bloco que o TFTP manda a acorda
+        // pelo evento da pilha.
+        let espera = leitura_suspensa(quem, conexao, 5000).map_err(|r| {
+            crate::log_error!("teste", "{}", r);
+            "a segunda leitura nao suspendeu"
+        })?;
+        let (acordado, waker) = Acordado::novo();
+        if espera.conferir(Some(&waker)).is_some() {
+            return Err("a segunda espera acabou sem nada chegar");
+        }
+        let r = mandar_datagrama(quem, conexao, &pedido_de_leitura("bancada.txt"));
+        if fs_numero(&r, "sent") != Some(20) {
+            crate::log_error!("teste", "net.send: {}", r);
+            return Err("o pedido de leitura com a espera armada nao saiu");
+        }
+        esperar_cedendo(|| acordado.vezes() > 0, 600)
+            .map_err(|_| "o bloco do TFTP nao acordou a espera")?;
+        if espera.conferir(None) != Some(Desfecho::Chegou) {
+            return Err("acordada, a espera nao viu o bloco");
+        }
+        drop(espera);
+        let bloco = datagrama_de(quem, conexao)?;
+        if bloco.len() != 516 || bloco[..4] != [0, 3, 0, 1] {
+            return Err("a espera acordada nao entregou o bloco do TFTP");
+        }
+        Ok(())
+    })();
+    fechar_conexao(quem, conexao);
+    resultado
+}
+
+/// Duas associações UDP vivas não dividem a porta local: o socket UDP
+/// recebe pela porta, e a segunda não ouviria nada. A faixa dá a volta, e a
+/// porta de uma associação viva é pulada.
+fn rede_a_associacao_tem_a_sua_porta() -> Resultado {
+    let quem = sistema_aqui();
+    let abrir = || {
+        conexao_aberta(&fs_pedir(
+            quem,
+            "net.connect",
+            &alloc::format!(r#"{{"to":"{TFTP}"}}"#),
+        ))
+    };
+    let mut abertas = alloc::vec::Vec::new();
+    let resultado = (|| -> Resultado {
+        let a = abrir()?;
+        abertas.push(a);
+        let pa = crate::rede::pilha::porta_local_de_teste(a).ok_or("a associacao nao tem porta")?;
+        // A próxima seria a mesma porta, como depois de dar a volta.
+        crate::rede::pilha::proxima_porta_de_teste(pa);
+        let b = abrir()?;
+        abertas.push(b);
+        let pb = crate::rede::pilha::porta_local_de_teste(b).ok_or("a associacao nao tem porta")?;
+        if pb == pa {
+            return Err("duas associacoes UDP vivas na mesma porta local");
+        }
+        // As duas conversam, cada uma pela sua porta.
+        for c in [a, b] {
+            let r = mandar_datagrama(quem, c, &pedido_de_leitura("bancada.txt"));
+            if fs_numero(&r, "sent") != Some(20) {
+                return Err("o pedido de leitura de uma das associacoes nao saiu");
+            }
+            let bloco = datagrama_de(quem, c)?;
+            if bloco.len() != 516 || bloco[..4] != [0, 3, 0, 1] {
+                return Err("uma das associacoes nao recebeu o seu bloco");
+            }
+        }
+        // Fechada, a associação solta a porta: a seguinte pode ficar com
+        // ela, e é ela quem ouve — o socket da fechada saiu da pilha.
+        fechar_conexao(quem, a);
+        abertas.retain(|&c| c != a);
+        if crate::rede::pilha::sockets_soltos_de_teste() != 0 {
+            return Err("fechada, a associacao deixou o socket na pilha");
+        }
+        crate::rede::pilha::proxima_porta_de_teste(pa);
+        let c = abrir()?;
+        abertas.push(c);
+        if crate::rede::pilha::porta_local_de_teste(c) != Some(pa) {
+            return Err("a porta de uma associacao fechada nao ficou livre");
+        }
+        let r = mandar_datagrama(quem, c, &pedido_de_leitura("bancada.txt"));
+        if fs_numero(&r, "sent") != Some(20) {
+            return Err("o pedido de leitura pela porta reaproveitada nao saiu");
+        }
+        let bloco = datagrama_de(quem, c)?;
+        if bloco.len() != 516 || bloco[..4] != [0, 3, 0, 1] {
+            return Err("a associacao na porta reaproveitada nao ouviu o seu bloco");
+        }
+        Ok(())
+    })();
+    for c in abertas {
+        fechar_conexao(quem, c);
+    }
+    resultado
+}
+
+/// O teto de cada titular conta conexões TCP e associações UDP juntas; e a
+/// associação fechada devolve a vaga na hora — ela não tem fecho com o
+/// outro lado para terminar.
+fn rede_o_teto_conta_as_associacoes() -> Resultado {
+    use crate::rede::pilha::CONEXOES_POR_DONO;
+    crate::pessoas::esquecer_registradas();
+    let quem = titular_novo_na_rede(61, "rede-teto-udp");
+    let abrir = |to: &str| fs_pedir(quem, "net.connect", &alloc::format!(r#"{{"to":"{to}"}}"#));
+    let mut abertas = alloc::vec::Vec::new();
+    let resultado = (|| -> Resultado {
+        for i in 0..CONEXOES_POR_DONO {
+            let to = if i % 2 == 0 { ECO } else { TFTP };
+            abertas.push(conexao_aberta(&abrir(to))?);
+        }
+        let r = abrir(TFTP);
+        if fs_numero(&r, "connection").is_some()
+            || !fs_texto(&r, "error").is_some_and(|e| e.contains("maximo"))
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("um titular passou do teto com uma associacao UDP");
+        }
+        let udp = abertas[1];
+        fechar_conexao(quem, udp);
+        abertas.retain(|&c| c != udp);
+        let r = abrir(TFTP);
+        abertas.push(
+            conexao_aberta(&r).map_err(|_| "a associacao fechada nao devolveu a vaga na hora")?,
+        );
+        Ok(())
+    })();
+    for c in abertas {
+        fechar_conexao(quem, c);
+    }
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// A associação de um processo que acabou é derrubada pelo coletor, como a
+/// conexão: some da tabela, e a derrubada vai para a auditoria com o
+/// destino UDP.
+fn rede_a_associacao_de_quem_acabou_e_derrubada() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
+    use core::sync::atomic::{AtomicBool, Ordering::SeqCst};
+    static SOLTAR: AtomicBool = AtomicBool::new(false);
+    extern "C" fn processo(_argumento: u64) -> ! {
+        while !SOLTAR.load(SeqCst) {
+            crate::fios::descansar_ate_a_interrupcao();
+        }
+        crate::fios::terminar()
+    }
+    let viva = |c: u64| {
+        crate::rede::pilha::donos()
+            .iter()
+            .any(|(id, _, _)| *id == c)
+    };
+    SOLTAR.store(false, SeqCst);
+    let fio = crate::fios::criar("rede-udp-dono", processo, 0)?.numero();
+    let dele = Chamador::Processo {
+        fio,
+        autoridade: Autoridade::Sistema,
+        programa: Programa::Kernel,
+    };
+    let r = fs_pedir(dele, "net.connect", &alloc::format!(r#"{{"to":"{TFTP}"}}"#));
+    let conexao = match conexao_aberta(&r) {
+        Ok(c) => c,
+        Err(e) => {
+            SOLTAR.store(true, SeqCst);
+            return Err(e);
+        }
+    };
+    let porta = crate::rede::pilha::porta_local_de_teste(conexao);
+    let _ = esperar_cedendo(|| false, 10);
+    if !viva(conexao) {
+        SOLTAR.store(true, SeqCst);
+        return Err("a associacao de um processo vivo foi derrubada");
+    }
+    SOLTAR.store(true, SeqCst);
+    esperar_cedendo(|| !viva(conexao), 300)
+        .map_err(|_| "a associacao do processo morto ficou na tabela")?;
+    let mut gravada = None;
+    esperar_cedendo(
+        || {
+            gravada = ultimo_que(|e| {
+                e.metodo == "net.close"
+                    && e.detalhe.contains("o dono acabou")
+                    && e.detalhe.contains(&alloc::format!("conexao {conexao} "))
+            });
+            gravada.is_some()
+        },
+        300,
+    )
+    .map_err(|_| "a associacao derrubada nao foi gravada")?;
+    if gravada
+        .ok_or("a associacao derrubada nao foi gravada")?
+        .recurso
+        != TFTP
+    {
+        return Err("a associacao derrubada foi gravada sem o destino UDP");
+    }
+    // A derrubada solta a porta, como o fecho: o socket sai da pilha, e uma
+    // associação nova na porta é quem ouve.
+    if crate::rede::pilha::sockets_soltos_de_teste() != 0 {
+        return Err("derrubada, a associacao deixou o socket na pilha");
+    }
+    let porta = porta.ok_or("a associacao derrubada nao tinha porta")?;
+    let quem = sistema_aqui();
+    crate::rede::pilha::proxima_porta_de_teste(porta);
+    let nova = conexao_aberta(&fs_pedir(
+        quem,
+        "net.connect",
+        &alloc::format!(r#"{{"to":"{TFTP}"}}"#),
+    ))?;
+    let resultado = (|| -> Resultado {
+        if crate::rede::pilha::porta_local_de_teste(nova) != Some(porta) {
+            return Err("a porta da associacao derrubada nao ficou livre");
+        }
+        let r = mandar_datagrama(quem, nova, &pedido_de_leitura("bancada.txt"));
+        if fs_numero(&r, "sent") != Some(20) {
+            return Err("o pedido de leitura pela porta da derrubada nao saiu");
+        }
+        let bloco = datagrama_de(quem, nova)?;
+        if bloco.len() != 516 || bloco[..4] != [0, 3, 0, 1] {
+            return Err("a associacao na porta da derrubada nao ouviu o seu bloco");
+        }
+        Ok(())
+    })();
+    fechar_conexao(quem, nova);
+    resultado
+}
+
+/// Vários fios, em vários núcleos ao mesmo tempo, cada um com a sua
+/// associação ao TFTP, leem o arquivo inteiro, bloco a bloco: cada um
+/// recebe os seus blocos — o TFTP separa as conversas pela porta de cada
+/// associação —, e a tabela termina vazia.
+fn rede_varios_fios_trocam_datagramas_ao_mesmo_tempo() -> Resultado {
+    use core::sync::atomic::{AtomicU64, Ordering::SeqCst};
+    const FIOS: u64 = 4;
+    static CERTOS: AtomicU64 = AtomicU64::new(0);
+    static ERRADOS: AtomicU64 = AtomicU64::new(0);
+    extern "C" fn ler_o_arquivo(indice: u64) -> ! {
+        let quem = sistema_no_armazem(crate::fios::id_atual());
+        let ok = (|| -> Result<(), &'static str> {
+            let c = conexao_aberta(&fs_pedir(
+                quem,
+                "net.connect",
+                &alloc::format!(r#"{{"to":"{TFTP}"}}"#),
+            ))?;
+            let lido = (|| -> Result<alloc::vec::Vec<u8>, &'static str> {
+                let mut lido = alloc::vec::Vec::new();
+                let r = mandar_datagrama(quem, c, &pedido_de_leitura("bancada.txt"));
+                if fs_numero(&r, "sent") != Some(20) {
+                    return Err("o pedido de leitura nao saiu");
+                }
+                for bloco in 1..=2u16 {
+                    let d = datagrama_de(quem, c)?;
+                    let [a, b] = bloco.to_be_bytes();
+                    if d.len() < 4 || d[..4] != [0, 3, a, b] {
+                        return Err("veio outro bloco que o esperado");
+                    }
+                    lido.extend_from_slice(&d[4..]);
+                    let _ = mandar_datagrama(quem, c, &confirmacao(bloco));
+                }
+                Ok(lido)
+            })();
+            fechar_conexao(quem, c);
+            if lido? != arquivo_do_tftp() {
+                return Err("o arquivo lido nao e o da bancada");
+            }
+            Ok(())
+        })();
+        match ok {
+            Ok(()) => CERTOS.fetch_add(1, SeqCst),
+            Err(e) => {
+                crate::log_error!("teste", "fio {} do UDP: {}", indice, e);
+                ERRADOS.fetch_add(1, SeqCst)
+            }
+        };
+        crate::fios::terminar()
+    }
+    CERTOS.store(0, SeqCst);
+    ERRADOS.store(0, SeqCst);
+    let nucleos = crate::nucleos::ligados() as u64;
+    for i in 0..FIOS {
+        crate::fios::criar_no_nucleo("rede-udp-fio", ler_o_arquivo, i, (i % nucleos) as usize)?;
+    }
+    esperar_cedendo(|| CERTOS.load(SeqCst) + ERRADOS.load(SeqCst) == FIOS, 3000)
+        .map_err(|_| "os fios do UDP nao terminaram")?;
+    if ERRADOS.load(SeqCst) != 0 {
+        return Err("um fio nao leu o arquivo pelo UDP (o motivo de cada um esta no log)");
+    }
+    esperar_cedendo(|| crate::rede::pilha::donos().is_empty(), 300)
+        .map_err(|_| "a tabela de conexoes nao esvaziou")?;
+    if crate::rede::pilha::sockets_soltos_de_teste() != 0 {
+        return Err("a tabela esvaziou e a pilha ficou com sockets de ninguem");
+    }
+    Ok(())
+}
+
+/// A fila de saída de uma associação guarda oito datagramas; cheia, o
+/// seguinte é recusado com o motivo — inteiro ou nada também aqui —, e não
+/// aceito e perdido calado. A bancada a enche com um destino do enlace que
+/// não responde ao ARP — o emulador só responde pelos endereços dele —: nada
+/// sai, e tudo fica na fila. O destino entra na política só durante o caso.
+fn rede_a_fila_cheia_recusa_o_datagrama() -> Resultado {
+    const MUDO: &str = "udp:10.0.2.99:9";
+    let quem = sistema_aqui();
+    let linha = alloc::format!("recurso sistema net.connect {ECO} {TFTP}");
+    if !politica::PADRAO.contains(&linha) {
+        return Err("a linha do sistema na politica mudou: o caso nao acha onde por o destino");
+    }
+    let com_o_mudo = politica::PADRAO.replace(&linha, &alloc::format!("{linha} {MUDO}"));
+    let nova = politica::Politica::ler(&com_o_mudo).map_err(|_| "a politica do caso nao se le")?;
+    let antes = crate::autorizacao::com_politica(|p| p.clone());
+    crate::autorizacao::restaurar_politica(nova);
+    let resultado = (|| -> Resultado {
+        let conexao = conexao_aberta(&fs_pedir(
+            quem,
+            "net.connect",
+            &alloc::format!(r#"{{"to":"{MUDO}"}}"#),
+        ))?;
+        let r = (|| -> Resultado {
+            for _ in 0..8 {
+                let r = mandar_datagrama(quem, conexao, "fila");
+                if fs_numero(&r, "sent") != Some(4) {
+                    crate::log_error!("teste", "net.send: {}", r);
+                    return Err("um datagrama que cabia na fila foi recusado");
+                }
+            }
+            let r = mandar_datagrama(quem, conexao, "fila");
+            if fs_numero(&r, "sent").is_some()
+                || !fs_texto(&r, "error").is_some_and(|e| e.contains("cheios"))
+            {
+                crate::log_error!("teste", "net.send: {}", r);
+                return Err("com a fila cheia, o datagrama nao foi recusado com o motivo");
+            }
+            Ok(())
+        })();
+        // Fechada enquanto o destino ainda está no alcance: o fecho também
+        // passa pelo gate.
+        fechar_conexao(quem, conexao);
+        r
+    })();
+    crate::autorizacao::restaurar_politica(antes);
+    resultado?;
+    if crate::rede::pilha::sockets_soltos_de_teste() != 0 {
+        return Err("fechada com a fila cheia, a associacao deixou o socket na pilha");
+    }
+    Ok(())
+}
+
 /// O programa `discador`, de verdade: lançado por uma pessoa operadora,
 /// conversa com o eco — os 256 valores de um byte pelo anexo, de volta em
 /// texto e em base64 — e ouve as recusas de dentro; lançado por uma
@@ -32252,6 +33115,9 @@ fn rede_o_console_espera_e_segura_a_entrada() -> Resultado {
 /// esperando, a conta de chamadas de sistema parada — até o prazo; e a
 /// conversa inteira custa poucas decisões de `net.recv`, e não uma por
 /// volta de um laço.
+///
+/// E pelo UDP: o programa pede o arquivo ao TFTP do emulador e o recebe em
+/// dois datagramas, cada leitura decidida em nome da pessoa que o lançou.
 fn rede_o_programa_disca_pelo_gate() -> Resultado {
     use crate::autorizacao::Autoridade;
     use crate::pessoas::Console;
@@ -32314,8 +33180,25 @@ fn rede_o_programa_disca_pelo_gate() -> Resultado {
             crate::log_error!("teste", "{} decisoes de net.recv", leituras);
             return Err("o programa perguntou de novo em vez de esperar");
         }
-        let e = ultimo_que(|e| e.metodo == "net.send" && e.detalhe.starts_with("pelo processo "))
-            .ok_or("o envio do programa nao foi gravado como do processo")?;
+        // Os dois blocos do TFTP: cada um, no máximo, a decisão que
+        // suspendeu e a da entrega.
+        let datagramas = leituras_de_desde(TFTP, desde);
+        if !(2..=4).contains(&datagramas) {
+            crate::log_error!("teste", "{} decisoes de net.recv no TFTP", datagramas);
+            return Err("o programa nao leu os dois blocos do TFTP esperando");
+        }
+        let udp = ultimo_que(|e| {
+            e.metodo == "net.recv" && e.recurso == TFTP && e.detalhe.starts_with("pelo processo ")
+        })
+        .ok_or("a leitura UDP do programa nao foi gravada como do processo")?;
+        if udp.titular != politica::auditoria::Titular::Pessoa {
+            crate::log_error!("teste", "{:?}", udp);
+            return Err("a leitura UDP do programa nao foi decidida em nome da pessoa");
+        }
+        let e = ultimo_que(|e| {
+            e.metodo == "net.send" && e.recurso == ECO && e.detalhe.starts_with("pelo processo ")
+        })
+        .ok_or("o envio do programa nao foi gravado como do processo")?;
         if e.titular != politica::auditoria::Titular::Pessoa || e.recurso != ECO {
             crate::log_error!("teste", "{:?}", e);
             return Err("o envio do programa nao saiu em nome da pessoa, com o destino");

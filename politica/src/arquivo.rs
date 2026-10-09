@@ -25,8 +25,9 @@
 //!   escreve: `recurso sistema fs.read /`. A mesma linha diz o alcance de
 //!   `message.send` — os papéis destinatários, `papel:<nome>` — e o de
 //!   `net.connect` — os destinos de rede, cada um inteiro e na forma
-//!   normal, `tcp:<ipv4>:<porta>` ([`crate::endereco`]). Nos dois, uma
-//!   lista enumerada: o que não está escrito não é alcançado.
+//!   normal, `tcp:<ipv4>:<porta>` ou `udp:<ipv4>:<porta>`
+//!   ([`crate::endereco`]). Nos dois, uma lista enumerada: o que não está
+//!   escrito não é alcançado.
 //! - `taxa <papel> <por segundo> <rajada>`: o balde de pedidos do papel.
 //! - `processos <papel> <quantos>`: a cota de processos vivos de cada
 //!   titular do papel — uma sessão de agente, uma de pessoa, o sistema —,
@@ -275,8 +276,8 @@ pub enum ErroTipo {
     CaminhoInvalido(String),
     /// Um destino que não é `papel:<nome>`, com o nome na regra.
     DestinoInvalido(String),
-    /// Um destino de rede que não é `tcp:<ipv4>:<porta>` na forma normal —
-    /// ver [`crate::endereco`].
+    /// Um destino de rede que não é `tcp:<ipv4>:<porta>` nem
+    /// `udp:<ipv4>:<porta>` na forma normal — ver [`crate::endereco`].
     EnderecoInvalido(String),
     /// Falta a linha `serial`.
     SemSerial,
@@ -324,7 +325,7 @@ impl Erro {
                 format!("destino invalido `{d}`: so `papel:<nome>`, sem curinga")
             }
             ErroTipo::EnderecoInvalido(d) => format!(
-                "destino de rede invalido `{d}`: so `tcp:<ipv4>:<porta>`, na forma normal, sem curinga"
+                "destino de rede invalido `{d}`: so `tcp:<ipv4>:<porta>` ou `udp:<ipv4>:<porta>`, na forma normal, sem curinga"
             ),
             ErroTipo::SemSerial => "falta a linha `serial`".to_string(),
             ErroTipo::SemLocal => "falta a linha `local`".to_string(),

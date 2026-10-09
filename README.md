@@ -202,11 +202,11 @@ $ cargo xtask agent --canal 2 agent.session
 | `fs.discard` | Descarta um rascunho seu, com os blocos dele (`path`, `draft`) |
 | `fs.claim` | Arrenda um arquivo do armazém para esta sessão (`path`, `ttl_ms`); sem preempção |
 | `fs.release` | Solta o arrendamento desta sessão num arquivo do armazém (`path`) |
-| `net.info` | A placa de rede e a pilha IP: endereço físico, contadores, o endereço e o roteador que o DHCP deu, e as conexões |
+| `net.info` | A placa de rede e a pilha IP: endereço físico, contadores, o endereço e o roteador que o DHCP deu, as conexões, e os datagramas de outra origem descartados |
 | `net.arp` | Pergunta quem atende por um IPv4 e espera a resposta (`ip`, `from`) |
-| `net.connect` | Abre uma conexão TCP de saída para um destino no alcance do papel (`to`: `tcp:<ipv4>:<porta>`) |
-| `net.send` | Manda bytes por uma conexão sua — texto em `content` ou o anexo (`connection`, `content`, `attachment`) |
-| `net.recv` | O que chegou numa conexão sua, e o estado dela; com `wait`, sem nada chegado, espera a pilha ter o que dizer — o dado, o estado, o fim da conexão — até o prazo; texto em `utf-8` ou `base64` (`connection`, `max`, `wait`) |
+| `net.connect` | Abre uma conexão de saída para um destino no alcance do papel: TCP, ou uma associação UDP que só conversa com aquele destino (`to`: `tcp:<ipv4>:<porta>` ou `udp:<ipv4>:<porta>`) |
+| `net.send` | Manda bytes por uma conexão sua — texto em `content` ou o anexo; numa UDP, um datagrama inteiro de até 1472 bytes, ou nada e o motivo (`connection`, `content`, `attachment`) |
+| `net.recv` | O que chegou numa conexão sua, e o estado dela; numa UDP, um datagrama inteiro, com o tamanho em `datagram`, e o que não cabe em `max` fica; com `wait`, sem nada chegado, espera a pilha ter o que dizer — o dado, o estado, o fim da conexão — até o prazo; texto em `utf-8` ou `base64` (`connection`, `max`, `wait`) |
 | `net.close` | Fecha uma conexão sua (`connection`) |
 | `video.sample` | Amostra a tela numa grade de cores (`columns`, `rows`) |
 | `display.info` | A pilha gráfica: adaptador ativo, telas, as camadas do compositor, memória das superfícies, o último retângulo que chegou à tela e, no virtio-gpu, o que atravessou para o dispositivo |
@@ -2074,10 +2074,10 @@ reconstrução.
 ## Rede nativa
 
 Um programa do Duke não abre um socket do Unix: pede uma conexão ao
-registro — `net.connect`, com o destino inteiro, `tcp:<ipv4>:<porta>` —,
-pelo mesmo gate de todo comando, e o destino é o **recurso** que a
-política decide. O protocolo é do [`smoltcp`](https://github.com/smoltcp-rs/smoltcp)
-(Ethernet, ARP, IPv4, DHCP, TCP): escrever TCP do zero é um a dois
+registro — `net.connect`, com o destino inteiro, `tcp:<ipv4>:<porta>` ou
+`udp:<ipv4>:<porta>` —, pelo mesmo gate de todo comando, e o destino é o
+**recurso** que a política decide. O protocolo é do [`smoltcp`](https://github.com/smoltcp-rs/smoltcp)
+(Ethernet, ARP, IPv4, DHCP, TCP, UDP): escrever TCP do zero é um a dois
 anos-pessoa e não diferencia o sistema em nada. O que diferencia é o lado
 de cima, e esse é do kernel.
 
@@ -2095,15 +2095,18 @@ $ cargo xtask agent net.connect '{"to":"tcp:10.0.2.100:8"}'
 **O alcance é enumerado.** A permissão `net.connect` é sensível — não vem
 por inclusão de outro papel — e cada papel que a tem escreve, numa linha
 `recurso`, os destinos que alcança, cada um inteiro e na forma normal
-(`politica::endereco`): `recurso operador net.connect tcp:10.0.2.100:7`.
-Sem curinga, sem faixa, sem "qualquer porta" — nem para o sistema. A
-forma normal recusa o ambíguo em vez de adivinhar: `tcp:010.0.2.100:7`
-não é lido como outra coisa, é uma linha que não vale. O teto do
-`policy.write` vale como para os caminhos: ninguém concede um destino que
-o administrador não alcança. A imagem de desenvolvimento enumera um
-destino só, o eco que a bancada põe em `10.0.2.100:7` — um `guestfwd` do
-emulador que roda `cat` a cada conexão, sem servidor nem porta aberta no
-hospedeiro.
+(`politica::endereco`): `recurso operador net.connect tcp:10.0.2.100:7
+udp:10.0.2.2:69`. Sem curinga, sem faixa, sem "qualquer porta" — nem para
+o sistema. O protocolo é parte do destino: `tcp:10.0.2.2:69` e
+`udp:10.0.2.2:69` são dois destinos, e a linha que alcança um não alcança
+o outro. A forma normal recusa o ambíguo em vez de adivinhar:
+`tcp:010.0.2.100:7` não é lido como outra coisa, é uma linha que não vale.
+O teto do `policy.write` vale como para os caminhos: ninguém concede um
+destino que o administrador não alcança. A imagem de desenvolvimento
+enumera dois destinos, os da bancada, os dois servidos pelo próprio
+emulador, sem servidor nem porta aberta no hospedeiro: o eco TCP em
+`10.0.2.100:7` — um `guestfwd` que roda `cat` a cada conexão — e o TFTP do
+emulador em `10.0.2.2:69`, que serve um arquivo que o `xtask` escreve.
 
 **Usar a conexão também é decidido.** `net.send`, `net.recv` e
 `net.close` nomeiam a conexão pelo número, e o gate resolve o número no
@@ -2124,18 +2127,66 @@ outros. Quando o dono acaba — o processo morre, a porta reabre, a pessoa
 sai —, o coletor de fios derruba a conexão na passada seguinte e a grava
 na auditoria, como faz com as camadas de um processo morto.
 
-**Tetos.** Dezesseis conexões na máquina, quatro por titular, quatro KiB
-em cada sentido de cada uma. São tetos de recurso, e não autorização: a
-decisão é a da política, e o teto só impede um titular de tomar a tabela
-dos outros. Por isso a conexão que o dono fechou e que ainda espera o
-outro lado terminar o fecho conta no teto **dele**: sem isso, um titular
-cujo outro lado não fecha enchia a tabela da máquina com fechos que não
-eram de ninguém — a suíte o mostrou, com o segundo destino da bancada, um
-`sleep` em `10.0.2.100:9` que não fecha por trinta segundos. E o fecho
+**Tetos.** Dezesseis conexões na máquina, quatro por titular — conexões
+TCP e associações UDP juntas —, quatro KiB em cada sentido de cada uma.
+São tetos de recurso, e não autorização: a decisão é a da política, e o
+teto só impede um titular de tomar a tabela dos outros. Por isso a
+conexão que o dono fechou e que ainda espera o outro lado terminar o fecho
+conta no teto **dele**: sem isso, um titular cujo outro lado não fecha
+enchia a tabela da máquina com fechos que não eram de ninguém — a suíte o
+mostrou, com um `sleep` da bancada em `10.0.2.100:9` que não fecha por
+trinta segundos. E o fecho
 termina ao chegar ao `TIME_WAIT`, e não dez segundos depois, como o
 `smoltcp` o guardaria: cada conexão nova pega a porta local seguinte numa
 faixa de milhares, e guardar os fechos já terminados fazia titulares novos
 ouvirem "tabela cheia" sem conexão viva de ninguém.
+
+**A associação UDP.** Um destino `udp:` abre uma associação: a mesma
+capacidade, com o mesmo número, o mesmo dono, a mesma decisão a cada uso,
+o mesmo teto e a mesma espera — e outra unidade, o datagrama:
+
+```
+$ cargo xtask agent net.connect '{"to":"udp:10.0.2.2:69"}'
+{"connection":2,"to":"udp:10.0.2.2:69","state":"open"}
+$ cargo xtask agent net.send '{"connection":2,"content":"\u0000\u0001bancada.txt\u0000octet\u0000"}'
+{"connection":2,"sent":20,"state":"open"}
+$ cargo xtask agent net.recv '{"connection":2,"wait":5000}'
+{"connection":2,"state":"open","returned":516,"datagram":516,"encoding":"utf-8","content":"\u0000\u0003\u0000\u0001bancada udp 000\n…"}
+```
+
+- `net.send` manda **um** datagrama, inteiro ou nada, de até 1472 bytes —
+  o quadro menos os cabeçalhos, porque a pilha não fragmenta. Um byte a
+  mais é recusado com o motivo, em vez de cortado ou perdido. A fila de
+  saída guarda oito datagramas; cheia — o vizinho ainda sem resposta ao
+  ARP —, o seguinte também é recusado com o motivo, e não aceito e perdido
+  calado.
+- `net.recv` devolve **um** datagrama inteiro, com o tamanho em
+  `datagram`, ou nenhum. O que não cabe no `max` de quem lê fica onde está,
+  e a resposta diz o tamanho: um datagrama não se corta, e o resto dele
+  não viria depois. Dois que chegaram juntos saem um de cada vez.
+- O socket UDP recebe de qualquer origem na porta dele. O que não veio do
+  destino da associação — outra porta, outro endereço — sai na volta da
+  pilha em que chega à frente da fila, e é contado em `net.info`
+  (`foreign_datagrams_dropped`): a associação é uma conversa com o destino
+  que o gate decidiu, e nada de outro chega a quem a abriu, nem fica
+  ocupando a fila dela à espera de uma leitura. Um datagrama alheio acorda
+  o waker de quem espera — o socket não sabe de origem —, e quem espera
+  não acha nada e volta a esperar.
+- Duas associações vivas não dividem a porta local: o socket UDP recebe
+  pela porta, e a segunda nunca ouviria nada. A faixa dá a volta e pula a
+  porta de uma associação viva.
+- Não há aperto nem fecho com o outro lado: o estado é `open` do começo ao
+  fim, e fechar solta a porta e devolve a vaga do teto na hora.
+
+A bancada é o TFTP do próprio emulador, que responde sempre da mesma
+porta: um pedido de leitura sai, e o arquivo volta em dois datagramas, de
+516 e 132 bytes. O maior datagrama também tem resposta: um pedido de
+leitura completado até 1472 bytes com uma opção que o TFTP não conhece, e
+ignora — cortado, perderia o zero do fim, e o TFTP o recusaria. O
+datagrama de outra origem a suíte injeta na pilha, num quadro montado por
+ela: a bancada não tem quem mande. E a fila cheia ela faz com um destino
+do enlace que não responde ao ARP — o emulador só responde pelos endereços
+dele —, posto na política só durante o caso.
 
 **Quem faz a pilha andar** é um fio do kernel, `rede`, que sonda a pilha
 e descansa até a próxima interrupção — dando a vez a quem estiver pronto.
@@ -2150,8 +2201,10 @@ inteiro de dentro de um processo, pelo `pedir`, com o manifesto
 declarando `net.connect`: os 256 valores de um byte vão pelo anexo do
 pedido e voltam, em texto quando são texto e em `base64` quando não são; a
 porta ao lado do eco é `DENY_RESOURCE`; lançado por uma pessoa
-observadora, `DENY_PERMISSION`. E ele não pergunta de novo a cada volta:
-cada leitura espera — ver a seguir.
+observadora, `DENY_PERMISSION`. E pelo UDP pede o arquivo da bancada ao
+TFTP do emulador, e o recebe em dois datagramas inteiros, confirmando cada
+bloco. E ele não pergunta de novo a cada volta: cada leitura espera — ver
+a seguir.
 
 **A leitura que espera.** `net.recv` com `wait` — em milissegundos, até
 dez segundos — não responde vazio quando nada chegou: o pedido dorme até
@@ -2203,10 +2256,9 @@ na mesma conexão — o mesmo dono pedindo pelo canal e pelo Terminal em que
 confirma uma linha — apagaria a primeira, que passaria a acordar só no
 prazo. Ela é recusada, com o motivo.
 
-O que ainda não há: UDP, DNS e TLS; esperar espaço para mandar
-(`net.send` devolve quanto coube, e não espera o buffer de saída
-esvaziar); e o canal do agente por TCP. São os incrementos seguintes da
-fase 9.
+O que ainda não há: DNS e TLS; esperar espaço para mandar (`net.send`
+devolve quanto coube, e não espera o buffer de saída esvaziar); e o canal
+do agente por TCP. São os incrementos seguintes da fase 9.
 
 ### As mutações da rede
 
@@ -4581,9 +4633,10 @@ padronizado.
       derrubada quando o dono acaba; e o programa `discador`, que conversa
       com o eco da bancada de dentro de um processo; e a leitura que
       espera o evento da pilha — `net.recv` com `wait` —, suspensa sem
-      prender o executor e decidida de novo na entrega. Ver
-      [Rede nativa](#rede-nativa). Faltam UDP, DNS, TLS e o canal do
-      agente por TCP.
+      prender o executor e decidida de novo na entrega; e o UDP, a mesma
+      capacidade com datagramas, numa associação que só conversa com o
+      destino decidido. Ver [Rede nativa](#rede-nativa). Faltam DNS, TLS e
+      o canal do agente por TCP.
 - [x] **Fase 10 — GPU, composição e a árvore semântica.** Começou antes da
       6, pela parte que não depende de vários núcleos. Feito: a pilha gráfica
       no desenho do Redox — um trait de adaptador que o compositor usa sem

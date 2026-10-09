@@ -3,13 +3,15 @@
 //!
 //! # O evento
 //!
-//! O socket TCP do `smoltcp` guarda o waker de quem espera a leitura e o
+//! O socket do `smoltcp` guarda o waker de quem espera a leitura e o
 //! aciona quando um dado entra no buffer de recepção, quando o estado muda,
-//! e quando a conexão é fechada ou derrubada (`close`, `abort`): quem acorda
-//! é a pilha, na volta em que processou o evento — no fio `rede` ou no
-//! comando que a sondou —, e quem espera não pergunta nada enquanto isso. O
-//! prazo é o do relógio das tarefas ([`crate::tarefas::relogio`]), acordado
-//! pelo tique.
+//! e quando a conexão é fechada ou derrubada (`close`, `abort`) — no TCP; no
+//! UDP, quando chega um datagrama, de qualquer origem: o de outra que não o
+//! destino sai na mesma volta da pilha, a conferência não acha nada, e a
+//! espera continua. Quem acorda é a pilha, na volta em que processou o
+//! evento — no fio `rede` ou no comando que a sondou —, e quem espera não
+//! pergunta nada enquanto isso. O prazo é o do relógio das tarefas
+//! ([`crate::tarefas::relogio`]), acordado pelo tique.
 //!
 //! # O comando não espera: suspende
 //!

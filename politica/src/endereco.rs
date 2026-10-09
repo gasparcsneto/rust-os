@@ -1,4 +1,5 @@
-//! Destinos de rede: a forma normal de `tcp:<ipv4>:<porta>`.
+//! Destinos de rede: a forma normal de `tcp:<ipv4>:<porta>` e de
+//! `udp:<ipv4>:<porta>`.
 //!
 //! # Por que enumerado, e por que aqui
 //!
@@ -15,8 +16,14 @@
 //! zero à esquerda, octeto acima de 255, porta zero ou acima de 65535,
 //! espaço, maiúscula, nome de máquina.
 //!
-//! Só TCP e só IPv4, por enquanto. Um protocolo novo entra aqui, com o
-//! prefixo dele, e cada linha da política continua dizendo qual.
+//! # O protocolo é parte do destino
+//!
+//! `tcp:10.0.2.2:69` e `udp:10.0.2.2:69` são dois destinos, e uma
+//! linha que alcança um não alcança o outro: o prefixo diz o que o kernel
+//! abre — uma conexão TCP, com aperto de mão e fluxo de bytes, ou uma
+//! associação UDP, que manda e recebe datagramas inteiros. Só IPv4, por
+//! enquanto. Um protocolo novo entra aqui, com o prefixo dele, e cada linha
+//! da política continua dizendo qual.
 
 use alloc::format;
 use alloc::string::String;
@@ -24,9 +31,32 @@ use alloc::string::String;
 /// O prefixo de um destino TCP.
 pub const PREFIXO_TCP: &str = "tcp:";
 
-/// Um destino TCP, lido.
+/// O prefixo de um destino UDP.
+pub const PREFIXO_UDP: &str = "udp:";
+
+/// O protocolo de um destino.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Protocolo {
+    /// Uma conexão TCP: aperto de mão, fluxo de bytes, fecho.
+    Tcp,
+    /// Uma associação UDP: datagramas inteiros, de e para um destino só.
+    Udp,
+}
+
+impl Protocolo {
+    /// O prefixo que o protocolo escreve na forma normal.
+    pub const fn prefixo(self) -> &'static str {
+        match self {
+            Protocolo::Tcp => PREFIXO_TCP,
+            Protocolo::Udp => PREFIXO_UDP,
+        }
+    }
+}
+
+/// Um destino de rede, lido.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Destino {
+    pub protocolo: Protocolo,
     pub ip: [u8; 4],
     pub porta: u16,
 }
@@ -35,7 +65,7 @@ impl Destino {
     /// A forma normal, a que a política guarda e a decisão compara.
     pub fn texto(&self) -> String {
         let [a, b, c, d] = self.ip;
-        format!("{PREFIXO_TCP}{a}.{b}.{c}.{d}:{}", self.porta)
+        format!("{}{a}.{b}.{c}.{d}:{}", self.protocolo.prefixo(), self.porta)
     }
 }
 
@@ -52,9 +82,14 @@ fn decimal(texto: &str, teto: u32) -> Option<u32> {
     (n <= teto).then_some(n)
 }
 
-/// Lê `tcp:<a>.<b>.<c>.<d>:<porta>`. `None` para qualquer outra coisa.
+/// Lê `tcp:<a>.<b>.<c>.<d>:<porta>` ou `udp:<a>.<b>.<c>.<d>:<porta>`.
+/// `None` para qualquer outra coisa.
 pub fn ler(texto: &str) -> Option<Destino> {
-    let resto = texto.strip_prefix(PREFIXO_TCP)?;
+    let (protocolo, resto) = if let Some(resto) = texto.strip_prefix(PREFIXO_TCP) {
+        (Protocolo::Tcp, resto)
+    } else {
+        (Protocolo::Udp, texto.strip_prefix(PREFIXO_UDP)?)
+    };
     let (ip, porta) = resto.split_once(':')?;
     let porta = decimal(porta, u32::from(u16::MAX))?;
     if porta == 0 {
@@ -69,6 +104,7 @@ pub fn ler(texto: &str) -> Option<Destino> {
         return None;
     }
     Some(Destino {
+        protocolo,
         ip: octetos,
         porta: porta as u16,
     })
@@ -90,9 +126,22 @@ mod testes {
         assert_eq!(
             ler("tcp:10.0.2.100:7"),
             Some(Destino {
+                protocolo: Protocolo::Tcp,
                 ip: [10, 0, 2, 100],
                 porta: 7
             })
+        );
+        assert_eq!(
+            ler("udp:10.0.2.2:9007"),
+            Some(Destino {
+                protocolo: Protocolo::Udp,
+                ip: [10, 0, 2, 2],
+                porta: 9007
+            })
+        );
+        assert_eq!(
+            normalizar("udp:0.0.0.0:65535").as_deref(),
+            Some("udp:0.0.0.0:65535")
         );
         assert_eq!(
             normalizar("tcp:0.0.0.0:65535").as_deref(),
@@ -123,7 +172,18 @@ mod testes {
             "tcp: 10.0.2.100:7",
             "tcp:10.0.2.100:7 ",
             "TCP:10.0.2.100:7",
-            "udp:10.0.2.100:7",
+            "UDP:10.0.2.2:9007",
+            "Udp:10.0.2.2:9007",
+            "udp:",
+            "udp:10.0.2.2",
+            "udp:10.0.2.2:0",
+            "udp:10.0.2.2:09007",
+            "udp:010.0.2.2:9007",
+            "udp:maquina:53",
+            "udp:10.0.2.2:*",
+            "udptcp:10.0.2.2:9007",
+            "tcpudp:10.0.2.2:9007",
+            "sctp:10.0.2.100:7",
             "tcp:maquina:7",
             "tcp:10.0.2.100:*",
             "tcp:*:7",
@@ -133,5 +193,21 @@ mod testes {
         ] {
             assert_eq!(ler(errado), None, "{errado:?}");
         }
+    }
+
+    /// O protocolo é parte do destino: os mesmos endereço e porta, em
+    /// protocolos diferentes, são dois destinos, com duas formas normais.
+    #[test]
+    fn o_protocolo_separa_os_destinos() {
+        let tcp = ler("tcp:10.0.2.2:9007").unwrap();
+        let udp = ler("udp:10.0.2.2:9007").unwrap();
+        assert_ne!(tcp, udp);
+        assert_eq!((tcp.ip, tcp.porta), (udp.ip, udp.porta));
+        assert_eq!(tcp.texto(), "tcp:10.0.2.2:9007");
+        assert_eq!(udp.texto(), "udp:10.0.2.2:9007");
+        assert_ne!(
+            normalizar("tcp:10.0.2.2:9007"),
+            normalizar("udp:10.0.2.2:9007")
+        );
     }
 }

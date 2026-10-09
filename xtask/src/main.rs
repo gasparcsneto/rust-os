@@ -4858,6 +4858,42 @@ fn disco_de_testes() -> Result<PathBuf, String> {
     Ok(caminho)
 }
 
+/// O arquivo que o TFTP do emulador serve à bancada do UDP — ver
+/// [`diretorio_do_tftp`].
+const ARQUIVO_DO_TFTP: &str = "bancada.txt";
+
+/// O conteúdo de [`ARQUIVO_DO_TFTP`]: quarenta linhas de dezesseis bytes,
+/// 640 ao todo — um bloco TFTP inteiro, de 512, e um pedaço, de 128 —, para
+/// quem lê receber dois datagramas, o segundo menor. A suíte do kernel
+/// recalcula as mesmas linhas.
+fn conteudo_do_tftp() -> String {
+    (0..40).map(|i| format!("bancada udp {i:03}\n")).collect()
+}
+
+/// O diretório que o TFTP do emulador serve, com [`ARQUIVO_DO_TFTP`].
+///
+/// O destino UDP da bancada é o TFTP que o próprio emulador tem, em
+/// `10.0.2.2:69`: como o eco TCP, ele não é um servidor no hospedeiro nem uma
+/// porta aberta nele, e responde sempre da mesma porta, o que uma
+/// associação UDP exige. Escrito só se falta ou mudou, por um arquivo ao
+/// lado e um `rename`: duas bancadas ao mesmo tempo — a do x86 e a do ARM —
+/// leem o mesmo diretório, e nenhuma vê o arquivo pela metade.
+fn diretorio_do_tftp() -> Result<PathBuf, String> {
+    let dir = raiz_do_projeto().join("target").join("tftp");
+    let arquivo = dir.join(ARQUIVO_DO_TFTP);
+    let conteudo = conteudo_do_tftp();
+    if std::fs::read_to_string(&arquivo).ok().as_deref() == Some(conteudo.as_str()) {
+        return Ok(dir);
+    }
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("não foi possível criar {}: {e}", dir.display()))?;
+    let temporario = dir.join(format!("{ARQUIVO_DO_TFTP}.{}", std::process::id()));
+    std::fs::write(&temporario, &conteudo)
+        .and_then(|()| std::fs::rename(&temporario, &arquivo))
+        .map_err(|e| format!("não foi possível gravar {}: {e}", arquivo.display()))?;
+    Ok(dir)
+}
+
 /// Onde mora o estado do TPM de uma arquitetura: o diretório do `swtpm`.
 fn diretorio_do_tpm(arch: Arquitetura) -> PathBuf {
     raiz_do_projeto()
@@ -5312,19 +5348,31 @@ fn comando_qemu(
         }
     }
 
-    // A rede em modo usuário, com dois destinos de bancada, sem servidor
+    // A rede em modo usuário, com três destinos de bancada, sem servidor
     // no hospedeiro e sem porta aberta nele:
     //
-    // - `10.0.2.100:7`, um eco: cada conexão roda um `cat` ligado a ela, e o
-    //   que chega volta. É o destino que a política de desenvolvimento
-    //   enumera para `net.connect`;
-    // - `10.0.2.100:9`, um outro lado que não fecha: cada conexão roda um
-    //   `sleep`, que não lê nem fecha por trinta segundos. Nenhuma política
-    //   o enumera; a suíte o põe numa política dela para provar que o fecho
-    //   que não termina conta no teto de quem fechou.
+    // - `10.0.2.100:7`, um eco TCP: cada conexão roda um `cat` ligado a
+    //   ela, e o que chega volta. A política de desenvolvimento o enumera
+    //   para `net.connect`;
+    // - `10.0.2.100:9`, um outro lado TCP que não fecha: cada conexão roda
+    //   um `sleep`, que não lê nem fecha por trinta segundos. Nenhuma
+    //   política o enumera; a suíte o põe numa política dela para provar
+    //   que o fecho que não termina conta no teto de quem fechou;
+    // - `10.0.2.2:69`, o TFTP do próprio emulador, que serve
+    //   [`ARQUIVO_DO_TFTP`]: o destino UDP — ver [`diretorio_do_tftp`]. A
+    //   política de desenvolvimento o enumera também.
+    let tftp = diretorio_do_tftp()?;
+    let tftp = tftp.to_str().filter(|t| !t.contains(',')).ok_or_else(|| {
+        format!(
+            "o diretório do TFTP não cabe na opção do emulador: {}",
+            tftp.display()
+        )
+    })?;
     qemu.args([
         "-netdev",
-        "user,id=rede0,guestfwd=tcp:10.0.2.100:7-cmd:cat,guestfwd=tcp:10.0.2.100:9-cmd:sleep 30",
+        &format!(
+            "user,id=rede0,tftp={tftp},guestfwd=tcp:10.0.2.100:7-cmd:cat,guestfwd=tcp:10.0.2.100:9-cmd:sleep 30"
+        ),
     ]);
     qemu.args(["-device", "virtio-net-pci,netdev=rede0"]);
 
@@ -9455,6 +9503,86 @@ fn sob_a_rede(
     println!(
         "  [rede] ok  o discador esperou o eco e o silencio, e saiu com 79 em {} ms",
         discou.as_millis()
+    );
+
+    // O UDP, pela mesma capacidade: uma associação com o TFTP do emulador,
+    // que entrega o arquivo da bancada em dois datagramas, cada um inteiro
+    // numa leitura que espera o evento. O protocolo é parte do destino: a
+    // porta ao lado do TFTP está fora do alcance, e o TFTP não se disca como
+    // TCP.
+    for fora in ["udp:10.0.2.2:70", "tcp:10.0.2.2:69"] {
+        let r = serial.pedir("net.connect", &format!(r#"{{"to":"{fora}"}}"#))?;
+        if !r.contains("DENY_RESOURCE") {
+            return Err(format!(
+                "rede: um destino fora do alcance foi discado ({fora})\n  {r}"
+            ));
+        }
+    }
+    let aberta = serial.pedir("net.connect", r#"{"to":"udp:10.0.2.2:69"}"#)?;
+    let associacao: u64 = aberta
+        .split(r#""connection":"#)
+        .nth(1)
+        .and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|n| n.parse().ok())
+        .filter(|_| aberta.contains(r#""state":"open""#))
+        .ok_or_else(|| format!("rede: a associacao com o TFTP nao abriu\n  {aberta}"))?;
+    let mandar = |serial: &mut Serial, conteudo: &str, tamanho: usize| -> Result<(), String> {
+        let r = serial.pedir(
+            "net.send",
+            &format!(r#"{{"connection":{associacao},"content":"{conteudo}"}}"#),
+        )?;
+        if !r.contains(&format!(r#""sent":{tamanho}"#)) {
+            return Err(format!("rede: o datagrama nao saiu inteiro\n  {r}"));
+        }
+        Ok(())
+    };
+    mandar(
+        &mut serial,
+        r#"\u0000\u0001bancada.txt\u0000octet\u0000"#,
+        20,
+    )?;
+    let comeco = std::time::Instant::now();
+    let um = serial.pedir(
+        "net.recv",
+        &format!(r#"{{"connection":{associacao},"wait":5000}}"#),
+    )?;
+    if !um.contains(r#""datagram":516"#)
+        || !um.contains(r#""content":"\u0000\u0003\u0000\u0001bancada udp 000\nbancada udp 001\n"#)
+    {
+        return Err(format!(
+            "rede: o primeiro bloco do TFTP nao veio inteiro num datagrama\n  {um}"
+        ));
+    }
+    mandar(&mut serial, r#"\u0000\u0004\u0000\u0001"#, 4)?;
+    let dois = serial.pedir(
+        "net.recv",
+        &format!(r#"{{"connection":{associacao},"wait":5000}}"#),
+    )?;
+    if !dois.contains(r#""datagram":132"#)
+        || !dois.contains(r#""content":"\u0000\u0003\u0000\u0002bancada udp 032\n"#)
+        || !dois.contains(r#"bancada udp 039\n""#)
+    {
+        return Err(format!(
+            "rede: o segundo bloco do TFTP nao veio inteiro num datagrama\n  {dois}"
+        ));
+    }
+    // O TFTP responde em milissegundos: as duas esperas acabam pelo
+    // datagrama, e não pelos cinco segundos do prazo.
+    let blocos = comeco.elapsed();
+    if blocos >= Duration::from_millis(4000) {
+        return Err(format!(
+            "rede: os blocos do TFTP vieram em {} ms — a espera acabou pelo prazo, e nao pelo datagrama",
+            blocos.as_millis()
+        ));
+    }
+    mandar(&mut serial, r#"\u0000\u0004\u0000\u0002"#, 4)?;
+    let r = serial.pedir("net.close", &format!(r#"{{"connection":{associacao}}}"#))?;
+    if !r.contains(r#""closed":true"#) {
+        return Err(format!("rede: a associacao com o TFTP nao fechou\n  {r}"));
+    }
+    println!(
+        "  [rede] ok  udp: o TFTP do emulador mandou o arquivo da bancada em dois datagramas inteiros (516 e 132 bytes), esperados em {} ms; a porta ao lado e o TFTP como TCP, DENY_RESOURCE",
+        blocos.as_millis()
     );
 
     let fechada = serial.pedir("net.close", &format!(r#"{{"connection":{conexao}}}"#))?;

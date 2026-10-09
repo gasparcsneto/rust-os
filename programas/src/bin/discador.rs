@@ -16,7 +16,11 @@
 //!   o eco devolver. Os 256 bytes voltam em poucas leituras, e uma leitura
 //!   no silêncio acaba pelo prazo, vazia, com a conexão ainda aberta;
 //! - fechada, a conexão deixa de existir para o programa também:
-//!   `DENY_RESOURCE`, a mesma resposta de um número que nunca existiu.
+//!   `DENY_RESOURCE`, a mesma resposta de um número que nunca existiu;
+//! - e pelo UDP, a mesma capacidade com datagramas: a associação com o TFTP
+//!   do emulador, `udp:10.0.2.2:69`, pede o arquivo da bancada e o recebe
+//!   em dois datagramas, cada um inteiro numa leitura que espera, e
+//!   confirma cada bloco.
 //!
 //! Lançado por alguém sem `net.connect` no papel, sai com [`SEM_REDE`]
 //! depois de ouvir `DENY_PERMISSION`. Sai com [`CODIGO`] quando tudo
@@ -41,6 +45,18 @@ const SEM_REDE: i64 = 71;
 
 /// O eco da bancada — ver a política de desenvolvimento.
 const ECO: &str = "tcp:10.0.2.100:7";
+
+/// O TFTP do emulador, o destino UDP da bancada — ver a política de
+/// desenvolvimento.
+const TFTP: &str = "udp:10.0.2.2:69";
+
+/// O arquivo que o TFTP da bancada serve, como o `xtask` o escreve:
+/// quarenta linhas de dezesseis bytes, em dois blocos.
+fn arquivo_do_tftp() -> Vec<u8> {
+    (0..40)
+        .flat_map(|i| alloc::format!("bancada udp {i:03}\n").into_bytes())
+        .collect()
+}
 
 /// Quanto cada leitura espera, em milissegundos: o eco responde em bem
 /// menos, e a espera acaba quando o dado chega.
@@ -99,6 +115,116 @@ fn de_base64(texto: &str, saida: &mut Vec<u8>) -> Option<()> {
         saida.extend_from_slice(&tres[..3 - iguais]);
     }
     Some(())
+}
+
+/// Os bytes do conteúdo de uma leitura: em texto, desescapado; em base64,
+/// decodificado.
+fn conteudo(r: &nativo::Resposta) -> Option<Vec<u8>> {
+    let lido = texto(r, "content")?;
+    match texto(r, "encoding")? {
+        "utf-8" => {
+            let mut claro = alloc::vec![0u8; lido.len()];
+            let t = r
+                .resultado()
+                .ok()?
+                .member("content")?
+                .desescapar_em(&mut claro)?;
+            Some(t.as_bytes().to_vec())
+        }
+        "base64" => {
+            let mut bytes = Vec::new();
+            de_base64(lido, &mut bytes)?;
+            Some(bytes)
+        }
+        _ => None,
+    }
+}
+
+/// Manda `dados` como um datagrama da associação, pelo anexo. Verdadeiro se
+/// ele saiu inteiro.
+fn mandar_datagrama(associacao: u64, dados: &[u8]) -> bool {
+    let Ok(r) =
+        nativo::pedir_com_anexo("net.send", |w| w.field_u64("connection", associacao), dados)
+    else {
+        return false;
+    };
+    let saiu = numero(&r, "sent") == Some(dados.len() as u64);
+    if !saiu {
+        escreverln!(
+            "discador: o datagrama nao saiu: {:?} {:?}",
+            codigo_de(&r),
+            texto(&r, "error")
+        );
+    }
+    saiu
+}
+
+/// O próximo datagrama da associação, numa leitura que espera: inteiro, do
+/// tamanho que a resposta diz.
+fn datagrama(associacao: u64) -> Option<Vec<u8>> {
+    let r = nativo::pedir("net.recv", |w| {
+        w.field_u64("connection", associacao)?;
+        w.field_u64("wait", ESPERA_MS)
+    })
+    .ok()?;
+    let lido = conteudo(&r);
+    match (numero(&r, "datagram"), lido) {
+        (Some(tamanho), Some(d)) if d.len() as u64 == tamanho => Some(d),
+        (tamanho, _) => {
+            escreverln!(
+                "discador: a leitura UDP deu {:?} {:?} {:?}",
+                tamanho,
+                codigo_de(&r),
+                texto(&r, "error")
+            );
+            None
+        }
+    }
+}
+
+/// O arquivo da bancada pelo TFTP do emulador: o pedido de leitura, e cada
+/// bloco num datagrama, confirmado. `Err` com o código de saída.
+fn pelo_udp() -> Result<(), i64> {
+    let r = nativo::pedir("net.connect", |w| w.field_str("to", TFTP)).map_err(|_| 14)?;
+    let (Some(associacao), Some("open")) = (numero(&r, "connection"), texto(&r, "state")) else {
+        escreverln!(
+            "discador: o TFTP nao abriu: {:?} {:?}",
+            codigo_de(&r),
+            texto(&r, "error")
+        );
+        return Err(14);
+    };
+    let mut pedido = Vec::from([0u8, 1]);
+    pedido.extend_from_slice(b"bancada.txt\0octet\0");
+    if !mandar_datagrama(associacao, &pedido) {
+        return Err(15);
+    }
+    let mut arquivo = Vec::new();
+    for bloco in 1..=2u16 {
+        let d = datagrama(associacao).ok_or(16)?;
+        let [a, b] = bloco.to_be_bytes();
+        if d.len() < 4 || d[..4] != [0, 3, a, b] {
+            escreverln!("discador: o bloco {} veio errado: {} bytes", bloco, d.len());
+            return Err(17);
+        }
+        arquivo.extend_from_slice(&d[4..]);
+        if !mandar_datagrama(associacao, &[0, 4, a, b]) {
+            return Err(15);
+        }
+    }
+    if arquivo != arquivo_do_tftp() {
+        escreverln!(
+            "discador: o arquivo do TFTP veio com {} bytes, e nao o da bancada",
+            arquivo.len()
+        );
+        return Err(18);
+    }
+    let r =
+        nativo::pedir("net.close", |w| w.field_u64("connection", associacao)).map_err(|_| 19)?;
+    if codigo_de(&r).is_some() {
+        return Err(19);
+    }
+    Ok(())
 }
 
 #[unsafe(no_mangle)]
@@ -275,5 +401,10 @@ fn principal() -> i64 {
     }
 
     escreverln!("discador: 256 bytes foram e voltaram pelo eco");
+
+    if let Err(codigo) = pelo_udp() {
+        return codigo;
+    }
+    escreverln!("discador: o arquivo da bancada veio pelo UDP, dois datagramas inteiros");
     CODIGO
 }

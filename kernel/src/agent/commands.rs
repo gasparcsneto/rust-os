@@ -380,12 +380,12 @@ pub static COMANDOS: &[Command] = &[
     },
     Command {
         nome: "net.connect",
-        resumo: "Abre uma conexao TCP de saida para `to`, `tcp:<ipv4>:<porta>`, se o destino esta no alcance do seu papel. Devolve o numero da conexao e o estado (quase sempre `connecting`: um net.recv com `wait` espera o aperto terminar). A conexao e sua: so voce a usa, e ela acaba com a sua sessao ou o seu processo.",
+        resumo: "Abre uma conexao de saida para `to`, se o destino esta no alcance do seu papel: TCP com `tcp:<ipv4>:<porta>`, ou uma associacao UDP com `udp:<ipv4>:<porta>`, que manda e recebe datagramas inteiros so com esse destino. Devolve o numero da conexao e o estado (TCP: quase sempre `connecting`, e um net.recv com `wait` espera o aperto terminar; UDP: `open`). A conexao e sua: so voce a usa, e ela acaba com a sua sessao ou o seu processo.",
         params: &[ParamSpec {
             nome: "to",
             tipo: TipoParam::Texto,
             obrigatorio: true,
-            descricao: "O destino inteiro, na forma normal: `tcp:10.0.2.100:7`.",
+            descricao: "O destino inteiro, na forma normal: `tcp:10.0.2.100:7`, `udp:10.0.2.2:69`.",
         }],
         acesso: Acesso::Exige(Permissao::NetConnect),
         recurso: Some("to"),
@@ -394,7 +394,7 @@ pub static COMANDOS: &[Command] = &[
     },
     Command {
         nome: "net.send",
-        resumo: "Manda bytes por uma conexao sua: o texto de `content`, ou o anexo do pedido (binario). Devolve quantos a conexao aceitou — menos que todos com o buffer de saida cheio — e o estado.",
+        resumo: "Manda bytes por uma conexao sua: o texto de `content`, ou o anexo do pedido (binario). Devolve quantos a conexao aceitou — numa TCP, menos que todos com o buffer de saida cheio; numa UDP, um datagrama inteiro, de ate 1472 bytes, ou nada e o motivo — e o estado.",
         params: &[
             ParamSpec {
                 nome: "connection",
@@ -422,7 +422,7 @@ pub static COMANDOS: &[Command] = &[
     },
     Command {
         nome: "net.recv",
-        resumo: "O que chegou numa conexao sua, ate `max` bytes (padrao e teto: 4096), e o estado dela. Sem `wait`, nao espera: sem nada chegado, devolve vazio. Com `wait`, sem nada chegado e com a conexao ainda abrindo ou aberta, espera ate chegar dado, o estado mudar, a conexao acabar ou o prazo vencer — e o pedido e decidido de novo antes de responder. `encoding` diz `utf-8` (cortado no fim de um caractere; o resto fica para o proximo) ou `base64`.",
+        resumo: "O que chegou numa conexao sua, ate `max` bytes (padrao e teto: 4096), e o estado dela. Numa UDP, um datagrama inteiro so do destino dela, com o tamanho em `datagram`; o que nao cabe em `max` fica, e a resposta diz o tamanho. Sem `wait`, nao espera: sem nada chegado, devolve vazio. Com `wait`, sem nada chegado e com a conexao ainda abrindo ou aberta, espera ate chegar dado, o estado mudar, a conexao acabar ou o prazo vencer — e o pedido e decidido de novo antes de responder. `encoding` diz `utf-8` (numa TCP, cortado no fim de um caractere; o resto fica para o proximo) ou `base64`.",
         params: &[
             ParamSpec {
                 nome: "connection",
@@ -2032,6 +2032,9 @@ fn net_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
                     }
                     w.field_u64("connections", r.conexoes as u64)?;
                     w.field_u64("connections_opened", r.abertas)?;
+                    // Os datagramas que chegaram a uma associação UDP de
+                    // outra origem que não o destino dela, descartados.
+                    w.field_u64("foreign_datagrams_dropped", r.datagramas_alheios)?;
                 }
                 None => w.field_bool("stack", false)?,
             }
@@ -2042,12 +2045,19 @@ fn net_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.end_object()
 }
 
-/// O dono do comando e o número da conexão do pedido — a mesma conexão
-/// que o gate resolveu, ou a recusa escrita.
+/// O dono do comando, o número da conexão do pedido e o destino dela — a
+/// mesma conexão que o gate resolveu, ou a recusa escrita.
 fn conexao_do_pedido(
     numero: Option<u64>,
     w: &mut JsonWriter,
-) -> Result<Option<(crate::rede::conexoes::Dono, u64)>, fmt::Error> {
+) -> Result<
+    Option<(
+        crate::rede::conexoes::Dono,
+        u64,
+        politica::endereco::Destino,
+    )>,
+    fmt::Error,
+> {
     let Some(dono) = crate::rede::conexoes::Dono::do_comando() else {
         w.field_str(
             "error",
@@ -2062,7 +2072,7 @@ fn conexao_do_pedido(
     // O handler só age sobre o destino que o gate decidiu: a conexão é a
     // mesma, de quem pediu — o número não volta a ser de outra.
     match crate::rede::pilha::destino_de(numero, &dono) {
-        Ok(d) if crate::autorizacao::endereco_decidido(&d.texto()) => Ok(Some((dono, numero))),
+        Ok(d) if crate::autorizacao::endereco_decidido(&d.texto()) => Ok(Some((dono, numero, d))),
         Ok(_) => {
             w.field_str("error", "a conexao nao e a que foi decidida")?;
             Ok(None)
@@ -2080,7 +2090,7 @@ fn net_connect(params: Json, w: &mut JsonWriter) -> fmt::Result {
     let Some(destino) = politica::endereco::ler(texto) else {
         w.field_str(
             "error",
-            "destino invalido: so `tcp:<ipv4>:<porta>`, na forma normal",
+            "destino invalido: so `tcp:<ipv4>:<porta>` ou `udp:<ipv4>:<porta>`, na forma normal",
         )?;
         return w.end_object();
     };
@@ -2127,7 +2137,7 @@ fn net_send_com(
     anexo: &[u8],
     buffer: &mut [u8],
 ) -> fmt::Result {
-    let Some((dono, numero)) = conexao_do_pedido(numero, w)? else {
+    let Some((dono, numero, _)) = conexao_do_pedido(numero, w)? else {
         return Ok(());
     };
     let dados: Result<&[u8], &'static str> = match params.member("content") {
@@ -2171,7 +2181,7 @@ fn net_recv(params: Json, w: &mut JsonWriter) -> fmt::Result {
         _ => None,
     };
     w.begin_object()?;
-    let Some((dono, numero)) = conexao_do_pedido(numero, w)? else {
+    let Some((dono, numero, destino)) = conexao_do_pedido(numero, w)? else {
         return w.end_object();
     };
     if let Some(motivo) = espera_recusada {
@@ -2184,6 +2194,9 @@ fn net_recv(params: Json, w: &mut JsonWriter) -> fmt::Result {
         .map_or(crate::rede::pilha::BUFFER_DA_CONEXAO, |m| {
             (m as usize).min(crate::rede::pilha::BUFFER_DA_CONEXAO)
         });
+    if destino.protocolo == politica::endereco::Protocolo::Udp {
+        return net_recv_datagrama(numero, &dono, maximo, w);
+    }
     let (dados, estado) = match crate::rede::pilha::espiar(numero, &dono, maximo) {
         Ok(r) => r,
         Err(motivo) => {
@@ -2228,6 +2241,64 @@ fn net_recv(params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.end_object()
 }
 
+/// `net.recv` numa associação UDP: um datagrama inteiro, ou nenhum — ver
+/// `rede::pilha` sobre a associação. Em texto se o datagrama inteiro é
+/// texto, em base64 se não é: um datagrama não se corta no meio de um
+/// caractere, porque o resto dele não vem depois. O que não cabe em `max`
+/// fica na associação, e a resposta diz o tamanho em `datagram`.
+fn net_recv_datagrama(
+    numero: u64,
+    dono: &crate::rede::conexoes::Dono,
+    maximo: usize,
+    w: &mut JsonWriter,
+) -> fmt::Result {
+    use crate::rede::pilha::Datagrama;
+    let (datagrama, estado) = match crate::rede::pilha::espiar_datagrama(numero, dono, maximo) {
+        Ok(r) => r,
+        Err(motivo) => {
+            w.field_str("error", motivo)?;
+            return w.end_object();
+        }
+    };
+    w.field_u64("connection", numero)?;
+    w.field_str("state", estado.nome())?;
+    let (dados, chegou) = match datagrama {
+        Datagrama::Inteiro(dados) => (dados, true),
+        Datagrama::Nenhum => (alloc::vec::Vec::new(), false),
+        Datagrama::Grande(tamanho) => {
+            w.field_u64("returned", 0)?;
+            w.field_u64("datagram", tamanho as u64)?;
+            w.field_str(
+                "error",
+                "o proximo datagrama nao cabe em max: ele fica na conexao, com o tamanho em `datagram`",
+            )?;
+            return w.end_object();
+        }
+    };
+    w.field_u64("returned", dados.len() as u64)?;
+    if chegou {
+        w.field_u64("datagram", dados.len() as u64)?;
+    }
+    match core::str::from_utf8(&dados) {
+        Ok(t) => {
+            w.field_str("encoding", "utf-8")?;
+            w.field_str("content", t)?;
+        }
+        Err(_) => {
+            w.field_str("encoding", "base64")?;
+            w.key("content")?;
+            w.begin_str()?;
+            em_base64(&dados, |c| w.push_str(c))?;
+            w.end_str()?;
+        }
+    }
+    if chegou && let Err(motivo) = crate::rede::pilha::consumir_datagrama(numero, dono, dados.len())
+    {
+        w.field_str("error", motivo)?;
+    }
+    w.end_object()
+}
+
 /// Arma a espera de um `net.recv` na conexão `numero` e suspende o comando
 /// — ver `rede::espera`. `Ok(true)` suspenso; `Ok(false)` quando há o que
 /// dizer agora, ou a conexão não é a que foi decidida para quem pede — e a
@@ -2252,7 +2323,7 @@ fn suspender_na_conexao(numero: Option<u64>, ms: u64) -> Result<bool, &'static s
 fn net_close(params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.begin_object()?;
     let numero = params.member("connection").and_then(|v| v.as_u64());
-    let Some((dono, numero)) = conexao_do_pedido(numero, w)? else {
+    let Some((dono, numero, _)) = conexao_do_pedido(numero, w)? else {
         return w.end_object();
     };
     match crate::rede::pilha::fechar(numero, &dono) {

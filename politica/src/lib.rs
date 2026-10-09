@@ -66,10 +66,11 @@ pub use permissao::Permissao;
 ///   do administrador, e o do administrador não muda em tempo de execução.
 ///   O `fs.write` dele é o do operador, `/armazem/compartilhado`: o teto
 ///   tem de conter o que o operador recebe, para o operador ser delegável.
-/// - `net.connect`, nos dois, alcança um destino só: o eco que a bancada põe
-///   em `10.0.2.100:7` (um `guestfwd` do emulador). Enumerado, como todo
-///   destino: a imagem de desenvolvimento não disca nada que não esteja
-///   escrito, nem o sistema.
+/// - `net.connect`, nos dois, alcança os dois destinos da bancada, os dois
+///   servidos pelo próprio emulador, sem servidor no hospedeiro: o eco TCP,
+///   em `10.0.2.100:7` (um `guestfwd`), e o TFTP do emulador, em
+///   `10.0.2.2:69` (UDP). Enumerados, como todo destino: a imagem de
+///   desenvolvimento não disca nada que não esteja escrito, nem o sistema.
 /// - `quorum admin.revoke 2 3`: revogar a credencial de um administrador
 ///   exige a prova de duas outras, de um grupo de três — o da imagem.
 macro_rules! papeis_de_sistema {
@@ -78,7 +79,7 @@ macro_rules! papeis_de_sistema {
 papel sistema agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.raw_read keyboard.read debug.trigger terminal.attach audit.read policy.read message.send message.read
 recurso sistema fs.read /
 recurso sistema fs.write /armazem
-recurso sistema net.connect tcp:10.0.2.100:7
+recurso sistema net.connect tcp:10.0.2.100:7 udp:10.0.2.2:69
 armazem sistema 268435456 65536
 recurso sistema process.run /
 recurso sistema message.send papel:observador papel:operador papel:sistema papel:administrador
@@ -88,7 +89,7 @@ processos sistema 32
 papel administrador agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke
 recurso administrador fs.read /dados /bin /programas /armazem/compartilhado
 recurso administrador fs.write /armazem/compartilhado
-recurso administrador net.connect tcp:10.0.2.100:7
+recurso administrador net.connect tcp:10.0.2.100:7 udp:10.0.2.2:69
 armazem administrador 67108864 16384
 recurso administrador process.run /bin /programas
 recurso administrador message.send papel:operador papel:sistema papel:administrador
@@ -121,8 +122,9 @@ pub const PADRAO: &str = concat!(
 # de caminho, o message.send e o net.connect tem o alcance escrito numa
 # linha `recurso` — o de message.send e o papel do destinatario,
 # `papel:<nome>`, e o de net.connect cada destino inteiro,
-# `tcp:<ipv4>:<porta>`, os dois enumerados. Nao ha curinga. O unico destino
-# desta imagem e o eco da bancada, 10.0.2.100:7. So o sistema e o proprio administrador alcancam o administrador:
+# `tcp:<ipv4>:<porta>` ou `udp:<ipv4>:<porta>`, os dois enumerados. Nao ha
+# curinga. Os unicos destinos desta imagem sao os da bancada: o eco TCP em
+# 10.0.2.100:7 e o TFTP do emulador, UDP, em 10.0.2.2:69. So o sistema e o proprio administrador alcancam o administrador:
 # nenhum policy.write da esse alcance a outro papel.
 
 papel observador agent.read system.read log.read ui.read message.read
@@ -132,7 +134,7 @@ processos observador 2
 papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read
 recurso operador fs.read /dados /bin /programas /armazem/compartilhado
 recurso operador fs.write /armazem/compartilhado
-recurso operador net.connect tcp:10.0.2.100:7
+recurso operador net.connect tcp:10.0.2.100:7 udp:10.0.2.2:69
 armazem operador 16777216 4096
 recurso operador process.run /bin /programas
 recurso operador message.send papel:operador papel:sistema
@@ -269,11 +271,15 @@ mod testes {
             Codigo::DenyPermission
         );
         for papel in ["operador", "administrador", "sistema"] {
-            assert_eq!(
-                d(papel, NetConnect, Some("tcp:10.0.2.100:7")),
-                Codigo::Allow,
-                "{papel}"
-            );
+            for dentro in ["tcp:10.0.2.100:7", "udp:10.0.2.2:69"] {
+                assert_eq!(
+                    d(papel, NetConnect, Some(dentro)),
+                    Codigo::Allow,
+                    "{papel} {dentro}"
+                );
+            }
+            // O protocolo é parte do destino: o TFTP, que é UDP, não é
+            // alcançado como TCP, nem o eco TCP como UDP.
             for fora in [
                 "tcp:10.0.2.100:8",
                 "tcp:10.0.2.101:7",
@@ -281,6 +287,11 @@ mod testes {
                 "tcp:010.0.2.100:7",
                 "tcp:10.0.2.100:07",
                 "udp:10.0.2.100:7",
+                "tcp:10.0.2.2:69",
+                "udp:10.0.2.2:70",
+                "udp:10.0.2.3:53",
+                "udp:10.0.2.2:069",
+                "UDP:10.0.2.2:69",
                 "tcp:10.0.2.100",
                 "",
             ] {
@@ -322,7 +333,10 @@ mod testes {
             if esperado && perm.recurso_e_endereco() {
                 assert_eq!(
                     sistema.recursos.get(&perm).unwrap(),
-                    &["tcp:10.0.2.100:7".to_string()]
+                    &[
+                        "tcp:10.0.2.100:7".to_string(),
+                        "udp:10.0.2.2:69".to_string()
+                    ]
                 );
             }
             if esperado && perm.recurso_e_caminho() {
