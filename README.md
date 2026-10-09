@@ -2357,6 +2357,78 @@ porque o handler pergunta `pode_suspender` antes de armar. A que quebra a
 permissão na origem — o contexto que permite sempre — é a quarta da
 tabela.
 
+### As mutações do UDP
+
+Trinta mutações contra o que a associação promete — só o destino, o
+datagrama inteiro, o teto do quadro, a fila, a porta própria, o socket que
+sai da pilha, a espera e o protocolo como parte do destino —, contra os
+casos da rede da suíte de quatro núcleos, no x86, e as da política também
+contra os testes dela no hospedeiro: **trinta reprovadas**.
+
+| Mutação | Reprovada por |
+|---|---|
+| o filtro de origem não filtra | `rede: o datagrama de outra origem nao chega` — um alheio acabou a espera |
+| o filtro só confere o endereço | o mesmo caso — o de outra porta acabou a espera |
+| o filtro só confere a porta | o mesmo caso — o de outro endereço acabou a espera |
+| a volta da pilha não descarta o alheio | o mesmo caso — o alheio acabou a espera |
+| o desenho anterior: só quem lê ou espera descarta | o mesmo caso — o alheio ficou na fila esperando uma leitura |
+| o alheio descartado não é contado | o mesmo caso |
+| o consumo tira o que estiver na frente | `rede: o datagrama nao se corta` — tirou um datagrama que não foi o entregue |
+| o consumo não confere a origem | `rede: o datagrama de outra origem nao chega` — tirou o alheio que esperava atrás |
+| o consumo não confere o tamanho | `rede: o datagrama nao se corta` |
+| o datagrama maior que `max` é cortado | o mesmo caso |
+| o datagrama maior que `max` é tirado e perdido | o mesmo caso — o que devia ficar não chegou |
+| a entrega não tira o datagrama | `rede: o datagrama vai e volta inteiro` — o primeiro bloco veio de novo |
+| `net.send` sem o teto | `rede: o datagrama nao se corta` — 1473 bytes saíram |
+| o teto oito bytes mais largo | o mesmo caso — com a constante errada, 1473 bytes saíram |
+| o teto exclusivo | o mesmo caso — 1472 bytes não saíram |
+| a fila de saída cheia aceita e perde calado | `rede: a fila cheia recusa o datagrama` |
+| duas associações vivas na mesma porta | `rede: a associacao tem a sua porta` |
+| fechar deixa o socket na pilha | o mesmo caso — sobrou um socket de ninguém |
+| fechar desliga o socket e o deixa na pilha | o mesmo caso |
+| a derrubada deixa o socket na pilha | `rede: a associacao de quem acabou e derrubada` |
+| o waker não fica no socket UDP | `rede: o datagrama de outra origem nao chega` — o injetado nem acordou a espera |
+| a associação nunca tem o que ler | o mesmo caso — o do destino não acabou a espera |
+| a associação não espera | o mesmo caso — a leitura vazia não suspendeu |
+| o teto por titular só conta TCP | `rede: o teto conta as associacoes` |
+| `udp:` lido como TCP | `endereco::testes::o_protocolo_separa_os_destinos`, `a_forma_normal`, e a política padrão deixa de se ler — vinte e três testes |
+| a forma normal sem o protocolo | os mesmos |
+| a forma normal sem o protocolo, contra a imagem | o `xtask`, antes de montar a imagem: a política dela não se lê |
+| a decisão compara o destino sem o protocolo | `testes::a_matriz_aprovada` — o operador alcançou `udp:10.0.2.100:7` |
+| a mesma, contra a suíte | `rede: o destino e o recurso` — o sistema abriu `udp:10.0.2.100:7` |
+| o `discador` sem a perna UDP | `rede: o programa disca pelo gate` |
+
+Desenhá-las mostrou quatro casos que não olhavam o que deviam; e reler o
+desenho enquanto elas rodavam mostrou um defeito, que pôs a primeira
+rodada de lado — as trinta da tabela rodaram sobre o código corrigido:
+
+- **O alheio ocupava a fila do destino.** Descartado só quando alguém lia
+  ou esperava, ele ficava na fila enquanto ninguém lia, e oito deles — a
+  fila inteira — faziam o `smoltcp` jogar fora o datagrama seguinte do
+  destino. Reproduzido no desenho anterior: com a fila cheia de alheios, o
+  bloco do TFTP se perdeu. Agora a volta da pilha descarta o alheio da
+  frente de cada associação, debaixo da mesma trava, logo depois de
+  receber; quem lê ou espera vê a frente que a última volta deixou.
+- **A fronteira lia a constante.** O caso mandava o teto da pilha e um
+  byte a mais: com a constante errada, mandaria 1481 bytes, recusados, e
+  1480, aceitos e perdidos calados — a pilha não fragmenta. E o maior
+  datagrama era lixo que o TFTP ignorava, sem prova de que tinha saído.
+  Agora o teto do caso é o número, 1472, e o maior datagrama é um pedido
+  de leitura que o TFTP responde.
+- **O socket que sobrava na pilha só aparecia por acaso.** O `smoltcp`
+  entrega o datagrama ao primeiro socket ligado à porta, na ordem do
+  conjunto; o que sobrou de uma associação fechada só roubava o bloco da
+  nova se viesse antes dela. E o que só se desliga, sem sair, solta a
+  porta e não aparecia nunca. A suíte agora confere que nenhum socket da
+  pilha é de ninguém. Medido sem essa conferência: fechar desligando e
+  deixando sobrevive; fechar e derrubar deixando ligado foram reprovados,
+  nesta rodada, pela porta reaproveitada — porque o socket que sobrou
+  estava antes do novo, o que depende de quais posições estavam livres.
+- **A fila de saída cheia e a origem no consumo** não eram alcançadas por
+  caso nenhum. A fila cheia agora é: um destino do enlace que não responde
+  ao ARP segura tudo nela. A origem também: o alheio que chegou atrás de
+  um datagrama do destino fica na frente quando aquele sai.
+
 ## Vários agentes
 
 O Duke atende vários agentes ao mesmo tempo, cada um numa **sessão**: um
