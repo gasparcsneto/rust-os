@@ -676,11 +676,15 @@ pub fn recolher_orfas() -> usize {
         }
         n
     });
-    drop(orfas);
+    // As contas antes da tela, como em `largar`: quem vê a camada sair — a
+    // suíte, o `process_surfaces` do agente — já vê a conta fechada. Na
+    // ordem inversa, um fio em outro núcleo via a camada fora da tela e a
+    // superfície ainda viva, até o coletor voltar a andar.
     if quantas > 0 {
         OCUPADAS.fetch_sub(quantas as u64, Ordering::Relaxed);
         RECOLHIDAS.fetch_add(quantas as u64, Ordering::Relaxed);
     }
+    drop(orfas);
     quantas
 }
 
