@@ -70,12 +70,19 @@ pub use permissao::Permissao;
 ///   do administrador, e o do administrador não muda em tempo de execução.
 ///   O `fs.write` dele é o do operador, `/armazem/compartilhado`: o teto
 ///   tem de conter o que o operador recebe, para o operador ser delegável.
-/// - `net.connect`, nos dois, alcança os três destinos da bancada, os três
-///   servidos pelo próprio emulador, sem servidor no hospedeiro: o eco TCP,
-///   em `10.0.2.100:7` (um `guestfwd`), o TFTP do emulador, em
+/// - `net.connect`, nos dois, alcança os quatro destinos da bancada, sem
+///   porta aberta no hospedeiro: o eco TCP, em `10.0.2.100:7` (um
+///   `guestfwd` que roda um `cat` a cada conexão), o eco TLS, em
+///   `10.0.2.100:443` (um `guestfwd` que roda, a cada conexão, o servidor
+///   TLS da bancada — o OpenSSL, pelo Python), o TFTP do emulador, em
 ///   `10.0.2.2:69` (UDP), e o DNS do emulador, em `10.0.2.3:53` (UDP).
 ///   Enumerados, como todo destino: a imagem de desenvolvimento não disca
-///   nada que não esteja escrito, nem o sistema.
+///   nada que não esteja escrito, nem o sistema. O nome que o servidor TLS
+///   apresenta não é recurso: o eco TLS serve vários nomes no mesmo
+///   destino, e o gate decide o destino.
+/// - `random.read` — os bytes do gerador do kernel — no `sistema`, no
+///   `administrador` e no `operador`, que conecta; não no `observador`, que
+///   não conecta a nada.
 /// - `process.isolate`, `agent.suspend` e `credential.suspend`, no `sistema` e
 ///   no `administrador`, alcançam `observador`, `operador` e `sistema` —
 ///   nunca `administrador`: suspender um administrador seria tirar dele,
@@ -98,12 +105,12 @@ pub use permissao::Permissao;
 macro_rules! papeis_de_sistema {
     () => {
         "\
-papel sistema agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.raw_read keyboard.read debug.trigger terminal.attach audit.read policy.read message.send message.read security.read net.observe net.block process.isolate agent.suspend credential.suspend
+papel sistema agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.raw_read keyboard.read debug.trigger terminal.attach audit.read policy.read message.send message.read security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read
 recurso sistema fs.read /
 recurso sistema fs.write /armazem
-recurso sistema net.connect tcp:10.0.2.100:7 udp:10.0.2.2:69 udp:10.0.2.3:53
+recurso sistema net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53
 recurso sistema net.observe udp:10.0.2.3:53
-recurso sistema net.block tcp:10.0.2.100:7 udp:10.0.2.2:69 udp:10.0.2.3:53
+recurso sistema net.block tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53
 armazem sistema 268435456 65536
 recurso sistema process.run /
 recurso sistema message.send papel:observador papel:operador papel:sistema papel:administrador
@@ -113,12 +120,12 @@ recurso sistema credential.suspend papel:observador papel:operador papel:sistema
 taxa sistema 400 800
 processos sistema 32
 
-papel administrador agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke security.read net.observe net.block process.isolate agent.suspend credential.suspend
+papel administrador agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read
 recurso administrador fs.read /dados /bin /programas /armazem/compartilhado
 recurso administrador fs.write /armazem/compartilhado
-recurso administrador net.connect tcp:10.0.2.100:7 udp:10.0.2.2:69 udp:10.0.2.3:53
+recurso administrador net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53
 recurso administrador net.observe udp:10.0.2.3:53
-recurso administrador net.block tcp:10.0.2.100:7 udp:10.0.2.2:69 udp:10.0.2.3:53
+recurso administrador net.block tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53
 armazem administrador 67108864 16384
 recurso administrador process.run /bin /programas
 recurso administrador message.send papel:operador papel:sistema papel:administrador
@@ -132,7 +139,7 @@ quorum admin.revoke 2 3
 
 papel seguranca audit.read net.observe net.block process.isolate
 recurso seguranca net.observe udp:10.0.2.3:53
-recurso seguranca net.block tcp:10.0.2.100:7 udp:10.0.2.2:69 udp:10.0.2.3:53
+recurso seguranca net.block tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53
 recurso seguranca process.isolate papel:observador papel:operador
 taxa seguranca 10 20
 servico nsf seguranca
@@ -164,8 +171,11 @@ pub const PADRAO: &str = concat!(
 # `papel:<nome>`, e o de net.connect cada destino inteiro,
 # `tcp:<ipv4>:<porta>` ou `udp:<ipv4>:<porta>`, os dois enumerados. Nao ha
 # curinga. Os unicos destinos desta imagem sao os da bancada: o eco TCP em
-# 10.0.2.100:7, o TFTP do emulador, UDP, em 10.0.2.2:69, e o DNS do
-# emulador, UDP, em 10.0.2.3:53. So o sistema e o proprio administrador
+# 10.0.2.100:7, o eco TLS em 10.0.2.100:443, o TFTP do emulador, UDP, em
+# 10.0.2.2:69, e o DNS do emulador, UDP, em 10.0.2.3:53. O nome de um
+# servidor TLS nao e recurso: o que se enumera e o destino. O random.read
+# (bytes do gerador do kernel, para a chave efemera do TLS) e de quem
+# conecta. So o sistema e o proprio administrador
 # alcancam o administrador: nenhum policy.write da esse alcance a outro
 # papel. O tecido de seguranca (servico nsf) decide pelo papel seguranca, e
 # so pelo que ele enumera.
@@ -174,10 +184,10 @@ papel observador agent.read system.read log.read ui.read message.read
 taxa observador 20 40
 processos observador 2
 
-papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read
+papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read
 recurso operador fs.read /dados /bin /programas /armazem/compartilhado
 recurso operador fs.write /armazem/compartilhado
-recurso operador net.connect tcp:10.0.2.100:7 udp:10.0.2.2:69 udp:10.0.2.3:53
+recurso operador net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53
 armazem operador 16777216 4096
 recurso operador process.run /bin /programas
 recurso operador message.send papel:operador papel:sistema
@@ -314,7 +324,12 @@ mod testes {
             Codigo::DenyPermission
         );
         for papel in ["operador", "administrador", "sistema"] {
-            for dentro in ["tcp:10.0.2.100:7", "udp:10.0.2.2:69", "udp:10.0.2.3:53"] {
+            for dentro in [
+                "tcp:10.0.2.100:7",
+                "tcp:10.0.2.100:443",
+                "udp:10.0.2.2:69",
+                "udp:10.0.2.3:53",
+            ] {
                 assert_eq!(
                     d(papel, NetConnect, Some(dentro)),
                     Codigo::Allow,
@@ -380,7 +395,12 @@ mod testes {
                 let alcance: &[&str] = if perm == Permissao::NetObserve {
                     &["udp:10.0.2.3:53"]
                 } else {
-                    &["tcp:10.0.2.100:7", "udp:10.0.2.2:69", "udp:10.0.2.3:53"]
+                    &[
+                        "tcp:10.0.2.100:7",
+                        "tcp:10.0.2.100:443",
+                        "udp:10.0.2.2:69",
+                        "udp:10.0.2.3:53",
+                    ]
                 };
                 assert_eq!(
                     sistema.recursos.get(&perm).unwrap(),
@@ -714,7 +734,12 @@ mod testes {
             assert_eq!(d(AuditRead, None), Codigo::Allow);
             assert_eq!(d(NetObserve, Some("udp:10.0.2.3:53")), Codigo::Allow);
             assert_eq!(d(NetObserve, Some("udp:10.0.2.2:69")), Codigo::DenyResource);
-            for dentro in ["tcp:10.0.2.100:7", "udp:10.0.2.2:69", "udp:10.0.2.3:53"] {
+            for dentro in [
+                "tcp:10.0.2.100:7",
+                "tcp:10.0.2.100:443",
+                "udp:10.0.2.2:69",
+                "udp:10.0.2.3:53",
+            ] {
                 assert_eq!(d(NetBlock, Some(dentro)), Codigo::Allow, "{dentro}");
             }
             for fora in ["tcp:10.0.2.100:8", "udp:10.0.2.99:53", ""] {
@@ -754,6 +779,7 @@ mod testes {
                 TerminalAttach,
                 AgentSuspend,
                 CredentialSuspend,
+                RandomRead,
             ] {
                 assert_eq!(
                     d(perm, Some("tcp:10.0.2.100:7")),
@@ -796,6 +822,44 @@ mod testes {
         let teto = PADRAO.replace("servico nsf seguranca", "servico nsf administrador");
         let teto = Politica::ler(&teto).expect("le");
         assert!(teto.conferir_tetos(&["administrador"]).is_err());
+    }
+
+    /// `random.read`: quem conecta tem — o operador, o administrador e o
+    /// sistema —; quem não conecta a nada não — o observador, o tecido de
+    /// segurança. Sem recurso, e não sensível: não é caminho, nem destino,
+    /// nem papel, e o que sai não diz nada de ninguém.
+    #[test]
+    fn quem_le_o_aleatorio() {
+        use Permissao::RandomRead;
+        let p = padrao();
+        for papel in ["operador", "administrador", "sistema"] {
+            assert_eq!(
+                p.decidir(Some(papel), RandomRead, None),
+                Codigo::Allow,
+                "{papel}"
+            );
+        }
+        for papel in ["observador", "seguranca"] {
+            assert_eq!(
+                p.decidir(Some(papel), RandomRead, None),
+                Codigo::DenyPermission,
+                "{papel}"
+            );
+        }
+        assert!(!RandomRead.sensivel());
+        assert!(!RandomRead.administrativa());
+        assert!(
+            !RandomRead.recurso_e_caminho()
+                && !RandomRead.recurso_e_endereco()
+                && !RandomRead.recurso_e_papel()
+        );
+        assert_eq!(Permissao::de_nome("random.read"), Some(RandomRead));
+        // O teto do administrador contém o que o operador recebe: o
+        // operador continua delegável.
+        assert_eq!(p.cabe_em("operador", "administrador"), Ok(()));
+        // Na emergência, o sistema continua com ela.
+        let e = Politica::emergencia();
+        assert_eq!(e.decidir(Some("sistema"), RandomRead, None), Codigo::Allow);
     }
 
     /// Só o DNS da bancada é observável — o único destino que um papel tem

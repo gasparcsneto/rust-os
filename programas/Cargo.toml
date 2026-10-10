@@ -36,6 +36,12 @@ aparencia = { path = "../aparencia" }
 # `toolkit/src/lib.rs`. Testados no hospedeiro, e usados aqui pela janela.
 toolkit = { path = "../toolkit" }
 
+# O cliente TLS 1.3, sobre o `rustls` — ver `tls/src/lib.rs`. Testado no
+# hospedeiro contra o servidor do `rustls` com o *ring*, e usado aqui pelo
+# `programas::tls`, que lhe dá o transporte, a semente e o relógio pelo
+# gate.
+tls = { path = "../tls" }
+
 # Sem `unwind`: não há quem desenrole a pilha no espaço do usuário, e um
 # pânico encerra o processo com um código — ver `src/lib.rs`.
 [profile.dev]

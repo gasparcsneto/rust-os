@@ -64,3 +64,55 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## rustls — o exemplo de provedor
+
+O provedor de criptografia do pacote `tls` segue a estrutura do exemplo de
+provedor do próprio `rustls`, que mostra como ligar os traits dele às
+primitivas do RustCrypto e do dalek:
+
+| Arquivo do Duke | Origem no `rustls` |
+|---|---|
+| `tls/src/cifra.rs` — a cifra de um registro do TLS 1.3 | `provider-example/src/aead.rs` — `Tls13Cipher` |
+| `tls/src/resumo.rs` — o resumo e o HMAC | `provider-example/src/hash.rs` e `hmac.rs` |
+| `tls/src/troca.rs` — a troca X25519 | `provider-example/src/kx.rs` |
+| `tls/src/provedor.rs` — o `CryptoProvider` montado | `provider-example/src/lib.rs` — `provider()` |
+
+Obtido de <https://github.com/rustls/rustls>, na tag `v/0.23.31`, como
+referência para os traits da série 0.23; o `rustls` usado é o 0.23.45.
+
+Não é cópia literal: o que muda, e por quê, está no cabeçalho de cada
+arquivo. O exemplo traz o TLS 1.2 e sorteia pelo sistema operacional; aqui é
+só TLS 1.3, a cifra é uma implementação genérica para as três suítes, o
+acaso é o gerador semeado por quem conecta — que falha fechado sem semente
+—, a troca X25519 recusa o ponto que não contribui (o exemplo aceita) e há
+também P-256, e a verificação de assinatura é própria: ECDSA P-256 e
+Ed25519 estrito, e nada além.
+
+```text
+Copyright (c) 2016 Joseph Birr-Pixton <jpixton@gmail.com>
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```

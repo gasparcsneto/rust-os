@@ -64,6 +64,10 @@ jobs:
       # publicados do Noise e a conversa com o `snow`, uma implementação
       # independente, nos dois papéis.
       #
+      # E o cliente TLS dos programas, que conversa nos testes com o
+      # servidor do `rustls` sobre o *ring* — outro provedor de cifra, outra
+      # verificação de assinatura — e com uma PKI montada a cada rodada.
+      #
       # E a âncora da persistência, que conversa nos testes com o `swtpm` —
       # um TPM 2.0 de verdade, a implementação de referência — e por isso
       # precisa dele instalado aqui também. Sem ele o teste falha, e não
@@ -74,11 +78,11 @@ jobs:
           sudo apt-get install -y --no-install-recommends swtpm
 
       - name: Testes no hospedeiro
-        run: cargo test -p xtask -p tipografia -p aparencia -p toolkit -p sigilo -p politica -p ancora -p diario -p armazem -p seguranca -p protocolo --features protocolo/alloc
+        run: cargo test -p xtask -p tipografia -p aparencia -p toolkit -p sigilo -p politica -p ancora -p diario -p armazem -p seguranca -p tls -p protocolo --features protocolo/alloc
 
       - name: Lints
         run: |
-          cargo clippy -p xtask -p tipografia -p aparencia -p toolkit -p sigilo -p politica -p ancora -p diario -p armazem -p seguranca --all-targets -- -D warnings
+          cargo clippy -p xtask -p tipografia -p aparencia -p toolkit -p sigilo -p politica -p ancora -p diario -p armazem -p seguranca -p tls --all-targets -- -D warnings
           cargo clippy -p protocolo --features alloc --all-targets -- -D warnings
           for alvo in x86_64-unknown-uefi aarch64-unknown-uefi; do
             (cd iniciador && cargo clippy --target "$alvo" -- -D warnings)
@@ -134,7 +138,7 @@ jobs:
         env:
           RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
         run: |
-          cargo doc --no-deps -p protocolo -p tipografia -p aparencia -p toolkit -p sigilo -p politica -p ancora -p diario -p armazem -p seguranca -p xtask --features protocolo/alloc
+          cargo doc --no-deps -p protocolo -p tipografia -p aparencia -p toolkit -p sigilo -p politica -p ancora -p diario -p armazem -p seguranca -p tls -p xtask --features protocolo/alloc
           for alvo in x86_64-unknown-uefi aarch64-unknown-uefi; do
             (cd iniciador && cargo doc --no-deps --target "$alvo")
           done
@@ -186,13 +190,18 @@ jobs:
       # por ferramentas que não têm nada a ver com este projeto. Nenhuma delas
       # precisa de privilégio: `mkfs.btrfs --rootdir` monta o sistema de
       # arquivos já com conteúdo, sem montar nada.
+      #
+      # E o Python 3, que o runner já traz: o servidor da bancada TLS é o
+      # módulo `ssl` dele — o OpenSSL, uma implementação inteira de fora —,
+      # que o emulador roda a cada conexão ao eco TLS. Pedido aqui para que
+      # a dependência esteja escrita, e não só presente por acaso.
       - name: Instalar o emulador e as ferramentas de disco
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             qemu-system-x86 qemu-system-arm \
             gdisk dosfstools mtools btrfs-progs ovmf qemu-efi-aarch64 \
-            swtpm
+            swtpm python3
 
       - name: Suíte de testes
         run: cargo xtask test --arch ${{ matrix.arch }}

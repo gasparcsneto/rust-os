@@ -1,23 +1,28 @@
-//! A espera de um `net.recv`: o pedido que dorme até a pilha ter o que
-//! dizer.
+//! A espera de um `net.recv` ou de um `net.send`: o pedido que dorme até a
+//! pilha ter o que dizer.
 //!
 //! # O evento
 //!
-//! O socket do `smoltcp` guarda o waker de quem espera a leitura e o
-//! aciona quando um dado entra no buffer de recepção, quando o estado muda,
-//! e quando a conexão é fechada ou derrubada (`close`, `abort`) — no TCP; no
-//! UDP, quando chega um datagrama, de qualquer origem: o de outra que não o
-//! destino sai na mesma volta da pilha, a conferência não acha nada, e a
-//! espera continua. Quem acorda é a pilha, na volta em que processou o
-//! evento — no fio `rede` ou no comando que a sondou —, e quem espera não
-//! pergunta nada enquanto isso. O prazo é o do relógio das tarefas
-//! ([`crate::tarefas::relogio`]), acordado pelo tique.
+//! Cada sentido tem o seu ([`Sentido`]). O socket do `smoltcp` guarda o
+//! waker de quem espera a **leitura** e o aciona quando um dado entra no
+//! buffer de recepção, quando o estado muda, e quando a conexão é fechada ou
+//! derrubada (`close`, `abort`) — no TCP; no UDP, quando chega um
+//! datagrama, de qualquer origem: o de outra que não o destino sai na mesma
+//! volta da pilha, a conferência não acha nada, e a espera continua. E
+//! guarda, à parte, o waker de quem espera **espaço para mandar**, e o
+//! aciona quando um ACK do outro lado tira bytes da fila de saída — no TCP;
+//! no UDP, quando um datagrama sai da fila —, e quando o estado muda. Quem
+//! acorda é a pilha, na volta em que processou o evento — no fio `rede` ou
+//! no comando que a sondou —, e quem espera não pergunta nada enquanto
+//! isso. O prazo é o do relógio das tarefas ([`crate::tarefas::relogio`]),
+//! acordado pelo tique.
 //!
 //! # O comando não espera: suspende
 //!
 //! Um handler roda no executor, e um handler que esperasse prenderia todos
 //! os canais, os consoles e os processos atrás dele. O `net.recv` que não
-//! tem o que dizer **arma** a espera na conexão e **suspende** — ver
+//! tem o que dizer — e o `net.send` que não tem onde pôr nada — **arma** a
+//! espera na conexão e **suspende** — ver
 //! [`crate::autorizacao::suspender`] —, sem escrever resposta nenhuma. Quem
 //! despachou o pedido é quem sabe esperar sem prender os outros:
 //!
@@ -35,14 +40,20 @@
 //! pedido não vale para o seguinte: uma revogação no meio da espera recusa
 //! a entrega.
 //!
-//! # Uma espera por conexão
+//! O `net.send` que suspende é executado de novo com o mesmo anexo: quem
+//! despachou o guarda junto com a linha — o processo, no texto do pedido; o
+//! canal, ao lado da linha suspensa —, e a entrega dos bytes também é
+//! decidida de novo.
+//!
+//! # Uma espera de cada sentido por conexão
 //!
 //! Uma conexão tem um dono, e o dono pede uma coisa de cada vez pelo caminho
 //! dele. Mas um agente pode pedir pelo canal e pelo Terminal em que confirma
-//! uma linha, com o mesmo dono — e o socket guarda **um** waker: o segundo
-//! apagaria o primeiro, que passaria a acordar só no prazo, sem ninguém
-//! saber por quê. A segunda espera na mesma conexão é recusada, com o
-//! motivo.
+//! uma linha, com o mesmo dono — e o socket guarda **um** waker de cada
+//! sentido: o segundo apagaria o primeiro, que passaria a acordar só no
+//! prazo, sem ninguém saber por quê. A segunda espera do mesmo sentido na
+//! mesma conexão é recusada, com o motivo; uma leitura e um envio esperam
+//! juntos, cada um no seu waker.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -59,11 +70,22 @@ use crate::tarefas::relogio::{self, Dormir};
 /// Quem quer esperar mais pede de novo — e a decisão é tomada de novo.
 pub const PRAZO_MAXIMO_MS: u64 = 10_000;
 
+/// Para que lado a espera olha.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sentido {
+    /// A de um `net.recv`: o dado que chega.
+    Leitura,
+    /// A de um `net.send`: o espaço na fila de saída.
+    Escrita,
+}
+
 /// Por que a espera acabou.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Desfecho {
-    /// Chegou dado.
+    /// Chegou dado — a espera de leitura.
     Chegou,
+    /// Abriu espaço na fila de saída — a espera de escrita.
+    Coube,
     /// O estado mudou do que o pedido viu: o aperto terminou, o outro lado
     /// fechou, a conexão caiu.
     Mudou,
@@ -81,6 +103,7 @@ pub struct Espera {
     numero: u64,
     conexao: u64,
     dono: Dono,
+    sentido: Sentido,
     /// O estado que o pedido viu: sair dele é um evento.
     estado: Estado,
     /// O tique em que a espera vence.
@@ -88,14 +111,21 @@ pub struct Espera {
 }
 
 impl Espera {
-    /// Arma a espera de um `net.recv` na conexão `conexao` de `dono`, por
-    /// `ms` milissegundos — no máximo [`PRAZO_MAXIMO_MS`].
+    /// Arma a espera de um `net.recv` — ou, no sentido da escrita, de um
+    /// `net.send` — na conexão `conexao` de `dono`, por `ms` milissegundos
+    /// — no máximo [`PRAZO_MAXIMO_MS`].
     ///
-    /// `Ok(None)` quando não há o que esperar: já chegou dado, ou a conexão
-    /// está num estado de que nada mais vem — e sem relógio, que é quem
-    /// venceria o prazo. `Err` com o motivo quando a conexão já tem quem
-    /// espere, ou não é de `dono`.
-    pub fn armar(conexao: u64, dono: Dono, ms: u64) -> Result<Option<Espera>, &'static str> {
+    /// `Ok(None)` quando não há o que esperar: já chegou dado, ou já cabe
+    /// algo na fila de saída, ou a conexão está num estado de que nada mais
+    /// vem — e sem relógio, que é quem venceria o prazo. `Err` com o motivo
+    /// quando a conexão já tem quem espere naquele sentido, ou não é de
+    /// `dono`.
+    pub fn armar(
+        conexao: u64,
+        dono: Dono,
+        ms: u64,
+        sentido: Sentido,
+    ) -> Result<Option<Espera>, &'static str> {
         let hz = crate::tempo::frequencia_hz() as u64;
         if hz == 0 {
             return Ok(None);
@@ -107,10 +137,11 @@ impl Espera {
             .max(1);
         let prazo = crate::tempo::ticks().saturating_add(tiques);
         Ok(
-            pilha::armar(conexao, &dono)?.map(|(numero, estado)| Espera {
+            pilha::armar(conexao, &dono, sentido)?.map(|(numero, estado)| Espera {
                 numero,
                 conexao,
                 dono,
+                sentido,
                 estado,
                 prazo,
             }),
@@ -131,8 +162,15 @@ impl Espera {
     /// com que ela processa o que chega: um evento cai antes — e a
     /// conferência o vê — ou depois — e acorda o waker registrado.
     pub fn conferir(&self, waker: Option<&Waker>) -> Option<Desfecho> {
-        pilha::conferir_espera(self.conexao, &self.dono, self.numero, self.estado, waker)
-            .or_else(|| (crate::tempo::ticks() >= self.prazo).then_some(Desfecho::Venceu))
+        pilha::conferir_espera(
+            self.conexao,
+            &self.dono,
+            self.numero,
+            self.estado,
+            self.sentido,
+            waker,
+        )
+        .or_else(|| (crate::tempo::ticks() >= self.prazo).then_some(Desfecho::Venceu))
     }
 }
 

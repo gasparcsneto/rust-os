@@ -17,7 +17,10 @@
 //! - **as superfícies** — [`superficie`], uma camada do compositor com os
 //!   pixels na memória do processo, e o endereço escolhido por ele;
 //!   [`desenho`], retângulos e texto com a fonte do console; e [`janela`],
-//!   a moldura que o servidor de janelas e o Terminal compartilham.
+//!   a moldura que o servidor de janelas e o Terminal compartilham;
+//! - **a rede de cima** — [`dns`], o resolvedor, e [`tls`], o cliente TLS
+//!   1.3: protocolos que rodam no processo, sobre a conexão que o gate
+//!   decidiu, e que não concedem nada.
 //!
 //! # Como um programa se escreve
 //!
@@ -55,6 +58,7 @@ pub mod nativo;
 pub mod saida;
 pub mod sistema;
 pub mod superficie;
+pub mod tls;
 
 // Para a macro `manifesto!`, que monta a nota com o envelope do protocolo.
 #[doc(hidden)]

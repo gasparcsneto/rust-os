@@ -115,6 +115,12 @@ impl AnexoDaPorta {
     pub fn entregar(mut self) -> Vec<u8> {
         core::mem::take(&mut self.0)
     }
+
+    /// Uma cópia, que se apaga como o original: a do pedido que pode
+    /// suspender, guardada para a reexecução — ver `rede::espera`.
+    pub fn copia(&self) -> Self {
+        Self(self.0.clone())
+    }
 }
 
 impl Drop for AnexoDaPorta {

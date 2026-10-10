@@ -244,6 +244,20 @@ pub static COMANDOS: &[Command] = &[
         handler: system_uptime,
     },
     Command {
+        nome: "random.read",
+        resumo: "Bytes do gerador do kernel - ChaCha20 semeado pelo virtio-rng -, em hexadecimal: para uma chave efemera, o random de um aperto TLS, um nonce. A decisao vai para a auditoria; os bytes, nunca. Sem fonte de entropia, falha com ENTROPY_UNAVAILABLE - um erro tecnico, e nao uma recusa - em vez de inventar bytes.",
+        params: &[ParamSpec {
+            nome: "bytes",
+            tipo: TipoParam::Inteiro,
+            obrigatorio: false,
+            descricao: "Quantos bytes, de 1 a 256 (padrao: 32).",
+        }],
+        acesso: Acesso::Exige(Permissao::RandomRead),
+        recurso: None,
+        mais: Mais::Nada,
+        handler: random_read,
+    },
+    Command {
         nome: "tasks.stats",
         resumo: "Estado do escalonador cooperativo e da fila de entrada.",
         params: &[],
@@ -394,7 +408,7 @@ pub static COMANDOS: &[Command] = &[
     },
     Command {
         nome: "net.send",
-        resumo: "Manda bytes por uma conexao sua: o texto de `content`, ou o anexo do pedido (binario). Devolve quantos a conexao aceitou — numa TCP, menos que todos com o buffer de saida cheio; numa UDP, um datagrama inteiro, de ate 1472 bytes, ou nada e o motivo — e o estado.",
+        resumo: "Manda bytes por uma conexao sua: o texto de `content`, ou o anexo do pedido (binario). Devolve quantos a conexao aceitou — numa TCP, menos que todos com o buffer de saida cheio; numa UDP, um datagrama inteiro, de ate 1472 bytes, ou nada e o motivo — e o estado. Com `wait`, se nada cabe agora e a conexao esta abrindo ou aberta, espera abrir espaco na fila de saida, o estado mudar, a conexao acabar ou o prazo vencer — e o pedido, com os mesmos bytes, e decidido de novo antes de mandar.",
         params: &[
             ParamSpec {
                 nome: "connection",
@@ -413,6 +427,12 @@ pub static COMANDOS: &[Command] = &[
                 tipo: TipoParam::Inteiro,
                 obrigatorio: false,
                 descricao: "Numa porta de agente: quantos bytes de anexo vieram antes deste pedido. Um processo manda o anexo pela chamada PEDIR_COM_ANEXO.",
+            },
+            ParamSpec {
+                nome: "wait",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "Quantos milissegundos esperar espaco, se nada cabe agora (padrao: 0, nao espera; teto: 10000). Uma espera de envio por conexao.",
             },
         ],
         acesso: Acesso::Exige(Permissao::NetConnect),
@@ -2225,6 +2245,65 @@ fn system_uptime(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.end_object()
 }
 
+/// Quantos bytes um `random.read` devolve sem `bytes`, e no máximo.
+const ALEATORIOS_PADRAO: u64 = 32;
+const ALEATORIOS_MAX: usize = 256;
+
+/// Bytes do gerador do kernel — ver [`crate::aleatorio`].
+///
+/// # O que fica de fora da auditoria
+///
+/// Os bytes. A auditoria grava a decisão — quem pediu, `random.read`, o
+/// resumo dos parâmetros —, e a resposta não passa por ela: um registro que
+/// guardasse a chave efêmera de um aperto TLS a entregaria a quem lê a
+/// auditoria. A resposta mora num texto que se apaga quando sai de cena, e a
+/// cópia daqui também se apaga.
+///
+/// # Falhar fechado
+///
+/// Sem fonte de entropia, o gerador não existe, e o pedido não recebe bytes
+/// de outro lugar: `ENTROPY_UNAVAILABLE`, um erro técnico — não uma recusa;
+/// o gate deixou.
+fn random_read(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let quantos = params
+        .member("bytes")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(ALEATORIOS_PADRAO);
+    // Fora da faixa é erro, e não um corte calado: quem pediu 512 bytes de
+    // chave não pode receber 256 sem saber.
+    let Some(quantos) = usize::try_from(quantos)
+        .ok()
+        .filter(|q| (1..=ALEATORIOS_MAX).contains(q))
+    else {
+        w.field_str("error", "bytes vai de 1 a 256")?;
+        return w.end_object();
+    };
+    let mut bytes = [0u8; ALEATORIOS_MAX];
+    let r = match crate::aleatorio::preencher(&mut bytes[..quantos]) {
+        Ok(()) => (|| {
+            w.field_u64("bytes", quantos as u64)?;
+            w.field_str("encoding", "hex")?;
+            w.key("content")?;
+            w.begin_str()?;
+            for &b in &bytes[..quantos] {
+                escrever_byte_hex(w, b)?;
+            }
+            w.end_str()
+        })(),
+        Err(crate::aleatorio::SemEntropia) => (|| {
+            w.field_str(
+                "error",
+                "o kernel nao tem fonte de entropia: nenhum byte aleatorio sai",
+            )?;
+            w.field_str("code", "ENTROPY_UNAVAILABLE")
+        })(),
+    };
+    politica::sigiloso::zerar(&mut bytes);
+    r?;
+    w.end_object()
+}
+
 fn memory_frames(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     let (livres, rastreados) = crate::frames::estatisticas();
 
@@ -2469,12 +2548,41 @@ fn barrado(
 }
 
 fn net_send(params: Json, w: &mut JsonWriter) -> fmt::Result {
-    w.begin_object()?;
     let mut anexo = crate::autorizacao::tirar_anexo();
-    let mut buffer = buffer_do_texto(params.member("content"));
     let numero = params.member("connection").and_then(|v| v.as_u64());
     let declarado = anexo_declarado(params.member("attachment"), &anexo);
-    let r = net_send_com(params, numero, declarado, w, &anexo, &mut buffer);
+    // A espera antes de qualquer escrita, como a do `net.recv`: o comando
+    // que suspende não responde agora — ver `rede::espera`. Só um pedido
+    // que mandaria algo espera: um malformado responde na hora com o
+    // motivo, em vez de ocupar a vaga da conexão. O anexo tirado aqui se
+    // apaga; quem despachou guarda o dele para a reexecução.
+    let mandaria = declarado.is_ok()
+        && !(params.member("content").is_some() && !anexo.is_empty())
+        && anexo.len() <= crate::rede::pilha::BUFFER_DA_CONEXAO;
+    let espera_recusada = match params.member("wait").and_then(|v| v.as_u64()) {
+        Some(ms) if ms > 0 && mandaria && crate::autorizacao::pode_suspender() => {
+            match suspender_na_conexao(numero, ms, crate::rede::espera::Sentido::Escrita) {
+                Ok(true) => {
+                    politica::sigiloso::zerar_bloco(&mut anexo);
+                    return Ok(());
+                }
+                Ok(false) => None,
+                Err(motivo) => Some(motivo),
+            }
+        }
+        _ => None,
+    };
+    w.begin_object()?;
+    let mut buffer = buffer_do_texto(params.member("content"));
+    let r = match espera_recusada {
+        // A segunda espera de envio na mesma conexão: nada sai, e o motivo
+        // diz por quê — depois da conferência de sempre da conexão.
+        Some(motivo) => conexao_do_pedido(numero, w).and_then(|achou| match achou {
+            Some(_) => falha_de_rede(w, motivo),
+            None => Ok(()),
+        }),
+        None => net_send_com(params, numero, declarado, w, &anexo, &mut buffer),
+    };
     politica::sigiloso::zerar_bloco(&mut buffer);
     politica::sigiloso::zerar_bloco(&mut anexo);
     r?;
@@ -2534,7 +2642,7 @@ fn net_recv(params: Json, w: &mut JsonWriter) -> fmt::Result {
     // responde agora — ver `rede::espera`.
     let espera_recusada = match params.member("wait").and_then(|v| v.as_u64()) {
         Some(ms) if ms > 0 && crate::autorizacao::pode_suspender() => {
-            match suspender_na_conexao(numero, ms) {
+            match suspender_na_conexao(numero, ms, crate::rede::espera::Sentido::Leitura) {
                 Ok(true) => return Ok(()),
                 Ok(false) => None,
                 Err(motivo) => Some(motivo),
@@ -2547,7 +2655,7 @@ fn net_recv(params: Json, w: &mut JsonWriter) -> fmt::Result {
         return w.end_object();
     };
     if let Some(motivo) = espera_recusada {
-        w.field_str("error", motivo)?;
+        falha_de_rede(w, motivo)?;
         return w.end_object();
     }
     let maximo = params
@@ -2668,11 +2776,16 @@ fn net_recv_datagrama(
     w.end_object()
 }
 
-/// Arma a espera de um `net.recv` na conexão `numero` e suspende o comando
-/// — ver `rede::espera`. `Ok(true)` suspenso; `Ok(false)` quando há o que
-/// dizer agora, ou a conexão não é a que foi decidida para quem pede — e a
+/// Arma a espera de um `net.recv` — ou, no sentido da escrita, de um
+/// `net.send` — na conexão `numero` e suspende o comando — ver
+/// `rede::espera`. `Ok(true)` suspenso; `Ok(false)` quando há o que dizer
+/// agora, ou a conexão não é a que foi decidida para quem pede — e a
 /// resposta de sempre diz o quê. `Err` com o motivo de não esperar.
-fn suspender_na_conexao(numero: Option<u64>, ms: u64) -> Result<bool, &'static str> {
+fn suspender_na_conexao(
+    numero: Option<u64>,
+    ms: u64,
+    sentido: crate::rede::espera::Sentido,
+) -> Result<bool, &'static str> {
     let (Some(dono), Some(numero)) = (crate::rede::conexoes::Dono::do_comando(), numero) else {
         return Ok(false);
     };
@@ -2682,7 +2795,7 @@ fn suspender_na_conexao(numero: Option<u64>, ms: u64) -> Result<bool, &'static s
         Ok(d) if crate::autorizacao::endereco_decidido(&d.texto()) => {}
         _ => return Ok(false),
     }
-    let Some(espera) = crate::rede::espera::Espera::armar(numero, dono, ms)? else {
+    let Some(espera) = crate::rede::espera::Espera::armar(numero, dono, ms, sentido)? else {
         return Ok(false);
     };
     // Não pode suspender afinal: a espera volta, e largá-la a desarma.

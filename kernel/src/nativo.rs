@@ -513,6 +513,25 @@ pub fn responder_suspensivel_de_teste(
     Ok(alloc::string::String::from_utf8_lossy(texto.como_bytes()).into_owned())
 }
 
+/// Só para a suíte: [`responder_suspensivel_de_teste`] com um anexo, como
+/// o de `PEDIR_COM_ANEXO`. `Err` com a espera, se suspendeu: a reexecução,
+/// pelo [`responder_com_anexo_de_teste`], leva o mesmo anexo — como a
+/// tarefa, que o guarda no texto do pedido suspenso.
+#[cfg(feature = "modo-teste")]
+pub fn responder_suspensivel_com_anexo_de_teste(
+    chamador: Chamador,
+    linha: &str,
+    anexo: &[u8],
+) -> Result<alloc::string::String, crate::rede::espera::Espera> {
+    let mut pedido = alloc::vec::Vec::from(linha.as_bytes());
+    if !anexo.is_empty() {
+        pedido.push(SEPARADOR_DO_ANEXO);
+        pedido.extend_from_slice(anexo);
+    }
+    let texto = responder_como(chamador, &pedido, true)?;
+    Ok(alloc::string::String::from_utf8_lossy(texto.como_bytes()).into_owned())
+}
+
 /// Só para a suíte: guarda como suspenso o pedido `linha` do fio `fio`,
 /// com a espera dele — o que [`atender_pendentes`] faz quando um comando
 /// suspende.

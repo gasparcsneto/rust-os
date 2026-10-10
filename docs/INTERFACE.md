@@ -268,11 +268,14 @@ gate.
   e cada gravação confirmada só depois de persistida. O que o journal do
   ponto 7 fez pelo estado administrativo, o armazenamento faz pelos dados
   dos programas.
-- **Fase 9 — Rede nativa.** IP, UDP, TCP, DHCP e TLS com `smoltcp`, como
+- **Fase 9 — Rede nativa.** IP, UDP, TCP e DHCP com `smoltcp`, como
   estava — mas um programa não abre um socket do Unix: pede uma conexão ao
-  registro, com o destino como recurso da política (`net.connect` com
-  alcance de host), e cada conexão vai para a auditoria. O canal do agente
-  por TCP vira mais um transporte de sessão.
+  registro, com o destino como recurso da política (`net.connect` com o
+  destino inteiro, enumerado), e cada conexão vai para a auditoria. O DNS
+  e o TLS são programas sobre essas conexões, e não serviços do kernel: um
+  nome não é recurso, e um certificado prova um nome ao programa sem
+  autorizar nada no gate. O canal do agente por TCP vira mais um
+  transporte de sessão.
 
 As fases 10 a 13 não mudam. A 12 perde o "sandbox por aplicativo", que o
 manifesto da 7 já é.

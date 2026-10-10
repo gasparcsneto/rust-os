@@ -58,6 +58,12 @@ pub fn init() {
 
 /// Enche `destino` de bytes aleatórios.
 pub fn preencher(destino: &mut [u8]) -> Result<(), SemEntropia> {
+    #[cfg(feature = "modo-teste")]
+    if FIO_SEM_GERADOR.load(core::sync::atomic::Ordering::Acquire)
+        == crate::fios::id_atual_sem_trava()
+    {
+        return Err(SemEntropia);
+    }
     // A realimentação lê o dispositivo fora da trava do gerador: as duas
     // travas nunca ficam presas ao mesmo tempo, e a ordem entre elas não
     // precisa de regra.
@@ -94,6 +100,26 @@ pub fn chave() -> Result<[u8; 32], SemEntropia> {
 /// Se o gerador foi semeado.
 pub fn semeado() -> bool {
     crate::arch::sem_interrupcoes(|| GERADOR.lock().is_some())
+}
+
+/// Na suíte: o fio para quem não há gerador — ver [`sem_gerador_de_teste`].
+/// `u64::MAX` é nenhum: não é número de fio.
+#[cfg(feature = "modo-teste")]
+static FIO_SEM_GERADOR: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(u64::MAX);
+
+/// Só para a suíte: roda `f` como numa máquina sem fonte de entropia — só
+/// para o fio que chama. Os outros seguem com o gerador: o coletor, que
+/// grava o journal com nonces sorteados, não pode ficar sem ele no meio —
+/// uma gravação que falha deixa a persistência indisponível até o boot
+/// seguinte.
+#[cfg(feature = "modo-teste")]
+pub fn sem_gerador_de_teste<R>(f: impl FnOnce() -> R) -> R {
+    use core::sync::atomic::Ordering;
+    FIO_SEM_GERADOR.store(crate::fios::id_atual_sem_trava(), Ordering::Release);
+    let r = f();
+    FIO_SEM_GERADOR.store(u64::MAX, Ordering::Release);
+    r
 }
 
 /// Destrava o gerador à força, para uso exclusivo do caminho de falha fatal.

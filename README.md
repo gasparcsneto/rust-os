@@ -175,6 +175,7 @@ $ cargo xtask agent --canal 2 agent.session
 | `security.metrics` | O custo e o efeito da segurança, medidos desde o boot: as decisões do gate por código e a latência dele, a da política e a da auditoria, as voltas do NSF e o tempo de máquina delas, a memória e as contas do motor (falsos positivos, contenções desfeitas, recusas repetidas), a latência da resposta e os arrendamentos soltos por causa |
 | `system.info` | Kernel, CPU, vídeo, uptime, o RTC e mecanismo de guarda da pilha |
 | `system.uptime` | Ticks do timer e milissegundos desde o boot |
+| `random.read` | Bytes do gerador do kernel, em hexadecimal, para quem precisa de uma chave — a semente de cada conexão TLS de um programa. De 1 a 256 — fora disso é erro, e não um corte —; sem fonte de entropia, `ENTROPY_UNAVAILABLE` e nenhum byte. A auditoria grava a decisão, nunca os bytes (`bytes`) |
 | `memory.stats` | Totais agregados de memória física |
 | `memory.regions` | Regiões do mapa de memória (`limit`, `usable_only`) |
 | `memory.frames` | Estado do alocador de frames físicos |
@@ -213,7 +214,7 @@ $ cargo xtask agent --canal 2 agent.session
 | `net.info` | A placa de rede e a pilha IP: endereço físico, contadores, o endereço e o roteador que o DHCP deu, as conexões, e os datagramas de outra origem descartados |
 | `net.arp` | Pergunta quem atende por um IPv4 e espera a resposta (`ip`, `from`) |
 | `net.connect` | Abre uma conexão de saída para um destino no alcance do papel: TCP, ou uma associação UDP que só conversa com aquele destino (`to`: `tcp:<ipv4>:<porta>` ou `udp:<ipv4>:<porta>`) |
-| `net.send` | Manda bytes por uma conexão sua — texto em `content` ou o anexo; numa UDP, um datagrama inteiro de até 1472 bytes, ou nada e o motivo (`connection`, `content`, `attachment`) |
+| `net.send` | Manda bytes por uma conexão sua — texto em `content` ou o anexo; numa UDP, um datagrama inteiro de até 1472 bytes, ou nada e o motivo; com `wait`, sem espaço na fila de saída, espera a pilha abrir espaço — ou o estado mudar — até o prazo, e a entrega é decidida de novo pelo gate (`connection`, `content`, `attachment`, `wait`) |
 | `net.recv` | O que chegou numa conexão sua, e o estado dela; numa UDP, um datagrama inteiro, com o tamanho em `datagram`, e o que não cabe em `max` fica; com `wait`, sem nada chegado, espera a pilha ter o que dizer — o dado, o estado, o fim da conexão — até o prazo; texto em `utf-8` ou `base64` (`connection`, `max`, `wait`) |
 | `net.close` | Fecha uma conexão sua (`connection`) |
 | `net.observe` | Os datagramas trocados com um destino observado — o conteúdo, em base64, com o dono, o sentido e o último registro da auditoria quando foi guardado (`after_record`, a ordem dele entre as decisões do gate) —, de associações de qualquer titular; só de um destino que um papel tem em `net.observe` (`to`, `after`, `max`) |
@@ -291,7 +292,7 @@ kernel/src/
 │   ├── conexoes.rs  a conexão como capacidade do registro: de quem ela é, e como o gate a decide
 │   ├── captura.rs   os datagramas trocados com um destino observado, para quem tem `net.observe` sobre ele
 │   ├── bancada_dns.rs  só na suíte: o servidor de DNS da bancada, determinístico, de dentro da máquina
-│   └── espera.rs    a leitura que espera: armada na conexão, acordada pela pilha ou pelo prazo, decidida de novo na entrega
+│   └── espera.rs    a leitura e o envio que esperam: armados na conexão, um de cada sentido, acordados pela pilha ou pelo prazo, decididos de novo na entrega
 ├── traps.rs         contabilidade de exceções e modo post-mortem
 ├── nucleos.rs       os vários núcleos: quem ligou, o pulso de cada um, o aviso e o travamento de propósito
 ├── trava.rs         a trava justa, por senha, que todo o kernel usa
@@ -460,6 +461,17 @@ seguranca/src/       o tecido de segurança (NSF) como conta pura: o que ele vê
 ├── relatorio.rs     o JSON das consultas `security.*`
 └── util.rs          hexadecimal, base64, o texto de uma string JSON e um resumo curto
 
+tls/src/             o cliente TLS 1.3 dos programas: o rustls sem std, com um provedor de cifra próprio — o que um certificado prova não autoriza nada
+├── lib.rs           o que o pacote pede a quem o usa — a semente, o relógio, as âncoras e o transporte — e o perfil
+├── sessao.rs        a conexão: o aperto pela máquina de estados do rustls, os registros, o alerta que sai na recusa e a sessão que quebra
+├── falha.rs         a taxonomia: a recusa do transporte passa com o código dela; as do TLS têm os seus
+├── provedor.rs      as suítes, os grupos e as assinaturas que o cliente aceita — e nada mais
+├── cifra.rs         AES-GCM e ChaCha20-Poly1305 sobre um registro
+├── troca.rs         X25519 e P-256, que recusam o ponto que não contribui
+├── assinatura.rs    ECDSA P-256 e Ed25519 estrito, para o CertificateVerify e a cadeia
+├── resumo.rs        SHA-256, SHA-384 e o HMAC deles
+└── acaso.rs         o gerador da conexão, semeado por quem conecta, que falha fechado sem semente
+
 armazem/src/         o armazém como conta pura: caminhos, diretórios, versões, donos e cotas; preparar e aplicar um lote
 ├── lib.rs           a árvore de arquivos e diretórios, a versão do armazém inteiro, o lote inteiro ou nada
 ├── bloco.rs         o bloco de 4 KiB do volume: XChaCha20-Poly1305 com o id do conteúdo e o índice no nonce
@@ -500,6 +512,7 @@ programas/           os programas de usuário, compilados à parte do kernel
     ├── saida.rs     uma linha formatada por chamada de `escrever`
     ├── desenho.rs   retângulos e texto, com a fonte do console
     ├── dns.rs       resolver um nome como programa: a associação com o servidor, que o gate decide, a pergunta e a resposta
+    ├── tls.rs       o TLS de um programa: a semente, o relógio, as âncoras e o transporte, cada um pelo gate
     ├── superficie.rs uma camada do compositor com os pixels no processo
     ├── janela.rs    a moldura, o arrasto e a caixa de fechar, e a interface dentro dela
     └── bin/
@@ -523,12 +536,15 @@ programas/           os programas de usuário, compilados à parte do kernel
         ├── guardar.rs    guarda no armazém pelo `pedir`: a versão, o conflito, a leitura pelo descritor e o `MUDOU`
         ├── discador.rs   conversa com o eco da bancada pelo `pedir`: os 256 bytes de ida e volta, e as recusas
         ├── resolvedor.rs resolve nomes pelo DNS da bancada, e confere que a resposta não dá acesso: o gate decide o endereço
+        ├── cifrado.rs    conversa TLS com o eco da bancada: o nome provado, o segredo cifrado, e as recusas — do gate antes, do programa depois
+        ├── pausado.rs    uma sessão TLS que a suíte interrompe no meio: a política, o firewall e a contenção chegam com o código deles
         ├── legado.rs     pede, não busca a resposta e troca de imagem: a nova não a encontra
         └── terminal.rs   o Terminal: o interpretador numa janela, pelo pseudo-terminal
 
 xtask/src/
 ├── main.rs          a ferramenta de build, teste e diagnóstico do projeto
-└── persistencia.rs  a bancada de persistência: a mesma máquina em vários boots, com corte de energia
+├── persistencia.rs  a bancada de persistência: a mesma máquina em vários boots, com corte de energia
+└── tls.rs           a bancada TLS: a PKI gerada a cada máquina, e o eco TLS — o OpenSSL, por `xtask/bancada/tls.py` — a cada conexão
 ```
 
 **Como as duas arquiteturas convivem.** Cada backend em `arch/` traduz o que
@@ -2153,10 +2169,13 @@ o outro. A forma normal recusa o ambíguo em vez de adivinhar:
 `tcp:010.0.2.100:7` não é lido como outra coisa, é uma linha que não vale.
 O teto do `policy.write` vale como para os caminhos: ninguém concede um
 destino que o administrador não alcança. A imagem de desenvolvimento
-enumera dois destinos, os da bancada, os dois servidos pelo próprio
-emulador, sem servidor nem porta aberta no hospedeiro: o eco TCP em
-`10.0.2.100:7` — um `guestfwd` que roda `cat` a cada conexão — e o TFTP do
-emulador em `10.0.2.2:69`, que serve um arquivo que o `xtask` escreve.
+enumera os destinos da bancada, todos servidos pelo próprio emulador, sem
+servidor nem porta aberta no hospedeiro: o eco TCP em `10.0.2.100:7` — um
+`guestfwd` que roda `cat` a cada conexão —, o eco TLS em `10.0.2.100:443`
+— outro `guestfwd`, que roda o servidor TLS da bancada a cada conexão (ver
+[O TLS de um programa](#o-tls-de-um-programa)) —, o TFTP do emulador em
+`10.0.2.2:69`, que serve um arquivo que o `xtask` escreve, e o DNS do
+emulador em `10.0.2.3:53`.
 
 **Usar a conexão também é decidido.** `net.send`, `net.recv` e
 `net.close` nomeiam a conexão pelo número, e o gate resolve o número no
@@ -2304,11 +2323,134 @@ espera, até o prazo, por um aperto que tinha levado milissegundos.
 **Uma espera por conexão.** O socket guarda um waker só: a segunda espera
 na mesma conexão — o mesmo dono pedindo pelo canal e pelo Terminal em que
 confirma uma linha — apagaria a primeira, que passaria a acordar só no
-prazo. Ela é recusada, com o motivo.
+prazo. Ela é recusada — `INVALID_REQUEST`, com o motivo.
 
-O que ainda não há: DNS e TLS; esperar espaço para mandar (`net.send`
-devolve quanto coube, e não espera o buffer de saída esvaziar); e o canal
-do agente por TCP. São os incrementos seguintes da fase 9.
+**O envio que espera.** `net.send` com `wait` — os mesmos milissegundos,
+até dez segundos — não responde "nada coube" quando a fila de saída da
+conexão está cheia: o pedido suspende até a pilha abrir espaço — o outro
+lado confirmou e a fila andou —, até o estado mudar, ou até o prazo. É a
+mesma espera da leitura, no outro sentido: o socket guarda um waker de
+cada sentido, e uma conexão aceita um envio e uma leitura esperando juntos
+— a segunda espera do **mesmo** sentido é recusada com o motivo. Sem ela,
+quem tem mais a mandar do que cabe nos 4 KiB da fila só podia perguntar de
+novo em laço — cada volta uma decisão do gate e um registro na auditoria;
+o TLS, que manda vários registros de uma vez, girava.
+
+A entrega é decidida de novo, como a da leitura, e leva os mesmos bytes:
+o anexo de um envio que esperou vai junto do pedido suspenso — no texto do
+pedido do processo, e numa cópia que o canal do agente guarda, porque a
+porta já o entregou. Sem a cópia, a reexecução pelo canal tirava da porta
+o que houvesse lá — nada —, e o envio que esperou espaço era recusado por
+um anexo que não confere.
+
+### O TLS de um programa
+
+O TLS 1.3 é do **programa**, como o DNS: o pacote [`tls`](tls/src/lib.rs)
+é o [`rustls`](https://github.com/rustls/rustls) sem `std`, com um provedor
+de cifra próprio sobre as implementações do RustCrypto e do dalek — AES-GCM
+e ChaCha20-Poly1305, X25519 e P-256, ECDSA P-256 e Ed25519 —, e
+[`programas::tls`](programas/src/tls.rs) dá a ele o que ele pede a quem o
+usa, cada coisa pelo gate:
+
+- a **semente** de cada conexão: 32 bytes do `random.read`, o gerador do
+  kernel — a única fonte de acaso de um programa, e uma permissão do papel
+  (o operador, o administrador e o sistema a têm; o observador e o tecido
+  de segurança, não). Sem ela, nenhum byte do TLS sai;
+- o **relógio**: o tempo lógico do `system.info`, o RTC com o piso do
+  journal, que nunca volta — um RTC atrasado de propósito não ressuscita um
+  certificado vencido. Sem relógio, a conexão é recusada, e não aceita sem
+  conferir a validade;
+- as **âncoras**: um arquivo PEM lido por `fs.read`;
+- o **transporte**: a conexão do `net.connect`, com cada `net.send` e cada
+  `net.recv` decididos de novo e esperando o evento da pilha, sem girar.
+
+```
+cifrado: tcp:10.0.2.100:444 -> DENY_RESOURCE: o gate recusou antes do TLS
+cifrado: tcp:10.0.2.100:443 provou ser bancada.duke (TLS13_AES_256_GCM_SHA384, X25519) em 130 ms
+cifrado: o segredo e 12222 bytes foram e voltaram cifrados em 150 ms
+cifrado: outro.duke -> TLS_NAME_MISMATCH: o programa recusou
+cifrado: estranho.duke -> TLS_UNTRUSTED: o programa recusou
+cifrado: vencido.duke -> TLS_EXPIRED: o programa recusou
+cifrado: tcp:10.0.2.100:7 nao fala TLS: TLS_HANDSHAKE_FAILED
+```
+
+**O certificado não autoriza nada.** O destino é decidido pelo gate antes
+do primeiro byte do TLS — fora do alcance, a recusa é do gate, e o
+`ClientHello` nem é montado —, e o nome que o programa quer provar não é
+recurso da política: o mesmo `tcp:10.0.2.100:443`, decidido `ALLOW` pela
+política, serve um nome que o programa aceita e três que ele recusa. A
+sessão cifrada não autoriza o que vem depois do aperto: a política que
+tira o destino, o processo isolado e a regra do firewall valem no envio
+seguinte, no meio dela.
+
+**As falhas não se misturam.** A recusa do gate e a do firewall passam
+pelo TLS com o código de quem recusou — `DENY_RESOURCE`, `DENY_CONTAINED`,
+`FIREWALL_BLOCKED` —, sem virar um código do TLS; as do TLS têm os seus
+(`TLS_UNTRUSTED`, `TLS_NAME_MISMATCH`, `TLS_EXPIRED`, `TLS_NOT_YET_VALID`,
+`TLS_HANDSHAKE_FAILED`, `TLS_TAMPERED`, `TLS_INTERRUPTED`), e as locais
+também (`ENTROPY_UNAVAILABLE`, `CLOCK_UNAVAILABLE`). Quando o programa
+recusa o certificado, o servidor ouve por quê — o alerta sai antes de a
+conexão fechar. Uma sessão que falhou fica quebrada com a falha que a
+quebrou: o registro que não saiu já gastou o número dele, e o seguinte
+sairia com o número errado.
+
+**O perfil é estreito, de propósito.** Só TLS 1.3; três suítes; dois
+grupos; duas assinaturas; sem retomada de sessão, sem 0-RTT, sem
+certificado de cliente; e nenhum atalho na verificação: o `xtask` confere
+que nenhum código chama a API `dangerous()` do `rustls` nem escreve um
+verificador próprio, e que o kernel não depende do pacote `tls`.
+
+**A bancada é de fora.** O servidor é o **OpenSSL**, pelo módulo `ssl` do
+Python do hospedeiro — outra implementação inteira do protocolo —, que o
+emulador roda a cada conexão a `10.0.2.100:443`, como roda o `cat` do eco
+TCP. Ele escolhe o certificado pelo nome pedido: `bancada.duke` (e
+qualquer outro nome, que leva o mesmo certificado), `estranho.duke`, de
+outra raiz, e `vencido.duke`, vencido em 2021. A PKI é gerada a cada
+máquina em `target/bancada-tls`, fora do repositório; a chave da raiz nem
+chega ao disco, e o que vai para a imagem é só o certificado dela, em
+`/dados/tls/bancada.pem`. No hospedeiro, o pacote `tls` conversa nos
+testes com o servidor do próprio `rustls` sobre o *ring* — outro provedor
+de cifra —, com raízes forjadas com o mesmo nome, assinaturas trocadas,
+registros adulterados e transportes que recusam no meio.
+
+O que ainda não há: o canal do agente por TCP — o incremento seguinte da
+fase 9.
+
+#### O que o exercício encontrou
+
+- **O alerta da recusa não saía.** Quando o programa recusa o
+  certificado, o `rustls` deixa o alerta na fila de saída — mas a máquina
+  que falhou repete a falha a cada registro que ainda está na entrada, o
+  resto do voo do servidor, que chegou junto com o certificado, e só
+  transmite a fila quando a entrada acaba. A primeira versão desistia na
+  primeira falha repetida, e o servidor via a conexão fechar sem saber
+  por quê. O teste do hospedeiro que olha o lado do servidor pegou. Agora
+  uma volta que falha e consome um registro conta como progresso.
+- **A sessão seguia depois de uma recusa no meio.** O registro que o
+  transporte recusou já tinha gastado o número de sequência dele; o
+  seguinte sairia com o número errado, e o par o leria como adulterado.
+  Agora a sessão fica quebrada com a falha que a quebrou, e cada pedido
+  seguinte ouve a mesma recusa sem nada passar pelo transporte.
+- **O TLS girava.** Com mais a mandar do que cabia na fila de saída, o
+  programa só podia perguntar de novo em laço, e cada volta era uma
+  decisão do gate e um registro na auditoria. Daí o envio que espera.
+- **O canal perdia o anexo do envio que esperava.** A reexecução tirava
+  da porta o que houvesse lá — nada — e recusava o envio por um anexo que
+  não confere. Agora o pedido suspenso leva uma cópia, e um caso confere
+  que a reexecução pelo canal manda os bytes guardados.
+- **A resposta maior que 4 KiB não chegava ao programa.** A cópia da
+  resposta para o processo tinha o teto de 4 KiB do tamanho que o processo
+  escolhe, e um `net.recv` de 4096 bytes responde, em base64, mais que
+  isso. Com uma sessão só, os bytes chegavam aos poucos e a leitura nunca
+  enchia; com três sessões ao mesmo tempo, encheu, e a chamada voltou -3.
+  O anexo tinha o mesmo teto, abaixo dos 60 KiB que a interface promete.
+  Agora a resposta vai inteira, o anexo vai até `MAIOR_ANEXO`, e o
+  `guardar` exercita os dois.
+- **A segunda espera da leitura vinha sem código.** O `net.recv` que
+  recusava a segunda espera respondia só o motivo, e o programa a lia como
+  `TECHNICAL_ERROR` — um erro técnico onde o pedido é que não cabia.
+  Agora a do envio e a da leitura respondem `INVALID_REQUEST`, como a
+  taxonomia da pilha já dizia, com o motivo.
 
 ### As mutações da rede
 
@@ -2478,6 +2620,55 @@ rodada de lado — as trinta da tabela rodaram sobre o código corrigido:
   caso nenhum. A fila cheia agora é: um destino do enlace que não responde
   ao ARP segura tudo nela. A origem também: o alheio que chegou atrás de
   um datagrama do destino fica na frente quando aquele sai.
+
+### As mutações do TLS e do envio que espera
+
+Vinte e quatro mutações contra o que o TLS, o `random.read` e o envio que
+espera prometem — catorze contra os casos da suíte de quatro núcleos, no
+x86 (onze no kernel e na política, três no TLS do programa), oito contra
+os testes do pacote `tls` no hospedeiro e duas contra o `xtask`: **vinte e
+quatro reprovadas**.
+
+| Mutação | Reprovada por |
+|---|---|
+| sem entropia, o `random.read` responde assim mesmo | `aleatorio: sem entropia nenhum byte sai` — o pedido não falhou fechado |
+| o tamanho fora de 1 a 256 ajustado à faixa, calado | `aleatorio: os bytes saem pelo gate e a auditoria fica sem eles` — um tamanho fora da faixa foi atendido |
+| o observador com `random.read` | o mesmo caso — quem não tem a permissão recebeu bytes —, e `tls: sem random.read nada sai` |
+| o envio malformado com `wait` suspende | `rede: uma espera de envio por conexao` — o anexo que não confere esperou, em vez de ser recusado na hora |
+| o envio nunca espera | `rede: o envio que nao cabe espera espaco`, `rede: o envio acorda pelo espaco e nao pelo dado`, `rede: a entrega do envio depois da espera e decidida`, `rede: uma espera de envio por conexao` e `rede: o console espera o envio` — sem espaço, nenhum suspendeu |
+| a espera não vê o espaço abrir | os três primeiros, `rede: o canal guarda o anexo do envio que espera` e `rede: o console espera o envio` — o console só retomaria no prazo |
+| o waker do envio registrado como o da leitura | `rede: o envio acorda pelo espaco e nao pelo dado` — o par confirmou, e a espera não acordou. Os outros 450 casos passam com ela: com o eco, a resposta acorda a leitura junto, e o envio passa por acordado; o par mudo da porta 9 existe por isso |
+| uma vaga de espera só para os dois sentidos | `rede: uma espera de envio por conexao` — a leitura não esperou junto com o envio |
+| o canal reexecuta sem o anexo guardado | `rede: o canal guarda o anexo do envio que espera` |
+| a resposta de volta ao teto de 4 KiB | `armazem: o programa guarda pelo gate` e `tls: tres sessoes ao mesmo tempo` |
+| o anexo de volta ao teto de 4 KiB | `armazem: o programa guarda pelo gate` |
+| o programa conecta antes de pedir a semente e o relógio | `tls: o programa cifrado conversa pelo gate` e `tls: sem random.read nada sai` — a conexão foi decidida antes de haver semente |
+| a recusa do gate vira `TECHNICAL_ERROR` no programa | `tls: o programa cifrado conversa pelo gate`, `tls: sem random.read nada sai`, e os casos do `pausado` — a recusa saiu com o código errado |
+| o relógio do programa fixo em 2020 | `tls: o programa cifrado conversa pelo gate` e os três casos do `pausado` — `TLS_NOT_YET_VALID` |
+| a recusa do certificado sem alerta | `o_nome_errado_e_recusado` — o servidor não recebeu o alerta |
+| a sessão que falhou não fica quebrada | `a_sessao_que_falhou_nao_volta` |
+| o ECDSA aceita qualquer assinatura | `ecdsa_recusa_a_outra_mensagem_e_o_der_torto`; sem ele, `a_raiz_com_o_mesmo_nome_e_outra_chave_e_recusada` e `o_certificate_verify_de_outra_chave_e_recusado`, na conversa |
+| o Ed25519 sem a verificação estrita | `ed25519_recusa_a_chave_de_ordem_pequena` |
+| o X25519 aceita o ponto de ordem pequena | `x25519_recusa_o_ponto_de_ordem_pequena` |
+| o P-256 aceita o ponto comprimido | `p256_recusa_o_comprimido_e_o_fora_da_curva` |
+| o nome errado lido como raiz desconhecida | `o_nome_errado_e_recusado` — `TLS_UNTRUSTED` no lugar de `TLS_NAME_MISMATCH` |
+| o vencido lido como raiz desconhecida | `o_vencido_e_o_que_ainda_nao_vale_sao_recusados` e `o_relogio_de_quem_conecta_decide_a_validade` |
+| um atalho na verificação (`dangerous()`) | o `xtask invariantes` — "um atalho na verificação do TLS" |
+| o kernel depende do pacote `tls` | o `xtask invariantes` — "o kernel depende do pacote `tls` — o TLS é do programa" |
+
+Desenhá-las mostrou dois testes que faltavam:
+
+- **A verificação estrita do Ed25519 não era exercitada por nada** — a
+  bancada assina com ECDSA P-256, e a troca do `verify_strict` pelo
+  `verify` comum passaria por todos os testes. Três testes novos a cobrem:
+  a assinatura válida, a chave de ordem pequena que a verificação comum
+  aceita, e o ECDSA com outra mensagem e o DER torto.
+- **O console de uma pessoa não esperava envio em caso nenhum** — o
+  processo e o canal do agente, sim. O caso novo, na primeira versão,
+  deixava sobreviver a espera que não vê o espaço: o console retomava no
+  prazo de cinco segundos, dentro da janela do caso, e com o espaço já
+  aberto a saída era a mesma. Agora a espera é a de dez segundos, e o caso
+  exige a retomada em oito.
 
 ## O tecido de segurança
 
@@ -5002,8 +5193,11 @@ padronizado.
       espera o evento da pilha — `net.recv` com `wait` —, suspensa sem
       prender o executor e decidida de novo na entrega; e o UDP, a mesma
       capacidade com datagramas, numa associação que só conversa com o
-      destino decidido. Ver [Rede nativa](#rede-nativa). Faltam DNS, TLS e
-      o canal do agente por TCP.
+      destino decidido; e o DNS, como programa sobre o UDP — um nome não é
+      recurso da política; e o TLS 1.3, como programa sobre o TCP, com o
+      envio que espera espaço na fila de saída e os bytes do gerador pelo
+      gate — um certificado prova um nome ao programa e não autoriza nada.
+      Ver [Rede nativa](#rede-nativa). Falta o canal do agente por TCP.
 - [x] **Fase 10 — GPU, composição e a árvore semântica.** Começou antes da
       6, pela parte que não depende de vários núcleos. Feito: a pilha gráfica
       no desenho do Redox — um trait de adaptador que o compositor usa sem

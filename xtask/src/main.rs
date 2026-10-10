@@ -14,6 +14,7 @@
 //! `A` é `x86_64` (padrão) ou `aarch64`. Aceita também `--release`.
 
 mod persistencia;
+mod tls;
 
 use std::collections::BTreeMap;
 use std::{
@@ -579,7 +580,7 @@ pub(crate) fn build_com(
             // incondicional porque `test`, `fumaca` e `run` compilam binários
             // diferentes, e bootar o errado dá um resultado que não é sobre o
             // que se pediu.
-            conferir_sem_simd(&elf)?;
+            conferir_sem_simd(&elf).map_err(|e| format!("o kernel {e}"))?;
             let efi = build_do_iniciador(arch, release)?;
             let disco = disco_de_testes()?;
             instalar_iniciador(arch, &disco, &efi, &kernel_para_a_esp(&elf)?)?;
@@ -646,9 +647,10 @@ fn conferir_sem_simd(elf: &Path) -> Result<(), String> {
     }
     if total > 0 {
         return Err(format!(
-            "o kernel usa registradores de SIMD em {total} instrução(ões) — os de um processo \
+            "usa registradores de SIMD em {total} instrução(ões) — os de um processo \
              interrompido, que este kernel não salva. As primeiras:\n  {}\n\
-             Confira as opções de backend em `kernel/.cargo/config.toml`.",
+             Confira as opções de backend em `kernel/.cargo/config.toml` e em \
+             `programas/.cargo/config.toml`.",
             achados.join("\n  ")
         ));
     }
@@ -2970,6 +2972,69 @@ fn conferir_quedas_so_na_bancada(raiz: &Path) -> Result<Vec<String>, String> {
     Ok(fora)
 }
 
+/// O TLS sem atalho: devolve o que o contraria.
+///
+/// - nenhum código do Duke — o pacote `tls`, os programas, o kernel — chama
+///   a API `dangerous()` do `rustls` nem escreve um verificador próprio de
+///   certificado (`danger::`, `ServerCertVerifier`): a única verificação é
+///   a das âncoras, e um atalho que a desligasse faria um servidor qualquer
+///   passar por `bancada.duke`;
+/// - a configuração legítima existe, uma vez, em `tls/src/sessao.rs`
+///   (`with_root_certificates`): uma busca que não a acha procura a coisa
+///   errada;
+/// - o kernel não depende do pacote `tls`: o TLS é do programa, e o que um
+///   certificado prova não chega ao gate — o nome não é recurso da
+///   política.
+fn conferir_tls_sem_atalho(raiz: &Path) -> Result<Vec<String>, String> {
+    const PROIBIDOS: [&str; 3] = ["dangerous(", "danger::", "ServerCertVerifier"];
+    const LEGITIMA: (&str, &str) = ("tls/src/sessao.rs", ".with_root_certificates(");
+    let mut fora = Vec::new();
+    let mut legitimas = 0;
+    for dir in ["tls/src", "programas/src", "kernel/src"] {
+        percorrer_fontes(&raiz.join(dir), &mut |caminho| {
+            let relativo = caminho
+                .strip_prefix(raiz)
+                .map_err(|_| format!("{} fora do projeto", caminho.display()))?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let texto = std::fs::read_to_string(caminho)
+                .map_err(|e| format!("não foi possível ler {}: {e}", caminho.display()))?;
+            for (n, linha) in texto.lines().enumerate() {
+                if PROIBIDOS.iter().any(|p| linha.contains(p)) {
+                    fora.push(format!(
+                        "{relativo}:{}: um atalho na verificação do TLS: {}",
+                        n + 1,
+                        linha.trim()
+                    ));
+                }
+                if relativo == LEGITIMA.0 && linha.contains(LEGITIMA.1) {
+                    legitimas += 1;
+                }
+            }
+            Ok(())
+        })?;
+    }
+    if legitimas != 1 {
+        fora.push(format!(
+            "`{}` aparece {legitimas} vezes em {}, e não uma: a conferência do TLS está cega",
+            LEGITIMA.1, LEGITIMA.0
+        ));
+    }
+    let caminho = raiz.join("kernel/Cargo.toml");
+    let cargo = std::fs::read_to_string(&caminho)
+        .map_err(|e| format!("não foi possível ler {}: {e}", caminho.display()))?;
+    for (n, linha) in cargo.lines().enumerate() {
+        let linha = linha.trim_start();
+        if linha.starts_with("tls ") || linha.starts_with("tls=") || linha.starts_with("tls.") {
+            fora.push(format!(
+                "kernel/Cargo.toml:{}: o kernel depende do pacote `tls` — o TLS é do programa",
+                n + 1
+            ));
+        }
+    }
+    Ok(fora)
+}
+
 /// A abertura da persistência antes de quem atende: devolve o que estiver
 /// fora de ordem no `kernel/src/main.rs`.
 fn conferir_a_ordem_do_boot(raiz: &Path) -> Result<Vec<String>, String> {
@@ -3047,6 +3112,9 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
     // agente e antes da suíte. Uma abertura depois disso seria uma janela
     // em que a credencial revogada da imagem ainda está ativa.
     fora.extend(conferir_a_ordem_do_boot(&raiz)?);
+    // O TLS é do programa, e sem atalho: nada desliga a verificação do
+    // certificado, e o kernel não o tem.
+    fora.extend(conferir_tls_sem_atalho(&raiz)?);
     // A chamada legítima tem de existir: uma busca que não acha nem ela
     // está procurando a coisa errada, e passaria por qualquer atalho.
     for ((chamada, donos), quantas) in CHAMADAS_PROTEGIDAS.iter().zip(&achadas) {
@@ -3063,7 +3131,8 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
              mensagens só pelos handlers, pela prova e pela revogação; o armazém só pelos \
              comandos fs.*, pela gravação dele e pela reposição do boot; quem agiu só se conta \
              na decisão; nenhuma camada sobe acima da barra; as cargas do boot só pelo boot; \
-             e o tecido de segurança só fala como ele mesmo, pelo gate, sem que o gate o leia"
+             o tecido de segurança só fala como ele mesmo, pelo gate, sem que o gate o leia; e \
+             o TLS, que é do programa, só verifica pelas âncoras, sem atalho que o desligue"
         );
         Ok(ExitCode::SUCCESS)
     } else {
@@ -3217,6 +3286,7 @@ fn conferir_arvore_do_readme() -> Result<ExitCode, String> {
         "diario/src",
         "armazem/src",
         "seguranca/src",
+        "tls/src",
         "programas/src",
         "xtask/src",
     ] {
@@ -4844,6 +4914,14 @@ fn montar_disco(caminho: &Path, programas: &[(String, Vec<u8>)]) -> Result<(), S
     }
     for (nome, conteudo) in programas {
         escrever_na_arvore(&arvore, nome, conteudo)?;
+        // Um programa do x86 não usa SIMD, como o kernel: o kernel não
+        // salva esses registradores de um processo para o outro — ver
+        // `programas/.cargo/config.toml`. Os que fazem criptografia são os
+        // que perguntariam ao processador.
+        if nome.starts_with("programas/x86_64/") {
+            conferir_sem_simd(&arvore.join(nome))
+                .map_err(|e| format!("o programa `{nome}`: {e}"))?;
+        }
     }
 
     std::fs::write(&raiz, vec![0u8; (disco::RAIZ_SETORES * 512) as usize])
@@ -4896,6 +4974,10 @@ fn disco_de_testes() -> Result<PathBuf, String> {
     // ficando no lugar.
     let mut programas = programas_do_disco()?;
     programas.extend(chaves::Chaves::garantir()?.arquivos()?);
+    // E a âncora da bancada TLS: o certificado da raiz em que o programa
+    // `cifrado` confia — ver [`tls`]. Gerada também, com a chave da raiz
+    // longe da imagem e do repositório.
+    programas.push((tls::ANCORA_NA_IMAGEM.to_string(), tls::ancora()?));
     let esperada = receita_do_disco(&programas);
 
     if caminho.is_file() && std::fs::read_to_string(&receita).is_ok_and(|atual| atual == esperada) {
@@ -5412,7 +5494,10 @@ fn comando_qemu(
     //   que o fecho que não termina conta no teto de quem fechou;
     // - `10.0.2.2:69`, o TFTP do próprio emulador, que serve
     //   [`ARQUIVO_DO_TFTP`]: o destino UDP — ver [`diretorio_do_tftp`]. A
-    //   política de desenvolvimento o enumera também.
+    //   política de desenvolvimento o enumera também;
+    // - `10.0.2.100:443`, o eco TLS: cada conexão roda o servidor TLS da
+    //   bancada — o OpenSSL, pelo Python —, que escolhe o certificado pelo
+    //   nome pedido. A política de desenvolvimento o enumera. Ver [`tls`].
     let tftp = diretorio_do_tftp()?;
     let tftp = tftp.to_str().filter(|t| !t.contains(',')).ok_or_else(|| {
         format!(
@@ -5420,10 +5505,12 @@ fn comando_qemu(
             tftp.display()
         )
     })?;
+    tls::conferir_o_hospedeiro()?;
+    let eco_tls = tls::guestfwd()?;
     qemu.args([
         "-netdev",
         &format!(
-            "user,id=rede0,tftp={tftp},guestfwd=tcp:10.0.2.100:7-cmd:cat,guestfwd=tcp:10.0.2.100:9-cmd:sleep 30"
+            "user,id=rede0,tftp={tftp},guestfwd=tcp:10.0.2.100:7-cmd:cat,guestfwd=tcp:10.0.2.100:9-cmd:sleep 30,{eco_tls}"
         ),
     ]);
     qemu.args(["-device", "virtio-net-pci,netdev=rede0"]);
@@ -9560,6 +9647,70 @@ fn sob_a_rede(
         "  [rede] ok  o discador esperou o eco e o silencio, e saiu com 79 em {} ms",
         discou.as_millis()
     );
+
+    // O TLS de um programa: o `cifrado` conversa com o eco TLS da bancada —
+    // o OpenSSL do hospedeiro, outra implementação inteira —, prova o nome,
+    // recusa os que o servidor não prova, e cada pedido dele passa pelo
+    // gate, que recusa a porta ao lado antes do primeiro byte. Daqui, a
+    // medida do aperto e do eco, que o programa diz no log.
+    let lancado = serial.pedir(
+        "user.run",
+        &format!(r#"{{"path":"/programas/{}/cifrado"}}"#, arch.nome()),
+    )?;
+    if !lancado.contains(r#""launched":true"#) {
+        return Err(format!("tls: o user.run nao lancou o cifrado\n  {lancado}"));
+    }
+    let comeco = std::time::Instant::now();
+    let limite = comeco + Duration::from_secs(60);
+    let mut ditas: Vec<String> = Vec::new();
+    loop {
+        let log = serial.pedir("log.tail", r#"{"count":32}"#)?;
+        for pedaco in log.split("cifrado: ").skip(1) {
+            let linha = format!("cifrado: {}", pedaco.split('"').next().unwrap_or(""));
+            if !ditas.contains(&linha) {
+                ditas.push(linha);
+            }
+        }
+        if log.contains("processo encerrou com codigo 86") {
+            break;
+        }
+        if std::time::Instant::now() > limite {
+            return Err(format!(
+                "tls: o cifrado nao conferiu o TLS da bancada\n  {}",
+                ditas.join("\n  ")
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let dita = |trecho: &str| {
+        ditas
+            .iter()
+            .find(|l| l.contains(trecho))
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "tls: o cifrado nao disse `{trecho}`\n  {}",
+                    ditas.join("\n  ")
+                )
+            })
+    };
+    let aperto = dita("provou ser bancada.duke")?;
+    let eco = dita("foram e voltaram cifrados")?;
+    for recusa in [
+        "DENY_RESOURCE: o gate recusou antes do TLS",
+        "outro.duke -> TLS_NAME_MISMATCH",
+        "estranho.duke -> TLS_UNTRUSTED",
+        "vencido.duke -> TLS_EXPIRED",
+        "nao fala TLS: TLS_HANDSHAKE_FAILED",
+    ] {
+        dita(recusa)?;
+    }
+    println!(
+        "  [tls] ok  o cifrado saiu com 86 em {} ms; recusou outro.duke, estranho.duke, vencido.duke e o eco sem TLS; a porta ao lado, DENY_RESOURCE do gate",
+        comeco.elapsed().as_millis()
+    );
+    println!("  [tls] medido  {aperto}");
+    println!("  [tls] medido  {eco}");
 
     // O UDP, pela mesma capacidade: uma associação com o TFTP do emulador,
     // que entrega o arquivo da bancada em dois datagramas, cada um inteiro

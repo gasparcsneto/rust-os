@@ -324,6 +324,54 @@ o caso escreve, e modos para mentir de propósito — responder de outro
 endereço, com bytes que não são DNS, ou não responder. O que vai para ele
 fica nele: não sai pela placa.
 
+## O TLS (9.5)
+
+O TLS também é **programa**: o pacote `tls` — o `rustls` sem `std`, com um
+provedor de cifra próprio — roda dentro do processo, sobre a interface
+nativa (`programas::tls`). O kernel não tem TLS: não depende do pacote, e o
+`xtask` confere que não passa a depender.
+
+Um certificado não autoriza nada, e o nome do servidor não é recurso:
+
+- **O destino é decidido antes do primeiro byte do TLS.** `net.connect`
+  com o destino inteiro, pelo gate, como qualquer conexão; fora do
+  alcance, a recusa é do gate (`DENY_RESOURCE`), e o `ClientHello` nem é
+  montado. O nome que o programa quer provar vai no aperto, e não passa
+  pelo gate: o mesmo destino, decidido uma vez pela política, pode servir
+  um nome que o programa aceita e outros que ele recusa — a bancada tem
+  quatro.
+- **Provar o nome é do programa, pelas âncoras dele.** A âncora é um
+  arquivo que o programa lê por `fs.read`, pelo gate; a semente de cada
+  conexão vem do `random.read`, e o relógio do tempo lógico
+  (`system.info`), os dois pelo gate. A verificação não tem atalho: o
+  `xtask` confere que nenhum código chama a API `dangerous()` do `rustls`
+  nem escreve um verificador próprio.
+- **A sessão não autoriza o que vem depois do aperto.** Cada `net.send` e
+  cada `net.recv` é decidido de novo: a política que tira o destino, o
+  processo isolado e a regra do firewall valem no pedido seguinte, no meio
+  da sessão cifrada.
+
+As falhas não se misturam. A recusa do gate e a do firewall passam pelo
+TLS com o código delas — `DENY_RESOURCE`, `DENY_CONTAINED`,
+`FIREWALL_BLOCKED`, `RATE_LIMIT`, `NETWORK_UNAVAILABLE` —, sem virar um
+código do TLS; as do TLS têm os seus — `TLS_UNTRUSTED`,
+`TLS_NAME_MISMATCH`, `TLS_EXPIRED`, `TLS_NOT_YET_VALID`,
+`TLS_HANDSHAKE_FAILED`, `TLS_TAMPERED`, `TLS_INTERRUPTED`; e as locais —
+sem entropia, sem relógio, um pedido malformado — os seus
+(`ENTROPY_UNAVAILABLE`, `CLOCK_UNAVAILABLE`, `INVALID_REQUEST`,
+`TECHNICAL_ERROR`). Uma sessão que falhou fica quebrada com a falha que a
+quebrou: o registro que não saiu já gastou o número dele, e a seguinte
+mentiria.
+
+O NSF vê do TLS o que vê de qualquer conexão: as decisões do gate — a
+conexão, cada envio e cada leitura, com o destino —, e nada de dentro
+(ver [limitações](#limitacoes-deliberadas)).
+
+A bancada é o **OpenSSL**, pelo módulo `ssl` do Python do hospedeiro —
+outra implementação inteira do protocolo —, que o emulador roda a cada
+conexão a `10.0.2.100:443` (`xtask/src/tls.rs`). A PKI é gerada a cada
+máquina, fora do repositório; a chave da raiz nem chega ao disco.
+
 ## As consultas
 
 Todas pelo gate, com a permissão `security.read` (sensível: diz o que os
@@ -366,6 +414,8 @@ mesma regra:
   dele**, com o alcance enumerado — continua sem curinga;
 - o DNS é o caminho 1 aprovado: programa sobre o UDP, sem `net.resolve`,
   sem nome na política;
+- o TLS segue o mesmo caminho: programa sobre o TCP, sem TLS no kernel; o
+  certificado prova o nome ao programa, e não autoriza nada no gate;
 - a revogação continua a do 4a1/L6: o NSF a recomenda, e quem tem a prova a
   executa.
 
@@ -397,6 +447,11 @@ contido pelo despertador.
   para trás, uma recusa por taxa faz o NSF recuar (até um minuto), e o
   que sair do anel de 1024 registros antes da leitura vira a detecção da
   lacuna. O NSF não ganha taxa por ser de segurança.
+- **O NSF não vê dentro do TLS.** Nem o nome pedido no aperto, nem a
+  recusa do certificado: esses são do programa. Ele vê as decisões do
+  gate sobre a conexão, como as de qualquer outra; um programa que
+  insiste num servidor que não prova o nome aparece como conexões
+  curtas e repetidas ao mesmo destino, e não como "certificado recusado".
 - **O relógio dos registros é de um segundo.** As janelas e as taxas das
   regras e do perfil contam com essa resolução; a ordem entre a captura e
   a auditoria é a dos números dos registros, que é exata.
@@ -440,3 +495,4 @@ contido pelo despertador.
 | NSF-3 | o firewall na pilha, `net.block`/`net.unblock`/`net.rules`, a resposta pelo gate |
 | 9.4 | `protocolo::dns`, o resolvedor como programa, a captura e `net.observe`, a bancada determinística de DNS |
 | NSF-4 | exercício: suíte, concorrência, contorno, revogação, proveniência, DNS, firewall, falhas; mutações; matriz; CI; relatório |
+| 9.5 | o TLS como programa: o pacote `tls`, `random.read` e o `net.send` que espera espaço pelo gate, a bancada com o OpenSSL; a sessão interrompida pela política, pelo firewall e pela contenção |

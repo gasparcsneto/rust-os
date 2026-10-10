@@ -1,0 +1,45 @@
+[package]
+# O TLS do Duke: o cliente TLS 1.3 com que um programa conversa com um
+# servidor que nunca viu, sobre a conexão TCP que o gate decidiu.
+#
+# O protocolo é o do `rustls`, e não escrito aqui — pela mesma razão do
+# `smoltcp` na pilha: escrever TLS não diferencia o Duke em nada, e o
+# `rustls` é uma implementação auditada, usada em toda parte. Daqui são o
+# provedor de criptografia — as primitivas do RustCrypto e do dalek, as
+# mesmas do `sigilo` — e o encaixe no Duke: o aleatório que vem do gate, o
+# relógio que não volta, as âncoras que quem chama escolhe, e o transporte,
+# que é a conexão de quem pede. Ver `src/lib.rs`.
+#
+# `no_std` com `alloc`, como o `sigilo`: compila para os programas.
+name = "tls"
+version = "0.1.0"
+edition = "2024"
+description = "O cliente TLS 1.3 dos programas do Duke, sobre o rustls"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Sem `std`, sem provedor embutido (o `aws-lc-rs` e o *ring* trazem C e
+# assembly que não compilam para os alvos do Duke) e sem TLS 1.2.
+rustls = { version = "0.23.45", default-features = false }
+# O gerador: o mesmo ChaCha20 com apagamento rápido da chave do kernel.
+sigilo = { path = "../sigilo" }
+# As primitivas, as mesmas versões do resto do projeto.
+sha2 = { version = "0.11.0", default-features = false }
+hmac = { version = "0.13.0", default-features = false }
+chacha20poly1305 = { version = "0.11.0", default-features = false }
+aes-gcm = { version = "0.11.1", default-features = false, features = ["aes"] }
+x25519-dalek = { version = "3.0.0", default-features = false, features = ["static_secrets", "zeroize"] }
+ed25519-dalek = { version = "3.0.0", default-features = false }
+p256 = { version = "0.14.0", default-features = false, features = ["arithmetic", "ecdh", "ecdsa"] }
+# Só para ligar a leitura da assinatura ECDSA em DER, que é como ela vem no
+# certificado e no `CertificateVerify`.
+ecdsa = { version = "0.17.0", default-features = false, features = ["der"] }
+zeroize = { version = "1.9.0", default-features = false, features = ["alloc"] }
+
+[dev-dependencies]
+# O outro lado dos testes: o servidor do `rustls` com o provedor do *ring* —
+# outra implementação de cada primitiva —, e o TLS 1.2 para conferir que o
+# cliente não desce de versão.
+rustls = { version = "0.23.45", default-features = false, features = ["std", "ring", "tls12"] }
+# Os certificados dos testes: raízes, folhas vencidas, nomes errados.
+rcgen = "0.14.10"

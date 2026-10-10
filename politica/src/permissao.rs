@@ -130,11 +130,17 @@ pub enum Permissao {
     /// autentica, e as sessões abertas com ela não agem —, e retomá-la.
     /// Reversível; não é revogação. O recurso é o papel do titular.
     CredentialSuspend,
+    /// Bytes aleatórios do gerador do kernel — `random.read` —, para quem
+    /// precisa de uma chave efêmera, um `random` de aperto, um nonce: o TLS
+    /// de um programa (`docs/SEGURANCA.md`). Sem recurso, e não sensível: o
+    /// que sai não diz nada de ninguém, e a taxa do papel limita quanto. Os
+    /// bytes nunca vão para a auditoria — só a decisão.
+    RandomRead,
 }
 
 /// Todas, na ordem do relatório. As novas entram no fim: a posição é o bit
 /// do manifesto — ver [`crate::manifesto::Permissoes`].
-pub const TODAS: [Permissao; 37] = [
+pub const TODAS: [Permissao; 38] = [
     Permissao::AgentRead,
     Permissao::SystemRead,
     Permissao::LogRead,
@@ -172,6 +178,7 @@ pub const TODAS: [Permissao; 37] = [
     Permissao::ProcessIsolate,
     Permissao::AgentSuspend,
     Permissao::CredentialSuspend,
+    Permissao::RandomRead,
 ];
 
 impl Permissao {
@@ -215,6 +222,7 @@ impl Permissao {
             Permissao::ProcessIsolate => "process.isolate",
             Permissao::AgentSuspend => "agent.suspend",
             Permissao::CredentialSuspend => "credential.suspend",
+            Permissao::RandomRead => "random.read",
         }
     }
 
@@ -360,7 +368,8 @@ impl Permissao {
             | Permissao::PolicyRead
             | Permissao::MessageRead
             | Permissao::SecurityRead
-            | Permissao::NetObserve => false,
+            | Permissao::NetObserve
+            | Permissao::RandomRead => false,
             Permissao::UiAct
             | Permissao::FsWrite
             | Permissao::FsRawWrite
@@ -417,6 +426,8 @@ mod testes {
             "message.read",
             "security.read",
             "net.observe",
+            // O gerador anda, mas nada que alguém veja muda.
+            "random.read",
         ];
         for p in TODAS {
             assert_eq!(

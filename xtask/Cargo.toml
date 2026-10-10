@@ -23,6 +23,10 @@ politica = { path = "../politica" }
 # estado e os registros nelas, pelo cabeçalho em claro — sem a chave.
 diario = { path = "../diario" }
 
+# Os certificados da bancada TLS: a raiz, as folhas, a vencida e a de outra
+# raiz — gerados em `target/`, nunca no repositório. Ver `src/tls.rs`.
+rcgen = "0.14.10"
+
 # De fora, nenhuma. O `xtask` monta o disco com as ferramentas do hospedeiro —
 # `sgdisk`, `mkfs.vfat`, `mcopy`, `mkfs.btrfs` — e o que boota é o iniciador
 # deste projeto, compilado como mais um alvo.

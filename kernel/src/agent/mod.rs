@@ -238,12 +238,19 @@ struct Montador {
 }
 
 /// Um pedido do canal que suspendeu: a espera armada, a linha que será
-/// executada de novo, e a conexão do cliente que a mandou — a geração do
-/// canal. Um cliente que saiu durante a espera não recebe nada, e o que o
-/// seguinte mandar não é retomado no lugar dele.
+/// executada de novo, o anexo que veio com ela, e a conexão do cliente que a
+/// mandou — a geração do canal. Um cliente que saiu durante a espera não
+/// recebe nada, e o que o seguinte mandar não é retomado no lugar dele.
+///
+/// O anexo é guardado aqui porque a porta já o entregou: a reexecução de um
+/// `net.send` que esperou espaço leva os mesmos bytes. Sem a cópia, ela
+/// tiraria da porta o que houvesse lá — nada, porque a sessão não lê
+/// enquanto espera —, e o envio seria recusado por um anexo que não
+/// confere.
 struct Suspenso {
     espera: crate::rede::espera::Espera,
     linha: politica::sigiloso::Texto,
+    anexo: crate::sessoes::AnexoDaPorta,
     geracao: u64,
 }
 
@@ -353,13 +360,15 @@ impl Montador {
                 } else if self.estourou {
                     responder_erro(self.canal, None, RpcError::LINHA_MUITO_LONGA, None);
                 } else if self.tam > 0
-                    && let Some(espera) = processar(self.canal, &self.buffer[..self.tam], true)
+                    && let Some((espera, anexo)) =
+                        processar(self.canal, &self.buffer[..self.tam], true, None)
                 {
                     let mut linha = politica::sigiloso::Texto::novo();
                     linha.acrescentar(&self.buffer[..self.tam]);
                     self.suspenso = Some(Suspenso {
                         espera,
                         linha,
+                        anexo,
                         geracao: self.geracao,
                     });
                 }
@@ -493,11 +502,12 @@ async fn retomar(canal: Canal, suspenso: Suspenso) -> bool {
     let Suspenso {
         espera,
         linha,
+        anexo,
         geracao,
     } = suspenso;
     let desfecho = crate::rede::espera::Aguardar::nova(&espera).await;
     drop(espera);
-    reexecutar(canal, &linha, geracao, desfecho)
+    reexecutar(canal, &linha, anexo, geracao, desfecho)
 }
 
 /// A reexecução de um pedido cuja espera acabou com `desfecho`: só na
@@ -505,6 +515,7 @@ async fn retomar(canal: Canal, suspenso: Suspenso) -> bool {
 fn reexecutar(
     canal: Canal,
     linha: &politica::sigiloso::Texto,
+    anexo: crate::sessoes::AnexoDaPorta,
     geracao: u64,
     desfecho: crate::rede::espera::Desfecho,
 ) -> bool {
@@ -517,7 +528,7 @@ fn reexecutar(
         );
         return false;
     }
-    let _ = processar(canal, linha.como_bytes(), false);
+    let _ = processar(canal, linha.como_bytes(), false, Some(anexo));
     true
 }
 
@@ -656,11 +667,12 @@ impl SessaoDeTeste {
         let Suspenso {
             espera,
             linha,
+            anexo,
             geracao,
         } = self.montador.suspenso.take()?;
         drop(espera);
         let adiados = core::mem::take(&mut self.montador.adiados);
-        if reexecutar(self.montador.canal, &linha, geracao, desfecho) {
+        if reexecutar(self.montador.canal, &linha, anexo, geracao, desfecho) {
             for &b in adiados.como_bytes() {
                 self.montador.alimentar(b, false);
             }
@@ -694,10 +706,16 @@ pub(crate) fn limpar_quadro(linha: &[u8]) -> &[u8] {
 
 /// Decodifica uma linha, despacha o comando como a sessão do canal, e
 /// responde pelo mesmo canal — ou, se o comando suspendeu, não responde e
-/// devolve a espera que ele armou: quem chamou espera o desfecho e chama de
-/// novo com a mesma linha, sem `permitir` — ver [`crate::rede::espera`].
-/// No modo post-mortem nada suspende: não há executor para esperar.
-fn processar(canal: Canal, linha: &[u8], permitir: bool) -> Option<crate::rede::espera::Espera> {
+/// devolve a espera que ele armou, com uma cópia do anexo do pedido: quem
+/// chamou espera o desfecho e chama de novo com a mesma linha e o mesmo
+/// anexo (`retomado`), sem `permitir` — ver [`crate::rede::espera`]. No
+/// modo post-mortem nada suspende: não há executor para esperar.
+fn processar(
+    canal: Canal,
+    linha: &[u8],
+    permitir: bool,
+    retomado: Option<crate::sessoes::AnexoDaPorta>,
+) -> Option<(crate::rede::espera::Espera, crate::sessoes::AnexoDaPorta)> {
     let linha = limpar_quadro(linha);
     if linha.is_empty() {
         return None;
@@ -709,10 +727,12 @@ fn processar(canal: Canal, linha: &[u8], permitir: bool) -> Option<crate::rede::
 
     // O anexo que chegou antes desta linha é dela, e só dela: tirado agora,
     // reivindicado ou não, e zerado se o pedido não o leva. A serial não
-    // tem quadros, nem anexo.
-    let anexo = match canal {
-        Canal::Porta(p) => crate::sessoes::tirar_anexo(p),
-        Canal::Serial => Ok(crate::sessoes::AnexoDaPorta::nenhum()),
+    // tem quadros, nem anexo. Na reexecução de um pedido que suspendeu, o
+    // anexo é o que ele trouxe, guardado: o da porta, se houver, é de outro.
+    let anexo = match (retomado, canal) {
+        (Some(guardado), _) => Ok(guardado),
+        (None, Canal::Porta(p)) => crate::sessoes::tirar_anexo(p),
+        (None, Canal::Serial) => Ok(crate::sessoes::AnexoDaPorta::nenhum()),
     };
 
     let requisicao = match Requisicao::parse(linha) {
@@ -793,7 +813,13 @@ fn processar(canal: Canal, linha: &[u8], permitir: bool) -> Option<crate::rede::
     } else {
         // A resposta é montada à parte e só sai se o comando não
         // suspendeu: suspenso, o envelope começado é jogado fora — e se
-        // apaga, como todo `Texto`.
+        // apaga, como todo `Texto`. O anexo de um pedido que pode suspender
+        // fica guardado numa cópia: a reexecução precisa dos mesmos bytes.
+        let guardado = if permitir && anexo.len() > 0 {
+            anexo.copia()
+        } else {
+            crate::sessoes::AnexoDaPorta::nenhum()
+        };
         let mut espera = None;
         let mut texto = politica::sigiloso::Texto::novo();
         {
@@ -805,8 +831,8 @@ fn processar(canal: Canal, linha: &[u8], permitir: bool) -> Option<crate::rede::
                 r
             });
         }
-        if espera.is_some() {
-            return espera;
+        if let Some(e) = espera {
+            return Some((e, guardado));
         }
         entregar(canal, texto);
     }

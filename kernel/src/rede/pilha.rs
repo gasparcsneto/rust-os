@@ -94,7 +94,7 @@ use politica::endereco::{Destino, Protocolo};
 use seguranca::firewall::{self, DonoDoFluxo, Escopo, Fluxo, Motivo, Regra, Regras, Veredito};
 
 use super::conexoes::Dono;
-use super::espera::Desfecho;
+use super::espera::{Desfecho, Sentido};
 
 /// Quantas conexões vivas a máquina toda tem, no máximo.
 pub const MAIS_CONEXOES: usize = 16;
@@ -195,9 +195,13 @@ struct Conexao {
     socket: SocketHandle,
     enviados: u64,
     recebidos: u64,
-    /// O número da espera armada nesta conexão, se há uma — no máximo uma,
-    /// ver [`super::espera`].
+    /// O número da espera de leitura armada nesta conexão, se há uma — no
+    /// máximo uma, ver [`super::espera`].
     espera: Option<u64>,
+    /// O número da espera de escrita — de um `net.send` que espera espaço
+    /// na fila de saída —, se há uma. No máximo uma, e independente da de
+    /// leitura: o socket guarda um waker de cada sentido.
+    espera_de_escrita: Option<u64>,
     /// O último estado que uma resposta disse ao dono — a de `net.connect`,
     /// `net.send` ou `net.recv`. Uma espera só arma se o estado ainda é
     /// este: o que mudou desde a última resposta é novidade para quem pede,
@@ -405,6 +409,13 @@ impl TxToken for Envio<'_> {
         // rede do emulador, que não tem esses endereços.
         #[cfg(feature = "modo-teste")]
         if super::bancada_dns::observar_saida(&quadro) {
+            return r;
+        }
+        // Na suíte, um fio que não entrega: o quadro some como numa rede
+        // que perde, e o outro lado não confirma nada — a fila de saída de
+        // uma conexão enche. Ver [`segurar_saida_de_teste`].
+        #[cfg(feature = "modo-teste")]
+        if SAIDA_SEGURA.load(Ordering::Acquire) {
             return r;
         }
         match crate::virtio::net::com_a_placa(|placa| placa.transmitir(&quadro)) {
@@ -712,6 +723,42 @@ impl Pilha {
         }
     }
 
+    /// Cabe algo na fila de saída da conexão `i`: na TCP, o sentido de
+    /// mandar está aberto e o buffer não está cheio; na UDP, a fila de
+    /// datagramas tem lugar.
+    fn cabe_algo(&self, i: usize) -> bool {
+        let c = &self.conexoes[i];
+        match c.destino.protocolo {
+            Protocolo::Tcp => self.sockets.get::<tcp::Socket>(c.socket).can_send(),
+            Protocolo::Udp => self.sockets.get::<udp::Socket>(c.socket).can_send(),
+        }
+    }
+
+    /// A vaga da espera de `sentido` na conexão `i`.
+    fn vaga(&mut self, i: usize, sentido: Sentido) -> &mut Option<u64> {
+        match sentido {
+            Sentido::Leitura => &mut self.conexoes[i].espera,
+            Sentido::Escrita => &mut self.conexoes[i].espera_de_escrita,
+        }
+    }
+
+    /// Deixa `waker` no socket da conexão `i`: o `smoltcp` o aciona no
+    /// próximo evento de escrita dela — espaço na fila de saída, ou o
+    /// estado que muda.
+    fn registrar_escrita(&mut self, i: usize, waker: &Waker) {
+        let c = &self.conexoes[i];
+        match c.destino.protocolo {
+            Protocolo::Tcp => self
+                .sockets
+                .get_mut::<tcp::Socket>(c.socket)
+                .register_send_waker(waker),
+            Protocolo::Udp => self
+                .sockets
+                .get_mut::<udp::Socket>(c.socket)
+                .register_send_waker(waker),
+        }
+    }
+
     /// Deixa `waker` no socket da conexão `i`: o `smoltcp` o aciona no
     /// próximo evento de leitura dela.
     fn registrar_leitura(&mut self, i: usize, waker: &Waker) {
@@ -843,6 +890,7 @@ pub fn abrir(
             enviados: 0,
             recebidos: 0,
             espera: None,
+            espera_de_escrita: None,
             relatado: Estado::Conectando,
         });
         // O SYN sai já, e não no próximo tique.
@@ -1010,19 +1058,29 @@ pub fn consumir_datagrama(id: u64, dono: &Dono, tamanho: usize) -> Result<(), &'
     r.unwrap_or(Err("a pilha de rede nao esta no ar"))
 }
 
-/// Arma a espera de um `net.recv` na conexão `id` de `dono`, se não há o
-/// que dizer agora. Devolve o número da espera e o estado que ela viu;
-/// `None` quando já chegou dado, quando o estado não é mais o que a última
-/// resposta disse ao dono — ver [`Conexao::relatado`] —, ou quando a
-/// conexão está num estado de que nada mais vem — fechando ou fechada. A
-/// segunda espera na mesma conexão é recusada: ver [`super::espera`].
-pub fn armar(id: u64, dono: &Dono) -> Result<Option<(u64, Estado)>, &'static str> {
+/// Arma a espera de um `net.recv` — ou, no sentido da escrita, de um
+/// `net.send` — na conexão `id` de `dono`, se não há o que dizer agora.
+/// Devolve o número da espera e o estado que ela viu; `None` quando já
+/// chegou dado (leitura) ou já cabe algo na fila de saída (escrita), quando
+/// o estado não é mais o que a última resposta disse ao dono — ver
+/// [`Conexao::relatado`] —, ou quando a conexão está num estado de que nada
+/// mais vem — fechando ou fechada. A segunda espera do mesmo sentido na
+/// mesma conexão é recusada: ver [`super::espera`].
+pub fn armar(
+    id: u64,
+    dono: &Dono,
+    sentido: Sentido,
+) -> Result<Option<(u64, Estado)>, &'static str> {
     let r = com_pilha(|p| {
-        // O que chegou até agora conta: a espera é pelo que ainda não veio.
+        // O que mudou até agora conta: a espera é pelo que ainda não veio.
         let _ = p.sondar();
         let i = p.achar(id, dono)?;
         let estado = p.estado(i);
-        if p.tem_o_que_ler(i)
+        let pronto = match sentido {
+            Sentido::Leitura => p.tem_o_que_ler(i),
+            Sentido::Escrita => p.cabe_algo(i),
+        };
+        if pronto
             || estado != p.conexoes[i].relatado
             || !matches!(
                 estado,
@@ -1031,12 +1089,15 @@ pub fn armar(id: u64, dono: &Dono) -> Result<Option<(u64, Estado)>, &'static str
         {
             return Ok(None);
         }
-        if p.conexoes[i].espera.is_some() {
-            return Err("a conexao ja tem um net.recv esperando");
+        if p.vaga(i, sentido).is_some() {
+            return Err(match sentido {
+                Sentido::Leitura => "a conexao ja tem um net.recv esperando",
+                Sentido::Escrita => "a conexao ja tem um net.send esperando",
+            });
         }
         let numero = p.proxima_espera;
         p.proxima_espera += 1;
-        p.conexoes[i].espera = Some(numero);
+        *p.vaga(i, sentido) = Some(numero);
         Ok(Some((numero, estado)))
     });
     r.unwrap_or(Err("a pilha de rede nao esta no ar"))
@@ -1044,10 +1105,12 @@ pub fn armar(id: u64, dono: &Dono) -> Result<Option<(u64, Estado)>, &'static str
 
 /// A espera `numero`, armada na conexão `id` de `dono` com o estado
 /// `estado`, acabou? `None` se não — e então `waker`, se veio um, fica no
-/// socket: o `smoltcp` o aciona no próximo dado que entrar, na próxima
-/// mudança de estado, e no fecho ou na derrubada. Numa associação UDP, no
-/// próximo datagrama — de qualquer origem: o de outra sai na volta em que
-/// chegou, a conferência não acha nada, e a espera continua.
+/// socket, no waker do sentido dela. Na leitura, o `smoltcp` o aciona no
+/// próximo dado que entrar, na próxima mudança de estado, e no fecho ou na
+/// derrubada; numa associação UDP, no próximo datagrama — de qualquer
+/// origem: o de outra sai na volta em que chegou, a conferência não acha
+/// nada, e a espera continua. Na escrita, no ACK que tira bytes da fila de
+/// saída — ou no datagrama que sai —, e na mudança de estado.
 ///
 /// Só confere: não sonda a pilha. Quem a faz andar é o fio `rede` e quem
 /// pede algo a ela, e é na volta deles que o evento acontece — e acorda.
@@ -1056,27 +1119,34 @@ pub fn conferir_espera(
     dono: &Dono,
     numero: u64,
     estado: Estado,
+    sentido: Sentido,
     waker: Option<&Waker>,
 ) -> Option<Desfecho> {
     com_pilha(|p| {
         let Ok(i) = p.achar(id, dono) else {
             return Some(Desfecho::Sumiu);
         };
-        if p.conexoes[i].espera != Some(numero) {
+        if *p.vaga(i, sentido) != Some(numero) {
             return Some(Desfecho::Sumiu);
         }
-        // Um datagrama de outra origem acorda o waker e não acaba a espera:
-        // a volta em que ele chegou já o tirou da fila, e o waker volta ao
-        // socket. A fila estava vazia quando a espera armou, e só uma volta
-        // a muda enquanto ela dura: a frente que se vê aqui é do destino.
-        if p.tem_o_que_ler(i) {
-            return Some(Desfecho::Chegou);
+        match sentido {
+            // Um datagrama de outra origem acorda o waker e não acaba a
+            // espera: a volta em que ele chegou já o tirou da fila, e o
+            // waker volta ao socket. A fila estava vazia quando a espera
+            // armou, e só uma volta a muda enquanto ela dura: a frente que
+            // se vê aqui é do destino.
+            Sentido::Leitura if p.tem_o_que_ler(i) => return Some(Desfecho::Chegou),
+            Sentido::Escrita if p.cabe_algo(i) => return Some(Desfecho::Coube),
+            _ => {}
         }
         if p.estado(i) != estado {
             return Some(Desfecho::Mudou);
         }
         if let Some(w) = waker {
-            p.registrar_leitura(i, w);
+            match sentido {
+                Sentido::Leitura => p.registrar_leitura(i, w),
+                Sentido::Escrita => p.registrar_escrita(i, w),
+            }
         }
         None
     })
@@ -1149,16 +1219,36 @@ pub fn porta_local_de_teste(id: u64) -> Option<u16> {
     .flatten()
 }
 
+/// Na suíte: os quadros de saída somem — ver [`segurar_saida_de_teste`].
+#[cfg(feature = "modo-teste")]
+static SAIDA_SEGURA: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Só para a suíte: segura — ou solta — todo quadro que a pilha manda, como
+/// um cabo que deixa de entregar. Nada é confirmado enquanto isso, e o
+/// buffer de saída de uma conexão TCP enche no que couber nele; solta, o
+/// `smoltcp` retransmite no prazo dele, o outro lado confirma, e o espaço
+/// abre — o evento da espera de um `net.send`.
+#[cfg(feature = "modo-teste")]
+pub fn segurar_saida_de_teste(segurar: bool) {
+    SAIDA_SEGURA.store(segurar, Ordering::Release);
+}
+
 /// Só para a suíte: a próxima porta local que uma conexão nova pede.
 #[cfg(feature = "modo-teste")]
 pub fn proxima_porta_de_teste(porta: u16) {
     let _ = com_pilha(|p| p.proxima_porta = porta);
 }
 
-/// Só para a suíte: a conexão `id`, de quem for, tem uma espera armada?
+/// Só para a suíte: a conexão `id`, de quem for, tem uma espera armada —
+/// de leitura ou de escrita?
 #[cfg(feature = "modo-teste")]
 pub fn espera_armada_de_teste(id: u64) -> bool {
-    com_pilha(|p| p.conexoes.iter().any(|c| c.id == id && c.espera.is_some())).unwrap_or(false)
+    com_pilha(|p| {
+        p.conexoes
+            .iter()
+            .any(|c| c.id == id && (c.espera.is_some() || c.espera_de_escrita.is_some()))
+    })
+    .unwrap_or(false)
 }
 
 /// Só para a suíte: quantos sockets a pilha guarda sem que sejam de ninguém
@@ -1182,13 +1272,16 @@ pub fn sockets_soltos_de_teste() -> usize {
 }
 
 /// Desarma a espera `numero` da conexão `id` de `dono`, se ainda é ela a
-/// armada.
+/// armada — num sentido ou no outro: o número é único entre os dois.
 pub fn desarmar(id: u64, dono: &Dono, numero: u64) {
     let _ = com_pilha(|p| {
-        if let Ok(i) = p.achar(id, dono)
-            && p.conexoes[i].espera == Some(numero)
-        {
-            p.conexoes[i].espera = None;
+        if let Ok(i) = p.achar(id, dono) {
+            for sentido in [Sentido::Leitura, Sentido::Escrita] {
+                let vaga = p.vaga(i, sentido);
+                if *vaga == Some(numero) {
+                    *vaga = None;
+                }
+            }
         }
     });
 }

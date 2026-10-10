@@ -18,11 +18,28 @@ target = "x86_64-unknown-none"
 # Nos dois, `max-page-size` de 4 KiB: o padrão do ARM é 64 KiB, e o ligador
 # alinhava cada segmento no **arquivo** a 64 KiB — um programa de 8 KiB de
 # código ocupava 82 KiB no disco, e o `executar` lia tudo.
+#
+# E as primitivas de criptografia em software, sem SIMD — as do TLS de um
+# programa (`tls/`): pela mesma razão do kernel (ver `kernel/.cargo/
+# config.toml`). O ChaCha20, o Poly1305, o AES, o GHASH, o SHA-2 e o
+# curve25519 do RustCrypto e do dalek perguntam ao processador, em tempo
+# de execução, se ele tem SIMD, e usam. Este kernel não salva os
+# registradores de SIMD de um processo quando troca de processo: dois
+# programas que os usassem corromperiam um o estado do outro, sem erro
+# nenhum. As opções são as que os pacotes oferecem para desligar o
+# caminho; a do GHASH (`polyval_backend`) é só daqui — o kernel não usa
+# AES-GCM.
 [target.x86_64-unknown-none]
 rustflags = [
     "-C", "link-arg=-Tusuario.ld",
     "-C", "link-arg=--no-pie",
     "-C", "link-arg=-zmax-page-size=4096",
+    "--cfg", 'chacha20_backend="soft"',
+    "--cfg", 'poly1305_backend="soft"',
+    "--cfg", 'curve25519_dalek_backend="serial"',
+    "--cfg", 'sha2_backend="soft"',
+    "--cfg", 'aes_backend="soft"',
+    "--cfg", 'polyval_backend="soft"',
 ]
 
 [target.aarch64-unknown-none-softfloat]
@@ -30,4 +47,10 @@ rustflags = [
     "-C", "link-arg=-Tusuario.ld",
     "-C", "relocation-model=static",
     "-C", "link-arg=-zmax-page-size=4096",
+    "--cfg", 'chacha20_backend="soft"',
+    "--cfg", 'poly1305_backend="soft"',
+    "--cfg", 'curve25519_dalek_backend="serial"',
+    "--cfg", 'sha2_backend="soft"',
+    "--cfg", 'aes_backend="soft"',
+    "--cfg", 'polyval_backend="soft"',
 ]

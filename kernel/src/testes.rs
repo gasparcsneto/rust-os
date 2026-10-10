@@ -7272,9 +7272,23 @@ fn btrfs_le_a_raiz_dos_pedacos() -> Resultado {
         return Err("a raiz dos pedacos veio sem itens");
     }
 
-    // Um endereço um nó adiante: traduzível, e não é um nó. A soma recusa.
-    let adiante = volume.superbloco.raiz_dos_pedacos + u64::from(volume.superbloco.tamanho_de_no);
-    if volume.ler_no(adiante, &mut bloco).is_ok() {
+    // Um endereço traduzível que não é um nó: o último lugar de um nó no
+    // pedaço da raiz — o pedaço de sistema tem megabytes, e a árvore de
+    // pedaços, uma folha. A soma recusa.
+    //
+    // Era "um nó adiante", até a imagem crescer: com um pedaço a mais, o
+    // `mkfs` reescreveu a folha dos pedaços, e a de antes — geração 6, quatro
+    // itens — ficou logo adiante, intacta. Um nó de verdade, com a soma e o
+    // endereço certos: o `ler_no` fazia bem em aceitá-lo.
+    let raiz = volume.superbloco.raiz_dos_pedacos;
+    let no = u64::from(volume.superbloco.tamanho_de_no);
+    let pedaco_da_raiz = volume
+        .mapa
+        .iter()
+        .find(|p| raiz >= p.logico && raiz - p.logico < p.tamanho)
+        .ok_or("a raiz dos pedacos nao esta em pedaco nenhum")?;
+    let fora_de_no = pedaco_da_raiz.logico + pedaco_da_raiz.tamanho - no;
+    if fora_de_no <= raiz || volume.ler_no(fora_de_no, &mut bloco).is_ok() {
         return Err("um endereco que nao e o do no foi aceito");
     }
 
@@ -7325,9 +7339,12 @@ fn btrfs_le_a_raiz_dos_pedacos() -> Resultado {
 /// item que existe, do tamanho certo, com bytes de outro. Nada falha, e o que
 /// se lê depois é um pedaço, uma raiz ou um nome montado a partir de lixo.
 ///
-/// A folha usada é a da árvore de pedaços, cujos quatro itens têm chave e
-/// tamanho conhecidos do lado de fora: o `dump-tree` imprime `itemoff` e
-/// `itemsize` de cada um.
+/// A folha usada é a da árvore de pedaços, cujos cinco itens — o
+/// dispositivo e quatro pedaços — têm chave e tamanho conhecidos do lado de
+/// fora: o `dump-tree` imprime `itemoff` e `itemsize` de cada um. Eram
+/// quatro itens e três pedaços até os programas do TLS levarem os dados da
+/// imagem além dos oito megabytes do primeiro pedaço de dados: o `mkfs` pôs
+/// um segundo, e a folha ganhou o item dele.
 fn btrfs_percorre_itens_da_folha() -> Resultado {
     let tabela = crate::particoes::varrer()?;
     let particao = tabela
@@ -7365,12 +7382,12 @@ fn btrfs_percorre_itens_da_folha() -> Resultado {
         }
     }
 
-    if quantos != 4 {
+    if quantos != 5 {
         crate::log_error!("teste", "a folha deu {} itens", quantos);
-        return Err("a folha de pedacos nao tem os quatro itens que o disco traz");
+        return Err("a folha de pedacos nao tem os cinco itens que o disco traz");
     }
-    if pedacos != 3 {
-        return Err("a folha de pedacos nao trouxe os tres pedacos");
+    if pedacos != 4 {
+        return Err("a folha de pedacos nao trouxe os quatro pedacos");
     }
 
     // E um nó interno não é folha. Forjar o nível no bloco já lido é o
@@ -7854,13 +7871,14 @@ fn btrfs_mapa_completo_alcanca_metadados() -> Resultado {
         .ok_or("nao ha particao de dados")?;
     let volume = crate::vfs::btrfs::Volume::abrir(particao.primeiro)?;
 
-    if volume.mapa.quantos() != 3 {
+    // Sistema, metadados e dois de dados — ver `btrfs_percorre_itens_da_folha`.
+    if volume.mapa.quantos() != 4 {
         crate::log_error!(
             "teste",
             "o mapa ficou com {} pedacos",
             volume.mapa.quantos()
         );
-        return Err("o mapa completo nao tem os tres pedacos do disco");
+        return Err("o mapa completo nao tem os quatro pedacos do disco");
     }
 
     let mut bloco = alloc::vec![0u8; volume.superbloco.tamanho_de_no as usize];
@@ -7994,11 +8012,21 @@ fn btrfs_raiz_montada() -> Resultado {
         return Err("a raiz montada nao lista exatamente o que o xtask pos nela");
     }
 
-    // E o subdiretório tem o que é dele, e só.
+    // E o subdiretório tem o que é dele, e só: a nota, e o diretório da
+    // âncora TLS da bancada, com ela dentro.
     let dados = conteudo("/dados")?;
-    if dados.len() != 1 || dados[0].0 != "nota.txt" || dados[0].1 != Tipo::Arquivo {
+    let esperado_em_dados = [
+        (alloc::string::String::from("nota.txt"), Tipo::Arquivo),
+        (alloc::string::String::from("tls"), Tipo::Diretorio),
+    ];
+    if dados != esperado_em_dados {
         crate::log_error!("teste", "/dados listou {:?}", dados);
         return Err("o subdiretorio nao lista exatamente o que esta dentro dele");
+    }
+    let tls = conteudo("/dados/tls")?;
+    if tls.len() != 1 || tls[0].0 != "bancada.pem" || tls[0].1 != Tipo::Arquivo {
+        crate::log_error!("teste", "/dados/tls listou {:?}", tls);
+        return Err("o diretorio da ancora nao tem so a ancora");
     }
 
     // E `/programas` tem uma arquitetura por diretório, as duas, e nada mais:
@@ -24894,6 +24922,16 @@ fn rodar_programa(
     autoridade: Option<crate::autorizacao::Autoridade>,
     codigo: i64,
 ) -> Result<u64, &'static str> {
+    rodar_programa_ate(nome, autoridade, codigo, 600)
+}
+
+/// [`rodar_programa`], com `teto_em_ticks` para o programa sair.
+fn rodar_programa_ate(
+    nome: &str,
+    autoridade: Option<crate::autorizacao::Autoridade>,
+    codigo: i64,
+    teto_em_ticks: u64,
+) -> Result<u64, &'static str> {
     let dir = crate::usuario::DIRETORIO_DOS_COMPILADOS;
     let programa = alloc::format!("{dir}/{nome}");
     let procurada = alloc::format!("processo encerrou com codigo {codigo}");
@@ -24909,7 +24947,7 @@ fn rodar_programa(
         Some(a) => crate::usuario::lancar_como(Some(&programa), a)?,
         None => crate::usuario::lancar(Some(&programa))?,
     };
-    esperar_ate(visto, 600)?;
+    esperar_ate(visto, teto_em_ticks)?;
     Ok(id)
 }
 
@@ -30297,6 +30335,62 @@ static CASOS: &[Caso] = &[
         f: rede_o_programa_disca_pelo_gate,
     },
     Caso {
+        nome: "aleatorio: os bytes saem pelo gate e a auditoria fica sem eles",
+        f: aleatorio_os_bytes_saem_pelo_gate,
+    },
+    Caso {
+        nome: "aleatorio: sem entropia nenhum byte sai",
+        f: aleatorio_sem_entropia_nenhum_byte_sai,
+    },
+    Caso {
+        nome: "rede: o envio que nao cabe espera espaco",
+        f: rede_o_envio_que_nao_cabe_espera_espaco,
+    },
+    Caso {
+        nome: "rede: o envio acorda pelo espaco e nao pelo dado",
+        f: rede_o_envio_acorda_pelo_espaco_e_nao_pelo_dado,
+    },
+    Caso {
+        nome: "rede: a entrega do envio depois da espera e decidida",
+        f: rede_o_envio_depois_da_espera_e_decidido,
+    },
+    Caso {
+        nome: "rede: uma espera de envio por conexao",
+        f: rede_uma_espera_de_envio_por_conexao,
+    },
+    Caso {
+        nome: "rede: o canal guarda o anexo do envio que espera",
+        f: rede_o_canal_guarda_o_anexo_do_envio,
+    },
+    Caso {
+        nome: "rede: o console espera o envio",
+        f: rede_o_console_espera_o_envio,
+    },
+    Caso {
+        nome: "tls: o programa cifrado conversa pelo gate",
+        f: tls_o_programa_conversa_pelo_gate,
+    },
+    Caso {
+        nome: "tls: sem random.read nada sai",
+        f: tls_sem_random_read_nada_sai,
+    },
+    Caso {
+        nome: "tls: a politica que tira o destino derruba a sessao",
+        f: tls_a_politica_que_tira_o_destino_derruba_a_sessao,
+    },
+    Caso {
+        nome: "tls: o firewall barra a conexao nova com o codigo dele",
+        f: tls_o_firewall_barra_a_conexao_nova_com_o_codigo_dele,
+    },
+    Caso {
+        nome: "tls: o processo isolado perde a sessao",
+        f: tls_o_processo_isolado_perde_a_sessao,
+    },
+    Caso {
+        nome: "tls: tres sessoes ao mesmo tempo",
+        f: tls_tres_sessoes_ao_mesmo_tempo,
+    },
+    Caso {
         nome: "nsf: le pelo gate com o papel dele",
         f: nsf_le_pelo_gate_com_o_papel_dele,
     },
@@ -32194,7 +32288,9 @@ fn rede_uma_espera_por_conexao() -> Resultado {
         let primeira = leitura_suspensa(quem, conexao, 5_000)
             .map_err(|_| "a primeira leitura com espera nao suspendeu")?;
         match leitura_suspensa(quem, conexao, 5_000) {
-            Err(r) if r.contains("ja tem um net.recv esperando") => {}
+            Err(r)
+                if r.contains("ja tem um net.recv esperando")
+                    && fs_texto(&r, "code").as_deref() == Some("INVALID_REQUEST") => {}
             Err(r) => {
                 crate::log_error!("teste", "{}", r);
                 return Err("a segunda espera na conexao nao foi recusada com o motivo");
@@ -33224,7 +33320,7 @@ fn rede_varios_fios_trocam_datagramas_ao_mesmo_tempo() -> Resultado {
 fn rede_a_fila_cheia_recusa_o_datagrama() -> Resultado {
     const MUDO: &str = "udp:10.0.2.99:9";
     let quem = sistema_aqui();
-    let linha = alloc::format!("recurso sistema net.connect {ECO} {TFTP}");
+    let linha = alloc::format!("recurso sistema net.connect {ECO} {ECO_TLS} {TFTP}");
     if !politica::PADRAO.contains(&linha) {
         return Err("a linha do sistema na politica mudou: o caso nao acha onde por o destino");
     }
@@ -33379,6 +33475,1118 @@ fn rede_o_programa_disca_pelo_gate() -> Resultado {
             71,
         )
         .map_err(|_| "o programa discador discou sem net.connect no papel")?;
+        Ok(())
+    })();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+// ---------------------------------------------------------------------------
+// O aleatório pelo gate, e o envio que espera espaço — 9.5
+// ---------------------------------------------------------------------------
+
+/// Os bytes do gerador do kernel saem pelo gate, como qualquer pedido: em
+/// nome de quem pede, com a permissão `random.read` — que o operador tem e
+/// o observador e o tecido de segurança não —, e a auditoria grava a
+/// decisão e nunca os bytes. Dois pedidos não se repetem; o tamanho vai de
+/// 1 a 256, e fora disso é erro, e não um corte calado.
+fn aleatorio_os_bytes_saem_pelo_gate() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use crate::pessoas::Console;
+    use politica::Codigo;
+    use politica::auditoria::Titular;
+    crate::pessoas::esquecer_registradas();
+    let resultado = (|| -> Resultado {
+        let op = Chamador::Pessoa(crate::pessoas::sessao_de_teste(
+            Console::Terminal(62),
+            "acaso-op",
+            "operador",
+        ));
+        let ob = Chamador::Pessoa(crate::pessoas::sessao_de_teste(
+            Console::Terminal(63),
+            "acaso-ob",
+            "observador",
+        ));
+        let hex = |r: &str| fs_texto(r, "content").unwrap_or_default();
+        let a = fs_pedir(op, "random.read", r#"{"bytes":32}"#);
+        let b = fs_pedir(op, "random.read", "{}");
+        let (ha, hb) = (hex(&a), hex(&b));
+        if ha.len() != 64
+            || hb.len() != 64
+            || !ha.bytes().chain(hb.bytes()).all(|c| c.is_ascii_hexdigit())
+            || fs_numero(&a, "bytes") != Some(32)
+            || fs_texto(&a, "encoding").as_deref() != Some("hex")
+        {
+            crate::log_error!("teste", "{} / {}", a, b);
+            return Err("o random.read nao devolveu 32 bytes em hexadecimal");
+        }
+        if ha == hb {
+            return Err("dois random.read devolveram os mesmos bytes");
+        }
+        let (_, e) =
+            registro_que(|e| e.metodo == "random.read").ok_or("o random.read nao foi gravado")?;
+        if e.codigo != Codigo::Allow || e.titular != Titular::Pessoa {
+            crate::log_error!("teste", "{:?}", e);
+            return Err("o random.read nao foi decidido em nome da pessoa");
+        }
+        // Nenhum registro do anel tem os bytes — nem o do pedido, nem outro.
+        let vazou = crate::autorizacao::com_auditoria(|c| {
+            c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+                .any(|r| {
+                    let gravado = alloc::format!("{:?}", r.evento);
+                    gravado.contains(&ha[..24]) || gravado.contains(&hb[..24])
+                })
+        })
+        .unwrap_or(true);
+        if vazou {
+            return Err("os bytes do random.read foram para a auditoria");
+        }
+        let r = fs_pedir(op, "random.read", r#"{"bytes":256}"#);
+        if hex(&r).len() != 512 {
+            crate::log_error!("teste", "{}", r);
+            return Err("o random.read de 256 bytes nao veio inteiro");
+        }
+        for fora in ["0", "257", "100000"] {
+            let r = fs_pedir(op, "random.read", &alloc::format!(r#"{{"bytes":{fora}}}"#));
+            if fs_texto(&r, "error").is_none() || r.contains(r#""content""#) {
+                crate::log_error!("teste", "{}", r);
+                return Err("um tamanho fora de 1..=256 foi atendido");
+            }
+        }
+        // Quem não conecta a nada não tem: o observador e o tecido.
+        crate::autorizacao::encher_a_taxa_do_servico_de_teste();
+        for (quem, nome) in [(ob, "observador"), (como_o_nsf(), "nsf")] {
+            let r = fs_pedir(quem, "random.read", "{}");
+            if decisao_do_envelope(&r) != "DENY_PERMISSION" || r.contains(r#""content""#) {
+                crate::log_error!("teste", "{}: {}", nome, r);
+                return Err("quem nao tem random.read recebeu bytes");
+            }
+        }
+        Ok(())
+    })();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// Sem fonte de entropia — para o fio que pede, como numa máquina em que o
+/// gerador nunca foi semeado —, o `random.read` não inventa bytes: o gate
+/// deixou, e a execução falha fechada, com `ENTROPY_UNAVAILABLE`, um erro
+/// técnico e não uma recusa. Com o gerador de volta, os bytes saem de novo.
+fn aleatorio_sem_entropia_nenhum_byte_sai() -> Resultado {
+    let quem = sistema_aqui();
+    let r = crate::aleatorio::sem_gerador_de_teste(|| fs_pedir(quem, "random.read", "{}"));
+    if decisao_do_envelope(&r) != "ALLOW"
+        || fs_texto(&r, "code").as_deref() != Some("ENTROPY_UNAVAILABLE")
+        || r.contains(r#""content""#)
+    {
+        crate::log_error!("teste", "{}", r);
+        return Err("sem entropia, o random.read nao falhou fechado");
+    }
+    let r = fs_pedir(quem, "random.read", "{}");
+    if fs_texto(&r, "content").map(|c| c.len()) != Some(64) {
+        crate::log_error!("teste", "{}", r);
+        return Err("com o gerador de volta, o random.read nao respondeu");
+    }
+    Ok(())
+}
+
+/// Lê do eco da conexão de `quem` até juntar `n` bytes — texto, que é o
+/// que os casos mandam.
+fn ler_do_eco(
+    quem: crate::autorizacao::Chamador,
+    conexao: u64,
+    n: usize,
+) -> Result<alloc::string::String, &'static str> {
+    let mut voltou = alloc::string::String::new();
+    esperar_cedendo(
+        || {
+            let r = fs_pedir(
+                quem,
+                "net.recv",
+                &alloc::format!(r#"{{"connection":{conexao}}}"#),
+            );
+            voltou.push_str(&fs_texto(&r, "content").unwrap_or_default());
+            voltou.len() >= n
+        },
+        900,
+    )
+    .map_err(|_| "o eco nao devolveu tudo o que foi mandado")?;
+    Ok(voltou)
+}
+
+/// O envio que espera espaço — no caminho de um processo, em que o anexo
+/// vai no texto do pedido.
+fn envio_suspenso(
+    quem: crate::autorizacao::Chamador,
+    linha: &str,
+    anexo: &[u8],
+) -> Result<crate::rede::espera::Espera, alloc::string::String> {
+    match crate::nativo::responder_suspensivel_com_anexo_de_teste(quem, linha, anexo) {
+        Err(espera) => Ok(espera),
+        Ok(resposta) => Err(resposta),
+    }
+}
+
+/// Enche a fila de saída da conexão com o cabo segurado: 4096 bytes
+/// aceitos, que ninguém confirma.
+fn encher_a_saida(
+    quem: crate::autorizacao::Chamador,
+    conexao: u64,
+) -> Result<alloc::string::String, &'static str> {
+    let cheio: alloc::string::String = (0..crate::rede::pilha::BUFFER_DA_CONEXAO)
+        .map(|i| (b'a' + (i % 26) as u8) as char)
+        .collect();
+    let r = crate::nativo::responder_com_anexo_de_teste(
+        quem,
+        &pedido_rpc(
+            "net.send",
+            &alloc::format!(r#"{{"connection":{conexao},"attachment":{}}}"#, cheio.len()),
+        ),
+        cheio.as_bytes(),
+    );
+    if fs_numero(&r, "sent") != Some(cheio.len() as u64) {
+        crate::log_error!("teste", "{}", r);
+        return Err("a fila de saida nao aceitou os 4096 bytes");
+    }
+    Ok(cheio)
+}
+
+/// Quantos `net.send` no eco foram decididos depois do registro `desde`.
+fn envios_decididos_desde(desde: u64) -> usize {
+    crate::autorizacao::com_auditoria(|c| {
+        c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+            .filter(|r| r.seq > desde && r.evento.metodo == "net.send" && r.evento.recurso == ECO)
+            .count()
+    })
+    .unwrap_or(0)
+}
+
+/// O envio que não cabe espera espaço, e não gira.
+///
+/// Com o cabo segurado — nada sai, nada é confirmado —, a fila de saída
+/// enche nos 4096 bytes dela. Sem `wait`, o envio seguinte responde na hora
+/// que nada coube. Com `wait`, suspende; não acorda enquanto o cabo está
+/// segurado, por mais voltas que a pilha dê; solto, a pilha retransmite, o
+/// eco confirma, o espaço abre e a espera acorda pelo evento — `Coube`. A
+/// entrega é executada de novo, com o mesmo anexo, e decidida de novo pelo
+/// gate — duas decisões, a da espera e a da entrega —; e o eco devolve
+/// exatamente o que foi mandado: os bytes que esperaram são os do pedido, e
+/// não outros.
+fn rede_o_envio_que_nao_cabe_espera_espaco() -> Resultado {
+    use crate::rede::espera::Desfecho;
+    use crate::rede::pilha;
+    let quem = sistema_aqui();
+    let conexao = eco_estabelecido(quem)?;
+    let resultado = (|| -> Resultado {
+        pilha::segurar_saida_de_teste(true);
+        let cheio = encher_a_saida(quem, conexao)?;
+        let pedaco = b"o que esperou espaco";
+        let sem_espera = pedido_rpc(
+            "net.send",
+            &alloc::format!(
+                r#"{{"connection":{conexao},"attachment":{}}}"#,
+                pedaco.len()
+            ),
+        );
+        let r = crate::nativo::responder_com_anexo_de_teste(quem, &sem_espera, pedaco);
+        if fs_numero(&r, "sent") != Some(0) {
+            crate::log_error!("teste", "{}", r);
+            return Err("sem espaco e sem wait, o envio nao respondeu que nada coube");
+        }
+        let com_espera = pedido_rpc(
+            "net.send",
+            &alloc::format!(
+                r#"{{"connection":{conexao},"attachment":{},"wait":5000}}"#,
+                pedaco.len()
+            ),
+        );
+        let desde = seq_da_auditoria();
+        let espera = envio_suspenso(quem, &com_espera, pedaco).map_err(|r| {
+            crate::log_error!("teste", "{}", r);
+            "sem espaco, o envio com wait nao suspendeu"
+        })?;
+        let (acordado, waker) = Acordado::novo();
+        if espera.conferir(Some(&waker)).is_some() {
+            return Err("a espera do envio acabou sem o espaco abrir");
+        }
+        let _ = esperar_cedendo(|| false, 20);
+        if acordado.vezes() != 0 || espera.conferir(None).is_some() {
+            return Err("a espera do envio acabou com o cabo segurado");
+        }
+        pilha::segurar_saida_de_teste(false);
+        esperar_cedendo(|| acordado.vezes() > 0, 900)
+            .map_err(|_| "o espaco abriu e a espera do envio nao foi acordada")?;
+        if espera.conferir(None) != Some(Desfecho::Coube) {
+            return Err("a espera do envio nao viu o espaco abrir");
+        }
+        drop(espera);
+        // A reexecução, como o despachante a faz: a mesma linha, o mesmo
+        // anexo, uma decisão nova.
+        let r = crate::nativo::responder_com_anexo_de_teste(quem, &com_espera, pedaco);
+        if fs_numero(&r, "sent") != Some(pedaco.len() as u64) {
+            crate::log_error!("teste", "{}", r);
+            return Err("a reexecucao do envio nao mandou os bytes do anexo");
+        }
+        if envios_decididos_desde(desde) != 2 {
+            return Err("a espera e a entrega nao foram decididas cada uma pelo gate");
+        }
+        let voltou = ler_do_eco(quem, conexao, cheio.len() + pedaco.len())?;
+        if voltou.as_bytes() != [cheio.as_bytes(), &pedaco[..]].concat() {
+            crate::log_error!("teste", "voltaram {} bytes", voltou.len());
+            return Err("o eco nao devolveu exatamente o que esperou e o que encheu");
+        }
+        Ok(())
+    })();
+    crate::rede::pilha::segurar_saida_de_teste(false);
+    fechar_conexao(quem, conexao);
+    resultado
+}
+
+/// O envio que espera acorda pelo espaço que abre, e não pelo dado que
+/// chega. Do outro lado, um par que confirma e não responde nada: o
+/// `sleep` da bancada em `10.0.2.100:9`, que nenhuma política enumera e
+/// este caso põe na do operador. Com o eco, a resposta dele acordaria a
+/// leitura junto, e um envio que esperasse no waker errado passaria por
+/// acordado; aqui, só o ACK que tira os bytes da fila de saída o acorda —
+/// e nada chega para ler.
+fn rede_o_envio_acorda_pelo_espaco_e_nao_pelo_dado() -> Resultado {
+    use crate::rede::espera::Desfecho;
+    use crate::rede::pilha;
+    const MUDO: &str = "tcp:10.0.2.100:9";
+    crate::pessoas::esquecer_registradas();
+    let com_o_mudo = politica_trocada(&[(
+        "recurso operador net.connect tcp:10.0.2.100:7 ",
+        "recurso operador net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:9 ",
+    )])?;
+    let resultado = com_a_politica(com_o_mudo, || {
+        let quem = titular_novo_na_rede(71, "envio-mudo");
+        let conexao = conexao_aberta(&fs_pedir(
+            quem,
+            "net.connect",
+            &alloc::format!(r#"{{"to":"{MUDO}"}}"#),
+        ))?;
+        if estado_depois_do_aperto(quem, conexao)? != "established" {
+            return Err("a conexao ao par mudo nao se estabeleceu");
+        }
+        let r = (|| -> Resultado {
+            pilha::segurar_saida_de_teste(true);
+            encher_a_saida(quem, conexao)?;
+            let linha = pedido_rpc(
+                "net.send",
+                &alloc::format!(r#"{{"connection":{conexao},"content":"mais","wait":5000}}"#),
+            );
+            let espera = envio_suspenso(quem, &linha, &[])
+                .map_err(|_| "sem espaco, o envio ao par mudo nao suspendeu")?;
+            let (acordado, waker) = Acordado::novo();
+            if espera.conferir(Some(&waker)).is_some() {
+                return Err("a espera do envio ao par mudo acabou antes da hora");
+            }
+            pilha::segurar_saida_de_teste(false);
+            esperar_cedendo(|| acordado.vezes() > 0, 900)
+                .map_err(|_| "o par confirmou e a espera do envio nao foi acordada")?;
+            if espera.conferir(None) != Some(Desfecho::Coube) {
+                return Err("a espera do envio ao par mudo nao viu o espaco abrir");
+            }
+            let lido = fs_pedir(
+                quem,
+                "net.recv",
+                &alloc::format!(r#"{{"connection":{conexao}}}"#),
+            );
+            if fs_numero(&lido, "returned") != Some(0) {
+                crate::log_error!("teste", "{}", lido);
+                return Err("o par mudo mandou algo, e o caso nao separa os dois sentidos");
+            }
+            Ok(())
+        })();
+        pilha::segurar_saida_de_teste(false);
+        fechar_conexao(quem, conexao);
+        r
+    });
+    crate::rede::pilha::segurar_saida_de_teste(false);
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// A entrega de um envio que esperou é decidida de novo: a política que
+/// tira o destino do alcance durante a espera recusa a entrega, e nada
+/// sai. Uma pessoa operadora, com o destino na política de hoje; durante a
+/// espera, a política muda.
+fn rede_o_envio_depois_da_espera_e_decidido() -> Resultado {
+    use crate::rede::espera::Desfecho;
+    use crate::rede::pilha;
+    crate::pessoas::esquecer_registradas();
+    let quem = titular_novo_na_rede(64, "envio-op");
+    let resultado = (|| -> Resultado {
+        let conexao = eco_estabelecido(quem)?;
+        pilha::segurar_saida_de_teste(true);
+        encher_a_saida(quem, conexao)?;
+        let pedaco = b"recusado na entrega";
+        let linha = pedido_rpc(
+            "net.send",
+            &alloc::format!(
+                r#"{{"connection":{conexao},"attachment":{},"wait":5000}}"#,
+                pedaco.len()
+            ),
+        );
+        let espera = envio_suspenso(quem, &linha, pedaco)
+            .map_err(|_| "o envio do operador nao suspendeu")?;
+        let (acordado, waker) = Acordado::novo();
+        if espera.conferir(Some(&waker)).is_some() {
+            return Err("a espera do operador acabou antes da hora");
+        }
+        let sem_o_eco = politica_trocada(&[(
+            "recurso operador net.connect tcp:10.0.2.100:7 ",
+            "recurso operador net.connect ",
+        )])?;
+        com_a_politica(sem_o_eco, || {
+            pilha::segurar_saida_de_teste(false);
+            esperar_cedendo(|| acordado.vezes() > 0, 900)
+                .map_err(|_| "o espaco abriu e a espera do operador nao acordou")?;
+            if espera.conferir(None) != Some(Desfecho::Coube) {
+                return Err("a espera do operador nao viu o espaco abrir");
+            }
+            let r = crate::nativo::responder_com_anexo_de_teste(quem, &linha, pedaco);
+            if decisao_do_envelope(&r) != "DENY_RESOURCE" || r.contains(r#""sent""#) {
+                crate::log_error!("teste", "{}", r);
+                return Err("a entrega depois da espera nao foi recusada pela politica nova");
+            }
+            Ok(())
+        })?;
+        drop(espera);
+        fechar_conexao(quem, conexao);
+        Ok(())
+    })();
+    crate::rede::pilha::segurar_saida_de_teste(false);
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// Uma espera de cada sentido por conexão: o segundo envio que esperaria é
+/// recusado com o motivo — e nada sai dele —, enquanto uma leitura espera
+/// junto, no waker dela; e o envio malformado não espera, responde. O prazo
+/// vence sem espaço, e a reexecução responde que nada coube. A conexão que
+/// fecha acaba com a espera do envio.
+fn rede_uma_espera_de_envio_por_conexao() -> Resultado {
+    use crate::rede::espera::Desfecho;
+    use crate::rede::pilha;
+    let quem = sistema_aqui();
+    let conexao = eco_estabelecido(quem)?;
+    let resultado = (|| -> Resultado {
+        pilha::segurar_saida_de_teste(true);
+        encher_a_saida(quem, conexao)?;
+        let linha = |ms: u64| {
+            pedido_rpc(
+                "net.send",
+                &alloc::format!(r#"{{"connection":{conexao},"content":"espera","wait":{ms}}}"#),
+            )
+        };
+        // Um pedido que não mandaria nada — o anexo não confere com o que
+        // ele declara — responde na hora, com o motivo, e não ocupa a vaga.
+        let torto = pedido_rpc(
+            "net.send",
+            &alloc::format!(r#"{{"connection":{conexao},"attachment":5,"wait":5000}}"#),
+        );
+        match envio_suspenso(quem, &torto, b"abc") {
+            Ok(_) => return Err("um envio malformado com espera suspendeu"),
+            Err(r) if r.contains("o anexo nao confere") => {}
+            Err(r) => {
+                crate::log_error!("teste", "{}", r);
+                return Err("o envio malformado nao disse o motivo");
+            }
+        }
+        let primeira = envio_suspenso(quem, &linha(5_000), &[])
+            .map_err(|_| "o primeiro envio com espera nao suspendeu")?;
+        match envio_suspenso(quem, &linha(5_000), &[]) {
+            Ok(_) => return Err("a segunda espera de envio na mesma conexao foi armada"),
+            Err(r)
+                if r.contains("net.send esperando")
+                    && !r.contains(r#""sent""#)
+                    && fs_texto(&r, "code").as_deref() == Some("INVALID_REQUEST") => {}
+            Err(r) => {
+                crate::log_error!("teste", "{}", r);
+                return Err("a segunda espera de envio nao disse por que foi recusada");
+            }
+        }
+        // A leitura espera junto: outro sentido, outro waker.
+        let leitura = leitura_suspensa(quem, conexao, 5_000)
+            .map_err(|_| "a leitura nao esperou junto com o envio")?;
+        drop(leitura);
+        drop(primeira);
+        // O prazo, sem espaço: a espera vence, e a reexecução responde que
+        // nada coube.
+        let curta = envio_suspenso(quem, &linha(200), &[])
+            .map_err(|_| "o envio de 200 ms nao suspendeu")?;
+        esperar_cedendo(|| curta.conferir(None).is_some(), 300)
+            .map_err(|_| "o prazo do envio nao venceu")?;
+        if curta.conferir(None) != Some(Desfecho::Venceu) {
+            return Err("o envio sem espaco nao acabou pelo prazo");
+        }
+        drop(curta);
+        let r = fs_pedir(
+            quem,
+            "net.send",
+            &alloc::format!(r#"{{"connection":{conexao},"content":"espera","wait":200}}"#),
+        );
+        if fs_numero(&r, "sent") != Some(0) {
+            crate::log_error!("teste", "{}", r);
+            return Err("depois do prazo, o envio nao respondeu que nada coube");
+        }
+        // A conexão que fecha acaba com a espera do envio.
+        let espera = envio_suspenso(quem, &linha(5_000), &[])
+            .map_err(|_| "o envio antes do fecho nao suspendeu")?;
+        fechar_conexao(quem, conexao);
+        if espera.conferir(None) != Some(Desfecho::Sumiu) {
+            return Err("fechada a conexao, a espera do envio nao viu que ela sumiu");
+        }
+        Ok(())
+    })();
+    crate::rede::pilha::segurar_saida_de_teste(false);
+    fechar_conexao(quem, conexao);
+    resultado
+}
+
+/// O canal do agente guarda o anexo do envio que suspendeu: a porta já o
+/// entregou ao pedido, e a reexecução manda os mesmos bytes. Sem a cópia,
+/// a reexecução tirava da porta o que houvesse lá — nada, e o envio que
+/// esperou espaço era recusado por um anexo que não confere. O agente
+/// manda, enquanto o envio espera, outro anexo e outro pedido: ficam na
+/// entrada, que a sessão não lê enquanto espera, e são do pedido de trás.
+/// Os dois respondem na ordem, e o eco devolve cada anexo no seu lugar.
+fn rede_o_canal_guarda_o_anexo_do_envio() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use crate::rede::conexoes::Dono;
+    use crate::rede::espera::Desfecho;
+    use crate::rede::pilha::{self, Estado};
+    com_agentes_de_teste(|| {
+        let (mut agente, mut sessao) = conectado(1)?;
+        let r = pela_porta(
+            &mut agente,
+            &mut sessao,
+            "net.connect",
+            &alloc::format!(r#"{{"to":"{ECO}"}}"#),
+        )?;
+        let conexao = conexao_aberta(&r)?;
+        let dono = Dono::do_chamador(
+            Chamador::Sessao(1),
+            Some(sigilo::publica_de(&chave_de_teste(1))),
+        );
+        esperar_cedendo(
+            || {
+                matches!(
+                    pilha::espiar(conexao, &dono, 0),
+                    Ok((_, Estado::Estabelecida))
+                )
+            },
+            300,
+        )
+        .map_err(|_| "a conexao do agente nao se estabeleceu")?;
+        let resultado = (|| -> Resultado {
+            pilha::segurar_saida_de_teste(true);
+            let cheio = [b'z'; crate::rede::pilha::BUFFER_DA_CONEXAO];
+            if pilha::mandar(conexao, &dono, &cheio).map(|(n, _)| n) != Ok(cheio.len()) {
+                return Err("a fila de saida do agente nao encheu");
+            }
+            let anexo = b"o anexo que esperou";
+            agente.anexar(&mut sessao, anexo)?;
+            agente.pedir(
+                &mut sessao,
+                &alloc::format!(
+                    r#"{{"jsonrpc":"2.0","id":51,"method":"net.send","params":{{"connection":{conexao},"attachment":{},"wait":5000}}}}"#,
+                    anexo.len()
+                ),
+            )?;
+            if !sessao.suspensa() {
+                crate::log_error!("teste", "{:?}", agente.respostas());
+                return Err("o envio com espera nao suspendeu a sessao");
+            }
+            // Enquanto ele espera, outro anexo e outro pedido: ficam na
+            // entrada até a sessão voltar a ler.
+            let outro = b"o anexo do pedido de tras";
+            agente.anexar(&mut sessao, outro)?;
+            agente.pedir(
+                &mut sessao,
+                &alloc::format!(
+                    r#"{{"jsonrpc":"2.0","id":52,"method":"net.send","params":{{"connection":{conexao},"attachment":{}}}}}"#,
+                    outro.len()
+                ),
+            )?;
+            if !agente.respostas().is_empty() {
+                return Err("a sessao respondeu enquanto o envio esperava");
+            }
+            let (acordado, waker) = Acordado::novo();
+            if sessao
+                .espera()
+                .is_none_or(|e| e.conferir(Some(&waker)).is_some())
+            {
+                return Err("a espera da sessao acabou sem o espaco abrir");
+            }
+            pilha::segurar_saida_de_teste(false);
+            esperar_cedendo(|| acordado.vezes() > 0, 900)
+                .map_err(|_| "o espaco abriu e a sessao nao foi acordada")?;
+            if sessao.retomar() != Some(Desfecho::Coube) {
+                return Err("acordada, a sessao nao retomou pelo espaco");
+            }
+            // Como a tarefa: depois do suspenso, a sessão volta a ler.
+            sessao.atender();
+            let respostas = agente.respostas();
+            if respostas.len() != 2
+                || !respostas[0].contains(r#""id":51"#)
+                || !respostas[0].contains(&alloc::format!(r#""sent":{}"#, anexo.len()))
+                || !respostas[1].contains(r#""id":52"#)
+                || !respostas[1].contains(&alloc::format!(r#""sent":{}"#, outro.len()))
+            {
+                crate::log_error!("teste", "{:?}", respostas);
+                return Err("a reexecucao pelo canal nao mandou o anexo guardado");
+            }
+            let total = cheio.len() + anexo.len() + outro.len();
+            let mut voltou = alloc::vec::Vec::new();
+            esperar_cedendo(
+                || {
+                    if let Ok((dados, _)) = pilha::espiar(conexao, &dono, 4096) {
+                        let _ = pilha::consumir(conexao, &dono, dados.len());
+                        voltou.extend_from_slice(&dados);
+                    }
+                    voltou.len() >= total
+                },
+                900,
+            )
+            .map_err(|_| "o eco nao devolveu o que a sessao mandou")?;
+            let depois = &voltou[cheio.len()..];
+            if depois != [&anexo[..], &outro[..]].concat() {
+                crate::log_error!(
+                    "teste",
+                    "depois do cheio: {}",
+                    alloc::string::String::from_utf8_lossy(depois)
+                );
+                return Err("o que saiu depois da espera nao eram os anexos de cada pedido");
+            }
+            Ok(())
+        })();
+        pilha::segurar_saida_de_teste(false);
+        let _ = pilha::fechar(conexao, &dono);
+        resultado
+    })
+}
+
+/// O console de uma pessoa espera o envio como espera a leitura: com a
+/// fila de saída cheia, `net.send` com `wait` deixa o console esperando,
+/// sem resposta nem prompt; o espaço que abre o acorda — antes do prazo,
+/// que é o maior, e não por ele: retomado no prazo, o envio também caberia,
+/// e a saída seria a mesma —, e a entrega é decidida de novo pelo gate. Os
+/// dois registros — o da espera e o da entrega — são da pessoa, pela sessão
+/// dela: o mesmo despachante e a mesma cadeia da leitura, no outro
+/// sentido.
+fn rede_o_console_espera_o_envio() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use crate::pessoas::Console;
+    use crate::rede::conexoes::Dono;
+    use crate::rede::pilha;
+    use politica::auditoria::Titular;
+    const T: u16 = 3;
+    let console = Console::Terminal(T);
+    crate::pessoas::esquecer_registradas();
+    crate::interpretador::abrir_console(console);
+    let resultado = (|| -> Resultado {
+        let _ = crate::pessoas::sessao_de_teste(Console::Terminal(46), "envio-console", "operador");
+        let sessao = entrar_no_console(console, "envio-console", "senha de teste")?;
+        let quem = Chamador::Pessoa(sessao);
+        let dono = Dono::Pessoa(sessao);
+        let conexao = eco_estabelecido(quem)?;
+        let r = (|| -> Resultado {
+            pilha::segurar_saida_de_teste(true);
+            let cheio = [b'c'; crate::rede::pilha::BUFFER_DA_CONEXAO];
+            if pilha::mandar(conexao, &dono, &cheio).map(|(n, _)| n) != Ok(cheio.len()) {
+                return Err("a fila de saida da pessoa nao encheu");
+            }
+            let _ = crate::pseudoterminal::tirar_de_teste(T as u8);
+            let desde = seq_da_auditoria();
+            let texto = "do console";
+            digitar_no_console(
+                console,
+                &alloc::format!(
+                    "net.send {{\"connection\":{conexao},\"content\":\"{texto}\",\"wait\":{}}}\n",
+                    crate::rede::espera::PRAZO_MAXIMO_MS
+                ),
+            );
+            if !crate::interpretador::ocupado(console) {
+                return Err("sem espaco, o envio com wait nao deixou o console esperando");
+            }
+            let _ = esperar_cedendo(|| false, 20);
+            if crate::interpretador::retomar_suspensos() != 0 {
+                return Err("o console retomou o envio com o cabo segurado");
+            }
+            let ate_aqui = alloc::string::String::from_utf8_lossy(
+                &crate::pseudoterminal::tirar_de_teste(T as u8),
+            )
+            .into_owned();
+            if ate_aqui.contains("sent") {
+                return Err("o console mostrou o envio enquanto ele esperava");
+            }
+            pilha::segurar_saida_de_teste(false);
+            // Oito segundos, menos que o prazo de dez: o que retoma aqui é o
+            // espaço que abriu.
+            esperar_cedendo(|| crate::interpretador::retomar_suspensos() > 0, 800)
+                .map_err(|_| "o espaco abriu e o console nao retomou o envio antes do prazo")?;
+            let saida = alloc::string::String::from_utf8_lossy(
+                &crate::pseudoterminal::tirar_de_teste(T as u8),
+            )
+            .into_owned();
+            if !saida.contains(&alloc::format!(r#""sent": {}"#, texto.len()))
+                || !saida.ends_with(protocolo::usuario::terminal::PROMPT)
+            {
+                crate::log_error!("teste", "{:?}", saida);
+                return Err("o console nao mostrou o envio e o prompt depois da espera");
+            }
+            if crate::interpretador::ocupado(console) {
+                return Err("o console continuou esperando depois de mandar");
+            }
+            // As duas decisões, a da espera e a da entrega, são da pessoa.
+            let decisoes = crate::autorizacao::com_auditoria(|c| {
+                c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+                    .filter(|r| {
+                        r.seq > desde && r.evento.metodo == "net.send" && r.evento.recurso == ECO
+                    })
+                    .map(|r| {
+                        r.evento.titular == Titular::Pessoa
+                            && r.evento.sessao_de_pessoa == Some(sessao.0)
+                    })
+                    .collect::<alloc::vec::Vec<bool>>()
+            })
+            .unwrap_or_default();
+            if decisoes != [true, true] {
+                crate::log_error!("teste", "{:?}", decisoes);
+                return Err("a espera e a entrega nao foram decididas pelo gate como a pessoa");
+            }
+            let total = cheio.len() + texto.len();
+            let mut voltou = alloc::vec::Vec::new();
+            esperar_cedendo(
+                || {
+                    if let Ok((dados, _)) = pilha::espiar(conexao, &dono, 4096) {
+                        let _ = pilha::consumir(conexao, &dono, dados.len());
+                        voltou.extend_from_slice(&dados);
+                    }
+                    voltou.len() >= total
+                },
+                900,
+            )
+            .map_err(|_| "o eco nao devolveu o que o console mandou")?;
+            if voltou[cheio.len()..] != *texto.as_bytes() {
+                return Err("o que saiu depois da espera nao era o texto do console");
+            }
+            Ok(())
+        })();
+        pilha::segurar_saida_de_teste(false);
+        fechar_conexao(quem, conexao);
+        r
+    })();
+    crate::interpretador::fechar_console(console, "o caso acabou");
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+// ---------------------------------------------------------------------------
+// O TLS como programa — 9.5, docs/SEGURANCA.md
+// ---------------------------------------------------------------------------
+
+/// O segredo que o programa `cifrado` manda pelo TLS: a mesma constante.
+const SEGREDO_DO_CIFRADO: &str = "segredo-cifrado-da-bancada-7f3a";
+
+/// O eco TLS da bancada.
+const ECO_TLS: &str = "tcp:10.0.2.100:443";
+
+/// Quanto um programa de TLS tem para sair: cada aperto é aritmética de
+/// curva elíptica emulada, e no ARM custa segundos.
+const TETO_DO_TLS: u64 = 3_000;
+
+/// O TLS de verdade, de dentro de um processo de uma pessoa operadora: o
+/// programa `cifrado` confere de dentro o aperto, o eco cifrado, e os nomes
+/// que o servidor não prova — e aqui se confere o outro lado:
+///
+/// - cada pedido do TLS foi uma decisão do gate, em nome da pessoa e pelo
+///   processo — o `random.read` e o relógio de cada conexão, a âncora por
+///   `fs.read`, o destino por `net.connect` —, e o destino fora do alcance
+///   foi `DENY_RESOURCE` sem nenhum envio depois dele;
+/// - o mesmo destino, `tcp:10.0.2.100:443`, foi decidido `ALLOW` para cada
+///   um dos quatro nomes — o que o programa aceitou e os três que ele
+///   recusou: o nome não passou pelo gate, e não muda o que o gate decide;
+/// - o segredo que foi e voltou cifrado não está em registro nenhum da
+///   auditoria, nem no log: o kernel só viu bytes cifrados.
+fn tls_o_programa_conversa_pelo_gate() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    use politica::Codigo;
+    use politica::auditoria::Titular;
+    crate::pessoas::esquecer_registradas();
+    let resultado = (|| -> Resultado {
+        let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(65), "tls-op", "operador");
+        let log_desde = crate::log::total_emitidos();
+        let fio = rodar_programa_ate(
+            "cifrado",
+            Some(Autoridade::Pessoa { sessao }),
+            86,
+            TETO_DO_TLS,
+        )
+        .map_err(|_| "o programa cifrado nao conferiu o TLS da bancada")?;
+        let do_processo = alloc::format!("pelo processo {fio} (");
+        let decisoes = |metodo: &str, recurso: &str| {
+            crate::autorizacao::com_auditoria(|c| {
+                c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+                    .filter(|r| {
+                        r.evento.metodo == metodo
+                            && (recurso.is_empty() || r.evento.recurso == recurso)
+                            && r.evento.detalhe.starts_with(&do_processo)
+                    })
+                    .map(|r| (r.seq, r.evento.codigo, r.evento.titular))
+                    .collect::<alloc::vec::Vec<_>>()
+            })
+            .unwrap_or_default()
+        };
+        let todos_da_pessoa = |v: &[(u64, Codigo, Titular)], codigo: Codigo| {
+            v.iter()
+                .all(|(_, c, t)| *c == codigo && *t == Titular::Pessoa)
+        };
+        // Uma semente e uma leitura do relógio por conexão: a de fora e as
+        // cinco de dentro.
+        for metodo in ["random.read", "system.info"] {
+            let v = decisoes(metodo, "");
+            if v.len() != 6 || !todos_da_pessoa(&v, Codigo::Allow) {
+                crate::log_error!("teste", "{}: {:?}", metodo, v);
+                return Err("cada conexao nao pediu a semente e o relogio ao gate");
+            }
+        }
+        let ancora = decisoes("fs.read", "/dados/tls/bancada.pem");
+        if ancora.len() != 1 || !todos_da_pessoa(&ancora, Codigo::Allow) {
+            crate::log_error!("teste", "{:?}", ancora);
+            return Err("a ancora nao foi lida pelo gate");
+        }
+        let fora = decisoes("net.connect", "tcp:10.0.2.100:444");
+        if fora.len() != 1 || !todos_da_pessoa(&fora, Codigo::DenyResource) {
+            crate::log_error!("teste", "{:?}", fora);
+            return Err("o destino fora do alcance nao foi recusado pelo gate");
+        }
+        if !decisoes("net.send", "tcp:10.0.2.100:444").is_empty() {
+            return Err("algo foi mandado para o destino recusado");
+        }
+        // Quatro nomes no mesmo destino: quatro decisões iguais.
+        let dentro = decisoes("net.connect", ECO_TLS);
+        if dentro.len() != 4 || !todos_da_pessoa(&dentro, Codigo::Allow) {
+            crate::log_error!("teste", "{:?}", dentro);
+            return Err("o eco TLS nao foi decidido igual para cada nome");
+        }
+        let envios = decisoes("net.send", ECO_TLS);
+        if envios.is_empty() || !todos_da_pessoa(&envios, Codigo::Allow) {
+            return Err("os envios do TLS nao foram decididos em nome da pessoa");
+        }
+        // O segredo não está em lugar nenhum do kernel que se leia.
+        let na_auditoria = crate::autorizacao::com_auditoria(|c| {
+            c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+                .any(|r| alloc::format!("{:?}", r.evento).contains(SEGREDO_DO_CIFRADO))
+        })
+        .unwrap_or(true);
+        let mut no_log = false;
+        crate::log::ultimos(128, crate::log::Level::Trace, |r| {
+            no_log |= r.seq >= log_desde && r.mensagem().contains(SEGREDO_DO_CIFRADO);
+        });
+        if na_auditoria || no_log {
+            return Err("o segredo do TLS apareceu na auditoria ou no log do kernel");
+        }
+        Ok(())
+    })();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// Sem `random.read` no papel, o TLS não começa: a semente é o primeiro
+/// pedido de uma conexão, e a recusa dela — `DENY_PERMISSION`, do gate —
+/// vem antes de qualquer `net.connect`. Nenhum byte sai, nem o
+/// `ClientHello`, nem para o destino que a política deixaria.
+fn tls_sem_random_read_nada_sai() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    use politica::Codigo;
+    crate::pessoas::esquecer_registradas();
+    let sem = politica_trocada(&[(
+        "message.send message.read random.read\nrecurso operador",
+        "message.send message.read\nrecurso operador",
+    )])?;
+    let resultado = com_a_politica(sem, || {
+        let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(66), "tls-sem", "operador");
+        let log_desde = crate::log::total_emitidos();
+        let fio = rodar_programa_ate(
+            "cifrado",
+            Some(Autoridade::Pessoa { sessao }),
+            62,
+            TETO_DO_TLS,
+        )
+        .map_err(|_| "o cifrado sem random.read nao parou na semente")?;
+        if linhas_do_programa(log_desde, "cifrado: tcp:10.0.2.100:444 deu DENY_PERMISSION") != 1 {
+            return Err("o cifrado nao ouviu DENY_PERMISSION do random.read");
+        }
+        let do_processo = alloc::format!("pelo processo {fio} (");
+        let (_, acaso) =
+            registro_que(|e| e.metodo == "random.read" && e.detalhe.starts_with(&do_processo))
+                .ok_or("o random.read recusado nao foi gravado")?;
+        if acaso.codigo != Codigo::DenyPermission {
+            return Err("o random.read sem a permissao nao foi DENY_PERMISSION");
+        }
+        if registro_que(|e| e.metodo == "net.connect" && e.detalhe.starts_with(&do_processo))
+            .is_some()
+        {
+            return Err("sem semente, o programa ainda chegou a pedir uma conexao");
+        }
+        Ok(())
+    });
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// O passo do `pausado` que manda pela sessão que ele tem.
+const PASSO_ECO: i64 = 1;
+
+/// O passo do `pausado` que larga a sessão e conecta de novo, do zero. O
+/// programa tem a mesma constante.
+const PASSO_RECONECTAR: i64 = 2;
+
+/// Lança o `pausado` como `sessao`, espera a sessão TLS dele chegar ao
+/// meio, roda `f` com o número do fio e com o passo — um evento no canal
+/// do programa, [`PASSO_ECO`] ou [`PASSO_RECONECTAR`], e a linha que ele
+/// tem de dizer depois —, e encerra o programa.
+fn com_o_pausado(
+    sessao: crate::pessoas::IdSessao,
+    f: impl FnOnce(u64, &dyn Fn(i64, &str) -> Resultado) -> Resultado,
+) -> Resultado {
+    use crate::autorizacao::Chamador;
+    use protocolo::usuario::evento::{Evento, tipo};
+    let dir = crate::usuario::DIRETORIO_DOS_COMPILADOS;
+    let desde = crate::log::total_emitidos();
+    let r = fs_pedir(
+        Chamador::Pessoa(sessao),
+        "user.run",
+        &alloc::format!(r#"{{"path":"{dir}/pausado"}}"#),
+    );
+    let fio = fs_numero(&r, "thread_id").ok_or("o user.run nao lancou o pausado")?;
+    let publicar = |t: u32, a: i64| {
+        crate::eventos::publicar(
+            "teste-pausado",
+            Evento {
+                tipo: t,
+                a,
+                ..Default::default()
+            },
+        )
+        .map_err(|_| "o canal do pausado nao recebeu o passo")
+    };
+    // A linha de cada passo, contada desde o passo: o anel do log anda, e
+    // uma conta desde o começo perderia as linhas que saíram dele.
+    let passo = |qual: i64, linha: &str| -> Resultado {
+        let desde_o_passo = crate::log::total_emitidos();
+        publicar(tipo::ACAO, qual)?;
+        esperar_ate(|| linhas_do_programa(desde_o_passo, linha) > 0, TETO_DO_TLS).map_err(|_| {
+            crate::log_error!("teste", "o pausado nao disse `{}`", linha);
+            "o pausado nao disse o que devia depois do passo"
+        })
+    };
+    let resultado = esperar_ate(
+        || linhas_do_programa(desde, "pausado: no meio") == 1,
+        TETO_DO_TLS,
+    )
+    .map_err(|_| "a sessao TLS do pausado nao chegou ao meio")
+    .and_then(|()| f(fio, &passo));
+    let desde_o_fim = crate::log::total_emitidos();
+    let _ = publicar(tipo::ENCERRAR, 0);
+    let saiu = esperar_ate(
+        || linhas_do_programa(desde_o_fim, "processo encerrou com codigo 87") == 1,
+        TETO_DO_TLS,
+    );
+    resultado?;
+    saiu.map_err(|_| "o pausado nao saiu quando pedido")
+}
+
+/// A sessão TLS não autoriza nada depois do aperto: a política que tira o
+/// destino do alcance no meio dela recusa o envio seguinte — e a recusa
+/// chega ao programa com o código do gate, `DENY_RESOURCE`, sem virar um
+/// código do TLS —, e a sessão nova também, antes do primeiro byte. Com a
+/// política de volta, uma sessão nova conversa: a recuperação é a decisão
+/// de agora, e não uma exceção guardada.
+fn tls_a_politica_que_tira_o_destino_derruba_a_sessao() -> Resultado {
+    use crate::pessoas::Console;
+    crate::pessoas::esquecer_registradas();
+    let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(67), "tls-pol", "operador");
+    let resultado = com_o_pausado(sessao, |_fio, passo| {
+        passo(PASSO_ECO, "pausado: depois: ALLOW")?;
+        let sem_o_tls = politica_trocada(&[(
+            "recurso operador net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 ",
+            "recurso operador net.connect tcp:10.0.2.100:7 ",
+        )])?;
+        com_a_politica(sem_o_tls, || {
+            passo(PASSO_ECO, "pausado: depois: DENY_RESOURCE")?;
+            // Uma sessão nova também não: o destino é decidido de novo.
+            passo(PASSO_RECONECTAR, "pausado: de novo: DENY_RESOURCE")
+        })?;
+        // A política de volta: uma sessão nova conversa de novo.
+        passo(PASSO_RECONECTAR, "pausado: de novo: ALLOW")
+    });
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// O firewall restringe depois do gate, com o código dele, e se desfaz.
+///
+/// - a regra posta no meio da sessão TLS derruba a conexão viva que ela
+///   alcança: o envio seguinte não acha a conexão — `DENY_RESOURCE`, do
+///   gate, que não sabe dela —, e não um código do TLS;
+/// - a sessão nova é decidida `ALLOW` pelo gate — o destino está no
+///   alcance — e barrada na execução: `FIREWALL_BLOCKED`, que o programa
+///   ouve como tal, e a auditoria grava a barrada como execução daquela
+///   decisão `ALLOW`. O firewall não substitui o gate: vem depois dele;
+/// - tirada a regra, a sessão nova conversa de novo.
+fn tls_o_firewall_barra_a_conexao_nova_com_o_codigo_dele() -> Resultado {
+    use crate::pessoas::Console;
+    use politica::Codigo;
+    crate::pessoas::esquecer_registradas();
+    let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(68), "tls-fw", "operador");
+    let resultado = com_o_pausado(sessao, |fio, passo| {
+        let sistema = sistema_aqui();
+        let para = alloc::format!(r#"{{"to":"{ECO_TLS}"}}"#);
+        let r = fs_pedir(sistema, "net.block", &para);
+        let regra = fs_numero(&r, "rule").ok_or("o sistema nao barrou o eco TLS")?;
+        if fs_numero(&r, "dropped") != Some(1) {
+            crate::log_error!("teste", "{}", r);
+            return Err("a regra nao derrubou a conexao TLS viva");
+        }
+        let barrada = (|| -> Resultado {
+            passo(PASSO_ECO, "pausado: depois: DENY_RESOURCE")?;
+            passo(PASSO_RECONECTAR, "pausado: de novo: FIREWALL_BLOCKED")
+        })();
+        let solta = fs_pedir(sistema, "net.unblock", &para);
+        barrada?;
+        if fs_numero(&solta, "rule") != Some(regra) {
+            crate::log_error!("teste", "{}", solta);
+            return Err("o sistema nao tirou a regra do eco TLS");
+        }
+        let prefixo = alloc::format!("bloqueado pelo firewall, regra {regra}; decisao ");
+        let (_, registro) =
+            registro_que(|e| e.codigo == Codigo::DenyPolicy && e.detalhe.contains(&prefixo))
+                .ok_or("a barrada do firewall nao foi gravada")?;
+        let decidida = decisao_executada(&registro.detalhe)
+            .and_then(registro_numero)
+            .ok_or("a barrada do firewall nao aponta a decisao")?;
+        if decidida.metodo != "net.connect"
+            || decidida.codigo != Codigo::Allow
+            || !decidida
+                .detalhe
+                .starts_with(&alloc::format!("pelo processo {fio} ("))
+        {
+            crate::log_error!("teste", "{:?}", decidida);
+            return Err("a barrada nao executa a decisao ALLOW da conexao do programa");
+        }
+        passo(PASSO_RECONECTAR, "pausado: de novo: ALLOW")
+    });
+    crate::rede::pilha::esquecer_regras_de_teste();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// O processo isolado no meio da sessão TLS: a conexão dele cai na hora —
+/// a contenção a derruba —, e o envio seguinte é `DENY_CONTAINED`, o
+/// código do gate, e não um do TLS. Solto, ele sai quando pedido.
+fn tls_o_processo_isolado_perde_a_sessao() -> Resultado {
+    use crate::pessoas::Console;
+    crate::pessoas::esquecer_registradas();
+    let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(69), "tls-iso", "operador");
+    let resultado = com_o_pausado(sessao, |fio, passo| {
+        let sistema = sistema_aqui();
+        let r = fs_pedir(
+            sistema,
+            "process.isolate",
+            &alloc::format!(r#"{{"process":{fio}}}"#),
+        );
+        if fs_texto(&r, "state").as_deref() != Some("isolated")
+            || fs_numero(&r, "dropped") != Some(1)
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("o sistema nao isolou o processo da sessao TLS, com a conexao dele");
+        }
+        let restantes = crate::rede::pilha::donos()
+            .iter()
+            .filter(|(_, d, _)| *d == crate::rede::conexoes::Dono::Processo(fio))
+            .count();
+        let r = passo(PASSO_ECO, "pausado: depois: DENY_CONTAINED");
+        let _ = fs_pedir(
+            sistema,
+            "process.release",
+            &alloc::format!(r#"{{"process":{fio}}}"#),
+        );
+        r?;
+        if restantes != 0 {
+            return Err("isolado, o processo continuou com a conexao TLS");
+        }
+        Ok(())
+    });
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// Três sessões TLS ao mesmo tempo, de três pessoas: cada uma com a sua
+/// semente, a sua conexão, a sua taxa — as três conferem tudo, e os envios
+/// delas se intercalam no gate.
+fn tls_tres_sessoes_ao_mesmo_tempo() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    crate::pessoas::esquecer_registradas();
+    let resultado = (|| -> Resultado {
+        let programa = alloc::format!("{}/cifrado", crate::usuario::DIRETORIO_DOS_COMPILADOS);
+        let desde = crate::log::total_emitidos();
+        let mut fios = alloc::vec::Vec::new();
+        for (i, nome) in ["tls-a", "tls-b", "tls-c"].into_iter().enumerate() {
+            let sessao =
+                crate::pessoas::sessao_de_teste(Console::Terminal(70 + i as u16), nome, "operador");
+            fios.push(crate::usuario::lancar_como(
+                Some(&programa),
+                Autoridade::Pessoa { sessao },
+            )?);
+        }
+        // Cada saída pelo número do registro: o anel do log anda enquanto
+        // os três escrevem, e uma linha contada não sai da conta.
+        let mut saidas = alloc::collections::BTreeMap::new();
+        let _ = esperar_ate(
+            || {
+                crate::log::ultimos(128, crate::log::Level::Trace, |r| {
+                    if r.seq >= desde
+                        && r.subsistema == "usuario"
+                        && let Some(c) = r.mensagem().strip_prefix("processo encerrou com codigo ")
+                    {
+                        saidas.insert(r.seq, alloc::string::String::from(c));
+                    }
+                });
+                saidas.len() >= fios.len()
+            },
+            2 * TETO_DO_TLS,
+        );
+        if saidas.len() != fios.len() || saidas.values().any(|c| c != "86") {
+            crate::log_error!("teste", "saidas: {:?}", saidas);
+            return Err("as tres sessoes TLS ao mesmo tempo nao conferiram");
+        }
+        // Os envios das três, na ordem do gate: se uma só começasse depois
+        // de a anterior acabar, seriam três blocos — duas trocas.
+        let de_quem = crate::autorizacao::com_auditoria(|c| {
+            c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+                .filter(|r| r.evento.metodo == "net.send" && r.evento.recurso == ECO_TLS)
+                .filter_map(|r| {
+                    fios.iter().position(|f| {
+                        r.evento
+                            .detalhe
+                            .starts_with(&alloc::format!("pelo processo {f} ("))
+                    })
+                })
+                .collect::<alloc::vec::Vec<_>>()
+        })
+        .unwrap_or_default();
+        let trocas = de_quem.windows(2).filter(|w| w[0] != w[1]).count();
+        if (0..fios.len()).any(|i| !de_quem.contains(&i)) || trocas <= 2 {
+            crate::log_error!("teste", "envios por processo: {:?}", de_quem);
+            return Err("as tres sessoes TLS nao correram ao mesmo tempo");
+        }
         Ok(())
     })();
     crate::pessoas::esquecer_registradas();
@@ -33864,8 +35072,8 @@ fn nsf_a_recusa_encerra_o_objetivo() -> Resultado {
     use seguranca::resposta::Estado;
     crate::pessoas::esquecer_registradas();
     let sem_o_eco = politica_trocada(&[(
-        "recurso seguranca net.block tcp:10.0.2.100:7 udp:10.0.2.2:69 udp:10.0.2.3:53",
-        "recurso seguranca net.block udp:10.0.2.2:69 udp:10.0.2.3:53",
+        "recurso seguranca net.block tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53",
+        "recurso seguranca net.block tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53",
     )])?;
     let resultado = com_a_politica(sem_o_eco, || {
         com_o_nsf(|| {
@@ -34324,8 +35532,8 @@ const SERVIDOR_DNS: &str = "udp:10.0.2.53:53";
 fn politica_com_a_bancada_de_dns() -> Result<politica::Politica, &'static str> {
     politica_trocada(&[
         (
-            "recurso operador net.connect tcp:10.0.2.100:7 udp:10.0.2.2:69 udp:10.0.2.3:53",
-            "recurso operador net.connect tcp:10.0.2.100:7 udp:10.0.2.2:69 udp:10.0.2.3:53 udp:10.0.2.53:53",
+            "recurso operador net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53",
+            "recurso operador net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53 udp:10.0.2.53:53",
         ),
         (
             "recurso seguranca net.observe udp:10.0.2.3:53",

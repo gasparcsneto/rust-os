@@ -313,6 +313,15 @@ mod testes {
         assert_eq!(todas.iter().count(), TODAS.len());
     }
 
+    /// A permissão mais nova cabe no manifesto, no bit dela.
+    #[test]
+    fn random_read_no_manifesto() {
+        let m = ok("duke-manifesto 1\nnome cifrado\npermite net.connect random.read\n");
+        assert!(m.permite.contem(crate::Permissao::RandomRead));
+        assert!(m.permite.contem(crate::Permissao::NetConnect));
+        assert!(!m.permite.contem(crate::Permissao::FsRead));
+    }
+
     #[test]
     fn o_resumo_e_da_imagem() {
         assert_ne!(resumo_da_imagem(b"a"), resumo_da_imagem(b"b"));
