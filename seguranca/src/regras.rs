@@ -10,6 +10,22 @@
 //! Detectar não é autorizar: uma detecção abre ou alimenta um incidente e
 //! pode levar o NSF a **pedir** uma ação. O que ela não faz é decidir nada:
 //! o gate não lê o que está aqui.
+//!
+//! # Categoria e confiança
+//!
+//! Cada detecção diz **o que** é — [`Categoria`]: o incomum, o arriscado, a
+//! violação, o contorno, que não são a mesma coisa — e **quanto** ela diz
+//! de uma ameaça real — [`Confianca`]. A severidade é o tamanho do estrago
+//! se for verdade; a confiança, o quanto é verdade. O que o NSF faz com a
+//! detecção depende das duas: ver [`crate::resposta`].
+//!
+//! # Volume não é ameaça
+//!
+//! As contas são do que distingue um ataque de uma repetição: a sondagem
+//! conta métodos **distintos**; "fora do alcance", pedidos distintos —
+//! método e recurso —; o firewall, destinos distintos. O mesmo pedido
+//! recusado cem vezes é um agente repetindo, e não um reconhecimento: o
+//! gate já o recusa, e a taxa do papel já o limita.
 
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::string::{String, ToString};
@@ -29,12 +45,14 @@ pub const JANELA_MS: u64 = 30_000;
 pub const RECARGA_MS: u64 = 600_000;
 /// Métodos distintos recusados por permissão que fazem sondagem.
 pub const SONDAGEM: usize = 3;
-/// Recusas de recurso que fazem o primeiro e o segundo degrau.
+/// Pedidos distintos — método e recurso — recusados por alcance que fazem
+/// o primeiro e o segundo degrau.
 pub const FORA_DO_ALCANCE: [usize; 2] = [3, 6];
-/// Recusas de autenticação que fazem abuso de credencial.
-pub const AUTENTICACAO: usize = 3;
-/// Recusas do firewall que fazem insistência.
-pub const FIREWALL: usize = 2;
+/// Recusas de autenticação que fazem o primeiro e o segundo degrau.
+pub const AUTENTICACAO: [usize; 2] = [3, 10];
+/// Destinos distintos barrados pelo firewall que fazem o primeiro e o
+/// segundo degrau.
+pub const FIREWALL: [usize; 2] = [2, 4];
 /// A profundidade de uma cadeia de processos que chama atenção.
 pub const PROFUNDIDADE: usize = 4;
 /// Nascimentos da mesma raiz, na janela, que chamam atenção.
@@ -90,6 +108,26 @@ impl Regra {
         }
     }
 
+    /// O que a regra vê — ver [`Categoria`].
+    pub const fn categoria(self) -> Categoria {
+        match self {
+            Regra::ComportamentoAnomalo | Regra::CadeiaDeProcessos => Categoria::Incomum,
+            Regra::AbusoDeCredencial
+            | Regra::MudancaDePolitica
+            | Regra::DnsContraAPolitica
+            | Regra::LacunaNaLeitura
+            | Regra::TempoQueVolta => Categoria::Risco,
+            Regra::SondagemDePrivilegio
+            | Regra::ForaDoManifesto
+            | Regra::ForaDoAlcance
+            | Regra::ContornoDoFirewall
+            | Regra::SaidaDepoisDeSondagem => Categoria::Violacao,
+            Regra::TetoExercido | Regra::AuditoriaAdulterada | Regra::AcaoSemPlano => {
+                Categoria::Contorno
+            }
+        }
+    }
+
     /// Todas, para quem lista.
     pub const TODAS: [Regra; 15] = [
         Regra::SondagemDePrivilegio,
@@ -110,11 +148,78 @@ impl Regra {
     ];
 }
 
-/// O que uma contenção alcançaria: o destino e o dono do fluxo.
+/// O que uma detecção é — a seção 3 do incremento de usabilidade: estas
+/// quatro coisas não se tratam como equivalentes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Categoria {
+    /// Fora do perfil, sem ser recusado: o volume, um método novo, uma
+    /// cadeia de processos. Um agente de compilação é incomum o dia todo.
+    Incomum,
+    /// Pode ser o começo de algo: falhas de autenticação, DNS que leva a um
+    /// destino recusado, mudança de política recusada, a leitura que perdeu
+    /// registros.
+    Risco,
+    /// O gate recusou por política de um jeito que diz intenção — métodos
+    /// que o papel não dá, recursos fora do alcance, o manifesto —, ou a
+    /// rede usada depois disso.
+    Violacao,
+    /// Alguém tentou passar por cima da autoridade: o teto do administrador
+    /// exercido, uma ação do NSF sem plano, a auditoria adulterada.
+    Contorno,
+}
+
+impl Categoria {
+    /// O nome, como as consultas o escrevem.
+    pub const fn nome(self) -> &'static str {
+        match self {
+            Categoria::Incomum => "unusual",
+            Categoria::Risco => "risky",
+            Categoria::Violacao => "violation",
+            Categoria::Contorno => "bypass",
+        }
+    }
+}
+
+/// Quanto uma detecção diz de uma ameaça real.
+///
+/// O que é só estatística — o perfil, o volume — é baixa; uma recusa da
+/// política que diz intenção é média; alta pede corroboração — duas coisas
+/// independentes apontando para o mesmo lado — ou um contorno, que não tem
+/// leitura inocente.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Confianca {
+    Baixa,
+    Media,
+    Alta,
+}
+
+impl Confianca {
+    /// O nome, como as consultas o escrevem.
+    pub const fn nome(self) -> &'static str {
+        match self {
+            Confianca::Baixa => "low",
+            Confianca::Media => "medium",
+            Confianca::Alta => "high",
+        }
+    }
+
+    /// Um degrau acima, até alta.
+    pub const fn acima(self) -> Confianca {
+        match self {
+            Confianca::Baixa => Confianca::Media,
+            _ => Confianca::Alta,
+        }
+    }
+}
+
+/// O que uma contenção alcançaria: o destino, o dono do fluxo, e o papel
+/// com que o gate decidiu o pedido — o alcance de uma contenção do dono é
+/// `papel:<papel>`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Alvo {
     pub destino: String,
     pub dono: String,
+    pub papel: String,
 }
 
 /// Uma detecção.
@@ -122,6 +227,7 @@ pub struct Alvo {
 pub struct Deteccao {
     pub regra: Regra,
     pub severidade: Severidade,
+    pub confianca: Confianca,
     pub principal: String,
     pub titular: Titular,
     /// Os registros da auditoria que a dispararam.
@@ -138,6 +244,7 @@ struct Visto {
     seq: u64,
     ts: u64,
     metodo: String,
+    recurso: String,
     codigo: Codigo,
     tipo: Tipo,
     /// Uma recusa do manifesto do programa — ver
@@ -216,6 +323,7 @@ impl Detector {
             seq: e.seq,
             ts: e.ts_ms,
             metodo: e.metodo.clone(),
+            recurso: e.recurso.clone(),
             codigo: e.codigo,
             tipo: e.tipo,
             manifesto: e.fora_do_manifesto(),
@@ -235,17 +343,19 @@ impl Detector {
             return saida;
         }
         let j: Vec<Visto> = self.janela(e).iter().cloned().collect();
-        let det = |regra, severidade, registros: Vec<u64>, explicacao: String| Deteccao {
-            regra,
-            severidade,
-            principal: e.principal.clone(),
-            titular: e.titular,
-            registros,
-            explicacao,
-            alvo: None,
-            ts_ms: e.ts_ms,
-            epoca: e.epoca,
-        };
+        let det =
+            |regra, severidade, confianca, registros: Vec<u64>, explicacao: String| Deteccao {
+                regra,
+                severidade,
+                confianca,
+                principal: e.principal.clone(),
+                titular: e.titular,
+                registros,
+                explicacao,
+                alvo: None,
+                ts_ms: e.ts_ms,
+                epoca: e.epoca,
+            };
         let decisoes = |c: Codigo| -> Vec<&Visto> {
             j.iter()
                 .filter(|v| v.tipo == Tipo::Decisao && v.codigo == c)
@@ -254,7 +364,9 @@ impl Detector {
 
         // A sondagem é de quem pede o que o papel dele não dá; a recusa do
         // manifesto de um programa é outra coisa — o papel tem, o programa
-        // não declarou —, e tem a regra dela.
+        // não declarou —, e tem a regra dela. Três métodos distintos dizem
+        // intenção, mas um agente que explora a própria API também os
+        // tenta: confiança média. Alta é com a rede usada depois.
         if e.tipo == Tipo::Decisao && e.codigo == Codigo::DenyPermission && !e.fora_do_manifesto() {
             let vs: Vec<&Visto> = decisoes(Codigo::DenyPermission)
                 .into_iter()
@@ -268,6 +380,7 @@ impl Detector {
                 saida.push(det(
                     Regra::SondagemDePrivilegio,
                     Severidade::Alta,
+                    Confianca::Media,
                     vs.iter().map(|v| v.seq).collect(),
                     alloc::format!(
                         "{} metodos tentados sem a permissao em {} s: {}",
@@ -289,6 +402,7 @@ impl Detector {
             saida.push(det(
                 Regra::ForaDoManifesto,
                 Severidade::Media,
+                Confianca::Media,
                 alloc::vec![e.seq],
                 alloc::format!(
                     "o programa{programa} pediu {}, que o manifesto dele nao declara — a atenuacao recusou",
@@ -297,24 +411,33 @@ impl Detector {
             ));
         }
 
+        // Fora do alcance: pedidos distintos. Um alcance estreito demais
+        // faz um agente legítimo bater em três recursos — é de olhar, não
+        // de alertar; seis distintos em meio minuto é reconhecimento.
         if e.tipo == Tipo::Decisao && e.codigo == Codigo::DenyResource {
             let vs = decisoes(Codigo::DenyResource);
-            for (nivel, (&limite, severidade)) in FORA_DO_ALCANCE
+            let (distintos, registros) = primeiros(&vs, |v| (v.metodo.clone(), v.recurso.clone()));
+            for (nivel, (&limite, (severidade, confianca))) in FORA_DO_ALCANCE
                 .iter()
-                .zip([Severidade::Media, Severidade::Alta])
+                .zip([
+                    (Severidade::Media, Confianca::Baixa),
+                    (Severidade::Alta, Confianca::Media),
+                ])
                 .enumerate()
                 .rev()
             {
-                if vs.len() >= limite {
+                if distintos >= limite {
                     if self.pode(Regra::ForaDoAlcance, &e.principal, nivel as u8 + 1, e.ts_ms) {
                         saida.push(det(
                             Regra::ForaDoAlcance,
                             severidade,
-                            vs.iter().map(|v| v.seq).collect(),
+                            confianca,
+                            registros,
                             alloc::format!(
-                                "{} pedidos fora do alcance do papel em {} s",
-                                vs.len(),
-                                JANELA_MS / 1000
+                                "{} pedidos distintos fora do alcance do papel em {} s ({} recusas)",
+                                distintos,
+                                JANELA_MS / 1000,
+                                vs.len()
                             ),
                         ));
                     }
@@ -323,14 +446,19 @@ impl Detector {
             }
         }
 
+        // A credencial: uma chave revogada que continua pedindo é de
+        // alertar — alguém revogou por um motivo —; falhas de
+        // autenticação, de olhar, até serem muitas: quem erra a senha três
+        // vezes não é um ataque.
         if e.codigo == Codigo::DenyNotAuthenticated {
             let vs = decisoes(Codigo::DenyNotAuthenticated);
-            if vs.len() >= AUTENTICACAO
+            if vs.len() >= AUTENTICACAO[1]
                 && self.pode(Regra::AbusoDeCredencial, &e.principal, 2, e.ts_ms)
             {
                 saida.push(det(
                     Regra::AbusoDeCredencial,
                     Severidade::Alta,
+                    Confianca::Media,
                     vs.iter().map(|v| v.seq).collect(),
                     alloc::format!(
                         "{} pedidos sem autenticacao valida em {} s ({})",
@@ -345,8 +473,24 @@ impl Detector {
                 saida.push(det(
                     Regra::AbusoDeCredencial,
                     Severidade::Media,
+                    Confianca::Media,
                     alloc::vec![e.seq],
                     alloc::format!("uso de credencial revogada: {}", e.metodo),
+                ));
+            } else if vs.len() >= AUTENTICACAO[0]
+                && self.pode(Regra::AbusoDeCredencial, &e.principal, 1, e.ts_ms)
+            {
+                saida.push(det(
+                    Regra::AbusoDeCredencial,
+                    Severidade::Media,
+                    Confianca::Baixa,
+                    vs.iter().map(|v| v.seq).collect(),
+                    alloc::format!(
+                        "{} falhas de autenticacao em {} s ({})",
+                        vs.len(),
+                        JANELA_MS / 1000,
+                        e.detalhe
+                    ),
                 ));
             }
         }
@@ -358,6 +502,7 @@ impl Detector {
             saida.push(det(
                 Regra::TetoExercido,
                 Severidade::Alta,
+                Confianca::Alta,
                 alloc::vec![e.seq],
                 alloc::format!("tentou exercer o teto de um administrador: {}", e.metodo),
             ));
@@ -370,6 +515,7 @@ impl Detector {
                 saida.push(det(
                     Regra::MudancaDePolitica,
                     Severidade::Baixa,
+                    Confianca::Baixa,
                     alloc::vec![e.seq],
                     alloc::format!("{} executada sobre `{}`", e.metodo, e.recurso),
                 ));
@@ -384,6 +530,7 @@ impl Detector {
                     saida.push(det(
                         Regra::MudancaDePolitica,
                         Severidade::Media,
+                        Confianca::Media,
                         vs.iter().map(|v| v.seq).collect(),
                         alloc::format!("{} mudancas de politica recusadas", vs.len()),
                     ));
@@ -391,6 +538,8 @@ impl Detector {
             }
         }
 
+        // O perfil: o que é só estatística é de olhar. Anomalia não é
+        // autorização, e nem alerta sozinha.
         if let Some(a) = ctx.anomalia
             && self.pode(Regra::ComportamentoAnomalo, &e.principal, 1, e.ts_ms)
         {
@@ -402,30 +551,52 @@ impl Detector {
             saida.push(det(
                 Regra::ComportamentoAnomalo,
                 Severidade::Media,
+                Confianca::Baixa,
                 alloc::vec![e.seq],
                 alloc::format!("{quem} fora da linha de base: {}", a.motivos.join("; ")),
             ));
         }
 
+        // O firewall: destinos distintos. Quem bate de novo no destino
+        // barrado está repetindo — a regra já o segura —; quem procura
+        // outro destino depois de barrado é que tenta contornar.
         if matches!(e.tipo, Tipo::Firewall { .. }) {
             let vs: Vec<&Visto> = j
                 .iter()
                 .filter(|v| matches!(v.tipo, Tipo::Firewall { .. }))
                 .collect();
-            if vs.len() >= FIREWALL
-                && self.pode(Regra::ContornoDoFirewall, &e.principal, 1, e.ts_ms)
+            let (distintos, registros) = primeiros(&vs, |v| v.recurso.clone());
+            for (nivel, (&limite, (severidade, confianca))) in FIREWALL
+                .iter()
+                .zip([
+                    (Severidade::Media, Confianca::Baixa),
+                    (Severidade::Alta, Confianca::Media),
+                ])
+                .enumerate()
+                .rev()
             {
-                saida.push(det(
-                    Regra::ContornoDoFirewall,
-                    Severidade::Alta,
-                    vs.iter().map(|v| v.seq).collect(),
-                    alloc::format!(
-                        "{} pedidos de rede barrados pelo firewall em {} s, o ultimo para {}",
-                        vs.len(),
-                        JANELA_MS / 1000,
-                        e.recurso
-                    ),
-                ));
+                if distintos >= limite {
+                    if self.pode(
+                        Regra::ContornoDoFirewall,
+                        &e.principal,
+                        nivel as u8 + 1,
+                        e.ts_ms,
+                    ) {
+                        saida.push(det(
+                            Regra::ContornoDoFirewall,
+                            severidade,
+                            confianca,
+                            registros,
+                            alloc::format!(
+                                "{} destinos distintos barrados pelo firewall em {} s, o ultimo {}",
+                                distintos,
+                                JANELA_MS / 1000,
+                                e.recurso
+                            ),
+                        ));
+                    }
+                    break;
+                }
             }
         }
 
@@ -436,6 +607,8 @@ impl Detector {
             saida.push(d);
         }
 
+        // Muitos processos é o trabalho de muito agente legítimo: de
+        // olhar, nunca de alertar sozinho.
         if let Tipo::Nascimento { filho } = e.tipo {
             let prov = ctx.grafo.proveniencia(e.epoca, filho);
             let raiz = ctx
@@ -460,6 +633,7 @@ impl Detector {
                 saida.push(det(
                     Regra::CadeiaDeProcessos,
                     Severidade::Media,
+                    Confianca::Baixa,
                     rajada,
                     explicacao,
                 ));
@@ -472,14 +646,17 @@ impl Detector {
     /// recusou na conexão `e`. Chamada dos dois lados — pela conexão, que
     /// encontra a resolução já lida, e pela resolução, lida da captura
     /// depois da conexão: a ordem das leituras não decide se a regra vê.
+    ///
+    /// Um nome que mudou de endereço para fora do alcance é o caso de todo
+    /// dia de um alcance estreito: de olhar. Dois nomes, de alertar.
     pub fn dns_contra_a_politica(&mut self, e: &Evento, r: &Resolucao) -> Option<Deteccao> {
         let nomes = self.nomes_recusados.entry(e.principal.clone()).or_default();
         nomes.insert(r.nome.clone());
         let n = nomes.len();
-        let (nivel, severidade) = if n >= 2 {
-            (2, Severidade::Alta)
+        let (nivel, severidade, confianca) = if n >= 2 {
+            (2, Severidade::Alta, Confianca::Media)
         } else {
-            (1, Severidade::Media)
+            (1, Severidade::Media, Confianca::Baixa)
         };
         if !self.pode(Regra::DnsContraAPolitica, &e.principal, nivel, e.ts_ms) {
             return None;
@@ -487,6 +664,7 @@ impl Detector {
         Some(Deteccao {
             regra: Regra::DnsContraAPolitica,
             severidade,
+            confianca,
             principal: e.principal.clone(),
             titular: e.titular,
             registros: alloc::vec![e.seq],
@@ -504,8 +682,13 @@ impl Detector {
 
     /// A saída depois da sondagem: quem tem um incidente alto aberto usa a
     /// rede, e o gate deixou. O alvo é o destino, para o dono do fluxo —
-    /// o que uma contenção alcançaria.
-    pub fn saida_depois_de_sondagem(&mut self, e: &Evento) -> Option<Deteccao> {
+    /// o que uma contenção alcançaria. A confiança é a que o incidente
+    /// corrobora — ver [`crate::incidente::Incidente::corroboracao`].
+    pub fn saida_depois_de_sondagem(
+        &mut self,
+        e: &Evento,
+        confianca: Confianca,
+    ) -> Option<Deteccao> {
         if !(e.tipo == Tipo::Decisao
             && e.codigo.permite()
             && matches!(e.metodo.as_str(), "net.connect" | "net.send"))
@@ -521,6 +704,7 @@ impl Detector {
         Some(Deteccao {
             regra: Regra::SaidaDepoisDeSondagem,
             severidade: Severidade::Alta,
+            confianca,
             principal: e.principal.clone(),
             titular: e.titular,
             registros: alloc::vec![e.seq],
@@ -532,6 +716,7 @@ impl Detector {
             alvo: Some(Alvo {
                 destino: destino.texto(),
                 dono,
+                papel: e.papel.clone(),
             }),
             ts_ms: e.ts_ms,
             epoca: e.epoca,
@@ -539,6 +724,18 @@ impl Detector {
     }
 }
 
+/// Quantos distintos há em `vs` pela chave, e o primeiro registro de cada
+/// um — o que mostra cada coisa distinta, sem as repetições.
+fn primeiros<K: Ord>(vs: &[&Visto], chave: impl Fn(&Visto) -> K) -> (usize, Vec<u64>) {
+    let mut vistos = BTreeSet::new();
+    let mut registros = Vec::new();
+    for v in vs {
+        if vistos.insert(chave(v)) {
+            registros.push(v.seq);
+        }
+    }
+    (vistos.len(), registros)
+}
 #[cfg(test)]
 pub(crate) mod testes {
     use super::*;
@@ -663,24 +860,132 @@ pub(crate) mod testes {
     /// Pessoa e agente: a mesma sequência dispara a mesma regra.
     #[test]
     fn pessoa_e_agente_pela_mesma_regra() {
-        let seq = |p: &str, t: Titular| -> Vec<(Regra, Severidade)> {
+        let seq = |p: &str, t: Titular| -> Vec<(Regra, Severidade, Confianca)> {
             let evs: Vec<Evento> = (1..=7)
-                .map(|i| ev(i, p, t, "net.connect", Codigo::DenyResource))
+                .map(|i| {
+                    let mut e = ev(i, p, t, "net.connect", Codigo::DenyResource);
+                    e.recurso = alloc::format!("tcp:10.0.2.{i}:80");
+                    e
+                })
                 .collect();
             rodar(&evs)
                 .iter()
-                .map(|d| (d.regra, d.severidade))
+                .map(|d| (d.regra, d.severidade, d.confianca))
                 .collect()
         };
         let agente = seq("agent:aa", Titular::Agente);
         assert_eq!(
             agente,
             [
-                (Regra::ForaDoAlcance, Severidade::Media),
-                (Regra::ForaDoAlcance, Severidade::Alta)
+                (Regra::ForaDoAlcance, Severidade::Media, Confianca::Baixa),
+                (Regra::ForaDoAlcance, Severidade::Alta, Confianca::Media)
             ]
         );
         assert_eq!(agente, seq("person:01", Titular::Pessoa));
+    }
+
+    /// O mesmo pedido recusado cem vezes é um agente repetindo, não um
+    /// reconhecimento: nenhuma regra conta a repetição — nem a do alcance,
+    /// nem a do firewall. A sondagem também não: um método só.
+    #[test]
+    fn a_repeticao_nao_e_reconhecimento() {
+        let mut evs = Vec::new();
+        for i in 1..=100 {
+            let mut e = ev(
+                i,
+                "agent:aa",
+                Titular::Agente,
+                "fs.read",
+                Codigo::DenyResource,
+            );
+            e.recurso = "/dados/fora".to_string();
+            evs.push(e);
+            let mut f = ev(
+                1000 + i,
+                "agent:aa",
+                Titular::Agente,
+                "policy.show",
+                Codigo::DenyPermission,
+            );
+            f.recurso = String::new();
+            evs.push(f);
+            let mut g = ev(
+                2000 + i,
+                "agent:aa",
+                Titular::Agente,
+                "net.connect",
+                Codigo::DenyPolicy,
+            );
+            g.tipo = Tipo::Firewall { regra: 1 };
+            g.recurso = "tcp:10.0.2.100:7".to_string();
+            evs.push(g);
+        }
+        for e in &mut evs {
+            e.ts_ms = 1_000 + e.seq % 1000 * 10;
+        }
+        evs.sort_by_key(|e| e.ts_ms);
+        let ds = rodar(&evs);
+        assert!(ds.is_empty(), "{ds:?}");
+    }
+
+    /// Cada regra tem a categoria dela, e as quatro existem: o incomum não
+    /// é o arriscado, nem a violação, nem o contorno.
+    #[test]
+    fn as_categorias() {
+        let mut vistas = BTreeSet::new();
+        for r in Regra::TODAS {
+            vistas.insert(r.categoria());
+        }
+        assert_eq!(
+            vistas.into_iter().collect::<Vec<_>>(),
+            [
+                Categoria::Incomum,
+                Categoria::Risco,
+                Categoria::Violacao,
+                Categoria::Contorno
+            ]
+        );
+        assert_eq!(Regra::ComportamentoAnomalo.categoria(), Categoria::Incomum);
+        assert_eq!(Regra::CadeiaDeProcessos.categoria(), Categoria::Incomum);
+        assert_eq!(Regra::SondagemDePrivilegio.categoria(), Categoria::Violacao);
+        assert_eq!(Regra::TetoExercido.categoria(), Categoria::Contorno);
+        assert_eq!(Confianca::Baixa.acima(), Confianca::Media);
+        assert_eq!(Confianca::Media.acima(), Confianca::Alta);
+        assert_eq!(Confianca::Alta.acima(), Confianca::Alta);
+    }
+
+    /// Três falhas de autenticação são de olhar — quem erra a senha não é um
+    /// ataque —; dez, de alertar.
+    #[test]
+    fn as_falhas_de_autenticacao() {
+        let falhas = |n: u64| -> Vec<(Severidade, Confianca)> {
+            let evs: Vec<Evento> = (1..=n)
+                .map(|i| {
+                    let mut e = ev(
+                        i,
+                        "anonymous:person:01",
+                        Titular::Anonimo,
+                        "login",
+                        Codigo::DenyNotAuthenticated,
+                    );
+                    e.detalhe = "a senha nao confere".to_string();
+                    e
+                })
+                .collect();
+            rodar(&evs)
+                .iter()
+                .map(|d| (d.severidade, d.confianca))
+                .collect()
+        };
+        assert!(falhas(2).is_empty());
+        assert_eq!(falhas(3), [(Severidade::Media, Confianca::Baixa)]);
+        assert_eq!(
+            falhas(10),
+            [
+                (Severidade::Media, Confianca::Baixa),
+                (Severidade::Alta, Confianca::Media)
+            ]
+        );
     }
 
     #[test]
@@ -700,13 +1005,18 @@ pub(crate) mod testes {
             e.detalhe = "chave revogada".to_string();
         }
         let ds = rodar(&evs);
-        let r: Vec<_> = ds.iter().map(|d| (d.regra, d.severidade)).collect();
+        let r: Vec<_> = ds
+            .iter()
+            .map(|d| (d.regra, d.severidade, d.confianca))
+            .collect();
+        // Uma vez: a chave revogada que insiste é a mesma coisa.
         assert_eq!(
             r,
-            [
-                (Regra::AbusoDeCredencial, Severidade::Media),
-                (Regra::AbusoDeCredencial, Severidade::Alta)
-            ]
+            [(
+                Regra::AbusoDeCredencial,
+                Severidade::Media,
+                Confianca::Media
+            )]
         );
     }
 
@@ -754,10 +1064,11 @@ pub(crate) mod testes {
         );
     }
 
+    /// O firewall: destinos distintos. Bater de novo no mesmo destino
+    /// barrado não conta; procurar outros, sim.
     #[test]
     fn o_firewall() {
-        let mut evs = Vec::new();
-        for i in 1..=3 {
+        let barrado = |i: u64, destino: &str| {
             let mut e = ev(
                 i,
                 "agent:aa",
@@ -766,13 +1077,40 @@ pub(crate) mod testes {
                 Codigo::DenyPolicy,
             );
             e.tipo = Tipo::Firewall { regra: 1 };
-            e.recurso = "tcp:10.0.2.100:7".to_string();
-            evs.push(e);
-        }
-        let ds = rodar(&evs);
-        assert_eq!(ds.len(), 1);
-        assert_eq!(ds[0].regra, Regra::ContornoDoFirewall);
-        assert_eq!(ds[0].registros, [1, 2]);
+            e.recurso = destino.to_string();
+            e
+        };
+        let mesmo: Vec<Evento> = (1..=5).map(|i| barrado(i, "tcp:10.0.2.100:7")).collect();
+        assert!(rodar(&mesmo).is_empty());
+        // Dois destinos, cada um duas vezes, e depois mais dois.
+        let outros: Vec<Evento> = [100, 100, 101, 101, 102, 103]
+            .iter()
+            .zip(1..)
+            .map(|(d, i)| barrado(i, &alloc::format!("tcp:10.0.2.{d}:7")))
+            .collect();
+        let ds = rodar(&outros);
+        let r: Vec<_> = ds
+            .iter()
+            .map(|d| (d.regra, d.severidade, d.confianca, d.registros.clone()))
+            .collect();
+        assert_eq!(
+            r,
+            [
+                (
+                    Regra::ContornoDoFirewall,
+                    Severidade::Media,
+                    Confianca::Baixa,
+                    alloc::vec![1, 3]
+                ),
+                (
+                    Regra::ContornoDoFirewall,
+                    Severidade::Alta,
+                    Confianca::Media,
+                    alloc::vec![1, 3, 5, 6]
+                ),
+            ],
+            "cada degrau com o primeiro registro de cada destino"
+        );
     }
 
     /// O que sai da janela não conta, e a recarga deixa disparar de novo.
@@ -826,19 +1164,21 @@ pub(crate) mod testes {
         let mut d = Detector::novo();
         let mut e = ev(9, "agent:aa", Titular::Agente, "net.connect", Codigo::Allow);
         e.recurso = "tcp:10.0.2.100:7".to_string();
-        let det = d.saida_depois_de_sondagem(&e).unwrap();
+        let det = d.saida_depois_de_sondagem(&e, Confianca::Alta).unwrap();
         assert_eq!(
             det.alvo,
             Some(Alvo {
                 destino: "tcp:10.0.2.100:7".to_string(),
-                dono: alloc::format!("agent:{}", crate::util::hex(&[0xAA; 32]))
+                dono: alloc::format!("agent:{}", crate::util::hex(&[0xAA; 32])),
+                papel: "operador".to_string(),
             })
         );
+        assert_eq!(det.confianca, Confianca::Alta);
         // Uma vez por destino.
-        assert!(d.saida_depois_de_sondagem(&e).is_none());
+        assert!(d.saida_depois_de_sondagem(&e, Confianca::Alta).is_none());
         // Recusada, ou sem destino, não.
         e.codigo = Codigo::DenyResource;
         e.recurso = "tcp:10.0.2.101:7".to_string();
-        assert!(d.saida_depois_de_sondagem(&e).is_none());
+        assert!(d.saida_depois_de_sondagem(&e, Confianca::Alta).is_none());
     }
 }

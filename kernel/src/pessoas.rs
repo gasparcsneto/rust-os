@@ -281,6 +281,10 @@ pub enum RecusaDeLogin {
     SemEntropia,
     /// Sessões abertas demais.
     Cheio,
+    /// A senha conferiu, e a credencial está suspensa — uma contenção
+    /// reversível, que um administrador desfaz. Só quem tem a senha ouve
+    /// isto: a recusa vem depois da conferência.
+    Suspensa,
 }
 
 impl RecusaDeLogin {
@@ -292,6 +296,7 @@ impl RecusaDeLogin {
             RecusaDeLogin::Memoria => "sem memoria para conferir a senha",
             RecusaDeLogin::SemEntropia => "sem entropia para abrir a sessao",
             RecusaDeLogin::Cheio => "sessoes demais abertas",
+            RecusaDeLogin::Suspensa => "credencial suspensa; um administrador pode retoma-la",
         }
     }
 
@@ -302,6 +307,7 @@ impl RecusaDeLogin {
             RecusaDeLogin::Memoria | RecusaDeLogin::SemEntropia | RecusaDeLogin::Cheio => {
                 Codigo::Error
             }
+            RecusaDeLogin::Suspensa => Codigo::DenyCredential,
         }
     }
 }
@@ -417,6 +423,17 @@ pub fn autenticar(console: Console, nome: &str, senha: &[u8]) -> Result<IdSessao
     }
     if !confere || !senha_valida {
         return recusar(Some(&pessoa.id), "senha nao confere");
+    }
+    // A credencial suspensa confere e não entra — ver `crate::contencao`.
+    if crate::contencao::pessoa_suspensa(pessoa.id) {
+        crate::autorizacao::auditar_pessoa_recusada_com(
+            Codigo::DenyCredential,
+            Some(&pessoa.id.texto()),
+            "person.login",
+            &recurso,
+            "credencial suspensa",
+        );
+        return Err(RecusaDeLogin::Suspensa);
     }
 
     let mut bytes = [0u8; 8];
@@ -659,6 +676,8 @@ pub fn revogar_pessoa(id: IdPessoa) -> Result<Vec<IdSessao>, Recusa> {
         politica::mensagens::Dono::Pessoa(id.0),
         "com a pessoa revogada",
     );
+    // A revogação é o definitivo: a suspensão de antes some.
+    crate::contencao::esquecer_pessoa(id);
     Ok(encerradas)
 }
 

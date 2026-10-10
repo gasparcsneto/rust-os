@@ -365,14 +365,7 @@ fn responder(
     }
     let licenca = match autorizacao::autorizar(chamador, comando, requisicao.params) {
         Ok(l) => l,
-        Err(codigo) => {
-            return protocol::envelope_erro(
-                w,
-                requisicao.id,
-                RpcError::da_recusa(codigo),
-                Some(codigo.nome()),
-            );
-        }
+        Err(recusa) => return protocol::envelope_recusa(w, requisicao.id, &recusa),
     };
     let r = protocol::envelope_ok(w, requisicao.id, |w| {
         let (r, e) = licenca.executar_suspensivel(

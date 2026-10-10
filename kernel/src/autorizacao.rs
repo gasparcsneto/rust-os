@@ -820,6 +820,7 @@ fn auditar(
     parametros: &[u8],
     detalhe: &str,
 ) -> u64 {
+    let inicio = crate::arch::ciclos();
     let recurso = cortado(recurso, MAIOR_RECURSO);
     let metodo = cortado(metodo, MAIOR_RECURSO);
     let evento = Evento {
@@ -845,6 +846,10 @@ fn auditar(
     };
     let seq =
         crate::arch::sem_interrupcoes(|| AUDITORIA.lock().as_mut().map_or(0, |c| c.anexar(evento)));
+    // O custo do registro, e quando ele foi gravado — de onde sai a
+    // latência da resposta do NSF. Antes de ele ser anunciado: o NSF não
+    // lê um registro cujo momento ainda não está guardado.
+    crate::metricas::registro_gravado(seq, crate::metricas::desde(inicio));
     ULTIMO_REGISTRO.fetch_max(seq, Ordering::AcqRel);
     seq
 }
@@ -1036,7 +1041,14 @@ fn quem_da_autoridade(sessao: u8, chave: Option<[u8; 32]>) -> Quem {
 
 /// Gasta uma ficha do balde da sessão. `Err` se não havia. Na volta de uma
 /// sequência recusada, grava quantas foram — ver [`BaldeDe::suprimidos`].
-fn passar_pela_taxa(quem: &Quem, metodo: &str, parametros: &[u8]) -> Result<(), Codigo> {
+/// Uma recusa por taxa: o registro dela — zero se foi contada sem registro,
+/// numa rajada — e quanto esperar pela próxima ficha.
+struct Taxada {
+    decisao: u64,
+    espera_ms: u64,
+}
+
+fn passar_pela_taxa(quem: &Quem, metodo: &str, parametros: &[u8]) -> Result<(), Taxada> {
     let Some(papel) = quem.papel.as_deref() else {
         // Sem papel não há taxa a aplicar: a decisão vai recusar.
         return Ok(());
@@ -1061,7 +1073,7 @@ fn passar_pela_taxa(quem: &Quem, metodo: &str, parametros: &[u8]) -> Result<(), 
         return Ok(());
     };
     let agora = crate::tempo::uptime_ms();
-    let (passou, suprimidos_antes, primeiro_recusado) = crate::arch::sem_interrupcoes(|| {
+    let (passou, suprimidos_ou_primeiro, espera_ms) = crate::arch::sem_interrupcoes(|| {
         let mut t = TAXAS.lock();
         let vaga = t
             .baldes
@@ -1089,26 +1101,30 @@ fn passar_pela_taxa(quem: &Quem, metodo: &str, parametros: &[u8]) -> Result<(), 
             b.balde = Balde::novo(taxa, agora);
         }
         if b.balde.tentar(agora) {
-            (true, core::mem::take(&mut b.suprimidos), false)
+            (true, core::mem::take(&mut b.suprimidos), 0)
         } else {
             b.suprimidos += 1;
-            (false, 0, b.suprimidos == 1)
+            (
+                false,
+                u64::from(b.suprimidos == 1),
+                b.balde.espera_ms(agora).max(1),
+            )
         }
     });
     if passou {
-        if suprimidos_antes > 1 {
+        if suprimidos_ou_primeiro > 1 {
             auditar(
                 quem,
                 metodo,
                 "",
                 Codigo::RateLimit,
                 &[],
-                &alloc::format!("{} pedidos recusados por taxa", suprimidos_antes),
+                &alloc::format!("{} pedidos recusados por taxa", suprimidos_ou_primeiro),
             );
         }
         return Ok(());
     }
-    if primeiro_recusado {
+    let decisao = if suprimidos_ou_primeiro == 1 {
         auditar(
             quem,
             metodo,
@@ -1116,9 +1132,11 @@ fn passar_pela_taxa(quem: &Quem, metodo: &str, parametros: &[u8]) -> Result<(), 
             Codigo::RateLimit,
             parametros,
             "taxa do papel esgotada",
-        );
-    }
-    Err(Codigo::RateLimit)
+        )
+    } else {
+        0
+    };
+    Err(Taxada { decisao, espera_ms })
 }
 
 /// O recurso de um pedido, como texto: o valor do parâmetro que o comando
@@ -1196,7 +1214,9 @@ fn decidir(papel: Option<&str>, permissao: Permissao, recurso: &str) -> (Codigo,
     {
         return (Codigo::DenyResource, "reservado ao kernel");
     }
+    let inicio = crate::arch::ciclos();
     let codigo = com_politica(|p| p.decidir(papel, permissao, Some(recurso)));
+    crate::metricas::POLITICA.somar(crate::metricas::desde(inicio));
     let detalhe = match codigo {
         Codigo::DenyRole => "sem papel, ou papel que a politica nao tem",
         Codigo::DenyPermission => "o papel nao tem a permissao",
@@ -1230,6 +1250,41 @@ pub fn decidir_destino(
         Err(motivo) => match decidir(papel, permissao, "") {
             (Codigo::DenyResource, _) => (Codigo::DenyResource, motivo, None),
             (codigo, detalhe) => (codigo, detalhe, None),
+        },
+    }
+}
+
+/// A decisão de uma contenção — ou do inverso dela: o recurso é o papel de
+/// quem o alvo alcança — o dono do processo, o agente, o titular da
+/// credencial —, `papel:<nome>`, contra o alcance enumerado de quem pede.
+///
+/// Como num destinatário, a permissão vem antes da existência: quem não tem
+/// a permissão ouve `DENY_PERMISSION`, e não descobre se o alvo existe;
+/// quem tem, e pede um alvo que não existe — um processo que acabou —,
+/// ouve `DENY_RESOURCE`, com o motivo.
+pub fn decidir_contencao(
+    papel: Option<&str>,
+    permissao: Permissao,
+    metodo: &str,
+    alvo: &str,
+) -> (Codigo, &'static str) {
+    let papel_do_alvo = crate::contencao::Alvo::do_texto(metodo, alvo)
+        .ok_or("alvo inexistente")
+        .and_then(|a| a.papel());
+    match papel_do_alvo {
+        Ok(p) => {
+            let recurso = alloc::format!("{}{}", politica::arquivo::PREFIXO_DE_DESTINO, p);
+            match decidir(papel, permissao, &recurso) {
+                (Codigo::DenyResource, _) => (
+                    Codigo::DenyResource,
+                    "o papel do alvo esta fora do alcance do papel",
+                ),
+                outra => outra,
+            }
+        }
+        Err(motivo) => match decidir(papel, permissao, "") {
+            (Codigo::DenyResource, _) => (Codigo::DenyResource, motivo),
+            outra => outra,
         },
     }
 }
@@ -1422,6 +1477,40 @@ pub fn endereco_decidido(destino: &str) -> bool {
     .unwrap_or(false)
 }
 
+/// A falha de uma execução — o que o handler não fez depois do gate: o
+/// conflito de versão, o arrendamento de outro, o que a ação pede e quem
+/// pediu não tem —, como uma [`Recusa`]: o comando e a decisão do gate que
+/// o autorizou, com o código e o motivo da falha. A explicação dela diz que
+/// não é a política: `CONFLICT`, ler de novo e repetir; esperar; tomar o
+/// arrendamento. `None` fora de um comando autorizado.
+pub fn recusa_da_execucao(codigo: Codigo, motivo: &str) -> Option<Recusa> {
+    do_comando_deste_fio(|c| {
+        c.decidido.as_ref().map(|d| Recusa {
+            codigo,
+            metodo: d.metodo,
+            permissao: d.permissao,
+            recurso: d.recursos.join(" ; "),
+            papel: d.quem.papel.clone(),
+            motivo: motivo.to_string(),
+            decisao: d.decisao,
+            espera_ms: None,
+        })
+    })
+    .flatten()
+}
+
+/// O alvo `texto` de uma contenção é o recurso que o gate decidiu para o
+/// comando em execução neste fio: o handler só contém, ou solta, quem foi
+/// decidido.
+pub fn alvo_decidido(texto: &str) -> bool {
+    do_comando_deste_fio(|c| {
+        c.decidido
+            .as_ref()
+            .is_some_and(|d| d.recursos.iter().any(|r| r == texto))
+    })
+    .unwrap_or(false)
+}
+
 /// Decide de novo, agora, o comando em execução neste fio — a mesma conta
 /// do gate, sobre a mesma autoridade, a mesma permissão e os mesmos
 /// recursos, com o registro e a política **de agora**.
@@ -1480,10 +1569,15 @@ pub fn reconfirmar() -> Result<(), (Codigo, &'static str)> {
     // A mesma conta do gate: o destinatário de uma permissão de destino é
     // resolvido de novo — o papel dele agora, e se ele ainda existe —, e um
     // caminho é decidido como caminho.
+    let metodo = do_comando_deste_fio(|c| c.decidido.as_ref().map(|d| d.metodo))
+        .flatten()
+        .unwrap_or("");
     for r in &recursos {
         let (c, d) = if permissao.recurso_e_destino() {
             let (c, d, _) = decidir_destino(quem.papel.as_deref(), permissao, r);
             (c, d)
+        } else if permissao.contencao() {
+            decidir_contencao(quem.papel.as_deref(), permissao, metodo, r)
         } else {
             decidir(quem.papel.as_deref(), permissao, r)
         };
@@ -1558,12 +1652,136 @@ pub fn cota_no_armazem() -> ::armazem::Cota {
 
 /// Decide um comando. `Ok` com a licença para executá-lo; `Err` com o código
 /// da recusa. A decisão vai para a auditoria nos dois casos.
+/// Uma recusa do gate, dita a quem pediu: o código que a auditoria gravou,
+/// e o que a explicação precisa — o que foi pedido, sobre o quê, com que
+/// papel, o motivo, o registro da decisão e, numa recusa por taxa, quanto
+/// esperar.
+///
+/// Não é uma segunda decisão: é a mesma, contada. Quem responde a quem
+/// pediu a transforma na explicação estruturada de um agente e na frase de
+/// uma pessoa — ver [`politica::explicacao`] e `docs/USABILIDADE.md`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Recusa {
+    pub codigo: Codigo,
+    pub metodo: &'static str,
+    /// A permissão que o comando exige — nenhuma numa operação por prova.
+    pub permissao: Option<Permissao>,
+    /// O recurso decidido, como a auditoria o gravou.
+    pub recurso: String,
+    /// O papel com que o gate decidiu, se havia um.
+    pub papel: Option<String>,
+    /// O motivo, como a auditoria o gravou.
+    pub motivo: String,
+    /// O número do registro da decisão; zero quando a recusa não foi
+    /// gravada — a taxa grava a primeira de uma rajada e conta as outras.
+    pub decisao: u64,
+    /// Numa recusa por taxa: em quantos milissegundos há ficha.
+    pub espera_ms: Option<u64>,
+}
+
+impl Recusa {
+    /// O que o gate decidiu, como a explicação o lê.
+    pub fn decidido(&self) -> politica::explicacao::Decidido<'_> {
+        politica::explicacao::Decidido {
+            codigo: self.codigo,
+            permissao: self.permissao.map(Permissao::nome),
+            metodo: self.metodo,
+            recurso: &self.recurso,
+            papel: self.papel.as_deref(),
+            motivo: &self.motivo,
+        }
+    }
+
+    /// A explicação: a razão, se adianta repetir, e o que fazer.
+    pub fn explicacao(&self) -> Option<politica::explicacao::Explicacao> {
+        politica::explicacao::explicar(&self.decidido())
+    }
+
+    /// A frase para uma pessoa — o que ela pediu, o papel dela, e o que
+    /// fazer —, sem detalhe que ela não tenha.
+    pub fn frase(&self) -> String {
+        match self.explicacao() {
+            Some(e) => politica::explicacao::frase(&self.decidido(), &e),
+            None => String::new(),
+        }
+    }
+
+    /// O membro `explain` de um erro: a mesma recusa, estruturada para um
+    /// agente se recuperar sem adivinhar.
+    pub fn escrever(&self, w: &mut JsonWriter) -> fmt::Result {
+        let Some(e) = self.explicacao() else {
+            return w.null_value();
+        };
+        w.begin_object()?;
+        // `outcome`, e não `result`: dentro de um erro, um membro `result`
+        // faria uma recusa parecer sucesso a quem procura o resultado.
+        w.field_str("outcome", e.resultado())?;
+        w.field_str("reason", e.razao.nome())?;
+        w.field_str("code", self.codigo.nome())?;
+        if let Some(p) = self.permissao {
+            w.field_str("permission", p.nome())?;
+        }
+        w.field_str("resource", &self.recurso)?;
+        w.key("role")?;
+        match &self.papel {
+            Some(p) => w.str_value(p)?,
+            None => w.null_value()?,
+        }
+        w.key("decision")?;
+        match self.decisao {
+            0 => w.null_value()?,
+            d => w.u64_value(d)?,
+        }
+        w.field_bool("recoverable", e.recuperavel())?;
+        w.field_str("retry", e.repetir.nome())?;
+        if let Some(espera) = self.espera_ms {
+            w.field_u64("retry_after_ms", espera)?;
+        }
+        w.field_str("next_action", e.proxima.nome())?;
+        w.field_str("message", &self.frase())?;
+        w.end_object()
+    }
+}
+
 pub fn autorizar(
     chamador: Chamador,
     comando: &'static Command,
     params: Json,
-) -> Result<Autorizado, Codigo> {
+) -> Result<Autorizado, Recusa> {
+    // O custo da decisão — do pedido à licença, sem o handler —, para
+    // `security.metrics`. Nada daqui volta para a decisão.
+    let inicio = crate::arch::ciclos();
+    let r = decidir_o_pedido(chamador, comando, params);
+    let codigo = match &r {
+        Ok(_) => Codigo::Allow,
+        Err(recusa) => recusa.codigo,
+    };
+    crate::metricas::decisao(codigo, crate::metricas::desde(inicio));
+    r
+}
+
+/// A decisão de [`autorizar`], sem a medida.
+fn decidir_o_pedido(
+    chamador: Chamador,
+    comando: &'static Command,
+    params: Json,
+) -> Result<Autorizado, Recusa> {
     let parametros = params.0;
+    let exigida = match comando.acesso {
+        Acesso::Exige(p) => Some(p),
+        Acesso::PorProva => None,
+    };
+    // Uma recusa, com o que a explicação precisa.
+    let recusa = |codigo: Codigo, quem: &Quem, recurso: &str, motivo: &str, decisao: u64| Recusa {
+        codigo,
+        metodo: comando.nome,
+        permissao: exigida,
+        recurso: recurso.to_string(),
+        papel: quem.papel.clone(),
+        motivo: motivo.to_string(),
+        decisao,
+        espera_ms: None,
+    };
     // Quem pede, e com que autoridade o comando roda se passar. A pessoa
     // decide pelo papel dela no registro, procurado agora pela sessão — a
     // mesma conta dos agentes, e a mesma auditoria.
@@ -1571,15 +1789,16 @@ pub fn autorizar(
         Chamador::Pessoa(id) => match quem_da_pessoa(id) {
             Ok(q) => (q, Autoridade::Pessoa { sessao: id }),
             Err(q) => {
-                auditar(
+                let motivo = "sessao de pessoa que acabou";
+                let d = auditar(
                     &q,
                     comando.nome,
                     "",
                     Codigo::DenyNotAuthenticated,
                     parametros,
-                    "sessao de pessoa que acabou",
+                    motivo,
                 );
-                return Err(Codigo::DenyNotAuthenticated);
+                return Err(recusa(Codigo::DenyNotAuthenticated, &q, "", motivo, d));
             }
         },
         Chamador::Processo {
@@ -1594,41 +1813,44 @@ pub fn autorizar(
             if let Autoridade::Pessoa { sessao } = autoridade
                 && quem_da_pessoa(sessao).is_err()
             {
-                auditar(
+                let motivo = "sessao de pessoa que acabou";
+                let d = auditar(
                     &q,
                     comando.nome,
                     "",
                     Codigo::DenyNotAuthenticated,
                     parametros,
-                    "sessao de pessoa que acabou",
+                    motivo,
                 );
-                return Err(Codigo::DenyNotAuthenticated);
+                return Err(recusa(Codigo::DenyNotAuthenticated, &q, "", motivo, d));
             }
             if so_do_canal(comando) {
-                auditar(
+                let motivo = "so um canal do agente pede este comando";
+                let d = auditar(
                     &q,
                     comando.nome,
                     "",
                     Codigo::DenyPermission,
                     parametros,
-                    "so um canal do agente pede este comando",
+                    motivo,
                 );
-                return Err(Codigo::DenyPermission);
+                return Err(recusa(Codigo::DenyPermission, &q, "", motivo, d));
             }
             // O manifesto: o que o programa não declarou ele não exerce,
             // qualquer que seja o papel de quem o lançou.
             if let Acesso::Exige(p) = comando.acesso
                 && !programa.permite(p)
             {
-                auditar(
+                let motivo = alloc::format!("o manifesto nao declara {}", p.nome());
+                let d = auditar(
                     &q,
                     comando.nome,
                     "",
                     Codigo::DenyPermission,
                     parametros,
-                    &alloc::format!("o manifesto nao declara {}", p.nome()),
+                    &motivo,
                 );
-                return Err(Codigo::DenyPermission);
+                return Err(recusa(Codigo::DenyPermission, &q, "", &motivo, d));
             }
             (q, autoridade)
         }
@@ -1643,7 +1865,7 @@ pub fn autorizar(
                 } else {
                     "sessao sem aperto"
                 };
-                auditar(
+                let d = auditar(
                     &q,
                     comando.nome,
                     "",
@@ -1651,7 +1873,7 @@ pub fn autorizar(
                     parametros,
                     detalhe,
                 );
-                return Err(Codigo::DenyNotAuthenticated);
+                return Err(recusa(Codigo::DenyNotAuthenticated, &q, "", detalhe, d));
             }
         },
     };
@@ -1660,25 +1882,56 @@ pub fn autorizar(
     if credenciada(autoridade)
         && let Some(motivo) = crate::persistencia::revogacoes_desconhecidas()
     {
-        auditar(
+        let detalhe = "journal recusado: as revogacoes nao se sabem";
+        let d = auditar(
             &quem,
             comando.nome,
             "",
             Codigo::DenyNotAuthenticated,
             parametros,
-            "journal recusado: as revogacoes nao se sabem",
+            detalhe,
         );
         crate::log_warn!("autorizacao", "credencial recusada: {}", motivo);
-        return Err(Codigo::DenyNotAuthenticated);
+        return Err(recusa(Codigo::DenyNotAuthenticated, &quem, "", detalhe, d));
     }
-    passar_pela_taxa(&quem, comando.nome, parametros)?;
+    if let Err(t) = passar_pela_taxa(&quem, comando.nome, parametros) {
+        return Err(Recusa {
+            espera_ms: Some(t.espera_ms),
+            ..recusa(
+                Codigo::RateLimit,
+                &quem,
+                "",
+                "taxa do papel esgotada",
+                t.decisao,
+            )
+        });
+    }
+    // Quem está contido pede, e o gate recusa: o processo isolado, o agente
+    // suspenso, a credencial suspensa — ver [`crate::contencao`]. Depois da
+    // taxa, para a insistência de um contido não encher a auditoria. Uma
+    // operação por prova passa: a prova é a autoridade, e a sessão por onde
+    // ela veio é só o transporte — o administrador recupera o sistema
+    // mesmo pela porta de quem foi contido.
+    if exigida.is_some()
+        && let Some((codigo, motivo)) = crate::contencao::recusa(chamador, autoridade)
+    {
+        let d = auditar(&quem, comando.nome, "", codigo, parametros, motivo);
+        return Err(recusa(codigo, &quem, "", motivo, d));
+    }
 
     // Um comando sobre uma conexão aberta — `net.send`, `net.recv`,
     // `net.close` — nomeia a conexão pelo número, e o recurso é o destino
     // dela, resolvido para quem pede: o número de outro titular, ou um que
     // não existe, não resolve. Ver `rede::conexoes`.
     let mut sem_conexao = None;
-    let recurso = if comando.recurso == Some(crate::rede::conexoes::PARAMETRO) {
+    let recurso = if exigida.is_some_and(Permissao::contencao) {
+        // O alvo de uma contenção, no texto em que a auditoria o grava;
+        // vazio se o pedido não diz um alvo que se leia — a decisão diz por
+        // quê.
+        crate::contencao::Alvo::do_pedido(comando.nome, params)
+            .map(|a| a.texto())
+            .unwrap_or_default()
+    } else if comando.recurso == Some(crate::rede::conexoes::PARAMETRO) {
         let dono = crate::rede::conexoes::Dono::do_chamador(chamador, quem.chave);
         let numero = params
             .member(crate::rede::conexoes::PARAMETRO)
@@ -1719,6 +1972,9 @@ pub fn autorizar(
             destino = resolvido;
             (codigo, detalhe)
         }
+        Acesso::Exige(permissao) if permissao.contencao() => {
+            decidir_contencao(quem.papel.as_deref(), permissao, comando.nome, &recurso)
+        }
         Acesso::Exige(permissao) => todos_os_recursos(comando, &recurso, &mais)
             .map(|r| decidir(quem.papel.as_deref(), permissao, r))
             .find(|(c, _)| !c.permite())
@@ -1741,7 +1997,7 @@ pub fn autorizar(
         detalhe,
     );
     if !codigo.permite() {
-        return Err(codigo);
+        return Err(recusa(codigo, &quem, &recurso_gravado, detalhe, decisao));
     }
     // Depois do `ALLOW`, e só dele: quem foi recusado não agiu.
     let permissao = match comando.acesso {
@@ -1867,11 +2123,23 @@ pub fn autorizar_processo(permissao: Permissao, recurso: &str, metodo: &str) -> 
         quem.processo = Some(pelo_processo(id, &programa));
     }
     let nao_declarada;
+    let autoridade = crate::fios::autoridade_atual();
+    // O processo isolado, o agente suspenso, a credencial suspensa: as
+    // chamadas de sistema também — abrir, executar, o terminal.
+    let contida = crate::contencao::recusa(
+        Chamador::Processo {
+            fio: id,
+            autoridade,
+            programa,
+        },
+        autoridade,
+    );
     let (codigo, detalhe) = match crate::persistencia::revogacoes_desconhecidas() {
-        Some(_) if credenciada(crate::fios::autoridade_atual()) => (
+        Some(_) if credenciada(autoridade) => (
             Codigo::DenyNotAuthenticated,
             "journal recusado: as revogacoes nao se sabem",
         ),
+        _ if contida.is_some() => contida.unwrap_or((Codigo::DenyContained, "")),
         _ if !programa.permite(permissao) => {
             nao_declarada = alloc::format!("o manifesto nao declara {}", permissao.nome());
             (Codigo::DenyPermission, nao_declarada.as_str())
@@ -2048,7 +2316,12 @@ pub fn autorizar_acao_da_pessoa(
             return Codigo::DenyNotAuthenticated;
         }
     };
-    let (codigo, detalhe) = if papel_de_teto(&quem) {
+    let contida = sessao.and_then(|id| {
+        crate::contencao::recusa(Chamador::Pessoa(id), Autoridade::Pessoa { sessao: id })
+    });
+    let (codigo, detalhe) = if let Some(recusa) = contida {
+        recusa
+    } else if papel_de_teto(&quem) {
         TETO_NAO_SE_EXERCE
     } else {
         decidir(quem.papel.as_deref(), Permissao::UiAct, "")
@@ -2072,6 +2345,21 @@ pub fn autorizar_acao_da_pessoa(
 /// auditoria do mesmo jeito.
 pub fn permitir_processo(autoridade: Autoridade, metodo: &str) -> Result<usize, Codigo> {
     let quem = quem_do_processo(autoridade);
+    // Quem está contido não lança nem bifurca: o filho de um processo
+    // isolado nasceria livre. Quem pede é o fio de agora — o processo que
+    // bifurca, ou o comando que lança em nome de alguém.
+    let (fio, programa) = crate::fios::programa_atual();
+    if let Some((codigo, motivo)) = crate::contencao::recusa(
+        Chamador::Processo {
+            fio,
+            autoridade,
+            programa,
+        },
+        autoridade,
+    ) {
+        auditar(&quem, metodo, "", codigo, &[], motivo);
+        return Err(codigo);
+    }
     let cota = quem
         .papel
         .as_deref()
@@ -2114,6 +2402,13 @@ fn recusar_pela_cota_com(quem: &Quem, metodo: &str, vivos: usize, cota: usize) -
         &alloc::format!("cota de processos do papel: {vivos} de {cota}"),
     );
     Codigo::DenyPolicy
+}
+
+/// O papel com que o gate decide os pedidos de quem age com `autoridade`:
+/// o de quem lançou o processo. É o recurso de uma contenção dele —
+/// `papel:<este>`.
+pub fn papel_da_autoridade(autoridade: Autoridade) -> Option<String> {
+    quem_do_processo(autoridade).papel
 }
 
 fn quem_do_processo(autoridade: Autoridade) -> Quem {
@@ -2367,6 +2662,18 @@ pub fn auditar_pessoa(
 /// alguém: é o que mostra uma pessoa sendo atacada. Um nome que não é de
 /// ninguém não é gravado.
 pub fn auditar_pessoa_recusada(alvo: Option<&str>, metodo: &str, recurso: &str, detalhe: &str) {
+    auditar_pessoa_recusada_com(Codigo::DenyNotAuthenticated, alvo, metodo, recurso, detalhe);
+}
+
+/// [`auditar_pessoa_recusada`], com outro código: a credencial suspensa,
+/// que conferiu e não entra.
+pub fn auditar_pessoa_recusada_com(
+    codigo: Codigo,
+    alvo: Option<&str>,
+    metodo: &str,
+    recurso: &str,
+    detalhe: &str,
+) {
     let quem = Quem {
         titular: Titular::Anonimo,
         sessao: SESSAO_DA_PESSOA,
@@ -2376,14 +2683,7 @@ pub fn auditar_pessoa_recusada(alvo: Option<&str>, metodo: &str, recurso: &str, 
         papel: None,
         processo: None,
     };
-    auditar(
-        &quem,
-        metodo,
-        recurso,
-        Codigo::DenyNotAuthenticated,
-        &[],
-        detalhe,
-    );
+    auditar(&quem, metodo, recurso, codigo, &[], detalhe);
 }
 
 /// Muda a política em vigor por uma conta sobre ela, numa seção só: ler a

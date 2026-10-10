@@ -77,7 +77,9 @@ fn tipo(t: Tipo) -> &'static str {
 fn deteccao(w: &mut JsonWriter, d: &Deteccao) -> fmt::Result {
     w.begin_object()?;
     w.field_str("rule", d.regra.nome())?;
+    w.field_str("category", d.regra.categoria().nome())?;
     w.field_str("severity", d.severidade.nome())?;
+    w.field_str("confidence", d.confianca.nome())?;
     w.field_str("principal", &d.principal)?;
     w.field_u64("ts_ms", d.ts_ms)?;
     w.key("records")?;
@@ -104,6 +106,9 @@ fn acao(w: &mut JsonWriter, a: &Acao) -> fmt::Result {
     if !a.params.is_empty() {
         w.field_str("params", &a.params)?;
     }
+    if !a.dono.is_empty() {
+        w.field_str("subject", &a.dono)?;
+    }
     w.field_str("state", a.estado.nome())?;
     match &a.estado {
         crate::resposta::Estado::Negada { codigo } => w.field_str("code", codigo)?,
@@ -126,9 +131,11 @@ fn resumo(w: &mut JsonWriter, i: &Incidente) -> fmt::Result {
     w.field_u64("id", i.id)?;
     w.field_str("state", i.estado.nome())?;
     w.field_str("severity", i.severidade.nome())?;
+    w.field_str("confidence", i.confianca.nome())?;
     w.field_str("principal", &i.principal)?;
     w.field_u64("boot", u64::from(i.epoca))?;
     w.field_bool("historical", i.historico)?;
+    w.field_bool("recovered", i.recuperada.is_some())?;
     w.key("rules")?;
     w.begin_array()?;
     let mut regras: Vec<&str> = i.deteccoes.iter().map(|d| d.regra.nome()).collect();
@@ -174,6 +181,11 @@ pub fn status(m: &Motor, w: &mut JsonWriter) -> fmt::Result {
     w.field_u64("allowed", c.permitidos)?;
     w.field_u64("denied", c.negados)?;
     w.field_u64("failed", c.falhos)?;
+    w.field_u64("recovered", c.recuperadas)?;
+    w.field_u64("repeated_containments", c.repetidas)?;
+    w.field_u64("observations", c.observacoes)?;
+    w.field_u64("denials_seen", c.recusas)?;
+    w.field_u64("denials_repeated", c.recusas_repetidas)?;
     let abertos = m
         .incidentes
         .todos()
@@ -183,16 +195,165 @@ pub fn status(m: &Motor, w: &mut JsonWriter) -> fmt::Result {
     w.field_u64("incidents", m.incidentes.todos().count() as u64)?;
     w.field_u64("evidence", m.cofre.guardados() as u64)?;
     w.field_u64("dns_malformed", m.dns.malformados)?;
+    saude(m, w)?;
     w.end_object()
 }
 
-/// `security.incidents` sem `id`.
+/// A saúde do NSF, como membro `health`: o estado, o código quando
+/// degradado, os motivos e o atraso. Nunca uma recusa — o gate não a lê.
+fn saude(m: &Motor, w: &mut JsonWriter) -> fmt::Result {
+    let s = m.saude();
+    w.key("health")?;
+    w.begin_object()?;
+    w.field_str("state", s.nome())?;
+    if let Some(codigo) = s.codigo() {
+        w.field_str("code", codigo)?;
+    }
+    w.key("reasons")?;
+    w.begin_array()?;
+    for d in &s.motivos {
+        w.str_value(d.nome())?;
+    }
+    w.end_array()?;
+    w.field_u64("backlog", s.atraso)?;
+    w.end_object()
+}
+
+/// Quantas observações a lista de incidentes mostra: as mais novas.
+const OBSERVACOES_NA_LISTA: usize = 16;
+
+/// Uma proporção em milésimos; zero sem base.
+fn por_mil(parte: u64, todo: u64) -> u64 {
+    parte.saturating_mul(1000).checked_div(todo).unwrap_or(0)
+}
+
+/// O uso de uma estrutura contra o teto dela.
+fn uso(w: &mut JsonWriter, nome: &str, usado: usize, teto: usize) -> fmt::Result {
+    w.key(nome)?;
+    w.begin_object()?;
+    w.field_u64("used", usado as u64)?;
+    w.field_u64("cap", teto as u64)?;
+    w.end_object()
+}
+
+/// A parte do NSF em `security.metrics`: a saúde, a memória de cada
+/// estrutura contra o teto dela, e as taxas que dizem o custo da segurança
+/// para quem não é ameaça — a contenção desfeita, o alerta que não deu em
+/// nada, a recusa repetida, a recusa de quem o NSF não tinha por ameaça.
+///
+/// As taxas são milésimos, e dizem do que o NSF ainda guarda: os
+/// incidentes são os da janela dele.
+pub fn metricas(m: &Motor, w: &mut JsonWriter) -> fmt::Result {
+    use crate::incidente::Estado;
+    use crate::regras::Confianca;
+    let c = &m.contadores;
+    w.begin_object()?;
+    saude(m, w)?;
+    w.key("memory")?;
+    w.begin_object()?;
+    uso(w, "events", m.eventos().count(), crate::motor::MAIS_EVENTOS)?;
+    uso(
+        w,
+        "incidents",
+        m.incidentes.todos().count(),
+        crate::incidente::MAIS_INCIDENTES,
+    )?;
+    uso(
+        w,
+        "observations",
+        m.observacoes().count(),
+        crate::motor::MAIS_OBSERVACOES,
+    )?;
+    uso(
+        w,
+        "evidence",
+        m.cofre.guardados(),
+        crate::evidencia::CAPACIDADE,
+    )?;
+    uso(
+        w,
+        "graph_edges",
+        m.grafo.arestas(),
+        crate::grafo::MAIS_ARESTAS,
+    )?;
+    uso(
+        w,
+        "profiles",
+        m.ueba.perfis().count(),
+        crate::ueba::MAIS_PERFIS,
+    )?;
+    uso(
+        w,
+        "dns_resolutions",
+        m.dns.resolucoes().count(),
+        crate::dns::MAIS_RESOLUCOES,
+    )?;
+    w.end_object()?;
+    w.field_u64("records_read", c.registros)?;
+    w.field_u64("detections", c.deteccoes)?;
+    w.field_u64("observations", c.observacoes)?;
+    w.field_u64("incidents", m.incidentes.todos().count() as u64)?;
+    // A contenção falsa: o que o NSF conteve e alguém, com a autoridade
+    // dele, desfez.
+    w.field_u64("containments_allowed", c.permitidos)?;
+    w.field_u64("containments_recovered", c.recuperadas)?;
+    w.field_u64(
+        "false_containment_permille",
+        por_mil(c.recuperadas, c.permitidos),
+    )?;
+    // O alerta que não deu em nada: o incidente encerrado sem contenção e
+    // sem detecção de confiança alta.
+    let encerrados: Vec<&Incidente> = m
+        .incidentes
+        .todos()
+        .filter(|i| i.estado == Estado::Encerrado)
+        .collect();
+    let vazios = encerrados
+        .iter()
+        .filter(|i| {
+            i.confianca < Confianca::Alta
+                && !i.acoes.iter().any(|a| {
+                    a.contem()
+                        && matches!(
+                            a.estado,
+                            crate::resposta::Estado::Permitida | crate::resposta::Estado::Observada
+                        )
+                })
+        })
+        .count();
+    w.field_u64("incidents_closed", encerrados.len() as u64)?;
+    w.field_u64(
+        "false_positive_permille",
+        por_mil(vazios as u64, encerrados.len() as u64),
+    )?;
+    w.field_u64("decisions_seen", c.decisoes)?;
+    w.field_u64("denials_seen", c.recusas)?;
+    w.field_u64("denials_repeated", c.recusas_repetidas)?;
+    w.field_u64(
+        "agent_retry_permille",
+        por_mil(c.recusas_repetidas, c.recusas),
+    )?;
+    w.field_u64(
+        "legitimate_denial_permille",
+        por_mil(c.recusas_sem_incidente, c.decisoes),
+    )?;
+    w.end_object()
+}
+
+/// `security.incidents` sem `id`: os incidentes — o nível 1 em diante —
+/// e as observações mais novas — o nível 0, o que só chamou a atenção.
 pub fn incidentes(m: &Motor, w: &mut JsonWriter) -> fmt::Result {
     w.begin_object()?;
     w.key("incidents")?;
     w.begin_array()?;
     for i in m.incidentes.todos().rev() {
         resumo(w, i)?;
+    }
+    w.end_array()?;
+    w.key("observations")?;
+    w.begin_array()?;
+    for d in m.observacoes().rev().take(OBSERVACOES_NA_LISTA) {
+        deteccao(w, d)?;
     }
     w.end_array()?;
     w.end_object()
@@ -212,10 +373,16 @@ pub fn incidente(m: &Motor, id: u64, w: &mut JsonWriter) -> fmt::Result {
     w.field_str("principal", &i.principal)?;
     w.field_u64("boot", u64::from(i.epoca))?;
     w.field_bool("historical", i.historico)?;
+    w.field_str("confidence", i.confianca.nome())?;
     w.field_str("correlation", &alloc::format!("{:016x}", i.correlacao))?;
     w.field_u64("opened_ms", i.aberto_ms)?;
     w.field_u64("updated_ms", i.atualizado_ms)?;
     w.field_bool("containment_denied", i.contencao_negada)?;
+    w.key("recovered_by")?;
+    match &i.recuperada {
+        Some(quem) => w.str_value(quem)?,
+        None => w.null_value()?,
+    }
     let r = m.risco(&i.principal);
     w.field_u64("risk", u64::from(r.pontos))?;
     w.key("actors")?;
@@ -342,10 +509,18 @@ fn significado(c: Codigo) -> &'static str {
         }
         Codigo::RateLimit => "a taxa do papel se esgotou",
         Codigo::InvalidArgument => "o pedido nao chegou a ser um comando valido",
-        Codigo::Conflict => "a versao ou o arrendamento eram outros",
-        Codigo::DenyLease => "outro titular tem o arrendamento do recurso",
+        Codigo::Conflict => {
+            "a versao esperada nao era a de agora, ou outro titular tinha o arrendamento"
+        }
+        Codigo::DenyLease => "a operacao pede o arrendamento, e quem pediu nao o tinha",
         Codigo::DenyReplay => "o pedido repetiu um que ja tinha sido usado",
         Codigo::DenyQuota => "a cota do dono se esgotou",
+        Codigo::DenyContained => {
+            "quem pediu estava contido (o processo isolado, ou o agente suspenso), por uma contencao reversivel"
+        }
+        Codigo::DenyCredential => {
+            "a credencial de quem pediu estava suspensa: nao autentica, e as sessoes dela nao agem"
+        }
         Codigo::Error => "a operacao falhou depois de autorizada",
     }
 }
@@ -407,6 +582,20 @@ pub fn explicar(m: &Motor, seq: u64, w: &mut JsonWriter) -> fmt::Result {
     w.begin_array()?;
     for i in incidentes {
         w.u64_value(i)?;
+    }
+    w.end_array()?;
+    // O que o NSF viu neste registro — de um incidente ou só observado —,
+    // com a categoria e a confiança: o NSF interpretou, e não decidiu.
+    w.key("detections")?;
+    w.begin_array()?;
+    for d in m.deteccoes().filter(|d| d.registros.contains(&seq)) {
+        w.begin_object()?;
+        w.field_str("rule", d.regra.nome())?;
+        w.field_str("category", d.regra.categoria().nome())?;
+        w.field_str("severity", d.severidade.nome())?;
+        w.field_str("confidence", d.confianca.nome())?;
+        w.field_str("explanation", &d.explicacao)?;
+        w.end_object()?;
     }
     w.end_array()?;
     w.end_object()

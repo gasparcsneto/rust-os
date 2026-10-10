@@ -26,6 +26,9 @@
 //! - [`caminho`]: a forma normal dos caminhos, a mesma do VFS do kernel.
 //! - [`endereco`]: a forma normal dos destinos de rede, a mesma que o
 //!   kernel disca.
+//! - [`explicacao`]: o que uma recusa quer dizer para quem pediu — a razão,
+//!   se adianta repetir, o que fazer, e a frase para uma pessoa. Lê a
+//!   decisão; não decide.
 
 #![no_std]
 
@@ -37,6 +40,7 @@ pub mod auditoria;
 pub mod caminho;
 pub mod codigo;
 pub mod endereco;
+pub mod explicacao;
 pub mod manifesto;
 pub mod mensagens;
 pub mod permissao;
@@ -72,11 +76,18 @@ pub use permissao::Permissao;
 ///   `10.0.2.2:69` (UDP), e o DNS do emulador, em `10.0.2.3:53` (UDP).
 ///   Enumerados, como todo destino: a imagem de desenvolvimento não disca
 ///   nada que não esteja escrito, nem o sistema.
+/// - `process.isolate`, `agent.suspend` e `credential.suspend`, no `sistema` e
+///   no `administrador`, alcançam `observador`, `operador` e `sistema` —
+///   nunca `administrador`: suspender um administrador seria tirar dele,
+///   sem quórum, o que a revogação só tira com quórum.
 /// - `quorum admin.revoke 2 3`: revogar a credencial de um administrador
 ///   exige a prova de duas outras, de um grupo de três — o da imagem.
 /// - `seguranca` é o papel do tecido de segurança — o serviço `nsf`, pela
 ///   linha `servico` (ver `docs/SEGURANCA.md`): lê a auditoria, observa o
-///   DNS da bancada e barra os destinos da bancada. Nada além: não conecta,
+///   DNS da bancada, barra os destinos da bancada e isola processos de
+///   `observador` e de `operador` — a contenção reversível mais estreita;
+///   suspender um agente ou uma credencial ele só recomenda (ver
+///   `docs/USABILIDADE.md`). Nada além: não conecta,
 ///   não lança, não lê arquivo, não muda a política, e não é o `sistema`.
 ///   Está nas duas políticas: sem política no disco, o tecido continua
 ///   vendo — e continua só com isto. O `sistema` e o `administrador` têm
@@ -87,7 +98,7 @@ pub use permissao::Permissao;
 macro_rules! papeis_de_sistema {
     () => {
         "\
-papel sistema agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.raw_read keyboard.read debug.trigger terminal.attach audit.read policy.read message.send message.read security.read net.observe net.block
+papel sistema agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.raw_read keyboard.read debug.trigger terminal.attach audit.read policy.read message.send message.read security.read net.observe net.block process.isolate agent.suspend credential.suspend
 recurso sistema fs.read /
 recurso sistema fs.write /armazem
 recurso sistema net.connect tcp:10.0.2.100:7 udp:10.0.2.2:69 udp:10.0.2.3:53
@@ -96,10 +107,13 @@ recurso sistema net.block tcp:10.0.2.100:7 udp:10.0.2.2:69 udp:10.0.2.3:53
 armazem sistema 268435456 65536
 recurso sistema process.run /
 recurso sistema message.send papel:observador papel:operador papel:sistema papel:administrador
+recurso sistema process.isolate papel:observador papel:operador papel:sistema
+recurso sistema agent.suspend papel:observador papel:operador papel:sistema
+recurso sistema credential.suspend papel:observador papel:operador papel:sistema
 taxa sistema 400 800
 processos sistema 32
 
-papel administrador agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke security.read net.observe net.block
+papel administrador agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke security.read net.observe net.block process.isolate agent.suspend credential.suspend
 recurso administrador fs.read /dados /bin /programas /armazem/compartilhado
 recurso administrador fs.write /armazem/compartilhado
 recurso administrador net.connect tcp:10.0.2.100:7 udp:10.0.2.2:69 udp:10.0.2.3:53
@@ -108,14 +122,18 @@ recurso administrador net.block tcp:10.0.2.100:7 udp:10.0.2.2:69 udp:10.0.2.3:53
 armazem administrador 67108864 16384
 recurso administrador process.run /bin /programas
 recurso administrador message.send papel:operador papel:sistema papel:administrador
+recurso administrador process.isolate papel:observador papel:operador papel:sistema
+recurso administrador agent.suspend papel:observador papel:operador papel:sistema
+recurso administrador credential.suspend papel:observador papel:operador papel:sistema
 taxa administrador 10 20
 processos administrador 8
 
 quorum admin.revoke 2 3
 
-papel seguranca audit.read net.observe net.block
+papel seguranca audit.read net.observe net.block process.isolate
 recurso seguranca net.observe udp:10.0.2.3:53
 recurso seguranca net.block tcp:10.0.2.100:7 udp:10.0.2.2:69 udp:10.0.2.3:53
+recurso seguranca process.isolate papel:observador papel:operador
 taxa seguranca 10 20
 servico nsf seguranca
 "
@@ -138,7 +156,8 @@ pub const PADRAO: &str = concat!(
 #
 # Uma permissao sensivel (fs.*, net.connect, keyboard.read, debug.trigger,
 # terminal.attach, policy.*, agent.register, agent.revoke, person.*,
-# credential.rotate, session.revoke, lease.revoke, message.*) nao atravessa
+# credential.rotate, session.revoke, lease.revoke, message.*, as contencoes
+# process.isolate, agent.suspend e credential.suspend) nao atravessa
 # a inclusao de outro papel: cada papel que a tem a escreve. Toda permissao
 # de caminho, o message.send e o net.connect tem o alcance escrito numa
 # linha `recurso` — o de message.send e o papel do destinatario,
@@ -673,9 +692,12 @@ mod testes {
     }
 
     /// O tecido de segurança é um principal como os outros: o serviço `nsf`
-    /// decide pelo papel `seguranca`, que enumera três permissões e o
+    /// decide pelo papel `seguranca`, que enumera quatro permissões e o
     /// alcance de cada uma — nas duas políticas embutidas. Nada além: nem
-    /// conectar, nem ler arquivo, nem lançar, nem ler o que ele mesmo viu.
+    /// conectar, nem ler arquivo, nem lançar, nem ler o que ele mesmo viu;
+    /// e das contenções, só a mais estreita — isolar o processo de quem é
+    /// `observador` ou `operador` —, nunca a de um agente ou de uma
+    /// credencial.
     #[test]
     fn o_servico_decide_pelo_papel_dele() {
         use Permissao::*;
@@ -684,7 +706,10 @@ mod testes {
             assert_eq!(p.servico("outro"), None);
             let papel = p.papel("seguranca").unwrap();
             let todas: alloc::vec::Vec<_> = papel.permissoes().map(|x| x.nome()).collect();
-            assert_eq!(todas, ["audit.read", "net.observe", "net.block"]);
+            assert_eq!(
+                todas,
+                ["audit.read", "net.observe", "net.block", "process.isolate"]
+            );
             let d = |perm, rec| p.decidir(Some("seguranca"), perm, rec);
             assert_eq!(d(AuditRead, None), Codigo::Allow);
             assert_eq!(d(NetObserve, Some("udp:10.0.2.3:53")), Codigo::Allow);
@@ -694,6 +719,28 @@ mod testes {
             }
             for fora in ["tcp:10.0.2.100:8", "udp:10.0.2.99:53", ""] {
                 assert_eq!(d(NetBlock, Some(fora)), Codigo::DenyResource, "{fora}");
+            }
+            // Na de emergência não há observador nem operador: o tecido não
+            // alcança ninguém — o papel do alvo precisa existir.
+            let esperado = if p.papel("operador").is_some() {
+                Codigo::Allow
+            } else {
+                Codigo::DenyResource
+            };
+            for dentro in ["papel:observador", "papel:operador"] {
+                assert_eq!(d(ProcessIsolate, Some(dentro)), esperado, "{dentro}");
+            }
+            for fora in [
+                "papel:sistema",
+                "papel:administrador",
+                "papel:seguranca",
+                "",
+            ] {
+                assert_eq!(
+                    d(ProcessIsolate, Some(fora)),
+                    Codigo::DenyResource,
+                    "{fora}"
+                );
             }
             for perm in [
                 NetConnect,
@@ -705,6 +752,8 @@ mod testes {
                 MessageSend,
                 AgentRevoke,
                 TerminalAttach,
+                AgentSuspend,
+                CredentialSuspend,
             ] {
                 assert_eq!(
                     d(perm, Some("tcp:10.0.2.100:7")),

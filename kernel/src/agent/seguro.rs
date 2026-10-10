@@ -275,6 +275,13 @@ impl Porta {
             );
         };
 
+        // A credencial suspensa prova ser de quem diz, e não entra — ver
+        // `crate::contencao`. Só quem tem a chave ouve isto: o aperto já a
+        // conferiu.
+        if crate::contencao::chave_suspensa(&chave) {
+            return self.recusar_aperto(Some(chave), Codigo::DenyCredential, "credencial suspensa");
+        }
+
         let Ok(efemera) = crate::aleatorio::chave() else {
             return self.recusar_aperto(Some(chave), Codigo::Error, "sem entropia para o aperto");
         };

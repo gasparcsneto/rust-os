@@ -19,6 +19,30 @@
 //! do boot anterior também. Mas só pede ação pelo que é **ao vivo**: os
 //! registros depois de [`Motor::ao_vivo_depois_de`]. O que é história vira
 //! incidente com recomendação, nunca com pedido.
+//!
+//! # O nível 0
+//!
+//! Uma detecção de confiança baixa não abre incidente: é uma
+//! **observação** — o registro, o risco, e nada mais
+//! ([`Motor::observacoes`]). O normal fica invisível.
+//!
+//! # A saúde
+//!
+//! O NSF está [`Saude`]: saudável, ou degradado — perdeu registros, o gate
+//! recusou a leitura, está atrás da auditoria, refaz a história.
+//! Degradado, ele continua observando e alertando, e só contém sozinho
+//! diante de um contorno ([`resposta::nivel_permitido`]). O gate não sabe
+//! da saúde do NSF, nem precisa: nunca dependeu dele. O NSF fora do ar não
+//! fecha nada.
+//!
+//! # Sem cascata
+//!
+//! A resposta do próprio NSF — o registro do pedido dele, casado com o
+//! plano — não passa pelas regras: não é comportamento de ninguém. O
+//! efeito de uma contenção — a conexão que caiu, a recusa do firewall, a
+//! recusa do contido — não é uma ameaça nova: as regras contam destinos e
+//! pedidos distintos, e uma contenção nunca sai duas vezes
+//! ([`Motor::pedidos`]).
 
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::{String, ToString};
@@ -32,8 +56,8 @@ use crate::evidencia::{Cofre, Prova};
 use crate::grafo::{Aresta, Criador, Grafo, No, Processo};
 use crate::incidente::Incidentes;
 use crate::invariantes::{Monitor, Violacao};
-use crate::regras::{Contexto, Deteccao, Detector, Regra};
-use crate::resposta::{self, Acao, Estado as EstadoDaAcao, Nivel};
+use crate::regras::{Confianca, Contexto, Deteccao, Detector, Regra};
+use crate::resposta::{self, Acao, Estado as EstadoDaAcao, Nivel, Situacao};
 use crate::ueba::Ueba;
 use crate::util;
 
@@ -42,6 +66,71 @@ pub const MAIS_EVENTOS: usize = 512;
 
 /// Quantos servidores de DNS o motor observa.
 pub const MAIS_OBSERVADOS: usize = 8;
+
+/// Quantas observações — detecções do nível 0 — o motor guarda.
+pub const MAIS_OBSERVACOES: usize = 64;
+
+/// Quantos registros atrás da cabeça da auditoria fazem o NSF degradado:
+/// o que uma volta lê.
+pub const ATRASO_MAXIMO: u64 = 512;
+
+/// Por quanto tempo — dos registros — uma lacuna deixa o NSF degradado.
+pub const LACUNA_MS: u64 = 30_000;
+
+/// Por que o NSF está degradado.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Degradacao {
+    /// Registros saíram do anel antes da leitura: o que se perdeu pode ter
+    /// sido uma recuperação.
+    Lacuna,
+    /// O gate recusou a última leitura da auditoria.
+    LeituraRecusada,
+    /// A auditoria está mais de [`ATRASO_MAXIMO`] registros à frente do
+    /// que o motor lê: a evidência é velha.
+    Atraso,
+    /// O motor ainda refaz a história do boot.
+    Historia,
+}
+
+impl Degradacao {
+    pub const fn nome(self) -> &'static str {
+        match self {
+            Degradacao::Lacuna => "audit-gap",
+            Degradacao::LeituraRecusada => "read-denied",
+            Degradacao::Atraso => "backlog",
+            Degradacao::Historia => "replaying-history",
+        }
+    }
+}
+
+/// A saúde do NSF.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Saude {
+    pub motivos: Vec<Degradacao>,
+    /// Quantos registros a auditoria está à frente.
+    pub atraso: u64,
+}
+
+impl Saude {
+    pub fn saudavel(&self) -> bool {
+        self.motivos.is_empty()
+    }
+
+    /// O nome, como as consultas o escrevem.
+    pub fn nome(&self) -> &'static str {
+        if self.saudavel() {
+            "healthy"
+        } else {
+            "degraded"
+        }
+    }
+
+    /// O código da degradação, na taxonomia das recusas — que ela nunca é:
+    /// o NSF degradado não recusa nada a ninguém.
+    pub fn codigo(&self) -> Option<&'static str> {
+        (!self.saudavel()).then_some("NSF_DEGRADED")
+    }
+}
 
 /// Um servidor de DNS que o motor quer observar: até onde leu a captura
 /// dele, e se o gate recusou a leitura.
@@ -65,11 +154,27 @@ pub struct Contadores {
     /// Registros cujo elo não se refez.
     pub adulterados: u64,
     pub deteccoes: u64,
+    /// Detecções de confiança baixa, sem incidente: o nível 0.
+    pub observacoes: u64,
     /// Ações pedidas ao gate.
     pub pedidos: u64,
     pub permitidos: u64,
     pub negados: u64,
     pub falhos: u64,
+    /// Contenções que o gate permitiu ao NSF e alguém desfez — a contenção
+    /// falsa, para quem mede.
+    pub recuperadas: u64,
+    /// Contenções que não saíram por já valerem.
+    pub repetidas: u64,
+    /// As decisões do gate que o motor leu — de quem pede, não do NSF.
+    pub decisoes: u64,
+    /// Decisões recusadas, e as que repetem uma recusa igual — mesmo
+    /// método, recurso e código — da mesma identidade na janela.
+    pub recusas: u64,
+    pub recusas_repetidas: u64,
+    /// Recusas de quem não tinha incidente aberto: quem o NSF não tinha
+    /// por ameaça — a recusa de uma operação, provavelmente, legítima.
+    pub recusas_sem_incidente: u64,
 }
 
 /// Um pedido que o fio do NSF faz ao gate.
@@ -78,6 +183,9 @@ pub struct Pedido {
     pub acao: u64,
     pub metodo: String,
     pub params: String,
+    /// O registro que disparou a detecção: de onde a latência da resposta
+    /// se mede.
+    pub origem: u64,
 }
 
 /// O motor.
@@ -99,6 +207,16 @@ pub struct Motor {
     /// Os servidores de DNS que alguém usou, e que o motor quer observar —
     /// aprendidos pela auditoria, não pela política, que o NSF não lê.
     observados: BTreeMap<String, Observacao>,
+    /// As detecções do nível 0, das mais velhas às mais novas.
+    observacoes: VecDeque<Deteccao>,
+    /// O tempo do registro mais novo lido.
+    ultimo_ms: u64,
+    /// O tempo da última lacuna.
+    lacuna_ms: Option<u64>,
+    /// Leituras da auditoria recusadas desde a última que passou.
+    recusas_seguidas: u64,
+    /// A cabeça da auditoria, como o kernel a viu na volta.
+    cabeca: u64,
     pub contadores: Contadores,
 }
 
@@ -125,8 +243,56 @@ impl Motor {
             dns: Dns::novo(),
             correlacoes: BTreeMap::new(),
             observados: BTreeMap::new(),
+            observacoes: VecDeque::new(),
+            ultimo_ms: 0,
+            lacuna_ms: None,
+            recusas_seguidas: 0,
+            cabeca: 0,
             contadores: Contadores::default(),
         }
+    }
+
+    /// A saúde do NSF, agora.
+    pub fn saude(&self) -> Saude {
+        let mut motivos = Vec::new();
+        if self
+            .lacuna_ms
+            .is_some_and(|t| self.ultimo_ms < t.saturating_add(LACUNA_MS))
+        {
+            motivos.push(Degradacao::Lacuna);
+        }
+        if self.recusas_seguidas > 0 {
+            motivos.push(Degradacao::LeituraRecusada);
+        }
+        let atraso = self.cabeca.saturating_sub(self.lido);
+        if atraso > ATRASO_MAXIMO {
+            motivos.push(Degradacao::Atraso);
+        }
+        if self.lido < self.ao_vivo {
+            motivos.push(Degradacao::Historia);
+        }
+        Saude { motivos, atraso }
+    }
+
+    /// A cabeça da auditoria, como o kernel a vê no começo de uma volta: o
+    /// atraso de cada registro lido é a distância até ela.
+    pub fn cabeca_da_auditoria(&mut self, seq: u64) {
+        self.cabeca = self.cabeca.max(seq);
+    }
+
+    /// As observações — as detecções do nível 0 —, das mais velhas às mais
+    /// novas.
+    pub fn observacoes(&self) -> impl DoubleEndedIterator<Item = &Deteccao> {
+        self.observacoes.iter()
+    }
+
+    /// Tudo o que o NSF detectou e ainda guarda: as detecções dos
+    /// incidentes e as observações.
+    pub fn deteccoes(&self) -> impl Iterator<Item = &Deteccao> {
+        self.incidentes
+            .todos()
+            .flat_map(|i| i.deteccoes.iter())
+            .chain(self.observacoes.iter())
     }
 
     /// O último registro da auditoria lido.
@@ -163,6 +329,7 @@ impl Motor {
     /// Uma leitura recusada pelo gate.
     pub fn leitura_recusada(&mut self) {
         self.contadores.leituras_recusadas += 1;
+        self.recusas_seguidas += 1;
     }
 
     /// Os eventos guardados, do mais velho ao mais novo.
@@ -303,12 +470,15 @@ impl Motor {
     /// JSON fora da trava do motor.
     pub fn ler_registros(&mut self, registros: Vec<Registro>) -> usize {
         let mut novos = 0;
+        self.recusas_seguidas = 0;
         for r in registros {
             if r.seq <= self.lido {
                 continue;
             }
             novos += 1;
             self.contadores.registros += 1;
+            self.ultimo_ms = self.ultimo_ms.max(r.ts_ms);
+            self.cabeca = self.cabeca.max(r.seq);
             for v in self.monitor.conferir(&r) {
                 self.violacao(v, &r);
             }
@@ -424,34 +594,42 @@ impl Motor {
             }
         }
 
-        // O perfil, e as regras.
-        let anomalia = self.ueba.observar(&e);
-        let ctx = Contexto {
-            dns: &self.dns,
-            grafo: &self.grafo,
-            anomalia: anomalia.as_ref(),
-        };
-        let mut deteccoes = self.detector.observar(&e, &ctx);
-        if self
-            .incidentes
-            .vivo_de(e.epoca, &e.principal)
-            .is_some_and(|i| i.alto())
-            && let Some(d) = self.detector.saida_depois_de_sondagem(&e)
-        {
-            deteccoes.push(d);
-        }
-
-        // O que o próprio NSF fez, e o que outros fizeram pelo próprio
-        // papel sobre o que um incidente envolve.
+        let mut deteccoes = Vec::new();
         if e.titular == Titular::Servico && e.tipo != Tipo::Leitura {
+            // A resposta do próprio NSF: casa com o pedido, ou é uma ação
+            // sem plano. Não é comportamento de ninguém — as regras não a
+            // contam, e uma recusa dela não vira sondagem do NSF.
             if let Some(d) = self.acao_do_nsf(&e) {
                 deteccoes.push(d);
             }
-        } else if matches!(e.metodo.as_str(), "net.block" | "net.unblock")
-            && e.tipo == Tipo::Decisao
-            && e.codigo.permite()
-        {
-            self.acao_observada(&e);
+        } else {
+            self.contar_repeticao(&e);
+            // O perfil, e as regras.
+            let anomalia = self.ueba.observar(&e);
+            let ctx = Contexto {
+                dns: &self.dns,
+                grafo: &self.grafo,
+                anomalia: anomalia.as_ref(),
+            };
+            deteccoes = self.detector.observar(&e, &ctx);
+            if let Some(confianca) = self
+                .incidentes
+                .vivo_de(e.epoca, &e.principal)
+                .filter(|i| i.alto())
+                .map(|i| i.corroboracao())
+                && let Some(d) = self.detector.saida_depois_de_sondagem(&e, confianca)
+            {
+                deteccoes.push(d);
+            }
+            // O que outros fizeram pelo próprio papel sobre o que um
+            // incidente envolve: uma contenção, ou a recuperação de uma.
+            if e.tipo == Tipo::Decisao
+                && e.codigo.permite()
+                && (resposta::inverso(&e.metodo).is_some()
+                    || resposta::desfeita_por(&e.metodo).is_some())
+            {
+                self.acao_observada(&e);
+            }
         }
 
         e.severidade = deteccoes
@@ -471,6 +649,34 @@ impl Motor {
         }
         for p in self.incidentes.envelhecer(ts) {
             self.detector.esquecer(&p);
+        }
+    }
+
+    /// Uma recusa que repete outra igual — mesmo método, recurso e código —
+    /// da mesma identidade na janela: um agente repetindo. Conta para a
+    /// taxa de repetição, e só.
+    fn contar_repeticao(&mut self, e: &Evento) {
+        if e.tipo != Tipo::Decisao {
+            return;
+        }
+        self.contadores.decisoes += 1;
+        if !e.negado() {
+            return;
+        }
+        self.contadores.recusas += 1;
+        if self.incidentes.vivo_de(e.epoca, &e.principal).is_none() {
+            self.contadores.recusas_sem_incidente += 1;
+        }
+        let repete = self.eventos.iter().rev().take(MAIS_EVENTOS).any(|o| {
+            o.principal == e.principal
+                && o.tipo == Tipo::Decisao
+                && o.metodo == e.metodo
+                && o.recurso == e.recurso
+                && o.codigo == e.codigo
+                && o.ts_ms.saturating_add(crate::regras::JANELA_MS) >= e.ts_ms
+        });
+        if repete {
+            self.contadores.recusas_repetidas += 1;
         }
     }
 
@@ -505,6 +711,7 @@ impl Motor {
         Some(Deteccao {
             regra: Regra::AcaoSemPlano,
             severidade: Severidade::Critica,
+            confianca: Confianca::Alta,
             principal: e.principal.clone(),
             titular: e.titular,
             registros: alloc::vec![e.seq],
@@ -519,30 +726,56 @@ impl Motor {
         })
     }
 
-    /// Alguém, pelo próprio papel, barrou ou liberou um destino que um
-    /// incidente vivo envolve: a ação entra nele.
+    /// Alguém, pelo próprio papel, conteve ou desfez uma contenção sobre o
+    /// que um incidente vivo envolve: a ação entra nele. Desfeita uma
+    /// contenção do incidente, ele fica recuperado — o NSF não contém de
+    /// novo nele.
+    ///
+    /// Um destino se reconhece pelo recurso; o dono inteiro — o processo,
+    /// o agente, a credencial —, pelo método e o papel dele, que é o que a
+    /// auditoria grava. Dois contidos do mesmo papel não se distinguem
+    /// aqui: na dúvida, o NSF recua.
     fn acao_observada(&mut self, e: &Evento) {
-        let Some(recurso) = politica::endereco::normalizar(&e.recurso) else {
-            return;
-        };
-        let alvos: Vec<u64> = self
+        let recurso =
+            politica::endereco::normalizar(&e.recurso).unwrap_or_else(|| e.recurso.clone());
+        let contencao = resposta::desfeita_por(&e.metodo).unwrap_or(e.metodo.as_str());
+        let por_destino = contencao == "net.block";
+        let alvos: Vec<(u64, bool)> = self
             .incidentes
             .todos()
             .filter(|i| i.epoca == e.epoca && i.estado != crate::incidente::Estado::Encerrado)
-            .filter(|i| i.recursos.contains(&recurso))
-            .map(|i| i.id)
+            .filter_map(|i| {
+                let dele = |a: &Acao| {
+                    a.metodo == contencao
+                        && a.recurso == recurso
+                        && matches!(a.estado, EstadoDaAcao::Permitida | EstadoDaAcao::Observada)
+                };
+                let do_nsf = i
+                    .acoes
+                    .iter()
+                    .any(|a| dele(a) && a.estado == EstadoDaAcao::Permitida);
+                let envolve = if por_destino {
+                    i.recursos.contains(&recurso)
+                } else {
+                    i.acoes.iter().any(dele)
+                };
+                envolve.then_some((i.id, do_nsf))
+            })
             .collect();
-        for id in alvos {
+        let desfaz = resposta::desfeita_por(&e.metodo).is_some();
+        for (id, do_nsf) in alvos {
             self.incidentes.agir(
                 id,
                 Acao {
                     id: 0,
-                    nivel: Nivel::Autorizada,
+                    nivel: Nivel::Reversivel,
                     metodo: e.metodo.clone(),
                     params: String::new(),
                     recurso: recurso.clone(),
+                    dono: String::new(),
                     estado: EstadoDaAcao::Observada,
                     decisao: Some(e.seq),
+                    origem: 0,
                     autorizado_por: e.principal.clone(),
                     justificativa: alloc::format!(
                         "{} pelo proprio papel ({})",
@@ -551,6 +784,20 @@ impl Motor {
                     ),
                 },
             );
+            if desfaz
+                && let Some(inc) = self.incidentes.get_mut(id)
+                && inc.recuperada.is_none()
+                && inc.acoes.iter().any(|a| {
+                    a.metodo == contencao
+                        && a.recurso == recurso
+                        && matches!(a.estado, EstadoDaAcao::Permitida | EstadoDaAcao::Observada)
+                })
+            {
+                inc.recuperada = Some(e.principal.clone());
+                if do_nsf {
+                    self.contadores.recuperadas += 1;
+                }
+            }
         }
     }
 
@@ -584,9 +831,17 @@ impl Motor {
                 alloc::format!("o registro {seq} tem tempo menor que o anterior"),
             ),
         };
+        if regra == Regra::LacunaNaLeitura {
+            self.lacuna_ms = Some(r.ts_ms);
+        }
         let d = Deteccao {
             regra,
             severidade,
+            confianca: if regra == Regra::AuditoriaAdulterada {
+                Confianca::Alta
+            } else {
+                Confianca::Media
+            },
             principal: "audit".to_string(),
             titular: Titular::Kernel,
             registros: alloc::vec![r.seq],
@@ -598,7 +853,8 @@ impl Motor {
         self.registrar(d, r.seq <= self.ao_vivo, 0);
     }
 
-    /// Uma detecção: o incidente, a evidência, o grafo, e o plano.
+    /// Uma detecção: o incidente, a evidência, o grafo, e o plano — ou,
+    /// de confiança baixa e sem incidente, uma observação.
     fn registrar(&mut self, d: Deteccao, historico: bool, correlacao: u64) {
         self.contadores.deteccoes += 1;
         let ja: Vec<u64> = self
@@ -607,6 +863,11 @@ impl Motor {
             .map(|i| i.registros.iter().copied().collect())
             .unwrap_or_default();
         let Some(id) = self.incidentes.registrar(&d, correlacao, historico) else {
+            self.contadores.observacoes += 1;
+            if self.observacoes.len() == MAIS_OBSERVACOES {
+                self.observacoes.pop_front();
+            }
+            self.observacoes.push_back(d);
             return;
         };
         // A evidência: cada registro que ainda não estava no incidente, e a
@@ -633,9 +894,14 @@ impl Motor {
                 registros: d.registros.clone(),
             },
         ));
-        let historico_do_incidente =
-            historico || self.incidentes.get(id).is_some_and(|i| i.historico);
-        let negada = self.incidentes.get(id).is_some_and(|i| i.contencao_negada);
+        let saudavel = self.saude().saudavel();
+        let situacao = self.incidentes.get(id).map(|i| Situacao {
+            historico: historico || i.historico,
+            contencao_negada: i.contencao_negada,
+            recuperada: i.recuperada.clone(),
+            saudavel,
+            dono_contido: d.alvo.as_ref().is_some_and(|a| i.contido(&a.dono)),
+        });
         if let Some(inc) = self.incidentes.get_mut(id) {
             inc.evidencias.extend(ids);
         }
@@ -651,9 +917,35 @@ impl Motor {
                 No::Destino(alvo.destino.clone()),
             );
         }
-        for acao in resposta::planejar(&d, historico_do_incidente, negada) {
+        let Some(situacao) = situacao else {
+            return;
+        };
+        for acao in resposta::planejar(&d, &situacao) {
+            // Idempotente: a mesma contenção, já pedida ou valendo, não sai
+            // de novo — nem deste incidente, nem de outro.
+            if acao.estado == EstadoDaAcao::Planejada && self.ja_contem(&acao) {
+                self.contadores.repetidas += 1;
+                continue;
+            }
             self.incidentes.agir(id, acao);
         }
+    }
+
+    /// Se a contenção `acao` — o mesmo comando, com os mesmos parâmetros —
+    /// já está planejada, pedida ou valendo em algum incidente vivo.
+    fn ja_contem(&self, acao: &Acao) -> bool {
+        self.incidentes
+            .todos()
+            .filter(|i| i.estado != crate::incidente::Estado::Encerrado)
+            .flat_map(|i| i.acoes.iter())
+            .any(|a| {
+                a.metodo == acao.metodo
+                    && a.params == acao.params
+                    && matches!(
+                        a.estado,
+                        EstadoDaAcao::Planejada | EstadoDaAcao::Pedida | EstadoDaAcao::Permitida
+                    )
+            })
     }
 
     /// Os pedidos planejados, para o fio executar agora. Cada um passa a
@@ -668,6 +960,7 @@ impl Motor {
                         acao: a.id,
                         metodo: a.metodo.clone(),
                         params: a.params.clone(),
+                        origem: a.origem,
                     });
                 }
             }
@@ -736,7 +1029,8 @@ impl Motor {
             .filter(move |e| e.principal == principal)
     }
 
-    /// O risco de uma identidade, agora.
+    /// O risco de uma identidade, agora: as detecções dos incidentes
+    /// abertos dela e as observações — o nível 0 também atualiza o risco.
     pub fn risco(&self, principal: &str) -> crate::risco::Risco {
         let eventos: Vec<&Evento> = self.eventos_de(principal).collect();
         let deteccoes: Vec<Severidade> = self
@@ -744,6 +1038,12 @@ impl Motor {
             .todos()
             .filter(|i| i.principal == principal && i.estado != crate::incidente::Estado::Encerrado)
             .flat_map(|i| i.deteccoes.iter().map(|d| d.severidade))
+            .chain(
+                self.observacoes
+                    .iter()
+                    .filter(|d| d.principal == principal && d.epoca == self.epoca)
+                    .map(|d| d.severidade),
+            )
             .collect();
         let anomalia = self.ueba.perfil(principal).is_some_and(|p| p.anomalias > 0);
         crate::risco::avaliar(&eventos, &deteccoes, anomalia)

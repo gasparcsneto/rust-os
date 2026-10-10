@@ -68,6 +68,7 @@ mod armazem;
 mod atividade;
 mod autorizacao;
 mod barra;
+mod contencao;
 mod coordenacao;
 mod eventos;
 mod fios;
@@ -80,6 +81,7 @@ mod irq;
 mod log;
 mod machine;
 mod mensagens;
+mod metricas;
 mod mmio;
 mod nativo;
 mod nucleos;
@@ -330,6 +332,9 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     // definitivo. Antes do escalonador de propósito: é o timer que o
     // preempta, e trocá-lo com fios já rodando seria trocar o chão sob eles.
     arch::init_timer_definitivo();
+    // A régua das medidas de custo: o contador da arquitetura contra o
+    // relógio do kernel, desde aqui — ver `metricas`.
+    metricas::iniciar();
 
     // Com heap e paginação no ar, o escalonador pode adotar o contexto atual
     // como primeiro fio de execução. A partir daqui o kernel é preemptável: o

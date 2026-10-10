@@ -45,6 +45,8 @@ const OUTRO_ENDERECO: i64 = 76;
 const INEXISTENTE: i64 = 77;
 /// Outra falha da resolução.
 const OUTRA: i64 = 78;
+/// O gate deixou, e o firewall barrou o servidor, ou a rede não estava.
+const SEM_REDE: i64 = 79;
 
 /// O servidor de DNS da bancada.
 const SERVIDOR: &str = "udp:10.0.2.53:53";
@@ -54,9 +56,10 @@ const SERVIDOR: &str = "udp:10.0.2.53:53";
 const PORTA: u16 = 7;
 
 fn falha(f: Falha) -> i64 {
-    escreverln!("resolvedor: {:?}", f);
+    escreverln!("resolvedor: {} ({:?})", f.codigo(), f);
     match f {
         Falha::Recusada => SEM_SERVIDOR,
+        Falha::Barrada | Falha::SemRede => SEM_REDE,
         Falha::SemResposta => SEM_RESPOSTA,
         Falha::Malformada(_) => MALFORMADA,
         _ => OUTRA,

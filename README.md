@@ -172,6 +172,7 @@ $ cargo xtask agent --canal 2 agent.session
 | `security.provenance` | A cadeia de um processo até a identidade que a começou, os filhos, e a rede dele: cada conexão, a decisão do gate, o DNS e a regra do firewall (`process`, `boot`) |
 | `security.risk` | O risco de uma identidade, com os fatores; o perfil de comportamento; e o raio do que ela já tocou (`principal`) |
 | `security.verify` | Refaz a cadeia do cofre de evidências |
+| `security.metrics` | O custo e o efeito da segurança, medidos desde o boot: as decisões do gate por código e a latência dele, a da política e a da auditoria, as voltas do NSF e o tempo de máquina delas, a memória e as contas do motor (falsos positivos, contenções desfeitas, recusas repetidas), a latência da resposta e os arrendamentos soltos por causa |
 | `system.info` | Kernel, CPU, vídeo, uptime, o RTC e mecanismo de guarda da pilha |
 | `system.uptime` | Ticks do timer e milissegundos desde o boot |
 | `memory.stats` | Totais agregados de memória física |
@@ -219,6 +220,13 @@ $ cargo xtask agent --canal 2 agent.session
 | `net.block` | Barra o tráfego para um destino, para todos ou para um dono — e derruba as conexões vivas que a regra alcança. Só restringe (`to`, `owner`) |
 | `net.unblock` | Tira a regra de um destino e um dono; o gate continua decidindo cada pedido (`to`, `owner`) |
 | `net.rules` | As regras do firewall — o destino, o dono, a decisão que pôs cada uma e quem pediu — e os quadros descartados, em cada sentido: sem fluxo, de fluxo barrado, de protocolo que não passa |
+| `process.isolate` | Isola um processo: ele continua existindo, mas todo pedido dele é `DENY_CONTAINED` e as conexões dele caem. Reversível, idempotente; o alcance é o papel de quem o lançou (`process`) |
+| `process.release` | Solta o processo isolado — pela mesma permissão (`process`) |
+| `agent.suspend` | Suspende um agente: registrado e conectado, mas todo pedido dele e dos processos dele é `DENY_CONTAINED`; as conexões caem e os arrendamentos são soltos. Não é revogação (`key`) |
+| `agent.resume` | Retoma o agente suspenso (`key`) |
+| `credential.suspend` | Suspende uma credencial — de pessoa ou de agente: login e aperto recusados com `DENY_CREDENTIAL`, as sessões não agem. Não é revogação (`person` ou `key`) |
+| `credential.resume` | Retoma a credencial suspensa (`person` ou `key`) |
+| `containment.list` | As contenções que valem agora, para quem investiga e recupera — voláteis: nenhuma sobrevive a um boot |
 | `video.sample` | Amostra a tela numa grade de cores (`columns`, `rows`) |
 | `display.info` | A pilha gráfica: adaptador ativo, telas, as camadas do compositor, memória das superfícies, o último retângulo que chegou à tela e, no virtio-gpu, o que atravessou para o dispositivo |
 | `ui.tree` | A árvore semântica do que está na tela: papel, rótulo, valor, moldura e ações de cada elemento; de cada campo, a versão e o arrendamento |
@@ -257,12 +265,14 @@ kernel/src/
 ├── pessoas.rs       quem entra pelos consoles: o registro, as credenciais e as sessões
 ├── persistencia.rs  o journal na partição de estado, ancorado no TPM: o estado de autoridade que sobrevive ao boot
 ├── coordenacao.rs   versões e arrendamentos: quem edita cada campo agora
+├── contencao.rs     as contenções reversíveis — o processo isolado, o agente e a credencial suspensos —, que o gate consulta
 ├── mensagens.rs     as mensagens entre titulares: um recurso, pelo mesmo ponto de decisão
 ├── armazem.rs       o armazém montado em /armazem: o lote, do gate ao commit — reconfirmação, arrendamento, cota, rascunhos, cada um no seu lugar
 ├── volume.rs        o volume do armazém na partição própria: blocos cifrados, o journal dos metadados, o ponto de commit no de estado
 ├── nativo.rs        a interface nativa: o registro como API dos programas, pelo mesmo gate
 ├── atividade.rs     quem está agindo: os agentes conectados e quem agiu por último
 ├── autorizacao.rs   o ponto único de decisão: papel, permissão, recurso, taxa e auditoria
+├── metricas.rs      o custo da segurança, medido: contadores atômicos que só a consulta lê, nunca a decisão
 ├── seguranca.rs     o tecido de segurança: o fio do NSF, que lê e pede pelo gate como qualquer principal
 ├── sessoes.rs       quem está em cada porta, e as chaves do transporte cifrado dela
 ├── aleatorio.rs     o gerador de números aleatórios, semeado pelo virtio-rng
@@ -422,6 +432,7 @@ politica/src/        a política de autorização, a mesma no kernel e no hosped
 ├── lib.rs           a cadeia de decisão, e a política padrão da imagem
 ├── permissao.rs     o vocabulário fechado de permissões, e quais são sensíveis
 ├── codigo.rs        os códigos de decisão: ALLOW, DENY_*, RATE_LIMIT, INVALID_ARGUMENT, ERROR
+├── explicacao.rs    a recusa explicada: a razão, se adianta repetir, o que fazer, e a frase para uma pessoa
 ├── arquivo.rs       o formato, a validação, a decisão, as regras de mudança e o texto que volta igual
 ├── caminho.rs       a forma normal dos caminhos, a mesma do VFS
 ├── endereco.rs      a forma normal dos destinos de rede, `tcp:<ipv4>:<porta>`, a mesma que o kernel disca
@@ -507,6 +518,7 @@ programas/           os programas de usuário, compilados à parte do kernel
         ├── formulario.rs dois campos e dois botões do toolkit, que o agente preenche
         ├── nativo.rs     um programa nativo: confere de dentro o que a interface nativa promete
         ├── contido.rs    declara só `system.read`, e confere que o manifesto limita o resto
+        ├── isolavel.rs   pede pelo gate a cada passo da suíte: isolado, ouve `DENY_CONTAINED` e não bifurca; solto, pede de novo
         ├── anonimo.rs    o único sem manifesto: não exerce nada, nem lançado pelo sistema
         ├── guardar.rs    guarda no armazém pelo `pedir`: a versão, o conflito, a leitura pelo descritor e o `MUDOU`
         ├── discador.rs   conversa com o eco da bancada pelo `pedir`: os 256 bytes de ida e volta, e as recusas
@@ -2468,8 +2480,8 @@ rodada de lado — as trinta da tabela rodaram sobre o código corrigido:
 O NSF observa, correlaciona, interpreta, detecta, avalia o risco, abre
 incidentes e **pede** respostas — e não é uma autoridade: é um principal
 como os outros, `service nsf`, com o papel que a linha `servico` da
-política dá a ele (`seguranca`, que enumera `audit.read`, `net.observe` e
-`net.block`, cada um com o alcance escrito). Lê a auditoria e a captura
+política dá a ele (`seguranca`, que enumera `audit.read`, `net.observe`,
+`net.block` e `process.isolate`, cada um com o alcance escrito). Lê a auditoria e a captura
 pelo gate; cada leitura e cada pedido dele é um registro da cadeia; uma
 contenção que o gate recusa encerra o objetivo. O firewall nativo só
 restringe, depois do gate; o DNS é um programa sobre o UDP do 9.3, e uma
@@ -2586,6 +2598,127 @@ até a suíte forçar a corrida que ela abre.
 | a contenção para todos | `resposta::testes::a_contencao_so_ao_vivo_e_sem_recusa` |
 | a regra de um agente alcança qualquer agente | `firewall::testes::o_escopo` |
 | a recusa do manifesto conta como sondagem | `regras::testes::a_recusa_do_manifesto_nao_e_sondagem` |
+
+### Segurança sem fricção
+
+A segurança é invisível quando tudo é normal, explícita quando algo é
+recusado, e decisiva quando há uma ameaça real. O incremento de
+usabilidade não reabre nada do que está consolidado — o gate continua o
+único ponto de decisão, e nada aqui é uma segunda autorização —; muda o
+que acontece em volta da decisão. O desenho está em
+[`docs/USABILIDADE.md`](docs/USABILIDADE.md).
+
+- **Toda recusa se explica.** O erro JSON-RPC continua o mesmo — `code`,
+  `message`, `data` — e ganha `explain`: o resultado (`DENY`, `CONFLICT`,
+  `ERROR`), a razão (`DENY_POLICY`, `DENY_SCOPE`, `DENY_CONTAINED`,
+  `RATE_LIMIT`…), se adianta repetir (`retryable`, `non_retryable`,
+  `requires_authorization`, `requires_scope`, `requires_user_action`),
+  quanto esperar numa taxa (`retry_after_ms`), o que fazer
+  (`next_action`), uma frase para pessoas, e o número do registro da
+  decisão — que o `security.explain` interpreta para quem lê a auditoria.
+  O console escreve a frase e, embaixo, o código e o registro.
+- **A explicação não diz o que a resposta cala.** Um recurso que não
+  existe, um que é de outro e um fora do alcance são o mesmo
+  `DENY_RESOURCE`, e se explicam igual, palavra por palavra.
+- **Recusa, conflito e erro técnico são coisas diferentes**: o conflito
+  de versão diz "leia de novo e repita", o arrendamento ocupado, "espere",
+  e o erro técnico, "não conseguimos agora" — nunca "você não pode".
+- **As contenções reversíveis**, cada uma com o seu inverso, pelo gate e
+  em `admin.execute` com prova: `process.isolate`/`process.release`,
+  `agent.suspend`/`agent.resume`, `credential.suspend`/`credential.resume`,
+  e `containment.list`. Idempotentes (`already_isolated`), voláteis como
+  as regras do firewall, e nunca revogação. O administrador recupera pela
+  prova — até pela porta do agente suspenso.
+- **O NSF observa o incomum, alerta o arriscado e só contém a violação
+  com confiança alta** — a menor contenção primeiro (o destino, só para o
+  dono do fluxo), o dono inteiro só se a ameaça continuar, e nada sozinho
+  quando degradado. Revogar é sempre de um administrador.
+- **O custo é medido**: `security.metrics` diz as decisões do gate por
+  código e a latência dele, a da política e a da auditoria, as voltas do
+  NSF e a parte do tempo de máquina delas, a memória do motor, as taxas
+  de falso positivo, de contenção desfeita e de repetição, a latência da
+  resposta, e os arrendamentos soltos por causa.
+
+#### O que o exercício encontrou
+
+- **A explicação dizia o que a resposta calava.** A primeira versão lia o
+  motivo da auditoria e, para um destinatário "inexistente", dizia
+  "corrija o pedido" — e, para um revogado, "peça alcance". O código da
+  resposta era o mesmo `DENY_RESOURCE` de propósito; a explicação
+  distinguia. Os casos de vazamento das mensagens — o destinatário
+  inexistente e o revogado, a mensagem de outro e a que não há — a
+  pegaram. Agora um `DENY_RESOURCE` se explica de um jeito só, e um teste
+  do hospedeiro confere que a frase não carrega motivo nenhum da
+  auditoria (salvo o do pedido mal formado).
+- **O `explain` tinha um membro `result`.** Dentro do erro, um `result`
+  fazia uma recusa parecer sucesso a quem procura o resultado — dezenas de
+  conferências da suíte e do `xtask` procuram `"result"`. Virou `outcome`.
+- **A frase dizia a permissão onde a pessoa digitou o método.** Quem
+  digitou `agent.ping` sem login ouvia "pediu agent.read". Agora a frase
+  diz o que a pessoa pediu — o método — e, quando o papel não tem a
+  permissão, a permissão que falta.
+- **Um processo isolado ainda bifurcava** — achado na releitura. A
+  contenção era conferida nos pedidos ao registro, e não no `fork`: o
+  filho de um isolado nasceria livre. Agora o `fork` também pergunta, e o programa `isolavel` confere
+  de dentro que, isolado, nem um filho sai.
+- **A trava da contenção esperava a do escalonador** — também na
+  releitura. Conferir se um
+  processo isolado ainda vive, com a trava das contenções na mão, punha
+  uma ordem de travas nova; a poda agora lê a lista, solta a trava e só
+  então pergunta ao escalonador.
+- **O caso do incomum terminava antes de o NSF ver a anomalia.** A
+  mutação "a anomalia vira recusa no gate" só foi reprovada pelo `xtask`:
+  o último pedido do caso vinha antes da volta em que o NSF via a
+  anomalia. Agora a pessoa continua trabalhando depois de o NSF a ver.
+
+#### As mutações da seção 39
+
+Treze mutações, uma por propriedade que o incremento promete:
+**treze reprovadas**.
+
+| Mutação | Reprovada por |
+|---|---|
+| o NSF ocupado contém tudo | `resposta::testes::a_confianca_cresce_com_o_impacto` e `nsf: a sobrecarga degrada sem bloquear` |
+| a anomalia vira recusa no gate | o `xtask` — o gate não lê o NSF — e `nsf: o incomum e observado, e nao contido` |
+| o NSF fora do ar bloqueia tudo | o `xtask` e `recusa: diz por que e o que fazer` |
+| o falso positivo revoga | `resposta::testes::revogar_e_recomendacao` |
+| isolar sem volta | `contencao: o processo isolado e solto` |
+| o arrendamento órfão na suspensão | `contencao: o agente suspenso e retomado pela prova` |
+| um cache de decisões sem invalidação | `nsf: a recusa encerra o objetivo` — a política mudou e o gate decidiu pela velha |
+| o erro técnico vira `DENY_POLICY` | `armazem: gravacao que falha nao vale` |
+| o conflito vira `DENY` | `explicacao::testes::recusa_conflito_e_erro_sao_coisas_diferentes` e `armazem: os conceitos separados` |
+| a recusa sem explicação | `recusa: diz por que e o que fazer` |
+| a recusa sem permissão manda repetir | `explicacao::testes::a_taxonomia` e `recusa: diz por que e o que fazer` |
+| a contenção executada duas vezes | `contencao: o processo isolado e solto` |
+| o administrador não recupera pela porta do contido | `contencao: o agente suspenso e retomado pela prova` |
+
+#### O gate sem cache
+
+A seção 10 pede o gate rápido, e um cache só como otimização. A medida
+decidiu: **sem cache**. Na suíte — o kernel de depuração, no QEMU sem aceleração —, uma
+decisão do gate leva em média 2,1 ms; a conta da política, a única parte
+que um cache pularia, 51 µs, uns 2,5% dela; o registro na auditoria, que
+nenhum cache pula — toda decisão é gravada —, 475 µs. O NSF toma 67
+partes por milhão do tempo de máquina, e a auditoria, 11. Na fumaça — o kernel de produção, também de depuração —, com o fio
+do NSF de verdade e muita atividade concentrada: 991 decisões, o gate
+1,5 ms em média, a política 49 µs, um registro 649 µs; o NSF, 81 voltas
+de 60 ms, cerca de 5% de um núcleo; a auditoria, 0,75%. A fumaça escreve
+os números a cada rodada. Um cache de decisões teria de ser
+invalidado por toda troca de política, de papel, de registro e de
+contenção — e a mutação "um cache sem invalidação" mostra o que acontece
+quando se esquece um deles: a política muda e o gate decide pela velha.
+Sem ganho a medir, não há o que pagar com esse risco.
+
+#### Decisões pendentes
+
+- **A expansão temporária de alcance** (seção 12): hoje o alcance é do
+  papel, e o que muda o papel é `policy.write` e `policy.assign`, com
+  prova, até a próxima mudança. Uma expansão **temporária, por
+  titular** — "esta pessoa, este recurso, por uma hora" — é um conceito
+  que a política não tem: uma entrada com prazo, de uma identidade e não
+  de um papel, que vence pelo tempo lógico e sobrevive a um boot. Isso
+  não se infere das invariantes; fica proposto, e não implementado, até
+  uma decisão.
 
 ## Vários agentes
 

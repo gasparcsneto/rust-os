@@ -507,6 +507,21 @@ pub fn nucleo_atual() -> usize {
     (indice as usize).min(crate::nucleos::MAX_NUCLEOS - 1)
 }
 
+/// O contador de tempo da arquitetura, `CNTVCT_EL0`: anda numa frequência
+/// fixa, igual em todos os núcleos. É a régua das medidas de custo — ver
+/// [`crate::metricas`] —, que a convertem pelo próprio relógio do kernel:
+/// nada aqui depende da frequência.
+pub fn ciclos() -> u64 {
+    let valor: u64;
+    // SAFETY: leitura de um registrador de sistema que EL1 sempre alcança,
+    // sem efeito; o `isb` antes impede que a leitura venha adiantada da
+    // instrução medida.
+    unsafe {
+        asm!("isb", "mrs {}, cntvct_el0", out(reg) valor, options(nomem, nostack, preserves_flags))
+    };
+    valor
+}
+
 /// O `MPIDR` deste núcleo, só com os campos de afinidade — é como o device
 /// tree e a PSCI o chamam.
 pub fn hardware_deste_nucleo() -> u64 {

@@ -17,10 +17,21 @@ use crate::nativo;
 const ESPERA_MS: u64 = 3_000;
 
 /// Por que um nome não resolveu.
+///
+/// Quatro coisas diferentes, que não se confundem (seção 24 do incremento
+/// de usabilidade): o DNS que não respondeu, a política que recusou o
+/// servidor, a rede que não está, o firewall que barrou — ver
+/// [`Falha::codigo`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Falha {
-    /// O gate recusou a associação com o servidor — o código, se veio.
+    /// O gate recusou a associação com o servidor.
     Recusada,
+    /// O gate deixou, e o firewall barrou o servidor.
+    Barrada,
+    /// O gate deixou, e a rede não está: sem endereço, sem pilha.
+    SemRede,
+    /// A chamada ao kernel não voltou.
+    Chamada,
     /// O nome não se escreve como nome.
     Nome(dns::Erro),
     /// A pergunta não saiu.
@@ -34,6 +45,30 @@ pub enum Falha {
     Desencontrada,
     /// O servidor diz que o nome não existe, ou devolveu outro erro.
     Codigo(u8),
+}
+
+impl Falha {
+    /// O código da falha, na taxonomia de quem se recupera: a política que
+    /// recusou (`DENY_POLICY`), o firewall (`FIREWALL_BLOCKED`), a rede
+    /// (`NETWORK_UNAVAILABLE`), o DNS que não respondeu ou não se entendeu
+    /// (`DNS_UNAVAILABLE`), o nome que não existe (`DNS_NAME_NOT_FOUND`), o
+    /// nome que não se escreve (`INVALID_REQUEST`), a chamada que não
+    /// voltou (`TECHNICAL_ERROR`).
+    pub const fn codigo(self) -> &'static str {
+        match self {
+            Falha::Recusada => "DENY_POLICY",
+            Falha::Barrada => "FIREWALL_BLOCKED",
+            Falha::SemRede => "NETWORK_UNAVAILABLE",
+            Falha::Chamada => "TECHNICAL_ERROR",
+            Falha::Nome(_) => "INVALID_REQUEST",
+            Falha::Codigo(dns::NOME_INEXISTENTE) => "DNS_NAME_NOT_FOUND",
+            Falha::Envio
+            | Falha::SemResposta
+            | Falha::Malformada(_)
+            | Falha::Desencontrada
+            | Falha::Codigo(_) => "DNS_UNAVAILABLE",
+        }
+    }
 }
 
 /// O valor de um caractere base64.
@@ -88,14 +123,15 @@ fn datagrama(r: &nativo::Resposta) -> Option<Vec<u8>> {
 pub fn resolver(servidor: &str, nome: &str, id: u16) -> Result<Vec<[u8; 4]>, Falha> {
     let alvo = dns::Nome::de_texto(nome).map_err(Falha::Nome)?;
     let r = nativo::pedir("net.connect", |w| w.field_str("to", servidor))
-        .map_err(|_| Falha::Recusada)?;
-    let Some(associacao) = r
-        .resultado()
-        .ok()
-        .and_then(|j| j.member("connection"))
-        .and_then(|v| v.as_u64())
-    else {
-        return Err(Falha::Recusada);
+        .map_err(|_| Falha::Chamada)?;
+    // O gate recusou — um erro —, ou deixou e a rede não abriu — o
+    // resultado diz o código.
+    let resultado = r.resultado().map_err(|_| Falha::Recusada)?;
+    let Some(associacao) = resultado.member("connection").and_then(|v| v.as_u64()) else {
+        return Err(match resultado.member("code").and_then(|c| c.as_str()) {
+            Some("FIREWALL_BLOCKED") => Falha::Barrada,
+            _ => Falha::SemRede,
+        });
     };
     let resultado = perguntar(associacao, &alvo, id);
     let _ = nativo::pedir("net.close", |w| w.field_u64("connection", associacao));

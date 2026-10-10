@@ -776,13 +776,10 @@ fn processar(canal: Canal, linha: &[u8], permitir: bool) -> Option<crate::rede::
     // devolve chama o handler — ver [`autorizacao`].
     let licenca = match autorizacao::autorizar(chamador, comando, requisicao.params) {
         Ok(l) => l,
-        Err(codigo) => {
-            responder_erro(
-                canal,
-                requisicao.id,
-                RpcError::da_recusa(codigo),
-                Some(codigo.nome()),
-            );
+        Err(recusa) => {
+            com_saida(canal, |w| {
+                protocol::envelope_recusa(w, requisicao.id, &recusa)
+            });
             return None;
         }
     };

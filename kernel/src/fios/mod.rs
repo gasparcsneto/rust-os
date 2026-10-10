@@ -2151,6 +2151,19 @@ pub fn processos_de(autoridade: crate::autorizacao::Autoridade) -> usize {
     com_escalonador(|e| e.processos_de(autoridade))
 }
 
+/// A autoridade de um processo vivo — um fio que hospeda um programa,
+/// lançado ou bifurcado. `None` para um fio do kernel, ou um que acabou:
+/// só um processo é alvo de `process.isolate`.
+pub fn autoridade_do_processo(id: u64) -> Option<crate::autorizacao::Autoridade> {
+    com_escalonador(|e| {
+        e.fios
+            .iter()
+            .flatten()
+            .find(|f| f.id.numero() == id && f.nome == "usuario" && f.estado != Estado::Terminado)
+            .map(|f| f.autoridade)
+    })
+}
+
 /// O fio `id` existe e não terminou?
 pub fn vivo(id: u64) -> bool {
     com_escalonador(|e| {

@@ -544,6 +544,115 @@ pub static COMANDOS: &[Command] = &[
         handler: net_rules,
     },
     Command {
+        nome: "process.isolate",
+        resumo: "Isola o processo `process`: ele continua existindo, mas todo pedido dele e recusado (DENY_CONTAINED) e as conexoes dele caem. Reversivel por process.release. O alcance e o papel de quem o lancou. Idempotente.",
+        params: &[ParamSpec {
+            nome: "process",
+            tipo: TipoParam::Inteiro,
+            obrigatorio: true,
+            descricao: "O fio do processo.",
+        }],
+        acesso: Acesso::Exige(Permissao::ProcessIsolate),
+        recurso: None,
+        mais: Mais::Nada,
+        handler: process_isolate,
+    },
+    Command {
+        nome: "process.release",
+        resumo: "Solta o processo isolado: ele volta a pedir, pelo gate, como antes. Pela mesma permissao.",
+        params: &[ParamSpec {
+            nome: "process",
+            tipo: TipoParam::Inteiro,
+            obrigatorio: true,
+            descricao: "O fio do processo.",
+        }],
+        acesso: Acesso::Exige(Permissao::ProcessIsolate),
+        recurso: None,
+        mais: Mais::Nada,
+        handler: process_release,
+    },
+    Command {
+        nome: "agent.suspend",
+        resumo: "Suspende o agente `key`: ele continua registrado e conectado, mas todo pedido dele e dos processos dele e recusado (DENY_CONTAINED); as conexoes caem e os arrendamentos sao soltos. Nao e revogacao. Idempotente.",
+        params: &[ParamSpec {
+            nome: "key",
+            tipo: TipoParam::Texto,
+            obrigatorio: true,
+            descricao: "A chave publica do agente, em hex.",
+        }],
+        acesso: Acesso::Exige(Permissao::AgentSuspend),
+        recurso: None,
+        mais: Mais::Nada,
+        handler: agent_suspend,
+    },
+    Command {
+        nome: "agent.resume",
+        resumo: "Retoma o agente suspenso. Pela mesma permissao.",
+        params: &[ParamSpec {
+            nome: "key",
+            tipo: TipoParam::Texto,
+            obrigatorio: true,
+            descricao: "A chave publica do agente, em hex.",
+        }],
+        acesso: Acesso::Exige(Permissao::AgentSuspend),
+        recurso: None,
+        mais: Mais::Nada,
+        handler: agent_resume,
+    },
+    Command {
+        nome: "credential.suspend",
+        resumo: "Suspende a credencial de uma pessoa (`person`) ou de um agente (`key`): ela nao autentica - login e aperto recusados com DENY_CREDENTIAL -, e as sessoes abertas com ela nao agem; as conexoes caem e os arrendamentos sao soltos. Nao e revogacao. Idempotente.",
+        params: &[
+            ParamSpec {
+                nome: "person",
+                tipo: TipoParam::Texto,
+                obrigatorio: false,
+                descricao: "A pessoa, `pessoa:<16 hex>`.",
+            },
+            ParamSpec {
+                nome: "key",
+                tipo: TipoParam::Texto,
+                obrigatorio: false,
+                descricao: "Ou a chave publica de um agente, em hex.",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::CredentialSuspend),
+        recurso: None,
+        mais: Mais::Nada,
+        handler: credential_suspend,
+    },
+    Command {
+        nome: "credential.resume",
+        resumo: "Retoma a credencial suspensa. Pela mesma permissao.",
+        params: &[
+            ParamSpec {
+                nome: "person",
+                tipo: TipoParam::Texto,
+                obrigatorio: false,
+                descricao: "A pessoa, `pessoa:<16 hex>`.",
+            },
+            ParamSpec {
+                nome: "key",
+                tipo: TipoParam::Texto,
+                obrigatorio: false,
+                descricao: "Ou a chave publica de um agente, em hex.",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::CredentialSuspend),
+        recurso: None,
+        mais: Mais::Nada,
+        handler: credential_resume,
+    },
+    Command {
+        nome: "containment.list",
+        resumo: "As contencoes que valem agora - processos isolados, agentes suspensos, credenciais suspensas -, para quem investiga e recupera.",
+        params: &[],
+        acesso: Acesso::Exige(Permissao::SecurityRead),
+        recurso: None,
+        mais: Mais::Nada,
+        handler: containment_list,
+    },
+    Command {
         nome: "video.sample",
         resumo: "Amostra a tela numa grade de cores, para o agente conferir o que foi desenhado.",
         params: &[
@@ -1423,6 +1532,15 @@ pub static COMANDOS: &[Command] = &[
         recurso: None,
         mais: Mais::Nada,
         handler: security_verify,
+    },
+    Command {
+        nome: "security.metrics",
+        resumo: "O custo e o efeito da seguranca, medidos: o gate (decisoes, recusas por codigo, latencia), a politica, a auditoria, o tecido (voltas, tempo de maquina, memoria, falsos positivos, contencoes desfeitas, repeticoes de recusa), a latencia da resposta e os arrendamentos soltos, por causa.",
+        params: &[],
+        acesso: Acesso::Exige(Permissao::SecurityRead),
+        recurso: None,
+        mais: Mais::Nada,
+        handler: security_metrics,
     },
 ];
 
@@ -2320,9 +2438,16 @@ fn net_connect(params: Json, w: &mut JsonWriter) -> fmt::Result {
             w.field_str("state", estado.nome())?;
         }
         Err(crate::rede::pilha::BARRADO) => barrado(w, &destino, &fluxo)?,
-        Err(motivo) => w.field_str("error", motivo)?,
+        Err(motivo) => falha_de_rede(w, motivo)?,
     }
     w.end_object()
+}
+
+/// Uma falha da rede depois do gate, com o código que a distingue de uma
+/// recusa da política — ver [`crate::rede::pilha::codigo_da_falha`].
+fn falha_de_rede(w: &mut JsonWriter, motivo: &str) -> fmt::Result {
+    w.field_str("error", motivo)?;
+    w.field_str("code", crate::rede::pilha::codigo_da_falha(motivo))
 }
 
 /// O firewall recusou o pedido de rede que o gate tinha permitido: a
@@ -2339,7 +2464,7 @@ fn barrado(
         politica::Codigo::DenyPolicy,
         &alloc::format!("bloqueado pelo firewall, regra {regra}"),
     );
-    w.field_str("error", crate::rede::pilha::BARRADO)?;
+    falha_de_rede(w, crate::rede::pilha::BARRADO)?;
     w.field_u64("rule", regra)
 }
 
@@ -2399,7 +2524,7 @@ fn net_send_com(
                 .unwrap_or_default();
             barrado(w, &destino, &fluxo)
         }
-        Err(motivo) => w.field_str("error", motivo),
+        Err(motivo) => falha_de_rede(w, motivo),
     }
 }
 
@@ -2437,7 +2562,7 @@ fn net_recv(params: Json, w: &mut JsonWriter) -> fmt::Result {
     let (dados, estado) = match crate::rede::pilha::espiar(numero, &dono, maximo) {
         Ok(r) => r,
         Err(motivo) => {
-            w.field_str("error", motivo)?;
+            falha_de_rede(w, motivo)?;
             return w.end_object();
         }
     };
@@ -2473,7 +2598,7 @@ fn net_recv(params: Json, w: &mut JsonWriter) -> fmt::Result {
     if tirar > 0
         && let Err(motivo) = crate::rede::pilha::consumir(numero, &dono, tirar)
     {
-        w.field_str("error", motivo)?;
+        falha_de_rede(w, motivo)?;
     }
     w.end_object()
 }
@@ -2493,7 +2618,7 @@ fn net_recv_datagrama(
     let (datagrama, estado) = match crate::rede::pilha::espiar_datagrama(numero, dono, maximo) {
         Ok(r) => r,
         Err(motivo) => {
-            w.field_str("error", motivo)?;
+            falha_de_rede(w, motivo)?;
             return w.end_object();
         }
     };
@@ -2537,7 +2662,7 @@ fn net_recv_datagrama(
                     crate::rede::captura::guardar(numero, dono, &destino, false, &dados);
                 }
             }
-            Err(motivo) => w.field_str("error", motivo)?,
+            Err(motivo) => falha_de_rede(w, motivo)?,
         }
     }
     w.end_object()
@@ -2575,7 +2700,7 @@ fn net_close(params: Json, w: &mut JsonWriter) -> fmt::Result {
             w.field_u64("connection", numero)?;
             w.field_bool("closed", true)?;
         }
-        Err(motivo) => w.field_str("error", motivo)?,
+        Err(motivo) => falha_de_rede(w, motivo)?,
     }
     w.end_object()
 }
@@ -3153,6 +3278,7 @@ fn recusa_do_armazem(w: &mut JsonWriter, caminho: &str, f: crate::armazem::Falha
         _ => {}
     }
     w.field_str("error", f.motivo())?;
+    explicar_falha(w, f.codigo(), f.motivo())?;
     w.end_object()
 }
 
@@ -3621,6 +3747,7 @@ fn fs_claim(params: Json, w: &mut JsonWriter) -> fmt::Result {
                 }
             }
             w.field_str("error", motivo)?;
+            explicar_falha(w, codigo, motivo)?;
         }
     }
     w.end_object()
@@ -3635,6 +3762,7 @@ fn fs_release(params: Json, w: &mut JsonWriter) -> fmt::Result {
             w.field_bool("ok", false)?;
             w.field_str("code", codigo.nome())?;
             w.field_str("error", motivo)?;
+            explicar_falha(w, codigo, motivo)?;
         }
     }
     w.end_object()
@@ -4295,6 +4423,7 @@ fn ui_act(params: Json, w: &mut JsonWriter) -> fmt::Result {
             w.field_bool("ok", false)?;
             if let Some(codigo) = recusa.codigo {
                 w.field_str("code", codigo.nome())?;
+                explicar_falha(w, codigo, recusa.motivo)?;
             }
             w.field_str("error", recusa.motivo)?;
         }
@@ -5238,6 +5367,7 @@ fn ui_claim(params: Json, w: &mut JsonWriter) -> fmt::Result {
             w.field_bool("ok", false)?;
             w.field_str("code", codigo.nome())?;
             w.field_str("error", "outro titular tem o arrendamento")?;
+            explicar_falha(w, codigo, "outro titular tem o arrendamento")?;
             if let Some(a) = crate::coordenacao::estado(&recurso).arrendamento {
                 w.key("lease")?;
                 escrever_arrendamento(w, &a)?;
@@ -5270,6 +5400,7 @@ fn ui_release(params: Json, w: &mut JsonWriter) -> fmt::Result {
             w.field_bool("ok", false)?;
             w.field_str("code", codigo.nome())?;
             w.field_str("error", "o arrendamento nao e seu")?;
+            explicar_falha(w, codigo, "o arrendamento nao e seu")?;
         }
     }
     w.end_object()
@@ -5286,6 +5417,7 @@ fn recusa_de_mensagem(w: &mut JsonWriter, codigo: politica::Codigo, motivo: &str
     w.field_bool("ok", false)?;
     w.field_str("code", codigo.nome())?;
     w.field_str("error", motivo)?;
+    explicar_falha(w, codigo, motivo)?;
     w.end_object()
 }
 
@@ -5644,6 +5776,147 @@ fn net_unblock(params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.end_object()
 }
 
+// ---------------------------------------------------------------------------
+// As contenções reversíveis — ver `crate::contencao`. O gate decidiu o alvo
+// pelo papel dele; o handler lê o alvo do pedido, confere que é o decidido,
+// e contém ou solta. Cada conexão que cai vai para a auditoria em nome da
+// decisão; os arrendamentos soltos, pela coordenação.
+// ---------------------------------------------------------------------------
+
+/// O `explain` de uma falha depois do gate — o mesmo de uma recusa dele,
+/// com a razão, se adianta repetir e o que fazer: um conflito de versão
+/// não é uma recusa da política, e o agente não precisa adivinhar isso.
+fn explicar_falha(w: &mut JsonWriter, codigo: politica::Codigo, motivo: &str) -> fmt::Result {
+    if let Some(r) = crate::autorizacao::recusa_da_execucao(codigo, motivo) {
+        w.key("explain")?;
+        r.escrever(w)?;
+    }
+    Ok(())
+}
+
+/// Uma chave de agente, em hex, de um parâmetro.
+fn chave_do_parametro(v: Option<Json>) -> Option<[u8; 32]> {
+    v.and_then(|v| v.as_str()).and_then(sigilo::de_hex_fixo)
+}
+
+/// Contém ou solta `alvo`, se é o que o gate decidiu, e escreve o desfecho:
+/// o alvo, se ficou contido, se mudou, e o estado em uma palavra —
+/// `isolated`, `already_isolated`, `released`, `not_isolated`, e os
+/// equivalentes de suspensão.
+fn conter_ou_soltar(
+    alvo: Option<crate::contencao::Alvo>,
+    conter: bool,
+    w: &mut JsonWriter,
+) -> fmt::Result {
+    w.begin_object()?;
+    let Some(alvo) = alvo else {
+        w.field_str("error", "alvo invalido")?;
+        return w.end_object();
+    };
+    let texto = alvo.texto();
+    if !crate::autorizacao::alvo_decidido(&texto) {
+        w.field_str("error", "o alvo nao e o que foi decidido")?;
+        return w.end_object();
+    }
+    let feito = if conter {
+        match crate::contencao::conter(&alvo) {
+            Ok(f) => f,
+            Err(motivo) => {
+                crate::autorizacao::auditar_execucao(&texto, politica::Codigo::Error, motivo);
+                w.field_str("error", motivo)?;
+                return w.end_object();
+            }
+        }
+    } else {
+        crate::contencao::soltar(&alvo)
+    };
+    for (id, d) in &feito.derrubadas {
+        crate::autorizacao::auditar_execucao(
+            &d.texto(),
+            politica::Codigo::Allow,
+            &alloc::format!("conexao {id} derrubada pela contencao"),
+        );
+    }
+    let estado = crate::contencao::desfecho(&alvo, conter, feito.mudou);
+    crate::autorizacao::auditar_execucao(&texto, politica::Codigo::Allow, estado);
+    w.field_str("target", &texto)?;
+    w.field_bool("contained", crate::contencao::contido(&alvo))?;
+    w.field_bool("changed", feito.mudou)?;
+    w.field_str("state", estado)?;
+    w.field_u64("dropped", feito.derrubadas.len() as u64)?;
+    w.end_object()
+}
+
+fn process_isolate(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let alvo = params
+        .member("process")
+        .and_then(|v| v.as_u64())
+        .map(crate::contencao::Alvo::Processo);
+    conter_ou_soltar(alvo, true, w)
+}
+
+fn process_release(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let alvo = params
+        .member("process")
+        .and_then(|v| v.as_u64())
+        .map(crate::contencao::Alvo::Processo);
+    conter_ou_soltar(alvo, false, w)
+}
+
+fn agent_suspend(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let alvo = chave_do_parametro(params.member("key")).map(crate::contencao::Alvo::Agente);
+    conter_ou_soltar(alvo, true, w)
+}
+
+fn agent_resume(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let alvo = chave_do_parametro(params.member("key")).map(crate::contencao::Alvo::Agente);
+    conter_ou_soltar(alvo, false, w)
+}
+
+/// O alvo de `credential.*`: a pessoa ou a chave — um dos dois.
+fn credencial_do_pedido(
+    pessoa: Option<Json>,
+    chave: Option<Json>,
+) -> Option<crate::contencao::Alvo> {
+    use crate::contencao::Alvo;
+    match (pessoa, chave) {
+        (Some(p), None) => p
+            .as_str()
+            .and_then(sigilo::pessoas::IdPessoa::ler)
+            .map(Alvo::Pessoa),
+        (None, k @ Some(_)) => chave_do_parametro(k).map(Alvo::ChaveDeAgente),
+        _ => None,
+    }
+}
+
+fn credential_suspend(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let alvo = credencial_do_pedido(params.member("person"), params.member("key"));
+    conter_ou_soltar(alvo, true, w)
+}
+
+fn credential_resume(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let alvo = credencial_do_pedido(params.member("person"), params.member("key"));
+    conter_ou_soltar(alvo, false, w)
+}
+
+fn containment_list(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    w.key("contained")?;
+    w.begin_array()?;
+    for (especie, alvo) in crate::contencao::lista() {
+        w.begin_object()?;
+        w.field_str("kind", especie)?;
+        w.field_str("target", &alvo)?;
+        w.end_object()?;
+    }
+    w.end_array()?;
+    w.field_str(
+        "note",
+        "volatil: uma contencao nao sobrevive a um boot; a revogacao e o definitivo",
+    )?;
+    w.end_object()
+}
+
 fn net_rules(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     let regras = crate::rede::pilha::regras();
     let d = crate::rede::pilha::descartes();
@@ -5745,4 +6018,96 @@ fn security_risk(params: Json, w: &mut JsonWriter) -> fmt::Result {
 
 fn security_verify(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     consulta(w, seguranca::relatorio::verificar)
+}
+
+/// Uma medida, `{"samples","avg","max"}`; a dos ciclos, em nanossegundos.
+fn escrever_medida(
+    w: &mut JsonWriter,
+    nome: &str,
+    medida: &crate::metricas::Medida,
+    em_ciclos: bool,
+) -> fmt::Result {
+    let (amostras, media, maior) = medida.ler();
+    let valor = |v| {
+        if em_ciclos {
+            crate::metricas::nanos(v)
+        } else {
+            v
+        }
+    };
+    w.key(nome)?;
+    w.begin_object()?;
+    w.field_u64("samples", amostras)?;
+    w.field_u64("avg", valor(media))?;
+    w.field_u64("max", valor(maior))?;
+    w.end_object()
+}
+
+/// O custo da segurança, e o efeito dela, desde o boot: as medidas do
+/// kernel (`crate::metricas`) e as contas do motor do NSF. Só lê
+/// contadores — nada daqui volta a uma decisão.
+fn security_metrics(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    use crate::metricas as m;
+    w.begin_object()?;
+    w.field_u64("window_ms", m::janela_ms())?;
+    // O gate: as decisões, as recusas por código, e o tempo do pedido à
+    // decisão.
+    let (decisoes, _, _) = m::GATE.ler();
+    let recusas = decisoes.saturating_sub(m::decisoes_de(politica::Codigo::Allow));
+    w.key("gate")?;
+    w.begin_object()?;
+    w.field_u64("decisions", decisoes)?;
+    w.field_u64("denials", recusas)?;
+    w.field_u64(
+        "denial_permille",
+        (recusas * 1000).checked_div(decisoes).unwrap_or(0),
+    )?;
+    escrever_medida(w, "latency_ns", &m::GATE, true)?;
+    w.key("by_code")?;
+    w.begin_object()?;
+    for c in politica::Codigo::TODOS {
+        let n = m::decisoes_de(c);
+        if n > 0 {
+            w.field_u64(c.nome(), n)?;
+        }
+    }
+    w.end_object()?;
+    w.end_object()?;
+    // A política sozinha, e a auditoria: cada registro, e a parte do
+    // tempo da máquina que eles tomaram.
+    w.key("policy")?;
+    w.begin_object()?;
+    escrever_medida(w, "latency_ns", &m::POLITICA, true)?;
+    w.end_object()?;
+    w.key("audit")?;
+    w.begin_object()?;
+    escrever_medida(w, "latency_ns", &m::AUDITORIA, true)?;
+    w.field_u64("cpu_ppm", m::ppm_do_tempo(m::AUDITORIA.soma()))?;
+    w.end_object()?;
+    // O tecido: as voltas, o tempo de máquina delas, e as contas do motor —
+    // a memória, os falsos positivos, as contenções desfeitas, as recusas
+    // repetidas.
+    w.key("nsf")?;
+    w.begin_object()?;
+    escrever_medida(w, "round_ns", &m::VOLTA_DO_NSF, true)?;
+    escrever_medida(w, "records_per_round", &m::REGISTROS_DO_NSF, false)?;
+    w.field_u64("cpu_ppm", m::ppm_do_tempo(m::VOLTA_DO_NSF.soma()))?;
+    w.key("engine")?;
+    consulta(w, seguranca::relatorio::metricas)?;
+    w.end_object()?;
+    // Do registro que disparou uma detecção ao pedido de resposta.
+    escrever_medida(w, "response_latency_ms", &m::RESPOSTA_MS, false)?;
+    // Os arrendamentos: quantos soltos, por quê, e os vencidos, quanto
+    // depois do prazo saíram.
+    w.key("leases")?;
+    w.begin_object()?;
+    w.key("released")?;
+    w.begin_object()?;
+    for saida in m::Saida::TODAS {
+        w.field_u64(saida.nome(), m::soltos_por(saida))?;
+    }
+    w.end_object()?;
+    escrever_medida(w, "expiry_delay_ms", &m::VENCIMENTO_MS, false)?;
+    w.end_object()?;
+    w.end_object()
 }

@@ -1367,8 +1367,15 @@ fn despachar(
     }
     let licenca = match autorizacao::autorizar(chamador, comando, params) {
         Ok(l) => l,
-        Err(codigo) => {
-            saidaln!(console, "negado: {}", codigo.nome());
+        Err(recusa) => {
+            // A frase para a pessoa — o que ela pediu, o papel dela, o que
+            // fazer —, e o código e o registro, para quem investiga
+            // (`security.explain` lê o registro).
+            saidaln!(console, "negado: {}", recusa.frase());
+            match recusa.decisao {
+                0 => saidaln!(console, "({})", recusa.codigo.nome()),
+                d => saidaln!(console, "({}; registro {})", recusa.codigo.nome(), d),
+            }
             // A sessão pode ter acabado entre o começo e a decisão: o
             // console fica sabendo, e volta a pedir o login.
             if let Chamador::Pessoa(_) = chamador {

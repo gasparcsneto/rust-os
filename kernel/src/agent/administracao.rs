@@ -95,6 +95,7 @@ fn reconfirmar(
     administrador: &[u8; 32],
     papel: &str,
     permissao: Permissao,
+    metodo: &str,
     alvo: Option<&str>,
 ) -> Result<(), Falha> {
     #[cfg(feature = "modo-teste")]
@@ -112,6 +113,9 @@ fn reconfirmar(
         ));
     }
     let codigo = match alvo {
+        Some(alvo) if permissao.contencao() => {
+            autorizacao::decidir_contencao(Some(papel), permissao, metodo, alvo).0
+        }
         Some(alvo) => autorizacao::decidir_destino(Some(papel), permissao, alvo).0,
         None => autorizacao::decidir_administracao(Some(papel), permissao),
     };
@@ -256,6 +260,53 @@ static OPERACOES: &[Operacao] = &[
         permissao: Permissao::MessageRead,
         efeito: Efeito::Nenhum,
         executar: confirmar_mensagem,
+    },
+    Operacao {
+        nome: "process.isolate",
+        resumo: "Isola um processo: {\"process\": fio}. Todo pedido dele e recusado, e as \
+                 conexoes dele caem. Reversivel por process.release; volatil.",
+        permissao: Permissao::ProcessIsolate,
+        efeito: Efeito::Nenhum,
+        executar: isolar_processo,
+    },
+    Operacao {
+        nome: "process.release",
+        resumo: "Solta um processo isolado: {\"process\": fio}.",
+        permissao: Permissao::ProcessIsolate,
+        efeito: Efeito::Nenhum,
+        executar: soltar_processo,
+    },
+    Operacao {
+        nome: "agent.suspend",
+        resumo: "Suspende um agente: {\"key\": chave publica em hex}. Os pedidos dele e dos \
+                 processos dele sao recusados, as conexoes caem, os arrendamentos sao soltos. \
+                 Nao e revogacao; volatil.",
+        permissao: Permissao::AgentSuspend,
+        efeito: Efeito::Nenhum,
+        executar: suspender_agente,
+    },
+    Operacao {
+        nome: "agent.resume",
+        resumo: "Retoma um agente suspenso: {\"key\": chave publica em hex}.",
+        permissao: Permissao::AgentSuspend,
+        efeito: Efeito::Nenhum,
+        executar: retomar_agente,
+    },
+    Operacao {
+        nome: "credential.suspend",
+        resumo: "Suspende uma credencial: {\"person\": \"pessoa:<16 hex>\"} ou {\"key\": \
+                 chave em hex}. Login e aperto recusados, as sessoes nao agem. Nao e \
+                 revogacao; volatil.",
+        permissao: Permissao::CredentialSuspend,
+        efeito: Efeito::Nenhum,
+        executar: suspender_credencial,
+    },
+    Operacao {
+        nome: "credential.resume",
+        resumo: "Retoma uma credencial suspensa: {\"person\"} ou {\"key\"}.",
+        permissao: Permissao::CredentialSuspend,
+        efeito: Efeito::Nenhum,
+        executar: retomar_credencial,
     },
     Operacao {
         nome: "message.purge",
@@ -521,7 +572,7 @@ fn conferir_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) -> Result
     // A prova disse quem; a política diz se o papel dele pode isto. A
     // permissão de destino tem o recurso nos parâmetros: o papel primeiro,
     // e o destinatário logo abaixo.
-    let decisao = if operacao.permissao.recurso_e_destino() {
+    let decisao = if operacao.permissao.recurso_e_destino() || operacao.permissao.contencao() {
         autorizacao::papel_tem(papel.as_deref(), operacao.permissao)
     } else {
         autorizacao::decidir_administracao(papel.as_deref(), operacao.permissao)
@@ -543,13 +594,13 @@ fn conferir_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) -> Result
     // O destinatário, pelo mesmo `decidir_destino` da sessão, com o papel do
     // administrador: o alcance dele, enumerado como o de todos.
     let mut destino = None;
-    let mut alvo_decidido = None;
+    let mut alvo_decidido: Option<String> = None;
     if operacao.permissao.recurso_e_destino() {
         let alvo = Json(parametros.as_bytes())
             .member("to")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        alvo_decidido = Some(alvo);
+        alvo_decidido = Some(alvo.to_string());
         let (codigo, motivo, resolvido) =
             autorizacao::decidir_destino(Some(papel), operacao.permissao, alvo);
         if !codigo.permite() {
@@ -557,6 +608,20 @@ fn conferir_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) -> Result
             return Err(falha(codigo, motivo));
         }
         destino = resolvido;
+    }
+    // O alvo de uma contenção, pelo mesmo `decidir_contencao` da sessão,
+    // com o papel do administrador: o papel do alvo, contra o alcance dele.
+    if operacao.permissao.contencao() {
+        let alvo = crate::contencao::Alvo::do_pedido(operacao.nome, Json(parametros.as_bytes()))
+            .map(|a| a.texto())
+            .unwrap_or_default();
+        let (codigo, motivo) =
+            autorizacao::decidir_contencao(Some(papel), operacao.permissao, operacao.nome, &alvo);
+        if !codigo.permite() {
+            gravar(codigo, &alvo, motivo);
+            return Err(falha(codigo, motivo));
+        }
+        alvo_decidido = Some(alvo);
     }
 
     // A persistência, antes de qualquer coisa: sem ela confiável, nenhuma
@@ -611,7 +676,13 @@ fn conferir_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) -> Result
         // a operação tocar em qualquer coisa, a decisão é feita de novo, pelo
         // registro e pela política de agora: ou ela vê a mudança e é
         // recusada, ou a mudança vem depois dela inteira.
-        if let Err(f) = reconfirmar(&administrador, papel, operacao.permissao, alvo_decidido) {
+        if let Err(f) = reconfirmar(
+            &administrador,
+            papel,
+            operacao.permissao,
+            operacao.nome,
+            alvo_decidido.as_deref(),
+        ) {
             return (Err(f), Ok(()));
         }
         let foto = (operacao.efeito != Efeito::Nenhum).then(crate::persistencia::Foto::tirar);
@@ -1447,6 +1518,66 @@ fn revogar_arrendamento(
     let _ = w.field_str("holder", tipo);
     let _ = w.field_str("by", &quem);
     Ok(recurso)
+}
+
+/// Uma contenção, ou o inverso dela, pela prova: o mesmo estado e o mesmo
+/// efeito do comando — ver [`crate::contencao`]. Devolve o alvo, o recurso
+/// que a auditoria grava: é por ele que o tecido de segurança reconhece a
+/// recuperação do que ele conteve.
+fn conter_pela_prova(
+    metodo: &str,
+    params: Json,
+    conter: bool,
+    w: &mut JsonWriter,
+) -> Result<String, Falha> {
+    let alvo = crate::contencao::Alvo::do_pedido(metodo, params)
+        .map_err(|m| falha(Codigo::InvalidArgument, m))?;
+    let feito = if conter {
+        crate::contencao::conter(&alvo).map_err(|m| falha(Codigo::Error, m))?
+    } else {
+        crate::contencao::soltar(&alvo)
+    };
+    for (id, d) in &feito.derrubadas {
+        autorizacao::auditar_execucao(
+            &d.texto(),
+            Codigo::Allow,
+            &format!("conexao {id} derrubada pela contencao"),
+        );
+    }
+    let texto = alvo.texto();
+    let _ = w.field_str("target", &texto);
+    let _ = w.field_bool("contained", crate::contencao::contido(&alvo));
+    let _ = w.field_bool("changed", feito.mudou);
+    let _ = w.field_str(
+        "state",
+        crate::contencao::desfecho(&alvo, conter, feito.mudou),
+    );
+    let _ = w.field_u64("dropped", feito.derrubadas.len() as u64);
+    Ok(texto)
+}
+
+fn isolar_processo(_: &Pedinte, params: Json, w: &mut JsonWriter) -> Result<String, Falha> {
+    conter_pela_prova("process.isolate", params, true, w)
+}
+
+fn soltar_processo(_: &Pedinte, params: Json, w: &mut JsonWriter) -> Result<String, Falha> {
+    conter_pela_prova("process.release", params, false, w)
+}
+
+fn suspender_agente(_: &Pedinte, params: Json, w: &mut JsonWriter) -> Result<String, Falha> {
+    conter_pela_prova("agent.suspend", params, true, w)
+}
+
+fn retomar_agente(_: &Pedinte, params: Json, w: &mut JsonWriter) -> Result<String, Falha> {
+    conter_pela_prova("agent.resume", params, false, w)
+}
+
+fn suspender_credencial(_: &Pedinte, params: Json, w: &mut JsonWriter) -> Result<String, Falha> {
+    conter_pela_prova("credential.suspend", params, true, w)
+}
+
+fn retomar_credencial(_: &Pedinte, params: Json, w: &mut JsonWriter) -> Result<String, Falha> {
+    conter_pela_prova("credential.resume", params, false, w)
 }
 
 /// A falha de uma operação de mensagem.

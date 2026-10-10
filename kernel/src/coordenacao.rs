@@ -447,6 +447,15 @@ pub fn invalidar_pessoas(motivo: &str) {
     invalidar(Titular::e_pessoa, motivo);
 }
 
+/// Tira os arrendamentos de uma pessoa — de todas as sessões dela —: a
+/// credencial foi suspensa. Grava.
+pub fn invalidar_da_pessoa(pessoa: [u8; 8], motivo: &str) {
+    invalidar(
+        |t| matches!(t, Titular::Pessoa { pessoa: p, .. } if *p == pessoa),
+        motivo,
+    );
+}
+
 /// Tira os arrendamentos de uma chave revogada, em qualquer sessão. Grava.
 pub fn invalidar_chave(chave: &[u8; 32], motivo: &str) {
     invalidar(
@@ -466,6 +475,7 @@ pub fn invalidar_sessao_do_canal(sessao: u8, motivo: &str) {
 
 fn invalidar(acabou: impl Fn(&Titular) -> bool, motivo: &str) {
     let saidos = com_tabela(|t| t.invalidar(acabou));
+    crate::metricas::arrendamentos_soltos(crate::metricas::Saida::do_motivo(motivo), saidos.len());
     for (recurso, a) in saidos {
         gravar(
             Some(&a.titular),
@@ -488,7 +498,11 @@ pub fn vencer_todos() {
     }
     ULTIMA.store(agora, Ordering::Relaxed);
     let saidos = com_tabela(|t| t.vencer_todos(agora));
+    crate::metricas::arrendamentos_soltos(crate::metricas::Saida::Vencimento, saidos.len());
     for (recurso, a) in saidos {
+        // Quanto depois do prazo o arrendamento saiu: o coletor passa uma
+        // vez por segundo, e nada prende o recurso além disso.
+        crate::metricas::VENCIMENTO_MS.somar(agora.saturating_sub(a.expira_ms));
         gravar(
             Some(&a.titular),
             "lease.expire",
@@ -505,6 +519,7 @@ pub fn vencer_todos() {
 pub fn revogar(recurso: &str) -> Option<Arrendamento> {
     let saiu = com_tabela(|t| t.revogar(recurso));
     if let Some(a) = saiu {
+        crate::metricas::arrendamentos_soltos(crate::metricas::Saida::Administrador, 1);
         gravar(
             Some(&a.titular),
             "lease.invalidate",

@@ -181,12 +181,18 @@ pub fn passo() -> Volta {
     if com_motor(|_| ()).is_none() {
         return volta;
     }
+    // O custo da volta, para `security.metrics`: o tempo dela, dos pedidos
+    // ao gate inclusive, e os registros que ela leu.
+    let inicio = crate::arch::ciclos();
 
     // Os dois despertadores antes de ler: todo datagrama já contado em
     // `captura` é de uma associação que o gate abriu antes, num registro
     // até `cabeca`.
     let captura = crate::rede::captura::ultimo();
     let cabeca = crate::autorizacao::ultimo_registro();
+    // A cabeça, para a saúde: um registro lido muito atrás dela é evidência
+    // velha, e o NSF não contém sozinho por ela — ver `seguranca::motor`.
+    com_motor(|m| m.cabeca_da_auditoria(cabeca));
 
     // A auditoria, até alcançar a cabeça — ou o teto da volta.
     for _ in 0..LEITURAS_POR_VOLTA {
@@ -248,6 +254,11 @@ pub fn passo() -> Volta {
     // novo; daqui, nada tenta outro caminho.
     for p in com_motor(|m| m.pedidos()).unwrap_or_default() {
         volta.pedidos += 1;
+        // A latência da resposta: do registro que disparou a detecção a
+        // este pedido — se o registro ainda está no anel dos momentos.
+        if let Some(gravado) = crate::metricas::momento_do_registro(p.origem) {
+            crate::metricas::RESPOSTA_MS.somar(crate::tempo::uptime_ms().saturating_sub(gravado));
+        }
         let envelope = match pedir(&p.metodo, &p.params) {
             Ok(resultado) => {
                 let mut e = Vec::from(&br#"{"result":"#[..]);
@@ -266,6 +277,8 @@ pub fn passo() -> Volta {
         ESPERA_MS.store(0, Ordering::Release);
         PROXIMA_MS.store(agora + INTERVALO_MS, Ordering::Release);
     }
+    crate::metricas::VOLTA_DO_NSF.somar(crate::metricas::desde(inicio));
+    crate::metricas::REGISTROS_DO_NSF.somar(volta.registros as u64);
     volta
 }
 

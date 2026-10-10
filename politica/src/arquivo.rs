@@ -584,7 +584,7 @@ impl Politica {
                 }
                 let mut prefixos = Vec::new();
                 for c in partes {
-                    if p.recurso_e_destino() {
+                    if p.recurso_e_papel() {
                         // Um papel pelo nome, e só: nada de curinga, nada de
                         // identidade solta. Se o papel existe é a decisão que
                         // confere, com a política em vigor — a de emergência
@@ -884,7 +884,7 @@ impl Politica {
                 return Codigo::DenyResource;
             }
         }
-        if p.recurso_e_destino() {
+        if p.recurso_e_papel() {
             // O papel do destinatário, igual a um dos enumerados — e um
             // papel que esta política tem. Sem destinatário resolvido, ou
             // fora da lista: fechado.
@@ -1228,7 +1228,7 @@ fn recurso_contido(p: Permissao, a: Option<&Vec<String>>, b: Option<&Vec<String>
     match (a, b) {
         (None, _) => true,
         (Some(_), None) => false,
-        (Some(a), Some(b)) if p.recurso_e_destino() || p.recurso_e_endereco() => {
+        (Some(a), Some(b)) if p.recurso_e_papel() || p.recurso_e_endereco() => {
             a.iter().all(|pa| b.contains(pa))
         }
         (Some(a), Some(b)) => a

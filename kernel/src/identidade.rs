@@ -589,6 +589,9 @@ pub fn revogar(chave: &[u8; TAM_CHAVE]) -> Result<String, Recusa> {
     })?;
     // Os arrendamentos da chave acabam com ela, na hora — em qualquer sessão.
     crate::coordenacao::invalidar_chave(chave, "a chave foi revogada");
+    // A revogação é o definitivo: a suspensão de antes some, e uma chave
+    // registrada de novo não a herda.
+    crate::contencao::esquecer_chave(chave);
     // E as mensagens dela: as que mandou e as que ia receber. Nenhuma é
     // entregue depois — nem se a mesma chave voltar ao registro.
     crate::mensagens::anular_titular(

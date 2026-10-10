@@ -8,8 +8,8 @@ use protocolo::json::{Json, JsonWriter};
 use seguranca::Motor;
 use seguranca::evento::Severidade;
 use seguranca::incidente::Estado as EstadoDoIncidente;
-use seguranca::regras::Regra;
-use seguranca::resposta::Estado as EstadoDaAcao;
+use seguranca::regras::{Confianca, Regra};
+use seguranca::resposta::{Estado as EstadoDaAcao, Nivel};
 
 const CHAVE: [u8; 32] = [0xA1; 32];
 
@@ -439,9 +439,13 @@ fn o_dns_contra_a_politica() {
         "pelo processo 9 (resolvedor 00000000): recurso fora do alcance do papel",
     ));
     ler(&mut m, &a);
-    let inc = m.incidentes.todos().next().expect("incidente do dns");
-    assert_eq!(inc.deteccoes[0].regra, Regra::DnsContraAPolitica);
-    assert!(inc.deteccoes[0].explicacao.contains("proibido.duke"));
+    // Um nome que levou a um destino recusado é de olhar — o alcance
+    // estreito de todo dia —: uma observação, sem incidente.
+    assert_eq!(m.incidentes.todos().count(), 0);
+    let obs = m.observacoes().next().expect("a observacao do dns");
+    assert_eq!(obs.regra, Regra::DnsContraAPolitica);
+    assert_eq!(obs.confianca, Confianca::Baixa);
+    assert!(obs.explicacao.contains("proibido.duke"));
     // A explicação da decisão diz o nome, e que o endereço passou pelo gate
     // — e foi recusado.
     let mut s = String::new();
@@ -512,9 +516,8 @@ fn o_dns_lido_depois_da_conexao() {
     assert_eq!(m.ler_captura("udp:10.0.2.53:53", antes.as_bytes()), Ok(2));
     let depois = conversa(dono, "tarde.duke", [10, 0, 2, 98], 3, outra);
     assert_eq!(m.ler_captura("udp:10.0.2.53:53", depois.as_bytes()), Ok(2));
-    let incidentes: Vec<_> = m.incidentes.todos().collect();
-    assert_eq!(incidentes.len(), 1, "{incidentes:?}");
-    let d = &incidentes[0].deteccoes;
+    assert_eq!(m.incidentes.todos().count(), 0);
+    let d: Vec<_> = m.deteccoes().collect();
     assert_eq!(d.len(), 1, "{d:?}");
     assert_eq!(d[0].regra, Regra::DnsContraAPolitica);
     assert_eq!(d[0].registros, [negada]);
@@ -523,7 +526,7 @@ fn o_dns_lido_depois_da_conexao() {
         "{}",
         d[0].explicacao
     );
-    assert!(!incidentes[0].registros.contains(&outra));
+    assert!(!d[0].registros.contains(&outra));
     assert_eq!(
         m.evento(negada).map(|e| e.severidade),
         Some(Severidade::Media)
@@ -537,7 +540,7 @@ fn o_dns_lido_depois_da_conexao() {
     assert!(s.contains(r#""dns":null"#), "{s}");
     // Ler de novo não dispara de novo.
     assert_eq!(m.ler_captura("udp:10.0.2.53:53", antes.as_bytes()), Ok(0));
-    assert_eq!(m.incidentes.todos().next().unwrap().deteccoes.len(), 1);
+    assert_eq!(m.deteccoes().count(), 1);
 }
 
 /// A mesma sequência de uma pessoa e de um agente: as mesmas regras, a
@@ -618,14 +621,53 @@ fn o_programa_fora_do_manifesto_nao_contem_quem_o_lancou() {
     assert!(m.pedidos().is_empty());
 }
 
-/// Só um incidente alto leva a saída a ser contida: três pedidos fora do
-/// alcance — o primeiro degrau, de severidade média — abrem o incidente, e
-/// a conexão que vem depois é só registrada. Nada é pedido.
+/// Só um incidente alto leva a saída a ser contida. Três pedidos distintos
+/// fora do alcance — o primeiro degrau — são de olhar: uma observação, sem
+/// incidente, e a conexão que vem depois é só registrada. O mesmo pedido
+/// recusado repetido nem isso é. Nada é pedido.
 #[test]
 fn so_o_incidente_alto_leva_a_contencao() {
     let mut a = Auditoria::nova();
     let mut m = Motor::novo();
-    for _ in 0..3 {
+    for arquivo in ["agentes", "pessoas", "chaves"] {
+        a.gravar(do_agente(
+            "fs.read",
+            &format!("/etc/duke/{arquivo}"),
+            Codigo::DenyResource,
+            "recurso fora do alcance do papel",
+        ));
+    }
+    a.gravar(do_agente("net.connect", ECO, Codigo::Allow, ""));
+    ler(&mut m, &a);
+    assert_eq!(m.incidentes.todos().count(), 0);
+    let obs: Vec<_> = m.observacoes().map(|d| (d.regra, d.confianca)).collect();
+    assert_eq!(obs, [(Regra::ForaDoAlcance, Confianca::Baixa)]);
+    assert!(m.pedidos().is_empty());
+    // A lista diz a observação, e a explicação do registro também — com a
+    // categoria e a confiança.
+    let mut s = String::new();
+    seguranca::relatorio::incidentes(&m, &mut JsonWriter::new(&mut s)).unwrap();
+    assert!(
+        s.starts_with(r#"{"incidents":[],"observations":[{"rule":"out-of-scope","category":"violation","severity":"medium","confidence":"low""#),
+        "{s}"
+    );
+    let mut s = String::new();
+    seguranca::relatorio::explicar(&m, 3, &mut JsonWriter::new(&mut s)).unwrap();
+    assert!(
+        s.contains(r#""detections":[{"rule":"out-of-scope","category":"violation","severity":"medium","confidence":"low""#),
+        "{s}"
+    );
+    let mut s = String::new();
+    seguranca::relatorio::status(&m, &mut JsonWriter::new(&mut s)).unwrap();
+    assert!(
+        s.contains(r#""health":{"state":"healthy","reasons":[],"backlog":0}"#),
+        "{s}"
+    );
+
+    // O mesmo pedido, trinta vezes: nem observação.
+    let mut a = Auditoria::nova();
+    let mut m = Motor::novo();
+    for _ in 0..30 {
         a.gravar(do_agente(
             "fs.read",
             "/etc/duke/agentes",
@@ -635,19 +677,27 @@ fn so_o_incidente_alto_leva_a_contencao() {
     }
     a.gravar(do_agente("net.connect", ECO, Codigo::Allow, ""));
     ler(&mut m, &a);
-    let inc = m
-        .incidentes
-        .todos()
-        .next()
-        .expect("o incidente fora do alcance");
-    assert!(!inc.alto(), "{inc:?}");
+    assert_eq!(m.incidentes.todos().count(), 0);
     assert!(
-        inc.deteccoes
-            .iter()
-            .all(|d| d.regra != Regra::SaidaDepoisDeSondagem),
-        "{inc:?}"
+        m.deteccoes().all(|d| d.regra != Regra::ForaDoAlcance),
+        "{:?}",
+        m.deteccoes().collect::<Vec<_>>()
     );
     assert!(m.pedidos().is_empty());
+    // A repetição é contada — para a taxa de repetição —, e só.
+    assert_eq!(
+        (m.contadores.recusas, m.contadores.recusas_repetidas),
+        (30, 29)
+    );
+    // E as métricas dizem o custo: quase toda recusa é repetição, e de
+    // quem o NSF não tinha por ameaça.
+    let mut s = String::new();
+    seguranca::relatorio::metricas(&m, &mut JsonWriter::new(&mut s)).unwrap();
+    assert!(
+        s.contains(r#""decisions_seen":31,"denials_seen":30,"denials_repeated":29,"agent_retry_permille":966,"legitimate_denial_permille":967"#),
+        "{s}"
+    );
+    assert!(s.contains(r#""events":{"used":31,"cap":512}"#), "{s}");
 }
 
 /// Detecção não é autorização: o motor só planeja `net.block` — restringir
@@ -679,4 +729,509 @@ fn o_motor_so_pede_restricao() {
     let mut s = String::new();
     seguranca::relatorio::status(&m, &mut JsonWriter::new(&mut s)).unwrap();
     assert!(s.contains(r#""service":"nsf""#), "{s}");
+}
+
+/// O detalhe de um pedido de um processo lançado pelo agente.
+const DO_PROCESSO: &str = "pelo processo 9 (cliente 0a0b0c0d)";
+
+/// A escada, e a recuperação respeitada. Quem sondou usa a rede de um
+/// processo: o primeiro degrau é o destino, só para o processo. A ameaça
+/// continua — o mesmo processo, outro destino, com a contenção valendo —:
+/// o degrau seguinte é o processo inteiro, isolado, com o papel dele como
+/// recurso. Um administrador o solta, pelo gate: o incidente fica
+/// recuperado, e a rede seguinte do processo é só recomendação — o NSF
+/// não contém de novo, nem com o risco ainda alto.
+#[test]
+fn a_escada_e_a_recuperacao() {
+    let mut a = Auditoria::nova();
+    let mut m = Motor::novo();
+    sondar(&mut a);
+    a.gravar(do_agente("net.connect", ECO, Codigo::Allow, DO_PROCESSO));
+    ler(&mut m, &a);
+    let p = m.pedidos();
+    assert_eq!(p.len(), 1);
+    assert_eq!(
+        (p[0].metodo.as_str(), p[0].params.as_str()),
+        (
+            "net.block",
+            format!(r#"{{"to":"{ECO}","owner":"process:9"}}"#).as_str()
+        )
+    );
+    m.desfecho(p[0].acao, br#"{"result":{"rule":1}}"#);
+    nsf_pediu(&mut a, "net.block", ECO, Codigo::Allow);
+    // O mesmo processo, outro destino: a contenção do destino não bastou.
+    a.gravar(do_agente(
+        "net.connect",
+        "udp:10.0.2.2:69",
+        Codigo::Allow,
+        DO_PROCESSO,
+    ));
+    ler(&mut m, &a);
+    let p = m.pedidos();
+    assert_eq!(p.len(), 1, "{p:?}");
+    assert_eq!(
+        (p[0].metodo.as_str(), p[0].params.as_str()),
+        ("process.isolate", r#"{"process":9}"#)
+    );
+    m.desfecho(p[0].acao, br#"{"result":{"process":9,"changed":true}}"#);
+    let isolou = nsf_pediu(&mut a, "process.isolate", "process:9", Codigo::Allow);
+    ler(&mut m, &a);
+    let inc = m.incidentes.todos().next().unwrap();
+    let acao = inc
+        .acoes
+        .iter()
+        .find(|x| x.metodo == "process.isolate")
+        .unwrap();
+    assert_eq!(
+        (
+            &acao.estado,
+            acao.decisao,
+            acao.nivel,
+            acao.recurso.as_str()
+        ),
+        (
+            &EstadoDaAcao::Permitida,
+            Some(isolou),
+            Nivel::Reversivel,
+            "process:9"
+        )
+    );
+    assert!(m.deteccoes().all(|d| d.regra != Regra::AcaoSemPlano));
+
+    // Um administrador solta o processo, pelo gate — e o processo usa a
+    // rede de novo.
+    a.gravar(R {
+        titular: Titular::Administrador,
+        agente: "adm",
+        chave: None,
+        papel: "administrador",
+        metodo: "process.release",
+        recurso: "process:9",
+        codigo: Codigo::Allow,
+        detalhe: "",
+    });
+    a.gravar(do_agente(
+        "net.connect",
+        "udp:10.0.2.3:53",
+        Codigo::Allow,
+        DO_PROCESSO,
+    ));
+    ler(&mut m, &a);
+    assert!(
+        m.pedidos().is_empty(),
+        "recuperado, o NSF nao contem de novo"
+    );
+    let inc = m.incidentes.todos().next().unwrap();
+    assert_eq!(inc.recuperada.as_deref(), Some("admin:adm"));
+    assert!(
+        inc.acoes
+            .iter()
+            .any(|x| x.metodo == "process.release" && x.estado == EstadoDaAcao::Observada)
+    );
+    assert_eq!(m.contadores.recuperadas, 1);
+    // A contenção falsa, para quem mede: das duas que o gate permitiu ao
+    // NSF, uma alguém desfez.
+    let mut s = String::new();
+    seguranca::relatorio::metricas(&m, &mut JsonWriter::new(&mut s)).unwrap();
+    assert!(
+        s.contains(r#""containments_allowed":2,"containments_recovered":1,"false_containment_permille":500"#),
+        "{s}"
+    );
+    let rec = inc
+        .acoes
+        .iter()
+        .find(|x| x.estado == EstadoDaAcao::Recomendada)
+        .expect("a recomendacao para quem pode");
+    assert!(
+        rec.justificativa.contains("admin:adm desfez"),
+        "{}",
+        rec.justificativa
+    );
+}
+
+/// A escada de um agente para no que a política dá ao NSF. O degrau
+/// seguinte ao destino é suspender o agente — e o papel do NSF não tem
+/// `agent.suspend`: o gate recusa, e o objetivo acaba. A recusa do pedido
+/// do NSF não é sondagem do NSF: a resposta dele não passa pelas regras.
+#[test]
+fn a_escada_do_agente_para_na_politica() {
+    let mut a = Auditoria::nova();
+    let mut m = Motor::novo();
+    sondar(&mut a);
+    a.gravar(do_agente("net.connect", ECO, Codigo::Allow, ""));
+    ler(&mut m, &a);
+    let p = m.pedidos();
+    m.desfecho(p[0].acao, br#"{"result":{"rule":1}}"#);
+    nsf_pediu(&mut a, "net.block", ECO, Codigo::Allow);
+    a.gravar(do_agente(
+        "net.connect",
+        "udp:10.0.2.2:69",
+        Codigo::Allow,
+        "",
+    ));
+    ler(&mut m, &a);
+    let p = m.pedidos();
+    assert_eq!(p.len(), 1);
+    assert_eq!(p[0].metodo, "agent.suspend");
+    assert_eq!(p[0].params, format!(r#"{{"key":"{}"}}"#, hex(&CHAVE)));
+    m.desfecho(
+        p[0].acao,
+        br#"{"error":{"code":-32010,"message":"negado","data":"DENY_PERMISSION"}}"#,
+    );
+    nsf_pediu(
+        &mut a,
+        "agent.suspend",
+        &format!("agent:{}", hex(&CHAVE)),
+        Codigo::DenyPermission,
+    );
+    a.gravar(do_agente(
+        "net.connect",
+        "udp:10.0.2.3:53",
+        Codigo::Allow,
+        "",
+    ));
+    ler(&mut m, &a);
+    assert!(m.pedidos().is_empty(), "depois da recusa, nada");
+    let inc = m.incidentes.todos().next().unwrap();
+    assert!(inc.contencao_negada);
+    assert!(
+        m.deteccoes().all(|d| d.principal != "service:nsf"),
+        "a recusa do pedido do NSF virou deteccao do NSF: {:?}",
+        m.deteccoes().collect::<Vec<_>>()
+    );
+}
+
+/// O NSF degradado continua observando e alertando, e não contém sozinho:
+/// com uma lacuna na leitura, a mesma saída depois da sondagem vira
+/// recomendação, dizendo por quê. Passada a janela da lacuna, ele volta a
+/// conter. O gate nunca soube de nada disso.
+#[test]
+fn degradado_so_recomenda() {
+    let mut a = Auditoria::nova();
+    let mut m = Motor::novo();
+    a.gravar(do_agente("agent.ping", "", Codigo::Allow, ""));
+    ler(&mut m, &a);
+    assert!(m.saude().saudavel(), "{:?}", m.saude());
+    // Três registros que saem do anel antes da leitura.
+    for _ in 0..3 {
+        a.gravar(do_agente("agent.ping", "", Codigo::Allow, ""));
+    }
+    sondar(&mut a);
+    a.gravar(do_agente("net.connect", ECO, Codigo::Allow, ""));
+    let depois = format!(r#"{{"records":[{}]}}"#, a.registros[4..].join(","));
+    m.ler_auditoria(depois.as_bytes()).unwrap();
+    let saude = m.saude();
+    assert_eq!(saude.nome(), "degraded");
+    assert_eq!(saude.codigo(), Some("NSF_DEGRADED"));
+    assert!(
+        m.pedidos().is_empty(),
+        "degradado, o NSF nao contem sozinho"
+    );
+    let mut s = String::new();
+    seguranca::relatorio::status(&m, &mut JsonWriter::new(&mut s)).unwrap();
+    assert!(
+        s.contains(r#""health":{"state":"degraded","code":"NSF_DEGRADED","reasons":["audit-gap"]"#),
+        "{s}"
+    );
+    let inc = m
+        .incidentes
+        .todos()
+        .find(|i| i.principal.starts_with("agent:"))
+        .expect("o incidente de quem sondou");
+    let rec = inc.acoes.iter().find(|x| x.metodo == "net.block").unwrap();
+    assert_eq!(rec.estado, EstadoDaAcao::Recomendada);
+    assert!(
+        rec.justificativa.contains("degradado"),
+        "{}",
+        rec.justificativa
+    );
+    // Passada a janela da lacuna, pelo tempo dos registros: saudável, e a
+    // saída para outro destino é contida.
+    a.ts += seguranca::motor::LACUNA_MS;
+    a.gravar(do_agente(
+        "net.connect",
+        "udp:10.0.2.2:69",
+        Codigo::Allow,
+        "",
+    ));
+    ler(&mut m, &a);
+    assert!(m.saude().saudavel(), "{:?}", m.saude());
+    let p = m.pedidos();
+    assert_eq!(p.len(), 1);
+    assert_eq!(p[0].metodo, "net.block");
+}
+
+/// O atraso também degrada: a evidência de um registro muito atrás da
+/// cabeça da auditoria é velha — pode já ter havido uma recuperação que o
+/// NSF não leu.
+#[test]
+fn o_atraso_degrada() {
+    let mut a = Auditoria::nova();
+    let mut m = Motor::novo();
+    m.cabeca_da_auditoria(10_000);
+    sondar(&mut a);
+    a.gravar(do_agente("net.connect", ECO, Codigo::Allow, ""));
+    ler(&mut m, &a);
+    let saude = m.saude();
+    assert!(
+        saude
+            .motivos
+            .contains(&seguranca::motor::Degradacao::Atraso),
+        "{saude:?}"
+    );
+    assert!(m.pedidos().is_empty());
+}
+
+/// Sem cascata: o efeito de uma contenção não é uma ameaça nova. O contido
+/// bate de novo no destino barrado — o gate deixa, o firewall barra —, e
+/// o gate recusa o que o processo isolado pede: nenhum incidente novo,
+/// nenhum pedido novo, nenhuma contenção repetida.
+#[test]
+fn sem_cascata() {
+    let mut a = Auditoria::nova();
+    let mut m = Motor::novo();
+    sondar(&mut a);
+    a.gravar(do_agente("net.connect", ECO, Codigo::Allow, ""));
+    ler(&mut m, &a);
+    let p = m.pedidos();
+    m.desfecho(p[0].acao, br#"{"result":{"rule":1}}"#);
+    let bloqueou = nsf_pediu(&mut a, "net.block", ECO, Codigo::Allow);
+    for _ in 0..20 {
+        let pedida = a.gravar(do_agente("net.connect", ECO, Codigo::Allow, ""));
+        a.gravar(do_agente(
+            "net.connect",
+            ECO,
+            Codigo::DenyPolicy,
+            &format!("bloqueado pelo firewall, regra 1; decisao {pedida}"),
+        ));
+    }
+    for metodo in ["fs.read", "message.send", "process.exec"] {
+        a.gravar(do_agente(metodo, "", Codigo::DenyContained, DO_PROCESSO));
+    }
+    ler(&mut m, &a);
+    assert!(m.pedidos().is_empty());
+    assert_eq!(
+        m.incidentes.todos().count(),
+        1,
+        "{:?}",
+        m.incidentes.todos().collect::<Vec<_>>()
+    );
+    let inc = m.incidentes.todos().next().unwrap();
+    assert_eq!(
+        inc.acoes
+            .iter()
+            .filter(|x| x.estado != EstadoDaAcao::Recomendada)
+            .count(),
+        1,
+        "{:?}",
+        inc.acoes
+    );
+    // Nada do que veio depois da contenção virou detecção.
+    assert!(
+        m.deteccoes()
+            .all(|d| d.registros.iter().all(|r| *r < bloqueou)),
+        "{:?}",
+        m.deteccoes().collect::<Vec<_>>()
+    );
+}
+
+/// Um agente legítimo muito ativo — centenas de pedidos permitidos, muitos
+/// recursos, muitos processos — não é uma ameaça: nenhum incidente, nenhum
+/// pedido. O que chamar a atenção do perfil é observação, de confiança
+/// baixa.
+#[test]
+fn o_agente_ativo_nao_e_ameaca() {
+    let mut a = Auditoria::nova();
+    let mut m = Motor::novo();
+    for i in 0..400 {
+        let recurso = format!("/projetos/compilacao/{i}.rs");
+        a.gravar(do_agente("fs.read", &recurso, Codigo::Allow, ""));
+        if i % 4 == 0 {
+            a.gravar(do_agente(
+                "user.run",
+                "/programas/compilador",
+                Codigo::Allow,
+                &format!("processo {} lancado; decisao {}", 100 + i, a.seq),
+            ));
+        }
+        if i % 50 == 0 {
+            a.gravar(do_agente("net.connect", ECO, Codigo::Allow, ""));
+        }
+        if i == 200 {
+            a.ts += 1;
+        }
+    }
+    ler(&mut m, &a);
+    assert_eq!(
+        m.incidentes.todos().count(),
+        0,
+        "{:?}",
+        m.incidentes.todos().collect::<Vec<_>>()
+    );
+    assert!(m.pedidos().is_empty());
+    // A rajada de processos chamou a atenção — e ficou no nível 0.
+    assert!(
+        m.observacoes()
+            .any(|d| d.regra == Regra::CadeiaDeProcessos && d.confianca == Confianca::Baixa)
+    );
+    assert!(m.observacoes().all(|d| d.confianca == Confianca::Baixa));
+}
+
+/// A pessoa incomum: primeiro uso de um programa, um destino nunca visto,
+/// uma cópia grande, pedidos rápidos — tudo permitido. Incomum sem ser
+/// malicioso: o perfil marca, e fica na observação.
+#[test]
+fn a_pessoa_incomum_nao_e_ameaca() {
+    let mut a = Auditoria::nova();
+    let mut m = Motor::novo();
+    let pessoa = |metodo: &'static str, recurso: String| R {
+        titular: Titular::Pessoa,
+        agente: "pessoa:00112233aabbccdd",
+        chave: None,
+        papel: "operador",
+        metodo,
+        recurso: Box::leak(recurso.into_boxed_str()),
+        codigo: Codigo::Allow,
+        detalhe: "",
+    };
+    // A rotina, devagar: a linha de base, com a taxa.
+    for i in 0..40 {
+        a.gravar(pessoa("fs.read", format!("/home/ana/{i}")));
+        a.ts += 1_000;
+    }
+    // O dia diferente, depressa.
+    a.gravar(pessoa("user.run", "/programas/instalador".to_string()));
+    a.gravar(pessoa("net.connect", "tcp:10.0.2.77:443".to_string()));
+    for i in 0..200 {
+        a.gravar(pessoa("fs.write", format!("/home/ana/copia/{i}")));
+    }
+    ler(&mut m, &a);
+    assert_eq!(m.incidentes.todos().count(), 0);
+    assert!(m.pedidos().is_empty());
+    assert!(
+        m.observacoes()
+            .any(|d| d.regra == Regra::ComportamentoAnomalo && d.confianca == Confianca::Baixa),
+        "{:?}",
+        m.observacoes().collect::<Vec<_>>()
+    );
+    assert!(m.observacoes().all(|d| d.confianca == Confianca::Baixa));
+}
+
+/// Cem conexões e um nome que ninguém resolveu antes: um agente que fala
+/// muito com o destino que o papel dá, depois de resolvê-lo por um nome
+/// novo. Volume não é ameaça, e um domínio novo que leva a um destino
+/// permitido não é nada: nenhum incidente, nenhum pedido.
+#[test]
+fn cem_conexoes_e_um_nome_novo_nao_sao_ameaca() {
+    let mut a = Auditoria::nova();
+    let mut m = Motor::novo();
+    let dono = "process:11";
+    let abriu = a.gravar(do_agente(
+        "net.connect",
+        "udp:10.0.2.53:53",
+        Codigo::Allow,
+        "pelo processo 11 (resolvedor 00000000)",
+    ));
+    ler(&mut m, &a);
+    let resolucao = conversa(dono, "novo-dominio.duke", [10, 0, 2, 100], 1, abriu);
+    assert_eq!(
+        m.ler_captura("udp:10.0.2.53:53", resolucao.as_bytes()),
+        Ok(2)
+    );
+    for _ in 0..100 {
+        a.gravar(do_agente(
+            "net.connect",
+            ECO,
+            Codigo::Allow,
+            "pelo processo 11 (resolvedor 00000000)",
+        ));
+    }
+    ler(&mut m, &a);
+    assert_eq!(
+        m.incidentes.todos().count(),
+        0,
+        "{:?}",
+        m.incidentes.todos().collect::<Vec<_>>()
+    );
+    assert!(m.pedidos().is_empty());
+    assert!(m.observacoes().all(|d| d.confianca == Confianca::Baixa));
+}
+
+/// A contenção é idempotente: a mesma — o mesmo comando, os mesmos
+/// parâmetros —, já pedida ou valendo, não sai de novo.
+#[test]
+fn a_contencao_nao_sai_duas_vezes() {
+    let mut a = Auditoria::nova();
+    let mut m = Motor::novo();
+    sondar(&mut a);
+    a.gravar(do_agente("net.connect", ECO, Codigo::Allow, DO_PROCESSO));
+    ler(&mut m, &a);
+    let p = m.pedidos();
+    m.desfecho(p[0].acao, br#"{"result":{"rule":1}}"#);
+    nsf_pediu(&mut a, "net.block", ECO, Codigo::Allow);
+    // Dois destinos novos do mesmo processo na mesma volta: o processo é
+    // isolado uma vez.
+    a.gravar(do_agente(
+        "net.connect",
+        "udp:10.0.2.2:69",
+        Codigo::Allow,
+        DO_PROCESSO,
+    ));
+    a.gravar(do_agente(
+        "net.connect",
+        "udp:10.0.2.3:53",
+        Codigo::Allow,
+        DO_PROCESSO,
+    ));
+    ler(&mut m, &a);
+    let p = m.pedidos();
+    assert_eq!(
+        p.iter().map(|x| x.metodo.as_str()).collect::<Vec<_>>(),
+        ["process.isolate"]
+    );
+    assert_eq!(m.contadores.repetidas, 1);
+}
+
+/// A recusa do pedido do NSF não é comportamento do NSF. Três agentes
+/// sondam e saem, cada um para um destino que o papel do NSF não alcança:
+/// os três `net.block` são `DENY_RESOURCE` — três pedidos distintos fora
+/// do alcance, que de qualquer outro seriam o primeiro degrau. Do NSF, são
+/// a política dizendo não a ele: cada objetivo acaba, e nenhuma detecção
+/// é do NSF.
+#[test]
+fn a_recusa_do_nsf_nao_e_comportamento_dele() {
+    let mut a = Auditoria::nova();
+    let mut m = Motor::novo();
+    for k in 1..=3u8 {
+        let chave = [k; 32];
+        let destino = format!("tcp:10.0.2.{}:7", 10 + k);
+        for metodo in ["fs.read", "policy.show", "disk.read"] {
+            a.gravar(R {
+                chave: Some(chave),
+                ..do_agente(metodo, "", Codigo::DenyPermission, "")
+            });
+        }
+        a.gravar(R {
+            chave: Some(chave),
+            ..do_agente("net.connect", &destino, Codigo::Allow, "")
+        });
+        ler(&mut m, &a);
+        let p = m.pedidos();
+        assert_eq!(p.len(), 1);
+        m.desfecho(
+            p[0].acao,
+            br#"{"error":{"code":-32010,"message":"negado","data":"DENY_RESOURCE"}}"#,
+        );
+        nsf_pediu(&mut a, "net.block", &destino, Codigo::DenyResource);
+    }
+    ler(&mut m, &a);
+    assert_eq!(
+        m.incidentes.todos().filter(|i| i.contencao_negada).count(),
+        3
+    );
+    assert!(
+        m.deteccoes().all(|d| d.principal != "service:nsf"),
+        "{:?}",
+        m.deteccoes().collect::<Vec<_>>()
+    );
 }

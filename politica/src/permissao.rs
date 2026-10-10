@@ -115,11 +115,26 @@ pub enum Permissao {
     /// nenhuma regra do firewall deixa passar o que o gate não decidiu. O
     /// recurso é o destino, e o alcance de cada papel é enumerado.
     NetBlock,
+    /// Isolar um processo — todo pedido dele ao gate passa a ser
+    /// `DENY_CONTAINED`, e as conexões dele caem —, e soltá-lo. Uma
+    /// contenção reversível, que só restringe. O recurso é o papel de quem
+    /// responde pelo processo, `papel:<nome>`, enumerado como o do
+    /// `message.send`. Ver `docs/USABILIDADE.md`.
+    ProcessIsolate,
+    /// Suspender um agente — os pedidos dele e dos processos dele passam a
+    /// ser `DENY_CONTAINED`, as conexões caem e os arrendamentos são
+    /// soltos —, e retomá-lo. Reversível; não é revogação. O recurso é o
+    /// papel do agente.
+    AgentSuspend,
+    /// Suspender uma credencial — de pessoa ou de agente: ela não
+    /// autentica, e as sessões abertas com ela não agem —, e retomá-la.
+    /// Reversível; não é revogação. O recurso é o papel do titular.
+    CredentialSuspend,
 }
 
 /// Todas, na ordem do relatório. As novas entram no fim: a posição é o bit
 /// do manifesto — ver [`crate::manifesto::Permissoes`].
-pub const TODAS: [Permissao; 34] = [
+pub const TODAS: [Permissao; 37] = [
     Permissao::AgentRead,
     Permissao::SystemRead,
     Permissao::LogRead,
@@ -154,6 +169,9 @@ pub const TODAS: [Permissao; 34] = [
     Permissao::SecurityRead,
     Permissao::NetObserve,
     Permissao::NetBlock,
+    Permissao::ProcessIsolate,
+    Permissao::AgentSuspend,
+    Permissao::CredentialSuspend,
 ];
 
 impl Permissao {
@@ -194,6 +212,9 @@ impl Permissao {
             Permissao::SecurityRead => "security.read",
             Permissao::NetObserve => "net.observe",
             Permissao::NetBlock => "net.block",
+            Permissao::ProcessIsolate => "process.isolate",
+            Permissao::AgentSuspend => "agent.suspend",
+            Permissao::CredentialSuspend => "credential.suspend",
         }
     }
 
@@ -232,6 +253,9 @@ impl Permissao {
                 | Permissao::SecurityRead
                 | Permissao::NetObserve
                 | Permissao::NetBlock
+                | Permissao::ProcessIsolate
+                | Permissao::AgentSuspend
+                | Permissao::CredentialSuspend
         )
     }
 
@@ -264,10 +288,33 @@ impl Permissao {
     }
 
     /// O recurso desta permissão é o papel de um destinatário — `papel:<nome>`
-    /// —, e um papel o limita a uma lista enumerada de papéis. Sem curinga:
-    /// um papel que não está na lista não é alcançado.
+    /// —, resolvido do endereço de uma mensagem. Ver [`Self::recurso_e_papel`].
     pub const fn recurso_e_destino(self) -> bool {
         matches!(self, Permissao::MessageSend)
+    }
+
+    /// O recurso desta permissão é um papel — `papel:<nome>` —, e um papel o
+    /// limita a uma lista enumerada de papéis. Sem curinga: um papel que não
+    /// está na lista não é alcançado. O do destinatário de uma mensagem, e o
+    /// de quem uma contenção alcança — o dono do processo, o agente, o
+    /// titular da credencial.
+    pub const fn recurso_e_papel(self) -> bool {
+        matches!(
+            self,
+            Permissao::MessageSend
+                | Permissao::ProcessIsolate
+                | Permissao::AgentSuspend
+                | Permissao::CredentialSuspend
+        )
+    }
+
+    /// Uma contenção reversível: só restringe, e tem o seu inverso na mesma
+    /// permissão.
+    pub const fn contencao(self) -> bool {
+        matches!(
+            self,
+            Permissao::ProcessIsolate | Permissao::AgentSuspend | Permissao::CredentialSuspend
+        )
     }
 
     /// O recurso desta permissão é um destino de rede —
@@ -335,7 +382,10 @@ impl Permissao {
             | Permissao::MessagePurge
             | Permissao::MessagePurgeMailbox
             | Permissao::AdminRevoke
-            | Permissao::NetBlock => true,
+            | Permissao::NetBlock
+            | Permissao::ProcessIsolate
+            | Permissao::AgentSuspend
+            | Permissao::CredentialSuspend => true,
         }
     }
 
@@ -343,7 +393,7 @@ impl Permissao {
     /// caminho, de destinatário ou de destino de rede. A linha é obrigatória
     /// para quem a tem.
     pub const fn tem_alcance(self) -> bool {
-        self.recurso_e_caminho() || self.recurso_e_destino() || self.recurso_e_endereco()
+        self.recurso_e_caminho() || self.recurso_e_papel() || self.recurso_e_endereco()
     }
 }
 
@@ -441,6 +491,33 @@ mod testes {
         assert!(manda.recurso_e_destino() && !manda.recurso_e_caminho());
         assert!(!le.recurso_e_destino() && !purga.recurso_e_destino());
         assert!(TODAS.iter().filter(|p| p.recurso_e_destino()).count() == 1);
+    }
+
+    /// As três contenções reversíveis: sensíveis, nenhuma administrativa — o
+    /// tecido as exerce pelo gate, sem prova, quando o papel dele as tem —,
+    /// todas mudam o estado, e o recurso de cada uma é o papel do alvo.
+    #[test]
+    fn as_contencoes() {
+        let nomes: alloc::vec::Vec<_> = TODAS
+            .iter()
+            .filter(|p| p.contencao())
+            .map(|p| p.nome())
+            .collect();
+        assert_eq!(
+            nomes,
+            ["process.isolate", "agent.suspend", "credential.suspend"]
+        );
+        for p in TODAS.into_iter().filter(|p| p.contencao()) {
+            assert!(
+                p.sensivel() && !p.administrativa() && p.muda_estado(),
+                "{}",
+                p.nome()
+            );
+            assert!(p.recurso_e_papel() && p.tem_alcance() && !p.recurso_e_destino());
+            assert!(!p.recurso_e_caminho() && !p.recurso_e_endereco());
+        }
+        // O papel como recurso: o destinatário de uma mensagem, e as três.
+        assert_eq!(TODAS.iter().filter(|p| p.recurso_e_papel()).count(), 4);
     }
 
     /// Conectar é sensível — não vem por inclusão: cada papel que disca

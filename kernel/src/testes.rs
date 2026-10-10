@@ -5851,10 +5851,13 @@ fn terminal_operado() -> Resultado {
         })
         .unwrap_or(false)
     };
+    // A recusa diz o que fazer, numa frase, e o código e o registro logo
+    // abaixo, para quem investiga.
     esperar_ate(
         || {
             atender();
-            na_grade("negado: DENY_NOT_AUTHENTICATED")
+            na_grade("negado: Ninguem identificado pediu agent.ping")
+                && na_grade("(DENY_NOT_AUTHENTICATED; registro ")
         },
         600,
     )
@@ -11722,6 +11725,29 @@ fn recusado_com(resposta: &str, codigo: &str) -> bool {
         && resposta.contains(&alloc::format!(r#""data":"{codigo}""#))
 }
 
+/// Uma resposta sem o número do registro da decisão — único por pedido,
+/// como o `id` do envelope —, para comparar duas recusas pelo que elas
+/// dizem. Um `null` fica: uma recusa gravada e uma não gravada não são a
+/// mesma resposta.
+fn sem_registro(resposta: &str) -> alloc::string::String {
+    const CHAVE: &str = r#""decision":"#;
+    let mut fora = alloc::string::String::new();
+    let mut resto = resposta;
+    while let Some(i) = resto.find(CHAVE) {
+        let depois = &resto[i + CHAVE.len()..];
+        let fim = depois
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(depois.len());
+        fora.push_str(&resto[..i + CHAVE.len()]);
+        if fim > 0 {
+            fora.push('N');
+        }
+        resto = &depois[fim..];
+    }
+    fora.push_str(resto);
+    fora
+}
+
 /// O último registro da auditoria.
 fn ultimo_registro() -> Option<politica::auditoria::Registro> {
     crate::autorizacao::com_auditoria(|c| c.ultimos(1).next().cloned()).flatten()
@@ -12267,7 +12293,7 @@ fn pessoas_o_registro_da_imagem() -> Resultado {
         comando,
         Json(params.as_bytes()),
     );
-    if !matches!(decisao, Err(politica::Codigo::DenyResource)) {
+    if !matches!(&decisao, Err(r) if r.codigo == politica::Codigo::DenyResource) {
         return Err("o registro de pessoas passou pela decisao");
     }
     let r = chamar("fs.read", params)?;
@@ -14566,9 +14592,12 @@ fn mensagens_destinatario_inexistente() -> Resultado {
                 crate::log_error!("teste", "{}: {}", alvo, r);
                 return Err("o destinatario inexistente ou revogado nao foi recusado como tal");
             }
-            respostas.push(r);
+            // O que quem pediu escreveu, e o número do registro, são dele;
+            // o resto da resposta é o mesmo para os três.
+            respostas.push(sem_registro(&r.replace(alvo, "")));
         }
         if respostas.windows(2).any(|w| w[0] != w[1]) {
+            crate::log_error!("teste", "{:?}", respostas);
             return Err("a resposta distingue inexistente de revogado");
         }
         let depois = ids_de(&mandar(&mut a, &mut sa, "teste-2", "dois", 20)?);
@@ -14924,7 +14953,8 @@ fn mensagens_sem_vazamento() -> Resultado {
                 &alloc::format!(r#"{{"id":"{inexistente}"}}"#),
             )?;
             if !recusa_de_mensagem(&alheio, "DENY_RESOURCE")
-                || alheio.replace(&id[0], "") != nenhum.replace(&inexistente, "")
+                || sem_registro(&alheio.replace(&id[0], ""))
+                    != sem_registro(&nenhum.replace(&inexistente, ""))
             {
                 crate::log_error!("teste", "{}: {} / {}", metodo, alheio, nenhum);
                 return Err("o id alheio responde diferente do inexistente");
@@ -19894,7 +19924,11 @@ fn politica_emergencia_mantem_o_sistema() -> Resultado {
             "operador",
         );
         let ping = registry::encontrar("agent.ping").ok_or("sem agent.ping")?;
-        if autorizar(Chamador::Pessoa(pessoa), ping, Json(b"{}")).err() != Some(Codigo::DenyRole) {
+        if autorizar(Chamador::Pessoa(pessoa), ping, Json(b"{}"))
+            .err()
+            .map(|r| r.codigo)
+            != Some(Codigo::DenyRole)
+        {
             return Err("com a politica de emergencia uma pessoa operador foi atendida");
         }
         // Este fio é do sistema: a decisão de um processo do sistema.
@@ -19945,7 +19979,10 @@ fn politica_o_sistema_decide_pela_politica() -> Resultado {
     let disco = registry::encontrar("disk.read").ok_or("sem disk.read")?;
     let params = Json(br#"{"sector":0}"#);
     let a_pessoa_decide_pelo_papel_dela = || {
-        autorizar(Chamador::Pessoa(pessoa), disco, params).err() == Some(Codigo::DenyPermission)
+        autorizar(Chamador::Pessoa(pessoa), disco, params)
+            .err()
+            .map(|r| r.codigo)
+            == Some(Codigo::DenyPermission)
             && ultimo_registro().is_some_and(|r| {
                 r.evento.titular == Titular::Pessoa
                     && r.evento.agente == id
@@ -25581,6 +25618,13 @@ fn armazem_os_conceitos_separados() -> Resultado {
                 crate::log_error!("teste", "{}", r);
                 return Err("a versao velha nao foi conflito de versao com a de agora");
             }
+            // Conflito não é recusa: leia de novo e repita.
+            if !explicada_como(
+                &r,
+                ["CONFLICT", "CONFLICT", "retryable", "REFRESH_AND_RETRY"],
+            ) {
+                return Err("o conflito de versao nao se explicou como conflito");
+            }
         }
         // Arrendamento: a bia toma; a ana, com a versão certa, ouve o
         // conflito de arrendamento — e nada anda.
@@ -25596,6 +25640,12 @@ fn armazem_os_conceitos_separados() -> Resultado {
         {
             crate::log_error!("teste", "{}", r);
             return Err("o arrendamento de outro titular nao recusou");
+        }
+        if !explicada_como(
+            &r,
+            ["CONFLICT", "LEASE_BUSY", "retryable", "WAIT_AND_RETRY"],
+        ) {
+            return Err("o arrendamento ocupado nao se explicou como espera");
         }
         if fs_no_armazem(C) != (v1, Some(b"um".to_vec())) {
             return Err("o conflito de arrendamento mudou o arquivo");
@@ -25836,6 +25886,13 @@ fn armazem_a_gravacao_que_falha_nao_vale() -> Resultado {
     if fs_ok(&r) || fs_texto(&r, "code").as_deref() != Some("ERROR") {
         crate::log_error!("teste", "{}", r);
         return Err("a gravacao que falhou foi confirmada");
+    }
+    // Um erro técnico não é recusa: não se diz "você não pode", e repetir
+    // adianta.
+    if !explicada_como(&r, ["ERROR", "TECHNICAL_ERROR", "retryable", "RETRY"])
+        || do_explain(&r, "message").is_some_and(|f| f.contains("nao permite"))
+    {
+        return Err("o erro tecnico se explicou como recusa");
     }
     if fs_no_armazem(C) != (v, Some(b"antes".to_vec())) {
         return Err("a mudanca que nao foi gravada valeu em memoria");
@@ -30280,6 +30337,42 @@ static CASOS: &[Caso] = &[
         f: dns_a_resposta_nao_da_acesso,
     },
     Caso {
+        nome: "recusa: diz por que e o que fazer",
+        f: recusa_diz_por_que_e_o_que_fazer,
+    },
+    Caso {
+        nome: "recusa: a taxa diz quando repetir",
+        f: recusa_a_taxa_diz_quando_repetir,
+    },
+    Caso {
+        nome: "contencao: o processo isolado e solto",
+        f: contencao_o_processo_isolado_e_solto,
+    },
+    Caso {
+        nome: "contencao: o agente suspenso e retomado pela prova",
+        f: contencao_o_agente_suspenso_e_retomado_pela_prova,
+    },
+    Caso {
+        nome: "contencao: a credencial suspensa nao entra",
+        f: contencao_a_credencial_suspensa_nao_entra,
+    },
+    Caso {
+        nome: "usabilidade: o dia de trabalho com a seguranca ligada",
+        f: usabilidade_o_dia_de_trabalho_com_a_seguranca_ligada,
+    },
+    Caso {
+        nome: "nsf: o incomum e observado, e nao contido",
+        f: nsf_o_incomum_e_observado_e_nao_contido,
+    },
+    Caso {
+        nome: "nsf: a sobrecarga degrada sem bloquear",
+        f: nsf_a_sobrecarga_degrada_sem_bloquear,
+    },
+    Caso {
+        nome: "seguranca: as metricas",
+        f: seguranca_as_metricas,
+    },
+    Caso {
         nome: "irq: o virtio interrompe de verdade",
         f: irq_o_virtio_interrompe_de_verdade,
     },
@@ -33608,7 +33701,10 @@ fn nsf_conter(
 
     // A seguinte: o gate decide — e deixa —, e o firewall barra depois.
     let r = pedir("net.connect", &alloc::format!(r#"{{"to":"{ECO}"}}"#))?;
+    // O firewall não é uma segunda política: a resposta diz que foi ele, e
+    // não o gate — `FIREWALL_BLOCKED`, com a regra.
     if fs_texto(&r, "error").as_deref() != Some(crate::rede::pilha::BARRADO)
+        || fs_texto(&r, "code").as_deref() != Some("FIREWALL_BLOCKED")
         || fs_numero(&r, "rule") != Some(regra)
     {
         crate::log_error!("teste", "{}", r);
@@ -33667,7 +33763,7 @@ fn nsf_conter(
     .ok_or("o incidente de quem sondou nao tem a contencao")?;
     if acao.decisao != Some(decisao)
         || acao.estado != Estado::Permitida
-        || acao.nivel != Nivel::Contencao
+        || acao.nivel != Nivel::Reversivel
         || acao.autorizado_por != "service:nsf"
         || sem_plano
     {
@@ -34320,12 +34416,12 @@ fn dns_o_resolvedor_pela_bancada() -> Resultado {
                 crate::log_error!("teste", "{}", r);
                 return Err("a explicacao da conexao permitida nao diz o nome");
             }
+            // Um nome só que leva a um destino recusado é de olhar — o
+            // alcance estreito de todo dia —: uma observação, o nível 0.
             let ligou = crate::seguranca::com_motor_de_teste(|m| {
-                m.incidentes.todos().any(|i| {
-                    i.deteccoes.iter().any(|d| {
-                        d.regra == seguranca::regras::Regra::DnsContraAPolitica
-                            && d.registros.contains(&recusada)
-                    })
+                m.deteccoes().any(|d| {
+                    d.regra == seguranca::regras::Regra::DnsContraAPolitica
+                        && d.registros.contains(&recusada)
                 })
             });
             if ligou != Some(true) {
@@ -34473,11 +34569,9 @@ fn dns_a_resposta_nao_da_acesso() -> Resultado {
                 let _ = crate::seguranca::passo();
                 let _ = crate::seguranca::passo();
                 let (religou, malformadas) = crate::seguranca::com_motor_de_teste(|m| {
-                    let religou = m.incidentes.todos().any(|i| {
-                        i.deteccoes.iter().any(|d| {
-                            d.regra == seguranca::regras::Regra::DnsContraAPolitica
-                                && d.explicacao.contains("permitido.duke")
-                        })
+                    let religou = m.deteccoes().any(|d| {
+                        d.regra == seguranca::regras::Regra::DnsContraAPolitica
+                            && d.explicacao.contains("permitido.duke")
                     });
                     (religou, m.dns.malformados)
                 })
@@ -34662,6 +34756,1005 @@ fn nsf_ve_a_lacuna_da_auditoria() -> Resultado {
 }
 
 // ---------------------------------------------------------------------------
+// Segurança sem fricção — docs/USABILIDADE.md
+// ---------------------------------------------------------------------------
+
+/// O `explain` de uma resposta: o do erro do gate, ou o do resultado de uma
+/// falha depois dele.
+fn explain_de(envelope: &str) -> Option<Json<'_>> {
+    let j = Json(envelope.as_bytes());
+    j.member("error")
+        .or_else(|| j.member("result"))?
+        .member("explain")
+}
+
+/// Um texto do `explain` de uma resposta.
+fn do_explain(envelope: &str, campo: &str) -> Option<alloc::string::String> {
+    explain_de(envelope)?
+        .member(campo)?
+        .as_str()
+        .map(alloc::string::String::from)
+}
+
+/// A resposta se explica como `[resultado, razão, repetir, próxima ação]`.
+fn explicada_como(envelope: &str, esperada: [&str; 4]) -> bool {
+    let campos = ["outcome", "reason", "retry", "next_action"];
+    let ok = campos
+        .iter()
+        .zip(esperada)
+        .all(|(c, e)| do_explain(envelope, c).as_deref() == Some(e));
+    if !ok {
+        crate::log_error!("teste", "esperada {:?}: {}", esperada, envelope);
+    }
+    ok
+}
+
+/// A linha `procurada` que um programa escreveu desde `desde`, quantas
+/// vezes.
+fn linhas_do_programa(desde: u64, procurada: &str) -> usize {
+    let mut n = 0;
+    crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+        n += (r.seq >= desde && r.subsistema == "usuario" && r.mensagem() == procurada) as usize;
+    });
+    n
+}
+
+/// Toda recusa diz por quê e o que fazer — estruturada para o agente, numa
+/// frase para a pessoa — sem ser uma segunda decisão: o número do `explain`
+/// é o registro da auditoria que a gravou, e o `security.explain` dele a
+/// interpreta.
+///
+/// - sem a permissão: `DENY_POLICY`, `requires_authorization`, pedir
+///   autorização — com o papel e a permissão de quem pediu;
+/// - com a permissão, fora do alcance: `DENY_SCOPE`, `requires_scope`,
+///   pedir alcance — com o recurso que ele pediu;
+/// - a mesma recusa repetida explica-se igual: só o número muda.
+fn recusa_diz_por_que_e_o_que_fazer() -> Resultado {
+    com_agentes_de_teste(|| {
+        let (mut agente, mut sessao) = conectado(1)?;
+        crate::identidade::atribuir(&nome_de_teste(1), "observador")
+            .map_err(|_| "a atribuicao falhou")?;
+        com_o_nsf(|| {
+            let r = pela_porta(&mut agente, &mut sessao, "fs.list", r#"{"path":"/bin"}"#)?;
+            if !recusado_com(&r, "DENY_PERMISSION")
+                || !explicada_como(
+                    &r,
+                    [
+                        "DENY",
+                        "DENY_POLICY",
+                        "requires_authorization",
+                        "REQUEST_AUTHORIZATION",
+                    ],
+                )
+            {
+                return Err("a recusa sem permissao nao se explicou como politica");
+            }
+            let e = explain_de(&r).ok_or("sem explain")?;
+            let texto = |n| e.member(n).and_then(|v| v.as_str()).unwrap_or("");
+            if texto("permission") != "fs.read"
+                || texto("role") != "observador"
+                || texto("code") != "DENY_PERMISSION"
+                || e.member("recoverable").and_then(|v| v.as_bool()) != Some(true)
+            {
+                crate::log_error!("teste", "{}", r);
+                return Err("o explain nao diz a permissao, o papel e o codigo");
+            }
+            let frase = texto("message");
+            if !frase.contains("observador") || !frase.contains("fs.read") {
+                crate::log_error!("teste", "{}", frase);
+                return Err("a frase nao diz o papel e o pedido");
+            }
+            // O número é o registro da recusa, e o NSF o interpreta — sem
+            // decidir nada.
+            let decisao = e
+                .member("decision")
+                .and_then(|v| v.as_u64())
+                .ok_or("o explain nao diz a decisao")?;
+            let gravado =
+                registro_numero(decisao).ok_or("a decisao do explain nao esta na auditoria")?;
+            if gravado.metodo != "fs.list" || gravado.codigo != politica::Codigo::DenyPermission {
+                crate::log_error!("teste", "{:?}", gravado);
+                return Err("o numero do explain nao e o registro da recusa");
+            }
+            let _ = crate::seguranca::passo();
+            let r = fs_pedir(
+                sistema_aqui(),
+                "security.explain",
+                &alloc::format!(r#"{{"seq":{decisao}}}"#),
+            );
+            let interpretado = Json(r.as_bytes()).member("result");
+            let metodo = interpretado
+                .and_then(|i| i.member("event"))
+                .and_then(|ev| ev.member("method"))
+                .and_then(|m| m.as_str());
+            if metodo != Some("fs.list")
+                || interpretado
+                    .and_then(|i| i.member("meaning"))
+                    .and_then(|m| m.as_str())
+                    .is_none()
+            {
+                crate::log_error!("teste", "{}", r);
+                return Err("o security.explain nao interpretou a recusa pelo numero");
+            }
+            Ok(())
+        })?;
+        // Fora do alcance: o recurso que ele pediu, e o caminho de quem
+        // pode incluí-lo.
+        crate::identidade::atribuir(&nome_de_teste(1), "operador")
+            .map_err(|_| "a atribuicao falhou")?;
+        let fora = "tcp:10.0.2.100:8";
+        let mut anteriores = alloc::vec::Vec::new();
+        for _ in 0..2 {
+            let r = pela_porta(
+                &mut agente,
+                &mut sessao,
+                "net.connect",
+                &alloc::format!(r#"{{"to":"{fora}"}}"#),
+            )?;
+            if !recusado_com(&r, "DENY_RESOURCE")
+                || !explicada_como(
+                    &r,
+                    ["DENY", "DENY_SCOPE", "requires_scope", "REQUEST_SCOPE"],
+                )
+                || do_explain(&r, "resource").as_deref() != Some(fora)
+            {
+                return Err("a recusa fora do alcance nao se explicou como alcance");
+            }
+            anteriores.push(sem_registro(&r));
+        }
+        if anteriores[0] != anteriores[1] {
+            crate::log_error!("teste", "{:?}", anteriores);
+            return Err("a mesma recusa, repetida, se explicou diferente");
+        }
+        Ok(())
+    })
+}
+
+/// Um agente que insiste numa recusa não vira consumo sem fim: cada
+/// pedido, permitido ou recusado, gasta a taxa do papel; passada a rajada,
+/// `RATE_LIMIT` diz quanto esperar — e esperado isso, o pedido passa. A
+/// enxurrada grava o primeiro, e os seguintes não têm registro: o
+/// `decision` deles é nulo.
+fn recusa_a_taxa_diz_quando_repetir() -> Resultado {
+    let texto = politica::PADRAO.replace("taxa observador 20 40", "taxa observador 4 3");
+    let apertada = politica::Politica::ler(&texto).map_err(|_| "a politica do caso nao vale")?;
+    let resultado = com_agentes_de_teste(|| {
+        let (mut agente, mut sessao) = conectado(1)?;
+        crate::identidade::atribuir(&nome_de_teste(1), "observador")
+            .map_err(|_| "a atribuicao falhou")?;
+        crate::autorizacao::trocar_politica(apertada);
+        // A rajada, gasta com recusas: a insistência paga como o resto.
+        for _ in 0..3 {
+            let r = pela_porta(&mut agente, &mut sessao, "fs.list", r#"{"path":"/bin"}"#)?;
+            if !recusado_com(&r, "DENY_PERMISSION") {
+                crate::log_error!("teste", "{}", r);
+                return Err("a recusa da politica nao veio antes da taxa");
+            }
+        }
+        let r = pela_porta(&mut agente, &mut sessao, "system.info", "{}")?;
+        if !recusado_com(&r, "RATE_LIMIT")
+            || !explicada_como(&r, ["DENY", "RATE_LIMIT", "retryable", "WAIT_AND_RETRY"])
+        {
+            return Err("passada a rajada de recusas, o pedido nao foi limitado");
+        }
+        let espera = explain_de(&r)
+            .and_then(|e| e.member("retry_after_ms"))
+            .and_then(|v| v.as_u64())
+            .ok_or("o RATE_LIMIT nao diz quanto esperar")?;
+        // Quatro por segundo: uma ficha a cada 250 ms.
+        if espera == 0 || espera > 250 {
+            crate::log_error!("teste", "{}", r);
+            return Err("a espera do RATE_LIMIT nao e a do balde");
+        }
+        let r = pela_porta(&mut agente, &mut sessao, "system.info", "{}")?;
+        let decisao = explain_de(&r).and_then(|e| e.member("decision"));
+        if !recusado_com(&r, "RATE_LIMIT") || decisao.and_then(|d| d.raw_str()) != Some("null") {
+            crate::log_error!("teste", "{}", r);
+            return Err("a segunda recusa da enxurrada virou registro");
+        }
+        // Esperado o que ela disse — e um pouco, pela volta do relógio —,
+        // passa.
+        let ate = crate::tempo::uptime_ms() + 260;
+        let _ = esperar_ate(|| crate::tempo::uptime_ms() >= ate, 200);
+        let r = pela_porta(&mut agente, &mut sessao, "system.info", "{}")?;
+        if !r.contains(r#""result":"#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("esperado o retry_after_ms, o pedido nao passou");
+        }
+        Ok(())
+    });
+    crate::autorizacao::carregar();
+    resultado
+}
+
+/// O processo isolado: um programa de verdade pede pelo gate e ouve
+/// `DENY_CONTAINED` — e nem bifurcar consegue —, e solto pede de novo como
+/// antes. Isolar duas vezes não isola "mais": a segunda diz
+/// `already_isolated` e não muda nada; soltar duas vezes, `not_isolated`.
+/// A lista das contenções diz quem está contido.
+fn contencao_o_processo_isolado_e_solto() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use protocolo::usuario::evento::{Evento, tipo};
+    crate::pessoas::esquecer_registradas();
+    let sessao = crate::pessoas::sessao_de_teste(
+        crate::pessoas::Console::Terminal(54),
+        "isola-pessoa",
+        "operador",
+    );
+    let dir = crate::usuario::DIRETORIO_DOS_COMPILADOS;
+    let desde = crate::log::total_emitidos();
+    let esperar_linha = |linha: &str, n: usize| -> Resultado {
+        esperar_ate(|| linhas_do_programa(desde, linha) >= n, 600).map_err(|_| {
+            crate::log_error!("teste", "nao veio `{}` ({} vez(es))", linha, n);
+            "o isolavel nao disse o que devia"
+        })
+    };
+    let passo = || {
+        crate::eventos::publicar(
+            "teste-isolavel",
+            Evento {
+                tipo: tipo::ACAO,
+                ..Default::default()
+            },
+        )
+        .map_err(|_| "o canal do isolavel nao recebeu o passo")
+    };
+    let r = fs_pedir(
+        Chamador::Pessoa(sessao),
+        "user.run",
+        &alloc::format!(r#"{{"path":"{dir}/isolavel"}}"#),
+    );
+    let fio = fs_numero(&r, "thread_id").ok_or("o user.run nao lancou o isolavel")?;
+    let resultado = (|| -> Resultado {
+        esperar_linha("isolavel: pronto", 1)?;
+        passo()?;
+        esperar_linha("isolavel: ALLOW", 1)?;
+        let sistema = sistema_aqui();
+        let pedir = |metodo: &str| {
+            let r = fs_pedir(sistema, metodo, &alloc::format!(r#"{{"process":{fio}}}"#));
+            (
+                fs_texto(&r, "state").unwrap_or_default(),
+                Json(r.as_bytes())
+                    .member("result")
+                    .and_then(|v| v.member("changed"))
+                    .and_then(|v| v.as_bool()),
+            )
+        };
+        if pedir("process.isolate") != ("isolated".into(), Some(true)) {
+            return Err("o sistema nao isolou o processo do operador");
+        }
+        if pedir("process.isolate") != ("already_isolated".into(), Some(false)) {
+            return Err("isolar de novo nao foi reconhecido como ja isolado");
+        }
+        let lista = fs_pedir(sistema, "containment.list", "{}");
+        if !lista.contains(&alloc::format!(r#""target":"process:{fio}""#)) {
+            crate::log_error!("teste", "{}", lista);
+            return Err("a lista das contencoes nao tem o processo isolado");
+        }
+        passo()?;
+        esperar_linha("isolavel: DENY_CONTAINED", 1)?;
+        esperar_linha("isolavel: sem filho", 1)?;
+        let alvo = alloc::format!("process:{fio}");
+        // Uma execução que isolou, e uma que só reconheceu: a contenção não
+        // executou duas vezes.
+        let execucoes = |estado: &str| {
+            let procurado = alloc::format!("{estado}; decisao ");
+            crate::autorizacao::com_auditoria(|c| {
+                c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+                    .filter(|r| {
+                        r.evento.recurso == alvo
+                            && r.evento
+                                .detalhe
+                                .split(": ")
+                                .any(|parte| parte.starts_with(&procurado))
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+        };
+        if execucoes("isolated") != 1 || execucoes("already_isolated") != 1 {
+            return Err("a contencao executou mais de uma vez, ou nao gravou o reconhecimento");
+        }
+        if pedir("process.release") != ("released".into(), Some(true)) {
+            return Err("o sistema nao soltou o processo");
+        }
+        if pedir("process.release") != ("not_isolated".into(), Some(false)) {
+            return Err("soltar de novo nao foi reconhecido como solto");
+        }
+        passo()?;
+        esperar_linha("isolavel: ALLOW", 2).map_err(|_| "solto, o processo continuou recusado")?;
+        // Isolado de novo, e o processo acaba: a contenção não fica para
+        // um fio que não existe mais.
+        if pedir("process.isolate") != ("isolated".into(), Some(true)) {
+            return Err("o sistema nao isolou o processo de novo");
+        }
+        Ok(())
+    })();
+    let fim = crate::eventos::publicar(
+        "teste-isolavel",
+        Evento {
+            tipo: tipo::ENCERRAR,
+            ..Default::default()
+        },
+    );
+    let saiu = esperar_ate(
+        || {
+            let mut achou = false;
+            crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+                achou |= r.seq >= desde
+                    && r.subsistema == "usuario"
+                    && r.mensagem() == "processo encerrou com codigo 84";
+            });
+            achou
+        },
+        600,
+    );
+    crate::pessoas::esquecer_registradas();
+    resultado?;
+    if fim.is_err() || saiu.is_err() {
+        return Err("o isolavel nao saiu com o codigo dele");
+    }
+    let alvo = alloc::format!("process:{fio}");
+    let ficou = esperar_ate(
+        || {
+            !crate::contencao::lista()
+                .iter()
+                .any(|(_, contido)| *contido == alvo)
+        },
+        300,
+    );
+    if ficou.is_err() {
+        return Err("a contencao ficou para um processo que acabou");
+    }
+    Ok(())
+}
+
+/// O agente suspenso: continua registrado e conectado, mas cada pedido
+/// dele é `DENY_CONTAINED` — explicado: fale com um administrador —, e os
+/// arrendamentos dele são soltos na hora, contados como saída por
+/// suspensão. Um administrador o retoma pela prova — e pela porta do
+/// próprio agente suspenso: a sessão é só o transporte da prova. Retomado,
+/// ele pede como antes.
+fn contencao_o_agente_suspenso_e_retomado_pela_prova() -> Resultado {
+    const C: &str = "/armazem/compartilhado/suspensao.txt";
+    com_agentes_de_teste(|| {
+        crate::identidade::registrar_administrador_de_teste(
+            sigilo::publica_de(&ADMIN_DE_TESTE),
+            "administrador",
+        );
+        let (mut agente, mut sessao) = conectado(1)?;
+        crate::identidade::atribuir(&nome_de_teste(1), "operador")
+            .map_err(|_| "a atribuicao falhou")?;
+        let chave = sigilo::hex(&sigilo::publica_de(&chave_de_teste(1)));
+        let r = pela_porta(
+            &mut agente,
+            &mut sessao,
+            "fs.claim",
+            &alloc::format!(r#"{{"path":"{C}"}}"#),
+        )?;
+        if !r.contains(r#""ok":true"#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o agente nao arrendou o caminho");
+        }
+        let recurso = crate::coordenacao::recurso_do_caminho(C);
+        let soltos = crate::metricas::soltos_por(crate::metricas::Saida::Suspensao);
+        let sistema = sistema_aqui();
+        let params = alloc::format!(r#"{{"key":"{chave}"}}"#);
+        let r = fs_pedir(sistema, "agent.suspend", &params);
+        if fs_texto(&r, "state").as_deref() != Some("suspended") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o sistema nao suspendeu o agente");
+        }
+        if crate::coordenacao::estado(&recurso).arrendamento.is_some() {
+            return Err("o arrendamento do agente suspenso ficou");
+        }
+        if crate::metricas::soltos_por(crate::metricas::Saida::Suspensao) <= soltos {
+            return Err("o arrendamento solto pela suspensao nao foi contado");
+        }
+        if registro_que(|e| e.metodo == "lease.invalidate" && e.recurso == recurso).is_none() {
+            return Err("a soltura do arrendamento nao foi gravada");
+        }
+        let r = pela_porta(&mut agente, &mut sessao, "system.info", "{}")?;
+        if !recusado_com(&r, "DENY_CONTAINED")
+            || !explicada_como(
+                &r,
+                [
+                    "DENY",
+                    "DENY_CONTAINED",
+                    "requires_authorization",
+                    "CONTACT_ADMIN",
+                ],
+            )
+        {
+            return Err("o agente suspenso nao ouviu DENY_CONTAINED explicado");
+        }
+        if crate::identidade::agente(&sigilo::publica_de(&chave_de_teste(1))).is_none() {
+            return Err("suspender revogou o agente");
+        }
+        // O administrador, pela porta do suspenso.
+        let r = admin_pela_porta(
+            &mut agente,
+            &mut sessao,
+            1,
+            "agent.resume",
+            &params,
+            &params,
+        )?;
+        if !r.contains(r#""state":"resumed""#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o administrador nao retomou o agente pela porta dele");
+        }
+        let r = pela_porta(&mut agente, &mut sessao, "system.info", "{}")?;
+        if !r.contains(r#""result":"#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("retomado, o agente continuou recusado");
+        }
+        // Suspenso de novo, e revogado: a revogação é o definitivo, e a
+        // suspensão volátil some com ela — uma chave registrada de novo
+        // não a herdaria.
+        if fs_texto(&fs_pedir(sistema, "agent.suspend", &params), "state").as_deref()
+            != Some("suspended")
+        {
+            return Err("o sistema nao suspendeu o agente de novo");
+        }
+        crate::identidade::revogar(&sigilo::publica_de(&chave_de_teste(1)))
+            .map_err(|_| "a revogacao do agente falhou")?;
+        let alvo = alloc::format!("agent:{chave}");
+        if crate::contencao::lista()
+            .iter()
+            .any(|(_, contido)| *contido == alvo)
+        {
+            return Err("a suspensao sobreviveu a revogacao");
+        }
+        Ok(())
+    })
+}
+
+/// A credencial suspensa: a pessoa com a senha certa ouve que a credencial
+/// está suspensa — e quem não tem a senha ouve o de sempre, sem saber da
+/// suspensão —; a sessão que ela tinha aberta não age, e o que ela
+/// arrendou é solto. A chave de um agente suspensa não completa o aperto.
+/// Retomadas, as duas entram de novo.
+fn contencao_a_credencial_suspensa_nao_entra() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use crate::pessoas::{Console, RecusaDeLogin};
+    const C: &str = "/armazem/compartilhado/credencial.txt";
+    crate::pessoas::esquecer_registradas();
+    let resultado = (|| -> Resultado {
+        let id = crate::pessoas::registrar_de_teste("suspensa", "operador", b"senha certa");
+        let sessao = crate::pessoas::autenticar(Console::Terminal(56), "suspensa", b"senha certa")
+            .map_err(|_| "a pessoa nao entrou")?;
+        let pessoa = Chamador::Pessoa(sessao);
+        if !fs_ok(&fs_pedir(
+            pessoa,
+            "fs.claim",
+            &alloc::format!(r#"{{"path":"{C}"}}"#),
+        )) {
+            return Err("a pessoa nao arrendou o caminho");
+        }
+        let sistema = sistema_aqui();
+        let params = alloc::format!(r#"{{"person":"{}"}}"#, id.texto());
+        let r = fs_pedir(sistema, "credential.suspend", &params);
+        if fs_texto(&r, "state").as_deref() != Some("suspended") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o sistema nao suspendeu a credencial");
+        }
+        if crate::coordenacao::estado(&crate::coordenacao::recurso_do_caminho(C))
+            .arrendamento
+            .is_some()
+        {
+            return Err("o arrendamento da credencial suspensa ficou");
+        }
+        let r = fs_pedir(pessoa, "system.info", "{}");
+        if !recusado_com(&r, "DENY_CREDENTIAL")
+            || !explicada_como(
+                &r,
+                [
+                    "DENY",
+                    "DENY_CREDENTIAL",
+                    "requires_authorization",
+                    "CONTACT_ADMIN",
+                ],
+            )
+        {
+            return Err("a sessao da credencial suspensa agiu");
+        }
+        match crate::pessoas::autenticar(Console::Terminal(57), "suspensa", b"senha certa") {
+            Err(RecusaDeLogin::Suspensa) => {}
+            _ => return Err("com a senha certa, o login nao disse que a credencial esta suspensa"),
+        }
+        match crate::pessoas::autenticar(Console::Terminal(58), "suspensa", b"senha errada") {
+            Err(RecusaDeLogin::NaoConfere) => {}
+            _ => return Err("sem a senha, o login revelou a suspensao"),
+        }
+        let r = fs_pedir(sistema, "credential.resume", &params);
+        if fs_texto(&r, "state").as_deref() != Some("resumed") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o sistema nao retomou a credencial");
+        }
+        if !fs_pedir(pessoa, "system.info", "{}").contains(r#""result":"#) {
+            return Err("retomada, a sessao continuou recusada");
+        }
+        crate::pessoas::autenticar(Console::Terminal(59), "suspensa", b"senha certa")
+            .map_err(|_| "retomada, a pessoa nao entrou")?;
+        Ok(())
+    })();
+    crate::pessoas::esquecer_registradas();
+    resultado?;
+    // A chave de um agente.
+    com_agentes_de_teste(|| {
+        let chave = sigilo::hex(&sigilo::publica_de(&chave_de_teste(2)));
+        let params = alloc::format!(r#"{{"key":"{chave}"}}"#);
+        let r = fs_pedir(sistema_aqui(), "credential.suspend", &params);
+        if fs_texto(&r, "state").as_deref() != Some("suspended") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o sistema nao suspendeu a chave");
+        }
+        let mut s = crate::agent::SessaoDeTeste::porta(2);
+        let recusado = AgenteDeTeste::conectar(2, &mut s, &chave_de_teste(2))?;
+        if recusado.transporte.is_some()
+            || recusado.recusa.as_deref() != Some("credencial suspensa")
+        {
+            crate::log_error!("teste", "{:?}", recusado.recusa);
+            return Err("a chave suspensa completou o aperto");
+        }
+        if registro_que(|e| e.codigo == politica::Codigo::DenyCredential).is_none() {
+            return Err("o aperto recusado pela suspensao nao foi gravado");
+        }
+        let r = fs_pedir(sistema_aqui(), "credential.resume", &params);
+        if fs_texto(&r, "state").as_deref() != Some("resumed") {
+            return Err("o sistema nao retomou a chave");
+        }
+        crate::virtio::console::simular_conexao(2, true);
+        let (mut agente, mut sessao) = conectado(2)?;
+        if !pela_porta(&mut agente, &mut sessao, "system.info", "{}")?.contains(r#""result":"#) {
+            return Err("retomada, a chave nao agiu");
+        }
+        Ok(())
+    })
+}
+
+/// O dia de trabalho com a segurança inteira ligada — o NSF lendo, o
+/// perfil aprendendo, o risco contando, a auditoria gravando, o firewall
+/// de pé (seção 35). Uma pessoa entra pela senha, cria uma pasta e um
+/// arquivo, lê, edita pela versão, copia, lista, arrenda e solta, roda um
+/// programa e olha o sistema; um agente manda uma mensagem a ela, conversa
+/// com o eco da bancada e guarda o arquivo dele; ela lê a mensagem. Nada
+/// disso é recusado, e o NSF não abre incidente nem pede nada: a segurança
+/// é invisível quando tudo é normal.
+fn usabilidade_o_dia_de_trabalho_com_a_seguranca_ligada() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use crate::pessoas::Console;
+    const DIR: &str = "/armazem/compartilhado/dia";
+    com_mensagens(|| {
+        let _ = conectado(1)?;
+        crate::identidade::atribuir(&nome_de_teste(1), "operador")
+            .map_err(|_| "a atribuicao falhou")?;
+        let agente = Chamador::Sessao(1);
+        diretorios_acima(DIR)?;
+        com_o_nsf(|| {
+            let mut pedidos = 0;
+            let mut volta = || pedidos += crate::seguranca::passo().pedidos;
+            let passou = |quem: Chamador, metodo: &str, params: &str| {
+                let r = fs_pedir(quem, metodo, params);
+                let ok = r.contains(r#""result":"#) && !r.contains(r#""ok":false"#);
+                if !ok {
+                    crate::log_error!("teste", "{}: {}", metodo, r);
+                }
+                (ok, r)
+            };
+            // A pessoa entra.
+            let id = crate::pessoas::registrar_de_teste("dia", "operador", b"senha do dia");
+            let ana = Chamador::Pessoa(
+                crate::pessoas::autenticar(Console::Terminal(64), "dia", b"senha do dia")
+                    .map_err(|_| "a pessoa nao entrou")?,
+            );
+            // Os arquivos dela.
+            let nota = alloc::format!("{DIR}/nota.txt");
+            let copia = alloc::format!("{DIR}/copia.txt");
+            if !passou(ana, "fs.mkdir", &alloc::format!(r#"{{"path":"{DIR}"}}"#)).0 {
+                return Err("a pessoa nao criou a pasta");
+            }
+            let r = fs_gravar(ana, &nota, 0, "primeira versao");
+            let v1 = fs_numero(&r, "version")
+                .filter(|_| fs_ok(&r))
+                .ok_or("a pessoa nao criou o arquivo")?;
+            let (ok, r) = passou(ana, "fs.read", &alloc::format!(r#"{{"path":"{nota}"}}"#));
+            if !ok || !r.contains("primeira versao") {
+                return Err("a pessoa nao leu o que escreveu");
+            }
+            let r = fs_gravar(ana, &nota, v1, "segunda versao");
+            if !fs_ok(&r) {
+                crate::log_error!("teste", "{}", r);
+                return Err("a pessoa nao editou pela versao");
+            }
+            if !fs_ok(&fs_gravar(ana, &copia, 0, "segunda versao")) {
+                return Err("a pessoa nao copiou o arquivo");
+            }
+            let (ok, r) = passou(ana, "fs.list", &alloc::format!(r#"{{"path":"{DIR}"}}"#));
+            if !ok || !r.contains("nota.txt") || !r.contains("copia.txt") {
+                return Err("a pessoa nao listou a pasta");
+            }
+            for metodo in ["fs.claim", "fs.release"] {
+                if !passou(ana, metodo, &alloc::format!(r#"{{"path":"{nota}"}}"#)).0 {
+                    return Err("a pessoa nao arrendou e soltou o arquivo");
+                }
+            }
+            volta();
+            // Um programa, e uma olhada no sistema.
+            let desde = crate::log::total_emitidos();
+            let dir = crate::usuario::DIRETORIO_DOS_COMPILADOS;
+            if !passou(
+                ana,
+                "user.run",
+                &alloc::format!(r#"{{"path":"{dir}/ola"}}"#),
+            )
+            .0
+            {
+                return Err("a pessoa nao rodou o programa");
+            }
+            esperar_ate(
+                || linhas_do_programa(desde, "processo encerrou com codigo 61") > 0,
+                600,
+            )
+            .map_err(|_| "o programa da pessoa nao terminou bem")?;
+            for metodo in ["system.info", "tasks.list", "ui.tree"] {
+                if !passou(ana, metodo, "{}").0 {
+                    return Err("a pessoa nao olhou o sistema");
+                }
+            }
+            volta();
+            // O agente: a mensagem, o eco, o arquivo dele.
+            let (ok, _) = passou(
+                agente,
+                "message.send",
+                &alloc::format!(r#"{{"to":"{}","body":"bom dia","nonce":1}}"#, id.texto()),
+            );
+            if !ok {
+                return Err("o agente nao mandou a mensagem");
+            }
+            let conexao = conexao_aberta(&fs_pedir(
+                agente,
+                "net.connect",
+                &alloc::format!(r#"{{"to":"{ECO}"}}"#),
+            ))?;
+            if estado_depois_do_aperto(agente, conexao)? != "established" {
+                return Err("a conexao do agente nao se estabeleceu");
+            }
+            let (ok, _) = passou(
+                agente,
+                "net.send",
+                &alloc::format!(r#"{{"connection":{conexao},"content":"ola, eco"}}"#),
+            );
+            if !ok || ler_da_conexao(agente, conexao, 8)? != b"ola, eco" {
+                return Err("o eco do agente nao voltou");
+            }
+            fechar_conexao(agente, conexao);
+            if !fs_ok(&fs_gravar(
+                agente,
+                &alloc::format!("{DIR}/do-agente.txt"),
+                0,
+                "relatorio",
+            )) {
+                return Err("o agente nao guardou o arquivo dele");
+            }
+            let (ok, r) = passou(ana, "message.read", "{}");
+            if !ok || !r.contains("bom dia") {
+                return Err("a pessoa nao leu a mensagem do agente");
+            }
+            volta();
+            volta();
+            // Invisível: nenhum incidente, nenhum pedido, nenhuma regra, e o
+            // NSF saudável.
+            let (incidentes, saudavel) = crate::seguranca::com_motor_de_teste(|m| {
+                (m.incidentes.todos().count(), m.saude().saudavel())
+            })
+            .unwrap_or((usize::MAX, false));
+            if pedidos != 0 || incidentes != 0 || !crate::rede::pilha::regras().is_empty() {
+                crate::log_error!("teste", "{} pedidos, {} incidentes", pedidos, incidentes);
+                return Err("o dia de trabalho abriu incidente, ou o NSF pediu algo");
+            }
+            if !saudavel {
+                return Err("o NSF nao acompanhou o dia de trabalho");
+            }
+            Ok(())
+        })
+    })
+}
+
+/// O legítimo incomum não é ameaça: uma pessoa que aprendeu a fazer uma
+/// coisa só e, de repente, faz muitas outras, depressa — leituras de tipos
+/// que nunca fez, a mesma repetida, uma conexão ao destino que o papel dá.
+/// O NSF vê a anomalia, e a guarda como observação: nenhum incidente,
+/// nenhuma contenção, nenhum pedido ao gate — e o gate não recusou nada do
+/// que o papel dá.
+fn nsf_o_incomum_e_observado_e_nao_contido() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use seguranca::regras::Regra;
+    crate::pessoas::esquecer_registradas();
+    let resultado = com_o_nsf(|| {
+        let sessao = crate::pessoas::sessao_de_teste(
+            crate::pessoas::Console::Terminal(60),
+            "incomum",
+            "operador",
+        );
+        let pessoa = Chamador::Pessoa(sessao);
+        let pedir = |metodo: &str, params: &str| -> Resultado {
+            let r = fs_pedir(pessoa, metodo, params);
+            if !r.contains(r#""result":"#) {
+                crate::log_error!("teste", "{}: {}", metodo, r);
+                return Err("o gate recusou o que o papel da");
+            }
+            Ok(())
+        };
+        // A linha de base: uma coisa só.
+        for _ in 0..seguranca::ueba::APRENDIZADO {
+            pedir("system.info", "{}")?;
+        }
+        let _ = crate::seguranca::passo();
+        // E, de repente, muitas.
+        let leituras = [
+            ("memory.stats", "{}"),
+            ("tasks.list", "{}"),
+            ("threads.list", "{}"),
+            ("agent.list", "{}"),
+            ("disk.info", "{}"),
+            ("net.info", "{}"),
+            ("fs.list", r#"{"path":"/bin"}"#),
+            ("fs.list", r#"{"path":"/programas"}"#),
+            ("ui.tree", "{}"),
+        ];
+        for _ in 0..4 {
+            for (metodo, params) in leituras {
+                pedir(metodo, params)?;
+            }
+        }
+        // O NSF vê a anomalia agora — e a pessoa continua trabalhando: o
+        // gate não leu a observação, e nada do que o papel dá é recusado.
+        let v0 = crate::seguranca::passo();
+        let viu = crate::seguranca::com_motor_de_teste(|m| {
+            m.observacoes()
+                .any(|d| d.regra == Regra::ComportamentoAnomalo)
+        })
+        .unwrap_or(false);
+        if !viu {
+            return Err("o NSF nao viu a anomalia: o caso nao prova nada");
+        }
+        for (metodo, params) in leituras {
+            pedir(metodo, params)?;
+        }
+        let eco = conexao_aberta(&fs_pedir(
+            pessoa,
+            "net.connect",
+            &alloc::format!(r#"{{"to":"{ECO}"}}"#),
+        ))?;
+        let v = crate::seguranca::passo();
+        let w = crate::seguranca::passo();
+        fechar_conexao(pessoa, eco);
+        if v0.pedidos + v.pedidos + w.pedidos != 0 || !crate::rede::pilha::regras().is_empty() {
+            crate::log_error!("teste", "{:?} {:?} {:?}", v0, v, w);
+            return Err("o NSF pediu contencao para o legitimo incomum");
+        }
+        let (observou, no_incidente, acoes) = crate::seguranca::com_motor_de_teste(|m| {
+            (
+                m.observacoes()
+                    .any(|d| d.regra == Regra::ComportamentoAnomalo),
+                m.incidentes.todos().any(|i| {
+                    i.deteccoes
+                        .iter()
+                        .any(|d| d.regra == Regra::ComportamentoAnomalo)
+                }),
+                m.incidentes
+                    .todos()
+                    .flat_map(|i| i.acoes.iter())
+                    .filter(|a| a.estado != seguranca::resposta::Estado::Observada)
+                    .count(),
+            )
+        })
+        .unwrap_or((false, true, usize::MAX));
+        if !observou {
+            return Err("o NSF nao viu a anomalia: o caso nao prova nada");
+        }
+        if no_incidente || acoes != 0 {
+            return Err("a anomalia virou incidente, ou o incidente ganhou acao");
+        }
+        Ok(())
+    });
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// Sobrecarga: uma enxurrada de registros passa do anel e do que o NSF lê
+/// numa volta — ele perde uma parte, e degrada. Degradado, continua lendo
+/// e detectando, mas uma sondagem seguida de saída só vira recomendação:
+/// sem evidência inteira, ele não contém sozinho. E o gate, que nunca
+/// dependeu dele, decide como sempre — o legítimo passa.
+fn nsf_a_sobrecarga_degrada_sem_bloquear() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use seguranca::resposta::Estado;
+    crate::pessoas::esquecer_registradas();
+    let resultado = com_o_nsf(|| {
+        let sessao = crate::pessoas::sessao_de_teste(
+            crate::pessoas::Console::Terminal(61),
+            "sobrecarga",
+            "operador",
+        );
+        let pessoa = Chamador::Pessoa(sessao);
+        let _ = crate::seguranca::passo();
+        let capacidade = crate::autorizacao::CAPACIDADE_DA_AUDITORIA as u64;
+        for i in 0..capacidade + 8 {
+            crate::autorizacao::auditar_enchimento_de_teste(
+                "teste.sobrecarga",
+                &i.to_le_bytes(),
+                "um registro de muitos",
+            );
+            if i % 100 == 99 {
+                crate::persistencia::gravar_auditoria()?;
+            }
+        }
+        let _ = crate::seguranca::passo();
+        let degradado =
+            crate::seguranca::com_motor_de_teste(|m| !m.saude().saudavel()).unwrap_or(false);
+        if !degradado {
+            return Err("a enxurrada nao degradou o NSF");
+        }
+        if !fs_pedir(pessoa, "system.info", "{}").contains(r#""result":"#) {
+            return Err("com o NSF degradado, o gate recusou o legitimo");
+        }
+        for metodo in ["audit.tail", "policy.show", "security.status"] {
+            let _ = fs_pedir(pessoa, metodo, "{}");
+        }
+        let _ = crate::seguranca::passo();
+        let eco = conexao_aberta(&fs_pedir(
+            pessoa,
+            "net.connect",
+            &alloc::format!(r#"{{"to":"{ECO}"}}"#),
+        ))?;
+        let v = crate::seguranca::passo();
+        let w = crate::seguranca::passo();
+        fechar_conexao(pessoa, eco);
+        if v.pedidos + w.pedidos != 0 || !crate::rede::pilha::regras().is_empty() {
+            crate::log_error!("teste", "{:?} {:?}", v, w);
+            return Err("degradado, o NSF conteve sozinho");
+        }
+        let recomendou = crate::seguranca::com_motor_de_teste(|m| {
+            m.incidentes.todos().any(|i| {
+                i.acoes
+                    .iter()
+                    .any(|a| a.estado == Estado::Recomendada && a.metodo == "net.block")
+            })
+        })
+        .unwrap_or(false);
+        if !recomendou {
+            return Err("degradado, o NSF nao recomendou a contencao a quem pode");
+        }
+        crate::persistencia::gravar_auditoria()?;
+        Ok(())
+    });
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// O custo da segurança, medido: `security.metrics` conta as decisões do
+/// gate por código — pelo menos as deste caso —, mede o gate, a política,
+/// a auditoria e as voltas do NSF, diz a memória e os contadores do motor,
+/// e os arrendamentos soltos por causa — o vencido, quanto depois do
+/// prazo. As contas fecham: as recusas são as decisões menos as
+/// permitidas, e a média nunca passa do maior.
+fn seguranca_as_metricas() -> Resultado {
+    use crate::autorizacao::Chamador;
+    const C: &str = "/armazem/compartilhado/metricas.txt";
+    crate::pessoas::esquecer_registradas();
+    let resultado = com_o_nsf(|| {
+        crate::metricas::zerar_de_teste();
+        let sessao = crate::pessoas::sessao_de_teste(
+            crate::pessoas::Console::Terminal(62),
+            "metricas",
+            "observador",
+        );
+        let pessoa = Chamador::Pessoa(sessao);
+        for _ in 0..5 {
+            let _ = fs_pedir(pessoa, "system.info", "{}");
+        }
+        for _ in 0..3 {
+            let _ = fs_pedir(pessoa, "fs.list", r#"{"path":"/bin"}"#);
+        }
+        // Um arrendamento que vence — de uma pessoa: o sistema não tem
+        // titular de arrendamento.
+        let operadora = Chamador::Pessoa(crate::pessoas::sessao_de_teste(
+            crate::pessoas::Console::Terminal(63),
+            "metricas-op",
+            "operador",
+        ));
+        let r = fs_pedir(
+            operadora,
+            "fs.claim",
+            &alloc::format!(r#"{{"path":"{C}","ttl_ms":1000}}"#),
+        );
+        if !fs_ok(&r) {
+            crate::log_error!("teste", "{}", r);
+            return Err("a operadora nao arrendou o caminho");
+        }
+        let sistema = sistema_aqui();
+        esperar_ate(
+            || {
+                crate::coordenacao::vencer_todos();
+                crate::metricas::soltos_por(crate::metricas::Saida::Vencimento) > 0
+            },
+            600,
+        )
+        .map_err(|_| "o arrendamento nao venceu")?;
+        let _ = crate::seguranca::passo();
+        let _ = crate::seguranca::passo();
+        let r = fs_pedir(sistema, "security.metrics", "{}");
+        let m = Json(r.as_bytes()).member("result").ok_or("sem metricas")?;
+        let numero = |caminho: &[&str]| {
+            caminho
+                .iter()
+                .try_fold(m, |j, c| j.member(c))
+                .and_then(|v| v.as_u64())
+        };
+        // O que se mediu, para quem lê o log: a régua do custo.
+        let ns = |a: &str, b: &str, c: &str| numero(&[a, b, c]).unwrap_or(0);
+        crate::log_info!(
+            "teste",
+            "medido: gate {}/{} ns, politica {} ns, registro {} ns, volta {} ns; NSF {} ppm, auditoria {} ppm",
+            ns("gate", "latency_ns", "avg"),
+            ns("gate", "latency_ns", "max"),
+            ns("policy", "latency_ns", "avg"),
+            ns("audit", "latency_ns", "avg"),
+            ns("nsf", "round_ns", "avg"),
+            numero(&["nsf", "cpu_ppm"]).unwrap_or(0),
+            numero(&["audit", "cpu_ppm"]).unwrap_or(0)
+        );
+        let decisoes = numero(&["gate", "decisions"]).unwrap_or(0);
+        let recusas = numero(&["gate", "denials"]).unwrap_or(0);
+        let permitidas = numero(&["gate", "by_code", "ALLOW"]).unwrap_or(0);
+        let sem_permissao = numero(&["gate", "by_code", "DENY_PERMISSION"]).unwrap_or(0);
+        if permitidas < 5 || sem_permissao < 3 || recusas != decisoes.saturating_sub(permitidas) {
+            crate::log_error!("teste", "{}", r);
+            return Err("as decisoes do gate nao fecham com as deste caso");
+        }
+        for medida in [
+            ["gate", "latency_ns"],
+            ["policy", "latency_ns"],
+            ["audit", "latency_ns"],
+            ["nsf", "round_ns"],
+        ] {
+            let amostras = numero(&[medida[0], medida[1], "samples"]).unwrap_or(0);
+            let media = numero(&[medida[0], medida[1], "avg"]).unwrap_or(0);
+            let maior = numero(&[medida[0], medida[1], "max"]).unwrap_or(0);
+            if amostras == 0 || media == 0 || media > maior {
+                crate::log_error!("teste", "{:?}: {}", medida, r);
+                return Err("uma medida de latencia nao tem amostra, ou a media passa do maior");
+            }
+        }
+        if numero(&["nsf", "round_ns", "samples"]).unwrap_or(0) < 2
+            || numero(&["nsf", "engine", "memory", "events", "cap"]).unwrap_or(0) == 0
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("as voltas do NSF, ou a memoria do motor, nao foram medidas");
+        }
+        if numero(&["leases", "released", "expired"]).unwrap_or(0) == 0
+            || numero(&["leases", "expiry_delay_ms", "samples"]).unwrap_or(0) == 0
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("o arrendamento vencido nao foi contado");
+        }
+        // Só quem tem `security.read` lê.
+        if !recusado_com(
+            &fs_pedir(pessoa, "security.metrics", "{}"),
+            "DENY_PERMISSION",
+        ) {
+            return Err("o observador leu as metricas da seguranca");
+        }
+        Ok(())
+    });
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+// ---------------------------------------------------------------------------
 // Roteamento de interrupção
 // ---------------------------------------------------------------------------
 
@@ -34814,8 +35907,11 @@ pub fn executar_todos() -> ! {
 
     for caso in CASOS {
         // Cada caso começa sem arrendamento nenhum: um que outro caso deixou
-        // seria um conflito que este não pediu.
+        // seria um conflito que este não pediu. E sem contenção: um processo
+        // isolado, ou uma chave de teste suspensa, por outro caso seria uma
+        // recusa que este não pediu.
         crate::coordenacao::esquecer();
+        crate::contencao::esquecer_de_teste();
         // O resultado é impresso *depois* de rodar, e não antes, porque um
         // teste que emite log jogaria essas linhas no meio de uma linha de
         // relatório pela metade. Assim cada linha do relatório fica íntegra e

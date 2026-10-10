@@ -217,6 +217,33 @@ pub fn envelope_erro(
     w.end_object()
 }
 
+/// Escreve o erro de uma recusa do gate: o `code` e a `message` de sempre,
+/// o `data` com o código da recusa — como antes —, e o `explain`: a mesma
+/// recusa, estruturada para o agente se recuperar sem adivinhar — a razão,
+/// se adianta repetir, quanto esperar, o que fazer. Ver
+/// [`crate::autorizacao::Recusa`].
+pub fn envelope_recusa(
+    w: &mut JsonWriter,
+    id: Option<Json>,
+    recusa: &crate::autorizacao::Recusa,
+) -> fmt::Result {
+    let erro = RpcError::da_recusa(recusa.codigo);
+    w.begin_object()?;
+    w.field_str("jsonrpc", VERSAO)?;
+    w.key("id")?;
+    escrever_id(w, id)?;
+    w.key("error")?;
+    w.begin_object()?;
+    w.key("code")?;
+    w.i64_value(erro.codigo as i64)?;
+    w.field_str("message", erro.mensagem)?;
+    w.field_str("data", recusa.codigo.nome())?;
+    w.key("explain")?;
+    recusa.escrever(w)?;
+    w.end_object()?;
+    w.end_object()
+}
+
 /// Ecoa o `id` exatamente como veio, ou `null` se não havia um.
 fn escrever_id(w: &mut JsonWriter, id: Option<Json>) -> fmt::Result {
     match id.and_then(|j| j.raw_str()) {

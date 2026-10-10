@@ -2700,6 +2700,24 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
     ("seguranca::iniciar()", &["kernel/src/main.rs"]),
     ("pilha::bloquear(", &["kernel/src/agent/commands.rs"]),
     ("pilha::desbloquear(", &["kernel/src/agent/commands.rs"]),
+    // As contenções reversíveis (ver `docs/USABILIDADE.md`): conter e
+    // soltar só pelos handlers dos comandos — depois do gate — e pelas
+    // operações administrativas — depois da prova. O gate só pergunta
+    // (`contencao::recusa`), e nada mais muda o estado.
+    (
+        "contencao::conter(",
+        &[
+            "kernel/src/agent/commands.rs",
+            "kernel/src/agent/administracao.rs",
+        ],
+    ),
+    (
+        "contencao::soltar(",
+        &[
+            "kernel/src/agent/commands.rs",
+            "kernel/src/agent/administracao.rs",
+        ],
+    ),
     ("captura::depois_de(", &["kernel/src/agent/commands.rs"]),
     (
         "seguranca::",
@@ -6173,6 +6191,7 @@ fn conversar(
     // Depois das sondas que usam os agentes: o incidente que esta abre
     // fica aberto, e não alcança mais ninguém.
     sob_o_tecido(arch, &mut escrita, &mut leitor)?;
+    sem_friccao(arch, &mut escrita, &mut leitor)?;
     // Um núcleo travado de propósito, **para sempre**: ele fica travado até
     // o fim, e a sonda da falha, a seguir, confere que a parada do caminho
     // fatal o alcança — ou diz que não o alcançou.
@@ -10314,6 +10333,101 @@ fn sob_terminal_pelo_agente(
     Ok(())
 }
 
+/// Um número de um JSON pelo caminho das chaves, cada uma procurada depois
+/// da anterior: `["gate", "latency_ns", "avg"]`.
+fn numero_no_caminho(texto: &str, caminho: &[&str]) -> Option<u64> {
+    let (ultima, antes) = caminho.split_last()?;
+    let mut resto = texto;
+    for chave in antes {
+        resto = apos(resto, &format!("\"{chave}\":"))?;
+    }
+    campo_simples(resto, ultima)?.parse().ok()
+}
+
+/// A segurança sem fricção no kernel de produção, com o fio do NSF de
+/// verdade — ver `docs/USABILIDADE.md`. A recusa diz por que, se adianta
+/// repetir e o que fazer; a suspensão de um agente vai e volta pelo gate,
+/// idempotente, e o suspenso ouve `DENY_CONTAINED` explicado; e
+/// `security.metrics` diz o custo medido da segurança — o gate, a política,
+/// a auditoria e as voltas do NSF —, que esta sonda escreve.
+fn sem_friccao(
+    arch: Arquitetura,
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+) -> Result<(), String> {
+    println!("[xtask] fumaça: a segurança sem fricção");
+    let mut id = 8900;
+    let mut pedir =
+        |metodo: &str, params: &str| pedir_pela_serial(escrita, leitor, &mut id, metodo, params);
+    let mut agente = AgenteNaPorta::conectar(arch, 3)?;
+    let r = agente.pedir("policy.show", "{}")?;
+    if !recusado_com(&r, "DENY_PERMISSION")
+        || !r.contains(r#""reason":"DENY_POLICY""#)
+        || !r.contains(r#""retry":"requires_authorization""#)
+        || !r.contains(r#""next_action":"REQUEST_AUTHORIZATION""#)
+    {
+        return Err(format!("sem friccao: a recusa nao se explicou\n  {r}"));
+    }
+    println!("  [sem friccao] ok  a recusa diz por que, se adianta repetir e o que fazer");
+
+    let chave = sigilo::hex(&sigilo::publica_de(
+        &chaves::Chaves::garantir()?.do_agente(3),
+    ));
+    let params = format!(r#"{{"key":"{chave}"}}"#);
+    for (metodo, estado) in [
+        ("agent.suspend", "suspended"),
+        ("agent.suspend", "already_suspended"),
+    ] {
+        let r = pedir(metodo, &params)?;
+        if !r.contains(&format!(r#""state":"{estado}""#)) {
+            return Err(format!("sem friccao: {metodo} nao deu {estado}\n  {r}"));
+        }
+    }
+    let r = agente.pedir("system.info", "{}")?;
+    if !recusado_com(&r, "DENY_CONTAINED") || !r.contains(r#""next_action":"CONTACT_ADMIN""#) {
+        return Err(format!(
+            "sem friccao: o agente suspenso nao ouviu DENY_CONTAINED explicado\n  {r}"
+        ));
+    }
+    let r = pedir("agent.resume", &params)?;
+    if !r.contains(r#""state":"resumed""#) {
+        return Err(format!("sem friccao: a serial nao retomou o agente\n  {r}"));
+    }
+    let r = agente.pedir("system.info", "{}")?;
+    if !r.contains(r#""result":"#) {
+        return Err(format!(
+            "sem friccao: retomado, o agente continuou recusado\n  {r}"
+        ));
+    }
+    drop(agente);
+    println!(
+        "  [sem friccao] ok  suspenso, o agente ouve DENY_CONTAINED; suspender de novo nao muda nada; retomado, pede"
+    );
+
+    let m = pedir("security.metrics", "{}")?;
+    let n = |caminho: &[&str]| numero_no_caminho(&m, caminho).unwrap_or(0);
+    let decisoes = n(&["gate", "decisions"]);
+    let voltas = n(&["nsf", "round_ns", "samples"]);
+    if decisoes == 0
+        || n(&["gate", "latency_ns", "samples"]) == 0
+        || voltas == 0
+        || n(&["memory", "events", "cap"]) == 0
+    {
+        return Err(format!("sem friccao: o custo nao foi medido\n  {m}"));
+    }
+    println!(
+        "  [sem friccao] ok  o custo, medido: {decisoes} decisoes, o gate {}/{} ns (media/maior), a politica {} ns, um registro {} ns; {voltas} voltas do NSF, {} ns cada, {} ppm do tempo; a auditoria, {} ppm",
+        n(&["gate", "latency_ns", "avg"]),
+        n(&["gate", "latency_ns", "max"]),
+        n(&["policy", "latency_ns", "avg"]),
+        n(&["audit", "latency_ns", "avg"]),
+        n(&["nsf", "round_ns", "avg"]),
+        n(&["nsf", "cpu_ppm"]),
+        n(&["audit", "cpu_ppm"]),
+    );
+    Ok(())
+}
+
 /// O tecido de segurança no kernel de produção, com o fio do NSF de verdade
 /// — ver `docs/SEGURANCA.md`. O NSF lê a auditoria pelo gate, com o papel
 /// dele; um agente operador pede três métodos que o papel não dá, e o NSF
@@ -10461,7 +10575,7 @@ fn sob_o_tecido(
     .map_err(|r| format!("tecido: o incidente nao diz a decisao do gate\n  {r}"))?;
     if !detalhe.contains(r#""authorized_by":"service:nsf""#)
         || !detalhe.contains(r#""state":"allowed""#)
-        || !detalhe.contains(r#""level":"containment""#)
+        || !detalhe.contains(r#""level":"reversible-containment""#)
     {
         return Err(format!(
             "tecido: o incidente nao diz quem autorizou a contencao\n  {detalhe}"

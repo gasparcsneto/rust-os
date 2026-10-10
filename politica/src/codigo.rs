@@ -36,6 +36,13 @@ pub enum Codigo {
     /// O pedido passaria de uma cota do dono de quem pede — a de armazém.
     /// Nada mudou.
     DenyQuota = 12,
+    /// Quem pede está contido: o processo isolado, ou o agente suspenso.
+    /// Uma contenção reversível, que alguém com a permissão desfaz — ver
+    /// `docs/USABILIDADE.md`. A política não mudou.
+    DenyContained = 13,
+    /// A credencial de quem pede está suspensa: ela não autentica, e as
+    /// sessões abertas com ela não agem. Reversível — não é revogação.
+    DenyCredential = 14,
 }
 
 impl Codigo {
@@ -55,11 +62,13 @@ impl Codigo {
             Codigo::DenyLease => "DENY_LEASE",
             Codigo::DenyReplay => "DENY_REPLAY",
             Codigo::DenyQuota => "DENY_QUOTA",
+            Codigo::DenyContained => "DENY_CONTAINED",
+            Codigo::DenyCredential => "DENY_CREDENTIAL",
         }
     }
 
     /// Todos, na ordem do número.
-    pub const TODOS: [Codigo; 13] = [
+    pub const TODOS: [Codigo; 15] = [
         Codigo::Allow,
         Codigo::DenyNotAuthenticated,
         Codigo::DenyRole,
@@ -73,6 +82,8 @@ impl Codigo {
         Codigo::DenyLease,
         Codigo::DenyReplay,
         Codigo::DenyQuota,
+        Codigo::DenyContained,
+        Codigo::DenyCredential,
     ];
 
     /// O código de um nome, como [`Codigo::nome`] o escreve: o caminho de

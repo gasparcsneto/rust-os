@@ -50,6 +50,26 @@ impl Balde {
             false
         }
     }
+
+    /// Quanto falta, em milissegundos, para a próxima ficha: zero se já há
+    /// uma. É o `retry_after_ms` de uma recusa por taxa — quem esperar isso
+    /// acha a ficha; quem repetir antes ouve a mesma recusa.
+    pub fn espera_ms(&self, agora_ms: u64) -> u64 {
+        let passou = agora_ms.saturating_sub(self.ultimo_ms);
+        let teto = u64::from(self.taxa.rajada) * 1000;
+        let fichas = self
+            .milifichas
+            .saturating_add(passou.saturating_mul(u64::from(self.taxa.por_segundo)))
+            .min(teto);
+        if fichas >= 1000 {
+            return 0;
+        }
+        // O balde enche `por_segundo` milésimos de ficha por milissegundo.
+        match u64::from(self.taxa.por_segundo) {
+            0 => u64::MAX,
+            por_ms => (1000 - fichas).div_ceil(por_ms),
+        }
+    }
 }
 
 /// Uma janela de apertos de mão: no máximo `quantos` a cada `janela_ms`.
@@ -104,6 +124,33 @@ mod testes {
             assert!(b.tentar(10_000));
         }
         assert!(!b.tentar(10_000));
+    }
+
+    /// A espera que a recusa diz é a que basta: esperando-a, a ficha está
+    /// lá; um milissegundo antes, não.
+    #[test]
+    fn a_espera_diz_quando_ha_ficha() {
+        let taxa = Taxa {
+            por_segundo: 10,
+            rajada: 2,
+        };
+        let mut b = Balde::novo(taxa, 0);
+        assert_eq!(b.espera_ms(0), 0);
+        assert!(b.tentar(0) && b.tentar(0));
+        assert!(!b.tentar(0));
+        let espera = b.espera_ms(0);
+        assert_eq!(espera, 100);
+        assert_eq!(b.espera_ms(40), 60);
+        assert!(!b.clone().tentar(espera - 1));
+        assert!(b.tentar(espera));
+        let parado = Balde::novo(
+            Taxa {
+                por_segundo: 0,
+                rajada: 0,
+            },
+            0,
+        );
+        assert_eq!(parado.espera_ms(0), u64::MAX);
     }
 
     #[test]

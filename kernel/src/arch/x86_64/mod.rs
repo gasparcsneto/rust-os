@@ -909,3 +909,13 @@ pub fn encerrar_emulador(resultado: crate::qemu::Resultado) -> ! {
     // Inalcançável sob o QEMU, mas o kernel também roda em hardware real.
     halt_forever()
 }
+
+/// O contador de tempo do processador, o TSC: anda numa frequência que o
+/// kernel não conhece de antemão, e é a régua das medidas de custo — ver
+/// [`crate::metricas`] —, que a convertem pelo próprio relógio do kernel.
+pub fn ciclos() -> u64 {
+    // SAFETY: `rdtsc` só lê o contador do processador, sem tocar a memória;
+    // existe em todo x86_64, e no anel 0 nada o impede — o `CR4.TSD` só
+    // vale para o anel 3.
+    unsafe { core::arch::x86_64::_rdtsc() }
+}

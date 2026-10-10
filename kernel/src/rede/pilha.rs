@@ -319,6 +319,32 @@ pub fn descartes() -> Descartes {
 /// handler o reconhece, procura a regra e grava a recusa.
 pub const BARRADO: &str = "barrado pelo firewall";
 
+/// O código de uma falha da rede **depois** do gate — a seção 24 do
+/// incremento de usabilidade: "o firewall barrou", "a rede não está" e "o
+/// pedido não cabe" nunca se confundem com "a política recusou", que é uma
+/// recusa do gate e vem como erro, não no resultado.
+///
+/// - `FIREWALL_BLOCKED`: uma regra do firewall barrou o fluxo — a regra
+///   vem junto;
+/// - `NETWORK_UNAVAILABLE`: a pilha não está no ar, o DHCP não respondeu,
+///   o destino não se alcança — não conseguimos agora;
+/// - `RESOURCE_LIMIT`: a tabela de conexões, o teto do titular, a fila de
+///   datagramas;
+/// - `INVALID_REQUEST`: o pedido não cabe na conexão — o protocolo errado,
+///   um datagrama grande demais, uma segunda espera.
+pub fn codigo_da_falha(motivo: &str) -> &'static str {
+    match motivo {
+        BARRADO => "FIREWALL_BLOCKED",
+        "a pilha de rede nao esta no ar"
+        | "a rede ainda nao tem endereco (o DHCP nao respondeu)"
+        | "o destino nao se alcanca" => "NETWORK_UNAVAILABLE",
+        "a tabela de conexoes esta cheia"
+        | "este titular ja tem o maximo de conexoes abertas"
+        | "os datagramas de saida da associacao estao cheios" => "RESOURCE_LIMIT",
+        _ => "INVALID_REQUEST",
+    }
+}
+
 /// Só para a suíte: quadros que a placa "recebeu", entregues à pilha antes
 /// dos que ela colheu — ver [`injetar_de_teste`]. Tomada dentro de
 /// [`PILHA`], quando a pilha colhe; nunca o contrário.

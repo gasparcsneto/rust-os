@@ -8,6 +8,14 @@
 //! sempre o mesmo número, e o número vem com a lista do que o compôs: um
 //! risco sem explicação não serve a quem investiga.
 //!
+//! # A repetição não infla
+//!
+//! As recusas, os recursos fora do alcance e os destinos barrados contam
+//! **distintos**: um agente repetindo o mesmo pedido recusado não
+//! transforma a recusa em risco — a explicação disse a ele que repetir não
+//! adianta, e a taxa do papel já o segura. As falhas de autenticação
+//! contam todas: o volume é o sinal da força bruta.
+//!
 //! # O que ele não é
 //!
 //! Autorização. Nenhum risco abre nada nem fecha nada: o gate não o lê. Ele
@@ -59,6 +67,11 @@ fn fator(
     });
 }
 
+/// Quantos distintos há.
+fn distintos<T: Ord>(v: impl Iterator<Item = T>) -> usize {
+    v.collect::<alloc::collections::BTreeSet<T>>().len()
+}
+
 /// O risco, dados os eventos da identidade (qualquer ordem; os da janela
 /// contam, medida a partir do mais novo), as severidades das detecções
 /// abertas dela, e se o perfil dela está em anomalia.
@@ -71,24 +84,37 @@ pub fn avaliar(eventos: &[&Evento], deteccoes: &[Severidade], anomalia: bool) ->
     let conta = |c: Codigo| na_janela.iter().filter(|e| e.codigo == c).count();
     let mut fatores = Vec::new();
 
-    let recusas = na_janela.iter().filter(|e| e.negado()).count();
+    let recusadas: Vec<&&&Evento> = na_janela.iter().filter(|e| e.negado()).collect();
+    let distintas = distintos(
+        recusadas
+            .iter()
+            .map(|e| (e.metodo.as_str(), e.recurso.as_str(), e.codigo as u8)),
+    );
     fator(
         &mut fatores,
         "denials",
-        recusas,
+        distintas,
         2,
         20,
-        alloc::format!("{recusas} pedidos recusados na janela"),
+        alloc::format!(
+            "{distintas} pedidos distintos recusados na janela ({} recusas)",
+            recusadas.len()
+        ),
     );
 
-    let fora = conta(Codigo::DenyResource);
+    let fora = distintos(
+        na_janela
+            .iter()
+            .filter(|e| e.codigo == Codigo::DenyResource)
+            .map(|e| (e.metodo.as_str(), e.recurso.as_str())),
+    );
     fator(
         &mut fatores,
         "out_of_scope",
         fora,
         4,
         24,
-        alloc::format!("{fora} recursos fora do alcance"),
+        alloc::format!("{fora} pedidos distintos fora do alcance"),
     );
 
     let mut sondadas: Vec<&str> = na_janela
@@ -117,17 +143,19 @@ pub fn avaliar(eventos: &[&Evento], deteccoes: &[Severidade], anomalia: bool) ->
         alloc::format!("{autenticacao} pedidos sem autenticacao valida"),
     );
 
-    let firewall = eventos
-        .iter()
-        .filter(|e| e.ts_ms + JANELA_MS >= agora && matches!(e.tipo, Tipo::Firewall { .. }))
-        .count();
+    let firewall = distintos(
+        eventos
+            .iter()
+            .filter(|e| e.ts_ms + JANELA_MS >= agora && matches!(e.tipo, Tipo::Firewall { .. }))
+            .map(|e| e.recurso.as_str()),
+    );
     fator(
         &mut fatores,
         "firewall",
         firewall,
         10,
         30,
-        alloc::format!("{firewall} pedidos de rede barrados pelo firewall"),
+        alloc::format!("{firewall} destinos barrados pelo firewall"),
     );
 
     let pontos_das_deteccoes: u32 = deteccoes
@@ -203,9 +231,34 @@ mod testes {
         let r = avaliar(&refs, &[], false);
         let nomes: Vec<&str> = r.fatores.iter().map(|f| f.nome).collect();
         assert_eq!(nomes, ["denials", "out_of_scope", "permission_probing"]);
-        // 4 recusas × 2 + 1 fora × 4 + 2 métodos × 6.
-        assert_eq!(r.pontos, 8 + 4 + 12);
+        // 3 recusas distintas × 2 + 1 fora × 4 + 2 métodos × 6.
+        assert_eq!(r.pontos, 6 + 4 + 12);
         assert_eq!(r.pontos, r.fatores.iter().map(|f| f.pontos).sum());
+    }
+
+    /// O agente que repete o mesmo pedido recusado cem vezes tem o risco de
+    /// quem foi recusado uma vez — e a explicação diz quantas foram.
+    #[test]
+    fn a_repeticao_nao_infla() {
+        let uma = [ev(1_000, "fs.read", Codigo::DenyResource, Tipo::Decisao)];
+        let cem: Vec<Evento> = (0..100)
+            .map(|i| {
+                ev(
+                    1_000 + i * 10,
+                    "fs.read",
+                    Codigo::DenyResource,
+                    Tipo::Decisao,
+                )
+            })
+            .collect();
+        let r1 = avaliar(&uma.iter().collect::<Vec<_>>(), &[], false);
+        let r100 = avaliar(&cem.iter().collect::<Vec<_>>(), &[], false);
+        assert_eq!(r1.pontos, r100.pontos);
+        assert!(
+            r100.fatores[0].motivo.contains("(100 recusas)"),
+            "{:?}",
+            r100.fatores
+        );
     }
 
     /// O que saiu da janela não conta; o teto segura o total.
@@ -215,8 +268,11 @@ mod testes {
         let novo = ev(JANELA_MS + 1, "agent.ping", Codigo::Allow, Tipo::Decisao);
         let r = avaliar(&[&velho, &novo], &[], false);
         assert_eq!(r.pontos, 0);
-        let muitos: Vec<Evento> = (0..50)
-            .map(|i| ev(i, "x", Codigo::DenyNotAuthenticated, Tipo::Decisao))
+        let metodos: Vec<String> = (0..50).map(|i| alloc::format!("x{i}")).collect();
+        let muitos: Vec<Evento> = metodos
+            .iter()
+            .enumerate()
+            .map(|(i, m)| ev(i as u64, m, Codigo::DenyNotAuthenticated, Tipo::Decisao))
             .collect();
         let refs: Vec<&Evento> = muitos.iter().collect();
         let r = avaliar(&refs, &[Severidade::Critica, Severidade::Alta], true);

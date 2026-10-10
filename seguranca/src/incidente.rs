@@ -6,22 +6,33 @@
 //!
 //! # Como as detecções se juntam
 //!
-//! Pela identidade e pelo boot: uma detecção de severidade média ou maior
-//! entra no incidente aberto da mesma identidade, ou abre um. Uma de
-//! severidade baixa é um fato — entra se há incidente, e não abre nenhum.
+//! Pela identidade e pelo boot. Abrir um incidente é alertar — o nível 1
+//! da resposta —, e alertar pede severidade média **e** confiança média:
+//! uma detecção de confiança baixa — o que é só estatística, o perfil, o
+//! volume — é uma observação, o nível 0, e fica com o motor (ver
+//! [`crate::motor::Motor::observacoes`]). Com um incidente já aberto, toda
+//! detecção da identidade entra nele: o que era só de olhar vira contexto.
 //!
 //! # O estado
 //!
 //! `aberto` ao nascer; `contido` quando uma contenção foi permitida pelo
 //! gate; `encerrado` depois de [`ENCERRAR_MS`] sem nada novo — pelo tempo
 //! dos registros.
+//!
+//! # A recuperação
+//!
+//! Quando alguém desfaz uma contenção deste incidente — solta o processo,
+//! retoma o agente, tira a regra —, o incidente fica **recuperado**: o
+//! objetivo daquela contenção acabou, e o NSF não contém de novo neste
+//! incidente, nem que o risco continue alto. Quem desfez decidiu, pelo
+//! gate, com a autoridade dele; o NSF não briga com essa decisão.
 
 use alloc::collections::{BTreeSet, VecDeque};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::evento::Severidade;
-use crate::regras::Deteccao;
+use crate::regras::{Categoria, Confianca, Deteccao, Regra};
 use crate::resposta::{Acao, Estado as EstadoDaAcao};
 
 /// Quantos incidentes o NSF guarda.
@@ -73,19 +84,52 @@ pub struct Incidente {
     pub correlacao: u64,
     pub aberto_ms: u64,
     pub atualizado_ms: u64,
+    /// A maior confiança das detecções.
+    pub confianca: Confianca,
     /// O gate recusou uma contenção deste incidente: nenhuma outra é pedida.
     pub contencao_negada: bool,
+    /// Quem desfez uma contenção deste incidente: nenhuma outra é pedida.
+    pub recuperada: Option<String>,
 }
 
 impl Incidente {
-    /// Se tem uma detecção de severidade `s` ou maior, de outra regra que
+    /// Se tem uma detecção de severidade alta ou maior, de outra regra que
     /// não a da saída depois da sondagem.
     pub fn alto(&self) -> bool {
         self.estado != Estado::Encerrado
             && self.deteccoes.iter().any(|d| {
-                d.severidade >= Severidade::Alta
-                    && d.regra != crate::regras::Regra::SaidaDepoisDeSondagem
+                d.severidade >= Severidade::Alta && d.regra != Regra::SaidaDepoisDeSondagem
             })
+    }
+
+    /// A confiança que a rede usada agora ganharia: um degrau acima da
+    /// melhor violação ou contorno alto do incidente — duas coisas
+    /// independentes apontando para o mesmo lado. O que é só risco — falhas
+    /// de autenticação, DNS — não corrobora: fica média.
+    pub fn corroboracao(&self) -> Confianca {
+        self.deteccoes
+            .iter()
+            .filter(|d| {
+                d.severidade >= Severidade::Alta
+                    && d.regra != Regra::SaidaDepoisDeSondagem
+                    && matches!(
+                        d.regra.categoria(),
+                        Categoria::Violacao | Categoria::Contorno
+                    )
+            })
+            .map(|d| d.confianca.acima())
+            .max()
+            .unwrap_or(Confianca::Media)
+    }
+
+    /// Se uma contenção de `dono` já vale neste incidente: o gate a
+    /// permitiu ao NSF, ou alguém a fez pelo próprio papel.
+    pub fn contido(&self, dono: &str) -> bool {
+        self.acoes.iter().any(|a| {
+            a.dono == dono
+                && a.contem()
+                && matches!(a.estado, EstadoDaAcao::Permitida | EstadoDaAcao::Observada)
+        })
     }
 }
 
@@ -136,14 +180,15 @@ impl Incidentes {
     }
 
     /// Junta uma detecção: ao incidente vivo da identidade, ou a um novo, se
-    /// a severidade é média ou maior. Devolve o incidente, se entrou em um.
+    /// a severidade e a confiança são médias ou maiores. Devolve o
+    /// incidente, se entrou em um.
     pub fn registrar(&mut self, d: &Deteccao, correlacao: u64, historico: bool) -> Option<u64> {
         let existente = self.lista.iter().position(|i| {
             i.epoca == d.epoca && i.principal == d.principal && i.estado != Estado::Encerrado
         });
         let i = match existente {
             Some(i) => i,
-            None if d.severidade >= Severidade::Media => {
+            None if d.severidade >= Severidade::Media && d.confianca >= Confianca::Media => {
                 if self.lista.len() == MAIS_INCIDENTES {
                     // Sai o encerrado mais velho; sem nenhum, o mais velho.
                     let velho = self
@@ -171,7 +216,9 @@ impl Incidentes {
                     correlacao,
                     aberto_ms: d.ts_ms,
                     atualizado_ms: d.ts_ms,
+                    confianca: d.confianca,
                     contencao_negada: false,
+                    recuperada: None,
                 });
                 self.lista.len() - 1
             }
@@ -179,6 +226,7 @@ impl Incidentes {
         };
         let inc = &mut self.lista[i];
         inc.severidade = inc.severidade.max(d.severidade);
+        inc.confianca = inc.confianca.max(d.confianca);
         inc.atualizado_ms = inc.atualizado_ms.max(d.ts_ms);
         inc.atores.insert(d.principal.clone());
         for r in &d.registros {
@@ -269,6 +317,7 @@ mod testes {
         Deteccao {
             regra: Regra::ForaDoAlcance,
             severidade,
+            confianca: Confianca::Media,
             principal: principal.to_string(),
             titular: Titular::Agente,
             registros: alloc::vec![ts],
@@ -309,6 +358,40 @@ mod testes {
         assert_eq!((inc.aberto_ms, inc.atualizado_ms), (2, 4));
     }
 
+    /// Alertar pede confiança: uma detecção de confiança baixa não abre
+    /// incidente — é uma observação —, nem com severidade alta. Com o
+    /// incidente aberto, entra nele como contexto, e não sobe a confiança.
+    #[test]
+    fn a_confianca_baixa_nao_abre() {
+        let mut is = Incidentes::novo();
+        let mut baixa = det("a", Severidade::Alta, 1);
+        baixa.confianca = Confianca::Baixa;
+        assert_eq!(is.registrar(&baixa, 0, false), None);
+        let id = is
+            .registrar(&det("a", Severidade::Media, 2), 0, false)
+            .unwrap();
+        assert_eq!(is.registrar(&baixa, 0, false), Some(id));
+        let inc = is.get(id).unwrap();
+        assert_eq!(inc.confianca, Confianca::Media);
+        assert_eq!(inc.deteccoes.len(), 2);
+    }
+
+    /// A corroboração: a rede usada depois de uma violação alta ganha um
+    /// degrau de confiança; depois de algo que é só risco, não.
+    #[test]
+    fn a_corroboracao() {
+        let mut is = Incidentes::novo();
+        let mut sondagem = det("a", Severidade::Alta, 1);
+        sondagem.regra = Regra::SondagemDePrivilegio;
+        let id = is.registrar(&sondagem, 0, false).unwrap();
+        assert_eq!(is.get(id).unwrap().corroboracao(), Confianca::Alta);
+        let mut dns = det("b", Severidade::Alta, 1);
+        dns.regra = Regra::DnsContraAPolitica;
+        let id = is.registrar(&dns, 0, false).unwrap();
+        assert!(is.get(id).unwrap().alto());
+        assert_eq!(is.get(id).unwrap().corroboracao(), Confianca::Media);
+    }
+
     #[test]
     fn a_acao_e_o_desfecho() {
         let mut is = Incidentes::novo();
@@ -316,23 +399,29 @@ mod testes {
         d.alvo = Some(Alvo {
             destino: "tcp:1.2.3.4:5".to_string(),
             dono: "process:1".to_string(),
+            papel: "operador".to_string(),
         });
         let id = is.registrar(&d, 0, false).unwrap();
         assert!(is.get(id).unwrap().recursos.contains("tcp:1.2.3.4:5"));
         let acao = Acao {
             id: 0,
-            nivel: Nivel::Contencao,
+            nivel: Nivel::Reversivel,
             metodo: "net.block".to_string(),
             params: String::new(),
             recurso: "tcp:1.2.3.4:5".to_string(),
+            dono: "process:1".to_string(),
             estado: EstadoDaAcao::Planejada,
             decisao: None,
+            origem: 1,
             autorizado_por: "service:nsf".to_string(),
             justificativa: String::new(),
         };
         let a = is.agir(id, acao.clone()).unwrap();
+        assert!(!is.get(id).unwrap().contido("process:1"));
         is.desfecho(a, EstadoDaAcao::Permitida);
         assert_eq!(is.get(id).unwrap().estado, Estado::Contido);
+        assert!(is.get(id).unwrap().contido("process:1"));
+        assert!(!is.get(id).unwrap().contido("process:2"));
         let b = is.agir(id, acao).unwrap();
         is.desfecho(
             b,
