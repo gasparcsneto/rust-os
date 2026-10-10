@@ -3952,6 +3952,14 @@ fn usuario_programas_compilados_rodam() -> Resultado {
         if usa_o_monte && crate::usuario::estatisticas_de_memoria().0 == mapeamentos {
             return Err("um programa compilado rodou sem pedir memoria ao kernel");
         }
+        // O `memoria` esgota a memória de propósito, e ela volta quando o
+        // coletor recolhe o processo — depois de ele sair. O próximo
+        // programa espera a volta: lançado antes, ele acharia a máquina
+        // sem um frame, como o CI viu.
+        if nome == "memoria" {
+            esperar_ate(|| crate::frames::estatisticas().0 + 64 >= livres_antes, 600)
+                .map_err(|_| "a memoria que o programa esgotou nao voltou quando ele saiu")?;
+        }
     }
 
     // A linha longa do `ola`: cortada no tamanho de um registro, e marcada
