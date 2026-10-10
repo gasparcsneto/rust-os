@@ -1894,7 +1894,11 @@ handler do registro pode ir ao disco e ao TPM. Então `pedir` deixa o pedido
 no fio e o põe a esperar; a tarefa `programas` do executor o atende, onde os
 comandos sempre rodaram, e acorda o fio com a resposta. A resposta fica no
 fio até ser buscada: o comando já teve efeito, e ela pode não caber no
-buffer do programa.
+buffer do programa. Buscada, ela vem inteira, do tamanho que tiver: o teto
+de 4 KiB por chamada é para o tamanho que o processo escolhe, e não para a
+resposta, que o kernel montou — com ele, um `fs.read` ou um `net.recv` de
+4096 bytes em base64 nunca chegava ao programa. E o anexo de um pedido vai
+até `MAIOR_ANEXO`, 60 KiB, como a interface promete.
 
 **Quem pediu e por quem.** O gate decide um pedido de processo como
 `Chamador::Processo`: a autoridade é a de quem o lançou, procurada a cada

@@ -154,6 +154,11 @@ const _: () = {
 /// Ele vale para `ler` também, e ali o teto faz uma segunda coisa: é o que
 /// limita o buffer que o kernel aloca por leitura. Sem ele, um processo
 /// escolheria quanto do heap do kernel quer consumir por chamada.
+///
+/// É o teto do tamanho que o **processo** escolhe a cada chamada. Uma cópia
+/// cujo tamanho já tem outro limite usa o dela — ver [`validar_faixa_ate`]:
+/// o anexo de um pedido vai até `MAIOR_ANEXO`, e a resposta de um pedido
+/// tem o tamanho que o kernel deu a ela.
 const MAX_TRANSFERENCIA: u64 = 4096;
 
 /// Maior nome de programa que `executar` aceita.
@@ -212,10 +217,21 @@ static SAIDAS: AtomicU64 = AtomicU64::new(0);
 /// número. Saturar também impediria o transbordo, mas devolveria uma faixa
 /// que continua parecendo legítima; recusar diz o que aconteceu.
 pub fn validar_faixa(inicio: u64, tamanho: u64) -> Result<(), i64> {
+    validar_faixa_ate(inicio, tamanho, MAX_TRANSFERENCIA)
+}
+
+/// [`validar_faixa`], com `teto` no lugar do de uma transferência comum:
+/// para as cópias cujo tamanho já tem outro limite — o anexo de um pedido,
+/// até `MAIOR_ANEXO`; a resposta de um pedido, que o kernel montou, e não
+/// o processo. Com o teto comum, as duas eram cortadas em 4 KiB, contra o
+/// que a interface promete: um anexo de 5 KiB era recusado, e uma resposta
+/// de 5 KiB — um `net.recv` de 4096 bytes, em base64 — nunca chegava ao
+/// programa, que ouvia `TAMANHO_INVALIDO` a cada vez que a buscava.
+pub fn validar_faixa_ate(inicio: u64, tamanho: u64, teto: u64) -> Result<(), i64> {
     if tamanho == 0 {
         return Ok(());
     }
-    if tamanho > MAX_TRANSFERENCIA {
+    if tamanho > teto {
         return Err(erro::TAMANHO_INVALIDO);
     }
     let fim = inicio.checked_add(tamanho).ok_or(erro::ENDERECO_INVALIDO)?;
@@ -253,7 +269,13 @@ pub fn validar_faixa(inicio: u64, tamanho: u64) -> Result<(), i64> {
 /// processo pode escrever nela, e a escrita do kernel é resolvida pelo
 /// tratador de falha como a dele seria — ver `resolver_copia_na_escrita`.
 pub fn validar_escrita(inicio: u64, tamanho: u64) -> Result<(), i64> {
-    validar_faixa(inicio, tamanho)?;
+    validar_escrita_ate(inicio, tamanho, MAX_TRANSFERENCIA)
+}
+
+/// [`validar_escrita`], com `teto` no lugar do de uma transferência comum —
+/// ver [`validar_faixa_ate`].
+pub fn validar_escrita_ate(inicio: u64, tamanho: u64, teto: u64) -> Result<(), i64> {
+    validar_faixa_ate(inicio, tamanho, teto)?;
     if tamanho == 0 {
         return Ok(());
     }

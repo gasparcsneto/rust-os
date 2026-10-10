@@ -111,6 +111,60 @@ impl Drop for Resposta {
     }
 }
 
+/// O valor de um caractere base64.
+fn valor_base64(c: u8) -> Option<u32> {
+    Some(match c {
+        b'A'..=b'Z' => c - b'A',
+        b'a'..=b'z' => c - b'a' + 26,
+        b'0'..=b'9' => c - b'0' + 52,
+        b'+' => 62,
+        b'/' => 63,
+        _ => return None,
+    } as u32)
+}
+
+/// Base64 com preenchimento, de volta a bytes, no fim de `saida`.
+fn de_base64(texto: &str, saida: &mut Vec<u8>) -> Option<()> {
+    let b = texto.as_bytes();
+    if !b.len().is_multiple_of(4) {
+        return None;
+    }
+    for quarteto in b.chunks(4) {
+        let iguais = quarteto.iter().rev().take_while(|&&c| c == b'=').count();
+        if iguais > 2 {
+            return None;
+        }
+        let mut n = 0u32;
+        for &c in &quarteto[..4 - iguais] {
+            n = (n << 6) | valor_base64(c)?;
+        }
+        n <<= 6 * iguais as u32;
+        let tres = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
+        saida.extend_from_slice(&tres[..3 - iguais]);
+    }
+    Some(())
+}
+
+/// O conteúdo de uma leitura — `fs.read`, `net.recv` —, em bytes: em texto
+/// (`utf-8`), desescapado; em `base64`, decodificado. `None` sem conteúdo,
+/// ou num envelope que não é uma leitura.
+pub fn conteudo(r: &Resposta) -> Option<Vec<u8>> {
+    let resultado = r.resultado().ok()?;
+    let campo = resultado.member("content")?;
+    match resultado.member("encoding")?.as_str()? {
+        "utf-8" => {
+            let mut claro = alloc::vec![0u8; campo.0.len()];
+            Some(campo.desescapar_em(&mut claro)?.as_bytes().to_vec())
+        }
+        "base64" => {
+            let mut bytes = Vec::new();
+            de_base64(campo.as_str()?, &mut bytes)?;
+            Some(bytes)
+        }
+        _ => None,
+    }
+}
+
 /// Pede `metodo` com os campos que `params` escreve dentro do objeto dos
 /// parâmetros — `|_| Ok(())` para nenhum. A resposta, ou o erro da chamada
 /// de sistema.

@@ -143,11 +143,14 @@ fn pedir_com(ponteiro: u64, tamanho: u64, anexo: Option<u64>) -> i64 {
                 u64::from_le_bytes(core::ptr::read_unaligned(p.add(1))),
             )
         };
-        if quantos as usize > protocolo::usuario::nativo::MAIOR_ANEXO {
+        let teto = protocolo::usuario::nativo::MAIOR_ANEXO as u64;
+        if quantos > teto {
             return erro::TAMANHO_INVALIDO;
         }
         if quantos > 0 {
-            if let Err(e) = crate::usuario::validar_faixa(onde, quantos) {
+            // O teto do anexo, e não o de uma transferência comum: o anexo
+            // vai até `MAIOR_ANEXO`, como a interface promete.
+            if let Err(e) = crate::usuario::validar_faixa_ate(onde, quantos, teto) {
                 return e;
             }
             texto.acrescentar(&[SEPARADOR_DO_ANEXO]);
@@ -182,13 +185,17 @@ pub fn resposta(ponteiro: u64, capacidade: u64) -> i64 {
         crate::fios::devolver_resposta(texto);
         return n as i64;
     }
-    if let Err(e) = crate::usuario::validar_escrita(ponteiro, n as u64) {
+    // O teto é o tamanho da própria resposta: quem a montou foi o kernel, e
+    // não o processo. Com o de uma transferência comum, 4 KiB, nenhuma
+    // resposta maior chegava ao programa — ver `usuario::validar_faixa_ate`.
+    if let Err(e) = crate::usuario::validar_escrita_ate(ponteiro, n as u64, n as u64) {
         crate::fios::devolver_resposta(texto);
         return e;
     }
-    // SAFETY: `validar_escrita` confirmou os `n` bytes no espaço do usuário,
-    // mapeados e graváveis. Fora de qualquer trava: escrever na memória do
-    // processo pode passar pelo tratador de uma página de cópia na escrita.
+    // SAFETY: `validar_escrita_ate` confirmou os `n` bytes no espaço do
+    // usuário, mapeados e graváveis. Fora de qualquer trava: escrever na
+    // memória do processo pode passar pelo tratador de uma página de cópia
+    // na escrita.
     unsafe {
         core::ptr::copy_nonoverlapping(texto.como_bytes().as_ptr(), ponteiro as *mut u8, n);
     }

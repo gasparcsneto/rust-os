@@ -14,7 +14,11 @@
 //! - os diretórios são explícitos: o programa cria o seu antes de gravar
 //!   dentro dele, e nada é criado de passagem;
 //! - o conteúdo binário vai fora do JSON, no anexo do pedido
-//!   (`PEDIR_COM_ANEXO`), e volta byte a byte pela leitura de sempre.
+//!   (`PEDIR_COM_ANEXO`), e volta byte a byte pela leitura de sempre e pelo
+//!   `fs.read`. O anexo passa de 4 KiB, e a resposta do `fs.read` também:
+//!   são as duas cópias que não seguem o teto de uma transferência comum —
+//!   o anexo vai até `MAIOR_ANEXO`, e a resposta tem o tamanho que o kernel
+//!   deu a ela.
 //!
 //! Lançado por alguém sem `fs.write` no papel, sai com [`SEM_ESCRITA`]
 //! depois de ouvir `DENY_PERMISSION`. Sai com [`CODIGO`] quando tudo
@@ -39,6 +43,10 @@ const SEM_ESCRITA: i64 = 70;
 const DIRETORIO: &str = "/armazem/compartilhado/programa";
 const CAMINHO: &str = "/armazem/compartilhado/programa/nota.txt";
 const BINARIO: &str = "/armazem/compartilhado/programa/bytes.bin";
+
+/// O tamanho do binário: mais que uma transferência comum, 4 KiB, e menos
+/// que o anexo, 60 KiB.
+const BINARIO_TAMANHO: usize = 10_000;
 
 fn codigo_de(r: &nativo::Resposta) -> Option<&str> {
     match r.resultado() {
@@ -195,11 +203,11 @@ fn principal() -> i64 {
     escreverln!("guardar: fora do alcance e recusado");
 
     // Binário, fora do JSON: todos os bytes, o zero e o 0xFF incluídos, no
-    // anexo do pedido; e de volta pela leitura de sempre.
-    let mut bytes = [0u8; 600];
-    for (i, b) in bytes.iter_mut().enumerate() {
-        *b = (i as u8).wrapping_mul(37);
-    }
+    // anexo do pedido — mais que uma transferência comum, 4 KiB —; e de
+    // volta pela leitura de sempre, em pedaços, e pelo `fs.read`.
+    let bytes: alloc::vec::Vec<u8> = (0..BINARIO_TAMANHO)
+        .map(|i| (i as u8).wrapping_mul(37) ^ (i >> 8) as u8)
+        .collect();
     let Ok(estado) = nativo::pedir("fs.stat", |w| w.field_str("path", BINARIO)) else {
         return 8;
     };
@@ -222,14 +230,43 @@ fn principal() -> i64 {
     if d < 0 {
         return 8;
     }
-    let mut lido = [0u8; 700];
-    let n = ler_tudo(d as u64, &mut lido);
+    // Pelo descritor, de 4 KiB em 4 KiB: o teto de uma leitura.
+    let mut lido = alloc::vec::Vec::new();
+    let mut pedaco = [0u8; 4096];
+    loop {
+        let n = ler_tudo(d as u64, &mut pedaco);
+        if n <= 0 {
+            break;
+        }
+        lido.extend_from_slice(&pedaco[..n as usize]);
+    }
     sistema::fechar(d as u64);
-    if n < 0 || lido[..n as usize] != bytes[..] {
-        escreverln!("guardar: o binario voltou diferente ({} bytes)", n);
+    if lido != bytes {
+        escreverln!("guardar: o binario voltou diferente ({} bytes)", lido.len());
         return 8;
     }
-    escreverln!("guardar: o binario foi e voltou pelo anexo");
+    // Pelo `fs.read`: 4096 bytes que não são texto vêm em base64, e a
+    // resposta passa de 4 KiB.
+    let Ok(r) = nativo::pedir("fs.read", |w| {
+        w.field_str("path", BINARIO)?;
+        w.field_u64("offset", 0)?;
+        w.field_u64("max", 4096)
+    }) else {
+        escreverln!("guardar: a resposta do fs.read de 4096 bytes nao chegou");
+        return 9;
+    };
+    if r.bytes().len() <= 4096 || nativo::conteudo(&r).as_deref() != Some(&bytes[..4096]) {
+        escreverln!(
+            "guardar: o fs.read voltou diferente ({} bytes de resposta)",
+            r.bytes().len()
+        );
+        return 9;
+    }
+    escreverln!(
+        "guardar: o binario de {} bytes foi pelo anexo e voltou, e o fs.read respondeu {} bytes",
+        bytes.len(),
+        r.bytes().len()
+    );
 
     escreverln!("guardar conferido: o armazem pelo mesmo gate");
     CODIGO
