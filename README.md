@@ -2636,6 +2636,167 @@ produção, `agent::atender`, andada à mão pela suíte.
   TCP passou a cair na janela do tecido. A etapa solta agora a linha que
   editou, e nenhuma deixa um prazo correndo para as seguintes.
 
+### O HTTP de um programa
+
+O HTTP/1.1 é do **programa**, como o DNS e o TLS: o pacote
+[`http`](http/src/lib.rs) é um cliente puro, sem dependência nenhuma —
+a URL, o pedido, a resposta pela RFC 9112, o *keep-alive* —, e
+[`programas::http`](programas/src/http.rs) o põe sobre a conexão do gate,
+direto no TCP ou com o TLS no meio, com o nome pelo DNS do próprio
+programa. A ordem de uma conexão é a de quem falha fechado:
+
+1. a URL — só `http` e `https`, o host por nome ou IPv4 na forma normal;
+2. com `https`, a semente e o relógio, pelo gate, antes de qualquer
+   conexão;
+3. o nome vira endereço pelo DNS do programa — a associação com o
+   servidor, que o gate decide —, e o endereço não vale nada para a
+   política;
+4. `net.connect` com o destino inteiro, decidido pelo gate como se o
+   número tivesse sido digitado, e pelo firewall depois dele;
+5. com `https`, o TLS prova o nome da URL pelas âncoras do programa;
+6. cada pedido e cada resposta, com cada `net.send` e cada `net.recv`
+   decidido de novo, com a autoridade de quem lançou o processo.
+
+```
+pagina: http://bancada.duke/ola -> 200 (10 bytes) em 80 ms
+pagina: tres pedidos numa conexao so (keep-alive), 1 2 3, e a quarta recusada depois do close
+pagina: http://bancada.duke/pedacos -> 200 (22 bytes) em 50 ms
+pagina: 65536 bytes foram e voltaram (POST) em 960 ms
+pagina: 404 e uma resposta, e 302 volta com o Location, sem ser seguido
+pagina: o corpo ate o fecho chegou inteiro, e a conexao nao ficou
+pagina: https://bancada.duke:8443/ola -> 200 (TLS13_AES_256_GCM_SHA384) em 110 ms, o aperto em 100 ms
+pagina: https://outro.duke:8443/ola -> tls TLS_NAME_MISMATCH em 80 ms
+pagina: http://bancada.duke:81/ola -> denied DENY_RESOURCE em 10 ms
+pagina: http://bancada.duke/torto/dobra -> protocol HTTP_MALFORMED em 50 ms
+pagina: http://bancada.duke/grande/2000000 -> limit HTTP_TOO_LARGE em 50 ms
+pagina: http://bancada.duke/corta -> closed HTTP_CLOSED em 80 ms
+pagina: http://bancada.duke/mudo -> timeout NETWORK_TIMEOUT em 2010 ms
+pagina: eco TCP cru: 65536 bytes foram e voltaram em 880 ms
+pagina: http://bancada.duke/grande/65536 -> 65536 bytes em 930 ms (68 KiB/s)
+pagina: https://bancada.duke:8443/grande/65536 -> 65536 bytes em 930 ms (68 KiB/s)
+pagina: http://bancada.duke/grande/262144 -> 262144 bytes em 3630 ms (70 KiB/s)
+```
+
+**As medidas** — no x86, kernel de produção, sozinho na bancada (o
+emulador sem aceleração, quatro núcleos; as outras seis respostas
+malformadas ficam entre 40 e 100 ms). O TLS custa o aperto, 100 a 170 ms
+por conexão, e depois dele nada que se meça: a mesma página de 64 KiB
+leva o mesmo tempo clara e cifrada. O HTTP custa menos de 10% sobre o
+TCP cru — o `POST` de 64 KiB que vai e volta, contra o eco que faz o
+mesmo sem protocolo. A vazão, de 70 a 100 KiB/s, é a da conexão: cada sentido tem
+um buffer de 4 KiB, que é a janela do TCP, e cada `net.recv` traz no
+máximo um deles e é uma decisão do gate e um registro da auditoria. Na
+fumaça inteira, com a página, uma decisão do gate leva 465 µs em média —
+a conta da política, 19 µs; um registro da auditoria, 208 µs —, o NSF
+usa 2,6% do tempo de máquina e a auditoria 0,5%. Uma visita curta
+sozinha leva 550 ms; quatro ao mesmo tempo, de pessoas e de agentes,
+1600 ms. No ARM, também release: a página pequena em 70 ms, o aperto em
+120 ms, os mesmos 69 KiB/s, e as quatro visitas em 910 ms. O kernel
+debug, mais lento, mede mais vazão que o release nas duas arquiteturas —
+o gargalo não é a CPU, é o ritmo em que uma janela tão pequena volta a
+ser anunciada, assunto da pilha. Na memória, o programa com TLS e HTTP tem uns 700 KB — o TLS
+são uns 570, o HTTP uns 60 —; a resposta não passa dos limites de quem
+pede (a linha, 8 KiB; a cabeça, 16 KiB; 64 cabeçalhos; o corpo, 1 MiB);
+e o kernel guarda 2 × 4 KiB por conexão, quatro por dono, dezesseis na
+máquina.
+
+**Nada do HTTP é autorização.** O gate decide o destino; o método, o
+caminho, o `Host`, os cabeçalhos, o status, o corpo, o redirecionamento e
+o *keep-alive* são do protocolo e de quem o fala. Não há comando `http.*`
+no registro, nem permissão `http.*` na política, e o kernel não depende do
+pacote — o `xtask invariantes` confere as três coisas. O DNS dá um número,
+e o número fora do alcance é `DENY_RESOURCE`, como o digitado; o
+certificado prova o nome ao programa, e o mesmo destino serve um nome que
+o TLS aceita e outro que ele recusa; a conexão mantida não leva
+autorização de um pedido ao seguinte. O que o programa pode é o que o gate
+decide para os pedidos de rede dele — com a autoridade de quem o lançou,
+a pessoa pela sessão ou o agente pela chave, e só ela: a resposta que
+chega depois da revogação não é entregue, e a do processo contido também
+não.
+
+**As falhas não se misturam.** Cada uma sobe com o código de quem falhou,
+e [`http::categoria`](http/src/categoria.rs) diz a família, sem decidir
+nada: a recusa do gate (`denied`), a contenção (`contained`), o firewall
+(`firewall`), o DNS (`dns`), o transporte — a rede, o teto, a conexão
+recusada ou derrubada pelo outro lado (`transport`) —, o prazo
+(`timeout`), o TLS (`tls`), a conversa que acabou antes da hora
+(`closed`), o protocolo (`protocol`), os limites (`limit`) e o pedido
+(`request`). O fim em ordem do outro lado não é falha; a conexão que ele
+derruba é `CONNECTION_RESET`, e o servidor que se cala é `NETWORK_TIMEOUT`
+— três estados que o transporte dos programas
+([`programas::conexao`](programas/src/conexao.rs)) separa, e que o TLS
+passa como vieram.
+
+**O protocolo é estreito, de propósito.** Só HTTP/1.1 — e o 1.0 que ele
+lê —, um pedido de cada vez numa conexão, sem fila. O fim de linha é CRLF
+e nada mais; o cabeçalho dobrado, o `Transfer-Encoding` junto com o
+`Content-Length`, dois tamanhos que não concordam e uma codificação que
+não é só `chunked` são recusados — cada um deixaria cliente e servidor
+lerem respostas diferentes. Os limites — a linha, a cabeça, quantos
+cabeçalhos, o corpo — param a leitura ali, e o corpo anunciado grande
+demais é recusado sem esperar ele chegar. A conexão só leva o pedido
+seguinte quando a resposta teve fim certo, não pediu para fechar e nada
+chegou colado depois dela: o que chega sem pedido é um servidor
+dessincronizado, e não o começo da resposta seguinte. O prazo é de
+silêncio — quanto o outro lado pode ficar sem mandar nada —, e não da
+conversa inteira. Fora, de propósito: HTTP/2 e HTTP/3, compressão,
+cookies, autenticação, *proxy* e seguir redirecionamento sozinho.
+
+**A bancada é de fora.** O servidor é um script Python do hospedeiro
+([`xtask/bancada/http.py`](xtask/bancada/http.py)), que o emulador roda a
+cada conexão a `10.0.2.100:80` — e a `10.0.2.100:8443`, atrás do TLS do
+OpenSSL, com os certificados do eco TLS —, com uma rota para cada
+comportamento que a suíte e a fumaça conferem: o corpo em pedaços, o
+contador da conexão mantida, o eco do `POST`, o lento, o mudo, o que corta,
+os malformados. Os dois destinos estão na política de desenvolvimento, e
+a porta ao lado não está.
+
+#### O que o exercício encontrou
+
+- **O firewall respondia como a política.** A regra que derruba uma
+  conexão viva tirava o número dela da tabela, e o pedido seguinte do
+  programa — o envio, ou a leitura que acordou da espera — não achava
+  conexão nenhuma: o gate o recusava com `DENY_RESOURCE`, a recusa de um
+  recurso que não é de quem pede, quando quem barrou foi o firewall. Um
+  caso do TLS conferia exatamente isso, e a documentação dizia o
+  contrário. Agora o número continua do dono, cortado: o gate decide o
+  pedido como qualquer outro — a autoridade, a contenção e a revogação
+  vêm primeiro —, e a execução ouve a regra, `FIREWALL_BLOCKED`, gravada
+  como execução da decisão. O `net.close` solta o número, e o coletor o
+  esquece quando o dono acaba.
+- **O DNS escondia a recusa.** A recusa da associação virava sempre
+  `DENY_POLICY`, qualquer que fosse o código do gate, e a recusa na
+  pergunta ou na leitura virava `DNS_UNAVAILABLE` — um servidor mudo. O
+  programa revogado no meio da cadeia ouvia que o DNS não respondeu. Agora
+  a falha leva o código de quem a deu: o do gate, ou o de depois dele.
+- **O transporte dos programas misturava três estados.** A conexão
+  recusada pelo outro lado e o prazo eram a mesma `TLS_UNAVAILABLE`, e a
+  conexão derrubada no meio era o fim em ordem. O transporte saiu do TLS
+  para [`programas::conexao`](programas/src/conexao.rs), que o TLS e o
+  HTTP usam, e separa a recusa do gate, o código de depois dele, a
+  conexão recusada, a derrubada e o prazo.
+- **A taxa do papel é o teto da vazão.** Cada `net.recv` traz no máximo
+  um buffer da conexão — 4 KiB —, e cada um é uma decisão do gate e um
+  registro da auditoria; a que espera e acorda é decidida de novo. Um
+  operador, com a taxa de todo dia, ouve `RATE_LIMIT` no meio de uma
+  página grande — como deve: a suíte sobe a taxa do operador no caso das
+  medidas, e a fumaça as faz pela serial, com a taxa do sistema.
+- **Fechar é um pedido.** O programa que larga uma conexão depois de a
+  política tirar o destino dela ouve `DENY_RESOURCE` no `net.close`, e a
+  conexão fica na tabela, no teto dele, até ele acabar. O caso da conexão
+  mantida achou a de antes no lugar da nova.
+- **O NSF parava no primeiro lote da captura.** Os casos do HTTP resolvem
+  pelo DNS da bancada, e os do DNS, que vêm depois deles, falharam na
+  suíte inteira: o NSF não via resolução nenhuma. Ele lia a captura de um
+  servidor em lotes de 16, um lote por volta — e o resto esperava outro
+  datagrama, que podia não vir. O NSF recomeçado pela suíte, além disso,
+  lia o anel desde o começo: a conversa dos casos de antes enchia o
+  primeiro lote, e a leitura parava ali. Agora a volta segue lendo
+  enquanto o lote vem cheio, e o NSF que começa do agora só lê a captura
+  do agora em diante. O caso `dns: o NSF le a rajada inteira` manda 24
+  datagramas entre duas voltas, e confere que a observação recusada não
+  insiste.
+
 ### As mutações da rede
 
 Quinze mutações contra o que este incremento promete — a posse, a
@@ -2957,6 +3118,64 @@ kernel lê o tamanho da lista — só a suíte, para saber se a vaga ficou
 livre —, e a ordem só muda o que ela observa: a corrida que a mudança
 fechou apareceu uma vez, no caso do prazo, que conferia a recusa logo
 depois de a lista esvaziar, antes de o coletor gravá-la.
+
+### As mutações do HTTP
+
+Trinta e três mutações contra o que o HTTP de um programa promete — o gate
+em cada pedido, a autoridade de quem lançou o processo e só ela, a
+revogação, a contenção e o fim da sessão no meio da conversa, o firewall
+com o código dele, o DNS e o certificado que não autorizam, as falhas que
+não se misturam, o protocolo estreito e os limites — e contra o que o
+exercício corrigiu: o número da conexão cortada e a leitura da captura do
+NSF. Vinte e cinco contra os casos `http:` e `dns:` da suíte de quatro
+núcleos, no x86, seis contra os testes do hospedeiro e duas contra o
+`xtask invariantes` — três delas também contra o outro lado:
+**trinta e três reprovadas**.
+
+| Mutação | Reprovada por |
+|---|---|
+| o `net.recv` sem decisão do gate | `http: a revogacao no meio do pedido` — revogado o papel do agente, a resposta lenta chegou: `200`, e não `DENY_ROLE` |
+| o destino decide sozinho: o papel de quem pede não conta na rede | `http: a conexao mantida e decidida a cada pedido` — com o servidor fora do alcance do operador, o pedido seguinte deu `200 4`, e não `DENY_RESOURCE` |
+| o certificado autoriza: a sessão cifrada esconde a recusa de baixo | `http: a contencao no meio do pedido` — o processo contido ouviu `HTTP_CLOSED`, e não `DENY_CONTAINED` |
+| um comando `http.*` no registro | o `xtask invariantes` — um comando do HTTP fora do ponto de decisão |
+| a identidade do agente perdida no processo | `http: a revogacao no meio do pedido` e `http: varias visitas ao mesmo tempo` — a conexão do processo não foi decidida com o agente que o lançou |
+| o processo (o PID) como identidade depois do fim da sessão | `http: o fim da sessao no meio do pedido` — depois do `logout`, a resposta lenta chegou: `200`, e não `DENY_NOT_AUTHENTICATED` |
+| a conexão sobrevive à revogação: o papel guardado | `http: a revogacao no meio do pedido` — `200`, e não `DENY_ROLE` |
+| o corte do firewall tira o número: a conexão some | `http: o firewall corta a conexao com o codigo dele` — `DENY_RESOURCE`, e não `FIREWALL_BLOCKED`: o defeito que o exercício achou |
+| o firewall ignorado na conexão nova | o mesmo caso — a conexão saiu sem o código do firewall, e esperou até `NETWORK_TIMEOUT` |
+| a recusa do gate vira erro do TLS | `http: a contencao no meio do pedido` — `TLS_INTERRUPTED`, e não `DENY_CONTAINED` |
+| o nome decide o destino, e não o endereço que o DNS deu | `http: o nome pelo dns e o destino pelo gate` — o nome religado para fora do alcance conversou: `200`, e não `DENY_RESOURCE` |
+| o processo com outra autoridade que não a de quem o lançou | `http: a pagina pelo gate` — as conexões da página não foram decididas em nome da pessoa |
+| o enquadramento ambíguo aceito: o erro de protocolo vira resposta | `testes::o_enquadramento_ambiguo_e_recusado`, no hospedeiro; de ponta a ponta, `http: a pagina pelo gate` |
+| a recusa do gate vira falha técnica no transporte | `http: a revogacao no meio do pedido` — `local TECHNICAL_ERROR`, e não `denied DENY_ROLE` |
+| o `DENY_` na família genérica | `categoria::testes::cada_codigo_na_sua_familia`; de ponta a ponta, `http: a revogacao no meio do pedido` — `local DENY_ROLE` |
+| a contenção ignorada pelo gate | `http: a contencao no meio do pedido` — o processo contido não ouviu `DENY_CONTAINED` |
+| o corte do firewall sem registro na auditoria | `http: o firewall corta a conexao com o codigo dele` — o corte não foi gravado |
+| o NSF barra direto, fora do gate | o `xtask invariantes` — uma operação protegida chamada fora do ponto de decisão |
+| a conexão derrubada lida como fim em ordem | `http: a conexao mantida e decidida a cada pedido` — `HTTP_CLOSED`, e não `CONNECTION_RESET` |
+| o firewall na família do transporte | `categoria::testes::cada_codigo_na_sua_familia` |
+| o que chega sem pedido vira a resposta seguinte | `testes::o_que_chega_sem_pedido_nao_vira_a_resposta_seguinte` e `o_que_nao_deixa_a_conexao_para_o_pedido_seguinte` |
+| o corpo anunciado sem limite | `testes::o_tamanho_anunciado_grande_demais_nao_espera_o_corpo` e `os_limites_param_a_leitura` |
+| o fecho da cortada não solta o número | `http: o firewall corta a conexao com o codigo dele` — o número cortado ficou com o programa depois de ele o largar |
+| o coletor não esquece as cortadas de quem acabou | `http: o processo que acaba solta as conexoes` |
+| o DNS esconde a recusa do gate | `http: a revogacao no meio do pedido` — `dns DNS_UNAVAILABLE`, e não `denied DENY_ROLE` |
+| a conexão não leva o pedido seguinte | `testes::a_conexao_leva_o_pedido_seguinte_quando_a_resposta_deixa` |
+| o prazo vira fim em ordem | `http: a conexao mantida e decidida a cada pedido` — o servidor mudo deu `HTTP_CLOSED`, e não `NETWORK_TIMEOUT` |
+| a leitura cortada sem a regra nem o registro | `http: o firewall corta a conexao com o codigo dele` — o corte não foi gravado |
+| a tabela não acha a cortada | o mesmo caso — `INVALID_REQUEST`, e não `FIREWALL_BLOCKED` |
+| o gate não acha o destino da cortada | o mesmo caso — `DENY_RESOURCE`, e não `FIREWALL_BLOCKED` |
+| o NSF recomeçado lê a captura de antes dele | `dns: o NSF le a rajada inteira` — leu mais do que a rajada; no hospedeiro, `o_agora_vale_tambem_para_a_captura` |
+| o NSF lê um lote só por volta | `dns: o NSF le a rajada inteira` — parou nos primeiros 16 datagramas |
+| a observação recusada insiste na mesma volta | o mesmo caso — três recusas numa volta |
+
+A autorização só pelo destino teve de ser escrita duas vezes. A primeira
+trocava o papel de quem pede pelo do sistema em `decidir_destino` — e
+sobreviveu, com o caso da revogação e com o da conexão mantida: aquela
+função decide o **destinatário de uma mensagem**, e não o destino de uma
+conexão, que passa pela conta comum do gate, `decidir`, como qualquer
+recurso. A mutação que vale troca o papel ali, só para os destinos
+`tcp:`; o caso da conexão mantida, que tira o servidor do alcance do
+operador e o deixa no do sistema, a reprova.
 
 ## O tecido de segurança
 

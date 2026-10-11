@@ -445,6 +445,62 @@ onde veio —, e não entra em decisão nenhuma.
   não pela conexão: continua o agente depois que ela cai, e perde a
   autoridade na hora em que a chave é revogada.
 
+## O HTTP (Fase 12)
+
+O HTTP/1.1 também é **programa**: o pacote `http` — o cliente, puro, sem
+dependência nenhuma — roda dentro do processo, sobre a conexão do gate,
+direto no TCP ou com o TLS no meio (`programas::http`), com o nome
+resolvido pelo DNS do próprio programa. O kernel não tem HTTP: não depende
+do pacote, nenhum comando do registro e nenhuma permissão da política é do
+HTTP, e o `xtask` confere as três coisas.
+
+Não há uma segunda política para o protocolo, nem autorização paralela:
+
+- **O que o gate decide é o destino.** Cada conexão é um `net.connect`
+  com o destino inteiro — o endereço que o DNS deu, decidido como se
+  tivesse sido digitado —, e cada envio e cada leitura são decididos de
+  novo, com a autoridade de quem lançou o processo — a pessoa pela sessão,
+  o agente pela chave —, e gravados com ela. O método, o caminho, o
+  `Host`, os cabeçalhos, o status, o corpo, o redirecionamento e o
+  *keep-alive* não chegam ao gate: não viram permissão, recurso nem regra.
+- **Nada no caminho autoriza.** O DNS dá um endereço, e o endereço fora do
+  alcance é recusado como o número digitado. O TLS prova o nome ao
+  programa, e a sessão cifrada não autoriza o que vem depois do aperto. A
+  conexão mantida não leva autorização de um pedido ao seguinte: a
+  política nova, a revogação, a contenção e o fim da sessão valem no
+  próximo `net.send` ou `net.recv` — no meio de uma resposta, inclusive: a
+  resposta que chega depois de a chave ser revogada não é entregue.
+- **Um 3xx não é seguido sozinho.** Volta a quem chama com o `Location`;
+  ir até lá é outro pedido — outro nome no DNS, outro destino no gate.
+
+As falhas não se misturam. Cada uma sobe com o código de quem falhou, e a
+família dela (`http::categoria`) só o nomeia:
+
+| Família | Códigos | Quem falhou |
+|---|---|---|
+| `denied` | `DENY_*` (menos o da contenção), `RATE_LIMIT` | o gate |
+| `contained` | `DENY_CONTAINED` | o gate, pela contenção |
+| `firewall` | `FIREWALL_BLOCKED` | o firewall, depois do gate |
+| `dns` | `DNS_UNAVAILABLE`, `DNS_NAME_NOT_FOUND` | o DNS |
+| `transport` | `NETWORK_UNAVAILABLE`, `RESOURCE_LIMIT`, `CONNECTION_REFUSED`, `CONNECTION_RESET` | a rede, o teto, o outro lado |
+| `timeout` | `NETWORK_TIMEOUT` | o outro lado, que não respondeu no prazo |
+| `tls` | `TLS_*` (menos o fecho) | o TLS |
+| `closed` | `HTTP_CLOSED`, `TLS_INTERRUPTED`, `HTTP_CONNECTION_SPENT` | a conversa que acabou antes da hora |
+| `protocol` | `HTTP_MALFORMED` | o servidor, que não falou HTTP/1.1 |
+| `limit` | `HTTP_TOO_LARGE` | a resposta, maior que os limites de quem pediu |
+| `request` | `INVALID_REQUEST` | o pedido, que não se escreve |
+| `local` | o resto | o programa |
+
+Um código que nenhuma camada dá é `local`: nada que não se reconhece vira
+recusa de alguém, nem permissão.
+
+O NSF vê do HTTP o que vê de qualquer conexão: as decisões do gate — a
+associação com o DNS, a conexão, cada envio e cada leitura, com o destino
+— e o nome que o sensor do DNS ligou ao endereço (`security.explain`).
+Nada do protocolo: não há regra do NSF sobre HTTP, nem leitura do que vai
+dentro — e, no `https`, nem os bytes. O uso normal não abre incidente: a
+suíte confere que a cadeia inteira não leva o NSF a pedir nada.
+
 ## As consultas
 
 Todas pelo gate, com a permissão `security.read` (sensível: diz o que os
@@ -489,6 +545,12 @@ mesma regra:
   sem nome na política;
 - o TLS segue o mesmo caminho: programa sobre o TCP, sem TLS no kernel; o
   certificado prova o nome ao programa, e não autoriza nada no gate;
+- o HTTP também: programa sobre o TCP ou o TLS, sem HTTP no kernel, sem
+  comando nem permissão dele; o gate decide o destino, e o protocolo é do
+  programa;
+- a conexão cortada pelo firewall guarda o número para o dono: a ordem
+  continua a mesma — o gate decide, e o firewall barra depois —, e o que
+  muda é só o código que o dono ouve, o do firewall;
 - a revogação continua a do 4a1/L6: o NSF a recomenda, e quem tem a prova a
   executa.
 
@@ -535,6 +597,10 @@ contido pelo despertador.
   agentes de verdade esperam a janela, e cada um, o prazo de quem não fez
   o aperto. O canal limita quanto tempo e quantas vagas um estranho
   segura, e não que ele tente.
+- **O NSF não interpreta HTTP.** Nem o método, nem o caminho, nem o
+  status: só as decisões do gate sobre a conexão, e o nome que o DNS deu.
+  Um programa que insiste num caminho que o servidor recusa aparece como
+  pedidos `ALLOW` ao mesmo destino, e não como "404 repetido".
 - **O relógio dos registros é de um segundo.** As janelas e as taxas das
   regras e do perfil contam com essa resolução; a ordem entre a captura e
   a auditoria é a dos números dos registros, que é exata.
