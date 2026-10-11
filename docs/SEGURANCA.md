@@ -308,6 +308,14 @@ número na mão do programa; para conversar com ele, o programa pede
 decidiria se o número tivesse sido digitado. Um nome que resolve para um
 destino fora do alcance dá `DENY_RESOURCE`, como o destino daria.
 
+A recusa no meio do DNS também é do gate, com o código dele. A associação,
+a pergunta e a leitura da resposta são pedidos como os outros, e o
+programa contido, revogado ou sem sessão ouve `DENY_CONTAINED`,
+`DENY_ROLE` ou `DENY_NOT_AUTHENTICATED` — e não `DENY_POLICY` sempre, nem
+"o DNS não respondeu", como a primeira versão dizia quando a recusa vinha
+na pergunta ou na leitura. O HTTP pegou: a cadeia inteira começa pelo
+DNS, e a revogação no meio dela chegava como um servidor mudo.
+
 O NSF vê o DNS pela captura (`net.observe` sobre o servidor): entende a
 resposta com o mesmo codec — num lugar só, o fio dele — e liga o nome ao
 endereço, o endereço à conexão pedida em seguida pelo mesmo dono, e a

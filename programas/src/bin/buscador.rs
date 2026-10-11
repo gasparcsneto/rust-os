@@ -1,0 +1,228 @@
+//! Uma conversa HTTP que a suíte interrompe no meio: o outro lado dos casos
+//! `http:` que revogam, contêm, barram e encerram enquanto o programa tem
+//! uma conexão aberta, ou um pedido esperando a resposta.
+//!
+//! O programa começa pela cadeia inteira: o nome `bancada.duke` pelo DNS
+//! da bancada da suíte — a associação com `udp:10.0.2.53:53`, que o gate
+//! decide —, a conexão com o endereço que ele deu, `tcp:10.0.2.100:80`,
+//! que o gate decide como se o número tivesse sido digitado, e um `GET`.
+//! Diz `buscador: no meio` e espera um evento no canal [`CANAL`]. A cada
+//! evento [`tipo::ACAO`], o `a` diz o passo:
+//!
+//! - [`TROCA`]: um `GET /conta` pela conexão que tem;
+//! - [`NOVA`]: larga a conexão, resolve o nome de novo e conecta do zero —
+//!   o DNS, o destino e o pedido, cada um pelo gate;
+//! - [`LENTA`]: um `GET /lento/<b>` pela conexão que tem: o servidor só
+//!   responde depois de `b` milissegundos, e o programa espera a resposta
+//!   dormindo no kernel — é ali que a suíte revoga, contém, barra ou
+//!   encerra a sessão;
+//! - [`CIFRADA`]: uma conexão nova com `https://bancada.duke:8443`, pelo
+//!   DNS, e um `GET /ola` — a cadeia DNS → TCP → TLS → HTTP;
+//! - [`CIFRADA_LENTA`]: um `GET /lento/<b>` pela conexão cifrada;
+//! - [`MUDO`]: um `GET /mudo` numa conexão nova, com um prazo curto;
+//! - [`SAIR_SEM_FECHAR`]: sai sem fechar nada — o kernel recolhe as
+//!   conexões de quem acabou.
+//!
+//! Depois de cada passo, diz `buscador: <passo>: <status> <corpo>`, ou
+//! `buscador: <passo>: <família> <código>` — o código de quem falhou: a
+//! recusa do gate, a contenção, o firewall, o DNS, o transporte, o prazo,
+//! o TLS, o HTTP. Sai com [`CODIGO`] quando a suíte pede o fim.
+
+#![no_std]
+#![no_main]
+
+extern crate alloc;
+
+programas::manifesto!(
+    "buscador",
+    "net.connect",
+    "random.read",
+    "system.read",
+    "fs.read"
+);
+
+use alloc::format;
+use alloc::string::String;
+use programas::conexao::Prazo;
+use programas::escreverln;
+use programas::http::{self, ConexaoHttp, Falha, Limites, Metodo, Opcoes, Pedido, Resolucao, Url};
+use programas::sistema;
+use programas::tls;
+use protocolo::usuario::evento::{Evento, tipo};
+
+/// O código de saída no fim pedido. A suíte do kernel o procura.
+const CODIGO: i64 = 89;
+
+/// O código de saída de [`SAIR_SEM_FECHAR`].
+const SEM_FECHAR: i64 = 90;
+
+/// O canal por onde a suíte dita o passo.
+const CANAL: &str = "teste-buscador";
+
+/// Os passos — a suíte tem as mesmas constantes.
+const TROCA: i64 = 1;
+const NOVA: i64 = 2;
+const LENTA: i64 = 3;
+const CIFRADA: i64 = 4;
+const CIFRADA_LENTA: i64 = 5;
+const MUDO: i64 = 6;
+const SAIR_SEM_FECHAR: i64 = 9;
+
+/// O DNS da bancada da suíte.
+const DNS: &str = "udp:10.0.2.53:53";
+
+/// A raiz da bancada, na imagem.
+const ANCORAS: &str = "/dados/tls/bancada.pem";
+
+/// Diz o desfecho de um passo.
+fn dizer(passo: &str, desfecho: Result<http::Resposta, Falha>) {
+    match desfecho {
+        Ok(r) => {
+            escreverln!("buscador: {}: {} {}", passo, r.status, http::texto(&r));
+        }
+        Err(f) => {
+            escreverln!(
+                "buscador: {}: {} {}",
+                passo,
+                f.categoria().nome(),
+                f.codigo()
+            );
+        }
+    }
+}
+
+/// Um `GET` de `caminho` pela conexão `conexao`, se há uma.
+fn obter(
+    conexao: &mut Option<ConexaoHttp>,
+    base: &str,
+    caminho: &str,
+) -> Result<http::Resposta, Falha> {
+    let url = Url::ler(&format!("{base}{caminho}")).map_err(Falha::Url)?;
+    let Some(c) = conexao.as_mut() else {
+        return Err(Falha::Http(http::Erro::Esgotada));
+    };
+    c.trocar(&Pedido::novo(Metodo::Get, url), &Limites::default())
+}
+
+/// Uma conexão nova com `base`, pelo DNS.
+fn conectar(base: &str, opcoes: &Opcoes<'_>) -> Result<ConexaoHttp, Falha> {
+    let url = Url::ler(base).map_err(Falha::Url)?;
+    http::conectar(&url, opcoes)
+}
+
+#[unsafe(no_mangle)]
+fn principal() -> i64 {
+    let canal = sistema::escutar(CANAL);
+    if canal < 0 {
+        escreverln!("buscador: escutar devolveu {}", canal);
+        return 1;
+    }
+    let ancoras = match tls::ancoras(ANCORAS) {
+        Ok(a) => a,
+        Err(f) => {
+            escreverln!("buscador: as ancoras nao se leram: {}", f.codigo());
+            return 2;
+        }
+    };
+    let opcoes = Opcoes {
+        resolucao: Resolucao::Dns(DNS),
+        ancoras: Some(&ancoras),
+        prazo: Prazo {
+            espera_ms: 2_000,
+            esperas: 3,
+        },
+    };
+    const CLARA: &str = "http://bancada.duke";
+    const CIFRADA_URL: &str = "https://bancada.duke:8443";
+
+    let mut clara = match conectar(CLARA, &opcoes) {
+        Ok(c) => Some(c),
+        Err(f) => {
+            escreverln!(
+                "buscador: o comeco falhou: {} {}",
+                f.categoria().nome(),
+                f.codigo()
+            );
+            return 3;
+        }
+    };
+    match obter(&mut clara, CLARA, "/ola") {
+        Ok(r) if r.status == 200 => {}
+        outro => {
+            dizer("comeco", outro);
+            return 4;
+        }
+    }
+    let mut cifrada: Option<ConexaoHttp> = None;
+    escreverln!("buscador: no meio");
+
+    let mut eventos = [Evento::default(); 8];
+    loop {
+        let n = match sistema::ler_eventos(canal as u64, &mut eventos) {
+            Ok(n) => n,
+            Err(e) => {
+                escreverln!("buscador: a leitura do canal falhou: {}", e);
+                return 5;
+            }
+        };
+        for e in &eventos[..n] {
+            if e.tipo == tipo::ENCERRAR {
+                escreverln!("buscador: encerrado");
+                return CODIGO;
+            }
+            if e.tipo != tipo::ACAO {
+                continue;
+            }
+            match e.a {
+                TROCA => dizer("troca", obter(&mut clara, CLARA, "/conta")),
+                NOVA => {
+                    // A conexão de antes sai primeiro, e a nova não herda
+                    // nada dela: o nome, o destino e o pedido, de novo.
+                    drop(clara.take());
+                    let desfecho = conectar(CLARA, &opcoes).and_then(|c| {
+                        clara = Some(c);
+                        obter(&mut clara, CLARA, "/conta")
+                    });
+                    dizer("nova", desfecho);
+                }
+                LENTA => {
+                    let caminho: String = format!("/lento/{}", e.b);
+                    dizer("lenta", obter(&mut clara, CLARA, &caminho));
+                }
+                CIFRADA => {
+                    drop(cifrada.take());
+                    let desfecho = conectar(CIFRADA_URL, &opcoes).and_then(|c| {
+                        cifrada = Some(c);
+                        obter(&mut cifrada, CIFRADA_URL, "/ola")
+                    });
+                    dizer("cifrada", desfecho);
+                }
+                CIFRADA_LENTA => {
+                    let caminho: String = format!("/lento/{}", e.b);
+                    dizer("cifrada lenta", obter(&mut cifrada, CIFRADA_URL, &caminho));
+                }
+                MUDO => {
+                    let curto = Opcoes {
+                        prazo: Prazo {
+                            espera_ms: 500,
+                            esperas: 2,
+                        },
+                        ..opcoes
+                    };
+                    let desfecho = conectar(CLARA, &curto).and_then(|c| {
+                        let mut mudo = Some(c);
+                        obter(&mut mudo, CLARA, "/mudo")
+                    });
+                    dizer("mudo", desfecho);
+                }
+                SAIR_SEM_FECHAR => {
+                    escreverln!("buscador: saindo sem fechar");
+                    sistema::sair(SEM_FECHAR);
+                }
+                outro => {
+                    escreverln!("buscador: passo desconhecido {}", outro);
+                }
+            }
+        }
+    }
+}

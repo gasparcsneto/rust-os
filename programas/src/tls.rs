@@ -10,7 +10,10 @@
 //! - as **âncoras**: um arquivo PEM lido por `fs.read`;
 //! - o **transporte**: a conexão do `net.connect` — o destino inteiro, que
 //!   a política enumera —, com cada `net.send` e cada `net.recv` decididos
-//!   de novo, e os dois esperando pelo evento da pilha (`wait`), sem girar.
+//!   de novo, e os dois esperando pelo evento da pilha (`wait`), sem girar:
+//!   ver [`crate::conexao`]. As falhas dela passam pelo TLS com o código de
+//!   quem falhou — a recusa do gate, o firewall, a conexão recusada ou
+//!   derrubada, o prazo —, e não viram um código do TLS.
 //!
 //! A ordem de [`conectar`] é a de quem falha fechado: a semente e o relógio
 //! antes de qualquer conexão — sem eles, nada sai —, e o destino decidido
@@ -21,18 +24,9 @@ use alloc::vec::Vec;
 
 pub use tls::{Ancoras, CLARO_POR_REGISTRO, Codigo, Falha, Sessao};
 
+use crate::conexao;
+pub use crate::conexao::{Conexao, Prazo};
 use crate::nativo::{self, Resposta, conteudo};
-
-/// Quanto cada `net.recv` e cada `net.send` espera pelo evento da pilha, em
-/// milissegundos.
-const ESPERA_MS: u64 = 5_000;
-
-/// Quantas esperas vencidas seguidas o transporte aceita antes de dizer
-/// que o par não responde.
-const ESPERAS: usize = 3;
-
-/// O maior pedaço de um `net.send`: o buffer de uma conexão.
-const MAIOR_ENVIO: usize = 4096;
 
 /// O maior arquivo de âncoras que se lê.
 const MAIOR_ANCORAS: u64 = 16 * 1024;
@@ -129,117 +123,6 @@ pub fn ancoras(caminho: &str) -> Result<Ancoras, Falha> {
     Ancoras::de_pem(&pem)
 }
 
-/// A conexão do `net.connect`, como transporte do TLS. Largada, é fechada.
-pub struct Conexao {
-    numero: u64,
-}
-
-impl Conexao {
-    /// O número que o `net.connect` devolveu.
-    pub fn numero(&self) -> u64 {
-        self.numero
-    }
-
-    /// Espera o aperto do TCP terminar: uma leitura de nada, que espera o
-    /// estado sair de `connecting`.
-    fn esperar_aberta(&mut self) -> Result<(), Falha> {
-        for _ in 0..ESPERAS {
-            let r = do_pedido(nativo::pedir("net.recv", |w| {
-                w.field_u64("connection", self.numero)?;
-                w.field_u64("max", 0)?;
-                w.field_u64("wait", ESPERA_MS)
-            }))?;
-            if let Some(f) = falha_depois_do_gate(&r) {
-                return Err(f);
-            }
-            match r.resultado().ok().and_then(|j| j.member("state")?.as_str()) {
-                Some("established") => return Ok(()),
-                Some("connecting") => {}
-                // Recusada pelo outro lado, ou caiu.
-                _ => return Err(Falha::SemResposta),
-            }
-        }
-        Err(Falha::SemResposta)
-    }
-}
-
-impl Drop for Conexao {
-    fn drop(&mut self) {
-        // Sem garantia: a conexão pode já ter acabado, ou o gate recusar —
-        // um processo isolado não fecha nada, e a dele cai sozinha.
-        let _ = nativo::pedir("net.close", |w| w.field_u64("connection", self.numero));
-    }
-}
-
-impl tls::Transporte for Conexao {
-    fn mandar(&mut self, dados: &[u8]) -> Result<(), Falha> {
-        let mut mandados = 0;
-        let mut vencidas = 0;
-        while mandados < dados.len() {
-            let fim = (mandados + MAIOR_ENVIO).min(dados.len());
-            let r = do_pedido(nativo::pedir_com_anexo(
-                "net.send",
-                |w| {
-                    w.field_u64("connection", self.numero)?;
-                    w.field_u64("wait", ESPERA_MS)
-                },
-                &dados[mandados..fim],
-            ))?;
-            if let Some(f) = falha_depois_do_gate(&r) {
-                return Err(f);
-            }
-            let resultado = r.resultado().map_err(|_| Falha::Interna)?;
-            let n = resultado
-                .member("sent")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
-            if n == 0 {
-                // A espera venceu sem espaço, ou a conexão não manda mais.
-                match resultado.member("state").and_then(|e| e.as_str()) {
-                    Some("established") | Some("connecting") => {
-                        vencidas += 1;
-                        if vencidas >= ESPERAS {
-                            return Err(Falha::SemResposta);
-                        }
-                    }
-                    _ => return Err(Falha::Interrompida),
-                }
-            } else {
-                vencidas = 0;
-            }
-            mandados += n;
-        }
-        Ok(())
-    }
-
-    fn receber(&mut self, destino: &mut [u8]) -> Result<usize, Falha> {
-        for _ in 0..ESPERAS {
-            let maximo = destino.len().min(MAIOR_ENVIO) as u64;
-            let r = do_pedido(nativo::pedir("net.recv", |w| {
-                w.field_u64("connection", self.numero)?;
-                w.field_u64("max", maximo)?;
-                w.field_u64("wait", ESPERA_MS)
-            }))?;
-            if let Some(f) = falha_depois_do_gate(&r) {
-                return Err(f);
-            }
-            let bytes = conteudo(&r).ok_or(Falha::Interna)?;
-            if !bytes.is_empty() {
-                let n = bytes.len().min(destino.len());
-                destino[..n].copy_from_slice(&bytes[..n]);
-                return Ok(n);
-            }
-            match r.resultado().ok().and_then(|j| j.member("state")?.as_str()) {
-                // A espera venceu no silêncio: espera de novo.
-                Some("established") | Some("connecting") => {}
-                // O outro lado fechou, e nada mais vem.
-                _ => return Ok(0),
-            }
-        }
-        Err(Falha::SemResposta)
-    }
-}
-
 /// Conecta ao `destino` — `tcp:<ipv4>:<porta>`, decidido pelo gate —, e
 /// conversa TLS com quem prova ser `nome`, pelas `ancoras`.
 pub fn conectar(destino: &str, nome: &str, ancoras: &Ancoras) -> Result<Sessao<Conexao>, Falha> {
@@ -248,16 +131,6 @@ pub fn conectar(destino: &str, nome: &str, ancoras: &Ancoras) -> Result<Sessao<C
     let agora = relogio()?;
     // O destino, pelo gate: a recusa vem com o código dele, e o TLS nem
     // começa.
-    let r = do_pedido(nativo::pedir("net.connect", |w| w.field_str("to", destino)))?;
-    if let Some(f) = falha_depois_do_gate(&r) {
-        return Err(f);
-    }
-    let numero = r
-        .resultado()
-        .ok()
-        .and_then(|j| j.member("connection")?.as_u64())
-        .ok_or(Falha::Interna)?;
-    let mut conexao = Conexao { numero };
-    conexao.esperar_aberta()?;
+    let conexao = conexao::abrir(destino, Prazo::PADRAO).map_err(conexao::Falha::para_o_tls)?;
     Sessao::conectar(conexao, nome, ancoras, agora, semente)
 }

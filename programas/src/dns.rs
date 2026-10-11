@@ -11,6 +11,7 @@ use alloc::vec::Vec;
 
 use protocolo::dns;
 
+use crate::conexao::Codigo;
 use crate::nativo;
 
 /// Quanto a leitura espera a resposta, em milissegundos.
@@ -18,18 +19,21 @@ const ESPERA_MS: u64 = 3_000;
 
 /// Por que um nome não resolveu.
 ///
-/// Quatro coisas diferentes, que não se confundem (seção 24 do incremento
-/// de usabilidade): o DNS que não respondeu, a política que recusou o
-/// servidor, a rede que não está, o firewall que barrou — ver
+/// Coisas diferentes, que não se confundem (seção 24 do incremento de
+/// usabilidade): o DNS que não respondeu, o gate que recusou — com o código
+/// dele —, o firewall que barrou, a rede que não está — ver
 /// [`Falha::codigo`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Falha {
-    /// O gate recusou a associação com o servidor.
-    Recusada,
-    /// O gate deixou, e o firewall barrou o servidor.
-    Barrada,
-    /// O gate deixou, e a rede não está: sem endereço, sem pilha.
-    SemRede,
+    /// O gate recusou a associação com o servidor, a pergunta ou a leitura
+    /// da resposta — com o código dele: a política, a contenção, a
+    /// autoridade revogada no meio. Uma recusa no meio da conversa não é
+    /// um DNS que não respondeu.
+    Recusada(Codigo),
+    /// O gate deixou, e a execução não, com o código de depois do gate: o
+    /// firewall barrou o servidor (`FIREWALL_BLOCKED`), a rede não está
+    /// (`NETWORK_UNAVAILABLE`), a tabela está cheia (`RESOURCE_LIMIT`).
+    Rede(Codigo),
     /// A chamada ao kernel não voltou.
     Chamada,
     /// O nome não se escreve como nome.
@@ -48,17 +52,15 @@ pub enum Falha {
 }
 
 impl Falha {
-    /// O código da falha, na taxonomia de quem se recupera: a política que
-    /// recusou (`DENY_POLICY`), o firewall (`FIREWALL_BLOCKED`), a rede
-    /// (`NETWORK_UNAVAILABLE`), o DNS que não respondeu ou não se entendeu
-    /// (`DNS_UNAVAILABLE`), o nome que não existe (`DNS_NAME_NOT_FOUND`), o
-    /// nome que não se escreve (`INVALID_REQUEST`), a chamada que não
-    /// voltou (`TECHNICAL_ERROR`).
-    pub const fn codigo(self) -> &'static str {
+    /// O código da falha, na taxonomia de quem se recupera: o do gate que
+    /// recusou (`DENY_RESOURCE`, `DENY_CONTAINED`…), o de depois do gate
+    /// (`FIREWALL_BLOCKED`, `NETWORK_UNAVAILABLE`, `RESOURCE_LIMIT`), o DNS
+    /// que não respondeu ou não se entendeu (`DNS_UNAVAILABLE`), o nome que
+    /// não existe (`DNS_NAME_NOT_FOUND`), o nome que não se escreve
+    /// (`INVALID_REQUEST`), a chamada que não voltou (`TECHNICAL_ERROR`).
+    pub fn codigo(&self) -> &str {
         match self {
-            Falha::Recusada => "DENY_POLICY",
-            Falha::Barrada => "FIREWALL_BLOCKED",
-            Falha::SemRede => "NETWORK_UNAVAILABLE",
+            Falha::Recusada(c) | Falha::Rede(c) => c.como_str(),
             Falha::Chamada => "TECHNICAL_ERROR",
             Falha::Nome(_) => "INVALID_REQUEST",
             Falha::Codigo(dns::NOME_INEXISTENTE) => "DNS_NAME_NOT_FOUND",
@@ -118,21 +120,34 @@ fn datagrama(r: &nativo::Resposta) -> Option<Vec<u8>> {
     }
 }
 
+/// A resposta de um pedido de rede: a recusa do gate, com o código dele;
+/// o código de depois do gate; ou nada a dizer.
+fn conferir(r: &nativo::Resposta) -> Result<(), Falha> {
+    match r.resultado() {
+        Err(recusa) => Err(Falha::Recusada(Codigo::de(
+            recusa.motivo.unwrap_or("TECHNICAL_ERROR"),
+        ))),
+        Ok(j) => match j.member("code").and_then(|c| c.as_str()) {
+            Some(codigo) => Err(Falha::Rede(Codigo::de(codigo))),
+            None => Ok(()),
+        },
+    }
+}
+
 /// Resolve `nome` pelo servidor `servidor` (`udp:<ipv4>:53`): os endereços
 /// IPv4 que a resposta dá a ele, ou por que não deu.
 pub fn resolver(servidor: &str, nome: &str, id: u16) -> Result<Vec<[u8; 4]>, Falha> {
     let alvo = dns::Nome::de_texto(nome).map_err(Falha::Nome)?;
     let r = nativo::pedir("net.connect", |w| w.field_str("to", servidor))
         .map_err(|_| Falha::Chamada)?;
-    // O gate recusou — um erro —, ou deixou e a rede não abriu — o
-    // resultado diz o código.
-    let resultado = r.resultado().map_err(|_| Falha::Recusada)?;
-    let Some(associacao) = resultado.member("connection").and_then(|v| v.as_u64()) else {
-        return Err(match resultado.member("code").and_then(|c| c.as_str()) {
-            Some("FIREWALL_BLOCKED") => Falha::Barrada,
-            _ => Falha::SemRede,
-        });
-    };
+    // O gate recusou — um erro, com o código dele —, ou deixou e a rede
+    // não abriu — o resultado diz o código.
+    conferir(&r)?;
+    let associacao = r
+        .resultado()
+        .ok()
+        .and_then(|j| j.member("connection")?.as_u64())
+        .ok_or(Falha::Chamada)?;
     let resultado = perguntar(associacao, &alvo, id);
     let _ = nativo::pedir("net.close", |w| w.field_u64("connection", associacao));
     resultado
@@ -141,13 +156,17 @@ pub fn resolver(servidor: &str, nome: &str, id: u16) -> Result<Vec<[u8; 4]>, Fal
 fn perguntar(associacao: u64, alvo: &dns::Nome, id: u16) -> Result<Vec<[u8; 4]>, Falha> {
     let mut b = [0u8; dns::MAIOR_MENSAGEM];
     let n = dns::pergunta(id, alvo, &mut b).map_err(Falha::Nome)?;
-    let enviado = nativo::pedir_com_anexo(
+    // Cada envio e cada leitura é decidido de novo: uma recusa no meio —
+    // a contenção, a revogação, a política nova, o firewall — vem com o
+    // código de quem recusou, e não como um DNS que não respondeu.
+    let r = nativo::pedir_com_anexo(
         "net.send",
         |w| w.field_u64("connection", associacao),
         &b[..n],
     )
-    .ok()
-    .and_then(|r| r.resultado().ok()?.member("sent")?.as_u64());
+    .map_err(|_| Falha::Chamada)?;
+    conferir(&r)?;
+    let enviado = r.resultado().ok().and_then(|j| j.member("sent")?.as_u64());
     if enviado != Some(n as u64) {
         return Err(Falha::Envio);
     }
@@ -155,7 +174,8 @@ fn perguntar(associacao: u64, alvo: &dns::Nome, id: u16) -> Result<Vec<[u8; 4]>,
         w.field_u64("connection", associacao)?;
         w.field_u64("wait", ESPERA_MS)
     })
-    .map_err(|_| Falha::SemResposta)?;
+    .map_err(|_| Falha::Chamada)?;
+    conferir(&r)?;
     let resposta = datagrama(&r)
         .filter(|d| !d.is_empty())
         .ok_or(Falha::SemResposta)?;

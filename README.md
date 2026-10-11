@@ -523,7 +523,9 @@ programas/           os programas de usuário, compilados à parte do kernel
     ├── saida.rs     uma linha formatada por chamada de `escrever`
     ├── desenho.rs   retângulos e texto, com a fonte do console
     ├── dns.rs       resolver um nome como programa: a associação com o servidor, que o gate decide, a pergunta e a resposta
-    ├── tls.rs       o TLS de um programa: a semente, o relógio, as âncoras e o transporte, cada um pelo gate
+    ├── conexao.rs   a conexão TCP de um programa, pelo gate: a recusa, o firewall, o outro lado e o prazo, sem se misturarem
+    ├── tls.rs       o TLS de um programa: a semente, o relógio e as âncoras, cada um pelo gate, sobre a conexão
+    ├── http.rs      o HTTP de um programa: o nome pelo DNS dele, o destino pelo gate, o TLS no meio, e a falha de quem falhou
     ├── superficie.rs uma camada do compositor com os pixels no processo
     ├── janela.rs    a moldura, o arrasto e a caixa de fechar, e a interface dentro dela
     └── bin/
@@ -549,6 +551,9 @@ programas/           os programas de usuário, compilados à parte do kernel
         ├── resolvedor.rs resolve nomes pelo DNS da bancada, e confere que a resposta não dá acesso: o gate decide o endereço
         ├── cifrado.rs    conversa TLS com o eco da bancada: o nome provado, o segredo cifrado, e as recusas — do gate antes, do programa depois
         ├── pausado.rs    uma sessão TLS que a suíte interrompe no meio: a política, o firewall e a contenção chegam com o código deles
+        ├── pagina.rs     busca páginas na bancada, claro e cifrado: cada página, cada falha com o código e a família dela, e as medidas
+        ├── buscador.rs   uma conversa HTTP que a suíte interrompe no meio: a revogação, a contenção, o firewall e o fim chegam com o código deles
+        ├── consulta.rs   uma visita curta à bancada, para várias correrem ao mesmo tempo com a autoridade de cada um
         ├── legado.rs     pede, não busca a resposta e troca de imagem: a nova não a encontra
         └── terminal.rs   o Terminal: o interpretador numa janela, pelo pseudo-terminal
 

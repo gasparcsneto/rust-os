@@ -58,8 +58,8 @@ const PORTA: u16 = 7;
 fn falha(f: Falha) -> i64 {
     escreverln!("resolvedor: {} ({:?})", f.codigo(), f);
     match f {
-        Falha::Recusada => SEM_SERVIDOR,
-        Falha::Barrada | Falha::SemRede => SEM_REDE,
+        Falha::Recusada(_) => SEM_SERVIDOR,
+        Falha::Rede(_) => SEM_REDE,
         Falha::SemResposta => SEM_RESPOSTA,
         Falha::Malformada(_) => MALFORMADA,
         _ => OUTRA,

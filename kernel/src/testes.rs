@@ -7339,12 +7339,14 @@ fn btrfs_le_a_raiz_dos_pedacos() -> Resultado {
 /// item que existe, do tamanho certo, com bytes de outro. Nada falha, e o que
 /// se lê depois é um pedaço, uma raiz ou um nome montado a partir de lixo.
 ///
-/// A folha usada é a da árvore de pedaços, cujos cinco itens — o
-/// dispositivo e quatro pedaços — têm chave e tamanho conhecidos do lado de
+/// A folha usada é a da árvore de pedaços, cujos seis itens — o
+/// dispositivo e cinco pedaços — têm chave e tamanho conhecidos do lado de
 /// fora: o `dump-tree` imprime `itemoff` e `itemsize` de cada um. Eram
 /// quatro itens e três pedaços até os programas do TLS levarem os dados da
 /// imagem além dos oito megabytes do primeiro pedaço de dados: o `mkfs` pôs
-/// um segundo, e a folha ganhou o item dele.
+/// um segundo, e a folha ganhou o item dele. E cinco itens e quatro
+/// pedaços até os programas do HTTP — três, de uns 680 KB cada, nas duas
+/// arquiteturas — passarem do segundo: o `mkfs` pôs um terceiro.
 fn btrfs_percorre_itens_da_folha() -> Resultado {
     let tabela = crate::particoes::varrer()?;
     let particao = tabela
@@ -7370,7 +7372,7 @@ fn btrfs_percorre_itens_da_folha() -> Resultado {
         if item.chave.tipo == crate::vfs::btrfs::folha::tipo::PEDACO {
             pedacos += 1;
             // O `offset` da chave de um pedaço é o endereço lógico dele, e
-            // todos os três precisam estar no mapa depois da abertura.
+            // todos eles precisam estar no mapa depois da abertura.
             if volume.mapa.traduzir(item.chave.offset).is_none() {
                 crate::log_error!(
                     "teste",
@@ -7382,12 +7384,12 @@ fn btrfs_percorre_itens_da_folha() -> Resultado {
         }
     }
 
-    if quantos != 5 {
+    if quantos != 6 {
         crate::log_error!("teste", "a folha deu {} itens", quantos);
-        return Err("a folha de pedacos nao tem os cinco itens que o disco traz");
+        return Err("a folha de pedacos nao tem os seis itens que o disco traz");
     }
-    if pedacos != 4 {
-        return Err("a folha de pedacos nao trouxe os quatro pedacos");
+    if pedacos != 5 {
+        return Err("a folha de pedacos nao trouxe os cinco pedacos");
     }
 
     // E um nó interno não é folha. Forjar o nível no bloco já lido é o
@@ -7871,14 +7873,15 @@ fn btrfs_mapa_completo_alcanca_metadados() -> Resultado {
         .ok_or("nao ha particao de dados")?;
     let volume = crate::vfs::btrfs::Volume::abrir(particao.primeiro)?;
 
-    // Sistema, metadados e dois de dados — ver `btrfs_percorre_itens_da_folha`.
-    if volume.mapa.quantos() != 4 {
+    // Sistema, metadados e três de dados — ver
+    // `btrfs_percorre_itens_da_folha`.
+    if volume.mapa.quantos() != 5 {
         crate::log_error!(
             "teste",
             "o mapa ficou com {} pedacos",
             volume.mapa.quantos()
         );
-        return Err("o mapa completo nao tem os quatro pedacos do disco");
+        return Err("o mapa completo nao tem os cinco pedacos do disco");
     }
 
     let mut bloco = alloc::vec![0u8; volume.superbloco.tamanho_de_no as usize];
