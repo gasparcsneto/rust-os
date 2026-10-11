@@ -34496,8 +34496,10 @@ fn tls_a_politica_que_tira_o_destino_derruba_a_sessao() -> Resultado {
 /// O firewall restringe depois do gate, com o código dele, e se desfaz.
 ///
 /// - a regra posta no meio da sessão TLS derruba a conexão viva que ela
-///   alcança: o envio seguinte não acha a conexão — `DENY_RESOURCE`, do
-///   gate, que não sabe dela —, e não um código do TLS;
+///   alcança: o envio seguinte é decidido pelo gate — o número ainda é do
+///   processo, cortado — e barrado na execução: `FIREWALL_BLOCKED`, o
+///   código de quem barrou, e não a recusa de um recurso que não é dele
+///   (`DENY_RESOURCE`), nem um código do TLS;
 /// - a sessão nova é decidida `ALLOW` pelo gate — o destino está no
 ///   alcance — e barrada na execução: `FIREWALL_BLOCKED`, que o programa
 ///   ouve como tal, e a auditoria grava a barrada como execução daquela
@@ -34518,7 +34520,7 @@ fn tls_o_firewall_barra_a_conexao_nova_com_o_codigo_dele() -> Resultado {
             return Err("a regra nao derrubou a conexao TLS viva");
         }
         let barrada = (|| -> Resultado {
-            passo(PASSO_ECO, "pausado: depois: DENY_RESOURCE")?;
+            passo(PASSO_ECO, "pausado: depois: FIREWALL_BLOCKED")?;
             passo(PASSO_RECONECTAR, "pausado: de novo: FIREWALL_BLOCKED")
         })();
         let solta = fs_pedir(sistema, "net.unblock", &para);
@@ -34969,13 +34971,19 @@ fn nsf_conter(
     if registro_que(|e| e.detalhe.ends_with(&caiu)).is_none() {
         return Err("a conexao viva nao caiu com o bloqueio, em nome da decisao");
     }
+    // O número da que caiu ainda é de quem a abriu: o gate decide o pedido
+    // sobre ele, e a execução ouve a regra que a cortou — o firewall, com o
+    // código dele, e não a recusa de um recurso que não é de quem pede.
     let r = pedir(
         "net.recv",
         &alloc::format!(r#"{{"connection":{conexao},"max":0}}"#),
     )?;
-    if fs_texto(&r, "state").is_some() {
+    if fs_texto(&r, "state").is_some()
+        || fs_texto(&r, "code").as_deref() != Some("FIREWALL_BLOCKED")
+        || fs_numero(&r, "rule") != Some(regra)
+    {
         crate::log_error!("teste", "{}", r);
-        return Err("a conexao derrubada ainda respondia");
+        return Err("a conexao derrubada ainda respondia, ou nao disse a regra que a cortou");
     }
 
     // A seguinte: o gate decide — e deixa —, e o firewall barra depois.

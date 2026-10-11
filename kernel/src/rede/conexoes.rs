@@ -186,6 +186,17 @@ pub fn destino_para(numero: Option<u64>, dono: &Dono) -> Result<Destino, &'stati
 /// escalonador, as sessões e as pessoas, e nenhuma dessas travas entra
 /// debaixo da da pilha.
 pub fn recolher_orfas() -> usize {
+    // As cortadas pelo firewall de donos que acabaram: só o número, que
+    // ninguém mais vai pedir. Sem registro: a regra que as cortou já gravou
+    // o corte de cada uma.
+    let cortadas: Vec<u64> = super::pilha::donos_das_cortadas()
+        .iter()
+        .filter(|(_, dono)| !dono.vivo())
+        .map(|(id, _)| *id)
+        .collect();
+    if !cortadas.is_empty() {
+        super::pilha::esquecer_cortadas(&cortadas);
+    }
     let donos = super::pilha::donos();
     if donos.is_empty() {
         return 0;

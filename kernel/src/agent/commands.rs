@@ -2567,7 +2567,10 @@ fn net_connect(params: Json, w: &mut JsonWriter) -> fmt::Result {
             w.field_str("to", &destino.texto())?;
             w.field_str("state", estado.nome())?;
         }
-        Err(crate::rede::pilha::BARRADO) => barrado(w, &destino, &fluxo)?,
+        Err(crate::rede::pilha::BARRADO) => {
+            let regra = crate::rede::pilha::barrado(&destino, &fluxo).unwrap_or(0);
+            barrado(w, &destino, regra)?
+        }
         Err(motivo) => falha_de_rede(w, motivo)?,
     }
     w.end_object()
@@ -2580,15 +2583,10 @@ fn falha_de_rede(w: &mut JsonWriter, motivo: &str) -> fmt::Result {
     w.field_str("code", crate::rede::pilha::codigo_da_falha(motivo))
 }
 
-/// O firewall recusou o pedido de rede que o gate tinha permitido: a
-/// recusa vai para a auditoria como execução da decisão, com a regra, e
-/// para quem pediu.
-fn barrado(
-    w: &mut JsonWriter,
-    destino: &politica::endereco::Destino,
-    fluxo: &seguranca::firewall::DonoDoFluxo,
-) -> fmt::Result {
-    let regra = crate::rede::pilha::barrado(destino, fluxo).unwrap_or(0);
+/// O firewall recusou o pedido de rede que o gate tinha permitido — a
+/// regra `regra`: a recusa vai para a auditoria como execução da decisão,
+/// com a regra, e para quem pediu.
+fn barrado(w: &mut JsonWriter, destino: &politica::endereco::Destino, regra: u64) -> fmt::Result {
     crate::autorizacao::auditar_execucao(
         &destino.texto(),
         politica::Codigo::DenyPolicy,
@@ -2678,13 +2676,26 @@ fn net_send_com(
             w.field_str("state", estado.nome())
         }
         Err(crate::rede::pilha::BARRADO) => {
-            let fluxo = crate::rede::pilha::fluxo_de(numero, &dono)
-                .map(|(_, f)| f)
-                .unwrap_or_default();
-            barrado(w, &destino, &fluxo)
+            barrado(w, &destino, regra_da_conexao(numero, &dono, &destino))
         }
         Err(motivo) => falha_de_rede(w, motivo),
     }
+}
+
+/// A regra que barra a conexão `numero` de `dono`: a que a cortou, se uma
+/// cortou — a conexão caiu quando a regra entrou —, ou a que barra o fluxo
+/// dela agora, se a conexão ainda está na tabela.
+fn regra_da_conexao(
+    numero: u64,
+    dono: &crate::rede::conexoes::Dono,
+    destino: &politica::endereco::Destino,
+) -> u64 {
+    crate::rede::pilha::regra_que_cortou(numero, dono)
+        .or_else(|| {
+            crate::rede::pilha::fluxo_de(numero, dono)
+                .and_then(|(_, f)| crate::rede::pilha::barrado(destino, &f))
+        })
+        .unwrap_or(0)
 }
 
 fn net_recv(params: Json, w: &mut JsonWriter) -> fmt::Result {
@@ -2716,10 +2727,14 @@ fn net_recv(params: Json, w: &mut JsonWriter) -> fmt::Result {
             (m as usize).min(crate::rede::pilha::BUFFER_DA_CONEXAO)
         });
     if destino.protocolo == politica::endereco::Protocolo::Udp {
-        return net_recv_datagrama(numero, &dono, maximo, w);
+        return net_recv_datagrama(numero, &dono, &destino, maximo, w);
     }
     let (dados, estado) = match crate::rede::pilha::espiar(numero, &dono, maximo) {
         Ok(r) => r,
+        Err(crate::rede::pilha::BARRADO) => {
+            barrado(w, &destino, regra_da_conexao(numero, &dono, &destino))?;
+            return w.end_object();
+        }
         Err(motivo) => {
             falha_de_rede(w, motivo)?;
             return w.end_object();
@@ -2770,12 +2785,17 @@ fn net_recv(params: Json, w: &mut JsonWriter) -> fmt::Result {
 fn net_recv_datagrama(
     numero: u64,
     dono: &crate::rede::conexoes::Dono,
+    destino: &politica::endereco::Destino,
     maximo: usize,
     w: &mut JsonWriter,
 ) -> fmt::Result {
     use crate::rede::pilha::Datagrama;
     let (datagrama, estado) = match crate::rede::pilha::espiar_datagrama(numero, dono, maximo) {
         Ok(r) => r,
+        Err(crate::rede::pilha::BARRADO) => {
+            barrado(w, destino, regra_da_conexao(numero, dono, destino))?;
+            return w.end_object();
+        }
         Err(motivo) => {
             falha_de_rede(w, motivo)?;
             return w.end_object();

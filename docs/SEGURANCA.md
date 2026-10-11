@@ -290,6 +290,19 @@ dois deixam, ou não passa.
   o número da regra, gravados como execução da decisão que o gate tinha
   permitido. `net.unblock` tira a regra — e o gate continua decidindo cada
   pedido, como antes dela.
+- **O número da conexão cortada.** A conexão que a regra derrubou some da
+  rede, mas o número dela continua do dono, cortado, até ele o fechar ou
+  acabar: o pedido seguinte sobre ele — um `net.send`, um `net.recv`, o
+  que acordou de uma espera — é decidido pelo gate como qualquer outro (a
+  autoridade, a contenção e a revogação de quem pede vêm primeiro), e a
+  execução ouve a regra que cortou: `FIREWALL_BLOCKED`, com a regra,
+  gravado como execução da decisão `ALLOW`. Antes, o número sumia junto,
+  e o pedido seguinte ouvia `DENY_RESOURCE` — a recusa da política para
+  um recurso que não é de quem pede — quando quem barrou foi o firewall.
+  O HTTP pegou (ver abaixo). O número cortado conta no teto do dono, como
+  uma conexão que o outro lado fechou; o `net.close` o solta, e o coletor
+  o esquece quando o dono acaba, sem registro novo — o corte já foi
+  gravado.
 
 Na tabela da pilha, ao lado dos fluxos que controlam; as regras não vão ao
 journal (ver [limitações](#limitacoes-deliberadas)).

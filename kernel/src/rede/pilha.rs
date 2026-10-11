@@ -68,7 +68,11 @@
 //! - As regras de `net.block` barram um destino, para todos ou para um dono;
 //!   o fluxo barrado não manda nem recebe, `net.connect` e `net.send` sobre
 //!   ele são recusados com o número da regra, e as conexões vivas que a
-//!   regra alcança caem quando ela entra.
+//!   regra alcança caem quando ela entra. O número de cada uma que caiu
+//!   continua do dono, cortado ([`Cortada`]): o pedido seguinte sobre ele é
+//!   decidido pelo gate como qualquer outro, e ouve a regra —
+//!   `FIREWALL_BLOCKED` —, e não "conexão inexistente", que seria a recusa
+//!   de um recurso que não é dele. O firewall barrou; a política não mudou.
 //!
 //! As regras moram aqui, ao lado dos fluxos que controlam, e a conta é a do
 //! pacote `seguranca` (`seguranca::firewall`). A cada volta, a pilha tira
@@ -257,6 +261,10 @@ struct Pilha {
     /// terminados — medido na suíte: titulares novos ouviam "tabela cheia"
     /// com nenhuma conexão viva de ninguém.
     fechando: Vec<EmFecho>,
+    /// As conexões que uma regra do firewall cortou — ver [`Cortada`].
+    /// Contam no teto do dono, como uma conexão fechada pelo outro lado
+    /// que ele ainda não fechou: o número é dele até ele o soltar.
+    cortadas: Vec<Cortada>,
     proximo_id: u64,
     proxima_porta: u16,
     abertas: u64,
@@ -284,6 +292,26 @@ struct EmFecho {
     destino: Destino,
     porta: u16,
     fluxo: DonoDoFluxo,
+}
+
+/// Uma conexão que uma regra do firewall cortou — ver [`bloquear`]. O
+/// socket dela caiu como o de qualquer conexão derrubada, e foi terminar
+/// em [`Pilha::fechando`]; o número fica aqui, do dono, até ele o fechar ou
+/// acabar. Sem socket e sem fluxo: nada dela passa, nem depois de a regra
+/// sair — a conexão nova é que é decidida de novo.
+///
+/// Sem ela, o pedido seguinte do dono sobre o número não achava conexão
+/// nenhuma, e o gate o recusava como recurso que não é dele —
+/// `DENY_RESOURCE`, a recusa da política —, quando quem o barrou foi o
+/// firewall. Com ela, o gate decide o pedido como decide qualquer outro —
+/// a autoridade, a contenção e a revogação de quem pede vêm primeiro —, e
+/// a execução ouve a regra que cortou: `FIREWALL_BLOCKED`.
+struct Cortada {
+    id: u64,
+    dono: Dono,
+    destino: Destino,
+    /// A regra que a cortou.
+    regra: u64,
 }
 
 static PILHA: Mutex<Option<Pilha>> = Mutex::new(None);
@@ -571,6 +599,7 @@ pub fn iniciar() {
             roteador: None,
             conexoes: Vec::new(),
             fechando: Vec::new(),
+            cortadas: Vec::new(),
             proximo_id: 1,
             proxima_porta: porta_inicial,
             abertas: 0,
@@ -877,12 +906,69 @@ impl Pilha {
     }
 
     fn achar(&self, id: u64, dono: &Dono) -> Result<usize, &'static str> {
-        // Uma conexão de outro titular e uma que não existe respondem o
-        // mesmo: quem pergunta não descobre o que é dos outros.
-        self.conexoes
+        if let Some(i) = self
+            .conexoes
             .iter()
             .position(|c| c.id == id && c.dono == *dono)
-            .ok_or("conexao inexistente, ou de outro titular")
+        {
+            return Ok(i);
+        }
+        // A conexão que o firewall cortou ainda é do dono: o motivo é a
+        // regra — ver [`Cortada`].
+        if self.cortada(id, dono).is_some() {
+            return Err(BARRADO);
+        }
+        // Uma conexão de outro titular e uma que não existe respondem o
+        // mesmo: quem pergunta não descobre o que é dos outros.
+        Err("conexao inexistente, ou de outro titular")
+    }
+
+    /// A conexão `id` de `dono`, se uma regra do firewall a cortou.
+    fn cortada(&self, id: u64, dono: &Dono) -> Option<&Cortada> {
+        self.cortadas.iter().find(|c| c.id == id && c.dono == *dono)
+    }
+
+    /// Tira da tabela as conexões `ids`, sem fecho educado — do lado de cá
+    /// ninguém mais as lê —, e devolve quantas. O socket TCP vai terminar
+    /// em [`Pilha::fechando`]; o UDP sai na hora. Com `regra`, foi o
+    /// firewall: o número de cada uma fica com o dono, cortado — ver
+    /// [`Cortada`].
+    fn tirar(&mut self, ids: &[u64], regra: Option<u64>) -> usize {
+        let mut n = 0;
+        let mut cortadas = Vec::new();
+        self.conexoes.retain(|c| {
+            if !ids.contains(&c.id) {
+                return true;
+            }
+            match c.destino.protocolo {
+                Protocolo::Tcp => {
+                    self.sockets.get_mut::<tcp::Socket>(c.socket).abort();
+                    self.fechando.push(EmFecho {
+                        socket: c.socket,
+                        dono: c.dono,
+                        destino: c.destino,
+                        porta: c.porta,
+                        fluxo: c.fluxo,
+                    });
+                }
+                Protocolo::Udp => {
+                    self.sockets.remove(c.socket);
+                }
+            }
+            if let Some(regra) = regra {
+                cortadas.push(Cortada {
+                    id: c.id,
+                    dono: c.dono,
+                    destino: c.destino,
+                    regra,
+                });
+            }
+            n += 1;
+            false
+        });
+        self.cortadas.extend(cortadas);
+        let _ = self.sondar();
+        n
     }
 }
 
@@ -896,9 +982,22 @@ fn endpoint(destino: &Destino) -> IpEndpoint {
 
 /// O destino da conexão `id`, se ela é de `dono`. É o que o gate decide
 /// num `net.send`, `net.recv` ou `net.close`.
+///
+/// A conexão que o firewall cortou também: ela ainda é do dono, e o pedido
+/// sobre ela é decidido como qualquer outro — a execução é que ouve a
+/// regra. Ver [`Cortada`].
 pub fn destino_de(id: u64, dono: &Dono) -> Result<Destino, &'static str> {
-    com_pilha(|p| p.achar(id, dono).map(|i| p.conexoes[i].destino))
-        .unwrap_or(Err("a pilha de rede nao esta no ar"))
+    com_pilha(|p| match p.achar(id, dono) {
+        Ok(i) => Ok(p.conexoes[i].destino),
+        Err(motivo) => p.cortada(id, dono).map(|c| c.destino).ok_or(motivo),
+    })
+    .unwrap_or(Err("a pilha de rede nao esta no ar"))
+}
+
+/// A regra que cortou a conexão `id` de `dono`, se uma cortou — ver
+/// [`Cortada`].
+pub fn regra_que_cortou(id: u64, dono: &Dono) -> Option<u64> {
+    com_pilha(|p| p.cortada(id, dono).map(|c| c.regra)).flatten()
 }
 
 /// Abre uma conexão de `dono` para `destino`. Devolve o número dela e o
@@ -919,11 +1018,12 @@ pub fn abrir(
         if firewall::barrado(p.regras.todas(), &destino, &fluxo).is_some() {
             return Err(BARRADO);
         }
-        if p.conexoes.len() + p.fechando.len() >= MAIS_CONEXOES {
+        if p.conexoes.len() + p.fechando.len() + p.cortadas.len() >= MAIS_CONEXOES {
             return Err("a tabela de conexoes esta cheia");
         }
         let do_dono = p.conexoes.iter().filter(|c| c.dono == dono).count()
-            + p.fechando.iter().filter(|f| f.dono == dono).count();
+            + p.fechando.iter().filter(|f| f.dono == dono).count()
+            + p.cortadas.iter().filter(|c| c.dono == dono).count();
         if do_dono >= CONEXOES_POR_DONO {
             return Err("este titular ja tem o maximo de conexoes abertas");
         }
@@ -1153,7 +1253,13 @@ pub fn armar(
     let r = com_pilha(|p| {
         // O que mudou até agora conta: a espera é pelo que ainda não veio.
         let _ = p.sondar();
-        let i = p.achar(id, dono)?;
+        let i = match p.achar(id, dono) {
+            Ok(i) => i,
+            // Cortada pelo firewall: nada mais vem dela, e o pedido
+            // responde já, com a regra.
+            Err(BARRADO) => return Ok(None),
+            Err(motivo) => return Err(motivo),
+        };
         let estado = p.estado(i);
         let pronto = match sentido {
             Sentido::Leitura => p.tem_o_que_ler(i),
@@ -1369,8 +1475,19 @@ pub fn desarmar(id: u64, dono: &Dono, numero: u64) {
 /// Fecha a conexão: o número deixa de valer na hora, e o fecho com o outro
 /// lado termina no fio da rede. Uma associação UDP não tem fecho: o socket
 /// sai na hora.
+///
+/// A conexão que o firewall cortou também se fecha: o número sai das mãos
+/// do dono, e a vaga dele no teto volta.
 pub fn fechar(id: u64, dono: &Dono) -> Result<(), &'static str> {
     let r = com_pilha(|p| {
+        if let Some(k) = p
+            .cortadas
+            .iter()
+            .position(|c| c.id == id && c.dono == *dono)
+        {
+            p.cortadas.remove(k);
+            return Ok(());
+        }
         let i = p.achar(id, dono)?;
         let c = p.conexoes.remove(i);
         match c.destino.protocolo {
@@ -1409,33 +1526,22 @@ pub fn donos() -> Vec<(u64, Dono, Destino)> {
 /// Derruba as conexões `ids` — de donos que acabaram —, sem fecho educado:
 /// do lado de cá ninguém mais as lê.
 pub fn derrubar(ids: &[u64]) -> usize {
+    com_pilha(|p| p.tirar(ids, None)).unwrap_or(0)
+}
+
+/// As conexões cortadas pelo firewall, com o dono de cada uma — para o
+/// coletor esquecer as de donos que acabaram. Ver [`Cortada`].
+pub fn donos_das_cortadas() -> Vec<(u64, Dono)> {
+    com_pilha(|p| p.cortadas.iter().map(|c| (c.id, c.dono)).collect()).unwrap_or_default()
+}
+
+/// Esquece as conexões cortadas `ids`: os donos delas acabaram, e ninguém
+/// mais pede o número. Devolve quantas.
+pub fn esquecer_cortadas(ids: &[u64]) -> usize {
     com_pilha(|p| {
-        let mut n = 0;
-        p.conexoes.retain(|c| {
-            if ids.contains(&c.id) {
-                match c.destino.protocolo {
-                    Protocolo::Tcp => {
-                        p.sockets.get_mut::<tcp::Socket>(c.socket).abort();
-                        p.fechando.push(EmFecho {
-                            socket: c.socket,
-                            dono: c.dono,
-                            destino: c.destino,
-                            porta: c.porta,
-                            fluxo: c.fluxo,
-                        });
-                    }
-                    Protocolo::Udp => {
-                        p.sockets.remove(c.socket);
-                    }
-                }
-                n += 1;
-                false
-            } else {
-                true
-            }
-        });
-        let _ = p.sondar();
-        n
+        let antes = p.cortadas.len();
+        p.cortadas.retain(|c| !ids.contains(&c.id));
+        antes - p.cortadas.len()
     })
     .unwrap_or(0)
 }
@@ -1491,10 +1597,12 @@ pub fn bloquear(
     })
     .unwrap_or(Err("a pilha de rede nao esta no ar"));
     let (regra, nova, alcancadas, sessoes_derrubadas) = r?;
-    // Fora da trava de cima, e pela mesma derrubada de quando o dono acaba:
-    // a regra já está na tabela, e uma conexão aberta no meio é recusada.
+    // Fora da trava de cima, e pela mesma derrubada de quando o dono acaba
+    // — mas o número de cada uma fica com o dono, cortado pela regra: ver
+    // [`Cortada`]. A regra já está na tabela, e uma conexão aberta no meio
+    // é recusada.
     let ids: Vec<u64> = alcancadas.iter().map(|(id, _)| *id).collect();
-    derrubar(&ids);
+    let _ = com_pilha(|p| p.tirar(&ids, Some(regra)));
     Ok(Bloqueio {
         regra,
         nova,

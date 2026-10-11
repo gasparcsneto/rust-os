@@ -90,7 +90,8 @@ pub enum Desfecho {
     /// fechou, a conexão caiu.
     Mudou,
     /// A conexão não existe mais para o dono: ele a fechou por outro
-    /// caminho, ou ela foi derrubada porque o dono acabou.
+    /// caminho, ela foi derrubada porque o dono acabou, ou uma regra do
+    /// firewall a cortou — e então o pedido executado de novo ouve a regra.
     Sumiu,
     /// O prazo venceu sem nada disso.
     Venceu,
