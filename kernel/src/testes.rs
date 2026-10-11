@@ -30419,6 +30419,14 @@ static CASOS: &[Caso] = &[
         f: canal_tcp_o_programa_lancado_pela_rede,
     },
     Caso {
+        nome: "canal tcp: o processo sem a conexao e a revogacao",
+        f: canal_tcp_o_processo_sem_a_conexao_e_a_revogacao,
+    },
+    Caso {
+        nome: "canal tcp: o conflito e o fim da conexao",
+        f: canal_tcp_o_conflito_e_o_fim_da_conexao,
+    },
+    Caso {
         nome: "canal tcp: a regra do firewall derruba a conexao",
         f: canal_tcp_a_regra_do_firewall_derruba_a_conexao,
     },
@@ -38225,6 +38233,229 @@ fn canal_tcp_o_programa_lancado_pela_rede() -> Resultado {
         }
         Ok(())
     })
+}
+
+/// O processo que um agente lançou pela rede age pela chave dele, e não
+/// pela conexão: a conexão que cai não leva a autoridade do processo — a
+/// chave segue no registro —, e a revogação da chave a leva, também do
+/// processo, que não está em conexão nenhuma. O `isolavel` pede pelo gate
+/// a cada passo que a suíte publica: a decisão é procurada na hora, pela
+/// chave, e gravada em nome do agente.
+fn canal_tcp_o_processo_sem_a_conexao_e_a_revogacao() -> Resultado {
+    use politica::Codigo;
+    use protocolo::usuario::evento::{Evento, tipo};
+    com_canal_tcp(|| {
+        crate::identidade::atribuir(&nome_de_teste(2), "operador")
+            .map_err(|_| "a atribuicao de teste falhou")?;
+        let chave = sigilo::publica_de(&chave_de_teste(2));
+        let inicio = crate::log::total_emitidos();
+        let publicar = |t| {
+            crate::eventos::publicar(
+                "teste-isolavel",
+                Evento {
+                    tipo: t,
+                    ..Default::default()
+                },
+            )
+            .map_err(|_| "o canal do isolavel nao recebeu o passo")
+        };
+        // Um passo, e a linha que ele deve fazer o `isolavel` dizer.
+        let passo = |linha: &str| -> Resultado {
+            let desde = crate::log::total_emitidos();
+            publicar(tipo::ACAO)?;
+            esperar_ate(|| linhas_do_programa(desde, linha) >= 1, 600).map_err(|_| {
+                crate::log_error!("teste", "tcp: nao veio `{}`", linha);
+                "o isolavel lancado pela rede nao disse o que devia"
+            })
+        };
+        let mut a = Some(AgenteTcpDeTeste::conectar(2)?);
+        let s = a.as_ref().map_or(0, |a| a.sessao());
+        let caminho = alloc::format!("{}/isolavel", crate::usuario::DIRETORIO_DOS_COMPILADOS);
+        let r = a
+            .as_mut()
+            .ok_or("sem o agente")?
+            .pedir("user.run", &alloc::format!(r#"{{"path":"{caminho}"}}"#))?;
+        if !r.contains(r#""launched":true"#) {
+            crate::log_error!("teste", "tcp: {}", r);
+            return Err("o operador nao lancou o isolavel pela rede");
+        }
+        let resultado = (|| -> Resultado {
+            esperar_ate(|| linhas_do_programa(inicio, "isolavel: pronto") >= 1, 600)
+                .map_err(|_| "o isolavel lancado pela rede nao ficou pronto")?;
+            passo("isolavel: ALLOW")?;
+            // A conexão cai, e a sessão acaba: o processo continua o agente.
+            drop(a.take());
+            esperar_cedendo(|| crate::sessoes::identidade(s).is_none(), 800)
+                .map_err(|_| "a sessao da conexao que caiu ficou de pe")?;
+            passo("isolavel: ALLOW").map_err(
+                |_| "sem a conexao, o processo lancado pela rede perdeu a autoridade do agente",
+            )?;
+            let pediu = ultimo_que(|e| e.metodo == "system.info" && e.chave == Some(chave))
+                .ok_or("o pedido do processo lancado pela rede nao foi gravado")?;
+            if pediu.codigo != Codigo::Allow
+                || pediu.agente != nome_de_teste(2)
+                || pediu.papel != "operador"
+                || pediu.sessao != s
+            {
+                crate::log_error!("teste", "tcp: {:?}", pediu);
+                return Err("o pedido do processo foi gravado sem o agente que o lancou pela rede");
+            }
+            // A chave é revogada: o processo perde a autoridade na hora.
+            crate::identidade::revogar(&chave).map_err(|_| "a revogacao de teste falhou")?;
+            passo("isolavel: DENY_ROLE").map_err(|_| {
+                "revogada a chave, o processo lancado pela rede continuou com a autoridade dela"
+            })?;
+            Ok(())
+        })();
+        drop(a);
+        let desde = crate::log::total_emitidos();
+        let fim = publicar(tipo::ENCERRAR);
+        let saiu = esperar_ate(
+            || {
+                let mut achou = false;
+                crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+                    achou |= r.seq >= desde
+                        && r.subsistema == "usuario"
+                        && r.mensagem() == "processo encerrou com codigo 84";
+                });
+                achou
+            },
+            600,
+        );
+        resultado?;
+        if fim.is_err() || saiu.is_err() {
+            return Err("o isolavel lancado pela rede nao saiu com o codigo dele");
+        }
+        Ok(())
+    })
+}
+
+/// O conflito pela rede é o das portas, e é conflito: dois agentes pela
+/// rede na linha de comando — a versão velha e o arrendamento de outro dão
+/// `CONFLICT`, nada muda, e não é recusa do gate —, gravado em nome de
+/// quem pediu, com a sessão TCP dele. E a conexão que cai é a sessão que
+/// acaba, também para o arrendamento: sai na hora, com o registro em nome
+/// de quem o tinha; quem conecta depois — a mesma chave, inclusive — não
+/// herda nada. Os agentes de teste têm o papel `sistema`: nem ele passa por
+/// cima do arrendamento de outro.
+fn canal_tcp_o_conflito_e_o_fim_da_conexao() -> Resultado {
+    use politica::Codigo;
+    crate::interpretador::ativar_para_teste();
+    crate::coordenacao::esquecer();
+    let resultado = com_canal_tcp(|| {
+        let linha = crate::ui::ID_DA_LINHA_DE_COMANDO;
+        let recurso = crate::coordenacao::recurso(linha);
+        let na_linha = |x: &mut AgenteTcpDeTeste, metodo: &str, extra: &str| {
+            x.pedir(metodo, &alloc::format!(r#"{{"id":{linha}{extra}}}"#))
+        };
+        let ok = |r: &str| r.contains(r#""ok":true"#);
+        let conflito = |r: &str| r.contains(r#""code":"CONFLICT""#) && !r.contains("DENY_");
+        // O último registro do método, na linha, pela sessão `s`: um
+        // conflito, em nome do agente `p`.
+        let conflito_gravado = |metodo: &str, s: u8, p: u8| {
+            ultimo_que(|e| e.metodo == metodo && e.sessao == s && e.recurso == recurso)
+                .is_some_and(|e| e.codigo == Codigo::Conflict && e.agente == nome_de_teste(p))
+        };
+        let mut a = AgenteTcpDeTeste::conectar(1)?;
+        let mut b = AgenteTcpDeTeste::conectar(2)?;
+        let (sa, sb) = (a.sessao(), b.sessao());
+
+        // A versão velha: A muda com a versão lida; B, com a mesma, não.
+        let lida = versao_da_linha();
+        let r = na_linha(
+            &mut a,
+            "ui.act",
+            &alloc::format!(
+                r#","action":"set_value","value":"agent.ping","expect_version":{lida}"#
+            ),
+        )?;
+        if !ok(&r) || versao_da_linha() != lida + 1 {
+            crate::log_error!("teste", "tcp: {}", r);
+            return Err("pela rede, a mudanca com a versao lida nao passou");
+        }
+        na_linha(&mut a, "ui.release", "")?;
+        let r = na_linha(
+            &mut b,
+            "ui.act",
+            &alloc::format!(
+                r#","action":"set_value","value":"system.info","expect_version":{lida}"#
+            ),
+        )?;
+        if !conflito(&r)
+            || versao_da_linha() != lida + 1
+            || crate::interpretador::com_valor(|v| v != "agent.ping")
+            || !conflito_gravado("ui.act", sb, 2)
+        {
+            crate::log_error!("teste", "tcp: {}", r);
+            return Err("pela rede, a versao velha nao foi CONFLICT gravado, ou mudou algo");
+        }
+
+        // O arrendamento de outro.
+        if !ok(&na_linha(&mut a, "ui.claim", r#","ttl_ms":300000"#)?) {
+            return Err("pela rede, o arrendamento livre nao foi tomado");
+        }
+        let r = na_linha(&mut b, "ui.claim", "")?;
+        if !conflito(&r) || !conflito_gravado("ui.claim", sb, 2) {
+            crate::log_error!("teste", "tcp: {}", r);
+            return Err("pela rede, o arrendamento de outro nao foi CONFLICT gravado");
+        }
+        let r = na_linha(&mut b, "ui.act", r#","action":"cancel""#)?;
+        if !conflito(&r) || crate::interpretador::com_valor(|v| v != "agent.ping") {
+            crate::log_error!("teste", "tcp: {}", r);
+            return Err("pela rede, o agente sem o arrendamento editou a linha de outro");
+        }
+
+        // A conexão de A cai: a sessão acaba, e o arrendamento com ela. Quem
+        // trata a queda é o coletor, em outro núcleo: espera-se o registro,
+        // que vem depois de o arrendamento sair da tabela.
+        let desde = ultimo_registro().map_or(0, |r| r.seq);
+        drop(a);
+        let solto = || {
+            crate::autorizacao::com_auditoria(|c| {
+                c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+                    .any(|r| {
+                        r.seq > desde
+                            && r.evento.metodo == "lease.invalidate"
+                            && r.evento.recurso == recurso
+                            && r.evento.sessao == sa
+                            && r.evento.agente == nome_de_teste(1)
+                            && r.evento.detalhe == "a sessao do canal acabou"
+                    })
+            })
+            .unwrap_or(false)
+        };
+        esperar_cedendo(solto, 800).map_err(
+            |_| "a queda da conexao nao soltou o arrendamento com o registro de quem o tinha",
+        )?;
+        if dono_da_linha().is_some() || crate::sessoes::identidade(sa).is_some() {
+            return Err("o arrendamento ou a sessao sobreviveram a queda da conexao");
+        }
+        if !ok(&na_linha(&mut b, "ui.claim", r#","ttl_ms":300000"#)?) {
+            return Err("o arrendamento solto pela queda da conexao nao foi para o outro");
+        }
+
+        // A mesma chave volta, numa conexão nova: não herda nada, e o
+        // arrendamento de B é de B.
+        let mut a = AgenteTcpDeTeste::conectar(1)?;
+        let r = na_linha(&mut a, "ui.act", r#","action":"cancel""#)?;
+        if !conflito(&r) || !conflito_gravado("ui.act", a.sessao(), 1) {
+            crate::log_error!("teste", "tcp: {}", r);
+            return Err("a chave que voltou pela rede editou a linha arrendada por outro");
+        }
+        drop(b);
+        esperar_cedendo(|| dono_da_linha().is_none(), 800)
+            .map_err(|_| "o arrendamento sobreviveu a queda da segunda conexao")?;
+        if !ok(&na_linha(&mut a, "ui.claim", "")?) || !ok(&na_linha(&mut a, "ui.release", "")?) {
+            return Err("solto pela queda, o arrendamento nao foi para quem voltou");
+        }
+        if !crate::coordenacao::um_por_recurso() {
+            return Err("um recurso ficou com dois arrendamentos");
+        }
+        Ok(())
+    });
+    crate::coordenacao::esquecer();
+    crate::interpretador::desativar_para_teste();
+    resultado
 }
 
 /// A conexão do canal é um fluxo do firewall como os outros: a regra que
