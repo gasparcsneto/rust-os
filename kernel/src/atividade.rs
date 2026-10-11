@@ -4,8 +4,8 @@
 //! # O que a pessoa precisa saber
 //!
 //! Que não está sozinha. Com agentes conectados, o que muda na tela pode
-//! não ter sido ela — e a barra diz, o tempo todo, quantos agentes estão nas
-//! portas e quem foi o último a agir: `agentes: 2 · último: teste-1
+//! não ter sido ela — e a barra diz, o tempo todo, quantos agentes estão
+//! conectados — pelas portas ou pelo TCP — e quem foi o último a agir: `agentes: 2 · último: teste-1
 //! (operador)`. Os agentes leem o mesmo texto na árvore, e a lista inteira
 //! — cada um, o papel, o último comando e há quanto tempo — no
 //! `agent.list`. Ninguém precisa de outro canal para saber quem está aqui.
@@ -46,12 +46,13 @@ use alloc::string::String;
 
 use crate::trava::Mutex;
 
-use crate::sessoes::PORTAS;
+use crate::sessoes::CIFRADAS;
 
 /// Quem agiu.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ator {
-    /// Uma sessão de agente numa porta, com a chave que provou o aperto.
+    /// Uma sessão de agente — numa porta, ou pelo TCP —, com a chave que
+    /// provou o aperto.
     Agente {
         sessao: u8,
         chave: [u8; 32],
@@ -100,7 +101,7 @@ pub struct Uso {
 // Tomadas sempre por `sem_interrupcoes`, como toda tranca deste kernel, e
 // soltas no caminho fatal.
 static ULTIMA: Mutex<Option<Acao>> = Mutex::new(None);
-static USOS: Mutex<[Option<Uso>; PORTAS]> = Mutex::new([None; PORTAS]);
+static USOS: Mutex<[Option<Uso>; CIFRADAS]> = Mutex::new([None; CIFRADAS]);
 
 /// Registra que `ator`, com `papel`, passou pela decisão com `metodo`; com
 /// `muda`, a permissão que exerceu muda o estado — e ele passa a ser o
@@ -146,7 +147,7 @@ pub(crate) fn registrar(ator: Ator, papel: &str, metodo: &'static str, muda: boo
 }
 
 fn indice(p: u8) -> Option<usize> {
-    (1..=PORTAS as u8).contains(&p).then(|| usize::from(p) - 1)
+    crate::sessoes::indice(p)
 }
 
 /// A última ação, de quem quer que seja.
@@ -169,13 +170,15 @@ pub fn sessao_acabou(p: u8) {
     crate::barra::atualizar_indicador();
 }
 
-/// As portas com um agente conectado agora: a sessão estabelecida, e a
-/// chave ainda no registro. Uma chave revogada sai da conta na hora, antes
-/// de a porta cair — ela já não age.
+/// As sessões com um agente conectado agora — nas portas e no TCP: a
+/// sessão estabelecida, com a chave confirmada e ainda no registro. Uma
+/// chave revogada sai da conta na hora, antes de a sessão cair — ela já não
+/// age; e o aperto do TCP ainda sem confirmação não entra nela — quem o fez
+/// pode só ter repetido o de outro.
 pub fn conectados() -> impl Iterator<Item = (u8, crate::sessoes::Identificada)> {
-    (1..=PORTAS as u8).filter_map(|p| {
+    (1..=CIFRADAS as u8).filter_map(|p| {
         crate::sessoes::identidade(p)
-            .filter(|id| crate::identidade::agente(&id.chave).is_some())
+            .filter(|id| id.confirmada && crate::identidade::agente(&id.chave).is_some())
             .map(|id| (p, id))
     })
 }
@@ -194,7 +197,7 @@ pub fn texto_do_indicador() -> String {
 pub fn esquecer() {
     crate::arch::sem_interrupcoes(|| {
         *ULTIMA.lock() = None;
-        *USOS.lock() = [None; PORTAS];
+        *USOS.lock() = [None; CIFRADAS];
     });
     crate::barra::atualizar_indicador();
 }

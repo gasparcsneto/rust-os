@@ -11,6 +11,8 @@
 //! - [`conexoes`]: a conexão TCP de saída como capacidade do registro: de
 //!   quem ela é, e como o gate a decide;
 //! - [`espera`]: o `net.recv` que dorme até a pilha ter o que dizer;
+//! - [`canal`]: o canal do agente por TCP — mais um transporte das sessões
+//!   cifradas, numa porta que o kernel escuta;
 //! - este arquivo: o ARP do diagnóstico — `net.arp`, a pergunta "quem
 //!   atende por este endereço?" —, que não abre conexão nenhuma.
 //!
@@ -31,6 +33,7 @@
 
 #[cfg(feature = "modo-teste")]
 pub mod bancada_dns;
+pub mod canal;
 pub mod captura;
 pub mod conexoes;
 pub mod espera;

@@ -274,8 +274,9 @@ gate.
   destino inteiro, enumerado), e cada conexão vai para a auditoria. O DNS
   e o TLS são programas sobre essas conexões, e não serviços do kernel: um
   nome não é recurso, e um certificado prova um nome ao programa sem
-  autorizar nada no gate. O canal do agente por TCP vira mais um
-  transporte de sessão.
+  autorizar nada no gate. O canal do agente por TCP é mais um transporte
+  de sessão: o mesmo aperto, a mesma chave no registro, o mesmo gate — sem
+  uma permissão, um comando ou uma decisão a mais.
 
 As fases 10 a 13 não mudam. A 12 perde o "sandbox por aplicativo", que o
 manifesto da 7 já é.

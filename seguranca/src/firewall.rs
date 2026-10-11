@@ -24,6 +24,20 @@
 //! - **Regras**: `net.block` barra um destino, para todos ou só para um dono
 //!   — ver [`Escopo`]. O fluxo barrado tem o número da regra; os quadros
 //!   dele não passam, nos dois sentidos.
+//!
+//! # A escuta do canal do agente
+//!
+//! Um transporte de entrada — o canal do agente por TCP, ver
+//! `kernel/src/rede/canal.rs` — não tem fluxo antes de o outro lado
+//! chamar: o primeiro quadro dele é um SYN de quem o kernel ainda não
+//! conhece. Uma [`Fluxo::escuta`] é a porta local desse transporte, e
+//! deixa passar só o começo de uma conexão: o SYN que chega a ela — e mais
+//! nada —, e o SYN-ACK ou o RST que saem dela, a resposta da pilha a esse
+//! SYN na mesma volta, antes de a conexão aceita entrar na fotografia. O
+//! resto da conversa é o de um fluxo como os outros, com a quádrupla
+//! inteira, que as regras alcançam: a conexão aceita é um fluxo da tabela.
+//! A escuta não autoriza nada — quem chega ainda tem de provar a chave
+//! dele no aperto do canal, e cada pedido passa pelo gate.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -145,7 +159,46 @@ pub struct Fluxo {
     pub porta_remota: u16,
     /// A regra que barra este fluxo, se alguma.
     pub barrado: Option<u64>,
+    /// Uma escuta, e não uma conversa: a porta local de um transporte de
+    /// entrada — ver o cabeçalho. `remoto` e `porta_remota` não valem, e a
+    /// escuta nunca casa como fluxo de quádrupla.
+    pub escuta: bool,
 }
+
+impl Fluxo {
+    /// A escuta TCP na porta local `porta` — ver o cabeçalho.
+    pub const fn escuta(porta: u16) -> Fluxo {
+        Fluxo {
+            protocolo: Protocolo::Tcp,
+            porta_local: porta,
+            remoto: [0; 4],
+            porta_remota: 0,
+            barrado: None,
+            escuta: true,
+        }
+    }
+
+    /// Este fluxo é a conversa da quádrupla dada — uma escuta nunca é.
+    fn casa(
+        &self,
+        protocolo: Protocolo,
+        porta_local: u16,
+        remoto: [u8; 4],
+        porta_remota: u16,
+    ) -> bool {
+        !self.escuta
+            && self.protocolo == protocolo
+            && self.porta_local == porta_local
+            && self.remoto == remoto
+            && self.porta_remota == porta_remota
+    }
+}
+
+/// Os bits do TCP que a escuta olha.
+const FIN: u8 = 0x01;
+const SYN: u8 = 0x02;
+const RST: u8 = 0x04;
+const ACK: u8 = 0x10;
 
 /// Por que um quadro não passou.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -175,6 +228,8 @@ enum Quadro {
         destino: [u8; 4],
         porta_de_origem: u16,
         porta_de_destino: u16,
+        /// Os bits do cabeçalho TCP; zero no UDP.
+        bits: u8,
     },
     Outro,
 }
@@ -213,13 +268,30 @@ fn ler(q: &[u8]) -> Quadro {
     if l4.len() < 4 {
         return Quadro::Outro;
     }
+    // No TCP, os bits — o byte 13 do cabeçalho: um segmento que não os
+    // tem não é TCP inteiro.
+    let bits = match protocolo {
+        Protocolo::Tcp => match l4.get(13) {
+            Some(&b) => b,
+            None => return Quadro::Outro,
+        },
+        Protocolo::Udp => 0,
+    };
     Quadro::Ip {
         protocolo,
         origem: [ip[12], ip[13], ip[14], ip[15]],
         destino: [ip[16], ip[17], ip[18], ip[19]],
         porta_de_origem: u16::from_be_bytes([l4[0], l4[1]]),
         porta_de_destino: u16::from_be_bytes([l4[2], l4[3]]),
+        bits,
     }
+}
+
+/// Uma escuta na porta local `porta`, entre os fluxos.
+fn escutando(fluxos: &[Fluxo], protocolo: Protocolo, porta: u16) -> bool {
+    fluxos
+        .iter()
+        .any(|f| f.escuta && f.protocolo == protocolo && f.porta_local == porta)
 }
 
 /// Um quadro que a pilha quer mandar.
@@ -232,6 +304,7 @@ pub fn saida(quadro: &[u8], fluxos: &[Fluxo]) -> Veredito {
             destino,
             porta_de_origem,
             porta_de_destino,
+            bits,
             ..
         } => {
             if protocolo == Protocolo::Udp
@@ -240,16 +313,21 @@ pub fn saida(quadro: &[u8], fluxos: &[Fluxo]) -> Veredito {
             {
                 return Veredito::Passa;
             }
-            match fluxos.iter().find(|f| {
-                f.protocolo == protocolo
-                    && f.porta_local == porta_de_origem
-                    && f.remoto == destino
-                    && f.porta_remota == porta_de_destino
-            }) {
+            match fluxos
+                .iter()
+                .find(|f| f.casa(protocolo, porta_de_origem, destino, porta_de_destino))
+            {
                 Some(Fluxo {
                     barrado: Some(r), ..
                 }) => Veredito::Descarta(Motivo::Regra(*r)),
                 Some(_) => Veredito::Passa,
+                // Da escuta, só a resposta a um SYN: o SYN-ACK que aceita,
+                // ou o RST que recusa. Ela nunca começa uma conversa.
+                None if escutando(fluxos, protocolo, porta_de_origem)
+                    && (bits & RST != 0 || bits & (SYN | ACK | FIN) == SYN | ACK) =>
+                {
+                    Veredito::Passa
+                }
                 None => Veredito::Descarta(Motivo::SemFluxo),
             }
         }
@@ -271,6 +349,7 @@ pub fn entrada(quadro: &[u8], fluxos: &[Fluxo]) -> Veredito {
             origem,
             porta_de_origem,
             porta_de_destino,
+            bits,
             ..
         } => {
             if protocolo == Protocolo::Udp
@@ -279,21 +358,26 @@ pub fn entrada(quadro: &[u8], fluxos: &[Fluxo]) -> Veredito {
             {
                 return Veredito::Passa;
             }
-            let do_fluxo = |f: &&Fluxo| {
-                f.protocolo == protocolo
-                    && f.porta_local == porta_de_destino
-                    && f.remoto == origem
-                    && f.porta_remota == porta_de_origem
-            };
-            if let Some(f) = fluxos.iter().find(do_fluxo) {
+            if let Some(f) = fluxos
+                .iter()
+                .find(|f| f.casa(protocolo, porta_de_destino, origem, porta_de_origem))
+            {
                 return match f.barrado {
                     Some(r) => Veredito::Descarta(Motivo::Regra(r)),
                     None => Veredito::Passa,
                 };
             }
-            let da_porta = fluxos
-                .iter()
-                .any(|f| f.protocolo == protocolo && f.porta_local == porta_de_destino);
+            // Na escuta, só o começo de uma conexão: o SYN sozinho. O que
+            // mais chegar a ela sem fluxo — um ACK, dados, um FIN, um RST —
+            // é de uma conversa que o kernel não tem.
+            if escutando(fluxos, protocolo, porta_de_destino)
+                && bits & (SYN | ACK | FIN | RST) == SYN
+            {
+                return Veredito::Passa;
+            }
+            let da_porta = fluxos.iter().any(|f| {
+                !f.escuta && f.protocolo == protocolo && f.porta_local == porta_de_destino
+            });
             if protocolo == Protocolo::Udp && da_porta {
                 Veredito::Passa
             } else {
@@ -315,6 +399,7 @@ pub fn fluxos<'a>(
         remoto: destino.ip,
         porta_remota: destino.porta,
         barrado: barrado(regras, &destino, &dono),
+        escuta: false,
     })
 }
 
@@ -409,6 +494,7 @@ mod testes {
             remoto: ECO,
             porta_remota: 7,
             barrado,
+            escuta: false,
         }
     }
 
@@ -419,6 +505,29 @@ mod testes {
             remoto: [10, 0, 2, 2],
             porta_remota: 69,
             barrado: None,
+            escuta: false,
+        }
+    }
+
+    /// Um segmento TCP com os bits dados.
+    fn segmento(origem: [u8; 4], destino: [u8; 4], po: u16, pd: u16, bits: u8) -> Vec<u8> {
+        let mut q = quadro(6, origem, destino, po, pd);
+        q[14 + 20 + 13] = bits;
+        q
+    }
+
+    const CANAL: u16 = 7070;
+    const HOSPEDEIRO: [u8; 4] = [10, 0, 2, 2];
+
+    /// A conexão do canal que a pilha já aceitou: um fluxo como os outros.
+    fn aceita(barrado: Option<u64>) -> Fluxo {
+        Fluxo {
+            protocolo: Protocolo::Tcp,
+            porta_local: CANAL,
+            remoto: HOSPEDEIRO,
+            porta_remota: 40000,
+            barrado,
+            escuta: false,
         }
     }
 
@@ -499,6 +608,131 @@ mod testes {
             entrada(&quadro(1, ECO, GUEST, 0, 0), &fluxos),
             Veredito::Descarta(Motivo::Protocolo)
         );
+    }
+
+    /// Na escuta do canal só entra o SYN — de quem for: quem chega ainda
+    /// tem de provar a chave no aperto do canal. Um ACK, dados, um FIN ou
+    /// um RST sem a conexão aceita não entram; outra porta não tem escuta,
+    /// e a escuta é do TCP.
+    #[test]
+    fn a_escuta_so_recebe_o_syn() {
+        let fluxos = [Fluxo::escuta(CANAL), eco(None)];
+        for origem in [HOSPEDEIRO, [192, 168, 7, 9]] {
+            for bits in [SYN, SYN | 0xC0] {
+                assert_eq!(
+                    entrada(&segmento(origem, GUEST, 40000, CANAL, bits), &fluxos),
+                    Veredito::Passa,
+                    "bits {bits:#04x}"
+                );
+            }
+        }
+        for bits in [
+            ACK,
+            SYN | ACK,
+            ACK | 0x08,
+            FIN | ACK,
+            RST,
+            SYN | FIN,
+            SYN | RST,
+            0,
+        ] {
+            assert_eq!(
+                entrada(&segmento(HOSPEDEIRO, GUEST, 40000, CANAL, bits), &fluxos),
+                Veredito::Descarta(Motivo::SemFluxo),
+                "bits {bits:#04x}"
+            );
+        }
+        assert_eq!(
+            entrada(&segmento(HOSPEDEIRO, GUEST, 40000, CANAL + 1, SYN), &fluxos),
+            Veredito::Descarta(Motivo::SemFluxo)
+        );
+        assert_eq!(
+            entrada(&quadro(17, HOSPEDEIRO, GUEST, 40000, CANAL), &fluxos),
+            Veredito::Descarta(Motivo::SemFluxo)
+        );
+        // Um TCP sem os bits — cortado antes do byte 13 — não é TCP inteiro.
+        let curto = quadro(6, HOSPEDEIRO, GUEST, 40000, CANAL)[..14 + 20 + 10].to_vec();
+        assert_eq!(
+            entrada(&curto, &fluxos),
+            Veredito::Descarta(Motivo::Protocolo)
+        );
+    }
+
+    /// Da escuta só sai a resposta a um SYN — o SYN-ACK que aceita, ou o
+    /// RST que recusa —, e nunca um SYN, dados ou um FIN: ela não começa
+    /// conversa.
+    #[test]
+    fn a_escuta_so_responde() {
+        let fluxos = [Fluxo::escuta(CANAL)];
+        for bits in [SYN | ACK, RST, RST | ACK] {
+            assert_eq!(
+                saida(&segmento(GUEST, HOSPEDEIRO, CANAL, 40000, bits), &fluxos),
+                Veredito::Passa,
+                "bits {bits:#04x}"
+            );
+        }
+        for bits in [SYN, ACK, ACK | 0x08, FIN | ACK, SYN | ACK | FIN, 0] {
+            assert_eq!(
+                saida(&segmento(GUEST, HOSPEDEIRO, CANAL, 40000, bits), &fluxos),
+                Veredito::Descarta(Motivo::SemFluxo),
+                "bits {bits:#04x}"
+            );
+        }
+        assert_eq!(
+            saida(
+                &segmento(GUEST, HOSPEDEIRO, CANAL + 1, 40000, SYN | ACK),
+                &fluxos
+            ),
+            Veredito::Descarta(Motivo::SemFluxo)
+        );
+    }
+
+    /// A escuta não é a conversa de ninguém: um segmento forjado com a
+    /// "quádrupla" dela — origem zero, porta zero — não casa com ela.
+    #[test]
+    fn a_escuta_nao_casa_como_quadrupla() {
+        let fluxos = [Fluxo::escuta(CANAL)];
+        assert_eq!(
+            entrada(&segmento([0; 4], GUEST, 0, CANAL, ACK), &fluxos),
+            Veredito::Descarta(Motivo::SemFluxo)
+        );
+        assert_eq!(
+            saida(&segmento(GUEST, [0; 4], CANAL, 0, ACK), &fluxos),
+            Veredito::Descarta(Motivo::SemFluxo)
+        );
+    }
+
+    /// A conexão aceita é um fluxo da tabela: conversa nos dois sentidos, e
+    /// a regra que a alcança a barra — a escuta não a protege, nem o RST
+    /// dela passa por uma conversa barrada.
+    #[test]
+    fn a_conexao_aceita_e_um_fluxo() {
+        let fluxos = [Fluxo::escuta(CANAL), aceita(None)];
+        assert_eq!(
+            entrada(
+                &segmento(HOSPEDEIRO, GUEST, 40000, CANAL, ACK | 0x08),
+                &fluxos
+            ),
+            Veredito::Passa
+        );
+        assert_eq!(
+            saida(
+                &segmento(GUEST, HOSPEDEIRO, CANAL, 40000, ACK | 0x08),
+                &fluxos
+            ),
+            Veredito::Passa
+        );
+        let barrada = [Fluxo::escuta(CANAL), aceita(Some(3))];
+        assert_eq!(
+            entrada(&segmento(HOSPEDEIRO, GUEST, 40000, CANAL, ACK), &barrada),
+            Veredito::Descarta(Motivo::Regra(3))
+        );
+        for bits in [ACK, RST] {
+            assert_eq!(
+                saida(&segmento(GUEST, HOSPEDEIRO, CANAL, 40000, bits), &barrada),
+                Veredito::Descarta(Motivo::Regra(3))
+            );
+        }
     }
 
     #[test]

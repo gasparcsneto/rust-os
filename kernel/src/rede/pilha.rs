@@ -13,6 +13,9 @@
 //!   para a regra, que é de lá —, e a espera armada em cada uma — ver
 //!   [`super::espera`];
 //! - a associação UDP, que entra na mesma tabela — ver abaixo;
+//! - os sockets das vagas do canal do agente por TCP, que escutam na porta
+//!   do canal — o transporte é de [`super::canal`], e a pilha só os guarda,
+//!   os faz andar e os põe na fotografia do firewall;
 //! - o fio `rede`, que faz a pilha andar.
 //!
 //! # Quem faz a pilha andar
@@ -54,9 +57,14 @@
 //! Depois do gate, antes da rede (ver `docs/SEGURANCA.md`): só restringe.
 //!
 //! - Cada quadro que a pilha manda pertence a um fluxo da tabela — uma
-//!   conexão que o gate decidiu, ou uma que ainda termina o fecho — ou ao
-//!   DHCP da placa; cada quadro que chega vai a um deles. O resto não passa:
-//!   nem eco ICMP, nem RST para uma porta sem conexão, nem IPv6. O ARP passa.
+//!   conexão que o gate decidiu, uma que ainda termina o fecho, ou uma
+//!   conexão do canal do agente — ou ao DHCP da placa; cada quadro que
+//!   chega vai a um deles. O resto não passa: nem eco ICMP, nem RST para
+//!   uma porta sem conexão, nem IPv6. O ARP passa.
+//! - A escuta do canal do agente: o SYN que chega à porta dele, e o SYN-ACK
+//!   ou o RST que a pilha responde — e mais nada, até a conexão existir. A
+//!   conexão aceita é um fluxo como os outros, de quem provou a chave nela:
+//!   as regras a alcançam — ver `seguranca::firewall`.
 //! - As regras de `net.block` barram um destino, para todos ou para um dono;
 //!   o fluxo barrado não manda nem recebe, `net.connect` e `net.send` sobre
 //!   ele são recusados com o número da regra, e as conexões vivas que a
@@ -81,7 +89,7 @@ use core::task::Waker;
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::socket::{dhcpv4, tcp, udp};
-use smoltcp::time::Instant;
+use smoltcp::time::{Duration, Instant};
 use smoltcp::wire::{
     EthernetAddress, HardwareAddress, IpAddress, IpCidr, IpEndpoint, Ipv4Address, Ipv4Cidr,
 };
@@ -93,6 +101,7 @@ use crate::virtio::net::MAIOR_QUADRO;
 use politica::endereco::{Destino, Protocolo};
 use seguranca::firewall::{self, DonoDoFluxo, Escopo, Fluxo, Motivo, Regra, Regras, Veredito};
 
+use super::canal;
 use super::conexoes::Dono;
 use super::espera::{Desfecho, Sentido};
 
@@ -261,6 +270,10 @@ struct Pilha {
     /// A fotografia dos fluxos, refeita a cada volta: o que o adaptador
     /// classifica. Guardada para não alocar uma por volta.
     fluxos: Vec<Fluxo>,
+    /// O socket de cada vaga do canal do agente por TCP — ver
+    /// [`super::canal`]. Ficam na pilha do boot ao fim: quando uma conexão
+    /// acaba, o socket volta a escutar.
+    vagas: [SocketHandle; canal::VAGAS as usize],
 }
 
 /// Um socket que o dono fechou, ou que caiu, e ainda termina o fecho com o
@@ -531,6 +544,23 @@ pub fn iniciar() {
     let iface = Interface::new(config, &mut Adaptador { fluxos: &[] }, agora());
     let mut sockets = SocketSet::new(Vec::new());
     let dhcp = sockets.add(dhcpv4::Socket::new());
+    // As vagas do canal do agente, escutando desde já: sem endereço ainda
+    // não chega SYN nenhum, e quando o DHCP responder elas já estão lá.
+    let mut vagas = [SocketHandle::default(); canal::VAGAS as usize];
+    for vaga in vagas.iter_mut() {
+        let mut socket = tcp::Socket::new(
+            tcp::SocketBuffer::new(vec![0u8; canal::BUFFER_DO_SOCKET]),
+            tcp::SocketBuffer::new(vec![0u8; canal::BUFFER_DO_SOCKET]),
+        );
+        // Um agente calado continua; um que sumiu sem fechar libera a vaga.
+        socket.set_keep_alive(Some(Duration::from_millis(canal::PERGUNTA_AO_SILENCIO_MS)));
+        socket.set_timeout(Some(Duration::from_millis(canal::SILENCIO_MAXIMO_MS)));
+        // As respostas saem inteiras de uma vez, cifradas: esperar o ACK do
+        // pedaço anterior para mandar o último só atrasaria o agente.
+        socket.set_nagle_enabled(false);
+        let _ = socket.listen(canal::PORTA);
+        *vaga = sockets.add(socket);
+    }
     let porta_inicial = PRIMEIRA_PORTA + (u16::from_le_bytes([semente[0], semente[1]]) % 4096);
     crate::arch::sem_interrupcoes(|| {
         *PILHA.lock() = Some(Pilha {
@@ -548,6 +578,7 @@ pub fn iniciar() {
             datagramas_alheios: 0,
             regras: Regras::nova(),
             fluxos: Vec::new(),
+            vagas,
         });
     });
     match crate::fios::criar("rede", laco, 0) {
@@ -603,6 +634,18 @@ impl Pilha {
             self.fechando.iter().map(|f| (f.destino, f.porta, f.fluxo)),
             regras,
         ));
+        // E o canal do agente: a escuta, e a conexão de cada vaga — inclusive
+        // a que ainda faz o aperto do TCP ou termina o fecho —, de quem
+        // provou a chave nela.
+        fluxos.push(Fluxo::escuta(canal::PORTA));
+        for v in 1..=canal::VAGAS {
+            if let Some((destino, dono)) = self.fluxo_da_vaga(v) {
+                fluxos.extend(firewall::fluxos(
+                    core::iter::once((destino, canal::PORTA, dono)),
+                    regras,
+                ));
+            }
+        }
         let _ = self.iface.poll(
             agora(),
             &mut Adaptador { fluxos: &fluxos },
@@ -624,6 +667,17 @@ impl Pilha {
             );
         }
         self.fluxos = fluxos;
+        // As vagas do canal do agente: aceitar, escoar, os prazos, o fecho,
+        // e voltar a escutar. O que precisa de mais que a trava da pilha —
+        // esquecer a sessão, gravar a recusa — fica para o coletor.
+        let agora_ms = crate::tempo::uptime_ms();
+        for v in 1..=canal::VAGAS {
+            let h = self.vagas[usize::from(v) - 1];
+            let socket = self.sockets.get_mut::<tcp::Socket>(h);
+            if let Some(d) = canal::bombear(v, socket, agora_ms) {
+                canal::deixar(v, d);
+            }
+        }
         // Os que o dono fechou e já terminaram saem do conjunto — ver
         // `fechando` sobre o `TIME_WAIT`.
         let sockets = &mut self.sockets;
@@ -672,6 +726,31 @@ impl Pilha {
                 Some(None)
             }
         }
+    }
+
+    /// O fluxo da conexão da vaga `v` do canal do agente, se ela tem uma —
+    /// em qualquer estado em que o socket ainda troca quadros com o par: o
+    /// aperto do TCP, a conversa, o fecho. O destino é o par; o dono, o
+    /// agente que provou a chave nela, ou ninguém ainda.
+    fn fluxo_da_vaga(&self, v: u8) -> Option<(Destino, DonoDoFluxo)> {
+        let socket = self
+            .sockets
+            .get::<tcp::Socket>(*self.vagas.get(usize::from(v).checked_sub(1)?)?);
+        if !socket.is_active() {
+            return None;
+        }
+        let par = socket.remote_endpoint()?;
+        let IpAddress::Ipv4(ip) = par.addr;
+        let destino = Destino {
+            protocolo: Protocolo::Tcp,
+            ip: ip.octets(),
+            porta: par.port,
+        };
+        let dono = DonoDoFluxo {
+            agente: canal::chave_da_vaga(v),
+            ..DonoDoFluxo::default()
+        };
+        Some((destino, dono))
     }
 
     /// O estado da conexão `i`, pelo socket do protocolo dela.
@@ -1263,6 +1342,7 @@ pub fn sockets_soltos_de_teste() -> usize {
             .iter()
             .filter(|(h, _)| {
                 *h != p.dhcp
+                    && !p.vagas.contains(h)
                     && !p.conexoes.iter().any(|c| c.socket == *h)
                     && !p.fechando.iter().any(|f| f.socket == *h)
             })
@@ -1368,6 +1448,9 @@ pub struct Bloqueio {
     pub nova: bool,
     /// As conexões vivas que ela alcançou e derrubou: o número e o destino.
     pub derrubadas: Vec<(u64, Destino)>,
+    /// As conexões do canal do agente que ela alcançou e derrubou: a sessão
+    /// e o par. A sessão acaba como se o par tivesse caído.
+    pub sessoes_derrubadas: Vec<(u8, Destino)>,
 }
 
 /// Põe a regra que barra `destino` para `escopo` — o `net.block` que o
@@ -1387,10 +1470,27 @@ pub fn bloquear(
             .filter(|c| c.destino == destino && escopo.alcanca(&c.fluxo))
             .map(|c| (c.id, c.destino))
             .collect();
-        Ok((regra, nova, alcancadas))
+        // As conexões do canal do agente que a regra alcança caem também,
+        // na mesma trava que a pôs: a escuta não protege ninguém.
+        let mut sessoes = Vec::new();
+        for v in 1..=canal::VAGAS {
+            let Some((par, dono)) = p.fluxo_da_vaga(v) else {
+                continue;
+            };
+            if par != destino || !escopo.alcanca(&dono) {
+                continue;
+            }
+            let h = p.vagas[usize::from(v) - 1];
+            p.sockets.get_mut::<tcp::Socket>(h).abort();
+            if let Some(geracao) = canal::derrubada(v) {
+                canal::deixar(v, canal::Desfecho::Acabou { geracao });
+            }
+            sessoes.push((canal::sessao(v), par));
+        }
+        Ok((regra, nova, alcancadas, sessoes))
     })
     .unwrap_or(Err("a pilha de rede nao esta no ar"));
-    let (regra, nova, alcancadas) = r?;
+    let (regra, nova, alcancadas, sessoes_derrubadas) = r?;
     // Fora da trava de cima, e pela mesma derrubada de quando o dono acaba:
     // a regra já está na tabela, e uma conexão aberta no meio é recusada.
     let ids: Vec<u64> = alcancadas.iter().map(|(id, _)| *id).collect();
@@ -1399,6 +1499,7 @@ pub fn bloquear(
         regra,
         nova,
         derrubadas: alcancadas,
+        sessoes_derrubadas,
     })
 }
 
@@ -1438,6 +1539,15 @@ pub fn esquecer_regras_de_teste() {
             p.regras.tirar(&r.destino, &r.escopo);
         }
     });
+}
+
+/// Quais vagas do canal do agente estão escutando — livres para a próxima
+/// conexão: a de antes já terminou o fecho com o par. Uma vaga sem conexão
+/// que ainda não escuta está terminando o fecho, e um SYN que chega então
+/// vai a outra vaga, ou é recusado.
+pub fn vagas_escutando() -> [bool; canal::VAGAS as usize] {
+    com_pilha(|p| core::array::from_fn(|i| p.sockets.get::<tcp::Socket>(p.vagas[i]).is_listening()))
+        .unwrap_or([false; canal::VAGAS as usize])
 }
 
 /// O que `net.info` diz da pilha. `None` se ela não está no ar.

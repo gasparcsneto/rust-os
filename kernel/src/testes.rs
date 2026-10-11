@@ -30391,6 +30391,54 @@ static CASOS: &[Caso] = &[
         f: tls_tres_sessoes_ao_mesmo_tempo,
     },
     Caso {
+        nome: "canal tcp: o aperto pela rede",
+        f: canal_tcp_o_aperto_pela_rede,
+    },
+    Caso {
+        nome: "canal tcp: a identidade nao se forja",
+        f: canal_tcp_a_identidade_nao_se_forja,
+    },
+    Caso {
+        nome: "canal tcp: o prazo do aperto",
+        f: canal_tcp_o_prazo_do_aperto,
+    },
+    Caso {
+        nome: "canal tcp: a mesma autoridade e a mesma taxa",
+        f: canal_tcp_a_mesma_autoridade_e_a_mesma_taxa,
+    },
+    Caso {
+        nome: "canal tcp: revogar derruba a conexao viva",
+        f: canal_tcp_revogar_derruba_a_conexao_viva,
+    },
+    Caso {
+        nome: "canal tcp: a contencao e o administrador",
+        f: canal_tcp_a_contencao_e_o_administrador,
+    },
+    Caso {
+        nome: "canal tcp: a regra do firewall derruba a conexao",
+        f: canal_tcp_a_regra_do_firewall_derruba_a_conexao,
+    },
+    Caso {
+        nome: "canal tcp: quem nao le espera",
+        f: canal_tcp_quem_nao_le_espera,
+    },
+    Caso {
+        nome: "canal tcp: a entrada cheia espera no socket",
+        f: canal_tcp_a_entrada_cheia_espera_no_socket,
+    },
+    Caso {
+        nome: "canal tcp: a saida tem teto",
+        f: canal_tcp_a_saida_tem_teto,
+    },
+    Caso {
+        nome: "canal tcp: quatro agentes e a vaga de cada um",
+        f: canal_tcp_quatro_agentes_e_a_vaga_de_cada_um,
+    },
+    Caso {
+        nome: "canal tcp: o nsf observa sem ser autoridade",
+        f: canal_tcp_o_nsf_observa_sem_ser_autoridade,
+    },
+    Caso {
         nome: "nsf: le pelo gate com o papel dele",
         f: nsf_le_pelo_gate_com_o_papel_dele,
     },
@@ -37156,4 +37204,1457 @@ pub fn executar_todos() -> ! {
     // O caso final fica fora da tabela porque não devolve o controle: ele
     // encerra o emulador de dentro do handler de falha.
     estouro_de_pilha_e_detectado()
+}
+
+// ---------------------------------------------------------------------------
+// O canal do agente por TCP
+// ---------------------------------------------------------------------------
+
+/// Para onde a suíte conecta para chegar ao canal como um agente de fora: a
+/// ponte da bancada (`xtask/src/canal_tcp.rs`), que leva a conexão pelo
+/// hospedeiro e a traz de volta à porta do canal — pela pilha do kernel
+/// duas vezes, sem atalho nenhum até o canal.
+const PONTE_DO_CANAL: politica::endereco::Destino = politica::endereco::Destino {
+    protocolo: politica::endereco::Protocolo::Tcp,
+    ip: [10, 0, 2, 100],
+    porta: 7070,
+};
+
+/// A tarefa de verdade que atende uma vaga do canal TCP — `agent::atender`
+/// —, andada à mão: a suíte não tem executor. Cada [`TarefaDaVaga::andar`]
+/// a faz correr até ela esperar um evento de fora.
+struct TarefaDaVaga {
+    tarefa: core::pin::Pin<alloc::boxed::Box<dyn core::future::Future<Output = ()>>>,
+    acordado: alloc::sync::Arc<Acordado>,
+    waker: core::task::Waker,
+}
+
+impl TarefaDaVaga {
+    fn nova(vaga: u8) -> TarefaDaVaga {
+        let (acordado, waker) = Acordado::novo();
+        TarefaDaVaga {
+            tarefa: alloc::boxed::Box::pin(crate::agent::atender(
+                crate::agent::sessao::Canal::Tcp(vaga),
+            )),
+            acordado,
+            waker,
+        }
+    }
+
+    /// Faz a tarefa correr até ela esperar um evento de fora — um byte, a
+    /// saída esvaziar: cada `ceder` dela devolve a vez e a acorda de novo.
+    fn andar(&mut self) {
+        for _ in 0..512 {
+            let antes = self.acordado.vezes();
+            let mut cx = core::task::Context::from_waker(&self.waker);
+            let _ = self.tarefa.as_mut().poll(&mut cx);
+            if self.acordado.vezes() == antes {
+                return;
+            }
+        }
+    }
+}
+
+/// Um quadro do canal: o tipo e o corpo.
+type QuadroDoCanal = (sigilo::quadro::Tipo, alloc::vec::Vec<u8>);
+
+/// Um agente de fora pelo canal TCP: uma conexão de saída pela pilha até a
+/// ponte da bancada, e o mesmo `sigilo` do cliente de verdade.
+///
+/// A conexão é aberta pela pilha, e não por `net.connect`: a suíte faz aqui
+/// o papel de quem está **fora** da máquina, e quem está fora não pede nada
+/// ao gate — é o canal, do outro lado da ponte, que pede. Do lado de dentro,
+/// a tarefa que atende a vaga é a de produção.
+struct AgenteTcpDeTeste {
+    /// O número do agente: o dono da conexão, e a numeração dos pedidos.
+    numero: u8,
+    conexao: u64,
+    dono: crate::rede::conexoes::Dono,
+    /// A vaga do canal que aceitou a conexão, e a tarefa que a atende.
+    vaga: u8,
+    tarefa: TarefaDaVaga,
+    transporte: Option<sigilo::Transporte>,
+    leitor: sigilo::quadro::Leitor,
+    /// Os quadros que chegaram e ninguém tirou.
+    quadros: alloc::vec::Vec<QuadroDoCanal>,
+    /// O texto decifrado que ainda não fechou uma linha.
+    texto: alloc::string::String,
+    /// O motivo da última recusa que o Duke mandou.
+    recusa: Option<alloc::string::String>,
+    /// O outro lado fechou a conexão.
+    fechada: bool,
+    /// O início do aperto que mandou — para quem quiser repeti-lo.
+    inicio: alloc::vec::Vec<u8>,
+    /// O que o Duke disse ao responder o aperto.
+    boas_vindas: alloc::string::String,
+    proximo_id: u32,
+}
+
+impl AgenteTcpDeTeste {
+    /// Abre a conexão pela ponte e espera a vaga que a aceitou. `n` faz o
+    /// dono da conexão — a suíte, no papel de quem está fora — um para cada
+    /// agente: o teto de conexões é por dono.
+    fn abrir(n: u8) -> Result<AgenteTcpDeTeste, &'static str> {
+        use crate::rede::canal;
+        let antes: [u64; canal::VAGAS as usize] =
+            core::array::from_fn(|i| canal::geracao(i as u8 + 1));
+        let dono = crate::rede::conexoes::Dono::Canal {
+            sessao: crate::agent::sessao::SERIAL,
+            chave: Some([0xC0 ^ n; 32]),
+            geracao: 0,
+        };
+        let fluxo = seguranca::firewall::DonoDoFluxo {
+            serial: true,
+            ..Default::default()
+        };
+        let (conexao, _) = crate::rede::pilha::abrir(dono, PONTE_DO_CANAL, fluxo)?;
+        let mut vaga = 0;
+        let aceita = esperar_cedendo(
+            || {
+                vaga = (1..=canal::VAGAS)
+                    .find(|&v| canal::geracao(v) > antes[usize::from(v) - 1])
+                    .unwrap_or(0);
+                vaga != 0
+            },
+            500,
+        );
+        if aceita.is_err() {
+            let _ = crate::rede::pilha::fechar(conexao, &dono);
+            return Err("a ponte nao levou a conexao a uma vaga do canal");
+        }
+        Ok(AgenteTcpDeTeste {
+            numero: n,
+            conexao,
+            dono,
+            vaga,
+            tarefa: TarefaDaVaga::nova(vaga),
+            transporte: None,
+            leitor: sigilo::quadro::Leitor::novo(),
+            quadros: alloc::vec::Vec::new(),
+            texto: alloc::string::String::new(),
+            recusa: None,
+            fechada: false,
+            inicio: alloc::vec::Vec::new(),
+            boas_vindas: alloc::string::String::new(),
+            proximo_id: u32::from(n) * 1000,
+        })
+    }
+
+    /// Conecta pela ponte e faz o aperto com a chave do agente de teste
+    /// `p` — e o primeiro pedido, que confirma a chave.
+    fn conectar(p: u8) -> Result<AgenteTcpDeTeste, &'static str> {
+        let mut a = AgenteTcpDeTeste::abrir(p)?;
+        a.apertar(&chave_de_teste(p))?;
+        if a.transporte.is_none() {
+            crate::log_error!("teste", "tcp {}: recusa {:?}", p, a.recusa);
+            return Err("um agente registrado nao completou o aperto pela rede");
+        }
+        let r = a.pedir("agent.ping", "{}")?;
+        if !r.contains(r#""result""#) {
+            crate::log_error!("teste", "tcp {}: {}", p, r);
+            return Err("o primeiro pedido pela rede nao foi atendido");
+        }
+        Ok(a)
+    }
+
+    /// A sessão do kernel desta conexão.
+    fn sessao(&self) -> u8 {
+        crate::rede::canal::sessao(self.vaga)
+    }
+
+    /// O lado de cá e o de lá andam: a tarefa da vaga atende o que chegou, e
+    /// o que ela mandou é colhido em quadros.
+    fn andar(&mut self) {
+        use crate::rede::pilha::{self, Estado};
+        self.tarefa.andar();
+        loop {
+            let Ok((dados, estado)) = pilha::espiar(self.conexao, &self.dono, 4096) else {
+                self.fechada = true;
+                return;
+            };
+            if dados.is_empty() {
+                if matches!(estado, Estado::Fechando | Estado::Fechada) {
+                    self.fechada = true;
+                }
+                return;
+            }
+            let _ = pilha::consumir(self.conexao, &self.dono, dados.len());
+            for b in dados {
+                if let Ok(Some((tipo, corpo))) = self.leitor.empurrar(b) {
+                    self.quadros.push((tipo, corpo.to_vec()));
+                }
+            }
+        }
+    }
+
+    /// Espera `condicao`, andando.
+    fn esperar(
+        &mut self,
+        condicao: impl Fn(&AgenteTcpDeTeste) -> bool,
+        teto_em_ticks: u64,
+    ) -> Resultado {
+        esperar_cedendo(
+            || {
+                self.andar();
+                condicao(self)
+            },
+            teto_em_ticks,
+        )
+    }
+
+    /// Bytes crus para o canal, inteiros: o que não coube agora vai quando
+    /// couber — a tarefa da vaga andando enquanto isso.
+    fn mandar(&mut self, bytes: &[u8]) -> Resultado {
+        let mut enviados = 0;
+        let mut erro = None;
+        let _ = esperar_cedendo(
+            || {
+                match crate::rede::pilha::mandar(self.conexao, &self.dono, &bytes[enviados..]) {
+                    Ok((n, _)) => enviados += n,
+                    Err(e) => erro = Some(e),
+                }
+                self.tarefa.andar();
+                erro.is_some() || enviados == bytes.len()
+            },
+            800,
+        );
+        if let Some(e) = erro {
+            crate::log_error!("teste", "tcp: {}", e);
+            return Err("a conexao pela ponte recusou os bytes");
+        }
+        if enviados != bytes.len() {
+            return Err("os bytes nao sairam pela ponte no prazo");
+        }
+        Ok(())
+    }
+
+    /// O aperto com `chave`: o início, e a resposta ou a recusa.
+    fn apertar(&mut self, chave: &[u8; 32]) -> Resultado {
+        use sigilo::quadro::{Tipo, montar};
+        let duke = crate::identidade::publica_do_duke().ok_or("o Duke nao tem chave")?;
+        let efemera = crate::aleatorio::chave().map_err(|_| "sem entropia")?;
+        let mut mensagem = alloc::vec![0u8; 1024];
+        let (n, aguardando) = sigilo::Iniciador::novo(sigilo::PROLOGO, chave, &duke)
+            .escrever(efemera, b"", &mut mensagem)
+            .map_err(|_| "o aperto nao foi escrito")?;
+        self.inicio = montar(Tipo::Inicio, &mensagem[..n]).map_err(|_| "quadro grande demais")?;
+        let inicio = self.inicio.clone();
+        self.mandar(&inicio)?;
+        self.esperar(|a| !a.quadros.is_empty() || a.fechada, 800)
+            .map_err(|_| "o aperto pela rede nao teve resposta")?;
+        if self.quadros.is_empty() {
+            return Err("a conexao fechou sem responder o aperto");
+        }
+        let (tipo, corpo) = self.quadros.remove(0);
+        match tipo {
+            Tipo::Resposta => {
+                let mut carga = alloc::vec![0u8; corpo.len()];
+                let (m, t) = aguardando
+                    .ler(&corpo, &mut carga)
+                    .map_err(|_| "a resposta do aperto nao abriu")?;
+                self.boas_vindas = String::from_utf8_lossy(&carga[..m]).into_owned();
+                self.transporte = Some(t);
+            }
+            Tipo::Recusa => self.recusa = Some(String::from_utf8_lossy(&corpo).into_owned()),
+            _ => return Err("quadro inesperado no aperto"),
+        }
+        Ok(())
+    }
+
+    /// Um pedido cifrado, em quadros prontos: o `id` dele, e os bytes.
+    fn quadro(
+        &mut self,
+        metodo: &str,
+        params: &str,
+    ) -> Result<(u32, alloc::vec::Vec<u8>), &'static str> {
+        use sigilo::quadro::{Tipo, montar};
+        self.proximo_id += 1;
+        let id = self.proximo_id;
+        let linha = alloc::format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"{metodo}\",\"params\":{params}}}\n"
+        );
+        let t = self.transporte.as_mut().ok_or("sem sessao")?;
+        let mut quadros = alloc::vec::Vec::new();
+        let mut cifrado = alloc::vec![0u8; sigilo::MAIOR_MENSAGEM];
+        for pedaco in linha.as_bytes().chunks(sigilo::Transporte::MAIOR_CLARO) {
+            let n = t.cifrar(pedaco, &mut cifrado).map_err(|_| "nao cifrou")?;
+            quadros.extend(montar(Tipo::Dados, &cifrado[..n]).map_err(|_| "quadro grande")?);
+        }
+        Ok((id, quadros))
+    }
+
+    /// As linhas inteiras que chegaram, decifradas; uma recusa fica em
+    /// [`AgenteTcpDeTeste::recusa`].
+    fn linhas(&mut self) -> alloc::vec::Vec<alloc::string::String> {
+        for (tipo, corpo) in core::mem::take(&mut self.quadros) {
+            match tipo {
+                sigilo::quadro::Tipo::Dados => {
+                    let Some(t) = self.transporte.as_mut() else {
+                        continue;
+                    };
+                    let mut claro = alloc::vec![0u8; corpo.len()];
+                    if let Ok(n) = t.decifrar(&corpo, &mut claro) {
+                        self.texto.push_str(&String::from_utf8_lossy(&claro[..n]));
+                    }
+                }
+                sigilo::quadro::Tipo::Recusa => {
+                    self.recusa = Some(String::from_utf8_lossy(&corpo).into_owned());
+                }
+                _ => {}
+            }
+        }
+        let mut linhas = alloc::vec::Vec::new();
+        while let Some(fim) = self.texto.find('\n') {
+            let linha: alloc::string::String = self.texto.drain(..=fim).collect();
+            linhas.push(alloc::string::String::from(linha.trim_end()));
+        }
+        linhas
+    }
+
+    /// Pede e espera a resposta do pedido.
+    fn pedir(&mut self, metodo: &str, params: &str) -> Result<alloc::string::String, &'static str> {
+        let (id, quadro) = self.quadro(metodo, params)?;
+        self.mandar(&quadro)?;
+        let marca = alloc::format!(r#""id":{id},"#);
+        let mut resposta = None;
+        let _ = esperar_cedendo(
+            || {
+                self.andar();
+                for l in self.linhas() {
+                    if l.contains(&marca) {
+                        resposta = Some(l);
+                    }
+                }
+                resposta.is_some() || self.recusa.is_some() || self.fechada
+            },
+            1200,
+        );
+        resposta.ok_or_else(|| {
+            crate::log_error!(
+                "teste",
+                "tcp {}: {} sem resposta ({:?})",
+                self.sessao(),
+                metodo,
+                self.recusa
+            );
+            "o pedido pela rede nao foi respondido"
+        })
+    }
+}
+
+impl Drop for AgenteTcpDeTeste {
+    fn drop(&mut self) {
+        let _ = crate::rede::pilha::fechar(self.conexao, &self.dono);
+    }
+}
+
+/// As quatro vagas do canal escutam, nenhuma sessão delas de pé, e o que
+/// as voltas da pilha deixaram já foi tratado.
+fn vagas_tcp_livres() -> bool {
+    use crate::rede::canal;
+    crate::rede::pilha::vagas_escutando().iter().all(|&e| e)
+        && canal::pendencias_de_teste() == 0
+        && (1..=canal::VAGAS).all(|v| crate::sessoes::identidade(canal::sessao(v)).is_none())
+}
+
+/// Registra os agentes de teste, roda `f` com as vagas do canal TCP livres,
+/// e espera o canal voltar a ficar como estava: as vagas escutando, nenhuma
+/// sessão delas de pé, as pendências tratadas pelo coletor.
+fn com_canal_tcp(f: impl FnOnce() -> Resultado) -> Resultado {
+    use crate::rede::canal;
+    esperar_cedendo(
+        || crate::rede::pilha::resumo().is_some_and(|r| r.endereco.is_some()),
+        500,
+    )
+    .map_err(|_| "a pilha nao tem endereco para o canal TCP")?;
+    crate::autorizacao::esquecer_apertos();
+    for p in 1..=4 {
+        crate::identidade::registrar_agente_de_teste(
+            sigilo::publica_de(&chave_de_teste(p)),
+            &nome_de_teste(p),
+            PAPEL_DE_TESTE,
+        );
+    }
+    let antes = esperar_cedendo(vagas_tcp_livres, 1500)
+        .map_err(|_| "as vagas do canal TCP nao estavam livres antes do caso");
+    let resultado = antes.and_then(|()| f());
+    let depois = esperar_cedendo(vagas_tcp_livres, 2000);
+    for v in 1..=canal::VAGAS {
+        let _ = crate::sessoes::esquecer(canal::sessao(v));
+    }
+    crate::identidade::esquecer_registrados();
+    crate::autorizacao::esquecer_apertos();
+    resultado?;
+    depois.map_err(|_| "as vagas do canal TCP nao voltaram a escutar depois do caso")
+}
+
+/// O aperto pela rede é o das portas: a sessão é a da vaga, quem está nela
+/// é a chave do registro, e o par é só o par. A conexão só passa a ser do
+/// agente — para o firewall, e para o prazo do aperto — quando ele
+/// confirma a chave com o primeiro quadro que abre. E a auditoria grava o
+/// aperto com o par, e o pedido com a sessão e o agente.
+fn canal_tcp_o_aperto_pela_rede() -> Resultado {
+    use crate::rede::canal;
+    use politica::Codigo;
+    use politica::auditoria::Titular;
+    com_canal_tcp(|| {
+        let inicio = seq_da_auditoria();
+        let mut a = AgenteTcpDeTeste::abrir(1)?;
+        a.apertar(&chave_de_teste(1))?;
+        let s = a.sessao();
+        if a.transporte.is_none() || !(5..=8).contains(&s) {
+            crate::log_error!("teste", "tcp: sessao {} recusa {:?}", s, a.recusa);
+            return Err("o aperto pela rede nao deu uma sessao do canal TCP");
+        }
+        if a.boas_vindas != alloc::format!(r#"{{"session":{s},"agent":"teste-1"}}"#) {
+            crate::log_error!("teste", "tcp: {}", a.boas_vindas);
+            return Err("o aperto pela rede nao disse a sessao e o agente");
+        }
+        if crate::sessoes::identidade(s).map(|i| i.nome).as_deref() != Some("teste-1") {
+            return Err("a sessao da vaga nao tem a chave que fez o aperto");
+        }
+        // O fim da conexão anterior da vaga — que o coletor trata depois —
+        // não leva a sessão desta.
+        let g = canal::geracao(a.vaga);
+        if crate::sessoes::esquecer_da_conexao(s, g.wrapping_sub(1)).is_some()
+            || crate::sessoes::identidade(s).is_none()
+        {
+            return Err("o fim da conexao anterior da vaga levou a sessao desta");
+        }
+        if canal::chave_de_teste(a.vaga).is_some() {
+            return Err("a conexao foi do agente antes de ele confirmar a chave");
+        }
+        // Antes da confirmação, o aperto não é de agente nenhum: nem na
+        // auditoria, nem para quem conta os conectados.
+        if registro_que(|e| e.metodo == "session.open" && e.sessao == s && e.codigo.permite())
+            .is_some_and(|(seq, _)| seq > inicio)
+        {
+            return Err("o aperto pela rede foi gravado antes de a chave ser confirmada");
+        }
+        if crate::atividade::conectados().any(|(p, _)| p == s) {
+            return Err("o aperto sem a chave confirmada contou como agente conectado");
+        }
+        let r = a.pedir("agent.session", "{}")?;
+        let esperado = alloc::format!(
+            r#""session":{s},"transport":"tcp","authenticated":true,"agent":"teste-1""#
+        );
+        if !r.contains(&esperado) || !r.contains(r#""remote":"10.0.2.2:"#) {
+            crate::log_error!("teste", "tcp: {}", r);
+            return Err("a sessao pela rede nao disse quem e e por onde");
+        }
+        let chave = sigilo::publica_de(&chave_de_teste(1));
+        if canal::chave_de_teste(a.vaga) != Some(chave) {
+            return Err("confirmada a chave, a conexao nao ficou do agente para o firewall");
+        }
+        let aperto = ultimo_que(|e| e.metodo == "session.open" && e.sessao == s)
+            .ok_or("o aperto pela rede nao foi gravado")?;
+        if aperto.codigo != Codigo::Allow
+            || aperto.agente != "teste-1"
+            || aperto.chave != Some(chave)
+            || !aperto.detalhe.contains("(tcp 10.0.2.2:")
+        {
+            crate::log_error!("teste", "tcp: {:?}", aperto);
+            return Err("o aperto pela rede foi gravado sem o agente ou sem o par");
+        }
+        let pedido = ultimo_que(|e| e.metodo == "agent.session" && e.sessao == s)
+            .ok_or("o pedido pela rede nao foi gravado")?;
+        if pedido.titular != Titular::Agente || pedido.chave != Some(chave) {
+            return Err("o pedido pela rede foi gravado sem o titular e a chave do agente");
+        }
+        if !crate::atividade::conectados().any(|(p, _)| p == s) {
+            return Err("confirmada a chave, o agente da rede nao contou como conectado");
+        }
+        Ok(())
+    })
+}
+
+/// A identidade não se forja pela rede, e a conexão não traz autoridade:
+///
+/// - a chave fora do registro é recusada no aperto, com o par na auditoria,
+///   e a conexão fecha;
+/// - quem repete o início do aperto de outro agente — a primeira mensagem
+///   do IK pode ser repetida — recebe a resposta, mas não a abre nem
+///   escreve um quadro que abra: o quadro capturado da sessão do outro não
+///   abre na dele, a sessão acaba, e nada foi pedido em nome de ninguém;
+/// - um pedido em claro pela conexão não é pedido: é recusado como quadro
+///   desconhecido, a conexão fecha, e nenhum comando é decidido por ela.
+///
+/// E o agente de verdade segue na sessão dele, sem perceber nada.
+fn canal_tcp_a_identidade_nao_se_forja() -> Resultado {
+    use politica::Codigo;
+    use sigilo::quadro::Tipo;
+    com_canal_tcp(|| {
+        // A chave fora do registro.
+        let estranha = [0x5Au8; 32];
+        let mut x = AgenteTcpDeTeste::abrir(1)?;
+        x.apertar(&estranha)?;
+        let sx = x.sessao();
+        if x.transporte.is_some() || x.recusa.as_deref() != Some("chave fora do registro") {
+            crate::log_error!("teste", "tcp: recusa {:?}", x.recusa);
+            return Err("a chave fora do registro nao foi recusada pela rede");
+        }
+        x.esperar(|x| x.fechada, 600)
+            .map_err(|_| "a conexao da chave recusada nao fechou")?;
+        let recusa = ultimo_que(|e| e.metodo == "session.open" && e.sessao == sx)
+            .ok_or("a recusa do aperto pela rede nao foi gravada")?;
+        if recusa.codigo != Codigo::DenyNotAuthenticated
+            || recusa.chave != Some(sigilo::publica_de(&estranha))
+            || !recusa.detalhe.contains("(tcp 10.0.2.2:")
+        {
+            crate::log_error!("teste", "tcp: {:?}", recusa);
+            return Err("a recusa do aperto pela rede nao tem a chave alegada e o par");
+        }
+        drop(x);
+
+        // O aperto repetido. O quadro capturado é um pedido de verdade do
+        // agente, que ele manda e é atendido — e que a cópia não repete.
+        let mut a = AgenteTcpDeTeste::conectar(2)?;
+        let (id, capturado) = a.quadro("agent.session", "{}")?;
+        a.mandar(&capturado)?;
+        let marca = alloc::format!(r#""id":{id},"#);
+        let mut atendido = false;
+        a.esperar(|a| !a.texto.is_empty() || !a.quadros.is_empty(), 800)
+            .map_err(|_| "o pedido capturado nao foi atendido")?;
+        let _ = esperar_cedendo(
+            || {
+                a.andar();
+                atendido |= a.linhas().iter().any(|l| l.contains(&marca));
+                atendido
+            },
+            800,
+        );
+        if !atendido {
+            return Err("o pedido capturado nao foi atendido na sessao dele");
+        }
+        let mut b = AgenteTcpDeTeste::abrir(3)?;
+        let sb = b.sessao();
+        let antes_da_repeticao = seq_da_auditoria();
+        let inicio = a.inicio.clone();
+        b.mandar(&inicio)?;
+        b.esperar(|b| !b.quadros.is_empty() || b.fechada, 800)
+            .map_err(|_| "o aperto repetido nao teve resposta")?;
+        if b.quadros.first().map(|q| q.0) != Some(Tipo::Resposta) {
+            return Err("o aperto repetido nao foi respondido como um aperto");
+        }
+        if crate::rede::canal::chave_de_teste(b.vaga).is_some() {
+            return Err("a conexao do aperto repetido ficou do agente sem a confirmacao");
+        }
+        if crate::atividade::conectados().any(|(p, _)| p == sb) {
+            return Err("o aperto repetido fez o agente aparecer conectado pela rede");
+        }
+        let sessoes = fs_pedir(sistema_aqui(), "agent.sessions", "{}");
+        let da_vaga = sessoes
+            .find(&alloc::format!(r#""session":{sb},"transport":"tcp""#))
+            .map(|i| &sessoes[i..])
+            .map(|resto| &resto[..resto.find('}').unwrap_or(resto.len())]);
+        if !da_vaga.is_some_and(|d| {
+            d.contains(r#""authenticated":false,"confirming":true"#) && !d.contains(r#""agent":"#)
+        }) {
+            crate::log_error!("teste", "tcp: {:?}", da_vaga);
+            return Err("o aperto repetido apareceu em agent.sessions como de um agente");
+        }
+        b.quadros.clear();
+        let decididos = seq_da_auditoria();
+        b.mandar(&capturado)?;
+        b.esperar(|b| b.fechada, 800)
+            .map_err(|_| "o quadro de outra sessao nao encerrou a repetida")?;
+        let _ = b.linhas();
+        if b.recusa.as_deref() != Some("a autenticacao falhou") {
+            crate::log_error!("teste", "tcp: recusa {:?}", b.recusa);
+            return Err("o quadro de outra sessao nao foi recusado pela autenticacao");
+        }
+        let pediu = crate::autorizacao::com_auditoria(|c| {
+            c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+                .any(|r| {
+                    r.seq > decididos && r.evento.sessao == sb && r.evento.metodo == "agent.session"
+                })
+        });
+        if pediu != Some(false) {
+            return Err("um pedido foi decidido em nome do agente pela sessao repetida");
+        }
+        // Na auditoria, o aperto repetido é um aperto recusado — com a chave
+        // que ele alegou e o par —, e nunca um que entrou.
+        let alegada = sigilo::publica_de(&chave_de_teste(2));
+        let (entrou, recusado) = crate::autorizacao::com_auditoria(|c| {
+            let novos = || {
+                c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+                    .filter(|r| {
+                        r.seq > antes_da_repeticao
+                            && r.evento.sessao == sb
+                            && r.evento.metodo == "session.open"
+                    })
+            };
+            (
+                novos().any(|r| r.evento.codigo.permite()),
+                novos().any(|r| {
+                    r.evento.codigo == Codigo::DenyNotAuthenticated
+                        && r.evento.chave == Some(alegada)
+                        && r.evento.detalhe.contains(
+                            "a chave do aperto nao foi confirmada: a autenticacao falhou (tcp 10.0.2.2:",
+                        )
+                }),
+            )
+        })
+        .unwrap_or((true, false));
+        if entrou {
+            return Err("o aperto repetido foi gravado como um aperto que entrou");
+        }
+        if !recusado {
+            return Err("o aperto repetido nao foi gravado como recusado, com a chave alegada");
+        }
+        drop(b);
+
+        // Quem repete e sai antes de confirmar: o fim da conexão também é
+        // um aperto recusado, com a chave alegada.
+        let mut d = AgenteTcpDeTeste::abrir(3)?;
+        let sd = d.sessao();
+        let antes = seq_da_auditoria();
+        d.mandar(&inicio)?;
+        d.esperar(|d| !d.quadros.is_empty() || d.fechada, 800)
+            .map_err(|_| "o aperto repetido nao teve resposta")?;
+        drop(d);
+        esperar_cedendo(
+            || {
+                registro_que(|e| {
+                    e.sessao == sd
+                        && e.metodo == "session.open"
+                        && e.codigo == Codigo::DenyNotAuthenticated
+                        && e.chave == Some(alegada)
+                        && e.detalhe.contains(
+                            "a chave do aperto nao foi confirmada: a conexao acabou (tcp 10.0.2.2:",
+                        )
+                })
+                .is_some_and(|(seq, _)| seq > antes)
+            },
+            600,
+        )
+        .map_err(|_| "o aperto repetido que saiu sem confirmar nao foi gravado como recusado")?;
+        let r = a.pedir("agent.session", "{}")?;
+        if !r.contains(r#""authenticated":true,"agent":"teste-2""#) {
+            crate::log_error!("teste", "tcp: {}", r);
+            return Err("o agente de verdade perdeu a sessao dele");
+        }
+        drop(a);
+
+        // O pedido em claro.
+        let mut c = AgenteTcpDeTeste::abrir(4)?;
+        let sc = c.sessao();
+        let decididos = seq_da_auditoria();
+        c.mandar(b"{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"system.info\",\"params\":{}}\n")?;
+        c.esperar(|c| c.fechada, 800)
+            .map_err(|_| "a conexao do pedido em claro nao fechou")?;
+        let _ = c.linhas();
+        if c.recusa.as_deref() != Some("quadro de tipo desconhecido") {
+            crate::log_error!("teste", "tcp: recusa {:?}", c.recusa);
+            return Err("o pedido em claro nao foi recusado como quadro");
+        }
+        let (decidiu, gravou) = crate::autorizacao::com_auditoria(|c| {
+            let novos = || {
+                c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+                    .filter(|r| r.seq > decididos && r.evento.sessao == sc)
+            };
+            (
+                novos().any(|r| r.evento.metodo == "system.info"),
+                novos().any(|r| {
+                    r.evento.metodo == "session.open"
+                        && r.evento.codigo == Codigo::DenyNotAuthenticated
+                        && r.evento
+                            .detalhe
+                            .contains("quadro de tipo desconhecido (tcp 10.0.2.2:")
+                }),
+            )
+        })
+        .unwrap_or((true, false));
+        if decidiu {
+            return Err("um pedido em claro pela rede chegou ao gate");
+        }
+        if !gravou {
+            return Err("o pedido em claro pela rede nao foi gravado como aperto recusado");
+        }
+        Ok(())
+    })
+}
+
+/// Quem conecta e não faz o aperto, e quem repete o aperto de outro e não
+/// confirma a chave, perdem a vaga no prazo — e a recusa de cada um vai à
+/// auditoria, com o par. O agente que confirmou fica.
+fn canal_tcp_o_prazo_do_aperto() -> Resultado {
+    use crate::rede::canal;
+    com_canal_tcp(|| {
+        let (_, expirados) = canal::contadores();
+        let mut a = AgenteTcpDeTeste::conectar(1)?;
+        let mut calado = AgenteTcpDeTeste::abrir(2)?;
+        let mut repetido = AgenteTcpDeTeste::abrir(3)?;
+        let (sc, sr) = (calado.sessao(), repetido.sessao());
+        let inicio = a.inicio.clone();
+        repetido.mandar(&inicio)?;
+        repetido
+            .esperar(|r| !r.quadros.is_empty() || r.fechada, 800)
+            .map_err(|_| "o aperto repetido nao teve resposta")?;
+        if crate::sessoes::identidade(sr).is_none() {
+            return Err("o aperto repetido nao deixou a sessao que o prazo tem de levar");
+        }
+        if crate::atividade::conectados().any(|(p, _)| p == sr) {
+            return Err("o aperto repetido fez o agente aparecer conectado pela rede");
+        }
+        // O prazo: dez segundos desde a conexão, e uma volta do coletor.
+        esperar_cedendo(
+            || {
+                calado.andar();
+                repetido.andar();
+                a.andar();
+                calado.fechada && repetido.fechada
+            },
+            canal::PRAZO_DO_APERTO_MS / 10 + 600,
+        )
+        .map_err(|_| "quem nao fez o aperto, ou nao o confirmou, nao perdeu a vaga no prazo")?;
+        if a.fechada {
+            return Err("o prazo derrubou o agente que confirmou a chave");
+        }
+        esperar_cedendo(
+            || canal::pendencias_de_teste() == 0 && crate::sessoes::identidade(sr).is_none(),
+            300,
+        )
+        .map_err(|_| "a sessao do aperto nao confirmado ficou")?;
+        if canal::contadores().1 < expirados + 2 {
+            return Err("os prazos vencidos nao foram contados");
+        }
+        for (s, motivo) in [
+            (sc, "o aperto nao veio em 10 s (tcp 10.0.2.2:"),
+            (
+                sr,
+                "a chave do aperto nao foi confirmada: o prazo de 10 s venceu (tcp 10.0.2.2:",
+            ),
+        ] {
+            if ultimo_que(|e| {
+                e.metodo == "session.open"
+                    && e.sessao == s
+                    && e.codigo == politica::Codigo::DenyNotAuthenticated
+                    && e.detalhe.contains(motivo)
+            })
+            .is_none()
+            {
+                crate::log_error!("teste", "tcp {}: sem `{}`", s, motivo);
+                return Err("um prazo vencido nao foi gravado com o motivo e o par");
+            }
+        }
+        let r = a.pedir("agent.session", "{}")?;
+        if !r.contains(r#""agent":"teste-1""#) {
+            return Err("o agente que confirmou perdeu a sessao");
+        }
+        Ok(())
+    })
+}
+
+/// Pela rede, a mesma autoridade e o mesmo gate da porta: o papel é o da
+/// chave — o observador observa e não lista arquivos —, a decisão é do
+/// gate, gravada com a sessão do canal e o agente; e a taxa é a da chave —
+/// pela rede os pedidos gastam do mesmo balde, e passam do limite como
+/// pela porta. Uma sessão TCP fora da conta da taxa seria um caminho sem
+/// limite para quem a política limita.
+fn canal_tcp_a_mesma_autoridade_e_a_mesma_taxa() -> Resultado {
+    use politica::Codigo;
+    use politica::auditoria::Titular;
+    com_canal_tcp(|| {
+        crate::identidade::atribuir(&nome_de_teste(1), "observador")
+            .map_err(|_| "a atribuicao de teste falhou")?;
+        let mut a = AgenteTcpDeTeste::conectar(1)?;
+        let s = a.sessao();
+        let r = a.pedir("system.info", "{}")?;
+        if !r.contains(r#""result""#) {
+            crate::log_error!("teste", "tcp: {}", r);
+            return Err("pela rede o observador nao observou");
+        }
+        let r = a.pedir("fs.list", r#"{"path":"/bin"}"#)?;
+        if !recusado_com(&r, "DENY_PERMISSION") {
+            crate::log_error!("teste", "tcp: {}", r);
+            return Err("pela rede o observador listou arquivos");
+        }
+        let recusa = ultimo_que(|e| e.metodo == "fs.list" && e.sessao == s)
+            .ok_or("a recusa pela rede nao foi gravada")?;
+        if recusa.codigo != Codigo::DenyPermission
+            || recusa.titular != Titular::Agente
+            || recusa.agente != "teste-1"
+            || recusa.papel != "observador"
+        {
+            crate::log_error!("teste", "tcp: {:?}", recusa);
+            return Err("a recusa pela rede foi gravada sem o agente e o papel dele");
+        }
+        let lento = politica_trocada(&[("taxa observador 20 40", "taxa observador 1 2")])?;
+        com_a_politica(lento, || {
+            let mut limitado = false;
+            for _ in 0..4 {
+                let r = a.pedir("agent.ping", "{}")?;
+                limitado |= recusado_com(&r, "RATE_LIMIT");
+            }
+            if !limitado {
+                return Err("pela rede quatro pedidos seguidos passaram de uma rajada de dois");
+            }
+            if ultimo_que(|e| e.codigo == Codigo::RateLimit && e.sessao == s).is_none() {
+                return Err("o limite da taxa pela rede nao foi gravado com a sessao");
+            }
+            Ok(())
+        })
+    })
+}
+
+/// Um `admin.execute` pela sessão TCP do agente: o desafio pedido nela, a
+/// prova calculada para a sessão dela — o caminho administrativo de
+/// sempre, por qualquer canal.
+fn admin_pela_rede(
+    agente: &mut AgenteTcpDeTeste,
+    comando: &str,
+    parametros: &str,
+) -> Result<alloc::string::String, &'static str> {
+    let r = agente.pedir("admin.challenge", "{}")?;
+    let d = Json(r.as_bytes())
+        .member("result")
+        .ok_or("o desafio pela rede nao veio")?;
+    let id = d
+        .member("challenge")
+        .and_then(|v| v.as_u64())
+        .ok_or("sem desafio")?;
+    let hex = |nome| {
+        d.member(nome)
+            .and_then(|v| v.as_str())
+            .and_then(sigilo::de_hex)
+            .ok_or("desafio incompleto")
+    };
+    let (nonce, efemera) = (hex("nonce")?, hex("ephemeral")?);
+    let publica = sigilo::publica_de(&ADMIN_DE_TESTE);
+    let contexto = sigilo::administracao::Contexto {
+        nonce: &nonce,
+        sessao: agente.sessao(),
+        administrador: &publica,
+        efemera: &efemera,
+        comando,
+        parametros,
+    };
+    let prova =
+        sigilo::administracao::provar(&ADMIN_DE_TESTE, &contexto).map_err(|_| "sem prova")?;
+    let pedido = alloc::format!(
+        r#"{{"challenge":{id},"command":"{comando}","params":"{}","admin":"{}","proof":"{}"}}"#,
+        como_string_json(parametros),
+        sigilo::hex(&publica),
+        sigilo::hex(&prova)
+    );
+    agente.pedir("admin.execute", &pedido)
+}
+
+/// Revogar a chave derruba a conexão viva: a recusa em claro chega ao
+/// agente, a conexão fecha, a sessão some — e a chave não volta pela rede.
+/// A revogação é a de sempre: o administrador, pela prova.
+fn canal_tcp_revogar_derruba_a_conexao_viva() -> Resultado {
+    com_canal_tcp(|| {
+        crate::identidade::registrar_administrador_de_teste(
+            sigilo::publica_de(&ADMIN_DE_TESTE),
+            "administrador",
+        );
+        // O papel dos agentes de teste é `sistema`, acima do teto do
+        // administrador — que não revoga quem pode mais que ele.
+        crate::identidade::atribuir(&nome_de_teste(2), "observador")
+            .map_err(|_| "a atribuicao de teste falhou")?;
+        let mut a = AgenteTcpDeTeste::conectar(2)?;
+        let s = a.sessao();
+        let chave = sigilo::publica_de(&chave_de_teste(2));
+        let params = alloc::format!(r#"{{"key":"{}"}}"#, sigilo::hex(&chave));
+        let r = executar_admin_de(
+            0,
+            desafio()?,
+            &ADMIN_DE_TESTE,
+            "agent.revoke",
+            &params,
+            &params,
+        )?;
+        if !r.contains(r#""executed":true"#)
+            || !r.contains(&alloc::format!(r#""sessions_closed":[{s}]"#))
+        {
+            crate::log_error!("teste", "tcp: {}", r);
+            return Err("a revogacao nao derrubou a sessao TCP viva");
+        }
+        a.esperar(|a| a.fechada, 800)
+            .map_err(|_| "a conexao da chave revogada nao fechou")?;
+        let _ = a.linhas();
+        if a.recusa.as_deref() != Some("chave revogada") {
+            crate::log_error!("teste", "tcp: recusa {:?}", a.recusa);
+            return Err("o agente revogado nao recebeu a recusa pela rede");
+        }
+        if crate::sessoes::identidade(s).is_some() {
+            return Err("a sessao TCP da chave revogada ficou");
+        }
+        drop(a);
+        let mut b = AgenteTcpDeTeste::abrir(3)?;
+        b.apertar(&chave_de_teste(2))?;
+        if b.transporte.is_some() || b.recusa.as_deref() != Some("chave fora do registro") {
+            crate::log_error!("teste", "tcp: recusa {:?}", b.recusa);
+            return Err("a chave revogada voltou a entrar pela rede");
+        }
+        Ok(())
+    })
+}
+
+/// A contenção fica na sessão, e não derruba o transporte: o agente
+/// suspenso continua conectado e ouve `DENY_CONTAINED`; a credencial
+/// suspensa não age na sessão aberta e não faz aperto novo. E o
+/// administrador recupera pelo caminho de sempre — a prova —, de uma
+/// sessão TCP: a rede não é um caminho a menos para quem administra.
+fn canal_tcp_a_contencao_e_o_administrador() -> Resultado {
+    use politica::Codigo;
+    com_canal_tcp(|| {
+        crate::identidade::registrar_administrador_de_teste(
+            sigilo::publica_de(&ADMIN_DE_TESTE),
+            "administrador",
+        );
+        let mut a = AgenteTcpDeTeste::conectar(1)?;
+        let mut adm = AgenteTcpDeTeste::conectar(2)?;
+        let s = a.sessao();
+        let params = alloc::format!(
+            r#"{{"key":"{}"}}"#,
+            sigilo::hex(&sigilo::publica_de(&chave_de_teste(1)))
+        );
+        let sistema = sistema_aqui();
+        let r = fs_pedir(sistema, "agent.suspend", &params);
+        if fs_texto(&r, "state").as_deref() != Some("suspended") {
+            crate::log_error!("teste", "tcp: {}", r);
+            return Err("o sistema nao suspendeu o agente da rede");
+        }
+        let r = a.pedir("system.info", "{}")?;
+        if !recusado_com(&r, "DENY_CONTAINED") || a.fechada {
+            crate::log_error!("teste", "tcp: {} fechada {}", r, a.fechada);
+            return Err("suspenso, o agente da rede nao ouviu DENY_CONTAINED com a conexao de pe");
+        }
+        if ultimo_que(|e| e.sessao == s && e.codigo == Codigo::DenyContained).is_none() {
+            return Err("a recusa do agente contido pela rede nao foi gravada");
+        }
+        let r = admin_pela_rede(&mut adm, "agent.resume", &params)?;
+        if !r.contains(r#""executed":true"#) || !r.contains(r#""state":"resumed""#) {
+            crate::log_error!("teste", "tcp: {}", r);
+            return Err("o administrador nao recuperou pela prova, de uma sessao TCP");
+        }
+        let r = a.pedir("system.info", "{}")?;
+        if !r.contains(r#""result""#) {
+            return Err("retomado, o agente da rede continuou recusado");
+        }
+
+        let r = fs_pedir(sistema, "credential.suspend", &params);
+        if fs_texto(&r, "state").as_deref() != Some("suspended") {
+            crate::log_error!("teste", "tcp: {}", r);
+            return Err("o sistema nao suspendeu a credencial do agente da rede");
+        }
+        let r = a.pedir("system.info", "{}")?;
+        if !recusado_com(&r, "DENY_CREDENTIAL") {
+            crate::log_error!("teste", "tcp: {}", r);
+            return Err("com a credencial suspensa, a sessao aberta pela rede agiu");
+        }
+        let mut b = AgenteTcpDeTeste::abrir(3)?;
+        let sb = b.sessao();
+        b.apertar(&chave_de_teste(1))?;
+        if b.transporte.is_some() || b.recusa.as_deref() != Some("credencial suspensa") {
+            crate::log_error!("teste", "tcp: recusa {:?}", b.recusa);
+            return Err("a credencial suspensa fez aperto pela rede");
+        }
+        if ultimo_que(|e| {
+            e.metodo == "session.open"
+                && e.sessao == sb
+                && e.codigo == Codigo::DenyCredential
+                && e.detalhe.contains("(tcp 10.0.2.2:")
+        })
+        .is_none()
+        {
+            return Err("o aperto da credencial suspensa nao foi gravado com o par");
+        }
+        drop(b);
+        let r = admin_pela_rede(&mut adm, "credential.resume", &params)?;
+        if !r.contains(r#""executed":true"#) {
+            crate::log_error!("teste", "tcp: {}", r);
+            return Err("o administrador nao soltou a credencial, de uma sessao TCP");
+        }
+        let r = a.pedir("system.info", "{}")?;
+        if !r.contains(r#""result""#) {
+            return Err("com a credencial solta, a sessao da rede continuou recusada");
+        }
+        Ok(())
+    })
+}
+
+/// A conexão do canal é um fluxo do firewall como os outros: a regra que
+/// a alcança — o par dela, para o agente dela — a derruba, a sessão acaba,
+/// e a auditoria grava a derrubada em nome de quem pôs a regra; a regra de
+/// outro agente, para o mesmo par, não a toca. A escuta não protege
+/// ninguém, e a outra sessão segue.
+fn canal_tcp_a_regra_do_firewall_derruba_a_conexao() -> Resultado {
+    use crate::rede::canal;
+    com_canal_tcp(|| {
+        let mut a = AgenteTcpDeTeste::conectar(1)?;
+        let mut b = AgenteTcpDeTeste::conectar(2)?;
+        let sa = a.sessao();
+        let ([x, y, z, w], porta) = canal::remoto(a.vaga).ok_or("a vaga nao tem o par")?;
+        let destino = alloc::format!("tcp:{x}.{y}.{z}.{w}:{porta}");
+        let hex = |p: u8| sigilo::hex(&sigilo::publica_de(&chave_de_teste(p)));
+        let com_o_par = politica_trocada(&[(
+            "recurso sistema net.block tcp:10.0.2.100:7 ",
+            &alloc::format!("recurso sistema net.block {destino} tcp:10.0.2.100:7 "),
+        )])?;
+        let sistema = sistema_aqui();
+        com_a_politica(com_o_par, || {
+            let de_b = alloc::format!(r#"{{"to":"{destino}","owner":"agent:{}"}}"#, hex(2));
+            let r = fs_pedir(sistema, "net.block", &de_b);
+            if fs_numero(&r, "dropped") != Some(0) {
+                crate::log_error!("teste", "tcp: {}", r);
+                return Err("a regra de outro agente derrubou a conexao do canal");
+            }
+            let _ = a.pedir("agent.ping", "{}")?;
+            let de_a = alloc::format!(r#"{{"to":"{destino}","owner":"agent:{}"}}"#, hex(1));
+            let r = fs_pedir(sistema, "net.block", &de_a);
+            let derrubou = fs_numero(&r, "dropped") == Some(1)
+                && r.contains(&alloc::format!(r#""sessions_dropped":[{sa}]"#));
+            let _ = fs_pedir(sistema, "net.unblock", &de_a);
+            let _ = fs_pedir(sistema, "net.unblock", &de_b);
+            if !derrubou {
+                crate::log_error!("teste", "tcp: {}", r);
+                return Err("a regra que alcanca a conexao do canal nao a derrubou");
+            }
+            Ok(())
+        })?;
+        a.esperar(|a| a.fechada, 800)
+            .map_err(|_| "a conexao derrubada pela regra nao fechou")?;
+        esperar_cedendo(|| crate::sessoes::identidade(sa).is_none(), 300)
+            .map_err(|_| "a sessao da conexao derrubada pela regra ficou")?;
+        // O registro da execução: o programa que pediu na frente, e a
+        // decisão do gate no fim.
+        let derrubada = alloc::format!("sessao {sa} do canal derrubada pelo bloqueio; decisao ");
+        let gravou = ultimo_que(|e| {
+            e.recurso == destino
+                && e.detalhe.contains(&derrubada)
+                && decisao_executada(&e.detalhe).is_some()
+        });
+        if gravou.is_none() {
+            return Err("a derrubada da sessao pela regra nao foi gravada");
+        }
+        let r = b.pedir("agent.ping", "{}")?;
+        if !r.contains(r#""result""#) {
+            return Err("a outra sessao do canal caiu junto");
+        }
+        Ok(())
+    })
+}
+
+/// Quem pede e não lê espera, sem perder nada: com a saída da pilha
+/// segura — o par que não lê —, a saída da vaga passa do limiar e a
+/// tarefa da sessão para de ler os pedidos, que ficam na entrada; nada é
+/// descartado. Solta a saída, as respostas chegam todas, inteiras e na
+/// ordem. É a tarefa de produção que espera — `agent::atender` —, e não a
+/// suíte.
+fn canal_tcp_quem_nao_le_espera() -> Resultado {
+    use crate::rede::{canal, pilha};
+    com_canal_tcp(|| {
+        let mut a = AgenteTcpDeTeste::conectar(4)?;
+        let (v, s) = (a.vaga, a.sessao());
+        const PEDIDOS: usize = 10;
+        let mut ids = alloc::vec::Vec::new();
+        let mut lote = alloc::vec::Vec::new();
+        for _ in 0..PEDIDOS {
+            let (id, q) = a.quadro("audit.tail", r#"{"count":128}"#)?;
+            ids.push(id);
+            lote.extend(q);
+        }
+        // Os pedidos chegam todos à vaga com a tarefa parada: só a pilha
+        // anda, e eles esperam na entrada.
+        let mut enviados = 0;
+        esperar_cedendo(
+            || {
+                if let Ok((n, _)) = pilha::mandar(a.conexao, &a.dono, &lote[enviados..]) {
+                    enviados += n;
+                }
+                enviados == lote.len() && canal::filas_de_teste(v).1 == lote.len()
+            },
+            600,
+        )
+        .map_err(|_| "os pedidos nao chegaram a entrada da vaga")?;
+        let perdidos = canal::perdidos_na_saida(v);
+        let decididos = seq_da_auditoria();
+        pilha::segurar_saida_de_teste(true);
+        // A tarefa anda até esperar: a saída cheia, e não os bytes.
+        for _ in 0..20 {
+            a.tarefa.andar();
+            let _ = esperar_cedendo(|| false, 5);
+        }
+        let (saida, entrada) = canal::filas_de_teste(v);
+        let respondidos = crate::autorizacao::com_auditoria(|c| {
+            c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+                .filter(|r| {
+                    r.seq > decididos && r.evento.sessao == s && r.evento.metodo == "audit.tail"
+                })
+                .count()
+        })
+        .unwrap_or(0);
+        pilha::segurar_saida_de_teste(false);
+        if saida <= canal::LIMIAR_DA_SAIDA || saida > canal::MAIOR_SAIDA {
+            crate::log_error!(
+                "teste",
+                "tcp: saida {} entrada {} respondidos {}",
+                saida,
+                entrada,
+                respondidos
+            );
+            return Err("quem nao le nao encheu a saida da vaga ate o limiar");
+        }
+        if entrada == 0 || respondidos >= PEDIDOS {
+            crate::log_error!(
+                "teste",
+                "tcp: saida {} entrada {} respondidos {}",
+                saida,
+                entrada,
+                respondidos
+            );
+            return Err("com a saida no limiar, a sessao continuou lendo os pedidos");
+        }
+        if canal::perdidos_na_saida(v) != perdidos {
+            return Err("quem nao le perdeu respostas");
+        }
+        // Solta a saída: tudo chega, na ordem.
+        let mut chegaram = alloc::vec::Vec::new();
+        esperar_cedendo(
+            || {
+                a.andar();
+                for l in a.linhas() {
+                    chegaram.push(l);
+                }
+                chegaram.len() >= PEDIDOS || a.fechada
+            },
+            2500,
+        )
+        .map_err(|_| "soltas, as respostas de quem nao lia nao chegaram")?;
+        for (linha, id) in chegaram.iter().zip(&ids) {
+            if !linha.contains(&alloc::format!(r#""id":{id},"#))
+                || !linha.contains(r#""records":["#)
+            {
+                crate::log_error!(
+                    "teste",
+                    "tcp: {} sem a resposta {}",
+                    &linha[..linha.len().min(120)],
+                    id
+                );
+                return Err("as respostas de quem nao lia nao vieram inteiras e na ordem");
+            }
+        }
+        if canal::perdidos_na_saida(v) != perdidos {
+            return Err("depois de soltar a saida, havia respostas perdidas");
+        }
+        Ok(())
+    })
+}
+
+/// A entrada da vaga tem teto, e o que passa dele espera no socket — com a
+/// janela do TCP fechada —, e não na memória do kernel: com a tarefa da
+/// sessão parada, a entrada enche até [`crate::rede::canal::MAIOR_ENTRADA`]
+/// e para ali. Andando a tarefa, os pedidos saem do socket e são todos
+/// atendidos, na ordem. Sem o teto, qualquer conexão — antes mesmo do
+/// aperto — cresceria o heap do kernel na velocidade da rede.
+fn canal_tcp_a_entrada_cheia_espera_no_socket() -> Resultado {
+    use crate::rede::{canal, pilha};
+    com_canal_tcp(|| {
+        let mut a = AgenteTcpDeTeste::conectar(3)?;
+        let v = a.vaga;
+        const PEDIDOS: usize = 24;
+        // O pedido é legítimo e grande: espaços dentro do objeto, que o
+        // JSON permite — um parâmetro desconhecido seria recusado.
+        let params = alloc::format!("{{{}}}", " ".repeat(1800));
+        let mut ids = alloc::vec::Vec::new();
+        let mut lote = alloc::vec::Vec::new();
+        for _ in 0..PEDIDOS {
+            let (id, q) = a.quadro("agent.ping", &params)?;
+            ids.push(id);
+            lote.extend(q);
+        }
+        if lote.len() <= 2 * canal::MAIOR_ENTRADA {
+            return Err("o lote do caso nao passa da entrada e do socket juntos");
+        }
+        // Com a tarefa parada, só a pilha anda: a entrada enche até o teto,
+        // e o resto fica no socket e no caminho.
+        let enviados = core::cell::Cell::new(0);
+        let maior = core::cell::Cell::new(0);
+        let mandar_e_medir = |a: &mut AgenteTcpDeTeste| {
+            if enviados.get() < lote.len()
+                && let Ok((n, _)) = pilha::mandar(a.conexao, &a.dono, &lote[enviados.get()..])
+            {
+                enviados.set(enviados.get() + n);
+            }
+            let entrada = canal::filas_de_teste(v).1;
+            maior.set(maior.get().max(entrada));
+            entrada
+        };
+        let encheu = esperar_cedendo(|| mandar_e_medir(&mut a) >= canal::MAIOR_ENTRADA, 600);
+        // Um tempo a mais, para o que ainda vem pelo caminho passar do teto
+        // se ele não segurasse.
+        let _ = esperar_cedendo(
+            || {
+                mandar_e_medir(&mut a);
+                false
+            },
+            100,
+        );
+        if maior.get() > canal::MAIOR_ENTRADA {
+            crate::log_error!("teste", "tcp: a entrada chegou a {} bytes", maior.get());
+            return Err("a entrada da vaga passou do teto");
+        }
+        if encheu.is_err() {
+            crate::log_error!(
+                "teste",
+                "tcp: entrada {} de {} enviados",
+                maior.get(),
+                enviados.get()
+            );
+            return Err("com a tarefa parada, a entrada da vaga nao encheu");
+        }
+        // Andando a tarefa, tudo chega e é atendido, na ordem.
+        let mut chegaram = alloc::vec::Vec::new();
+        esperar_cedendo(
+            || {
+                mandar_e_medir(&mut a);
+                a.andar();
+                chegaram.extend(a.linhas());
+                chegaram.len() >= PEDIDOS || a.fechada
+            },
+            2500,
+        )
+        .map_err(|_| "andando a tarefa, os pedidos retidos no socket nao foram atendidos")?;
+        for (linha, id) in chegaram.iter().zip(&ids) {
+            if !linha.contains(&alloc::format!(r#""id":{id},"#)) || !linha.contains(r#""result""#) {
+                crate::log_error!(
+                    "teste",
+                    "tcp: {} sem a resposta {}",
+                    &linha[..linha.len().min(120)],
+                    id
+                );
+                return Err("os pedidos retidos nao foram atendidos inteiros e na ordem");
+            }
+        }
+        if maior.get() > canal::MAIOR_ENTRADA {
+            return Err("a entrada da vaga passou do teto enquanto a tarefa lia");
+        }
+        Ok(())
+    })
+}
+
+/// A saída da vaga tem teto, e é ele que segura um quadro com vários
+/// pedidos: as linhas de um quadro decifrado são atendidas uma atrás da
+/// outra, sem a espera da saída entre elas — ver `agent::atender`. Com a
+/// saída da pilha segura, oito `audit.tail` grandes num quadro só passariam
+/// do teto: a resposta que não cabe não sai, a sessão acaba — como numa
+/// porta —, a perda é contada, e a saída nunca passa de
+/// [`crate::rede::canal::MAIOR_SAIDA`]. Solta a saída, a conexão fecha.
+fn canal_tcp_a_saida_tem_teto() -> Resultado {
+    use crate::rede::{canal, pilha};
+    use sigilo::quadro::{Tipo, montar};
+    com_canal_tcp(|| {
+        let mut a = AgenteTcpDeTeste::conectar(4)?;
+        let (v, s) = (a.vaga, a.sessao());
+        // Oito pedidos, uma linha cada, num quadro cifrado só.
+        let mut claro = alloc::string::String::new();
+        for _ in 0..8 {
+            a.proximo_id += 1;
+            claro.push_str(&alloc::format!(
+                "{{\"jsonrpc\":\"2.0\",\"id\":{},\"method\":\"audit.tail\",\"params\":{{\"count\":128}}}}\n",
+                a.proximo_id
+            ));
+        }
+        let t = a.transporte.as_mut().ok_or("sem sessao")?;
+        let mut cifrado = alloc::vec![0u8; sigilo::MAIOR_MENSAGEM];
+        let n = t
+            .cifrar(claro.as_bytes(), &mut cifrado)
+            .map_err(|_| "nao cifrou")?;
+        let quadro = montar(Tipo::Dados, &cifrado[..n]).map_err(|_| "quadro grande")?;
+        // O quadro chega inteiro à entrada com a tarefa parada: só a pilha
+        // anda.
+        let mut enviados = 0;
+        esperar_cedendo(
+            || {
+                if let Ok((n, _)) = pilha::mandar(a.conexao, &a.dono, &quadro[enviados..]) {
+                    enviados += n;
+                }
+                enviados == quadro.len() && canal::filas_de_teste(v).1 == quadro.len()
+            },
+            600,
+        )
+        .map_err(|_| "o quadro com os oito pedidos nao chegou a entrada da vaga")?;
+        let perdidos = canal::perdidos_na_saida(v);
+        pilha::segurar_saida_de_teste(true);
+        let mut maior = 0;
+        let acabou = esperar_cedendo(
+            || {
+                a.tarefa.andar();
+                maior = maior.max(canal::filas_de_teste(v).0);
+                crate::sessoes::identidade(s).is_none()
+            },
+            1500,
+        );
+        pilha::segurar_saida_de_teste(false);
+        if maior > canal::MAIOR_SAIDA {
+            crate::log_error!("teste", "tcp: a saida chegou a {} bytes", maior);
+            return Err("a saida da vaga passou do teto");
+        }
+        if acabou.is_err() {
+            crate::log_error!("teste", "tcp: saida {} bytes", maior);
+            return Err("a resposta que nao cabia na saida nao encerrou a sessao");
+        }
+        if canal::perdidos_na_saida(v) == perdidos {
+            return Err("a resposta que nao coube na saida nao foi contada");
+        }
+        a.esperar(|a| a.fechada, 1500)
+            .map_err(|_| "a conexao da sessao encerrada pelo teto nao fechou")?;
+        Ok(())
+    })
+}
+
+/// Quatro agentes pela rede ao mesmo tempo, cada um na vaga dele: os
+/// pedidos intercalados, e cada resposta só na sessão de quem pediu; a
+/// quinta conexão não tem vaga. Os quatro aparecem como conectados. E a
+/// conexão de rede que um deles abriu é da conexão dele — da geração da
+/// vaga —, e cai quando ele sai.
+fn canal_tcp_quatro_agentes_e_a_vaga_de_cada_um() -> Resultado {
+    use crate::rede::canal;
+    com_canal_tcp(|| {
+        let mut agentes = alloc::vec::Vec::new();
+        for p in 1..=4u8 {
+            agentes.push(AgenteTcpDeTeste::conectar(p)?);
+        }
+        let mut sessoes: alloc::vec::Vec<u8> = agentes.iter().map(|a| a.sessao()).collect();
+        sessoes.sort_unstable();
+        if sessoes != [5, 6, 7, 8] {
+            crate::log_error!("teste", "tcp: sessoes {:?}", sessoes);
+            return Err("os quatro agentes nao ficaram com as quatro vagas");
+        }
+        // Os pedidos de todos no fio antes de qualquer resposta.
+        let mut esperados = alloc::vec::Vec::new();
+        for _ in 0..3 {
+            for a in agentes.iter_mut() {
+                let (id, q) = a.quadro("agent.session", "{}")?;
+                a.mandar(&q)?;
+                esperados.push((a.sessao(), id));
+            }
+        }
+        let mut respostas: alloc::vec::Vec<(u8, alloc::string::String)> = alloc::vec::Vec::new();
+        esperar_cedendo(
+            || {
+                for a in agentes.iter_mut() {
+                    a.andar();
+                    let s = a.sessao();
+                    for l in a.linhas() {
+                        respostas.push((s, l));
+                    }
+                }
+                respostas.len() >= esperados.len()
+            },
+            2000,
+        )
+        .map_err(|_| "os pedidos intercalados pela rede nao foram todos respondidos")?;
+        for (s, id) in &esperados {
+            let p = agentes
+                .iter()
+                .find(|a| a.sessao() == *s)
+                .map(|a| a.numero)
+                .unwrap_or(0);
+            let certa = respostas.iter().any(|(sr, l)| {
+                sr == s
+                    && l.contains(&alloc::format!(r#""id":{id},"#))
+                    && l.contains(&alloc::format!(r#""session":{s},"transport":"tcp""#))
+                    && l.contains(&alloc::format!(r#""agent":"teste-{p}""#))
+            });
+            if !certa {
+                crate::log_error!("teste", "tcp: sessao {} id {}: {:?}", s, id, respostas);
+                return Err("uma resposta pela rede foi para outra sessao, ou nao veio");
+            }
+        }
+        let conectados = crate::atividade::conectados()
+            .filter(|(s, _)| (5..=8).contains(s))
+            .count();
+        if conectados != 4 {
+            return Err("os quatro agentes da rede nao aparecem como conectados");
+        }
+        // A quinta conexão não tem vaga.
+        if AgenteTcpDeTeste::abrir(5).is_ok() {
+            return Err("com as quatro vagas ocupadas, uma quinta conexao foi aceita");
+        }
+        // A conexão de rede do agente é da conexão dele.
+        let mut um = agentes.remove(0);
+        let r = um.pedir("net.connect", &alloc::format!(r#"{{"to":"{ECO}"}}"#))?;
+        let id = Json(r.as_bytes())
+            .member("result")
+            .and_then(|v| v.member("connection"))
+            .and_then(|v| v.as_u64())
+            .ok_or("o agente da rede nao abriu a conexao ao eco")?;
+        let geracao = canal::geracao(um.vaga);
+        let dono = crate::rede::pilha::donos()
+            .into_iter()
+            .find(|(c, _, _)| *c == id)
+            .map(|(_, d, _)| d);
+        let esperado = crate::rede::conexoes::Dono::Canal {
+            sessao: um.sessao(),
+            chave: Some(sigilo::publica_de(&chave_de_teste(1))),
+            geracao,
+        };
+        if dono != Some(esperado) || geracao == 0 {
+            crate::log_error!("teste", "tcp: dono {:?} geracao {}", dono, geracao);
+            return Err("a conexao de rede do agente nao e da conexao TCP dele");
+        }
+        drop(um);
+        esperar_cedendo(
+            || !crate::rede::pilha::donos().iter().any(|(c, _, _)| *c == id),
+            800,
+        )
+        .map_err(|_| "o agente saiu da rede e a conexao dele ficou")?;
+        Ok(())
+    })
+}
+
+/// O NSF observa o canal pela auditoria, como observa o resto: apertos
+/// recusados pela rede, da mesma chave alegada, viram uma detecção dele com
+/// o par na explicação — e ele não pede nada ao gate por isso: quem não se
+/// autenticou não tem o que conter. Não há um sensor do TCP fora do gate.
+fn canal_tcp_o_nsf_observa_sem_ser_autoridade() -> Resultado {
+    use seguranca::regras::Regra;
+    com_canal_tcp(|| {
+        com_o_nsf(|| {
+            let estranha = [0x5Bu8; 32];
+            for _ in 0..3 {
+                let mut x = AgenteTcpDeTeste::abrir(1)?;
+                x.apertar(&estranha)?;
+                if x.transporte.is_some() {
+                    return Err("a chave fora do registro entrou pela rede");
+                }
+                x.esperar(|x| x.fechada, 800)
+                    .map_err(|_| "a conexao recusada nao fechou")?;
+                drop(x);
+                esperar_cedendo(vagas_tcp_livres, 600)
+                    .map_err(|_| "a vaga da conexao recusada nao voltou a escutar")?;
+            }
+            let v = crate::seguranca::passo();
+            if v.pedidos != 0 {
+                return Err("o NSF pediu algo ao gate por apertos recusados");
+            }
+            let principal = alloc::format!(
+                "anonymous:agent:{}",
+                sigilo::hex(&sigilo::publica_de(&estranha))
+            );
+            // Três falhas são de olhar, e não um ataque: a detecção é de
+            // confiança baixa, e fica como observação — ou entra no
+            // incidente que já houver do mesmo principal.
+            let da_rede = |d: &seguranca::regras::Deteccao| {
+                d.principal == principal
+                    && d.regra == Regra::AbusoDeCredencial
+                    && d.explicacao.contains("(tcp 10.0.2.2:")
+            };
+            let viu = crate::seguranca::com_motor_de_teste(|m| {
+                m.observacoes().any(da_rede)
+                    || m.incidentes
+                        .todos()
+                        .any(|i| i.principal == principal && i.deteccoes.iter().any(da_rede))
+            });
+            if viu != Some(true) {
+                return Err("o NSF nao viu os apertos recusados pela rede, com o par");
+            }
+            Ok(())
+        })
+    })
 }

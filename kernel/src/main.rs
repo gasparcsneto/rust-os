@@ -132,7 +132,7 @@ use core::panic::PanicInfo;
 /// Completa, e não "em andamento": o trabalho às vezes adianta uma fase — a
 /// pilha gráfica da fase 10 começou antes da 6 —, e um número que dissesse
 /// "10" prometeria vários núcleos que o kernel não tem.
-pub const FASE: &str = "8";
+pub const FASE: &str = "11";
 
 /// Para o boot quando falta uma base sobre a qual tudo o que vem depois se
 /// apoia, e continua respondendo pelo caminho que não depende dela.
@@ -545,6 +545,25 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
                 let canal = agent::sessao::Canal::Porta(i as u8 + 1);
                 executor.lancar(tarefas::Tarefa::nova(nome, agent::atender(canal)));
             }
+        }
+        // E uma por vaga do canal por TCP, se a pilha IP está no ar: as
+        // mesmas sessões cifradas, pela rede — ver `rede::canal`.
+        if rede::pilha::resumo().is_some() {
+            const NOMES: [&str; rede::canal::VAGAS as usize] = [
+                "agente tcp 1",
+                "agente tcp 2",
+                "agente tcp 3",
+                "agente tcp 4",
+            ];
+            for (i, nome) in NOMES.iter().enumerate() {
+                let canal = agent::sessao::Canal::Tcp(i as u8 + 1);
+                executor.lancar(tarefas::Tarefa::nova(nome, agent::atender(canal)));
+            }
+            log_info!(
+                "agent",
+                "canal do agente por TCP na porta {}",
+                rede::canal::PORTA
+            );
         }
         executor.lancar(tarefas::Tarefa::nova("pulso", pulso()));
         // Os pedidos dos programas ao registro — ver `nativo`.

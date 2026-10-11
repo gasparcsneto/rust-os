@@ -290,6 +290,7 @@ kernel/src/
 │   ├── mod.rs       o ARP do diagnóstico, e o observador que o deixa conviver com a pilha
 │   ├── pilha.rs     a pilha IP — o smoltcp sobre a placa —, o DHCP, a tabela de conexões e o fio que a faz andar
 │   ├── conexoes.rs  a conexão como capacidade do registro: de quem ela é, e como o gate a decide
+│   ├── canal.rs     o canal do agente por TCP, só o transporte: as vagas, a geração, o prazo do aperto e a contrapressão
 │   ├── captura.rs   os datagramas trocados com um destino observado, para quem tem `net.observe` sobre ele
 │   ├── bancada_dns.rs  só na suíte: o servidor de DNS da bancada, determinístico, de dentro da máquina
 │   └── espera.rs    a leitura e o envio que esperam: armados na conexão, um de cada sentido, acordados pela pilha ou pelo prazo, decididos de novo na entrega
@@ -543,6 +544,7 @@ programas/           os programas de usuário, compilados à parte do kernel
 
 xtask/src/
 ├── main.rs          a ferramenta de build, teste e diagnóstico do projeto
+├── canal_tcp.rs     o canal do agente por TCP do lado de fora: a porta encaminhada, e a ponte da suíte — `xtask/bancada/ponte.py`
 ├── persistencia.rs  a bancada de persistência: a mesma máquina em vários boots, com corte de energia
 └── tls.rs           a bancada TLS: a PKI gerada a cada máquina, e o eco TLS — o OpenSSL, por `xtask/bancada/tls.py` — a cada conexão
 ```
@@ -2413,9 +2415,6 @@ testes com o servidor do próprio `rustls` sobre o *ring* — outro provedor
 de cifra —, com raízes forjadas com o mesmo nome, assinaturas trocadas,
 registros adulterados e transportes que recusam no meio.
 
-O que ainda não há: o canal do agente por TCP — o incremento seguinte da
-fase 9.
-
 #### O que o exercício encontrou
 
 - **O alerta da recusa não saía.** Quando o programa recusa o
@@ -2451,6 +2450,156 @@ fase 9.
   `TECHNICAL_ERROR` — um erro técnico onde o pedido é que não cabia.
   Agora a do envio e a da leitura respondem `INVALID_REQUEST`, como a
   taxonomia da pilha já dizia, com o motivo.
+
+### O canal do agente por TCP
+
+O canal do agente ganha mais um transporte: uma conexão TCP que o kernel
+aceita na porta 7070. Nada acima dele mudou — o mesmo aperto IK do Noise,
+a mesma chave no registro, o mesmo gate a cada pedido, a mesma auditoria,
+os mesmos comandos. São as sessões 5 a 8, uma por **vaga**: quatro
+conexões ao mesmo tempo, como as quatro portas do `virtio-console`.
+
+```
+$ cargo xtask agent --tcp agent.session
+{"jsonrpc":"2.0","id":100001,"result":{"session":5,"transport":"tcp","authenticated":true,"agent":"agente-1","key":"6d991c2d…","role":"operador","since_ms":12820,"remote":"10.0.2.2:55816"}}
+```
+
+O cliente é o do `xtask`, com a chave do agente 1 da bancada (`--canal N`
+escolhe outra); o par é o do emulador, que leva a conexão do hospedeiro à
+máquina.
+
+**A conexão não traz autoridade.** Aceitar uma conexão não é autenticar,
+e autenticar não é autorizar: quem chega prova a chave no aperto, e o que
+ela pode é o papel que o registro dá a ela. O endereço e a porta do par
+não entram em decisão nenhuma — vão para a auditoria, ao lado da chave,
+como o que se sabe de por onde a conversa veio. Não há política do TCP: a
+mesma decisão que abre uma sessão numa porta abre aqui, e um agente pela
+rede tem exatamente a autoridade que teria pela porta — a mesma taxa (o
+balde é da chave, e não do transporte), a mesma contenção, a mesma
+revogação, a mesma janela de apertos por sessão. A administração é a de
+sempre: `admin.challenge` e `admin.execute` pela sessão TCP, com a prova
+amarrada ao número dela; o administrador recupera o sistema por qualquer
+canal.
+
+**O aperto só termina com a chave confirmada.** A primeira mensagem do IK
+pode ser repetida por quem a capturou: o Duke responde, mas quem repete
+não abre a resposta, e não escreve um quadro que abra. Numa porta isso não
+custa nada — o socket é do hospedeiro. Pela rede, a sessão fantasma
+seguraria uma vaga — e diria, a quem lista os agentes e a quem lê a
+auditoria, que o dono da chave estava conectado. Por isso, no TCP, o
+aperto só termina no primeiro quadro de dados que abre, e só então a
+sessão é do agente: para a auditoria, que grava ali o aperto completo;
+para `agent.list` e a barra, que só então o contam; e para o firewall, de
+quem a conexão passa a ser o fluxo dele. O prazo do aperto — dez segundos
+desde a conexão — corre até lá. A sessão que acaba sem a confirmação — o
+prazo, um quadro que não abre, a conexão que cai — vai à auditoria como
+um aperto recusado, com a chave alegada e o par ("a chave do aperto nao
+foi confirmada: o prazo de 10 s venceu (tcp 10.0.2.2:40880, conexao 1)").
+Quem conecta e não manda nada cai pelo mesmo prazo ("o aperto nao
+veio").
+
+**O firewall.** A escuta deixa entrar só o SYN, e sair só o SYN-ACK ou o
+RST — nada mais passa por ela. A conexão aceita é um fluxo como os outros,
+do agente que confirmou a chave, e as regras do `net.block` a alcançam: a
+que barra o par dela, para o agente dela, derruba a conexão; a sessão
+acaba; a auditoria grava a derrubada em nome de quem pôs a regra. A regra
+de outro agente, para o mesmo par, não a toca. Como no resto da rede, o
+destino é enumerado: a regra nomeia o par inteiro, com a porta dele.
+
+**Contrapressão, e não perda.** Na entrada, a pilha só tira do socket o
+que cabe na entrada da vaga (16 KiB): o resto espera no socket, com a
+janela do TCP fechada, e quem manda mais depressa do que a sessão atende
+espera — numa porta, o que não cabe é perdido e encerra a sessão. Na
+saída, com mais de 64 KiB esperando o par ler, a sessão não lê o pedido
+seguinte até ele ler; passando de 256 KiB, a resposta não sai e a sessão
+acaba, como numa porta. Quem pede e não lê espera, sem perder nada. As
+linhas de um mesmo quadro cifrado são atendidas uma atrás da outra, sem a
+espera entre elas: quem manda muitas num quadro só é segurado pelo teto.
+
+**O fim.** O par fecha ou cai — o *keep-alive* pergunta a cada 30 s, e
+90 s de silêncio derrubam —, uma regra o derruba, ou a sessão acaba por
+dentro: a revogação, um quadro que não abre, um aperto recusado. A recusa
+em claro sai primeiro, e então o FIN; o fecho tem prazo de cinco segundos,
+e passado ele vai um RST — um par que não lê não segura a vaga. O fim de
+uma conexão leva só a sessão **dela**, pela geração da vaga, e nunca a da
+conexão seguinte, que já pode ter feito o aperto. E as conexões de rede
+que o agente abriu são da conexão dele: caem com ela, e a seguinte na
+mesma vaga, com a mesma chave, não as herda.
+
+**O NSF observa sem ser autoridade.** Os apertos recusados pela rede vão
+à auditoria como os das portas, com o par no detalhe, e o NSF os lê dali,
+pelo gate: três falhas da mesma chave alegada são uma observação, dez são
+uma detecção de abuso de credencial. Ele não pede nada ao gate por quem
+não se autenticou — não há o que conter —, e não há um sensor do TCP fora
+do gate.
+
+**A bancada.** O emulador encaminha a porta do canal a uma porta livre do
+hospedeiro, só em `127.0.0.1`, escolhida a cada máquina e gravada em
+`target/agente-tcp-<arch>.porta`, de onde `cargo xtask agent --tcp` e a
+fumaça a leem. A suíte, que roda dentro do kernel, chega ao canal como um
+agente de fora: conecta a `10.0.2.100:7070`, um `guestfwd` que roda a
+[ponte](xtask/bancada/ponte.py) a cada conexão, e a ponte a leva à porta do
+hospedeiro e de volta ao canal — pela pilha do kernel duas vezes, sem
+atalho nenhum. Do lado de dentro, a tarefa que atende a vaga é a de
+produção, `agent::atender`, andada à mão pela suíte.
+
+#### O que o exercício encontrou
+
+- **O TCP escapava da taxa.** O balde da chave era só das sessões de 0 a
+  4; um pedido de uma vaga do TCP não gastava ficha nenhuma, e o programa
+  lançado por um agente pela rede gastava do balde do sistema. Agora toda
+  sessão de um canal do agente gasta do balde da chave, e o caso `canal
+  tcp: a mesma autoridade e a mesma taxa` passa do limite pela rede como
+  pela porta.
+- **A janela de apertos só conhecia as portas**, e recusava todo aperto
+  pela rede como "apertos demais". Ela é por sessão cifrada.
+- **A revogação não alcançava a rede.** Ela encerrava as sessões das
+  portas da chave revogada; a sessão TCP seguia de pé — recusada pelo gate
+  a cada pedido, mas segurando a vaga, e sem a recusa que diz por quê.
+  Agora revogar derruba a conexão viva, com a recusa, e o caso o confere
+  no meio da conexão.
+- **A conexão de rede de um agente pela rede passava à conexão
+  seguinte.** O dono de uma conexão aberta por um canal leva a geração do
+  transporte, e a de uma vaga TCP era lida como a de uma porta — zero,
+  sempre. A conexão seguinte na mesma vaga, com a mesma chave, era o mesmo
+  dono: chegando antes da passada do coletor, herdava as conexões da
+  anterior, o que nas portas não acontece. Agora a geração é a da vaga.
+- **Os agentes pela rede não apareciam** em `agent.list` nem no indicador
+  da barra: a atividade só olhava as portas.
+- **O fim de uma conexão esquecia a sessão da seguinte.** O fim é tratado
+  pelo coletor, depois; se a conexão seguinte na mesma vaga já tinha feito
+  o aperto, ele levava a sessão dela. Agora a sessão guarda a geração em
+  que o aperto aconteceu, e o fim de uma conexão só esquece a dela.
+- **A repetição do aperto segurava uma vaga.** Respondido o aperto, o
+  prazo parava, e a sessão fantasma de quem repetiu a primeira mensagem
+  ficava na vaga para sempre. Daí a confirmação da chave.
+- **E fazia o dono da chave aparecer conectado.** Com o prazo de volta, a
+  sessão de quem repete caía em dez segundos — mas, até cair, era contada
+  em `agent.list` e na barra como o agente da chave, e a auditoria tinha
+  dela um "aperto completo" com o par de quem repetiu. Agora, no TCP, o
+  aperto só é gravado e mostrado quando a chave é confirmada, e a sessão
+  que acaba antes vai à auditoria como recusada.
+- **A escuta não passava pelo firewall.** Ele só deixava entrar quadros de
+  conexões da tabela, e o SYN de quem chega ao canal não é de nenhuma. A
+  escuta é um fluxo dele agora, que só aceita o SYN.
+- **A recusa não chegava.** O transporte era fechado antes de a recusa
+  entrar na saída, e o agente via a conexão cair sem saber por quê. Agora
+  a recusa entra primeiro, o fecho espera a saída escoar — com prazo —, e
+  nada entra na saída depois do fecho pedido.
+- **A vaga livre não era só a pendência tratada.** O coletor tirava o fim
+  de uma conexão da lista antes de tratá-lo, e quem esperava a lista
+  vazia via a vaga livre antes de a sessão ser esquecida e a recusa
+  gravada; a suíte pegou. Agora a pendência sai da lista depois de
+  tratada.
+- **A fumaça contava com a vaga que ainda fechava.** Uma conexão que
+  acabou ainda termina o fecho, e um SYN que chega então encontra três
+  vagas escutando, e não quatro. `agent.sessions` diz agora se cada vaga
+  escuta, e a fumaça espera as quatro antes de conectar quatro agentes.
+- **A contrapressão não se mede de fora.** O hospedeiro e o emulador
+  guardam alguns MB entre o agente e o kernel, e o agente que não lê na
+  fumaça nem enche a saída da vaga. O limiar é conferido na suíte, onde a
+  saída da pilha pode ser segurada; a fumaça confere que nada se perde no
+  caminho de verdade.
 
 ### As mutações da rede
 
@@ -2934,9 +3083,11 @@ transporte local: o `virtio-console` com várias portas — o recurso
 `MULTIPORT` —, cada porta num socket próprio no hospedeiro, as sessões 1 a
 4. O driver faz o aperto de mão do `MULTIPORT` pela fila de controle: diz
 que está pronto, o dispositivo anuncia cada porta, o driver a põe de pé e a
-abre do lado dele, e o hospedeiro manda o nome dela. `agent.session` diz a
-um agente qual é a sessão dele; `agent.sessions` lista todas, com quem está
-conectado e o que se perdeu.
+abre do lado dele, e o hospedeiro manda o nome dela. E pela rede, o canal
+por TCP, as sessões 5 a 8 — ver [O canal do agente por
+TCP](#o-canal-do-agente-por-tcp). `agent.session` diz a um agente qual é a
+sessão dele; `agent.sessions` lista todas, com quem está conectado e o que
+se perdeu.
 
 **Uma coisa que a serial não dava: a conexão.** A serial não enxerga quando
 um cliente conecta ou cai, e convive com isso por um teto de ociosidade e
@@ -2978,9 +3129,9 @@ kernel de depuração — centenas de milissegundos por aperto, as portas uma
 de cada vez — fez o CI encadear reconexões até cair nesse limite.
 
 **Acima do transporte.** O enquadramento, o JSON-RPC e os comandos não
-sabem por onde os bytes vieram: perguntam ao canal da sessão. É o que deixa
-o próximo transporte — o TCP, quando houver rede, e o vsock, para as máquinas
-virtuais — entrar como mais um caso, sem mudar nada em cima. São sete
+sabem por onde os bytes vieram: perguntam ao canal da sessão. Foi assim que
+o TCP entrou — mais um caso, sem mudar nada em cima —, e é assim que o
+vsock, para as máquinas virtuais, entraria. São sete
 etapas: o transporte e as sessões; o canal seguro, abaixo; depois a camada
 de controle (política, auditoria encadeada, limites, revogação), os
 conflitos entre agentes, as mensagens entre eles, o indicador na barra, e
@@ -5178,7 +5329,7 @@ padronizado.
       os dados de programas e agentes, e divide a partição com o estado de
       autoridade. Ver [Armazenamento nativo](#armazenamento-nativo) e
       [`docs/ARMAZENAMENTO.md`](docs/ARMAZENAMENTO.md). **Fase 8 completa.**
-- [ ] **Fase 9 — Rede nativa.** IP, UDP, TCP, DHCP e TLS. Com `smoltcp` em
+- [x] **Fase 9 — Rede nativa.** IP, UDP, TCP, DHCP e TLS. Com `smoltcp` em
       vez de escrever a pilha: escrever TCP do zero é um a dois anos-pessoa
       e não diferencia o Duke em nada. O que diferencia é o lado de cima: um
       programa não abre um socket do Unix, pede uma conexão ao registro,
@@ -5196,8 +5347,11 @@ padronizado.
       destino decidido; e o DNS, como programa sobre o UDP — um nome não é
       recurso da política; e o TLS 1.3, como programa sobre o TCP, com o
       envio que espera espaço na fila de saída e os bytes do gerador pelo
-      gate — um certificado prova um nome ao programa e não autoriza nada.
-      Ver [Rede nativa](#rede-nativa). Falta o canal do agente por TCP.
+      gate — um certificado prova um nome ao programa e não autoriza nada;
+      e o canal do agente por TCP, mais um transporte de sessão — o mesmo
+      aperto, a mesma chave, o mesmo gate, a mesma auditoria: a conexão não
+      traz autoridade, e a chave só vale confirmada. Ver [Rede
+      nativa](#rede-nativa). **Fase 9 completa.**
 - [x] **Fase 10 — GPU, composição e a árvore semântica.** Começou antes da
       6, pela parte que não depende de vários núcleos. Feito: a pilha gráfica
       no desenho do Redox — um trait de adaptador que o compositor usa sem

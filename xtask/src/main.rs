@@ -9,10 +9,12 @@
 //! cargo xtask run   [--arch A]                   # sobe no QEMU
 //! cargo xtask test  [--arch A]                   # suíte de testes no QEMU
 //! cargo xtask agent [--arch A] <metodo> [params] # fala JSON-RPC com o kernel
+//! cargo xtask agent --tcp [--canal N] <metodo>    # o mesmo, pelo canal TCP
 //! ```
 //!
 //! `A` é `x86_64` (padrão) ou `aarch64`. Aceita também `--release`.
 
+mod canal_tcp;
 mod persistencia;
 mod tls;
 
@@ -228,7 +230,15 @@ fn main() -> ExitCode {
         "agent" => {
             let metodo = posicionais.get(1).copied().unwrap_or("agent.describe");
             let params = posicionais.get(2).copied().unwrap_or("{}");
+            let tcp = args.iter().any(|a| a == "--tcp");
             match extrair_valor(&args, "--canal").map(str::parse::<u8>) {
+                None if tcp => agente_tcp(arch, 1, metodo, params),
+                Some(Ok(n)) if tcp && (1..=PORTAS_DE_AGENTE).contains(&n) => {
+                    agente_tcp(arch, n, metodo, params)
+                }
+                Some(_) if tcp => Err(format!(
+                    "--canal, com --tcp, escolhe a chave do agente: de 1 a {PORTAS_DE_AGENTE}"
+                )),
                 None => agente(arch, 0, metodo, params),
                 Some(Ok(canal)) if canal <= PORTAS_DE_AGENTE => agente(arch, canal, metodo, params),
                 Some(_) => Err(format!(
@@ -322,7 +332,10 @@ COMANDOS:
     run                       executa no QEMU com o canal do agente ativo
     test                      executa a suíte de testes dentro do QEMU
     fumaca                    sobe o kernel de produção e conversa pelo canal
-    agent <metodo> [params]   envia uma chamada JSON-RPC ao kernel em execução
+    agent <metodo> [params]   envia uma chamada JSON-RPC ao kernel em execução:
+                              pela serial, por uma porta (--canal 1..4) ou
+                              pelo canal TCP (--tcp, com a chave do agente
+                              --canal N, 1 por padrão)
     debug                     sobe o kernel parado, esperando um depurador
     simbolo <endereco>...     traduz endereços de execução em arquivo e linha
     asm <simbolo>             desmonta uma função do binário compilado
@@ -339,6 +352,7 @@ EXEMPLOS:
     cargo xtask agent system.info
     cargo xtask agent --arch aarch64 agent.describe
     cargo xtask agent log.tail '{{\"count\":5,\"min_level\":\"info\"}}'
+    cargo xtask agent --tcp --canal 2 agent.session
 
     cargo xtask debug --arch aarch64
     cargo xtask simbolo 0xffff80000000b697
@@ -2305,11 +2319,30 @@ fn conferir_invariantes() -> Result<ExitCode, String> {
         conferir_ponto_unico_de_decisao()?,
         conferir_remetente_da_sessao()?,
         conferir_auditoria_so_relatada()?,
+        conferir_a_porta_do_canal_tcp(),
     ];
     if passos.iter().all(|p| *p == ExitCode::SUCCESS) {
         Ok(ExitCode::SUCCESS)
     } else {
         Ok(ExitCode::FAILURE)
+    }
+}
+
+/// Confere que a porta do canal TCP que o emulador encaminha é a que o
+/// kernel escuta — ver [`canal_tcp::conferir_a_porta`].
+fn conferir_a_porta_do_canal_tcp() -> ExitCode {
+    match canal_tcp::conferir_a_porta() {
+        Ok(()) => {
+            println!(
+                "[xtask] o canal TCP: a porta encaminhada é a {} que o kernel escuta",
+                canal_tcp::PORTA_NO_HOSPEDE
+            );
+            ExitCode::SUCCESS
+        }
+        Err(motivo) => {
+            println!("[xtask] {motivo}");
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -5498,6 +5531,14 @@ fn comando_qemu(
     // - `10.0.2.100:443`, o eco TLS: cada conexão roda o servidor TLS da
     //   bancada — o OpenSSL, pelo Python —, que escolhe o certificado pelo
     //   nome pedido. A política de desenvolvimento o enumera. Ver [`tls`].
+    //
+    // E o canal do agente por TCP: a porta dele no hóspede, encaminhada a
+    // uma porta livre de `127.0.0.1` no hospedeiro — a única porta que esta
+    // máquina abre nele, e só no endereço local —, e a ponte de
+    // `10.0.2.100:7070` até ela, por onde a suíte chega ao canal como um
+    // agente de fora. Nenhuma política enumera a ponte: a suíte a usa pela
+    // pilha, sem o gate, porque ela faz o papel de quem está fora. Ver
+    // [`canal_tcp`].
     let tftp = diretorio_do_tftp()?;
     let tftp = tftp.to_str().filter(|t| !t.contains(',')).ok_or_else(|| {
         format!(
@@ -5507,10 +5548,11 @@ fn comando_qemu(
     })?;
     tls::conferir_o_hospedeiro()?;
     let eco_tls = tls::guestfwd()?;
+    let canal_tcp = canal_tcp::preparar(arch.nome())?;
     qemu.args([
         "-netdev",
         &format!(
-            "user,id=rede0,tftp={tftp},guestfwd=tcp:10.0.2.100:7-cmd:cat,guestfwd=tcp:10.0.2.100:9-cmd:sleep 30,{eco_tls}"
+            "user,id=rede0,tftp={tftp},guestfwd=tcp:10.0.2.100:7-cmd:cat,guestfwd=tcp:10.0.2.100:9-cmd:sleep 30,{eco_tls},{canal_tcp}"
         ),
     ]);
     qemu.args(["-device", "virtio-net-pci,netdev=rede0"]);
@@ -6273,6 +6315,7 @@ fn conversar(
     sob_sigilo(arch)?;
     sob_administracao(arch, &mut escrita, &mut leitor)?;
     sob_politica(arch, &mut escrita, &mut leitor)?;
+    sob_canal_tcp(arch, &mut escrita, &mut leitor)?;
     sob_tela(monitor, tela_no_monitor, &mut escrita, &mut leitor)?;
     sob_fragmento(&mut escrita, &mut leitor)?;
     // Depois das sondas que usam os agentes: o incidente que esta abre
@@ -7683,16 +7726,59 @@ fn aleatorios() -> Result<[u8; 32], String> {
     Ok(chave)
 }
 
-/// Um agente numa porta do console virtio, pelo canal cifrado: o aperto de
-/// mão, e os pedidos por ele.
+/// O fluxo de um agente até o kernel: o socket de uma porta do console
+/// virtio, ou uma conexão do canal por TCP. O que passa por ele é o mesmo:
+/// os quadros do canal cifrado.
+enum FluxoDoAgente {
+    Porta(UnixStream),
+    Tcp(std::net::TcpStream),
+}
+
+impl FluxoDoAgente {
+    fn set_read_timeout(&self, prazo: Option<Duration>) -> std::io::Result<()> {
+        match self {
+            FluxoDoAgente::Porta(f) => f.set_read_timeout(prazo),
+            FluxoDoAgente::Tcp(f) => f.set_read_timeout(prazo),
+        }
+    }
+}
+
+impl Read for FluxoDoAgente {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            FluxoDoAgente::Porta(f) => f.read(buf),
+            FluxoDoAgente::Tcp(f) => f.read(buf),
+        }
+    }
+}
+
+impl Write for FluxoDoAgente {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            FluxoDoAgente::Porta(f) => f.write(buf),
+            FluxoDoAgente::Tcp(f) => f.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            FluxoDoAgente::Porta(f) => f.flush(),
+            FluxoDoAgente::Tcp(f) => f.flush(),
+        }
+    }
+}
+
+/// Um agente numa porta do console virtio, ou no canal por TCP, pelo canal
+/// cifrado: o aperto de mão, e os pedidos por ele.
 ///
 /// É o mesmo `sigilo` que o kernel usa do lado dele — ver o pacote. A chave
 /// do agente é a de `target/chaves/`, e a pública do Duke sai da privada que
 /// o `xtask` gerou: quem provisiona a máquina conhece as duas. Um cliente de
 /// verdade receberia só a pública.
 struct AgenteNaPorta {
-    porta: u8,
-    fluxo: UnixStream,
+    /// Por onde ele fala, para as mensagens: `porta 2`, `tcp`.
+    onde: String,
+    fluxo: FluxoDoAgente,
     transporte: sigilo::Transporte,
     leitor: sigilo::quadro::Leitor,
     /// Texto decifrado que ainda não fechou uma linha.
@@ -7717,35 +7803,71 @@ impl AgenteNaPorta {
         chave: &[u8; 32],
         duke: &[u8; 32],
     ) -> Result<AgenteNaPorta, String> {
+        Self::insistir(&format!("porta {porta}"), porta, chave, duke, || {
+            UnixStream::connect(caminho_canal(arch, porta))
+                .map(FluxoDoAgente::Porta)
+                .map_err(|e| FalhaDoAperto::Outra(format!("a porta nao aceitou conexao: {e}")))
+        })
+    }
+
+    /// Conecta pelo canal TCP com a chave do agente `agente` — a mesma de
+    /// uma porta: o transporte não muda quem ele é.
+    fn conectar_tcp(arch: Arquitetura, agente: u8) -> Result<AgenteNaPorta, String> {
+        let chaves = chaves::Chaves::garantir()?;
+        Self::conectar_tcp_com(arch, agente, &chaves.do_agente(agente), &chaves.duke)
+    }
+
+    /// Conecta pelo canal TCP com uma chave qualquer, insistindo enquanto o
+    /// kernel não responde. `numero` só numera os pedidos.
+    fn conectar_tcp_com(
+        arch: Arquitetura,
+        numero: u8,
+        chave: &[u8; 32],
+        duke: &[u8; 32],
+    ) -> Result<AgenteNaPorta, String> {
+        let porta = canal_tcp::porta(arch.nome())?;
+        Self::insistir("tcp", numero, chave, duke, || {
+            std::net::TcpStream::connect(("127.0.0.1", porta))
+                .map(FluxoDoAgente::Tcp)
+                .map_err(|e| FalhaDoAperto::Outra(format!("o canal TCP nao aceitou conexao: {e}")))
+        })
+    }
+
+    /// O aperto por um fluxo que `abrir` dá, de novo enquanto o kernel não
+    /// responde. Uma recusa é a resposta, e não se insiste.
+    fn insistir(
+        onde: &str,
+        porta: u8,
+        chave: &[u8; 32],
+        duke: &[u8; 32],
+        abrir: impl Fn() -> Result<FluxoDoAgente, FalhaDoAperto>,
+    ) -> Result<AgenteNaPorta, String> {
         let limite = Instant::now() + Duration::from_secs(30);
         loop {
-            match Self::tentar_aperto(arch, porta, chave, duke) {
+            match abrir().and_then(|fluxo| Self::tentar_aperto(fluxo, onde, porta, chave, duke)) {
                 Ok(agente) => return Ok(agente),
                 Err(FalhaDoAperto::Recusado(motivo)) => {
-                    return Err(format!("agentes: porta {porta}: recusado: {motivo}"));
+                    return Err(format!("agentes: {onde}: recusado: {motivo}"));
                 }
-                Err(FalhaDoAperto::Outra(e)) => return Err(format!("agentes: porta {porta}: {e}")),
+                Err(FalhaDoAperto::Outra(e)) => return Err(format!("agentes: {onde}: {e}")),
                 Err(FalhaDoAperto::Silencio) if Instant::now() < limite => {
                     std::thread::sleep(Duration::from_millis(300));
                 }
                 Err(FalhaDoAperto::Silencio) => {
-                    return Err(format!(
-                        "agentes: porta {porta}: o aperto nao foi respondido"
-                    ));
+                    return Err(format!("agentes: {onde}: o aperto nao foi respondido"));
                 }
             }
         }
     }
 
     fn tentar_aperto(
-        arch: Arquitetura,
+        mut fluxo: FluxoDoAgente,
+        onde: &str,
         porta: u8,
         chave: &[u8; 32],
         duke: &[u8; 32],
     ) -> Result<AgenteNaPorta, FalhaDoAperto> {
         use sigilo::quadro::{Tipo, montar};
-        let mut fluxo = UnixStream::connect(caminho_canal(arch, porta))
-            .map_err(|e| FalhaDoAperto::Outra(format!("a porta nao aceitou conexao: {e}")))?;
         // A espera é pelo aperto inteiro, e não só pelo primeiro sinal de
         // vida: desistir e reconectar é o que faz aparecer o limite do
         // transporte — a resposta ao aperto abandonado chega à conexão
@@ -7788,7 +7910,7 @@ impl AgenteNaPorta {
                     .set_read_timeout(Some(Duration::from_secs(10)))
                     .map_err(|e| FalhaDoAperto::Outra(e.to_string()))?;
                 Ok(AgenteNaPorta {
-                    porta,
+                    onde: onde.to_string(),
                     fluxo,
                     transporte,
                     leitor,
@@ -7827,12 +7949,12 @@ impl AgenteNaPorta {
         Ok((id, quadros))
     }
 
-    /// Manda bytes crus pela porta.
+    /// Manda bytes crus pelo fluxo.
     fn mandar(&mut self, bytes: &[u8]) -> Result<(), String> {
         self.fluxo
             .write_all(bytes)
             .and_then(|()| self.fluxo.flush())
-            .map_err(|e| format!("agentes: a porta {} nao aceitou o pedido: {e}", self.porta))
+            .map_err(|e| format!("agentes: {} nao aceitou o pedido: {e}", self.onde))
     }
 
     /// A próxima linha de resposta, decifrada. `Err` com o motivo se o Duke
@@ -7844,14 +7966,14 @@ impl AgenteNaPorta {
                 return Ok(String::from_utf8_lossy(&linha).trim_end().to_string());
             }
             let (tipo, corpo) = ler_quadro(&mut self.fluxo, &mut self.leitor)?
-                .ok_or_else(|| format!("agentes: porta {}: sem resposta", self.porta))?;
+                .ok_or_else(|| format!("agentes: {}: sem resposta", self.onde))?;
             match tipo {
                 sigilo::quadro::Tipo::Dados => {
                     let mut claro = vec![0u8; corpo.len()];
                     let n = self.transporte.decifrar(&corpo, &mut claro).map_err(|e| {
                         format!(
-                            "agentes: porta {}: resposta que nao abre: {}",
-                            self.porta,
+                            "agentes: {}: resposta que nao abre: {}",
+                            self.onde,
                             e.motivo()
                         )
                     })?;
@@ -7860,7 +7982,7 @@ impl AgenteNaPorta {
                 sigilo::quadro::Tipo::Recusa => {
                     return Err(format!("recusa: {}", String::from_utf8_lossy(&corpo)));
                 }
-                _ => return Err(format!("agentes: porta {}: quadro inesperado", self.porta)),
+                _ => return Err(format!("agentes: {}: quadro inesperado", self.onde)),
             }
         }
     }
@@ -7941,10 +8063,9 @@ impl AgenteNaPorta {
 /// Lê bytes até um quadro se completar. `Ok(None)` se o prazo do fluxo
 /// venceu sem quadro inteiro.
 fn ler_quadro(
-    fluxo: &mut UnixStream,
+    fluxo: &mut impl Read,
     leitor: &mut sigilo::quadro::Leitor,
 ) -> Result<Option<(sigilo::quadro::Tipo, Vec<u8>)>, String> {
-    use std::io::Read;
     let mut byte = [0u8; 1];
     loop {
         match fluxo.read(&mut byte) {
@@ -9047,6 +9168,442 @@ fn sob_politica(
         "  [politica] ok  {} registros da auditoria refeitos aqui fora, elo a elo, ate {}…; sem nenhuma prova dentro",
         registros.len(),
         &sigilo::hex(&ultimo)[..16]
+    );
+    Ok(())
+}
+
+/// O número da sessão que o aperto deu a um agente: o `session` das boas
+/// vindas.
+fn sessao_do_aperto(agente: &AgenteNaPorta) -> Result<u8, String> {
+    campo_simples(&agente.boas_vindas, "session")
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(|| format!("tcp: o aperto nao disse a sessao\n  {}", agente.boas_vindas))
+}
+
+/// Um campo do objeto da sessão TCP `sessao` num `agent.sessions`.
+fn campo_da_sessao_tcp(r: &str, sessao: u8, nome: &str) -> Option<String> {
+    let resto = apos(r, &format!(r#""session":{sessao},"transport":"tcp""#))?;
+    campo_simples(resto, nome)
+}
+
+/// Os quadros que chegaram por uma conexão crua: o tipo e o corpo.
+type QuadrosCrus = Vec<(sigilo::quadro::Tipo, Vec<u8>)>;
+
+/// Lê de uma conexão crua ao canal TCP até ela fechar, ou o prazo vencer:
+/// os quadros que chegaram, e se ela fechou.
+fn ler_ate_fechar(
+    fluxo: &mut std::net::TcpStream,
+    prazo: Duration,
+) -> Result<(QuadrosCrus, bool), String> {
+    fluxo
+        .set_read_timeout(Some(prazo))
+        .map_err(|e| format!("tcp: sem prazo de leitura: {e}"))?;
+    let mut leitor = sigilo::quadro::Leitor::novo();
+    let mut quadros = Vec::new();
+    let mut buf = [0u8; 512];
+    loop {
+        match fluxo.read(&mut buf) {
+            Ok(0) => return Ok((quadros, true)),
+            Ok(n) => {
+                for &b in &buf[..n] {
+                    if let Ok(Some((t, c))) = leitor.empurrar(b) {
+                        quadros.push((t, c.to_vec()));
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {
+                return Ok((quadros, true));
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Ok((quadros, false));
+            }
+            Err(e) => return Err(format!("tcp: a leitura falhou: {e}")),
+        }
+    }
+}
+
+/// Espera as quatro vagas do canal TCP escutarem: nenhuma conexão, e o
+/// fecho da última terminado — pelo `agent.sessions` da serial.
+fn esperar_vagas_tcp_livres(
+    pedir: &mut dyn FnMut(&str, &str) -> Result<String, String>,
+) -> Result<(), String> {
+    let limite = Instant::now() + Duration::from_secs(15);
+    loop {
+        let r = pedir("agent.sessions", "{}")?;
+        let livres = (5..=8u8)
+            .filter(|&s| campo_da_sessao_tcp(&r, s, "listening").as_deref() == Some("true"))
+            .count();
+        if livres == 4 {
+            return Ok(());
+        }
+        if Instant::now() >= limite {
+            return Err(format!("tcp: as vagas nao voltaram a escutar\n  {r}"));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// O canal do agente por TCP, no kernel de produção: o mesmo canal cifrado
+/// das portas, por uma conexão que chega pela rede do emulador — de fora do
+/// hóspede, pelo `hostfwd` (ver [`canal_tcp`]).
+///
+/// # O que esta sonda prova que a suíte não prova
+///
+/// A suíte conversa com o canal por dentro do hóspede, pela ponte. Esta vem
+/// de fora de verdade — o cliente do `xtask`, a pilha do hospedeiro, a rede
+/// do emulador e as tarefas do executor de produção —, e confere que nada
+/// no caminho dá ao TCP o que a porta não dá:
+///
+/// - o aperto é o mesmo, e a sessão diz quem é pela chave — o par é só o
+///   par —; a autoridade é a do papel da chave, a mesma de quem entra pela
+///   porta;
+/// - uma chave fora do registro, uma revogada e um pedido em claro são
+///   recusados, a conexão fecha, e a recusa vai à auditoria com o par;
+/// - quatro agentes ao mesmo tempo, cada um com as respostas dele; com as
+///   vagas cheias, a quinta conexão não entra;
+/// - revogar a chave derruba a conexão viva, com a recusa;
+/// - o agente contido continua conectado e ouve `DENY_CONTAINED`, e o
+///   administrador o solta pelo caminho de sempre — a prova —, de uma
+///   sessão TCP;
+/// - quem pede muito e não lê não perde nada: as respostas chegam todas,
+///   inteiras e na ordem, quando ele lê — o limiar em que o kernel para de
+///   ler os pedidos é conferido na suíte, onde a saída pode ser segurada;
+/// - quem conecta e não faz o aperto perde a conexão no prazo, e a recusa
+///   vai à auditoria.
+fn sob_canal_tcp(
+    arch: Arquitetura,
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+) -> Result<(), String> {
+    println!("[xtask] fumaça: o canal do agente por TCP — a mesma cadeia, pela rede");
+    let chaves = chaves::Chaves::garantir()?;
+    let porta = canal_tcp::porta(arch.nome())?;
+    let mut id = 6700;
+    let mut pedir =
+        |metodo: &str, params: &str| pedir_pela_serial(escrita, leitor, &mut id, metodo, params);
+    let vagas = 5..=8u8;
+
+    // O aperto pela rede, e a mesma autoridade da porta.
+    let inicio = Instant::now();
+    let mut dois = AgenteNaPorta::conectar_tcp(arch, 2)?;
+    let aperto_ms = inicio.elapsed().as_millis();
+    let s2 = sessao_do_aperto(&dois)?;
+    if !vagas.contains(&s2) || !dois.boas_vindas.contains(r#""agent":"agente-2""#) {
+        return Err(format!(
+            "tcp: o aperto deu a sessao errada\n  {}",
+            dois.boas_vindas
+        ));
+    }
+    let r = dois.pedir("agent.session", "{}")?;
+    if !r.contains(r#""transport":"tcp","authenticated":true,"agent":"agente-2""#)
+        || !r.contains(r#""remote":"10.0.2.2:"#)
+    {
+        return Err(format!("tcp: a sessao nao disse quem e e por onde\n  {r}"));
+    }
+    let r = dois.pedir("fs.list", r#"{"path":"/bin"}"#)?;
+    if !r.contains(r#""result":"#) {
+        return Err(format!("tcp: o operador nao listou /bin pela rede\n  {r}"));
+    }
+    let r = dois.pedir("fs.read", r#"{"path":"/etc/duke/agentes"}"#)?;
+    if !recusado_com(&r, "DENY_RESOURCE") {
+        return Err(format!("tcp: pela rede o operador leu o registro\n  {r}"));
+    }
+    println!(
+        "  [tcp] ok  o aperto pela rede ({aperto_ms} ms) da a sessao {s2} a agente-2, com o papel dele: le o alcance, e nada alem"
+    );
+
+    // Ninguém entra por ser quem conecta: a chave fora do registro e a
+    // revogada são recusadas no aperto; um pedido em claro não é pedido.
+    let estranha = aleatorios()?;
+    for (quem, chave) in [
+        ("uma chave fora do registro", &estranha),
+        ("a chave revogada", &chaves.intruso),
+    ] {
+        match AgenteNaPorta::conectar_tcp_com(arch, 9, chave, &chaves.duke) {
+            Err(e) if e.contains("recusado: chave fora do registro") => {}
+            Err(e) => return Err(format!("tcp: {quem} foi recusada pelo motivo errado: {e}")),
+            Ok(_) => return Err(format!("tcp: {quem} entrou pela rede")),
+        }
+    }
+    let mut cru = std::net::TcpStream::connect(("127.0.0.1", porta))
+        .map_err(|e| format!("tcp: o canal nao aceitou conexao: {e}"))?;
+    cru.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"system.info\",\"params\":{}}\n")
+        .map_err(|e| format!("tcp: o pedido em claro nao saiu: {e}"))?;
+    let (quadros, fechou) = ler_ate_fechar(&mut cru, Duration::from_secs(10))?;
+    if !fechou || quadros.len() != 1 || quadros[0].0 != sigilo::quadro::Tipo::Recusa {
+        return Err(format!(
+            "tcp: um pedido em claro nao foi recusado com a conexao fechada: {} quadro(s), fechou {fechou}",
+            quadros.len()
+        ));
+    }
+    drop(cru);
+    let cauda = pedir("audit.tail", r#"{"count":64}"#)?;
+    if !cauda.contains(r#""method":"session.open""#)
+        || !cauda.contains("quadro de tipo desconhecido (tcp 10.0.2.2:")
+    {
+        return Err(format!(
+            "tcp: a recusa do pedido em claro nao foi a auditoria com o par\n  {cauda}"
+        ));
+    }
+    drop(dois);
+    println!(
+        "  [tcp] ok  chave fora do registro, chave revogada e pedido em claro: recusados, a conexao fecha, e a auditoria tem o par"
+    );
+
+    // Quatro agentes ao mesmo tempo, e a quinta conexão sem vaga — com as
+    // quatro vagas escutando antes: a de uma conexão que acabou de fechar
+    // ainda termina o fecho, e um SYN que chega então vai a outra vaga, ou
+    // é recusado.
+    esperar_vagas_tcp_livres(&mut pedir)?;
+    let todos = std::sync::Arc::new(std::sync::Barrier::new(5));
+    let soltos = std::sync::Arc::new(std::sync::Barrier::new(5));
+    let fios: Vec<_> = (1..=4u8)
+        .map(|n| {
+            let (todos, soltos) = (todos.clone(), soltos.clone());
+            std::thread::spawn(move || -> Result<u8, String> {
+                // O primeiro pedido antes de esperar os outros: é ele que
+                // confirma a chave, e sem ele o prazo do aperto vence.
+                let conectado = AgenteNaPorta::conectar_tcp(arch, n)
+                    .and_then(|mut a| a.pedir("agent.ping", "{}").map(|_| a));
+                todos.wait();
+                soltos.wait();
+                let mut agente = conectado?;
+                let s = sessao_do_aperto(&agente)?;
+                let esperado = format!(
+                    r#""session":{s},"transport":"tcp","authenticated":true,"agent":"agente-{n}""#
+                );
+                for _ in 0..30 {
+                    let r = agente.pedir("agent.session", "{}")?;
+                    if !r.contains(&esperado) {
+                        return Err(format!(
+                            "tcp: agente-{n} recebeu a resposta de outro\n  {r}"
+                        ));
+                    }
+                }
+                Ok(s)
+            })
+        })
+        .collect();
+    todos.wait();
+    let mut quinta = std::net::TcpStream::connect(("127.0.0.1", porta))
+        .map_err(|e| format!("tcp: o hospedeiro nao aceitou a quinta conexao: {e}"))?;
+    let _ = quinta.write_all(&[1, 0, 0]);
+    let (quadros, fechou) = ler_ate_fechar(&mut quinta, Duration::from_secs(10))?;
+    drop(quinta);
+    soltos.wait();
+    let mut sessoes = Vec::new();
+    for fio in fios {
+        sessoes.push(fio.join().map_err(|_| "tcp: um fio de agente caiu")??);
+    }
+    sessoes.sort_unstable();
+    sessoes.dedup();
+    if sessoes.len() != 4 || !sessoes.iter().all(|s| vagas.contains(s)) {
+        return Err(format!(
+            "tcp: os quatro agentes nao tiveram as quatro vagas: {sessoes:?}"
+        ));
+    }
+    if !fechou || !quadros.is_empty() {
+        return Err(format!(
+            "tcp: com as vagas cheias, a quinta conexao foi atendida: {} quadro(s), fechou {fechou}",
+            quadros.len()
+        ));
+    }
+    println!(
+        "  [tcp] ok  quatro agentes ao mesmo tempo nas sessoes {sessoes:?}, 120 pedidos, cada um so com as respostas dele; a quinta conexao nao entra"
+    );
+
+    // Revogar derruba a conexão viva: a recusa, e o fim dela.
+    esperar_vagas_tcp_livres(&mut pedir)?;
+    let privada = aleatorios()?;
+    let publica = sigilo::hex(&sigilo::publica_de(&privada));
+    let administrar = |pedir: &mut dyn FnMut(&str, &str) -> Result<String, String>,
+                       comando: &str,
+                       parametros: &str|
+     -> Result<String, String> {
+        let desafio = pedir("admin.challenge", "{}")?;
+        let pedido = pedido_administrativo(&chaves, 0, &desafio, comando, parametros, parametros)?;
+        pedir("admin.execute", &pedido)
+    };
+    let r = administrar(
+        &mut pedir,
+        "agent.register",
+        &format!(r#"{{"key":"{publica}","name":"tcp-revogavel","role":"operador"}}"#),
+    )?;
+    if !r.contains(r#""executed":true"#) {
+        return Err(format!(
+            "tcp: o agente da revogacao nao foi registrado\n  {r}"
+        ));
+    }
+    let mut revogavel = AgenteNaPorta::conectar_tcp_com(arch, 7, &privada, &chaves.duke)?;
+    let sr = sessao_do_aperto(&revogavel)?;
+    let r = revogavel.pedir("agent.session", "{}")?;
+    if !r.contains(r#""agent":"tcp-revogavel""#) {
+        return Err(format!(
+            "tcp: o agente registrado entrou com outro nome\n  {r}"
+        ));
+    }
+    let r = administrar(
+        &mut pedir,
+        "agent.revoke",
+        &format!(r#"{{"key":"{publica}"}}"#),
+    )?;
+    if !r.contains(r#""executed":true"#) || !r.contains(&format!(r#""sessions_closed":[{sr}]"#)) {
+        return Err(format!(
+            "tcp: a revogacao nao derrubou a sessao TCP {sr}\n  {r}"
+        ));
+    }
+    match revogavel.proxima_linha() {
+        Err(e) if e.contains("recusa: chave revogada") => {}
+        outro => {
+            return Err(format!(
+                "tcp: o agente revogado nao recebeu a recusa: {outro:?}"
+            ));
+        }
+    }
+    match revogavel.proxima_linha() {
+        Err(e) if e.contains("fechou") || e.contains("reset") => {}
+        outro => return Err(format!("tcp: a conexao revogada nao fechou: {outro:?}")),
+    }
+    drop(revogavel);
+    match AgenteNaPorta::conectar_tcp_com(arch, 7, &privada, &chaves.duke) {
+        Err(e) if e.contains("recusado: chave fora do registro") => {}
+        outro => {
+            return Err(format!(
+                "tcp: a chave revogada voltou a entrar: {:?}",
+                outro.err()
+            ));
+        }
+    }
+    println!(
+        "  [tcp] ok  revogar a chave derruba a conexao viva: a recusa chega, a conexao fecha, e ela nao volta"
+    );
+
+    // A contenção não derruba a conexão, e o administrador recupera pela
+    // prova, de uma sessão TCP.
+    esperar_vagas_tcp_livres(&mut pedir)?;
+    let mut tres = AgenteNaPorta::conectar_tcp(arch, 3)?;
+    let mut quatro = AgenteNaPorta::conectar_tcp(arch, 4)?;
+    let s4 = sessao_do_aperto(&quatro)?;
+    let chave3 = sigilo::hex(&sigilo::publica_de(&chaves.do_agente(3)));
+    let params3 = format!(r#"{{"key":"{chave3}"}}"#);
+    let r = pedir("agent.suspend", &params3)?;
+    if !r.contains(r#""state":"suspended""#) {
+        return Err(format!("tcp: a serial nao suspendeu o agente 3\n  {r}"));
+    }
+    for _ in 0..2 {
+        let r = tres.pedir("system.info", "{}")?;
+        if !recusado_com(&r, "DENY_CONTAINED") {
+            return Err(format!("tcp: o agente contido pediu pela rede\n  {r}"));
+        }
+    }
+    let desafio = quatro.pedir("admin.challenge", "{}")?;
+    let pedido = pedido_administrativo(&chaves, s4, &desafio, "agent.resume", &params3, &params3)?;
+    let r = quatro.pedir("admin.execute", &pedido)?;
+    if !r.contains(r#""executed":true"#) || !r.contains(r#""state":"resumed""#) {
+        return Err(format!(
+            "tcp: o administrador nao recuperou pela prova, de uma sessao TCP\n  {r}"
+        ));
+    }
+    let r = tres.pedir("system.info", "{}")?;
+    if !r.contains(r#""result":"#) {
+        return Err(format!("tcp: retomado, o agente continuou recusado\n  {r}"));
+    }
+    drop(tres);
+    println!(
+        "  [tcp] ok  contido, o agente fica conectado e ouve DENY_CONTAINED; o administrador o solta pela prova, da sessao TCP {s4}"
+    );
+
+    // Quem pede e não lê não perde nada: muitas respostas grandes, lidas
+    // só depois, chegam todas, inteiras e na ordem. O limiar em que o
+    // kernel para de ler os pedidos de quem não lê é da suíte — aqui o
+    // hospedeiro guarda alguns MB entre o emulador e o cliente, e a saída
+    // do kernel pode nem encher; o que se confere é que nada se perde no
+    // caminho de verdade.
+    const PEDIDOS: usize = 60;
+    let mut ids = Vec::new();
+    let mut lote = Vec::new();
+    for _ in 0..PEDIDOS {
+        let (id, quadro) = quatro.quadro_do_pedido("audit.tail", r#"{"count":128}"#)?;
+        ids.push(id);
+        lote.extend(quadro);
+    }
+    quatro.mandar(&lote)?;
+    let mut maior_na_saida = 0u64;
+    let limite = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < limite {
+        let r = pedir("agent.sessions", "{}")?;
+        let na_saida: u64 = campo_da_sessao_tcp(&r, s4, "queued_out")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        maior_na_saida = maior_na_saida.max(na_saida);
+        if campo_da_sessao_tcp(&r, s4, "lost_out").as_deref() != Some("0") {
+            return Err(format!("tcp: quem nao le perdeu respostas\n  {r}"));
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    let mut bytes = 0usize;
+    for esperado in &ids {
+        let resposta = loop {
+            let linha = quatro.proxima_linha()?;
+            if linha.contains(r#""id":"#) {
+                break linha;
+            }
+        };
+        if !e_a_resposta(&resposta, *esperado) || !resposta.contains(r#""records":["#) {
+            return Err(format!(
+                "tcp: a resposta {esperado} nao veio inteira, na ordem\n  {}",
+                &resposta[..resposta.len().min(200)]
+            ));
+        }
+        bytes += resposta.len();
+    }
+    let r = pedir("agent.sessions", "{}")?;
+    if campo_da_sessao_tcp(&r, s4, "lost_out").as_deref() != Some("0") {
+        return Err(format!(
+            "tcp: depois da leitura, havia respostas perdidas\n  {r}"
+        ));
+    }
+    drop(quatro);
+    println!(
+        "  [tcp] ok  {PEDIDOS} pedidos sem ler por 3 s: as {PEDIDOS} respostas ({} KiB) chegaram inteiras, na ordem, sem perda (a saida do kernel chegou a {} KiB)",
+        bytes / 1024,
+        maior_na_saida / 1024
+    );
+
+    // Quem conecta e não faz o aperto perde a conexão no prazo.
+    esperar_vagas_tcp_livres(&mut pedir)?;
+    let inicio = Instant::now();
+    let mut calado = std::net::TcpStream::connect(("127.0.0.1", porta))
+        .map_err(|e| format!("tcp: o canal nao aceitou conexao: {e}"))?;
+    let (quadros, fechou) = ler_ate_fechar(&mut calado, Duration::from_secs(20))?;
+    let decorrido = inicio.elapsed();
+    if !fechou || !quadros.is_empty() || decorrido < Duration::from_secs(9) {
+        return Err(format!(
+            "tcp: quem nao fez o aperto nao caiu no prazo: fechou {fechou} em {} ms",
+            decorrido.as_millis()
+        ));
+    }
+    let limite = Instant::now() + Duration::from_secs(10);
+    loop {
+        let cauda = pedir("audit.tail", r#"{"count":32}"#)?;
+        if cauda.contains("o aperto nao veio em 10 s (tcp 10.0.2.2:") {
+            break;
+        }
+        if Instant::now() >= limite {
+            return Err(format!(
+                "tcp: o prazo vencido nao foi a auditoria\n  {cauda}"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    println!(
+        "  [tcp] ok  quem conecta e nao faz o aperto cai em {} ms, e a recusa vai a auditoria com o par",
+        decorrido.as_millis()
     );
     Ok(())
 }
@@ -11508,6 +12065,16 @@ fn agente(arch: Arquitetura, canal: u8, metodo: &str, params: &str) -> Result<Ex
             Err(Espera::Fatal(motivo)) => return Err(motivo),
         }
     }
+}
+
+/// Uma chamada pelo canal TCP, com a chave do agente `n`: o aperto, o
+/// pedido, a resposta. A porta do hospedeiro é a que a máquina em execução
+/// gravou — ver [`canal_tcp`].
+fn agente_tcp(arch: Arquitetura, n: u8, metodo: &str, params: &str) -> Result<ExitCode, String> {
+    let mut agente = AgenteNaPorta::conectar_tcp(arch, n)?;
+    let resposta = agente.pedir(metodo, params)?;
+    println!("{resposta}");
+    Ok(ExitCode::SUCCESS)
 }
 
 /// O que separa "ainda não" de "não vai dar".

@@ -69,9 +69,6 @@ pub const CAMINHO_DA_POLITICA: &str = "/etc/duke/politica";
 /// deixam o elo como âncora — ver [`politica::auditoria`].
 pub const CAPACIDADE_DA_AUDITORIA: usize = 1024;
 
-/// As sessões com balde: a serial e as quatro portas.
-const SESSOES: usize = 1 + crate::sessoes::PORTAS;
-
 /// A sessão que a auditoria atribui à autoridade local — a pessoa na frente
 /// da máquina e os processos do sistema: ela não é uma sessão do canal.
 pub const SESSAO_DA_PESSOA: u8 = u8::MAX;
@@ -142,14 +139,16 @@ enum DonoDaTaxa {
 
 struct Taxas {
     baldes: [Option<BaldeDe>; BALDES],
-    janelas: [Janela; crate::sessoes::PORTAS],
-    apertos_suprimidos: [u64; crate::sessoes::PORTAS],
+    /// A janela de apertos de cada sessão cifrada — as portas e as vagas
+    /// do canal TCP —, e quantos ela recusou desde o último que passou.
+    janelas: [Janela; crate::sessoes::CIFRADAS],
+    apertos_suprimidos: [u64; crate::sessoes::CIFRADAS],
 }
 
 static TAXAS: Mutex<Taxas> = Mutex::new(Taxas {
     baldes: [None; BALDES],
-    janelas: [Janela::NOVA; crate::sessoes::PORTAS],
-    apertos_suprimidos: [0; crate::sessoes::PORTAS],
+    janelas: [Janela::NOVA; crate::sessoes::CIFRADAS],
+    apertos_suprimidos: [0; crate::sessoes::CIFRADAS],
 });
 
 /// O que roda num fio, para o gate: código do kernel, ou a imagem de um
@@ -1059,10 +1058,12 @@ fn passar_pela_taxa(quem: &Quem, metodo: &str, parametros: &[u8]) -> Result<(), 
     };
     // O principal: a chave do agente, ou a serial. A pessoa e o sistema não
     // têm taxa no que pedem por si — só no que os programas deles pedem.
-    // Ver [`DonoDaTaxa`].
+    // Ver [`DonoDaTaxa`]. Uma sessão de qualquer canal do agente — a
+    // serial, uma porta, uma vaga do TCP — gasta do balde da chave: o
+    // transporte não muda quem pede.
     let dono = if quem.titular == Titular::Servico {
         DonoDaTaxa::Servico
-    } else if usize::from(quem.sessao) < SESSOES {
+    } else if crate::agent::sessao::Canal::da_sessao(quem.sessao).is_some() {
         DonoDaTaxa::Chave(quem.chave)
     } else if quem.processo.is_some() {
         match quem.sessao_de_pessoa {
@@ -2450,26 +2451,24 @@ pub fn auditar_bifurcacao(filho: u64) {
     );
 }
 
-/// Zera as janelas de apertos de todas as portas, para a suíte: cada caso
-/// com agentes começa como um agente que acabou de chegar. Em release a
-/// suíte corre mais depressa, e os apertos de casos seguidos caíam na
-/// mesma janela da política — a recusa era de outro caso.
+/// Zera as janelas de apertos de todas as sessões cifradas, para a suíte:
+/// cada caso com agentes começa como um agente que acabou de chegar. Em
+/// release a suíte corre mais depressa, e os apertos de casos seguidos
+/// caíam na mesma janela da política — a recusa era de outro caso.
 #[cfg(feature = "modo-teste")]
 pub fn esquecer_apertos() {
     crate::arch::sem_interrupcoes(|| {
         let mut t = TAXAS.lock();
-        t.janelas = [Janela::NOVA; crate::sessoes::PORTAS];
-        t.apertos_suprimidos = [0; crate::sessoes::PORTAS];
+        t.janelas = [Janela::NOVA; crate::sessoes::CIFRADAS];
+        t.apertos_suprimidos = [0; crate::sessoes::CIFRADAS];
     });
 }
 
-/// Conta um aperto de mão na janela da porta `p`. Falso se passou do
-/// limite da política — e grava o primeiro da sequência.
+/// Conta um aperto de mão na janela da sessão cifrada `p` — uma porta, ou
+/// uma vaga do canal TCP. Falso se passou do limite da política — e grava
+/// o primeiro da sequência. Uma sessão que não é cifrada não faz aperto.
 pub fn permitir_aperto(p: u8) -> bool {
-    let Some(i) = (1..=crate::sessoes::PORTAS as u8)
-        .contains(&p)
-        .then(|| usize::from(p) - 1)
-    else {
+    let Some(i) = crate::sessoes::indice(p) else {
         return false;
     };
     let limite = com_politica(|pol| pol.apertos());

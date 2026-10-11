@@ -2,28 +2,35 @@
 //!
 //! # O que é
 //!
-//! Um servidor JSON-RPC 2.0 rodando dentro do kernel, falando por uma serial
-//! própria — a COM2 no x86, a única PL011 no ARM. Um
-//! objeto JSON por linha entra, um objeto JSON por linha sai. Do lado de fora,
-//! o QEMU liga essa porta a um socket Unix, então o agente conversa com o OS
-//! com um `connect()` comum — sem depurador, sem stub de GDB, sem instrumentar
-//! o binário.
+//! Um servidor JSON-RPC 2.0 rodando dentro do kernel. Um objeto JSON por
+//! linha entra, um objeto JSON por linha sai, por três transportes — ver
+//! [`sessao`]:
 //!
-//! # Por que serial, e não rede
+//! - a **serial** do agente — a COM2 no x86, a única PL011 no ARM —, que o
+//!   QEMU liga a um socket Unix: o agente conversa com o OS com um
+//!   `connect()` comum, sem depurador, sem stub de GDB, sem instrumentar o
+//!   binário;
+//! - as **portas** do `virtio-console`, uma por agente;
+//! - o **canal por TCP**, na porta [`crate::rede::canal::PORTA`], uma vaga
+//!   por conexão.
 //!
-//! Porque funciona *agora*. Um canal sobre TCP exigiria driver de rede, pilha
-//! IP e, para ser honesto sobre segurança, TLS — tudo isso é a fase 9 do
-//! roteiro. A UART
-//! já está de pé no primeiro milissegundo do boot, antes de haver paginação,
-//! heap ou interrupções.
+//! Nas portas e no TCP, a conversa é a sessão cifrada de [`seguro`]: o
+//! aperto do Noise, a chave no registro, o gate a cada pedido.
 //!
-//! E essa precocidade é justamente o que dá valor ao canal: ele existe para
-//! nos ajudar a construir e depurar as camadas que vêm *depois* dele. Quando
-//! a paginação quebrar, o canal do agente ainda vai estar respondendo.
+//! # Por que a serial continua
+//!
+//! A UART já está de pé no primeiro milissegundo do boot, antes de haver
+//! paginação, heap, interrupções ou rede. E essa precocidade é justamente o
+//! que dá valor ao canal: ele existe para nos ajudar a construir e depurar
+//! as camadas que vêm *depois* dele. Quando a paginação quebrar, o canal do
+//! agente ainda vai estar respondendo — pela serial, a única que responde
+//! no modo post-mortem.
 //!
 //! O transporte é um detalhe trocável: o conjunto de comandos em
-//! [`commands::COMANDOS`] não sabe nada sobre serial. Quando houver rede,
-//! expor o mesmo conjunto sobre TCP é trocar este módulo, não os comandos.
+//! [`commands::COMANDOS`] não sabe por onde os bytes vieram. O TCP entrou
+//! assim — mais um [`sessao::Canal`] —, sem um comando, uma permissão ou
+//! uma decisão a mais. E sem TLS por cima: a sessão cifrada já autentica as
+//! duas pontas e cifra a conversa, e é a mesma das portas.
 //!
 //! # Os dois modos de atendimento
 //!
@@ -231,9 +238,9 @@ struct Montador {
     suspenso: Option<Suspenso>,
     /// O texto que chegou atrás do pedido suspenso, no mesmo quadro
     /// decifrado: é dos pedidos seguintes, e volta ao montador depois da
-    /// retomada, na ordem em que veio. Numa porta, um quadro de dados pode
-    /// trazer várias linhas; a serial entrega um byte por vez, e a tarefa
-    /// não lê o próximo enquanto espera.
+    /// retomada, na ordem em que veio. Numa porta e no TCP, um quadro de
+    /// dados pode trazer várias linhas; a serial entrega um byte por vez, e
+    /// a tarefa não lê o próximo enquanto espera.
     adiados: politica::sigiloso::Texto,
 }
 
@@ -430,8 +437,8 @@ impl Montador {
 /// atendimento, e uma tarefa que nunca termina não teria como devolver o
 /// controle ao relatório.
 ///
-/// Uma por canal: a serial, e cada porta do `virtio-console` — ver
-/// [`sessao`].
+/// Uma por canal: a serial, cada porta do `virtio-console` e cada vaga do
+/// canal por TCP — ver [`sessao`].
 #[cfg_attr(feature = "modo-teste", allow(dead_code))]
 pub async fn atender(canal: Canal) {
     crate::log_info!(
@@ -447,27 +454,30 @@ pub async fn atender(canal: Canal) {
     // contador de perdas não existe em tempo de compilação.
     montador.geracao = canal.geracao();
     montador.abrir_quadro();
-    // Numa porta, os bytes passam antes pela sessão cifrada: o montador só
-    // vê o texto que sobreviveu à decifração.
-    let mut porta = match canal {
-        Canal::Porta(p) => Some(seguro::Porta::nova(p)),
+    // Numa porta e no TCP, os bytes passam antes pela sessão cifrada: o
+    // montador só vê o texto que sobreviveu à decifração.
+    let mut cifrada = match canal {
+        Canal::Porta(_) | Canal::Tcp(_) => Some(seguro::Cifrada::nova(canal)),
         Canal::Serial => None,
     };
     loop {
-        let (byte, depois_de_silencio) = canal.proximo_byte().await;
-        let fechou = match porta.as_mut() {
-            // Numa porta o fim de um cliente é a geração da porta, e o texto
-            // decifrado não tem relógio de chegada.
-            Some(porta) => {
+        let chegada = canal.proximo_byte().await;
+        let fechou = match cifrada.as_mut() {
+            // Num canal cifrado o fim de um cliente é a geração da conexão,
+            // e o texto decifrado não tem relógio de chegada.
+            Some(cifrada) => {
                 let mut fechou = false;
-                porta.receber(byte, |b| fechou |= montador.alimentar(b, false));
+                cifrada.receber(chegada.geracao, chegada.byte, |b| {
+                    fechou |= montador.alimentar(b, false)
+                });
                 fechou
             }
-            None => montador.alimentar(byte, depois_de_silencio),
+            None => montador.alimentar(chegada.byte, chegada.depois_de_silencio),
         };
         // Um pedido suspenso: a sessão espera por ele antes de qualquer
         // outro — ver [`crate::rede::espera`]. O que veio atrás dele no
         // mesmo quadro volta ao montador depois, e pode suspender também.
+        let mut retomou = false;
         while let Some(suspenso) = montador.suspenso.take() {
             let adiados = core::mem::take(&mut montador.adiados);
             if retomar(canal, suspenso).await {
@@ -475,9 +485,16 @@ pub async fn atender(canal: Canal) {
                     montador.alimentar(b, false);
                 }
             }
+            retomou = true;
             crate::tarefas::ceder().await;
         }
-        if fechou {
+        if fechou || retomou {
+            // A contrapressão da saída: no TCP, com a saída acima do limiar
+            // — um agente que pede e não lê —, o pedido seguinte espera o
+            // par ler o que já tem. Ver `crate::rede::canal`.
+            if let Canal::Tcp(v) = canal {
+                crate::rede::canal::espaco_na_saida(v).await;
+            }
             // Acabamos de executar um comando, o que pode ter custado um
             // tempo arbitrário. Um cliente que envie várias requisições
             // emendadas manteria esta tarefa rodando sem parar, porque o
@@ -519,7 +536,7 @@ fn reexecutar(
     geracao: u64,
     desfecho: crate::rede::espera::Desfecho,
 ) -> bool {
-    if canal.geracao() != geracao {
+    if !canal.na_conexao(geracao) {
         crate::log_info!(
             "agent",
             "sessao {}: o cliente do pedido suspenso saiu ({:?}); nada a responder",
@@ -613,12 +630,14 @@ impl QuadroDaSerialDeTeste {
 #[cfg(feature = "modo-teste")]
 pub struct SessaoDeTeste {
     montador: Montador,
-    porta: seguro::Porta,
+    cifrada: seguro::Cifrada,
 }
 
 #[cfg(feature = "modo-teste")]
 impl SessaoDeTeste {
-    /// Uma porta do `virtio-console`, de 1 a 4.
+    /// Uma porta do `virtio-console`, de 1 a 4. As vagas do canal TCP a
+    /// suíte atende com a tarefa de produção — [`atender`] —, que ela anda
+    /// à mão.
     pub fn porta(p: u8) -> SessaoDeTeste {
         let canal = Canal::Porta(p);
         let mut montador = Montador::novo(canal);
@@ -626,22 +645,26 @@ impl SessaoDeTeste {
         montador.abrir_quadro();
         SessaoDeTeste {
             montador,
-            porta: seguro::Porta::nova(p),
+            cifrada: seguro::Cifrada::nova(canal),
         }
     }
 
-    /// Consome o que estiver na entrada da porta, respondendo cada quadro
+    /// Consome o que estiver na entrada do canal, respondendo cada quadro
     /// que fechar — até um pedido suspender: aí, como a tarefa, para de
     /// ler, e o resto fica na entrada até [`SessaoDeTeste::retomar`].
     pub fn atender(&mut self) {
-        let Canal::Porta(p) = self.montador.canal else {
-            return;
-        };
-        while self.montador.suspenso.is_none()
-            && let Some(byte) = crate::virtio::console::retirar(p)
-        {
+        let canal = self.montador.canal;
+        while self.montador.suspenso.is_none() {
+            let chegou = match canal {
+                Canal::Porta(p) => crate::virtio::console::retirar(p)
+                    .map(|b| (b, crate::virtio::console::geracao(p))),
+                Canal::Tcp(_) | Canal::Serial => None,
+            };
+            let Some((byte, geracao)) = chegou else {
+                return;
+            };
             let montador = &mut self.montador;
-            self.porta.receber(byte, |b| {
+            self.cifrada.receber(geracao, byte, |b| {
                 montador.alimentar(b, false);
             });
         }
@@ -728,10 +751,10 @@ fn processar(
     // O anexo que chegou antes desta linha é dela, e só dela: tirado agora,
     // reivindicado ou não, e zerado se o pedido não o leva. A serial não
     // tem quadros, nem anexo. Na reexecução de um pedido que suspendeu, o
-    // anexo é o que ele trouxe, guardado: o da porta, se houver, é de outro.
+    // anexo é o que ele trouxe, guardado: o do canal, se houver, é de outro.
     let anexo = match (retomado, canal) {
         (Some(guardado), _) => Ok(guardado),
-        (None, Canal::Porta(p)) => crate::sessoes::tirar_anexo(p),
+        (None, Canal::Porta(_) | Canal::Tcp(_)) => crate::sessoes::tirar_anexo(canal.sessao()),
         (None, Canal::Serial) => Ok(crate::sessoes::AnexoDaPorta::nenhum()),
     };
 
@@ -858,8 +881,9 @@ fn responder_erro(canal: Canal, id: Option<json::Json>, erro: RpcError, detalhe:
 ///
 /// A resposta é montada inteira antes, com o handler rodando com as
 /// interrupções ligadas, e só então vai ao canal: numa porta do
-/// `virtio-console`, cifrada pela sessão da porta e entregue ao driver em
-/// quadros; na serial, escrita no fio de uma vez, com a trava dela.
+/// `virtio-console` ou numa vaga do canal TCP, cifrada pela sessão e
+/// entregue ao transporte em quadros; na serial, escrita no fio de uma vez,
+/// com a trava dela.
 ///
 /// # Por que a serial não escreve enquanto o handler executa
 ///
@@ -897,8 +921,8 @@ fn entregar(canal: Canal, mut texto: politica::sigiloso::Texto) {
         // Sem sessão estabelecida não há a quem: a resposta é descartada.
         // Não acontece por um pedido — um pedido só chega decifrado —, mas
         // acontece quando a sessão cai entre o pedido e a resposta.
-        Canal::Porta(p) => {
-            seguro::enviar(p, texto.como_bytes());
+        Canal::Porta(_) | Canal::Tcp(_) => {
+            seguro::enviar(canal, texto.como_bytes());
         }
     }
 }

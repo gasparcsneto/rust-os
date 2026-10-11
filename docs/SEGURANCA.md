@@ -273,8 +273,10 @@ dois deixam, ou não passa.
 - **Estrutural.** Cada quadro que a pilha manda pertence a uma conexão da
   tabela — a mesma que o gate decidiu —, ou ao DHCP da própria placa; o
   resto não sai. Cada quadro que chega vai a uma porta local de uma
-  conexão do mesmo protocolo (no TCP, com a quádrupla inteira), ou ao DHCP;
-  o resto é descartado antes da pilha — sem RST, sem eco ICMP. O ARP passa.
+  conexão do mesmo protocolo (no TCP, com a quádrupla inteira), ao DHCP,
+  ou — só o SYN — à escuta do canal do agente; o resto é descartado antes
+  da pilha — sem RST, sem eco ICMP. A escuta só responde com o SYN-ACK ou
+  o RST. O ARP passa.
   Contado em `net.rules`, em cada sentido: sem fluxo, de fluxo barrado, de
   protocolo que não passa.
 - **Regras.** `net.block {to, owner?}` barra um destino — para todos, ou só
@@ -372,6 +374,38 @@ outra implementação inteira do protocolo —, que o emulador roda a cada
 conexão a `10.0.2.100:443` (`xtask/src/tls.rs`). A PKI é gerada a cada
 máquina, fora do repositório; a chave da raiz nem chega ao disco.
 
+## O canal do agente por TCP (9.6)
+
+O canal do agente ganhou um transporte: as sessões 5 a 8, uma por conexão
+aceita na porta 7070. A conexão não traz autoridade, e o canal não tem
+política própria: o aperto é o mesmo das portas (o IK do Noise, a chave no
+registro), cada pedido passa pelo gate com o papel da chave, e a taxa, a
+contenção, a revogação e a janela de apertos são as mesmas. O endereço do
+par vai para a auditoria, ao lado da chave — como o que se sabe de por
+onde veio —, e não entra em decisão nenhuma.
+
+- **A chave só vale confirmada.** A primeira mensagem do IK pode ser
+  repetida por quem a capturou; pela rede, a sessão de quem repete
+  seguraria uma vaga, e diria que o dono da chave estava conectado. No
+  TCP, o aperto só termina no primeiro quadro que abre: é só então que ele
+  vai à auditoria como completo, que o agente conta como conectado e que a
+  conexão é dele para o firewall. A sessão que acaba antes — o prazo de dez
+  segundos, um quadro que não abre, a conexão que cai, a revogação — vai à
+  auditoria como um aperto recusado, com a chave alegada e o par.
+- **O firewall alcança o canal.** A conexão aceita é um fluxo da tabela,
+  do agente que confirmou a chave: a regra que barra o par dela, para o
+  agente dela, a derruba e encerra a sessão, gravada como execução do
+  bloqueio em nome de quem pôs a regra. A escuta não protege ninguém.
+- **O NSF observa pela auditoria.** Os apertos recusados pela rede — a
+  chave fora do registro, a revogada, a suspensa, o quadro que não é um
+  aperto, o prazo vencido — são registros `session.open` como os das
+  portas, com o par no detalhe; as regras de credencial os leem como leem
+  os outros. O NSF não pede nada ao gate por quem não se autenticou, e não
+  há um sensor do TCP fora do gate.
+- **A administração é a de sempre.** `admin.challenge` e `admin.execute`
+  pela sessão TCP, com a prova amarrada ao número dela: o administrador
+  recupera o sistema por qualquer canal, e por nenhum sem a prova.
+
 ## As consultas
 
 Todas pelo gate, com a permissão `security.read` (sensível: diz o que os
@@ -452,6 +486,16 @@ contido pelo despertador.
   gate sobre a conexão, como as de qualquer outra; um programa que
   insiste num servidor que não prova o nome aparece como conexões
   curtas e repetidas ao mesmo destino, e não como "certificado recusado".
+- **O canal TCP nomeia o par inteiro.** Uma regra do `net.block` sobre
+  uma conexão do canal nomeia o par com a porta efêmera dele — o alcance
+  do `net.block` é enumerado, sem curinga —, e não barra a conexão
+  seguinte do mesmo endereço. Para tirar um agente da rede, a revogação e
+  a suspensão da credencial valem em qualquer conexão.
+- **Os apertos pela rede gastam a janela da vaga.** A janela de apertos
+  é por sessão, e uma enxurrada de conexões sem chave a esgota: os
+  agentes de verdade esperam a janela, e cada um, o prazo de quem não fez
+  o aperto. O canal limita quanto tempo e quantas vagas um estranho
+  segura, e não que ele tente.
 - **O relógio dos registros é de um segundo.** As janelas e as taxas das
   regras e do perfil contam com essa resolução; a ordem entre a captura e
   a auditoria é a dos números dos registros, que é exata.
@@ -496,3 +540,4 @@ contido pelo despertador.
 | 9.4 | `protocolo::dns`, o resolvedor como programa, a captura e `net.observe`, a bancada determinística de DNS |
 | NSF-4 | exercício: suíte, concorrência, contorno, revogação, proveniência, DNS, firewall, falhas; mutações; matriz; CI; relatório |
 | 9.5 | o TLS como programa: o pacote `tls`, `random.read` e o `net.send` que espera espaço pelo gate, a bancada com o OpenSSL; a sessão interrompida pela política, pelo firewall e pela contenção |
+| 9.6 | o canal do agente por TCP: as vagas, a escuta do firewall, a chave confirmada, a contrapressão; a revogação, a contenção, a regra e o administrador pela rede; o NSF lendo os apertos recusados |

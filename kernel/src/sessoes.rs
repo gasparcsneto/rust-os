@@ -1,5 +1,8 @@
-//! O estado das sessões cifradas das portas de agente: quem está em cada
-//! porta, e as chaves do transporte.
+//! O estado das sessões cifradas do canal do agente: quem está em cada
+//! sessão, e as chaves do transporte. As sessões cifradas são as portas do
+//! `virtio-console` (1 a 4) e as vagas do canal TCP (5 a 8, ver
+//! [`crate::rede::canal`]) — as mesmas tabelas, a mesma vida: o transporte
+//! é o único que muda.
 //!
 //! Só o armazenamento. Quem faz o aperto de mão, decifra e cifra é o canal
 //! do agente, em [`crate::agent::seguro`]; ele mora lá porque é código que
@@ -17,7 +20,11 @@ use sigilo::{TAM_CHAVE, Transporte};
 /// Quantas portas de agente há.
 pub const PORTAS: usize = crate::virtio::console::PORTAS as usize;
 
-/// Quem está numa porta.
+/// Quantas sessões cifradas há: as portas e as vagas do canal TCP. A
+/// sessão `s`, de 1 a `CIFRADAS`, mora em `[s - 1]` de cada tabela.
+pub const CIFRADAS: usize = PORTAS + crate::rede::canal::VAGAS as usize;
+
+/// Quem está numa sessão cifrada: uma porta, ou uma vaga do canal TCP.
 #[derive(Clone)]
 pub struct Identificada {
     /// O nome do agente, do registro.
@@ -26,6 +33,17 @@ pub struct Identificada {
     pub chave: [u8; TAM_CHAVE],
     /// Quando a sessão foi estabelecida, em milissegundos desde o boot.
     pub desde_ms: u64,
+    /// A conexão do transporte em que o aperto aconteceu: a geração da
+    /// porta, ou da vaga do canal TCP. O fim de uma conexão leva só a
+    /// sessão dela — ver [`esquecer_da_conexao`].
+    pub geracao: u64,
+    /// No TCP, o par de quem fez o aperto — o que a auditoria grava.
+    pub par: Option<([u8; 4], u16)>,
+    /// A chave foi confirmada nesta conexão: numa porta, desde o aperto; no
+    /// TCP, só no primeiro quadro de dados que abre — até ele, quem fez o
+    /// aperto pode só ter repetido o de outro, e a sessão não é mostrada
+    /// como de agente nenhum. Ver `agent::seguro`, a confirmação.
+    pub confirmada: bool,
 }
 
 /// O transporte de cada porta estabelecida.
@@ -34,10 +52,11 @@ pub struct Identificada {
 /// resposta **tira** o transporte daqui, cifra fora da trava — uma resposta
 /// grande leva milissegundos para cifrar, e não precisa das interrupções
 /// desligadas — e o devolve.
-static TRANSPORTES: Mutex<[Option<Transporte>; PORTAS]> = Mutex::new([const { None }; PORTAS]);
+static TRANSPORTES: Mutex<[Option<Transporte>; CIFRADAS]> = Mutex::new([const { None }; CIFRADAS]);
 
 /// Quem está em cada porta, para o relatório e para o log.
-static IDENTIDADES: Mutex<[Option<Identificada>; PORTAS]> = Mutex::new([const { None }; PORTAS]);
+static IDENTIDADES: Mutex<[Option<Identificada>; CIFRADAS]> =
+    Mutex::new([const { None }; CIFRADAS]);
 
 /// Apertos recusados: chave fora do registro, quadro inválido, sem entropia.
 static RECUSADOS: AtomicU64 = AtomicU64::new(0);
@@ -45,8 +64,11 @@ static RECUSADOS: AtomicU64 = AtomicU64::new(0);
 /// uma resposta que não saiu.
 static ENCERRADAS: AtomicU64 = AtomicU64::new(0);
 
-fn indice(p: u8) -> Option<usize> {
-    (1..=PORTAS as u8).contains(&p).then(|| usize::from(p) - 1)
+/// Onde a sessão `s` mora nas tabelas, se é uma sessão cifrada.
+pub fn indice(s: u8) -> Option<usize> {
+    (1..=CIFRADAS as u8)
+        .contains(&s)
+        .then(|| usize::from(s) - 1)
 }
 
 /// Guarda uma sessão recém-estabelecida.
@@ -60,6 +82,26 @@ pub fn estabelecer(p: u8, transporte: Transporte, identificada: Identificada) {
     });
     // Um agente a mais na barra, na hora em que ele entra.
     crate::barra::atualizar_indicador();
+}
+
+/// A chave da sessão `p`, na conexão `geracao`, foi confirmada — ver
+/// [`Identificada::confirmada`]. Devolve a identidade, se a sessão ainda é
+/// a dessa conexão e não estava confirmada: quem confirma grava o aperto.
+pub fn confirmar(p: u8, geracao: u64) -> Option<Identificada> {
+    let i = indice(p)?;
+    let confirmada = crate::arch::sem_interrupcoes(|| {
+        let mut identidades = IDENTIDADES.lock();
+        let id = identidades[i]
+            .as_mut()
+            .filter(|id| id.geracao == geracao && !id.confirmada)?;
+        id.confirmada = true;
+        Some(id.clone())
+    });
+    if confirmada.is_some() {
+        // Um agente a mais na barra: agora ele é quem diz ser.
+        crate::barra::atualizar_indicador();
+    }
+    confirmada
 }
 
 /// Tira o transporte da porta `p`, para cifrar ou decifrar fora da trava.
@@ -95,7 +137,7 @@ impl Pendente {
     }
 }
 
-static ANEXOS: Mutex<[Pendente; PORTAS]> = Mutex::new([const { Pendente::novo() }; PORTAS]);
+static ANEXOS: Mutex<[Pendente; CIFRADAS]> = Mutex::new([const { Pendente::novo() }; CIFRADAS]);
 
 /// O anexo de um pedido, tirado da porta: zerado quando sai de cena, seja
 /// entregue ao comando ou recusado.
@@ -167,17 +209,36 @@ pub fn tirar_anexo(p: u8) -> Result<AnexoDaPorta, ()> {
     if estourou { Err(()) } else { Ok(anexo) }
 }
 
-/// Esquece a sessão da porta `p`: a identidade e as chaves. Devolve quem
-/// estava nela.
+/// Esquece a sessão `p`: a identidade e as chaves. Devolve quem estava
+/// nela.
 pub fn esquecer(p: u8) -> Option<Identificada> {
+    esquecer_se(p, |_| true)
+}
+
+/// Esquece a sessão `s` só se ela é da conexão `geracao` do transporte, ou
+/// se ninguém fez o aperto nela: o fim de uma conexão não leva a sessão da
+/// seguinte, que já pode ter feito o aperto na mesma vaga — quem trata o
+/// fim de uma conexão do canal TCP é o coletor, depois dela. Devolve quem
+/// estava na sessão esquecida.
+pub fn esquecer_da_conexao(s: u8, geracao: u64) -> Option<Identificada> {
+    esquecer_se(s, |id| id.geracao == geracao)
+}
+
+fn esquecer_se(p: u8, dela: impl FnOnce(&Identificada) -> bool) -> Option<Identificada> {
     let i = indice(p)?;
+    // A conferência e a retirada na mesma trava: entre uma e outra, outra
+    // sessão não entra no lugar.
+    let (identidade, transporte) = crate::arch::sem_interrupcoes(|| {
+        let mut identidades = IDENTIDADES.lock();
+        if identidades[i].as_ref().is_some_and(|id| !dela(id)) {
+            return None;
+        }
+        Some((identidades[i].take(), TRANSPORTES.lock()[i].take()))
+    })?;
     // O anexo pela metade era da sessão que acabou.
     drop(tirar_anexo(p));
     // O transporte sai da trava e é destruído fora dela; o `Drop` da cifra
     // apaga as chaves.
-    let (identidade, transporte) = crate::arch::sem_interrupcoes(|| {
-        (IDENTIDADES.lock()[i].take(), TRANSPORTES.lock()[i].take())
-    });
     drop(transporte);
     // A sessão acabou: os arrendamentos dela também, na hora.
     if identidade.is_some() {
@@ -199,7 +260,7 @@ pub fn identidade(p: u8) -> Option<Identificada> {
 
 /// As portas cuja sessão foi encerrada por fora — por uma revogação — e
 /// que já receberam a recusa: a porta se dá por encerrada sem mandar outra.
-static AVISADAS: [AtomicBool; PORTAS] = [const { AtomicBool::new(false) }; PORTAS];
+static AVISADAS: [AtomicBool; CIFRADAS] = [const { AtomicBool::new(false) }; CIFRADAS];
 
 /// Marca que a sessão da porta `p` foi encerrada por fora, com a recusa já
 /// enviada.

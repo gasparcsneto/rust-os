@@ -22,9 +22,10 @@
 //!
 //! De quem a abriu, pelo caminho por onde o pedido veio — o [`Dono`]:
 //!
-//! - uma sessão do canal: a porta, a chave que provou o aperto, e a geração
-//!   da porta. Um agente que desconecta perde as conexões dele; o seguinte
-//!   na mesma porta — mesmo com a mesma chave — não as herda;
+//! - uma sessão do canal: a sessão — uma porta, ou uma vaga do canal TCP
+//!   —, a chave que provou o aperto, e a geração da conexão. Um agente que
+//!   desconecta perde as conexões dele; o seguinte na mesma sessão — mesmo
+//!   com a mesma chave — não as herda;
 //! - uma pessoa, pela sessão dela no console;
 //! - um processo, pelo fio dele — e não pela autoridade de quem o lançou:
 //!   o agente que lançou um programa não lê a conexão do programa, nem o
@@ -65,13 +66,11 @@ pub enum Dono {
     Processo(u64),
 }
 
-/// A geração atual de uma sessão do canal.
+/// A geração atual de uma sessão do canal: a conexão de agora do
+/// transporte dela — a serial, uma porta, uma vaga do TCP. Uma sessão que
+/// não é de canal nenhum não tem geração, e nada a reconhece como viva.
 fn geracao(sessao: u8) -> u64 {
-    if sessao == crate::agent::sessao::SERIAL {
-        crate::agent::sessao::Canal::Serial.geracao()
-    } else {
-        crate::agent::sessao::Canal::Porta(sessao).geracao()
-    }
+    crate::agent::sessao::Canal::da_sessao(sessao).map_or(u64::MAX, |c| c.geracao())
 }
 
 impl Dono {

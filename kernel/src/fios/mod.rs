@@ -640,6 +640,10 @@ fn passada_do_coletor() {
     // E as conexões de rede de quem acabou — o processo, a sessão —, como
     // as camadas de um processo morto.
     crate::rede::conexoes::recolher_orfas();
+    // E o que o canal do agente por TCP deixou: a sessão de uma conexão
+    // que acabou, a recusa de um aperto que venceu o prazo. A pilha não
+    // pode esperar um disco, e o coletor pode — ver `rede::canal`.
+    crate::rede::canal::atender_pendencias();
 }
 
 /// Há outro fio que este núcleo poderia rodar agora?

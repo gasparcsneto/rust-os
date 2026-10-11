@@ -42,9 +42,10 @@ pub static COMANDOS: &[Command] = &[
     },
     Command {
         nome: "agent.sessions",
-        resumo: "As sessoes do canal do agente: a serial, e cada porta do console virtio, \
-                 com o nome, se ha um agente conectado, quantas conexoes ja houve e os \
-                 bytes perdidos na entrada e na saida.",
+        resumo: "As sessoes do canal do agente: a serial, cada porta do console virtio e \
+                 cada vaga do canal por TCP, com o nome ou o par, se ha um agente \
+                 conectado, quantas conexoes ja houve e os bytes perdidos na entrada e na \
+                 saida.",
         params: &[],
         acesso: Acesso::Exige(Permissao::AgentRead),
         recurso: None,
@@ -53,7 +54,7 @@ pub static COMANDOS: &[Command] = &[
     },
     Command {
         nome: "agent.list",
-        resumo: "Os agentes conectados agora, para os agentes se verem: a porta, o nome, \
+        resumo: "Os agentes conectados agora, para os agentes se verem: a sessao, o nome, \
                  o papel, ha quanto tempo esta conectado, quantos arrendamentos tem, o \
                  ultimo comando que passou pela decisao e a ultima acao (um comando que \
                  muda o estado), cada um com ha quanto tempo. E quem agiu por ultimo na \
@@ -426,7 +427,7 @@ pub static COMANDOS: &[Command] = &[
                 nome: "attachment",
                 tipo: TipoParam::Inteiro,
                 obrigatorio: false,
-                descricao: "Numa porta de agente: quantos bytes de anexo vieram antes deste pedido. Um processo manda o anexo pela chamada PEDIR_COM_ANEXO.",
+                descricao: "Numa sessao cifrada de agente (uma porta ou o TCP): quantos bytes de anexo vieram antes deste pedido. Um processo manda o anexo pela chamada PEDIR_COM_ANEXO.",
             },
             ParamSpec {
                 nome: "wait",
@@ -1046,7 +1047,7 @@ pub static COMANDOS: &[Command] = &[
                 nome: "attachment",
                 tipo: TipoParam::Inteiro,
                 obrigatorio: false,
-                descricao: "Numa porta de agente: quantos bytes de anexo vieram nos quadros de anexo antes deste pedido. Um processo manda o anexo pela chamada PEDIR_COM_ANEXO, sem este campo.",
+                descricao: "Numa sessao cifrada de agente (uma porta ou o TCP): quantos bytes de anexo vieram nos quadros de anexo antes deste pedido. Um processo manda o anexo pela chamada PEDIR_COM_ANEXO, sem este campo.",
             },
         ],
         acesso: Acesso::Exige(Permissao::FsWrite),
@@ -1080,7 +1081,7 @@ pub static COMANDOS: &[Command] = &[
                 nome: "attachment",
                 tipo: TipoParam::Inteiro,
                 obrigatorio: false,
-                descricao: "Numa porta de agente: quantos bytes de anexo vieram nos quadros de anexo antes deste pedido. Um processo manda o anexo pela chamada PEDIR_COM_ANEXO, sem este campo.",
+                descricao: "Numa sessao cifrada de agente (uma porta ou o TCP): quantos bytes de anexo vieram nos quadros de anexo antes deste pedido. Um processo manda o anexo pela chamada PEDIR_COM_ANEXO, sem este campo.",
             },
         ],
         acesso: Acesso::Exige(Permissao::FsWrite),
@@ -1188,7 +1189,7 @@ pub static COMANDOS: &[Command] = &[
                 nome: "attachment",
                 tipo: TipoParam::Inteiro,
                 obrigatorio: false,
-                descricao: "Numa porta de agente: quantos bytes de anexo vieram nos quadros de anexo antes deste pedido. Um processo manda o anexo pela chamada PEDIR_COM_ANEXO, sem este campo.",
+                descricao: "Numa sessao cifrada de agente (uma porta ou o TCP): quantos bytes de anexo vieram nos quadros de anexo antes deste pedido. Um processo manda o anexo pela chamada PEDIR_COM_ANEXO, sem este campo.",
             },
         ],
         acesso: Acesso::Exige(Permissao::FsWrite),
@@ -1222,7 +1223,7 @@ pub static COMANDOS: &[Command] = &[
                 nome: "attachment",
                 tipo: TipoParam::Inteiro,
                 obrigatorio: false,
-                descricao: "Numa porta de agente: quantos bytes de anexo vieram nos quadros de anexo antes deste pedido. Um processo manda o anexo pela chamada PEDIR_COM_ANEXO, sem este campo.",
+                descricao: "Numa sessao cifrada de agente (uma porta ou o TCP): quantos bytes de anexo vieram nos quadros de anexo antes deste pedido. Um processo manda o anexo pela chamada PEDIR_COM_ANEXO, sem este campo.",
             },
         ],
         acesso: Acesso::Exige(Permissao::FsWrite),
@@ -1578,20 +1579,40 @@ fn agent_session(_params: Json, w: &mut JsonWriter) -> fmt::Result {
         w.field_str("error", "quem pediu nao fala por um canal do agente")?;
         return w.end_object();
     };
-    let canal = if sessao == super::sessao::SERIAL {
-        super::sessao::Canal::Serial
-    } else {
-        super::sessao::Canal::Porta(sessao)
+    let Some(canal) = super::sessao::Canal::da_sessao(sessao) else {
+        w.begin_object()?;
+        w.key("session")?;
+        w.null_value()?;
+        w.field_str("error", "a sessao nao e de um canal do agente")?;
+        return w.end_object();
     };
     w.begin_object()?;
     w.field_u64("session", sessao as u64)?;
     w.field_str("transport", canal.transporte())?;
     escrever_identidade(w, sessao)?;
+    // No TCP, o par da conexão: quem está do outro lado — o que a conexão
+    // diz, e não quem a sessão é. Quem a sessão é, é a chave.
+    if let super::sessao::Canal::Tcp(v) = canal {
+        escrever_par(w, crate::rede::canal::remoto(v))?;
+    }
     w.end_object()
 }
 
-/// Quem está numa sessão: numa porta, o agente que provou a chave; na
-/// serial, ninguém — ela é aberta, o canal de emergência.
+/// O par de uma conexão do canal TCP, como `remote`: `a.b.c.d:porta`, ou
+/// `null` sem conexão.
+fn escrever_par(w: &mut JsonWriter, par: Option<([u8; 4], u16)>) -> fmt::Result {
+    w.key("remote")?;
+    match par {
+        Some(([a, b, c, d], porta)) => w.str_value(&alloc::format!("{a}.{b}.{c}.{d}:{porta}")),
+        None => w.null_value(),
+    }
+}
+
+/// Quem está numa sessão: numa porta ou no TCP, o agente que provou a
+/// chave; na serial, ninguém — ela é aberta, o canal de emergência. O
+/// aperto do TCP cuja chave ainda não foi confirmada não diz agente
+/// nenhum: quem o fez pode só ter repetido o de outro — ver
+/// `agent::seguro`, a confirmação.
 fn escrever_identidade(w: &mut JsonWriter, sessao: u8) -> fmt::Result {
     if sessao == super::sessao::SERIAL {
         w.field_bool("authenticated", false)?;
@@ -1600,6 +1621,10 @@ fn escrever_identidade(w: &mut JsonWriter, sessao: u8) -> fmt::Result {
         return w.field_str("role", &papel);
     }
     match crate::sessoes::identidade(sessao) {
+        Some(id) if !id.confirmada => {
+            w.field_bool("authenticated", false)?;
+            w.field_bool("confirming", true)
+        }
         Some(id) => {
             w.field_bool("authenticated", true)?;
             w.field_str("agent", &id.nome)?;
@@ -1903,6 +1928,29 @@ fn agent_sessions(_params: Json, w: &mut JsonWriter) -> fmt::Result {
         escrever_identidade(w, p)?;
         w.end_object()?;
     }
+    // As vagas do canal por TCP: as mesmas sessões cifradas, numa conexão
+    // que o kernel aceita na porta do canal — ver `crate::rede::canal`.
+    // Sem a pilha IP no ar, não há vaga.
+    if crate::rede::pilha::resumo().is_some() {
+        use crate::rede::canal;
+        let escutando = crate::rede::pilha::vagas_escutando();
+        for v in 1..=canal::VAGAS {
+            let s = canal::sessao(v);
+            w.begin_object()?;
+            w.field_u64("session", u64::from(s))?;
+            w.field_str("transport", "tcp")?;
+            w.field_u64("port", u64::from(canal::PORTA))?;
+            w.field_bool("connected", canal::aberta(v))?;
+            w.field_bool("listening", escutando[usize::from(v) - 1])?;
+            w.field_u64("connections", canal::geracao(v))?;
+            w.field_u64("lost_in", 0)?;
+            w.field_u64("lost_out", canal::perdidos_na_saida(v))?;
+            w.field_u64("queued_out", canal::na_saida(v) as u64)?;
+            escrever_par(w, canal::remoto(v))?;
+            escrever_identidade(w, s)?;
+            w.end_object()?;
+        }
+    }
     w.end_array()?;
     let (recusados, encerradas) = crate::sessoes::contadores();
     w.field_u64("handshakes_refused", recusados)?;
@@ -1910,6 +1958,9 @@ fn agent_sessions(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     let (recebidos, enviados) = console::trafego();
     w.field_u64("console_bytes_in", recebidos)?;
     w.field_u64("console_bytes_out", enviados)?;
+    let (aceitas, expiradas) = crate::rede::canal::contadores();
+    w.field_u64("tcp_connections_accepted", aceitas)?;
+    w.field_u64("tcp_handshakes_expired", expiradas)?;
     w.end_object()
 }
 
@@ -5836,6 +5887,7 @@ fn net_block(params: Json, w: &mut JsonWriter) -> fmt::Result {
             regra,
             nova,
             derrubadas,
+            sessoes_derrubadas,
         }) => {
             // Cada conexão que a regra derrubou, em nome de quem a pôs.
             for (id, d) in &derrubadas {
@@ -5843,6 +5895,15 @@ fn net_block(params: Json, w: &mut JsonWriter) -> fmt::Result {
                     &d.texto(),
                     politica::Codigo::Allow,
                     &alloc::format!("conexao {id} derrubada pelo bloqueio"),
+                );
+            }
+            // E cada sessão do canal do agente por TCP: a conexão dela é
+            // um fluxo como os outros.
+            for (sessao, d) in &sessoes_derrubadas {
+                crate::autorizacao::auditar_execucao(
+                    &d.texto(),
+                    politica::Codigo::Allow,
+                    &alloc::format!("sessao {sessao} do canal derrubada pelo bloqueio"),
                 );
             }
             if nova {
@@ -5856,7 +5917,16 @@ fn net_block(params: Json, w: &mut JsonWriter) -> fmt::Result {
             w.field_bool("new", nova)?;
             w.field_str("to", &destino.texto())?;
             w.field_str("owner", &escopo.texto())?;
-            w.field_u64("dropped", derrubadas.len() as u64)?;
+            w.field_u64(
+                "dropped",
+                (derrubadas.len() + sessoes_derrubadas.len()) as u64,
+            )?;
+            w.key("sessions_dropped")?;
+            w.begin_array()?;
+            for (sessao, _) in &sessoes_derrubadas {
+                w.u64_value(u64::from(*sessao))?;
+            }
+            w.end_array()?;
         }
         Err(motivo) => w.field_str("error", motivo)?,
     }

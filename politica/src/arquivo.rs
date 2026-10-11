@@ -48,7 +48,8 @@
 //!   2 até N, e N até [`MAIOR_GRUPO`]; só para as operações de
 //!   [`OPERACOES_DE_QUORUM`]. Só a imagem a escreve: um `policy.write` que
 //!   baixasse o M seria uma credencial só desfazendo o quórum.
-//! - `apertos <quantos> <janela em ms>`: apertos de mão por porta.
+//! - `apertos <quantos> <janela em ms>`: apertos de mão por sessão
+//!   cifrada — uma porta, ou uma vaga do canal TCP.
 //! - `serial <papel>`: o papel da sessão 0. Obrigatória.
 //! - `local <papel>`: o papel da autoridade local — os processos do
 //!   sistema. Obrigatória. A pessoa num console não é a autoridade local:
@@ -154,7 +155,8 @@ pub struct Quorum {
     pub n: u8,
 }
 
-/// O limite de apertos de mão por porta.
+/// O limite de apertos de mão por sessão cifrada: uma porta, ou uma vaga
+/// do canal TCP.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Apertos {
     pub quantos: u32,
@@ -499,7 +501,7 @@ impl Politica {
         &self.local
     }
 
-    /// O limite de apertos por porta.
+    /// O limite de apertos por sessão cifrada.
     pub fn apertos(&self) -> Apertos {
         self.apertos
     }
