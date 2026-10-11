@@ -2613,6 +2613,13 @@ produção, `agent::atender`, andada à mão pela suíte.
   recuar até um minuto. A janela de cinco segundos começa agora quando o
   NSF alcança a cabeça da auditoria — de 1 a 1,6 s depois, nas fumaças
   locais —, e o que se confere continua: alcançada a cabeça, ela para.
+  E a falha passou a dizer quem escreveu na janela, o que mostrou a
+  segunda causa na rodada seguinte, só no x86: um `lease.expire` da
+  serial. A etapa da rede limpava a linha do console com um `set_value`
+  — uma edição, que arrenda a linha por sessenta segundos — e não a
+  soltava; o vencimento, pelo relógio, caía onde caísse, e com a perna
+  TCP passou a cair na janela do tecido. A etapa solta agora a linha que
+  editou, e nenhuma deixa um prazo correndo para as seguintes.
 
 ### As mutações da rede
 

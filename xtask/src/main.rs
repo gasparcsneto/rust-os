@@ -10160,7 +10160,15 @@ fn sob_a_rede(
             acordado.as_millis()
         ));
     }
+    // A linha volta vazia, e o arrendamento que as edições da serial
+    // tomaram é solto: a etapa não deixa um prazo correndo para as
+    // seguintes — vencido sessenta segundos depois, ele é um registro da
+    // auditoria no meio de outra etapa, e caía na janela do tecido quieto.
     let _ = serial.pedir("ui.act", r#"{"id":3,"action":"set_value","value":""}"#)?;
+    let r = serial.pedir("ui.release", r#"{"id":3}"#)?;
+    if !r.contains(r#""ok":true"#) {
+        return Err(format!("rede: a linha do console nao foi solta\n  {r}"));
+    }
     println!(
         "  [rede] ok  o console esperou: o confirm voltou em {} ms, a linha no prazo em {} ms, pelo eco em {} ms",
         confirmado.as_millis(),
