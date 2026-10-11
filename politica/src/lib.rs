@@ -70,16 +70,19 @@ pub use permissao::Permissao;
 ///   do administrador, e o do administrador não muda em tempo de execução.
 ///   O `fs.write` dele é o do operador, `/armazem/compartilhado`: o teto
 ///   tem de conter o que o operador recebe, para o operador ser delegável.
-/// - `net.connect`, nos dois, alcança os quatro destinos da bancada, sem
+/// - `net.connect`, nos dois, alcança os seis destinos da bancada, sem
 ///   porta aberta no hospedeiro: o eco TCP, em `10.0.2.100:7` (um
 ///   `guestfwd` que roda um `cat` a cada conexão), o eco TLS, em
 ///   `10.0.2.100:443` (um `guestfwd` que roda, a cada conexão, o servidor
 ///   TLS da bancada — o OpenSSL, pelo Python), o TFTP do emulador, em
-///   `10.0.2.2:69` (UDP), e o DNS do emulador, em `10.0.2.3:53` (UDP).
-///   Enumerados, como todo destino: a imagem de desenvolvimento não disca
-///   nada que não esteja escrito, nem o sistema. O nome que o servidor TLS
-///   apresenta não é recurso: o eco TLS serve vários nomes no mesmo
-///   destino, e o gate decide o destino.
+///   `10.0.2.2:69` (UDP), o DNS do emulador, em `10.0.2.3:53` (UDP), e o
+///   servidor HTTP da bancada, claro em `10.0.2.100:80` e atrás do TLS em
+///   `10.0.2.100:8443`. Enumerados, como todo destino: a imagem de
+///   desenvolvimento não disca nada que não esteja escrito, nem o sistema.
+///   O nome que o servidor TLS apresenta não é recurso: o eco TLS serve
+///   vários nomes no mesmo destino, e o gate decide o destino. Do HTTP,
+///   também não: o método, o caminho, o `Host` e o status são do
+///   protocolo, e o gate decide o destino.
 /// - `random.read` — os bytes do gerador do kernel — no `sistema`, no
 ///   `administrador` e no `operador`, que conecta; não no `observador`, que
 ///   não conecta a nada.
@@ -108,9 +111,9 @@ macro_rules! papeis_de_sistema {
 papel sistema agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.raw_read keyboard.read debug.trigger terminal.attach audit.read policy.read message.send message.read security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read
 recurso sistema fs.read /
 recurso sistema fs.write /armazem
-recurso sistema net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53
+recurso sistema net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53 tcp:10.0.2.100:80 tcp:10.0.2.100:8443
 recurso sistema net.observe udp:10.0.2.3:53
-recurso sistema net.block tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53
+recurso sistema net.block tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53 tcp:10.0.2.100:80 tcp:10.0.2.100:8443
 armazem sistema 268435456 65536
 recurso sistema process.run /
 recurso sistema message.send papel:observador papel:operador papel:sistema papel:administrador
@@ -123,9 +126,9 @@ processos sistema 32
 papel administrador agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read
 recurso administrador fs.read /dados /bin /programas /armazem/compartilhado
 recurso administrador fs.write /armazem/compartilhado
-recurso administrador net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53
+recurso administrador net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53 tcp:10.0.2.100:80 tcp:10.0.2.100:8443
 recurso administrador net.observe udp:10.0.2.3:53
-recurso administrador net.block tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53
+recurso administrador net.block tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53 tcp:10.0.2.100:80 tcp:10.0.2.100:8443
 armazem administrador 67108864 16384
 recurso administrador process.run /bin /programas
 recurso administrador message.send papel:operador papel:sistema papel:administrador
@@ -139,7 +142,7 @@ quorum admin.revoke 2 3
 
 papel seguranca audit.read net.observe net.block process.isolate
 recurso seguranca net.observe udp:10.0.2.3:53
-recurso seguranca net.block tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53
+recurso seguranca net.block tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53 tcp:10.0.2.100:80 tcp:10.0.2.100:8443
 recurso seguranca process.isolate papel:observador papel:operador
 taxa seguranca 10 20
 servico nsf seguranca
@@ -172,8 +175,10 @@ pub const PADRAO: &str = concat!(
 # `tcp:<ipv4>:<porta>` ou `udp:<ipv4>:<porta>`, os dois enumerados. Nao ha
 # curinga. Os unicos destinos desta imagem sao os da bancada: o eco TCP em
 # 10.0.2.100:7, o eco TLS em 10.0.2.100:443, o TFTP do emulador, UDP, em
-# 10.0.2.2:69, e o DNS do emulador, UDP, em 10.0.2.3:53. O nome de um
-# servidor TLS nao e recurso: o que se enumera e o destino. O random.read
+# 10.0.2.2:69, o DNS do emulador, UDP, em 10.0.2.3:53, e o HTTP da bancada
+# em 10.0.2.100:80 e, atras do TLS, em 10.0.2.100:8443. O nome de um
+# servidor TLS nao e recurso, nem o caminho, o metodo ou o Host de um
+# pedido HTTP: o que se enumera e o destino. O random.read
 # (bytes do gerador do kernel, para a chave efemera do TLS) e de quem
 # conecta. So o sistema e o proprio administrador
 # alcancam o administrador: nenhum policy.write da esse alcance a outro
@@ -187,7 +192,7 @@ processos observador 2
 papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read
 recurso operador fs.read /dados /bin /programas /armazem/compartilhado
 recurso operador fs.write /armazem/compartilhado
-recurso operador net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53
+recurso operador net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53 tcp:10.0.2.100:80 tcp:10.0.2.100:8443
 armazem operador 16777216 4096
 recurso operador process.run /bin /programas
 recurso operador message.send papel:operador papel:sistema
@@ -329,6 +334,8 @@ mod testes {
                 "tcp:10.0.2.100:443",
                 "udp:10.0.2.2:69",
                 "udp:10.0.2.3:53",
+                "tcp:10.0.2.100:80",
+                "tcp:10.0.2.100:8443",
             ] {
                 assert_eq!(
                     d(papel, NetConnect, Some(dentro)),
@@ -340,6 +347,9 @@ mod testes {
             // alcançado como TCP, nem o eco TCP como UDP.
             for fora in [
                 "tcp:10.0.2.100:8",
+                "tcp:10.0.2.100:81",
+                "tcp:10.0.2.100:8444",
+                "udp:10.0.2.100:80",
                 "tcp:10.0.2.101:7",
                 "tcp:10.0.2.2:7",
                 "tcp:010.0.2.100:7",
@@ -400,6 +410,8 @@ mod testes {
                         "tcp:10.0.2.100:443",
                         "udp:10.0.2.2:69",
                         "udp:10.0.2.3:53",
+                        "tcp:10.0.2.100:80",
+                        "tcp:10.0.2.100:8443",
                     ]
                 };
                 assert_eq!(
@@ -739,6 +751,8 @@ mod testes {
                 "tcp:10.0.2.100:443",
                 "udp:10.0.2.2:69",
                 "udp:10.0.2.3:53",
+                "tcp:10.0.2.100:80",
+                "tcp:10.0.2.100:8443",
             ] {
                 assert_eq!(d(NetBlock, Some(dentro)), Codigo::Allow, "{dentro}");
             }

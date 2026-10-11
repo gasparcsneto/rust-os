@@ -132,7 +132,7 @@ use core::panic::PanicInfo;
 /// Completa, e não "em andamento": o trabalho às vezes adianta uma fase — a
 /// pilha gráfica da fase 10 começou antes da 6 —, e um número que dissesse
 /// "10" prometeria vários núcleos que o kernel não tem.
-pub const FASE: &str = "11";
+pub const FASE: &str = "12";
 
 /// Para o boot quando falta uma base sobre a qual tudo o que vem depois se
 /// apoia, e continua respondendo pelo caminho que não depende dela.

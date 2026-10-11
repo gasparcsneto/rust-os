@@ -48,6 +48,11 @@ use rcgen::{
 /// O script do servidor, no repositório.
 pub(crate) const SERVIDOR: &str = "xtask/bancada/tls.py";
 
+/// O script do servidor HTTP da bancada, no repositório: o claro e o
+/// cifrado — este com os mesmos certificados do eco TLS. Ver
+/// [`guestfwd_http`].
+pub(crate) const SERVIDOR_HTTP: &str = "xtask/bancada/http.py";
+
 /// Onde a âncora da bancada mora na imagem — o mesmo caminho que o programa
 /// `cifrado` lê.
 pub(crate) const ANCORA_NA_IMAGEM: &str = "dados/tls/bancada.pem";
@@ -182,6 +187,32 @@ pub(crate) fn guestfwd() -> Result<String, String> {
     }
     Ok(format!(
         "guestfwd=tcp:10.0.2.100:443-cmd:python3 {script} {dir}"
+    ))
+}
+
+/// Os `guestfwd` do servidor HTTP da bancada: `10.0.2.100:80`, o HTTP
+/// claro, e `10.0.2.100:8443`, o mesmo servidor atrás do TLS — com os
+/// certificados e a escolha pelo nome do eco TLS. Como ele, um processo do
+/// script a cada conexão, sem porta aberta no hospedeiro.
+///
+/// Dois destinos, e não um com dois nomes: o esquema é parte do que o
+/// programa pede, e o destino é o que o gate decide — cada um enumerado na
+/// política. O caminho, o método, o `Host` e o status são do protocolo, e
+/// não aparecem para o gate.
+pub(crate) fn guestfwd_http() -> Result<String, String> {
+    let dir = preparar()?;
+    let script = super::raiz_do_projeto().join(SERVIDOR_HTTP);
+    let (dir, script) = (dir.display().to_string(), script.display().to_string());
+    for caminho in [&dir, &script] {
+        if caminho.contains([',', ' ']) {
+            return Err(format!(
+                "o caminho da bancada HTTP não cabe na opção do emulador: {caminho}"
+            ));
+        }
+    }
+    Ok(format!(
+        "guestfwd=tcp:10.0.2.100:80-cmd:python3 {script} {dir},\
+         guestfwd=tcp:10.0.2.100:8443-cmd:python3 {script} {dir} tls"
     ))
 }
 

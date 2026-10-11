@@ -30394,6 +30394,42 @@ static CASOS: &[Caso] = &[
         f: tls_tres_sessoes_ao_mesmo_tempo,
     },
     Caso {
+        nome: "http: a pagina pelo gate",
+        f: http_a_pagina_pelo_gate,
+    },
+    Caso {
+        nome: "http: o nome pelo dns e o destino pelo gate",
+        f: http_o_nome_pelo_dns_e_o_destino_pelo_gate,
+    },
+    Caso {
+        nome: "http: a conexao mantida e decidida a cada pedido",
+        f: http_a_conexao_mantida_e_decidida_a_cada_pedido,
+    },
+    Caso {
+        nome: "http: o firewall corta a conexao com o codigo dele",
+        f: http_o_firewall_corta_a_conexao_com_o_codigo_dele,
+    },
+    Caso {
+        nome: "http: a revogacao no meio do pedido",
+        f: http_a_revogacao_no_meio_do_pedido,
+    },
+    Caso {
+        nome: "http: a contencao no meio do pedido",
+        f: http_a_contencao_no_meio_do_pedido,
+    },
+    Caso {
+        nome: "http: o fim da sessao no meio do pedido",
+        f: http_o_fim_da_sessao_no_meio_do_pedido,
+    },
+    Caso {
+        nome: "http: o processo que acaba solta as conexoes",
+        f: http_o_processo_que_acaba_solta_as_conexoes,
+    },
+    Caso {
+        nome: "http: varias visitas ao mesmo tempo",
+        f: http_varias_visitas_ao_mesmo_tempo,
+    },
+    Caso {
         nome: "canal tcp: o aperto pela rede",
         f: canal_tcp_o_aperto_pela_rede,
     },
@@ -34658,6 +34694,844 @@ fn tls_tres_sessoes_ao_mesmo_tempo() -> Resultado {
         }
         Ok(())
     })();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+// ---------------------------------------------------------------------------
+// O HTTP — README, "O HTTP", e docs/SEGURANCA.md
+// ---------------------------------------------------------------------------
+
+/// O servidor HTTP da bancada, claro.
+const HTTP_CLARO: &str = "tcp:10.0.2.100:80";
+
+/// O mesmo servidor, atrás do TLS.
+const HTTP_CIFRADO: &str = "tcp:10.0.2.100:8443";
+
+/// Quanto um programa de HTTP tem para dizer cada passo: o do TLS, que é o
+/// mais caro — o aperto é aritmética de curva emulada.
+const TETO_DO_HTTP: u64 = TETO_DO_TLS;
+
+/// Os passos do `buscador` — o programa tem as mesmas constantes.
+const BUSCA_TROCA: i64 = 1;
+const BUSCA_NOVA: i64 = 2;
+const BUSCA_LENTA: i64 = 3;
+const BUSCA_CIFRADA: i64 = 4;
+const BUSCA_CIFRADA_LENTA: i64 = 5;
+const BUSCA_MUDO: i64 = 6;
+const BUSCA_SAIR_SEM_FECHAR: i64 = 9;
+
+/// O `buscador` em execução: o fio dele, e o caminho para ditar os passos.
+struct Buscador {
+    fio: u64,
+}
+
+impl Buscador {
+    /// Lança o buscador com `autoridade` e espera a conversa dele chegar ao
+    /// meio: o nome pelo DNS da bancada, o destino pelo gate, o primeiro
+    /// pedido respondido.
+    fn lancar(autoridade: crate::autorizacao::Autoridade) -> Result<Buscador, &'static str> {
+        let programa = alloc::format!("{}/buscador", crate::usuario::DIRETORIO_DOS_COMPILADOS);
+        let desde = crate::log::total_emitidos();
+        let fio = crate::usuario::lancar_como(Some(&programa), autoridade)?;
+        esperar_ate(
+            || linhas_do_programa(desde, "buscador: no meio") == 1,
+            TETO_DO_HTTP,
+        )
+        .map_err(|_| "o buscador nao chegou ao meio da conversa")?;
+        Ok(Buscador { fio })
+    }
+
+    /// Pede o passo `a`, com `b`, sem esperar o que ele diz.
+    fn pedir(&self, a: i64, b: i64) -> Resultado {
+        use protocolo::usuario::evento::{Evento, tipo};
+        crate::eventos::publicar(
+            "teste-buscador",
+            Evento {
+                tipo: tipo::ACAO,
+                a,
+                b,
+                ..Default::default()
+            },
+        )
+        .map_err(|_| "o canal do buscador nao recebeu o passo")
+    }
+
+    /// Espera o buscador dizer `linha`, contada desde o registro `desde`
+    /// do log: o anel anda, e uma conta desde o começo perderia as linhas
+    /// que saíram dele.
+    fn dizer(&self, desde: u64, linha: &str) -> Resultado {
+        esperar_ate(|| linhas_do_programa(desde, linha) > 0, TETO_DO_HTTP).map_err(|_| {
+            crate::log_error!("teste", "o buscador nao disse `{}`", linha);
+            "o buscador nao disse o que devia depois do passo"
+        })
+    }
+
+    /// O passo inteiro: pede, e espera a linha.
+    fn passo(&self, a: i64, b: i64, linha: &str) -> Resultado {
+        let desde = crate::log::total_emitidos();
+        self.pedir(a, b)?;
+        self.dizer(desde, linha)
+    }
+
+    /// Pede o fim, e espera o programa sair com o código dele.
+    fn encerrar(self) -> Resultado {
+        use protocolo::usuario::evento::{Evento, tipo};
+        let desde = crate::log::total_emitidos();
+        let _ = crate::eventos::publicar(
+            "teste-buscador",
+            Evento {
+                tipo: tipo::ENCERRAR,
+                ..Default::default()
+            },
+        );
+        esperar_ate(
+            || linhas_do_programa(desde, "processo encerrou com codigo 89") == 1,
+            TETO_DO_HTTP,
+        )
+        .map_err(|_| "o buscador nao saiu quando pedido")
+    }
+}
+
+/// Os registros do processo `fio` com o método `metodo` e o recurso
+/// `recurso` — todos, se `recurso` é vazio: o número, o código e o titular.
+fn decisoes_do_processo(
+    fio: u64,
+    metodo: &str,
+    recurso: &str,
+) -> alloc::vec::Vec<(u64, politica::Codigo, politica::auditoria::Titular)> {
+    let do_processo = alloc::format!("pelo processo {fio} (");
+    crate::autorizacao::com_auditoria(|c| {
+        c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+            .filter(|r| {
+                r.evento.metodo == metodo
+                    && (recurso.is_empty() || r.evento.recurso == recurso)
+                    && r.evento.detalhe.starts_with(&do_processo)
+            })
+            .map(|r| (r.seq, r.evento.codigo, r.evento.titular))
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// Roda `f` com o DNS da bancada respondendo `bancada.duke` com o servidor
+/// HTTP, e com a política que põe o servidor de DNS no alcance do operador
+/// e do NSF. Depois, devolve o DNS, as regras do firewall e as pessoas
+/// como estavam — também quando `f` falha.
+fn com_a_bancada_http(f: impl FnOnce() -> Resultado) -> Resultado {
+    use crate::rede::bancada_dns::{self, Modo};
+    crate::pessoas::esquecer_registradas();
+    bancada_dns::por_de_teste(&[("bancada.duke", &[[10, 0, 2, 100]])], Modo::Normal);
+    let resultado = politica_com_a_bancada_de_dns().and_then(|p| com_a_politica(p, f));
+    bancada_dns::por_de_teste(&[], Modo::Normal);
+    crate::rede::pilha::esquecer_regras_de_teste();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// O HTTP de verdade, de dentro de um processo de uma pessoa operadora: o
+/// programa `pagina` confere de dentro cada página, cada falha e a família
+/// dela — ver `programas/src/bin/pagina.rs` —, e aqui se confere o outro
+/// lado, o que o kernel viu:
+///
+/// - só destinos. Cada conexão foi um `net.connect` decidido pelo gate em
+///   nome da pessoa, pelo processo: dezenove ao servidor claro — uma por
+///   página, e uma só para os três pedidos mantidos —, três ao cifrado — o
+///   aperto que fecha, o nome que o TLS recusa no mesmo destino, e a
+///   medida —, e a porta ao lado, `DENY_RESOURCE`, sem nenhum envio
+///   depois;
+/// - nada do HTTP: nenhum registro do processo tem o caminho, o método, o
+///   `Host`, um cabeçalho ou o corpo — o gate decide o destino, e o
+///   protocolo é do programa. O firewall não entrou em nada;
+/// - uma semente e uma leitura do relógio para cada conexão cifrada, e a
+///   âncora lida uma vez, pelo gate.
+///
+/// A taxa do operador sobe para o caso: cada `net.recv` traz no máximo um
+/// buffer da conexão, e as páginas grandes da medida são centenas de
+/// decisões em segundos — com a taxa de todo dia, a recusa `RATE_LIMIT`
+/// viria no meio delas, como deve.
+fn http_a_pagina_pelo_gate() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    use politica::Codigo;
+    use politica::auditoria::Titular;
+    crate::pessoas::esquecer_registradas();
+    let mais_taxa = politica_trocada(&[("taxa operador 50 100", "taxa operador 400 800")])?;
+    let resultado = com_a_politica(mais_taxa, || {
+        let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(73), "http-op", "operador");
+        let fio = rodar_programa_ate(
+            "pagina",
+            Some(Autoridade::Pessoa { sessao }),
+            88,
+            2 * TETO_DO_HTTP,
+        )
+        .map_err(|_| "o programa pagina nao conferiu o HTTP da bancada")?;
+        let da_pessoa = |v: &[(u64, Codigo, Titular)], codigo: Codigo| {
+            v.iter()
+                .all(|(_, c, t)| *c == codigo && *t == Titular::Pessoa)
+        };
+        let claras = decisoes_do_processo(fio, "net.connect", HTTP_CLARO);
+        let cifradas = decisoes_do_processo(fio, "net.connect", HTTP_CIFRADO);
+        let fora = decisoes_do_processo(fio, "net.connect", "tcp:10.0.2.100:81");
+        if claras.len() != 19
+            || cifradas.len() != 3
+            || fora.len() != 1
+            || !da_pessoa(&claras, Codigo::Allow)
+            || !da_pessoa(&cifradas, Codigo::Allow)
+            || !da_pessoa(&fora, Codigo::DenyResource)
+        {
+            crate::log_error!("teste", "{:?} / {:?} / {:?}", claras, cifradas, fora);
+            return Err("cada conexao da pagina nao foi uma decisao do gate em nome da pessoa");
+        }
+        if !decisoes_do_processo(fio, "net.send", "tcp:10.0.2.100:81").is_empty() {
+            return Err("algo foi mandado para o destino recusado");
+        }
+        for metodo in ["net.send", "net.recv"] {
+            let v = decisoes_do_processo(fio, metodo, HTTP_CLARO);
+            if v.len() < 19 || !da_pessoa(&v, Codigo::Allow) {
+                crate::log_error!("teste", "{}: {:?}", metodo, v);
+                return Err("os envios e as leituras do HTTP nao foram decididos um a um");
+            }
+        }
+        for metodo in ["random.read", "system.info"] {
+            let v = decisoes_do_processo(fio, metodo, "");
+            if v.len() != 3 || !da_pessoa(&v, Codigo::Allow) {
+                crate::log_error!("teste", "{}: {:?}", metodo, v);
+                return Err("cada conexao cifrada nao pediu a semente e o relogio ao gate");
+            }
+        }
+        if decisoes_do_processo(fio, "fs.read", "/dados/tls/bancada.pem").len() != 1 {
+            return Err("a ancora nao foi lida uma vez pelo gate");
+        }
+        // Nada do protocolo no que o kernel gravou do processo.
+        let do_processo = alloc::format!("pelo processo {fio} (");
+        let vazou = crate::autorizacao::com_auditoria(|c| {
+            c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+                .filter(|r| r.evento.detalhe.starts_with(&do_processo))
+                .any(|r| {
+                    let e = alloc::format!("{:?}", r.evento);
+                    [
+                        "/ola",
+                        "/conta",
+                        "/eco",
+                        "GET ",
+                        "POST ",
+                        "HTTP/1.1",
+                        "Host",
+                        "ola, duke",
+                        "bancada.duke",
+                        "bloqueado pelo firewall",
+                    ]
+                    .iter()
+                    .any(|t| e.contains(t))
+                })
+        })
+        .unwrap_or(true);
+        if vazou {
+            return Err("um registro do processo tem o protocolo HTTP, ou o firewall");
+        }
+        Ok(())
+    });
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// A cadeia inteira, DNS → TCP → TLS → HTTP, e o que cada elo **não** faz:
+///
+/// - o `buscador`, de uma pessoa operadora, resolve `bancada.duke` pelo DNS
+///   da bancada — a associação, decidida pelo gate —, conecta ao endereço
+///   — decidido pelo gate como se fosse digitado —, prova o nome pelo TLS
+///   e pede a página. O NSF observa tudo pelo gate e liga a conexão ao
+///   nome que a precedeu, sem pedir nada: o uso normal não é incidente;
+/// - o DNS não autoriza: o mesmo nome, respondido com um endereço fora do
+///   alcance, leva a `DENY_RESOURCE` — a recusa do gate, a mesma do número
+///   digitado;
+/// - as falhas do DNS são do DNS: o nome que não existe e o servidor mudo
+///   não se confundem com a recusa nem com a rede;
+/// - com o DNS de volta, a conexão nova conversa: nada ficou guardado.
+fn http_o_nome_pelo_dns_e_o_destino_pelo_gate() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    use crate::rede::bancada_dns::{self, Modo};
+    use politica::Codigo;
+    com_a_bancada_http(|| {
+        com_o_nsf(|| {
+            let sessao =
+                crate::pessoas::sessao_de_teste(Console::Terminal(74), "http-dns", "operador");
+            let b = Buscador::lancar(Autoridade::Pessoa { sessao })?;
+            let fio = b.fio;
+            let r = (|| -> Resultado {
+                b.passo(BUSCA_CIFRADA, 0, "buscador: cifrada: 200 ola, duke?")?;
+                let associacoes = decisoes_do_processo(fio, "net.connect", SERVIDOR_DNS);
+                let claras = decisoes_do_processo(fio, "net.connect", HTTP_CLARO);
+                let cifradas = decisoes_do_processo(fio, "net.connect", HTTP_CIFRADO);
+                if associacoes.len() != 2
+                    || claras.len() != 1
+                    || cifradas.len() != 1
+                    || associacoes
+                        .iter()
+                        .chain(&claras)
+                        .chain(&cifradas)
+                        .any(|(_, c, _)| *c != Codigo::Allow)
+                {
+                    crate::log_error!("teste", "{:?} / {:?} / {:?}", associacoes, claras, cifradas);
+                    return Err("o DNS e as duas conexoes nao foram decididos pelo gate");
+                }
+                // O NSF lê a cadeia pelo gate e liga a conexão cifrada ao
+                // nome — sem pedir nada.
+                let v = crate::seguranca::passo();
+                let w = crate::seguranca::passo();
+                if v.pedidos + w.pedidos != 0 || !crate::rede::pilha::regras().is_empty() {
+                    crate::log_error!("teste", "{:?} {:?}", v, w);
+                    return Err("o uso normal do HTTP levou o NSF a pedir uma contencao");
+                }
+                let (cifrada, _, _) = cifradas[0];
+                let r = consulta_de_seguranca(
+                    "security.explain",
+                    &alloc::format!(r#"{{"seq":{cifrada}}}"#),
+                );
+                if !r.contains(r#""name":"bancada.duke""#)
+                    || !r.contains(r#""address_decided_by_gate":true"#)
+                    || !r.contains(r#""gate_code":"ALLOW""#)
+                {
+                    crate::log_error!("teste", "{}", r);
+                    return Err("a explicacao da conexao cifrada nao diz o nome nem a decisao");
+                }
+                // O DNS não autoriza: o endereço fora do alcance é recusado.
+                bancada_dns::por_de_teste(&[("bancada.duke", &[[10, 0, 2, 99]])], Modo::Normal);
+                b.passo(BUSCA_NOVA, 0, "buscador: nova: denied DENY_RESOURCE")?;
+                let fora = decisoes_do_processo(fio, "net.connect", "tcp:10.0.2.99:80");
+                if fora.len() != 1 || fora[0].1 != Codigo::DenyResource {
+                    crate::log_error!("teste", "{:?}", fora);
+                    return Err("o endereco que o DNS deu nao foi decidido pelo gate");
+                }
+                // As falhas do DNS, cada uma com o seu código.
+                bancada_dns::por_de_teste(&[], Modo::Normal);
+                b.passo(BUSCA_NOVA, 0, "buscador: nova: dns DNS_NAME_NOT_FOUND")?;
+                bancada_dns::por_de_teste(&[("bancada.duke", &[[10, 0, 2, 100]])], Modo::Muda);
+                b.passo(BUSCA_NOVA, 0, "buscador: nova: dns DNS_UNAVAILABLE")?;
+                // De volta: nada ficou guardado de antes.
+                bancada_dns::por_de_teste(&[("bancada.duke", &[[10, 0, 2, 100]])], Modo::Normal);
+                b.passo(BUSCA_NOVA, 0, "buscador: nova: 200 1")
+            })();
+            let fim = b.encerrar();
+            r.and(fim)
+        })
+    })
+}
+
+/// A política com o servidor de DNS da bancada no alcance do operador, e
+/// sem o servidor HTTP claro.
+fn politica_sem_o_http_claro() -> Result<politica::Politica, &'static str> {
+    politica_trocada(&[
+        (
+            "recurso operador net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53 tcp:10.0.2.100:80 ",
+            "recurso operador net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53 udp:10.0.2.53:53 ",
+        ),
+        (
+            "recurso seguranca net.observe udp:10.0.2.3:53",
+            "recurso seguranca net.observe udp:10.0.2.3:53 udp:10.0.2.53:53",
+        ),
+    ])
+}
+
+/// A conexão mantida não leva autorização de um pedido para o outro:
+///
+/// - dois pedidos na conexão que o `buscador` já tem — um `net.connect`
+///   só, e cada envio e cada leitura decididos de novo;
+/// - a política que tira o servidor do alcance no meio dela recusa o
+///   pedido seguinte com o código do gate, e a conexão nova também;
+/// - com a política de volta, uma conexão nova conversa: a recuperação é
+///   a decisão de agora;
+/// - a conexão derrubada pelo outro lado no meio de um pedido é
+///   `CONNECTION_RESET`, uma falha do transporte — e não o fim em ordem;
+/// - o servidor mudo é o prazo, `NETWORK_TIMEOUT`, e não a rede nem o gate.
+fn http_a_conexao_mantida_e_decidida_a_cada_pedido() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    com_a_bancada_http(|| {
+        let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(75), "http-ka", "operador");
+        let b = Buscador::lancar(Autoridade::Pessoa { sessao })?;
+        let fio = b.fio;
+        let r = (|| -> Resultado {
+            b.passo(BUSCA_TROCA, 0, "buscador: troca: 200 2")?;
+            b.passo(BUSCA_TROCA, 0, "buscador: troca: 200 3")?;
+            let conexoes = decisoes_do_processo(fio, "net.connect", HTTP_CLARO);
+            let envios = decisoes_do_processo(fio, "net.send", HTTP_CLARO);
+            if conexoes.len() != 1 || envios.len() < 3 {
+                crate::log_error!("teste", "{:?} / {:?}", conexoes, envios);
+                return Err("os tres pedidos nao foram numa conexao, cada envio decidido");
+            }
+            com_a_politica(politica_sem_o_http_claro()?, || {
+                b.passo(BUSCA_TROCA, 0, "buscador: troca: denied DENY_RESOURCE")?;
+                b.passo(BUSCA_NOVA, 0, "buscador: nova: denied DENY_RESOURCE")
+            })?;
+            b.passo(BUSCA_NOVA, 0, "buscador: nova: 200 1")?;
+            // O outro lado derruba a conexão no meio de um pedido: a falha
+            // é do transporte, e não a conversa que acabou em ordem.
+            let desde = crate::log::total_emitidos();
+            b.pedir(BUSCA_LENTA, 8_000)?;
+            let _ = esperar_ate(|| false, 50);
+            // A mais nova: a de antes da política sem o servidor ficou na
+            // tabela — o `net.close` dela foi recusado pelo gate, como
+            // qualquer pedido sobre um destino fora do alcance.
+            let dono = crate::rede::conexoes::Dono::Processo(fio);
+            let viva = crate::rede::pilha::donos()
+                .into_iter()
+                .filter(|(_, d, x)| *d == dono && x.texto() == HTTP_CLARO)
+                .map(|(id, _, _)| id)
+                .max()
+                .ok_or("o buscador nao tinha a conexao do pedido lento")?;
+            crate::rede::pilha::abortar_de_teste(viva);
+            b.dizer(desde, "buscador: lenta: transport CONNECTION_RESET")?;
+            b.passo(BUSCA_NOVA, 0, "buscador: nova: 200 1")?;
+            let antes = crate::tempo::uptime_ms();
+            b.passo(BUSCA_MUDO, 0, "buscador: mudo: timeout NETWORK_TIMEOUT")?;
+            // Duas esperas de meio segundo: o prazo, e não o evento.
+            if crate::tempo::uptime_ms().saturating_sub(antes) < 1_000 {
+                return Err("o servidor mudo deu o prazo antes de o prazo vencer");
+            }
+            Ok(())
+        })();
+        let fim = b.encerrar();
+        r.and(fim)
+    })
+}
+
+/// O firewall corta a conexão no meio de um pedido, com o código dele:
+///
+/// - o `buscador` espera a resposta de um pedido lento, dormindo no
+///   kernel; a regra que entra derruba a conexão, a espera acorda na hora
+///   — muito antes de a resposta vir —, e o `net.recv` executado de novo é
+///   decidido pelo gate, que deixa — o processo ainda tem a autoridade e o
+///   número —, e barrado pelo firewall: `FIREWALL_BLOCKED`, gravado como
+///   execução daquela decisão `ALLOW`. Não `DENY_RESOURCE`: o firewall
+///   barrou, a política não mudou;
+/// - a conexão nova é barrada também, com o mesmo código;
+/// - tirada a regra, a conexão nova conversa, e o número cortado foi
+///   solto quando o programa largou a conexão.
+fn http_o_firewall_corta_a_conexao_com_o_codigo_dele() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    use politica::Codigo;
+    com_a_bancada_http(|| {
+        let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(76), "http-fw", "operador");
+        let b = Buscador::lancar(Autoridade::Pessoa { sessao })?;
+        let fio = b.fio;
+        let r = (|| -> Resultado {
+            let sistema = sistema_aqui();
+            let para = alloc::format!(r#"{{"to":"{HTTP_CLARO}"}}"#);
+            let desde = crate::log::total_emitidos();
+            b.pedir(BUSCA_LENTA, 8_000)?;
+            // O pedido lento saiu, e o programa espera a resposta.
+            let saiu = || decisoes_do_processo(fio, "net.send", HTTP_CLARO).len() >= 2;
+            esperar_ate(saiu, TETO_DO_HTTP).map_err(|_| "o pedido lento nao saiu")?;
+            let _ = esperar_ate(|| false, 20);
+            let antes = crate::tempo::uptime_ms();
+            let r = fs_pedir(sistema, "net.block", &para);
+            let regra = fs_numero(&r, "rule").ok_or("o sistema nao barrou o servidor HTTP")?;
+            if fs_numero(&r, "dropped") != Some(1) {
+                crate::log_error!("teste", "{}", r);
+                return Err("a regra nao derrubou a conexao HTTP viva");
+            }
+            b.dizer(desde, "buscador: lenta: firewall FIREWALL_BLOCKED")?;
+            if crate::tempo::uptime_ms().saturating_sub(antes) >= 6_000 {
+                return Err("a espera nao acordou com o corte: esperou a resposta");
+            }
+            let prefixo = alloc::format!("bloqueado pelo firewall, regra {regra}; decisao ");
+            let (_, barrada) =
+                registro_que(|e| e.codigo == Codigo::DenyPolicy && e.detalhe.contains(&prefixo))
+                    .ok_or("o corte do firewall nao foi gravado")?;
+            let decidida = decisao_executada(&barrada.detalhe)
+                .and_then(registro_numero)
+                .ok_or("o corte do firewall nao aponta a decisao")?;
+            if decidida.metodo != "net.recv"
+                || decidida.codigo != Codigo::Allow
+                || !decidida
+                    .detalhe
+                    .starts_with(&alloc::format!("pelo processo {fio} ("))
+            {
+                crate::log_error!("teste", "{:?}", decidida);
+                return Err("o corte nao executa a decisao ALLOW da leitura do programa");
+            }
+            let nova = b.passo(BUSCA_NOVA, 0, "buscador: nova: firewall FIREWALL_BLOCKED");
+            let solta = fs_pedir(sistema, "net.unblock", &para);
+            nova?;
+            if fs_numero(&solta, "rule") != Some(regra) {
+                crate::log_error!("teste", "{}", solta);
+                return Err("o sistema nao tirou a regra do servidor HTTP");
+            }
+            b.passo(BUSCA_NOVA, 0, "buscador: nova: 200 1")?;
+            let dono = crate::rede::conexoes::Dono::Processo(fio);
+            if crate::rede::pilha::donos_das_cortadas()
+                .iter()
+                .any(|(_, d)| *d == dono)
+            {
+                return Err("o numero cortado ficou com o programa depois de ele o largar");
+            }
+            Ok(())
+        })();
+        let fim = b.encerrar();
+        r.and(fim)
+    })
+}
+
+/// A revogação no meio de um pedido, de um processo lançado por um agente
+/// pela rede:
+///
+/// - o `buscador` conversa com a autoridade do agente que o lançou — o
+///   pedido gravado com a chave e o nome dele —; a conexão do agente cai,
+///   e o processo continua o agente: a autoridade é da chave, e não da
+///   conexão;
+/// - a chave é revogada enquanto o programa espera a resposta de um pedido
+///   lento: a resposta chega, e não é entregue — o `net.recv` executado de
+///   novo é `DENY_ROLE`, a recusa do gate;
+/// - o nome também não resolve mais: a associação com o DNS é recusada
+///   com o código do gate, e não vira um DNS que não respondeu.
+fn http_a_revogacao_no_meio_do_pedido() -> Resultado {
+    use politica::Codigo;
+    com_a_bancada_http(|| {
+        com_canal_tcp(|| {
+            crate::identidade::atribuir(&nome_de_teste(3), "operador")
+                .map_err(|_| "a atribuicao de teste falhou")?;
+            let chave = sigilo::publica_de(&chave_de_teste(3));
+            let mut a = Some(AgenteTcpDeTeste::conectar(3)?);
+            let s = a.as_ref().map_or(0, |a| a.sessao());
+            let caminho = alloc::format!("{}/buscador", crate::usuario::DIRETORIO_DOS_COMPILADOS);
+            let desde = crate::log::total_emitidos();
+            let r = a
+                .as_mut()
+                .ok_or("sem o agente")?
+                .pedir("user.run", &alloc::format!(r#"{{"path":"{caminho}"}}"#))?;
+            let fio = fs_numero(&r, "thread_id").ok_or("o agente nao lancou o buscador")?;
+            esperar_ate(
+                || linhas_do_programa(desde, "buscador: no meio") == 1,
+                TETO_DO_HTTP,
+            )
+            .map_err(|_| "o buscador do agente nao chegou ao meio")?;
+            let b = Buscador { fio };
+            let r = (|| -> Resultado {
+                b.passo(BUSCA_TROCA, 0, "buscador: troca: 200 2")?;
+                let pediu = ultimo_que(|e| {
+                    e.metodo == "net.connect"
+                        && e.recurso == HTTP_CLARO
+                        && e.detalhe
+                            .starts_with(&alloc::format!("pelo processo {fio} ("))
+                })
+                .ok_or("a conexao do processo do agente nao foi gravada")?;
+                if pediu.codigo != Codigo::Allow
+                    || pediu.chave != Some(chave)
+                    || pediu.agente != nome_de_teste(3)
+                    || pediu.papel != "operador"
+                {
+                    crate::log_error!("teste", "{:?}", pediu);
+                    return Err("a conexao do processo nao foi decidida com o agente que o lancou");
+                }
+                // A conexão do agente cai: o processo continua o agente.
+                drop(a.take());
+                esperar_cedendo(|| crate::sessoes::identidade(s).is_none(), 800)
+                    .map_err(|_| "a sessao do agente que caiu ficou de pe")?;
+                b.passo(BUSCA_TROCA, 0, "buscador: troca: 200 3")?;
+                // A revogação no meio do pedido lento.
+                let desde = crate::log::total_emitidos();
+                b.pedir(BUSCA_LENTA, 1_500)?;
+                let _ = esperar_ate(|| false, 30);
+                crate::identidade::revogar(&chave).map_err(|_| "a revogacao de teste falhou")?;
+                b.dizer(desde, "buscador: lenta: denied DENY_ROLE")?;
+                let negada = ultimo_que(|e| {
+                    e.metodo == "net.recv"
+                        && e.chave == Some(chave)
+                        && e.detalhe
+                            .starts_with(&alloc::format!("pelo processo {fio} ("))
+                })
+                .ok_or("a leitura recusada nao foi gravada")?;
+                if negada.codigo != Codigo::DenyRole {
+                    crate::log_error!("teste", "{:?}", negada);
+                    return Err("a leitura depois da revogacao nao foi recusada pelo gate");
+                }
+                // O nome também não: a recusa é do gate, no DNS.
+                b.passo(BUSCA_NOVA, 0, "buscador: nova: denied DENY_ROLE")
+            })();
+            drop(a);
+            let fim = b.encerrar();
+            r.and(fim)
+        })
+    })
+}
+
+/// A contenção no meio de um pedido cifrado, e a recuperação
+/// administrativa:
+///
+/// - o processo é isolado enquanto espera a resposta de um pedido lento
+///   pela conexão TLS: as conexões dele caem, a espera acorda, e o
+///   `net.recv` executado de novo é `DENY_CONTAINED` — o código da
+///   contenção, que passa pelo TLS como veio: a sessão cifrada não
+///   autoriza nada, e a recusa não vira um código do TLS;
+/// - contido, ele não resolve nome nem conecta: a associação com o DNS é
+///   recusada com o mesmo código;
+/// - solto pelo sistema, pelo gate, uma conexão nova conversa.
+fn http_a_contencao_no_meio_do_pedido() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    com_a_bancada_http(|| {
+        let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(77), "http-iso", "operador");
+        let b = Buscador::lancar(Autoridade::Pessoa { sessao })?;
+        let fio = b.fio;
+        let sistema = sistema_aqui();
+        let processo = alloc::format!(r#"{{"process":{fio}}}"#);
+        let r = (|| -> Resultado {
+            b.passo(BUSCA_CIFRADA, 0, "buscador: cifrada: 200 ola, duke?")?;
+            let desde = crate::log::total_emitidos();
+            let antes_do_pedido = decisoes_do_processo(fio, "net.send", HTTP_CIFRADO).len();
+            b.pedir(BUSCA_CIFRADA_LENTA, 8_000)?;
+            let saiu =
+                || decisoes_do_processo(fio, "net.send", HTTP_CIFRADO).len() > antes_do_pedido;
+            esperar_ate(saiu, TETO_DO_HTTP).map_err(|_| "o pedido lento cifrado nao saiu")?;
+            let _ = esperar_ate(|| false, 30);
+            let antes = crate::tempo::uptime_ms();
+            let r = fs_pedir(sistema, "process.isolate", &processo);
+            if fs_texto(&r, "state").as_deref() != Some("isolated")
+                || fs_numero(&r, "dropped") != Some(2)
+            {
+                crate::log_error!("teste", "{}", r);
+                return Err("o sistema nao isolou o processo com as duas conexoes dele");
+            }
+            b.dizer(desde, "buscador: cifrada lenta: contained DENY_CONTAINED")?;
+            if crate::tempo::uptime_ms().saturating_sub(antes) >= 6_000 {
+                return Err("a espera nao acordou com a contencao");
+            }
+            b.passo(BUSCA_NOVA, 0, "buscador: nova: contained DENY_CONTAINED")?;
+            let r = fs_pedir(sistema, "process.release", &processo);
+            if !r.contains(r#""result""#) {
+                crate::log_error!("teste", "{}", r);
+                return Err("o sistema nao soltou o processo");
+            }
+            b.passo(BUSCA_NOVA, 0, "buscador: nova: 200 1")
+        })();
+        let _ = fs_pedir(sistema, "process.release", &processo);
+        let fim = b.encerrar();
+        r.and(fim)
+    })
+}
+
+/// O fim da sessão da pessoa no meio de um pedido: a resposta chega, e não
+/// é entregue — o processo age pela sessão de quem o lançou, e a sessão
+/// acabou: `DENY_NOT_AUTHENTICATED`, também no DNS.
+fn http_o_fim_da_sessao_no_meio_do_pedido() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    com_a_bancada_http(|| {
+        let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(78), "http-fim", "operador");
+        let b = Buscador::lancar(Autoridade::Pessoa { sessao })?;
+        let r = (|| -> Resultado {
+            let desde = crate::log::total_emitidos();
+            b.pedir(BUSCA_LENTA, 1_500)?;
+            let _ = esperar_ate(|| false, 30);
+            if !crate::pessoas::sair(sessao) {
+                return Err("a sessao da pessoa nao estava aberta");
+            }
+            b.dizer(desde, "buscador: lenta: denied DENY_NOT_AUTHENTICATED")?;
+            b.passo(
+                BUSCA_NOVA,
+                0,
+                "buscador: nova: denied DENY_NOT_AUTHENTICATED",
+            )
+        })();
+        let fim = b.encerrar();
+        r.and(fim)
+    })
+}
+
+/// O processo que acaba sem fechar nada: as conexões dele caem com ele,
+/// recolhidas pelo kernel. A cifrada estava viva, e a queda é gravada; a
+/// clara, o firewall já tinha cortado — o número cortado também é
+/// esquecido, sem registro novo: o corte foi gravado quando a regra
+/// entrou.
+fn http_o_processo_que_acaba_solta_as_conexoes() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    com_a_bancada_http(|| {
+        let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(79), "http-sai", "operador");
+        let b = Buscador::lancar(Autoridade::Pessoa { sessao })?;
+        let fio = b.fio;
+        b.passo(BUSCA_CIFRADA, 0, "buscador: cifrada: 200 ola, duke?")?;
+        let dono = crate::rede::conexoes::Dono::Processo(fio);
+        let do_processo = |destino: &str| {
+            crate::rede::pilha::donos()
+                .iter()
+                .filter(|(_, d, x)| *d == dono && x.texto() == destino)
+                .map(|(id, _, _)| *id)
+                .collect::<alloc::vec::Vec<_>>()
+        };
+        let (clara, cifrada) = (do_processo(HTTP_CLARO), do_processo(HTTP_CIFRADO));
+        if clara.len() != 1 || cifrada.len() != 1 {
+            return Err("o buscador nao tinha as duas conexoes abertas");
+        }
+        // O firewall corta a clara: o número fica com o processo, cortado.
+        let sistema = sistema_aqui();
+        let so_dele = alloc::format!(r#"{{"to":"{HTTP_CLARO}","owner":"process:{fio}"}}"#);
+        let r = fs_pedir(sistema, "net.block", &so_dele);
+        let cortada = || {
+            crate::rede::pilha::donos_das_cortadas()
+                .iter()
+                .any(|(id, d)| *d == dono && *id == clara[0])
+        };
+        if fs_numero(&r, "dropped") != Some(1) || !cortada() {
+            crate::log_error!("teste", "{}", r);
+            return Err("a regra nao cortou a conexao clara do processo");
+        }
+        let desde = crate::log::total_emitidos();
+        b.pedir(BUSCA_SAIR_SEM_FECHAR, 0)?;
+        esperar_ate(
+            || linhas_do_programa(desde, "processo encerrou com codigo 90") == 1,
+            TETO_DO_HTTP,
+        )
+        .map_err(|_| "o buscador nao saiu sem fechar")?;
+        esperar_cedendo(
+            || {
+                crate::rede::pilha::donos()
+                    .iter()
+                    .all(|(_, d, _)| *d != dono)
+                    && crate::rede::pilha::donos_das_cortadas()
+                        .iter()
+                        .all(|(_, d)| *d != dono)
+            },
+            800,
+        )
+        .map_err(|_| "as conexoes do processo que acabou ficaram na tabela")?;
+        let caiu = |id: u64| alloc::format!("conexao {id} derrubada: o dono acabou");
+        if registro_que(|e| e.recurso == HTTP_CIFRADO && e.detalhe == caiu(cifrada[0])).is_none() {
+            return Err("a conexao viva do processo que acabou nao foi gravada ao cair");
+        }
+        if registro_que(|e| e.detalhe == caiu(clara[0])).is_some() {
+            return Err("o numero cortado pelo firewall foi gravado como conexao derrubada");
+        }
+        Ok(())
+    })
+}
+
+/// Várias visitas ao mesmo tempo — duas pessoas e dois agentes —, cada
+/// uma com a autoridade de quem a lançou: as quatro conferem tudo, os
+/// envios delas se intercalam no gate, e cada decisão foi gravada em nome
+/// de quem lançou o processo — a pessoa, ou o agente pela chave. O caso
+/// diz no log quanto uma visita sozinha levou, e quanto as quatro juntas:
+/// a medida de muitas conexões.
+fn http_varias_visitas_ao_mesmo_tempo() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    use politica::auditoria::Titular;
+    crate::pessoas::esquecer_registradas();
+    let resultado = (|| -> Resultado {
+        let programa = alloc::format!("{}/consulta", crate::usuario::DIRETORIO_DOS_COMPILADOS);
+        let chaves = [
+            sigilo::publica_de(&chave_de_teste(1)),
+            sigilo::publica_de(&chave_de_teste(2)),
+        ];
+        for (i, chave) in chaves.iter().enumerate() {
+            crate::identidade::registrar_agente_de_teste(
+                *chave,
+                &nome_de_teste(i as u8 + 1),
+                "operador",
+            );
+        }
+        // Uma sozinha, para a medida.
+        let sozinha = crate::pessoas::sessao_de_teste(Console::Terminal(82), "http-s", "operador");
+        let comeco = crate::tempo::uptime_ms();
+        rodar_programa_ate(
+            "consulta",
+            Some(Autoridade::Pessoa { sessao: sozinha }),
+            91,
+            TETO_DO_HTTP,
+        )
+        .map_err(|_| "a visita sozinha nao conferiu")?;
+        let uma_ms = crate::tempo::uptime_ms().saturating_sub(comeco);
+        let desde = crate::log::total_emitidos();
+        let comeco = crate::tempo::uptime_ms();
+        let mut fios = alloc::vec::Vec::new();
+        for (i, nome) in ["http-a", "http-b"].into_iter().enumerate() {
+            let sessao =
+                crate::pessoas::sessao_de_teste(Console::Terminal(80 + i as u16), nome, "operador");
+            fios.push(crate::usuario::lancar_como(
+                Some(&programa),
+                Autoridade::Pessoa { sessao },
+            )?);
+        }
+        for (i, chave) in chaves.iter().enumerate() {
+            fios.push(crate::usuario::lancar_como(
+                Some(&programa),
+                Autoridade::Sessao {
+                    sessao: i as u8 + 1,
+                    chave: Some(*chave),
+                },
+            )?);
+        }
+        let mut saidas = alloc::collections::BTreeMap::new();
+        let _ = esperar_ate(
+            || {
+                crate::log::ultimos(128, crate::log::Level::Trace, |r| {
+                    if r.seq >= desde
+                        && r.subsistema == "usuario"
+                        && let Some(c) = r.mensagem().strip_prefix("processo encerrou com codigo ")
+                    {
+                        saidas.insert(r.seq, alloc::string::String::from(c));
+                    }
+                });
+                saidas.len() >= fios.len()
+            },
+            2 * TETO_DO_HTTP,
+        );
+        if saidas.len() != fios.len() || saidas.values().any(|c| c != "91") {
+            crate::log_error!("teste", "saidas: {:?}", saidas);
+            return Err("as visitas ao mesmo tempo nao conferiram");
+        }
+        crate::log_info!(
+            "teste",
+            "http: uma visita sozinha em {} ms; quatro ao mesmo tempo em {} ms",
+            uma_ms,
+            crate::tempo::uptime_ms().saturating_sub(comeco)
+        );
+        // Cada decisão em nome de quem lançou.
+        for (i, fio) in fios.iter().enumerate() {
+            let do_processo = alloc::format!("pelo processo {fio} (");
+            let certas = crate::autorizacao::com_auditoria(|c| {
+                c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+                    .filter(|r| r.evento.detalhe.starts_with(&do_processo))
+                    .all(|r| match i {
+                        0 | 1 => r.evento.titular == Titular::Pessoa,
+                        _ => {
+                            r.evento.titular == Titular::Agente
+                                && r.evento.chave == Some(chaves[i - 2])
+                                && r.evento.agente == nome_de_teste(i as u8 - 1)
+                        }
+                    })
+            })
+            .unwrap_or(false);
+            if !certas || decisoes_do_processo(*fio, "net.connect", HTTP_CLARO).len() != 3 {
+                return Err("uma visita foi decidida em nome de outro, ou fora da conta");
+            }
+        }
+        // Os envios das quatro, na ordem do gate: intercalados.
+        let de_quem = crate::autorizacao::com_auditoria(|c| {
+            c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+                .filter(|r| r.evento.metodo == "net.send" && r.evento.recurso == HTTP_CLARO)
+                .filter_map(|r| {
+                    fios.iter().position(|f| {
+                        r.evento
+                            .detalhe
+                            .starts_with(&alloc::format!("pelo processo {f} ("))
+                    })
+                })
+                .collect::<alloc::vec::Vec<_>>()
+        })
+        .unwrap_or_default();
+        let trocas = de_quem.windows(2).filter(|w| w[0] != w[1]).count();
+        if (0..fios.len()).any(|i| !de_quem.contains(&i)) || trocas <= 3 {
+            crate::log_error!("teste", "envios por processo: {:?}", de_quem);
+            return Err("as visitas nao correram ao mesmo tempo");
+        }
+        Ok(())
+    })();
+    crate::identidade::esquecer_registrados();
     crate::pessoas::esquecer_registradas();
     resultado
 }

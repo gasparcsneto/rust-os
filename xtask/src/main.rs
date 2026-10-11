@@ -3068,6 +3068,72 @@ fn conferir_tls_sem_atalho(raiz: &Path) -> Result<Vec<String>, String> {
     Ok(fora)
 }
 
+/// O HTTP é do programa, e não tem autorização própria: devolve o que o
+/// contraria.
+///
+/// - o kernel não depende do pacote `http`: o método, o caminho, o `Host` e
+///   o status não chegam ao gate — o que ele decide é o destino;
+/// - o pacote `http` não depende de nada: não alcança a política, o gate
+///   nem o kernel, e não tem com que decidir;
+/// - nenhum comando do registro e nenhuma permissão da política é do HTTP
+///   (`http.`): o que um programa pode na rede é o que `net.connect`,
+///   `net.send` e `net.recv` decidem para o destino. Não há uma segunda
+///   política para o protocolo.
+fn conferir_http_do_programa(raiz: &Path) -> Result<Vec<String>, String> {
+    let ler = |relativo: &str| {
+        std::fs::read_to_string(raiz.join(relativo))
+            .map_err(|e| format!("não foi possível ler {relativo}: {e}"))
+    };
+    let mut fora = Vec::new();
+    for (n, linha) in ler("kernel/Cargo.toml")?.lines().enumerate() {
+        let linha = linha.trim_start();
+        if linha.starts_with("http ") || linha.starts_with("http=") || linha.starts_with("http.") {
+            fora.push(format!(
+                "kernel/Cargo.toml:{}: o kernel depende do pacote `http` — o HTTP é do programa",
+                n + 1
+            ));
+        }
+    }
+    let manifesto = ler("http/Cargo.toml")?;
+    let mut nas_dependencias = false;
+    for (n, linha) in manifesto.lines().enumerate() {
+        let linha = linha.trim();
+        if linha.starts_with('[') {
+            nas_dependencias = linha.contains("dependencies");
+        } else if nas_dependencias && !linha.is_empty() && !linha.starts_with('#') {
+            fora.push(format!(
+                "http/Cargo.toml:{}: o pacote `http` depende de algo — o cliente é puro: {linha}",
+                n + 1
+            ));
+        }
+    }
+    for dir in ["kernel/src", "politica/src"] {
+        percorrer_fontes(&raiz.join(dir), &mut |caminho| {
+            let relativo = caminho
+                .strip_prefix(raiz)
+                .map_err(|_| format!("{} fora do projeto", caminho.display()))?
+                .to_string_lossy()
+                .replace('\\', "/");
+            if relativo == "kernel/src/testes.rs" {
+                return Ok(());
+            }
+            let texto = std::fs::read_to_string(caminho)
+                .map_err(|e| format!("não foi possível ler {}: {e}", caminho.display()))?;
+            for (n, linha) in texto.lines().enumerate() {
+                if linha.contains("\"http.") {
+                    fora.push(format!(
+                        "{relativo}:{}: um comando ou uma permissão do HTTP — a autorização é do destino: {}",
+                        n + 1,
+                        linha.trim()
+                    ));
+                }
+            }
+            Ok(())
+        })?;
+    }
+    Ok(fora)
+}
+
 /// A abertura da persistência antes de quem atende: devolve o que estiver
 /// fora de ordem no `kernel/src/main.rs`.
 fn conferir_a_ordem_do_boot(raiz: &Path) -> Result<Vec<String>, String> {
@@ -3148,6 +3214,9 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
     // O TLS é do programa, e sem atalho: nada desliga a verificação do
     // certificado, e o kernel não o tem.
     fora.extend(conferir_tls_sem_atalho(&raiz)?);
+    // E o HTTP também é do programa: o kernel não o tem, ele não alcança o
+    // gate, e não há comando nem permissão dele.
+    fora.extend(conferir_http_do_programa(&raiz)?);
     // A chamada legítima tem de existir: uma busca que não acha nem ela
     // está procurando a coisa errada, e passaria por qualquer atalho.
     for ((chamada, donos), quantas) in CHAMADAS_PROTEGIDAS.iter().zip(&achadas) {
@@ -3164,8 +3233,9 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
              mensagens só pelos handlers, pela prova e pela revogação; o armazém só pelos \
              comandos fs.*, pela gravação dele e pela reposição do boot; quem agiu só se conta \
              na decisão; nenhuma camada sobe acima da barra; as cargas do boot só pelo boot; \
-             o tecido de segurança só fala como ele mesmo, pelo gate, sem que o gate o leia; e \
-             o TLS, que é do programa, só verifica pelas âncoras, sem atalho que o desligue"
+             o tecido de segurança só fala como ele mesmo, pelo gate, sem que o gate o leia; \
+             o TLS, que é do programa, só verifica pelas âncoras, sem atalho que o desligue; e \
+             o HTTP, que é do programa, não tem comando, permissão nem caminho até o gate"
         );
         Ok(ExitCode::SUCCESS)
     } else {
@@ -3320,6 +3390,7 @@ fn conferir_arvore_do_readme() -> Result<ExitCode, String> {
         "armazem/src",
         "seguranca/src",
         "tls/src",
+        "http/src",
         "programas/src",
         "xtask/src",
     ] {
@@ -5530,7 +5601,13 @@ fn comando_qemu(
     //   política de desenvolvimento o enumera também;
     // - `10.0.2.100:443`, o eco TLS: cada conexão roda o servidor TLS da
     //   bancada — o OpenSSL, pelo Python —, que escolhe o certificado pelo
-    //   nome pedido. A política de desenvolvimento o enumera. Ver [`tls`].
+    //   nome pedido. A política de desenvolvimento o enumera. Ver [`tls`];
+    // - `10.0.2.100:80` e `10.0.2.100:8443`, o servidor HTTP da bancada,
+    //   claro e atrás do TLS: cada conexão roda o script dele, com uma rota
+    //   para cada comportamento que a suíte e a fumaça conferem — o corpo
+    //   em pedaços, o lento, o mudo, o que corta, os malformados. A
+    //   política de desenvolvimento enumera os dois. Ver
+    //   [`tls::guestfwd_http`].
     //
     // E o canal do agente por TCP: a porta dele no hóspede, encaminhada a
     // uma porta livre de `127.0.0.1` no hospedeiro — a única porta que esta
@@ -5548,11 +5625,12 @@ fn comando_qemu(
     })?;
     tls::conferir_o_hospedeiro()?;
     let eco_tls = tls::guestfwd()?;
+    let http = tls::guestfwd_http()?;
     let canal_tcp = canal_tcp::preparar(arch.nome())?;
     qemu.args([
         "-netdev",
         &format!(
-            "user,id=rede0,tftp={tftp},guestfwd=tcp:10.0.2.100:7-cmd:cat,guestfwd=tcp:10.0.2.100:9-cmd:sleep 30,{eco_tls},{canal_tcp}"
+            "user,id=rede0,tftp={tftp},guestfwd=tcp:10.0.2.100:7-cmd:cat,guestfwd=tcp:10.0.2.100:9-cmd:sleep 30,{eco_tls},{http},{canal_tcp}"
         ),
     ]);
     qemu.args(["-device", "virtio-net-pci,netdev=rede0"]);
@@ -10276,6 +10354,97 @@ fn sob_a_rede(
     );
     println!("  [tls] medido  {aperto}");
     println!("  [tls] medido  {eco}");
+
+    // O HTTP de um programa: a `pagina` conversa com o servidor HTTP da
+    // bancada, claro e atrás do TLS — o Python do hospedeiro, outra
+    // implementação —, e confere de dentro as páginas, a conexão mantida, o
+    // corpo em pedaços, o `POST` maior que o buffer, os status que não são
+    // falha, o nome que o TLS recusa no mesmo destino, a porta fora do
+    // alcance — a recusa do gate —, e cada falha do protocolo com o código
+    // e a família dela. Daqui, as medidas que ela diz no log.
+    let lancado = serial.pedir(
+        "user.run",
+        &format!(r#"{{"path":"/programas/{}/pagina"}}"#, arch.nome()),
+    )?;
+    if !lancado.contains(r#""launched":true"#) {
+        return Err(format!("http: o user.run nao lancou a pagina\n  {lancado}"));
+    }
+    let comeco = std::time::Instant::now();
+    let limite = comeco + Duration::from_secs(180);
+    let mut ditas: Vec<String> = Vec::new();
+    loop {
+        let log = serial.pedir("log.tail", r#"{"count":32}"#)?;
+        for pedaco in log.split("pagina: ").skip(1) {
+            let linha = format!("pagina: {}", pedaco.split('"').next().unwrap_or(""));
+            if !ditas.contains(&linha) {
+                ditas.push(linha);
+            }
+        }
+        if log.contains("processo encerrou com codigo 88") {
+            break;
+        }
+        // Saiu com um dos códigos de falha dela (40 a 48): o que ela disse
+        // diz o quê, sem esperar o teto.
+        let falhou = log
+            .split("processo encerrou com codigo ")
+            .skip(1)
+            .filter_map(|r| r.split('"').next()?.parse::<u32>().ok())
+            .find(|c| (40..=48).contains(c));
+        if let Some(codigo) = falhou {
+            return Err(format!(
+                "http: a pagina saiu com {codigo}\n  {}",
+                ditas.join("\n  ")
+            ));
+        }
+        if std::time::Instant::now() > limite {
+            return Err(format!(
+                "http: a pagina nao conferiu o HTTP da bancada\n  {}",
+                ditas.join("\n  ")
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let dita = |trecho: &str| {
+        ditas
+            .iter()
+            .find(|l| l.contains(trecho))
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "http: a pagina nao disse `{trecho}`\n  {}",
+                    ditas.join("\n  ")
+                )
+            })
+    };
+    for conferida in [
+        "tres pedidos numa conexao so (keep-alive)",
+        "65536 bytes foram e voltaram (POST)",
+        "404 e uma resposta",
+        "https://outro.duke:8443/ola -> tls TLS_NAME_MISMATCH",
+        "http://bancada.duke:81/ola -> denied DENY_RESOURCE",
+        "/torto/dobra -> protocol HTTP_MALFORMED",
+        "/grande/2000000 -> limit HTTP_TOO_LARGE",
+        "/corta -> closed HTTP_CLOSED",
+        "/mudo -> timeout NETWORK_TIMEOUT",
+        "tudo conferiu",
+    ] {
+        dita(conferida)?;
+    }
+    println!(
+        "  [http] ok  a pagina saiu com 88 em {} ms; keep-alive, pedacos, POST de 64 KiB, https, outro.duke recusado pelo TLS, a porta 81 pelo gate, as respostas malformadas, grandes, cortadas e mudas cada uma com o seu codigo",
+        comeco.elapsed().as_millis()
+    );
+    for medida in [
+        "http://bancada.duke/ola -> 200",
+        "https://bancada.duke:8443/ola -> 200",
+        "65536 bytes foram e voltaram (POST)",
+        "eco TCP cru:",
+        "http://bancada.duke/grande/65536 ->",
+        "https://bancada.duke:8443/grande/65536 ->",
+        "http://bancada.duke/grande/262144 ->",
+    ] {
+        println!("  [http] medido  {}", dita(medida)?);
+    }
 
     // O UDP, pela mesma capacidade: uma associação com o TFTP do emulador,
     // que entrega o arquivo da bancada em dois datagramas, cada um inteiro

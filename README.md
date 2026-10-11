@@ -561,7 +561,7 @@ xtask/src/
 ├── main.rs          a ferramenta de build, teste e diagnóstico do projeto
 ├── canal_tcp.rs     o canal do agente por TCP do lado de fora: a porta encaminhada, e a ponte da suíte — `xtask/bancada/ponte.py`
 ├── persistencia.rs  a bancada de persistência: a mesma máquina em vários boots, com corte de energia
-└── tls.rs           a bancada TLS: a PKI gerada a cada máquina, e o eco TLS — o OpenSSL, por `xtask/bancada/tls.py` — a cada conexão
+└── tls.rs           a bancada TLS: a PKI gerada a cada máquina, o eco TLS — o OpenSSL, por `xtask/bancada/tls.py` —, e o servidor HTTP claro e cifrado — `xtask/bancada/http.py` —, a cada conexão
 ```
 
 **Como as duas arquiteturas convivem.** Cada backend em `arch/` traduz o que
@@ -1634,7 +1634,7 @@ novo e executa, e o log diz `executado: agent.ping (agente 3)` — o número
 da sessão do agente, que o Terminal leva junto com o Enter. Um processo
 com o pseudo-terminal pode escrever o Enter do agente sem ter sido pedido
 — atribuir ao agente o que a pessoa fez é o erro menos grave, e o registro
-que a pessoa confira é da fase 12.
+que a pessoa confira é da fase 13.
 
 Noventa e seis mutações nas seis etapas, e as noventa e seis reprovadas —
 várias só depois de o caso ser reforçado. Seis das oito da
@@ -4303,7 +4303,7 @@ info console  executado: system.uptime (agente 0)
 info console  executado: agent.ping (pessoa)
 ```
 
-É o começo do que a fase 12 chama de auditoria: se um agente pode fazer tudo
+É o começo do que a fase 13 chama de auditoria: se um agente pode fazer tudo
 que uma pessoa faz, o registro precisa dizer qual dos dois fez.
 
 **O primeiro botão.** A barra superior tem o **Limpar**, que aceita `press` —
@@ -4314,7 +4314,7 @@ Userspace.
 
 **O que ainda não há.** Consentimento: um `set_value` do agente troca o que a pessoa
 estava digitando, e nada pergunta a ela antes. A árvore mostra o que está
-digitado, e o log registra quem agiu, mas pedir licença é trabalho da fase 12.
+digitado, e o log registra quem agiu, mas pedir licença é trabalho da fase 13.
 
 **Duas coisas que ela destapou no console.** O apagar desenhava um `?` e
 avançava, em vez de apagar — a linha no buffer estava certa e a tela afirmava
@@ -5553,14 +5553,29 @@ padronizado.
       estado, o campo de texto com o caminho do agente até ele, e as janelas
       do Duke refeitas com eles — nenhuma descrita à mão, e uma conferência
       que impede a próxima de ser.
-- [ ] **Fase 12 — Consentimento e auditoria.** Se um agente pode fazer tudo
+- [x] **Fase 12 — Comunicação de alto nível.** DNS → TCP → TLS → aplicação
+      sobre a pilha nativa da fase 9, começando pelo HTTP/1.1, sem uma
+      segunda política: o protocolo é do programa, e o gate decide o
+      destino. Feito: o pacote `http` — o cliente puro, a URL, o pedido, a
+      resposta pela RFC 9112 sem ambiguidade de enquadramento, os limites,
+      o *keep-alive* —, e a família de cada falha, sem decidir nada; o
+      transporte dos programas separando a recusa do gate, o firewall, a
+      conexão recusada, a derrubada e o prazo; o HTTP de um programa, do
+      nome pelo DNS dele à conexão decidida pelo gate, com o TLS no meio; a
+      bancada HTTP, clara e cifrada; e as correções que o exercício pediu —
+      a conexão cortada pelo firewall responde com o código dele, o DNS não
+      esconde mais a recusa do gate, e o NSF lê a captura do DNS até o
+      fim. HTTP/2 e HTTP/3, mTLS, a gestão de certificados, o NTP e o SIMD
+      ficam para depois. Ver [O HTTP de um programa](#o-http-de-um-programa).
+      **Fase 12 completa.**
+- [ ] **Fase 13 — Consentimento e auditoria.** Se um agente pode fazer tudo
       que uma pessoa faz, o modelo de permissão precisa ser **mais** forte que
       o de um desktop comum, e não mais fraco. Três coisas: quem pediu — a
       pessoa na frente da máquina ou o agente pelo canal —, o que foi feito, e
       um registro que a pessoa possa ler depois e desfazer. Junto com o resto
       do que um desktop precisa: assinatura de código e cadeia de boot
       confiável. O sandbox por aplicativo é o manifesto da fase 7.
-- [ ] **Fase 13 — Hardware real e distribuição.** Instalador, atualização A/B
+- [ ] **Fase 14 — Hardware real e distribuição.** Instalador, atualização A/B
       com rollback, imagens assinadas, ACPI de verdade, NVMe, placa de rede
       real, watchdog. É onde projetos assim costumam morrer, e é por isso que
       vem por último: até aqui o emulador é hardware suficiente.

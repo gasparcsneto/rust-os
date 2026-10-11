@@ -116,7 +116,7 @@ impl Acao {
 
 /// Quem pediu uma ação.
 ///
-/// Vai para o log junto com o que foi feito. É o começo do que a fase 12 do
+/// Vai para o log junto com o que foi feito. É o começo do que a fase 13 do
 /// roteiro chama de auditoria: se um agente pode fazer tudo que uma pessoa
 /// faz, o registro precisa dizer qual dos dois fez.
 ///
