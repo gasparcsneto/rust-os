@@ -35399,10 +35399,18 @@ fn http_o_processo_que_acaba_solta_as_conexoes() -> Resultado {
             800,
         )
         .map_err(|_| "as conexoes do processo que acabou ficaram na tabela")?;
+        // O coletor tira as conexões da tabela e grava em seguida: a
+        // gravação pode vir um instante depois de a tabela mudar. A cortada
+        // é mais velha que a cifrada, e seria gravada antes dela.
         let caiu = |id: u64| alloc::format!("conexao {id} derrubada: o dono acabou");
-        if registro_que(|e| e.recurso == HTTP_CIFRADO && e.detalhe == caiu(cifrada[0])).is_none() {
-            return Err("a conexao viva do processo que acabou nao foi gravada ao cair");
-        }
+        esperar_cedendo(
+            || {
+                registro_que(|e| e.recurso == HTTP_CIFRADO && e.detalhe == caiu(cifrada[0]))
+                    .is_some()
+            },
+            300,
+        )
+        .map_err(|_| "a conexao viva do processo que acabou nao foi gravada ao cair")?;
         if registro_que(|e| e.detalhe == caiu(clara[0])).is_some() {
             return Err("o numero cortado pelo firewall foi gravado como conexao derrubada");
         }

@@ -2796,6 +2796,12 @@ a porta ao lado não está.
   do agora em diante. O caso `dns: o NSF le a rajada inteira` manda 24
   datagramas entre duas voltas, e confere que a observação recusada não
   insiste.
+- **O caso do processo que acaba esperava a tabela, e não a gravação.** O
+  coletor tira da tabela as conexões de quem acabou e grava cada derrubada
+  em seguida; o caso conferia a gravação assim que a tabela esvaziava, e o
+  CI do ARM, com a virtio-gpu, o pegou entre as duas coisas. Os casos mais
+  velhos da rede já esperavam a gravação; o do HTTP passou a esperar
+  também.
 
 ### As mutações da rede
 
