@@ -11303,24 +11303,74 @@ fn sob_o_tecido(
     drop(operador);
 
     // Quieta: sem ninguém pedir, a cabeça só anda pela leitura do NSF do
-    // último pedido — e pelos pedidos desta conta.
+    // último pedido — e pelos pedidos desta conta. Depois de o NSF alcançar
+    // a cabeça: as pernas de antes — a do canal TCP escreve centenas de
+    // registros em segundos — podem deixá-lo para trás, e ele lê no máximo
+    // uma volta por segundo, com a taxa do papel dele, que numa recusa o
+    // faz recuar até um minuto. O que se confere é que, alcançada a cabeça,
+    // ela para: uma leitura que se alimentasse dela mesma nunca pararia.
+    let cabeca =
+        |pedir: &mut dyn FnMut(&str, &str) -> Result<String, String>| -> Result<u64, String> {
+            campo_simples(&pedir("audit.head", "{}")?, "seq")
+                .and_then(|n| n.parse().ok())
+                .ok_or_else(|| String::from("tecido: audit.head sem seq"))
+        };
+    let lido = |pedir: &mut dyn FnMut(&str, &str) -> Result<String, String>| -> Result<(u64, String), String> {
+        let status = pedir("security.status", "{}")?;
+        let lido = campo_simples(&status, "audit_read_until")
+            .and_then(|n| n.parse().ok())
+            .ok_or_else(|| format!("tecido: security.status sem audit_read_until\n  {status}"))?;
+        Ok((lido, status))
+    };
+    let inicio = Instant::now();
+    loop {
+        let alvo = cabeca(&mut pedir)?;
+        std::thread::sleep(Duration::from_secs(1));
+        let (lido, status) = lido(&mut pedir)?;
+        if lido >= alvo {
+            break;
+        }
+        if inicio.elapsed() > Duration::from_secs(90) {
+            return Err(format!(
+                "tecido: o NSF nao alcancou a cabeca da auditoria em 90 s ({lido} de {alvo})\n  {status}"
+            ));
+        }
+    }
+    let alcancou = inicio.elapsed();
     std::thread::sleep(Duration::from_secs(2));
-    let antes: u64 = campo_simples(&pedir("audit.head", "{}")?, "seq")
-        .and_then(|n| n.parse().ok())
-        .ok_or("tecido: audit.head sem seq")?;
+    let antes = cabeca(&mut pedir)?;
     std::thread::sleep(Duration::from_secs(5));
-    let depois: u64 = campo_simples(&pedir("audit.head", "{}")?, "seq")
-        .and_then(|n| n.parse().ok())
-        .ok_or("tecido: audit.head sem seq")?;
+    let depois = cabeca(&mut pedir)?;
+    // Quem escreveu na janela: o método e o titular de cada registro.
+    let cauda = pedir("audit.tail", &format!(r#"{{"after":{antes},"count":16}}"#))?;
+    let quem: Vec<String> = cauda
+        .split(r#"{"seq":"#)
+        .skip(1)
+        .filter_map(|r| {
+            let seq: u64 = r.split(',').next()?.parse().ok()?;
+            (seq <= depois).then(|| {
+                format!(
+                    "{} ({} {})",
+                    campo_simples(r, "method").unwrap_or_default(),
+                    campo_simples(r, "holder").unwrap_or_default(),
+                    campo_simples(r, "agent").unwrap_or_default()
+                )
+            })
+        })
+        .collect();
     if depois > antes + 3 {
+        let (_, status) = lido(&mut pedir)?;
         return Err(format!(
-            "tecido: parado o movimento, a auditoria andou {} registros em 5 s",
-            depois - antes
+            "tecido: parado o movimento, a auditoria andou {} registros em 5 s: {}\n  {status}",
+            depois - antes,
+            quem.join(", ")
         ));
     }
     println!(
-        "  [tecido] ok  parado o movimento, a auditoria andou {} registro(s) em 5 s",
-        depois - antes
+        "  [tecido] ok  parado o movimento — o NSF alcancou a cabeca em {} ms —, a auditoria andou {} registro(s) em 5 s: {}",
+        alcancou.as_millis(),
+        depois - antes,
+        quem.join(", ")
     );
     Ok(())
 }
