@@ -2819,6 +2819,82 @@ Desenhá-las mostrou dois testes que faltavam:
   aberto a saída era a mesma. Agora a espera é a de dez segundos, e o caso
   exige a retomada em oito.
 
+### As mutações do canal TCP
+
+Trinta e cinco mutações contra o que o canal do agente por TCP promete —
+a mesma taxa, a mesma janela de apertos e a mesma revogação das portas, a
+chave confirmada, o prazo do aperto, a escuta e os fluxos do firewall, a
+geração da vaga, a contrapressão e os tetos, o coletor, a auditoria de
+cada recusa e a presença só de quem confirmou —, trinta e uma contra os
+casos `canal tcp` da suíte de quatro núcleos, no x86, três contra os
+testes do firewall no hospedeiro e uma contra o `xtask invariantes`:
+**trinta e quatro reprovadas, e uma equivalente**.
+
+| Mutação | Reprovada por |
+|---|---|
+| a taxa só das sessões de 0 a 4 | `canal tcp: a mesma autoridade e a mesma taxa` — pela rede, quatro pedidos seguidos passaram de uma rajada de dois |
+| a janela de apertos só das portas | todos os casos `canal tcp` — nenhum aperto pela rede entrou |
+| a revogação só das portas | `canal tcp: revogar derruba a conexao viva` |
+| a chave vale sem confirmação | `canal tcp: o aperto pela rede`, `canal tcp: a identidade nao se forja` e `canal tcp: o prazo do aperto` — a conexão foi do agente antes de ele confirmar, e o aperto repetido apareceu conectado |
+| sem o prazo do aperto | `canal tcp: o prazo do aperto` |
+| a escuta deixa entrar qualquer quadro | `firewall::testes::a_escuta_so_recebe_o_syn` e `a_escuta_nao_casa_como_quadrupla` |
+| a escuta deixa sair qualquer quadro | `firewall::testes::a_escuta_so_responde` e `a_escuta_nao_casa_como_quadrupla` |
+| a escuta casa como uma conversa | `firewall::testes::a_escuta_nao_casa_como_quadrupla` |
+| sem a escuta na fotografia do firewall | todos os casos `canal tcp` — o SYN não passa, e a ponte não chega a vaga nenhuma |
+| sem os fluxos das vagas | todos os casos `canal tcp` — a conexão aceita não conversa |
+| o bloqueio não derruba o canal | `canal tcp: a regra do firewall derruba a conexao` |
+| o bloqueio ignora o dono da regra | o mesmo caso — a regra de outro agente derrubou a conexão |
+| a geração da vaga lida como a de uma porta | `canal tcp: quatro agentes e a vaga de cada um` — a conexão de rede do agente não era da conexão dele |
+| o fim de uma conexão leva a sessão da seguinte | `canal tcp: o aperto pela rede` |
+| sem a contrapressão da saída | `canal tcp: quem nao le espera` — com a saída no limiar, a sessão continuou lendo |
+| a saída sem teto | `canal tcp: a saida tem teto` — oito respostas grandes de um quadro só passaram de 256 KiB |
+| a entrada sem teto | `canal tcp: a entrada cheia espera no socket` |
+| o coletor não trata as pendências | todos os casos `canal tcp` — as vagas não voltaram a escutar |
+| o fim da sessão não fecha a conexão | `canal tcp: a identidade nao se forja`, `canal tcp: revogar derruba a conexao viva` e `canal tcp: o nsf observa sem ser autoridade` |
+| a recusa antes do aperto não é gravada | `canal tcp: a identidade nao se forja` — o pedido em claro |
+| o transporte com o nome da porta | `canal tcp: o aperto pela rede` e `canal tcp: quatro agentes e a vaga de cada um` |
+| o prazo não esquece a sessão não confirmada | `canal tcp: o prazo do aperto` |
+| o fim da conexão não esquece a sessão | dez casos — a sessão ficou, e a vaga não voltou a ser livre |
+| o aperto diz outra sessão | `canal tcp: o aperto pela rede` |
+| a porta do `xtask` não é a do kernel | o `xtask invariantes` |
+| o fluxo da vaga sem o agente | `canal tcp: a regra do firewall derruba a conexao` — a regra do agente não alcançou a conexão dele |
+| os conectados só das portas | `canal tcp: o aperto pela rede` e `canal tcp: quatro agentes e a vaga de cada um` |
+| os conectados contam o aperto não confirmado | `canal tcp: o aperto pela rede`, `canal tcp: a identidade nao se forja` e `canal tcp: o prazo do aperto` |
+| o aperto do TCP gravado na resposta, e não na confirmação | `canal tcp: o aperto pela rede` e `canal tcp: a identidade nao se forja` |
+| o fim não confirmado não é gravado | `canal tcp: a identidade nao se forja` e `canal tcp: o prazo do aperto` |
+| `agent.sessions` mostra o aperto não confirmado como de um agente | `canal tcp: a identidade nao se forja` |
+| a sessão não confirmada sem o par | os mesmos dois — a recusa sem o par |
+| a queda antes da confirmação não é gravada | `canal tcp: a identidade nao se forja` — quem repete e sai |
+| a confirmação não marca a sessão | quatro casos — o agente que confirmou não aparece |
+| a pendência sai da lista antes de tratada | equivalente — ver abaixo |
+
+Desenhá-las mostrou quatro lugares que nenhum caso alcançava — cada um
+ganhou o seu antes da rodada final:
+
+- **O teto da entrada.** Nenhum caso mandava mais do que a entrada da
+  vaga guarda, e tirar o teto passaria. O caso `canal tcp: a entrada
+  cheia espera no socket` manda 46 KiB de pedidos legítimos com a tarefa
+  parada: a entrada para nos 16 KiB, o resto espera no socket, e andando a
+  tarefa os 24 pedidos são atendidos na ordem.
+- **O teto da saída sobreviveu à primeira rodada**, e mostrou por que
+  importa: a contrapressão espera depois de cada linha que fecha, mas as
+  linhas de um mesmo quadro decifrado são atendidas uma atrás da outra,
+  sem a espera entre elas. Um quadro com oito `audit.tail` grandes leva a
+  saída da vaga muito além do limiar — e só o teto a segura. O caso
+  `canal tcp: a saida tem teto` faz isso com a saída da pilha segura: a
+  resposta que não cabe não sai, a sessão acaba e a perda é contada, e a
+  saída nunca passa de 256 KiB.
+- **O `agent.sessions` do aperto não confirmado** e **a queda antes da
+  confirmação** não eram olhados: o caso da identidade passou a conferir
+  que o aperto repetido aparece como não autenticado, sem nome de agente,
+  e que quem repete e sai deixa uma recusa gravada com a chave alegada.
+
+A equivalente: a pendência que sai da lista antes de ser tratada. Nada no
+kernel lê o tamanho da lista — só a suíte, para saber se a vaga ficou
+livre —, e a ordem só muda o que ela observa: a corrida que a mudança
+fechou apareceu uma vez, no caso do prazo, que conferia a recusa logo
+depois de a lista esvaziar, antes de o coletor gravá-la.
+
 ## O tecido de segurança
 
 O NSF observa, correlaciona, interpreta, detecta, avalia o risco, abre
