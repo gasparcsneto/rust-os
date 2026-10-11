@@ -82,6 +82,10 @@ const LEITURAS_POR_VOLTA: usize = 8;
 /// Quantos datagramas cada `net.observe` traz.
 const DATAGRAMAS: u64 = 16;
 
+/// Quantos `net.observe` uma volta faz por servidor, no máximo: o anel
+/// inteiro da captura, e a leitura que confirma que ele acabou.
+const LEITURAS_DA_CAPTURA: usize = crate::rede::captura::CAPACIDADE / DATAGRAMAS as usize + 1;
+
 /// O que uma volta fez.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Volta {
@@ -228,19 +232,34 @@ pub fn passo() -> Volta {
     // duas ordens. Se a leitura da auditoria parou antes de `cabeca`, um
     // servidor ainda pode não ser conhecido: a captura fica como não
     // vista, e a volta seguinte lê de novo — cada servidor de onde parou.
+    //
+    // Um servidor com mais datagramas do que uma leitura traz segue sendo
+    // lido de onde parou, até um lote vir incompleto: o resto não espera
+    // outro datagrama, que talvez não venha. O teto cobre o anel inteiro —
+    // o que sobrar dele chegou depois de `captura`, e acorda a volta
+    // seguinte.
     if captura > CAPTURA_VISTA.load(Ordering::Acquire) {
-        for (destino, depois) in com_motor(|m| m.a_observar()).unwrap_or_default() {
-            let params =
-                alloc::format!(r#"{{"to":"{destino}","after":{depois},"max":{DATAGRAMAS}}}"#);
-            volta.leituras += 1;
-            match pedir("net.observe", &params) {
-                Ok(r) => {
-                    let lidos = seguranca::dns::capturas(&r).unwrap_or_default();
-                    volta.datagramas += com_motor(|m| m.ler_capturas(&destino, lidos)).unwrap_or(0);
-                }
-                Err(_) => {
-                    volta.recusadas += 1;
-                    com_motor(|m| m.observacao_recusada(&destino));
+        for (destino, mut depois) in com_motor(|m| m.a_observar()).unwrap_or_default() {
+            for _ in 0..LEITURAS_DA_CAPTURA {
+                let params =
+                    alloc::format!(r#"{{"to":"{destino}","after":{depois},"max":{DATAGRAMAS}}}"#);
+                volta.leituras += 1;
+                match pedir("net.observe", &params) {
+                    Ok(r) => {
+                        let lidos = seguranca::dns::capturas(&r).unwrap_or_default();
+                        let cheio = lidos.len() as u64 >= DATAGRAMAS;
+                        depois = lidos.iter().map(|c| c.seq).fold(depois, u64::max);
+                        volta.datagramas +=
+                            com_motor(|m| m.ler_capturas(&destino, lidos)).unwrap_or(0);
+                        if !cheio {
+                            break;
+                        }
+                    }
+                    Err(_) => {
+                        volta.recusadas += 1;
+                        com_motor(|m| m.observacao_recusada(&destino));
+                        break;
+                    }
                 }
             }
         }

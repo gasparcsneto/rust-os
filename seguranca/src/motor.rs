@@ -194,6 +194,10 @@ pub struct Motor {
     pub epoca: u32,
     lido: u64,
     captura_lida: u64,
+    /// Até onde a captura é de antes do motor: um servidor que ele passa a
+    /// observar começa a ser lido daqui. Zero — o anel inteiro —, a não ser
+    /// para quem pediu só o agora ([`Motor::comecar_depois_de`]).
+    captura_inicio: u64,
     ao_vivo: u64,
     eventos: VecDeque<Evento>,
     pub grafo: Grafo,
@@ -232,6 +236,7 @@ impl Motor {
             epoca: 0,
             lido: 0,
             captura_lida: 0,
+            captura_inicio: 0,
             ao_vivo: 0,
             eventos: VecDeque::new(),
             grafo: Grafo::novo(),
@@ -318,11 +323,14 @@ impl Motor {
 
     /// Começa a leitura depois de `seq`, sem ler o que veio antes — para
     /// quem quer o NSF só do agora em diante (a suíte, entre um caso e
-    /// outro).
+    /// outro). Na captura também: um servidor que o motor passar a observar
+    /// é lido depois do datagrama `captura`, e não do começo do anel, que
+    /// guarda a conversa de quem veio antes.
     pub fn comecar_depois_de(&mut self, seq: u64, captura: u64) {
         self.lido = seq;
         self.ao_vivo = seq;
         self.captura_lida = captura;
+        self.captura_inicio = captura;
         self.monitor = Monitor::novo();
     }
 
@@ -585,7 +593,11 @@ impl Motor {
             && d.porta == protocolo::dns::PORTA
             && (self.observados.len() < MAIS_OBSERVADOS || self.observados.contains_key(&d.texto()))
         {
-            self.observados.entry(d.texto()).or_default();
+            let lida = self.captura_inicio;
+            self.observados.entry(d.texto()).or_insert(Observacao {
+                lida,
+                recusada: false,
+            });
         }
         // A política mudou: uma observação recusada pode valer agora.
         if matches!(e.metodo.as_str(), "policy.write" | "policy.assign") && e.codigo.permite() {

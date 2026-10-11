@@ -30502,6 +30502,10 @@ static CASOS: &[Caso] = &[
         f: dns_a_resposta_nao_da_acesso,
     },
     Caso {
+        nome: "dns: o NSF le a rajada inteira",
+        f: dns_o_nsf_le_a_rajada_inteira,
+    },
+    Caso {
         nome: "recusa: diz por que e o que fazer",
         f: recusa_diz_por_que_e_o_que_fazer,
     },
@@ -35868,6 +35872,106 @@ fn dns_a_resposta_nao_da_acesso() -> Resultado {
                     return Err("o NSF nao viu a religacao, ou nao contou a malformada");
                 }
                 Ok(())
+            })();
+            fechar_conexao(pessoa, conexao);
+            r
+        })
+    });
+    bancada_dns::por_de_teste(&[], Modo::Normal);
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// Uma rajada de DNS maior que uma leitura da captura: doze perguntas e
+/// doze respostas — 24 datagramas, e cada `net.observe` do NSF traz até 16
+/// — entre duas voltas dele. A volta segue lendo o servidor de onde parou,
+/// até o lote vir incompleto: o fim da rajada não espera um datagrama que
+/// talvez não venha. O NSF reiniciado pela suíte só lê a rajada, e não a
+/// conversa que os casos de antes deixaram no anel. E a observação
+/// recusada não insiste: com o servidor fora do alcance do NSF — ainda
+/// observável, pelo do sistema —, a volta pede uma vez e é recusada uma
+/// vez.
+fn dns_o_nsf_le_a_rajada_inteira() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use crate::rede::bancada_dns::{self, Modo};
+    const PERGUNTAS: u16 = 12;
+    // O servidor no alcance do operador, e a taxa dele sem pressa: cada
+    // pergunta é um `net.send`, e cada espera pela resposta, `net.recv` até
+    // ela chegar.
+    const OPERADOR: [(&str, &str); 2] = [
+        (
+            "recurso operador net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53",
+            "recurso operador net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53 udp:10.0.2.53:53",
+        ),
+        ("taxa operador 50 100", "taxa operador 400 800"),
+    ];
+    crate::pessoas::esquecer_registradas();
+    let politica = politica_trocada(&[
+        OPERADOR[0],
+        OPERADOR[1],
+        (
+            "recurso seguranca net.observe udp:10.0.2.3:53",
+            "recurso seguranca net.observe udp:10.0.2.3:53 udp:10.0.2.53:53",
+        ),
+    ])?;
+    let sem_o_nsf = politica_trocada(&[
+        OPERADOR[0],
+        OPERADOR[1],
+        (
+            "recurso sistema net.observe udp:10.0.2.3:53",
+            "recurso sistema net.observe udp:10.0.2.3:53 udp:10.0.2.53:53",
+        ),
+    ])?;
+    bancada_dns::por_de_teste(&[("rajada.duke", &[[10, 0, 2, 100]])], Modo::Normal);
+    let resultado = com_a_politica(politica, || {
+        com_o_nsf(|| {
+            let sessao = crate::pessoas::sessao_de_teste(
+                crate::pessoas::Console::Terminal(58),
+                "dns-rajada",
+                "operador",
+            );
+            let pessoa = Chamador::Pessoa(sessao);
+            let conexao = conexao_aberta(&fs_pedir(
+                pessoa,
+                "net.connect",
+                &alloc::format!(r#"{{"to":"{SERVIDOR_DNS}"}}"#),
+            ))?;
+            let perguntar = |id: u16| -> Resultado {
+                let r = mandar_datagrama(pessoa, conexao, &pergunta_de_dns(id, "rajada.duke")?);
+                if fs_numero(&r, "sent").is_none() {
+                    crate::log_error!("teste", "{}", r);
+                    return Err("a pergunta nao saiu");
+                }
+                let m = protocolo::dns::ler(&datagrama_de(pessoa, conexao)?)
+                    .map_err(|_| "a resposta nao se le")?;
+                if m.id != id {
+                    return Err("a resposta e de outra pergunta");
+                }
+                Ok(())
+            };
+            let r = (|| -> Resultado {
+                for id in 0x1200..0x1200 + PERGUNTAS {
+                    perguntar(id)?;
+                }
+                let _ = crate::seguranca::passo();
+                let _ = crate::seguranca::passo();
+                let (lidas, resolucoes) = crate::seguranca::com_motor_de_teste(|m| {
+                    (m.contadores.capturas, m.dns.resolucoes().count())
+                })
+                .unwrap_or((0, 0));
+                if lidas != 2 * u64::from(PERGUNTAS) || resolucoes != usize::from(PERGUNTAS) {
+                    crate::log_error!("teste", "{} datagramas, {} resolucoes", lidas, resolucoes);
+                    return Err("o NSF nao leu a rajada inteira, ou leu a conversa de antes dele");
+                }
+                com_a_politica(sem_o_nsf, || {
+                    perguntar(0x1200 + PERGUNTAS)?;
+                    let v = crate::seguranca::passo();
+                    if v.recusadas != 1 {
+                        crate::log_error!("teste", "{:?}", v);
+                        return Err("recusada a observacao, o NSF insistiu na mesma volta");
+                    }
+                    Ok(())
+                })
             })();
             fechar_conexao(pessoa, conexao);
             r

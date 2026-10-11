@@ -341,6 +341,18 @@ auditoria naquele instante (`after_record` no `net.observe`), e uma
 resolução precedeu a decisão de número maior que esse. Sem conteúdo — um
 número —, e exato onde o relógio não separaria as duas.
 
+A captura de cada servidor é lida de onde parou, em lotes de 16, e a
+volta segue lendo enquanto o lote vem cheio — até o anel inteiro: o fim de
+uma rajada não espera outro datagrama, que talvez não venha. A primeira
+versão lia um lote por volta, e o resto só quando um datagrama novo
+chegasse; o programa que resolve muitos nomes de uma vez deixava as
+últimas respostas sem ninguém ler até alguém usar o DNS de novo. O HTTP
+pegou: os casos dele enchem o anel antes dos do DNS. O NSF que começa do
+agora — o da suíte, entre um caso e outro — também não lê a captura de
+antes dele: o servidor que ele passa a observar começa de onde o agora
+começou, e não do começo do anel, que guarda a conversa de outros donos,
+com números que um processo de agora pode ter de novo.
+
 A bancada da suíte tem um servidor de DNS determinístico, dentro da
 máquina, num endereço que o emulador não tem (`10.0.2.53`): uma tabela que
 o caso escreve, e modos para mentir de propósito — responder de outro

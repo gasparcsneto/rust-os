@@ -543,6 +543,37 @@ fn o_dns_lido_depois_da_conexao() {
     assert_eq!(m.deteccoes().count(), 1);
 }
 
+/// O motor que começa do agora não lê a captura de antes dele: o servidor
+/// que ele passa a observar é lido de onde o agora começou, e não do
+/// começo do anel, que guarda a conversa de quem veio antes — com um dono
+/// que pode ter o mesmo número de um de agora.
+#[test]
+fn o_agora_vale_tambem_para_a_captura() {
+    let mut a = Auditoria::nova();
+    let mut m = Motor::novo();
+    let velha = conversa("process:9", "velho.duke", [10, 0, 2, 99], 1, 0);
+    m.comecar_depois_de(0, 2);
+    a.gravar(do_agente(
+        "net.connect",
+        "udp:10.0.2.53:53",
+        Codigo::Allow,
+        "pelo processo 9 (resolvedor 00000000)",
+    ));
+    ler(&mut m, &a);
+    assert_eq!(m.a_observar(), [("udp:10.0.2.53:53".to_string(), 2)]);
+    assert_eq!(m.ler_captura("udp:10.0.2.53:53", velha.as_bytes()), Ok(0));
+    assert_eq!(m.dns.resolucoes().count(), 0);
+    let nova = conversa("process:9", "novo.duke", [10, 0, 2, 100], 3, 1);
+    assert_eq!(m.ler_captura("udp:10.0.2.53:53", nova.as_bytes()), Ok(2));
+    assert_eq!(m.dns.resolucoes().count(), 1);
+    // Sem o agora, o anel inteiro: a conversa que veio antes de o servidor
+    // ser conhecido é a do programa que acabou de usá-lo.
+    let mut m = Motor::novo();
+    ler(&mut m, &a);
+    assert_eq!(m.a_observar(), [("udp:10.0.2.53:53".to_string(), 0)]);
+    assert_eq!(m.ler_captura("udp:10.0.2.53:53", velha.as_bytes()), Ok(2));
+}
+
 /// A mesma sequência de uma pessoa e de um agente: as mesmas regras, a
 /// mesma severidade — nenhuma exceção para nenhum dos dois.
 #[test]
