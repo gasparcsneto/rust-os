@@ -1,0 +1,23 @@
+[package]
+# O HTTP do Duke: o cliente HTTP/1.1 com que um programa conversa com um
+# servidor, sobre a conexão que o gate decidiu — TCP direto, ou o TLS do
+# pacote `tls` por cima dela.
+#
+# Só o protocolo: escrever o pedido, ler a resposta, e os limites de cada
+# parte. O transporte é de quem chama — num programa do Duke, `net.send` e
+# `net.recv`, cada um decidido pelo gate —, e o pacote não sabe de destino,
+# de política nem de autoridade: o HTTP não autoriza nada. Ver `src/lib.rs`.
+#
+# Escrito aqui, e não tirado de um pacote de fora, ao contrário do TLS: o
+# HTTP/1.1 de um cliente é pequeno — uma linha, cabeçalhos, três jeitos de
+# delimitar o corpo —, e o que importa nele é o que se recusa, que um
+# pacote de fora decide por quem o escreveu.
+#
+# `no_std` com `alloc`, como o `tls`: compila para os programas.
+name = "http"
+version = "0.1.0"
+edition = "2024"
+description = "O cliente HTTP/1.1 dos programas do Duke"
+license = "MIT OR Apache-2.0"
+
+[dependencies]

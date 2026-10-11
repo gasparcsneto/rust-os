@@ -473,6 +473,16 @@ tls/src/             o cliente TLS 1.3 dos programas: o rustls sem std, com um p
 ├── resumo.rs        SHA-256, SHA-384 e o HMAC deles
 └── acaso.rs         o gerador da conexão, semeado por quem conecta, que falha fechado sem semente
 
+http/src/            o cliente HTTP/1.1 dos programas: nada do HTTP é autorização — o gate decide o destino, e o protocolo é do programa
+├── lib.rs           o que é, o que não é, e o que fica de fora de propósito: HTTP/2, fila de pedidos, cookies, seguir redirecionamento
+├── url.rs           só `http` e `https`, o host por nome ou IPv4 na forma normal; o que se recusa de propósito
+├── pedido.rs        a linha, o `Host`, os cabeçalhos de quem chama conferidos, e os que só o cliente escreve
+├── resposta.rs      a resposta pela RFC 9112: o enquadramento sem ambiguidade, os pedaços, os limites, e quando a conexão fica
+├── cliente.rs       um pedido de cada vez numa conexão, e a mesma conexão para o seguinte quando a resposta deixa
+├── erro.rs          a falha de baixo como veio, a conversa que acabou cedo, o protocolo e os limites
+├── categoria.rs     de que família é o código de uma falha — o gate, a contenção, o firewall, o DNS, o transporte, o prazo, o TLS
+└── testes.rs        cada resposta partida em todo tamanho de pedaço, contra um transporte de mentira
+
 armazem/src/         o armazém como conta pura: caminhos, diretórios, versões, donos e cotas; preparar e aplicar um lote
 ├── lib.rs           a árvore de arquivos e diretórios, a versão do armazém inteiro, o lote inteiro ou nada
 ├── bloco.rs         o bloco de 4 KiB do volume: XChaCha20-Poly1305 com o id do conteúdo e o índice no nonce
