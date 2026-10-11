@@ -2524,7 +2524,12 @@ e passado ele vai um RST — um par que não lê não segura a vaga. O fim de
 uma conexão leva só a sessão **dela**, pela geração da vaga, e nunca a da
 conexão seguinte, que já pode ter feito o aperto. E as conexões de rede
 que o agente abriu são da conexão dele: caem com ela, e a seguinte na
-mesma vaga, com a mesma chave, não as herda.
+mesma vaga, com a mesma chave, não as herda. O arrendamento também é da
+sessão: o que o agente tinha arrendado sai quando a conexão cai, gravado
+em nome dele, e quem conecta depois — a mesma chave, inclusive — não
+herda nada. O processo que ele lançou pela rede, não: age pela chave, e
+não pela conexão — continua o agente depois que ela cai, e perde a
+autoridade na hora em que a chave é revogada.
 
 **O NSF observa sem ser autoridade.** Os apertos recusados pela rede vão
 à auditoria como os das portas, com o par no detalhe, e o NSF os lê dali,
@@ -2600,6 +2605,14 @@ produção, `agent::atender`, andada à mão pela suíte.
   fumaça nem enche a saída da vaga. O limiar é conferido na suíte, onde a
   saída da pilha pode ser segurada; a fumaça confere que nada se perde no
   caminho de verdade.
+- **A fumaça do tecido pegava o NSF ainda lendo.** O CI reprovou a fumaça
+  nas duas arquiteturas na conferência do tecido quieto — quatro registros
+  em cinco segundos, e o limite é três. A perna do canal TCP, nova e logo
+  antes, escreve centenas de registros em segundos, e o NSF lê no máximo
+  uma volta por segundo, com a taxa do papel dele, que numa recusa o faz
+  recuar até um minuto. A janela de cinco segundos começa agora quando o
+  NSF alcança a cabeça da auditoria — de 1 a 1,6 s depois, nas fumaças
+  locais —, e o que se confere continua: alcançada a cabeça, ela para.
 
 ### As mutações da rede
 
@@ -2821,14 +2834,15 @@ Desenhá-las mostrou dois testes que faltavam:
 
 ### As mutações do canal TCP
 
-Trinta e cinco mutações contra o que o canal do agente por TCP promete —
+Trinta e nove mutações contra o que o canal do agente por TCP promete —
 a mesma taxa, a mesma janela de apertos e a mesma revogação das portas, a
 chave confirmada, o prazo do aperto, a escuta e os fluxos do firewall, a
 geração da vaga, a contrapressão e os tetos, o coletor, a auditoria de
-cada recusa e a presença só de quem confirmou —, trinta e uma contra os
+cada recusa, a presença só de quem confirmou, o arrendamento que cai com
+a conexão e o processo que age pela chave —, trinta e cinco contra os
 casos `canal tcp` da suíte de quatro núcleos, no x86, três contra os
 testes do firewall no hospedeiro e uma contra o `xtask invariantes`:
-**trinta e quatro reprovadas, e uma equivalente**.
+**trinta e oito reprovadas, e uma equivalente**.
 
 | Mutação | Reprovada por |
 |---|---|
@@ -2866,6 +2880,10 @@ testes do firewall no hospedeiro e uma contra o `xtask invariantes`:
 | a sessão não confirmada sem o par | os mesmos dois — a recusa sem o par |
 | a queda antes da confirmação não é gravada | `canal tcp: a identidade nao se forja` — quem repete e sai |
 | a confirmação não marca a sessão | quatro casos — o agente que confirmou não aparece |
+| o fim da sessão TCP não solta os arrendamentos | `canal tcp: o conflito e o fim da conexao` — e só ele: sem o caso, a mesma mutação passa pelos casos `coordenacao` e pelos outros treze `canal tcp` |
+| o comando da sessão TCP sem a chave | `canal tcp: o programa lancado pela rede` e `canal tcp: o processo sem a conexao e a revogacao` — o operador nem lança o programa |
+| a autoridade do processo presa à conexão viva | `canal tcp: o processo sem a conexao e a revogacao`, e só ele — caída a conexão, o processo perdeu o agente |
+| a revogação não alcança o processo lançado pela rede | o mesmo caso, e só ele — o processo seguiu com o papel da chave revogada |
 | a pendência sai da lista antes de tratada | equivalente — ver abaixo |
 
 Desenhá-las mostrou quatro lugares que nenhum caso alcançava — cada um
@@ -2888,6 +2906,29 @@ ganhou o seu antes da rodada final:
   confirmação** não eram olhados: o caso da identidade passou a conferir
   que o aperto repetido aparece como não autenticado, sem nome de agente,
   e que quem repete e sai deixa uma recusa gravada com a chave alegada.
+
+E, depois da primeira rodada, mais dois — cada um com o seu caso, e as
+mutações que só ele reprova:
+
+- **O arrendamento de quem cai da rede.** O fim de uma sessão TCP solta
+  os arrendamentos dela pelo mesmo caminho das portas, mas nenhum caso
+  tomava um arrendamento pela rede: a mutação que deixa de soltar os das
+  vagas sobreviveu aos casos `coordenacao`, que usam as portas, e aos
+  outros treze `canal tcp`. O caso `canal tcp: o conflito e o fim da
+  conexao` põe dois agentes pela rede na linha de comando — a versão velha
+  e o arrendamento de outro são `CONFLICT`, gravados com a sessão TCP de
+  quem pediu, e nada muda —, derruba a conexão de quem tinha o
+  arrendamento e espera a soltura gravada em nome dele; a mesma chave,
+  conectada de novo, não herda nada.
+- **O processo lançado pela rede, sem a conexão.** O caso `canal tcp: o
+  programa lancado pela rede` confere as recusas de dentro do processo,
+  mas não o que acontece com ele depois da conexão. O caso `canal tcp: o
+  processo sem a conexao e a revogacao` lança o `isolavel` pela rede: ele
+  continua o agente depois que a conexão cai — a autoridade é da chave —,
+  e a perde na hora em que a chave é revogada. As duas mutações — a
+  autoridade do processo presa à conexão viva, e a revogação que não o
+  alcança — passam pelo caso antigo e são reprovadas pelo novo; o caso
+  `politica: o processo age como o agente` olha só as portas.
 
 A equivalente: a pendência que sai da lista antes de ser tratada. Nada no
 kernel lê o tamanho da lista — só a suíte, para saber se a vaga ficou

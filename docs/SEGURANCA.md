@@ -405,6 +405,12 @@ onde veio —, e não entra em decisão nenhuma.
 - **A administração é a de sempre.** `admin.challenge` e `admin.execute`
   pela sessão TCP, com a prova amarrada ao número dela: o administrador
   recupera o sistema por qualquer canal, e por nenhum sem a prova.
+- **O que a conexão leva quando cai, e o que não.** A sessão, as conexões
+  de rede que o agente abriu por ela e os arrendamentos dele — gravados em
+  nome dele —; quem conecta depois na mesma vaga, mesmo com a mesma chave,
+  não herda nada. O processo que ele lançou pela rede age pela chave, e
+  não pela conexão: continua o agente depois que ela cai, e perde a
+  autoridade na hora em que a chave é revogada.
 
 ## As consultas
 
