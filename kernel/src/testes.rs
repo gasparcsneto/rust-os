@@ -30415,6 +30415,10 @@ static CASOS: &[Caso] = &[
         f: canal_tcp_a_contencao_e_o_administrador,
     },
     Caso {
+        nome: "canal tcp: o programa lancado pela rede",
+        f: canal_tcp_o_programa_lancado_pela_rede,
+    },
+    Caso {
         nome: "canal tcp: a regra do firewall derruba a conexao",
         f: canal_tcp_a_regra_do_firewall_derruba_a_conexao,
     },
@@ -38172,6 +38176,52 @@ fn canal_tcp_a_contencao_e_o_administrador() -> Resultado {
         let r = a.pedir("system.info", "{}")?;
         if !r.contains(r#""result""#) {
             return Err("com a credencial solta, a sessao da rede continuou recusada");
+        }
+        Ok(())
+    })
+}
+
+/// O processo lançado pela rede tem a autoridade de quem o lançou — a
+/// chave e o papel do agente —, e não a do canal nem a do sistema: o
+/// `autoridade`, lançado por um operador pela sessão TCP, confere de dentro
+/// as recusas que o papel manda, inclusive no filho de um `fork`; e o
+/// lançamento vai à auditoria com a sessão TCP, a chave e o papel.
+fn canal_tcp_o_programa_lancado_pela_rede() -> Resultado {
+    use politica::Codigo;
+    com_canal_tcp(|| {
+        crate::identidade::atribuir(&nome_de_teste(2), "operador")
+            .map_err(|_| "a atribuicao de teste falhou")?;
+        let mut a = AgenteTcpDeTeste::conectar(2)?;
+        let s = a.sessao();
+        let desde = crate::log::total_emitidos();
+        let caminho = alloc::format!("{}/autoridade", crate::usuario::DIRETORIO_DOS_COMPILADOS);
+        let r = a.pedir("user.run", &alloc::format!(r#"{{"path":"{caminho}"}}"#))?;
+        if !r.contains(r#""launched":true"#) {
+            crate::log_error!("teste", "tcp: {}", r);
+            return Err("o operador nao lancou um programa pela rede");
+        }
+        esperar_ate(
+            || {
+                let mut achou = false;
+                crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+                    achou |= r.seq >= desde
+                        && r.subsistema == "usuario"
+                        && r.mensagem() == "processo encerrou com codigo 72";
+                });
+                achou
+            },
+            600,
+        )
+        .map_err(|_| "o programa lancado pela rede nao rodou com a autoridade do agente")?;
+        let lancou = ultimo_que(|e| e.metodo == "user.run" && e.sessao == s)
+            .ok_or("o lancamento pela rede nao foi gravado")?;
+        if lancou.codigo != Codigo::Allow
+            || lancou.agente != nome_de_teste(2)
+            || lancou.chave != Some(sigilo::publica_de(&chave_de_teste(2)))
+            || lancou.papel != "operador"
+        {
+            crate::log_error!("teste", "tcp: {:?}", lancou);
+            return Err("o lancamento pela rede foi gravado sem o agente e o papel dele");
         }
         Ok(())
     })
