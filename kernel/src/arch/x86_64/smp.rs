@@ -50,7 +50,7 @@
 //! trocaram de `CR3` ao largá-lo, e trocar de `CR3` descarta as traduções do
 //! usuário. Ver [`super::paginacao::desmapear`].
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crate::trava::Mutex;
 use x86_64::structures::paging::PageTable;
@@ -423,8 +423,18 @@ static FALTAM: AtomicU64 = AtomicU64::new(0);
 /// Um pedido de descarte por vez.
 static TRAVA_DO_DESCARTE: Mutex<()> = Mutex::new(());
 
-/// O sistema parou, e todo núcleo que receber uma NMI deve parar também.
+/// O sistema parou, e todo núcleo que receber uma NMI deve parar também —
+/// menos o que conduz a parada, [`QUEM_PARA`].
 static PARANDO: AtomicBool = AtomicBool::new(false);
+/// O núcleo que chamou [`parar_os_outros`]: o único que uma NMI depois da
+/// parada não para. Ver [`atender_nmi`].
+static QUEM_PARA: AtomicUsize = AtomicUsize::new(usize::MAX);
+/// Só para a suíte: a próxima parada atende, logo depois de ligar
+/// [`PARANDO`], a NMI de um aviso de descarte que chegasse atrasado. O caso
+/// final pede, e quem conduz o fim tem de seguir até o relatório — ver
+/// [`atender_nmi`].
+#[cfg(feature = "modo-teste")]
+pub static NMI_ATRASADA_NA_PARADA: AtomicBool = AtomicBool::new(false);
 /// Quem já parou: um bit por núcleo.
 static PARADOS: AtomicU64 = AtomicU64::new(0);
 
@@ -532,8 +542,16 @@ pub fn reavisos() -> u64 {
 /// não estão executando código do kernel — nem uma NMI os alcança —, e o
 /// relatório segue sem eles.
 pub fn parar_os_outros() -> crate::nucleos::Mascara {
-    PARANDO.store(true, Ordering::Release);
     let eu = gdt::nucleo_atual();
+    // Antes de `PARANDO`: quem vê a parada vê também quem a conduz.
+    QUEM_PARA.store(eu, Ordering::Release);
+    PARANDO.store(true, Ordering::Release);
+    // O aviso atrasado que a suíte pede, atendido aqui como a NMI o
+    // atenderia — ver `NMI_ATRASADA_NA_PARADA`.
+    #[cfg(feature = "modo-teste")]
+    if NMI_ATRASADA_NA_PARADA.load(Ordering::Acquire) {
+        atender_nmi();
+    }
     let outros = crate::nucleos::mascara_dos_ligados() & !crate::nucleos::bit(eu);
     for i in 0..MAX_NUCLEOS {
         if outros & (1 << i) != 0
@@ -570,11 +588,24 @@ static NMIS_ATENDIDAS: AtomicU64 = AtomicU64::new(0);
 ///
 /// Sem trava nenhuma: a NMI pode ter chegado com este núcleo segurando
 /// qualquer uma, e tomar uma trava aqui seria esperar por si mesmo.
+///
+/// # Quem conduz a parada não para
+///
+/// A NMI é a mesma para os dois avisos, e quem a recebe não sabe qual deles
+/// ela traz: decide por [`PARANDO`]. Um aviso de descarte mandado antes da
+/// parada e entregue depois dela chega também ao núcleo que conduz o fim —
+/// e ele, que acabou de parar os outros, parava a si mesmo, no meio do
+/// relatório: o sistema morria calado, que é o que o caminho de falha
+/// existe para impedir. Achado com a suíte filtrada, quando o coletor
+/// devolvia as páginas da pilha de um fio enquanto o caso final estourava a
+/// pilha de propósito: o caso pendurava até o teto do `xtask`. O caso final
+/// agora pede a NMI atrasada — ver `NMI_ATRASADA_NA_PARADA` —, e sem esta
+/// conferência ele pendura sempre.
 pub fn atender_nmi() {
     let eu = gdt::nucleo_atual();
     let bit = crate::nucleos::bit(eu);
 
-    if PARANDO.load(Ordering::Acquire) {
+    if PARANDO.load(Ordering::Acquire) && QUEM_PARA.load(Ordering::Acquire) != eu {
         PARADOS.fetch_or(bit, Ordering::AcqRel);
         // Nunca voltamos: sem `iretq`, o processador também não entrega
         // outra NMI, e este núcleo fica parado de vez.

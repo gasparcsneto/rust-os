@@ -9860,10 +9860,21 @@ fn consumir_pilha(profundidade: u64) -> u64 {
 /// É também o único caso que testa as três peças de uma vez: a guard page
 /// existe, a falha é entregue, e o handler tem uma pilha intacta para rodar.
 /// Sem a terceira, o próprio handler faltaria ao empilhar o contexto.
+///
+/// # E a NMI atrasada, no x86
+///
+/// É o único caso que passa pela parada dos outros núcleos, e por isso ele
+/// pede também a NMI de um aviso de descarte que chegasse depois da parada:
+/// quem conduz o fim tem de ignorá-la e seguir até o relatório. Sem isso, o
+/// núcleo que parou os outros parava a si mesmo, e o caso pendurava — ver
+/// `smp::atender_nmi`.
 fn estouro_de_pilha_e_detectado() -> ! {
     crate::serial_print!("  {:<42} ", "pilha: estouro e detectado");
 
     crate::traps::esperar(crate::arch::falha_de_estouro_de_pilha());
+    #[cfg(target_arch = "x86_64")]
+    crate::arch::x86_64::smp::NMI_ATRASADA_NA_PARADA
+        .store(true, core::sync::atomic::Ordering::Release);
     let _ = consumir_pilha(0);
 
     // Inalcançável se a guard page funcionar.
