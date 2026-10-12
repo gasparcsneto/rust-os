@@ -31,6 +31,12 @@ use crate::nativo::{self, Resposta, conteudo};
 /// O maior arquivo de âncoras que se lê.
 const MAIOR_ANCORAS: u64 = 16 * 1024;
 
+// Um registro que sai é um `net.send`: o registro cifrado inteiro é o
+// buffer da conexão.
+const _: () = assert!(
+    CLARO_POR_REGISTRO + tls::SOBRA_DO_REGISTRO == protocolo::usuario::nativo::BUFFER_DA_CONEXAO
+);
+
 /// A recusa do gate, com o código dele, ou a falha da chamada.
 fn do_pedido(r: Result<Resposta, i64>) -> Result<Resposta, Falha> {
     let r = r.map_err(|_| Falha::Transporte(Codigo::de("TECHNICAL_ERROR")))?;

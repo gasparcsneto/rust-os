@@ -167,6 +167,12 @@ pub mod nativo {
     /// disso vai em pedaços, por um rascunho do armazém (`fs.draft`).
     pub const MAIOR_ANEXO: usize = 60 * 1024;
 
+    /// O buffer de cada sentido de uma conexão TCP: o maior `net.send` cabe
+    /// nele, e um `net.recv` devolve no máximo isto. Cada pedido é uma
+    /// decisão do gate, e leva até um buffer inteiro — vários segmentos do
+    /// TCP numa decisão, e não um.
+    pub const BUFFER_DA_CONEXAO: usize = 16 * 1024;
+
     /// A versão da interface nativa, que `system.info` publica. Cresce
     /// quando uma chamada de mecanismo é acrescentada ou o envelope muda;
     /// os comandos do registro se descrevem sozinhos, por `agent.describe`.

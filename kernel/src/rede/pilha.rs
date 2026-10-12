@@ -116,9 +116,26 @@ pub const MAIS_CONEXOES: usize = 16;
 /// tabela dos outros.
 pub const CONEXOES_POR_DONO: usize = 4;
 
-/// O buffer de cada sentido de uma conexão. O maior `net.send` cabe nele,
-/// e um `net.recv` devolve no máximo isto.
-pub const BUFFER_DA_CONEXAO: usize = 4096;
+/// O buffer de cada sentido de uma conexão TCP. O maior `net.send` cabe
+/// nele, e um `net.recv` devolve no máximo isto: cada pedido é uma decisão
+/// do gate, e leva até um buffer — vários segmentos do TCP numa decisão.
+///
+/// É também a janela que a conexão anuncia, e por isso o tamanho dela é o
+/// que a vazão é: o outro lado manda até a janela, e espera o programa ler.
+/// A janela inteira só vale porque a placa recebe a rajada dela sem perder
+/// quadro — ver [`Adaptador::capabilities`]. Na memória, são dois buffers
+/// por conexão, [`CONEXOES_POR_DONO`] por dono e [`MAIS_CONEXOES`] na
+/// máquina: 512 KiB do heap no pior caso, com a tabela cheia.
+pub const BUFFER_DA_CONEXAO: usize = protocolo::usuario::nativo::BUFFER_DA_CONEXAO;
+
+// A janela de uma conexão cabe no campo de 16 bits do TCP: o `smoltcp` não
+// a escala, e o que se vê no fio é o buffer.
+const _: () = assert!(BUFFER_DA_CONEXAO <= u16::MAX as usize);
+
+/// O espaço de cada sentido de uma associação UDP, para os
+/// [`DATAGRAMAS_DA_ASSOCIACAO`] dela. Não acompanha o do TCP: um datagrama
+/// tem no máximo [`MAIOR_DATAGRAMA`] bytes, e uma leitura leva um.
+const BUFFER_DA_ASSOCIACAO: usize = 4096;
 
 /// A primeira porta local das conexões de saída: o começo da faixa
 /// dinâmica. Cada conexão nova pega a seguinte, dando a volta no fim.
@@ -130,8 +147,8 @@ const PRIMEIRA_PORTA: u16 = 49152;
 /// com o motivo, em vez de cortado ou perdido.
 pub const MAIOR_DATAGRAMA: usize = MAIOR_QUADRO - 14 - 20 - 8;
 
-/// Quantos datagramas esperam em cada sentido de uma associação UDP. O
-/// espaço deles é o mesmo [`BUFFER_DA_CONEXAO`] de uma conexão TCP.
+/// Quantos datagramas esperam em cada sentido de uma associação UDP, no
+/// espaço de [`BUFFER_DA_ASSOCIACAO`].
 const DATAGRAMAS_DA_ASSOCIACAO: usize = 8;
 
 /// O estado de uma conexão, como o agente e o programa o leem.
@@ -459,6 +476,8 @@ impl TxToken for Envio<'_> {
         if SAIDA_SEGURA.load(Ordering::Acquire) {
             return r;
         }
+        #[cfg(feature = "modo-teste")]
+        observar_janela(&quadro);
         match crate::virtio::net::com_a_placa(|placa| placa.transmitir(&quadro)) {
             Some(Ok(())) | None => {}
             Some(Err(motivo)) => crate::log_warn!("rede", "quadro nao saiu: {}", motivo),
@@ -536,10 +555,26 @@ impl Device for Adaptador<'_> {
         // No Ethernet o `smoltcp` conta o cabeçalho no MTU: é o quadro
         // inteiro, o mesmo teto da placa.
         c.max_transmission_unit = MAIOR_QUADRO;
-        c.max_burst_size = Some(1);
+        // A rajada que a placa recebe sem perder quadro: um buffer de
+        // recepção para cada. O `smoltcp` limita a janela anunciada a ela —
+        // o outro lado não manda mais do que a placa tem onde pôr —, e é
+        // ela que decide se a janela é o buffer da conexão ou menos que
+        // ele. Com um quadro só, a janela era um segmento: o outro lado
+        // mandava um e esperava a confirmação atrasada, e a conexão andava
+        // um segmento a cada 20 ms, qualquer que fosse o buffer.
+        c.max_burst_size = Some(crate::virtio::net::BUFFERS_DE_RECEPCAO);
         c
     }
 }
+
+/// A rajada que a placa recebe cobre o buffer de uma conexão: a janela
+/// anunciada é o buffer inteiro, e não um pedaço dele. O segmento é o quadro
+/// sem os cabeçalhos IPv4 e TCP, contados no maior — 20 e 60 bytes —, como o
+/// `smoltcp` conta.
+const _: () = assert!(
+    crate::virtio::net::BUFFERS_DE_RECEPCAO * (MAIOR_QUADRO - 20 - 60) >= BUFFER_DA_CONEXAO,
+    "a rajada da placa nao cobre a janela de uma conexao"
+);
 
 /// Liga a pilha sobre a placa, se há uma com endereço, e põe o fio `rede`
 /// para fazê-la andar. Depois da placa e do gerador de números: a semente
@@ -1044,7 +1079,7 @@ pub fn abrir(
                 let buffer = || {
                     udp::PacketBuffer::new(
                         vec![udp::PacketMetadata::EMPTY; DATAGRAMAS_DA_ASSOCIACAO],
-                        vec![0u8; BUFFER_DA_CONEXAO],
+                        vec![0u8; BUFFER_DA_ASSOCIACAO],
                     )
                 };
                 let mut socket = udp::Socket::new(buffer(), buffer());
@@ -1416,6 +1451,68 @@ static SAIDA_SEGURA: core::sync::atomic::AtomicBool = core::sync::atomic::Atomic
 #[cfg(feature = "modo-teste")]
 pub fn segurar_saida_de_teste(segurar: bool) {
     SAIDA_SEGURA.store(segurar, Ordering::Release);
+}
+
+/// Na suíte: a porta local vigiada, e a última e a maior janela que a
+/// pilha anunciou nos segmentos TCP que saíram dela — ver
+/// [`vigiar_janela_de_teste`]. A porta nos bits 48 a 63; o bit 47 diz que
+/// algum segmento saiu; a última janela nos bits 16 a 31, e a maior nos 16
+/// de baixo.
+#[cfg(feature = "modo-teste")]
+static JANELA_VIGIADA: AtomicU64 = AtomicU64::new(0);
+
+/// O bit que diz que algum segmento saiu da porta vigiada.
+#[cfg(feature = "modo-teste")]
+const JANELA_VISTA: u64 = 1 << 47;
+
+/// Na suíte: a janela que um quadro de saída anuncia, se ele é um segmento
+/// TCP da porta vigiada. O campo como está no fio: as conexões do Duke não
+/// escalam a janela — o buffer cabe em 16 bits.
+#[cfg(feature = "modo-teste")]
+fn observar_janela(quadro: &[u8]) {
+    let vigiada = JANELA_VIGIADA.load(Ordering::Acquire);
+    let porta = (vigiada >> 48) as u16;
+    if porta == 0 || quadro.len() < 14 + 20 || quadro[12..14] != [0x08, 0x00] {
+        return;
+    }
+    let ip = usize::from(quadro[14] & 0x0f) * 4;
+    if quadro[14 + 9] != 6 || quadro.len() < 14 + ip + 20 {
+        return;
+    }
+    let tcp = &quadro[14 + ip..];
+    if u16::from_be_bytes([tcp[0], tcp[1]]) != porta {
+        return;
+    }
+    let janela = u64::from(u16::from_be_bytes([tcp[14], tcp[15]]));
+    let maior = (vigiada & 0xffff).max(janela);
+    JANELA_VIGIADA.store(
+        (u64::from(porta) << 48) | JANELA_VISTA | (janela << 16) | maior,
+        Ordering::Release,
+    );
+}
+
+/// Só para a suíte: passa a vigiar a janela que a pilha anuncia nos
+/// segmentos TCP que saem da porta local `porta` — e esquece o que viu
+/// antes, inclusive a maior.
+#[cfg(feature = "modo-teste")]
+pub fn vigiar_janela_de_teste(porta: u16) {
+    JANELA_VIGIADA.store(u64::from(porta) << 48, Ordering::Release);
+}
+
+/// Só para a suíte: a última e a maior janela anunciadas pela porta
+/// vigiada desde [`vigiar_janela_de_teste`], se algum segmento saiu dela.
+#[cfg(feature = "modo-teste")]
+pub fn janela_anunciada_de_teste() -> Option<(u16, u16)> {
+    let vigiada = JANELA_VIGIADA.load(Ordering::Acquire);
+    (vigiada & JANELA_VISTA != 0).then_some(((vigiada >> 16) as u16, vigiada as u16))
+}
+
+/// Só para a suíte: quantas vagas da tabela estão tomadas — as conexões
+/// vivas, os fechos que ainda terminam e as cortadas pelo firewall, que
+/// contam todas no teto da máquina.
+#[cfg(feature = "modo-teste")]
+pub fn ocupadas_de_teste() -> (usize, usize, usize) {
+    com_pilha(|p| (p.conexoes.len(), p.fechando.len(), p.cortadas.len())).unwrap_or((0, 0, 0))
 }
 
 /// Só para a suíte: a próxima porta local que uma conexão nova pede.

@@ -37,12 +37,20 @@ use crate::{Falha, SOBRA_DO_REGISTRO, acaso, provedor};
 /// acrescenta (até 256) e o cabeçalho (RFC 8446, 5.2).
 const MAIOR_REGISTRO: usize = (1 << 14) + 256 + 5;
 
-/// O buffer de entrada: um registro inteiro, e a folga de uma leitura.
-const ENTRADA: usize = MAIOR_REGISTRO + 4096;
+/// O maior registro que sai, cifrado: o maior `net.send` do Duke, o buffer
+/// de uma conexão — um registro, uma decisão do gate.
+const MAIOR_REGISTRO_QUE_SAI: usize = 16 * 1024;
+
+/// O buffer de entrada: um registro inteiro, e a folga de uma leitura — o
+/// que um `net.recv` traz, até o buffer de uma conexão.
+const ENTRADA: usize = MAIOR_REGISTRO + 16 * 1024;
 
 /// Quanto texto claro vai em cada registro que sai: o registro cifrado
-/// inteiro tem 4096 bytes — o maior `net.send` do Duke.
-pub const CLARO_POR_REGISTRO: usize = 4096 - SOBRA_DO_REGISTRO;
+/// inteiro tem [`MAIOR_REGISTRO_QUE_SAI`] bytes. Cabe no maior texto de um
+/// registro, 2^14 bytes (RFC 8446, 5.1).
+pub const CLARO_POR_REGISTRO: usize = MAIOR_REGISTRO_QUE_SAI - SOBRA_DO_REGISTRO;
+
+const _: () = assert!(CLARO_POR_REGISTRO <= 1 << 14);
 
 /// Quantas voltas a sessão dá, no máximo, para mandar ao par o alerta de
 /// um aperto recusado: as que consomem o resto do voo do servidor — um
@@ -495,7 +503,7 @@ fn escrever(
 ) -> Result<(), Falha> {
     let inicio = saida.len();
     // Um registro inteiro de folga: o caso comum cabe na primeira.
-    saida.resize(inicio + 4096, 0);
+    saida.resize(inicio + MAIOR_REGISTRO_QUE_SAI, 0);
     match f(&mut saida[inicio..]) {
         Ok(n) => {
             saida.truncate(inicio + n);

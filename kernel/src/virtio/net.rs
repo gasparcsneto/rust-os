@@ -80,24 +80,34 @@ const BUFFER: usize = CABECALHO + MAIOR_QUADRO;
 
 /// Quantos buffers de recepção ficam pendurados no dispositivo.
 ///
-/// # Por que quatro, e por que um frame cada
+/// # Por que dezesseis, e por que um frame cada
 ///
-/// Quatro porque o número só precisa cobrir a rajada que chega entre duas
-/// colheitas, e este driver é consultado pelo canal do agente, não por uma
-/// pilha de rede — as colheitas são frequentes e as rajadas, curtas.
+/// Dezesseis porque o número precisa cobrir a rajada que chega entre duas
+/// colheitas, e a rajada é a janela do TCP: o outro lado de uma conexão
+/// manda até a janela anunciada sem esperar confirmação, e a pilha só
+/// anuncia a janela que a placa recebe sem perder quadro — um quadro por
+/// buffer (ver `rede::pilha`). Com dezesseis, a rajada passa do buffer de
+/// uma conexão, e a janela é o buffer inteiro. Eram quatro quando só o
+/// canal do agente consultava a placa, e a pilha anunciava um segmento.
 ///
 /// Um frame inteiro para cada, gastando 1526 bytes dos 4096, porque o frame é
 /// a unidade que o alocador entrega e a única que garante contiguidade
-/// física. A primeira versão disto tentou empacotar os quatro num frame só, e
-/// a asserção de compilação logo abaixo recusou a compilar: quatro buffers de
-/// 1526 bytes são 6104. Desperdiçar dez KiB de RAM numa máquina com centenas
-/// de MiB é mais barato que um cálculo de deslocamento que precisa estar
-/// certo.
+/// física. A primeira versão disto tentou empacotar os quatro de então num
+/// frame só, e a asserção de compilação logo abaixo recusou a compilar:
+/// quatro buffers de 1526 bytes são 6104. Os 64 KiB de dezesseis frames numa
+/// máquina com centenas de MiB são mais baratos que um cálculo de
+/// deslocamento que precisa estar certo.
 ///
 /// Um buffer por cadeia, e não cabeçalho e quadro em descritores separados: o
 /// dispositivo aceita os dois no mesmo, e uma cadeia de um descritor é uma a
-/// menos para alocar por pacote.
-pub const BUFFERS_DE_RECEPCAO: usize = 4;
+/// menos para alocar por pacote. Cabem na fila: ela tem
+/// [`super::fila::DESCRITORES`] descritores.
+pub const BUFFERS_DE_RECEPCAO: usize = 16;
+
+const _: () = assert!(
+    BUFFERS_DE_RECEPCAO <= super::fila::DESCRITORES as usize,
+    "os buffers de recepcao nao cabem na fila"
+);
 
 /// Onde o endereço MAC está, na configuração específica do dispositivo.
 const CONFIG_MAC: u64 = 0;
@@ -307,8 +317,8 @@ impl Placa {
     /// de quatro pacotes que este driver anuncia deixava de existir a partir
     /// do segundo pacote.
     ///
-    /// O estado estável agora é o pretendido: quatro descritores em uso, um
-    /// por buffer, e quatro livres.
+    /// O estado estável agora é o pretendido: um descritor em uso por buffer
+    /// — [`BUFFERS_DE_RECEPCAO`] —, e os outros livres.
     fn pendurar_buffers(&mut self) {
         for indice in 0..BUFFERS_DE_RECEPCAO {
             if self.ja_pendurado(indice) {

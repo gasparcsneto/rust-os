@@ -34,8 +34,9 @@ use crate::pedido::{Metodo, tchar};
 /// Quantas respostas informativas (1xx) se aceitam antes da final.
 const MAIS_INFORMATIVAS: usize = 8;
 
-/// O maior pedaço que se pede ao transporte de uma vez.
-const LEITURA: usize = 4096;
+/// O maior pedaço que se pede ao transporte de uma vez: o buffer de uma
+/// conexão do Duke, o que um `net.recv` traz numa decisão do gate.
+const LEITURA: usize = 16 * 1024;
 
 /// A maior linha de tamanho de um pedaço, com as extensões.
 const MAIOR_LINHA_DE_PEDACO: usize = 1024;
@@ -122,13 +123,20 @@ struct Entrada<'a, F: Fluxo> {
 impl<F: Fluxo> Entrada<'_, F> {
     /// Mais bytes do transporte. `false`: o outro lado fechou.
     fn encher(&mut self) -> Result<bool, Erro<F::Falha>> {
-        let mut pedaco = [0u8; LEITURA];
-        let n = self.fluxo.receber(&mut pedaco).map_err(Erro::Baixo)?;
-        if n == 0 {
-            return Ok(false);
-        }
-        self.buffer.extend_from_slice(&pedaco[..n.min(LEITURA)]);
-        Ok(true)
+        // Direto no fim do buffer, e não num pedaço na pilha: a pilha de um
+        // programa do Duke tem 64 KiB, e uma leitura é um quarto disso.
+        let inicio = self.buffer.len();
+        self.buffer.resize(inicio + LEITURA, 0);
+        let lido = self.fluxo.receber(&mut self.buffer[inicio..]);
+        let n = match lido {
+            Ok(n) => n.min(LEITURA),
+            Err(e) => {
+                self.buffer.truncate(inicio);
+                return Err(Erro::Baixo(e));
+            }
+        };
+        self.buffer.truncate(inicio + n);
+        Ok(n > 0)
     }
 
     /// Uma linha, sem o CRLF, de no máximo `maximo` bytes.

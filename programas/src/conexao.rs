@@ -25,8 +25,9 @@ use crate::nativo::{self, Resposta, conteudo};
 
 pub use tls::Codigo;
 
-/// O maior pedaço de um `net.send`: o buffer de uma conexão.
-const MAIOR_ENVIO: usize = 4096;
+/// O maior pedaço de um `net.send` e de um `net.recv`: o buffer de uma
+/// conexão. Cada pedido é uma decisão do gate, e leva até um buffer.
+const MAIOR_ENVIO: usize = protocolo::usuario::nativo::BUFFER_DA_CONEXAO;
 
 /// Quanto o transporte espera o outro lado.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -412,7 +412,7 @@ pub static COMANDOS: &[Command] = &[
     },
     Command {
         nome: "net.send",
-        resumo: "Manda bytes por uma conexao sua: o texto de `content`, ou o anexo do pedido (binario). Devolve quantos a conexao aceitou — numa TCP, menos que todos com o buffer de saida cheio; numa UDP, um datagrama inteiro, de ate 1472 bytes, ou nada e o motivo — e o estado. Com `wait`, se nada cabe agora e a conexao esta abrindo ou aberta, espera abrir espaco na fila de saida, o estado mudar, a conexao acabar ou o prazo vencer — e o pedido, com os mesmos bytes, e decidido de novo antes de mandar.",
+        resumo: "Manda bytes por uma conexao sua: o texto de `content`, ou o anexo do pedido (binario), ate 16384 bytes (o buffer da conexao). Devolve quantos a conexao aceitou — numa TCP, menos que todos com o buffer de saida cheio; numa UDP, um datagrama inteiro, de ate 1472 bytes, ou nada e o motivo — e o estado. Com `wait`, se nada cabe agora e a conexao esta abrindo ou aberta, espera abrir espaco na fila de saida, o estado mudar, a conexao acabar ou o prazo vencer — e o pedido, com os mesmos bytes, e decidido de novo antes de mandar.",
         params: &[
             ParamSpec {
                 nome: "connection",
@@ -446,7 +446,7 @@ pub static COMANDOS: &[Command] = &[
     },
     Command {
         nome: "net.recv",
-        resumo: "O que chegou numa conexao sua, ate `max` bytes (padrao e teto: 4096), e o estado dela. Numa UDP, um datagrama inteiro so do destino dela, com o tamanho em `datagram`; o que nao cabe em `max` fica, e a resposta diz o tamanho. Sem `wait`, nao espera: sem nada chegado, devolve vazio. Com `wait`, sem nada chegado e com a conexao ainda abrindo ou aberta, espera ate chegar dado, o estado mudar, a conexao acabar ou o prazo vencer — e o pedido e decidido de novo antes de responder. `encoding` diz `utf-8` (numa TCP, cortado no fim de um caractere; o resto fica para o proximo) ou `base64`.",
+        resumo: "O que chegou numa conexao sua, ate `max` bytes (padrao e teto: 16384, o buffer da conexao), e o estado dela. Numa UDP, um datagrama inteiro so do destino dela, com o tamanho em `datagram`; o que nao cabe em `max` fica, e a resposta diz o tamanho. Sem `wait`, nao espera: sem nada chegado, devolve vazio. Com `wait`, sem nada chegado e com a conexao ainda abrindo ou aberta, espera ate chegar dado, o estado mudar, a conexao acabar ou o prazo vencer — e o pedido e decidido de novo antes de responder. `encoding` diz `utf-8` (numa TCP, cortado no fim de um caractere; o resto fica para o proximo) ou `base64`.",
         params: &[
             ParamSpec {
                 nome: "connection",
@@ -2600,6 +2600,13 @@ fn barrado(w: &mut JsonWriter, destino: &politica::endereco::Destino, regra: u64
     w.field_u64("rule", regra)
 }
 
+// As descrições de `net.send` e `net.recv` dizem o buffer da conexão pelo
+// número: quem o muda muda o texto.
+const _: () = assert!(
+    crate::rede::pilha::BUFFER_DA_CONEXAO == 16384,
+    "as descricoes de net.send e net.recv dizem 16384"
+);
+
 fn net_send(params: Json, w: &mut JsonWriter) -> fmt::Result {
     let mut anexo = crate::autorizacao::tirar_anexo();
     let numero = params.member("connection").and_then(|v| v.as_u64());
@@ -2664,7 +2671,8 @@ fn net_send_com(
     };
     let dados = match dados {
         Ok(d) if d.len() > crate::rede::pilha::BUFFER_DA_CONEXAO => {
-            return w.field_str("error", "mais que 4096 bytes num envio");
+            w.field_str("error", "mais que o buffer da conexao num envio")?;
+            return w.field_u64("max", crate::rede::pilha::BUFFER_DA_CONEXAO as u64);
         }
         Ok(d) => d,
         Err(m) => return w.field_str("error", m),

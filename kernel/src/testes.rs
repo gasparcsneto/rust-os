@@ -30618,6 +30618,10 @@ static CASOS: &[Caso] = &[
         f: rede_o_teto_de_conexoes_e_por_titular,
     },
     Caso {
+        nome: "rede: a memoria das conexoes volta",
+        f: rede_a_memoria_das_conexoes_volta,
+    },
+    Caso {
         nome: "rede: o caractere partido nao prende a leitura",
         f: rede_o_caractere_partido_nao_prende_a_leitura,
     },
@@ -30636,6 +30640,18 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "rede: varios fios conversam ao mesmo tempo",
         f: rede_varios_fios_conversam_ao_mesmo_tempo,
+    },
+    Caso {
+        nome: "rede: a janela e o buffer inteiro, e fecha quando ninguem le",
+        f: rede_a_janela_e_o_buffer_inteiro,
+    },
+    Caso {
+        nome: "rede: o pedido maior que o buffer",
+        f: rede_o_pedido_maior_que_o_buffer,
+    },
+    Caso {
+        nome: "rede: varios fios trocam buffers inteiros ao mesmo tempo",
+        f: rede_varios_fios_trocam_buffers_inteiros,
     },
     Caso {
         nome: "rede: a espera acorda pelo evento da pilha",
@@ -31546,31 +31562,9 @@ fn ler_da_conexao(
                 "net.recv",
                 &alloc::format!(r#"{{"connection":{conexao}}}"#),
             );
-            match (
-                fs_texto(&r, "encoding").as_deref(),
-                Json(r.as_bytes()).member("result"),
-            ) {
-                (Some("utf-8"), Some(res)) => {
-                    let mut claro = alloc::vec![0u8; 8192];
-                    match res
-                        .member("content")
-                        .and_then(|c| c.desescapar_em(&mut claro))
-                    {
-                        Some(t) => lidos.extend_from_slice(t.as_bytes()),
-                        None => falha = Some("o texto lido nao se desescapa"),
-                    }
-                }
-                (Some("base64"), Some(_)) => {
-                    let t = fs_texto(&r, "content").unwrap_or_default();
-                    match de_base64(&t) {
-                        Some(b) => lidos.extend_from_slice(&b),
-                        None => falha = Some("o base64 lido nao se decodifica"),
-                    }
-                }
-                _ => {
-                    crate::log_error!("teste", "net.recv: {}", r);
-                    falha = Some("net.recv nao devolveu o conteudo");
-                }
+            match bytes_lidos(&r) {
+                Ok(b) => lidos.extend_from_slice(&b),
+                Err(e) => falha = Some(e),
             }
             falha.is_some() || lidos.len() >= quantos
         },
@@ -31580,6 +31574,29 @@ fn ler_da_conexao(
         return Err(f);
     }
     Ok(lidos)
+}
+
+/// Os bytes que um `net.recv` devolveu, em texto ou em base64 — até o
+/// buffer inteiro de uma conexão.
+fn bytes_lidos(r: &str) -> Result<alloc::vec::Vec<u8>, &'static str> {
+    match (
+        fs_texto(r, "encoding").as_deref(),
+        Json(r.as_bytes()).member("result"),
+    ) {
+        (Some("utf-8"), Some(res)) => {
+            let mut claro = alloc::vec![0u8; crate::rede::pilha::BUFFER_DA_CONEXAO];
+            res.member("content")
+                .and_then(|c| c.desescapar_em(&mut claro))
+                .map(|t| t.as_bytes().to_vec())
+                .ok_or("o texto lido nao se desescapa")
+        }
+        (Some("base64"), Some(_)) => de_base64(&fs_texto(r, "content").unwrap_or_default())
+            .ok_or("o base64 lido nao se decodifica"),
+        _ => {
+            crate::log_error!("teste", "net.recv: {}", r);
+            Err("net.recv nao devolveu o conteudo")
+        }
+    }
 }
 
 /// A pilha pede o endereço ao DHCP do emulador, e o recebe: o endereço que
@@ -32238,6 +32255,450 @@ fn rede_varios_fios_conversam_ao_mesmo_tempo() -> Resultado {
     // outro. Dizer aqui um deles seria dizer o errado nos outros casos.
     if ERRADOS.load(SeqCst) != 0 {
         return Err("um fio nao conversou com o eco (o motivo de cada um esta no log)");
+    }
+    esperar_cedendo(|| crate::rede::pilha::donos().is_empty(), 300)
+        .map_err(|_| "a tabela de conexoes nao esvaziou")?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// A janela e o buffer de uma conexão
+// ---------------------------------------------------------------------------
+
+/// A janela que a conexão anuncia é o buffer inteiro, e fecha quando ninguém
+/// lê.
+///
+/// Era um segmento: a placa dizia ao `smoltcp` que recebia um quadro por vez
+/// — a rajada dela —, e ele limita a janela à rajada. O outro lado mandava um
+/// segmento e esperava a confirmação atrasada, uns 20 ms, qualquer que fosse
+/// o buffer, e a conexão andava a 70 KiB/s. A rajada agora é a dos buffers de
+/// recepção da placa, e a janela é o buffer.
+///
+/// E o buffer cheio fecha a janela: o eco devolve mais do que cabe, ninguém
+/// lê, e o que não coube fica do outro lado — o kernel guarda o buffer, e
+/// nada além. Uma leitura leva o buffer inteiro, numa decisão do gate; a
+/// janela reabre inteira, e o resto chega.
+fn rede_a_janela_e_o_buffer_inteiro() -> Resultado {
+    use crate::rede::conexoes::Dono;
+    use crate::rede::pilha::{self, BUFFER_DA_CONEXAO};
+    const A_MAIS: usize = 1000;
+    let quem = sistema_aqui();
+    let dono = Dono::Processo(crate::fios::id_atual());
+    let conexao = conexao_aberta(&fs_pedir(
+        quem,
+        "net.connect",
+        &alloc::format!(r#"{{"to":"{ECO}"}}"#),
+    ))?;
+    let janela = || {
+        let j = pilha::janela_anunciada_de_teste();
+        crate::log_error!("teste", "janela (ultima, maior): {:?}", j);
+    };
+    let resultado = (|| -> Resultado {
+        if estado_depois_do_aperto(quem, conexao)? != "established" {
+            return Err("a conexao ao eco nao se estabeleceu");
+        }
+        let porta = pilha::porta_local_de_teste(conexao).ok_or("a conexao nao tem porta local")?;
+        pilha::vigiar_janela_de_teste(porta);
+        // O segmento que sai com a frase leva a janela, com o buffer vazio.
+        let r = fs_pedir(
+            quem,
+            "net.send",
+            &alloc::format!(r#"{{"connection":{conexao},"content":"janela"}}"#),
+        );
+        if fs_numero(&r, "sent") != Some(6) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o eco nao aceitou a frase");
+        }
+        if ler_da_conexao(quem, conexao, 6)? != b"janela" {
+            return Err("o eco nao devolveu a frase");
+        }
+        esperar_cedendo(
+            || {
+                pilha::janela_anunciada_de_teste()
+                    .is_some_and(|(_, maior)| usize::from(maior) == BUFFER_DA_CONEXAO)
+            },
+            300,
+        )
+        .map_err(|_| {
+            janela();
+            "a janela anunciada nao e o buffer da conexao"
+        })?;
+
+        // O buffer inteiro e mais um pouco, que o eco devolve e ninguém lê.
+        let dados: alloc::vec::Vec<u8> = (0..BUFFER_DA_CONEXAO + A_MAIS)
+            .map(|i| b'a' + (i % 26) as u8)
+            .collect();
+        let mut mandados = 0;
+        esperar_cedendo(
+            || {
+                let fim = (mandados + BUFFER_DA_CONEXAO).min(dados.len());
+                let r = crate::nativo::responder_com_anexo_de_teste(
+                    quem,
+                    &pedido_rpc(
+                        "net.send",
+                        &alloc::format!(
+                            r#"{{"connection":{conexao},"attachment":{}}}"#,
+                            fim - mandados
+                        ),
+                    ),
+                    &dados[mandados..fim],
+                );
+                mandados += fs_numero(&r, "sent").unwrap_or(0) as usize;
+                mandados >= dados.len()
+            },
+            500,
+        )
+        .map_err(|_| "o eco nao aceitou o buffer inteiro e mais")?;
+        esperar_cedendo(
+            || {
+                pilha::espiar(conexao, &dono, BUFFER_DA_CONEXAO)
+                    .is_ok_and(|(d, _)| d.len() == BUFFER_DA_CONEXAO)
+            },
+            500,
+        )
+        .map_err(|_| "o buffer de entrada nao encheu")?;
+        esperar_cedendo(
+            || pilha::janela_anunciada_de_teste().is_some_and(|(ultima, _)| ultima == 0),
+            300,
+        )
+        .map_err(|_| {
+            janela();
+            "o buffer cheio nao fechou a janela"
+        })?;
+
+        // Uma leitura leva o buffer inteiro, numa decisão do gate.
+        let desde = seq_da_auditoria();
+        pilha::vigiar_janela_de_teste(porta);
+        let r = fs_pedir(
+            quem,
+            "net.recv",
+            &alloc::format!(r#"{{"connection":{conexao}}}"#),
+        );
+        if bytes_lidos(&r)? != dados[..BUFFER_DA_CONEXAO] {
+            return Err("a leitura nao trouxe o buffer inteiro");
+        }
+        if leituras_decididas_desde(desde) != 1 {
+            return Err("a leitura do buffer inteiro nao foi uma decisao so");
+        }
+        esperar_cedendo(
+            || {
+                pilha::janela_anunciada_de_teste()
+                    .is_some_and(|(_, maior)| usize::from(maior) == BUFFER_DA_CONEXAO)
+            },
+            300,
+        )
+        .map_err(|_| {
+            janela();
+            "a leitura nao reabriu a janela inteira"
+        })?;
+        // E o que não coube chega depois, inteiro.
+        if ler_da_conexao(quem, conexao, A_MAIS)? != dados[BUFFER_DA_CONEXAO..] {
+            return Err("o que nao coube nao chegou depois");
+        }
+        Ok(())
+    })();
+    pilha::vigiar_janela_de_teste(0);
+    fechar_conexao(quem, conexao);
+    resultado
+}
+
+/// O envio maior que o buffer da conexão é recusado inteiro, com o teto na
+/// resposta — nada dele sai, e não sai um pedaço —; o buffer exato cabe. E a
+/// leitura que pede mais que o buffer leva o buffer, e não mais: o `max` é
+/// cortado, e o kernel não aloca o que o pedido diz.
+fn rede_o_pedido_maior_que_o_buffer() -> Resultado {
+    use crate::rede::conexoes::Dono;
+    use crate::rede::pilha::{self, BUFFER_DA_CONEXAO};
+    let quem = sistema_aqui();
+    let dono = Dono::Processo(crate::fios::id_atual());
+    let conexao = conexao_aberta(&fs_pedir(
+        quem,
+        "net.connect",
+        &alloc::format!(r#"{{"to":"{ECO}"}}"#),
+    ))?;
+    let enviar = |dados: &[u8]| {
+        crate::nativo::responder_com_anexo_de_teste(
+            quem,
+            &pedido_rpc(
+                "net.send",
+                &alloc::format!(r#"{{"connection":{conexao},"attachment":{}}}"#, dados.len()),
+            ),
+            dados,
+        )
+    };
+    let resultado = (|| -> Resultado {
+        if estado_depois_do_aperto(quem, conexao)? != "established" {
+            return Err("a conexao ao eco nao se estabeleceu");
+        }
+        let r = enviar(&alloc::vec![b'g'; BUFFER_DA_CONEXAO + 1]);
+        if fs_numero(&r, "sent").is_some()
+            || fs_numero(&r, "max") != Some(BUFFER_DA_CONEXAO as u64)
+            || !fs_texto(&r, "error").is_some_and(|e| e.contains("buffer"))
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("o envio maior que o buffer nao foi recusado inteiro");
+        }
+        // Nada saiu: o eco não tem o que devolver.
+        let _ = esperar_cedendo(|| false, 20);
+        if !pilha::espiar(conexao, &dono, 1).is_ok_and(|(d, _)| d.is_empty()) {
+            return Err("um pedaco do envio recusado saiu");
+        }
+        let cheio = alloc::vec![b'h'; BUFFER_DA_CONEXAO];
+        let r = enviar(&cheio);
+        if fs_numero(&r, "sent") != Some(BUFFER_DA_CONEXAO as u64) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o envio do buffer exato nao coube");
+        }
+        esperar_cedendo(
+            || {
+                pilha::espiar(conexao, &dono, BUFFER_DA_CONEXAO)
+                    .is_ok_and(|(d, _)| d.len() == BUFFER_DA_CONEXAO)
+            },
+            500,
+        )
+        .map_err(|_| "o eco nao devolveu o buffer inteiro")?;
+        let r = fs_pedir(
+            quem,
+            "net.recv",
+            &alloc::format!(r#"{{"connection":{conexao},"max":1000000000}}"#),
+        );
+        if fs_numero(&r, "returned") != Some(BUFFER_DA_CONEXAO as u64) || bytes_lidos(&r)? != cheio
+        {
+            crate::log_error!("teste", "returned: {:?}", fs_numero(&r, "returned"));
+            return Err("a leitura com max enorme nao levou o buffer, e so ele");
+        }
+        Ok(())
+    })();
+    fechar_conexao(quem, conexao);
+    resultado
+}
+
+/// Cada conexão TCP guarda os dois buffers no heap desde que abre, e os
+/// devolve quando sai da tabela. O teto da tabela é o teto dessa memória:
+/// três titulares com o máximo de conexões cada um tomam o que a conta diz
+/// — dois buffers por conexão, e pouco mais —, e fechado tudo o heap volta.
+/// A associação UDP não acompanha o buffer do TCP: os mesmos titulares com
+/// o máximo de associações tomam o espaço dos datagramas, de 4 KiB por
+/// sentido, e não o de uma conexão.
+///
+/// Os fechos dos casos anteriores terminam antes de medir — um socket que
+/// sai no meio da medida seria memória devolvida que não é deste caso. E
+/// uma volta de aquecimento: a tabela de sockets do `smoltcp` cresce uma vez
+/// até o que se usou, e não encolhe — é a capacidade dela, e não memória de
+/// conexão nenhuma.
+fn rede_a_memoria_das_conexoes_volta() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use crate::rede::pilha::{self, BUFFER_DA_CONEXAO, CONEXOES_POR_DONO, MAIS_CONEXOES};
+    const TITULARES: u16 = 3;
+    let n = TITULARES as usize * CONEXOES_POR_DONO;
+    esperar_cedendo(
+        || {
+            let (vivas, fechando, cortadas) = pilha::ocupadas_de_teste();
+            fechando == 0 && cortadas == 0 && vivas + n <= MAIS_CONEXOES
+        },
+        4000,
+    )
+    .map_err(|_| {
+        crate::log_error!("teste", "ocupadas: {:?}", pilha::ocupadas_de_teste());
+        "a tabela nao tem vaga para o caso"
+    })?;
+    let vivas = pilha::ocupadas_de_teste().0;
+    crate::pessoas::esquecer_registradas();
+    let titulares: alloc::vec::Vec<Chamador> = (0..TITULARES)
+        .map(|t| titular_novo_na_rede(60 + t, &alloc::format!("rede-memoria-{t}")))
+        .collect();
+    let abrir = |abertas: &mut alloc::vec::Vec<(Chamador, u64)>, destino: &str| -> Resultado {
+        for &quem in &titulares {
+            for _ in 0..CONEXOES_POR_DONO {
+                abertas.push((
+                    quem,
+                    conexao_aberta(&fs_pedir(
+                        quem,
+                        "net.connect",
+                        &alloc::format!(r#"{{"to":"{destino}"}}"#),
+                    ))?,
+                ));
+            }
+        }
+        Ok(())
+    };
+    let fechar = |abertas: &mut alloc::vec::Vec<(Chamador, u64)>| -> Resultado {
+        for (quem, c) in abertas.drain(..) {
+            fechar_conexao(quem, c);
+        }
+        esperar_cedendo(|| pilha::ocupadas_de_teste() == (vivas, 0, 0), 1500).map_err(|_| {
+            crate::log_error!("teste", "ocupadas: {:?}", pilha::ocupadas_de_teste());
+            "os fechos nao terminaram"
+        })
+    };
+    let mut abertas = alloc::vec::Vec::new();
+    let resultado = (|| -> Resultado {
+        abrir(&mut abertas, ECO)?;
+        fechar(&mut abertas)?;
+        let antes = crate::heap::estatisticas().alocado;
+        abrir(&mut abertas, ECO)?;
+        let durante = crate::heap::estatisticas().alocado;
+        fechar(&mut abertas)?;
+        let depois = crate::heap::estatisticas().alocado;
+        let buffers = n * 2 * BUFFER_DA_CONEXAO;
+        crate::log_info!(
+            "teste",
+            "{} conexoes: o heap de {} para {} bytes, e {} depois de fechar",
+            n,
+            antes,
+            durante,
+            depois
+        );
+        // O heap é de todos: o que outros fios soltam e tomam no meio da
+        // medida é ruído de alguns KiB — muito menos que um buffer.
+        if durante + 16 * 1024 < antes + buffers {
+            return Err("as conexoes abertas nao guardam os dois buffers");
+        }
+        // Pouco mais: o socket, a vaga na tabela, a sessão de quem pede.
+        if durante > antes + buffers + n * 4 * 1024 {
+            return Err("as conexoes abertas guardam mais que os dois buffers");
+        }
+        if depois > antes + 16 * 1024 {
+            return Err("fechadas as conexoes, o heap nao voltou");
+        }
+        // As associações UDP, ao TFTP do emulador: só o espaço dos
+        // datagramas — 4 KiB por sentido —, e não o buffer de uma conexão.
+        let antes = crate::heap::estatisticas().alocado;
+        abrir(&mut abertas, "udp:10.0.2.2:69")?;
+        let durante = crate::heap::estatisticas().alocado;
+        fechar(&mut abertas)?;
+        crate::log_info!(
+            "teste",
+            "{} associacoes: o heap de {} para {} bytes",
+            n,
+            antes,
+            durante
+        );
+        if durante > antes + n * (2 * 4096 + 4 * 1024) {
+            return Err("as associacoes UDP guardam mais que o espaco dos datagramas");
+        }
+        Ok(())
+    })();
+    let _ = fechar(&mut abertas);
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// Quatro fios trocam ao mesmo tempo, em núcleos diferentes, cada um com o
+/// seu eco, 64 KiB de bytes que não são texto, em pedidos do tamanho do
+/// buffer — cada envio e cada leitura uma decisão do gate, e uma leitura só
+/// quando há o que ler. O que volta a cada um é o que ele mandou, sem um
+/// byte de outro; e as conexões saem da tabela no fim.
+fn rede_varios_fios_trocam_buffers_inteiros() -> Resultado {
+    use core::sync::atomic::{AtomicU64, Ordering::SeqCst};
+    const FIOS: u64 = 4;
+    const TOTAL: usize = 64 * 1024;
+    static CERTOS: AtomicU64 = AtomicU64::new(0);
+    static ERRADOS: AtomicU64 = AtomicU64::new(0);
+    extern "C" fn trocar(indice: u64) -> ! {
+        use crate::rede::pilha::{self, BUFFER_DA_CONEXAO};
+        let quem = sistema_no_armazem(crate::fios::id_atual());
+        let dono = crate::rede::conexoes::Dono::Processo(crate::fios::id_atual());
+        let ok = (|| -> Result<(), &'static str> {
+            let c = conexao_aberta(&fs_pedir(
+                quem,
+                "net.connect",
+                &alloc::format!(r#"{{"to":"{ECO}"}}"#),
+            ))?;
+            let r = (|| -> Result<(), &'static str> {
+                if estado_depois_do_aperto(quem, c)? != "established" {
+                    return Err("nao se estabeleceu");
+                }
+                let dados: alloc::vec::Vec<u8> = (0..TOTAL)
+                    .map(|i| (0x80 | ((i * 131 + indice as usize * 17) % 128)) as u8)
+                    .collect();
+                let mut mandados = 0;
+                let mut voltou = alloc::vec::Vec::with_capacity(TOTAL);
+                let mut leituras = 0u64;
+                let mut falha = None;
+                let _ = esperar_cedendo(
+                    || {
+                        if mandados < TOTAL {
+                            let fim = (mandados + BUFFER_DA_CONEXAO).min(TOTAL);
+                            let r = crate::nativo::responder_com_anexo_de_teste(
+                                quem,
+                                &pedido_rpc(
+                                    "net.send",
+                                    &alloc::format!(
+                                        r#"{{"connection":{c},"attachment":{}}}"#,
+                                        fim - mandados
+                                    ),
+                                ),
+                                &dados[mandados..fim],
+                            );
+                            match fs_numero(&r, "sent") {
+                                Some(n) => mandados += n as usize,
+                                None => {
+                                    crate::log_error!("teste", "{}", r);
+                                    falha = Some("o envio falhou");
+                                    return true;
+                                }
+                            }
+                        }
+                        if pilha::espiar(c, &dono, 1).is_ok_and(|(d, _)| !d.is_empty()) {
+                            let r = fs_pedir(
+                                quem,
+                                "net.recv",
+                                &alloc::format!(r#"{{"connection":{c}}}"#),
+                            );
+                            match bytes_lidos(&r) {
+                                Ok(b) => {
+                                    leituras += 1;
+                                    voltou.extend_from_slice(&b);
+                                }
+                                Err(e) => {
+                                    falha = Some(e);
+                                    return true;
+                                }
+                            }
+                        }
+                        voltou.len() >= TOTAL
+                    },
+                    3000,
+                );
+                if let Some(f) = falha {
+                    return Err(f);
+                }
+                crate::log_info!(
+                    "teste",
+                    "fio {}: {} de {} bytes voltaram em {} leituras",
+                    indice,
+                    voltou.len(),
+                    TOTAL,
+                    leituras
+                );
+                if voltou != dados {
+                    return Err("voltou outra coisa");
+                }
+                Ok(())
+            })();
+            fechar_conexao(quem, c);
+            r
+        })();
+        match ok {
+            Ok(()) => CERTOS.fetch_add(1, SeqCst),
+            Err(e) => {
+                crate::log_error!("teste", "fio {} da rede: {}", indice, e);
+                ERRADOS.fetch_add(1, SeqCst)
+            }
+        };
+        crate::fios::terminar()
+    }
+    CERTOS.store(0, SeqCst);
+    ERRADOS.store(0, SeqCst);
+    let nucleos = crate::nucleos::ligados() as u64;
+    for i in 0..FIOS {
+        crate::fios::criar_no_nucleo("rede-buffers", trocar, i, (i % nucleos) as usize)?;
+    }
+    esperar_cedendo(|| CERTOS.load(SeqCst) + ERRADOS.load(SeqCst) == FIOS, 4000)
+        .map_err(|_| "os fios da rede nao terminaram")?;
+    if ERRADOS.load(SeqCst) != 0 {
+        return Err("um fio nao trocou os buffers com o eco (o motivo de cada um esta no log)");
     }
     esperar_cedendo(|| crate::rede::pilha::donos().is_empty(), 300)
         .map_err(|_| "a tabela de conexoes nao esvaziou")?;
@@ -34122,8 +34583,8 @@ fn envio_suspenso(
     }
 }
 
-/// Enche a fila de saída da conexão com o cabo segurado: 4096 bytes
-/// aceitos, que ninguém confirma.
+/// Enche a fila de saída da conexão com o cabo segurado: o buffer dela
+/// inteiro aceito, que ninguém confirma.
 fn encher_a_saida(
     quem: crate::autorizacao::Chamador,
     conexao: u64,
@@ -34141,7 +34602,7 @@ fn encher_a_saida(
     );
     if fs_numero(&r, "sent") != Some(cheio.len() as u64) {
         crate::log_error!("teste", "{}", r);
-        return Err("a fila de saida nao aceitou os 4096 bytes");
+        return Err("a fila de saida nao aceitou o buffer inteiro");
     }
     Ok(cheio)
 }
@@ -34159,7 +34620,7 @@ fn envios_decididos_desde(desde: u64) -> usize {
 /// O envio que não cabe espera espaço, e não gira.
 ///
 /// Com o cabo segurado — nada sai, nada é confirmado —, a fila de saída
-/// enche nos 4096 bytes dela. Sem `wait`, o envio seguinte responde na hora
+/// enche no buffer dela. Sem `wait`, o envio seguinte responde na hora
 /// que nada coube. Com `wait`, suspende; não acorda enquanto o cabo está
 /// segurado, por mais voltas que a pilha dê; solto, a pilha retransmite, o
 /// eco confirma, o espaço abre e a espera acorda pelo evento — `Coube`. A
