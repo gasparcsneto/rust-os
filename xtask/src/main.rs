@@ -5777,6 +5777,28 @@ fn comando_qemu(
     ]);
     qemu.args(["-device", "virtio-net-pci,netdev=rede0"]);
 
+    // A captura do fio, para quem mede a rede: `DUKE_CAPTURA=<arquivo>`
+    // grava em pcap cada quadro que passa pela placa, nos dois sentidos —
+    // o `filter-dump` do emulador, sem nada no hóspede. Uma fumaça sobe
+    // várias máquinas, e cada uma grava no dela: `<arquivo>.0`,
+    // `<arquivo>.1`, na ordem em que sobem. Só os cabeçalhos — os
+    // primeiros 128 bytes de cada quadro —: o que se mede é o TCP, e não o
+    // que ele leva.
+    if let Some(arquivo) = std::env::var_os("DUKE_CAPTURA") {
+        static MAQUINAS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = MAQUINAS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let arquivo = format!("{}.{n}", arquivo.to_string_lossy());
+        if arquivo.contains(',') {
+            return Err(format!(
+                "DUKE_CAPTURA nao cabe na opcao do emulador (tem virgula): {arquivo}"
+            ));
+        }
+        qemu.args([
+            "-object",
+            &format!("filter-dump,id=captura0,netdev=rede0,file={arquivo},maxlen=128"),
+        ]);
+    }
+
     // A fonte de entropia do kernel: o `/dev/urandom` do hospedeiro, pelo
     // `virtio-rng`. Sem ela as portas de agente recusam o aperto de mão.
     qemu.args(["-device", "virtio-rng-pci"]);
@@ -10505,6 +10527,15 @@ fn sob_a_rede(
     // falha, o nome que o TLS recusa no mesmo destino, a porta fora do
     // alcance — a recusa do gate —, e cada falha do protocolo com o código
     // e a família dela. Daqui, as medidas que ela diz no log.
+    // As decisões do gate que a página custa — cada envio e cada leitura,
+    // até um buffer da conexão cada —, para a taxa dos papéis ter com o que
+    // se medir.
+    let decisoes = |serial: &mut Serial<'_>| -> Result<u64, String> {
+        let m = serial.pedir("security.metrics", "{}")?;
+        numero_no_caminho(&m, &["gate", "decisions"])
+            .ok_or_else(|| format!("http: o security.metrics nao disse as decisoes\n  {m}"))
+    };
+    let decisoes_antes = decisoes(&mut serial)?;
     let lancado = serial.pedir(
         "user.run",
         &format!(r#"{{"path":"/programas/{}/pagina"}}"#, arch.nome()),
@@ -10588,6 +10619,21 @@ fn sob_a_rede(
     ] {
         println!("  [http] medido  {}", dita(medida)?);
     }
+    // Contadas depois de a página sair: as decisões dela e as do caminho da
+    // fumaça até aqui, que são um punhado.
+    println!(
+        "  [http] medido  a pagina custou {} decisoes do gate",
+        decisoes(&mut serial)?.saturating_sub(decisoes_antes)
+    );
+    let heap = serial.pedir("heap.stats", "{}")?;
+    let pico = numero_no_caminho(&heap, &["peak_bytes"])
+        .ok_or_else(|| format!("http: o heap.stats nao disse o pico\n  {heap}"))?;
+    let total = numero_no_caminho(&heap, &["total_bytes"]).unwrap_or(0);
+    println!(
+        "  [http] medido  o heap: pico de {} KiB dos {} KiB",
+        pico / 1024,
+        total / 1024
+    );
 
     // O UDP, pela mesma capacidade: uma associação com o TFTP do emulador,
     // que entrega o arquivo da bancada em dois datagramas, cada um inteiro
