@@ -3436,6 +3436,369 @@ Sem ganho a medir, não há o que pagar com esse risco.
   não se infere das invariantes; fica proposto, e não implementado, até
   uma decisão.
 
+## O código de fora da imagem
+
+O código da imagem roda porque é da imagem: veio com o kernel, com a
+política e com as chaves, e quem tem a imagem tem tudo isso. O código que
+chega depois — pela rede, gravado no armazém — não tem essa procedência:
+qualquer um com `fs.write` no diretório o teria posto lá. A regra é uma
+só, nas duas portas por onde código vira processo — o `user.run` e a
+chamada `executar`:
+
+- o código da **imagem** — os programas embutidos em `/bin`, os do disco
+  em `/programas` — roda como sempre rodou;
+- o código **gravado** em tempo de execução — o armazém — só roda com o
+  **selo** de um **editor** do registro da imagem em que o **papel** de
+  quem o lança confia.
+
+A origem é a da montagem que a leitura percorreu, e não o caminho
+escrito: `/armazem//compartilhado/./codigo/x` continua sendo o armazém.
+E não há uma segunda política: a confiança num editor é uma linha da
+mesma política, decidida no mesmo gate, com o mesmo papel; o selo é só a
+prova de quem selou, como o aperto de mão é a prova de quem fala.
+
+### O selo
+
+O arranjo das assinaturas de módulo do Linux (`~Module signature
+appended~`): o selo vai no fim do arquivo, depois do executável, sem tocar
+nele — o ELF continua o mesmo, e o selo se separa dele pelo tamanho fixo e
+pela marca no fim ([`sigilo::codigo`](sigilo/src/codigo.rs)).
+
+```text
+[ executável ][ assinatura Ed25519: 64 ][ chave pública do editor: 32 ][ "~Duke selo v1~\r\n": 16 ]
+```
+
+O editor assina o rótulo `Duke codigo: selo ed25519 v1` seguido do resumo
+BLAKE2s-256 do executável — o mesmo resumo com que a auditoria nomeia o
+programa: o que o editor assina é exatamente o que a auditoria cita. O
+rótulo separa esta assinatura de qualquer outra feita com a mesma chave:
+um selo não vale como assinatura de quórum, nem a assinatura crua do
+resumo vale como selo. A conferência é a estrita (`verify_strict`), como a
+do quórum: sem chave de ordem pequena e sem assinatura maleável, um selo
+válido não tem uma segunda grafia que também valha.
+
+Sem a marca no fim, o arquivo não tem selo: `CODE_UNSIGNED`. Com a marca,
+ele **diz** que tem, e o resto tem de conferir — um selo cortado, uma
+chave que não é ponto da curva, um byte do executável ou da assinatura
+trocado depois: `CODE_TAMPERED`. O selo que confere, com uma chave fora do
+registro ou com a de um editor em que o papel não confia:
+`CODE_UNTRUSTED`.
+
+O selo não diz **quando** o código foi selado, nem se é a versão mais
+nova: prova **quem** selou **estes** bytes. O que o processo pode depois é
+do papel e do manifesto, como para qualquer programa.
+
+### Os editores e a confiança
+
+O registro de editores mora na imagem, como o dos agentes:
+`/etc/duke/editores`, uma linha por editor, `ed25519:<chave pública em
+hex> <nome>`. A chave de ordem pequena é recusada na leitura — com ela,
+nenhum selo conferiria, e o editor existiria só no nome. Em quem cada
+papel confia é da política ([`politica::arquivo`](politica/src/arquivo.rs)):
+
+```text
+editores operador bancada
+```
+
+Sem repetição, em ordem; vazia é nenhum; num papel sem `process.run`, a
+linha não diria nada, e é recusada. Muda pelo `policy.write`, com a prova
+de um administrador, pela regra do teto: **tirar** um editor de um papel
+é sempre possível — é a revogação da confiança —; **acrescentar**, só um
+editor em que o próprio teto confia: ninguém concede a confiança que não
+tem. A atribuição de um papel confere os editores como confere as
+permissões, e o build da imagem confere que todo editor citado pela
+política está no registro.
+
+A política de desenvolvimento confia no editor `bancada` para o sistema, o
+administrador e o operador, e dá ao operador e ao administrador
+`process.run` em `/armazem/compartilhado/codigo`, onde o código instalado
+mora. O registro da bancada tem um segundo editor, `outro`, em quem nenhum
+papel confia; e a bancada tem uma terceira chave, `estranho`, que a imagem
+não conhece. As privadas ficam em `target/chaves/`, como as dos agentes:
+fora do repositório e fora da imagem.
+
+### Onde se confere
+
+[`usuario::codigo::obter`](kernel/src/usuario/codigo.rs) é o único lugar:
+lê o arquivo **uma vez**, confere o selo sobre esses bytes e devolve esses
+bytes — sem o selo — a quem vai carregar. Ninguém relê o arquivo entre a
+conferência e a carga: quem trocasse o arquivo no armazém depois de
+conferido trocaria um arquivo que ninguém mais lê. A ordem é a de quem
+falha fechado:
+
+1. o gate decide `process.run` sobre o caminho — no `user.run`, como
+   qualquer comando; no `executar`, como `process.exec`, em nome do
+   processo. Fora do alcance, o arquivo nem é lido;
+2. `obter` lê, pela montagem, e confere a origem, o selo, o editor no
+   registro e se o papel de **quem lança** — procurado agora — confia nele;
+3. a recusa vai para a auditoria como a execução da decisão do gate —
+   `DENY_POLICY`, o motivo e `; decisao N` —, e quem pediu ouve o porquê:
+   o `user.run` responde `launched: false`, com o `code` e a explicação de
+   razão `DENY_PROVENANCE`; o `executar` devolve `SEM_SELO` (−18),
+   `SELO_NAO_CONFERE` (−19) ou `EDITOR_NAO_CONFIADO` (−20), e o processo
+   segue inteiro — nada foi trocado;
+4. o processo nasce com o editor no programa do fio, e a auditoria diz de
+   onde ele veio — o nascimento, `processo <fio> lancado: codigo <resumo>
+   de bancada`, e cada pedido dele, `(vindo <resumo> de bancada)`.
+
+**A confiança é perguntada a cada pedido**, como o papel: cada pedido ao
+registro, cada chamada de sistema que o gate decide e cada `fork` ou
+lançamento feito por um processo de código selado perguntam de novo se o
+papel ainda confia no editor. Tirada a confiança pela política, ou o
+editor do registro, o pedido seguinte do processo que já está rodando é
+`DENY_POLICY`, e ele não bifurca — o filho levaria o mesmo programa.
+
+**O NSF vê o adulterado.** A regra `code-tampered` lê a mesma auditoria:
+um selo que não confere é um código que mudou depois de selado, ou um selo
+forjado, e basta uma vez. Mas quem pediu pode ser a vítima — o código veio
+de uma fonte adulterada —, e a confiança da detecção é média; o NSF não
+planeja contenção por ela: alerta, com o incidente, e a contenção fica com
+quem tem a autoridade. O código sem selo e o editor em quem não se confia
+são política, e não incidente.
+
+O `xtask invariantes` confere o desenho: só `usuario/mod.rs` chama
+`obter` e `programa::carregar`; nada mais em `usuario/` lê um executável
+do VFS; só o carregador monta o programa de um fio; e o kernel não sela
+nada — ele não tem chave de editor nenhuma.
+
+### Da rede ao processo
+
+O `xtask` compila o programa [`vindo`](programas/src/bin/vindo.rs) com os
+outros, e **não** o põe na imagem: sela-o e publica cinco variantes no
+servidor da bancada, `GET /codigo/<arquitetura>/<nome>`, claro e atrás do
+TLS — selado pela `bancada`, sem selo, selado e com um byte trocado
+depois, selado pela chave `estranho` e pelo editor `outro`. O
+[`instalador`](programas/src/bin/instalador.rs) faz o caminho inteiro de
+dentro de um processo, com a autoridade de quem o lançou: o nome
+`bancada.duke` pelo DNS dele, a conexão decidida pelo gate, o TLS com a
+âncora da imagem, o `GET`, e o corpo para o armazém pelo `fs.write`, no
+anexo; depois bifurca, e o filho executa o arquivo gravado. Nada ali
+decide nada: o selo é conferido pelo kernel na troca de imagem, e o
+instalador só fica sabendo pelo erro.
+
+```
+instalador: baixou vindo: 26688 bytes
+instalador: baixou vindo-sem-selo: 26576 bytes
+instalador: baixou vindo-adulterado: 26688 bytes
+instalador: baixou vindo-estranho: 26688 bytes
+instalador: baixou vindo-outro: 26688 bytes
+vindo: rodando, de fora da imagem
+vindo: o gate deixou
+instalador: rodou vindo: saiu 92
+instalador: rodou vindo-sem-selo: saiu -18
+instalador: rodou vindo-adulterado: saiu -19
+instalador: rodou vindo-estranho: saiu -20
+instalador: rodou vindo-outro: saiu -20
+```
+
+A suíte confere, além disso, a confiança tirada entre baixar e rodar, o
+instalador isolado — que nem baixa nem bifurca —, a confiança tirada no
+meio de um processo que já roda, e um fio que troca o arquivo entre o
+selado e o adulterado enquanto outros o lançam: cada lançamento roda o
+selado, ou é recusado. A fumaça grava as cinco variantes no armazém pelo
+canal cifrado de um agente, pede `user.run` de cada uma e confere a
+resposta e a auditoria.
+
+### As medidas
+
+A conferência — o resumo BLAKE2s do executável e uma verificação Ed25519,
+sem a leitura do arquivo — é medida pelo kernel a cada vez
+(`security.metrics`, em `code.verify_ns`), e a suíte escreve a média e a
+maior a cada rodada, sobre o `ola` selado (20 KiB no x86, 22 KiB no ARM):
+
+| | x86 | ARM |
+|---|---|---|
+| kernel de depuração | 3,5 a 8,3 ms (a maior, 26 ms) | 2,4 ms (a maior, 3,8 ms) |
+| kernel de produção | 2,4 a 2,9 ms (a maior, 5,7 ms) | 1,5 a 1,8 ms (a maior, 4,7 ms) |
+
+As faixas são de rodadas diferentes da mesma bancada — o emulador sem
+aceleração, quatro núcleos —, e a máquina que o hospeda varia: a suíte
+inteira do x86 em depuração levou de 24 a 30 minutos. Uma conferência
+custa o que custam de três a oito decisões do gate na mesma rodada (2,4 ms
+contra 0,68 ms no x86 em release; 1,5 ms contra 0,19 ms no ARM). Sem
+emulador, na máquina que hospeda a bancada, só o resumo de 26 KiB leva
+0,13 ms; a verificação Ed25519 é da mesma ordem.
+
+Na fumaça — o kernel de produção, com o fio do NSF de verdade e o canal
+cifrado de um agente —, a mesma medida, com a máquina ocupada, conta
+também as vezes em que o fio que confere perde o núcleo: 7,7 a 7,8 ms em
+média em depuração, 2,9 ms no ARM em release e 11 ms no x86 em release,
+com a maior até 45 ms. O `user.run` inteiro, do lado do agente — o canal,
+o gate, a auditoria, a leitura do armazém, a conferência e o nascimento —:
+
+| `user.run` | x86 depuração | x86 release | ARM depuração | ARM release |
+|---|---|---|---|---|
+| o selado, que nasce | 129 ms | 56 ms | 164 ms | 25 ms |
+| os quatro recusados | 378 a 421 ms | 84 a 139 ms | 389 a 505 ms | 19 a 28 ms |
+
+Em depuração, a recusa custa mais que o lançamento: grava a execução da
+decisão, monta a explicação e escreve o aviso no log, e o processo que
+nasce só carrega depois da resposta.
+
+No caso do instalador, cada download de 26 KiB — o DNS, a conexão, o
+aperto TLS, o `GET` e a gravação no armazém pelo gate — leva de 0,9 a
+1,1 s em depuração e de 0,5 a 0,6 s em release, nas duas arquiteturas; a
+execução num filho — `bifurcar`, `executar` com a leitura e a
+conferência, e a espera —, de 230 a 900 ms em depuração e de 60 a 220 ms
+em release, recusada ou não. O código da imagem não paga a conferência: a
+suíte confere que o `user.run` do `ola` da imagem não passa por ela.
+
+### O que o exercício encontrou
+
+- **O lançamento respondia antes de ler.** O `user.run` criava o fio e
+  respondia `launched: true`; o fio lia o arquivo depois de nascer — e,
+  para um caminho que não existia, morria sozinho, longe de quem pediu.
+  Com o selo, a conferência teria de acontecer ali, num fio que já
+  nasceu, sem resposta a quem pediu e com o arquivo lido depois da
+  decisão. Agora `user.run` lê e confere antes de o fio nascer, responde a
+  recusa a quem pediu, e entrega ao fio os bytes conferidos — e o caminho
+  que não existe deixou de ser "lançado".
+- **Lançar passou a esperar a leitura.** Com a leitura antes de o fio
+  nascer, quem lança espera o arquivo ser lido e conferido, e um laço de
+  lançamentos ficou em fila. Dois casos da suíte dependiam do lançamento
+  que respondia antes de ler, e a suíte inteira os pegou — os casos
+  `codigo:`, sozinhos, não: o do `ceder` lançava oito cópias em fila, e
+  cada uma saía antes de a seguinte nascer, sem ninguém a quem dar a vez
+  (16 trocas, e não milhares) — agora as lança de oito fios ao mesmo
+  tempo, como antes os fios liam cada um o seu arquivo —; e o da
+  revogação no meio do pedido HTTP revogava a chave 30 ms depois de pedir
+  a página lenta — na máquina mais lenta, a recusa caía no envio, e não
+  na leitura que o caso confere; agora espera a leitura ser decidida.
+- **O `executar` não alcançava o armazém.** O nome que ele aceita tinha
+  32 bytes, o bastante para `/bin/<nome>` e `/programas/<arquitetura>/<nome>`;
+  `/armazem/compartilhado/codigo/vindo` tem 35, e o processo não
+  conseguia executar o que ele mesmo tinha gravado. O teto agora é o de um
+  caminho de `abrir`.
+- **O filho levaria a confiança que o pai perdeu.** A contenção já
+  impedia o processo isolado de bifurcar; a confiança no editor, não: o
+  processo de código selado cujo editor saiu da confiança seria recusado
+  em cada pedido, mas ainda bifurcaria e lançaria. Agora `fork` e o
+  lançamento perguntam também.
+- **A corrida não pega a releitura.** O caso que troca o arquivo entre o
+  selado e o adulterado enquanto outros o lançam confere que cada
+  processo carregou o que foi conferido. A primeira versão lançava o
+  `ola`, que não faz pedido nenhum ao gate — e é o pedido que diz, na
+  auditoria, o resumo do que foi carregado —; passou a lançar o
+  `ponteiros`, que abre um arquivo. Mesmo assim, a mutação que relê o
+  arquivo depois de conferir passou pelo caso: a releitura só carrega o
+  adulterado se uma gravação inteira couber entre as duas leituras —
+  alguns milissegundos —, e a leitura que pega uma gravação no meio é
+  recusada (`o arquivo mudou depois de aberto`), oito de doze lançamentos
+  naquela rodada. O caso continua valendo para o que ele confere; a regra
+  "lê uma vez" virou uma conferência do `xtask invariantes`, que reprova
+  a releitura sempre.
+- **O instalador dependia do caso de antes.** O `fs.mkdir` cria um nível
+  só, e o instalador criava só `/armazem/compartilhado/codigo`: o
+  diretório de cima existia porque o primeiro caso da série o tinha
+  criado. Rodado sozinho — numa mutação —, o caso do instalador falhava no
+  download, antes de chegar ao que a mutação mexia. Agora o instalador e
+  a fumaça criam os dois níveis.
+
+- **A vaga do zumbi era livre.** No ARM em release, na CI, o caso da
+  corrida lançou doze `ponteiros` — que bifurca e colhe — ao mesmo tempo,
+  e um deles ouviu que não tinha filho nenhum (`a espera legitima deu
+  Err(-11)`). A conta das vagas do escalonador tratava a de qualquer fio
+  terminado como livre, e a do zumbi também — o filho que terminou e que
+  o pai, vivo, ainda vai colher. O coletor já o respeitava; a criação de
+  um fio, não: o fio que nascesse entre a saída do filho e a pergunta do
+  pai ficava com a vaga, e o código de saída ia embora com ela. Um defeito
+  de antes desta fase, que só a concorrência dela mostrou. A conta agora
+  pula o zumbi, e o caso `fios: o zumbi guarda a vaga ate a colheita` o
+  torna determinístico: o programa `colhedor` bifurca e só colhe quando a
+  suíte manda, e no meio a suíte enche a tabela de fios.
+- **O instalador passava da taxa.** No kernel de produção, os cinco
+  downloads seguidos — umas vinte decisões do gate por arquivo — passam
+  da taxa de todo dia do operador, e o quinto ouve `RATE_LIMIT`, como
+  deve. No de depuração, mais lento, a taxa não chegava a ser alcançada.
+  Os casos que usam o instalador sobem a taxa do operador, como o caso das
+  medidas do HTTP já fazia.
+
+### O que fica de fora
+
+- **A revogação de um selo, ou de uma versão.** Um selo antigo do mesmo
+  editor continua conferindo: não há lista de selos revogados, nem
+  versão, nem data. Tirar a confiança é por editor, inteiro. Impedir a
+  volta a uma versão velha é da atualização com rollback, da fase 14.
+- **O registro em tempo de execução.** Um editor novo é uma imagem nova.
+  Registrar um editor por uma operação administrativa com prova, como o
+  `agent.register`, é possível no mesmo desenho, e não foi pedido.
+- **Uma cadeia de editores.** Uma chave por editor, sem certificado, sem
+  autoridade que assine editores, sem prazo de validade; a troca da chave
+  de um editor é trocar a linha do registro.
+- **A confiança por programa ou por diretório.** O papel confia no editor
+  para tudo o que ele selar; o que cada programa pode depois é do
+  manifesto e do papel, como sempre.
+- **A imagem conferida.** O código da imagem roda por ser da imagem; quem
+  prova a imagem é a cadeia de boot confiável, o incremento seguinte desta
+  fase.
+- **Um programa maior que um anexo.** O instalador grava o corpo num
+  `fs.write` só, com o anexo de até 60 KiB; o armazém aceita arquivos
+  maiores, por partes, e o instalador não as usa.
+- **O instalador que espera a taxa.** Ele não espera a janela da taxa
+  quando ouve `RATE_LIMIT`: a recusa sobe como veio. Cinco arquivos
+  seguidos, no kernel de produção, passam da taxa de todo dia do operador.
+- **A conferência guardada.** Cada lançamento lê e confere de novo, sem
+  cache: o custo, medido acima, é pequeno perto do resto do lançamento, e
+  um cache teria de ser invalidado por toda troca do arquivo, do registro
+  e da política.
+
+### As mutações do código selado
+
+Trinta e cinco mutações contra o que a conferência promete — o selo, a
+origem pela montagem, a confiança decidida pelo papel e a cada pedido, a
+leitura única, a auditoria, a resposta e o NSF — e contra o defeito do
+escalonador que o exercício achou, cada uma contra o que deve reprová-la:
+os casos `codigo:` e `fios:` da suíte de quatro núcleos, no x86, os
+testes do hospedeiro e o `xtask invariantes`; cinco delas também contra o
+outro lado. **Trinta e cinco reprovadas** — uma só depois da conferência
+que o exercício acrescentou, e uma, de ponta a ponta, equivalente.
+
+| Mutação | Reprovada por |
+|---|---|
+| a conferência não estrita: a chave de ordem pequena confere | `codigo::testes::chave_de_ordem_pequena` |
+| a assinatura não conferida | sete testes do selo no hospedeiro; de ponta a ponta, a bancada recusa publicar — a variante adulterada conferia —; só no kernel, `codigo: so o da imagem roda sem selo` — o adulterado rodou |
+| sem a marca, um selo estranho em vez de "sem selo" | `codigo::testes::sem_marca_no_fim_nao_ha_selo` |
+| o selo carregado junto com o código | `codigo: o conferido e o que roda` — o pedido do processo citou outro resumo que o do nascimento |
+| o rótulo fora da mensagem assinada | `codigo::testes::o_rotulo_separa` — a assinatura crua do resumo valeu como selo |
+| o armazém montado como imagem | `codigo: so o da imagem roda sem selo` — o código gravado rodou sem conferência |
+| a origem pelo caminho escrito, e não pela montagem | o mesmo caso — `/armazem//compartilhado/./codigo/...` rodou o código sem selo |
+| a carga sem a confiança no editor | o mesmo caso — o editor fora do registro rodou |
+| o pedido do processo sem a confiança | `codigo: a confianca e decidida a cada pedido` — tirada a confiança, o processo continuou pedindo |
+| a chamada de sistema sem a confiança | o mesmo caso — o `abrir` passou sem a confiança |
+| bifurcar e lançar sem a confiança | o mesmo caso — o código selado bifurcou sem a confiança |
+| a política confia em qualquer editor | `arquivo::testes::os_editores_de_codigo`; de ponta a ponta, `codigo: so o da imagem roda sem selo` |
+| o administrador concede a confiança que não tem | `arquivo::testes::a_confianca_muda_dentro_do_teto`; de ponta a ponta, `codigo: a confianca e decidida a cada pedido` |
+| a chave fora do registro vale como a do primeiro editor | `codigo: so o da imagem roda sem selo` |
+| a chave fraca aceita no registro de editores | `registro::testes::editor_ida_e_volta_e_recusas` |
+| a confiança num papel que não roda nada | `arquivo::testes::os_editores_de_codigo` |
+| a atribuição de papel sem o teto dos editores | `arquivo::testes::a_confianca_muda_dentro_do_teto` |
+| a carga relê o arquivo depois de conferir | o `xtask invariantes` — a conferência lê o executável duas vezes. A suíte **não** a reprovou: ver o que o exercício encontrou |
+| o `executar` relê o arquivo | o `xtask invariantes` — um executável lido por fora da conferência |
+| o programa do fio montado fora do carregador | o `xtask invariantes` |
+| o kernel sela código | o `xtask invariantes` |
+| uma terceira porta lê e confere código | o `xtask invariantes` — `codigo::obter` fora do ponto de execução |
+| uma terceira porta carrega código | o `xtask invariantes` — `programa::carregar` fora do ponto de execução |
+| a recusa do `executar` sem auditoria | `codigo: o instalador pela rede` — a recusa não foi gravada |
+| a recusa do `user.run` sem auditoria | `codigo: so o da imagem roda sem selo` |
+| o nascimento sem o selo | o mesmo caso — o nascimento não diz quem selou, nem o resumo |
+| o programa sem o editor na auditoria | `codigo: a confianca e decidida a cada pedido` |
+| o `user.run` sem o código da recusa | `codigo: so o da imagem roda sem selo` |
+| a explicação sem a razão de procedência | `explicacao::testes::a_taxonomia` |
+| o erro do `executar` confunde o adulterado com o sem selo | `codigo: o instalador pela rede` — `-18`, e não `-19` |
+| o nome do `executar` volta a 32 bytes | o mesmo caso — o processo não executou o que gravou |
+| a vaga do zumbi volta a ser livre — o defeito que o exercício achou | `fios: o zumbi guarda a vaga ate a colheita` — um fio novo tomou a vaga do zumbi |
+| o NSF não vê o código adulterado | `o_codigo_adulterado_alerta_e_nao_contem`; de ponta a ponta, `codigo: o instalador pela rede` |
+| o NSF com confiança alta no código adulterado | `o_codigo_adulterado_alerta_e_nao_contem`, no hospedeiro. De ponta a ponta, **equivalente**: o NSF não planeja contenção para esta regra em confiança nenhuma — a contenção automática é só da saída depois de sondagem —, e nenhum pedido sai |
+| o NSF lê o motivo sem tirar o processo do detalhe | `o_codigo_adulterado_alerta_e_nao_contem` |
+
+Duas tiveram de ser escritas de novo. A "assinatura não conferida" caía
+na bancada, e não no kernel: o `sigilo` é o mesmo dos dois lados, e o
+`xtask` confere cada variante antes de publicá-la — a mutação que vale
+tira a conferência só do alvo sem sistema operacional. E cinco mutações
+do caso do instalador, rodadas sozinhas, falhavam no download, antes do
+que elas mexiam: era o `fs.mkdir` de um nível só, que o caso de antes
+escondia — corrigido, as cinco foram reprovadas pelo que mexiam.
+
 ## Vários agentes
 
 O Duke atende vários agentes ao mesmo tempo, cada um numa **sessão**: um
@@ -5808,6 +6171,14 @@ padronizado.
       um registro que a pessoa possa ler depois e desfazer. Junto com o resto
       do que um desktop precisa: assinatura de código e cadeia de boot
       confiável. O sandbox por aplicativo é o manifesto da fase 7.
+      Começou pela assinatura de código, sobre a rede da fase 12: o código
+      que chega pela rede e é gravado no armazém só roda com o selo de um
+      editor do registro da imagem em que o papel de quem o lança confia —
+      conferido uma vez, no ponto de execução, sobre os mesmos bytes que se
+      carregam, e a confiança perguntada de novo a cada pedido do processo,
+      na mesma política e no mesmo gate. Ver [O código de fora da
+      imagem](#o-código-de-fora-da-imagem). A cadeia de boot confiável, o
+      consentimento e o desfazer são os incrementos seguintes.
 - [ ] **Fase 14 — Hardware real e distribuição.** Instalador, atualização A/B
       com rollback, imagens assinadas, ACPI de verdade, NVMe, placa de rede
       real, watchdog. É onde projetos assim costumam morrer, e é por isso que

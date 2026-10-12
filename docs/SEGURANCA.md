@@ -208,6 +208,7 @@ dispararam:
 | `process-chain` | processos lançados em profundidade ou em rajada a partir do mesmo ator |
 | `ceiling-exercised` | tentativa de exercer o papel de teto de um administrador |
 | `egress-after-probing` | quem tem um incidente alto aberto usa a rede |
+| `code-tampered` | o código de fora da imagem cujo selo não confere com ele — os bytes mudaram depois de selados, ou o selo é forjado: basta uma vez, mas quem pediu pode ser a vítima, e a confiança é média; o NSF não planeja contenção por ela — alerta, e a contenção fica com quem tem a autoridade. O código sem selo e o editor em quem o papel não confia são política, e não disparam nada |
 
 E o **monitor de invariantes** — a segunda camada, sobre o que as regras
 não olham: o elo de cada registro lido refaz a conta da cadeia; a
