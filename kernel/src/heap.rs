@@ -80,6 +80,8 @@ struct Estado {
     primeiro: *mut No,
     total: usize,
     alocado: usize,
+    /// O maior `alocado` desde o boot.
+    pico: usize,
     alocacoes: u64,
     liberacoes: u64,
     /// Pedidos que não puderam ser atendidos.
@@ -95,6 +97,7 @@ impl Estado {
         primeiro: ptr::null_mut(),
         total: 0,
         alocado: 0,
+        pico: 0,
         alocacoes: 0,
         liberacoes: 0,
         falhas: 0,
@@ -288,6 +291,7 @@ unsafe impl GlobalAlloc for Alocador {
             match unsafe { estado.retirar(tamanho, alinhamento) } {
                 Some(endereco) => {
                     estado.alocado += tamanho;
+                    estado.pico = estado.pico.max(estado.alocado);
                     estado.alocacoes += 1;
                     endereco as *mut u8
                 }
@@ -391,6 +395,9 @@ pub fn init() -> Result<(), &'static str> {
 pub struct Estatisticas {
     pub total: usize,
     pub alocado: usize,
+    /// O maior `alocado` desde o boot: quanto do heap o pior momento usou —
+    /// a medida da folga, que um retrato de agora não dá.
+    pub pico: usize,
     pub livre: usize,
     pub blocos_livres: usize,
     /// O maior bloco contíguo disponível.
@@ -425,6 +432,7 @@ pub fn estatisticas() -> Estatisticas {
         Estatisticas {
             total: estado.total,
             alocado: estado.alocado,
+            pico: estado.pico,
             livre,
             blocos_livres: blocos,
             maior_bloco: maior,

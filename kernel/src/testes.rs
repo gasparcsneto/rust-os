@@ -9493,6 +9493,40 @@ fn heap_relatorio_fecha() -> Resultado {
     conferir("depois de liberar")
 }
 
+/// O pico do heap é o pior momento desde o boot: cobre o alocado de agora,
+/// sobe com a alocação que passa dele, e não desce quando ela sai. É a
+/// medida da folga — um retrato de agora não diz quanto o heap já chegou
+/// perto do teto.
+fn heap_o_pico_e_o_pior_momento() -> Resultado {
+    let antes = crate::heap::estatisticas();
+    if antes.pico < antes.alocado || antes.pico > antes.total {
+        return Err("o pico do heap nao cobre o alocado de agora");
+    }
+    let passa = antes.pico - antes.alocado + 64 * 1024;
+    let pico_durante = {
+        let grande = alloc::vec![0u8; passa];
+        let durante = crate::heap::estatisticas();
+        if durante.pico < antes.alocado + grande.len() {
+            crate::log_error!(
+                "teste",
+                "pico {} com {} alocados antes e {} a mais",
+                durante.pico,
+                antes.alocado,
+                grande.len()
+            );
+            return Err("o pico nao subiu com a alocacao que passou dele");
+        }
+        durante.pico
+    };
+    // Uma alocação pequena depois que a grande saiu: o pico é o pior
+    // momento, e não o de agora.
+    let _pequena = alloc::boxed::Box::new([0u8; 64]);
+    if crate::heap::estatisticas().pico < pico_durante {
+        return Err("o pico desceu quando a alocacao saiu");
+    }
+    Ok(())
+}
+
 fn heap_box_aloca_e_libera() -> Resultado {
     let antes = crate::heap::estatisticas();
 
@@ -29780,6 +29814,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "heap: o relatorio fecha com a lista livre",
         f: heap_relatorio_fecha,
+    },
+    Caso {
+        nome: "heap: o pico e o pior momento",
+        f: heap_o_pico_e_o_pior_momento,
     },
     Caso {
         nome: "heap: funde blocos adjacentes",

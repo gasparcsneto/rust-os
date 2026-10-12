@@ -214,7 +214,7 @@ pub static COMANDOS: &[Command] = &[
     },
     Command {
         nome: "heap.stats",
-        resumo: "Estado do heap do kernel, incluindo fragmentacao.",
+        resumo: "Estado do heap do kernel, incluindo fragmentacao e o pico desde o boot (`peak_bytes`).",
         params: &[],
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
@@ -2400,6 +2400,7 @@ fn heap_stats(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.begin_object()?;
     w.field_u64("total_bytes", e.total as u64)?;
     w.field_u64("allocated_bytes", e.alocado as u64)?;
+    w.field_u64("peak_bytes", e.pico as u64)?;
     w.field_u64("free_bytes", e.livre as u64)?;
     w.field_u64("free_blocks", e.blocos_livres as u64)?;
     // A medida honesta de fragmentacao: quando o maior bloco fica muito menor
