@@ -40442,6 +40442,24 @@ const PUBLICADOS: [&str; 5] = [
 /// O código com que o `vindo` sai quando o pedido dele passa.
 const SAIDA_DO_VINDO: i64 = 92;
 
+/// Roda `f` com a taxa do operador alta, sobre a política em vigor — a da
+/// bancada HTTP. O instalador decide pelo gate, a cada arquivo, umas vinte
+/// coisas — o DNS, a conexão, a semente, o envio, cada leitura de 4 KiB, os
+/// diretórios, a versão e a gravação —, e cinco arquivos seguidos, no
+/// kernel de produção, passam da taxa de todo dia do operador: a recusa
+/// `RATE_LIMIT` viria no meio deles, como deve. Como no caso das medidas do
+/// HTTP.
+fn com_a_taxa_do_instalador(f: impl FnOnce() -> Resultado) -> Resultado {
+    const DE: &str = "taxa operador 50 100";
+    let atual = crate::autorizacao::com_politica(|p| p.texto());
+    if !atual.contains(DE) {
+        return Err("a politica mudou: o caso nao acha a taxa do operador");
+    }
+    let mais = politica::Politica::ler(&atual.replace(DE, "taxa operador 400 800"))
+        .map_err(|_| "a politica do caso nao se le")?;
+    com_a_politica(mais, f)
+}
+
 /// O `instalador`, lançado e conduzido pela suíte.
 struct Instalador {
     fio: u64,
@@ -40575,128 +40593,133 @@ fn codigo_o_instalador_pela_rede() -> Resultado {
     use politica::Codigo;
     use seguranca::regras::Regra;
     com_a_bancada_http(|| {
-        com_o_nsf(|| {
-            let sessao =
-                crate::pessoas::sessao_de_teste(Console::Terminal(82), "codigo-rede", "operador");
-            let instalador = Instalador::lancar(Autoridade::Pessoa { sessao })?;
-            let fio = instalador.fio;
-            let r = (|| -> Resultado {
-                for arquivo in 0..PUBLICADOS.len() {
-                    instalador.baixar(arquivo)?;
-                }
-                // Cada download pelo gate: o DNS, o destino cifrado e a
-                // gravação, uma por arquivo.
-                let cifradas = decisoes_do_processo(fio, "net.connect", HTTP_CIFRADO);
-                let gravadas = decisoes_do_processo(fio, "fs.write", "");
-                if cifradas.len() != PUBLICADOS.len()
-                    || gravadas.len() < PUBLICADOS.len()
-                    || cifradas
-                        .iter()
-                        .chain(&gravadas)
-                        .any(|(_, c, _)| *c != Codigo::Allow)
-                {
-                    crate::log_error!("teste", "{:?} {:?}", cifradas, gravadas);
-                    return Err("o codigo nao chegou pelo gate, destino por destino");
-                }
-
-                use protocolo::usuario::erro;
-                let esperados = [
-                    SAIDA_DO_VINDO,
-                    erro::SEM_SELO,
-                    erro::SELO_NAO_CONFERE,
-                    erro::EDITOR_NAO_CONFIADO,
-                    erro::EDITOR_NAO_CONFIADO,
-                ];
-                for (arquivo, codigo) in esperados.into_iter().enumerate() {
-                    instalador.rodar(arquivo, codigo)?;
-                }
-                // As recusas: execuções da decisão do gate sobre o
-                // `executar`, em nome do processo que executava, com o
-                // motivo de cada uma.
-                let motivos = [
-                    (1, "o codigo nao tem selo"),
-                    (2, "o selo nao confere com o codigo"),
-                    (3, "o editor do codigo nao esta no registro"),
-                    (4, "o papel nao confia no editor outro"),
-                ];
-                for (arquivo, motivo) in motivos {
-                    let caminho = alloc::format!("{CODIGO_INSTALADO}/{}", PUBLICADOS[arquivo]);
-                    let (_, e) = registro_que(|e| {
-                        e.metodo == "process.exec"
-                            && e.recurso == caminho
-                            && e.codigo == Codigo::DenyPolicy
-                    })
-                    .ok_or("a recusa do executar nao foi gravada")?;
-                    let certo = e.detalhe.starts_with("pelo processo ")
-                        && e.detalhe.contains("(instalador ")
-                        && e.detalhe.contains(&alloc::format!("): {motivo}; decisao "));
-                    if !certo {
-                        crate::log_error!("teste", "{:?}", e);
-                        return Err(
-                            "a recusa do executar nao diz o processo, o motivo e a decisao",
-                        );
+        com_a_taxa_do_instalador(|| {
+            com_o_nsf(|| {
+                let sessao = crate::pessoas::sessao_de_teste(
+                    Console::Terminal(82),
+                    "codigo-rede",
+                    "operador",
+                );
+                let instalador = Instalador::lancar(Autoridade::Pessoa { sessao })?;
+                let fio = instalador.fio;
+                let r = (|| -> Resultado {
+                    for arquivo in 0..PUBLICADOS.len() {
+                        instalador.baixar(arquivo)?;
                     }
-                }
-                // O que rodou pediu, e o pedido diz de onde ele veio.
-                registro_que(|e| {
-                    e.metodo == "system.info"
-                        && e.codigo == Codigo::Allow
-                        && e.detalhe.contains("(vindo ")
-                        && e.detalhe.ends_with(" de bancada)")
-                })
-                .ok_or("o pedido do codigo instalado nao diz quem o selou")?;
-
-                // O NSF: o adulterado é um incidente, de alerta — e ninguém
-                // é contido por ele.
-                let ate = crate::autorizacao::ultimo_registro();
-                let mut pedidos = 0;
-                for _ in 0..64 {
-                    pedidos += crate::seguranca::passo().pedidos;
-                    if crate::seguranca::com_motor_de_teste(|m| m.lido() >= ate) == Some(true) {
-                        break;
+                    // Cada download pelo gate: o DNS, o destino cifrado e a
+                    // gravação, uma por arquivo.
+                    let cifradas = decisoes_do_processo(fio, "net.connect", HTTP_CIFRADO);
+                    let gravadas = decisoes_do_processo(fio, "fs.write", "");
+                    if cifradas.len() != PUBLICADOS.len()
+                        || gravadas.len() < PUBLICADOS.len()
+                        || cifradas
+                            .iter()
+                            .chain(&gravadas)
+                            .any(|(_, c, _)| *c != Codigo::Allow)
+                    {
+                        crate::log_error!("teste", "{:?} {:?}", cifradas, gravadas);
+                        return Err("o codigo nao chegou pelo gate, destino por destino");
                     }
-                }
-                let viu = crate::seguranca::com_motor_de_teste(|m| {
-                    m.incidentes.todos().any(|i| {
-                        i.deteccoes.iter().any(|d| {
-                            d.regra == Regra::CodigoAdulterado
-                                && d.explicacao.contains("vindo-adulterado")
+
+                    use protocolo::usuario::erro;
+                    let esperados = [
+                        SAIDA_DO_VINDO,
+                        erro::SEM_SELO,
+                        erro::SELO_NAO_CONFERE,
+                        erro::EDITOR_NAO_CONFIADO,
+                        erro::EDITOR_NAO_CONFIADO,
+                    ];
+                    for (arquivo, codigo) in esperados.into_iter().enumerate() {
+                        instalador.rodar(arquivo, codigo)?;
+                    }
+                    // As recusas: execuções da decisão do gate sobre o
+                    // `executar`, em nome do processo que executava, com o
+                    // motivo de cada uma.
+                    let motivos = [
+                        (1, "o codigo nao tem selo"),
+                        (2, "o selo nao confere com o codigo"),
+                        (3, "o editor do codigo nao esta no registro"),
+                        (4, "o papel nao confia no editor outro"),
+                    ];
+                    for (arquivo, motivo) in motivos {
+                        let caminho = alloc::format!("{CODIGO_INSTALADO}/{}", PUBLICADOS[arquivo]);
+                        let (_, e) = registro_que(|e| {
+                            e.metodo == "process.exec"
+                                && e.recurso == caminho
+                                && e.codigo == Codigo::DenyPolicy
                         })
+                        .ok_or("a recusa do executar nao foi gravada")?;
+                        let certo = e.detalhe.starts_with("pelo processo ")
+                            && e.detalhe.contains("(instalador ")
+                            && e.detalhe.contains(&alloc::format!("): {motivo}; decisao "));
+                        if !certo {
+                            crate::log_error!("teste", "{:?}", e);
+                            return Err(
+                                "a recusa do executar nao diz o processo, o motivo e a decisao",
+                            );
+                        }
+                    }
+                    // O que rodou pediu, e o pedido diz de onde ele veio.
+                    registro_que(|e| {
+                        e.metodo == "system.info"
+                            && e.codigo == Codigo::Allow
+                            && e.detalhe.contains("(vindo ")
+                            && e.detalhe.ends_with(" de bancada)")
                     })
-                });
-                if viu != Some(true) {
-                    return Err("o NSF nao viu o codigo adulterado");
-                }
-                if pedidos != 0 {
-                    return Err("o NSF pediu uma contencao pelo codigo adulterado");
-                }
+                    .ok_or("o pedido do codigo instalado nao diz quem o selou")?;
 
-                // O user.run da pessoa, sobre o mesmo arquivo instalado.
-                let pessoa = crate::autorizacao::Chamador::Pessoa(sessao);
-                let desde = crate::log::total_emitidos();
-                let r = fs_pedir(
-                    pessoa,
-                    "user.run",
-                    &alloc::format!(r#"{{"path":"{CODIGO_INSTALADO}/vindo"}}"#),
-                );
-                if !r.contains(r#""launched":true"#) {
-                    crate::log_error!("teste", "{}", r);
-                    return Err("o user.run nao rodou o codigo selado pela bancada");
-                }
-                saida_do_processo(desde, SAIDA_DO_VINDO)?;
-                let r = fs_pedir(
-                    pessoa,
-                    "user.run",
-                    &alloc::format!(r#"{{"path":"{CODIGO_INSTALADO}/vindo-adulterado"}}"#),
-                );
-                if !r.contains(r#""code":"CODE_TAMPERED""#) {
-                    crate::log_error!("teste", "{}", r);
-                    return Err("o user.run nao recusou o codigo adulterado");
-                }
-                Ok(())
-            })();
-            let fim = instalador.encerrar();
-            r.and(fim)
+                    // O NSF: o adulterado é um incidente, de alerta — e ninguém
+                    // é contido por ele.
+                    let ate = crate::autorizacao::ultimo_registro();
+                    let mut pedidos = 0;
+                    for _ in 0..64 {
+                        pedidos += crate::seguranca::passo().pedidos;
+                        if crate::seguranca::com_motor_de_teste(|m| m.lido() >= ate) == Some(true) {
+                            break;
+                        }
+                    }
+                    let viu = crate::seguranca::com_motor_de_teste(|m| {
+                        m.incidentes.todos().any(|i| {
+                            i.deteccoes.iter().any(|d| {
+                                d.regra == Regra::CodigoAdulterado
+                                    && d.explicacao.contains("vindo-adulterado")
+                            })
+                        })
+                    });
+                    if viu != Some(true) {
+                        return Err("o NSF nao viu o codigo adulterado");
+                    }
+                    if pedidos != 0 {
+                        return Err("o NSF pediu uma contencao pelo codigo adulterado");
+                    }
+
+                    // O user.run da pessoa, sobre o mesmo arquivo instalado.
+                    let pessoa = crate::autorizacao::Chamador::Pessoa(sessao);
+                    let desde = crate::log::total_emitidos();
+                    let r = fs_pedir(
+                        pessoa,
+                        "user.run",
+                        &alloc::format!(r#"{{"path":"{CODIGO_INSTALADO}/vindo"}}"#),
+                    );
+                    if !r.contains(r#""launched":true"#) {
+                        crate::log_error!("teste", "{}", r);
+                        return Err("o user.run nao rodou o codigo selado pela bancada");
+                    }
+                    saida_do_processo(desde, SAIDA_DO_VINDO)?;
+                    let r = fs_pedir(
+                        pessoa,
+                        "user.run",
+                        &alloc::format!(r#"{{"path":"{CODIGO_INSTALADO}/vindo-adulterado"}}"#),
+                    );
+                    if !r.contains(r#""code":"CODE_TAMPERED""#) {
+                        crate::log_error!("teste", "{}", r);
+                        return Err("o user.run nao recusou o codigo adulterado");
+                    }
+                    Ok(())
+                })();
+                let fim = instalador.encerrar();
+                r.and(fim)
+            })
         })
     })
 }
@@ -40713,54 +40736,56 @@ fn codigo_entre_baixar_e_rodar() -> Resultado {
     use crate::autorizacao::Autoridade;
     use crate::pessoas::Console;
     com_a_bancada_http(|| {
-        let sessao =
-            crate::pessoas::sessao_de_teste(Console::Terminal(83), "codigo-meio", "operador");
-        let instalador = Instalador::lancar(Autoridade::Pessoa { sessao })?;
-        let fio = instalador.fio;
-        let r = (|| -> Resultado {
-            instalador.baixar(0)?;
-            let sem_confianca = crate::autorizacao::com_politica(|p| {
-                p.com_linha("editores operador", "administrador", &[])
-            })
-            .map_err(|_| "a politica sem a confianca nao se fez")?;
-            com_a_politica(sem_confianca, || {
-                instalador.rodar(0, protocolo::usuario::erro::EDITOR_NAO_CONFIADO)
-            })?;
-            instalador.rodar(0, SAIDA_DO_VINDO)?;
+        com_a_taxa_do_instalador(|| {
+            let sessao =
+                crate::pessoas::sessao_de_teste(Console::Terminal(83), "codigo-meio", "operador");
+            let instalador = Instalador::lancar(Autoridade::Pessoa { sessao })?;
+            let fio = instalador.fio;
+            let r = (|| -> Resultado {
+                instalador.baixar(0)?;
+                let sem_confianca = crate::autorizacao::com_politica(|p| {
+                    p.com_linha("editores operador", "administrador", &[])
+                })
+                .map_err(|_| "a politica sem a confianca nao se fez")?;
+                com_a_politica(sem_confianca, || {
+                    instalador.rodar(0, protocolo::usuario::erro::EDITOR_NAO_CONFIADO)
+                })?;
+                instalador.rodar(0, SAIDA_DO_VINDO)?;
 
-            // Isolado: nem a conexão, nem o filho.
-            let quem = sistema_aqui();
-            let isolar = fs_pedir(
-                quem,
-                "process.isolate",
-                &alloc::format!(r#"{{"process":{fio}}}"#),
-            );
-            if !isolar.contains(r#""state":"isolated""#) {
-                crate::log_error!("teste", "{}", isolar);
-                return Err("o caso nao isolou o instalador");
-            }
-            let baixou = instalador.passo(INSTALAR_BAIXAR, 0);
-            let rodou = instalador.passo(INSTALAR_RODAR, 0);
-            let _ = fs_pedir(
-                quem,
-                "process.release",
-                &alloc::format!(r#"{{"process":{fio}}}"#),
-            );
-            let (baixou, rodou) = (baixou?, rodou?);
-            if !baixou.contains("DENY_CONTAINED") {
-                crate::log_error!("teste", "baixou: {}", baixou);
-                return Err("o instalador isolado baixou");
-            }
-            if rodou != alloc::format!("falhou bifurcar {}", protocolo::usuario::erro::NEGADO) {
-                crate::log_error!("teste", "rodou: {}", rodou);
-                return Err("o instalador isolado rodou o codigo num filho");
-            }
-            instalador.baixar(0)?;
-            instalador.rodar(0, SAIDA_DO_VINDO)
-        })();
-        let fim = instalador.encerrar();
-        crate::pessoas::esquecer_registradas();
-        r.and(fim)
+                // Isolado: nem a conexão, nem o filho.
+                let quem = sistema_aqui();
+                let isolar = fs_pedir(
+                    quem,
+                    "process.isolate",
+                    &alloc::format!(r#"{{"process":{fio}}}"#),
+                );
+                if !isolar.contains(r#""state":"isolated""#) {
+                    crate::log_error!("teste", "{}", isolar);
+                    return Err("o caso nao isolou o instalador");
+                }
+                let baixou = instalador.passo(INSTALAR_BAIXAR, 0);
+                let rodou = instalador.passo(INSTALAR_RODAR, 0);
+                let _ = fs_pedir(
+                    quem,
+                    "process.release",
+                    &alloc::format!(r#"{{"process":{fio}}}"#),
+                );
+                let (baixou, rodou) = (baixou?, rodou?);
+                if !baixou.contains("DENY_CONTAINED") {
+                    crate::log_error!("teste", "baixou: {}", baixou);
+                    return Err("o instalador isolado baixou");
+                }
+                if rodou != alloc::format!("falhou bifurcar {}", protocolo::usuario::erro::NEGADO) {
+                    crate::log_error!("teste", "rodou: {}", rodou);
+                    return Err("o instalador isolado rodou o codigo num filho");
+                }
+                instalador.baixar(0)?;
+                instalador.rodar(0, SAIDA_DO_VINDO)
+            })();
+            let fim = instalador.encerrar();
+            crate::pessoas::esquecer_registradas();
+            r.and(fim)
+        })
     })
 }
 
