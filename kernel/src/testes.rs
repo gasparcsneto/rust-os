@@ -3821,11 +3821,11 @@ fn usb_relatorio_hid_vira_teclas() -> Resultado {
 /// preempção faz, cada cópia volta pelo próprio quadro, em qualquer núcleo.
 fn usuario_ceder_de_varios_processos_em_varios_nucleos() -> Resultado {
     use crate::usuario::DIRETORIO_DOS_COMPILADOS;
+    use core::sync::atomic::{AtomicUsize, Ordering};
 
     // Duas cópias por núcleo, e no mínimo quatro: com um núcleo só, a
     // sobreposição que importa é a de dois fios cedendo no mesmo núcleo.
     let copias = (crate::nucleos::ligados() * 2).max(4);
-    let caminho = alloc::format!("{DIRETORIO_DOS_COMPILADOS}/cedente");
     let saida = "processo encerrou com codigo 78";
     let desde = crate::log::total_emitidos();
     let contar = |procurada: &str| {
@@ -3837,9 +3837,33 @@ fn usuario_ceder_de_varios_processos_em_varios_nucleos() -> Resultado {
         });
         n
     };
+    // As cópias nascem juntas, cada uma lançada por um fio: o lançamento lê
+    // e confere o executável antes de o fio nascer — ver
+    // `usuario::lancar_conferido` —, e lançadas em fila, cada cópia saía
+    // antes de a seguinte nascer, sem ninguém a quem ceder.
+    static LANCADAS: AtomicUsize = AtomicUsize::new(0);
+    static RECUSADAS: AtomicUsize = AtomicUsize::new(0);
+    extern "C" fn lancador(_: u64) -> ! {
+        let caminho = alloc::format!("{DIRETORIO_DOS_COMPILADOS}/cedente");
+        let contador = if crate::usuario::lancar(Some(&caminho)).is_ok() {
+            &LANCADAS
+        } else {
+            &RECUSADAS
+        };
+        contador.fetch_add(1, Ordering::AcqRel);
+        crate::fios::terminar()
+    }
+    LANCADAS.store(0, Ordering::Release);
+    RECUSADAS.store(0, Ordering::Release);
     let trocas_antes = crate::fios::estatisticas().1;
     for _ in 0..copias {
-        crate::usuario::lancar(Some(&caminho))?;
+        crate::fios::criar("teste-lancador", lancador, 0)?;
+    }
+    let lancou = || LANCADAS.load(Ordering::Acquire) + RECUSADAS.load(Ordering::Acquire);
+    esperar_cedendo(|| lancou() == copias, 3000)
+        .map_err(|_| "os fios que lancavam o cedente nao terminaram")?;
+    if RECUSADAS.load(Ordering::Acquire) > 0 {
+        return Err("uma copia do cedente nao foi lancada");
     }
     // Cedendo: com um núcleo só, quem espera girando é um fio ocupado no
     // rodízio, e fica com um quantum inteiro a cada volta das cópias — cem
@@ -35257,10 +35281,20 @@ fn http_a_revogacao_no_meio_do_pedido() -> Resultado {
                 esperar_cedendo(|| crate::sessoes::identidade(s).is_none(), 800)
                     .map_err(|_| "a sessao do agente que caiu ficou de pe")?;
                 b.passo(BUSCA_TROCA, 0, "buscador: troca: 200 3")?;
-                // A revogação no meio do pedido lento.
+                // A revogação no meio do pedido lento: com a leitura que
+                // espera a resposta já decidida — e não depois de um tempo
+                // fixo, que a máquina mais lenta não cumpre: a recusa caía
+                // no envio, antes da leitura.
                 let desde = crate::log::total_emitidos();
+                let antes = crate::autorizacao::ultimo_registro();
                 b.pedir(BUSCA_LENTA, 1_500)?;
-                let _ = esperar_ate(|| false, 30);
+                let esperando = || {
+                    decisoes_do_processo(fio, "net.recv", HTTP_CLARO)
+                        .iter()
+                        .any(|(seq, c, _)| *seq > antes && *c == Codigo::Allow)
+                };
+                esperar_ate(esperando, TETO_DO_HTTP)
+                    .map_err(|_| "o buscador nao chegou a esperar a resposta lenta")?;
                 crate::identidade::revogar(&chave).map_err(|_| "a revogacao de teste falhou")?;
                 b.dizer(desde, "buscador: lenta: denied DENY_ROLE")?;
                 let negada = ultimo_que(|e| {
