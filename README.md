@@ -180,7 +180,7 @@ $ cargo xtask agent --canal 2 agent.session
 | `memory.regions` | Regiões do mapa de memória (`limit`, `usable_only`) |
 | `memory.frames` | Estado do alocador de frames físicos |
 | `paging.translate` | Traduz um endereço virtual para físico (`address`) |
-| `heap.stats` | Estado do heap, incluindo fragmentação |
+| `heap.stats` | Estado do heap, incluindo fragmentação e o pico desde o boot (`peak_bytes`) |
 | `tasks.stats` | Escalonador cooperativo e fila de entrada do canal |
 | `threads.stats` | Escalonador preemptivo: trocas de contexto e quanta |
 | `threads.list` | Fios de execução do kernel, com estado e vezes escalonado |
@@ -214,8 +214,8 @@ $ cargo xtask agent --canal 2 agent.session
 | `net.info` | A placa de rede e a pilha IP: endereço físico, contadores, o endereço e o roteador que o DHCP deu, as conexões, e os datagramas de outra origem descartados |
 | `net.arp` | Pergunta quem atende por um IPv4 e espera a resposta (`ip`, `from`) |
 | `net.connect` | Abre uma conexão de saída para um destino no alcance do papel: TCP, ou uma associação UDP que só conversa com aquele destino (`to`: `tcp:<ipv4>:<porta>` ou `udp:<ipv4>:<porta>`) |
-| `net.send` | Manda bytes por uma conexão sua — texto em `content` ou o anexo; numa UDP, um datagrama inteiro de até 1472 bytes, ou nada e o motivo; com `wait`, sem espaço na fila de saída, espera a pilha abrir espaço — ou o estado mudar — até o prazo, e a entrega é decidida de novo pelo gate (`connection`, `content`, `attachment`, `wait`) |
-| `net.recv` | O que chegou numa conexão sua, e o estado dela; numa UDP, um datagrama inteiro, com o tamanho em `datagram`, e o que não cabe em `max` fica; com `wait`, sem nada chegado, espera a pilha ter o que dizer — o dado, o estado, o fim da conexão — até o prazo; texto em `utf-8` ou `base64` (`connection`, `max`, `wait`) |
+| `net.send` | Manda bytes por uma conexão sua — texto em `content` ou o anexo, até o buffer da conexão (16 KiB); numa UDP, um datagrama inteiro de até 1472 bytes, ou nada e o motivo; com `wait`, sem espaço na fila de saída, espera a pilha abrir espaço — ou o estado mudar — até o prazo, e a entrega é decidida de novo pelo gate (`connection`, `content`, `attachment`, `wait`) |
+| `net.recv` | O que chegou numa conexão sua, até `max` e no máximo o buffer da conexão (16 KiB), e o estado dela; numa UDP, um datagrama inteiro, com o tamanho em `datagram`, e o que não cabe em `max` fica; com `wait`, sem nada chegado, espera a pilha ter o que dizer — o dado, o estado, o fim da conexão — até o prazo; texto em `utf-8` ou `base64` (`connection`, `max`, `wait`) |
 | `net.close` | Fecha uma conexão sua (`connection`) |
 | `net.observe` | Os datagramas trocados com um destino observado — o conteúdo, em base64, com o dono, o sentido e o último registro da auditoria quando foi guardado (`after_record`, a ordem dele entre as decisões do gate) —, de associações de qualquer titular; só de um destino que um papel tem em `net.observe` (`to`, `after`, `max`) |
 | `net.block` | Barra o tráfego para um destino, para todos ou para um dono — e derruba as conexões vivas que a regra alcança. Só restringe (`to`, `owner`) |
@@ -2224,7 +2224,9 @@ sai —, o coletor de fios derruba a conexão na passada seguinte e a grava
 na auditoria, como faz com as camadas de um processo morto.
 
 **Tetos.** Dezesseis conexões na máquina, quatro por titular — conexões
-TCP e associações UDP juntas —, quatro KiB em cada sentido de cada uma.
+TCP e associações UDP juntas —, 16 KiB em cada sentido de uma conexão TCP
+— o buffer, que é também a janela: ver [A janela do TCP](#a-janela-do-tcp)
+— e 4 KiB numa associação UDP.
 São tetos de recurso, e não autorização: a decisão é a da política, e o
 teto só impede um titular de tomar a tabela dos outros. Por isso a
 conexão que o dono fechou e que ainda espera o outro lado terminar o fecho
@@ -2359,8 +2361,8 @@ lado confirmou e a fila andou —, até o estado mudar, ou até o prazo. É a
 mesma espera da leitura, no outro sentido: o socket guarda um waker de
 cada sentido, e uma conexão aceita um envio e uma leitura esperando juntos
 — a segunda espera do **mesmo** sentido é recusada com o motivo. Sem ela,
-quem tem mais a mandar do que cabe nos 4 KiB da fila só podia perguntar de
-novo em laço — cada volta uma decisão do gate e um registro na auditoria;
+quem tem mais a mandar do que cabe na fila só podia perguntar de novo em
+laço — cada volta uma decisão do gate e um registro na auditoria;
 o TLS, que manda vários registros de uma vez, girava.
 
 A entrega é decidida de novo, como a da leitura, e leva os mesmos bytes:
@@ -2708,7 +2710,9 @@ ser anunciada, assunto da pilha. Na memória, o programa com TLS e HTTP tem uns 
 são uns 570, o HTTP uns 60 —; a resposta não passa dos limites de quem
 pede (a linha, 8 KiB; a cabeça, 16 KiB; 64 cabeçalhos; o corpo, 1 MiB);
 e o kernel guarda 2 × 4 KiB por conexão, quatro por dono, dezesseis na
-máquina.
+máquina. (A janela não era o buffer: era um segmento, e é o que o
+incremento seguinte mediu e corrigiu — ver [A janela do
+TCP](#a-janela-do-tcp).)
 
 **Nada do HTTP é autorização.** O gate decide o destino; o método, o
 caminho, o `Host`, os cabeçalhos, o status, o corpo, o redirecionamento e
@@ -2790,7 +2794,9 @@ a porta ao lado não está.
   registro da auditoria; a que espera e acorda é decidida de novo. Um
   operador, com a taxa de todo dia, ouve `RATE_LIMIT` no meio de uma
   página grande — como deve: a suíte sobe a taxa do operador no caso das
-  medidas, e a fumaça as faz pela serial, com a taxa do sistema.
+  medidas, e a fumaça as faz pela serial, com a taxa do sistema. (Com a
+  janela inteira, um `net.recv` leva 16 KiB, e a mesma página custa um
+  décimo das decisões — ver [A janela do TCP](#a-janela-do-tcp).)
 - **Fechar é um pedido.** O programa que larga uma conexão depois de a
   política tirar o destino dela ouve `DENY_RESOURCE` no `net.close`, e a
   conexão fica na tabela, no teto dele, até ele acabar. O caso da conexão
@@ -2812,6 +2818,97 @@ a porta ao lado não está.
   CI do ARM, com a virtio-gpu, o pegou entre as duas coisas. Os casos mais
   velhos da rede já esperavam a gravação; o do HTTP passou a esperar
   também.
+
+### A janela do TCP
+
+O buffer de cada conexão TCP é de 16 KiB em cada sentido, e é também a
+janela que ela anuncia: o outro lado manda até 16 KiB sem esperar
+confirmação, e um `net.recv` leva até 16 KiB numa decisão do gate — vários
+segmentos do TCP numa decisão, e não um. O `net.send` leva o mesmo, e o TLS
+de um programa corta em 16 KiB os registros que manda: um registro, um
+envio, uma decisão. O número mora em `protocolo`
+(`usuario::nativo::BUFFER_DA_CONEXAO`): o kernel, o transporte dos
+programas e o HTTP o usam, e o registro do TLS que não couber num envio
+reprova a compilação dos programas.
+
+**O que a medida achou.** A vazão de 70 KiB/s da fase 12 não era o buffer de
+4 KiB, nem a decisão do gate por leitura — a explicação que este texto deu.
+A janela anunciada era de **um segmento**, 1474 bytes: a placa dizia ao
+`smoltcp` que recebia um quadro por vez (`max_burst_size`), e ele limita a
+janela à rajada da placa, para o outro lado não mandar mais do que ela tem
+onde pôr. Com um segmento de janela, o outro lado manda um e espera a
+confirmação; a de um segmento só é atrasada — 10 ms no `smoltcp`, num
+relógio de tiques de 10 ms —, e a conexão andava um segmento a cada 20 ms,
+qualquer que fosse o buffer. A captura do fio (`DUKE_CAPTURA`, ver
+[Depuração](#depuração)) mostrou exatamente isso: por página de 64 KiB, 45
+segmentos de 1460 bytes, um a cada 19,98 ms (mediana), cada pausa inteira
+entre o dado e a confirmação do hóspede; e o programa lendo 43 vezes, 1524
+bytes em média. Só com a rajada corrigida, o buffer ainda de 4 KiB, a
+mesma página levou 90 ms em vez de 920. E o enigma da fase 12 — o kernel
+debug, mais lento, media mais vazão que o release — era o mesmo: com um
+segmento de janela, quem lia mais devagar juntava mais segmentos por
+leitura. Com a janela inteira, o release voltou a ser o mais rápido.
+
+**A rajada é a da placa.** A placa pendura dezesseis buffers de recepção, e
+diz ao `smoltcp` que recebe dezesseis quadros de uma vez — o que é verdade:
+são dezesseis lugares para o dispositivo escrever antes de a pilha colher.
+Uma asserção de compilação amarra os dois números: a rajada, em
+segmentos, cobre o buffer de uma conexão, e a janela é o buffer inteiro. O
+emulador segura o quadro que não cabe até a placa ter lugar, mas uma placa
+de verdade o perderia: a rajada anunciada é a que o dispositivo aguenta, e
+não a que a bancada perdoa. A janela cabe nos 16 bits do TCP — outra
+asserção —, sem escala.
+
+**As medidas**, na fumaça, uma rodada cada; antes, o código da fase 13.1:
+
+| | x86 release | x86 debug | ARM release | ARM debug |
+|---|---|---|---|---|
+| janela anunciada | 1474 → 16 384 bytes | o mesmo | o mesmo | o mesmo |
+| `GET` de 64 KiB | 920 ms (69 KiB/s) → 80 ms (800 KiB/s) | 730 (87) → 300 (213) | 810 (79) → 80 (800) | 930 (68) → 170 (376) |
+| `GET` de 256 KiB | 3490 (73) → 120 (2133) | 2680 (95) → 640 (400) | 3370 (75) → 130 (1969) | 2750 (93) → 760 (336) |
+| `GET` de 64 KiB, cifrado | 810 (79) → 130 (492) | 900 (71) → 380 (168) | 810 (79) → 130 (492) | 920 (69) → 330 (193) |
+| `POST` de 64 KiB, ida e volta | 880 → 70 | 870 → 280 | 900 → 70 | 1000 → 390 |
+| eco TCP de 64 KiB, ida e volta | 880 → 50 | 940 → 430 | 860 → 50 | 940 → 420 |
+| eco TLS | 12 222 bytes em 240 ms → 49 086 em 70 ms | 12 222 em 160 → 49 086 em 280 | 12 222 em 180 → 49 086 em 80 | 12 222 em 170 → 49 086 em 300 |
+| decisões do gate da página | 984 → 288 | → 309 | 952 → 288 | → 307 |
+| pico do heap na fumaça | 1729 → 1750 KiB | → 1763 KiB | 1761 → 1774 KiB | → 1800 KiB |
+
+O eco TLS manda três registros cheios, e o registro cresceu de 4 KiB para
+16: quatro vezes os bytes em menos tempo. O `GET` de 256 KiB leva 17
+leituras em vez de 177; a fumaça inteira, 1575 decisões em vez de 2271.
+
+**A memória.** Os dois buffers de uma conexão nascem com ela e saem com ela:
+32 KiB por conexão, 128 KiB por titular, 512 KiB do heap de 4 MiB com a
+tabela cheia — eram 128 KiB. A suíte confere a conta: doze conexões tomam
+os dois buffers de cada uma e pouco mais, e fechadas o heap volta. A
+associação UDP continua com 4 KiB em cada sentido — um datagrama tem no
+máximo 1472 bytes —, e a suíte confere que ela não acompanha o TCP. A placa
+usa 64 KiB de frames físicos, fora do heap, para os dezesseis buffers de
+recepção. E o heap ganhou o pico (`peak_bytes` no `heap.stats`), que a
+fumaça escreve: na fumaça inteira, o mesmo antes e depois, porque o pior
+momento do heap não é o das conexões.
+
+**O gate não muda.** Cada `net.send` e cada `net.recv` continua decidido,
+com a autoridade de quem pede; a revogação, a contenção e o firewall valem
+no pedido seguinte; cada um vai para a auditoria, com o destino. O que
+muda é quantos pedidos uma transferência custa — e a taxa dos papéis, que
+a página grande esgotava, é o incremento seguinte, medido sobre isto.
+
+**A contrapressão** é a do TCP: o buffer cheio fecha a janela, e o que não
+coube fica do outro lado — o kernel guarda o buffer, e nada além. A suíte
+o vê no fio: a janela de 16 KiB anunciada, a janela zero quando ninguém lê,
+e a janela inteira de volta na leitura que leva o buffer numa decisão; e
+quatro fios trocam 64 KiB cada, ao mesmo tempo, em quatro leituras cada um.
+
+**O que fica de fora.** O HTTPS ficou no TLS: perto de 500 KiB/s no x86, o
+AES-GCM em software, que a vazão nova deixou à mostra — é o incremento das
+otimizações de cifra. A confirmação atrasada continua num relógio de 10 ms:
+o fim de uma rajada ímpar ainda espera um tique. A pessoa que lê pelo
+Terminal uma leitura inteira em base64, uns 22 KiB, passa do anel de 16 KiB
+da janela, e o que não cabe é contado como perdido, como qualquer saída
+grande — `max` limita a leitura. E 32 KiB por sentido foram medidos e não
+ficaram: a página de 256 KiB foi de 150 para 140 ms, as decisões da fumaça
+de 1580 para 1556, e o pior caso do heap dobraria.
 
 ### As mutações da rede
 
@@ -3192,6 +3289,38 @@ conexão, que passa pela conta comum do gate, `decidir`, como qualquer
 recurso. A mutação que vale troca o papel ali, só para os destinos
 `tcp:`; o caso da conexão mantida, que tira o servidor do alcance do
 operador e o deixa no do sistema, a reprova.
+
+### As mutações da janela
+
+Catorze mutações contra o que a janela do TCP promete — a rajada da placa,
+o teto do pedido, a memória das conexões e das associações, o pico do heap
+e o registro do TLS que cabe num envio —, contra os casos `rede:`, `heap:`
+e `tls:` da suíte de quatro núcleos, no x86: **doze reprovadas**, e duas
+equivalentes.
+
+| Mutação | Reprovada por |
+|---|---|
+| a rajada da placa de volta a um quadro | `rede: a janela e o buffer inteiro, e fecha quando ninguem le` — a janela anunciada não é o buffer |
+| quatro buffers de recepção | a compilação: a rajada da placa não cobre a janela de uma conexão |
+| quatro buffers de recepção, sem a asserção | `rede: a janela e o buffer inteiro, e fecha quando ninguem le` |
+| o envio maior que o buffer aceito em parte | `rede: o pedido maior que o buffer` — não foi recusado inteiro |
+| o envio do buffer exato recusado | o mesmo caso — o buffer exato não coube |
+| a leitura sem os dois tetos | o kernel cai na leitura com `max` enorme: um bloco do tamanho do pedido |
+| a conexão guarda um buffer a mais | `rede: a memoria das conexoes volta` — mais que os dois buffers |
+| o fecho terminado não sai do conjunto de sockets | o mesmo caso — fechadas as conexões, o heap não voltou |
+| a associação UDP com o buffer do TCP | o mesmo caso — as associações tomam mais que o espaço dos datagramas |
+| o pico do heap não acompanha | `heap: o pico e o pior momento` |
+| o pico do heap é o alocado de agora | o mesmo caso — o pico desceu quando a alocação saiu |
+| o registro do TLS maior que o envio | a compilação dos programas: o registro não cabe num envio |
+
+As duas equivalentes são os dois tetos da leitura, cada um sozinho: a pilha
+corta o que lê no buffer, e o comando corta o `max` antes de pedir. São de
+propósito — um em quem guarda o recurso, outro em quem fala com o pedido —,
+e tirar os dois junto derruba o kernel, a mutação da tabela. Duas
+sobreviveram à primeira rodada, e os casos mudaram por elas: o buffer do
+UDP — o caso da memória passou a medir as associações também —, e o pico
+que segue o alocado de agora — o caso do pico passou a alocar depois de a
+alocação grande sair, e a conferir que ele não desceu.
 
 ## O tecido de segurança
 
@@ -5960,6 +6089,19 @@ $ cargo xtask simbolo 18446603336221253026
       kernel/src/arch/x86_64/mod.rs:337:14
 ```
 
+**Pelo fio**, para quem mede a rede: `DUKE_CAPTURA=<arquivo>` grava em
+pcap cada quadro que passa pela placa virtio de cada máquina que o `xtask`
+sobe — `<arquivo>.0`, `<arquivo>.1`, na ordem em que sobem —, pelo
+`filter-dump` do emulador, sem nada no hóspede. Só os cabeçalhos, 128
+bytes por quadro: o que se lê é o TCP — as janelas, os segmentos, as
+pausas —, no `tcpdump` ou no Wireshark. Foi como a janela de um segmento
+apareceu (ver [A janela do TCP](#a-janela-do-tcp)).
+
+```bash
+$ DUKE_CAPTURA=/tmp/fumaca.pcap cargo xtask fumaca --release
+$ tcpdump -nr /tmp/fumaca.pcap.0 'tcp port 80'
+```
+
 Detalhes, e a lista honesta do que **não** funciona num kernel (Miri, ASan,
 TSan, Tokio, `perf`) com o motivo de cada um, em [`docs/DEPURACAO.md`](docs/DEPURACAO.md).
 
@@ -6198,6 +6340,16 @@ padronizado.
       fim. HTTP/2 e HTTP/3, mTLS, a gestão de certificados, o NTP e o SIMD
       ficam para depois. Ver [O HTTP de um programa](#o-http-de-um-programa).
       **Fase 12 completa.**
+- [ ] **Fase 12 — os incrementos de infraestrutura.** Sobre o HTTP/1.1,
+      cada um separado, na ordem das dependências entre eles: os buffers
+      do TCP; as taxas dos papéis, medidas sobre eles; a compressão e os
+      cookies, do programa; o HTTP/2, com o ALPN no TLS; o NTP, a gestão de
+      certificados e o mTLS, nessa ordem; o *proxy*; o HTTP/3, que depende
+      do QUIC e começa por uma avaliação; e as otimizações de cifra, por
+      último, medidas. Feito: os buffers do TCP — a janela era de um
+      segmento, e passou a ser o buffer de 16 KiB, e uma leitura leva
+      vários segmentos numa decisão do gate. Ver [A janela do
+      TCP](#a-janela-do-tcp).
 - [ ] **Fase 13 — Consentimento e auditoria.** Se um agente pode fazer tudo
       que uma pessoa faz, o modelo de permissão precisa ser **mais** forte que
       o de um desktop comum, e não mais fraco. Três coisas: quem pediu — a
