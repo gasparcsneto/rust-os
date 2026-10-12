@@ -837,9 +837,12 @@ pronto; derrubar uma tradução do kernel em todos os núcleos antes de o frame
 voltar ao alocador; e parar todos no caminho da falha fatal, para o
 relatório sair de um núcleo só. No x86 os dois últimos vão por NMI, que
 atravessa a máscara — um núcleo girando com as interrupções desligadas
-ainda é parado. No ARM a invalidação da TLB é difundida pelo próprio
-hardware (`tlbi …is`), e a parada vai por SGI, que **não** atravessa a
-máscara: um núcleo mascarado fica de fora, e o relatório o lista em
+ainda é parado. A NMI é a mesma para os dois, e quem a recebe decide pela
+parada em curso; quem conduz a parada não para por ela — um aviso de
+descarte mandado antes da parada e entregue depois chega a ele também. No
+ARM a invalidação da TLB é difundida pelo próprio hardware (`tlbi …is`), e
+a parada vai por uma SGI só dela, que **não** atravessa a máscara: um
+núcleo mascarado fica de fora, e o relatório o lista em
 `fatal_unanswered_mask`.
 
 **As travas são justas.** O `spin::Mutex` é um teste-e-troca: ganha quem
@@ -3712,6 +3715,31 @@ suíte confere que o `user.run` do `ola` da imagem não passa por ela.
   deve. No de depuração, mais lento, a taxa não chegava a ser alcançada.
   Os casos que usam o instalador sobem a taxa do operador, como o caso das
   medidas do HTTP já fazia.
+- **O sono acordado por NMI.** Na CI, na suíte com a virtio-gpu, o caso
+  `arch: dormir parado acorda com as interrupcoes mascaradas` reprovou
+  logo depois do caso novo do zumbi: o coletor devolvia as pilhas dos
+  fios que aquele caso criou, cada página com um aviso de descarte aos
+  outros núcleos — uma NMI —, e o sono do caso acordava com uma delas
+  antes de qualquer interrupção comum. A NMI não passa por `irq::total`, e
+  o caso lia essa volta como "não dormiu". Com a suíte filtrada aos dois
+  casos, na mesma máquina, reprovou cinco vezes em seis. Agora as NMIs
+  atendidas são contadas sob `modo-teste`; a volta que só uma NMI explica
+  não decide, e o caso dorme de novo até uma interrupção comum; e uma
+  segunda metade dorme com um fio de outro núcleo avisando sem parar, e
+  exige ver a volta por NMI.
+- **A parada parava quem a conduzia.** Com a suíte filtrada a esse caso,
+  o caso final — o estouro de pilha de propósito — pendurou: o coletor
+  devolvia a pilha do fio que avisava, e um aviso de descarte mandado
+  antes da parada chegou depois dela ao núcleo que conduzia o fim. A NMI é
+  a mesma para o descarte e para a parada; o núcleo a lia como parada e
+  parava a si mesmo, no meio do relatório — o sistema morria calado. Um
+  defeito do caminho de falha desde a fase 6, só do x86: no ARM a parada
+  tem uma SGI só dela. Com o fio avisando até o caso final e uma sonda na
+  serial, uma rodada em quatro pendurou, com a sonda mostrando a NMI
+  parando quem conduzia; com a correção, seis em seis passaram, três delas
+  com a NMI atrasada chegando e sendo ignorada. Quem conduz a parada
+  agora não para por ela, e o caso final pede, depois de ligar a parada,
+  a NMI atrasada — sem a correção, pendura sempre.
 
 ### O que fica de fora
 
@@ -3744,14 +3772,16 @@ suíte confere que o `user.run` do `ola` da imagem não passa por ela.
 
 ### As mutações do código selado
 
-Trinta e cinco mutações contra o que a conferência promete — o selo, a
+Trinta e nove mutações contra o que a conferência promete — o selo, a
 origem pela montagem, a confiança decidida pelo papel e a cada pedido, a
-leitura única, a auditoria, a resposta e o NSF — e contra o defeito do
-escalonador que o exercício achou, cada uma contra o que deve reprová-la:
-os casos `codigo:` e `fios:` da suíte de quatro núcleos, no x86, os
-testes do hospedeiro e o `xtask invariantes`; cinco delas também contra o
-outro lado. **Trinta e cinco reprovadas** — uma só depois da conferência
-que o exercício acrescentou, e uma, de ponta a ponta, equivalente.
+leitura única, a auditoria, a resposta e o NSF — e contra o que o
+exercício achou fora dela — a vaga do zumbi, o sono acordado por NMI e a
+parada que parava quem a conduzia —, cada uma contra o que deve
+reprová-la: os casos `codigo:`, `fios:` e `arch:` da suíte de quatro
+núcleos, no x86, os testes do hospedeiro e o `xtask invariantes`; cinco
+delas também contra o outro lado. **Trinta e nove reprovadas** — uma só
+depois da conferência que o exercício acrescentou, e uma, de ponta a
+ponta, equivalente.
 
 | Mutação | Reprovada por |
 |---|---|
@@ -3787,6 +3817,10 @@ que o exercício acrescentou, e uma, de ponta a ponta, equivalente.
 | o erro do `executar` confunde o adulterado com o sem selo | `codigo: o instalador pela rede` — `-18`, e não `-19` |
 | o nome do `executar` volta a 32 bytes | o mesmo caso — o processo não executou o que gravou |
 | a vaga do zumbi volta a ser livre — o defeito que o exercício achou | `fios: o zumbi guarda a vaga ate a colheita` — um fio novo tomou a vaga do zumbi |
+| a volta do sono por NMI decide, como antes | `arch: dormir parado acorda com as interrupcoes mascaradas`, na metade sob avisos de outro núcleo — "voltou sem nenhuma interrupcao ter sido atendida" |
+| as NMIs atendidas sem conta | o mesmo caso — a volta por NMI ficou sem explicação |
+| o sono mascarado vira giro — a mutação para a qual o caso existe | o mesmo caso, na primeira metade |
+| quem conduz a parada para com a NMI atrasada | `pilha: estouro e detectado` — o caso final pendurou até o teto do `xtask` |
 | o NSF não vê o código adulterado | `o_codigo_adulterado_alerta_e_nao_contem`; de ponta a ponta, `codigo: o instalador pela rede` |
 | o NSF com confiança alta no código adulterado | `o_codigo_adulterado_alerta_e_nao_contem`, no hospedeiro. De ponta a ponta, **equivalente**: o NSF não planeja contenção para esta regra em confiança nenhuma — a contenção automática é só da saída depois de sondagem —, e nenhum pedido sai |
 | o NSF lê o motivo sem tirar o processo do detalhe | `o_codigo_adulterado_alerta_e_nao_contem` |
