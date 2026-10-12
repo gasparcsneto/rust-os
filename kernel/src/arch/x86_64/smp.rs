@@ -552,6 +552,20 @@ pub fn parar_os_outros() -> crate::nucleos::Mascara {
     PARADOS.load(Ordering::Acquire)
 }
 
+/// Quantas NMIs os núcleos atenderam e das quais voltaram, somados todos.
+///
+/// Só a suíte pergunta. Uma NMI acorda um `hlt` como qualquer interrupção,
+/// mas não passa por [`crate::irq::total`] — e o caso `arch: dormir parado
+/// acorda com as interrupcoes mascaradas` precisa separar a volta do sono
+/// que ela explica da volta que nada explica.
+#[cfg(feature = "modo-teste")]
+pub fn nmis_atendidas() -> u64 {
+    NMIS_ATENDIDAS.load(Ordering::Relaxed)
+}
+
+#[cfg(feature = "modo-teste")]
+static NMIS_ATENDIDAS: AtomicU64 = AtomicU64::new(0);
+
 /// O que um núcleo faz ao receber uma NMI.
 ///
 /// Sem trava nenhuma: a NMI pode ter chegado com este núcleo segurando
@@ -569,6 +583,9 @@ pub fn atender_nmi() {
             x86_64::instructions::hlt();
         }
     }
+
+    #[cfg(feature = "modo-teste")]
+    NMIS_ATENDIDAS.fetch_add(1, Ordering::Relaxed);
 
     if FALTAM.load(Ordering::Acquire) & bit != 0 {
         x86_64::instructions::tlb::flush(x86_64::VirtAddr::new_truncate(

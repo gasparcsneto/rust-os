@@ -24709,6 +24709,34 @@ fn kernel_checagem_de_estouro_ligada() -> Resultado {
 /// pelo menos uma servida, e [`crate::irq::total`] sobe. Com o `spin_loop`
 /// ela não sobe, e o caso reprova.
 ///
+/// # A volta que só uma NMI explica, e por que ela não decide
+///
+/// O `hlt` acorda também com uma NMI, e no x86 o aviso de descarte de
+/// tradução que um núcleo manda aos outros é uma NMI — ver o módulo
+/// `arch::x86_64::smp`. Ela atravessa a máscara, é atendida e
+/// **não** passa por `irq::total`. A versão anterior lia essa volta como "não
+/// dormiu", e a CI achou o dia em que ela acontece: logo depois de `fios: o
+/// zumbi guarda a vaga ate a colheita`, o coletor devolve as pilhas dos fios
+/// que aquele caso criou — oitenta e nove, com a suíte filtrada —, cada
+/// página com um aviso aos outros núcleos, e o sono deste caso acordava com
+/// um deles antes de qualquer interrupção comum, em qualquer núcleo. Com a
+/// suíte filtrada aos dois casos, na máquina da virtio-gpu, este reprovou
+/// cinco vezes em seis; a sonda mostrava os descartes subindo e
+/// `irq::total` parado.
+///
+/// A volta por NMI não prova nem desmente o sono — o `spin_loop` também
+/// pode coincidir com uma —, então ela não decide: o caso dorme de novo, até
+/// uma interrupção comum ser atendida **dentro** do sono. O que reprova é a
+/// volta que nada explica, nem interrupção nem NMI. As NMIs são contadas só
+/// sob `modo-teste`, em `smp::nmis_atendidas`.
+///
+/// E a volta por NMI deixou de depender de qual caso veio antes. Com outro
+/// núcleo, a segunda metade dorme com um fio dele avisando sem parar —
+/// marcando e desmarcando uma página do heap, um descarte de cada vez — e
+/// exige ter visto ao menos uma volta por NMI, além da interrupção comum no
+/// fim de cada sono. Com a regra antiga de volta, é essa metade que reprova,
+/// e sem o caso do zumbi antes.
+///
 /// # Por que o ARM afirma menos, e não é desleixo
 ///
 /// Porque lá `wfi` acorda com a interrupção **pendente e mascarada** — ele
@@ -24720,30 +24748,181 @@ fn kernel_checagem_de_estouro_ligada() -> Resultado {
 /// Sobra o que vale nos dois: a função volta, e a máscara volta com ela. É
 /// a metade fraca, e está dito que é.
 fn arch_dormir_parado_acorda_mascarado() -> Resultado {
-    let irqs_antes = crate::irq::total();
-
-    let mascarado_dentro = crate::arch::sem_interrupcoes(|| {
-        // Se esta chamada não voltar, a suíte estoura o teto. É o ponto.
-        crate::arch::dormir_parado();
-        crate::arch::interrupcoes_habilitadas()
-    });
-
-    if mascarado_dentro {
-        return Err("dormir_parado devolveu o controle com as interrupcoes ligadas");
-    }
-    if !crate::arch::interrupcoes_habilitadas() {
-        return Err("a regiao mascarada nao devolveu as interrupcoes ao sair");
+    let por_nmi = dormir_ate_uma_interrupcao()?;
+    if por_nmi > 0 {
+        crate::log_info!(
+            "teste",
+            "o sono voltou {} vez(es) por NMI antes da interrupcao comum",
+            por_nmi
+        );
     }
 
-    // A metade falsificável, só onde ela existe. Ver o cabeçalho.
     #[cfg(target_arch = "x86_64")]
-    if crate::irq::total() == irqs_antes {
-        crate::log_error!("teste", "irqs antes e depois: {}", irqs_antes);
-        return Err("dormir_parado voltou sem nenhuma interrupcao ter sido atendida");
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    let _ = irqs_antes;
+    dormir_sob_avisos_de_outro_nucleo()?;
 
+    Ok(())
+}
+
+/// Dorme com [`crate::arch::dormir_parado`] até uma interrupção comum ser
+/// atendida dentro do sono, e devolve quantas voltas antes dela só uma NMI
+/// explicava. Ver [`arch_dormir_parado_acorda_mascarado`].
+fn dormir_ate_uma_interrupcao() -> Result<u64, &'static str> {
+    // Contra o laço sem fim, e muito acima do que cabe num tique: cada volta
+    // por NMI pede um aviso novo, e o timer de qualquer núcleo encerra a
+    // sequência.
+    const TETO_DE_VOLTAS_POR_NMI: u64 = 1_000_000;
+    let mut por_nmi = 0;
+    loop {
+        let (mascarado_dentro, atendida, por_aviso) = crate::arch::sem_interrupcoes(|| {
+            let irqs = crate::irq::total();
+            let nmis = nmis_atendidas();
+            // Se esta chamada não voltar, a suíte estoura o teto. É o ponto.
+            crate::arch::dormir_parado();
+            // Lidos antes de a máscara cair: o que chegasse depois dela não
+            // diria nada sobre o sono.
+            (
+                crate::arch::interrupcoes_habilitadas(),
+                crate::irq::total() != irqs,
+                nmis_atendidas() != nmis,
+            )
+        });
+
+        if mascarado_dentro {
+            return Err("dormir_parado devolveu o controle com as interrupcoes ligadas");
+        }
+        if !crate::arch::interrupcoes_habilitadas() {
+            return Err("a regiao mascarada nao devolveu as interrupcoes ao sair");
+        }
+
+        // A metade falsificável, só onde ela existe. Ver o cabeçalho.
+        if cfg!(not(target_arch = "x86_64")) || atendida {
+            return Ok(por_nmi);
+        }
+        if !por_aviso {
+            crate::log_error!(
+                "teste",
+                "irqs: {}, nmis: {}, voltas por NMI antes: {}",
+                crate::irq::total(),
+                nmis_atendidas(),
+                por_nmi
+            );
+            return Err("dormir_parado voltou sem nenhuma interrupcao ter sido atendida");
+        }
+        por_nmi += 1;
+        if por_nmi >= TETO_DE_VOLTAS_POR_NMI {
+            return Err("o sono so voltou por NMI, e nenhuma interrupcao comum chegou");
+        }
+    }
+}
+
+/// As NMIs atendidas até agora — ver [`crate::arch::x86_64::smp::nmis_atendidas`].
+#[cfg(target_arch = "x86_64")]
+fn nmis_atendidas() -> u64 {
+    crate::arch::x86_64::smp::nmis_atendidas()
+}
+
+/// No ARM, nenhuma: o aviso de lá não é NMI, e o caso não lê o número.
+#[cfg(not(target_arch = "x86_64"))]
+fn nmis_atendidas() -> u64 {
+    0
+}
+
+/// A segunda metade de [`arch_dormir_parado_acorda_mascarado`]: o sono com
+/// um fio de outro núcleo avisando sem parar.
+///
+/// Algumas rodadas, e basta uma volta por NMI numa delas: um sono que começa
+/// colado ao tique de algum núcleo acaba por ele antes do primeiro aviso.
+/// Toda volta, de todo sono, continua conferida.
+#[cfg(target_arch = "x86_64")]
+fn dormir_sob_avisos_de_outro_nucleo() -> Resultado {
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    #[repr(align(4096))]
+    struct Pagina {
+        _bytes: [u8; 4096],
+    }
+    static AVISAR: AtomicBool = AtomicBool::new(false);
+    static PAROU: AtomicBool = AtomicBool::new(false);
+    static FALHOU: AtomicBool = AtomicBool::new(false);
+    static AVISOS: AtomicU64 = AtomicU64::new(0);
+    // Cada marca e cada desmarca de uma página do kernel avisa os outros
+    // núcleos — ver `paginacao_marcar_pagina_do_kernel_avisa_todos`.
+    extern "C" fn avisador(virtual_: u64) -> ! {
+        while AVISAR.load(Ordering::Acquire) {
+            if crate::arch::marcar_compartilhada(virtual_).is_err()
+                || crate::arch::x86_64::desmarcar_compartilhada_de_teste(virtual_).is_err()
+            {
+                FALHOU.store(true, Ordering::Release);
+                break;
+            }
+            AVISOS.fetch_add(2, Ordering::AcqRel);
+        }
+        PAROU.store(true, Ordering::Release);
+        crate::fios::terminar()
+    }
+    const RODADAS: usize = 16;
+
+    let Some(outro) = outro_nucleo() else {
+        crate::log_info!("teste", "um nucleo so: nao ha quem avise");
+        return Ok(());
+    };
+    let pagina = alloc::boxed::Box::new(Pagina { _bytes: [0; 4096] });
+    let virtual_ = &*pagina as *const Pagina as u64;
+    AVISAR.store(true, Ordering::Release);
+    PAROU.store(false, Ordering::Release);
+    FALHOU.store(false, Ordering::Release);
+    AVISOS.store(0, Ordering::Release);
+    if let Err(e) = crate::fios::criar_no_nucleo("teste-avisador", avisador, virtual_, outro) {
+        AVISAR.store(false, Ordering::Release);
+        return Err(e);
+    }
+
+    let mut resultado = esperar_ate(
+        || AVISOS.load(Ordering::Acquire) > 0 || PAROU.load(Ordering::Acquire),
+        600,
+    )
+    .map_err(|_| "o avisador nao comecou a avisar");
+    let mut por_nmi = 0;
+    if resultado.is_ok() {
+        for _ in 0..RODADAS {
+            match dormir_ate_uma_interrupcao() {
+                Ok(voltas) => por_nmi += voltas,
+                Err(e) => {
+                    resultado = Err(e);
+                    break;
+                }
+            }
+            if por_nmi > 0 {
+                break;
+            }
+        }
+    }
+    AVISAR.store(false, Ordering::Release);
+    if esperar_ate(|| PAROU.load(Ordering::Acquire), 600).is_err() {
+        // A página fica com ele: devolvida ao heap, ele a marcaria na mão
+        // de outro dono.
+        alloc::boxed::Box::leak(pagina);
+        return Err("o avisador nao parou quando pedido");
+    }
+    drop(pagina);
+
+    resultado?;
+    if FALHOU.load(Ordering::Acquire) {
+        return Err("marcar a pagina do avisador falhou");
+    }
+    if por_nmi == 0 {
+        crate::log_error!(
+            "teste",
+            "{} avisos em {} sonos, nenhuma volta por NMI",
+            AVISOS.load(Ordering::Acquire),
+            RODADAS
+        );
+        return Err("nenhum sono voltou por NMI: a volta que ela explica nao foi exercitada");
+    }
+    crate::log_info!(
+        "teste",
+        "sob avisos: {} volta(s) por NMI antes da interrupcao comum",
+        por_nmi
+    );
     Ok(())
 }
 
