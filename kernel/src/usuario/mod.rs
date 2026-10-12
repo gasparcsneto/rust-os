@@ -41,12 +41,12 @@
 //! existirá uma ABI de outro sistema: os programas do Duke falam a língua
 //! dele — ver `docs/INTERFACE.md`, a fase 7 do roteiro.
 
+pub mod codigo;
 pub mod descritores;
 pub mod elf;
 pub mod exemplo;
 pub mod programa;
 
-use alloc::string::String;
 use core::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 use politica::Permissao;
@@ -161,12 +161,16 @@ const _: () = {
 /// tem o tamanho que o kernel deu a ela.
 const MAX_TRANSFERENCIA: u64 = 4096;
 
-/// Maior nome de programa que `executar` aceita.
+/// Maior nome de programa que `executar` aceita: o mesmo teto de um
+/// caminho de `abrir`, [`MAX_CAMINHO`].
 ///
 /// Um teto explícito porque o tamanho vem do usuário, e porque o nome é
 /// copiado para a pilha do kernel **antes** de a imagem ser trocada — ver
-/// [`executar`] para o porquê.
-const MAX_NOME: usize = 32;
+/// [`executar`] para o porquê. Era 32: o bastante para `/bin/<nome>` e
+/// `/programas/<arquitetura>/<nome>`, e curto para o código instalado no
+/// armazém — `/armazem/compartilhado/codigo/vindo` tem 35 —, que um
+/// processo não conseguia executar pelo caminho que ele mesmo gravou.
+const MAX_NOME: usize = MAX_CAMINHO;
 
 static CHAMADAS: AtomicU64 = AtomicU64::new(0);
 static BIFURCACOES: AtomicU64 = AtomicU64::new(0);
@@ -1279,16 +1283,22 @@ unsafe fn executar(quadro: *mut core::ffi::c_void, ponteiro: u64, tamanho: u64) 
 
     // A decisão é sobre o caminho já resolvido: um nome sem barra vira o de
     // `/bin`, e é esse que a política confere.
-    if !crate::autorizacao::autorizar_processo(Permissao::ProcessRun, &caminho, "process.exec")
-        .permite()
-    {
+    let (decidido, decisao) = crate::autorizacao::autorizar_processo_com_decisao(
+        Permissao::ProcessRun,
+        &caminho,
+        "process.exec",
+    );
+    if !decidido.permite() {
         RECUSADAS.fetch_add(1, Ordering::Relaxed);
         return erro::NEGADO;
     }
 
-    let imagem = match crate::vfs::ler_tudo(&caminho) {
-        Ok(bytes) => bytes,
-        Err(motivo) => {
+    // O código, lido e conferido pela mesma regra do `user.run`: o de fora
+    // da imagem só com o selo de um editor em que o papel confia. O que é
+    // conferido é o que se carrega — ver `codigo`.
+    let codigo = match codigo::obter(&caminho, crate::fios::autoridade_atual()) {
+        Ok(c) => c,
+        Err(codigo::Recusa::Leitura(motivo)) => {
             crate::log_warn!(
                 "usuario",
                 "executar: `{}` nao pode ser lido: {}",
@@ -1298,9 +1308,31 @@ unsafe fn executar(quadro: *mut core::ffi::c_void, ponteiro: u64, tamanho: u64) 
             RECUSADAS.fetch_add(1, Ordering::Relaxed);
             return erro::PROGRAMA_DESCONHECIDO;
         }
+        // O gate deixou o caminho, e o arquivo não prova de onde veio: a
+        // execução recusa, em nome do processo, com a decisão. O processo
+        // segue inteiro — nada foi trocado.
+        Err(recusa) => {
+            crate::autorizacao::auditar_execucao_do_processo(
+                "process.exec",
+                &caminho,
+                politica::Codigo::DenyPolicy,
+                recusa.motivo(),
+                decisao,
+            );
+            crate::log_warn!(
+                "usuario",
+                "executar: `{}` recusado: {}",
+                caminho,
+                recusa.motivo()
+            );
+            RECUSADAS.fetch_add(1, Ordering::Relaxed);
+            return recusa.erro();
+        }
     };
+    let editor = codigo.selo.as_ref().map(|s| s.editor);
+    let imagem = codigo.imagem;
 
-    let novo = match programa::carregar(&imagem) {
+    let novo = match programa::carregar(&imagem, editor) {
         Ok(programa) => programa,
 
         // Falhou antes do ponto de não retorno: o processo que chamou está
@@ -1346,17 +1378,6 @@ unsafe fn executar(quadro: *mut core::ffi::c_void, ponteiro: u64, tamanho: u64) 
 /// Devolve o identificador do fio. Não espera o processo terminar: quem chama
 /// é o canal do agente, e bloquear ali travaria o atendimento — o resultado
 /// aparece depois em `user.stats`.
-///
-/// # Como o caminho chega ao fio novo
-///
-/// Num ponteiro, e não numa variável global. [`crate::fios::criar`] carrega um
-/// `u64` até a função de entrada, e é nele que vai a `String` vazada de
-/// propósito — o fio a reconstrói e a larga. Zero significa "o exemplo".
-///
-/// Uma global exigiria decidir o que acontece quando dois lançamentos se
-/// cruzam: ou uma trava segurando o segundo, ou o segundo sobrescrevendo o
-/// caminho do primeiro antes de ele ler. O ponteiro não tem essa pergunta,
-/// porque cada fio recebe o dele.
 pub fn lancar(caminho: Option<&str>) -> Result<u64, &'static str> {
     lancar_como(caminho, crate::autorizacao::Autoridade::Sistema)
 }
@@ -1367,30 +1388,81 @@ pub fn lancar_como(
     caminho: Option<&str>,
     autoridade: crate::autorizacao::Autoridade,
 ) -> Result<u64, &'static str> {
+    lancar_conferido(caminho, autoridade).map_err(|n| n.motivo_fixo())
+}
+
+/// Por que um lançamento não aconteceu.
+#[derive(Debug)]
+pub enum NaoLancou {
+    /// O código não se leu, ou é de fora da imagem e não prova de onde veio
+    /// — ver [`codigo`].
+    Codigo(codigo::Recusa),
+    /// O fio não nasceu: a cota de processos do papel, ou as vagas do
+    /// escalonador.
+    Fio(&'static str),
+}
+
+impl NaoLancou {
+    /// O motivo, para o log e para a resposta.
+    pub fn motivo(&self) -> &str {
+        match self {
+            NaoLancou::Codigo(r) => r.motivo(),
+            NaoLancou::Fio(m) => m,
+        }
+    }
+
+    /// O motivo sem o que é deste caso — o nome do editor —, para quem só
+    /// guarda texto estático.
+    fn motivo_fixo(&self) -> &'static str {
+        match self {
+            NaoLancou::Codigo(codigo::Recusa::Leitura(e)) => e.motivo(),
+            NaoLancou::Codigo(codigo::Recusa::Procedencia(f, _)) => f.motivo(),
+            NaoLancou::Fio(m) => m,
+        }
+    }
+}
+
+/// O que o fio novo recebe: o código já lido e conferido, e quem o selou.
+struct Carga {
+    imagem: alloc::vec::Vec<u8>,
+    editor: Option<[u8; 32]>,
+}
+
+/// Como [`lancar_como`], com o motivo inteiro da recusa — o código de fora
+/// da imagem sem selo, com o selo que não confere, de um editor em que o
+/// papel não confia —, para quem responde a um agente.
+///
+/// # O código é lido aqui, e não no fio novo
+///
+/// O fio recebe os bytes **já conferidos** — ver [`codigo::obter`] —, num
+/// ponteiro: [`crate::fios::criar`] carrega um `u64` até a função de
+/// entrada, e é nele que vai a [`Carga`] vazada de propósito; o fio a
+/// reconstrói e a larga. Zero significa "o exemplo".
+///
+/// Antes, o fio lia o arquivo sozinho, depois de nascer: o lançamento
+/// respondia "lançado" para um caminho que não existia, e — com o código
+/// que precisa de selo — a conferência teria de acontecer num fio que já
+/// nasceu, longe de quem pediu e da resposta a ele. Lendo aqui, quem pediu
+/// ouve a recusa, e o que roda é exatamente o que foi conferido: ninguém
+/// relê o arquivo.
+pub fn lancar_conferido(
+    caminho: Option<&str>,
+    autoridade: crate::autorizacao::Autoridade,
+) -> Result<u64, NaoLancou> {
     extern "C" fn hospedar(argumento: u64) -> ! {
-        let imagem = if argumento == 0 {
-            alloc::borrow::Cow::Borrowed(exemplo::bytes())
+        let (imagem, editor) = if argumento == 0 {
+            (alloc::borrow::Cow::Borrowed(exemplo::bytes()), None)
         } else {
             // SAFETY: o ponteiro veio do `Box::into_raw` logo abaixo, este fio
             // é o único que o recebeu, e ele o reconstrói uma vez só.
-            let caminho = unsafe { alloc::boxed::Box::from_raw(argumento as *mut String) };
-            match crate::vfs::ler_tudo(&caminho) {
-                Ok(bytes) => alloc::borrow::Cow::Owned(bytes),
-                Err(motivo) => {
-                    crate::log_error!(
-                        "usuario",
-                        "nao foi possivel ler `{}`: {}",
-                        caminho,
-                        motivo.motivo()
-                    );
-                    crate::fios::terminar()
-                }
-            }
+            let carga = unsafe { alloc::boxed::Box::from_raw(argumento as *mut Carga) };
+            let Carga { imagem, editor } = *carga;
+            (alloc::borrow::Cow::Owned(imagem), editor)
         };
 
         // Carregar e entrar em dois passos, com a imagem largada no meio: ver
         // `programa::entrar` sobre o vazamento que isto fecha.
-        let carregado = programa::carregar(&imagem);
+        let carregado = programa::carregar(&imagem, editor);
         drop(imagem);
         match carregado.and_then(programa::entrar) {
             Ok(_) => unreachable!("entrar nao retorna em caso de sucesso"),
@@ -1410,20 +1482,61 @@ pub fn lancar_como(
     // A cota de processos do papel de quem lança: contada antes de nascer,
     // e de novo ao nascer — ver `fios::criar_processo`.
     let Ok(cota) = crate::autorizacao::permitir_processo(autoridade, "process.run") else {
-        return Err(crate::fios::COTA_ESGOTADA);
+        return Err(NaoLancou::Fio(crate::fios::COTA_ESGOTADA));
     };
 
-    let argumento = match caminho {
-        None => 0,
-        Some(caminho) => {
-            alloc::boxed::Box::into_raw(alloc::boxed::Box::new(String::from(caminho))) as u64
-        }
+    // O código, lido e conferido antes de o fio nascer.
+    let (argumento, selo) = match caminho {
+        None => (0, None),
+        Some(caminho) => match codigo::obter(caminho, autoridade) {
+            Ok(c) => {
+                let editor = c.selo.as_ref().map(|s| s.editor);
+                let carga = alloc::boxed::Box::new(Carga {
+                    imagem: c.imagem,
+                    editor,
+                });
+                (alloc::boxed::Box::into_raw(carga) as u64, c.selo)
+            }
+            Err(recusa) => {
+                // O que o código não prova vai para a auditoria como o que
+                // a execução fez da decisão — o `user.run`, com o número
+                // dela —, ou, fora de um comando, em nome do kernel.
+                if let codigo::Recusa::Procedencia(..) = recusa {
+                    let motivo = recusa.motivo();
+                    if crate::autorizacao::auditar_execucao(
+                        caminho,
+                        politica::Codigo::DenyPolicy,
+                        motivo,
+                    ) == 0
+                    {
+                        crate::autorizacao::auditar_do_kernel(
+                            "process.run",
+                            caminho,
+                            politica::Codigo::DenyPolicy,
+                            motivo,
+                        );
+                    }
+                }
+                crate::log_warn!(
+                    "usuario",
+                    "`{}` nao foi lancado: {}",
+                    caminho,
+                    recusa.motivo()
+                );
+                return Err(NaoLancou::Codigo(recusa));
+            }
+        },
     };
 
     // Quem lançou o fio novo, na auditoria — é a proveniência dele —, antes
-    // de ele poder rodar.
+    // de ele poder rodar; com quem selou, se o código veio de fora da
+    // imagem.
     let nasceu = |id: crate::fios::IdFio| {
-        crate::autorizacao::auditar_nascimento(caminho.unwrap_or("<exemplo embutido>"), id.numero())
+        crate::autorizacao::auditar_nascimento(
+            caminho.unwrap_or("<exemplo embutido>"),
+            id.numero(),
+            selo.as_ref().map(|s| (s.nome.as_str(), &s.resumo)),
+        )
     };
     match crate::fios::criar_processo("usuario", hospedar, argumento, autoridade, cota, &nasceu) {
         Ok(id) => Ok(id.numero()),
@@ -1433,14 +1546,14 @@ pub fn lancar_como(
             }
             // O fio não nasceu, então ninguém vai reconstruir a caixa. Largá-la
             // aqui é obrigatório: sem isto, cada lançamento recusado — e eles
-            // acontecem, o escalonador tem dezesseis vagas — deixaria uma
-            // `String` no heap para sempre.
+            // acontecem, o escalonador tem dezesseis vagas — deixaria a
+            // imagem inteira no heap para sempre.
             if argumento != 0 {
                 // SAFETY: o ponteiro veio do `into_raw` acima e não foi
                 // entregue a ninguém, porque `criar` falhou.
-                drop(unsafe { alloc::boxed::Box::from_raw(argumento as *mut String) });
+                drop(unsafe { alloc::boxed::Box::from_raw(argumento as *mut Carga) });
             }
-            Err(motivo)
+            Err(NaoLancou::Fio(motivo))
         }
     }
 }

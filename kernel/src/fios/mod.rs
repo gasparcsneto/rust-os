@@ -1572,6 +1572,31 @@ pub fn adotar_imagem(
     })
 }
 
+/// Só para a suíte: roda `f` com o programa do fio que executa trocado por
+/// `programa`, e põe o de antes de volta. É o fio da suíte pedindo como
+/// pediria um processo daquele programa — pela mesma `autorizar_processo`
+/// de uma chamada de sistema —, sem precisar de um processo que peça no
+/// instante exato em que o caso muda a política.
+#[cfg(feature = "modo-teste")]
+pub fn com_programa_de_teste<R>(
+    programa: crate::autorizacao::Programa,
+    f: impl FnOnce() -> R,
+) -> R {
+    let antes = com_escalonador(|e| {
+        e.fio_atual_mut()
+            .map(|fio| core::mem::replace(&mut fio.programa, programa))
+    });
+    let r = f();
+    if let Some(antes) = antes {
+        com_escalonador(|e| {
+            if let Some(fio) = e.fio_atual_mut() {
+                fio.programa = antes;
+            }
+        });
+    }
+    r
+}
+
 /// O identificador do fio que está executando e o programa dele — ver
 /// [`crate::autorizacao::Programa`]. Fora de um fio, o kernel.
 /// Só para a suíte: os núcleos parados no fio ocioso agora — os que um

@@ -204,7 +204,11 @@ impl Programa {
 /// união das permissões — que é exatamente como se perde o `W^X`. Um linker
 /// alinha segmentos a página justamente por isso, então recusar não rejeita
 /// nada legítimo.
-pub fn carregar(imagem: &[u8]) -> Result<Programa, Falha> {
+///
+/// `editor` é quem selou a imagem, quando ela veio de fora da imagem do
+/// sistema — conferido antes, por [`super::codigo::obter`]. Vai para o
+/// programa do fio junto com o manifesto e o resumo.
+pub fn carregar(imagem: &[u8], editor: Option<[u8; 32]>) -> Result<Programa, Falha> {
     // Tudo até a troca de espaço é recuperável, e é este `map_err` que diz
     // isso uma vez em vez de em cada `?`.
     let antes = Falha::ProcessoIntacto;
@@ -249,6 +253,7 @@ pub fn carregar(imagem: &[u8]) -> Result<Programa, Falha> {
     let programa = crate::autorizacao::Programa::Imagem {
         manifesto,
         resumo: politica::manifesto::resumo_da_imagem(imagem),
+        editor,
     };
 
     let espaco = crate::paginacao::Espaco::novo(ENTRADA_PRIVADA).map_err(antes)?;
@@ -354,7 +359,7 @@ fn faixa_de_paginas(inicio: u64, tamanho: u64) -> Result<(u64, u64), &'static st
 // passos — ver [`entrar`].
 #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub fn executar(imagem: &[u8]) -> Result<core::convert::Infallible, Falha> {
-    entrar(carregar(imagem)?)
+    entrar(carregar(imagem, None)?)
 }
 
 /// Desce para o anel sem privilégio num programa já carregado. Nunca

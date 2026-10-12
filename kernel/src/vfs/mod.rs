@@ -129,6 +129,26 @@ pub struct No {
 pub struct Vnode {
     pub no: No,
     montagem: usize,
+    /// A origem da montagem, lida na mesma seção que a resolveu.
+    origem: Origem,
+}
+
+/// De onde vêm os bytes de uma montagem.
+///
+/// É o que decide se o código que está nela precisa de selo para rodar —
+/// ver [`crate::usuario::codigo`]. Uma propriedade da montagem, e não do
+/// caminho: quem pergunta pelo caminho escrito erraria no primeiro ponto
+/// de montagem novo, e a montagem é o que o VFS percorreu de fato.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Origem {
+    /// Da imagem: os programas embutidos no kernel e a raiz do disco. Vieram
+    /// com o kernel, a política e as chaves, e nada os grava em tempo de
+    /// execução.
+    Imagem,
+    /// Gravados em tempo de execução — o armazém. O que está aqui chegou
+    /// depois da imagem, por quem tinha `fs.write`, de onde quer que tenha
+    /// vindo.
+    Gravada,
 }
 
 /// Uma entrada de diretório.
@@ -178,6 +198,8 @@ struct Montagem {
     em: String,
     /// Que tipo de sistema de arquivos é, para o relatório.
     tipo: &'static str,
+    /// De onde vêm os bytes dela.
+    origem: Origem,
     sistema: Box<dyn SistemaDeArquivos>,
 }
 
@@ -206,6 +228,7 @@ const TETO_DE_LEITURA: u64 = 1024 * 1024;
 pub fn montar(
     tipo: &'static str,
     em: &str,
+    origem: Origem,
     sistema: Box<dyn SistemaDeArquivos>,
 ) -> Result<(), Erro> {
     let em = normalizar(em)?;
@@ -215,7 +238,12 @@ pub fn montar(
         if montagens.iter().any(|m| m.em == em) {
             return Err(Erro::JaMontado);
         }
-        montagens.push(Montagem { em, tipo, sistema });
+        montagens.push(Montagem {
+            em,
+            tipo,
+            origem,
+            sistema,
+        });
         Ok(())
     })
 }
@@ -320,6 +348,7 @@ fn resolver_como(caminho: &str, do_kernel: bool) -> Result<Vnode, Erro> {
         Ok(Vnode {
             no: atual,
             montagem: indice,
+            origem: montagens[indice].origem,
         })
     })
 }
@@ -370,6 +399,16 @@ pub fn ler_em(vnode: &Vnode, deslocamento: u64, destino: &mut [u8]) -> Result<us
 /// por pedaços exigiria guardar estado entre as leituras.
 pub fn ler_tudo(caminho: &str) -> Result<Vec<u8>, Erro> {
     ler_vnode(resolver(caminho)?)
+}
+
+/// Lê um arquivo inteiro, e diz de onde ele veio: da imagem, ou gravado
+/// em tempo de execução. A origem é a da montagem que a resolução
+/// percorreu, na mesma seção — não uma segunda resolução que pudesse cair
+/// em outra.
+pub fn ler_tudo_com_origem(caminho: &str) -> Result<(Vec<u8>, Origem), Erro> {
+    let vnode = resolver(caminho)?;
+    let origem = vnode.origem;
+    Ok((ler_vnode(vnode)?, origem))
 }
 
 /// Lê um segredo do kernel, de dentro do [`DIRETORIO_RESERVADO`].

@@ -170,10 +170,14 @@ pub enum Programa {
     /// `usuario::lancar` cria, antes de ler o executável. Não exerce nada.
     SemImagem,
     /// A imagem que o processo executa: o manifesto dela, se tem um — sem
-    /// manifesto, não exerce nada —, e o resumo BLAKE2s do executável.
+    /// manifesto, não exerce nada —, o resumo BLAKE2s do executável, e,
+    /// para o código de fora da imagem, a chave do editor que o selou —
+    /// ver [`crate::usuario::codigo`]. Com editor, cada pedido do processo
+    /// pergunta de novo se o papel de quem o lançou confia nele.
     Imagem {
         manifesto: Option<politica::manifesto::Manifesto>,
         resumo: [u8; 32],
+        editor: Option<[u8; 32]>,
     },
 }
 
@@ -194,23 +198,76 @@ impl Programa {
     }
 
     /// Como a auditoria o nomeia: o nome declarado e o começo do resumo da
-    /// imagem — o nome é o que o programa diz ser, e o resumo é o que ele é.
+    /// imagem — o nome é o que o programa diz ser, e o resumo é o que ele é
+    /// —, e, se veio de fora da imagem, quem o selou.
     pub fn descricao(&self) -> String {
         match self {
             Programa::Kernel => String::from("kernel"),
             Programa::SemImagem => String::from("sem imagem"),
-            Programa::Imagem { manifesto, resumo } => {
+            Programa::Imagem {
+                manifesto,
+                resumo,
+                editor,
+            } => {
                 let nome = manifesto.as_ref().map_or("sem manifesto", |m| m.nome());
-                alloc::format!(
+                let mut d = alloc::format!(
                     "{nome} {:02x}{:02x}{:02x}{:02x}",
                     resumo[0],
                     resumo[1],
                     resumo[2],
                     resumo[3]
-                )
+                );
+                if let Some(chave) = editor {
+                    let quem = crate::identidade::editor(chave)
+                        .unwrap_or_else(|| String::from("desconhecido"));
+                    d.push_str(" de ");
+                    d.push_str(&quem);
+                }
+                d
             }
         }
     }
+}
+
+/// Se o papel `papel` confia no editor de código de chave `chave`: o nome
+/// do editor, ou o que falta — o editor fora do registro, ou o papel que
+/// não confia nele —, com o motivo da auditoria.
+///
+/// A pergunta que o kernel faz antes de carregar código de fora da imagem
+/// e, de novo, a cada pedido do processo que ele virou: o papel é o de
+/// agora, procurado por quem chama, e a política também — a confiança
+/// tirada vale na hora, também para quem já está rodando.
+pub fn confianca_no_editor(
+    papel: Option<&str>,
+    chave: &[u8; 32],
+) -> Result<String, (politica::procedencia::Falta, String)> {
+    use politica::procedencia::{Falta, nao_confiado};
+    let Some(nome) = crate::identidade::editor(chave) else {
+        let f = Falta::EditorDesconhecido;
+        return Err((f, String::from(f.motivo())));
+    };
+    if com_politica(|p| p.confia(papel, &nome)) {
+        Ok(nome)
+    } else {
+        Err((Falta::NaoConfiado, nao_confiado(&nome)))
+    }
+}
+
+/// O motivo de recusar um pedido de `programa` com o papel `papel`, se o
+/// programa veio de fora da imagem e o papel não confia mais no editor
+/// dele. `None` para o código da imagem: a imagem não tem editor a
+/// perguntar.
+fn editor_sem_confianca(programa: &Programa, papel: Option<&str>) -> Option<String> {
+    let Programa::Imagem {
+        editor: Some(chave),
+        ..
+    } = programa
+    else {
+        return None;
+    };
+    confianca_no_editor(papel, chave)
+        .err()
+        .map(|(_, motivo)| motivo)
 }
 
 /// Com que autoridade algo roda.
@@ -1981,6 +2038,23 @@ fn decidir_o_pedido(
             .find(|(c, _)| !c.permite())
             .unwrap_or((Codigo::Allow, "")),
     };
+    // O código de fora da imagem pede só enquanto o papel de quem o lançou
+    // confia no editor que o selou: a última condição, depois de o papel
+    // ter permitido — então há papel a perguntar —, e decidida a cada
+    // pedido, como o papel.
+    let sem_confianca;
+    let (codigo, detalhe) = match chamador {
+        Chamador::Processo { programa, .. } if codigo.permite() && exigida.is_some() => {
+            match editor_sem_confianca(&programa, quem.papel.as_deref()) {
+                Some(motivo) => {
+                    sem_confianca = motivo;
+                    (Codigo::DenyPolicy, sem_confianca.as_str())
+                }
+                None => (codigo, detalhe),
+            }
+        }
+        _ => (codigo, detalhe),
+    };
     // O recurso da auditoria: todos, em ordem.
     let mut recurso_gravado = String::new();
     for r in todos_os_recursos(comando, &recurso, &mais) {
@@ -2113,6 +2187,17 @@ pub fn encher_a_taxa_do_servico_de_teste() {
 /// enumera, e não um passe livre. O de um agente decide pelo papel do
 /// agente, procurado agora.
 pub fn autorizar_processo(permissao: Permissao, recurso: &str, metodo: &str) -> Codigo {
+    autorizar_processo_com_decisao(permissao, recurso, metodo).0
+}
+
+/// [`autorizar_processo`], com o número do registro da decisão — para quem
+/// grava depois o que a execução fez dela, como `executar` com o código que
+/// não confere.
+pub fn autorizar_processo_com_decisao(
+    permissao: Permissao,
+    recurso: &str,
+    metodo: &str,
+) -> (Codigo, u64) {
     // Uma sessão de pessoa que acabou não tem papel, e o papel vazio
     // recusa.
     let mut quem = quem_do_processo(crate::fios::autoridade_atual());
@@ -2148,8 +2233,38 @@ pub fn autorizar_processo(permissao: Permissao, recurso: &str, metodo: &str) -> 
         _ if papel_de_teto(&quem) => TETO_NAO_SE_EXERCE,
         _ => decidir(quem.papel.as_deref(), permissao, recurso),
     };
-    auditar(&quem, metodo, recurso, codigo, &[], detalhe);
-    codigo
+    // A confiança no editor do código de fora da imagem: a última
+    // condição, como no pedido de um comando.
+    let sem_confianca;
+    let (codigo, detalhe) = match editor_sem_confianca(&programa, quem.papel.as_deref()) {
+        Some(motivo) if codigo.permite() => {
+            sem_confianca = motivo;
+            (Codigo::DenyPolicy, sem_confianca.as_str())
+        }
+        _ => (codigo, detalhe),
+    };
+    let decisao = auditar(&quem, metodo, recurso, codigo, &[], detalhe);
+    (codigo, decisao)
+}
+
+/// Grava o que a execução de uma chamada de sistema fez da decisão
+/// `decisao`, em nome do processo que chama — a autoridade e o programa do
+/// fio: o `executar` que o gate deixou, e que o código lido recusou. O
+/// detalhe leva a decisão no fim, como o de uma execução de comando.
+pub fn auditar_execucao_do_processo(
+    metodo: &str,
+    recurso: &str,
+    codigo: Codigo,
+    detalhe: &str,
+    decisao: u64,
+) -> u64 {
+    let mut quem = quem_do_processo(crate::fios::autoridade_atual());
+    let (id, programa) = crate::fios::programa_atual();
+    if programa != Programa::Kernel {
+        quem.processo = Some(pelo_processo(id, &programa));
+    }
+    let detalhe = alloc::format!("{detalhe}; decisao {decisao}");
+    auditar(&quem, metodo, recurso, codigo, &[], &detalhe)
 }
 
 /// Se a autoridade vem de uma credencial que pode ter sido revogada: a
@@ -2361,6 +2476,13 @@ pub fn permitir_processo(autoridade: Autoridade, metodo: &str) -> Result<usize, 
         auditar(&quem, metodo, "", codigo, &[], motivo);
         return Err(codigo);
     }
+    // O código de fora da imagem em cujo editor o papel não confia mais
+    // também não lança nem bifurca: o filho levaria o mesmo programa, e
+    // nasceria só para ser recusado em cada pedido.
+    if let Some(motivo) = editor_sem_confianca(&programa, quem.papel.as_deref()) {
+        auditar(&quem, metodo, "", Codigo::DenyPolicy, &[], &motivo);
+        return Err(Codigo::DenyPolicy);
+    }
     let cota = quem
         .papel
         .as_deref()
@@ -2428,8 +2550,20 @@ fn quem_do_processo(autoridade: Autoridade) -> Quem {
 /// comando, em nome do kernel (o servidor de janelas e o Terminal no
 /// boot). É a proveniência que o tecido de segurança lê: quem lançou o fio
 /// `filho`, pela auditoria, e não por um canal à parte.
-pub fn auditar_nascimento(recurso: &str, filho: u64) {
-    let detalhe = alloc::format!("processo {filho} lancado");
+///
+/// `selado` é o código de fora da imagem: o editor que o selou e o resumo
+/// do que ele selou — o mesmo que vai depois em cada pedido do processo.
+pub fn auditar_nascimento(recurso: &str, filho: u64, selado: Option<(&str, &[u8; 32])>) {
+    let detalhe = match selado {
+        None => alloc::format!("processo {filho} lancado"),
+        Some((editor, r)) => alloc::format!(
+            "processo {filho} lancado: codigo {:02x}{:02x}{:02x}{:02x} de {editor}",
+            r[0],
+            r[1],
+            r[2],
+            r[3]
+        ),
+    };
     if auditar_execucao(recurso, Codigo::Allow, &detalhe) == 0 {
         auditar_do_kernel("process.run", recurso, Codigo::Allow, &detalhe);
     }

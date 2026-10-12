@@ -6632,6 +6632,7 @@ fn vfs_montagem_mais_longa_ganha() -> Resultado {
     crate::vfs::montar(
         "programas",
         FUNDO,
+        crate::vfs::Origem::Imagem,
         alloc::boxed::Box::new(crate::vfs::programas::Programas),
     )
     .map_err(|e| e.motivo())?;
@@ -6639,6 +6640,7 @@ fn vfs_montagem_mais_longa_ganha() -> Resultado {
     let segunda = crate::vfs::montar(
         "programas",
         DENTRO,
+        crate::vfs::Origem::Imagem,
         alloc::boxed::Box::new(crate::vfs::programas::Programas),
     );
 
@@ -8646,7 +8648,7 @@ fn usuario_imagem_recusada_nao_custa_o_espaco() -> Resultado {
 
     // Oito bytes não são um cabeçalho ELF, e é a primeira conferência do
     // validador que os recusa — bem antes de qualquer mapeamento.
-    let resultado = crate::usuario::programa::carregar(&[0u8; 8]);
+    let resultado = crate::usuario::programa::carregar(&[0u8; 8], None);
 
     let depois = crate::arch::espaco_atual();
     if depois != antes {
@@ -24020,7 +24022,7 @@ fn fios_coletor_recolhe_o_espaco_do_processo_morto() -> Resultado {
         // Um fio que hospeda um processo segura bem mais que a própria
         // pilha: a raiz de tradução, as tabelas e todas as páginas do
         // programa.
-        if crate::usuario::programa::carregar(crate::usuario::exemplo::bytes()).is_err() {
+        if crate::usuario::programa::carregar(crate::usuario::exemplo::bytes(), None).is_err() {
             crate::fios::terminar()
         }
 
@@ -24157,7 +24159,7 @@ fn usuario_nenhuma_pagina_gravavel_e_executavel() -> Resultado {
     static AMBOS: AtomicU64 = AtomicU64::new(0);
 
     extern "C" fn inspetor(_argumento: u64) -> ! {
-        if crate::usuario::programa::carregar(crate::usuario::exemplo::bytes()).is_err() {
+        if crate::usuario::programa::carregar(crate::usuario::exemplo::bytes(), None).is_err() {
             crate::fios::terminar()
         }
 
@@ -24269,7 +24271,7 @@ fn usuario_dois_processos_coexistem() -> Resultado {
     /// Só pode rodar num fio criado por `fios::criar`, porque `carregar`
     /// instala um espaço de endereços no fio corrente.
     unsafe fn marcar(marca: u64) -> Result<(), &'static str> {
-        let programa = crate::usuario::programa::carregar(crate::usuario::exemplo::bytes())
+        let programa = crate::usuario::programa::carregar(crate::usuario::exemplo::bytes(), None)
             .map_err(|falha| falha.motivo())?;
 
         // O topo da pilha do processo: mapeado por `carregar`, e no mesmo
@@ -25061,6 +25063,7 @@ fn manifesto_a_permissao_e_a_intersecao() -> Resultado {
     let imagem = |permite: &str| Programa::Imagem {
         manifesto: Some(manifesto_de_teste("caso", permite)),
         resumo: [0xab; 32],
+        editor: None,
     };
     let decide = |autoridade, programa, metodo: &str, params: &str| {
         let chamador = Chamador::Processo {
@@ -25097,6 +25100,7 @@ fn manifesto_a_permissao_e_a_intersecao() -> Resultado {
         let sem_manifesto = Programa::Imagem {
             manifesto: None,
             resumo: [0xcd; 32],
+            editor: None,
         };
         for programa in [sem_manifesto, Programa::SemImagem] {
             if decide(sistema, programa, "system.info", "{}") != "DENY_PERMISSION" {
@@ -25245,7 +25249,7 @@ extern "C" fn carregar_adulterado(argumento: u64) -> ! {
     // SAFETY: o ponteiro veio do `Box::into_raw` do caso, este fio é o único
     // que o recebeu, e o reconstrói uma vez só.
     let imagem = unsafe { alloc::boxed::Box::from_raw(argumento as *mut alloc::vec::Vec<u8>) };
-    let visto = match crate::usuario::programa::carregar(&imagem) {
+    let visto = match crate::usuario::programa::carregar(&imagem, None) {
         Err(crate::usuario::programa::Falha::ProcessoIntacto(_)) => 10,
         // Carregou: o fio larga o espaço novo ao terminar, sem entrar nele.
         _ => 11,
@@ -26154,6 +26158,7 @@ fn armazem_igual_para_pessoa_agente_processo() -> Resultado {
                 programa: Programa::Imagem {
                     manifesto: Some(manifesto_de_teste("caso-fs", permite)),
                     resumo: [0xcd; 32],
+                    editor: None,
                 },
             };
             let c = "/armazem/sistema/manifesto.txt";
@@ -30428,6 +30433,26 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "http: varias visitas ao mesmo tempo",
         f: http_varias_visitas_ao_mesmo_tempo,
+    },
+    Caso {
+        nome: "codigo: so o da imagem roda sem selo",
+        f: codigo_so_o_da_imagem_roda_sem_selo,
+    },
+    Caso {
+        nome: "codigo: a confianca e decidida a cada pedido",
+        f: codigo_a_confianca_e_decidida_a_cada_pedido,
+    },
+    Caso {
+        nome: "codigo: o instalador pela rede",
+        f: codigo_o_instalador_pela_rede,
+    },
+    Caso {
+        nome: "codigo: entre baixar e rodar",
+        f: codigo_entre_baixar_e_rodar,
+    },
+    Caso {
+        nome: "codigo: o conferido e o que roda",
+        f: codigo_o_conferido_e_o_que_roda,
     },
     Caso {
         nome: "canal tcp: o aperto pela rede",
@@ -39934,5 +39959,892 @@ fn canal_tcp_o_nsf_observa_sem_ser_autoridade() -> Resultado {
             }
             Ok(())
         })
+    })
+}
+
+// ---------------------------------------------------------------------------
+// codigo: o código de fora da imagem, selado por um editor
+// ---------------------------------------------------------------------------
+
+/// O editor de código dos casos: uma chave privada fixa — da suíte, e de
+/// ninguém mais — e o nome com que o registro do caso o conhece.
+const EDITOR_DO_CASO: ([u8; 32], &str) = ([0x5a; 32], "caso");
+/// Um editor do registro do caso em quem nenhum papel confia.
+const EDITOR_DE_FORA_DO_CASO: ([u8; 32], &str) = ([0x5b; 32], "caso-de-fora");
+/// Uma chave de editor que nenhum registro tem.
+const EDITOR_ESTRANHO_DO_CASO: [u8; 32] = [0x5c; 32];
+
+/// Onde o código instalado mora: o diretório que a política deixa o
+/// operador executar.
+const CODIGO_INSTALADO: &str = "/armazem/compartilhado/codigo";
+
+/// O código com que `ola`, o programa da imagem que os casos selam, sai.
+const SAIDA_DO_OLA: i64 = 61;
+
+/// Um arquivo do caso: o nome, os bytes, e a recusa esperada — o código da
+/// resposta e o motivo —, ou nenhuma, se ele roda.
+type CodigoDoCaso = (
+    &'static str,
+    alloc::vec::Vec<u8>,
+    Option<(&'static str, &'static str)>,
+);
+
+/// Roda `f` com o registro de editores da imagem mais os dois do caso, e
+/// com a política que faz o sistema, o operador e o administrador confiarem
+/// no editor do caso. Põe os dois de volta depois — também quando `f`
+/// falha.
+fn com_editores_do_caso(f: impl FnOnce() -> Resultado) -> Resultado {
+    use crate::identidade::Editor;
+    let da_imagem = crate::identidade::trocar_editores_de_teste(alloc::vec::Vec::new());
+    let mut do_caso = da_imagem.clone();
+    for (privada, nome) in [EDITOR_DO_CASO, EDITOR_DE_FORA_DO_CASO] {
+        do_caso.push(Editor {
+            chave: sigilo::codigo::publica_do_editor(&privada),
+            nome: nome.into(),
+        });
+    }
+    crate::identidade::trocar_editores_de_teste(do_caso);
+    let r = politica_trocada(&[
+        ("editores sistema bancada", "editores sistema bancada caso"),
+        (
+            "editores operador bancada",
+            "editores operador bancada caso",
+        ),
+        (
+            "editores administrador bancada",
+            "editores administrador bancada caso",
+        ),
+    ])
+    .and_then(|p| com_a_politica(p, f));
+    crate::identidade::trocar_editores_de_teste(da_imagem);
+    r
+}
+
+/// Grava `bytes` em `caminho`, no armazém, como o sistema — pelo gate, no
+/// anexo, contra a versão de agora —, criando os diretórios que faltam.
+fn gravar_codigo(caminho: &str, bytes: &[u8]) -> Resultado {
+    diretorios_acima(caminho)?;
+    let r = crate::nativo::responder_com_anexo_de_teste(
+        sistema_aqui(),
+        &pedido_rpc(
+            "fs.write",
+            &alloc::format!(
+                r#"{{"path":"{caminho}","expect_version":{},"attachment":{}}}"#,
+                fs_no_armazem(caminho).0,
+                bytes.len()
+            ),
+        ),
+        bytes,
+    );
+    if !fs_ok(&r) {
+        crate::log_error!("teste", "{}", r);
+        return Err("o caso nao gravou o codigo no armazem");
+    }
+    Ok(())
+}
+
+/// O programa `ola` da imagem — o executável que os casos selam.
+fn ola_da_imagem() -> Result<alloc::vec::Vec<u8>, &'static str> {
+    crate::vfs::ler_tudo(&alloc::format!(
+        "{}/ola",
+        crate::usuario::DIRETORIO_DOS_COMPILADOS
+    ))
+    .map_err(|_| "o ola da imagem nao se leu")
+}
+
+/// Os quatro primeiros bytes de um resumo, como a auditoria os escreve.
+fn comeco_do_resumo(r: &[u8; 32]) -> alloc::string::String {
+    alloc::format!("{:02x}{:02x}{:02x}{:02x}", r[0], r[1], r[2], r[3])
+}
+
+/// Espera o processo `fio` sair, e devolve o código: pelo log do kernel,
+/// que diz o fio e o código.
+fn saida_do_processo(desde: u64, codigo: i64) -> Resultado {
+    let procurada = alloc::format!("processo encerrou com codigo {codigo}");
+    esperar_ate(|| linhas_do_programa(desde, &procurada) > 0, TETO_DO_HTTP)
+        .map_err(|_| "o processo lancado nao saiu com o codigo esperado")
+}
+
+/// O código de fora da imagem só roda com o selo de um editor em que o
+/// papel de quem lança confia; o da imagem, como sempre roda:
+///
+/// - o mesmo programa — o `ola`, da imagem — gravado no armazém de cinco
+///   jeitos: selado pelo editor do caso, sem selo, selado e com um byte do
+///   código trocado depois, selado por uma chave que o registro não tem, e
+///   por um editor do registro em quem o papel não confia;
+/// - uma pessoa operadora pede `user.run` de cada um: o selado roda, e o
+///   nascimento diz quem selou e o resumo do que foi selado; os outros
+///   não nascem, e a resposta diz `CODE_UNSIGNED`, `CODE_TAMPERED` ou
+///   `CODE_UNTRUSTED`, com a razão `DENY_PROVENANCE` e o que fazer — e a
+///   recusa vai para a auditoria como a execução da decisão do gate, que
+///   tinha deixado o caminho;
+/// - o original, da imagem, roda sem selo nenhum, e a grafia do caminho não
+///   muda a origem: a montagem é que diz;
+/// - o selo assina o resumo que a auditoria cita;
+/// - o gate vem antes: um caminho fora do alcance nem é lido.
+fn codigo_so_o_da_imagem_roda_sem_selo() -> Resultado {
+    use crate::pessoas::Console;
+    use politica::Codigo;
+    use sigilo::codigo::selar;
+    crate::pessoas::esquecer_registradas();
+    let resultado = com_editores_do_caso(|| {
+        let ola = ola_da_imagem()?;
+        if sigilo::codigo::resumo(&ola) != politica::manifesto::resumo_da_imagem(&ola) {
+            return Err("o selo nao assina o resumo que a auditoria cita");
+        }
+        let selado = selar(&ola, &EDITOR_DO_CASO.0);
+        let mut adulterado = selado.clone();
+        adulterado[ola.len() / 2] ^= 1;
+        let casos: [CodigoDoCaso; 5] = [
+            ("caso-selado", selado, None),
+            (
+                "caso-sem-selo",
+                ola.clone(),
+                Some(("CODE_UNSIGNED", "o codigo nao tem selo")),
+            ),
+            (
+                "caso-adulterado",
+                adulterado,
+                Some(("CODE_TAMPERED", "o selo nao confere com o codigo")),
+            ),
+            (
+                "caso-estranho",
+                selar(&ola, &EDITOR_ESTRANHO_DO_CASO),
+                Some(("CODE_UNTRUSTED", "o editor do codigo nao esta no registro")),
+            ),
+            (
+                "caso-de-fora",
+                selar(&ola, &EDITOR_DE_FORA_DO_CASO.0),
+                Some((
+                    "CODE_UNTRUSTED",
+                    "o papel nao confia no editor caso-de-fora",
+                )),
+            ),
+        ];
+        let pessoa = crate::autorizacao::Chamador::Pessoa(crate::pessoas::sessao_de_teste(
+            Console::Terminal(80),
+            "codigo-op",
+            "operador",
+        ));
+        let rodar = |caminho: &str| {
+            fs_pedir(
+                pessoa,
+                "user.run",
+                &alloc::format!(r#"{{"path":"{caminho}"}}"#),
+            )
+        };
+        let conferidos = crate::metricas::CODIGO.ler().0;
+        for (nome, bytes, recusa) in &casos {
+            let caminho = alloc::format!("{CODIGO_INSTALADO}/{nome}");
+            gravar_codigo(&caminho, bytes)?;
+            let desde = crate::log::total_emitidos();
+            let r = rodar(&caminho);
+            match recusa {
+                None => {
+                    let fio = fs_numero(&r, "thread_id").ok_or_else(|| {
+                        crate::log_error!("teste", "{}: {}", nome, r);
+                        "o codigo selado por um editor confiado nao rodou"
+                    })?;
+                    saida_do_processo(desde, SAIDA_DO_OLA)?;
+                    let nasceu = alloc::format!(
+                        "processo {fio} lancado: codigo {} de {}; decisao ",
+                        comeco_do_resumo(&sigilo::codigo::resumo(&ola)),
+                        EDITOR_DO_CASO.1
+                    );
+                    registro_que(|e| {
+                        e.metodo == "user.run"
+                            && e.recurso == caminho
+                            && e.codigo == Codigo::Allow
+                            && e.detalhe.starts_with(&nasceu)
+                    })
+                    .ok_or_else(|| {
+                        crate::log_error!("teste", "esperado `{}`", nasceu);
+                        "o nascimento nao diz quem selou o codigo, nem o resumo"
+                    })?;
+                }
+                Some((codigo, motivo)) => {
+                    let explicado = r.contains(r#""launched":false"#)
+                        && r.contains(&alloc::format!(r#""code":"{codigo}""#))
+                        && r.contains(r#""reason":"DENY_PROVENANCE""#)
+                        && !r.contains("thread_id");
+                    if !explicado {
+                        crate::log_error!("teste", "{}: {}", nome, r);
+                        return Err(
+                            "o codigo sem procedencia nao foi recusado com o codigo e a razao",
+                        );
+                    }
+                    let (_, e) = registro_que(|e| {
+                        e.metodo == "user.run"
+                            && e.recurso == caminho
+                            && e.codigo == Codigo::DenyPolicy
+                    })
+                    .ok_or("a recusa do codigo nao foi gravada")?;
+                    let decisao = e
+                        .detalhe
+                        .strip_prefix(&alloc::format!("{motivo}; decisao "))
+                        .and_then(|n| n.parse::<u64>().ok())
+                        .ok_or_else(|| {
+                            crate::log_error!("teste", "{:?}", e);
+                            "a recusa do codigo nao diz o motivo e a decisao"
+                        })?;
+                    let d = registro_numero(decisao).ok_or("a decisao da recusa saiu do anel")?;
+                    if d.metodo != "user.run" || d.recurso != caminho || d.codigo != Codigo::Allow {
+                        crate::log_error!("teste", "{:?}", d);
+                        return Err("a recusa do codigo nao e a execucao da decisao do gate");
+                    }
+                }
+            }
+        }
+        // Cada conferência — o selo e a confiança —, medida: o que o
+        // `security.metrics` diz.
+        let (n, media, maior) = crate::metricas::CODIGO.ler();
+        if n < conferidos + casos.len() as u64 {
+            return Err("a conferencia do codigo nao foi medida");
+        }
+        crate::log_info!(
+            "teste",
+            "a conferencia de {} KiB: {} us em media, {} us a maior",
+            ola.len() / 1024,
+            crate::metricas::nanos(media) / 1000,
+            crate::metricas::nanos(maior) / 1000
+        );
+        // O original, da imagem, sem selo nenhum: roda — e não passa pela
+        // conferência.
+        let desde = crate::log::total_emitidos();
+        let da_imagem = alloc::format!("{}/ola", crate::usuario::DIRETORIO_DOS_COMPILADOS);
+        let conferidos = crate::metricas::CODIGO.ler().0;
+        if !rodar(&da_imagem).contains(r#""launched":true"#) {
+            return Err("o codigo da imagem passou a pedir selo");
+        }
+        if crate::metricas::CODIGO.ler().0 != conferidos {
+            return Err("o codigo da imagem passou pela conferencia do selo");
+        }
+        saida_do_processo(desde, SAIDA_DO_OLA)?;
+        // A grafia do caminho não muda a origem: o armazém continua o
+        // armazém.
+        let torto = "/armazem//compartilhado/./codigo/caso-sem-selo";
+        if !rodar(torto).contains(r#""code":"CODE_UNSIGNED""#) {
+            return Err("outra grafia do caminho do armazem rodou o codigo sem selo");
+        }
+        // Fora do alcance de process.run, o gate recusa antes de ler.
+        let fora = "/armazem/compartilhado/caso-fora";
+        gravar_codigo(fora, &ola)?;
+        if decisao_do_envelope(&rodar(fora)) != "DENY_RESOURCE" {
+            return Err("o caminho fora do alcance passou do gate");
+        }
+        // E o mesmo selado, sob a política da imagem — em que o operador
+        // não confia no editor do caso —, não roda.
+        let padrao = politica::Politica::ler(politica::PADRAO)
+            .map_err(|_| "a politica da imagem nao se le")?;
+        let selado = alloc::format!("{CODIGO_INSTALADO}/caso-selado");
+        let r = com_a_politica(padrao, || Ok(rodar(&selado)))?;
+        if !r.contains(r#""code":"CODE_UNTRUSTED""#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o editor fora da confianca do papel rodou o codigo");
+        }
+        Ok(())
+    });
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// A confiança no editor é decidida a cada pedido do processo, como o
+/// papel — a pergunta não é só na entrada:
+///
+/// - um processo de código selado pelo editor do caso, de uma pessoa
+///   operadora, pede `system.info`: passa;
+/// - um `policy.write`, com a prova de um administrador, tira o editor do
+///   operador: o pedido seguinte do mesmo processo é recusado,
+///   `DENY_POLICY`, com o motivo e a razão `DENY_PROVENANCE` — e o mesmo
+///   programa vindo da imagem continua pedindo;
+/// - o editor que o administrador não tem não se concede; o que ele tem,
+///   sim, e o pedido volta a passar na hora;
+/// - o editor que sai do registro também leva a confiança.
+fn codigo_a_confianca_e_decidida_a_cada_pedido() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
+    use crate::pessoas::Console;
+    const FIO: u64 = 7_300_001;
+    crate::pessoas::esquecer_registradas();
+    crate::identidade::registrar_administrador_de_teste(
+        sigilo::publica_de(&ADMIN_DE_TESTE),
+        "administrador",
+    );
+    let resultado = com_editores_do_caso(|| {
+        let sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(81), "codigo-pedido", "operador");
+        let editor = sigilo::codigo::publica_do_editor(&EDITOR_DO_CASO.0);
+        let programa = |editor: Option<[u8; 32]>| Programa::Imagem {
+            manifesto: Some(manifesto_de_teste("caso", "system.read fs.read")),
+            resumo: [0xab; 32],
+            editor,
+        };
+        let pedir = |programa: Programa| {
+            crate::nativo::responder_de_teste(
+                Chamador::Processo {
+                    fio: FIO,
+                    autoridade: Autoridade::Pessoa { sessao },
+                    programa,
+                },
+                &pedido_rpc("system.info", "{}"),
+            )
+        };
+        let escrever = |linha: &str| {
+            let p = alloc::format!(r#"{{"line":"{linha}"}}"#);
+            executar_admin_com(0, &ADMIN_DE_TESTE, "policy.write", &p, &p)
+        };
+        if decisao_do_envelope(&pedir(programa(Some(editor)))) != "ALLOW" {
+            return Err("o codigo de um editor confiado nao pediu");
+        }
+
+        let r = escrever("editores operador bancada")?;
+        if !r.contains(r#""executed":true"#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o administrador nao tirou a confianca do operador");
+        }
+        let r = pedir(programa(Some(editor)));
+        let explicado = decisao_do_envelope(&r) == "DENY_POLICY"
+            && r.contains(r#""reason":"DENY_PROVENANCE""#)
+            && r.contains(r#""retry":"requires_authorization""#);
+        if !explicado {
+            crate::log_error!("teste", "{}", r);
+            return Err("tirada a confianca, o processo de codigo selado continuou pedindo");
+        }
+        let gravado = alloc::format!(
+            "pelo processo {FIO} (caso abababab de caso): o papel nao confia no editor caso"
+        );
+        if !registro_que(|e| e.metodo == "system.info" && e.detalhe == gravado).is_some() {
+            return Err("a recusa pela confianca nao diz o programa, o editor e o motivo");
+        }
+        if decisao_do_envelope(&pedir(programa(None))) != "ALLOW" {
+            return Err("o mesmo programa, da imagem, perdeu o que o papel da");
+        }
+        // O que o administrador não tem não se concede; o que ele tem, sim.
+        let r = escrever("editores operador bancada caso caso-de-fora")?;
+        if !r.contains(r#""executed":false"#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o administrador concedeu a confianca num editor em que ele nao confia");
+        }
+        let r = escrever("editores operador bancada caso")?;
+        if !r.contains(r#""executed":true"#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o administrador nao devolveu a confianca");
+        }
+        if decisao_do_envelope(&pedir(programa(Some(editor)))) != "ALLOW" {
+            return Err("devolvida a confianca, o pedido seguinte nao passou");
+        }
+        // A chamada de sistema pergunta o mesmo: o fio que pede com o
+        // programa selado — e a autoridade do sistema — abre o arquivo
+        // enquanto o papel do sistema confia no editor, e não abre sob uma
+        // política em que ele não confia.
+        let abrir = || {
+            crate::fios::com_programa_de_teste(programa(Some(editor)), || {
+                crate::autorizacao::autorizar_processo(
+                    politica::Permissao::FsRead,
+                    "/saudacao.txt",
+                    "fs.open",
+                )
+            })
+        };
+        if abrir() != politica::Codigo::Allow {
+            return Err("a chamada de sistema do codigo selado foi recusada com a confianca");
+        }
+        let sistema_sem = politica_trocada(&[
+            (
+                "editores operador bancada",
+                "editores operador bancada caso",
+            ),
+            (
+                "editores administrador bancada",
+                "editores administrador bancada caso",
+            ),
+        ])?;
+        // E nem bifurca, nem lança: o filho levaria o mesmo programa.
+        let bifurcar = || {
+            crate::fios::com_programa_de_teste(programa(Some(editor)), || {
+                crate::autorizacao::permitir_processo(Autoridade::Sistema, "process.fork")
+            })
+        };
+        if bifurcar().is_err() {
+            return Err("o codigo selado de um editor confiado nao bifurcou");
+        }
+        let (abriu, bifurcou) = com_a_politica(sistema_sem, || Ok((abrir(), bifurcar())))?;
+        if abriu != politica::Codigo::DenyPolicy {
+            return Err("a chamada de sistema do codigo selado passou sem a confianca");
+        }
+        if bifurcou != Err(politica::Codigo::DenyPolicy) {
+            return Err("o codigo selado bifurcou sem a confianca no editor");
+        }
+        // O editor que sai do registro leva a confiança junto.
+        let do_caso = crate::identidade::trocar_editores_de_teste(alloc::vec::Vec::new());
+        let r = pedir(programa(Some(editor)));
+        crate::identidade::trocar_editores_de_teste(do_caso);
+        if decisao_do_envelope(&r) != "DENY_POLICY"
+            || !r.contains(r#""next_action":"CONTACT_ADMIN""#)
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("o codigo de um editor fora do registro continuou pedindo");
+        }
+        Ok(())
+    });
+    crate::pessoas::esquecer_registradas();
+    crate::identidade::esquecer_registrados();
+    resultado
+}
+
+/// Os passos do `instalador` — ver `programas/src/bin/instalador.rs`.
+const INSTALAR_BAIXAR: i64 = 1;
+const INSTALAR_RODAR: i64 = 2;
+
+/// Os arquivos que a bancada publica, na ordem do instalador — ver
+/// `xtask/src/codigo.rs`.
+const PUBLICADOS: [&str; 5] = [
+    "vindo",
+    "vindo-sem-selo",
+    "vindo-adulterado",
+    "vindo-estranho",
+    "vindo-outro",
+];
+
+/// O código com que o `vindo` sai quando o pedido dele passa.
+const SAIDA_DO_VINDO: i64 = 92;
+
+/// O `instalador`, lançado e conduzido pela suíte.
+struct Instalador {
+    fio: u64,
+}
+
+impl Instalador {
+    /// Lança o instalador com `autoridade` e espera ele ficar pronto.
+    fn lancar(autoridade: crate::autorizacao::Autoridade) -> Result<Instalador, &'static str> {
+        let programa = alloc::format!("{}/instalador", crate::usuario::DIRETORIO_DOS_COMPILADOS);
+        let desde = crate::log::total_emitidos();
+        let fio = crate::usuario::lancar_como(Some(&programa), autoridade)?;
+        esperar_ate(
+            || linhas_do_programa(desde, "instalador: pronto") == 1,
+            TETO_DO_HTTP,
+        )
+        .map_err(|_| "o instalador nao ficou pronto")?;
+        Ok(Instalador { fio })
+    }
+
+    /// Pede o passo `a` sobre o arquivo `arquivo`, e devolve o que o
+    /// instalador disse dele: o que vem depois de `instalador: <passo>
+    /// <arquivo>: `.
+    fn passo(&self, a: i64, arquivo: usize) -> Result<alloc::string::String, &'static str> {
+        use protocolo::usuario::evento::{Evento, tipo};
+        let desde = crate::log::total_emitidos();
+        crate::eventos::publicar(
+            "teste-instalador",
+            Evento {
+                tipo: tipo::ACAO,
+                a,
+                b: arquivo as i64,
+                ..Default::default()
+            },
+        )
+        .map_err(|_| "o canal do instalador nao recebeu o passo")?;
+        let verbo = if a == INSTALAR_BAIXAR {
+            "baixou"
+        } else {
+            "rodou"
+        };
+        let prefixo = alloc::format!("instalador: {verbo} {}: ", PUBLICADOS[arquivo]);
+        let mut dito = None;
+        esperar_ate(
+            || {
+                crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+                    if dito.is_none()
+                        && r.seq >= desde
+                        && r.subsistema == "usuario"
+                        && let Some(resto) = r.mensagem().strip_prefix(prefixo.as_str())
+                    {
+                        dito = Some(alloc::string::String::from(resto));
+                    }
+                });
+                dito.is_some()
+            },
+            2 * TETO_DO_HTTP,
+        )
+        .map_err(|_| {
+            crate::log_error!("teste", "o instalador nao disse `{}...`", prefixo);
+            "o instalador nao disse o que fez"
+        })?;
+        dito.ok_or("o instalador nao disse o que fez")
+    }
+
+    /// Baixa `arquivo`, e confere que veio.
+    fn baixar(&self, arquivo: usize) -> Resultado {
+        let dito = self.passo(INSTALAR_BAIXAR, arquivo)?;
+        if !dito.ends_with(" bytes") {
+            crate::log_error!("teste", "baixou {}: {}", PUBLICADOS[arquivo], dito);
+            return Err("o instalador nao baixou o codigo da bancada");
+        }
+        Ok(())
+    }
+
+    /// Roda `arquivo`, e confere com que código o filho saiu.
+    fn rodar(&self, arquivo: usize, codigo: i64) -> Resultado {
+        let dito = self.passo(INSTALAR_RODAR, arquivo)?;
+        if dito != alloc::format!("saiu {codigo}") {
+            crate::log_error!(
+                "teste",
+                "rodou {}: {} (esperado saiu {})",
+                PUBLICADOS[arquivo],
+                dito,
+                codigo
+            );
+            return Err("o codigo instalado nao rodou como devia");
+        }
+        Ok(())
+    }
+
+    /// Pede o fim, e espera o programa sair com o código dele.
+    fn encerrar(self) -> Resultado {
+        use protocolo::usuario::evento::{Evento, tipo};
+        let desde = crate::log::total_emitidos();
+        let _ = crate::eventos::publicar(
+            "teste-instalador",
+            Evento {
+                tipo: tipo::ENCERRAR,
+                ..Default::default()
+            },
+        );
+        esperar_ate(
+            || linhas_do_programa(desde, "processo encerrou com codigo 94") == 1,
+            TETO_DO_HTTP,
+        )
+        .map_err(|_| "o instalador nao saiu quando pedido")
+    }
+}
+
+/// O código que chega pela rede, de ponta a ponta, e o que cada elo **não**
+/// faz:
+///
+/// - o `instalador`, de uma pessoa operadora, resolve `bancada.duke` pelo
+///   DNS da bancada, conecta ao endereço — decidido pelo gate —, prova o
+///   nome pelo TLS, pede `/codigo/<arquitetura>/<arquivo>` e grava o corpo
+///   no armazém, pelo gate, no anexo; os cinco arquivos publicados chegam;
+/// - ele roda cada um num filho, pela chamada `executar`: o selado pela
+///   bancada roda, e o pedido dele diz de onde veio; os outros quatro são
+///   recusados pelo kernel na troca de imagem, cada um com o erro dele —
+///   e a recusa gravada como a execução da decisão do gate, em nome do
+///   processo;
+/// - o TLS e o HTTP não autorizam nada: o selo é que diz quem fez o código,
+///   e o papel é que diz em quem se confia;
+/// - o NSF vê o código adulterado — de uma vez —, alerta, e não contém
+///   ninguém; o resto, ele só observa;
+/// - o `user.run` da pessoa, sobre o mesmo arquivo instalado, roda pela
+///   mesma conferência.
+fn codigo_o_instalador_pela_rede() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    use politica::Codigo;
+    use seguranca::regras::Regra;
+    com_a_bancada_http(|| {
+        com_o_nsf(|| {
+            let sessao =
+                crate::pessoas::sessao_de_teste(Console::Terminal(82), "codigo-rede", "operador");
+            let instalador = Instalador::lancar(Autoridade::Pessoa { sessao })?;
+            let fio = instalador.fio;
+            let r = (|| -> Resultado {
+                for arquivo in 0..PUBLICADOS.len() {
+                    instalador.baixar(arquivo)?;
+                }
+                // Cada download pelo gate: o DNS, o destino cifrado e a
+                // gravação, uma por arquivo.
+                let cifradas = decisoes_do_processo(fio, "net.connect", HTTP_CIFRADO);
+                let gravadas = decisoes_do_processo(fio, "fs.write", "");
+                if cifradas.len() != PUBLICADOS.len()
+                    || gravadas.len() < PUBLICADOS.len()
+                    || cifradas
+                        .iter()
+                        .chain(&gravadas)
+                        .any(|(_, c, _)| *c != Codigo::Allow)
+                {
+                    crate::log_error!("teste", "{:?} {:?}", cifradas, gravadas);
+                    return Err("o codigo nao chegou pelo gate, destino por destino");
+                }
+
+                use protocolo::usuario::erro;
+                let esperados = [
+                    SAIDA_DO_VINDO,
+                    erro::SEM_SELO,
+                    erro::SELO_NAO_CONFERE,
+                    erro::EDITOR_NAO_CONFIADO,
+                    erro::EDITOR_NAO_CONFIADO,
+                ];
+                for (arquivo, codigo) in esperados.into_iter().enumerate() {
+                    instalador.rodar(arquivo, codigo)?;
+                }
+                // As recusas: execuções da decisão do gate sobre o
+                // `executar`, em nome do processo que executava, com o
+                // motivo de cada uma.
+                let motivos = [
+                    (1, "o codigo nao tem selo"),
+                    (2, "o selo nao confere com o codigo"),
+                    (3, "o editor do codigo nao esta no registro"),
+                    (4, "o papel nao confia no editor outro"),
+                ];
+                for (arquivo, motivo) in motivos {
+                    let caminho = alloc::format!("{CODIGO_INSTALADO}/{}", PUBLICADOS[arquivo]);
+                    let (_, e) = registro_que(|e| {
+                        e.metodo == "process.exec"
+                            && e.recurso == caminho
+                            && e.codigo == Codigo::DenyPolicy
+                    })
+                    .ok_or("a recusa do executar nao foi gravada")?;
+                    let certo = e.detalhe.starts_with("pelo processo ")
+                        && e.detalhe.contains("(instalador ")
+                        && e.detalhe.contains(&alloc::format!("): {motivo}; decisao "));
+                    if !certo {
+                        crate::log_error!("teste", "{:?}", e);
+                        return Err(
+                            "a recusa do executar nao diz o processo, o motivo e a decisao",
+                        );
+                    }
+                }
+                // O que rodou pediu, e o pedido diz de onde ele veio.
+                registro_que(|e| {
+                    e.metodo == "system.info"
+                        && e.codigo == Codigo::Allow
+                        && e.detalhe.contains("(vindo ")
+                        && e.detalhe.ends_with(" de bancada)")
+                })
+                .ok_or("o pedido do codigo instalado nao diz quem o selou")?;
+
+                // O NSF: o adulterado é um incidente, de alerta — e ninguém
+                // é contido por ele.
+                let ate = crate::autorizacao::ultimo_registro();
+                let mut pedidos = 0;
+                for _ in 0..64 {
+                    pedidos += crate::seguranca::passo().pedidos;
+                    if crate::seguranca::com_motor_de_teste(|m| m.lido() >= ate) == Some(true) {
+                        break;
+                    }
+                }
+                let viu = crate::seguranca::com_motor_de_teste(|m| {
+                    m.incidentes.todos().any(|i| {
+                        i.deteccoes.iter().any(|d| {
+                            d.regra == Regra::CodigoAdulterado
+                                && d.explicacao.contains("vindo-adulterado")
+                        })
+                    })
+                });
+                if viu != Some(true) {
+                    return Err("o NSF nao viu o codigo adulterado");
+                }
+                if pedidos != 0 {
+                    return Err("o NSF pediu uma contencao pelo codigo adulterado");
+                }
+
+                // O user.run da pessoa, sobre o mesmo arquivo instalado.
+                let pessoa = crate::autorizacao::Chamador::Pessoa(sessao);
+                let desde = crate::log::total_emitidos();
+                let r = fs_pedir(
+                    pessoa,
+                    "user.run",
+                    &alloc::format!(r#"{{"path":"{CODIGO_INSTALADO}/vindo"}}"#),
+                );
+                if !r.contains(r#""launched":true"#) {
+                    crate::log_error!("teste", "{}", r);
+                    return Err("o user.run nao rodou o codigo selado pela bancada");
+                }
+                saida_do_processo(desde, SAIDA_DO_VINDO)?;
+                let r = fs_pedir(
+                    pessoa,
+                    "user.run",
+                    &alloc::format!(r#"{{"path":"{CODIGO_INSTALADO}/vindo-adulterado"}}"#),
+                );
+                if !r.contains(r#""code":"CODE_TAMPERED""#) {
+                    crate::log_error!("teste", "{}", r);
+                    return Err("o user.run nao recusou o codigo adulterado");
+                }
+                Ok(())
+            })();
+            let fim = instalador.encerrar();
+            r.and(fim)
+        })
+    })
+}
+
+/// A confiança, a contenção e o processo entre baixar e rodar — o que muda
+/// depois do download vale na troca de imagem:
+///
+/// - baixado o código selado pela bancada, a política tira a confiança do
+///   operador: o `executar` é recusado, `EDITOR_NAO_CONFIADO`; com ela de
+///   volta, roda;
+/// - o instalador isolado não baixa — a conexão é recusada pelo gate — nem
+///   roda — o filho de um processo isolado não nasce —; solto, faz os dois.
+fn codigo_entre_baixar_e_rodar() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    com_a_bancada_http(|| {
+        let sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(83), "codigo-meio", "operador");
+        let instalador = Instalador::lancar(Autoridade::Pessoa { sessao })?;
+        let fio = instalador.fio;
+        let r = (|| -> Resultado {
+            instalador.baixar(0)?;
+            let sem_confianca = crate::autorizacao::com_politica(|p| {
+                p.com_linha("editores operador", "administrador", &[])
+            })
+            .map_err(|_| "a politica sem a confianca nao se fez")?;
+            com_a_politica(sem_confianca, || {
+                instalador.rodar(0, protocolo::usuario::erro::EDITOR_NAO_CONFIADO)
+            })?;
+            instalador.rodar(0, SAIDA_DO_VINDO)?;
+
+            // Isolado: nem a conexão, nem o filho.
+            let quem = sistema_aqui();
+            let isolar = fs_pedir(
+                quem,
+                "process.isolate",
+                &alloc::format!(r#"{{"process":{fio}}}"#),
+            );
+            if !isolar.contains(r#""state":"isolated""#) {
+                crate::log_error!("teste", "{}", isolar);
+                return Err("o caso nao isolou o instalador");
+            }
+            let baixou = instalador.passo(INSTALAR_BAIXAR, 0);
+            let rodou = instalador.passo(INSTALAR_RODAR, 0);
+            let _ = fs_pedir(
+                quem,
+                "process.release",
+                &alloc::format!(r#"{{"process":{fio}}}"#),
+            );
+            let (baixou, rodou) = (baixou?, rodou?);
+            if !baixou.contains("DENY_CONTAINED") {
+                crate::log_error!("teste", "baixou: {}", baixou);
+                return Err("o instalador isolado baixou");
+            }
+            if rodou != alloc::format!("falhou bifurcar {}", protocolo::usuario::erro::NEGADO) {
+                crate::log_error!("teste", "rodou: {}", rodou);
+                return Err("o instalador isolado rodou o codigo num filho");
+            }
+            instalador.baixar(0)?;
+            instalador.rodar(0, SAIDA_DO_VINDO)
+        })();
+        let fim = instalador.encerrar();
+        crate::pessoas::esquecer_registradas();
+        r.and(fim)
+    })
+}
+
+/// O que é conferido é o que roda: enquanto um fio troca o arquivo entre o
+/// selado e o adulterado, sem parar, outros lançamentos do mesmo caminho
+/// acontecem — cada um roda o selado, ou é recusado; nenhum confere um e
+/// carrega o outro. O programa é o `ponteiros`, da imagem, selado pelo
+/// editor do caso: ele abre um arquivo, e o pedido dele diz o resumo do
+/// que foi **carregado** — que tem de ser o do selado, o mesmo que o
+/// nascimento diz que foi conferido. O arquivo que muda no meio da
+/// leitura não é lido pela metade: é recusado.
+fn codigo_o_conferido_e_o_que_roda() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    static PARAR: AtomicBool = AtomicBool::new(false);
+    static PAROU: AtomicBool = AtomicBool::new(false);
+    static TROCAS: AtomicU32 = AtomicU32::new(0);
+    static BYTES: crate::trava::Mutex<Option<(alloc::vec::Vec<u8>, alloc::vec::Vec<u8>)>> =
+        crate::trava::Mutex::new(None);
+    const CAMINHO: &str = "/armazem/compartilhado/codigo/caso-alterna";
+
+    extern "C" fn trocador(_: u64) -> ! {
+        let (bom, mau) = crate::arch::sem_interrupcoes(|| BYTES.lock().clone()).unwrap_or_default();
+        let mut vez = 0u32;
+        while !PARAR.load(Ordering::Acquire) {
+            let bytes = if vez.is_multiple_of(2) { &mau } else { &bom };
+            if gravar_codigo(CAMINHO, bytes).is_ok() {
+                TROCAS.fetch_add(1, Ordering::AcqRel);
+            }
+            vez += 1;
+            crate::fios::ceder();
+        }
+        PAROU.store(true, Ordering::Release);
+        crate::fios::terminar()
+    }
+
+    com_editores_do_caso(|| {
+        let ponteiros = crate::vfs::ler_tudo(&alloc::format!(
+            "{}/ponteiros",
+            crate::usuario::DIRETORIO_DOS_COMPILADOS
+        ))
+        .map_err(|_| "o ponteiros da imagem nao se leu")?;
+        let bom = sigilo::codigo::selar(&ponteiros, &EDITOR_DO_CASO.0);
+        let mut mau = bom.clone();
+        mau[ponteiros.len() / 3] ^= 0x10;
+        gravar_codigo(CAMINHO, &bom)?;
+        crate::arch::sem_interrupcoes(|| *BYTES.lock() = Some((bom, mau)));
+        PARAR.store(false, Ordering::Release);
+        PAROU.store(false, Ordering::Release);
+        TROCAS.store(0, Ordering::Release);
+        crate::fios::criar("teste-trocador", trocador, 0)?;
+        let resumo = comeco_do_resumo(&sigilo::codigo::resumo(&ponteiros));
+        let desde = crate::log::total_emitidos();
+        let (mut rodaram, mut recusados) = (0usize, 0usize);
+        let mut fios = alloc::vec::Vec::new();
+        let r = (|| -> Resultado {
+            for _ in 0..12 {
+                match crate::usuario::lancar_conferido(Some(CAMINHO), Autoridade::Sistema) {
+                    Ok(fio) => {
+                        rodaram += 1;
+                        let nasceu =
+                            alloc::format!("processo {fio} lancado: codigo {resumo} de caso");
+                        registro_que(|e| e.metodo == "process.run" && e.detalhe == nasceu)
+                            .ok_or("um nascimento nao diz o resumo do codigo selado")?;
+                        fios.push(fio);
+                    }
+                    Err(crate::usuario::NaoLancou::Codigo(
+                        crate::usuario::codigo::Recusa::Procedencia(
+                            politica::procedencia::Falta::NaoConfere,
+                            _,
+                        ),
+                    )) => recusados += 1,
+                    // Ler no instante em que o trocador grava: o arquivo
+                    // que mudou entre a resolução e a leitura não é lido
+                    // pela metade — é recusado, e a vez seguinte o lê.
+                    Err(crate::usuario::NaoLancou::Codigo(
+                        crate::usuario::codigo::Recusa::Leitura(crate::vfs::Erro::Mudou),
+                    )) => {}
+                    Err(outro) => {
+                        crate::log_error!("teste", "{:?}", outro);
+                        return Err("um lancamento falhou por outro motivo");
+                    }
+                }
+                crate::fios::ceder();
+            }
+            Ok(())
+        })();
+        PARAR.store(true, Ordering::Release);
+        let parou = esperar_cedendo(|| PAROU.load(Ordering::Acquire), 600);
+        r?;
+        parou.map_err(|_| "o fio que trocava o arquivo nao parou")?;
+        // Cada um que nasceu sai com o código do programa, e o pedido dele
+        // diz o resumo do selado: nenhum carregou o adulterado.
+        let saidas = "processo encerrou com codigo 64";
+        esperar_ate(
+            || linhas_do_programa(desde, saidas) >= rodaram,
+            TETO_DO_HTTP,
+        )
+        .map_err(|_| "um processo nascido do arquivo trocado nao saiu como o selado")?;
+        for fio in &fios {
+            let pediu = alloc::format!("pelo processo {fio} (ponteiros {resumo} de caso)");
+            registro_que(|e| e.metodo == "fs.open" && e.detalhe.starts_with(&pediu)).ok_or_else(
+                || {
+                    crate::log_error!("teste", "esperado `{}`", pediu);
+                    "um processo nascido do arquivo trocado carregou outro codigo"
+                },
+            )?;
+        }
+        if TROCAS.load(Ordering::Acquire) < 2 || rodaram + recusados == 0 {
+            crate::log_error!(
+                "teste",
+                "trocas {}, rodaram {}, recusados {}",
+                TROCAS.load(Ordering::Acquire),
+                rodaram,
+                recusados
+            );
+            return Err("a troca e os lancamentos nao aconteceram juntos");
+        }
+        Ok(())
     })
 }

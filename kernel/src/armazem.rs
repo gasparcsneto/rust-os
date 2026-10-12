@@ -116,7 +116,7 @@ pub(crate) fn trocar(outro: Armazem) -> Armazem {
 
 /// Monta o armazém em [`RAIZ`]. No boot, antes de o volume repô-lo.
 pub fn montar() -> Result<(), vfs::Erro> {
-    vfs::montar("armazem", RAIZ, Box::new(NoVfs))
+    vfs::montar("armazem", RAIZ, vfs::Origem::Gravada, Box::new(NoVfs))
 }
 
 /// O caminho do armazém, relativo à raiz dele, de um caminho do pedido — na

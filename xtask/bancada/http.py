@@ -23,6 +23,10 @@ Cada rota e um comportamento que a suite e a fumaca conferem:
     GET  /status/<n>     o status <n>, com um corpo curto
     GET  /redireciona    302 para http://bancada.duke/ola
     GET  /fecha          200 com Connection: close
+    GET  /codigo/<arquitetura>/<nome>
+                         200 com os bytes do programa publicado, de
+                         <diretorio>/codigo/<arquitetura>/<nome> (ver
+                         xtask/src/codigo.rs); 404 se nao ha
     o resto              404
 
 Nada sai pela saida padrao nem pela de erro: as duas sao a conexao. Os erros
@@ -129,7 +133,7 @@ def padrao(n):
     return (b"0123456789" * (n // 10 + 1))[:n]
 
 
-def atender(conexao, log):
+def atender(conexao, log, diretorio):
     leitor = Leitor(conexao)
     numero = 0
     while True:
@@ -158,7 +162,26 @@ def atender(conexao, log):
 
         m = re.fullmatch(r"/(grande|lento|status|torto)/([a-z0-9]+)", alvo)
         rota, arg = (m.group(1), m.group(2)) if m else (alvo, None)
-        if metodo == "GET" and rota == "/ola":
+        # O codigo publicado: a arquitetura e o nome so do alfabeto que o
+        # xtask escreve, e nada de caminho - o arquivo e o deste diretorio.
+        codigo = re.fullmatch(r"/codigo/(x86_64|aarch64)/([a-z0-9][a-z0-9-]*)", alvo)
+        if metodo == "GET" and codigo:
+            arquivo = os.path.join(diretorio, "codigo", codigo.group(1), codigo.group(2))
+            try:
+                with open(arquivo, "rb") as f:
+                    bytes_do_programa = f.read()
+            except OSError:
+                conexao.sendall(resposta(404, "Not Found", b"nao ha\n", extras))
+            else:
+                conexao.sendall(
+                    resposta(
+                        200,
+                        "OK",
+                        bytes_do_programa,
+                        ["Content-Type: application/octet-stream"] + extras,
+                    )
+                )
+        elif metodo == "GET" and rota == "/ola":
             conexao.sendall(resposta(200, "OK", b"ola, duke\n", extras))
         elif metodo == "GET" and rota == "/conta":
             conexao.sendall(resposta(200, "OK", str(numero).encode(), extras))
@@ -222,7 +245,7 @@ def main():
     try:
         conexao = cifrar(diretorio, cru) if cifrado else cru
         with conexao:
-            atender(conexao, log)
+            atender(conexao, log, diretorio)
             if cifrado:
                 # O fim educado do TLS: o cliente le o fim como fim, e nao
                 # como corte.

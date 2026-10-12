@@ -172,7 +172,7 @@ $ cargo xtask agent --canal 2 agent.session
 | `security.provenance` | A cadeia de um processo até a identidade que a começou, os filhos, e a rede dele: cada conexão, a decisão do gate, o DNS e a regra do firewall (`process`, `boot`) |
 | `security.risk` | O risco de uma identidade, com os fatores; o perfil de comportamento; e o raio do que ela já tocou (`principal`) |
 | `security.verify` | Refaz a cadeia do cofre de evidências |
-| `security.metrics` | O custo e o efeito da segurança, medidos desde o boot: as decisões do gate por código e a latência dele, a da política e a da auditoria, as voltas do NSF e o tempo de máquina delas, a memória e as contas do motor (falsos positivos, contenções desfeitas, recusas repetidas), a latência da resposta e os arrendamentos soltos por causa |
+| `security.metrics` | O custo e o efeito da segurança, medidos desde o boot: as decisões do gate por código e a latência dele, a da política e a da auditoria, as voltas do NSF e o tempo de máquina delas, a memória e as contas do motor (falsos positivos, contenções desfeitas, recusas repetidas), a latência da resposta, os arrendamentos soltos por causa e a conferência do código de fora da imagem |
 | `system.info` | Kernel, CPU, vídeo, uptime, o RTC e mecanismo de guarda da pilha |
 | `system.uptime` | Ticks do timer e milissegundos desde o boot |
 | `random.read` | Bytes do gerador do kernel, em hexadecimal, para quem precisa de uma chave — a semente de cada conexão TLS de um programa. De 1 a 256 — fora disso é erro, e não um corte —; sem fonte de entropia, `ENTROPY_UNAVAILABLE` e nenhum byte. A auditoria grava a decisão, nunca os bytes (`bytes`) |
@@ -184,7 +184,7 @@ $ cargo xtask agent --canal 2 agent.session
 | `tasks.stats` | Escalonador cooperativo e fila de entrada do canal |
 | `threads.stats` | Escalonador preemptivo: trocas de contexto e quanta |
 | `threads.list` | Fios de execução do kernel, com estado e vezes escalonado |
-| `user.run` | Lança um programa no anel sem privilégio (`path`; padrão: o exemplo) |
+| `user.run` | Lança um programa no anel sem privilégio (`path`; padrão: o exemplo). O código de fora da imagem só roda com o selo de um editor em que o papel confia: senão, `CODE_UNSIGNED`, `CODE_TAMPERED` ou `CODE_UNTRUSTED` |
 | `user.stats` | Chamadas atendidas e recusadas, arquivos abertos e lidos, último código de saída |
 | `tasks.list` | Tarefas lançadas, com id, nome e se estão vivas |
 | `irq.stats` | Contadores de interrupções de hardware por linha |
@@ -323,6 +323,7 @@ kernel/src/
 │   ├── mod.rs       ABI das chamadas de sistema e validação de ponteiros
 │   ├── elf.rs       leitor de ELF64: o formato em que um programa chega
 │   ├── programa.rs  mapeia o processo e desce de privilégio
+│   ├── codigo.rs    o código que vira processo, lido e conferido uma vez: o da imagem, ou o selado por um editor em que o papel confia
 │   ├── descritores.rs  a tabela de descritores de um processo
 │   └── exemplo.rs   seis programas mínimos, em assembly
 ├── tarefas/
@@ -424,6 +425,7 @@ sigilo/src/          o canal seguro, dos dois lados da conversa
 ├── resumo.rs        o BLAKE2s, o HMAC e os dois HKDF
 ├── administracao.rs a prova de uma operação administrativa, presa ao contexto
 ├── quorum.rs        M de N credenciais provando o mesmo conteúdo canônico
+├── codigo.rs        o selo de um editor sobre um executável: Ed25519 estrita sobre o resumo, no fim do arquivo
 ├── gerador.rs       ChaCha20 com apagamento rápido da chave
 ├── credencial.rs    o verificador Argon2id de uma senha, conferido em tempo constante
 ├── pessoas.rs       o identificador de uma pessoa e o formato do registro delas
@@ -435,6 +437,7 @@ politica/src/        a política de autorização, a mesma no kernel e no hosped
 ├── permissao.rs     o vocabulário fechado de permissões, e quais são sensíveis
 ├── codigo.rs        os códigos de decisão: ALLOW, DENY_*, RATE_LIMIT, INVALID_ARGUMENT, ERROR
 ├── explicacao.rs    a recusa explicada: a razão, se adianta repetir, o que fazer, e a frase para uma pessoa
+├── procedencia.rs   por que um código de fora da imagem não roda: o motivo da auditoria e o código da resposta
 ├── arquivo.rs       o formato, a validação, a decisão, as regras de mudança e o texto que volta igual
 ├── caminho.rs       a forma normal dos caminhos, a mesma do VFS
 ├── endereco.rs      a forma normal dos destinos de rede, `tcp:<ipv4>:<porta>`, a mesma que o kernel disca
@@ -554,12 +557,15 @@ programas/           os programas de usuário, compilados à parte do kernel
         ├── pagina.rs     busca páginas na bancada, claro e cifrado: cada página, cada falha com o código e a família dela, e as medidas
         ├── buscador.rs   uma conversa HTTP que a suíte interrompe no meio: a revogação, a contenção, o firewall e o fim chegam com o código deles
         ├── consulta.rs   uma visita curta à bancada, para várias correrem ao mesmo tempo com a autoridade de cada um
+        ├── instalador.rs baixa código da bancada pelo DNS, TCP, TLS e HTTP, grava no armazém e o executa num filho: o kernel confere o selo
+        ├── vindo.rs      o programa que chega pela rede: fora da imagem, selado pela bancada, e pede pelo gate
         ├── legado.rs     pede, não busca a resposta e troca de imagem: a nova não a encontra
         └── terminal.rs   o Terminal: o interpretador numa janela, pelo pseudo-terminal
 
 xtask/src/
 ├── main.rs          a ferramenta de build, teste e diagnóstico do projeto
 ├── canal_tcp.rs     o canal do agente por TCP do lado de fora: a porta encaminhada, e a ponte da suíte — `xtask/bancada/ponte.py`
+├── codigo.rs        o código publicado: fora da imagem, selado pelos editores da bancada, servido pelo HTTP dela em `/codigo`
 ├── persistencia.rs  a bancada de persistência: a mesma máquina em vários boots, com corte de energia
 └── tls.rs           a bancada TLS: a PKI gerada a cada máquina, o eco TLS — o OpenSSL, por `xtask/bancada/tls.py` —, e o servidor HTTP claro e cifrado — `xtask/bancada/http.py` —, a cada conexão
 ```
@@ -3345,7 +3351,8 @@ que acontece em volta da decisão. O desenho está em
   código e a latência dele, a da política e a da auditoria, as voltas do
   NSF e a parte do tempo de máquina delas, a memória do motor, as taxas
   de falso positivo, de contenção desfeita e de repetição, a latência da
-  resposta, e os arrendamentos soltos por causa.
+  resposta, os arrendamentos soltos por causa e — desde a fase 13 — a
+  conferência do código de fora da imagem.
 
 #### O que o exercício encontrou
 

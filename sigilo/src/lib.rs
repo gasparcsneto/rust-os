@@ -11,7 +11,10 @@
 //! - [`gerador`]: o gerador de números aleatórios de onde saem as chaves
 //!   efêmeras;
 //! - [`quadro`]: como as mensagens se delimitam no fluxo de bytes da porta;
-//! - [`registro`]: o formato dos arquivos de chaves autorizadas;
+//! - [`registro`]: o formato dos arquivos de chaves autorizadas — e do
+//!   registro de editores de código;
+//! - [`codigo`]: o selo de um editor sobre um executável, e a conferência
+//!   dele;
 //! - [`resumo`] e [`cifra`]: as peças do Noise — o BLAKE2s, o HMAC, o HKDF
 //!   e o ChaCha20-Poly1305 com o contador.
 //!
@@ -38,6 +41,7 @@ extern crate alloc;
 pub mod administracao;
 pub mod aperto;
 pub mod cifra;
+pub mod codigo;
 pub mod credencial;
 pub mod gerador;
 pub mod pessoas;

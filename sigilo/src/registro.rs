@@ -164,6 +164,42 @@ pub fn linha_de_administrador(
     )
 }
 
+/// Uma entrada do registro de editores: a chave pública Ed25519 com que o
+/// editor sela, e o nome dele.
+pub type EntradaDeEditor<'a> = ([u8; TAM_CHAVE], &'a str);
+
+/// Lê uma linha do registro de editores — `ed25519:<hex> <nome>` — ver
+/// [`crate::codigo`]. A chave tem o prefixo de sempre, e tem de servir de
+/// chave de editor: uma que não é ponto da curva, ou que é de ordem
+/// pequena, é recusada aqui, e não descoberta no primeiro selo que não
+/// confere.
+pub fn ler_linha_de_editor(linha: &str) -> Result<Option<EntradaDeEditor<'_>>, ErroDeLinha> {
+    let linha = linha.trim();
+    if linha.is_empty() || linha.starts_with('#') {
+        return Ok(None);
+    }
+    let mut partes = linha.split_ascii_whitespace();
+    let chave = partes
+        .next()
+        .and_then(|c| c.strip_prefix(PREFIXO_DE_ASSINATURA))
+        .and_then(de_hex)
+        .filter(crate::codigo::chave_valida)
+        .ok_or(ErroDeLinha::Assinatura)?;
+    let nome = partes
+        .next()
+        .filter(|n| nome_valido(n))
+        .ok_or(ErroDeLinha::Nome)?;
+    if partes.next().is_some() {
+        return Err(ErroDeLinha::Sobra);
+    }
+    Ok(Some((chave, nome)))
+}
+
+/// A linha de um editor, com a quebra no fim.
+pub fn linha_de_editor(chave: &[u8; TAM_CHAVE], nome: &str) -> String {
+    alloc::format!("{PREFIXO_DE_ASSINATURA}{} {nome}\n", hex(chave))
+}
+
 /// A linha de uma entrada, com a quebra no fim.
 pub fn linha(chave: &[u8; TAM_CHAVE], nome: &str, papel: Option<&str>) -> String {
     match papel {
@@ -253,6 +289,47 @@ mod testes {
                 "{k} adm administrador ed25519:{} sobra",
                 hex(&assinatura)
             )),
+            Err(ErroDeLinha::Sobra)
+        );
+    }
+
+    #[test]
+    fn editor_ida_e_volta_e_recusas() {
+        let chave = crate::codigo::publica_do_editor(&[0x41; 32]);
+        let l = linha_de_editor(&chave, "bancada");
+        assert_eq!(ler_linha_de_editor(&l), Ok(Some((chave, "bancada"))));
+        assert_eq!(ler_linha_de_editor("# editores"), Ok(None));
+        assert_eq!(ler_linha_de_editor("  "), Ok(None));
+        let k = hex(&chave);
+        // Sem o prefixo, com outro prefixo, com hex torto.
+        for ruim in [
+            alloc::format!("{k} bancada"),
+            alloc::format!("x25519:{k} bancada"),
+            alloc::format!("ed25519:{} bancada", &k[..62]),
+        ] {
+            assert_eq!(
+                ler_linha_de_editor(&ruim),
+                Err(ErroDeLinha::Assinatura),
+                "{ruim}"
+            );
+        }
+        // Uma chave de ordem pequena — a identidade — não é de editor.
+        let mut identidade = [0u8; 32];
+        identidade[0] = 1;
+        assert_eq!(
+            ler_linha_de_editor(&linha_de_editor(&identidade, "fraco")),
+            Err(ErroDeLinha::Assinatura)
+        );
+        assert_eq!(
+            ler_linha_de_editor(&alloc::format!("ed25519:{k}")),
+            Err(ErroDeLinha::Nome)
+        );
+        assert_eq!(
+            ler_linha_de_editor(&alloc::format!("ed25519:{k} Bancada")),
+            Err(ErroDeLinha::Nome)
+        );
+        assert_eq!(
+            ler_linha_de_editor(&alloc::format!("ed25519:{k} bancada sobra")),
             Err(ErroDeLinha::Sobra)
         );
     }

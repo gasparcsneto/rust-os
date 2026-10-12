@@ -15,6 +15,7 @@
 //! `A` é `x86_64` (padrão) ou `aarch64`. Aceita também `--release`.
 
 mod canal_tcp;
+mod codigo;
 mod persistencia;
 mod tls;
 
@@ -2542,6 +2543,11 @@ fn conferir_janelas_pelo_toolkit() -> Result<ExitCode, String> {
 const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
     // O handler de um comando: só a licença de `autorizacao::autorizar`.
     (".handler)(", &["kernel/src/autorizacao.rs"]),
+    // O código que vira processo: lido e conferido por uma função só — a
+    // do código de fora da imagem, com selo — e carregado só pelas duas
+    // portas, o lançamento e o `executar`, que a usam.
+    ("codigo::obter(", &["kernel/src/usuario/mod.rs"]),
+    ("programa::carregar(", &["kernel/src/usuario/mod.rs"]),
     // Escrever no disco: só o journal de estado e o volume do armazém, cada
     // um pela sua janela — o journal na de estado, o volume na dele. As
     // janelas, só o boot (e a definição delas no driver). O driver confere
@@ -3134,6 +3140,86 @@ fn conferir_http_do_programa(raiz: &Path) -> Result<Vec<String>, String> {
     Ok(fora)
 }
 
+/// Confere que o código de fora da imagem só roda conferido:
+///
+/// - o executável de um processo não se lê pelo VFS em `usuario/` fora da
+///   conferência — `codigo::obter` é quem lê, com a origem da montagem;
+/// - a conferência lê o executável uma vez só, pela montagem — o que ela
+///   confere é o que ela devolve;
+/// - o `Programa::Imagem`, que leva o editor ao gate, só nasce no
+///   carregador, com o editor que a conferência deu;
+/// - o kernel não sela nada: a chave de um editor não está nele, e
+///   `sigilo::codigo::selar` não é chamada de fora da suíte.
+fn conferir_codigo_conferido(raiz: &Path) -> Result<Vec<String>, String> {
+    let mut fora = Vec::new();
+    percorrer_fontes(&raiz.join("kernel/src"), &mut |caminho| {
+        let relativo = caminho
+            .strip_prefix(raiz)
+            .map_err(|_| format!("{} fora do projeto", caminho.display()))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        if relativo == "kernel/src/testes.rs" {
+            return Ok(());
+        }
+        let texto = std::fs::read_to_string(caminho)
+            .map_err(|e| format!("não foi possível ler {}: {e}", caminho.display()))?;
+        for (n, linha) in texto.lines().enumerate() {
+            let onde = format!("{relativo}:{}", n + 1);
+            if linha.contains("codigo::selar") {
+                fora.push(format!("{onde}: o kernel sela codigo: {}", linha.trim()));
+            }
+            let no_usuario = relativo.starts_with("kernel/src/usuario/");
+            if no_usuario
+                && relativo != "kernel/src/usuario/codigo.rs"
+                && linha.contains("vfs::ler_tudo")
+            {
+                fora.push(format!(
+                    "{onde}: um executavel lido por fora da conferencia: {}",
+                    linha.trim()
+                ));
+            }
+        }
+        // A conferência lê o executável uma vez só, pela montagem: o que
+        // ela devolve é o que ela conferiu. Uma segunda leitura no módulo —
+        // depois de conferir — carregaria o que ninguém conferiu, e a
+        // corrida da suíte só a pega quando uma gravação inteira cabe entre
+        // as duas.
+        if relativo == "kernel/src/usuario/codigo.rs" {
+            let leituras: Vec<(usize, &str)> = texto
+                .lines()
+                .enumerate()
+                .filter(|(_, l)| l.contains("vfs::ler"))
+                .map(|(n, l)| (n + 1, l.trim()))
+                .collect();
+            if !matches!(leituras[..], [(_, l)] if l.contains("vfs::ler_tudo_com_origem(")) {
+                fora.push(format!(
+                    "{relativo}: a conferencia le o executavel {} vez(es), e nao uma, pela montagem: {leituras:?}",
+                    leituras.len()
+                ));
+            }
+        }
+        // O bloco inteiro, até a chave que o fecha: um padrão de `match`
+        // tem `..`, e pode tê-lo na linha seguinte; uma construção não. O
+        // módulo do tipo o desmonta nos métodos dele, e fica de fora.
+        if relativo != "kernel/src/usuario/programa.rs" && relativo != "kernel/src/autorizacao.rs" {
+            let mut resto = texto.as_str();
+            while let Some(i) = resto.find("Programa::Imagem {") {
+                let bloco = &resto[i..];
+                let fim = bloco.find('}').unwrap_or(bloco.len());
+                if !bloco[..fim].contains("..") {
+                    let linha = texto[..texto.len() - resto.len() + i].lines().count();
+                    fora.push(format!(
+                        "{relativo}:{linha}: o programa de um fio nascido fora do carregador"
+                    ));
+                }
+                resto = &bloco[fim.min(bloco.len())..];
+            }
+        }
+        Ok(())
+    })?;
+    Ok(fora)
+}
+
 /// A abertura da persistência antes de quem atende: devolve o que estiver
 /// fora de ordem no `kernel/src/main.rs`.
 fn conferir_a_ordem_do_boot(raiz: &Path) -> Result<Vec<String>, String> {
@@ -3217,6 +3303,10 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
     // E o HTTP também é do programa: o kernel não o tem, ele não alcança o
     // gate, e não há comando nem permissão dele.
     fora.extend(conferir_http_do_programa(&raiz)?);
+    // O código de fora da imagem só roda conferido: o executável não se lê
+    // por fora da conferência, o programa do fio só nasce no carregador, e
+    // o kernel não sela nada.
+    fora.extend(conferir_codigo_conferido(&raiz)?);
     // A chamada legítima tem de existir: uma busca que não acha nem ela
     // está procurando a coisa errada, e passaria por qualquer atalho.
     for ((chamada, donos), quantas) in CHAMADAS_PROTEGIDAS.iter().zip(&achadas) {
@@ -3234,8 +3324,9 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
              comandos fs.*, pela gravação dele e pela reposição do boot; quem agiu só se conta \
              na decisão; nenhuma camada sobe acima da barra; as cargas do boot só pelo boot; \
              o tecido de segurança só fala como ele mesmo, pelo gate, sem que o gate o leia; \
-             o TLS, que é do programa, só verifica pelas âncoras, sem atalho que o desligue; e \
-             o HTTP, que é do programa, não tem comando, permissão nem caminho até o gate"
+             o TLS, que é do programa, só verifica pelas âncoras, sem atalho que o desligue; \
+             o HTTP, que é do programa, não tem comando, permissão nem caminho até o gate; e o \
+             código só vira processo pela conferência única, que o kernel faz e não sela"
         );
         Ok(ExitCode::SUCCESS)
     } else {
@@ -4250,6 +4341,14 @@ mod chaves {
         /// O segredo da pessoa de desenvolvimento: o identificador, o sal e
         /// a senha saem dele — ver [`Chaves::pessoa_dev`].
         pub pessoa_dev: [u8; 32],
+        /// As chaves **privadas** Ed25519 dos editores de código — ver
+        /// [`super::codigo`]: a do editor `bancada`, em que a política de
+        /// desenvolvimento confia; a de `outro`, do registro, em que nenhum
+        /// papel confia; e a de um editor estranho, fora do registro. A
+        /// imagem recebe só as públicas das duas primeiras.
+        pub editor_da_bancada: [u8; 32],
+        pub editor_de_fora: [u8; 32],
+        pub editor_estranho: [u8; 32],
     }
 
     /// O nome da pessoa de desenvolvimento.
@@ -4322,6 +4421,9 @@ mod chaves {
                 ],
                 intruso: chave("intruso")?,
                 pessoa_dev: chave("pessoa-dev")?,
+                editor_da_bancada: chave("editor-bancada")?,
+                editor_de_fora: chave("editor-outro")?,
+                editor_estranho: chave("editor-estranho")?,
             })
         }
 
@@ -4465,11 +4567,42 @@ mod chaves {
                     ));
                 }
             }
+            // Os editores de código: as públicas de `bancada` e de `outro`.
+            // A política só confia em quem o registro tem — um editor que a
+            // política nomeasse e o registro não tivesse seria confiança em
+            // ninguém, e o erro aparece aqui.
+            let mut editores = String::from(
+                "# Os editores de codigo: a chave publica Ed25519 com que cada um sela, e o\n\
+                 # nome. Em quem cada papel confia e da politica (a linha `editores`).\n",
+            );
+            let registrados = [
+                (super::codigo::EDITOR_DA_BANCADA, &self.editor_da_bancada),
+                (super::codigo::EDITOR_DE_FORA, &self.editor_de_fora),
+            ];
+            for (nome, privada) in registrados {
+                editores.push_str(&sigilo::registro::linha_de_editor(
+                    &sigilo::codigo::publica_do_editor(privada),
+                    nome,
+                ));
+            }
+            for papel in politica.papeis() {
+                if let Some(e) = papel
+                    .editores
+                    .iter()
+                    .find(|e| !registrados.iter().any(|(n, _)| n == e))
+                {
+                    return Err(format!(
+                        "a politica da imagem faz `{}` confiar no editor `{e}`, que o registro de editores nao tem",
+                        papel.nome
+                    ));
+                }
+            }
             Ok(vec![
                 (
                     "etc/duke/privado/chave".to_string(),
                     format!("{}\n", sigilo::hex(&self.duke)).into_bytes(),
                 ),
+                ("etc/duke/editores".to_string(), editores.into_bytes()),
                 // O registro de pessoas, no diretório reservado: o
                 // verificador não é a senha, mas quem o tem testa palpites
                 // fora da máquina.
@@ -4731,7 +4864,12 @@ fn programas_do_disco() -> Result<Vec<(String, Vec<u8>)>, String> {
         if !status.success() {
             return Err(format!("os programas não compilaram para {}", arch.nome()));
         }
-        for nome in &nomes {
+        // Os publicados não vão para a imagem: chegam pela rede, selados —
+        // ver [`codigo`].
+        for nome in nomes
+            .iter()
+            .filter(|n| !codigo::PUBLICADOS.contains(&n.as_str()))
+        {
             let caminho = dir
                 .join("target")
                 .join(arch.alvo())
@@ -5626,6 +5764,10 @@ fn comando_qemu(
     tls::conferir_o_hospedeiro()?;
     let eco_tls = tls::guestfwd()?;
     let http = tls::guestfwd_http()?;
+    // O código que o servidor HTTP serve em `/codigo`: os programas
+    // publicados desta arquitetura, selados — ver [`codigo`]. Depois do
+    // disco, que os compila.
+    codigo::publicar(arch)?;
     let canal_tcp = canal_tcp::preparar(arch.nome())?;
     qemu.args([
         "-netdev",
@@ -6389,6 +6531,7 @@ fn conversar(
     sob_interface_nativa(arch, &mut escrita, &mut leitor)?;
     sob_o_armazem(arch, &mut escrita, &mut leitor)?;
     sob_a_rede(arch, &mut escrita, &mut leitor)?;
+    sob_o_codigo(arch, &mut escrita, &mut leitor)?;
     sob_agentes(arch)?;
     sob_sigilo(arch)?;
     sob_administracao(arch, &mut escrita, &mut leitor)?;
@@ -10680,6 +10823,153 @@ fn sob_o_armazem(
     println!(
         "  [armazem] ok  binario de um agente pelo anexo, {} bytes",
         bytes.len()
+    );
+    Ok(())
+}
+
+/// O código de fora da imagem, na imagem de verdade — o registro de
+/// editores, a política e as chaves da bancada, sem nada da suíte: o agente
+/// da porta 1, um operador, grava no armazém, pelo anexo da sessão cifrada,
+/// os arquivos que a bancada publica — os mesmos bytes que o instalador da
+/// suíte baixa pela rede, ver [`codigo`] — e pede `user.run` de cada um.
+///
+/// O selado pela bancada roda e sai com o código do programa; os outros não
+/// nascem, cada um com o código da recusa e a razão `DENY_PROVENANCE`. E a
+/// auditoria, lida pela serial, diz cada recusa como a execução da decisão
+/// do gate, que tinha deixado o caminho.
+fn sob_o_codigo(
+    arch: Arquitetura,
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+) -> Result<(), String> {
+    println!("[xtask] fumaça: o código de fora da imagem, selado");
+    let mut id = 8900;
+    let mut pedir = |metodo: &str, params: &str| -> Result<String, String> {
+        id += 1;
+        escrita
+            .write_all(
+                format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"{metodo}","params":{params}}}"#)
+                    .as_bytes(),
+            )
+            .and_then(|()| escrita.write_all(b"\n"))
+            .and_then(|()| escrita.flush())
+            .map_err(|e| format!("codigo: falha ao pedir `{metodo}`: {e}"))?;
+        let resposta = ler_resposta(leitor).map_err(|e| format!("codigo: {e}"))?;
+        if !e_a_resposta(&resposta, id) {
+            return Err(format!(
+                "codigo: veio a resposta de outro pedido\n  {resposta}"
+            ));
+        }
+        Ok(resposta)
+    };
+    let numero = |r: &str, campo: &str| -> Option<u64> {
+        r.split(&format!(r#""{campo}":"#))
+            .nth(1)
+            .and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next())
+            .and_then(|n| n.parse().ok())
+    };
+
+    const DIRETORIO: &str = "/armazem/compartilhado/codigo";
+    let mut agente = AgenteNaPorta::conectar(arch, 1)?;
+    // O diretório e o de cima dele: o `fs.mkdir` cria um nível.
+    for diretorio in ["/armazem/compartilhado", DIRETORIO] {
+        let feito = agente.pedir("fs.mkdir", &format!(r#"{{"path":"{diretorio}"}}"#))?;
+        if !feito.contains(r#""ok":true"#) && !feito.contains("ja ha algo nesse caminho") {
+            return Err(format!(
+                "codigo: o diretorio {diretorio} nao foi criado\n  {feito}"
+            ));
+        }
+    }
+    let mut rodou = 0;
+    let mut recusados = Vec::new();
+    let mut tempos = Vec::new();
+    for publicado in codigo::PUBLICADOS {
+        for (sufixo, recusa) in codigo::VARIANTES {
+            let arquivo = format!("{publicado}{sufixo}");
+            let bytes = codigo::publicado(arch, &arquivo)?;
+            let caminho = format!("{DIRETORIO}/{arquivo}");
+            let estado = agente.pedir("fs.stat", &format!(r#"{{"path":"{caminho}"}}"#))?;
+            let versao = numero(&estado, "version").unwrap_or(0);
+            let gravado = agente.pedir_com_anexo(
+                "fs.write",
+                &format!(r#"{{"path":"{caminho}","expect_version":{versao}}}"#),
+                &bytes,
+            )?;
+            if !gravado.contains(r#""ok":true"#)
+                || numero(&gravado, "size") != Some(bytes.len() as u64)
+            {
+                return Err(format!(
+                    "codigo: {arquivo} nao foi gravado inteiro pelo anexo\n  {gravado}"
+                ));
+            }
+            let pedido = std::time::Instant::now();
+            let lancado = agente.pedir("user.run", &format!(r#"{{"path":"{caminho}"}}"#))?;
+            tempos.push(format!("{arquivo} {} ms", pedido.elapsed().as_millis()));
+            match recusa {
+                None => {
+                    if !lancado.contains(r#""launched":true"#) {
+                        return Err(format!(
+                            "codigo: o selado pela bancada nao rodou\n  {lancado}"
+                        ));
+                    }
+                    let procurada = "processo encerrou com codigo 92";
+                    let limite = std::time::Instant::now() + Duration::from_secs(15);
+                    loop {
+                        let log = pedir("log.tail", r#"{"count":32}"#)?;
+                        if log.contains(procurada) {
+                            break;
+                        }
+                        if std::time::Instant::now() >= limite {
+                            return Err(format!("codigo: {arquivo} nao saiu com 92\n  {log}"));
+                        }
+                        std::thread::sleep(Duration::from_millis(150));
+                    }
+                    rodou += 1;
+                }
+                Some(codigo) => {
+                    let explicado = lancado.contains(r#""launched":false"#)
+                        && lancado.contains(&format!(r#""code":"{codigo}""#))
+                        && lancado.contains(r#""reason":"DENY_PROVENANCE""#)
+                        && !lancado.contains("thread_id");
+                    if !explicado {
+                        return Err(format!(
+                            "codigo: {arquivo} nao foi recusado com {codigo}\n  {lancado}"
+                        ));
+                    }
+                    recusados.push(format!("{arquivo} {codigo}"));
+                }
+            }
+        }
+    }
+    drop(agente);
+    // A recusa do adulterado, pela serial: a execução da decisão do agente,
+    // com o motivo.
+    let auditoria = pedir("audit.tail", r#"{"count":64}"#)?;
+    if !auditoria.contains("o selo nao confere com o codigo; decisao ") {
+        return Err(format!(
+            "codigo: a recusa do codigo adulterado nao esta na auditoria\n  {auditoria}"
+        ));
+    }
+    println!(
+        "  [codigo] ok  {rodou} selado pela bancada rodou e saiu com 92; recusados: {}",
+        recusados.join(", ")
+    );
+    // O custo, medido pelo kernel: cada conferência do selo e da confiança,
+    // sem a leitura do arquivo — e, do lado de cá, cada `user.run`, com o
+    // canal cifrado, o gate, a auditoria e a leitura.
+    let m = pedir("security.metrics", "{}")?;
+    let n = |caminho: &[&str]| numero_no_caminho(&m, caminho).unwrap_or(0);
+    let conferencias = n(&["code", "verify_ns", "samples"]);
+    if conferencias < codigo::VARIANTES.len() as u64 {
+        return Err(format!(
+            "codigo: a conferencia do codigo nao foi medida\n  {m}"
+        ));
+    }
+    println!(
+        "  [codigo] ok  a conferencia, medida: {conferencias} selos, {}/{} us (media/maior); o user.run: {}",
+        n(&["code", "verify_ns", "avg"]) / 1000,
+        n(&["code", "verify_ns", "max"]) / 1000,
+        tempos.join(", ")
     );
     Ok(())
 }

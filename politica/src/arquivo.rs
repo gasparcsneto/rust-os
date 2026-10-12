@@ -48,6 +48,16 @@
 //!   2 até N, e N até [`MAIOR_GRUPO`]; só para as operações de
 //!   [`OPERACOES_DE_QUORUM`]. Só a imagem a escreve: um `policy.write` que
 //!   baixasse o M seria uma credencial só desfazendo o quórum.
+//! - `editores <papel> <editor>...`: os editores de código em que o papel
+//!   confia — os nomes do registro de editores da imagem (ver
+//!   `sigilo::codigo`). O código que não vem da imagem — o gravado no
+//!   armazém, o que chegou pela rede — só roda com o selo de um deles, e o
+//!   processo que ele vira só pede enquanto o papel de quem o lançou
+//!   continuar confiando no editor: a confiança é decidida a cada pedido,
+//!   como o papel. Sem a linha, ou com a lista vazia, nenhum: o papel roda
+//!   só o código da imagem. Pede `process.run` no papel — sem ele, não há o
+//!   que rodar. Um `policy.write` que acrescente um editor cabe no teto de
+//!   quem delega; tirar é sempre possível, e é a revogação da confiança.
 //! - `apertos <quantos> <janela em ms>`: apertos de mão por sessão
 //!   cifrada — uma porta, ou uma vaga do canal TCP.
 //! - `serial <papel>`: o papel da sessão 0. Obrigatória.
@@ -221,6 +231,9 @@ pub struct Papel {
     /// agente, uma pessoa, o sistema. Sem linha, nenhuma: quem não tem cota
     /// não ocupa nada, mesmo com `fs.write`.
     pub armazem: CotaDoArmazem,
+    /// Os editores de código em que o papel confia, pelo nome, em ordem e
+    /// sem repetição. Vazio: só o código da imagem.
+    pub editores: Vec<String>,
     /// As diretas mais as não sensíveis dos incluídos. Calculadas pela
     /// validação.
     permissoes: BTreeSet<Permissao>,
@@ -237,6 +250,7 @@ impl Papel {
             processos: PROCESSOS_PADRAO,
             mensagens: crate::mensagens::COTAS_PADRAO,
             armazem: CotaDoArmazem::NENHUMA,
+            editores: Vec::new(),
             permissoes: BTreeSet::new(),
         }
     }
@@ -312,6 +326,8 @@ pub enum ErroTipo {
     /// Um serviço com o papel da serial ou da autoridade local: (serviço,
     /// papel).
     ServicoComPapelDoSistema(String, String),
+    /// Uma linha `editores` não vazia para um papel sem `process.run`.
+    EditoresSemExecucao(String),
 }
 
 /// Um erro, com a linha onde está. Linha zero: a política como um todo.
@@ -361,6 +377,9 @@ impl Erro {
             ErroTipo::ServicoRepetido(n) => format!("servico `{n}` definido duas vezes"),
             ErroTipo::ServicoComPapelDoSistema(n, papel) => format!(
                 "o servico `{n}` teria o papel `{papel}`, da serial ou da autoridade local: um servico nao herda o sistema"
+            ),
+            ErroTipo::EditoresSemExecucao(papel) => format!(
+                "`{papel}` confia em editores de codigo e nao tem process.run: nao ha o que rodar"
             ),
         };
         if self.linha == 0 {
@@ -525,6 +544,16 @@ impl Politica {
         })
     }
 
+    /// Se o papel `papel` confia no editor de código `editor` — o nome do
+    /// registro de editores. Sem papel, ou com um que a política não tem:
+    /// não. É a pergunta que o gate faz antes de rodar código de fora da
+    /// imagem, e de novo a cada pedido do processo que ele virou.
+    pub fn confia(&self, papel: Option<&str>, editor: &str) -> bool {
+        papel
+            .and_then(|n| self.papel(n))
+            .is_some_and(|p| p.editores.iter().any(|e| e == editor))
+    }
+
     /// O papel do serviço `nome`, se a política lhe dá um. Sem a linha, o
     /// serviço não tem papel — e a decisão sem papel é `DENY_ROLE`.
     pub fn servico(&self, nome: &str) -> Option<&str> {
@@ -687,6 +716,28 @@ impl Politica {
                     .ok_or(erro(ErroTipo::PapelDesconhecido(nome.to_string())))?;
                 papel.armazem = CotaDoArmazem { bytes, objetos };
             }
+            "editores" => {
+                let nome = partes.next().ok_or(erro(ErroTipo::Sintaxe))?;
+                let mut editores: Vec<String> = Vec::new();
+                for e in partes {
+                    if e.contains('*') {
+                        return Err(erro(ErroTipo::Curinga));
+                    }
+                    if !nome_valido(e) {
+                        return Err(erro(ErroTipo::NomeInvalido(e.to_string())));
+                    }
+                    if !editores.iter().any(|ja| ja == e) {
+                        editores.push(e.to_string());
+                    }
+                }
+                // A ordem não muda o que a linha diz: a política que volta
+                // do texto é igual à que foi escrita, em qualquer ordem.
+                editores.sort();
+                let papel = self
+                    .papel_mut(nome)
+                    .ok_or(erro(ErroTipo::PapelDesconhecido(nome.to_string())))?;
+                papel.editores = editores;
+            }
             "quorum" => {
                 let operacao = partes.next().ok_or(erro(ErroTipo::Sintaxe))?;
                 let m = numero(partes.next(), n)?;
@@ -783,6 +834,12 @@ impl Politica {
                 if !papel.tem(*p) {
                     return Err(geral(ErroTipo::RecursoSemPermissao(p.nome().to_string())));
                 }
+            }
+            // Confiar em editores de código é sobre o que o papel roda: sem
+            // `process.run`, a linha não diria nada, e uma linha que não diz
+            // nada é erro de quem a escreveu.
+            if !papel.editores.is_empty() && !papel.tem(Permissao::ProcessRun) {
+                return Err(geral(ErroTipo::EditoresSemExecucao(papel.nome.clone())));
             }
             // E o contrário: cada permissão de caminho tem o alcance
             // escrito. Também a que veio por inclusão — o alcance é de cada
@@ -996,6 +1053,11 @@ impl Politica {
                 "`{papel}` tem uma cota de armazem maior que a do administrador"
             )));
         }
+        if let Some(e) = a.editores.iter().find(|e| !t.editores.contains(e)) {
+            return Err(Recusa::Proibida(format!(
+                "`{papel}` confia no editor `{e}`, em que o administrador nao confia"
+            )));
+        }
         for p in a.permissoes() {
             if !t.tem(p) {
                 return Err(Recusa::Proibida(format!(
@@ -1036,11 +1098,12 @@ impl Politica {
         let palavra = linha.split_ascii_whitespace().next().unwrap_or("");
         if !matches!(
             palavra,
-            "papel" | "recurso" | "taxa" | "processos" | "mensagens" | "armazem"
+            "papel" | "recurso" | "taxa" | "processos" | "mensagens" | "armazem" | "editores"
         ) {
             return Err(Recusa::Proibida(
-                "policy.write muda papel, recurso, taxa, processos, mensagens ou armazem; a serial \
-                 muda por policy.assign, e o papel local, o dos servicos e os apertos so pela imagem"
+                "policy.write muda papel, recurso, taxa, processos, mensagens, armazem ou \
+                 editores; a serial muda por policy.assign, e o papel local, o dos servicos e os \
+                 apertos so pela imagem"
                     .to_string(),
             ));
         }
@@ -1074,6 +1137,19 @@ impl Politica {
             if depois.nome == teto || protegidos.contains(&depois.nome.as_str()) {
                 return Err(Recusa::Proibida(format!(
                     "a mudanca alteraria o papel `{}`, que e protegido",
+                    depois.nome
+                )));
+            }
+            // O editor que o papel passa a confiar é um em que o teto
+            // confia: ninguém concede a confiança que não tem. Tirar um
+            // editor não pede nada — é a revogação da confiança.
+            if let Some(e) = depois
+                .editores
+                .iter()
+                .find(|e| antes.is_none_or(|a| !a.editores.contains(e)) && !t.editores.contains(e))
+            {
+                return Err(Recusa::Proibida(format!(
+                    "a mudanca daria a `{}` a confianca no editor `{e}`, em que o administrador nao confia",
                     depois.nome
                 )));
             }
@@ -1184,6 +1260,9 @@ impl Politica {
                     "armazem {} {} {}",
                     papel.nome, papel.armazem.bytes, papel.armazem.objetos
                 );
+            }
+            if !papel.editores.is_empty() {
+                let _ = writeln!(t, "editores {} {}", papel.nome, papel.editores.join(" "));
             }
         }
         let _ = writeln!(t, "serial {}", self.serial);
@@ -1908,6 +1987,131 @@ mod testes {
                 Some("papel:operador")
             ),
             Codigo::DenyResource
+        );
+    }
+
+    /// Os editores de código: lidos, escritos de volta iguais, só num papel
+    /// que roda programas. A confiança é do papel — sem papel, nenhuma —, e
+    /// a ordem e a repetição na linha não mudam o que ela diz.
+    #[test]
+    fn os_editores_de_codigo() {
+        let p = Politica::ler(crate::PADRAO).unwrap();
+        for papel in ["operador", "administrador", "sistema"] {
+            assert!(p.confia(Some(papel), "bancada"), "{papel}");
+            assert!(!p.confia(Some(papel), "outro"), "{papel}");
+            assert!(!p.confia(Some(papel), "bancadax"), "{papel}");
+        }
+        for papel in [
+            Some("observador"),
+            Some("seguranca"),
+            Some("fantasma"),
+            None,
+        ] {
+            assert!(!p.confia(papel, "bancada"), "{papel:?}");
+        }
+        assert_eq!(Politica::ler(&p.texto()).unwrap(), p);
+        // Na emergência, o sistema e o administrador são os mesmos; o
+        // operador não existe nela.
+        let e = Politica::emergencia();
+        assert!(e.confia(Some("sistema"), "bancada"));
+        assert!(e.confia(Some("administrador"), "bancada"));
+        assert!(!e.confia(Some("operador"), "bancada"));
+        assert_eq!(Politica::ler(&e.texto()).unwrap(), e);
+
+        let base = "papel a process.run\nrecurso a process.run /bin\nserial a\nlocal a\n";
+        let com = |linha: &str| Politica::ler(&format!("{base}{linha}\n"));
+        let um = com("editores a z y z").unwrap();
+        assert_eq!(um, com("editores a y z").unwrap());
+        assert_eq!(um.papel("a").unwrap().editores, ["y", "z"]);
+        assert_eq!(Politica::ler(&um.texto()).unwrap(), um);
+        // Vazia é nenhum, e o texto não a escreve.
+        let vazia = com("editores a").unwrap();
+        assert!(!vazia.confia(Some("a"), "y"));
+        assert!(!vazia.texto().contains("editores"));
+        assert_eq!(vazia, Politica::ler(base).unwrap());
+        let erro = |linha: &str| com(linha).unwrap_err().tipo;
+        assert_eq!(erro("editores a *"), ErroTipo::Curinga);
+        assert_eq!(erro("editores a y*"), ErroTipo::Curinga);
+        assert_eq!(
+            erro("editores a Bancada"),
+            ErroTipo::NomeInvalido("Bancada".into())
+        );
+        assert_eq!(
+            erro("editores b y"),
+            ErroTipo::PapelDesconhecido("b".into())
+        );
+        assert_eq!(erro("editores"), ErroTipo::Sintaxe);
+        // Confiar em editores sem rodar nada é uma linha que não diz nada.
+        assert_eq!(
+            Politica::ler("papel a system.read\nserial a\nlocal a\neditores a y\n")
+                .unwrap_err()
+                .tipo,
+            ErroTipo::EditoresSemExecucao("a".into())
+        );
+        // Vazia, num papel sem process.run, não diz nada errado.
+        assert!(Politica::ler("papel a system.read\nserial a\nlocal a\neditores a\n").is_ok());
+    }
+
+    /// A confiança num editor muda por `policy.write`: tirar, sempre — é a
+    /// revogação —; acrescentar, só o editor em que o teto confia, como
+    /// qualquer outra concessão. O papel do teto e os protegidos não mudam;
+    /// e a atribuição de um papel cabe no teto também pela confiança.
+    #[test]
+    fn a_confianca_muda_dentro_do_teto() {
+        let p = Politica::ler(crate::PADRAO).unwrap();
+        let sem = p
+            .com_linha("editores operador", "administrador", &[])
+            .unwrap();
+        assert!(!sem.confia(Some("operador"), "bancada"));
+        assert!(sem.confia(Some("administrador"), "bancada"));
+        assert_eq!(
+            sem.com_linha("editores operador bancada", "administrador", &[])
+                .unwrap(),
+            p
+        );
+        for proibida in [
+            "editores operador bancada outro",
+            "editores operador outro",
+            // O teto, e — com o operador protegido — o papel da sessão.
+            "editores administrador",
+        ] {
+            assert!(
+                matches!(
+                    p.com_linha(proibida, "administrador", &[]),
+                    Err(Recusa::Proibida(_))
+                ),
+                "{proibida}"
+            );
+        }
+        assert!(matches!(
+            p.com_linha("editores operador", "administrador", &["operador"]),
+            Err(Recusa::Proibida(_))
+        ));
+        // Um papel que não roda nada não passa a confiar.
+        assert!(matches!(
+            p.com_linha("editores observador bancada", "administrador", &[]),
+            Err(Recusa::Invalida(Erro {
+                tipo: ErroTipo::EditoresSemExecucao(_),
+                ..
+            }))
+        ));
+        // Um editor em que o teto não confia, numa política que o operador
+        // já confia nele: a atribuição do operador não cabe no teto.
+        assert!(p.cabe_em("operador", "administrador").is_ok());
+        let alem = Politica::ler(&crate::PADRAO.replace(
+            "editores operador bancada",
+            "editores operador bancada outro",
+        ))
+        .unwrap();
+        assert!(matches!(
+            alem.cabe_em("operador", "administrador"),
+            Err(Recusa::Proibida(_))
+        ));
+        // E o que já era confiado continua mudável: tirar o `outro` passa,
+        // mesmo fora do teto.
+        assert!(
+            alem.com_linha("editores operador bancada", "administrador", &[])
+                .is_ok()
         );
     }
 

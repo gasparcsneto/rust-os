@@ -652,6 +652,81 @@ fn o_programa_fora_do_manifesto_nao_contem_quem_o_lancou() {
     assert!(m.pedidos().is_empty());
 }
 
+/// O código cujo selo não confere é um contorno, de uma vez só: o NSF abre
+/// o incidente, alto, e alerta — quem pediu pode ser a vítima de uma fonte
+/// adulterada, e a contenção fica com quem tem a autoridade. O código sem
+/// selo, e o de um editor em que o papel não confia, são a política
+/// recusando o que se explica a quem pediu: nada a detectar.
+#[test]
+fn o_codigo_adulterado_alerta_e_nao_contem() {
+    use politica::procedencia::{Falta, nao_confiado};
+    let mut a = Auditoria::nova();
+    let mut m = Motor::novo();
+    let caminho = "/armazem/compartilhado/codigo/vindo";
+    let decisao = a.gravar(do_agente("user.run", caminho, Codigo::Allow, ""));
+    for motivo in [
+        String::from(Falta::SemSelo.motivo()),
+        nao_confiado("outro"),
+        String::from(Falta::EditorDesconhecido.motivo()),
+    ] {
+        a.gravar(do_agente(
+            "user.run",
+            caminho,
+            Codigo::DenyPolicy,
+            &format!("{motivo}; decisao {decisao}"),
+        ));
+    }
+    ler(&mut m, &a);
+    assert_eq!(
+        m.incidentes.todos().count(),
+        0,
+        "a politica nao e incidente"
+    );
+
+    // Pelo processo que executa, depois da decisão do gate.
+    let exec = a.gravar(do_agente("process.exec", caminho, Codigo::Allow, ""));
+    let adulterado = a.gravar(do_agente(
+        "process.exec",
+        caminho,
+        Codigo::DenyPolicy,
+        &format!(
+            "pelo processo 41 (instalador 0a1b2c3d): {}; decisao {exec}",
+            Falta::NaoConfere.motivo()
+        ),
+    ));
+    ler(&mut m, &a);
+    let deteccoes: Vec<_> = m
+        .incidentes
+        .todos()
+        .flat_map(|i| i.deteccoes.iter().cloned())
+        .collect();
+    let d = deteccoes
+        .iter()
+        .find(|d| d.regra == Regra::CodigoAdulterado)
+        .expect("o codigo adulterado nao foi detectado");
+    assert_eq!(d.registros, vec![adulterado]);
+    assert_eq!(d.severidade, Severidade::Alta);
+    assert_eq!(d.confianca, Confianca::Media);
+    assert!(d.explicacao.contains("processo 41"), "{}", d.explicacao);
+    // Alertar não é conter: nada pedido ao gate.
+    assert!(m.pedidos().is_empty());
+    // A segunda vez, da mesma identidade, não abre outra detecção.
+    a.gravar(do_agente(
+        "process.exec",
+        caminho,
+        Codigo::DenyPolicy,
+        &format!("{}; decisao {exec}", Falta::NaoConfere.motivo()),
+    ));
+    ler(&mut m, &a);
+    let quantas = m
+        .incidentes
+        .todos()
+        .flat_map(|i| i.deteccoes.iter())
+        .filter(|d| d.regra == Regra::CodigoAdulterado)
+        .count();
+    assert_eq!(quantas, 1);
+}
+
 /// Só um incidente alto leva a saída a ser contida. Três pedidos distintos
 /// fora do alcance — o primeiro degrau — são de olhar: uma observação, sem
 /// incidente, e a conexão que vem depois é só registrada. O mesmo pedido

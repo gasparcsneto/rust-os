@@ -25,8 +25,9 @@
 //! O motivo é da auditoria, e pode dizer o que a resposta esconde de
 //! propósito. A explicação o lê só para distinguir o que é de quem pediu:
 //! a identidade dele (revogada, ou sem aperto), o manifesto do programa
-//! dele, o arrendamento que a resposta já mostra, e o pedido mal formado
-//! que ele mesmo escreveu. **Nunca** num `DENY_RESOURCE`: o kernel responde
+//! dele, a procedência do código que ele pediu para rodar (ver
+//! [`crate::procedencia`]), o arrendamento que a resposta já mostra, e o
+//! pedido mal formado que ele mesmo escreveu. **Nunca** num `DENY_RESOURCE`: o kernel responde
 //! o mesmo ao recurso que não existe, ao que é de outro e ao que está fora
 //! do alcance — um destinatário revogado e um que nunca existiu, a
 //! mensagem de outro e um número que ninguém tem —, e a explicação
@@ -50,6 +51,9 @@ pub enum Razao {
     /// Sem papel, o papel não tem a permissão, o manifesto do programa não
     /// a declara, ou uma regra da política além do papel recusou.
     Politica,
+    /// O código de fora da imagem não prova de onde veio: sem selo, com um
+    /// selo que não confere, ou de um editor em que o papel não confia.
+    Procedencia,
     /// O papel tem a permissão, mas não sobre este recurso.
     Alcance,
     /// Quem pediu está contido: o processo isolado, o agente suspenso.
@@ -80,6 +84,7 @@ impl Razao {
             Razao::Revogacao => "DENY_REVOCATION",
             Razao::Credencial => "DENY_CREDENTIAL",
             Razao::Politica => "DENY_POLICY",
+            Razao::Procedencia => "DENY_PROVENANCE",
             Razao::Alcance => "DENY_SCOPE",
             Razao::Contido => "DENY_CONTAINED",
             Razao::Conflito => "CONFLICT",
@@ -218,6 +223,31 @@ pub fn explicar(d: &Decidido) -> Option<Explicacao> {
                 )
             }
         }
+        // O código sem procedência: o que não tem selo, ou cujo selo não
+        // confere, não roda nunca — é outro código que passa; o de um editor
+        // em que o papel não confia passa se um administrador incluir o
+        // editor no papel; o de um editor que o registro não tem, só com a
+        // imagem.
+        Codigo::DenyPolicy if let Some(f) = crate::procedencia::Falta::do_motivo(d.motivo) => {
+            use crate::procedencia::Falta;
+            match f {
+                Falta::SemSelo | Falta::NaoConfere => (
+                    Razao::Procedencia,
+                    Repetir::Nao,
+                    ProximaAcao::CorrigirOPedido,
+                ),
+                Falta::NaoConfiado => (
+                    Razao::Procedencia,
+                    Repetir::PedeAutorizacao,
+                    ProximaAcao::PedirAutorizacao,
+                ),
+                Falta::EditorDesconhecido => (
+                    Razao::Procedencia,
+                    Repetir::PedeAutorizacao,
+                    ProximaAcao::FalarComUmAdministrador,
+                ),
+            }
+        }
         Codigo::DenyRole | Codigo::DenyPolicy => (
             Razao::Politica,
             Repetir::PedeAutorizacao,
@@ -303,6 +333,15 @@ pub fn frase(d: &Decidido, e: &Explicacao) -> String {
         Razao::Politica if e.proxima == ProximaAcao::CorrigirOPedido => format!(
             "O programa nao declara {pedido} no manifesto dele: ele nao pode pedir isso, qualquer que seja o seu papel."
         ),
+        Razao::Procedencia if e.proxima == ProximaAcao::CorrigirOPedido => {
+            "O programa veio de fora da imagem sem um selo de editor que confira com ele: ele nao roda. Obtenha o programa selado pelo editor e repita.".into()
+        }
+        Razao::Procedencia if e.proxima == ProximaAcao::PedirAutorizacao => format!(
+            "Seu papel ({papel}) nao confia no editor que selou este programa. Um administrador pode incluir o editor no seu papel."
+        ),
+        Razao::Procedencia => {
+            "O editor que selou este programa nao e conhecido nesta maquina. Fale com um administrador.".into()
+        }
         Razao::Politica if d.papel.is_none() => {
             "Esta identidade nao tem papel na politica. Um administrador pode atribuir um.".into()
         }
@@ -449,6 +488,36 @@ mod testes {
         assert_eq!(
             caso(Codigo::Error, ""),
             ("TECHNICAL_ERROR", "retryable", "RETRY")
+        );
+        // A procedência do código, pelas quatro faltas — e o firewall, que
+        // também é `DENY_POLICY`, continua sendo da política.
+        use crate::procedencia::{Falta, nao_confiado};
+        for f in [Falta::SemSelo, Falta::NaoConfere] {
+            assert_eq!(
+                caso(Codigo::DenyPolicy, f.motivo()),
+                ("DENY_PROVENANCE", "non_retryable", "FIX_REQUEST")
+            );
+        }
+        let nao_confia = nao_confiado("outro");
+        assert_eq!(
+            caso(Codigo::DenyPolicy, nao_confia.leak()),
+            (
+                "DENY_PROVENANCE",
+                "requires_authorization",
+                "REQUEST_AUTHORIZATION"
+            )
+        );
+        assert_eq!(
+            caso(Codigo::DenyPolicy, Falta::EditorDesconhecido.motivo()),
+            ("DENY_PROVENANCE", "requires_authorization", "CONTACT_ADMIN")
+        );
+        assert_eq!(
+            caso(Codigo::DenyPolicy, "bloqueado pelo firewall, regra 2"),
+            (
+                "DENY_POLICY",
+                "requires_authorization",
+                "REQUEST_AUTHORIZATION"
+            )
         );
     }
 

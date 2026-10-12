@@ -79,6 +79,7 @@ pub enum Regra {
     CadeiaDeProcessos,
     TetoExercido,
     SaidaDepoisDeSondagem,
+    CodigoAdulterado,
     // O monitor de invariantes — ver [`crate::invariantes`].
     AuditoriaAdulterada,
     LacunaNaLeitura,
@@ -101,6 +102,7 @@ impl Regra {
             Regra::CadeiaDeProcessos => "process-chain",
             Regra::TetoExercido => "ceiling-exercised",
             Regra::SaidaDepoisDeSondagem => "egress-after-probing",
+            Regra::CodigoAdulterado => "code-tampered",
             Regra::AuditoriaAdulterada => "audit-tampered",
             Regra::LacunaNaLeitura => "audit-gap",
             Regra::TempoQueVolta => "time-goes-back",
@@ -122,14 +124,15 @@ impl Regra {
             | Regra::ForaDoAlcance
             | Regra::ContornoDoFirewall
             | Regra::SaidaDepoisDeSondagem => Categoria::Violacao,
-            Regra::TetoExercido | Regra::AuditoriaAdulterada | Regra::AcaoSemPlano => {
-                Categoria::Contorno
-            }
+            Regra::TetoExercido
+            | Regra::AuditoriaAdulterada
+            | Regra::AcaoSemPlano
+            | Regra::CodigoAdulterado => Categoria::Contorno,
         }
     }
 
     /// Todas, para quem lista.
-    pub const TODAS: [Regra; 15] = [
+    pub const TODAS: [Regra; 16] = [
         Regra::SondagemDePrivilegio,
         Regra::ForaDoManifesto,
         Regra::AbusoDeCredencial,
@@ -141,6 +144,7 @@ impl Regra {
         Regra::CadeiaDeProcessos,
         Regra::TetoExercido,
         Regra::SaidaDepoisDeSondagem,
+        Regra::CodigoAdulterado,
         Regra::AuditoriaAdulterada,
         Regra::LacunaNaLeitura,
         Regra::TempoQueVolta,
@@ -493,6 +497,34 @@ impl Detector {
                     ),
                 ));
             }
+        }
+
+        // O código cujo selo não confere — ver `politica::procedencia`: os
+        // bytes mudaram depois de selados, ou o selo é forjado. Não há
+        // volume que torne isto inocente, e por isso basta uma vez; mas
+        // quem pediu pode ser a vítima — o código veio de uma fonte
+        // adulterada —, e a confiança é média. O NSF não planeja contenção
+        // por ela (ver `resposta::planejar`): alerta, e a contenção fica
+        // com quem tem a autoridade, com o incidente na mão.
+        if e.tipo == Tipo::Execucao
+            && e.codigo == Codigo::DenyPolicy
+            && e.falta_de_procedencia() == Some(politica::procedencia::Falta::NaoConfere)
+            && self.pode(Regra::CodigoAdulterado, &e.principal, 1, e.ts_ms)
+        {
+            let programa = e.processo.as_ref().map_or_else(String::new, |(fio, p)| {
+                alloc::format!(", pelo processo {fio} ({p})")
+            });
+            saida.push(det(
+                Regra::CodigoAdulterado,
+                Severidade::Alta,
+                Confianca::Media,
+                alloc::vec![e.seq],
+                alloc::format!(
+                    "{} de `{}`{programa}: o selo nao confere com o codigo — ele mudou depois de selado, ou o selo e forjado",
+                    e.metodo,
+                    e.recurso
+                ),
+            ));
         }
 
         if e.codigo == Codigo::DenyRole

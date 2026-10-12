@@ -10,7 +10,9 @@
 //!   que leu — e a parte do tempo da máquina que as voltas tomaram;
 //! - a resposta: do registro que disparou a detecção ao pedido do NSF;
 //! - os arrendamentos: quantos soltos, por quê, e os que venceram, quanto
-//!   depois do prazo saíram.
+//!   depois do prazo saíram;
+//! - o código de fora da imagem: cada conferência do selo e da confiança
+//!   no editor, antes de ele virar processo.
 //!
 //! # A régua
 //!
@@ -94,6 +96,9 @@ pub static RESPOSTA_MS: Medida = Medida::nova();
 /// De quanto depois do prazo um arrendamento vencido saiu, em
 /// milissegundos.
 pub static VENCIMENTO_MS: Medida = Medida::nova();
+/// A conferência do código de fora da imagem — o selo e a confiança no
+/// editor, sem a leitura do arquivo —, em ciclos.
+pub static CODIGO: Medida = Medida::nova();
 
 /// As decisões do gate por código, na ordem de [`Codigo::TODOS`].
 static POR_CODIGO: [AtomicU64; Codigo::TODOS.len()] =
@@ -276,6 +281,7 @@ pub fn zerar_de_teste() {
         &REGISTROS_DO_NSF,
         &RESPOSTA_MS,
         &VENCIMENTO_MS,
+        &CODIGO,
     ] {
         m.zerar();
     }

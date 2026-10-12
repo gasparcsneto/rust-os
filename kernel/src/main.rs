@@ -407,6 +407,7 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     match vfs::montar(
         "programas",
         vfs::DIRETORIO_DOS_PROGRAMAS,
+        vfs::Origem::Imagem,
         alloc::boxed::Box::new(vfs::programas::Programas),
     ) {
         Ok(()) => log_info!(
@@ -672,7 +673,12 @@ fn panic(info: &PanicInfo) -> ! {
 fn montar_a_raiz(tabela: &particoes::Tabela) {
     match tabela.primeira(particoes::Tipo::Dados) {
         Some(particao) => match vfs::btrfs::Sistema::abrir(particao.primeiro) {
-            Ok(sistema) => match vfs::montar("btrfs", "/", alloc::boxed::Box::new(sistema)) {
+            Ok(sistema) => match vfs::montar(
+                "btrfs",
+                "/",
+                vfs::Origem::Imagem,
+                alloc::boxed::Box::new(sistema),
+            ) {
                 Ok(()) => log_info!("vfs", "/ montado do disco, em btrfs"),
                 Err(motivo) => {
                     log_error!("vfs", "a raiz nao montou: {}", motivo.motivo())

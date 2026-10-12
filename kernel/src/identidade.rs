@@ -10,7 +10,12 @@
 //! - `/etc/duke/agentes`: as chaves públicas dos agentes que podem abrir uma
 //!   porta, com o nome de cada um;
 //! - `/etc/duke/administradores`: as dos administradores, que podem provar
-//!   uma operação administrativa — ver [`crate::agent::administracao`].
+//!   uma operação administrativa — ver [`crate::agent::administracao`];
+//! - `/etc/duke/editores`: as chaves públicas Ed25519 dos editores de
+//!   código, com o nome de cada um — ver `sigilo::codigo`. O registro diz
+//!   **quem** selou; em quem cada papel confia é da política, na linha
+//!   `editores`. Só a imagem o escreve: não há editor registrado em tempo
+//!   de execução.
 //!
 //! # Por que fora do canal do agente
 //!
@@ -44,6 +49,8 @@ pub const CAMINHO_DA_CHAVE: &str = "/etc/duke/privado/chave";
 pub const CAMINHO_DOS_AGENTES: &str = "/etc/duke/agentes";
 /// Onde estão os administradores.
 pub const CAMINHO_DOS_ADMINISTRADORES: &str = "/etc/duke/administradores";
+/// Onde estão os editores de código.
+pub const CAMINHO_DOS_EDITORES: &str = "/etc/duke/editores";
 
 /// Quantos agentes o registro guarda. Um teto para que `agent.register` não
 /// seja um jeito de esgotar a memória do kernel.
@@ -101,12 +108,22 @@ pub struct Administrador {
     pub assinatura: Option<[u8; TAM_CHAVE]>,
 }
 
+/// Um editor de código: a chave pública Ed25519 com que ele sela, e o nome
+/// com que a política e a auditoria o chamam.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Editor {
+    pub chave: [u8; TAM_CHAVE],
+    pub nome: String,
+}
+
 struct Identidade {
     /// A chave privada do Duke. Nunca sai deste módulo: quem precisa dela
     /// pede uma operação em [`com_chave_do_duke`].
     chave: Option<[u8; TAM_CHAVE]>,
     agentes: Vec<Agente>,
     administradores: Vec<Administrador>,
+    /// Os editores de código, da imagem.
+    editores: Vec<Editor>,
     /// As lápides: as credenciais administrativas revogadas por quórum,
     /// desta execução ou de antes dela, lidas do journal.
     ///
@@ -122,6 +139,7 @@ static IDENTIDADE: Mutex<Identidade> = Mutex::new(Identidade {
     chave: None,
     agentes: Vec::new(),
     administradores: Vec::new(),
+    editores: Vec::new(),
     lapides: Vec::new(),
 });
 
@@ -169,13 +187,16 @@ pub fn carregar() {
         })
         .collect();
 
+    let editores = ler_editores();
+
     if let Some(c) = &chave {
         crate::log_info!(
             "agent",
-            "chave do Duke {}, {} agentes, {} administradores",
+            "chave do Duke {}, {} agentes, {} administradores, {} editores de codigo",
             impressao(&sigilo::publica_de(c)),
             agentes.len(),
-            administradores.len()
+            administradores.len(),
+            editores.len()
         );
     }
     crate::arch::sem_interrupcoes(|| {
@@ -183,6 +204,7 @@ pub fn carregar() {
         id.chave = chave;
         id.agentes = agentes;
         id.administradores = administradores;
+        id.editores = editores;
         // A lápide vence a imagem: o que já foi revogado continua.
         let lapides = id.lapides.clone();
         for a in id.administradores.iter_mut() {
@@ -319,6 +341,60 @@ fn ler_arquivo(caminho: &str, administradores: bool) -> Vec<Entrada> {
     entradas
 }
 
+/// Os editores de código do arquivo da imagem. Como os outros registros:
+/// uma linha errada — uma chave que não é de editor, um nome fora da regra
+/// — é pulada com um aviso, uma chave ou um nome repetidos também, e um
+/// arquivo ausente é um registro vazio: a máquina que só roda o código da
+/// imagem.
+fn ler_editores() -> Vec<Editor> {
+    let Ok(bytes) = crate::vfs::ler_tudo(CAMINHO_DOS_EDITORES) else {
+        crate::log_info!(
+            "agent",
+            "{} nao existe: so o codigo da imagem roda",
+            CAMINHO_DOS_EDITORES
+        );
+        return Vec::new();
+    };
+    let Ok(texto) = core::str::from_utf8(&bytes) else {
+        crate::log_error!("agent", "{} nao e texto", CAMINHO_DOS_EDITORES);
+        return Vec::new();
+    };
+    let mut editores: Vec<Editor> = Vec::new();
+    for (i, linha) in texto.lines().enumerate() {
+        match registro::ler_linha_de_editor(linha) {
+            Ok(Some((chave, nome))) => {
+                if editores.len() >= MAIOR_REGISTRO {
+                    crate::log_warn!(
+                        "agent",
+                        "{}: mais de {} editores",
+                        CAMINHO_DOS_EDITORES,
+                        MAIOR_REGISTRO
+                    );
+                    break;
+                }
+                // Duas chaves com um nome seriam um editor que a política
+                // não sabe distinguir; um nome para duas chaves, também.
+                if editores.iter().any(|e| e.chave == chave || e.nome == nome) {
+                    crate::log_warn!(
+                        "agent",
+                        "{}:{}: editor repetido, ignorado",
+                        CAMINHO_DOS_EDITORES,
+                        i + 1
+                    );
+                    continue;
+                }
+                editores.push(Editor {
+                    chave,
+                    nome: String::from(nome),
+                });
+            }
+            Ok(None) => {}
+            Err(e) => avisar_linha(CAMINHO_DOS_EDITORES, i + 1, e),
+        }
+    }
+    editores
+}
+
 fn avisar_linha(caminho: &str, linha: usize, e: ErroDeLinha) {
     crate::log_warn!("agent", "{}:{}: {}, ignorada", caminho, linha, e.motivo());
 }
@@ -371,6 +447,25 @@ pub fn administrador_por_nome(nome: &str) -> Option<([u8; TAM_CHAVE], Option<Str
             .find(|a| a.nome == nome && !a.revogado)
             .map(|a| (a.chave, a.papel.clone()))
     })
+}
+
+/// O nome do editor de código com esta chave, se ele estiver no registro.
+pub fn editor(chave: &[u8; TAM_CHAVE]) -> Option<String> {
+    crate::arch::sem_interrupcoes(|| {
+        IDENTIDADE
+            .lock()
+            .editores
+            .iter()
+            .find(|e| e.chave == *chave)
+            .map(|e| e.nome.clone())
+    })
+}
+
+/// Troca os editores do registro, e devolve os de antes — a suíte põe os
+/// do caso, e repõe os da imagem no fim.
+#[cfg(feature = "modo-teste")]
+pub fn trocar_editores_de_teste(editores: Vec<Editor>) -> Vec<Editor> {
+    crate::arch::sem_interrupcoes(|| core::mem::replace(&mut IDENTIDADE.lock().editores, editores))
 }
 
 /// Se esta chave é de um administrador: o nome dele.

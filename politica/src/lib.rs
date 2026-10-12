@@ -29,6 +29,9 @@
 //! - [`explicacao`]: o que uma recusa quer dizer para quem pediu — a razão,
 //!   se adianta repetir, o que fazer, e a frase para uma pessoa. Lê a
 //!   decisão; não decide.
+//! - [`procedencia`]: por que um código de fora da imagem não roda — sem
+//!   selo, o selo que não confere, o editor desconhecido ou em que o papel
+//!   não confia —, com o motivo da auditoria e o código da resposta.
 
 #![no_std]
 
@@ -44,6 +47,7 @@ pub mod explicacao;
 pub mod manifesto;
 pub mod mensagens;
 pub mod permissao;
+pub mod procedencia;
 pub mod sigiloso;
 pub mod taxa;
 
@@ -92,6 +96,13 @@ pub use permissao::Permissao;
 ///   sem quórum, o que a revogação só tira com quórum.
 /// - `quorum admin.revoke 2 3`: revogar a credencial de um administrador
 ///   exige a prova de duas outras, de um grupo de três — o da imagem.
+/// - `editores`: o `sistema` e o `administrador` confiam no editor
+///   `bancada`, o da imagem de desenvolvimento — ver `sigilo::codigo` e o
+///   registro de editores, `/etc/duke/editores`. O código de fora da
+///   imagem roda só com o selo dele; o `administrador` precisa confiar para
+///   poder delegar a confiança, e alcança com `process.run` o diretório do
+///   código instalado, `/armazem/compartilhado/codigo`, para que o
+///   operador seja delegável.
 /// - `seguranca` é o papel do tecido de segurança — o serviço `nsf`, pela
 ///   linha `servico` (ver `docs/SEGURANCA.md`): lê a auditoria, observa o
 ///   DNS da bancada, barra os destinos da bancada e isola processos de
@@ -116,6 +127,7 @@ recurso sistema net.observe udp:10.0.2.3:53
 recurso sistema net.block tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53 tcp:10.0.2.100:80 tcp:10.0.2.100:8443
 armazem sistema 268435456 65536
 recurso sistema process.run /
+editores sistema bancada
 recurso sistema message.send papel:observador papel:operador papel:sistema papel:administrador
 recurso sistema process.isolate papel:observador papel:operador papel:sistema
 recurso sistema agent.suspend papel:observador papel:operador papel:sistema
@@ -130,7 +142,8 @@ recurso administrador net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2
 recurso administrador net.observe udp:10.0.2.3:53
 recurso administrador net.block tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53 tcp:10.0.2.100:80 tcp:10.0.2.100:8443
 armazem administrador 67108864 16384
-recurso administrador process.run /bin /programas
+recurso administrador process.run /bin /programas /armazem/compartilhado/codigo
+editores administrador bancada
 recurso administrador message.send papel:operador papel:sistema papel:administrador
 recurso administrador process.isolate papel:observador papel:operador papel:sistema
 recurso administrador agent.suspend papel:observador papel:operador papel:sistema
@@ -158,7 +171,9 @@ servico nsf seguranca
 /// - `observador` observa o estado do sistema e a tela; não lê arquivos;
 /// - `operador` observa e age: a tela, programas de `/bin` e
 ///   `/programas`, arquivos de `/dados`, `/bin` e `/programas`; lê e
-///   escreve no armazém compartilhado, `/armazem/compartilhado`;
+///   escreve no armazém compartilhado, `/armazem/compartilhado`; e roda o
+///   código instalado em `/armazem/compartilhado/codigo` — só o selado
+///   pelo editor `bancada`, em que ele confia;
 /// - `sistema` e `administrador`: ver `papeis_de_sistema`.
 pub const PADRAO: &str = concat!(
     "\
@@ -183,7 +198,10 @@ pub const PADRAO: &str = concat!(
 # conecta. So o sistema e o proprio administrador
 # alcancam o administrador: nenhum policy.write da esse alcance a outro
 # papel. O tecido de seguranca (servico nsf) decide pelo papel seguranca, e
-# so pelo que ele enumera.
+# so pelo que ele enumera. O codigo de fora da imagem (o instalado no
+# armazem, o que chegou pela rede) so roda com o selo de um editor em que
+# o papel de quem o lanca confia: a linha `editores`. Nesta imagem, o
+# editor `bancada`, do registro de editores (/etc/duke/editores).
 
 papel observador agent.read system.read log.read ui.read message.read
 taxa observador 20 40
@@ -194,7 +212,8 @@ recurso operador fs.read /dados /bin /programas /armazem/compartilhado
 recurso operador fs.write /armazem/compartilhado
 recurso operador net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53 tcp:10.0.2.100:80 tcp:10.0.2.100:8443
 armazem operador 16777216 4096
-recurso operador process.run /bin /programas
+recurso operador process.run /bin /programas /armazem/compartilhado/codigo
+editores operador bancada
 recurso operador message.send papel:operador papel:sistema
 taxa operador 50 100
 processos operador 8
@@ -266,6 +285,34 @@ mod testes {
         // O sistema alcança a árvore porque a linha `recurso` diz `/`.
         assert_eq!(d("sistema", FsRead, Some("/grande.txt")), Codigo::Allow);
         assert_eq!(d("sistema", ProcessRun, Some("/x/y")), Codigo::Allow);
+        // O código instalado: o operador e o administrador rodam o que está
+        // no diretório dele — e só lá, no armazém —; o observador nada. Quem
+        // selou é outra pergunta, a dos editores.
+        for papel in ["operador", "administrador"] {
+            assert_eq!(
+                d(papel, ProcessRun, Some("/armazem/compartilhado/codigo/x")),
+                Codigo::Allow
+            );
+            for fora in [
+                "/armazem/compartilhado/x",
+                "/armazem/compartilhado/codigox",
+                "/armazem/x",
+            ] {
+                assert_eq!(
+                    d(papel, ProcessRun, Some(fora)),
+                    Codigo::DenyResource,
+                    "{papel} {fora}"
+                );
+            }
+        }
+        assert_eq!(
+            d(
+                "observador",
+                ProcessRun,
+                Some("/armazem/compartilhado/codigo/x")
+            ),
+            Codigo::DenyPermission
+        );
         // As de sistema, só o sistema.
         for perm in [FsRawRead, DebugTrigger, KeyboardRead, TerminalAttach] {
             assert_eq!(d("sistema", perm, None), Codigo::Allow);

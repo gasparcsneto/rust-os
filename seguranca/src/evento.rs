@@ -352,6 +352,15 @@ impl Evento {
         self.codigo == Codigo::DenyPermission && self.detalhe.contains("o manifesto nao declara")
     }
 
+    /// O que falta ao código de fora da imagem que este registro recusou —
+    /// ver `politica::procedencia` —, se é uma recusa assim.
+    pub fn falta_de_procedencia(&self) -> Option<politica::procedencia::Falta> {
+        if self.codigo != Codigo::DenyPolicy {
+            return None;
+        }
+        politica::procedencia::Falta::do_motivo(&ler_detalhe(&self.detalhe).resto)
+    }
+
     /// O dono de um fluxo de rede que este evento pede: o processo, se foi
     /// um; senão o agente pela chave, a pessoa pela sessão, ou a serial. É
     /// o mesmo texto da captura e do escopo de uma regra do firewall — ver

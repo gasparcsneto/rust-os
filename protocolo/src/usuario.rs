@@ -227,6 +227,16 @@ pub mod erro {
     /// novo dá o de agora. Distinto de [`ENDERECO_INVALIDO`]: o buffer está
     /// certo, e não há metade de um conteúdo e metade de outro para ler.
     pub const MUDOU: i64 = -17;
+    /// O programa é de fora da imagem e não traz selo de editor: não roda.
+    /// Distinto de [`NEGADO`]: o gate deixou rodar o caminho, e é o
+    /// arquivo que não prova de onde veio — ver `sigilo::codigo`.
+    pub const SEM_SELO: i64 = -18;
+    /// O programa traz um selo, e o selo não confere com ele: o código, ou
+    /// o selo, mudou depois de selado. Não roda, e repetir não adianta.
+    pub const SELO_NAO_CONFERE: i64 = -19;
+    /// O selo confere, e o papel de quem lança não confia no editor que o
+    /// selou — ou o editor não está no registro.
+    pub const EDITOR_NAO_CONFIADO: i64 = -20;
 }
 
 /// As superfícies do compositor, como um processo as vê.

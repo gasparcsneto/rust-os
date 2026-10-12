@@ -298,6 +298,9 @@ pub static COMANDOS: &[Command] = &[
         nome: "user.run",
         resumo: "Lanca um programa no anel sem privilegio, num fio proprio. \
                  Sem `path`, lanca o exemplo embutido. \
+                 O codigo de fora da imagem (o armazem) so roda com o selo de um editor \
+                 em que o seu papel confia: sem ele, `launched` e false, com `code` \
+                 CODE_UNSIGNED, CODE_TAMPERED ou CODE_UNTRUSTED. \
                  Nao espera o fim: consulte `user.stats` depois.",
         params: &[ParamSpec {
             nome: "path",
@@ -1556,7 +1559,7 @@ pub static COMANDOS: &[Command] = &[
     },
     Command {
         nome: "security.metrics",
-        resumo: "O custo e o efeito da seguranca, medidos: o gate (decisoes, recusas por codigo, latencia), a politica, a auditoria, o tecido (voltas, tempo de maquina, memoria, falsos positivos, contencoes desfeitas, repeticoes de recusa), a latencia da resposta e os arrendamentos soltos, por causa.",
+        resumo: "O custo e o efeito da seguranca, medidos: o gate (decisoes, recusas por codigo, latencia), a politica, a auditoria, o tecido (voltas, tempo de maquina, memoria, falsos positivos, contencoes desfeitas, repeticoes de recusa), a latencia da resposta, os arrendamentos soltos, por causa, e a conferencia do codigo de fora da imagem (o selo e a confianca no editor).",
         params: &[],
         acesso: Acesso::Exige(Permissao::SecurityRead),
         recurso: None,
@@ -5016,15 +5019,29 @@ fn user_run(params: Json, w: &mut JsonWriter) -> fmt::Result {
     // `last_exit` se refere.
     w.field_str("program", caminho.unwrap_or("<exemplo embutido>"))?;
     // Com a autoridade de quem pediu: o processo de um agente abre e executa
-    // o que o papel do agente alcança — ver [`crate::autorizacao`].
-    match crate::usuario::lancar_como(caminho, crate::autorizacao::autoridade_atual()) {
+    // o que o papel do agente alcança — ver [`crate::autorizacao`]. O código
+    // de fora da imagem, só com o selo de um editor em que o papel confia —
+    // ver `usuario::codigo`.
+    match crate::usuario::lancar_conferido(caminho, crate::autorizacao::autoridade_atual()) {
         Ok(id) => {
             w.field_bool("launched", true)?;
             w.field_u64("thread_id", id)?;
         }
-        Err(motivo) => {
+        // O gate deixou o caminho, e o arquivo não prova de onde veio: o
+        // código do que falta, e a explicação. A recusa já está na
+        // auditoria, como execução da decisão.
+        Err(crate::usuario::NaoLancou::Codigo(crate::usuario::codigo::Recusa::Procedencia(
+            falta,
+            motivo,
+        ))) => {
             w.field_bool("launched", false)?;
-            w.field_str("error", motivo)?;
+            w.field_str("code", falta.resposta())?;
+            w.field_str("error", &motivo)?;
+            explicar_falha(w, politica::Codigo::DenyPolicy, &motivo)?;
+        }
+        Err(outro) => {
+            w.field_bool("launched", false)?;
+            w.field_str("error", outro.motivo())?;
         }
     }
     w.end_object()
@@ -6311,6 +6328,12 @@ fn security_metrics(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     }
     w.end_object()?;
     escrever_medida(w, "expiry_delay_ms", &m::VENCIMENTO_MS, false)?;
+    w.end_object()?;
+    // O código de fora da imagem: cada conferência do selo e da confiança
+    // no editor, antes de ele virar processo.
+    w.key("code")?;
+    w.begin_object()?;
+    escrever_medida(w, "verify_ns", &m::CODIGO, true)?;
     w.end_object()?;
     w.end_object()
 }
