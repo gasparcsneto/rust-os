@@ -22673,6 +22673,117 @@ fn fios_zumbi_espera_a_colheita_e_some_depois_dela() -> Resultado {
     Ok(())
 }
 
+/// O zumbi guarda a vaga até a colheita: um fio que nasce entre a saída do
+/// filho e a pergunta do pai fica com outra vaga.
+///
+/// O `colhedor` bifurca, e o filho sai na hora; o pai só pergunta por ele
+/// quando a suíte manda. No meio, a suíte cria fios até a tabela não ter
+/// mais vaga — cada um fica com a próxima livre — e confere, depois de cada
+/// um, que o zumbi continua na tabela. Soltos os fios, o pai colhe o filho,
+/// com o código dele.
+///
+/// A conta das vagas tratava a de qualquer fio terminado como livre, e a do
+/// zumbi também: o fio novo a tomava, o código de saída ia embora com ela,
+/// e o pai ouvia `SEM_FILHOS`. Quem achou foi `codigo: o conferido e o que
+/// roda`, no ARM em release: os lançamentos do `ponteiros` — que bifurca e
+/// colhe — caindo entre a saída de um filho e a pergunta do pai dele.
+fn fios_o_zumbi_guarda_a_vaga_ate_a_colheita() -> Resultado {
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use protocolo::usuario::evento::{Evento, tipo};
+    static SOLTAR: AtomicBool = AtomicBool::new(false);
+    static VIVOS: AtomicUsize = AtomicUsize::new(0);
+    extern "C" fn ocupante(_: u64) -> ! {
+        while !SOLTAR.load(Ordering::Acquire) {
+            crate::fios::ceder();
+        }
+        VIVOS.fetch_sub(1, Ordering::AcqRel);
+        crate::fios::terminar()
+    }
+    const CANAL: &str = "teste-colhedor";
+    let publicar = |tipo, a| {
+        crate::eventos::publicar(
+            CANAL,
+            Evento {
+                tipo,
+                a,
+                ..Default::default()
+            },
+        )
+        .map_err(|_| "o canal do colhedor nao recebeu o passo")
+    };
+    // O que o colhedor disse depois de `desde`, com o prefixo dado.
+    let dito = |desde: u64, prefixo: &str| {
+        let mut visto = None;
+        crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+            if visto.is_none()
+                && r.seq >= desde
+                && r.subsistema == "usuario"
+                && let Some(resto) = r.mensagem().strip_prefix(prefixo)
+            {
+                visto = Some(alloc::string::String::from(resto));
+            }
+        });
+        visto
+    };
+
+    if crate::fios::colheita().1 != 0 {
+        return Err("a tabela ja tinha zumbi antes do caso comecar");
+    }
+    let desde = crate::log::total_emitidos();
+    let programa = alloc::format!("{}/colhedor", crate::usuario::DIRETORIO_DOS_COMPILADOS);
+    crate::usuario::lancar(Some(&programa))?;
+    esperar_ate(|| dito(desde, "colhedor: pronto").is_some(), 600)
+        .map_err(|_| "o colhedor nao ficou pronto")?;
+    publicar(tipo::ACAO, 1)?;
+    esperar_ate(|| crate::fios::colheita().1 == 1, 600)
+        .map_err(|_| "o filho do colhedor nao virou zumbi")?;
+
+    // A tabela cheia, um fio de cada vez, e o zumbi conferido depois de
+    // cada um.
+    SOLTAR.store(false, Ordering::Release);
+    VIVOS.store(0, Ordering::Release);
+    let (mut criados, mut tomou) = (0usize, false);
+    while criados < crate::fios::MAX_FIOS {
+        if crate::fios::criar("teste-vaga", ocupante, 0).is_err() {
+            break;
+        }
+        VIVOS.fetch_add(1, Ordering::AcqRel);
+        criados += 1;
+        if crate::fios::colheita().1 != 1 {
+            tomou = true;
+            break;
+        }
+    }
+    SOLTAR.store(true, Ordering::Release);
+    esperar_cedendo(|| VIVOS.load(Ordering::Acquire) == 0, 600)
+        .map_err(|_| "os fios que enchiam a tabela nao terminaram")?;
+    if tomou {
+        return Err("um fio novo tomou a vaga do zumbi");
+    }
+    if criados == 0 {
+        return Err("nenhum fio nasceu: a tabela nao foi conferida");
+    }
+
+    // O pai pergunta, e o código do filho está lá.
+    let desde = crate::log::total_emitidos();
+    publicar(tipo::ACAO, 2)?;
+    let colheu = || dito(desde, "colhedor: colheu ").or_else(|| dito(desde, "colhedor: esperar "));
+    esperar_ate(|| colheu().is_some(), 600).map_err(|_| "o colhedor nao colheu")?;
+    let resposta = colheu().unwrap_or_default();
+    let desde = crate::log::total_emitidos();
+    let _ = publicar(tipo::ENCERRAR, 0);
+    let fim = esperar_ate(
+        || linhas_do_programa(desde, "processo encerrou com codigo 72") == 1,
+        600,
+    )
+    .map_err(|_| "o colhedor nao saiu quando pedido");
+    if !resposta.ends_with(" com 71") {
+        crate::log_error!("teste", "colhedor: {} ({} fios criados)", resposta, criados);
+        return Err("o pai nao colheu o filho com o codigo dele");
+    }
+    fim
+}
+
 /// A travessia completa, do kernel ao anel sem privilégio e de volta — agora
 /// com o processo se duplicando e trocando de imagem no meio do caminho.
 ///
@@ -29924,6 +30035,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "fios: o zumbi espera a colheita e some depois dela",
         f: fios_zumbi_espera_a_colheita_e_some_depois_dela,
+    },
+    Caso {
+        nome: "fios: o zumbi guarda a vaga ate a colheita",
+        f: fios_o_zumbi_guarda_a_vaga_ate_a_colheita,
     },
     Caso {
         nome: "arch: dormir parado acorda com as interrupcoes mascaradas",

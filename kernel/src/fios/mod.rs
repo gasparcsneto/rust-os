@@ -1365,12 +1365,19 @@ impl Escalonador {
     /// usando", e o campo que responde é [`Fio::na_cpu`]: ele cobre o atual
     /// de cada núcleo e também o que um núcleo acabou de largar mas ainda
     /// não terminou de salvar.
+    ///
+    /// A vaga de um zumbi também não: o filho que terminou e que o pai ainda
+    /// vai colher guarda nela o código de saída — ver [`Self::e_zumbi`]. O
+    /// coletor já a respeitava, e esta conta não: um fio que nascesse entre
+    /// a saída do filho e a pergunta do pai ficava com a vaga, o código ia
+    /// embora junto, e o pai ouvia que não tinha filho nenhum.
     fn vaga_livre(&self) -> Result<usize, &'static str> {
-        self.fios
-            .iter()
-            .position(|f| match f {
+        (0..self.fios.len())
+            .find(|&i| match &self.fios[i] {
                 None => true,
-                Some(fio) => fio.estado == Estado::Terminado && fio.na_cpu.is_none(),
+                Some(fio) => {
+                    fio.estado == Estado::Terminado && fio.na_cpu.is_none() && !self.e_zumbi(i)
+                }
             })
             .ok_or("nao ha vaga livre para outro fio")
     }

@@ -538,6 +538,7 @@ programas/           os programas de usuário, compilados à parte do kernel
         ├── autoridade.rs confere de dentro que o processo age com o papel de quem o lançou
         ├── eco.rs        escuta um canal de eventos e diz o que chega
         ├── cedente.rs    cede a vez duas mil vezes, em várias cópias, e confere que voltou inteiro
+        ├── colhedor.rs   bifurca, e só colhe o filho quando a suíte manda: no meio, o filho é um zumbi
         ├── janelas.rs    o servidor de janelas: moldura, foco, arrasto, ordem e fechar
         ├── superficie.rs desenha numa superfície, bifurca, fecha e sai sem fechar
         ├── herdeira.rs   depois de um `exec`, fecha a superfície herdada sem perder a sua
