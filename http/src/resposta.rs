@@ -23,11 +23,19 @@
 //! dois-pontos, controle no valor, versão que não é 1.0 nem 1.1, status
 //! fora de 100 a 599, troca de protocolo (101). E o servidor que fecha
 //! antes do fim é [`Erro::Fechada`]: o que chegou não é entregue.
+//!
+//! # O corpo codificado
+//!
+//! Com um `Content-Encoding` que o pedido aceitou, o corpo é lido inteiro
+//! com os limites de sempre e decodificado depois, com o teto do corpo
+//! decodificado — ver [`crate::codificacao`]. A codificação se confere pela
+//! cabeça, antes de ler o corpo.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::cliente::Fluxo;
+use crate::codificacao::{self, Aceitas, Codificacao};
 use crate::erro::{Erro, Limite, Motivo};
 use crate::pedido::{Metodo, tchar};
 
@@ -52,8 +60,12 @@ pub struct Limites {
     pub cabeca: usize,
     /// Quantos cabeçalhos.
     pub cabecalhos: usize,
-    /// O corpo, em bytes.
+    /// O corpo como veio, em bytes — comprimido ou não.
     pub corpo: usize,
+    /// O corpo decodificado, em bytes: o teto do que sai do decodificador
+    /// quando o corpo veio comprimido. O corpo que veio como é não passa
+    /// pelo decodificador, e o limite dele é o `corpo`.
+    pub descomprimido: usize,
 }
 
 impl Default for Limites {
@@ -63,6 +75,7 @@ impl Default for Limites {
             cabeca: 16 * 1024,
             cabecalhos: 64,
             corpo: 1024 * 1024,
+            descomprimido: 4 * 1024 * 1024,
         }
     }
 }
@@ -93,9 +106,16 @@ pub struct Resposta {
     pub versao: Versao,
     pub status: u16,
     pub motivo: String,
-    /// Os cabeçalhos na ordem em que vieram, com o nome em minúsculas.
+    /// Os cabeçalhos na ordem em que vieram, com o nome em minúsculas. O
+    /// `Content-Length` e o `Content-Encoding` falam do corpo como veio.
     pub cabecalhos: Vec<(String, String)>,
+    /// O conteúdo: já decodificado, quando veio comprimido.
     pub corpo: Vec<u8>,
+    /// A codificação que o cliente tirou do corpo — `None`, quando ele veio
+    /// como é.
+    pub codificacao: Option<Codificacao>,
+    /// O tamanho do corpo como veio, antes de decodificado.
+    pub no_fio: usize,
     pub enquadramento: Enquadramento,
     /// A conexão pode levar o pedido seguinte: HTTP/1.1 sem
     /// `Connection: close`, um corpo com fim certo, e nada a mais depois
@@ -275,7 +295,7 @@ fn ler_cabecalho(linha: &[u8]) -> Result<(String, String), Motivo> {
 
 /// Os valores de todos os cabeçalhos `nome`, partidos nas vírgulas, sem o
 /// espaço das pontas e sem os vazios.
-fn lista<'a>(
+pub(crate) fn lista<'a>(
     cabecalhos: &'a [(String, String)],
     nome: &'a str,
 ) -> impl Iterator<Item = &'a str> + 'a {
@@ -465,12 +485,14 @@ fn ler_corpo<F: Fluxo>(
     }
 }
 
-/// Lê a resposta ao pedido `metodo` de `fluxo`, começando pelo que já está
-/// em `buffer` — o que sobrar fica nele.
+/// Lê a resposta ao pedido `metodo`, que aceitou as codificações
+/// `aceitas`, de `fluxo`, começando pelo que já está em `buffer` — o que
+/// sobrar fica nele.
 pub(crate) fn ler<F: Fluxo>(
     fluxo: &mut F,
     buffer: &mut Vec<u8>,
     metodo: Metodo,
+    aceitas: Aceitas,
     limites: &Limites,
 ) -> Result<Resposta, Erro<F::Falha>> {
     let mut entrada = Entrada { fluxo, buffer };
@@ -488,7 +510,22 @@ pub(crate) fn ler<F: Fluxo>(
             continue;
         }
         let enquadramento = enquadrar(metodo, status, &cabecalhos, limites)?;
-        let corpo = ler_corpo(&mut entrada, enquadramento, limites)?;
+        // Sem corpo, não há o que decodificar: o `Content-Encoding` de um
+        // `HEAD` ou de um `304` fala da representação, e não desta resposta.
+        let codificacao = match enquadramento {
+            Enquadramento::Nenhum => None,
+            _ => codificacao::da_resposta(&cabecalhos, aceitas).map_err(Erro::Conteudo)?,
+        };
+        let como_veio = ler_corpo(&mut entrada, enquadramento, limites)?;
+        let no_fio = como_veio.len();
+        let corpo = match codificacao {
+            // O corpo vazio é a representação vazia: não há fluxo para
+            // conferir, nem conteúdo para cortar.
+            Some(c) if no_fio > 0 => {
+                codificacao::decodificar(c, &como_veio, limites.descomprimido)?
+            }
+            _ => como_veio,
+        };
         let conexao =
             |token: &str| lista(&cabecalhos, "connection").any(|t| t.eq_ignore_ascii_case(token));
         let manter = match versao {
@@ -503,6 +540,8 @@ pub(crate) fn ler<F: Fluxo>(
             motivo,
             cabecalhos,
             corpo,
+            codificacao,
+            no_fio,
             enquadramento,
             reutilizavel,
         });

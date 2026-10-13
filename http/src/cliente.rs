@@ -77,7 +77,13 @@ impl<F: Fluxo> Cliente<F> {
         // uma troca que falha no meio a deixa num ponto que ninguém sabe.
         self.pronto = false;
         self.fluxo.mandar(&pedido.escrever()).map_err(Erro::Baixo)?;
-        let mut r = resposta::ler(&mut self.fluxo, &mut self.buffer, pedido.metodo, limites)?;
+        let mut r = resposta::ler(
+            &mut self.fluxo,
+            &mut self.buffer,
+            pedido.metodo,
+            pedido.aceitas,
+            limites,
+        )?;
         r.reutilizavel &= !pedido.fechar;
         self.pronto = r.reutilizavel;
         self.trocas += 1;

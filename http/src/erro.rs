@@ -1,6 +1,6 @@
 //! Por que uma troca HTTP não terminou com uma resposta.
 //!
-//! Quatro famílias que não se confundem:
+//! Cinco famílias que não se confundem:
 //!
 //! - **a de baixo** ([`Erro::Baixo`]): o transporte falhou — o gate recusou
 //!   um `net.recv`, o firewall barrou, o TLS não conferiu, o par não
@@ -13,9 +13,14 @@
 //! - **o protocolo** ([`Erro::Protocolo`]): o que chegou não é HTTP/1.1, ou
 //!   é ambíguo de um jeito que deixaria cliente e servidor lerem coisas
 //!   diferentes;
-//! - **os limites** ([`Erro::Limite`]): uma linha, os cabeçalhos ou o
-//!   corpo passaram do que quem chama aceita. O cliente para de ler ali, e
-//!   a memória não cresce na vontade do servidor.
+//! - **os limites** ([`Erro::Limite`]): uma linha, os cabeçalhos, o
+//!   corpo ou o corpo decodificado passaram do que quem chama aceita. O
+//!   cliente para de ler — ou de decodificar — ali, e a memória não cresce
+//!   na vontade do servidor;
+//! - **o conteúdo** ([`Erro::Conteudo`]): a mensagem chegou inteira, e o
+//!   corpo veio numa codificação que o pedido não aceitou, ou comprimido de
+//!   um jeito que não se decodifica — cortado, corrompido, com a soma
+//!   errada. O que saiu do decodificador não é entregue.
 //!
 //! Nenhuma delas vira resposta. Um status de erro do servidor — um 404, um
 //! 500 — não está aqui: é uma resposta, o protocolo funcionou.
@@ -53,6 +58,40 @@ pub enum Motivo {
     Pedaco,
 }
 
+/// Por que o corpo codificado não se decodifica — ver
+/// [`crate::Codificacao`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Defeito {
+    /// Uma codificação que o pedido não aceitou, uma que o cliente não
+    /// conhece, ou mais de uma empilhada.
+    Codificacao,
+    /// O invólucro não confere: a assinatura do gzip, o método, um bit
+    /// reservado, o `FCHECK` do zlib, o dicionário preestabelecido.
+    Cabecalho,
+    /// O DEFLATE não se decodifica: um bloco, um código, uma distância.
+    Dados,
+    /// O corpo acabou antes do fim do fluxo comprimido.
+    Cortado,
+    /// Uma soma não confere — o CRC-32 do gzip, o da cabeça dele, o
+    /// Adler-32 do zlib —, ou o tamanho que o gzip guarda.
+    Soma,
+    /// Bytes depois do fim do fluxo.
+    Sobra,
+}
+
+impl Defeito {
+    pub const fn nome(self) -> &'static str {
+        match self {
+            Defeito::Codificacao => "unaccepted-coding",
+            Defeito::Cabecalho => "coding-header",
+            Defeito::Dados => "corrupt-data",
+            Defeito::Cortado => "truncated",
+            Defeito::Soma => "checksum",
+            Defeito::Sobra => "trailing-data",
+        }
+    }
+}
+
 impl Motivo {
     pub const fn nome(self) -> &'static str {
         match self {
@@ -81,8 +120,10 @@ pub enum Limite {
     Cabeca,
     /// Cabeçalhos demais.
     Cabecalhos,
-    /// O corpo.
+    /// O corpo, como veio.
     Corpo,
+    /// O corpo decodificado: o que sai do decodificador.
+    Descomprimido,
 }
 
 impl Limite {
@@ -92,6 +133,7 @@ impl Limite {
             Limite::Cabeca => "head",
             Limite::Cabecalhos => "headers",
             Limite::Corpo => "body",
+            Limite::Descomprimido => "decoded-body",
         }
     }
 }
@@ -111,6 +153,8 @@ pub enum Erro<F> {
     /// A conexão não leva mais pedidos: a resposta anterior a fechou, não
     /// tinha fim certo, ou a troca falhou no meio.
     Esgotada,
+    /// O corpo não se decodifica.
+    Conteudo(Defeito),
 }
 
 impl<F> Erro<F> {
@@ -123,6 +167,8 @@ impl<F> Erro<F> {
             Erro::Protocolo(_) => Some("HTTP_MALFORMED"),
             Erro::Limite(_) => Some("HTTP_TOO_LARGE"),
             Erro::Esgotada => Some("HTTP_CONNECTION_SPENT"),
+            Erro::Conteudo(Defeito::Codificacao) => Some("HTTP_UNACCEPTED_ENCODING"),
+            Erro::Conteudo(_) => Some("HTTP_CORRUPT_CONTENT"),
         }
     }
 }

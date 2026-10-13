@@ -5,9 +5,10 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use crate::testes_da_codificacao::{OLA_GZIP, OLA_ZLIB, TEXTO_9, em_gzip, texto};
 use crate::{
-    Cliente, Enquadramento, Erro, Fluxo, Limite, Limites, Metodo, Motivo, Pedido, Resposta, Url,
-    Versao,
+    Aceitas, Cliente, Codificacao, Defeito, Enquadramento, Erro, Fluxo, Limite, Limites, Metodo,
+    Motivo, Pedido, Resposta, Url, Versao,
 };
 
 /// Uma falha do transporte de mentira: um código, como o do gate.
@@ -364,6 +365,7 @@ fn os_limites_param_a_leitura() {
         cabeca: 96,
         cabecalhos: 3,
         corpo: 10,
+        ..Limites::default()
     };
     let falha_com =
         |chegada: &str| em_todo_pedaco(chegada.as_bytes(), Metodo::Get, &pequeno).unwrap_err();
@@ -653,7 +655,225 @@ fn o_pedido_vai_inteiro_pelo_fluxo() {
     let r = c.trocar(&p, &Limites::default()).unwrap();
     assert_eq!(r.status, 201);
     let mandado = &c.fluxo().mandado;
-    let cabeca = b"POST /eco HTTP/1.1\r\nHost: bancada.duke:8443\r\nContent-Length: 10000\r\n\r\n";
+    let cabeca =
+        b"POST /eco HTTP/1.1\r\nHost: bancada.duke:8443\r\nAccept-Encoding: gzip, deflate\r\n\
+                   Content-Length: 10000\r\n\r\n";
     assert_eq!(&mandado[..cabeca.len()], cabeca);
     assert_eq!(mandado.len(), cabeca.len() + 10_000);
+}
+
+/// A resposta `200` com o corpo `corpo` e os cabeçalhos `extras`, pelo
+/// tamanho.
+fn com_corpo(extras: &str, corpo: &[u8]) -> Vec<u8> {
+    let mut v = alloc::format!(
+        "HTTP/1.1 200 OK\r\n{extras}Content-Length: {}\r\n\r\n",
+        corpo.len()
+    )
+    .into_bytes();
+    v.extend_from_slice(corpo);
+    v
+}
+
+#[test]
+fn o_corpo_comprimido_chega_decodificado() {
+    let ola = b"ola, Duke\n";
+    for (extras, corpo, codificacao) in [
+        (
+            "Content-Encoding: gzip\r\n",
+            &OLA_GZIP[..],
+            Codificacao::Gzip,
+        ),
+        (
+            "Content-Encoding: x-gzip\r\n",
+            &OLA_GZIP[..],
+            Codificacao::Gzip,
+        ),
+        (
+            "Content-Encoding: deflate\r\n",
+            &OLA_ZLIB[..],
+            Codificacao::Deflate,
+        ),
+        (
+            "Content-Encoding: identity, GZIP\r\n",
+            &OLA_GZIP[..],
+            Codificacao::Gzip,
+        ),
+    ] {
+        let r = em_todo_pedaco(&com_corpo(extras, corpo), Metodo::Get, &Limites::default())
+            .unwrap_or_else(|e| panic!("{extras:?}: {e:?}"));
+        assert_eq!(r.corpo, ola, "{extras:?}");
+        assert_eq!(r.codificacao, Some(codificacao));
+        assert_eq!(r.no_fio, corpo.len());
+        assert_eq!(r.enquadramento, Enquadramento::Tamanho(corpo.len() as u64));
+        // Os cabeçalhos ficam como vieram: falam do corpo no fio.
+        assert_eq!(
+            r.cabecalho("content-length"),
+            Some(&*alloc::format!("{}", corpo.len()))
+        );
+        assert!(r.reutilizavel);
+    }
+    // Em pedaços, e até o fecho.
+    let t = texto(2048);
+    let corpo = em_gzip(&TEXTO_9, &t);
+    let mut chegada =
+        b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+    for parte in corpo.chunks(100) {
+        chegada.extend_from_slice(alloc::format!("{:x}\r\n", parte.len()).as_bytes());
+        chegada.extend_from_slice(parte);
+        chegada.extend_from_slice(b"\r\n");
+    }
+    chegada.extend_from_slice(b"0\r\n\r\n");
+    let r = em_todo_pedaco(&chegada, Metodo::Get, &Limites::default()).unwrap();
+    assert!(r.corpo == t);
+    assert_eq!(r.no_fio, corpo.len());
+    let mut chegada = b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\n\r\n".to_vec();
+    chegada.extend_from_slice(&corpo);
+    let r = em_todo_pedaco(&chegada, Metodo::Get, &Limites::default()).unwrap();
+    assert!(r.corpo == t);
+    assert!(!r.reutilizavel);
+    // Sem codificação, o corpo é o do fio.
+    let r = ok("HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc");
+    assert_eq!(r.codificacao, None);
+    assert_eq!(r.no_fio, 3);
+}
+
+#[test]
+fn o_pedido_diz_o_que_aceita() {
+    let mut c = Cliente::novo(Roteiro::novo(&com_corpo("", b""), 7));
+    c.trocar(&get("http://h/"), &Limites::default()).unwrap();
+    let mandado = String::from_utf8(c.fluxo().mandado.clone()).unwrap();
+    assert!(
+        mandado.contains("\r\nAccept-Encoding: gzip, deflate\r\n"),
+        "{mandado:?}"
+    );
+    let mut c = Cliente::novo(Roteiro::novo(&com_corpo("", b""), 7));
+    let mut p = get("http://h/");
+    p.aceitas = Aceitas::NENHUMA;
+    c.trocar(&p, &Limites::default()).unwrap();
+    let mandado = String::from_utf8(c.fluxo().mandado.clone()).unwrap();
+    assert!(
+        mandado.contains("\r\nAccept-Encoding: identity\r\n"),
+        "{mandado:?}"
+    );
+}
+
+#[test]
+fn a_codificacao_que_o_pedido_nao_aceitou_nao_le_o_corpo() {
+    for (aceitas, extras) in [
+        (Aceitas::NENHUMA, "Content-Encoding: gzip\r\n"),
+        (
+            Aceitas {
+                gzip: true,
+                deflate: false,
+            },
+            "Content-Encoding: deflate\r\n",
+        ),
+        (Aceitas::TODAS, "Content-Encoding: br\r\n"),
+        (Aceitas::TODAS, "Content-Encoding: gzip, gzip\r\n"),
+        (
+            Aceitas::TODAS,
+            "Content-Encoding: gzip\r\nContent-Encoding: deflate\r\n",
+        ),
+    ] {
+        // Só a cabeça chega: ler o corpo seria pedir ao transporte o que o
+        // roteiro recusa.
+        let cabeca = alloc::format!("HTTP/1.1 200 OK\r\n{extras}Content-Length: 30\r\n\r\n");
+        let mut roteiro = Roteiro::novo(cabeca.as_bytes(), 4096);
+        roteiro.fim = Some(FalhaDeTeste("NAO_LEU"));
+        let mut c = Cliente::novo(roteiro);
+        let mut p = get("http://h/");
+        p.aceitas = aceitas;
+        let e = c.trocar(&p, &Limites::default()).unwrap_err();
+        assert_eq!(e, Erro::Conteudo(Defeito::Codificacao), "{extras:?}");
+        assert_eq!(e.codigo(), Some("HTTP_UNACCEPTED_ENCODING"));
+        assert!(!c.pronto());
+    }
+}
+
+#[test]
+fn sem_corpo_a_codificacao_nao_importa() {
+    // O `Content-Encoding` de um `HEAD`, de um `204` e de um `304` fala da
+    // representação, e não há corpo para decodificar.
+    let r = em_todo_pedaco(
+        b"HTTP/1.1 200 OK\r\nContent-Encoding: br\r\nContent-Length: 30\r\n\r\n",
+        Metodo::Head,
+        &Limites::default(),
+    )
+    .unwrap();
+    assert_eq!((r.codificacao, r.corpo.len()), (None, 0));
+    for status in ["204 No Content", "304 Not Modified"] {
+        let r = ok(&alloc::format!(
+            "HTTP/1.1 {status}\r\nContent-Encoding: compress\r\n\r\n"
+        ));
+        assert_eq!(r.codificacao, None);
+    }
+    // O corpo vazio é a representação vazia: não há fluxo para conferir.
+    let r = ok("HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 0\r\n\r\n");
+    assert_eq!(
+        (r.codificacao, r.corpo.len(), r.no_fio),
+        (Some(Codificacao::Gzip), 0, 0)
+    );
+}
+
+#[test]
+fn o_conteudo_que_nao_se_decodifica_nao_vira_resposta() {
+    let n = OLA_GZIP.len();
+    let mut soma = OLA_GZIP.to_vec();
+    soma[n - 5] ^= 1;
+    let mut sobra = OLA_GZIP.to_vec();
+    sobra.push(0);
+    for (corpo, defeito) in [
+        (&soma[..], Defeito::Soma),
+        (&OLA_GZIP[..n - 1], Defeito::Cortado),
+        (&sobra[..], Defeito::Sobra),
+        (&OLA_ZLIB[..], Defeito::Cabecalho),
+        (&OLA_GZIP[..10], Defeito::Cortado),
+    ] {
+        let chegada = com_corpo("Content-Encoding: gzip\r\n", corpo);
+        let e = em_todo_pedaco(&chegada, Metodo::Get, &Limites::default()).unwrap_err();
+        assert_eq!(e, Erro::Conteudo(defeito));
+        assert_eq!(e.codigo(), Some("HTTP_CORRUPT_CONTENT"));
+        // A mensagem chegou inteira, e a troca falhou: a conexão não leva
+        // outro pedido.
+        let mut c = Cliente::novo(Roteiro::novo(&chegada, 4096));
+        assert!(c.trocar(&get("http://h/"), &Limites::default()).is_err());
+        assert!(!c.pronto());
+        assert_eq!(
+            c.trocar(&get("http://h/"), &Limites::default()),
+            Err(Erro::Esgotada)
+        );
+    }
+}
+
+#[test]
+fn o_teto_do_corpo_decodificado_na_troca() {
+    let t = texto(2048);
+    let chegada = com_corpo("Content-Encoding: gzip\r\n", &em_gzip(&TEXTO_9, &t));
+    let limites = |descomprimido| Limites {
+        descomprimido,
+        ..Limites::default()
+    };
+    assert!(
+        em_todo_pedaco(&chegada, Metodo::Get, &limites(2048))
+            .unwrap()
+            .corpo
+            == t
+    );
+    let e = em_todo_pedaco(&chegada, Metodo::Get, &limites(2047)).unwrap_err();
+    assert_eq!(e, Erro::Limite(Limite::Descomprimido));
+    assert_eq!(e.codigo(), Some("HTTP_TOO_LARGE"));
+    // O limite do corpo vale para o que veio, antes de descomprimir: o
+    // comprimido grande demais nem é lido.
+    let pequeno = Limites {
+        corpo: 100,
+        ..Limites::default()
+    };
+    assert_eq!(
+        em_todo_pedaco(&chegada, Metodo::Get, &pequeno).unwrap_err(),
+        Erro::Limite(Limite::Corpo)
+    );
+    // E o corpo que veio como é não passa pelo decodificador: o limite
+    // dele é o do corpo.
+    let r = em_todo_pedaco(&com_corpo("", &t), Metodo::Get, &limites(10)).unwrap();
+    assert_eq!(r.corpo.len(), 2048);
 }

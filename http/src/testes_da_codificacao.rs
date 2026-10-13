@@ -1,0 +1,1538 @@
+//! Os testes da codificação de conteúdo: o DEFLATE, o gzip, o zlib, a
+//! negociação e os limites.
+//!
+//! O DEFLATE se confere de três jeitos que não dependem dele mesmo:
+//!
+//! - **vetores do zlib**, uma implementação de fora, gerados pelo `zlib` e
+//!   pelo `gzip` do Python e guardados aqui como bytes (no fim do arquivo):
+//!   os blocos dinâmicos de verdade, com os códigos que um servidor manda;
+//! - **um escritor de teste** ([`Escritor`]), que escreve os símbolos que o
+//!   teste escolhe — todo comprimento, toda distância, códigos de até 15
+//!   bits, e os blocos inválidos de cada jeito que a RFC proíbe —, com a
+//!   referência em [`aplicar`]: os símbolos aplicados um a um, sem Huffman
+//!   nenhum. As tabelas da RFC estão copiadas aqui, e não emprestadas do
+//!   decodificador: uma tabela errada lá não se confere com ela mesma;
+//! - **somas publicadas**: o CRC-32 e o Adler-32 de textos conhecidos, para
+//!   o invólucro não ser conferido só com ele mesmo.
+//!
+//! E o monte do teste é medido ([`Medidor`]): o pico de memória de uma
+//! decodificação — a de uma bomba inclusive — fica no teto que quem chama
+//! fixou.
+
+use alloc::vec;
+use alloc::vec::Vec;
+use core::alloc::{GlobalAlloc, Layout};
+use core::cell::Cell;
+use std::alloc::System;
+
+use crate::codificacao::{self, Aceitas, Codificacao, adler32, crc32};
+use crate::erro::{Defeito, Erro, Limite};
+use crate::inflar::{Parada, Saida, Tabelas, inflar};
+
+/// O alocador do binário de teste: o de sempre, contando o que cada fio
+/// tem alocado agora, e o pico.
+struct Medidor;
+
+std::thread_local! {
+    static ATUAL: Cell<usize> = const { Cell::new(0) };
+    static PICO: Cell<usize> = const { Cell::new(0) };
+}
+
+fn somar(n: usize) {
+    let _ = ATUAL.try_with(|a| {
+        a.set(a.get() + n);
+        let _ = PICO.try_with(|p| p.set(p.get().max(a.get())));
+    });
+}
+
+fn tirar(n: usize) {
+    let _ = ATUAL.try_with(|a| a.set(a.get().saturating_sub(n)));
+}
+
+// SAFETY: repassa cada chamada ao `System`, com o mesmo `Layout`; a conta
+// é por fio, e não toca na memória.
+unsafe impl GlobalAlloc for Medidor {
+    unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+        // SAFETY: o mesmo contrato de quem chamou.
+        let p = unsafe { System.alloc(l) };
+        if !p.is_null() {
+            somar(l.size());
+        }
+        p
+    }
+
+    unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+        // SAFETY: o mesmo contrato de quem chamou.
+        unsafe { System.dealloc(p, l) };
+        tirar(l.size());
+    }
+
+    unsafe fn realloc(&self, p: *mut u8, l: Layout, novo: usize) -> *mut u8 {
+        // SAFETY: o mesmo contrato de quem chamou.
+        let q = unsafe { System.realloc(p, l, novo) };
+        if !q.is_null() {
+            // O pior caso: o bloco antigo e o novo convivem até a cópia —
+            // é o que o monte de um programa do Duke faz.
+            somar(novo);
+            tirar(l.size());
+        }
+        q
+    }
+}
+
+#[global_allocator]
+static MEDIDOR: Medidor = Medidor;
+
+/// O pico de memória deste fio durante `f`, acima do que ele já tinha.
+fn pico_de<T>(f: impl FnOnce() -> T) -> (T, usize) {
+    let antes = ATUAL.with(Cell::get);
+    PICO.with(|p| p.set(antes));
+    let r = f();
+    (r, PICO.with(Cell::get) - antes)
+}
+
+/// As palavras do texto de teste — o mesmo gerador do script que fez os
+/// vetores do zlib.
+const PALAVRAS: [&[u8]; 28] = [
+    b"duke",
+    b"gate",
+    b"politica",
+    b"auditoria",
+    b"conexao",
+    b"pedido",
+    b"resposta",
+    b"corpo",
+    b"limite",
+    b"agente",
+    b"pessoa",
+    b"processo",
+    b"destino",
+    b"firewall",
+    b"revogacao",
+    b"contencao",
+    b"o",
+    b"a",
+    b"de",
+    b"que",
+    b"e",
+    b"um",
+    b"uma",
+    b"nao",
+    b"com",
+    b"por",
+    b"para",
+    b"sem",
+];
+
+/// `n` bytes de texto: palavras escolhidas por um gerador congruente.
+pub(crate) fn texto(n: usize) -> Vec<u8> {
+    let mut x: u64 = 0x2545_f491_4f6c_dd1d;
+    let mut saida = Vec::new();
+    let mut k = 0;
+    while saida.len() < n {
+        x = x
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        saida.extend_from_slice(PALAVRAS[((x >> 33) % PALAVRAS.len() as u64) as usize]);
+        k += 1;
+        saida.push(if k % 12 == 0 { b'\n' } else { b' ' });
+    }
+    saida.truncate(n);
+    saida
+}
+
+/// Bytes que não se repetem: um *xorshift*.
+fn ruido(n: usize, semente: u64) -> Vec<u8> {
+    let mut x = semente | 1;
+    (0..n)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x as u8
+        })
+        .collect()
+}
+
+/// As tabelas da RFC 1951, 3.2.5, copiadas aqui.
+const COMPRIMENTO: [(u16, u32); 29] = [
+    (3, 0),
+    (4, 0),
+    (5, 0),
+    (6, 0),
+    (7, 0),
+    (8, 0),
+    (9, 0),
+    (10, 0),
+    (11, 1),
+    (13, 1),
+    (15, 1),
+    (17, 1),
+    (19, 2),
+    (23, 2),
+    (27, 2),
+    (31, 2),
+    (35, 3),
+    (43, 3),
+    (51, 3),
+    (59, 3),
+    (67, 4),
+    (83, 4),
+    (99, 4),
+    (115, 4),
+    (131, 5),
+    (163, 5),
+    (195, 5),
+    (227, 5),
+    (258, 0),
+];
+const DISTANCIA: [(u16, u32); 30] = [
+    (1, 0),
+    (2, 0),
+    (3, 0),
+    (4, 0),
+    (5, 1),
+    (7, 1),
+    (9, 2),
+    (13, 2),
+    (17, 3),
+    (25, 3),
+    (33, 4),
+    (49, 4),
+    (65, 5),
+    (97, 5),
+    (129, 6),
+    (193, 6),
+    (257, 7),
+    (385, 7),
+    (513, 8),
+    (769, 8),
+    (1025, 9),
+    (1537, 9),
+    (2049, 10),
+    (3073, 10),
+    (4097, 11),
+    (6145, 11),
+    (8193, 12),
+    (12289, 12),
+    (16385, 13),
+    (24577, 13),
+];
+
+/// A ordem dos comprimentos do código de comprimentos (RFC 1951, 3.2.7).
+const ORDEM: [usize; 19] = [
+    16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
+];
+
+/// Um símbolo, como o teste o escreve.
+#[derive(Clone, Copy, Debug)]
+enum Simbolo {
+    Literal(u8),
+    /// O comprimento e a distância.
+    Copia(u16, u16),
+    /// Um símbolo de literal e comprimento cru — para os que a RFC proíbe.
+    Cru(usize),
+    /// Um símbolo de comprimento com um de distância crus.
+    CopiaCrua(usize, usize),
+}
+
+/// A referência: os símbolos aplicados um a um.
+fn aplicar(simbolos: &[Simbolo]) -> Vec<u8> {
+    let mut saida = Vec::new();
+    for s in simbolos {
+        match *s {
+            Simbolo::Literal(b) => saida.push(b),
+            Simbolo::Copia(c, d) => {
+                for _ in 0..c {
+                    saida.push(saida[saida.len() - usize::from(d)]);
+                }
+            }
+            Simbolo::Cru(_) | Simbolo::CopiaCrua(..) => panic!("sem referência"),
+        }
+    }
+    saida
+}
+
+/// O símbolo, os bits a mais e quantos, de um comprimento ou distância.
+fn codigo_de(tabela: &[(u16, u32)], v: u16) -> (usize, u32, u32) {
+    let i = tabela.iter().rposition(|&(base, _)| base <= v).unwrap();
+    let (base, extra) = tabela[i];
+    assert!(u32::from(v - base) < 1 << extra || (extra == 0 && v == base));
+    (i, u32::from(v - base), extra)
+}
+
+/// Escreve bits como o DEFLATE os lê: do menos significativo para o mais.
+pub(crate) struct Escritor {
+    bytes: Vec<u8>,
+    acumulado: u64,
+    quantos: u32,
+}
+
+impl Escritor {
+    pub(crate) fn novo() -> Escritor {
+        Escritor {
+            bytes: Vec::new(),
+            acumulado: 0,
+            quantos: 0,
+        }
+    }
+
+    fn bits(&mut self, valor: u32, n: u32) {
+        assert!(n == 32 || valor < 1 << n, "{valor} em {n} bits");
+        self.acumulado |= u64::from(valor) << self.quantos;
+        self.quantos += n;
+        while self.quantos >= 8 {
+            self.bytes.push(self.acumulado as u8);
+            self.acumulado >>= 8;
+            self.quantos -= 8;
+        }
+    }
+
+    /// Um código de Huffman: pelo bit mais significativo.
+    fn codigo(&mut self, (codigo, n): (u32, u32)) {
+        assert!(n > 0, "um símbolo sem código");
+        self.bits(codigo.reverse_bits() >> (32 - n), n);
+    }
+
+    fn alinhar(&mut self) {
+        if self.quantos > 0 {
+            self.bits(0, 8 - self.quantos);
+        }
+    }
+
+    pub(crate) fn fim(mut self) -> Vec<u8> {
+        self.alinhar();
+        self.bytes
+    }
+
+    /// Um bloco guardado.
+    fn guardado(&mut self, dados: &[u8], ultimo: bool) {
+        self.bits(u32::from(ultimo), 1);
+        self.bits(0, 2);
+        self.alinhar();
+        let n = dados.len() as u16;
+        self.bits(u32::from(n), 16);
+        self.bits(u32::from(!n), 16);
+        for &b in dados {
+            self.bits(u32::from(b), 8);
+        }
+    }
+
+    /// Os símbolos e o fim de bloco, com os códigos `literal` e
+    /// `distancia`.
+    fn simbolos(&mut self, literal: &[(u32, u32)], distancia: &[(u32, u32)], s: &[Simbolo]) {
+        for &s in s {
+            match s {
+                Simbolo::Literal(b) => self.codigo(literal[usize::from(b)]),
+                Simbolo::Cru(l) => self.codigo(literal[l]),
+                Simbolo::Copia(c, d) => {
+                    let (i, x, n) = codigo_de(&COMPRIMENTO, c);
+                    self.codigo(literal[257 + i]);
+                    self.bits(x, n);
+                    let (i, x, n) = codigo_de(&DISTANCIA, d);
+                    self.codigo(distancia[i]);
+                    self.bits(x, n);
+                }
+                Simbolo::CopiaCrua(l, d) => {
+                    self.codigo(literal[l]);
+                    self.codigo(distancia[d]);
+                }
+            }
+        }
+        self.codigo(literal[256]);
+    }
+
+    /// Um bloco com o código fixo.
+    fn fixo(&mut self, s: &[Simbolo], ultimo: bool) {
+        self.bits(u32::from(ultimo), 1);
+        self.bits(1, 2);
+        let (l, d) = fixos();
+        self.simbolos(&canonico(&l), &canonico(&d), s);
+    }
+
+    /// A cabeça de um bloco dinâmico: os comprimentos do código de
+    /// comprimentos `cc` (na ordem natural) e a `sequencia` de símbolos
+    /// dele, com os bits a mais de 16, 17 e 18.
+    fn cabeca_dinamica(
+        &mut self,
+        ultimo: bool,
+        literais: usize,
+        distancias: usize,
+        cc: &[u8; 19],
+        sequencia: &[(u8, u32)],
+    ) {
+        self.bits(u32::from(ultimo), 1);
+        self.bits(2, 2);
+        self.bits((literais - 257) as u32, 5);
+        self.bits((distancias - 1) as u32, 5);
+        let quantos = ORDEM
+            .iter()
+            .rposition(|&s| cc[s] != 0)
+            .map_or(4, |i| (i + 1).max(4));
+        self.bits((quantos - 4) as u32, 4);
+        for &s in &ORDEM[..quantos] {
+            self.bits(u32::from(cc[s]), 3);
+        }
+        let codigos = canonico(cc);
+        for &(s, extra) in sequencia {
+            self.codigo(codigos[usize::from(s)]);
+            match s {
+                16 => self.bits(extra, 2),
+                17 => self.bits(extra, 3),
+                18 => self.bits(extra, 7),
+                _ => {}
+            }
+        }
+    }
+
+    /// Um bloco dinâmico com os códigos de comprimentos `literal` e
+    /// `distancia`, cada comprimento escrito com um código de quatro bits.
+    fn dinamico(&mut self, literal: &[u8], distancia: &[u8], s: &[Simbolo], ultimo: bool) {
+        let sequencia: Vec<(u8, u32)> = literal.iter().chain(distancia).map(|&c| (c, 0)).collect();
+        self.cabeca_dinamica(
+            ultimo,
+            literal.len(),
+            distancia.len(),
+            &QUATRO_BITS,
+            &sequencia,
+        );
+        self.simbolos(&canonico(literal), &canonico(distancia), s);
+    }
+}
+
+/// O código de comprimentos de quatro bits para cada comprimento de 0 a 15:
+/// completo, e sem as repetições.
+const QUATRO_BITS: [u8; 19] = [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 0, 0, 0];
+
+/// O código canônico de cada símbolo: (código, comprimento) — RFC 1951,
+/// 3.2.2.
+fn canonico(comprimentos: &[u8]) -> Vec<(u32, u32)> {
+    let mut contagem = [0u32; 16];
+    for &c in comprimentos {
+        contagem[usize::from(c)] += 1;
+    }
+    contagem[0] = 0;
+    let mut proximo = [0u32; 16];
+    let mut codigo = 0;
+    for c in 1..16 {
+        codigo = (codigo + contagem[c - 1]) << 1;
+        proximo[c] = codigo;
+    }
+    comprimentos
+        .iter()
+        .map(|&c| {
+            if c == 0 {
+                (0, 0)
+            } else {
+                let k = proximo[usize::from(c)];
+                proximo[usize::from(c)] += 1;
+                (k, u32::from(c))
+            }
+        })
+        .collect()
+}
+
+/// Os comprimentos do código fixo (RFC 1951, 3.2.6).
+fn fixos() -> (Vec<u8>, Vec<u8>) {
+    let mut l = vec![8u8; 288];
+    l[144..256].fill(9);
+    l[256..280].fill(7);
+    (l, vec![5u8; 32])
+}
+
+/// Um código de literal completo com códigos de 3 a 9 bits, para os 286
+/// símbolos: os literais com 9, e os comprimentos com 3, 6 e 7.
+fn literal_dinamico() -> Vec<u8> {
+    let mut l = vec![9u8; 286];
+    l[256..258].fill(3);
+    l[258..262].fill(6);
+    l[262..286].fill(7);
+    l
+}
+
+/// Um código de distância completo: dois de 4 bits, 28 de 5.
+fn distancia_dinamica() -> Vec<u8> {
+    let mut d = vec![5u8; 30];
+    d[..2].fill(4);
+    d
+}
+
+/// Um LZ77 guloso: os símbolos de `dados`, com cópias de até 258 bytes até
+/// 32 KiB para trás.
+fn lz77(dados: &[u8]) -> Vec<Simbolo> {
+    let mut ultimo = vec![usize::MAX; 1 << 12];
+    let mut saida = Vec::new();
+    let mut i = 0;
+    while i < dados.len() {
+        if i + 3 <= dados.len() {
+            let h = (usize::from(dados[i]) << 4
+                ^ usize::from(dados[i + 1]) << 2
+                ^ usize::from(dados[i + 2]))
+                & 0xfff;
+            let j = ultimo[h];
+            ultimo[h] = i;
+            if j != usize::MAX && i - j <= 32768 && dados[j..j + 3] == dados[i..i + 3] {
+                let mut n = 3;
+                while n < 258 && i + n < dados.len() && dados[j + n] == dados[i + n] {
+                    n += 1;
+                }
+                saida.push(Simbolo::Copia(n as u16, (i - j) as u16));
+                i += n;
+                continue;
+            }
+        }
+        saida.push(Simbolo::Literal(dados[i]));
+        i += 1;
+    }
+    saida
+}
+
+/// `deflate` com o invólucro gzip mínimo: sem campos, com o CRC e o
+/// tamanho de `dados`.
+pub(crate) fn em_gzip(deflate: &[u8], dados: &[u8]) -> Vec<u8> {
+    let mut v = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff];
+    v.extend_from_slice(deflate);
+    v.extend_from_slice(&crc32(dados).to_le_bytes());
+    v.extend_from_slice(&(dados.len() as u32).to_le_bytes());
+    v
+}
+
+/// `deflate` com o invólucro zlib.
+pub(crate) fn em_zlib(deflate: &[u8], dados: &[u8]) -> Vec<u8> {
+    let mut v = vec![0x78, 0x9c];
+    v.extend_from_slice(deflate);
+    v.extend_from_slice(&adler32(dados).to_be_bytes());
+    v
+}
+
+/// O DEFLATE cru de `simbolos`, num bloco fixo.
+fn fixo(simbolos: &[Simbolo]) -> Vec<u8> {
+    let mut e = Escritor::novo();
+    e.fixo(simbolos, true);
+    e.fim()
+}
+
+/// Decodifica o DEFLATE cru, e diz quanto da entrada ele ocupou.
+fn cru(deflate: &[u8], teto: usize) -> Result<(Vec<u8>, usize), Parada> {
+    let mut saida = Saida::nova(teto, deflate.len());
+    let mut tabelas = Tabelas::novas();
+    let n = inflar(deflate, &mut saida, &mut tabelas)?;
+    Ok((saida.entregar(), n))
+}
+
+fn decodificar(c: Codificacao, corpo: &[u8], teto: usize) -> Result<Vec<u8>, Erro<()>> {
+    codificacao::decodificar::<()>(c, corpo, teto)
+}
+
+const MIB: usize = 1024 * 1024;
+
+/// O teto padrão de quem chama.
+const TETO: usize = 4 * MIB;
+
+fn gzip(corpo: &[u8]) -> Result<Vec<u8>, Erro<()>> {
+    decodificar(Codificacao::Gzip, corpo, TETO)
+}
+
+fn zlib(corpo: &[u8]) -> Result<Vec<u8>, Erro<()>> {
+    decodificar(Codificacao::Deflate, corpo, TETO)
+}
+
+#[test]
+fn as_somas_publicadas() {
+    assert_eq!(crc32(b"123456789"), 0xcbf4_3926);
+    assert_eq!(crc32(b""), 0);
+    assert_eq!(adler32(b"Wikipedia"), 0x11e6_0398);
+    assert_eq!(adler32(b""), 1);
+    // As do texto de teste, pelo zlib do Python: o gerador daqui é o de lá.
+    assert_eq!(crc32(&texto(2048)), 0x10e8_0973);
+    assert_eq!(adler32(&texto(2048)), 0x0aac_f255);
+    // O Adler-32 em pedaços contra a definição, byte a byte, no pior caso
+    // para as somas: tudo 0xff, bem mais que um pedaço.
+    let uns = vec![0xffu8; 100_000];
+    let (mut a, mut b) = (1u32, 0u32);
+    for &x in &uns {
+        a = (a + u32::from(x)) % 65_521;
+        b = (b + a) % 65_521;
+    }
+    assert_eq!(adler32(&uns), b << 16 | a);
+}
+
+#[test]
+fn os_vetores_do_zlib() {
+    assert_eq!(gzip(&OLA_GZIP).unwrap(), b"ola, Duke\n");
+    assert_eq!(gzip(&OLA_GZIP_COM_NOME).unwrap(), b"ola, Duke\n");
+    assert_eq!(zlib(&OLA_ZLIB).unwrap(), b"ola, Duke\n");
+    assert_eq!(gzip(&VAZIO_GZIP).unwrap(), b"");
+    assert_eq!(zlib(&VAZIO_ZLIB).unwrap(), b"");
+    // Dois membros: o conteúdo é a soma deles (RFC 1952, 2.2).
+    assert_eq!(gzip(&MEMBROS_GZIP).unwrap(), b"um dois");
+    assert_eq!(cru(&GUARDADO, TETO).unwrap(), (b"guardado".to_vec(), 13));
+    let t = texto(2048);
+    for (nome, v) in [
+        ("nivel 9", &TEXTO_9[..]),
+        ("nivel 1", &TEXTO_1[..]),
+        ("fixo", &TEXTO_FIXO[..]),
+        ("so huffman", &TEXTO_HUFFMAN[..]),
+    ] {
+        let (saida, n) = cru(v, TETO).unwrap_or_else(|p| panic!("{nome}: {p:?}"));
+        assert_eq!(saida, t, "{nome}");
+        assert_eq!(n, v.len(), "{nome}");
+        assert_eq!(gzip(&em_gzip(v, &t)).unwrap(), t, "{nome}");
+        assert_eq!(zlib(&em_zlib(v, &t)).unwrap(), t, "{nome}");
+    }
+}
+
+#[test]
+fn o_dicionario_preestabelecido_e_recusado() {
+    assert_eq!(
+        zlib(&COM_DICIONARIO_ZLIB),
+        Err(Erro::Conteudo(Defeito::Cabecalho))
+    );
+}
+
+#[test]
+fn todo_comprimento_e_toda_distancia() {
+    // 40 KiB que não se repetem, para cada distância ter o que copiar; e
+    // depois cada comprimento, com distâncias que variam, e cada
+    // distância, na base e no fim da faixa dela.
+    let mut s: Vec<Simbolo> = ruido(40 * 1024, 7)
+        .into_iter()
+        .map(Simbolo::Literal)
+        .collect();
+    for c in 3..=258u16 {
+        s.push(Simbolo::Copia(c, 1 + (c * 97) % 32768));
+    }
+    for (i, &(base, extra)) in DISTANCIA.iter().enumerate() {
+        let fim = DISTANCIA.get(i + 1).map_or(32768, |&(b, _)| b - 1);
+        assert_eq!(u32::from(fim - base) + 1, 1 << extra);
+        s.push(Simbolo::Copia(3, base));
+        s.push(Simbolo::Copia(258, fim));
+        s.push(Simbolo::Literal(b'|'));
+    }
+    // Cópias que se sobrepõem a si mesmas: a distância menor que o
+    // comprimento.
+    for d in 1..=9u16 {
+        s.push(Simbolo::Copia(258, d));
+        s.push(Simbolo::Copia(17, d));
+    }
+    let esperado = aplicar(&s);
+    let mut fixo = Escritor::novo();
+    fixo.fixo(&s, true);
+    let fixo = fixo.fim();
+    let mut dinamico = Escritor::novo();
+    dinamico.dinamico(&literal_dinamico(), &distancia_dinamica(), &s, true);
+    let dinamico = dinamico.fim();
+    for (nome, v) in [("fixo", fixo), ("dinamico", dinamico)] {
+        let (saida, n) = cru(&v, TETO).unwrap_or_else(|p| panic!("{nome}: {p:?}"));
+        assert!(saida == esperado, "{nome}");
+        assert_eq!(n, v.len(), "{nome}");
+    }
+}
+
+#[test]
+fn os_codigos_longos_saem_bit_a_bit() {
+    // Um código de literal com um código de cada comprimento de 1 a 14, e
+    // dois de 15: completo, e mais longo que a tabela rápida.
+    let mut l = vec![0u8; 257];
+    for (s, c) in l.iter_mut().zip(1..=14u8) {
+        *s = c;
+    }
+    l[14] = 15;
+    l[256] = 15;
+    let s: Vec<Simbolo> = (0..=14u8)
+        .chain([14, 13, 0, 9, 10, 11, 12])
+        .map(Simbolo::Literal)
+        .collect();
+    let mut e = Escritor::novo();
+    // Sem distância nenhuma: o bloco só de literais.
+    e.dinamico(&l, &[0], &s, true);
+    let v = e.fim();
+    assert_eq!(cru(&v, TETO).unwrap().0, aplicar(&s));
+    // E cortado no meio de um código longo: o último byte tem o fim do
+    // bloco, e sem ele a entrada acaba no meio de um código de 15 bits.
+    assert_eq!(
+        cru(&v[..v.len() - 1], TETO),
+        Err(Parada::Defeito(Defeito::Cortado))
+    );
+}
+
+#[test]
+fn blocos_de_todo_tipo_em_sequencia() {
+    let r = ruido(70_000, 3);
+    let mut e = Escritor::novo();
+    // Um guardado vazio, um pequeno e um do maior tamanho.
+    e.guardado(b"", false);
+    e.guardado(b"abc", false);
+    e.guardado(&r[..65535], false);
+    // Um fixo que copia de dentro do guardado: a janela é a do fluxo, e
+    // não a do bloco.
+    let s = [
+        Simbolo::Copia(258, 30_000),
+        Simbolo::Literal(b'x'),
+        Simbolo::Copia(5, 1),
+    ];
+    e.fixo(&s, false);
+    let mut todos: Vec<Simbolo> = b"abc"
+        .iter()
+        .chain(&r[..65535])
+        .map(|&b| Simbolo::Literal(b))
+        .collect();
+    todos.extend_from_slice(&s);
+    // Um dinâmico, e um fixo vazio no fim.
+    let d = [Simbolo::Literal(b'y'), Simbolo::Copia(100, 2)];
+    e.dinamico(&literal_dinamico(), &distancia_dinamica(), &d, false);
+    todos.extend_from_slice(&d);
+    e.fixo(&[], true);
+    let esperado = aplicar(&todos);
+    let v = e.fim();
+    let (saida, n) = cru(&v, TETO).unwrap();
+    assert!(saida == esperado);
+    assert_eq!(n, v.len());
+    // O que vem depois do último bloco não é do fluxo: é de quem chama.
+    let mut com_sobra = v.clone();
+    com_sobra.extend_from_slice(b"depois");
+    assert_eq!(cru(&com_sobra, TETO).unwrap().1, v.len());
+}
+
+/// Um bloco dinâmico só com a cabeça e os símbolos dados.
+fn dinamico_cru(
+    literais: usize,
+    distancias: usize,
+    cc: &[u8; 19],
+    sequencia: &[(u8, u32)],
+) -> Vec<u8> {
+    let mut e = Escritor::novo();
+    e.cabeca_dinamica(true, literais, distancias, cc, sequencia);
+    // Bits de sobra, para o defeito não ser confundido com o corte.
+    e.bits(0, 32);
+    e.bits(0, 32);
+    e.fim()
+}
+
+/// Os comprimentos `l` e `d` como sequência de quatro bits.
+fn seq(l: &[u8], d: &[u8]) -> Vec<(u8, u32)> {
+    l.iter().chain(d).map(|&c| (c, 0)).collect()
+}
+
+#[test]
+fn o_que_a_rfc_proibe_e_recusado() {
+    let dados = Parada::Defeito(Defeito::Dados);
+    let mut casos: Vec<(&str, Vec<u8>)> = Vec::new();
+    // O bloco de tipo 3.
+    let mut e = Escritor::novo();
+    e.bits(1, 1);
+    e.bits(3, 2);
+    e.bits(0, 32);
+    casos.push(("tipo 3", e.fim()));
+    // O guardado com LEN e NLEN que não se complementam.
+    casos.push(("nlen", vec![0x01, 0x03, 0x00, 0xfc, 0xfe, b'a', b'b', b'c']));
+    // Literais e distâncias demais.
+    let (l, d) = (literal_dinamico(), distancia_dinamica());
+    for (nl, nd) in [(287, 30), (288, 30), (286, 31), (286, 32)] {
+        let mut ll = l.clone();
+        ll.resize(nl, 0);
+        let mut dd = d.clone();
+        dd.resize(nd, 0);
+        casos.push(("demais", dinamico_cru(nl, nd, &QUATRO_BITS, &seq(&ll, &dd))));
+    }
+    // Um código de literal sobrecarregado: três de um bit.
+    let mut sobre = vec![0u8; 257];
+    sobre[0] = 1;
+    sobre[1] = 1;
+    sobre[256] = 1;
+    casos.push((
+        "sobrecarregado",
+        dinamico_cru(257, 1, &QUATRO_BITS, &seq(&sobre, &[1])),
+    ));
+    // Um incompleto com códigos de mais de um bit.
+    let mut incompleto = vec![0u8; 257];
+    incompleto[0] = 2;
+    incompleto[256] = 2;
+    casos.push((
+        "incompleto",
+        dinamico_cru(257, 1, &QUATRO_BITS, &seq(&incompleto, &[1])),
+    ));
+    // Uma distância incompleta com mais de um bit.
+    casos.push((
+        "distancia incompleta",
+        dinamico_cru(286, 2, &QUATRO_BITS, &seq(&l, &[2, 2])),
+    ));
+    // O código de comprimentos incompleto, e o sobrecarregado.
+    let mut cc_incompleto = [0u8; 19];
+    cc_incompleto[0] = 2;
+    cc_incompleto[1] = 2;
+    casos.push(("cc incompleto", dinamico_cru(257, 1, &cc_incompleto, &[])));
+    let mut cc_sobre = [0u8; 19];
+    cc_sobre[0] = 1;
+    cc_sobre[1] = 1;
+    cc_sobre[2] = 1;
+    casos.push(("cc sobrecarregado", dinamico_cru(257, 1, &cc_sobre, &[])));
+    // A repetição sem anterior, e a que passa do total.
+    let mut cc = QUATRO_BITS;
+    cc[16] = 4;
+    cc[17] = 4;
+    cc[18] = 4;
+    cc[15] = 0;
+    cc[14] = 0;
+    cc[13] = 0;
+    casos.push(("16 sem anterior", dinamico_cru(257, 1, &cc, &[(16, 0)])));
+    casos.push((
+        "repeticao demais",
+        dinamico_cru(257, 1, &cc, &[(18, 127), (18, 127), (17, 0)]),
+    ));
+    // A repetição que passa do total, e só isso: cortada no total, o resto
+    // seria um código válido — o fim de bloco sozinho, e nenhuma
+    // distância.
+    casos.push((
+        "repeticao alem do total",
+        dinamico_cru(257, 1, &cc, &[(18, 127), (18, 107), (1, 0), (17, 0)]),
+    ));
+    // Sem o fim de bloco: o código é completo, e não o tem.
+    let mut sem_fim = vec![0u8; 257];
+    sem_fim[0] = 1;
+    sem_fim[1] = 1;
+    casos.push((
+        "sem fim",
+        dinamico_cru(257, 1, &QUATRO_BITS, &seq(&sem_fim, &[1])),
+    ));
+    // Os símbolos que o código fixo tem e a RFC proíbe.
+    for s in [286, 287] {
+        casos.push((
+            "literal fixo proibido",
+            fixo(&[Simbolo::Literal(b'a'), Simbolo::Cru(s)]),
+        ));
+    }
+    for d in [30, 31] {
+        casos.push((
+            "distancia fixa proibida",
+            fixo(&[Simbolo::Literal(b'a'), Simbolo::CopiaCrua(257, d)]),
+        ));
+    }
+    // A distância antes do começo.
+    casos.push((
+        "longe demais",
+        fixo(&[Simbolo::Literal(b'a'), Simbolo::Copia(3, 2)]),
+    ));
+    casos.push(("sem saida", fixo(&[Simbolo::Copia(3, 1)])));
+    // Uma cópia com o código de distância vazio: o bloco só de literais
+    // não tem distância.
+    let mut so_literais = Escritor::novo();
+    so_literais.cabeca_dinamica(true, 286, 1, &QUATRO_BITS, &seq(&l, &[0]));
+    let codigos = canonico(&l);
+    so_literais.codigo(codigos[b'a' as usize]);
+    so_literais.codigo(codigos[257]);
+    so_literais.bits(0, 32);
+    so_literais.bits(0, 32);
+    casos.push(("copia sem distancias", so_literais.fim()));
+    // Um código de distância de um só código, de um bit: o código que
+    // sobra — o bit 1 — não existe.
+    let mut um_so = Escritor::novo();
+    um_so.cabeca_dinamica(true, 286, 1, &QUATRO_BITS, &seq(&l, &[1]));
+    um_so.codigo(codigos[b'a' as usize]);
+    um_so.codigo(codigos[257]);
+    um_so.bits(1, 1);
+    um_so.bits(0, 32);
+    um_so.bits(0, 32);
+    casos.push(("codigo que sobra", um_so.fim()));
+    for (nome, v) in casos {
+        assert_eq!(cru(&v, TETO), Err(dados), "{nome}");
+    }
+}
+
+#[test]
+fn o_codigo_de_um_so_simbolo_e_o_bloco_so_de_literais() {
+    let l = literal_dinamico();
+    // Um código de distância de um bit só: a distância 1.
+    let s = [
+        Simbolo::Literal(b'z'),
+        Simbolo::Copia(10, 1),
+        Simbolo::Literal(b'!'),
+    ];
+    let mut e = Escritor::novo();
+    e.dinamico(&l, &[1], &s, true);
+    assert_eq!(cru(&e.fim(), TETO).unwrap().0, aplicar(&s));
+    // Nenhum código de distância: só literais.
+    let s = [Simbolo::Literal(b'a'), Simbolo::Literal(b'b')];
+    let mut e = Escritor::novo();
+    e.dinamico(&l, &[0], &s, true);
+    assert_eq!(cru(&e.fim(), TETO).unwrap().0, b"ab");
+    // O fim de bloco sozinho, num código de um símbolo só.
+    let mut so_fim = vec![0u8; 257];
+    so_fim[256] = 1;
+    let mut e = Escritor::novo();
+    e.dinamico(&so_fim, &[0], &[], true);
+    assert_eq!(cru(&e.fim(), TETO).unwrap().0, b"");
+}
+
+/// Os corpos com que os cortes e as trocas de bit se conferem.
+fn corpos() -> Vec<(&'static str, Codificacao, Vec<u8>, Vec<u8>)> {
+    let t = texto(2048);
+    let s = lz77(&t);
+    let mut g = Escritor::novo();
+    g.guardado(&t[..100], false);
+    g.fixo(&s, true);
+    let misto = g.fim();
+    let mut m = t[..100].to_vec();
+    m.extend_from_slice(&t);
+    vec![
+        (
+            "ola gzip",
+            Codificacao::Gzip,
+            OLA_GZIP.to_vec(),
+            b"ola, Duke\n".to_vec(),
+        ),
+        (
+            "ola com nome",
+            Codificacao::Gzip,
+            OLA_GZIP_COM_NOME.to_vec(),
+            b"ola, Duke\n".to_vec(),
+        ),
+        (
+            "ola zlib",
+            Codificacao::Deflate,
+            OLA_ZLIB.to_vec(),
+            b"ola, Duke\n".to_vec(),
+        ),
+        (
+            "texto gzip",
+            Codificacao::Gzip,
+            em_gzip(&TEXTO_9, &t),
+            t.clone(),
+        ),
+        (
+            "texto zlib",
+            Codificacao::Deflate,
+            em_zlib(&TEXTO_HUFFMAN, &t),
+            t.clone(),
+        ),
+        ("misto", Codificacao::Gzip, em_gzip(&misto, &m), m),
+    ]
+}
+
+#[test]
+fn o_fluxo_cortado_em_qualquer_ponto() {
+    for (nome, c, corpo, esperado) in corpos() {
+        assert_eq!(decodificar(c, &corpo, TETO).unwrap(), esperado, "{nome}");
+        for n in 1..corpo.len() {
+            assert_eq!(
+                decodificar(c, &corpo[..n], TETO),
+                Err(Erro::Conteudo(Defeito::Cortado)),
+                "{nome}: {n} de {}",
+                corpo.len()
+            );
+        }
+    }
+    // Dois membros: cortado na fronteira, o primeiro é um gzip inteiro —
+    // o formato não tem como dizer que faltou um.
+    for n in 1..MEMBROS_GZIP.len() {
+        let r = gzip(&MEMBROS_GZIP[..n]);
+        if n == 23 {
+            assert_eq!(r.unwrap(), b"um ");
+        } else {
+            assert_eq!(r, Err(Erro::Conteudo(Defeito::Cortado)), "{n}");
+        }
+    }
+}
+
+#[test]
+fn nenhum_bit_trocado_vira_outro_conteudo() {
+    let mut inofensivas = 0;
+    let mut recusadas = 0;
+    for (nome, c, corpo, esperado) in corpos() {
+        for i in 0..corpo.len() * 8 {
+            let mut v = corpo.clone();
+            v[i / 8] ^= 1 << (i % 8);
+            match decodificar(c, &v, TETO) {
+                // Um campo que não muda o conteúdo — a hora, o sistema, o
+                // nome do arquivo — pode trocar à vontade.
+                Ok(saida) => {
+                    assert!(saida == esperado, "{nome}: o bit {i} mudou o conteúdo");
+                    inofensivas += 1;
+                }
+                Err(Erro::Conteudo(_) | Erro::Limite(Limite::Descomprimido)) => recusadas += 1,
+                Err(e) => panic!("{nome}: o bit {i} deu {e:?}"),
+            }
+        }
+    }
+    // Quase tudo é recusado: o que passa são os campos de fora das somas.
+    assert!(recusadas > 20 * inofensivas, "{recusadas} {inofensivas}");
+}
+
+#[test]
+fn cada_membro_e_um_fluxo() {
+    // O segundo membro começa outra janela: uma cópia dele que aponte para
+    // o conteúdo do primeiro aponta para antes do começo do fluxo dele.
+    let um = em_gzip(
+        &fixo(&[Simbolo::Literal(b'a'), Simbolo::Literal(b'b')]),
+        b"ab",
+    );
+    let copia = [Simbolo::Copia(3, 2)];
+    let dois = em_gzip(&fixo(&copia), b"ababa");
+    let mut v = um.clone();
+    v.extend_from_slice(&dois);
+    assert_eq!(gzip(&v), Err(Erro::Conteudo(Defeito::Dados)));
+    // Sozinho, o mesmo segundo membro também não tem de onde copiar; e o
+    // primeiro repetido é o conteúdo dele duas vezes.
+    assert_eq!(gzip(&dois), Err(Erro::Conteudo(Defeito::Dados)));
+    let mut duas_vezes = um.clone();
+    duas_vezes.extend_from_slice(&um);
+    assert_eq!(gzip(&duas_vezes).unwrap(), b"abab");
+}
+
+#[test]
+fn o_teto_do_corpo_decodificado() {
+    let t = texto(2048);
+    let corpo = em_gzip(&TEXTO_9, &t);
+    // No teto exato, passa; um byte abaixo, não.
+    assert_eq!(decodificar(Codificacao::Gzip, &corpo, 2048).unwrap(), t);
+    assert_eq!(
+        decodificar(Codificacao::Gzip, &corpo, 2047),
+        Err(Erro::Limite(Limite::Descomprimido))
+    );
+    assert_eq!(decodificar(Codificacao::Gzip, &VAZIO_GZIP, 0).unwrap(), b"");
+    assert_eq!(
+        decodificar(Codificacao::Deflate, &OLA_ZLIB, 0),
+        Err(Erro::Limite(Limite::Descomprimido))
+    );
+    // O teto conta o conteúdo inteiro, e não o de um membro.
+    assert_eq!(
+        decodificar(Codificacao::Gzip, &MEMBROS_GZIP, 7).unwrap(),
+        b"um dois"
+    );
+    assert_eq!(
+        decodificar(Codificacao::Gzip, &MEMBROS_GZIP, 6),
+        Err(Erro::Limite(Limite::Descomprimido))
+    );
+}
+
+/// Uma bomba: o DEFLATE com a maior razão que o formato tem — um literal,
+/// e cópias de 258 bytes a um byte de distância, dois bits cada — que se
+/// expande a `n` cópias.
+pub(crate) fn bomba(copias: usize) -> Vec<u8> {
+    let mut l = vec![0u8; 286];
+    l[285] = 1;
+    l[0] = 2;
+    l[256] = 2;
+    let mut e = Escritor::novo();
+    e.cabeca_dinamica(true, 286, 1, &QUATRO_BITS, &seq(&l, &[1]));
+    let codigos = canonico(&l);
+    e.codigo(codigos[0]);
+    // Cada cópia: o código de 258, um bit zero, e o da distância 1, outro.
+    let mut faltam = copias * 2;
+    while faltam > 0 {
+        let k = faltam.min(32);
+        e.bits(0, k as u32);
+        faltam -= k;
+    }
+    e.codigo(codigos[256]);
+    e.fim()
+}
+
+#[test]
+fn a_bomba_para_no_teto() {
+    // Meio GiB em uns 500 KiB: abaixo do limite do corpo, e cento e vinte
+    // e oito vezes o teto.
+    let copias = 512 * MIB / 258;
+    let deflate = bomba(copias);
+    assert!(deflate.len() < 600 * 1024, "{}", deflate.len());
+    // O rodapé nem é lido: o teto chega antes.
+    let mut corpo = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff];
+    corpo.extend_from_slice(&deflate);
+    corpo.extend_from_slice(&[0; 8]);
+    let (r, pico) = pico_de(|| decodificar(Codificacao::Gzip, &corpo, TETO));
+    assert_eq!(r, Err(Erro::Limite(Limite::Descomprimido)));
+    // A saída dobra até o teto: no pior instante, a anterior e a nova —
+    // uma vez e meia o teto — e as tabelas.
+    assert!(pico <= TETO + TETO / 2 + 64 * 1024, "{pico}");
+    // Com um teto pequeno, a memória é a dele: a primeira reserva vem do
+    // corpo que chegou — duas vezes ele —, e para no teto.
+    let (r, pico) = pico_de(|| decodificar(Codificacao::Gzip, &corpo, 100 * 1024));
+    assert_eq!(r, Err(Erro::Limite(Limite::Descomprimido)));
+    assert!(pico <= 100 * 1024 + 64 * 1024, "{pico}");
+    // A mesma bomba no zlib, e em mil membros pequenos.
+    let mut z = vec![0x78, 0x9c];
+    z.extend_from_slice(&bomba(MIB / 258 * 64));
+    z.extend_from_slice(&[0; 4]);
+    assert_eq!(zlib(&z), Err(Erro::Limite(Limite::Descomprimido)));
+    let membro = em_gzip(&bomba(4096), &vec![0u8; 4096 * 258 + 1]);
+    let mil: Vec<u8> = membro
+        .iter()
+        .copied()
+        .cycle()
+        .take(membro.len() * 1000)
+        .collect();
+    let (r, pico) = pico_de(|| gzip(&mil));
+    assert_eq!(r, Err(Erro::Limite(Limite::Descomprimido)));
+    assert!(pico <= TETO + TETO / 2 + 64 * 1024, "{pico}");
+}
+
+#[test]
+fn o_tamanho_anunciado_nao_reserva_nada() {
+    // O gzip diz ter 4 GiB menos um: a decodificação reserva o que o
+    // corpo pede, e a conta de tamanho recusa.
+    let mut corpo = OLA_GZIP.to_vec();
+    let n = corpo.len();
+    corpo[n - 4..].copy_from_slice(&u32::MAX.to_le_bytes());
+    let (r, pico) = pico_de(|| gzip(&corpo));
+    assert_eq!(r, Err(Erro::Conteudo(Defeito::Soma)));
+    assert!(pico <= 64 * 1024, "{pico}");
+}
+
+/// `corpo` com o byte `i` trocado por `b`.
+fn com(corpo: &[u8], i: usize, b: u8) -> Vec<u8> {
+    let mut v = corpo.to_vec();
+    v[i] = b;
+    v
+}
+
+#[test]
+fn o_involucro_do_gzip() {
+    let cabecalho = Err(Erro::Conteudo(Defeito::Cabecalho));
+    // A assinatura e o método — mesmo sem o resto da cabeça.
+    for (i, b) in [(0, 0x1e), (1, 0x8c), (2, 7)] {
+        assert_eq!(gzip(&com(&OLA_GZIP, i, b)), cabecalho, "{i}");
+        assert_eq!(gzip(&com(&OLA_GZIP, i, b)[..i + 1]), cabecalho, "{i}");
+    }
+    // Os bits reservados de FLG.
+    for bit in 5..8 {
+        assert_eq!(gzip(&com(&OLA_GZIP, 3, 1 << bit)), cabecalho, "{bit}");
+    }
+    // Os campos opcionais, cada um, e todos juntos com o CRC da cabeça.
+    let deflate = &OLA_GZIP[10..OLA_GZIP.len() - 8];
+    let rodape = &OLA_GZIP[OLA_GZIP.len() - 8..];
+    let montar = |flg: u8, campos: &[u8], crc_da_cabeca: Option<u16>| {
+        let mut v = vec![0x1f, 0x8b, 8, flg, 1, 2, 3, 4, 2, 3];
+        v.extend_from_slice(campos);
+        if let Some(c) = crc_da_cabeca {
+            v.extend_from_slice(&c.to_le_bytes());
+        }
+        v.extend_from_slice(deflate);
+        v.extend_from_slice(rodape);
+        v
+    };
+    let extra = [5, 0, b'D', b'K', 1, 0, 9];
+    assert_eq!(gzip(&montar(4, &extra, None)).unwrap(), b"ola, Duke\n");
+    assert_eq!(gzip(&montar(8, b"nome\0", None)).unwrap(), b"ola, Duke\n");
+    assert_eq!(
+        gzip(&montar(16, b"comentario\0", None)).unwrap(),
+        b"ola, Duke\n"
+    );
+    let mut campos = extra.to_vec();
+    campos.extend_from_slice(b"nome\0comentario\0");
+    let mut cabeca = vec![0x1f, 0x8b, 8, 0x1f, 1, 2, 3, 4, 2, 3];
+    cabeca.extend_from_slice(&campos);
+    let crc = crc32(&cabeca) as u16;
+    assert_eq!(
+        gzip(&montar(0x1f, &campos, Some(crc))).unwrap(),
+        b"ola, Duke\n"
+    );
+    assert_eq!(
+        gzip(&montar(0x1f, &campos, Some(crc ^ 1))),
+        Err(Erro::Conteudo(Defeito::Soma))
+    );
+    // Os campos que não acabam.
+    assert_eq!(
+        gzip(&[0x1f, 0x8b, 8, 4, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 1, 2]),
+        Err(Erro::Conteudo(Defeito::Cortado))
+    );
+    assert_eq!(
+        gzip(&[0x1f, 0x8b, 8, 8, 0, 0, 0, 0, 0, 0, b'n', b'o']),
+        Err(Erro::Conteudo(Defeito::Cortado))
+    );
+    // O CRC e o tamanho do rodapé.
+    let n = OLA_GZIP.len();
+    assert_eq!(
+        gzip(&com(&OLA_GZIP, n - 8, OLA_GZIP[n - 8] ^ 1)),
+        Err(Erro::Conteudo(Defeito::Soma))
+    );
+    assert_eq!(
+        gzip(&com(&OLA_GZIP, n - 4, OLA_GZIP[n - 4] + 1)),
+        Err(Erro::Conteudo(Defeito::Soma))
+    );
+    // O que vem depois do último membro: o que não é gzip sobra; o começo
+    // de um membro é um membro cortado.
+    for (depois, defeito) in [
+        (&b"x"[..], Defeito::Sobra),
+        (&b"\x1fx"[..], Defeito::Sobra),
+        (&b"\0\0\0\0"[..], Defeito::Sobra),
+        (&b"\x1f"[..], Defeito::Cortado),
+        (&b"\x1f\x8b"[..], Defeito::Cortado),
+        (&b"\x1f\x8b\x08\x00"[..], Defeito::Cortado),
+    ] {
+        let mut v = OLA_GZIP.to_vec();
+        v.extend_from_slice(depois);
+        assert_eq!(gzip(&v), Err(Erro::Conteudo(defeito)), "{depois:?}");
+    }
+}
+
+#[test]
+fn o_involucro_do_zlib() {
+    let cabecalho = Err(Erro::Conteudo(Defeito::Cabecalho));
+    // O método, a janela, o FCHECK e o dicionário.
+    for cmf in [0x79, 0x77, 0x88, 0xf8] {
+        assert_eq!(zlib(&com(&OLA_ZLIB, 0, cmf)), cabecalho, "{cmf:#x}");
+        assert_eq!(zlib(&[cmf]), cabecalho, "{cmf:#x}");
+    }
+    assert_eq!(zlib(&com(&OLA_ZLIB, 1, OLA_ZLIB[1] ^ 1)), cabecalho);
+    // Com FDICT, e o FCHECK certo: o dicionário é que não se aceita.
+    let flg = (0..=255u8)
+        .find(|&f| f & 0x20 != 0 && (0x78u16 << 8 | u16::from(f)).is_multiple_of(31))
+        .unwrap();
+    assert_eq!(zlib(&com(&OLA_ZLIB, 1, flg)), cabecalho);
+    // A soma, e o que sobra.
+    let n = OLA_ZLIB.len();
+    assert_eq!(
+        zlib(&com(&OLA_ZLIB, n - 1, OLA_ZLIB[n - 1] ^ 1)),
+        Err(Erro::Conteudo(Defeito::Soma))
+    );
+    let mut v = OLA_ZLIB.to_vec();
+    v.push(0);
+    assert_eq!(zlib(&v), Err(Erro::Conteudo(Defeito::Sobra)));
+    // O DEFLATE cru, mandado como `deflate`: não se adivinha.
+    assert_eq!(zlib(&GUARDADO), cabecalho);
+    assert!(zlib(&TEXTO_9).is_err());
+    // E o gzip, mandado como `deflate`, e o contrário.
+    assert_eq!(zlib(&OLA_GZIP), cabecalho);
+    assert_eq!(gzip(&OLA_ZLIB), cabecalho);
+}
+
+#[test]
+fn a_negociacao() {
+    let c = |valores: &[&str], aceitas: Aceitas| {
+        let cabecalhos: Vec<(alloc::string::String, alloc::string::String)> = valores
+            .iter()
+            .map(|v| ("content-encoding".into(), (*v).into()))
+            .collect();
+        codificacao::da_resposta(&cabecalhos, aceitas)
+    };
+    let gzip_so = Aceitas {
+        gzip: true,
+        deflate: false,
+    };
+    let deflate_so = Aceitas {
+        gzip: false,
+        deflate: true,
+    };
+    // Sem o cabeçalho, ou só com `identity`, o corpo veio como é.
+    assert_eq!(c(&[], Aceitas::TODAS), Ok(None));
+    assert_eq!(c(&[], Aceitas::NENHUMA), Ok(None));
+    assert_eq!(c(&["identity"], Aceitas::NENHUMA), Ok(None));
+    assert_eq!(c(&[""], Aceitas::NENHUMA), Ok(None));
+    // O nome sem diferença de maiúsculas, e o `x-gzip`.
+    for v in [
+        "gzip",
+        "GZIP",
+        "x-gzip",
+        "X-Gzip",
+        " gzip ",
+        "identity, gzip",
+        "gzip,identity",
+    ] {
+        assert_eq!(c(&[v], Aceitas::TODAS), Ok(Some(Codificacao::Gzip)), "{v}");
+        assert_eq!(c(&[v], gzip_so), Ok(Some(Codificacao::Gzip)), "{v}");
+        assert_eq!(c(&[v], deflate_so), Err(Defeito::Codificacao), "{v}");
+        assert_eq!(c(&[v], Aceitas::NENHUMA), Err(Defeito::Codificacao), "{v}");
+    }
+    assert_eq!(c(&["Deflate"], deflate_so), Ok(Some(Codificacao::Deflate)));
+    assert_eq!(c(&["deflate"], gzip_so), Err(Defeito::Codificacao));
+    // Desconhecidas, com parâmetro, e empilhadas — numa linha ou em duas.
+    for v in [
+        &["br"][..],
+        &["zstd"],
+        &["compress"],
+        &["x-compress"],
+        &["gzip;q=1"],
+        &["gzip, gzip"],
+        &["gzip, deflate"],
+        &["deflate", "gzip"],
+        &["gzip", "br"],
+    ] {
+        assert_eq!(c(v, Aceitas::TODAS), Err(Defeito::Codificacao), "{v:?}");
+    }
+}
+
+#[test]
+fn decodifica_em_paralelo() {
+    // Nada do decodificador é de todos: cada fio com o seu corpo, ao mesmo
+    // tempo, e cada um com o seu resultado e o seu teto.
+    let fios: Vec<_> = (0..8u64)
+        .map(|k| {
+            std::thread::spawn(move || {
+                let dados = if k % 2 == 0 {
+                    texto(4096 + k as usize * 1000)
+                } else {
+                    ruido(30_000, k)
+                };
+                let s = lz77(&dados);
+                let corpo = if k % 3 == 0 {
+                    em_zlib(&fixo(&s), &dados)
+                } else {
+                    em_gzip(&fixo(&s), &dados)
+                };
+                let c = if k % 3 == 0 {
+                    Codificacao::Deflate
+                } else {
+                    Codificacao::Gzip
+                };
+                for _ in 0..50 {
+                    assert!(decodificar(c, &corpo, TETO).unwrap() == dados);
+                    assert_eq!(
+                        decodificar(c, &corpo, dados.len() - 1),
+                        Err(Erro::Limite(Limite::Descomprimido))
+                    );
+                    let bomba = em_gzip(&bomba(100_000), &[]);
+                    let teto = 256 * 1024;
+                    let (r, pico) = pico_de(|| decodificar(Codificacao::Gzip, &bomba, teto));
+                    assert_eq!(r, Err(Erro::Limite(Limite::Descomprimido)));
+                    assert!(pico <= teto + teto / 2 + 64 * 1024, "{pico}");
+                }
+            })
+        })
+        .collect();
+    for f in fios {
+        f.join().unwrap();
+    }
+}
+
+#[test]
+fn o_monte_de_uma_decodificacao() {
+    // Um corpo pequeno: as tabelas e a primeira reserva da saída, e nada
+    // que cresça com ele.
+    let t = texto(2048);
+    let corpo = em_gzip(&TEXTO_9, &t);
+    let (r, pico) = pico_de(|| gzip(&corpo));
+    assert_eq!(r.unwrap(), t);
+    assert!(pico <= 16 * 1024 + 16 * 1024, "{pico}");
+}
+
+#[test]
+fn as_tabelas_cabem_no_que_o_modulo_diz() {
+    assert!(core::mem::size_of::<Tabelas>() <= 9 * 1024);
+}
+
+// Os vetores do zlib: gerados pelo `zlib` e pelo `gzip` do Python 3 (zlib
+// 1.3), com o texto de [`texto`]. `GUARDADO` e `TEXTO_*` são DEFLATE cru.
+pub(crate) const OLA_GZIP: [u8; 30] = [
+    0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x03, 0xcb, 0xcf, 0x49, 0xd4, 0x51, 0x70,
+    0x29, 0xcd, 0x4e, 0xe5, 0x02, 0x00, 0xda, 0x4f, 0x8e, 0x27, 0x0a, 0x00, 0x00, 0x00,
+];
+pub(crate) const OLA_GZIP_COM_NOME: [u8; 38] = [
+    0x1f, 0x8b, 0x08, 0x08, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0x6f, 0x6c, 0x61, 0x2e, 0x74, 0x78,
+    0x74, 0x00, 0xcb, 0xcf, 0x49, 0xd4, 0x51, 0x70, 0x29, 0xcd, 0x4e, 0xe5, 0x02, 0x00, 0xda, 0x4f,
+    0x8e, 0x27, 0x0a, 0x00, 0x00, 0x00,
+];
+pub(crate) const OLA_ZLIB: [u8; 18] = [
+    0x78, 0xda, 0xcb, 0xcf, 0x49, 0xd4, 0x51, 0x70, 0x29, 0xcd, 0x4e, 0xe5, 0x02, 0x00, 0x12, 0x65,
+    0x03, 0x1c,
+];
+pub(crate) const VAZIO_GZIP: [u8; 20] = [
+    0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x03, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+];
+pub(crate) const VAZIO_ZLIB: [u8; 8] = [0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01];
+pub(crate) const MEMBROS_GZIP: [u8; 47] = [
+    0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x03, 0x2b, 0xcd, 0x55, 0x00, 0x00, 0x8b,
+    0x46, 0x46, 0x46, 0x03, 0x00, 0x00, 0x00, 0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
+    0x03, 0x4b, 0xc9, 0xcf, 0x2c, 0x06, 0x00, 0x3d, 0xc3, 0xb8, 0xab, 0x04, 0x00, 0x00, 0x00,
+];
+pub(crate) const COM_DICIONARIO_ZLIB: [u8; 22] = [
+    0x78, 0xf9, 0x16, 0x75, 0x04, 0x22, 0xcb, 0xcf, 0x49, 0xd4, 0x51, 0x70, 0x29, 0xcd, 0x4e, 0xe5,
+    0x02, 0x00, 0x12, 0x65, 0x03, 0x1c,
+];
+pub(crate) const GUARDADO: [u8; 13] = [
+    0x01, 0x08, 0x00, 0xf7, 0xff, 0x67, 0x75, 0x61, 0x72, 0x64, 0x61, 0x64, 0x6f,
+];
+pub(crate) const TEXTO_9: [u8; 569] = [
+    0x75, 0x55, 0x49, 0x52, 0xc4, 0x30, 0x0c, 0xbc, 0xfb, 0x15, 0xfe, 0x9a, 0x2b, 0x11, 0x53, 0x2e,
+    0x12, 0x3b, 0x64, 0x01, 0x9e, 0x8f, 0xb5, 0x2b, 0x33, 0xc3, 0x81, 0x21, 0x8b, 0xdc, 0x6a, 0xb5,
+    0x5a, 0xca, 0x06, 0x73, 0x9d, 0x7b, 0x6e, 0xa5, 0xe7, 0x6b, 0xcd, 0x5f, 0x17, 0xe4, 0x9e, 0x77,
+    0xf8, 0xee, 0x8f, 0x32, 0x8d, 0x47, 0x1b, 0xbf, 0x7d, 0x94, 0x13, 0xc2, 0xd3, 0xa9, 0x37, 0xf8,
+    0x1d, 0xff, 0xe7, 0xeb, 0x13, 0xf0, 0x48, 0xda, 0xe1, 0xd8, 0xfa, 0x71, 0x96, 0x5c, 0xae, 0xb9,
+    0x9e, 0x7d, 0xaf, 0x25, 0xcf, 0x70, 0x9c, 0xb5, 0xc9, 0x51, 0x3d, 0xf0, 0x0a, 0xb1, 0x95, 0xdd,
+    0x63, 0xcb, 0x03, 0xda, 0x88, 0x96, 0xa4, 0x7c, 0x97, 0x62, 0xe2, 0x6b, 0x2d, 0xf2, 0xc7, 0x07,
+    0xe9, 0x67, 0xea, 0xfb, 0xd6, 0xf3, 0x01, 0xcc, 0x9e, 0xef, 0xa6, 0xbe, 0xa6, 0xa5, 0xae, 0x75,
+    0xa0, 0x61, 0x65, 0x44, 0x82, 0xd8, 0x46, 0x06, 0xab, 0x26, 0x54, 0x38, 0xe5, 0x81, 0x58, 0x5b,
+    0x5f, 0xea, 0x59, 0xa7, 0x92, 0xba, 0x40, 0xde, 0xb8, 0x9f, 0xd0, 0x58, 0x9e, 0xe3, 0xe8, 0x7e,
+    0x4e, 0x32, 0xea, 0xad, 0xbc, 0xe5, 0xe3, 0xf2, 0x0e, 0x89, 0x61, 0x05, 0x8e, 0x06, 0xca, 0x82,
+    0xf8, 0x71, 0x30, 0x5d, 0x0e, 0x56, 0x33, 0xd3, 0xd7, 0xd3, 0x69, 0xeb, 0x7b, 0xde, 0xf6, 0x3e,
+    0x21, 0x70, 0x36, 0xd1, 0xed, 0x02, 0x81, 0x31, 0xa4, 0x15, 0x83, 0x08, 0x6f, 0x25, 0x8d, 0xc8,
+    0x8a, 0x35, 0x72, 0x32, 0x12, 0xa7, 0x84, 0xaa, 0xbc, 0x89, 0xa4, 0x8a, 0x53, 0x45, 0xb2, 0x5a,
+    0x9c, 0xc2, 0x26, 0xe9, 0x96, 0x3e, 0xd7, 0x16, 0xf9, 0x29, 0xcc, 0x44, 0x39, 0x90, 0x9a, 0xb1,
+    0xd1, 0x78, 0xe4, 0x8a, 0x16, 0x52, 0xbd, 0x29, 0x6a, 0x06, 0x0f, 0x7c, 0x12, 0x15, 0x04, 0x8b,
+    0xb3, 0x8a, 0xc4, 0x94, 0x52, 0x1b, 0xce, 0x1c, 0xd4, 0x60, 0xd1, 0x93, 0xa4, 0x0f, 0x9f, 0x20,
+    0x79, 0x59, 0x2f, 0xe9, 0xf3, 0x47, 0xdd, 0xe1, 0xa7, 0x2c, 0x4b, 0xb6, 0x8b, 0xe7, 0x86, 0x90,
+    0x2d, 0x54, 0xfd, 0x99, 0xeb, 0x71, 0xf0, 0x81, 0x99, 0x34, 0x29, 0x35, 0x40, 0x08, 0x33, 0x00,
+    0xbc, 0xba, 0x46, 0x26, 0x03, 0xdf, 0x06, 0x1f, 0x0f, 0x50, 0xd7, 0x02, 0x0d, 0x2d, 0x55, 0x51,
+    0x74, 0x2b, 0x16, 0x6b, 0xcd, 0x8a, 0x3e, 0x50, 0xc9, 0x43, 0x80, 0x83, 0x35, 0x9f, 0x67, 0xab,
+    0x82, 0x6d, 0x8f, 0xc5, 0xb9, 0xfe, 0x2a, 0xa9, 0xdb, 0x98, 0xce, 0xbc, 0x41, 0x7c, 0x93, 0x59,
+    0x82, 0x85, 0xb4, 0x60, 0xc7, 0x76, 0x3a, 0x73, 0x9d, 0x54, 0x85, 0x1d, 0x51, 0x26, 0xbd, 0x0f,
+    0x66, 0xb3, 0x48, 0xe2, 0x2a, 0x5d, 0xbb, 0x42, 0x27, 0x1c, 0x81, 0xe3, 0xbc, 0x25, 0xf7, 0xc5,
+    0x21, 0x6f, 0x6f, 0x3b, 0x46, 0x07, 0x58, 0x58, 0xa2, 0xde, 0xff, 0x19, 0x1b, 0x02, 0xb0, 0xf1,
+    0xe4, 0xd9, 0x11, 0x48, 0x95, 0xe5, 0x36, 0x68, 0xef, 0xe6, 0x2a, 0xe1, 0xee, 0xf1, 0xe7, 0xe8,
+    0xab, 0x3b, 0xad, 0x6e, 0x8c, 0xb4, 0x1b, 0xf2, 0x5a, 0x6b, 0x96, 0x21, 0x16, 0x7d, 0x78, 0xbd,
+    0x19, 0x4f, 0x44, 0xbf, 0xed, 0x04, 0x31, 0xb2, 0x6c, 0x5c, 0xd7, 0x6d, 0xe8, 0x91, 0x62, 0x3f,
+    0x74, 0x62, 0xd4, 0x89, 0xea, 0x08, 0xdf, 0x38, 0xaa, 0x27, 0x65, 0x0c, 0x58, 0x3a, 0x1f, 0x49,
+    0xd7, 0xf0, 0x60, 0x66, 0x73, 0x2f, 0x23, 0x6e, 0x55, 0xe1, 0x4f, 0xa1, 0x4d, 0x18, 0x4c, 0x47,
+    0x75, 0xc7, 0xad, 0x68, 0x7c, 0x65, 0xa1, 0x59, 0x6c, 0xd8, 0xeb, 0xf1, 0x79, 0x32, 0xeb, 0x5a,
+    0xa4, 0xd7, 0xc6, 0x94, 0xdc, 0xdc, 0xc1, 0x22, 0xe6, 0xcb, 0x95, 0x37, 0x2e, 0x95, 0x80, 0x57,
+    0x4c, 0xd3, 0x43, 0xc3, 0x62, 0xe7, 0x8f, 0x45, 0xf8, 0xf2, 0x08, 0xd9, 0xe4, 0x05, 0xb0, 0x95,
+    0x5e, 0x96, 0xbc, 0x7f, 0x09, 0x25, 0x2f, 0x7f, 0xc7, 0x46, 0x8d, 0xb2, 0xb4, 0x6c, 0x47, 0xa0,
+    0x20, 0x38, 0x13, 0xb2, 0x3a, 0xc3, 0x10, 0xf3, 0x67, 0x4e, 0x23, 0x8d, 0xd4, 0x93, 0xfd, 0xa2,
+    0x35, 0x7d, 0x44, 0xca, 0x6d, 0x51, 0x8f, 0x98, 0x3f,
+];
+pub(crate) const TEXTO_1: [u8; 631] = [
+    0x5d, 0x55, 0x5b, 0xb6, 0xdc, 0x30, 0x08, 0xfb, 0xf7, 0x2a, 0xbc, 0x35, 0x9f, 0xc4, 0x9d, 0x93,
+    0xd3, 0xc9, 0x38, 0xcd, 0xa3, 0xed, 0xf2, 0x8b, 0x40, 0x80, 0x3b, 0x1f, 0x77, 0x6e, 0x1e, 0x18,
+    0x24, 0x21, 0xc8, 0xd1, 0xd7, 0x6d, 0x1d, 0xf5, 0xd3, 0x46, 0x7d, 0xf6, 0xfa, 0xeb, 0xe9, 0x75,
+    0xd4, 0xb3, 0xff, 0x1e, 0xaf, 0xb6, 0xc8, 0xa3, 0xc3, 0xde, 0xbe, 0xda, 0xdd, 0xa7, 0xa7, 0xcb,
+    0xf8, 0xf4, 0xbf, 0xf2, 0x76, 0x7d, 0x7e, 0x76, 0x1c, 0x29, 0x67, 0xbf, 0x8e, 0x71, 0xdd, 0xad,
+    0xb6, 0x67, 0xdd, 0xee, 0x71, 0x6e, 0xad, 0xae, 0xfd, 0xba, 0xb7, 0xcf, 0xa8, 0x7a, 0xd4, 0x0f,
+    0x64, 0x62, 0x7f, 0x72, 0xb4, 0x33, 0x63, 0xdb, 0xab, 0x7f, 0xa4, 0x10, 0x8b, 0xda, 0x5d, 0x99,
+    0x0b, 0x3f, 0x7b, 0x13, 0x94, 0xf8, 0xab, 0x7a, 0x50, 0x7f, 0x96, 0x71, 0x1e, 0xa3, 0x5e, 0xdd,
+    0xd0, 0xdb, 0xdd, 0x32, 0xf6, 0xf2, 0xde, 0xf6, 0x4d, 0xb2, 0x81, 0x99, 0x82, 0x50, 0xb4, 0x33,
+    0x82, 0xbd, 0xb2, 0xa0, 0xa7, 0x73, 0xcc, 0xc8, 0x75, 0x8c, 0xf7, 0x76, 0x6f, 0x4b, 0x2b, 0xa3,
+    0x5a, 0xca, 0xf9, 0xa4, 0xa0, 0xfc, 0x98, 0x3c, 0xd7, 0x35, 0x12, 0x3f, 0x2b, 0x7a, 0x9a, 0xa3,
+    0xeb, 0x5b, 0x3b, 0xce, 0x77, 0x00, 0x06, 0x06, 0x99, 0xad, 0x3b, 0x0a, 0xc5, 0x67, 0xc1, 0x7a,
+    0x29, 0xa8, 0x56, 0x83, 0x3f, 0xaa, 0x9d, 0x2e, 0xc7, 0x38, 0xeb, 0x71, 0x8e, 0x05, 0x89, 0x25,
+    0x05, 0x45, 0x8f, 0x0b, 0x24, 0x46, 0x08, 0x28, 0x33, 0x05, 0x2a, 0x79, 0x6f, 0x4c, 0x5d, 0xca,
+    0x0a, 0x8e, 0x56, 0x4c, 0xc5, 0x69, 0x72, 0xe3, 0xac, 0xb2, 0x89, 0xaa, 0x6f, 0x42, 0x1d, 0xb5,
+    0x47, 0x5f, 0x3d, 0x6d, 0x61, 0xb7, 0x9c, 0xb4, 0xb7, 0x28, 0x4f, 0xa1, 0x92, 0xd6, 0x00, 0x34,
+    0x3f, 0x16, 0x79, 0x80, 0x15, 0x16, 0x72, 0xbd, 0x95, 0x80, 0xf0, 0x8e, 0xc0, 0x2f, 0x51, 0x3b,
+    0x73, 0x99, 0x31, 0x29, 0xb1, 0xba, 0xc2, 0x1b, 0x0e, 0x23, 0x2b, 0x1d, 0xf5, 0xe8, 0xec, 0x49,
+    0xd5, 0xc7, 0x9a, 0xd2, 0xe1, 0x21, 0xd3, 0x8b, 0x7d, 0xfe, 0xb1, 0x9d, 0xfd, 0x4f, 0x7b, 0xbf,
+    0x6b, 0x5c, 0x7c, 0x37, 0x44, 0x6d, 0xe1, 0xea, 0x0b, 0x44, 0xf0, 0x49, 0xad, 0x5a, 0xed, 0xc5,
+    0x5d, 0xad, 0x0d, 0xe0, 0x00, 0x98, 0xc8, 0x7d, 0xd2, 0x97, 0xa0, 0x39, 0x19, 0x30, 0xef, 0xe4,
+    0x63, 0x49, 0x9a, 0x5a, 0x60, 0x1c, 0xc9, 0x5f, 0xa3, 0x91, 0x97, 0xb1, 0xd1, 0xac, 0x54, 0x2a,
+    0x25, 0x9f, 0xba, 0x99, 0xc9, 0xf4, 0x30, 0x65, 0x73, 0x16, 0x9a, 0x4c, 0x79, 0xa6, 0xfe, 0x26,
+    0x50, 0xba, 0x9a, 0x0d, 0x0e, 0x7f, 0x64, 0xc6, 0xe8, 0x51, 0x56, 0x66, 0x30, 0x41, 0x4b, 0x12,
+    0xac, 0x88, 0xb9, 0x9d, 0x91, 0x86, 0xee, 0x8b, 0xfb, 0x22, 0x51, 0x21, 0x7d, 0x0e, 0x26, 0x50,
+    0x9b, 0x84, 0x8a, 0x95, 0x5d, 0x93, 0x7f, 0x31, 0x07, 0x99, 0xc1, 0xe2, 0xb2, 0x25, 0x09, 0xcb,
+    0x1c, 0x01, 0xa9, 0x99, 0x99, 0x38, 0xd9, 0x0a, 0x47, 0x09, 0xbd, 0x9d, 0xd4, 0xb7, 0xb1, 0x65,
+    0x4e, 0x63, 0xb9, 0x05, 0x4e, 0x9b, 0x1d, 0xae, 0x2d, 0x6e, 0x0c, 0x2f, 0xc1, 0x4a, 0x01, 0x2f,
+    0xcf, 0x8b, 0x4f, 0x30, 0x7c, 0xde, 0x42, 0xf8, 0xea, 0x7f, 0x58, 0x1c, 0x5f, 0x78, 0x8c, 0xdd,
+    0x60, 0x09, 0xef, 0x9b, 0x85, 0xcb, 0x26, 0x99, 0xd6, 0x1b, 0xfd, 0x06, 0xa7, 0xed, 0xc1, 0x42,
+    0x3d, 0x4e, 0x23, 0xdb, 0xd2, 0x9e, 0x74, 0x13, 0x3d, 0x60, 0x59, 0x2e, 0x33, 0xb9, 0xe2, 0xc4,
+    0x50, 0x6f, 0xe7, 0x13, 0x27, 0x52, 0x4f, 0xe5, 0x2d, 0x5e, 0x74, 0x3c, 0x5a, 0x41, 0x78, 0x14,
+    0x70, 0x81, 0x8a, 0x82, 0x0c, 0x97, 0xe1, 0x5a, 0x3c, 0x73, 0x56, 0xb0, 0x04, 0x1c, 0xba, 0xa7,
+    0x93, 0xd8, 0x8e, 0x2c, 0xa0, 0xf3, 0xa2, 0x70, 0x7c, 0xa1, 0x85, 0x41, 0xe9, 0x2d, 0x18, 0x43,
+    0x2d, 0xed, 0x8b, 0x5a, 0x76, 0x9f, 0x89, 0x15, 0x91, 0xc9, 0xcd, 0x20, 0x45, 0x44, 0x76, 0xd2,
+    0xbb, 0xad, 0xa2, 0x09, 0xe8, 0xb5, 0x2b, 0x05, 0x5c, 0x19, 0xcc, 0x0c, 0xcd, 0xdd, 0x67, 0x53,
+    0x03, 0x88, 0xfe, 0xe5, 0xa1, 0x76, 0xf2, 0x21, 0xf4, 0x2f, 0xa7, 0x59, 0xc9, 0xef, 0x62, 0xc9,
+    0xbb, 0xc8, 0x51, 0x57, 0x73, 0x81, 0x23, 0x97, 0x56, 0x7c, 0x59, 0xf0, 0x59, 0xc6, 0x4c, 0xa8,
+    0x84, 0x41, 0x09, 0x8c, 0x91, 0x3a, 0xa9, 0xf9, 0xe2, 0x8d, 0x10, 0x5a, 0x69, 0xb6, 0x66, 0x44,
+    0x97, 0x1c, 0x6b, 0xd4, 0x93, 0x98, 0x7f,
+];
+pub(crate) const TEXTO_FIXO: [u8; 703] = [
+    0x2b, 0x48, 0x4d, 0xc9, 0x4c, 0xc9, 0x57, 0xc8, 0x4b, 0xcc, 0x57, 0x28, 0xcd, 0x55, 0x28, 0x2c,
+    0x4d, 0x55, 0xc8, 0x57, 0x28, 0x4a, 0x2d, 0xcb, 0x4f, 0x4f, 0x4c, 0x06, 0x0a, 0x15, 0x40, 0x64,
+    0xd3, 0x13, 0x4b, 0x52, 0x91, 0x44, 0x93, 0xf3, 0xf3, 0x52, 0x2b, 0x80, 0x74, 0x4a, 0x69, 0x76,
+    0x2a, 0x48, 0x0b, 0x57, 0x51, 0x6a, 0x71, 0x41, 0x7e, 0x71, 0x49, 0xa2, 0x42, 0x62, 0x69, 0x4a,
+    0x66, 0x49, 0x7e, 0x51, 0x66, 0xa2, 0x42, 0x4a, 0x6a, 0x71, 0x49, 0x66, 0x1e, 0x54, 0x2b, 0x4c,
+    0x03, 0xa6, 0x11, 0x05, 0x89, 0x45, 0x08, 0xb5, 0x89, 0xe9, 0xa9, 0x79, 0x40, 0xd5, 0x50, 0x4b,
+    0x21, 0x3c, 0x2e, 0x64, 0x8b, 0x4b, 0x73, 0x13, 0xa1, 0x18, 0xa2, 0x11, 0x4c, 0x24, 0xe7, 0x17,
+    0x15, 0xe4, 0x2b, 0x14, 0xa7, 0x42, 0x5c, 0x0f, 0xe1, 0x25, 0xe7, 0xe7, 0x72, 0xe5, 0x64, 0xe6,
+    0x66, 0x02, 0x4d, 0x03, 0xf9, 0x0c, 0xec, 0x08, 0xb0, 0x6b, 0x91, 0x5d, 0x90, 0x0b, 0xb3, 0x10,
+    0x66, 0x1c, 0xcc, 0x1d, 0x20, 0xb3, 0x0a, 0xf2, 0x73, 0x32, 0x4b, 0x32, 0x93, 0x13, 0xb9, 0xf2,
+    0xa1, 0x46, 0xa2, 0xb8, 0xbd, 0x24, 0x35, 0x0f, 0x12, 0x3c, 0xc5, 0xc5, 0xf9, 0x08, 0x7d, 0x50,
+    0x1b, 0x61, 0x5c, 0xa8, 0x2c, 0x44, 0x3b, 0x54, 0x0e, 0xe4, 0x30, 0x90, 0x0f, 0x10, 0xa6, 0xa5,
+    0xc2, 0x5c, 0x01, 0x76, 0x1f, 0x44, 0x31, 0x98, 0x09, 0x74, 0x55, 0x0a, 0xc4, 0xf9, 0x30, 0xdd,
+    0x5c, 0x05, 0xf9, 0x45, 0x0a, 0x05, 0x45, 0xf9, 0xc9, 0x20, 0x83, 0x15, 0xe0, 0x81, 0x0e, 0x67,
+    0x80, 0x0c, 0x06, 0x29, 0xc9, 0x4b, 0x84, 0x1b, 0x81, 0x24, 0x0b, 0xb5, 0x06, 0x1a, 0xac, 0x20,
+    0x3f, 0x42, 0x2c, 0x03, 0x07, 0x4e, 0x22, 0x92, 0xaf, 0x10, 0x91, 0x08, 0x0e, 0x15, 0x84, 0x53,
+    0x41, 0x8e, 0x85, 0x79, 0x0e, 0x66, 0x2c, 0x17, 0x34, 0xb6, 0x60, 0xe2, 0xb0, 0x28, 0x42, 0xe8,
+    0x02, 0xd9, 0x04, 0xb6, 0x03, 0xe4, 0x34, 0xb8, 0x6b, 0x60, 0xea, 0x41, 0x6e, 0x05, 0x25, 0x21,
+    0x58, 0x78, 0x83, 0x55, 0xa5, 0xa4, 0x22, 0x14, 0xa2, 0x05, 0x6a, 0x2a, 0xd4, 0x2c, 0x88, 0xad,
+    0xd0, 0x20, 0x06, 0x5b, 0x09, 0x8b, 0x70, 0x88, 0x1b, 0x60, 0x09, 0x0c, 0x39, 0x4d, 0x82, 0xc3,
+    0x07, 0xa2, 0x03, 0x1c, 0xbc, 0x90, 0xf0, 0x82, 0xc6, 0x73, 0x5a, 0x66, 0x51, 0x6a, 0x79, 0x62,
+    0x4e, 0x8e, 0x02, 0x9c, 0x81, 0x1e, 0x21, 0xe0, 0x64, 0x01, 0x0b, 0xfd, 0x14, 0x88, 0x7f, 0x10,
+    0x86, 0x03, 0xcd, 0xe4, 0x82, 0x59, 0x0a, 0x8e, 0x00, 0xa8, 0x83, 0x21, 0x06, 0xa4, 0x62, 0xa6,
+    0x1a, 0x68, 0xce, 0x00, 0xc9, 0x22, 0xa5, 0x63, 0xa0, 0xa1, 0x88, 0xb0, 0x00, 0x25, 0x68, 0xa8,
+    0xaf, 0xc0, 0xaa, 0xf3, 0x12, 0xe1, 0x6a, 0xe1, 0x91, 0x85, 0x9c, 0x0e, 0x60, 0x41, 0x8e, 0xa4,
+    0x00, 0x61, 0x58, 0x1e, 0x22, 0x3f, 0xc3, 0x7d, 0x01, 0x49, 0xf6, 0x20, 0xcf, 0x21, 0xc2, 0x1f,
+    0x16, 0xa4, 0x88, 0x64, 0x0c, 0xd6, 0x83, 0xc5, 0x44, 0x2c, 0x36, 0x43, 0x15, 0x43, 0x1d, 0x0d,
+    0x35, 0x1b, 0x39, 0x3a, 0x11, 0x2e, 0x87, 0xe5, 0x54, 0x98, 0xb1, 0x40, 0x55, 0xf0, 0xa0, 0x47,
+    0x64, 0xcc, 0x3c, 0xb8, 0x4a, 0xb0, 0x5b, 0xa1, 0xb1, 0x56, 0x8a, 0x14, 0x13, 0x08, 0x13, 0x20,
+    0xea, 0x10, 0x51, 0x82, 0x5a, 0x70, 0x40, 0x65, 0x51, 0xca, 0x18, 0x58, 0x06, 0x86, 0xba, 0x12,
+    0x14, 0xde, 0xb8, 0x12, 0x76, 0x2a, 0x92, 0xc1, 0x70, 0x77, 0x42, 0xf2, 0x0e, 0xd4, 0x48, 0x58,
+    0xb0, 0xa0, 0x64, 0x34, 0x6c, 0xf9, 0x8a, 0x0b, 0x54, 0xf6, 0x20, 0xc4, 0x41, 0xe9, 0x0a, 0xd5,
+    0x59, 0xf9, 0x70, 0x17, 0xc1, 0x62, 0x03, 0x2a, 0x0d, 0xf3, 0x33, 0x34, 0x13, 0x43, 0xc3, 0x07,
+    0x52, 0xbc, 0xc1, 0xdd, 0x09, 0x32, 0x1d, 0xa5, 0x4c, 0x80, 0x26, 0x64, 0x68, 0x89, 0x8b, 0x08,
+    0x37, 0x60, 0x78, 0x70, 0x21, 0xc7, 0x07, 0x2c, 0xc7, 0xc0, 0x52, 0x22, 0x2c, 0x45, 0x20, 0x4a,
+    0x1c, 0x58, 0x78, 0x82, 0x6d, 0x44, 0x32, 0x0b, 0x96, 0x3f, 0xb8, 0x60, 0xc5, 0x30, 0xd0, 0x65,
+    0xf0, 0x7c, 0x0f, 0xcd, 0xe2, 0x70, 0x5f, 0x81, 0x88, 0x44, 0x70, 0x49, 0x88, 0x94, 0xe8, 0xc0,
+    0xfe, 0x46, 0x2e, 0x15, 0xe1, 0xee, 0x85, 0x16, 0x68, 0x70, 0xb5, 0x48, 0xe5, 0x3a, 0xb2, 0x38,
+    0x17, 0x3c, 0xe9, 0xc2, 0x55, 0x22, 0xfc, 0x06, 0x71, 0x12, 0x22, 0x71, 0x23, 0x25, 0x11, 0x78,
+    0xba, 0xcc, 0x85, 0x94, 0xb8, 0x60, 0x2f, 0x80, 0x58, 0x10, 0x67, 0x22, 0x94, 0x22, 0x15, 0xec,
+    0x90, 0xca, 0x02, 0xa9, 0xe6, 0x81, 0x3a, 0x96, 0x0b, 0xe1, 0x01, 0x48, 0x52, 0xc2, 0x28, 0xe4,
+    0x11, 0x35, 0x21, 0xd4, 0x5e, 0x48, 0x3d, 0x06, 0xf4, 0x23, 0xb4, 0xd0, 0x82, 0x97, 0x11, 0xa0,
+    0x00, 0x01, 0xe5, 0x09, 0x68, 0xd1, 0x89, 0x94, 0x89, 0x21, 0xd5, 0x1c, 0x4c, 0x25, 0xdc, 0x51,
+    0x68, 0xc9, 0x0f, 0x39, 0x69, 0x22, 0xb2, 0x48, 0x22, 0x4a, 0x41, 0x0d, 0x54, 0x03, 0x00,
+];
+pub(crate) const TEXTO_HUFFMAN: [u8; 1044] = [
+    0x05, 0xc1, 0x51, 0x8e, 0x2c, 0x29, 0x10, 0x03, 0xc0, 0xff, 0x3a, 0x85, 0xaf, 0x66, 0x25, 0x5e,
+    0x94, 0xea, 0x02, 0xd3, 0x90, 0xf4, 0x9b, 0xe3, 0x6f, 0xc4, 0x52, 0xcb, 0x66, 0x4c, 0x1a, 0x77,
+    0xe0, 0x7b, 0x05, 0x63, 0xeb, 0xe7, 0xce, 0xa0, 0xb1, 0xd4, 0xb2, 0x19, 0x9d, 0x25, 0x6c, 0xfd,
+    0xdc, 0x19, 0x34, 0xc2, 0x53, 0x7f, 0x34, 0xda, 0xfd, 0x08, 0xdf, 0xab, 0x67, 0xeb, 0x2c, 0x9f,
+    0x22, 0x78, 0x5b, 0x96, 0x77, 0x12, 0x4d, 0xa7, 0x72, 0x1a, 0x9d, 0x25, 0x84, 0xa7, 0xfe, 0x68,
+    0x6c, 0xfd, 0xdc, 0x19, 0x34, 0xc2, 0x53, 0x7f, 0x34, 0x16, 0x37, 0xd1, 0x74, 0x2a, 0xa7, 0xc1,
+    0xae, 0x59, 0xc2, 0x52, 0xcb, 0x66, 0xb0, 0x6b, 0x96, 0x1e, 0x61, 0xeb, 0xe7, 0xce, 0xa0, 0x71,
+    0x07, 0x71, 0x07, 0x71, 0x07, 0x16, 0x37, 0xb1, 0xb8, 0x89, 0xf0, 0x5e, 0xc6, 0xd1, 0xc0, 0xf7,
+    0x0a, 0xe1, 0xbd, 0x8c, 0xf0, 0x78, 0xde, 0x1c, 0x59, 0xc2, 0xa4, 0xd1, 0x59, 0x42, 0xbb, 0x1f,
+    0x61, 0xeb, 0xe7, 0xce, 0xa0, 0x11, 0x1e, 0x60, 0xd7, 0x2c, 0xe1, 0x0e, 0x2c, 0x6e, 0xa2, 0xe9,
+    0x54, 0x4e, 0xe3, 0x68, 0x60, 0xf9, 0xcd, 0xca, 0xe0, 0x63, 0x84, 0xf7, 0x32, 0xb6, 0x7e, 0xee,
+    0x0c, 0x1a, 0xe1, 0x59, 0x9a, 0x41, 0x63, 0xe9, 0x1c, 0x13, 0x4d, 0xa7, 0x72, 0x1a, 0x6f, 0x8e,
+    0x2c, 0xa1, 0xe9, 0x54, 0x4e, 0x63, 0xe9, 0x1c, 0x13, 0xe1, 0xbd, 0x8c, 0x37, 0x47, 0x96, 0x10,
+    0x1e, 0xcf, 0x1d, 0xc4, 0xd6, 0xcf, 0x9d, 0x41, 0x43, 0x60, 0xd7, 0x2c, 0xa1, 0xdd, 0x8f, 0x10,
+    0xde, 0xcb, 0x68, 0xf7, 0x23, 0xdc, 0x81, 0x26, 0x4c, 0x1a, 0xc6, 0x9b, 0x23, 0x4b, 0xcf, 0xf2,
+    0xc6, 0xda, 0x0e, 0x9d, 0x63, 0x6c, 0x9d, 0xe5, 0x53, 0xc4, 0xd6, 0x59, 0x3e, 0x45, 0xdc, 0x41,
+    0x2c, 0x6f, 0x4c, 0x1a, 0xed, 0x7e, 0x84, 0x3b, 0x88, 0xad, 0xb3, 0x7c, 0x8a, 0x60, 0xd7, 0x2c,
+    0x81, 0x5d, 0xb3, 0xf4, 0x1c, 0x0d, 0x84, 0xf7, 0x32, 0x3a, 0x4b, 0x20, 0xc2, 0xb3, 0x34, 0x83,
+    0x06, 0x6f, 0xcb, 0xf2, 0x4e, 0x62, 0x71, 0x13, 0x5b, 0x3f, 0x77, 0x06, 0x0d, 0x43, 0x68, 0x3a,
+    0x95, 0xd3, 0xd8, 0x3a, 0xcb, 0xa7, 0xf8, 0x2c, 0xb5, 0x6c, 0x46, 0xd3, 0xa9, 0x9c, 0xc6, 0x1d,
+    0xc4, 0x1d, 0xc4, 0xd6, 0xcf, 0x9d, 0x41, 0xe3, 0x68, 0xa0, 0xb3, 0x84, 0xe5, 0x8d, 0xad, 0xb3,
+    0x7c, 0x8a, 0x68, 0x3a, 0x95, 0xd3, 0x98, 0x34, 0xbe, 0x57, 0xcf, 0xf2, 0x9b, 0x95, 0x41, 0x2c,
+    0x6f, 0x34, 0x61, 0xeb, 0x2c, 0x9f, 0x22, 0xde, 0x1c, 0x59, 0x42, 0xd3, 0xa9, 0x9c, 0x86, 0xd0,
+    0x59, 0xc2, 0x52, 0xcb, 0x66, 0x2c, 0x9d, 0x63, 0x82, 0xb8, 0x83, 0xcf, 0x9b, 0x23, 0x4b, 0x30,
+    0xee, 0x20, 0xc2, 0x53, 0x7f, 0x34, 0x08, 0xde, 0x96, 0xe5, 0x9d, 0xc4, 0x1d, 0xc4, 0xd2, 0x39,
+    0x26, 0x84, 0x3b, 0x70, 0x07, 0xb1, 0xfc, 0x66, 0x65, 0xf0, 0xf9, 0x2f, 0xb7, 0xfe, 0xf1, 0x7d,
+    0xf1, 0x5f, 0x6e, 0xfd, 0xe3, 0xfb, 0xa2, 0xdd, 0x8f, 0x10, 0xde, 0xcb, 0x68, 0xf7, 0x23, 0x1c,
+    0x0d, 0xac, 0xed, 0xd0, 0x39, 0x46, 0x13, 0x96, 0x37, 0x78, 0x5b, 0x96, 0x77, 0x12, 0x84, 0x9e,
+    0xf0, 0xd4, 0x1f, 0x8d, 0x49, 0xa3, 0xe9, 0x54, 0x4e, 0x23, 0xbc, 0x97, 0x21, 0x84, 0x67, 0x69,
+    0x06, 0x8d, 0xa5, 0x73, 0x4c, 0x74, 0x96, 0x10, 0xde, 0xcb, 0x58, 0xdc, 0x44, 0x78, 0x2f, 0x63,
+    0x79, 0x3f, 0xcb, 0x6f, 0x56, 0x06, 0xf1, 0xbd, 0xc2, 0x9b, 0x23, 0x4b, 0xe8, 0x2c, 0x61, 0xd2,
+    0x58, 0xdc, 0x44, 0x78, 0x96, 0x66, 0xd0, 0x20, 0xb6, 0xce, 0xf2, 0x29, 0x62, 0xeb, 0xe7, 0xce,
+    0xa0, 0x41, 0x84, 0x67, 0x69, 0x06, 0xfd, 0x2c, 0xbf, 0x59, 0x19, 0xc4, 0xa4, 0xb1, 0xd4, 0xb2,
+    0x19, 0x6b, 0x3b, 0x74, 0x8e, 0xb1, 0xb8, 0x89, 0x76, 0x3f, 0xc2, 0xf2, 0x9b, 0x95, 0x41, 0x2c,
+    0x9d, 0x63, 0x82, 0x68, 0x3a, 0x95, 0xd3, 0x58, 0x6a, 0xd9, 0x8c, 0xf0, 0x2c, 0xcd, 0xa0, 0x9f,
+    0xe5, 0x37, 0x2b, 0x83, 0xd8, 0x3a, 0xcb, 0xa7, 0x88, 0xad, 0x9f, 0x3b, 0x83, 0xc6, 0x52, 0xcb,
+    0x66, 0xbc, 0x39, 0xb2, 0x04, 0xa2, 0xdd, 0x8f, 0xd0, 0x84, 0xad, 0xb3, 0x7c, 0x8a, 0x08, 0xcf,
+    0xd2, 0x0c, 0x1a, 0xe1, 0xbd, 0x8c, 0xf0, 0x2c, 0xcd, 0xa0, 0x9f, 0x26, 0xfc, 0x97, 0x5b, 0xff,
+    0xf8, 0xbe, 0x60, 0xd7, 0x2c, 0xe1, 0x0e, 0x4c, 0x1a, 0xe1, 0xbd, 0x8c, 0xc5, 0x4d, 0xdc, 0x81,
+    0x3b, 0x88, 0x3b, 0xb0, 0xb6, 0x43, 0xe7, 0x18, 0xe1, 0x59, 0x9a, 0x41, 0x3f, 0xe1, 0xbd, 0x0c,
+    0xde, 0x96, 0xe5, 0x9d, 0xc4, 0xd6, 0xcf, 0x9d, 0x41, 0xe3, 0x0e, 0x22, 0xbc, 0x97, 0xc1, 0xae,
+    0x59, 0xc2, 0x52, 0xcb, 0x66, 0x2c, 0x9d, 0x63, 0xa2, 0xdd, 0x8f, 0xd0, 0x84, 0xef, 0x15, 0xb6,
+    0xce, 0xf2, 0x29, 0x3e, 0x4b, 0x2d, 0x9b, 0xd1, 0x74, 0x2a, 0xa7, 0x21, 0xf0, 0xb6, 0x2c, 0xef,
+    0x24, 0xfe, 0xcb, 0xad, 0x7f, 0x7c, 0x5f, 0x74, 0x96, 0xc0, 0xae, 0x59, 0xc2, 0xf2, 0x9b, 0x95,
+    0x41, 0xb0, 0x6b, 0x96, 0xc0, 0xae, 0x59, 0x42, 0x78, 0x96, 0x66, 0xd0, 0xe0, 0x6d, 0x59, 0xde,
+    0xc9, 0x27, 0x3c, 0x10, 0x9e, 0xa5, 0x19, 0x34, 0x8e, 0x06, 0xd8, 0x35, 0x4b, 0x58, 0x6a, 0xd9,
+    0x0c, 0xa3, 0xdd, 0x8f, 0xd0, 0x84, 0xa5, 0x73, 0x4c, 0xb0, 0x6b, 0x96, 0xb0, 0xb6, 0x43, 0xe7,
+    0x18, 0xec, 0x9a, 0xa5, 0xe7, 0x0e, 0x4c, 0x1a, 0x9d, 0x25, 0x34, 0x9d, 0xca, 0x69, 0x08, 0xe1,
+    0x81, 0xad, 0xb3, 0x7c, 0x8a, 0xb8, 0x83, 0x68, 0xf7, 0x23, 0x84, 0xa7, 0xfe, 0x68, 0xac, 0xed,
+    0xd0, 0x39, 0x46, 0x78, 0x2f, 0x3f, 0xe1, 0x59, 0x9a, 0x41, 0x23, 0x3c, 0xf5, 0x47, 0x83, 0x08,
+    0xef, 0x65, 0x2c, 0xbf, 0x59, 0x19, 0xc4, 0xda, 0x0e, 0x9d, 0x63, 0x6c, 0xfd, 0xdc, 0x19, 0x34,
+    0x3a, 0x4b, 0x30, 0xd6, 0x76, 0xe8, 0x1c, 0xa3, 0xdd, 0x8f, 0x70, 0x34, 0x9e, 0xa3, 0x81, 0xef,
+    0x15, 0xee, 0xc0, 0xd1, 0x40, 0x67, 0x09, 0x93, 0xc6, 0xf7, 0x0a, 0x46, 0xbb, 0x1f, 0xa1, 0xdd,
+    0x8f, 0x40, 0x84, 0xc7, 0xb3, 0xfc, 0x66, 0x65, 0x10, 0x4b, 0x2d, 0x9b, 0xb1, 0xf5, 0x73, 0x67,
+    0xd0, 0x10, 0xc2, 0x53, 0x7f, 0x34, 0x96, 0x37, 0x26, 0x8d, 0xe5, 0x37, 0x2b, 0x83, 0x78, 0x73,
+    0x64, 0x09, 0x93, 0xc6, 0xa4, 0xb1, 0xfc, 0x66, 0x65, 0xf0, 0x21, 0x96, 0xce, 0x31, 0xb1, 0xfc,
+    0x66, 0x65, 0x10, 0xe1, 0x59, 0x9a, 0x41, 0xe3, 0x7b, 0x85, 0x3b, 0x88, 0xa5, 0x73, 0x4c, 0xf0,
+    0xb6, 0x2c, 0xef, 0x24, 0xb6, 0xce, 0xf2, 0x29, 0x22, 0x3c, 0x70, 0x07, 0x9a, 0x9e, 0xa3, 0x81,
+    0x3b, 0xd0, 0xee, 0x47, 0x20, 0x78, 0x5b, 0x96, 0x77, 0x12, 0x42, 0xd3, 0xa9, 0x9c, 0xc6, 0xe2,
+    0x26, 0x9a, 0x10, 0xde, 0xcb, 0x38, 0x1a, 0x08, 0x4f, 0xfd, 0xd1, 0xcf, 0xd6, 0xcf, 0x9d, 0x41,
+    0xe3, 0x7b, 0x85, 0xad, 0x9f, 0x3b, 0x83, 0x86, 0xc0, 0xae, 0x59, 0x42, 0x78, 0xea, 0x8f, 0xc6,
+    0xd6, 0x59, 0x3e, 0x45, 0x2c, 0x6e, 0x62, 0x79, 0xe3, 0x0e, 0x22, 0x3c, 0x4b, 0x33, 0x68, 0x2c,
+    0xb5, 0x6c, 0x7e, 0x9a, 0xd0, 0x59, 0xc2, 0xf2, 0x9b, 0x95, 0x41, 0x4c, 0x1a, 0xdf, 0x2b, 0x84,
+    0x67, 0x69, 0x06, 0x8d, 0xa6, 0x53, 0x39, 0x8d, 0xe5, 0x37, 0x2b, 0x83, 0x60, 0xd7, 0x2c, 0xa1,
+    0xb3, 0x04, 0x76, 0xcd, 0x12, 0xc2, 0xb3, 0x34, 0x83, 0x7e, 0x88, 0xa6, 0x53, 0x39, 0x8d, 0x3b,
+    0x88, 0xce, 0xfa, 0x1f,
+];

@@ -19,13 +19,17 @@
 //!    certificado autentica o servidor para o programa, e não dá nada a
 //!    ninguém;
 //! 6. cada pedido e cada resposta, com cada `net.send` e cada `net.recv`
-//!    decidido de novo pelo gate, com a autoridade de agora.
+//!    decidido de novo pelo gate, com a autoridade de agora;
+//! 7. o corpo comprimido — `gzip` ou `deflate`, o que o pedido aceitou —
+//!    decodificado aqui, no processo, com o teto de quem pediu
+//!    (`http::codificacao`). O gate viu os bytes que passaram, e não sabe
+//!    que eram comprimidos.
 //!
 //! # O que não há aqui
 //!
 //! Nenhuma decisão. O método, a URL, o `Host`, os cabeçalhos, o status, o
-//! corpo, o redirecionamento e o *keep-alive* não viram permissão, recurso
-//! nem regra: o que este programa pode é o que o gate decide para os
+//! corpo, a compressão, o redirecionamento e o *keep-alive* não viram
+//! permissão, recurso nem regra: o que este programa pode é o que o gate decide para os
 //! pedidos de rede dele, e uma conexão aberta não leva autorização para o
 //! pedido seguinte — a revogação, a contenção, a política nova e o
 //! firewall valem no próximo `net.send` ou `net.recv`, no meio de uma
@@ -47,8 +51,8 @@ use alloc::vec::Vec;
 use core::convert::Infallible;
 
 pub use http::{
-    Categoria, Enquadramento, Erro, ErroDePedido, ErroDeUrl, Esquema, Host, Limites, Metodo,
-    Pedido, Resposta, Url, Versao,
+    Aceitas, Categoria, Codificacao, Defeito, Enquadramento, Erro, ErroDePedido, ErroDeUrl,
+    Esquema, Host, Limite, Limites, Metodo, Pedido, Resposta, Url, Versao,
 };
 
 use crate::conexao::{self, Conexao, Prazo};
@@ -97,7 +101,8 @@ pub enum Falha {
     /// falhou.
     Tls(tls::Falha),
     /// O HTTP: a conversa que acabou cedo, o protocolo, os limites, a
-    /// conexão que não leva mais pedidos.
+    /// conexão que não leva mais pedidos, o corpo comprimido que não se
+    /// decodifica.
     Http(http::Erro<Infallible>),
 }
 
@@ -128,6 +133,7 @@ fn do_http<F>(e: http::Erro<F>, baixo: impl FnOnce(F) -> Falha) -> Falha {
         http::Erro::Protocolo(m) => Falha::Http(http::Erro::Protocolo(m)),
         http::Erro::Limite(l) => Falha::Http(http::Erro::Limite(l)),
         http::Erro::Esgotada => Falha::Http(http::Erro::Esgotada),
+        http::Erro::Conteudo(d) => Falha::Http(http::Erro::Conteudo(d)),
     }
 }
 

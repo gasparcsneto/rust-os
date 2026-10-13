@@ -26,10 +26,17 @@
 //! - [`Cliente`]: manda o pedido e lê a resposta pelo [`Fluxo`] de quem
 //!   chama — com `Content-Length`, em pedaços (`chunked`) ou até o fecho —,
 //!   e reaproveita a conexão quando a resposta deixa;
-//! - [`Limites`]: a maior linha, a maior cabeça, quantos cabeçalhos e o
-//!   maior corpo — a memória não cresce na vontade do servidor;
+//! - [`Codificacao`]: o corpo comprimido — `gzip` e `deflate` —, negociado
+//!   pelo pedido ([`Aceitas`]) e decodificado aqui, com um teto fixado
+//!   antes de descomprimir ([`codificacao`]). A
+//!   compressão é do protocolo: o gate não a vê, e nada nela autoriza ou
+//!   recusa;
+//! - [`Limites`]: a maior linha, a maior cabeça, quantos cabeçalhos, o
+//!   maior corpo e o maior corpo decodificado — a memória não cresce na
+//!   vontade do servidor;
 //! - [`Erro`]: a falha de baixo como veio, a conexão que acabou cedo, o
-//!   protocolo e os limites, sem se confundirem;
+//!   protocolo, os limites e o conteúdo que não se decodifica, sem se
+//!   confundirem;
 //! - [`categoria`]: de que família é o código de uma falha — a recusa do
 //!   gate, a contenção, o firewall, o DNS, o transporte, o prazo, o TLS, a
 //!   conversa que acabou cedo, o protocolo, os limites —, para quem se
@@ -38,8 +45,9 @@
 //!
 //! # O que fica de fora, de propósito
 //!
-//! HTTP/2 e HTTP/3, pedidos em fila, compressão, cookies, autenticação,
-//! *proxy* e seguir redirecionamento sozinho: uma resposta `3xx` volta a
+//! HTTP/2 e HTTP/3, pedidos em fila, cookies, autenticação, *proxy*, a
+//! compressão do pedido, o `Transfer-Encoding` que não é `chunked`, o
+//! Brotli e seguir redirecionamento sozinho: uma resposta `3xx` volta a
 //! quem chama com o `Location`, e ir até lá é outro pedido — outro nome no
 //! DNS, outro destino no gate.
 
@@ -49,17 +57,22 @@ extern crate alloc;
 
 mod categoria;
 mod cliente;
+pub mod codificacao;
 mod erro;
+mod inflar;
 mod pedido;
 mod resposta;
 mod url;
 
 #[cfg(test)]
 mod testes;
+#[cfg(test)]
+mod testes_da_codificacao;
 
 pub use categoria::{Categoria, categoria};
 pub use cliente::{Cliente, Fluxo};
-pub use erro::{Erro, Limite, Motivo};
+pub use codificacao::{Aceitas, Codificacao};
+pub use erro::{Defeito, Erro, Limite, Motivo};
 pub use pedido::{ErroDePedido, Metodo, Pedido};
 pub use resposta::{Enquadramento, Limites, Resposta, Versao};
 pub use url::{ErroDeUrl, Esquema, Host, MAIOR_URL, Url};

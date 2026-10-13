@@ -13,6 +13,11 @@
 # delimitar o corpo —, e o que importa nele é o que se recusa, que um
 # pacote de fora decide por quem o escreveu.
 #
+# A descompressão do corpo também (`src/codificacao.rs`, `src/inflar.rs`):
+# o gzip, o zlib e o DEFLATE que eles levam são lidos aqui, com o teto de
+# quem chama, e o pacote continua sem dependência nenhuma — o `xtask`
+# confere.
+#
 # `no_std` com `alloc`, como o `tls`: compila para os programas.
 name = "http"
 version = "0.1.0"

@@ -37,7 +37,9 @@ pub enum Categoria {
     /// A conversa acabou antes da hora: o servidor fechou no meio da
     /// resposta, ou a conexão não leva mais pedidos.
     Fechada,
-    /// O que chegou não é HTTP/1.1.
+    /// O que chegou não é HTTP/1.1 que se leia: a mensagem, ou o corpo na
+    /// codificação que ela diz ter — uma que o pedido não aceitou, ou um
+    /// comprimido que não se decodifica.
     Protocolo,
     /// A resposta passou de um limite de quem pediu.
     Limite,
@@ -85,7 +87,9 @@ pub fn categoria(codigo: &str) -> Categoria {
         // no meio da resposta.
         "TLS_INTERRUPTED" | "HTTP_CLOSED" | "HTTP_CONNECTION_SPENT" => Categoria::Fechada,
         c if c.starts_with("TLS_") => Categoria::Tls,
-        "HTTP_MALFORMED" => Categoria::Protocolo,
+        "HTTP_MALFORMED" | "HTTP_UNACCEPTED_ENCODING" | "HTTP_CORRUPT_CONTENT" => {
+            Categoria::Protocolo
+        }
         "HTTP_TOO_LARGE" => Categoria::Limite,
         "INVALID_REQUEST" | "INVALID_ARGUMENT" => Categoria::Pedido,
         _ => Categoria::Local,
@@ -125,6 +129,8 @@ mod testes {
             ("HTTP_CLOSED", Categoria::Fechada),
             ("HTTP_CONNECTION_SPENT", Categoria::Fechada),
             ("HTTP_MALFORMED", Categoria::Protocolo),
+            ("HTTP_UNACCEPTED_ENCODING", Categoria::Protocolo),
+            ("HTTP_CORRUPT_CONTENT", Categoria::Protocolo),
             ("HTTP_TOO_LARGE", Categoria::Limite),
             ("INVALID_REQUEST", Categoria::Pedido),
             ("INVALID_ARGUMENT", Categoria::Pedido),

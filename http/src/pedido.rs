@@ -8,13 +8,16 @@
 //! um cabeçalho desses vindo de quem chama — um segundo `Content-Length`,
 //! um `Transfer-Encoding` — faria o servidor ler o pedido de um jeito e o
 //! cliente o escrever de outro, que é como se contrabandeia um pedido
-//! dentro de outro. Quem chama acrescenta os outros, e cada um é conferido:
-//! o nome é um *token*, e o valor não tem CR, LF nem NUL — sem isso, um
-//! valor com `\r\n` seria uma linha nova.
+//! dentro de outro. O `Accept-Encoding` também: ele diz o que o cliente
+//! decodifica ([`Pedido::aceitas`]), e um escrito por quem chama pediria o
+//! que o cliente não decodifica. Quem chama acrescenta os outros, e cada um
+//! é conferido: o nome é um *token*, e o valor não tem CR, LF nem NUL — sem
+//! isso, um valor com `\r\n` seria uma linha nova.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use crate::codificacao::Aceitas;
 use crate::url::Url;
 
 /// Os métodos que o cliente pede.
@@ -61,7 +64,7 @@ pub enum ErroDePedido {
 }
 
 /// Os cabeçalhos que só este pacote escreve.
-const RESERVADOS: [&str; 10] = [
+const RESERVADOS: [&str; 11] = [
     "host",
     "content-length",
     "transfer-encoding",
@@ -72,6 +75,7 @@ const RESERVADOS: [&str; 10] = [
     "te",
     "trailer",
     "expect",
+    "accept-encoding",
 ];
 
 /// Quantos cabeçalhos quem chama pode pôr.
@@ -95,6 +99,10 @@ pub struct Pedido {
     /// Pede ao servidor que feche a conexão depois da resposta
     /// (`Connection: close`): a conexão não leva outro pedido.
     pub fechar: bool,
+    /// As codificações de conteúdo que o pedido aceita
+    /// (`Accept-Encoding`), e que o cliente decodifica — todas, a menos que
+    /// quem chama diga outra coisa. Ver [`crate::codificacao`].
+    pub aceitas: Aceitas,
 }
 
 impl Pedido {
@@ -106,6 +114,7 @@ impl Pedido {
             cabecalhos: Vec::new(),
             corpo: Vec::new(),
             fechar: false,
+            aceitas: Aceitas::TODAS,
         }
     }
 
@@ -146,6 +155,8 @@ impl Pedido {
         s.push_str(&self.url.alvo);
         s.push_str(" HTTP/1.1\r\nHost: ");
         s.push_str(&self.url.autoridade());
+        s.push_str("\r\nAccept-Encoding: ");
+        s.push_str(self.aceitas.cabecalho());
         s.push_str("\r\n");
         for (nome, valor) in &self.cabecalhos {
             s.push_str(nome);
@@ -183,12 +194,12 @@ mod testes {
         let p = pedido(Metodo::Get, "http://bancada.duke/ola?x=1#f");
         assert_eq!(
             texto(&p),
-            "GET /ola?x=1 HTTP/1.1\r\nHost: bancada.duke\r\n\r\n"
+            "GET /ola?x=1 HTTP/1.1\r\nHost: bancada.duke\r\nAccept-Encoding: gzip, deflate\r\n\r\n"
         );
         let p = pedido(Metodo::Head, "https://bancada.duke:8443/");
         assert_eq!(
             texto(&p),
-            "HEAD / HTTP/1.1\r\nHost: bancada.duke:8443\r\n\r\n"
+            "HEAD / HTTP/1.1\r\nHost: bancada.duke:8443\r\nAccept-Encoding: gzip, deflate\r\n\r\n"
         );
     }
 
@@ -200,8 +211,8 @@ mod testes {
         p.fechar = true;
         assert_eq!(
             texto(&p),
-            "POST /eco HTTP/1.1\r\nHost: 10.0.2.100\r\nContent-Type: text/plain\r\n\
-             Content-Length: 3\r\nConnection: close\r\n\r\nabc"
+            "POST /eco HTTP/1.1\r\nHost: 10.0.2.100\r\nAccept-Encoding: gzip, deflate\r\n\
+             Content-Type: text/plain\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabc"
         );
         // Sem corpo, o POST diz zero.
         let p = pedido(Metodo::Post, "http://10.0.2.100/eco");
@@ -229,6 +240,7 @@ mod testes {
             "CONNECTION",
             "Upgrade",
             "Expect",
+            "Accept-Encoding",
         ] {
             assert_eq!(
                 p.cabecalho(reservado, "x"),
@@ -242,5 +254,39 @@ mod testes {
             p.cabecalho(&alloc::format!("X-{i}"), "v").unwrap();
         }
         assert_eq!(p.cabecalho("X-Demais", "v"), Err(ErroDePedido::Grande));
+    }
+
+    #[test]
+    fn o_accept_encoding_diz_o_que_o_cliente_decodifica() {
+        for (aceitas, valor) in [
+            (Aceitas::TODAS, "gzip, deflate"),
+            (
+                Aceitas {
+                    gzip: true,
+                    deflate: false,
+                },
+                "gzip",
+            ),
+            (
+                Aceitas {
+                    gzip: false,
+                    deflate: true,
+                },
+                "deflate",
+            ),
+            // Sem o cabeçalho, o servidor poderia mandar qualquer uma.
+            (Aceitas::NENHUMA, "identity"),
+        ] {
+            let mut p = pedido(Metodo::Get, "http://h/");
+            p.aceitas = aceitas;
+            let t = texto(&p);
+            assert!(
+                t.contains(&alloc::format!("\r\nAccept-Encoding: {valor}\r\n")),
+                "{t:?}"
+            );
+            assert_eq!(t.matches("Accept-Encoding").count(), 1, "{t:?}");
+        }
+        // O padrão aceita as duas.
+        assert_eq!(pedido(Metodo::Get, "http://h/").aceitas, Aceitas::TODAS);
     }
 }
