@@ -6565,6 +6565,7 @@ fn conversar(
     sob_interface_nativa(arch, &mut escrita, &mut leitor)?;
     sob_o_armazem(arch, &mut escrita, &mut leitor)?;
     sob_a_rede(arch, &mut escrita, &mut leitor)?;
+    sob_o_plano_de_dados(arch, &mut escrita, &mut leitor)?;
     sob_o_codigo(arch, &mut escrita, &mut leitor)?;
     sob_agentes(arch)?;
     sob_sigilo(arch)?;
@@ -10746,6 +10747,173 @@ fn sob_a_rede(
     let enviados = campo_simples(&info, "frames_sent").unwrap_or_default();
     println!(
         "  [rede] medido  a maior espera por uma transmissao: {espera} voltas, em {enviados} quadros"
+    );
+    Ok(())
+}
+
+/// As contas do orçamento do gate que a fumaça do plano de dados lê, na
+/// ordem: as decisões de controle, de dados e de fecho, as recusas por
+/// taxa, as esperas pelo caminho da auditoria, os registros que saíram do
+/// anel antes do journal, e os bytes lidos e mandados pelo plano de dados.
+const CONTAS_DO_ORCAMENTO: [&[&str]; 8] = [
+    &["budget", "control_decisions"],
+    &["budget", "data_decisions"],
+    &["budget", "release_decisions"],
+    &["budget", "rate_limited"],
+    &["budget", "audit_waits", "deferred"],
+    &["budget", "audit_backlog", "lost"],
+    &["budget", "throughput", "bytes_received"],
+    &["budget", "throughput", "bytes_sent"],
+];
+
+/// As [`CONTAS_DO_ORCAMENTO`] de uma resposta de `security.metrics`.
+fn contas_do_orcamento(metricas: &str) -> Result<[u64; 8], String> {
+    let mut contas = [0; 8];
+    for (conta, caminho) in contas.iter_mut().zip(CONTAS_DO_ORCAMENTO) {
+        *conta = numero_no_caminho(metricas, caminho).ok_or_else(|| {
+            format!(
+                "dados: o security.metrics nao disse {}\n  {metricas}",
+                caminho.join(".")
+            )
+        })?;
+    }
+    Ok(contas)
+}
+
+/// O plano de dados no kernel de produção, com a política padrão tal como
+/// ela é e o journal levando a auditoria — ver "O plano de dados" no
+/// README. O agente da porta 2, do papel `operador`, lança o `vazao`, que
+/// traz 5 MiB do HTTP da bancada, claro e cifrado, e a `carga`, que passa
+/// 1 MiB de ida e volta por quatro conexões com o eco ao mesmo tempo. Cada
+/// `net.send` e cada `net.recv` deles é uma decisão do gate, gravada; e
+/// nenhuma gasta a ficha do papel — antes da separação, o operador ouvia
+/// `RATE_LIMIT` no meio do segundo MiB. Os dois saírem com o código deles
+/// é a prova: uma recusa no meio derrubaria a transferência. Daqui, a vazão
+/// que o benchmark compara, e as contas do orçamento — com nenhum registro
+/// da auditoria perdido.
+fn sob_o_plano_de_dados(
+    arch: Arquitetura,
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+) -> Result<(), String> {
+    println!("[xtask] fumaça: o plano de dados, pelo operador, com a política padrão");
+    // Fora da faixa dos `id` do aperto, que começam com 9 e `ler_resposta`
+    // pula.
+    let mut id = 5300;
+    let mut pedir = |metodo: &str, params: &str| -> Result<String, String> {
+        id += 1;
+        escrita
+            .write_all(
+                format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"{metodo}","params":{params}}}"#)
+                    .as_bytes(),
+            )
+            .and_then(|()| escrita.write_all(b"\n"))
+            .and_then(|()| escrita.flush())
+            .map_err(|e| format!("dados: falha ao pedir `{metodo}`: {e}"))?;
+        let resposta = ler_resposta(leitor).map_err(|e| format!("dados: {e}"))?;
+        if !e_a_resposta(&resposta, id) {
+            return Err(format!(
+                "dados: veio a resposta de outro pedido\n  {resposta}"
+            ));
+        }
+        Ok(resposta)
+    };
+    let antes = contas_do_orcamento(&pedir("security.metrics", "{}")?)?;
+    let comeco = std::time::Instant::now();
+    let mut operador = AgenteNaPorta::conectar(arch, 2)?;
+    let mut medidas = Vec::new();
+    // O programa, o código de quando tudo conferiu, os das falhas dele, e o
+    // teto — folgado para o ARM de depuração.
+    for (programa, saida, falhas, teto) in
+        [("vazao", 95, 53..=55, 300), ("carga", 96, 56..=59, 120)]
+    {
+        let lancado = operador.pedir(
+            "user.run",
+            &format!(r#"{{"path":"/programas/{}/{programa}"}}"#, arch.nome()),
+        )?;
+        if !lancado.contains(r#""launched":true"#) {
+            return Err(format!(
+                "dados: o operador nao lancou o {programa}\n  {lancado}"
+            ));
+        }
+        let lancado_em = std::time::Instant::now();
+        let limite = lancado_em + Duration::from_secs(teto);
+        let marca = format!("{programa}: ");
+        let mut ditas: Vec<String> = Vec::new();
+        loop {
+            let log = pedir("log.tail", r#"{"count":32}"#)?;
+            for pedaco in log.split(&marca).skip(1) {
+                let linha = format!("{marca}{}", pedaco.split('"').next().unwrap_or(""));
+                if !ditas.contains(&linha) {
+                    ditas.push(linha);
+                }
+            }
+            if log.contains(&format!("processo encerrou com codigo {saida}")) {
+                break;
+            }
+            // Saiu com um dos códigos de falha dele: o que ele disse diz o
+            // quê — uma recusa por taxa, por exemplo —, sem esperar o teto.
+            let falhou = log
+                .split("processo encerrou com codigo ")
+                .skip(1)
+                .filter_map(|r| r.split('"').next()?.parse::<u32>().ok())
+                .find(|c| falhas.contains(c));
+            if let Some(codigo) = falhou {
+                return Err(format!(
+                    "dados: o {programa} do operador saiu com {codigo}\n  {}",
+                    ditas.join("\n  ")
+                ));
+            }
+            if std::time::Instant::now() > limite {
+                return Err(format!(
+                    "dados: o {programa} do operador nao terminou em {teto} s\n  {}",
+                    ditas.join("\n  ")
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        println!(
+            "  [dados] ok  o {programa} do operador saiu com {saida} em {} ms",
+            lancado_em.elapsed().as_millis()
+        );
+        medidas.extend(ditas.into_iter().filter(|l| l.contains(" ms")));
+    }
+    drop(operador);
+    let metricas = pedir("security.metrics", "{}")?;
+    let depois = contas_do_orcamento(&metricas)?;
+    // As decisões de controle da própria fumaça: cada pedido pela serial
+    // depois do primeiro — as leituras do log, e esta.
+    let da_fumaca = id - 5301;
+    let [controle, dados, fecho, taxa, adiados, _, lidos, mandados] =
+        std::array::from_fn(|i| depois[i].saturating_sub(antes[i]));
+    // Nenhum registro da auditoria saiu do anel antes do journal — desde o
+    // boot, e não só nesta perna.
+    let perdidos = depois[5];
+    if perdidos != 0 {
+        return Err(format!(
+            "dados: {perdidos} registros da auditoria sairam do anel antes do journal"
+        ));
+    }
+    println!(
+        "  [dados] ok  5 MiB e 4 conexoes do operador, cada envio e cada leitura decididos e gravados, sem a ficha do papel; nenhum registro perdido"
+    );
+    for medida in &medidas {
+        println!("  [dados] medido  {medida}");
+    }
+    println!(
+        "  [dados] medido  {dados} decisoes de dados e {fecho} de fecho em {} ms; {controle} de controle no sistema todo, {da_fumaca} delas as leituras do log pela serial; {taxa} recusas por taxa; {adiados} esperas pela auditoria, o maior atraso dela {} registros; {} KiB lidos e {} KiB mandados",
+        comeco.elapsed().as_millis(),
+        numero_no_caminho(&metricas, &["budget", "audit_backlog", "max"]).unwrap_or(0),
+        lidos / 1024,
+        mandados / 1024
+    );
+    // O NSF lê a mesma auditoria, no ritmo dele: a saúde dele depois da
+    // transferência.
+    let saude = apos(&metricas, r#""health":"#).unwrap_or("");
+    println!(
+        "  [dados] medido  o NSF depois: {}, atraso de {} registros",
+        campo_simples(saude, "state").unwrap_or_default(),
+        numero_no_caminho(saude, &["backlog"]).unwrap_or(0)
     );
     Ok(())
 }
