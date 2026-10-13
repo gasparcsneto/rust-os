@@ -163,6 +163,9 @@ fn auditoria_foi_gravada(ate: u64, elo: [u8; 32]) {
         *ELO_GRAVADO.lock() = elo;
         AUDITORIA_GRAVADA.store(ate, Ordering::Release);
     });
+    // O journal é um dos consumidores do caminho da auditoria: quem espera
+    // por lugar nele confere de novo — ver `crate::oleoduto`.
+    crate::oleoduto::avancou();
 }
 
 /// A cadeia que o journal refaz no boot, enquanto ele é lido. Ela só vira
@@ -243,6 +246,18 @@ fn com<R>(f: impl FnOnce(&mut Persistencia) -> R) -> R {
 /// O estado da persistência.
 pub fn estado() -> Estado {
     com(|p| p.estado)
+}
+
+/// O journal está levando a auditoria do anel: a persistência está de pé
+/// e — na suíte — a gravação periódica não está pausada. É um dos
+/// consumidores do caminho da auditoria, e até onde ele levou é
+/// [`auditoria_gravada`] — ver `crate::oleoduto`.
+pub fn drenando() -> bool {
+    #[cfg(feature = "modo-teste")]
+    if AUDITORIA_PAUSADA.load(Ordering::Acquire) {
+        return false;
+    }
+    estado() == Estado::Disponivel
 }
 
 /// A geração administrativa em vigor.
@@ -1246,6 +1261,7 @@ fn gravar_sozinho(tipo_do_registro: u16, dados: &[u8], decisao: u64) -> Result<(
             // O conteúdo pode ter o corpo de uma mensagem.
             politica::sigiloso::zerar_bloco(&mut conteudo);
             gravado?;
+            contar_a_lacuna(&a);
             auditoria_foi_gravada(a.ate, a.elo);
             return Ok(());
         }
@@ -1260,7 +1276,19 @@ fn gravar_sozinho(tipo_do_registro: u16, dados: &[u8], decisao: u64) -> Result<(
             return Err("a decisao da operacao nao cabe no registro dela");
         }
         gravar_um(tipo::AUDITORIA, &antes.campos)?;
+        contar_a_lacuna(&antes);
         auditoria_foi_gravada(antes.ate, antes.elo);
+    }
+}
+
+/// A lacuna que foi para o journal entra na conta da auditoria perdida —
+/// ver `security.metrics`.
+fn contar_a_lacuna(a: &DaAuditoria) {
+    if let Some((primeira, ultima)) = a.perdidas {
+        crate::metricas::AUDITORIA_PERDIDA.fetch_add(
+            ultima.saturating_sub(primeira).saturating_add(1),
+            Ordering::Relaxed,
+        );
     }
 }
 
@@ -1303,12 +1331,25 @@ pub fn pausar_a_auditoria_de_teste(pausada: bool) {
     AUDITORIA_PAUSADA.store(pausada, Ordering::Release);
 }
 
+/// Só na suíte: o journal segurado — de pé, e o consumidor do caminho da
+/// auditoria, mas sem gravar: o disco que demora. Diferente da pausa, que
+/// tira o journal do caminho; segurado, ele continua nele, parado.
+#[cfg(feature = "modo-teste")]
+static AUDITORIA_SEGURADA: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Só para a suíte: segura ou solta o journal — ver [`AUDITORIA_SEGURADA`].
+#[cfg(feature = "modo-teste")]
+pub fn segurar_a_auditoria_de_teste(segurada: bool) {
+    AUDITORIA_SEGURADA.store(segurada, Ordering::Release);
+}
+
 /// Chamada pelo coletor: grava a auditoria pendente a cada
 /// [`INTERVALO_DA_AUDITORIA_MS`], ou antes, se ela já ocupa meio anel.
 pub fn gravar_auditoria_se_preciso() {
     static ULTIMA: AtomicU64 = AtomicU64::new(0);
     #[cfg(feature = "modo-teste")]
-    if AUDITORIA_PAUSADA.load(Ordering::Acquire) {
+    if AUDITORIA_PAUSADA.load(Ordering::Acquire) || AUDITORIA_SEGURADA.load(Ordering::Acquire) {
         return;
     }
     if estado() != Estado::Disponivel {
@@ -1321,7 +1362,11 @@ pub fn gravar_auditoria_se_preciso() {
     if pendentes == 0 {
         return;
     }
+    // Com um pedido de dados esperando lugar no caminho da auditoria, o
+    // coletor grava sem esperar: é ele quem faz o journal andar — ver
+    // `crate::oleoduto`.
     if pendentes < AUDITORIA_QUE_NAO_ESPERA
+        && !crate::oleoduto::ha_quem_espere()
         && agora.saturating_sub(ULTIMA.load(Ordering::Relaxed)) < INTERVALO_DA_AUDITORIA_MS
     {
         return;
@@ -2551,6 +2596,49 @@ fn repor_de_teste(c: &mut Cadeia, r: &diario::Registro) -> Result<(), &'static s
         }
     }
     Ok(())
+}
+
+/// Só para a suíte: o que o journal tem da auditoria — um registro, com o
+/// número e o evento, ou uma lacuna, com o primeiro e o último que ela
+/// pula.
+#[cfg(feature = "modo-teste")]
+pub enum AuditoriaNoJournal {
+    Registro(u64, politica::auditoria::Evento),
+    Lacuna(u64, u64),
+}
+
+/// Só para a suíte: a auditoria do journal, na ordem em que está no disco,
+/// entregue a `f` um item de cada vez — sem guardar o journal no heap, que
+/// não o comporta inteiro.
+#[cfg(feature = "modo-teste")]
+pub fn percorrer_a_auditoria_de_teste(
+    mut f: impl FnMut(AuditoriaNoJournal),
+) -> Result<(), &'static str> {
+    let (chave, _) = segredos().ok_or("sem a chave do Duke")?;
+    let mut meio = regiao_atual()?;
+    diario::percorrer(&mut meio, &chave, |r| {
+        for e in entradas(&r)? {
+            let campos = estado::ler_campos(e)?;
+            match campos.as_slice() {
+                [t, ev] if *t == tipo::AUDITORIA_EVENTO.to_le_bytes() => {
+                    let (seq, evento) = politica::auditoria::decodificar(ev)?;
+                    f(AuditoriaNoJournal::Registro(seq, evento));
+                }
+                [t, primeira, ultima, _] if *t == tipo::AUDITORIA_LACUNA.to_le_bytes() => {
+                    f(AuditoriaNoJournal::Lacuna(
+                        u64_de(primeira)?,
+                        u64_de(ultima)?,
+                    ));
+                }
+                _ => {}
+            }
+        }
+        Ok::<(), &'static str>(())
+    })
+    .map(|_| ())
+    .map_err(|e| match e {
+        diario::Interrompido::Meio(m) | diario::Interrompido::Recusado { motivo: m, .. } => m,
+    })
 }
 
 /// A região em que o journal mora, para ler.

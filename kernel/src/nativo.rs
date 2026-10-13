@@ -370,8 +370,16 @@ fn responder(
         autorizacao::auditar_invalido(chamador, comando.nome, requisicao.params.0, campo);
         return protocol::envelope_erro(w, requisicao.id, RpcError::PARAMS_INVALIDOS, Some(campo));
     }
-    let licenca = match autorizacao::autorizar(chamador, comando, requisicao.params) {
-        Ok(l) => l,
+    let licenca = match autorizacao::autorizar(chamador, comando, requisicao.params, permitir) {
+        Ok(autorizacao::Decisao::Licenca(l)) => l,
+        // Adiado pelo caminho da auditoria: como um comando que suspendeu,
+        // o pedido fica, e é executado de novo, pelo gate, quando a espera
+        // acabar — ver `crate::oleoduto`.
+        Ok(autorizacao::Decisao::Adiada(e)) => {
+            *espera = Some(e);
+            politica::sigiloso::zerar_bloco(&mut anexo);
+            return Ok(());
+        }
         Err(recusa) => return protocol::envelope_recusa(w, requisicao.id, &recusa),
     };
     let r = protocol::envelope_ok(w, requisicao.id, |w| {

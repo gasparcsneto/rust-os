@@ -60,7 +60,7 @@ use politica::{Codigo, Permissao, Politica};
 use crate::agent::json::{Json, JsonWriter};
 use alloc::vec::Vec;
 
-use crate::agent::registry::{Acesso, Command, Mais};
+use crate::agent::registry::{Acesso, Command, Mais, Plano};
 
 /// Onde a política mora no disco.
 pub const CAMINHO_DA_POLITICA: &str = "/etc/duke/politica";
@@ -107,7 +107,7 @@ const BALDES: usize = 16;
 /// qualquer porta, continua com o que tinha.
 #[derive(Clone, Copy)]
 struct BaldeDe {
-    dono: DonoDaTaxa,
+    dono: Principal,
     balde: Balde,
     /// Pedidos recusados por taxa desde o último registro de taxa: a
     /// auditoria grava o primeiro e soma os seguintes, para uma enxurrada
@@ -117,15 +117,16 @@ struct BaldeDe {
     uso_ms: u64,
 }
 
-/// De quem é um balde: o principal que pede.
+/// O principal que pede: de quem é um balde da taxa, e de quem é a conta
+/// no caminho da auditoria — ver [`crate::oleoduto`].
 ///
 /// Uma pessoa e o sistema não têm taxa no que pedem por si — ninguém digita
 /// na velocidade de uma máquina, e o sistema não pede pelo canal. Mas um
 /// **programa** por eles pede na velocidade de uma máquina, e cada decisão
 /// vai para a auditoria e para o journal: o processo de uma pessoa gasta o
 /// balde da sessão dela, e o do sistema, o do sistema.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum DonoDaTaxa {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Principal {
     /// A chave do agente, ou `None` para a serial.
     Chave(Option<[u8; 32]>),
     /// Os processos lançados na sessão desta pessoa.
@@ -135,6 +136,24 @@ enum DonoDaTaxa {
     /// Um serviço — o tecido de segurança: o balde é dele, e não o do
     /// sistema.
     Servico,
+}
+
+impl Principal {
+    /// Como `security.metrics` o escreve: o agente e a pessoa pelos
+    /// primeiros bytes da chave e da sessão, como o firewall os escreve.
+    pub fn texto(&self) -> String {
+        match self {
+            Principal::Chave(None) => String::from("serial"),
+            Principal::Chave(Some(k)) => {
+                alloc::format!("agent:{:02x}{:02x}{:02x}{:02x}", k[0], k[1], k[2], k[3])
+            }
+            Principal::Pessoa(s) => {
+                alloc::format!("person:{:02x}{:02x}{:02x}{:02x}", s[0], s[1], s[2], s[3])
+            }
+            Principal::Sistema => String::from("system"),
+            Principal::Servico => String::from("service"),
+        }
+    }
 }
 
 struct Taxas {
@@ -1104,6 +1123,36 @@ struct Taxada {
     espera_ms: u64,
 }
 
+/// O principal de `quem` para a taxa: o balde de quem ele gasta. `None`
+/// para quem não tem taxa — a pessoa e o sistema no que pedem por si.
+///
+/// Uma sessão de qualquer canal do agente — a serial, uma porta, uma vaga
+/// do TCP — gasta do balde da chave: o transporte não muda quem pede.
+fn principal_da_taxa(quem: &Quem) -> Option<Principal> {
+    if quem.titular == Titular::Servico {
+        Some(Principal::Servico)
+    } else if crate::agent::sessao::Canal::da_sessao(quem.sessao).is_some() {
+        Some(Principal::Chave(quem.chave))
+    } else if quem.processo.is_some() {
+        Some(match quem.sessao_de_pessoa {
+            Some(sessao) => Principal::Pessoa(sessao),
+            None => Principal::Sistema,
+        })
+    } else {
+        None
+    }
+}
+
+/// O principal de `quem` no caminho da auditoria: o mesmo da taxa, e a
+/// pessoa e o sistema também no que pedem por si — o registro de uma
+/// decisão de dados ocupa o caminho igual, venha de quem vier.
+fn principal_da_capacidade(quem: &Quem) -> Principal {
+    principal_da_taxa(quem).unwrap_or(match quem.sessao_de_pessoa {
+        Some(sessao) => Principal::Pessoa(sessao),
+        None => Principal::Sistema,
+    })
+}
+
 fn passar_pela_taxa(quem: &Quem, metodo: &str, parametros: &[u8]) -> Result<(), Taxada> {
     let Some(papel) = quem.papel.as_deref() else {
         // Sem papel não há taxa a aplicar: a decisão vai recusar.
@@ -1115,19 +1164,8 @@ fn passar_pela_taxa(quem: &Quem, metodo: &str, parametros: &[u8]) -> Result<(), 
     };
     // O principal: a chave do agente, ou a serial. A pessoa e o sistema não
     // têm taxa no que pedem por si — só no que os programas deles pedem.
-    // Ver [`DonoDaTaxa`]. Uma sessão de qualquer canal do agente — a
-    // serial, uma porta, uma vaga do TCP — gasta do balde da chave: o
-    // transporte não muda quem pede.
-    let dono = if quem.titular == Titular::Servico {
-        DonoDaTaxa::Servico
-    } else if crate::agent::sessao::Canal::da_sessao(quem.sessao).is_some() {
-        DonoDaTaxa::Chave(quem.chave)
-    } else if quem.processo.is_some() {
-        match quem.sessao_de_pessoa {
-            Some(sessao) => DonoDaTaxa::Pessoa(sessao),
-            None => DonoDaTaxa::Sistema,
-        }
-    } else {
+    // Ver [`Principal`].
+    let Some(dono) = principal_da_taxa(quem) else {
         return Ok(());
     };
     let agora = crate::tempo::uptime_ms();
@@ -1801,29 +1839,118 @@ impl Recusa {
     }
 }
 
+/// O que o gate fez de um pedido que não recusou.
+///
+/// A licença vai por valor, uma por pedido, e é consumida na hora por quem
+/// despachou: numa caixa, seria uma alocação do heap a cada decisão.
+#[allow(clippy::large_enum_variant)]
+pub enum Decisao {
+    /// Decidido e gravado: a licença para executar.
+    Licenca(Autorizado),
+    /// Um pedido do plano de dados, com `wait`, que o gate autorizaria e
+    /// que o caminho da auditoria não tem lugar para registrar agora:
+    /// **não** foi gravado nem executado, e a decisão de agora não vale
+    /// para depois. Quem despachou guarda a espera, como guarda a que um
+    /// comando arma, e quando ela acaba executa o pedido de novo, inteiro,
+    /// por este gate — ver [`crate::oleoduto`].
+    Adiada(crate::rede::espera::Espera),
+}
+
+/// O orçamento que um pedido consome — ver `registry::Plano`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Orcamento {
+    /// O exercício de autoridade: a ficha da taxa do papel.
+    Taxa,
+    /// Dados por um recurso já aberto do principal: a capacidade do
+    /// caminho da auditoria.
+    Dados(Principal),
+    /// O fecho de um recurso já aberto do principal: nada — fechar devolve
+    /// capacidade, e a ficha gasta não prende o recurso aberto.
+    Fecho(Principal),
+}
+
+/// O orçamento do pedido de `quem`, antes da decisão.
+///
+/// O plano do comando sozinho não basta: um pedido só sai da taxa do papel
+/// quando é sobre um recurso **já aberto** de quem pede — o número
+/// resolve, para ele, numa conexão viva dele (ou, para fechar, numa que o
+/// firewall cortou) —, e quem pede não está contido. O número de outro
+/// titular, o que não existe e o pedido de um contido seguem o caminho de
+/// todo exercício de autoridade: a taxa, e depois a contenção. E o pedido
+/// que passa daqui ainda tem de ser autorizado: o que o gate recusa paga
+/// a ficha depois da decisão — ver [`decidir_o_pedido`].
+fn orcamento_do_pedido(
+    chamador: Chamador,
+    autoridade: Autoridade,
+    quem: &Quem,
+    comando: &Command,
+    params: Json,
+) -> Orcamento {
+    let cortada_vale = match comando.plano {
+        Plano::Controle => return Orcamento::Taxa,
+        Plano::Dados => false,
+        Plano::Fecho => true,
+    };
+    // O recurso aberto, pelo número que a abertura devolveu. Hoje, a
+    // conexão — o único recurso que se abre e se usa por número.
+    if comando.recurso != Some(crate::rede::conexoes::PARAMETRO) {
+        return Orcamento::Taxa;
+    }
+    if crate::contencao::recusa(chamador, autoridade).is_some() {
+        return Orcamento::Taxa;
+    }
+    let dono = crate::rede::conexoes::Dono::do_chamador(chamador, quem.chave);
+    let numero = params
+        .member(crate::rede::conexoes::PARAMETRO)
+        .and_then(|v| v.as_u64());
+    if !crate::rede::conexoes::aberta(numero, &dono, cortada_vale) {
+        return Orcamento::Taxa;
+    }
+    let principal = principal_da_capacidade(quem);
+    match comando.plano {
+        Plano::Fecho => Orcamento::Fecho(principal),
+        _ => Orcamento::Dados(principal),
+    }
+}
+
+/// Decide um pedido: `Ok` com a licença, ou com o adiamento de um pedido
+/// de dados que pode esperar (`pode_adiar`: quem despachou sabe esperar, e
+/// esta é a primeira execução dele); `Err` com a recusa.
 pub fn autorizar(
     chamador: Chamador,
     comando: &'static Command,
     params: Json,
-) -> Result<Autorizado, Recusa> {
+    pode_adiar: bool,
+) -> Result<Decisao, Recusa> {
     // O custo da decisão — do pedido à licença, sem o handler —, para
     // `security.metrics`. Nada daqui volta para a decisão.
     let inicio = crate::arch::ciclos();
-    let r = decidir_o_pedido(chamador, comando, params);
+    let mut orcamento = Orcamento::Taxa;
+    let r = decidir_o_pedido(chamador, comando, params, pode_adiar, &mut orcamento);
     let codigo = match &r {
-        Ok(_) => Codigo::Allow,
+        // Adiado não é decisão: nada foi decidido nem gravado.
+        Ok(Decisao::Adiada(_)) => return r,
+        Ok(Decisao::Licenca(_)) => Codigo::Allow,
         Err(recusa) => recusa.codigo,
     };
     crate::metricas::decisao(codigo, crate::metricas::desde(inicio));
+    crate::metricas::decisao_do_plano(match orcamento {
+        Orcamento::Taxa => Plano::Controle,
+        Orcamento::Dados(_) => Plano::Dados,
+        Orcamento::Fecho(_) => Plano::Fecho,
+    });
     r
 }
 
-/// A decisão de [`autorizar`], sem a medida.
+/// A decisão de [`autorizar`], sem a medida. `orcamento` sai com o que o
+/// pedido consumiu.
 fn decidir_o_pedido(
     chamador: Chamador,
     comando: &'static Command,
     params: Json,
-) -> Result<Autorizado, Recusa> {
+    pode_adiar: bool,
+    orcamento: &mut Orcamento,
+) -> Result<Decisao, Recusa> {
     let parametros = params.0;
     let exigida = match comando.acesso {
         Acesso::Exige(p) => Some(p),
@@ -1952,17 +2079,26 @@ fn decidir_o_pedido(
         crate::log_warn!("autorizacao", "credencial recusada: {}", motivo);
         return Err(recusa(Codigo::DenyNotAuthenticated, &quem, "", detalhe, d));
     }
-    if let Err(t) = passar_pela_taxa(&quem, comando.nome, parametros) {
-        return Err(Recusa {
-            espera_ms: Some(t.espera_ms),
-            ..recusa(
-                Codigo::RateLimit,
-                &quem,
-                "",
-                "taxa do papel esgotada",
-                t.decisao,
-            )
-        });
+    // A recusa por taxa: a ficha do papel acabou.
+    let taxa_esgotada = |t: Taxada, quem: &Quem| Recusa {
+        espera_ms: Some(t.espera_ms),
+        ..recusa(
+            Codigo::RateLimit,
+            quem,
+            "",
+            "taxa do papel esgotada",
+            t.decisao,
+        )
+    };
+    // O orçamento — ver [`orcamento_do_pedido`]. O exercício de autoridade
+    // paga a ficha do papel aqui, antes de tudo, como sempre. O pedido sobre
+    // um recurso já aberto de quem pede só tem o orçamento dele depois da
+    // decisão: é só o que o gate autoriza que sai da taxa.
+    *orcamento = orcamento_do_pedido(chamador, autoridade, &quem, comando, params);
+    if *orcamento == Orcamento::Taxa
+        && let Err(t) = passar_pela_taxa(&quem, comando.nome, parametros)
+    {
+        return Err(taxa_esgotada(t, &quem));
     }
     // Quem está contido pede, e o gate recusa: o processo isolado, o agente
     // suspenso, a credencial suspensa — ver [`crate::contencao`]. Depois da
@@ -2055,6 +2191,51 @@ fn decidir_o_pedido(
         }
         _ => (codigo, detalhe),
     };
+    // O orçamento do pedido sobre um recurso já aberto, decidido o pedido.
+    // O que o gate recusa não é operação sobre um recurso autorizado: segue
+    // o caminho de todo exercício de autoridade, e paga a ficha — a
+    // insistência de quem perdeu a autoridade não enche a auditoria. O que
+    // ele autoriza respeita a capacidade do caminho da auditoria — ver
+    // [`crate::oleoduto`].
+    match *orcamento {
+        Orcamento::Taxa => {}
+        _ if !codigo.permite() => {
+            *orcamento = Orcamento::Taxa;
+            if let Err(t) = passar_pela_taxa(&quem, comando.nome, parametros) {
+                return Err(taxa_esgotada(t, &quem));
+            }
+        }
+        Orcamento::Fecho(_) => {}
+        Orcamento::Dados(p) if crate::oleoduto::tem_lugar(p) => {}
+        Orcamento::Dados(p) => {
+            let espera = params.member("wait").and_then(|v| v.as_u64()).unwrap_or(0);
+            if espera > 0 && !pode_adiar {
+                // A reexecução de quem já esperou: passa, na margem do anel
+                // — uma por pedido suspenso.
+                crate::metricas::DADOS_NA_MARGEM.fetch_add(1, Ordering::Relaxed);
+            } else if let Some(e) = (espera > 0)
+                .then(|| crate::rede::espera::Espera::pela_auditoria(p, espera))
+                .flatten()
+            {
+                // Adiado: nem gravado, nem executado — a decisão de agora
+                // não vale para depois. Quem despachou espera o caminho
+                // andar, e pede de novo, inteiro, por este gate.
+                crate::oleoduto::adiou(p);
+                crate::metricas::ADIADOS.fetch_add(1, Ordering::Relaxed);
+                return Ok(Decisao::Adiada(e));
+            } else {
+                // Sem `wait` — ou sem relógio para o prazo —, o pedido não
+                // pode esperar, e não passa de graça: volta a gastar a ficha
+                // do papel, como qualquer pedido, e a taxa grava a primeira
+                // recusa e conta as outras.
+                crate::metricas::DADOS_PELA_TAXA.fetch_add(1, Ordering::Relaxed);
+                *orcamento = Orcamento::Taxa;
+                if let Err(t) = passar_pela_taxa(&quem, comando.nome, parametros) {
+                    return Err(taxa_esgotada(t, &quem));
+                }
+            }
+        }
+    }
     // O recurso da auditoria: todos, em ordem.
     let mut recurso_gravado = String::new();
     for r in todos_os_recursos(comando, &recurso, &mais) {
@@ -2071,6 +2252,11 @@ fn decidir_o_pedido(
         parametros,
         detalhe,
     );
+    // O registro de um pedido sobre um recurso aberto ocupa o caminho da
+    // auditoria até um consumidor levá-lo: entra na conta do principal.
+    if let Orcamento::Dados(p) | Orcamento::Fecho(p) = *orcamento {
+        crate::oleoduto::registrou(p, decisao);
+    }
     if !codigo.permite() {
         return Err(recusa(codigo, &quem, &recurso_gravado, detalhe, decisao));
     }
@@ -2088,7 +2274,7 @@ fn decidir_o_pedido(
     let recursos: Vec<String> = todos_os_recursos(comando, &recurso, &mais)
         .map(String::from)
         .collect();
-    Ok(Autorizado {
+    Ok(Decisao::Licenca(Autorizado {
         comando,
         autoridade,
         pedinte,
@@ -2101,7 +2287,7 @@ fn decidir_o_pedido(
             recursos,
             programa,
         },
-    })
+    }))
 }
 
 /// Grava um pedido que não chegou a ser um comando: JSON quebrado, método
@@ -2170,7 +2356,7 @@ pub fn auditar_enchimento_de_teste(metodo: &str, parametros: &[u8], detalhe: &st
 pub fn encher_a_taxa_do_servico_de_teste() {
     crate::arch::sem_interrupcoes(|| {
         for b in TAXAS.lock().baldes.iter_mut() {
-            if b.is_some_and(|b| b.dono == DonoDaTaxa::Servico) {
+            if b.is_some_and(|b| b.dono == Principal::Servico) {
                 *b = None;
             }
         }

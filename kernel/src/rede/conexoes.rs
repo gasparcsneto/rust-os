@@ -179,6 +179,15 @@ pub fn destino_para(numero: Option<u64>, dono: &Dono) -> Result<Destino, &'stati
     super::pilha::destino_de(numero, dono)
 }
 
+/// Se o número que o pedido traz é uma conexão aberta de `dono` — viva,
+/// ou, com `cortada_vale`, também cortada pelo firewall. É a pergunta do
+/// orçamento do gate: só o recurso já aberto **de quem pede** sai da taxa
+/// do papel — ver `agent::registry::Plano`. Um número de outro titular ou
+/// um que não existe dá `false`, e o pedido segue o caminho de sempre.
+pub fn aberta(numero: Option<u64>, dono: &Dono, cortada_vale: bool) -> bool {
+    numero.is_some_and(|n| super::pilha::aberta(n, dono, cortada_vale))
+}
+
 /// Derruba as conexões de donos que acabaram, e grava cada uma na
 /// auditoria. Devolve quantas. Chamada pelo coletor de fios.
 ///

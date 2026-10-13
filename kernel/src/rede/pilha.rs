@@ -1029,6 +1029,13 @@ pub fn destino_de(id: u64, dono: &Dono) -> Result<Destino, &'static str> {
     .unwrap_or(Err("a pilha de rede nao esta no ar"))
 }
 
+/// Se `id` é uma conexão aberta de `dono`: viva — ou, com `cortada_vale`,
+/// também uma que uma regra do firewall cortou e que ainda é dele.
+pub fn aberta(id: u64, dono: &Dono, cortada_vale: bool) -> bool {
+    com_pilha(|p| p.achar(id, dono).is_ok() || cortada_vale && p.cortada(id, dono).is_some())
+        .unwrap_or(false)
+}
+
 /// A regra que cortou a conexão `id` de `dono`, se uma cortou — ver
 /// [`Cortada`].
 pub fn regra_que_cortou(id: u64, dono: &Dono) -> Option<u64> {

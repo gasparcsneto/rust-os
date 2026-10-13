@@ -12,7 +12,14 @@
 //! - os arrendamentos: quantos soltos, por quê, e os que venceram, quanto
 //!   depois do prazo saíram;
 //! - o código de fora da imagem: cada conferência do selo e da confiança
-//!   no editor, antes de ele virar processo.
+//!   no editor, antes de ele virar processo;
+//! - o orçamento das decisões: quantas gastaram a taxa do papel (o
+//!   exercício de autoridade), quantas foram do plano de dados sobre um
+//!   recurso já aberto, quantas foram fechos; os pedidos de dados que o
+//!   caminho da auditoria adiou, e quanto esperaram; os que passaram na
+//!   margem — a reexecução de quem esperou —, e os que, sem `wait`, voltaram
+//!   à taxa; e os bytes que o plano de dados moveu — ver
+//!   [`crate::oleoduto`].
 //!
 //! # A régua
 //!
@@ -270,6 +277,43 @@ pub fn momento_do_registro(seq: u64) -> Option<u64> {
     (MOMENTO_SEQ[i].load(Ordering::Relaxed) == seq).then_some(ms)
 }
 
+/// As decisões pelo orçamento que consumiram — ver
+/// `agent::registry::Plano`: a taxa do papel, o plano de dados, o fecho.
+static POR_PLANO: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+
+/// Uma decisão do gate, pelo orçamento que consumiu.
+pub fn decisao_do_plano(plano: crate::agent::registry::Plano) {
+    POR_PLANO[plano as usize].fetch_add(1, Ordering::Relaxed);
+}
+
+/// As decisões de um orçamento.
+pub fn decisoes_do_plano(plano: crate::agent::registry::Plano) -> u64 {
+    POR_PLANO[plano as usize].load(Ordering::Relaxed)
+}
+
+/// Pedidos de dados que o caminho da auditoria adiou.
+pub static ADIADOS: AtomicU64 = AtomicU64::new(0);
+
+/// Pedidos de dados que passaram com o caminho cheio, na margem: a
+/// reexecução de quem já esperou.
+pub static DADOS_NA_MARGEM: AtomicU64 = AtomicU64::new(0);
+
+/// Pedidos de dados sem `wait` que, com o caminho cheio, voltaram a gastar
+/// a ficha do papel.
+pub static DADOS_PELA_TAXA: AtomicU64 = AtomicU64::new(0);
+
+/// Quanto cada espera pela auditoria durou, em milissegundos.
+pub static ESPERA_DA_AUDITORIA_MS: Medida = Medida::nova();
+
+/// Os bytes que o plano de dados moveu: aceitos para mandar, e entregues a
+/// quem leu.
+pub static BYTES_MANDADOS: AtomicU64 = AtomicU64::new(0);
+pub static BYTES_LIDOS: AtomicU64 = AtomicU64::new(0);
+
+/// Registros da auditoria que saíram do anel antes de o journal os levar —
+/// cada lacuna que ele gravou, pelo tamanho dela. Zero é a promessa.
+pub static AUDITORIA_PERDIDA: AtomicU64 = AtomicU64::new(0);
+
 /// Só para a suíte: zera as medidas que um caso confere.
 #[cfg(feature = "modo-teste")]
 pub fn zerar_de_teste() {
@@ -282,8 +326,19 @@ pub fn zerar_de_teste() {
         &RESPOSTA_MS,
         &VENCIMENTO_MS,
         &CODIGO,
+        &ESPERA_DA_AUDITORIA_MS,
     ] {
         m.zerar();
+    }
+    for c in POR_PLANO.iter().chain([
+        &ADIADOS,
+        &DADOS_NA_MARGEM,
+        &DADOS_PELA_TAXA,
+        &BYTES_MANDADOS,
+        &BYTES_LIDOS,
+        &AUDITORIA_PERDIDA,
+    ]) {
+        c.store(0, Ordering::Relaxed);
     }
     for c in &POR_CODIGO {
         c.store(0, Ordering::Relaxed);

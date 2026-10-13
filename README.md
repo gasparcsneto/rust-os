@@ -274,6 +274,7 @@ kernel/src/
 ├── atividade.rs     quem está agindo: os agentes conectados e quem agiu por último
 ├── autorizacao.rs   o ponto único de decisão: papel, permissão, recurso, taxa e auditoria
 ├── metricas.rs      o custo da segurança, medido: contadores atômicos que só a consulta lê, nunca a decisão
+├── oleoduto.rs      o caminho da auditoria até o journal: a capacidade que o plano de dados respeita, a partilha entre principais e quem espera por lugar
 ├── seguranca.rs     o tecido de segurança: o fio do NSF, que lê e pede pelo gate como qualquer principal
 ├── sessoes.rs       quem está em cada porta, e as chaves do transporte cifrado dela
 ├── aleatorio.rs     o gerador de números aleatórios, semeado pelo virtio-rng
@@ -559,6 +560,9 @@ programas/           os programas de usuário, compilados à parte do kernel
         ├── buscador.rs   uma conversa HTTP que a suíte interrompe no meio: a revogação, a contenção, o firewall e o fim chegam com o código deles
         ├── consulta.rs   uma visita curta à bancada, para várias correrem ao mesmo tempo com a autoridade de cada um
         ├── instalador.rs baixa código da bancada pelo DNS, TCP, TLS e HTTP, grava no armazém e o executa num filho: o kernel confere o selo
+        ├── vazao.rs      traz 5 MiB da bancada, claro e cifrado, pelo plano de dados: cada leitura decidida e gravada, sem a ficha do papel
+        ├── carga.rs      quatro conexões com o eco ao mesmo tempo, 256 KiB de ida e volta em cada, cada uma com os bytes dela
+        ├── insistente.rs passa dados pela conexão aberta, e insiste, no passo que a suíte dita: a revogação, a contenção e o firewall no meio
         ├── vindo.rs      o programa que chega pela rede: fora da imagem, selado pela bancada, e pede pelo gate
         ├── legado.rs     pede, não busca a resposta e troca de imagem: a nova não a encontra
         └── terminal.rs   o Terminal: o interpretador numa janela, pelo pseudo-terminal

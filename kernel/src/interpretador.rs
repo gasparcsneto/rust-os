@@ -1365,8 +1365,12 @@ fn despachar(
         saidaln!(console, "parametro invalido: {}", campo);
         return None;
     }
-    let licenca = match autorizacao::autorizar(chamador, comando, params) {
-        Ok(l) => l,
+    let licenca = match autorizacao::autorizar(chamador, comando, params, permitir) {
+        Ok(autorizacao::Decisao::Licenca(l)) => l,
+        // Adiado pelo caminho da auditoria: o console espera como espera um
+        // comando que suspendeu, e o interpretador o executa de novo, pelo
+        // gate, quando a espera acabar — ver `crate::oleoduto`.
+        Ok(autorizacao::Decisao::Adiada(espera)) => return Some(espera),
         Err(recusa) => {
             // A frase para a pessoa — o que ela pediu, o papel dela, o que
             // fazer —, e o código e o registro, para quem investiga

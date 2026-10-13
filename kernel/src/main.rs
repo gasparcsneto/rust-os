@@ -85,6 +85,7 @@ mod metricas;
 mod mmio;
 mod nativo;
 mod nucleos;
+mod oleoduto;
 #[cfg(feature = "modo-teste")]
 mod ordem_das_travas;
 mod paginacao;

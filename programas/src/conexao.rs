@@ -7,6 +7,17 @@
 //! de girar: quem não tem o que ler, ou onde pôr o que manda, dorme no
 //! kernel até a pilha ter o que dizer, ou até o prazo.
 //!
+//! # O orçamento de cada pedido
+//!
+//! O `net.connect` é exercício de autoridade: gasta a ficha da taxa do
+//! papel de quem lançou o programa. O `net.send`, o `net.recv` e o
+//! `net.close` sobre a conexão aberta, do próprio programa, são o plano de
+//! dados: passam pelo gate e vão para a auditoria do mesmo jeito, mas não
+//! gastam a ficha — respeitam a capacidade do caminho da auditoria, e o
+//! `wait` de cada um é também o que o kernel usa para segurá-lo quando a
+//! auditoria está cheia. Por isso todo pedido de dados daqui leva `wait`:
+//! sem ele, com a auditoria cheia, o pedido volta a gastar a ficha.
+//!
 //! # As falhas não se misturam
 //!
 //! [`Falha`] separa o que o gate recusou — com o código dele —, o que o
@@ -38,8 +49,8 @@ pub struct Prazo {
     /// Quantas esperas vencidas seguidas, sem nada chegar nem sair, o
     /// transporte aceita antes de dizer que o par não responde. É um prazo
     /// de silêncio, e não da conversa inteira: um par que manda um pouco de
-    /// cada vez o renova — e os limites de tamanho de quem lê, e a taxa do
-    /// papel no gate, é que acabam com ele.
+    /// cada vez o renova — e os limites de tamanho de quem lê é que acabam
+    /// com ele.
     pub esperas: usize,
 }
 
@@ -256,7 +267,8 @@ impl Conexao {
 impl Drop for Conexao {
     fn drop(&mut self) {
         // Sem garantia: a conexão pode já ter acabado, ou o gate recusar —
-        // um processo isolado não fecha nada, e a dele cai sozinha.
+        // um processo isolado não fecha nada, e a dele cai sozinha. A taxa
+        // do papel não recusa: o fecho da conexão aberta não gasta a ficha.
         let _ = nativo::pedir("net.close", |w| w.field_u64("connection", self.numero));
     }
 }

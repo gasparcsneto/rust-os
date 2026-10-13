@@ -12438,6 +12438,7 @@ fn pessoas_o_registro_da_imagem() -> Resultado {
         crate::autorizacao::Chamador::Sessao(crate::agent::sessao::SERIAL),
         comando,
         Json(params.as_bytes()),
+        false,
     );
     if !matches!(&decisao, Err(r) if r.codigo == politica::Codigo::DenyResource) {
         return Err("o registro de pessoas passou pela decisao");
@@ -16813,6 +16814,7 @@ fn persistencia_o_journal_recusado_fecha_as_credenciais() -> Resultado {
             crate::autorizacao::Chamador::Sessao(crate::agent::sessao::SERIAL),
             comando,
             Json(b"{}"),
+            false,
         );
         crate::persistencia::forcar_estado_de_teste(anterior);
         let recusado = recusado?;
@@ -20060,7 +20062,7 @@ fn politica_emergencia_mantem_o_sistema() -> Resultado {
         }
         let disco = registry::encontrar("disk.read").ok_or("sem disk.read")?;
         let params = Json(br#"{"sector":0}"#);
-        if autorizar(Chamador::Sessao(0), disco, params).is_err() {
+        if autorizar(Chamador::Sessao(0), disco, params, false).is_err() {
             return Err("sem politica no disco, o sistema perdeu fs.raw_read");
         }
         // Uma pessoa de papel `operador`: como o agente, recusada.
@@ -20070,7 +20072,7 @@ fn politica_emergencia_mantem_o_sistema() -> Resultado {
             "operador",
         );
         let ping = registry::encontrar("agent.ping").ok_or("sem agent.ping")?;
-        if autorizar(Chamador::Pessoa(pessoa), ping, Json(b"{}"))
+        if autorizar(Chamador::Pessoa(pessoa), ping, Json(b"{}"), false)
             .err()
             .map(|r| r.codigo)
             != Some(Codigo::DenyRole)
@@ -20125,7 +20127,7 @@ fn politica_o_sistema_decide_pela_politica() -> Resultado {
     let disco = registry::encontrar("disk.read").ok_or("sem disk.read")?;
     let params = Json(br#"{"sector":0}"#);
     let a_pessoa_decide_pelo_papel_dela = || {
-        autorizar(Chamador::Pessoa(pessoa), disco, params)
+        autorizar(Chamador::Pessoa(pessoa), disco, params, false)
             .err()
             .map(|r| r.codigo)
             == Some(Codigo::DenyPermission)
@@ -30854,6 +30856,70 @@ static CASOS: &[Caso] = &[
         f: http_varias_visitas_ao_mesmo_tempo,
     },
     Caso {
+        nome: "dados: a transferencia grande com a politica padrao",
+        f: dados_a_transferencia_grande_com_a_politica_padrao,
+    },
+    Caso {
+        nome: "dados: varias conexoes do mesmo programa",
+        f: dados_varias_conexoes_do_mesmo_programa,
+    },
+    Caso {
+        nome: "dados: principais ao mesmo tempo",
+        f: dados_principais_ao_mesmo_tempo,
+    },
+    Caso {
+        nome: "dados: a revogacao no meio da transferencia",
+        f: dados_a_revogacao_no_meio_da_transferencia,
+    },
+    Caso {
+        nome: "dados: a contencao no meio da transferencia",
+        f: dados_a_contencao_no_meio_da_transferencia,
+    },
+    Caso {
+        nome: "dados: o firewall no meio da transferencia",
+        f: dados_o_firewall_no_meio_da_transferencia,
+    },
+    Caso {
+        nome: "dados: o fecho com a taxa esgotada",
+        f: dados_o_fecho_com_a_taxa_esgotada,
+    },
+    Caso {
+        nome: "dados: a conexao de outro titular",
+        f: dados_a_conexao_de_outro_titular,
+    },
+    Caso {
+        nome: "dados: a conexao que nao existe",
+        f: dados_a_conexao_que_nao_existe,
+    },
+    Caso {
+        nome: "dados: a inundacao de um byte",
+        f: dados_a_inundacao_de_um_byte,
+    },
+    Caso {
+        nome: "dados: as medidas do orcamento",
+        f: dados_as_medidas_do_orcamento,
+    },
+    Caso {
+        nome: "dados: a contrapressao adia sem gravar nem executar",
+        f: dados_a_contrapressao_adia_sem_gravar_nem_executar,
+    },
+    Caso {
+        nome: "dados: a partilha entre principais",
+        f: dados_a_partilha_entre_principais,
+    },
+    Caso {
+        nome: "dados: a reautorizacao depois da espera",
+        f: dados_a_reautorizacao_depois_da_espera,
+    },
+    Caso {
+        nome: "dados: a auditoria inteira sob inundacao",
+        f: dados_a_auditoria_inteira_sob_inundacao,
+    },
+    Caso {
+        nome: "dados: o contido nao tem o orcamento do fecho",
+        f: dados_o_contido_nao_tem_o_orcamento_do_fecho,
+    },
+    Caso {
         nome: "codigo: so o da imagem roda sem selo",
         f: codigo_so_o_da_imagem_roda_sem_selo,
     },
@@ -35735,18 +35801,18 @@ fn com_a_bancada_http(f: impl FnOnce() -> Resultado) -> Resultado {
 /// - uma semente e uma leitura do relógio para cada conexão cifrada, e a
 ///   âncora lida uma vez, pelo gate.
 ///
-/// A taxa do operador sobe para o caso: cada `net.recv` traz no máximo um
+/// Com a taxa de todo dia do operador: cada `net.recv` traz no máximo um
 /// buffer da conexão, e as páginas grandes da medida são centenas de
-/// decisões em segundos — com a taxa de todo dia, a recusa `RATE_LIMIT`
-/// viria no meio delas, como deve.
+/// decisões em segundos — o plano de dados sobre as conexões abertas do
+/// processo, que não gasta a ficha do papel.
 fn http_a_pagina_pelo_gate() -> Resultado {
     use crate::autorizacao::Autoridade;
     use crate::pessoas::Console;
     use politica::Codigo;
     use politica::auditoria::Titular;
     crate::pessoas::esquecer_registradas();
-    let mais_taxa = politica_trocada(&[("taxa operador 50 100", "taxa operador 400 800")])?;
-    let resultado = com_a_politica(mais_taxa, || {
+    let padrao = politica_trocada(&[])?;
+    let resultado = com_a_politica(padrao, || {
         let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(73), "http-op", "operador");
         let fio = rodar_programa_ate(
             "pagina",
@@ -36439,6 +36505,1879 @@ fn http_varias_visitas_ao_mesmo_tempo() -> Resultado {
         Ok(())
     })();
     crate::identidade::esquecer_registrados();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+// ---------------------------------------------------------------------------
+// O plano de dados: o orçamento de cada decisão — ver `agent::registry::Plano`
+// e `crate::oleoduto`
+// ---------------------------------------------------------------------------
+
+/// O teto de uma transferência grande, em tiques: a máquina mais lenta da
+/// matriz — o ARM emulado, sem otimização — leva bem mais que uma página.
+const TETO_DA_VAZAO: u64 = 6 * TETO_DO_HTTP;
+
+/// O código com que o `vazao` sai quando tudo conferiu — ver
+/// `programas/src/bin/vazao.rs`.
+const SAIDA_DA_VAZAO: i64 = 95;
+
+/// O código com que a `carga` sai quando tudo conferiu — ver
+/// `programas/src/bin/carga.rs`.
+const SAIDA_DA_CARGA: i64 = 96;
+
+/// As contas do orçamento das decisões — ver `crate::metricas` —, para um
+/// caso comparar antes e depois.
+#[derive(Clone, Copy, Debug)]
+struct ContasDoPlano {
+    controle: u64,
+    dados: u64,
+    fecho: u64,
+    taxa: u64,
+    adiados: u64,
+    pela_taxa: u64,
+    na_margem: u64,
+    perdidos: u64,
+    mandados: u64,
+}
+
+impl ContasDoPlano {
+    fn agora() -> ContasDoPlano {
+        use crate::agent::registry::Plano;
+        use crate::metricas as m;
+        use core::sync::atomic::Ordering::Relaxed;
+        ContasDoPlano {
+            controle: m::decisoes_do_plano(Plano::Controle),
+            dados: m::decisoes_do_plano(Plano::Dados),
+            fecho: m::decisoes_do_plano(Plano::Fecho),
+            taxa: m::decisoes_de(politica::Codigo::RateLimit),
+            adiados: m::ADIADOS.load(Relaxed),
+            pela_taxa: m::DADOS_PELA_TAXA.load(Relaxed),
+            na_margem: m::DADOS_NA_MARGEM.load(Relaxed),
+            perdidos: m::AUDITORIA_PERDIDA.load(Relaxed),
+            mandados: m::BYTES_MANDADOS.load(Relaxed),
+        }
+    }
+
+    /// O que mudou desde `antes`.
+    fn desde(antes: ContasDoPlano) -> ContasDoPlano {
+        let a = ContasDoPlano::agora();
+        ContasDoPlano {
+            controle: a.controle.saturating_sub(antes.controle),
+            dados: a.dados.saturating_sub(antes.dados),
+            fecho: a.fecho.saturating_sub(antes.fecho),
+            taxa: a.taxa.saturating_sub(antes.taxa),
+            adiados: a.adiados.saturating_sub(antes.adiados),
+            pela_taxa: a.pela_taxa.saturating_sub(antes.pela_taxa),
+            na_margem: a.na_margem.saturating_sub(antes.na_margem),
+            perdidos: a.perdidos.saturating_sub(antes.perdidos),
+            mandados: a.mandados.saturating_sub(antes.mandados),
+        }
+    }
+}
+
+/// Uma pessoa operadora numa sessão aberta agora, e um processo dela neste
+/// fio: ele pede com a autoridade dela e gasta o balde dela — a pessoa, no
+/// que pede por si, não tem taxa; o processo dela tem.
+fn processo_de_operadora(
+    console: u16,
+    nome: &str,
+) -> (crate::pessoas::IdSessao, crate::autorizacao::Chamador) {
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
+    let sessao = crate::pessoas::sessao_de_teste(
+        crate::pessoas::Console::Terminal(console),
+        nome,
+        "operador",
+    );
+    (
+        sessao,
+        Chamador::Processo {
+            fio: crate::fios::id_atual(),
+            autoridade: Autoridade::Pessoa { sessao },
+            programa: Programa::Kernel,
+        },
+    )
+}
+
+/// O processo de um agente operador neste fio, pela chave de teste `n`:
+/// registra o agente, e o processo pede com a autoridade dele.
+fn processo_de_agente_operador(n: u8) -> ([u8; 32], crate::autorizacao::Chamador) {
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
+    let chave = sigilo::publica_de(&chave_de_teste(n));
+    crate::identidade::registrar_agente_de_teste(chave, &nome_de_teste(n), "operador");
+    (
+        chave,
+        Chamador::Processo {
+            fio: crate::fios::id_atual(),
+            autoridade: Autoridade::Sessao {
+                sessao: 1,
+                chave: Some(chave),
+            },
+            programa: Programa::Kernel,
+        },
+    )
+}
+
+/// O começo do detalhe dos registros do processo do fio `fio`.
+fn do_processo(fio: u64) -> alloc::string::String {
+    alloc::format!("pelo processo {fio} (")
+}
+
+/// Abre uma conexão de `quem` com o eco, e espera o aperto.
+fn aberta_com_o_eco(quem: crate::autorizacao::Chamador) -> Result<u64, &'static str> {
+    let c = conexao_aberta(&fs_pedir(
+        quem,
+        "net.connect",
+        &alloc::format!(r#"{{"to":"{ECO}"}}"#),
+    ))?;
+    if estado_depois_do_aperto(quem, c)? != "established" {
+        fechar_conexao(quem, c);
+        return Err("a conexao com o eco nao se estabeleceu");
+    }
+    Ok(c)
+}
+
+/// Um pedido como a tarefa de um despachante o atende: a primeira execução
+/// pode suspender — pela conexão, ou adiada pelo caminho da auditoria —, e
+/// então quem pediu espera a espera acabar e executa o pedido de novo,
+/// inteiro, pelo gate, sem poder suspender.
+fn pedir_como_o_despachante(
+    quem: crate::autorizacao::Chamador,
+    metodo: &str,
+    params: &str,
+) -> alloc::string::String {
+    let linha = pedido_rpc(metodo, params);
+    match crate::nativo::responder_suspensivel_de_teste(quem, &linha) {
+        Ok(r) => r,
+        Err(espera) => {
+            let _ = esperar_cedendo(|| espera.conferir(None).is_some(), 1_200);
+            drop(espera);
+            crate::nativo::responder_de_teste(quem, &linha)
+        }
+    }
+}
+
+/// `n` bytes de ida e volta pelo eco, pela conexão `c` de `quem`, como um
+/// programa os passa: cada envio e cada leitura com `wait`, pelo
+/// despachante. O texto muda com `semente`, e o que volta é conferido.
+fn ida_e_volta(quem: crate::autorizacao::Chamador, c: u64, n: usize, semente: usize) -> Resultado {
+    let texto: alloc::string::String = (0..n)
+        .map(|i| (b'a' + ((i + semente) % 26) as u8) as char)
+        .collect();
+    let mut mandados = 0;
+    while mandados < n {
+        let r = pedir_como_o_despachante(
+            quem,
+            "net.send",
+            &alloc::format!(
+                r#"{{"connection":{c},"content":"{}","wait":2000}}"#,
+                &texto[mandados..]
+            ),
+        );
+        let k = fs_numero(&r, "sent").ok_or_else(|| {
+            crate::log_error!("teste", "net.send: {}", r);
+            "um envio de dados nao saiu"
+        })?;
+        mandados += k as usize;
+    }
+    let mut voltou = alloc::vec::Vec::new();
+    let mut vazias = 0;
+    while voltou.len() < n {
+        let r = pedir_como_o_despachante(
+            quem,
+            "net.recv",
+            &alloc::format!(
+                r#"{{"connection":{c},"max":{},"wait":2000}}"#,
+                n - voltou.len()
+            ),
+        );
+        let b = bytes_lidos(&r)?;
+        if b.is_empty() {
+            vazias += 1;
+            if vazias > 5 {
+                return Err("o eco nao voltou no prazo");
+            }
+        }
+        voltou.extend_from_slice(&b);
+    }
+    if voltou != texto.as_bytes() {
+        return Err("o eco voltou outra coisa");
+    }
+    Ok(())
+}
+
+/// Roda `f` com o journal levando a auditoria como fora da suíte: o coletor
+/// grava sozinho — a cada intervalo, com meio anel pendente, ou com quem
+/// espere por lugar —, e o caminho da auditoria tem quem o consuma. Antes,
+/// grava o que estava pendente — a lacuna que os casos de antes deixaram
+/// fica antes —, e `f` recebe até onde. Depois pausa de novo, também
+/// quando `f` falha.
+fn com_o_journal_drenando(f: impl FnOnce(u64) -> Resultado) -> Resultado {
+    if crate::persistencia::estado() != crate::persistencia::Estado::Disponivel {
+        return Err("a persistencia nao esta disponivel na suite");
+    }
+    crate::persistencia::gravar_auditoria()?;
+    let desde = crate::persistencia::auditoria_gravada();
+    crate::persistencia::pausar_a_auditoria_de_teste(false);
+    let r = f(desde);
+    crate::persistencia::pausar_a_auditoria_de_teste(true);
+    r
+}
+
+/// Toda a auditoria depois de `desde` está no journal: grava o que falta e
+/// confere, no disco, que cada número está lá, um depois do outro, sem
+/// lacuna — nenhum registro saiu do anel antes de chegar ao journal —, e
+/// que a cadeia refeita do journal confere. Cada registro passa por `f`,
+/// para o caso conferir quem fez o quê.
+fn auditoria_inteira_no_journal(
+    desde: u64,
+    mut f: impl FnMut(u64, &politica::auditoria::Evento),
+) -> Resultado {
+    use crate::persistencia::AuditoriaNoJournal;
+    crate::persistencia::gravar_auditoria()?;
+    let gravada = crate::persistencia::auditoria_gravada();
+    let mut proximo = desde + 1;
+    let mut falha = None;
+    crate::persistencia::percorrer_a_auditoria_de_teste(|a| match a {
+        AuditoriaNoJournal::Lacuna(primeira, ultima) if ultima >= proximo => {
+            crate::log_error!(
+                "teste",
+                "lacuna de {} a {}, depois de {}",
+                primeira,
+                ultima,
+                desde
+            );
+            falha.get_or_insert("o journal tem uma lacuna na auditoria do caso");
+        }
+        AuditoriaNoJournal::Registro(seq, evento) if seq >= proximo => {
+            if seq == proximo {
+                proximo += 1;
+                f(seq, &evento);
+            } else {
+                crate::log_error!("teste", "depois de {} veio {}", proximo - 1, seq);
+                falha.get_or_insert("falta um registro da auditoria no journal");
+            }
+        }
+        _ => {}
+    })?;
+    if let Some(f) = falha {
+        return Err(f);
+    }
+    if proximo <= gravada {
+        crate::log_error!(
+            "teste",
+            "o journal vai ate {}, e diz {}",
+            proximo - 1,
+            gravada
+        );
+        return Err("o journal nao tem a auditoria ate onde diz te-la gravado");
+    }
+    a_cadeia_do_journal_confere()
+}
+
+/// A transferência grande de uma pessoa operadora com a política padrão tal
+/// como ela é — sem taxa trocada: o `vazao` traz 5 MiB do servidor HTTP da
+/// bancada, claro e cifrado. Antes do plano de dados, a recusa
+/// `RATE_LIMIT` vinha no meio do segundo MiB.
+///
+/// - nenhuma recusa por taxa: os `net.recv` sobre as conexões abertas do
+///   processo são o plano de dados, e não gastam a ficha do papel — e cada
+///   um é uma decisão do gate, gravada;
+/// - o controle — as conexões, as sementes, os relógios, a âncora — cabe
+///   na rajada do papel;
+/// - e com o journal levando a auditoria como fora da suíte, toda decisão
+///   está nele, sem lacuna: nenhum registro saiu do anel antes do disco.
+fn dados_a_transferencia_grande_com_a_politica_padrao() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    if !politica::PADRAO.contains("taxa operador 50 100") {
+        return Err("a taxa padrao do operador nao e a que o caso confere");
+    }
+    let padrao =
+        politica::Politica::ler(politica::PADRAO).map_err(|_| "a politica padrao nao se le")?;
+    crate::pessoas::esquecer_registradas();
+    let resultado = com_a_politica(padrao, || {
+        com_o_journal_drenando(|desde| {
+            let sessao =
+                crate::pessoas::sessao_de_teste(Console::Terminal(90), "dados-vazao", "operador");
+            let antes = ContasDoPlano::agora();
+            let comeco = crate::tempo::uptime_ms();
+            let fio = rodar_programa_ate(
+                "vazao",
+                Some(Autoridade::Pessoa { sessao }),
+                SAIDA_DA_VAZAO,
+                TETO_DA_VAZAO,
+            )
+            .map_err(|_| "o vazao nao trouxe os 5 MiB com a politica padrao")?;
+            let d = ContasDoPlano::desde(antes);
+            crate::log_info!(
+                "teste",
+                "dados: 5 MiB em {} ms; {:?}",
+                crate::tempo::uptime_ms().saturating_sub(comeco),
+                d
+            );
+            if d.taxa != 0 {
+                return Err("a transferencia autorizada ouviu RATE_LIMIT");
+            }
+            // Cinco MiB, em leituras de no máximo 16 KiB.
+            if d.dados < 320 {
+                return Err("os dados nao foram decididos um a um");
+            }
+            if d.controle > 100 {
+                return Err("o controle da transferencia passou da rajada do papel");
+            }
+            let prefixo = do_processo(fio);
+            let (mut do_vazao, mut recusados) = (0u64, 0u64);
+            auditoria_inteira_no_journal(desde, |_, e| {
+                if e.detalhe.starts_with(&prefixo) {
+                    do_vazao += 1;
+                    recusados += u64::from(!e.codigo.permite());
+                }
+            })?;
+            if do_vazao < 320 || recusados != 0 {
+                crate::log_error!(
+                    "teste",
+                    "{} decisoes do vazao, {} recusas",
+                    do_vazao,
+                    recusados
+                );
+                return Err("o journal nao tem cada decisao do vazao, todas ALLOW");
+            }
+            if ContasDoPlano::desde(antes).perdidos != 0 {
+                return Err("um registro saiu do anel antes do journal");
+            }
+            Ok(())
+        })
+    });
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// Várias conexões ao mesmo tempo, de um programa só, com a política padrão:
+/// a `carga` abre quatro conexões com o eco — quatro exercícios de
+/// autoridade, cada um uma ficha — e passa por elas, intercalados, 256 KiB
+/// de ida e volta em cada. São centenas de decisões do plano de dados, mais
+/// que a rajada inteira do papel, sem nenhuma recusa por taxa; cada conexão
+/// devolve só o que é dela; cada decisão foi gravada em nome da pessoa,
+/// pelo processo; e as quatro fecham.
+fn dados_varias_conexoes_do_mesmo_programa() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    use politica::Codigo;
+    use politica::auditoria::Titular;
+    let padrao =
+        politica::Politica::ler(politica::PADRAO).map_err(|_| "a politica padrao nao se le")?;
+    crate::pessoas::esquecer_registradas();
+    let resultado = com_a_politica(padrao, || {
+        let sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(91), "dados-carga", "operador");
+        let antes = ContasDoPlano::agora();
+        let fio = rodar_programa_ate(
+            "carga",
+            Some(Autoridade::Pessoa { sessao }),
+            SAIDA_DA_CARGA,
+            TETO_DA_VAZAO,
+        )
+        .map_err(|_| "a carga nao passou pelas quatro conexoes")?;
+        let d = ContasDoPlano::desde(antes);
+        if d.taxa != 0 {
+            return Err("as conexoes abertas ouviram RATE_LIMIT");
+        }
+        // Quatro conexões, 32 pedaços de 8 KiB em cada: um envio e ao menos
+        // uma leitura por pedaço.
+        if d.dados < 4 * 2 * 32 || d.fecho != 4 {
+            crate::log_error!("teste", "{:?}", d);
+            return Err("os dados e os fechos nao foram decididos um a um");
+        }
+        let da_pessoa = |v: &[(u64, Codigo, Titular)]| {
+            v.iter()
+                .all(|(_, c, t)| *c == Codigo::Allow && *t == Titular::Pessoa)
+        };
+        let abertas = decisoes_do_processo(fio, "net.connect", ECO);
+        let fechadas = decisoes_do_processo(fio, "net.close", ECO);
+        if abertas.len() != 4
+            || fechadas.len() != 4
+            || !da_pessoa(&abertas)
+            || !da_pessoa(&fechadas)
+        {
+            crate::log_error!("teste", "{:?} / {:?}", abertas, fechadas);
+            return Err("cada conexao nao foi aberta e fechada pelo gate, em nome da pessoa");
+        }
+        for metodo in ["net.send", "net.recv"] {
+            let v = decisoes_do_processo(fio, metodo, ECO);
+            if v.len() < 4 * 32 || !da_pessoa(&v) {
+                crate::log_error!("teste", "{}: {}", metodo, v.len());
+                return Err("os envios e as leituras nao foram decididos um a um");
+            }
+        }
+        Ok(())
+    });
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// Vários principais ao mesmo tempo no plano de dados, cada um num fio, em
+/// vários núcleos: os processos de duas pessoas e de dois agentes, todos
+/// operadores, cada um com a sua conexão ao eco, passando por ela — pelo
+/// despachante, que suspende e executa de novo — mais pedidos que a rajada
+/// inteira do papel. Com o journal levando a auditoria:
+///
+/// - ninguém ouve `RATE_LIMIT`, e cada um recebe de volta só o que mandou;
+/// - a conta da partilha tem os quatro, cada um com as decisões de dados
+///   dele;
+/// - e o que os quatro fizeram está no journal, sem lacuna, cada decisão em
+///   nome de quem pediu: a pessoa pela sessão, o agente pela chave.
+fn dados_principais_ao_mesmo_tempo() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador, Principal, Programa};
+    use core::sync::atomic::{AtomicU64, Ordering::SeqCst};
+    use politica::auditoria::Titular;
+    const FIOS: usize = 4;
+    const IDAS: usize = 64;
+    static CERTOS: AtomicU64 = AtomicU64::new(0);
+    static ERRADOS: AtomicU64 = AtomicU64::new(0);
+    static FIO_DE: [AtomicU64; FIOS] = [const { AtomicU64::new(0) }; FIOS];
+    static AUTORIDADES: crate::trava::Mutex<[Option<Autoridade>; FIOS]> =
+        crate::trava::Mutex::new([None; FIOS]);
+    extern "C" fn trabalhar(i: u64) -> ! {
+        let i = i as usize;
+        let fio = crate::fios::id_atual();
+        FIO_DE[i].store(fio, SeqCst);
+        let autoridade = crate::arch::sem_interrupcoes(|| AUTORIDADES.lock()[i]);
+        let r = (|| -> Resultado {
+            let quem = Chamador::Processo {
+                fio,
+                autoridade: autoridade.ok_or("o fio nao tem autoridade")?,
+                programa: Programa::Kernel,
+            };
+            let c = aberta_com_o_eco(quem)?;
+            let r = (0..IDAS).try_for_each(|k| ida_e_volta(quem, c, 512, i * 1000 + k));
+            let fecho = fs_pedir(
+                quem,
+                "net.close",
+                &alloc::format!(r#"{{"connection":{c}}}"#),
+            );
+            r?;
+            if decisao_do_envelope(&fecho) != "ALLOW" {
+                return Err("o fecho da propria conexao foi recusado");
+            }
+            Ok(())
+        })();
+        match r {
+            Ok(()) => CERTOS.fetch_add(1, SeqCst),
+            Err(e) => {
+                crate::log_error!("teste", "fio {} do plano de dados: {}", i, e);
+                ERRADOS.fetch_add(1, SeqCst)
+            }
+        };
+        crate::fios::terminar()
+    }
+    crate::pessoas::esquecer_registradas();
+    let resultado = com_o_journal_drenando(|desde| {
+        let pessoas = [
+            crate::pessoas::sessao_de_teste(
+                crate::pessoas::Console::Terminal(92),
+                "dados-a",
+                "operador",
+            ),
+            crate::pessoas::sessao_de_teste(
+                crate::pessoas::Console::Terminal(93),
+                "dados-b",
+                "operador",
+            ),
+        ];
+        let chaves = [6u8, 7].map(|n| {
+            let chave = sigilo::publica_de(&chave_de_teste(n));
+            crate::identidade::registrar_agente_de_teste(chave, &nome_de_teste(n), "operador");
+            chave
+        });
+        let autoridades = [
+            Autoridade::Pessoa { sessao: pessoas[0] },
+            Autoridade::Pessoa { sessao: pessoas[1] },
+            Autoridade::Sessao {
+                sessao: 1,
+                chave: Some(chaves[0]),
+            },
+            Autoridade::Sessao {
+                sessao: 2,
+                chave: Some(chaves[1]),
+            },
+        ];
+        crate::arch::sem_interrupcoes(|| *AUTORIDADES.lock() = autoridades.map(Some));
+        CERTOS.store(0, SeqCst);
+        ERRADOS.store(0, SeqCst);
+        let antes = ContasDoPlano::agora();
+        let nucleos = crate::nucleos::ligados();
+        for i in 0..FIOS {
+            crate::fios::criar_no_nucleo("dados-fio", trabalhar, i as u64, i % nucleos)?;
+        }
+        esperar_cedendo(
+            || CERTOS.load(SeqCst) + ERRADOS.load(SeqCst) == FIOS as u64,
+            TETO_DA_VAZAO,
+        )
+        .map_err(|_| "os fios do plano de dados nao terminaram")?;
+        if ERRADOS.load(SeqCst) != 0 {
+            return Err("um principal nao passou pela conexao dele (o motivo esta no log)");
+        }
+        let d = ContasDoPlano::desde(antes);
+        crate::log_info!("teste", "dados: quatro principais ao mesmo tempo: {:?}", d);
+        if d.taxa != 0 {
+            return Err("um principal ouviu RATE_LIMIT no plano de dados");
+        }
+        if d.dados < (FIOS * IDAS * 2) as u64 || d.fecho != FIOS as u64 {
+            return Err("os dados dos principais nao foram decididos um a um");
+        }
+        // A conta da partilha: os quatro, cada um com as dele.
+        let retrato = crate::oleoduto::retrato();
+        let principais = [
+            Principal::Pessoa(pessoas[0].0),
+            Principal::Pessoa(pessoas[1].0),
+            Principal::Chave(Some(chaves[0])),
+            Principal::Chave(Some(chaves[1])),
+        ];
+        for p in &principais {
+            let texto = p.texto();
+            if !retrato
+                .contas
+                .iter()
+                .any(|c| c.principal == texto && c.decisoes >= (IDAS * 2) as u64)
+            {
+                crate::log_error!("teste", "{} fora da conta da partilha", texto);
+                return Err("a conta da partilha nao tem cada principal com as decisoes dele");
+            }
+        }
+        // E o journal tem tudo, em nome de quem pediu.
+        let fios: [u64; FIOS] = core::array::from_fn(|i| FIO_DE[i].load(SeqCst));
+        let prefixos = fios.map(do_processo);
+        let mut por_fio = [0u64; FIOS];
+        let mut de_outro = 0u64;
+        auditoria_inteira_no_journal(desde, |_, e| {
+            let Some(i) = prefixos
+                .iter()
+                .position(|p| e.detalhe.starts_with(p.as_str()))
+            else {
+                return;
+            };
+            por_fio[i] += 1;
+            let certo = match i {
+                0 | 1 => e.titular == Titular::Pessoa && e.sessao_de_pessoa == Some(pessoas[i].0),
+                _ => e.titular == Titular::Agente && e.chave == Some(chaves[i - 2]),
+            };
+            de_outro += u64::from(!certo);
+        })?;
+        if de_outro != 0 || por_fio.iter().any(|n| *n < (IDAS * 2) as u64) {
+            crate::log_error!("teste", "{:?}, {} em nome de outro", por_fio, de_outro);
+            return Err("o journal nao tem cada decisao, em nome de quem pediu");
+        }
+        if ContasDoPlano::desde(antes).perdidos != 0 {
+            return Err("um registro saiu do anel antes do journal");
+        }
+        Ok(())
+    });
+    crate::identidade::esquecer_registrados();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// A revogação no meio de uma transferência, nas duas formas:
+///
+/// - a chave do agente que lançou o processo é revogada: o pedido seguinte
+///   sobre a mesma conexão — ainda aberta, ainda do processo — é decidido de
+///   novo, recusado pelo gate, `DENY_ROLE`, e gravado; e nada sai;
+/// - a política nova tira o destino do alcance do papel do processo de uma
+///   pessoa: cada pedido sobre a conexão aberta é recusado, `DENY_RESOURCE`,
+///   e — recusado, não é operação sobre um recurso autorizado — fica com o
+///   controle e gasta a ficha do papel: a insistência acaba em `RATE_LIMIT`,
+///   sem encher a auditoria. Com a política de volta, a conexão é dela de
+///   novo.
+fn dados_a_revogacao_no_meio_da_transferencia() -> Resultado {
+    let (chave, quem) = processo_de_agente_operador(5);
+    let prefixo = do_processo(crate::fios::id_atual());
+    let resultado = (|| -> Resultado {
+        let c = aberta_com_o_eco(quem)?;
+        let r = (|| -> Resultado {
+            let antes = ContasDoPlano::agora();
+            for k in 0..64 {
+                ida_e_volta(quem, c, 256, k)?;
+            }
+            let d = ContasDoPlano::desde(antes);
+            if d.taxa != 0 || d.dados < 128 {
+                crate::log_error!("teste", "{:?}", d);
+                return Err("a transferencia do agente nao foi plano de dados");
+            }
+            crate::identidade::revogar(&chave).map_err(|_| "a revogacao de teste falhou")?;
+            let antes = ContasDoPlano::agora();
+            let cabeca = crate::autorizacao::ultimo_registro();
+            for (metodo, params) in [
+                (
+                    "net.send",
+                    alloc::format!(r#"{{"connection":{c},"content":"revogado","wait":1000}}"#),
+                ),
+                (
+                    "net.recv",
+                    alloc::format!(r#"{{"connection":{c},"wait":1000}}"#),
+                ),
+            ] {
+                let r = pedir_como_o_despachante(quem, metodo, &params);
+                if !recusado_com(&r, "DENY_ROLE") {
+                    crate::log_error!("teste", "{} depois da revogacao: {}", metodo, r);
+                    return Err("o pedido depois da revogacao nao foi recusado pelo gate");
+                }
+                let (seq, e) =
+                    registro_que(|e| e.metodo == metodo && e.detalhe.starts_with(&prefixo))
+                        .ok_or("a recusa depois da revogacao nao foi gravada")?;
+                if seq <= cabeca || e.codigo != politica::Codigo::DenyRole || e.chave != Some(chave)
+                {
+                    crate::log_error!("teste", "{:?}", e);
+                    return Err("a recusa gravada nao e a da revogacao");
+                }
+            }
+            let d = ContasDoPlano::desde(antes);
+            if d.mandados != 0 || d.dados != 0 || d.adiados != 0 || d.controle != 2 {
+                crate::log_error!("teste", "{:?}", d);
+                return Err("o revogado teve o beneficio do plano de dados");
+            }
+            Ok(())
+        })();
+        // A conexão segue do processo, que a fecha pelo sistema dele.
+        fechar_conexao(sistema_aqui(), c);
+        r
+    })();
+    crate::identidade::esquecer_registrados();
+    resultado?;
+    // A política que tira o destino.
+    crate::pessoas::esquecer_registradas();
+    let (_, quem) = processo_de_operadora(110, "dados-sem-eco");
+    let resultado = (|| -> Resultado {
+        let sem_o_eco = politica_trocada(&[(
+            "recurso operador net.connect tcp:10.0.2.100:7 ",
+            "recurso operador net.connect ",
+        )])?;
+        let c = aberta_com_o_eco(quem)?;
+        let r = (|| -> Resultado {
+            for k in 0..64 {
+                ida_e_volta(quem, c, 256, k)?;
+            }
+            com_a_politica(sem_o_eco, || {
+                let antes = ContasDoPlano::agora();
+                let cabeca = crate::autorizacao::ultimo_registro();
+                let (mut recusas, mut taxadas) = (0u64, 0u64);
+                for _ in 0..300 {
+                    let r = fs_pedir(
+                        quem,
+                        "net.send",
+                        &alloc::format!(r#"{{"connection":{c},"content":"fora"}}"#),
+                    );
+                    match decisao_do_envelope(&r).as_str() {
+                        "DENY_RESOURCE" => recusas += 1,
+                        "RATE_LIMIT" => taxadas += 1,
+                        _ => {
+                            crate::log_error!("teste", "{}", r);
+                            return Err("o destino fora do alcance nao foi recusado pelo gate");
+                        }
+                    }
+                }
+                let d = ContasDoPlano::desde(antes);
+                let gravados = crate::autorizacao::ultimo_registro() - cabeca;
+                if d.dados != 0 || d.mandados != 0 || d.controle != 300 {
+                    crate::log_error!("teste", "{:?}", d);
+                    return Err("o recusado pela politica teve o beneficio do plano de dados");
+                }
+                if recusas == 0 || taxadas == 0 || gravados >= 300 || gravados > 3 * recusas + 2 {
+                    crate::log_error!("teste", "{} {} {}", recusas, taxadas, gravados);
+                    return Err("a insistencia fora do alcance nao caiu na taxa");
+                }
+                Ok(())
+            })?;
+            // A política de volta: os dados passam de novo — com a ficha que
+            // a insistência gastou, porque eles não a gastam.
+            ida_e_volta(quem, c, 64, 1)
+        })();
+        fechar_conexao(quem, c);
+        r
+    })();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// Os passos do `insistente` — o programa tem as mesmas constantes.
+const INSISTE_PASSAR: i64 = 1;
+const INSISTE_INSISTIR: i64 = 2;
+const INSISTE_UM: i64 = 3;
+const INSISTE_FECHAR: i64 = 4;
+
+/// O `insistente` em execução: um processo de verdade, com o fio dele — o
+/// que o sistema contém, e o que o gate decide —, e o caminho para ditar
+/// os passos.
+struct Insistente {
+    fio: u64,
+}
+
+impl Insistente {
+    /// Lança o insistente com `autoridade` e espera ele ficar pronto.
+    fn lancar(autoridade: crate::autorizacao::Autoridade) -> Result<Insistente, &'static str> {
+        let programa = alloc::format!("{}/insistente", crate::usuario::DIRETORIO_DOS_COMPILADOS);
+        let desde = crate::log::total_emitidos();
+        let fio = crate::usuario::lancar_como(Some(&programa), autoridade)?;
+        esperar_ate(
+            || linhas_do_programa(desde, "insistente: pronto") == 1,
+            TETO_DO_HTTP,
+        )
+        .map_err(|_| "o insistente nao ficou pronto")?;
+        Ok(Insistente { fio })
+    }
+
+    /// Dita o passo `a`, com `b`, sem esperar o que ele diz.
+    fn pedir(&self, a: i64, b: i64) -> Resultado {
+        use protocolo::usuario::evento::{Evento, tipo};
+        crate::eventos::publicar(
+            "teste-insistente",
+            Evento {
+                tipo: tipo::ACAO,
+                a,
+                b,
+                ..Default::default()
+            },
+        )
+        .map_err(|_| "o canal do insistente nao recebeu o passo")
+    }
+
+    /// O que o insistente disse depois do registro `desde` do log — uma
+    /// linha por passo —, sem o `insistente: `.
+    fn dizer(&self, desde: u64) -> Result<alloc::string::String, &'static str> {
+        let mut dito = None;
+        let _ = esperar_ate(
+            || {
+                crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+                    if dito.is_none()
+                        && r.seq >= desde
+                        && r.subsistema == "usuario"
+                        && let Some(resto) = r.mensagem().strip_prefix("insistente: ")
+                    {
+                        dito = Some(alloc::string::String::from(resto));
+                    }
+                });
+                dito.is_some()
+            },
+            TETO_DA_VAZAO,
+        );
+        dito.ok_or("o insistente nao respondeu ao passo")
+    }
+
+    /// O passo inteiro: dita, e devolve o que ele disse.
+    fn passo(&self, a: i64, b: i64) -> Result<alloc::string::String, &'static str> {
+        let desde = crate::log::total_emitidos();
+        self.pedir(a, b)?;
+        self.dizer(desde)
+    }
+
+    /// Pede o fim, e espera o programa sair com o código dele.
+    fn encerrar(self) -> Resultado {
+        use protocolo::usuario::evento::{Evento, tipo};
+        let desde = crate::log::total_emitidos();
+        let _ = crate::eventos::publicar(
+            "teste-insistente",
+            Evento {
+                tipo: tipo::ENCERRAR,
+                ..Default::default()
+            },
+        );
+        esperar_ate(
+            || linhas_do_programa(desde, "processo encerrou com codigo 97") == 1,
+            TETO_DO_HTTP,
+        )
+        .map_err(|_| "o insistente nao saiu quando pedido")
+    }
+}
+
+/// Os números de uma linha, na ordem.
+fn numeros_de(linha: &str) -> alloc::vec::Vec<u64> {
+    linha
+        .split(|c: char| !c.is_ascii_digit())
+        .filter_map(|t| t.parse().ok())
+        .collect()
+}
+
+/// A contenção no meio de uma transferência, num processo de verdade: o
+/// `insistente`, de uma pessoa operadora, passa pela conexão aberta mais
+/// pedidos de dados que a rajada do papel; o sistema o isola, e a conexão
+/// cai; e ele insiste. Cada pedido dele é decidido de novo e recusado,
+/// `DENY_CONTAINED`, e nada sai. Contido, ele não tem o benefício do plano
+/// de dados: cada pedido é exercício de autoridade e gasta a ficha do papel,
+/// e a insistência acaba em `RATE_LIMIT` — sem encher a auditoria. Solto,
+/// ele abre outra conexão e passa de novo.
+fn dados_a_contencao_no_meio_da_transferencia() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    crate::pessoas::esquecer_registradas();
+    let sessao = crate::pessoas::sessao_de_teste(
+        crate::pessoas::Console::Terminal(94),
+        "dados-iso",
+        "operador",
+    );
+    let p = Insistente::lancar(Autoridade::Pessoa { sessao })?;
+    let processo = alloc::format!(r#"{{"process":{}}}"#, p.fio);
+    let sistema = sistema_aqui();
+    let r = (|| -> Resultado {
+        let antes = ContasDoPlano::agora();
+        let dito = p.passo(INSISTE_PASSAR, 64)?;
+        let d = ContasDoPlano::desde(antes);
+        if dito != "passou 64" || d.taxa != 0 || d.dados < 128 {
+            crate::log_error!("teste", "{} {:?}", dito, d);
+            return Err("a transferencia do processo nao foi plano de dados");
+        }
+        let r = fs_pedir(sistema, "process.isolate", &processo);
+        if fs_texto(&r, "state").as_deref() != Some("isolated")
+            || fs_numero(&r, "dropped") != Some(1)
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("o sistema nao isolou o processo com a conexao dele");
+        }
+        let antes = ContasDoPlano::agora();
+        let cabeca = crate::autorizacao::ultimo_registro();
+        let dito = p.passo(INSISTE_INSISTIR, 300)?;
+        let d = ContasDoPlano::desde(antes);
+        let gravados = crate::autorizacao::ultimo_registro() - cabeca;
+        let [enviados, contidos, taxa, outros] = numeros_de(&dito)[..] else {
+            crate::log_error!("teste", "{}", dito);
+            return Err("o insistente nao disse o que ouviu");
+        };
+        if enviados != 0 || outros != 0 || contidos == 0 || taxa == 0 {
+            crate::log_error!("teste", "{}", dito);
+            return Err("o contido nao ouviu a contencao, e depois a taxa");
+        }
+        if d.dados != 0 || d.mandados != 0 || d.controle != 300 {
+            crate::log_error!("teste", "{:?}", d);
+            return Err("o contido teve o beneficio do plano de dados");
+        }
+        if gravados >= 300 || gravados > 3 * contidos + 2 {
+            crate::log_error!("teste", "{} gravados, {} contidos", gravados, contidos);
+            return Err("a insistencia do contido encheu a auditoria");
+        }
+        // Solto, ele esquece a conexão que caiu, abre outra — com a ficha
+        // que voltou — e passa de novo.
+        let r = fs_pedir(sistema, "process.release", &processo);
+        if fs_texto(&r, "state").as_deref() != Some("released") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o sistema nao soltou o processo");
+        }
+        let _ = esperar_ate(|| false, 50);
+        let fechou = p.passo(INSISTE_FECHAR, 0)?;
+        if fechou != "fechou DENY_RESOURCE" {
+            crate::log_error!("teste", "{}", fechou);
+            return Err("a conexao que caiu com a contencao ainda existia");
+        }
+        let dito = p.passo(INSISTE_PASSAR, 4)?;
+        if dito != "passou 4" {
+            crate::log_error!("teste", "{}", dito);
+            return Err("solto, o processo nao passou de novo");
+        }
+        Ok(())
+    })();
+    let _ = fs_pedir(sistema, "process.release", &processo);
+    let fim = p.encerrar();
+    crate::pessoas::esquecer_registradas();
+    r.and(fim)
+}
+
+/// A espera não leva decisão nenhuma: o pedido de um processo de verdade,
+/// adiado pelo caminho da auditoria — o despachante dos processos o guarda
+/// como guarda o que espera a conexão —, é executado de novo, inteiro, pelo
+/// gate, quando a espera acaba; e o que mudou no meio vale:
+///
+/// - a regra do firewall que cortou a conexão no meio: o gate decide de
+///   novo, e o firewall barra, com o código dele;
+/// - a revogação do agente que lançou o processo: `DENY_ROLE`;
+/// - o isolamento do processo: `DENY_CONTAINED`.
+///
+/// Nenhum manda um byte, e cada desfecho é uma decisão gravada depois da
+/// espera.
+fn dados_a_reautorizacao_depois_da_espera() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::oleoduto::TETO;
+    crate::pessoas::esquecer_registradas();
+    let sistema = sistema_aqui();
+    // Segura o envio seguinte do processo no caminho da auditoria — o
+    // consumidor simulado parado no teto —, faz `no_meio`, anda o journal,
+    // e devolve o que o processo ouviu da reexecução.
+    let segurar = |p: &Insistente,
+                   no_meio: &dyn Fn() -> Resultado|
+     -> Result<alloc::string::String, &'static str> {
+        let cabeca = crate::autorizacao::ultimo_registro();
+        crate::oleoduto::consumidor_de_teste(Some(cabeca.saturating_sub(TETO)));
+        let antes = ContasDoPlano::agora();
+        let desde = crate::log::total_emitidos();
+        let r = (|| -> Result<alloc::string::String, &'static str> {
+            p.pedir(INSISTE_UM, 0)?;
+            esperar_ate(|| ContasDoPlano::desde(antes).adiados == 1, TETO_DO_HTTP)
+                .map_err(|_| "o envio do processo nao foi adiado com o caminho cheio")?;
+            if linhas_do_programa(desde, "insistente: um") != 0
+                || decisoes_do_processo(p.fio, "net.send", "")
+                    .iter()
+                    .any(|(seq, _, _)| *seq > cabeca)
+            {
+                return Err("o envio adiado foi decidido, ou respondido, antes da espera acabar");
+            }
+            no_meio()?;
+            let h = crate::autorizacao::ultimo_registro();
+            crate::oleoduto::consumidor_de_teste(Some(h));
+            let dito = p.dizer(desde)?;
+            if !decisoes_do_processo(p.fio, "net.send", "")
+                .iter()
+                .any(|(seq, _, _)| *seq > h)
+            {
+                return Err("a reexecucao nao foi uma decisao nova do gate");
+            }
+            if ContasDoPlano::desde(antes).mandados != 0 {
+                return Err("o adiado mandou bytes depois do que mudou no meio");
+            }
+            Ok(dito)
+        })();
+        crate::oleoduto::consumidor_de_teste(None);
+        r
+    };
+    let resultado = (|| -> Resultado {
+        // O firewall no meio.
+        let sessao = crate::pessoas::sessao_de_teste(
+            crate::pessoas::Console::Terminal(105),
+            "dados-reauto",
+            "operador",
+        );
+        let p = Insistente::lancar(Autoridade::Pessoa { sessao })?;
+        let regra = alloc::format!(r#"{{"to":"{ECO}","owner":"process:{}"}}"#, p.fio);
+        let r = (|| -> Resultado {
+            if p.passo(INSISTE_PASSAR, 4)? != "passou 4" {
+                return Err("o processo nao passou pela conexao");
+            }
+            let dito = segurar(&p, &|| {
+                let r = fs_pedir(sistema, "net.block", &regra);
+                if fs_numero(&r, "dropped") != Some(1) {
+                    crate::log_error!("teste", "{}", r);
+                    return Err("a regra nao cortou a conexao do processo");
+                }
+                Ok(())
+            })?;
+            if dito != "um FIREWALL_BLOCKED" {
+                crate::log_error!("teste", "{}", dito);
+                return Err("depois da espera, o firewall nao barrou");
+            }
+            Ok(())
+        })();
+        let _ = fs_pedir(sistema, "net.unblock", &regra);
+        let fim = p.encerrar();
+        r.and(fim)?;
+
+        // A revogação no meio.
+        let chave = sigilo::publica_de(&chave_de_teste(8));
+        crate::identidade::registrar_agente_de_teste(chave, &nome_de_teste(8), "operador");
+        let p = Insistente::lancar(Autoridade::Sessao {
+            sessao: 1,
+            chave: Some(chave),
+        })?;
+        let r = (|| -> Resultado {
+            if p.passo(INSISTE_PASSAR, 4)? != "passou 4" {
+                return Err("o processo do agente nao passou pela conexao");
+            }
+            let dito = segurar(&p, &|| {
+                crate::identidade::revogar(&chave)
+                    .map(|_| ())
+                    .map_err(|_| "a revogacao de teste falhou")
+            })?;
+            if dito != "um DENY_ROLE" {
+                crate::log_error!("teste", "{}", dito);
+                return Err("depois da espera, a revogacao nao valeu");
+            }
+            Ok(())
+        })();
+        let fim = p.encerrar();
+        r.and(fim)?;
+
+        // A contenção no meio.
+        let p = Insistente::lancar(Autoridade::Pessoa { sessao })?;
+        let processo = alloc::format!(r#"{{"process":{}}}"#, p.fio);
+        let r = (|| -> Resultado {
+            if p.passo(INSISTE_PASSAR, 4)? != "passou 4" {
+                return Err("o processo nao passou pela conexao");
+            }
+            let dito = segurar(&p, &|| {
+                let r = fs_pedir(sistema, "process.isolate", &processo);
+                if fs_texto(&r, "state").as_deref() != Some("isolated") {
+                    crate::log_error!("teste", "{}", r);
+                    return Err("o sistema nao isolou o processo");
+                }
+                Ok(())
+            })?;
+            if dito != "um DENY_CONTAINED" {
+                crate::log_error!("teste", "{}", dito);
+                return Err("depois da espera, a contencao nao valeu");
+            }
+            Ok(())
+        })();
+        let _ = fs_pedir(sistema, "process.release", &processo);
+        let fim = p.encerrar();
+        r.and(fim)
+    })();
+    crate::oleoduto::consumidor_de_teste(None);
+    crate::rede::pilha::esquecer_regras_de_teste();
+    crate::identidade::esquecer_registrados();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// O firewall no meio de uma transferência: a regra do sistema para o
+/// fluxo do processo corta a conexão aberta; o pedido de dados seguinte é
+/// decidido de novo pelo gate e barrado pelo firewall, com o código dele —
+/// nada sai. A conexão cortada já não é um recurso aberto: o pedido sobre
+/// ela gasta a ficha, como todo exercício de autoridade. O fecho dela, não:
+/// fechar devolve a vaga, e não espera ficha.
+fn dados_o_firewall_no_meio_da_transferencia() -> Resultado {
+    crate::pessoas::esquecer_registradas();
+    let (_, quem) = processo_de_operadora(95, "dados-fw");
+    let sistema = sistema_no_armazem(7_199_998);
+    let dono = alloc::format!("process:{}", crate::fios::id_atual());
+    let regra = alloc::format!(r#"{{"to":"{ECO}","owner":"{dono}"}}"#);
+    let resultado = (|| -> Resultado {
+        let c = aberta_com_o_eco(quem)?;
+        let r = (|| -> Resultado {
+            let antes = ContasDoPlano::agora();
+            for k in 0..64 {
+                ida_e_volta(quem, c, 256, k)?;
+            }
+            if ContasDoPlano::desde(antes).taxa != 0 {
+                return Err("a transferencia ouviu RATE_LIMIT");
+            }
+            let r = fs_pedir(sistema, "net.block", &regra);
+            let dono = crate::rede::conexoes::Dono::Processo(crate::fios::id_atual());
+            if fs_numero(&r, "rule").is_none()
+                || crate::rede::pilha::regra_que_cortou(c, &dono) != fs_numero(&r, "rule")
+            {
+                crate::log_error!("teste", "{}", r);
+                return Err("a regra nao cortou a conexao do processo");
+            }
+            let antes = ContasDoPlano::agora();
+            let r = pedir_como_o_despachante(
+                quem,
+                "net.send",
+                &alloc::format!(r#"{{"connection":{c},"content":"barrado","wait":1000}}"#),
+            );
+            if fs_texto(&r, "code").as_deref() != Some("FIREWALL_BLOCKED") {
+                crate::log_error!("teste", "{}", r);
+                return Err("o envio pela conexao cortada nao foi barrado pelo firewall");
+            }
+            let d = ContasDoPlano::desde(antes);
+            if d.mandados != 0 || d.dados != 0 || d.controle != 1 {
+                crate::log_error!("teste", "{:?}", d);
+                return Err("a conexao cortada foi tratada como recurso aberto");
+            }
+            let antes = ContasDoPlano::agora();
+            let r = fs_pedir(
+                quem,
+                "net.close",
+                &alloc::format!(r#"{{"connection":{c}}}"#),
+            );
+            let d = ContasDoPlano::desde(antes);
+            if decisao_do_envelope(&r) != "ALLOW" || d.fecho != 1 || d.controle != 0 {
+                crate::log_error!("teste", "{} {:?}", r, d);
+                return Err("o fecho da conexao cortada gastou a ficha, ou nao fechou");
+            }
+            Ok(())
+        })();
+        let _ = fs_pedir(sistema, "net.unblock", &regra);
+        fechar_conexao(quem, c);
+        r
+    })();
+    crate::rede::pilha::esquecer_regras_de_teste();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// O fecho com a taxa esgotada: o processo de uma pessoa operadora gasta a
+/// ficha do papel até a taxa recusar, e sem ficha abrir outra conexão é
+/// recusado — abrir é exercício de autoridade. Ainda assim, os dados da
+/// conexão aberta passam, e o fecho dela passa na hora, com a ficha esgotada
+/// de novo: nem os dados nem o fecho gastam ficha — a conexão não fica presa.
+///
+/// A ficha se esgota pelo relógio, um pedido de controle que não sai da
+/// máquina. Abrindo conexões, quem a esgotava era a pressa: cada abertura
+/// vai ao eco da bancada e volta, e numa bancada carregada a ficha voltava
+/// antes de a abertura seguinte a pedir — a taxa de 50 por segundo não se
+/// esgota com aberturas de 20 ms.
+fn dados_o_fecho_com_a_taxa_esgotada() -> Resultado {
+    crate::pessoas::esquecer_registradas();
+    let (_, quem) = processo_de_operadora(96, "dados-fecho");
+    let conectar = alloc::format!(r#"{{"to":"{ECO}"}}"#);
+    let esgotar = || -> Resultado {
+        for _ in 0..1000 {
+            if recusado_com(&fs_pedir(quem, "system.uptime", "{}"), "RATE_LIMIT") {
+                return Ok(());
+            }
+        }
+        Err("a taxa do papel nao se esgotou")
+    };
+    // Sem ficha, a abertura é recusada pela taxa. Uma ficha pode voltar
+    // entre o esgotar e a abertura, se o fio parar 20 ms no meio: a
+    // abertura que passou é fechada, e a ficha, esgotada de novo.
+    let abrir_sem_ficha = || -> Resultado {
+        for _ in 0..5 {
+            esgotar()?;
+            let r = fs_pedir(quem, "net.connect", &conectar);
+            if recusado_com(&r, "RATE_LIMIT") {
+                return Ok(());
+            }
+            match fs_numero(&r, "connection") {
+                Some(aberta) => fechar_conexao(quem, aberta),
+                None => {
+                    crate::log_error!("teste", "{}", r);
+                    return Err("a abertura sem a ficha nao foi recusada pela taxa");
+                }
+            }
+        }
+        Err("a abertura sem a ficha passou cinco vezes")
+    };
+    let resultado = (|| -> Resultado {
+        let c = aberta_com_o_eco(quem)?;
+        let r = (|| -> Resultado {
+            abrir_sem_ficha()?;
+            let antes = ContasDoPlano::agora();
+            for k in 0..8 {
+                ida_e_volta(quem, c, 128, k)?;
+            }
+            if ContasDoPlano::desde(antes).taxa != 0 {
+                return Err("os dados da conexao aberta esperaram a ficha do papel");
+            }
+            esgotar()
+        })();
+        let antes = ContasDoPlano::agora();
+        let fecho = fs_pedir(
+            quem,
+            "net.close",
+            &alloc::format!(r#"{{"connection":{c}}}"#),
+        );
+        let d = ContasDoPlano::desde(antes);
+        r?;
+        if decisao_do_envelope(&fecho) != "ALLOW" || d.fecho != 1 || d.taxa != 0 || d.controle != 0
+        {
+            crate::log_error!("teste", "{} {:?}", fecho, d);
+            return Err("o fecho esperou a ficha do papel");
+        }
+        if crate::rede::pilha::donos()
+            .iter()
+            .any(|(id, _, _)| *id == c)
+        {
+            return Err("a conexao fechada ficou na tabela");
+        }
+        Ok(())
+    })();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// A conexão de outro titular nunca é plano de dados de quem pede: o
+/// processo de uma pessoa tenta mandar, ler e fechar pela conexão aberta de
+/// outra — `DENY_RESOURCE`, a mesma resposta de um número que não existe,
+/// gravada —, e cada tentativa é exercício de autoridade, e gasta a ficha:
+/// a insistência acaba em `RATE_LIMIT`, sem encher a auditoria. A conexão
+/// da dona segue dela, inteira.
+fn dados_a_conexao_de_outro_titular() -> Resultado {
+    use crate::autorizacao::Chamador;
+    crate::pessoas::esquecer_registradas();
+    let dona = Chamador::Pessoa(crate::pessoas::sessao_de_teste(
+        crate::pessoas::Console::Terminal(97),
+        "dados-dona",
+        "operador",
+    ));
+    let (_, outro) = processo_de_operadora(98, "dados-outro");
+    let resultado = (|| -> Resultado {
+        let c = aberta_com_o_eco(dona)?;
+        let r = (|| -> Resultado {
+            let antes = ContasDoPlano::agora();
+            for (metodo, params) in [
+                (
+                    "net.send",
+                    alloc::format!(r#"{{"connection":{c},"content":"intruso","wait":1000}}"#),
+                ),
+                (
+                    "net.recv",
+                    alloc::format!(r#"{{"connection":{c},"wait":1000}}"#),
+                ),
+                ("net.close", alloc::format!(r#"{{"connection":{c}}}"#)),
+            ] {
+                let r = pedir_como_o_despachante(outro, metodo, &params);
+                if !recusado_com(&r, "DENY_RESOURCE") {
+                    crate::log_error!("teste", "{} de outro: {}", metodo, r);
+                    return Err("outro titular usou a conexao da dona");
+                }
+            }
+            let d = ContasDoPlano::desde(antes);
+            if d.dados != 0 || d.fecho != 0 || d.adiados != 0 || d.controle != 3 {
+                crate::log_error!("teste", "{:?}", d);
+                return Err("a conexao de outro titular foi tratada como plano de dados");
+            }
+            let cabeca = crate::autorizacao::ultimo_registro();
+            let (mut recusadas, mut taxadas) = (0u64, 0u64);
+            for _ in 0..300 {
+                let r = fs_pedir(
+                    outro,
+                    "net.send",
+                    &alloc::format!(r#"{{"connection":{c},"content":"intruso"}}"#),
+                );
+                match decisao_do_envelope(&r).as_str() {
+                    "DENY_RESOURCE" => recusadas += 1,
+                    "RATE_LIMIT" => taxadas += 1,
+                    _ => return Err("a insistencia de outro titular ouviu outra coisa"),
+                }
+            }
+            // A taxa grava a primeira recusa de cada rajada, e a soma dela
+            // quando a ficha volta: os registros acompanham o que a taxa
+            // deixou passar, e não a insistência.
+            let gravados = crate::autorizacao::ultimo_registro() - cabeca;
+            if taxadas == 0 || gravados >= recusadas + taxadas || gravados > 3 * recusadas + 2 {
+                crate::log_error!("teste", "{} {} {}", recusadas, taxadas, gravados);
+                return Err("a insistencia de outro titular nao caiu na taxa");
+            }
+            // A da dona segue dela, e inteira.
+            ida_e_volta(dona, c, 64, 3)
+        })();
+        fechar_conexao(dona, c);
+        r
+    })();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// A conexão que não existe segue o caminho de todo exercício de
+/// autoridade: o número de uma conexão já fechada e o de uma que nunca
+/// existiu são `DENY_RESOURCE`, gravados, com o motivo, e cada pedido
+/// gasta a ficha — nenhum é plano de dados, nem fecho.
+fn dados_a_conexao_que_nao_existe() -> Resultado {
+    crate::pessoas::esquecer_registradas();
+    let (_, quem) = processo_de_operadora(99, "dados-nada");
+    let resultado = (|| -> Resultado {
+        let c = aberta_com_o_eco(quem)?;
+        fechar_conexao(quem, c);
+        let antes = ContasDoPlano::agora();
+        for numero in [c, 999_999] {
+            for (metodo, params) in [
+                (
+                    "net.send",
+                    alloc::format!(r#"{{"connection":{numero},"content":"nada","wait":1000}}"#),
+                ),
+                (
+                    "net.recv",
+                    alloc::format!(r#"{{"connection":{numero},"wait":1000}}"#),
+                ),
+                ("net.close", alloc::format!(r#"{{"connection":{numero}}}"#)),
+            ] {
+                let r = pedir_como_o_despachante(quem, metodo, &params);
+                if !recusado_com(&r, "DENY_RESOURCE") {
+                    crate::log_error!("teste", "{} {}: {}", metodo, numero, r);
+                    return Err("a conexao que nao existe nao foi recusada pelo gate");
+                }
+            }
+        }
+        let d = ContasDoPlano::desde(antes);
+        if d.controle != 6 || d.dados != 0 || d.fecho != 0 || d.adiados != 0 {
+            crate::log_error!("teste", "{:?}", d);
+            return Err("a conexao que nao existe saiu do caminho do exercicio de autoridade");
+        }
+        Ok(())
+    })();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// A inundação de envios de um byte pela conexão aberta, com o journal
+/// lento — o consumidor simulado, parado:
+///
+/// - com `wait`, nada é recusado por volume: o caminho enche até a parte de
+///   um principal sozinho, e o envio seguinte é adiado — nem gravado nem
+///   executado;
+/// - sem `wait`, o envio não pode esperar: volta a gastar a ficha do papel,
+///   e a insistência acaba em `RATE_LIMIT` — gravada uma vez e contada
+///   depois;
+/// - o anel nunca chega ao fim, e nada se perde; o journal anda, e o
+///   adiado passa, executado de novo pelo gate.
+fn dados_a_inundacao_de_um_byte() -> Resultado {
+    use crate::oleoduto::{CAPACIDADE, PARTILHA};
+    crate::pessoas::esquecer_registradas();
+    let (_, quem) = processo_de_operadora(100, "dados-enxurrada");
+    let prefixo = do_processo(crate::fios::id_atual());
+    let resultado = (|| -> Resultado {
+        let c = aberta_com_o_eco(quem)?;
+        let r = (|| -> Resultado {
+            let antes = ContasDoPlano::agora();
+            crate::oleoduto::consumidor_de_teste(Some(crate::autorizacao::ultimo_registro()));
+            let linha = pedido_rpc(
+                "net.send",
+                &alloc::format!(r#"{{"connection":{c},"content":"x","wait":10000}}"#),
+            );
+            let mut passaram = 0u64;
+            let espera = loop {
+                let h = crate::autorizacao::ultimo_registro();
+                match crate::nativo::responder_suspensivel_de_teste(quem, &linha) {
+                    Ok(r) if fs_numero(&r, "sent") == Some(1) => passaram += 1,
+                    Ok(r) => {
+                        crate::log_error!("teste", "{}", r);
+                        return Err("um envio de um byte foi recusado");
+                    }
+                    Err(e) => {
+                        // Adiado: nem gravado.
+                        if registro_que(|e| e.detalhe.starts_with(&prefixo))
+                            .is_some_and(|(s, _)| s > h)
+                        {
+                            return Err("o envio adiado foi gravado");
+                        }
+                        break e;
+                    }
+                }
+                if passaram > CAPACIDADE {
+                    return Err("a inundacao com wait nao foi contida");
+                }
+            };
+            let d = ContasDoPlano::desde(antes);
+            if passaram != PARTILHA || d.taxa != 0 || d.adiados != 1 {
+                crate::log_error!("teste", "{} passaram; {:?}", passaram, d);
+                return Err("a inundacao com wait nao parou na parte de um principal sozinho");
+            }
+            if d.mandados != PARTILHA {
+                return Err("o envio adiado mandou");
+            }
+            // Sem `wait`: volta à ficha do papel.
+            let cabeca = crate::autorizacao::ultimo_registro();
+            let (mut passou, mut taxado) = (0u64, 0u64);
+            for _ in 0..400 {
+                let r = fs_pedir(
+                    quem,
+                    "net.send",
+                    &alloc::format!(r#"{{"connection":{c},"content":"y"}}"#),
+                );
+                match decisao_do_envelope(&r).as_str() {
+                    "ALLOW" => passou += 1,
+                    "RATE_LIMIT" => taxado += 1,
+                    _ => {
+                        crate::log_error!("teste", "{}", r);
+                        return Err("sem wait, o envio ouviu outra coisa que a taxa");
+                    }
+                }
+            }
+            let gravados = crate::autorizacao::ultimo_registro() - cabeca;
+            let d = ContasDoPlano::desde(antes);
+            if taxado == 0
+                || gravados >= passou + taxado
+                || gravados > 3 * passou + 2
+                || d.pela_taxa != 400
+            {
+                crate::log_error!("teste", "{} {} {} {:?}", passou, taxado, gravados, d);
+                return Err("sem wait, a inundacao nao voltou a taxa do papel");
+            }
+            // Nada se perdeu: o anel não chegou ao fim.
+            if crate::oleoduto::retrato().maior_atraso >= CAPACIDADE {
+                return Err("o atraso da auditoria chegou ao fim do anel");
+            }
+            // O journal anda, e o adiado passa — decidido de novo.
+            crate::oleoduto::consumidor_de_teste(Some(crate::autorizacao::ultimo_registro()));
+            if espera.conferir(None) != Some(crate::rede::espera::Desfecho::Liberou) {
+                return Err("o journal andou, e a espera nao acabou");
+            }
+            drop(espera);
+            let h = crate::autorizacao::ultimo_registro();
+            let r = crate::nativo::responder_de_teste(quem, &linha);
+            let (seq, _) =
+                registro_que(|e| e.metodo == "net.send" && e.detalhe.starts_with(&prefixo))
+                    .ok_or("a reexecucao nao foi gravada")?;
+            if fs_numero(&r, "sent") != Some(1) || seq <= h {
+                crate::log_error!("teste", "{}", r);
+                return Err("o adiado nao passou, decidido de novo, depois da espera");
+            }
+            Ok(())
+        })();
+        crate::oleoduto::consumidor_de_teste(None);
+        fechar_conexao(quem, c);
+        r
+    })();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// As medidas do orçamento, cada uma separada, em `security.metrics`: as
+/// decisões de controle, as de dados e as de fecho; as recusas por taxa; as
+/// esperas pela auditoria; o atraso dela, agora e o maior, e o que se
+/// perdeu antes do journal; a vazão; e a partilha entre os principais.
+/// Cada uma anda com o que o caso faz.
+fn dados_as_medidas_do_orcamento() -> Resultado {
+    use crate::autorizacao::Principal;
+    use crate::oleoduto::{CAPACIDADE, PARTILHA, TETO};
+    crate::pessoas::esquecer_registradas();
+    let (sessao, quem) = processo_de_operadora(101, "dados-medidas");
+    let sistema = sistema_no_armazem(7_199_997);
+    let resultado = (|| -> Resultado {
+        let c = aberta_com_o_eco(quem)?;
+        let r = (|| -> Resultado {
+            crate::metricas::zerar_de_teste();
+            for k in 0..4 {
+                ida_e_volta(quem, c, 100, k)?;
+            }
+            // O caminho cheio: o envio seguinte espera.
+            let cabeca = crate::autorizacao::ultimo_registro();
+            crate::oleoduto::consumidor_de_teste(Some(cabeca.saturating_sub(TETO)));
+            let espera = crate::nativo::responder_suspensivel_de_teste(
+                quem,
+                &pedido_rpc(
+                    "net.send",
+                    &alloc::format!(r#"{{"connection":{c},"content":"espera","wait":10000}}"#),
+                ),
+            )
+            .err()
+            .ok_or("o envio passou com o caminho cheio")?;
+            drop(espera);
+            let r = fs_pedir(sistema, "security.metrics", "{}");
+            let orcamento = Json(r.as_bytes())
+                .member("result")
+                .and_then(|r| r.member("budget"))
+                .ok_or("security.metrics nao tem o orcamento")?;
+            let n = |caminho: &[&str]| {
+                let mut v = Some(orcamento);
+                for k in caminho {
+                    v = v.and_then(|v| v.member(k));
+                }
+                v.and_then(|v| v.as_u64())
+            };
+            let principal = Principal::Pessoa(sessao.0).texto();
+            let da_conta = orcamento
+                .member("fairness")
+                .and_then(|f| f.member("principals"))
+                .and_then(|p| {
+                    (0..).map_while(|i| p.item(i)).find(|c| {
+                        c.member("principal").and_then(|v| v.as_str()) == Some(principal.as_str())
+                    })
+                });
+            let conta = |k: &str| da_conta.and_then(|c| c.member(k)).and_then(|v| v.as_u64());
+            let certos = [
+                n(&["control_decisions"]).is_some_and(|v| v >= 1),
+                n(&["data_decisions"]).is_some_and(|v| v >= 8),
+                n(&["release_decisions"]) == Some(0),
+                n(&["rate_limited"]) == Some(0),
+                n(&["audit_waits", "deferred"]) == Some(1),
+                n(&["audit_waits", "ended"]).is_some_and(|v| v >= 1),
+                n(&["audit_backlog", "now"]).is_some_and(|v| v >= TETO),
+                n(&["audit_backlog", "max"]).is_some_and(|v| v >= TETO),
+                n(&["audit_backlog", "journal"]) == Some(cabeca.saturating_sub(TETO)),
+                n(&["audit_backlog", "lost"]) == Some(0),
+                n(&["audit_backlog", "share_from"]) == Some(PARTILHA),
+                n(&["audit_backlog", "all_wait_from"]) == Some(TETO),
+                n(&["audit_backlog", "capacity"]) == Some(CAPACIDADE),
+                n(&["throughput", "bytes_sent"]).is_some_and(|v| v >= 400),
+                n(&["throughput", "bytes_received"]).is_some_and(|v| v >= 400),
+                n(&["fairness", "top_share_permille"]) == Some(1000),
+                n(&["fairness", "jain_permille"]) == Some(1000),
+                conta("data_decisions").is_some_and(|v| v >= 8),
+                conta("deferred") == Some(1),
+            ];
+            if let Some(i) = certos.iter().position(|c| !c) {
+                crate::log_error!("teste", "medida {}: {}", i, r);
+                return Err("uma medida do orcamento nao andou com o que o caso fez");
+            }
+            Ok(())
+        })();
+        crate::oleoduto::consumidor_de_teste(None);
+        fechar_conexao(quem, c);
+        r
+    })();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// A contrapressão: com o caminho da auditoria cheio — o consumidor
+/// simulado parado no teto —, o pedido de dados com `wait` é adiado pela
+/// espera da fase 9.2: nem gravado, nem executado, e não recusado — nenhum
+/// byte sai. A espera não acaba sozinha; o fecho, sim, passa na hora. O
+/// journal anda: a espera acaba, e o pedido é executado de novo, inteiro,
+/// pelo gate — uma decisão nova, gravada —, e só então os bytes saem. E sem
+/// consumidor nenhum não há o que proteger: nada espera.
+fn dados_a_contrapressao_adia_sem_gravar_nem_executar() -> Resultado {
+    use crate::oleoduto::TETO;
+    use crate::rede::espera::Desfecho;
+    crate::pessoas::esquecer_registradas();
+    let (_, quem) = processo_de_operadora(102, "dados-pressao");
+    let prefixo = do_processo(crate::fios::id_atual());
+    let resultado = (|| -> Resultado {
+        let c = aberta_com_o_eco(quem)?;
+        let outra = aberta_com_o_eco(quem)?;
+        let r = (|| -> Resultado {
+            let cabeca = crate::autorizacao::ultimo_registro();
+            crate::oleoduto::consumidor_de_teste(Some(cabeca.saturating_sub(TETO)));
+            let antes = ContasDoPlano::agora();
+            let linha = pedido_rpc(
+                "net.send",
+                &alloc::format!(r#"{{"connection":{c},"content":"pressao","wait":10000}}"#),
+            );
+            let espera = match crate::nativo::responder_suspensivel_de_teste(quem, &linha) {
+                Err(e) => e,
+                Ok(r) => {
+                    crate::log_error!("teste", "{}", r);
+                    return Err("o envio passou, ou foi recusado, com o caminho cheio");
+                }
+            };
+            let d = ContasDoPlano::desde(antes);
+            let gravado =
+                registro_que(|e| e.detalhe.starts_with(&prefixo)).is_some_and(|(s, _)| s > cabeca);
+            if gravado || d.mandados != 0 || d.adiados != 1 || d.taxa != 0 {
+                crate::log_error!("teste", "{:?}", d);
+                return Err("o envio adiado foi gravado, ou executado");
+            }
+            if espera.conferir(None).is_some() {
+                return Err("a espera acabou sem o journal andar");
+            }
+            // O fecho não espera.
+            let r = crate::nativo::responder_suspensivel_de_teste(
+                quem,
+                &pedido_rpc("net.close", &alloc::format!(r#"{{"connection":{outra}}}"#)),
+            );
+            if r.as_ref().map(|r| decisao_do_envelope(r)).ok().as_deref() != Some("ALLOW") {
+                return Err("o fecho esperou o caminho da auditoria");
+            }
+            crate::oleoduto::consumidor_de_teste(Some(crate::autorizacao::ultimo_registro()));
+            if espera.conferir(None) != Some(Desfecho::Liberou) {
+                return Err("o journal andou, e a espera nao acabou");
+            }
+            drop(espera);
+            let h = crate::autorizacao::ultimo_registro();
+            let r = crate::nativo::responder_de_teste(quem, &linha);
+            if fs_numero(&r, "sent") != Some(7) {
+                crate::log_error!("teste", "{}", r);
+                return Err("o envio nao passou depois da espera");
+            }
+            let (seq, e) =
+                registro_que(|e| e.metodo == "net.send" && e.detalhe.starts_with(&prefixo))
+                    .ok_or("a reexecucao nao foi gravada")?;
+            if seq <= h || e.codigo != politica::Codigo::Allow {
+                return Err("a reexecucao nao foi uma decisao nova do gate");
+            }
+            if ler_da_conexao(quem, c, 7)? != b"pressao" {
+                return Err("o eco nao devolveu o envio de depois da espera");
+            }
+            // Sem consumidor, nada espera.
+            crate::oleoduto::consumidor_de_teste(None);
+            let r = crate::nativo::responder_suspensivel_de_teste(
+                quem,
+                &pedido_rpc(
+                    "net.send",
+                    &alloc::format!(r#"{{"connection":{c},"content":"livre","wait":10000}}"#),
+                ),
+            );
+            if r.as_ref().ok().and_then(|r| fs_numero(r, "sent")) != Some(5) {
+                return Err("sem consumidor, o envio esperou");
+            }
+            Ok(())
+        })();
+        crate::oleoduto::consumidor_de_teste(None);
+        fechar_conexao(quem, c);
+        r
+    })();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// A partilha entre principais, com o journal lento — o consumidor
+/// simulado, parado —: um principal inunda o caminho com envios de um byte,
+/// e passa até a parte de um principal sozinho; então espera. Outro chega e
+/// passa — a parte dele é a metade, e ele não usou nada — até o teto,
+/// enquanto o primeiro continua esperando. Ninguém é recusado, nenhum
+/// registro se perde, e a monopolização não é silenciosa: a conta de cada
+/// um, a maior parte e o índice de justiça estão nas medidas. O journal
+/// anda, e os dois passam.
+fn dados_a_partilha_entre_principais() -> Resultado {
+    use crate::autorizacao::{Chamador, Principal};
+    use crate::oleoduto::{CAPACIDADE, PARTILHA, TETO};
+    use crate::rede::espera::Desfecho;
+    crate::pessoas::esquecer_registradas();
+    let (sa, a) = processo_de_operadora(103, "dados-muito");
+    let sb = crate::pessoas::sessao_de_teste(
+        crate::pessoas::Console::Terminal(104),
+        "dados-pouco",
+        "operador",
+    );
+    let b = Chamador::Pessoa(sb);
+    let (pa, pb) = (Principal::Pessoa(sa.0), Principal::Pessoa(sb.0));
+    // Inunda com envios de um byte até ser adiado.
+    let inundar =
+        |quem: Chamador, linha: &str| -> Result<(u64, crate::rede::espera::Espera), &'static str> {
+            let mut passaram = 0;
+            loop {
+                match crate::nativo::responder_suspensivel_de_teste(quem, linha) {
+                    Ok(r) if fs_numero(&r, "sent") == Some(1) => passaram += 1,
+                    Ok(r) => {
+                        crate::log_error!("teste", "{}", r);
+                        return Err("um envio de um byte foi recusado");
+                    }
+                    Err(e) => return Ok((passaram, e)),
+                }
+                if passaram > CAPACIDADE {
+                    return Err("a inundacao nao foi contida");
+                }
+            }
+        };
+    let resultado = (|| -> Resultado {
+        let ca = aberta_com_o_eco(a)?;
+        let cb = aberta_com_o_eco(b)?;
+        let r = (|| -> Resultado {
+            let um_byte = |c: u64| {
+                pedido_rpc(
+                    "net.send",
+                    &alloc::format!(r#"{{"connection":{c},"content":"x","wait":10000}}"#),
+                )
+            };
+            let (la, lb) = (um_byte(ca), um_byte(cb));
+            crate::oleoduto::consumidor_de_teste(Some(crate::autorizacao::ultimo_registro()));
+            let (passou_a, espera_a) = inundar(a, &la)?;
+            if passou_a != PARTILHA {
+                crate::log_error!("teste", "{} passaram", passou_a);
+                return Err("o primeiro principal nao parou na parte de um principal sozinho");
+            }
+            let (passou_b, espera_b) = inundar(b, &lb)?;
+            // O segundo passa até o teto: a parte dele é a metade, e o
+            // primeiro já passou da dele.
+            if passou_b == 0 || passou_b > TETO - PARTILHA {
+                crate::log_error!("teste", "{} passaram", passou_b);
+                return Err("o segundo principal nao teve a parte dele");
+            }
+            if crate::oleoduto::pendentes_de_teste(pa) != PARTILHA as u32
+                || crate::oleoduto::pendentes_de_teste(pb) != passou_b as u32
+            {
+                return Err("a conta da partilha nao e a de cada principal");
+            }
+            if espera_a.conferir(None).is_some() || espera_b.conferir(None).is_some() {
+                return Err("uma espera acabou sem o journal andar");
+            }
+            // Nada se perdeu, e a monopolização está nas medidas.
+            let retrato = crate::oleoduto::retrato();
+            if retrato.maior_atraso >= CAPACIDADE
+                || retrato.maior_parte_permil <= 500
+                || retrato.justica_permil >= 1000
+                || !retrato
+                    .contas
+                    .iter()
+                    .any(|c| c.principal == pa.texto() && c.adiados >= 1)
+            {
+                crate::log_error!(
+                    "teste",
+                    "atraso {}, parte {}, justica {}",
+                    retrato.maior_atraso,
+                    retrato.maior_parte_permil,
+                    retrato.justica_permil
+                );
+                return Err("a partilha nao aparece nas medidas");
+            }
+            // O journal anda: os dois passam, decididos de novo.
+            crate::oleoduto::consumidor_de_teste(Some(crate::autorizacao::ultimo_registro()));
+            for (quem, linha, espera) in [(a, &la, espera_a), (b, &lb, espera_b)] {
+                if espera.conferir(None) != Some(Desfecho::Liberou) {
+                    return Err("o journal andou, e uma espera nao acabou");
+                }
+                drop(espera);
+                let r = crate::nativo::responder_de_teste(quem, linha);
+                if fs_numero(&r, "sent") != Some(1) {
+                    crate::log_error!("teste", "{}", r);
+                    return Err("um adiado nao passou depois da espera");
+                }
+            }
+            Ok(())
+        })();
+        crate::oleoduto::consumidor_de_teste(None);
+        fechar_conexao(a, ca);
+        fechar_conexao(b, cb);
+        r
+    })();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// Nenhum registro se perde com o journal de verdade, nem com ele parado:
+/// três principais inundam o plano de dados ao mesmo tempo, cada um num
+/// fio, com envios de um byte e `wait` — muito mais registros que o anel
+/// inteiro —, e o journal, que leva a auditoria como fora da suíte, para no
+/// começo — o disco que demora. A contrapressão segura cada um na parte
+/// dele até o teto: todos esperam, e ninguém é recusado. Solto o journal,
+/// ele grava, quem esperava passa — decidido de novo —, e a inundação
+/// termina. O atraso nunca chegou ao fim do anel, e toda decisão está no
+/// journal, sem lacuna.
+fn dados_a_auditoria_inteira_sob_inundacao() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
+    use core::sync::atomic::{AtomicU64, Ordering::SeqCst};
+    const FIOS: usize = 3;
+    const ENVIOS: u64 = 700;
+    static CERTOS: AtomicU64 = AtomicU64::new(0);
+    static ERRADOS: AtomicU64 = AtomicU64::new(0);
+    static AUTORIDADES: crate::trava::Mutex<[Option<Autoridade>; FIOS]> =
+        crate::trava::Mutex::new([None; FIOS]);
+    extern "C" fn inundar(i: u64) -> ! {
+        let autoridade = crate::arch::sem_interrupcoes(|| AUTORIDADES.lock()[i as usize]);
+        let r = (|| -> Resultado {
+            let quem = Chamador::Processo {
+                fio: crate::fios::id_atual(),
+                autoridade: autoridade.ok_or("o fio nao tem autoridade")?,
+                programa: Programa::Kernel,
+            };
+            let c = aberta_com_o_eco(quem)?;
+            let params = alloc::format!(r#"{{"connection":{c},"content":"z","wait":10000}}"#);
+            let r = (0..ENVIOS).try_for_each(|_| {
+                let r = pedir_como_o_despachante(quem, "net.send", &params);
+                match fs_numero(&r, "sent") {
+                    Some(1) => Ok(()),
+                    _ => {
+                        crate::log_error!("teste", "{}", r);
+                        Err("um envio da inundacao foi recusado")
+                    }
+                }
+            });
+            fechar_conexao(quem, c);
+            r
+        })();
+        match r {
+            Ok(()) => CERTOS.fetch_add(1, SeqCst),
+            Err(e) => {
+                crate::log_error!("teste", "fio {} da inundacao: {}", i, e);
+                ERRADOS.fetch_add(1, SeqCst)
+            }
+        };
+        crate::fios::terminar()
+    }
+    crate::pessoas::esquecer_registradas();
+    let resultado = com_o_journal_drenando(|desde| {
+        let autoridades: [Autoridade; FIOS] = core::array::from_fn(|i| Autoridade::Pessoa {
+            sessao: crate::pessoas::sessao_de_teste(
+                crate::pessoas::Console::Terminal(106 + i as u16),
+                &alloc::format!("dados-inunda-{i}"),
+                "operador",
+            ),
+        });
+        crate::arch::sem_interrupcoes(|| *AUTORIDADES.lock() = autoridades.map(Some));
+        CERTOS.store(0, SeqCst);
+        ERRADOS.store(0, SeqCst);
+        let antes = ContasDoPlano::agora();
+        // O journal parado no começo: a inundação enche o caminho, e cada
+        // principal espera.
+        crate::persistencia::segurar_a_auditoria_de_teste(true);
+        let nucleos = crate::nucleos::ligados();
+        for i in 0..FIOS {
+            crate::fios::criar_no_nucleo("dados-inunda", inundar, i as u64, i % nucleos)?;
+        }
+        let esperaram = esperar_cedendo(
+            || {
+                ContasDoPlano::desde(antes).adiados >= FIOS as u64
+                    || CERTOS.load(SeqCst) + ERRADOS.load(SeqCst) == FIOS as u64
+            },
+            TETO_DA_VAZAO,
+        )
+        .and_then(|_| {
+            (ContasDoPlano::desde(antes).adiados >= FIOS as u64)
+                .then_some(())
+                .ok_or("os fios acabaram sem esperar")
+        });
+        let parado = crate::oleoduto::retrato();
+        crate::persistencia::segurar_a_auditoria_de_teste(false);
+        esperaram.map_err(|_| "com o journal parado, a inundacao nao esperou")?;
+        if parado.atraso < crate::oleoduto::PARTILHA {
+            crate::log_error!("teste", "atraso {} com o journal parado", parado.atraso);
+            return Err("com o journal parado, a inundacao nao parou na partilha");
+        }
+        esperar_cedendo(
+            || CERTOS.load(SeqCst) + ERRADOS.load(SeqCst) == FIOS as u64,
+            TETO_DA_VAZAO,
+        )
+        .map_err(|_| "os fios da inundacao nao terminaram")?;
+        if ERRADOS.load(SeqCst) != 0 {
+            return Err("um principal da inundacao foi recusado (o motivo esta no log)");
+        }
+        let d = ContasDoPlano::desde(antes);
+        let retrato = crate::oleoduto::retrato();
+        crate::log_info!(
+            "teste",
+            "dados: inundacao de {} envios: atraso maior {}, {:?}",
+            FIOS as u64 * ENVIOS,
+            retrato.maior_atraso,
+            d
+        );
+        if d.taxa != 0 || d.mandados != FIOS as u64 * ENVIOS || d.adiados < FIOS as u64 {
+            return Err("a inundacao com wait foi recusada por volume, ou nao esperou");
+        }
+        if retrato.maior_atraso >= crate::oleoduto::CAPACIDADE {
+            return Err("o atraso da auditoria chegou ao fim do anel");
+        }
+        let mut envios = 0u64;
+        auditoria_inteira_no_journal(desde, |_, e| {
+            envios += u64::from(e.metodo == "net.send" && e.recurso == ECO);
+        })?;
+        if envios < FIOS as u64 * ENVIOS || ContasDoPlano::desde(antes).perdidos != 0 {
+            crate::log_error!("teste", "{} envios no journal", envios);
+            return Err("o journal nao tem cada envio da inundacao");
+        }
+        Ok(())
+    });
+    crate::persistencia::segurar_a_auditoria_de_teste(false);
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// O contido não tem o orçamento do fecho: a conexão que o firewall cortou
+/// sobrevive à contenção — só as vivas caem —, e fechá-la, para quem está
+/// contido, é exercício de autoridade como outro qualquer: o pedido fica com
+/// o controle, e é recusado. Solta, a mesma pessoa a fecha pelo orçamento do
+/// fecho.
+fn dados_o_contido_nao_tem_o_orcamento_do_fecho() -> Resultado {
+    use crate::autorizacao::Chamador;
+    crate::pessoas::esquecer_registradas();
+    let sessao = crate::pessoas::sessao_de_teste(
+        crate::pessoas::Console::Terminal(109),
+        "dados-fecho-contido",
+        "operador",
+    );
+    let pessoa = Chamador::Pessoa(sessao);
+    let Some(id) = crate::pessoas::dona_da_sessao(sessao) else {
+        return Err("a sessao de teste nao tem pessoa");
+    };
+    let sistema = sistema_aqui();
+    let regra = alloc::format!(r#"{{"to":"{ECO}","owner":"person:{}"}}"#, sessao.texto());
+    let credencial = alloc::format!(r#"{{"person":"{}"}}"#, id.texto());
+    let resultado = (|| -> Resultado {
+        let c = aberta_com_o_eco(pessoa)?;
+        let fechar = alloc::format!(r#"{{"connection":{c}}}"#);
+        let r = fs_pedir(sistema, "net.block", &regra);
+        let dona = crate::rede::conexoes::Dono::Pessoa(sessao);
+        if fs_numero(&r, "rule").is_none()
+            || crate::rede::pilha::regra_que_cortou(c, &dona) != fs_numero(&r, "rule")
+        {
+            crate::log_error!("teste", "{}", r);
+            fechar_conexao(pessoa, c);
+            return Err("a regra nao cortou a conexao da pessoa");
+        }
+        let r = fs_pedir(sistema, "credential.suspend", &credencial);
+        if fs_texto(&r, "state").as_deref() != Some("suspended") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o sistema nao suspendeu a credencial");
+        }
+        let antes = ContasDoPlano::agora();
+        let r = fs_pedir(pessoa, "net.close", &fechar);
+        let d = ContasDoPlano::desde(antes);
+        if !recusado_com(&r, "DENY_CREDENTIAL") || d.controle != 1 || d.fecho != 0 {
+            crate::log_error!("teste", "{} {:?}", r, d);
+            return Err("o contido teve o orcamento do fecho");
+        }
+        let r = fs_pedir(sistema, "credential.resume", &credencial);
+        if fs_texto(&r, "state").as_deref() != Some("resumed") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o sistema nao retomou a credencial");
+        }
+        let antes = ContasDoPlano::agora();
+        let r = fs_pedir(pessoa, "net.close", &fechar);
+        let d = ContasDoPlano::desde(antes);
+        if decisao_do_envelope(&r) != "ALLOW" || d.fecho != 1 || d.controle != 0 {
+            crate::log_error!("teste", "{} {:?}", r, d);
+            return Err("solta, a pessoa nao fechou a cortada pelo orcamento do fecho");
+        }
+        Ok(())
+    })();
+    let _ = fs_pedir(sistema, "credential.resume", &credencial);
+    let _ = fs_pedir(sistema, "net.unblock", &regra);
+    crate::rede::pilha::esquecer_regras_de_teste();
     crate::pessoas::esquecer_registradas();
     resultado
 }
@@ -37676,28 +39615,23 @@ fn dns_o_nsf_le_a_rajada_inteira() -> Resultado {
     use crate::autorizacao::Chamador;
     use crate::rede::bancada_dns::{self, Modo};
     const PERGUNTAS: u16 = 12;
-    // O servidor no alcance do operador, e a taxa dele sem pressa: cada
-    // pergunta é um `net.send`, e cada espera pela resposta, `net.recv` até
-    // ela chegar.
-    const OPERADOR: [(&str, &str); 2] = [
-        (
-            "recurso operador net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53",
-            "recurso operador net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53 udp:10.0.2.53:53",
-        ),
-        ("taxa operador 50 100", "taxa operador 400 800"),
-    ];
+    // O servidor no alcance do operador: cada pergunta é um `net.send`, e
+    // cada espera pela resposta, `net.recv` até ela chegar — a pessoa, no
+    // que pede por si, não tem taxa.
+    const OPERADOR: (&str, &str) = (
+        "recurso operador net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53",
+        "recurso operador net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53 udp:10.0.2.53:53",
+    );
     crate::pessoas::esquecer_registradas();
     let politica = politica_trocada(&[
-        OPERADOR[0],
-        OPERADOR[1],
+        OPERADOR,
         (
             "recurso seguranca net.observe udp:10.0.2.3:53",
             "recurso seguranca net.observe udp:10.0.2.3:53 udp:10.0.2.53:53",
         ),
     ])?;
     let sem_o_nsf = politica_trocada(&[
-        OPERADOR[0],
-        OPERADOR[1],
+        OPERADOR,
         (
             "recurso sistema net.observe udp:10.0.2.3:53",
             "recurso sistema net.observe udp:10.0.2.3:53 udp:10.0.2.53:53",
@@ -39081,9 +41015,12 @@ pub fn executar_todos() -> ! {
         // Cada caso começa sem arrendamento nenhum: um que outro caso deixou
         // seria um conflito que este não pediu. E sem contenção: um processo
         // isolado, ou uma chave de teste suspensa, por outro caso seria uma
-        // recusa que este não pediu.
+        // recusa que este não pediu. E sem conta no caminho da auditoria: os
+        // registros de dados de outro caso seriam uma partilha que este não
+        // fez.
         crate::coordenacao::esquecer();
         crate::contencao::esquecer_de_teste();
+        crate::oleoduto::esquecer_de_teste();
         // O resultado é impresso *depois* de rodar, e não antes, porque um
         // teste que emite log jogaria essas linhas no meio de uma linha de
         // relatório pela metade. Assim cada linha do relatório fica íntegra e
@@ -41282,24 +43219,6 @@ const PUBLICADOS: [&str; 5] = [
 /// O código com que o `vindo` sai quando o pedido dele passa.
 const SAIDA_DO_VINDO: i64 = 92;
 
-/// Roda `f` com a taxa do operador alta, sobre a política em vigor — a da
-/// bancada HTTP. O instalador decide pelo gate, a cada arquivo, umas vinte
-/// coisas — o DNS, a conexão, a semente, o envio, cada leitura de 4 KiB, os
-/// diretórios, a versão e a gravação —, e cinco arquivos seguidos, no
-/// kernel de produção, passam da taxa de todo dia do operador: a recusa
-/// `RATE_LIMIT` viria no meio deles, como deve. Como no caso das medidas do
-/// HTTP.
-fn com_a_taxa_do_instalador(f: impl FnOnce() -> Resultado) -> Resultado {
-    const DE: &str = "taxa operador 50 100";
-    let atual = crate::autorizacao::com_politica(|p| p.texto());
-    if !atual.contains(DE) {
-        return Err("a politica mudou: o caso nao acha a taxa do operador");
-    }
-    let mais = politica::Politica::ler(&atual.replace(DE, "taxa operador 400 800"))
-        .map_err(|_| "a politica do caso nao se le")?;
-    com_a_politica(mais, f)
-}
-
 /// O `instalador`, lançado e conduzido pela suíte.
 struct Instalador {
     fio: u64,
@@ -41433,133 +43352,128 @@ fn codigo_o_instalador_pela_rede() -> Resultado {
     use politica::Codigo;
     use seguranca::regras::Regra;
     com_a_bancada_http(|| {
-        com_a_taxa_do_instalador(|| {
-            com_o_nsf(|| {
-                let sessao = crate::pessoas::sessao_de_teste(
-                    Console::Terminal(82),
-                    "codigo-rede",
-                    "operador",
-                );
-                let instalador = Instalador::lancar(Autoridade::Pessoa { sessao })?;
-                let fio = instalador.fio;
-                let r = (|| -> Resultado {
-                    for arquivo in 0..PUBLICADOS.len() {
-                        instalador.baixar(arquivo)?;
-                    }
-                    // Cada download pelo gate: o DNS, o destino cifrado e a
-                    // gravação, uma por arquivo.
-                    let cifradas = decisoes_do_processo(fio, "net.connect", HTTP_CIFRADO);
-                    let gravadas = decisoes_do_processo(fio, "fs.write", "");
-                    if cifradas.len() != PUBLICADOS.len()
-                        || gravadas.len() < PUBLICADOS.len()
-                        || cifradas
-                            .iter()
-                            .chain(&gravadas)
-                            .any(|(_, c, _)| *c != Codigo::Allow)
-                    {
-                        crate::log_error!("teste", "{:?} {:?}", cifradas, gravadas);
-                        return Err("o codigo nao chegou pelo gate, destino por destino");
-                    }
+        com_o_nsf(|| {
+            let sessao =
+                crate::pessoas::sessao_de_teste(Console::Terminal(82), "codigo-rede", "operador");
+            let instalador = Instalador::lancar(Autoridade::Pessoa { sessao })?;
+            let fio = instalador.fio;
+            let r = (|| -> Resultado {
+                for arquivo in 0..PUBLICADOS.len() {
+                    instalador.baixar(arquivo)?;
+                }
+                // Cada download pelo gate: o DNS, o destino cifrado e a
+                // gravação, uma por arquivo.
+                let cifradas = decisoes_do_processo(fio, "net.connect", HTTP_CIFRADO);
+                let gravadas = decisoes_do_processo(fio, "fs.write", "");
+                if cifradas.len() != PUBLICADOS.len()
+                    || gravadas.len() < PUBLICADOS.len()
+                    || cifradas
+                        .iter()
+                        .chain(&gravadas)
+                        .any(|(_, c, _)| *c != Codigo::Allow)
+                {
+                    crate::log_error!("teste", "{:?} {:?}", cifradas, gravadas);
+                    return Err("o codigo nao chegou pelo gate, destino por destino");
+                }
 
-                    use protocolo::usuario::erro;
-                    let esperados = [
-                        SAIDA_DO_VINDO,
-                        erro::SEM_SELO,
-                        erro::SELO_NAO_CONFERE,
-                        erro::EDITOR_NAO_CONFIADO,
-                        erro::EDITOR_NAO_CONFIADO,
-                    ];
-                    for (arquivo, codigo) in esperados.into_iter().enumerate() {
-                        instalador.rodar(arquivo, codigo)?;
-                    }
-                    // As recusas: execuções da decisão do gate sobre o
-                    // `executar`, em nome do processo que executava, com o
-                    // motivo de cada uma.
-                    let motivos = [
-                        (1, "o codigo nao tem selo"),
-                        (2, "o selo nao confere com o codigo"),
-                        (3, "o editor do codigo nao esta no registro"),
-                        (4, "o papel nao confia no editor outro"),
-                    ];
-                    for (arquivo, motivo) in motivos {
-                        let caminho = alloc::format!("{CODIGO_INSTALADO}/{}", PUBLICADOS[arquivo]);
-                        let (_, e) = registro_que(|e| {
-                            e.metodo == "process.exec"
-                                && e.recurso == caminho
-                                && e.codigo == Codigo::DenyPolicy
-                        })
-                        .ok_or("a recusa do executar nao foi gravada")?;
-                        let certo = e.detalhe.starts_with("pelo processo ")
-                            && e.detalhe.contains("(instalador ")
-                            && e.detalhe.contains(&alloc::format!("): {motivo}; decisao "));
-                        if !certo {
-                            crate::log_error!("teste", "{:?}", e);
-                            return Err(
-                                "a recusa do executar nao diz o processo, o motivo e a decisao",
-                            );
-                        }
-                    }
-                    // O que rodou pediu, e o pedido diz de onde ele veio.
-                    registro_que(|e| {
-                        e.metodo == "system.info"
-                            && e.codigo == Codigo::Allow
-                            && e.detalhe.contains("(vindo ")
-                            && e.detalhe.ends_with(" de bancada)")
+                use protocolo::usuario::erro;
+                let esperados = [
+                    SAIDA_DO_VINDO,
+                    erro::SEM_SELO,
+                    erro::SELO_NAO_CONFERE,
+                    erro::EDITOR_NAO_CONFIADO,
+                    erro::EDITOR_NAO_CONFIADO,
+                ];
+                for (arquivo, codigo) in esperados.into_iter().enumerate() {
+                    instalador.rodar(arquivo, codigo)?;
+                }
+                // As recusas: execuções da decisão do gate sobre o
+                // `executar`, em nome do processo que executava, com o
+                // motivo de cada uma.
+                let motivos = [
+                    (1, "o codigo nao tem selo"),
+                    (2, "o selo nao confere com o codigo"),
+                    (3, "o editor do codigo nao esta no registro"),
+                    (4, "o papel nao confia no editor outro"),
+                ];
+                for (arquivo, motivo) in motivos {
+                    let caminho = alloc::format!("{CODIGO_INSTALADO}/{}", PUBLICADOS[arquivo]);
+                    let (_, e) = registro_que(|e| {
+                        e.metodo == "process.exec"
+                            && e.recurso == caminho
+                            && e.codigo == Codigo::DenyPolicy
                     })
-                    .ok_or("o pedido do codigo instalado nao diz quem o selou")?;
-
-                    // O NSF: o adulterado é um incidente, de alerta — e ninguém
-                    // é contido por ele.
-                    let ate = crate::autorizacao::ultimo_registro();
-                    let mut pedidos = 0;
-                    for _ in 0..64 {
-                        pedidos += crate::seguranca::passo().pedidos;
-                        if crate::seguranca::com_motor_de_teste(|m| m.lido() >= ate) == Some(true) {
-                            break;
-                        }
+                    .ok_or("a recusa do executar nao foi gravada")?;
+                    let certo = e.detalhe.starts_with("pelo processo ")
+                        && e.detalhe.contains("(instalador ")
+                        && e.detalhe.contains(&alloc::format!("): {motivo}; decisao "));
+                    if !certo {
+                        crate::log_error!("teste", "{:?}", e);
+                        return Err(
+                            "a recusa do executar nao diz o processo, o motivo e a decisao",
+                        );
                     }
-                    let viu = crate::seguranca::com_motor_de_teste(|m| {
-                        m.incidentes.todos().any(|i| {
-                            i.deteccoes.iter().any(|d| {
-                                d.regra == Regra::CodigoAdulterado
-                                    && d.explicacao.contains("vindo-adulterado")
-                            })
+                }
+                // O que rodou pediu, e o pedido diz de onde ele veio.
+                registro_que(|e| {
+                    e.metodo == "system.info"
+                        && e.codigo == Codigo::Allow
+                        && e.detalhe.contains("(vindo ")
+                        && e.detalhe.ends_with(" de bancada)")
+                })
+                .ok_or("o pedido do codigo instalado nao diz quem o selou")?;
+
+                // O NSF: o adulterado é um incidente, de alerta — e ninguém
+                // é contido por ele.
+                let ate = crate::autorizacao::ultimo_registro();
+                let mut pedidos = 0;
+                for _ in 0..64 {
+                    pedidos += crate::seguranca::passo().pedidos;
+                    if crate::seguranca::com_motor_de_teste(|m| m.lido() >= ate) == Some(true) {
+                        break;
+                    }
+                }
+                let viu = crate::seguranca::com_motor_de_teste(|m| {
+                    m.incidentes.todos().any(|i| {
+                        i.deteccoes.iter().any(|d| {
+                            d.regra == Regra::CodigoAdulterado
+                                && d.explicacao.contains("vindo-adulterado")
                         })
-                    });
-                    if viu != Some(true) {
-                        return Err("o NSF nao viu o codigo adulterado");
-                    }
-                    if pedidos != 0 {
-                        return Err("o NSF pediu uma contencao pelo codigo adulterado");
-                    }
+                    })
+                });
+                if viu != Some(true) {
+                    return Err("o NSF nao viu o codigo adulterado");
+                }
+                if pedidos != 0 {
+                    return Err("o NSF pediu uma contencao pelo codigo adulterado");
+                }
 
-                    // O user.run da pessoa, sobre o mesmo arquivo instalado.
-                    let pessoa = crate::autorizacao::Chamador::Pessoa(sessao);
-                    let desde = crate::log::total_emitidos();
-                    let r = fs_pedir(
-                        pessoa,
-                        "user.run",
-                        &alloc::format!(r#"{{"path":"{CODIGO_INSTALADO}/vindo"}}"#),
-                    );
-                    if !r.contains(r#""launched":true"#) {
-                        crate::log_error!("teste", "{}", r);
-                        return Err("o user.run nao rodou o codigo selado pela bancada");
-                    }
-                    saida_do_processo(desde, SAIDA_DO_VINDO)?;
-                    let r = fs_pedir(
-                        pessoa,
-                        "user.run",
-                        &alloc::format!(r#"{{"path":"{CODIGO_INSTALADO}/vindo-adulterado"}}"#),
-                    );
-                    if !r.contains(r#""code":"CODE_TAMPERED""#) {
-                        crate::log_error!("teste", "{}", r);
-                        return Err("o user.run nao recusou o codigo adulterado");
-                    }
-                    Ok(())
-                })();
-                let fim = instalador.encerrar();
-                r.and(fim)
-            })
+                // O user.run da pessoa, sobre o mesmo arquivo instalado.
+                let pessoa = crate::autorizacao::Chamador::Pessoa(sessao);
+                let desde = crate::log::total_emitidos();
+                let r = fs_pedir(
+                    pessoa,
+                    "user.run",
+                    &alloc::format!(r#"{{"path":"{CODIGO_INSTALADO}/vindo"}}"#),
+                );
+                if !r.contains(r#""launched":true"#) {
+                    crate::log_error!("teste", "{}", r);
+                    return Err("o user.run nao rodou o codigo selado pela bancada");
+                }
+                saida_do_processo(desde, SAIDA_DO_VINDO)?;
+                let r = fs_pedir(
+                    pessoa,
+                    "user.run",
+                    &alloc::format!(r#"{{"path":"{CODIGO_INSTALADO}/vindo-adulterado"}}"#),
+                );
+                if !r.contains(r#""code":"CODE_TAMPERED""#) {
+                    crate::log_error!("teste", "{}", r);
+                    return Err("o user.run nao recusou o codigo adulterado");
+                }
+                Ok(())
+            })();
+            let fim = instalador.encerrar();
+            r.and(fim)
         })
     })
 }
@@ -41576,56 +43490,54 @@ fn codigo_entre_baixar_e_rodar() -> Resultado {
     use crate::autorizacao::Autoridade;
     use crate::pessoas::Console;
     com_a_bancada_http(|| {
-        com_a_taxa_do_instalador(|| {
-            let sessao =
-                crate::pessoas::sessao_de_teste(Console::Terminal(83), "codigo-meio", "operador");
-            let instalador = Instalador::lancar(Autoridade::Pessoa { sessao })?;
-            let fio = instalador.fio;
-            let r = (|| -> Resultado {
-                instalador.baixar(0)?;
-                let sem_confianca = crate::autorizacao::com_politica(|p| {
-                    p.com_linha("editores operador", "administrador", &[])
-                })
-                .map_err(|_| "a politica sem a confianca nao se fez")?;
-                com_a_politica(sem_confianca, || {
-                    instalador.rodar(0, protocolo::usuario::erro::EDITOR_NAO_CONFIADO)
-                })?;
-                instalador.rodar(0, SAIDA_DO_VINDO)?;
+        let sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(83), "codigo-meio", "operador");
+        let instalador = Instalador::lancar(Autoridade::Pessoa { sessao })?;
+        let fio = instalador.fio;
+        let r = (|| -> Resultado {
+            instalador.baixar(0)?;
+            let sem_confianca = crate::autorizacao::com_politica(|p| {
+                p.com_linha("editores operador", "administrador", &[])
+            })
+            .map_err(|_| "a politica sem a confianca nao se fez")?;
+            com_a_politica(sem_confianca, || {
+                instalador.rodar(0, protocolo::usuario::erro::EDITOR_NAO_CONFIADO)
+            })?;
+            instalador.rodar(0, SAIDA_DO_VINDO)?;
 
-                // Isolado: nem a conexão, nem o filho.
-                let quem = sistema_aqui();
-                let isolar = fs_pedir(
-                    quem,
-                    "process.isolate",
-                    &alloc::format!(r#"{{"process":{fio}}}"#),
-                );
-                if !isolar.contains(r#""state":"isolated""#) {
-                    crate::log_error!("teste", "{}", isolar);
-                    return Err("o caso nao isolou o instalador");
-                }
-                let baixou = instalador.passo(INSTALAR_BAIXAR, 0);
-                let rodou = instalador.passo(INSTALAR_RODAR, 0);
-                let _ = fs_pedir(
-                    quem,
-                    "process.release",
-                    &alloc::format!(r#"{{"process":{fio}}}"#),
-                );
-                let (baixou, rodou) = (baixou?, rodou?);
-                if !baixou.contains("DENY_CONTAINED") {
-                    crate::log_error!("teste", "baixou: {}", baixou);
-                    return Err("o instalador isolado baixou");
-                }
-                if rodou != alloc::format!("falhou bifurcar {}", protocolo::usuario::erro::NEGADO) {
-                    crate::log_error!("teste", "rodou: {}", rodou);
-                    return Err("o instalador isolado rodou o codigo num filho");
-                }
-                instalador.baixar(0)?;
-                instalador.rodar(0, SAIDA_DO_VINDO)
-            })();
-            let fim = instalador.encerrar();
-            crate::pessoas::esquecer_registradas();
-            r.and(fim)
-        })
+            // Isolado: nem a conexão, nem o filho.
+            let quem = sistema_aqui();
+            let isolar = fs_pedir(
+                quem,
+                "process.isolate",
+                &alloc::format!(r#"{{"process":{fio}}}"#),
+            );
+            if !isolar.contains(r#""state":"isolated""#) {
+                crate::log_error!("teste", "{}", isolar);
+                return Err("o caso nao isolou o instalador");
+            }
+            let baixou = instalador.passo(INSTALAR_BAIXAR, 0);
+            let rodou = instalador.passo(INSTALAR_RODAR, 0);
+            let _ = fs_pedir(
+                quem,
+                "process.release",
+                &alloc::format!(r#"{{"process":{fio}}}"#),
+            );
+            let (baixou, rodou) = (baixou?, rodou?);
+            if !baixou.contains("DENY_CONTAINED") {
+                crate::log_error!("teste", "baixou: {}", baixou);
+                return Err("o instalador isolado baixou");
+            }
+            if rodou != alloc::format!("falhou bifurcar {}", protocolo::usuario::erro::NEGADO) {
+                crate::log_error!("teste", "rodou: {}", rodou);
+                return Err("o instalador isolado rodou o codigo num filho");
+            }
+            instalador.baixar(0)?;
+            instalador.rodar(0, SAIDA_DO_VINDO)
+        })();
+        let fim = instalador.encerrar();
+        crate::pessoas::esquecer_registradas();
+        r.and(fim)
     })
 }
 

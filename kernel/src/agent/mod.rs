@@ -817,8 +817,25 @@ fn processar(
 
     // A decisão: identidade, sessão, papel, permissão. Só a licença que ela
     // devolve chama o handler — ver [`autorizacao`].
-    let licenca = match autorizacao::autorizar(chamador, comando, requisicao.params) {
-        Ok(l) => l,
+    let licenca = match autorizacao::autorizar(
+        chamador,
+        comando,
+        requisicao.params,
+        permitir && !DIRETO.load(Ordering::SeqCst),
+    ) {
+        Ok(autorizacao::Decisao::Licenca(l)) => l,
+        // Adiado pelo caminho da auditoria: a sessão espera como espera um
+        // comando que suspendeu — com o anexo guardado para a reexecução —,
+        // e o pedido passa pelo gate de novo quando a espera acabar — ver
+        // `crate::oleoduto`.
+        Ok(autorizacao::Decisao::Adiada(e)) => {
+            let guardado = if anexo.len() > 0 {
+                anexo.copia()
+            } else {
+                crate::sessoes::AnexoDaPorta::nenhum()
+            };
+            return Some((e, guardado));
+        }
         Err(recusa) => {
             com_saida(canal, |w| {
                 protocol::envelope_recusa(w, requisicao.id, &recusa)

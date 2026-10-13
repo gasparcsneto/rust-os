@@ -2760,6 +2760,17 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
         ],
     ),
     ("captura::depois_de(", &["kernel/src/agent/commands.rs"]),
+    // O plano de dados (ver `agent::registry::Plano` e `oleoduto`): só o
+    // gate pergunta se o caminho da auditoria tem lugar, só ele adia um
+    // pedido por ele, e só ele põe a decisão de dados na conta do
+    // principal; a espera pela auditoria só a conferência da espera a
+    // confere; e o caminho só anda quando o journal grava.
+    ("oleoduto::tem_lugar(", &["kernel/src/autorizacao.rs"]),
+    ("Espera::pela_auditoria(", &["kernel/src/autorizacao.rs"]),
+    ("oleoduto::adiou(", &["kernel/src/autorizacao.rs"]),
+    ("oleoduto::registrou(", &["kernel/src/autorizacao.rs"]),
+    ("oleoduto::conferir(", &["kernel/src/rede/espera.rs"]),
+    ("oleoduto::avancou(", &["kernel/src/persistencia.rs"]),
     (
         "seguranca::",
         &[
@@ -3325,7 +3336,8 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
              na decisão; nenhuma camada sobe acima da barra; as cargas do boot só pelo boot; \
              o tecido de segurança só fala como ele mesmo, pelo gate, sem que o gate o leia; \
              o TLS, que é do programa, só verifica pelas âncoras, sem atalho que o desligue; \
-             o HTTP, que é do programa, não tem comando, permissão nem caminho até o gate; e o \
+             o HTTP, que é do programa, não tem comando, permissão nem caminho até o gate; o \
+             plano de dados só sai da taxa, e só espera pela auditoria, pelo gate; e o \
              código só vira processo pela conferência única, que o kernel faz e não sela"
         );
         Ok(ExitCode::SUCCESS)

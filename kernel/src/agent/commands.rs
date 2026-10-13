@@ -16,7 +16,7 @@
 use core::fmt;
 
 use super::json::{Json, JsonWriter};
-use super::registry::{Acesso, Command, Mais, ParamSpec, TipoParam};
+use super::registry::{Acesso, Command, Mais, ParamSpec, Plano, TipoParam};
 use politica::Permissao;
 
 /// A tabela de comandos do kernel.
@@ -28,6 +28,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::AgentRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: ping,
     },
     Command {
@@ -38,6 +39,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::AgentRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: agent_session,
     },
     Command {
@@ -50,6 +52,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::AgentRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: agent_sessions,
     },
     Command {
@@ -63,6 +66,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::AgentRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: agent_list,
     },
     Command {
@@ -74,6 +78,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::AgentRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: agent_registry,
     },
     Command {
@@ -85,6 +90,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::AgentRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: person_registry,
     },
     Command {
@@ -102,6 +108,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::PorProva,
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: admin_challenge,
     },
     Command {
@@ -151,6 +158,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::PorProva,
         recurso: Some("command"),
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: admin_execute,
     },
     Command {
@@ -161,6 +169,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::AgentRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: describe,
     },
     Command {
@@ -170,6 +179,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: system_info,
     },
     Command {
@@ -179,6 +189,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: memory_stats,
     },
     Command {
@@ -201,6 +212,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: memory_regions,
     },
     Command {
@@ -210,6 +222,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: memory_frames,
     },
     Command {
@@ -219,6 +232,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: heap_stats,
     },
     Command {
@@ -233,6 +247,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: Some("address"),
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: paging_translate,
     },
     Command {
@@ -242,6 +257,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: system_uptime,
     },
     Command {
@@ -256,6 +272,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::RandomRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: random_read,
     },
     Command {
@@ -265,6 +282,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: tasks_stats,
     },
     Command {
@@ -274,6 +292,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: tasks_list,
     },
     Command {
@@ -283,6 +302,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: threads_stats,
     },
     Command {
@@ -292,6 +312,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: threads_list,
     },
     Command {
@@ -312,6 +333,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::ProcessRun),
         recurso: Some("path"),
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: user_run,
     },
     Command {
@@ -322,6 +344,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: user_stats,
     },
     Command {
@@ -332,6 +355,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: pci_list,
     },
     Command {
@@ -341,6 +365,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: disk_info,
     },
     Command {
@@ -363,6 +388,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::FsRawRead),
         recurso: Some("sector"),
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: disk_read,
     },
     Command {
@@ -372,6 +398,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: net_info,
     },
     Command {
@@ -394,6 +421,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::NetSend),
         recurso: Some("ip"),
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: net_arp,
     },
     Command {
@@ -408,6 +436,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::NetConnect),
         recurso: Some("to"),
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: net_connect,
     },
     Command {
@@ -442,6 +471,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::NetConnect),
         recurso: Some("connection"),
         mais: Mais::Nada,
+        plano: Plano::Dados,
         handler: net_send,
     },
     Command {
@@ -470,6 +500,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::NetConnect),
         recurso: Some("connection"),
         mais: Mais::Nada,
+        plano: Plano::Dados,
         handler: net_recv,
     },
     Command {
@@ -484,6 +515,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::NetConnect),
         recurso: Some("connection"),
         mais: Mais::Nada,
+        plano: Plano::Fecho,
         handler: net_close,
     },
     Command {
@@ -512,6 +544,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::NetObserve),
         recurso: Some("to"),
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: net_observe,
     },
     Command {
@@ -534,6 +567,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::NetBlock),
         recurso: Some("to"),
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: net_block,
     },
     Command {
@@ -556,6 +590,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::NetBlock),
         recurso: Some("to"),
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: net_unblock,
     },
     Command {
@@ -565,6 +600,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::SecurityRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: net_rules,
     },
     Command {
@@ -579,6 +615,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::ProcessIsolate),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: process_isolate,
     },
     Command {
@@ -593,6 +630,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::ProcessIsolate),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: process_release,
     },
     Command {
@@ -607,6 +645,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::AgentSuspend),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: agent_suspend,
     },
     Command {
@@ -621,6 +660,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::AgentSuspend),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: agent_resume,
     },
     Command {
@@ -643,6 +683,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::CredentialSuspend),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: credential_suspend,
     },
     Command {
@@ -665,6 +706,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::CredentialSuspend),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: credential_resume,
     },
     Command {
@@ -674,6 +716,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::SecurityRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: containment_list,
     },
     Command {
@@ -696,6 +739,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::UiRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: video_sample,
     },
     Command {
@@ -708,6 +752,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: display_info,
     },
     Command {
@@ -718,6 +763,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::UiRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: ui_tree,
     },
     Command {
@@ -754,6 +800,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::UiAct),
         recurso: Some("id"),
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: ui_act,
     },
     Command {
@@ -779,6 +826,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::UiAct),
         recurso: Some("id"),
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: ui_claim,
     },
     Command {
@@ -793,6 +841,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::UiAct),
         recurso: Some("id"),
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: ui_release,
     },
     Command {
@@ -833,6 +882,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::MessageSend),
         recurso: Some("to"),
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: message_send,
     },
     Command {
@@ -856,6 +906,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::MessageRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: message_read,
     },
     Command {
@@ -878,6 +929,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::MessageRead),
         recurso: Some("id"),
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: message_ack,
     },
     Command {
@@ -904,6 +956,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::MessageRead),
         recurso: Some("id"),
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: message_cancel,
     },
     Command {
@@ -918,6 +971,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::MessageRead),
         recurso: Some("id"),
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: message_status,
     },
     Command {
@@ -927,6 +981,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: disk_partitions,
     },
     Command {
@@ -936,6 +991,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: btrfs_chunks,
     },
     Command {
@@ -945,6 +1001,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: btrfs_info,
     },
     Command {
@@ -954,6 +1011,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: fs_mounts,
     },
     Command {
@@ -987,6 +1045,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::FsRead),
         recurso: Some("path"),
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: fs_read,
     },
     Command {
@@ -1001,6 +1060,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::FsRead),
         recurso: Some("path"),
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: fs_list,
     },
     Command {
@@ -1016,6 +1076,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::FsRead),
         recurso: Some("path"),
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: fs_stat,
     },
     Command {
@@ -1056,6 +1117,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::FsWrite),
         recurso: Some("path"),
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: fs_write,
     },
     Command {
@@ -1090,6 +1152,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::FsWrite),
         recurso: Some("path"),
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: fs_append,
     },
     Command {
@@ -1112,6 +1175,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::FsWrite),
         recurso: Some("path"),
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: fs_delete,
     },
     Command {
@@ -1126,6 +1190,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::FsWrite),
         recurso: Some("path"),
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: fs_mkdir,
     },
     Command {
@@ -1148,6 +1213,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::FsWrite),
         recurso: Some("path"),
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: fs_rmdir,
     },
     Command {
@@ -1176,6 +1242,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::FsWrite),
         recurso: Some("path"),
         mais: Mais::Parametro("to"),
+        plano: Plano::Controle,
         handler: fs_rename,
     },
     Command {
@@ -1198,6 +1265,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::FsWrite),
         recurso: None,
         mais: Mais::Lote("ops"),
+        plano: Plano::Controle,
         handler: fs_batch,
     },
     Command {
@@ -1232,6 +1300,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::FsWrite),
         recurso: Some("path"),
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: fs_draft,
     },
     Command {
@@ -1254,6 +1323,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::FsWrite),
         recurso: Some("path"),
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: fs_discard,
     },
     Command {
@@ -1279,6 +1349,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::FsWrite),
         recurso: Some("path"),
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: fs_claim,
     },
     Command {
@@ -1293,6 +1364,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::FsWrite),
         recurso: Some("path"),
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: fs_release,
     },
     Command {
@@ -1307,6 +1379,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::KeyboardRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: keyboard_read,
     },
     Command {
@@ -1316,6 +1389,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: irq_stats,
     },
     Command {
@@ -1325,6 +1399,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: traps_stats,
     },
     Command {
@@ -1368,6 +1443,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::DebugTrigger),
         recurso: Some("kind"),
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: debug_trigger,
     },
     Command {
@@ -1390,6 +1466,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::LogRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: log_tail,
     },
     Command {
@@ -1414,6 +1491,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::AuditRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: audit_tail,
     },
     Command {
@@ -1424,6 +1502,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::AuditRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: audit_head,
     },
     Command {
@@ -1434,6 +1513,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::AuditRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: audit_verify,
     },
     Command {
@@ -1445,6 +1525,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::PolicyRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: policy_show,
     },
     Command {
@@ -1454,6 +1535,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::SecurityRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: security_status,
     },
     Command {
@@ -1468,6 +1550,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::SecurityRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: security_incidents,
     },
     Command {
@@ -1496,6 +1579,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::SecurityRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: security_events,
     },
     Command {
@@ -1510,6 +1594,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::SecurityRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: security_explain,
     },
     Command {
@@ -1532,6 +1617,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::SecurityRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: security_provenance,
     },
     Command {
@@ -1546,6 +1632,7 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::SecurityRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: security_risk,
     },
     Command {
@@ -1555,15 +1642,17 @@ pub static COMANDOS: &[Command] = &[
         acesso: Acesso::Exige(Permissao::SecurityRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: security_verify,
     },
     Command {
         nome: "security.metrics",
-        resumo: "O custo e o efeito da seguranca, medidos: o gate (decisoes, recusas por codigo, latencia), a politica, a auditoria, o tecido (voltas, tempo de maquina, memoria, falsos positivos, contencoes desfeitas, repeticoes de recusa), a latencia da resposta, os arrendamentos soltos, por causa, e a conferencia do codigo de fora da imagem (o selo e a confianca no editor).",
+        resumo: "O custo e o efeito da seguranca, medidos: o gate (decisoes, recusas por codigo, latencia), a politica, a auditoria, o tecido (voltas, tempo de maquina, memoria, falsos positivos, contencoes desfeitas, repeticoes de recusa), a latencia da resposta, os arrendamentos soltos, por causa, a conferencia do codigo de fora da imagem (o selo e a confianca no editor), e o orcamento (`budget`): decisoes de controle (a taxa do papel), de dados e de fecho sobre um recurso ja aberto, recusas por taxa, esperas pelo caminho da auditoria, o atraso dela e o que saiu do anel antes do journal, a vazao do plano de dados e a justica entre os principais.",
         params: &[],
         acesso: Acesso::Exige(Permissao::SecurityRead),
         recurso: None,
         mais: Mais::Nada,
+        plano: Plano::Controle,
         handler: security_metrics,
     },
 ];
@@ -2084,6 +2173,9 @@ fn describe(_params: Json, w: &mut JsonWriter) -> fmt::Result {
         w.begin_object()?;
         w.field_str("name", cmd.nome)?;
         w.field_str("summary", cmd.resumo)?;
+        // O orçamento da decisão: `control` gasta a taxa do papel; `data` e
+        // `release` agem sobre um recurso já aberto — ver `registry::Plano`.
+        w.field_str("plane", cmd.plano.nome())?;
         w.key("params")?;
         w.begin_array()?;
         for spec in cmd.params {
@@ -2679,6 +2771,8 @@ fn net_send_com(
     };
     match crate::rede::pilha::mandar(numero, &dono, dados) {
         Ok((aceitos, estado)) => {
+            crate::metricas::BYTES_MANDADOS
+                .fetch_add(aceitos as u64, core::sync::atomic::Ordering::Relaxed);
             // Um datagrama para um destino observado fica na captura.
             if aceitos > 0 {
                 crate::rede::captura::guardar(numero, &dono, &destino, true, &dados[..aceitos]);
@@ -2781,10 +2875,14 @@ fn net_recv(params: Json, w: &mut JsonWriter) -> fmt::Result {
             w.end_str()?;
         }
     }
-    if tirar > 0
-        && let Err(motivo) = crate::rede::pilha::consumir(numero, &dono, tirar)
-    {
-        falha_de_rede(w, motivo)?;
+    if tirar > 0 {
+        match crate::rede::pilha::consumir(numero, &dono, tirar) {
+            Ok(_) => {
+                crate::metricas::BYTES_LIDOS
+                    .fetch_add(tirar as u64, core::sync::atomic::Ordering::Relaxed);
+            }
+            Err(motivo) => falha_de_rede(w, motivo)?,
+        }
     }
     w.end_object()
 }
@@ -2848,6 +2946,8 @@ fn net_recv_datagrama(
     if chegou {
         match crate::rede::pilha::consumir_datagrama(numero, dono, dados.len()) {
             Ok(()) => {
+                crate::metricas::BYTES_LIDOS
+                    .fetch_add(dados.len() as u64, core::sync::atomic::Ordering::Relaxed);
                 // O datagrama de um destino observado fica na captura.
                 if let Ok(destino) = crate::rede::pilha::destino_de(numero, dono) {
                     crate::rede::captura::guardar(numero, dono, &destino, false, &dados);
@@ -6343,6 +6443,77 @@ fn security_metrics(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.key("code")?;
     w.begin_object()?;
     escrever_medida(w, "verify_ns", &m::CODIGO, true)?;
+    w.end_object()?;
+    // O orçamento das decisões: a taxa do papel, o plano de dados, o fecho
+    // — e o caminho da auditoria que o plano de dados respeita. Ver
+    // `registry::Plano` e `crate::oleoduto`.
+    orcamento(w)?;
+    w.end_object()
+}
+
+/// A seção `budget` de `security.metrics`.
+fn orcamento(w: &mut JsonWriter) -> fmt::Result {
+    use crate::metricas as m;
+    use core::sync::atomic::Ordering::Relaxed;
+    let r = crate::oleoduto::retrato();
+    w.key("budget")?;
+    w.begin_object()?;
+    w.field_u64("control_decisions", m::decisoes_do_plano(Plano::Controle))?;
+    w.field_u64("data_decisions", m::decisoes_do_plano(Plano::Dados))?;
+    w.field_u64("release_decisions", m::decisoes_do_plano(Plano::Fecho))?;
+    w.field_u64("rate_limited", m::decisoes_de(politica::Codigo::RateLimit))?;
+    w.field_u64("data_back_to_rate", m::DADOS_PELA_TAXA.load(Relaxed))?;
+    w.field_u64("data_in_margin", m::DADOS_NA_MARGEM.load(Relaxed))?;
+    // As esperas pelo caminho da auditoria: adiadas, as que acabaram, e
+    // quanto duraram.
+    w.key("audit_waits")?;
+    w.begin_object()?;
+    w.field_u64("deferred", m::ADIADOS.load(Relaxed))?;
+    w.field_u64("ended", r.esperas_acabadas)?;
+    w.field_u64("waiting_tasks", r.esperando as u64)?;
+    escrever_medida(w, "wait_ms", &m::ESPERA_DA_AUDITORIA_MS, false)?;
+    w.end_object()?;
+    // O atraso da auditoria: da cabeça ao que o journal já gravou — `null`
+    // sem journal —, e os limiares. O do NSF é o `backlog` da saúde dele.
+    w.key("audit_backlog")?;
+    w.begin_object()?;
+    w.field_u64("head", r.cabeca)?;
+    w.field_u64("now", r.atraso)?;
+    w.field_u64("max", r.maior_atraso)?;
+    w.key("journal")?;
+    match r.journal {
+        Some(j) => w.u64_value(j)?,
+        None => w.null_value()?,
+    }
+    w.field_u64("lost", m::AUDITORIA_PERDIDA.load(Relaxed))?;
+    w.field_u64("share_from", crate::oleoduto::PARTILHA)?;
+    w.field_u64("all_wait_from", crate::oleoduto::TETO)?;
+    w.field_u64("capacity", crate::oleoduto::CAPACIDADE)?;
+    w.end_object()?;
+    // A vazão do plano de dados: os bytes, e a janela das medidas.
+    w.key("throughput")?;
+    w.begin_object()?;
+    w.field_u64("bytes_sent", m::BYTES_MANDADOS.load(Relaxed))?;
+    w.field_u64("bytes_received", m::BYTES_LIDOS.load(Relaxed))?;
+    w.field_u64("window_ms", m::janela_ms())?;
+    w.end_object()?;
+    // A justiça entre os principais no plano de dados.
+    w.key("fairness")?;
+    w.begin_object()?;
+    w.field_u64("jain_permille", r.justica_permil)?;
+    w.field_u64("top_share_permille", r.maior_parte_permil)?;
+    w.key("principals")?;
+    w.begin_array()?;
+    for c in &r.contas {
+        w.begin_object()?;
+        w.field_str("principal", &c.principal)?;
+        w.field_u64("data_decisions", c.decisoes)?;
+        w.field_u64("recent", c.recentes)?;
+        w.field_u64("pending", u64::from(c.pendentes))?;
+        w.field_u64("deferred", c.adiados)?;
+        w.end_object()?;
+    }
+    w.end_array()?;
     w.end_object()?;
     w.end_object()
 }

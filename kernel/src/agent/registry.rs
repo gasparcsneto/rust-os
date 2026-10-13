@@ -83,6 +83,59 @@ pub enum Acesso {
     PorProva,
 }
 
+/// Que orçamento a decisão de um comando consome.
+///
+/// Todo comando declara o seu, como declara o [`Acesso`]: não há padrão, e
+/// um comando novo sem esta linha não compila.
+///
+/// # Exercício de autoridade, e operação sobre o que já foi autorizado
+///
+/// Abrir uma conexão, associar um destino, abrir um arquivo, lançar um
+/// processo, mandar uma mensagem, administrar: cada um é um **exercício de
+/// autoridade** — o papel de quem pede decide, e a taxa do papel limita
+/// quantos por segundo ([`Plano::Controle`]).
+///
+/// Usar um recurso que um exercício desses já abriu — mandar e ler pela
+/// conexão aberta, fechá-la — é outra coisa: a operação do **plano de
+/// dados** sobre um recurso já autorizado. Ela continua uma decisão do
+/// mesmo gate, com a mesma identidade, a mesma autoridade, a mesma
+/// política, a contenção, o firewall e o registro na auditoria; o que muda
+/// é o orçamento. O recurso já pagou a ficha do papel ao abrir; o que
+/// limita a operação sobre ele é a capacidade — a do recurso, a
+/// contrapressão dele, e a do caminho da auditoria (ver
+/// [`crate::oleoduto`]).
+///
+/// O plano não dá nada a ninguém: um comando de [`Plano::Dados`] ou
+/// [`Plano::Fecho`] só sai do orçamento do papel quando o gate resolve o
+/// recurso para **quem pede** — vivo, dele, com quem pede não contido — e
+/// autoriza o pedido. Sem isso, o pedido segue o caminho de qualquer
+/// exercício de autoridade, e paga a ficha.
+///
+/// O recurso é nomeado pelo número que a abertura devolveu, no parâmetro
+/// que o comando declara em `recurso`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Plano {
+    /// Exercício de autoridade: a taxa do papel.
+    Controle,
+    /// Mover dados por um recurso já aberto e autorizado: a capacidade do
+    /// recurso e a da auditoria, com contrapressão.
+    Dados,
+    /// Fechar um recurso já aberto: devolve capacidade, e nunca espera
+    /// orçamento — a taxa gasta não prende o recurso aberto.
+    Fecho,
+}
+
+impl Plano {
+    /// O nome, como `agent.describe` e `security.metrics` o escrevem.
+    pub const fn nome(self) -> &'static str {
+        match self {
+            Plano::Controle => "control",
+            Plano::Dados => "data",
+            Plano::Fecho => "release",
+        }
+    }
+}
+
 /// Um comando exposto ao agente.
 pub struct Command {
     pub nome: &'static str,
@@ -98,6 +151,8 @@ pub struct Command {
     /// [`Mais`]. O gate decide **cada um**, pela mesma permissão, e o
     /// handler só muda o que o gate decidiu.
     pub mais: Mais,
+    /// O orçamento que a decisão consome — ver [`Plano`].
+    pub plano: Plano,
     pub handler: Handler,
 }
 

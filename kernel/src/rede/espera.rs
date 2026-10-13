@@ -45,6 +45,16 @@
 //! canal, ao lado da linha suspensa —, e a entrega dos bytes também é
 //! decidida de novo.
 //!
+//! # A espera pela auditoria
+//!
+//! O mesmo mecanismo serve a outra espera, que não é da conexão: a do
+//! pedido do plano de dados que o gate adiou porque o caminho da auditoria
+//! não tem lugar agora — ver [`crate::oleoduto`]. Ela é armada pelo gate,
+//! e não pelo comando: o pedido não foi decidido, nem gravado, nem
+//! executado. O despachante a guarda e a confere como guarda e confere a da
+//! conexão, e acordado — o journal gravou, o NSF leu, ou o prazo do `wait`
+//! venceu — executa o pedido de novo, inteiro, pelo gate.
+//!
 //! # Uma espera de cada sentido por conexão
 //!
 //! Uma conexão tem um dono, e o dono pede uma coisa de cada vez pelo caminho
@@ -95,20 +105,55 @@ pub enum Desfecho {
     Sumiu,
     /// O prazo venceu sem nada disso.
     Venceu,
+    /// O caminho da auditoria tem lugar de novo — a espera de um pedido
+    /// que o gate adiou.
+    Liberou,
 }
 
-/// Uma espera armada numa conexão. Largá-la a desarma.
+/// Uma espera: armada numa conexão, ou pelo caminho da auditoria. Largá-la
+/// a desarma.
 #[derive(Debug)]
 pub struct Espera {
-    /// O número que a conexão guarda enquanto esta espera está armada.
-    numero: u64,
-    conexao: u64,
-    dono: Dono,
-    sentido: Sentido,
-    /// O estado que o pedido viu: sair dele é um evento.
-    estado: Estado,
+    causa: Causa,
     /// O tique em que a espera vence.
     prazo: u64,
+}
+
+/// Pelo que se espera.
+#[derive(Debug)]
+enum Causa {
+    /// O evento de uma conexão.
+    Conexao {
+        /// O número que a conexão guarda enquanto esta espera está armada.
+        numero: u64,
+        conexao: u64,
+        dono: Dono,
+        sentido: Sentido,
+        /// O estado que o pedido viu: sair dele é um evento.
+        estado: Estado,
+    },
+    /// Lugar no caminho da auditoria, para um pedido de dados de
+    /// `principal` que o gate adiou.
+    Auditoria {
+        principal: crate::autorizacao::Principal,
+        /// Desde quando, em milissegundos: a conta das esperas.
+        desde_ms: u64,
+    },
+}
+
+/// O tique em que vence uma espera de `ms` milissegundos — no máximo
+/// [`PRAZO_MAXIMO_MS`]. `None` sem relógio, que é quem venceria o prazo.
+fn prazo_de(ms: u64) -> Option<u64> {
+    let hz = crate::tempo::frequencia_hz() as u64;
+    if hz == 0 {
+        return None;
+    }
+    let tiques = ms
+        .min(PRAZO_MAXIMO_MS)
+        .saturating_mul(hz)
+        .div_ceil(1000)
+        .max(1);
+    Some(crate::tempo::ticks().saturating_add(tiques))
 }
 
 impl Espera {
@@ -127,26 +172,35 @@ impl Espera {
         ms: u64,
         sentido: Sentido,
     ) -> Result<Option<Espera>, &'static str> {
-        let hz = crate::tempo::frequencia_hz() as u64;
-        if hz == 0 {
+        let Some(prazo) = prazo_de(ms) else {
             return Ok(None);
-        }
-        let tiques = ms
-            .min(PRAZO_MAXIMO_MS)
-            .saturating_mul(hz)
-            .div_ceil(1000)
-            .max(1);
-        let prazo = crate::tempo::ticks().saturating_add(tiques);
+        };
         Ok(
             pilha::armar(conexao, &dono, sentido)?.map(|(numero, estado)| Espera {
-                numero,
-                conexao,
-                dono,
-                sentido,
-                estado,
+                causa: Causa::Conexao {
+                    numero,
+                    conexao,
+                    dono,
+                    sentido,
+                    estado,
+                },
                 prazo,
             }),
         )
+    }
+
+    /// A espera de um pedido de dados de `principal` que o gate adiou: até
+    /// o caminho da auditoria ter lugar para ele, por `ms` milissegundos —
+    /// o `wait` do pedido, no máximo [`PRAZO_MAXIMO_MS`]. `None` sem
+    /// relógio: sem prazo, não se adia. Só o gate arma — o `xtask` confere.
+    pub fn pela_auditoria(principal: crate::autorizacao::Principal, ms: u64) -> Option<Espera> {
+        Some(Espera {
+            causa: Causa::Auditoria {
+                principal,
+                desde_ms: crate::tempo::uptime_ms(),
+            },
+            prazo: prazo_de(ms)?,
+        })
     }
 
     /// O tique em que a espera vence.
@@ -163,22 +217,38 @@ impl Espera {
     /// com que ela processa o que chega: um evento cai antes — e a
     /// conferência o vê — ou depois — e acorda o waker registrado.
     pub fn conferir(&self, waker: Option<&Waker>) -> Option<Desfecho> {
-        pilha::conferir_espera(
-            self.conexao,
-            &self.dono,
-            self.numero,
-            self.estado,
-            self.sentido,
-            waker,
-        )
+        match &self.causa {
+            Causa::Conexao {
+                numero,
+                conexao,
+                dono,
+                sentido,
+                estado,
+            } => pilha::conferir_espera(*conexao, dono, *numero, *estado, *sentido, waker),
+            Causa::Auditoria { principal, .. } => {
+                crate::oleoduto::conferir(*principal, waker).then_some(Desfecho::Liberou)
+            }
+        }
         .or_else(|| (crate::tempo::ticks() >= self.prazo).then_some(Desfecho::Venceu))
     }
 }
 
 impl Drop for Espera {
-    /// Desarma: a conexão volta a aceitar uma espera.
+    /// Desarma: a conexão volta a aceitar uma espera. A espera pela
+    /// auditoria não tem o que desarmar — o waker guardado acorda à toa,
+    /// no máximo —, e entra na conta das esperas.
     fn drop(&mut self) {
-        pilha::desarmar(self.conexao, &self.dono, self.numero);
+        match &self.causa {
+            Causa::Conexao {
+                numero,
+                conexao,
+                dono,
+                ..
+            } => pilha::desarmar(*conexao, dono, *numero),
+            Causa::Auditoria { desde_ms, .. } => {
+                crate::oleoduto::esperou(crate::tempo::uptime_ms().saturating_sub(*desde_ms))
+            }
+        }
     }
 }
 
