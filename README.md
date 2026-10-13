@@ -2761,8 +2761,10 @@ seguinte quando a resposta teve fim certo, não pediu para fechar e nada
 chegou colado depois dela: o que chega sem pedido é um servidor
 dessincronizado, e não o começo da resposta seguinte. O prazo é de
 silêncio — quanto o outro lado pode ficar sem mandar nada —, e não da
-conversa inteira. Fora, de propósito: HTTP/2 e HTTP/3, compressão,
-cookies, autenticação, *proxy* e seguir redirecionamento sozinho.
+conversa inteira. Fora, de propósito: HTTP/2 e HTTP/3, cookies,
+autenticação, *proxy* e seguir redirecionamento sozinho. (A compressão do
+corpo veio depois, também no programa — ver [A compressão do
+HTTP](#a-compressão-do-http).)
 
 **A bancada é de fora.** O servidor é um script Python do hospedeiro
 ([`xtask/bancada/http.py`](xtask/bancada/http.py)), que o emulador roda a
@@ -3101,6 +3103,179 @@ relógio, a âncora — são 24 decisões, medidas na suíte.
   autoridade, que gasta a ficha —, e os datagramas dela são o plano de
   dados.
 - **As taxas padrão não mudaram.** O que mudou é o que gasta a ficha.
+
+### A compressão do HTTP
+
+O corpo comprimido é do **programa**, como o resto do HTTP: o pedido diz o
+que o cliente decodifica (`Accept-Encoding`), a resposta diz o que o
+servidor aplicou (`Content-Encoding`), e o pacote `http` decodifica no
+processo — `gzip` (e `x-gzip`) e `deflate` —, com um teto que quem pede fixa
+antes de descomprimir ([`codificacao.rs`](http/src/codificacao.rs)). O
+gate não vê nada disso: decide a conexão, cada envio e cada leitura pelo
+destino e por quem pede, e os bytes que passam são bytes, comprimidos ou
+não — com TLS, nem os bytes.
+
+```
+compressao: http://bancada.duke/bomba/gzip/512 -> limit HTTP_TOO_LARGE
+compressao: a bomba de 512 MiB parou no teto de 4 MiB; o monte foi de 64 a 8192 KiB
+compressao: http://bancada.duke/comprimido/gzip/6291456 -> limit HTTP_TOO_LARGE
+compressao: http://bancada.duke/comprimido/gzip/65536 -> gzip: 65536 bytes de 12767 no fio
+compressao: http://bancada.duke/comprimido/deflate/65536 -> deflate: 65536 bytes de 12755 no fio
+compressao: http://bancada.duke/comprimido-ate-fechar/gzip/65536 -> gzip: 65536 bytes de 12767 no fio
+compressao: https://bancada.duke:8443/comprimido/gzip/65536 -> gzip: 65536 bytes de 12767 no fio
+compressao: http://bancada.duke/negocia/65536 aceitando gzip=false deflate=true -> deflate (12755 bytes no fio)
+compressao: http://bancada.duke/negocia/65536 aceitando gzip=false deflate=false -> identity (65536 bytes no fio)
+compressao: tres respostas comprimidas numa conexao so
+compressao: http://bancada.duke/estragado/desconhecida -> protocol HTTP_UNACCEPTED_ENCODING
+compressao: http://bancada.duke/estragado/crc -> protocol HTTP_CORRUPT_CONTENT
+compressao: http://bancada.duke/estragado/cortado-fecho -> protocol HTTP_CORRUPT_CONTENT
+compressao: http://bancada.duke/estragado/vazio -> o conteudo vazio
+compressao: http://bancada.duke/comprimido/gzip/4718592 -> limit HTTP_TOO_LARGE
+compressao: http://bancada.duke/comprimido/gzip/4718592 com um teto de 8 MiB: 4718592 bytes de 879856 no fio
+compressao: http://bancada.duke:81/comprimido/gzip/1000 -> denied DENY_RESOURCE
+```
+
+**Transparente para a autorização.** A compressão não é recurso,
+permissão nem regra, e o gate não decide nada por ela — nem para deixar,
+nem para recusar. O programa que comprime não faz pedido nenhum que o HTTP
+já não fizesse, e a mesma página, pedida como é, em gzip e em deflate,
+passa pelas mesmas decisões, na mesma ordem — o nome pelo DNS, a conexão,
+o envio, as leituras, o fecho —, cada uma deixada em nome de quem pediu: o
+que muda é quantas leituras o corpo pede, sete como é e três ou quatro
+comprimido, para 64 KiB de texto. Nenhum registro da auditoria tem o nome
+de uma codificação, um cabeçalho dela ou um caminho do HTTP — a suíte e a
+fumaça leem a auditoria registro a registro para conferir —, e o `xtask
+invariantes` confere que o kernel e a política não falam de codificação de
+conteúdo. A revogação, a contenção e o firewall no meio de um corpo
+comprimido chegam com o código deles: metade do gzip lida, a leitura
+seguinte é a recusa, e nada da metade é entregue — nem decodificada, nem
+como um gzip cortado no lugar da recusa.
+
+**A negociação.** O pedido aceita as duas por padrão
+([`Aceitas`](http/src/codificacao.rs)); quem não quer diz `identity`, e não
+deixa de mandar o cabeçalho — sem ele, o servidor poderia mandar qualquer
+uma (RFC 9110, 12.5.3). O `Accept-Encoding` é escrito pelo pacote, como o
+`Content-Length`: quem chama não o põe à mão, e o que o pedido aceita é o
+que o cliente decodifica. A resposta numa codificação que o pedido não
+aceitou, numa desconhecida — `br`, `zstd`, `compress` — ou em duas
+empilhadas é `HTTP_UNACCEPTED_ENCODING`, conferida pela cabeça, antes de
+ler o corpo: o comprimido não é entregue como se fosse o conteúdo. A
+resposta sem corpo — a um `HEAD`, um `204`, um `304` — não tem o que
+decodificar; o corpo vazio é o conteúdo vazio. Os cabeçalhos ficam como
+vieram, e a resposta diz o que o cliente tirou (`codificacao`) e o tamanho
+no fio (`no_fio`).
+
+**Os limites, antes de descomprimir.** O corpo como veio passa pelo limite
+do corpo (1 MiB) enquanto chega, e o anunciado grande demais é recusado
+sem ser lido. O que sai do decodificador tem um teto próprio, o do corpo
+decodificado (`Limites::descomprimido`, 4 MiB por padrão), fixado antes do
+primeiro byte sair: a saída cresce dobrando, em potências de dois do teto,
+e para nele com `HTTP_TOO_LARGE`. O tamanho que o gzip anuncia no fim é
+conferido, e não reserva nada. As tabelas do DEFLATE são fixas, uns 8 KiB,
+e a janela de 32 KiB é a própria saída. A memória de uma decodificação é o
+corpo que veio, as tabelas e a saída — no pior instante, quando a saída
+dobra, uma vez e meia o teto. A bomba — meio GiB de zeros em uns 500 KiB, a
+maior razão do formato — custa o teto e para: o monte do processo foi de
+64 KiB a uns 8 MiB, os pedaços que a saída deixou para trás inclusive, que
+o monte de um programa não devolve. O trabalho é linear na entrada e na
+saída.
+
+**O que se confere.** No gzip (RFC 1952): a assinatura, o método, os bits
+reservados, os campos opcionais, o CRC da cabeça, o DEFLATE, e o CRC-32 e
+o tamanho de cada membro; membros seguidos são o formato, cada um com a
+janela dele, e depois do último nada. No `deflate`, o formato zlib (RFC
+1950): o método, a janela, o `FCHECK`, sem dicionário preestabelecido, o
+DEFLATE e o Adler-32; o DEFLATE cru que servidores antigos mandam como
+`deflate` é recusado — o cliente não adivinha. No DEFLATE (RFC 1951), o que
+a RFC proíbe e o zlib recusa. O que não confere é `HTTP_CORRUPT_CONTENT` —
+cortado, corrompido, com a soma errada, com bytes a mais —, da família do
+protocolo: a mensagem chegou, e o conteúdo dela não se lê. A conexão em
+que isso acontece não leva outro pedido.
+
+**Escrito aqui.** O pacote `http` não depende de ninguém — o `xtask`
+confere desde a fase 12 —, e o DEFLATE é dele também
+([`inflar.rs`](http/src/inflar.rs)). A confiança nele vem de três lados que
+não dependem dele: vetores do zlib, gerados pelo Python e guardados como
+bytes; um escritor de teste que monta os blocos símbolo a símbolo — todo
+comprimento, toda distância, códigos de até 15 bits, e cada bloco que a RFC
+proíbe —, com a referência em aplicar os símbolos, sem Huffman; e somas
+publicadas. Cada corte de cada corpo é `Cortado`; cada um dos 21 616 bits
+trocados é recusado ou não muda o conteúdo — os 290 que passam caem fora
+do que as somas cobrem, como a hora e o nome do gzip —; e o monte do teste
+é medido, a bomba inclusive.
+
+**As medidas.** O texto da bancada — palavras de um vocabulário pequeno,
+como o de uma página — vai a 18,7% em gzip: 1 MiB são 195 890 bytes no
+fio, e 64 KiB, 12 767 (12 755 em deflate). O `compressao` traz 1 MiB dele
+como é e em gzip, três vezes cada, claro e cifrado, na fumaça — o kernel de
+produção, a pessoa operadora, a política padrão —, em release, cada fumaça
+sozinha na bancada, quatro no x86 e duas no ARM (o menor e o maior):
+
+| 1 MiB de texto | como é | gzip |
+|---|---|---|
+| x86, claro | 530–800 ms | 300–430 ms |
+| x86, cifrado | 860–980 ms | 370–490 ms |
+| ARM, claro | 550–610 ms | 300–380 ms |
+| ARM, cifrado | 870–1000 ms | 380–440 ms |
+
+Os tempos vão do pedido ao conteúdo decodificado e conferido, e incluem a
+bancada gerar o texto a cada pedido — uns 90 ms no hospedeiro — e, no
+gzip, comprimi-lo, uns 50 ms. O que se ganha é o fio: cinco vezes menos
+bytes pelo TCP, pelo TLS e pelas leituras do gate, que custam por byte; o
+decodificador, no processo, custa menos que isso. Com o kernel de teste em
+debug, em que cada leitura custa mais, a diferença cresce: no ARM, 3,1 s
+contra 1,1 s claro, e 4,9 s contra 1,2 s cifrado. O programa inteiro — a
+bomba, as páginas, a negociação, o estragado, o teto e as medidas — leva
+de 16 a 18 s na fumaça; três dele ao mesmo tempo, de duas pessoas e de um
+agente, 22 s na suíte do ARM em release. No hospedeiro, o decodificador faz
+uns 200 MiB/s de gzip de texto, metade disso no CRC-32; a bomba de 512 MiB
+para no teto de 4 MiB em 2,3 ms; e um MiB de blocos dinâmicos mínimos — o
+pior trabalho por byte de entrada — leva uns 140 ms.
+
+**O que não é comprimido ficou como estava.** Os programas que falam HTTP
+cresceram de 5 a 13 KiB — o DEFLATE, as somas e a negociação; o `vazao` do
+x86, de 683 a 696 KiB —, e cada pedido leva o `Accept-Encoding`, 32
+bytes. Na fumaça, em pares de antes e depois alternados na mesma árvore —
+quatro no x86 e dois no ARM —, o `vazao` traz os 5 MiB em 2,94–3,23 s
+depois e 2,87–3,07 s antes no x86, e em 2,62–2,71 s depois e 2,73–2,83 s
+antes no ARM; a `carga`, que não é HTTP, faz o seu MiB em 1,00–1,12 s
+depois e 0,98–1,48 s antes no x86, e em 1,15–1,28 s e 1,06–1,29 s no ARM. A
+mesma árvore importa: o caminho dela entra nos binários — o kernel, com o
+mesmo código, sai com um `.bss` de outro tamanho em cada árvore —, e a
+primeira rodada, com o antes e o depois em árvores diferentes, mediu até
+30% a mais que era da árvore, e não do código: o código novo numa árvore
+nova repetiu a diferença, e na mesma árvore do antes ela sumiu.
+
+**O que fica de fora.**
+
+- **Brotli e zstd.** Avaliados, e deixados. Os dois comprimem texto melhor
+  que o gzip, e nenhum entra sem pesar: o pacote `http` não tem
+  dependências, e um decodificador de Brotli escrito aqui seria várias
+  vezes o DEFLATE, com um dicionário de uns 120 KiB embutido em cada
+  programa que fala HTTP; o do zstd também é maior, e o HTTP deixa o
+  servidor anunciar uma janela de até 8 MiB (RFC 9659). A bancada tampouco
+  os gera: o Python dela não tem nenhum dos dois na biblioteca padrão.
+  Quando um motivo pesar mais que isso, entram aqui, no programa, com o
+  mesmo teto antes de descomprimir, e o gate continua sem saber.
+- **O pedido não é comprimido.** O corpo de um `POST` vai como é: quase
+  nenhum servidor aceita um pedido comprimido sem combinar antes.
+- **O `Transfer-Encoding` comprimido** continua recusado, como antes: o
+  cliente não manda `TE`, e só o `chunked` é enquadramento.
+- **Faixas e compressão.** Um pedido de faixa (`Range`) pede o pedaço da
+  representação codificada, e um pedaço de gzip não se decodifica: quem
+  pede faixas pede sem codificação (`Aceitas::NENHUMA`).
+- **O corte na fronteira de dois membros** do gzip não se vê: o primeiro
+  membro é um gzip inteiro. É o formato; o `Content-Length` e o fecho do
+  TLS são o que diz que a mensagem acabou.
+- **O custo da entrada hostil** é linear, e não desprezível: um MiB de
+  blocos dinâmicos mínimos, que não escrevem nada, custa uns 140 ms no
+  hospedeiro, cada bloco montando as tabelas dele — no processo de quem
+  pediu, e limitado pelo corpo.
+- **O CRC-32 é metade do custo** de decodificar um gzip, um byte por vez —
+  candidato do incremento de otimizações.
+- **O teto é de cada resposta**, e quem o sobe aceita a memória; e o monte
+  do programa não devolve páginas, de modo que o que a bomba custou fica
+  mapeado até o processo acabar.
 
 ### As mutações da rede
 
@@ -3582,6 +3757,52 @@ o caso do zumbi deixou, e o fim da leva caiu dentro da janela. O caso
 agora recolhe os mortos antes e espera a leva de outro núcleo acabar — a
 conta dos recolhidos parada —, como o caso do custo do coletor já fazia;
 a suíte com a virtio-gpu passou inteira em seguida.
+
+### As mutações da compressão
+
+Quarenta e três mutações contra o que a compressão promete — o teto antes
+de descomprimir, cada soma e cada regra do formato, a negociação, o
+cliente que não adivinha, e o gate que não sabe de nada disso —: trinta e
+nove contra os testes do pacote `http`, duas de ponta a ponta contra a
+suíte do x86, e duas contra as invariantes do `xtask`. **Todas
+reprovadas** — uma delas só depois de um teste novo, abaixo.
+
+| Mutação | Reprovada por |
+|---|---|
+| sem o teto da saída | `a_bomba_para_no_teto`, `o_teto_do_corpo_decodificado` e outros dois |
+| o teto com um a menos | `o_teto_do_corpo_decodificado` — o corpo do tamanho exato do teto não passou |
+| a reserva que dobra sem olhar o teto | `a_bomba_para_no_teto` e `decodifica_em_paralelo` — o pico do monte passou de uma vez e meia o teto |
+| sem o teto de quem pede, na troca | `o_teto_do_corpo_decodificado_na_troca` |
+| o gzip sem o CRC-32; sem o tamanho; sem o CRC da cabeça | `o_involucro_do_gzip`, e o CRC também por `nenhum_bit_trocado_vira_outro_conteudo`; o tamanho por `o_tamanho_anunciado_nao_reserva_nada` |
+| o gzip que aceita bytes depois do último membro; sem os bits reservados; o rodapé cortado lido como zeros | `o_involucro_do_gzip`, e o rodapé por `o_fluxo_cortado_em_qualquer_ponto` |
+| o zlib sem o Adler-32; com o dicionário preestabelecido; sem o `FCHECK`; com a janela maior que 32 KiB | `o_involucro_do_zlib`, e o dicionário por `o_dicionario_preestabelecido_e_recusado` |
+| o polinômio do CRC-32 trocado; o pedaço do Adler-32 grande demais | `as_somas_publicadas` — as somas que a literatura publica —, e outros seis |
+| a codificação desconhecida lida como `identity`; o `x-gzip` desconhecido | `a_negociacao`, e `o_corpo_comprimido_chega_decodificado` |
+| duas codificações empilhadas aceitas | `a_negociacao` e `a_codificacao_que_o_pedido_nao_aceitou_nao_le_o_corpo` |
+| o cliente decodifica o que o pedido não aceitou | `a_negociacao`; e, de ponta a ponta, `compressao: o corpo comprimido pelo gate` — o programa recebeu um gzip que não pediu como se fosse o conteúdo |
+| o pedido sem o `Accept-Encoding`; o `identity` de quem não aceita nada trocado; o `Accept-Encoding` de quem chama | os testes do pedido — `o_accept_encoding_diz_o_que_o_cliente_decodifica` e `os_cabecalhos_de_quem_chama_sao_conferidos` |
+| o corpo vazio decodificado; a codificação conferida sem corpo | `sem_corpo_a_codificacao_nao_importa` |
+| a conexão fica depois do conteúdo que não se decodifica | `o_conteudo_que_nao_se_decodifica_nao_vira_resposta` e outros três |
+| o fim da entrada lido como zeros; o código que acaba no meio aceito | `o_fluxo_cortado_em_qualquer_ponto`, e o código também por `nenhum_bit_trocado_vira_outro_conteudo` |
+| a distância antes do começo do membro; dois membros na mesma janela | `cada_membro_e_um_fluxo` |
+| o código de Huffman incompleto; o de comprimentos incompleto; sem o fim de bloco; literais ou distâncias demais; os símbolos 286 e 287; sem `LEN` e `NLEN`; o bloco de tipo 3; a repetição sem anterior | `o_que_a_rfc_proibe_e_recusado` |
+| a repetição que passa do total, cortada no total | `o_que_a_rfc_proibe_e_recusado` — depois do caso novo |
+| sem o teto, de ponta a ponta | `compressao: o corpo comprimido pelo gate` — a bomba fez o processo pedir 16 MiB de monte, e ele caiu no pânico da alocação; o kernel e a suíte seguiram |
+| o kernel fala de `gzip`; a política fala de `deflate` | `cargo xtask invariantes`: a compressão do HTTP no kernel ou na política |
+
+**A sobrevivente que pediu um teste.** A repetição que passa do total de
+comprimentos, cortada no total em vez de recusada, passou na primeira
+rodada: o caso de "repetição demais" que existia, ao passar do total,
+também deixava o código sem o fim de bloco — e era essa outra regra que o
+recusava. O caso novo passa do total e só isso: cortado, o resto seria um
+código válido, o fim de bloco sozinho.
+
+**O teste que faltava antes de qualquer mutação.** Nenhum teste dizia que
+o segundo membro de um gzip não pode copiar do primeiro: cada membro é um
+fluxo DEFLATE, com a janela dele. O decodificador já fazia certo — a
+distância é contada do começo do membro —, e o caso
+`cada_membro_e_um_fluxo` entrou antes da bateria, que confirmou que ele
+mata as duas mutações.
 
 ## O tecido de segurança
 
@@ -6618,8 +6839,14 @@ padronizado.
       do QUIC e começa por uma avaliação; e as otimizações de cifra, por
       último, medidas. Feito: os buffers do TCP — a janela era de um
       segmento, e passou a ser o buffer de 16 KiB, e uma leitura leva
-      vários segmentos numa decisão do gate. Ver [A janela do
-      TCP](#a-janela-do-tcp).
+      vários segmentos numa decisão do gate (ver [A janela do
+      TCP](#a-janela-do-tcp)); as taxas dos papéis — o envio e a leitura
+      por uma conexão aberta continuam decisões do gate, e saem da taxa do
+      papel para um orçamento, com a auditoria segurando quem vai depressa
+      demais (ver [O plano de dados](#o-plano-de-dados)); e a compressão do
+      HTTP — `gzip` e `deflate`, negociados e decodificados no programa, com
+      o teto antes de descomprimir, sem que o gate saiba (ver [A compressão
+      do HTTP](#a-compressão-do-http)).
 - [ ] **Fase 13 — Consentimento e auditoria.** Se um agente pode fazer tudo
       que uma pessoa faz, o modelo de permissão precisa ser **mais** forte que
       o de um desktop comum, e não mais fraco. Três coisas: quem pediu — a

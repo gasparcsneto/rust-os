@@ -473,6 +473,15 @@ Não há uma segunda política para o protocolo, nem autorização paralela:
   resposta que chega depois de a chave ser revogada não é entregue.
 - **Um 3xx não é seguido sozinho.** Volta a quem chama com o `Location`;
   ir até lá é outro pedido — outro nome no DNS, outro destino no gate.
+- **A compressão é do programa.** O pedido diz o que o cliente decodifica
+  (`Accept-Encoding`), e o corpo em `gzip` ou `deflate` é decodificado no
+  processo, pelo pacote `http`, com um teto que quem pede fixa antes de
+  descomprimir — a bomba custa o teto, e para. O gate decide a conexão,
+  cada envio e cada leitura pelos bytes que passam, comprimidos ou não, e
+  nenhuma decisão depende do algoritmo: a mesma página como é e
+  comprimida passa pelas mesmas decisões, e só o número de leituras muda.
+  O kernel e a política não falam de codificação de conteúdo, e o `xtask`
+  confere.
 
 As falhas não se misturam. Cada uma sobe com o código de quem falhou, e a
 família dela (`http::categoria`) só o nomeia:
@@ -487,8 +496,8 @@ família dela (`http::categoria`) só o nomeia:
 | `timeout` | `NETWORK_TIMEOUT` | o outro lado, que não respondeu no prazo |
 | `tls` | `TLS_*` (menos o fecho) | o TLS |
 | `closed` | `HTTP_CLOSED`, `TLS_INTERRUPTED`, `HTTP_CONNECTION_SPENT` | a conversa que acabou antes da hora |
-| `protocol` | `HTTP_MALFORMED` | o servidor, que não falou HTTP/1.1 |
-| `limit` | `HTTP_TOO_LARGE` | a resposta, maior que os limites de quem pediu |
+| `protocol` | `HTTP_MALFORMED`, `HTTP_UNACCEPTED_ENCODING`, `HTTP_CORRUPT_CONTENT` | o servidor, que não falou HTTP/1.1, mandou uma codificação que o pedido não aceitou, ou um comprimido que não se decodifica |
+| `limit` | `HTTP_TOO_LARGE` | a resposta, maior que os limites de quem pediu — o corpo como veio, ou o decodificado |
 | `request` | `INVALID_REQUEST` | o pedido, que não se escreve |
 | `local` | o resto | o programa |
 
@@ -548,7 +557,7 @@ mesma regra:
   certificado prova o nome ao programa, e não autoriza nada no gate;
 - o HTTP também: programa sobre o TCP ou o TLS, sem HTTP no kernel, sem
   comando nem permissão dele; o gate decide o destino, e o protocolo é do
-  programa;
+  programa — a compressão do corpo inclusive, decodificada no processo;
 - a conexão cortada pelo firewall guarda o número para o dono: a ordem
   continua a mesma — o gate decide, e o firewall barra depois —, e o que
   muda é só o código que o dono ouve, o do firewall;
@@ -604,7 +613,8 @@ contido pelo despertador.
   o aperto. O canal limita quanto tempo e quantas vagas um estranho
   segura, e não que ele tente.
 - **O NSF não interpreta HTTP.** Nem o método, nem o caminho, nem o
-  status: só as decisões do gate sobre a conexão, e o nome que o DNS deu.
+  status, nem a codificação do corpo: só as decisões do gate sobre a
+  conexão, e o nome que o DNS deu.
   Um programa que insiste num caminho que o servidor recusa aparece como
   pedidos `ALLOW` ao mesmo destino, e não como "404 repetido".
 - **O relógio dos registros é de um segundo.** As janelas e as taxas das
