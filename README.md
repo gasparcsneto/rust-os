@@ -172,7 +172,7 @@ $ cargo xtask agent --canal 2 agent.session
 | `security.provenance` | A cadeia de um processo até a identidade que a começou, os filhos, e a rede dele: cada conexão, a decisão do gate, o DNS e a regra do firewall (`process`, `boot`) |
 | `security.risk` | O risco de uma identidade, com os fatores; o perfil de comportamento; e o raio do que ela já tocou (`principal`) |
 | `security.verify` | Refaz a cadeia do cofre de evidências |
-| `security.metrics` | O custo e o efeito da segurança, medidos desde o boot: as decisões do gate por código e a latência dele, a da política e a da auditoria, as voltas do NSF e o tempo de máquina delas, a memória e as contas do motor (falsos positivos, contenções desfeitas, recusas repetidas), a latência da resposta, os arrendamentos soltos por causa e a conferência do código de fora da imagem |
+| `security.metrics` | O custo e o efeito da segurança, medidos desde o boot: as decisões do gate por código e a latência dele, a da política e a da auditoria, as voltas do NSF e o tempo de máquina delas, a memória e as contas do motor (falsos positivos, contenções desfeitas, recusas repetidas), a latência da resposta, os arrendamentos soltos por causa, a conferência do código de fora da imagem, e o orçamento: as decisões de controle, de dados e de fecho, as recusas por taxa, as esperas pelo caminho da auditoria e o atraso dela, a vazão do plano de dados e a justiça entre os principais |
 | `system.info` | Kernel, CPU, vídeo, uptime, o RTC e mecanismo de guarda da pilha |
 | `system.uptime` | Ticks do timer e milissegundos desde o boot |
 | `random.read` | Bytes do gerador do kernel, em hexadecimal, para quem precisa de uma chave — a semente de cada conexão TLS de um programa. De 1 a 256 — fora disso é erro, e não um corte —; sem fonte de entropia, `ENTROPY_UNAVAILABLE` e nenhum byte. A auditoria grava a decisão, nunca os bytes (`bytes`) |
@@ -2800,7 +2800,10 @@ a porta ao lado não está.
   página grande — como deve: a suíte sobe a taxa do operador no caso das
   medidas, e a fumaça as faz pela serial, com a taxa do sistema. (Com a
   janela inteira, um `net.recv` leva 16 KiB, e a mesma página custa um
-  décimo das decisões — ver [A janela do TCP](#a-janela-do-tcp).)
+  décimo das decisões — ver [A janela do TCP](#a-janela-do-tcp). E com o
+  plano de dados as leituras e os envios pela conexão aberta não gastam
+  mais a ficha: a página passa com a taxa de todo dia, e o caso não a
+  sobe mais — ver [O plano de dados](#o-plano-de-dados).)
 - **Fechar é um pedido.** O programa que larga uma conexão depois de a
   política tirar o destino dela ouve `DENY_RESOURCE` no `net.close`, e a
   conexão fica na tabela, no teto dele, até ele acabar. O caso da conexão
@@ -2896,7 +2899,8 @@ momento do heap não é o das conexões.
 com a autoridade de quem pede; a revogação, a contenção e o firewall valem
 no pedido seguinte; cada um vai para a auditoria, com o destino. O que
 muda é quantos pedidos uma transferência custa — e a taxa dos papéis, que
-a página grande esgotava, é o incremento seguinte, medido sobre isto.
+a página grande esgotava, deixou de ser gasta pelos dados no incremento
+seguinte: ver [O plano de dados](#o-plano-de-dados).
 
 **A contrapressão** é a do TCP: o buffer cheio fecha a janela, e o que não
 coube fica do outro lado — o kernel guarda o buffer, e nada além. A suíte
@@ -2913,6 +2917,186 @@ da janela, e o que não cabe é contado como perdido, como qualquer saída
 grande — `max` limita a leitura. E 32 KiB por sentido foram medidos e não
 ficaram: a página de 256 KiB foi de 150 para 140 ms, as decisões da fumaça
 de 1580 para 1556, e o pior caso do heap dobraria.
+
+### O plano de dados
+
+A taxa do papel limita o **exercício de autoridade**: abrir uma conexão,
+associar um destino, abrir um arquivo, lançar um processo, mandar uma
+mensagem, administrar. Até este incremento ela limitava também cada envio e
+cada leitura por uma conexão já aberta — a decisão de um `net.recv` gastava
+a mesma ficha que a do `net.connect`. A medida, antes de mudar, mostrou o
+que isso fazia com a política padrão:
+
+- **a taxa de segurança era um teto de vazão.** Um MiB custa perto de 85
+  decisões do gate — uma por leitura de até 16 KiB, mais os envios, as
+  esperas, a conexão e o fecho —, e os 50 pedidos por segundo do operador,
+  com rajada de 100, deixavam passar uns 1,2 MiB de uma vez. Uma pessoa
+  operadora trazendo 8 corpos de 1 MiB ouvia `RATE_LIMIT` em todos;
+- **a recusa era falha, e não contrapressão.** O `RATE_LIMIT` no meio de uma
+  transferência autorizada a derrubava: o programa não tinha o que fazer
+  com ele;
+- **a recusa vazava capacidade.** O `net.close` também era recusado pela
+  taxa, a conexão ficava aberta até o processo acabar, e depois de quatro —
+  o teto do titular — toda conexão nova era `RESOURCE_LIMIT`;
+- **quanto mais rápida a máquina, mais cedo a recusa.** A mesma carga, mais
+  depressa, precisa de mais rajada: o ARM da bancada, mais rápido neste
+  trabalho, era recusado antes do x86.
+
+O plano de controle das mesmas cargas — conexões, sementes do TLS, relógio,
+âncora — usava no máximo 15 da rajada de 100, e não crescia com o tamanho da
+transferência. O que pressionava a taxa era o plano de dados.
+
+**O que muda é o orçamento, e só ele.** Cada comando declara o plano dele
+no registro (`plano`, e `plane` no `agent.describe`), como declara a
+permissão — um comando sem a linha não compila: `control`, o exercício de
+autoridade; `data`, o `net.send` e o `net.recv`; `release`, o `net.close`. O
+pedido de dados continua uma decisão do mesmo gate, com a mesma
+identidade, a mesma autoridade, a mesma política, a contenção, o firewall,
+a posse e a validade da conexão, e o registro na auditoria; o que ele deixa
+de fazer é gastar a ficha do papel — e só quando é o que diz ser: uma
+operação sobre um recurso **já aberto, vivo, de quem pede**, com quem pede
+não contido, **e autorizada pela política**. Fora disso o pedido é um
+exercício de autoridade como outro qualquer, e paga a ficha:
+
+| o pedido de dados | o orçamento |
+|---|---|
+| pela conexão aberta, viva, de quem pede, autorizado | a capacidade: o recurso e o caminho da auditoria |
+| pela conexão de outro titular | a taxa, e a recusa do gate (`DENY_RESOURCE`) |
+| por um número que não é conexão nenhuma | a taxa, e a recusa do gate (`DENY_RESOURCE`) |
+| recusado pela política, pela revogação, pela confiança no código | a taxa, decidida a recusa |
+| de um processo, agente ou pessoa contido | a taxa, e `DENY_CONTAINED` ou `DENY_CREDENTIAL` |
+| pela conexão que o firewall cortou | a taxa, e `FIREWALL_BLOCKED` depois do gate |
+| o fecho da conexão aberta ou cortada, de quem pede, não contido | nenhum: o fecho nunca espera e nunca paga |
+
+O orçamento é estimado antes da decisão, para a taxa valer na mesma ordem
+de sempre, e confirmado depois dela: a recusa — da política, da revogação,
+do papel que sumiu — volta à taxa e gasta a ficha. Não há uma segunda
+política nem um segundo mecanismo de autorização: o plano só escolhe de
+onde sai o orçamento da decisão que o gate tomou.
+
+**O fecho não fica preso.** O `net.close` da conexão de quem pede não gasta
+ficha nem espera o caminho da auditoria: a taxa gasta não prende o recurso
+aberto. O da conexão que o firewall cortou também — fechá-la devolve a vaga
+ao titular. O contido não tem esse orçamento: fechar, para ele, é exercício
+de autoridade, e a contenção o recusa.
+
+**A capacidade da auditoria.** Toda decisão do gate vira um registro no
+anel da auditoria, de 1024 registros, e o journal os leva para o disco. Um
+registro que sai do anel antes do journal é auditoria perdida — o journal
+grava a lacuna no lugar dele. Sem a ficha, o plano de dados precisa de
+outro freio, e é este: o **atraso**, da cabeça da auditoria ao que o
+journal já gravou ([`oleoduto.rs`](kernel/src/oleoduto.rs)):
+
+- abaixo de 640 registros (cinco oitavos do anel), todos passam;
+- de 640 a 768, a **partilha**: passa quem tem pendentes menos registros de
+  dados que a parte justa — 640 divididos pelos principais com registros
+  pendentes —, e quem passou da parte espera;
+- de 768 para cima, todo pedido de dados que pode esperar espera.
+
+**Esperar é a espera da fase 9.2.** O pedido com `wait` não é decidido, não
+é gravado e não é executado: quem o despachou — o fio do canal, o dos
+processos, o interpretador — o guarda, como guarda a leitura que espera
+dados, e o coletor do journal, que normalmente grava a cada dois segundos,
+não dorme enquanto alguém espera. Quando o journal grava, ou o prazo do
+`wait` vence, **o pedido inteiro passa pelo gate de novo** — identidade,
+autoridade, política, contenção, firewall e auditoria de agora: a
+revogação, a contenção e o firewall de enquanto ele esperava valem para
+ele. Nada aqui recusa um pedido por volume: o prazo vencido decide o pedido
+na margem.
+
+**A margem** é a quarta parte do anel, de 768 ao fim, para o que não espera:
+a reexecução de quem esperou — uma por pedido suspenso, e eles são no
+máximo um por fio, por porta e por console —, o fecho — no máximo um por
+conexão aberta —, e o exercício de autoridade, que a taxa limita. O pedido
+de dados **sem** `wait`, com o caminho cheio, não pode esperar, e não passa
+de graça: volta à taxa, como qualquer pedido.
+
+**As contas** estão em `security.metrics`, na seção `budget`: as decisões
+de cada plano, as recusas por taxa, os pedidos de dados que voltaram à
+taxa e os que passaram na margem; as esperas pela auditoria (adiadas,
+acabadas, as tarefas esperando agora, quanto duraram); o atraso dela (a
+cabeça, o de agora, o maior desde o boot, o do journal, os registros
+perdidos e os limiares); a vazão (os bytes mandados e lidos pelo plano de
+dados); e a justiça — o índice de Jain das decisões de dados recentes entre
+os principais, a parte do maior, e a conta de cada um.
+
+**As medidas.** O mesmo `medidor` da medida de antes de mudar — 16 páginas
+de 64 KiB, 8 corpos de 1 MiB e 2 de 1 MiB cifrados —, pela mesma pessoa
+operadora e pelo sistema, com a política padrão, em release; cada código
+numa rodada sozinha na bancada, antes e depois alternados — três pares no
+x86, um no ARM (o menor e o maior das três, no x86):
+
+| | x86, antes | x86, depois | ARM, antes | ARM, depois |
+|---|---|---|---|---|
+| operador, 16 × 64 KiB | 1 MiB, 467–522 KiB/s | 1 MiB, 467–517 KiB/s | 768 KiB, 4 `RATE_LIMIT` | 1 MiB, 764 KiB/s |
+| operador, 8 × 1 MiB | **nenhum**: 8 `RATE_LIMIT` | 8 MiB, 2320–2445 KiB/s | **nenhum**: 8 `RATE_LIMIT` | 8 MiB, 2536 KiB/s |
+| operador, 2 × 1 MiB cifrados | **nenhum**: 2 `RATE_LIMIT` | 2 MiB, 1119–1402 KiB/s | **nenhum**: 2 `RATE_LIMIT` | 2 MiB, 1312 KiB/s |
+| sistema, 16 × 64 KiB | 476–550 KiB/s | 459–517 KiB/s | 800 KiB/s | 819 KiB/s |
+| sistema, 8 × 1 MiB | 1878–2307 KiB/s | 2301–2651 KiB/s | 2388 KiB/s | 2668 KiB/s |
+| sistema, 2 × 1 MiB cifrados | 1119–1183 KiB/s | 1150–1197 KiB/s | 1055 KiB/s | 1393 KiB/s |
+| o gate, média por decisão, sistema (≈944 decisões) | 294 µs | 280 µs | 358 µs | 324 µs |
+
+O sistema, que tem taxa de sobra, é a medida do custo novo: a mesma vazão
+e a mesma latência do gate para a mesma carga, dentro da variação de uma
+rodada para outra — a estimativa do orçamento e a conta do caminho não
+aparecem. Cada rodada do operador são 89 decisões de controle, 828 de
+dados e 26 de fecho: o controle cabe na rajada de 100 do papel, e não
+cresce com o tamanho. Com o journal levando a auditoria, como fora da
+suíte, o operador faz 2027 a 2584 KiB/s, e o maior atraso do caminho fica
+entre 283 e 365 registros: abaixo da partilha, nenhuma espera.
+
+Na fumaça — o kernel de produção, o agente da porta 2, do papel
+`operador`, o journal e o NSF de verdade —, o `vazao` traz os 5 MiB em 2,9
+s no x86 release (2133 KiB/s claro, 1204 KiB/s cifrado) e em 2,7 s no ARM
+release (2275 e 1190 KiB/s), e a `carga` passa o seu MiB por quatro
+conexões em 1,1 a 1,2 s: 610 decisões de dados e 9 de fecho, nenhuma
+recusa por taxa no sistema todo, nenhuma espera, o maior atraso da
+auditoria entre 247 e 271 registros, nenhum perdido, e o NSF saudável
+depois. O controle do `vazao` — as conexões, as sementes do TLS, o
+relógio, a âncora — são 24 decisões, medidas na suíte.
+
+**O que fica de fora.**
+
+- **A margem não segura tudo.** Os 256 registros de margem são para a
+  reexecução de quem esperou, o fecho e o exercício de autoridade — e este
+  último é limitado pela taxa de cada papel, e não pela margem: a soma das
+  rajadas de todos os papéis passa dela (só a do sistema é 800). Uma
+  rajada de controle de muitos principais com o journal parado ainda
+  empurra registros para fora do anel antes do disco, como antes deste
+  incremento; o journal grava a lacuna, e `budget.audit_backlog.lost` a
+  conta. A contrapressão nova segura o volume de dados, que era o que
+  crescia sem teto além da taxa.
+- **A justiça é aproximada.** A conta separa dezesseis principais; os
+  seguintes dividem uma linha, e a parte justa deles é a de um só. A parte
+  é contada em registros pendentes, e não em bytes: quem lê 16 KiB por
+  decisão e quem manda um byte por decisão pesam o mesmo no caminho da
+  auditoria — que é o que a partilha protege.
+- **Sem fila entre quem espera.** Quando o journal grava, todos os que
+  esperam acordam e são decididos de novo; quem chega primeiro ocupa o
+  lugar. A justiça vem da parte de cada principal, e não da ordem de
+  chegada.
+- **O NSF pode ficar para trás.** Ele lê até 512 registros por volta, uma
+  volta por segundo, e não é consumidor do caminho: o gate não sabe que ele
+  existe. Com os dados fora da taxa, a auditoria pode crescer mais depressa
+  que isso; o NSF que fica para trás se declara degradado (`audit-gap`), e
+  o que ele não leu está no journal.
+- **Sem journal, sem contrapressão.** Com a persistência fora do ar, a
+  auditoria fica só no anel, como sempre ficou, e o caminho não segura
+  ninguém: o anel guarda as últimas 1024 decisões, e uma transferência
+  grande as ocupa.
+- **Na prática, a contrapressão só se arma com o journal parado.** O
+  journal grava a cada dois segundos, ou com meio anel pendente, e
+  acompanha o que a bancada consegue produzir — o maior atraso medido na
+  fumaça está acima. A suíte a exercita com o journal seguro de propósito
+  e com um consumidor simulado.
+- **O pedido de dados sem `wait`**, com o caminho cheio, volta à taxa, e
+  com a ficha esgotada ouve `RATE_LIMIT`, como antes. O transporte dos
+  programas ([`programas::conexao`](programas/src/conexao.rs)) manda e lê
+  sempre com `wait`.
+- **O DNS** abre uma associação UDP por resolução — um exercício de
+  autoridade, que gasta a ficha —, e os datagramas dela são o plano de
+  dados.
+- **As taxas padrão não mudaram.** O que mudou é o que gasta a ficha.
 
 ### As mutações da rede
 
@@ -3325,6 +3509,75 @@ sobreviveram à primeira rodada, e os casos mudaram por elas: o buffer do
 UDP — o caso da memória passou a medir as associações também —, e o pico
 que segue o alocado de agora — o caso do pico passou a alocar depois de a
 alocação grande sair, e a conferir que ele não desceu.
+
+### As mutações do plano de dados
+
+Vinte e uma mutações contra o que o plano de dados promete — o gate
+inteiro em cada pedido, a auditoria de cada um, a revogação, a contenção e
+o firewall no pedido seguinte, a decisão de novo depois da espera, a posse
+e a existência do recurso, a contrapressão, nenhum registro perdido e
+nenhuma monopolização calada —, vinte contra os casos `dados:` da suíte de
+quatro núcleos, no x86, e uma contra as invariantes do `xtask`: **dezenove
+reprovadas**, e duas equivalentes.
+
+| Mutação | Reprovada por |
+|---|---|
+| a política não decide o pedido de dados: o gate pulado | `dados: a revogacao no meio da transferencia` — o pedido depois da revogação passou —, e outros dois casos |
+| o handler chamado fora da licença do gate | `cargo xtask invariantes`: um comando executa só por `autorizar` e `Autorizado::executar` |
+| os dados sem auditoria | `dados: a transferencia grande com a politica padrao` — o journal não tem cada decisão do `vazao` —, e outros sete |
+| o papel revogado não recusa os dados | `dados: a revogacao no meio da transferencia` |
+| a contenção fora do orçamento: o contido com o orçamento do fecho | `dados: o contido nao tem o orcamento do fecho` |
+| a conexão cortada pelo firewall continua plano de dados | `dados: o firewall no meio da transferencia` — a cortada foi tratada como recurso aberto |
+| a reexecução depois da espera sem a política | `dados: a reautorizacao depois da espera` — o adiado mandou bytes depois do firewall, da revogação ou do isolamento que vieram no meio |
+| a conexão de outro titular, no gate: o destino resolvido sem o dono | `dados: a conexao de outro titular` — outro titular usou a conexão da dona |
+| qualquer número é uma conexão aberta, no orçamento | `dados: o firewall no meio da transferencia` — a cortada virou recurso aberto |
+| o número que não resolve vira um destino, no gate | `dados: a conexao que nao existe`, `dados: a conexao de outro titular` e `dados: a contencao no meio da transferencia` |
+| sem contrapressão: sempre há lugar | `dados: a inundacao de um byte` — a inundação com `wait` não foi contida —, e outros cinco |
+| o pedido adiado largado pelo despachante dos processos | `dados: a inundacao de um byte` — um envio foi recusado em vez de esperar —, e outros cinco |
+| o journal fora do caminho: o anel transborda | `dados: a auditoria inteira sob inundacao` — com o journal parado, a inundação não esperou |
+| sem partilha: só o teto | `dados: a inundacao de um byte` e `dados: a partilha entre principais` — um principal sozinho passou da parte dele |
+| a parte do maior principal some das medidas | `dados: as medidas do orcamento` e `dados: a partilha entre principais` — a partilha não aparece nas medidas |
+| o fecho volta à taxa | `dados: varias conexoes do mesmo programa` — os fechos não foram decididos como fecho —, e outros quatro |
+| o pedido recusado fica fora da taxa | `dados: a revogacao no meio da transferencia` — o revogado teve o benefício do plano de dados |
+| o pedido de dados sem `wait`, com o caminho cheio, passa de graça | `dados: a inundacao de um byte` — sem `wait`, a inundação não voltou à taxa |
+| sem margem: o teto é o fim do anel | `dados: as medidas do orcamento` — o envio passou com o caminho cheio —, e outros três |
+
+As duas equivalentes são a outra metade de duas camadas, cada uma
+suficiente sozinha:
+
+- **a contenção fora do gate, só para os dados.** O pedido de quem está
+  contido nunca chega ao orçamento dos dados — a estimativa o põe na taxa
+  antes de tudo —, e a contenção do gate o recusa; tirar a contenção do
+  gate só para o orçamento dos dados é tirá-la de um estado que não
+  acontece;
+- **a conexão de outro titular, no orçamento.** A estimativa dá ao pedido o
+  orçamento dos dados, o gate o recusa (`DENY_RESOURCE`), e a recusa volta
+  à taxa depois da decisão: o mesmo desfecho, com a mesma ficha gasta.
+
+Já a mutação do número que não resolve, no orçamento — escrita para a
+conexão inexistente —, morreu pelo firewall: sem a conferência, a conexão
+cortada também virava recurso aberto.
+
+**A primeira rodada achou um caso que dependia da pressa da bancada.** O
+`dados: o fecho com a taxa esgotada` esgotava a ficha abrindo conexões, e
+cada abertura vai ao eco da bancada e volta: com outra máquina na bancada
+— a das mutações —, a abertura levava mais de 20 ms, a ficha voltava antes
+da seguinte, e a taxa de 50 por segundo não se esgotava nunca. Reprovava
+qualquer mutação, e a suíte inteira sob carga. O caso agora esgota a ficha
+pelo relógio, um pedido que não sai da máquina, e confere à parte que a
+abertura sem ficha é recusada pela taxa; as mutações que ele tinha
+reprovado sozinho rodaram de novo.
+
+**A matriz achou um caso de antes, pelo mesmo coletor do sono acordado
+por NMI.** Na suíte com a virtio-gpu, no x86, o caso `mmio: mapeamento
+que falha no meio desfaz tudo` reprovou: os frames livres subiram 756
+durante um mapeamento que não devolve nada. A janela do caso mascara as
+interrupções, o que segura o coletor neste núcleo, e não nos outros: o de
+outro núcleo desmontava, um a um, por mais de um segundo, os 90 fios que
+o caso do zumbi deixou, e o fim da leva caiu dentro da janela. O caso
+agora recolhe os mortos antes e espera a leva de outro núcleo acabar — a
+conta dos recolhidos parada —, como o caso do custo do coletor já fazia;
+a suíte com a virtio-gpu passou inteira em seguida.
 
 ## O tecido de segurança
 
@@ -3847,7 +4100,10 @@ suíte confere que o `user.run` do `ola` da imagem não passa por ela.
   da taxa de todo dia do operador, e o quinto ouve `RATE_LIMIT`, como
   deve. No de depuração, mais lento, a taxa não chegava a ser alcançada.
   Os casos que usam o instalador sobem a taxa do operador, como o caso das
-  medidas do HTTP já fazia.
+  medidas do HTTP já fazia. (Com o plano de dados, os downloads gastam a
+  ficha só no controle — 43 decisões nos cinco arquivos, contra 72 de
+  dados —, e os casos voltaram à taxa de todo dia: ver
+  [O plano de dados](#o-plano-de-dados).)
 - **O sono acordado por NMI.** Na CI, na suíte com a virtio-gpu, o caso
   `arch: dormir parado acorda com as interrupcoes mascaradas` reprovou
   logo depois do caso novo do zumbi: o coletor devolvia as pilhas dos
@@ -3896,8 +4152,11 @@ suíte confere que o `user.run` do `ola` da imagem não passa por ela.
   `fs.write` só, com o anexo de até 60 KiB; o armazém aceita arquivos
   maiores, por partes, e o instalador não as usa.
 - **O instalador que espera a taxa.** Ele não espera a janela da taxa
-  quando ouve `RATE_LIMIT`: a recusa sobe como veio. Cinco arquivos
-  seguidos, no kernel de produção, passam da taxa de todo dia do operador.
+  quando ouve `RATE_LIMIT`: a recusa sobe como veio. Os bytes de um
+  download não gastam a ficha — são o plano de dados —, mas cada arquivo
+  ainda custa umas nove decisões de controle (a conexão, as sementes do
+  TLS, o relógio, a gravação), e uma série longa o bastante, depressa o
+  bastante, alcança a taxa do operador.
 - **A conferência guardada.** Cada lançamento lê e confere de novo, sem
   cache: o custo, medido acima, é pequeno perto do resto do lançamento, e
   um cache teria de ser invalidado por toda troca do arquivo, do registro
@@ -4322,7 +4581,10 @@ que importa.
 JSON-RPC `-32010` (ou `-32011`, para a taxa), com o código no `data`.
 
 **Taxa.** Cada papel tem um balde — pedidos por segundo e rajada —, por
-sessão e por chave: reconectar não enche o balde. O aperto de mão tem o seu
+sessão e por chave: reconectar não enche o balde. O balde é do exercício
+de autoridade: o envio e a leitura pela conexão já aberta de quem pede, e
+o fecho dela, continuam decididos e gravados, mas não gastam ficha — ver
+[O plano de dados](#o-plano-de-dados). O aperto de mão tem o seu
 limite por porta, contado antes de qualquer conta: cada aperto custa ao
 Duke duas trocas Diffie-Hellman, e quem não tem chave registrada pode
 pedi-los à vontade.

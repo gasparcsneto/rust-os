@@ -224,6 +224,7 @@ daqui volta a uma decisão**: o gate escreve, só a consulta lê.
 | `nsf.engine.legitimate_denial_permille` | a recusa de quem o NSF não tinha por ameaça | `legitimate_operation_denial_rate` |
 | `response_latency_ms` | do registro que disparou a detecção ao pedido de resposta | `response_latency` |
 | `leases.released`, `leases.expiry_delay_ms` | os arrendamentos soltos por vencimento, fim de sessão, revogação, suspensão e administrador; o vencido, quanto depois do prazo saiu | `lease_recovery_time` |
+| `budget.*` | as decisões de cada plano (controle, dados, fecho), as recusas por taxa, as esperas pelo caminho da auditoria, o atraso dela e os registros perdidos, a vazão do plano de dados e a justiça entre os principais — ver [O plano de dados](../README.md#o-plano-de-dados) | — |
 
 O tempo de máquina vai em partes por **milhão** (`cpu_ppm`), e não por
 mil: o custo da auditoria e o do NSF ficam abaixo de um milésimo, e uma

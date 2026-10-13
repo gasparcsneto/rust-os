@@ -179,6 +179,13 @@ velocidade de uma máquina enchia a auditoria e o journal sem passar por
 balde nenhum. Vale também para o canal do agente, onde o mesmo buraco
 existia, mais estreito.
 
+O plano de dados, mais tarde, mudou o orçamento e não o caminho: o envio e
+a leitura pela conexão já aberta do próprio principal, autorizados pelo
+gate, não gastam o balde — o que os limita é a capacidade do recurso e a do
+caminho da auditoria, com a contrapressão pela espera da 9.2. O pedido
+quebrado, o recusado e o de quem está contido continuam gastando o balde.
+Ver [O plano de dados](../README.md#o-plano-de-dados).
+
 ### O contexto do comando é do fio
 
 `EM_EXECUCAO` passa a ser uma entrada por fio, e o que os handlers

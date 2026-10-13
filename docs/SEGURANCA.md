@@ -582,7 +582,12 @@ contido pelo despertador.
   de vinte: sob uma carga que passe disso por muito tempo, a leitura fica
   para trás, uma recusa por taxa faz o NSF recuar (até um minuto), e o
   que sair do anel de 1024 registros antes da leitura vira a detecção da
-  lacuna. O NSF não ganha taxa por ser de segurança.
+  lacuna. O NSF não ganha taxa por ser de segurança. Com o plano de dados,
+  uma transferência grande deixa de ser limitada pela taxa do papel, e a
+  auditoria pode crescer mais depressa do que ele lê; a contrapressão do
+  caminho da auditoria é a do journal, e não a dele — o gate não sabe que
+  o NSF existe. O NSF que fica para trás se declara degradado
+  (`audit-gap`); o que ele não leu está no journal, e não foi perdido.
 - **O NSF não vê dentro do TLS.** Nem o nome pedido no aperto, nem a
   recusa do certificado: esses são do programa. Ele vê as decisões do
   gate sobre a conexão, como as de qualquer outra; um programa que
