@@ -3095,7 +3095,12 @@ fn conferir_tls_sem_atalho(raiz: &Path) -> Result<Vec<String>, String> {
 /// - nenhum comando do registro e nenhuma permissão da política é do HTTP
 ///   (`http.`): o que um programa pode na rede é o que `net.connect`,
 ///   `net.send` e `net.recv` decidem para o destino. Não há uma segunda
-///   política para o protocolo.
+///   política para o protocolo;
+/// - nem para a compressão: o kernel e a política não falam de codificação
+///   de conteúdo (`gzip`, `deflate`, `Content-Encoding`,
+///   `Accept-Encoding`). O corpo é decodificado no processo, pelo pacote
+///   `http`, e nenhuma decisão do gate depende do algoritmo — nem para
+///   deixar, nem para recusar.
 fn conferir_http_do_programa(raiz: &Path) -> Result<Vec<String>, String> {
     let ler = |relativo: &str| {
         std::fs::read_to_string(raiz.join(relativo))
@@ -3140,6 +3145,17 @@ fn conferir_http_do_programa(raiz: &Path) -> Result<Vec<String>, String> {
                 if linha.contains("\"http.") {
                     fora.push(format!(
                         "{relativo}:{}: um comando ou uma permissão do HTTP — a autorização é do destino: {}",
+                        n + 1,
+                        linha.trim()
+                    ));
+                }
+                let minusculas = linha.to_ascii_lowercase();
+                if ["gzip", "deflate", "content-encoding", "accept-encoding"]
+                    .iter()
+                    .any(|c| minusculas.contains(c))
+                {
+                    fora.push(format!(
+                        "{relativo}:{}: a compressão do HTTP no kernel ou na política — ela é do programa, e o gate não a vê: {}",
                         n + 1,
                         linha.trim()
                     ));
@@ -3336,8 +3352,9 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
              na decisão; nenhuma camada sobe acima da barra; as cargas do boot só pelo boot; \
              o tecido de segurança só fala como ele mesmo, pelo gate, sem que o gate o leia; \
              o TLS, que é do programa, só verifica pelas âncoras, sem atalho que o desligue; \
-             o HTTP, que é do programa, não tem comando, permissão nem caminho até o gate; o \
-             plano de dados só sai da taxa, e só espera pela auditoria, pelo gate; e o \
+             o HTTP, que é do programa, não tem comando, permissão nem caminho até o gate, \
+             e a compressão dele não chega ao kernel nem à política; o plano de dados só \
+             sai da taxa, e só espera pela auditoria, pelo gate; e o \
              código só vira processo pela conferência única, que o kernel faz e não sela"
         );
         Ok(ExitCode::SUCCESS)
@@ -6566,6 +6583,7 @@ fn conversar(
     sob_o_armazem(arch, &mut escrita, &mut leitor)?;
     sob_a_rede(arch, &mut escrita, &mut leitor)?;
     sob_o_plano_de_dados(arch, &mut escrita, &mut leitor)?;
+    sob_a_compressao(arch, &mut escrita, &mut leitor)?;
     sob_o_codigo(arch, &mut escrita, &mut leitor)?;
     sob_agentes(arch)?;
     sob_sigilo(arch)?;
@@ -10914,6 +10932,227 @@ fn sob_o_plano_de_dados(
         "  [dados] medido  o NSF depois: {}, atraso de {} registros",
         campo_simples(saude, "state").unwrap_or_default(),
         numero_no_caminho(saude, &["backlog"]).unwrap_or(0)
+    );
+    Ok(())
+}
+
+/// O que seria a compressão chegando ao gate num registro da auditoria —
+/// o nome de uma codificação, um cabeçalho dela, um caminho da bancada.
+/// Os mesmos da suíte.
+const DA_COMPRESSAO: [&str; 10] = [
+    "gzip",
+    "deflate",
+    "identity",
+    "Encoding",
+    "encoding",
+    "Codificacao",
+    "/negocia",
+    "/comprimido",
+    "/bomba",
+    "/estragado",
+];
+
+/// A compressão do HTTP no kernel de produção, com a política padrão — ver
+/// "A compressão do HTTP" no README. O agente da porta 2, do papel
+/// `operador`, lança o `compressao`, que confere de dentro o texto da
+/// bancada em gzip e em deflate — claro e cifrado, pelo tamanho, em pedaços
+/// e até o fecho —, a negociação, o estragado e a bomba com o código de
+/// cada um, o teto de quem pede e a recusa do gate fora do alcance. Daqui,
+/// o que o kernel viu, registro a registro desde antes do lançamento: as
+/// decisões do processo, todas deixadas menos a do destino fora do
+/// alcance; nada da compressão em registro nenhum; nenhuma recusa por
+/// taxa e nenhum registro perdido. E as medidas: os bytes no fio e o tempo
+/// de 1 MiB de texto como é e em gzip, e o monte que a bomba custou.
+fn sob_a_compressao(
+    arch: Arquitetura,
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+) -> Result<(), String> {
+    println!("[xtask] fumaça: a compressão do HTTP, pelo operador");
+    // Fora da faixa dos `id` do aperto, que começam com 9 e `ler_resposta`
+    // pula — e longe da do plano de dados.
+    let mut id = 2000;
+    let mut pedir = |metodo: &str, params: &str| -> Result<String, String> {
+        id += 1;
+        escrita
+            .write_all(
+                format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"{metodo}","params":{params}}}"#)
+                    .as_bytes(),
+            )
+            .and_then(|()| escrita.write_all(b"\n"))
+            .and_then(|()| escrita.flush())
+            .map_err(|e| format!("compressao: falha ao pedir `{metodo}`: {e}"))?;
+        let resposta = ler_resposta(leitor).map_err(|e| format!("compressao: {e}"))?;
+        if !e_a_resposta(&resposta, id) {
+            return Err(format!(
+                "compressao: veio a resposta de outro pedido\n  {resposta}"
+            ));
+        }
+        Ok(resposta)
+    };
+    let antes = contas_do_orcamento(&pedir("security.metrics", "{}")?)?;
+    let inicio = numero_no_caminho(&pedir("audit.head", "{}")?, &["seq"])
+        .ok_or("compressao: o audit.head nao disse o numero")?;
+    let comeco = std::time::Instant::now();
+    let mut operador = AgenteNaPorta::conectar(arch, 2)?;
+    let lancado = operador.pedir(
+        "user.run",
+        &format!(r#"{{"path":"/programas/{}/compressao"}}"#, arch.nome()),
+    )?;
+    let processo = numero_no_caminho(&lancado, &["thread_id"])
+        .filter(|_| lancado.contains(r#""launched":true"#))
+        .ok_or_else(|| format!("compressao: o operador nao lancou o programa\n  {lancado}"))?;
+    let limite = comeco + Duration::from_secs(300);
+    let mut ditas: Vec<String> = Vec::new();
+    loop {
+        let log = pedir("log.tail", r#"{"count":32}"#)?;
+        for pedaco in log.split("compressao: ").skip(1) {
+            let linha = format!("compressao: {}", pedaco.split('"').next().unwrap_or(""));
+            if !ditas.contains(&linha) {
+                ditas.push(linha);
+            }
+        }
+        if log.contains("processo encerrou com codigo 98") {
+            break;
+        }
+        // Saiu com um dos códigos de falha dele (30 a 38): o que ele disse
+        // diz o quê, sem esperar o teto.
+        let falhou = log
+            .split("processo encerrou com codigo ")
+            .skip(1)
+            .filter_map(|r| r.split('"').next()?.parse::<u32>().ok())
+            .find(|c| (30..=38).contains(c));
+        if let Some(codigo) = falhou {
+            return Err(format!(
+                "compressao: o programa saiu com {codigo}\n  {}",
+                ditas.join("\n  ")
+            ));
+        }
+        if std::time::Instant::now() > limite {
+            return Err(format!(
+                "compressao: o programa nao terminou em 300 s\n  {}",
+                ditas.join("\n  ")
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let duracao = comeco.elapsed();
+    drop(operador);
+    // A auditoria até aqui: cada leitura dela também é gravada, e ler até
+    // não vir mais nada não acabaria.
+    let fim = numero_no_caminho(&pedir("audit.head", "{}")?, &["seq"])
+        .ok_or("compressao: o audit.head nao disse o numero")?;
+    let dita = |trecho: &str| {
+        ditas
+            .iter()
+            .find(|l| l.contains(trecho))
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "compressao: o programa nao disse `{trecho}`\n  {}",
+                    ditas.join("\n  ")
+                )
+            })
+    };
+    for conferida in [
+        "/comprimido/gzip/65536 -> gzip: 65536 bytes",
+        "/comprimido/deflate/65536 -> deflate: 65536 bytes",
+        "https://bancada.duke:8443/comprimido/gzip/65536 -> gzip",
+        "-> protocol HTTP_UNACCEPTED_ENCODING",
+        "/estragado/cortado-fecho -> protocol HTTP_CORRUPT_CONTENT",
+        "/bomba/gzip/512 -> limit HTTP_TOO_LARGE",
+        "tres respostas comprimidas numa conexao so",
+        "http://bancada.duke:81/comprimido/gzip/1000 -> denied DENY_RESOURCE",
+        "tudo conferiu",
+    ] {
+        dita(conferida)?;
+    }
+    // O que o kernel gravou desde antes do lançamento, de 128 em 128.
+    let do_processo = format!("pelo processo {processo} (");
+    let mut depois_de = inicio;
+    let mut decisoes: std::collections::BTreeMap<(String, String), u64> = Default::default();
+    let mut vistos = 0u64;
+    while depois_de < fim {
+        let cauda = pedir(
+            "audit.tail",
+            &format!(r#"{{"after":{depois_de},"count":128}}"#),
+        )?;
+        let registros = objetos_planos(
+            apos(&cauda, r#""records":["#).ok_or("compressao: audit.tail sem registros")?,
+        )?;
+        if registros.is_empty() {
+            break;
+        }
+        for campos in &registros {
+            let campo = |nome: &str| {
+                campos
+                    .iter()
+                    .find(|(n, _)| n == nome)
+                    .and_then(|(_, v)| v.clone())
+                    .unwrap_or_default()
+            };
+            depois_de = campo("seq").parse().unwrap_or(depois_de + 1);
+            if depois_de > fim {
+                break;
+            }
+            vistos += 1;
+            let texto = format!(
+                "{} {} {} {}",
+                campo("method"),
+                campo("resource"),
+                campo("detail"),
+                campo("agent")
+            );
+            if let Some(t) = DA_COMPRESSAO.iter().find(|t| texto.contains(*t)) {
+                return Err(format!(
+                    "compressao: um registro da auditoria tem `{t}`\n  {texto}"
+                ));
+            }
+            if campo("detail").starts_with(&do_processo) {
+                *decisoes
+                    .entry((campo("method"), campo("code")))
+                    .or_default() += 1;
+            }
+        }
+    }
+    let recusadas: Vec<_> = decisoes
+        .iter()
+        .filter(|((_, codigo), _)| codigo != "ALLOW")
+        .collect();
+    if recusadas.len() != 1
+        || *recusadas[0].0 != ("net.connect".to_string(), "DENY_RESOURCE".to_string())
+        || *recusadas[0].1 != 1
+    {
+        return Err(format!(
+            "compressao: as decisoes do programa nao foram as do HTTP: {decisoes:?}"
+        ));
+    }
+    let metricas = pedir("security.metrics", "{}")?;
+    let depois = contas_do_orcamento(&metricas)?;
+    let [_, dados, _, taxa, _, _, _, _]: [u64; 8] =
+        std::array::from_fn(|i| depois[i].saturating_sub(antes[i]));
+    if taxa != 0 || depois[5] != 0 {
+        return Err(format!(
+            "compressao: {taxa} recusas por taxa, {} registros perdidos",
+            depois[5]
+        ));
+    }
+    println!(
+        "  [compressao] ok  o compressao do operador saiu com 98 em {} ms: gzip e deflate, claro e cifrado, a negociacao, o estragado, a bomba e o teto, cada um com o seu codigo; {vistos} registros da auditoria lidos, nenhum com a compressao; as decisoes do processo todas deixadas, menos a do destino fora do alcance",
+        duracao.as_millis()
+    );
+    for medida in ditas.iter().filter(|l| {
+        l.contains("medida ") || l.contains("a bomba de 512 MiB") || l.contains("o monte mapeado")
+    }) {
+        println!("  [compressao] medido  {medida}");
+    }
+    let leituras = decisoes
+        .get(&("net.recv".to_string(), "ALLOW".to_string()))
+        .copied()
+        .unwrap_or(0);
+    println!(
+        "  [compressao] medido  {} decisoes do processo, {leituras} delas leituras; {dados} decisoes de dados no sistema todo",
+        decisoes.values().sum::<u64>()
     );
     Ok(())
 }
