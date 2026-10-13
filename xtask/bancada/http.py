@@ -29,16 +29,41 @@ Cada rota e um comportamento que a suite e a fumaca conferem:
                          xtask/src/codigo.rs); 404 se nao ha
     o resto              404
 
+E as da compressao, com o texto da bancada (ver `texto`), que o programa
+`compressao` regenera do mesmo jeito para conferir:
+
+    GET  /texto/<n>      200 com n bytes do texto, como e
+    GET  /negocia/<n>    o texto na codificacao que o Accept-Encoding pede
+                         - gzip, depois deflate, depois como e -, com Vary
+                         e X-Codificacao dizendo qual
+    GET  /comprimido/<cod>/<n>
+                         o texto em <cod> (gzip, x-gzip, deflate), peca o
+                         cliente o que pedir
+    GET  /comprimido-pedacos/<cod>/<n>
+                         o mesmo, em pedacos (chunked)
+    GET  /comprimido-ate-fechar/<cod>/<n>
+                         o mesmo, sem tamanho: o corpo vai ate o fecho
+    GET  /comprimido-lento/<ms>
+                         64 KiB do texto em gzip: a metade, <ms> de espera,
+                         e o resto
+    GET  /bomba/<cod>/<mib>
+                         <mib> MiB de zeros em <cod>, com a maior razao do
+                         DEFLATE - um gzip ou um zlib valido
+    GET  /estragado/<tipo>
+                         um corpo comprimido estragado - ver ESTRAGADOS
+
 Nada sai pela saida padrao nem pela de erro: as duas sao a conexao. Os erros
 vao para `servidor-http.log`, no diretorio da bancada.
 """
 
+import gzip
 import os
 import re
 import socket
 import ssl
 import sys
 import time
+import zlib
 
 # As respostas malformadas de /torto/<tipo>: cada uma quebra uma regra da
 # RFC 9112 que o cliente tem de recusar.
@@ -59,6 +84,187 @@ TORTAS = {
     # Dois tamanhos que nao concordam.
     "tamanhos": b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Length: 3\r\n\r\nok!",
 }
+
+# As palavras do texto da bancada - as mesmas do programa `compressao` e
+# dos vetores dos testes do pacote http.
+PALAVRAS = [b"duke", b"gate", b"politica", b"auditoria", b"conexao", b"pedido",
+            b"resposta", b"corpo", b"limite", b"agente", b"pessoa", b"processo",
+            b"destino", b"firewall", b"revogacao", b"contencao", b"o", b"a", b"de",
+            b"que", b"e", b"um", b"uma", b"nao", b"com", b"por", b"para", b"sem"]
+
+
+def texto(n):
+    """n bytes de texto: palavras escolhidas por um gerador congruente."""
+    x = 0x2545F4914F6CDD1D
+    saida = bytearray()
+    k = 0
+    while len(saida) < n:
+        x = (x * 6364136223846793005 + 1442695040888963407) & 0xFFFFFFFFFFFFFFFF
+        saida += PALAVRAS[(x >> 33) % len(PALAVRAS)]
+        k += 1
+        saida += b"\n" if k % 12 == 0 else b" "
+    return bytes(saida[:n])
+
+
+def comprimir(cod, dados):
+    """`dados` na codificacao `cod`: o gzip e o zlib do Python."""
+    if cod in ("gzip", "x-gzip"):
+        return gzip.compress(dados, compresslevel=6, mtime=0)
+    return zlib.compress(dados, 6)
+
+
+class Bits:
+    """Bits como o DEFLATE os le: do menos significativo para o mais."""
+
+    def __init__(self):
+        self.bytes = bytearray()
+        self.acumulado = 0
+        self.quantos = 0
+
+    def por(self, valor, n):
+        self.acumulado |= valor << self.quantos
+        self.quantos += n
+        while self.quantos >= 8:
+            self.bytes.append(self.acumulado & 0xFF)
+            self.acumulado >>= 8
+            self.quantos -= 8
+
+    def codigo(self, codigo, n):
+        self.por(int(format(codigo, "0%db" % n)[::-1], 2), n)
+
+    def zeros(self, n):
+        # Ate o fim do byte, os bytes inteiros de uma vez, e o resto.
+        primeiro = min(n, (8 - self.quantos) % 8)
+        self.por(0, primeiro)
+        n -= primeiro
+        self.bytes += bytes(n // 8)
+        self.por(0, n % 8)
+
+    def fim(self):
+        if self.quantos:
+            self.por(0, 8 - self.quantos)
+        return bytes(self.bytes)
+
+
+def canonico(comprimentos):
+    """O codigo canonico de cada simbolo (RFC 1951, 3.2.2)."""
+    contagem = [0] * 16
+    for c in comprimentos:
+        contagem[c] += 1
+    contagem[0] = 0
+    proximo = [0] * 16
+    codigo = 0
+    for c in range(1, 16):
+        codigo = (codigo + contagem[c - 1]) << 1
+        proximo[c] = codigo
+    codigos = []
+    for c in comprimentos:
+        codigos.append((proximo[c], c))
+        proximo[c] += 1
+    return codigos
+
+
+def bomba(cod, mib):
+    """<mib> MiB de zeros num bloco DEFLATE dinamico: um literal zero e
+    copias de 258 bytes a um byte de distancia, dois bits cada - a maior
+    razao do formato, uns 1030 para 1. Um gzip ou um zlib valido: quem
+    pede com um teto maior que ele o decodifica inteiro."""
+    copias = (mib << 20) // 258
+    tamanho = 1 + copias * 258
+    b = Bits()
+    b.por(1, 1)
+    b.por(2, 2)
+    b.por(286 - 257, 5)
+    b.por(1 - 1, 5)
+    b.por(19 - 4, 4)
+    # O codigo dos comprimentos: de 0 a 15, quatro bits cada.
+    cc = [4] * 16 + [0, 0, 0]
+    for s in [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]:
+        b.por(cc[s], 3)
+    codigos_cc = canonico(cc)
+    literal = [0] * 286
+    literal[285] = 1
+    literal[0] = 2
+    literal[256] = 2
+    for c in literal + [1]:
+        b.codigo(*codigos_cc[c])
+    codigos = canonico(literal)
+    b.codigo(*codigos[0])
+    b.zeros(2 * copias)
+    b.codigo(*codigos[256])
+    deflate = b.fim()
+    if cod in ("gzip", "x-gzip"):
+        crc = 0
+        zero = bytes(1 << 20)
+        falta = tamanho
+        while falta:
+            k = min(falta, len(zero))
+            crc = zlib.crc32(zero[:k], crc)
+            falta -= k
+        return (b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff" + deflate
+                + crc.to_bytes(4, "little") + (tamanho & 0xFFFFFFFF).to_bytes(4, "little"))
+    # O Adler-32 de `tamanho` zeros: a soma `a` fica em 1, e a `b` soma 1 a
+    # cada byte.
+    adler = ((tamanho % 65521) << 16) | 1
+    return b"\x78\x9c" + deflate + adler.to_bytes(4, "big")
+
+
+def estragado(tipo):
+    """Os corpos estragados de /estragado/<tipo>: (codificacao, corpo, ate o
+    fecho). Cada um quebra o que o cliente tem de conferir."""
+    t = texto(4096)
+    g = gzip.compress(t, compresslevel=6, mtime=0)
+    z = zlib.compress(t, 6)
+    meio = len(g) // 2
+    if tipo == "crc":
+        return "gzip", g[:-8] + bytes([g[-8] ^ 1]) + g[-7:], False
+    if tipo == "isize":
+        return "gzip", g[:-4] + (len(t) + 1).to_bytes(4, "little"), False
+    if tipo == "adler":
+        return "deflate", z[:-1] + bytes([z[-1] ^ 1]), False
+    if tipo == "dados":
+        return "gzip", g[:meio] + bytes([g[meio] ^ 0x55]) + g[meio + 1:], False
+    if tipo == "cabeca":
+        return "gzip", b"\x1e" + g[1:], False
+    if tipo == "cru":
+        c = zlib.compressobj(6, zlib.DEFLATED, -15)
+        return "deflate", c.compress(t) + c.flush(), False
+    if tipo == "sobra":
+        return "gzip", g + b"lixo", False
+    if tipo == "cortado":
+        return "gzip", g[:meio], False
+    if tipo == "cortado-fecho":
+        return "gzip", g[:meio], True
+    if tipo == "desconhecida":
+        return "br", os.urandom(64), False
+    if tipo == "empilhada":
+        return "gzip, gzip", gzip.compress(g, mtime=0), False
+    if tipo == "vazio":
+        return "gzip", b"", False
+    return None
+
+
+def negociar(aceita):
+    """A codificacao que o Accept-Encoding pede: gzip, depois deflate,
+    depois como e. Um `q=0` recusa."""
+    aceitas = set()
+    for item in aceita.split(","):
+        nome, _, params = item.strip().partition(";")
+        q = 1.0
+        for p in params.split(";"):
+            chave, _, valor = p.strip().partition("=")
+            if chave == "q":
+                try:
+                    q = float(valor)
+                except ValueError:
+                    q = 0.0
+        if nome and q > 0:
+            aceitas.add(nome.strip().lower())
+    for cod in ("gzip", "deflate"):
+        if cod in aceitas:
+            return cod
+    return "identity"
+
 
 # O maior pedido que se le: a cabeca e o corpo.
 MAIOR_CABECA = 16 * 1024
@@ -160,8 +366,16 @@ def atender(conexao, log, diretorio):
         fechar = cabecalhos.get("connection", "").lower() == "close"
         extras = ["Connection: close"] if fechar else []
 
-        m = re.fullmatch(r"/(grande|lento|status|torto)/([a-z0-9]+)", alvo)
+        m = re.fullmatch(
+            r"/(grande|lento|status|torto|texto|negocia|comprimido-lento|estragado)/([a-z0-9-]+)",
+            alvo,
+        )
         rota, arg = (m.group(1), m.group(2)) if m else (alvo, None)
+        # As da compressao com a codificacao e o tamanho.
+        cm = re.fullmatch(
+            r"/(comprimido|comprimido-pedacos|comprimido-ate-fechar|bomba)/(gzip|x-gzip|deflate)/([0-9]+)",
+            alvo,
+        )
         # O codigo publicado: a arquitetura e o nome so do alfabeto que o
         # xtask escreve, e nada de caminho - o arquivo e o deste diretorio.
         codigo = re.fullmatch(r"/codigo/(x86_64|aarch64)/([a-z0-9][a-z0-9-]*)", alvo)
@@ -181,6 +395,57 @@ def atender(conexao, log, diretorio):
                         ["Content-Type: application/octet-stream"] + extras,
                     )
                 )
+        elif metodo == "GET" and cm and int(cm.group(3)) <= 8 << 20:
+            forma, cod, n = cm.group(1), cm.group(2), int(cm.group(3))
+            if forma == "bomba":
+                corpo_c = bomba(cod, n)
+            else:
+                corpo_c = comprimir(cod, texto(n))
+            codificacao = ["Content-Encoding: " + cod]
+            if forma in ("comprimido", "bomba"):
+                conexao.sendall(resposta(200, "OK", corpo_c, codificacao + extras))
+            elif forma == "comprimido-pedacos":
+                pedacos = b"".join(
+                    b"%x\r\n" % len(corpo_c[i:i + 1000]) + corpo_c[i:i + 1000] + b"\r\n"
+                    for i in range(0, len(corpo_c), 1000)
+                )
+                conexao.sendall(
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
+                    + "".join(c + "\r\n" for c in codificacao + extras).encode()
+                    + b"\r\n" + pedacos + b"0\r\n\r\n"
+                )
+            else:
+                conexao.sendall(
+                    b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Encoding: "
+                    + cod.encode() + b"\r\n\r\n" + corpo_c
+                )
+                return
+        elif metodo == "GET" and rota == "texto" and arg.isdigit() and int(arg) <= 8 << 20:
+            conexao.sendall(resposta(200, "OK", texto(int(arg)), extras))
+        elif metodo == "GET" and rota == "negocia" and arg.isdigit() and int(arg) <= 8 << 20:
+            cod = negociar(cabecalhos.get("accept-encoding", "identity"))
+            dados = texto(int(arg))
+            corpo_c = dados if cod == "identity" else comprimir(cod, dados)
+            vistos = ["Vary: Accept-Encoding", "X-Codificacao: " + cod]
+            if cod != "identity":
+                vistos.append("Content-Encoding: " + cod)
+            conexao.sendall(resposta(200, "OK", corpo_c, vistos + extras))
+        elif metodo == "GET" and rota == "comprimido-lento" and arg.isdigit():
+            corpo_c = comprimir("gzip", texto(64 * 1024))
+            inteira = resposta(200, "OK", corpo_c, ["Content-Encoding: gzip"] + extras)
+            meio = len(inteira) - len(corpo_c) // 2
+            conexao.sendall(inteira[:meio])
+            time.sleep(int(arg) / 1000)
+            conexao.sendall(inteira[meio:])
+        elif metodo == "GET" and rota == "estragado" and estragado(arg):
+            cod, corpo_e, ate_o_fecho = estragado(arg)
+            if ate_o_fecho:
+                conexao.sendall(
+                    b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Encoding: "
+                    + cod.encode() + b"\r\n\r\n" + corpo_e
+                )
+                return
+            conexao.sendall(resposta(200, "OK", corpo_e, ["Content-Encoding: " + cod] + extras))
         elif metodo == "GET" and rota == "/ola":
             conexao.sendall(resposta(200, "OK", b"ola, duke\n", extras))
         elif metodo == "GET" and rota == "/conta":

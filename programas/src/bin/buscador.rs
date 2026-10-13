@@ -20,11 +20,21 @@
 //!   DNS, e um `GET /ola` — a cadeia DNS → TCP → TLS → HTTP;
 //! - [`CIFRADA_LENTA`]: um `GET /lento/<b>` pela conexão cifrada;
 //! - [`MUDO`]: um `GET /mudo` numa conexão nova, com um prazo curto;
+//! - [`COMPRIMIDA_LENTA`]: um `GET /comprimido-lento/<b>` pela conexão que
+//!   tem: 64 KiB de texto em gzip, e o servidor manda a metade, espera `b`
+//!   milissegundos, e manda o resto — é no meio do corpo comprimido que a
+//!   suíte revoga, contém ou barra;
+//! - [`CIFRADA_COMPRIMIDA_LENTA`]: o mesmo pela conexão cifrada;
+//! - [`NEGOCIADA`]: uma conexão nova, e um `GET /negocia/65536` que aceita
+//!   o que `b` diz — o bit 1, `gzip`; o 2, `deflate` —: a suíte compara o
+//!   que o gate decidiu com e sem compressão;
 //! - [`SAIR_SEM_FECHAR`]: sai sem fechar nada — o kernel recolhe as
 //!   conexões de quem acabou.
 //!
-//! Depois de cada passo, diz `buscador: <passo>: <status> <corpo>`, ou
-//! `buscador: <passo>: <família> <código>` — o código de quem falhou: a
+//! Depois de cada passo, diz `buscador: <passo>: <status> <corpo>` — ou,
+//! nos comprimidos, `buscador: <passo>: <status> <codificação> <bytes>
+//! <no fio> <confere>` —, ou `buscador: <passo>: <família> <código>` — o
+//! código de quem falhou: a
 //! recusa do gate, a contenção, o firewall, o DNS, o transporte, o prazo,
 //! o TLS, o HTTP. Sai com [`CODIGO`] quando a suíte pede o fim.
 
@@ -45,7 +55,9 @@ use alloc::format;
 use alloc::string::String;
 use programas::conexao::Prazo;
 use programas::escreverln;
-use programas::http::{self, ConexaoHttp, Falha, Limites, Metodo, Opcoes, Pedido, Resolucao, Url};
+use programas::http::{
+    self, Aceitas, ConexaoHttp, Falha, Limites, Metodo, Opcoes, Pedido, Resolucao, Url,
+};
 use programas::sistema;
 use programas::tls;
 use protocolo::usuario::evento::{Evento, tipo};
@@ -66,7 +78,10 @@ const LENTA: i64 = 3;
 const CIFRADA: i64 = 4;
 const CIFRADA_LENTA: i64 = 5;
 const MUDO: i64 = 6;
+const COMPRIMIDA_LENTA: i64 = 7;
+const NEGOCIADA: i64 = 8;
 const SAIR_SEM_FECHAR: i64 = 9;
+const CIFRADA_COMPRIMIDA_LENTA: i64 = 10;
 
 /// O DNS da bancada da suíte.
 const DNS: &str = "udp:10.0.2.53:53";
@@ -88,6 +103,26 @@ fn dizer(passo: &str, desfecho: Result<http::Resposta, Falha>) {
                 f.codigo()
             );
         }
+    }
+}
+
+/// Diz o desfecho de um passo comprimido: a codificação, os bytes, os do
+/// fio, e se o conteúdo é o texto de `n` bytes da bancada.
+fn dizer_comprimida(passo: &str, n: usize, desfecho: Result<http::Resposta, Falha>) {
+    match desfecho {
+        Ok(r) => {
+            let confere = r.corpo == http::texto_da_bancada(n);
+            escreverln!(
+                "buscador: {}: {} {} {} {} {}",
+                passo,
+                r.status,
+                r.codificacao.map_or("identity", http::Codificacao::nome),
+                r.corpo.len(),
+                r.no_fio,
+                if confere { "confere" } else { "diferente" }
+            );
+        }
+        Err(f) => dizer(passo, Err(f)),
     }
 }
 
@@ -214,6 +249,32 @@ fn principal() -> i64 {
                         obter(&mut mudo, CLARA, "/mudo")
                     });
                     dizer("mudo", desfecho);
+                }
+                COMPRIMIDA_LENTA => {
+                    let caminho: String = format!("/comprimido-lento/{}", e.b);
+                    let desfecho = obter(&mut clara, CLARA, &caminho);
+                    dizer_comprimida("comprimida lenta", 64 * 1024, desfecho);
+                }
+                CIFRADA_COMPRIMIDA_LENTA => {
+                    let caminho: String = format!("/comprimido-lento/{}", e.b);
+                    let desfecho = obter(&mut cifrada, CIFRADA_URL, &caminho);
+                    dizer_comprimida("cifrada comprimida lenta", 64 * 1024, desfecho);
+                }
+                NEGOCIADA => {
+                    let aceitas = Aceitas {
+                        gzip: e.b & 1 != 0,
+                        deflate: e.b & 2 != 0,
+                    };
+                    let desfecho = conectar(CLARA, &opcoes).and_then(|mut c| {
+                        let url =
+                            Url::ler(&format!("{CLARA}/negocia/65536")).map_err(Falha::Url)?;
+                        let mut pedido = Pedido::novo(Metodo::Get, url);
+                        pedido.aceitas = aceitas;
+                        let r = c.trocar(&pedido, &Limites::default());
+                        c.fechar();
+                        r
+                    });
+                    dizer_comprimida("negociada", 65536, desfecho);
                 }
                 SAIR_SEM_FECHAR => {
                     escreverln!("buscador: saindo sem fechar");

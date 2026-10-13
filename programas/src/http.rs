@@ -332,3 +332,54 @@ pub fn texto(r: &Resposta) -> String {
 pub fn padrao(n: usize) -> Vec<u8> {
     (0..n).map(|i| b'0' + (i % 10) as u8).collect()
 }
+
+/// As palavras do texto da bancada — as mesmas do servidor HTTP dela.
+const PALAVRAS: [&[u8]; 28] = [
+    b"duke",
+    b"gate",
+    b"politica",
+    b"auditoria",
+    b"conexao",
+    b"pedido",
+    b"resposta",
+    b"corpo",
+    b"limite",
+    b"agente",
+    b"pessoa",
+    b"processo",
+    b"destino",
+    b"firewall",
+    b"revogacao",
+    b"contencao",
+    b"o",
+    b"a",
+    b"de",
+    b"que",
+    b"e",
+    b"um",
+    b"uma",
+    b"nao",
+    b"com",
+    b"por",
+    b"para",
+    b"sem",
+];
+
+/// Os `n` bytes do texto da bancada: palavras escolhidas por um gerador
+/// congruente, que o servidor dela gera igual. Comprime como texto — umas
+/// cinco vezes —, e não como o padrão, que se repete a cada dez bytes.
+pub fn texto_da_bancada(n: usize) -> Vec<u8> {
+    let mut x: u64 = 0x2545_f491_4f6c_dd1d;
+    let mut saida = Vec::with_capacity(n + 16);
+    let mut k = 0;
+    while saida.len() < n {
+        x = x
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        saida.extend_from_slice(PALAVRAS[((x >> 33) % PALAVRAS.len() as u64) as usize]);
+        k += 1;
+        saida.push(if k % 12 == 0 { b'\n' } else { b' ' });
+    }
+    saida.truncate(n);
+    saida
+}
