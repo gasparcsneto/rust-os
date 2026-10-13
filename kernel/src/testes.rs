@@ -30920,6 +30920,30 @@ static CASOS: &[Caso] = &[
         f: dados_o_contido_nao_tem_o_orcamento_do_fecho,
     },
     Caso {
+        nome: "compressao: o corpo comprimido pelo gate",
+        f: compressao_o_corpo_comprimido_pelo_gate,
+    },
+    Caso {
+        nome: "compressao: o gate decide o mesmo com e sem",
+        f: compressao_o_gate_decide_o_mesmo_com_e_sem,
+    },
+    Caso {
+        nome: "compressao: a revogacao no meio do corpo",
+        f: compressao_a_revogacao_no_meio_do_corpo_comprimido,
+    },
+    Caso {
+        nome: "compressao: a contencao no meio do corpo",
+        f: compressao_a_contencao_no_meio_do_corpo_comprimido,
+    },
+    Caso {
+        nome: "compressao: o firewall no meio do corpo",
+        f: compressao_o_firewall_no_meio_do_corpo_comprimido,
+    },
+    Caso {
+        nome: "compressao: varias ao mesmo tempo",
+        f: compressao_varias_ao_mesmo_tempo,
+    },
+    Caso {
         nome: "codigo: so o da imagem roda sem selo",
         f: codigo_so_o_da_imagem_roda_sem_selo,
     },
@@ -38378,6 +38402,514 @@ fn dados_o_contido_nao_tem_o_orcamento_do_fecho() -> Resultado {
     let _ = fs_pedir(sistema, "credential.resume", &credencial);
     let _ = fs_pedir(sistema, "net.unblock", &regra);
     crate::rede::pilha::esquecer_regras_de_teste();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+// ---------------------------------------------------------------------------
+// A compressão do HTTP — README, "A compressão do HTTP"
+// ---------------------------------------------------------------------------
+
+/// Os passos do `buscador` com o corpo comprimido — o programa tem as
+/// mesmas constantes.
+const BUSCA_COMPRIMIDA_LENTA: i64 = 7;
+const BUSCA_NEGOCIADA: i64 = 8;
+const BUSCA_CIFRADA_COMPRIMIDA_LENTA: i64 = 10;
+
+/// O que seria a compressão chegando ao gate num registro da auditoria: o
+/// nome de uma codificação, um cabeçalho dela, um caminho da bancada.
+const DA_COMPRESSAO: [&str; 10] = [
+    "gzip",
+    "deflate",
+    "identity",
+    "Encoding",
+    "encoding",
+    "Codificacao",
+    "/negocia",
+    "/comprimido",
+    "/bomba",
+    "/estragado",
+];
+
+/// Um registro da auditoria, como os casos da compressão o comparam: o
+/// método, o recurso, o código e o titular.
+type Decisao = (
+    alloc::string::String,
+    alloc::string::String,
+    politica::Codigo,
+    politica::auditoria::Titular,
+);
+
+/// Os registros do processo do fio `fio` depois do registro `depois`, na
+/// ordem.
+fn registros_do_processo(fio: u64, depois: u64) -> alloc::vec::Vec<Decisao> {
+    let prefixo = do_processo(fio);
+    crate::autorizacao::com_auditoria(|c| {
+        c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+            .filter(|r| r.seq > depois && r.evento.detalhe.starts_with(&prefixo))
+            .map(|r| {
+                (
+                    r.evento.metodo.clone(),
+                    r.evento.recurso.clone(),
+                    r.evento.codigo,
+                    r.evento.titular,
+                )
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// Algum registro do processo do fio `fio` tem a compressão — ver
+/// [`DA_COMPRESSAO`].
+fn compressao_no_registro(fio: u64) -> bool {
+    let prefixo = do_processo(fio);
+    crate::autorizacao::com_auditoria(|c| {
+        c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+            .filter(|r| r.evento.detalhe.starts_with(&prefixo))
+            .any(|r| {
+                let e = alloc::format!("{:?}", r.evento);
+                DA_COMPRESSAO.iter().any(|t| e.contains(t))
+            })
+    })
+    .unwrap_or(true)
+}
+
+/// A última linha de um programa, desde o registro `desde` do log, que
+/// começa com `prefixo`.
+fn linha_que_comeca(desde: u64, prefixo: &str) -> Option<alloc::string::String> {
+    let mut achada = None;
+    crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+        if r.seq >= desde && r.subsistema == "usuario" && r.mensagem().starts_with(prefixo) {
+            achada = Some(alloc::string::String::from(r.mensagem()));
+        }
+    });
+    achada
+}
+
+/// A compressão de verdade, de dentro do processo de uma pessoa operadora:
+/// o programa `compressao` confere de dentro o texto em gzip e em deflate,
+/// a negociação, o estragado, a bomba e o teto — ver
+/// `programas/src/bin/compressao.rs` —, e aqui se confere o que o kernel
+/// viu:
+///
+/// - só o que o HTTP já pedia: conexões, envios, leituras e fechos com os
+///   destinos da bancada, a semente e o relógio do TLS, a âncora e o
+///   relógio do sistema. Nenhum pedido novo, nenhuma permissão nova — a
+///   compressão é do programa;
+/// - tudo deixado, em nome da pessoa, menos o destino fora do alcance:
+///   `DENY_RESOURCE`, como sem compressão. A bomba, o estragado e a
+///   codificação que o pedido não aceitou são falhas do programa, e não do
+///   gate: as leituras deles foram deixadas;
+/// - nada da compressão em registro nenhum: nem o nome de uma codificação,
+///   nem um cabeçalho, nem um caminho.
+fn compressao_o_corpo_comprimido_pelo_gate() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    use politica::Codigo;
+    use politica::auditoria::Titular;
+    crate::pessoas::esquecer_registradas();
+    let padrao = politica_trocada(&[])?;
+    let resultado = com_a_politica(padrao, || {
+        let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(121), "comp-op", "operador");
+        let antes = crate::autorizacao::ultimo_registro();
+        let comeco = crate::tempo::uptime_ms();
+        let fio = rodar_programa_ate(
+            "compressao",
+            Some(Autoridade::Pessoa { sessao }),
+            98,
+            8 * TETO_DO_HTTP,
+        )
+        .map_err(|_| "o programa compressao nao conferiu a compressao da bancada")?;
+        crate::log_info!(
+            "teste",
+            "compressao: o programa conferiu tudo em {} ms",
+            crate::tempo::uptime_ms().saturating_sub(comeco)
+        );
+        let registros = registros_do_processo(fio, antes);
+        const PEDIDOS: [&str; 8] = [
+            "net.connect",
+            "net.send",
+            "net.recv",
+            "net.close",
+            "random.read",
+            "system.info",
+            "system.uptime",
+            "fs.read",
+        ];
+        let fora = |m: &str, r: &str| m == "net.connect" && r == "tcp:10.0.2.100:81";
+        if let Some(r) = registros
+            .iter()
+            .find(|(m, ..)| !PEDIDOS.contains(&m.as_str()))
+        {
+            crate::log_error!("teste", "{:?}", r);
+            return Err("a compressao fez um pedido que o HTTP nao fazia");
+        }
+        if let Some(r) = registros.iter().find(|(m, r, c, t)| {
+            *t != Titular::Pessoa
+                || (*c != Codigo::Allow && !(fora(m, r) && *c == Codigo::DenyResource))
+                || (m.starts_with("net.") && !fora(m, r) && r != HTTP_CLARO && r != HTTP_CIFRADO)
+        }) {
+            crate::log_error!("teste", "{:?}", r);
+            return Err("uma decisao da compressao nao foi a do HTTP em nome da pessoa");
+        }
+        let recusadas = registros.iter().filter(|(m, r, ..)| fora(m, r)).count();
+        let lidas = registros.iter().filter(|(m, ..)| m == "net.recv").count();
+        if recusadas != 1 || lidas < 40 {
+            crate::log_error!("teste", "recusadas {} leituras {}", recusadas, lidas);
+            return Err("o destino fora do alcance nao foi recusado uma vez pelo gate");
+        }
+        if compressao_no_registro(fio) {
+            return Err("um registro do processo tem a compressao");
+        }
+        Ok(())
+    });
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// Uma decisão de [`registros_do_processo`] sem as leituras repetidas: o
+/// corpo menor pede menos leituras, e é só isso que a compressão muda.
+fn sem_leituras_repetidas(v: &[Decisao]) -> alloc::vec::Vec<Decisao> {
+    let mut saida: alloc::vec::Vec<Decisao> = alloc::vec::Vec::new();
+    for d in v {
+        if d.0 == "net.recv"
+            && saida
+                .last()
+                .is_some_and(|u| u.0 == "net.recv" && u.1 == d.1)
+        {
+            continue;
+        }
+        saida.push(d.clone());
+    }
+    saida
+}
+
+/// A compressão é transparente para a autorização: a mesma página, pedida
+/// como é, em gzip e em deflate, passa pelas mesmas decisões — o nome pelo
+/// DNS, a conexão, o envio, as leituras e o fecho, cada uma deixada em nome
+/// de quem pediu, na mesma ordem —, e o que muda é só quantas leituras o
+/// corpo pede. O gate não sabe qual foi comprimida: nenhum registro diz, e
+/// nenhuma decisão depende disso.
+fn compressao_o_gate_decide_o_mesmo_com_e_sem() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    use politica::Codigo;
+    com_a_bancada_http(|| {
+        let sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(122), "comp-neg", "operador");
+        let b = Buscador::lancar(Autoridade::Pessoa { sessao })?;
+        let fio = b.fio;
+        let r = (|| -> Resultado {
+            let mut formas = alloc::vec::Vec::new();
+            let mut leituras = alloc::vec::Vec::new();
+            for (aceitas, codificacao) in
+                [(0, "identity"), (1, "gzip"), (2, "deflate"), (3, "gzip")]
+            {
+                let desde = crate::log::total_emitidos();
+                let antes = crate::autorizacao::ultimo_registro();
+                b.pedir(BUSCA_NEGOCIADA, aceitas)?;
+                let prefixo = alloc::format!("buscador: negociada: 200 {codificacao} 65536 ");
+                esperar_ate(
+                    || linha_que_comeca(desde, "buscador: negociada:").is_some(),
+                    TETO_DO_HTTP,
+                )
+                .map_err(|_| "o buscador nao disse a pagina negociada")?;
+                let linha = linha_que_comeca(desde, "buscador: negociada:").unwrap_or_default();
+                let no_fio: u64 = linha
+                    .strip_prefix(&prefixo)
+                    .and_then(|r| r.strip_suffix(" confere"))
+                    .and_then(|n| n.parse().ok())
+                    .ok_or_else(|| {
+                        crate::log_error!("teste", "{}", linha);
+                        "a pagina negociada nao veio na codificacao pedida, ou veio diferente"
+                    })?;
+                if (codificacao == "identity") != (no_fio == 65536) {
+                    crate::log_error!("teste", "{}", linha);
+                    return Err("o corpo comprimido nao veio menor no fio");
+                }
+                let registros = registros_do_processo(fio, antes);
+                if registros.iter().any(|(_, _, c, _)| *c != Codigo::Allow) {
+                    crate::log_error!("teste", "{:?}", registros);
+                    return Err("uma decisao da pagina negociada nao foi deixada");
+                }
+                leituras.push((
+                    codificacao,
+                    no_fio,
+                    registros
+                        .iter()
+                        .filter(|(m, r, ..)| m == "net.recv" && r == HTTP_CLARO)
+                        .count(),
+                ));
+                formas.push(sem_leituras_repetidas(&registros));
+            }
+            if formas.iter().any(|f| *f != formas[0]) {
+                for f in &formas {
+                    crate::log_error!("teste", "{:?}", f);
+                }
+                return Err("o gate decidiu diferente a pagina comprimida e a que veio como e");
+            }
+            if leituras.iter().any(|(_, _, n)| *n > leituras[0].2) {
+                crate::log_error!("teste", "{:?}", leituras);
+                return Err("a pagina comprimida pediu mais leituras que a que veio como e");
+            }
+            crate::log_info!(
+                "teste",
+                "compressao: a mesma pagina de 64 KiB, (codificacao, bytes no fio, leituras do servidor): {:?}",
+                leituras
+            );
+            if compressao_no_registro(fio) {
+                return Err("um registro do processo tem a compressao");
+            }
+            Ok(())
+        })();
+        let fim = b.encerrar();
+        r.and(fim)
+    })
+}
+
+/// O `buscador` pede a página negociada que aceita `aceitas`, e ela chega
+/// em `codificacao`, inteira e igual ao texto da bancada. A linha traz os
+/// bytes do fio, que dependem do zlib da bancada: o começo e o fim bastam.
+fn negociada_inteira(b: &Buscador, aceitas: i64, codificacao: &str) -> Resultado {
+    let desde = crate::log::total_emitidos();
+    b.pedir(BUSCA_NEGOCIADA, aceitas)?;
+    let prefixo = alloc::format!("buscador: negociada: 200 {codificacao} 65536 ");
+    esperar_ate(
+        || linha_que_comeca(desde, &prefixo).is_some_and(|l| l.ends_with(" confere")),
+        TETO_DO_HTTP,
+    )
+    .map_err(|_| "a pagina negociada nao chegou inteira")
+}
+
+/// O `buscador` pede o corpo comprimido lento pela conexão `destino`, e o
+/// caso espera a primeira metade chegar — uma leitura deixada depois do
+/// pedido —: é ali, no meio do corpo comprimido, que ele age.
+fn no_meio_do_corpo_comprimido(
+    b: &Buscador,
+    passo: i64,
+    espera_ms: i64,
+    destino: &str,
+) -> Result<u64, &'static str> {
+    use politica::Codigo;
+    let desde = crate::log::total_emitidos();
+    let antes = crate::autorizacao::ultimo_registro();
+    b.pedir(passo, espera_ms)?;
+    let metade = || {
+        decisoes_do_processo(b.fio, "net.recv", destino)
+            .iter()
+            .any(|(seq, c, _)| *seq > antes && *c == Codigo::Allow)
+    };
+    esperar_ate(metade, TETO_DO_HTTP)
+        .map_err(|_| "a primeira metade do corpo comprimido nao chegou")?;
+    Ok(desde)
+}
+
+/// A revogação no meio de um corpo comprimido, de um processo lançado por
+/// um agente: metade do gzip chegou e foi lida, o resto o servidor manda
+/// depois — e a chave é revogada nesse meio. A leitura seguinte é
+/// `DENY_ROLE`, a recusa do gate, e o programa não recebe nada: nem a
+/// metade decodificada, nem um erro da compressão no lugar da recusa.
+fn compressao_a_revogacao_no_meio_do_corpo_comprimido() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use politica::Codigo;
+    com_a_bancada_http(|| {
+        let chave = sigilo::publica_de(&chave_de_teste(6));
+        crate::identidade::registrar_agente_de_teste(chave, &nome_de_teste(6), "operador");
+        let r = (|| -> Resultado {
+            let b = Buscador::lancar(Autoridade::Sessao {
+                sessao: 1,
+                chave: Some(chave),
+            })?;
+            let fio = b.fio;
+            let r = (|| -> Resultado {
+                let desde =
+                    no_meio_do_corpo_comprimido(&b, BUSCA_COMPRIMIDA_LENTA, 1_500, HTTP_CLARO)?;
+                crate::identidade::revogar(&chave).map_err(|_| "a revogacao de teste falhou")?;
+                b.dizer(desde, "buscador: comprimida lenta: denied DENY_ROLE")?;
+                let negada = ultimo_que(|e| {
+                    e.metodo == "net.recv" && e.detalhe.starts_with(&do_processo(fio))
+                })
+                .ok_or("a leitura recusada nao foi gravada")?;
+                if negada.codigo != Codigo::DenyRole || negada.chave != Some(chave) {
+                    crate::log_error!("teste", "{:?}", negada);
+                    return Err("a leitura depois da revogacao nao foi recusada pelo gate");
+                }
+                Ok(())
+            })();
+            let fim = b.encerrar();
+            r.and(fim)
+        })();
+        crate::identidade::esquecer_registrados();
+        r
+    })
+}
+
+/// A contenção no meio de um corpo comprimido e cifrado: o processo é
+/// isolado com metade do gzip lida pela sessão TLS; a espera acorda, e a
+/// leitura executada de novo é `DENY_CONTAINED` — o código da contenção,
+/// que passa pelo TLS e pela compressão como veio. Solto, uma página nova
+/// chega comprimida e inteira.
+fn compressao_a_contencao_no_meio_do_corpo_comprimido() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    com_a_bancada_http(|| {
+        let sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(123), "comp-iso", "operador");
+        let b = Buscador::lancar(Autoridade::Pessoa { sessao })?;
+        let fio = b.fio;
+        let sistema = sistema_aqui();
+        let processo = alloc::format!(r#"{{"process":{fio}}}"#);
+        let r = (|| -> Resultado {
+            b.passo(BUSCA_CIFRADA, 0, "buscador: cifrada: 200 ola, duke?")?;
+            let desde = no_meio_do_corpo_comprimido(
+                &b,
+                BUSCA_CIFRADA_COMPRIMIDA_LENTA,
+                8_000,
+                HTTP_CIFRADO,
+            )?;
+            let antes = crate::tempo::uptime_ms();
+            let r = fs_pedir(sistema, "process.isolate", &processo);
+            if fs_texto(&r, "state").as_deref() != Some("isolated") {
+                crate::log_error!("teste", "{}", r);
+                return Err("o sistema nao isolou o processo");
+            }
+            b.dizer(
+                desde,
+                "buscador: cifrada comprimida lenta: contained DENY_CONTAINED",
+            )?;
+            if crate::tempo::uptime_ms().saturating_sub(antes) >= 6_000 {
+                return Err("a espera nao acordou com a contencao");
+            }
+            let r = fs_pedir(sistema, "process.release", &processo);
+            if !r.contains(r#""result""#) {
+                crate::log_error!("teste", "{}", r);
+                return Err("o sistema nao soltou o processo");
+            }
+            negociada_inteira(&b, 1, "gzip")
+        })();
+        let _ = fs_pedir(sistema, "process.release", &processo);
+        let fim = b.encerrar();
+        r.and(fim)
+    })
+}
+
+/// O firewall no meio de um corpo comprimido: a regra entra com metade do
+/// gzip lida, derruba a conexão, e o programa ouve `FIREWALL_BLOCKED` — o
+/// código do firewall, e não um gzip cortado: o corpo não acabou, a
+/// conexão é que foi cortada. Sem a regra, a conexão nova conversa.
+fn compressao_o_firewall_no_meio_do_corpo_comprimido() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    com_a_bancada_http(|| {
+        let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(124), "comp-fw", "operador");
+        let b = Buscador::lancar(Autoridade::Pessoa { sessao })?;
+        let r = (|| -> Resultado {
+            let sistema = sistema_aqui();
+            let para = alloc::format!(r#"{{"to":"{HTTP_CLARO}"}}"#);
+            let desde = no_meio_do_corpo_comprimido(&b, BUSCA_COMPRIMIDA_LENTA, 8_000, HTTP_CLARO)?;
+            let antes = crate::tempo::uptime_ms();
+            let r = fs_pedir(sistema, "net.block", &para);
+            if fs_numero(&r, "rule").is_none() || fs_numero(&r, "dropped") != Some(1) {
+                crate::log_error!("teste", "{}", r);
+                return Err("a regra nao derrubou a conexao com o corpo comprimido no meio");
+            }
+            let barrada = b.dizer(
+                desde,
+                "buscador: comprimida lenta: firewall FIREWALL_BLOCKED",
+            );
+            let rapida = crate::tempo::uptime_ms().saturating_sub(antes) < 6_000;
+            let solta = fs_pedir(sistema, "net.unblock", &para);
+            barrada?;
+            if !rapida {
+                return Err("a espera nao acordou com o corte: esperou o resto do corpo");
+            }
+            if fs_numero(&solta, "rule").is_none() {
+                crate::log_error!("teste", "{}", solta);
+                return Err("o sistema nao tirou a regra do servidor HTTP");
+            }
+            b.passo(BUSCA_NOVA, 0, "buscador: nova: 200 1")?;
+            negociada_inteira(&b, 3, "gzip")
+        })();
+        let fim = b.encerrar();
+        r.and(fim)
+    })
+}
+
+/// Várias descompressões ao mesmo tempo, de pessoas e de um agente: cada
+/// processo com o seu decodificador, o seu teto e o seu monte — nenhum
+/// estado da compressão é de mais de um —, e cada decisão em nome de quem
+/// lançou. Todos conferem tudo, a bomba inclusive.
+fn compressao_varias_ao_mesmo_tempo() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    use politica::auditoria::Titular;
+    crate::pessoas::esquecer_registradas();
+    let resultado = (|| -> Resultado {
+        let programa = alloc::format!("{}/compressao", crate::usuario::DIRETORIO_DOS_COMPILADOS);
+        let chave = sigilo::publica_de(&chave_de_teste(7));
+        crate::identidade::registrar_agente_de_teste(chave, &nome_de_teste(7), "operador");
+        let desde = crate::log::total_emitidos();
+        let comeco = crate::tempo::uptime_ms();
+        let mut fios = alloc::vec::Vec::new();
+        for (i, nome) in ["comp-a", "comp-b"].into_iter().enumerate() {
+            let sessao = crate::pessoas::sessao_de_teste(
+                Console::Terminal(125 + i as u16),
+                nome,
+                "operador",
+            );
+            fios.push((
+                crate::usuario::lancar_como(Some(&programa), Autoridade::Pessoa { sessao })?,
+                Titular::Pessoa,
+            ));
+        }
+        fios.push((
+            crate::usuario::lancar_como(
+                Some(&programa),
+                Autoridade::Sessao {
+                    sessao: 1,
+                    chave: Some(chave),
+                },
+            )?,
+            Titular::Agente,
+        ));
+        let mut saidas = alloc::collections::BTreeMap::new();
+        let _ = esperar_ate(
+            || {
+                crate::log::ultimos(128, crate::log::Level::Trace, |r| {
+                    if r.seq >= desde
+                        && r.subsistema == "usuario"
+                        && let Some(c) = r.mensagem().strip_prefix("processo encerrou com codigo ")
+                    {
+                        saidas.insert(r.seq, alloc::string::String::from(c));
+                    }
+                });
+                saidas.len() >= fios.len()
+            },
+            16 * TETO_DO_HTTP,
+        );
+        if saidas.len() != fios.len() || saidas.values().any(|c| c != "98") {
+            crate::log_error!("teste", "saidas: {:?}", saidas);
+            return Err("as descompressoes ao mesmo tempo nao conferiram");
+        }
+        crate::log_info!(
+            "teste",
+            "compressao: tres programas ao mesmo tempo em {} ms",
+            crate::tempo::uptime_ms().saturating_sub(comeco)
+        );
+        for (fio, titular) in &fios {
+            let registros = registros_do_processo(*fio, 0);
+            if registros.is_empty() || registros.iter().any(|(_, _, _, t)| t != titular) {
+                crate::log_error!("teste", "{}: {:?}", fio, registros.first());
+                return Err("uma decisao de um processo nao foi em nome de quem o lancou");
+            }
+            if compressao_no_registro(*fio) {
+                return Err("um registro de um processo tem a compressao");
+            }
+        }
+        Ok(())
+    })();
+    crate::identidade::esquecer_registrados();
     crate::pessoas::esquecer_registradas();
     resultado
 }
