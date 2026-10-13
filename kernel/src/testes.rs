@@ -2725,6 +2725,35 @@ fn gpt_cabecalho_absurdo_e_recusado() -> Resultado {
 /// Que os frames voltam. Um desfazer que esquecesse uma página deixaria o
 /// contador de livres mais baixo do que começou, e a faixa seguinte a pedir
 /// aqueles endereços falharia por um motivo que não é o dela.
+/// Recolhe os fios mortos que os casos anteriores deixaram, e espera o
+/// coletor de outro núcleo terminar a leva dele: duas passadas seguidas sem
+/// morto nenhum, e a conta dos recolhidos parada por cinco tiques — o
+/// coletor desmonta cada morto fora da trava, e só soma a leva quando
+/// devolveu os frames dela. Com teto de dois segundos: passado dele, quem
+/// chama mede como antes.
+fn sem_mortos_por_recolher() {
+    let limite = crate::tempo::ticks().saturating_add(200);
+    let mut vazias = 0;
+    let mut recolhidos = crate::fios::recolhidos();
+    let mut desde = crate::tempo::ticks();
+    while crate::tempo::ticks() < limite {
+        if crate::fios::recolher_terminados() == 0 {
+            vazias += 1;
+        } else {
+            vazias = 0;
+        }
+        let agora = crate::fios::recolhidos();
+        if agora != recolhidos {
+            recolhidos = agora;
+            desde = crate::tempo::ticks();
+        }
+        if vazias >= 2 && crate::tempo::ticks().saturating_sub(desde) >= 5 {
+            return;
+        }
+        crate::fios::ceder();
+    }
+}
+
 fn mmio_mapeamento_que_falha_no_meio_desfaz_tudo() -> Resultado {
     const PAGINA: u64 = 4096;
     /// Páginas de 4 KiB cobertas por uma tabela de último nível.
@@ -2789,6 +2818,13 @@ fn mmio_mapeamento_que_falha_no_meio_desfaz_tudo() -> Resultado {
     // e os livres **subiram** 44 durante um mapeamento que não devolve
     // nada. E um handler que alocasse um frame no meio consumiria a falha
     // encomendada no lugar do mapeamento.
+    //
+    // Mascarar segura só este núcleo: o coletor roda em qualquer um. Antes
+    // da janela, os mortos que os casos anteriores deixaram são recolhidos
+    // — medido, na suíte com a virtio-gpu, o coletor de outro núcleo
+    // desmontava os 90 fios do caso do zumbi um a um, por mais de um
+    // segundo, e o fim da leva caiu dentro desta janela: 756 frames a mais.
+    sem_mortos_por_recolher();
     let (livres_antes, falho, sobraram, livres_depois) = crate::arch::sem_interrupcoes(|| {
         let (livres_antes, _) = crate::frames::estatisticas();
         crate::frames::encomendar_falhas(1);
