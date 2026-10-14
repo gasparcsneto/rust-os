@@ -832,6 +832,24 @@ fn o_httponly_nao_sai_do_pote_para_o_programa() {
 }
 
 #[test]
+fn o_debug_do_pote_nao_mostra_valor() {
+    // Nem o do `HttpOnly`, nem o que o programa pôs: um `{:?}` do pote vai
+    // para um log sem levar uma sessão junto.
+    let mut p = Pote::novo();
+    da_rede(&mut p, BANCADA, "sessao=segredo-da-sessao; HttpOnly", None).unwrap();
+    definir(&mut p, BANCADA, "tema=escuro-e-unico", None).unwrap();
+    let texto = format!("{p:?}");
+    assert!(
+        texto.contains("sessao") && texto.contains("tema"),
+        "{texto}"
+    );
+    assert!(
+        !texto.contains("segredo-da-sessao") && !texto.contains("escuro-e-unico"),
+        "{texto}"
+    );
+}
+
+#[test]
 fn cada_pote_e_um_estado() {
     let mut um = Pote::novo();
     let mut outro = Pote::novo();

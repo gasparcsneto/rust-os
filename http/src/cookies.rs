@@ -217,7 +217,7 @@ impl<'a> Agora<'a> {
 }
 
 /// Um cookie no pote.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct Cookie {
     nome: String,
     valor: String,
@@ -234,6 +234,26 @@ struct Cookie {
     /// A ordem de criação e a do último uso, numa conta do pote.
     criado: u64,
     usado: u64,
+}
+
+/// O valor não aparece — nem num `{:?}` do pote: ele vai para o fio, e não
+/// para o log nem para o programa.
+impl core::fmt::Debug for Cookie {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Cookie")
+            .field("nome", &self.nome)
+            .field("valor", &format_args!("<{} bytes>", self.valor.len()))
+            .field("dominio", &self.dominio)
+            .field("so_o_host", &self.so_o_host)
+            .field("caminho", &self.caminho)
+            .field("expira", &self.expira)
+            .field("seguro", &self.seguro)
+            .field("so_http", &self.so_http)
+            .field("mesmo_site", &self.mesmo_site)
+            .field("criado", &self.criado)
+            .field("usado", &self.usado)
+            .finish()
+    }
 }
 
 impl Cookie {
