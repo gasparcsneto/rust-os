@@ -3100,7 +3100,11 @@ fn conferir_tls_sem_atalho(raiz: &Path) -> Result<Vec<String>, String> {
 ///   de conteúdo (`gzip`, `deflate`, `Content-Encoding`,
 ///   `Accept-Encoding`). O corpo é decodificado no processo, pelo pacote
 ///   `http`, e nenhuma decisão do gate depende do algoritmo — nem para
-///   deixar, nem para recusar.
+///   deixar, nem para recusar;
+/// - nem para os cookies: o kernel e a política não falam de cookie. O pote
+///   é do processo, no pacote `http`; um cookie não é credencial do Duke,
+///   não vira identidade, não entra numa decisão e não muda a autoridade
+///   de ninguém — quem pede é o processo, com a autoridade do titular dele.
 fn conferir_http_do_programa(raiz: &Path) -> Result<Vec<String>, String> {
     let ler = |relativo: &str| {
         std::fs::read_to_string(raiz.join(relativo))
@@ -3156,6 +3160,13 @@ fn conferir_http_do_programa(raiz: &Path) -> Result<Vec<String>, String> {
                 {
                     fora.push(format!(
                         "{relativo}:{}: a compressão do HTTP no kernel ou na política — ela é do programa, e o gate não a vê: {}",
+                        n + 1,
+                        linha.trim()
+                    ));
+                }
+                if minusculas.contains("cookie") {
+                    fora.push(format!(
+                        "{relativo}:{}: um cookie no kernel ou na política — o pote é do programa, e um cookie não é credencial nem autoridade: {}",
                         n + 1,
                         linha.trim()
                     ));
@@ -3353,7 +3364,7 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
              o tecido de segurança só fala como ele mesmo, pelo gate, sem que o gate o leia; \
              o TLS, que é do programa, só verifica pelas âncoras, sem atalho que o desligue; \
              o HTTP, que é do programa, não tem comando, permissão nem caminho até o gate, \
-             e a compressão dele não chega ao kernel nem à política; o plano de dados só \
+             e a compressão e os cookies dele não chegam ao kernel nem à política; o plano de dados só \
              sai da taxa, e só espera pela auditoria, pelo gate; e o \
              código só vira processo pela conferência única, que o kernel faz e não sela"
         );
@@ -6584,6 +6595,7 @@ fn conversar(
     sob_a_rede(arch, &mut escrita, &mut leitor)?;
     sob_o_plano_de_dados(arch, &mut escrita, &mut leitor)?;
     sob_a_compressao(arch, &mut escrita, &mut leitor)?;
+    sob_os_cookies(arch, &mut escrita, &mut leitor)?;
     sob_o_codigo(arch, &mut escrita, &mut leitor)?;
     sob_agentes(arch)?;
     sob_sigilo(arch)?;
@@ -11153,6 +11165,288 @@ fn sob_a_compressao(
     println!(
         "  [compressao] medido  {} decisoes do processo, {leituras} delas leituras; {dados} decisoes de dados no sistema todo",
         decisoes.values().sum::<u64>()
+    );
+    Ok(())
+}
+
+/// O que seria um cookie chegando ao gate num registro da auditoria — o
+/// nome do cabeçalho, um atributo, um prefixo, um caminho da bancada. Em
+/// qualquer registro, de qualquer um: o programa se chama `cookies`, e o
+/// caminho dele, que o lançamento grava, não é nenhum destes.
+const DOS_COOKIES: [&str; 8] = [
+    "Cookie",
+    "/cookies/",
+    "HttpOnly",
+    "SameSite",
+    "Max-Age",
+    "Expires",
+    "__Host-",
+    "__Secure-",
+];
+
+/// Os cookies do HTTP no kernel de produção, com a política padrão — ver
+/// "Os cookies do HTTP" no README. O agente da porta 2, do papel
+/// `operador`, lança o `cookies`, que confere de dentro a sessão da
+/// bancada, clara e cifrada, o isolamento entre potes e entre hosts, o
+/// `Secure`, o domínio, o caminho, os prefixos, o `SameSite`, o
+/// `HttpOnly`, a validade no relógio do sistema, os limites do pote, as
+/// trocas numa conexão mantida, a medida e a recusa do gate fora do
+/// alcance, com a sessão no pote. Daqui, o que o kernel viu, registro a
+/// registro desde antes do lançamento: as decisões do processo, todas
+/// deixadas menos a do destino fora do alcance; nenhum pedido que o HTTP
+/// não fazia; nada dos cookies em registro nenhum — nem o identificador de
+/// uma sessão que o programa disse —; nenhuma recusa por taxa e nenhum
+/// registro perdido.
+fn sob_os_cookies(
+    arch: Arquitetura,
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+) -> Result<(), String> {
+    println!("[xtask] fumaça: os cookies do HTTP, pelo operador");
+    // Fora da faixa dos `id` do aperto, que começam com 9, e longe da da
+    // compressão.
+    let mut id = 2500;
+    let mut pedir = |metodo: &str, params: &str| -> Result<String, String> {
+        id += 1;
+        escrita
+            .write_all(
+                format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"{metodo}","params":{params}}}"#)
+                    .as_bytes(),
+            )
+            .and_then(|()| escrita.write_all(b"\n"))
+            .and_then(|()| escrita.flush())
+            .map_err(|e| format!("cookies: falha ao pedir `{metodo}`: {e}"))?;
+        let resposta = ler_resposta(leitor).map_err(|e| format!("cookies: {e}"))?;
+        if !e_a_resposta(&resposta, id) {
+            return Err(format!(
+                "cookies: veio a resposta de outro pedido\n  {resposta}"
+            ));
+        }
+        Ok(resposta)
+    };
+    let antes = contas_do_orcamento(&pedir("security.metrics", "{}")?)?;
+    let inicio = numero_no_caminho(&pedir("audit.head", "{}")?, &["seq"])
+        .ok_or("cookies: o audit.head nao disse o numero")?;
+    let comeco = std::time::Instant::now();
+    let mut operador = AgenteNaPorta::conectar(arch, 2)?;
+    let lancado = operador.pedir(
+        "user.run",
+        &format!(r#"{{"path":"/programas/{}/cookies"}}"#, arch.nome()),
+    )?;
+    let processo = numero_no_caminho(&lancado, &["thread_id"])
+        .filter(|_| lancado.contains(r#""launched":true"#))
+        .ok_or_else(|| format!("cookies: o operador nao lancou o programa\n  {lancado}"))?;
+    let limite = comeco + Duration::from_secs(300);
+    let mut ditas: Vec<String> = Vec::new();
+    loop {
+        let log = pedir("log.tail", r#"{"count":32}"#)?;
+        for pedaco in log.split("cookies: ").skip(1) {
+            let linha = format!("cookies: {}", pedaco.split('"').next().unwrap_or(""));
+            if !ditas.contains(&linha) {
+                ditas.push(linha);
+            }
+        }
+        if log.contains("processo encerrou com codigo 99") {
+            break;
+        }
+        // Saiu com um dos códigos de falha dele (40 a 49): o que ele disse
+        // diz o quê, sem esperar o teto.
+        let falhou = log
+            .split("processo encerrou com codigo ")
+            .skip(1)
+            .filter_map(|r| r.split('"').next()?.parse::<u32>().ok())
+            .find(|c| (40..=49).contains(c));
+        if let Some(codigo) = falhou {
+            return Err(format!(
+                "cookies: o programa saiu com {codigo}\n  {}",
+                ditas.join("\n  ")
+            ));
+        }
+        if std::time::Instant::now() > limite {
+            return Err(format!(
+                "cookies: o programa nao terminou em 300 s\n  {}",
+                ditas.join("\n  ")
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let duracao = comeco.elapsed();
+    drop(operador);
+    // A auditoria até aqui: cada leitura dela também é gravada, e ler até
+    // não vir mais nada não acabaria.
+    let fim = numero_no_caminho(&pedir("audit.head", "{}")?, &["seq"])
+        .ok_or("cookies: o audit.head nao disse o numero")?;
+    let dita = |trecho: &str| {
+        ditas
+            .iter()
+            .find(|l| l.contains(trecho))
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "cookies: o programa nao disse `{trecho}`\n  {}",
+                    ditas.join("\n  ")
+                )
+            })
+    };
+    for conferida in [
+        "http://bancada.duke entrou (sessao ",
+        "https://bancada.duke:8443 entrou (sessao ",
+        "a sessao de um pote nao foi por outro pote, por um pedido sem pote, nem a http://estranho.duke",
+        "o Secure so foi por https",
+        "Domain=duke e Domain=estranho.duke recusados",
+        "os prefixos valeram",
+        "o programa nao criou, nao sobrescreveu e nao viu o HttpOnly",
+        "o Max-Age=5 venceu no relogio do sistema",
+        "60 cookies num dominio ficaram 50 no pote",
+        "entrar, privado, sair e privado numa conexao so: 200 200 200 401",
+        "http://bancada.duke:81/cookies/privado com a sessao no pote -> denied DENY_RESOURCE",
+        "tudo conferiu",
+    ] {
+        dita(conferida)?;
+    }
+    // Os identificadores das sessões que a bancada deu: nenhum deles em
+    // registro nenhum.
+    let sessoes: Vec<String> = ditas
+        .iter()
+        .filter_map(|l| {
+            let id = l.split("entrou (sessao ").nth(1)?.split(')').next()?;
+            (!id.is_empty()).then(|| id.to_string())
+        })
+        .collect();
+    if sessoes.len() != 2 || sessoes[0] == sessoes[1] {
+        return Err(format!(
+            "cookies: o programa nao disse duas sessoes distintas: {sessoes:?}"
+        ));
+    }
+    // O que o kernel gravou desde antes do lançamento, de 128 em 128.
+    let do_processo = format!("pelo processo {processo} (");
+    let mut depois_de = inicio;
+    let mut decisoes: std::collections::BTreeMap<(String, String), u64> = Default::default();
+    let mut vistos = 0u64;
+    while depois_de < fim {
+        let cauda = pedir(
+            "audit.tail",
+            &format!(r#"{{"after":{depois_de},"count":128}}"#),
+        )?;
+        let registros = objetos_planos(
+            apos(&cauda, r#""records":["#).ok_or("cookies: audit.tail sem registros")?,
+        )?;
+        if registros.is_empty() {
+            break;
+        }
+        for campos in &registros {
+            let campo = |nome: &str| {
+                campos
+                    .iter()
+                    .find(|(n, _)| n == nome)
+                    .and_then(|(_, v)| v.clone())
+                    .unwrap_or_default()
+            };
+            depois_de = campo("seq").parse().unwrap_or(depois_de + 1);
+            if depois_de > fim {
+                break;
+            }
+            vistos += 1;
+            let detalhe = campo("detail");
+            let texto = format!(
+                "{} {} {} {}",
+                campo("method"),
+                campo("resource"),
+                detalhe,
+                campo("agent")
+            );
+            if let Some(t) = DOS_COOKIES
+                .iter()
+                .copied()
+                .chain(sessoes.iter().map(String::as_str))
+                .find(|t| texto.contains(*t))
+            {
+                return Err(format!(
+                    "cookies: um registro da auditoria tem `{t}`\n  {texto}"
+                ));
+            }
+            if let Some(resto) = detalhe.strip_prefix(&do_processo) {
+                // O do processo, sem o nome do programa: nem `cookie` nem
+                // `sessao`, em caixa nenhuma.
+                let sem_o_nome = resto.split_once(')').map_or("", |(_, r)| r);
+                let proprio = format!(
+                    "{} {} {} {}",
+                    campo("method"),
+                    campo("resource"),
+                    sem_o_nome,
+                    campo("agent")
+                )
+                .to_ascii_lowercase();
+                if proprio.contains("cookie") || proprio.contains("sessao") {
+                    return Err(format!(
+                        "cookies: um registro do processo tem um cookie\n  {texto}"
+                    ));
+                }
+                *decisoes
+                    .entry((campo("method"), campo("code")))
+                    .or_default() += 1;
+            }
+        }
+    }
+    const PEDIDOS: [&str; 8] = [
+        "net.connect",
+        "net.send",
+        "net.recv",
+        "net.close",
+        "random.read",
+        "system.info",
+        "system.uptime",
+        "fs.read",
+    ];
+    if let Some(((metodo, _), _)) = decisoes
+        .iter()
+        .find(|((m, _), _)| !PEDIDOS.contains(&m.as_str()))
+    {
+        return Err(format!(
+            "cookies: o programa pediu `{metodo}`, que o HTTP nao pedia: {decisoes:?}"
+        ));
+    }
+    let recusadas: Vec<_> = decisoes
+        .iter()
+        .filter(|((_, codigo), _)| codigo != "ALLOW")
+        .collect();
+    if recusadas.len() != 1
+        || *recusadas[0].0 != ("net.connect".to_string(), "DENY_RESOURCE".to_string())
+        || *recusadas[0].1 != 1
+    {
+        return Err(format!(
+            "cookies: as decisoes do programa nao foram as do HTTP: {decisoes:?}"
+        ));
+    }
+    let metricas = pedir("security.metrics", "{}")?;
+    let depois = contas_do_orcamento(&metricas)?;
+    let [_, dados, _, taxa, _, _, _, _]: [u64; 8] =
+        std::array::from_fn(|i| depois[i].saturating_sub(antes[i]));
+    if taxa != 0 || depois[5] != 0 {
+        return Err(format!(
+            "cookies: {taxa} recusas por taxa, {} registros perdidos",
+            depois[5]
+        ));
+    }
+    println!(
+        "  [cookies] ok  o cookies do operador saiu com 99 em {} ms: a sessao clara e cifrada, o isolamento entre potes e hosts, o Secure, o dominio, o caminho, os prefixos, o SameSite, o HttpOnly, a validade, os limites e a conexao mantida; {vistos} registros da auditoria lidos, nenhum com um cookie nem com as duas sessoes; as decisoes do processo todas deixadas, menos a do destino fora do alcance",
+        duracao.as_millis()
+    );
+    if let Ok(medida) = dita("medida ") {
+        println!("  [cookies] medido  {medida}");
+    }
+    let contar = |metodo: &str| {
+        decisoes
+            .get(&(metodo.to_string(), "ALLOW".to_string()))
+            .copied()
+            .unwrap_or(0)
+    };
+    println!(
+        "  [cookies] medido  {} decisoes do processo: {} conexoes, {} leituras, {} do relogio (TLS e cookies); {dados} decisoes de dados no sistema todo",
+        decisoes.values().sum::<u64>(),
+        contar("net.connect"),
+        contar("net.recv"),
+        contar("system.info")
     );
     Ok(())
 }
