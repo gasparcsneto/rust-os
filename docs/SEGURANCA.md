@@ -482,6 +482,31 @@ Não há uma segunda política para o protocolo, nem autorização paralela:
   comprimida passa pelas mesmas decisões, e só o número de leituras muda.
   O kernel e a política não falam de codificação de conteúdo, e o `xtask`
   confere.
+- **Os cookies são do programa, e não são credencial.** Um cookie é o
+  estado que um servidor pede para o programa guardar e mandar de volta:
+  prova alguma coisa ao servidor, e nada ao Duke. Ele vive num pote na
+  memória do processo (`http::Pote`), com as regras da RFC 6265 e da
+  6265bis — domínio, caminho, `Secure`, `HttpOnly`, `SameSite`, validade
+  e tetos —, e não é identidade de ninguém: quem pede é o processo, com a
+  autoridade de quem o lançou, e o registro diz essa pessoa ou esse
+  agente, nunca um cookie. Um servidor não muda a autoridade de nada com
+  um `Set-Cookie`: o pote é estado do programa, e o gate não o lê. A
+  revogação, a contenção e o firewall valem no pedido seguinte, leve ele
+  a sessão ou não — e, liberado, o processo segue com a sessão dele, que
+  lá fora nunca deixou de valer para o servidor. Um processo não vê o
+  pote de outro: a memória de cada um é dele, e a página que o kernel dá
+  chega zerada; duas pessoas, ou uma pessoa e um agente, têm cada um o
+  seu, e dois processos da mesma pessoa também. Nada se guarda além do
+  processo. O relógio da validade é o `system.info`, pelo gate, uma vez
+  por troca e só quando um cookie com validade está em jogo; sem ele, o
+  que tem validade não vai — a resposta diz quantos ficaram. Essa leitura
+  é do caminho de controle, e gasta a taxa de quem lançou o programa — a
+  sessão da pessoa, ou a chave do agente: uma rajada de trocas com
+  cookies de validade a esgota, e até ela voltar os de validade ficam no
+  pote, e os outros pedidos de controle dos programas dele — o relógio de
+  uma conexão TLS nova inclusive — ouvem `DENY_RATE`. A segurança não
+  cede; cede a conversa. O kernel e a política não falam de cookie, e o
+  `xtask` confere.
 
 As falhas não se misturam. Cada uma sobe com o código de quem falhou, e a
 família dela (`http::categoria`) só o nomeia:
@@ -557,7 +582,8 @@ mesma regra:
   certificado prova o nome ao programa, e não autoriza nada no gate;
 - o HTTP também: programa sobre o TCP ou o TLS, sem HTTP no kernel, sem
   comando nem permissão dele; o gate decide o destino, e o protocolo é do
-  programa — a compressão do corpo inclusive, decodificada no processo;
+  programa — a compressão do corpo inclusive, decodificada no processo, e
+  os cookies, num pote do processo que o gate não lê;
 - a conexão cortada pelo firewall guarda o número para o dono: a ordem
   continua a mesma — o gate decide, e o firewall barra depois —, e o que
   muda é só o código que o dono ouve, o do firewall;
@@ -613,8 +639,9 @@ contido pelo despertador.
   o aperto. O canal limita quanto tempo e quantas vagas um estranho
   segura, e não que ele tente.
 - **O NSF não interpreta HTTP.** Nem o método, nem o caminho, nem o
-  status, nem a codificação do corpo: só as decisões do gate sobre a
-  conexão, e o nome que o DNS deu.
+  status, nem a codificação do corpo, nem os cookies: só as decisões do
+  gate sobre a conexão, e o nome que o DNS deu. Uma sessão roubada de um
+  servidor é problema daquele servidor; aqui, ela não abre nada.
   Um programa que insiste num caminho que o servidor recusa aparece como
   pedidos `ALLOW` ao mesmo destino, e não como "404 repetido".
 - **O relógio dos registros é de um segundo.** As janelas e as taxas das

@@ -3280,6 +3280,194 @@ nova repetiu a diferença, e na mesma árvore do antes ela sumiu.
   do programa não devolve páginas, de modo que o que a bomba custou fica
   mapeado até o processo acabar.
 
+### Os cookies do HTTP
+
+Um cookie é o estado que um servidor pede para o **programa** guardar e
+mandar de volta — e é do programa, como o resto do HTTP. Ele mora num pote
+na memória do processo ([`Pote`](http/src/cookies.rs)), com as regras da
+RFC 6265 e da 6265bis, e não é credencial do Duke: prova alguma coisa ao
+servidor, e nada aqui. O kernel não o vê, o gate decide pelo destino e por
+quem pede, e a revogação, a contenção e o firewall valem no pedido
+seguinte, leve ele a sessão ou não.
+
+```
+cookies: http://bancada.duke entrou (sessao 4f0c9e1d2a7b), o privado a reconheceu, e depois de sair nao
+cookies: https://bancada.duke:8443 entrou (sessao 9a51c37e08d2), o privado a reconheceu, e depois de sair nao
+cookies: a sessao de um pote nao foi por outro pote, por um pedido sem pote, nem a http://estranho.duke
+cookies: o Secure so foi por https, e a origem clara nao o sobrescreveu
+cookies: Domain=duke e Domain=estranho.duke recusados; o Path so vale dentro dele
+cookies: os prefixos valeram; do proprio site s1,s2,s3,__Host-a, navegando de outro s2,s3,__Host-a, buscando para outro s3
+cookies: o programa nao criou, nao sobrescreveu e nao viu o HttpOnly
+cookies: o Max-Age=5 venceu no relogio do sistema; o Expires passado apagou, o futuro ficou
+cookies: 60 cookies num dominio ficaram 50 no pote; o de 4100 bytes nao entrou
+cookies: entrar, privado, sair e privado numa conexao so: 200 200 200 401
+cookies: http://bancada.duke:81/cookies/privado com a sessao no pote -> denied DENY_RESOURCE
+```
+
+**Do programa, e de nenhum outro.** O pote é um valor que o programa cria
+(`Pote::novo()`) e passa a cada troca (`trocar_com_pote`, `buscar_com_pote`):
+o pedido leva o `Cookie` que o pote dá para ele, e os `Set-Cookie` da
+resposta vão para o pote — e saem dos cabeçalhos que o programa vê. Sem
+pote, nada de cookie, e o `Cookie` é escrito só pelo pacote: quem chama
+não o põe à mão. Não há pote global. Dois potes do mesmo processo não se
+veem; dois processos — da mesma pessoa, de duas pessoas, de uma pessoa e
+de um agente — têm cada um a sua memória, e a página que o kernel dá a um
+processo chega zerada, de modo que nada do pote de um processo que acabou
+chega ao seguinte. O filho de um `bifurcar` é uma cópia do processo — o
+pote junto —, e herda a autoridade dele: é o programa que se copia. E
+nada se guarda além do processo: o pote acaba com ele.
+
+**Não é identidade, nem autoridade.** Quem pede é o processo, com a
+autoridade de quem o lançou — a pessoa pela sessão, o agente pela chave
+—, e o registro da auditoria diz essa pessoa ou esse agente, nunca um
+cookie; um servidor não muda a autoridade de nada com um `Set-Cookie`. A
+suíte confere pelos dois lados: uma pessoa e um agente, cada um com o seu
+processo e a sua sessão na bancada, não veem a do outro, e cada decisão
+sai em nome de quem lançou; e o mesmo pedido ao privado da bancada, sem
+sessão e com ela, passa pelas mesmas decisões, na mesma ordem — o que muda
+é só a resposta. Com a sessão no pote, a chave revogada leva o pedido
+seguinte a `DENY_ROLE`, a contenção a `DENY_CONTAINED`, e a regra do
+firewall a `FIREWALL_BLOCKED`, antes de um byte sair; liberado, o processo
+segue com a mesma sessão, que lá fora nunca deixou de valer para o
+servidor — aqui ela não abria nada. Nenhum registro tem o cabeçalho, a
+sessão ou um caminho dos cookies: a suíte e a fumaça leem a auditoria
+registro a registro — a fumaça procura também os identificadores das
+sessões que o programa disse —, e o `xtask invariantes` confere que o
+kernel e a política não falam de cookie.
+
+**As regras.** O domínio: sem `Domain`, o cookie é só do host que o deu;
+com ele, de quem está abaixo do domínio, que tem de conter o host —
+`Domain=duke`, de um rótulo só, é de todo mundo, e é recusado sem uma
+lista de sufixos públicos —, e um host por endereço só tem cookie dele
+mesmo. O caminho: sem `Path`, o diretório do pedido, e o `/cookies` vale
+em `/cookies/eco`, e não em `/cookiesx`. O `Secure` só vem e só vai por
+`https`, e uma origem clara não sobrescreve um cookie seguro de mesmo
+nome. O `HttpOnly` só vem pela rede: a API do programa não o cria, não o
+sobrescreve e não o vê — o valor vai para o fio, e não para o programa;
+nem um `{:?}` do pote mostra valor nenhum, para um log não levar uma
+sessão junto. O
+`SameSite` segue o contexto que quem pede declara: do próprio site, tudo
+vai; de outro site, o `Strict` não vai, o `Lax` — o padrão — só numa
+navegação com `GET` ou `HEAD`, e o `None`, que exige `Secure`, sempre; e
+a resposta a um pedido de outro site que não é navegação não põe `Strict`
+nem `Lax`. Os prefixos: `__Secure-` exige `Secure`, e `__Host-` também,
+sem `Domain` e com `Path=/`. A validade: o `Max-Age` vence o `Expires`, em
+qualquer ordem, zero ou menos apaga, e nenhuma passa de 400 dias; a data
+é lida pela RFC 6265, a que não existe é ignorada. Os tetos: 4096 bytes
+de nome e valor, 50 cookies por domínio, 300 no pote e 128 KiB; o que
+passa tira primeiro os vencidos, depois o usado há mais tempo do domínio
+que passou, depois o usado há mais tempo de todos. O cabeçalho vai do
+caminho mais longo ao mais curto, e entre os iguais, do mais antigo.
+
+**O relógio.** A validade se confere no relógio do sistema, o mesmo do
+TLS: o `system.info`, pelo gate, lido uma vez por troca e só quando um
+cookie com validade está em jogo — algum que iria no pedido, ou algum
+`Set-Cookie` da resposta. Sem relógio — sem RTC, num programa cujo
+manifesto não declara `system.read`, ou com a leitura recusada pelo gate
+—, o que já tem validade no pote não vai, porque não há como saber se
+venceu, e a resposta diz quantos ficaram (`retidos`); o que chega com
+validade fica de sessão — dura o pote, isto é, no máximo o processo —, e
+o `Max-Age=0` apaga do mesmo jeito.
+
+**A bancada.** O servidor HTTP da bancada ganhou `/cookies`: `entrar` dá
+uma sessão `HttpOnly` e `SameSite=Lax` — `Secure` no `https` —, assinada
+com um HMAC de uma chave tirada da da bancada; `privado` só responde a
+quem a traz, com o identificador dela; `sair` a apaga; `eco` devolve o
+`Cookie` que chegou; `definir` devolve os `Set-Cookie` que o programa
+pede; e `muitos` manda dezenas deles de uma vez. O `cookies` confere tudo
+isso de dentro, claro e cifrado, e o `buscador` ganhou o pote, para a
+suíte interromper a sessão no meio.
+
+**As medidas.** No hospedeiro, com um transporte de mentira que devolve
+sempre a mesma resposta numa conexão mantida, uma troca custa 593 ns sem
+pote e 595 ns com o pote vazio; com uma sessão no pote, 932 ns; com ela
+renovada a cada resposta por um `Set-Cookie` de `Max-Age` — uma leitura
+do relógio por troca —, 1,98 µs; com 50 cookies do domínio no cabeçalho,
+2,4 µs; e com 300 de outros hosts, que não vão, 2,1 µs: o pote é uma
+lista, e o que limita a busca é o teto dela. No sistema, o `cookies` faz
+40 trocas numa conexão mantida com o `eco` da bancada, três vezes — sem
+pote, com uma sessão e com um cookie de `Max-Age` —, na fumaça, em
+release:
+
+| 40 trocas | sem pote | sessão | `Max-Age` |
+|---|---|---|---|
+| x86, quatro fumaças | 110–130 ms | 110–150 ms | 180–220 ms |
+| ARM, três fumaças | 120–140 ms | 120–170 ms | 170–250 ms |
+
+O relógio do sistema anda de 10 em 10 ms, e a mesma série varia de uma
+rodada para outra até um milissegundo por troca: a sessão fica nesse
+ruído — em média, menos de meio milissegundo por troca. O `Max-Age` custa
+uns 2 ms por troca (de 0,8 a 3,3), e é a leitura do relógio: o
+`system.info` pelo gate — uma decisão, um registro na auditoria, e uma
+resposta com o estado do sistema inteiro; com o kernel de teste em debug,
+de 5 a 18 ms. O programa inteiro faz uns 627 pedidos ao gate — 41
+conexões, 277 leituras e 55 leituras do relógio, do TLS e dos cookies —
+e leva de 8,7 a 10,2 s na fumaça em release, e de 15 a 17 s em debug;
+três dele ao mesmo tempo, de duas pessoas e de um agente, 10,5 s na
+suíte do ARM em release, e 13 s na do x86.
+
+**O que não usa o pote ficou como estava.** O kernel e a política não
+mudaram — só a suíte. O `buscador`, que ganhou o pote, cresceu 33 KiB no
+x86 e 31 KiB no ARM; o `cookies` tem 725 KiB no x86 e 730 KiB no ARM; e
+os outros programas que falam HTTP mudaram menos de 9 KiB, para mais ou
+para menos. Na fumaça, em pares de antes e depois alternados na mesma
+árvore, três no x86 e dois no ARM:
+
+| | x86 antes | x86 depois | ARM antes | ARM depois |
+|---|---|---|---|---|
+| `vazao`, 5 MiB | 2,44–2,75 s | 2,45–2,65 s | 2,31–2,52 s | 2,30–2,33 s |
+| `carga`, 1 MiB por 4 conexões | 0,98–1,31 s | 0,95–1,33 s | 0,92–1,17 s | 0,91–0,98 s |
+| `pagina` inteira | 4,66–4,92 s | 4,87–5,11 s | 3,75–4,03 s | 3,96–4,03 s |
+
+As faixas se sobrepõem. A rodada do depois mais lenta na `pagina`, no
+x86, foi a mais lenta de todas também na `carga`, que não é HTTP; e na
+`pagina`, que não usa o pote, o que mudou é o `Cookie` entre os
+cabeçalhos reservados.
+
+**O que fica de fora.**
+
+- **Guardar além do processo.** O pote acaba com o processo. Guardá-lo
+  pediria um lugar no armazém que fosse só de um titular — de uma pessoa,
+  ou de um agente —, e os escopos do armazém são do papel, e o
+  `/armazem/compartilhado` é de todos os operadores: um cookie guardado ali
+  seria lido por qualquer um deles. Um escopo por titular seria uma
+  abstração nova, e não entrou.
+- **A lista de sufixos públicos.** Sem ela, só o domínio de um rótulo é
+  recusado: um `Domain=co.uk` vindo de `a.co.uk` seria aceito. Na rede da
+  bancada não há sufixo público de dois rótulos; numa rede de verdade, a
+  lista entra aqui, no programa.
+- **O site do pedido é declarado.** Sem um navegador, não há documento de
+  onde o pedido sai: quem pede diz se é do próprio site ou de outro, e se
+  é uma navegação, e o `SameSite` vale por isso. O padrão é o próprio
+  site.
+- **O cookie sem nome** da 6265bis (`Set-Cookie: abc`) é recusado, e o
+  `Partitioned`, a prioridade e o `SameParty` não existem aqui.
+- **O relógio custa uma decisão.** Cada troca com um cookie de validade em
+  jogo faz um `system.info` pelo gate — um registro na auditoria, e uma
+  ficha da taxa de quem lançou o programa, a sessão da pessoa ou a chave
+  do agente: a do caminho de controle, que o plano de dados não cobre.
+  Num experimento fora da árvore, o `cookies` de uma pessoa operadora fez
+  400 trocas seguidas com um cookie de `Max-Age`, numa conexão mantida —
+  umas 300 por segundo: a taxa do papel, 50 pedidos por segundo com
+  rajada de 100, recusou o relógio a partir da troca 116, e 243 das 400
+  foram sem o cookie (`retidos`), o que o servidor vê. E, enquanto a taxa
+  não voltava, os outros pedidos de controle dos programas daquela sessão
+  ouviram `DENY_RATE` também: o `system.uptime` do próprio programa, no
+  experimento, e uma conexão TLS nova, que lê o mesmo relógio, não se
+  abriria. Três processos — de duas pessoas e de um agente —, com 400
+  trocas cada um ao mesmo tempo, não chegaram à taxa: cada um gasta a
+  sua. A segurança não cede — sem relógio, o que tem validade não vai —;
+  cede a conversa. Um relógio que o programa lesse sem uma decisão do
+  gate, ou a leitura dele no orçamento do plano de dados, seria uma
+  abstração nova, e não entrou.
+- **O servidor enche o pote.** Até o teto de cada domínio e do pote, e o
+  que passa tira o usado há mais tempo — de outro domínio também, quando o
+  pote inteiro está cheio. E um host pode pôr cookies do domínio de cima,
+  que vão também aos vizinhos dele, num `Cookie` de dezenas de KiB que o
+  vizinho pode recusar. É o que acontece num navegador; a defesa é o teto,
+  que é de cada processo, e o que se perde é a conversa desse programa
+  com esses hosts.
+
 ### As mutações da rede
 
 Quinze mutações contra o que este incremento promete — a posse, a
@@ -3806,6 +3994,65 @@ fluxo DEFLATE, com a janela dele. O decodificador já fazia certo — a
 distância é contada do começo do membro —, e o caso
 `cada_membro_e_um_fluxo` entrou antes da bateria, que confirmou que ele
 mata as duas mutações.
+
+### As mutações dos cookies
+
+Setenta e seis mutações contra o que os cookies prometem — cada regra do
+pote, o relógio, os tetos, a troca, e a autoridade que um cookie não muda
+—: sessenta e oito contra os testes do pacote `http`, seis de ponta a ponta
+contra a suíte do x86, e duas contra as invariantes do `xtask`. **Todas
+reprovadas** — quatro só depois de um caso novo, abaixo. Outras duas, de
+ponta a ponta, são equivalentes, e o porquê vem depois da tabela.
+
+| Mutação | Reprovada por |
+|---|---|
+| o domínio sem a fronteira do ponto; o `Domain` de outro host; o de um rótulo só aceito | `o_dominio` |
+| o host só do host casando por sufixo; o `Domain` com caixa; com o ponto do começo | `o_dominio` e `o_set_cookie_se_le` |
+| o host por endereço com `Domain`; o endereço que casa por sufixo | `o_host_por_endereco_so_tem_cookie_dele` — o sufixo, depois do caso novo |
+| o caminho sem a fronteira; o caminho padrão que é o do pedido; o `Path` sem barra aceito | `o_caminho` e `o_set_cookie_se_le` |
+| o `Secure` de origem clara; o `Secure` que vai por `http`; a origem clara que sobrescreve o seguro | `o_secure` |
+| o `HttpOnly` visível ao programa; criado pela API; sobrescrito pela API; a API como se fosse a rede; os visíveis com o `HttpOnly` | `o_httponly_nao_sai_do_pote_para_o_programa` |
+| o `Strict` que vai de outro site; o `Lax` em qualquer pedido de outro site; num `POST` de navegação; o `None` sem `Secure`; o outro site que põe `Strict` ou `Lax`; o padrão `None` | `o_samesite` |
+| o contexto do pedido ignorado no envio; na resposta | `o_contexto_do_pedido_vai_ao_pote`; a resposta, por `o_contexto_do_pedido_vale_para_a_resposta`, novo |
+| o `__Secure-` sem `Secure`; o `__Host-` com `Domain`; com outro caminho; o prefixo com caixa | `os_prefixos`, e o `nada_do_que_o_servidor_manda_quebra_o_pote` |
+| o `Max-Age=0` que não apaga; o `Expires` que vence o `Max-Age`; sem o teto de 400 dias, num e no outro; o vencido que vai; o vencido no segundo exato | `a_validade`, `o_que_ja_venceu_apaga` e `sem_relogio_a_validade_nao_se_confere` |
+| a data com o ano de dois dígitos no século errado; a que não existe; o bissexto de quatro em quatro; antes de 1601; a hora fora de faixa; o `Max-Age` com lixo | `as_datas_de_cookie`, e o lixo por `a_validade` e pelo `nada_do_que_o_servidor_manda_quebra_o_pote` |
+| sem relógio, a validade vai; os retidos não contados; os retidos que não chegam a quem chama | `sem_relogio_a_validade_nao_se_confere`; os retidos, por `sem_relogio_a_troca_diz_quantos_ficaram`, que entrou com eles |
+| o relógio sempre lido; lido a cada vez; lido duas vezes na troca | `o_relogio_so_e_lido_quando_um_cookie_tem_validade`; a troca, por `a_troca_le_o_relogio_uma_vez`, novo |
+| sem o teto por domínio; sem o de bytes; sem o do pote; o despejo do mais novo, no domínio e no pote; o uso que não conta | `os_limites_e_o_despejo` — o uso, depois do caso novo —, e os bytes também por `o_monte_do_pote_tem_teto` |
+| o cookie grande aceito; o atributo grande lido; o nome vazio; o controle no valor; o par sem `=` como um nome sem valor | `o_que_nao_e_cookie_e_recusado` e `o_set_cookie_se_le` |
+| a ordem do cabeçalho invertida; o desempate pelo mais novo; o substituto que perde a criação | `a_ordem_do_cabecalho` |
+| qualquer cabeçalho lido como cookie; o `Set-Cookie` que fica na resposta; o pote que não vai no pedido | `a_troca_com_o_pote` |
+| o `Cookie` de quem chama | `os_cabecalhos_de_quem_chama_sao_conferidos` e `sem_pote_nada_de_cookie` |
+| o `Debug` do pote que mostra o valor | `o_debug_do_pote_nao_mostra_valor`, que entrou com a correção — antes dela, um `{:?}` do pote mostrava a sessão |
+| a revogação ignorada no plano de dados; o revogado que fica com o papel | `cookies: a revogacao nao passa pelo cookie` — com a sessão no pote, o pedido depois da revogação deu `200 privado`, e não `DENY_ROLE` |
+| a contenção que não alcança a rede | `cookies: a contencao nao passa pelo cookie` — o contido ouviu `DENY_RESOURCE`, e não a contenção |
+| o firewall sem as duas camadas da conexão aberta: o bloqueio que não a derruba, e o envio que não confere a regra | `cookies: o firewall nao passa pelo cookie` — nada passou, porque a placa ainda descarta os quadros do fluxo barrado, mas o programa ouviu `NETWORK_TIMEOUT`, e não `FIREWALL_BLOCKED` |
+| o processo de um agente decidido em nome de uma pessoa | `cookies: pessoa e agente cada um com o seu` e `cookies: varios ao mesmo tempo` |
+| um pote só no processo, o que o programa passa ignorado | `cookies: o programa inteiro pelo gate` — a sessão de um pote foi pelo outro —, e os outros sete casos |
+| o kernel fala de cookie; a política também | `cargo xtask invariantes`: um cookie no kernel ou na política |
+
+**As que pediram um caso.** O endereço que casa por sufixo passou na
+primeira rodada: nenhum caso tinha um cookie de domínio que terminasse
+como um endereço. O caso novo põe `Domain=0.2.100` a partir de
+`x.0.2.100` — um nome —, e confere que ele vai a `y.0.2.100` e não a
+`10.0.2.100`. O uso que não conta também passou: o caso do despejo
+renovava o cookie mais velho substituindo-o, e a substituição já o
+deixava novo; o caso agora o renova só usando. E duas da troca com o
+pote: o contexto do pedido ignorado na resposta, e o relógio lido duas
+vezes numa troca — `o_contexto_do_pedido_vale_para_a_resposta` e
+`a_troca_le_o_relogio_uma_vez` entraram para elas. Uma terceira era
+equivalente — ler o par sem `=` como um nome vazio, que o nome vazio
+recusa do mesmo jeito — e foi trocada pela que o lê como um nome sem
+valor.
+
+**As equivalentes.** A contenção ignorada só no plano de dados, e o
+bloqueio que só não derruba a conexão, não mudam nada aqui: a contenção
+derruba as conexões do contido, e o pedido seguinte, sem conexão, é
+decidido no caminho de controle, onde a contenção recusa; e o envio
+confere a regra do firewall a cada vez, com a conexão viva ou não. São
+camadas que se cobrem, e as duas mutações que os cookies reprovam tiram
+as duas de cada vez.
 
 ## O tecido de segurança
 
@@ -6849,7 +7096,10 @@ padronizado.
       demais (ver [O plano de dados](#o-plano-de-dados)); e a compressão do
       HTTP — `gzip` e `deflate`, negociados e decodificados no programa, com
       o teto antes de descomprimir, sem que o gate saiba (ver [A compressão
-      do HTTP](#a-compressão-do-http)).
+      do HTTP](#a-compressão-do-http)); e os cookies — o pote do programa,
+      com as regras da RFC 6265 e da 6265bis, na memória do processo, sem
+      virar identidade nem autoridade de ninguém (ver [Os cookies do
+      HTTP](#os-cookies-do-http)).
 - [ ] **Fase 13 — Consentimento e auditoria.** Se um agente pode fazer tudo
       que uma pessoa faz, o modelo de permissão precisa ser **mais** forte que
       o de um desktop comum, e não mais fraco. Três coisas: quem pediu — a
