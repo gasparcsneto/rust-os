@@ -159,8 +159,11 @@ jobs:
     # e o armazém, a bancada sozinha leva de 39 a 48 — o mesmo código, em
     # duas rodadas seguidas: o runner varia uns vinte por cento — e o job
     # inteiro de 58 a 70, que era o teto, e numa das rodadas foi cortado no
-    # último passo.
-    timeout-minutes: 140
+    # último passo. O teto ficou em 140 enquanto o job crescia — a rede, o
+    # TLS, o HTTP, a suíte em virtio-gpu, e a bancada de persistência, que
+    # sozinha leva 74 minutos no x86 —, e o x86 chegou a 137; com os
+    # cookies, a uns 141, e foi cortado de novo no último passo.
+    timeout-minutes: 290
     strategy:
       # Sem fail-fast: quando uma arquitetura quebra, queremos saber na mesma
       # rodada se a outra também quebrou. Saber se o bug é específico de uma
