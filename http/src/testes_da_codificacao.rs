@@ -84,7 +84,7 @@ unsafe impl GlobalAlloc for Medidor {
 static MEDIDOR: Medidor = Medidor;
 
 /// O pico de memória deste fio durante `f`, acima do que ele já tinha.
-fn pico_de<T>(f: impl FnOnce() -> T) -> (T, usize) {
+pub(crate) fn pico_de<T>(f: impl FnOnce() -> T) -> (T, usize) {
     let antes = ATUAL.with(Cell::get);
     PICO.with(|p| p.set(antes));
     let r = f();

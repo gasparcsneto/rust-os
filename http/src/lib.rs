@@ -31,6 +31,12 @@
 //!   antes de descomprimir ([`codificacao`]). A
 //!   compressão é do protocolo: o gate não a vê, e nada nela autoriza ou
 //!   recusa;
+//! - [`Pote`]: os cookies do programa — o estado que um servidor pede para
+//!   guardar e mandar de volta —, na memória do processo, e só dele, com
+//!   as regras da RFC 6265 e da 6265bis ([`cookies`]). Um cookie não é
+//!   credencial do Duke: prova alguma coisa ao servidor, e nada aqui; o
+//!   kernel não o vê, e a revogação, a contenção e o firewall valem no
+//!   pedido seguinte, leve ele cookie ou não;
 //! - [`Limites`]: a maior linha, a maior cabeça, quantos cabeçalhos, o
 //!   maior corpo e o maior corpo decodificado — a memória não cresce na
 //!   vontade do servidor;
@@ -45,11 +51,11 @@
 //!
 //! # O que fica de fora, de propósito
 //!
-//! HTTP/2 e HTTP/3, pedidos em fila, cookies, autenticação, *proxy*, a
-//! compressão do pedido, o `Transfer-Encoding` que não é `chunked`, o
-//! Brotli e seguir redirecionamento sozinho: uma resposta `3xx` volta a
-//! quem chama com o `Location`, e ir até lá é outro pedido — outro nome no
-//! DNS, outro destino no gate.
+//! HTTP/2 e HTTP/3, pedidos em fila, autenticação, *proxy*, a compressão do
+//! pedido, o `Transfer-Encoding` que não é `chunked`, o Brotli, guardar
+//! cookies além do processo e seguir redirecionamento sozinho: uma
+//! resposta `3xx` volta a quem chama com o `Location`, e ir até lá é outro
+//! pedido — outro nome no DNS, outro destino no gate.
 
 #![cfg_attr(not(test), no_std)]
 
@@ -58,6 +64,7 @@ extern crate alloc;
 mod categoria;
 mod cliente;
 pub mod codificacao;
+pub mod cookies;
 mod erro;
 mod inflar;
 mod pedido;
@@ -68,10 +75,15 @@ mod url;
 mod testes;
 #[cfg(test)]
 mod testes_da_codificacao;
+#[cfg(test)]
+mod testes_dos_cookies;
 
 pub use categoria::{Categoria, categoria};
 pub use cliente::{Cliente, Fluxo};
 pub use codificacao::{Aceitas, Codificacao};
+pub use cookies::{
+    Agora, Contexto, Guardado, Guardados, LimitesDoPote, MesmoSite, Pote, Recusa as RecusaDeCookie,
+};
 pub use erro::{Defeito, Erro, Limite, Motivo};
 pub use pedido::{ErroDePedido, Metodo, Pedido};
 pub use resposta::{Enquadramento, Limites, Resposta, Versao};

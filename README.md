@@ -478,17 +478,19 @@ tls/src/             o cliente TLS 1.3 dos programas: o rustls sem std, com um p
 └── acaso.rs         o gerador da conexão, semeado por quem conecta, que falha fechado sem semente
 
 http/src/            o cliente HTTP/1.1 dos programas: nada do HTTP é autorização — o gate decide o destino, e o protocolo é do programa
-├── lib.rs           o que é, o que não é, e o que fica de fora de propósito: HTTP/2, fila de pedidos, cookies, Brotli, seguir redirecionamento
+├── lib.rs           o que é, o que não é, e o que fica de fora de propósito: HTTP/2, fila de pedidos, cookies além do processo, Brotli, seguir redirecionamento
 ├── url.rs           só `http` e `https`, o host por nome ou IPv4 na forma normal; o que se recusa de propósito
 ├── pedido.rs        a linha, o `Host`, os cabeçalhos de quem chama conferidos, e os que só o cliente escreve
 ├── resposta.rs      a resposta pela RFC 9112: o enquadramento sem ambiguidade, os pedaços, os limites, e quando a conexão fica
 ├── cliente.rs       um pedido de cada vez numa conexão, e a mesma conexão para o seguinte quando a resposta deixa
 ├── codificacao.rs   o corpo comprimido: `gzip` e `deflate` negociados pelo pedido, conferidos, e decodificados com o teto de quem pede
+├── cookies.rs       o pote do programa: o `Set-Cookie` lido, o domínio, o caminho, o `Secure`, o `HttpOnly`, o `SameSite`, a validade e os tetos — estado do processo, e não credencial
 ├── inflar.rs        o DEFLATE, escrito aqui: o que a RFC 1951 proíbe é recusado, e a saída para no teto
 ├── erro.rs          a falha de baixo como veio, a conversa que acabou cedo, o protocolo, os limites e o conteúdo que não se decodifica
 ├── categoria.rs     de que família é o código de uma falha — o gate, a contenção, o firewall, o DNS, o transporte, o prazo, o TLS
 ├── testes.rs        cada resposta partida em todo tamanho de pedaço, contra um transporte de mentira
-└── testes_da_codificacao.rs  o DEFLATE contra o zlib e contra símbolos escritos à mão; cortes, bits trocados, bombas e o monte medido
+├── testes_da_codificacao.rs  o DEFLATE contra o zlib e contra símbolos escritos à mão; cortes, bits trocados, bombas e o monte medido
+└── testes_dos_cookies.rs    as regras do pote, uma a uma; potes que não se veem, o relógio lido só quando precisa, e o lixo do servidor que não o quebra
 
 armazem/src/         o armazém como conta pura: caminhos, diretórios, versões, donos e cotas; preparar e aplicar um lote
 ├── lib.rs           a árvore de arquivos e diretórios, a versão do armazém inteiro, o lote inteiro ou nada

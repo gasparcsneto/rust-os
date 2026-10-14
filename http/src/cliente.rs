@@ -7,9 +7,15 @@
 //! certo, ou a troca falhou no meio — recusa o próximo
 //! ([`Erro::Esgotada`]): quem chama abre outra, e a abertura é uma decisão
 //! nova do gate.
+//!
+//! Com um pote ([`Cliente::trocar_com_pote`]), o pedido leva os cookies que
+//! o pote dá para ele, e os `Set-Cookie` da resposta vão para o pote — e
+//! saem dos cabeçalhos da resposta que quem chama vê. Ver
+//! [`crate::cookies`].
 
 use alloc::vec::Vec;
 
+use crate::cookies::{Agora, Pote};
 use crate::erro::Erro;
 use crate::pedido::Pedido;
 use crate::resposta::{self, Limites, Resposta};
@@ -64,11 +70,43 @@ impl<F: Fluxo> Cliente<F> {
         self.trocas
     }
 
-    /// Manda `pedido` e lê a resposta, com `limites`.
+    /// Manda `pedido` e lê a resposta, com `limites`. Sem pote: o pedido
+    /// não leva cookie, e a resposta traz os `Set-Cookie` como vieram.
     pub fn trocar(
         &mut self,
         pedido: &Pedido,
         limites: &Limites,
+    ) -> Result<Resposta, Erro<F::Falha>> {
+        self.trocar_com(pedido, limites, None)
+    }
+
+    /// Manda `pedido` com os cookies de `pote` e lê a resposta, com
+    /// `limites`; os `Set-Cookie` dela vão para o pote, e saem dos
+    /// cabeçalhos. `relogio` dá o tempo de agora, em segundos desde 1970 —
+    /// lido só se um cookie com validade estiver em jogo, e uma vez. A
+    /// troca que falha não grava cookie nenhum.
+    pub fn trocar_com_pote(
+        &mut self,
+        pedido: &Pedido,
+        limites: &Limites,
+        pote: &mut Pote,
+        relogio: &mut dyn FnMut() -> Option<u64>,
+    ) -> Result<Resposta, Erro<F::Falha>> {
+        let mut agora = Agora::de(relogio);
+        let (cookie, retidos) =
+            pote.cabecalho(&pedido.url, pedido.metodo, pedido.contexto, &mut agora);
+        let mut r = self.trocar_com(pedido, limites, cookie.as_deref())?;
+        r.cookies = pote.guardar(&pedido.url, pedido.contexto, &r.cabecalhos, &mut agora);
+        r.cookies.retidos = retidos;
+        r.cabecalhos.retain(|(nome, _)| nome != "set-cookie");
+        Ok(r)
+    }
+
+    fn trocar_com(
+        &mut self,
+        pedido: &Pedido,
+        limites: &Limites,
+        cookie: Option<&str>,
     ) -> Result<Resposta, Erro<F::Falha>> {
         if !self.pronto {
             return Err(Erro::Esgotada);
@@ -76,7 +114,9 @@ impl<F: Fluxo> Cliente<F> {
         // Até a resposta chegar inteira, a conexão não leva outro pedido:
         // uma troca que falha no meio a deixa num ponto que ninguém sabe.
         self.pronto = false;
-        self.fluxo.mandar(&pedido.escrever()).map_err(Erro::Baixo)?;
+        self.fluxo
+            .mandar(&pedido.escrever_com(cookie))
+            .map_err(Erro::Baixo)?;
         let mut r = resposta::ler(
             &mut self.fluxo,
             &mut self.buffer,

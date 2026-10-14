@@ -13,10 +13,10 @@ use crate::{
 
 /// Uma falha do transporte de mentira: um código, como o do gate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct FalhaDeTeste(&'static str);
+pub(crate) struct FalhaDeTeste(pub(crate) &'static str);
 
 /// O transporte de mentira.
-struct Roteiro {
+pub(crate) struct Roteiro {
     chegada: Vec<u8>,
     lidos: usize,
     pedaco: usize,
@@ -25,17 +25,17 @@ struct Roteiro {
     /// Uma falha no meio da chegada, depois de tantos bytes.
     falha_em: Option<(usize, FalhaDeTeste)>,
     falha_ao_mandar: Option<FalhaDeTeste>,
-    mandado: Vec<u8>,
+    pub(crate) mandado: Vec<u8>,
     recebimentos: usize,
     /// Como um servidor de verdade: a chegada até `rodadas[k]` só fica
     /// disponível depois do pedido `k + 1`. Vazio, ela toda está lá desde
     /// o começo.
-    rodadas: Vec<usize>,
+    pub(crate) rodadas: Vec<usize>,
     pedidos: usize,
 }
 
 impl Roteiro {
-    fn novo(chegada: &[u8], pedaco: usize) -> Roteiro {
+    pub(crate) fn novo(chegada: &[u8], pedaco: usize) -> Roteiro {
         Roteiro {
             chegada: chegada.to_vec(),
             lidos: 0,

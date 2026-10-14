@@ -10,7 +10,10 @@
 //! cliente o escrever de outro, que é como se contrabandeia um pedido
 //! dentro de outro. O `Accept-Encoding` também: ele diz o que o cliente
 //! decodifica ([`Pedido::aceitas`]), e um escrito por quem chama pediria o
-//! que o cliente não decodifica. Quem chama acrescenta os outros, e cada um
+//! que o cliente não decodifica. E o `Cookie`: ele vem do pote do programa
+//! ([`crate::cookies`]), que confere a quem cada cookie vai — um escrito à
+//! mão mandaria um cookie sem essa conferência, ou dois cabeçalhos onde a
+//! RFC 6265 manda um. Quem chama acrescenta os outros, e cada um
 //! é conferido: o nome é um *token*, e o valor não tem CR, LF nem NUL — sem
 //! isso, um valor com `\r\n` seria uma linha nova.
 
@@ -18,6 +21,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::codificacao::Aceitas;
+use crate::cookies::Contexto;
 use crate::url::Url;
 
 /// Os métodos que o cliente pede.
@@ -64,7 +68,7 @@ pub enum ErroDePedido {
 }
 
 /// Os cabeçalhos que só este pacote escreve.
-const RESERVADOS: [&str; 11] = [
+const RESERVADOS: [&str; 12] = [
     "host",
     "content-length",
     "transfer-encoding",
@@ -76,6 +80,7 @@ const RESERVADOS: [&str; 11] = [
     "trailer",
     "expect",
     "accept-encoding",
+    "cookie",
 ];
 
 /// Quantos cabeçalhos quem chama pode pôr.
@@ -103,6 +108,10 @@ pub struct Pedido {
     /// (`Accept-Encoding`), e que o cliente decodifica — todas, a menos que
     /// quem chama diga outra coisa. Ver [`crate::codificacao`].
     pub aceitas: Aceitas,
+    /// De onde o pedido parte, para o `SameSite` dos cookies: o programa
+    /// pedindo por conta dele, a menos que quem chama diga que o pedido
+    /// sai do conteúdo de outro site. Ver [`crate::cookies`].
+    pub contexto: Contexto,
 }
 
 impl Pedido {
@@ -115,6 +124,7 @@ impl Pedido {
             corpo: Vec::new(),
             fechar: false,
             aceitas: Aceitas::TODAS,
+            contexto: Contexto::DoProprioSite,
         }
     }
 
@@ -147,8 +157,13 @@ impl Pedido {
         &self.cabecalhos
     }
 
-    /// O pedido como vai para a conexão.
+    /// O pedido como vai para a conexão, sem cookie.
     pub fn escrever(&self) -> Vec<u8> {
+        self.escrever_com(None)
+    }
+
+    /// O pedido como vai para a conexão, com o `Cookie` que o pote deu.
+    pub(crate) fn escrever_com(&self, cookie: Option<&str>) -> Vec<u8> {
         let mut s = String::new();
         s.push_str(self.metodo.nome());
         s.push(' ');
@@ -158,6 +173,11 @@ impl Pedido {
         s.push_str("\r\nAccept-Encoding: ");
         s.push_str(self.aceitas.cabecalho());
         s.push_str("\r\n");
+        if let Some(cookie) = cookie {
+            s.push_str("Cookie: ");
+            s.push_str(cookie);
+            s.push_str("\r\n");
+        }
         for (nome, valor) in &self.cabecalhos {
             s.push_str(nome);
             s.push_str(": ");
@@ -241,6 +261,7 @@ mod testes {
             "Upgrade",
             "Expect",
             "Accept-Encoding",
+            "Cookie",
         ] {
             assert_eq!(
                 p.cabecalho(reservado, "x"),

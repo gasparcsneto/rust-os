@@ -36,6 +36,7 @@ use alloc::vec::Vec;
 
 use crate::cliente::Fluxo;
 use crate::codificacao::{self, Aceitas, Codificacao};
+use crate::cookies::Guardados;
 use crate::erro::{Erro, Limite, Motivo};
 use crate::pedido::{Metodo, tchar};
 
@@ -116,6 +117,9 @@ pub struct Resposta {
     pub codificacao: Option<Codificacao>,
     /// O tamanho do corpo como veio, antes de decodificado.
     pub no_fio: usize,
+    /// O que os `Set-Cookie` fizeram no pote, numa troca com pote; zero
+    /// sem ele.
+    pub cookies: Guardados,
     pub enquadramento: Enquadramento,
     /// A conexão pode levar o pedido seguinte: HTTP/1.1 sem
     /// `Connection: close`, um corpo com fim certo, e nada a mais depois
@@ -542,6 +546,7 @@ pub(crate) fn ler<F: Fluxo>(
             corpo,
             codificacao,
             no_fio,
+            cookies: Guardados::default(),
             enquadramento,
             reutilizavel,
         });
