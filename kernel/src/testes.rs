@@ -30946,6 +30946,38 @@ static CASOS: &[Caso] = &[
         f: compressao_varias_ao_mesmo_tempo,
     },
     Caso {
+        nome: "cookies: o programa inteiro pelo gate",
+        f: cookies_o_programa_inteiro_pelo_gate,
+    },
+    Caso {
+        nome: "cookies: o pote e do processo",
+        f: cookies_o_pote_e_do_processo,
+    },
+    Caso {
+        nome: "cookies: pessoa e agente cada um com o seu",
+        f: cookies_pessoa_e_agente_cada_um_com_o_seu,
+    },
+    Caso {
+        nome: "cookies: a revogacao nao passa pelo cookie",
+        f: cookies_a_revogacao_nao_passa_pelo_cookie,
+    },
+    Caso {
+        nome: "cookies: a contencao nao passa pelo cookie",
+        f: cookies_a_contencao_nao_passa_pelo_cookie,
+    },
+    Caso {
+        nome: "cookies: o firewall nao passa pelo cookie",
+        f: cookies_o_firewall_nao_passa_pelo_cookie,
+    },
+    Caso {
+        nome: "cookies: o gate decide o mesmo com e sem",
+        f: cookies_o_gate_decide_o_mesmo_com_e_sem,
+    },
+    Caso {
+        nome: "cookies: varios ao mesmo tempo",
+        f: cookies_varios_ao_mesmo_tempo,
+    },
+    Caso {
         nome: "codigo: so o da imagem roda sem selo",
         f: codigo_so_o_da_imagem_roda_sem_selo,
     },
@@ -35702,9 +35734,11 @@ const BUSCA_CIFRADA_LENTA: i64 = 5;
 const BUSCA_MUDO: i64 = 6;
 const BUSCA_SAIR_SEM_FECHAR: i64 = 9;
 
-/// O `buscador` em execução: o fio dele, e o caminho para ditar os passos.
+/// O `buscador` em execução: o fio dele, e o canal por onde a suíte dita
+/// os passos.
 struct Buscador {
     fio: u64,
+    canal: &'static str,
 }
 
 impl Buscador {
@@ -35712,22 +35746,39 @@ impl Buscador {
     /// meio: o nome pelo DNS da bancada, o destino pelo gate, o primeiro
     /// pedido respondido.
     fn lancar(autoridade: crate::autorizacao::Autoridade) -> Result<Buscador, &'static str> {
+        Buscador::lancar_em(autoridade, "teste-buscador", "buscador: no meio")
+    }
+
+    /// Lança um segundo buscador, com o primeiro vivo: ele escuta o outro
+    /// canal.
+    fn lancar_segundo(
+        autoridade: crate::autorizacao::Autoridade,
+    ) -> Result<Buscador, &'static str> {
+        Buscador::lancar_em(
+            autoridade,
+            "teste-buscador-2",
+            "buscador: no meio pelo segundo canal",
+        )
+    }
+
+    fn lancar_em(
+        autoridade: crate::autorizacao::Autoridade,
+        canal: &'static str,
+        no_meio: &str,
+    ) -> Result<Buscador, &'static str> {
         let programa = alloc::format!("{}/buscador", crate::usuario::DIRETORIO_DOS_COMPILADOS);
         let desde = crate::log::total_emitidos();
         let fio = crate::usuario::lancar_como(Some(&programa), autoridade)?;
-        esperar_ate(
-            || linhas_do_programa(desde, "buscador: no meio") == 1,
-            TETO_DO_HTTP,
-        )
-        .map_err(|_| "o buscador nao chegou ao meio da conversa")?;
-        Ok(Buscador { fio })
+        esperar_ate(|| linhas_do_programa(desde, no_meio) == 1, TETO_DO_HTTP)
+            .map_err(|_| "o buscador nao chegou ao meio da conversa")?;
+        Ok(Buscador { fio, canal })
     }
 
     /// Pede o passo `a`, com `b`, sem esperar o que ele diz.
     fn pedir(&self, a: i64, b: i64) -> Resultado {
         use protocolo::usuario::evento::{Evento, tipo};
         crate::eventos::publicar(
-            "teste-buscador",
+            self.canal,
             Evento {
                 tipo: tipo::ACAO,
                 a,
@@ -35760,7 +35811,7 @@ impl Buscador {
         use protocolo::usuario::evento::{Evento, tipo};
         let desde = crate::log::total_emitidos();
         let _ = crate::eventos::publicar(
-            "teste-buscador",
+            self.canal,
             Evento {
                 tipo: tipo::ENCERRAR,
                 ..Default::default()
@@ -36190,7 +36241,10 @@ fn http_a_revogacao_no_meio_do_pedido() -> Resultado {
                 TETO_DO_HTTP,
             )
             .map_err(|_| "o buscador do agente nao chegou ao meio")?;
-            let b = Buscador { fio };
+            let b = Buscador {
+                fio,
+                canal: "teste-buscador",
+            };
             let r = (|| -> Resultado {
                 b.passo(BUSCA_TROCA, 0, "buscador: troca: 200 2")?;
                 let pediu = ultimo_que(|e| {
@@ -38907,6 +38961,510 @@ fn compressao_varias_ao_mesmo_tempo() -> Resultado {
             }
             if compressao_no_registro(*fio) {
                 return Err("um registro de um processo tem a compressao");
+            }
+        }
+        Ok(())
+    })();
+    crate::identidade::esquecer_registrados();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+// ---------------------------------------------------------------------------
+// Os cookies do HTTP — README, "Os cookies do HTTP"
+// ---------------------------------------------------------------------------
+
+/// Os passos do `buscador` com o pote — o programa tem as mesmas
+/// constantes.
+const BUSCA_COOKIE_ENTRAR: i64 = 11;
+const BUSCA_COOKIE_PRIVADO: i64 = 12;
+const BUSCA_COOKIE_ECO: i64 = 13;
+
+/// O que seria um cookie chegando ao gate num registro da auditoria: o
+/// nome do cabeçalho, o da sessão da bancada, os caminhos dela.
+const DOS_COOKIES: [&str; 4] = ["cookie", "Cookie", "sessao", "/cookies"];
+
+/// Algum registro do processo do fio `fio` tem um cookie — ver
+/// [`DOS_COOKIES`] — no método, no recurso, em quem agiu, no papel ou no
+/// detalhe. Do detalhe, o nome do programa fica de fora — o programa pode
+/// se chamar `cookies` —; e os nomes dos campos do registro também, que
+/// não são o que ele grava: um deles é `sessao`.
+fn cookie_no_registro(fio: u64) -> bool {
+    let prefixo = do_processo(fio);
+    crate::autorizacao::com_auditoria(|c| {
+        c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+            .filter(|r| r.evento.detalhe.starts_with(&prefixo))
+            .any(|r| {
+                let e = &r.evento;
+                let depois_do_nome = e.detalhe.split_once(')').map_or("", |(_, d)| d);
+                let gravado = alloc::format!(
+                    "{} {} {} {} {}",
+                    e.metodo,
+                    e.recurso,
+                    e.agente,
+                    e.papel,
+                    depois_do_nome
+                );
+                DOS_COOKIES.iter().any(|t| gravado.contains(t))
+            })
+    })
+    .unwrap_or(true)
+}
+
+/// O buscador entra na bancada: a sessão vai para o pote dele.
+fn cookie_entrar(b: &Buscador) -> Resultado {
+    b.passo(
+        BUSCA_COOKIE_ENTRAR,
+        0,
+        "buscador: cookie entrar: 200 1 novo(s), 1 no pote",
+    )
+}
+
+/// O privado com o pote do buscador: o id da sessão que a bancada
+/// reconheceu, ou `None` com 401.
+fn cookie_privado(b: &Buscador) -> Result<Option<alloc::string::String>, &'static str> {
+    let desde = crate::log::total_emitidos();
+    b.pedir(BUSCA_COOKIE_PRIVADO, 0)?;
+    const PREFIXO: &str = "buscador: cookie privado: ";
+    esperar_ate(|| linha_que_comeca(desde, PREFIXO).is_some(), TETO_DO_HTTP)
+        .map_err(|_| "o buscador nao disse o privado")?;
+    let linha = linha_que_comeca(desde, PREFIXO).unwrap_or_default();
+    match linha.strip_prefix(PREFIXO) {
+        Some("401 sem sessao") => Ok(None),
+        Some(r) => match r.strip_prefix("200 privado ") {
+            Some(id) if !id.is_empty() => Ok(Some(alloc::string::String::from(id))),
+            _ => {
+                crate::log_error!("teste", "{}", linha);
+                Err("o privado nao deu nem a sessao nem 401")
+            }
+        },
+        None => Err("o buscador nao disse o privado"),
+    }
+}
+
+/// O processo de uma pessoa operadora roda o programa `cookies` inteiro —
+/// a sessão clara e cifrada, o isolamento entre potes e entre hosts, o
+/// `Secure`, os atributos, a validade, os limites — e aqui se confere o
+/// que o kernel viu:
+///
+/// - só o que o HTTP já pedia: conexões, envios, leituras e fechos com os
+///   destinos da bancada, a semente e o relógio do TLS — o relógio também
+///   para a validade dos cookies —, e a âncora; e o tempo desde o boot,
+///   para a medida. Nenhum pedido novo, nenhuma permissão nova: o pote é
+///   do programa;
+/// - tudo deixado, em nome da pessoa, menos o destino fora do alcance:
+///   `DENY_RESOURCE`, com a sessão no pote. O cookie não abre nada;
+/// - nada dos cookies em registro nenhum: nem o cabeçalho, nem a sessão,
+///   nem um caminho.
+fn cookies_o_programa_inteiro_pelo_gate() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    use politica::Codigo;
+    use politica::auditoria::Titular;
+    crate::pessoas::esquecer_registradas();
+    let padrao = politica_trocada(&[])?;
+    let resultado = com_a_politica(padrao, || {
+        let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(131), "cook-op", "operador");
+        let antes = crate::autorizacao::ultimo_registro();
+        let comeco = crate::tempo::uptime_ms();
+        let fio = rodar_programa_ate(
+            "cookies",
+            Some(Autoridade::Pessoa { sessao }),
+            99,
+            8 * TETO_DO_HTTP,
+        )
+        .map_err(|_| "o programa cookies nao conferiu os cookies da bancada")?;
+        crate::log_info!(
+            "teste",
+            "cookies: o programa conferiu tudo em {} ms",
+            crate::tempo::uptime_ms().saturating_sub(comeco)
+        );
+        let registros = registros_do_processo(fio, antes);
+        const PEDIDOS: [&str; 8] = [
+            "net.connect",
+            "net.send",
+            "net.recv",
+            "net.close",
+            "random.read",
+            "system.info",
+            "system.uptime",
+            "fs.read",
+        ];
+        let fora = |m: &str, r: &str| m == "net.connect" && r == "tcp:10.0.2.100:81";
+        if let Some(r) = registros
+            .iter()
+            .find(|(m, ..)| !PEDIDOS.contains(&m.as_str()))
+        {
+            crate::log_error!("teste", "{:?}", r);
+            return Err("os cookies fizeram um pedido que o HTTP nao fazia");
+        }
+        if let Some(r) = registros.iter().find(|(m, r, c, t)| {
+            *t != Titular::Pessoa
+                || (*c != Codigo::Allow && !(fora(m, r) && *c == Codigo::DenyResource))
+                || (m.starts_with("net.") && !fora(m, r) && r != HTTP_CLARO && r != HTTP_CIFRADO)
+        }) {
+            crate::log_error!("teste", "{:?}", r);
+            return Err("uma decisao do programa dos cookies nao foi a do HTTP em nome da pessoa");
+        }
+        let recusadas = registros.iter().filter(|(m, r, ..)| fora(m, r)).count();
+        let relogio = registros
+            .iter()
+            .filter(|(m, ..)| m == "system.info")
+            .count();
+        if recusadas != 1 || relogio == 0 {
+            crate::log_error!("teste", "recusadas {} relogio {}", recusadas, relogio);
+            return Err("o destino fora do alcance nao foi recusado uma vez pelo gate");
+        }
+        if cookie_no_registro(fio) {
+            return Err("um registro do processo tem um cookie");
+        }
+        Ok(())
+    });
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// O pote é do processo: dois processos da **mesma** pessoa, ao mesmo
+/// tempo — o primeiro entra na bancada, o segundo pede o privado e não
+/// tem sessão, nem cookie nenhum no eco. Depois o segundo entra também, e
+/// cada um segue com a sua: o pote de um não muda o do outro.
+fn cookies_o_pote_e_do_processo() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    com_a_bancada_http(|| {
+        let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(132), "cook-pr", "operador");
+        let a = Buscador::lancar(Autoridade::Pessoa { sessao })?;
+        let r = (|| -> Resultado {
+            cookie_entrar(&a)?;
+            let de_a = cookie_privado(&a)?.ok_or("o primeiro processo nao ficou com a sessao")?;
+            let b = Buscador::lancar_segundo(Autoridade::Pessoa { sessao })?;
+            let r = (|| -> Resultado {
+                if cookie_privado(&b)?.is_some() {
+                    return Err("o segundo processo teve a sessao do primeiro");
+                }
+                b.passo(BUSCA_COOKIE_ECO, 0, "buscador: cookie eco: 200 nenhum")?;
+                cookie_entrar(&b)?;
+                let de_b = cookie_privado(&b)?.ok_or("o segundo processo nao ficou com a sua")?;
+                let de_a_depois = cookie_privado(&a)?;
+                if de_b == de_a || de_a_depois.as_deref() != Some(de_a.as_str()) {
+                    crate::log_error!("teste", "{} {} {:?}", de_a, de_b, de_a_depois);
+                    return Err("as sessoes dos dois processos se misturaram");
+                }
+                crate::log_info!(
+                    "teste",
+                    "cookies: a mesma pessoa, dois processos, duas sessoes: {} e {}",
+                    de_a,
+                    de_b
+                );
+                Ok(())
+            })();
+            let fim = b.encerrar();
+            r.and(fim)
+        })();
+        let fim = a.encerrar();
+        r.and(fim)
+    })
+}
+
+/// Uma pessoa e um agente, cada um com o seu processo e a sua sessão na
+/// bancada: nenhum vê a do outro, e cada decisão é em nome de quem lançou
+/// — o cookie não muda o titular de nada.
+fn cookies_pessoa_e_agente_cada_um_com_o_seu() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    use politica::auditoria::Titular;
+    com_a_bancada_http(|| {
+        let chave = sigilo::publica_de(&chave_de_teste(9));
+        crate::identidade::registrar_agente_de_teste(chave, &nome_de_teste(9), "operador");
+        let r = (|| -> Resultado {
+            let sessao =
+                crate::pessoas::sessao_de_teste(Console::Terminal(133), "cook-pa", "operador");
+            let pessoa = Buscador::lancar(Autoridade::Pessoa { sessao })?;
+            let r = (|| -> Resultado {
+                let agente = Buscador::lancar_segundo(Autoridade::Sessao {
+                    sessao: 1,
+                    chave: Some(chave),
+                })?;
+                let r = (|| -> Resultado {
+                    cookie_entrar(&pessoa)?;
+                    if cookie_privado(&agente)?.is_some() {
+                        return Err("o agente teve a sessao da pessoa");
+                    }
+                    cookie_entrar(&agente)?;
+                    let da_pessoa = cookie_privado(&pessoa)?.ok_or("a pessoa perdeu a sessao")?;
+                    let do_agente = cookie_privado(&agente)?.ok_or("o agente perdeu a sessao")?;
+                    if da_pessoa == do_agente {
+                        return Err("a pessoa e o agente ficaram com a mesma sessao");
+                    }
+                    for (fio, titular) in
+                        [(pessoa.fio, Titular::Pessoa), (agente.fio, Titular::Agente)]
+                    {
+                        let registros = registros_do_processo(fio, 0);
+                        if registros.is_empty()
+                            || registros.iter().any(|(_, _, _, t)| *t != titular)
+                        {
+                            crate::log_error!("teste", "{}: {:?}", fio, registros.first());
+                            return Err("uma decisao nao foi em nome de quem lancou o processo");
+                        }
+                        if cookie_no_registro(fio) {
+                            return Err("um registro tem um cookie");
+                        }
+                    }
+                    Ok(())
+                })();
+                let fim = agente.encerrar();
+                r.and(fim)
+            })();
+            let fim = pessoa.encerrar();
+            r.and(fim)
+        })();
+        crate::identidade::esquecer_registrados();
+        r
+    })
+}
+
+/// A revogação não passa pelo cookie: o agente entra na bancada, a chave
+/// dele é revogada, e o pedido seguinte — com a sessão no pote — é
+/// `DENY_ROLE` do gate, antes de um byte sair. A sessão lá fora continua
+/// valendo para o servidor; aqui ela não abre nada.
+fn cookies_a_revogacao_nao_passa_pelo_cookie() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use politica::Codigo;
+    com_a_bancada_http(|| {
+        let chave = sigilo::publica_de(&chave_de_teste(10));
+        crate::identidade::registrar_agente_de_teste(chave, &nome_de_teste(10), "operador");
+        let r = (|| -> Resultado {
+            let b = Buscador::lancar(Autoridade::Sessao {
+                sessao: 1,
+                chave: Some(chave),
+            })?;
+            let fio = b.fio;
+            let r = (|| -> Resultado {
+                cookie_entrar(&b)?;
+                cookie_privado(&b)?.ok_or("o agente nao ficou com a sessao")?;
+                crate::identidade::revogar(&chave).map_err(|_| "a revogacao de teste falhou")?;
+                b.passo(
+                    BUSCA_COOKIE_PRIVADO,
+                    0,
+                    "buscador: cookie privado: denied DENY_ROLE",
+                )?;
+                let negado = ultimo_que(|e| {
+                    e.metodo == "net.send" && e.detalhe.starts_with(&do_processo(fio))
+                })
+                .ok_or("o envio recusado nao foi gravado")?;
+                if negado.codigo != Codigo::DenyRole || negado.chave != Some(chave) {
+                    crate::log_error!("teste", "{:?}", negado);
+                    return Err("o envio com o cookie depois da revogacao nao foi recusado");
+                }
+                Ok(())
+            })();
+            let fim = b.encerrar();
+            r.and(fim)
+        })();
+        crate::identidade::esquecer_registrados();
+        r
+    })
+}
+
+/// A contenção não passa pelo cookie: o processo isolado ouve
+/// `DENY_CONTAINED` no pedido com a sessão; solto, numa conexão nova, a
+/// mesma sessão volta a valer — a contenção não é revogação, e o pote
+/// continua do processo.
+fn cookies_a_contencao_nao_passa_pelo_cookie() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    com_a_bancada_http(|| {
+        let sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(134), "cook-iso", "operador");
+        let b = Buscador::lancar(Autoridade::Pessoa { sessao })?;
+        let fio = b.fio;
+        let sistema = sistema_aqui();
+        let processo = alloc::format!(r#"{{"process":{fio}}}"#);
+        let r = (|| -> Resultado {
+            cookie_entrar(&b)?;
+            let antes = cookie_privado(&b)?.ok_or("a pessoa nao ficou com a sessao")?;
+            let r = fs_pedir(sistema, "process.isolate", &processo);
+            if fs_texto(&r, "state").as_deref() != Some("isolated") {
+                crate::log_error!("teste", "{}", r);
+                return Err("o sistema nao isolou o processo");
+            }
+            b.passo(
+                BUSCA_COOKIE_PRIVADO,
+                0,
+                "buscador: cookie privado: contained DENY_CONTAINED",
+            )?;
+            let r = fs_pedir(sistema, "process.release", &processo);
+            if !r.contains(r#""result""#) {
+                crate::log_error!("teste", "{}", r);
+                return Err("o sistema nao soltou o processo");
+            }
+            b.passo(BUSCA_NOVA, 0, "buscador: nova: 200 1")?;
+            let depois = cookie_privado(&b)?;
+            if depois.as_deref() != Some(antes.as_str()) {
+                return Err("solto, o processo nao seguiu com a sessao dele");
+            }
+            Ok(())
+        })();
+        let _ = fs_pedir(sistema, "process.release", &processo);
+        let fim = b.encerrar();
+        r.and(fim)
+    })
+}
+
+/// O firewall não passa pelo cookie: a regra derruba a conexão com a
+/// sessão no pote, e o pedido seguinte ouve `FIREWALL_BLOCKED`. Sem a
+/// regra, numa conexão nova, a sessão vale de novo.
+fn cookies_o_firewall_nao_passa_pelo_cookie() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    com_a_bancada_http(|| {
+        let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(135), "cook-fw", "operador");
+        let b = Buscador::lancar(Autoridade::Pessoa { sessao })?;
+        let r = (|| -> Resultado {
+            let sistema = sistema_aqui();
+            let para = alloc::format!(r#"{{"to":"{HTTP_CLARO}"}}"#);
+            cookie_entrar(&b)?;
+            let antes = cookie_privado(&b)?.ok_or("a pessoa nao ficou com a sessao")?;
+            let r = fs_pedir(sistema, "net.block", &para);
+            if fs_numero(&r, "rule").is_none() || fs_numero(&r, "dropped") != Some(1) {
+                crate::log_error!("teste", "{}", r);
+                return Err("a regra nao derrubou a conexao com a sessao no pote");
+            }
+            let barrado = b.passo(
+                BUSCA_COOKIE_PRIVADO,
+                0,
+                "buscador: cookie privado: firewall FIREWALL_BLOCKED",
+            );
+            let solta = fs_pedir(sistema, "net.unblock", &para);
+            barrado?;
+            if fs_numero(&solta, "rule").is_none() {
+                crate::log_error!("teste", "{}", solta);
+                return Err("o sistema nao tirou a regra do servidor HTTP");
+            }
+            b.passo(BUSCA_NOVA, 0, "buscador: nova: 200 1")?;
+            if cookie_privado(&b)?.as_deref() != Some(antes.as_str()) {
+                return Err("sem a regra, o processo nao seguiu com a sessao dele");
+            }
+            Ok(())
+        })();
+        let fim = b.encerrar();
+        r.and(fim)
+    })
+}
+
+/// Os cookies são transparentes para a autorização: o mesmo pedido ao
+/// privado sem sessão e com ela passa pelas mesmas decisões — o envio e as
+/// leituras, deixados em nome de quem pediu, na mesma ordem —, e o que
+/// muda é só a resposta. O gate não sabe que o pedido leva um cookie.
+fn cookies_o_gate_decide_o_mesmo_com_e_sem() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    use politica::Codigo;
+    com_a_bancada_http(|| {
+        let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(136), "cook-gt", "operador");
+        let b = Buscador::lancar(Autoridade::Pessoa { sessao })?;
+        let fio = b.fio;
+        let r = (|| -> Resultado {
+            let antes = crate::autorizacao::ultimo_registro();
+            if cookie_privado(&b)?.is_some() {
+                return Err("o privado reconheceu uma sessao que nao havia");
+            }
+            let sem = registros_do_processo(fio, antes);
+            cookie_entrar(&b)?;
+            let antes = crate::autorizacao::ultimo_registro();
+            cookie_privado(&b)?.ok_or("a pessoa nao ficou com a sessao")?;
+            let com = registros_do_processo(fio, antes);
+            if sem.is_empty()
+                || [&sem, &com]
+                    .iter()
+                    .any(|v| v.iter().any(|(_, _, c, _)| *c != Codigo::Allow))
+            {
+                crate::log_error!("teste", "{:?} {:?}", sem, com);
+                return Err("uma decisao do privado nao foi deixada");
+            }
+            if sem_leituras_repetidas(&sem) != sem_leituras_repetidas(&com) {
+                crate::log_error!("teste", "sem: {:?}", sem);
+                crate::log_error!("teste", "com: {:?}", com);
+                return Err("o gate decidiu diferente o pedido com cookie e o sem");
+            }
+            if cookie_no_registro(fio) {
+                return Err("um registro do processo tem um cookie");
+            }
+            Ok(())
+        })();
+        let fim = b.encerrar();
+        r.and(fim)
+    })
+}
+
+/// Vários potes ao mesmo tempo, de pessoas e de um agente: o programa
+/// `cookies` inteiro em três processos, cada um com os seus potes e as
+/// suas sessões na bancada, e cada decisão em nome de quem lançou.
+fn cookies_varios_ao_mesmo_tempo() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    use politica::auditoria::Titular;
+    crate::pessoas::esquecer_registradas();
+    let resultado = (|| -> Resultado {
+        let programa = alloc::format!("{}/cookies", crate::usuario::DIRETORIO_DOS_COMPILADOS);
+        let chave = sigilo::publica_de(&chave_de_teste(11));
+        crate::identidade::registrar_agente_de_teste(chave, &nome_de_teste(11), "operador");
+        let desde = crate::log::total_emitidos();
+        let comeco = crate::tempo::uptime_ms();
+        let mut fios = alloc::vec::Vec::new();
+        for (i, nome) in ["cook-a", "cook-b"].into_iter().enumerate() {
+            let sessao = crate::pessoas::sessao_de_teste(
+                Console::Terminal(137 + i as u16),
+                nome,
+                "operador",
+            );
+            fios.push((
+                crate::usuario::lancar_como(Some(&programa), Autoridade::Pessoa { sessao })?,
+                Titular::Pessoa,
+            ));
+        }
+        fios.push((
+            crate::usuario::lancar_como(
+                Some(&programa),
+                Autoridade::Sessao {
+                    sessao: 1,
+                    chave: Some(chave),
+                },
+            )?,
+            Titular::Agente,
+        ));
+        let mut saidas = alloc::collections::BTreeMap::new();
+        let _ = esperar_ate(
+            || {
+                crate::log::ultimos(128, crate::log::Level::Trace, |r| {
+                    if r.seq >= desde
+                        && r.subsistema == "usuario"
+                        && let Some(c) = r.mensagem().strip_prefix("processo encerrou com codigo ")
+                    {
+                        saidas.insert(r.seq, alloc::string::String::from(c));
+                    }
+                });
+                saidas.len() >= fios.len()
+            },
+            16 * TETO_DO_HTTP,
+        );
+        if saidas.len() != fios.len() || saidas.values().any(|c| c != "99") {
+            crate::log_error!("teste", "saidas: {:?}", saidas);
+            return Err("os potes ao mesmo tempo nao conferiram");
+        }
+        crate::log_info!(
+            "teste",
+            "cookies: tres programas ao mesmo tempo em {} ms",
+            crate::tempo::uptime_ms().saturating_sub(comeco)
+        );
+        for (fio, titular) in &fios {
+            let registros = registros_do_processo(*fio, 0);
+            if registros.is_empty() || registros.iter().any(|(_, _, _, t)| t != titular) {
+                crate::log_error!("teste", "{}: {:?}", fio, registros.first());
+                return Err("uma decisao de um processo nao foi em nome de quem o lancou");
+            }
+            if cookie_no_registro(*fio) {
+                return Err("um registro de um processo tem um cookie");
             }
         }
         Ok(())
