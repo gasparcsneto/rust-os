@@ -23,17 +23,23 @@
 //! 7. o corpo comprimido — `gzip` ou `deflate`, o que o pedido aceitou —
 //!    decodificado aqui, no processo, com o teto de quem pediu
 //!    (`http::codificacao`). O gate viu os bytes que passaram, e não sabe
-//!    que eram comprimidos.
+//!    que eram comprimidos;
+//! 8. com um pote ([`Pote`], e as trocas `_com_pote`), os cookies: o pedido
+//!    leva os que o pote dá para ele, e os da resposta vão para o pote —
+//!    que é do processo, na memória dele, e acaba com ele
+//!    (`http::cookies`). O relógio da validade é o `system.info` do TLS,
+//!    pelo gate, lido só quando um cookie com validade está em jogo.
 //!
 //! # O que não há aqui
 //!
 //! Nenhuma decisão. O método, a URL, o `Host`, os cabeçalhos, o status, o
-//! corpo, a compressão, o redirecionamento e o *keep-alive* não viram
-//! permissão, recurso nem regra: o que este programa pode é o que o gate decide para os
-//! pedidos de rede dele, e uma conexão aberta não leva autorização para o
-//! pedido seguinte — a revogação, a contenção, a política nova e o
-//! firewall valem no próximo `net.send` ou `net.recv`, no meio de uma
-//! resposta. Um `3xx` volta a quem chama com o `Location`: seguir é outro
+//! corpo, a compressão, os cookies, o redirecionamento e o *keep-alive* não
+//! viram permissão, recurso nem regra: um cookie prova alguma coisa ao
+//! servidor, e nada ao Duke. O que este programa pode é o que o gate
+//! decide para os pedidos de rede dele, e uma conexão aberta não leva
+//! autorização para o pedido seguinte — a revogação, a contenção, a
+//! política nova e o firewall valem no próximo `net.send` ou `net.recv`,
+//! no meio de uma resposta. Um `3xx` volta a quem chama com o `Location`: seguir é outro
 //! pedido, outro nome no DNS, outro destino no gate.
 //!
 //! # As falhas
@@ -51,8 +57,9 @@ use alloc::vec::Vec;
 use core::convert::Infallible;
 
 pub use http::{
-    Aceitas, Categoria, Codificacao, Defeito, Enquadramento, Erro, ErroDePedido, ErroDeUrl,
-    Esquema, Host, Limite, Limites, Metodo, Pedido, Resposta, Url, Versao,
+    Aceitas, Agora, Categoria, Codificacao, Contexto, Defeito, Enquadramento, Erro, ErroDePedido,
+    ErroDeUrl, Esquema, Guardado, Guardados, Host, Limite, Limites, LimitesDoPote, MesmoSite,
+    Metodo, Pedido, Pote, RecusaDeCookie, Resposta, Url, Versao,
 };
 
 use crate::conexao::{self, Conexao, Prazo};
@@ -272,12 +279,10 @@ impl ConexaoHttp {
 
     /// Manda `pedido` e lê a resposta, com `limites`. O pedido é para a
     /// origem desta conexão: outra origem é outra conexão — outro nome,
-    /// outro destino no gate.
+    /// outro destino no gate. Sem pote: nenhum cookie vai, e os
+    /// `Set-Cookie` voltam como vieram.
     pub fn trocar(&mut self, pedido: &Pedido, limites: &Limites) -> Result<Resposta, Falha> {
-        let u = &pedido.url;
-        if u.esquema != self.esquema || u.host != self.host || u.porta != self.porta {
-            return Err(Falha::Pedido(None));
-        }
+        self.da_origem(pedido)?;
         match &mut self.via {
             Via::Clara(c) => c
                 .trocar(pedido, limites)
@@ -286,6 +291,37 @@ impl ConexaoHttp {
                 .trocar(pedido, limites)
                 .map_err(|e| do_http(e, Falha::Tls)),
         }
+    }
+
+    /// [`ConexaoHttp::trocar`] com os cookies de `pote`: o pedido leva os
+    /// que vão para ele, e os da resposta vão para o pote — e saem dos
+    /// cabeçalhos dela. Os com validade que ficaram sem o relógio, a
+    /// resposta conta (`cookies.retidos`).
+    pub fn trocar_com_pote(
+        &mut self,
+        pedido: &Pedido,
+        limites: &Limites,
+        pote: &mut Pote,
+    ) -> Result<Resposta, Falha> {
+        self.da_origem(pedido)?;
+        let mut relogio = relogio_dos_cookies;
+        match &mut self.via {
+            Via::Clara(c) => c
+                .trocar_com_pote(pedido, limites, pote, &mut relogio)
+                .map_err(|e| do_http(e, Falha::Conexao)),
+            Via::Cifrada(c) => c
+                .trocar_com_pote(pedido, limites, pote, &mut relogio)
+                .map_err(|e| do_http(e, Falha::Tls)),
+        }
+    }
+
+    /// O pedido é para a origem desta conexão.
+    fn da_origem(&self, pedido: &Pedido) -> Result<(), Falha> {
+        let u = &pedido.url;
+        if u.esquema != self.esquema || u.host != self.host || u.porta != self.porta {
+            return Err(Falha::Pedido(None));
+        }
+        Ok(())
     }
 
     /// Fecha a conexão: no `https`, avisa o outro lado (`close_notify`)
@@ -312,6 +348,40 @@ pub fn buscar(pedido: Pedido, opcoes: &Opcoes<'_>, limites: &Limites) -> Result<
 pub fn obter(url: &str, opcoes: &Opcoes<'_>, limites: &Limites) -> Result<Resposta, Falha> {
     let url = Url::ler(url).map_err(Falha::Url)?;
     buscar(Pedido::novo(Metodo::Get, url), opcoes, limites)
+}
+
+/// [`buscar`] com os cookies de `pote`.
+pub fn buscar_com_pote(
+    pedido: Pedido,
+    opcoes: &Opcoes<'_>,
+    limites: &Limites,
+    pote: &mut Pote,
+) -> Result<Resposta, Falha> {
+    let mut conexao = conectar(&pedido.url, opcoes)?;
+    let mut pedido = pedido;
+    pedido.fechar = true;
+    let r = conexao.trocar_com_pote(&pedido, limites, pote);
+    conexao.fechar();
+    r
+}
+
+/// [`obter`] com os cookies de `pote`.
+pub fn obter_com_pote(
+    url: &str,
+    opcoes: &Opcoes<'_>,
+    limites: &Limites,
+    pote: &mut Pote,
+) -> Result<Resposta, Falha> {
+    let url = Url::ler(url).map_err(Falha::Url)?;
+    buscar_com_pote(Pedido::novo(Metodo::Get, url), opcoes, limites, pote)
+}
+
+/// O relógio da validade dos cookies: o tempo lógico do `system.info`,
+/// pelo gate, o mesmo do TLS. `None` sem relógio — sem RTC, sem a permissão
+/// de lê-lo, ou com a leitura recusada —: aí a validade não se confere, e
+/// os cookies que a têm não vão (ver `http::cookies`).
+pub fn relogio_dos_cookies() -> Option<u64> {
+    tls::relogio().ok()
 }
 
 /// O corpo de `r` como texto, para dizer — o que não é texto vira `?`.

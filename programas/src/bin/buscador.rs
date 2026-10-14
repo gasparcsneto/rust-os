@@ -6,8 +6,10 @@
 //! da bancada da suíte — a associação com `udp:10.0.2.53:53`, que o gate
 //! decide —, a conexão com o endereço que ele deu, `tcp:10.0.2.100:80`,
 //! que o gate decide como se o número tivesse sido digitado, e um `GET`.
-//! Diz `buscador: no meio` e espera um evento no canal [`CANAL`]. A cada
-//! evento [`tipo::ACAO`], o `a` diz o passo:
+//! Diz `buscador: no meio` e espera um evento no canal [`CANAL`] — ou, se
+//! outro buscador já o escuta, diz `buscador: no meio pelo segundo canal`
+//! e espera no [`SEGUNDO_CANAL`]: dois processos ao mesmo tempo, cada um
+//! ditado pelo seu. A cada evento [`tipo::ACAO`], o `a` diz o passo:
 //!
 //! - [`TROCA`]: um `GET /conta` pela conexão que tem;
 //! - [`NOVA`]: larga a conexão, resolve o nome de novo e conecta do zero —
@@ -28,6 +30,14 @@
 //! - [`NEGOCIADA`]: uma conexão nova, e um `GET /negocia/65536` que aceita
 //!   o que `b` diz — o bit 1, `gzip`; o 2, `deflate` —: a suíte compara o
 //!   que o gate decidiu com e sem compressão;
+//! - [`COOKIE_ENTRAR`]: um `GET /cookies/entrar` pela conexão que tem,
+//!   com o pote do programa: a bancada dá uma sessão (`HttpOnly`), e ela
+//!   vai para o pote;
+//! - [`COOKIE_PRIVADO`]: um `GET /cookies/privado` pela conexão que tem,
+//!   com o pote: a bancada diz o id da sessão que reconheceu, ou 401 — é
+//!   aqui que a suíte revoga, contém ou barra, com a sessão no pote;
+//! - [`COOKIE_ECO`]: um `GET /cookies/eco` com o pote: os nomes dos
+//!   cookies que a bancada recebeu — os valores não vão para o log;
 //! - [`SAIR_SEM_FECHAR`]: sai sem fechar nada — o kernel recolhe as
 //!   conexões de quem acabou.
 //!
@@ -56,7 +66,7 @@ use alloc::string::String;
 use programas::conexao::Prazo;
 use programas::escreverln;
 use programas::http::{
-    self, Aceitas, ConexaoHttp, Falha, Limites, Metodo, Opcoes, Pedido, Resolucao, Url,
+    self, Aceitas, ConexaoHttp, Falha, Limites, Metodo, Opcoes, Pedido, Pote, Resolucao, Url,
 };
 use programas::sistema;
 use programas::tls;
@@ -71,6 +81,9 @@ const SEM_FECHAR: i64 = 90;
 /// O canal por onde a suíte dita o passo.
 const CANAL: &str = "teste-buscador";
 
+/// O canal de um segundo buscador, com o primeiro vivo.
+const SEGUNDO_CANAL: &str = "teste-buscador-2";
+
 /// Os passos — a suíte tem as mesmas constantes.
 const TROCA: i64 = 1;
 const NOVA: i64 = 2;
@@ -82,6 +95,9 @@ const COMPRIMIDA_LENTA: i64 = 7;
 const NEGOCIADA: i64 = 8;
 const SAIR_SEM_FECHAR: i64 = 9;
 const CIFRADA_COMPRIMIDA_LENTA: i64 = 10;
+const COOKIE_ENTRAR: i64 = 11;
+const COOKIE_PRIVADO: i64 = 12;
+const COOKIE_ECO: i64 = 13;
 
 /// O DNS da bancada da suíte.
 const DNS: &str = "udp:10.0.2.53:53";
@@ -139,6 +155,66 @@ fn obter(
     c.trocar(&Pedido::novo(Metodo::Get, url), &Limites::default())
 }
 
+/// Um `GET` de `caminho` pela conexão `conexao`, com `pote`.
+fn obter_com_pote(
+    conexao: &mut Option<ConexaoHttp>,
+    base: &str,
+    caminho: &str,
+    pote: &mut Pote,
+) -> Result<http::Resposta, Falha> {
+    let url = Url::ler(&format!("{base}{caminho}")).map_err(Falha::Url)?;
+    let Some(c) = conexao.as_mut() else {
+        return Err(Falha::Http(http::Erro::Esgotada));
+    };
+    c.trocar_com_pote(&Pedido::novo(Metodo::Get, url), &Limites::default(), pote)
+}
+
+/// O corpo de `r` como texto, sem o fim de linha com que a bancada acaba
+/// as respostas dela.
+fn linha(r: &http::Resposta) -> String {
+    let mut texto = http::texto(r);
+    if r.corpo.ends_with(b"\n") {
+        texto.pop();
+    }
+    texto
+}
+
+/// Diz o desfecho de um `/cookies/privado`: a sessão que a bancada
+/// reconheceu, ou o 401.
+fn dizer_privado(desfecho: Result<http::Resposta, Falha>) {
+    match desfecho {
+        Ok(r) => {
+            escreverln!("buscador: cookie privado: {} {}", r.status, linha(&r));
+        }
+        Err(f) => dizer("cookie privado", Err(f)),
+    }
+}
+
+/// Diz o desfecho de um `/cookies/eco`: só os nomes do que a bancada
+/// recebeu.
+fn dizer_eco(desfecho: Result<http::Resposta, Falha>) {
+    match desfecho {
+        Ok(r) => {
+            let corpo = linha(&r);
+            let nomes: alloc::vec::Vec<&str> = if corpo == "-" {
+                alloc::vec::Vec::new()
+            } else {
+                corpo
+                    .split("; ")
+                    .map(|par| par.split('=').next().unwrap_or(""))
+                    .collect()
+            };
+            let nomes = if nomes.is_empty() {
+                String::from("nenhum")
+            } else {
+                nomes.join(",")
+            };
+            escreverln!("buscador: cookie eco: {} {}", r.status, nomes);
+        }
+        Err(f) => dizer("cookie eco", Err(f)),
+    }
+}
+
 /// Uma conexão nova com `base`, pelo DNS.
 fn conectar(base: &str, opcoes: &Opcoes<'_>) -> Result<ConexaoHttp, Falha> {
     let url = Url::ler(base).map_err(Falha::Url)?;
@@ -147,7 +223,12 @@ fn conectar(base: &str, opcoes: &Opcoes<'_>) -> Result<ConexaoHttp, Falha> {
 
 #[unsafe(no_mangle)]
 fn principal() -> i64 {
-    let canal = sistema::escutar(CANAL);
+    let mut segundo = false;
+    let mut canal = sistema::escutar(CANAL);
+    if canal < 0 {
+        segundo = true;
+        canal = sistema::escutar(SEGUNDO_CANAL);
+    }
     if canal < 0 {
         escreverln!("buscador: escutar devolveu {}", canal);
         return 1;
@@ -189,7 +270,13 @@ fn principal() -> i64 {
         }
     }
     let mut cifrada: Option<ConexaoHttp> = None;
-    escreverln!("buscador: no meio");
+    // Os cookies deste processo: na memória dele, e de mais ninguém.
+    let mut pote = Pote::novo();
+    if segundo {
+        escreverln!("buscador: no meio pelo segundo canal");
+    } else {
+        escreverln!("buscador: no meio");
+    }
 
     let mut eventos = [Evento::default(); 8];
     loop {
@@ -275,6 +362,28 @@ fn principal() -> i64 {
                         r
                     });
                     dizer_comprimida("negociada", 65536, desfecho);
+                }
+                COOKIE_ENTRAR => {
+                    match obter_com_pote(&mut clara, CLARA, "/cookies/entrar", &mut pote) {
+                        Ok(r) => {
+                            escreverln!(
+                                "buscador: cookie entrar: {} {} novo(s), {} no pote",
+                                r.status,
+                                r.cookies.novos,
+                                pote.quantos()
+                            );
+                        }
+                        Err(f) => dizer("cookie entrar", Err(f)),
+                    }
+                }
+                COOKIE_PRIVADO => dizer_privado(obter_com_pote(
+                    &mut clara,
+                    CLARA,
+                    "/cookies/privado",
+                    &mut pote,
+                )),
+                COOKIE_ECO => {
+                    dizer_eco(obter_com_pote(&mut clara, CLARA, "/cookies/eco", &mut pote))
                 }
                 SAIR_SEM_FECHAR => {
                     escreverln!("buscador: saindo sem fechar");

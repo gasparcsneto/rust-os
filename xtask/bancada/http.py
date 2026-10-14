@@ -52,17 +52,38 @@ E as da compressao, com o texto da bancada (ver `texto`), que o programa
     GET  /estragado/<tipo>
                          um corpo comprimido estragado - ver ESTRAGADOS
 
+E as dos cookies, que o programa `cookies` e o `buscador` usam. A sessao e
+um identificador assinado (HMAC-SHA256 com uma chave tirada da chave TLS da
+bancada): cada conexao e um processo novo deste script, e a assinatura e o
+que deixa conferir uma sessao sem guardar nada.
+
+    GET  /cookies/entrar 200, e uma sessao nova: `sessao`, HttpOnly,
+                         SameSite=Lax, Path=/ - e Secure no TLS
+    GET  /cookies/privado
+                         200 "privado <id>" com uma sessao valida no
+                         Cookie, 401 sem
+    GET  /cookies/sair   200, e a sessao apagada (Max-Age=0)
+    GET  /cookies/.../eco
+                         200 com o Cookie que chegou, ou "-" sem nenhum
+    GET  /cookies/definir?c=<set-cookie>&c=...
+                         200, e um Set-Cookie para cada `c`, como veio
+    GET  /cookies/muitos/<n>/<tamanho>
+                         200, e <n> cookies `m<i>` de <tamanho> bytes
+
 Nada sai pela saida padrao nem pela de erro: as duas sao a conexao. Os erros
 vao para `servidor-http.log`, no diretorio da bancada.
 """
 
 import gzip
+import hashlib
+import hmac
 import os
 import re
 import socket
 import ssl
 import sys
 import time
+import urllib.parse
 import zlib
 
 # As respostas malformadas de /torto/<tipo>: cada uma quebra uma regra da
@@ -266,6 +287,70 @@ def negociar(aceita):
     return "identity"
 
 
+def segredo_das_sessoes(diretorio):
+    """A chave das sessoes de /cookies: da chave TLS da bancada, que so ela tem."""
+    with open(os.path.join(diretorio, "bancada.chave"), "rb") as f:
+        return hashlib.sha256(b"duke cookies " + f.read()).digest()
+
+
+def sessao_nova(segredo):
+    ident = os.urandom(6).hex()
+    return ident + "." + hmac.new(segredo, ident.encode(), "sha256").hexdigest()[:16]
+
+
+def sessao_valida(segredo, cookie):
+    """O id da primeira `sessao` do Cookie com a assinatura certa."""
+    for par in cookie.split(";"):
+        nome, _, valor = par.strip().partition("=")
+        if nome != "sessao" or "." not in valor:
+            continue
+        ident, _, assinatura = valor.partition(".")
+        certa = hmac.new(segredo, ident.encode(), "sha256").hexdigest()[:16]
+        if hmac.compare_digest(assinatura, certa):
+            return ident
+    return None
+
+
+def rota_dos_cookies(alvo, cabecalhos, extras, cifrado, diretorio):
+    """A resposta de /cookies/..., ou None se o alvo nao e dela."""
+    partes = urllib.parse.urlsplit(alvo)
+    caminho = partes.path
+    if not caminho.startswith("/cookies/"):
+        return None
+    seguro = "; Secure" if cifrado else ""
+    if caminho == "/cookies/entrar":
+        valor = sessao_nova(segredo_das_sessoes(diretorio))
+        return resposta(200, "OK", b"entrou\n", [
+            "Set-Cookie: sessao=" + valor + "; Path=/; HttpOnly; SameSite=Lax" + seguro
+        ] + extras)
+    if caminho == "/cookies/privado":
+        ident = sessao_valida(segredo_das_sessoes(diretorio), cabecalhos.get("cookie", ""))
+        if ident is None:
+            return resposta(401, "Unauthorized", b"sem sessao\n", extras)
+        return resposta(200, "OK", b"privado " + ident.encode() + b"\n", extras)
+    if caminho == "/cookies/sair":
+        return resposta(200, "OK", b"saiu\n", [
+            "Set-Cookie: sessao=; Path=/; Max-Age=0; HttpOnly" + seguro
+        ] + extras)
+    if re.fullmatch(r"/cookies(/[a-z0-9-]+)*/eco", caminho):
+        return resposta(200, "OK", (cabecalhos.get("cookie") or "-").encode() + b"\n", extras)
+    if caminho == "/cookies/definir":
+        definidos = urllib.parse.parse_qs(partes.query, keep_blank_values=True).get("c", [])
+        if len(definidos) > 32 or any("\r" in c or "\n" in c for c in definidos):
+            return resposta(400, "Bad Request", b"", extras)
+        return resposta(
+            200, "OK", b"definidos %d\n" % len(definidos),
+            ["Set-Cookie: " + c for c in definidos] + extras,
+        )
+    m = re.fullmatch(r"/cookies/muitos/([0-9]+)/([0-9]+)", caminho)
+    if m and int(m.group(1)) <= 60 and int(m.group(2)) <= 8192:
+        n, tamanho = int(m.group(1)), int(m.group(2))
+        return resposta(200, "OK", b"muitos %d\n" % n, [
+            "Set-Cookie: m%d=%s; Path=/" % (i, "v" * tamanho) for i in range(n)
+        ] + extras)
+    return None
+
+
 # O maior pedido que se le: a cabeca e o corpo.
 MAIOR_CABECA = 16 * 1024
 MAIOR_CORPO = 1024 * 1024
@@ -339,7 +424,7 @@ def padrao(n):
     return (b"0123456789" * (n // 10 + 1))[:n]
 
 
-def atender(conexao, log, diretorio):
+def atender(conexao, log, diretorio, cifrado):
     leitor = Leitor(conexao)
     numero = 0
     while True:
@@ -371,6 +456,10 @@ def atender(conexao, log, diretorio):
             alvo,
         )
         rota, arg = (m.group(1), m.group(2)) if m else (alvo, None)
+        dos_cookies = (
+            rota_dos_cookies(alvo, cabecalhos, extras, cifrado, diretorio)
+            if metodo == "GET" else None
+        )
         # As da compressao com a codificacao e o tamanho.
         cm = re.fullmatch(
             r"/(comprimido|comprimido-pedacos|comprimido-ate-fechar|bomba)/(gzip|x-gzip|deflate)/([0-9]+)",
@@ -379,7 +468,9 @@ def atender(conexao, log, diretorio):
         # O codigo publicado: a arquitetura e o nome so do alfabeto que o
         # xtask escreve, e nada de caminho - o arquivo e o deste diretorio.
         codigo = re.fullmatch(r"/codigo/(x86_64|aarch64)/([a-z0-9][a-z0-9-]*)", alvo)
-        if metodo == "GET" and codigo:
+        if dos_cookies is not None:
+            conexao.sendall(dos_cookies)
+        elif metodo == "GET" and codigo:
             arquivo = os.path.join(diretorio, "codigo", codigo.group(1), codigo.group(2))
             try:
                 with open(arquivo, "rb") as f:
@@ -510,7 +601,7 @@ def main():
     try:
         conexao = cifrar(diretorio, cru) if cifrado else cru
         with conexao:
-            atender(conexao, log, diretorio)
+            atender(conexao, log, diretorio, cifrado)
             if cifrado:
                 # O fim educado do TLS: o cliente le o fim como fim, e nao
                 # como corte.
