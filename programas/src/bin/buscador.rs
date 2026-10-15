@@ -38,6 +38,13 @@
 //!   aqui que a suíte revoga, contém ou barra, com a sessão no pote;
 //! - [`COOKIE_ECO`]: um `GET /cookies/eco` com o pote: os nomes dos
 //!   cookies que a bancada recebeu — os valores não vão para o log;
+//! - [`H2`]: uma conexão HTTP/2 nova — `b` 0, clara, com conhecimento
+//!   prévio; 1, pelo TLS, com o ALPN —, pelo DNS, e um `GET /ola`;
+//! - [`H2_LENTA`]: três correntes ao mesmo tempo pela conexão HTTP/2 que
+//!   tem — `/ola`, `/h2/lento-meio/<b>` e `/lento/<b>` —: a primeira é
+//!   recebida, o programa diz `buscador: h2 lenta: a primeira <status>`, e
+//!   espera a segunda, cujo corpo pára na metade por `b` milissegundos — é
+//!   ali que a suíte revoga, contém ou barra —, e depois a terceira;
 //! - [`SAIR_SEM_FECHAR`]: sai sem fechar nada — o kernel recolhe as
 //!   conexões de quem acabou.
 //!
@@ -66,7 +73,8 @@ use alloc::string::String;
 use programas::conexao::Prazo;
 use programas::escreverln;
 use programas::http::{
-    self, Aceitas, ConexaoHttp, Falha, Limites, Metodo, Opcoes, Pedido, Pote, Resolucao, Url,
+    self, Aceitas, ConexaoHttp, Falha, Limites, Metodo, Opcoes, Pedido, Pote, Protocolo, Resolucao,
+    Url,
 };
 use programas::sistema;
 use programas::tls;
@@ -98,6 +106,8 @@ const CIFRADA_COMPRIMIDA_LENTA: i64 = 10;
 const COOKIE_ENTRAR: i64 = 11;
 const COOKIE_PRIVADO: i64 = 12;
 const COOKIE_ECO: i64 = 13;
+const H2: i64 = 14;
+const H2_LENTA: i64 = 15;
 
 /// O DNS da bancada da suíte.
 const DNS: &str = "udp:10.0.2.53:53";
@@ -215,6 +225,51 @@ fn dizer_eco(desfecho: Result<http::Resposta, Falha>) {
     }
 }
 
+/// O desfecho curto de uma corrente: o status, ou a família e o código.
+fn curto(desfecho: &Result<http::Resposta, Falha>) -> String {
+    match desfecho {
+        Ok(r) => format!("{}", r.status),
+        Err(f) => format!("{} {}", f.categoria().nome(), f.codigo()),
+    }
+}
+
+/// As três correntes de [`H2_LENTA`] pela conexão `h2`.
+fn h2_lenta(h2: &mut Option<ConexaoHttp>, base: &str, ms: i64) {
+    let Some(c) = h2.as_mut() else {
+        dizer("h2 lenta", Err(Falha::Http(http::Erro::Esgotada)));
+        return;
+    };
+    let pedido = |caminho: &str| -> Result<Pedido, Falha> {
+        let url = Url::ler(&format!("{base}{caminho}")).map_err(Falha::Url)?;
+        Ok(Pedido::novo(Metodo::Get, url))
+    };
+    let correntes = (|| -> Result<_, Falha> {
+        let primeira = c.enviar(&pedido("/ola")?, &Limites::default())?;
+        let no_meio = c.enviar(
+            &pedido(&format!("/h2/lento-meio/{ms}"))?,
+            &Limites::default(),
+        )?;
+        let lenta = c.enviar(&pedido(&format!("/lento/{ms}"))?, &Limites::default())?;
+        Ok((primeira, no_meio, lenta))
+    })();
+    let (primeira, no_meio, lenta) = match correntes {
+        Ok(c) => c,
+        Err(f) => {
+            dizer("h2 lenta", Err(f));
+            return;
+        }
+    };
+    let r = c.receber(primeira);
+    escreverln!("buscador: h2 lenta: a primeira {}", curto(&r));
+    let r = c.receber(no_meio);
+    let no_meio = match &r {
+        Ok(r) if r.corpo != http::texto_da_bancada(64 * 1024) => String::from("diferente"),
+        _ => curto(&r),
+    };
+    let lenta = curto(&c.receber(lenta));
+    escreverln!("buscador: h2 lenta: {} / {}", no_meio, lenta);
+}
+
 /// Uma conexão nova com `base`, pelo DNS.
 fn conectar(base: &str, opcoes: &Opcoes<'_>) -> Result<ConexaoHttp, Falha> {
     let url = Url::ler(base).map_err(Falha::Url)?;
@@ -247,6 +302,7 @@ fn principal() -> i64 {
             espera_ms: 2_000,
             esperas: 3,
         },
+        protocolo: Protocolo::Http1,
     };
     const CLARA: &str = "http://bancada.duke";
     const CIFRADA_URL: &str = "https://bancada.duke:8443";
@@ -270,6 +326,10 @@ fn principal() -> i64 {
         }
     }
     let mut cifrada: Option<ConexaoHttp> = None;
+    // A conexão HTTP/2, clara ou cifrada: as correntes dela são deste
+    // processo.
+    let mut h2: Option<ConexaoHttp> = None;
+    let mut h2_base = CLARA;
     // Os cookies deste processo: na memória dele, e de mais ninguém.
     let mut pote = Pote::novo();
     if segundo {
@@ -385,6 +445,27 @@ fn principal() -> i64 {
                 COOKIE_ECO => {
                     dizer_eco(obter_com_pote(&mut clara, CLARA, "/cookies/eco", &mut pote))
                 }
+                H2 => {
+                    if let Some(c) = h2.take() {
+                        c.fechar();
+                    }
+                    h2_base = if e.b == 1 { CIFRADA_URL } else { CLARA };
+                    let so_h2 = Opcoes {
+                        protocolo: Protocolo::Http2,
+                        ..opcoes
+                    };
+                    let desfecho = conectar(h2_base, &so_h2).and_then(|c| {
+                        h2 = Some(c);
+                        obter(&mut h2, h2_base, "/ola")
+                    });
+                    match desfecho {
+                        Ok(r) => {
+                            escreverln!("buscador: h2: {} {:?} {}", r.status, r.versao, linha(&r));
+                        }
+                        Err(f) => dizer("h2", Err(f)),
+                    }
+                }
+                H2_LENTA => h2_lenta(&mut h2, h2_base, e.b),
                 SAIR_SEM_FECHAR => {
                     escreverln!("buscador: saindo sem fechar");
                     sistema::sair(SEM_FECHAR);

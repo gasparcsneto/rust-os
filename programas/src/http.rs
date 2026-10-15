@@ -30,6 +30,17 @@
 //!    (`http::cookies`). O relógio da validade é o `system.info` do TLS,
 //!    pelo gate, lido só quando um cookie com validade está em jogo.
 //!
+//! # O HTTP/2
+//!
+//! Quem chama escolhe ([`Protocolo`]): com `https`, o HTTP/2 é oferecido
+//! pelo ALPN do TLS e o servidor escolhe; com `http`, só com conhecimento
+//! prévio (h2c). A conexão é a mesma — o mesmo destino, a mesma porta, o
+//! mesmo gate —, e as correntes dela ([`ConexaoHttp::enviar`],
+//! [`ConexaoHttp::receber`]) são todas deste processo, com a autoridade de
+//! quem o lançou: o HTTP/2 multiplexa pedidos, e não autoridade. Uma
+//! recusa do gate no meio acaba com a conexão inteira, e cada corrente que
+//! esperava ouve o código como veio.
+//!
 //! # O que não há aqui
 //!
 //! Nenhuma decisão. O método, a URL, o `Host`, os cabeçalhos, o status, o
@@ -77,6 +88,20 @@ pub enum Resolucao<'a> {
     Fixa([u8; 4]),
 }
 
+/// Que HTTP a conexão fala.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Protocolo {
+    /// O HTTP/1.1, e só ele.
+    Http1,
+    /// O HTTP/2, se o servidor quiser: no `https`, oferecido pelo ALPN com o
+    /// HTTP/1.1 de reserva; no `http`, o HTTP/1.1 — o h2c é só com
+    /// conhecimento prévio.
+    Preferir2,
+    /// O HTTP/2, e só ele: no `https`, pelo ALPN, e o servidor que não o
+    /// escolhe é recusado; no `http`, com conhecimento prévio (h2c).
+    Http2,
+}
+
 /// O que uma conexão precisa de quem a pede.
 #[derive(Clone, Copy)]
 pub struct Opcoes<'a> {
@@ -86,6 +111,8 @@ pub struct Opcoes<'a> {
     pub ancoras: Option<&'a Ancoras>,
     /// Quanto o transporte espera o outro lado.
     pub prazo: Prazo,
+    /// Que HTTP a conexão fala.
+    pub protocolo: Protocolo,
 }
 
 /// Por que uma conexão ou uma troca não deu uma resposta — a falha de quem
@@ -132,6 +159,9 @@ impl Falha {
     }
 }
 
+/// O protocolo que o ALPN negocia para o HTTP/2.
+const H2: &[u8] = b"h2";
+
 /// O erro do HTTP, com a falha de baixo dita por `baixo`.
 fn do_http<F>(e: http::Erro<F>, baixo: impl FnOnce(F) -> Falha) -> Falha {
     match e {
@@ -162,12 +192,17 @@ impl http::Fluxo for Cifrada {
     }
 }
 
-/// Por onde os bytes vão. A sessão TLS é grande — o estado do `rustls` —,
-/// e mora no monte.
+/// Por onde os bytes vão, e em que HTTP. A sessão TLS é grande — o estado
+/// do `rustls` —, e a conexão HTTP/2 também: moram no monte.
 enum Via {
     Clara(http::Cliente<Conexao>),
     Cifrada(Box<http::Cliente<Cifrada>>),
+    Clara2(Box<http::ClienteH2<Conexao>>),
+    Cifrada2(Box<http::ClienteH2<Cifrada>>),
 }
+
+/// Uma corrente HTTP/2 aberta por [`ConexaoHttp::enviar`].
+pub use http::Corrente;
 
 /// Uma conexão HTTP com uma origem: o esquema, o host e a porta de uma
 /// URL. Largada, a conexão TCP fecha.
@@ -226,15 +261,41 @@ pub fn conectar(url: &Url, opcoes: &Opcoes<'_>) -> Result<ConexaoHttp, Falha> {
     let conexao = conexao::abrir(&destino, opcoes.prazo).map_err(Falha::Conexao)?;
     let numero = conexao.numero();
     let (via, suite) = match cifra {
+        None if opcoes.protocolo == Protocolo::Http2 => {
+            (Via::Clara2(Box::new(http::ClienteH2::novo(conexao))), None)
+        }
         None => (Via::Clara(http::Cliente::novo(conexao)), None),
         Some((ancoras, semente, agora)) => {
-            let sessao = Sessao::conectar(conexao, &url.nome(), ancoras, agora, semente)
-                .map_err(Falha::Tls)?;
-            let suite = sessao.suite();
-            (
-                Via::Cifrada(Box::new(http::Cliente::novo(Cifrada(sessao)))),
-                suite,
+            // O ALPN: o que se oferece, na ordem de preferência. Sem
+            // oferta, o servidor fala o HTTP/1.1, como sempre.
+            let protocolos: &[&[u8]] = match opcoes.protocolo {
+                Protocolo::Http1 => &[],
+                Protocolo::Preferir2 => &[H2, b"http/1.1"],
+                Protocolo::Http2 => &[H2],
+            };
+            let sessao = Sessao::conectar_com_protocolos(
+                conexao,
+                &url.nome(),
+                ancoras,
+                agora,
+                semente,
+                protocolos,
             )
+            .map_err(Falha::Tls)?;
+            let suite = sessao.suite();
+            let h2 = sessao.protocolo() == Some(H2);
+            if opcoes.protocolo == Protocolo::Http2 && !h2 {
+                // O servidor não escolheu o HTTP/2: não fala, como o h2c
+                // que não recebe o prefácio.
+                let _ = sessao.fechar();
+                return Err(Falha::Http(http::Erro::Protocolo(http::Motivo::Prefacio)));
+            }
+            let via = if h2 {
+                Via::Cifrada2(Box::new(http::ClienteH2::novo(Cifrada(sessao))))
+            } else {
+                Via::Cifrada(Box::new(http::Cliente::novo(Cifrada(sessao))))
+            };
+            (via, suite)
         }
     };
     Ok(ConexaoHttp {
@@ -264,6 +325,8 @@ impl ConexaoHttp {
         match &self.via {
             Via::Clara(c) => c.pronto(),
             Via::Cifrada(c) => c.pronto(),
+            Via::Clara2(c) => c.pronto(),
+            Via::Cifrada2(c) => c.pronto(),
         }
     }
 
@@ -272,6 +335,25 @@ impl ConexaoHttp {
         match &self.via {
             Via::Clara(c) => c.trocas(),
             Via::Cifrada(c) => c.trocas(),
+            Via::Clara2(c) => c.trocas(),
+            Via::Cifrada2(c) => c.trocas(),
+        }
+    }
+
+    /// O HTTP que a conexão fala: [`Versao::Http11`] ou [`Versao::Http2`].
+    pub fn versao(&self) -> Versao {
+        match &self.via {
+            Via::Clara(_) | Via::Cifrada(_) => Versao::Http11,
+            Via::Clara2(_) | Via::Cifrada2(_) => Versao::Http2,
+        }
+    }
+
+    /// Quantas correntes HTTP/2 a conexão guarda — zero no HTTP/1.1.
+    pub fn abertas(&self) -> usize {
+        match &self.via {
+            Via::Clara(_) | Via::Cifrada(_) => 0,
+            Via::Clara2(c) => c.abertas(),
+            Via::Cifrada2(c) => c.abertas(),
         }
     }
 
@@ -293,6 +375,47 @@ impl ConexaoHttp {
             Via::Cifrada(c) => c
                 .trocar(pedido, limites)
                 .map_err(|e| do_http(e, Falha::Tls)),
+            Via::Clara2(c) => c
+                .trocar(pedido, limites)
+                .map_err(|e| do_http(e, Falha::Conexao)),
+            Via::Cifrada2(c) => c
+                .trocar(pedido, limites)
+                .map_err(|e| do_http(e, Falha::Tls)),
+        }
+    }
+
+    /// HTTP/2: abre uma corrente com `pedido`, e volta sem esperar a
+    /// resposta — ver [`http::ClienteH2::enviar`]. Numa conexão HTTP/1.1, o
+    /// pedido não se faz: ela não leva dois ao mesmo tempo.
+    pub fn enviar(&mut self, pedido: &Pedido, limites: &Limites) -> Result<Corrente, Falha> {
+        self.da_origem(pedido)?;
+        match &mut self.via {
+            Via::Clara(_) | Via::Cifrada(_) => Err(Falha::Pedido(None)),
+            Via::Clara2(c) => c
+                .enviar(pedido, limites)
+                .map_err(|e| do_http(e, Falha::Conexao)),
+            Via::Cifrada2(c) => c
+                .enviar(pedido, limites)
+                .map_err(|e| do_http(e, Falha::Tls)),
+        }
+    }
+
+    /// HTTP/2: espera a resposta de `corrente`, lendo o que chegar para as
+    /// outras enquanto isso.
+    pub fn receber(&mut self, corrente: Corrente) -> Result<Resposta, Falha> {
+        match &mut self.via {
+            Via::Clara(_) | Via::Cifrada(_) => Err(Falha::Pedido(None)),
+            Via::Clara2(c) => c.receber(corrente).map_err(|e| do_http(e, Falha::Conexao)),
+            Via::Cifrada2(c) => c.receber(corrente).map_err(|e| do_http(e, Falha::Tls)),
+        }
+    }
+
+    /// HTTP/2: larga `corrente` — o servidor para de mandá-la.
+    pub fn cancelar(&mut self, corrente: Corrente) {
+        match &mut self.via {
+            Via::Clara(_) | Via::Cifrada(_) => {}
+            Via::Clara2(c) => c.cancelar(corrente),
+            Via::Cifrada2(c) => c.cancelar(corrente),
         }
     }
 
@@ -315,6 +438,12 @@ impl ConexaoHttp {
             Via::Cifrada(c) => c
                 .trocar_com_pote(pedido, limites, pote, &mut relogio)
                 .map_err(|e| do_http(e, Falha::Tls)),
+            Via::Clara2(c) => c
+                .trocar_com_pote(pedido, limites, pote, &mut relogio)
+                .map_err(|e| do_http(e, Falha::Conexao)),
+            Via::Cifrada2(c) => c
+                .trocar_com_pote(pedido, limites, pote, &mut relogio)
+                .map_err(|e| do_http(e, Falha::Tls)),
         }
     }
 
@@ -327,11 +456,22 @@ impl ConexaoHttp {
         Ok(())
     }
 
-    /// Fecha a conexão: no `https`, avisa o outro lado (`close_notify`)
-    /// antes de a conexão TCP fechar.
+    /// Fecha a conexão: no HTTP/2, avisa o servidor (`GOAWAY`); no
+    /// `https`, avisa o outro lado (`close_notify`) antes de a conexão TCP
+    /// fechar.
     pub fn fechar(self) {
-        if let Via::Cifrada(c) = self.via {
-            let _ = c.devolver().0.fechar();
+        match self.via {
+            Via::Clara(_) => {}
+            Via::Cifrada(c) => {
+                let _ = c.devolver().0.fechar();
+            }
+            Via::Clara2(mut c) => {
+                let _ = c.fechar();
+            }
+            Via::Cifrada2(mut c) => {
+                let _ = c.fechar();
+                let _ = c.devolver().0.fechar();
+            }
         }
     }
 }

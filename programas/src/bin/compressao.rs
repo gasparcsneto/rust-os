@@ -50,8 +50,8 @@ use alloc::string::String;
 use programas::conexao::Prazo;
 use programas::escreverln;
 use programas::http::{
-    self, Aceitas, Categoria, Codificacao, Falha, Limites, Metodo, Opcoes, Pedido, Resolucao,
-    Resposta, Url,
+    self, Aceitas, Categoria, Codificacao, Falha, Limites, Metodo, Opcoes, Pedido, Protocolo,
+    Resolucao, Resposta, Url,
 };
 use programas::monte;
 use programas::nativo;
@@ -381,6 +381,7 @@ fn tudo(ancoras: &tls::Ancoras) -> Result<(), i64> {
             espera_ms: 5_000,
             esperas: 4,
         },
+        protocolo: Protocolo::Http1,
     };
     let padrao = Limites::default();
     bomba(&opcoes)?;

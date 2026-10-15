@@ -50,7 +50,7 @@ use programas::conexao::Prazo;
 use programas::escreverln;
 use programas::http::{
     self, Agora, Categoria, Contexto, Falha, Guardados, Limites, Metodo, Opcoes, Pedido, Pote,
-    RecusaDeCookie, Resolucao, Resposta, Url,
+    Protocolo, RecusaDeCookie, Resolucao, Resposta, Url,
 };
 use programas::tls;
 
@@ -736,6 +736,7 @@ fn tudo(ancoras: &tls::Ancoras) -> Result<(), i64> {
             espera_ms: 5_000,
             esperas: 4,
         },
+        protocolo: Protocolo::Http1,
     };
     sessao(CLARA, &opcoes)?;
     sessao(CIFRADA, &opcoes)?;

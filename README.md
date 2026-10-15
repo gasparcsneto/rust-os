@@ -575,6 +575,7 @@ programas/           os programas de usuário, compilados à parte do kernel
         ├── vazao.rs      traz 5 MiB da bancada, claro e cifrado, pelo plano de dados: cada leitura decidida e gravada, sem a ficha do papel
         ├── compressao.rs o HTTP comprimido da bancada, claro e cifrado: decodificado no processo, negociado, o estragado e a bomba com o código deles
         ├── cookies.rs    a sessão da bancada no pote do processo, clara e cifrada: o isolamento, os atributos, a validade, os tetos, e a recusa que é do gate
+        ├── correntes.rs  o HTTP/2 da bancada, h2c e pelo ALPN: correntes ao mesmo tempo numa conexão, o erro da corrente e o da conexão, e a recusa que é do gate
         ├── carga.rs      quatro conexões com o eco ao mesmo tempo, 256 KiB de ida e volta em cada, cada uma com os bytes dela
         ├── insistente.rs passa dados pela conexão aberta, e insiste, no passo que a suíte dita: a revogação, a contenção e o firewall no meio
         ├── vindo.rs      o programa que chega pela rede: fora da imagem, selado pela bancada, e pede pelo gate

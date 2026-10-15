@@ -43,7 +43,7 @@ use alloc::format;
 use alloc::string::String;
 use programas::conexao::Prazo;
 use programas::escreverln;
-use programas::http::{self, Falha, Limites, Opcoes, Resolucao};
+use programas::http::{self, Falha, Limites, Opcoes, Protocolo, Resolucao};
 use programas::nativo::{self, Recusa};
 use programas::sistema;
 use programas::tls;
@@ -205,6 +205,7 @@ fn principal() -> i64 {
             espera_ms: 2_000,
             esperas: 3,
         },
+        protocolo: Protocolo::Http1,
     };
     escreverln!("instalador: pronto");
 

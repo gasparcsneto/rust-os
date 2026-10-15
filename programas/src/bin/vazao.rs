@@ -30,7 +30,7 @@ programas::manifesto!(
 
 use programas::conexao::Prazo;
 use programas::escreverln;
-use programas::http::{self, Limites, Opcoes, Resolucao};
+use programas::http::{self, Limites, Opcoes, Protocolo, Resolucao};
 use programas::nativo;
 use programas::tls;
 
@@ -122,6 +122,7 @@ fn tudo(ancoras: &tls::Ancoras) -> Result<(), i64> {
         resolucao: Resolucao::Fixa([10, 0, 2, 100]),
         ancoras: Some(ancoras),
         prazo: Prazo::PADRAO,
+        protocolo: Protocolo::Http1,
     };
     let comeco = agora_ms();
     let claros = serie(

@@ -51,7 +51,7 @@ use alloc::vec::Vec;
 use programas::conexao::{self, Prazo};
 use programas::escreverln;
 use programas::http::{
-    self, Categoria, Falha, Limites, Metodo, Opcoes, Pedido, Resolucao, Resposta, Url,
+    self, Categoria, Falha, Limites, Metodo, Opcoes, Pedido, Protocolo, Resolucao, Resposta, Url,
 };
 use programas::nativo;
 use programas::tls;
@@ -399,6 +399,7 @@ fn tudo(ancoras: &tls::Ancoras) -> Result<(), i64> {
         resolucao: Resolucao::Fixa(BANCADA),
         ancoras: Some(ancoras),
         prazo: Prazo::PADRAO,
+        protocolo: Protocolo::Http1,
     };
     let padrao = Limites::default();
 

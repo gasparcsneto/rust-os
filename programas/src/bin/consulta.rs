@@ -21,7 +21,7 @@ programas::manifesto!("consulta", "net.connect");
 use alloc::vec::Vec;
 use programas::conexao::Prazo;
 use programas::escreverln;
-use programas::http::{self, Limites, Metodo, Opcoes, Pedido, Resolucao, Url};
+use programas::http::{self, Limites, Metodo, Opcoes, Pedido, Protocolo, Resolucao, Url};
 
 /// Tudo conferiu. A suíte o procura.
 const CODIGO: i64 = 91;
@@ -37,6 +37,7 @@ fn tudo() -> Result<(), i64> {
         resolucao: Resolucao::Fixa([10, 0, 2, 100]),
         ancoras: None,
         prazo: Prazo::PADRAO,
+        protocolo: Protocolo::Http1,
     };
     let limites = Limites::default();
     match http::obter("http://bancada.duke/ola", &opcoes, &limites) {
