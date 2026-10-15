@@ -8,6 +8,22 @@ da bancada - o OpenSSL, pelo modulo `ssl` do Python, com o certificado pelo
 nome que o cliente pediu (SNI). Depois, le pedidos HTTP/1.1 ate o cliente
 fechar, ou ate uma resposta que fecha a conexao.
 
+Ou fala HTTP/2 (`http2.py`): na porta 80, quando a conexao comeca com o
+prefacio do HTTP/2 (h2c, com conhecimento previo); na 8443, quando o ALPN
+do TLS escolheu `h2`. As rotas sao as mesmas que fazem sentido sem as
+regras de enquadramento do HTTP/1.1 - ver `rota_h2` -, e as hostis do
+HTTP/2:
+
+    GET  /h2/reinicia    RST_STREAM com INTERNAL_ERROR, sem resposta
+    GET  /h2/recusa      RST_STREAM com REFUSED_STREAM
+    GET  /h2/adeus       GOAWAY com ENHANCE_YOUR_CALM, e a conexao fecha
+    GET  /h2/empurra     um PUSH_PROMISE, que o cliente desligou
+    GET  /h2/hpack       um bloco de cabeca que nao se decodifica
+    GET  /h2/enxurrada   dois mil PING antes da resposta
+    GET  /h2/lento-meio/<ms>
+                         64 KiB do texto: a metade, <ms> de espera, e o
+                         resto
+
 Cada rota e um comportamento que a suite e a fumaca conferem:
 
     GET  /ola            200 "ola, duke\\n", com Content-Length
@@ -85,6 +101,11 @@ import sys
 import time
 import urllib.parse
 import zlib
+
+# O vizinho `http2.py` e importado daqui: sem o cache de bytecode, que o
+# Python escreveria ao lado dele, dentro do repositorio.
+sys.dont_write_bytecode = True
+import http2  # noqa: E402
 
 # As respostas malformadas de /torto/<tipo>: cada uma quebra uma regra da
 # RFC 9112 que o cliente tem de recusar.
@@ -367,6 +388,9 @@ def contexto(diretorio, nome):
         os.path.join(diretorio, nome + ".pem"),
         os.path.join(diretorio, nome + ".chave"),
     )
+    # O ALPN: o HTTP/2 para quem o oferece, o HTTP/1.1 para quem oferece
+    # so ele. Quem nao oferece nada fala HTTP/1.1, como sempre.
+    c.set_alpn_protocols(["h2", "http/1.1"])
     return c
 
 
@@ -388,9 +412,9 @@ def cifrar(diretorio, cru):
 class Leitor:
     """O que chegou da conexao, lido por linhas e por tamanhos."""
 
-    def __init__(self, conexao):
+    def __init__(self, conexao, inicio=b""):
         self.conexao = conexao
-        self.buffer = b""
+        self.buffer = inicio
 
     def encher(self):
         dados = self.conexao.recv(65536)
@@ -424,8 +448,8 @@ def padrao(n):
     return (b"0123456789" * (n // 10 + 1))[:n]
 
 
-def atender(conexao, log, diretorio, cifrado):
-    leitor = Leitor(conexao)
+def atender(conexao, log, diretorio, cifrado, inicio=b""):
+    leitor = Leitor(conexao, inicio)
     numero = 0
     while True:
         try:
@@ -587,6 +611,98 @@ def atender(conexao, log, diretorio, cifrado):
         print("http.py: pedido", numero, metodo, alvo, file=log, flush=True)
 
 
+# Os cabecalhos que o HTTP/2 nao tem (RFC 9113, 8.2.2).
+DA_CONEXAO = {"connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade"}
+
+
+def de_h1(cru):
+    """Uma resposta HTTP/1.1 escrita por `resposta`, como resposta HTTP/2: o
+    status, os cabecalhos sem os da conexao, e o corpo."""
+    cabeca, _, corpo = cru.partition(b"\r\n\r\n")
+    linhas = cabeca.decode("latin-1").split("\r\n")
+    status = int(linhas[0].split(" ")[1])
+    cabecalhos = []
+    for linha in linhas[1:]:
+        nome, _, valor = linha.partition(":")
+        if nome.strip().lower() not in DA_CONEXAO:
+            cabecalhos.append((nome.strip(), valor.strip()))
+    return http2.Resposta2(status, cabecalhos, corpo)
+
+
+def rota_h2(diretorio, cifrado):
+    """A funcao que responde os pedidos de uma conexao HTTP/2."""
+
+    def responder(metodo, alvo, cabecalhos, corpo, numero):
+        R = http2.Resposta2
+        dos_cookies = (
+            rota_dos_cookies(alvo, cabecalhos, [], cifrado, diretorio) if metodo == "GET" else None
+        )
+        if dos_cookies is not None:
+            return de_h1(dos_cookies)
+        hostil = re.fullmatch(r"/h2/(reinicia|recusa|adeus|empurra|hpack|enxurrada)", alvo)
+        if metodo == "GET" and hostil:
+            return R(200, hostil=hostil.group(1))
+        m = re.fullmatch(
+            r"/(grande|lento|status|texto|negocia|comprimido-lento|h2/lento-meio)/([a-z0-9-]+)",
+            alvo,
+        )
+        rota, arg = (m.group(1), m.group(2)) if m else (alvo, None)
+        cm = re.fullmatch(r"/comprimido/(gzip|x-gzip|deflate)/([0-9]+)", alvo)
+        numerico = arg is not None and arg.isdigit()
+        if metodo == "GET" and rota == "/ola":
+            return R(200, [], b"ola, duke\n")
+        if metodo == "GET" and rota == "/conta":
+            return R(200, [], str(numero).encode())
+        if metodo == "GET" and rota == "grande" and numerico and int(arg) <= 8 << 20:
+            return R(200, [("Content-Length", str(int(arg)))], padrao(int(arg)))
+        if metodo == "GET" and rota == "texto" and numerico and int(arg) <= 8 << 20:
+            return R(200, [("Content-Length", str(int(arg)))], texto(int(arg)))
+        if metodo == "POST" and rota == "/eco":
+            return R(200, [("Content-Length", str(len(corpo)))], corpo)
+        if metodo == "GET" and rota == "lento" and numerico:
+            return R(200, [], b"lento\n", atraso=int(arg) / 1000)
+        if metodo == "GET" and rota == "h2/lento-meio" and numerico:
+            dados = texto(64 * 1024)
+            return R(200, [("Content-Length", str(len(dados)))], dados,
+                     pausa=(len(dados) // 2, int(arg) / 1000))
+        if metodo == "GET" and rota == "comprimido-lento" and numerico:
+            corpo_c = comprimir("gzip", texto(64 * 1024))
+            return R(200, [("Content-Encoding", "gzip")], corpo_c,
+                     pausa=(len(corpo_c) // 2, int(arg) / 1000))
+        if metodo == "GET" and rota == "status" and numerico:
+            n = int(arg)
+            return R(n, [], b"status %d\n" % n)
+        if metodo == "GET" and rota == "negocia" and numerico and int(arg) <= 8 << 20:
+            cod = negociar(cabecalhos.get("accept-encoding", "identity"))
+            dados = texto(int(arg))
+            corpo_c = dados if cod == "identity" else comprimir(cod, dados)
+            vistos = [("Vary", "Accept-Encoding"), ("X-Codificacao", cod)]
+            if cod != "identity":
+                vistos.append(("Content-Encoding", cod))
+            return R(200, vistos, corpo_c)
+        if metodo == "GET" and cm and int(cm.group(2)) <= 8 << 20:
+            return R(200, [("Content-Encoding", cm.group(1))],
+                     comprimir(cm.group(1), texto(int(cm.group(2)))))
+        if metodo == "GET" and rota == "/redireciona":
+            return R(302, [("Location", "http://bancada.duke/ola")], b"")
+        if metodo == "GET" and rota == "/mudo":
+            return R(200, nunca=True)
+        return R(404, [], b"nao ha\n")
+
+    return responder
+
+
+def espiar(conexao):
+    """O comeco da conexao, ate dar para dizer se e o prefacio do HTTP/2."""
+    dados = b""
+    while len(dados) < len(http2.PREFACIO) and http2.PREFACIO.startswith(dados):
+        pedaco = conexao.recv(65536)
+        if not pedaco:
+            break
+        dados += pedaco
+    return dados
+
+
 def main():
     diretorio = sys.argv[1]
     cifrado = len(sys.argv) > 2 and sys.argv[2] == "tls"
@@ -601,7 +717,14 @@ def main():
     try:
         conexao = cifrar(diretorio, cru) if cifrado else cru
         with conexao:
-            atender(conexao, log, diretorio, cifrado)
+            if cifrado and conexao.selected_alpn_protocol() == "h2":
+                http2.servir(conexao, rota_h2(diretorio, cifrado), log)
+            else:
+                inicio = b"" if cifrado else espiar(conexao)
+                if inicio.startswith(http2.PREFACIO):
+                    http2.servir(conexao, rota_h2(diretorio, cifrado), log, inicio)
+                else:
+                    atender(conexao, log, diretorio, cifrado, inicio)
             if cifrado:
                 # O fim educado do TLS: o cliente le o fim como fim, e nao
                 # como corte.

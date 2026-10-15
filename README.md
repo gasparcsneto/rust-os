@@ -586,7 +586,7 @@ xtask/src/
 ├── canal_tcp.rs     o canal do agente por TCP do lado de fora: a porta encaminhada, e a ponte da suíte — `xtask/bancada/ponte.py`
 ├── codigo.rs        o código publicado: fora da imagem, selado pelos editores da bancada, servido pelo HTTP dela em `/codigo`
 ├── persistencia.rs  a bancada de persistência: a mesma máquina em vários boots, com corte de energia
-└── tls.rs           a bancada TLS: a PKI gerada a cada máquina, o eco TLS — o OpenSSL, por `xtask/bancada/tls.py` —, e o servidor HTTP claro e cifrado — `xtask/bancada/http.py` —, a cada conexão
+└── tls.rs           a bancada TLS: a PKI gerada a cada máquina, o eco TLS — o OpenSSL, por `xtask/bancada/tls.py` —, e o servidor HTTP claro e cifrado, HTTP/1.1 e HTTP/2 — `xtask/bancada/http.py` e `http2.py` —, a cada conexão
 ```
 
 **Como as duas arquiteturas convivem.** Cada backend em `arch/` traduz o que
