@@ -2774,8 +2774,9 @@ dessincronizado, e não o começo da resposta seguinte. O prazo é de
 silêncio — quanto o outro lado pode ficar sem mandar nada —, e não da
 conversa inteira. Fora, de propósito: HTTP/2 e HTTP/3, cookies,
 autenticação, *proxy* e seguir redirecionamento sozinho. (A compressão do
-corpo veio depois, também no programa — ver [A compressão do
-HTTP](#a-compressão-do-http).)
+corpo, os cookies e o HTTP/2 vieram depois, também no programa — ver [A
+compressão do HTTP](#a-compressão-do-http), [Os cookies do
+HTTP](#os-cookies-do-http) e [O HTTP/2](#o-http2).)
 
 **A bancada é de fora.** O servidor é um script Python do hospedeiro
 ([`xtask/bancada/http.py`](xtask/bancada/http.py)), que o emulador roda a
@@ -3476,6 +3477,220 @@ cabeçalhos reservados.
   que é de cada processo, e o que se perde é a conversa desse programa
   com esses hosts.
 
+### O HTTP/2
+
+O HTTP/2 é do programa, como o HTTP/1.1: o pacote `http` fala a RFC 9113,
+com o HPACK da RFC 7541 ([`ClienteH2`](http/src/h2.rs)), pelo TLS quando o
+ALPN o escolhe, ou no claro com conhecimento prévio (h2c). Ele multiplexa
+pedidos, e não autoridade: várias correntes numa conexão são vários
+pedidos do mesmo processo, pela mesma conexão que o gate decidiu pelo
+destino, e cada envio e cada leitura dela continuam decididos com a
+autoridade de quem o lançou. O kernel não sabe que as correntes existem.
+
+```
+correntes: h2c com conhecimento previo: 200 Http2
+correntes: 8 ao mesmo tempo de 1 byte a 100 KiB em 110 ms, e a lenta em 310 ms
+correntes: o eco de 200 KiB voltou inteiro
+correntes: gzip decodificado, e a sessao da bancada pelo pote
+correntes: 2 MB passam do limite: HTTP_TOO_LARGE so na corrente, e a conexao segue
+correntes: reiniciada e recusada so na corrente: HTTP_STREAM_RESET HTTP_STREAM_REFUSED
+correntes: 16 trocas numa conexao so
+correntes: a conexao acaba inteira, a outra corrente junto: HTTP_MALFORMED HTTP_MALFORMED HTTP_TOO_MANY_FRAMES HTTP_CONNECTION_ENDED
+correntes: o ALPN: Http2 Http2, Preferir2 Http2, Http1 Http11; antigo: Preferir2 Http11, Http2 HTTP_MALFORMED; claro: Preferir2 Http11
+correntes: 40 pedidos, no maximo 16 guardados: HTTP_TOO_MANY_STREAMS, e a mais antiga recebida antes da seguinte
+correntes: medida 40 pedidos de 1 KiB, em ms: http/1.1 160, h2 um a um 180, h2 juntos 160
+correntes: http://bancada.duke:81 pelo HTTP/2 -> denied DENY_RESOURCE
+correntes: tudo conferiu
+```
+
+**Multiplexar pedidos, e não autoridade.** Uma corrente não é uma
+conexão, um titular nem uma decisão. O `correntes` inteiro, de uma pessoa
+operadora, faz catorze conexões — nove ao servidor claro e cinco ao
+cifrado, uma decisão `net.connect` para cada — e manda dezenas de
+correntes por elas, sem nenhuma decisão a mais por corrente; tudo é
+deixado em nome da pessoa, menos a porta fora do alcance,
+`DENY_RESOURCE`, antes do primeiro byte. A suíte interrompe as correntes
+no meio — a segunda parada na metade do corpo, a terceira ainda por vir —:
+a chave revogada do agente que lançou o programa faz a leitura seguinte
+`DENY_ROLE`, gravada com a chave dele; o processo isolado ouve
+`DENY_CONTAINED`, pelo TLS; a regra do firewall derruba as duas conexões
+claras do processo, e as correntes ouvem `FIREWALL_BLOCKED`. Em cada um,
+a conexão acaba inteira, e as duas correntes que esperavam ouvem o mesmo
+código, como veio — nem um erro do HTTP/2 no lugar da recusa, nem metade
+de uma resposta. Três `correntes` ao mesmo tempo, de duas pessoas e de um
+agente, têm cada um as suas conexões, as suas correntes e as suas tabelas
+do HPACK, e cada decisão sai em nome de quem lançou. Nenhum registro tem
+o HTTP/2 — nem uma pseudo-cabeça, nem o prefácio, nem um caminho das
+correntes —, e o `xtask invariantes` confere que o kernel e a política
+não falam dele.
+
+**O que se recusa.** O que é da corrente fica nela: a resposta
+malformada — os pseudo-cabeçalhos fora do lugar, o nome em maiúsculas, um
+cabeçalho da conexão, o `:status` que não é de três dígitos, o `101`, a
+informativa que acaba a corrente, os dados antes da cabeça, o corpo que
+não confere com o `content-length`, os *trailers* sem o fim —, o corpo
+além do limite, e o `RST_STREAM` do servidor (`HTTP_STREAM_RESET`, ou
+`HTTP_STREAM_REFUSED`, que pode ir noutra conexão); o cliente manda o
+`RST_STREAM` dele, e a conexão segue. O que quebra o protocolo acaba com
+a conexão inteira, com o `GOAWAY` e o código da RFC: o quadro torto, a
+corrente que o servidor abre, o bloco de cabeça que não se decodifica — a
+tabela dinâmica é da conexão —, o `PUSH_PROMISE` (o *push* vai desligado),
+o `SETTINGS` fora da faixa, a janela que transborda, e as enxurradas:
+1024 quadros seguidos sem levar resposta nenhuma adiante, 64
+`CONTINUATION` num bloco, ou um bloco cru maior que o dobro do limite da
+cabeça. O `GOAWAY` do servidor recusa as correntes acima da última, e o
+fecho com erro chega como `HTTP_CONNECTION_ENDED`.
+
+**A memória tem teto.** Uma conexão guarda 16 correntes — as abertas e as
+que acabaram e não foram recebidas —; a seguinte é
+`HTTP_TOO_MANY_STREAMS`, e quem chama recebe uma antes de abrir outra. A
+janela de cada corrente é 64 KiB: é o que uma corrente parada segura. A
+esperada abre de uma vez até o limite do corpo dela, e um byte além, para
+o corpo grande demais ser visto como tal. A janela da conexão, 16 MiB, é
+reaberta quando cai à metade: o teto é o das correntes. A cabeça conta
+como o HPACK conta, e a tabela dinâmica continua certa mesmo quando a
+lista passa do limite.
+
+**O HPACK.** O decodificador inteiro: a tabela estática, a dinâmica, o
+Huffman — as tabelas transcritas de duas implementações independentes e
+conferidas entre si —, e os vetores do apêndice C da RFC 7541. O
+codificador não indexa nada: o primeiro bloco põe a tabela deste lado,
+no servidor, em zero bytes, e nenhum ajuste do servidor pede
+atualização depois; o `cookie`, o `authorization` e o
+`proxy-authorization` vão como nunca indexados, para ninguém no caminho
+os guardar.
+
+**O ALPN e o h2c.** Quem conecta escolhe (`Protocolo`): `Http1`, como
+sempre; `Preferir2`, que no `https` oferece `h2` e `http/1.1` e fala o que
+o servidor escolher; e `Http2`, que exige o HTTP/2 — no `https`, o
+servidor que não o escolhe é recusado, depois do aperto, com
+`HTTP_MALFORMED`; no `http`, o prefácio com conhecimento prévio. O
+`Upgrade` do HTTP/1.1 para o h2c não existe: a RFC 9113 o tirou. O TLS
+ganhou a oferta e a leitura da escolha (`Sessao::conectar_com_protocolos`,
+`Sessao::protocolo`); o destino é o mesmo, e o gate não a vê.
+
+**A validação.** Os testes do pacote conversam com um servidor de mentira
+que respeita as janelas do cliente e com roteiros hostis — cada recusa,
+com o código e o alcance dela —, e com o `nghttpd`, a referência da
+nghttp2: as trocas, a tabela dinâmica, a janela pequena, o corpo grande,
+os *trailers*, o servidor que não fala HTTP/2 e o `GOAWAY` deste lado. Um
+teste que precisa do `nghttpd` falha sem ele, e a CI o instala. Na
+bancada, o servidor HTTP/2 é um script do hospedeiro
+([`xtask/bancada/http2.py`](xtask/bancada/http2.py)), conferido com o
+`curl`; e o `antigo.duke`, o mesmo destino por outro nome, faz o papel do
+servidor que só fala HTTP/1.1.
+
+**As medidas.** No hospedeiro, só o protocolo — o cliente contra um
+servidor de mentira na memória, sem rede, com 1 KiB de corpo —, uma troca
+custa de 740 a 850 ns pelo HTTP/1.1 numa conexão mantida, de 920 a 940 ns
+pelo HTTP/2 uma de cada vez, e de 975 a 990 ns com dezesseis correntes
+juntas: os quadros e o HPACK custam uns 150 ns por troca, e na memória não
+há ida e volta para economizar. No sistema, o `correntes` faz 40 pedidos
+de 1 KiB à bancada pelo HTTP/1.1 numa conexão mantida, pelo HTTP/2 um de
+cada vez, e pelo HTTP/2 tantos ao mesmo tempo quanto a conexão guarda —
+na fumaça, em release:
+
+| 40 pedidos de 1 KiB | HTTP/1.1 | HTTP/2 um a um | HTTP/2 juntos |
+|---|---|---|---|
+| x86, cinco fumaças | 140–280 ms | 150–290 ms | 160–320 ms |
+| ARM, quatro fumaças | 180–330 ms | 280–490 ms | 160–200 ms |
+
+O que se mede é o hóspede. Na captura do fio, a bancada responde em meio
+milissegundo; o custo de cada pedido é o caminho dele no Duke — um
+`net.send` e um `net.recv`, cada um uma decisão do gate, a espera, a
+cópia —, e não o protocolo. Juntas, as correntes não economizam
+decisões: cada pedido ainda é um envio. Economizam espera: oito correntes
+de 1 byte a 100 KiB acabam juntas em 110 a 220 ms, e a que o servidor
+segura 300 ms acaba em 290 a 370 ms, sem segurar as outras. No x86, as
+três séries ficam na mesma faixa; no ARM, onde a volta do hóspede varia
+mais, juntas são a mais estável. O programa inteiro faz uns 430 pedidos
+ao gate — 14 conexões, 200 envios e de 178 a 190 leituras — e leva de 3,7
+a 4,7 s na fumaça do x86, e de 3,7 a 4,1 s na do ARM.
+
+**O que não fala HTTP/2 ficou como estava.** O kernel e a política não
+mudaram — só a suíte —, e o HTTP/1.1 é o mesmo código. Na fumaça, em
+pares de antes e depois alternados na mesma árvore, três no x86 e dois
+no ARM:
+
+| | x86 antes | x86 depois | ARM antes | ARM depois |
+|---|---|---|---|---|
+| `vazao`, 5 MiB | 4,09–4,35 s | 3,85–4,03 s | 3,80–4,22 s | 3,98–4,02 s |
+| `carga`, 1 MiB por 4 conexões | 1,42–1,59 s | 1,56–1,73 s | 1,51–1,74 s | 1,50–1,76 s |
+| `pagina` inteira | 6,53–6,64 s | 6,17–6,42 s | 4,91–5,58 s | 5,06–5,13 s |
+| `compressao` inteiro | 22,0–22,9 s | 22,3–23,5 s | 22,9–23,2 s | 21,5–22,1 s |
+| `cookies` inteiro | 11,3–11,8 s | 10,8–11,7 s | 10,3–10,7 s | 10,3–11,2 s |
+
+As faixas se sobrepõem ou se tocam, e quando uma série do depois sai à
+frente, outra sai atrás. A máquina destas medidas é mais lenta que a das
+medidas dos cookies — lá, a `vazao` levava de 2,4 a 2,8 s no x86 —, e por
+isso os pares são de uma sessão só, e não comparados com os números de
+antes.
+
+**O que o exercício encontrou.**
+
+- *A bancada escrevia um quadro por escrita.* A cabeça e o corpo de cada
+  resposta iam em segmentos separados, e o segundo esperava o ACK
+  atrasado do primeiro (Nagle): 44 ms por troca, 200 trocas em 8,8 s no
+  hospedeiro. A bancada passou a juntar o que produz numa escrita, como
+  um servidor de verdade: 200 trocas em 41 ms, e no emulador, os 40
+  pedidos um a um caíram de 2520 para 880 ms (x86, debug). O cliente
+  estava certo — uma escrita por pedido, uma leitura por resposta.
+- *O programa abria mais correntes que a conexão guarda.* O teto de 16
+  é do desenho, e a medida do `correntes` engolia a falha calada; agora
+  ela respeita o teto e diz o código quando um envio falha.
+- *A fumaça lia o fim do programa anterior.* O `cookies` sai com o mesmo
+  código, e a perna do HTTP/2 o achava na cauda do log; ela passou a ler
+  só os registros depois do lançamento.
+- *A linha do ALPN não cabia num registro do log* (160 bytes), e saía
+  cortada.
+- *Cada conexão da bancada compilava o `http2.py`* — 15 ms por processo,
+  o HTTP/1.1 junto. Agora só a conexão que fala HTTP/2 o importa.
+- *A medida do ARM variava, e não era do HTTP/2.* Uma fumaça deu 490 ms
+  para os 40 pedidos um a um pelo HTTP/2, contra 180 pelo HTTP/1.1; a
+  seguinte, 280 contra 330. A captura do fio (`DUKE_CAPTURA`) mostrou
+  onde estava o tempo: a bancada responde em meio milissegundo
+  (mediana), nos dois protocolos, e o resto é do hóspede — de 3,6 a 4,8
+  ms de mediana entre a resposta chegar e o pedido seguinte sair, com
+  voltas isoladas de 10 a 60 ms, que caem numa série ou na outra. Nada a
+  corrigir no HTTP/2; o custo da volta no hóspede do ARM fica medido, e
+  não explicado.
+
+**O que fica de fora.**
+
+- **O HTTP/3.** É outro incremento do roteiro, e depende do QUIC sobre o
+  UDP, que começa por uma avaliação.
+- **O *push*, a prioridade, o `CONNECT` estendido e o `Upgrade`.** O
+  *push* vai desligado no prefácio, e um `PUSH_PROMISE` acaba com a
+  conexão; a prioridade é lida e ignorada, como a RFC 9113 deixa; o
+  `CONNECT` estendido (RFC 8441), que levaria o WebSocket, não existe; e
+  o `Upgrade` do HTTP/1.1 para o h2c a RFC tirou.
+- **Uma conexão por origem.** Dois nomes no mesmo servidor, mesmo com um
+  certificado que cubra os dois, são duas conexões — dois nomes no DNS,
+  dois destinos no gate. Juntá-los numa conexão faria a decisão de um
+  destino valer para um nome que o gate não viu.
+- **O corpo inteiro na memória.** Como no HTTP/1.1, a resposta chega
+  inteira, até o limite dela; quem chama não a lê em pedaços. A janela de
+  cada corrente segura o servidor, e o limite segura a corrente.
+- **O cliente não manda `PING`.** Responde os do servidor; a conexão
+  parada cai pelo prazo do transporte, como no HTTP/1.1.
+- **Os ajustes são do código.** As 16 correntes, a janela de 64 KiB e a
+  cabeça mudam por `ClienteH2::com`; os programas usam o padrão.
+- **Os *trailers* são conferidos e largados**, como no HTTP/1.1.
+- **O pedido não usa a tabela dinâmica.** Nada deste lado entra na tabela
+  do servidor: o pedido vai pela tabela estática e pelo Huffman, e um
+  pedido repetido custa os mesmos bytes — em troca, este lado não deixa
+  estado nenhum no servidor para ele guardar.
+- **A bancada atende num fio só.** O `http2.py` intercala as respostas
+  quadro a quadro, dentro das janelas, mas não mede um servidor que
+  responde em paralelo de verdade.
+- **O programa cresce.** Cada programa que fala HTTP pelo
+  `programas::http` leva o cliente HTTP/2, mesmo o que só fala HTTP/1.1:
+  o protocolo se escolhe ao conectar. No x86, de 40 a 50 KiB a mais — o
+  `buscador`, que ganhou as rotas do HTTP/2, 50 KiB —, e no ARM, de 33 a
+  46 KiB; os que não falam HTTP mudaram menos de 1 KiB. O `correntes` tem
+  761 KiB no x86 e 771 KiB no ARM. Deixar o HTTP/2 só em quem o pede
+  seria uma escolha de compilação no `programas`, e não entrou.
+
 ### As mutações da rede
 
 Quinze mutações contra o que este incremento promete — a posse, a
@@ -4061,6 +4276,70 @@ decidido no caminho de controle, onde a contenção recusa; e o envio
 confere a regra do firewall a cada vez, com a conexão viva ou não. São
 camadas que se cobrem, e as duas mutações que os cookies reprovam tiram
 as duas de cada vez.
+
+### As mutações do HTTP/2
+
+Setenta e oito mutações contra o que o HTTP/2 promete — as correntes e o
+teto delas, as janelas, o erro que é da corrente e o que é da conexão, o
+HPACK, os quadros, o ALPN e o h2c, e a autoridade que uma corrente não
+muda —: setenta contra os testes do pacote `http`, os do hospedeiro e os
+contra o `nghttpd`; seis de ponta a ponta contra a suíte do x86; e duas
+contra as invariantes do `xtask`. **Setenta e seis reprovadas** — duas só
+depois de um caso novo, abaixo. As outras duas são equivalentes, e o
+porquê vem depois da tabela.
+
+| Mutação | Reprovada por |
+|---|---|
+| sem o teto das correntes guardadas; sem o máximo de correntes do servidor; o máximo dele ignorado | `as_correntes_de_quem_chama_tem_teto` e `o_servidor_pode_aceitar_menos_correntes` |
+| a janela da corrente esperada que não abre; a janela inicial nova que não vale para as abertas | `a_corrente_parada_segura_so_a_janela_dela`, `a_janela_da_corrente_esperada_abre_de_uma_vez` e `o_corpo_do_pedido_espera_a_janela_do_servidor` |
+| a janela da conexão que não reabre | `a_janela_da_conexao_se_reabre`, novo |
+| os dados além da janela da corrente; a janela da corrente que transborda; a da conexão | `os_dados_alem_da_janela_da_corrente`, `a_janela_do_pedido_alem_do_maximo_e_da_corrente` e `os_erros_da_conexao` |
+| o corpo sem limite | `os_limites_da_resposta_sao_da_corrente`, depois do caso novo |
+| os dados antes da cabeça; o corpo além e aquém do `content-length` | `o_corpo_que_nao_confere_com_a_cabeca` |
+| a cabeça numa corrente ociosa; o reinício de uma ociosa; o *push* ligado aceito; o maior quadro fora da faixa; o quadro maior que o anunciado | `os_erros_da_conexao` |
+| as `CONTINUATION` sem fim; o bloco cru sem teto; a enxurrada sem teto; o `PING` contado como progresso | `as_enxurradas` |
+| a cabeça depois do fim da corrente | `depois_do_fim_da_corrente_nada_dela` |
+| a lista além do limite que passa | `a_cabeca_alem_do_limite_mantem_a_tabela_certa` e `os_limites_da_resposta_sao_da_corrente` |
+| o `101` aceito; o nome em maiúsculas; o cabeçalho da conexão; o pseudo-cabeçalho depois dos outros; o valor com espaço nas pontas; o status fora da faixa | `as_respostas_malformadas_sao_so_da_corrente` |
+| a informativa que acaba a corrente; as informativas sem fim | `as_informativas_passam_e_nao_acabam_a_corrente` |
+| os *trailers* sem o fim | `os_trailers_tortos` |
+| a recusa do servidor que vira reinício | `a_recusa_do_servidor_no_meio_do_corpo_do_pedido` e `o_reinicio_do_servidor` |
+| os ajustes sem `ACK`; o primeiro bloco sem a tabela deste lado em zero | `uma_troca` |
+| o `GOAWAY` que não recusa as correntes de depois; o código dele esquecido no fecho | `o_adeus_do_servidor` |
+| o erro da corrente sem `RST_STREAM`; o `RST_STREAM` numa corrente já fechada; o erro da conexão sem `GOAWAY`; os reconhecimentos que esperam o pedido seguinte | os casos de cada recusa, que conferem o que sai pelo fio: `as_respostas_malformadas_sao_so_da_corrente`, `os_erros_da_conexao`, `o_prefacio_que_nao_e_do_http2`, `mil_pings_com_progresso_no_meio_passam` e outros |
+| a falha da conexão que não chega às outras correntes | os testes do pacote não terminam: a corrente que esperava espera para sempre |
+| a corrente de outra conexão | `a_corrente_de_outra_conexao_nao_e_entregue` |
+| o `cookie` indexável; a credencial indexável | `os_cookies_pelo_pote_e_o_cookie_nunca_indexado` e `o_https_a_porta_e_os_cabecalhos_de_quem_chama` |
+| o `POST` sem corpo sem `content-length` | `o_post_sem_corpo_diz_zero_e_acaba_na_cabeca` |
+| sem o prefácio do servidor | `o_prefacio_que_nao_e_do_http2` |
+| cancelar sem `RST_STREAM`; o limite que sai como `PROTOCOL_ERROR` no `RST_STREAM` | `cancelar_larga_a_corrente` e `os_limites_da_resposta_sao_da_corrente` |
+| o HPACK: o tamanho da tabela mudado depois de um campo, ou acima do anunciado; a lista sem limite; o literal indexado que não entra na tabela; a entrada sem os 32 bytes; o inteiro sem teto | `a_tabela_muda_de_tamanho_so_no_comeco_e_ate_o_anunciado`, `a_lista_para_no_teto_e_a_tabela_continua_certa`, `a_tabela_dinamica_do_servidor_atravessa_as_correntes`, `baixar_a_tabela_tira_os_mais_velhos`, `um_inteiro_sem_fim_ou_grande_demais` e os vetores da RFC |
+| o Huffman: o EOS numa cadeia; o preenchimento longo, ou que não é de uns; a cadeia sem teto | `o_eos_nao_pode_estar_na_cadeia`, `uma_cadeia_que_nao_e_huffman`, `o_preenchimento_e_o_comeco_do_eos_com_menos_de_oito_bits` e `a_cadeia_decodificada_nao_passa_do_teto` |
+| os quadros: `DATA` na corrente zero; o preenchimento maior que a carga; a cabeça que depende de si mesma; o `SETTINGS` fora de seis em seis, com carga no `ACK` ou numa corrente; o `WINDOW_UPDATE` de zero; o `GOAWAY` numa corrente | `os_dados_com_e_sem_preenchimento`, `os_cabecalhos_com_preenchimento_e_prioridade`, `os_erros_da_conexao`, `os_ajustes_e_o_reconhecimento`, `a_janela_e_o_incremento_zero` e `o_adeus` |
+| a recusa do gate que chega ao programa como o fecho da conexão, no claro e no cifrado | `http2: o programa inteiro pelo gate`, a revogação, a contenção e o firewall no meio das correntes, e `http2: varias ao mesmo tempo` — as correntes ouviram `HTTP_CLOSED`, e não a recusa |
+| o HTTP/2 exigido sem o `h2` na oferta do ALPN; o preferido sem ele; o exigido que aceita o HTTP/1.1; sem o h2c com conhecimento prévio | `http2: o programa inteiro pelo gate` e `http2: varias ao mesmo tempo`, e os casos que vão pelo TLS ou pelo h2c: as correntes pelo TLS, a revogação, a contenção e o firewall |
+| o kernel fala do h2c; a política, do ALPN | `cargo xtask invariantes`: o HTTP/2 no kernel ou na política |
+
+**As que pediram um caso.** A janela da conexão que não reabre passou na
+primeira rodada: ela é de 16 MiB, e nenhum teste mandava mais que a
+metade disso numa conexão. O caso novo faz três respostas de 6 MiB numa
+conexão só, e confere que o servidor viu o `WINDOW_UPDATE` da conexão
+mais de uma vez. O corpo sem limite também passou: os testes do limite
+mandavam o `content-length`, e é ele que recusa a resposta antes do
+corpo chegar — a janela da corrente abre até o limite e um byte além, e
+o byte além cabia nela. O caso agora manda o corpo sem tamanho declarado:
+11 bytes contra um limite de 10 são `HTTP_TOO_LARGE`, e 10 passam.
+
+**As equivalentes.** Os dados além da janela da conexão não chegam a
+existir: a janela que este lado anuncia é de 16 MiB, e ela volta a 16 MiB
+assim que cai à metade, no mesmo quadro que a fez cair; um quadro tem no
+máximo 16 KiB — o maior é recusado antes, como quadro, e não como
+janela —, então a conta da conexão nunca fica abaixo de um quadro. A
+conferência fica, para a janela que mudar de tamanho. E o segundo
+`GOAWAY` que sobe a última corrente não muda nada: no primeiro, as
+correntes acima da última já falharam com `HTTP_STREAM_REFUSED`, e a
+conexão já não abre outras — não sobra corrente para a última nova
+alcançar.
 
 ## O tecido de segurança
 
@@ -7107,7 +7386,11 @@ padronizado.
       do HTTP](#a-compressão-do-http)); e os cookies — o pote do programa,
       com as regras da RFC 6265 e da 6265bis, na memória do processo, sem
       virar identidade nem autoridade de ninguém (ver [Os cookies do
-      HTTP](#os-cookies-do-http)).
+      HTTP](#os-cookies-do-http)); e o HTTP/2 — o cliente da RFC 9113, com
+      o HPACK, pelo ALPN no TLS ou no claro com conhecimento prévio: várias
+      correntes numa conexão que o gate decidiu pelo destino, sem que ele
+      saiba delas, e o erro de uma corrente separado do da conexão (ver [O
+      HTTP/2](#o-http2)).
 - [ ] **Fase 13 — Consentimento e auditoria.** Se um agente pode fazer tudo
       que uma pessoa faz, o modelo de permissão precisa ser **mais** forte que
       o de um desktop comum, e não mais fraco. Três coisas: quem pediu — a

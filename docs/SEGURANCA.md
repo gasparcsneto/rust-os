@@ -507,6 +507,25 @@ Não há uma segunda política para o protocolo, nem autorização paralela:
   uma conexão TLS nova inclusive — ouvem `DENY_RATE`. A segurança não
   cede; cede a conversa. O kernel e a política não falam de cookie, e o
   `xtask` confere.
+- **O HTTP/2 é do programa, e multiplexa pedidos, e não autoridade.** O
+  cliente do pacote `http` fala HTTP/2 (RFC 9113, com o HPACK da RFC 7541)
+  pelo TLS, quando o ALPN o escolhe, ou no claro, com conhecimento prévio.
+  Várias correntes numa conexão são vários pedidos de um processo só: a
+  conexão é um `net.connect` decidido pelo destino, cada envio e cada
+  leitura dela são decididos de novo, com a autoridade de quem lançou o
+  processo, e uma corrente não é uma conexão, um titular nem uma decisão —
+  o gate não sabe que elas existem. A revogação, a contenção e o firewall
+  no meio das correntes acabam com a conexão inteira, e cada corrente que
+  esperava ouve o código como veio: nem um erro do HTTP/2 no lugar da
+  recusa, nem metade de uma resposta. O servidor que reinicia ou recusa uma
+  corrente falha só ela; o que quebra o protocolo — o *push* que o cliente
+  desligou, o bloco de cabeça que não se decodifica, a enxurrada de
+  quadros sem progresso, o `GOAWAY` com erro — acaba com a conexão, e isso
+  é do programa e do servidor, não do gate. A memória de uma conexão tem
+  teto: as correntes que ela guarda, a janela de cada uma, a cabeça antes
+  e depois de decodificada; além dele, o programa ouve o código do limite.
+  O kernel e a política não falam de HTTP/2 — nem do h2c, do ALPN, do
+  HPACK ou dos quadros —, e o `xtask` confere.
 
 As falhas não se misturam. Cada uma sobe com o código de quem falhou, e a
 família dela (`http::categoria`) só o nomeia:
@@ -520,9 +539,9 @@ família dela (`http::categoria`) só o nomeia:
 | `transport` | `NETWORK_UNAVAILABLE`, `RESOURCE_LIMIT`, `CONNECTION_REFUSED`, `CONNECTION_RESET` | a rede, o teto, o outro lado |
 | `timeout` | `NETWORK_TIMEOUT` | o outro lado, que não respondeu no prazo |
 | `tls` | `TLS_*` (menos o fecho) | o TLS |
-| `closed` | `HTTP_CLOSED`, `TLS_INTERRUPTED`, `HTTP_CONNECTION_SPENT` | a conversa que acabou antes da hora |
-| `protocol` | `HTTP_MALFORMED`, `HTTP_UNACCEPTED_ENCODING`, `HTTP_CORRUPT_CONTENT` | o servidor, que não falou HTTP/1.1, mandou uma codificação que o pedido não aceitou, ou um comprimido que não se decodifica |
-| `limit` | `HTTP_TOO_LARGE` | a resposta, maior que os limites de quem pediu — o corpo como veio, ou o decodificado |
+| `closed` | `HTTP_CLOSED`, `TLS_INTERRUPTED`, `HTTP_CONNECTION_SPENT`, `HTTP_STREAM_RESET`, `HTTP_STREAM_REFUSED`, `HTTP_CONNECTION_ENDED` | a conversa que acabou antes da hora — no HTTP/2, a corrente que o servidor reiniciou ou recusou, ou a conexão que ele encerrou com erro |
+| `protocol` | `HTTP_MALFORMED`, `HTTP_UNACCEPTED_ENCODING`, `HTTP_CORRUPT_CONTENT` | o servidor, que não falou HTTP/1.1 nem HTTP/2 — ou não escolheu o HTTP/2 que o programa exigiu —, mandou uma codificação que o pedido não aceitou, ou um comprimido que não se decodifica |
+| `limit` | `HTTP_TOO_LARGE`, `HTTP_TOO_MANY_STREAMS`, `HTTP_TOO_MANY_FRAMES` | a resposta, maior que os limites de quem pediu — o corpo como veio, ou o decodificado —; no HTTP/2, as correntes que a conexão guarda, e os quadros sem progresso |
 | `request` | `INVALID_REQUEST` | o pedido, que não se escreve |
 | `local` | o resto | o programa |
 
@@ -582,8 +601,9 @@ mesma regra:
   certificado prova o nome ao programa, e não autoriza nada no gate;
 - o HTTP também: programa sobre o TCP ou o TLS, sem HTTP no kernel, sem
   comando nem permissão dele; o gate decide o destino, e o protocolo é do
-  programa — a compressão do corpo inclusive, decodificada no processo, e
-  os cookies, num pote do processo que o gate não lê;
+  programa — a compressão do corpo inclusive, decodificada no processo,
+  os cookies, num pote do processo que o gate não lê, e o HTTP/2, com o
+  ALPN no TLS: as correntes numa conexão que o gate decidiu pelo destino;
 - a conexão cortada pelo firewall guarda o número para o dono: a ordem
   continua a mesma — o gate decide, e o firewall barra depois —, e o que
   muda é só o código que o dono ouve, o do firewall;
@@ -639,9 +659,10 @@ contido pelo despertador.
   o aperto. O canal limita quanto tempo e quantas vagas um estranho
   segura, e não que ele tente.
 - **O NSF não interpreta HTTP.** Nem o método, nem o caminho, nem o
-  status, nem a codificação do corpo, nem os cookies: só as decisões do
-  gate sobre a conexão, e o nome que o DNS deu. Uma sessão roubada de um
-  servidor é problema daquele servidor; aqui, ela não abre nada.
+  status, nem a codificação do corpo, nem os cookies, nem as correntes do
+  HTTP/2: só as decisões do gate sobre a conexão, e o nome que o DNS deu.
+  Uma sessão roubada de um servidor é problema daquele servidor; aqui, ela
+  não abre nada.
   Um programa que insiste num caminho que o servidor recusa aparece como
   pedidos `ALLOW` ao mesmo destino, e não como "404 repetido".
 - **O relógio dos registros é de um segundo.** As janelas e as taxas das
