@@ -21,10 +21,10 @@ pub(crate) struct Roteiro {
     lidos: usize,
     pedaco: usize,
     /// Depois de a chegada acabar: o fecho limpo (`None`) ou esta falha.
-    fim: Option<FalhaDeTeste>,
+    pub(crate) fim: Option<FalhaDeTeste>,
     /// Uma falha no meio da chegada, depois de tantos bytes.
-    falha_em: Option<(usize, FalhaDeTeste)>,
-    falha_ao_mandar: Option<FalhaDeTeste>,
+    pub(crate) falha_em: Option<(usize, FalhaDeTeste)>,
+    pub(crate) falha_ao_mandar: Option<FalhaDeTeste>,
     pub(crate) mandado: Vec<u8>,
     recebimentos: usize,
     /// Como um servidor de verdade: a chegada até `rodadas[k]` só fica

@@ -35,13 +35,16 @@ pub enum Categoria {
     /// registro adulterado.
     Tls,
     /// A conversa acabou antes da hora: o servidor fechou no meio da
-    /// resposta, ou a conexão não leva mais pedidos.
+    /// resposta, ou a conexão não leva mais pedidos — ou, no HTTP/2, o
+    /// servidor reiniciou ou recusou a corrente, ou encerrou a conexão.
     Fechada,
-    /// O que chegou não é HTTP/1.1 que se leia: a mensagem, ou o corpo na
-    /// codificação que ela diz ter — uma que o pedido não aceitou, ou um
-    /// comprimido que não se decodifica.
+    /// O que chegou não é HTTP/1.1 nem HTTP/2 que se leia: a mensagem, os
+    /// quadros, o bloco de cabeça, ou o corpo na codificação que a mensagem
+    /// diz ter — uma que o pedido não aceitou, ou um comprimido que não se
+    /// decodifica.
     Protocolo,
-    /// A resposta passou de um limite de quem pediu.
+    /// A resposta passou de um limite de quem pediu — ou, no HTTP/2, a
+    /// conexão: correntes demais, quadros demais sem progresso.
     Limite,
     /// O pedido não se escreve: a URL, um cabeçalho, um parâmetro.
     Pedido,
@@ -85,12 +88,17 @@ pub fn categoria(codigo: &str) -> Categoria {
         // O TLS fechado sem `close_notify` é a conversa que acabou antes da
         // hora — o que chegou pode estar cortado —, como o HTTP que fecha
         // no meio da resposta.
-        "TLS_INTERRUPTED" | "HTTP_CLOSED" | "HTTP_CONNECTION_SPENT" => Categoria::Fechada,
+        "TLS_INTERRUPTED"
+        | "HTTP_CLOSED"
+        | "HTTP_CONNECTION_SPENT"
+        | "HTTP_STREAM_RESET"
+        | "HTTP_STREAM_REFUSED"
+        | "HTTP_CONNECTION_ENDED" => Categoria::Fechada,
         c if c.starts_with("TLS_") => Categoria::Tls,
         "HTTP_MALFORMED" | "HTTP_UNACCEPTED_ENCODING" | "HTTP_CORRUPT_CONTENT" => {
             Categoria::Protocolo
         }
-        "HTTP_TOO_LARGE" => Categoria::Limite,
+        "HTTP_TOO_LARGE" | "HTTP_TOO_MANY_STREAMS" | "HTTP_TOO_MANY_FRAMES" => Categoria::Limite,
         "INVALID_REQUEST" | "INVALID_ARGUMENT" => Categoria::Pedido,
         _ => Categoria::Local,
     }
@@ -128,10 +136,15 @@ mod testes {
             ("TLS_INTERRUPTED", Categoria::Fechada),
             ("HTTP_CLOSED", Categoria::Fechada),
             ("HTTP_CONNECTION_SPENT", Categoria::Fechada),
+            ("HTTP_STREAM_RESET", Categoria::Fechada),
+            ("HTTP_STREAM_REFUSED", Categoria::Fechada),
+            ("HTTP_CONNECTION_ENDED", Categoria::Fechada),
             ("HTTP_MALFORMED", Categoria::Protocolo),
             ("HTTP_UNACCEPTED_ENCODING", Categoria::Protocolo),
             ("HTTP_CORRUPT_CONTENT", Categoria::Protocolo),
             ("HTTP_TOO_LARGE", Categoria::Limite),
+            ("HTTP_TOO_MANY_STREAMS", Categoria::Limite),
+            ("HTTP_TOO_MANY_FRAMES", Categoria::Limite),
             ("INVALID_REQUEST", Categoria::Pedido),
             ("INVALID_ARGUMENT", Categoria::Pedido),
             ("ENTROPY_UNAVAILABLE", Categoria::Local),
@@ -139,6 +152,39 @@ mod testes {
             ("TECHNICAL_ERROR", Categoria::Local),
         ] {
             assert_eq!(categoria(codigo), esperada, "{codigo}");
+        }
+    }
+
+    #[test]
+    fn todo_codigo_do_http_tem_familia() {
+        use crate::{CodigoH2, Defeito, Erro, Limite, Motivo};
+        // Cada erro que o pacote dá cai numa família que não é a do
+        // desconhecido: um código novo sem família quebra aqui.
+        let mut erros: alloc::vec::Vec<Erro<()>> = alloc::vec![
+            Erro::Fechada,
+            Erro::Protocolo(Motivo::Status),
+            Erro::Protocolo(Motivo::Prefacio),
+            Erro::Esgotada,
+            Erro::Conteudo(Defeito::Codificacao),
+            Erro::Conteudo(Defeito::Soma),
+            Erro::Reiniciada(CodigoH2::CANCEL),
+            Erro::Recusada,
+            Erro::Encerrada(CodigoH2::PROTOCOL_ERROR),
+        ];
+        for l in [
+            Limite::Linha,
+            Limite::Cabeca,
+            Limite::Cabecalhos,
+            Limite::Corpo,
+            Limite::Descomprimido,
+            Limite::Correntes,
+            Limite::Quadros,
+        ] {
+            erros.push(Erro::Limite(l));
+        }
+        for e in erros {
+            let codigo = e.codigo().unwrap();
+            assert_ne!(categoria(codigo), Categoria::Local, "{e:?} {codigo}");
         }
     }
 

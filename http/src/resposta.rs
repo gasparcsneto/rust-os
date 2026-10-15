@@ -41,11 +41,11 @@ use crate::erro::{Erro, Limite, Motivo};
 use crate::pedido::{Metodo, tchar};
 
 /// Quantas respostas informativas (1xx) se aceitam antes da final.
-const MAIS_INFORMATIVAS: usize = 8;
+pub(crate) const MAIS_INFORMATIVAS: usize = 8;
 
 /// O maior pedaço que se pede ao transporte de uma vez: o buffer de uma
 /// conexão do Duke, o que um `net.recv` traz numa decisão do gate.
-const LEITURA: usize = 16 * 1024;
+pub(crate) const LEITURA: usize = 16 * 1024;
 
 /// A maior linha de tamanho de um pedaço, com as extensões.
 const MAIOR_LINHA_DE_PEDACO: usize = 1024;
@@ -54,10 +54,13 @@ const MAIOR_LINHA_DE_PEDACO: usize = 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limites {
     /// A maior linha, sem o CRLF: a de status, um cabeçalho, o tamanho de
-    /// um pedaço.
+    /// um pedaço. No HTTP/2, cada campo como seria a linha dele: o nome, `: `
+    /// e o valor.
     pub linha: usize,
     /// A cabeça inteira, com os CRLF: status e cabeçalhos — e, à parte, os
-    /// *trailers* de um corpo em pedaços.
+    /// *trailers* de um corpo em pedaços. No HTTP/2, contada como o HPACK
+    /// conta (RFC 7541, 4.1): o nome, o valor e 32 por campo — o que a
+    /// conexão anuncia no `SETTINGS_MAX_HEADER_LIST_SIZE`.
     pub cabeca: usize,
     /// Quantos cabeçalhos.
     pub cabecalhos: usize,
@@ -86,6 +89,7 @@ impl Default for Limites {
 pub enum Versao {
     Http10,
     Http11,
+    Http2,
 }
 
 /// Como o corpo foi delimitado — ver o cabeçalho do módulo.
@@ -99,6 +103,9 @@ pub enum Enquadramento {
     Pedacos,
     /// Até o servidor fechar.
     AteFechar,
+    /// HTTP/2: os `DATA` da corrente, até o `END_STREAM` — e o
+    /// `Content-Length`, se veio, conferido contra eles.
+    Quadros,
 }
 
 /// Uma resposta inteira.
@@ -125,6 +132,7 @@ pub struct Resposta {
     /// `Connection: close`, um corpo com fim certo, e nada a mais depois
     /// dele — o que já chegou colado à resposta, sem pedido que o explique,
     /// é um servidor dessincronizado, e não o começo da resposta seguinte.
+    /// No HTTP/2, a conexão viva, sem `GOAWAY` e sem pedido de fecho.
     pub reutilizavel: bool,
 }
 
@@ -226,7 +234,7 @@ impl<F: Fluxo> Entrada<'_, F> {
 }
 
 /// O valor sem o espaço opcional das pontas (`OWS`).
-fn sem_ows(mut v: &[u8]) -> &[u8] {
+pub(crate) fn sem_ows(mut v: &[u8]) -> &[u8] {
     while let [b' ' | b'\t', resto @ ..] = v {
         v = resto;
     }
@@ -238,7 +246,7 @@ fn sem_ows(mut v: &[u8]) -> &[u8] {
 
 /// Um byte que pode estar num valor de cabeçalho: visível, espaço,
 /// tabulação, ou acima do ASCII (`obs-text`).
-fn de_valor(b: u8) -> bool {
+pub(crate) fn de_valor(b: u8) -> bool {
     b == b' ' || b == b'\t' || b.is_ascii_graphic() || b >= 0x80
 }
 
@@ -366,6 +374,17 @@ fn enquadrar<F>(
     if !medido {
         return Ok(Enquadramento::AteFechar);
     }
+    let n = declarado(cabecalhos, limites)?.ok_or(Erro::Protocolo(Motivo::Tamanho))?;
+    Ok(Enquadramento::Tamanho(n))
+}
+
+/// O `Content-Length`: `None` sem nenhum; o número, quando todos os que
+/// vieram — e cada parte separada por vírgula — são o mesmo decimal; e
+/// recusado se passa do corpo de `limites`. Do HTTP/1.1 e do HTTP/2.
+pub(crate) fn declarado<F>(
+    cabecalhos: &[(String, String)],
+    limites: &Limites,
+) -> Result<Option<u64>, Erro<F>> {
     let mut tamanho = None;
     for parte in cabecalhos
         .iter()
@@ -389,11 +408,10 @@ fn enquadrar<F>(
             Some(_) => return Err(Erro::Protocolo(Motivo::Tamanho)),
         }
     }
-    let n = tamanho.ok_or(Erro::Protocolo(Motivo::Tamanho))?;
-    if n > limites.corpo as u64 {
+    if tamanho.is_some_and(|n| n > limites.corpo as u64) {
         return Err(Erro::Limite(Limite::Corpo));
     }
-    Ok(Enquadramento::Tamanho(n))
+    Ok(tamanho)
 }
 
 /// O tamanho de um pedaço: hexadecimal, e as extensões depois de `;`,
@@ -466,7 +484,8 @@ fn ler_corpo<F: Fluxo>(
     limites: &Limites,
 ) -> Result<Vec<u8>, Erro<F::Falha>> {
     match enquadramento {
-        Enquadramento::Nenhum => Ok(Vec::new()),
+        // Os quadros são do HTTP/2: `enquadrar` não os dá.
+        Enquadramento::Nenhum | Enquadramento::Quadros => Ok(Vec::new()),
         Enquadramento::Tamanho(n) => {
             // `n` já passou pelo limite do corpo.
             let mut corpo = Vec::with_capacity(n as usize);
@@ -533,7 +552,8 @@ pub(crate) fn ler<F: Fluxo>(
         let conexao =
             |token: &str| lista(&cabecalhos, "connection").any(|t| t.eq_ignore_ascii_case(token));
         let manter = match versao {
-            Versao::Http11 => !conexao("close"),
+            // `ler_status` não dá o HTTP/2: ele não tem linha de status.
+            Versao::Http11 | Versao::Http2 => !conexao("close"),
             Versao::Http10 => conexao("keep-alive") && !conexao("close"),
         };
         let reutilizavel =

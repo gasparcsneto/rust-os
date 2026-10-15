@@ -200,6 +200,22 @@ impl<'a> Agora<'a> {
         Agora { ler, lido: None }
     }
 
+    /// O mesmo tempo de uma leitura anterior da mesma troca — `lido`, de
+    /// [`Agora::lido`] —, ou o de `ler`, se ela não leu. No HTTP/2 o pedido
+    /// sai numa chamada e a resposta chega noutra, e o relógio continua
+    /// sendo lido uma vez só por troca.
+    pub(crate) fn continuando(
+        ler: &'a mut dyn FnMut() -> Option<u64>,
+        lido: Option<Option<u64>>,
+    ) -> Agora<'a> {
+        Agora { ler, lido }
+    }
+
+    /// O que já se leu: `None`, nada; `Some(None)`, a falta de relógio.
+    pub(crate) fn lido(&self) -> Option<Option<u64>> {
+        self.lido
+    }
+
     /// O tempo de agora, lido na primeira vez.
     fn valor(&mut self) -> Option<u64> {
         if let Some(v) = self.lido {

@@ -141,6 +141,9 @@ fn do_http<F>(e: http::Erro<F>, baixo: impl FnOnce(F) -> Falha) -> Falha {
         http::Erro::Limite(l) => Falha::Http(http::Erro::Limite(l)),
         http::Erro::Esgotada => Falha::Http(http::Erro::Esgotada),
         http::Erro::Conteudo(d) => Falha::Http(http::Erro::Conteudo(d)),
+        http::Erro::Reiniciada(c) => Falha::Http(http::Erro::Reiniciada(c)),
+        http::Erro::Recusada => Falha::Http(http::Erro::Recusada),
+        http::Erro::Encerrada(c) => Falha::Http(http::Erro::Encerrada(c)),
     }
 }
 

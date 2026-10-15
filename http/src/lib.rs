@@ -1,5 +1,5 @@
-//! O HTTP do Duke: o cliente HTTP/1.1 com que um programa conversa com um
-//! servidor.
+//! O HTTP do Duke: o cliente HTTP/1.1 e HTTP/2 com que um programa conversa
+//! com um servidor.
 //!
 //! # O que é, e o que não é
 //!
@@ -26,6 +26,13 @@
 //! - [`Cliente`]: manda o pedido e lê a resposta pelo [`Fluxo`] de quem
 //!   chama — com `Content-Length`, em pedaços (`chunked`) ou até o fecho —,
 //!   e reaproveita a conexão quando a resposta deixa;
+//! - [`ClienteH2`]: o HTTP/2 (RFC 9113) — vários pedidos ao mesmo tempo
+//!   numa conexão, cada um a sua [`Corrente`], lidos num fio só; os quadros,
+//!   o HPACK (RFC 7541) com a tabela dinâmica do servidor, a janela de cada
+//!   corrente e a da conexão, e o erro que é só da corrente ou da conexão
+//!   inteira. As correntes são todas do mesmo processo, e cada `net.send` e
+//!   `net.recv` da conexão continua decidido pelo gate: o HTTP/2 não cria
+//!   autoridade nenhuma, nem para a conexão, nem para a corrente;
 //! - [`Codificacao`]: o corpo comprimido — `gzip` e `deflate` —, negociado
 //!   pelo pedido ([`Aceitas`]) e decodificado aqui, com um teto fixado
 //!   antes de descomprimir ([`codificacao`]). A
@@ -51,11 +58,12 @@
 //!
 //! # O que fica de fora, de propósito
 //!
-//! HTTP/2 e HTTP/3, pedidos em fila, autenticação, *proxy*, a compressão do
-//! pedido, o `Transfer-Encoding` que não é `chunked`, o Brotli, guardar
-//! cookies além do processo e seguir redirecionamento sozinho: uma
-//! resposta `3xx` volta a quem chama com o `Location`, e ir até lá é outro
-//! pedido — outro nome no DNS, outro destino no gate.
+//! HTTP/3, pedidos em fila no HTTP/1.1, o *push* e a prioridade do HTTP/2,
+//! autenticação, *proxy*, a compressão do pedido, o `Transfer-Encoding` que
+//! não é `chunked`, o Brotli, guardar cookies além do processo e seguir
+//! redirecionamento sozinho: uma resposta `3xx` volta a quem chama com o
+//! `Location`, e ir até lá é outro pedido — outro nome no DNS, outro
+//! destino no gate.
 
 #![cfg_attr(not(test), no_std)]
 
@@ -66,8 +74,12 @@ mod cliente;
 pub mod codificacao;
 pub mod cookies;
 mod erro;
+mod h2;
+mod hpack;
+mod huffman;
 mod inflar;
 mod pedido;
+mod quadro;
 mod resposta;
 mod url;
 
@@ -76,7 +88,13 @@ mod testes;
 #[cfg(test)]
 mod testes_da_codificacao;
 #[cfg(test)]
+mod testes_do_h2;
+#[cfg(test)]
+mod testes_do_hpack;
+#[cfg(test)]
 mod testes_dos_cookies;
+#[cfg(test)]
+mod testes_dos_quadros;
 
 pub use categoria::{Categoria, categoria};
 pub use cliente::{Cliente, Fluxo};
@@ -85,6 +103,8 @@ pub use cookies::{
     Agora, Contexto, Guardado, Guardados, LimitesDoPote, MesmoSite, Pote, Recusa as RecusaDeCookie,
 };
 pub use erro::{Defeito, Erro, Limite, Motivo};
+pub use h2::{AjustesH2, ClienteH2, Corrente};
 pub use pedido::{ErroDePedido, Metodo, Pedido};
+pub use quadro::CodigoH2;
 pub use resposta::{Enquadramento, Limites, Resposta, Versao};
 pub use url::{ErroDeUrl, Esquema, Host, MAIOR_URL, Url};

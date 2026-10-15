@@ -1,6 +1,6 @@
 //! Por que uma troca HTTP não terminou com uma resposta.
 //!
-//! Cinco famílias que não se confundem:
+//! Seis famílias que não se confundem:
 //!
 //! - **a de baixo** ([`Erro::Baixo`]): o transporte falhou — o gate recusou
 //!   um `net.recv`, o firewall barrou, o TLS não conferiu, o par não
@@ -10,9 +10,15 @@
 //!   antes de a resposta estar inteira — sem resposta nenhuma, no meio dos
 //!   cabeçalhos, ou antes do fim que o corpo prometia. O que chegou não é
 //!   entregue: uma resposta cortada não é uma resposta;
-//! - **o protocolo** ([`Erro::Protocolo`]): o que chegou não é HTTP/1.1, ou
-//!   é ambíguo de um jeito que deixaria cliente e servidor lerem coisas
-//!   diferentes;
+//! - **a corrente que o servidor largou**, no HTTP/2 ([`Erro::Reiniciada`],
+//!   [`Erro::Recusada`], [`Erro::Encerrada`]): o servidor reiniciou a
+//!   corrente, não chegou a processá-la, ou encerrou a conexão com um erro
+//!   antes da resposta. Como a conexão que acabou cedo, o que chegou não é
+//!   entregue — e a recusada pode ir noutra conexão, porque o servidor diz
+//!   que não fez nada com ela;
+//! - **o protocolo** ([`Erro::Protocolo`]): o que chegou não é HTTP/1.1 nem
+//!   HTTP/2, ou é ambíguo de um jeito que deixaria cliente e servidor lerem
+//!   coisas diferentes;
 //! - **os limites** ([`Erro::Limite`]): uma linha, os cabeçalhos, o
 //!   corpo ou o corpo decodificado passaram do que quem chama aceita. O
 //!   cliente para de ler — ou de decodificar — ali, e a memória não cresce
@@ -25,7 +31,9 @@
 //! Nenhuma delas vira resposta. Um status de erro do servidor — um 404, um
 //! 500 — não está aqui: é uma resposta, o protocolo funcionou.
 
-/// Por que o que chegou não é uma resposta HTTP/1.1.
+use crate::quadro::CodigoH2;
+
+/// Por que o que chegou não é uma resposta HTTP/1.1 ou HTTP/2.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Motivo {
     /// Uma linha que não acaba em CRLF: um LF sozinho, ou um CR no meio.
@@ -56,6 +64,29 @@ pub enum Motivo {
     /// Um pedaço (`chunked`) malformado: o tamanho não é hexadecimal, ou o
     /// dado não acaba em CRLF.
     Pedaco,
+    /// HTTP/2: o servidor não começou com o prefácio dele — um `SETTINGS`.
+    /// Um servidor que só fala HTTP/1.1 cai aqui.
+    Prefacio,
+    /// HTTP/2: um quadro que a RFC 9113 recusa — o tamanho, a corrente
+    /// zero onde não pode, o preenchimento, um ajuste fora da faixa, um
+    /// quadro no meio de um bloco de cabeça, uma corrente que o servidor não
+    /// pode abrir.
+    Quadro,
+    /// HTTP/2: o bloco de cabeça não se decodifica (HPACK). A tabela
+    /// dinâmica fica sem saber o que é, e a conexão inteira acaba.
+    Compressao,
+    /// HTTP/2: o controle de fluxo — o servidor mandou além da janela, ou
+    /// passou do maior tamanho de uma.
+    Janela,
+    /// HTTP/2: um quadro numa corrente que já acabou.
+    Corrente,
+    /// HTTP/2: a mensagem malformada (RFC 9113, 8.1.1) — sem `:status`, um
+    /// pseudo-cabeçalho onde não pode, um cabeçalho da conexão
+    /// (`Connection`, `Transfer-Encoding`...), dados antes da cabeça, uma
+    /// informativa que acaba a corrente, *trailers* que não a acabam.
+    Mensagem,
+    /// HTTP/2: um `PUSH_PROMISE`, que este cliente desliga no prefácio.
+    Empurrado,
 }
 
 /// Por que o corpo codificado não se decodifica — ver
@@ -107,6 +138,13 @@ impl Motivo {
             Motivo::Codificacao => "transfer-encoding",
             Motivo::Ambiguo => "ambiguous-framing",
             Motivo::Pedaco => "chunk",
+            Motivo::Prefacio => "preface",
+            Motivo::Quadro => "frame",
+            Motivo::Compressao => "hpack",
+            Motivo::Janela => "flow-control",
+            Motivo::Corrente => "stream-state",
+            Motivo::Mensagem => "message",
+            Motivo::Empurrado => "push",
         }
     }
 }
@@ -124,6 +162,12 @@ pub enum Limite {
     Corpo,
     /// O corpo decodificado: o que sai do decodificador.
     Descomprimido,
+    /// HTTP/2: correntes abertas demais na conexão — as deste lado, ou as
+    /// que o servidor aceita.
+    Correntes,
+    /// HTTP/2: quadros demais sem levar a resposta adiante — `PING`,
+    /// `SETTINGS`, quadros vazios ou desconhecidos, `CONTINUATION` sem fim.
+    Quadros,
 }
 
 impl Limite {
@@ -134,6 +178,8 @@ impl Limite {
             Limite::Cabecalhos => "headers",
             Limite::Corpo => "body",
             Limite::Descomprimido => "decoded-body",
+            Limite::Correntes => "streams",
+            Limite::Quadros => "frames",
         }
     }
 }
@@ -155,6 +201,16 @@ pub enum Erro<F> {
     Esgotada,
     /// O corpo não se decodifica.
     Conteudo(Defeito),
+    /// HTTP/2: o servidor reiniciou a corrente (`RST_STREAM`) antes de a
+    /// resposta estar inteira, com este código.
+    Reiniciada(CodigoH2),
+    /// HTTP/2: o servidor não processou o pedido — `REFUSED_STREAM`, ou uma
+    /// corrente acima da última que o `GOAWAY` dele diz ter processado. O
+    /// pedido pode ir noutra conexão.
+    Recusada,
+    /// HTTP/2: o servidor encerrou a conexão (`GOAWAY`) com este erro antes
+    /// de a resposta estar inteira.
+    Encerrada(CodigoH2),
 }
 
 impl<F> Erro<F> {
@@ -165,10 +221,15 @@ impl<F> Erro<F> {
             Erro::Baixo(_) => None,
             Erro::Fechada => Some("HTTP_CLOSED"),
             Erro::Protocolo(_) => Some("HTTP_MALFORMED"),
+            Erro::Limite(Limite::Correntes) => Some("HTTP_TOO_MANY_STREAMS"),
+            Erro::Limite(Limite::Quadros) => Some("HTTP_TOO_MANY_FRAMES"),
             Erro::Limite(_) => Some("HTTP_TOO_LARGE"),
             Erro::Esgotada => Some("HTTP_CONNECTION_SPENT"),
             Erro::Conteudo(Defeito::Codificacao) => Some("HTTP_UNACCEPTED_ENCODING"),
             Erro::Conteudo(_) => Some("HTTP_CORRUPT_CONTENT"),
+            Erro::Reiniciada(_) => Some("HTTP_STREAM_RESET"),
+            Erro::Recusada => Some("HTTP_STREAM_REFUSED"),
+            Erro::Encerrada(_) => Some("HTTP_CONNECTION_ENDED"),
         }
     }
 }

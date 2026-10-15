@@ -48,7 +48,7 @@ impl Metodo {
     /// O método leva corpo: o `Content-Length` vai sempre, mesmo zero —
     /// um servidor que espera um corpo e não sabe o tamanho esperaria o
     /// fecho.
-    const fn leva_corpo(self) -> bool {
+    pub(crate) const fn leva_corpo(self) -> bool {
         matches!(self, Metodo::Post | Metodo::Put)
     }
 }

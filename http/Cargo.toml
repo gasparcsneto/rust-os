@@ -1,7 +1,7 @@
 [package]
-# O HTTP do Duke: o cliente HTTP/1.1 com que um programa conversa com um
-# servidor, sobre a conexão que o gate decidiu — TCP direto, ou o TLS do
-# pacote `tls` por cima dela.
+# O HTTP do Duke: o cliente HTTP/1.1 e HTTP/2 com que um programa conversa
+# com um servidor, sobre a conexão que o gate decidiu — TCP direto, ou o TLS
+# do pacote `tls` por cima dela.
 #
 # Só o protocolo: escrever o pedido, ler a resposta, e os limites de cada
 # parte. O transporte é de quem chama — num programa do Duke, `net.send` e
@@ -13,6 +13,12 @@
 # delimitar o corpo —, e o que importa nele é o que se recusa, que um
 # pacote de fora decide por quem o escreveu.
 #
+# O HTTP/2 também (`src/h2.rs`, `src/quadro.rs`, `src/hpack.rs`,
+# `src/huffman.rs`): quadros, janelas e HPACK são contas e estados que cabem
+# aqui, e o que importa neles — de novo — é o que se recusa. As tabelas da RFC
+# 7541 foram transcritas de duas implementações independentes e conferidas
+# entre si, e os testes conversam com o `nghttpd`, a referência da nghttp2.
+#
 # A descompressão do corpo também (`src/codificacao.rs`, `src/inflar.rs`):
 # o gzip, o zlib e o DEFLATE que eles levam são lidos aqui, com o teto de
 # quem chama, e o pacote continua sem dependência nenhuma — o `xtask`
@@ -22,7 +28,7 @@
 name = "http"
 version = "0.1.0"
 edition = "2024"
-description = "O cliente HTTP/1.1 dos programas do Duke"
+description = "O cliente HTTP/1.1 e HTTP/2 dos programas do Duke"
 license = "MIT OR Apache-2.0"
 
 [dependencies]

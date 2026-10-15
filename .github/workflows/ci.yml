@@ -72,10 +72,14 @@ jobs:
       # um TPM 2.0 de verdade, a implementação de referência — e por isso
       # precisa dele instalado aqui também. Sem ele o teste falha, e não
       # pula: um teste que passa quando o que ele testa não existe mente.
-      - name: O TPM dos testes do hospedeiro
+      #
+      # E o HTTP/2 dos programas, que conversa nos testes com o `nghttpd` —
+      # o servidor da nghttp2, a biblioteca de HTTP/2 do `curl` —, pela
+      # mesma razão.
+      - name: O TPM e o servidor HTTP/2 dos testes do hospedeiro
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends swtpm
+          sudo apt-get install -y --no-install-recommends swtpm nghttp2-server
 
       - name: Testes no hospedeiro
         run: cargo test -p xtask -p tipografia -p aparencia -p toolkit -p sigilo -p politica -p ancora -p diario -p armazem -p seguranca -p tls -p http -p protocolo --features protocolo/alloc
