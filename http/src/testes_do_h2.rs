@@ -629,6 +629,28 @@ fn a_janela_da_corrente_esperada_abre_de_uma_vez() {
     assert_eq!(janelas.len(), 1, "{janelas:?}");
 }
 
+/// A janela da conexão se reabre: três corpos de 6 MiB na mesma conexão,
+/// um depois do outro — 18 MiB, mais que os 16 MiB que o cliente anuncia
+/// no prefácio —, e o cliente a reabre quando ela cai à metade. Sem isso, o
+/// servidor pararia no meio do terceiro, esperando janela.
+#[test]
+fn a_janela_da_conexao_se_reabre() {
+    let mut c = cliente(Servidor::novo(rotas_padrao));
+    let limites = Limites {
+        corpo: 7 << 20,
+        ..Limites::default()
+    };
+    for _ in 0..3 {
+        let r = c.trocar(&get("http://h/n/6291456"), &limites).unwrap();
+        assert_eq!(r.corpo, corpo_de("/6291456"));
+    }
+    let s = c.devolver();
+    // A do prefácio, de 64 KiB a 16 MiB; depois, as que a reabriram.
+    let janelas = s.janelas_para(0);
+    assert_eq!(janelas.first(), Some(&((1 << 24) - 65_535)), "{janelas:?}");
+    assert!(janelas.len() >= 2, "{janelas:?}");
+}
+
 #[test]
 fn a_corrente_parada_segura_so_a_janela_dela() {
     let mut s = Servidor::novo(rotas_padrao);
@@ -1329,6 +1351,19 @@ fn os_limites_da_resposta_sao_da_corrente() {
         false,
     );
     assert_eq!(corpo(&grande), Err(Erro::Limite(Limite::Corpo)));
+    // Sem ele, o limite vale para o que chega.
+    let sem_tamanho = [
+        cabeca(1, &bloco(&[(":status", "200")]), false),
+        dados(1, &[1; 11], true),
+    ]
+    .concat();
+    assert_eq!(corpo(&sem_tamanho), Err(Erro::Limite(Limite::Corpo)));
+    let sem_tamanho = [
+        cabeca(1, &bloco(&[(":status", "200")]), false),
+        dados(1, &[1; 10], true),
+    ]
+    .concat();
+    assert_eq!(corpo(&sem_tamanho).unwrap().corpo, [1; 10]);
     let cabecalhos = limites(Limites {
         cabecalhos: 2,
         ..Limites::default()
