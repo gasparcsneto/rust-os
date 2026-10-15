@@ -11504,7 +11504,7 @@ const DO_H2: [&str; 9] = [
 /// alcance. Daqui, o que o kernel viu, registro a registro desde antes do
 /// lançamento: as decisões do processo, todas deixadas menos a do destino
 /// fora do alcance; nenhum pedido que o HTTP não fazia; uma conexão para
-/// muitas correntes — onze, e não uma por pedido —; nada do HTTP/2 em
+/// muitas correntes — catorze, e não uma por pedido —; nada do HTTP/2 em
 /// registro nenhum; nenhuma recusa por taxa e nenhum registro perdido.
 fn sob_o_http2(
     arch: Arquitetura,
@@ -11536,6 +11536,34 @@ fn sob_o_http2(
     let antes = contas_do_orcamento(&pedir("security.metrics", "{}")?)?;
     let inicio = numero_no_caminho(&pedir("audit.head", "{}")?, &["seq"])
         .ok_or("http2: o audit.head nao disse o numero")?;
+    // O log desde aqui, registro a registro: o `cookies`, da perna de antes,
+    // sai com o mesmo código, e o fim dele ainda está na cauda.
+    let registros_do_log = |resposta: &str| -> Result<Vec<(u64, String, String)>, String> {
+        let registros = objetos_planos(
+            apos(resposta, r#""records":["#).ok_or("http2: log.tail sem registros")?,
+        )?;
+        Ok(registros
+            .iter()
+            .filter_map(|campos| {
+                let campo = |nome: &str| {
+                    campos
+                        .iter()
+                        .find(|(n, _)| n == nome)
+                        .and_then(|(_, v)| v.clone())
+                };
+                Some((
+                    campo("seq")?.parse().ok()?,
+                    campo("subsystem")?,
+                    campo("message")?,
+                ))
+            })
+            .collect())
+    };
+    let do_log = registros_do_log(&pedir("log.tail", r#"{"count":1}"#)?)?
+        .iter()
+        .map(|(seq, ..)| *seq)
+        .max()
+        .ok_or("http2: o log.tail nao disse o numero")?;
     let comeco = std::time::Instant::now();
     let mut operador = AgenteNaPorta::conectar(arch, 2)?;
     let lancado = operador.pedir(
@@ -11548,23 +11576,30 @@ fn sob_o_http2(
     let limite = comeco + Duration::from_secs(300);
     let mut ditas: Vec<String> = Vec::new();
     loop {
-        let log = pedir("log.tail", r#"{"count":32}"#)?;
-        for pedaco in log.split("correntes: ").skip(1) {
-            let linha = format!("correntes: {}", pedaco.split('"').next().unwrap_or(""));
-            if !ditas.contains(&linha) {
-                ditas.push(linha);
+        let novos: Vec<_> = registros_do_log(&pedir("log.tail", r#"{"count":32}"#)?)?
+            .into_iter()
+            .filter(|(seq, subsistema, _)| *seq > do_log && subsistema == "usuario")
+            .map(|(_, _, mensagem)| mensagem)
+            .collect();
+        for linha in novos.iter().filter(|l| l.starts_with("correntes: ")) {
+            if !ditas.contains(linha) {
+                ditas.push(linha.clone());
             }
         }
-        if log.contains("processo encerrou com codigo 99") {
+        let saida = novos
+            .iter()
+            .filter_map(|l| {
+                l.strip_prefix("processo encerrou com codigo ")?
+                    .parse::<u32>()
+                    .ok()
+            })
+            .next_back();
+        if saida == Some(99) {
             break;
         }
         // Saiu com um dos códigos de falha dele (40 a 49): o que ele disse
         // diz o quê, sem esperar o teto.
-        let falhou = log
-            .split("processo encerrou com codigo ")
-            .skip(1)
-            .filter_map(|r| r.split('"').next()?.parse::<u32>().ok())
-            .find(|c| (40..=49).contains(c));
+        let falhou = saida.filter(|c| (40..=49).contains(c));
         if let Some(codigo) = falhou {
             return Err(format!(
                 "http2: o programa saiu com {codigo}\n  {}",
@@ -11605,7 +11640,7 @@ fn sob_o_http2(
         "HTTP_TOO_LARGE so na corrente, e a conexao segue",
         "reiniciada e recusada so na corrente: HTTP_STREAM_RESET HTTP_STREAM_REFUSED",
         "a conexao acaba inteira, a outra corrente junto: HTTP_MALFORMED HTTP_MALFORMED HTTP_TOO_MANY_FRAMES HTTP_CONNECTION_ENDED",
-        "o ALPN pelo TLS: Http2 Http2, Preferir2 Http2, Http1 Http11",
+        "o ALPN: Http2 Http2, Preferir2 Http2, Http1 Http11; antigo: Preferir2 Http11, Http2 HTTP_MALFORMED; claro: Preferir2 Http11",
         "40 pedidos, no maximo 16 guardados: HTTP_TOO_MANY_STREAMS, e a mais antiga recebida antes da seguinte",
         "http://bancada.duke:81 pelo HTTP/2 -> denied DENY_RESOURCE",
         "tudo conferiu",
@@ -11695,12 +11730,13 @@ fn sob_o_http2(
             "http2: as decisoes do programa nao foram as do HTTP: {decisoes:?}"
         ));
     }
-    // Oito ao claro — a das correntes, as quatro dos servidores que quebram
-    // o protocolo e as três da medida — e três ao cifrado, uma por oferta do
-    // ALPN: uma decisão por conexão, e não por corrente.
+    // Nove ao claro — a das correntes, as quatro dos servidores que quebram
+    // o protocolo, a do HTTP/2 preferido sem conhecimento prévio e as três
+    // da medida — e cinco ao cifrado, uma por oferta do ALPN e duas pelo
+    // nome que não fala HTTP/2: uma decisão por conexão, e não por corrente.
     let esperadas: std::collections::BTreeMap<String, u64> = [
-        ("tcp:10.0.2.100:80".to_string(), 8),
-        ("tcp:10.0.2.100:8443".to_string(), 3),
+        ("tcp:10.0.2.100:80".to_string(), 9),
+        ("tcp:10.0.2.100:8443".to_string(), 5),
     ]
     .into_iter()
     .collect();
@@ -11720,7 +11756,7 @@ fn sob_o_http2(
         ));
     }
     println!(
-        "  [http2] ok  o correntes do operador saiu com 99 em {} ms: o h2c, as correntes ao mesmo tempo, o eco, o gzip e os cookies, o limite, os servidores que reiniciam, recusam e quebram o protocolo, o ALPN e o teto das correntes guardadas; {vistos} registros da auditoria lidos, nenhum com o HTTP/2; uma decisao por conexao, onze, e nenhuma por corrente; as decisoes do processo todas deixadas, menos a do destino fora do alcance",
+        "  [http2] ok  o correntes do operador saiu com 99 em {} ms: o h2c, as correntes ao mesmo tempo, o eco, o gzip e os cookies, o limite, os servidores que reiniciam, recusam e quebram o protocolo, o ALPN, com o servidor que nao fala HTTP/2, e o teto das correntes guardadas; {vistos} registros da auditoria lidos, nenhum com o HTTP/2; uma decisao por conexao, catorze, e nenhuma por corrente; as decisoes do processo todas deixadas, menos a do destino fora do alcance",
         duracao.as_millis()
     );
     for medida in ditas.iter().filter(|l| {

@@ -39567,11 +39567,13 @@ fn no_meio_das_correntes(b: &Buscador, espera_ms: i64) -> Result<u64, &'static s
 ///   destinos da bancada, a semente e o relógio do TLS, a âncora e o tempo
 ///   desde o boot. Nenhum pedido novo, nenhuma permissão nova: o HTTP/2 é
 ///   do programa;
-/// - uma conexão para muitas correntes: oito ao servidor claro — a das
-///   correntes, as quatro dos servidores que quebram o protocolo e as três
-///   da medida —, três ao cifrado — uma por oferta do ALPN —, e a porta ao
-///   lado, `DENY_RESOURCE`, uma vez. O gate decide destinos; uma corrente
-///   é envio e leitura da conexão do processo, e não uma conexão;
+/// - uma conexão para muitas correntes: nove ao servidor claro — a das
+///   correntes, as quatro dos servidores que quebram o protocolo, a do
+///   HTTP/2 preferido sem conhecimento prévio e as três da medida —, cinco
+///   ao cifrado — uma por oferta do ALPN, e duas pelo nome em que o servidor
+///   não fala HTTP/2 —, e a porta ao lado, `DENY_RESOURCE`, uma vez. O gate
+///   decide destinos; uma corrente é envio e leitura da conexão do
+///   processo, e não uma conexão;
 /// - tudo deixado, em nome da pessoa, menos o destino fora do alcance. O
 ///   `RST_STREAM`, o `GOAWAY` e a enxurrada de `PING` são falhas do
 ///   programa, e não do gate: as leituras deles foram deixadas;
@@ -39638,7 +39640,7 @@ fn http2_o_programa_inteiro_pelo_gate() -> Resultado {
             conexoes(HTTP_CIFRADO),
             conexoes("tcp:10.0.2.100:81"),
         );
-        if contadas != (8, 3, 1) {
+        if contadas != (9, 5, 1) {
             crate::log_error!("teste", "conexoes (claras, cifradas, fora): {:?}", contadas);
             return Err("as conexoes do HTTP/2 nao foram uma por conexao do programa");
         }

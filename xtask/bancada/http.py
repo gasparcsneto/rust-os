@@ -102,10 +102,22 @@ import time
 import urllib.parse
 import zlib
 
-# O vizinho `http2.py` e importado daqui: sem o cache de bytecode, que o
-# Python escreveria ao lado dele, dentro do repositorio.
+# O vizinho `http2.py` e importado so pela conexao que fala HTTP/2 - ver
+# `h2()` -, e sem o cache de bytecode, que o Python escreveria ao lado dele,
+# dentro do repositorio.
 sys.dont_write_bytecode = True
-import http2  # noqa: E402
+
+# O prefacio do HTTP/2: o comeco de uma conexao clara com conhecimento
+# previo (RFC 9113, 3.4).
+PREFACIO_H2 = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+
+
+def h2():
+    """O modulo do HTTP/2. Cada conexao e um processo novo, e compilar o
+    `http2.py` custa uns 15 ms: a conexao HTTP/1.1 nao paga por ele."""
+    import http2
+
+    return http2
 
 # As respostas malformadas de /torto/<tipo>: cada uma quebra uma regra da
 # RFC 9112 que o cliente tem de recusar.
@@ -381,7 +393,7 @@ class Fechou(Exception):
     """O cliente fechou, ou mandou o que nao e HTTP."""
 
 
-def contexto(diretorio, nome):
+def contexto(diretorio, nome, protocolos=("h2", "http/1.1")):
     c = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     c.minimum_version = ssl.TLSVersion.TLSv1_3
     c.load_cert_chain(
@@ -390,7 +402,7 @@ def contexto(diretorio, nome):
     )
     # O ALPN: o HTTP/2 para quem o oferece, o HTTP/1.1 para quem oferece
     # so ele. Quem nao oferece nada fala HTTP/1.1, como sempre.
-    c.set_alpn_protocols(["h2", "http/1.1"])
+    c.set_alpn_protocols(list(protocolos))
     return c
 
 
@@ -399,6 +411,8 @@ def cifrar(diretorio, cru):
     outros = {
         "estranho.duke": contexto(diretorio, "estranho"),
         "vencido.duke": contexto(diretorio, "vencido"),
+        # Um servidor que nao fala HTTP/2: o ALPN so escolhe o HTTP/1.1.
+        "antigo.duke": contexto(diretorio, "antigo", ("http/1.1",)),
     }
 
     def pelo_nome(conexao, nome, _contexto):
@@ -626,14 +640,14 @@ def de_h1(cru):
         nome, _, valor = linha.partition(":")
         if nome.strip().lower() not in DA_CONEXAO:
             cabecalhos.append((nome.strip(), valor.strip()))
-    return http2.Resposta2(status, cabecalhos, corpo)
+    return h2().Resposta2(status, cabecalhos, corpo)
 
 
 def rota_h2(diretorio, cifrado):
     """A funcao que responde os pedidos de uma conexao HTTP/2."""
 
     def responder(metodo, alvo, cabecalhos, corpo, numero):
-        R = http2.Resposta2
+        R = h2().Resposta2
         dos_cookies = (
             rota_dos_cookies(alvo, cabecalhos, [], cifrado, diretorio) if metodo == "GET" else None
         )
@@ -695,7 +709,7 @@ def rota_h2(diretorio, cifrado):
 def espiar(conexao):
     """O comeco da conexao, ate dar para dizer se e o prefacio do HTTP/2."""
     dados = b""
-    while len(dados) < len(http2.PREFACIO) and http2.PREFACIO.startswith(dados):
+    while len(dados) < len(PREFACIO_H2) and PREFACIO_H2.startswith(dados):
         pedaco = conexao.recv(65536)
         if not pedaco:
             break
@@ -718,11 +732,11 @@ def main():
         conexao = cifrar(diretorio, cru) if cifrado else cru
         with conexao:
             if cifrado and conexao.selected_alpn_protocol() == "h2":
-                http2.servir(conexao, rota_h2(diretorio, cifrado), log)
+                h2().servir(conexao, rota_h2(diretorio, cifrado), log)
             else:
                 inicio = b"" if cifrado else espiar(conexao)
-                if inicio.startswith(http2.PREFACIO):
-                    http2.servir(conexao, rota_h2(diretorio, cifrado), log, inicio)
+                if inicio.startswith(PREFACIO_H2):
+                    h2().servir(conexao, rota_h2(diretorio, cifrado), log, inicio)
                 else:
                     atender(conexao, log, diretorio, cifrado, inicio)
             if cifrado:

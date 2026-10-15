@@ -18,7 +18,9 @@
 //!   erro — acaba com a conexão inteira, e cada corrente que esperava ouve o
 //!   mesmo código;
 //! - pelo TLS, o ALPN: o HTTP/2 só, o HTTP/2 se o servidor quiser, e o
-//!   HTTP/1.1 sem oferecer nada;
+//!   HTTP/1.1 sem oferecer nada; e o servidor que não fala HTTP/2 — o
+//!   `antigo.duke`, o mesmo destino —: o HTTP/1.1 de reserva, e a recusa de
+//!   quem exige o HTTP/2;
 //! - a medida: os mesmos pedidos pelo HTTP/1.1 numa conexão mantida, pelo
 //!   HTTP/2 um de cada vez, e pelo HTTP/2 todos ao mesmo tempo;
 //! - fora do alcance, a recusa é do gate, `DENY_RESOURCE`, antes do
@@ -82,6 +84,9 @@ const BANCADA: [u8; 4] = [10, 0, 2, 100];
 
 const CLARA: &str = "http://bancada.duke";
 const CIFRADA: &str = "https://bancada.duke:8443";
+/// O mesmo servidor e o mesmo destino, por um nome em que o ALPN só oferece
+/// o HTTP/1.1.
+const ANTIGA: &str = "https://antigo.duke:8443";
 
 /// As opções de sempre, com o `protocolo`.
 fn opcoes<'a>(ancoras: &'a tls::Ancoras, protocolo: Protocolo) -> Opcoes<'a> {
@@ -357,28 +362,59 @@ fn hostis_da_conexao(opcoes: &Opcoes<'_>) -> Result<(), i64> {
 }
 
 /// Pelo TLS, o ALPN: o HTTP/2 só, o HTTP/2 se o servidor quiser, e o
-/// HTTP/1.1 sem oferecer nada.
+/// HTTP/1.1 sem oferecer nada. Pelo servidor que não fala HTTP/2, o HTTP/1.1
+/// de reserva, e a recusa de quem exige o HTTP/2 — depois do aperto, pelo
+/// programa: o destino é o mesmo, e o gate o deixou. E no claro, sem
+/// conhecimento prévio, o HTTP/1.1.
 fn alpn(ancoras: &tls::Ancoras) -> Result<(), i64> {
-    let mut vistos = Vec::new();
-    for (protocolo, esperada) in [
-        (Protocolo::Http2, Versao::Http2),
-        (Protocolo::Preferir2, Versao::Http2),
-        (Protocolo::Http1, Versao::Http11),
+    // O que se viu em cada origem — numa linha que cabe num registro do log.
+    let (mut cifrada, mut antiga, mut clara) = (Vec::new(), Vec::new(), Vec::new());
+    for (origem, protocolo, esperada) in [
+        (CIFRADA, Protocolo::Http2, Versao::Http2),
+        (CIFRADA, Protocolo::Preferir2, Versao::Http2),
+        (CIFRADA, Protocolo::Http1, Versao::Http11),
+        (ANTIGA, Protocolo::Preferir2, Versao::Http11),
+        (CLARA, Protocolo::Preferir2, Versao::Http11),
     ] {
-        let mut c = conectar(CIFRADA, &opcoes(ancoras, protocolo), ALPN)?;
-        let r = c.trocar(&get(CIFRADA, "/ola"), &Limites::default());
+        let mut c = conectar(origem, &opcoes(ancoras, protocolo), ALPN)?;
+        let r = c.trocar(&get(origem, "/ola"), &Limites::default());
         match &r {
             Ok(r)
                 if c.versao() == esperada && r.versao == esperada && r.corpo == b"ola, duke\n" => {}
             _ => {
-                dizer(&format!("{CIFRADA}/ola com {protocolo:?}"), &r);
+                dizer(&format!("{origem}/ola com {protocolo:?}"), &r);
                 return Err(ALPN);
             }
         }
         c.fechar();
-        vistos.push(format!("{protocolo:?} {esperada:?}"));
+        let visto = format!("{protocolo:?} {esperada:?}");
+        if origem == CIFRADA {
+            cifrada.push(visto);
+        } else if origem == ANTIGA {
+            antiga.push(visto);
+        } else {
+            clara.push(visto);
+        }
     }
-    escreverln!("correntes: o ALPN pelo TLS: {}", vistos.join(", "));
+    match http::conectar(&url(ANTIGA, "/"), &opcoes(ancoras, Protocolo::Http2)) {
+        Err(f) if f.codigo() == "HTTP_MALFORMED" && f.categoria() == Categoria::Protocolo => {
+            antiga.push(format!("Http2 {}", f.codigo()));
+        }
+        Err(f) => {
+            escreverln!("correntes: {} com Http2 falhou com {}", ANTIGA, f.codigo());
+            return Err(ALPN);
+        }
+        Ok(c) => {
+            escreverln!("correntes: {} com Http2 falou {:?}", ANTIGA, c.versao());
+            return Err(ALPN);
+        }
+    }
+    escreverln!(
+        "correntes: o ALPN: {}; antigo: {}; claro: {}",
+        cifrada.join(", "),
+        antiga.join(", "),
+        clara.join(", ")
+    );
     Ok(())
 }
 

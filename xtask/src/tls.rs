@@ -25,11 +25,13 @@
 //! | `bancada.duke` (e qualquer outro) | o de `bancada.duke`, da raiz da bancada |
 //! | `estranho.duke` | o de `estranho.duke`, de **outra** raiz |
 //! | `vencido.duke` | o de `vencido.duke`, da raiz da bancada, vencido em 2021 |
+//! | `antigo.duke` | o de `antigo.duke`, da raiz da bancada |
 //!
 //! O gate decide um destino só, `tcp:10.0.2.100:443`; os nomes são do TLS.
 //! É a bancada que mostra que o nome não autoriza nada: o mesmo destino,
 //! decidido uma vez pela política, serve um nome que o programa aceita e
-//! três que ele recusa.
+//! três que ele recusa. O `antigo.duke` é do servidor HTTP: por ele, o ALPN
+//! só oferece o HTTP/1.1, como um servidor que não fala HTTP/2.
 //!
 //! # As chaves
 //!
@@ -59,7 +61,7 @@ pub(crate) const ANCORA_NA_IMAGEM: &str = "dados/tls/bancada.pem";
 
 /// A versão do formato do diretório: um diretório de outra versão é
 /// refeito inteiro.
-const VERSAO: &str = "bancada-tls v1\n";
+const VERSAO: &str = "bancada-tls v2\n";
 
 /// O diretório da bancada, com os certificados e as chaves das folhas.
 pub(crate) fn diretorio() -> PathBuf {
@@ -67,7 +69,7 @@ pub(crate) fn diretorio() -> PathBuf {
 }
 
 /// Os arquivos que o servidor e a imagem leem.
-const ARQUIVOS: [&str; 7] = [
+const ARQUIVOS: [&str; 9] = [
     "raiz.pem",
     "bancada.pem",
     "bancada.chave",
@@ -75,6 +77,8 @@ const ARQUIVOS: [&str; 7] = [
     "estranho.chave",
     "vencido.pem",
     "vencido.chave",
+    "antigo.pem",
+    "antigo.chave",
 ];
 
 /// Prepara a bancada, se ainda não está pronta, e devolve o diretório.
@@ -141,6 +145,7 @@ fn gerar(dir: &Path) -> Result<(), String> {
     let (bancada, bancada_chave) = folha(&da_bancada, "bancada.duke", 2025, 2040)?;
     let (estranho, estranho_chave) = folha(&estranha, "estranho.duke", 2025, 2040)?;
     let (vencido, vencido_chave) = folha(&da_bancada, "vencido.duke", 2020, 2021)?;
+    let (antigo, antigo_chave) = folha(&da_bancada, "antigo.duke", 2025, 2040)?;
 
     let escrever = |nome: &str, conteudo: &str, privado: bool| -> Result<(), String> {
         let caminho = novo.join(nome);
@@ -160,6 +165,8 @@ fn gerar(dir: &Path) -> Result<(), String> {
     escrever("estranho.chave", &estranho_chave, true)?;
     escrever("vencido.pem", &vencido, false)?;
     escrever("vencido.chave", &vencido_chave, true)?;
+    escrever("antigo.pem", &antigo, false)?;
+    escrever("antigo.chave", &antigo_chave, true)?;
     escrever("versao", VERSAO, false)?;
 
     let _ = std::fs::remove_dir_all(dir);
