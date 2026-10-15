@@ -893,15 +893,36 @@ fn custo_da_conferencia() {
         std::println!("{nome}: {:?} por resposta", inicio.elapsed() / n);
     };
     medir("válida (duas assinaturas)", &resposta, Ok(()));
-    let mut forjada = resposta.clone();
+    // O pior caso de quem forja: a delegação verdadeira, que qualquer
+    // resposta antiga da fonte traz, e no topo uma assinatura com o R que é
+    // ponto da curva e o S trocado. As duas conferências vão até o fim.
     let corpo = moldura::mensagem(&resposta).unwrap();
     let topo = Mensagem::ler(corpo).unwrap();
+    let mut sig = [0u8; 64];
+    sig.copy_from_slice(topo.valor(SIG).unwrap());
+    sig[32] ^= 1;
+    medir(
+        "forjada sobre a delegação verdadeira (duas assinaturas inteiras)",
+        &st::trocar_no_topo(&resposta, SIG, &sig),
+        Err(Recusa::AssinaturaDaResposta),
+    );
+    // A delegação com um R que não é ponto da curva: a recusa vem na
+    // descompressão, antes da conta.
     let cert = Mensagem::ler(topo.valor(CERT).unwrap()).unwrap();
     let sig = cert.valor(SIG).unwrap();
+    let mut r = [0u8; 32];
+    r.copy_from_slice(&sig[..32]);
+    r[0] ^= 1;
+    assert!(
+        curve25519_dalek::edwards::CompressedEdwardsY(r)
+            .decompress()
+            .is_none()
+    );
     let comeco = sig.as_ptr() as usize - resposta.as_ptr() as usize;
+    let mut forjada = resposta.clone();
     forjada[comeco] ^= 1;
     medir(
-        "delegação forjada (uma assinatura)",
+        "delegação com um R que não é ponto (nenhuma conta inteira)",
         &forjada,
         Err(Recusa::AssinaturaDaDelegacao),
     );
