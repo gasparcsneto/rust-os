@@ -176,6 +176,23 @@ impl<T: Transporte> Sessao<T> {
         agora: u64,
         semente: [u8; 32],
     ) -> Result<Sessao<T>, Falha> {
+        Sessao::conectar_com_protocolos(transporte, nome, ancoras, agora, semente, &[])
+    }
+
+    /// [`Sessao::conectar`] oferecendo `protocolos` pelo ALPN (RFC 7301),
+    /// na ordem de preferência — `h2`, `http/1.1`. O servidor escolhe um
+    /// deles, ou nenhum ([`Sessao::protocolo`]); um que não foi oferecido
+    /// acaba com o aperto ([`Falha::Aperto`]). A escolha é do protocolo de
+    /// aplicação, entre o programa e o servidor: o destino é o mesmo, a
+    /// porta é a mesma, e o gate não a vê.
+    pub fn conectar_com_protocolos(
+        transporte: T,
+        nome: &str,
+        ancoras: &Ancoras,
+        agora: u64,
+        semente: [u8; 32],
+        protocolos: &[&[u8]],
+    ) -> Result<Sessao<T>, Falha> {
         if agora == 0 {
             return Err(Falha::SemRelogio);
         }
@@ -194,6 +211,7 @@ impl<T: Transporte> Sessao<T> {
         // Sem retomada: uma sessão não deixa estado para a seguinte, e
         // cada aperto confere o certificado de novo.
         config.resumption = Resumption::disabled();
+        config.alpn_protocols = protocolos.iter().map(|p| p.to_vec()).collect();
         let conexao = UnbufferedClientConnection::new(Arc::new(config), nome)
             .map_err(|e| Falha::do_rustls(&e))?;
         let mut sessao = Sessao {
@@ -227,6 +245,12 @@ impl<T: Transporte> Sessao<T> {
         self.conexao
             .negotiated_cipher_suite()
             .and_then(|s| s.suite().as_str())
+    }
+
+    /// O protocolo de aplicação que o servidor escolheu pelo ALPN — `None`
+    /// se nenhum foi oferecido, ou se o servidor não escolheu.
+    pub fn protocolo(&self) -> Option<&[u8]> {
+        self.conexao.alpn_protocol()
     }
 
     /// O grupo da troca de chaves negociado.

@@ -286,6 +286,56 @@ fn o_aperto_fecha_e_o_eco_volta() {
     assert!(bancada.recebidos > 0);
 }
 
+/// O ALPN: o cliente oferece, o servidor escolhe — ou não escolhe nada.
+#[test]
+fn o_protocolo_que_o_servidor_escolhe() {
+    let raiz = raiz();
+    let oferta: &[&[u8]] = &[b"h2", b"http/1.1"];
+    for (do_servidor, oferecidos, escolhido) in [
+        (
+            vec![b"h2".to_vec(), b"http/1.1".to_vec()],
+            oferta,
+            Some(&b"h2"[..]),
+        ),
+        (vec![b"http/1.1".to_vec()], oferta, Some(&b"http/1.1"[..])),
+        // O servidor sem ALPN: nenhum.
+        (vec![], oferta, None),
+        // O cliente que não oferece: nenhum, mesmo com o servidor querendo.
+        (vec![b"h2".to_vec()], &[][..], None),
+    ] {
+        let mut c = config(folha(&raiz));
+        c.alpn_protocols = do_servidor.clone();
+        let mut s = Sessao::conectar_com_protocolos(
+            Bancada::nova(c),
+            NOME,
+            &ancoras(&raiz),
+            AGORA,
+            SEMENTE,
+            oferecidos,
+        )
+        .unwrap();
+        assert_eq!(s.protocolo(), escolhido, "{do_servidor:?}");
+        // E a conversa segue como sempre.
+        eco(&mut s, b"depois do alpn");
+    }
+    // Nada em comum: o servidor recusa o aperto, e o cliente ouve a recusa
+    // como uma falha do TLS.
+    let mut c = config(folha(&raiz));
+    c.alpn_protocols = vec![b"spdy/3".to_vec()];
+    let r = Sessao::conectar_com_protocolos(
+        Bancada::nova(c),
+        NOME,
+        &ancoras(&raiz),
+        AGORA,
+        SEMENTE,
+        oferta,
+    );
+    assert_eq!(r.err(), Some(Falha::Aperto));
+    // A conexão sem oferta continua sem protocolo.
+    let s = conectar(Bancada::nova(config(folha(&raiz))), &ancoras(&raiz)).unwrap();
+    assert_eq!(s.protocolo(), None);
+}
+
 /// Cada suíte do perfil, com o servidor restrito a ela: a cifra e o resumo
 /// daqui fazem a mesma conta que os do *ring*.
 #[test]
