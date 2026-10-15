@@ -213,6 +213,11 @@ fn depois_de_sincronizado_voltar_fora_do_envelope_espera_uma_pessoa() {
     );
     let l = r.ler(t3);
     assert_eq!(l.meio_ms, verdade(t3) - 600_000);
+    assert_eq!(
+        l.incerteza_ms,
+        Some(5_000 + 5),
+        "a do acordo, mais a deriva dos 10 s desde ele"
+    );
     assert_eq!(l.pendente_ms, None);
     assert!(l.alem_do_envelope);
     assert_eq!(r.confirmar(t3), None, "nada mais pendente");
@@ -326,6 +331,28 @@ fn o_teto_conta_da_referencia_na_primeira_sincronizacao() {
 }
 
 #[test]
+fn um_salto_do_tamanho_do_teto_ainda_e_automatico() {
+    // O teto é o maior salto sem uma pessoa: do tamanho dele, contado da
+    // referência, salta em duas rodadas; um milissegundo a mais, espera.
+    let teto = P.salto_maximo_ms;
+    let mut r = Relogio::do_rtc(P, None, 0);
+    for (t, salta) in [(10_000, false), (15_000, true)] {
+        let efeito = r.rodada(&honestas(verdade(t), t), t, Some(verdade(t) - teto));
+        assert_eq!(matches!(efeito, Efeito::Salto { .. }), salta, "{efeito:?}");
+        assert!(!matches!(efeito, Efeito::Pendente { .. }));
+    }
+    let mut r = Relogio::do_rtc(P, None, 0);
+    assert!(matches!(
+        r.rodada(
+            &honestas(verdade(10_000), 10_000),
+            10_000,
+            Some(verdade(10_000) - teto - 1)
+        ),
+        Efeito::Pendente { .. }
+    ));
+}
+
+#[test]
 fn o_salto_pede_duas_rodadas_seguidas_e_separadas() {
     let mut r = sincronizado(0);
     let mais = 600_000;
@@ -377,6 +404,44 @@ fn o_salto_pede_duas_rodadas_seguidas_e_separadas() {
         Efeito::Candidato { .. }
     ));
 
+    // Um empate, ou uma rodada inválida, no meio também.
+    for no_meio in [Desfecho::Empate { cobertura: 2 }, Desfecho::Invalido] {
+        let mut r = sincronizado(0);
+        assert!(matches!(
+            r.rodada(&honestas(verdade(t) + mais, t), t, None),
+            Efeito::Candidato { .. }
+        ));
+        assert_eq!(r.rodada(&no_meio, t + 5_000, None), Efeito::SemAcordo);
+        assert!(
+            matches!(
+                r.rodada(&honestas(verdade(t3) + mais, t3), t3, None),
+                Efeito::Candidato { .. }
+            ),
+            "{no_meio:?}"
+        );
+    }
+
+    // E um salto pendente no meio: as duas rodadas têm de ser seguidas.
+    let mut r = sincronizado(0);
+    assert!(matches!(
+        r.rodada(&honestas(verdade(t) + mais, t), t, None),
+        Efeito::Candidato { .. }
+    ));
+    let dois_dias = 2 * 86_400_000;
+    let no_meio = t + 5_000;
+    assert!(matches!(
+        r.rodada(
+            &honestas(verdade(no_meio) + dois_dias, no_meio),
+            no_meio,
+            None
+        ),
+        Efeito::Pendente { .. }
+    ));
+    assert!(matches!(
+        r.rodada(&honestas(verdade(t3) + mais, t3), t3, None),
+        Efeito::Candidato { .. }
+    ));
+
     // Dois desvios grandes que não concordam: o segundo vira o candidato.
     let mut r = sincronizado(0);
     assert!(matches!(
@@ -413,6 +478,78 @@ fn o_limiar_cresce_com_a_incerteza_do_acordo() {
         r.rodada(&rodada_de(verdade(t) + 15_000, 5_000, t), t, None),
         Efeito::Candidato { desvio_ms: 15_000 }
     );
+    // Raio de 1 s: o limiar fica no mínimo, 10 s, e 8 s ainda é gradual.
+    let mut r = sincronizado(0);
+    assert_eq!(
+        r.rodada(&rodada_de(verdade(t) + 8_000, 1_000, t), t, None),
+        Efeito::Gradual { desvio_ms: 8_000 }
+    );
+}
+
+#[test]
+fn as_pontas_da_incerteza_e_do_limiar() {
+    // Um desvio do tamanho da incerteza do acordo ainda cabe nele; um do
+    // tamanho do limiar ainda é gradual.
+    let t = 1_024_000;
+    for (desvio_ms, esperado) in [
+        (5_000u64, Efeito::Nada),
+        (5_001, Efeito::Gradual { desvio_ms: 5_001 }),
+        (10_000, Efeito::Gradual { desvio_ms: 10_000 }),
+        (10_001, Efeito::Candidato { desvio_ms: 10_001 }),
+    ] {
+        let mut r = sincronizado(0);
+        assert_eq!(
+            r.rodada(&honestas(verdade(t) + desvio_ms, t), t, None),
+            esperado
+        );
+    }
+}
+
+#[test]
+fn o_salto_descarta_o_ajuste_gradual_em_curso() {
+    // Um ajuste gradual em curso, e então as fontes saltam: depois do salto,
+    // o civil fica no acordo, sem o resto do ajuste velho.
+    let mut r = sincronizado(0);
+    let t = 1_024_000;
+    assert_eq!(
+        r.rodada(&honestas(verdade(t) + 8_000, t), t, None),
+        Efeito::Gradual { desvio_ms: 8_000 }
+    );
+    let mais = 600_000;
+    let t2 = t + 1_000;
+    assert!(matches!(
+        r.rodada(&honestas(verdade(t2) + mais, t2), t2, None),
+        Efeito::Candidato { .. }
+    ));
+    let t3 = t2 + 5_000;
+    assert!(matches!(
+        r.rodada(&honestas(verdade(t3) + mais, t3), t3, None),
+        Efeito::Salto { .. }
+    ));
+    for depois in [0, 100_000, 1_000_000] {
+        assert_eq!(r.ler(t3 + depois).meio_ms, verdade(t3 + depois) + mais);
+    }
+}
+
+#[test]
+fn as_fontes_que_desmentem_o_pendente_o_apagam() {
+    // Um salto pendente que as fontes desmentem não espera mais ninguém: a
+    // pessoa não confirma o que elas já não dizem.
+    let t = 1_024_000;
+    let t2 = t + 64_000;
+    for (hora, esperado) in [
+        (verdade(t2), Efeito::Nada),
+        (verdade(t2) + 8_000, Efeito::Gradual { desvio_ms: 8_000 }),
+    ] {
+        let mut r = sincronizado(0);
+        assert!(matches!(
+            r.rodada(&honestas(verdade(t) - 600_000, t), t, None),
+            Efeito::Pendente { .. }
+        ));
+        assert_eq!(r.rodada(&honestas(hora, t2), t2, None), esperado);
+        assert_eq!(r.ler(t2).pendente_ms, None, "{esperado:?}");
+        assert_eq!(r.confirmar(t2), None);
+    }
 }
 
 #[test]
@@ -451,6 +588,20 @@ fn sem_fontes_a_incerteza_cresce_e_o_estado_muda() {
     let l = r.ler(120_000_000);
     assert_eq!(l.incerteza_ms, Some(5_000 + 60_000));
     assert_eq!(l.estado, Estado::Vencido);
+    // A janela do sincronizado conta com a ponta.
+    let janela = P.janela_sincronizado_ms;
+    assert_eq!(r.ler(janela).estado, Estado::Sincronizado);
+    assert_eq!(r.ler(janela + 1).estado, Estado::Holdover);
+    // No teto, ainda holdover; um milissegundo depois, vencido.
+    let no_teto = 110_000_000;
+    let l = r.ler(no_teto);
+    assert_eq!(
+        l.incerteza_ms,
+        Some(60_000),
+        "5 s mais 500 ppm de 110 000 s"
+    );
+    assert_eq!(l.estado, Estado::Holdover);
+    assert_eq!(r.ler(no_teto + 1).estado, Estado::Vencido);
 }
 
 #[test]

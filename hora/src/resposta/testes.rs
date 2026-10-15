@@ -613,6 +613,10 @@ fn assinatura_da_resposta() {
     let mut s = Servidor::novo();
     s.contexto_de_resposta = b"RoughTime v1 response signature\0".to_vec();
     assert_eq!(com(s), Err(Recusa::AssinaturaDaResposta));
+    // O contexto sem o zero do fim.
+    let mut s = Servidor::novo();
+    s.contexto_de_resposta = b"Roughtime v1 response signature".to_vec();
+    assert_eq!(com(s), Err(Recusa::AssinaturaDaResposta));
     // O contexto da delegação no lugar do da resposta.
     let mut s = Servidor::novo();
     s.contexto_de_resposta = CONTEXTO_DE_DELEGACAO.to_vec();
@@ -632,6 +636,74 @@ fn a_chave_delegada_fraca_nao_vale() {
     assert_eq!(
         conferir_contra(&pedido, &s.chave_longa(), &r),
         Err(Recusa::AssinaturaDaResposta)
+    );
+}
+
+/// Uma assinatura de quem tem a chave, com o R de ordem pequena — a
+/// identidade: S = k·a, com k = H(R ‖ A ‖ mensagem). Ela fecha a conta da
+/// conferência frouxa, [S]B = R + [k]A; a estrita a recusa pelo R.
+fn com_o_r_de_ordem_pequena(chave: &ed25519_dalek::SigningKey, mensagem: &[u8]) -> [u8; 64] {
+    use curve25519_dalek::scalar::Scalar;
+    use sha2::{Digest, Sha512};
+    let mut r = [0u8; 32];
+    r[0] = 1;
+    let resumo = Sha512::new()
+        .chain_update(r)
+        .chain_update(chave.verifying_key().to_bytes())
+        .chain_update(mensagem)
+        .finalize();
+    let mut largo = [0u8; 64];
+    largo.copy_from_slice(&resumo);
+    let s = Scalar::from_bytes_mod_order_wide(&largo) * chave.to_scalar();
+    let mut assinatura = [0u8; 64];
+    assinatura[..32].copy_from_slice(&r);
+    assinatura[32..].copy_from_slice(&s.to_bytes());
+    assinatura
+}
+
+#[test]
+fn o_r_de_ordem_pequena_nao_vale() {
+    // A chave não é fraca, e quem assinou tem a chave privada; o que torna
+    // a assinatura maleável é o R. A conferência frouxa a aceitaria — é por
+    // isso que o caso prova algo.
+    use ed25519_dalek::{Signature, Verifier};
+    let (pedido, servidor, resposta) = honesta();
+    let chave = servidor.chave_longa();
+    let corpo = moldura::mensagem(&resposta).unwrap();
+    let topo = Mensagem::ler(corpo).unwrap();
+    // O SREP, como chegou, assinado pela delegada.
+    let assinado = [CONTEXTO_DE_RESPOSTA, topo.valor(SREP).unwrap()].concat();
+    let assinatura = com_o_r_de_ordem_pequena(&servidor.delegada, &assinado);
+    assert!(
+        servidor
+            .delegada
+            .verifying_key()
+            .verify(&assinado, &Signature::from_bytes(&assinatura))
+            .is_ok()
+    );
+    let r = st::trocar_no_topo(&resposta, SIG, &assinatura);
+    assert_eq!(
+        conferir_contra(&pedido, &chave, &r),
+        Err(Recusa::AssinaturaDaResposta)
+    );
+    // A DELE, como chegou, assinada pela longa.
+    let cert = Mensagem::ler(topo.valor(CERT).unwrap()).unwrap();
+    let assinado = [CONTEXTO_DE_DELEGACAO, cert.valor(DELE).unwrap()].concat();
+    let assinatura = com_o_r_de_ordem_pequena(&servidor.longa, &assinado);
+    assert!(
+        servidor
+            .longa
+            .verifying_key()
+            .verify(&assinado, &Signature::from_bytes(&assinatura))
+            .is_ok()
+    );
+    let sig = cert.valor(SIG).unwrap();
+    let comeco = sig.as_ptr() as usize - resposta.as_ptr() as usize;
+    let mut r = resposta.clone();
+    r[comeco..comeco + 64].copy_from_slice(&assinatura);
+    assert_eq!(
+        conferir_contra(&pedido, &chave, &r),
+        Err(Recusa::AssinaturaDaDelegacao)
     );
 }
 
@@ -740,6 +812,36 @@ fn o_que_a_resposta_afirma_so_se_le_depois_das_assinaturas() {
         conferir_contra(&nosso, &servidor.chave_longa(), &r),
         Err(Recusa::AssinaturaDaResposta)
     );
+}
+
+#[test]
+fn a_forma_se_confere_antes_das_assinaturas() {
+    // Contra outra chave fixada, nenhuma assinatura fecha. Mesmo assim, o
+    // veredito de uma resposta torta na forma é o da forma: ela se confere
+    // sem conta de curva, e quem manda lixo não faz este lado conferir
+    // assinatura.
+    let contra_outra_chave = |servidor: Servidor| {
+        let pedido = Pedido::novo(&NONCE, &servidor.chave_longa());
+        let resposta = servidor.responder(pedido.bytes());
+        let outra = ed25519_dalek::SigningKey::from_bytes(&[0x4d; 32])
+            .verifying_key()
+            .to_bytes();
+        conferir_contra(&pedido, &outra, &resposta)
+    };
+    assert_eq!(
+        contra_outra_chave(Servidor::novo()),
+        Err(Recusa::AssinaturaDaDelegacao)
+    );
+    let mut s = Servidor::novo();
+    s.tipo = 0;
+    assert_eq!(contra_outra_chave(s), Err(Recusa::Tipo));
+    let mut s = Servidor::novo();
+    s.nonce = Some([0x99; 32]);
+    assert_eq!(contra_outra_chave(s), Err(Recusa::Nonce));
+    let mut s = Servidor::novo();
+    s.versao = 0x8000_000c;
+    s.vers = std::vec![0x8000_000c];
+    assert_eq!(contra_outra_chave(s), Err(Recusa::Versao));
 }
 
 #[test]
