@@ -3104,7 +3104,12 @@ fn conferir_tls_sem_atalho(raiz: &Path) -> Result<Vec<String>, String> {
 /// - nem para os cookies: o kernel e a política não falam de cookie. O pote
 ///   é do processo, no pacote `http`; um cookie não é credencial do Duke,
 ///   não vira identidade, não entra numa decisão e não muda a autoridade
-///   de ninguém — quem pede é o processo, com a autoridade do titular dele.
+///   de ninguém — quem pede é o processo, com a autoridade do titular dele;
+/// - nem para o HTTP/2: o kernel e a política não falam dele (`HTTP/2`,
+///   `h2c`, o ALPN, o HPACK, os quadros). As correntes são do processo,
+///   numa conexão que o gate decidiu pelo destino; multiplexar pedidos não
+///   multiplexa autoridade, e uma corrente não é uma conexão, um titular
+///   nem uma decisão.
 fn conferir_http_do_programa(raiz: &Path) -> Result<Vec<String>, String> {
     let ler = |relativo: &str| {
         std::fs::read_to_string(raiz.join(relativo))
@@ -3167,6 +3172,26 @@ fn conferir_http_do_programa(raiz: &Path) -> Result<Vec<String>, String> {
                 if minusculas.contains("cookie") {
                     fora.push(format!(
                         "{relativo}:{}: um cookie no kernel ou na política — o pote é do programa, e um cookie não é credencial nem autoridade: {}",
+                        n + 1,
+                        linha.trim()
+                    ));
+                }
+                if [
+                    "http/2",
+                    "http2",
+                    "h2c",
+                    "alpn",
+                    "hpack",
+                    "goaway",
+                    "rst_stream",
+                    "push_promise",
+                    "window_update",
+                ]
+                .iter()
+                .any(|c| minusculas.contains(c))
+                {
+                    fora.push(format!(
+                        "{relativo}:{}: o HTTP/2 no kernel ou na política — as correntes são do programa, e o gate decide a conexão pelo destino: {}",
                         n + 1,
                         linha.trim()
                     ));
@@ -3364,7 +3389,7 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
              o tecido de segurança só fala como ele mesmo, pelo gate, sem que o gate o leia; \
              o TLS, que é do programa, só verifica pelas âncoras, sem atalho que o desligue; \
              o HTTP, que é do programa, não tem comando, permissão nem caminho até o gate, \
-             e a compressão e os cookies dele não chegam ao kernel nem à política; o plano de dados só \
+             e a compressão, os cookies e o HTTP/2 dele não chegam ao kernel nem à política; o plano de dados só \
              sai da taxa, e só espera pela auditoria, pelo gate; e o \
              código só vira processo pela conferência única, que o kernel faz e não sela"
         );
@@ -6596,6 +6621,7 @@ fn conversar(
     sob_o_plano_de_dados(arch, &mut escrita, &mut leitor)?;
     sob_a_compressao(arch, &mut escrita, &mut leitor)?;
     sob_os_cookies(arch, &mut escrita, &mut leitor)?;
+    sob_o_http2(arch, &mut escrita, &mut leitor)?;
     sob_o_codigo(arch, &mut escrita, &mut leitor)?;
     sob_agentes(arch)?;
     sob_sigilo(arch)?;
@@ -11447,6 +11473,275 @@ fn sob_os_cookies(
         contar("net.connect"),
         contar("net.recv"),
         contar("system.info")
+    );
+    Ok(())
+}
+
+/// O que seria o HTTP/2 chegando ao gate num registro da auditoria — uma
+/// pseudo-cabeça, o nome do protocolo, o prefácio, um caminho das correntes
+/// da bancada. Em qualquer registro, de qualquer um: o programa se chama
+/// `correntes`, e o caminho dele, que o lançamento grava, não é nenhum
+/// destes.
+const DO_H2: [&str; 9] = [
+    ":path",
+    ":authority",
+    ":status",
+    "HTTP/2",
+    "PRI *",
+    "h2c",
+    "/h2/",
+    "/grande/",
+    "/lento/",
+];
+
+/// O HTTP/2 no kernel de produção, com a política padrão — ver "O HTTP/2"
+/// no README. O agente da porta 2, do papel `operador`, lança o
+/// `correntes`, que confere de dentro o h2c com conhecimento prévio, as
+/// correntes ao mesmo tempo numa conexão só, o eco, o gzip e os cookies
+/// pelas correntes, o limite que falha só a corrente, o servidor que
+/// reinicia ou recusa uma corrente, o que quebra o protocolo e acaba com a
+/// conexão inteira, o ALPN pelo TLS, a medida e a recusa do gate fora do
+/// alcance. Daqui, o que o kernel viu, registro a registro desde antes do
+/// lançamento: as decisões do processo, todas deixadas menos a do destino
+/// fora do alcance; nenhum pedido que o HTTP não fazia; uma conexão para
+/// muitas correntes — onze, e não uma por pedido —; nada do HTTP/2 em
+/// registro nenhum; nenhuma recusa por taxa e nenhum registro perdido.
+fn sob_o_http2(
+    arch: Arquitetura,
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+) -> Result<(), String> {
+    println!("[xtask] fumaça: o HTTP/2, pelo operador");
+    // Fora da faixa dos `id` do aperto, que começam com 9, e longe da dos
+    // cookies.
+    let mut id = 3000;
+    let mut pedir = |metodo: &str, params: &str| -> Result<String, String> {
+        id += 1;
+        escrita
+            .write_all(
+                format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"{metodo}","params":{params}}}"#)
+                    .as_bytes(),
+            )
+            .and_then(|()| escrita.write_all(b"\n"))
+            .and_then(|()| escrita.flush())
+            .map_err(|e| format!("http2: falha ao pedir `{metodo}`: {e}"))?;
+        let resposta = ler_resposta(leitor).map_err(|e| format!("http2: {e}"))?;
+        if !e_a_resposta(&resposta, id) {
+            return Err(format!(
+                "http2: veio a resposta de outro pedido\n  {resposta}"
+            ));
+        }
+        Ok(resposta)
+    };
+    let antes = contas_do_orcamento(&pedir("security.metrics", "{}")?)?;
+    let inicio = numero_no_caminho(&pedir("audit.head", "{}")?, &["seq"])
+        .ok_or("http2: o audit.head nao disse o numero")?;
+    let comeco = std::time::Instant::now();
+    let mut operador = AgenteNaPorta::conectar(arch, 2)?;
+    let lancado = operador.pedir(
+        "user.run",
+        &format!(r#"{{"path":"/programas/{}/correntes"}}"#, arch.nome()),
+    )?;
+    let processo = numero_no_caminho(&lancado, &["thread_id"])
+        .filter(|_| lancado.contains(r#""launched":true"#))
+        .ok_or_else(|| format!("http2: o operador nao lancou o programa\n  {lancado}"))?;
+    let limite = comeco + Duration::from_secs(300);
+    let mut ditas: Vec<String> = Vec::new();
+    loop {
+        let log = pedir("log.tail", r#"{"count":32}"#)?;
+        for pedaco in log.split("correntes: ").skip(1) {
+            let linha = format!("correntes: {}", pedaco.split('"').next().unwrap_or(""));
+            if !ditas.contains(&linha) {
+                ditas.push(linha);
+            }
+        }
+        if log.contains("processo encerrou com codigo 99") {
+            break;
+        }
+        // Saiu com um dos códigos de falha dele (40 a 49): o que ele disse
+        // diz o quê, sem esperar o teto.
+        let falhou = log
+            .split("processo encerrou com codigo ")
+            .skip(1)
+            .filter_map(|r| r.split('"').next()?.parse::<u32>().ok())
+            .find(|c| (40..=49).contains(c));
+        if let Some(codigo) = falhou {
+            return Err(format!(
+                "http2: o programa saiu com {codigo}\n  {}",
+                ditas.join("\n  ")
+            ));
+        }
+        if std::time::Instant::now() > limite {
+            return Err(format!(
+                "http2: o programa nao terminou em 300 s\n  {}",
+                ditas.join("\n  ")
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let duracao = comeco.elapsed();
+    drop(operador);
+    // A auditoria até aqui: cada leitura dela também é gravada, e ler até
+    // não vir mais nada não acabaria.
+    let fim = numero_no_caminho(&pedir("audit.head", "{}")?, &["seq"])
+        .ok_or("http2: o audit.head nao disse o numero")?;
+    let dita = |trecho: &str| {
+        ditas
+            .iter()
+            .find(|l| l.contains(trecho))
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "http2: o programa nao disse `{trecho}`\n  {}",
+                    ditas.join("\n  ")
+                )
+            })
+    };
+    for conferida in [
+        "h2c com conhecimento previo: 200 Http2",
+        "8 ao mesmo tempo de 1 byte a 100 KiB em ",
+        "o eco de 200 KiB voltou inteiro",
+        "gzip decodificado, e a sessao da bancada pelo pote",
+        "HTTP_TOO_LARGE so na corrente, e a conexao segue",
+        "reiniciada e recusada so na corrente: HTTP_STREAM_RESET HTTP_STREAM_REFUSED",
+        "a conexao acaba inteira, a outra corrente junto: HTTP_MALFORMED HTTP_MALFORMED HTTP_TOO_MANY_FRAMES HTTP_CONNECTION_ENDED",
+        "o ALPN pelo TLS: Http2 Http2, Preferir2 Http2, Http1 Http11",
+        "40 pedidos, no maximo 16 guardados: HTTP_TOO_MANY_STREAMS, e a mais antiga recebida antes da seguinte",
+        "http://bancada.duke:81 pelo HTTP/2 -> denied DENY_RESOURCE",
+        "tudo conferiu",
+    ] {
+        dita(conferida)?;
+    }
+    // O que o kernel gravou desde antes do lançamento, de 128 em 128.
+    let do_processo = format!("pelo processo {processo} (");
+    let mut depois_de = inicio;
+    let mut decisoes: std::collections::BTreeMap<(String, String), u64> = Default::default();
+    let mut conexoes: std::collections::BTreeMap<String, u64> = Default::default();
+    let mut vistos = 0u64;
+    while depois_de < fim {
+        let cauda = pedir(
+            "audit.tail",
+            &format!(r#"{{"after":{depois_de},"count":128}}"#),
+        )?;
+        let registros = objetos_planos(
+            apos(&cauda, r#""records":["#).ok_or("http2: audit.tail sem registros")?,
+        )?;
+        if registros.is_empty() {
+            break;
+        }
+        for campos in &registros {
+            let campo = |nome: &str| {
+                campos
+                    .iter()
+                    .find(|(n, _)| n == nome)
+                    .and_then(|(_, v)| v.clone())
+                    .unwrap_or_default()
+            };
+            depois_de = campo("seq").parse().unwrap_or(depois_de + 1);
+            if depois_de > fim {
+                break;
+            }
+            vistos += 1;
+            let detalhe = campo("detail");
+            let texto = format!(
+                "{} {} {} {}",
+                campo("method"),
+                campo("resource"),
+                detalhe,
+                campo("agent")
+            );
+            if let Some(t) = DO_H2.iter().find(|t| texto.contains(*t)) {
+                return Err(format!(
+                    "http2: um registro da auditoria tem `{t}`\n  {texto}"
+                ));
+            }
+            if detalhe.starts_with(&do_processo) {
+                *decisoes
+                    .entry((campo("method"), campo("code")))
+                    .or_default() += 1;
+                if campo("method") == "net.connect" && campo("code") == "ALLOW" {
+                    *conexoes.entry(campo("resource")).or_default() += 1;
+                }
+            }
+        }
+    }
+    const PEDIDOS: [&str; 8] = [
+        "net.connect",
+        "net.send",
+        "net.recv",
+        "net.close",
+        "random.read",
+        "system.info",
+        "system.uptime",
+        "fs.read",
+    ];
+    if let Some(((metodo, _), _)) = decisoes
+        .iter()
+        .find(|((m, _), _)| !PEDIDOS.contains(&m.as_str()))
+    {
+        return Err(format!(
+            "http2: o programa pediu `{metodo}`, que o HTTP nao pedia: {decisoes:?}"
+        ));
+    }
+    let recusadas: Vec<_> = decisoes
+        .iter()
+        .filter(|((_, codigo), _)| codigo != "ALLOW")
+        .collect();
+    if recusadas.len() != 1
+        || *recusadas[0].0 != ("net.connect".to_string(), "DENY_RESOURCE".to_string())
+        || *recusadas[0].1 != 1
+    {
+        return Err(format!(
+            "http2: as decisoes do programa nao foram as do HTTP: {decisoes:?}"
+        ));
+    }
+    // Oito ao claro — a das correntes, as quatro dos servidores que quebram
+    // o protocolo e as três da medida — e três ao cifrado, uma por oferta do
+    // ALPN: uma decisão por conexão, e não por corrente.
+    let esperadas: std::collections::BTreeMap<String, u64> = [
+        ("tcp:10.0.2.100:80".to_string(), 8),
+        ("tcp:10.0.2.100:8443".to_string(), 3),
+    ]
+    .into_iter()
+    .collect();
+    if conexoes != esperadas {
+        return Err(format!(
+            "http2: as conexoes do programa nao foram as dele: {conexoes:?}"
+        ));
+    }
+    let metricas = pedir("security.metrics", "{}")?;
+    let depois = contas_do_orcamento(&metricas)?;
+    let [_, dados, _, taxa, _, _, _, _]: [u64; 8] =
+        std::array::from_fn(|i| depois[i].saturating_sub(antes[i]));
+    if taxa != 0 || depois[5] != 0 {
+        return Err(format!(
+            "http2: {taxa} recusas por taxa, {} registros perdidos",
+            depois[5]
+        ));
+    }
+    println!(
+        "  [http2] ok  o correntes do operador saiu com 99 em {} ms: o h2c, as correntes ao mesmo tempo, o eco, o gzip e os cookies, o limite, os servidores que reiniciam, recusam e quebram o protocolo, o ALPN e o teto das correntes guardadas; {vistos} registros da auditoria lidos, nenhum com o HTTP/2; uma decisao por conexao, onze, e nenhuma por corrente; as decisoes do processo todas deixadas, menos a do destino fora do alcance",
+        duracao.as_millis()
+    );
+    for medida in ditas.iter().filter(|l| {
+        l.contains("medida ")
+            || l.contains("ao mesmo tempo de 1 byte")
+            || l.contains("trocas numa conexao so")
+    }) {
+        println!("  [http2] medido  {medida}");
+    }
+    let contar = |metodo: &str| {
+        decisoes
+            .get(&(metodo.to_string(), "ALLOW".to_string()))
+            .copied()
+            .unwrap_or(0)
+    };
+    println!(
+        "  [http2] medido  {} decisoes do processo: {} conexoes, {} envios, {} leituras; {dados} decisoes de dados no sistema todo",
+        decisoes.values().sum::<u64>(),
+        contar("net.connect"),
+        contar("net.send"),
+        contar("net.recv")
     );
     Ok(())
 }

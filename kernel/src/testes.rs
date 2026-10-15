@@ -30978,6 +30978,30 @@ static CASOS: &[Caso] = &[
         f: cookies_varios_ao_mesmo_tempo,
     },
     Caso {
+        nome: "http2: o programa inteiro pelo gate",
+        f: http2_o_programa_inteiro_pelo_gate,
+    },
+    Caso {
+        nome: "http2: as correntes pelo tls",
+        f: http2_as_correntes_pelo_tls,
+    },
+    Caso {
+        nome: "http2: a revogacao no meio das correntes",
+        f: http2_a_revogacao_no_meio_das_correntes,
+    },
+    Caso {
+        nome: "http2: a contencao no meio das correntes",
+        f: http2_a_contencao_no_meio_das_correntes,
+    },
+    Caso {
+        nome: "http2: o firewall no meio das correntes",
+        f: http2_o_firewall_no_meio_das_correntes,
+    },
+    Caso {
+        nome: "http2: varias ao mesmo tempo",
+        f: http2_varias_ao_mesmo_tempo,
+    },
+    Caso {
         nome: "codigo: so o da imagem roda sem selo",
         f: codigo_so_o_da_imagem_roda_sem_selo,
     },
@@ -39465,6 +39489,424 @@ fn cookies_varios_ao_mesmo_tempo() -> Resultado {
             }
             if cookie_no_registro(*fio) {
                 return Err("um registro de um processo tem um cookie");
+            }
+        }
+        Ok(())
+    })();
+    crate::identidade::esquecer_registrados();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+// ---------------------------------------------------------------------------
+// O HTTP/2 — README, "O HTTP/2"
+// ---------------------------------------------------------------------------
+
+/// Os passos do `buscador` com o HTTP/2 — o programa tem as mesmas
+/// constantes.
+const BUSCA_H2: i64 = 14;
+const BUSCA_H2_LENTA: i64 = 15;
+
+/// O que seria o HTTP/2 chegando ao gate num registro da auditoria: uma
+/// pseudo-cabeça, o nome do protocolo, o prefácio, um caminho das
+/// correntes da bancada.
+const DO_H2: [&str; 9] = [
+    ":path",
+    ":authority",
+    ":status",
+    "HTTP/2",
+    "PRI *",
+    "h2c",
+    "/h2/",
+    "/grande/",
+    "/lento",
+];
+
+/// Algum registro do processo do fio `fio` tem o HTTP/2 — ver [`DO_H2`] —
+/// no método, no recurso, em quem agiu, no papel ou no detalhe. Do
+/// detalhe, o nome do programa fica de fora, como nos cookies.
+fn h2_no_registro(fio: u64) -> bool {
+    let prefixo = do_processo(fio);
+    crate::autorizacao::com_auditoria(|c| {
+        c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+            .filter(|r| r.evento.detalhe.starts_with(&prefixo))
+            .any(|r| {
+                let e = &r.evento;
+                let depois_do_nome = e.detalhe.split_once(')').map_or("", |(_, d)| d);
+                let gravado = alloc::format!(
+                    "{} {} {} {} {}",
+                    e.metodo,
+                    e.recurso,
+                    e.agente,
+                    e.papel,
+                    depois_do_nome
+                );
+                DO_H2.iter().any(|t| gravado.contains(t))
+            })
+    })
+    .unwrap_or(true)
+}
+
+/// O `buscador` abre as três correntes de [`BUSCA_H2_LENTA`] pela conexão
+/// HTTP/2 que tem, e o caso espera a primeira chegar inteira: a segunda
+/// está parada na metade do corpo por `espera_ms`, a terceira ainda não
+/// veio — é ali, com as duas esperando na mesma conexão, que ele age.
+fn no_meio_das_correntes(b: &Buscador, espera_ms: i64) -> Result<u64, &'static str> {
+    let desde = crate::log::total_emitidos();
+    b.pedir(BUSCA_H2_LENTA, espera_ms)?;
+    b.dizer(desde, "buscador: h2 lenta: a primeira 200")?;
+    Ok(desde)
+}
+
+/// O processo de uma pessoa operadora roda o programa `correntes` inteiro
+/// — o h2c com conhecimento prévio, as correntes ao mesmo tempo, o eco, o
+/// gzip e os cookies pelas correntes, o limite, os servidores que quebram
+/// o protocolo, o ALPN e a medida —, e aqui se confere o que o kernel viu:
+///
+/// - só o que o HTTP já pedia: conexões, envios, leituras e fechos com os
+///   destinos da bancada, a semente e o relógio do TLS, a âncora e o tempo
+///   desde o boot. Nenhum pedido novo, nenhuma permissão nova: o HTTP/2 é
+///   do programa;
+/// - uma conexão para muitas correntes: oito ao servidor claro — a das
+///   correntes, as quatro dos servidores que quebram o protocolo e as três
+///   da medida —, três ao cifrado — uma por oferta do ALPN —, e a porta ao
+///   lado, `DENY_RESOURCE`, uma vez. O gate decide destinos; uma corrente
+///   é envio e leitura da conexão do processo, e não uma conexão;
+/// - tudo deixado, em nome da pessoa, menos o destino fora do alcance. O
+///   `RST_STREAM`, o `GOAWAY` e a enxurrada de `PING` são falhas do
+///   programa, e não do gate: as leituras deles foram deixadas;
+/// - nada do HTTP/2 em registro nenhum: nem uma pseudo-cabeça, nem o
+///   prefácio, nem um caminho.
+fn http2_o_programa_inteiro_pelo_gate() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    use politica::Codigo;
+    use politica::auditoria::Titular;
+    crate::pessoas::esquecer_registradas();
+    let padrao = politica_trocada(&[])?;
+    let resultado = com_a_politica(padrao, || {
+        let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(141), "h2-op", "operador");
+        let antes = crate::autorizacao::ultimo_registro();
+        let comeco = crate::tempo::uptime_ms();
+        let fio = rodar_programa_ate(
+            "correntes",
+            Some(Autoridade::Pessoa { sessao }),
+            99,
+            8 * TETO_DO_HTTP,
+        )
+        .map_err(|_| "o programa correntes nao conferiu o HTTP/2 da bancada")?;
+        crate::log_info!(
+            "teste",
+            "http2: o programa conferiu tudo em {} ms",
+            crate::tempo::uptime_ms().saturating_sub(comeco)
+        );
+        let registros = registros_do_processo(fio, antes);
+        const PEDIDOS: [&str; 8] = [
+            "net.connect",
+            "net.send",
+            "net.recv",
+            "net.close",
+            "random.read",
+            "system.info",
+            "system.uptime",
+            "fs.read",
+        ];
+        let fora = |m: &str, r: &str| m == "net.connect" && r == "tcp:10.0.2.100:81";
+        if let Some(r) = registros
+            .iter()
+            .find(|(m, ..)| !PEDIDOS.contains(&m.as_str()))
+        {
+            crate::log_error!("teste", "{:?}", r);
+            return Err("o HTTP/2 fez um pedido que o HTTP nao fazia");
+        }
+        if let Some(r) = registros.iter().find(|(m, r, c, t)| {
+            *t != Titular::Pessoa
+                || (*c != Codigo::Allow && !(fora(m, r) && *c == Codigo::DenyResource))
+                || (m.starts_with("net.") && !fora(m, r) && r != HTTP_CLARO && r != HTTP_CIFRADO)
+        }) {
+            crate::log_error!("teste", "{:?}", r);
+            return Err("uma decisao do programa do HTTP/2 nao foi a do HTTP em nome da pessoa");
+        }
+        let conexoes = |destino: &str| {
+            registros
+                .iter()
+                .filter(|(m, r, ..)| m == "net.connect" && r == destino)
+                .count()
+        };
+        let contadas = (
+            conexoes(HTTP_CLARO),
+            conexoes(HTTP_CIFRADO),
+            conexoes("tcp:10.0.2.100:81"),
+        );
+        if contadas != (8, 3, 1) {
+            crate::log_error!("teste", "conexoes (claras, cifradas, fora): {:?}", contadas);
+            return Err("as conexoes do HTTP/2 nao foram uma por conexao do programa");
+        }
+        if h2_no_registro(fio) {
+            return Err("um registro do processo tem o HTTP/2");
+        }
+        Ok(())
+    });
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// As correntes pelo TLS, sem ninguém no meio: o ALPN escolhe o HTTP/2, e
+/// as três correntes da mesma conexão chegam inteiras — a parada na metade
+/// e a lenta também. O gate viu uma conexão só ao cifrado, e os envios e
+/// as leituras dela, todos deixados em nome da pessoa, sem nada do HTTP/2:
+/// as correntes são do programa, e a conexão é o que o gate decide.
+fn http2_as_correntes_pelo_tls() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    use politica::Codigo;
+    use politica::auditoria::Titular;
+    com_a_bancada_http(|| {
+        let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(142), "h2-tls", "operador");
+        let b = Buscador::lancar(Autoridade::Pessoa { sessao })?;
+        let fio = b.fio;
+        let r = (|| -> Resultado {
+            let antes = crate::autorizacao::ultimo_registro();
+            b.passo(BUSCA_H2, 1, "buscador: h2: 200 Http2 ola, duke")?;
+            let desde = no_meio_das_correntes(&b, 300)?;
+            b.dizer(desde, "buscador: h2 lenta: 200 / 200")?;
+            let registros = registros_do_processo(fio, antes);
+            if let Some(r) = registros.iter().find(|(m, r, c, t)| {
+                *t != Titular::Pessoa
+                    || *c != Codigo::Allow
+                    || (m.starts_with("net.") && r != HTTP_CIFRADO && r != SERVIDOR_DNS)
+            }) {
+                crate::log_error!("teste", "{:?}", r);
+                return Err("uma decisao das correntes cifradas nao foi deixada em nome da pessoa");
+            }
+            let cifradas = registros
+                .iter()
+                .filter(|(m, r, ..)| m == "net.connect" && r == HTTP_CIFRADO)
+                .count();
+            let lidas = registros
+                .iter()
+                .filter(|(m, r, ..)| m == "net.recv" && r == HTTP_CIFRADO)
+                .count();
+            if cifradas != 1 || lidas == 0 {
+                crate::log_error!("teste", "conexoes {} leituras {}", cifradas, lidas);
+                return Err("as quatro correntes cifradas nao foram de uma conexao so");
+            }
+            if h2_no_registro(fio) {
+                return Err("um registro do processo tem o HTTP/2");
+            }
+            Ok(())
+        })();
+        let fim = b.encerrar();
+        r.and(fim)
+    })
+}
+
+/// A revogação no meio das correntes, de um processo lançado por um
+/// agente: três correntes numa conexão HTTP/2 clara, a primeira recebida,
+/// a segunda parada na metade do corpo — e a chave é revogada nesse meio.
+/// A leitura seguinte é `DENY_ROLE`, a recusa do gate, gravada com a chave
+/// do agente, e a conexão acaba inteira: as duas correntes que esperavam
+/// ouvem o mesmo código, como veio — nem um erro do HTTP/2 no lugar da
+/// recusa, nem a metade do corpo. O nome também não resolve mais.
+fn http2_a_revogacao_no_meio_das_correntes() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use politica::Codigo;
+    com_a_bancada_http(|| {
+        let chave = sigilo::publica_de(&chave_de_teste(12));
+        crate::identidade::registrar_agente_de_teste(chave, &nome_de_teste(12), "operador");
+        let r = (|| -> Resultado {
+            let b = Buscador::lancar(Autoridade::Sessao {
+                sessao: 1,
+                chave: Some(chave),
+            })?;
+            let fio = b.fio;
+            let r = (|| -> Resultado {
+                b.passo(BUSCA_H2, 0, "buscador: h2: 200 Http2 ola, duke")?;
+                let desde = no_meio_das_correntes(&b, 1_500)?;
+                crate::identidade::revogar(&chave).map_err(|_| "a revogacao de teste falhou")?;
+                b.dizer(
+                    desde,
+                    "buscador: h2 lenta: denied DENY_ROLE / denied DENY_ROLE",
+                )?;
+                let negada = ultimo_que(|e| {
+                    e.metodo == "net.recv" && e.detalhe.starts_with(&do_processo(fio))
+                })
+                .ok_or("a leitura recusada nao foi gravada")?;
+                if negada.codigo != Codigo::DenyRole || negada.chave != Some(chave) {
+                    crate::log_error!("teste", "{:?}", negada);
+                    return Err("a leitura das correntes depois da revogacao nao foi recusada");
+                }
+                b.passo(BUSCA_H2, 0, "buscador: h2: denied DENY_ROLE")
+            })();
+            let fim = b.encerrar();
+            r.and(fim)
+        })();
+        crate::identidade::esquecer_registrados();
+        r
+    })
+}
+
+/// A contenção no meio das correntes cifradas: a conexão HTTP/2 pelo TLS,
+/// três correntes, a segunda parada na metade — e o processo é isolado. As
+/// conexões dele caem, a espera acorda na hora, e a leitura executada de
+/// novo é `DENY_CONTAINED`: o código passa pelo TLS e pelas correntes como
+/// veio, e as duas que esperavam ouvem o mesmo. Contido, ele não resolve
+/// nome; solto pelo sistema, uma conexão HTTP/2 nova conversa.
+fn http2_a_contencao_no_meio_das_correntes() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    com_a_bancada_http(|| {
+        let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(143), "h2-iso", "operador");
+        let b = Buscador::lancar(Autoridade::Pessoa { sessao })?;
+        let fio = b.fio;
+        let sistema = sistema_aqui();
+        let processo = alloc::format!(r#"{{"process":{fio}}}"#);
+        let r = (|| -> Resultado {
+            b.passo(BUSCA_H2, 1, "buscador: h2: 200 Http2 ola, duke")?;
+            let desde = no_meio_das_correntes(&b, 8_000)?;
+            let antes = crate::tempo::uptime_ms();
+            let r = fs_pedir(sistema, "process.isolate", &processo);
+            if fs_texto(&r, "state").as_deref() != Some("isolated")
+                || fs_numero(&r, "dropped") != Some(2)
+            {
+                crate::log_error!("teste", "{}", r);
+                return Err("o sistema nao isolou o processo com as duas conexoes dele");
+            }
+            b.dizer(
+                desde,
+                "buscador: h2 lenta: contained DENY_CONTAINED / contained DENY_CONTAINED",
+            )?;
+            if crate::tempo::uptime_ms().saturating_sub(antes) >= 6_000 {
+                return Err("a espera das correntes nao acordou com a contencao");
+            }
+            b.passo(BUSCA_H2, 1, "buscador: h2: contained DENY_CONTAINED")?;
+            let r = fs_pedir(sistema, "process.release", &processo);
+            if !r.contains(r#""result""#) {
+                crate::log_error!("teste", "{}", r);
+                return Err("o sistema nao soltou o processo");
+            }
+            b.passo(BUSCA_H2, 1, "buscador: h2: 200 Http2 ola, duke")
+        })();
+        let _ = fs_pedir(sistema, "process.release", &processo);
+        let fim = b.encerrar();
+        r.and(fim)
+    })
+}
+
+/// O firewall no meio das correntes: a regra entra com a segunda corrente
+/// parada na metade, derruba as duas conexões claras do processo — a do
+/// HTTP/1.1 e a do HTTP/2 —, e as duas correntes que esperavam ouvem
+/// `FIREWALL_BLOCKED`, o código do firewall, e não um `GOAWAY` nem um
+/// corpo cortado. A conexão nova é barrada também; sem a regra, conversa.
+fn http2_o_firewall_no_meio_das_correntes() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    com_a_bancada_http(|| {
+        let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(144), "h2-fw", "operador");
+        let b = Buscador::lancar(Autoridade::Pessoa { sessao })?;
+        let r = (|| -> Resultado {
+            let sistema = sistema_aqui();
+            let para = alloc::format!(r#"{{"to":"{HTTP_CLARO}"}}"#);
+            b.passo(BUSCA_H2, 0, "buscador: h2: 200 Http2 ola, duke")?;
+            let desde = no_meio_das_correntes(&b, 8_000)?;
+            let antes = crate::tempo::uptime_ms();
+            let r = fs_pedir(sistema, "net.block", &para);
+            if fs_numero(&r, "rule").is_none() || fs_numero(&r, "dropped") != Some(2) {
+                crate::log_error!("teste", "{}", r);
+                return Err("a regra nao derrubou as duas conexoes claras do processo");
+            }
+            let barrada = b.dizer(
+                desde,
+                "buscador: h2 lenta: firewall FIREWALL_BLOCKED / firewall FIREWALL_BLOCKED",
+            );
+            let rapida = crate::tempo::uptime_ms().saturating_sub(antes) < 6_000;
+            let nova = barrada
+                .and_then(|()| b.passo(BUSCA_H2, 0, "buscador: h2: firewall FIREWALL_BLOCKED"));
+            let solta = fs_pedir(sistema, "net.unblock", &para);
+            nova?;
+            if !rapida {
+                return Err("a espera das correntes nao acordou com o corte");
+            }
+            if fs_numero(&solta, "rule").is_none() {
+                crate::log_error!("teste", "{}", solta);
+                return Err("o sistema nao tirou a regra do servidor HTTP");
+            }
+            b.passo(BUSCA_H2, 0, "buscador: h2: 200 Http2 ola, duke")
+        })();
+        let fim = b.encerrar();
+        r.and(fim)
+    })
+}
+
+/// Várias conexões HTTP/2 ao mesmo tempo, de pessoas e de um agente: o
+/// programa `correntes` inteiro em três processos, cada um com as suas
+/// conexões, as suas correntes e as suas tabelas do HPACK — nenhum estado
+/// do HTTP/2 é de mais de um —, e cada decisão em nome de quem lançou.
+fn http2_varias_ao_mesmo_tempo() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    use politica::auditoria::Titular;
+    crate::pessoas::esquecer_registradas();
+    let resultado = (|| -> Resultado {
+        let programa = alloc::format!("{}/correntes", crate::usuario::DIRETORIO_DOS_COMPILADOS);
+        let chave = sigilo::publica_de(&chave_de_teste(13));
+        crate::identidade::registrar_agente_de_teste(chave, &nome_de_teste(13), "operador");
+        let desde = crate::log::total_emitidos();
+        let comeco = crate::tempo::uptime_ms();
+        let mut fios = alloc::vec::Vec::new();
+        for (i, nome) in ["h2-a", "h2-b"].into_iter().enumerate() {
+            let sessao = crate::pessoas::sessao_de_teste(
+                Console::Terminal(145 + i as u16),
+                nome,
+                "operador",
+            );
+            fios.push((
+                crate::usuario::lancar_como(Some(&programa), Autoridade::Pessoa { sessao })?,
+                Titular::Pessoa,
+            ));
+        }
+        fios.push((
+            crate::usuario::lancar_como(
+                Some(&programa),
+                Autoridade::Sessao {
+                    sessao: 1,
+                    chave: Some(chave),
+                },
+            )?,
+            Titular::Agente,
+        ));
+        let mut saidas = alloc::collections::BTreeMap::new();
+        let _ = esperar_ate(
+            || {
+                crate::log::ultimos(128, crate::log::Level::Trace, |r| {
+                    if r.seq >= desde
+                        && r.subsistema == "usuario"
+                        && let Some(c) = r.mensagem().strip_prefix("processo encerrou com codigo ")
+                    {
+                        saidas.insert(r.seq, alloc::string::String::from(c));
+                    }
+                });
+                saidas.len() >= fios.len()
+            },
+            16 * TETO_DO_HTTP,
+        );
+        if saidas.len() != fios.len() || saidas.values().any(|c| c != "99") {
+            crate::log_error!("teste", "saidas: {:?}", saidas);
+            return Err("as conexoes HTTP/2 ao mesmo tempo nao conferiram");
+        }
+        crate::log_info!(
+            "teste",
+            "http2: tres programas ao mesmo tempo em {} ms",
+            crate::tempo::uptime_ms().saturating_sub(comeco)
+        );
+        for (fio, titular) in &fios {
+            let registros = registros_do_processo(*fio, 0);
+            if registros.is_empty() || registros.iter().any(|(_, _, _, t)| t != titular) {
+                crate::log_error!("teste", "{}: {:?}", fio, registros.first());
+                return Err("uma decisao de um processo nao foi em nome de quem o lancou");
+            }
+            if h2_no_registro(*fio) {
+                return Err("um registro de um processo tem o HTTP/2");
             }
         }
         Ok(())
