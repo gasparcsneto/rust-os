@@ -689,6 +689,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hora"
+version = "0.1.0"
+dependencies = [
+ "curve25519-dalek 5.0.0",
+ "ed25519-dalek",
+ "sha2 0.11.0",
+]
+
+[[package]]
 name = "http"
 version = "0.1.0"
 

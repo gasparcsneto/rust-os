@@ -116,3 +116,58 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
+
+## Roughenough — os vetores de teste do Roughtime
+
+Quatro arquivos de dados em `hora/testdata/`, e nenhuma linha de código:
+
+| Arquivo do Duke | Origem no Roughenough |
+|---|---|
+| `hora/testdata/rfc10049-pedido.104172a3` | `testdata/rfc10049-request.104172a3` |
+| `hora/testdata/rfc10049-resposta.104172a3` | `testdata/rfc10049-response.104172a3` |
+| `hora/testdata/rascunho-pedido.071039e5` | `testdata/rfc-request.071039e5` |
+| `hora/testdata/rascunho-resposta.071039e5` | `testdata/rfc-response.071039e5` |
+
+O primeiro par é um pedido e a resposta da versão 1 do Roughtime (RFC
+10049), gerados pelo servidor do Roughenough com uma semente de teste. O
+segundo é uma captura de maio de 2025 de um servidor da época dos rascunhos
+(versão `0x8000000c`). Os casos de `hora::resposta` conferem que o primeiro
+passa e o segundo é recusado. É a única conferência externa do formato que
+este repositório tem sem rede: o servidor de teste do pacote usa o mesmo
+escritor de mensagens que o pedido, e escritor e leitor errando juntos só
+aparecem contra bytes de outra implementação.
+
+Obtido do pacote `roughenough-protocol` 2.2.0, no crates.io, de 2026-10-12,
+publicado do commit `16012fc1fd3d70ccdffeb8f00794bc124ca9e3d1` de
+<https://github.com/int08h/roughenough>, em `crates/roughenough-protocol`. O
+pacote é MIT OU Apache-2.0; os arquivos ficam sob a MIT, com o aviso abaixo.
+O Duke não depende do Roughenough: nem o código, nem o pacote, entram no
+build.
+
+```text
+Copyright 2025 the Roughenough Project Contributors
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```

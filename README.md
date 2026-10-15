@@ -516,6 +516,24 @@ ancora/src/          a âncora da persistência: um contador monotônico num TPM
 ├── cripto.rs        o KDFa, o KDFe, o sal por ECDH em P-256 e a cifra de parâmetro, como a especificação do TPM os compõe
 └── testes.rs        os bytes que a especificação fixa; `tests/swtpm.rs`, a sessão contra o swtpm, com um interposto no barramento
 
+hora/src/            a hora como conta pura: o Roughtime da RFC 10049, versão 1, conferido, e o relógio civil disciplinado — uma resposta não escolhe a hora
+├── lib.rs           o que mora aqui, de onde vem o que se sabe do protocolo — reproduzido, da referência, pendente — e o que não se declara
+├── moldura.rs       o `ROUGHTIM`, o comprimento exato e o teto do pacote
+├── mensagem.rs      o cabeçalho, as etiquetas em ordem little-endian e os valores como fatias do que chegou — nada se reescreve
+├── merkle.rs        a folha, que é o pacote inteiro do pedido; o nó; e a subida pelo caminho e pelo índice
+├── pedido.rs        o pedido da versão 1, de 1024 bytes, com o `SRV` da chave fixada, e a folha dele
+├── resposta.rs      a conferência: a forma, as duas assinaturas sobre os bytes recebidos, e só então o que a resposta afirma
+├── resposta/
+│   └── testes.rs    os dois vetores externos, e uma resposta torta para cada conferência — torta só naquilo
+├── pedidos.rs       os pedidos em aberto: o id ligado ao principal, à fonte, à chave e à folha; a recusa não consome, a primeira válida sim
+├── encadeamento.rs  o nonce do próximo pedido da rodada, tirado da resposta anterior
+├── intervalo.rs     a amostra: o intervalo da hora no instante da chegada, levado adiante com a deriva
+├── quorum.rs        o acordo de pelo menos duas chaves: cada chave conta uma vez, e o empate é recusado
+├── disciplina.rs    o relógio civil: o ajuste gradual, o salto em duas rodadas, o teto, o salto pendente e os estados
+├── disciplina/
+│   └── testes.rs    o relógio atrasado, o adiantado, o salto, a perda e a volta das fontes, e a monotonicidade por sorteio
+└── servidor_de_teste.rs  só nos testes: um servidor que responde como a versão 1 — ou, de propósito, de outro jeito
+
 aparencia/src/       a linguagem visual, dos dois lados da fronteira
 └── lib.rs           a paleta, onde cada cor vai, as medidas e os estilos de texto pelo uso
 

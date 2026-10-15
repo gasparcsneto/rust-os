@@ -3545,6 +3545,7 @@ fn conferir_arvore_do_readme() -> Result<ExitCode, String> {
         "diario/src",
         "armazem/src",
         "seguranca/src",
+        "hora/src",
         "tls/src",
         "http/src",
         "programas/src",
