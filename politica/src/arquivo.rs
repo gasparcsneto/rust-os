@@ -66,12 +66,13 @@
 //!   decide pelo papel dela no registro de pessoas. Ela não é exceção à política:
 //!   decide pela mesma conta, com as permissões que o papel enumera.
 //! - `servico <nome> <papel>`: o papel de um serviço do sistema com
-//!   identidade própria — hoje só o tecido de segurança, `nsf` (ver
-//!   [`SERVICOS`] e `docs/SEGURANCA.md`). Opcional: sem a linha, o serviço
-//!   não tem papel, e o gate recusa tudo o que ele pede. O papel não pode
-//!   ser o da serial nem o da autoridade local — o serviço não herda o
-//!   `sistema` —, e o kernel e o `xtask` conferem que também não é o teto
-//!   de um administrador. Só a imagem a escreve.
+//!   identidade própria — o tecido de segurança, `nsf` (ver
+//!   `docs/SEGURANCA.md`), e o serviço de hora, `hora`; o vocabulário é
+//!   [`SERVICOS`]. Opcional: sem a linha, o serviço não tem papel, e o
+//!   gate recusa tudo o que ele pede. O papel não pode ser o da serial nem
+//!   o da autoridade local — o serviço não herda o `sistema` —, e o kernel
+//!   e o `xtask` conferem que também não é o teto de um administrador. Só
+//!   a imagem a escreve.
 //!
 //! # Validar antes de valer
 //!
@@ -207,9 +208,10 @@ pub const TETO_DE_BYTES_DO_ARMAZEM: u64 = 1 << 40;
 pub const TETO_DE_OBJETOS_DO_ARMAZEM: u64 = 1 << 24;
 
 /// Os serviços que uma linha `servico` nomeia: um vocabulário fechado, como
-/// o das permissões. Um nome fora dele recusa a política. Ver
-/// `docs/SEGURANCA.md`.
-pub const SERVICOS: &[&str] = &["nsf"];
+/// o das permissões. Um nome fora dele recusa a política. O tecido de
+/// segurança, `nsf` — ver `docs/SEGURANCA.md` —, e o serviço de hora,
+/// `hora`, que apresenta ao kernel a evidência das fontes de hora.
+pub const SERVICOS: &[&str] = &["nsf", "hora"];
 
 /// Um papel.
 #[derive(Clone, Debug, PartialEq, Eq)]

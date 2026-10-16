@@ -95,9 +95,9 @@ pub enum Titular {
     /// Ninguém ainda: uma porta sem aperto, um console sem login.
     Anonimo = 6,
     /// Um serviço do sistema com identidade própria — o tecido de
-    /// segurança, `nsf` —, pelo papel que a linha `servico` da política
-    /// lhe dá. Entrou depois dos outros, no fim: o número de cada um é o
-    /// que já está nos journals.
+    /// segurança, `nsf`, e o de hora, `hora` —, pelo papel que a linha
+    /// `servico` da política lhe dá. Entrou depois dos outros, no fim: o
+    /// número de cada um é o que já está nos journals.
     Servico = 7,
 }
 

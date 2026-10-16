@@ -14,6 +14,18 @@
 //! As **administrativas** só se exercem por `admin.execute`, com a prova de
 //! um administrador: nenhum comando comum as usa. Estão no vocabulário para
 //! que o papel do administrador as declare — e o papel diga o que ele pode.
+//!
+//! # As do tempo
+//!
+//! `time.sync` autoriza **apresentar evidência**, e não escolher a hora:
+//! pedir ao kernel um pedido do Roughtime para uma fonte do registro de
+//! fontes, e entregar a resposta que chegou — o kernel a confere contra o
+//! que ele mesmo emitiu, e só o acordo de pelo menos duas chaves move o
+//! relógio civil (ver o pacote `hora`). `time.confirm` aplica um salto que
+//! o quórum já indicou e que ficou pendente; é administrativa, e não aceita
+//! uma hora digitada. As duas são sensíveis — nenhuma vem pela inclusão de
+//! outro papel —, e nenhuma tem alcance próprio: as fontes são destinos de
+//! `net.connect`, e o alcance delas é o dessa permissão.
 
 /// Uma permissão.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -136,11 +148,24 @@ pub enum Permissao {
     /// que sai não diz nada de ninguém, e a taxa do papel limita quanto. Os
     /// bytes nunca vão para a auditoria — só a decisão.
     RandomRead,
+    /// Apresentar evidência de hora: pedir ao kernel o pedido do Roughtime
+    /// para uma fonte do registro de fontes (`time.request`), e entregar a
+    /// resposta que chegou (`time.sync`). Não escolhe a hora — o kernel
+    /// confere a resposta contra o pedido que ele emitiu, e só um acordo de
+    /// pelo menos duas chaves move o relógio civil. Sensível: o papel que a
+    /// tem a escreve. Sem alcance próprio: o transporte até a fonte é um
+    /// `net.connect`, decidido à parte, com os destinos enumerados.
+    TimeSync,
+    /// Aplicar o salto pendente — o que o quórum indicou e que, acima do
+    /// teto ou fora do envelope, espera uma pessoa. Administrativa: só por
+    /// `admin.execute`, com prova. Não aceita uma hora digitada; sem salto
+    /// pendente, não há o que confirmar.
+    TimeConfirm,
 }
 
 /// Todas, na ordem do relatório. As novas entram no fim: a posição é o bit
 /// do manifesto — ver [`crate::manifesto::Permissoes`].
-pub const TODAS: [Permissao; 38] = [
+pub const TODAS: [Permissao; 40] = [
     Permissao::AgentRead,
     Permissao::SystemRead,
     Permissao::LogRead,
@@ -179,6 +204,8 @@ pub const TODAS: [Permissao; 38] = [
     Permissao::AgentSuspend,
     Permissao::CredentialSuspend,
     Permissao::RandomRead,
+    Permissao::TimeSync,
+    Permissao::TimeConfirm,
 ];
 
 impl Permissao {
@@ -223,6 +250,8 @@ impl Permissao {
             Permissao::AgentSuspend => "agent.suspend",
             Permissao::CredentialSuspend => "credential.suspend",
             Permissao::RandomRead => "random.read",
+            Permissao::TimeSync => "time.sync",
+            Permissao::TimeConfirm => "time.confirm",
         }
     }
 
@@ -264,6 +293,8 @@ impl Permissao {
                 | Permissao::ProcessIsolate
                 | Permissao::AgentSuspend
                 | Permissao::CredentialSuspend
+                | Permissao::TimeSync
+                | Permissao::TimeConfirm
         )
     }
 
@@ -283,6 +314,7 @@ impl Permissao {
                 | Permissao::MessagePurge
                 | Permissao::MessagePurgeMailbox
                 | Permissao::AdminRevoke
+                | Permissao::TimeConfirm
         )
     }
 
@@ -355,6 +387,10 @@ impl Permissao {
     /// `message.cancel`: confirmar e cancelar mexem só nas mensagens do
     /// próprio titular — a caixa dele, as que ele mandou —, e não no que
     /// outro vê da máquina.
+    ///
+    /// `time.sync` muda: a evidência entregue pode mover o relógio civil, e
+    /// o pedido emitido ocupa a tabela do kernel. `time.confirm` aplica um
+    /// salto.
     pub const fn muda_estado(self) -> bool {
         match self {
             Permissao::AgentRead
@@ -394,7 +430,9 @@ impl Permissao {
             | Permissao::NetBlock
             | Permissao::ProcessIsolate
             | Permissao::AgentSuspend
-            | Permissao::CredentialSuspend => true,
+            | Permissao::CredentialSuspend
+            | Permissao::TimeSync
+            | Permissao::TimeConfirm => true,
         }
     }
 
@@ -585,5 +623,36 @@ mod testes {
         let p = Permissao::de_nome("admin.revoke").unwrap();
         assert_eq!(p, Permissao::AdminRevoke);
         assert!(p.administrativa() && p.sensivel() && p.muda_estado() && !p.tem_alcance());
+    }
+
+    /// As do tempo. `time.sync` é sensível — não vem pela inclusão de outro
+    /// papel: quem apresenta evidência de hora o escreve — e não é
+    /// administrativa: o serviço de hora a exerce pelo gate, sem prova.
+    /// `time.confirm` é administrativa e sensível: só com prova. As duas
+    /// mudam o estado e nenhuma tem alcance próprio — as fontes são
+    /// destinos de `net.connect`. E entram no fim: a posição é o bit do
+    /// manifesto, e as de antes não mudam de bit.
+    #[test]
+    fn as_do_tempo() {
+        let (sync, confirm) = (
+            Permissao::de_nome("time.sync").unwrap(),
+            Permissao::de_nome("time.confirm").unwrap(),
+        );
+        assert_eq!(
+            (sync, confirm),
+            (Permissao::TimeSync, Permissao::TimeConfirm)
+        );
+        assert!(sync.sensivel() && !sync.administrativa() && sync.muda_estado());
+        assert!(confirm.sensivel() && confirm.administrativa() && confirm.muda_estado());
+        for p in [sync, confirm] {
+            assert!(!p.tem_alcance(), "{}", p.nome());
+            assert!(!p.recurso_e_caminho() && !p.recurso_e_endereco() && !p.recurso_e_papel());
+            assert!(!p.recurso_e_destino() && !p.contencao());
+        }
+        assert_eq!(TODAS[38], Permissao::TimeSync);
+        assert_eq!(TODAS[39], Permissao::TimeConfirm);
+        assert_eq!(TODAS[37], Permissao::RandomRead);
+        assert_eq!(Permissao::de_nome("time.*"), None);
+        assert_eq!(Permissao::de_nome("time"), None);
     }
 }

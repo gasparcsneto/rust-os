@@ -90,6 +90,19 @@ pub use permissao::Permissao;
 /// - `random.read` — os bytes do gerador do kernel — no `sistema`, no
 ///   `administrador` e no `operador`, que conecta; não no `observador`, que
 ///   não conecta a nada.
+/// - As fontes de hora da bancada — `udp:10.0.2.2:5319`, `udp:10.0.2.2:5320`
+///   e `udp:10.0.2.2:5321`, as do registro de fontes, `/etc/duke/tempo` —
+///   estão no `net.connect` e no `net.block` dos dois, além dos seis
+///   destinos acima: o `sistema` porque é o máximo enumerado, e o
+///   `administrador` para que o papel `tempo` caiba no teto de quem o
+///   delega, e para que ele possa cortar uma fonte. O `seguranca` não as
+///   barra: o tecido não corta fonte de hora — quem forja respostas ruins
+///   não faz o tecido cortar a fonte legítima.
+/// - `time.sync` — apresentar evidência de hora — no `sistema`, que é o
+///   máximo enumerado, e no `administrador`; `time.confirm` — aplicar o
+///   salto pendente —, administrativa, só no `administrador`. Nenhum dos
+///   dois é curinga: o `tempo` não inclui o `sistema`, e a linha `servico`
+///   não pode dar ao serviço o papel da serial nem o da autoridade local.
 /// - `process.isolate`, `agent.suspend` e `credential.suspend`, no `sistema` e
 ///   no `administrador`, alcançam `observador`, `operador` e `sistema` —
 ///   nunca `administrador`: suspender um administrador seria tirar dele,
@@ -119,12 +132,12 @@ pub use permissao::Permissao;
 macro_rules! papeis_de_sistema {
     () => {
         "\
-papel sistema agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.raw_read keyboard.read debug.trigger terminal.attach audit.read policy.read message.send message.read security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read
+papel sistema agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.raw_read keyboard.read debug.trigger terminal.attach audit.read policy.read message.send message.read security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read time.sync
 recurso sistema fs.read /
 recurso sistema fs.write /armazem
-recurso sistema net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53 tcp:10.0.2.100:80 tcp:10.0.2.100:8443
+recurso sistema net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53 tcp:10.0.2.100:80 tcp:10.0.2.100:8443 udp:10.0.2.2:5319 udp:10.0.2.2:5320 udp:10.0.2.2:5321
 recurso sistema net.observe udp:10.0.2.3:53
-recurso sistema net.block tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53 tcp:10.0.2.100:80 tcp:10.0.2.100:8443
+recurso sistema net.block tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53 tcp:10.0.2.100:80 tcp:10.0.2.100:8443 udp:10.0.2.2:5319 udp:10.0.2.2:5320 udp:10.0.2.2:5321
 armazem sistema 268435456 65536
 recurso sistema process.run /
 editores sistema bancada
@@ -135,12 +148,12 @@ recurso sistema credential.suspend papel:observador papel:operador papel:sistema
 taxa sistema 400 800
 processos sistema 32
 
-papel administrador agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read
+papel administrador agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read time.sync time.confirm
 recurso administrador fs.read /dados /bin /programas /armazem/compartilhado
 recurso administrador fs.write /armazem/compartilhado
-recurso administrador net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53 tcp:10.0.2.100:80 tcp:10.0.2.100:8443
+recurso administrador net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53 tcp:10.0.2.100:80 tcp:10.0.2.100:8443 udp:10.0.2.2:5319 udp:10.0.2.2:5320 udp:10.0.2.2:5321
 recurso administrador net.observe udp:10.0.2.3:53
-recurso administrador net.block tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53 tcp:10.0.2.100:80 tcp:10.0.2.100:8443
+recurso administrador net.block tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53 tcp:10.0.2.100:80 tcp:10.0.2.100:8443 udp:10.0.2.2:5319 udp:10.0.2.2:5320 udp:10.0.2.2:5321
 armazem administrador 67108864 16384
 recurso administrador process.run /bin /programas /armazem/compartilhado/codigo
 editores administrador bancada
@@ -174,6 +187,14 @@ servico nsf seguranca
 ///   escreve no armazém compartilhado, `/armazem/compartilhado`; e roda o
 ///   código instalado em `/armazem/compartilhado/codigo` — só o selado
 ///   pelo editor `bancada`, em que ele confia;
+/// - `tempo` é o papel do serviço de hora — a linha `servico hora tempo`:
+///   apresenta evidência de hora (`time.sync`) e conecta às três fontes do
+///   registro de fontes, `/etc/duke/tempo`, cada uma escrita por inteiro,
+///   UDP. Nada mais: não lê nem escreve arquivo, não lança, não manda
+///   mensagem, não confirma salto, e não é o `sistema`. Só nesta política:
+///   a de emergência não tem a linha `servico hora`, e sem política no
+///   disco o serviço de hora não tem papel — o relógio civil fica no RTC,
+///   como era antes dele;
 /// - `sistema` e `administrador`: ver `papeis_de_sistema`.
 pub const PADRAO: &str = concat!(
     "\
@@ -182,8 +203,8 @@ pub const PADRAO: &str = concat!(
 # Uma permissao sensivel (fs.*, net.connect, keyboard.read, debug.trigger,
 # terminal.attach, policy.*, agent.register, agent.revoke, person.*,
 # credential.rotate, session.revoke, lease.revoke, message.*, as contencoes
-# process.isolate, agent.suspend e credential.suspend) nao atravessa
-# a inclusao de outro papel: cada papel que a tem a escreve. Toda permissao
+# process.isolate, agent.suspend e credential.suspend, e time.*) nao
+# atravessa a inclusao de outro papel: cada papel que a tem a escreve. Toda permissao
 # de caminho, o message.send e o net.connect tem o alcance escrito numa
 # linha `recurso` — o de message.send e o papel do destinatario,
 # `papel:<nome>`, e o de net.connect cada destino inteiro,
@@ -201,7 +222,13 @@ pub const PADRAO: &str = concat!(
 # so pelo que ele enumera. O codigo de fora da imagem (o instalado no
 # armazem, o que chegou pela rede) so roda com o selo de um editor em que
 # o papel de quem o lanca confia: a linha `editores`. Nesta imagem, o
-# editor `bancada`, do registro de editores (/etc/duke/editores).
+# editor `bancada`, do registro de editores (/etc/duke/editores). O servico
+# de hora (servico hora) decide pelo papel tempo: so apresenta evidencia de
+# hora (time.sync) e so fala com as fontes do registro de fontes
+# (/etc/duke/tempo), UDP em 10.0.2.2:5319, 10.0.2.2:5320 e 10.0.2.2:5321 —
+# cada fonte do registro tem o destino dela aqui, e o xtask confere. A hora
+# nao se escolhe: so o acordo de pelo menos duas chaves a move, e o salto
+# que fica pendente so o administrador confirma, com prova (time.confirm).
 
 papel observador agent.read system.read log.read ui.read message.read
 taxa observador 20 40
@@ -217,6 +244,11 @@ editores operador bancada
 recurso operador message.send papel:operador papel:sistema
 taxa operador 50 100
 processos operador 8
+
+papel tempo net.connect time.sync
+recurso tempo net.connect udp:10.0.2.2:5319 udp:10.0.2.2:5320 udp:10.0.2.2:5321
+taxa tempo 10 20
+servico hora tempo
 
 ",
     papeis_de_sistema!(),
@@ -419,6 +451,35 @@ mod testes {
             }
             assert_eq!(d(papel, NetConnect, None), Codigo::DenyResource);
         }
+        // O tempo: apresentar evidência de hora, o papel do serviço de hora,
+        // o sistema e o teto do administrador; confirmar o salto pendente,
+        // só o administrador. O observador, o operador e o tecido de
+        // segurança, nenhuma das duas.
+        for (papel, sync, confirm) in [
+            ("observador", Codigo::DenyPermission, Codigo::DenyPermission),
+            ("operador", Codigo::DenyPermission, Codigo::DenyPermission),
+            ("seguranca", Codigo::DenyPermission, Codigo::DenyPermission),
+            ("tempo", Codigo::Allow, Codigo::DenyPermission),
+            ("sistema", Codigo::Allow, Codigo::DenyPermission),
+            ("administrador", Codigo::Allow, Codigo::Allow),
+        ] {
+            assert_eq!(d(papel, TimeSync, None), sync, "{papel}");
+            assert_eq!(d(papel, TimeConfirm, None), confirm, "{papel}");
+            // O recurso não muda nada: as duas não têm alcance.
+            assert_eq!(d(papel, TimeSync, Some("udp:10.0.2.2:5319")), sync);
+        }
+        // As fontes de hora: o tempo, o sistema e o administrador conectam;
+        // o operador e o observador não — elas não estão no alcance deles.
+        for fonte in FONTES {
+            for papel in ["tempo", "sistema", "administrador"] {
+                assert_eq!(d(papel, NetConnect, Some(fonte)), Codigo::Allow, "{papel}");
+            }
+            assert_eq!(d("operador", NetConnect, Some(fonte)), Codigo::DenyResource);
+            assert_eq!(
+                d("observador", NetConnect, Some(fonte)),
+                Codigo::DenyPermission
+            );
+        }
         assert_eq!(p.decidir(None, AgentRead, None), Codigo::DenyRole);
         assert_eq!(
             p.decidir(Some("fantasma"), AgentRead, None),
@@ -459,6 +520,9 @@ mod testes {
                         "udp:10.0.2.3:53",
                         "tcp:10.0.2.100:80",
                         "tcp:10.0.2.100:8443",
+                        FONTES[0],
+                        FONTES[1],
+                        FONTES[2],
                     ]
                 };
                 assert_eq!(
@@ -478,7 +542,7 @@ mod testes {
             }
         }
         // Nenhum outro papel da padrão alcança mais que ele.
-        for papel in ["observador", "operador"] {
+        for papel in ["observador", "operador", "tempo"] {
             assert!(p.cabe_em(papel, "sistema").is_ok(), "{papel}");
         }
     }
@@ -806,6 +870,11 @@ mod testes {
             for fora in ["tcp:10.0.2.100:8", "udp:10.0.2.99:53", ""] {
                 assert_eq!(d(NetBlock, Some(fora)), Codigo::DenyResource, "{fora}");
             }
+            // As fontes de hora não: o tecido não corta fonte de hora — quem
+            // forja respostas ruins não o faz cortar a legítima.
+            for fonte in FONTES {
+                assert_eq!(d(NetBlock, Some(fonte)), Codigo::DenyResource, "{fonte}");
+            }
             // Na de emergência não há observador nem operador: o tecido não
             // alcança ninguém — o papel do alvo precisa existir.
             let esperado = if p.papel("operador").is_some() {
@@ -841,6 +910,8 @@ mod testes {
                 AgentSuspend,
                 CredentialSuspend,
                 RandomRead,
+                TimeSync,
+                TimeConfirm,
             ] {
                 assert_eq!(
                     d(perm, Some("tcp:10.0.2.100:7")),
@@ -997,5 +1068,234 @@ mod testes {
                 Err(Recusa::Proibida(_))
             ));
         }
+    }
+
+    /// As três fontes de hora da bancada, como o registro de fontes as
+    /// escreve.
+    const FONTES: [&str; 3] = [
+        "udp:10.0.2.2:5319",
+        "udp:10.0.2.2:5320",
+        "udp:10.0.2.2:5321",
+    ];
+
+    /// O serviço de hora decide pelo papel `tempo`, que enumera duas
+    /// permissões — conectar às fontes e apresentar evidência de hora — e
+    /// nada mais. Só na padrão: na de emergência o serviço não tem papel, e
+    /// a decisão sem papel é `DENY_ROLE`.
+    #[test]
+    fn o_servico_de_hora_decide_pelo_papel_tempo() {
+        use Permissao::*;
+        let p = padrao();
+        assert_eq!(p.servico("hora"), Some("tempo"));
+        let tempo = p.papel("tempo").unwrap();
+        assert!(tempo.inclui.is_empty(), "o tempo inclui outro papel");
+        let todas: alloc::vec::Vec<_> = tempo.permissoes().map(|x| x.nome()).collect();
+        assert_eq!(todas, ["net.connect", "time.sync"]);
+        assert_eq!(tempo.recursos.get(&NetConnect).unwrap(), &FONTES);
+        assert!(tempo.editores.is_empty());
+        let d = |perm, rec| p.decidir(p.servico("hora"), perm, rec);
+        assert_eq!(d(TimeSync, None), Codigo::Allow);
+        for fonte in FONTES {
+            assert_eq!(d(NetConnect, Some(fonte)), Codigo::Allow, "{fonte}");
+        }
+        // Nenhum outro destino: nem os da bancada, nem outra porta da fonte,
+        // nem a fonte por TCP.
+        for fora in [
+            "udp:10.0.2.2:69",
+            "udp:10.0.2.3:53",
+            "tcp:10.0.2.100:7",
+            "udp:10.0.2.2:5318",
+            "udp:10.0.2.2:5322",
+            "tcp:10.0.2.2:5319",
+            "udp:10.0.2.3:5319",
+            "",
+        ] {
+            assert_eq!(d(NetConnect, Some(fora)), Codigo::DenyResource, "{fora}");
+        }
+        assert_eq!(d(NetConnect, None), Codigo::DenyResource);
+        // Cada outra permissão do vocabulário, recusada.
+        for perm in permissao::TODAS {
+            if perm == NetConnect || perm == TimeSync {
+                continue;
+            }
+            assert_eq!(
+                d(perm, Some("/")),
+                Codigo::DenyPermission,
+                "{}",
+                perm.nome()
+            );
+        }
+        // Cabe no teto do administrador — que pode mudá-lo por policy.write,
+        // dentro do que ele mesmo tem — e não é teto de ninguém.
+        assert_eq!(p.cabe_em("tempo", "administrador"), Ok(()));
+        assert_eq!(p.conferir_tetos(&["administrador"]), Ok(()));
+        // Na de emergência: sem a linha, sem papel.
+        let e = Politica::emergencia();
+        assert_eq!(e.servico("hora"), None);
+        assert!(e.papel("tempo").is_none());
+        assert_eq!(
+            e.decidir(e.servico("hora"), TimeSync, None),
+            Codigo::DenyRole
+        );
+        // O texto leva a linha, e a leitura a devolve.
+        assert!(p.texto().contains("servico hora tempo\n"));
+        assert_eq!(Politica::ler(&p.texto()).unwrap(), p);
+    }
+
+    /// O `tempo` não é o `sistema`, nem o recebe por nenhum caminho: não o
+    /// inclui; uma inclusão do `sistema` não traria `time.sync` nem
+    /// `net.connect`, que são sensíveis; e a linha `servico` não pode dar
+    /// ao serviço de hora o papel da serial, o da autoridade local, nem o
+    /// teto de um administrador.
+    #[test]
+    fn o_tempo_nao_herda_o_sistema() {
+        use Permissao::*;
+        let p = padrao();
+        let sistema = p.papel("sistema").unwrap();
+        let tempo = p.papel("tempo").unwrap();
+        // Das que o sistema tem, o tempo tem só as duas que escreve.
+        let comuns: alloc::vec::Vec<_> = sistema
+            .permissoes()
+            .filter(|x| tempo.tem(*x))
+            .map(|x| x.nome())
+            .collect();
+        assert_eq!(comuns, ["net.connect", "time.sync"]);
+        // Uma política em que o tempo incluísse o sistema: só as não
+        // sensíveis atravessariam — nem `time.sync`, nem `net.connect`. E
+        // nem se lê sem escrever o alcance do `process.run` que viria junto:
+        // o alcance é de cada papel, e não se herda.
+        let tempo_do_padrao = "papel tempo net.connect time.sync\nrecurso tempo net.connect udp:10.0.2.2:5319 udp:10.0.2.2:5320 udp:10.0.2.2:5321\n";
+        assert!(PADRAO.contains(tempo_do_padrao));
+        let so_incluindo = PADRAO.replace(tempo_do_padrao, "papel tempo @sistema\n");
+        assert!(matches!(
+            Politica::ler(&so_incluindo).unwrap_err().tipo,
+            arquivo::ErroTipo::RecursoFaltando(papel, perm) if papel == "tempo" && perm == "process.run"
+        ));
+        let incluindo = PADRAO.replace(
+            tempo_do_padrao,
+            "papel tempo @sistema\nrecurso tempo process.run /bin\n",
+        );
+        let incluindo = Politica::ler(&incluindo).expect("le");
+        let herdado = incluindo.papel("tempo").unwrap();
+        assert!(!herdado.tem(TimeSync) && !herdado.tem(NetConnect));
+        assert!(!herdado.tem(TimeConfirm));
+        assert_eq!(
+            incluindo.decidir(incluindo.servico("hora"), TimeSync, None),
+            Codigo::DenyPermission
+        );
+        // O papel da serial, o da autoridade local: a política não vigora.
+        let como_o_sistema = PADRAO.replace("servico hora tempo", "servico hora sistema");
+        assert!(matches!(
+            Politica::ler(&como_o_sistema).unwrap_err().tipo,
+            arquivo::ErroTipo::ServicoComPapelDoSistema(s, q) if s == "hora" && q == "sistema"
+        ));
+        let como_o_local = PADRAO
+            .replace("servico hora tempo", "servico hora operador")
+            .replace("local sistema", "local operador");
+        assert!(matches!(
+            Politica::ler(&como_o_local).unwrap_err().tipo,
+            arquivo::ErroTipo::ServicoComPapelDoSistema(s, q) if s == "hora" && q == "operador"
+        ));
+        // E a troca da serial para o papel do serviço é recusada.
+        assert!(matches!(
+            p.com_serial("tempo"),
+            Err(Recusa::Invalida(arquivo::Erro {
+                tipo: arquivo::ErroTipo::ServicoComPapelDoSistema(_, _),
+                ..
+            }))
+        ));
+        // O teto de um administrador: a política se lê, e a conferência dos
+        // tetos — a do kernel e a do `xtask` — a recusa.
+        let teto = PADRAO.replace("servico hora tempo", "servico hora administrador");
+        let teto = Politica::ler(&teto).expect("le");
+        assert!(teto.conferir_tetos(&["administrador"]).is_err());
+    }
+
+    /// `time.sync` não é implícita: um papel que inclui outro que a tem não
+    /// a tem; só quem a escreve. E `time.confirm`, além disso, só se exerce
+    /// com prova — ver `Permissao::administrativa`.
+    #[test]
+    fn as_do_tempo_nao_atravessam_a_inclusao() {
+        use Permissao::*;
+        let p = com("papel a time.sync net.connect\nrecurso a net.connect udp:10.0.2.2:5319\npapel b @a ui.read")
+            .unwrap();
+        let b = p.papel("b").unwrap();
+        assert!(b.tem(UiRead) && !b.tem(TimeSync) && !b.tem(NetConnect));
+        assert_eq!(p.decidir(Some("b"), TimeSync, None), Codigo::DenyPermission);
+        let p = com("papel a time.confirm\npapel b @a ui.read").unwrap();
+        assert!(!p.papel("b").unwrap().tem(TimeConfirm));
+        // Na padrão, quem tem cada uma: as listas inteiras.
+        let p = padrao();
+        let quem = |perm| {
+            [
+                "observador",
+                "operador",
+                "tempo",
+                "sistema",
+                "administrador",
+                "seguranca",
+            ]
+            .into_iter()
+            .filter(|papel| p.papel(papel).unwrap().tem(perm))
+            .collect::<alloc::vec::Vec<_>>()
+        };
+        assert_eq!(quem(TimeSync), ["tempo", "sistema", "administrador"]);
+        assert_eq!(quem(TimeConfirm), ["administrador"]);
+    }
+
+    /// `policy.write` e o tempo: o administrador revoga `time.sync` do
+    /// papel `tempo` — e a decisão seguinte do serviço é recusada —,
+    /// estreita os destinos dele, e o delega a quem cabe no teto; não dá ao
+    /// `tempo` um destino que o teto não alcança, nem o que o teto não tem.
+    /// A linha `servico hora` não muda por aqui.
+    #[test]
+    fn policy_write_e_o_tempo() {
+        use Permissao::*;
+        let p = padrao();
+        let mudar =
+            |linha: &str| p.com_linha(linha, "administrador", &["administrador", "sistema"]);
+        // Revogar: o papel continua, sem a permissão; o serviço é recusado.
+        let sem = mudar("papel tempo net.connect").unwrap();
+        assert_eq!(
+            sem.decidir(sem.servico("hora"), TimeSync, None),
+            Codigo::DenyPermission
+        );
+        assert_eq!(
+            sem.decidir(sem.servico("hora"), NetConnect, Some(FONTES[0])),
+            Codigo::Allow
+        );
+        // Tirar uma fonte do alcance: o serviço não conecta mais a ela.
+        let estreito =
+            mudar("recurso tempo net.connect udp:10.0.2.2:5319 udp:10.0.2.2:5320").unwrap();
+        assert_eq!(
+            estreito.decidir(estreito.servico("hora"), NetConnect, Some(FONTES[2])),
+            Codigo::DenyResource
+        );
+        // Um destino que o administrador não alcança: não.
+        assert!(matches!(
+            mudar("recurso tempo net.connect udp:10.0.2.2:5319 udp:10.0.2.2:5399"),
+            Err(Recusa::Proibida(_))
+        ));
+        // O que o administrador não tem: não.
+        assert!(matches!(
+            mudar("papel tempo net.connect time.sync debug.trigger"),
+            Err(Recusa::Proibida(_))
+        ));
+        // Delegar `time.sync` ao operador cabe no teto: é decisão de quem
+        // tem a prova, e a auditoria a grava.
+        let delegado = mudar(
+            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read time.sync",
+        )
+        .unwrap();
+        assert_eq!(
+            delegado.decidir(Some("operador"), TimeSync, None),
+            Codigo::Allow
+        );
+        // A linha do serviço é só da imagem.
+        for linha in ["servico hora operador", "servico hora tempo"] {
+            assert!(matches!(mudar(linha), Err(Recusa::Proibida(_))), "{linha}");
+        }
+        // Nada disso mudou a política de onde partiu.
+        assert_eq!(p, padrao());
     }
 }
