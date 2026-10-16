@@ -23,6 +23,15 @@ politica = { path = "../politica" }
 # estado e os registros nelas, pelo cabeçalho em claro — sem a chave.
 diario = { path = "../diario" }
 
+# O registro de fontes de hora que vai para a imagem: o mesmo leitor que o
+# kernel usa no boot, e a coerência dele com a política — conferidos antes
+# de a imagem existir.
+hora = { path = "../hora" }
+
+# As raízes das fontes de hora da bancada: a pública de cada uma sai da
+# privada, que fica em `target/chaves/`. A mesma versão do `sigilo`.
+ed25519-dalek = { version = "3.0.0", default-features = false }
+
 # Os certificados da bancada TLS: a raiz, as folhas, a vencida e a de outra
 # raiz — gerados em `target/`, nunca no repositório. Ver `src/tls.rs`.
 rcgen = "0.14.10"

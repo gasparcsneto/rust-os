@@ -160,7 +160,7 @@ $ cargo xtask agent --canal 2 agent.session
 | `agent.registry` | Quem pode entrar pelas portas: a chave do Duke e cada agente registrado, com a origem |
 | `person.registry` | Quem pode entrar pelos consoles: cada pessoa, com identificador, nome, papel, estado e sessões abertas — sem credencial |
 | `admin.challenge` | Um desafio de uso único para uma operação administrativa nesta sessão |
-| `admin.execute` | Uma operação administrativa com a prova de um administrador (`challenge`, `command`, `params`, `admin`, `proof`): `agent.register`, `agent.revoke`, `policy.assign`, `policy.write`, `person.register`, `person.revoke`, `credential.rotate`, `session.revoke`, `lease.revoke`, `message.send`, `message.read`, `message.ack`, `message.purge`, `message.purge_mailbox`; e, com as assinaturas de um quórum em `signatures`, `admin.revoke` |
+| `admin.execute` | Uma operação administrativa com a prova de um administrador (`challenge`, `command`, `params`, `admin`, `proof`): `agent.register`, `agent.revoke`, `policy.assign`, `policy.write`, `person.register`, `person.revoke`, `credential.rotate`, `session.revoke`, `lease.revoke`, `message.send`, `message.read`, `message.ack`, `message.purge`, `message.purge_mailbox`, `time.confirm` — o salto de hora pendente, sem hora digitada —; e, com as assinaturas de um quórum em `signatures`, `admin.revoke` |
 | `audit.tail` | Os registros mais recentes da auditoria encadeada, com o que basta para refazer cada elo, e quais já estão no journal; com `after`, os seguintes a um número, do mais velho ao mais novo — a leitura de quem acompanha a cadeia (`count`, `after`) |
 | `audit.head` | A cabeça da auditoria — o elo do último registro, para ancorar fora da máquina —, a âncora e quantos há |
 | `audit.verify` | Refaz a cadeia guardada a partir da âncora e diz se cada elo confere |
@@ -176,6 +176,8 @@ $ cargo xtask agent --canal 2 agent.session
 | `system.info` | Kernel, CPU, vídeo, uptime, o RTC e mecanismo de guarda da pilha |
 | `system.uptime` | Ticks do timer e milissegundos desde o boot |
 | `random.read` | Bytes do gerador do kernel, em hexadecimal, para quem precisa de uma chave — a semente de cada conexão TLS de um programa. De 1 a 256 — fora disso é erro, e não um corte —; sem fonte de entropia, `ENTROPY_UNAVAILABLE` e nenhum byte. A auditoria grava a decisão, nunca os bytes (`bytes`) |
+| `time.request` | O pedido do Roughtime para uma fonte do registro de fontes de hora, `/etc/duke/tempo`, com o nonce do kernel, ligado a quem pede e à fonte; não escolhe a hora. Exige `time.sync`; o transporte até a fonte é um `net.connect` UDP, decidido à parte. Uma fonte fora do registro é `INVALID_REQUEST`; por enquanto o serviço de hora não emite pedidos, e a resposta é `TIME_UNAVAILABLE` (`source`) |
+| `time.sync` | Entrega a resposta que chegou de uma fonte de hora — inteira, como chegou, no anexo; sem anexo, o aviso de que ela não veio — para o pedido `id` de quem entrega. O kernel a confere contra o pedido que ele emitiu, e só o acordo de pelo menos duas chaves move o relógio civil. Exige `time.sync`; um id que não é de quem entrega não existe para ele — e, por enquanto, sem o serviço de hora, nenhum pedido está aberto —: `INVALID_REQUEST` (`id`, `attachment`) |
 | `memory.stats` | Totais agregados de memória física |
 | `memory.regions` | Regiões do mapa de memória (`limit`, `usable_only`) |
 | `memory.frames` | Estado do alocador de frames físicos |

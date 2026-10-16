@@ -1517,6 +1517,8 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "diario",
+ "ed25519-dalek",
+ "hora",
  "politica",
  "protocolo",
  "rcgen",

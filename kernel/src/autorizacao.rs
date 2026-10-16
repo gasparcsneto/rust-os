@@ -133,9 +133,10 @@ pub enum Principal {
     Pessoa([u8; 8]),
     /// Os processos lançados pelo sistema.
     Sistema,
-    /// Um serviço — o tecido de segurança: o balde é dele, e não o do
-    /// sistema.
-    Servico,
+    /// Um serviço — o tecido de segurança, o serviço de hora: o balde é de
+    /// cada um, e não o do sistema, nem um só para os dois. Um serviço que
+    /// pede demais não gasta a ficha do outro.
+    Servico(Servico),
 }
 
 impl Principal {
@@ -151,7 +152,7 @@ impl Principal {
                 alloc::format!("person:{:02x}{:02x}{:02x}{:02x}", s[0], s[1], s[2], s[3])
             }
             Principal::Sistema => String::from("system"),
-            Principal::Servico => String::from("service"),
+            Principal::Servico(s) => alloc::format!("service:{}", s.nome()),
         }
     }
 }
@@ -326,6 +327,17 @@ pub enum Autoridade {
 pub enum Servico {
     /// O tecido nativo de segurança.
     Nsf,
+    /// O serviço de hora: apresenta ao kernel a evidência das fontes de
+    /// hora do registro — `time.request` e `time.sync` —, com o papel que a
+    /// linha `servico hora` lhe dá. Não escolhe a hora, e não é o sistema.
+    #[cfg_attr(
+        not(feature = "modo-teste"),
+        expect(
+            dead_code,
+            reason = "o fio do servico de hora e do passo seguinte; ate la, so a suite age como ele"
+        )
+    )]
+    Hora,
 }
 
 impl Servico {
@@ -333,6 +345,7 @@ impl Servico {
     pub const fn nome(self) -> &'static str {
         match self {
             Servico::Nsf => "nsf",
+            Servico::Hora => "hora",
         }
     }
 }
@@ -640,6 +653,9 @@ struct Quem {
     /// quem responde por ele é o titular acima — quem o lançou —, e a
     /// auditoria diz também qual programa pediu.
     processo: Option<String>,
+    /// O serviço, quando quem pede é um: de quem é o balde da taxa e a
+    /// conta no caminho da auditoria — cada serviço o seu.
+    servico: Option<Servico>,
 }
 
 /// Quem está numa decisão, como a barra o mostra — ver [`crate::atividade`].
@@ -747,6 +763,7 @@ pub fn carregar() {
         chave: None,
         papel: None,
         processo: None,
+        servico: None,
     };
     let (politica, codigo, detalhe, resumo) = match crate::vfs::ler_tudo(CAMINHO_DA_POLITICA) {
         Ok(bytes) => {
@@ -779,6 +796,13 @@ pub fn carregar() {
             detalhe
         );
     }
+    // O registro de fontes de hora diante desta política: o que o serviço de
+    // hora não alcança, o boot diz — e o gate recusa a cada pedido. Não tira
+    // fonte nenhuma: a política muda em tempo de execução, e o gate decide
+    // com a de agora. Ver `hora::registro`.
+    if let Some(fontes) = crate::identidade::fontes_de_hora() {
+        relatar_fontes_de_hora(&fontes, &politica);
+    }
     DO_DISCO.store(do_disco, Ordering::Relaxed);
     trocar_politica(politica);
     auditar(
@@ -789,6 +813,36 @@ pub fn carregar() {
         &resumo,
         &detalhe,
     );
+}
+
+/// O registro de fontes de hora diante da política: coerentes, ou o aviso
+/// de cada incoerência — o serviço sem papel, o papel sem `time.sync`, cada
+/// fonte cujo destino o papel não alcança. Só diz: ver [`carregar`].
+fn relatar_fontes_de_hora(fontes: &hora::registro::Registro, politica: &Politica) {
+    use hora::registro::{CAMINHO, Incoerencia};
+    match fontes.conferir_com(politica) {
+        Ok(()) => crate::log_info!(
+            "politica",
+            "{} fontes de hora, todas no alcance do servico de hora",
+            fontes.fontes().len()
+        ),
+        Err(e @ Incoerencia::SemServico) => crate::log_warn!("politica", "{}: {}", CAMINHO, e),
+        Err(e) => {
+            if let Incoerencia::SemPermissao { .. } = e {
+                crate::log_warn!("politica", "{}: {}", CAMINHO, e);
+            }
+            for (fonte, codigo) in fontes.fontes_sem_destino(politica) {
+                crate::log_warn!(
+                    "politica",
+                    "{}: a fonte `{}` fala em `{}`, que o servico de hora nao alcanca ({}): o gate a recusa",
+                    CAMINHO,
+                    fonte.nome(),
+                    fonte.destino(),
+                    codigo.nome()
+                );
+            }
+        }
+    }
 }
 
 /// A política que os bytes do disco descrevem, se ela pode vigorar: texto,
@@ -945,6 +999,7 @@ pub fn auditar_do_kernel(metodo: &str, recurso: &str, codigo: Codigo, detalhe: &
         chave: None,
         papel: None,
         processo: None,
+        servico: None,
     };
     auditar(&quem, metodo, recurso, codigo, &[], detalhe)
 }
@@ -976,6 +1031,7 @@ fn quem_da_sessao(sessao: u8) -> Result<Quem, Quem> {
             chave: None,
             papel: Some(com_politica(|p| p.serial().to_string())),
             processo: None,
+            servico: None,
         });
     }
     match crate::sessoes::identidade(sessao) {
@@ -989,6 +1045,7 @@ fn quem_da_sessao(sessao: u8) -> Result<Quem, Quem> {
             chave: Some(id.chave),
             papel: None,
             processo: None,
+            servico: None,
         }),
         Some(id) => Ok(Quem {
             titular: Titular::Agente,
@@ -998,6 +1055,7 @@ fn quem_da_sessao(sessao: u8) -> Result<Quem, Quem> {
             agente: id.nome,
             chave: Some(id.chave),
             processo: None,
+            servico: None,
         }),
         None => Err(Quem {
             titular: Titular::Anonimo,
@@ -1007,6 +1065,7 @@ fn quem_da_sessao(sessao: u8) -> Result<Quem, Quem> {
             chave: None,
             papel: None,
             processo: None,
+            servico: None,
         }),
     }
 }
@@ -1023,6 +1082,7 @@ fn quem_da_pessoa(id: crate::pessoas::IdSessao) -> Result<Quem, Quem> {
             chave: None,
             papel: Some(papel),
             processo: None,
+            servico: None,
         }),
         _ => Err(Quem {
             titular: Titular::Anonimo,
@@ -1034,6 +1094,7 @@ fn quem_da_pessoa(id: crate::pessoas::IdSessao) -> Result<Quem, Quem> {
             chave: None,
             papel: None,
             processo: None,
+            servico: None,
         }),
     }
 }
@@ -1048,6 +1109,7 @@ fn quem_sem_login() -> Quem {
         chave: None,
         papel: None,
         processo: None,
+        servico: None,
     }
 }
 
@@ -1062,6 +1124,7 @@ fn quem_local(agente: &str) -> Quem {
         chave: None,
         papel: Some(com_politica(|p| p.local().to_string())),
         processo: None,
+        servico: None,
     }
 }
 
@@ -1076,6 +1139,7 @@ fn quem_do_servico(s: Servico) -> Quem {
         chave: None,
         papel: com_politica(|p| p.servico(s.nome()).map(ToString::to_string)),
         processo: None,
+        servico: Some(s),
     }
 }
 
@@ -1092,6 +1156,7 @@ fn quem_da_autoridade(sessao: u8, chave: Option<[u8; 32]>) -> Quem {
             chave: None,
             papel: Some(com_politica(|p| p.serial().to_string())),
             processo: None,
+            servico: None,
         },
         (_, Some(k)) => Quem {
             titular: Titular::Agente,
@@ -1101,6 +1166,7 @@ fn quem_da_autoridade(sessao: u8, chave: Option<[u8; 32]>) -> Quem {
             chave: Some(k),
             papel: crate::identidade::papel_do_agente(&k),
             processo: None,
+            servico: None,
         },
         (_, None) => Quem {
             titular: Titular::Anonimo,
@@ -1110,6 +1176,7 @@ fn quem_da_autoridade(sessao: u8, chave: Option<[u8; 32]>) -> Quem {
             chave: None,
             papel: None,
             processo: None,
+            servico: None,
         },
     }
 }
@@ -1129,8 +1196,8 @@ struct Taxada {
 /// Uma sessão de qualquer canal do agente — a serial, uma porta, uma vaga
 /// do TCP — gasta do balde da chave: o transporte não muda quem pede.
 fn principal_da_taxa(quem: &Quem) -> Option<Principal> {
-    if quem.titular == Titular::Servico {
-        Some(Principal::Servico)
+    if let Some(s) = quem.servico {
+        Some(Principal::Servico(s))
     } else if crate::agent::sessao::Canal::da_sessao(quem.sessao).is_some() {
         Some(Principal::Chave(quem.chave))
     } else if quem.processo.is_some() {
@@ -2347,16 +2414,16 @@ pub fn auditar_enchimento_de_teste(metodo: &str, parametros: &[u8], detalhe: &st
     );
 }
 
-/// Só para a suíte: o balde do serviço sai, e o pedido seguinte dele começa
-/// um cheio. Os casos do tecido fazem as voltas do NSF uma atrás da outra,
-/// sem a cadência do fio, e o balde é um só para todos eles: sem isto, o
-/// que um caso gastou faltava ao seguinte, conforme a velocidade da
-/// máquina.
+/// Só para a suíte: os baldes dos serviços saem, e o pedido seguinte de
+/// cada um começa um cheio. Os casos do tecido fazem as voltas do NSF uma
+/// atrás da outra, sem a cadência do fio, e o balde é um só para todos
+/// eles: sem isto, o que um caso gastou faltava ao seguinte, conforme a
+/// velocidade da máquina. Os do serviço de hora, igual.
 #[cfg(feature = "modo-teste")]
 pub fn encher_a_taxa_do_servico_de_teste() {
     crate::arch::sem_interrupcoes(|| {
         for b in TAXAS.lock().baldes.iter_mut() {
-            if b.is_some_and(|b| b.dono == Principal::Servico) {
+            if b.is_some_and(|b| matches!(b.dono, Principal::Servico(_))) {
                 *b = None;
             }
         }
@@ -2521,6 +2588,7 @@ fn quem_do_ator(ator: AtorDeMensagem) -> Quem {
                 chave: None,
                 papel: crate::pessoas::pessoa(id).map(|p| p.papel),
                 processo: None,
+                servico: None,
             }
         }
         AtorDeMensagem::Dono(Dono::Administrador(k)) => {
@@ -2533,6 +2601,7 @@ fn quem_do_ator(ator: AtorDeMensagem) -> Quem {
                 chave: Some(k),
                 papel: papel.and_then(|(_, p)| p),
                 processo: None,
+                servico: None,
             }
         }
         AtorDeMensagem::Kernel => Quem {
@@ -2543,6 +2612,7 @@ fn quem_do_ator(ator: AtorDeMensagem) -> Quem {
             chave: None,
             papel: None,
             processo: None,
+            servico: None,
         },
     }
 }
@@ -2812,6 +2882,7 @@ pub fn permitir_aperto(p: u8) -> bool {
             chave: None,
             papel: None,
             processo: None,
+            servico: None,
         };
         auditar(
             &quem,
@@ -2846,6 +2917,7 @@ pub fn auditar_aperto(p: u8, chave: Option<[u8; 32]>, nome: &str, codigo: Codigo
         chave,
         papel,
         processo: None,
+        servico: None,
     };
     auditar(&quem, "session.open", "", codigo, &[], detalhe);
 }
@@ -2882,6 +2954,7 @@ pub fn contar_administracao(nome: &str, papel: &str, metodo: &'static str, permi
         chave: None,
         papel: Some(papel.to_string()),
         processo: None,
+        servico: None,
     };
     contar(&quem, metodo, Some(permissao));
 }
@@ -2913,6 +2986,7 @@ pub fn auditar_administracao(
         chave: administrador.map(|a| *a.1),
         papel: papel.map(ToString::to_string),
         processo: None,
+        servico: None,
     };
     auditar(&quem, metodo, recurso, codigo, parametros, detalhe)
 }
@@ -2945,6 +3019,7 @@ pub fn auditar_quorum(
         chave: None,
         papel: papel.map(ToString::to_string),
         processo: None,
+        servico: None,
     };
     auditar(&quem, metodo, recurso, codigo, parametros, detalhe)
 }
@@ -2972,6 +3047,7 @@ pub fn auditar_pessoa(
         chave: None,
         papel: papel.map(ToString::to_string),
         processo: None,
+        servico: None,
     };
     auditar(&quem, metodo, recurso, codigo, &[], detalhe);
 }
@@ -3001,6 +3077,7 @@ pub fn auditar_pessoa_recusada_com(
         chave: None,
         papel: None,
         processo: None,
+        servico: None,
     };
     auditar(&quem, metodo, recurso, codigo, &[], detalhe);
 }

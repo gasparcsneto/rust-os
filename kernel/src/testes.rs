@@ -31217,6 +31217,38 @@ static CASOS: &[Caso] = &[
         nome: "teto: o administrador delega e nao exerce",
         f: teto_o_administrador_delega_e_nao_exerce,
     },
+    Caso {
+        nome: "tempo: o registro do boot",
+        f: tempo_o_registro_do_boot,
+    },
+    Caso {
+        nome: "tempo: o servico pede pelo gate",
+        f: tempo_o_servico_pede_pelo_gate,
+    },
+    Caso {
+        nome: "tempo: o servico nao e o sistema",
+        f: tempo_o_servico_nao_e_o_sistema,
+    },
+    Caso {
+        nome: "tempo: pessoa e agente pela mesma politica",
+        f: tempo_pessoa_e_agente_pela_mesma_politica,
+    },
+    Caso {
+        nome: "tempo: confirmar so com prova",
+        f: tempo_confirmar_so_com_prova,
+    },
+    Caso {
+        nome: "tempo: a revogacao vale no gate",
+        f: tempo_a_revogacao_vale_no_gate,
+    },
+    Caso {
+        nome: "tempo: cada servico tem o seu balde",
+        f: tempo_cada_servico_tem_o_seu_balde,
+    },
+    Caso {
+        nome: "tempo: nenhum caminho cria autoridade",
+        f: tempo_nenhum_caminho_cria_autoridade,
+    },
     // Perto do fim: a reposição cobre o que a suíte inteira gravou.
     Caso {
         nome: "reconstrucao: imagem limpa e journal inteiro",
@@ -45194,4 +45226,709 @@ fn codigo_o_conferido_e_o_que_roda() -> Resultado {
         }
         Ok(())
     })
+}
+
+// ---------------------------------------------------------------------------
+// O tempo na política e no gate — hora::registro e a superfície do serviço
+// de hora (o serviço mesmo é do passo seguinte)
+// ---------------------------------------------------------------------------
+
+/// O serviço de hora, como o gate o vê: um pedido com a autoridade do
+/// serviço — e só ela. A suíte o monta: o fio dele é do passo seguinte.
+fn como_o_servico_de_hora() -> crate::autorizacao::Chamador {
+    use crate::autorizacao::{Autoridade, Chamador, Programa, Servico};
+    Chamador::Processo {
+        fio: crate::fios::id_atual(),
+        autoridade: Autoridade::Servico(Servico::Hora),
+        programa: Programa::Kernel,
+    }
+}
+
+/// A decisão do gate sobre um pedido — gravada como qualquer outra —, sem
+/// executar o comando: o código. Para conferir o transporte até uma fonte
+/// sem abrir a associação.
+fn so_a_decisao(
+    quem: crate::autorizacao::Chamador,
+    metodo: &str,
+    params: &str,
+) -> Result<politica::Codigo, &'static str> {
+    let comando = registry::encontrar(metodo).ok_or("comando ausente do registro")?;
+    Ok(
+        match crate::autorizacao::autorizar(quem, comando, Json(params.as_bytes()), false) {
+            Ok(_) => politica::Codigo::Allow,
+            Err(r) => r.codigo,
+        },
+    )
+}
+
+/// As três fontes de hora da bancada, como a política e o registro as
+/// escrevem.
+const FONTES_DE_HORA: [&str; 3] = [
+    "udp:10.0.2.2:5319",
+    "udp:10.0.2.2:5320",
+    "udp:10.0.2.2:5321",
+];
+
+/// O registro de fontes da imagem foi lido no boot: três fontes, dois de
+/// três, coerente com a política em vigor. E o mesmo leitor, aqui dentro,
+/// recusa o registro inteiro com k = 0, k = 1, uma chave que não serve e um
+/// destino TCP — e aceita k maior que as fontes, que só confere.
+fn tempo_o_registro_do_boot() -> Resultado {
+    use hora::registro::{ErroTipo, Registro};
+    let r = crate::identidade::fontes_de_hora()
+        .ok_or("o boot nao leu o registro de fontes de hora da imagem")?;
+    let nomes: alloc::vec::Vec<_> = r.fontes().iter().map(|f| f.nome()).collect();
+    let destinos: alloc::vec::Vec<_> = r.fontes().iter().map(|f| f.destino()).collect();
+    if nomes != ["bancada-a", "bancada-b", "bancada-c"]
+        || destinos != FONTES_DE_HORA
+        || r.quorum() != 2
+        || !r.move_o_relogio()
+    {
+        crate::log_error!("teste", "{:?} {:?} quorum {}", nomes, destinos, r.quorum());
+        return Err("o registro do boot nao e o da imagem");
+    }
+    if !crate::autorizacao::com_politica(|p| r.conferir_com(p).is_ok()) {
+        return Err("o registro da imagem e a politica em vigor nao sao coerentes");
+    }
+    let linha = |nome: &str, destino: &str, chave: &[u8; 32]| {
+        alloc::format!("fonte {nome} {destino} ed25519:{}\n", sigilo::hex(chave))
+    };
+    let duas = alloc::format!(
+        "{}{}",
+        linha("a", FONTES_DE_HORA[0], r.fontes()[0].chave()),
+        linha("b", FONTES_DE_HORA[1], r.fontes()[1].chave())
+    );
+    for k in [0u64, 1] {
+        match Registro::ler(&alloc::format!("{duas}quorum {k}\n")) {
+            Err(e) if e.tipo == ErroTipo::QuorumAbaixoDoMinimo(k) => {}
+            outro => {
+                crate::log_error!("teste", "k={}: {:?}", k, outro.map(|_| ()));
+                return Err("um quorum abaixo de dois foi aceito");
+            }
+        }
+    }
+    let so_confere = Registro::ler(&alloc::format!("{duas}quorum 3\n"))
+        .map_err(|_| "k maior que as fontes foi recusado")?;
+    if so_confere.move_o_relogio() {
+        return Err("k maior que as fontes moveria o relogio");
+    }
+    let fraca = alloc::format!(
+        "fonte a {} ed25519:{}\nquorum 2\n",
+        FONTES_DE_HORA[0],
+        "00".repeat(32)
+    );
+    let torta = alloc::format!(
+        "fonte a {} ed25519:{}\nquorum 2\n",
+        FONTES_DE_HORA[0],
+        "zz".repeat(32)
+    );
+    let tcp = linha("a", "tcp:10.0.2.2:5319", r.fontes()[0].chave()) + "quorum 2\n";
+    for (texto, tipo) in [
+        (fraca, ErroTipo::ChaveFraca),
+        (torta, ErroTipo::ChaveInvalida),
+        (tcp, ErroTipo::DestinoNaoUdp),
+    ] {
+        if !matches!(Registro::ler(&texto), Err(e) if e.tipo == tipo) {
+            crate::log_error!("teste", "{:?}: {}", tipo, texto);
+            return Err("o leitor do kernel aceitou um registro que devia recusar");
+        }
+    }
+    Ok(())
+}
+
+/// O serviço de hora pede pelo gate, com o papel dele: `time.request` de
+/// uma fonte do registro passa pelo gate e é gravado como do serviço; o
+/// pedido mesmo ainda não sai — `TIME_UNAVAILABLE`. Uma fonte fora do
+/// registro não existe, e `time.sync` sem pedido aberto também não. O
+/// transporte é outra decisão: as três fontes, sim; nada mais. E sem
+/// registro nenhum, nenhuma fonte — e nenhuma autorização a mais.
+fn tempo_o_servico_pede_pelo_gate() -> Resultado {
+    use politica::Codigo;
+    use politica::auditoria::Titular;
+    crate::autorizacao::encher_a_taxa_do_servico_de_teste();
+    let hora = como_o_servico_de_hora();
+    let codigo = |r: &str| fs_texto(r, "code").unwrap_or_default();
+
+    let r = fs_pedir(hora, "time.request", r#"{"source":"bancada-a"}"#);
+    if codigo(&r) != "TIME_UNAVAILABLE" || fs_texto(&r, "to").as_deref() != Some(FONTES_DE_HORA[0])
+    {
+        crate::log_error!("teste", "{}", r);
+        return Err("o servico de hora nao pediu pelo gate a fonte do registro");
+    }
+    let (_, e) = registro_que(|e| e.metodo == "time.request")
+        .ok_or("o pedido do servico de hora nao foi gravado")?;
+    if e.titular != Titular::Servico
+        || e.agente != "hora"
+        || e.papel != "tempo"
+        || e.codigo != Codigo::Allow
+        || e.recurso != "bancada-a"
+    {
+        crate::log_error!("teste", "{:?}", e);
+        return Err("o pedido nao foi gravado como do servico de hora, pelo papel tempo");
+    }
+    let r = fs_pedir(hora, "time.request", r#"{"source":"intrusa"}"#);
+    if codigo(&r) != "INVALID_REQUEST" {
+        crate::log_error!("teste", "{}", r);
+        return Err("uma fonte fora do registro existiu para o servico de hora");
+    }
+    let r = fs_pedir(hora, "time.sync", r#"{"id":1}"#);
+    if codigo(&r) != "INVALID_REQUEST" {
+        crate::log_error!("teste", "{}", r);
+        return Err("uma entrega sem pedido aberto foi aceita");
+    }
+    let (_, e) = registro_que(|e| e.metodo == "time.sync")
+        .ok_or("a entrega do servico de hora nao foi gravada")?;
+    if e.titular != Titular::Servico || e.papel != "tempo" || e.codigo != Codigo::Allow {
+        crate::log_error!("teste", "{:?}", e);
+        return Err("a entrega nao foi decidida como do servico de hora");
+    }
+    // O transporte: as fontes, e só elas — nem os outros destinos da
+    // bancada, nem outra porta, nem a fonte por TCP.
+    for fonte in FONTES_DE_HORA {
+        let pedido = alloc::format!(r#"{{"to":"{fonte}"}}"#);
+        if so_a_decisao(hora, "net.connect", &pedido)? != Codigo::Allow {
+            return Err("o servico de hora nao alcanca uma fonte do registro");
+        }
+    }
+    for fora in [
+        "udp:10.0.2.2:69",
+        "udp:10.0.2.3:53",
+        "tcp:10.0.2.100:7",
+        "udp:10.0.2.2:5399",
+        "tcp:10.0.2.2:5319",
+    ] {
+        let pedido = alloc::format!(r#"{{"to":"{fora}"}}"#);
+        if so_a_decisao(hora, "net.connect", &pedido)? != Codigo::DenyResource {
+            crate::log_error!("teste", "{}", fora);
+            return Err("o servico de hora alcancou um destino que nao e fonte");
+        }
+    }
+    // Sem registro: nenhuma fonte; a política decide o mesmo.
+    let antes = crate::identidade::trocar_fontes_de_hora_de_teste(None);
+    let sem_registro = (|| -> Resultado {
+        let r = fs_pedir(hora, "time.request", r#"{"source":"bancada-a"}"#);
+        if codigo(&r) != "INVALID_REQUEST" {
+            crate::log_error!("teste", "{}", r);
+            return Err("sem registro, uma fonte existiu");
+        }
+        if so_a_decisao(hora, "net.connect", r#"{"to":"udp:10.0.2.2:5399"}"#)?
+            != Codigo::DenyResource
+        {
+            return Err("sem registro, o servico de hora alcancou um destino a mais");
+        }
+        if so_a_decisao(hora, "net.connect", r#"{"to":"udp:10.0.2.2:5319"}"#)? != Codigo::Allow {
+            return Err("sem registro, a decisao do transporte mudou");
+        }
+        Ok(())
+    })();
+    crate::identidade::trocar_fontes_de_hora_de_teste(antes);
+    sem_registro
+}
+
+/// O serviço de hora não é o sistema, nem um root novo: o papel `tempo`
+/// enumera conectar às fontes e apresentar evidência, e o resto é recusado
+/// como seria para qualquer um — cada recusa gravada como do serviço. Sem a
+/// linha `servico hora`, sem papel: `DENY_ROLE`, e não o do sistema. E um
+/// `tempo` que incluísse o `sistema` não teria `time.sync` nem
+/// `net.connect`: as sensíveis não atravessam a inclusão.
+fn tempo_o_servico_nao_e_o_sistema() -> Resultado {
+    use politica::Codigo;
+    use politica::auditoria::Titular;
+    crate::autorizacao::encher_a_taxa_do_servico_de_teste();
+    let hora = como_o_servico_de_hora();
+    let casos: &[(&str, &str, &str)] = &[
+        (
+            "fs.read",
+            r#"{"path":"/dados/leia-me.txt"}"#,
+            "DENY_PERMISSION",
+        ),
+        (
+            "net.connect",
+            r#"{"to":"tcp:10.0.2.100:7"}"#,
+            "DENY_RESOURCE",
+        ),
+        (
+            "net.connect",
+            r#"{"to":"udp:10.0.2.2:69"}"#,
+            "DENY_RESOURCE",
+        ),
+        ("user.run", r#"{"path":"/bin/ola"}"#, "DENY_PERMISSION"),
+        ("policy.show", "{}", "DENY_PERMISSION"),
+        ("audit.tail", "{}", "DENY_PERMISSION"),
+        ("security.status", "{}", "DENY_PERMISSION"),
+        ("random.read", "{}", "DENY_PERMISSION"),
+        ("system.info", "{}", "DENY_PERMISSION"),
+        (
+            "net.block",
+            r#"{"to":"udp:10.0.2.2:5319","owner":"serial"}"#,
+            "DENY_PERMISSION",
+        ),
+    ];
+    for (metodo, params, esperado) in casos {
+        let r = fs_pedir(hora, metodo, params);
+        if !recusado_com(&r, esperado) {
+            crate::log_error!("teste", "{}: {}", metodo, r);
+            return Err("o servico de hora fez o que o papel tempo nao enumera");
+        }
+        let (_, e) =
+            registro_que(|e| e.metodo == *metodo).ok_or("a recusa do servico nao foi gravada")?;
+        if e.titular != Titular::Servico || e.agente != "hora" || e.papel != "tempo" {
+            crate::log_error!("teste", "{:?}", e);
+            return Err("a recusa nao foi gravada como do servico de hora, pelo papel dele");
+        }
+    }
+    // Sem a linha do serviço: sem papel — e não o do sistema.
+    let sem_servico = politica_trocada(&[("servico hora tempo\n", "")])?;
+    com_a_politica(sem_servico, || {
+        for (metodo, params) in [
+            ("time.request", r#"{"source":"bancada-a"}"#),
+            ("net.connect", r#"{"to":"udp:10.0.2.2:5319"}"#),
+            ("system.info", "{}"),
+        ] {
+            if so_a_decisao(hora, metodo, params)? != Codigo::DenyRole {
+                crate::log_error!("teste", "{}", metodo);
+                return Err("sem a linha servico, o servico de hora decidiu por algum papel");
+            }
+        }
+        Ok(())
+    })?;
+    // Um `tempo` que incluísse o `sistema`: só as não sensíveis viriam.
+    let incluindo = politica_trocada(&[(
+        "papel tempo net.connect time.sync\nrecurso tempo net.connect udp:10.0.2.2:5319 udp:10.0.2.2:5320 udp:10.0.2.2:5321\n",
+        "papel tempo @sistema\nrecurso tempo process.run /bin\n",
+    )])?;
+    com_a_politica(incluindo, || {
+        if so_a_decisao(hora, "time.request", r#"{"source":"bancada-a"}"#)?
+            != Codigo::DenyPermission
+            || so_a_decisao(hora, "net.connect", r#"{"to":"udp:10.0.2.2:5319"}"#)?
+                != Codigo::DenyPermission
+        {
+            return Err("incluindo o sistema, o tempo ganhou uma permissao sensivel");
+        }
+        if so_a_decisao(hora, "system.info", "{}")? != Codigo::Allow {
+            return Err("a inclusao nao trouxe nem as nao sensiveis: o caso nao confere nada");
+        }
+        Ok(())
+    })
+}
+
+/// Pessoa e agente obedecem exatamente à mesma política: no mesmo papel,
+/// a mesma decisão sobre `time.request`, gravada com o titular de cada um.
+/// O observador e o operador não têm `time.sync`; o operador a quem a
+/// política a dá passa — pessoa e agente —, e a política de volta tira dos
+/// dois. Um agente `sistema` passa. Quem não está autenticado — a chave
+/// revogada, a sessão de pessoa que acabou — é recusado antes de tudo.
+fn tempo_pessoa_e_agente_pela_mesma_politica() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use crate::pessoas::Console;
+    use politica::auditoria::Titular;
+    const PEDIDO: &str = r#"{"source":"bancada-a"}"#;
+    let nome = nome_de_teste(1);
+    // A resposta, como o código que ela diz: o da recusa, ou o do pós-gate.
+    let desfecho = |r: &str| {
+        if r.contains(r#""result""#) {
+            fs_texto(r, "code").unwrap_or_default()
+        } else {
+            Json(r.as_bytes())
+                .member("error")
+                .and_then(|e| e.member("data"))
+                .and_then(|d| d.as_str())
+                .map(alloc::string::String::from)
+                .unwrap_or_default()
+        }
+    };
+    let resultado = com_agentes_de_teste(|| {
+        let (mut agente, mut sessao) = conectado(1)?;
+        let mut console = 80u16;
+        let mut comparar = |papel: &str,
+                            esperado: &str,
+                            agente: &mut AgenteDeTeste,
+                            sessao: &mut crate::agent::SessaoDeTeste|
+         -> Resultado {
+            crate::identidade::atribuir(&nome, papel).map_err(|_| "a atribuicao falhou")?;
+            let pelo_agente = pela_porta(agente, sessao, "time.request", PEDIDO)?;
+            let id = crate::pessoas::sessao_de_teste(
+                Console::Terminal(console),
+                &alloc::format!("relogio-{papel}"),
+                papel,
+            );
+            console += 1;
+            let pela_pessoa = fs_pedir(Chamador::Pessoa(id), "time.request", PEDIDO);
+            let _ = crate::pessoas::sair(id);
+            if desfecho(&pelo_agente) != esperado || desfecho(&pela_pessoa) != esperado {
+                crate::log_error!(
+                    "teste",
+                    "{}: agente {} / pessoa {}",
+                    papel,
+                    pelo_agente,
+                    pela_pessoa
+                );
+                return Err("pessoa e agente do mesmo papel nao decidiram como a politica manda");
+            }
+            let codigo = if esperado.starts_with("DENY") {
+                esperado
+            } else {
+                "ALLOW"
+            };
+            for titular in [Titular::Agente, Titular::Pessoa] {
+                let (_, e) = registro_que(|e| e.metodo == "time.request" && e.titular == titular)
+                    .ok_or("a decisao de hora nao foi gravada")?;
+                if e.papel != papel || e.codigo.nome() != codigo {
+                    crate::log_error!("teste", "{:?}", e);
+                    return Err("a decisao de hora nao foi gravada como foi");
+                }
+            }
+            Ok(())
+        };
+        comparar("observador", "DENY_PERMISSION", &mut agente, &mut sessao)?;
+        comparar("operador", "DENY_PERMISSION", &mut agente, &mut sessao)?;
+        let delegado = politica_trocada(&[(
+            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read\n",
+            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read time.sync\n",
+        )])?;
+        com_a_politica(delegado, || {
+            comparar("operador", "TIME_UNAVAILABLE", &mut agente, &mut sessao)?;
+            comparar("observador", "DENY_PERMISSION", &mut agente, &mut sessao)
+        })?;
+        comparar("operador", "DENY_PERMISSION", &mut agente, &mut sessao)?;
+        crate::identidade::atribuir(&nome, "sistema").map_err(|_| "a atribuicao falhou")?;
+        let r = pela_porta(&mut agente, &mut sessao, "time.request", PEDIDO)?;
+        if desfecho(&r) != "TIME_UNAVAILABLE" {
+            crate::log_error!("teste", "{}", r);
+            return Err("o agente sistema nao passou pelo gate");
+        }
+
+        // Não autenticado: a chave revogada no meio da sessão; a sessão de
+        // pessoa que acabou.
+        crate::identidade::revogar(&sigilo::publica_de(&chave_de_teste(1)))
+            .map_err(|_| "a revogacao de teste falhou")?;
+        let r = pela_porta(&mut agente, &mut sessao, "time.request", PEDIDO)?;
+        if !recusado_com(&r, "DENY_NOT_AUTHENTICATED") {
+            crate::log_error!("teste", "{}", r);
+            return Err("uma chave revogada pediu evidencia de hora");
+        }
+        let id = crate::pessoas::sessao_de_teste(
+            Console::Terminal(console),
+            "relogio-operador",
+            "operador",
+        );
+        let _ = crate::pessoas::sair(id);
+        let r = fs_pedir(Chamador::Pessoa(id), "time.request", PEDIDO);
+        if !recusado_com(&r, "DENY_NOT_AUTHENTICATED") {
+            crate::log_error!("teste", "{}", r);
+            return Err("uma sessao de pessoa que acabou pediu evidencia de hora");
+        }
+        Ok(())
+    });
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// `time.confirm` é administrativa: não é comando, só se exerce por
+/// `admin.execute`, com a prova de um administrador cujo papel a tem. A
+/// chave fora do registro, a prova de outros parâmetros, a de outra
+/// operação, o pedido sem prova e o administrador sem a permissão são
+/// recusados e gravados. O administrador com prova é autorizado — e, sem
+/// salto pendente, não há o que confirmar: `CONFLICT`. Uma hora digitada é
+/// recusada, e não ignorada. Nada disso muda a política.
+fn tempo_confirmar_so_com_prova() -> Resultado {
+    use politica::Codigo;
+    use politica::auditoria::Titular;
+    let antes = (
+        crate::autorizacao::versao_da_politica(),
+        crate::autorizacao::com_politica(|p| p.texto()),
+    );
+    let resultado = (|| -> Resultado {
+        if registry::encontrar("time.confirm").is_some() {
+            return Err("time.confirm esta na tabela de comandos comuns");
+        }
+        let r = fs_pedir(sistema_aqui(), "time.confirm", "{}");
+        if r.contains(r#""result""#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("time.confirm respondeu como comando");
+        }
+        crate::identidade::registrar_administrador_de_teste(
+            sigilo::publica_de(&ADMIN_DE_TESTE),
+            "administrador",
+        );
+        let r = executar_admin_com(0, &[0x42; 32], "time.confirm", "{}", "{}")?;
+        if !r.contains("chave fora do registro de administradores") {
+            crate::log_error!("teste", "{}", r);
+            return Err("uma chave que nao e de administrador confirmou a hora");
+        }
+        let d = com_sessao_de_teste(0, desafio)?;
+        let r = executar_admin_de(0, d, &ADMIN_DE_TESTE, "time.confirm", r#"{"x":1}"#, "{}")?;
+        if !r.contains("a prova nao confere") {
+            crate::log_error!("teste", "{}", r);
+            return Err("a prova de outros parametros confirmou a hora");
+        }
+        let d = com_sessao_de_teste(0, desafio)?;
+        let r = executar_admin_provado(
+            0,
+            d,
+            &ADMIN_DE_TESTE,
+            "lease.revoke",
+            "time.confirm",
+            "{}",
+            "{}",
+        )?;
+        if !r.contains("a prova nao confere") {
+            crate::log_error!("teste", "{}", r);
+            return Err("a prova de outra operacao confirmou a hora");
+        }
+        let (id, _, _) = com_sessao_de_teste(0, desafio)?;
+        let sem_prova = alloc::format!(
+            r#"{{"challenge":{id},"command":"time.confirm","params":"{{}}","admin":"{}"}}"#,
+            sigilo::hex(&sigilo::publica_de(&ADMIN_DE_TESTE))
+        );
+        let r = com_sessao_de_teste(0, || chamar("admin.execute", &sem_prova))?;
+        if !r.contains("prova ausente ou invalida") {
+            crate::log_error!("teste", "{}", r);
+            return Err("um pedido sem prova confirmou a hora");
+        }
+        let fraco = [0x43; 32];
+        crate::identidade::registrar_administrador_de_teste(sigilo::publica_de(&fraco), "operador");
+        let r = executar_admin_com(0, &fraco, "time.confirm", "{}", "{}")?;
+        if !r.contains(r#""code":"DENY_PERMISSION""#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("um administrador sem time.confirm confirmou a hora");
+        }
+        let r = executar_admin_com(0, &ADMIN_DE_TESTE, "time.confirm", "{}", "{}")?;
+        if !r.contains(r#""executed":false"#)
+            || !r.contains(r#""code":"CONFLICT""#)
+            || !r.contains("nenhum salto de hora pendente")
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("sem salto pendente, time.confirm fez alguma coisa");
+        }
+        let (autorizada, e) =
+            registro_que(|e| e.metodo == "time.confirm" && e.codigo == Codigo::Allow)
+                .ok_or("a decisao do time.confirm nao foi gravada")?;
+        if e.titular != Titular::Administrador
+            || e.papel != "administrador"
+            || !e.detalhe.contains("prova conferida")
+            || !e.detalhe.contains("permissao time.confirm")
+        {
+            crate::log_error!("teste", "{:?}", e);
+            return Err("a decisao do time.confirm nao foi gravada com a prova e a permissao");
+        }
+        let (conflito, _) =
+            registro_que(|e| e.metodo == "time.confirm" && e.codigo == Codigo::Conflict)
+                .ok_or("o desfecho do time.confirm nao foi gravado")?;
+        if conflito <= autorizada {
+            return Err("o desfecho do time.confirm veio antes da decisao");
+        }
+        let hora = r#"{"unix_s":1760000000}"#;
+        let r = executar_admin_com(0, &ADMIN_DE_TESTE, "time.confirm", hora, hora)?;
+        if !r.contains(r#""code":"INVALID_ARGUMENT""#) || !r.contains("a hora nao se digita") {
+            crate::log_error!("teste", "{}", r);
+            return Err("uma hora digitada nao foi recusada");
+        }
+        Ok(())
+    })();
+    crate::identidade::esquecer_registrados();
+    resultado?;
+    if (
+        crate::autorizacao::versao_da_politica(),
+        crate::autorizacao::com_politica(|p| p.texto()),
+    ) != antes
+    {
+        return Err("time.confirm mudou a politica");
+    }
+    Ok(())
+}
+
+/// A revogação vale na decisão seguinte, no gate. O administrador tira
+/// `time.sync` do papel `tempo` por `policy.write`: o pedido seguinte do
+/// serviço — e a entrega de uma resposta, que seria a continuação de uma
+/// operação já começada — é recusado pelo gate, antes de chegar ao
+/// serviço. O transporte continua o que a política diz; cortada uma fonte,
+/// o gate a recusa, e o registro deixa de ser coerente só nela. A política
+/// devolve o que tirou — dentro do teto —, e a linha do serviço não muda por
+/// aqui.
+fn tempo_a_revogacao_vale_no_gate() -> Resultado {
+    use politica::Codigo;
+    crate::autorizacao::encher_a_taxa_do_servico_de_teste();
+    let hora = como_o_servico_de_hora();
+    let resultado = (|| -> Resultado {
+        crate::identidade::registrar_administrador_de_teste(
+            sigilo::publica_de(&ADMIN_DE_TESTE),
+            "administrador",
+        );
+        let escrever = |linha: &str| -> Result<alloc::string::String, &'static str> {
+            let p = alloc::format!(r#"{{"line":"{linha}"}}"#);
+            executar_admin_com(0, &ADMIN_DE_TESTE, "policy.write", &p, &p)
+        };
+        let escrita = |linha: &str| -> Resultado {
+            let r = escrever(linha)?;
+            if !r.contains(r#""executed":true"#) {
+                crate::log_error!("teste", "{}: {}", linha, r);
+                return Err("uma linha de politica do caso nao foi escrita");
+            }
+            Ok(())
+        };
+        let r = fs_pedir(hora, "time.request", r#"{"source":"bancada-a"}"#);
+        if fs_texto(&r, "code").as_deref() != Some("TIME_UNAVAILABLE") {
+            crate::log_error!("teste", "{}", r);
+            return Err("antes da revogacao, o servico de hora nao pediu");
+        }
+        escrita("papel tempo net.connect")?;
+        for (metodo, params) in [
+            ("time.request", r#"{"source":"bancada-a"}"#),
+            ("time.sync", r#"{"id":1}"#),
+        ] {
+            let r = fs_pedir(hora, metodo, params);
+            if !recusado_com(&r, "DENY_PERMISSION") {
+                crate::log_error!("teste", "{}: {}", metodo, r);
+                return Err("revogado time.sync, o pedido seguinte do servico passou pelo gate");
+            }
+        }
+        if so_a_decisao(hora, "net.connect", r#"{"to":"udp:10.0.2.2:5319"}"#)? != Codigo::Allow {
+            return Err("tirar time.sync tirou tambem o transporte");
+        }
+        escrita("recurso tempo net.connect udp:10.0.2.2:5319 udp:10.0.2.2:5320")?;
+        if so_a_decisao(hora, "net.connect", r#"{"to":"udp:10.0.2.2:5321"}"#)?
+            != Codigo::DenyResource
+        {
+            return Err("cortada da politica, a fonte continuou alcancavel");
+        }
+        let registro = crate::identidade::fontes_de_hora().ok_or("o registro de fontes sumiu")?;
+        let sem: alloc::vec::Vec<alloc::string::String> = crate::autorizacao::com_politica(|p| {
+            registro
+                .fontes_sem_destino(p)
+                .map(|(f, _)| alloc::string::String::from(f.nome()))
+                .collect()
+        });
+        if sem != ["bancada-c"] {
+            crate::log_error!("teste", "{:?}", sem);
+            return Err("a coerencia nao seguiu a politica de agora");
+        }
+        escrita("papel tempo net.connect time.sync")?;
+        escrita("recurso tempo net.connect udp:10.0.2.2:5319 udp:10.0.2.2:5320 udp:10.0.2.2:5321")?;
+        if so_a_decisao(hora, "time.request", r#"{"source":"bancada-a"}"#)? != Codigo::Allow {
+            return Err("devolvido time.sync, o servico de hora continuou recusado");
+        }
+        for linha in ["servico hora operador", "servico hora tempo"] {
+            let r = escrever(linha)?;
+            if !r.contains(r#""code":"DENY_POLICY""#) {
+                crate::log_error!("teste", "{}: {}", linha, r);
+                return Err("policy.write mudou a linha do servico de hora");
+            }
+        }
+        Ok(())
+    })();
+    crate::autorizacao::carregar();
+    crate::identidade::esquecer_registrados();
+    resultado
+}
+
+/// Cada serviço tem o seu balde: o serviço de hora que pede demais é
+/// recusado pela taxa do papel `tempo`, e o tecido de segurança, com o
+/// balde dele, continua; e o contrário. Um balde só para os dois seria um
+/// serviço gastando a ficha do outro.
+fn tempo_cada_servico_tem_o_seu_balde() -> Resultado {
+    use politica::Codigo;
+    let hora = como_o_servico_de_hora();
+    let nsf = como_o_nsf();
+    let esgotar = |quem: crate::autorizacao::Chamador,
+                   metodo: &str,
+                   params: &str|
+     -> Result<usize, &'static str> {
+        let mut taxadas = 0;
+        for _ in 0..60 {
+            if so_a_decisao(quem, metodo, params)? == Codigo::RateLimit {
+                taxadas += 1;
+            }
+        }
+        Ok(taxadas)
+    };
+    const PEDIDO: &str = r#"{"source":"bancada-a"}"#;
+    const LEITURA: &str = r#"{"count":1}"#;
+    crate::autorizacao::encher_a_taxa_do_servico_de_teste();
+    let resultado = (|| -> Resultado {
+        if esgotar(hora, "time.request", PEDIDO)? == 0 {
+            return Err("o servico de hora pediu sem limite: a taxa do papel tempo nao valeu");
+        }
+        if so_a_decisao(nsf, "audit.tail", LEITURA)? != Codigo::Allow {
+            return Err("o servico de hora gastou a ficha do tecido de seguranca");
+        }
+        crate::autorizacao::encher_a_taxa_do_servico_de_teste();
+        if esgotar(nsf, "audit.tail", LEITURA)? == 0 {
+            return Err("o tecido de seguranca pediu sem limite");
+        }
+        if so_a_decisao(hora, "time.request", PEDIDO)? != Codigo::Allow {
+            return Err("o tecido de seguranca gastou a ficha do servico de hora");
+        }
+        Ok(())
+    })();
+    crate::autorizacao::encher_a_taxa_do_servico_de_teste();
+    resultado
+}
+
+/// Nenhum caminho de `time.sync` cria autoridade ou muda política: o
+/// serviço de hora e o sistema pedem e entregam — a fonte do registro, a de
+/// fora, o id que não existe, a resposta no anexo e o anexo que não confere
+/// —, e a política, a versão dela, o registro de fontes e as credenciais
+/// continuam os mesmos. E quem pediu não ganhou nada: o serviço continua
+/// sem o que não tinha.
+fn tempo_nenhum_caminho_cria_autoridade() -> Resultado {
+    use politica::Codigo;
+    crate::autorizacao::encher_a_taxa_do_servico_de_teste();
+    let hora = como_o_servico_de_hora();
+    let foto = || {
+        (
+            crate::autorizacao::versao_da_politica(),
+            crate::autorizacao::com_politica(|p| p.texto()),
+            crate::identidade::fontes_de_hora(),
+            crate::identidade::agentes().len(),
+            crate::identidade::quantos_administradores(),
+            crate::identidade::papeis_dos_administradores(),
+        )
+    };
+    let antes = foto();
+    let resposta = [0xa5u8; 1024];
+    for quem in [hora, sistema_aqui()] {
+        for (metodo, params) in [
+            ("time.request", r#"{"source":"bancada-a"}"#),
+            ("time.request", r#"{"source":"fantasma"}"#),
+            ("time.sync", r#"{"id":1}"#),
+            ("time.sync", r#"{"id":18446744073709551615}"#),
+        ] {
+            let r = fs_pedir(quem, metodo, params);
+            if !r.contains(r#""result""#) || fs_ok(&r) {
+                crate::log_error!("teste", "{}: {}", metodo, r);
+                return Err("um pedido de hora fez mais do que o pos-gate desta etapa");
+            }
+        }
+        let r = crate::nativo::responder_com_anexo_de_teste(
+            quem,
+            &pedido_rpc("time.sync", r#"{"id":7,"attachment":1024}"#),
+            &resposta,
+        );
+        if fs_texto(&r, "error").as_deref() != Some("nenhum pedido de hora aberto com este id") {
+            crate::log_error!("teste", "{}", r);
+            return Err("a resposta entregue no anexo nao foi tratada como sem pedido");
+        }
+        let r = crate::nativo::responder_com_anexo_de_teste(
+            quem,
+            &pedido_rpc("time.sync", r#"{"id":7,"attachment":3}"#),
+            &resposta,
+        );
+        if fs_texto(&r, "error").as_deref() != Some("o anexo nao confere com attachment") {
+            crate::log_error!("teste", "{}", r);
+            return Err("um anexo que nao confere com attachment foi aceito");
+        }
+    }
+    if foto() != antes {
+        return Err("um pedido de hora mudou a politica, o registro ou as credenciais");
+    }
+    for (metodo, params) in [
+        ("policy.show", "{}"),
+        ("fs.read", r#"{"path":"/dados/leia-me.txt"}"#),
+    ] {
+        if so_a_decisao(hora, metodo, params)? != Codigo::DenyPermission {
+            return Err("pedir evidencia de hora deu ao servico o que ele nao tinha");
+        }
+    }
+    Ok(())
 }

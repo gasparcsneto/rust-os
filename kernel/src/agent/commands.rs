@@ -276,6 +276,44 @@ pub static COMANDOS: &[Command] = &[
         handler: random_read,
     },
     Command {
+        nome: "time.request",
+        resumo: "Pede ao kernel o pedido do Roughtime para uma fonte do registro de fontes de hora (/etc/duke/tempo): o kernel escolhe o nonce e liga o pedido a quem pediu e a fonte. Nao escolhe a hora. O transporte ate a fonte e uma associacao UDP de net.connect, decidida a parte. Fonte fora do registro: INVALID_REQUEST. O servico de hora ainda nao emite pedidos neste kernel: TIME_UNAVAILABLE.",
+        params: &[ParamSpec {
+            nome: "source",
+            tipo: TipoParam::Texto,
+            obrigatorio: true,
+            descricao: "O nome da fonte no registro de fontes de hora.",
+        }],
+        acesso: Acesso::Exige(Permissao::TimeSync),
+        recurso: Some("source"),
+        mais: Mais::Nada,
+        plano: Plano::Controle,
+        handler: time_request,
+    },
+    Command {
+        nome: "time.sync",
+        resumo: "Entrega ao kernel a resposta que chegou de uma fonte de hora para o pedido `id` de time.request: a resposta inteira, como chegou, no anexo do pedido; sem anexo, o aviso de que ela nao veio. O kernel a confere contra o pedido que ele mesmo emitiu, e so o acordo de pelo menos duas chaves move o relogio civil: quem entrega nao escolhe a hora. Um id que nao e seu nao existe para voce: INVALID_REQUEST.",
+        params: &[
+            ParamSpec {
+                nome: "id",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: true,
+                descricao: "O id que time.request devolveu.",
+            },
+            ParamSpec {
+                nome: "attachment",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "Numa sessao cifrada de agente (uma porta ou o TCP): quantos bytes de anexo vieram antes deste pedido - a resposta da fonte, como chegou. Um processo manda o anexo pela chamada PEDIR_COM_ANEXO.",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::TimeSync),
+        recurso: Some("id"),
+        mais: Mais::Nada,
+        plano: Plano::Controle,
+        handler: time_sync,
+    },
+    Command {
         nome: "tasks.stats",
         resumo: "Estado do escalonador cooperativo e da fila de entrada.",
         params: &[],
@@ -2447,6 +2485,62 @@ fn random_read(params: Json, w: &mut JsonWriter) -> fmt::Result {
     };
     politica::sigiloso::zerar(&mut bytes);
     r?;
+    w.end_object()
+}
+
+/// `time.request`: o pedido do Roughtime para uma fonte do registro.
+///
+/// O gate decidiu `time.sync`. Aqui, a fonte tem de estar no registro de
+/// fontes — uma fora dele não existe, e nenhuma ausência de registro dá
+/// fonte a ninguém. O pedido mesmo — o nonce do kernel, ligado a quem pede
+/// e à fonte — é do serviço de hora, que ainda não está neste kernel:
+/// `TIME_UNAVAILABLE`, um erro técnico, e não uma recusa.
+fn time_request(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let nome = params
+        .member("source")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    match crate::identidade::fonte_de_hora(nome) {
+        None => {
+            w.field_str("error", "fonte de hora fora do registro")?;
+            w.field_str("code", "INVALID_REQUEST")?;
+        }
+        Some(fonte) => {
+            w.field_str("source", fonte.nome())?;
+            w.field_str("to", fonte.destino())?;
+            w.field_str(
+                "error",
+                "o servico de hora ainda nao emite pedidos neste kernel",
+            )?;
+            w.field_str("code", "TIME_UNAVAILABLE")?;
+        }
+    }
+    w.end_object()
+}
+
+/// `time.sync`: a resposta de uma fonte de hora, entregue para um pedido.
+///
+/// O gate decidiu `time.sync`. O id é de um pedido que o kernel emitiu para
+/// quem entrega — nunca o de outro —, e a resposta é conferida contra o
+/// registro do pedido, e não contra o que quem entrega diz dela. Sem o
+/// serviço de hora neste kernel, nenhum pedido está aberto: todo id é
+/// `INVALID_REQUEST`, e a resposta, que não é segredo, é descartada sem ser
+/// lida.
+fn time_sync(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let anexo = crate::autorizacao::tirar_anexo();
+    let id = params.member("id").and_then(|v| v.as_u64());
+    let erro = if anexo_declarado(params.member("attachment"), &anexo).is_err() {
+        "o anexo nao confere com attachment"
+    } else if id.is_none() {
+        "id invalido"
+    } else {
+        "nenhum pedido de hora aberto com este id"
+    };
+    drop(anexo);
+    w.field_str("error", erro)?;
+    w.field_str("code", "INVALID_REQUEST")?;
     w.end_object()
 }
 

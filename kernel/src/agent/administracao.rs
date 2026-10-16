@@ -4,8 +4,8 @@
 //!
 //! Uma operação administrativa — registrar e revogar um agente, atribuir um
 //! papel, mudar a política, registrar e revogar uma pessoa, trocar a
-//! credencial dela, encerrar uma sessão de pessoa, revogar um arrendamento
-//! — não é um comando como os outros. Ela não está
+//! credencial dela, encerrar uma sessão de pessoa, revogar um arrendamento,
+//! confirmar um salto de hora pendente — não é um comando como os outros. Ela não está
 //! em [`super::commands::COMANDOS`] e não se chama pelo nome: chega
 //! embrulhada em `admin.execute`, com a prova de um administrador para
 //! **aquele** pedido, naquela sessão, com aquele desafio. Ver
@@ -150,7 +150,7 @@ struct Operacao {
 /// gravação falha: o que foi concedido é desfeito; o que foi tirado fica.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Efeito {
-    /// Não muda autoridade: arrendamentos e mensagens.
+    /// Não muda autoridade: arrendamentos, mensagens, contenções, a hora.
     Nenhum,
     /// Dá a alguém o que ele não tinha: um registro, um papel, uma
     /// política, uma credencial.
@@ -324,6 +324,16 @@ static OPERACOES: &[Operacao] = &[
         permissao: Permissao::MessagePurgeMailbox,
         efeito: Efeito::Nenhum,
         executar: esvaziar_caixa,
+    },
+    Operacao {
+        nome: "time.confirm",
+        resumo: "Aplica o salto de hora pendente - o que o acordo de pelo menos duas chaves \
+                 de fontes do registro indicou e que, acima do teto ou fora do envelope, \
+                 espera uma pessoa: {}. Nao recebe hora nenhuma; sem salto pendente, nao \
+                 ha o que confirmar (CONFLICT), e nada muda.",
+        permissao: Permissao::TimeConfirm,
+        efeito: Efeito::Nenhum,
+        executar: confirmar_salto_de_hora,
     },
 ];
 
@@ -1478,6 +1488,33 @@ fn revogar_sessao(pedinte: &Pedinte, params: Json, w: &mut JsonWriter) -> Result
 /// arrendamento que saiu vai para a auditoria em nome de quem o tinha, e a
 /// operação em nome do administrador. O `sistema` não tem um atalho para
 /// isto.
+/// `time.confirm`: o salto de hora pendente, aplicado.
+///
+/// Não recebe hora nenhuma — os parâmetros são um objeto vazio, e um campo
+/// qualquer recusa o pedido, em vez de ser ignorado: a hora não se digita.
+/// O salto que se confirma é o que o quórum indicou e o serviço de hora
+/// guardou como pendente; o serviço ainda não está neste kernel, e sem ele
+/// nunca há salto pendente — `CONFLICT`, e nada muda. A decisão já foi
+/// gravada: a prova, o papel com `time.confirm`, e o desafio.
+fn confirmar_salto_de_hora(
+    _pedinte: &Pedinte,
+    params: Json,
+    _w: &mut JsonWriter,
+) -> Result<String, Falha> {
+    let vazio = params.raw_str().is_some_and(|t| {
+        t.bytes()
+            .filter(|b| !b.is_ascii_whitespace())
+            .eq(b"{}".iter().copied())
+    });
+    if !vazio {
+        return Err(falha(
+            Codigo::InvalidArgument,
+            "time.confirm nao recebe parametros: a hora nao se digita, so se confirma o salto que o quorum indicou",
+        ));
+    }
+    Err(falha(Codigo::Conflict, "nenhum salto de hora pendente"))
+}
+
 fn revogar_arrendamento(
     _pedinte: &Pedinte,
     params: Json,

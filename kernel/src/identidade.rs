@@ -16,6 +16,11 @@
 //!   **quem** selou; em quem cada papel confia é da política, na linha
 //!   `editores`. Só a imagem o escreve: não há editor registrado em tempo
 //!   de execução.
+//! - `/etc/duke/tempo`: as fontes de hora — o nome, o destino UDP e a raiz
+//!   Ed25519 de cada uma — e o quórum e os tetos — ver `hora::registro`. O
+//!   registro diz **em quem** o relógio civil confia; com quem o serviço de
+//!   hora fala é da política, no `net.connect` do papel dele. Só a imagem o
+//!   escreve, e qualquer erro o recusa inteiro: sem registro, não há fonte.
 //!
 //! # Por que fora do canal do agente
 //!
@@ -51,6 +56,8 @@ pub const CAMINHO_DOS_AGENTES: &str = "/etc/duke/agentes";
 pub const CAMINHO_DOS_ADMINISTRADORES: &str = "/etc/duke/administradores";
 /// Onde estão os editores de código.
 pub const CAMINHO_DOS_EDITORES: &str = "/etc/duke/editores";
+/// Onde estão as fontes de hora.
+pub const CAMINHO_DAS_FONTES_DE_HORA: &str = hora::registro::CAMINHO;
 
 /// Quantos agentes o registro guarda. Um teto para que `agent.register` não
 /// seja um jeito de esgotar a memória do kernel.
@@ -124,6 +131,9 @@ struct Identidade {
     administradores: Vec<Administrador>,
     /// Os editores de código, da imagem.
     editores: Vec<Editor>,
+    /// As fontes de hora, da imagem: o registro inteiro, ou nenhum — ver
+    /// [`ler_fontes_de_hora`].
+    fontes_de_hora: Option<hora::registro::Registro>,
     /// As lápides: as credenciais administrativas revogadas por quórum,
     /// desta execução ou de antes dela, lidas do journal.
     ///
@@ -140,6 +150,7 @@ static IDENTIDADE: Mutex<Identidade> = Mutex::new(Identidade {
     agentes: Vec::new(),
     administradores: Vec::new(),
     editores: Vec::new(),
+    fontes_de_hora: None,
     lapides: Vec::new(),
 });
 
@@ -188,15 +199,17 @@ pub fn carregar() {
         .collect();
 
     let editores = ler_editores();
+    let fontes_de_hora = ler_fontes_de_hora();
 
     if let Some(c) = &chave {
         crate::log_info!(
             "agent",
-            "chave do Duke {}, {} agentes, {} administradores, {} editores de codigo",
+            "chave do Duke {}, {} agentes, {} administradores, {} editores de codigo, {} fontes de hora",
             impressao(&sigilo::publica_de(c)),
             agentes.len(),
             administradores.len(),
-            editores.len()
+            editores.len(),
+            fontes_de_hora.as_ref().map_or(0, |r| r.fontes().len())
         );
     }
     crate::arch::sem_interrupcoes(|| {
@@ -205,6 +218,7 @@ pub fn carregar() {
         id.agentes = agentes;
         id.administradores = administradores;
         id.editores = editores;
+        id.fontes_de_hora = fontes_de_hora;
         // A lápide vence a imagem: o que já foi revogado continua.
         let lapides = id.lapides.clone();
         for a in id.administradores.iter_mut() {
@@ -393,6 +407,81 @@ fn ler_editores() -> Vec<Editor> {
         }
     }
     editores
+}
+
+/// As fontes de hora do arquivo da imagem. Diferente dos outros registros,
+/// uma linha errada não é pulada: o registro inteiro é recusado, com a
+/// linha — o quórum e os tetos são regras de segurança, e um registro meio
+/// lido seria uma confiança que ninguém escreveu. Ausente ou recusado: sem
+/// fonte nenhuma, e o relógio civil fica no RTC. Ver `hora::registro`.
+fn ler_fontes_de_hora() -> Option<hora::registro::Registro> {
+    let Ok(bytes) = crate::vfs::ler_tudo(CAMINHO_DAS_FONTES_DE_HORA) else {
+        crate::log_info!(
+            "agent",
+            "{} nao existe: sem fontes de hora, o relogio civil fica no RTC",
+            CAMINHO_DAS_FONTES_DE_HORA
+        );
+        return None;
+    };
+    let Ok(texto) = core::str::from_utf8(&bytes) else {
+        crate::log_error!(
+            "agent",
+            "{} nao e texto: sem fontes de hora",
+            CAMINHO_DAS_FONTES_DE_HORA
+        );
+        return None;
+    };
+    match hora::registro::Registro::ler(texto) {
+        Ok(r) => {
+            if !r.move_o_relogio() {
+                crate::log_warn!(
+                    "agent",
+                    "{}: quorum {} com {} fontes: as respostas sao conferidas e registradas, e o relogio nunca se move",
+                    CAMINHO_DAS_FONTES_DE_HORA,
+                    r.quorum(),
+                    r.fontes().len()
+                );
+            }
+            Some(r)
+        }
+        Err(e) => {
+            crate::log_error!(
+                "agent",
+                "{}: {}; registro recusado inteiro, sem fontes de hora",
+                CAMINHO_DAS_FONTES_DE_HORA,
+                e
+            );
+            None
+        }
+    }
+}
+
+/// A fonte de hora com este nome, se o registro a tem. Fora do registro,
+/// ou sem registro, nenhuma: não há fonte por omissão.
+pub fn fonte_de_hora(nome: &str) -> Option<hora::registro::Fonte> {
+    crate::arch::sem_interrupcoes(|| {
+        IDENTIDADE
+            .lock()
+            .fontes_de_hora
+            .as_ref()
+            .and_then(|r| r.fonte_de_nome(nome).map(|(_, f)| *f))
+    })
+}
+
+/// O registro de fontes de hora, se há um.
+pub fn fontes_de_hora() -> Option<hora::registro::Registro> {
+    crate::arch::sem_interrupcoes(|| IDENTIDADE.lock().fontes_de_hora)
+}
+
+/// Troca o registro de fontes de hora, e devolve o de antes — a suíte põe
+/// o do caso, e repõe o da imagem no fim.
+#[cfg(feature = "modo-teste")]
+pub fn trocar_fontes_de_hora_de_teste(
+    fontes: Option<hora::registro::Registro>,
+) -> Option<hora::registro::Registro> {
+    crate::arch::sem_interrupcoes(|| {
+        core::mem::replace(&mut IDENTIDADE.lock().fontes_de_hora, fontes)
+    })
 }
 
 fn avisar_linha(caminho: &str, linha: usize, e: ErroDeLinha) {

@@ -2321,11 +2321,127 @@ fn conferir_invariantes() -> Result<ExitCode, String> {
         conferir_remetente_da_sessao()?,
         conferir_auditoria_so_relatada()?,
         conferir_a_porta_do_canal_tcp(),
+        conferir_o_tempo(),
     ];
     if passos.iter().all(|p| *p == ExitCode::SUCCESS) {
         Ok(ExitCode::SUCCESS)
     } else {
         Ok(ExitCode::FAILURE)
+    }
+}
+
+/// O tempo na política da imagem, sem precisar de chave nenhuma: quem tem
+/// `time.sync` — o serviço de hora (o papel da linha `servico hora`), o
+/// `sistema` e o teto do `administrador`, e ninguém mais —, quem tem
+/// `time.confirm` — só o `administrador`, administrativa —, e o papel do
+/// serviço: só conectar às fontes da bancada e apresentar evidência.
+fn conferir_o_tempo_da_politica(politica: &politica::Politica) -> Result<(), String> {
+    use politica::Permissao;
+    let servico = politica
+        .servico(hora::registro::SERVICO)
+        .ok_or("a politica da imagem nao tem a linha `servico hora`")?;
+    let quem = |p: Permissao| {
+        politica
+            .papeis()
+            .iter()
+            .filter(|papel| papel.tem(p))
+            .map(|papel| papel.nome.as_str())
+            .collect::<Vec<_>>()
+    };
+    let sync = quem(Permissao::TimeSync);
+    let mut esperado = vec![servico, "sistema", "administrador"];
+    esperado.sort_unstable();
+    let mut tem = sync.clone();
+    tem.sort_unstable();
+    if tem != esperado {
+        return Err(format!(
+            "time.sync na politica da imagem: {sync:?}; so o servico de hora, o sistema e o administrador"
+        ));
+    }
+    let confirm = quem(Permissao::TimeConfirm);
+    if confirm != ["administrador"] || !Permissao::TimeConfirm.administrativa() {
+        return Err(format!(
+            "time.confirm na politica da imagem: {confirm:?}; so o administrador, e so com prova"
+        ));
+    }
+    let papel = politica
+        .papel(servico)
+        .ok_or_else(|| format!("o papel `{servico}` do servico de hora nao existe"))?;
+    let permissoes: Vec<_> = papel.permissoes().map(|p| p.nome()).collect();
+    if permissoes != ["net.connect", "time.sync"] || !papel.inclui.is_empty() {
+        return Err(format!(
+            "o papel `{servico}` do servico de hora tem {permissoes:?}{}: so net.connect e time.sync, escritas",
+            if papel.inclui.is_empty() {
+                ""
+            } else {
+                " por inclusao"
+            }
+        ));
+    }
+    let mut alcance: Vec<&str> = papel
+        .recursos
+        .get(&Permissao::NetConnect)
+        .map(|r| r.iter().map(String::as_str).collect())
+        .unwrap_or_default();
+    alcance.sort_unstable();
+    let mut fontes: Vec<&str> = chaves::FONTES_DE_HORA.iter().map(|(_, d)| *d).collect();
+    fontes.sort_unstable();
+    if alcance != fontes {
+        return Err(format!(
+            "o papel `{servico}` do servico de hora alcanca {alcance:?}; so as fontes de hora da bancada, {fontes:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// O registro de fontes de hora da imagem e a política da imagem dizem o
+/// mesmo, nos dois sentidos: cada fonte no alcance do serviço de hora — a
+/// coerência de `hora::registro` —, o serviço alcançando só as fontes, o
+/// quórum alcançável, e o tempo da política no lugar — ver
+/// [`conferir_o_tempo_da_politica`].
+pub fn conferir_o_tempo_da_imagem(
+    registro: &hora::registro::Registro,
+    politica: &politica::Politica,
+) -> Result<(), String> {
+    registro
+        .conferir_com(politica)
+        .map_err(|e| format!("o registro de fontes de hora e a politica da imagem: {e}"))?;
+    if !registro.move_o_relogio() {
+        return Err(format!(
+            "o registro de fontes de hora da imagem pede {} chaves e tem {} fontes: o relogio nunca se moveria",
+            registro.quorum(),
+            registro.fontes().len()
+        ));
+    }
+    let destinos: Vec<&str> = registro.fontes().iter().map(|f| f.destino()).collect();
+    let bancada: Vec<&str> = chaves::FONTES_DE_HORA.iter().map(|(_, d)| *d).collect();
+    if destinos != bancada {
+        return Err(format!(
+            "as fontes de hora da imagem falam em {destinos:?}, e as da bancada em {bancada:?}"
+        ));
+    }
+    conferir_o_tempo_da_politica(politica)
+}
+
+/// A política padrão com o tempo no lugar — ver
+/// [`conferir_o_tempo_da_politica`]. Sem chaves: é de fonte.
+fn conferir_o_tempo() -> ExitCode {
+    let resultado = politica::Politica::ler(politica::PADRAO)
+        .map_err(|e| format!("a politica padrao nao se le: {}", e.motivo()))
+        .and_then(|p| conferir_o_tempo_da_politica(&p));
+    match resultado {
+        Ok(()) => {
+            println!(
+                "[xtask] o tempo na politica: time.sync so no servico de hora, no sistema e no \
+                 administrador; time.confirm so no administrador; o servico de hora so conecta \
+                 as fontes da bancada"
+            );
+            ExitCode::SUCCESS
+        }
+        Err(motivo) => {
+            println!("[xtask] {motivo}");
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -2732,6 +2848,16 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
     (
         "Servico::Nsf",
         &["kernel/src/autorizacao.rs", "kernel/src/seguranca.rs"],
+    ),
+    // O serviço de hora (ver `hora::registro`): por enquanto, só o gate o
+    // conhece — o fio dele é do passo seguinte. `time.sync` só se exige
+    // pelos dois comandos dela, e `time.confirm` só pela operação
+    // administrativa, com prova: nenhum comando comum a exerce.
+    ("Servico::Hora", &["kernel/src/autorizacao.rs"]),
+    ("Permissao::TimeSync", &["kernel/src/agent/commands.rs"]),
+    (
+        "Permissao::TimeConfirm",
+        &["kernel/src/agent/administracao.rs"],
     ),
     (
         "nativo::responder_pelo_kernel(",
@@ -4415,7 +4541,24 @@ mod chaves {
         pub editor_da_bancada: [u8; 32],
         pub editor_de_fora: [u8; 32],
         pub editor_estranho: [u8; 32],
+        /// As chaves **privadas** Ed25519 das fontes de hora da bancada — as
+        /// raízes com que o servidor de hora da bancada assina as delegações,
+        /// na ordem de [`FONTES_DE_HORA`]. A imagem recebe só as públicas,
+        /// no registro de fontes, `/etc/duke/tempo`.
+        pub fontes_de_hora: [[u8; 32]; 3],
     }
+
+    /// As fontes de hora da bancada: o nome e o destino UDP de cada uma. Os
+    /// destinos são os que a política padrão dá ao papel do serviço de hora
+    /// — a imagem só é gerada se os dois disserem o mesmo.
+    pub const FONTES_DE_HORA: [(&str, &str); 3] = [
+        ("bancada-a", "udp:10.0.2.2:5319"),
+        ("bancada-b", "udp:10.0.2.2:5320"),
+        ("bancada-c", "udp:10.0.2.2:5321"),
+    ];
+
+    /// O quórum da bancada: dois de três.
+    pub const QUORUM_DE_HORA: u64 = 2;
 
     /// O nome da pessoa de desenvolvimento.
     pub const NOME_DA_PESSOA_DEV: &str = "dev";
@@ -4490,7 +4633,42 @@ mod chaves {
                 editor_da_bancada: chave("editor-bancada")?,
                 editor_de_fora: chave("editor-outro")?,
                 editor_estranho: chave("editor-estranho")?,
+                fontes_de_hora: [
+                    chave("fonte-de-hora-a")?,
+                    chave("fonte-de-hora-b")?,
+                    chave("fonte-de-hora-c")?,
+                ],
             })
+        }
+
+        /// O registro de fontes de hora da imagem — as públicas das fontes
+        /// da bancada, os destinos delas e o quórum —, lido pelo mesmo leitor
+        /// do kernel e conferido contra a política da imagem antes de
+        /// existir: ver [`super::conferir_o_tempo_da_imagem`].
+        pub fn registro_de_fontes_de_hora(
+            &self,
+            politica: &politica::Politica,
+        ) -> Result<String, String> {
+            let mut texto = String::from(
+                "# As fontes de hora: o nome, o destino UDP e a raiz Ed25519 de cada uma,\n\
+                 # e quantas chaves precisam concordar para o relogio se mover. Com quem\n\
+                 # o servico de hora fala e da politica (o net.connect do papel dele).\n",
+            );
+            for ((nome, destino), privada) in FONTES_DE_HORA.iter().zip(&self.fontes_de_hora) {
+                let publica = ed25519_dalek::SigningKey::from_bytes(privada)
+                    .verifying_key()
+                    .to_bytes();
+                texto.push_str(&format!(
+                    "fonte {nome} {destino} {}{}\n",
+                    hora::registro::PREFIXO_DA_CHAVE,
+                    sigilo::hex(&publica)
+                ));
+            }
+            texto.push_str(&format!("quorum {QUORUM_DE_HORA}\n"));
+            let registro = hora::registro::Registro::ler(&texto)
+                .map_err(|e| format!("o registro de fontes de hora da imagem nao se le: {e}"))?;
+            super::conferir_o_tempo_da_imagem(&registro, politica)?;
+            Ok(texto)
         }
 
         /// A pessoa de desenvolvimento: o identificador, o sal e a senha.
@@ -4663,12 +4841,17 @@ mod chaves {
                     ));
                 }
             }
+            // As fontes de hora: o registro só entra na imagem se se lê — o
+            // quórum de pelo menos duas chaves, os tetos nos limites — e se
+            // a política da imagem diz o mesmo que ele.
+            let fontes_de_hora = self.registro_de_fontes_de_hora(&politica)?;
             Ok(vec![
                 (
                     "etc/duke/privado/chave".to_string(),
                     format!("{}\n", sigilo::hex(&self.duke)).into_bytes(),
                 ),
                 ("etc/duke/editores".to_string(), editores.into_bytes()),
+                ("etc/duke/tempo".to_string(), fontes_de_hora.into_bytes()),
                 // O registro de pessoas, no diretório reservado: o
                 // verificador não é a senha, mas quem o tem testa palpites
                 // fora da máquina.
@@ -6628,6 +6811,7 @@ fn conversar(
     sob_sigilo(arch)?;
     sob_administracao(arch, &mut escrita, &mut leitor)?;
     sob_politica(arch, &mut escrita, &mut leitor)?;
+    sob_o_tempo(arch, &mut escrita, &mut leitor)?;
     sob_canal_tcp(arch, &mut escrita, &mut leitor)?;
     sob_tela(monitor, tela_no_monitor, &mut escrita, &mut leitor)?;
     sob_fragmento(&mut escrita, &mut leitor)?;
@@ -9559,6 +9743,131 @@ fn esperar_vagas_tcp_livres(
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// O tempo pelo canal de verdade, de fora do hóspede: a superfície que a
+/// suíte confere por dentro, decidida pelo mesmo gate para quem chega pela
+/// serial e pelas portas.
+///
+/// - a serial — o papel `sistema`, que tem `time.sync` — pede o pedido de
+///   uma fonte do registro e passa pelo gate; o pedido mesmo é do serviço
+///   de hora, que ainda não está no kernel: `TIME_UNAVAILABLE`. A fonte
+///   fora do registro e a entrega sem pedido aberto não existem;
+/// - o operador de uma porta, sem `time.sync`, é recusado nas duas;
+/// - `time.confirm` não é comando; com a prova do administrador é
+///   decidido e não acha salto pendente — `CONFLICT` —, e uma hora digitada
+///   é recusada, e não ignorada;
+/// - cada decisão vai à auditoria com o titular e o papel, e a política é a
+///   mesma no fim.
+fn sob_o_tempo(
+    arch: Arquitetura,
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+) -> Result<(), String> {
+    println!("[xtask] fumaça: o tempo — time.request, time.sync e time.confirm, pelo gate");
+    let chaves = chaves::Chaves::garantir()?;
+    let mut id = 7500;
+    let mut pedir =
+        |metodo: &str, params: &str| pedir_pela_serial(escrita, leitor, &mut id, metodo, params);
+    let resultado = |r: &str| apos(r, r#""result":"#).map(str::to_string);
+    let politica_antes =
+        resultado(&pedir("policy.show", "{}")?).ok_or("tempo: policy.show sem resultado")?;
+
+    let r = pedir("time.request", r#"{"source":"bancada-a"}"#)?;
+    if !r.contains(r#""code":"TIME_UNAVAILABLE""#) || !r.contains(r#""to":"udp:10.0.2.2:5319""#) {
+        return Err(format!(
+            "tempo: a serial nao pediu pelo gate a fonte do registro\n  {r}"
+        ));
+    }
+    let r = pedir("time.request", r#"{"source":"intrusa"}"#)?;
+    if !r.contains(r#""code":"INVALID_REQUEST""#) {
+        return Err(format!("tempo: uma fonte fora do registro existiu\n  {r}"));
+    }
+    let r = pedir("time.sync", r#"{"id":1}"#)?;
+    if !r.contains(r#""code":"INVALID_REQUEST""#) {
+        return Err(format!(
+            "tempo: uma entrega sem pedido aberto foi aceita\n  {r}"
+        ));
+    }
+    let mut operador = AgenteNaPorta::conectar(arch, 2)?;
+    for (metodo, params) in [
+        ("time.request", r#"{"source":"bancada-a"}"#),
+        ("time.sync", r#"{"id":1}"#),
+    ] {
+        let r = operador.pedir(metodo, params)?;
+        if !recusado_com(&r, "DENY_PERMISSION") {
+            return Err(format!(
+                "tempo: o operador, sem time.sync, pediu {metodo}\n  {r}"
+            ));
+        }
+    }
+    drop(operador);
+    println!(
+        "  [tempo] ok  a serial pede pelo gate a fonte do registro (TIME_UNAVAILABLE: o servico e do passo seguinte); a fonte de fora e a entrega sem pedido nao existem; o operador, sem time.sync, e recusado"
+    );
+
+    let r = pedir("time.confirm", "{}")?;
+    if r.contains(r#""result""#) {
+        return Err(format!("tempo: time.confirm respondeu como comando\n  {r}"));
+    }
+    let desafio = pedir("admin.challenge", "{}")?;
+    let pedido = pedido_administrativo(&chaves, 0, &desafio, "time.confirm", "{}", "{}")?;
+    let r = pedir("admin.execute", &pedido)?;
+    if !r.contains(r#""executed":false"#) || !r.contains(r#""code":"CONFLICT""#) {
+        return Err(format!(
+            "tempo: sem salto pendente, time.confirm fez alguma coisa\n  {r}"
+        ));
+    }
+    let hora = r#"{"unix_s":1760000000}"#;
+    let desafio = pedir("admin.challenge", "{}")?;
+    let pedido = pedido_administrativo(&chaves, 0, &desafio, "time.confirm", hora, hora)?;
+    let r = pedir("admin.execute", &pedido)?;
+    if !r.contains(r#""code":"INVALID_ARGUMENT""#) {
+        return Err(format!("tempo: uma hora digitada nao foi recusada\n  {r}"));
+    }
+    println!(
+        "  [tempo] ok  time.confirm nao e comando; com a prova do administrador, CONFLICT: nenhum salto pendente; uma hora digitada, INVALID_ARGUMENT"
+    );
+
+    // Cada decisão, gravada como foi.
+    let cauda = pedir("audit.tail", r#"{"count":64}"#)?;
+    let registros =
+        objetos_planos(apos(&cauda, r#""records":["#).ok_or("tempo: audit.tail sem registros")?)?;
+    let campo = |r: &ObjetoPlano, nome: &str| {
+        r.iter()
+            .find(|(n, _)| n == nome)
+            .and_then(|(_, v)| v.clone())
+            .unwrap_or_default()
+    };
+    for (metodo, titular, papel, codigo) in [
+        ("time.request", "serial", "sistema", "ALLOW"),
+        ("time.sync", "serial", "sistema", "ALLOW"),
+        ("time.request", "agent", "operador", "DENY_PERMISSION"),
+        ("time.sync", "agent", "operador", "DENY_PERMISSION"),
+        ("time.confirm", "admin", "administrador", "ALLOW"),
+    ] {
+        if !registros.iter().any(|r| {
+            campo(r, "method") == metodo
+                && campo(r, "holder") == titular
+                && campo(r, "role") == papel
+                && campo(r, "code") == codigo
+        }) {
+            return Err(format!(
+                "tempo: a auditoria nao tem {metodo} de {titular} ({papel}) com {codigo}"
+            ));
+        }
+    }
+    if !registros
+        .iter()
+        .any(|r| campo(r, "method") == "time.confirm" && campo(r, "code") == "CONFLICT")
+    {
+        return Err("tempo: o desfecho do time.confirm nao foi gravado".into());
+    }
+    if resultado(&pedir("policy.show", "{}")?) != Some(politica_antes) {
+        return Err("tempo: um pedido de hora mudou a politica".into());
+    }
+    println!("  [tempo] ok  cada decisao gravada com o titular e o papel; a politica, a mesma");
+    Ok(())
 }
 
 /// O canal do agente por TCP, no kernel de produção: o mesmo canal cifrado
@@ -14043,6 +14352,75 @@ mod testes {
             !receita.contains("/home") && !receita.contains("target/"),
             "a receita carrega um caminho da máquina:\n{receita}"
         );
+    }
+
+    /// O tempo da imagem: o registro da bancada e a política padrão dizem o
+    /// mesmo — e cada jeito de dizerem coisas diferentes é recusado antes de
+    /// a imagem existir: uma fonte fora da política, uma a menos, um quórum
+    /// que nunca se alcança; e, na política, `time.sync` implícito no
+    /// operador, `time.confirm` no operador, o serviço sem linha, o `tempo`
+    /// com um destino, uma permissão ou uma inclusão a mais.
+    #[test]
+    fn o_tempo_da_imagem_e_coerente() {
+        use super::*;
+        let raiz = |semente: u8| {
+            ed25519_dalek::SigningKey::from_bytes(&[semente; 32])
+                .verifying_key()
+                .to_bytes()
+        };
+        let registro = |fontes: &[(&str, &str)], k: u64| {
+            let mut texto = String::new();
+            for (i, (nome, destino)) in fontes.iter().enumerate() {
+                texto.push_str(&format!(
+                    "fonte {nome} {destino} ed25519:{}\n",
+                    sigilo::hex(&raiz(i as u8 + 1))
+                ));
+            }
+            texto.push_str(&format!("quorum {k}\n"));
+            hora::registro::Registro::ler(&texto).unwrap()
+        };
+        let bancada = chaves::FONTES_DE_HORA.to_vec();
+        let padrao = politica::Politica::ler(politica::PADRAO).unwrap();
+        assert_eq!(
+            conferir_o_tempo_da_imagem(&registro(&bancada, 2), &padrao),
+            Ok(())
+        );
+        let mut mais = bancada.clone();
+        mais.push(("intrusa", "udp:10.0.2.2:5399"));
+        let erro = conferir_o_tempo_da_imagem(&registro(&mais, 2), &padrao).unwrap_err();
+        assert!(erro.contains("intrusa"), "{erro}");
+        assert!(conferir_o_tempo_da_imagem(&registro(&bancada[..2], 2), &padrao).is_err());
+        let erro = conferir_o_tempo_da_imagem(&registro(&bancada, 4), &padrao).unwrap_err();
+        assert!(erro.contains("nunca se moveria"), "{erro}");
+
+        let trocada = |de: &str, para: &str| {
+            assert!(politica::PADRAO.contains(de), "{de}");
+            politica::Politica::ler(&politica::PADRAO.replace(de, para)).unwrap()
+        };
+        const OPERADOR: &str = "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read\n";
+        const TEMPO: &str = "papel tempo net.connect time.sync\n";
+        const ALCANCE: &str =
+            "recurso tempo net.connect udp:10.0.2.2:5319 udp:10.0.2.2:5320 udp:10.0.2.2:5321\n";
+        for (de, para) in [
+            (
+                OPERADOR,
+                OPERADOR.replace("random.read", "random.read time.sync"),
+            ),
+            (
+                OPERADOR,
+                OPERADOR.replace("random.read", "random.read time.confirm"),
+            ),
+            ("servico hora tempo\n", String::new()),
+            (ALCANCE, ALCANCE.replace("5321", "5321 udp:10.0.2.2:69")),
+            (TEMPO, TEMPO.replace("time.sync", "time.sync system.read")),
+            (TEMPO, TEMPO.replace("tempo ", "tempo @observador ")),
+        ] {
+            let p = trocada(de, &para);
+            assert!(
+                conferir_o_tempo_da_imagem(&registro(&bancada, 2), &p).is_err(),
+                "{para}"
+            );
+        }
     }
 
     #[test]

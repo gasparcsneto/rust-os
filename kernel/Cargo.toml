@@ -100,6 +100,12 @@ armazem = { path = "../armazem" }
 # pedidos; nada do pacote decide acesso.
 seguranca = { path = "../seguranca" }
 
+# A hora: por enquanto, só o registro de fontes — `/etc/duke/tempo`, lido
+# e conferido no boot, e a coerência dele com a política. O serviço de hora
+# — o relógio civil, a conferência das respostas, a disciplina — é do passo
+# seguinte; ver `hora/src/lib.rs`.
+hora = { path = "../hora" }
+
 # A pilha IP: Ethernet, ARP, IPv4, DHCP, TCP e UDP sobre a placa virtio —
 # ver `src/rede/pilha.rs`. Escrever TCP do zero é um a dois anos-pessoa e
 # não diferencia o Duke em nada; o que diferencia é o lado de cima, a
