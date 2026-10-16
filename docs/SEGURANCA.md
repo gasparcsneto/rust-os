@@ -55,7 +55,7 @@ Nenhum componente do NSF:
 | **Papel** | o da linha `servico nsf <papel>` da política — na imagem, `seguranca` | a política |
 | **Permissões** | as que o papel enumera, nada além: `audit.read`, `net.observe` e `net.block`, com o alcance de cada uma escrito | a política |
 | **Titular na auditoria** | `service`, identificador `nsf` | `politica::auditoria::Titular::Servico` |
-| **Taxa** | um balde próprio, pela linha `taxa` do papel | `autorizacao::DonoDaTaxa::Servico` |
+| **Taxa** | um balde próprio, pela linha `taxa` do papel — o de cada serviço, e não um para todos: o serviço de hora tem o dele | `autorizacao::Principal::Servico` |
 
 A linha `servico` só vem da imagem (um `policy.write` não a escreve), e a
 política que a tem só vigora se o papel do serviço **não** for o da serial,

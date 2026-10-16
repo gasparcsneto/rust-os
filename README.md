@@ -4610,6 +4610,232 @@ Sem ganho a medir, não há o que pagar com esse risco.
   não se infere das invariantes; fica proposto, e não implementado, até
   uma decisão.
 
+## O tempo
+
+Três relógios, separados: o **monotônico**, que conta desde o boot e mede
+arrendamentos, sessões, taxas e esperas — nenhuma fonte o toca —; o
+**civil**, a melhor estimativa da hora UTC, com a incerteza dela e um
+estado; e o **lógico**, `max(piso, civil)`, que nunca volta e carimba a
+auditoria. O civil autenticado vem do Roughtime (RFC 10049, versão 1, e só
+ela): uma resposta assinada prova que o servidor viu o nosso pedido, e só o
+**acordo de pelo menos duas chaves** move a hora. Nenhuma decisão de
+autorização lê o civil nem o lógico.
+
+Ele chega em passos. As contas — a moldura, a conferência da resposta, o
+quórum e a disciplina — estão no pacote `hora`, puro e testado no
+hospedeiro. A superfície dele na política e no gate é a deste passo; o
+serviço mesmo — o relógio civil, o fio que consulta as fontes por UDP, a
+conferência das respostas no kernel — é o seguinte. Até lá, o relógio é o
+de antes.
+
+### A superfície no gate
+
+**Duas permissões.** `time.sync` autoriza **apresentar evidência**, e não
+escolher a hora: pedir ao kernel o pedido do Roughtime para uma fonte do
+registro, e entregar a resposta que chegou — o kernel a confere contra o
+que ele mesmo emitiu. É sensível — nenhum papel a recebe pela inclusão de
+outro — e não é administrativa: o serviço de hora a exerce pelo gate, sem
+prova. `time.confirm` aplica um salto que o quórum já indicou e que ficou
+pendente — acima do teto, ou para trás fora do envelope —; é
+administrativa: só por `admin.execute`, com a prova de um administrador
+cujo papel a tem. Não recebe hora nenhuma.
+
+| | `time.sync` | `time.confirm` |
+|---|---|---|
+| `observador`, `operador` | não | não |
+| `tempo` (o serviço de hora) | sim | não |
+| `sistema` | sim | não |
+| `administrador` (o teto) | sim | sim, com prova |
+| `seguranca` (o NSF) | não | não |
+
+**Três operações.** `time.request {source}` e `time.sync {id, anexo}` são
+comandos, decididos pelo gate com `time.sync` e gravados como qualquer
+outro; `time.confirm` é operação administrativa, dentro de `admin.execute`.
+O que cada uma faz **depois** do gate, neste passo:
+
+- `time.request` de uma fonte fora do registro — ou sem registro nenhum —
+  responde `INVALID_REQUEST`: a fonte não existe. De uma fonte do registro,
+  `TIME_UNAVAILABLE`: quem emite o pedido é o serviço de hora, que ainda
+  não está no kernel;
+- `time.sync` responde `INVALID_REQUEST`: nenhum pedido está aberto. O
+  anexo — a resposta como chegou — é conferido contra o `attachment` e
+  descartado sem ser lido;
+- `time.confirm` com prova é autorizado e gravado, e responde `CONFLICT`:
+  não há salto pendente. Com qualquer campo nos parâmetros, uma hora
+  digitada, `INVALID_ARGUMENT` — recusado, e não ignorado.
+
+**O serviço `hora` e o papel `tempo`.** O serviço tem identidade própria,
+como o NSF: `Autoridade::Servico(Servico::Hora)`, com o papel da linha
+`servico hora tempo`. O papel `tempo` enumera duas permissões — conectar,
+com `net.connect`, às três fontes da bancada, `udp:10.0.2.2:5319`,
+`:5320` e `:5321`, e `time.sync` — e nada mais: não lê arquivo, não lança,
+não lê a auditoria, não confirma salto, e não inclui o `sistema`. A linha
+só vem da imagem, e só na política padrão: na de emergência, o serviço não
+tem papel, e o civil fica no RTC. A taxa é a do papel, num balde só do
+serviço — cada serviço o seu: o de hora que pede demais não gasta a ficha
+do NSF, nem o contrário.
+
+**O registro `/etc/duke/tempo`.** As fontes em que o civil confia, da
+imagem, como o registro de editores:
+
+```
+fonte bancada-a udp:10.0.2.2:5319 ed25519:<raiz pública em hexadecimal>
+fonte bancada-b udp:10.0.2.2:5320 ed25519:<…>
+fonte bancada-c udp:10.0.2.2:5321 ed25519:<…>
+quorum 2
+salto 86400
+incerteza 60
+```
+
+Até oito fontes, cada uma com nome, destino UDP na forma normal da política
+e a raiz Ed25519 dela — uma chave fora da curva ou de ordem pequena é
+recusada na leitura; nome, destino e chave não se repetem. `quorum` é
+obrigatório e vai de 2 a 8: **k ≥ 2 sempre**. Com k maior que o número de
+fontes, o registro vale e o relógio nunca se move — uma fonte isolada é
+conferida e auditada, e não move nada. `salto` — o teto do salto automático
+para a frente — vai de 1 s a um dia; `incerteza` — o teto da incerteza
+antes de a hora vencer — de 10 s, o maior raio aceito, a 10 min. Sem as
+duas linhas, um dia e 60 s. **Qualquer erro recusa o registro inteiro**,
+com a linha; recusado ou ausente, não há fonte nenhuma — e nenhuma
+autorização a mais. As chaves privadas das fontes da bancada ficam em
+`target/chaves/`; a imagem recebe só as públicas.
+
+**A coerência com a política.** O registro diz em quem confiar; a política,
+com quem o serviço fala. O `xtask` não gera a imagem se os dois não disserem
+o mesmo, nos dois sentidos: cada fonte no alcance do `net.connect` do papel
+do serviço, o papel alcançando só as fontes, o quórum alcançável, e
+`time.sync` só no `tempo`, no `sistema` e no `administrador`, `time.confirm`
+só no `administrador`. O boot confere de novo, contra a política em vigor, e
+avisa cada fonte que o serviço não alcança. A coerência é conferência de
+configuração, e não autorização: quem impede o serviço de falar com uma fonte
+sem destino na política é o gate, a cada `net.connect` — e um `policy.write`
+que corte uma fonte vale na decisão seguinte, sem tirar o registro.
+
+**Nenhum outro caminho.** `Servico::Hora` só aparece no gate;
+`Permissao::TimeSync` só nos dois comandos; `Permissao::TimeConfirm` só na
+operação administrativa — o `cargo xtask invariantes` confere os três, e a
+política da imagem. Revogar `time.sync` do papel `tempo` recusa no gate o
+pedido seguinte do serviço, e também a entrega de uma resposta: a
+continuação de uma operação já começada é outra decisão, e não uma exceção
+do serviço.
+
+A suíte confere, pelo gate de verdade: o registro do boot e o leitor dele
+recusando k = 0, k = 1, a chave que não serve e o destino TCP; o serviço
+pedindo com o papel dele, gravado como `service`/`hora`/`tempo`; a fonte
+fora do registro e o registro ausente; o transporte só até as fontes; o
+serviço não sendo o sistema — sem a linha, `DENY_ROLE`; incluindo o
+`sistema`, sem as sensíveis —; pessoa e agente do mesmo papel decidindo o
+mesmo, com e sem `time.sync` delegado, e os não autenticados recusados;
+`time.confirm` sem prova, com a prova de outra coisa, por quem não é
+administrador e por um administrador sem a permissão; a revogação e a
+devolução por `policy.write`; o balde de cada serviço; e nenhum caminho de
+`time.sync` mudando política, registro ou credencial. A fumaça faz o mesmo
+de fora, pelo canal de verdade: a serial pede a fonte do registro e passa
+pelo gate, o operador de uma porta é recusado, `time.confirm` com a prova
+do administrador acha `CONFLICT` e recusa a hora digitada — e cada decisão
+está na auditoria com o titular e o papel, e a política é a mesma no fim.
+
+### O custo
+
+Medido no hospedeiro, na mesma máquina, antes e depois deste passo —
+mediana de sete rodadas, em três execuções: a decisão não mudou, de 7 a
+250 ns conforme o pedido, dentro do ruído entre execuções; ler a política
+padrão, 16% mais longa e com um papel a mais, passou de 34–36 µs a
+38–42 µs; validar uma linha de `policy.write`, de 7 µs a 10 µs. Ler o
+registro de três fontes custa 15 µs — quase tudo nas três chaves
+conferidas na curva —, uma vez por boot; a coerência com a política, menos
+de 1 µs. O registro ocupa 880 bytes.
+
+### O que fica de fora
+
+- **O serviço.** Nenhum fio deste kernel tem a autoridade do serviço de
+  hora: só a suíte age como ele. `time.request` responde
+  `TIME_UNAVAILABLE`, `time.sync` não acha pedido aberto e `time.confirm`
+  não acha salto pendente; o relógio é o de antes, o RTC e o contador do
+  boot. O civil, o fio `hora` e a conferência das respostas no kernel são
+  o passo seguinte.
+- **A coerência do boot só avisa.** O `xtask` recusa a imagem incoerente;
+  o boot confere de novo, contra a política em vigor, e só escreve no log
+  o que não confere — nenhum teste lê esse aviso, e nenhuma mutação o
+  cobre. Quem impede o serviço de falar com uma fonte sem destino é o
+  gate. Do mesmo jeito, um registro com k maior que as fontes, que o
+  leitor aceita e o `xtask` recusa, valeria no boot só para conferir.
+- **O registro em tempo de execução.** Trocar as fontes, o quórum ou os
+  tetos é uma imagem nova, como no registro de editores; não há operação
+  administrativa para isso.
+- **A taxa do `tempo`.** `taxa tempo 10 20` não foi medida contra a carga
+  do serviço, que ainda não existe — cada rodada serão até k pedidos, k
+  conexões e k entregas, todos pelo gate. O passo do serviço mede, e a
+  linha muda se a medida mandar.
+- **Os destinos da bancada.** `udp:10.0.2.2:5319` a `:5321` supõem que o
+  emulador leve o UDP do hóspede para `10.0.2.2` ao loopback do
+  hospedeiro, onde o servidor Roughtime da bancada vai escutar. A premissa
+  é o primeiro passo da bancada de tempo; se falhar, mudam as linhas — da
+  política, do registro e do `xtask` —, e não o desenho.
+- **A forma normal, duas vezes.** O leitor do registro confere que o
+  destino escrito é a forma normal, e o `endereco::ler` da política já só
+  lê a forma normal: hoje a conferência do registro é redundante — a
+  mutação que a tira sobrevive, equivalente —, e fica para o dia em que a
+  política ler mais formas.
+
+### As mutações do tempo
+
+Cinquenta e duas mutações contra o que a superfície do tempo promete — que
+`time.sync` não vire autorização implícita, que `time.confirm` não chegue
+ao operador nem saia da operação administrativa, que o `sistema` não seja
+curinga, que o registro recuse o que deve e que a imagem não saia
+incoerente —: trinta e seis contra os testes da `politica`, do `hora` e do
+`xtask` e contra as invariantes, no hospedeiro; dezesseis contra as
+invariantes e os casos `tempo:` da suíte, no x86. **Cinquenta e uma
+reprovadas**; a que sobreviveu é equivalente. Três das do kernel morreram
+só nas invariantes, e duas ganharam uma variante que escapa da invariante
+— sem nomear a permissão, lendo o anexo sem conferi-lo —, para saber se a
+suíte também as pega: pega.
+
+| Mutação | Reprovada por |
+|---|---|
+| a permissão `time.sync` não sensível: atravessaria a inclusão | `as_do_tempo`, `as_do_tempo_nao_atravessam_a_inclusao`, `o_tempo_nao_herda_o_sistema` |
+| `decidir` deixa `time.sync` a qualquer papel | `a_matriz_aprovada`, `o_tempo_nao_herda_o_sistema`, `policy_write_e_o_tempo` e mais dois; no registro, `a_coerencia_segue_a_politica_de_agora` e `um_papel_que_nao_conecta` |
+| o operador da imagem com `time.sync` | `a_matriz_aprovada`, `as_do_tempo_nao_atravessam_a_inclusao`, `o_tempo_da_imagem_e_coerente` e as invariantes |
+| a inclusão leva as sensíveis | `sensivel_nao_atravessa_a_inclusao`, `as_do_tempo_nao_atravessam_a_inclusao`, `o_tempo_nao_herda_o_sistema` e mais três |
+| o comando `time.request` exige `system.read` | `tempo: o servico pede pelo gate`, `tempo: o servico nao e o sistema` |
+| o comando `time.sync` exige `system.read` | `tempo: o servico pede pelo gate`, `tempo: nenhum caminho cria autoridade` |
+| o operador da imagem com `time.confirm` | `a_matriz_aprovada`, `o_sistema_e_maximo_e_enumerado`, `o_tempo_da_imagem_e_coerente` e mais um, e as invariantes |
+| a permissão `time.confirm` não administrativa | `as_do_tempo`, `o_sistema_e_maximo_e_enumerado`, `o_tempo_da_imagem_e_coerente` e as invariantes |
+| a operação `time.confirm` exige `time.sync` | as invariantes: `Permissao::TimeSync` fora dos comandos |
+| a mesma, sem nomear `time.sync` | `tempo: confirmar so com prova` — a decisão não foi gravada com `time.confirm` |
+| a operação `time.confirm` aceita uma hora | `tempo: confirmar so com prova` — a hora digitada não foi recusada |
+| a operação `time.confirm` diz que confirmou | o mesmo caso — sem salto pendente, fez alguma coisa |
+| um comando comum exige `time.confirm` | as invariantes: `Permissao::TimeConfirm` fora da operação administrativa |
+| `decidir`: o `sistema` pode tudo | `a_matriz_aprovada`, `o_fs_write_do_sistema_e_so_a_linha`, `caminho_sem_alcance_nao_e_tudo_na_decisao` e mais dois |
+| o serviço com o papel do sistema aceito | `o_servico_nao_herda_o_sistema`, `o_tempo_nao_herda_o_sistema` |
+| o serviço decide pelo papel local, o do sistema | `tempo: o servico pede pelo gate`, `tempo: o servico nao e o sistema` |
+| sem a linha `servico`, o papel local | `tempo: o servico nao e o sistema` — sem a linha, decidiu por algum papel |
+| o `tempo` da imagem inclui o `sistema` | `o_tempo_nao_herda_o_sistema`, `o_servico_de_hora_decide_pelo_papel_tempo`, `o_tempo_da_imagem_e_coerente` e mais dois, e as invariantes |
+| quórum de uma chave; quórum sem mínimo | `quorum_abaixo_de_dois_e_recusado` |
+| quórum sem máximo | `quorum_maior_que_as_fontes_so_confere` |
+| k acima das fontes move o relógio | o mesmo teste e `o_tempo_da_imagem_e_coerente` |
+| a chave de ordem pequena; o hexadecimal maiúsculo | `chaves_invalidas` |
+| o destino TCP | `destinos` |
+| **o destino fora da forma normal** | **sobreviveu** — equivalente: o `endereco::ler` da política só lê a forma normal, e a conferência do registro repete a dele |
+| o nome, o destino ou a chave repetidos (três) | `repetidos` |
+| sem fontes | `a_forma_das_linhas` |
+| sem quórum | `sem_quorum_e_recusado` |
+| os tetos de `salto` e de `incerteza` — o teto exclusivo, sem teto, abaixo do raio (quatro) | `os_tetos_nos_limites` (e `o_registro_da_bancada`) |
+| os parâmetros sem o teto do salto | `os_tetos_nos_limites` |
+| a coerência sem `time.sync` | `a_coerencia_segue_a_politica_de_agora`, `um_papel_que_nao_conecta` |
+| a coerência pelo `net.send` | `coerente_com_a_padrao`, `fonte_sem_destino_na_politica`, `o_tempo_da_imagem_e_coerente` e mais um |
+| a coerência ignora os destinos | `fonte_sem_destino_na_politica`, `a_coerencia_segue_a_politica_de_agora`, `o_tempo_da_imagem_e_coerente` |
+| um balde para todos os serviços | `tempo: cada servico tem o seu balde` — o de hora gastou a ficha do NSF |
+| o serviço sem balde próprio | o mesmo caso e `tempo: o servico nao e o sistema` |
+| o comando `time.request` sem conferir o registro | `tempo: o servico pede pelo gate` — uma fonte fora do registro existiu |
+| o comando `time.sync` sem conferir o anexo | as invariantes: `attachment` declarado e nunca lido |
+| a mesma, lendo o `attachment` | `tempo: nenhum caminho cria autoridade` — o anexo que não confere foi aceito |
+| o boot sem o registro | `tempo: o registro do boot`, `tempo: o servico pede pelo gate` |
+| o registro dá a primeira fonte a qualquer nome | `tempo: o servico pede pelo gate` |
+| a imagem sem a coerência, com k acima das fontes, com destino a mais no `tempo`, com `time.sync` em qualquer papel, com `time.confirm` fora do administrador (cinco) | `o_tempo_da_imagem_e_coerente` |
+| a lista das chamadas protegidas deixa `time.confirm` nos comandos | as invariantes — acusam a lista que não confere nada |
+
 ## O código de fora da imagem
 
 O código da imagem roda porque é da imagem: veio com o kernel, com a
@@ -5296,10 +5522,13 @@ o sistema e a tela, e não lê arquivos; `operador` observa e age — a tela,
 programas de `/bin` e `/programas`, arquivos de `/dados`, `/bin` e
 `/programas`; `sistema` é a autoridade máxima — a da serial e dos
 processos do sistema; `administrador` é o teto do que um
-administrador delega. Um papel pode incluir outro (`@observador`), mas as
+administrador delega. E os dos serviços, pela linha `servico`: `seguranca`,
+do tecido de segurança, e `tempo`, do serviço de hora — ver
+[O tecido de segurança](#o-tecido-de-segurança) e [O tempo](#o-tempo). Um
+papel pode incluir outro (`@observador`), mas as
 permissões **sensíveis** — `fs.read`, `fs.raw_read`, `keyboard.read`,
-`debug.trigger`, `terminal.attach`, as administrativas — não atravessam a
-inclusão: cada papel que as tem as escreve. Não há curinga: `*` é um erro de
+`debug.trigger`, `terminal.attach`, `time.sync`, as administrativas — não
+atravessam a inclusão: cada papel que as tem as escreve. Não há curinga: `*` é um erro de
 leitura. Quatro agentes ou quatrocentos, a política continua do tamanho dos
 papéis.
 
@@ -5375,8 +5604,8 @@ Duke duas trocas Diffie-Hellman, e quem não tem chave registrada pode
 pedi-los à vontade.
 
 **Administrar: prova e papel, os dois.** As operações administrativas —
-`agent.register`, `agent.revoke`, `policy.assign`, `policy.write`, e as de
-pessoas (ver adiante) — só
+`agent.register`, `agent.revoke`, `policy.assign`, `policy.write`, as de
+pessoas (ver adiante) e `time.confirm` — só
 existem dentro de `admin.execute`, depois da prova do administrador; e a
 prova não basta: o papel do administrador, na política, precisa ter a
 permissão. Ele é o **teto** do que o administrador delega:
