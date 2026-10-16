@@ -17,7 +17,9 @@
 //! - [`intervalo`]: a amostra como intervalo no instante da chegada;
 //! - [`quorum`]: o acordo de pelo menos duas chaves sobre os intervalos;
 //! - [`disciplina`]: o relógio civil — o ajuste gradual, o salto, o salto
-//!   pendente e os estados.
+//!   pendente e os estados;
+//! - [`registro`]: as fontes em que se confia — `/etc/duke/tempo` —, o
+//!   quórum e os tetos, e a coerência deles com a política.
 //!
 //! # O protocolo, e de onde vem o que se sabe dele
 //!
@@ -66,6 +68,7 @@ pub mod moldura;
 pub mod pedido;
 pub mod pedidos;
 pub mod quorum;
+pub mod registro;
 pub mod resposta;
 
 #[cfg(test)]

@@ -11,6 +11,10 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 ed25519-dalek = { version = "3.0.0", default-features = false }
 sha2 = { version = "0.11.0", default-features = false }
+# O registro de fontes confere-se contra a política: o destino de cada fonte
+# na forma normal dela, e a decisão de `net.connect` pela mesma conta do
+# gate. Só o registro a usa.
+politica = { path = "../politica" }
 
 # A aritmética da curva, só para os casos que montam uma chave fraca de
 # propósito — a mesma versão que o `ed25519-dalek` já traz.

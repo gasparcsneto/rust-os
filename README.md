@@ -532,6 +532,9 @@ hora/src/            a hora como conta pura: o Roughtime da RFC 10049, versão 1
 ├── disciplina.rs    o relógio civil: o ajuste gradual, o salto em duas rodadas, o teto, o salto pendente e os estados
 ├── disciplina/
 │   └── testes.rs    o relógio atrasado, o adiantado, o salto, a perda e a volta das fontes, e a monotonicidade por sorteio
+├── registro.rs      `/etc/duke/tempo`: as fontes em que se confia, o quórum de pelo menos duas chaves e os tetos — um erro recusa o registro inteiro —, e a coerência com a política
+├── registro/
+│   └── testes.rs    k = 0, k = 1, k acima das fontes, a chave que não serve, o destino que não é UDP, a fonte sem destino na política
 └── servidor_de_teste.rs  só nos testes: um servidor que responde como a versão 1 — ou, de propósito, de outro jeito
 
 aparencia/src/       a linguagem visual, dos dois lados da fronteira
