@@ -4967,7 +4967,7 @@ o que é grande anda em caixa — a rodada mora numa do começo ao fim, o
 fechamento a leva consigo, a entrega devolve só a fonte —, e o fio do
 serviço orquestra em passos pequenos, um quadro de cada vez. Um caso da
 suíte mede a marca d'água da pilha de um fio novo que faz a rodada inteira,
-e exige folga de um quarto: no perfil de depuração, 41 704 bytes dos
+e exige folga de um quarto: no perfil de depuração, 42 048 bytes dos
 61 440 no x86 e 42 896 no ARM — 68% e 70%.
 
 ### O que a suíte, a fumaça e a bancada conferem
@@ -5046,10 +5046,11 @@ objeto `time`.
 
 O que o tempo custa por conta própria: a régua do x86 mede o TSC no boot
 por um décimo de segundo — mais, se a primeira medida passar de 200 ppm —;
-uma rodada honesta de três fontes, pelo gate, leva de 80 a 110 ms em
-release, nas duas arquiteturas (de 170 a 250 ms na depuração); a
-conferência de uma resposta — as duas assinaturas Ed25519, o Merkle e o
-encadeamento —, de 3 a 5 ms em média, em release; a rodada inteira num
+uma rodada honesta de três fontes, pelo gate, leva de 80 a 120 ms em
+release nas suítes inteiras, nas duas arquiteturas (de 170 a 260 ms na
+depuração); a conferência de uma resposta — as duas assinaturas Ed25519,
+o Merkle e o encadeamento —, de 3 a 9 ms em média, em release, e é só
+conta: o que varia entre as execuções é a máquina; a rodada inteira num
 fio, 18–19 KiB da pilha em release e 41–42 KiB na depuração, dos 60 KiB.
 E o fio do serviço não custa nada parado: bloqueado, não ocupa núcleo
 nenhum entre as rodadas.
