@@ -72,7 +72,8 @@ impl Balde {
     }
 }
 
-/// Uma janela de apertos de mão: no máximo `quantos` a cada `janela_ms`.
+/// Uma janela de apertos de mão: no máximo `quantos` a cada `janela_ms`,
+/// contados a partir do primeiro aperto da janela.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Janela {
     inicio_ms: u64,
@@ -87,8 +88,15 @@ impl Janela {
     };
 
     /// Conta um aperto. Verdadeiro se ele cabe na janela.
+    ///
+    /// Uma janela vazia começa no aperto que ela conta, e não no zero do
+    /// relógio. Antes, a primeira janela de uma tabela nova acabava no
+    /// `janela_ms` do boot: contada pela primeira vez aos 59,6 s, uma janela
+    /// de um minuto acabava aos 60 s, e a rajada que atravessava o minuto
+    /// ganhava uma janela nova no meio — o sexto login seguido de um console
+    /// entrava.
     pub fn contar(&mut self, limite: crate::arquivo::Apertos, agora_ms: u64) -> bool {
-        if agora_ms.saturating_sub(self.inicio_ms) >= limite.janela_ms {
+        if self.contados == 0 || agora_ms.saturating_sub(self.inicio_ms) >= limite.janela_ms {
             self.inicio_ms = agora_ms;
             self.contados = 0;
         }
@@ -177,5 +185,22 @@ mod testes {
         assert!(j.contar(limite, 10));
         assert!(!j.contar(limite, 20));
         assert!(j.contar(limite, 1000));
+    }
+
+    #[test]
+    fn a_janela_comeca_no_primeiro_aperto() {
+        // A rajada de logins que atravessa o primeiro minuto do boot: a
+        // janela é a dela, e não a que acabaria aos 60 s.
+        let limite = Apertos {
+            quantos: 5,
+            janela_ms: 60_000,
+        };
+        let mut j = Janela::NOVA;
+        for agora in [59_590, 60_020, 60_770, 61_190, 61_600] {
+            assert!(j.contar(limite, agora));
+        }
+        assert!(!j.contar(limite, 62_100));
+        assert!(!j.contar(limite, 119_589));
+        assert!(j.contar(limite, 119_590));
     }
 }
