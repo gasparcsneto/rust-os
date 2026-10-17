@@ -775,7 +775,12 @@ pub fn init() {
     for i in 0..xhci.dispositivos.len() {
         xhci.pendurar_relatorios(i);
     }
-    *XHCI.lock() = Some(xhci);
+    // Com as interrupções mascaradas, como toda trava (ver `crate::trava`):
+    // o tique colhe os relatórios por esta mesma trava — ver [`colher`] —, e
+    // um tique que caísse aqui, com ela na mão, esperaria por si mesmo. O
+    // boot parava depois do último dispositivo, com o canal do agente mudo:
+    // foi assim que uma fumaça com teclado USB parou no CI do x86.
+    crate::arch::sem_interrupcoes(|| *XHCI.lock() = Some(xhci));
 }
 // ---------------------------------------------------------------------------
 // O dispositivo
