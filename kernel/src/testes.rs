@@ -42836,10 +42836,51 @@ fn irq_o_virtio_interrompe_de_verdade() -> Resultado {
 /// interrompeu lê zero. O teste força tráfego de **um** deles e confere que o
 /// outro não foi creditado.
 ///
-/// No ARM as linhas são separadas e o caso passa trivialmente. Ele vale
-/// mesmo assim: a atribuição é do código comum, e um dia o ARM também terá
-/// dois dispositivos no mesmo pino.
+/// No ARM os dois também dividem uma linha: no PCI do emulador, o pino de
+/// cada um cai na mesma — a 36, na máquina da suíte —, e o caso vale nas
+/// duas arquiteturas.
+///
+/// # A rede que trabalha sem ninguém pedir
+///
+/// O caso supunha a rede parada enquanto o disco lê, e ela não fica. Uma
+/// conexão que o firewall cortou no meio — a de `http2: o firewall no meio
+/// das correntes`, com o servidor HTTP da bancada — não se fecha do outro
+/// lado: o fecho do kernel é barrado na saída, como a regra manda, e o
+/// servidor retransmite o que mandou por último, com intervalos que crescem
+/// até doze segundos, por minutos. Cada quadro desses entra sem fluxo e é
+/// descartado, mas interrompe de verdade, e o crédito é da rede. A suíte do
+/// ARM pelo firmware reprovou assim no CI, com um deles na janela da
+/// leitura: o crédito estava certo, e a premissa, errada.
+///
+/// O que o caso confere é o resto: numa janela em que a placa não mandou nem
+/// recebeu quadro nenhum, a rede não ganha crédito pela interrupção do disco.
+/// Os contadores da placa contam antes do firewall — o quadro descartado
+/// também conta —, e a contagem cobre a janela com folga dos dois lados: a
+/// conclusão de um quadro que saiu logo antes chega antes dela, e um quadro
+/// que chegou nela é colhido depois. Uma janela em que a rede trabalhou não
+/// decide nada, e o caso tenta outra.
 fn irq_linha_compartilhada_nao_confunde() -> Resultado {
+    for _ in 0..JANELAS_DA_LINHA_COMPARTILHADA {
+        if uma_janela_da_linha_compartilhada()? {
+            return Ok(());
+        }
+    }
+    Err("a rede trabalhou em todas as janelas")
+}
+
+/// Quantas janelas o caso da linha compartilhada tenta. Com um quadro
+/// perdido a cada doze segundos, a chance de todas terem um é desprezível.
+const JANELAS_DA_LINHA_COMPARTILHADA: usize = 5;
+
+/// Uma leitura do disco e o crédito da rede nela: verdadeiro se a janela
+/// decide — a rede parada e sem crédito —, falso se a rede trabalhou nela.
+fn uma_janela_da_linha_compartilhada() -> Result<bool, &'static str> {
+    let quadros = || crate::virtio::net::com_a_placa(|p| p.contadores());
+    let quadros_antes = quadros();
+    // A conclusão de um quadro que saiu logo antes interrompe aqui, fora da
+    // janela.
+    esperar_ms(100);
+
     let Some(rede_antes) = crate::virtio::avisos_de("rede") else {
         return Err("a rede nao registrou interrupcao");
     };
@@ -42866,20 +42907,31 @@ fn irq_linha_compartilhada_nao_confunde() -> Resultado {
         return Err("o disco trabalhou mas nao foi creditado");
     }
 
-    // A rede não transmitiu nada nesse intervalo. Se o contador dela subiu, o
-    // crédito foi dado pela linha e não pelo dispositivo.
     let rede_depois = crate::virtio::avisos_de("rede").unwrap_or(0);
-    if rede_depois != rede_antes {
-        crate::log_error!(
-            "teste",
-            "a rede foi de {} para {} sem transmitir nada",
-            rede_antes,
-            rede_depois
-        );
-        return Err("a interrupcao do disco foi creditada tambem a rede");
+    if rede_depois == rede_antes {
+        return Ok(true);
+    }
+    // Um quadro que chegou na janela só é contado quando o fio da rede o
+    // colhe, um pouco depois.
+    let prazo = crate::tempo::uptime_ms().saturating_add(500);
+    while quadros() == quadros_antes && crate::tempo::uptime_ms() < prazo {
+        crate::fios::ceder();
+    }
+    let quadros_depois = quadros();
+    if quadros_depois != quadros_antes {
+        return Ok(false);
     }
 
-    Ok(())
+    // A rede não mandou nem recebeu nada nesse intervalo. Se o contador dela
+    // subiu, o crédito foi dado pela linha e não pelo dispositivo.
+    crate::log_error!(
+        "teste",
+        "a rede foi de {} para {} sem mandar nem receber nada ({:?} quadros)",
+        rede_antes,
+        rede_depois,
+        quadros_depois
+    );
+    Err("a interrupcao do disco foi creditada tambem a rede")
 }
 
 /// Roda todos os casos e encerra o emulador com o veredito.
