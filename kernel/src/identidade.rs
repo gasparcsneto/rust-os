@@ -456,21 +456,11 @@ fn ler_fontes_de_hora() -> Option<hora::registro::Registro> {
     }
 }
 
-/// A fonte de hora com este nome, se o registro a tem. Fora do registro,
-/// ou sem registro, nenhuma: não há fonte por omissão.
-pub fn fonte_de_hora(nome: &str) -> Option<hora::registro::Fonte> {
-    crate::arch::sem_interrupcoes(|| {
-        IDENTIDADE
-            .lock()
-            .fontes_de_hora
-            .as_ref()
-            .and_then(|r| r.fonte_de_nome(nome).map(|(_, f)| *f))
-    })
-}
-
-/// O registro de fontes de hora, se há um.
-pub fn fontes_de_hora() -> Option<hora::registro::Registro> {
-    crate::arch::sem_interrupcoes(|| IDENTIDADE.lock().fontes_de_hora)
+/// O registro de fontes de hora, se há um. Em caixa: ele tem perto de
+/// 1 KiB, e quem o pede está às vezes no fundo do despacho do gate, numa
+/// pilha de fio — ver a pilha em `crate::hora::rodada`.
+pub fn fontes_de_hora() -> Option<alloc::boxed::Box<hora::registro::Registro>> {
+    crate::arch::sem_interrupcoes(|| IDENTIDADE.lock().fontes_de_hora.map(alloc::boxed::Box::new))
 }
 
 /// Troca o registro de fontes de hora, e devolve o de antes — a suíte põe

@@ -2849,19 +2849,61 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
         "Servico::Nsf",
         &["kernel/src/autorizacao.rs", "kernel/src/seguranca.rs"],
     ),
-    // O serviço de hora (ver `hora::registro`): por enquanto, só o gate o
-    // conhece — o fio dele é do passo seguinte. `time.sync` só se exige
-    // pelos dois comandos dela, e `time.confirm` só pela operação
+    // O serviço de hora (ver `hora::registro` e `kernel/src/hora`): o gate
+    // o conhece pelo nome, o fio dele nasce e fala como ele, e a tabela de
+    // pedidos separa a dele — mais ninguém se diz o serviço. `time.sync` só
+    // se exige pelos dois comandos dela, e `time.confirm` só pela operação
     // administrativa, com prova: nenhum comando comum a exerce.
-    ("Servico::Hora", &["kernel/src/autorizacao.rs"]),
+    (
+        "Servico::Hora",
+        &[
+            "kernel/src/autorizacao.rs",
+            "kernel/src/hora/rodada.rs",
+            "kernel/src/hora/servico.rs",
+        ],
+    ),
     ("Permissao::TimeSync", &["kernel/src/agent/commands.rs"]),
     (
         "Permissao::TimeConfirm",
         &["kernel/src/agent/administracao.rs"],
     ),
+    // Os tratadores de hora só pelos handlers, depois do gate: o pedido e a
+    // entrega pelos de `time.request` e `time.sync`, a confirmação pela
+    // operação administrativa, com prova. E o civil só se move por eles: o
+    // desfecho de uma rodada e o salto pendente, de dentro do módulo, e
+    // nenhum outro caminho — nem uma hora digitada, nem o NSF. O RTC só se
+    // lê pelo civil, que o relê no máximo uma vez por segundo.
+    ("hora::pedir(", &["kernel/src/agent/commands.rs"]),
+    ("hora::entregar(", &["kernel/src/agent/commands.rs"]),
+    ("hora::confirmar(", &["kernel/src/agent/administracao.rs"]),
+    ("civil::rodada(", &["kernel/src/hora/mod.rs"]),
+    ("civil::confirmar(", &["kernel/src/hora/mod.rs"]),
+    (
+        "relogio::agora(",
+        &["kernel/src/hora/mod.rs", "kernel/src/hora/civil.rs"],
+    ),
     (
         "nativo::responder_pelo_kernel(",
         &["kernel/src/seguranca.rs"],
+    ),
+    (
+        "nativo::responder_pelo_kernel_esperando(",
+        &["kernel/src/hora/servico.rs"],
+    ),
+    // Quem descansa a cada interrupção continua pronto, e o núcleo dele não
+    // vai para o ocioso: com mais fios descansando que núcleos, eles se
+    // revezam sem parar, e nenhum núcleo dorme (ver `fios::bloquear_em`).
+    // Os que descansam são estes — o coletor, a rede e o NSF —; o serviço
+    // de hora espera bloqueado, entre as rodadas e na rede, e a bancada de
+    // hora da suíte também. Um fio novo que descanse é uma decisão, e não
+    // um acaso.
+    (
+        "descansar_ate_a_interrupcao()",
+        &[
+            "kernel/src/fios/mod.rs",
+            "kernel/src/rede/pilha.rs",
+            "kernel/src/seguranca.rs",
+        ],
     ),
     ("seguranca::passo(", &[]),
     ("seguranca::iniciar()", &["kernel/src/main.rs"]),
@@ -3144,6 +3186,112 @@ fn conferir_quedas_so_na_bancada(raiz: &Path) -> Result<Vec<String>, String> {
     })?;
     if !achou {
         fora.push("a bancada não pede a feature `quedas`: a conferência está cega".into());
+    }
+    Ok(fora)
+}
+
+/// O servidor de Roughtime de teste (`hora::servidor_de_teste`, a feature
+/// `servidor` do pacote `hora`) é só da suíte: a feature `modo-teste` do
+/// kernel é a única que o pede, e nenhum outro manifesto do projeto o
+/// tem. Num kernel de produção ele seria um assinador de respostas com
+/// sementes de teste fixas. Devolve o que contraria isso.
+fn conferir_servidor_de_hora_so_na_suite(raiz: &Path) -> Result<Vec<String>, String> {
+    const MANIFESTOS: [&str; 18] = [
+        "Cargo.toml",
+        "ancora/Cargo.toml",
+        "aparencia/Cargo.toml",
+        "armazem/Cargo.toml",
+        "diario/Cargo.toml",
+        "hora/Cargo.toml",
+        "http/Cargo.toml",
+        "iniciador/Cargo.toml",
+        "kernel/Cargo.toml",
+        "politica/Cargo.toml",
+        "programas/Cargo.toml",
+        "protocolo/Cargo.toml",
+        "seguranca/Cargo.toml",
+        "sigilo/Cargo.toml",
+        "tipografia/Cargo.toml",
+        "tls/Cargo.toml",
+        "toolkit/Cargo.toml",
+        "xtask/Cargo.toml",
+    ];
+    let mut fora = Vec::new();
+    let mut achou = false;
+    for manifesto in MANIFESTOS {
+        let texto = std::fs::read_to_string(raiz.join(manifesto))
+            .map_err(|e| format!("não foi possível ler {manifesto}: {e}"))?;
+        for (n, linha) in texto.lines().enumerate() {
+            let codigo = linha.split('#').next().unwrap_or("");
+            let pede = codigo.contains("hora/servidor")
+                || (codigo.contains("hora") && codigo.contains("\"servidor\""));
+            if !pede {
+                continue;
+            }
+            if manifesto == "kernel/Cargo.toml" && codigo.trim_start().starts_with("modo-teste") {
+                achou = true;
+            } else {
+                fora.push(format!(
+                    "{manifesto}:{}: o servidor de hora de teste fora da suíte: {}",
+                    n + 1,
+                    linha.trim()
+                ));
+            }
+        }
+    }
+    if !achou {
+        fora.push("a suíte não pede o servidor de hora de teste: a conferência está cega".into());
+    }
+    Ok(fora)
+}
+
+/// Nenhuma decisão de autorização lê o relógio civil nem o lógico (o
+/// desenho do tempo): o gate decide pelo relógio do kernel, que nenhuma
+/// fonte de hora ajusta, e o estado do relógio não concede nem tira nada.
+/// Em `autorizacao.rs`, o lógico só aparece no carimbo de um registro da
+/// auditoria — dentro de `auditar` —, e nada do módulo `hora` nem o RTC é
+/// lido. Devolve o que contraria isso.
+fn conferir_decisao_sem_relogio_civil(raiz: &Path) -> Result<Vec<String>, String> {
+    const ARQUIVO: &str = "kernel/src/autorizacao.rs";
+    let texto = std::fs::read_to_string(raiz.join(ARQUIVO))
+        .map_err(|e| format!("não foi possível ler {ARQUIVO}: {e}"))?;
+    let mut fora = Vec::new();
+    let mut dentro = "";
+    let mut carimbos = 0;
+    for (n, linha) in texto.lines().enumerate() {
+        if let Some(resto) = linha
+            .strip_prefix("fn ")
+            .or(linha.strip_prefix("pub fn "))
+            .or(linha.strip_prefix("pub(crate) fn "))
+        {
+            dentro = resto.split(['(', '<']).next().unwrap_or("");
+        }
+        let codigo = linha.split("//").next().unwrap_or("");
+        if codigo.contains("persistencia::agora") {
+            if dentro == "auditar" {
+                carimbos += 1;
+            } else {
+                fora.push(format!(
+                    "{ARQUIVO}:{}: o tempo lógico fora do carimbo da auditoria, em `{dentro}`: {}",
+                    n + 1,
+                    linha.trim()
+                ));
+            }
+        }
+        for proibido in ["crate::hora::", "civil_s(", "relogio::agora("] {
+            if codigo.contains(proibido) {
+                fora.push(format!(
+                    "{ARQUIVO}:{}: o ponto de decisão lê o relógio civil: {}",
+                    n + 1,
+                    linha.trim()
+                ));
+            }
+        }
+    }
+    if carimbos == 0 {
+        fora.push(format!(
+            "{ARQUIVO}: o carimbo da auditoria não lê o tempo lógico em `auditar`: a conferência está cega"
+        ));
     }
     Ok(fora)
 }
@@ -3496,6 +3644,10 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
     // por fora da conferência, o programa do fio só nasce no carregador, e
     // o kernel não sela nada.
     fora.extend(conferir_codigo_conferido(&raiz)?);
+    // O servidor de Roughtime de teste é só da suíte; e nenhuma decisão lê
+    // o relógio civil nem o lógico.
+    fora.extend(conferir_servidor_de_hora_so_na_suite(&raiz)?);
+    fora.extend(conferir_decisao_sem_relogio_civil(&raiz)?);
     // A chamada legítima tem de existir: uma busca que não acha nem ela
     // está procurando a coisa errada, e passaria por qualquer atalho.
     for ((chamada, donos), quantas) in CHAMADAS_PROTEGIDAS.iter().zip(&achadas) {
@@ -3516,8 +3668,10 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
              o TLS, que é do programa, só verifica pelas âncoras, sem atalho que o desligue; \
              o HTTP, que é do programa, não tem comando, permissão nem caminho até o gate, \
              e a compressão, os cookies e o HTTP/2 dele não chegam ao kernel nem à política; o plano de dados só \
-             sai da taxa, e só espera pela auditoria, pelo gate; e o \
-             código só vira processo pela conferência única, que o kernel faz e não sela"
+             sai da taxa, e só espera pela auditoria, pelo gate; o \
+             código só vira processo pela conferência única, que o kernel faz e não sela; e \
+             a hora só anda pelos tratadores de time.sync e time.confirm, depois do gate, com \
+             o servidor de teste só na suíte"
         );
         Ok(ExitCode::SUCCESS)
     } else {
@@ -9749,16 +9903,26 @@ fn esperar_vagas_tcp_livres(
 /// suíte confere por dentro, decidida pelo mesmo gate para quem chega pela
 /// serial e pelas portas.
 ///
-/// - a serial — o papel `sistema`, que tem `time.sync` — pede o pedido de
-///   uma fonte do registro e passa pelo gate; o pedido mesmo é do serviço
-///   de hora, que ainda não está no kernel: `TIME_UNAVAILABLE`. A fonte
-///   fora do registro e a entrega sem pedido aberto não existem;
+/// A bancada da fumaça não tem servidor de hora — o do `xtask` é da
+/// bancada de tempo, o passo seguinte —: os pedidos saem de verdade para
+/// os destinos do registro, e nenhuma resposta volta. Assim:
+///
+/// - a serial — o papel `sistema`, que tem `time.sync` — faz uma rodada
+///   inteira pelo gate: o pedido v1 de cada fonte do registro, na ordem, e
+///   a entrega sem resposta de cada uma. A rodada fecha sem acordo, e o
+///   civil fica no RTC. A fonte fora do registro, a fonte fora da ordem, a
+///   segunda fonte com a primeira em aberto e a entrega sem pedido aberto
+///   são recusadas;
 /// - o operador de uma porta, sem `time.sync`, é recusado nas duas;
+/// - o `system.info time` diz o estado, o civil e o lógico, as fontes e as
+///   rodadas — a da serial e as do serviço de hora, que fala só pelo gate —,
+///   e nenhum pedido;
 /// - `time.confirm` não é comando; com a prova do administrador é
 ///   decidido e não acha salto pendente — `CONFLICT` —, e uma hora digitada
 ///   é recusada, e não ignorada;
-/// - cada decisão vai à auditoria com o titular e o papel, e a política é a
-///   mesma no fim.
+/// - cada decisão vai à auditoria com o titular e o papel — as do serviço
+///   de hora também, como `service` no papel `tempo` —, com o desfecho da
+///   rodada; e a política é a mesma no fim.
 fn sob_o_tempo(
     arch: Arquitetura,
     escrita: &mut UnixStream,
@@ -9772,23 +9936,84 @@ fn sob_o_tempo(
     let resultado = |r: &str| apos(r, r#""result":"#).map(str::to_string);
     let politica_antes =
         resultado(&pedir("policy.show", "{}")?).ok_or("tempo: policy.show sem resultado")?;
+    let inicio: u64 = campo_simples(&pedir("audit.head", "{}")?, "seq")
+        .and_then(|v| v.parse().ok())
+        .ok_or("tempo: audit.head sem seq")?;
 
-    let r = pedir("time.request", r#"{"source":"bancada-a"}"#)?;
-    if !r.contains(r#""code":"TIME_UNAVAILABLE""#) || !r.contains(r#""to":"udp:10.0.2.2:5319""#) {
-        return Err(format!(
-            "tempo: a serial nao pediu pelo gate a fonte do registro\n  {r}"
-        ));
+    for (params, o_que) in [
+        (
+            r#"{"source":"intrusa"}"#,
+            "uma fonte fora do registro existiu",
+        ),
+        (
+            r#"{"source":"bancada-b"}"#,
+            "uma rodada comecou fora da primeira fonte do registro",
+        ),
+    ] {
+        let r = pedir("time.request", params)?;
+        if !r.contains(r#""code":"INVALID_REQUEST""#) {
+            return Err(format!("tempo: {o_que}\n  {r}"));
+        }
     }
-    let r = pedir("time.request", r#"{"source":"intrusa"}"#)?;
-    if !r.contains(r#""code":"INVALID_REQUEST""#) {
-        return Err(format!("tempo: uma fonte fora do registro existiu\n  {r}"));
-    }
-    let r = pedir("time.sync", r#"{"id":1}"#)?;
+    let r = pedir("time.sync", r#"{"id":999999999}"#)?;
     if !r.contains(r#""code":"INVALID_REQUEST""#) {
         return Err(format!(
             "tempo: uma entrega sem pedido aberto foi aceita\n  {r}"
         ));
     }
+    // Uma rodada inteira, na ordem do registro: o pedido de verdade — 1024
+    // bytes, em base64 —, e a entrega sem resposta.
+    let mut rodada = None;
+    for (i, (fonte, destino)) in chaves::FONTES_DE_HORA.iter().enumerate() {
+        let r = pedir("time.request", &format!(r#"{{"source":"{fonte}"}}"#))?;
+        // Os campos do resultado, e não do envelope: o `id` do envelope é o
+        // do JSON-RPC, e não o do pedido de hora.
+        let dentro = apos(&r, r#""result":"#).unwrap_or("");
+        let pedido = campo_simples(dentro, "request").unwrap_or_default();
+        let numero = campo_simples(dentro, "id").and_then(|v| v.parse::<u64>().ok());
+        let desta = campo_simples(dentro, "round").and_then(|v| v.parse::<u64>().ok());
+        let (Some(numero), Some(desta)) = (numero, desta) else {
+            return Err(format!("tempo: a serial nao pediu a fonte {fonte}\n  {r}"));
+        };
+        if !r.contains(&format!(r#""to":"{destino}""#)) || pedido.len() != 1368 {
+            return Err(format!(
+                "tempo: o pedido para {fonte} nao saiu para {destino} com 1024 bytes\n  {r}"
+            ));
+        }
+        if *rodada.get_or_insert(desta) != desta {
+            return Err(format!("tempo: a fonte {fonte} caiu noutra rodada\n  {r}"));
+        }
+        if let Some((proxima, _)) = chaves::FONTES_DE_HORA.get(i + 1) {
+            let r = pedir("time.request", &format!(r#"{{"source":"{proxima}"}}"#))?;
+            if !r.contains(r#""code":"INVALID_REQUEST""#) {
+                return Err(format!(
+                    "tempo: a fonte {proxima} foi pedida com a anterior em aberto\n  {r}"
+                ));
+            }
+        }
+        let r = pedir("time.sync", &format!(r#"{{"id":{numero}}}"#))?;
+        if !r.contains(r#""verdict":"sem_resposta""#) {
+            return Err(format!(
+                "tempo: a entrega sem resposta de {fonte} nao foi o veredito sem_resposta\n  {r}"
+            ));
+        }
+        let ultima = i + 1 == chaves::FONTES_DE_HORA.len();
+        if ultima
+            && !(r.contains(r#""outcome":"sem_quorum""#)
+                && r.contains(r#""effect":"sem_acordo""#)
+                && r.contains(r#""state_after":"rtc""#))
+        {
+            return Err(format!(
+                "tempo: a rodada sem resposta nenhuma nao fechou sem acordo, no RTC\n  {r}"
+            ));
+        }
+        if !ultima && !r.contains(r#""closed":false}"#) {
+            return Err(format!(
+                "tempo: a rodada fechou antes da ultima fonte\n  {r}"
+            ));
+        }
+    }
+    let rodada = rodada.unwrap_or_default();
     let mut operador = AgenteNaPorta::conectar(arch, 2)?;
     for (metodo, params) in [
         ("time.request", r#"{"source":"bancada-a"}"#),
@@ -9803,7 +10028,34 @@ fn sob_o_tempo(
     }
     drop(operador);
     println!(
-        "  [tempo] ok  a serial pede pelo gate a fonte do registro (TIME_UNAVAILABLE: o servico e do passo seguinte); a fonte de fora e a entrega sem pedido nao existem; o operador, sem time.sync, e recusado"
+        "  [tempo] ok  a serial faz uma rodada pelo gate: o pedido v1 de cada fonte do registro, na ordem, e a entrega sem resposta; sem servidor de hora na bancada, a rodada fecha sem acordo e o civil fica no RTC; fonte de fora, fora da ordem, com a anterior aberta e entrega sem pedido sao recusadas; o operador, sem time.sync, tambem"
+    );
+
+    // O `system.info time`: o estado, o civil, o lógico, as fontes e as
+    // rodadas — nenhum pedido, nenhum nonce.
+    let info = pedir("system.info", "{}")?;
+    let tempo = apos(&info, r#""time":{"#)
+        .ok_or_else(|| format!("tempo: o system.info nao diz o tempo\n  {info}"))?;
+    let tempo = &tempo[..tempo.find(r#""verify_ns""#).unwrap_or(tempo.len())];
+    let numero = |nome: &str| campo_simples(tempo, nome).and_then(|v| v.parse::<u64>().ok());
+    let regua = match arch {
+        Arquitetura::X86_64 => "calibrated",
+        Arquitetura::Aarch64 => "declared",
+    };
+    if campo_simples(tempo, "state").as_deref() != Some("rtc")
+        || !tempo.contains(r#""sources":{"registered":3,"quorum":2,"moves_clock":true}"#)
+        || numero("lost").is_none_or(|n| n < 1)
+        || numero("logical").is_none_or(|l| l * 1000 + 1000 < numero("civil_ms").unwrap_or(0))
+        || !tempo.contains(&format!(r#""source":"{regua}""#))
+        || tempo.contains(r#""request":"#)
+        || tempo.contains("nonce")
+    {
+        return Err(format!(
+            "tempo: o system.info time nao diz o estado, as fontes, a rodada perdida e a regua {regua}, ou diz um pedido\n  {tempo}"
+        ));
+    }
+    println!(
+        "  [tempo] ok  system.info time: rtc, 3 fontes com quorum 2, rodadas perdidas contadas, regua {regua}; nenhum pedido"
     );
 
     let r = pedir("time.confirm", "{}")?;
@@ -9829,10 +10081,30 @@ fn sob_o_tempo(
         "  [tempo] ok  time.confirm nao e comando; com a prova do administrador, CONFLICT: nenhum salto pendente; uma hora digitada, INVALID_ARGUMENT"
     );
 
-    // Cada decisão, gravada como foi.
-    let cauda = pedir("audit.tail", r#"{"count":64}"#)?;
-    let registros =
-        objetos_planos(apos(&cauda, r#""records":["#).ok_or("tempo: audit.tail sem registros")?)?;
+    // Cada decisão, gravada como foi — as desta sonda e as do serviço de
+    // hora, que roda as dele desde o boot —, lida em páginas desde o começo
+    // até a cabeça de agora: cada `audit.tail` também é gravado, e quem
+    // lesse até a página vazia nunca chegaria lá.
+    let fim: u64 = campo_simples(&pedir("audit.head", "{}")?, "seq")
+        .and_then(|v| v.parse().ok())
+        .ok_or("tempo: audit.head sem seq")?;
+    let mut registros = Vec::new();
+    let mut depois = inicio;
+    while depois < fim {
+        let cauda = pedir("audit.tail", &format!(r#"{{"count":64,"after":{depois}}}"#))?;
+        let pagina = objetos_planos(
+            apos(&cauda, r#""records":["#).ok_or("tempo: audit.tail sem registros")?,
+        )?;
+        let Some(ultimo) = pagina
+            .last()
+            .and_then(|r| r.iter().find(|(n, _)| n == "seq"))
+            .and_then(|(_, v)| v.as_deref()?.parse::<u64>().ok())
+        else {
+            break;
+        };
+        depois = ultimo;
+        registros.extend(pagina);
+    }
     let campo = |r: &ObjetoPlano, nome: &str| {
         r.iter()
             .find(|(n, _)| n == nome)
@@ -9863,10 +10135,64 @@ fn sob_o_tempo(
     {
         return Err("tempo: o desfecho do time.confirm nao foi gravado".into());
     }
+    // O desfecho da rodada da serial: o civil e o lógico, o estado, e o
+    // número da rodada no detalhe.
+    let marca = format!("r{rodada} sem_quorum");
+    if !registros.iter().any(|r| {
+        campo(r, "method") == "time.sync"
+            && campo(r, "holder") == "serial"
+            && campo(r, "resource").starts_with("civil ")
+            && campo(r, "resource").contains(" rtc>rtc")
+            && campo(r, "detail").contains(&marca)
+    }) {
+        return Err(format!(
+            "tempo: o desfecho da rodada {rodada} da serial nao foi gravado"
+        ));
+    }
+    // O serviço de hora fala pelo gate, como ele mesmo: `service`, no
+    // papel `tempo`. Com as fontes caladas, ele faz uma rodada a cada 64 s
+    // no máximo, e esta sonda inteira cabe entre duas: espera a seguinte,
+    // lendo a auditoria de onde parou — a rodada mais o intervalo, com
+    // folga.
+    let do_servico = |r: &ObjetoPlano| {
+        campo(r, "method") == "time.request"
+            && campo(r, "holder") == "service"
+            && campo(r, "agent") == "hora"
+            && campo(r, "role") == "tempo"
+            && campo(r, "code") == "ALLOW"
+    };
+    let prazo = Instant::now() + Duration::from_secs(100);
+    while !registros.iter().any(do_servico) {
+        if Instant::now() > prazo {
+            return Err("tempo: a auditoria nao tem o servico de hora pedindo pelo gate".into());
+        }
+        std::thread::sleep(Duration::from_secs(2));
+        loop {
+            let cauda = pedir("audit.tail", &format!(r#"{{"count":64,"after":{depois}}}"#))?;
+            let pagina = objetos_planos(
+                apos(&cauda, r#""records":["#).ok_or("tempo: audit.tail sem registros")?,
+            )?;
+            let Some(ultimo) = pagina
+                .last()
+                .and_then(|r| r.iter().find(|(n, _)| n == "seq"))
+                .and_then(|(_, v)| v.as_deref()?.parse::<u64>().ok())
+            else {
+                break;
+            };
+            depois = ultimo;
+            let cheia = pagina.len() == 64;
+            registros.extend(pagina);
+            if !cheia {
+                break;
+            }
+        }
+    }
     if resultado(&pedir("policy.show", "{}")?) != Some(politica_antes) {
         return Err("tempo: um pedido de hora mudou a politica".into());
     }
-    println!("  [tempo] ok  cada decisao gravada com o titular e o papel; a politica, a mesma");
+    println!(
+        "  [tempo] ok  cada decisao gravada com o titular e o papel, o desfecho da rodada {rodada} e o servico de hora pelo gate; a politica, a mesma"
+    );
     Ok(())
 }
 

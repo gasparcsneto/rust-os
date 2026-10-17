@@ -522,6 +522,16 @@ pub fn ciclos() -> u64 {
     valor
 }
 
+/// A frequência de [`ciclos`] e o erro máximo dela, em ppm: a que o
+/// firmware declara em `CNTFRQ_EL0` — o contador anda nela, e ninguém a
+/// mede. Zero, que um firmware descuidado deixa, é `None`: sem frequência,
+/// o contador não é régua de nada.
+pub fn frequencia_dos_ciclos() -> Option<(u64, u64)> {
+    use aarch64_cpu::registers::CNTFRQ_EL0;
+    let hz = CNTFRQ_EL0.get();
+    (hz > 0).then_some((hz, 0))
+}
+
 /// O `MPIDR` deste núcleo, só com os campos de afinidade — é como o device
 /// tree e a PSCI o chamam.
 pub fn hardware_deste_nucleo() -> u64 {

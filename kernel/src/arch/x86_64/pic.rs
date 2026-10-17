@@ -236,6 +236,197 @@ pub unsafe fn programar_timer(hz_desejado: u32) -> u32 {
     FREQUENCIA_BASE_PIT / divisor as u32
 }
 
+/// O canal 2 do PIT: o do alto-falante. O canal 0 é o timer; o 2 não tem
+/// outro dono neste kernel, e mede o contador de ciclos — ver
+/// [`calibrar_ciclos`].
+const PIT_CANAL2: u16 = 0x42;
+
+/// A porta B do controlador do sistema: o bit 0 deixa o canal 2 contar (o
+/// "gate"), o 1 liga o alto-falante ao canal.
+const PORTA_B: u16 = 0x61;
+
+/// Quantos clocks do PIT uma medida cobre: um décimo de segundo.
+const CLOCKS_DA_MEDIDA: u64 = FREQUENCIA_BASE_PIT as u64 / 10;
+
+/// A maior lacuna entre duas leituras do canal 2, em clocks do PIT. O
+/// contador tem 16 bits e dá a volta a cada 65536 clocks (55 ms): uma
+/// lacuna desse tamanho — o fio preemptado, o processador emulado sem vez
+/// no hospedeiro — esconde uma volta inteira, e a medida sai errada sem
+/// aviso. Com o teto em 20000, toda lacuna que pode ter escondido uma volta
+/// é recusada (ver [`medir_os_ciclos`]).
+const MAIOR_LACUNA: u64 = 20_000;
+
+/// O maior erro de uma medida que vale, em partes por milhão.
+const MAIOR_ERRO_PPM: u64 = 200;
+
+/// Uma leitura do canal 2: a contagem travada, e o contador de ciclos
+/// logo antes e logo depois da trava.
+#[derive(Clone, Copy)]
+struct LeituraDoCanal2 {
+    antes: u64,
+    depois: u64,
+    contagem: u16,
+}
+
+impl LeituraDoCanal2 {
+    fn meio(&self) -> u64 {
+        self.antes + self.largura() / 2
+    }
+
+    fn largura(&self) -> u64 {
+        self.depois.saturating_sub(self.antes)
+    }
+}
+
+/// # Safety
+///
+/// Portas do PIT, com o canal 2 programado por [`calibrar_ciclos`].
+unsafe fn ler_o_canal2() -> LeituraDoCanal2 {
+    // SAFETY: as portas do PIT; a garantia é de quem chama.
+    unsafe {
+        let antes = super::ciclos();
+        // Trava a contagem do canal 2 (comando `10 00 0000`): os dois bytes
+        // lidos depois são os do instante da trava, e não um de cada
+        // instante.
+        Port::<u8>::new(PIT_COMANDO).write(0x80);
+        let depois = super::ciclos();
+        let mut canal = Port::<u8>::new(PIT_CANAL2);
+        let baixo: u8 = canal.read();
+        let alto: u8 = canal.read();
+        LeituraDoCanal2 {
+            antes,
+            depois,
+            contagem: u16::from_le_bytes([baixo, alto]),
+        }
+    }
+}
+
+/// Uma medida: a frequência do contador de ciclos e o erro máximo dela, em
+/// ppm. `None` se uma lacuna pode ter escondido uma volta do canal 2, ou
+/// se ele não conta.
+///
+/// # Safety
+///
+/// Como [`ler_o_canal2`].
+unsafe fn medir_os_ciclos() -> Option<(u64, u64)> {
+    /// Quantas leituras disputam cada ponta: vale a mais estreita.
+    const PONTAS: usize = 8;
+    // SAFETY: a garantia de quem chama.
+    let ler = || unsafe { ler_o_canal2() };
+    // A partida: a mais estreita de algumas leituras. As que vêm depois
+    // dela entram na conta pela diferença de contagem, como qualquer outra.
+    let mut inicio = ler();
+    for _ in 1..PONTAS {
+        let l = ler();
+        if l.largura() < inicio.largura() {
+            inicio = l;
+        }
+    }
+    let mut anterior = inicio;
+    let mut menor_largura = inicio.largura();
+    let mut clocks = 0u64;
+    let mut maior_lacuna = 0u64;
+    let mut leituras = 0u64;
+    // Até cobrir a medida, e então até uma leitura tão estreita quanto a
+    // melhor já vista — com um teto, para uma ponta larga não segurar o
+    // boot.
+    let mut extras = 0;
+    loop {
+        let l = ler();
+        maior_lacuna = maior_lacuna.max(l.antes.saturating_sub(anterior.depois));
+        // O canal conta para baixo, e dá a volta: a diferença módulo 2^16
+        // é o que ele andou, desde que nenhuma lacuna esconda uma volta.
+        clocks += u64::from(anterior.contagem.wrapping_sub(l.contagem));
+        anterior = l;
+        leituras += 1;
+        if leituras > 100_000_000 {
+            // O canal 2 não conta: nenhuma medida.
+            return None;
+        }
+        if clocks < CLOCKS_DA_MEDIDA {
+            menor_largura = menor_largura.min(l.largura());
+            continue;
+        }
+        if l.largura() <= menor_largura.saturating_mul(2) || extras >= 64 {
+            break;
+        }
+        extras += 1;
+    }
+    let fim = anterior;
+    let ciclos = fim.meio().checked_sub(inicio.meio())?;
+    if ciclos == 0 || clocks == 0 {
+        return None;
+    }
+    // A maior lacuna, em clocks do PIT, pela razão medida: acima do teto
+    // ela pode ter escondido uma volta. Uma que escondeu uma volta faz a
+    // razão sair errada para menos clocks, e ainda assim passa do teto —
+    // a conta está no comentário de `MAIOR_LACUNA`.
+    if u128::from(maior_lacuna) * u128::from(clocks) > u128::from(MAIOR_LACUNA) * u128::from(ciclos)
+    {
+        return None;
+    }
+    let hz = u128::from(ciclos) * u128::from(FREQUENCIA_BASE_PIT) / u128::from(clocks);
+    let hz = u64::try_from(hz).ok().filter(|&h| h > 0)?;
+    // O erro: o instante de cada ponta está dentro da largura dela, e a
+    // contagem do PIT é inteira — um clock de cada lado.
+    let um_clock = hz.div_ceil(u64::from(FREQUENCIA_BASE_PIT));
+    let incerteza = (inicio.largura() + fim.largura()).div_ceil(2) + 2 * um_clock;
+    let erro_ppm = (u128::from(incerteza) * 1_000_000).div_ceil(u128::from(ciclos));
+    Some((hz, u64::try_from(erro_ppm).unwrap_or(u64::MAX)))
+}
+
+/// A frequência do contador de ciclos (o TSC), medida contra o canal 2 do
+/// PIT — o mesmo cristal que calibra o APIC —, e o erro máximo da medida,
+/// em ppm. É a régua do relógio civil: ver `crate::hora::contador`.
+///
+/// # Por que o canal 2, e não os tiques
+///
+/// Porque os tiques se perdem: o emulador junta interrupções do timer
+/// quando o processador emulado fica sem vez no hospedeiro, e o relógio do
+/// kernel anda devagar sem dizer nada. O contador do PIT não perde
+/// contagem — ele é lido, não interrompe —, e cada leitura fica entre duas
+/// leituras do TSC: o instante dela está naquela largura.
+///
+/// Uma medida de um décimo de segundo; até cinco tentativas, e vale a
+/// primeira com erro de até [`MAIOR_ERRO_PPM`]. `None` sem nenhuma — o
+/// civil cai para os tiques, com a deriva deles.
+pub fn calibrar_ciclos() -> Option<(u64, u64)> {
+    const TENTATIVAS: usize = 5;
+    // SAFETY: as portas do PIT e a porta B. O canal 2 e o alto-falante não
+    // têm outro dono neste kernel, e a calibração roda no boot, com um
+    // núcleo só; o canal 0, o do timer, não é tocado — o comando de
+    // programação e o de trava nomeiam o canal 2.
+    unsafe {
+        let mut b = Port::<u8>::new(PORTA_B);
+        let antes: u8 = b.read();
+        // O canal 2 conta; o alto-falante, desligado.
+        b.write((antes & !0x02) | 0x01);
+        espera_io();
+        // Canal 2, dois bytes (baixo e alto), modo 2 (o contador desce e
+        // recarrega), contagem binária — e a contagem 0, que é 65536.
+        Port::<u8>::new(PIT_COMANDO).write(0xB4);
+        espera_io();
+        let mut canal = Port::<u8>::new(PIT_CANAL2);
+        canal.write(0);
+        espera_io();
+        canal.write(0);
+        let mut melhor: Option<(u64, u64)> = None;
+        for _ in 0..TENTATIVAS {
+            let Some(m) = medir_os_ciclos() else {
+                continue;
+            };
+            if melhor.is_none_or(|(_, e)| m.1 < e) {
+                melhor = Some(m);
+            }
+            if m.1 <= MAIOR_ERRO_PPM {
+                break;
+            }
+        }
+        b.write(antes);
+        melhor.filter(|&(_, erro)| erro <= MAIOR_ERRO_PPM)
+    }
+}
+
 /// Sinaliza fim de interrupção para o PIC.
 ///
 /// Obrigatório: sem este aviso o controlador considera a interrupção ainda em

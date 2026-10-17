@@ -919,3 +919,10 @@ pub fn ciclos() -> u64 {
     // vale para o anel 3.
     unsafe { core::arch::x86_64::_rdtsc() }
 }
+
+/// A frequência de [`ciclos`] e o erro máximo dela, em ppm: o x86 não a
+/// declara, e ela é medida contra o PIT — ver [`pic::calibrar_ciclos`].
+/// `None` se a medida não valeu.
+pub fn frequencia_dos_ciclos() -> Option<(u64, u64)> {
+    pic::calibrar_ciclos()
+}

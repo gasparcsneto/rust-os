@@ -1421,9 +1421,48 @@ fn sem_tpm_nada_de_autoridade(arch: Arquitetura, artefato: &Artefato) -> Result<
     ))
 }
 
+/// O objeto `time` do `system.info`: o civil e o lógico, como o kernel os
+/// diz.
+struct Tempo {
+    estado: String,
+    civil_ms: u64,
+    logico: u64,
+    adiantado_ms: u64,
+    marcas: String,
+}
+
+fn tempo_de(maquina: &mut Ligada) -> Result<Tempo, String> {
+    let r = maquina.pedir("system.info", "{}")?;
+    // Os campos do civil vêm antes do primeiro objeto aninhado.
+    let t = super::apos(&r, r#""time":{"#)
+        .and_then(|t| t.split(r#""sources":{"#).next())
+        .ok_or_else(|| format!("o system.info nao diz o tempo\n  {r}"))?;
+    let numero = |n: &str| -> Result<u64, String> {
+        super::campo_simples(t, n)
+            .and_then(|v| v.parse().ok())
+            .ok_or_else(|| format!("o tempo nao diz `{n}`: {t}"))
+    };
+    Ok(Tempo {
+        estado: super::campo_simples(t, "state").unwrap_or_default(),
+        civil_ms: numero("civil_ms")?,
+        logico: numero("logical")?,
+        adiantado_ms: numero("ahead_ms")?,
+        marcas: super::apos(t, r#""marks":["#)
+            .and_then(|m| m.split(']').next())
+            .unwrap_or_default()
+            .to_string(),
+    })
+}
+
 /// O tempo lógico: num boot em 2031 ele está em 2031, e uma operação o
 /// grava; no seguinte, com o RTC em 2024, ele continua em 2031 — o piso
 /// do journal —; no terceiro, com o RTC em 2032, anda.
+///
+/// E o civil, separado: sem fonte de hora que responda — a bancada de
+/// persistência não tem servidor de hora —, ele é o RTC, no estado `rtc`.
+/// No segundo boot o lógico fica no piso, adiantado do civil, e o
+/// `system.info time` o marca `adiantado`, com quanto; no terceiro, o
+/// lógico é o civil, sem marca.
 fn o_relogio_logico_nao_volta(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
     const EM_2031: u64 = 1_936_785_600;
     const EM_2032: u64 = 1_968_408_000; // 2032-05-17 12:00:00
@@ -1449,9 +1488,11 @@ fn o_relogio_logico_nao_volta(arch: Arquitetura, artefato: &Artefato) -> Result<
     let mut m = Ligada::subir(arch, artefato, Some("2024-01-01T00:00:00"))?;
     let rtc = rtc_do_kernel(&mut m)?;
     let b = persistencia_de(&mut m)?.relogio;
+    let tempo_b = tempo_de(&mut m)?;
     m.cortar_a_energia()?;
     let mut m = Ligada::subir(arch, artefato, Some("2032-05-17T12:00:00"))?;
     let c = persistencia_de(&mut m)?.relogio;
+    let tempo_c = tempo_de(&mut m)?;
     m.cortar_a_energia()?;
     if !(EM_2031..EM_2031 + 300).contains(&a) {
         return Err(format!("no boot de 2031 o tempo logico e {a}"));
@@ -1467,7 +1508,36 @@ fn o_relogio_logico_nao_volta(arch: Arquitetura, artefato: &Artefato) -> Result<
     if c < EM_2032 {
         return Err(format!("o tempo logico nao andou com o RTC em 2032: {c}"));
     }
-    Ok(format!("{a} -> {b} (RTC em {rtc}) -> {c}"))
+    // O civil é o RTC, e não o piso; o lógico, no piso, adiantado dele.
+    let civil_b = tempo_b.civil_ms / 1000;
+    if tempo_b.estado != "rtc"
+        || !(rtc..rtc + 300).contains(&civil_b)
+        || tempo_b.logico < a
+        || !tempo_b.marcas.contains(r#""adiantado""#)
+        || tempo_b.adiantado_ms < a.saturating_sub(civil_b + 1) * 1000
+    {
+        return Err(format!(
+            "com o RTC em 2024 e o piso em 2031, o system.info time diz estado {}, civil {} ms, logico {}, adiantado {} ms, marcas [{}]",
+            tempo_b.estado, tempo_b.civil_ms, tempo_b.logico, tempo_b.adiantado_ms, tempo_b.marcas
+        ));
+    }
+    // Com o RTC adiante do piso, o lógico é o civil, sem marca.
+    let civil_c = tempo_c.civil_ms / 1000;
+    if tempo_c.estado != "rtc"
+        || civil_c < EM_2032
+        || tempo_c.logico < civil_c
+        || tempo_c.logico > civil_c + 1
+        || tempo_c.marcas.contains(r#""adiantado""#)
+    {
+        return Err(format!(
+            "com o RTC em 2032, o system.info time diz estado {}, civil {} ms, logico {}, marcas [{}]",
+            tempo_c.estado, tempo_c.civil_ms, tempo_c.logico, tempo_c.marcas
+        ));
+    }
+    Ok(format!(
+        "{a} -> {b} (RTC em {rtc}; o civil no RTC, o logico {} s adiantado) -> {c}",
+        tempo_b.adiantado_ms / 1000
+    ))
 }
 
 /// O signatário guarda a maior geração que assinou: depois de assinar

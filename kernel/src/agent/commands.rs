@@ -277,7 +277,7 @@ pub static COMANDOS: &[Command] = &[
     },
     Command {
         nome: "time.request",
-        resumo: "Pede ao kernel o pedido do Roughtime para uma fonte do registro de fontes de hora (/etc/duke/tempo): o kernel escolhe o nonce e liga o pedido a quem pediu e a fonte. Nao escolhe a hora. O transporte ate a fonte e uma associacao UDP de net.connect, decidida a parte. Fonte fora do registro: INVALID_REQUEST. O servico de hora ainda nao emite pedidos neste kernel: TIME_UNAVAILABLE.",
+        resumo: "Pede ao kernel o pedido do Roughtime (versao 1, 1024 bytes, em base64 em `request`) para uma fonte do registro de fontes de hora (/etc/duke/tempo), e um `id`. O kernel escolhe o nonce - o primeiro do gerador, os seguintes encadeados a ultima resposta aceita da rodada - e liga o pedido a quem pediu (a autoridade decidida, nao o fio), a fonte e a chave fixada dela. Nao escolhe a hora. A rodada comeca pela primeira fonte do registro e segue a ordem dele: a fonte seguinte so depois da entrega da anterior, e pedir de novo a fonte em curso substitui o pedido dela. O transporte ate a fonte e uma associacao UDP de net.connect, decidida a parte. Fonte fora do registro, ou fora da ordem: INVALID_REQUEST.",
         params: &[ParamSpec {
             nome: "source",
             tipo: TipoParam::Texto,
@@ -292,7 +292,7 @@ pub static COMANDOS: &[Command] = &[
     },
     Command {
         nome: "time.sync",
-        resumo: "Entrega ao kernel a resposta que chegou de uma fonte de hora para o pedido `id` de time.request: a resposta inteira, como chegou, no anexo do pedido; sem anexo, o aviso de que ela nao veio. O kernel a confere contra o pedido que ele mesmo emitiu, e so o acordo de pelo menos duas chaves move o relogio civil: quem entrega nao escolhe a hora. Um id que nao e seu nao existe para voce: INVALID_REQUEST.",
+        resumo: "Entrega ao kernel a resposta que chegou de uma fonte de hora para o pedido `id` de time.request: a resposta inteira, como chegou, no anexo do pedido; sem anexo, o aviso de que ela nao veio. O kernel a confere contra o pedido que ele mesmo emitiu - o nonce, a chave fixada da fonte, a folha do pacote -, nunca contra o que quem entrega diz. Uma resposta recusada nao consome o id (ate 4 entregas); a primeira aceita consome; passado o prazo de 2 s, o id vence. Na ultima fonte da rodada, ela fecha: so o acordo de pelo menos duas chaves do registro move o relogio civil, pelas regras da disciplina, e `round` diz o desfecho. Quem entrega nao escolhe a hora. Um id que nao e seu nao existe para voce: INVALID_REQUEST.",
         params: &[
             ParamSpec {
                 nome: "id",
@@ -2318,10 +2318,14 @@ fn system_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     // Cru de propósito — o tempo que vale para prazos é o lógico, que a
     // persistência mantém e nunca volta; este é o que o hardware diz.
     w.key("rtc")?;
-    match crate::relogio::agora() {
+    match crate::hora::rtc() {
         Some(s) => w.u64_value(s)?,
         None => w.null_value()?,
     }
+    // O relógio civil e o lógico: o estado, a incerteza, as marcas, as
+    // fontes em resumo, a régua — ver `crate::hora::escrever`.
+    w.key("time")?;
+    crate::hora::escrever(w)?;
     // A persistência: se as operações de autoridade podem acontecer agora,
     // e por que não; a geração administrativa, que um signatário de quórum
     // compara com a maior que já viu; a âncora do TPM; e o tempo lógico,
@@ -2492,28 +2496,31 @@ fn random_read(params: Json, w: &mut JsonWriter) -> fmt::Result {
 ///
 /// O gate decidiu `time.sync`. Aqui, a fonte tem de estar no registro de
 /// fontes — uma fora dele não existe, e nenhuma ausência de registro dá
-/// fonte a ninguém. O pedido mesmo — o nonce do kernel, ligado a quem pede
-/// e à fonte — é do serviço de hora, que ainda não está neste kernel:
-/// `TIME_UNAVAILABLE`, um erro técnico, e não uma recusa.
+/// fonte a ninguém —, e o pedido sai do serviço de hora do kernel
+/// ([`crate::hora::pedir`]): o nonce do kernel, ligado ao principal que o
+/// gate decidiu, à fonte e à chave fixada dela. Uma recusa depois do gate
+/// — fora da ordem da rodada, a tabela cheia, sem entropia — vai para a
+/// auditoria como execução da decisão.
 fn time_request(params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.begin_object()?;
     let nome = params
         .member("source")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    match crate::identidade::fonte_de_hora(nome) {
-        None => {
-            w.field_str("error", "fonte de hora fora do registro")?;
-            w.field_str("code", "INVALID_REQUEST")?;
+    match crate::hora::pedir(nome) {
+        Ok(p) => {
+            w.field_u64("id", p.id)?;
+            w.field_str("source", p.fonte.nome())?;
+            w.field_str("to", p.fonte.destino())?;
+            w.field_u64("round", p.rodada)?;
+            w.key("request")?;
+            w.begin_str()?;
+            em_base64(p.pedido.bytes(), |c| w.push_str(c))?;
+            w.end_str()?;
         }
-        Some(fonte) => {
-            w.field_str("source", fonte.nome())?;
-            w.field_str("to", fonte.destino())?;
-            w.field_str(
-                "error",
-                "o servico de hora ainda nao emite pedidos neste kernel",
-            )?;
-            w.field_str("code", "TIME_UNAVAILABLE")?;
+        Err(f) => {
+            w.field_str("error", f.motivo())?;
+            w.field_str("code", f.codigo())?;
         }
     }
     w.end_object()
@@ -2523,24 +2530,79 @@ fn time_request(params: Json, w: &mut JsonWriter) -> fmt::Result {
 ///
 /// O gate decidiu `time.sync`. O id é de um pedido que o kernel emitiu para
 /// quem entrega — nunca o de outro —, e a resposta é conferida contra o
-/// registro do pedido, e não contra o que quem entrega diz dela. Sem o
-/// serviço de hora neste kernel, nenhum pedido está aberto: todo id é
-/// `INVALID_REQUEST`, e a resposta, que não é segredo, é descartada sem ser
-/// lida.
+/// registro do pedido, e não contra o que quem entrega diz dela — ver
+/// [`crate::hora::entregar`]. Sem anexo, o aviso de que ela não veio.
 fn time_sync(params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.begin_object()?;
     let anexo = crate::autorizacao::tirar_anexo();
     let id = params.member("id").and_then(|v| v.as_u64());
-    let erro = if anexo_declarado(params.member("attachment"), &anexo).is_err() {
-        "o anexo nao confere com attachment"
-    } else if id.is_none() {
-        "id invalido"
-    } else {
-        "nenhum pedido de hora aberto com este id"
+    if anexo_declarado(params.member("attachment"), &anexo).is_err() {
+        w.field_str("error", "o anexo nao confere com attachment")?;
+        w.field_str("code", "INVALID_REQUEST")?;
+        return w.end_object();
+    }
+    let Some(id) = id else {
+        w.field_str("error", "id invalido")?;
+        w.field_str("code", "INVALID_REQUEST")?;
+        return w.end_object();
+    };
+    let pacote = (!anexo.is_empty()).then_some(&anexo[..]);
+    let e = match crate::hora::entregar(id, pacote) {
+        Ok(e) => e,
+        Err(f) => {
+            w.field_str("error", f.motivo())?;
+            w.field_str("code", f.codigo())?;
+            return w.end_object();
+        }
     };
     drop(anexo);
-    w.field_str("error", erro)?;
-    w.field_str("code", "INVALID_REQUEST")?;
+    w.field_u64("id", id)?;
+    w.field_str("source", e.fonte.nome())?;
+    w.field_str("verdict", e.resultado.nome())?;
+    let (aceita, fechado) = match e.resultado {
+        crate::hora::Resultado::Aceita { prova, rtt_ms } => {
+            w.field_u64("midp", prova.midp)?;
+            w.field_u64("radi", u64::from(prova.radi))?;
+            w.field_u64("rtt_ms", rtt_ms)?;
+            (true, true)
+        }
+        crate::hora::Resultado::Recusada {
+            tentativa, fechou, ..
+        } => {
+            w.field_u64("attempt", u64::from(tentativa))?;
+            w.field_u64("max_attempts", u64::from(hora::pedidos::MAIS_TENTATIVAS))?;
+            (false, fechou)
+        }
+        crate::hora::Resultado::SemResposta | crate::hora::Resultado::Vencida => (false, true),
+    };
+    w.field_bool("accepted", aceita)?;
+    w.field_bool("closed", fechado)?;
+    w.key("round")?;
+    w.begin_object()?;
+    w.field_u64("number", e.rodada)?;
+    w.field_bool("closed", e.fechamento.is_some())?;
+    if let Some(d) = &e.fechamento {
+        w.field_str("outcome", crate::hora::nome_do_desfecho(d))?;
+        if let hora::quorum::Desfecho::Acordo(a) = d {
+            w.field_u64("coverage", a.cobertura as u64)?;
+            w.field_u64("uncertainty_ms", a.incerteza_ms())?;
+        }
+        if let Some(motivo) = e.descartada {
+            w.field_str("discarded", motivo)?;
+        }
+        if let Some(m) = e.mudanca {
+            w.field_str("effect", crate::hora::nome_do_efeito(&m.efeito))?;
+            w.field_str("state_before", m.antes.estado.nome())?;
+            w.field_str("state_after", m.depois.estado.nome())?;
+            w.field_bool("divergent", m.depois.divergente)?;
+            w.key("pending_ms")?;
+            match m.depois.pendente_ms {
+                Some(p) => w.i64_value(p)?,
+                None => w.null_value()?,
+            }
+        }
+    }
+    w.end_object()?;
     w.end_object()
 }
 

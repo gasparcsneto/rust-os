@@ -299,17 +299,28 @@ pub fn auditoria_gravada() -> u64 {
     AUDITORIA_GRAVADA.load(Ordering::Acquire)
 }
 
-/// O tempo lógico: o RTC com o piso do journal — nunca volta.
+/// O tempo lógico: o relógio civil, em segundos, com o piso do journal —
+/// nunca volta. Antes da primeira amostra autenticada, o civil é o RTC:
+/// é o comportamento de sempre, sem o CMOS a cada registro. O civil é lido
+/// antes, e solto: nenhuma trava dele fica na mão com a desta — ver
+/// `crate::hora::civil`.
 pub fn agora() -> u64 {
-    let rtc = crate::relogio::agora();
-    com(|p| p.relogio.agora(rtc))
+    let civil = crate::hora::civil_s();
+    com(|p| p.relogio.agora(civil))
+}
+
+/// O piso do tempo lógico, sem andá-lo: o maior que ele já devolveu, ou o
+/// que o journal gravou. É a referência do teto de um salto do civil para
+/// a frente — o que passa do piso não se desfaz.
+pub fn piso() -> u64 {
+    com(|p| p.relogio.piso())
 }
 
 /// O tempo lógico em milissegundos, para os prazos das mensagens.
 ///
-/// A resolução é a do RTC: um segundo. Um prazo vence no primeiro segundo
-/// lógico que o alcança — nunca antes, e nunca depois de um reboot que
-/// volte o RTC, porque o piso não volta. O tempo desde o boot, que teria
+/// A resolução é de um segundo, a do tempo lógico. Um prazo vence no
+/// primeiro segundo lógico que o alcança — nunca antes, e nunca depois de
+/// um reboot que volte o RTC, porque o piso não volta. O tempo desde o boot, que teria
 /// milissegundos, não serve: recomeça a cada boot, e um prazo medido nele
 /// voltaria a correr depois de um.
 pub fn agora_ms() -> u64 {

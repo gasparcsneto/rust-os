@@ -75,6 +75,7 @@ mod fios;
 mod frames;
 mod grafico;
 mod heap;
+mod hora;
 mod identidade;
 mod interpretador;
 mod irq;
@@ -478,6 +479,12 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     // Quem pode falar pelas portas: a chave do Duke e os registros, do disco
     // que acabou de montar.
     identidade::carregar();
+    // O relógio civil, com os tetos do registro de fontes de hora que veio
+    // junto: a régua (o contador do hardware, medido no x86 contra o PIT) e
+    // o RTC. Antes da política e do journal — o tempo lógico de todo
+    // registro da auditoria, daqui em diante, é o civil com o piso. Ver
+    // [`hora`].
+    hora::iniciar_civil();
     // E o que cada papel pode: a política, do mesmo disco. Sem ela, a de
     // emergência — ver [`autorizacao`].
     autorizacao::carregar();
@@ -493,6 +500,11 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     // `docs/SEGURANCA.md`. Na suíte, cada caso faz as voltas dele.
     #[cfg(not(feature = "modo-teste"))]
     seguranca::iniciar();
+    // O serviço de hora, com a rede no ar: o fio `hora`, que pede às fontes
+    // do registro pelo gate, com o papel do serviço — ver `hora::servico`.
+    // Na suíte, cada caso faz as rodadas dele.
+    #[cfg(not(feature = "modo-teste"))]
+    hora::servico::iniciar();
 
     // Os demais núcleos, com o boot inteiro feito. Ligá-los antes daria a
     // eles fios para rodar no meio da inicialização dos dispositivos, que foi

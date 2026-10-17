@@ -128,6 +128,37 @@ pub fn usado_da_pilha_de_nucleo(nucleo: usize) -> u64 {
     fim - fundo
 }
 
+/// Só para a suíte: quantos bytes da pilha do fio que chama já foram
+/// usados — do topo até a palavra mais funda que não é zero —, ou `None`
+/// fora da pilha de um fio (o fio do boot, na pilha do boot).
+///
+/// A pilha de um fio nasce zerada — os frames novos são zerados ao mapear —
+/// e é dele enquanto ele vive: a conta é a marca d'água desde que ele
+/// nasceu. Uma palavra zero escrita no ponto mais fundo a subestimaria em
+/// alguns bytes, nunca em uma página.
+#[cfg(feature = "modo-teste")]
+pub fn usado_da_pilha_deste_fio() -> Option<u64> {
+    let marca = 0u64;
+    let aqui = core::ptr::addr_of!(marca) as u64;
+    let fim_da_area = BASE + super::MAX_FIOS as u64 * TAMANHO_DA_VAGA;
+    if !(BASE..fim_da_area).contains(&aqui) {
+        return None;
+    }
+    let inicio = BASE + (aqui - BASE) / TAMANHO_DA_VAGA * TAMANHO_DA_VAGA + TAMANHO_PAGINA;
+    let fim = inicio + TAMANHO_DA_PILHA;
+    let mut fundo = inicio;
+    while fundo < fim {
+        // SAFETY: `[inicio, fim)` é a pilha do fio que roda esta função —
+        // `aqui` está nela —, mapeada enquanto ele vive; a leitura é de uma
+        // palavra alinhada dela.
+        if unsafe { core::ptr::read_volatile(fundo as *const u64) } != 0 {
+            break;
+        }
+        fundo += 8;
+    }
+    Some(fim - fundo)
+}
+
 impl Drop for Pilha {
     fn drop(&mut self) {
         let primeira_pagina = BASE + self.vaga as u64 * TAMANHO_DA_VAGA + TAMANHO_PAGINA;

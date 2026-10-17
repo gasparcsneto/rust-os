@@ -278,6 +278,12 @@ kernel/src/
 ├── metricas.rs      o custo da segurança, medido: contadores atômicos que só a consulta lê, nunca a decisão
 ├── oleoduto.rs      o caminho da auditoria até o journal: a capacidade que o plano de dados respeita, a partilha entre principais e quem espera por lugar
 ├── seguranca.rs     o tecido de segurança: o fio do NSF, que lê e pede pelo gate como qualquer principal
+├── hora/
+│   ├── mod.rs       os três relógios — o monotônico intocado, o civil, o lógico pelo civil —, os tratadores de time.request, time.sync e time.confirm, e o system.info time
+│   ├── contador.rs  a régua do civil: o contador do hardware em milissegundos — a frequência declarada no ARM, o TSC calibrado pelo PIT no x86
+│   ├── civil.rs     o relógio civil, um só, atrás de uma trava folha: o RTC até o primeiro acordo, e depois só o desfecho de uma rodada ou o salto confirmado
+│   ├── rodada.rs    os pedidos em aberto e as rodadas de cada principal: a ordem das fontes, o nonce encadeado, o quórum no fechamento
+│   └── servico.rs   o fio do serviço de hora: as rodadas pelas fontes do registro, cada passo pelo gate, como ele mesmo
 ├── sessoes.rs       quem está em cada porta, e as chaves do transporte cifrado dela
 ├── aleatorio.rs     o gerador de números aleatórios, semeado pelo virtio-rng
 ├── barra.rs         a barra superior: o nome, os botões, quem está agindo e o tempo ligado
@@ -296,6 +302,7 @@ kernel/src/
 │   ├── canal.rs     o canal do agente por TCP, só o transporte: as vagas, a geração, o prazo do aperto e a contrapressão
 │   ├── captura.rs   os datagramas trocados com um destino observado, para quem tem `net.observe` sobre ele
 │   ├── bancada_dns.rs  só na suíte: o servidor de DNS da bancada, determinístico, de dentro da máquina
+│   ├── bancada_hora.rs só na suíte: as três fontes de Roughtime da bancada, de dentro da máquina, honestas ou torcidas por caso
 │   └── espera.rs    a leitura e o envio que esperam: armados na conexão, um de cada sentido, acordados pela pilha ou pelo prazo, decididos de novo na entrega
 ├── traps.rs         contabilidade de exceções e modo post-mortem
 ├── nucleos.rs       os vários núcleos: quem ligou, o pulso de cada um, o aviso e o travamento de propósito
@@ -303,7 +310,7 @@ kernel/src/
 ├── ordem_das_travas.rs  só na suíte: a ordem das travas, conferida a cada `lock` — nenhum par em duas ordens
 ├── irq.rs           contadores de interrupções de hardware
 ├── tempo.rs         contagem de tempo desde o boot
-├── relogio.rs       o relógio de parede: o RTC (CMOS no x86, PL031 no ARM)
+├── relogio.rs       o RTC (CMOS no x86, PL031 no ARM), que só o relógio civil lê
 ├── tpm.rs           o TPM 2.0 pelas interfaces TIS e CRB: o transporte da âncora
 ├── qemu.rs          encerramento do emulador para testes
 ├── quedas.rs        quedas de energia em pontos exatos, só na compilação da bancada

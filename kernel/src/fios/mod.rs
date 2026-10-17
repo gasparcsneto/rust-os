@@ -683,6 +683,80 @@ pub fn descansar_ate_a_interrupcao() {
     }
 }
 
+/// Roda `futuro` até o fim neste fio, fora do rodízio entre um passo e
+/// outro: o fio fica esperando, como o que lê um canal de eventos vazio, e
+/// quem o devolve à circulação é o waker do futuro — o tique de um prazo, o
+/// evento de uma conexão —, que o [`acordar`]ia.
+///
+/// # Por que não descansar
+///
+/// Quem descansa ([`descansar_ate_a_interrupcao`]) continua pronto: o
+/// núcleo dele não vai para o ocioso, e o [`acordar`] não o cutuca. Com mais
+/// fios descansando que núcleos, sempre há um pronto, e eles se revezam sem
+/// parar: nenhum núcleo dorme, o emulador gira os processadores inteiros, e
+/// quem tem trabalho de verdade espera na volta do rodízio. Medido na
+/// fumaça do ARM, com quatro núcleos: o fio do serviço de hora descansando
+/// era o quinto, e cada `video.sample` passou de 210 ms a 500 ms.
+///
+/// # O aviso que chega antes do sono
+///
+/// O evento pode chegar entre o `Pending` e o fio sair de circulação, e o
+/// [`acordar`] dele acharia o fio ainda rodando. O waker marca o
+/// [`Sinal`] antes de acordar, e o fio só sai de circulação, com a trava do
+/// escalonador na mão, se a marca não estiver lá — e então o [`acordar`],
+/// que toma a mesma trava, o acha esperando.
+///
+/// Não se chama com trava na mão nem com as interrupções mascaradas: o fio
+/// sai do núcleo. Antes de o escalonador ligar, o futuro é conferido a cada
+/// interrupção.
+pub fn bloquear_em<F: core::future::Future>(futuro: F) -> F::Output {
+    use core::task::{Context, Poll, Waker};
+    let sinal = alloc::sync::Arc::new(Sinal {
+        fio: id_atual(),
+        acordado: core::sync::atomic::AtomicBool::new(false),
+    });
+    let waker = Waker::from(alloc::sync::Arc::clone(&sinal));
+    let mut contexto = Context::from_waker(&waker);
+    let mut futuro = core::pin::pin!(futuro);
+    loop {
+        if let Poll::Ready(valor) = futuro.as_mut().poll(&mut contexto) {
+            return valor;
+        }
+        let estacionou = com_escalonador(|e| {
+            if !e.ligado || sinal.acordado.swap(false, Ordering::AcqRel) {
+                return false;
+            }
+            e.fio_atual_mut()
+                .map(|f| f.estado = Estado::Esperando)
+                .is_some()
+        });
+        if estacionou {
+            ceder();
+        } else if !LIGADO.load(Ordering::Acquire) {
+            descansar_ate_a_interrupcao();
+        }
+    }
+}
+
+/// O waker de [`bloquear_em`]: marca, e devolve o fio à circulação.
+struct Sinal {
+    fio: u64,
+    acordado: core::sync::atomic::AtomicBool,
+}
+
+impl alloc::task::Wake for Sinal {
+    fn wake(self: alloc::sync::Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    /// Por referência: o tique acorda os dormentes de dentro do handler, e
+    /// ali nenhum `Arc` deve chegar a zero.
+    fn wake_by_ref(self: &alloc::sync::Arc<Self>) {
+        self.acordado.store(true, Ordering::Release);
+        acordar(self.fio);
+    }
+}
+
 /// Tira da tabela os fios que já terminaram e devolve o que eles ocupavam:
 /// a pilha de kernel, e o espaço de endereços quando havia um.
 ///

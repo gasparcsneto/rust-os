@@ -33,6 +33,8 @@
 
 #[cfg(feature = "modo-teste")]
 pub mod bancada_dns;
+#[cfg(feature = "modo-teste")]
+pub mod bancada_hora;
 pub mod canal;
 pub mod captura;
 pub mod conexoes;

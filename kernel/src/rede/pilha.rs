@@ -469,6 +469,12 @@ impl TxToken for Envio<'_> {
         if super::bancada_dns::observar_saida(&quadro) {
             return r;
         }
+        // E o que vai para as fontes de hora da bancada também — ver
+        // `rede::bancada_hora`.
+        #[cfg(feature = "modo-teste")]
+        if super::bancada_hora::observar_saida(&quadro) {
+            return r;
+        }
         // Na suíte, um fio que não entrega: o quadro some como numa rede
         // que perde, e o outro lado não confirma nada — a fila de saída de
         // uma conexão enche. Ver [`segurar_saida_de_teste`].

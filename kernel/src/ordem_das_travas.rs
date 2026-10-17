@@ -124,6 +124,15 @@ fn endereco_da_ordem() -> usize {
     &ORDEM as *const u8 as usize
 }
 
+/// A classe da vez da hora — os pedidos e as rodadas de `crate::hora`,
+/// uma trava do fio como a ordem das gravações: o endereço é o desta
+/// estática.
+pub static VEZ_DA_HORA: u8 = 0;
+
+fn endereco_da_vez_da_hora() -> usize {
+    &VEZ_DA_HORA as *const u8 as usize
+}
+
 /// A vaga da classe de `endereco`, criando-a se `onde` é dado.
 fn classe(endereco: usize, onde: Option<&'static Location<'static>>) -> Option<usize> {
     let mut i = (endereco >> 3).wrapping_mul(0x9E37_79B9_7F4A_7C15) % CLASSES;
@@ -227,6 +236,9 @@ fn classe_em(
 /// A classe da ordem das gravações, guardada como a das travas.
 static CLASSE_DA_ORDEM: AtomicU16 = AtomicU16::new(NENHUMA);
 
+/// A classe da vez da hora, guardada como a das travas.
+static CLASSE_DA_VEZ_DA_HORA: AtomicU16 = AtomicU16::new(NENHUMA);
+
 /// Roda `f` com as interrupções mascaradas — e não as mascara de novo se já
 /// estão: quase toda trava é tomada assim, e salvar e restaurar o estado a
 /// cada gancho custaria, no emulador, o que um caso de tempo mede.
@@ -250,6 +262,15 @@ fn com_o_que_esta_na_mao(mut f: impl FnMut(usize)) {
     }
     if crate::persistencia::ordem_na_mao_sem_trava()
         && let Some(c) = classe_em(endereco_da_ordem(), &CLASSE_DA_ORDEM, Location::caller())
+    {
+        f(c);
+    }
+    if crate::hora::vez_na_mao_sem_trava()
+        && let Some(c) = classe_em(
+            endereco_da_vez_da_hora(),
+            &CLASSE_DA_VEZ_DA_HORA,
+            Location::caller(),
+        )
     {
         f(c);
     }
@@ -381,6 +402,12 @@ pub fn ao_soltar(guardada: &AtomicU16) {
 #[track_caller]
 pub fn ao_pedir_a_ordem() {
     ao_pedir(endereco_da_ordem(), &CLASSE_DA_ORDEM);
+}
+
+/// A vez da hora vai ser pedida por quem não a tem.
+#[track_caller]
+pub fn ao_pedir_a_vez_da_hora() {
+    ao_pedir(endereco_da_vez_da_hora(), &CLASSE_DA_VEZ_DA_HORA);
 }
 
 /// O caminho fatal destravou tudo à força: daqui em diante a conferência

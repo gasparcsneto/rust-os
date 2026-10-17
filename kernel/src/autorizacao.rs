@@ -330,13 +330,6 @@ pub enum Servico {
     /// O serviço de hora: apresenta ao kernel a evidência das fontes de
     /// hora do registro — `time.request` e `time.sync` —, com o papel que a
     /// linha `servico hora` lhe dá. Não escolhe a hora, e não é o sistema.
-    #[cfg_attr(
-        not(feature = "modo-teste"),
-        expect(
-            dead_code,
-            reason = "o fio do servico de hora e do passo seguinte; ate la, so a suite age como ele"
-        )
-    )]
     Hora,
 }
 
@@ -937,8 +930,9 @@ fn cortado(texto: &str, teto: usize) -> &str {
 /// Grava uma decisão na cadeia, e devolve o número dela — zero antes de a
 /// cadeia existir.
 ///
-/// O tempo é o lógico da persistência: o RTC com o piso do journal, que
-/// atravessa boots sem voltar. A cadeia vai ao journal — ver
+/// O tempo é o lógico da persistência: o civil com o piso do journal, que
+/// atravessa boots sem voltar. É o único lugar daqui que o lê: nenhuma
+/// decisão lê o civil nem o lógico — o `xtask` confere. A cadeia vai ao journal — ver
 /// [`crate::persistencia`] —, e um registro com o tempo desde o boot diria
 /// pouco no boot seguinte.
 fn auditar(
@@ -1581,6 +1575,21 @@ pub fn quem_decidiu() -> Option<String> {
     .flatten()
 }
 
+/// O principal que o gate decidiu para o comando em execução neste fio: a
+/// chave do agente (ou a serial), a pessoa, o sistema, o serviço — o mesmo
+/// da taxa e do caminho da auditoria. É a ele que um pedido de hora fica
+/// ligado, e não ao fio nem a um PID: um processo do agente e o agente são
+/// o mesmo principal, e outro fio do mesmo serviço também — ver
+/// `crate::hora`. `None` fora de um comando autorizado.
+pub fn principal_decidido() -> Option<Principal> {
+    do_comando_deste_fio(|c| {
+        c.decidido
+            .as_ref()
+            .map(|d| principal_da_capacidade(&d.quem))
+    })
+    .flatten()
+}
+
 /// Põe o anexo na vaga do comando deste fio.
 fn por_anexo(anexo: Vec<u8>) {
     let eu = crate::fios::id_atual();
@@ -1752,9 +1761,10 @@ pub fn reconfirmar() -> Result<(), (Codigo, &'static str)> {
 }
 
 /// Só para a suíte: o que roda no ponto de commit de uma mensagem ou de uma
-/// operação administrativa — com a ordem das gravações na mão — antes de a
-/// decisão ser feita de novo. É onde um caso põe a revogação ou a política
-/// nova "no meio" da operação.
+/// operação administrativa — com a ordem das gravações na mão —, ou de uma
+/// rodada de hora — com a vez da hora —, antes de a decisão ser feita de
+/// novo. É onde um caso põe a revogação ou a política nova "no meio" da
+/// operação.
 #[cfg(feature = "modo-teste")]
 static ANTES_DA_RECONFIRMACAO: Mutex<Option<fn()>> = Mutex::new(None);
 

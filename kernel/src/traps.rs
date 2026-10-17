@@ -333,7 +333,11 @@ pub fn fatal(nome: &'static str, pc: u64, endereco: Option<u64>, codigo: u64) ->
         crate::rede::captura::destravar();
         #[cfg(feature = "modo-teste")]
         crate::rede::bancada_dns::destravar();
+        #[cfg(feature = "modo-teste")]
+        crate::rede::bancada_hora::destravar();
         crate::seguranca::destravar();
+        crate::hora::destravar();
+        crate::hora::civil::destravar();
         crate::virtio::teclado::destravar();
         crate::virtio::console::destravar();
         crate::virtio::entropia::destravar();

@@ -1492,14 +1492,17 @@ fn revogar_sessao(pedinte: &Pedinte, params: Json, w: &mut JsonWriter) -> Result
 ///
 /// Não recebe hora nenhuma — os parâmetros são um objeto vazio, e um campo
 /// qualquer recusa o pedido, em vez de ser ignorado: a hora não se digita.
-/// O salto que se confirma é o que o quórum indicou e o serviço de hora
-/// guardou como pendente; o serviço ainda não está neste kernel, e sem ele
-/// nunca há salto pendente — `CONFLICT`, e nada muda. A decisão já foi
-/// gravada: a prova, o papel com `time.confirm`, e o desafio.
+/// O salto que se confirma é o que o acordo de pelo menos duas chaves
+/// indicou e a disciplina guardou como pendente — ver
+/// [`crate::hora::confirmar`]: levado até agora pela régua, com a
+/// incerteza do acordo e a deriva desde ele. Sem salto pendente,
+/// `CONFLICT`, e nada muda. A decisão já foi gravada: a prova, o papel com
+/// `time.confirm`, e o desafio; o registro da execução leva o salto, a
+/// rodada que o pediu, o civil e o lógico antes e depois.
 fn confirmar_salto_de_hora(
     _pedinte: &Pedinte,
     params: Json,
-    _w: &mut JsonWriter,
+    w: &mut JsonWriter,
 ) -> Result<String, Falha> {
     let vazio = params.raw_str().is_some_and(|t| {
         t.bytes()
@@ -1512,7 +1515,9 @@ fn confirmar_salto_de_hora(
             "time.confirm nao recebe parametros: a hora nao se digita, so se confirma o salto que o quorum indicou",
         ));
     }
-    Err(falha(Codigo::Conflict, "nenhum salto de hora pendente"))
+    let aplicado = crate::hora::confirmar().map_err(|(codigo, motivo)| falha(codigo, motivo))?;
+    let _ = w.field_str("applied", &aplicado);
+    Ok(aplicado)
 }
 
 fn revogar_arrendamento(

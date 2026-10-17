@@ -14928,7 +14928,8 @@ fn mensagens_cotas() -> Resultado {
             r#"{"to":"teste-2","body":"curta","nonce":2,"ttl_ms":1000}"#,
         )?;
         let id = ids_de(&r);
-        // O prazo é do tempo lógico, com a resolução do RTC: espera-se nele.
+        // O prazo é do tempo lógico, com a resolução dele, um segundo:
+        // espera-se nele.
         // O coletor fica parado: quem vence aqui é a consulta, sozinha.
         crate::mensagens::pausar_o_coletor_de_teste(true);
         let vence = crate::persistencia::agora_ms() + 1000;
@@ -16921,7 +16922,7 @@ fn auditoria_a_decisao_vai_no_registro_da_operacao() -> Resultado {
             crate::log_error!("teste", "{:?}", decisao.evento);
             return Err("a decisao da operacao nao e o ultimo registro da auditoria");
         }
-        // O tempo dela é o lógico — o RTC com o piso do journal —, que
+        // O tempo dela é o lógico — o civil com o piso do journal —, que
         // atravessa boots; e não o tempo desde o boot.
         let agora = crate::persistencia::agora_ms();
         if decisao.evento.ts_ms > agora || decisao.evento.ts_ms + 5_000 < agora {
@@ -21791,6 +21792,148 @@ fn smp_a_cota_de_processos_vale_entre_nucleos() -> Resultado {
     crate::autorizacao::carregar();
     crate::pessoas::esquecer_registradas();
     resultado
+}
+
+/// Quem bloqueia num futuro sai do rodízio: fica esperando, e nenhum núcleo
+/// o escala até o waker do futuro o devolver — o tique de um prazo, ou quem
+/// tem o waker. É como o fio do serviço de hora espera entre as rodadas e
+/// nas esperas da rede: descansando, como antes, ele ficava pronto o tempo
+/// todo, e com os outros fios que descansam passava o número de núcleos da
+/// bancada — nenhum núcleo dormia, e na fumaça do ARM cada `video.sample`
+/// passou de 210 ms a 500 ms (ver `fios::bloquear_em`).
+///
+/// E o aviso que chega antes do sono não se perde: o futuro que se acorda
+/// no próprio `poll` e devolve `Pending` é conferido de novo, e não espera
+/// um waker que já passou.
+fn fios_quem_bloqueia_sai_do_rodizio() -> Resultado {
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
+    use core::task::{Context, Poll, Waker};
+    static ID: AtomicU64 = AtomicU64::new(0);
+    static ACORDOU_EM: AtomicU64 = AtomicU64::new(0);
+    static PRONTO: AtomicBool = AtomicBool::new(false);
+    static GUARDADO: crate::trava::Mutex<Option<Waker>> = crate::trava::Mutex::new(None);
+    const PRAZO_MS: u64 = 1_500;
+
+    /// Pronto com `PRONTO`; antes, guarda o waker para quem o acordar.
+    struct PeloWaker;
+    impl core::future::Future for PeloWaker {
+        type Output = ();
+        fn poll(self: core::pin::Pin<&mut Self>, cx: &mut Context) -> Poll<()> {
+            if PRONTO.load(SeqCst) {
+                return Poll::Ready(());
+            }
+            crate::arch::sem_interrupcoes(|| *GUARDADO.lock() = Some(cx.waker().clone()));
+            if PRONTO.load(SeqCst) {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        }
+    }
+    /// Acorda a si mesmo no primeiro `poll`, e fica pronto no segundo: o
+    /// evento que chegou entre o `Pending` e o sono.
+    struct AntesDoSono(bool);
+    impl core::future::Future for AntesDoSono {
+        type Output = ();
+        fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut Context) -> Poll<()> {
+            if self.0 {
+                return Poll::Ready(());
+            }
+            self.0 = true;
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
+    extern "C" fn pelo_tique(_: u64) -> ! {
+        ID.store(crate::fios::id_atual(), SeqCst);
+        crate::fios::bloquear_em(crate::tarefas::relogio::por_ms(PRAZO_MS));
+        ACORDOU_EM.store(crate::tempo::uptime_ms().max(1), SeqCst);
+        crate::fios::terminar()
+    }
+    extern "C" fn pelo_waker(_: u64) -> ! {
+        ID.store(crate::fios::id_atual(), SeqCst);
+        crate::fios::bloquear_em(PeloWaker);
+        ACORDOU_EM.store(crate::tempo::uptime_ms().max(1), SeqCst);
+        crate::fios::terminar()
+    }
+    extern "C" fn antes_do_sono(_: u64) -> ! {
+        ID.store(crate::fios::id_atual(), SeqCst);
+        crate::fios::bloquear_em(AntesDoSono(false));
+        ACORDOU_EM.store(crate::tempo::uptime_ms().max(1), SeqCst);
+        crate::fios::terminar()
+    }
+    fn inscricao(id: u64) -> Option<(&'static str, u64)> {
+        let mut achou = None;
+        crate::fios::com_inscricoes(|i| {
+            if i.id == id {
+                achou = Some((i.estado, i.escalonamentos));
+            }
+        });
+        achou
+    }
+    fn esperando(id: u64) -> bool {
+        id != 0 && crate::fios::esperando_de_teste(id)
+    }
+
+    // Pelo tique do prazo: esperando, sem voltar ao rodízio, até ele.
+    ID.store(0, SeqCst);
+    ACORDOU_EM.store(0, SeqCst);
+    let comeco = crate::tempo::uptime_ms();
+    crate::fios::criar("teste-bloqueado", pelo_tique, 0)?;
+    esperar_cedendo(|| esperando(ID.load(SeqCst)), 200)
+        .map_err(|_| "o fio que bloqueia no prazo nao saiu do rodizio")?;
+    let id = ID.load(SeqCst);
+    let (_, antes) = inscricao(id).ok_or("o fio bloqueado sumiu")?;
+    esperar_ms(500);
+    let (estado, depois) = inscricao(id).ok_or("o fio bloqueado sumiu")?;
+    if ACORDOU_EM.load(SeqCst) == 0 && (estado != "waiting" || depois != antes) {
+        crate::log_error!(
+            "teste",
+            "bloqueado no prazo: {} e escalonado {} vezes, depois {}",
+            estado,
+            antes,
+            depois
+        );
+        return Err("o fio bloqueado no prazo voltou ao rodizio antes dele");
+    }
+    esperar_cedendo(|| ACORDOU_EM.load(SeqCst) != 0, 1_000)
+        .map_err(|_| "o tique do prazo nao devolveu o fio bloqueado")?;
+    if ACORDOU_EM.load(SeqCst).saturating_sub(comeco) < PRAZO_MS {
+        return Err("o fio bloqueado no prazo acordou antes dele");
+    }
+
+    // Pelo waker de quem espera: esperando até ele, e de volta logo depois.
+    ID.store(0, SeqCst);
+    ACORDOU_EM.store(0, SeqCst);
+    PRONTO.store(false, SeqCst);
+    crate::arch::sem_interrupcoes(|| *GUARDADO.lock() = None);
+    crate::fios::criar("teste-bloqueado", pelo_waker, 0)?;
+    esperar_cedendo(|| esperando(ID.load(SeqCst)), 200)
+        .map_err(|_| "o fio que bloqueia no waker nao saiu do rodizio")?;
+    esperar_ms(200);
+    if ACORDOU_EM.load(SeqCst) != 0 || !esperando(ID.load(SeqCst)) {
+        return Err("o fio bloqueado no waker voltou sem ser acordado");
+    }
+    let acordado = crate::tempo::uptime_ms();
+    PRONTO.store(true, SeqCst);
+    let waker = crate::arch::sem_interrupcoes(|| GUARDADO.lock().take())
+        .ok_or("o futuro nao guardou o waker")?;
+    waker.wake();
+    esperar_cedendo(|| ACORDOU_EM.load(SeqCst) != 0, 200)
+        .map_err(|_| "o waker nao devolveu o fio bloqueado")?;
+    crate::log_info!(
+        "teste",
+        "bloquear_em: o waker devolveu o fio em {} ms",
+        ACORDOU_EM.load(SeqCst).saturating_sub(acordado)
+    );
+
+    // O aviso antes do sono.
+    ID.store(0, SeqCst);
+    ACORDOU_EM.store(0, SeqCst);
+    crate::fios::criar("teste-bloqueado", antes_do_sono, 0)?;
+    esperar_cedendo(|| ACORDOU_EM.load(SeqCst) != 0, 200)
+        .map_err(|_| "o aviso que chegou antes do sono se perdeu")?;
+    Ok(())
 }
 
 /// O quantum anda com a trava do escalonador ocupada.
@@ -30008,6 +30151,10 @@ static CASOS: &[Caso] = &[
         f: fios_o_quantum_anda_com_a_trava_ocupada,
     },
     Caso {
+        nome: "fios: quem bloqueia sai do rodizio",
+        f: fios_quem_bloqueia_sai_do_rodizio,
+    },
+    Caso {
         nome: "smp: o coletor nao fecha o console do dono seguinte",
         f: smp_o_coletor_nao_fecha_o_console_do_dono_seguinte,
     },
@@ -31248,6 +31395,66 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "tempo: nenhum caminho cria autoridade",
         f: tempo_nenhum_caminho_cria_autoridade,
+    },
+    Caso {
+        nome: "hora: a regua e os tres relogios",
+        f: hora_a_regua_e_os_tres_relogios,
+    },
+    Caso {
+        nome: "hora: uma rodada honesta pelo gate",
+        f: hora_uma_rodada_honesta_pelo_gate,
+    },
+    Caso {
+        nome: "hora: cada resposta ruim e um veredito",
+        f: hora_cada_resposta_ruim_e_um_veredito,
+    },
+    Caso {
+        nome: "hora: entregas fora do pedido",
+        f: hora_entregas_fora_do_pedido,
+    },
+    Caso {
+        nome: "hora: os nonces encadeados e a ordem da rodada",
+        f: hora_os_nonces_encadeados_e_a_ordem,
+    },
+    Caso {
+        nome: "hora: k dois sempre",
+        f: hora_k_dois_sempre,
+    },
+    Caso {
+        nome: "hora: fontes divergentes",
+        f: hora_fontes_divergentes,
+    },
+    Caso {
+        nome: "hora: a disciplina no civil",
+        f: hora_a_disciplina_no_civil,
+    },
+    Caso {
+        nome: "hora: os estados e a recuperacao",
+        f: hora_os_estados_e_a_recuperacao,
+    },
+    Caso {
+        nome: "hora: a resposta atrasada na rede",
+        f: hora_a_resposta_atrasada_na_rede,
+    },
+    Caso {
+        nome: "hora: revogacao e politica no meio da rodada",
+        f: hora_revogacao_e_politica_no_meio_da_rodada,
+    },
+    Caso {
+        nome: "hora: o ponto de commit da rodada",
+        f: hora_o_ponto_de_commit_da_rodada,
+    },
+    Caso {
+        nome: "hora: a rodada cabe na pilha de um fio",
+        f: hora_a_rodada_cabe_na_pilha_de_um_fio,
+    },
+    Caso {
+        nome: "hora: rodadas, leitores e o NSF ao mesmo tempo",
+        f: hora_rodadas_leitores_e_nsf_ao_mesmo_tempo,
+    },
+    Caso {
+        nome: "hora: nenhum caminho fora do gate",
+        f: hora_nenhum_caminho_fora_do_gate,
     },
     // Perto do fim: a reposição cobre o que a suíte inteira gravou.
     Caso {
@@ -45337,9 +45544,9 @@ fn tempo_o_registro_do_boot() -> Resultado {
 }
 
 /// O serviço de hora pede pelo gate, com o papel dele: `time.request` de
-/// uma fonte do registro passa pelo gate e é gravado como do serviço; o
-/// pedido mesmo ainda não sai — `TIME_UNAVAILABLE`. Uma fonte fora do
-/// registro não existe, e `time.sync` sem pedido aberto também não. O
+/// uma fonte do registro passa pelo gate e é gravado como do serviço, e o
+/// pedido v1 sai — 1024 bytes, com um id. Uma fonte fora do registro não
+/// existe, e `time.sync` sem pedido aberto também não. O
 /// transporte é outra decisão: as três fontes, sim; nada mais. E sem
 /// registro nenhum, nenhuma fonte — e nenhuma autorização a mais.
 fn tempo_o_servico_pede_pelo_gate() -> Resultado {
@@ -45350,7 +45557,10 @@ fn tempo_o_servico_pede_pelo_gate() -> Resultado {
     let codigo = |r: &str| fs_texto(r, "code").unwrap_or_default();
 
     let r = fs_pedir(hora, "time.request", r#"{"source":"bancada-a"}"#);
-    if codigo(&r) != "TIME_UNAVAILABLE" || fs_texto(&r, "to").as_deref() != Some(FONTES_DE_HORA[0])
+    let pedido = fs_texto(&r, "request").and_then(|b| seguranca::util::de_base64(&b));
+    if fs_numero(&r, "id").is_none()
+        || pedido.map(|p| p.len()) != Some(hora::pedido::TAMANHO)
+        || fs_texto(&r, "to").as_deref() != Some(FONTES_DE_HORA[0])
     {
         crate::log_error!("teste", "{}", r);
         return Err("o servico de hora nao pediu pelo gate a fonte do registro");
@@ -45371,16 +45581,27 @@ fn tempo_o_servico_pede_pelo_gate() -> Resultado {
         crate::log_error!("teste", "{}", r);
         return Err("uma fonte fora do registro existiu para o servico de hora");
     }
-    let r = fs_pedir(hora, "time.sync", r#"{"id":1}"#);
+    let r = fs_pedir(hora, "time.sync", r#"{"id":999999999}"#);
     if codigo(&r) != "INVALID_REQUEST" {
         crate::log_error!("teste", "{}", r);
         return Err("uma entrega sem pedido aberto foi aceita");
     }
-    let (_, e) = registro_que(|e| e.metodo == "time.sync")
+    // Dois registros: a decisão do gate, e a execução dela — o id que não
+    // existe, gravado como do serviço.
+    let (_, e) = registro_que(|e| e.metodo == "time.sync" && !e.detalhe.contains("; decisao "))
         .ok_or("a entrega do servico de hora nao foi gravada")?;
     if e.titular != Titular::Servico || e.papel != "tempo" || e.codigo != Codigo::Allow {
         crate::log_error!("teste", "{:?}", e);
         return Err("a entrega nao foi decidida como do servico de hora");
+    }
+    let (_, e) = registro_que(|e| e.metodo == "time.sync" && e.detalhe.contains("; decisao "))
+        .ok_or("a execucao da entrega sem pedido nao foi gravada")?;
+    if e.titular != Titular::Servico
+        || e.codigo != Codigo::InvalidArgument
+        || e.recurso != "id 999999999"
+    {
+        crate::log_error!("teste", "{:?}", e);
+        return Err("a entrega sem pedido nao foi gravada como execucao do servico");
     }
     // O transporte: as fontes, e só elas — nem os outros destinos da
     // bancada, nem outra porta, nem a fonte por TCP.
@@ -45422,6 +45643,7 @@ fn tempo_o_servico_pede_pelo_gate() -> Resultado {
         Ok(())
     })();
     crate::identidade::trocar_fontes_de_hora_de_teste(antes);
+    crate::hora::esvaziar_de_teste();
     sem_registro
 }
 
@@ -45524,10 +45746,17 @@ fn tempo_pessoa_e_agente_pela_mesma_politica() -> Resultado {
     use politica::auditoria::Titular;
     const PEDIDO: &str = r#"{"source":"bancada-a"}"#;
     let nome = nome_de_teste(1);
-    // A resposta, como o código que ela diz: o da recusa, ou o do pós-gate.
+    // A resposta, como o código que ela diz: o da recusa, o do pós-gate,
+    // ou `OK` com o pedido emitido.
     let desfecho = |r: &str| {
         if r.contains(r#""result""#) {
-            fs_texto(r, "code").unwrap_or_default()
+            fs_texto(r, "code").unwrap_or_else(|| {
+                if fs_numero(r, "id").is_some() {
+                    alloc::string::String::from("OK")
+                } else {
+                    alloc::string::String::new()
+                }
+            })
         } else {
             Json(r.as_bytes())
                 .member("error")
@@ -45587,16 +45816,17 @@ fn tempo_pessoa_e_agente_pela_mesma_politica() -> Resultado {
             "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read time.sync\n",
         )])?;
         com_a_politica(delegado, || {
-            comparar("operador", "TIME_UNAVAILABLE", &mut agente, &mut sessao)?;
+            comparar("operador", "OK", &mut agente, &mut sessao)?;
             comparar("observador", "DENY_PERMISSION", &mut agente, &mut sessao)
         })?;
         comparar("operador", "DENY_PERMISSION", &mut agente, &mut sessao)?;
         crate::identidade::atribuir(&nome, "sistema").map_err(|_| "a atribuicao falhou")?;
         let r = pela_porta(&mut agente, &mut sessao, "time.request", PEDIDO)?;
-        if desfecho(&r) != "TIME_UNAVAILABLE" {
+        if desfecho(&r) != "OK" {
             crate::log_error!("teste", "{}", r);
             return Err("o agente sistema nao passou pelo gate");
         }
+        let id = fs_numero(&r, "id").unwrap_or(0);
 
         // Não autenticado: a chave revogada no meio da sessão; a sessão de
         // pessoa que acabou.
@@ -45606,6 +45836,13 @@ fn tempo_pessoa_e_agente_pela_mesma_politica() -> Resultado {
         if !recusado_com(&r, "DENY_NOT_AUTHENTICATED") {
             crate::log_error!("teste", "{}", r);
             return Err("uma chave revogada pediu evidencia de hora");
+        }
+        // E a entrega para o pedido de antes da revogação também não passa.
+        let entrega = alloc::format!(r#"{{"id":{id}}}"#);
+        let r = pela_porta(&mut agente, &mut sessao, "time.sync", &entrega)?;
+        if !recusado_com(&r, "DENY_NOT_AUTHENTICATED") {
+            crate::log_error!("teste", "{}", r);
+            return Err("uma chave revogada entregou evidencia de hora");
         }
         let id = crate::pessoas::sessao_de_teste(
             Console::Terminal(console),
@@ -45621,6 +45858,7 @@ fn tempo_pessoa_e_agente_pela_mesma_politica() -> Resultado {
         Ok(())
     });
     crate::pessoas::esquecer_registradas();
+    crate::hora::esvaziar_de_teste();
     resultado
 }
 
@@ -45768,7 +46006,7 @@ fn tempo_a_revogacao_vale_no_gate() -> Resultado {
             Ok(())
         };
         let r = fs_pedir(hora, "time.request", r#"{"source":"bancada-a"}"#);
-        if fs_texto(&r, "code").as_deref() != Some("TIME_UNAVAILABLE") {
+        if fs_numero(&r, "id").is_none() {
             crate::log_error!("teste", "{}", r);
             return Err("antes da revogacao, o servico de hora nao pediu");
         }
@@ -45819,6 +46057,7 @@ fn tempo_a_revogacao_vale_no_gate() -> Resultado {
     })();
     crate::autorizacao::carregar();
     crate::identidade::esquecer_registrados();
+    crate::hora::esvaziar_de_teste();
     resultado
 }
 
@@ -45891,7 +46130,7 @@ fn tempo_nenhum_caminho_cria_autoridade() -> Resultado {
         for (metodo, params) in [
             ("time.request", r#"{"source":"bancada-a"}"#),
             ("time.request", r#"{"source":"fantasma"}"#),
-            ("time.sync", r#"{"id":1}"#),
+            ("time.sync", r#"{"id":999999999}"#),
             ("time.sync", r#"{"id":18446744073709551615}"#),
         ] {
             let r = fs_pedir(quem, metodo, params);
@@ -45902,7 +46141,7 @@ fn tempo_nenhum_caminho_cria_autoridade() -> Resultado {
         }
         let r = crate::nativo::responder_com_anexo_de_teste(
             quem,
-            &pedido_rpc("time.sync", r#"{"id":7,"attachment":1024}"#),
+            &pedido_rpc("time.sync", r#"{"id":999999999,"attachment":1024}"#),
             &resposta,
         );
         if fs_texto(&r, "error").as_deref() != Some("nenhum pedido de hora aberto com este id") {
@@ -45911,7 +46150,7 @@ fn tempo_nenhum_caminho_cria_autoridade() -> Resultado {
         }
         let r = crate::nativo::responder_com_anexo_de_teste(
             quem,
-            &pedido_rpc("time.sync", r#"{"id":7,"attachment":3}"#),
+            &pedido_rpc("time.sync", r#"{"id":999999999,"attachment":3}"#),
             &resposta,
         );
         if fs_texto(&r, "error").as_deref() != Some("o anexo nao confere com attachment") {
@@ -45919,6 +46158,7 @@ fn tempo_nenhum_caminho_cria_autoridade() -> Resultado {
             return Err("um anexo que nao confere com attachment foi aceito");
         }
     }
+    crate::hora::esvaziar_de_teste();
     if foto() != antes {
         return Err("um pedido de hora mudou a politica, o registro ou as credenciais");
     }
@@ -45929,6 +46169,1529 @@ fn tempo_nenhum_caminho_cria_autoridade() -> Resultado {
         if so_a_decisao(hora, metodo, params)? != Codigo::DenyPermission {
             return Err("pedir evidencia de hora deu ao servico o que ele nao tinha");
         }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// hora: o relógio civil, as rodadas e o serviço de hora — `crate::hora`
+// ---------------------------------------------------------------------------
+
+/// Roda `f` com a bancada de hora ligada e o registro de fontes dela — o
+/// quórum `k`, o teto do salto e o da incerteza, em segundos — no lugar do
+/// da imagem; os pedidos e as rodadas vazios, a taxa do serviço cheia, e o
+/// civil recomeçado no estado `rtc` com os parâmetros do registro. Põe
+/// tudo de volta no fim, também quando `f` falha.
+fn com_a_bancada_de_hora<T>(
+    k: u64,
+    salto_s: u64,
+    incerteza_s: u64,
+    f: impl FnOnce() -> Result<T, &'static str>,
+) -> Result<T, &'static str> {
+    let texto = crate::rede::bancada_hora::registro_de_teste(k, salto_s, incerteza_s);
+    let registro = hora::registro::Registro::ler(&texto)
+        .map_err(|_| "o registro da bancada de hora nao se le")?;
+    let antes = crate::identidade::trocar_fontes_de_hora_de_teste(Some(registro));
+    crate::hora::esvaziar_de_teste();
+    crate::hora::reiniciar_civil_de_teste();
+    crate::autorizacao::encher_a_taxa_do_servico_de_teste();
+    let r = f();
+    crate::rede::bancada_hora::honestas_de_teste();
+    crate::hora::esvaziar_de_teste();
+    crate::identidade::trocar_fontes_de_hora_de_teste(antes);
+    crate::hora::reiniciar_civil_de_teste();
+    crate::autorizacao::encher_a_taxa_do_servico_de_teste();
+    r
+}
+
+/// Uma rodada do serviço de hora pelo gate, com a taxa do papel cheia.
+fn rodada_do_servico() -> crate::hora::servico::Desfecho {
+    crate::autorizacao::encher_a_taxa_do_servico_de_teste();
+    crate::hora::servico::rodada()
+}
+
+/// A rodada fechou com um destes efeitos e este estado.
+fn fechou_com(d: &crate::hora::servico::Desfecho, efeitos: &[&str], estado: &str) -> Resultado {
+    match d {
+        crate::hora::servico::Desfecho::Fechada { efeito, estado: e }
+            if efeitos.contains(&efeito.as_str()) && e == estado =>
+        {
+            Ok(())
+        }
+        outro => {
+            crate::log_error!("teste", "{:?}, esperado {:?} e {}", outro, efeitos, estado);
+            Err("a rodada nao fechou como as regras mandam")
+        }
+    }
+}
+
+/// O civil agora.
+fn civil_agora() -> Result<hora::disciplina::Leitura, &'static str> {
+    crate::hora::civil::ler().ok_or("sem relogio civil")
+}
+
+/// O registro do desfecho da rodada mais nova — o recurso começa por
+/// `civil ` —, com o número.
+fn ultimo_desfecho() -> Option<(u64, politica::auditoria::Evento)> {
+    registro_que(|e| e.metodo == "time.sync" && e.recurso.starts_with("civil "))
+}
+
+/// O registro do veredito mais novo da fonte `nome`, com o número.
+fn ultimo_veredito(nome: &str) -> Option<(u64, politica::auditoria::Evento)> {
+    let prefixo = alloc::format!("{nome} ");
+    registro_que(|e| {
+        e.metodo == "time.sync"
+            && (e.recurso == nome || e.recurso.starts_with(&prefixo))
+            && e.detalhe.contains("; decisao ")
+    })
+}
+
+/// O objeto `time` de um `system.info` pedido pelo sistema.
+fn tempo_no_system_info() -> Result<alloc::string::String, &'static str> {
+    let r = fs_pedir(sistema_aqui(), "system.info", "{}");
+    let t = Json(r.as_bytes())
+        .member("result")
+        .and_then(|v| v.member("time"))
+        .ok_or("system.info sem o objeto time")?;
+    Ok(alloc::string::String::from_utf8_lossy(t.0).into_owned())
+}
+
+/// Espera cedendo a CPU por `ms` no relógio do kernel.
+fn esperar_ms(ms: u64) {
+    let alvo = crate::tempo::uptime_ms().saturating_add(ms);
+    while crate::tempo::uptime_ms() < alvo {
+        crate::fios::ceder();
+    }
+}
+
+/// Os parâmetros da disciplina com limiar, teto e separação que cabem nos
+/// segundos de um caso — o resto do desenho.
+fn parametros_curtos() -> hora::disciplina::Parametros {
+    hora::disciplina::Parametros {
+        limiar_minimo_ms: 6_000,
+        salto_maximo_ms: 10_000,
+        separacao_minima_ms: 1_000,
+        ..crate::hora::parametros_de_teste(crate::identidade::fontes_de_hora().as_deref())
+    }
+}
+
+/// A régua do civil anda sem voltar, em todo núcleo; o relógio do kernel
+/// é outro, e o civil e o lógico não o tocam. O lógico nunca fica abaixo do
+/// piso, e é o civil com o piso.
+fn hora_a_regua_e_os_tres_relogios() -> Resultado {
+    use crate::hora::contador::{self, Origem};
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
+    static PRONTOS: AtomicU64 = AtomicU64::new(0);
+    static VOLTOU: AtomicBool = AtomicBool::new(false);
+    static NUCLEOS: AtomicU64 = AtomicU64::new(0);
+
+    extern "C" fn ler_muito(_: u64) -> ! {
+        let mut antes = 0u64;
+        let mut civil_antes = 0u64;
+        for i in 0..20_000u32 {
+            let agora = contador::agora_ms();
+            let civil = crate::hora::civil::ler().map_or(0, |l| l.meio_ms);
+            if agora < antes || civil < civil_antes {
+                VOLTOU.store(true, SeqCst);
+            }
+            antes = agora;
+            civil_antes = civil;
+            NUCLEOS.fetch_or(1 << crate::nucleos::atual().min(63), SeqCst);
+            if i % 1000 == 0 {
+                crate::fios::ceder();
+            }
+        }
+        PRONTOS.fetch_add(1, SeqCst);
+        crate::fios::terminar()
+    }
+
+    // A régua tem a origem da arquitetura: declarada no ARM, medida no x86.
+    let origem = contador::origem();
+    let esperada = if cfg!(target_arch = "aarch64") {
+        Origem::Declarada
+    } else {
+        Origem::Calibrada
+    };
+    if origem != esperada || contador::hz() == 0 {
+        crate::log_error!(
+            "teste",
+            "regua {:?} a {} Hz, erro {} ppm",
+            origem,
+            contador::hz(),
+            contador::erro_ppm()
+        );
+        return Err("a regua do civil nao e o contador da arquitetura");
+    }
+    if contador::erro_ppm() > 200 {
+        return Err("a medida da frequencia do contador passou do teto de erro");
+    }
+    // Fios em vários núcleos lendo a régua e o civil ao mesmo tempo: nada
+    // volta — sem salto no meio, o civil também não.
+    PRONTOS.store(0, SeqCst);
+    VOLTOU.store(false, SeqCst);
+    NUCLEOS.store(0, SeqCst);
+    for _ in 0..4 {
+        crate::fios::criar("teste-regua", ler_muito, 0)?;
+    }
+    esperar_cedendo(|| PRONTOS.load(SeqCst) == 4, 6_000)?;
+    if VOLTOU.load(SeqCst) {
+        return Err("a regua ou o civil voltaram numa leitura");
+    }
+    crate::log_info!(
+        "teste",
+        "regua: {} Hz ({}), lida em nucleos {:#x}",
+        contador::hz(),
+        origem.nome(),
+        NUCLEOS.load(SeqCst)
+    );
+    // O relógio do kernel e a régua andam juntos — os dois medem a mesma
+    // passagem do tempo —, e são dois: a taxa de um contra o outro é
+    // medida e publicada, e não corrigida.
+    let (m0, r0) = (crate::tempo::uptime_ms(), contador::agora_ms());
+    esperar_ms(500);
+    let (m1, r1) = (crate::tempo::uptime_ms(), contador::agora_ms());
+    let (dm, dr) = (m1 - m0, r1 - r0);
+    if dr < 400 || dm < 400 || dm.abs_diff(dr) > dr / 4 + 20 {
+        crate::log_error!("teste", "monotonico {} ms, regua {} ms", dm, dr);
+        return Err("o monotonico e a regua nao medem a mesma passagem do tempo");
+    }
+    if contador::mono_ppm().is_none() {
+        return Err("com mais de dez segundos de regua, a taxa do monotonico nao foi publicada");
+    }
+    // O lógico: o civil com o piso, nunca abaixo de nenhum dos dois.
+    let piso = crate::persistencia::piso();
+    let civil_s = crate::hora::civil_s();
+    let logico = crate::persistencia::agora();
+    if logico < piso || civil_s.is_some_and(|c| logico < c) {
+        crate::log_error!(
+            "teste",
+            "piso {} logico {} civil {:?}",
+            piso,
+            logico,
+            civil_s
+        );
+        return Err("o logico ficou abaixo do piso ou do civil");
+    }
+    if crate::persistencia::agora() < logico {
+        return Err("o logico voltou");
+    }
+    Ok(())
+}
+
+/// Uma rodada honesta, ponta a ponta pelo gate: o serviço de hora pede às
+/// três fontes, conecta, manda, recebe e entrega; a rodada fecha num
+/// acordo de três chaves, e o civil sai do RTC para sincronizado — a
+/// primeira sincronização. Cada passo gravado como do serviço, pelo papel
+/// `tempo`; cada veredito com o resumo da resposta; o desfecho com o civil,
+/// o lógico e o estado antes e depois. E o `system.info` diz o mesmo, sem
+/// nonce, id nem resposta.
+fn hora_uma_rodada_honesta_pelo_gate() -> Resultado {
+    use politica::Codigo;
+    use politica::auditoria::Titular;
+    com_a_bancada_de_hora(2, 86_400, 60, || {
+        if civil_agora()?.estado != hora::disciplina::Estado::Rtc {
+            return Err("o civil recomecado nao esta no RTC");
+        }
+        let desde = crate::autorizacao::ultimo_registro();
+        let respondidas: u64 = (0..3)
+            .map(crate::rede::bancada_hora::respondidas_de_teste)
+            .sum();
+        let (conferidas, _, _) = crate::hora::CONFERENCIA.ler();
+        let comeco = crate::tempo::uptime_ms();
+        let d = rodada_do_servico();
+        let duracao = crate::tempo::uptime_ms() - comeco;
+        fechou_com(&d, &["nada", "gradual"], "sincronizado")?;
+        // O custo, para o benchmark: a rodada inteira, e a conferência de
+        // uma resposta — as duas assinaturas e o resto.
+        let (n, media, maior) = crate::hora::CONFERENCIA.ler();
+        if n < conferidas + 3 {
+            return Err("as tres respostas nao foram conferidas e medidas");
+        }
+        crate::log_info!(
+            "teste",
+            "rodada honesta: {} ms; a conferencia de uma resposta, {} ns em media e {} no pior caso ({} medidas)",
+            duracao,
+            crate::metricas::nanos(media),
+            crate::metricas::nanos(maior),
+            n
+        );
+        let l = civil_agora()?;
+        if l.estado != hora::disciplina::Estado::Sincronizado || l.incerteza_ms.is_none() {
+            return Err("depois do acordo, o civil nao esta sincronizado com incerteza");
+        }
+        let agora: u64 = (0..3)
+            .map(crate::rede::bancada_hora::respondidas_de_teste)
+            .sum();
+        if agora != respondidas + 3 {
+            return Err("as tres fontes nao responderam uma vez cada");
+        }
+        // Cada passo do serviço, pelo gate, gravado como dele.
+        let do_servico = |metodo: &str| {
+            crate::autorizacao::com_auditoria(|c| {
+                c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+                    .filter(|r| {
+                        r.seq > desde
+                            && r.evento.metodo == metodo
+                            && r.evento.titular == Titular::Servico
+                            && r.evento.agente == "hora"
+                            && r.evento.papel == "tempo"
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+        };
+        for metodo in [
+            "time.request",
+            "net.connect",
+            "net.send",
+            "net.recv",
+            "net.close",
+        ] {
+            if do_servico(metodo) < 3 {
+                crate::log_error!("teste", "{}: {}", metodo, do_servico(metodo));
+                return Err("um passo da rodada nao passou pelo gate como do servico");
+            }
+        }
+        // Os vereditos: a fonte e o resumo no recurso, a aceitação no
+        // detalhe.
+        for nome in crate::rede::bancada_hora::NOMES {
+            let (seq, e) =
+                ultimo_veredito(nome).ok_or("o veredito de uma fonte nao foi gravado")?;
+            let resumo = e.recurso.strip_prefix(nome).unwrap_or("").trim();
+            if seq <= desde
+                || e.codigo != Codigo::Allow
+                || !e.detalhe.contains("aceita midp ")
+                || resumo.len() != 64
+                || e.titular != Titular::Servico
+            {
+                crate::log_error!("teste", "{:?}", e);
+                return Err("o veredito nao foi gravado com a fonte, o resumo e o carimbo");
+            }
+        }
+        let (_, e) = ultimo_desfecho().ok_or("o desfecho da rodada nao foi gravado")?;
+        if !e.recurso.contains(" rtc>sincronizado")
+            || !e.recurso.contains(" logico ")
+            || !e.detalhe.contains(" acordo 3/3 ")
+            || e.codigo != Codigo::Allow
+            || e.detalhe.len() > politica::auditoria::MAIOR_DETALHE
+        {
+            crate::log_error!("teste", "{:?}", e);
+            return Err("o desfecho nao foi gravado com o civil, o logico, o estado e o quorum");
+        }
+        // O system.info diz o mesmo — e nada que seja de um pedido.
+        let t = tempo_no_system_info()?;
+        let j = Json(t.as_bytes());
+        let texto = |c: &str| j.member(c).and_then(|v| v.as_str());
+        let fontes = j.member("sources").ok_or("time sem sources")?;
+        let ultima = j
+            .member("rounds")
+            .and_then(|r| r.member("last"))
+            .ok_or("time sem a ultima rodada")?;
+        if texto("state") != Some("sincronizado")
+            || j.member("uncertainty_ms")
+                .and_then(|v| v.as_u64())
+                .is_none()
+            || fontes.member("registered").and_then(|v| v.as_u64()) != Some(3)
+            || fontes.member("quorum").and_then(|v| v.as_u64()) != Some(2)
+            || ultima.member("outcome").and_then(|v| v.as_str()) != Some("acordo")
+            || ultima.member("accepted").and_then(|v| v.as_u64()) != Some(3)
+            || ["nonce", "\"request\"", "\"id\"", "attachment"]
+                .iter()
+                .any(|p| t.contains(p))
+        {
+            crate::log_error!("teste", "{}", t);
+            return Err("o system.info time nao diz o que a rodada fez, ou diz demais");
+        }
+        let clock = fs_numero(&fs_pedir(sistema_aqui(), "system.info", "{}"), "rtc");
+        if clock.is_none() && crate::hora::rtc().is_some() {
+            return Err("o system.info perdeu o RTC cru");
+        }
+        Ok(())
+    })
+}
+
+/// Cada resposta ruim de uma fonte é um veredito dela, gravado com o
+/// código da classe — a forma, o que não é desta conversa, o que a chave
+/// fixada não assinou —, e o relógio não se move por ela: a rodada fecha
+/// com as outras duas, honestas. Uma recusa não consome o id: o lixo antes
+/// da resposta verdadeira não a impede de entrar.
+fn hora_cada_resposta_ruim_e_um_veredito() -> Resultado {
+    use crate::rede::bancada_hora::{self as bancada, Modo};
+    use politica::Codigo;
+    com_a_bancada_de_hora(2, 86_400, 60, || {
+        // Uma rodada honesta antes: a fonte do meio guarda uma resposta
+        // válida, que a repetida devolve depois.
+        fechou_com(&rodada_do_servico(), &["nada", "gradual"], "sincronizado")?;
+        let casos = [
+            (
+                Modo::ChaveErrada,
+                "assinatura_da_delegacao",
+                Codigo::DenyCredential,
+            ),
+            (
+                Modo::RespostaMalAssinada,
+                "assinatura_da_resposta",
+                Codigo::DenyCredential,
+            ),
+            (Modo::NonceErrado, "nonce", Codigo::DenyReplay),
+            (Modo::OutroPedido, "outro_pedido", Codigo::DenyReplay),
+            (
+                Modo::ForaDaDelegacao,
+                "fora_da_delegacao",
+                Codigo::DenyCredential,
+            ),
+            (Modo::RaioGrande, "raio", Codigo::InvalidArgument),
+            (Modo::VersaoErrada, "versao", Codigo::InvalidArgument),
+            (Modo::Malformada, "moldura", Codigo::InvalidArgument),
+            (Modo::Grande, "moldura", Codigo::InvalidArgument),
+            (Modo::Repetida, "nonce", Codigo::DenyReplay),
+        ];
+        for (modo, veredito, codigo) in casos {
+            bancada::honestas_de_teste();
+            bancada::modo_de_teste(1, modo);
+            let antes = crate::autorizacao::ultimo_registro();
+            let d = rodada_do_servico();
+            fechou_com(&d, &["nada", "gradual"], "sincronizado")?;
+            let recusa = registro_que(|e| {
+                e.metodo == "time.sync"
+                    && e.recurso.starts_with("bancada-b ")
+                    && e.detalhe.contains("recusada ")
+            })
+            .filter(|(seq, _)| *seq > antes);
+            let Some((_, e)) = recusa else {
+                crate::log_error!("teste", "{:?}: sem recusa", modo);
+                return Err("a resposta ruim nao virou um veredito gravado");
+            };
+            let esperado = alloc::format!("recusada {veredito} 1/4");
+            if !e.detalhe.contains(&esperado) || e.codigo != codigo {
+                crate::log_error!("teste", "{:?}: {:?}", modo, e);
+                return Err("o veredito da resposta ruim nao e o da conferencia");
+            }
+            let (_, fim) = ultimo_desfecho().ok_or("a rodada nao gravou o desfecho")?;
+            if !fim.detalhe.contains(" acordo 2/2 ") {
+                crate::log_error!("teste", "{:?}: {:?}", modo, fim);
+                return Err("a resposta ruim contou no acordo");
+            }
+        }
+        // O lixo antes da verdadeira: a recusa conta uma tentativa, e a
+        // verdadeira entra no mesmo id.
+        bancada::honestas_de_teste();
+        bancada::modo_de_teste(1, Modo::LixoAntes);
+        let antes = crate::autorizacao::ultimo_registro();
+        fechou_com(&rodada_do_servico(), &["nada", "gradual"], "sincronizado")?;
+        let (lixo, e) = registro_que(|e| {
+            e.metodo == "time.sync"
+                && e.recurso.starts_with("bancada-b ")
+                && e.detalhe.contains("recusada moldura 1/4")
+        })
+        .filter(|(seq, _)| *seq > antes)
+        .ok_or("o lixo antes da resposta nao foi recusado")?;
+        let (aceita, _) = ultimo_veredito("bancada-b").ok_or("sem veredito da fonte do meio")?;
+        let aceita_e = registro_numero(aceita).ok_or("o veredito sumiu do anel")?;
+        if aceita <= lixo || aceita_e.codigo != Codigo::Allow || e.codigo != Codigo::InvalidArgument
+        {
+            crate::log_error!("teste", "{:?}", aceita_e);
+            return Err("a recusa do lixo consumiu o id da resposta verdadeira");
+        }
+        let (_, fim) = ultimo_desfecho().ok_or("sem desfecho")?;
+        if !fim.detalhe.contains(" acordo 3/3 ") {
+            return Err("a verdadeira depois do lixo nao contou no acordo");
+        }
+        Ok(())
+    })
+}
+
+/// As entregas que não são de quem entrega: a resposta sem pedido, a
+/// resposta ao pedido de outro principal — o nonce estrangeiro —, a mesma
+/// resposta duas vezes — o nonce repetido —, o id de outro, as quatro
+/// tentativas, e a resposta que chega depois do prazo.
+fn hora_entregas_fora_do_pedido() -> Resultado {
+    use crate::rede::bancada_hora as bancada;
+    let hora = como_o_servico_de_hora();
+    let sistema = sistema_aqui();
+    let entregar = |quem, id: u64, resposta: &[u8]| {
+        let linha = pedido_rpc(
+            "time.sync",
+            &alloc::format!(r#"{{"id":{id},"attachment":{}}}"#, resposta.len()),
+        );
+        crate::nativo::responder_com_anexo_de_teste(quem, &linha, resposta)
+    };
+    let pedir = |quem| -> Result<(u64, alloc::vec::Vec<u8>), &'static str> {
+        let r = fs_pedir(quem, "time.request", r#"{"source":"bancada-a"}"#);
+        let id = fs_numero(&r, "id").ok_or("time.request sem id")?;
+        let pedido = fs_texto(&r, "request")
+            .and_then(|b| seguranca::util::de_base64(&b))
+            .ok_or("time.request sem o pedido")?;
+        if pedido.len() != hora::pedido::TAMANHO {
+            return Err("o pedido nao tem 1024 bytes");
+        }
+        Ok((id, pedido))
+    };
+    let veredito = |r: &str| fs_texto(r, "verdict").unwrap_or_default();
+    let erro = |r: &str| fs_texto(r, "error").unwrap_or_default();
+    com_a_bancada_de_hora(2, 86_400, 60, || {
+        // Sem pedido: o id não existe, e a tentativa fica gravada.
+        let r = entregar(hora, u64::MAX, &[0x52; 64]);
+        if erro(&r) != "nenhum pedido de hora aberto com este id" {
+            crate::log_error!("teste", "{}", r);
+            return Err("uma resposta sem pedido foi aceita");
+        }
+        let (_, e) = registro_que(|e| {
+            e.metodo == "time.sync" && e.recurso == alloc::format!("id {}", u64::MAX)
+        })
+        .ok_or("a entrega sem pedido nao foi gravada")?;
+        if e.codigo != politica::Codigo::InvalidArgument {
+            return Err("a entrega sem pedido nao foi gravada como argumento invalido");
+        }
+        // Dois principais, cada um com o seu pedido à mesma fonte. Os ids
+        // são por principal — a tabela do serviço e a dos outros contam os
+        // seus —, e o mesmo número pode ser dos dois: o que vale é o par.
+        // Para entregar no id do outro, um que não seja também de quem
+        // entrega: o pedido de novo abre outra rodada, com outro id.
+        let (id_s, pedido_s) = pedir(sistema)?;
+        let (mut id_h, mut pedido_h) = pedir(hora)?;
+        if id_h == id_s {
+            (id_h, pedido_h) = pedir(hora)?;
+        }
+        if id_h == id_s {
+            return Err("o pedido de novo nao trocou o id");
+        }
+        let resposta_s = bancada::resposta_de_teste(0, &pedido_s);
+        // O nonce estrangeiro: a resposta ao pedido do sistema, entregue
+        // pelo serviço ao pedido dele, é recusada — e não consome o id.
+        let r = entregar(hora, id_h, &resposta_s);
+        if veredito(&r) != "nonce" || fs_numero(&r, "attempt") != Some(1) {
+            crate::log_error!("teste", "{}", r);
+            return Err("a resposta ao pedido de outro principal foi aceita");
+        }
+        // O id do outro não existe para quem entrega.
+        let r = entregar(hora, id_s, &resposta_s);
+        if erro(&r) != "nenhum pedido de hora aberto com este id" {
+            crate::log_error!("teste", "{}", r);
+            return Err("o servico entregou para o id do sistema");
+        }
+        // O dono entrega a dele: aceita, e o id se consome.
+        let r = entregar(sistema, id_s, &resposta_s);
+        if veredito(&r) != "aceita" {
+            crate::log_error!("teste", "{}", r);
+            return Err("a resposta verdadeira ao pedido do sistema foi recusada");
+        }
+        // O nonce repetido: a mesma resposta de novo.
+        let r = entregar(sistema, id_s, &resposta_s);
+        if erro(&r) != "nenhum pedido de hora aberto com este id" {
+            crate::log_error!("teste", "{}", r);
+            return Err("a mesma resposta entrou duas vezes");
+        }
+        // E o serviço ainda entrega a dele no mesmo id: a recusa de antes
+        // não o consumiu.
+        let r = entregar(hora, id_h, &bancada::resposta_de_teste(0, &pedido_h));
+        if veredito(&r) != "aceita" {
+            crate::log_error!("teste", "{}", r);
+            return Err("a recusa do nonce estrangeiro consumiu o id do servico");
+        }
+        // Maior que o maior pacote — a rede não o traria, mas um anexo
+        // chega a 60 KiB —: a moldura recusa antes de ler um byte dele.
+        let (id, _) = pedir(hora)?;
+        let r = entregar(hora, id, &alloc::vec![0x47; 4096]);
+        if veredito(&r) != "moldura" || fs_numero(&r, "attempt") != Some(1) {
+            crate::log_error!("teste", "{}", r);
+            return Err("um pacote maior que o maior pacote nao foi recusado pela moldura");
+        }
+        // Quatro entregas ruins fecham o id; a quinta não acha nada.
+        let (id, pedido) = pedir(hora)?;
+        for i in 1..=4u64 {
+            let r = entregar(hora, id, &[0x52; 64]);
+            let fechou = Json(r.as_bytes())
+                .member("result")
+                .and_then(|v| v.member("closed"))
+                .and_then(|v| v.as_bool());
+            if fs_numero(&r, "attempt") != Some(i) || fechou != Some(i == 4) {
+                crate::log_error!("teste", "{}: {}", i, r);
+                return Err("as tentativas de um id nao tem o teto de quatro");
+            }
+        }
+        let r = entregar(hora, id, &bancada::resposta_de_teste(0, &pedido));
+        if erro(&r) != "nenhum pedido de hora aberto com este id" {
+            crate::log_error!("teste", "{}", r);
+            return Err("depois da quarta recusa, o id continuou aberto");
+        }
+        // A resposta atrasada: depois do prazo, nem a verdadeira vale.
+        let (id, pedido) = pedir(hora)?;
+        esperar_ms(crate::hora::PRAZO_MS + 300);
+        let r = entregar(hora, id, &bancada::resposta_de_teste(0, &pedido));
+        if veredito(&r) != "vencida" {
+            crate::log_error!("teste", "{}", r);
+            return Err("uma resposta depois do prazo foi aceita");
+        }
+        Ok(())
+    })
+}
+
+/// A rodada segue o registro, e os nonces se encadeiam (desenho §5): a
+/// primeira fonte abre a rodada com o nonce do gerador; a seguinte só é
+/// pedida depois de a anterior entregue, e o nonce dela é H(a última
+/// resposta aceita ‖ o aleatório) — a resposta de uma fonte prova que a
+/// anterior já tinha respondido. Começar do meio, pular uma fonte, pedir a
+/// seguinte com a anterior aberta e trocar uma resposta já aceita são
+/// recusados; pedir de novo a fonte em curso troca o pedido dela, e o de
+/// antes não fica aberto.
+fn hora_os_nonces_encadeados_e_a_ordem() -> Resultado {
+    use crate::rede::bancada_hora as bancada;
+    use hora::servidor_de_teste::nonce_do_pedido;
+    let sistema = sistema_aqui();
+    let pedir = |fonte: &str| {
+        fs_pedir(
+            sistema,
+            "time.request",
+            &alloc::format!(r#"{{"source":"{fonte}"}}"#),
+        )
+    };
+    let aberto = |r: &str| -> Result<(u64, alloc::vec::Vec<u8>), &'static str> {
+        let id = fs_numero(r, "id").ok_or("time.request sem id")?;
+        let pedido = fs_texto(r, "request")
+            .and_then(|b| seguranca::util::de_base64(&b))
+            .ok_or("time.request sem o pedido")?;
+        Ok((id, pedido))
+    };
+    let recusado = |r: &str| fs_texto(r, "code").as_deref() == Some("INVALID_REQUEST");
+    let entregar = |id: u64, resposta: &[u8]| {
+        let linha = pedido_rpc(
+            "time.sync",
+            &alloc::format!(r#"{{"id":{id},"attachment":{}}}"#, resposta.len()),
+        );
+        let r = crate::nativo::responder_com_anexo_de_teste(sistema, &linha, resposta);
+        fs_texto(&r, "verdict").unwrap_or_default()
+    };
+    com_a_bancada_de_hora(2, 86_400, 60, || {
+        if !recusado(&pedir("bancada-b")) {
+            return Err("uma rodada comecou fora da primeira fonte do registro");
+        }
+        // A primeira: o nonce é o aleatório do gerador.
+        let (id_a, pedido_a) = aberto(&pedir("bancada-a"))?;
+        if nonce_do_pedido(&pedido_a) != crate::hora::ultimo_aleatorio_de_teste() {
+            return Err("o nonce da primeira fonte nao e o do gerador");
+        }
+        if !recusado(&pedir("bancada-b")) || !recusado(&pedir("bancada-c")) {
+            return Err("a rodada seguiu com a primeira fonte aberta, ou pulou uma");
+        }
+        let resposta_a = bancada::resposta_de_teste(0, &pedido_a);
+        if entregar(id_a, &resposta_a) != "aceita" {
+            return Err("a resposta da primeira fonte foi recusada");
+        }
+        // As seguintes: o nonce encadeado na última aceita. Pedida de novo
+        // antes da entrega, a fonte em curso troca de pedido: o de antes não
+        // fica aberto, e a entrega dele não acha nada. (A primeira fonte
+        // pedida de novo abre outra rodada, que já larga tudo.)
+        let (substituido, _) = aberto(&pedir("bancada-b"))?;
+        let (id_b, pedido_b) = aberto(&pedir("bancada-b"))?;
+        if id_b == substituido || crate::hora::abertos_de_teste().1 != 1 {
+            return Err("o pedido substituido ficou aberto na tabela");
+        }
+        if !recusado(&fs_pedir(
+            sistema,
+            "time.sync",
+            &alloc::format!(r#"{{"id":{substituido}}}"#),
+        )) {
+            return Err("a entrega do pedido substituido achou alguma coisa");
+        }
+        let aleatorio_b = crate::hora::ultimo_aleatorio_de_teste();
+        let nonce_b = nonce_do_pedido(&pedido_b);
+        if nonce_b != hora::encadeamento::nonce(&resposta_a, &aleatorio_b) || nonce_b == aleatorio_b
+        {
+            return Err("o nonce da segunda fonte nao se encadeia na resposta da primeira");
+        }
+        let resposta_b = bancada::resposta_de_teste(1, &pedido_b);
+        if entregar(id_b, &resposta_b) != "aceita" {
+            return Err("a resposta da segunda fonte foi recusada");
+        }
+        if !recusado(&pedir("bancada-b")) {
+            return Err("uma resposta aceita foi trocada por um pedido novo");
+        }
+        let (id_c, pedido_c) = aberto(&pedir("bancada-c"))?;
+        let aleatorio_c = crate::hora::ultimo_aleatorio_de_teste();
+        if nonce_do_pedido(&pedido_c) != hora::encadeamento::nonce(&resposta_b, &aleatorio_c) {
+            return Err("o nonce da terceira fonte nao se encadeia na resposta da segunda");
+        }
+        if entregar(id_c, &bancada::resposta_de_teste(2, &pedido_c)) != "aceita" {
+            return Err("a resposta da terceira fonte foi recusada");
+        }
+        let (_, e) = ultimo_desfecho().ok_or("a rodada do sistema nao fechou")?;
+        if !e.detalhe.contains(" acordo 3/3 ") {
+            crate::log_error!("teste", "{:?}", e);
+            return Err("a rodada encadeada nao fechou com as tres chaves");
+        }
+        Ok(())
+    })
+}
+
+/// k ≥ 2 sempre: uma fonte só não move o relógio; k − 1 fontes também não;
+/// duas fontes coerentes, com k = 2, movem.
+fn hora_k_dois_sempre() -> Resultado {
+    use crate::rede::bancada_hora::{self as bancada, Modo};
+    let sem_acordo = |d: &crate::hora::servico::Desfecho, o_que: &'static str| -> Resultado {
+        fechou_com(d, &["sem_acordo"], "rtc").map_err(|_| o_que)?;
+        if civil_agora()?.estado != hora::disciplina::Estado::Rtc {
+            return Err(o_que);
+        }
+        Ok(())
+    };
+    com_a_bancada_de_hora(2, 86_400, 60, || {
+        bancada::modo_de_teste(1, Modo::Muda);
+        bancada::modo_de_teste(2, Modo::Muda);
+        sem_acordo(&rodada_do_servico(), "uma fonte sozinha moveu o relogio")?;
+        let (_, e) = ultimo_desfecho().ok_or("sem desfecho")?;
+        if !e.detalhe.contains(" sem_quorum 1/1 ") {
+            crate::log_error!("teste", "{:?}", e);
+            return Err("a rodada de uma fonte so nao foi gravada como sem quorum");
+        }
+        Ok(())
+    })?;
+    com_a_bancada_de_hora(3, 86_400, 60, || {
+        bancada::modo_de_teste(2, Modo::Muda);
+        sem_acordo(&rodada_do_servico(), "k - 1 fontes moveram o relogio")
+    })?;
+    com_a_bancada_de_hora(2, 86_400, 60, || {
+        bancada::modo_de_teste(2, Modo::Muda);
+        fechou_com(&rodada_do_servico(), &["nada", "gradual"], "sincronizado")?;
+        let (_, e) = ultimo_desfecho().ok_or("sem desfecho")?;
+        if !e.detalhe.contains(" acordo 2/2 ") {
+            return Err("duas fontes coerentes nao deram o acordo");
+        }
+        // A fonte muda: o veredito dela é o aviso de que nada veio.
+        let (_, e) = ultimo_veredito("bancada-c").ok_or("sem veredito da fonte muda")?;
+        if e.detalhe.contains("sem_resposta") && e.codigo == politica::Codigo::Error {
+            Ok(())
+        } else {
+            crate::log_error!("teste", "{:?}", e);
+            Err("a fonte ausente nao foi gravada como sem resposta")
+        }
+    })
+}
+
+/// Fontes que não concordam: com os intervalos disjuntos, a interseção é
+/// vazia e não há acordo — a marca é `divergente`, e o civil não se move;
+/// com uma fonte fora do trecho das outras duas, o acordo é das duas, e a
+/// terceira fica marcada.
+fn hora_fontes_divergentes() -> Resultado {
+    use crate::rede::bancada_hora as bancada;
+    com_a_bancada_de_hora(2, 86_400, 60, || {
+        bancada::deslocamento_de_teste(1, 120);
+        bancada::deslocamento_de_teste(2, 240);
+        let antes = civil_agora()?;
+        fechou_com(&rodada_do_servico(), &["sem_acordo"], "rtc")?;
+        let depois = civil_agora()?;
+        if !depois.divergente || depois.meio_ms > antes.meio_ms + 60_000 {
+            return Err("fontes disjuntas moveram o relogio, ou nao ficaram marcadas");
+        }
+        let (_, e) = ultimo_desfecho().ok_or("sem desfecho")?;
+        if !e.detalhe.contains(" sem_quorum 1/3 ")
+            || !e.recurso.contains(" divergente")
+            || e.codigo != politica::Codigo::Conflict
+        {
+            crate::log_error!("teste", "{:?}", e);
+            return Err("a intersecao vazia nao foi gravada como divergencia");
+        }
+        bancada::deslocamento_de_teste(1, 0);
+        fechou_com(&rodada_do_servico(), &["nada", "gradual"], "sincronizado")?;
+        let l = civil_agora()?;
+        let (_, e) = ultimo_desfecho().ok_or("sem desfecho")?;
+        if !l.divergente || !e.detalhe.contains(" acordo 2/3 ") {
+            crate::log_error!("teste", "{:?} {:?}", l, e);
+            return Err("a fonte fora do acordo nao ficou marcada");
+        }
+        Ok(())
+    })
+}
+
+/// A disciplina no civil, com o limiar, o teto e a separação apertados
+/// para caber num caso: o ajuste gradual anda no máximo 5% mais rápido e
+/// nunca para trás; o desvio grande pede duas rodadas seguidas, e então
+/// salta; o salto acima do teto fica pendente, e só a confirmação do
+/// administrador o aplica — o civil e o lógico andam juntos, e o
+/// monotônico não muda; para trás, fora do envelope, também pendente, e
+/// confirmado o civil volta enquanto o lógico fica no piso, adiantado, até
+/// o civil passar.
+fn hora_a_disciplina_no_civil() -> Resultado {
+    use crate::rede::bancada_hora as bancada;
+    use hora::disciplina::Estado;
+    let todas = |s: i64| {
+        for i in 0..3 {
+            bancada::deslocamento_de_teste(i, s);
+        }
+    };
+    let confirmar = || -> Result<alloc::string::String, &'static str> {
+        executar_admin_com(0, &ADMIN_DE_TESTE, "time.confirm", "{}", "{}")
+    };
+    crate::identidade::registrar_administrador_de_teste(
+        sigilo::publica_de(&ADMIN_DE_TESTE),
+        "administrador",
+    );
+    let r = com_a_bancada_de_hora(2, 86_400, 60, || {
+        crate::hora::civil::reiniciar_de_teste(parametros_curtos());
+        for i in 0..3 {
+            bancada::raio_de_teste(i, 1);
+        }
+        fechou_com(&rodada_do_servico(), &["nada", "gradual"], "sincronizado")?;
+
+        // Gradual: 4 s adiante, dentro do limiar de 6 s. O civil anda mais
+        // depressa, até 5%, e nunca para trás — nem de uma vez: ao longo da
+        // própria rodada, ele não andou mais que a régua e os 5%.
+        todas(4);
+        let (ca, ra) = (civil_agora()?.meio_ms, crate::hora::contador::agora_ms());
+        fechou_com(&rodada_do_servico(), &["gradual"], "sincronizado")?;
+        let (c0, r0) = (civil_agora()?.meio_ms, crate::hora::contador::agora_ms());
+        if (c0 - ca) * 1000 > (r0 - ra) * 1055 + 50_000 {
+            crate::log_error!("teste", "civil {} ms em {} ms de regua", c0 - ca, r0 - ra);
+            return Err("o ajuste gradual aplicou o desvio de uma vez");
+        }
+        let mut antes = c0;
+        let fim = crate::tempo::uptime_ms() + 1_000;
+        while crate::tempo::uptime_ms() < fim {
+            let c = civil_agora()?.meio_ms;
+            if c < antes {
+                return Err("o ajuste gradual voltou o civil");
+            }
+            antes = c;
+            crate::fios::ceder();
+        }
+        let (c1, r1) = (civil_agora()?.meio_ms, crate::hora::contador::agora_ms());
+        let (dc, dr) = (c1 - c0, r1 - r0);
+        if dc < dr || dc * 1000 > dr * 1055 {
+            crate::log_error!("teste", "civil {} ms em {} ms de regua", dc, dr);
+            return Err("o ajuste gradual passou de 5%, ou nao adiantou o civil");
+        }
+
+        // Um desvio grande: a primeira rodada só o vê; a seguinte, depois
+        // da separação, salta — e descarta o gradual em curso.
+        todas(9);
+        let m0 = crate::tempo::uptime_ms();
+        let c0 = civil_agora()?.meio_ms;
+        fechou_com(&rodada_do_servico(), &["candidato"], "sincronizado")?;
+        if civil_agora()?.meio_ms > c0 + 3_000 {
+            return Err("o candidato a salto ja moveu o civil");
+        }
+        // Depois da primeira sincronização, e com o intervalo do civil longe
+        // do acordo, o salto é além do envelope — e a auditoria o diz.
+        esperar_ms(1_100);
+        fechou_com(&rodada_do_servico(), &["salto_alem"], "sincronizado")?;
+        let (_, e) = ultimo_desfecho().ok_or("o salto nao foi gravado")?;
+        if !e.detalhe.contains(" salto_alem") || e.codigo != politica::Codigo::Allow {
+            crate::log_error!("teste", "{:?}", e);
+            return Err("o salto alem do envelope nao foi gravado como tal");
+        }
+        let c1 = civil_agora()?.meio_ms;
+        let m1 = crate::tempo::uptime_ms();
+        if c1 < c0 + 6_000 {
+            return Err("o salto confirmado por duas rodadas nao moveu o civil");
+        }
+        // O monotônico andou o tempo que passou, e não o salto.
+        if (m1 - m0) + 4_000 > c1 - c0 {
+            crate::log_error!("teste", "monotonico {} ms, civil {} ms", m1 - m0, c1 - c0);
+            return Err("o salto moveu o monotonico");
+        }
+        let logico = crate::persistencia::agora();
+        if logico * 1000 + 1_000 < c1 {
+            return Err("o logico nao acompanhou o salto do civil");
+        }
+
+        // Acima do teto de 10 s: pendente. O civil não se move — e o NSF,
+        // que lê a rodada, vê o salto pendente e só o vê: nem o confirma,
+        // nem mexe no civil.
+        todas(14);
+        let c0 = civil_agora()?.meio_ms;
+        com_o_nsf(|| {
+            fechou_com(&rodada_do_servico(), &["pendente"], "sincronizado")?;
+            crate::seguranca::passo();
+            crate::seguranca::passo();
+            let status = crate::seguranca::consultar(seguranca::relatorio::status)?;
+            let tempo = Json(status.as_bytes())
+                .member("time")
+                .ok_or("o NSF nao diz o tempo")?;
+            if !alloc::string::String::from_utf8_lossy(tempo.0).contains("\"pendente\"") {
+                crate::log_error!("teste", "{}", status);
+                return Err("o NSF nao viu o salto pendente");
+            }
+            Ok(())
+        })?;
+        let l = civil_agora()?;
+        if l.pendente_ms.is_none_or(|p| p < 10_000) || l.meio_ms > c0 + 3_000 {
+            return Err("o salto acima do teto nao ficou pendente, ou alguem o aplicou");
+        }
+        if registro_que(|e| {
+            e.metodo == "time.confirm" && e.titular == politica::auditoria::Titular::Servico
+        })
+        .is_some()
+        {
+            return Err("um servico confirmou um salto de hora");
+        }
+        let (_, e) = ultimo_desfecho().ok_or("sem desfecho")?;
+        if !e.recurso.contains(" pendente") || e.codigo != politica::Codigo::Conflict {
+            crate::log_error!("teste", "{:?}", e);
+            return Err("o salto pendente nao foi gravado como conflito");
+        }
+        // A rodada que pediu o salto é a evidência: o system.info a diz, e
+        // a confirmação a grava.
+        let numero = e
+            .detalhe
+            .split(' ')
+            .find_map(|p| p.strip_prefix('r').and_then(|n| n.parse::<u64>().ok()))
+            .ok_or("o desfecho sem o numero da rodada")?;
+        let t = tempo_no_system_info()?;
+        if Json(t.as_bytes())
+            .member("pending_round")
+            .and_then(|v| v.as_u64())
+            != Some(numero)
+        {
+            crate::log_error!("teste", "rodada {} e {}", numero, t);
+            return Err("o system.info nao diz a rodada do salto pendente");
+        }
+        // Só o administrador, com prova, confirma — e confirma o que o
+        // acordo pediu, levado até agora.
+        let r = confirmar()?;
+        if !r.contains(r#""executed":true"#) || !r.contains(r#""applied":"salto +"#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o administrador nao confirmou o salto pendente");
+        }
+        let l = civil_agora()?;
+        if l.pendente_ms.is_some() || l.meio_ms < c0 + 10_000 {
+            return Err("confirmado, o salto nao foi aplicado");
+        }
+        let (_, e) = registro_que(|e| {
+            e.metodo == "time.confirm"
+                && e.codigo == politica::Codigo::Allow
+                && e.recurso.starts_with("salto +")
+        })
+        .ok_or("a confirmacao nao foi gravada com o salto")?;
+        if !e.recurso.contains(" civil ")
+            || !e.recurso.contains(" logico ")
+            || !e.recurso.contains(&alloc::format!(" r{numero} "))
+        {
+            crate::log_error!("teste", "{:?}", e);
+            return Err("a confirmacao nao gravou a rodada, o civil e o logico");
+        }
+        let t = tempo_no_system_info()?;
+        if !t.contains(r#""pending_round":null"#) || !t.contains(r#""pending_ms":null"#) {
+            crate::log_error!("teste", "{}", t);
+            return Err("confirmado, o system.info ainda diz um salto pendente");
+        }
+        let r = confirmar()?;
+        if !r.contains(r#""code":"CONFLICT""#) {
+            return Err("um segundo time.confirm achou outro salto");
+        }
+
+        // Para trás, fora do envelope: pendente; confirmado, o civil volta
+        // e o lógico fica no piso, adiantado.
+        todas(0);
+        fechou_com(&rodada_do_servico(), &["nada", "gradual"], "sincronizado")?;
+        todas(-8);
+        let c0 = civil_agora()?.meio_ms;
+        fechou_com(&rodada_do_servico(), &["pendente"], "sincronizado")?;
+        if civil_agora()?.meio_ms + 1_000 < c0 {
+            return Err("o salto para tras sem confirmacao voltou o civil");
+        }
+        let piso = crate::persistencia::agora();
+        if !confirmar()?.contains(r#""executed":true"#) {
+            return Err("o administrador nao confirmou o salto para tras");
+        }
+        let l = civil_agora()?;
+        if l.meio_ms + 5_000 > c0 {
+            return Err("confirmado, o salto para tras nao voltou o civil");
+        }
+        if crate::persistencia::agora() < piso {
+            return Err("o logico voltou com o civil");
+        }
+        let t = tempo_no_system_info()?;
+        if !t.contains(r#""adiantado""#) {
+            crate::log_error!("teste", "{}", t);
+            return Err("o logico parado no piso nao ficou marcado adiantado");
+        }
+        // O lógico volta a andar quando o civil passa o piso.
+        esperar_cedendo(
+            || crate::hora::civil_s().unwrap_or(0) > crate::persistencia::piso(),
+            1_500,
+        )
+        .map_err(|_| "o civil nao alcancou o piso")?;
+        if civil_agora()?.estado != Estado::Sincronizado {
+            return Err("o civil saiu de sincronizado");
+        }
+        Ok(())
+    });
+    crate::identidade::esquecer_registrados();
+    r
+}
+
+/// Os estados: `rtc` antes de tudo; `sincronizado` com o acordo;
+/// `holdover` passada a janela sem acordo; `vencido` com a incerteza acima
+/// do teto; e `sincronizado` de novo com evidência nova. Uma rodada com as
+/// fontes caladas é perdida, gravada, e não volta o estado ao RTC.
+fn hora_os_estados_e_a_recuperacao() -> Resultado {
+    use crate::rede::bancada_hora::{self as bancada, Modo};
+    use hora::disciplina::Estado;
+    com_a_bancada_de_hora(2, 86_400, 60, || {
+        crate::hora::civil::reiniciar_de_teste(hora::disciplina::Parametros {
+            janela_sincronizado_ms: 1_500,
+            deriva_ppm: 300_000,
+            teto_da_incerteza_ms: 4_000,
+            ..parametros_curtos()
+        });
+        for i in 0..3 {
+            bancada::raio_de_teste(i, 1);
+        }
+        let estado = || civil_agora().map(|l| l.estado);
+        if estado()? != Estado::Rtc {
+            return Err("o civil nao comecou no RTC");
+        }
+        fechou_com(&rodada_do_servico(), &["nada", "gradual"], "sincronizado")?;
+        esperar_cedendo(|| estado() == Ok(Estado::Holdover), 500)
+            .map_err(|_| "passada a janela, o civil nao foi a holdover")?;
+        let u0 = civil_agora()?.incerteza_ms.unwrap_or(0);
+        esperar_cedendo(|| estado() == Ok(Estado::Vencido), 2_000)
+            .map_err(|_| "com a incerteza acima do teto, o civil nao venceu")?;
+        if civil_agora()?.incerteza_ms.unwrap_or(0) <= u0 {
+            return Err("a incerteza nao cresceu no holdover");
+        }
+        let t = tempo_no_system_info()?;
+        if !t.contains(r#""state":"vencido""#) {
+            crate::log_error!("teste", "{}", t);
+            return Err("o system.info nao disse vencido");
+        }
+        // Recuperação: evidência nova.
+        fechou_com(&rodada_do_servico(), &["nada", "gradual"], "sincronizado")?;
+        // Perda de todas as fontes: a rodada perdida é gravada.
+        let perdidas = |t: &str| {
+            Json(t.as_bytes())
+                .member("rounds")
+                .and_then(|r| r.member("lost"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+        };
+        let antes = perdidas(&tempo_no_system_info()?);
+        for i in 0..3 {
+            bancada::modo_de_teste(i, Modo::Muda);
+        }
+        let d = rodada_do_servico();
+        let crate::hora::servico::Desfecho::Fechada { efeito, estado: e } = &d else {
+            crate::log_error!("teste", "{:?}", d);
+            return Err("a rodada sem nenhuma fonte nao fechou");
+        };
+        if efeito != "sem_acordo" || e == "rtc" {
+            return Err("a rodada perdida moveu o relogio, ou voltou ao RTC");
+        }
+        if perdidas(&tempo_no_system_info()?) != antes + 1 {
+            return Err("a rodada perdida nao foi contada");
+        }
+        let (_, e) = ultimo_desfecho().ok_or("sem desfecho da rodada perdida")?;
+        if !e.detalhe.contains(" sem_quorum 0/0 ") || e.codigo != politica::Codigo::Error {
+            crate::log_error!("teste", "{:?}", e);
+            return Err("a rodada perdida nao foi gravada");
+        }
+        Ok(())
+    })
+}
+
+/// A resposta que chega tarde pela rede: a fonte atrasa além do prazo do
+/// pedido; quem espera desiste no prazo e avisa que nada veio, e o
+/// datagrama atrasado não entra em nada.
+fn hora_a_resposta_atrasada_na_rede() -> Resultado {
+    use crate::rede::bancada_hora as bancada;
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
+    static ID: AtomicU64 = AtomicU64::new(0);
+    static FIM: AtomicBool = AtomicBool::new(false);
+    static DESFECHO: crate::trava::Mutex<Option<crate::hora::servico::Desfecho>> =
+        crate::trava::Mutex::new(None);
+    extern "C" fn rodada_num_fio(_: u64) -> ! {
+        ID.store(crate::fios::id_atual(), SeqCst);
+        let d = rodada_do_servico();
+        crate::arch::sem_interrupcoes(|| *DESFECHO.lock() = Some(d));
+        FIM.store(true, SeqCst);
+        crate::fios::terminar()
+    }
+    com_a_bancada_de_hora(2, 86_400, 60, || {
+        bancada::atraso_de_teste(1, crate::hora::PRAZO_MS + 1_000);
+        // A rodada num fio dela: esperando a fonte atrasada, ele sai do
+        // rodízio — bloqueado até o prazo, e não descansando a cada
+        // interrupção (ver `fios::bloquear_em`).
+        ID.store(0, SeqCst);
+        FIM.store(false, SeqCst);
+        crate::fios::criar("teste-hora-atrasada", rodada_num_fio, 0)?;
+        let mut esperou = false;
+        esperar_cedendo(
+            || {
+                let id = ID.load(SeqCst);
+                esperou |= id != 0 && crate::fios::esperando_de_teste(id);
+                FIM.load(SeqCst)
+            },
+            1_000,
+        )
+        .map_err(|_| "a rodada com a fonte atrasada nao fechou")?;
+        if !esperou {
+            return Err("a rodada esperou a fonte atrasada sem sair do rodizio");
+        }
+        let d = crate::arch::sem_interrupcoes(|| DESFECHO.lock().take())
+            .ok_or("a rodada nao deixou o desfecho")?;
+        fechou_com(&d, &["nada", "gradual"], "sincronizado")?;
+        let (_, e) = ultimo_veredito("bancada-b").ok_or("sem veredito da fonte atrasada")?;
+        if !e.detalhe.contains("sem_resposta") {
+            crate::log_error!("teste", "{:?}", e);
+            return Err("a resposta atrasada entrou");
+        }
+        let (_, fim) = ultimo_desfecho().ok_or("sem desfecho")?;
+        if !fim.detalhe.contains(" acordo 2/2 ") {
+            return Err("a fonte atrasada contou no acordo");
+        }
+        // O atrasado chega depois, a uma associação fechada: nada muda.
+        let antes = crate::autorizacao::ultimo_registro();
+        esperar_ms(1_500);
+        let depois = registro_que(|e| e.metodo == "time.sync").map_or(0, |(s, _)| s);
+        if depois > antes {
+            return Err("o datagrama atrasado virou uma entrega");
+        }
+        Ok(())
+    })
+}
+
+/// A revogação e a política no meio da rodada. Tirado `time.sync` do papel
+/// `tempo` entre o pedido e a entrega, a entrega é recusada pelo gate; a
+/// política de volta, a rodada aberta sob a outra já não existe — nada
+/// dela chega ao civil. Uma escrita qualquer de política no meio da rodada
+/// também a larga.
+fn hora_revogacao_e_politica_no_meio_da_rodada() -> Resultado {
+    use crate::rede::bancada_hora as bancada;
+    let hora = como_o_servico_de_hora();
+    crate::identidade::registrar_administrador_de_teste(
+        sigilo::publica_de(&ADMIN_DE_TESTE),
+        "administrador",
+    );
+    let escrita = |linha: &str| -> Resultado {
+        let p = alloc::format!(r#"{{"line":"{linha}"}}"#);
+        let r = executar_admin_com(0, &ADMIN_DE_TESTE, "policy.write", &p, &p)?;
+        if r.contains(r#""executed":true"#) {
+            Ok(())
+        } else {
+            crate::log_error!("teste", "{}: {}", linha, r);
+            Err("uma linha de politica do caso nao foi escrita")
+        }
+    };
+    let pedir = |fonte: &str| -> Result<(u64, alloc::vec::Vec<u8>), &'static str> {
+        let r = fs_pedir(
+            hora,
+            "time.request",
+            &alloc::format!(r#"{{"source":"{fonte}"}}"#),
+        );
+        let id = fs_numero(&r, "id").ok_or("time.request sem id")?;
+        let pedido = fs_texto(&r, "request")
+            .and_then(|b| seguranca::util::de_base64(&b))
+            .ok_or("time.request sem o pedido")?;
+        Ok((id, pedido))
+    };
+    let entregar = |id: u64, resposta: &[u8]| {
+        let linha = pedido_rpc(
+            "time.sync",
+            &alloc::format!(r#"{{"id":{id},"attachment":{}}}"#, resposta.len()),
+        );
+        crate::nativo::responder_com_anexo_de_teste(hora, &linha, resposta)
+    };
+    let r = com_a_bancada_de_hora(2, 86_400, 60, || {
+        let antes = crate::autorizacao::ultimo_registro();
+        let civil0 = civil_agora()?;
+        // Revogado entre o pedido e a entrega.
+        let (id, pedido) = pedir("bancada-a")?;
+        let resposta = bancada::resposta_de_teste(0, &pedido);
+        escrita("papel tempo net.connect")?;
+        let r = entregar(id, &resposta);
+        if !recusado_com(&r, "DENY_PERMISSION") {
+            crate::log_error!("teste", "{}", r);
+            return Err("revogado time.sync, a entrega passou pelo gate");
+        }
+        escrita("papel tempo net.connect time.sync")?;
+        let r = entregar(id, &resposta);
+        if fs_texto(&r, "error").as_deref() != Some("nenhum pedido de hora aberto com este id") {
+            crate::log_error!("teste", "{}", r);
+            return Err("a rodada aberta sob a politica de antes continuou valendo");
+        }
+        // Uma escrita qualquer no meio da rodada: a fonte seguinte não é
+        // mais a seguinte de rodada nenhuma.
+        crate::autorizacao::encher_a_taxa_do_servico_de_teste();
+        let (id, pedido) = pedir("bancada-a")?;
+        let r = entregar(id, &bancada::resposta_de_teste(0, &pedido));
+        if fs_texto(&r, "verdict").as_deref() != Some("aceita") {
+            crate::log_error!("teste", "{}", r);
+            return Err("a primeira fonte da rodada nao foi aceita");
+        }
+        escrita("taxa tempo 10 20")?;
+        let r = fs_pedir(hora, "time.request", r#"{"source":"bancada-b"}"#);
+        if fs_texto(&r, "code").as_deref() != Some("INVALID_REQUEST") {
+            crate::log_error!("teste", "{}", r);
+            return Err("a rodada continuou depois de uma escrita de politica");
+        }
+        // Nada disso chegou ao civil: nenhum desfecho de rodada, e o
+        // estado de antes.
+        if ultimo_desfecho().is_some_and(|(s, _)| s > antes) {
+            return Err("uma rodada interrompida pela politica chegou ao civil");
+        }
+        if civil_agora()?.estado != civil0.estado {
+            return Err("o civil mudou de estado sem rodada nenhuma");
+        }
+        Ok(())
+    });
+    crate::autorizacao::carregar();
+    crate::identidade::esquecer_registrados();
+    r
+}
+
+/// O ponto de commit da rodada — a última resposta já conferida, antes do
+/// civil: o que chega ali descarta a rodada inteira, e o descarte fica
+/// gravado; nada dela chega ao civil. Uma escrita de política que não tira
+/// nada muda a versão da política; a sessão de quem faz a rodada acabando
+/// não muda versão nenhuma, e só a decisão refeita a vê. As duas chegam
+/// pelo gancho da reconfirmação, onde nenhum fio da suíte acertaria a
+/// hora: no meio da conferência das duas assinaturas da última resposta.
+fn hora_o_ponto_de_commit_da_rodada() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use crate::pessoas::{Console, IdSessao};
+    use crate::rede::bancada_hora as bancada;
+    use politica::Codigo;
+    static SESSAO: crate::trava::Mutex<Option<IdSessao>> = crate::trava::Mutex::new(None);
+    fn trocar_a_politica() {
+        let mesma = crate::autorizacao::com_politica(|p| p.clone());
+        crate::autorizacao::trocar_politica(mesma);
+    }
+    fn encerrar_a_sessao() {
+        if let Some(id) = crate::arch::sem_interrupcoes(|| SESSAO.lock().take()) {
+            crate::pessoas::sair(id);
+        }
+    }
+    // Uma rodada inteira de `quem`, com `gancho` no commit da última
+    // entrega: a resposta dela.
+    let rodada = |quem: Chamador, gancho: fn()| -> Result<alloc::string::String, &'static str> {
+        let mut ultima = alloc::string::String::new();
+        for (i, fonte) in bancada::NOMES.iter().enumerate() {
+            let r = fs_pedir(
+                quem,
+                "time.request",
+                &alloc::format!(r#"{{"source":"{fonte}"}}"#),
+            );
+            let id = fs_numero(&r, "id").ok_or("time.request sem id")?;
+            let pedido = fs_texto(&r, "request")
+                .and_then(|b| seguranca::util::de_base64(&b))
+                .ok_or("time.request sem o pedido")?;
+            let resposta = bancada::resposta_de_teste(i, &pedido);
+            let linha = pedido_rpc(
+                "time.sync",
+                &alloc::format!(r#"{{"id":{id},"attachment":{}}}"#, resposta.len()),
+            );
+            if i + 1 == bancada::NOMES.len() {
+                crate::autorizacao::antes_da_reconfirmacao_de_teste(Some(gancho));
+            }
+            ultima = crate::nativo::responder_com_anexo_de_teste(quem, &linha, &resposta);
+            crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+        }
+        Ok(ultima)
+    };
+    // A rodada fechou e foi descartada pelo motivo, o descarte gravado, e
+    // nenhum desfecho chegou ao civil.
+    let descartada = |r: &str, motivo: &str, antes: u64| -> Resultado {
+        let descarte = Json(r.as_bytes())
+            .member("result")
+            .and_then(|x| x.member("round"))
+            .and_then(|x| x.member("discarded"))
+            .and_then(|x| x.as_str());
+        if descarte != Some(motivo) || r.contains(r#""effect""#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("a rodada mudada no ponto de commit nao foi descartada");
+        }
+        let gravado = registro_que(|e| {
+            e.metodo == "time.sync" && e.recurso == "civil" && e.codigo == Codigo::DenyPolicy
+        });
+        if !gravado.is_some_and(|(s, e)| s > antes && e.detalhe.contains(" descartada: ")) {
+            return Err("o descarte da rodada nao foi gravado");
+        }
+        if ultimo_desfecho().is_some_and(|(s, _)| s > antes) {
+            return Err("uma rodada descartada chegou ao civil");
+        }
+        Ok(())
+    };
+    let r = com_a_bancada_de_hora(2, 86_400, 60, || {
+        let estado = civil_agora()?.estado;
+        // A política escrita no meio: a mesma, numa versão nova.
+        let antes = crate::autorizacao::ultimo_registro();
+        let r = rodada(sistema_aqui(), trocar_a_politica)?;
+        descartada(&r, "a politica mudou durante a rodada", antes)?;
+        // A sessão da pessoa que faz a rodada acaba no meio: a versão é a
+        // mesma, e a decisão refeita não vale mais.
+        let delegado = politica_trocada(&[(
+            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read\n",
+            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read time.sync\n",
+        )])?;
+        com_a_politica(delegado, || {
+            let id = crate::pessoas::sessao_de_teste(
+                Console::Terminal(151),
+                "relogio-commit",
+                "operador",
+            );
+            crate::arch::sem_interrupcoes(|| *SESSAO.lock() = Some(id));
+            let antes = crate::autorizacao::ultimo_registro();
+            let r = rodada(Chamador::Pessoa(id), encerrar_a_sessao);
+            encerrar_a_sessao();
+            descartada(&r?, "a decisao nao vale mais pela politica de agora", antes)
+        })?;
+        if civil_agora()?.estado != estado {
+            return Err("o civil mudou de estado sem rodada nenhuma aplicada");
+        }
+        Ok(())
+    });
+    crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+    r
+}
+
+/// A rodada inteira — os pedidos, as esperas, a conferência das três
+/// respostas, cada uma com duas assinaturas Ed25519 no fundo do despacho
+/// do gate, o fechamento e a auditoria — cabe com folga na pilha de um fio:
+/// o fio do serviço de hora tem a de um fio qualquer. A conta é a marca
+/// d'água da pilha de um fio novo; a folga, de um quarto dela. No perfil de
+/// depuração, cada temporário tem lugar próprio na pilha: é ali que a conta
+/// aperta.
+fn hora_a_rodada_cabe_na_pilha_de_um_fio() -> Resultado {
+    use crate::fios::pilha::TAMANHO_DA_PILHA;
+    use core::sync::atomic::{AtomicU64, Ordering::SeqCst};
+    static USADO: AtomicU64 = AtomicU64::new(0);
+    // 1, sincronizada; 2, outra coisa.
+    static DESFECHO: AtomicU64 = AtomicU64::new(0);
+    extern "C" fn fio(_: u64) -> ! {
+        let d = rodada_do_servico();
+        let ok = matches!(
+            &d,
+            crate::hora::servico::Desfecho::Fechada { estado, .. } if estado == "sincronizado"
+        );
+        if !ok {
+            crate::log_error!("teste", "{:?}", d);
+        }
+        let usado = crate::fios::pilha::usado_da_pilha_deste_fio().unwrap_or(u64::MAX);
+        USADO.store(usado, SeqCst);
+        DESFECHO.store(if ok { 1 } else { 2 }, SeqCst);
+        crate::fios::terminar()
+    }
+    com_a_bancada_de_hora(2, 86_400, 60, || {
+        USADO.store(0, SeqCst);
+        DESFECHO.store(0, SeqCst);
+        crate::fios::criar("teste-hora-pilha", fio, 0)?;
+        esperar_cedendo(|| DESFECHO.load(SeqCst) != 0, 10_000)?;
+        if DESFECHO.load(SeqCst) != 1 {
+            return Err("a rodada num fio novo nao fechou sincronizada");
+        }
+        let usado = USADO.load(SeqCst);
+        crate::log_info!(
+            "teste",
+            "a rodada usou {} de {} bytes da pilha do fio",
+            usado,
+            TAMANHO_DA_PILHA
+        );
+        if usado > TAMANHO_DA_PILHA * 3 / 4 {
+            return Err("a rodada passa de tres quartos da pilha de um fio");
+        }
+        Ok(())
+    })
+}
+
+/// Concorrência: o serviço de hora e o sistema fazem rodadas ao mesmo
+/// tempo, sobre as mesmas fontes — cada um com os pedidos e a rodada dele,
+/// que não se misturam —, enquanto outros fios leem o civil e o
+/// `system.info time` e o NSF lê a auditoria. Todas as rodadas fecham com
+/// o acordo das três fontes, o civil lido nunca volta, os carimbos da
+/// auditoria nunca descem, e o NSF não age sobre o serviço de hora.
+fn hora_rodadas_leitores_e_nsf_ao_mesmo_tempo() -> Resultado {
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
+    static FECHADAS: AtomicU64 = AtomicU64::new(0);
+    static ERRADAS: AtomicU64 = AtomicU64::new(0);
+    static PRONTOS: AtomicU64 = AtomicU64::new(0);
+    static PARAR: AtomicBool = AtomicBool::new(false);
+    static VOLTOU: AtomicBool = AtomicBool::new(false);
+    static LEITURAS: AtomicU64 = AtomicU64::new(0);
+
+    fn contar(d: crate::hora::servico::Desfecho) {
+        match d {
+            crate::hora::servico::Desfecho::Fechada { estado, .. } if estado == "sincronizado" => {
+                FECHADAS.fetch_add(1, SeqCst);
+            }
+            outro => {
+                crate::log_error!("teste", "rodada concorrente: {:?}", outro);
+                ERRADAS.fetch_add(1, SeqCst);
+            }
+        }
+    }
+    extern "C" fn do_servico(_: u64) -> ! {
+        for _ in 0..2 {
+            contar(rodada_do_servico());
+        }
+        PRONTOS.fetch_add(1, SeqCst);
+        crate::fios::terminar()
+    }
+    extern "C" fn do_sistema(_: u64) -> ! {
+        for _ in 0..2 {
+            let quem = sistema_no_armazem(crate::fios::id_atual());
+            contar(crate::hora::servico::rodada_de_teste(quem));
+        }
+        PRONTOS.fetch_add(1, SeqCst);
+        crate::fios::terminar()
+    }
+    extern "C" fn leitor(_: u64) -> ! {
+        let mut antes = 0u64;
+        while !PARAR.load(SeqCst) {
+            if let Some(l) = crate::hora::civil::ler() {
+                if l.meio_ms < antes {
+                    VOLTOU.store(true, SeqCst);
+                }
+                antes = l.meio_ms;
+            }
+            let quem = sistema_no_armazem(crate::fios::id_atual());
+            let r = fs_pedir(quem, "system.info", "{}");
+            if Json(r.as_bytes())
+                .member("result")
+                .and_then(|v| v.member("time"))
+                .is_some()
+            {
+                LEITURAS.fetch_add(1, SeqCst);
+            }
+            // Devagar: cada leitura é um registro da auditoria, e o anel
+            // tem de guardar as rodadas que o caso confere.
+            esperar_ms(100);
+        }
+        PRONTOS.fetch_add(1, SeqCst);
+        crate::fios::terminar()
+    }
+    extern "C" fn nsf(_: u64) -> ! {
+        while !PARAR.load(SeqCst) {
+            crate::seguranca::passo();
+            // Cada volta lê a auditoria pelo gate, e a leitura é um
+            // registro: devagar, como o fio do NSF.
+            esperar_ms(300);
+        }
+        PRONTOS.fetch_add(1, SeqCst);
+        crate::fios::terminar()
+    }
+
+    com_a_bancada_de_hora(2, 86_400, 60, || {
+        com_o_nsf(|| {
+            for c in [&FECHADAS, &ERRADAS, &PRONTOS, &LEITURAS] {
+                c.store(0, SeqCst);
+            }
+            PARAR.store(false, SeqCst);
+            VOLTOU.store(false, SeqCst);
+            let desde = crate::autorizacao::ultimo_registro();
+            // A primeira rodada sozinha: o civil sai do RTC antes, e a
+            // concorrência é de rodadas que não o voltam.
+            fechou_com(&rodada_do_servico(), &["nada", "gradual"], "sincronizado")?;
+            crate::fios::criar("teste-hora-leitor", leitor, 0)?;
+            crate::fios::criar("teste-hora-leitor", leitor, 1)?;
+            crate::fios::criar("teste-hora-nsf", nsf, 0)?;
+            crate::fios::criar("teste-hora-servico", do_servico, 0)?;
+            crate::fios::criar("teste-hora-sistema", do_sistema, 0)?;
+            let rodadas =
+                esperar_cedendo(|| FECHADAS.load(SeqCst) + ERRADAS.load(SeqCst) == 4, 12_000);
+            PARAR.store(true, SeqCst);
+            esperar_cedendo(|| PRONTOS.load(SeqCst) == 5, 3_000)?;
+            rodadas?;
+            if ERRADAS.load(SeqCst) != 0 {
+                return Err("uma rodada concorrente nao fechou sincronizada");
+            }
+            if VOLTOU.load(SeqCst) {
+                return Err("o civil voltou numa leitura concorrente");
+            }
+            if LEITURAS.load(SeqCst) == 0 {
+                return Err("os leitores nao leram o system.info time");
+            }
+            // Nada ficou aberto: cada pedido foi entregue, cada rodada
+            // fechou e saiu da tabela.
+            if crate::hora::abertos_de_teste() != (0, 0, 0) {
+                crate::log_error!("teste", "abertos {:?}", crate::hora::abertos_de_teste());
+                return Err("as rodadas concorrentes deixaram pedidos ou rodadas abertos");
+            }
+            // As rodadas não se misturaram: cada uma fechou com três
+            // chaves, a do serviço e a do sistema.
+            let (do_servico, do_sistema) = crate::autorizacao::com_auditoria(|c| {
+                let mut s = (0, 0);
+                let mut ts = 0u64;
+                let mut desceu = false;
+                for r in c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA) {
+                    if r.seq <= desde {
+                        continue;
+                    }
+                    desceu |= r.evento.ts_ms < ts;
+                    ts = r.evento.ts_ms;
+                    let e = &r.evento;
+                    if e.metodo == "time.sync"
+                        && e.recurso.starts_with("civil ")
+                        && e.detalhe.contains(" acordo 3/3 ")
+                    {
+                        if e.agente == "hora" {
+                            s.0 += 1;
+                        } else {
+                            s.1 += 1;
+                        }
+                    }
+                }
+                if desceu { (0, 0) } else { s }
+            })
+            .unwrap_or((0, 0));
+            if do_servico < 3 || do_sistema < 2 {
+                crate::log_error!("teste", "servico {} sistema {}", do_servico, do_sistema);
+                return Err(
+                    "as rodadas concorrentes nao fecharam cada uma com as tres chaves, ou os carimbos desceram",
+                );
+            }
+            // O NSF leu tudo isso, viu o tempo, e não agiu sobre o serviço.
+            crate::seguranca::passo();
+            let status = crate::seguranca::consultar(seguranca::relatorio::status)?;
+            let tempo = Json(status.as_bytes())
+                .member("time")
+                .ok_or("o NSF nao diz o tempo")?;
+            if tempo.member("state").and_then(|v| v.as_str()) != Some("sincronizado")
+                || tempo.member("rounds").and_then(|v| v.as_u64()).unwrap_or(0) < 5
+            {
+                crate::log_error!("teste", "{}", status);
+                return Err("o NSF nao observou as rodadas");
+            }
+            let do_hora = crate::seguranca::com_motor_de_teste(|m| {
+                m.incidentes
+                    .todos()
+                    .filter(|i| i.principal == "service:hora")
+                    .count()
+                    + m.deteccoes()
+                        .filter(|d| d.principal == "service:hora")
+                        .count()
+            })
+            .unwrap_or(0);
+            if do_hora != 0 {
+                return Err("o NSF detectou ou abriu incidente sobre o servico de hora");
+            }
+            Ok(())
+        })
+    })
+}
+
+/// Nenhum caminho fora do gate move o civil, e nenhum pedido de hora
+/// cria autoridade: os tratadores fora de um comando autorizado não acham
+/// principal; o `system.info` não recebe parâmetros nem diz nonce, id ou
+/// resposta; e um principal sem `time.sync` não pede nem entrega.
+fn hora_nenhum_caminho_fora_do_gate() -> Resultado {
+    let antes = civil_agora()?;
+    if crate::hora::pedir("bancada-a").err() != Some(crate::hora::Falha::SemPrincipal)
+        || crate::hora::entregar(1, Some(&[0u8; 64])).err()
+            != Some(crate::hora::Falha::SemPrincipal)
+    {
+        return Err("um tratador de hora agiu fora de um comando autorizado");
+    }
+    if crate::hora::confirmar().is_ok() {
+        return Err("sem salto pendente, a confirmacao fez alguma coisa");
+    }
+    let depois = civil_agora()?;
+    if depois.estado != antes.estado || depois.pendente_ms.is_some() {
+        return Err("um caminho fora do gate mudou o civil");
+    }
+    let r = fs_pedir(sistema_aqui(), "system.info", r#"{"unix_s":1760000000}"#);
+    if r.contains(r#""result""#) {
+        crate::log_error!("teste", "{}", r);
+        return Err("system.info aceitou parametros");
     }
     Ok(())
 }

@@ -477,6 +477,33 @@ pub fn responder_pelo_kernel(chamador: Chamador, linha: &[u8]) -> Texto {
     responder_como(chamador, linha, false).unwrap_or_default()
 }
 
+/// [`responder_pelo_kernel`], podendo esperar: um comando que suspende — o
+/// `net.recv` com `wait` do serviço de hora, ou um pedido de dados que o
+/// caminho da auditoria adiou — espera aqui, no fio de quem pede, e é
+/// executado de novo, inteiro, pelo gate, quando a espera acaba: o mesmo
+/// que um pedido de processo suspenso (ver [`retomar_suspensos`]). Quem
+/// espera sai do rodízio até o evento da conexão ou o tique do prazo, como
+/// a tarefa de uma sessão do canal — ver `fios::bloquear_em`. O waker fica
+/// no socket da conexão de quem pede, que ninguém mais espera.
+///
+/// `pedido` é a linha, e o anexo depois do separador, se houver — como na
+/// fila dos processos. O `xtask` confere que só o serviço de hora chama.
+pub fn responder_pelo_kernel_esperando(chamador: Chamador, pedido: &[u8]) -> Texto {
+    let espera = match responder_como(chamador, pedido, true) {
+        Ok(texto) => return texto,
+        Err(espera) => espera,
+    };
+    crate::fios::bloquear_em(crate::rede::espera::Aguardar::nova(&espera));
+    // Desarmada antes da reexecução, que responde com o que houver e não
+    // suspende de novo.
+    drop(espera);
+    responder_como(chamador, pedido, false).unwrap_or_default()
+}
+
+/// O separador entre a linha e o anexo, para quem monta um pedido com
+/// anexo para [`responder_pelo_kernel_esperando`].
+pub const SEPARADOR: u8 = SEPARADOR_DO_ANEXO;
+
 /// `(atendidos, inválidos)` — para `system.info`.
 pub fn estatisticas() -> (u64, u64) {
     (
