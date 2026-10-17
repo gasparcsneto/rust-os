@@ -706,6 +706,18 @@ pub fn descansar_ate_a_interrupcao() {
 /// escalonador na mão, se a marca não estiver lá — e então o [`acordar`],
 /// que toma a mesma trava, o acha esperando.
 ///
+/// # Quem sai, sai rodando
+///
+/// O primeiro núcleo não tem ocioso — o fio do boot faz as vezes dele —, e
+/// quem espera ali sem mais ninguém pronto não sai do núcleo: a escolha o
+/// deixa correr, ainda esperando, e o laço confere o futuro de novo. Ele
+/// pode ficar pronto nessa conferência sem que o waker tenha passado: o
+/// prazo que o tique de outro núcleo venceu antes de o tique deste acordar
+/// os dormentes. O fio saía daqui marcado esperando, e a troca seguinte o
+/// tirava de circulação sem waker nenhum para devolvê-lo — a suíte parou
+/// assim no CI do ARM, no fio dela, que é o do boot, na rodada de hora com
+/// as três fontes mudas. Quem sai, sai rodando.
+///
 /// Não se chama com trava na mão nem com as interrupções mascaradas: o fio
 /// sai do núcleo. Antes de o escalonador ligar, o futuro é conferido a cada
 /// interrupção.
@@ -720,6 +732,16 @@ pub fn bloquear_em<F: core::future::Future>(futuro: F) -> F::Output {
     let mut futuro = core::pin::pin!(futuro);
     loop {
         if let Poll::Ready(valor) = futuro.as_mut().poll(&mut contexto) {
+            // Ver "Quem sai, sai rodando": esperando, ou pronto se o waker
+            // passou com ele ainda no núcleo.
+            com_escalonador(|e| {
+                if let Some(f) = e
+                    .fio_atual_mut()
+                    .filter(|f| matches!(f.estado, Estado::Esperando | Estado::Pronto))
+                {
+                    f.estado = Estado::Rodando;
+                }
+            });
             return valor;
         }
         let estacionou = com_escalonador(|e| {

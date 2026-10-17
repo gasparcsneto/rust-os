@@ -4830,6 +4830,17 @@ do canal passou de 210 ms a 500 ms — a sonda da tela não conseguia
 fotografar a barra no mesmo segundo. Bloqueado, voltou a 216–272 ms. O
 `cargo xtask invariantes` confere quem ainda descansa.
 
+E quem sai de `bloquear_em` sai **rodando**. O primeiro núcleo não tem
+ocioso — o fio do boot faz as vezes dele —, e quem espera ali sem mais
+ninguém pronto não sai do núcleo: a escolha o deixa correr, ainda
+esperando, e o futuro conferido de novo pode ficar pronto sem o waker — o
+prazo que o tique de outro núcleo venceu antes de o tique deste acordar os
+dormentes. O fio saía marcado esperando, e a troca seguinte o tirava de
+circulação sem waker nenhum para devolvê-lo. Foi o CI que achou: a suíte do
+ARM carregada pelo firmware UEFI parou dez minutos em `hora: os estados e a
+recuperacao`, na rodada com as três fontes mudas — o fio da suíte é o do
+boot, fixo no primeiro núcleo.
+
 ### A rodada
 
 Uma rodada é de **um principal** — a autoridade que o gate decidiu, e não o
@@ -4983,6 +4994,11 @@ ponto de commit; a rodada na pilha de um fio; a concorrência; e nenhum
 caminho fora do gate. E um caso do escalonador, `fios: quem bloqueia sai do
 rodizio`: o fio bloqueado num prazo fica esperando, sem ser escalonado, até
 o tique; o waker o devolve; e o aviso que chega antes do sono não se perde.
+E outro, `fios: quem volta do bloqueio volta rodando`: o fio da suíte, no
+núcleo sem ocioso, bloqueia duzentas vezes num futuro que fica pronto sem
+acordar ninguém, e volta de cada uma rodando — com os outros fios presos a
+outro núcleo, ele não tem por quem ser trocado, e o caso exige ter passado
+pela volta sem sair do núcleo.
 **A concorrência**: o serviço e o sistema
 fazem rodadas ao mesmo tempo sobre as mesmas fontes, cada um com os
 pedidos dele, enquanto outros fios leem o civil e o `system.info time` e o
@@ -5165,14 +5181,14 @@ suíte também as pega: pega.
 
 ### As mutações do relógio e do serviço
 
-Quarenta e nove mutações contra o que o relógio e o serviço prometem — que
+Cinquenta mutações contra o que o relógio e o serviço prometem — que
 uma fonte só não mova a hora, que nenhuma resposta valha sem o pedido dela
 e as duas assinaturas, que nada mova o civil fora dos dois tratadores, que
 o lógico não volte nem se misture ao monotônico, que o NSF não ajuste nada,
 que a auditoria não perca uma rodada, que a concorrência não corrompa uma e
 que o serviço espere sem tirar o sono dos núcleos —: duas contra os testes
 do hospedeiro e as invariantes, treze nas duas camadas — o hospedeiro e os
-casos `tempo:` e `hora:` da suíte, no x86 — e trinta e quatro contra as
+casos `tempo:` e `hora:` da suíte, no x86 — e trinta e cinco contra as
 invariantes e a suíte. **Todas reprovadas** — uma delas só pela fumaça do
 ARM, porque o fio do serviço não roda na suíte. Na primeira passada, três
 sobreviveram, e cada uma mudou alguma coisa: o ponto de commit sem conferir
@@ -5184,7 +5200,10 @@ Seis morreram só nas invariantes; as quatro que importam ganharam variantes
 que escapam delas — o NSF confirmando por um ponteiro de função, o gate
 lendo o civil por um ajudante e sem nomear a permissão, a espera da rede e
 a do serviço descansando sem nomear a função —: a suíte pega três, e a
-fumaça do ARM a do serviço, que só a imagem de produção roda.
+fumaça do ARM a do serviço, que só a imagem de produção roda. A
+quinquagésima é o código de antes da correção que o CI pediu —
+`bloquear_em` saindo sem voltar a rodar —, e o caso novo do escalonador a
+reprova na primeira volta, nas duas arquiteturas.
 
 | Mutação | Reprovada por |
 |---|---|
@@ -5224,6 +5243,7 @@ fumaça do ARM a do serviço, que só a imagem de produção roda.
 | a invariante deixa outro arquivo mover o civil | as invariantes — acusam a lista que não confere nada |
 | o aviso que chega antes do sono se perde (`bloquear_em` sem a marca) | `fios: quem bloqueia sai do rodizio` — o fio dormiu para sempre |
 | `bloquear_em` descansa em vez de bloquear | `fios: quem bloqueia sai do rodizio`, `hora: a resposta atrasada na rede` — o fio nunca saiu do rodízio |
+| `bloquear_em` sai sem voltar a rodar — o código de antes | `fios: quem volta do bloqueio volta rodando` — o fio da suíte voltou esperando na primeira volta, no x86 e no ARM |
 | o serviço descansa entre as rodadas | as invariantes: `descansar_ate_a_interrupcao()` fora da lista |
 | a mesma, sem nomear a função | a fumaça do ARM: a sonda da tela — cada `video.sample` de novo duas vezes mais lento |
 | a espera da rede descansa | as invariantes |

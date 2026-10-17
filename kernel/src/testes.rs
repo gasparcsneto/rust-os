@@ -21936,6 +21936,115 @@ fn fios_quem_bloqueia_sai_do_rodizio() -> Resultado {
     Ok(())
 }
 
+/// Quem volta de `bloquear_em` volta rodando, também sem ter saído do
+/// núcleo.
+///
+/// # O que estava em jogo
+///
+/// O fio da suíte é o do boot, fixo no primeiro núcleo, e o primeiro núcleo
+/// não tem ocioso. Quando ele bloqueava sem mais ninguém pronto ali, a
+/// escolha o deixava correr, ainda esperando, e o futuro conferido de novo
+/// ficava pronto sem o waker — o prazo de um `net.recv` que o tique de outro
+/// núcleo venceu. Ele saía marcado esperando, e a troca seguinte o tirava de
+/// circulação para sempre: no CI do ARM, a suíte parou dez minutos em "hora:
+/// os estados e a recuperacao", na rodada com as três fontes mudas.
+///
+/// Aqui o fio da suíte bloqueia, muitas vezes, num futuro que fica pronto na
+/// segunda conferência sem acordar ninguém — com um prazo de dois tiques por
+/// trás, para a volta em que ele sai do núcleo de verdade —, e confere o
+/// próprio estado ao voltar. Os outros fios ficam presos a outro núcleo
+/// enquanto isso: no primeiro, o da suíte não tem por quem ser trocado, e a
+/// volta sem sair do núcleo — o caminho do defeito — deixa de depender de
+/// quem estava pronto; o caso exige ter passado por ela. Com um núcleo só
+/// não há onde prendê-los, os que descansam estão sempre prontos ali, e ela
+/// não acontece.
+fn fios_quem_volta_do_bloqueio_volta_rodando() -> Resultado {
+    use core::future::Future;
+    use core::task::{Context, Poll};
+    const VOLTAS: u32 = 200;
+
+    /// Pendente na primeira conferência e pronto na segunda, sem acordar
+    /// ninguém; o prazo guarda o waker para quando o fio sai do núcleo.
+    struct NaSegunda {
+        conferido: bool,
+        prazo: crate::tarefas::relogio::Dormir,
+    }
+    impl Future for NaSegunda {
+        type Output = ();
+        fn poll(self: core::pin::Pin<&mut Self>, cx: &mut Context) -> Poll<()> {
+            let este = self.get_mut();
+            if este.conferido {
+                return Poll::Ready(());
+            }
+            este.conferido = true;
+            let _ = core::pin::Pin::new(&mut este.prazo).poll(cx);
+            Poll::Pending
+        }
+    }
+    let eu = crate::fios::id_atual();
+    let inscricao = || {
+        let mut achou = None;
+        crate::fios::com_inscricoes(|i| {
+            if i.id == eu {
+                achou = Some((i.estado, i.escalonamentos));
+            }
+        });
+        achou.ok_or("o fio da suite nao esta na tabela")
+    };
+    let outro = outro_nucleo();
+    let mut presos = alloc::vec::Vec::new();
+    if let Some(nucleo) = outro {
+        crate::fios::com_inscricoes(|i| {
+            if i.id != eu && i.fixo.is_none() && !matches!(i.estado, "done" | "zombie") {
+                presos.push(i.id);
+            }
+        });
+        presos.retain(|&id| crate::fios::fixar(id, Some(nucleo)));
+    }
+    let mut no_nucleo = 0;
+    let mut resultado = Ok(());
+    for volta in 0..VOLTAS {
+        let antes = match inscricao() {
+            Ok((_, n)) => n,
+            Err(e) => {
+                resultado = Err(e);
+                break;
+            }
+        };
+        crate::fios::bloquear_em(NaSegunda {
+            conferido: false,
+            prazo: crate::tarefas::relogio::por_ticks(2),
+        });
+        match inscricao() {
+            Ok(("running", depois)) => no_nucleo += u32::from(depois == antes),
+            Ok((estado, _)) => {
+                crate::log_error!("teste", "volta {}: o fio da suite voltou {}", volta, estado);
+                resultado = Err("quem voltou de bloquear_em nao voltou rodando");
+                break;
+            }
+            Err(e) => {
+                resultado = Err(e);
+                break;
+            }
+        }
+    }
+    for &id in &presos {
+        crate::fios::fixar(id, None);
+    }
+    resultado?;
+    crate::log_info!(
+        "teste",
+        "bloquear_em: {} de {} voltas sem sair do nucleo, {} fios presos a outro",
+        no_nucleo,
+        VOLTAS,
+        presos.len()
+    );
+    if no_nucleo == 0 && outro.is_some() {
+        return Err("nenhuma volta ficou no nucleo: o caso nao passou pelo que confere");
+    }
+    Ok(())
+}
+
 /// O quantum anda com a trava do escalonador ocupada.
 ///
 /// O tique tomava a trava do escalonador por `try_lock` para contar o
@@ -30153,6 +30262,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "fios: quem bloqueia sai do rodizio",
         f: fios_quem_bloqueia_sai_do_rodizio,
+    },
+    Caso {
+        nome: "fios: quem volta do bloqueio volta rodando",
+        f: fios_quem_volta_do_bloqueio_volta_rodando,
     },
     Caso {
         nome: "smp: o coletor nao fecha o console do dono seguinte",
@@ -46355,6 +46468,10 @@ fn hora_a_regua_e_os_tres_relogios() -> Resultado {
         crate::log_error!("teste", "monotonico {} ms, regua {} ms", dm, dr);
         return Err("o monotonico e a regua nao medem a mesma passagem do tempo");
     }
+    // A taxa só sai com dez segundos de régua: a suíte inteira já passou
+    // deles aqui, e um filtro que roda só os casos da hora, não.
+    esperar_cedendo(|| contador::agora_ms() >= 10_000, 1_500)
+        .map_err(|_| "a regua nao chegou a dez segundos")?;
     if contador::mono_ppm().is_none() {
         return Err("com mais de dez segundos de regua, a taxa do monotonico nao foi publicada");
     }
