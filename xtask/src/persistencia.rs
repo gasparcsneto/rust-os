@@ -1508,16 +1508,20 @@ fn o_relogio_logico_nao_volta(arch: Arquitetura, artefato: &Artefato) -> Result<
     if c < EM_2032 {
         return Err(format!("o tempo logico nao andou com o RTC em 2032: {c}"));
     }
-    // O civil é o RTC, e não o piso; o lógico, no piso, adiantado dele.
+    // O civil é o RTC, e não o piso; o lógico, no piso, adiantado dele. O
+    // civil pode estar um segundo atrás do RTC lido antes dele: o RTC tem
+    // resolução de um segundo, e o civil o relê no máximo uma vez por
+    // segundo, só para a frente — o RTC pode virar o segundo entre as duas
+    // leituras sem que o civil o tenha relido.
     let civil_b = tempo_b.civil_ms / 1000;
     if tempo_b.estado != "rtc"
-        || !(rtc..rtc + 300).contains(&civil_b)
+        || !(rtc.saturating_sub(1)..rtc + 300).contains(&civil_b)
         || tempo_b.logico < a
         || !tempo_b.marcas.contains(r#""adiantado""#)
         || tempo_b.adiantado_ms < a.saturating_sub(civil_b + 1) * 1000
     {
         return Err(format!(
-            "com o RTC em 2024 e o piso em 2031, o system.info time diz estado {}, civil {} ms, logico {}, adiantado {} ms, marcas [{}]",
+            "com o RTC em 2024 ({rtc}) e o piso em 2031, o system.info time diz estado {}, civil {} ms, logico {}, adiantado {} ms, marcas [{}]",
             tempo_b.estado, tempo_b.civil_ms, tempo_b.logico, tempo_b.adiantado_ms, tempo_b.marcas
         ));
     }
