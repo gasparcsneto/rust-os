@@ -27,9 +27,9 @@
 //!   porque cada conexão mistura entropia nova. Sem semente o gerador não
 //!   inventa nada ([`Falha::SemAcaso`]);
 //! - o **relógio** — para a validade dos certificados — vem de quem chama,
-//!   em segundos desde 1970: num programa do Duke, o tempo lógico, o RTC
-//!   com o piso do journal, que nunca volta. Sem relógio não há conexão: um
-//!   certificado vencido não se distinguiria de um válido
+//!   em segundos desde 1970: num programa do Duke, o tempo lógico, o
+//!   relógio civil com o piso do journal, que nunca volta. Sem relógio não
+//!   há conexão: um certificado vencido não se distinguiria de um válido
 //!   ([`Falha::SemRelogio`]);
 //! - as **âncoras** — as raízes em que o programa confia — vêm de quem
 //!   chama, em PEM ([`Ancoras`]): num programa do Duke, de um arquivo lido

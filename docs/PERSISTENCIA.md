@@ -267,6 +267,9 @@ do `xtask` guarda a maior geração que já assinou, e recusa uma menor.
 ### O relógio
 
 O tempo lógico é o RTC com um piso: o tempo do último registro gravado.
+Desde o relógio civil (ver [O tempo](../README.md#o-tempo)), o relógio de
+fora é o civil — o RTC até o primeiro acordo das fontes de hora, e a hora
+autenticada depois —; o piso é o mesmo.
 Ele nunca fica abaixo desse piso — nem num boot com o RTC atrasado. Uma
 leitura do relógio que não grava nada não sobe o piso; o que depende do
 tempo e precisa sobreviver (os prazos das mensagens, na 7.4) grava o tempo
@@ -395,10 +398,10 @@ pendente o que já foi confirmado ou anulado.
 
 ### O tempo e os ids
 
-- **Os prazos são do tempo lógico** — o RTC com o piso do journal —, com
-  a resolução do RTC, um segundo. Um prazo não volta a correr num boot com
-  o RTC atrasado. O tempo desde o boot só diz ao coletor de quanto em
-  quanto olhar.
+- **Os prazos são do tempo lógico** — o relógio civil com o piso do
+  journal —, com a resolução dele, um segundo. Um prazo não volta a
+  correr num boot com o RTC atrasado. O tempo desde o boot só diz ao
+  coletor de quanto em quanto olhar.
 - **Um vencimento dito é gravado**: o coletor e a consulta que vencem uma
   mensagem gravam o vencimento antes de dizê-lo. Uma vencida não volta a
   pendente.

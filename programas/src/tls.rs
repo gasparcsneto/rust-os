@@ -4,9 +4,11 @@
 //! gate, como qualquer pedido do programa:
 //!
 //! - a **semente** de cada conexão: 32 bytes do `random.read`;
-//! - o **relógio**: o tempo lógico do `system.info` — o RTC com o piso do
-//!   journal, que nunca volta: um RTC atrasado de propósito não ressuscita
-//!   um certificado vencido;
+//! - o **relógio**: o tempo lógico do `system.info` — o relógio civil com
+//!   o piso do journal, que nunca volta: um RTC atrasado de propósito não
+//!   ressuscita um certificado vencido. O civil é o RTC até o primeiro
+//!   acordo das fontes de hora, e a hora autenticada depois; o estado e a
+//!   incerteza dele não entram aqui;
 //! - as **âncoras**: um arquivo PEM lido por `fs.read`;
 //! - o **transporte**: a conexão do `net.connect` — o destino inteiro, que
 //!   a política enumera —, com cada `net.send` e cada `net.recv` decididos

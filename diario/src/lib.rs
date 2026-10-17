@@ -1062,7 +1062,8 @@ pub fn julgar(disco: Option<u64>, tpm: Option<u64>) -> Veredito {
     }
 }
 
-/// O tempo lógico: o RTC, com um piso que nunca desce.
+/// O tempo lógico: o relógio de fora — o RTC, ou, no kernel, o relógio
+/// civil —, com um piso que nunca desce.
 ///
 /// O piso começa no tempo do último registro do journal e sobe a cada
 /// leitura. Um RTC que volta — acertado à mão, sem bateria, uma máquina
@@ -1078,7 +1079,8 @@ impl Relogio {
         Relogio { piso }
     }
 
-    /// O tempo lógico agora, dado o que o RTC diz. Sem RTC, é o piso.
+    /// O tempo lógico agora, dado o que o relógio de fora diz. Sem ele, é o
+    /// piso.
     pub fn agora(&mut self, rtc: Option<u64>) -> u64 {
         if let Some(r) = rtc
             && r > self.piso
@@ -1088,7 +1090,7 @@ impl Relogio {
         self.piso
     }
 
-    /// O piso, sem consultar o RTC.
+    /// O piso, sem consultar o relógio de fora.
     pub fn piso(&self) -> u64 {
         self.piso
     }

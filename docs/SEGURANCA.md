@@ -555,6 +555,31 @@ Nada do protocolo: não há regra do NSF sobre HTTP, nem leitura do que vai
 dentro — e, no `https`, nem os bytes. O uso normal não abre incidente: a
 suíte confere que a cadeia inteira não leva o NSF a pedir nada.
 
+## O tempo (T7.3)
+
+O relógio civil autenticado não dá ao NSF autoridade nenhuma sobre ele. O
+serviço de hora é um principal como o NSF —
+`Autoridade::Servico(Servico::Hora)`, o papel `tempo`, o balde dele —, e o
+que o NSF faz com o tempo é ler:
+
+- **O tempo vem dos registros, nunca de um relógio.** `seguranca::tempo`
+  lê os registros de execução de `time.sync` — o veredito de cada
+  resposta, com o código da classe: `ALLOW`, `DENY_CREDENTIAL` (a
+  assinatura ou a delegação que a chave fixada não fecha), `DENY_REPLAY`
+  (o nonce ou o pedido de outro), `INVALID_ARGUMENT` (a forma, o raio),
+  `ERROR` (sem resposta, vencida) —, o desfecho de cada rodada (o civil e
+  o lógico antes e depois, o estado, as marcas `pendente`, `divergente`,
+  `adiantado`) e os `time.confirm` executados. O `security.status` diz o
+  estado da última rodada, as marcas e as contagens.
+- **Nenhuma regra de tempo, nenhuma ação.** O NSF não ajusta o relógio,
+  não confirma salto, não bloqueia fonte e não cria autorização
+  emergencial — e as invariantes conferem quem chama o que move o civil.
+- **O serviço de hora é observado e nunca alvo.** Nenhuma regra nem perfil
+  o conta, e nenhuma resposta do NSF chega a ele nem às fontes dele: quem
+  injeta respostas ruins no caminho não faz o NSF cortar a fonte legítima.
+- **Nenhuma decisão lê o tempo.** O gate decide pelo relógio do kernel; o
+  estado do civil não concede nem nega nada.
+
 ## As consultas
 
 Todas pelo gate, com a permissão `security.read` (sensível: diz o que os
@@ -609,6 +634,9 @@ mesma regra:
   muda é só o código que o dono ouve, o do firewall;
 - a revogação continua a do 4a1/L6: o NSF a recomenda, e quem tem a prova a
   executa.
+- o tempo: o serviço de hora é outro serviço, com o balde dele, e o NSF só
+  lê o que a auditoria conta dele — não move, não confirma, não corta
+  fonte.
 
 Um ponto pediu cuidado e ficou dentro da regra: **observar é acessar**. Um
 gancho no funil da auditoria daria ao NSF a cadeia inteira sem permissão
@@ -710,3 +738,4 @@ contido pelo despertador.
 | NSF-4 | exercício: suíte, concorrência, contorno, revogação, proveniência, DNS, firewall, falhas; mutações; matriz; CI; relatório |
 | 9.5 | o TLS como programa: o pacote `tls`, `random.read` e o `net.send` que espera espaço pelo gate, a bancada com o OpenSSL; a sessão interrompida pela política, pelo firewall e pela contenção |
 | 9.6 | o canal do agente por TCP: as vagas, a escuta do firewall, a chave confirmada, a contrapressão; a revogação, a contenção, a regra e o administrador pela rede; o NSF lendo os apertos recusados |
+| T7.3 | o relógio civil e o serviço de hora: o NSF lê o tempo nos registros de `time.sync` e `time.confirm` (`seguranca::tempo`, o `time` do `security.status`), sem regra nem resposta de tempo |

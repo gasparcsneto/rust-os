@@ -51,11 +51,11 @@
 //! # O tempo não volta
 //!
 //! O tempo de um registro nunca é menor que o do anterior: o anel o sobe
-//! até lá, se for preciso. Com o tempo lógico da persistência — o RTC com o
-//! piso do journal — isso só acontece com os registros de um boot feitos
-//! antes de o journal ser lido, e garante que uma cadeia que atravessa
-//! boots nunca anda para trás no tempo. A reposição recusa um tempo que
-//! volte: ele não sai de um journal autêntico.
+//! até lá, se for preciso. Com o tempo lógico da persistência — o relógio
+//! civil com o piso do journal — isso só acontece com os registros de um
+//! boot feitos antes de o journal ser lido, e garante que uma cadeia que
+//! atravessa boots nunca anda para trás no tempo. A reposição recusa um
+//! tempo que volte: ele não sai de um journal autêntico.
 
 use alloc::collections::VecDeque;
 use alloc::string::String;

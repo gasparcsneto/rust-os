@@ -173,11 +173,11 @@ $ cargo xtask agent --canal 2 agent.session
 | `security.risk` | O risco de uma identidade, com os fatores; o perfil de comportamento; e o raio do que ela já tocou (`principal`) |
 | `security.verify` | Refaz a cadeia do cofre de evidências |
 | `security.metrics` | O custo e o efeito da segurança, medidos desde o boot: as decisões do gate por código e a latência dele, a da política e a da auditoria, as voltas do NSF e o tempo de máquina delas, a memória e as contas do motor (falsos positivos, contenções desfeitas, recusas repetidas), a latência da resposta, os arrendamentos soltos por causa, a conferência do código de fora da imagem, e o orçamento: as decisões de controle, de dados e de fecho, as recusas por taxa, as esperas pelo caminho da auditoria e o atraso dela, a vazão do plano de dados e a justiça entre os principais |
-| `system.info` | Kernel, CPU, vídeo, uptime, o RTC e mecanismo de guarda da pilha |
+| `system.info` | Kernel, CPU, vídeo, uptime, o RTC, o tempo — `time`: o estado e as marcas do relógio civil, o civil, o lógico, a incerteza, o salto pendente, as fontes, as rodadas e a régua; ver [O tempo](#o-tempo) — e mecanismo de guarda da pilha |
 | `system.uptime` | Ticks do timer e milissegundos desde o boot |
 | `random.read` | Bytes do gerador do kernel, em hexadecimal, para quem precisa de uma chave — a semente de cada conexão TLS de um programa. De 1 a 256 — fora disso é erro, e não um corte —; sem fonte de entropia, `ENTROPY_UNAVAILABLE` e nenhum byte. A auditoria grava a decisão, nunca os bytes (`bytes`) |
-| `time.request` | O pedido do Roughtime para uma fonte do registro de fontes de hora, `/etc/duke/tempo`, com o nonce do kernel, ligado a quem pede e à fonte; não escolhe a hora. Exige `time.sync`; o transporte até a fonte é um `net.connect` UDP, decidido à parte. Uma fonte fora do registro é `INVALID_REQUEST`; por enquanto o serviço de hora não emite pedidos, e a resposta é `TIME_UNAVAILABLE` (`source`) |
-| `time.sync` | Entrega a resposta que chegou de uma fonte de hora — inteira, como chegou, no anexo; sem anexo, o aviso de que ela não veio — para o pedido `id` de quem entrega. O kernel a confere contra o pedido que ele emitiu, e só o acordo de pelo menos duas chaves move o relógio civil. Exige `time.sync`; um id que não é de quem entrega não existe para ele — e, por enquanto, sem o serviço de hora, nenhum pedido está aberto —: `INVALID_REQUEST` (`id`, `attachment`) |
+| `time.request` | O pedido do Roughtime — versão 1, 1 KiB, em base64 em `request` — para uma fonte do registro de fontes de hora, `/etc/duke/tempo`, e o `id` dele. O kernel escolhe o nonce — o primeiro do gerador; os seguintes, encadeados à última resposta aceita da rodada — e liga o pedido ao principal que o gate decidiu, à fonte e à chave fixada dela; não escolhe a hora. A rodada começa pela primeira fonte do registro e segue a ordem dele, e pedir de novo a fonte em curso substitui o pedido. Exige `time.sync`; o transporte até a fonte é um `net.connect` UDP, decidido à parte. Uma fonte fora do registro, ou fora da ordem, é `INVALID_REQUEST`; a tabela cheia, `DENY_QUOTA`; sem entropia, `ENTROPY_UNAVAILABLE` (`source`) |
+| `time.sync` | Entrega a resposta que chegou de uma fonte de hora — inteira, como chegou, no anexo; sem anexo, o aviso de que ela não veio — para o pedido `id` de quem entrega. O kernel a confere contra o pedido que ele emitiu — o nonce, a chave fixada da fonte, a folha do pacote —, nunca contra o que quem entrega diz. Uma resposta recusada não consome o id (até 4 entregas); a primeira aceita consome; depois de 2 s, o id vence. Na última fonte, a rodada fecha: só o acordo de pelo menos duas chaves do registro move o relógio civil, pelas regras da disciplina, e `round` diz o desfecho. Exige `time.sync`; um id que não é de quem entrega não existe para ele: `INVALID_REQUEST` (`id`, `attachment`) |
 | `memory.stats` | Totais agregados de memória física |
 | `memory.regions` | Regiões do mapa de memória (`limit`, `usable_only`) |
 | `memory.frames` | Estado do alocador de frames físicos |
@@ -473,6 +473,7 @@ seguranca/src/       o tecido de segurança (NSF) como conta pura: o que ele vê
 ├── firewall.rs      as regras, quem elas alcançam, e o que cada quadro é — só restringe
 ├── motor.rs         o caminho inteiro: da leitura ao pedido, e o desfecho de volta
 ├── relatorio.rs     o JSON das consultas `security.*`
+├── tempo.rs         o tempo como a auditoria o conta: o estado do civil e os vereditos das fontes — só observa
 └── util.rs          hexadecimal, base64, o texto de uma string JSON e um resumo curto
 
 tls/src/             o cliente TLS 1.3 dos programas: o rustls sem std, com um provedor de cifra próprio — o que um certificado prova não autoriza nada
@@ -480,7 +481,6 @@ tls/src/             o cliente TLS 1.3 dos programas: o rustls sem std, com um p
 ├── sessao.rs        a conexão: o aperto pela máquina de estados do rustls, os registros, o alerta que sai na recusa e a sessão que quebra
 ├── falha.rs         a taxonomia: a recusa do transporte passa com o código dela; as do TLS têm os seus
 ├── provedor.rs      as suítes, os grupos e as assinaturas que o cliente aceita — e nada mais
-├── tempo.rs         o tempo como a auditoria o conta: o estado do civil e os vereditos das fontes — só observa
 ├── cifra.rs         AES-GCM e ChaCha20-Poly1305 sobre um registro
 ├── troca.rs         X25519 e P-256, que recusam o ponto que não contribui
 ├── assinatura.rs    ECDSA P-256 e Ed25519 estrito, para o CertificateVerify e a cadeia
@@ -2435,10 +2435,10 @@ usa, cada coisa pelo gate:
   kernel — a única fonte de acaso de um programa, e uma permissão do papel
   (o operador, o administrador e o sistema a têm; o observador e o tecido
   de segurança, não). Sem ela, nenhum byte do TLS sai;
-- o **relógio**: o tempo lógico do `system.info`, o RTC com o piso do
-  journal, que nunca volta — um RTC atrasado de propósito não ressuscita um
-  certificado vencido. Sem relógio, a conexão é recusada, e não aceita sem
-  conferir a validade;
+- o **relógio**: o tempo lógico do `system.info`, o relógio civil com o
+  piso do journal, que nunca volta — um RTC atrasado de propósito não
+  ressuscita um certificado vencido (ver [O tempo](#o-tempo)). Sem
+  relógio, a conexão é recusada, e não aceita sem conferir a validade;
 - as **âncoras**: um arquivo PEM lido por `fs.read`;
 - o **transporte**: a conexão do `net.connect`, com cada `net.send` e cada
   `net.recv` decididos de novo e esperando o evento da pilha, sem girar.
@@ -4629,12 +4629,72 @@ ela): uma resposta assinada prova que o servidor viu o nosso pedido, e só o
 **acordo de pelo menos duas chaves** move a hora. Nenhuma decisão de
 autorização lê o civil nem o lógico.
 
-Ele chega em passos. As contas — a moldura, a conferência da resposta, o
+Ele chegou em passos. As contas — a moldura, a conferência da resposta, o
 quórum e a disciplina — estão no pacote `hora`, puro e testado no
-hospedeiro. A superfície dele na política e no gate é a deste passo; o
-serviço mesmo — o relógio civil, o fio que consulta as fontes por UDP, a
-conferência das respostas no kernel — é o seguinte. Até lá, o relógio é o
-de antes.
+hospedeiro. A superfície na política e no gate — as duas permissões, o
+serviço e o papel, o registro das fontes — veio em seguida. Por cima dela,
+sem tirar nem pôr, o kernel tem agora o relógio civil, o lógico por ele, e
+o **serviço de hora**: um fio que consulta as fontes do registro pelo gate
+e entrega ao kernel o que elas responderam. **A bancada ainda não tem
+servidor de hora** — os da suíte moram no kernel de teste —: a imagem de
+produção faz as rodadas, não recebe resposta, e o civil fica no RTC, como
+antes. O servidor da bancada é o passo seguinte.
+
+### Os relógios no kernel
+
+**A régua** (`hora::contador`). O civil não mede o tempo pelos tiques do
+timer: tique perdido não volta, e o emulador junta interrupções quando o
+processador emulado fica sem vez no hospedeiro — 5% de perda são 51 s de
+erro entre duas rodadas de 1024 s. Mede pelo contador de ciclos, que é
+lido, e não interrompe: no ARM, com a frequência que o processador declara
+(`CNTFRQ_EL0`); no x86, com a do TSC medida no boot contra o canal 2 do PIT
+— um décimo de segundo, até cinco tentativas, e vale a primeira com erro
+de até 200 ppm, que entra na deriva máxima do civil. Sem nenhuma das duas,
+a régua são os tiques, com 5% de deriva: o civil vence o teto da incerteza
+em minutos, e o `system.info` diz `ticks`. A régua nunca devolve menos do
+que já devolveu, em núcleo nenhum. O relógio do kernel continua sendo a
+régua das durações; o serviço só mede a taxa dele contra o contador
+(`mono_ppm`), e não o corrige.
+
+**O civil** (`hora::civil`). Uma instância só da disciplina do pacote,
+atrás de uma trava folha. Antes do primeiro acordo, é o RTC: lido no boot e
+relido no máximo uma vez por segundo, fora da trava, e só para a frente —
+um RTC que ainda não virou o segundo, ou que alguém atrasou, não faz o
+civil voltar. Depois, **só dois caminhos o movem, e os dois atrás do
+gate**: o tratador de `time.sync`, na entrega da última fonte de uma
+rodada, e o de `time.confirm`, dentro de `admin.execute`. Ninguém mais lê o
+RTC: o `system.info` lê o cru pelo civil.
+
+Os estados são os do desenho: `rtc`, antes de qualquer acordo;
+`sincronizado`, até 2048 s depois do último; `holdover`, passada a janela,
+com a incerteza crescendo pela deriva máxima da régua; e `vencido`, com a
+incerteza acima do teto do registro (60 s, por padrão). Três marcas
+acompanham o estado: **pendente** — um salto espera confirmação —,
+**divergente** — o último acordo deixou fontes de fora, ou não houve acordo
+porque elas não se tocam — e **adiantado** — o lógico está à frente do
+civil, depois de um salto para trás.
+
+A disciplina é a do pacote, com os tetos do registro. Com o desvio Δ entre
+o meio do acordo e o civil, e a incerteza u do acordo: |Δ| ≤ u, nada se
+move; até o limiar — o maior entre 10 s e 2u —, o ajuste **gradual**, no
+máximo 5% mais rápido ou mais devagar, e nunca para trás; acima, um
+**salto**, só depois de duas rodadas seguidas que concordam no desvio, a
+pelo menos 4 s uma da outra. Mas o salto para a frente além do teto
+(um dia, por padrão), contado do maior entre o civil e o piso do lógico, e
+o salto para trás depois da primeira sincronização que a régua não explica
+— fora do envelope — ficam **pendentes**: só `time.confirm` os aplica.
+
+**O lógico** (`persistencia::agora`): `max(piso, civil em segundos)`, com o
+piso no journal. Antes da primeira sincronização é exatamente o de antes,
+porque o civil é o RTC; depois, segue a hora autenticada. Nunca volta:
+depois de um salto do civil para trás, ele fica no piso — `adiantado` — até
+o civil passar. Os carimbos da auditoria e os prazos das mensagens andam
+nele.
+
+**Nenhuma decisão lê o civil nem o lógico.** O gate decide pelo relógio do
+kernel; o estado do relógio não concede nada. O `cargo xtask invariantes`
+confere: em `autorizacao.rs`, o lógico só dentro de `auditar` — o carimbo —,
+e nunca `crate::hora::`, `civil_s(` ou `relogio::agora(`.
 
 ### A superfície no gate
 
@@ -4659,18 +4719,8 @@ cujo papel a tem. Não recebe hora nenhuma.
 **Três operações.** `time.request {source}` e `time.sync {id, anexo}` são
 comandos, decididos pelo gate com `time.sync` e gravados como qualquer
 outro; `time.confirm` é operação administrativa, dentro de `admin.execute`.
-O que cada uma faz **depois** do gate, neste passo:
-
-- `time.request` de uma fonte fora do registro — ou sem registro nenhum —
-  responde `INVALID_REQUEST`: a fonte não existe. De uma fonte do registro,
-  `TIME_UNAVAILABLE`: quem emite o pedido é o serviço de hora, que ainda
-  não está no kernel;
-- `time.sync` responde `INVALID_REQUEST`: nenhum pedido está aberto. O
-  anexo — a resposta como chegou — é conferido contra o `attachment` e
-  descartado sem ser lido;
-- `time.confirm` com prova é autorizado e gravado, e responde `CONFLICT`:
-  não há salto pendente. Com qualquer campo nos parâmetros, uma hora
-  digitada, `INVALID_ARGUMENT` — recusado, e não ignorado.
+O que cada uma faz depois do gate está
+[mais abaixo](#o-que-cada-operação-faz-depois-do-gate).
 
 **O serviço `hora` e o papel `tempo`.** O serviço tem identidade própria,
 como o NSF: `Autoridade::Servico(Servico::Hora)`, com o papel da linha
@@ -4737,11 +4787,221 @@ mesmo, com e sem `time.sync` delegado, e os não autenticados recusados;
 `time.confirm` sem prova, com a prova de outra coisa, por quem não é
 administrador e por um administrador sem a permissão; a revogação e a
 devolução por `policy.write`; o balde de cada serviço; e nenhum caminho de
-`time.sync` mudando política, registro ou credencial. A fumaça faz o mesmo
-de fora, pelo canal de verdade: a serial pede a fonte do registro e passa
-pelo gate, o operador de uma porta é recusado, `time.confirm` com a prova
-do administrador acha `CONFLICT` e recusa a hora digitada — e cada decisão
-está na auditoria com o titular e o papel, e a política é a mesma no fim.
+`time.sync` mudando política, registro ou credencial. O que o relógio e o
+serviço acrescentam está
+[mais abaixo](#o-que-a-suíte-a-fumaça-e-a-bancada-conferem).
+
+### O serviço de hora
+
+O fio `hora`, com `Autoridade::Servico(Servico::Hora)` e o papel da linha
+`servico hora tempo` — como o NSF: cada passo é um pedido JSON-RPC ao gate,
+decidido e gravado, e nenhum passo a menos que um processo. Ele não toca o
+relógio: só entrega o que as fontes responderam, e quem decide é o
+tratador de `time.sync`. Sem registro de fontes, não sobe.
+
+Uma rodada, fonte por fonte, na ordem do registro:
+
+1. `time.request {source}`: o pedido v1, de 1024 bytes, e o id dele;
+2. `net.connect {to}`: a associação UDP com o destino da fonte — o gate
+   decide pelo alcance do papel `tempo`, e o firewall pode cortá-la;
+3. `net.send`, com o pedido no anexo;
+4. `net.recv` com espera até o prazo do pedido — 2 s, menos uma margem —:
+   cada datagrama que chega vai inteiro, como chegou, a `time.sync`. Uma
+   recusa não consome o id: a fonte tem até quatro entregas;
+5. `net.close`;
+6. sem resposta aceita nem recusada de vez, `time.sync {id}` sem anexo: o
+   aviso de que ela não veio.
+
+A entrega da última fonte fecha a rodada. Uma recusa do gate — sem
+`time.sync`, sem a linha `servico`, a taxa — encerra a rodada: nada tenta
+outro caminho, e a recusa fica gravada. O intervalo é o do desenho: 2 s
+entre rodadas até sincronizar, dobrando até 64 s com as fontes caladas;
+sincronizado, 64 s dobrando até 1024 s; uma falha depois disso volta a
+64 s; um candidato a salto pede a rodada seguinte depois da separação
+mínima.
+
+Entre as rodadas, e esperando um datagrama, o fio fica **bloqueado** — fora
+do rodízio, até o tique da próxima rodada ou o evento da conexão
+(`fios::bloquear_em`) —, e não descansando a cada interrupção, como o NSF,
+o coletor e a rede. A primeira versão descansava, e a fumaça do ARM mostrou
+o preço: quem descansa continua pronto, o fio da hora era o quinto numa
+máquina de quatro núcleos, nenhum núcleo dormia mais, e cada `video.sample`
+do canal passou de 210 ms a 500 ms — a sonda da tela não conseguia
+fotografar a barra no mesmo segundo. Bloqueado, voltou a 216–272 ms. O
+`cargo xtask invariantes` confere quem ainda descansa.
+
+### A rodada
+
+Uma rodada é de **um principal** — a autoridade que o gate decidiu, e não o
+fio nem um PID. O serviço, o sistema, um agente ou uma pessoa com
+`time.sync` fazem cada um a sua, pelas mesmas operações:
+
+- `time.request` da primeira fonte abre uma rodada nova, e larga a de antes
+  do mesmo principal, com os pedidos dela;
+- a fonte seguinte só é pedida depois de a anterior entregue — aceita,
+  recusada de vez, sem resposta ou vencida —, e o nonce dela é
+  H(o pacote inteiro da última resposta aceita da rodada ‖ 32 bytes
+  aleatórios): a resposta de uma fonte prova que a anterior já tinha
+  respondido. Sem resposta aceita ainda, o nonce é o próprio aleatório, do
+  gerador. Começar do meio, pular uma fonte ou pedir a seguinte com a
+  anterior aberta é recusado;
+- pedir de novo a fonte em curso substitui o pedido dela, se ela ainda não
+  foi aceita — o de antes se fecha, e a entrega dele não acha nada —: uma
+  resposta autêntica não se troca por outra;
+- a entrega da última fonte fecha a rodada: as amostras aceitas, levadas ao
+  mesmo instante pela régua, vão ao quórum de pelo menos k chaves do
+  registro, e o desfecho vai à disciplina.
+
+Os pedidos moram em duas tabelas: a do serviço de hora, só dele, e a de
+todos os outros — quem pede demais não toma a vaga do serviço. Cada uma com
+16 abertos, 8 por principal e 4 entregas recusadas por id; o id é da
+tabela, e a busca é sempre pelo par (principal, id): o id de outro, ou o
+de um pedido já consumido, não acha nada. As rodadas de outros principais
+abertas ao mesmo tempo são no máximo quatro; a do serviço tem lugar só
+dela.
+
+**A política no meio da rodada.** Uma rodada aberta sob uma política vale
+só sob ela: uma troca da política em vigor — um `policy.write`, o papel da
+serial num `policy.assign` — larga as rodadas em curso e os pedidos delas.
+O que muda sem trocar a política — o papel de um agente, a chave revogada,
+a sessão de pessoa que acabou — não larga nada: o pedido seguinte é
+recusado pelo gate. No fechamento, o
+ponto de commit, as duas coisas são conferidas de novo: a versão da
+política — uma escrita pode chegar enquanto as assinaturas da última
+resposta são conferidas — e a decisão do gate, refeita pela política e pelo
+registro de agora (`autorizacao::reconfirmar`), que vê também o que não
+muda a versão: a sessão de pessoa que acabou, a chave revogada. Se uma das
+duas não vale, a rodada é descartada, e o descarte gravado — nada dela
+chega ao civil.
+
+**A vez da hora.** As tabelas ficam sob uma trava do fio, e não do núcleo:
+conferir uma resposta custa duas assinaturas Ed25519 — milissegundos no
+emulador —, e isso não se faz com as interrupções mascaradas. Quem espera
+cede a CPU. Nunca é pedida com uma trava de núcleo na mão, e a conferência
+da ordem das travas a vê como uma classe. A versão da política é lida com
+a vez na mão: lida antes, podia ser de antes de uma troca que outro fio já
+viu, e largaria as rodadas abertas sob a nova.
+
+### O que cada operação faz depois do gate
+
+- **`time.request {source}`** responde `{id, source, to, round, request}`,
+  com o pedido em base64. Fonte fora do registro — ou sem registro —, fora
+  da ordem, com a anterior aberta ou já aceita: `INVALID_REQUEST`; a tabela
+  cheia, `DENY_QUOTA`; sem entropia, `ENTROPY_UNAVAILABLE`. Cada recusa
+  depois do gate fica gravada como execução da decisão.
+- **`time.sync {id, attachment}`** confere a resposta contra o registro do
+  pedido, e nunca contra o que quem entrega diz dela. Responde o veredito —
+  `aceita`, com `midp`, `radi` e `rtt_ms`; a recusa pelo nome (`moldura`,
+  `estrutura`, `tipo`, `versao`, `nonce`, `outro_pedido`,
+  `assinatura_da_delegacao`, `assinatura_da_resposta`,
+  `fora_da_delegacao`, `raio`), com a tentativa; `sem_resposta`, sem anexo;
+  `vencida`, depois do prazo — e, na última fonte, a rodada: o desfecho do
+  quórum, a cobertura, a incerteza, o efeito, o estado antes e depois, a
+  marca de divergência, o salto pendente. Um id que não está aberto para
+  quem entrega — a resposta sem pedido, o pedido de outro principal, a
+  mesma resposta duas vezes — é `INVALID_REQUEST`.
+- **`time.confirm`**, dentro de `admin.execute`, com a prova de um
+  administrador cujo papel a tem: aplica o salto pendente — o meio do
+  acordo que o pediu, levado até agora pela régua — e grava a rodada que o
+  pediu, o civil e o lógico antes e depois. Sem salto pendente, `CONFLICT`;
+  com qualquer campo nos parâmetros, uma hora digitada, `INVALID_ARGUMENT`.
+  Nunca uma hora de quem confirma.
+
+**`system.info`** tem o objeto `time`: o estado, o civil em ms, a
+incerteza, o salto pendente e a rodada que o pediu — a evidência que quem
+confirma confere antes —, as marcas, o lógico e quanto ele está adiantado;
+as fontes em resumo (quantas, o quórum, se o registro move o relógio); as
+rodadas — fechadas, com e sem acordo, perdidas, saltos confirmados, as
+abertas, e a última, com o veredito de cada fonte —; a régua (origem,
+frequência, erro, deriva); a taxa do monotônico; e o custo da conferência.
+Nenhum nonce, nenhum id, nenhuma resposta: os pedidos são de cada
+principal. E nenhum parâmetro: não é mecanismo de ajuste.
+
+### A auditoria
+
+Cada operação grava a decisão do gate, com o titular, o agente e o papel —
+o serviço como `service`/`hora`/`tempo` —, e o que ela fez depois:
+
+| Registro | Recurso | Detalhe | Código |
+|---|---|---|---|
+| `time.request` recusado depois do gate | a fonte pedida | o motivo | `CONFLICT` (a ordem), `INVALID_ARGUMENT`, `DENY_QUOTA`, `ERROR` |
+| `time.sync`, o veredito | a fonte e o resumo do pacote entregue | `aceita midp … radi … rtt …`, `recusada <nome> n/4`, `sem_resposta`, `vencida` | `ALLOW`; `DENY_REPLAY` (nonce, outro pedido); `DENY_CREDENTIAL` (as assinaturas, a delegação); `INVALID_ARGUMENT` (a forma, o raio); `ERROR` |
+| `time.sync`, o desfecho da rodada | `civil <antes>><depois> logico <antes>><depois> <estado>><estado>` e as marcas | `r<n> <desfecho>` — a cobertura, as aceitas, o desvio e a incerteza, ou a maior cobertura —, e o efeito | `ALLOW`; `CONFLICT` (pendente, divergente); `ERROR` (sem acordo) |
+| `time.sync`, a rodada descartada | `civil` | `r<n> descartada: <motivo>` | `DENY_POLICY` |
+| `time.sync` sem pedido aberto para quem entrega | `id <n>` | o motivo | `INVALID_ARGUMENT` |
+| a confirmação, `time.confirm` em `admin.execute`, executada | `salto <desvio> r<n> civil <antes>><depois> logico <antes>><depois>` | | `ALLOW`; `CONFLICT` sem pendente |
+
+Dois registros na última fonte, e não um: o detalhe tem teto de 96 bytes no
+codec, que não muda. Nunca um corpo — o pedido, a resposta e o nonce não
+entram na auditoria; o resumo do pacote, sim.
+
+**O NSF** lê o tempo nesses registros, e nunca num relógio: o
+`security.status` ganhou o objeto `time` — o estado e as marcas da última
+rodada, quantas fecharam, e as respostas pela classe do veredito. Só
+observa: nenhuma regra de tempo, nenhuma ação. O serviço de hora, como
+titular, é observado e nunca alvo — nenhuma regra nem perfil o conta, e
+nenhuma resposta do NSF chega a ele nem às fontes dele: quem forja
+respostas ruins não faz o NSF cortar a fonte legítima.
+
+### A pilha
+
+A conferência de uma resposta roda no fio de quem entrega, no fundo do
+despacho do gate — e o fio do serviço de hora tem a pilha de um fio
+qualquer, 60 KiB. A primeira rodada honesta da suíte, no perfil de
+depuração, derrubou o kernel com uma falta dupla: a pilha estourou. No
+perfil de depuração cada temporário tem lugar próprio na pilha, e uma
+rodada — o registro, o veredito de cada fonte, o pedido de 1 KiB — tem
+alguns KiB, copiados a cada movimento. A correção não aumentou a pilha:
+o que é grande anda em caixa — a rodada mora numa do começo ao fim, o
+fechamento a leva consigo, a entrega devolve só a fonte —, e o fio do
+serviço orquestra em passos pequenos, um quadro de cada vez. Um caso da
+suíte mede a marca d'água da pilha de um fio novo que faz a rodada inteira,
+e exige folga de um quarto: no perfil de depuração, 41 704 bytes dos
+61 440 no x86 e 42 896 no ARM — 68% e 70%.
+
+### O que a suíte, a fumaça e a bancada conferem
+
+A suíte tem três servidores de Roughtime dentro do kernel de teste, com
+chaves sorteadas a cada caso, e quinze casos `hora:` além dos oito `tempo:`
+do passo anterior: a régua e os três relógios; uma rodada honesta ponta a
+ponta pelo gate — a primeira sincronização, cada passo gravado como do
+serviço, o `system.info` sem nonce nem resposta —; cada resposta ruim como
+um veredito da classe dela — o lixo, a versão, o nonce de outro pedido, a
+delegação de outra chave, a assinatura que não fecha, a árvore sem o
+nosso pedido, a janela da delegação, o raio, o datagrama grande, a
+resposta repetida —, sem mover o relógio; as entregas que não são de quem
+entrega — sem pedido, o pedido de outro principal, a mesma resposta duas
+vezes, as quatro tentativas, depois do prazo —; os nonces encadeados e a
+ordem da rodada; k ≥ 2 — uma fonte e k − 1 fontes não movem, duas
+coerentes movem —; as fontes divergentes e a interseção vazia; a
+disciplina — o ajuste gradual no teto de 5% e nunca para trás, o salto em
+duas rodadas, o salto acima do teto pendente até a confirmação, o salto
+para trás fora do envelope com o lógico parado no piso —; os estados e a
+recuperação; a resposta atrasada na rede — com o fio da rodada fora do
+rodízio enquanto espera —; a revogação e a política no meio da rodada; o
+ponto de commit; a rodada na pilha de um fio; a concorrência; e nenhum
+caminho fora do gate. E um caso do escalonador, `fios: quem bloqueia sai do
+rodizio`: o fio bloqueado num prazo fica esperando, sem ser escalonado, até
+o tique; o waker o devolve; e o aviso que chega antes do sono não se perde.
+**A concorrência**: o serviço e o sistema
+fazem rodadas ao mesmo tempo sobre as mesmas fontes, cada um com os
+pedidos dele, enquanto outros fios leem o civil e o `system.info time` e o
+NSF lê a auditoria — todas fecham com o acordo das três fontes, o civil
+lido nunca volta, os carimbos da auditoria nunca descem, e no fim não
+sobra pedido nem rodada aberta.
+
+A fumaça roda a imagem de produção, sem servidor: a serial faz uma rodada
+inteira pelo canal de verdade — o pedido de 1024 bytes de cada fonte, na
+ordem, a fonte de fora, fora da ordem e com a anterior aberta recusadas, a
+entrega sem resposta — e a rodada fecha sem acordo, com o civil no RTC; o
+operador de uma porta é recusado; o `system.info time` diz o estado, as
+fontes, as rodadas perdidas e a régua, sem pedido nenhum; `time.confirm`
+com a prova do administrador acha `CONFLICT` e recusa a hora digitada; e a
+auditoria tem cada decisão, o desfecho da rodada da serial e o serviço de
+hora pedindo pelo gate como ele mesmo. A bancada de persistência confere o
+lógico através de reboots: com o RTC voltado para trás do piso, o civil é
+o RTC e o lógico fica no piso, `adiantado`; com o RTC adiante, o lógico
+anda com ele.
 
 ### O custo
 
@@ -4754,39 +5014,98 @@ registro de três fontes custa 15 µs — quase tudo nas três chaves
 conferidas na curva —, uma vez por boot; a coerência com a política, menos
 de 1 µs. O registro ocupa 880 bytes.
 
+E o deste passo, medido na mesma máquina e na mesma configuração (x86,
+release) — a base do passo anterior e este, alternando, duas vezes cada.
+Na fumaça, com perto de 4 700 decisões, o gate de ponta a ponta ficou
+igual — 422 a 457 µs antes, 435 a 443 µs depois —, e o registro da
+auditoria ficou mais barato — 149 a 180 µs antes, 115 a 154 µs depois: o
+tempo lógico deixou de ler o CMOS a cada registro. A média da política
+passou de 19–20 µs a 23 µs; a fumaça deste passo tem umas 210 decisões a
+mais, as das sondas do tempo e do serviço, e a mistura mudou — o caminho
+da decisão não mudou. As cargas de rede da suíte — uma visita HTTP e
+quatro ao mesmo tempo, 5 MiB pelo plano de dados, a compressão, os
+cookies e o HTTP/2, sozinhos e três ao mesmo tempo — ficaram dentro do
+ruído entre execuções, de uns 5%. O `system.info` ficou maior: leva o
+objeto `time`.
+
+O que o tempo custa por conta própria: a régua do x86 mede o TSC no boot
+por um décimo de segundo — mais, se a primeira medida passar de 200 ppm —;
+uma rodada honesta de três fontes, pelo gate, leva de 80 a 110 ms em
+release, nas duas arquiteturas (de 170 a 250 ms na depuração); a
+conferência de uma resposta — as duas assinaturas Ed25519, o Merkle e o
+encadeamento —, de 3 a 5 ms em média, em release; a rodada inteira num
+fio, 18–19 KiB da pilha em release e 41–42 KiB na depuração, dos 60 KiB.
+E o fio do serviço não custa nada parado: bloqueado, não ocupa núcleo
+nenhum entre as rodadas.
+
 ### O que fica de fora
 
-- **O serviço.** Nenhum fio deste kernel tem a autoridade do serviço de
-  hora: só a suíte age como ele. `time.request` responde
-  `TIME_UNAVAILABLE`, `time.sync` não acha pedido aberto e `time.confirm`
-  não acha salto pendente; o relógio é o de antes, o RTC e o contador do
-  boot. O civil, o fio `hora` e a conferência das respostas no kernel são
-  o passo seguinte.
-- **A coerência do boot só avisa.** O `xtask` recusa a imagem incoerente;
-  o boot confere de novo, contra a política em vigor, e só escreve no log
-  o que não confere — nenhum teste lê esse aviso, e nenhuma mutação o
-  cobre. Quem impede o serviço de falar com uma fonte sem destino é o
-  gate. Do mesmo jeito, um registro com k maior que as fontes, que o
-  leitor aceita e o `xtask` recusa, valeria no boot só para conferir.
-- **O registro em tempo de execução.** Trocar as fontes, o quórum ou os
-  tetos é uma imagem nova, como no registro de editores; não há operação
-  administrativa para isso.
-- **A taxa do `tempo`.** `taxa tempo 10 20` não foi medida contra a carga
-  do serviço, que ainda não existe — cada rodada serão até k pedidos, k
-  conexões e k entregas, todos pelo gate. O passo do serviço mede, e a
-  linha muda se a medida mandar.
-- **Os destinos da bancada.** `udp:10.0.2.2:5319` a `:5321` supõem que o
-  emulador leve o UDP do hóspede para `10.0.2.2` ao loopback do
-  hospedeiro, onde o servidor Roughtime da bancada vai escutar. A premissa
-  é o primeiro passo da bancada de tempo; se falhar, mudam as linhas — da
-  política, do registro e do `xtask` —, e não o desenho.
-- **A forma normal, duas vezes.** O leitor do registro confere que o
-  destino escrito é a forma normal, e o `endereco::ler` da política já só
-  lê a forma normal: hoje a conferência do registro é redundante — a
-  mutação que a tira sobrevive, equivalente —, e fica para o dia em que a
-  política ler mais formas.
+- **O servidor da bancada.** Os servidores de Roughtime da suíte moram no
+  kernel de teste (`rede::bancada_hora`): o quadro que a pilha manda a uma
+  das fontes é desviado depois do firewall, e a resposta entra pela fila
+  da placa, passando pelo firewall de entrada. Só a placa e o emulador
+  ficam de fora do caminho. O recurso que os liga só existe no kernel da
+  suíte — o `xtask` confere que nenhum outro manifesto o pede. A fumaça e a
+  bancada de persistência rodam a imagem de produção, sem servidor: o
+  serviço faz as rodadas, nenhuma resposta chega, e o civil fica no RTC. O
+  tempo até a primeira sincronização, a rodada pela rede de verdade e a
+  fumaça de um acordo esperam o servidor do `xtask` — o passo seguinte, que
+  confirma também a premissa dos destinos: que o emulador leve o UDP do
+  hóspede para `10.0.2.2` ao loopback do hospedeiro.
+- **Os consumidores.** Nada mudou no TLS, nos cookies nem nas mensagens:
+  eles leem o tempo lógico, como antes — e o lógico agora segue o civil.
+  Depois de sincronizado, a validade de um certificado e a de um cookie
+  andam na hora autenticada; o estado e a incerteza do civil não entram em
+  decisão nenhuma deles. Um salto confirmado para a frente envelhece de uma
+  vez os prazos das mensagens; depois de um para trás, eles param no piso
+  até o civil passar. Regras sobre o estado do relógio são dos incrementos
+  dos consumidores.
+- **O que a confirmação confirma.** `time.confirm` aplica o salto pendente
+  de agora, e não recebe parâmetro nenhum — nem o número da rodada. Se uma
+  rodada nova trocar o pendente entre a leitura do `system.info` e a
+  confirmação, o administrador confirma uma evidência que não leu; o
+  registro do `time.confirm` diz qual rodada foi aplicada, mas depois.
+  Ligar a confirmação à rodada seria um parâmetro novo numa operação que o
+  passo anterior fechou sem nenhum: é decisão de desenho, e está no
+  relatório.
+- **O salto para trás dentro do envelope.** O desenho diz, ao descrever o
+  civil e a monotonicidade, que ele volta em dois casos só — a primeira
+  sincronização e um salto confirmado —; a tabela dos grandes saltos e a
+  disciplina do pacote, fechada no T7.1, aplicam também, depois de duas
+  rodadas, o salto para trás que a régua explica, com o civil dentro do
+  envelope. Este passo segue o código fechado; a divergência é do texto do
+  desenho, e também está no relatório. O lógico não volta em caso nenhum.
+- **A folga da pilha.** No perfil de depuração, a rodada inteira usa
+  68% (x86) a 70% (ARM) da pilha de um fio; no de produção, bem menos. O
+  caso da suíte exige folga de um quarto. O que a pilha de um fio tem de
+  mais fundo hoje é a da rede, sob `net.recv`; um caminho mais fundo que
+  passe a rodar no fio do serviço pede a conta de novo.
+- **A régua do x86 nos tiques.** A calibração do TSC é uma medida no boot.
+  Num hospedeiro muito carregado, as cinco tentativas podem passar de
+  200 ppm, e a régua cai para os tiques, com 5% de deriva: o civil vence o
+  teto da incerteza minutos depois de cada acordo, e o `system.info` diz
+  `ticks`. Não há segunda medida depois do boot. A frequência também não é
+  aprendida das amostras: com raios de segundos, separar 100 ppm pediria
+  dias entre rodadas.
+- **Bloquear uma fonte não tira a confiança nela.** O firewall corta o
+  caminho do serviço até uma fonte; a resposta dela, chegada por outro
+  caminho permitido e entregue por quem tem `time.sync`, ainda vale — a
+  confiança é o registro, e tirar uma fonte é uma imagem nova.
+- **A taxa do `tempo`.** Uma rodada honesta são seis operações por fonte
+  — pedido, conexão, envio, leitura, entrega e fecho —, dezoito para as
+  três, mais uma decisão por leitura que espera, refeita ao acordar: perto
+  da rajada de `taxa tempo 10 20`, com a reposição de dez por segundo
+  durante a rodada e o intervalo entre rodadas enchendo o balde de novo.
+  As rodadas da suíte, ao lado das do sistema, cabem nela. Com respostas
+  recusadas, cada fonte pode gastar até quatro leituras e quatro entregas,
+  e a rodada pode esbarrar na taxa: ela acaba, e a recusa fica gravada.
+  Quem consegue injetar lixo no caminho já consegue calar as fontes.
+- **A coerência do boot só avisa**, e **o registro em tempo de execução**
+  não existe: os dois continuam como no passo anterior. Os tetos do
+  desenho — o prazo de 2 s, o raio de 10 s, a janela de 2048 s — não foram
+  medidos contra servidores públicos, que esta bancada não alcança.
 
-### As mutações do tempo
+### As mutações da superfície
 
 Cinquenta e duas mutações contra o que a superfície do tempo promete — que
 `time.sync` não vire autorização implícita, que `time.confirm` não chegue
@@ -4843,6 +5162,72 @@ suíte também as pega: pega.
 | o registro dá a primeira fonte a qualquer nome | `tempo: o servico pede pelo gate` |
 | a imagem sem a coerência, com k acima das fontes, com destino a mais no `tempo`, com `time.sync` em qualquer papel, com `time.confirm` fora do administrador (cinco) | `o_tempo_da_imagem_e_coerente` |
 | a lista das chamadas protegidas deixa `time.confirm` nos comandos | as invariantes — acusam a lista que não confere nada |
+
+### As mutações do relógio e do serviço
+
+Quarenta e nove mutações contra o que o relógio e o serviço prometem — que
+uma fonte só não mova a hora, que nenhuma resposta valha sem o pedido dela
+e as duas assinaturas, que nada mova o civil fora dos dois tratadores, que
+o lógico não volte nem se misture ao monotônico, que o NSF não ajuste nada,
+que a auditoria não perca uma rodada, que a concorrência não corrompa uma e
+que o serviço espere sem tirar o sono dos núcleos —: duas contra os testes
+do hospedeiro e as invariantes, treze nas duas camadas — o hospedeiro e os
+casos `tempo:` e `hora:` da suíte, no x86 — e trinta e quatro contra as
+invariantes e a suíte. **Todas reprovadas** — uma delas só pela fumaça do
+ARM, porque o fio do serviço não roda na suíte. Na primeira passada, três
+sobreviveram, e cada uma mudou alguma coisa: o ponto de commit sem conferir
+a versão da política e sem refazer a decisão pediram o caso do ponto de
+commit, que põe a mudança no meio da conferência da última resposta; e o
+pedido substituído deixado aberto era equivalente — a tabela do pacote já o
+substitui —: o código redundante saiu, e a mutação foi para o lugar certo.
+Seis morreram só nas invariantes; as quatro que importam ganharam variantes
+que escapam delas — o NSF confirmando por um ponteiro de função, o gate
+lendo o civil por um ajudante e sem nomear a permissão, a espera da rede e
+a do serviço descansando sem nomear a função —: a suíte pega três, e a
+fumaça do ARM a do serviço, que só a imagem de produção roda.
+
+| Mutação | Reprovada por |
+|---|---|
+| o quórum aceita k = 1 — no pacote; e com o kernel pedindo k = 1 | `k_menor_que_dois_nunca_da_acordo`; `hora: k dois sempre` e `hora: fontes divergentes` — uma fonte sozinha moveu o relógio |
+| uma fonte sozinha vira quórum, com a amostra duplicada noutra chave | `hora: k dois sempre` |
+| o quórum com k − 1 fontes | `uma_fonte_so_nunca_move_o_relogio` e mais cinco; `hora: k dois sempre` |
+| ignorar o nonce | `nonce` e mais dois; `hora: cada resposta ruim e um veredito` |
+| ignorar a assinatura da resposta; a da delegação | `assinatura_da_resposta` e mais três; `assinatura_da_delegacao` e mais cinco; `hora: cada resposta ruim e um veredito` |
+| ignorar o Merkle | `outro_pedido`, `o_vetor_da_rfc_10049_e_aceito` e mais quatro; `hora: cada resposta ruim e um veredito` |
+| ignorar a janela da delegação; sem teto do raio | `fora_da_delegacao`; `raio`; e o mesmo caso |
+| o id não se consome na aceita — o nonce repetido | `a_resposta_valida_da_a_amostra_e_consome_o_id`; `hora: rodadas, leitores e o NSF ao mesmo tempo` — sobraram pedidos abertos |
+| a entrega sem pedido mexe na fonte em curso | `tempo: o servico pede pelo gate` — uma entrega sem pedido aberto foi aceita |
+| a entrega acha o pedido de outro principal — o nonce estrangeiro | `hora: entregas fora do pedido` |
+| o nonce sem encadear; a fonte seguinte com a anterior aberta; a resposta aceita trocada por um pedido novo | `hora: os nonces encadeados e a ordem da rodada` |
+| o pedido substituído fica aberto na tabela | `um_pedido_novo_para_a_mesma_fonte_substitui` e mais um; `hora: os nonces encadeados e a ordem da rodada` |
+| **a rodada aplicada sem conferir a versão da política** | **sobreviveu à primeira passada**; `hora: o ponto de commit da rodada` — a escrita de política no meio da conferência |
+| a mesma, e a entrega sem largar as rodadas de outra política | `hora: revogacao e politica no meio da rodada`, `hora: o ponto de commit da rodada` |
+| **o commit sem refazer a decisão** | **sobreviveu à primeira passada**; `hora: o ponto de commit da rodada` — a sessão da pessoa que acabou |
+| sem teto de taxa no ajuste gradual | `o_ajuste_gradual_para_a_frente_tem_teto_de_taxa` e mais dois; `hora: a disciplina no civil` — o ajuste aplicou o desvio de uma vez |
+| o salto para trás sem confirmação; acima do teto sem confirmação; numa rodada só | os da disciplina no hospedeiro, de três a oito cada; `hora: a disciplina no civil` |
+| o `time.confirm` aceita parâmetros; põe a hora digitada no civil | `tempo: confirmar so com prova` — a hora digitada não foi recusada |
+| o `time.confirm` sem salto pendente diz que confirmou | `tempo: confirmar so com prova`, `hora: a disciplina no civil`, `hora: nenhum caminho fora do gate` |
+| o tratador fora de um comando age como o sistema | `hora: nenhum caminho fora do gate` |
+| `time.sync` decidido por `system.read` | `tempo: o servico pede pelo gate`, `tempo: nenhum caminho cria autoridade` e mais onze |
+| o NSF confirma o salto pendente | as invariantes: `hora::confirmar(` fora da operação administrativa |
+| a mesma, por um ponteiro de função | `hora: a disciplina no civil` — o salto acima do teto não ficou pendente |
+| o gate lê o civil | as invariantes: o ponto de decisão lê o relógio civil |
+| o gate deixa `time.sync` a todos fora de sincronizado, por um ajudante | as invariantes: `Permissao::TimeSync` fora dos comandos |
+| a mesma, sem nomear a permissão | `tempo: pessoa e agente pela mesma politica`, `tempo: o servico nao e o sistema` |
+| o lógico sem o piso | `hora: a disciplina no civil` — o lógico voltou com o civil |
+| o lógico pelo monotônico | `hora: a regua e os tres relogios`, `hora: a disciplina no civil` |
+| o salto move o monotônico | `hora: a disciplina no civil` — o salto moveu o monotônico |
+| a rodada fecha sem registro; o veredito sem registro | `hora: uma rodada honesta pelo gate` e mais oito; e mais três |
+| o serviço de hora no balde do NSF | `tempo: cada servico tem o seu balde` |
+| a vez da hora sem trava | `hora: rodadas, leitores e o NSF ao mesmo tempo` — o kernel cai com a rodada corrompida |
+| as rodadas de principais diferentes se misturam | `hora: entregas fora do pedido`, `hora: rodadas, leitores e o NSF ao mesmo tempo` |
+| a invariante deixa outro arquivo mover o civil | as invariantes — acusam a lista que não confere nada |
+| o aviso que chega antes do sono se perde (`bloquear_em` sem a marca) | `fios: quem bloqueia sai do rodizio` — o fio dormiu para sempre |
+| `bloquear_em` descansa em vez de bloquear | `fios: quem bloqueia sai do rodizio`, `hora: a resposta atrasada na rede` — o fio nunca saiu do rodízio |
+| o serviço descansa entre as rodadas | as invariantes: `descansar_ate_a_interrupcao()` fora da lista |
+| a mesma, sem nomear a função | a fumaça do ARM: a sonda da tela — cada `video.sample` de novo duas vezes mais lento |
+| a espera da rede descansa | as invariantes |
+| a mesma, sem nomear a função | `hora: a resposta atrasada na rede` — a rodada esperou sem sair do rodízio |
 
 ## O código de fora da imagem
 
@@ -5580,22 +5965,22 @@ reservado só é chamada pela identidade, e as duas cargas só pelo boot — o
 sistema, console, serial ou pseudo-terminal as alcança.
 
 **Tudo vai para a auditoria.** Permitido ou não, cada decisão vira um
-registro: número, o tempo lógico em milissegundos (o RTC com o piso do
-journal — ver [Persistência](#persistência)), o tipo de titular (kernel,
-sistema, serial, agente, pessoa, administrador ou ninguém ainda), sessão,
-sessão de pessoa, identificador, chave pública, papel, método, recurso,
-código e um BLAKE2s dos parâmetros. O titular e a sessão de pessoa entram no
-elo: um registro de pessoa não vira um de agente trocando um texto. Os
-parâmetros não entram — podem trazer o que um agente escreveu, ou uma prova
-administrativa. Cada registro carrega o elo do anterior, e o seu é o
-BLAKE2s do anterior com a codificação dele; mudar, tirar ou reordenar um
-registro muda todos os elos dali para a frente. Na memória, a cadeia mora
-num anel de mil e vinte e quatro registros; o que sai pela ponta deixa o elo
-como âncora. No disco, ela vai inteira para o journal, e atravessa o boot
-com os mesmos números e elos. `audit.head` dá a cabeça para ancorar fora da
-máquina, e a fumaça refaz a cauda no hospedeiro com o mesmo pacote. Uma enxurrada recusada por
-taxa grava o primeiro e soma os seguintes, para não empurrar para fora o
-que importa.
+registro: número, o tempo lógico em milissegundos (o relógio civil com o
+piso do journal — ver [O tempo](#o-tempo) e [Persistência](#persistência)),
+o tipo de titular (kernel, sistema, serial, agente, pessoa, administrador ou
+ninguém ainda), sessão, sessão de pessoa, identificador, chave pública,
+papel, método, recurso, código e um BLAKE2s dos parâmetros. O titular e
+a sessão de pessoa entram no elo: um registro de pessoa não vira um de
+agente trocando um texto. Os parâmetros não entram — podem trazer o que um
+agente escreveu, ou uma prova administrativa. Cada registro carrega o elo
+do anterior, e o seu é o BLAKE2s do anterior com a codificação dele; mudar,
+tirar ou reordenar um registro muda todos os elos dali para a frente. Na
+memória, a cadeia mora num anel de mil e vinte e quatro registros; o que
+sai pela ponta deixa o elo como âncora. No disco, ela vai inteira para o
+journal, e atravessa o boot com os mesmos números e elos. `audit.head` dá
+a cabeça para ancorar fora da máquina, e a fumaça refaz a cauda no
+hospedeiro com o mesmo pacote. Uma enxurrada recusada por taxa grava o
+primeiro e soma os seguintes, para não empurrar para fora o que importa.
 
 **Os códigos.** `ALLOW`, `DENY_NOT_AUTHENTICATED`, `DENY_ROLE`,
 `DENY_PERMISSION`, `DENY_RESOURCE`, `DENY_POLICY`, `RATE_LIMIT`,
@@ -6134,8 +6519,9 @@ o pedido; o boot o reaplica por cima da imagem, antes de abrir as portas.
   registro; o boot refaz a cadeia do journal e continua dela. Com o journal
   recusado, a cadeia recomeça só em memória, e a recusa é o primeiro
   registro dela.
-- **O tempo lógico não volta.** O RTC, com um piso que é o tempo do último
-  registro gravado.
+- **O tempo lógico não volta.** O relógio civil — o RTC até o primeiro
+  acordo das fontes de hora —, com um piso que é o tempo do último registro
+  gravado.
 - **O journal se compacta sem esquecer.** A partição tem duas regiões, e o
   journal vive numa. Passados três quartos dela, o boot ou o coletor — só
   num ponto seguro, sem gravação pendente — escrevem na outra uma base: a
