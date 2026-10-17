@@ -59,6 +59,9 @@
 #[cfg(test)]
 extern crate std;
 
+#[cfg(any(test, feature = "servidor"))]
+extern crate alloc;
+
 pub mod disciplina;
 pub mod encadeamento;
 pub mod intervalo;
@@ -71,5 +74,5 @@ pub mod quorum;
 pub mod registro;
 pub mod resposta;
 
-#[cfg(test)]
-mod servidor_de_teste;
+#[cfg(any(test, feature = "servidor"))]
+pub mod servidor_de_teste;

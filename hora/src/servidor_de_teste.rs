@@ -1,13 +1,17 @@
 //! Só nos testes: um servidor de Roughtime que responde como a versão 1 —
 //! ou, de propósito, de outro jeito.
 //!
+//! Dos casos deste pacote, e da suíte do kernel, que o compila com a
+//! `feature` `servidor` para os servidores de dentro da máquina — ver
+//! `kernel/src/rede/bancada_hora.rs`. Nenhuma outra compilação o tem.
+//!
 //! As chaves são sementes fixas de teste, como as do `sigilo`; não guardam
 //! nada. O servidor monta a resposta com o mesmo escritor de mensagens que o
 //! pedido usa; o que o escritor recusaria é montado à mão pelos casos.
 //! Escritor e leitor errando juntos é o que o vetor externo da RFC 10049
 //! pega (ver `resposta::testes`).
 
-use std::vec::Vec;
+use alloc::vec::Vec;
 
 use ed25519_dalek::{Signer, SigningKey};
 
@@ -67,7 +71,7 @@ impl Servidor {
             mint: MIDP_PADRAO - 3600,
             maxt: MIDP_PADRAO + 86_400,
             versao: 1,
-            vers: std::vec![1],
+            vers: alloc::vec![1],
             tipo: 1,
             contexto_de_delegacao: CONTEXTO_DE_DELEGACAO.to_vec(),
             contexto_de_resposta: CONTEXTO_DE_RESPOSTA.to_vec(),
@@ -77,6 +81,27 @@ impl Servidor {
             extra_na_dele: Vec::new(),
             nonce: None,
         }
+    }
+
+    /// Um servidor com estas sementes — a longa e a delegada —, e o resto
+    /// como o de [`Servidor::novo`]. A suíte do kernel sorteia as dela.
+    pub fn com_sementes(longa: &[u8; 32], delegada: &[u8; 32]) -> Servidor {
+        let longa = SigningKey::from_bytes(longa);
+        let delegada = SigningKey::from_bytes(delegada);
+        let pubk = delegada.verifying_key().to_bytes();
+        Servidor {
+            longa,
+            delegada,
+            pubk,
+            ..Servidor::novo()
+        }
+    }
+
+    /// O mesmo servidor, com o `SREP` assinado pela chave desta semente, e
+    /// não pela delegada.
+    pub fn com_srep_assinado_por(mut self, semente: &[u8; 32]) -> Servidor {
+        self.assina_o_srep = Some(SigningKey::from_bytes(semente));
+        self
     }
 
     /// A chave pública longa: a que o kernel fixaria.
@@ -102,7 +127,7 @@ impl Servidor {
         let mint = self.mint.to_le_bytes();
         let maxt = self.maxt.to_le_bytes();
         let mut campos_dele: Vec<(Etiqueta, &[u8])> =
-            std::vec![(PUBK, &self.pubk[..]), (MINT, &mint[..]), (MAXT, &maxt[..])];
+            alloc::vec![(PUBK, &self.pubk[..]), (MINT, &mint[..]), (MAXT, &maxt[..])];
         for (e, v) in &self.extra_na_dele {
             campos_dele.push((*e, v));
         }
@@ -117,7 +142,7 @@ impl Servidor {
         let radi = self.radi.to_le_bytes();
         let midp = self.midp.to_le_bytes();
         let vers: Vec<u8> = self.vers.iter().flat_map(|v| v.to_le_bytes()).collect();
-        let mut campos_srep: Vec<(Etiqueta, &[u8])> = std::vec![
+        let mut campos_srep: Vec<(Etiqueta, &[u8])> = alloc::vec![
             (VER, &versao[..]),
             (RADI, &radi[..]),
             (MIDP, &midp[..]),
@@ -135,7 +160,7 @@ impl Servidor {
 
         let tipo = self.tipo.to_le_bytes();
         let indx = indice.to_le_bytes();
-        let mut campos: Vec<(Etiqueta, &[u8])> = std::vec![
+        let mut campos: Vec<(Etiqueta, &[u8])> = alloc::vec![
             (SIG, &sig[..]),
             (NONC, &nonce[..]),
             (TYPE, &tipo[..]),
@@ -153,7 +178,7 @@ impl Servidor {
 
 /// Uma mensagem escrita pelo escritor do pacote.
 pub fn escrita(campos: &[(Etiqueta, &[u8])]) -> Vec<u8> {
-    let mut destino = std::vec![0u8; 4096];
+    let mut destino = alloc::vec![0u8; 4096];
     let n = mensagem::escrever(campos, &mut destino).expect("o servidor de teste escreve certo");
     destino.truncate(n);
     destino
@@ -183,7 +208,7 @@ pub fn crua(campos: &[(Etiqueta, &[u8])]) -> Vec<u8> {
 
 /// A mensagem com a moldura.
 pub fn emoldurado(mensagem: &[u8]) -> Vec<u8> {
-    let mut pacote = std::vec![0u8; moldura::CABECALHO];
+    let mut pacote = alloc::vec![0u8; moldura::CABECALHO];
     moldura::escrever(&mut pacote, mensagem.len() as u32);
     pacote.extend_from_slice(mensagem);
     pacote
@@ -206,7 +231,7 @@ pub fn arvore(folhas: &[Resumo]) -> (Resumo, Vec<Vec<u8>>) {
     while nivel.len() < tamanho {
         nivel.push(merkle::h(&[&[0xee], &(nivel.len() as u32).to_le_bytes()]));
     }
-    let mut caminhos: Vec<Vec<u8>> = std::vec![Vec::new(); folhas.len()];
+    let mut caminhos: Vec<Vec<u8>> = alloc::vec![Vec::new(); folhas.len()];
     let mut posicao: Vec<usize> = (0..folhas.len()).collect();
     while nivel.len() > 1 {
         for (i, p) in posicao.iter_mut().enumerate() {

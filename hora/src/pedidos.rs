@@ -228,6 +228,18 @@ impl<P: Copy + Eq> Pedidos<P> {
         }
     }
 
+    /// Quem entrega avisa que a resposta não veio: o id se fecha sem
+    /// conferir nada. Devolve a fonte do registro, se o id estava aberto
+    /// para este principal — o de outro não existe para ele, e não se
+    /// fecha por ele.
+    pub fn desistir(&mut self, principal: P, id: u64) -> Option<usize> {
+        let vaga = self
+            .vagas
+            .iter_mut()
+            .find(|v| v.is_some_and(|a| a.id == id && a.principal == principal))?;
+        vaga.take().map(|a| a.fonte)
+    }
+
     /// Fecha os ids vencidos; devolve quantos.
     pub fn vencer(&mut self, agora_ms: u64, prazo_ms: u64) -> usize {
         let mut fechados = 0;
@@ -510,6 +522,25 @@ mod testes {
         assert_eq!(
             t.entregar(DONO, id, &resposta, 1_100, &REGRAS),
             Err(FalhaDaEntrega::Desconhecido)
+        );
+        assert_eq!(t.abertos(), 1, "o do outro fica");
+    }
+
+    #[test]
+    fn desistir_fecha_so_o_proprio_id() {
+        let (mut t, servidor, id, resposta) = tabela_com_um();
+        let outro = t
+            .emitir(OUTRO, 5, &servidor.chave_longa(), &NONCE, 1_000)
+            .unwrap();
+        assert_eq!(t.desistir(OUTRO, id), None, "o id de outro não existe");
+        assert_eq!(t.desistir(DONO, outro.id), None);
+        assert_eq!(t.abertos(), 2, "nenhum se fechou por quem não é dono");
+        assert_eq!(t.desistir(DONO, id), Some(3), "a fonte do registro");
+        assert_eq!(t.desistir(DONO, id), None, "fechado, não existe mais");
+        assert_eq!(
+            t.entregar(DONO, id, &resposta, 1_100, &REGRAS),
+            Err(FalhaDaEntrega::Desconhecido),
+            "depois do aviso, nem a verdadeira entra"
         );
         assert_eq!(t.abertos(), 1, "o do outro fica");
     }
